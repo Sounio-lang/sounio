@@ -1128,6 +1128,8 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
     if name_is_log((*func).name) { return 17 }
     if name_is_sin((*func).name) { return 18 }
     if name_is_cos((*func).name) { return 19 }
+    if name_is_f64_to_bits((*func).name) { return 25 }
+    if name_is_bits_to_f64((*func).name) { return 26 }
     if name_is_assert((*func).name) { return 21 }
     if name_is_str_from_bytes((*func).name) { return 22 }
     if name_is_heap_alloc((*func).name) { return 23 }
@@ -1325,6 +1327,38 @@ pub fn name_is_sqrt(n: Name) -> bool with Mut, Panic, Div {
     if n.buf[1] != 113 as i8 { return false }     // 'q'
     if n.buf[2] != 114 as i8 { return false }     // 'r'
     if n.buf[3] != 116 as i8 { return false }     // 't'
+    true
+}
+
+pub fn name_is_f64_to_bits(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 11 { return false }
+    if n.buf[0] != 102 as i8 { return false }     // 'f'
+    if n.buf[1] != 54 as i8 { return false }      // '6'
+    if n.buf[2] != 52 as i8 { return false }      // '4'
+    if n.buf[3] != 95 as i8 { return false }      // '_'
+    if n.buf[4] != 116 as i8 { return false }     // 't'
+    if n.buf[5] != 111 as i8 { return false }     // 'o'
+    if n.buf[6] != 95 as i8 { return false }      // '_'
+    if n.buf[7] != 98 as i8 { return false }      // 'b'
+    if n.buf[8] != 105 as i8 { return false }     // 'i'
+    if n.buf[9] != 116 as i8 { return false }     // 't'
+    if n.buf[10] != 115 as i8 { return false }    // 's'
+    true
+}
+
+pub fn name_is_bits_to_f64(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 11 { return false }
+    if n.buf[0] != 98 as i8 { return false }      // 'b'
+    if n.buf[1] != 105 as i8 { return false }     // 'i'
+    if n.buf[2] != 116 as i8 { return false }     // 't'
+    if n.buf[3] != 115 as i8 { return false }     // 's'
+    if n.buf[4] != 95 as i8 { return false }      // '_'
+    if n.buf[5] != 116 as i8 { return false }     // 't'
+    if n.buf[6] != 111 as i8 { return false }     // 'o'
+    if n.buf[7] != 95 as i8 { return false }      // '_'
+    if n.buf[8] != 102 as i8 { return false }     // 'f'
+    if n.buf[9] != 54 as i8 { return false }      // '6'
+    if n.buf[10] != 52 as i8 { return false }     // '4'
     true
 }
 
@@ -4261,6 +4295,21 @@ fn emit_builtin_sqrt(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div 
     c.code = emit_ret(c.code)
     c
 }
+
+// f64_to_bits / bits_to_f64 — pure IEEE-754 reinterpret. The 64-bit value is
+// identical whether read as f64 or i64, and this backend passes the argument in
+// rdi and returns in rax (same convention as emit_builtin_sqrt), so the body is
+// just `rax = rdi`. Without this the call defaults to fn 0 (the runtime entry)
+// and segfaults.
+fn emit_builtin_f64_bits_identity(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c.code = emit_push_rbp(c.code)
+    c.code = emit_mov_rbp_rsp(c.code)
+    c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi
+    c.code = emit_pop_rbp(c.code)
+    c.code = emit_ret(c.code)
+    c
+}
 // Sprint 119: exp builtin — range-reduction + degree-6 minimax polynomial
 // Algorithm: x = n*ln(2) + r, exp(r) via Horner, scale by 2^n
 // Stack layout: [rbp-8]=input x, [rbp-16]=r, [rbp-24]=n_float, [rbp-32]=result
@@ -5256,6 +5305,8 @@ pub fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) 
         if name_is_write_file(func.name) { return emit_builtin_write_file(c) }
         if name_is_file_size(func.name) { return emit_builtin_file_size(c) }
         if name_is_sqrt(func.name) { return emit_builtin_sqrt(c) }
+        if name_is_f64_to_bits(func.name) { return emit_builtin_f64_bits_identity(c) }
+        if name_is_bits_to_f64(func.name) { return emit_builtin_f64_bits_identity(c) }
         if name_is_print_f64(func.name) { return emit_builtin_print_f64(c) }
         if name_is_exp(func.name) { return emit_builtin_exp(c) }
         if name_is_log(func.name) { return emit_builtin_log(c) }
@@ -6050,6 +6101,8 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     if builtin_id == 22 { native_v2_persist_builtin_emit_into(nc, emit_builtin_str_from_bytes((*nc))); return }
     if builtin_id == 23 { emit_builtin_heap_alloc_into(nc); return }
     if builtin_id == 24 { emit_builtin_heap_free_into(nc); return }
+    if builtin_id == 25 { native_v2_persist_builtin_emit_into(nc, emit_builtin_f64_bits_identity((*nc))); return }
+    if builtin_id == 26 { native_v2_persist_builtin_emit_into(nc, emit_builtin_f64_bits_identity((*nc))); return }
 }
 
 pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func: MachineFunction, fn_index: i64) -> NativeCompiler with Mut, Panic, Div, Alloc {
@@ -6099,6 +6152,8 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
         if name_is_write_file(func.name) { return emit_builtin_write_file(c) }
         if name_is_file_size(func.name) { return emit_builtin_file_size(c) }
         if name_is_sqrt(func.name) { return emit_builtin_sqrt(c) }
+        if name_is_f64_to_bits(func.name) { return emit_builtin_f64_bits_identity(c) }
+        if name_is_bits_to_f64(func.name) { return emit_builtin_f64_bits_identity(c) }
         if name_is_print_f64(func.name) { return emit_builtin_print_f64(c) }
         if name_is_exp(func.name) { return emit_builtin_exp(c) }
         if name_is_log(func.name) { return emit_builtin_log(c) }
@@ -8136,6 +8191,8 @@ fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_f
         if name_is_write_file(func.name) { (*nc) = emit_builtin_write_file((*nc)); return }
         if name_is_file_size(func.name) { (*nc) = emit_builtin_file_size((*nc)); return }
         if name_is_sqrt(func.name) { (*nc) = emit_builtin_sqrt((*nc)); return }
+        if name_is_f64_to_bits(func.name) { (*nc) = emit_builtin_f64_bits_identity((*nc)); return }
+        if name_is_bits_to_f64(func.name) { (*nc) = emit_builtin_f64_bits_identity((*nc)); return }
         if name_is_print_f64(func.name) { (*nc) = emit_builtin_print_f64((*nc)); return }
         if name_is_exp(func.name) { (*nc) = emit_builtin_exp((*nc)); return }
         if name_is_log(func.name) { (*nc) = emit_builtin_log((*nc)); return }
