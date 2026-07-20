@@ -84,6 +84,7 @@ fn ERR_INVALID_TARGET() -> i64 { 2 }
 fn ERR_INVALID_MATRIX() -> i64 { 3 }
 fn ERR_TRACE_WRITE_FAILED() -> i64 { 4 }
 fn ERR_TARGET_FLAGS_REQUIRE_NATIVE() -> i64 { 5 }
+fn ERR_BACKEND_CAPACITY_EXCEEDED() -> i64 { 6 }
 
 fn TARGET_SOURCE_UNKNOWN() -> i64 { 0 }
 fn TARGET_SOURCE_EXPLICIT() -> i64 { 1 }
@@ -910,6 +911,9 @@ fn native_compile_result_ok_wide(bytes: [i8; 16777216], len: i64, format_id: i64
 }
 
 fn native_compile_result_ok_elf(bytes: [i8; 1048576], len: i64, format_id: i64) -> NativeCompileResult with Mut, Panic, Div {
+    if len <= 0 {
+        return native_compile_result_error(ERR_BACKEND_CAPACITY_EXCEEDED(), "native_elf_finalization_refused")
+    }
     var narrow: [i8; 131072] = [0; 131072]
     var i: i64 = 0
     while i < len && i < 131072 {
@@ -1649,14 +1653,142 @@ fn nc_patch_u32_le(nc: &! NativeCompiler, offset: i64, val: i64) with Mut, Panic
     }
 }
 
+fn native_v2_flat_reloc_capacity() -> i64 { 65536 }
+fn native_legacy_reloc_capacity() -> i64 { 4096 }
+fn native_elf_rela_capacity() -> i64 { 341 }
+
+fn native_legacy_reloc_table_complete(table: &RelocationTable) -> bool {
+    (*table).count >= 0 && (*table).count <= native_legacy_reloc_capacity()
+}
+
+fn native_v2_flat_reloc_table_complete(nc: &NativeCompiler) -> bool {
+    (*nc).flat_reloc_count >= 0
+        && (*nc).flat_reloc_count <= native_v2_flat_reloc_capacity()
+}
+
+fn native_relocation_tables_complete(nc: &NativeCompiler) -> bool {
+    native_legacy_reloc_table_complete(&(*nc).relocs)
+        && native_v2_flat_reloc_table_complete(nc)
+}
+
+fn native_relocation_state_complete(nc: &NativeCompiler) -> bool {
+    !(*nc).code_overflow
+        && native_relocation_tables_complete(nc)
+}
+
+fn native_legacy_relocations_resolvable(nc: &NativeCompiler) -> bool with Mut, Panic, Div {
+    if !native_legacy_reloc_table_complete(&(*nc).relocs) { return false }
+    var i: i64 = 0
+    while i < (*nc).relocs.count {
+        let entry = (*nc).relocs.entries[i as usize]
+        if entry.offset < 0 || entry.offset + 4 > (*nc).code.len { return false }
+        if entry.kind.kind_code == 1 {
+            let target_idx = entry.target.target_index
+            if entry.target.is_function != 1
+                || target_idx < 0
+                || target_idx >= (*nc).fn_count
+                || (*nc).fn_offsets[target_idx as usize] < 0 {
+                return false
+            }
+        } else if entry.kind.kind_code == 2 || entry.kind.kind_code == 3 {
+            if entry.target.is_function != 0 || entry.target.target_index < 0 {
+                return false
+            }
+        } else {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn native_relocation_state_finalizable(nc: &NativeCompiler) -> bool with Mut, Panic, Div {
+    native_relocation_state_complete(nc)
+        && native_legacy_relocations_resolvable(nc)
+}
+
+fn native_relocation_table_fits_rela(nc: &NativeCompiler) -> bool {
+    (*nc).flat_reloc_count == 0
+        && (*nc).relocs.count >= 0
+        && (*nc).relocs.count <= native_elf_rela_capacity()
+}
+
+fn native_relocation_state_complete_for_rela(nc: &NativeCompiler) -> bool with Mut, Panic, Div {
+    native_relocation_state_finalizable(nc)
+        && native_relocation_table_fits_rela(nc)
+}
+
+fn native_relocation_state_complete_for_shared(nc: &NativeCompiler) -> bool {
+    native_relocation_state_complete(nc)
+        && (*nc).flat_reloc_count == 0
+        && (*nc).relocs.count == 0
+}
+
+fn native_relocation_refusal_binary() -> Elf64Binary with Mut {
+    var out = elf_binary_new()
+    out.len = -1
+    out
+}
+
+fn native_checked_add_reloc(
+    table: RelocationTable,
+    patch_offset: i64,
+    kind_code: i64,
+    is_function: i64,
+    target_index: i64
+) -> RelocationTable with Mut, Panic {
+    var t = table
+    let idx = t.count
+    if idx >= 0 && idx < native_legacy_reloc_capacity() {
+        let target = if is_function == 1 {
+            reloc_target_function(target_index)
+        } else {
+            reloc_target_data(target_index)
+        }
+        let kind = if kind_code == 1 {
+            reloc_rel32()
+        } else if kind_code == 3 {
+            reloc_data_rel32()
+        } else {
+            reloc_rip_rel32()
+        }
+        t.entries[idx as usize] = Relocation {
+            offset: patch_offset,
+            target: target,
+            kind: kind,
+            flat_kind_code: kind_code,
+            flat_is_function: is_function,
+            flat_target_index: target_index,
+        }
+        t.count = idx + 1
+    } else {
+        t.count = native_legacy_reloc_capacity() + 1
+    }
+    t
+}
+
+fn native_checked_add_call_reloc(table: RelocationTable, patch_offset: i64, target_func: i64) -> RelocationTable with Mut, Panic {
+    native_checked_add_reloc(table, patch_offset, 1, 1, target_func)
+}
+
+fn native_checked_add_rip_reloc(table: RelocationTable, patch_offset: i64, rodata_offset: i64) -> RelocationTable with Mut, Panic {
+    native_checked_add_reloc(table, patch_offset, 2, 0, rodata_offset)
+}
+
+fn native_checked_add_data_section_reloc(table: RelocationTable, patch_offset: i64, data_offset: i64) -> RelocationTable with Mut, Panic {
+    native_checked_add_reloc(table, patch_offset, 3, 0, data_offset)
+}
+
 fn nc_add_flat_reloc(nc: &! NativeCompiler, patch_offset: i64, kind_code: i64, is_function: i64, target_index: i64) with Mut, Panic, Div {
     let idx = (*nc).flat_reloc_count
-    if idx >= 0 && idx < 65536 {
+    if idx >= 0 && idx < native_v2_flat_reloc_capacity() {
         NC_FLAT_RELOC_OFFSETS[idx as usize] = patch_offset
         NC_FLAT_RELOC_KIND_CODES[idx as usize] = kind_code
         NC_FLAT_RELOC_IS_FUNCTIONS[idx as usize] = is_function
         NC_FLAT_RELOC_TARGET_INDICES[idx as usize] = target_index
         (*nc).flat_reloc_count = idx + 1
+    } else {
+        (*nc).flat_reloc_count = native_v2_flat_reloc_capacity() + 1
     }
 }
 
@@ -1670,6 +1802,57 @@ fn nc_add_rodata_reloc(nc: &! NativeCompiler, patch_offset: i64, rodata_offset: 
 
 fn nc_add_data_section_reloc(nc: &! NativeCompiler, patch_offset: i64, data_offset: i64) with Mut, Panic, Div {
     nc_add_flat_reloc(nc, patch_offset, 3, 0, data_offset)
+}
+
+fn native_legacy_relocation_fail_closed_selftest() -> bool with Mut, Panic {
+    var legacy = reloc_table_new()
+    legacy.count = 255
+    legacy = native_checked_add_call_reloc(legacy, 1, 0)
+    if legacy.count != 256 { return false }
+    legacy = native_checked_add_call_reloc(legacy, 5, 0)
+    if legacy.count != 257 { return false }
+    legacy.count = native_legacy_reloc_capacity() - 1
+    legacy = native_checked_add_rip_reloc(legacy, 9, 0)
+    if legacy.count != native_legacy_reloc_capacity() { return false }
+    legacy = native_checked_add_data_section_reloc(legacy, 13, 0)
+    if legacy.count != native_legacy_reloc_capacity() + 1 { return false }
+    if native_legacy_reloc_table_complete(&legacy) { return false }
+    true
+}
+
+fn native_v2_flat_relocation_fail_closed_selftest() -> bool with Mut, Panic, Div {
+    var modern = compiler_new()
+    modern.flat_reloc_count = native_v2_flat_reloc_capacity() - 1
+    nc_add_call_reloc(&! modern, 1, 0)
+    if modern.flat_reloc_count != native_v2_flat_reloc_capacity() { return false }
+    nc_add_rodata_reloc(&! modern, 5, 0)
+    if modern.flat_reloc_count != native_v2_flat_reloc_capacity() + 1 { return false }
+    if native_relocation_state_complete(&modern) { return false }
+    true
+}
+
+fn native_elf_rela_fail_closed_selftest() -> bool with Mut {
+    var rela = compiler_new()
+    rela.relocs.count = native_elf_rela_capacity()
+    if !native_relocation_table_fits_rela(&rela) { return false }
+    rela.relocs.count = native_elf_rela_capacity() + 1
+    if native_relocation_table_fits_rela(&rela) { return false }
+    true
+}
+
+fn native_shared_relocation_fail_closed_selftest() -> bool with Mut {
+    var shared = compiler_new()
+    if !native_relocation_state_complete_for_shared(&shared) { return false }
+    shared.relocs.count = 1
+    if native_relocation_state_complete_for_shared(&shared) { return false }
+    true
+}
+
+pub fn native_v2_relocation_fail_closed_selftest() -> bool with Mut, Panic, Div {
+    if !native_legacy_relocation_fail_closed_selftest() { return false }
+    if !native_v2_flat_relocation_fail_closed_selftest() { return false }
+    if !native_elf_rela_fail_closed_selftest() { return false }
+    native_shared_relocation_fail_closed_selftest()
 }
 
 fn nc_emit_mov_rax_r15(nc: &! NativeCompiler) with Mut, Panic, Div {
@@ -2563,7 +2746,7 @@ fn emit_store_runtime_context_data_ptr(nc: NativeCompiler, field_offset: i64, da
     var c = nc
     let load_disp_pos = c.code.len + 3
     c.code = emit_lea_rax_rip_disp32(c.code, 0)
-    c.relocs = add_data_section_reloc(c.relocs, load_disp_pos, data_offset)
+    c.relocs = native_checked_add_data_section_reloc(c.relocs, load_disp_pos, data_offset)
     c = emit_store_rax_runtime_context_field(c, field_offset)
     c
 }
@@ -3908,17 +4091,24 @@ fn native_v2_rodata_append_updated_tail(nc: &! NativeCompiler, updated: NativeCo
 }
 
 fn native_v2_persist_builtin_emit_into(nc: &! NativeCompiler, updated: NativeCompiler) with Mut, Panic, Div {
+    if !native_legacy_reloc_table_complete(&updated.relocs) {
+        (*nc).flat_reloc_count = native_v2_flat_reloc_capacity() + 1
+        return
+    }
     let nc_rodata_len_before = (*nc).rodata.len
     (*nc).code = updated.code
     let rodata_append_base = native_v2_rodata_append_updated_tail(nc, updated, nc_rodata_len_before)
     var ri = 0
-    while ri < updated.relocs.count && ri < 4096 {
+    while ri < updated.relocs.count {
         let entry = updated.relocs.entries[ri as usize]
         if entry.kind.kind_code == 2 {
             let adjusted = rodata_append_base + (entry.target.target_index - nc_rodata_len_before)
             nc_add_rodata_reloc(nc, entry.offset, adjusted)
         } else if entry.kind.kind_code == 3 {
             nc_add_data_section_reloc(nc, entry.offset, entry.target.target_index)
+        } else {
+            (*nc).flat_reloc_count = -1
+            return
         }
         ri = ri + 1
     }
@@ -4198,7 +4388,7 @@ fn emit_builtin_exp(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     // Step 1: n_float = x * (1/ln2)
     let load_inv_ln2_pos = c.code.len
     c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, load_inv_ln2_pos + 4, inv_ln2_off)
+    c.relocs = native_checked_add_rip_reloc(c.relocs, load_inv_ln2_pos + 4, inv_ln2_off)
     c.code = emit_mulsd_xmm0_xmm1(c.code)         // xmm0 = x / ln(2)
 
     // Step 2: n = truncate to integer, n_f64 = convert back
@@ -4210,7 +4400,7 @@ fn emit_builtin_exp(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     // Step 3: r = x - n_f64 * ln2
     let load_ln2_pos = c.code.len
     c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, load_ln2_pos + 4, ln2_off)
+    c.relocs = native_checked_add_rip_reloc(c.relocs, load_ln2_pos + 4, ln2_off)
     c.code = emit_mulsd_xmm0_xmm1(c.code)         // xmm0 = n_f64 * ln2
     c.code = emit_movsd_rbp_disp8_xmm1(c.code, -16) // save n*ln2 to [rbp-16] temporarily
     c.code = emit_movsd_xmm0_rbp_disp8(c.code, -8)  // xmm0 = x
@@ -4223,7 +4413,7 @@ fn emit_builtin_exp(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     // Start from innermost: acc = c6
     let load_c6_pos = c.code.len
     c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, load_c6_pos + 4, c6_off)
+    c.relocs = native_checked_add_rip_reloc(c.relocs, load_c6_pos + 4, c6_off)
     // acc = c5 + r * c6
     c.code = emit_movsd_rbp_disp8_xmm0(c.code, -40)  // [rbp-40] = acc (c6)
     c.code = emit_movsd_xmm0_rbp_disp8(c.code, -16)  // xmm0 = r
@@ -4231,7 +4421,7 @@ fn emit_builtin_exp(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r * acc
     let load_c5_pos = c.code.len
     c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, load_c5_pos + 4, c5_off)
+    c.relocs = native_checked_add_rip_reloc(c.relocs, load_c5_pos + 4, c5_off)
     c.code = emit_addsd_xmm0_xmm1(c.code)             // xmm0 = c5 + r*c6
     // acc = c4 + r * (c5 + r*c6)
     c.code = emit_movsd_rbp_disp8_xmm0(c.code, -40)
@@ -4240,7 +4430,7 @@ fn emit_builtin_exp(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     c.code = emit_mulsd_xmm0_xmm1(c.code)
     let load_c4_pos = c.code.len
     c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, load_c4_pos + 4, c4_off)
+    c.relocs = native_checked_add_rip_reloc(c.relocs, load_c4_pos + 4, c4_off)
     c.code = emit_addsd_xmm0_xmm1(c.code)
     // acc = c3 + r * acc
     c.code = emit_movsd_rbp_disp8_xmm0(c.code, -40)
@@ -4249,7 +4439,7 @@ fn emit_builtin_exp(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     c.code = emit_mulsd_xmm0_xmm1(c.code)
     let load_c3_pos = c.code.len
     c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, load_c3_pos + 4, c3_off)
+    c.relocs = native_checked_add_rip_reloc(c.relocs, load_c3_pos + 4, c3_off)
     c.code = emit_addsd_xmm0_xmm1(c.code)
     // acc = c2 + r * acc
     c.code = emit_movsd_rbp_disp8_xmm0(c.code, -40)
@@ -4258,7 +4448,7 @@ fn emit_builtin_exp(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     c.code = emit_mulsd_xmm0_xmm1(c.code)
     let load_c2_pos = c.code.len
     c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, load_c2_pos + 4, c2_off)
+    c.relocs = native_checked_add_rip_reloc(c.relocs, load_c2_pos + 4, c2_off)
     c.code = emit_addsd_xmm0_xmm1(c.code)
     // acc = 1.0 + r * acc
     c.code = emit_movsd_rbp_disp8_xmm0(c.code, -40)
@@ -4267,7 +4457,7 @@ fn emit_builtin_exp(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     c.code = emit_mulsd_xmm0_xmm1(c.code)
     let load_one1_pos = c.code.len
     c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, load_one1_pos + 4, one_off)
+    c.relocs = native_checked_add_rip_reloc(c.relocs, load_one1_pos + 4, one_off)
     c.code = emit_addsd_xmm0_xmm1(c.code)
     // acc = 1.0 + r * acc  (outermost)
     c.code = emit_movsd_rbp_disp8_xmm0(c.code, -40)
@@ -4276,7 +4466,7 @@ fn emit_builtin_exp(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     c.code = emit_mulsd_xmm0_xmm1(c.code)
     let load_one2_pos = c.code.len
     c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, load_one2_pos + 4, one_off)
+    c.relocs = native_checked_add_rip_reloc(c.relocs, load_one2_pos + 4, one_off)
     c.code = emit_addsd_xmm0_xmm1(c.code)
     // xmm0 = exp(r) approx
 
@@ -4370,7 +4560,7 @@ fn emit_builtin_log(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     // xmm0 = m, load 1.0 into xmm1
     let load_one1_pos = c.code.len
     c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, load_one1_pos + 4, one_off)
+    c.relocs = native_checked_add_rip_reloc(c.relocs, load_one1_pos + 4, one_off)
     // m - 1 in xmm0
     c.code = emit_subsd_xmm0_xmm1(c.code)         // xmm0 = m - 1
     c.code = emit_movsd_rbp_disp8_xmm0(c.code, -48)  // [rbp-48] = m - 1
@@ -4379,7 +4569,7 @@ fn emit_builtin_log(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     c.code = emit_movsd_xmm0_rbp_disp8(c.code, -40)  // xmm0 = m
     let load_one2_pos = c.code.len
     c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, load_one2_pos + 4, one_off)
+    c.relocs = native_checked_add_rip_reloc(c.relocs, load_one2_pos + 4, one_off)
     c.code = emit_addsd_xmm0_xmm1(c.code)         // xmm0 = m + 1
 
     // f = (m-1) / (m+1)
@@ -4413,7 +4603,7 @@ fn emit_builtin_log(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     // term4 = f^6 / 7
     let load_seventh_pos = c.code.len
     c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, load_seventh_pos + 4, seventh_off)
+    c.relocs = native_checked_add_rip_reloc(c.relocs, load_seventh_pos + 4, seventh_off)
     c.code = emit_mulsd_xmm0_xmm1(c.code)          // xmm0 = f^6 * (1/7)
 
     // + f^4 / 5
@@ -4421,7 +4611,7 @@ fn emit_builtin_log(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     c.code = emit_movsd_xmm0_rbp_disp8(c.code, -48)  // xmm0 = f^4
     let load_fifth_pos = c.code.len
     c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, load_fifth_pos + 4, fifth_off)
+    c.relocs = native_checked_add_rip_reloc(c.relocs, load_fifth_pos + 4, fifth_off)
     c.code = emit_mulsd_xmm0_xmm1(c.code)          // xmm0 = f^4 * (1/5)
     c.code = emit_movsd_xmm1_rbp_disp8(c.code, -40)  // xmm1 = f^6/7
     c.code = emit_addsd_xmm0_xmm1(c.code)          // xmm0 = f^4/5 + f^6/7
@@ -4431,7 +4621,7 @@ fn emit_builtin_log(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     c.code = emit_movsd_xmm0_rbp_disp8(c.code, -32)  // xmm0 = f^2
     let load_third_pos = c.code.len
     c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, load_third_pos + 4, third_off)
+    c.relocs = native_checked_add_rip_reloc(c.relocs, load_third_pos + 4, third_off)
     c.code = emit_mulsd_xmm0_xmm1(c.code)          // xmm0 = f^2 * (1/3)
     c.code = emit_movsd_xmm1_rbp_disp8(c.code, -40)  // xmm1 = f^4/5 + f^6/7
     c.code = emit_addsd_xmm0_xmm1(c.code)          // xmm0 = f^2/3 + f^4/5 + f^6/7
@@ -4439,13 +4629,13 @@ fn emit_builtin_log(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     // + 1.0
     let load_one3_pos = c.code.len
     c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, load_one3_pos + 4, one_off)
+    c.relocs = native_checked_add_rip_reloc(c.relocs, load_one3_pos + 4, one_off)
     c.code = emit_addsd_xmm0_xmm1(c.code)          // xmm0 = 1 + f^2/3 + f^4/5 + f^6/7
 
     // * 2 * f
     let load_two_pos = c.code.len
     c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, load_two_pos + 4, two_off)
+    c.relocs = native_checked_add_rip_reloc(c.relocs, load_two_pos + 4, two_off)
     c.code = emit_mulsd_xmm0_xmm1(c.code)          // xmm0 *= 2
     c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)  // xmm1 = f
     c.code = emit_mulsd_xmm0_xmm1(c.code)          // xmm0 = log(m)
@@ -4455,7 +4645,7 @@ fn emit_builtin_log(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     c.code = emit_movsd_xmm0_rbp_disp8(c.code, -16)  // xmm0 = e_f64
     let load_ln2_pos = c.code.len
     c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, load_ln2_pos + 4, ln2_off)
+    c.relocs = native_checked_add_rip_reloc(c.relocs, load_ln2_pos + 4, ln2_off)
     c.code = emit_mulsd_xmm0_xmm1(c.code)          // xmm0 = e * ln(2)
     c.code = emit_movsd_xmm1_rbp_disp8(c.code, -40)  // xmm1 = log(m)
     c.code = emit_addsd_xmm0_xmm1(c.code)          // xmm0 = e*ln2 + log(m)
@@ -4502,13 +4692,13 @@ fn emit_builtin_sin(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // [rbp-24] = x (save)
     let sin_inv2pi = c.code.len
     c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, sin_inv2pi + 4, inv_two_pi_off)
+    c.relocs = native_checked_add_rip_reloc(c.relocs, sin_inv2pi + 4, inv_two_pi_off)
     c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = x/(2π)
     c.code = emit_cvtsd2si_rax_xmm0(c.code)           // rax = round(x/(2π))
     c.code = emit_cvtsi2sd_xmm0_rax(c.code)           // xmm0 = n (as f64)
     let sin_2pi = c.code.len
     c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, sin_2pi + 4, two_pi_off)
+    c.relocs = native_checked_add_rip_reloc(c.relocs, sin_2pi + 4, two_pi_off)
     c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = n*2π
     // r = x - n*2π
     c.code = emit_movsd_rbp_disp8_xmm0(c.code, -32)   // [rbp-32] = n*2π
@@ -4527,14 +4717,14 @@ fn emit_builtin_sin(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     // Innermost: s = 1/5040
     let sin_c7 = c.code.len
     c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, sin_c7 + 4, c7_off)
+    c.relocs = native_checked_add_rip_reloc(c.relocs, sin_c7 + 4, c7_off)
     // s = 1/120 - r² * s
     c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
     c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²/5040
     c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
     let sin_c5 = c.code.len
     c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, sin_c5 + 4, c5_off)
+    c.relocs = native_checked_add_rip_reloc(c.relocs, sin_c5 + 4, c5_off)
     c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)   // xmm1 = r²/5040
     c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = 1/120 - r²/5040
     // s = 1/6 - r² * s
@@ -4543,7 +4733,7 @@ fn emit_builtin_sin(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
     let sin_c3 = c.code.len
     c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, sin_c3 + 4, c3_off)
+    c.relocs = native_checked_add_rip_reloc(c.relocs, sin_c3 + 4, c3_off)
     c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)   // xmm1 = r²*(...)
     c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = 1/6 - r²*(...)
     // s = 1 - r² * s
@@ -4552,7 +4742,7 @@ fn emit_builtin_sin(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
     let sin_one = c.code.len
     c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, sin_one + 4, one_off)
+    c.relocs = native_checked_add_rip_reloc(c.relocs, sin_one + 4, one_off)
     c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)   // xmm1 = r²*(...)
     c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = 1 - r²*(...)
     // result = r * s
@@ -4599,13 +4789,13 @@ fn emit_builtin_cos(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // [rbp-24] = x
     let cos_inv2pi = c.code.len
     c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, cos_inv2pi + 4, cos_inv_two_pi_off)
+    c.relocs = native_checked_add_rip_reloc(c.relocs, cos_inv2pi + 4, cos_inv_two_pi_off)
     c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = x/(2π)
     c.code = emit_cvtsd2si_rax_xmm0(c.code)           // rax = round(x/(2π))
     c.code = emit_cvtsi2sd_xmm0_rax(c.code)           // xmm0 = n
     let cos_2pi = c.code.len
     c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, cos_2pi + 4, cos_two_pi_off)
+    c.relocs = native_checked_add_rip_reloc(c.relocs, cos_2pi + 4, cos_two_pi_off)
     c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = n*2π
     c.code = emit_movsd_rbp_disp8_xmm0(c.code, -32)   // [rbp-32] = n*2π
     c.code = emit_movsd_xmm0_rbp_disp8(c.code, -24)   // xmm0 = x
@@ -4623,14 +4813,14 @@ fn emit_builtin_cos(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     // Innermost: s = 1/720
     let cos_c6 = c.code.len
     c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, cos_c6 + 4, cos_c6_off)
+    c.relocs = native_checked_add_rip_reloc(c.relocs, cos_c6 + 4, cos_c6_off)
     // s = 1/24 - r² * s
     c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
     c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²/720
     c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
     let cos_c4 = c.code.len
     c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, cos_c4 + 4, cos_c4_off)
+    c.relocs = native_checked_add_rip_reloc(c.relocs, cos_c4 + 4, cos_c4_off)
     c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
     c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = 1/24 - r²/720
     // s = 1/2 - r² * s
@@ -4639,7 +4829,7 @@ fn emit_builtin_cos(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
     let cos_c2 = c.code.len
     c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, cos_c2 + 4, cos_c2_off)
+    c.relocs = native_checked_add_rip_reloc(c.relocs, cos_c2 + 4, cos_c2_off)
     c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
     c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = 1/2 - r²*(...)
     // result = 1 - r² * s
@@ -4648,7 +4838,7 @@ fn emit_builtin_cos(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
     let cos_one = c.code.len
     c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, cos_one + 4, cos_one_off)
+    c.relocs = native_checked_add_rip_reloc(c.relocs, cos_one + 4, cos_one_off)
     c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
     c.code = emit_subsd_xmm0_xmm1(c.code)             // xmm0 = cos(x)
 
@@ -4773,7 +4963,7 @@ fn emit_builtin_print_f64(nc: NativeCompiler) -> NativeCompiler with Mut, Panic,
     // Load 1e6 from .rodata
     let movsd1_pos = c.code.len
     c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, movsd1_pos + 4, rodata_1e6_offset)
+    c.relocs = native_checked_add_rip_reloc(c.relocs, movsd1_pos + 4, rodata_1e6_offset)
 
     c.code = emit_mulsd_xmm0_xmm1(c.code)
     c.code = emit_cvttsd2si_rax_xmm0(c.code)
@@ -4965,6 +5155,11 @@ pub fn compile_module_streaming_finish_into(nc: &! NativeCompiler, module: &IrMo
     let data_file_offset = if effective_data_len > 0 {
         align_page(rodata_file_offset + effective_rodata_len)
     } else { 0 }
+    if !native_relocation_state_complete(nc) { return }
+    if !native_legacy_relocations_resolvable(nc) {
+        (*nc).relocs.count = -1
+        return
+    }
     (*nc).code = apply_relocations((*nc).relocs, (*nc).code, (*nc).fn_offsets, (*nc).fn_count, rodata_file_offset, data_file_offset)
 }
 
@@ -4993,43 +5188,66 @@ fn native_v2_reloc_is_rip_disp_patch(nc: &NativeCompiler, patch_offset: i64) -> 
 }
 
 fn apply_relocations_into(nc: &! NativeCompiler, rodata_file_offset: i64, data_file_offset: i64) with Mut, Panic, Div {
+    if !native_relocation_state_complete(nc) { return }
     var i = 0
-    while i < (*nc).flat_reloc_count && i < 65536 {
+    while i < (*nc).flat_reloc_count {
         let patch_offset = NC_FLAT_RELOC_OFFSETS[i as usize]
         let kind_code = NC_FLAT_RELOC_KIND_CODES[i as usize]
         let is_function = NC_FLAT_RELOC_IS_FUNCTIONS[i as usize]
         let target_index = NC_FLAT_RELOC_TARGET_INDICES[i as usize]
+        var applied = false
 
         if kind_code == 1 && native_v2_reloc_is_call_patch(nc, patch_offset) {
-            if is_function == 1 {
-                let target_idx = target_index
-                if target_idx >= 0 && target_idx < (*nc).fn_count {
-                    let target_offset = (*nc).fn_offsets[target_idx as usize]
+            let target_idx = target_index
+            if is_function == 1 && target_idx >= 0 && target_idx < (*nc).fn_count {
+                let target_offset = (*nc).fn_offsets[target_idx as usize]
+                if target_offset >= 0 {
                     let rel32 = target_offset - (patch_offset + 4)
                     nc_patch_u32_le(nc, patch_offset, rel32)
+                    applied = true
                 }
             }
-        } else if kind_code == 2 && native_v2_reloc_is_rip_disp_patch(nc, patch_offset) {
+        } else if kind_code == 2
+            && is_function == 0
+            && target_index >= 0
+            && rodata_file_offset > 0
+            && native_v2_reloc_is_rip_disp_patch(nc, patch_offset) {
             let str_offset = target_index
             let text_file_offset = 4096
             let lea_next_ip = text_file_offset + patch_offset + 4
             let string_va = rodata_file_offset + str_offset
             let disp32 = string_va - lea_next_ip
             nc_patch_u32_le(nc, patch_offset, disp32)
-        } else if kind_code == 3 && native_v2_reloc_is_rip_disp_patch(nc, patch_offset) {
+            applied = true
+        } else if kind_code == 3
+            && is_function == 0
+            && target_index >= 0
+            && data_file_offset > 0
+            && native_v2_reloc_is_rip_disp_patch(nc, patch_offset) {
             let data_off = target_index
             let text_file_offset2 = 4096
             let next_ip = text_file_offset2 + patch_offset + 4
             let counter_va = data_file_offset + data_off
             let disp32_data = counter_va - next_ip
             nc_patch_u32_le(nc, patch_offset, disp32_data)
-        } else if kind_code == 4 && native_v2_reloc_is_rip_disp_patch(nc, patch_offset) {
+            applied = true
+        } else if kind_code == 4
+            && is_function == 1
+            && native_v2_reloc_is_rip_disp_patch(nc, patch_offset) {
             let target_idx = target_index
             if target_idx >= 0 && target_idx < (*nc).fn_count {
                 let fn_off = (*nc).fn_offsets[target_idx as usize]
-                let disp32_fn = fn_off - (patch_offset + 4)
-                nc_patch_u32_le(nc, patch_offset, disp32_fn)
+                if fn_off >= 0 {
+                    let disp32_fn = fn_off - (patch_offset + 4)
+                    nc_patch_u32_le(nc, patch_offset, disp32_fn)
+                    applied = true
+                }
             }
+        }
+
+        if !applied {
+            (*nc).flat_reloc_count = -1
+            return
         }
 
         i = i + 1
@@ -5476,7 +5694,7 @@ fn native_v2_emit_machine_instr(nc: NativeCompiler, instr: MachineInstr) -> Nati
         let str_offset = c.rodata.last_offset
         let lea_pos = c.code.len
         c.code = emit_lea_rax_rip_disp32(c.code, 0)
-        c.relocs = add_rip_reloc(c.relocs, lea_pos + 3, str_offset)
+        c.relocs = native_checked_add_rip_reloc(c.relocs, lea_pos + 3, str_offset)
         return native_v2_store_rax_to_temp(c, instr.dst.value)
     }
 
@@ -5590,7 +5808,7 @@ fn native_v2_emit_machine_instr(nc: NativeCompiler, instr: MachineInstr) -> Nati
         let call_pos = c.code.len
         c.code = emit_call_rel32_placeholder(c.code)
         if instr.src1.value >= 0 {
-            c.relocs = add_call_reloc(c.relocs, call_pos + 1, instr.src1.value)
+            c.relocs = native_checked_add_call_reloc(c.relocs, call_pos + 1, instr.src1.value)
         }
         return c
     }
@@ -5784,7 +6002,7 @@ fn native_v2_emit_machine_instr(nc: NativeCompiler, instr: MachineInstr) -> Nati
         let data_offset = c.rodata.last_offset
         let movsd_pos = c.code.len
         c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
-        c.relocs = add_rip_reloc(c.relocs, movsd_pos + 4, data_offset)
+        c.relocs = native_checked_add_rip_reloc(c.relocs, movsd_pos + 4, data_offset)
         c.code = emit_movq_rax_xmm0(c.code)
         return native_v2_store_rax_to_stack_slot(c, instr.dst.value)
     }
@@ -8125,6 +8343,14 @@ pub fn compile_module_v2_mut(nc: &! NativeCompiler, module: &IrModule) -> string
     let data_file_offset = if effective_data_len > 0 {
         align_page(rodata_file_offset + (*nc).rodata.len)
     } else { 0 }
+    if !native_relocation_tables_complete(nc) {
+        return "native_v2_relocation_capacity_exceeded"
+    }
+    if (*nc).code_overflow { return "native_v2_code_capacity_exceeded" }
+    if !native_legacy_relocations_resolvable(nc) {
+        (*nc).relocs.count = -1
+        return "native_v2_relocation_validation_failed"
+    }
     (*nc).code = apply_relocations((*nc).relocs, (*nc).code, (*nc).fn_offsets, (*nc).fn_count, rodata_file_offset, data_file_offset)
 
     ""
@@ -8773,7 +8999,7 @@ fn emit_prof_dump_function(nc: NativeCompiler, module: &IrModule) -> NativeCompi
         let name_rodata_offset = c.prof_counter_names[ci as usize]
         let lea_pos = c.code.len + 3     // disp32 is at byte 3 of LEA instruction
         c.code = emit_lea_rax_rip_disp32(c.code, 0)  // placeholder disp32
-        c.relocs = add_rip_reloc(c.relocs, lea_pos, name_rodata_offset)
+        c.relocs = native_checked_add_rip_reloc(c.relocs, lea_pos, name_rodata_offset)
         // rax = pointer to name string in .rodata
         c.code = emit_mov_reg_reg(c.code, 6, 0)      // mov rsi, rax
         c = emit_inline_strlen(c)                      // rcx = length, rsi preserved
@@ -8790,7 +9016,7 @@ fn emit_prof_dump_function(nc: NativeCompiler, module: &IrModule) -> NativeCompi
         let counter_id = module.prof_counters[ci as usize].counter_id
         let load_disp_pos = c.code.len + 3  // disp32 at byte 3 of MOV [rip+disp32]
         c.code = emit_mov_rax_rip_disp32(c.code, 0)   // placeholder disp32
-        c.relocs = add_data_section_reloc(c.relocs, load_disp_pos, c.prof_counter_data_base + (counter_id * 8))
+        c.relocs = native_checked_add_data_section_reloc(c.relocs, load_disp_pos, c.prof_counter_data_base + (counter_id * 8))
         // rax = counter value
         c.code = emit_mov_rdi_rax(c.code)              // rdi = counter value
         c = emit_inline_itoa_stderr(c)                  // itoa + sys_write(2, ...)
@@ -8808,7 +9034,7 @@ fn emit_prof_dump_function(nc: NativeCompiler, module: &IrModule) -> NativeCompi
     // sys_open("profile.sprof", O_WRONLY|O_CREAT|O_TRUNC=577, 0644=420)
     let sprof_lea_pos = c.code.len + 3
     c.code = emit_lea_rax_rip_disp32(c.code, 0)     // placeholder → .rodata "profile.sprof"
-    c.relocs = add_rip_reloc(c.relocs, sprof_lea_pos, c.prof_sprof_name_offset)
+    c.relocs = native_checked_add_rip_reloc(c.relocs, sprof_lea_pos, c.prof_sprof_name_offset)
     c.code = emit_mov_rdi_rax(c.code)                // rdi = filename pointer
     c.code = emit_mov_reg_imm(c.code, 6, 577)        // rsi = O_WRONLY|O_CREAT|O_TRUNC
     c.code = emit_mov_reg_imm(c.code, 2, 420)        // rdx = 0644
@@ -8826,7 +9052,7 @@ fn emit_prof_dump_function(nc: NativeCompiler, module: &IrModule) -> NativeCompi
         let fn_rodata_offset = c.prof_counter_names[fi as usize]
         let fn_lea_pos = c.code.len + 3
         c.code = emit_lea_rax_rip_disp32(c.code, 0)  // placeholder
-        c.relocs = add_rip_reloc(c.relocs, fn_lea_pos, fn_rodata_offset)
+        c.relocs = native_checked_add_rip_reloc(c.relocs, fn_lea_pos, fn_rodata_offset)
         c.code = emit_mov_reg_reg(c.code, 6, 0)      // mov rsi, rax
         c = emit_inline_strlen(c)                      // rcx = length
         c.code = emit_mov_reg_reg(c.code, 2, 1)      // mov rdx, rcx
@@ -8841,7 +9067,7 @@ fn emit_prof_dump_function(nc: NativeCompiler, module: &IrModule) -> NativeCompi
         let file_counter_id = module.prof_counters[fi as usize].counter_id
         let file_load_pos = c.code.len + 3
         c.code = emit_mov_rax_rip_disp32(c.code, 0)   // placeholder
-        c.relocs = add_data_section_reloc(c.relocs, file_load_pos, c.prof_counter_data_base + (file_counter_id * 8))
+        c.relocs = native_checked_add_data_section_reloc(c.relocs, file_load_pos, c.prof_counter_data_base + (file_counter_id * 8))
         c.code = emit_mov_rdi_rax(c.code)              // rdi = counter value
         c = emit_inline_itoa_fd(c)                      // itoa + sys_write(r12, ...)
 
@@ -9016,7 +9242,7 @@ fn emit_entry_trampoline_into(nc: &! NativeCompiler, main_fn_index: i64) with Mu
 
     let ctx_slot_disp = (*nc).code.len + 3
     (*nc).code = emit_mov_rip_disp32_rax((*nc).code, 0)
-    (*nc).relocs = add_data_section_reloc((*nc).relocs, ctx_slot_disp, (*nc).runtime_context_slot_offset)
+    (*nc).relocs = native_checked_add_data_section_reloc((*nc).relocs, ctx_slot_disp, (*nc).runtime_context_slot_offset)
 
     (*nc).code = emit_mov_reg_imm((*nc).code, 1, runtime_context_size())
     (*nc).code = emit_add_reg_reg((*nc).code, 0, 1)
@@ -9074,7 +9300,7 @@ fn emit_entry_trampoline_into(nc: &! NativeCompiler, main_fn_index: i64) with Mu
 
     let call_pos = (*nc).code.len
     (*nc).code = emit_call_rel32_placeholder((*nc).code)
-    (*nc).relocs = add_call_reloc((*nc).relocs, call_pos + 1, main_fn_index)
+    (*nc).relocs = native_checked_add_call_reloc((*nc).relocs, call_pos + 1, main_fn_index)
 
     (*nc).code = emit_mov_rdi_rax((*nc).code)
 
@@ -9082,7 +9308,7 @@ fn emit_entry_trampoline_into(nc: &! NativeCompiler, main_fn_index: i64) with Mu
         (*nc).code = emit_push_rdi((*nc).code)
         let dump_call_pos = (*nc).code.len
         (*nc).code = emit_call_rel32_placeholder((*nc).code)
-        (*nc).relocs = add_call_reloc((*nc).relocs, dump_call_pos + 1, (*nc).prof_dump_fn_index)
+        (*nc).relocs = native_checked_add_call_reloc((*nc).relocs, dump_call_pos + 1, (*nc).prof_dump_fn_index)
         (*nc).code = emit_pop_rdi((*nc).code)
     }
 
@@ -9116,7 +9342,7 @@ fn emit_entry_trampoline(nc: NativeCompiler, main_fn_index: i64) -> NativeCompil
     // Publish the RuntimeContext pointer into the .data slot.
     let ctx_slot_disp = c.code.len + 3
     c.code = emit_mov_rip_disp32_rax(c.code, 0)
-    c.relocs = add_data_section_reloc(c.relocs, ctx_slot_disp, c.runtime_context_slot_offset)
+    c.relocs = native_checked_add_data_section_reloc(c.relocs, ctx_slot_disp, c.runtime_context_slot_offset)
 
     // Managed handle table lives immediately after the fixed-size RuntimeContext.
     c.code = emit_mov_reg_imm(c.code, 1, runtime_context_size())
@@ -9184,7 +9410,7 @@ fn emit_entry_trampoline(nc: NativeCompiler, main_fn_index: i64) -> NativeCompil
     // call main (placeholder, will be relocated)
     let call_pos = c.code.len
     c.code = emit_call_rel32_placeholder(c.code)
-    c.relocs = add_call_reloc(c.relocs, call_pos + 1, main_fn_index)
+    c.relocs = native_checked_add_call_reloc(c.relocs, call_pos + 1, main_fn_index)
 
     // mov rdi, rax (exit code = main's return value)
     c.code = emit_mov_rdi_rax(c.code)
@@ -9194,7 +9420,7 @@ fn emit_entry_trampoline(nc: NativeCompiler, main_fn_index: i64) -> NativeCompil
         c.code = emit_push_rdi(c.code)       // save exit code
         let dump_call_pos = c.code.len
         c.code = emit_call_rel32_placeholder(c.code)
-        c.relocs = add_call_reloc(c.relocs, dump_call_pos + 1, c.prof_dump_fn_index)
+        c.relocs = native_checked_add_call_reloc(c.relocs, dump_call_pos + 1, c.prof_dump_fn_index)
         c.code = emit_pop_rdi(c.code)        // restore exit code
     }
 
@@ -9270,7 +9496,7 @@ fn emit_entry_trampoline_windows_x86(nc: NativeCompiler, main_fn_index: i64) -> 
     // Publish the RuntimeContext pointer into the .data slot.
     let ctx_slot_disp = c.code.len + 3
     c.code = emit_mov_rip_disp32_rax(c.code, 0)
-    c.relocs = add_data_section_reloc(c.relocs, ctx_slot_disp, c.runtime_context_slot_offset)
+    c.relocs = native_checked_add_data_section_reloc(c.relocs, ctx_slot_disp, c.runtime_context_slot_offset)
 
     // Managed handle table lives immediately after the fixed-size RuntimeContext.
     c.code = emit_mov_reg_imm(c.code, 1, runtime_context_size())
@@ -9360,7 +9586,7 @@ fn emit_entry_trampoline_windows_x86(nc: NativeCompiler, main_fn_index: i64) -> 
     // call main (placeholder, will be relocated)
     let call_pos = c.code.len
     c.code = emit_call_rel32_placeholder(c.code)
-    c.relocs = add_call_reloc(c.relocs, call_pos + 1, main_fn_index)
+    c.relocs = native_checked_add_call_reloc(c.relocs, call_pos + 1, main_fn_index)
 
     // ExitProcess(main_return_value): mov rcx, rax; call [rip+disp32]
     c.code = emit_mov_rcx_rax(c.code)
@@ -9396,7 +9622,7 @@ fn emit_entry_trampoline_macos_x86(nc: NativeCompiler, main_fn_index: i64) -> Na
     c.code = emit_syscall(c.code)
     let ctx_slot_disp = c.code.len + 3
     c.code = emit_mov_rip_disp32_rax(c.code, 0)
-    c.relocs = add_data_section_reloc(c.relocs, ctx_slot_disp, c.runtime_context_slot_offset)
+    c.relocs = native_checked_add_data_section_reloc(c.relocs, ctx_slot_disp, c.runtime_context_slot_offset)
     c.code = emit_mov_reg_imm(c.code, 1, runtime_context_size())
     c.code = emit_add_reg_reg(c.code, 0, 1)
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_handle_table_base())
@@ -9448,13 +9674,13 @@ fn emit_entry_trampoline_macos_x86(nc: NativeCompiler, main_fn_index: i64) -> Na
     }
     let call_pos = c.code.len
     c.code = emit_call_rel32_placeholder(c.code)
-    c.relocs = add_call_reloc(c.relocs, call_pos + 1, main_fn_index)
+    c.relocs = native_checked_add_call_reloc(c.relocs, call_pos + 1, main_fn_index)
     c.code = emit_mov_rdi_rax(c.code)
     if c.prof_counter_count > 0 {
         c.code = emit_push_rdi(c.code)
         let dump_call_pos = c.code.len
         c.code = emit_call_rel32_placeholder(c.code)
-        c.relocs = add_call_reloc(c.relocs, dump_call_pos + 1, c.prof_dump_fn_index)
+        c.relocs = native_checked_add_call_reloc(c.relocs, dump_call_pos + 1, c.prof_dump_fn_index)
         c.code = emit_pop_rdi(c.code)
     }
     c.code = emit_mov_rax_imm(c.code, MACOS_SYS_EXIT())
@@ -9833,6 +10059,12 @@ fn a64_preview_emit_entry_trampoline_linux(c: A64PreviewCompiler, main_fn_index:
 fn compile_to_elf_v2(module: &IrModule, base_addr: i64) -> NativeCompileResult with Mut, Panic, Div, Alloc {
     var nc = compiler_new()
     let err = compile_module_v2_mut(&! nc, module)
+    if !native_relocation_tables_complete(&nc) {
+        return native_compile_result_error(ERR_BACKEND_CAPACITY_EXCEEDED(), "native_v2_relocation_capacity_exceeded")
+    }
+    if nc.code_overflow {
+        return native_compile_result_error(ERR_BACKEND_CAPACITY_EXCEEDED(), "native_v2_code_capacity_exceeded")
+    }
     if str_len(err) > 0 {
         return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "native_v2_unsupported_opcode:" + err)
     }
@@ -9883,6 +10115,8 @@ fn native_v2_file_emit_phdr(pos: i64, p_type: i64, flags: i64, offset: i64, vadd
 }
 
 fn native_v2_write_min_elf64_to_file(output_path: string, nc: &! NativeCompiler, entry_offset: i64, base_addr: i64) -> i32 with IO, Mut, Panic, Div {
+    if !native_relocation_tables_complete(nc) { return 20 }
+    if (*nc).code_overflow { return 19 }
     let text_offset: i64 = 4096
     let code_len = (*nc).code.len
     let rodata_len = if (*nc).flat_rodata_len > 0 { (*nc).flat_rodata_len } else { (*nc).rodata.len }
@@ -10155,6 +10389,7 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
     let patched_rodata_file_offset = align_page(text_file_offset + nc.code.len)
     let patched_eff_rodata_len = if nc.flat_rodata_len > 0 { nc.flat_rodata_len } else { nc.rodata.len }
     let patched_data_file_offset = align_page(patched_rodata_file_offset + patched_eff_rodata_len)
+    if !native_relocation_tables_complete(&nc) { return 20 }
     apply_relocations_into(&! nc, patched_rodata_file_offset, patched_data_file_offset)
     let entry = trampoline_offset(nc)
     nc.bss_total_size = (*module).bss_total_size
@@ -10335,6 +10570,14 @@ fn nc_elf_put_u64(val: i64) with Mut, Panic {
 // Avoids (*struct_ref).array_field[idx]=val (drops writes) and stack-allocated
 // large arrays (overflows 8MB thread stack).
 fn compile_native_finalize_and_write_ref(nc: &! NativeCompiler, base_addr: i64, output_path: string) -> i32 with IO, Mut, Panic, Div, Alloc {
+    if !native_relocation_tables_complete(nc) {
+        print("Native compilation failed: relocation_capacity_exceeded\n")
+        return 20
+    }
+    if (*nc).code_overflow {
+        print("Native compilation failed: code_capacity_exceeded\n")
+        return 19
+    }
     NATIVE_ELF_OFF = 0
 
     let code_len = (*nc).code.len
@@ -10532,6 +10775,9 @@ pub fn compile_native_x86_linux_to_file(module: &IrModule, output_path: string) 
 fn compile_to_elf(module: &IrModule, base_addr: i64) -> Elf64Binary with Mut, Panic, Div, Alloc {
     var nc = compiler_new()
     nc = compile_module(nc, module)
+    if !native_relocation_state_finalizable(&nc) {
+        return native_relocation_refusal_binary()
+    }
     let entry = trampoline_offset(nc)
     var final_data = nc.data
     let min_data_len = nc.prof_counter_data_base + (nc.prof_counter_count * 8)
@@ -10543,6 +10789,9 @@ fn compile_to_elf(module: &IrModule, base_addr: i64) -> Elf64Binary with Mut, Pa
 }
 
 pub fn finalize_compiled_elf(nc: NativeCompiler, base_addr: i64) -> Elf64Binary with Mut, Panic, Div, Alloc {
+    if !native_relocation_state_finalizable(&nc) {
+        return native_relocation_refusal_binary()
+    }
     let entry = trampoline_offset(nc)
     var final_data = nc.data
     let min_data_len = nc.prof_counter_data_base + (nc.prof_counter_count * 8)
@@ -10598,6 +10847,9 @@ fn finalize_elf64_relocatable(
     fn_offsets: [i64; 2048],
     fn_count: i64
 ) -> Elf64Binary with Mut, Panic, Div {
+    if rela.len < 0 || rela.len > 8192 || rela.len % 24 != 0 {
+        return native_relocation_refusal_binary()
+    }
     var bin = elf_binary_new()
 
     let has_rodata = rodata.len > 0
@@ -10772,6 +11024,10 @@ fn compile_to_obj(module: &IrModule) -> Elf64Binary with Mut, Panic, Div, Alloc 
     var nc = compiler_new()
     nc = compile_module_for_obj(nc, module)
 
+    if !native_relocation_state_complete_for_rela(&nc) {
+        return native_relocation_refusal_binary()
+    }
+
     let has_rodata = nc.rodata.len > 0
     let has_data = nc.data.len > 0
     let sym_first_fn = 1 + 1
@@ -10783,6 +11039,9 @@ fn compile_to_obj(module: &IrModule) -> Elf64Binary with Mut, Panic, Div, Alloc 
     } else { 0 }
 
     let rela = collect_rela_section(nc.relocs, sym_first_fn, sym_rodata, sym_data)
+    if rela.len != nc.relocs.count * 24 {
+        return native_relocation_refusal_binary()
+    }
     finalize_elf64_relocatable(nc.code, nc.rodata, nc.data, rela, nc.symbols, nc.fn_offsets, nc.fn_count)
 }
 
@@ -10919,5 +11178,8 @@ fn finalize_elf64_shared(code: CodeBuffer, symbols: SymbolData, fn_offsets: [i64
 fn compile_to_shared(module: &IrModule) -> Elf64Binary with Mut, Panic, Div, Alloc {
     var nc = compiler_new()
     nc = compile_module_for_obj(nc, module)
+    if !native_relocation_state_complete_for_shared(&nc) {
+        return native_relocation_refusal_binary()
+    }
     finalize_elf64_shared(nc.code, nc.symbols, nc.fn_offsets, module.export_names, module.export_count)
 }
