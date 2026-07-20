@@ -8,7 +8,13 @@ use parser::ast::{Name, BinaryOp, UnaryOp, empty_name}
 use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IrRegList, BSS_BASE_LINUX, IR_FLOAT_REG_MARKER_FLAG}
 
 pub let MIR_MAX_BLOCKS: i64 = 1
-pub let MIR_MAX_INSTRS: i64 = 1024
+// MIR_MAX_INSTRS history:
+//   1024 (silent drop past wall) → 4096 (2026-07-20, align with IR_MAX_INSTRS).
+// Multi-module streaming / machine_ir legalize still materialises one block of
+// MachineInstr; under 1024 the tail (incl. ret) was dropped with no diagnostic.
+// Legalize expands some IR ops 2–4×, so dense full-IR bodies may still trip the
+// wall — overflow is now fail-closed (supported=false, mir_instr_capacity).
+pub let MIR_MAX_INSTRS: i64 = 4096
 pub let MIR_MAX_CALL_ARGS: i64 = 8
 
 pub let MIR_OPERAND_NONE: i64 = 0
@@ -107,7 +113,7 @@ pub struct MachineInstr {
 }
 
 pub struct MachineBlock {
-    pub instrs: [MachineInstr; 1024],
+    pub instrs: [MachineInstr; 4096],
     pub instr_count: i64,
 }
 
@@ -241,7 +247,7 @@ pub fn machine_empty_instr() -> MachineInstr with Mut, Panic, Div {
 
 pub fn machine_block_new() -> MachineBlock with Mut, Panic, Div {
     MachineBlock {
-        instrs: [machine_empty_instr(); 1024],
+        instrs: [machine_empty_instr(); 4096],
         instr_count: 0,
     }
 }
@@ -294,6 +300,10 @@ pub fn machine_function_add_instr_mut(func: &! MachineFunction, instr: MachineIn
         block.instrs[idx as usize] = instr
         block.instr_count = idx + 1
         (*func).blocks[0] = block
+    } else {
+        // Fail closed: never silently drop ret / tail (was silent miscompile wall).
+        (*func).supported = false
+        (*func).unsupported_detail = "mir_instr_capacity"
     }
 }
 
@@ -603,6 +613,9 @@ pub fn _emit_legal_byval(func: MachineFunction, instr: MachineInstr) -> MachineF
         block.instr_count = idx + 1
         f.blocks[0] = block
         f.legal_instr_count = f.legal_instr_count + 1
+    } else {
+        f.supported = false
+        f.unsupported_detail = "mir_instr_capacity"
     }
     f
 }
@@ -615,6 +628,9 @@ pub fn _add_instr_byval(func: MachineFunction, instr: MachineInstr) -> MachineFu
         block.instrs[idx as usize] = instr
         block.instr_count = idx + 1
         f.blocks[0] = block
+    } else {
+        f.supported = false
+        f.unsupported_detail = "mir_instr_capacity"
     }
     f
 }
