@@ -3248,3 +3248,9 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 | Date | Provider | Task | Target | Outcome | Note |
 |---|---|---|---|---|---|
 | 2026-07-20 | xai/Grok 4.3; zai/GLM-5.2, deepseek, and groq attempted | external raw review | draft PR description for canonical production catalog refresh observation | PASS_SINGLE_PROVIDER_DEGRADED | xAI returned no BLOCKER, MAJOR, or MINOR finding after checking authority boundaries, point-in-time scope, byte-continuity wording, and validation consistency. Two Z.AI attempts produced empty response files and are not counted as passes. DeepSeek returned `Insufficient Balance`; Groq rejected its configured key. The description remains a draft, records an unanswered request only, and grants no authority. Raw: `/tmp/llm-offload-o57tpc/`, `/tmp/llm-offload-9pdcUd/`, `/tmp/llm-offload-kKy9gp/`, `/tmp/llm-offload-XBycIB/`. |
+
+## 2026-07-20 - canonical catalog refresh issue request review
+
+| Date | Provider | Task | Target | Outcome | Note |
+|---|---|---|---|---|---|
+| 2026-07-20 | xai/Grok 4.3; zai/GLM-5.2 | external raw review | issue #1122 catalog-refresh observation and unanswered reconfirmation request | PASS_TWO_PROVIDERS | Both reviewers found no BLOCKER, MAJOR, or MINOR issue and preserved the intended classification: point-in-time observation, no mapping response or selection, no new proposal, and no source-removal, production, repository-write, or cutover authority. The exact reviewed body was published as issue comment `5018122998` (1,744 bytes, SHA-256 `c4f69223ecbae95a0d55f698c255c0bfcfb6ac2f5992ebce07e8038a0b2a3fdb`) and verified byte-identical through the GitHub API. Raw: `/tmp/llm-offload-SXzk3v/`. |
