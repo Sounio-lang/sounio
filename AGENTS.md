@@ -126,6 +126,30 @@ Use `bash scripts/dev/sounio_semantic_status.sh` before assigning overlapping
 semantic work. Scanner output is observational; dirty worktrees are potential
 writers, not automatic ownership claims.
 
+### Live lane coordination
+
+`bin/sounio-coord` is the live, cross-worktree coordination surface. It stores
+short-lived leases outside Git, keyed by the repository's shared Git directory,
+so attached worktrees see the same active claims.
+
+Before the first write in an implementation lane:
+
+1. Run `bin/sounio-coord brief` (also shown by `./sounio-whereami --quick`).
+2. Claim the exact write set:
+   `bin/sounio-coord claim --agent <id> --lane <id> --intent "<goal>" --files <paths...>`.
+3. Keep long-running work alive with
+   `bin/sounio-coord heartbeat --agent <id> --lane <id>`.
+4. Release on completion, abort, or handoff with
+   `bin/sounio-coord release --agent <id> --lane <id> --reason "<result>"`.
+
+Put `--files` last and quote glob scopes such as
+`'self-hosted/compiler/**'`. The command refuses overlapping active claims.
+Claims expire after four hours by default; expiry makes abandoned work visible,
+but does not authorize overwriting dirty files. Git status and executable repo
+truth still outrank coordination metadata. Treat this as runtime presence, not a
+durable handoff record; blockers and consequential handoffs still belong in the
+repository contracts named below.
+
 If an agent leaves a blocker for another agent, it must use that contract's
 Blocker-ID, severity, class, evidence, owner, worktree, branch, acceptance gate,
 and next-action fields.
