@@ -1064,27 +1064,33 @@ fn ir_merge_epistemic_sections(dst: IrEpistemicSection, src: IrEpistemicSection)
 // IR module merging
 // ============================================================
 
-fn ir_merge_modules(dst: IrModule, src: IrModule) -> IrModule with Mut, Panic, Div {
-    // Merge src functions into dst, adjusting fn_ids in call instructions
-    var merged = dst
-    let fn_offset = dst.fn_count  // src function IDs shift by this amount
-    let contest_offset = dst.epistemic.contest_count
-    let robust_offset = dst.epistemic.robust_proof_count
-    let decision_offset = dst.epistemic.decision_certificate_count
-    let deferred_offset = dst.epistemic.deferred_certificate_count
-    let validated_offset = dst.epistemic.validated_manifest_count
-    let acquisition_plan_offset = dst.epistemic.acquisition_plan_count
-    let recourse_plan_offset = dst.epistemic.recourse_plan_count
-    let alternative_set_offset = dst.epistemic.alternative_set_count
-    let transition_plan_offset = dst.epistemic.transition_plan_count
-    let observed_transition_offset = dst.epistemic.observed_transition_count
-    let rollback_certificate_offset = dst.epistemic.rollback_certificate_count
+// In-place merge: append `src` into `dst` with the same fn_id / epistemic
+// offset shifts as the historical by-value `ir_merge_modules`, without the
+// two full-IrModule by-value parameter copies and the full by-value return.
+// Memory wall P1 (post-#1319 finalize-byref residual).
+//
+// Index-bind idiom: bind `dst_idx` to a local before the whole-element store —
+// inline `(*dst).functions[(*dst).fn_count] = func` miscompiles under lean_single
+// (64KB element store can overshoot onto fn_count). Same proven pattern as
+// ir_merge_append_function_into_box / find_or_add_fn_id.
+fn ir_merge_modules_into(dst: &! IrModule, src: &IrModule) with Mut, Panic, Div {
+    let fn_offset = (*dst).fn_count
+    let contest_offset = (*dst).epistemic.contest_count
+    let robust_offset = (*dst).epistemic.robust_proof_count
+    let decision_offset = (*dst).epistemic.decision_certificate_count
+    let deferred_offset = (*dst).epistemic.deferred_certificate_count
+    let validated_offset = (*dst).epistemic.validated_manifest_count
+    let acquisition_plan_offset = (*dst).epistemic.acquisition_plan_count
+    let recourse_plan_offset = (*dst).epistemic.recourse_plan_count
+    let alternative_set_offset = (*dst).epistemic.alternative_set_count
+    let transition_plan_offset = (*dst).epistemic.transition_plan_count
+    let observed_transition_offset = (*dst).epistemic.observed_transition_count
+    let rollback_certificate_offset = (*dst).epistemic.rollback_certificate_count
 
-    // Copy functions
     var fi: i64 = 0
-    while fi < src.fn_count && merged.fn_count < IR_MAX_FUNCS {
-        var func = src.functions[fi]
-        func.compile_strategy = src.functions[fi].compile_strategy
+    while fi < (*src).fn_count && (*dst).fn_count < IR_MAX_FUNCS {
+        var func = (*src).functions[fi]
+        func.compile_strategy = (*src).functions[fi].compile_strategy
         var ii: i64 = 0
         while ii < func.instr_count {
             if func.instrs[ii].op == IrOpcode::IrCall {
@@ -1108,23 +1114,32 @@ fn ir_merge_modules(dst: IrModule, src: IrModule) -> IrModule with Mut, Panic, D
             )
             ii = ii + 1
         }
-        merged.functions[merged.fn_count] = func
-        merged.fn_count = merged.fn_count + 1
+        func.compile_strategy = (*src).functions[fi].compile_strategy
+        let dst_idx = (*dst).fn_count
+        (*dst).functions[dst_idx as usize] = func
+        (*dst).fn_count = dst_idx + 1
         fi = fi + 1
     }
 
-    // Merge string tables (simple append, no dedup for now)
     var si: i64 = 0
-    while si < src.string_count && merged.string_count < IR_MAX_STRINGS {
-        merged.string_table[merged.string_count] = src.string_table[si]
-        merged.string_count = merged.string_count + 1
+    while si < (*src).string_count && (*dst).string_count < IR_MAX_STRINGS {
+        let dst_sidx = (*dst).string_count
+        (*dst).string_table[dst_sidx as usize] = (*src).string_table[si as usize]
+        (*dst).string_count = dst_sidx + 1
         si = si + 1
     }
 
-    merged.epistemic = ir_merge_epistemic_sections(merged.epistemic, src.epistemic)
-    merged.algebras = ir_merge_algebra_tables(merged.algebras, src.algebras)
-    merged.ontologies = ir_merge_ontology_parameter_links(merged.ontologies, src.ontologies)
+    (*dst).epistemic = ir_merge_epistemic_sections((*dst).epistemic, (*src).epistemic)
+    (*dst).algebras = ir_merge_algebra_tables((*dst).algebras, (*src).algebras)
+    (*dst).ontologies = ir_merge_ontology_parameter_links((*dst).ontologies, (*src).ontologies)
+}
 
+// Compatibility wrapper: only for call sites that still own both modules by
+// value. Prefer ir_merge_modules_into. This still densifies once into a local
+// then mutates in place — better than the old three-copy (dst+src params + return).
+fn ir_merge_modules(dst: IrModule, src: IrModule) -> IrModule with Mut, Panic, Div {
+    var merged = dst
+    ir_merge_modules_into(&! merged, &src)
     merged
 }
 
@@ -4007,9 +4022,11 @@ fn module_frontend_lower_imported_source_recursive(path: string, depth: i64, tra
     let imports = module_frontend_import_files_from_source(path)
     var i: i64 = 0
     while i < imports.count {
+        // Lower dep into its own local, then merge in place — no full-module
+        // by-value merge (was: merged = ir_merge_modules(merged, dep)).
         let dep = module_frontend_lower_imported_source_recursive(imports.paths[i], depth + 1, trace)
         if dep.fn_count > 0 {
-            merged = ir_merge_modules(merged, dep)
+            ir_merge_modules_into(&! merged, &dep)
         }
         i = i + 1
     }
@@ -4077,6 +4094,10 @@ fn multimodule_ir_ok(m: IrModule) -> MultiModuleIrResult {
 
 fn multimodule_ir_error(msg: string) -> MultiModuleIrResult {
     MultiModuleIrResult { ok: false, module: ir_empty_module(), error_msg: msg }
+}
+
+pub fn empty_multimodule_ir_result() -> MultiModuleIrResult {
+    multimodule_ir_error("")
 }
 
 fn multimodule_ir_counts_ok(fn_count: i64, string_count: i64, contest_count: i64) -> MultiModuleIrCountsResult {
@@ -5151,14 +5172,16 @@ fn module_frontend_specialized_typecheck(programs: &! [Program; 256], count: i64
     (true, verdict)
 }
 
-fn module_frontend_merge_imported_into(
+// Finalize merged multi-mod IR in place and return the live Box. No densify.
+// Primary Madaros compile path (module_frontend_compile_imported_to_file) already
+// stays on the box end-to-end; this helper serves load_* / merge_imported_into.
+fn module_frontend_merge_imported_box(
     programs: &! [Program; 256],
     loaded: i64,
-    trace: &! LoadMultimoduleIrTrace,
-    out_module: &! IrModule
-) -> bool with IO, Mut, Div, Panic, Alloc {
+    trace: &! LoadMultimoduleIrTrace
+) -> ModuleFrontendLowerDirectBoxResult with IO, Mut, Div, Panic, Alloc {
     if loaded <= 0 {
-        return false
+        return module_frontend_lower_direct_box_error("no_modules_loaded")
     }
 
     trace.last_stage = "typecheck"
@@ -5171,7 +5194,7 @@ fn module_frontend_merge_imported_into(
     }
     if verdict != 0 {
         print("Type check failed during imported IR merge\n")
-        return false
+        return module_frontend_lower_direct_box_error("type_check_failed")
     }
     trace.typechecked_modules = loaded
 
@@ -5182,21 +5205,52 @@ fn module_frontend_merge_imported_into(
         print("IR lowering failed during merge: ")
         print(lowered.error_msg)
         print("\n")
-        return false
+        return module_frontend_lower_direct_box_error(lowered.error_msg)
     }
     let module_box = lowered.module
     if (*module_box).fn_count <= 0 {
         print("IR lowering produced empty module\n")
-        return false
+        return module_frontend_lower_direct_box_error("ir_lowering_empty_module")
     }
     let user_main_snapshot = ir_function_deep_copy((*module_box).functions[0 as usize])
     // Memory wall P0: finalize/restore in place on the boxed module — no full
     // IrModule by-value chain (promote/compact/ensure/resolve each used to copy).
     ir_module_finalize_merged_calls(&! (*module_box))
     ir_module_restore_user_main_calls(&! (*module_box), user_main_snapshot)
-    // Residual full densify: one writeback into the caller-owned out_module.
-    // Honest residual — densify of Box→local remains; finalize path itself is byref.
-    (*out_module) = *module_box
+    module_frontend_lower_direct_box_ok(module_box, ir_empty_validated_patch_stats())
+}
+
+fn module_frontend_merge_imported_into(
+    programs: &! [Program; 256],
+    loaded: i64,
+    trace: &! LoadMultimoduleIrTrace,
+    out_module: &! IrModule
+) -> bool with IO, Mut, Div, Panic, Alloc {
+    let merged = module_frontend_merge_imported_box(programs, loaded, trace)
+    if !merged.ok {
+        return false
+    }
+    // Residual densify for callers that still own a stack IrModule (legacy
+    // MultiModuleIrResult). Prefer module_frontend_merge_imported_box / the
+    // compile-to-file path which never densifies.
+    (*out_module) = *merged.module
+    true
+}
+
+// Box-preserving write: move the finalized module into caller-owned Box without
+// densifying through a stack IrModule. Avoids the empty+densify pair that used
+// to allocate two full modules at the load_multimodule_ir boundary.
+fn module_frontend_merge_imported_into_box(
+    programs: &! [Program; 256],
+    loaded: i64,
+    trace: &! LoadMultimoduleIrTrace,
+    out_box: &! Box<IrModule>
+) -> bool with IO, Mut, Div, Panic, Alloc {
+    let merged = module_frontend_merge_imported_box(programs, loaded, trace)
+    if !merged.ok {
+        return false
+    }
+    (*out_box) = merged.module
     true
 }
 
@@ -6390,29 +6444,49 @@ pub fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIr
         return multimodule_ir_error("no_modules_loaded")
     }
 
-    var merged_module = ir_empty_module()
-    if !module_frontend_merge_imported_into(&! programs, loaded, trace, &! merged_module) {
+    // Keep the merged module in a Box through finalize. Densify only once into
+    // MultiModuleIrResult at the API boundary (legacy callers still take IrModule
+    // by value). Avoids: empty stack module + densify into it + return densify.
+    let merged = module_frontend_merge_imported_box(&! programs, loaded, trace)
+    if !merged.ok {
         return multimodule_ir_error("ir_lowering_failed")
     }
+    let module_box = merged.module
 
     trace.last_stage = "done"
     trace.last_module_index = loaded - 1
     print("Merged IR: ")
-    print_int(merged_module.fn_count)
+    print_int((*module_box).fn_count)
     print(" functions\n")
 
-    if merged_module.fn_count <= 0 {
+    if (*module_box).fn_count <= 0 {
         print("IR lowering produced empty module\n")
         return multimodule_ir_error("ir_lowering_empty_module")
     }
 
     parser_reset_last_errors()
-    multimodule_ir_ok(merged_module)
+    // Single densify: Box → MultiModuleIrResult.module (API residual).
+    multimodule_ir_ok(*module_box)
 }
 
 pub fn load_multimodule_ir(main_path: string) -> MultiModuleIrResult with IO, Mut, Div, Panic, Alloc {
     var trace = empty_load_multimodule_ir_trace()
     load_multimodule_ir_traced(main_path, &! trace)
+}
+
+// Write merged multi-mod IR into a caller-owned module. One densify from the
+// live Box into MultiModuleIrResult happens inside load_multimodule_ir_traced,
+// then this moves that module into `out`. Prefer
+// module_frontend_compile_imported_to_file / merge_imported_box for zero densify
+// (Box stays boxed end-to-end).
+pub fn load_multimodule_ir_into(main_path: string, out: &! IrModule) -> MultiModuleFrontendResult with IO, Mut, Div, Panic, Alloc {
+    var trace = empty_load_multimodule_ir_trace()
+    let result = load_multimodule_ir_traced(main_path, &! trace)
+    if !result.ok {
+        return multimodule_frontend_error(result.error_msg)
+    }
+    (*out) = result.module
+    multimodule_frontend_ok()
 }
 
 pub fn load_multimodule_ir_counts_traced(main_path: string, trace: &! LoadMultimoduleIrTrace) -> MultiModuleIrCountsResult with IO, Mut, Div, Panic, Alloc {
@@ -6825,7 +6899,8 @@ pub fn load_multimodule_ir_probe_summary_traced(main_path: string, trace: &! Loa
         }
         trace.lowered_modules = trace.lowered_modules + 1
         trace.last_stage = "merge"
-        merged_module = ir_merge_modules(merged_module, lower_result)
+        // In-place merge: keep accumulator in one slot; drop lower_result after.
+        ir_merge_modules_into(&! merged_module, &lower_result)
         trace.merged_modules = trace.merged_modules + 1
         i = i + 1
     }
