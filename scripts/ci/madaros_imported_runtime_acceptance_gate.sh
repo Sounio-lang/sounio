@@ -342,7 +342,12 @@ assert_private_rejection() {
   [[ "$(grep -Fc 'error[E175' "$log" || true)" -eq 1 ]] || fail issue_862_private_build e175_count_mismatch
   [[ "$(grep -Fc 'function is private in its defining module' "$log" || true)" -eq 1 ]] || \
     fail issue_862_private_build privacy_message_count_mismatch
-  grep -Fq 'run_check_mode: verdict=1' "$log" || fail issue_862_private_build rejection_verdict_missing
+  grep -Fq 'imported_compile: visibility_done' "$log" || \
+    fail issue_862_private_build visibility_preflight_completion_missing
+  grep -Fq 'Visibility/type preflight failed during imported compile' "$log" || \
+    fail issue_862_private_build visibility_preflight_rejection_missing
+  grep -Fq 'native_v2_compile: front-half/backend failed rc=1' "$log" || \
+    fail issue_862_private_build frontend_rejection_status_missing
   if grep -Eq 'imported_compile: lower_begin|module_frontend_full_ir: lower_node|lower_array:|canonical AST closure full IR path|Merged IR:|Compilation successful!' "$log"; then
     fail issue_862_private_build lowering_reached_after_rejection
   fi
