@@ -9,7 +9,13 @@
 # (mod/half.sio missing) → E137 / incomplete closure. Brace form
 # `use mod::{half}` already worked.
 #
-# PASS = check rc=0, compile+run rc=0, stdout contains 1.500000.
+# Also covers multi-module -O: opt_cleanup_module_inplace must not SEGV after
+# lower_done and must still print 1.500000. Root cause was by-value IrFunction
+# copies (Box/call_args, A8 family) plus miscompiled `&! functions[fi]` array-
+# element exclusive refs; cleanup mutates via module+fi field access only.
+#
+# PASS = check rc=0, default compile+run rc=0 with 1.500000, -O compile+run
+# rc=0 with 1.500000.
 # See docs/audit/MADAROS_MULTIMODULE_PRINT_IMPORT_BUGS_2026-07-13.md.
 
 set -uo pipefail
@@ -57,36 +63,50 @@ if grep -qE 'error\[E[0-9]+\]|AST closure incomplete' "$SCRATCH_DIR/check.stdout
 fi
 log "check: PASS"
 
-# Default (non -O) compile is the acceptance path. The -O cleanup lane currently
-# SIGSEGVs after lower for this multi-module shape — that is a separate optimizer
-# defect, not the named-import/E137 subject of this gate.
-echo "=== path-form named import compile + run (default native) ==="
-OUT="$SCRATCH_DIR/named_path_import.elf"
-"$RAW" "$MAIN_SRC" -o "$OUT" >"$SCRATCH_DIR/cc.stdout" 2>"$SCRATCH_DIR/cc.stderr"
-CC_RC=$?
-if [[ $CC_RC -ne 0 ]]; then
-  echo "NAMED_PATH_IMPORT_GATE_BLOCKED reason=compile_fail cc_rc=$CC_RC" >&2
-  tail -15 "$SCRATCH_DIR/cc.stderr" >&2
-  exit 1
-fi
-if [[ ! -s "$OUT" ]]; then
-  echo "NAMED_PATH_IMPORT_GATE_BLOCKED reason=no_elf_emitted" >&2
-  exit 1
-fi
+run_compile_and_execute() {
+  local label="$1"
+  shift
+  local out="$SCRATCH_DIR/${label}.elf"
+  local cc_stdout="$SCRATCH_DIR/${label}.cc.stdout"
+  local cc_stderr="$SCRATCH_DIR/${label}.cc.stderr"
+  local run_out="$SCRATCH_DIR/${label}.run.out"
 
-chmod +x "$OUT"
-"$OUT" >"$SCRATCH_DIR/run.out" 2>/dev/null
-RUN_RC=$?
-if [[ $RUN_RC -ne 0 ]]; then
-  echo "NAMED_PATH_IMPORT_GATE_BLOCKED reason=run_fail run_rc=$RUN_RC" >&2
-  exit 1
-fi
+  echo "=== path-form named import compile + run (${label}) ==="
+  "$RAW" "$@" "$MAIN_SRC" -o "$out" >"$cc_stdout" 2>"$cc_stderr"
+  local cc_rc=$?
+  if [[ $cc_rc -ne 0 ]]; then
+    echo "NAMED_PATH_IMPORT_GATE_BLOCKED reason=compile_fail label=${label} cc_rc=$cc_rc" >&2
+    tail -20 "$cc_stderr" >&2
+    exit 1
+  fi
+  if [[ ! -s "$out" ]]; then
+    echo "NAMED_PATH_IMPORT_GATE_BLOCKED reason=no_elf_emitted label=${label}" >&2
+    tail -20 "$cc_stderr" >&2
+    exit 1
+  fi
 
-if ! grep -q '1\.500000' "$SCRATCH_DIR/run.out"; then
-  echo "NAMED_PATH_IMPORT_GATE_BLOCKED reason=stdout_missing_expected_value" >&2
-  cat "$SCRATCH_DIR/run.out" >&2
-  exit 1
-fi
+  chmod +x "$out"
+  "$out" >"$run_out" 2>/dev/null
+  local run_rc=$?
+  if [[ $run_rc -ne 0 ]]; then
+    echo "NAMED_PATH_IMPORT_GATE_BLOCKED reason=run_fail label=${label} run_rc=$run_rc" >&2
+    exit 1
+  fi
 
-echo "NAMED_PATH_IMPORT_GATE_PASS raw_sha256=${RAW_SHA256:0:16} stdout=$(tr -d '\n' < "$SCRATCH_DIR/run.out")"
+  if ! grep -q '1\.500000' "$run_out"; then
+    echo "NAMED_PATH_IMPORT_GATE_BLOCKED reason=stdout_missing_expected_value label=${label}" >&2
+    cat "$run_out" >&2
+    exit 1
+  fi
+
+  log "${label}: PASS stdout=$(tr -d '\n' < "$run_out")"
+}
+
+# Default (no -O) must stay green.
+run_compile_and_execute "default"
+
+# -O multi-module opt_cleanup path: must also emit 1.500000 (no SEGV).
+run_compile_and_execute "opt" -O
+
+echo "NAMED_PATH_IMPORT_GATE_PASS raw_sha256=${RAW_SHA256:0:16} default+opt"
 exit 0
