@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SOURCE="${IRFUNCTION_INSTR_CAPACITY_SOURCE:-$ROOT/self-hosted/ir/ir.sio}"
-EXPECTED_CAPACITY=2048
+EXPECTED_CAPACITY=4096
 
 fail() {
   printf 'IRFUNCTION_INSTR_CAPACITY_FAIL reason=%s\n' "$1" >&2
@@ -103,5 +103,5 @@ fi
 
 printf '%s\n' \
   'IRFUNCTION_INSTR_CAPACITY_BOUNDARY storage_coherence=proved runtime_readback=not_claimed soir_v6=unchanged legacy=preserved'
-printf 'IRFUNCTION_INSTR_CAPACITY_PASS source=%s source_sha256=%s expected=2048 head=%s tree=%s worktree=%s\n' \
+printf 'IRFUNCTION_INSTR_CAPACITY_PASS source=%s source_sha256=%s expected=4096 head=%s tree=%s worktree=%s\n' \
   "$SOURCE" "$source_sha256" "$head_sha" "$tree_sha" "$worktree_state"
