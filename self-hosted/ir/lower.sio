@@ -14,8 +14,15 @@ pub struct LowerProgramItemsHandle {
 // Heap-pinned payload referenced by the module frontend's flat i64 sidecar.
 // Aggregate-valued BSS arrays are not stable under the bootstrap ABI.
 pub struct LowerExternBindingHandle {
-    pub name: Name,
+    // The caller is explicit even though each lowering pass currently receives
+    // a caller-local slice. Keeping all four identity components here prevents
+    // a later global-name fallback from regaining authority accidentally.
+    pub caller_module_id: i64,
+    pub local_name: Name,
     pub defining_module_id: i64,
+    pub export_name: Name,
+    pub qualifier_path: AstPath,
+    pub used_by_call: bool,
 }
 
 struct LowerLocalStack {
@@ -1069,30 +1076,33 @@ fn lowerer_preseed_external_struct_items_mut(
     }
 }
 
-fn lowerer_extern_binding_contains(
+fn lowerer_extern_binding_index(
     binding_ptrs: &![i64; 2048],
     count: i64,
+    caller_module_id: i64,
     defining_module_id: i64,
-    name: Name
-) -> bool with Mut, Panic, Div {
+    export_name: Name
+) -> i64 with Mut, Panic, Div {
     var i: i64 = 0
     while i < count {
         let binding = (*binding_ptrs)[i as usize] as *mut LowerExternBindingHandle
         if binding as i64 != 0 {
-            if (*binding).defining_module_id == defining_module_id &&
-               ir_name_eq((*binding).name, name) {
-                return true
+            if (*binding).caller_module_id == caller_module_id &&
+               (*binding).defining_module_id == defining_module_id &&
+               ir_name_eq((*binding).export_name, export_name) {
+                return i
             }
         }
         i = i + 1
     }
-    false
+    -1
 }
 
 fn lowerer_preseed_external_impl_method_items_mut(
     lo: &! Lowerer,
     type_name: Name,
     methods: &Option<Box<ItemList>>,
+    caller_module_id: i64,
     defining_module_id: i64,
     binding_ptrs: &![i64; 2048],
     binding_count: i64
@@ -1104,19 +1114,22 @@ fn lowerer_preseed_external_impl_method_items_mut(
                 let method = &(*list).head
                 if method.kind == ItemKind::ItemFn {
                     let mangled = ir_mangle_method_name(type_name, method.name)
-                    if lowerer_extern_binding_contains(
+                    let binding_index = lowerer_extern_binding_index(
                         binding_ptrs,
                         binding_count,
+                        caller_module_id,
                         defining_module_id,
                         mangled
-                    ) {
+                    )
+                    if binding_index >= 0 {
+                        let binding = (*binding_ptrs)[binding_index as usize] as *mut LowerExternBindingHandle
                         let fn_def_ref: &Option<Box<FnDef>> = &method.fn_def
                         match *fn_def_ref {
                             Some(fd) => {
                                 lowerer_preseed_external_fn_signature_mut(
                                     lo,
                                     defining_module_id,
-                                    mangled,
+                                    (*binding).local_name,
                                     &(*fd).params,
                                     &(*fd).return_type,
                                     &(*fd).effects
@@ -1136,6 +1149,7 @@ fn lowerer_preseed_external_impl_method_items_mut(
 fn lowerer_preseed_external_function_items_mut(
     lo: &! Lowerer,
     items: &Option<Box<ItemList>>,
+    caller_module_id: i64,
     defining_module_id: i64,
     binding_ptrs: &![i64; 2048],
     binding_count: i64
@@ -1145,20 +1159,26 @@ fn lowerer_preseed_external_function_items_mut(
         match *current {
             Some(list) => {
                 let head = &(*list).head
-                if head.kind == ItemKind::ItemFn &&
-                   lowerer_extern_binding_contains(
-                       binding_ptrs,
-                       binding_count,
-                       defining_module_id,
-                       head.name
-                   ) {
+                let binding_index = if head.kind == ItemKind::ItemFn {
+                    lowerer_extern_binding_index(
+                        binding_ptrs,
+                        binding_count,
+                        caller_module_id,
+                        defining_module_id,
+                        head.name
+                    )
+                } else {
+                    -1
+                }
+                if head.kind == ItemKind::ItemFn && binding_index >= 0 {
+                    let binding = (*binding_ptrs)[binding_index as usize] as *mut LowerExternBindingHandle
                     let fn_def_opt_ref: &Option<Box<FnDef>> = &head.fn_def
                     match *fn_def_opt_ref {
                         Some(fd) => {
                             lowerer_preseed_external_fn_signature_mut(
                                 lo,
                                 defining_module_id,
-                                head.name,
+                                (*binding).local_name,
                                 &(*fd).params,
                                 &(*fd).return_type,
                                 &(*fd).effects
@@ -1174,6 +1194,7 @@ fn lowerer_preseed_external_function_items_mut(
                                 lo,
                                 head.name,
                                 &(*impl_def).methods,
+                                caller_module_id,
                                 defining_module_id,
                                 binding_ptrs,
                                 binding_count
@@ -11149,6 +11170,7 @@ fn lower_program_to_ir_summary_box_with_externs_ref(
                 lowerer_preseed_external_function_items_mut(
                     &! lo,
                     &(*item_handle).items,
+                    self_index,
                     i,
                     binding_ptrs,
                     binding_count

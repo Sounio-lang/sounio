@@ -3,7 +3,7 @@
 // Multimodule frontend and IR-loading lane split from module_loader.sio.
 // Keeps frontend probes off the native/wasm/optimizer/thin-link backend surface.
 
-use parser::ast::{AstPath, empty_path, ImplDef, ImportItemList, Item, ItemKind, ItemList, Name, ParamList, Program, StringList, VariantDefList, make_name, name_eq, visibility_ref_to_bool, visibility_to_bool}
+use parser::ast::{AstPath, Block, Expr, ExprKind, ExprList, ImplDef, ImportItemList, Item, ItemKind, ItemList, MatchArm, MatchArmList, Name, ParamList, Program, Stmt, StmtList, StringList, StructFieldInit, StructFieldList, VariantDefList, empty_path, make_name, name_eq, visibility_is_pub, visibility_private, visibility_ref_to_bool, visibility_to_bool}
 use parser::mod::{count_items}
 use parser::parser::{parser_last_error_count, parser_reset_last_errors}
 use ir::ir::*
@@ -157,6 +157,29 @@ var MODULE_FRONTEND_IMPORTED_SIMPLE_FAILURE_KIND: i64 = 0
 // LowerExternBindingHandle; aggregate Name arrays in BSS are not stable.
 var MF_EXTERN_BINDING_PTRS: [i64; 2048] = [0; 2048]
 var MF_PROGRAM_ITEM_PTRS: [i64; 256] = [0; 256]
+var MF_IMPORT_AUTHORITY_STUB_COUNTS: [i64; 256] = [0; 256]
+var MF_IMPORT_AUTHORITY_ERROR_COUNT: i64 = 0
+var MF_IMPORT_AUTHORITY_BINDING_COUNT: i64 = 0
+var MF_IMPORT_AUTHORITY_USED_COUNT: i64 = 0
+var MF_IMPORT_AUTHORITY_QUALIFIED_REWRITE_COUNT: i64 = 0
+var MF_IMPORT_AUTHORITY_CHECKER_STUB_COUNT: i64 = 0
+var MF_IMPORT_AUTHORITY_NODE_COUNT: i64 = 0
+var MF_IMPORT_AUTHORITY_PREPARED_COLLECTION_ID: i64 = 0
+var MF_IMPORT_AUTHORITY_COLLECTOR_ENABLED: bool = true
+
+// The bootstrap drops direct writes to large Expr/Stmt/Item locals. Stage
+// rewritten nodes behind pointers, matching the generic-specializer spine.
+struct ModuleFrontendAuthorityExprStage {
+    e: Expr,
+}
+
+struct ModuleFrontendAuthorityStmtStage {
+    s: Stmt,
+}
+
+struct ModuleFrontendAuthorityItemStage {
+    item: Item,
+}
 
 fn module_frontend_import_is_ident_ch(c: i8) -> bool {
     (c >= 65 as i8 && c <= 90 as i8) ||
@@ -564,6 +587,65 @@ fn module_frontend_qualified_segments_ref(sl: &StringList, remaining: i64) -> st
             module_frontend_qualified_segments_ref(&(*next), remaining - 1)
         )
     }
+}
+
+fn module_frontend_string_list_prefix_equal(
+    a: &StringList,
+    b: &StringList,
+    remaining: i64,
+) -> bool with Mut, Panic, Div {
+    if remaining <= 0 || (*a).head_len != (*b).head_len {
+        return remaining == 0
+    }
+    var i: i64 = 0
+    while i < (*a).head_len {
+        if (*a).head_buf[i as usize] != (*b).head_buf[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    if remaining == 1 {
+        return true
+    }
+    match (*a).tail {
+        Some(a_tail) => {
+            match (*b).tail {
+                Some(b_tail) => module_frontend_string_list_prefix_equal(
+                    &(*a_tail),
+                    &(*b_tail),
+                    remaining - 1,
+                )
+                None => false,
+            }
+        }
+        None => false,
+    }
+}
+
+fn module_frontend_path_equal(a: &AstPath, b: &AstPath) -> bool with Mut, Panic, Div {
+    if (*a).seg_count <= 0 || (*a).seg_count != (*b).seg_count {
+        return false
+    }
+    module_frontend_string_list_prefix_equal(
+        &(*a).segments,
+        &(*b).segments,
+        (*a).seg_count,
+    )
+}
+
+fn module_frontend_call_path_has_import_prefix(
+    call_path: &AstPath,
+    import_path: &AstPath,
+) -> bool with Mut, Panic, Div {
+    if (*import_path).seg_count <= 0 ||
+       (*call_path).seg_count != (*import_path).seg_count + 1 {
+        return false
+    }
+    module_frontend_string_list_prefix_equal(
+        &(*call_path).segments,
+        &(*import_path).segments,
+        (*import_path).seg_count,
+    )
 }
 
 fn use_path_ref_to_string(path: &AstPath) -> string with Mut, Panic, Div, Alloc {
@@ -2920,6 +3002,7 @@ pub fn module_frontend_collect_ast_closure_programs_into(
     out: &!ModuleClosure,
     programs: &! [Program; 256],
 ) -> bool with IO, Mut, Panic, Div, Alloc {
+    MF_IMPORT_AUTHORITY_PREPARED_COLLECTION_ID = 0
     (*out).collection_id = module_frontend_next_closure_collection_id()
     module_frontend_trace_closure_collection(main_path, (*out).collection_id)
     (*out).node_count = 0
@@ -3052,7 +3135,24 @@ pub fn module_frontend_collect_ast_closure_programs_into(
     }
     // Closure topology and import-surface validity are independent evidence.
     // Callers must inspect surface_error_count before checking or lowering.
-    structurally_complete && !(*out).saturated && !(*out).parse_failed
+    let closure_complete = structurally_complete &&
+        !(*out).saturated &&
+        !(*out).parse_failed
+    if closure_complete &&
+       (*out).surface_error_count == 0 &&
+       (*out).node_count > 1 &&
+       MF_IMPORT_AUTHORITY_COLLECTOR_ENABLED {
+        if !module_frontend_prepare_import_authority(
+            &(*out),
+            programs,
+            &!(*out).paths,
+            (*out).node_count,
+        ) {
+            return false
+        }
+        MF_IMPORT_AUTHORITY_PREPARED_COLLECTION_ID = (*out).collection_id
+    }
+    closure_complete
 }
 
 // Validate that the collection generation, closure paths, Program logical
@@ -3209,7 +3309,12 @@ pub fn module_frontend_collect_ast_closure_into(
     out: &!ModuleClosure
 ) -> bool with IO, Mut, Panic, Div, Alloc {
     var programs: [Program; 256] = [mf_empty_program(); 256]
-    module_frontend_collect_ast_closure_programs_into(main_path, out, &!programs)
+    // Topology-only reports must not rewrite call expressions or emit call
+    // authority diagnostics. Compiler/checker callers use the Programs API.
+    MF_IMPORT_AUTHORITY_COLLECTOR_ENABLED = false
+    let result = module_frontend_collect_ast_closure_programs_into(main_path, out, &!programs)
+    MF_IMPORT_AUTHORITY_COLLECTOR_ENABLED = true
+    result
 }
 
 pub struct ImportPathList {
@@ -5907,6 +6012,7 @@ fn module_frontend_items_explicitly_import_definition(
     importing_module_id: i64,
     defining_module_id: i64,
     name: Name,
+    qualifier_path: &!AstPath,
     exhausted: &!bool,
 ) -> bool with IO, Mut, Panic, Div, Alloc {
     var current = items
@@ -5928,6 +6034,7 @@ fn module_frontend_items_explicitly_import_definition(
                             let resolved = resolve_import_file_path_result_ref(&item.use_path, cur_dir)
                             if !resolved.ambiguous && resolved.candidate_count == 1 &&
                                str_eq(resolved.path, (*file_paths)[defining_module_id as usize]) {
+                                (*qualifier_path) = item.use_path
                                 return true
                             }
                         }
@@ -5949,6 +6056,7 @@ fn module_frontend_items_explicitly_import_definition(
                                 &!visited,
                                 exhausted,
                             ) {
+                                (*qualifier_path) = item.use_path
                                 return true
                             }
                         }
@@ -5969,8 +6077,10 @@ fn module_frontend_function_defining_module(
     file_paths: &![string; 256],
     program_count: i64,
     self_index: i64,
-    name: Name
+    name: Name,
+    qualifier_path: &!AstPath,
 ) -> i64 with IO, Mut, Panic, Div, Alloc {
+    (*qualifier_path) = empty_path()
     if self_index < 0 || self_index >= program_count {
         return IR_DEFINING_MODULE_UNKNOWN
     }
@@ -5987,8 +6097,6 @@ fn module_frontend_function_defining_module(
 
     var explicit_module: i64 = IR_DEFINING_MODULE_UNKNOWN
     var explicit_count: i64 = 0
-    var found_module: i64 = IR_DEFINING_MODULE_UNKNOWN
-    var found_count: i64 = 0
     var authority_scan_exhausted = false
     var i: i64 = 0
     while i < program_count {
@@ -6000,8 +6108,7 @@ fn module_frontend_function_defining_module(
                     name
                 )
                 if import_anchor.len > 0 {
-                    found_module = i
-                    found_count = found_count + 1
+                    var candidate_qualifier = empty_path()
                     if module_frontend_items_explicitly_import_definition(
                         closure,
                         programs,
@@ -6010,10 +6117,12 @@ fn module_frontend_function_defining_module(
                         self_index,
                         i,
                         import_anchor,
+                        &!candidate_qualifier,
                         &!authority_scan_exhausted,
                     ) {
                         explicit_module = i
                         explicit_count = explicit_count + 1
+                        (*qualifier_path) = candidate_qualifier
                     }
                 }
             }
@@ -6027,29 +6136,32 @@ fn module_frontend_function_defining_module(
         return explicit_module
     }
     if explicit_count > 1 {
+        (*qualifier_path) = empty_path()
         return IR_DEFINING_MODULE_AMBIGUOUS
     }
-    if found_count == 1 {
-        return found_module
-    }
-    if found_count > 1 {
-        return IR_DEFINING_MODULE_AMBIGUOUS
-    }
+    // A globally unique definition is not an import. No explicit binding means
+    // no authority, even when only one module happens to export this name.
     IR_DEFINING_MODULE_UNKNOWN
 }
 
 fn module_frontend_binding_already_present(
     binding_ptrs: &![i64; 2048],
     count: i64,
+    caller_module_id: i64,
+    local_name: Name,
     defining_module_id: i64,
-    name: Name
+    export_name: Name,
+    qualifier_path: &AstPath,
 ) -> bool with Mut, Panic, Div {
     var i: i64 = 0
     while i < count {
         let binding = (*binding_ptrs)[i as usize] as *mut LowerExternBindingHandle
         if binding as i64 != 0 {
-            if (*binding).defining_module_id == defining_module_id &&
-               ir_name_eq((*binding).name, name) {
+            if (*binding).caller_module_id == caller_module_id &&
+               (*binding).defining_module_id == defining_module_id &&
+               ir_name_eq((*binding).local_name, local_name) &&
+               ir_name_eq((*binding).export_name, export_name) &&
+               module_frontend_path_equal(&(*binding).qualifier_path, qualifier_path) {
                 return true
             }
         }
@@ -6061,30 +6173,40 @@ fn module_frontend_binding_already_present(
 fn module_frontend_append_external_binding(
     binding_ptrs: &![i64; 2048],
     count: i64,
+    caller_module_id: i64,
+    local_name: Name,
     defining_module_id: i64,
-    name: Name
+    export_name: Name,
+    qualifier_path: &AstPath,
 ) -> i64 with Mut, Panic, Div, Alloc {
     if count < 0 || count >= 2048 {
-        return count
+        return -1
     }
     if module_frontend_binding_already_present(
         binding_ptrs,
         count,
+        caller_module_id,
+        local_name,
         defining_module_id,
-        name
+        export_name,
+        qualifier_path,
     ) {
         return count
     }
     var binding = (*binding_ptrs)[count as usize] as *mut LowerExternBindingHandle
     if binding as i64 == 0 {
-        binding = heap_alloc(256) as *mut LowerExternBindingHandle
+        binding = heap_alloc(1024) as *mut LowerExternBindingHandle
         if binding as i64 == 0 {
             return -1
         }
         (*binding_ptrs)[count as usize] = binding as i64
     }
-    (*binding).name = name
+    (*binding).caller_module_id = caller_module_id
+    (*binding).local_name = local_name
     (*binding).defining_module_id = defining_module_id
+    (*binding).export_name = export_name
+    (*binding).qualifier_path = (*qualifier_path)
+    (*binding).used_by_call = false
     count + 1
 }
 
@@ -6099,23 +6221,50 @@ fn module_frontend_collect_external_binding_name(
     name: Name,
     count: i64
 ) -> i64 with IO, Mut, Panic, Div, Alloc {
-    let owner = module_frontend_function_defining_module(
+    if self_index < 0 || self_index >= program_count ||
+       module_index < 0 || module_index >= program_count ||
+       self_index == module_index {
+        return count
+    }
+    let self_item_handle = (*program_item_ptrs)[self_index as usize] as *mut LowerProgramItemsHandle
+    let candidate_item_handle = (*program_item_ptrs)[module_index as usize] as *mut LowerProgramItemsHandle
+    if self_item_handle as i64 == 0 || candidate_item_handle as i64 == 0 {
+        return -1
+    }
+    let import_anchor = module_frontend_items_ir_function_import_anchor(
+        &(*candidate_item_handle).items,
+        name,
+    )
+    if import_anchor.len <= 0 {
+        return count
+    }
+    var qualifier_path = empty_path()
+    var exhausted = false
+    let authorized = module_frontend_items_explicitly_import_definition(
         closure,
         programs,
-        program_item_ptrs,
         file_paths,
-        program_count,
+        &(*self_item_handle).items,
         self_index,
-        name
+        module_index,
+        import_anchor,
+        &!qualifier_path,
+        &!exhausted,
     )
-    if owner != module_index {
+    if exhausted {
+        return -1
+    }
+    if !authorized {
         return count
     }
     module_frontend_append_external_binding(
         &! MF_EXTERN_BINDING_PTRS,
         count,
-        owner,
-        name
+        self_index,
+        name,
+        module_index,
+        name,
+        &qualifier_path,
     )
 }
 
@@ -6225,7 +6374,899 @@ fn module_frontend_collect_external_bindings(
         }
         module_index = module_index + 1
     }
+    if count >= 2048 {
+        return -1
+    }
     count
+}
+
+fn module_frontend_snapshot_program_item_handles(
+    programs: &! [Program; 256],
+    loaded: i64,
+) -> bool with Mut, Panic, Div, Alloc {
+    var i: i64 = 0
+    while i < loaded {
+        var item_handle = MF_PROGRAM_ITEM_PTRS[i as usize] as *mut LowerProgramItemsHandle
+        if item_handle as i64 == 0 {
+            item_handle = heap_alloc(32) as *mut LowerProgramItemsHandle
+            if item_handle as i64 == 0 {
+                return false
+            }
+            MF_PROGRAM_ITEM_PTRS[i as usize] = item_handle as i64
+        }
+        let program = (*programs)[i as usize]
+        (*item_handle).items = program.items
+        i = i + 1
+    }
+    true
+}
+
+fn module_frontend_binding_mark_used(index: i64) with Mut, Panic, Div {
+    if index < 0 || index >= 2048 {
+        return
+    }
+    let binding = MF_EXTERN_BINDING_PTRS[index as usize] as *mut LowerExternBindingHandle
+    if binding as i64 != 0 && !(*binding).used_by_call {
+        (*binding).used_by_call = true
+        MF_IMPORT_AUTHORITY_USED_COUNT = MF_IMPORT_AUTHORITY_USED_COUNT + 1
+    }
+}
+
+fn module_frontend_binding_find_bare(
+    caller_module_id: i64,
+    local_name: Name,
+    binding_count: i64,
+) -> i64 with Mut, Panic, Div {
+    var found: i64 = -1
+    var matches: i64 = 0
+    var i: i64 = 0
+    while i < binding_count {
+        let binding = MF_EXTERN_BINDING_PTRS[i as usize] as *mut LowerExternBindingHandle
+        if binding as i64 != 0 &&
+           (*binding).caller_module_id == caller_module_id &&
+           ir_name_eq((*binding).local_name, local_name) {
+            found = i
+            matches = matches + 1
+        }
+        i = i + 1
+    }
+    if matches == 1 { found } else if matches > 1 { -2 } else { -1 }
+}
+
+fn module_frontend_binding_find_qualified(
+    caller_module_id: i64,
+    call_path: &AstPath,
+    export_name: Name,
+    binding_count: i64,
+) -> i64 with Mut, Panic, Div {
+    var found: i64 = -1
+    var matches: i64 = 0
+    var i: i64 = 0
+    while i < binding_count {
+        let binding = MF_EXTERN_BINDING_PTRS[i as usize] as *mut LowerExternBindingHandle
+        if binding as i64 != 0 &&
+           (*binding).caller_module_id == caller_module_id &&
+           ir_name_eq((*binding).export_name, export_name) &&
+           module_frontend_call_path_has_import_prefix(
+               call_path,
+               &(*binding).qualifier_path,
+           ) {
+            found = i
+            matches = matches + 1
+        }
+        i = i + 1
+    }
+    if matches == 1 { found } else if matches > 1 { -2 } else { -1 }
+}
+
+fn module_frontend_items_directly_export_function(
+    items: &Option<Box<ItemList>>,
+    name: Name,
+    remaining: i64,
+) -> bool with Mut, Panic, Div {
+    match *items {
+        None => false
+        Some(list) => {
+            if remaining <= 0 {
+                return false
+            }
+            let item = &(*list).head
+            if (*item).kind == ItemKind::ItemFn &&
+               visibility_ref_to_bool(&(*item).visibility) &&
+               ir_name_eq((*item).name, name) {
+                return true
+            }
+            module_frontend_items_directly_export_function(
+                &(*list).tail,
+                name,
+                remaining - 1,
+            )
+        }
+    }
+}
+
+fn module_frontend_items_directly_export_public_function(
+    items: &Option<Box<ItemList>>,
+    name: Name,
+    remaining: i64,
+) -> bool with Mut, Panic, Div {
+    match *items {
+        None => false
+        Some(list) => {
+            if remaining <= 0 {
+                return false
+            }
+            let item = &(*list).head
+            if (*item).kind == ItemKind::ItemFn &&
+               visibility_is_pub((*item).visibility) &&
+               ir_name_eq((*item).name, name) {
+                return true
+            }
+            module_frontend_items_directly_export_public_function(
+                &(*list).tail,
+                name,
+                remaining - 1,
+            )
+        }
+    }
+}
+
+fn module_frontend_external_public_function_count(
+    program_item_ptrs: &![i64; 256],
+    program_count: i64,
+    caller_module_id: i64,
+    name: Name,
+) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < program_count {
+        if i != caller_module_id {
+            let item_handle = (*program_item_ptrs)[i as usize] as *mut LowerProgramItemsHandle
+            if item_handle as i64 != 0 && module_frontend_items_directly_export_function(
+                &(*item_handle).items,
+                name,
+                4096,
+            ) {
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    count
+}
+
+fn module_frontend_call_path_is_authored_import(
+    items: &Option<Box<ItemList>>,
+    call_path: &AstPath,
+    remaining: i64,
+) -> bool with Mut, Panic, Div {
+    match *items {
+        None => false
+        Some(list) => {
+            if remaining <= 0 {
+                return false
+            }
+            let item = &(*list).head
+            if (*item).kind == ItemKind::ItemUse &&
+               module_frontend_call_path_has_import_prefix(call_path, &(*item).use_path) {
+                return true
+            }
+            module_frontend_call_path_is_authored_import(
+                &(*list).tail,
+                call_path,
+                remaining - 1,
+            )
+        }
+    }
+}
+
+fn module_frontend_report_import_authority_error(
+    caller_path: string,
+    display_name: string,
+    reason: string,
+) with IO, Mut, Panic, Div {
+    print("error[E137]: call `")
+    print(display_name)
+    print("` has no unique authorized import binding for caller ")
+    print(caller_path)
+    print(" reason=")
+    print(reason)
+    print("\n")
+    MF_IMPORT_AUTHORITY_ERROR_COUNT = MF_IMPORT_AUTHORITY_ERROR_COUNT + 1
+}
+
+fn module_frontend_authority_rewrite_expr_opt(
+    opt: Option<Box<Expr>>,
+    caller_module_id: i64,
+    caller_path: string,
+    caller_items: &Option<Box<ItemList>>,
+    program_item_ptrs: &![i64; 256],
+    program_count: i64,
+    binding_count: i64,
+) -> Option<Box<Expr>> with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        None => None
+        Some(expr) => {
+            let stage = heap_alloc(32768) as *mut ModuleFrontendAuthorityExprStage
+            if stage as i64 == 0 {
+                module_frontend_report_import_authority_error(caller_path, "<allocation>", "rewrite_allocation_failed")
+                return Some(expr)
+            }
+            (*stage).e = *expr
+            module_frontend_authority_rewrite_expr_mut(
+                stage,
+                caller_module_id,
+                caller_path,
+                caller_items,
+                program_item_ptrs,
+                program_count,
+                binding_count,
+            )
+            Some(Box::new((*stage).e))
+        }
+    }
+}
+
+fn module_frontend_authority_rewrite_expr_list_opt(
+    opt: Option<Box<ExprList>>,
+    caller_module_id: i64,
+    caller_path: string,
+    caller_items: &Option<Box<ItemList>>,
+    program_item_ptrs: &![i64; 256],
+    program_count: i64,
+    binding_count: i64,
+) -> Option<Box<ExprList>> with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        None => None
+        Some(list) => {
+            let rewritten = module_frontend_authority_rewrite_expr_opt(
+                Some(Box::new((*list).head)),
+                caller_module_id,
+                caller_path,
+                caller_items,
+                program_item_ptrs,
+                program_count,
+                binding_count,
+            )
+            let head = match rewritten {
+                Some(expr) => *expr
+                None => (*list).head,
+            }
+            Some(Box::new(ExprList {
+                label: (*list).label,
+                head: head,
+                tail: module_frontend_authority_rewrite_expr_list_opt(
+                    (*list).tail,
+                    caller_module_id,
+                    caller_path,
+                    caller_items,
+                    program_item_ptrs,
+                    program_count,
+                    binding_count,
+                ),
+            }))
+        }
+    }
+}
+
+fn module_frontend_authority_rewrite_stmt_list_opt(
+    opt: Option<Box<StmtList>>,
+    caller_module_id: i64,
+    caller_path: string,
+    caller_items: &Option<Box<ItemList>>,
+    program_item_ptrs: &![i64; 256],
+    program_count: i64,
+    binding_count: i64,
+) -> Option<Box<StmtList>> with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        None => None
+        Some(list) => {
+            let stage = heap_alloc(16384) as *mut ModuleFrontendAuthorityStmtStage
+            if stage as i64 == 0 {
+                module_frontend_report_import_authority_error(caller_path, "<allocation>", "stmt_rewrite_allocation_failed")
+                return Some(list)
+            }
+            (*stage).s = (*list).head
+            (*stage).s.expr = module_frontend_authority_rewrite_expr_opt(
+                (*stage).s.expr,
+                caller_module_id,
+                caller_path,
+                caller_items,
+                program_item_ptrs,
+                program_count,
+                binding_count,
+            )
+            (*stage).s.target = module_frontend_authority_rewrite_expr_opt(
+                (*stage).s.target,
+                caller_module_id,
+                caller_path,
+                caller_items,
+                program_item_ptrs,
+                program_count,
+                binding_count,
+            )
+            Some(Box::new(StmtList {
+                head: (*stage).s,
+                tail: module_frontend_authority_rewrite_stmt_list_opt(
+                    (*list).tail,
+                    caller_module_id,
+                    caller_path,
+                    caller_items,
+                    program_item_ptrs,
+                    program_count,
+                    binding_count,
+                ),
+            }))
+        }
+    }
+}
+
+fn module_frontend_authority_rewrite_block(
+    block: Block,
+    caller_module_id: i64,
+    caller_path: string,
+    caller_items: &Option<Box<ItemList>>,
+    program_item_ptrs: &![i64; 256],
+    program_count: i64,
+    binding_count: i64,
+) -> Block with IO, Mut, Panic, Div, Alloc {
+    Block {
+        stmts: module_frontend_authority_rewrite_stmt_list_opt(
+            block.stmts,
+            caller_module_id,
+            caller_path,
+            caller_items,
+            program_item_ptrs,
+            program_count,
+            binding_count,
+        ),
+        span: block.span,
+    }
+}
+
+fn module_frontend_authority_rewrite_block_opt(
+    opt: Option<Box<Block>>,
+    caller_module_id: i64,
+    caller_path: string,
+    caller_items: &Option<Box<ItemList>>,
+    program_item_ptrs: &![i64; 256],
+    program_count: i64,
+    binding_count: i64,
+) -> Option<Box<Block>> with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        None => None
+        Some(block) => Some(Box::new(module_frontend_authority_rewrite_block(
+            *block,
+            caller_module_id,
+            caller_path,
+            caller_items,
+            program_item_ptrs,
+            program_count,
+            binding_count,
+        )))
+    }
+}
+
+fn module_frontend_authority_rewrite_match_arms_opt(
+    opt: Option<Box<MatchArmList>>,
+    caller_module_id: i64,
+    caller_path: string,
+    caller_items: &Option<Box<ItemList>>,
+    program_item_ptrs: &![i64; 256],
+    program_count: i64,
+    binding_count: i64,
+) -> Option<Box<MatchArmList>> with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        None => None
+        Some(list) => {
+            let body_opt = module_frontend_authority_rewrite_expr_opt(
+                Some(Box::new((*list).head.body)),
+                caller_module_id,
+                caller_path,
+                caller_items,
+                program_item_ptrs,
+                program_count,
+                binding_count,
+            )
+            let body = match body_opt {
+                Some(expr) => *expr
+                None => (*list).head.body,
+            }
+            let arm = MatchArm {
+                pattern: (*list).head.pattern,
+                guard: module_frontend_authority_rewrite_expr_opt(
+                    (*list).head.guard,
+                    caller_module_id,
+                    caller_path,
+                    caller_items,
+                    program_item_ptrs,
+                    program_count,
+                    binding_count,
+                ),
+                body: body,
+                span: (*list).head.span,
+            }
+            Some(Box::new(MatchArmList {
+                head: arm,
+                tail: module_frontend_authority_rewrite_match_arms_opt(
+                    (*list).tail,
+                    caller_module_id,
+                    caller_path,
+                    caller_items,
+                    program_item_ptrs,
+                    program_count,
+                    binding_count,
+                ),
+            }))
+        }
+    }
+}
+
+fn module_frontend_authority_rewrite_struct_fields_opt(
+    opt: Option<Box<StructFieldList>>,
+    caller_module_id: i64,
+    caller_path: string,
+    caller_items: &Option<Box<ItemList>>,
+    program_item_ptrs: &![i64; 256],
+    program_count: i64,
+    binding_count: i64,
+) -> Option<Box<StructFieldList>> with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        None => None
+        Some(list) => {
+            let value_opt = module_frontend_authority_rewrite_expr_opt(
+                Some(Box::new((*list).head.value)),
+                caller_module_id,
+                caller_path,
+                caller_items,
+                program_item_ptrs,
+                program_count,
+                binding_count,
+            )
+            let value = match value_opt {
+                Some(expr) => *expr
+                None => (*list).head.value,
+            }
+            Some(Box::new(StructFieldList {
+                head: StructFieldInit { name: (*list).head.name, value: value },
+                tail: module_frontend_authority_rewrite_struct_fields_opt(
+                    (*list).tail,
+                    caller_module_id,
+                    caller_path,
+                    caller_items,
+                    program_item_ptrs,
+                    program_count,
+                    binding_count,
+                ),
+            }))
+        }
+    }
+}
+
+fn module_frontend_authority_rewrite_expr_mut(
+    stage: *mut ModuleFrontendAuthorityExprStage,
+    caller_module_id: i64,
+    caller_path: string,
+    caller_items: &Option<Box<ItemList>>,
+    program_item_ptrs: &![i64; 256],
+    program_count: i64,
+    binding_count: i64,
+) with IO, Mut, Panic, Div, Alloc {
+    MF_IMPORT_AUTHORITY_NODE_COUNT = MF_IMPORT_AUTHORITY_NODE_COUNT + 1
+    if MF_IMPORT_AUTHORITY_NODE_COUNT > 65536 {
+        if MF_IMPORT_AUTHORITY_ERROR_COUNT == 0 {
+            module_frontend_report_import_authority_error(caller_path, "<capacity>", "expression_scan_saturated")
+        }
+        return
+    }
+
+    (*stage).e.left = module_frontend_authority_rewrite_expr_opt(
+        (*stage).e.left, caller_module_id, caller_path, caller_items,
+        program_item_ptrs, program_count, binding_count,
+    )
+    (*stage).e.right = module_frontend_authority_rewrite_expr_opt(
+        (*stage).e.right, caller_module_id, caller_path, caller_items,
+        program_item_ptrs, program_count, binding_count,
+    )
+    (*stage).e.block = module_frontend_authority_rewrite_block_opt(
+        (*stage).e.block, caller_module_id, caller_path, caller_items,
+        program_item_ptrs, program_count, binding_count,
+    )
+    (*stage).e.else_expr = module_frontend_authority_rewrite_expr_opt(
+        (*stage).e.else_expr, caller_module_id, caller_path, caller_items,
+        program_item_ptrs, program_count, binding_count,
+    )
+    (*stage).e.args = module_frontend_authority_rewrite_expr_list_opt(
+        (*stage).e.args, caller_module_id, caller_path, caller_items,
+        program_item_ptrs, program_count, binding_count,
+    )
+    (*stage).e.arms = module_frontend_authority_rewrite_match_arms_opt(
+        (*stage).e.arms, caller_module_id, caller_path, caller_items,
+        program_item_ptrs, program_count, binding_count,
+    )
+    (*stage).e.fields = module_frontend_authority_rewrite_struct_fields_opt(
+        (*stage).e.fields, caller_module_id, caller_path, caller_items,
+        program_item_ptrs, program_count, binding_count,
+    )
+    (*stage).e.handler_block = module_frontend_authority_rewrite_block_opt(
+        (*stage).e.handler_block, caller_module_id, caller_path, caller_items,
+        program_item_ptrs, program_count, binding_count,
+    )
+    (*stage).e.closure_body = module_frontend_authority_rewrite_expr_opt(
+        (*stage).e.closure_body, caller_module_id, caller_path, caller_items,
+        program_item_ptrs, program_count, binding_count,
+    )
+
+    if (*stage).e.kind != ExprKind::ExprCall {
+        return
+    }
+    match (*stage).e.left {
+        Some(callee) => {
+            if (*callee).kind == ExprKind::ExprIdent {
+                let call_name = (*callee).name
+                if module_frontend_items_define_ir_function(caller_items, call_name) ||
+                   native_v2_builtin_id_for_name(call_name) != 0 {
+                    return
+                }
+                let binding_index = module_frontend_binding_find_bare(
+                    caller_module_id,
+                    call_name,
+                    binding_count,
+                )
+                if binding_index >= 0 {
+                    module_frontend_binding_mark_used(binding_index)
+                    return
+                }
+                let external_count = module_frontend_external_public_function_count(
+                    program_item_ptrs,
+                    program_count,
+                    caller_module_id,
+                    call_name,
+                )
+                if binding_index == -2 {
+                    module_frontend_report_import_authority_error(
+                        caller_path,
+                        str_from_bytes(call_name.buf, call_name.len),
+                        "ambiguous_bare_binding",
+                    )
+                } else if external_count > 0 {
+                    module_frontend_report_import_authority_error(
+                        caller_path,
+                        str_from_bytes(call_name.buf, call_name.len),
+                        "not_selected",
+                    )
+                }
+                return
+            }
+            if (*callee).kind == ExprKind::ExprPath && (*callee).path.seg_count >= 2 {
+                if !module_frontend_call_path_is_authored_import(
+                    caller_items,
+                    &(*callee).path,
+                    4096,
+                ) {
+                    // Preserve enum constructors and Type::method calls. Only an
+                    // authored module-import prefix enters this authority lane.
+                    return
+                }
+                let export_name = ir_path_last_name((*callee).path)
+                let binding_index = module_frontend_binding_find_qualified(
+                    caller_module_id,
+                    &(*callee).path,
+                    export_name,
+                    binding_count,
+                )
+                if binding_index < 0 {
+                    module_frontend_report_import_authority_error(
+                        caller_path,
+                        use_path_ref_to_string(&(*callee).path),
+                        if binding_index == -2 { "ambiguous_qualified_binding" } else { "qualified_name_not_selected" },
+                    )
+                    return
+                }
+                let binding = MF_EXTERN_BINDING_PTRS[binding_index as usize] as *mut LowerExternBindingHandle
+                module_frontend_binding_mark_used(binding_index)
+                let rewritten = Box::new(*callee)
+                (*rewritten).kind = ExprKind::ExprIdent
+                (*rewritten).name = (*binding).local_name
+                (*rewritten).path = empty_path()
+                (*stage).e.left = Some(rewritten)
+                MF_IMPORT_AUTHORITY_QUALIFIED_REWRITE_COUNT = MF_IMPORT_AUTHORITY_QUALIFIED_REWRITE_COUNT + 1
+            }
+        }
+        None => {}
+    }
+}
+
+fn module_frontend_authority_rewrite_item_list_opt(
+    opt: Option<Box<ItemList>>,
+    caller_module_id: i64,
+    caller_path: string,
+    caller_items: &Option<Box<ItemList>>,
+    program_item_ptrs: &![i64; 256],
+    program_count: i64,
+    binding_count: i64,
+) -> Option<Box<ItemList>> with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        None => None
+        Some(list) => {
+            let stage = heap_alloc(65536) as *mut ModuleFrontendAuthorityItemStage
+            if stage as i64 == 0 {
+                module_frontend_report_import_authority_error(caller_path, "<allocation>", "item_rewrite_allocation_failed")
+                return Some(list)
+            }
+            (*stage).item = (*list).head
+            if (*stage).item.kind == ItemKind::ItemFn {
+                match (*stage).item.fn_def {
+                    Some(fd) => {
+                        let rewritten_fd = Box::new(*fd)
+                        (*rewritten_fd).body = module_frontend_authority_rewrite_block(
+                            (*fd).body,
+                            caller_module_id,
+                            caller_path,
+                            caller_items,
+                            program_item_ptrs,
+                            program_count,
+                            binding_count,
+                        )
+                        (*stage).item.fn_def = Some(rewritten_fd)
+                    }
+                    None => {}
+                }
+            } else if (*stage).item.kind == ItemKind::ItemImpl {
+                match (*stage).item.impl_def {
+                    Some(impl_def) => {
+                        let rewritten_impl = Box::new(*impl_def)
+                        (*rewritten_impl).methods = module_frontend_authority_rewrite_item_list_opt(
+                            (*impl_def).methods,
+                            caller_module_id,
+                            caller_path,
+                            caller_items,
+                            program_item_ptrs,
+                            program_count,
+                            binding_count,
+                        )
+                        (*stage).item.impl_def = Some(rewritten_impl)
+                    }
+                    None => {}
+                }
+            }
+            Some(Box::new(ItemList {
+                head: (*stage).item,
+                tail: module_frontend_authority_rewrite_item_list_opt(
+                    (*list).tail,
+                    caller_module_id,
+                    caller_path,
+                    caller_items,
+                    program_item_ptrs,
+                    program_count,
+                    binding_count,
+                ),
+            }))
+        }
+    }
+}
+
+fn module_frontend_checker_stub_item(
+    items: &Option<Box<ItemList>>,
+    local_name: Name,
+    export_name: Name,
+    remaining: i64,
+) -> Option<Box<Item>> with Mut, Panic, Div, Alloc {
+    match *items {
+        None => None
+        Some(list) => {
+            if remaining <= 0 {
+                return None
+            }
+            let target = &(*list).head
+            if (*target).kind == ItemKind::ItemFn &&
+               visibility_is_pub((*target).visibility) &&
+               ir_name_eq((*target).name, export_name) {
+                match (*target).fn_def {
+                    Some(fd) => {
+                        let stage = heap_alloc(65536) as *mut ModuleFrontendAuthorityItemStage
+                        if stage as i64 == 0 {
+                            return None
+                        }
+                        (*stage).item = (*target)
+                        (*stage).item.name = local_name
+                        (*stage).item.visibility = visibility_private()
+                        let stub_fd = Box::new(*fd)
+                        (*stub_fd).name = local_name
+                        (*stub_fd).body = Block {
+                            stmts: None,
+                            span: (*stub_fd).body.span,
+                        }
+                        (*stage).item.fn_def = Some(stub_fd)
+                        return Some(Box::new((*stage).item))
+                    }
+                    None => return None,
+                }
+            }
+            module_frontend_checker_stub_item(
+                &(*list).tail,
+                local_name,
+                export_name,
+                remaining - 1,
+            )
+        }
+    }
+}
+
+fn module_frontend_prepend_used_checker_stubs(
+    programs: &! [Program; 256],
+    caller_module_id: i64,
+    binding_count: i64,
+) -> i64 with Mut, Panic, Div, Alloc {
+    var added: i64 = 0
+    var i: i64 = 0
+    while i < binding_count {
+        let binding = MF_EXTERN_BINDING_PTRS[i as usize] as *mut LowerExternBindingHandle
+        if binding as i64 != 0 &&
+           (*binding).caller_module_id == caller_module_id &&
+           (*binding).used_by_call &&
+           (*binding).defining_module_id >= 0 &&
+           (*binding).defining_module_id < 256 {
+            let target_handle = MF_PROGRAM_ITEM_PTRS[(*binding).defining_module_id as usize] as *mut LowerProgramItemsHandle
+            if target_handle as i64 == 0 {
+                return -1
+            }
+            // Restricted visibility remains owned by the existing contextual
+            // checker. A local checker stub is only sound for an unconditional
+            // public export; otherwise it could mask E175.
+            if module_frontend_items_directly_export_public_function(
+                &(*target_handle).items,
+                (*binding).export_name,
+                4096,
+            ) {
+                let stub = module_frontend_checker_stub_item(
+                    &(*target_handle).items,
+                    (*binding).local_name,
+                    (*binding).export_name,
+                    4096,
+                )
+                match stub {
+                    Some(item) => {
+                        var caller = (*programs)[caller_module_id as usize]
+                        caller.items = Some(Box::new(ItemList {
+                            head: *item,
+                            tail: caller.items,
+                        }))
+                        (*programs)[caller_module_id as usize] = caller
+                        added = added + 1
+                    }
+                    None => return -1,
+                }
+            }
+        }
+        i = i + 1
+    }
+    added
+}
+
+fn module_frontend_drop_item_prefix(
+    items: Option<Box<ItemList>>,
+    count: i64,
+) -> Option<Box<ItemList>> with Mut, Panic, Div, Alloc {
+    if count <= 0 {
+        return items
+    }
+    match items {
+        Some(list) => module_frontend_drop_item_prefix((*list).tail, count - 1)
+        None => None,
+    }
+}
+
+fn module_frontend_strip_import_authority_stubs(
+    programs: &! [Program; 256],
+    loaded: i64,
+) with Mut, Panic, Div, Alloc {
+    var i: i64 = 0
+    while i < loaded {
+        let count = MF_IMPORT_AUTHORITY_STUB_COUNTS[i as usize]
+        if count > 0 {
+            var program = (*programs)[i as usize]
+            program.items = module_frontend_drop_item_prefix(program.items, count)
+            (*programs)[i as usize] = program
+            MF_IMPORT_AUTHORITY_STUB_COUNTS[i as usize] = 0
+        }
+        i = i + 1
+    }
+    MF_IMPORT_AUTHORITY_PREPARED_COLLECTION_ID = 0
+}
+
+fn module_frontend_prepare_import_authority(
+    closure: &ModuleClosure,
+    programs: &! [Program; 256],
+    file_paths: &![string; 256],
+    loaded: i64,
+) -> bool with IO, Mut, Panic, Div, Alloc {
+    MF_IMPORT_AUTHORITY_ERROR_COUNT = 0
+    MF_IMPORT_AUTHORITY_BINDING_COUNT = 0
+    MF_IMPORT_AUTHORITY_USED_COUNT = 0
+    MF_IMPORT_AUTHORITY_QUALIFIED_REWRITE_COUNT = 0
+    MF_IMPORT_AUTHORITY_CHECKER_STUB_COUNT = 0
+    MF_IMPORT_AUTHORITY_NODE_COUNT = 0
+    var reset_i: i64 = 0
+    while reset_i < loaded {
+        MF_IMPORT_AUTHORITY_STUB_COUNTS[reset_i as usize] = 0
+        reset_i = reset_i + 1
+    }
+
+    if !module_frontend_snapshot_program_item_handles(programs, loaded) {
+        module_frontend_report_import_authority_error((*file_paths)[0], "<snapshot>", "program_items_handle_alloc_failed")
+        return false
+    }
+
+    var caller_module_id: i64 = 0
+    while caller_module_id < loaded && MF_IMPORT_AUTHORITY_ERROR_COUNT == 0 {
+        let caller_handle = MF_PROGRAM_ITEM_PTRS[caller_module_id as usize] as *mut LowerProgramItemsHandle
+        if caller_handle as i64 == 0 {
+            module_frontend_report_import_authority_error((*file_paths)[caller_module_id as usize], "<snapshot>", "missing_program_items_handle")
+            caller_module_id = loaded
+        } else {
+            let binding_count = module_frontend_collect_external_bindings(
+                closure,
+                programs,
+                &! MF_PROGRAM_ITEM_PTRS,
+                file_paths,
+                loaded,
+                caller_module_id,
+            )
+            if binding_count < 0 {
+                module_frontend_report_import_authority_error((*file_paths)[caller_module_id as usize], "<capacity>", "binding_collection_incomplete")
+                caller_module_id = loaded
+            } else {
+                MF_IMPORT_AUTHORITY_BINDING_COUNT = MF_IMPORT_AUTHORITY_BINDING_COUNT + binding_count
+                let rewritten_items = module_frontend_authority_rewrite_item_list_opt(
+                    (*caller_handle).items,
+                    caller_module_id,
+                    (*file_paths)[caller_module_id as usize],
+                    &(*caller_handle).items,
+                    &! MF_PROGRAM_ITEM_PTRS,
+                    loaded,
+                    binding_count,
+                )
+                var program = (*programs)[caller_module_id as usize]
+                program.items = rewritten_items
+                (*programs)[caller_module_id as usize] = program
+                if MF_IMPORT_AUTHORITY_ERROR_COUNT == 0 {
+                    let stub_count = module_frontend_prepend_used_checker_stubs(
+                        programs,
+                        caller_module_id,
+                        binding_count,
+                    )
+                    if stub_count < 0 {
+                        module_frontend_report_import_authority_error((*file_paths)[caller_module_id as usize], "<signature>", "authorized_signature_stub_missing")
+                    } else {
+                        MF_IMPORT_AUTHORITY_STUB_COUNTS[caller_module_id as usize] = stub_count
+                        MF_IMPORT_AUTHORITY_CHECKER_STUB_COUNT = MF_IMPORT_AUTHORITY_CHECKER_STUB_COUNT + stub_count
+                    }
+                }
+                caller_module_id = caller_module_id + 1
+            }
+        }
+    }
+
+    if MF_IMPORT_AUTHORITY_ERROR_COUNT > 0 {
+        module_frontend_strip_import_authority_stubs(programs, loaded)
+        print("MADAROS_IMPORT_AUTHORITY_REFUSAL schema=1 global_unique_fallback=0 errors=")
+        print_int(MF_IMPORT_AUTHORITY_ERROR_COUNT)
+        print("\n")
+        return false
+    }
+    print("MADAROS_IMPORT_AUTHORITY_RECEIPT schema=1 modules=")
+    print_int(loaded)
+    print(" bindings=")
+    print_int(MF_IMPORT_AUTHORITY_BINDING_COUNT)
+    print(" used=")
+    print_int(MF_IMPORT_AUTHORITY_USED_COUNT)
+    print(" qualified_rewrites=")
+    print_int(MF_IMPORT_AUTHORITY_QUALIFIED_REWRITE_COUNT)
+    print(" checker_stubs=")
+    print_int(MF_IMPORT_AUTHORITY_CHECKER_STUB_COUNT)
+    print(" global_unique_fallback=0\n")
+    true
 }
 
 fn module_frontend_assign_function_provenance(
@@ -6243,6 +7284,7 @@ fn module_frontend_assign_function_provenance(
         var defining_module_id = func.defining_module_id
         if defining_module_id == IR_DEFINING_MODULE_UNKNOWN ||
            defining_module_id == IR_DEFINING_MODULE_AMBIGUOUS {
+            var qualifier_path = empty_path()
             defining_module_id = module_frontend_function_defining_module(
                 closure,
                 programs,
@@ -6250,7 +7292,8 @@ fn module_frontend_assign_function_provenance(
                 file_paths,
                 program_count,
                 self_index,
-                func.name
+                func.name,
+                &!qualifier_path,
             )
             if defining_module_id == IR_DEFINING_MODULE_UNKNOWN && func.instr_count > 0 {
                 defining_module_id = self_index
@@ -6399,20 +7442,8 @@ fn module_frontend_lower_programs_array_direct_box(
     // ModuleGraph remains the owner of Program topology. Lowering snapshots
     // only stable ItemList handles because repeated external projections from
     // the large Program array are not reliable under the bootstrap ABI.
-    var snapshot_i: i64 = 0
-    while snapshot_i < loaded {
-        var item_handle = MF_PROGRAM_ITEM_PTRS[snapshot_i as usize] as *mut LowerProgramItemsHandle
-        if item_handle as i64 == 0 {
-            item_handle = heap_alloc(32) as *mut LowerProgramItemsHandle
-            if item_handle as i64 == 0 {
-                return module_frontend_lower_direct_box_error("program_items_handle_alloc_failed")
-            }
-            MF_PROGRAM_ITEM_PTRS[snapshot_i as usize] = item_handle as i64
-        }
-        let snapshot_program = (*programs)[snapshot_i as usize]
-        let snapshot_items = snapshot_program.items
-        (*item_handle).items = snapshot_items
-        snapshot_i = snapshot_i + 1
+    if !module_frontend_snapshot_program_item_handles(programs, loaded) {
+        return module_frontend_lower_direct_box_error("program_items_handle_alloc_failed")
     }
 
     trace.last_stage = "lower_summary"
@@ -6970,6 +8001,25 @@ pub fn module_frontend_compile_collected_to_file(
     print_int(loaded)
     print(" modules\n")
 
+    var import_authority_prepared = loaded > 1 &&
+        MF_IMPORT_AUTHORITY_PREPARED_COLLECTION_ID == (*closure).collection_id
+    if loaded > 1 {
+        if !import_authority_prepared {
+            trace.last_stage = "import_authority"
+            if !module_frontend_prepare_import_authority(
+                &(*closure),
+                programs,
+                &!(*closure).paths,
+                loaded,
+            ) {
+                print("Imported-call authority preflight failed before lowering\n")
+                return 1
+            }
+            MF_IMPORT_AUTHORITY_PREPARED_COLLECTION_ID = (*closure).collection_id
+            import_authority_prepared = true
+        }
+    }
+
     trace.last_stage = "visibility"
     print("imported_compile: visibility_begin\n")
     var visibility_verdict: i64 = 0
@@ -6990,6 +8040,9 @@ pub fn module_frontend_compile_collected_to_file(
     }
     print("imported_compile: visibility_done\n")
     if visibility_verdict != 0 {
+        if import_authority_prepared {
+            module_frontend_strip_import_authority_stubs(programs, loaded)
+        }
         print("Visibility/type preflight failed during imported compile\n")
         return 1
     }
@@ -7009,8 +8062,17 @@ pub fn module_frontend_compile_collected_to_file(
     }
     print("imported_compile: typecheck_done\n")
     if verdict != 0 {
+        if import_authority_prepared {
+            module_frontend_strip_import_authority_stubs(programs, loaded)
+        }
         print("Type check failed during imported IR merge\n")
         return 1
+    }
+    if import_authority_prepared {
+        // Checker-only signature stubs never become IR definitions. Qualified
+        // call rewrites remain in the exact caller-owned Programs, and lowering
+        // independently preseeds only the same explicit binding sidecar.
+        module_frontend_strip_import_authority_stubs(programs, loaded)
     }
     trace.typechecked_modules = loaded
     print("imported_compile: typecheck ok\n")
