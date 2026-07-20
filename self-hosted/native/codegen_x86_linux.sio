@@ -2070,6 +2070,16 @@ fn nc_emit_movzx_rax_byte_rdx_rbx(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x1a)
 }
 
+// MOVSX RAX, BYTE [RDX + RBX] — signed packed i8 BSS / raw-byte load
+// Encoding: REX.W 0F BE /r  with SIB [rdx+rbx] → 48 0f be 04 1a
+fn nc_emit_movsx_rax_byte_rdx_rbx(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0xbe)
+    nc_emit_byte(nc, 0x04)
+    nc_emit_byte(nc, 0x1a)
+}
+
 fn nc_emit_store_al_mem_rdx_rbx(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x88)
     nc_emit_byte(nc, 0x04)
@@ -7215,7 +7225,15 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             }
         } else if instr_op == IrOpcode::IrIndexGet {
             let base_reg = (*func).instrs[i as usize].src1
-            if (*func).instrs[i as usize].label_id == 3 {
+            if (*func).instrs[i as usize].label_id == 4 {
+                // BSS i8: sign-extend packed byte (parity with local [i8;N] box path).
+                native_v2_core_emit_raw_signed_byte_array_load_into(
+                    nc,
+                    (*func).instrs[i as usize].dst,
+                    base_reg,
+                    (*func).instrs[i as usize].src2,
+                )
+            } else if (*func).instrs[i as usize].label_id == 3 {
                 native_v2_core_emit_raw_byte_array_load_into(
                     nc,
                     (*func).instrs[i as usize].dst,
@@ -8665,6 +8683,17 @@ pub fn native_v2_core_emit_raw_byte_array_load_into(nc: &! NativeCompiler, dst: 
     nc_core_store_rax_to_temp(nc, dst)
 }
 
+// Signed packed-byte load for BSS `[i8; N]` (label_id=4). Zero-extend would turn
+// -1 into 255 and break `i8 as i64` / signed compares vs local-array parity.
+pub fn native_v2_core_emit_raw_signed_byte_array_load_into(nc: &! NativeCompiler, dst: i64, base_reg: i64, idx_reg: i64) with Mut, Panic, Div {
+    nc_core_load_temp_to_rax(nc, base_reg)
+    nc_emit_mov_reg_reg(nc, 2, 0)
+    nc_core_load_temp_to_rax(nc, idx_reg)
+    nc_emit_mov_reg_reg(nc, 3, 0)
+    nc_emit_movsx_rax_byte_rdx_rbx(nc)
+    nc_core_store_rax_to_temp(nc, dst)
+}
+
 pub fn native_v2_core_emit_raw_byte_array_store_into(nc: &! NativeCompiler, base_reg: i64, idx_reg: i64, src: i64) with Mut, Panic, Div {
     nc_core_load_temp_to_rax(nc, base_reg)
     nc_emit_mov_reg_reg(nc, 2, 0)
@@ -9208,6 +9237,7 @@ fn emit_entry_trampoline_split_into(nc: &! NativeCompiler, main_fn_index: i64) w
 //   - scalar / 1-elem: single 8-byte store of prof_counter_id
 //   - array-repeat `[V; N]` (instr_count == 0, bss_size > elem): rep stosq/stosb
 // f64 values are stored as IEEE-754 bit patterns (same path as i64 words).
+// hyper_algebra_kind: 1=u8, 17=i8 (both physical size 1), 8=qword.
 fn emit_global_var_inits_into(nc: &! NativeCompiler, module: &IrModule) with Mut, Panic, Div {
     var fi: i64 = 0
     while fi < (*module).fn_count {
@@ -9218,6 +9248,10 @@ fn emit_global_var_inits_into(nc: &! NativeCompiler, module: &IrModule) with Mut
             let init_val = func.prof_counter_id
             let total = func.bss_size
             var elem = func.hyper_algebra_kind
+            // i8 uses kind 17 (signed); physical stride is still 1 byte.
+            if elem == 17 {
+                elem = 1
+            }
             if elem <= 0 {
                 elem = 8
             }
