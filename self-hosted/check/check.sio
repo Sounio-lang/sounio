@@ -244,6 +244,11 @@ pub struct Checker {
     escape_provenance: i64,   // tail-expr escape provenance: 0=safe, 1=local ref escapes the frame
     loop_depth: i64,
     suppress_linear_consume_depth: i64,
+    assignment_place_depth: i64,
+    // Borrow scope depth of the closure body currently being analyzed, or -1.
+    // Call-argument borrows of bindings outside this scope are captures and
+    // must remain live after the syntactic call inside the closure body.
+    closure_capture_scope_depth: i64,
     type_depth: i64,
     expr_depth: i64,
     complexity_budget: i64,
@@ -619,10 +624,34 @@ fn mangle_append_literal(result: &! Name, c0: i8, c1: i8, c2: i8, c3: i8, len: i
     }
 }
 
-// Bind direct (`v: F`) and one-level array (`values: [F; N]`) generic struct
-// fields. The template is borrowed because the in-place checker path must not
-// recursively copy StructInfo. Other compound shapes need their own witnesses
-// before they become part of this inference contract.
+fn ty_named_with_type_args(name: Name, args: TypeEntryList) -> TypeEntry with Mut, Alloc {
+    var ty = ty_named(name)
+    ty.tuple_elems = Some(Box::new(type_entry_list_clone(&args)))
+    ty
+}
+
+fn infer_bind_type_param_list(
+    tmpl_types: TypeEntryList,
+    init_types: TypeEntryList,
+    tmpl: &StructInfo,
+    buf: InferBuf,
+) -> InferBuf with Mut, Panic, Div, Alloc {
+    var out = infer_bind_array_type_param(tmpl_types.head, init_types.head, tmpl, buf)
+    match tmpl_types.tail {
+        Some(t_rest) => {
+            match init_types.tail {
+                Some(i_rest) => return infer_bind_type_param_list(*t_rest, *i_rest, tmpl, out)
+                None => {}
+            }
+        }
+        None => {}
+    }
+    out
+}
+
+// Bind type parameters through direct fields and recursively matching owned
+// compound shapes. Generic applications carry their argument list in
+// tuple_elems until every parameter is concrete.
 fn infer_bind_array_type_param(tmpl_ty: TypeEntry, init_ty: TypeEntry, tmpl: &StructInfo, buf: InferBuf) -> InferBuf with Mut, Panic, Div, Alloc {
     var out = buf
     if tmpl_ty.kind == TypeKind::TyNamed {
@@ -634,30 +663,30 @@ fn infer_bind_array_type_param(tmpl_ty: TypeEntry, init_ty: TypeEntry, tmpl: &St
             }
             pi = pi + 1
         }
-        return out
     }
-    if tmpl_ty.kind != TypeKind::TyArray || init_ty.kind != TypeKind::TyArray {
-        return out
-    }
-    match tmpl_ty.inner {
-        Some(t_inner) => {
-            match init_ty.inner {
-                Some(i_inner) => {
-                    if (*t_inner).kind == TypeKind::TyNamed {
-                        var pi: i64 = 0
-                        while pi < (*tmpl).type_param_count {
-                            if name_eq((*t_inner).name, (*tmpl).type_param_names[pi]) {
-                                out.args[pi] = *i_inner
-                                return out
-                            }
-                            pi = pi + 1
-                        }
-                    }
+    match tmpl_ty.tuple_elems {
+        Some(t_args) => {
+            match init_ty.tuple_elems {
+                Some(i_args) => {
+                    out = infer_bind_type_param_list(*t_args, *i_args, tmpl, out)
                 }
                 None => {}
             }
         }
         None => {}
+    }
+    if tmpl_ty.kind == init_ty.kind {
+        match tmpl_ty.inner {
+            Some(t_inner) => {
+                match init_ty.inner {
+                    Some(i_inner) => {
+                        out = infer_bind_array_type_param(*t_inner, *i_inner, tmpl, out)
+                    }
+                    None => {}
+                }
+            }
+            None => {}
+        }
     }
     out
 }
@@ -666,6 +695,8 @@ fn infer_bind_array_type_param(tmpl_ty: TypeEntry, init_ty: TypeEntry, tmpl: &St
 // For each field, if its type is TyNamed and matches a type parameter name,
 // replace it with the corresponding concrete type argument.
 fn monomorphize_fields(
+    structs: *mut StructTable,
+    enums: *mut EnumTable,
     fields: Option<Box<FieldInfoList> >,
     tp_buf: TypeParamBuf,
     args: &TypeEntryList,
@@ -679,9 +710,9 @@ fn monomorphize_fields(
             let head = (*fl).head
             let args_for_head = type_entry_list_clone(args)
             let args_for_rest = type_entry_list_clone(args)
-            let new_ty = substitute_type_param(head.ty, tp_buf, args_for_head)
+            let new_ty = substitute_type_param(structs, enums, head.ty, tp_buf, args_for_head)
             let new_head = FieldInfo { name: head.name, ty: new_ty }
-            let rest = monomorphize_fields((*fl).tail, tp_buf, &args_for_rest)
+            let rest = monomorphize_fields(structs, enums, (*fl).tail, tp_buf, &args_for_rest)
             return (Some(Box::new(FieldInfoList { head: new_head, tail: rest.0 })), 1 + rest.1)
         }
     }
@@ -691,6 +722,8 @@ fn monomorphize_fields(
 
 // If ty is a TyNamed whose name matches a type parameter, replace with the concrete type.
 fn substitute_type_param(
+    structs: *mut StructTable,
+    enums: *mut EnumTable,
     ty: TypeEntry,
     tp_buf: TypeParamBuf,
     args: TypeEntryList,
@@ -710,30 +743,106 @@ fn substitute_type_param(
     var result = ty
     match ty.inner {
         Some(inner_ty) => {
-            let new_inner = substitute_type_param(*inner_ty, tp_buf, args_for_rec)
+            let new_inner = substitute_type_param(structs, enums, *inner_ty, tp_buf, args_for_rec)
             result.inner = Some(Box::new(new_inner))
         }
         None => {}
     }
     match ty.tuple_elems {
         Some(elems) => {
-            result.tuple_elems = Some(Box::new(substitute_type_param_list(*elems, tp_buf, type_entry_list_clone(&args))))
+            result.tuple_elems = Some(Box::new(substitute_type_param_list(
+                structs,
+                enums,
+                *elems,
+                tp_buf,
+                type_entry_list_clone(&args),
+            )))
         }
         None => {}
+    }
+    // An unresolved nested generic application is represented structurally as
+    // TyNamed(template) plus its arguments in tuple_elems. Once substitution
+    // makes every argument concrete, materialize the same mangled StructInfo
+    // used by a direct annotation or literal.
+    if result.kind == TypeKind::TyNamed {
+        let tmpl_idx = struct_table_find(structs, result.name)
+        if tmpl_idx >= 0 {
+            let tmpl = struct_table_get(structs, tmpl_idx)
+            if tmpl.is_generic_template {
+                match result.tuple_elems {
+                    Some(concrete_args_box) => {
+                        let concrete_args = *concrete_args_box
+                        let unresolved = collect_fn_generic_names_from_type_list_in_tables(
+                            structs,
+                            enums,
+                            concrete_args,
+                            empty_type_param_buf(),
+                        )
+                        if unresolved.count == 0 {
+                            let tmpl_name = tmpl.name
+                            let mangled = mangle_generic_name(&tmpl_name, &concrete_args)
+                            var mono_idx = struct_table_find(structs, mangled)
+                            if mono_idx < 0 {
+                                let placeholder = StructInfo {
+                                    name: mangled,
+                                    fields: None,
+                                    field_count: 0,
+                                    is_linear: tmpl.is_linear,
+                                    is_affine: tmpl.is_affine,
+                                    type_param_count: 0,
+                                    type_param_names: [Name { buf: [0; 128], len: 0 }; 8],
+                                    is_generic_template: false,
+                                    visibility_kind: tmpl.visibility_kind,
+                                    defining_module_id: tmpl.defining_module_id,
+                                    visibility: tmpl.visibility,
+                                    defining_module: tmpl.defining_module,
+                                }
+                                struct_table_add(structs, placeholder)
+                                mono_idx = struct_table_find(structs, mangled)
+                                let mono_fields = monomorphize_fields(
+                                    structs,
+                                    enums,
+                                    field_info_list_clone(&tmpl.fields),
+                                    TypeParamBuf {
+                                        names: tmpl.type_param_names,
+                                        count: tmpl.type_param_count,
+                                    },
+                                    &concrete_args,
+                                )
+                                if mono_idx >= 0 {
+                                    (*structs).entries[mono_idx as usize].fields = mono_fields.0
+                                    (*structs).entries[mono_idx as usize].field_count = mono_fields.1
+                                }
+                            }
+                            return ty_named_with_type_args(mangled, concrete_args)
+                        }
+                    }
+                    None => {}
+                }
+            }
+        }
     }
     result
 }
 
 fn substitute_type_param_list(
+    structs: *mut StructTable,
+    enums: *mut EnumTable,
     list: TypeEntryList,
     tp_buf: TypeParamBuf,
     args: TypeEntryList,
 ) -> TypeEntryList with Mut, Panic, Div, Alloc {
-    let new_head = substitute_type_param(list.head, tp_buf, args)
+    let new_head = substitute_type_param(structs, enums, list.head, tp_buf, args)
     match list.tail {
         None => TypeEntryList { head: new_head, tail: None }
         Some(rest) => {
-            let new_tail = substitute_type_param_list(*rest, tp_buf, type_entry_list_clone(&args))
+            let new_tail = substitute_type_param_list(
+                structs,
+                enums,
+                *rest,
+                tp_buf,
+                type_entry_list_clone(&args),
+            )
             TypeEntryList { head: new_head, tail: Some(Box::new(new_tail)) }
         }
     }
@@ -833,7 +942,13 @@ fn collect_fn_generic_names_from_params_in_tables(structs: *mut StructTable, enu
     }
 }
 
-fn checker_substitute_fn_params(opt: Option<Box<FnParamList> >, tp_buf: TypeParamBuf, args: TypeEntryList) -> Option<Box<FnParamList> > with Mut, Panic, Div, Alloc {
+fn checker_substitute_fn_params(
+    structs: *mut StructTable,
+    enums: *mut EnumTable,
+    opt: Option<Box<FnParamList> >,
+    tp_buf: TypeParamBuf,
+    args: TypeEntryList,
+) -> Option<Box<FnParamList> > with Mut, Panic, Div, Alloc {
     match opt {
         None => None
         Some(list) => {
@@ -841,9 +956,9 @@ fn checker_substitute_fn_params(opt: Option<Box<FnParamList> >, tp_buf: TypePara
             let args_for_tail = type_entry_list_clone(&args)
             let new_head = FnParamInfo {
                 name: head.name,
-                ty: substitute_type_param(head.ty, tp_buf, args),
+                ty: substitute_type_param(structs, enums, head.ty, tp_buf, args),
             }
-            let new_tail = checker_substitute_fn_params((*list).tail, tp_buf, args_for_tail)
+            let new_tail = checker_substitute_fn_params(structs, enums, (*list).tail, tp_buf, args_for_tail)
             Some(Box::new(FnParamList { head: new_head, tail: new_tail }))
         }
     }
@@ -934,6 +1049,8 @@ fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
         escape_provenance: 0,
         loop_depth: 0,
         suppress_linear_consume_depth: 0,
+        assignment_place_depth: 0,
+        closure_capture_scope_depth: -1,
         type_depth: 0,
         expr_depth: 0,
         complexity_budget: 0,
@@ -1031,6 +1148,8 @@ fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     (*raw).escape_provenance = 0
     (*raw).loop_depth = 0
     (*raw).suppress_linear_consume_depth = 0
+    (*raw).assignment_place_depth = 0
+    (*raw).closure_capture_scope_depth = -1
     (*raw).type_depth = 0
     (*raw).expr_depth = 0
     (*raw).complexity_budget = 0
@@ -1131,6 +1250,8 @@ fn checker_store_from_value(dst: *mut Checker, src: Checker) with Mut, Panic, Di
     (*dst).last_literal_kind = src.last_literal_kind
     (*dst).loop_depth = src.loop_depth
     (*dst).suppress_linear_consume_depth = src.suppress_linear_consume_depth
+    (*dst).assignment_place_depth = src.assignment_place_depth
+    (*dst).closure_capture_scope_depth = src.closure_capture_scope_depth
     (*dst).type_depth = src.type_depth
     (*dst).expr_depth = src.expr_depth
     (*dst).complexity_budget = src.complexity_budget
@@ -1463,6 +1584,61 @@ fn checker_lower_named_type_with_args_mut(c: *mut Checker, path: AstPath, type_a
             }
         }
     }
+    // User-defined generic structs must lower to the same mangled StructInfo
+    // used by generic struct literals. The by-value checker already performs
+    // this monomorphization; keep the active in-place spine semantically equal.
+    match type_args {
+        Some(args) => {
+            let tmpl_idx = struct_table_find((*c).structs, name)
+            if tmpl_idx >= 0 {
+                let tmpl = struct_table_get((*c).structs, tmpl_idx)
+                if tmpl.is_generic_template {
+                    let lowered_args = checker_lower_type_expr_list_mut(c, *args)
+                    if type_entry_list_count_value(&lowered_args) != tmpl.type_param_count {
+                        checker_report_error_at_inplace(c, (*args).head.span, 10, 0, 0, 0)
+                        return ty_error()
+                    }
+                    let unresolved = collect_fn_generic_names_from_type_list_in_tables(
+                        (*c).structs,
+                        (*c).enums,
+                        lowered_args,
+                        empty_type_param_buf(),
+                    )
+                    if unresolved.count > 0 {
+                        return ty_named_with_type_args(name, lowered_args)
+                    }
+                    let tmpl_name = tmpl.name
+                    let tmpl_fields = field_info_list_clone(&tmpl.fields)
+                    let tmpl_tp_buf = TypeParamBuf {
+                        names: tmpl.type_param_names,
+                        count: tmpl.type_param_count,
+                    }
+                    let mangled = mangle_generic_name(&tmpl_name, &lowered_args)
+                    let existing_idx = struct_table_find((*c).structs, mangled)
+                    if existing_idx < 0 {
+                        let mono_fields = monomorphize_fields((*c).structs, (*c).enums, tmpl_fields, tmpl_tp_buf, &lowered_args)
+                        let mono_info = StructInfo {
+                            name: mangled,
+                            fields: mono_fields.0,
+                            field_count: mono_fields.1,
+                            is_linear: tmpl.is_linear,
+                            is_affine: tmpl.is_affine,
+                            type_param_count: 0,
+                            type_param_names: [Name { buf: [0; 128], len: 0 }; 8],
+                            is_generic_template: false,
+                            visibility_kind: tmpl.visibility_kind,
+                            defining_module_id: tmpl.defining_module_id,
+                            visibility: tmpl.visibility,
+                            defining_module: tmpl.defining_module,
+                        }
+                        struct_table_add((*c).structs, mono_info)
+                    }
+                    return ty_named_with_type_args(mangled, lowered_args)
+                }
+            }
+        }
+        None => {}
+    }
     checker_lower_named_type_mut(c, path)
 }
 
@@ -1685,6 +1861,7 @@ fn checker_lower_fn_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry wi
         is_kernel: false,
         is_epistemic_kernel: false,
         is_linear_closure: false,
+        is_affine_closure: false,
         linear_capture_count: 0,
         epistemic_epsilon: 0.0 - 1.0,
         visibility_kind: VISIBILITY_PUB,
@@ -2813,6 +2990,116 @@ fn checker_report_error_at_inplace(c: *mut Checker, span: Span, code: i64, msg_a
     print_error_note(code)
 }
 
+fn checker_report_single_use_consumed_inplace(c: *mut Checker, span: Span, is_affine: bool) with Mut, IO, Panic, Div {
+    (*c).error_count = (*c).error_count + 1
+    (*c).had_error = true
+    (*c).diag_emitted = true
+    print("error[E039]")
+    if span.start > 0 || span.end > 0 {
+        print(" at ")
+        print_int(span.start)
+        print("..")
+        print_int(span.end)
+    }
+    if is_affine {
+        print(": affine value has already been used\n")
+    } else {
+        print(": linear value has already been used\n")
+    }
+}
+
+fn checker_report_move_while_borrowed_inplace(c: *mut Checker, span: Span, is_affine: bool) with Mut, IO, Panic, Div {
+    (*c).error_count = (*c).error_count + 1
+    (*c).had_error = true
+    (*c).diag_emitted = true
+    print("error[E038]")
+    if span.start > 0 || span.end > 0 {
+        print(" at ")
+        print_int(span.start)
+        print("..")
+        print_int(span.end)
+    }
+    if is_affine {
+        print(": cannot move affine value while borrowed\n")
+    } else {
+        print(": cannot move linear value while borrowed\n")
+    }
+    print("   |\n   = help: end the active borrow before moving the value\n")
+}
+
+fn checker_report_linear_branch_asymmetry_inplace(c: *mut Checker, span: Span) with Mut, IO, Panic, Div {
+    (*c).error_count = (*c).error_count + 1
+    (*c).had_error = true
+    (*c).diag_emitted = true
+    print("error[E040]")
+    if span.start > 0 || span.end > 0 {
+        print(" at ")
+        print_int(span.start)
+        print("..")
+        print_int(span.end)
+    }
+    print(": linear value consumed in then-branch but not else-branch\n")
+}
+
+fn checker_report_linear_match_asymmetry_inplace(c: *mut Checker, span: Span) with Mut, IO, Panic, Div {
+    (*c).error_count = (*c).error_count + 1
+    (*c).had_error = true
+    (*c).diag_emitted = true
+    print("error[E040]")
+    if span.start > 0 || span.end > 0 {
+        print(" at ")
+        print_int(span.start)
+        print("..")
+        print_int(span.end)
+    }
+    print(": linear value consumed in some match arms but not all match arms\n")
+}
+
+fn checker_report_unconsumed_linear_inplace(c: *mut Checker, count: i64) with Mut, IO, Panic, Div {
+    (*c).error_count = (*c).error_count + 1
+    (*c).had_error = true
+    (*c).diag_emitted = true
+    print("error[E040]: linear value not consumed (")
+    print_int(count)
+    print(" unconsumed)\n")
+}
+
+fn checker_report_repeated_region_move_inplace(c: *mut Checker, span: Span, mode: i64) with Mut, IO, Panic, Div {
+    (*c).error_count = (*c).error_count + 1
+    (*c).had_error = true
+    (*c).diag_emitted = true
+    print("error[E039]")
+    if span.start > 0 || span.end > 0 {
+        print(" at ")
+        print_int(span.start)
+        print("..")
+        print_int(span.end)
+    }
+    if mode == 2 {
+        print(": linear value consumed in potentially repeating loop\n")
+    } else {
+        print(": affine value consumed in potentially repeating loop\n")
+    }
+}
+
+fn checker_report_match_guard_move_inplace(c: *mut Checker, span: Span, mode: i64) with Mut, IO, Panic, Div {
+    (*c).error_count = (*c).error_count + 1
+    (*c).had_error = true
+    (*c).diag_emitted = true
+    print("error[E039]")
+    if span.start > 0 || span.end > 0 {
+        print(" at ")
+        print_int(span.start)
+        print("..")
+        print_int(span.end)
+    }
+    if mode == 2 {
+        print(": linear value cannot be consumed in a match guard\n")
+    } else {
+        print(": affine value cannot be consumed in a match guard\n")
+    }
+}
+
 fn checker_report_mismatch_inplace(c: *mut Checker, span: Span, code: i64, expected: TypeEntry, got: TypeEntry) with Mut, IO, Panic, Div, Alloc {
     (*c).error_count = (*c).error_count + 1
     (*c).had_error = true
@@ -2902,14 +3189,159 @@ fn checker_const_int_bind_unknown_inplace(c: *mut Checker, name: Name) with Mut,
     checker_const_int_bind_raw_inplace(c, name, 0, 0)
 }
 
-fn checker_is_linear_type_inplace(c: *mut Checker, ty: TypeEntry) -> bool with Mut, Panic, Div {
+fn checker_ownership_mode_join(a: i64, b: i64) -> i64 {
+    if a > b { a } else { b }
+}
+
+struct OwnershipVisitSet {
+    structs: [bool; 4096],
+    enums: [bool; 256],
+}
+
+fn checker_type_ownership_mode_visit(
+    structs: *mut StructTable,
+    enums: *mut EnumTable,
+    fn_sigs: *mut FnSigTable,
+    ty: TypeEntry,
+    visited: &! OwnershipVisitSet,
+) -> i64 with Mut, Panic, Div {
     if ty.kind == TypeKind::TyNamed {
-        let idx = struct_table_find((*c).structs, ty.name)
+        if name_eq(ty.name, make_name("Box")) || name_eq(ty.name, make_name("Option")) {
+            match ty.inner {
+                Some(inner) => return checker_type_ownership_mode_visit(structs, enums, fn_sigs, *inner, visited)
+                None => return 0
+            }
+        }
+        let idx = struct_table_find(structs, ty.name)
         if idx >= 0 {
-            return (*(*c).structs).entries[idx].is_linear
+            if (*visited).structs[idx as usize] { return 0 }
+            // Ownership folds the set of reachable declaration markers with
+            // max. Visit each graph node once and return the identity (0) on a
+            // repeated edge, including edges that close recursive cycles.
+            (*visited).structs[idx as usize] = true
+            let info = (*structs).entries[idx]
+            var mode: i64 = 0
+            if info.is_affine { mode = 1 }
+            if info.is_linear { mode = 2 }
+            var fields = info.fields
+            while true {
+                match fields {
+                    Some(list) => {
+                        mode = checker_ownership_mode_join(
+                            mode,
+                            checker_type_ownership_mode_visit(structs, enums, fn_sigs, (*list).head.ty, visited),
+                        )
+                        fields = (*list).tail
+                    }
+                    None => break
+                }
+            }
+            return mode
+        }
+        let enum_idx = enum_table_find(enums, ty.name)
+        if enum_idx >= 0 {
+            if (*visited).enums[enum_idx as usize] { return 0 }
+            (*visited).enums[enum_idx as usize] = true
+            let info = enum_table_get(enums, enum_idx)
+            var variants = info.variants
+            var mode: i64 = 0
+            while true {
+                match variants {
+                    Some(variant_list) => {
+                        var fields = (*variant_list).head.fields
+                        while true {
+                            match fields {
+                                Some(field_list) => {
+                                    mode = checker_ownership_mode_join(
+                                        mode,
+                                        checker_type_ownership_mode_visit(
+                                            structs,
+                                            enums,
+                                            fn_sigs,
+                                            (*field_list).head.ty,
+                                            visited,
+                                        ),
+                                    )
+                                    fields = (*field_list).tail
+                                }
+                                None => break
+                            }
+                        }
+                        variants = (*variant_list).tail
+                    }
+                    None => break
+                }
+            }
+            return mode
+        }
+    } else if ty.kind == TypeKind::TyArray {
+        if ty.array_size == 0 { return 0 }
+        match ty.inner {
+            Some(inner) => return checker_type_ownership_mode_visit(structs, enums, fn_sigs, *inner, visited)
+            None => return 0
+        }
+    } else if ty.kind == TypeKind::TyTuple {
+        var elems = ty.tuple_elems
+        var mode: i64 = 0
+        while true {
+            match elems {
+                Some(list) => {
+                    mode = checker_ownership_mode_join(
+                        mode,
+                        checker_type_ownership_mode_visit(structs, enums, fn_sigs, (*list).head, visited),
+                    )
+                    elems = (*list).tail
+                }
+                None => break
+            }
+        }
+        return mode
+    } else if ty.kind == TypeKind::TyFn {
+        if ty.fn_sig_id >= 0 && ty.fn_sig_id < (*fn_sigs).count {
+            let sig = fn_sig_table_get(fn_sigs, ty.fn_sig_id)
+            if sig.is_linear_closure { return 2 }
+            if sig.is_affine_closure { return 1 }
         }
     }
-    false
+    0
+}
+
+fn checker_type_ownership_mode_table(
+    structs: *mut StructTable,
+    enums: *mut EnumTable,
+    fn_sigs: *mut FnSigTable,
+    ty: TypeEntry,
+) -> i64 with Mut, Panic, Div {
+    var visited = OwnershipVisitSet { structs: [false; 4096], enums: [false; 256] }
+    checker_type_ownership_mode_visit(
+        structs,
+        enums,
+        fn_sigs,
+        ty,
+        &! visited,
+    )
+}
+
+fn checker_is_linear_type_inplace(c: *mut Checker, ty: TypeEntry) -> bool with Mut, Panic, Div {
+    checker_type_ownership_mode_table((*c).structs, (*c).enums, (*c).fn_sigs, ty) == 2
+}
+
+fn checker_is_affine_type_inplace(c: *mut Checker, ty: TypeEntry) -> bool with Mut, Panic, Div {
+    checker_type_ownership_mode_table((*c).structs, (*c).enums, (*c).fn_sigs, ty) == 1
+}
+
+fn checker_track_borrow_inplace(
+    c: *mut Checker,
+    name: Name,
+    is_linear: bool,
+    is_affine: bool,
+    span: Span,
+) with Mut, Panic, Div, IO {
+    let tracked = (*c).borrows.track(name, is_linear, is_affine)
+    (*c).borrows = tracked.0
+    if tracked.1 != 0 {
+        checker_report_error_at_inplace(c, span, 64, 128, 128, 0)
+    }
 }
 
 // ---- collect phase, true *mut (the crash is HERE, in collect, not check) ----
@@ -3077,6 +3509,7 @@ fn checker_collect_fn_def_inplace(c: *mut Checker, opt: Option<Box<FnDef> >, vis
                 is_kernel: is_kernel_fn,
                 is_epistemic_kernel: has_epistemic_param,
                 is_linear_closure: false,
+                is_affine_closure: false,
                 linear_capture_count: 0,
                 epistemic_epsilon: 0.0 - 1.0,
                 visibility_kind: visibility.kind,
@@ -3369,6 +3802,7 @@ fn checker_collect_struct_def_inplace(c: *mut Checker, name: Name, opt: Option<B
                 fields: fc.fields,
                 field_count: fc.count,
                 is_linear: (*sd).is_linear,
+                is_affine: (*sd).is_affine,
                 type_param_count: tp_result.count,
                 type_param_names: tp_result.names,
                 is_generic_template: tp_result.count > 0,
@@ -3922,6 +4356,16 @@ fn checker_check_impl_method_inplace(c: *mut Checker, item: Item) with Mut, Pani
             if (*c).multitest_count > 1 && !(*c).multitest_corrected {
                 checker_report_multitest_correction_required_inplace(c, (*fd).span, (*c).multitest_count)
             }
+            let parameter_linear_check = (*c).borrows.check_linear_consumed()
+            (*c).borrows = parameter_linear_check.0
+            if parameter_linear_check.1 > 0 {
+                (*c).had_error = true
+                (*c).error_count = (*c).error_count + 1
+                (*c).diag_emitted = true
+                print("error[E040]: linear value not consumed (")
+                print_int(parameter_linear_check.1)
+                print(" unconsumed)\n")
+            }
             checker_pop_const_scope_inplace(c)
             (*c).borrows = (*c).borrows.pop_scope()
             (*c).env = (*c).env.pop_scope()
@@ -4009,6 +4453,7 @@ fn checker_collect_impl_method_inplace(c: *mut Checker, item: Item, type_name: N
                 is_kernel: false,
                 is_epistemic_kernel: false,
                 is_linear_closure: false,
+                is_affine_closure: false,
                 linear_capture_count: 0,
                 epistemic_epsilon: 0.0 - 1.0,
                 visibility_kind: item.visibility.kind,
@@ -4161,13 +4606,15 @@ fn checker_bind_fn_param_inplace(c: *mut Checker, p: Param) with Mut, Panic, Div
         (*c).env = (*c).env.bind(p.name, (*c).current_impl_type, p.is_self_mut)
         checker_const_int_bind_unknown_inplace(c, p.name)
         let self_linear = checker_is_linear_type_inplace(c, (*c).current_impl_type)
-        (*c).borrows = (*c).borrows.track(p.name, self_linear)
+        let self_affine = checker_is_affine_type_inplace(c, (*c).current_impl_type)
+        checker_track_borrow_inplace(c, p.name, self_linear, self_affine, p.span)
     } else {
         let param_ty = checker_lower_type_expr_mut(c, p.ty)
         (*c).env = (*c).env.bind(p.name, param_ty, false)
         checker_const_int_bind_unknown_inplace(c, p.name)
         let lin = checker_is_linear_type_inplace(c, param_ty)
-        (*c).borrows = (*c).borrows.track(p.name, lin)
+        let aff = checker_is_affine_type_inplace(c, param_ty)
+        checker_track_borrow_inplace(c, p.name, lin, aff, p.span)
     }
 }
 
@@ -4246,6 +4693,16 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             }
             if (*c).multitest_count > 1 && !(*c).multitest_corrected {
                 checker_report_multitest_correction_required_inplace(c, (*fd).span, (*c).multitest_count)
+            }
+            let parameter_linear_check = (*c).borrows.check_linear_consumed()
+            (*c).borrows = parameter_linear_check.0
+            if parameter_linear_check.1 > 0 {
+                (*c).had_error = true
+                (*c).error_count = (*c).error_count + 1
+                (*c).diag_emitted = true
+                print("error[E040]: linear value not consumed (")
+                print_int(parameter_linear_check.1)
+                print(" unconsumed)\n")
             }
             checker_pop_const_scope_inplace(c)
             (*c).borrows = (*c).borrows.pop_scope()
@@ -4533,6 +4990,11 @@ fn checker_check_return_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
             }
         }
     }
+    let unconsumed = (*c).borrows.unconsumed_linear_count()
+    if unconsumed > 0 {
+        checker_report_unconsumed_linear_inplace(c, unconsumed)
+        (*c).borrows = (*c).borrows.mark_unconsumed_linear_reported()
+    }
     ty_never()
 }
 
@@ -4641,34 +5103,28 @@ fn checker_check_range_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
 // a different path). Checks each element in place (no per-element Checker copy) and builds
 // the tuple type. Faithful to by-value check_tuple_lit + check_tuple_elems.
 fn checker_check_tuple_elems_inplace(c: *mut Checker, opt: Option<Box<ExprList> >) -> Option<Box<TypeEntryList> > with Mut, Panic, Div, Alloc, IO {
-    var types: [TypeEntry; 16] = [empty_type_entry(); 16]
-    var count: i64 = 0
+    var reversed: Option<Box<TypeEntryList> > = None
     var cur = opt
-    var done = false
-    while !done {
+    while true {
         match cur {
             Some(list) => {
-                if count < 16 {
-                    types[count] = checker_check_expr_inplace(c, (*list).head)
-                    count = count + 1
-                    cur = (*list).tail
-                } else {
-                    done = true
-                }
+                let elem_ty = checker_check_expr_inplace(c, (*list).head)
+                reversed = Some(Box::new(TypeEntryList { head: elem_ty, tail: reversed }))
+                cur = (*list).tail
             }
-            None => {
-                done = true
-            }
+            None => break
         }
     }
-    if count == 0 {
-        return None
-    }
     var result: Option<Box<TypeEntryList> > = None
-    var j = count - 1
-    while j >= 0 {
-        result = Some(Box::new(TypeEntryList { head: types[j as usize], tail: result }))
-        j = j - 1
+    var rev_cur = reversed
+    while true {
+        match rev_cur {
+            Some(list) => {
+                result = Some(Box::new(TypeEntryList { head: (*list).head, tail: result }))
+                rev_cur = (*list).tail
+            }
+            None => break
+        }
     }
     result
 }
@@ -5001,22 +5457,75 @@ fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut
     }
     // Condition narrowing (mirrors check_if_expr: push a refinement guard for the then-branch)
     let saved_cond_env = (*c).refine_cond_env
+    let incoming_borrows = (*c).borrows
+    let incoming_single_use = incoming_borrows.snapshot_single_use()
+    let incoming_borrow_states = incoming_borrows.snapshot_borrow_states()
     let cond_guard = if_cond_extract_pred(e.left)
     if cond_guard.0 != 0 {
         (*c).refine_cond_env = refine_static_env_push((*c).refine_cond_env, cond_guard.1)
     }
     let then_ty = checker_check_opt_block_inplace(c, e.block)
+    let then_single_use = (*c).borrows.snapshot_single_use()
+    let then_borrow_states = (*c).borrows.snapshot_borrow_states()
     (*c).refine_cond_env = saved_cond_env
+    (*c).borrows = incoming_borrows
+    (*c).borrows = (*c).borrows.restore_single_use(incoming_single_use)
+    (*c).borrows = (*c).borrows.restore_borrow_states(incoming_borrow_states)
     match e.else_expr {
         Some(else_e) => {
             let else_ty = checker_check_expr_inplace(c, *else_e)
-            (*c).refine_cond_env = saved_cond_env
-            if !checker_types_compatible_inplace(c, then_ty, else_ty) {
-                checker_report_mismatch_inplace(c, e.span, 7, then_ty, else_ty)
+            let else_single_use = (*c).borrows.snapshot_single_use()
+            let else_borrow_states = (*c).borrows.snapshot_borrow_states()
+            (*c).borrows = incoming_borrows
+            (*c).borrows = (*c).borrows.restore_single_use(incoming_single_use)
+            (*c).borrows = (*c).borrows.restore_borrow_states(incoming_borrow_states)
+            let then_diverges = then_ty.kind == TypeKind::TyNever
+            let else_diverges = else_ty.kind == TypeKind::TyNever
+            var result_ty = then_ty
+            if then_diverges && else_diverges {
+                let dead_paths = (*c).borrows.merge_non_fallthrough_snapshots(then_single_use, else_single_use)
+                (*c).borrows = (*c).borrows.restore_single_use(dead_paths)
+                result_ty = ty_never()
+            } else if then_diverges {
+                (*c).borrows = (*c).borrows.restore_single_use(else_single_use)
+                if checker_type_has_ref_table((*c).structs, (*c).enums, else_ty) {
+                    (*c).borrows = (*c).borrows.restore_borrow_states(else_borrow_states)
+                }
+                result_ty = else_ty
+            } else if else_diverges {
+                (*c).borrows = (*c).borrows.restore_single_use(then_single_use)
+                if checker_type_has_ref_table((*c).structs, (*c).enums, then_ty) {
+                    (*c).borrows = (*c).borrows.restore_borrow_states(then_borrow_states)
+                }
+            } else {
+                let merge_result = (*c).borrows.merge_if_branches(then_single_use, else_single_use, true)
+                (*c).borrows = merge_result.0
+                if merge_result.1 > 0 {
+                    checker_report_linear_branch_asymmetry_inplace(c, e.span)
+                }
+                if !checker_types_compatible_inplace(c, then_ty, else_ty) {
+                    checker_report_mismatch_inplace(c, e.span, 7, then_ty, else_ty)
+                }
+                if checker_type_has_ref_table((*c).structs, (*c).enums, then_ty)
+                    || checker_type_has_ref_table((*c).structs, (*c).enums, else_ty) {
+                    let merged_borrow_states = (*c).borrows.merge_borrow_state_snapshots(
+                        then_borrow_states,
+                        else_borrow_states,
+                    )
+                    (*c).borrows = (*c).borrows.restore_borrow_states(merged_borrow_states)
+                }
             }
-            then_ty
+            (*c).refine_cond_env = saved_cond_env
+            result_ty
         }
         None => {
+            if then_ty.kind != TypeKind::TyNever {
+                let merge_result = (*c).borrows.merge_if_branches(then_single_use, incoming_single_use, false)
+                (*c).borrows = merge_result.0
+                if merge_result.1 > 0 {
+                    checker_report_linear_branch_asymmetry_inplace(c, e.span)
+                }
+            }
             (*c).refine_cond_env = saved_cond_env
             ty_unit()
         }
@@ -5033,6 +5542,7 @@ fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut
 // release_exclusive_borrows before the body — is faithful to the by-value original.
 // While is SIMPLER than if: it has NO refine_cond_env narrowing, so none is added here.
 fn checker_check_while_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let before_loop = (*c).borrows.snapshot_single_use()
     // Condition (via the *mut spine). Must be bool.
     let cond_ty = checker_check_opt_expr_inplace(c, e.left)
     if !is_error_or_unknown(cond_ty) && !is_bool_type(cond_ty) {
@@ -5053,6 +5563,10 @@ fn checker_check_while_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
     // by-value original discards body_pair.1).
     let _body_ty = checker_check_opt_block_inplace(c, e.block)
     (*c).loop_depth = (*c).loop_depth - 1
+    let repeated_move_mode = (*c).borrows.repeated_region_new_move_mode(before_loop)
+    if repeated_move_mode != 0 {
+        checker_report_repeated_region_move_inplace(c, e.span, repeated_move_mode)
+    }
     ty_unit()
 }
 
@@ -5064,6 +5578,7 @@ fn checker_check_while_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
 // limit on for-in; body type discarded).
 fn checker_check_for_in_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let _iter_ty = checker_check_opt_expr_inplace(c, e.left)
+    let before_body = (*c).borrows.snapshot_single_use()
     (*c).env = (*c).env.push_scope()
     (*c).borrows = (*c).borrows.push_scope()
     checker_push_const_scope_inplace(c)
@@ -5075,6 +5590,10 @@ fn checker_check_for_in_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
     checker_pop_const_scope_inplace(c)
     (*c).borrows = (*c).borrows.pop_scope()
     (*c).env = (*c).env.pop_scope()
+    let repeated_move_mode = (*c).borrows.repeated_region_new_move_mode(before_body)
+    if repeated_move_mode != 0 {
+        checker_report_repeated_region_move_inplace(c, e.span, repeated_move_mode)
+    }
     ty_unit()
 }
 
@@ -5113,6 +5632,13 @@ fn checker_check_array_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
                 if count_e.kind != ExprKind::ExprIntLit {
                     checker_report_error_at_inplace(c, count_e.span, 20, 0, 0, 0)
                     return ty_array(elem_ty, 0)
+                }
+                let elem_is_linear = checker_is_linear_type_inplace(c, elem_ty)
+                let elem_is_affine = checker_is_affine_type_inplace(c, elem_ty)
+                if count_e.int_val > 1 && (elem_is_linear || elem_is_affine) {
+                    checker_report_single_use_consumed_inplace(c, (*elem_box).span, elem_is_affine)
+                } else if count_e.int_val == 0 && elem_is_linear {
+                    checker_report_unconsumed_linear_inplace(c, 1)
                 }
                 return ty_array(elem_ty, count_e.int_val)
             }
@@ -5174,8 +5700,15 @@ fn checker_check_unary_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
     if (e.un_op == UnaryOp::OpRef || e.un_op == UnaryOp::OpRefMut) && expr_is_half_open_range(e.left) {
         return checker_check_slice_borrow_expr_inplace(c, e)
     }
-    // Operand via the *mut spine (faithful to self.check_opt_expr(e.left)).
+    // A reference observes its operand; it does not move a single-use value.
+    let is_borrow = e.un_op == UnaryOp::OpRef || e.un_op == UnaryOp::OpRefMut
+    if is_borrow {
+        (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth + 1
+    }
     let operand_ty = checker_check_opt_expr_inplace(c, e.left)
+    if is_borrow && (*c).suppress_linear_consume_depth > 0 {
+        (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth - 1
+    }
     // Op-typing (pure helper).
     let result = unary_result_type(e.un_op, operand_ty)
     if result.kind == TypeKind::TyError && !is_error_or_unknown(operand_ty) {
@@ -5220,7 +5753,11 @@ fn checker_check_slice_borrow_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntr
                 return ty_error()
             }
             // Index base via the *mut spine (faithful to self.check_opt_expr(idx_expr.left)).
+            (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth + 1
             let base_ty = checker_check_opt_expr_inplace(c, idx_expr.left)
+            if (*c).suppress_linear_consume_depth > 0 {
+                (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth - 1
+            }
             let result_ty = slice_borrow_result_type(base_ty, want_mut)
             if result_ty.kind == TypeKind::TyError && !is_error_or_unknown(base_ty) {
                 checker_report_error_at_inplace(c, e.span, 13, 0, 0, 0)
@@ -5504,7 +6041,15 @@ fn checker_check_index_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, 
     // Base then index, in left->right order (faithful to the by-value c threading:
     // base_pair = check_opt_expr(e.left); then idx_pair = c.check_opt_expr(e.right)).
     let base_ty = checker_check_opt_expr_inplace(c, e.left)
+    // An index computes a place but is not itself part of that place. Restore
+    // normal ownership evaluation while checking it, then resume place mode so
+    // an enclosing field/index base remains non-consuming.
+    let saved_assignment_place_depth = (*c).assignment_place_depth
+    if saved_assignment_place_depth > 0 {
+        (*c).assignment_place_depth = 0
+    }
     let idx_ty = checker_check_opt_expr_inplace(c, e.right)
+    (*c).assignment_place_depth = saved_assignment_place_depth
     // Index must be an integer type (E14). Non-returning: continues to the indexability check below.
     if !is_error_or_unknown(idx_ty) && !is_integer_type(idx_ty) {
         checker_report_error_at_inplace(c, e.span, 14, 0, 0, 0)
@@ -5545,30 +6090,85 @@ fn checker_check_match_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
     // Iterate the arm list. The FIRST arm's body type is the match result type
     // (check_match_arms' first_ty); each REMAINING arm's body type is compared against it
     // (check_remaining_arms). No arms => ty_unit() (check_match_arms' None branch).
+    let incoming_borrows = (*c).borrows
+    let incoming_single_use = incoming_borrows.snapshot_single_use()
+    let incoming_borrow_states = incoming_borrows.snapshot_borrow_states()
+    var merged_single_use = incoming_single_use
+    var merged_non_fallthrough = incoming_single_use
+    var merged_borrow_states = incoming_borrow_states
+    var linear_asymmetry: i64 = 0
     var cursor = e.arms
     var result_ty = ty_unit()
-    var seen_first = false
+    var seen_fallthrough = false
+    var seen_non_fallthrough = false
+    var join_may_carry_borrow = false
     while true {
         match cursor {
             Some(list) => {
                 let arm = (*list).head
+                // Pattern bindings and borrows belong to one alternative only.
+                // Start every arm from the complete incoming state, not merely
+                // the incoming consumption bits.
+                (*c).borrows = incoming_borrows
+                (*c).borrows = (*c).borrows.restore_single_use(incoming_single_use)
+                (*c).borrows = (*c).borrows.restore_borrow_states(incoming_borrow_states)
                 let arm_ty = checker_check_match_arm_inplace(c, arm, scrut_ty)
-                if !seen_first {
-                    // First arm: its body type becomes the expected/result type.
+                let arm_single_use = (*c).borrows.snapshot_single_use()
+                let arm_borrow_states = (*c).borrows.snapshot_borrow_states()
+                if arm_ty.kind == TypeKind::TyNever {
+                    if !seen_non_fallthrough {
+                        merged_non_fallthrough = arm_single_use
+                        seen_non_fallthrough = true
+                    } else {
+                        merged_non_fallthrough = (*c).borrows.merge_non_fallthrough_snapshots(
+                            merged_non_fallthrough,
+                            arm_single_use,
+                        )
+                    }
+                } else if !seen_fallthrough {
+                    // Only arms that can reach the join establish its type and
+                    // ownership state. A returning arm has no successor state.
                     result_ty = arm_ty
-                    seen_first = true
+                    merged_single_use = arm_single_use
+                    merged_borrow_states = arm_borrow_states
+                    join_may_carry_borrow = checker_type_has_ref_table((*c).structs, (*c).enums, arm_ty)
+                    seen_fallthrough = true
                 } else {
-                    // Remaining arm: compare against the first arm's type (check_remaining_arms,
-                    // code 18, span = this arm's span == (*list).head.span, expected = result_ty,
-                    // got = arm_ty).
+                    // Remaining fallthrough arm: compare against the first
+                    // fallthrough arm and merge only states that reach the join.
                     if !checker_types_compatible_inplace(c, arm_ty, result_ty) {
                         checker_report_mismatch_inplace(c, arm.span, 18, result_ty, arm_ty)
+                    }
+                    let merge_result = (*c).borrows.merge_alternative_snapshots(merged_single_use, arm_single_use)
+                    merged_single_use = merge_result.0
+                    linear_asymmetry = linear_asymmetry + merge_result.1
+                    merged_borrow_states = (*c).borrows.merge_borrow_state_snapshots(
+                        merged_borrow_states,
+                        arm_borrow_states,
+                    )
+                    if checker_type_has_ref_table((*c).structs, (*c).enums, arm_ty) {
+                        join_may_carry_borrow = true
                     }
                 }
                 cursor = (*list).tail
             }
             None => break
         }
+    }
+    (*c).borrows = incoming_borrows
+    (*c).borrows = (*c).borrows.restore_single_use(incoming_single_use)
+    (*c).borrows = (*c).borrows.restore_borrow_states(incoming_borrow_states)
+    if seen_fallthrough {
+        (*c).borrows = (*c).borrows.restore_single_use(merged_single_use)
+        if join_may_carry_borrow {
+            (*c).borrows = (*c).borrows.restore_borrow_states(merged_borrow_states)
+        }
+    } else if seen_non_fallthrough {
+        (*c).borrows = (*c).borrows.restore_single_use(merged_non_fallthrough)
+        result_ty = ty_never()
+    }
+    if linear_asymmetry > 0 {
+        checker_report_linear_match_asymmetry_inplace(c, e.span)
     }
     result_ty
 }
@@ -5593,8 +6193,9 @@ fn checker_check_match_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
 // Fidelity: codes 15 (not-found) / 16 (field compat) / 46 (count mismatch); returns
 // ty_named(struct_name) | ty_named(mangled) | ty_error(); per-field order = lookup-then-check;
 // count mismatch returns ty_named(struct_name) (NOT ty_error — the outer by-value wraps it so);
-// generic-with-zero-type-params (args_list None edge, 16680) returns ty_error(); both generic
-// passes check each field expr (faithful to the by-value double-check); no expr_depth mgmt.
+// generic-with-zero-type-params (args_list None edge, 16680) returns ty_error(). Generic field
+// initializers are checked exactly once: their first-pass types are cached for validation so
+// ownership and other expression effects cannot be applied twice. No expr_depth mgmt.
 fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let struct_name = checker_copy_string_list_to_name(e.path.segments)
     let struct_idx = struct_table_find((*c).structs, struct_name)
@@ -5609,6 +6210,7 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
             // 16642). Walk the field list via the *mut spine, recording each inferred type into
             // a per-template-param slot, exactly as the by-value original.
             var inferred = InferBuf { args: [ty_error(); 8] }
+            var inferred_init_types: Option<Box<TypeEntryList> > = None
             var cur_inf = e.fields
             var done_inf = false
             while !done_inf {
@@ -5617,6 +6219,15 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                         let field_name = (*fl).head.name
                         let tmpl_field_ty = field_info_list_find(si.fields, field_name)
                         let init_ty = checker_check_expr_inplace(c, (*fl).head.value)
+                        let init_type_node = TypeEntryList { head: init_ty, tail: None }
+                        match inferred_init_types {
+                            None => {
+                                inferred_init_types = Some(Box::new(init_type_node))
+                            }
+                            Some(existing_types) => {
+                                inferred_init_types = Some(Box::new(type_entry_list_append(*existing_types, init_type_node)))
+                            }
+                        }
                         // Bind direct (`v: F`) and one-level array (`c: [F; N]`)
                         // type parameters without copying StructInfo recursively.
                         inferred = infer_bind_array_type_param(tmpl_field_ty, init_ty, &si, inferred)
@@ -5645,6 +6256,7 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                     let si_type_param_count = si.type_param_count
                     let si_type_param_names = si.type_param_names
                     let si_is_linear = si.is_linear
+                    let si_is_affine = si.is_affine
                     let si_visibility_kind = si.visibility_kind
                     let si_defining_module_id = si.defining_module_id
                     let si_visibility = si.visibility
@@ -5655,12 +6267,13 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                     let existing_idx = struct_table_find((*c).structs, mangled)
                     if existing_idx < 0 {
                     let si_tp_buf = TypeParamBuf { names: si.type_param_names, count: si.type_param_count }
-                    let mono_fields = monomorphize_fields(si_fields, si_tp_buf, &args)
+                    let mono_fields = monomorphize_fields((*c).structs, (*c).enums, si_fields, si_tp_buf, &args)
                         let mono_info = StructInfo {
                             name: mangled,
                             fields: mono_fields.0,
                             field_count: mono_fields.1,
                             is_linear: si_is_linear,
+                            is_affine: si_is_affine,
                             type_param_count: 0,
                             type_param_names: [Name { buf: [0; 128], len: 0 }; 8],
                             is_generic_template: false,
@@ -5683,18 +6296,25 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                             checker_report_error_at_inplace(c, e.span, 46, 0, 0, 0)
                         } else {
                             var cur_v = e.fields
+                            var cur_v_types = inferred_init_types
                             var done_v = false
                             while !done_v {
                                 match cur_v {
                                     Some(list) => {
-                                        if !field_info_list_has(mono_si.fields, (*list).head.name) {
-                                            checker_report_error_at_inplace(c, (*list).head.value.span, 12, 0, 0, 0)
-                                        } else {
-                                            let field_ty = field_info_list_find(mono_si.fields, (*list).head.name)
-                                            let val_init_ty = checker_check_expr_inplace(c, (*list).head.value)
-                                            if !checker_contextual_expr_compatible((*list).head.value, val_init_ty, field_ty) {
-                                                checker_report_mismatch_inplace(c, (*list).head.value.span, 16, field_ty, val_init_ty)
+                                        match cur_v_types {
+                                            Some(type_list) => {
+                                                let val_init_ty = (*type_list).head
+                                                if !field_info_list_has(mono_si.fields, (*list).head.name) {
+                                                    checker_report_error_at_inplace(c, (*list).head.value.span, 12, 0, 0, 0)
+                                                } else {
+                                                    let field_ty = field_info_list_find(mono_si.fields, (*list).head.name)
+                                                    if !checker_contextual_expr_compatible((*list).head.value, val_init_ty, field_ty) {
+                                                        checker_report_mismatch_inplace(c, (*list).head.value.span, 16, field_ty, val_init_ty)
+                                                    }
+                                                }
+                                                cur_v_types = (*type_list).tail
                                             }
+                                            None => {}
                                         }
                                         cur_v = (*list).tail
                                     }
@@ -5705,7 +6325,7 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                             }
                         }
                     }
-                    ty_named(mangled)
+                    ty_named_with_type_args(mangled, args)
                 }
             }
         } else {
@@ -5871,6 +6491,9 @@ fn checker_bind_closure_param_inplace(c: *mut Checker, p: ClosureParam) with Mut
     let param_ty = checker_lower_type_expr_mut(c, p.ty)
     (*c).env = (*c).env.bind(p.name, param_ty, false)
     checker_const_int_bind_unknown_inplace(c, p.name)
+    let lin = checker_is_linear_type_inplace(c, param_ty)
+    let aff = checker_is_affine_type_inplace(c, param_ty)
+    checker_track_borrow_inplace(c, p.name, lin, aff, p.span)
 }
 
 fn checker_bind_closure_params_inplace(c: *mut Checker, opt: Option<Box<ClosureParamList> >) with Mut, Panic, Div, Alloc, IO {
@@ -5901,14 +6524,23 @@ fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
     (*c).current_effects = [0; 8]
     (*c).current_effect_count = 0
 
+    let outer_single_use = (*c).borrows.snapshot_single_use()
+    let saved_closure_capture_scope_depth = (*c).closure_capture_scope_depth
     (*c).env = (*c).env.push_scope()
     (*c).borrows = (*c).borrows.push_scope()
+    (*c).closure_capture_scope_depth = (*c).borrows.scope_depth
     checker_push_const_scope_inplace(c)
 
     checker_bind_closure_params_inplace(c, e.closure_params)
 
     // THE FIX: body checked in place (was the by-value c.check_opt_expr recursion).
     let body_ty = checker_check_opt_expr_inplace(c, e.closure_body)
+    let capture_counts = (*c).borrows.single_use_capture_counts_since(outer_single_use)
+    let closure_param_linear_check = (*c).borrows.check_linear_consumed()
+    (*c).borrows = closure_param_linear_check.0
+    if closure_param_linear_check.1 > 0 {
+        checker_report_unconsumed_linear_inplace(c, closure_param_linear_check.1)
+    }
 
     let inferred_ret_ty = if ret_ty.kind == TypeKind::TyUnknown {
         body_ty
@@ -5927,21 +6559,20 @@ fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
     checker_pop_const_scope_inplace(c)
     (*c).borrows = (*c).borrows.pop_scope()
     (*c).env = (*c).env.pop_scope()
+    (*c).closure_capture_scope_depth = saved_closure_capture_scope_depth
     (*c).current_effects = saved_effects
     (*c).current_effect_count = saved_effect_count
 
-    var capture_linear = false
-    var capture_linear_count: i64 = 0
+    let capture_linear_count = capture_counts.0
+    let capture_affine_count = capture_counts.1
+    let capture_linear = capture_linear_count > 0
+    let capture_affine = !capture_linear && capture_affine_count > 0
     var capture_epsilon: f64 = 0.0 - 1.0
     var ci: i64 = 0
     let env_count = (*c).env.count
     while ci < env_count {
         let binding = (*c).env.bindings[ci as usize]
         let binding_ty = binding.ty
-        if checker_is_linear_type_inplace(c, binding_ty) {
-            capture_linear = true
-            capture_linear_count = capture_linear_count + 1
-        }
         if binding_ty.kind == TypeKind::TyKnowledge {
             let eps = binding_ty.knowledge_epsilon
             if eps >= 0.0 {
@@ -5980,6 +6611,7 @@ fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
         is_kernel: false,
         is_epistemic_kernel: false,
         is_linear_closure: capture_linear,
+        is_affine_closure: capture_affine,
         linear_capture_count: capture_linear_count,
         epistemic_epsilon: capture_epsilon,
         visibility_kind: VISIBILITY_PRIVATE,
@@ -6254,21 +6886,6 @@ fn checker_check_one_call_arg_inplace(c: *mut Checker, arg_expr: Expr, param_inf
             checker_ontology_boundary_check_call_arg_contract_inplace(c, arg_ty, param_info.ty, call_span)
         }
     }
-    if has_param_info &&
-       arg_expr.kind == ExprKind::ExprIdent &&
-       checker_is_linear_type_inplace(c, arg_ty) &&
-       !implicit_borrow &&
-       (*c).suppress_linear_consume_depth == 0 {
-        if (*c).borrows.is_borrowed(arg_expr.name) {
-            checker_report_error_at_inplace(c, call_span, 38, 0, 0, 0)
-        } else {
-            let consume_result = (*c).borrows.consume_linear(arg_expr.name)
-            (*c).borrows = consume_result.0
-            if consume_result.1 != 0 {
-                checker_report_error_at_inplace(c, call_span, 39, 0, 0, 0)
-            }
-        }
-    }
 }
 
 // *mut transcription of check_call_args_inner (16907): the arg is checked via the spine;
@@ -6311,21 +6928,6 @@ fn checker_check_call_args_inplace(c: *mut Checker, args: ExprListHandle, params
                 checker_check_call_arg_knowledge_boundary_inplace(c, arg_ty, param_info.ty, call_span)
                 checker_check_call_arg_unit_boundary_inplace(c, arg_ty, param_info.ty, call_span)
                 checker_ontology_boundary_check_call_arg_contract_inplace(c, arg_ty, param_info.ty, call_span)
-            }
-        }
-        if has_param_info &&
-           arg_expr.kind == ExprKind::ExprIdent &&
-           checker_is_linear_type_inplace(c, arg_ty) &&
-           !implicit_borrow &&
-           (*c).suppress_linear_consume_depth == 0 {
-            if (*c).borrows.is_borrowed(arg_expr.name) {
-                checker_report_error_at_inplace(c, call_span, 38, 0, 0, 0)
-            } else {
-                let consume_result = (*c).borrows.consume_linear(arg_expr.name)
-                (*c).borrows = consume_result.0
-                if consume_result.1 != 0 {
-                    checker_report_error_at_inplace(c, call_span, 39, 0, 0, 0)
-                }
             }
         }
         current = expr_list_handle_next(current)
@@ -6726,8 +7328,8 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
                     if provided_type_arg_count != generic_names.count {
                         checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
                     }
-                    effective_params = checker_substitute_fn_params(effective_params, generic_names, type_entry_list_clone(&lowered_type_args))
-                    effective_return_type = substitute_type_param(direct_sig.return_type, generic_names, type_entry_list_clone(&lowered_type_args))
+                    effective_params = checker_substitute_fn_params((*c).structs, (*c).enums, effective_params, generic_names, type_entry_list_clone(&lowered_type_args))
+                    effective_return_type = substitute_type_param((*c).structs, (*c).enums, direct_sig.return_type, generic_names, type_entry_list_clone(&lowered_type_args))
                 }
             }
             None => {}
@@ -6805,8 +7407,8 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
                     if provided_type_arg_count != generic_names.count {
                         checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
                     }
-                    effective_params = checker_substitute_fn_params(effective_params, generic_names, type_entry_list_clone(&lowered_type_args))
-                    effective_return_type = substitute_type_param(sig.return_type, generic_names, type_entry_list_clone(&lowered_type_args))
+                    effective_params = checker_substitute_fn_params((*c).structs, (*c).enums, effective_params, generic_names, type_entry_list_clone(&lowered_type_args))
+                    effective_return_type = substitute_type_param((*c).structs, (*c).enums, sig.return_type, generic_names, type_entry_list_clone(&lowered_type_args))
                 }
             }
             None => {}
@@ -6854,6 +7456,12 @@ fn checker_check_callee_effects_inplace(c: *mut Checker, span: Span, callee_effe
     checker_store_from_value(c, t)
 }
 
+fn checker_retain_closure_capture_borrow_inplace(c: *mut Checker, name: Name) -> bool with Mut, Panic, Div {
+    if (*c).closure_capture_scope_depth < 0 { return false }
+    let binding_depth = (*c).borrows.scope_depth_of(name)
+    binding_depth >= 0 && binding_depth < (*c).closure_capture_scope_depth
+}
+
     fn checker_release_call_arg_borrows_inplace(c: *mut Checker, args: Option<Box<ExprList> >, params: Option<Box<FnParamList> >, call_start_borrows: BorrowEnv) with Mut, Panic, Div, Alloc, IO {
         match args {
             None => {}
@@ -6881,7 +7489,8 @@ fn checker_check_callee_effects_inplace(c: *mut Checker, span: Span, callee_effe
                     // which failed when consecutive calls borrow the same variable
                     // (the second call saw before_pair.0 == 2 from the first call's
                     // un-released borrow, and skipped the release).
-                    if implicit_release_kind == 1 || implicit_release_kind == 2 {
+                    if (implicit_release_kind == 1 || implicit_release_kind == 2)
+                        && !checker_retain_closure_capture_borrow_inplace(c, arg_expr.name) {
                         (*c).borrows = (*c).borrows.release_borrow(arg_expr.name)
                     }
                 }
@@ -6890,8 +7499,9 @@ fn checker_check_callee_effects_inplace(c: *mut Checker, span: Span, callee_effe
                    (arg_expr.un_op == UnaryOp::OpRef || arg_expr.un_op == UnaryOp::OpRefMut) {
                     let borrow_name = unary_operand_name(arg_expr.left)
                     if !name_is_empty(borrow_name) {
-                        // Unconditionally release call-site borrows after call returns
-                        (*c).borrows = (*c).borrows.release_borrow(borrow_name)
+                        if !checker_retain_closure_capture_borrow_inplace(c, borrow_name) {
+                            (*c).borrows = (*c).borrows.release_borrow(borrow_name)
+                        }
                     }
                 }
 
@@ -7171,14 +7781,21 @@ fn checker_check_ident_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
         return ty_error()
     }
     let ident_ty = (*c).env.lookup(e.name)
-    if checker_is_linear_type_inplace(c, ident_ty) && (*c).suppress_linear_consume_depth == 0 {
+    let is_single_use = checker_is_linear_type_inplace(c, ident_ty) || checker_is_affine_type_inplace(c, ident_ty)
+    if is_single_use && (*c).assignment_place_depth > 0 {
+        if (*c).borrows.is_consumed(e.name) {
+            checker_report_single_use_consumed_inplace(c, e.span, checker_is_affine_type_inplace(c, ident_ty))
+        }
+    } else if is_single_use && (*c).suppress_linear_consume_depth == 0 {
         if (*c).borrows.is_borrowed(e.name) {
-            checker_report_error_at_inplace(c, e.span, 38, 0, 0, 0)
+            checker_report_move_while_borrowed_inplace(c, e.span, checker_is_affine_type_inplace(c, ident_ty))
+            let poison_result = (*c).borrows.consume_linear(e.name)
+            (*c).borrows = poison_result.0
         } else {
             let consume_result = (*c).borrows.consume_linear(e.name)
             (*c).borrows = consume_result.0
             if consume_result.1 != 0 {
-                checker_report_error_at_inplace(c, e.span, consume_result.1, 0, 0, 0)
+                checker_report_single_use_consumed_inplace(c, e.span, checker_is_affine_type_inplace(c, ident_ty))
             }
         }
     }
@@ -7231,14 +7848,28 @@ fn checker_check_match_arm_inplace(c: *mut Checker, arm: MatchArm, scrut_ty: Typ
     (*c).borrows = (*c).borrows.push_scope()
     checker_push_const_scope_inplace(c)
     checker_bind_pattern_inplace(c, arm.pattern, scrut_ty)
+    let guard_span = arm.span
     // Type-check the `if <cond>` guard (if any) with the pattern variables in scope.
     match arm.guard {
         Some(g) => {
+            let before_guard = (*c).borrows.snapshot_single_use()
             let _guard_ty = checker_check_expr_inplace(c, *g)
+            let guard_move_mode = (*c).borrows.repeated_region_new_move_mode(before_guard)
+            if guard_move_mode != 0 {
+                checker_report_match_guard_move_inplace(c, guard_span, guard_move_mode)
+                // Recovery treats the rejected move as observational. This keeps
+                // the arm body check useful and prevents a cascading E039.
+                (*c).borrows = (*c).borrows.restore_single_use(before_guard)
+            }
         }
         _ => {}
     }
     let body_ty = checker_check_expr_inplace(c, arm.body)
+    let linear_result = (*c).borrows.check_linear_consumed()
+    (*c).borrows = linear_result.0
+    if linear_result.1 > 0 {
+        checker_report_unconsumed_linear_inplace(c, linear_result.1)
+    }
     checker_pop_const_scope_inplace(c)
     (*c).borrows = (*c).borrows.pop_scope()
     (*c).env = (*c).env.pop_scope()
@@ -7272,7 +7903,8 @@ fn checker_bind_pattern_inplace(c: *mut Checker, pat: Pattern, scrut_ty: TypeEnt
         (*c).env = (*c).env.bind(pat.name, scrut_ty, pat.is_mut)
         checker_const_int_bind_unknown_inplace(c, pat.name)
         let lin = checker_is_linear_type_inplace(c, scrut_ty)
-        (*c).borrows = (*c).borrows.track(pat.name, lin)
+        let aff = checker_is_affine_type_inplace(c, scrut_ty)
+        checker_track_borrow_inplace(c, pat.name, lin, aff, pat.span)
     } else if pat.kind == PatternKind::PatEnum {
         // Single-payload variant (e.g. Some(x) on Option<T>/Box<T>): the scrutinee
         // carries the payload type in .inner (Box/Option lowering). Bind the payload
@@ -7617,7 +8249,8 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
     }
     // Track variable for borrow checking (linear if struct is declared linear)
     let lin = checker_is_linear_type_inplace(c, bind_ty)
-    (*c).borrows = (*c).borrows.track(s.name, lin)
+    let aff = checker_is_affine_type_inplace(c, bind_ty)
+    checker_track_borrow_inplace(c, s.name, lin, aff, s.span)
     // Propagate escape provenance: `let r = &x` taints r LOCAL; `let r = &self.f` keeps it first-class.
     (*c).borrows = (*c).borrows.set_provenance(s.name, checker_expr_provenance_opt(c, s.expr))
     ty_unit()
@@ -7675,7 +8308,8 @@ fn checker_check_var_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
         checker_const_int_bind_unknown_inplace(c, s.name)
     }
     let lin = checker_is_linear_type_inplace(c, bind_ty)
-    (*c).borrows = (*c).borrows.track(s.name, lin)
+    let aff = checker_is_affine_type_inplace(c, bind_ty)
+    checker_track_borrow_inplace(c, s.name, lin, aff, s.span)
     (*c).borrows = (*c).borrows.set_provenance(s.name, checker_expr_provenance_opt(c, s.expr))
     ty_unit()
 }
@@ -7701,34 +8335,93 @@ fn checker_check_assign_mutability_inplace(c: *mut Checker, opt: Option<Box<Expr
 
 // *mut StmtAssign handler — transcription of check_assign_stmt (14136). The target and
 // value exprs go through the *mut spine (was: by-value check_opt_expr -> SRET-smash).
-// True if `ty` is a reference, or transitively contains one (array element, struct field).
-// Used to reject storing a value that smuggles a reference inside an aggregate (a struct
-// field or array element), which the bare-ref-type / provenance checks miss. Self-recursive,
-// depth-bounded; conservative (an unregistered named type is treated as ref-free).
-fn checker_type_has_ref(c: *mut Checker, ty: TypeEntry, depth: i64) -> bool with Mut, Panic, Div, Alloc, IO {
-    if depth > 16 { return false }
+// True if `ty` is a reference, or transitively contains one. The visited sets
+// make recursive declaration graphs finite without imposing a depth cutoff that
+// could erase a deeply nested reference from the borrow-state join.
+struct ReferenceVisitSet {
+    structs: [bool; 4096],
+    enums: [bool; 256],
+}
+
+fn checker_type_has_ref_visit(
+    structs: *mut StructTable,
+    enums: *mut EnumTable,
+    ty: TypeEntry,
+    visited: &! ReferenceVisitSet,
+) -> bool with Mut, Panic, Div, Alloc, IO {
     if ty.kind == TypeKind::TyRef || ty.kind == TypeKind::TyRefMut
         || ty.kind == TypeKind::TySlice || ty.kind == TypeKind::TySliceMut {
         return true
     }
     if ty.kind == TypeKind::TyArray {
+        if ty.array_size == 0 { return false }
         match ty.inner {
-            Some(el) => { return checker_type_has_ref(c, *el, depth + 1) }
+            Some(el) => { return checker_type_has_ref_visit(structs, enums, *el, visited) }
             None => { return false }
         }
     }
+    if ty.kind == TypeKind::TyTuple {
+        var elems = ty.tuple_elems
+        while true {
+            match elems {
+                Some(list) => {
+                    if checker_type_has_ref_visit(structs, enums, (*list).head, visited) { return true }
+                    elems = (*list).tail
+                }
+                None => break
+            }
+        }
+        return false
+    }
     if ty.kind == TypeKind::TyNamed {
-        let sidx = struct_table_find((*c).structs, ty.name)
-        if sidx >= 0 && sidx < (*(*c).structs).count {
-            let si = struct_table_get((*c).structs, sidx)
+        if name_eq(ty.name, make_name("Box")) || name_eq(ty.name, make_name("Option")) {
+            match ty.inner {
+                Some(inner) => { return checker_type_has_ref_visit(structs, enums, *inner, visited) }
+                None => { return false }
+            }
+        }
+        let sidx = struct_table_find(structs, ty.name)
+        if sidx >= 0 && sidx < (*structs).count {
+            if (*visited).structs[sidx as usize] { return false }
+            (*visited).structs[sidx as usize] = true
+            let si = struct_table_get(structs, sidx)
             var cur = si.fields
-            var guard = 0
-            while guard < 1024 {
-                guard = guard + 1
+            while true {
                 match cur {
                     Some(list) => {
-                        if checker_type_has_ref(c, (*list).head.ty, depth + 1) { return true }
+                        if checker_type_has_ref_visit(structs, enums, (*list).head.ty, visited) { return true }
                         cur = (*list).tail
+                    }
+                    None => break
+                }
+            }
+            return false
+        }
+        let eidx = enum_table_find(enums, ty.name)
+        if eidx >= 0 && eidx < (*enums).count {
+            if (*visited).enums[eidx as usize] { return false }
+            (*visited).enums[eidx as usize] = true
+            let ei = enum_table_get(enums, eidx)
+            var variants = ei.variants
+            while true {
+                match variants {
+                    Some(variant_list) => {
+                        var fields = (*variant_list).head.fields
+                        while true {
+                            match fields {
+                                Some(field_list) => {
+                                    if checker_type_has_ref_visit(
+                                        structs,
+                                        enums,
+                                        (*field_list).head.ty,
+                                        visited,
+                                    ) { return true }
+                                    fields = (*field_list).tail
+                                }
+                                None => break
+                            }
+                        }
+                        variants = (*variant_list).tail
                     }
                     None => break
                 }
@@ -7736,11 +8429,69 @@ fn checker_type_has_ref(c: *mut Checker, ty: TypeEntry, depth: i64) -> bool with
         }
         return false
     }
+    // Epistemic and proof-carrying wrappers use `inner` for their represented
+    // value. Raw pointers are an explicit non-borrowed escape hatch, so their
+    // pointee is not treated as a contained borrow here.
+    if ty.kind != TypeKind::TyRawPtr {
+        match ty.inner {
+            Some(inner) => { return checker_type_has_ref_visit(structs, enums, *inner, visited) }
+            None => {}
+        }
+    }
     false
 }
 
+fn checker_type_has_ref_table(
+    structs: *mut StructTable,
+    enums: *mut EnumTable,
+    ty: TypeEntry,
+) -> bool with Mut, Panic, Div, Alloc, IO {
+    var visited = ReferenceVisitSet { structs: [false; 4096], enums: [false; 256] }
+    checker_type_has_ref_visit(structs, enums, ty, &! visited)
+}
+
+fn checker_type_has_ref(c: *mut Checker, ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc, IO {
+    checker_type_has_ref_table((*c).structs, (*c).enums, ty)
+}
+
+fn checker_assignment_place_root_name(opt: Option<Box<Expr> >) -> Name with Mut, Panic, Div, Alloc {
+    match opt {
+        None => empty_name()
+        Some(expr) => {
+            let e = *expr
+            if e.kind == ExprKind::ExprIdent {
+                return e.name
+            }
+            if e.kind == ExprKind::ExprFieldAccess || e.kind == ExprKind::ExprIndex {
+                return checker_assignment_place_root_name(e.left)
+            }
+            if e.kind == ExprKind::ExprUnary && e.un_op == UnaryOp::OpDeref {
+                return checker_assignment_place_root_name(e.left)
+            }
+            empty_name()
+        }
+    }
+}
+
 fn checker_check_assign_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let target_is_bare_ident = match s.target {
+        Some(target) => (*target).kind == ExprKind::ExprIdent
+        None => false
+    }
+    if target_is_bare_ident {
+        // A bare `x = value` may reinitialize a moved binding.
+        (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth + 1
+    } else {
+        // Compound places must be live. Their base is observed, while index
+        // expressions are evaluated normally by checker_check_index_inplace.
+        (*c).assignment_place_depth = (*c).assignment_place_depth + 1
+    }
     let target_ty = checker_check_opt_expr_inplace(c, s.target)
+    if target_is_bare_ident && (*c).suppress_linear_consume_depth > 0 {
+        (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth - 1
+    } else if !target_is_bare_ident && (*c).assignment_place_depth > 0 {
+        (*c).assignment_place_depth = (*c).assignment_place_depth - 1
+    }
     let val_ty = checker_check_opt_expr_inplace(c, s.expr)
     if s.assign_op != AssignOp::AssignEq {
         if !is_error_or_unknown(target_ty) && !is_error_or_unknown(val_ty) {
@@ -7764,6 +8515,53 @@ fn checker_check_assign_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with
         }
     }
     checker_check_assign_mutability_inplace(c, s.target, s.span)
+    if s.assign_op == AssignOp::AssignEq {
+        match s.target {
+            Some(target) => {
+                if (*target).kind == ExprKind::ExprIdent {
+                    let reassignment = (*c).borrows.prepare_reassignment((*target).name)
+                    (*c).borrows = reassignment.0
+                    if reassignment.1 == 38 {
+                        let is_affine = checker_is_affine_type_inplace(c, target_ty)
+                        if checker_is_linear_type_inplace(c, target_ty) || is_affine {
+                            checker_report_move_while_borrowed_inplace(c, s.span, is_affine)
+                            let poison = (*c).borrows.consume_linear((*target).name)
+                            (*c).borrows = poison.0
+                        } else {
+                            checker_report_error_at_inplace(c, s.span, 38, 0, 0, 0)
+                        }
+                    } else if reassignment.1 == 40 {
+                        checker_report_unconsumed_linear_inplace(c, 1)
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+    if !target_is_bare_ident {
+        let root_name = checker_assignment_place_root_name(s.target)
+        if !name_is_empty(root_name) && (*c).env.has_binding(root_name) {
+            let root_ty = (*c).env.lookup(root_name)
+            let root_consumed = (*c).borrows.is_consumed(root_name)
+            if !root_consumed && (*c).borrows.is_borrowed(root_name) {
+                let root_is_affine = checker_is_affine_type_inplace(c, root_ty)
+                if checker_is_linear_type_inplace(c, root_ty) || root_is_affine {
+                    checker_report_move_while_borrowed_inplace(c, s.span, root_is_affine)
+                    let poison = (*c).borrows.consume_linear(root_name)
+                    (*c).borrows = poison.0
+                } else {
+                    checker_report_error_at_inplace(c, s.span, 38, 0, 0, 0)
+                }
+            } else if !root_consumed && s.assign_op == AssignOp::AssignEq
+                && checker_is_linear_type_inplace(c, target_ty) {
+                // Partial replacement would silently discard a live linear
+                // subvalue. Reject until partial-move state is represented.
+                checker_report_unconsumed_linear_inplace(c, 1)
+                let poison = (*c).borrows.consume_linear(root_name)
+                (*c).borrows = poison.0
+            }
+        }
+    }
     // Raw-reference escape (store sites): a reference may not be stored into a struct field,
     // an array element, or through a pointer — doing so lets it outlive its referent → a
     // dangling reference. References are second-class: pass them to functions and read/write
@@ -7779,7 +8577,7 @@ fn checker_check_assign_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with
             // A reference value (or an aggregate transitively containing a reference, e.g.
             // a stored ref parameter, or `H{p:r}`) may not be stored; or a frame-local
             // reference by provenance.
-            let rhs_is_ref = checker_type_has_ref(c, val_ty, 0)
+            let rhs_is_ref = checker_type_has_ref(c, val_ty)
             if is_store_place && (rhs_is_ref || checker_expr_provenance_opt(c, s.expr) == 1) {
                 checker_report_error_at_inplace(c, s.span, 91, 0, 0, 0)
             }
@@ -9844,6 +10642,99 @@ impl Checker {
         // Print help and note if available
         print_error_help(code)
         print_error_note(code)
+        c
+    }
+
+    fn report_single_use_consumed(self, span: Span, is_affine: bool) -> Checker with Mut, IO, Panic, Div {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        c.diag_emitted = true
+        print("error[E039]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        if is_affine {
+            print(": affine value has already been used\n")
+        } else {
+            print(": linear value has already been used\n")
+        }
+        c
+    }
+
+    fn report_move_while_borrowed(self, span: Span, is_affine: bool) -> Checker with Mut, IO, Panic, Div {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        c.diag_emitted = true
+        print("error[E038]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        if is_affine {
+            print(": cannot move affine value while borrowed\n")
+        } else {
+            print(": cannot move linear value while borrowed\n")
+        }
+        print("   |\n   = help: end the active borrow before moving the value\n")
+        c
+    }
+
+    fn report_linear_branch_asymmetry(self, span: Span) -> Checker with Mut, IO, Panic, Div {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        c.diag_emitted = true
+        print("error[E040]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": linear value consumed in then-branch but not else-branch\n")
+        c
+    }
+
+    fn report_linear_match_asymmetry(self, span: Span) -> Checker with Mut, IO, Panic, Div {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        c.diag_emitted = true
+        print("error[E040]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": linear value consumed in some match arms but not all match arms\n")
+        c
+    }
+
+    fn report_repeated_region_move(self, span: Span, mode: i64) -> Checker with Mut, IO, Panic, Div {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        c.diag_emitted = true
+        print("error[E039]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        if mode == 2 {
+            print(": linear value consumed in potentially repeating loop\n")
+        } else {
+            print(": affine value consumed in potentially repeating loop\n")
+        }
         c
     }
 
@@ -13316,6 +14207,12 @@ fn checker_fn_sig_effects_compatible(a: FnSig, b: FnSig) -> bool with Mut, Panic
     true
 }
 
+fn checker_fn_sig_ownership_mode(sig: FnSig) -> i64 {
+    if sig.is_linear_closure { return 2 }
+    if sig.is_affine_closure { return 1 }
+    0
+}
+
 fn checker_types_compatible_table_deep(tbl: *mut FnSigTable, a: TypeEntry, b: TypeEntry, depth: i64) -> bool with Mut, Panic, Div, Alloc {
     if types_compatible(a, b) {
         return true
@@ -13334,6 +14231,12 @@ fn checker_types_compatible_table_deep(tbl: *mut FnSigTable, a: TypeEntry, b: Ty
     }
     let asig = fn_sig_table_get(tbl, a.fn_sig_id)
     let bsig = fn_sig_table_get(tbl, b.fn_sig_id)
+    // A structural fn coercion must not erase callable ownership. Sounio does
+    // not yet spell affine/linear fn types explicitly, so mixed-mode coercions
+    // fail closed at parameter, return, and annotated-binding boundaries.
+    if checker_fn_sig_ownership_mode(asig) != checker_fn_sig_ownership_mode(bsig) {
+        return false
+    }
     if !checker_types_compatible_table_deep(tbl, asig.return_type, bsig.return_type, depth + 1) {
         return false
     }
@@ -13376,6 +14279,9 @@ fn checker_fn_types_structurally_compatible_table(tbl: *mut FnSigTable, a: TypeE
     }
     let asig = fn_sig_table_get(tbl, a.fn_sig_id)
     let bsig = fn_sig_table_get(tbl, b.fn_sig_id)
+    if checker_fn_sig_ownership_mode(asig) != checker_fn_sig_ownership_mode(bsig) {
+        return false
+    }
     if !checker_types_compatible_table_deep(tbl, asig.return_type, bsig.return_type, 0) {
         return false
     }
@@ -14623,10 +15529,20 @@ impl Checker {
                         let args_result = self.lower_type_expr_list(*args)
                         var c = args_result.0
                         let lowered_args = args_result.1
+                        let unresolved = collect_fn_generic_names_from_type_list_in_tables(
+                            c.structs,
+                            c.enums,
+                            lowered_args,
+                            empty_type_param_buf(),
+                        )
+                        if unresolved.count > 0 {
+                            return (c, ty_named_with_type_args(name, lowered_args))
+                        }
                         let tmpl_name = tmpl.name
                         let tmpl_fields = field_info_list_clone(&tmpl.fields)
                         let tmpl_tp_buf = TypeParamBuf { names: tmpl.type_param_names, count: tmpl.type_param_count }
                         let tmpl_is_linear = tmpl.is_linear
+                        let tmpl_is_affine = tmpl.is_affine
                         let tmpl_visibility_kind = tmpl.visibility_kind
                         let tmpl_defining_module_id = tmpl.defining_module_id
                         let tmpl_visibility = tmpl.visibility
@@ -14638,15 +15554,16 @@ impl Checker {
                         // Check if already monomorphized
                         let existing_idx = struct_table_find(c.structs, mangled)
                         if existing_idx >= 0 {
-                            (c, ty_named(mangled))
+                            (c, ty_named_with_type_args(mangled, lowered_args))
                         } else {
                             // Monomorphize: substitute type params in fields
-                            let mono_fields = monomorphize_fields(tmpl_fields, tmpl_tp_buf, &lowered_args)
+                            let mono_fields = monomorphize_fields(c.structs, c.enums, tmpl_fields, tmpl_tp_buf, &lowered_args)
                             let mono_info = StructInfo {
                                 name: mangled,
                                 fields: mono_fields.0,
                                 field_count: mono_fields.1,
                                 is_linear: tmpl_is_linear,
+                            is_affine: tmpl_is_affine,
                             type_param_count: 0,
                             type_param_names: [Name { buf: [0; 128], len: 0 }; 8],
                             is_generic_template: false,
@@ -14656,7 +15573,7 @@ impl Checker {
                             defining_module: tmpl_defining_module,
                             }
                             struct_table_add(c.structs, mono_info)
-                            (c, ty_named(mangled))
+                            (c, ty_named_with_type_args(mangled, lowered_args))
                         }
                     } else {
                         // Non-generic struct used with type args — fall through to named
@@ -14876,6 +15793,7 @@ impl Checker {
             is_kernel: false,
             is_epistemic_kernel: false,
             is_linear_closure: false,
+            is_affine_closure: false,
             linear_capture_count: 0,
             epistemic_epsilon: 0.0 - 1.0,
             visibility_kind: VISIBILITY_PUB,
@@ -17004,6 +17922,7 @@ impl Checker {
                     is_kernel: is_kernel_fn,
                     is_epistemic_kernel: has_epistemic_param,
                     is_linear_closure: false,
+                    is_affine_closure: false,
                     linear_capture_count: 0,
                     epistemic_epsilon: 0.0 - 1.0,
                     visibility_kind: visibility.kind,
@@ -17078,6 +17997,7 @@ impl Checker {
                     fields: fields,
                     field_count: field_count,
                     is_linear: (*sd).is_linear,
+                    is_affine: (*sd).is_affine,
                     type_param_count: tp_count,
                     type_param_names: tp_names,
                     is_generic_template: is_generic,
@@ -17997,6 +18917,7 @@ impl Checker {
                     is_kernel: false,
                     is_epistemic_kernel: false,
                     is_linear_closure: false,
+                    is_affine_closure: false,
                     linear_capture_count: 0,
                     epistemic_epsilon: 0.0 - 1.0,
                     visibility_kind: item.visibility.kind,
@@ -18139,6 +19060,16 @@ impl Checker {
                 if c.multitest_count > 1 && !c.multitest_corrected {
                     c = c.report_multitest_correction_required((*fd).span, c.multitest_count)
                 }
+                let parameter_linear_check = c.borrows.check_linear_consumed()
+                c.borrows = parameter_linear_check.0
+                if parameter_linear_check.1 > 0 {
+                    c.had_error = true
+                    c.error_count = c.error_count + 1
+                    c.diag_emitted = true
+                    print("error[E040]: linear value not consumed (")
+                    print_int(parameter_linear_check.1)
+                    print(" unconsumed)\n")
+                }
                 c = c.pop_const_scope()
                 c.borrows = c.borrows.pop_scope()
                 c.env = c.env.pop_scope()
@@ -18171,7 +19102,12 @@ impl Checker {
             c = c.const_int_bind_unknown(p.name)
             // Track self parameter for borrow checking
             let self_linear = c.is_linear_type(c.current_impl_type)
-            c.borrows = c.borrows.track(p.name, self_linear)
+            let self_affine = c.is_affine_type(c.current_impl_type)
+            let tracked = c.borrows.track(p.name, self_linear, self_affine)
+            c.borrows = tracked.0
+            if tracked.1 != 0 {
+                c = c.report_error_at(p.span, 64, 128, 128, 0)
+            }
             c
         } else {
             let pair = c.lower_type_expr(p.ty)
@@ -18181,7 +19117,12 @@ impl Checker {
             c = c.const_int_bind_unknown(p.name)
             // Track parameter for borrow checking (linear if struct is declared linear)
             let lin = c.is_linear_type(param_ty)
-            c.borrows = c.borrows.track(p.name, lin)
+            let aff = c.is_affine_type(param_ty)
+            let tracked = c.borrows.track(p.name, lin, aff)
+            c.borrows = tracked.0
+            if tracked.1 != 0 {
+                c = c.report_error_at(p.span, 64, 128, 128, 0)
+            }
             c
         }
     }
@@ -18367,7 +19308,12 @@ impl Checker {
         }
         // Track variable for borrow checking (linear if struct is declared linear)
         let lin = c.is_linear_type(bind_ty)
-        c.borrows = c.borrows.track(s.name, lin)
+        let aff = c.is_affine_type(bind_ty)
+        let tracked = c.borrows.track(s.name, lin, aff)
+        c.borrows = tracked.0
+        if tracked.1 != 0 {
+            c = c.report_error_at(s.span, 64, 128, 128, 0)
+        }
         (c, ty_unit())
     }
 
@@ -18424,7 +19370,12 @@ impl Checker {
         }
         // Track variable for borrow checking (linear if struct is declared linear)
         let lin = c.is_linear_type(bind_ty)
-        c.borrows = c.borrows.track(s.name, lin)
+        let aff = c.is_affine_type(bind_ty)
+        let tracked = c.borrows.track(s.name, lin, aff)
+        c.borrows = tracked.0
+        if tracked.1 != 0 {
+            c = c.report_error_at(s.span, 64, 128, 128, 0)
+        }
         (c, ty_unit())
     }
 
@@ -18459,13 +19410,11 @@ impl Checker {
     }
 
     fn is_linear_type(self, ty: TypeEntry) -> bool with Mut, Panic, Div {
-        if ty.kind == TypeKind::TyNamed {
-            let idx = struct_table_find(self.structs, ty.name)
-            if idx >= 0 {
-                return (*self.structs).entries[idx].is_linear
-            }
-        }
-        false
+        checker_type_ownership_mode_table(self.structs, self.enums, self.fn_sigs, ty) == 2
+    }
+
+    fn is_affine_type(self, ty: TypeEntry) -> bool with Mut, Panic, Div {
+        checker_type_ownership_mode_table(self.structs, self.enums, self.fn_sigs, ty) == 1
     }
 
     fn check_expr_stmt(self, s: Stmt) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
@@ -18474,8 +19423,12 @@ impl Checker {
 
     fn check_assign_stmt(self, s: Stmt) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         var c = self
+        c.suppress_linear_consume_depth = c.suppress_linear_consume_depth + 1
         let target_pair = c.check_opt_expr(s.target)
         c = target_pair.0
+        if c.suppress_linear_consume_depth > 0 {
+            c.suppress_linear_consume_depth = c.suppress_linear_consume_depth - 1
+        }
         let target_ty = target_pair.1
         let val_pair = c.check_opt_expr(s.expr)
         c = val_pair.0
@@ -18505,6 +19458,23 @@ impl Checker {
         }
         // Check mutability: if target is an ident, it must be mutable
         c = c.check_assign_mutability(s.target, s.span)
+        if s.assign_op == AssignOp::AssignEq {
+            match s.target {
+                Some(target) => {
+                    if (*target).kind == ExprKind::ExprIdent {
+                        let reassignment = c.borrows.prepare_reassignment((*target).name)
+                        c.borrows = reassignment.0
+                        if reassignment.1 != 0 {
+                            c.had_error = true
+                            c.error_count = c.error_count + 1
+                            c.diag_emitted = true
+                            print("error[E040]: linear value not consumed (1 unconsumed)\n")
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
         match s.target {
             Some(target) => {
                 if (*target).kind == ExprKind::ExprIdent {
@@ -18637,15 +19607,18 @@ impl Checker {
                 let ident_ty = c.env.lookup(e.name)
                 // If this is a linear type variable, mark it as consumed
                 var c2 = c
-                if c2.is_linear_type(ident_ty) && c2.suppress_linear_consume_depth == 0 {
+                if (c2.is_linear_type(ident_ty) || c2.is_affine_type(ident_ty))
+                    && c2.suppress_linear_consume_depth == 0 {
                     // CRITICAL FIX: Check if borrowed before consuming
                     if c2.borrows.is_borrowed(e.name) {
-                        c2 = c2.report_error_at(e.span, 38, 0, 0, 0)  // Cannot consume borrowed value
+                        c2 = c2.report_move_while_borrowed(e.span, c2.is_affine_type(ident_ty))
+                        let poison_result = c2.borrows.consume_linear(e.name)
+                        c2.borrows = poison_result.0
                     } else {
                         let consume_result = c2.borrows.consume_linear(e.name)
                         c2.borrows = consume_result.0
                         if consume_result.1 != 0 {
-                            c2 = c2.report_error_at(e.span, consume_result.1, 0, 0, 0)
+                            c2 = c2.report_single_use_consumed(e.span, c2.is_affine_type(ident_ty))
                         }
                     }
                 }
@@ -19040,8 +20013,13 @@ impl Checker {
                 if idx_expr.kind != ExprKind::ExprIndex {
                     return (self.report_error_at(e.span, 13, 0, 0, 0), ty_error())
                 }
-                let base_pair = self.check_opt_expr(idx_expr.left)
+                var checker_for_base = self
+                checker_for_base.suppress_linear_consume_depth = checker_for_base.suppress_linear_consume_depth + 1
+                let base_pair = checker_for_base.check_opt_expr(idx_expr.left)
                 var c = base_pair.0
+                if c.suppress_linear_consume_depth > 0 {
+                    c.suppress_linear_consume_depth = c.suppress_linear_consume_depth - 1
+                }
                 let base_ty = base_pair.1
                 let result_ty = slice_borrow_result_type(base_ty, want_mut)
                 if result_ty.kind == TypeKind::TyError && !is_error_or_unknown(base_ty) {
@@ -19107,8 +20085,16 @@ impl Checker {
         if (e.un_op == UnaryOp::OpRef || e.un_op == UnaryOp::OpRefMut) && expr_is_half_open_range(e.left) {
             return self.check_slice_borrow_expr(e)
         }
-        let pair = self.check_opt_expr(e.left)
+        let is_borrow = e.un_op == UnaryOp::OpRef || e.un_op == UnaryOp::OpRefMut
+        var checker_for_operand = self
+        if is_borrow {
+            checker_for_operand.suppress_linear_consume_depth = checker_for_operand.suppress_linear_consume_depth + 1
+        }
+        let pair = checker_for_operand.check_opt_expr(e.left)
         var c = pair.0
+        if is_borrow && c.suppress_linear_consume_depth > 0 {
+            c.suppress_linear_consume_depth = c.suppress_linear_consume_depth - 1
+        }
         let operand_ty = pair.1
         let result = unary_result_type(e.un_op, operand_ty)
         if result.kind == TypeKind::TyError && !is_error_or_unknown(operand_ty) {
@@ -19905,8 +20891,8 @@ impl Checker {
                         if provided_type_arg_count != generic_names.count {
                             c = c.report_error_at(e.span, 10, 0, 0, 0)
                         }
-                        effective_params = checker_substitute_fn_params(effective_params, generic_names, type_entry_list_clone(&lowered_type_args))
-                        effective_return_type = substitute_type_param(sig.return_type, generic_names, type_entry_list_clone(&lowered_type_args))
+                        effective_params = checker_substitute_fn_params(c.structs, c.enums, effective_params, generic_names, type_entry_list_clone(&lowered_type_args))
+                        effective_return_type = substitute_type_param(c.structs, c.enums, sig.return_type, generic_names, type_entry_list_clone(&lowered_type_args))
                     }
                 }
                 None => {}
@@ -21881,7 +22867,11 @@ impl Checker {
                     // which failed when consecutive calls borrow the same variable
                     // (the second call saw before_pair.0 == 2 from the first call's
                     // un-released borrow, and skipped the release).
-                    if implicit_release_kind == 1 || implicit_release_kind == 2 {
+                    let binding_depth = c.borrows.scope_depth_of(arg_expr.name)
+                    let retain_capture = c.closure_capture_scope_depth >= 0
+                        && binding_depth >= 0
+                        && binding_depth < c.closure_capture_scope_depth
+                    if (implicit_release_kind == 1 || implicit_release_kind == 2) && !retain_capture {
                         c.borrows = c.borrows.release_borrow(arg_expr.name)
                     }
                 }
@@ -21890,8 +22880,13 @@ impl Checker {
                    (arg_expr.un_op == UnaryOp::OpRef || arg_expr.un_op == UnaryOp::OpRefMut) {
                     let borrow_name = unary_operand_name(arg_expr.left)
                     if !name_is_empty(borrow_name) {
-                        // Unconditionally release call-site borrows after call returns
-                        c.borrows = c.borrows.release_borrow(borrow_name)
+                        let binding_depth = c.borrows.scope_depth_of(borrow_name)
+                        let retain_capture = c.closure_capture_scope_depth >= 0
+                            && binding_depth >= 0
+                            && binding_depth < c.closure_capture_scope_depth
+                        if !retain_capture {
+                            c.borrows = c.borrows.release_borrow(borrow_name)
+                        }
                     }
                 }
 
@@ -22208,22 +23203,6 @@ impl Checker {
                         c = c.ontology_boundary_check_call_arg_contract(arg_ty, param_info.ty, call_span)
                     }
                 }
-                // Linear type consumption: if arg is linear and not implicitly borrowed, consume it
-                if has_param_info &&
-                   arg_expr.kind == ExprKind::ExprIdent &&
-                   c.is_linear_type(arg_ty) &&
-                   !implicit_borrow &&
-                   c.suppress_linear_consume_depth == 0 {
-                    if c.borrows.is_borrowed(arg_expr.name) {
-                        c = c.report_error_at(call_span, 38, 0, 0, 0)
-                    } else {
-                        let consume_result = c.borrows.consume_linear(arg_expr.name)
-                        c.borrows = consume_result.0
-                        if consume_result.1 != 0 {
-                            c = c.report_error_at(call_span, 39, 0, 0, 0)
-                        }
-                    }
-                }
                 c.check_call_args_inner((*arg_list).tail, params, idx + 1, expected_count, call_span)
             }
             None => {
@@ -22287,6 +23266,9 @@ impl Checker {
         // E.g.: `if x > 0 { f(x as Pos) }` — we push `x > 0` as a guard.
         // The saved env is restored after both branches so guards don't leak.
         let saved_cond_env = c.refine_cond_env
+        let incoming_borrows = c.borrows
+        let incoming_single_use = incoming_borrows.snapshot_single_use()
+        let incoming_borrow_states = incoming_borrows.snapshot_borrow_states()
         let cond_guard = if_cond_extract_pred(e.left)
         if cond_guard.0 != 0 {
             c.refine_cond_env = refine_static_env_push(c.refine_cond_env, cond_guard.1)
@@ -22295,23 +23277,73 @@ impl Checker {
         let then_pair = c.check_opt_block(e.block)
         c = then_pair.0
         let then_ty = then_pair.1
+        let then_single_use = c.borrows.snapshot_single_use()
+        let then_borrow_states = c.borrows.snapshot_borrow_states()
         // Restore env before else branch (negation narrowing is not yet implemented
         // — the safe choice is no narrowing in the else branch).
         c.refine_cond_env = saved_cond_env
+        c.borrows = incoming_borrows
+        c.borrows = c.borrows.restore_single_use(incoming_single_use)
+        c.borrows = c.borrows.restore_borrow_states(incoming_borrow_states)
         // Check else
         match e.else_expr {
             Some(else_e) => {
                 let else_pair = c.check_expr(*else_e)
                 c = else_pair.0
                 let else_ty = else_pair.1
+                let else_single_use = c.borrows.snapshot_single_use()
+                let else_borrow_states = c.borrows.snapshot_borrow_states()
+                c.borrows = incoming_borrows
+                c.borrows = c.borrows.restore_single_use(incoming_single_use)
+                c.borrows = c.borrows.restore_borrow_states(incoming_borrow_states)
+                let then_diverges = then_ty.kind == TypeKind::TyNever
+                let else_diverges = else_ty.kind == TypeKind::TyNever
+                var result_ty = then_ty
+                if then_diverges && else_diverges {
+                    let dead_paths = c.borrows.merge_non_fallthrough_snapshots(then_single_use, else_single_use)
+                    c.borrows = c.borrows.restore_single_use(dead_paths)
+                    result_ty = ty_never()
+                } else if then_diverges {
+                    c.borrows = c.borrows.restore_single_use(else_single_use)
+                    if checker_type_has_ref_table(c.structs, c.enums, else_ty) {
+                        c.borrows = c.borrows.restore_borrow_states(else_borrow_states)
+                    }
+                    result_ty = else_ty
+                } else if else_diverges {
+                    c.borrows = c.borrows.restore_single_use(then_single_use)
+                    if checker_type_has_ref_table(c.structs, c.enums, then_ty) {
+                        c.borrows = c.borrows.restore_borrow_states(then_borrow_states)
+                    }
+                } else {
+                    let merge_result = c.borrows.merge_if_branches(then_single_use, else_single_use, true)
+                    c.borrows = merge_result.0
+                    if merge_result.1 > 0 {
+                        c = c.report_linear_branch_asymmetry(e.span)
+                    }
+                    if !c.types_compatible_structural(then_ty, else_ty) {
+                        c = c.report_mismatch(e.span, 7, then_ty, else_ty)
+                    }
+                    if checker_type_has_ref_table(c.structs, c.enums, then_ty)
+                        || checker_type_has_ref_table(c.structs, c.enums, else_ty) {
+                        let merged_borrow_states = c.borrows.merge_borrow_state_snapshots(
+                            then_borrow_states,
+                            else_borrow_states,
+                        )
+                        c.borrows = c.borrows.restore_borrow_states(merged_borrow_states)
+                    }
+                }
                 // Restore after else branch
                 c.refine_cond_env = saved_cond_env
-                if !c.types_compatible_structural(then_ty, else_ty) {
-                    c = c.report_mismatch(e.span, 7, then_ty, else_ty)
-                }
-                (c, then_ty)
+                (c, result_ty)
             }
             None => {
+                if then_ty.kind != TypeKind::TyNever {
+                    let merge_result = c.borrows.merge_if_branches(then_single_use, incoming_single_use, false)
+                    c.borrows = merge_result.0
+                    if merge_result.1 > 0 {
+                        c = c.report_linear_branch_asymmetry(e.span)
+                    }
+                }
                 c.refine_cond_env = saved_cond_env
                 (c, ty_unit())
             }
@@ -22333,7 +23365,82 @@ impl Checker {
         let scrut_pair = self.check_opt_expr(e.left)
         var c = scrut_pair.0
         let scrut_ty = scrut_pair.1
-        c.check_match_arms(e.arms, scrut_ty)
+        let incoming_borrows = c.borrows
+        let incoming_single_use = incoming_borrows.snapshot_single_use()
+        let incoming_borrow_states = incoming_borrows.snapshot_borrow_states()
+        var merged_single_use = incoming_single_use
+        var merged_non_fallthrough = incoming_single_use
+        var merged_borrow_states = incoming_borrow_states
+        var linear_asymmetry: i64 = 0
+        var cursor = e.arms
+        var result_ty = ty_unit()
+        var seen_fallthrough = false
+        var seen_non_fallthrough = false
+        var join_may_carry_borrow = false
+        while true {
+            match cursor {
+                Some(list) => {
+                    let arm = (*list).head
+                    c.borrows = incoming_borrows
+                    c.borrows = c.borrows.restore_single_use(incoming_single_use)
+                    c.borrows = c.borrows.restore_borrow_states(incoming_borrow_states)
+                    let pair = c.check_match_arm(arm, scrut_ty)
+                    c = pair.0
+                    let arm_ty = pair.1
+                    let arm_single_use = c.borrows.snapshot_single_use()
+                    let arm_borrow_states = c.borrows.snapshot_borrow_states()
+                    if arm_ty.kind == TypeKind::TyNever {
+                        if !seen_non_fallthrough {
+                            merged_non_fallthrough = arm_single_use
+                            seen_non_fallthrough = true
+                        } else {
+                            merged_non_fallthrough = c.borrows.merge_non_fallthrough_snapshots(
+                                merged_non_fallthrough,
+                                arm_single_use,
+                            )
+                        }
+                    } else if !seen_fallthrough {
+                        result_ty = arm_ty
+                        merged_single_use = arm_single_use
+                        merged_borrow_states = arm_borrow_states
+                        join_may_carry_borrow = checker_type_has_ref_table(c.structs, c.enums, arm_ty)
+                        seen_fallthrough = true
+                    } else {
+                        if !c.types_compatible_structural(arm_ty, result_ty) {
+                            c = c.report_mismatch(arm.span, 18, result_ty, arm_ty)
+                        }
+                        let merge_result = c.borrows.merge_alternative_snapshots(merged_single_use, arm_single_use)
+                        merged_single_use = merge_result.0
+                        linear_asymmetry = linear_asymmetry + merge_result.1
+                        merged_borrow_states = c.borrows.merge_borrow_state_snapshots(
+                            merged_borrow_states,
+                            arm_borrow_states,
+                        )
+                        if checker_type_has_ref_table(c.structs, c.enums, arm_ty) {
+                            join_may_carry_borrow = true
+                        }
+                    }
+                    cursor = (*list).tail
+                }
+                None => break
+            }
+        }
+        c.borrows = incoming_borrows
+        c.borrows = c.borrows.restore_single_use(incoming_single_use)
+        c.borrows = c.borrows.restore_borrow_states(incoming_borrow_states)
+        if seen_fallthrough {
+            c.borrows = c.borrows.restore_single_use(merged_single_use)
+            if join_may_carry_borrow {
+                c.borrows = c.borrows.restore_borrow_states(merged_borrow_states)
+            }
+        } else if seen_non_fallthrough {
+            c.borrows = c.borrows.restore_single_use(merged_non_fallthrough)
+            result_ty = ty_never()
+        }
+        if linear_asymmetry > 0 {
+            c = c.report_linear_match_asymmetry(e.span)
+        }
+        (c, result_ty)
     }
 
     fn check_match_arms(self, opt: Option<Box<MatchArmList> >, scrut_ty: TypeEntry) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
@@ -22358,6 +23465,16 @@ impl Checker {
         let pair = c.check_expr(arm.body)
         c = pair.0
         let body_ty = pair.1
+        let linear_result = c.borrows.check_linear_consumed()
+        c.borrows = linear_result.0
+        if linear_result.1 > 0 {
+            c.had_error = true
+            c.error_count = c.error_count + 1
+            c.diag_emitted = true
+            print("error[E040]: linear value not consumed (")
+            print_int(linear_result.1)
+            print(" unconsumed)\n")
+        }
         c = c.pop_const_scope()
         c.borrows = c.borrows.pop_scope()
         c.env = c.env.pop_scope()
@@ -22388,7 +23505,12 @@ impl Checker {
                 c = c.const_int_bind_unknown(pat.name)
                 // Track pattern binding for borrow checking (linear if type is linear)
                 let lin = c.is_linear_type(scrut_ty)
-                c.borrows = c.borrows.track(pat.name, lin)
+                let aff = c.is_affine_type(scrut_ty)
+                let tracked = c.borrows.track(pat.name, lin, aff)
+                c.borrows = tracked.0
+                if tracked.1 != 0 {
+                    c = c.report_error_at(pat.span, 64, 128, 128, 0)
+                }
                 c
             }
             PatternKind::PatIntLit => self
@@ -22491,6 +23613,7 @@ impl Checker {
         // Check iterator expression (range)
         let iter_pair = self.check_opt_expr(e.left)
         var c = iter_pair.0
+        let before_body = c.borrows.snapshot_single_use()
         // Push scope for loop variable
         c.env = c.env.push_scope()
         c.borrows = c.borrows.push_scope()
@@ -22504,10 +23627,15 @@ impl Checker {
         c = c.pop_const_scope()
         c.borrows = c.borrows.pop_scope()
         c.env = c.env.pop_scope()
+        let repeated_move_mode = c.borrows.repeated_region_new_move_mode(before_body)
+        if repeated_move_mode != 0 {
+            c = c.report_repeated_region_move(e.span, repeated_move_mode)
+        }
         (c, ty_unit())
     }
 
     fn check_while_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        let before_loop = self.borrows.snapshot_single_use()
         let cond_pair = self.check_opt_expr(e.left)
         var c = cond_pair.0
         let cond_ty = cond_pair.1
@@ -22529,11 +23657,16 @@ impl Checker {
         let body_pair = c.check_opt_block(e.block)
         c = body_pair.0
         c.loop_depth = c.loop_depth - 1
+        let repeated_move_mode = c.borrows.repeated_region_new_move_mode(before_loop)
+        if repeated_move_mode != 0 {
+            c = c.report_repeated_region_move(e.span, repeated_move_mode)
+        }
         (c, ty_unit())
     }
 
     fn check_loop_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         var c = self
+        let before_body = c.borrows.snapshot_single_use()
         // Check loop depth limit before incrementing
         let depth_pair = c.check_loop_depth(e.span)
         c = depth_pair.0
@@ -22546,6 +23679,10 @@ impl Checker {
         let pair = c.check_opt_block(e.block)
         c = pair.0
         c.loop_depth = c.loop_depth - 1
+        let repeated_move_mode = c.borrows.repeated_region_new_move_mode(before_body)
+        if repeated_move_mode != 0 {
+            c = c.report_repeated_region_move(e.span, repeated_move_mode)
+        }
         (c, ty_unit())
     }
 
@@ -22568,6 +23705,15 @@ impl Checker {
                     c = c.report_mismatch(e.span, 8, c.current_return_type, val_ty)
                 }
             }
+        }
+        let unconsumed = c.borrows.unconsumed_linear_count()
+        if unconsumed > 0 {
+            c.had_error = true
+            c.error_count = c.error_count + 1
+            c.diag_emitted = true
+            print("error[E040]: linear value not consumed (")
+            print_int(unconsumed)
+            print(" unconsumed)\n")
         }
         (c, ty_never())
     }
@@ -22672,6 +23818,7 @@ impl Checker {
                 let tmpl_fields = field_info_list_clone(&tmpl.fields)
                 let tmpl_tp_buf = TypeParamBuf { names: tmpl.type_param_names, count: tmpl.type_param_count }
                 let tmpl_is_linear = tmpl.is_linear
+                let tmpl_is_affine = tmpl.is_affine
                 let tmpl_visibility_kind = tmpl.visibility_kind
                 let tmpl_defining_module_id = tmpl.defining_module_id
                 let tmpl_visibility = tmpl.visibility
@@ -22684,12 +23831,13 @@ impl Checker {
                 let existing_idx = struct_table_find(c.structs, mangled)
                 if existing_idx < 0 {
                     // Monomorphize
-                    let mono_fields = monomorphize_fields(tmpl_fields, tmpl_tp_buf, &args)
+                    let mono_fields = monomorphize_fields(c.structs, c.enums, tmpl_fields, tmpl_tp_buf, &args)
                     let mono_info = StructInfo {
                         name: mangled,
                         fields: mono_fields.0,
                         field_count: mono_fields.1,
                         is_linear: tmpl_is_linear,
+                    is_affine: tmpl_is_affine,
                     type_param_count: 0,
                     type_param_names: [Name { buf: [0; 128], len: 0 }; 8],
                     is_generic_template: false,
@@ -22707,7 +23855,7 @@ impl Checker {
                     let mono_si = struct_table_get(c.structs, mono_idx)
                     c = c.check_struct_field_inits(e.fields, mono_si, e.span)
                 }
-                (c, ty_named(mangled))
+                (c, ty_named_with_type_args(mangled, args))
             }
         }
     }
@@ -23004,8 +24152,11 @@ impl Checker {
         c.current_effect_count = 0
 
         // Push scope for parameters
+        let outer_single_use = c.borrows.snapshot_single_use()
+        let saved_closure_capture_scope_depth = c.closure_capture_scope_depth
         c.env = c.env.push_scope()
         c.borrows = c.borrows.push_scope()
+        c.closure_capture_scope_depth = c.borrows.scope_depth
         c = c.push_const_scope()
 
         // Bind closure params in environment
@@ -23015,6 +24166,12 @@ impl Checker {
         let body_pair = c.check_opt_expr(e.closure_body)
         c = body_pair.0
         let body_ty = body_pair.1
+        let capture_counts = c.borrows.single_use_capture_counts_since(outer_single_use)
+        let closure_param_linear_check = c.borrows.check_linear_consumed()
+        c.borrows = closure_param_linear_check.0
+        if closure_param_linear_check.1 > 0 {
+            c = c.report_error_at(e.span, 40, 0, 0, 0)
+        }
 
         // Infer return type from body if not annotated
         let inferred_ret_ty = if ret_ty.kind == TypeKind::TyUnknown {
@@ -23038,14 +24195,18 @@ impl Checker {
         c = c.pop_const_scope()
         c.borrows = c.borrows.pop_scope()
         c.env = c.env.pop_scope()
+        c.closure_capture_scope_depth = saved_closure_capture_scope_depth
 
         // Restore outer effects context
         c.current_effects = saved_effects
         c.current_effect_count = saved_effect_count
 
-        // Sprint 231: Capture analysis — scan outer scope for linear + epistemic
-        var capture_linear = false
-        var capture_linear_count: i64 = 0
+        // Sprint 231: moved single-use captures come from the closure-body delta;
+        // unrelated outer bindings must not change the callable's ownership mode.
+        let capture_linear_count = capture_counts.0
+        let capture_affine_count = capture_counts.1
+        let capture_linear = capture_linear_count > 0
+        let capture_affine = !capture_linear && capture_affine_count > 0
         var capture_epsilon: f64 = 0.0 - 1.0
         // Conservative: scan all bindings in the outer scope (below closure params)
         // The closure scope was pushed above; outer bindings are those with
@@ -23055,10 +24216,6 @@ impl Checker {
         while ci < env_count {
             let binding = c.env.bindings[ci as usize]
             let binding_ty = binding.ty
-            if c.is_linear_type(binding_ty) {
-                capture_linear = true
-                capture_linear_count = capture_linear_count + 1
-            }
             if binding_ty.kind == TypeKind::TyKnowledge {
                 let eps = binding_ty.knowledge_epsilon
                 if eps >= 0.0 {
@@ -23098,6 +24255,7 @@ impl Checker {
             is_kernel: false,
             is_epistemic_kernel: false,
             is_linear_closure: capture_linear,
+            is_affine_closure: capture_affine,
             linear_capture_count: capture_linear_count,
             epistemic_epsilon: capture_epsilon,
             visibility_kind: VISIBILITY_PRIVATE,
@@ -23158,6 +24316,13 @@ impl Checker {
         let param_ty = pair.1
         c.env = c.env.bind(p.name, param_ty, false)
         c = c.const_int_bind_unknown(p.name)
+        let lin = c.is_linear_type(param_ty)
+        let aff = c.is_affine_type(param_ty)
+        let tracked = c.borrows.track(p.name, lin, aff)
+        c.borrows = tracked.0
+        if tracked.1 != 0 {
+            c = c.report_error_at(p.span, 64, 128, 128, 0)
+        }
         c
     }
 

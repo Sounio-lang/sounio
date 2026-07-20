@@ -4,6 +4,7 @@
 // Enforces:
 //   - &x: fails if exclusive borrow is active
 //   - &!x: fails if any borrow is active
+//   - affine struct: may be consumed at most once
 //   - linear struct: must be consumed exactly once
 //   - Scope exit: releases borrows created in that scope
 
@@ -19,7 +20,9 @@ pub struct BorrowEntry {
     state: i64,          // 0=Owned, 1=SharedBorrow, 2=ExclusiveBorrow
     shared_count: i64,   // Number of active shared borrows
     is_linear: bool,     // Whether this is a linear type variable
-    consumed: bool,      // Whether a linear variable has been consumed
+    is_affine: bool,     // Whether this is an affine type variable
+    consumed: bool,      // Whether a single-use variable has been consumed
+    linear_obligation_reported: bool, // Avoid repeating a path obligation at scope exit
     scope_depth: i64,    // Scope where this entry was created
     provenance: i64,     // escape provenance: 0=first-class (param/global/safe), 1=local (frame-bound ref)
 }
@@ -30,7 +33,9 @@ fn empty_borrow_entry() -> BorrowEntry {
         state: 0,
         shared_count: 0,
         is_linear: false,
+        is_affine: false,
         consumed: false,
+        linear_obligation_reported: false,
         scope_depth: 0,
         provenance: 0,
     }
@@ -45,6 +50,18 @@ pub struct BorrowEnv {
     count: i64,
     scope_starts: [i64; 64],
     scope_depth: i64,
+}
+
+pub struct SingleUseSnapshot {
+    consumed: [bool; 128],
+    linear_reported: [bool; 128],
+    count: i64,
+}
+
+pub struct BorrowStateSnapshot {
+    states: [i64; 128],
+    shared_counts: [i64; 128],
+    count: i64,
 }
 
 fn borrow_env_new() -> BorrowEnv {
@@ -83,22 +100,27 @@ impl BorrowEnv {
         env
     }
 
-    // Register a variable for borrow tracking
-    fn track(self, name: Name, is_linear: bool) -> BorrowEnv with Mut, Panic, Div {
+    // Register a variable for borrow tracking. A full table is a hard semantic
+    // limit: silently omitting a binding would let ownership and borrow checks
+    // disappear beyond the capacity boundary.
+    fn track(self, name: Name, is_linear: bool, is_affine: bool) -> (BorrowEnv, i64) with Mut, Panic, Div {
         var env = self
-        if env.count < 128 {
-            env.entries[env.count] = BorrowEntry {
-                name: name,
-                state: 0,
-                shared_count: 0,
-                is_linear: is_linear,
-                consumed: false,
-                scope_depth: env.scope_depth,
-                provenance: 0,
-            }
-            env.count = env.count + 1
+        if env.count >= 128 {
+            return (env, 64)
         }
-        env
+        env.entries[env.count] = BorrowEntry {
+            name: name,
+            state: 0,
+            shared_count: 0,
+            is_linear: is_linear,
+            is_affine: is_affine,
+            consumed: false,
+            linear_obligation_reported: false,
+            scope_depth: env.scope_depth,
+            provenance: 0,
+        }
+        env.count = env.count + 1
+        (env, 0)
     }
 
     // Find entry index for a variable (most recent binding)
@@ -176,7 +198,7 @@ impl BorrowEnv {
         (env, 0)
     }
 
-    // Mark a linear variable as consumed (moved)
+    // Mark an affine or linear variable as consumed (moved).
     // Returns (updated env, error_code) where 0 = ok, 39 = already consumed
     fn consume_linear(self, name: Name) -> (BorrowEnv, i64) with Mut, Panic, Div {
         var env = self
@@ -185,11 +207,11 @@ impl BorrowEnv {
             return (env, 0)
         }
         let entry = env.entries[idx]
-        if !entry.is_linear {
+        if !entry.is_linear && !entry.is_affine {
             return (env, 0)
         }
         if entry.consumed {
-            // Double consumption of linear value
+            // Double consumption of a single-use value
             return (env, 39)
         }
         env.entries[idx].consumed = true
@@ -208,12 +230,322 @@ impl BorrowEnv {
         }
         var i = scope_start
         while i < env.count {
-            if env.entries[i].is_linear && !env.entries[i].consumed {
+            if env.entries[i].is_linear
+                && !env.entries[i].consumed
+                && !env.entries[i].linear_obligation_reported {
                 unconsumed = unconsumed + 1
             }
             i = i + 1
         }
         (env, unconsumed)
+    }
+
+    fn unconsumed_linear_count(self) -> i64 with Mut, Panic, Div {
+        var unconsumed: i64 = 0
+        var i: i64 = 0
+        while i < self.count {
+            if self.entries[i].is_linear
+                && !self.entries[i].consumed
+                && !self.entries[i].linear_obligation_reported {
+                unconsumed = unconsumed + 1
+            }
+            i = i + 1
+        }
+        unconsumed
+    }
+
+    // A return checks every live linear binding on that control-flow path. Keep
+    // ownership intact for branch joining, but do not diagnose it again later.
+    fn mark_unconsumed_linear_reported(self) -> BorrowEnv with Mut, Panic, Div {
+        var env = self
+        var i: i64 = 0
+        while i < env.count {
+            if env.entries[i].is_linear && !env.entries[i].consumed {
+                env.entries[i].linear_obligation_reported = true
+            }
+            i = i + 1
+        }
+        env
+    }
+
+    // Return 2 for a newly moved linear value, 1 for affine, and 0 when the
+    // potentially repeating region did not move an outer single-use binding.
+    fn repeated_region_new_move_mode(self, before: SingleUseSnapshot) -> i64 with Mut, Panic, Div {
+        var mode: i64 = 0
+        var i: i64 = 0
+        while i < self.count && i < before.count {
+            if !before.consumed[i] && self.entries[i].consumed {
+                if self.entries[i].is_linear {
+                    mode = 2
+                } else if self.entries[i].is_affine && mode < 1 {
+                    mode = 1
+                }
+            }
+            i = i + 1
+        }
+        mode
+    }
+
+    // Count outer single-use bindings newly moved while checking a closure body.
+    // The snapshot predates the closure scope, so parameters and body locals are
+    // excluded. The first result is linear captures, the second affine captures.
+    fn single_use_capture_counts_since(self, before: SingleUseSnapshot) -> (i64, i64) with Mut, Panic, Div {
+        var linear_count: i64 = 0
+        var affine_count: i64 = 0
+        var i: i64 = 0
+        while i < self.count && i < before.count {
+            if !before.consumed[i] && self.entries[i].consumed {
+                if self.entries[i].is_linear {
+                    linear_count = linear_count + 1
+                } else if self.entries[i].is_affine {
+                    affine_count = affine_count + 1
+                }
+            }
+            i = i + 1
+        }
+        (linear_count, affine_count)
+    }
+
+    // Prepare an identifier assignment. Linear values cannot be overwritten
+    // while still live; affine values may be abandoned. The assigned value is
+    // a fresh ownership state and therefore starts unconsumed.
+    fn prepare_reassignment(self, name: Name) -> (BorrowEnv, i64) with Mut, Panic, Div {
+        var env = self
+        let idx = env.find(name)
+        if idx < 0 {
+            return (env, 0)
+        }
+        if env.entries[idx].state != 0 {
+            return (env, 38)
+        }
+        if env.entries[idx].is_linear && !env.entries[idx].consumed {
+            // Recovery continues with the newly assigned value live. A later
+            // valid use consumes that fresh value without cascading into E039.
+            env.entries[idx].consumed = false
+            env.entries[idx].linear_obligation_reported = false
+            return (env, 40)
+        }
+        if env.entries[idx].is_linear || env.entries[idx].is_affine {
+            env.entries[idx].consumed = false
+            env.entries[idx].linear_obligation_reported = false
+        }
+        (env, 0)
+    }
+
+    fn snapshot_single_use(self) -> SingleUseSnapshot with Mut, Panic, Div {
+        var bits = [false; 128]
+        var reported = [false; 128]
+        var i: i64 = 0
+        while i < self.count {
+            bits[i] = self.entries[i].consumed
+            reported[i] = self.entries[i].linear_obligation_reported
+            i = i + 1
+        }
+        SingleUseSnapshot { consumed: bits, linear_reported: reported, count: self.count }
+    }
+
+    fn restore_single_use(self, snapshot: SingleUseSnapshot) -> BorrowEnv with Mut, Panic, Div {
+        var env = self
+        var i: i64 = 0
+        if snapshot.count != env.count {
+            // A partial restore would leave an arbitrary suffix live. Make every
+            // tracked single-use value unavailable and suppress follow-on scope
+            // diagnostics; the originating control-flow error remains primary.
+            while i < env.count {
+                env.entries[i].consumed = true
+                env.entries[i].linear_obligation_reported = true
+                i = i + 1
+            }
+            return env
+        }
+        while i < env.count {
+            env.entries[i].consumed = snapshot.consumed[i]
+            env.entries[i].linear_obligation_reported = snapshot.linear_reported[i]
+            i = i + 1
+        }
+        env
+    }
+
+    fn snapshot_borrow_states(self) -> BorrowStateSnapshot with Mut, Panic, Div {
+        var states: [i64; 128] = [0; 128]
+        var shared_counts: [i64; 128] = [0; 128]
+        var i: i64 = 0
+        while i < self.count {
+            states[i] = self.entries[i].state
+            shared_counts[i] = self.entries[i].shared_count
+            i = i + 1
+        }
+        BorrowStateSnapshot { states: states, shared_counts: shared_counts, count: self.count }
+    }
+
+    fn restore_borrow_states(self, snapshot: BorrowStateSnapshot) -> BorrowEnv with Mut, Panic, Div {
+        var env = self
+        var i: i64 = 0
+        if snapshot.count != env.count {
+            // A malformed flow snapshot cannot prove any tracked root unborrowed.
+            // Exclusive is the canonical fail-closed state and shared_count must
+            // remain zero for that state.
+            while i < env.count {
+                env.entries[i].state = 2
+                env.entries[i].shared_count = 0
+                i = i + 1
+            }
+            return env
+        }
+        while i < env.count {
+            env.entries[i].state = snapshot.states[i]
+            env.entries[i].shared_count = snapshot.shared_counts[i]
+            i = i + 1
+        }
+        env
+    }
+
+    // Join borrow states from mutually exclusive fallthrough alternatives whose
+    // result may carry a reference. The numeric state order is also its
+    // conservatism order: owned < shared < exclusive. Shared counts use max
+    // because exactly one alternative executes, while every possibly borrowed
+    // root must remain unavailable after the join.
+    fn merge_borrow_state_snapshots(
+        self,
+        accumulated: BorrowStateSnapshot,
+        next: BorrowStateSnapshot,
+    ) -> BorrowStateSnapshot with Mut, Panic, Div {
+        var merged = accumulated
+        if accumulated.count != self.count || next.count != self.count {
+            // This violates the join precondition. Fail closed: no tracked root
+            // may be moved or borrowed again through a malformed flow state.
+            var failed = self.snapshot_borrow_states()
+            var failed_index: i64 = 0
+            while failed_index < self.count {
+                failed.states[failed_index] = 2
+                failed.shared_counts[failed_index] = 0
+                failed_index = failed_index + 1
+            }
+            return failed
+        }
+        var i: i64 = 0
+        while i < self.count {
+            let accumulated_state = accumulated.states[i]
+            let next_state = next.states[i]
+            let joined_state = if next_state > accumulated_state {
+                next_state
+            } else {
+                accumulated_state
+            }
+            merged.states[i] = joined_state
+            if joined_state == 1 {
+                merged.shared_counts[i] = if next.shared_counts[i] > accumulated.shared_counts[i] {
+                    next.shared_counts[i]
+                } else {
+                    accumulated.shared_counts[i]
+                }
+            } else {
+                // Owned and exclusive states both have canonical shared count 0.
+                merged.shared_counts[i] = 0
+            }
+            i = i + 1
+        }
+        merged
+    }
+
+    // Merge ownership after an if-expression. Both branches begin from the
+    // same lightweight consumption snapshot. Linear values must agree across
+    // paths; affine values are unavailable after the join if either path moved.
+    fn merge_if_branches(
+        self,
+        then_snapshot: SingleUseSnapshot,
+        else_snapshot: SingleUseSnapshot,
+        has_else: bool,
+    ) -> (BorrowEnv, i64) with Mut, Panic, Div {
+        var merged = self
+        var linear_asymmetry: i64 = 0
+        // Both snapshots must describe the same outer environment. Branch-local
+        // entries are popped before the snapshot reaches this join.
+        if then_snapshot.count != merged.count || else_snapshot.count != merged.count {
+            return (merged, 1)
+        }
+        var i: i64 = 0
+        while i < merged.count {
+            let then_consumed = then_snapshot.consumed[i]
+            let else_consumed = if has_else {
+                else_snapshot.consumed[i]
+            } else {
+                merged.entries[i].consumed
+            }
+            if merged.entries[i].is_linear {
+                if then_consumed != else_consumed {
+                    linear_asymmetry = linear_asymmetry + 1
+                    // The control-flow error is authoritative; treat the value as
+                    // unavailable after the invalid join to avoid a second E040 at
+                    // the enclosing scope boundary.
+                    merged.entries[i].consumed = true
+                } else {
+                    merged.entries[i].consumed = then_consumed
+                }
+            } else if merged.entries[i].is_affine {
+                merged.entries[i].consumed = then_consumed || else_consumed
+            }
+            merged.entries[i].linear_obligation_reported =
+                then_snapshot.linear_reported[i] || else_snapshot.linear_reported[i]
+            i = i + 1
+        }
+        (merged, linear_asymmetry)
+    }
+
+    // Merge two alternative control-flow outcomes represented as lightweight
+    // consumption snapshots. Linear values must agree across all alternatives;
+    // affine values become unavailable when any alternative moves them.
+    fn merge_alternative_snapshots(
+        self,
+        accumulated: SingleUseSnapshot,
+        next: SingleUseSnapshot,
+    ) -> (SingleUseSnapshot, i64) with Mut, Panic, Div {
+        var merged = accumulated
+        var linear_asymmetry: i64 = 0
+        if accumulated.count != self.count || next.count != self.count {
+            return (merged, 1)
+        }
+        var i: i64 = 0
+        while i < self.count {
+            let accumulated_consumed = accumulated.consumed[i]
+            let next_consumed = next.consumed[i]
+            if self.entries[i].is_linear {
+                if accumulated_consumed != next_consumed {
+                    linear_asymmetry = linear_asymmetry + 1
+                    // The join diagnostic is authoritative. Keep the value
+                    // unavailable afterwards to avoid a second scope-exit error.
+                    merged.consumed[i] = true
+                }
+            } else if self.entries[i].is_affine {
+                merged.consumed[i] = accumulated_consumed || next_consumed
+            }
+            merged.linear_reported[i] =
+                accumulated.linear_reported[i] || next.linear_reported[i]
+            i = i + 1
+        }
+        (merged, linear_asymmetry)
+    }
+
+    // Combine bookkeeping for alternatives that never reach their join. There
+    // is no consumption asymmetry to diagnose because no successor observes
+    // either state; OR only prevents duplicate path-obligation diagnostics.
+    fn merge_non_fallthrough_snapshots(
+        self,
+        accumulated: SingleUseSnapshot,
+        next: SingleUseSnapshot,
+    ) -> SingleUseSnapshot with Mut, Panic, Div {
+        var merged = accumulated
+        if accumulated.count != self.count || next.count != self.count {
+            return merged
+        }
+        var i: i64 = 0
+        while i < self.count {
+            merged.consumed[i] = accumulated.consumed[i] || next.consumed[i]
+            merged.linear_reported[i] =
+                accumulated.linear_reported[i] || next.linear_reported[i]
+            i = i + 1
+        }
+        merged
     }
 
     // Check if a variable is currently borrowed (state != 0)
@@ -225,6 +557,12 @@ impl BorrowEnv {
         }
         let entry = self.entries[idx]
         entry.state != 0  // 0 = Owned, 1 = SharedBorrow, 2 = ExclusiveBorrow
+    }
+
+    fn is_consumed(self, name: Name) -> bool with Mut, Panic, Div {
+        let idx = self.find(name)
+        if idx < 0 { return false }
+        self.entries[idx].consumed
     }
 
     // Release a borrow on a named variable, restoring it to Owned state.
