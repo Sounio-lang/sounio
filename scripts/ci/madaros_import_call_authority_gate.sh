@@ -76,7 +76,7 @@ strip_shape="$(sed -n '/^fn module_frontend_strip_import_authority_stubs(/,/^fn 
 compile_shape="$(sed -n '/^pub fn module_frontend_compile_collected_to_file(/,/^pub fn module_frontend_imported_native_compile(/p' "$FRONTEND")"
 lower_binding_shape="$(sed -n '/^fn lowerer_extern_binding_index(/,/^fn lowerer_preseed_external_impl_method_items_mut(/p' "$LOWER")"
 
-for field in caller_module_id local_name defining_module_id export_name qualifier_path; do
+for field in caller_module_id local_name defining_module_id export_name qualified_name qualifier_path; do
   grep -Fq "pub $field:" <<<"$binding_shape" || fail "binding_field_${field}_missing"
 done
 grep -Fq 'MF_IMPORT_AUTHORITY_PREPARED_COLLECTION_ID = (*out).collection_id' <<<"$collector_shape" ||
@@ -94,10 +94,13 @@ if grep -Fq '(*stage).e.left = Some(Box::new(rewritten))' "$FRONTEND"; then
 fi
 grep -Fq 'MF_EXTERN_BINDING_QUALIFIER_PATHS[qualifier_sidecar_index as usize] = requested_import' "$FRONTEND" ||
   fail qualifier_text_not_derived_from_authored_import
+grep -Fq 'MF_EXTERN_BINDING_QUALIFIED_NAMES[qualifier_sidecar_index as usize] = str_from_bytes(qualified_name.buf, qualified_name.len)' "$FRONTEND" ||
+  fail qualified_lower_name_not_derived_from_authored_import
 for sidecar in \
   MF_EXTERN_BINDING_LOCAL_NAMES \
   MF_EXTERN_BINDING_EXPORT_NAMES \
-  MF_EXTERN_BINDING_QUALIFIER_PATHS; do
+  MF_EXTERN_BINDING_QUALIFIER_PATHS \
+  MF_EXTERN_BINDING_QUALIFIED_NAMES; do
   grep -Fq "var $sidecar: [string; 2048]" "$FRONTEND" || fail "binding_sidecar_${sidecar}_missing"
 done
 grep -Fq 'fn module_frontend_call_text_selects_binding(' "$FRONTEND" || fail qualified_exact_path_selection_missing
@@ -119,6 +122,12 @@ grep -Fq 'MADAROS_IMPORT_AUTHORITY_REFUSAL schema=1 global_unique_fallback=0' <<
   fail refusal_receipt_missing
 grep -Fq 'MADAROS_IMPORT_AUTHORITY_RECEIPT schema=1 modules=' <<<"$authority_shape" ||
   fail acceptance_receipt_missing
+grep -Fq 'fn module_frontend_rebind_qualified_calls_to_external_identity(' "$FRONTEND" ||
+  fail qualified_ir_identity_rebind_missing
+grep -Fq 'ir_merge_find_function_identity_index(' "$FRONTEND" ||
+  fail qualified_ir_exact_identity_lookup_missing
+grep -Fq 'MADAROS_IMPORT_AUTHORITY_IR_REBIND_RECEIPT schema=1 caller=' "$FRONTEND" ||
+  fail qualified_ir_rebind_receipt_missing
 grep -Fq 'module_frontend_strip_import_authority_stubs(programs, loaded)' <<<"$compile_shape" ||
   fail checker_stub_strip_missing
 grep -Fq 'trace.last_stage = "lower_merge"' <<<"$compile_shape" || fail lower_boundary_missing
@@ -227,6 +236,7 @@ compile_case() {
   [[ "$(od -An -tx1 -N4 "$elf" | tr -d ' \n')" == 7f454c46 ]] || fail "${label}_output_not_elf"
   grep -Fq 'MADAROS_IMPORT_AUTHORITY_RECEIPT schema=1' "$log" || fail "${label}_authority_receipt_missing"
   grep -Fq 'global_unique_fallback=0' "$log" || fail "${label}_fallback_receipt_missing"
+  grep -Fq 'MADAROS_IMPORT_AUTHORITY_IR_REBIND_RECEIPT schema=1' "$log" || fail "${label}_ir_rebind_receipt_missing"
   grep -Eq '^Merged IR: [1-9][0-9]*$' "$log" || fail "${label}_merged_ir_receipt_missing"
 }
 

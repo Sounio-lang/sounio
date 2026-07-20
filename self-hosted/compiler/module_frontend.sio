@@ -166,6 +166,7 @@ var MF_EXTERN_BINDING_PTRS: [i64; 2048] = [0; 2048]
 var MF_EXTERN_BINDING_LOCAL_NAMES: [string; 2048] = [""; 2048]
 var MF_EXTERN_BINDING_EXPORT_NAMES: [string; 2048] = [""; 2048]
 var MF_EXTERN_BINDING_QUALIFIER_PATHS: [string; 2048] = [""; 2048]
+var MF_EXTERN_BINDING_QUALIFIED_NAMES: [string; 2048] = [""; 2048]
 var MF_PROGRAM_ITEM_PTRS: [i64; 256] = [0; 256]
 var MF_IMPORT_AUTHORITY_STUB_COUNTS: [i64; 256] = [0; 256]
 var MF_IMPORT_AUTHORITY_ERROR_COUNT: i64 = 0
@@ -5836,6 +5837,16 @@ fn module_frontend_lower_program_box_traced_with_externs(
         program_count,
         module_index
     )
+    let qualified_rebind_count = module_frontend_rebind_qualified_calls_to_external_identity(
+        &! (*body_module_box),
+        module_index,
+        &! MF_EXTERN_BINDING_PTRS,
+        binding_count,
+    )
+    if qualified_rebind_count < 0 {
+        trace.last_stage = "lower_bodies_error"
+        return module_frontend_lower_box_error("qualified_call_identity_rebind_failed")
+    }
 
     trace.body_lowered_modules = trace.body_lowered_modules + 1
     trace.lowered_modules = trace.lowered_modules + 1
@@ -5931,6 +5942,16 @@ fn module_frontend_lower_program_items_box_traced_with_externs(
         program_count,
         module_index
     )
+    let qualified_rebind_count = module_frontend_rebind_qualified_calls_to_external_identity(
+        &! (*body_module_box),
+        module_index,
+        &! MF_EXTERN_BINDING_PTRS,
+        binding_count,
+    )
+    if qualified_rebind_count < 0 {
+        trace.last_stage = "lower_bodies_error"
+        return module_frontend_lower_box_error("qualified_call_identity_rebind_failed")
+    }
 
     if module_frontend_items_have_ontology(items) {
         checker_apply_ir_ontology_parameter_links_from_items(items, &! (*body_module_box))
@@ -6086,6 +6107,7 @@ fn module_frontend_items_explicitly_import_definition(
 ) -> bool with IO, Mut, Panic, Div, Alloc {
     if qualifier_sidecar_index >= 0 && qualifier_sidecar_index < 2048 {
         MF_EXTERN_BINDING_QUALIFIER_PATHS[qualifier_sidecar_index as usize] = ""
+        MF_EXTERN_BINDING_QUALIFIED_NAMES[qualifier_sidecar_index as usize] = ""
     }
     var current = items
     while true {
@@ -6109,6 +6131,11 @@ fn module_frontend_items_explicitly_import_definition(
                                 (*qualifier_path) = item.use_path
                                 if qualifier_sidecar_index >= 0 && qualifier_sidecar_index < 2048 {
                                     MF_EXTERN_BINDING_QUALIFIER_PATHS[qualifier_sidecar_index as usize] = use_path_ref_to_string(&item.use_path)
+                                    let qualifier_first = ir_path_first_name(item.use_path)
+                                    if qualifier_first.len > 0 {
+                                        let qualified_name = ir_mangle_method_name(qualifier_first, name)
+                                        MF_EXTERN_BINDING_QUALIFIED_NAMES[qualifier_sidecar_index as usize] = str_from_bytes(qualified_name.buf, qualified_name.len)
+                                    }
                                 }
                                 return true
                             }
@@ -6134,6 +6161,11 @@ fn module_frontend_items_explicitly_import_definition(
                                 (*qualifier_path) = item.use_path
                                 if qualifier_sidecar_index >= 0 && qualifier_sidecar_index < 2048 {
                                     MF_EXTERN_BINDING_QUALIFIER_PATHS[qualifier_sidecar_index as usize] = requested_import
+                                    let qualifier_first = ir_path_first_name(item.use_path)
+                                    if qualifier_first.len > 0 {
+                                        let qualified_name = ir_mangle_method_name(qualifier_first, name)
+                                        MF_EXTERN_BINDING_QUALIFIED_NAMES[qualifier_sidecar_index as usize] = str_from_bytes(qualified_name.buf, qualified_name.len)
+                                    }
                                 }
                                 return true
                             }
@@ -6248,6 +6280,10 @@ fn module_frontend_binding_already_present(
                str_eq(
                    MF_EXTERN_BINDING_QUALIFIER_PATHS[i as usize],
                    MF_EXTERN_BINDING_QUALIFIER_PATHS[candidate_qualifier_index as usize]
+               ) &&
+               str_eq(
+                   MF_EXTERN_BINDING_QUALIFIED_NAMES[i as usize],
+                   MF_EXTERN_BINDING_QUALIFIED_NAMES[candidate_qualifier_index as usize]
                ) {
                 return true
             }
@@ -6292,6 +6328,7 @@ fn module_frontend_append_external_binding(
     (*binding).local_name = local_name
     (*binding).defining_module_id = defining_module_id
     (*binding).export_name = export_name
+    (*binding).qualified_name = make_name(MF_EXTERN_BINDING_QUALIFIED_NAMES[count as usize])
     (*binding).qualifier_path = (*qualifier_path)
     (*binding).used_by_call = false
     MF_EXTERN_BINDING_LOCAL_NAMES[count as usize] = str_from_bytes(local_name.buf, local_name.len)
@@ -6308,7 +6345,9 @@ fn module_frontend_append_external_binding(
         print(" export=")
         print(MF_EXTERN_BINDING_EXPORT_NAMES[count as usize])
         print(" qualifier=")
-        println(MF_EXTERN_BINDING_QUALIFIER_PATHS[count as usize])
+        print(MF_EXTERN_BINDING_QUALIFIER_PATHS[count as usize])
+        print(" qualified=")
+        println(MF_EXTERN_BINDING_QUALIFIED_NAMES[count as usize])
     }
     count + 1
 }
@@ -6482,6 +6521,78 @@ fn module_frontend_collect_external_bindings(
         return -1
     }
     count
+}
+
+// Qualified paths lower to a linker alias (`leaf::answer` -> `leaf_answer`).
+// Bind that alias back to the exact authorized definition before modules are
+// merged. AST rewrites are retained for checker compatibility, but are not an
+// IR authority boundary because lean_single can drop large Expr Box updates.
+fn module_frontend_rebind_qualified_calls_to_external_identity(
+    module: &! IrModule,
+    caller_module_id: i64,
+    binding_ptrs: &![i64; 2048],
+    binding_count: i64,
+) -> i64 with IO, Mut, Panic, Div {
+    var rewrite_count: i64 = 0
+    var fi: i64 = 0
+    while fi < (*module).fn_count {
+        var func = (*module).functions[fi as usize]
+        var changed = false
+        var ii: i64 = 0
+        while ii < func.instr_count {
+            let op = func.instrs[ii as usize].op
+            if op == IrOpcode::IrCall || op == IrOpcode::IrCallSret {
+                let call_name = func.instrs[ii as usize].name
+                var selected_binding: i64 = -1
+                var match_count: i64 = 0
+                var bi: i64 = 0
+                while bi < binding_count {
+                    let binding = (*binding_ptrs)[bi as usize] as *mut LowerExternBindingHandle
+                    if binding as i64 != 0 &&
+                       (*binding).caller_module_id == caller_module_id &&
+                       (*binding).qualified_name.len > 0 &&
+                       ir_name_eq((*binding).qualified_name, call_name) {
+                        selected_binding = bi
+                        match_count = match_count + 1
+                    }
+                    bi = bi + 1
+                }
+                if match_count > 1 {
+                    return -1
+                }
+                if match_count == 1 {
+                    let binding = (*binding_ptrs)[selected_binding as usize] as *mut LowerExternBindingHandle
+                    let target = ir_merge_find_function_identity_index(
+                        module,
+                        (*binding).defining_module_id,
+                        (*binding).local_name,
+                    )
+                    if target < 0 || target >= (*module).fn_count {
+                        return -1
+                    }
+                    var instr = func.instrs[ii as usize]
+                    instr.fn_id = target
+                    instr.name = (*module).functions[target as usize].name
+                    func.instrs[ii as usize] = instr
+                    changed = true
+                    rewrite_count = rewrite_count + 1
+                }
+            }
+            ii = ii + 1
+        }
+        if changed {
+            (*module).functions[fi as usize] = func
+        }
+        fi = fi + 1
+    }
+    if binding_count > 0 {
+        print("MADAROS_IMPORT_AUTHORITY_IR_REBIND_RECEIPT schema=1 caller=")
+        print_int(caller_module_id)
+        print(" rewrites=")
+        print_int(rewrite_count)
+        print(" global_unique_fallback=0\n")
+    }
+    rewrite_count
 }
 
 fn module_frontend_snapshot_program_item_handles(
