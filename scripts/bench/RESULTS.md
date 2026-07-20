@@ -57,6 +57,12 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 | rolling_quantile (1M rows, window 100, q=0.9) | | 305 | 402 | **0.76x — Sounio wins** | sorted-window vs skip-list |
 | rolling_sum_by (1M rows, 1000 groups, window 100) | | ~57 | ~180 | **0.32x — Sounio wins** | vs pandas groupby().rolling() |
 | rolling_mean_by (1M rows, 1000 groups, window 100) | | ~59 | ~163 | **0.36x — Sounio wins** | vs pandas groupby().rolling() |
+| rolling_max_by / rolling_min_by (1M rows, 1000 groups, window 100, deque) | | ~65 | ~163 | **0.40x — Sounio wins** | counting-sort + per-region deque |
+| rolling_var_by (1M rows, 1000 groups, window 100, Welford) | | ~82 | ~170 | **0.48x — Sounio wins** | (new verb) |
+| rolling_std_by (1M rows, 1000 groups, window 100, +bf_sqrt) | | ~159 | ~171 | **0.93x — Sounio wins** | grouped rolling beats even sqrt-bound |
+| rolling_median_by (1M rows, 1000 groups, window 100, sorted-window) | | ~336 | ~474 | **0.71x — Sounio wins** | counting-sort + per-region sorted window |
+| rolling_quantile_by (1M rows, 1000 groups, window 100, q=0.9) | | ~346 | ~484 | **0.72x — Sounio wins** | generalises median_by; interp at q*(w-1) |
+| nlargest_by / nsmallest_by (1M rows, 1000 groups, n=10) | | ~52 | ~335 | **0.15x — Sounio wins (6.5x)** | bounded top-n buffer vs pandas per-group sort |
 | cov (1M rows, two-pass mean-shift) | | 6.7 | 8.5 | **0.78x — Sounio wins** | (new verb) |
 | corr (1M rows, two-pass + bf_sqrt) | | 10.3 | 8.0 | **~1.3x** | (new verb) |
 | median (1M rows, quickselect) | | ~34 | ~16 | **~2.2x** | numpy SIMD introselect |

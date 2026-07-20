@@ -44,11 +44,17 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.data-io-
 > **Remaining siblings (NOT fixed; separate items):** (1) ~~`write_file`~~ — **FIXED 2026-07-19** on
 > `fix/madaros-write-file-handle-abi`: `emit_builtin_write_file` now resolves the native-v2 GC handle
 > and unpacks 8-byte boxed slots into a packed buffer (mirrors `str_from_bytes`). Canonical shape is
-> `write_file(path, buf, n)` handle-by-value; `write_file(path, &buf, n)` remains wrong and must not
-> be "fixed" by adding a deref. Gate: `scripts/native_write_file_handle_abi_gate.sh` (needs
-> current-source Madaros). (2) The `self-hosted/native/codegen.sio` old-backend copy of
-> `emit_builtin_read_file` (reachable via wide/render drivers, not the default path). (3) ~~The
-> `raw[i]` string-index-operator crash~~ — **FIXED 2026-07-20** (see above). (4) `file_size`/
+> `write_file(path, buf, n)` handle-by-value. Gate: `scripts/native_write_file_handle_abi_gate.sh`
+> (needs current-source Madaros). (1b) ~~`&buf` residual~~ — **FIXED 2026-07-20** on
+> `fix/madaros-d2-ref-buf-builtin`: native-v2 `OpRef` is LEA of the handle slot, so
+> `write_file(path, &buf, n)` / `str_from_bytes(&buf, n)` used to pass a pointer into
+> `resolve_handle` → SEGV/garbage. Lower now auto-unwraps `&`/`&!` and ref-typed slots at the
+> **call site** for those two builtins so both shapes share the proven handle unpack path.
+> Do **not** add an unconditional deref inside the builtin body (that previously broke the
+> canonical handle shape + self-host). Gate: `scripts/native_d2_ref_buf_builtin_gate.sh`.
+> (2) The `self-hosted/native/codegen.sio` old-backend copy of `emit_builtin_read_file`
+> (reachable via wide/render drivers, not the default path). (3) ~~The `raw[i]`
+> string-index-operator crash~~ — **FIXED 2026-07-20** (see above). (4) `file_size`/
 > `read_file` fail on some ABSOLUTE paths but work on relative ones (path-length or cwd resolution —
 > unconfirmed).
 >

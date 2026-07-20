@@ -305,13 +305,62 @@ pub fn emit_mov_rsp_rbp(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
     b
 }
 
-pub fn emit_sub_rsp_imm32(buf: CodeBuffer, val: i64) -> CodeBuffer with Mut, Panic, Div {
-    // 48 81 ec <imm32> — sub rsp, imm32
+// Touch [rsp] so the current page is faulted in (stack growth frontier).
+pub fn emit_touch_rsp(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    // or qword ptr [rsp], 0  — 48 83 0c 24 00
     var b = buf
     b = emit_byte(b, 0x48)
-    b = emit_byte(b, 0x81)
-    b = emit_byte(b, 0xec)
+    b = emit_byte(b, 0x83)
+    b = emit_byte(b, 0x0c)
+    b = emit_byte(b, 0x24)
+    b = emit_byte(b, 0x00)
+    b
+}
+
+// Post-sub page walk: mov rax,rbp; loop sub rax,0x1000 / cmp rax,rsp / jbe / or [rax],0.
+// No-op when (rbp-rsp) < 4 KiB. Matches lean_single emit_stack_probe_x86.
+pub fn emit_stack_probe(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48); b = emit_byte(b, 0x89); b = emit_byte(b, 0xe8)
+    b = emit_byte(b, 0x48); b = emit_byte(b, 0x2d); b = emit_u32_le(b, 0x1000)
+    b = emit_byte(b, 0x48); b = emit_byte(b, 0x39); b = emit_byte(b, 0xe0)
+    b = emit_byte(b, 0x76); b = emit_byte(b, 0x05)
+    b = emit_byte(b, 0x80); b = emit_byte(b, 0x08); b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0xeb); b = emit_byte(b, 0xf0)
+    b
+}
+
+pub fn emit_sub_rsp_imm32(buf: CodeBuffer, val: i64) -> CodeBuffer with Mut, Panic, Div {
+    // 48 81 ec <imm32> — sub rsp, imm32, with stack growth probes for large frames.
+    // See nc_emit_sub_rsp_imm32 (codegen_x86_linux.sio) for the live Madaros path.
+    var b = buf
+    if val <= 0 {
+        return b
+    }
+    if val < 4096 {
+        b = emit_byte(b, 0x48)
+        b = emit_byte(b, 0x81)
+        b = emit_byte(b, 0xec)
+        b = emit_u32_le(b, val)
+        b = emit_stack_probe(b)
+        return b
+    }
+    // Page-by-page sub+touch (clobbers r11). Encoding mirrors nc_emit_sub_rsp_imm32.
+    b = emit_byte(b, 0x49); b = emit_byte(b, 0xc7); b = emit_byte(b, 0xc3)
     b = emit_u32_le(b, val)
+    b = emit_byte(b, 0x49); b = emit_byte(b, 0x81); b = emit_byte(b, 0xfb)
+    b = emit_u32_le(b, 0x1000)
+    b = emit_byte(b, 0x72); b = emit_byte(b, 0x15)
+    b = emit_byte(b, 0x48); b = emit_byte(b, 0x81); b = emit_byte(b, 0xec)
+    b = emit_u32_le(b, 0x1000)
+    b = emit_touch_rsp(b)
+    b = emit_byte(b, 0x49); b = emit_byte(b, 0x81); b = emit_byte(b, 0xeb)
+    b = emit_u32_le(b, 0x1000)
+    b = emit_byte(b, 0xeb); b = emit_byte(b, 0xe2)
+    b = emit_byte(b, 0x4c); b = emit_byte(b, 0x29); b = emit_byte(b, 0xdc)
+    b = emit_byte(b, 0x4d); b = emit_byte(b, 0x85); b = emit_byte(b, 0xdb)
+    b = emit_byte(b, 0x74); b = emit_byte(b, 0x05)
+    b = emit_touch_rsp(b)
     b
 }
 
