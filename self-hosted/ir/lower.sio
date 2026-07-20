@@ -222,6 +222,11 @@ struct Lowerer {
     global_types: Box<LowerGlobalTypeTable>,
     array_elem_float_regs: [i64; 512],
     array_elem_float_reg_count: i64,
+    // Per-call tuple result typing. Each mask bit marks a declared f64 tuple
+    // element so the later `.N` field read carries the native float marker.
+    tuple_float_regs: [i64; 512],
+    tuple_float_masks: [i64; 512],
+    tuple_float_reg_count: i64,
     variance_base_regs: [i64; 1024],
     variance_value_regs: [i64; 1024],
     variance_base_reg_count: i64,
@@ -358,6 +363,9 @@ fn lowerer_new() -> Lowerer with Alloc {
         global_types: Box::new(empty_lower_global_type_table()),
         array_elem_float_regs: [IR_INVALID_REG; 512],
         array_elem_float_reg_count: 0,
+        tuple_float_regs: [IR_INVALID_REG; 512],
+        tuple_float_masks: [0; 512],
+        tuple_float_reg_count: 0,
         variance_base_regs: [IR_INVALID_REG; 1024],
         variance_value_regs: [IR_INVALID_REG; 1024],
         variance_base_reg_count: 0,
@@ -2599,6 +2607,7 @@ fn lowerer_lower_fn_item_mut(
     // functions and make `var i = 0 as i64; i = i + 1` lower as float-add
     // (IEEE 1.0 bits) once f64 params correctly carry scalar_kind=2.
     (*lo).array_elem_float_reg_count = 0
+    (*lo).tuple_float_reg_count = 0
     (*lo).variance_base_reg_count = 0
     (*lo).pending_variance_reg = -1
     (*lo).pending_closure_fn_id = -1
@@ -2961,14 +2970,57 @@ fn lower_opt_type_is_array_of_f64(opt: &Option<Box<TypeExpr>>) -> bool with Mut,
 // f64 array (`[f64; N]`), 0 = other. The `2` lets a caller's `let r = mk()` (mk
 // returning an f64 array) flag `r` as a float-element local, so `r[i]` reads
 // classify as float instead of taking the integer path (cvtsi2sd corruption).
-// All consumers test `== 1`, so the new `2` value is inert for the scalar path.
+// Tuple returns use LOWER_RETURN_TUPLE_FLOAT_BASE + a bounded 16-element f64
+// bitmask. Existing scalar/array consumers test exact codes, so tuple metadata
+// is inert until a `.N` field read decodes it.
+fn LOWER_RETURN_TUPLE_FLOAT_BASE() -> i64 { 65536 }
+
+fn lower_type_expr_tuple_float_mask_ref(ty: &TypeExpr) -> i64 with Mut, Panic, Div {
+    if (*ty).kind != TypeExprKind::TypeTuple {
+        return 0
+    }
+    var current = &(*ty).type_args
+    var index: i64 = 0
+    var mask: i64 = 0
+    while true {
+        match *current {
+            Some(list) => {
+                if index < 16 && lower_type_expr_is_f64(&(*list).head) {
+                    mask = mask | (1 << index)
+                }
+                index = index + 1
+                current = &(*list).tail
+            }
+            None => break
+        }
+    }
+    mask
+}
+
+fn lower_opt_type_tuple_float_mask(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(te) => lower_type_expr_tuple_float_mask_ref(&(*te)),
+        None => 0,
+    }
+}
+
+fn lower_return_tuple_float_mask(return_code: i64) -> i64 {
+    let base = LOWER_RETURN_TUPLE_FLOAT_BASE()
+    if return_code > base && return_code < base + 65536 {
+        return_code - base
+    } else {
+        0
+    }
+}
+
 fn lower_opt_return_float_code(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
     if lower_opt_type_is_f64(opt) {
         1
     } else if lower_opt_type_is_array_of_f64(opt) {
         2
     } else {
-        0
+        let tuple_mask = lower_opt_type_tuple_float_mask(opt)
+        if tuple_mask > 0 { LOWER_RETURN_TUPLE_FLOAT_BASE() + tuple_mask } else { 0 }
     }
 }
 
@@ -3627,6 +3679,7 @@ impl Lowerer {
         lo.loop_depth = 0
         // D5 (#986): per-function reset of vreg-keyed float/variance tables.
         lo.array_elem_float_reg_count = 0
+        lo.tuple_float_reg_count = 0
         lo.variance_base_reg_count = 0
         lo.pending_variance_reg = -1
         lo.pending_closure_fn_id = -1
@@ -5127,6 +5180,42 @@ impl Lowerer {
             i = i + 1
         }
         false
+    }
+
+    fn bind_reg_tuple_float_mask(self, reg: i64, mask: i64) -> Lowerer with Mut, Panic, Div {
+        var lo = self
+        if reg < 0 || mask <= 0 {
+            return lo
+        }
+        var i: i64 = 0
+        while i < lo.tuple_float_reg_count {
+            if lo.tuple_float_regs[i as usize] == reg {
+                lo.tuple_float_masks[i as usize] = mask
+                return lo
+            }
+            i = i + 1
+        }
+        if lo.tuple_float_reg_count < 512 {
+            let slot = lo.tuple_float_reg_count
+            lo.tuple_float_regs[slot as usize] = reg
+            lo.tuple_float_masks[slot as usize] = mask
+            lo.tuple_float_reg_count = slot + 1
+        }
+        lo
+    }
+
+    fn lookup_reg_tuple_float_mask(self, reg: i64) -> i64 with Mut, Panic, Div {
+        if reg < 0 {
+            return 0
+        }
+        var i: i64 = 0
+        while i < self.tuple_float_reg_count {
+            if self.tuple_float_regs[i as usize] == reg {
+                return self.tuple_float_masks[i as usize]
+            }
+            i = i + 1
+        }
+        0
     }
 
     fn lookup_local_wide_bits(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
@@ -7019,6 +7108,7 @@ impl Lowerer {
         lo.loop_depth = 0
         // D5 (#986): per-function reset of vreg-keyed float/variance tables.
         lo.array_elem_float_reg_count = 0
+        lo.tuple_float_reg_count = 0
         lo.variance_base_reg_count = 0
         lo.pending_variance_reg = -1
         lo.pending_closure_fn_id = -1
@@ -7214,6 +7304,7 @@ impl Lowerer {
         lo.loop_depth = 0
         // D5 (#986): per-function reset of vreg-keyed float/variance tables.
         lo.array_elem_float_reg_count = 0
+        lo.tuple_float_reg_count = 0
         lo.variance_base_reg_count = 0
         lo.pending_variance_reg = -1
         lo.pending_closure_fn_id = -1
@@ -7601,6 +7692,10 @@ impl Lowerer {
                 }
             }
             _ => {}
+        }
+        let tuple_float_mask = lo.lookup_reg_tuple_float_mask(reg)
+        if bind_reg != reg && tuple_float_mask > 0 {
+            lo = lo.bind_reg_tuple_float_mask(bind_reg, tuple_float_mask)
         }
         lo = lo.bind_local(s.name, bind_reg, is_mut)
         if fixed_array_len >= 0 {
@@ -9458,6 +9553,12 @@ impl Lowerer {
         if call_instr.imm_flags == IR_FLOAT_REG_MARKER_FLAG {
             lo5 = lo5.emit(ir_mark_float_reg(dst))
         }
+        if fn_id >= 0 && fn_id < (*lo5.module).fn_count {
+            let tuple_float_mask = lower_return_tuple_float_mask((*lo5.module).functions[fn_id as usize].returns_float)
+            if tuple_float_mask > 0 {
+                lo5 = lo5.bind_reg_tuple_float_mask(dst, tuple_float_mask)
+            }
+        }
         (lo5, dst)
     }
 
@@ -9559,7 +9660,11 @@ impl Lowerer {
         let lo1 = pair_b.0
         let base = pair_b.1
         let fidx = lo1.field_idx_for_base_ref(&e.left, e.name)
-        let field_is_float = lo1.field_is_float_for_base_ref(&e.left, e.name) || lo1.field_is_float_by_name_simple(e.name)
+        let tuple_float_mask = lo1.lookup_reg_tuple_float_mask(base)
+        let tuple_field_is_float = fidx >= 0 && fidx < 16 && (tuple_float_mask & (1 << fidx)) != 0
+        let field_is_float = lo1.field_is_float_for_base_ref(&e.left, e.name)
+            || lo1.field_is_float_by_name_simple(e.name)
+            || tuple_field_is_float
         let field_array_elem_is_float = lo1.field_array_elem_is_float_for_base_ref(&e.left, e.name)
         let base_is_ref = match e.left {
             Some(base_expr_ref) => {
@@ -10725,6 +10830,7 @@ impl Lowerer {
         lo.loop_depth = 0
         // D5 (#986): per-function reset of vreg-keyed float/variance tables.
         lo.array_elem_float_reg_count = 0
+        lo.tuple_float_reg_count = 0
         lo.variance_base_reg_count = 0
         lo.pending_variance_reg = -1
         lo.pending_closure_fn_id = -1
