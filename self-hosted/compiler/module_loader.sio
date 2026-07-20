@@ -253,6 +253,55 @@ fn file_path_mod_fallback(path: string) -> string with Mut, Panic, Div {
     str_concat(str_concat(base, "/mod"), ".sio")
 }
 
+// Drop the last segment of an AstPath. Returns (parent_path, true) when a
+// parent exists (original had >= 2 segments).
+fn ast_path_drop_last_segment(path: AstPath) -> (AstPath, bool) with Mut, Panic, Div, Alloc {
+    if path.seg_count < 2 {
+        return (path, false)
+    }
+    let segs = path.segments
+    match segs.tail {
+        None => (path, false)
+        Some(rest1) => {
+            match (*rest1).tail {
+                None => {
+                    // path was [head, last] → parent is [head]
+                    let parent = AstPath {
+                        segments: StringList {
+                            head_buf: segs.head_buf,
+                            head_len: segs.head_len,
+                            tail: None,
+                        },
+                        seg_count: 1,
+                    }
+                    (parent, true)
+                }
+                Some(_) => {
+                    // path was [head, ..., last] with >= 3 segments.
+                    let nested = AstPath {
+                        segments: *rest1,
+                        seg_count: path.seg_count - 1,
+                    }
+                    let nested_pair = ast_path_drop_last_segment(nested)
+                    if !nested_pair.1 {
+                        return (path, false)
+                    }
+                    let parent_tail = nested_pair.0.segments
+                    let parent = AstPath {
+                        segments: StringList {
+                            head_buf: segs.head_buf,
+                            head_len: segs.head_len,
+                            tail: Some(Box::new(parent_tail)),
+                        },
+                        seg_count: path.seg_count - 1,
+                    }
+                    (parent, true)
+                }
+            }
+        }
+    }
+}
+
 fn resolve_import_file_path(path: AstPath, cur_dir: string) -> string with IO, Mut, Panic, Div, Alloc {
     let local = use_path_to_file_path(path, cur_dir)
     if file_exists(local) {
@@ -269,6 +318,30 @@ fn resolve_import_file_path(path: AstPath, cur_dir: string) -> string with IO, M
     let pkg_mod = file_path_mod_fallback(pkg)
     if file_exists(pkg_mod) {
         return pkg_mod
+    }
+    // Named-import fallback (see module_frontend.resolve_import_file_path):
+    // bare `use mod::symbol` when `mod/symbol.sio` is missing → load `mod.sio`.
+    if path.seg_count >= 2 {
+        let parent_pair = ast_path_drop_last_segment(path)
+        if parent_pair.1 {
+            let parent = parent_pair.0
+            let parent_local = use_path_to_file_path(parent, cur_dir)
+            if file_exists(parent_local) {
+                return parent_local
+            }
+            let parent_stdlib = use_path_to_file_path(parent, "stdlib")
+            if file_exists(parent_stdlib) {
+                return parent_stdlib
+            }
+            let parent_pkg = use_path_to_package_file_path(parent)
+            if file_exists(parent_pkg) {
+                return parent_pkg
+            }
+            let parent_pkg_mod = file_path_mod_fallback(parent_pkg)
+            if file_exists(parent_pkg_mod) {
+                return parent_pkg_mod
+            }
+        }
     }
     local
 }
