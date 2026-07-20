@@ -85,8 +85,14 @@ grep -Fq 'MF_IMPORT_AUTHORITY_PREPARED_COLLECTION_ID = (*out).collection_id' <<<
   fail collector_authority_receipt_missing
 grep -Fq 'module_frontend_snapshot_program_item_handles(programs, (*out).node_count)' <<<"$collector_shape" ||
   fail collector_item_handle_snapshot_missing
-if grep -Fq 'let program = (*programs)[module_id]' "$FRONTEND"; then
-  fail export_scan_whole_program_copy_reintroduced
+grep -Fq '(*item_handle).items = (*programs)[i as usize].items' "$FRONTEND" ||
+  fail item_handle_snapshot_not_field_scoped
+grep -Fq 'let seed_item_handle = MF_PROGRAM_ITEM_PTRS[0] as *mut LowerProgramItemsHandle' "$FRONTEND" ||
+  fail seed_lowering_item_handle_missing
+grep -Fq 'let dep_item_handle = MF_PROGRAM_ITEM_PTRS[i as usize] as *mut LowerProgramItemsHandle' "$FRONTEND" ||
+  fail dependency_lowering_item_handle_missing
+if grep -Eq '^[[:space:]]*let [A-Za-z_][A-Za-z0-9_]* = \(\*programs\)\[[^]]+\][[:space:]]*$' "$FRONTEND"; then
+  fail whole_program_copy_reintroduced
 fi
 grep -Fq 'module_frontend_prepare_import_authority(' <<<"$collector_shape" ||
   fail collector_authority_prepare_missing
