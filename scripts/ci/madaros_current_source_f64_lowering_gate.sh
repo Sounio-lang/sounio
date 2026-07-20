@@ -19,15 +19,28 @@ else
 fi
 
 MADAROS_ELF="${SOUNIO_MADAROS_F64_LOWERING_GATE_BIN:-$WORK/madaros}"
+BUILD_RECEIPT="${SOUNIO_MADAROS_F64_LOWERING_GATE_RECEIPT:-}"
+AUTHORITY="external-unbound"
+MERGE_READY=0
 
 if [[ "$KEEP_WORK" != "1" ]]; then
   trap 'rm -rf "$WORK"' EXIT
 fi
 
 if [[ -z "${SOUNIO_MADAROS_F64_LOWERING_GATE_BIN:-}" ]]; then
-  if ! bash "$ROOT_DIR/scripts/ci/build_modular_madaros.sh" "$MADAROS_ELF" >"$WORK/build.log" 2>&1; then
+  BUILD_RECEIPT="${BUILD_RECEIPT:-$WORK/madaros-build-receipt.tsv}"
+  if ! SOUNIO_MADAROS_BUILD_RECEIPT="$BUILD_RECEIPT" \
+      bash "$ROOT_DIR/scripts/ci/build_modular_madaros.sh" "$MADAROS_ELF" >"$WORK/build.log" 2>&1; then
     tail -n 80 "$WORK/build.log" >&2 || true
     fail "current-source Madaros build failed"
+  fi
+  [[ -s "$BUILD_RECEIPT" ]] || fail "current-source Madaros build receipt is missing: $BUILD_RECEIPT"
+  AUTHORITY="locally-built-content-bound"
+else
+  if [[ -n "$BUILD_RECEIPT" ]]; then
+    [[ -s "$BUILD_RECEIPT" ]] || fail "external build receipt is missing: $BUILD_RECEIPT"
+  else
+    BUILD_RECEIPT="none"
   fi
 fi
 [[ -x "$MADAROS_ELF" ]] || fail "Madaros is missing or not executable: $MADAROS_ELF"
@@ -52,4 +65,4 @@ SOUNIO_MADAROS_IMPORTED_CAPACITY_GATE_DIR="$WORK/imported-capacity" \
 SOUNIO_MADAROS_IMPORTED_CAPACITY_GATE_KEEP=1 \
   bash "$ROOT_DIR/scripts/ci/madaros_imported_capacity_gate.sh"
 
-echo "[madaros-f64-lowering] PASS: one shared Madaros ELF passed dereference, global f64, direct capacity, and imported capacity gates"
+echo "[madaros-f64-lowering] PASS: one shared Madaros ELF passed dereference, global f64, direct capacity, and imported capacity gates authority=$AUTHORITY merge_ready=$MERGE_READY receipt=$BUILD_RECEIPT"
