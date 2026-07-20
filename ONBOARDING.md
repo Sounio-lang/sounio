@@ -84,6 +84,14 @@ IR ou claims científicas, leia também
   claims vencidos aparecem como `STALE` e podem ser removidos com `bin/sounio-coord prune`.
 - Coloque `--files` por último e proteja globs com aspas, por exemplo
   `'self-hosted/compiler/**'`.
+- Hooks de projeto registram automaticamente sessões Claude/Codex e reservam arquivos antes de
+  `Write`, `Edit` e `apply_patch`. No Codex, abra `/hooks` e aprove o hook quando seu hash mudar.
+- Escritas feitas dentro de comandos Bash continuam exigindo claim manual, pois o hook não pode
+  inferir com segurança todos os efeitos de um comando de shell. Reuse o agent/lane exibido pelo
+  hook de startup com `bin/sounio-coord scope`, evitando criar uma segunda lease sobreposta.
+- Para conversar com outra lane durante o trabalho, use `bin/sounio-coord send`; mensagens não
+  lidas entram automaticamente no próximo turno ou passo de ferramenta do destinatário. Consulte com
+  `bin/sounio-coord inbox` e confirme o tratamento com `bin/sounio-coord ack`.
 - **Re-cheque `git status` antes de stage.** Nunca trate uma claim como licença para
   sobrescrever mudanças já presentes na worktree.
 - Edits podem aparecer no commit de outro agente sob mensagens não-relacionadas. Não brigue com a história.
