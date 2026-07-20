@@ -1,10 +1,10 @@
 <!-- docs:meta
-topic_id: repo.docs.proposals.global-array-literal-init
+topic_id: repo.docs.proposals.global-array-literal-init-2026-07-20
 authority: repo_only
 audience: users
-last_validated: 2026-07-20
+last_validated: 2026-03-07
 validated_by: A2
-source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.proposals.global-array-literal-init
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.proposals.global-array-literal-init-2026-07-20
 -->
 
 # Proposal: Global Array Literal Initialization

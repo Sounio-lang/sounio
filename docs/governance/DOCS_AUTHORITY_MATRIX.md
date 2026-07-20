@@ -623,6 +623,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.preprint.rapamycin-des-combo-outline | repo_only | docs/preprint/rapamycin_des_combo_outline.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.proposals.epistemic-meta-analysis | repo_only | docs/proposals/epistemic-meta-analysis.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.proposals.epistemic-workflows | repo_only | docs/proposals/epistemic-workflows.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.proposals.global-array-literal-init-2026-07-20 | repo_only | docs/proposals/GLOBAL_ARRAY_LITERAL_INIT_2026-07-20.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.proposals.native-heap-allocation-2026-07-12 | repo_only | docs/proposals/NATIVE_HEAP_ALLOCATION_2026-07-12.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.proposals.nma-nonassociative-algebra-note | repo_only | docs/proposals/nma_nonassociative_algebra_note.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.proposals.pbpk-osp-interop-roadmap | repo_only | docs/proposals/pbpk-osp-interop-roadmap.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
