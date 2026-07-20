@@ -71,6 +71,7 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 | rank_by (1M rows, 1000 groups, average) | | ~130 | ~68 | **~1.9x — loss (sort-bound)** | per-region mergesort vs pandas Cython group-rank; C3 radix-sort would close it |
 | ngroup_by (1M rows, 1000 dense keys) | | ~8.2 | ~13.2 | **0.62x — Sounio wins** | dense direct-index, sorted-key compacted numbering |
 | cumcount_desc_by (1M rows, 1000 dense keys) | | ~10.7 | ~40.5 | **0.27x — Sounio wins (3.7x)** | dense direct-index reverse cumcount |
+| pct_change_by (1M rows, 1000 dense keys) | | ~13.3 | ~101.7 | **0.13x — Sounio wins (7.6x)** | dense direct-index per-group prev-value tracker |
 | cov (1M rows, two-pass mean-shift) | | 6.7 | 8.5 | **0.78x — Sounio wins** | (new verb) |
 | corr (1M rows, two-pass + bf_sqrt) | | 10.3 | 8.0 | **~1.3x** | (new verb) |
 | median (1M rows, quickselect) | | ~34 | ~16 | **~2.2x** | numpy SIMD introselect |
