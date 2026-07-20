@@ -150,6 +150,34 @@ truth still outrank coordination metadata. Treat this as runtime presence, not a
 durable handoff record; blockers and consequential handoffs still belong in the
 repository contracts named below.
 
+Project hooks in `.codex/hooks.json` and `.claude/settings.json` automate the
+common path. They register session presence, refresh a 30-minute lease during
+active turns, and reserve files before structured `Write`, `Edit`, or
+`apply_patch` calls. Claude releases its session lease on `SessionEnd`; Codex
+currently has no session-end event, so its inactive hook lease expires. Codex
+users must review and trust the project hook with `/hooks` once per hook hash.
+Shell commands can write arbitrary files and cannot be scoped reliably, so a
+manual exact scope remains mandatory before write-bearing Bash commands. The
+startup hook prints the session's agent/lane identity; reuse it with
+`bin/sounio-coord scope --agent <session-agent> --lane <session-lane> --intent "<goal>" --files <paths...>`
+instead of creating a second overlapping lease.
+
+Agents can exchange live messages across worktrees:
+
+- Send a directed request with
+  `bin/sounio-coord send --agent <id> --lane <id> --to-agent <id> --to-lane <id> --kind request --message "<text>"`.
+- Read pending messages with
+  `bin/sounio-coord inbox --agent <id> --lane <id>`.
+- After acting on a message, acknowledge it with
+  `bin/sounio-coord ack --agent <id> --lane <id> --message <message-id>`.
+
+Prompt and post-tool hooks inject unread messages into the agent's active turn.
+A rejected structured write also sends a request to the current owner
+automatically. Use
+`info`, `request`, `reply`, `blocker`, or `handoff` as message kinds. Messages
+coordinate work in progress; durable blockers still require the blocker
+contract.
+
 If an agent leaves a blocker for another agent, it must use that contract's
 Blocker-ID, severity, class, evidence, owner, worktree, branch, acceptance gate,
 and next-action fields.
