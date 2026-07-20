@@ -55,8 +55,14 @@ Heuristic: **self-contained modules (no stdlib `use` deps) that avoid `f64→i64
 casts and method-call sites import cleanly and return correct numbers.**
 (`order_spread_exact` / `product_nonassoc` are the measured exceptions that may
 `use` free-function / field-form `knowledge` while keeping the multiply path fully
-local — do **not** reintroduce `algebra::associator_field` / `algebra::octonion`
-uses; those still SEGV at runtime under Madaros multi-module native emit.)
+local — do **not** reintroduce `algebra::associator_field` uses; those still SEGV
+at runtime under Madaros multi-module native emit.)
+
+**Update 2026-07-20:** `algebra::octonion::oct_mul` imports cleanly under default
+Madaros after splitting the 8-component exclusive-ref body into `oct_mul_lo` /
+`oct_mul_hi` (each ≤ ~0x1200 spill frame). Full unrolled body needs ~0x23e0 and
+SEGV'd (measured single-file and multi-module). Gate:
+`scripts/madaros_algebra_octonion_import_gate.sh`.
 
 ### ⚠️ Importable but specific outputs CORRUPTED
 
@@ -73,7 +79,7 @@ uses; those still SEGV at runtime under Madaros multi-module native emit.)
 |---|---|---|
 | `knowledge` **method-call** form (`Epistemic::measured`, `e.val()`) | SEGV in method-call lowering (Root 2) | use free `ep_*` API under Madaros; methods still OK under lean_single |
 | `propagate` (full module) | blocked / fragile multi-module (xoshiro, multi-use) | full propagation layer not yet native-trustworthy; **structural nonassoc path is** — use `epistemic::product_nonassoc` leaf |
-| `algebra::associator_field` / `algebra::octonion` (imported exclusive-ref path) | **runtime SEGV** after successful native compile | CPC N=4 / product_nonassoc no longer depend on this path — use `epistemic::order_spread_exact::order_spread4` and `epistemic::product_nonassoc` instead |
+| `algebra::associator_field` (imported exclusive-ref path) | **runtime SEGV** after successful native compile (large exclusive-ref chain) | CPC N=4 / product_nonassoc no longer depend on this path — use `epistemic::order_spread_exact::order_spread4` and `epistemic::product_nonassoc` instead; `algebra::octonion::oct_mul` is green after lo/hi split (2026-07-20) |
 | `uncertain_eq` | method / multi-module path | equality-under-uncertainty native-import-blocked |
 
 Method-form and remaining modules are usable today only by **free-function rewrite**,
