@@ -9127,6 +9127,9 @@ fn emit_entry_trampoline_split_into(nc: &! NativeCompiler, main_fn_index: i64) w
     emit_entry_trampoline_call_exit_into(nc, main_fn_index)
 }
 
+// Emit entry-time BSS fills for globals with a recorded non-zero scalar init
+// (returns_float==1 is the "has init" flag; prof_counter_id holds the fill value).
+// Scalars: single 8-byte store. Array-repeat `[V; N]`: rep stosq/stosb over bss_size.
 fn emit_global_var_inits_into(nc: &! NativeCompiler, module: &IrModule) with Mut, Panic, Div {
     var fi: i64 = 0
     while fi < (*module).fn_count {
@@ -9135,9 +9138,41 @@ fn emit_global_var_inits_into(nc: &! NativeCompiler, module: &IrModule) with Mut
             let bss_off = func.param_count
             let abs_addr = BSS_BASE_LINUX + bss_off
             let init_val = func.prof_counter_id
-            nc_emit_mov_rax_imm(nc, init_val)
-            nc_emit_mov_reg_imm(nc, 3, abs_addr)
-            nc_emit_store_rax_mem_rbx_disp32(nc, 0)
+            let total = func.bss_size
+            var elem = func.hyper_algebra_kind
+            if elem <= 0 {
+                elem = 8
+            }
+            // Single word (scalar or 1-element array of 8-byte elems): one store.
+            if total <= 8 && elem >= 8 {
+                nc_emit_mov_rax_imm(nc, init_val)
+                nc_emit_mov_reg_imm(nc, 3, abs_addr)
+                nc_emit_store_rax_mem_rbx_disp32(nc, 0)
+            } else if total > 0 {
+                // Multi-element fill. DF=0 (ascending) is the process default.
+                // rax = fill value, rdi = dest, rcx = element count.
+                let count = total / elem
+                if count > 0 {
+                    nc_emit_mov_rax_imm(nc, init_val)
+                    nc_emit_mov_rdi_imm(nc, abs_addr)
+                    nc_emit_mov_reg_imm(nc, 1, count)
+                    if elem == 1 {
+                        // rep stosb
+                        nc_emit_byte(nc, 0xf3)
+                        nc_emit_byte(nc, 0xaa)
+                    } else {
+                        // rep stosq
+                        nc_emit_byte(nc, 0xf3)
+                        nc_emit_byte(nc, 0x48)
+                        nc_emit_byte(nc, 0xab)
+                    }
+                }
+            } else {
+                // Legacy slots with bss_size unset: scalar store
+                nc_emit_mov_rax_imm(nc, init_val)
+                nc_emit_mov_reg_imm(nc, 3, abs_addr)
+                nc_emit_store_rax_mem_rbx_disp32(nc, 0)
+            }
         }
         fi = fi + 1
     }
