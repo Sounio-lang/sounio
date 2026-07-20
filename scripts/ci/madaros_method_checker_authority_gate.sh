@@ -71,6 +71,25 @@ expect_single_success() {
   ! grep -Fq 'run_check_mode: about to check' "$log" || fail "${label}_unexpected_multimodule_path"
 }
 
+expect_single_rejection() {
+  local label="$1"
+  local source="$2"
+  local code="$3"
+  local message="$4"
+  local log="$WORK/$label.log"
+
+  run_check "$label" "$source"
+  [[ "$(cat "$WORK/$label.rc")" -eq 1 ]] || {
+    cat "$log" >&2 || true
+    fail "${label}_expected_rc_1"
+  }
+  [[ "$(grep -Fc "error[$code" "$log" || true)" -eq 1 ]] || fail "${label}_${code}_count"
+  [[ "$(grep -Fc "$message" "$log" || true)" -eq 1 ]] || fail "${label}_message_count"
+  [[ "$(grep -Fc 'error[E' "$log" || true)" -eq 1 ]] || fail "${label}_diagnostic_count"
+  ! grep -Fq 'check: OK' "$log" || fail "${label}_unexpected_ok"
+  ! grep -Fq 'run_check_mode: about to check' "$log" || fail "${label}_unexpected_multimodule_path"
+}
+
 expect_rejection() {
   local label="$1"
   local source="$2"
@@ -128,7 +147,7 @@ for fixture in \
   ambiguous_same_receiver_main.sio ambiguous_same_receiver_marker.sio \
   method_body_contract_main.sio method_body_contract_leaf.sio \
   local_precedence_main.sio local_precedence_distractor.sio \
-  single_local_helper_main.sio; do
+  single_local_helper_main.sio single_undefined_main.sio; do
   [[ -f "$FIXTURES/$fixture" ]] || fail "fixture_missing_$fixture"
 done
 
@@ -169,9 +188,15 @@ done
   || fail module_identity_visibility_not_generalized
 [[ "$(grep -Ec 'visibility_allows_access\(' "$ROOT_DIR/self-hosted/check/check.sio")" -eq 2 ]] \
   || fail direct_path_visibility_reintroduced
+[[ "$(grep -Fc 'check_items_verdict_boot4_with_identity(items, empty_path(), CHECK_MODULE_ID_UNKNOWN)' "$ROOT_DIR/self-hosted/check/mod.sio")" -eq 1 ]] \
+  || fail merged_items_unknown_identity_missing
+[[ "$(grep -Fc 'check_items_verdict_boot4_with_identity(items, module_path, 0)' "$ROOT_DIR/self-hosted/check/mod.sio")" -eq 1 ]] \
+  || fail standalone_root_identity_missing
 
 expect_success public_unique "$FIXTURES/public_unique_main.sio"
 expect_single_success single_local_helper "$FIXTURES/single_local_helper_main.sio"
+expect_single_rejection single_undefined "$FIXTURES/single_undefined_main.sio" \
+  E137 'use of undeclared variable'
 expect_success local_precedence "$FIXTURES/local_precedence_main.sio"
 expect_success nominal_target_distractor_first "$FIXTURES/ambiguous_remote_main.sio"
 expect_success nominal_target_target_first "$FIXTURES/ambiguous_remote_reversed_main.sio"
@@ -191,4 +216,4 @@ expect_rejection ambiguous_same_receiver "$FIXTURES/ambiguous_same_receiver_main
 expect_rejection method_body_contract "$FIXTURES/method_body_contract_main.sio" \
   E008 "return value does not match function's declared return type"
 
-printf 'MADAROS_METHOD_CHECKER_AUTHORITY_PASS public_unique=pass single_local_helper=pass root_module_id=0 local_precedence=pass nominal_identity_orders=passx2 private_distractor_orders=passx2 associated_reexport_compat=pass private_surfaces=fn:E175+struct:E176+enum:E177+method:E175 ambiguity=E219 method_body_contract=E008 method_lookup=receiver-first+visibility-before-uniqueness outcomes=FOUND+PRIVATE+AMBIGUOUS+MISSING legacy_fallback=list-only-unknown checker_paths=inplace-executed+by-value-source-routed selective_import_authority=not_claimed generic_mangling_identity=not_claimed forward_reference_backpatch=not_claimed\n'
+printf 'MADAROS_METHOD_CHECKER_AUTHORITY_PASS public_unique=pass single_local_helper=pass single_undefined=E137 root_module_id=0 merged_items_module_id=UNKNOWN local_precedence=pass nominal_identity_orders=passx2 private_distractor_orders=passx2 associated_reexport_compat=pass private_surfaces=fn:E175+struct:E176+enum:E177+method:E175 ambiguity=E219 method_body_contract=E008 method_lookup=receiver-first+visibility-before-uniqueness outcomes=FOUND+PRIVATE+AMBIGUOUS+MISSING legacy_fallback=witness-probe-unknown checker_paths=inplace-executed+by-value-source-routed selective_import_authority=not_claimed generic_mangling_identity=not_claimed forward_reference_backpatch=not_claimed\n'
