@@ -9006,8 +9006,350 @@ fn ocp_compact_nops(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     result
 }
 
-// Run const_fold + DCE on every function without copying the whole IrModule.
+// ============================================================================
+// Multi-module -O cleanup: module-index (mfi) field-wise peels
+// ============================================================================
+//
+// Measured root causes for multi-module -O SEGV after lower_done (2026-07-20):
+// 1. By-value `IrFunction` copies scramble live `IrInstr.call_args: Option<Box<…>>`
+//    (A8 / A14 family — Box-carrying large-struct copy under lean_single).
+// 2. Taking `&! (*module).functions[fi]` (exclusive ref to an array element of
+//    `[IrFunction; 2048]`) is miscompiled: field reads through that ref return
+//    garbage (instr_count ~1e13) and the pass loop SEGVs.
+//
+// Therefore the multi-module -O entry mutates ONLY via
+//   `(*module).functions[fi as usize].field…`
+// and never forms an intermediate `&! IrFunction` to a module array slot, never
+// copies a whole `IrFunction` or a whole `IrInstr` with live call_args.
+//
+// Pass set is the safe scalar/control subset: constructor writebacks
+// (`ir_nop` / `ir_copy` / `ir_load_imm` / `ir_return`) and scalar field stores
+// (`.src1` / `.src2`). Full const-fold / SCCP / compact_nops / e-graph stay on
+// the by-value stack-local path used by main.sio self-tests.
+
+// Dedup IrLoadImm → IrCopy when an earlier reg already holds the same imm.
+fn ocp_mfi_dedup_imm(module: &! IrModule, fi: i64) with Mut, Div, Panic {
+    var seen_const: [bool; 256] = [false; 256]
+    var seen_val: [i64; 256] = [0; 256]
+    var i: i64 = 0
+    while i < (*module).functions[fi as usize].instr_count {
+        let op = (*module).functions[fi as usize].instrs[i as usize].op
+        let dst = (*module).functions[fi as usize].instrs[i as usize].dst
+        let imm = (*module).functions[fi as usize].instrs[i as usize].imm_i64
+        if op == IrOpcode::IrLoadImm && dst >= 0 && dst < 256 {
+            var found: i64 = 0 - 1
+            var j: i64 = 0
+            while j < 256 {
+                if seen_const[j as usize] && seen_val[j as usize] == imm && j != dst {
+                    found = j
+                    j = 256
+                }
+                j = j + 1
+            }
+            if found >= 0 {
+                (*module).functions[fi as usize].instrs[i as usize] = ir_copy(dst, found)
+            } else {
+                seen_const[dst as usize] = true
+                seen_val[dst as usize] = imm
+            }
+        }
+        i = i + 1
+    }
+}
+
+// Copy-prop: rewrite src1/src2 through IrCopy chains; scalar field stores only.
+fn ocp_mfi_copy_prop(module: &! IrModule, fi: i64) with Mut, Div, Panic {
+    var copy_target: [i64; 256] = [-1; 256]
+    var i: i64 = 0
+    while i < (*module).functions[fi as usize].instr_count {
+        let s1 = (*module).functions[fi as usize].instrs[i as usize].src1
+        if s1 >= 0 && s1 < 256 && copy_target[s1 as usize] >= 0 {
+            (*module).functions[fi as usize].instrs[i as usize].src1 = copy_target[s1 as usize]
+        }
+        let s2 = (*module).functions[fi as usize].instrs[i as usize].src2
+        if s2 >= 0 && s2 < 256 && copy_target[s2 as usize] >= 0 {
+            (*module).functions[fi as usize].instrs[i as usize].src2 = copy_target[s2 as usize]
+        }
+        let op = (*module).functions[fi as usize].instrs[i as usize].op
+        let dst = (*module).functions[fi as usize].instrs[i as usize].dst
+        let cur_s1 = (*module).functions[fi as usize].instrs[i as usize].src1
+        if op == IrOpcode::IrCopy && dst >= 0 && dst < 256 {
+            if cur_s1 >= 0 && cur_s1 < 256 && copy_target[cur_s1 as usize] >= 0 {
+                copy_target[dst as usize] = copy_target[cur_s1 as usize]
+                (*module).functions[fi as usize].instrs[i as usize].src1 = copy_target[cur_s1 as usize]
+            } else {
+                copy_target[dst as usize] = cur_s1
+            }
+        } else if dst >= 0 && dst < 256 {
+            copy_target[dst as usize] = 0 - 1
+        }
+        i = i + 1
+    }
+}
+
+// Dead-store elimination: NOP earlier write if never read before next write.
+fn ocp_mfi_dse(module: &! IrModule, fi: i64) with Mut, Div, Panic {
+    var last_write: [i64; 256] = [-1; 256]
+    var i: i64 = 0
+    while i < (*module).functions[fi as usize].instr_count {
+        let op = (*module).functions[fi as usize].instrs[i as usize].op
+        let s1 = (*module).functions[fi as usize].instrs[i as usize].src1
+        let s2 = (*module).functions[fi as usize].instrs[i as usize].src2
+        let dst = (*module).functions[fi as usize].instrs[i as usize].dst
+        if s1 >= 0 && s1 < 256 {
+            last_write[s1 as usize] = 0 - 1
+        }
+        if s2 >= 0 && s2 < 256 {
+            last_write[s2 as usize] = 0 - 1
+        }
+        if ocp_has_dst(op) && !ocp_has_side_effect(op) {
+            if dst >= 0 && dst < 256 {
+                let prev = last_write[dst as usize]
+                if prev >= 0 {
+                    (*module).functions[fi as usize].instrs[prev as usize] = ir_nop()
+                }
+                last_write[dst as usize] = i
+            }
+        }
+        if op == IrOpcode::IrLabel || op == IrOpcode::IrJump || op == IrOpcode::IrBranchTrue || op == IrOpcode::IrBranchFalse {
+            var k: i64 = 0
+            while k < 256 {
+                last_write[k as usize] = 0 - 1
+                k = k + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+// Jump/branch immediately followed by its target label → NOP.
+fn ocp_mfi_redundant_jump(module: &! IrModule, fi: i64) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i + 1 < (*module).functions[fi as usize].instr_count {
+        let cur_op = (*module).functions[fi as usize].instrs[i as usize].op
+        let cur_lab = (*module).functions[fi as usize].instrs[i as usize].label_id
+        let next_op = (*module).functions[fi as usize].instrs[(i + 1) as usize].op
+        let next_lab = (*module).functions[fi as usize].instrs[(i + 1) as usize].label_id
+        if next_op == IrOpcode::IrLabel {
+            if cur_op == IrOpcode::IrJump && cur_lab == next_lab {
+                (*module).functions[fi as usize].instrs[i as usize] = ir_nop()
+            }
+            if cur_op == IrOpcode::IrBranchTrue && cur_lab == next_lab {
+                (*module).functions[fi as usize].instrs[i as usize] = ir_nop()
+            }
+            if cur_op == IrOpcode::IrBranchFalse && cur_lab == next_lab {
+                (*module).functions[fi as usize].instrs[i as usize] = ir_nop()
+            }
+        }
+        i = i + 1
+    }
+}
+
+// IrJump to a block whose first non-NOP is IrReturn → fold to IrReturn.
+fn ocp_mfi_jump_to_return(module: &! IrModule, fi: i64) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < (*module).functions[fi as usize].instr_count {
+        let op = (*module).functions[fi as usize].instrs[i as usize].op
+        let lab = (*module).functions[fi as usize].instrs[i as usize].label_id
+        if op == IrOpcode::IrJump {
+            var j: i64 = 0
+            while j < (*module).functions[fi as usize].instr_count {
+                let jop = (*module).functions[fi as usize].instrs[j as usize].op
+                let jlab = (*module).functions[fi as usize].instrs[j as usize].label_id
+                if jop == IrOpcode::IrLabel && jlab == lab {
+                    var k = j + 1
+                    while k < (*module).functions[fi as usize].instr_count {
+                        let kop = (*module).functions[fi as usize].instrs[k as usize].op
+                        if kop == IrOpcode::IrNop {
+                            k = k + 1
+                        } else {
+                            if kop == IrOpcode::IrReturn {
+                                let rsrc = (*module).functions[fi as usize].instrs[k as usize].src1
+                                (*module).functions[fi as usize].instrs[i as usize] = ir_return(rsrc)
+                            }
+                            k = (*module).functions[fi as usize].instr_count
+                        }
+                    }
+                    j = (*module).functions[fi as usize].instr_count
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+// Code after unconditional jump until next label is unreachable → NOP.
+fn ocp_mfi_dead_after_jump(module: &! IrModule, fi: i64) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < (*module).functions[fi as usize].instr_count {
+        let op = (*module).functions[fi as usize].instrs[i as usize].op
+        if op == IrOpcode::IrJump || op == IrOpcode::IrReturn {
+            var j = i + 1
+            while j < (*module).functions[fi as usize].instr_count {
+                let jop = (*module).functions[fi as usize].instrs[j as usize].op
+                if jop == IrOpcode::IrLabel {
+                    j = (*module).functions[fi as usize].instr_count
+                } else {
+                    (*module).functions[fi as usize].instrs[j as usize] = ir_nop()
+                    j = j + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+// Labels never targeted by jump/branch → NOP (keeps fall-through semantics).
+fn ocp_mfi_dead_label(module: &! IrModule, fi: i64) with Mut, Div, Panic {
+    var targeted: [bool; 256] = [false; 256]
+    var i: i64 = 0
+    while i < (*module).functions[fi as usize].instr_count {
+        let op = (*module).functions[fi as usize].instrs[i as usize].op
+        let lab = (*module).functions[fi as usize].instrs[i as usize].label_id
+        if op == IrOpcode::IrJump || op == IrOpcode::IrBranchTrue || op == IrOpcode::IrBranchFalse {
+            if lab >= 0 && lab < 256 {
+                targeted[lab as usize] = true
+            }
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < (*module).functions[fi as usize].instr_count {
+        let op = (*module).functions[fi as usize].instrs[i as usize].op
+        let lab = (*module).functions[fi as usize].instrs[i as usize].label_id
+        if op == IrOpcode::IrLabel && lab >= 0 && lab < 256 {
+            if !targeted[lab as usize] {
+                (*module).functions[fi as usize].instrs[i as usize] = ir_nop()
+            }
+        }
+        i = i + 1
+    }
+}
+
+// CSE for mapped binops → IrCopy (constructor writeback; no IrInstr copy).
+fn ocp_mfi_cse(module: &! IrModule, fi: i64) with Mut, Div, Panic {
+    var cse_op: [i64; 128] = [0; 128]
+    var cse_src1: [i64; 128] = [0; 128]
+    var cse_src2: [i64; 128] = [0; 128]
+    var cse_dst: [i64; 128] = [0; 128]
+    var cse_len: i64 = 0
+    var i: i64 = 0
+    while i < (*module).functions[fi as usize].instr_count {
+        let op = (*module).functions[fi as usize].instrs[i as usize].op
+        let dst = (*module).functions[fi as usize].instrs[i as usize].dst
+        let bin = (*module).functions[fi as usize].instrs[i as usize].bin_op
+        let s1 = (*module).functions[fi as usize].instrs[i as usize].src1
+        let s2 = (*module).functions[fi as usize].instrs[i as usize].src2
+        if ocp_has_dst(op) && dst >= 0 {
+            let invalidated = ocp_cse_invalidate_reg(cse_op, cse_src1, cse_src2, cse_dst, cse_len, dst)
+            cse_op = invalidated.op
+            cse_src1 = invalidated.src1
+            cse_src2 = invalidated.src2
+            cse_dst = invalidated.dst
+            cse_len = invalidated.len
+        }
+        if ocp_is_binop(op) {
+            let op_key = ocp_binop_to_cse_key(bin)
+            if op_key != 0 {
+                var cse_s1 = s1
+                var cse_s2 = s2
+                if ocp_is_commutative_op(bin) && cse_s1 > cse_s2 {
+                    let tmp = cse_s1
+                    cse_s1 = cse_s2
+                    cse_s2 = tmp
+                }
+                var j: i64 = 0
+                var found: i64 = 0 - 1
+                while j < cse_len {
+                    if cse_op[j as usize] == op_key && cse_src1[j as usize] == cse_s1 && cse_src2[j as usize] == cse_s2 {
+                        found = j
+                        j = cse_len
+                    }
+                    j = j + 1
+                }
+                if found >= 0 {
+                    (*module).functions[fi as usize].instrs[i as usize] = ir_copy(dst, cse_dst[found as usize])
+                } else {
+                    if cse_len < 128 {
+                        cse_op[cse_len as usize] = op_key
+                        cse_src1[cse_len as usize] = cse_s1
+                        cse_src2[cse_len as usize] = cse_s2
+                        cse_dst[cse_len as usize] = dst
+                        cse_len = cse_len + 1
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+// One DCE sweep: NOP pure defs whose dst is never used as src1/src2.
+// Note: does not walk call_args lists (would require Box walk). Side-effecting
+// ops (calls) are never removed — call_args Boxes stay in place.
+fn ocp_mfi_dce_once(module: &! IrModule, fi: i64) -> i64 with Mut, Div, Panic {
+    var used: [bool; 256] = [false; 256]
+    var i: i64 = 0
+    while i < (*module).functions[fi as usize].instr_count {
+        let s1 = (*module).functions[fi as usize].instrs[i as usize].src1
+        let s2 = (*module).functions[fi as usize].instrs[i as usize].src2
+        if s1 >= 0 && s1 < 256 {
+            used[s1 as usize] = true
+        }
+        if s2 >= 0 && s2 < 256 {
+            used[s2 as usize] = true
+        }
+        i = i + 1
+    }
+    var removed: i64 = 0
+    i = 0
+    while i < (*module).functions[fi as usize].instr_count {
+        let op = (*module).functions[fi as usize].instrs[i as usize].op
+        let dst = (*module).functions[fi as usize].instrs[i as usize].dst
+        if ocp_has_dst(op) && !ocp_has_side_effect(op) {
+            if dst >= 0 && dst < 256 {
+                if !used[dst as usize] {
+                    (*module).functions[fi as usize].instrs[i as usize] = ir_nop()
+                    removed = removed + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    removed
+}
+
+// Safe multi-module function cleanup via module+fi field access only.
+fn opt_cleanup_function_mfi(module: &! IrModule, fi: i64) with Mut, Div, Panic {
+    let ic = (*module).functions[fi as usize].instr_count
+    if ic <= 0 {
+        return
+    }
+    ocp_mfi_dedup_imm(module, fi)
+    ocp_mfi_copy_prop(module, fi)
+    ocp_mfi_dse(module, fi)
+    ocp_mfi_redundant_jump(module, fi)
+    ocp_mfi_jump_to_return(module, fi)
+    ocp_mfi_dead_after_jump(module, fi)
+    ocp_mfi_dead_label(module, fi)
+    ocp_mfi_cse(module, fi)
+    var iter: i64 = 0
+    while iter < 8 {
+        let removed = ocp_mfi_dce_once(module, fi)
+        if removed == 0 {
+            iter = 8
+        }
+        iter = iter + 1
+    }
+}
+
+// Run safe field-wise cleanup on every function without copying IrModule or
+// IrFunction by value, and without taking `&! functions[fi]`.
 pub fn opt_cleanup_module_inplace(module: &! IrModule) -> OcpCleanupModuleReceipt with Mut, Div, Panic {
+    // Exact-bitwise rebracket audit still lives on the by-value const-fold
+    // spine (self-test / pipeline probe path). Multi-module -O uses mfi peels
+    // only, so audit deltas stay zero here until that spine is field-wise.
     var audit = ocp_empty_exact_bitwise_rebracket_pass_audit()
     var last_application_function_index: i64 = -1
     var transaction_ontology_parameter_link_count: i64 = 0
@@ -9018,11 +9360,8 @@ pub fn opt_cleanup_module_inplace(module: &! IrModule) -> OcpCleanupModuleReceip
         let transactions_before = audit.transaction_count
         let applications_before = audit.application_count
         let function_name = (*module).functions[fi as usize].name
-        (*module).functions[fi as usize] = opt_cleanup_function_with_algebras_and_audit(
-            (*module).functions[fi as usize],
-            (*module).algebras,
-            &! audit,
-        )
+        // Inplace field-wise peels — never by-value IrFunction from the array.
+        opt_cleanup_function_mfi(module, fi)
         // Audit links are keyed by the lowered function name. Cleanup is not a
         // symbol-renaming pass, so fail loudly if that invariant ever changes.
         assert(ir_name_eq(function_name, (*module).functions[fi as usize].name))
