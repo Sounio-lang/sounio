@@ -48,9 +48,14 @@ A result is usable under native import iff **both** hold:
 | `knightian` (p-box) | `pb_gap`, `pb_midpoint` | self-contained |
 | `covariance` | `cov_new` and accessors | self-contained |
 | `knowledge` (**free-function** `ep_*` API) | `ep_measured` / `ep_add` / `ep_mul` / `ep_merge` / `ep_gate` | **D3 partial 2026-07-19** — free-function surface imports under Madaros; see `EPISTEMIC_KNOWLEDGE_MADAROS_D3_2026-07-19` |
+| `order_spread_exact` (`order_spread4`) | CPC N=4 exact spread ≈ `2.044226` (scaled µ-units `2044225`/`2044226`) | **stdlib leaf 2026-07-20** — algebra inlined via field-wise `OsOct` (no `algebra::` use). Gate: `scripts/madaros_order_spread_native_gate.sh` + Section A `ORDER_SPREAD_TRUST_OK`. `product4_exact` remains available (pulls free-function `knowledge`); method-form `Epistemic::measured` still Root-2. |
 
 Heuristic: **self-contained modules (no stdlib `use` deps) that avoid `f64→i64`
 casts and method-call sites import cleanly and return correct numbers.**
+(`order_spread_exact` is the measured exception that may `use` free-function
+`knowledge` while keeping the multiply path fully local — do **not** reintroduce
+`algebra::associator_field` / `algebra::octonion` uses; those still SEGV at
+runtime under Madaros multi-module native emit.)
 
 ### ⚠️ Importable but specific outputs CORRUPTED
 
@@ -67,7 +72,7 @@ casts and method-call sites import cleanly and return correct numbers.**
 |---|---|---|
 | `knowledge` **method-call** form (`Epistemic::measured`, `e.val()`) | SEGV in method-call lowering (Root 2) | use free `ep_*` API under Madaros; methods still OK under lean_single |
 | `propagate` | blocked / fragile multi-module | propagation layer not yet native-trustworthy |
-| `order_spread_exact` | **segfault** (uses `knowledge`+`algebra`) | works only via lean_single, not native import |
+| `algebra::associator_field` / `algebra::octonion` (imported exclusive-ref path) | **runtime SEGV** after successful native compile | CPC N=4 no longer depends on this path — use `epistemic::order_spread_exact::order_spread4` instead |
 | `uncertain_eq` | method / multi-module path | equality-under-uncertainty native-import-blocked |
 
 Method-form and remaining modules are usable today only by **free-function rewrite**,
