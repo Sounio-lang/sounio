@@ -48,6 +48,9 @@ run_witness deref-value-field-f64 \
 run_witness contextual-level-struct-literal \
   "$ROOT_DIR/tests/packages/contextual_level_struct_literal.sio" \
   'contextual level literal: passed'
+run_witness println-empty-preserves-calls \
+  "$ROOT_DIR/tests/packages/println_empty_preserves_calls.sio" \
+  'empty println preserves calls: passed'
 
 MADAROS_RAW_BIN="$RAW_MADAROS" \
   bash "$ROOT_DIR/scripts/ci/package_import_science_gate.sh"
