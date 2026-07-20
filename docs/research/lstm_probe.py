@@ -29,3 +29,25 @@ def lstm_step_jacobians(cell, x_seq, h0=None, c0=None):
 if __name__=='__main__':
     print("import lstm_step_jacobians, build/load a trained LSTMCell, run over many fixed sequences,")
     print("feed the per-step Jacobians to align_curve(...) and record the SHOULDER position per sequence.")
+# closed system is (h,c) — compute the FULL Jacobians (lstm_step_jacobians), then report alignment BY BLOCK:
+#   h→h : dense — the only place subspace death can live; the signature is claimable ONLY here.
+#   c→c : diagonal by architecture (gates depend on h_{t-1},x_t, never on c_{t-1}) — a FREE internal
+#         positive control: it will read align≈1 trivially; if the FULL-state alignment matches c→c while
+#         h→h sits at the null, the alignment is entirely architectural, found in the same computation.
+import numpy as np
+def bottomV(A,k): return np.linalg.svd(A)[2][-k:]
+def align_curve_of(mats,ks,dim):
+    base=np.sqrt(np.array(ks)/dim); out=[]
+    for k in ks:
+        cs=[np.linalg.svd(bottomV(mats[l],k)@bottomV(mats[l+1],k).T,compute_uv=False).mean() for l in range(len(mats)-1)]
+        out.append(np.mean(cs))
+    return np.array(out), base
+def block_report(state_jacs, H, ks=None):
+    """state_jacs: list of (2H,2H) per-step Jacobians. Reports align(k) for the h→h block, the c→c block,
+    and the full state. c→c is the free positive control; the signature is claimable only in h→h."""
+    ks=ks or list(range(1,2*H))
+    hh=[J[:H,:H] for J in state_jacs]; cc=[J[H:,H:] for J in state_jacs]
+    ah,_=align_curve_of(hh,[k for k in ks if k<H],H)
+    ac,_=align_curve_of(cc,[k for k in ks if k<H],H)
+    af,_=align_curve_of(state_jacs,ks,2*H)
+    return dict(hh=ah, cc=ac, full=af)   # look for a SMALL-k shoulder in hh; cc≈1 is architectural

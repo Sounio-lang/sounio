@@ -752,6 +752,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.lorenz-i256-y-step-z0-bridge-2026-06-24 | historical | docs/research/lorenz-i256-y-step-z0-bridge-2026-06-24.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.lorenz-i256-z-derivative-bounded-bridge-2026-06-24 | historical | docs/research/lorenz-i256-z-derivative-bounded-bridge-2026-06-24.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.lorenz-i256-z-step-bounded-bridge-2026-06-24 | historical | docs/research/lorenz-i256-z-step-bounded-bridge-2026-06-24.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.lyapunov-repositioning | historical | docs/research/lyapunov-repositioning.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.m0-baseline-inventory | historical | docs/research/m0_baseline_inventory.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.m3-naturality-residual | historical | docs/research/m3_naturality_residual.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.m4-validation-framework | historical | docs/research/m4_validation_framework.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
