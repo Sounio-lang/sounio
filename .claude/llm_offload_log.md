@@ -3254,3 +3254,10 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 | Date | Provider | Task | Target | Outcome | Note |
 |---|---|---|---|---|---|
 | 2026-07-20 | xai/Grok 4.3; zai/GLM-5.2 | external raw review | issue #1122 catalog-refresh observation and unanswered reconfirmation request | PASS_TWO_PROVIDERS | Both reviewers found no BLOCKER, MAJOR, or MINOR issue and preserved the intended classification: point-in-time observation, no mapping response or selection, no new proposal, and no source-removal, production, repository-write, or cutover authority. The exact reviewed body was published as issue comment `5018122998` (1,744 bytes, SHA-256 `c4f69223ecbae95a0d55f698c255c0bfcfb6ac2f5992ebce07e8038a0b2a3fdb`) and verified byte-identical through the GitHub API. Raw: `/tmp/llm-offload-SXzk3v/`. |
+
+## 2026-07-20 - canonical catalog refresh second main-integration carry waiver
+
+| Date | Provider | Task | Target | Outcome | Note |
+|---|---|---|---|---|---|
+| 2026-07-20 | none | main integration | affective_ordering.py; codimension-and-the-bits-functional.md; erosion-hebbian-result.md; erosion_hebbian.py; river-variational-and-the-ordering-null.md | WAIVED_BYTE_IDENTICAL_MAIN_CARRY | This lane integrated current `origin/main@943d0a2f2`. Every listed index object equals the corresponding `origin/main` object. This catalog-refresh lane did not author, revise, execute, publish, or make a new mathematical or research claim in these artifacts. The core object IDs are `0748c2bf`, `3e1ce84e`, `370c16cc`, `51c2eb60`, and `dd010f1a`. |
+| 2026-07-20 | none | main integration | EPISTEMIC_TRUST_MAP_2026-07-14.md; order_spread_exact.sio; order_spread_trust.sio; witness_import_order_spread.sio; madaros_dual_gum_knowledge.sio | WAIVED_BYTE_IDENTICAL_MAIN_CARRY | These epistemic claim/code surfaces are exact `origin/main@943d0a2f2` carries. This lane did not edit their semantics or use them as evidence for the catalog observation. `order_spread_exact.sio` is object `b4a19598f45058bf47169e7c280db41672f2d84b` in both the merge index and upstream. |

@@ -54,7 +54,14 @@ fi
 
 # This gate is wired to the Linux current-source CI job. Darwin's common
 # 65532 KiB ceiling is intentionally not normalized into this Linux contract.
-stack_kb="${SOUNIO_MADAROS_CHANGED_TESTS_STACK_KB:-65536}"
+#
+# Dual-module witnesses (gum+knowledge) need more than 64 MiB soft stack under
+# current Madaros multi-module lower+codegen: measured 2026-07-20, 65536 KiB
+# completes lower (final_fn_count 225) but fails to emit the ELF (wrapper then
+# reports "run exited 1" / typecheck: failed); >= ~120000 KiB writes and runs
+# DUAL_GUM_KNOWLEDGE_OK. Default 131072 leaves headroom on GHA Linux runners
+# (hard limit unlimited).
+stack_kb="${SOUNIO_MADAROS_CHANGED_TESTS_STACK_KB:-131072}"
 [[ "$stack_kb" =~ ^[1-9][0-9]*$ && ${#stack_kb} -le 9 ]] \
   || fail "invalid_stack_kb"
 
