@@ -301,6 +301,20 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     if bf_get(&cb, 1000, 0) != 2.0 { print("FAIL cumsumby1000\n"); return 109 }
     if bf_get(&cb, 999000, 0) != 1000.0 { print("FAIL cumsumby999000\n"); return 110 } // 1000th of key 0
     if bf_get(&cb, 999999, 0) != 1000.0 { print("FAIL cumsumby_last\n"); return 111 }  // 1000th of key 999
+    // DENSE vs HASH: the general-key _hash variants must match the dense fast path on dense keys.
+    let cch = bf_cumcount_by_hash(&cf, 1)
+    let cbh = bf_cumsum_by_hash(&cf, 1, 2)
+    if bf_get(&cch, 1000, 0) != bf_get(&cc, 1000, 0) { print("FAIL cumcount_hash\n"); return 330 }
+    if bf_get(&cch, 999999, 0) != bf_get(&cc, 999999, 0) { print("FAIL cumcount_hash2\n"); return 331 }
+    if bf_get(&cbh, 999000, 0) != bf_get(&cb, 999000, 0) { print("FAIL cumsum_hash\n"); return 332 }
+    if bf_get(&cbh, 999999, 0) != bf_get(&cb, 999999, 0) { print("FAIL cumsum_hash2\n"); return 333 }
+    // _hash handles SPARSE keys the dense path can't: keys 5000 & 9000 (>1024).
+    var spf = bf_new(2, 16)
+    var spi: i64 = 0
+    while spi < 6 { var spr:[f64;64]=[0.0;64]; spr[0]=(5000 + 4000*(spi%2)) as f64; spr[1]=1.0; bf_push_row(&!spf,&spr,2); spi=spi+1 }
+    let sph = bf_cumsum_by_hash(&spf, 0, 1)   // key 5000: rows 0,2,4 -> 1,2,3 ; key 9000: rows 1,3,5 -> 1,2,3
+    if bf_get(&sph, 4, 0) != 3.0 { print("FAIL cumsum_hash_sparse\n"); return 334 }
+    if bf_get(&sph, 5, 0) != 3.0 { print("FAIL cumsum_hash_sparse2\n"); return 335 }
     // CUMMAX / CUMMIN: reuse cf (col0=i%100, col1=i%1000 key, col2 unused here, col3=i).
     // Add a strictly-decreasing column for cummin by rebuilding a small dedicated frame.
     var xf = bf_new(3, 16)
@@ -883,6 +897,26 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
     // so group std ~ 12.1106. all rows same.
     if !approx_eq(bf_get(&tsd, 0, 0), bf_get(&tsd, 4, 0)) { print("FAIL tstd_uniform\n"); return 320 }
     if bf_get(&tsd, 0, 0) < 12.0 || bf_get(&tsd, 0, 0) > 12.2 { print("FAIL tstd_val\n"); return 321 }
+    // GROUPED CUMULATIVE MIN / MAX. 2 groups (key=r%2). val for group 0 (even rows) descends
+    // 100,99,98,...; group 1 (odd rows) ascends 0,1,2,... -> cummin group0 keeps dropping,
+    // cummax group0 stays 100; cummax group1 keeps rising, cummin group1 stays 0.
+    var cef = bf_new(2, 16)
+    var cei: i64 = 0
+    while cei < 200 { var cer:[f64;64]=[0.0;64]; cer[0]=(cei%2) as f64
+        if cei%2==0 { cer[1]=(100 - cei/2) as f64 } else { cer[1]=(cei/2) as f64 }
+        bf_push_row(&!cef,&cer,2); cei=cei+1 }
+    let cmx = bf_cummax_by(&cef, 0, 1)
+    let cmn = bf_cummin_by(&cef, 0, 1)
+    if bf_nrows(&cmx) != 200 { print("FAIL cumext_n\n"); return 322 }               // row-aligned
+    // group 0 rows are even indices; occurrence j (row 2j) has val 100-j.
+    if bf_get(&cmx, 0, 0) != 100.0 { print("FAIL cmx_g0_first\n"); return 323 }      // max so far = 100
+    if bf_get(&cmx, 20, 0) != 100.0 { print("FAIL cmx_g0_stay\n"); return 324 }      // still 100 (descending vals)
+    if bf_get(&cmn, 0, 0) != 100.0 { print("FAIL cmn_g0_first\n"); return 325 }      // min so far = 100
+    if bf_get(&cmn, 20, 0) != 90.0 { print("FAIL cmn_g0_drop\n"); return 326 }       // row 20 = occ 10 -> val 90, min so far 90
+    // group 1 rows are odd indices; occurrence j (row 2j+1) has val j.
+    if bf_get(&cmn, 1, 0) != 0.0 { print("FAIL cmn_g1_first\n"); return 327 }        // min = 0
+    if bf_get(&cmn, 21, 0) != 0.0 { print("FAIL cmn_g1_stay\n"); return 328 }        // still 0 (ascending)
+    if bf_get(&cmx, 21, 0) != 10.0 { print("FAIL cmx_g1_rise\n"); return 329 }       // row 21 = occ 10 -> val 10, max 10
     print("BIGFRAME_OPS_GATE_OK\n")
     } else {
         print("BIGFRAME_OPS_FAIL\n")

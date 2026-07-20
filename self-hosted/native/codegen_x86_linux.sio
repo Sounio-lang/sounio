@@ -7063,6 +7063,10 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
     }
     spill_ir_params_ref_mut(nc, func)
 
+    // saw_return: defense against truncated IR (pre-4096 IR_MAX_INSTRS wall dropped
+    // IrReturn on unsplit oct_mul → fallthrough into the next function / main
+    // re-entry storm). Always close the frame if no IrReturn/IrReturnSret was seen.
+    var saw_return = false
     var i = 0
     while i < (*func).instr_count && i < IR_MAX_INSTRS {
         let instr_op = (*func).instrs[i as usize].op
@@ -7401,11 +7405,13 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             nc_emit_mov_rsp_rbp(nc)
             nc_emit_pop_rbp(nc)
             nc_emit_ret(nc)
+            saw_return = true
         } else if instr_op == IrOpcode::IrReturnSret {
             nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
             nc_emit_mov_rsp_rbp(nc)
             nc_emit_pop_rbp(nc)
             nc_emit_ret(nc)
+            saw_return = true
         } else if instr_op == IrOpcode::IrLabel {
             nc_define_label(nc, (*func).instrs[i as usize].label_id)
         } else if instr_op == IrOpcode::IrJump {
@@ -7562,6 +7568,18 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             return false
         }
         i = i + 1
+    }
+
+    // Fallthrough defense: if IR was truncated past IR_MAX_INSTRS (or a void body
+    // never received IrReturn), emit a synthetic epilogue so control cannot walk
+    // into the next function body (re-entry through main / wrong call target
+    // appearance). Correctness of the truncated body is not claimed — callers
+    // that hit this path still need a larger IR_MAX_INSTRS for full semantics.
+    if !saw_return {
+        nc_emit_mov_rax_imm(nc, 0)
+        nc_emit_mov_rsp_rbp(nc)
+        nc_emit_pop_rbp(nc)
+        nc_emit_ret(nc)
     }
 
     patch_label_forwards_mut(nc)
