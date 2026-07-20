@@ -6,11 +6,11 @@ use parser::ast::*
 use ir::ir::*
 use check::types::*
 //
-// SOIR v3 Binary Format:
+// SOIR v4 Binary Format (lossless subset only):
 // ─────────────────────────
 // Header (8 bytes):
 //   - Magic: "SOIR" (0x534F4952 little-endian)
-//   - Version: 3 (1 byte)
+//   - Version: 4 (1 byte)
 //   - Reserved: 0x00 (3 bytes padding)
 //
 // Body:
@@ -33,7 +33,7 @@ use check::types::*
 //   - hyper_algebra_kind: i64 (v3+)
 //   - instrs: array of IrInstr
 //
-// IrInstr encoding (fixed-size, 128 bytes):
+// IrInstr encoding (fixed-size, 232 bytes):
 //   - op: IrOpcode (1 byte + 7 padding)
 //   - dst, src1, src2: i64 (8 bytes each)
 //   - imm_i64: i64
@@ -47,9 +47,54 @@ use check::types::*
 let SOIR_MAGIC: i64 = 1380206931  // "SOIR" as i32 cast to i64
 let SOIR_VERSION: i8 = 4
 let SOIR_MAX_SIZE: i64 = 131072  // 128KB max module size
+let SOIR_NAME_SIZE: i64 = 136
+let SOIR_INSTR_SIZE: i64 = 232
+let SOIR_FUNCTION_HEADER_V4_SIZE: i64 = 704
+let SOIR_EPISTEMIC_COUNT_FIELDS_V4: i64 = 36
+let SOIR_EMPTY_EPISTEMIC_SIZE_V4: i64 = 288
+let SOIR_ALGEBRA_INFO_SIZE_V4: i64 = 200
+let SOIR_INVALID_POS: i64 = 131073
+
+pub let SOIR_V4_STATUS_OK: i64 = 0
+pub let SOIR_V4_STATUS_VIEW_BOUNDS: i64 = 1
+pub let SOIR_V4_STATUS_BAD_VERSION: i64 = 2
+pub let SOIR_V4_STATUS_CAPACITY: i64 = 3
+pub let SOIR_V4_STATUS_MALFORMED: i64 = 4
+pub let SOIR_V4_STATUS_SEMANTIC_LOSS: i64 = 5
+pub let SOIR_V4_STATUS_TRUNCATED: i64 = 6
+pub let SOIR_V4_STATUS_TRAILING_BYTES: i64 = 7
+pub let SOIR_V4_STATUS_UNSUPPORTED_TAG: i64 = 8
+pub let SOIR_V4_STATUS_BAD_RESERVED: i64 = 9
+
+// The serializer is single-threaded today. These logical cursor guards keep
+// the fixed-array helper ABI intact while making every primitive access honor
+// the caller-provided artifact length. Persistent cache authority remains
+// quarantined in compiler::module_loader.
+var SOIR_V4_WRITE_STATUS: i64 = SOIR_V4_STATUS_OK
+var SOIR_V4_READ_STATUS: i64 = SOIR_V4_STATUS_OK
+var SOIR_V4_READ_LIMIT: i64 = 0
+
+pub fn soir_v4_last_write_status() -> i64 { SOIR_V4_WRITE_STATUS }
+pub fn soir_v4_last_read_status() -> i64 { SOIR_V4_READ_STATUS }
+
+fn soir_v4_write_fail(status: i64) with Mut {
+    if SOIR_V4_WRITE_STATUS == SOIR_V4_STATUS_OK {
+        SOIR_V4_WRITE_STATUS = status
+    }
+}
+
+fn soir_v4_read_fail(status: i64) with Mut {
+    if SOIR_V4_READ_STATUS == SOIR_V4_STATUS_OK {
+        SOIR_V4_READ_STATUS = status
+    }
+}
 
 fn write_i8(buf: [i8; 131072], pos: i64, val: i8) -> ([i8; 131072], i64) with Mut, Panic, Div {
     var b = buf
+    if pos < 0 || pos >= SOIR_MAX_SIZE {
+        soir_v4_write_fail(SOIR_V4_STATUS_CAPACITY)
+        return (b, SOIR_INVALID_POS)
+    }
     b[pos] = val
     (b, pos + 1)
 }
@@ -95,6 +140,14 @@ fn write_f64(buf: [i8; 131072], pos: i64, val: f64) -> ([i8; 131072], i64) with 
 
 fn write_name(buf: [i8; 131072], pos: i64, n: Name) -> ([i8; 131072], i64) with Mut, Panic, Div {
     var b = buf
+    if n.len < 0 || n.len > 128 {
+        soir_v4_write_fail(SOIR_V4_STATUS_MALFORMED)
+        return (b, SOIR_INVALID_POS)
+    }
+    if pos < 0 || pos > SOIR_MAX_SIZE || SOIR_NAME_SIZE > SOIR_MAX_SIZE - pos {
+        soir_v4_write_fail(SOIR_V4_STATUS_CAPACITY)
+        return (b, SOIR_INVALID_POS)
+    }
     var p = pos
     // Write length first
     let pair = write_i64(b, p, n.len)
@@ -110,10 +163,18 @@ fn write_name(buf: [i8; 131072], pos: i64, n: Name) -> ([i8; 131072], i64) with 
 }
 
 fn read_i8(buf: [i8; 131072], pos: i64) -> (i8, i64) with Mut, Panic, Div {
+    if pos < 0 || pos >= SOIR_V4_READ_LIMIT {
+        soir_v4_read_fail(SOIR_V4_STATUS_TRUNCATED)
+        return (0 as i8, pos)
+    }
     (buf[pos], pos + 1)
 }
 
 fn read_i64(buf: [i8; 131072], pos: i64) -> (i64, i64) with Mut, Panic, Div {
+    if pos < 0 || pos > SOIR_V4_READ_LIMIT || 8 > SOIR_V4_READ_LIMIT - pos {
+        soir_v4_read_fail(SOIR_V4_STATUS_TRUNCATED)
+        return (0, pos)
+    }
     // Little-endian decoding - mask to ensure unsigned byte interpretation
     let raw0: i64 = buf[pos + 0] as i64
     let raw1: i64 = buf[pos + 1] as i64
@@ -135,75 +196,24 @@ fn read_i64(buf: [i8; 131072], pos: i64) -> (i64, i64) with Mut, Panic, Div {
     (val, pos + 8)
 }
 
-// IEEE 754 double: i64 bits → f64 via arithmetic reconstruction.
-// sign (bit 63) | exponent (bits 62..52, bias 1023) | mantissa (bits 51..0)
-fn ieee754_bits_to_f64(bits: i64) -> f64 with Mut, Panic, Div {
-    // Zero (positive or negative)
-    if (bits & 0x7FFFFFFFFFFFFFFF) == 0 { return 0.0 }
-
-    let sign_bit = (bits >> 63) & 1
-    let raw_exp = (bits >> 52) & 0x7FF
-    let frac_bits = bits & 0xFFFFFFFFFFFFF
-
-    // Infinity / NaN — return 0.0 as safe fallback for serialization
-    if raw_exp == 0x7FF { return 0.0 }
-
-    // Reconstruct mantissa: 1.frac (normal) or 0.frac (subnormal)
-    var mantissa: f64 = 0.0
-    var bit_val: f64 = 0.5
-    var i: i64 = 51
-    while i >= 0 {
-        if ((frac_bits >> i) & 1) == 1 {
-            mantissa = mantissa + bit_val
-        }
-        bit_val = bit_val / 2.0
-        i = i - 1
-    }
-
-    var result: f64 = 0.0
-    if raw_exp == 0 {
-        // Subnormal: 0.frac × 2^(-1022)
-        result = mantissa
-        var e: i64 = 0
-        while e < 1022 {
-            result = result / 2.0
-            e = e + 1
-        }
-    } else {
-        // Normal: (1 + mantissa) × 2^(exp - 1023)
-        result = 1.0 + mantissa
-        let exp = raw_exp - 1023
-        if exp > 0 {
-            var e: i64 = 0
-            while e < exp {
-                result = result * 2.0
-                e = e + 1
-            }
-        } else if exp < 0 {
-            let neg_exp = 0 - exp
-            var e: i64 = 0
-            while e < neg_exp {
-                result = result / 2.0
-                e = e + 1
-            }
-        }
-    }
-
-    if sign_bit == 1 { result = 0.0 - result }
-    result
-}
-
 fn read_f64(buf: [i8; 131072], pos: i64) -> (f64, i64) with Mut, Panic, Div {
     let pair = read_i64(buf, pos)
-    let bits = pair.0
-    let next_pos = pair.1
-    (ieee754_bits_to_f64(bits), next_pos)
+    (bits_to_f64(pair.0), pair.1)
 }
 
 fn read_name(buf: [i8; 131072], pos: i64) -> (Name, i64) with Mut, Panic, Div {
+    if pos < 0 || pos > SOIR_V4_READ_LIMIT || SOIR_NAME_SIZE > SOIR_V4_READ_LIMIT - pos {
+        soir_v4_read_fail(SOIR_V4_STATUS_TRUNCATED)
+        return (Name { buf: [0; 128], len: 0 }, pos)
+    }
     let len_pair = read_i64(buf, pos)
     let len = len_pair.0
     var p = len_pair.1
+
+    if len < 0 || len > 128 {
+        soir_v4_read_fail(SOIR_V4_STATUS_MALFORMED)
+        return (Name { buf: [0; 128], len: 0 }, pos)
+    }
 
     var n = Name { buf: [0; 128], len: len }
     var i: i64 = 0
@@ -212,6 +222,22 @@ fn read_name(buf: [i8; 131072], pos: i64) -> (Name, i64) with Mut, Panic, Div {
         i = i + 1
     }
     (n, p + 128)
+}
+
+fn read_zero_padding(buf: [i8; 131072], pos: i64, count: i64) -> i64 with Mut, Panic, Div {
+    if count < 0 || pos < 0 || pos > SOIR_V4_READ_LIMIT || count > SOIR_V4_READ_LIMIT - pos {
+        soir_v4_read_fail(SOIR_V4_STATUS_TRUNCATED)
+        return pos
+    }
+    var i: i64 = 0
+    while i < count {
+        if buf[pos + i] != 0 as i8 {
+            soir_v4_read_fail(SOIR_V4_STATUS_BAD_RESERVED)
+            return pos
+        }
+        i = i + 1
+    }
+    pos + count
 }
 
 fn write_compare_op(buf: [i8; 131072], pos: i64, op: CompareOp) -> ([i8; 131072], i64) with Mut, Panic, Div {
@@ -229,6 +255,10 @@ fn read_compare_op(buf: [i8; 131072], pos: i64) -> (CompareOp, i64) with Mut, Pa
     let pair = read_i8(buf, pos)
     let tag = pair.0
     let next_pos = pair.1
+    if SOIR_V4_READ_STATUS != SOIR_V4_STATUS_OK || tag < 0 || tag > 4 {
+        soir_v4_read_fail(SOIR_V4_STATUS_UNSUPPORTED_TAG)
+        return (CompareOp::CmpEq, next_pos)
+    }
     let op = if tag == 0 { CompareOp::CmpLt }
         else if tag == 1 { CompareOp::CmpLe }
         else if tag == 2 { CompareOp::CmpEq }
@@ -237,7 +267,54 @@ fn read_compare_op(buf: [i8; 131072], pos: i64) -> (CompareOp, i64) with Mut, Pa
     (op, next_pos)
 }
 
+fn soir_v4_opcode_supported(op: IrOpcode) -> bool {
+    match op {
+        IrOpcode::IrLoadImm => true,
+        IrOpcode::IrLoadFloat => true,
+        IrOpcode::IrLoadBool => true,
+        IrOpcode::IrLoadString => true,
+        IrOpcode::IrCopy => true,
+        IrOpcode::IrBinOp => true,
+        IrOpcode::IrUnaryOp => true,
+        IrOpcode::IrCall => true,
+        IrOpcode::IrReturn => true,
+        IrOpcode::IrJump => true,
+        IrOpcode::IrBranchTrue => true,
+        IrOpcode::IrBranchFalse => true,
+        IrOpcode::IrFieldGet => true,
+        IrOpcode::IrFieldSet => true,
+        IrOpcode::IrIndexGet => true,
+        IrOpcode::IrIndexSet => true,
+        IrOpcode::IrAlloc => true,
+        IrOpcode::IrLabel => true,
+        IrOpcode::IrNop => true,
+        IrOpcode::IrPhi => true,
+        IrOpcode::IrContest => true,
+        IrOpcode::IrProveRobust => true,
+        IrOpcode::IrValidated => true,
+        IrOpcode::IrLiftKnowledge => true,
+        IrOpcode::IrMeasure => true,
+        IrOpcode::IrAdmitAction => true,
+        IrOpcode::IrDeferAction => true,
+        IrOpcode::IrPlanAcquisition => true,
+        IrOpcode::IrPlanRecourse => true,
+        IrOpcode::IrProposeAlternatives => true,
+        IrOpcode::IrCommitAlternative => true,
+        IrOpcode::IrObserveTransition => true,
+        IrOpcode::IrRollbackTransition => true,
+        IrOpcode::IrDebugGuard => true,
+        IrOpcode::IrProfCounter => true,
+        IrOpcode::IrCallSret => false,
+        IrOpcode::IrReturnSret => false,
+        _ => false,
+    }
+}
+
 fn write_opcode(buf: [i8; 131072], pos: i64, op: IrOpcode) -> ([i8; 131072], i64) with Mut, Panic, Div {
+    if !soir_v4_opcode_supported(op) {
+        soir_v4_write_fail(SOIR_V4_STATUS_SEMANTIC_LOSS)
+        return (buf, SOIR_INVALID_POS)
+    }
     let tag: i8 = match op {
         IrOpcode::IrLoadImm => 0,
         IrOpcode::IrLoadFloat => 1,
@@ -276,6 +353,7 @@ fn write_opcode(buf: [i8; 131072], pos: i64, op: IrOpcode) -> ([i8; 131072], i64
         IrOpcode::IrProfCounter => 34,
         IrOpcode::IrCallSret => 35,
         IrOpcode::IrReturnSret => 36,
+        _ => 0,
     }
     write_i8(buf, pos, tag)
 }
@@ -284,6 +362,10 @@ fn read_opcode(buf: [i8; 131072], pos: i64) -> (IrOpcode, i64) with Mut, Panic, 
     let pair = read_i8(buf, pos)
     let tag = pair.0
     let next_pos = pair.1
+    if SOIR_V4_READ_STATUS != SOIR_V4_STATUS_OK || tag < 0 || tag > 34 {
+        soir_v4_read_fail(SOIR_V4_STATUS_UNSUPPORTED_TAG)
+        return (IrOpcode::IrNop, next_pos)
+    }
     let op = if tag == 0 { IrOpcode::IrLoadImm }
         else if tag == 1 { IrOpcode::IrLoadFloat }
         else if tag == 2 { IrOpcode::IrLoadBool }
@@ -356,6 +438,10 @@ fn read_binary_op(buf: [i8; 131072], pos: i64) -> (BinaryOp, i64) with Mut, Pani
     let pair = read_i8(buf, pos)
     let tag = pair.0
     let next_pos = pair.1
+    if SOIR_V4_READ_STATUS != SOIR_V4_STATUS_OK || tag < 0 || tag > 20 {
+        soir_v4_read_fail(SOIR_V4_STATUS_UNSUPPORTED_TAG)
+        return (BinaryOp::OpAdd, next_pos)
+    }
     let op = if tag == 0 { BinaryOp::OpAdd }
         else if tag == 1 { BinaryOp::OpSub }
         else if tag == 2 { BinaryOp::OpMul }
@@ -395,6 +481,10 @@ fn read_unary_op(buf: [i8; 131072], pos: i64) -> (UnaryOp, i64) with Mut, Panic,
     let pair = read_i8(buf, pos)
     let tag = pair.0
     let next_pos = pair.1
+    if SOIR_V4_READ_STATUS != SOIR_V4_STATUS_OK || tag < 0 || tag > 4 {
+        soir_v4_read_fail(SOIR_V4_STATUS_UNSUPPORTED_TAG)
+        return (UnaryOp::OpNeg, next_pos)
+    }
     let op = if tag == 0 { UnaryOp::OpNeg }
         else if tag == 1 { UnaryOp::OpNot }
         else if tag == 2 { UnaryOp::OpRef }
@@ -406,6 +496,11 @@ fn read_unary_op(buf: [i8; 131072], pos: i64) -> (UnaryOp, i64) with Mut, Panic,
 fn serialize_ir_instr(buf: [i8; 131072], pos: i64, instr: IrInstr) -> ([i8; 131072], i64) with Mut, Panic, Div {
     var b = buf
     var p = pos
+
+    if pos < 0 || pos > SOIR_MAX_SIZE || SOIR_INSTR_SIZE > SOIR_MAX_SIZE - pos {
+        soir_v4_write_fail(SOIR_V4_STATUS_CAPACITY)
+        return (b, SOIR_INVALID_POS)
+    }
 
     let op_pair = write_opcode(b, p, instr.op)
     b = op_pair.0
@@ -463,10 +558,14 @@ fn serialize_ir_instr(buf: [i8; 131072], pos: i64, instr: IrInstr) -> ([i8; 1310
 }
 
 fn deserialize_ir_instr(buf: [i8; 131072], pos: i64) -> (IrInstr, i64) with Mut, Panic, Div {
+    if pos < 0 || pos > SOIR_V4_READ_LIMIT || SOIR_INSTR_SIZE > SOIR_V4_READ_LIMIT - pos {
+        soir_v4_read_fail(SOIR_V4_STATUS_TRUNCATED)
+        return (ir_instr_new(IrOpcode::IrNop), pos)
+    }
     var p = pos
     let op_pair = read_opcode(buf, p)
     let op = op_pair.0
-    p = op_pair.1 + 7  // skip padding
+    p = read_zero_padding(buf, op_pair.1, 7)
 
     let dst_pair = read_i64(buf, p)
     let dst = dst_pair.0
@@ -502,11 +601,11 @@ fn deserialize_ir_instr(buf: [i8; 131072], pos: i64) -> (IrInstr, i64) with Mut,
 
     let bin_op_pair = read_binary_op(buf, p)
     let bin_op = bin_op_pair.0
-    p = bin_op_pair.1 + 7  // skip padding
+    p = read_zero_padding(buf, bin_op_pair.1, 7)
 
     let un_op_pair = read_unary_op(buf, p)
     let un_op = un_op_pair.0
-    p = un_op_pair.1 + 7  // skip padding
+    p = read_zero_padding(buf, un_op_pair.1, 7)
 
     let name_pair = read_name(buf, p)
     let name = name_pair.0
@@ -515,6 +614,10 @@ fn deserialize_ir_instr(buf: [i8; 131072], pos: i64) -> (IrInstr, i64) with Mut,
     let arg_count_pair = read_i64(buf, p)
     let arg_count = arg_count_pair.0
     p = arg_count_pair.1
+
+    if arg_count != 0 {
+        soir_v4_read_fail(SOIR_V4_STATUS_SEMANTIC_LOSS)
+    }
 
     let instr = IrInstr {
         op: op,
@@ -530,53 +633,53 @@ fn deserialize_ir_instr(buf: [i8; 131072], pos: i64) -> (IrInstr, i64) with Mut,
         bin_op: bin_op,
         un_op: un_op,
         name: name,
-        call_args: ir_empty_reg_list(),  // Not serialized
+        call_args: None,
         arg_count: arg_count,
     }
     (instr, p)
 }
 
-fn serialize_ir_function(buf: [i8; 131072], pos: i64, func: IrFunction) -> ([i8; 131072], i64) with Mut, Panic, Div {
+fn serialize_ir_function(buf: [i8; 131072], pos: i64, func: &IrFunction) -> ([i8; 131072], i64) with Mut, Panic, Div {
     var b = buf
     var p = pos
 
-    let name_pair = write_name(b, p, func.name)
+    let name_pair = write_name(b, p, (*func).name)
     b = name_pair.0
     p = name_pair.1
-    let instr_count_pair = write_i64(b, p, func.instr_count)
+    let instr_count_pair = write_i64(b, p, (*func).instr_count)
     b = instr_count_pair.0
     p = instr_count_pair.1
-    let reg_count_pair = write_i64(b, p, func.reg_count)
+    let reg_count_pair = write_i64(b, p, (*func).reg_count)
     b = reg_count_pair.0
     p = reg_count_pair.1
-    let label_count_pair = write_i64(b, p, func.label_count)
+    let label_count_pair = write_i64(b, p, (*func).label_count)
     b = label_count_pair.0
     p = label_count_pair.1
-    let param_count_pair = write_i64(b, p, func.param_count)
+    let param_count_pair = write_i64(b, p, (*func).param_count)
     b = param_count_pair.0
     p = param_count_pair.1
 
     // Write param_regs array
     var i: i64 = 0
     while i < 64 {
-        let reg_pair = write_i64(b, p, func.param_regs[i])
+        let reg_pair = write_i64(b, p, (*func).param_regs[i as usize])
         b = reg_pair.0
         p = reg_pair.1
         i = i + 1
     }
 
     // Sprint 38: Write compile strategy
-    let strategy_pair = write_i64(b, p, func.compile_strategy)
+    let strategy_pair = write_i64(b, p, (*func).compile_strategy)
     b = strategy_pair.0
     p = strategy_pair.1
 
     // Sprint 44: Write prof_counter_id
-    let prof_ctr_pair = write_i64(b, p, func.prof_counter_id)
+    let prof_ctr_pair = write_i64(b, p, (*func).prof_counter_id)
     b = prof_ctr_pair.0
     p = prof_ctr_pair.1
 
     if SOIR_VERSION >= 3 {
-        let hyper_alg_pair = write_i64(b, p, func.hyper_algebra_kind)
+        let hyper_alg_pair = write_i64(b, p, (*func).hyper_algebra_kind)
         b = hyper_alg_pair.0
         p = hyper_alg_pair.1
     }
@@ -586,17 +689,22 @@ fn serialize_ir_function(buf: [i8; 131072], pos: i64, func: IrFunction) -> ([i8;
 
     // Write instructions
     var j: i64 = 0
-    while j < func.instr_count {
-        let instr_pair = serialize_ir_instr(b, p, func.instrs[j])
+    while j < (*func).instr_count {
+        let instr_pair = serialize_ir_instr(b, p, (*func).instrs[j as usize])
         b = instr_pair.0
         p = instr_pair.1
+        if SOIR_V4_WRITE_STATUS != SOIR_V4_STATUS_OK { return (b, p) }
         j = j + 1
     }
 
     (b, p)
 }
 
-fn deserialize_ir_function(buf: [i8; 131072], pos: i64, version: i8) -> (IrFunction, i64) with Mut, Panic, Div {
+fn deserialize_ir_function_into(buf: [i8; 131072], pos: i64, out: &! IrFunction) -> (i64, bool) with Mut, Panic, Div {
+    if pos < 0 || pos > SOIR_V4_READ_LIMIT || SOIR_FUNCTION_HEADER_V4_SIZE > SOIR_V4_READ_LIMIT - pos {
+        soir_v4_read_fail(SOIR_V4_STATUS_TRUNCATED)
+        return (pos, false)
+    }
     var p = pos
     let name_pair = read_name(buf, p)
     let name = name_pair.0
@@ -605,25 +713,48 @@ fn deserialize_ir_function(buf: [i8; 131072], pos: i64, version: i8) -> (IrFunct
     let instr_count_pair = read_i64(buf, p)
     let instr_count = instr_count_pair.0
     p = instr_count_pair.1
+    if instr_count < 0 {
+        soir_v4_read_fail(SOIR_V4_STATUS_MALFORMED)
+        return (p, false)
+    }
+    if instr_count > IR_MAX_INSTRS {
+        soir_v4_read_fail(SOIR_V4_STATUS_CAPACITY)
+        return (p, false)
+    }
 
     let reg_count_pair = read_i64(buf, p)
     let reg_count = reg_count_pair.0
     p = reg_count_pair.1
+    if reg_count < 0 {
+        soir_v4_read_fail(SOIR_V4_STATUS_MALFORMED)
+        return (p, false)
+    }
 
     let label_count_pair = read_i64(buf, p)
     let label_count = label_count_pair.0
     p = label_count_pair.1
+    if label_count < 0 {
+        soir_v4_read_fail(SOIR_V4_STATUS_MALFORMED)
+        return (p, false)
+    }
 
     let param_count_pair = read_i64(buf, p)
     let param_count = param_count_pair.0
     p = param_count_pair.1
+    if param_count < 0 {
+        soir_v4_read_fail(SOIR_V4_STATUS_MALFORMED)
+        return (p, false)
+    }
+    if param_count > IR_MAX_PARAMS {
+        soir_v4_read_fail(SOIR_V4_STATUS_CAPACITY)
+        return (p, false)
+    }
 
     // Read param_regs array
-    var param_regs: [i64; 64] = [IR_INVALID_REG; 64]
     var i: i64 = 0
     while i < 64 {
         let reg_pair = read_i64(buf, p)
-        param_regs[i] = reg_pair.0
+        (*out).param_regs[i as usize] = reg_pair.0
         p = reg_pair.1
         i = i + 1
     }
@@ -638,45 +769,46 @@ fn deserialize_ir_function(buf: [i8; 131072], pos: i64, version: i8) -> (IrFunct
     let prof_counter_id = prof_ctr_pair.0
     p = prof_ctr_pair.1
 
-    var hyper_algebra_kind: i64 = -1
-    if version >= 3 {
-        let hyper_alg_pair = read_i64(buf, p)
-        hyper_algebra_kind = hyper_alg_pair.0
-        p = hyper_alg_pair.1
+    let hyper_alg_pair = read_i64(buf, p)
+    let hyper_algebra_kind = hyper_alg_pair.0
+    p = hyper_alg_pair.1
+
+    if SOIR_V4_READ_STATUS != SOIR_V4_STATUS_OK ||
+       p < 0 || p > SOIR_V4_READ_LIMIT ||
+       instr_count > (SOIR_V4_READ_LIMIT - p) / SOIR_INSTR_SIZE {
+        soir_v4_read_fail(SOIR_V4_STATUS_TRUNCATED)
+        return (p, false)
     }
 
-    // Read instructions
-    var instrs: [IrInstr; 2048] = [ir_nop(); 2048]
+    (*out).name = name
+    (*out).defining_module_id = IR_DEFINING_MODULE_UNKNOWN
+    (*out).instr_count = 0
+    (*out).reg_count = reg_count
+    (*out).label_count = label_count
+    (*out).param_count = param_count
+    (*out).compile_strategy = compile_strategy
+    (*out).returns_float = 0
+    (*out).return_struct_name = ir_empty_name()
+    (*out).prof_counter_id = prof_counter_id
+    (*out).hyper_algebra_kind = hyper_algebra_kind
+    (*out).is_sret = 0
+    (*out).sret_dest_reg = -1
+    (*out).bss_size = 0
+    (*out).first_param_is_ref = 0
+
     var j: i64 = 0
     while j < instr_count {
         let instr_pair = deserialize_ir_instr(buf, p)
-        instrs[j] = instr_pair.0
+        if SOIR_V4_READ_STATUS != SOIR_V4_STATUS_OK {
+            return (p, false)
+        }
+        (*out).instrs[j as usize] = instr_pair.0
         p = instr_pair.1
         j = j + 1
     }
 
-    let func = IrFunction {
-        name: name,
-        // SOIR v4 carries neither definition provenance nor first-param reference
-        // semantics. Keep both losses explicit; neither is a v4 round-trip claim.
-        defining_module_id: IR_DEFINING_MODULE_UNKNOWN,
-        instrs: instrs,
-        instr_count: instr_count,
-        reg_count: reg_count,
-        label_count: label_count,
-        param_count: param_count,
-        param_regs: param_regs,
-        compile_strategy: compile_strategy,
-        returns_float: 0,
-        return_struct_name: ir_empty_name(),
-        prof_counter_id: prof_counter_id,
-        hyper_algebra_kind: hyper_algebra_kind,
-        is_sret: 0,
-        sret_dest_reg: -1,
-        bss_size: 0,
-        first_param_is_ref: 0,
-    }
-    (func, p)
+    (*out).instr_count = instr_count
+    (p, true)
 }
 
 fn write_ir_algebra_info(buf: [i8; 131072], pos: i64, info: IrAlgebraInfo) -> ([i8; 131072], i64) with Mut, Panic, Div {
@@ -738,6 +870,14 @@ fn read_ir_algebra_info(buf: [i8; 131072], pos: i64) -> (IrAlgebraInfo, i64) wit
     let valid_pair = read_i64(buf, p)
     let is_valid = valid_pair.0 != 0
     p = valid_pair.1
+    if (add_comm_pair.0 != 0 && add_comm_pair.0 != 1) ||
+       (add_assoc_pair.0 != 0 && add_assoc_pair.0 != 1) ||
+       (mul_comm_pair.0 != 0 && mul_comm_pair.0 != 1) ||
+       (mul_assoc_pair.0 != 0 && mul_assoc_pair.0 != 1) ||
+       (mul_alt_pair.0 != 0 && mul_alt_pair.0 != 1) ||
+       (valid_pair.0 != 0 && valid_pair.0 != 1) {
+        soir_v4_read_fail(SOIR_V4_STATUS_MALFORMED)
+    }
     (IrAlgebraInfo {
         name: name,
         add_commutative: add_comm,
@@ -754,6 +894,14 @@ fn read_ir_algebra_info(buf: [i8; 131072], pos: i64) -> (IrAlgebraInfo, i64) wit
 fn serialize_ir_algebra_table(buf: [i8; 131072], pos: i64, table: IrAlgebraTable) -> ([i8; 131072], i64) with Mut, Panic, Div {
     var b = buf
     var p = pos
+    if table.count < 0 {
+        soir_v4_write_fail(SOIR_V4_STATUS_MALFORMED)
+        return (b, SOIR_INVALID_POS)
+    }
+    if table.count > 32 {
+        soir_v4_write_fail(SOIR_V4_STATUS_CAPACITY)
+        return (b, SOIR_INVALID_POS)
+    }
     let count_pair = write_i64(b, p, table.count)
     b = count_pair.0
     p = count_pair.1
@@ -767,21 +915,48 @@ fn serialize_ir_algebra_table(buf: [i8; 131072], pos: i64, table: IrAlgebraTable
     (b, p)
 }
 
-fn deserialize_ir_algebra_table(buf: [i8; 131072], pos: i64) -> (IrAlgebraTable, i64) with Mut, Panic, Div {
+fn deserialize_ir_algebra_table_into(buf: [i8; 131072], pos: i64, out: &! IrAlgebraTable) -> (i64, bool) with Mut, Panic, Div {
     var p = pos
     let count_pair = read_i64(buf, p)
     let count = count_pair.0
     p = count_pair.1
-    var table = ir_empty_algebra_table()
+    if SOIR_V4_READ_STATUS != SOIR_V4_STATUS_OK || count < 0 {
+        soir_v4_read_fail(SOIR_V4_STATUS_MALFORMED)
+        return (p, false)
+    }
+    if count > 32 {
+        soir_v4_read_fail(SOIR_V4_STATUS_CAPACITY)
+        return (p, false)
+    }
+    if p < 0 || p > SOIR_V4_READ_LIMIT || count > (SOIR_V4_READ_LIMIT - p) / SOIR_ALGEBRA_INFO_SIZE_V4 {
+        soir_v4_read_fail(SOIR_V4_STATUS_TRUNCATED)
+        return (p, false)
+    }
+    (*out).count = 0
     var i: i64 = 0
-    while i < count && i < 32 {
+    while i < count {
         let info_pair = read_ir_algebra_info(buf, p)
-        table.entries[i] = info_pair.0
+        if SOIR_V4_READ_STATUS != SOIR_V4_STATUS_OK {
+            return (p, false)
+        }
+        (*out).entries[i as usize] = info_pair.0
         p = info_pair.1
         i = i + 1
     }
-    table.count = if count > 32 { 32 } else { count }
-    (table, p)
+    (*out).count = count
+    (p, true)
+}
+
+fn soir_v4_empty_policy_requirement_info() -> IrPolicyRequirementInfo {
+    IrPolicyRequirementInfo {
+        metric_id: -1,
+        metric_name: Name { buf: [0; 128], len: 0 },
+        op: CompareOp::CmpEq,
+        threshold: 0.0,
+        threshold_kind: 0,
+        bool_threshold: false,
+        name_threshold: Name { buf: [0; 128], len: 0 },
+    }
 }
 
 fn write_policy_requirement_info(buf: [i8; 131072], pos: i64, req: IrPolicyRequirementInfo) -> ([i8; 131072], i64) with Mut, Panic, Div {
@@ -960,7 +1135,7 @@ fn read_ir_policy_info(buf: [i8; 131072], pos: i64) -> (IrPolicyInfo, i64) with 
     let req_count_pair = read_i64(buf, p)
     let requirement_count = req_count_pair.0
     p = req_count_pair.1
-    var requirements: [IrPolicyRequirementInfo; 8] = [ir_empty_policy_requirement_info(); 8]
+    var requirements: [IrPolicyRequirementInfo; 8] = [soir_v4_empty_policy_requirement_info(); 8]
     var i: i64 = 0
     while i < 8 {
         let req_pair = read_policy_requirement_info(buf, p)
@@ -1020,7 +1195,7 @@ fn read_decision_policy_info(buf: [i8; 131072], pos: i64) -> (IrDecisionPolicyIn
     let req_count_pair = read_i64(buf, p)
     let requirement_count = req_count_pair.0
     p = req_count_pair.1
-    var requirements: [IrPolicyRequirementInfo; 8] = [ir_empty_policy_requirement_info(); 8]
+    var requirements: [IrPolicyRequirementInfo; 8] = [soir_v4_empty_policy_requirement_info(); 8]
     var i: i64 = 0
     while i < requirement_count && i < 8 {
         let req_pair = read_policy_requirement_info(buf, p)
@@ -1082,7 +1257,7 @@ fn read_deferral_policy_info(buf: [i8; 131072], pos: i64) -> (IrDeferralPolicyIn
     let req_count_pair = read_i64(buf, p)
     let requirement_count = req_count_pair.0
     p = req_count_pair.1
-    var requirements: [IrPolicyRequirementInfo; 8] = [ir_empty_policy_requirement_info(); 8]
+    var requirements: [IrPolicyRequirementInfo; 8] = [soir_v4_empty_policy_requirement_info(); 8]
     var i: i64 = 0
     while i < requirement_count && i < 8 {
         let req_pair = read_policy_requirement_info(buf, p)
@@ -1151,7 +1326,7 @@ fn read_acquisition_policy_info(buf: [i8; 131072], pos: i64) -> (IrAcquisitionPo
     let req_count_pair = read_i64(buf, p)
     let requirement_count = req_count_pair.0
     p = req_count_pair.1
-    var requirements: [IrPolicyRequirementInfo; 8] = [ir_empty_policy_requirement_info(); 8]
+    var requirements: [IrPolicyRequirementInfo; 8] = [soir_v4_empty_policy_requirement_info(); 8]
     var i: i64 = 0
     while i < requirement_count && i < 8 {
         let req_pair = read_policy_requirement_info(buf, p)
@@ -1221,7 +1396,7 @@ fn read_recourse_policy_info(buf: [i8; 131072], pos: i64) -> (IrRecoursePolicyIn
     let req_count_pair = read_i64(buf, p)
     let requirement_count = req_count_pair.0
     p = req_count_pair.1
-    var requirements: [IrPolicyRequirementInfo; 8] = [ir_empty_policy_requirement_info(); 8]
+    var requirements: [IrPolicyRequirementInfo; 8] = [soir_v4_empty_policy_requirement_info(); 8]
     var i: i64 = 0
     while i < requirement_count && i < 8 {
         let req_pair = read_policy_requirement_info(buf, p)
@@ -2833,7 +3008,7 @@ fn read_transition_policy_info(buf: [i8; 131072], pos: i64) -> (IrTransitionPoli
     let p4 = read_i64(buf, p)
     let requirement_count = p4.0
     p = p4.1
-    var requirements: [IrPolicyRequirementInfo; 8] = [ir_empty_policy_requirement_info(); 8]
+    var requirements: [IrPolicyRequirementInfo; 8] = [soir_v4_empty_policy_requirement_info(); 8]
     var i: i64 = 0
     while i < 8 {
         let pair = read_policy_requirement_info(buf, p)
@@ -2916,7 +3091,7 @@ fn read_transition_step_info(buf: [i8; 131072], pos: i64) -> (IrTransitionStepIn
     let p6 = read_i64(buf, p)
     let requirement_count = p6.0
     p = p6.1
-    var requirements: [IrPolicyRequirementInfo; 8] = [ir_empty_policy_requirement_info(); 8]
+    var requirements: [IrPolicyRequirementInfo; 8] = [soir_v4_empty_policy_requirement_info(); 8]
     var i: i64 = 0
     while i < 8 {
         let pair = read_policy_requirement_info(buf, p)
@@ -3204,7 +3379,7 @@ fn read_monitoring_policy_info(buf: [i8; 131072], pos: i64) -> (IrMonitoringPoli
     let p4 = read_i64(buf, p)
     let requirement_count = p4.0
     p = p4.1
-    var requirements: [IrPolicyRequirementInfo; 8] = [ir_empty_policy_requirement_info(); 8]
+    var requirements: [IrPolicyRequirementInfo; 8] = [soir_v4_empty_policy_requirement_info(); 8]
     var i: i64 = 0
     while i < 8 {
         let pair = read_policy_requirement_info(buf, p)
@@ -3921,7 +4096,10 @@ fn serialize_ir_epistemic_section(buf: [i8; 131072], pos: i64, ep: IrEpistemicSe
     (b, p)
 }
 
-fn deserialize_ir_epistemic_section(buf: [i8; 131072], pos: i64) -> (IrEpistemicSection, i64) with Mut, Panic, Div, Alloc {
+// Legacy body kept compile-clean for bootstrap source compatibility only. The
+// v4 module reader below never calls it because non-empty epistemic payloads
+// contain TypeEntry and record fields that v4 cannot preserve losslessly.
+fn deserialize_ir_epistemic_section_legacy_unreachable(buf: [i8; 131072], pos: i64, len: i64) -> (IrEpistemicSection, i64) with Mut, Panic, Div, Alloc {
     var p = pos
     var ep = ir_empty_epistemic_section()
 
@@ -4374,9 +4552,248 @@ fn deserialize_ir_epistemic_section(buf: [i8; 131072], pos: i64) -> (IrEpistemic
     (ep, p)
 }
 
-fn serialize_ir_module_into(module: IrModule, out_buf: &![i8; 131072], out_len: &! i64) with Mut, Panic, Div, Alloc {
+fn soir_v4_clear_epistemic_counts(ep: &! IrEpistemicSection) with Mut {
+    (*ep).model_family_count = 0
+    (*ep).policy_count = 0
+    (*ep).validation_count = 0
+    (*ep).mechanistic_report_count = 0
+    (*ep).posterior_weights_count = 0
+    (*ep).counterexample_count = 0
+    (*ep).audit_count = 0
+    (*ep).contest_count = 0
+    (*ep).contest_witness_count = 0
+    (*ep).robust_proof_count = 0
+    (*ep).validated_manifest_count = 0
+    (*ep).decision_policy_count = 0
+    (*ep).decision_certificate_count = 0
+    (*ep).deferral_policy_count = 0
+    (*ep).deferred_certificate_count = 0
+    (*ep).deferred_reason_witness_count = 0
+    (*ep).acquisition_policy_count = 0
+    (*ep).acquisition_plan_count = 0
+    (*ep).acquisition_reason_witness_count = 0
+    (*ep).recourse_policy_count = 0
+    (*ep).recourse_plan_count = 0
+    (*ep).recourse_reason_witness_count = 0
+    (*ep).alternative_policy_count = 0
+    (*ep).alternative_frontier_count = 0
+    (*ep).alternative_candidate_count = 0
+    (*ep).alternative_set_count = 0
+    (*ep).alternative_reason_witness_count = 0
+    (*ep).transition_policy_count = 0
+    (*ep).transition_protocol_count = 0
+    (*ep).transition_step_count = 0
+    (*ep).transition_plan_count = 0
+    (*ep).transition_reason_witness_count = 0
+    (*ep).monitoring_policy_count = 0
+    (*ep).observed_transition_count = 0
+    (*ep).rollback_certificate_count = 0
+    (*ep).hyper_expr_count = 0
+}
+
+fn deserialize_ir_epistemic_empty_v4(
+    buf: [i8; 131072],
+    pos: i64,
+    out: &! IrEpistemicSection,
+) -> (i64, bool) with Mut, Panic, Div {
+    soir_v4_clear_epistemic_counts(out)
+    var p = pos
+    var field_index: i64 = 0
+    while field_index < SOIR_EPISTEMIC_COUNT_FIELDS_V4 {
+        let count_pair = read_i64(buf, p)
+        if SOIR_V4_READ_STATUS != SOIR_V4_STATUS_OK {
+            return (p, false)
+        }
+        if count_pair.0 != 0 {
+            soir_v4_read_fail(SOIR_V4_STATUS_SEMANTIC_LOSS)
+            return (p, false)
+        }
+        p = count_pair.1
+        field_index = field_index + 1
+    }
+    (p, true)
+}
+
+fn soir_v4_name_valid(name: Name) -> bool {
+    name.len >= 0 && name.len <= 128
+}
+
+fn soir_v4_epistemic_is_empty(ep: &IrEpistemicSection) -> bool {
+    (*ep).model_family_count == 0 &&
+    (*ep).policy_count == 0 &&
+    (*ep).validation_count == 0 &&
+    (*ep).mechanistic_report_count == 0 &&
+    (*ep).posterior_weights_count == 0 &&
+    (*ep).counterexample_count == 0 &&
+    (*ep).audit_count == 0 &&
+    (*ep).contest_count == 0 &&
+    (*ep).contest_witness_count == 0 &&
+    (*ep).robust_proof_count == 0 &&
+    (*ep).validated_manifest_count == 0 &&
+    (*ep).decision_policy_count == 0 &&
+    (*ep).decision_certificate_count == 0 &&
+    (*ep).deferral_policy_count == 0 &&
+    (*ep).deferred_certificate_count == 0 &&
+    (*ep).deferred_reason_witness_count == 0 &&
+    (*ep).acquisition_policy_count == 0 &&
+    (*ep).acquisition_plan_count == 0 &&
+    (*ep).acquisition_reason_witness_count == 0 &&
+    (*ep).recourse_policy_count == 0 &&
+    (*ep).recourse_plan_count == 0 &&
+    (*ep).recourse_reason_witness_count == 0 &&
+    (*ep).alternative_policy_count == 0 &&
+    (*ep).alternative_frontier_count == 0 &&
+    (*ep).alternative_candidate_count == 0 &&
+    (*ep).alternative_set_count == 0 &&
+    (*ep).alternative_reason_witness_count == 0 &&
+    (*ep).transition_policy_count == 0 &&
+    (*ep).transition_protocol_count == 0 &&
+    (*ep).transition_step_count == 0 &&
+    (*ep).transition_plan_count == 0 &&
+    (*ep).transition_reason_witness_count == 0 &&
+    (*ep).monitoring_policy_count == 0 &&
+    (*ep).observed_transition_count == 0 &&
+    (*ep).rollback_certificate_count == 0 &&
+    (*ep).hyper_expr_count == 0
+}
+
+fn soir_v4_instr_is_lossless(instr: &IrInstr) -> bool {
+    let call_args_empty = match (*instr).call_args {
+        None => true,
+        _ => false,
+    }
+    soir_v4_opcode_supported((*instr).op) &&
+    (*instr).imm_flags == 0 &&
+    (*instr).arg_count == 0 &&
+    call_args_empty &&
+    soir_v4_name_valid((*instr).name)
+}
+
+fn soir_v4_function_is_lossless(func: &IrFunction) -> bool with Mut, Panic, Div {
+    if !soir_v4_name_valid((*func).name) ||
+       (*func).instr_count < 0 ||
+       (*func).reg_count < 0 || (*func).label_count < 0 ||
+       (*func).param_count < 0 {
+        soir_v4_write_fail(SOIR_V4_STATUS_MALFORMED)
+        return false
+    }
+    if (*func).instr_count > IR_MAX_INSTRS || (*func).param_count > IR_MAX_PARAMS {
+        soir_v4_write_fail(SOIR_V4_STATUS_CAPACITY)
+        return false
+    }
+    if (*func).defining_module_id != IR_DEFINING_MODULE_UNKNOWN ||
+       (*func).returns_float != 0 ||
+       (*func).return_struct_name.len != 0 ||
+       (*func).is_sret != 0 ||
+       (*func).sret_dest_reg != -1 ||
+       (*func).bss_size != 0 ||
+       (*func).first_param_is_ref != 0 {
+        soir_v4_write_fail(SOIR_V4_STATUS_SEMANTIC_LOSS)
+        return false
+    }
+    var i: i64 = 0
+    while i < (*func).instr_count {
+        if !soir_v4_instr_is_lossless(&(*func).instrs[i as usize]) {
+            soir_v4_write_fail(SOIR_V4_STATUS_SEMANTIC_LOSS)
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn serialize_ir_module_core_preflight(module: &IrModule) -> bool with Mut, Panic, Div {
+    if (*module).fn_count < 0 || (*module).string_count < 0 ||
+       (*module).algebras.count < 0 {
+        soir_v4_write_fail(SOIR_V4_STATUS_MALFORMED)
+        return false
+    }
+    if (*module).fn_count > IR_MAX_FUNCS ||
+       (*module).string_count > IR_MAX_STRINGS ||
+       (*module).algebras.count > 32 {
+        soir_v4_write_fail(SOIR_V4_STATUS_CAPACITY)
+        return false
+    }
+    if !soir_v4_epistemic_is_empty(&(*module).epistemic) ||
+       (*module).ontologies.count != 0 ||
+       (*module).ontologies.property_count != 0 ||
+       (*module).ontologies.parameter_link_count != 0 ||
+       (*module).prof_counter_count != 0 ||
+       (*module).export_count != 0 ||
+       (*module).bss_total_size != 0 {
+        soir_v4_write_fail(SOIR_V4_STATUS_SEMANTIC_LOSS)
+        return false
+    }
+
+    var required: i64 = 16
+    var i: i64 = 0
+    while i < (*module).fn_count {
+        let func = &(*module).functions[i as usize]
+        if !soir_v4_function_is_lossless(func) { return false }
+        if SOIR_FUNCTION_HEADER_V4_SIZE > SOIR_MAX_SIZE - required {
+            soir_v4_write_fail(SOIR_V4_STATUS_CAPACITY)
+            return false
+        }
+        required = required + SOIR_FUNCTION_HEADER_V4_SIZE
+        if (*func).instr_count > (SOIR_MAX_SIZE - required) / SOIR_INSTR_SIZE {
+            soir_v4_write_fail(SOIR_V4_STATUS_CAPACITY)
+            return false
+        }
+        required = required + (*func).instr_count * SOIR_INSTR_SIZE
+        i = i + 1
+    }
+
+    if 8 > SOIR_MAX_SIZE - required {
+        soir_v4_write_fail(SOIR_V4_STATUS_CAPACITY)
+        return false
+    }
+    required = required + 8
+    if (*module).string_count > (SOIR_MAX_SIZE - required) / SOIR_NAME_SIZE {
+        soir_v4_write_fail(SOIR_V4_STATUS_CAPACITY)
+        return false
+    }
+    var string_index: i64 = 0
+    while string_index < (*module).string_count {
+        if !soir_v4_name_valid((*module).string_table[string_index as usize]) {
+            soir_v4_write_fail(SOIR_V4_STATUS_MALFORMED)
+            return false
+        }
+        string_index = string_index + 1
+    }
+    required = required + (*module).string_count * SOIR_NAME_SIZE
+
+    if SOIR_EMPTY_EPISTEMIC_SIZE_V4 > SOIR_MAX_SIZE - required {
+        soir_v4_write_fail(SOIR_V4_STATUS_CAPACITY)
+        return false
+    }
+    required = required + SOIR_EMPTY_EPISTEMIC_SIZE_V4
+    if 8 > SOIR_MAX_SIZE - required {
+        soir_v4_write_fail(SOIR_V4_STATUS_CAPACITY)
+        return false
+    }
+    required = required + 8
+    if (*module).algebras.count > (SOIR_MAX_SIZE - required) / SOIR_ALGEBRA_INFO_SIZE_V4 {
+        soir_v4_write_fail(SOIR_V4_STATUS_CAPACITY)
+        return false
+    }
+    var algebra_index: i64 = 0
+    while algebra_index < (*module).algebras.count {
+        if !soir_v4_name_valid((*module).algebras.entries[algebra_index as usize].name) {
+            soir_v4_write_fail(SOIR_V4_STATUS_MALFORMED)
+            return false
+        }
+        algebra_index = algebra_index + 1
+    }
+    true
+}
+
+pub fn serialize_ir_module_into(module: &IrModule, out_buf: &![i8; 131072], out_len: &! i64) -> bool with Mut, Panic, Div, Alloc {
     var buf: [i8; 131072] = [0; 131072]
     var pos: i64 = 0
+    SOIR_V4_WRITE_STATUS = SOIR_V4_STATUS_OK
+    (*out_len) = 0
+
+    if !serialize_ir_module_core_preflight(module) { return false }
 
     // Write header
     buf[0] = 83 as i8   // 'S'
@@ -4390,58 +4807,224 @@ fn serialize_ir_module_into(module: IrModule, out_buf: &![i8; 131072], out_len: 
     pos = 8
 
     // Write function count
-    let fn_count_pair = write_i64(buf, pos, module.fn_count)
+    let fn_count_pair = write_i64(buf, pos, (*module).fn_count)
     buf = fn_count_pair.0
     pos = fn_count_pair.1
 
     // Write functions
     var i: i64 = 0
-    while i < module.fn_count {
-        let func_pair = serialize_ir_function(buf, pos, module.functions[i])
+    while i < (*module).fn_count {
+        let func_pair = serialize_ir_function(buf, pos, &(*module).functions[i as usize])
         buf = func_pair.0
         pos = func_pair.1
+        if SOIR_V4_WRITE_STATUS != SOIR_V4_STATUS_OK { return false }
         i = i + 1
     }
 
     // Write string count
-    let string_count_pair = write_i64(buf, pos, module.string_count)
+    let string_count_pair = write_i64(buf, pos, (*module).string_count)
     buf = string_count_pair.0
     pos = string_count_pair.1
 
     // Write string table
     var j: i64 = 0
-    while j < module.string_count {
-        let name_pair = write_name(buf, pos, module.string_table[j])
+    while j < (*module).string_count {
+        let name_pair = write_name(buf, pos, (*module).string_table[j as usize])
         buf = name_pair.0
         pos = name_pair.1
+        if SOIR_V4_WRITE_STATUS != SOIR_V4_STATUS_OK { return false }
         j = j + 1
     }
 
     if SOIR_VERSION >= 2 {
-        let ep_pair = serialize_ir_epistemic_section(buf, pos, module.epistemic)
+        let ep_pair = serialize_ir_epistemic_section(buf, pos, (*module).epistemic)
         buf = ep_pair.0
         pos = ep_pair.1
+        if SOIR_V4_WRITE_STATUS != SOIR_V4_STATUS_OK { return false }
     }
 
     if SOIR_VERSION >= 3 {
-        let alg_pair = serialize_ir_algebra_table(buf, pos, module.algebras)
+        let alg_pair = serialize_ir_algebra_table(buf, pos, (*module).algebras)
         buf = alg_pair.0
         pos = alg_pair.1
+        if SOIR_V4_WRITE_STATUS != SOIR_V4_STATUS_OK { return false }
     }
 
+    if pos < 0 || pos > SOIR_MAX_SIZE {
+        soir_v4_write_fail(SOIR_V4_STATUS_CAPACITY)
+        return false
+    }
     (*out_buf) = buf
     (*out_len) = pos
+    true
 }
 
-fn serialize_ir_module(module: IrModule) -> ([i8; 131072], i64) with Mut, Panic, Div, Alloc {
+pub fn serialize_ir_module(module: IrModule) -> ([i8; 131072], i64) with Mut, Panic, Div, Alloc {
     var buf: [i8; 131072] = [0; 131072]
     var len: i64 = 0
-    serialize_ir_module_into(module, &! buf, &! len)
+    let _ = serialize_ir_module_into(&module, &! buf, &! len)
     (buf, len)
 }
 
-fn deserialize_ir_module(buf: [i8; 131072], len: i64) -> IrModule with Mut, Panic, Div, Alloc {
+fn soir_v4_decode_fail(out: &! IrModule) -> bool with Mut {
+    (*out).fn_count = 0
+    (*out).string_count = 0
+    soir_v4_clear_epistemic_counts(&! (*out).epistemic)
+    (*out).algebras.count = 0
+    (*out).ontologies.count = 0
+    (*out).ontologies.property_count = 0
+    (*out).ontologies.parameter_link_count = 0
+    (*out).prof_counter_count = 0
+    (*out).export_count = 0
+    (*out).bss_total_size = 0
+    false
+}
+
+// Validate the complete v4 lossless profile without allocating an IrModule.
+// The full decoder invokes this first, then performs a second pass that
+// publishes into caller-owned storage only after the wire is canonical.
+pub fn soir_v4_validate_lossless_wire(buf: [i8; 131072], len: i64) -> bool with Mut, Panic, Div {
+    SOIR_V4_READ_STATUS = SOIR_V4_STATUS_OK
+    SOIR_V4_READ_LIMIT = 0
+    if len < 0 || len > SOIR_MAX_SIZE {
+        soir_v4_read_fail(SOIR_V4_STATUS_VIEW_BOUNDS)
+        return false
+    }
+    if len < 8 {
+        soir_v4_read_fail(SOIR_V4_STATUS_TRUNCATED)
+        return false
+    }
+    SOIR_V4_READ_LIMIT = len
+
+    if buf[0] != 83 as i8 || buf[1] != 79 as i8 ||
+       buf[2] != 73 as i8 || buf[3] != 82 as i8 {
+        soir_v4_read_fail(SOIR_V4_STATUS_MALFORMED)
+        return false
+    }
+    if buf[4] != SOIR_VERSION {
+        soir_v4_read_fail(SOIR_V4_STATUS_BAD_VERSION)
+        return false
+    }
+    if buf[5] != 0 as i8 || buf[6] != 0 as i8 || buf[7] != 0 as i8 {
+        soir_v4_read_fail(SOIR_V4_STATUS_BAD_RESERVED)
+        return false
+    }
+
+    var pos: i64 = 8
+    let fn_count_pair = read_i64(buf, pos)
+    let fn_count = fn_count_pair.0
+    pos = fn_count_pair.1
+    if SOIR_V4_READ_STATUS != SOIR_V4_STATUS_OK || fn_count < 0 {
+        soir_v4_read_fail(SOIR_V4_STATUS_MALFORMED)
+        return false
+    }
+    if fn_count > IR_MAX_FUNCS {
+        soir_v4_read_fail(SOIR_V4_STATUS_CAPACITY)
+        return false
+    }
+    if pos < 0 || pos > SOIR_V4_READ_LIMIT ||
+       fn_count > (SOIR_V4_READ_LIMIT - pos) / SOIR_FUNCTION_HEADER_V4_SIZE {
+        soir_v4_read_fail(SOIR_V4_STATUS_TRUNCATED)
+        return false
+    }
+
+    var scratch = ir_empty_function()
+    var function_index: i64 = 0
+    while function_index < fn_count {
+        let function_pair = deserialize_ir_function_into(buf, pos, &! scratch)
+        if !function_pair.1 || SOIR_V4_READ_STATUS != SOIR_V4_STATUS_OK {
+            return false
+        }
+        pos = function_pair.0
+        function_index = function_index + 1
+    }
+
+    let string_count_pair = read_i64(buf, pos)
+    let string_count = string_count_pair.0
+    pos = string_count_pair.1
+    if SOIR_V4_READ_STATUS != SOIR_V4_STATUS_OK || string_count < 0 {
+        soir_v4_read_fail(SOIR_V4_STATUS_MALFORMED)
+        return false
+    }
+    if string_count > IR_MAX_STRINGS {
+        soir_v4_read_fail(SOIR_V4_STATUS_CAPACITY)
+        return false
+    }
+    if pos < 0 || pos > SOIR_V4_READ_LIMIT ||
+       string_count > (SOIR_V4_READ_LIMIT - pos) / SOIR_NAME_SIZE {
+        soir_v4_read_fail(SOIR_V4_STATUS_TRUNCATED)
+        return false
+    }
+    var string_index: i64 = 0
+    while string_index < string_count {
+        let name_pair = read_name(buf, pos)
+        if SOIR_V4_READ_STATUS != SOIR_V4_STATUS_OK { return false }
+        pos = name_pair.1
+        string_index = string_index + 1
+    }
+
+    var epistemic_index: i64 = 0
+    while epistemic_index < SOIR_EPISTEMIC_COUNT_FIELDS_V4 {
+        let count_pair = read_i64(buf, pos)
+        if SOIR_V4_READ_STATUS != SOIR_V4_STATUS_OK { return false }
+        if count_pair.0 != 0 {
+            soir_v4_read_fail(SOIR_V4_STATUS_SEMANTIC_LOSS)
+            return false
+        }
+        pos = count_pair.1
+        epistemic_index = epistemic_index + 1
+    }
+
+    let algebra_count_pair = read_i64(buf, pos)
+    let algebra_count = algebra_count_pair.0
+    pos = algebra_count_pair.1
+    if SOIR_V4_READ_STATUS != SOIR_V4_STATUS_OK || algebra_count < 0 {
+        soir_v4_read_fail(SOIR_V4_STATUS_MALFORMED)
+        return false
+    }
+    if algebra_count > 32 {
+        soir_v4_read_fail(SOIR_V4_STATUS_CAPACITY)
+        return false
+    }
+    if pos < 0 || pos > SOIR_V4_READ_LIMIT ||
+       algebra_count > (SOIR_V4_READ_LIMIT - pos) / SOIR_ALGEBRA_INFO_SIZE_V4 {
+        soir_v4_read_fail(SOIR_V4_STATUS_TRUNCATED)
+        return false
+    }
+    var algebra_index: i64 = 0
+    while algebra_index < algebra_count {
+        let algebra_pair = read_ir_algebra_info(buf, pos)
+        if SOIR_V4_READ_STATUS != SOIR_V4_STATUS_OK { return false }
+        pos = algebra_pair.1
+        algebra_index = algebra_index + 1
+    }
+
+    if pos != len {
+        soir_v4_read_fail(SOIR_V4_STATUS_TRAILING_BYTES)
+        return false
+    }
+    true
+}
+
+pub fn deserialize_ir_module_into(buf: [i8; 131072], len: i64, out: &! IrModule) -> bool with Mut, Panic, Div, Alloc {
     var pos: i64 = 0
+    SOIR_V4_READ_STATUS = SOIR_V4_STATUS_OK
+    SOIR_V4_READ_LIMIT = 0
+    soir_v4_decode_fail(out)
+
+    if len < 0 || len > SOIR_MAX_SIZE {
+        soir_v4_read_fail(SOIR_V4_STATUS_VIEW_BOUNDS)
+        return false
+    }
+    if len < 8 {
+        soir_v4_read_fail(SOIR_V4_STATUS_TRUNCATED)
+        return false
+    }
+    if !soir_v4_validate_lossless_wire(buf, len) {
+        return false
+    }
+    SOIR_V4_READ_STATUS = SOIR_V4_STATUS_OK
+    SOIR_V4_READ_LIMIT = len
 
     // Verify header magic - cast literals to i8 for comparison
     let b0: i8 = 83 as i8
@@ -4450,13 +5033,18 @@ fn deserialize_ir_module(buf: [i8; 131072], len: i64) -> IrModule with Mut, Pani
     let b3: i8 = 82 as i8
     let magic_ok = buf[0] == b0 && buf[1] == b1 && buf[2] == b2 && buf[3] == b3
     if !magic_ok {
-        // Return empty module on invalid magic
-        return ir_empty_module()
+        soir_v4_read_fail(SOIR_V4_STATUS_MALFORMED)
+        return false
     }
 
     let version = buf[4]
-    if version != 1 && version != 2 as i8 && version != 3 as i8 && version != SOIR_VERSION {
-        return ir_empty_module()
+    if version != SOIR_VERSION {
+        soir_v4_read_fail(SOIR_V4_STATUS_BAD_VERSION)
+        return false
+    }
+    if buf[5] != 0 as i8 || buf[6] != 0 as i8 || buf[7] != 0 as i8 {
+        soir_v4_read_fail(SOIR_V4_STATUS_BAD_RESERVED)
+        return false
     }
 
     pos = 8  // Skip header
@@ -4465,14 +5053,27 @@ fn deserialize_ir_module(buf: [i8; 131072], len: i64) -> IrModule with Mut, Pani
     let fn_count_pair = read_i64(buf, pos)
     let fn_count = fn_count_pair.0
     pos = fn_count_pair.1
+    if SOIR_V4_READ_STATUS != SOIR_V4_STATUS_OK || fn_count < 0 {
+        soir_v4_read_fail(SOIR_V4_STATUS_MALFORMED)
+        return soir_v4_decode_fail(out)
+    }
+    if fn_count > IR_MAX_FUNCS {
+        soir_v4_read_fail(SOIR_V4_STATUS_CAPACITY)
+        return soir_v4_decode_fail(out)
+    }
+    if pos < 0 || pos > SOIR_V4_READ_LIMIT || fn_count > (SOIR_V4_READ_LIMIT - pos) / SOIR_FUNCTION_HEADER_V4_SIZE {
+        soir_v4_read_fail(SOIR_V4_STATUS_TRUNCATED)
+        return soir_v4_decode_fail(out)
+    }
 
     // Read functions
-    var functions: [IrFunction; 1024] = [ir_empty_function(); 1024]
     var i: i64 = 0
     while i < fn_count {
-        let func_pair = deserialize_ir_function(buf, pos, version)
-        functions[i] = func_pair.0
-        pos = func_pair.1
+        let func_pair = deserialize_ir_function_into(buf, pos, &! (*out).functions[i as usize])
+        if !func_pair.1 || SOIR_V4_READ_STATUS != SOIR_V4_STATUS_OK {
+            return soir_v4_decode_fail(out)
+        }
+        pos = func_pair.0
         i = i + 1
     }
 
@@ -4480,35 +5081,322 @@ fn deserialize_ir_module(buf: [i8; 131072], len: i64) -> IrModule with Mut, Pani
     let string_count_pair = read_i64(buf, pos)
     let string_count = string_count_pair.0
     pos = string_count_pair.1
+    if SOIR_V4_READ_STATUS != SOIR_V4_STATUS_OK || string_count < 0 {
+        soir_v4_read_fail(SOIR_V4_STATUS_MALFORMED)
+        return soir_v4_decode_fail(out)
+    }
+    if string_count > IR_MAX_STRINGS {
+        soir_v4_read_fail(SOIR_V4_STATUS_CAPACITY)
+        return soir_v4_decode_fail(out)
+    }
+    if pos < 0 || pos > SOIR_V4_READ_LIMIT || string_count > (SOIR_V4_READ_LIMIT - pos) / SOIR_NAME_SIZE {
+        soir_v4_read_fail(SOIR_V4_STATUS_TRUNCATED)
+        return soir_v4_decode_fail(out)
+    }
 
     // Read string table
-    var string_table: [Name; 4096] = [ir_empty_name(); 4096]
     var j: i64 = 0
     while j < string_count {
         let name_pair = read_name(buf, pos)
-        string_table[j] = name_pair.0
+        if SOIR_V4_READ_STATUS != SOIR_V4_STATUS_OK {
+            return soir_v4_decode_fail(out)
+        }
+        (*out).string_table[j as usize] = name_pair.0
         pos = name_pair.1
         j = j + 1
     }
 
+    let ep_pair = deserialize_ir_epistemic_empty_v4(buf, pos, &! (*out).epistemic)
+    if !ep_pair.1 || SOIR_V4_READ_STATUS != SOIR_V4_STATUS_OK {
+        return soir_v4_decode_fail(out)
+    }
+    pos = ep_pair.0
+
+    let alg_pair = deserialize_ir_algebra_table_into(buf, pos, &! (*out).algebras)
+    if !alg_pair.1 || SOIR_V4_READ_STATUS != SOIR_V4_STATUS_OK {
+        return soir_v4_decode_fail(out)
+    }
+    pos = alg_pair.0
+
+    if pos != len {
+        soir_v4_read_fail(SOIR_V4_STATUS_TRAILING_BYTES)
+        return soir_v4_decode_fail(out)
+    }
+
+    (*out).fn_count = fn_count
+    (*out).string_count = string_count
+    true
+}
+
+pub fn deserialize_ir_module(buf: [i8; 131072], len: i64) -> IrModule with Mut, Panic, Div, Alloc {
     var module = ir_empty_module()
-    module.functions = functions
-    module.fn_count = fn_count
-    module.string_table = string_table
-    module.string_count = string_count
-
-    if version >= 2 && pos < len {
-        let ep_pair = deserialize_ir_epistemic_section(buf, pos)
-        module.epistemic = ep_pair.0
-        pos = ep_pair.1
-    }
-
-    if version >= 3 && pos < len {
-        let alg_pair = deserialize_ir_algebra_table(buf, pos)
-        module.algebras = alg_pair.0
-    }
-
+    deserialize_ir_module_into(buf, len, &! module)
     module
+}
+
+fn soir_v4_probe_name(a: i8, b: i8, c: i8, len: i64, tail: i8) -> Name with Mut, Panic {
+    var name = Name { buf: [0; 128], len: len }
+    name.buf[0] = a
+    name.buf[1] = b
+    name.buf[2] = c
+    name.buf[127] = tail
+    name
+}
+
+fn soir_v4_probe_write(
+    func: &IrFunction,
+    string_name: Name,
+    string_count: i64,
+    out_buf: &![i8; 131072],
+    out_len: &! i64,
+) -> bool with Mut, Panic, Div {
+    var buf: [i8; 131072] = [0; 131072]
+    SOIR_V4_WRITE_STATUS = SOIR_V4_STATUS_OK
+    (*out_len) = 0
+    if !soir_v4_function_is_lossless(func) { return false }
+    if string_count < 0 || string_count > 1 {
+        soir_v4_write_fail(SOIR_V4_STATUS_MALFORMED)
+        return false
+    }
+    if string_count == 1 && !soir_v4_name_valid(string_name) {
+        soir_v4_write_fail(SOIR_V4_STATUS_MALFORMED)
+        return false
+    }
+
+    // Header/counts + one function header + empty epistemic/algebra sections.
+    // A present probe string adds one fixed-size Name payload.
+    let fixed_size: i64 = 1024 + string_count * SOIR_NAME_SIZE
+    if (*func).instr_count > (SOIR_MAX_SIZE - fixed_size) / SOIR_INSTR_SIZE {
+        soir_v4_write_fail(SOIR_V4_STATUS_CAPACITY)
+        return false
+    }
+
+    buf[0] = 83 as i8
+    buf[1] = 79 as i8
+    buf[2] = 73 as i8
+    buf[3] = 82 as i8
+    buf[4] = SOIR_VERSION
+    buf[5] = 0 as i8
+    buf[6] = 0 as i8
+    buf[7] = 0 as i8
+    var pos: i64 = 8
+
+    let function_count_pair = write_i64(buf, pos, 1)
+    buf = function_count_pair.0
+    pos = function_count_pair.1
+    let function_pair = serialize_ir_function(buf, pos, func)
+    buf = function_pair.0
+    pos = function_pair.1
+    if SOIR_V4_WRITE_STATUS != SOIR_V4_STATUS_OK { return false }
+
+    let string_count_pair = write_i64(buf, pos, string_count)
+    buf = string_count_pair.0
+    pos = string_count_pair.1
+    if string_count == 1 {
+        let string_pair = write_name(buf, pos, string_name)
+        buf = string_pair.0
+        pos = string_pair.1
+    }
+
+    var epistemic_index: i64 = 0
+    while epistemic_index < SOIR_EPISTEMIC_COUNT_FIELDS_V4 {
+        let count_pair = write_i64(buf, pos, 0)
+        buf = count_pair.0
+        pos = count_pair.1
+        epistemic_index = epistemic_index + 1
+    }
+    let algebra_count_pair = write_i64(buf, pos, 0)
+    buf = algebra_count_pair.0
+    pos = algebra_count_pair.1
+    if SOIR_V4_WRITE_STATUS != SOIR_V4_STATUS_OK { return false }
+
+    (*out_buf) = buf
+    (*out_len) = pos
+    true
+}
+
+fn soir_v4_probe_buffers_equal(
+    left: &[i8; 131072],
+    right: &[i8; 131072],
+    len: i64,
+) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < len {
+        if (*left)[i as usize] != (*right)[i as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
+// Runtime witness for the fields v4 actually preserves. This deliberately
+// avoids constructing IrModule; module publication is checked by the public
+// source gate and remains non-authoritative in the persistent cache.
+pub fn soir_v4_lossless_roundtrip_self_test() -> i64 with Mut, Panic, Div {
+    var function = ir_empty_function()
+    function.name = soir_v4_probe_name(114 as i8, 116 as i8, 52 as i8, 3, 71 as i8)
+    function.instr_count = 2
+    function.reg_count = 23
+    function.label_count = 5
+    function.param_count = 1
+    function.param_regs[0] = 17
+    function.param_regs[63] = -7
+    function.compile_strategy = 3
+    function.prof_counter_id = 29
+    function.hyper_algebra_kind = 4
+
+    var first = ir_instr_new(IrOpcode::IrLoadFloat)
+    first.dst = 9
+    first.imm_f64 = bits_to_f64(9221120237041090626)
+    first.label_id = 13
+    first.fn_id = 17
+    first.field_idx = 19
+    first.name = soir_v4_probe_name(110 as i8, 97 as i8, 110 as i8, 3, 83 as i8)
+    function.instrs[0] = first
+
+    var second = ir_instr_new(IrOpcode::IrLoadFloat)
+    second.dst = 10
+    second.src1 = 9
+    second.imm_i64 = -37
+    second.imm_f64 = bits_to_f64(4614256656552045848)
+    function.instrs[1] = second
+    let string_name = soir_v4_probe_name(115 as i8, 116 as i8, 114 as i8, 3, 77 as i8)
+
+    var buf_a: [i8; 131072] = [0; 131072]
+    var buf_b: [i8; 131072] = [0; 131072]
+    var len_a: i64 = 0
+    var len_b: i64 = 0
+    if !soir_v4_probe_write(&function, string_name, 1, &! buf_a, &! len_a) ||
+       SOIR_V4_WRITE_STATUS != SOIR_V4_STATUS_OK || len_a != 1624 {
+        return 11
+    }
+    if !soir_v4_validate_lossless_wire(buf_a, len_a) ||
+       SOIR_V4_READ_STATUS != SOIR_V4_STATUS_OK {
+        return 12
+    }
+
+    SOIR_V4_READ_STATUS = SOIR_V4_STATUS_OK
+    SOIR_V4_READ_LIMIT = len_a
+    var pos: i64 = 8
+    let function_count_pair = read_i64(buf_a, pos)
+    if function_count_pair.0 != 1 { return 13 }
+    pos = function_count_pair.1
+    var restored = ir_empty_function()
+    let function_pair = deserialize_ir_function_into(buf_a, pos, &! restored)
+    if !function_pair.1 || SOIR_V4_READ_STATUS != SOIR_V4_STATUS_OK { return 14 }
+    pos = function_pair.0
+    let string_count_pair = read_i64(buf_a, pos)
+    if string_count_pair.0 != 1 { return 15 }
+    pos = string_count_pair.1
+    let restored_name_pair = read_name(buf_a, pos)
+    let restored_name = restored_name_pair.0
+
+    if restored.name.buf[127] != 71 as i8 ||
+       restored_name.buf[127] != 77 as i8 ||
+       restored.instr_count != 2 ||
+       restored.reg_count != 23 ||
+       restored.label_count != 5 ||
+       restored.param_count != 1 ||
+       restored.param_regs[0] != 17 ||
+       restored.param_regs[63] != -7 ||
+       restored.compile_strategy != 3 ||
+       restored.prof_counter_id != 29 ||
+       restored.hyper_algebra_kind != 4 ||
+       f64_to_bits(restored.instrs[0].imm_f64) != 9221120237041090626 ||
+       f64_to_bits(restored.instrs[1].imm_f64) != 4614256656552045848 ||
+       restored.instrs[0].name.buf[127] != 83 as i8 {
+        return 16
+    }
+
+    if !soir_v4_probe_write(&restored, restored_name, 1, &! buf_b, &! len_b) ||
+       len_b != len_a || !soir_v4_probe_buffers_equal(&buf_a, &buf_b, len_a) {
+        return 17
+    }
+
+    var bad = buf_a
+    if soir_v4_validate_lossless_wire(bad, len_a - 1) ||
+       SOIR_V4_READ_STATUS != SOIR_V4_STATUS_TRUNCATED {
+        return 21
+    }
+    bad = buf_a
+    bad[len_a as usize] = 0 as i8
+    if soir_v4_validate_lossless_wire(bad, len_a + 1) ||
+       SOIR_V4_READ_STATUS != SOIR_V4_STATUS_TRAILING_BYTES {
+        return 22
+    }
+    bad = buf_a
+    bad[4] = 5 as i8
+    if soir_v4_validate_lossless_wire(bad, len_a) ||
+       SOIR_V4_READ_STATUS != SOIR_V4_STATUS_BAD_VERSION {
+        return 23
+    }
+    bad = buf_a
+    bad[5] = 1 as i8
+    if soir_v4_validate_lossless_wire(bad, len_a) ||
+       SOIR_V4_READ_STATUS != SOIR_V4_STATUS_BAD_RESERVED {
+        return 24
+    }
+    bad = buf_a
+    bad[720] = 35 as i8
+    if soir_v4_validate_lossless_wire(bad, len_a) ||
+       SOIR_V4_READ_STATUS != SOIR_V4_STATUS_UNSUPPORTED_TAG {
+        return 25
+    }
+    bad = buf_a
+    bad[944] = 1 as i8
+    if soir_v4_validate_lossless_wire(bad, len_a) ||
+       SOIR_V4_READ_STATUS != SOIR_V4_STATUS_SEMANTIC_LOSS {
+        return 26
+    }
+    bad = buf_a
+    bad[1328] = 1 as i8
+    if soir_v4_validate_lossless_wire(bad, len_a) ||
+       SOIR_V4_READ_STATUS != SOIR_V4_STATUS_SEMANTIC_LOSS {
+        return 27
+    }
+    bad = buf_a
+    bad[8] = 0 as i8
+    bad[9] = 8 as i8
+    if soir_v4_validate_lossless_wire(bad, len_a) ||
+       SOIR_V4_READ_STATUS != SOIR_V4_STATUS_TRUNCATED {
+        return 28
+    }
+    bad = buf_a
+    bad[8] = 1 as i8
+    bad[9] = 8 as i8
+    if soir_v4_validate_lossless_wire(bad, len_a) ||
+       SOIR_V4_READ_STATUS != SOIR_V4_STATUS_CAPACITY {
+        return 29
+    }
+    bad = buf_a
+    bad[16] = 129 as i8
+    if soir_v4_validate_lossless_wire(bad, len_a) ||
+       SOIR_V4_READ_STATUS != SOIR_V4_STATUS_MALFORMED {
+        return 30
+    }
+
+    function.defining_module_id = 7
+    if soir_v4_probe_write(&function, string_name, 1, &! buf_b, &! len_b) ||
+       len_b != 0 || SOIR_V4_WRITE_STATUS != SOIR_V4_STATUS_SEMANTIC_LOSS {
+        return 31
+    }
+    function.defining_module_id = IR_DEFINING_MODULE_UNKNOWN
+    function.instr_count = 560
+    if !soir_v4_probe_write(&function, string_name, 0, &! buf_b, &! len_b) ||
+       len_b != 130944 || SOIR_V4_WRITE_STATUS != SOIR_V4_STATUS_OK {
+        return 32
+    }
+    function.instr_count = 561
+    if soir_v4_probe_write(&function, string_name, 0, &! buf_b, &! len_b) ||
+       len_b != 0 || SOIR_V4_WRITE_STATUS != SOIR_V4_STATUS_CAPACITY {
+        return 33
+    }
+    function.instr_count = 2
+    function.name.len = 129
+    if soir_v4_probe_write(&function, string_name, 1, &! buf_b, &! len_b) ||
+       len_b != 0 || SOIR_V4_WRITE_STATUS != SOIR_V4_STATUS_MALFORMED {
+        return 34
+    }
+    0
 }
 
 // ============================================================
@@ -4529,87 +5417,14 @@ let SOIR_TYPE_COUNTERFACTUAL: i8 = 24
 let SOIR_TYPE_VALIDATED: i8 = 25
 
 fn write_type_tag(buf: [i8; 131072], pos: i64, ty: TypeEntry) -> ([i8; 131072], i64) with Mut, Panic, Div {
-    var b = buf
-    var p = pos
-
-    if ty.kind == TypeKind::TyI64 {
-        let pair = write_i8(b, p, 0)
-        return pair
-    }
-    if ty.kind == TypeKind::TyF64 {
-        let pair = write_i8(b, p, 1)
-        return pair
-    }
-    if ty.kind == TypeKind::TyBool {
-        let pair = write_i8(b, p, 2)
-        return pair
-    }
-    if ty.kind == TypeKind::TyHyper {
-        let tag_pair = write_i8(b, p, SOIR_TYPE_HYPER)
-        b = tag_pair.0
-        p = tag_pair.1
-        let alg_pair = write_i64(b, p, ty.algebra_kind)
-        b = alg_pair.0
-        p = alg_pair.1
-        let cp_pair = write_i64(b, p, ty.clifford_p)
-        b = cp_pair.0
-        p = cp_pair.1
-        let cq_pair = write_i64(b, p, ty.clifford_q)
-        return cq_pair
-    }
-    if ty.kind == TypeKind::TyIntervention {
-        let tag_pair = write_i8(b, p, SOIR_TYPE_INTERVENTION)
-        return tag_pair
-    }
-    if ty.kind == TypeKind::TyCounterfactual {
-        let tag_pair = write_i8(b, p, SOIR_TYPE_COUNTERFACTUAL)
-        return tag_pair
-    }
-    if ty.kind == TypeKind::TyValidated {
-        let tag_pair = write_i8(b, p, SOIR_TYPE_VALIDATED)
-        return tag_pair
-    }
-    // Default: write kind ordinal
-    let kind_tag: i8 = 0  // fallback
-    write_i8(b, p, kind_tag)
+    // TypeEntry has outgrown this unversioned tag. The v4 profile rejects every
+    // non-empty epistemic record before reaching this helper, so no private
+    // TypeKind or lossy fallback can become wire authority.
+    soir_v4_write_fail(SOIR_V4_STATUS_SEMANTIC_LOSS)
+    (buf, SOIR_INVALID_POS)
 }
 
 fn read_type_tag(buf: [i8; 131072], pos: i64) -> (TypeEntry, i64) with Mut, Panic, Div, Alloc {
-    let tag_pair = read_i8(buf, pos)
-    let tag = tag_pair.0
-    var p = tag_pair.1
-
-    if tag == 0 { return (ty_i64(), p) }
-    if tag == 1 { return (ty_f64(), p) }
-    if tag == 2 { return (ty_bool(), p) }
-
-    if tag == SOIR_TYPE_HYPER {
-        let alg_pair = read_i64(buf, p)
-        let alg = alg_pair.0
-        p = alg_pair.1
-        let cp_pair = read_i64(buf, p)
-        let cl_p = cp_pair.0
-        p = cp_pair.1
-        let cq_pair = read_i64(buf, p)
-        let cl_q = cq_pair.0
-        p = cq_pair.1
-        // Construct Hyper type with inner = f64 (default for hypercomplex)
-        if alg == 5 {
-            return (ty_clifford(cl_p, cl_q, ty_f64()), p)
-        }
-        return (ty_hyper(alg, ty_f64()), p)
-    }
-
-    if tag == SOIR_TYPE_INTERVENTION {
-        return (ty_intervention(ty_f64(), -1.0), p)
-    }
-    if tag == SOIR_TYPE_COUNTERFACTUAL {
-        return (ty_counterfactual(ty_f64(), -1.0), p)
-    }
-    if tag == SOIR_TYPE_VALIDATED {
-        return (ty_validated(ty_f64(), -1.0), p)
-    }
-
-    // Unknown tag: return error type
-    (ty_error(), p)
+    soir_v4_read_fail(SOIR_V4_STATUS_SEMANTIC_LOSS)
+    (empty_type_entry(), pos)
 }

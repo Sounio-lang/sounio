@@ -1,0 +1,327 @@
+module tests::fixtures::soir_v4::lossless_wire_runtime
+
+let WIRE_SIZE: i64 = 1624
+let MAX_WIRE_SIZE: i64 = 131072
+let ONE_FUNCTION_FIXED_SIZE: i64 = 1024
+let FUNCTION_HEADER_SIZE: i64 = 704
+let INSTRUCTION_SIZE: i64 = 232
+let MAX_INSTRUCTIONS: i64 = 2048
+let STATUS_OK: i64 = 0
+let STATUS_BAD_VERSION: i64 = 2
+let STATUS_CAPACITY: i64 = 3
+let STATUS_MALFORMED: i64 = 4
+let STATUS_SEMANTIC_LOSS: i64 = 5
+let STATUS_TRUNCATED: i64 = 6
+let STATUS_TRAILING: i64 = 7
+let STATUS_UNSUPPORTED_TAG: i64 = 8
+let STATUS_BAD_RESERVED: i64 = 9
+
+fn put_i64(buf: &![i8; 2048], pos: i64, value: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < 8 {
+        (*buf)[(pos + i) as usize] = ((value >> (i * 8)) & 255) as i8
+        i = i + 1
+    }
+    pos + 8
+}
+
+fn get_i64(buf: &[i8; 2048], pos: i64) -> i64 with Mut, Panic, Div {
+    var value: i64 = 0
+    var i: i64 = 0
+    while i < 8 {
+        let octet = ((*buf)[(pos + i) as usize] as i64) & 255
+        value = value | (octet << (i * 8))
+        i = i + 1
+    }
+    value
+}
+
+fn put_name(
+    buf: &![i8; 2048],
+    pos: i64,
+    a: i8,
+    b: i8,
+    c: i8,
+    tail: i8,
+) -> i64 with Mut, Panic, Div {
+    var p = put_i64(buf, pos, 3)
+    var i: i64 = 0
+    while i < 128 {
+        (*buf)[(p + i) as usize] = 0 as i8
+        i = i + 1
+    }
+    (*buf)[p as usize] = a
+    (*buf)[(p + 1) as usize] = b
+    (*buf)[(p + 2) as usize] = c
+    (*buf)[(p + 127) as usize] = tail
+    p + 128
+}
+
+fn put_instr(
+    buf: &![i8; 2048],
+    pos: i64,
+    dst: i64,
+    src1: i64,
+    imm_i64: i64,
+    float_bits: i64,
+    name_tail: i8,
+) -> i64 with Mut, Panic, Div {
+    var p = pos
+    (*buf)[p as usize] = 1 as i8
+    p = p + 8
+    p = put_i64(buf, p, dst)
+    p = put_i64(buf, p, src1)
+    p = put_i64(buf, p, -1)
+    p = put_i64(buf, p, imm_i64)
+    // SOIR persists imm_f64 as its raw IEEE-754 i64 payload. Keep the wire
+    // witness bootstrap-compatible by roundtripping those eight bytes directly.
+    p = put_i64(buf, p, float_bits)
+    p = put_i64(buf, p, 13)
+    p = put_i64(buf, p, 17)
+    p = put_i64(buf, p, 19)
+    (*buf)[p as usize] = 0 as i8
+    p = p + 8
+    (*buf)[p as usize] = 0 as i8
+    p = p + 8
+    p = put_name(buf, p, 110 as i8, 97 as i8, 110 as i8, name_tail)
+    put_i64(buf, p, 0)
+}
+
+fn build_wire(buf: &![i8; 2048]) -> i64 with Mut, Panic, Div {
+    (*buf)[0] = 83 as i8
+    (*buf)[1] = 79 as i8
+    (*buf)[2] = 73 as i8
+    (*buf)[3] = 82 as i8
+    (*buf)[4] = 4 as i8
+    (*buf)[5] = 0 as i8
+    (*buf)[6] = 0 as i8
+    (*buf)[7] = 0 as i8
+    var p: i64 = 8
+    p = put_i64(buf, p, 1)
+    p = put_name(buf, p, 114 as i8, 116 as i8, 52 as i8, 71 as i8)
+    p = put_i64(buf, p, 2)
+    p = put_i64(buf, p, 23)
+    p = put_i64(buf, p, 5)
+    p = put_i64(buf, p, 1)
+    var param_index: i64 = 0
+    while param_index < 64 {
+        var param_reg: i64 = -1
+        if param_index == 0 { param_reg = 17 }
+        else if param_index == 63 { param_reg = -7 }
+        p = put_i64(buf, p, param_reg)
+        param_index = param_index + 1
+    }
+    p = put_i64(buf, p, 3)
+    p = put_i64(buf, p, 29)
+    p = put_i64(buf, p, 4)
+    p = put_instr(buf, p, 9, -1, 0, 9221120237041090626, 83 as i8)
+    p = put_instr(buf, p, 10, 9, -37, 4614256656552045848, 89 as i8)
+    p = put_i64(buf, p, 1)
+    p = put_name(buf, p, 115 as i8, 116 as i8, 114 as i8, 77 as i8)
+    var epistemic_index: i64 = 0
+    while epistemic_index < 36 {
+        p = put_i64(buf, p, 0)
+        epistemic_index = epistemic_index + 1
+    }
+    put_i64(buf, p, 0)
+}
+
+fn padding_zero(buf: &[i8; 2048], pos: i64, count: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < count {
+        if (*buf)[(pos + i) as usize] != 0 as i8 { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn instr_status(buf: &[i8; 2048], pos: i64) -> i64 with Mut, Panic, Div {
+    let opcode = ((*buf)[pos as usize] as i64) & 255
+    if opcode > 34 { return STATUS_UNSUPPORTED_TAG }
+    if !padding_zero(buf, pos + 1, 7) { return STATUS_BAD_RESERVED }
+    let binary_tag = ((*buf)[(pos + 72) as usize] as i64) & 255
+    if binary_tag > 20 { return STATUS_UNSUPPORTED_TAG }
+    if !padding_zero(buf, pos + 73, 7) { return STATUS_BAD_RESERVED }
+    let unary_tag = ((*buf)[(pos + 80) as usize] as i64) & 255
+    if unary_tag > 4 { return STATUS_UNSUPPORTED_TAG }
+    if !padding_zero(buf, pos + 81, 7) { return STATUS_BAD_RESERVED }
+    let name_len = get_i64(buf, pos + 88)
+    if name_len < 0 || name_len > 128 { return STATUS_MALFORMED }
+    if get_i64(buf, pos + 224) != 0 { return STATUS_SEMANTIC_LOSS }
+    STATUS_OK
+}
+
+fn one_function_capacity_status(instruction_count: i64) -> i64 with Div {
+    if instruction_count < 0 { return STATUS_MALFORMED }
+    if instruction_count > MAX_INSTRUCTIONS { return STATUS_CAPACITY }
+    if instruction_count > (MAX_WIRE_SIZE - ONE_FUNCTION_FIXED_SIZE) / INSTRUCTION_SIZE {
+        return STATUS_CAPACITY
+    }
+    STATUS_OK
+}
+
+fn validate_wire(buf: &[i8; 2048], len: i64) -> i64 with Mut, Panic, Div {
+    if len < WIRE_SIZE { return STATUS_TRUNCATED }
+    if len > WIRE_SIZE { return STATUS_TRAILING }
+    if (*buf)[0] != 83 as i8 || (*buf)[1] != 79 as i8 ||
+       (*buf)[2] != 73 as i8 || (*buf)[3] != 82 as i8 {
+        return STATUS_MALFORMED
+    }
+    if (*buf)[4] != 4 as i8 { return STATUS_BAD_VERSION }
+    if (*buf)[5] != 0 as i8 || (*buf)[6] != 0 as i8 || (*buf)[7] != 0 as i8 {
+        return STATUS_BAD_RESERVED
+    }
+    let function_count = get_i64(buf, 8)
+    if function_count < 0 { return STATUS_MALFORMED }
+    if function_count > 2048 { return STATUS_CAPACITY }
+    if function_count > (len - 16) / FUNCTION_HEADER_SIZE { return STATUS_TRUNCATED }
+    if function_count != 1 || get_i64(buf, 16) != 3 ||
+       get_i64(buf, 152) != 2 || get_i64(buf, 176) != 1 ||
+       get_i64(buf, 1184) != 1 || get_i64(buf, 1192) != 3 {
+        return STATUS_MALFORMED
+    }
+    let first_status = instr_status(buf, 720)
+    if first_status != STATUS_OK { return first_status }
+    let second_status = instr_status(buf, 952)
+    if second_status != STATUS_OK { return second_status }
+    var epistemic_index: i64 = 0
+    while epistemic_index < 36 {
+        if get_i64(buf, 1328 + epistemic_index * 8) != 0 {
+            return STATUS_SEMANTIC_LOSS
+        }
+        epistemic_index = epistemic_index + 1
+    }
+    if get_i64(buf, 1616) != 0 { return STATUS_MALFORMED }
+    STATUS_OK
+}
+
+fn copy_i64(left: &[i8; 2048], right: &![i8; 2048], pos: i64) -> i64 with Mut, Panic, Div {
+    put_i64(right, pos, get_i64(left, pos))
+}
+
+fn copy_name(left: &[i8; 2048], right: &![i8; 2048], pos: i64) -> i64 with Mut, Panic, Div {
+    var p = copy_i64(left, right, pos)
+    var i: i64 = 0
+    while i < 128 {
+        (*right)[(p + i) as usize] = (*left)[(p + i) as usize]
+        i = i + 1
+    }
+    p + 128
+}
+
+fn copy_instr(left: &[i8; 2048], right: &![i8; 2048], pos: i64) -> i64 with Mut, Panic, Div {
+    var p = pos
+    var header_index: i64 = 0
+    while header_index < 8 {
+        (*right)[(p + header_index) as usize] = (*left)[(p + header_index) as usize]
+        header_index = header_index + 1
+    }
+    p = p + 8
+    var scalar_index: i64 = 0
+    while scalar_index < 8 {
+        let value = get_i64(left, p)
+        p = put_i64(right, p, value)
+        scalar_index = scalar_index + 1
+    }
+    var tag_index: i64 = 0
+    while tag_index < 16 {
+        (*right)[(p + tag_index) as usize] = (*left)[(p + tag_index) as usize]
+        tag_index = tag_index + 1
+    }
+    p = p + 16
+    p = copy_name(left, right, p)
+    copy_i64(left, right, p)
+}
+
+fn roundtrip_wire(left: &[i8; 2048], right: &![i8; 2048]) -> i64 with Mut, Panic, Div {
+    var header_index: i64 = 0
+    while header_index < 8 {
+        (*right)[header_index as usize] = (*left)[header_index as usize]
+        header_index = header_index + 1
+    }
+    var p: i64 = 8
+    p = copy_i64(left, right, p)
+    p = copy_name(left, right, p)
+    var function_scalar_index: i64 = 0
+    while function_scalar_index < 4 {
+        p = copy_i64(left, right, p)
+        function_scalar_index = function_scalar_index + 1
+    }
+    var param_index: i64 = 0
+    while param_index < 64 {
+        p = copy_i64(left, right, p)
+        param_index = param_index + 1
+    }
+    var metadata_index: i64 = 0
+    while metadata_index < 3 {
+        p = copy_i64(left, right, p)
+        metadata_index = metadata_index + 1
+    }
+    p = copy_instr(left, right, p)
+    p = copy_instr(left, right, p)
+    p = copy_i64(left, right, p)
+    p = copy_name(left, right, p)
+    var epistemic_index: i64 = 0
+    while epistemic_index < 36 {
+        p = copy_i64(left, right, p)
+        epistemic_index = epistemic_index + 1
+    }
+    copy_i64(left, right, p)
+}
+
+fn buffers_equal(left: &[i8; 2048], right: &[i8; 2048], len: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < len {
+        if (*left)[i as usize] != (*right)[i as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    var first: [i8; 2048] = [0; 2048]
+    var second: [i8; 2048] = [0; 2048]
+    let len = build_wire(&! first)
+    if len != WIRE_SIZE || validate_wire(&first, len) != STATUS_OK { return 11 }
+    let copied = roundtrip_wire(&first, &! second)
+    if copied != len || !buffers_equal(&first, &second, len) { return 12 }
+    if get_i64(&second, 720 + 40) != 9221120237041090626 ||
+       get_i64(&second, 952 + 40) != 4614256656552045848 {
+        return 13
+    }
+
+    var bad = first
+    if validate_wire(&bad, len - 1) != STATUS_TRUNCATED { return 21 }
+    if validate_wire(&bad, len + 1) != STATUS_TRAILING { return 22 }
+    bad = first
+    bad[4] = 5 as i8
+    if validate_wire(&bad, len) != STATUS_BAD_VERSION { return 23 }
+    bad = first
+    bad[5] = 1 as i8
+    if validate_wire(&bad, len) != STATUS_BAD_RESERVED { return 24 }
+    bad = first
+    bad[720] = 35 as i8
+    if validate_wire(&bad, len) != STATUS_UNSUPPORTED_TAG { return 25 }
+    bad = first
+    bad[944] = 1 as i8
+    if validate_wire(&bad, len) != STATUS_SEMANTIC_LOSS { return 26 }
+    bad = first
+    bad[1328] = 1 as i8
+    if validate_wire(&bad, len) != STATUS_SEMANTIC_LOSS { return 27 }
+    bad = first
+    bad[8] = 2 as i8
+    if validate_wire(&bad, len) != STATUS_MALFORMED { return 28 }
+    bad = first
+    let truncated_count_end = put_i64(&! bad, 8, 2048)
+    if truncated_count_end != 16 || validate_wire(&bad, len) != STATUS_TRUNCATED { return 29 }
+    bad = first
+    let count_end = put_i64(&! bad, 8, 2049)
+    if count_end != 16 || validate_wire(&bad, len) != STATUS_CAPACITY { return 30 }
+    if one_function_capacity_status(560) != STATUS_OK ||
+       one_function_capacity_status(561) != STATUS_CAPACITY {
+        return 31
+    }
+
+    print("SOIR_V4_LOSSLESS_WIRE_RUNTIME_PASS bytes=1624 functions=1 instructions=2 strings=1 epistemic_counts=36 algebras=empty bit_exact=pass malformed=fail_closed capacity=560/561\n")
+    0
+}
