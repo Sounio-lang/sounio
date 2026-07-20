@@ -965,10 +965,33 @@ pub fn bf_cumsum(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Pan
 
 /// Per-group running count (0-indexed), aligned to input row order: out[i] = the
 /// number of EARLIER rows sharing row i's `key_col` value (like pandas
-/// groupby(key).cumcount()). One pass with an open-addressing hash table mapping key
-/// -> count-so-far. Returns a 1-column BigFrame of length n. O(n) expected. NATIVE +
-/// lean_single only (heap).
+/// groupby(key).cumcount()). DENSE integer keys 0..1023 (direct-index counter, no
+/// hashing -- the same fast dense-key contract as bf_groupby_sum; a row whose key is
+/// outside [0,1024) gets 0). For sparse/large-domain keys use bf_cumcount_by_hash.
+/// Returns a 1-column BigFrame of length n. O(n), one pass. NATIVE + lean_single only.
 pub fn bf_cumcount_by(src: &BigFrame, key_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var cnt: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    if key_col < 0 || key_col >= bf_ncols(src) || n <= 0 { return bf_new(1, 1) }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    var out = bf_new(1, n)
+    out.n_rows = n
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 { write_f64(op, i, cnt[k]); cnt[k] = cnt[k] + 1.0 }
+        else { write_f64(op, i, 0.0) }
+        i = i + 1
+    }
+    out
+}
+
+/// Per-group running count for ANY f64 key (sparse or large-domain, unlike
+/// bf_cumcount_by which caps keys at 0..1023): out[i] = the number of earlier rows
+/// sharing row i's key. One pass with an open-addressing hash table (key -> count-so-far).
+/// O(n) expected. Returns a 1-column BigFrame of length n. NATIVE + lean_single only.
+pub fn bf_cumcount_by_hash(src: &BigFrame, key_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
     let n = bf_nrows(src)
     if key_col < 0 || key_col >= bf_ncols(src) || n <= 0 { return bf_new(1, 1) }
     var size: i64 = 16
@@ -1014,10 +1037,38 @@ pub fn bf_cumcount_by(src: &BigFrame, key_col: i64) -> BigFrame with Alloc, Mut,
 
 /// Per-group running sum of `val_col`, aligned to input row order: out[i] = the sum
 /// of `val_col` over all rows up to and including row i that share row i's `key_col`
-/// value (like pandas groupby(key)[val].cumsum()). One pass with an open-addressing
-/// hash table mapping key -> running sum. Returns a 1-column BigFrame of length n.
-/// O(n) expected. NATIVE + lean_single only (heap).
+/// value (like pandas groupby(key)[val].cumsum()). DENSE integer keys 0..1023
+/// (direct-index accumulator, no hashing -- the same fast dense-key contract as
+/// bf_groupby_sum; a row whose key is outside [0,1024) gets its own value). For
+/// sparse/large-domain keys use bf_cumsum_by_hash. Returns a 1-column BigFrame of length
+/// n. O(n), one pass. NATIVE + lean_single only (heap).
 pub fn bf_cumsum_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var run: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || n <= 0 { return bf_new(1, 1) }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    var out = bf_new(1, n)
+    out.n_rows = n
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        let v = read_f64(vp, i)
+        if k >= 0 && k < 1024 { run[k] = run[k] + v; write_f64(op, i, run[k]) }
+        else { write_f64(op, i, v) }
+        i = i + 1
+    }
+    out
+}
+
+/// Per-group running sum for ANY f64 key (sparse or large-domain, unlike bf_cumsum_by
+/// which caps keys at 0..1023): out[i] = the sum of `val_col` over all rows up to and
+/// including row i that share row i's key. One pass with an open-addressing hash table
+/// (key -> running sum). O(n) expected. Returns a 1-column BigFrame of length n. NATIVE +
+/// lean_single only (heap).
+pub fn bf_cumsum_by_hash(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
     let n = bf_nrows(src)
     let nc = bf_ncols(src)
     if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || n <= 0 { return bf_new(1, 1) }
