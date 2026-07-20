@@ -25,6 +25,20 @@ var LAST_PARSED_ITEM: Option<Box<Item> > = None
 // (Parser, Expr) = 74-slot SRET which corrupts rdi in the lean compiler.
 var LAST_EXPR: Option<Box<Expr> > = None
 
+// Exact decimal-to-f64 conversion scratch. Parser execution is already
+// single-threaded and global-state-backed, so fixed scalar arrays avoid
+// bootstrap-hostile large array arguments and returns.
+var PARSER_DEC_NUM: [i64; 128] = [0; 128]
+var PARSER_DEC_DEN: [i64; 128] = [0; 128]
+var PARSER_DEC_REM: [i64; 128] = [0; 128]
+var PARSER_DEC_DIV: [i64; 128] = [0; 128]
+var PARSER_DEC_TMP: [i64; 128] = [0; 128]
+var PARSER_DEC_NUM_LEN: i64 = 1
+var PARSER_DEC_DEN_LEN: i64 = 1
+var PARSER_DEC_REM_LEN: i64 = 1
+var PARSER_DEC_DIV_LEN: i64 = 1
+var PARSER_DEC_TMP_LEN: i64 = 1
+
 pub fn parser_store_expr_box(b: Box<Expr>) with Mut {
     LAST_EXPR = Some(b)
 }
@@ -937,66 +951,436 @@ pub fn parser_advance(p_in: Parser) -> Parser with Mut, Panic, Div {
     p
 }
 
-fn parser_parse_float_token(start: i64, end: i64) -> f64 with Mut, Panic, Div {
-    var result: f64 = 0.0
-    var i = start
-    while i < end {
-        let ch = CURSOR_SOURCE[i as usize]
-        if ch == (95 as i8) { i = i + 1; continue }
-        if ch == (46 as i8) || ch == (101 as i8) || ch == (69 as i8) { break }
-        if ch >= (48 as i8) && ch <= (57 as i8) {
-            result = result * 10.0 + (ch - (48 as i8)) as f64
-        } else {
-            break
-        }
+fn parser_decimal_len(which: i64) -> i64 {
+    if which == 0 { PARSER_DEC_NUM_LEN }
+    else if which == 1 { PARSER_DEC_DEN_LEN }
+    else if which == 2 { PARSER_DEC_REM_LEN }
+    else if which == 3 { PARSER_DEC_DIV_LEN }
+    else { PARSER_DEC_TMP_LEN }
+}
+
+fn parser_decimal_set_len(which: i64, len: i64) with Mut {
+    if which == 0 { PARSER_DEC_NUM_LEN = len }
+    else if which == 1 { PARSER_DEC_DEN_LEN = len }
+    else if which == 2 { PARSER_DEC_REM_LEN = len }
+    else if which == 3 { PARSER_DEC_DIV_LEN = len }
+    else { PARSER_DEC_TMP_LEN = len }
+}
+
+fn parser_decimal_get(which: i64, idx: i64) -> i64 with Mut, Panic {
+    if which == 0 { PARSER_DEC_NUM[idx as usize] }
+    else if which == 1 { PARSER_DEC_DEN[idx as usize] }
+    else if which == 2 { PARSER_DEC_REM[idx as usize] }
+    else if which == 3 { PARSER_DEC_DIV[idx as usize] }
+    else { PARSER_DEC_TMP[idx as usize] }
+}
+
+fn parser_decimal_set(which: i64, idx: i64, value: i64) with Mut, Panic {
+    if which == 0 { PARSER_DEC_NUM[idx as usize] = value }
+    else if which == 1 { PARSER_DEC_DEN[idx as usize] = value }
+    else if which == 2 { PARSER_DEC_REM[idx as usize] = value }
+    else if which == 3 { PARSER_DEC_DIV[idx as usize] = value }
+    else { PARSER_DEC_TMP[idx as usize] = value }
+}
+
+fn parser_decimal_clear(which: i64) with Mut, Panic {
+    var i: i64 = 0
+    while i < 128 {
+        parser_decimal_set(which, i, 0)
         i = i + 1
     }
-    if i < end && CURSOR_SOURCE[i as usize] == (46 as i8) {
+    parser_decimal_set_len(which, 1)
+}
+
+fn parser_decimal_trim(which: i64) with Mut, Panic {
+    var len = parser_decimal_len(which)
+    while len > 1 && parser_decimal_get(which, len - 1) == 0 {
+        len = len - 1
+    }
+    parser_decimal_set_len(which, len)
+}
+
+// Limbs use base 2^30. Multiplication by ten and left shifts of at most
+// 29 bits therefore stay well inside signed i64 during bootstrap execution.
+fn parser_decimal_mul_add(which: i64, multiplier: i64, addend: i64) -> bool with Mut, Panic, Div {
+    let base: i64 = 1073741824
+    let len = parser_decimal_len(which)
+    var carry = addend
+    var i: i64 = 0
+    while i < len {
+        let product = parser_decimal_get(which, i) * multiplier + carry
+        parser_decimal_set(which, i, product % base)
+        carry = product / base
         i = i + 1
-        var frac: f64 = 0.1
-        while i < end {
-            let ch = CURSOR_SOURCE[i as usize]
-            if ch == (95 as i8) { i = i + 1; continue }
-            if ch == (101 as i8) || ch == (69 as i8) { break }
-            if ch >= (48 as i8) && ch <= (57 as i8) {
-                result = result + (ch - (48 as i8)) as f64 * frac
-                frac = frac * 0.1
-            } else {
-                break
-            }
+    }
+    var out_len = len
+    while carry > 0 {
+        if out_len >= 128 { return false }
+        parser_decimal_set(which, out_len, carry % base)
+        carry = carry / base
+        out_len = out_len + 1
+    }
+    parser_decimal_set_len(which, out_len)
+    true
+}
+
+fn parser_decimal_mod_small(which: i64, divisor: i64) -> i64 with Mut, Panic, Div {
+    let base: i64 = 1073741824
+    var remainder: i64 = 0
+    var i = parser_decimal_len(which) - 1
+    while i >= 0 {
+        remainder = (remainder * base + parser_decimal_get(which, i)) % divisor
+        i = i - 1
+    }
+    remainder
+}
+
+fn parser_decimal_div_small(which: i64, divisor: i64) -> i64 with Mut, Panic, Div {
+    let base: i64 = 1073741824
+    var remainder: i64 = 0
+    var i = parser_decimal_len(which) - 1
+    while i >= 0 {
+        let current = remainder * base + parser_decimal_get(which, i)
+        parser_decimal_set(which, i, current / divisor)
+        remainder = current % divisor
+        i = i - 1
+    }
+    parser_decimal_trim(which)
+    remainder
+}
+
+fn parser_decimal_copy_shifted(src: i64, dst: i64, shift: i64) -> bool with Mut, Panic, Div {
+    if shift < 0 || src == dst { return false }
+    let base: i64 = 1073741824
+    parser_decimal_clear(dst)
+    let word_shift = shift / 30
+    let bit_shift = shift % 30
+    if word_shift >= 128 { return false }
+
+    var carry: i64 = 0
+    var i: i64 = 0
+    let src_len = parser_decimal_len(src)
+    while i < src_len {
+        let out_idx = i + word_shift
+        if out_idx >= 128 { return false }
+        let value = (parser_decimal_get(src, i) << bit_shift) + carry
+        parser_decimal_set(dst, out_idx, value % base)
+        carry = value / base
+        i = i + 1
+    }
+
+    var out_len = word_shift + src_len
+    if carry > 0 {
+        if out_len >= 128 { return false }
+        parser_decimal_set(dst, out_len, carry)
+        out_len = out_len + 1
+    }
+    parser_decimal_set_len(dst, out_len)
+    parser_decimal_trim(dst)
+    true
+}
+
+fn parser_decimal_compare(left: i64, right: i64) -> i64 with Mut, Panic {
+    let left_len = parser_decimal_len(left)
+    let right_len = parser_decimal_len(right)
+    if left_len < right_len { return 0 - 1 }
+    if left_len > right_len { return 1 }
+    var i = left_len - 1
+    while i >= 0 {
+        let a = parser_decimal_get(left, i)
+        let b = parser_decimal_get(right, i)
+        if a < b { return 0 - 1 }
+        if a > b { return 1 }
+        i = i - 1
+    }
+    0
+}
+
+fn parser_decimal_subtract(left: i64, right: i64) with Mut, Panic {
+    let base: i64 = 1073741824
+    let left_len = parser_decimal_len(left)
+    let right_len = parser_decimal_len(right)
+    var borrow: i64 = 0
+    var i: i64 = 0
+    while i < left_len {
+        let rhs = if i < right_len { parser_decimal_get(right, i) } else { 0 }
+        var value = parser_decimal_get(left, i) - rhs - borrow
+        if value < 0 {
+            value = value + base
+            borrow = 1
+        } else {
+            borrow = 0
+        }
+        parser_decimal_set(left, i, value)
+        i = i + 1
+    }
+    if borrow != 0 { panic("decimal float internal subtraction underflow") }
+    parser_decimal_trim(left)
+}
+
+fn parser_decimal_bit_length(which: i64) -> i64 with Mut, Panic, Div {
+    let len = parser_decimal_len(which)
+    var top = parser_decimal_get(which, len - 1)
+    if len == 1 && top == 0 { return 0 }
+    var top_bits: i64 = 0
+    while top > 0 {
+        top = top / 2
+        top_bits = top_bits + 1
+    }
+    (len - 1) * 30 + top_bits
+}
+
+fn parser_decimal_floor_log2_ratio() -> i64 with Mut, Panic, Div {
+    let num_bits = parser_decimal_bit_length(0)
+    let den_bits = parser_decimal_bit_length(1)
+    var candidate = num_bits - den_bits
+    var cmp: i64 = 0
+    if candidate >= 0 {
+        if !parser_decimal_copy_shifted(1, 4, candidate) {
+            panic("decimal float literal exceeds exact parser limit")
+        }
+        cmp = parser_decimal_compare(0, 4)
+    } else {
+        if !parser_decimal_copy_shifted(0, 4, 0 - candidate) {
+            panic("decimal float literal exceeds exact parser limit")
+        }
+        cmp = parser_decimal_compare(4, 1)
+    }
+    if cmp < 0 { candidate - 1 } else { candidate }
+}
+
+// Round (NUM * 2^binary_shift / DEN) at the supplied binary place. The
+// quotient is at most 53 bits for every caller, so it remains exact in i64.
+fn parser_decimal_round_at(binary_shift: i64, target_exp: i64) -> i64 with Mut, Panic, Div {
+    let shift = binary_shift - target_exp
+    if shift >= 0 {
+        if !parser_decimal_copy_shifted(0, 2, shift) || !parser_decimal_copy_shifted(1, 3, 0) {
+            panic("decimal float literal exceeds exact parser limit")
+        }
+    } else {
+        if !parser_decimal_copy_shifted(0, 2, 0) || !parser_decimal_copy_shifted(1, 3, 0 - shift) {
+            panic("decimal float literal exceeds exact parser limit")
+        }
+    }
+
+    var quotient: i64 = 0
+    var quotient_bit = parser_decimal_bit_length(2) - parser_decimal_bit_length(3)
+    if quotient_bit > 53 { panic("decimal float internal quotient overflow") }
+    while quotient_bit >= 0 {
+        if !parser_decimal_copy_shifted(3, 4, quotient_bit) {
+            panic("decimal float literal exceeds exact parser limit")
+        }
+        if parser_decimal_compare(2, 4) >= 0 {
+            parser_decimal_subtract(2, 4)
+            quotient = quotient | (1 << quotient_bit)
+        }
+        quotient_bit = quotient_bit - 1
+    }
+
+    if !parser_decimal_copy_shifted(2, 4, 1) {
+        panic("decimal float literal exceeds exact parser limit")
+    }
+    let half_cmp = parser_decimal_compare(4, 3)
+    if half_cmp > 0 || (half_cmp == 0 && (quotient & 1) == 1) {
+        quotient = quotient + 1
+    }
+    quotient
+}
+
+fn parser_decimal_scale_binary(significand: i64, exponent: i64) -> f64 with Mut, Panic, Div {
+    if significand == 0 { return 0.0 }
+    var result = significand as f64
+    var i: i64 = 0
+    if exponent > 0 {
+        while i < exponent {
+            result = result * 2.0
+            i = i + 1
+        }
+    } else if exponent < 0 {
+        let count = 0 - exponent
+        while i < count {
+            result = result / 2.0
             i = i + 1
         }
     }
+    result
+}
+
+fn parser_decimal_to_f64(decimal_exp: i64) -> f64 with Mut, Panic, Div {
+    parser_decimal_clear(1)
+    parser_decimal_set(1, 0, 1)
+
+    let binary_shift = decimal_exp
+    var power = if decimal_exp < 0 { 0 - decimal_exp } else { decimal_exp }
+    let target = if decimal_exp < 0 { 1 } else { 0 }
+    while power > 0 {
+        if !parser_decimal_mul_add(target, 5, 0) {
+            panic("decimal float literal exceeds exact parser limit")
+        }
+        power = power - 1
+    }
+
+    var binary_exp = parser_decimal_floor_log2_ratio() + binary_shift
+    if binary_exp < -1075 { return 0.0 }
+    if binary_exp > 1023 { panic("decimal float literal overflows f64") }
+
+    if binary_exp >= -1022 {
+        var target_exp = binary_exp - 52
+        var significand = parser_decimal_round_at(binary_shift, target_exp)
+        if significand == 9007199254740992 {
+            significand = significand / 2
+            binary_exp = binary_exp + 1
+            target_exp = binary_exp - 52
+            if binary_exp > 1023 { panic("decimal float literal overflows f64") }
+        }
+        if significand < 4503599627370496 || significand >= 9007199254740992 {
+            panic("decimal float internal normal rounding failure")
+        }
+        return parser_decimal_scale_binary(significand, target_exp)
+    }
+
+    let subnormal = parser_decimal_round_at(binary_shift, -1074)
+    if subnormal < 0 || subnormal > 4503599627370496 {
+        panic("decimal float internal subnormal rounding failure")
+    }
+    parser_decimal_scale_binary(subnormal, -1074)
+}
+
+fn parser_decimal_is_digit(ch: i8) -> bool {
+    ch >= (48 as i8) && ch <= (57 as i8)
+}
+
+fn parser_decimal_valid_suffix(start: i64, end: i64) -> bool with Mut, Panic {
+    let len = end - start
+    if len == 2 {
+        let first = CURSOR_SOURCE[start as usize]
+        return (first == (105 as i8) || first == (117 as i8)) &&
+            CURSOR_SOURCE[(start + 1) as usize] == (56 as i8)
+    }
+    if len != 3 { return false }
+    let first = CURSOR_SOURCE[start as usize]
+    let second = CURSOR_SOURCE[(start + 1) as usize]
+    let third = CURSOR_SOURCE[(start + 2) as usize]
+    if first == (102 as i8) {
+        return (second == (51 as i8) && third == (50 as i8)) ||
+            (second == (54 as i8) && third == (52 as i8))
+    }
+    if first != (105 as i8) && first != (117 as i8) { return false }
+    (second == (49 as i8) && third == (54 as i8)) ||
+        (second == (51 as i8) && third == (50 as i8)) ||
+        (second == (54 as i8) && third == (52 as i8))
+}
+
+pub fn parser_parse_float_token(start: i64, end: i64) -> f64 with Mut, Panic, Div {
+    if start < 0 || end <= start || end - start > 1024 {
+        panic("invalid decimal float literal")
+    }
+    var which: i64 = 0
+    while which < 5 {
+        parser_decimal_clear(which)
+        which = which + 1
+    }
+
+    var i = start
+    var saw_digit = false
+    var saw_dot = false
+    var fraction_digits: i64 = 0
+    var significant_digits: i64 = 0
+    var saw_nonzero = false
+    var previous_was_digit = false
+
+    while i < end {
+        let ch = CURSOR_SOURCE[i as usize]
+        if parser_decimal_is_digit(ch) {
+            let digit = (ch - (48 as i8)) as i64
+            if !parser_decimal_mul_add(0, 10, digit) {
+                panic("decimal float literal exceeds exact parser limit")
+            }
+            saw_digit = true
+            previous_was_digit = true
+            if saw_dot { fraction_digits = fraction_digits + 1 }
+            if saw_nonzero {
+                significant_digits = significant_digits + 1
+            } else if digit != 0 {
+                saw_nonzero = true
+                significant_digits = 1
+            }
+            if significant_digits > 768 {
+                panic("decimal float literal exceeds exact parser limit")
+            }
+            i = i + 1
+            continue
+        }
+        if ch == (95 as i8) {
+            if !previous_was_digit || i + 1 >= end ||
+               !parser_decimal_is_digit(CURSOR_SOURCE[(i + 1) as usize]) {
+                panic("invalid decimal float literal separator")
+            }
+            previous_was_digit = false
+            i = i + 1
+            continue
+        }
+        if ch == (46 as i8) && !saw_dot {
+            if !previous_was_digit || i + 1 >= end ||
+               !parser_decimal_is_digit(CURSOR_SOURCE[(i + 1) as usize]) {
+                panic("invalid decimal float literal fraction")
+            }
+            saw_dot = true
+            previous_was_digit = false
+            i = i + 1
+            continue
+        }
+        break
+    }
+
+    if !saw_digit { panic("invalid decimal float literal") }
+
+    var exponent_sign: i64 = 1
+    var exponent_value: i64 = 0
+    var exponent_too_large = false
     if i < end && (CURSOR_SOURCE[i as usize] == (101 as i8) || CURSOR_SOURCE[i as usize] == (69 as i8)) {
         i = i + 1
-        var exp_sign: i64 = 1
         if i < end && CURSOR_SOURCE[i as usize] == (45 as i8) {
-            exp_sign = 0 - 1
+            exponent_sign = 0 - 1
             i = i + 1
         } else if i < end && CURSOR_SOURCE[i as usize] == (43 as i8) {
             i = i + 1
         }
-        var exp_value: i64 = 0
-        while i < end {
-            let ch = CURSOR_SOURCE[i as usize]
-            if ch == (95 as i8) { i = i + 1; continue }
-            if ch >= (48 as i8) && ch <= (57 as i8) {
-                exp_value = exp_value * 10 + ((ch - (48 as i8)) as i64)
+        let exponent_start = i
+        while i < end && parser_decimal_is_digit(CURSOR_SOURCE[i as usize]) {
+            let digit = (CURSOR_SOURCE[i as usize] - (48 as i8)) as i64
+            if exponent_value > 100000 {
+                exponent_too_large = true
             } else {
-                break
+                exponent_value = exponent_value * 10 + digit
+                if exponent_value > 100000 { exponent_too_large = true }
             }
             i = i + 1
         }
-        while exp_value > 0 {
-            if exp_sign < 0 {
-                result = result / 10.0
-            } else {
-                result = result * 10.0
-            }
-            exp_value = exp_value - 1
-        }
+        if i == exponent_start { panic("invalid decimal float literal exponent") }
     }
-    result
+
+    if i < end && !parser_decimal_valid_suffix(i, end) {
+        panic("invalid decimal float literal suffix")
+    }
+
+    if !saw_nonzero { return 0.0 }
+    if exponent_too_large {
+        if exponent_sign < 0 { return 0.0 }
+        panic("decimal float literal overflows f64")
+    }
+
+    var decimal_exp = exponent_sign * exponent_value - fraction_digits
+    let decimal_order = significant_digits + decimal_exp - 1
+    if decimal_order > 308 { panic("decimal float literal overflows f64") }
+    if decimal_order < -324 { return 0.0 }
+
+    while parser_decimal_mod_small(0, 10) == 0 {
+        let remainder = parser_decimal_div_small(0, 10)
+        if remainder != 0 { panic("decimal float internal normalization failure") }
+        decimal_exp = decimal_exp + 1
+    }
+    parser_decimal_to_f64(decimal_exp)
 }
 
 pub fn parser_peek_ahead(p: Parser, offset: i64) -> TokenKind with Mut, Panic, Div {

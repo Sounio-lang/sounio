@@ -3226,3 +3226,9 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 | 2026-07-19 | xai/Grok 4.3 | math-review | stdlib/epistemic/gum.sio (dof_to_i64) | PASS | Confirmed WS, t-tables, Type A/B, and round-half-up `dof+0.5` as correct GUM table lookup. Raw: `/tmp/llm-offload-0n5IXJ/`. |
 | 2026-07-19 | deepseek | review | test_prescription_chain_e2e.sio | PROVIDER_ERROR | Insufficient Balance. |
 | 2026-07-19 | xai/Grok 4.3 | review | test_prescription_chain_e2e.sio | ADDRESSED | Wired GUM U95 into `gum_band_decide`; documented Matzke *0.06 L/h and illustrative CV=0.25; claims_not_made bedside. Dead-code GUM critique fixed. Raw: `/tmp/llm-offload-bh5nkB/`. |
+
+## 2026-07-20 - exact decimal literal rounding review
+
+| Date | Provider | Task | Target | Outcome | Note |
+|---|---|---|---|---|---|
+| 2026-07-20 | xai/Grok 4.3; zai/GLM-5.2 attempted | math-review | parser.sio decimal-to-binary64 exact-rational conversion | PASS_SINGLE_PROVIDER_DEGRADED | A focused review checked the `N * 10^d = (N/D) * 2^b` reduction, floor-log2 normalization, normal/subnormal rounding, ties-to-even remainder test, `2^53` carry, power-of-two scaling, limb capacity, and signed-i64 bounds. xAI returned PASS with no counterexample within the stated 768-digit and 1024-byte limits. The first generic xAI task incorrectly classified the diff as non-mathematical and is not counted. Z.AI first requested a diff despite receiving the focused algorithm, then returned no review on a direct full-diff retry; it is not counted as a pass. Independent executable evidence remains 13 CPython bit-identity boundaries plus a 300-case deterministic differential; this is compiler parsing evidence, not a broader numerical claim. Raw: `/tmp/llm-offload-ieqB2q/`, `/tmp/llm-offload-dIiH67/`, `/tmp/llm-offload-ZpY8GC/`. |
