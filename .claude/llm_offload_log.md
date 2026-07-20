@@ -3242,3 +3242,9 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 |---|---|---|---|---|---|
 | 2026-07-20 | none | main integration | codimension-and-the-bits-functional.md | WAIVED_BYTE_IDENTICAL_MAIN_CARRY | This lane integrated current `origin/main`; the working-tree object and `origin/main` object are both `ad9ec67492fa5657d50e5de3419b58f71f7675cd`. This lane did not author, revise, publish, or make a new mathematical claim in the artifact. |
 | 2026-07-20 | none | main integration | mercy-exchange-rate.md | WAIVED_BYTE_IDENTICAL_MAIN_CARRY | This lane integrated current `origin/main`; the working-tree object and `origin/main` object are both `4645dbfd67c0064cb5d61b2dcf61ba09b4915efb`. This lane did not author, revise, publish, or make a new mathematical claim in the artifact. |
+
+## 2026-07-20 - canonical catalog refresh draft PR review
+
+| Date | Provider | Task | Target | Outcome | Note |
+|---|---|---|---|---|---|
+| 2026-07-20 | xai/Grok 4.3; zai/GLM-5.2, deepseek, and groq attempted | external raw review | draft PR description for canonical production catalog refresh observation | PASS_SINGLE_PROVIDER_DEGRADED | xAI returned no BLOCKER, MAJOR, or MINOR finding after checking authority boundaries, point-in-time scope, byte-continuity wording, and validation consistency. Two Z.AI attempts produced empty response files and are not counted as passes. DeepSeek returned `Insufficient Balance`; Groq rejected its configured key. The description remains a draft, records an unanswered request only, and grants no authority. Raw: `/tmp/llm-offload-o57tpc/`, `/tmp/llm-offload-9pdcUd/`, `/tmp/llm-offload-kKy9gp/`, `/tmp/llm-offload-XBycIB/`. |
