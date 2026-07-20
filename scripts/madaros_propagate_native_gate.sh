@@ -3,12 +3,13 @@
 #
 # Acceptance:
 #   - Default ./bin/souc (Madaros) compile+run of the multi-module witness prints
-#     product (6 / 0.25) and exp_delta (e / e²·0.01) as exact scaled micro-units,
-#     plus MC identity / square within numeric bands.
+#     product (6 / 0.25) and exp (literal name; e / e²·0.01) as exact scaled
+#     micro-units, plus MC identity / square within numeric bands.
 #   - TRUST sentinel PROPAGATE_TRUST_OK from free-function Epistemic path.
+#   - Requires a Madaros binary that includes the Wave6 C codegen fix
+#     (empty-stub builtins only) so call-site `exp` is not float-hijacked.
 #
-# Does NOT claim lean_single is Madaros. Rebuild of Madaros is not required for
-# this stdlib surface; measure with the current default engine.
+# Does NOT claim lean_single is Madaros.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
@@ -49,7 +50,7 @@ if $SOUC compile tests/epistemic_trust/witness_import_propagate.sio -o "$OUT/w.e
   id_var="$(echo "${lines[5]:-}" | tr -d '[:space:]')"
   sq_val="$(echo "${lines[6]:-}" | tr -d '[:space:]')"
   sq_var="$(echo "${lines[7]:-}" | tr -d '[:space:]')"
-  echo "product=($p_val,$p_var) exp_delta=($e_val,$e_var) mc_id=($id_val,$id_var) mc_sq=($sq_val,$sq_var)"
+  echo "product=($p_val,$p_var) exp=($e_val,$e_var) mc_id=($id_val,$id_var) mc_sq=($sq_val,$sq_var)"
 
   if [ "$p_val" = "6000000" ] && [ "$p_var" = "250000" ]; then
     echo "PASS: product 6.0 / 0.25"
@@ -59,10 +60,11 @@ if $SOUC compile tests/epistemic_trust/witness_import_propagate.sio -o "$OUT/w.e
   fi
 
   # exp(1) series ≈ 2.718281 → 2718281; var e²*0.01 ≈ 0.073890 → 73890 (±2)
+  # Witness imports the symbol literally named `exp` (not exp_delta).
   if in_band "$e_val" 2718200 2718360 && in_band "$e_var" 73800 74000; then
-    echo "PASS: exp_delta e / e²·0.01 (scaled $e_val / $e_var)"
+    echo "PASS: exp e / e²·0.01 (scaled $e_val / $e_var)"
   else
-    echo "FAIL: exp_delta sentinels (got $e_val / $e_var)"
+    echo "FAIL: exp sentinels (got $e_val / $e_var)"
     fail=1
   fi
 
