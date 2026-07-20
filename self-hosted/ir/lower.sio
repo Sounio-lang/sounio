@@ -133,6 +133,9 @@ fn empty_lower_loop_labels() -> LowerLoopLabels {
 
 let LOWER_GLOBAL_ELEM_F64: i64 = 2
 let LOWER_GLOBAL_SCALAR_F64: i64 = 3
+// Word-size integer scalar global (`var G: i64 = …`). Distinct from 0/unknown so
+// `print(G)` / `println(G)` can select print_int instead of the char* printer.
+let LOWER_GLOBAL_SCALAR_I64: i64 = 1
 
 pub struct LowerGlobalTypeTable {
     // Indexed by IrModule.functions slot. Keep this aligned with IR_MAX_FUNCS;
@@ -2866,6 +2869,9 @@ fn lower_global_elem_kind(ty_opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic
         Some(ty) => {
             if lower_type_expr_is_f64(&(*ty)) { return LOWER_GLOBAL_SCALAR_F64 }
             if lower_type_expr_is_array_of_f64(&(*ty)) { return LOWER_GLOBAL_ELEM_F64 }
+            // Scalar integers: needed so print/println of `var G: i64` routes to
+            // print_int (same SEGV class as untyped f64 → char*).
+            if lower_type_expr_is_integer(&(*ty)) { return LOWER_GLOBAL_SCALAR_I64 }
             0
         }
         _ => 0,
@@ -5675,6 +5681,35 @@ impl Lowerer {
         }
     }
 
+    // Scalar kind for a module-level BSS global identified by name.
+    // Returns 2 for `var G: f64`, 1 for word-size integer scalars, else 0.
+    // Locals already carry scalar_kind; this is the print/println dispatch
+    // fallback that #1325 did for array-element indexing only.
+    fn bss_global_scalar_kind(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, name)
+        if fn_id < 0 {
+            return 0
+        }
+        if fn_id >= self.module.fn_count {
+            return 0
+        }
+        if self.module.functions[fn_id as usize].compile_strategy != IR_STRATEGY_BSS_GLOBAL {
+            return 0
+        }
+        // Aggregate bases (arrays/structs) are not print scalars.
+        if self.module.functions[fn_id as usize].bss_size > 8 {
+            return 0
+        }
+        let gkind = lower_global_type_table_lookup(&(*self.global_types), fn_id)
+        if gkind == LOWER_GLOBAL_SCALAR_F64 {
+            return 2
+        }
+        if gkind == LOWER_GLOBAL_SCALAR_I64 {
+            return 1
+        }
+        0
+    }
+
     fn index_base_elem_is_float_ref(self, base_opt: &Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc {
         match *base_opt {
             Some(base_expr) => {
@@ -5775,7 +5810,13 @@ impl Lowerer {
             return true
         }
         if (*e).kind == ExprKind::ExprIdent {
-            return self.lookup_local_scalar_kind((*e).name) == 2
+            if self.lookup_local_scalar_kind((*e).name) == 2 {
+                return true
+            }
+            // Module-level `var G: f64` is a BSS slot, not a local with scalar_kind=2.
+            // Without this fallback, `print(G)` stays on the char* printer and SEGVs
+            // (array path already falls back via index_base_elem_is_float_ref).
+            return self.bss_global_scalar_kind((*e).name) == 2
         }
         if (*e).kind == ExprKind::ExprCast {
             return lower_cast_type_is_f64(&(*e).cast_type)
@@ -5879,7 +5920,12 @@ impl Lowerer {
             return 3
         }
         if (*e).kind == ExprKind::ExprIdent {
-            return self.lookup_local_scalar_kind((*e).name)
+            let local_sk = self.lookup_local_scalar_kind((*e).name)
+            if local_sk != 0 {
+                return local_sk
+            }
+            // BSS scalar global fallback: see bss_global_scalar_kind.
+            return self.bss_global_scalar_kind((*e).name)
         }
         if (*e).kind == ExprKind::ExprCast {
             if lower_cast_type_is_f64(&(*e).cast_type) { return 2 }
@@ -10562,7 +10608,7 @@ impl Lowerer {
                     let lo = pair.0
                     let reg = pair.1
                     let lo2 = lo.emit(ir_load_global(reg, bss_off, e.name))
-                    if self.lookup_local_scalar_kind(e.name) == 2 {
+                    if self.lookup_local_scalar_kind(e.name) == 2 || self.bss_global_scalar_kind(e.name) == 2 {
                         return (lo2.emit(ir_mark_float_reg(reg)), reg)
                     }
                     return (lo2, reg)

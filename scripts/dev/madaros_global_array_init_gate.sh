@@ -79,12 +79,36 @@ fn main() -> i64 with IO {
 }
 ' '10 20 30'
 
-# 4) scalar control
+# 4) scalar control (explicit print_int — always worked)
 run_case "scalar" '
 var G: i64 = 42
 fn main() -> i64 with IO {
   print_int(G)
   print("\n")
+  if G != 42 { return 1 }
+  0
+}
+' '42'
+
+# 5) scalar f64 print/println via auto-dispatch (#1325 residual)
+run_case "scalar_f64_print" '
+var G: f64 = 1.5
+fn main() -> i64 with IO {
+  print(G)
+  print("\n")
+  println(G)
+  if G != 1.5 { return 1 }
+  0
+}
+' '1.500000'
+
+# 6) scalar i64 print/println via auto-dispatch (same class as f64 char* SEGV)
+run_case "scalar_i64_print" '
+var G: i64 = 42
+fn main() -> i64 with IO {
+  print(G)
+  print("\n")
+  println(G)
   if G != 42 { return 1 }
   0
 }
