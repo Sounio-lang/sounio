@@ -824,6 +824,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.subptx-phase-h-complete | historical | docs/research/subptx_phase_h_complete.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.subptx-sinkhorn16-2iter | historical | docs/research/subptx_sinkhorn16_2iter.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.sunflower-168-sounio-note | historical | docs/research/sunflower-168-sounio-note.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.the-reckoning | historical | docs/research/the-reckoning.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.variance-of-associator | historical | docs/research/variance_of_associator.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.while-loop-bug-investigation | historical | docs/research/WHILE_LOOP_BUG_INVESTIGATION.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.zeta-variance-deep-investigation | historical | docs/research/zeta_variance_deep_investigation.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
