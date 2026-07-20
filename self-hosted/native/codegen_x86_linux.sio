@@ -1100,6 +1100,14 @@ fn native_v2_func_name_is_print(func: &IrFunction) -> bool with Mut, Panic, Div 
 }
 
 fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, Div {
+    // Empty stubs (instr_count == 0) from ir_module_ensure_builtin_call_targets
+    // still map to hand-coded float/string/IO intrinsics. User/stdlib free
+    // functions that share a name (e.g. epistemic::propagate::exp/cos) keep
+    // their lowered IR body — name-only hijack used the float intrinsic ABI
+    // on non-f64 args and SEGVd under multi-module Madaros (#1287 / Wave6 C).
+    if (*func).instr_count > 0 {
+        return 0
+    }
     if native_v2_func_name_is_print_int(func) { return 1 }
     if native_v2_func_name_is_print_char(func) { return 2 }
     if native_v2_func_name_is_print(func) { return 3 }
@@ -5226,32 +5234,35 @@ pub fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) 
     c.fn_offsets[fn_index as usize] = c.code.len
     c.symbols = symbol_data_add_name(c.symbols, fn_index, func.name.buf, func.name.len)
 
-    // Builtin dispatch — emit hand-coded assembly, skip normal IR lowering
-    // M3: print builtins
-    if name_is_print_int(func.name) { return emit_builtin_print_int(c) }
-    if name_is_print_char(func.name) { return emit_builtin_print_char(c) }
-    if name_is_print(func.name) { return emit_builtin_print_str(c) }
-    // M4: argv + string builtins
-    if name_is_get_arg_count(func.name) { return emit_builtin_get_arg_count(c) }
-    if name_is_get_arg(func.name) { return emit_builtin_get_arg(c) }
-    if name_is_str_len(func.name) { return emit_builtin_str_len(c) }
-    if name_is_str_char_at(func.name) { return emit_builtin_str_char_at(c) }
-    if name_is_str_eq(func.name) { return emit_builtin_str_eq(c) }
-    if name_is_str_slice(func.name) { return emit_builtin_str_slice(c) }
-    if name_is_starts_with(func.name) { return emit_builtin_starts_with(c) }
-    if name_is_str_concat(func.name) { return emit_builtin_str_concat(c) }
-    if name_is_str_from_bytes(func.name) { return emit_builtin_str_from_bytes(c) }
-    // M5: file I/O builtins
-    if name_is_read_file(func.name) { return emit_builtin_read_file(c) }
-    if name_is_write_file(func.name) { return emit_builtin_write_file(c) }
-    if name_is_file_size(func.name) { return emit_builtin_file_size(c) }
-    if name_is_sqrt(func.name) { return emit_builtin_sqrt(c) }
-    if name_is_print_f64(func.name) { return emit_builtin_print_f64(c) }
-    if name_is_exp(func.name) { return emit_builtin_exp(c) }
-    if name_is_log(func.name) { return emit_builtin_log(c) }
-    if name_is_sin(func.name) { return emit_builtin_sin(c) }
-    if name_is_cos(func.name) { return emit_builtin_cos(c) }
-    if name_is_assert(func.name) { return emit_builtin_assert(c) }
+    // Builtin dispatch — empty stubs only. User/stdlib bodies that share a
+    // builtin name (exp/cos/sin/log/sqrt/print_f64/…) compile as ordinary IR.
+    if func.instr_count == 0 {
+        // M3: print builtins
+        if name_is_print_int(func.name) { return emit_builtin_print_int(c) }
+        if name_is_print_char(func.name) { return emit_builtin_print_char(c) }
+        if name_is_print(func.name) { return emit_builtin_print_str(c) }
+        // M4: argv + string builtins
+        if name_is_get_arg_count(func.name) { return emit_builtin_get_arg_count(c) }
+        if name_is_get_arg(func.name) { return emit_builtin_get_arg(c) }
+        if name_is_str_len(func.name) { return emit_builtin_str_len(c) }
+        if name_is_str_char_at(func.name) { return emit_builtin_str_char_at(c) }
+        if name_is_str_eq(func.name) { return emit_builtin_str_eq(c) }
+        if name_is_str_slice(func.name) { return emit_builtin_str_slice(c) }
+        if name_is_starts_with(func.name) { return emit_builtin_starts_with(c) }
+        if name_is_str_concat(func.name) { return emit_builtin_str_concat(c) }
+        if name_is_str_from_bytes(func.name) { return emit_builtin_str_from_bytes(c) }
+        // M5: file I/O builtins
+        if name_is_read_file(func.name) { return emit_builtin_read_file(c) }
+        if name_is_write_file(func.name) { return emit_builtin_write_file(c) }
+        if name_is_file_size(func.name) { return emit_builtin_file_size(c) }
+        if name_is_sqrt(func.name) { return emit_builtin_sqrt(c) }
+        if name_is_print_f64(func.name) { return emit_builtin_print_f64(c) }
+        if name_is_exp(func.name) { return emit_builtin_exp(c) }
+        if name_is_log(func.name) { return emit_builtin_log(c) }
+        if name_is_sin(func.name) { return emit_builtin_sin(c) }
+        if name_is_cos(func.name) { return emit_builtin_cos(c) }
+        if name_is_assert(func.name) { return emit_builtin_assert(c) }
+    }
 
     // Sprint 38: Set compile strategy from IR function metadata
     c.current_strategy = func.compile_strategy
@@ -6071,29 +6082,32 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
     c.fn_offsets[fn_index as usize] = c.code.len
     c.symbols = symbol_data_add_name(c.symbols, fn_index, func.name.buf, func.name.len)
 
-    if name_is_print_int(func.name) { return emit_builtin_print_int(c) }
-    if name_is_print_char(func.name) { return emit_builtin_print_char(c) }
-    if name_is_print(func.name) { return emit_builtin_print_str(c) }
-    if name_is_get_arg_count(func.name) { return emit_builtin_get_arg_count(c) }
-    if name_is_get_arg(func.name) { return emit_builtin_get_arg(c) }
-    if name_is_str_len(func.name) { return emit_builtin_str_len(c) }
-    if name_is_str_char_at(func.name) { return emit_builtin_str_char_at(c) }
-    if name_is_str_eq(func.name) { return emit_builtin_str_eq(c) }
-    if name_is_str_slice(func.name) { return emit_builtin_str_slice(c) }
-    if name_is_starts_with(func.name) { return emit_builtin_starts_with(c) }
-    if name_is_str_concat(func.name) { return emit_builtin_str_concat(c) }
-    if name_is_read_file(func.name) { return emit_builtin_read_file(c) }
-    if name_is_write_file(func.name) { return emit_builtin_write_file(c) }
-    if name_is_file_size(func.name) { return emit_builtin_file_size(c) }
-    if name_is_sqrt(func.name) { return emit_builtin_sqrt(c) }
-    if name_is_print_f64(func.name) { return emit_builtin_print_f64(c) }
-    if name_is_exp(func.name) { return emit_builtin_exp(c) }
-    if name_is_log(func.name) { return emit_builtin_log(c) }
-    if name_is_sin(func.name) { return emit_builtin_sin(c) }
-    if name_is_cos(func.name) { return emit_builtin_cos(c) }
-    if name_is_assert(func.name) { return emit_builtin_assert(c) }
-    if name_is_heap_alloc(func.name) { emit_builtin_heap_alloc_into(&! c); return c }
-    if name_is_heap_free(func.name) { emit_builtin_heap_free_into(&! c); return c }
+    // Empty-stub builtins only — see native_v2_builtin_id_for_func_ref.
+    if func.instr_count == 0 {
+        if name_is_print_int(func.name) { return emit_builtin_print_int(c) }
+        if name_is_print_char(func.name) { return emit_builtin_print_char(c) }
+        if name_is_print(func.name) { return emit_builtin_print_str(c) }
+        if name_is_get_arg_count(func.name) { return emit_builtin_get_arg_count(c) }
+        if name_is_get_arg(func.name) { return emit_builtin_get_arg(c) }
+        if name_is_str_len(func.name) { return emit_builtin_str_len(c) }
+        if name_is_str_char_at(func.name) { return emit_builtin_str_char_at(c) }
+        if name_is_str_eq(func.name) { return emit_builtin_str_eq(c) }
+        if name_is_str_slice(func.name) { return emit_builtin_str_slice(c) }
+        if name_is_starts_with(func.name) { return emit_builtin_starts_with(c) }
+        if name_is_str_concat(func.name) { return emit_builtin_str_concat(c) }
+        if name_is_read_file(func.name) { return emit_builtin_read_file(c) }
+        if name_is_write_file(func.name) { return emit_builtin_write_file(c) }
+        if name_is_file_size(func.name) { return emit_builtin_file_size(c) }
+        if name_is_sqrt(func.name) { return emit_builtin_sqrt(c) }
+        if name_is_print_f64(func.name) { return emit_builtin_print_f64(c) }
+        if name_is_exp(func.name) { return emit_builtin_exp(c) }
+        if name_is_log(func.name) { return emit_builtin_log(c) }
+        if name_is_sin(func.name) { return emit_builtin_sin(c) }
+        if name_is_cos(func.name) { return emit_builtin_cos(c) }
+        if name_is_assert(func.name) { return emit_builtin_assert(c) }
+        if name_is_heap_alloc(func.name) { emit_builtin_heap_alloc_into(&! c); return c }
+        if name_is_heap_free(func.name) { emit_builtin_heap_free_into(&! c); return c }
+    }
 
     c.current_strategy = func.compile_strategy
 
@@ -8106,28 +8120,31 @@ fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_f
     native_compiler_set_fn_offset(nc, fn_index, function_offset)
     (*nc).symbols = symbol_data_add_name((*nc).symbols, fn_index, func.name.buf, func.name.len)
 
-    if name_is_print_int(func.name) { (*nc) = emit_builtin_print_int((*nc)); return }
-    if name_is_print_char(func.name) { (*nc) = emit_builtin_print_char((*nc)); return }
-    if name_is_print(func.name) { (*nc) = emit_builtin_print_str((*nc)); return }
-    if name_is_get_arg_count(func.name) { (*nc) = emit_builtin_get_arg_count((*nc)); return }
-    if name_is_get_arg(func.name) { (*nc) = emit_builtin_get_arg((*nc)); return }
-    if name_is_str_len(func.name) { (*nc) = emit_builtin_str_len((*nc)); return }
-    if name_is_str_eq(func.name) { (*nc) = emit_builtin_str_eq((*nc)); return }
-    if name_is_str_slice(func.name) { (*nc) = emit_builtin_str_slice((*nc)); return }
-    if name_is_starts_with(func.name) { (*nc) = emit_builtin_starts_with((*nc)); return }
-    if name_is_str_concat(func.name) { (*nc) = emit_builtin_str_concat((*nc)); return }
-    if name_is_read_file(func.name) { (*nc) = emit_builtin_read_file((*nc)); return }
-    if name_is_write_file(func.name) { (*nc) = emit_builtin_write_file((*nc)); return }
-    if name_is_file_size(func.name) { (*nc) = emit_builtin_file_size((*nc)); return }
-    if name_is_sqrt(func.name) { (*nc) = emit_builtin_sqrt((*nc)); return }
-    if name_is_print_f64(func.name) { (*nc) = emit_builtin_print_f64((*nc)); return }
-    if name_is_exp(func.name) { (*nc) = emit_builtin_exp((*nc)); return }
-    if name_is_log(func.name) { (*nc) = emit_builtin_log((*nc)); return }
-    if name_is_sin(func.name) { (*nc) = emit_builtin_sin((*nc)); return }
-    if name_is_cos(func.name) { (*nc) = emit_builtin_cos((*nc)); return }
-    if name_is_assert(func.name) { (*nc) = emit_builtin_assert((*nc)); return }
-    if name_is_heap_alloc(func.name) { emit_builtin_heap_alloc_into(nc); return }
-    if name_is_heap_free(func.name) { emit_builtin_heap_free_into(nc); return }
+    // Empty-stub builtins only — see native_v2_builtin_id_for_func_ref.
+    if func.instr_count == 0 {
+        if name_is_print_int(func.name) { (*nc) = emit_builtin_print_int((*nc)); return }
+        if name_is_print_char(func.name) { (*nc) = emit_builtin_print_char((*nc)); return }
+        if name_is_print(func.name) { (*nc) = emit_builtin_print_str((*nc)); return }
+        if name_is_get_arg_count(func.name) { (*nc) = emit_builtin_get_arg_count((*nc)); return }
+        if name_is_get_arg(func.name) { (*nc) = emit_builtin_get_arg((*nc)); return }
+        if name_is_str_len(func.name) { (*nc) = emit_builtin_str_len((*nc)); return }
+        if name_is_str_eq(func.name) { (*nc) = emit_builtin_str_eq((*nc)); return }
+        if name_is_str_slice(func.name) { (*nc) = emit_builtin_str_slice((*nc)); return }
+        if name_is_starts_with(func.name) { (*nc) = emit_builtin_starts_with((*nc)); return }
+        if name_is_str_concat(func.name) { (*nc) = emit_builtin_str_concat((*nc)); return }
+        if name_is_read_file(func.name) { (*nc) = emit_builtin_read_file((*nc)); return }
+        if name_is_write_file(func.name) { (*nc) = emit_builtin_write_file((*nc)); return }
+        if name_is_file_size(func.name) { (*nc) = emit_builtin_file_size((*nc)); return }
+        if name_is_sqrt(func.name) { (*nc) = emit_builtin_sqrt((*nc)); return }
+        if name_is_print_f64(func.name) { (*nc) = emit_builtin_print_f64((*nc)); return }
+        if name_is_exp(func.name) { (*nc) = emit_builtin_exp((*nc)); return }
+        if name_is_log(func.name) { (*nc) = emit_builtin_log((*nc)); return }
+        if name_is_sin(func.name) { (*nc) = emit_builtin_sin((*nc)); return }
+        if name_is_cos(func.name) { (*nc) = emit_builtin_cos((*nc)); return }
+        if name_is_assert(func.name) { (*nc) = emit_builtin_assert((*nc)); return }
+        if name_is_heap_alloc(func.name) { emit_builtin_heap_alloc_into(nc); return }
+        if name_is_heap_free(func.name) { emit_builtin_heap_free_into(nc); return }
+    }
 
     (*nc).current_strategy = func.compile_strategy
     native_v2_run_machine_regalloc_mut(nc, machine_func)
