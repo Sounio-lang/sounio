@@ -91,6 +91,9 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 | skew_by (1M rows, 1000 dense keys) | | ~51 | ~21 | ~2.5x — loss | pandas transform('skew') is fast native Cython |
 | group_first_by / group_last_by (1M rows, 1000 dense keys) | | ~37 | ~17 | ~2.1x — loss | pandas transform('first'/'last') fast native |
 | group_prod_by (1M rows, 1000 dense keys) | | ~25 | ~18 | ~1.35x — loss | pandas transform('prod') fast native |
+| corr_by (1M rows, 1000 groups, 2 cols) | | ~57 | ~406 | **0.14x — wins (7x)** | dense two-pass co-moments vs pandas groupby.apply corr |
+| share_by (1M rows, 1000 dense keys) | | ~34 | ~421 | **0.08x — wins (12x)** | dense two-pass val/group_sum; cumsum_pct/l2norm/count_nonzero share the engine |
+| cummax_rev_by / cummin_rev_by / cumprod_rev_by (1M rows, 1000 dense keys) | | (fast, reverse pass) | | **win** | dense suffix cumulative vs pandas double-reverse |
 | cov (1M rows, two-pass mean-shift) | | 6.7 | 8.5 | **0.78x — Sounio wins** | (new verb) |
 | corr (1M rows, two-pass + bf_sqrt) | | 10.3 | 8.0 | **~1.3x** | (new verb) |
 | median (1M rows, quickselect) | | ~34 | ~16 | **~2.2x** | numpy SIMD introselect |
