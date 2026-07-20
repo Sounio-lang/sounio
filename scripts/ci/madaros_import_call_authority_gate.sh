@@ -71,6 +71,8 @@ done
 binding_shape="$(sed -n '/^pub struct LowerExternBindingHandle {/,/^}/p' "$LOWER")"
 collector_shape="$(sed -n '/^pub fn module_frontend_collect_ast_closure_programs_into(/,/^\/\/ Validate that the collection generation/p' "$FRONTEND")"
 authority_shape="$(sed -n '/^fn module_frontend_prepare_import_authority(/,/^fn module_frontend_assign_function_provenance(/p' "$FRONTEND")"
+stub_shape="$(sed -n '/^fn module_frontend_prepend_used_checker_stubs(/,/^fn module_frontend_drop_item_prefix(/p' "$FRONTEND")"
+strip_shape="$(sed -n '/^fn module_frontend_strip_import_authority_stubs(/,/^fn module_frontend_prepare_import_authority(/p' "$FRONTEND")"
 compile_shape="$(sed -n '/^pub fn module_frontend_compile_collected_to_file(/,/^pub fn module_frontend_imported_native_compile(/p' "$FRONTEND")"
 lower_binding_shape="$(sed -n '/^fn lowerer_extern_binding_index(/,/^fn lowerer_preseed_external_impl_method_items_mut(/p' "$LOWER")"
 
@@ -101,6 +103,15 @@ grep -Fq 'str_char_at(call_path, qualifier_len) != 58' "$FRONTEND" || fail quali
 grep -Fq 'module_frontend_prepend_used_checker_stubs(' <<<"$authority_shape" ||
   fail checker_stub_adapter_missing
 grep -Fq 'visibility_is_pub((*item).visibility)' "$FRONTEND" || fail checker_stub_public_guard_missing
+grep -Fq '(*programs)[caller_module_id as usize].items = rewritten_items' <<<"$authority_shape" ||
+  fail authority_rewrite_not_field_scoped
+grep -Fq '(*programs)[caller_module_id as usize].items = Some(Box::new(ItemList {' <<<"$stub_shape" ||
+  fail checker_stub_prepend_not_field_scoped
+grep -Fq '(*programs)[i as usize].items = module_frontend_drop_item_prefix(items, count)' <<<"$strip_shape" ||
+  fail checker_stub_strip_not_field_scoped
+if grep -Eq 'var (program|caller) = \(\*programs\)' <<<"${authority_shape}${stub_shape}${strip_shape}"; then
+  fail authority_whole_program_write_reintroduced
+fi
 grep -Fq 'MADAROS_IMPORT_AUTHORITY_REFUSAL schema=1 global_unique_fallback=0' <<<"$authority_shape" ||
   fail refusal_receipt_missing
 grep -Fq 'MADAROS_IMPORT_AUTHORITY_RECEIPT schema=1 modules=' <<<"$authority_shape" ||
