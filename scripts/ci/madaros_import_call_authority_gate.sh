@@ -87,6 +87,8 @@ grep -Fq '(*callee).kind == ExprKind::ExprPath' "$FRONTEND" || fail qualified_pa
 grep -Fq 'rewritten.kind = ExprKind::ExprIdent' "$FRONTEND" || fail qualified_path_rewrite_missing
 grep -Fq 'rewritten.name = make_name(MF_EXTERN_BINDING_LOCAL_NAMES[binding_index as usize])' "$FRONTEND" ||
   fail qualified_path_exact_local_name_missing
+grep -Fq '(*qualifier_path_text) = requested_import' "$FRONTEND" ||
+  fail qualifier_text_not_derived_from_authored_import
 for sidecar in \
   MF_EXTERN_BINDING_LOCAL_NAMES \
   MF_EXTERN_BINDING_EXPORT_NAMES \
