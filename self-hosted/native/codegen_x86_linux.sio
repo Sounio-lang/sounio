@@ -2726,26 +2726,65 @@ fn native_v2_emit_gc_empty_frame_reset(nc: NativeCompiler) -> NativeCompiler wit
     c
 }
 
+// Hybrid base resolution (issue #919):
+//   handle id  ∈ [1, capacity)  → table lookup → object base
+//   raw pointer ≥ capacity      → already an object base (unboxed small value)
+// Unboxed ≤16 B value structs return the raw object base so they never consume
+// a handle-table slot; field load/store must accept both encodings.
 fn native_v2_resolve_handle_to_object_base_rax(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
     c.code = emit_mov_rbx_rax(c.code)
+    c.code = emit_mov_rax_imm(c.code, native_v2_handle_raw_ptr_threshold())
+    c.code = emit_cmp_rbx_rax(c.code)
+    c.code = emit_setae_al(c.code)
+    c.code = emit_movzx_rax_al(c.code)
+    c.code = emit_test_rax_rax(c.code)
+    let raw_jnz = c.code.len
+    c.code = emit_jnz_rel32(c.code)
+
+    c.code = emit_mov_rax_rbx(c.code)
     c.code = emit_imul_rbx_rbx_imm8(c.code, native_v2_handle_entry_size())
     c.code = emit_mov_reg_reg(c.code, 7, 3)
     c = emit_load_runtime_context_field_rax(c, runtime_context_field_handle_table_base())
     c.code = emit_mov_reg_reg(c.code, 3, 7)
     c.code = emit_add_rax_rbx(c.code)
     c.code = emit_load_rax_mem_rax_disp32(c.code, native_v2_handle_entry_field_object_base())
+    let done_jmp = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+
+    let raw_target = c.code.len
+    c.code = patch_u32_le(c.code, raw_jnz + 2, raw_target - (raw_jnz + 6))
+    c.code = emit_mov_rax_rbx(c.code)
+    let done_target = c.code.len
+    c.code = patch_u32_le(c.code, done_jmp + 1, done_target - (done_jmp + 5))
     c
 }
 
 fn native_v2_resolve_handle_to_object_base_rax_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_mov_rbx_rax(nc)
+    nc_emit_mov_rax_imm(nc, native_v2_handle_raw_ptr_threshold())
+    nc_emit_cmp_rbx_rax(nc)
+    nc_emit_setae_al(nc)
+    nc_emit_movzx_rax_al(nc)
+    nc_emit_test_rax_rax(nc)
+    let raw_jnz = (*nc).code.len
+    nc_emit_jnz_rel32(nc)
+
+    nc_emit_mov_rax_rbx(nc)
     nc_emit_imul_rbx_rbx_imm8(nc, native_v2_handle_entry_size())
     nc_emit_mov_reg_reg(nc, 7, 3)
     emit_load_runtime_context_field_rax_into(nc, runtime_context_field_handle_table_base())
     nc_emit_mov_reg_reg(nc, 3, 7)
     nc_emit_add_rax_rbx(nc)
     nc_emit_load_rax_mem_rax_disp32(nc, native_v2_handle_entry_field_object_base())
+    let done_jmp = (*nc).code.len
+    nc_emit_jmp_rel32(nc)
+
+    let raw_target = (*nc).code.len
+    nc_patch_u32_le(nc, raw_jnz + 2, raw_target - (raw_jnz + 6))
+    nc_emit_mov_rax_rbx(nc)
+    let done_target = (*nc).code.len
+    nc_patch_u32_le(nc, done_jmp + 1, done_target - (done_jmp + 5))
 }
 
 fn native_data_add_u64(st: StringTable, value: i64) -> StringTable with Mut, Panic, Div {
@@ -5626,8 +5665,9 @@ fn native_v2_emit_machine_instr(nc: NativeCompiler, instr: MachineInstr) -> Nati
     if instr.opcode == MIR_OP_ALLOC {
         let payload_size = instr.src1.value
         let total_size = payload_size + native_v2_object_header_size()
-        let header_slots = native_v2_object_header_size() / 8
-        let alloc_retry_target = c.code.len
+        // MIR already carries the resolved payload size; ≤16 B means a SysV
+        // register-pair value struct (Rational/Box). Unbox: no handle slot.
+        let unboxed = payload_size > 0 && payload_size <= 16
         c = emit_load_runtime_context_field_rax(c, runtime_context_field_heap_cursor())
         c.code = emit_mov_rdx_rax(c.code)
         c.code = emit_mov_reg_imm(c.code, 1, total_size)
@@ -5642,6 +5682,32 @@ fn native_v2_emit_machine_instr(nc: NativeCompiler, instr: MachineInstr) -> Nati
         c.code = emit_test_rax_rax(c.code)
         let heap_slow_jnz = c.code.len
         c.code = emit_jnz_rel32(c.code)
+
+        if unboxed {
+            c.code = emit_mov_reg_reg(c.code, 0, 1)
+            c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_cursor())
+            c.code = emit_mov_rax_rdx(c.code)
+            c.code = emit_mov_rbx_rax(c.code)
+            c.code = emit_mov_rax_imm(c.code, instr.aux.value)
+            c.code = emit_store_rax_mem_rbx_disp32(c.code, native_v2_object_header_field_descriptor_id())
+            c.code = emit_mov_rax_imm(c.code, payload_size)
+            c.code = emit_store_rax_mem_rbx_disp32(c.code, native_v2_object_header_field_payload_size())
+            c.code = emit_xor_rax_rax(c.code)
+            c.code = emit_store_rax_mem_rbx_disp32(c.code, native_v2_object_header_field_flags())
+            c.code = emit_store_rax_mem_rbx_disp32(c.code, native_v2_object_header_field_handle_id())
+            c.code = emit_mov_rax_rdx(c.code)
+            let done_jmp_u = c.code.len
+            c.code = emit_jmp_rel32(c.code)
+
+            let heap_slow_path_u = c.code.len
+            c.code = patch_u32_le(c.code, heap_slow_jnz + 2, heap_slow_path_u - (heap_slow_jnz + 6))
+            c = native_v2_emit_gc_request_metadata(c, total_size, native_v2_gc_reason_heap_limit())
+            c.code = emit_exit(c.code, 181)
+
+            let done_target_u = c.code.len
+            c.code = patch_u32_le(c.code, done_jmp_u + 1, done_target_u - (done_jmp_u + 5))
+            return native_v2_store_rax_to_temp(c, instr.dst.value)
+        }
 
         c = emit_load_runtime_context_field_rax(c, runtime_context_field_handle_count())
         c.code = emit_mov_rbx_rax(c.code)
@@ -5693,45 +5759,16 @@ fn native_v2_emit_machine_instr(nc: NativeCompiler, instr: MachineInstr) -> Nati
         let done_jmp = c.code.len
         c.code = emit_jmp_rel32(c.code)
 
+        // Fail closed: no empty-frame reset (live roots not precisely mapped).
         let heap_slow_path = c.code.len
         c.code = patch_u32_le(c.code, heap_slow_jnz + 2, heap_slow_path - (heap_slow_jnz + 6))
         c = native_v2_emit_gc_request_metadata(c, total_size, native_v2_gc_reason_heap_limit())
-        c = emit_load_runtime_context_field_rax(c, runtime_context_field_pin_count())
-        c.code = emit_test_rax_rax(c.code)
-        let heap_pinned_jnz = c.code.len
-        c.code = emit_jnz_rel32(c.code)
-        c = native_v2_emit_current_frame_live_probe(c)
-        c.code = emit_test_rax_rax(c.code)
-        let heap_live_jnz = c.code.len
-        c.code = emit_jnz_rel32(c.code)
-        c = native_v2_emit_gc_empty_frame_reset(c)
-        let heap_retry_jmp = c.code.len
-        c.code = emit_jmp_rel32(c.code)
-        let heap_fail_exit = c.code.len
-        c.code = patch_u32_le(c.code, heap_pinned_jnz + 2, heap_fail_exit - (heap_pinned_jnz + 6))
-        c.code = patch_u32_le(c.code, heap_live_jnz + 2, heap_fail_exit - (heap_live_jnz + 6))
         c.code = emit_exit(c.code, 181)
-        c.code = patch_u32_le(c.code, heap_retry_jmp + 1, alloc_retry_target - (heap_retry_jmp + 5))
 
         let handle_slow_path = c.code.len
         c.code = patch_u32_le(c.code, handle_slow_jnz + 2, handle_slow_path - (handle_slow_jnz + 6))
         c = native_v2_emit_gc_request_metadata(c, total_size, native_v2_gc_reason_handle_table_full())
-        c = emit_load_runtime_context_field_rax(c, runtime_context_field_pin_count())
-        c.code = emit_test_rax_rax(c.code)
-        let handle_pinned_jnz = c.code.len
-        c.code = emit_jnz_rel32(c.code)
-        c = native_v2_emit_current_frame_live_probe(c)
-        c.code = emit_test_rax_rax(c.code)
-        let handle_live_jnz = c.code.len
-        c.code = emit_jnz_rel32(c.code)
-        c = native_v2_emit_gc_empty_frame_reset(c)
-        let handle_retry_jmp = c.code.len
-        c.code = emit_jmp_rel32(c.code)
-        let handle_fail_exit = c.code.len
-        c.code = patch_u32_le(c.code, handle_pinned_jnz + 2, handle_fail_exit - (handle_pinned_jnz + 6))
-        c.code = patch_u32_le(c.code, handle_live_jnz + 2, handle_fail_exit - (handle_live_jnz + 6))
         c.code = emit_exit(c.code, 182)
-        c.code = patch_u32_le(c.code, handle_retry_jmp + 1, alloc_retry_target - (handle_retry_jmp + 5))
 
         let done_target = c.code.len
         c.code = patch_u32_le(c.code, done_jmp + 1, done_target - (done_jmp + 5))
@@ -6365,34 +6402,15 @@ fn nc_emit_core_float_binop_into(nc: &! NativeCompiler, op: BinaryOp) -> bool wi
     false
 }
 
-fn nc_core_emit_empty_frame_gc_reset_into(nc: &! NativeCompiler) with Mut, Panic, Div {
-    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_heap_base())
-    emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_cursor())
-    emit_store_runtime_context_imm_into(nc, runtime_context_field_handle_count(), 0)
-    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_collector_epoch())
-    nc_emit_mov_reg_imm(nc, 1, 1)
-    nc_emit_add_reg_reg(nc, 0, 1)
-    emit_store_rax_runtime_context_field_into(nc, runtime_context_field_collector_epoch())
-    emit_store_runtime_context_imm_into(nc, runtime_context_field_last_gc_stats(), 1)
-}
-
-fn nc_core_emit_alloc_retry_or_exit_into(nc: &! NativeCompiler, slow_jnz: i64, retry_target: i64, fail_code: i64) with Mut, Panic, Div {
+// Fail closed on allocation exhaustion (issue #919).
+// Core-IR frames do not publish precise live-root maps. Recycling the monotonic
+// arena / handle table under a false "empty frame" probe retargets handles that
+// remain live in callers (silent wrong values / SEGV). Until a collector can
+// prove every live root is traced, STOP with a dedicated exit code.
+fn nc_core_emit_alloc_fail_into(nc: &! NativeCompiler, slow_jnz: i64, fail_code: i64) with Mut, Panic, Div {
     let slow_path = (*nc).code.len
     nc_patch_u32_le(nc, slow_jnz + 2, slow_path - (slow_jnz + 6))
-
-    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_pin_count())
-    nc_emit_test_rax_rax(nc)
-    let pinned_jnz = (*nc).code.len
-    nc_emit_jnz_rel32(nc)
-
-    nc_core_emit_empty_frame_gc_reset_into(nc)
-    let retry_jmp = (*nc).code.len
-    nc_emit_jmp_rel32(nc)
-
-    let fail_exit = (*nc).code.len
-    nc_patch_u32_le(nc, pinned_jnz + 2, fail_exit - (pinned_jnz + 6))
     nc_emit_exit_code(nc, fail_code)
-    nc_patch_u32_le(nc, retry_jmp + 1, retry_target - (retry_jmp + 5))
 }
 
 fn nc_core_emit_alloc_into(nc: &! NativeCompiler, dst: i64, type_tag: i64, elem_count: i64) -> bool with Mut, Panic, Div {
@@ -6404,7 +6422,11 @@ fn nc_core_emit_alloc_into(nc: &! NativeCompiler, dst: i64, type_tag: i64, elem_
         return false
     }
 
-    let alloc_retry_target = (*nc).code.len
+    // ≤16 B value structs (SysV two-register return): heap-bump only, return the
+    // raw object base. No handle-table slot — eliminates the 2^20 wrap trigger
+    // for Rational / Box / other two-int value returns (issue #919 root fix).
+    let unboxed = elem_count == 0 && native_v2_is_small_value_struct_tag(type_tag)
+
     emit_load_runtime_context_field_rax_into(nc, runtime_context_field_heap_cursor())
     nc_emit_mov_rdx_rax(nc)
     nc_emit_mov_reg_imm(nc, 1, total_size)
@@ -6419,6 +6441,33 @@ fn nc_core_emit_alloc_into(nc: &! NativeCompiler, dst: i64, type_tag: i64, elem_
     nc_emit_test_rax_rax(nc)
     let heap_slow_jnz = (*nc).code.len
     nc_emit_jnz_rel32(nc)
+
+    if unboxed {
+        // Fast path: bump cursor, stamp header with handle_id=0, return object base.
+        nc_emit_mov_reg_reg(nc, 0, 6)
+        emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_cursor())
+
+        nc_emit_mov_rax_rdx(nc)
+        nc_emit_mov_rbx_rax(nc)
+        nc_emit_mov_rax_imm(nc, descriptor_id)
+        nc_emit_store_rax_mem_rbx_disp32(nc, native_v2_object_header_field_descriptor_id())
+        nc_emit_mov_rax_imm(nc, payload_size)
+        nc_emit_store_rax_mem_rbx_disp32(nc, native_v2_object_header_field_payload_size())
+        nc_emit_xor_rax_rax(nc)
+        nc_emit_store_rax_mem_rbx_disp32(nc, native_v2_object_header_field_flags())
+        nc_emit_store_rax_mem_rbx_disp32(nc, native_v2_object_header_field_handle_id())
+        // rax = object base (raw pointer encoding for hybrid resolve)
+        nc_emit_mov_rax_rdx(nc)
+        let done_jmp_u = (*nc).code.len
+        nc_emit_jmp_rel32(nc)
+
+        nc_core_emit_alloc_fail_into(nc, heap_slow_jnz, 181)
+
+        let done_target_u = (*nc).code.len
+        nc_patch_u32_le(nc, done_jmp_u + 1, done_target_u - (done_jmp_u + 5))
+        nc_core_store_rax_to_temp(nc, dst)
+        return true
+    }
 
     emit_load_runtime_context_field_rax_into(nc, runtime_context_field_handle_count())
     nc_emit_mov_rbx_rax(nc)
@@ -6478,8 +6527,8 @@ fn nc_core_emit_alloc_into(nc: &! NativeCompiler, dst: i64, type_tag: i64, elem_
     let done_jmp = (*nc).code.len
     nc_emit_jmp_rel32(nc)
 
-    nc_core_emit_alloc_retry_or_exit_into(nc, heap_slow_jnz, alloc_retry_target, 181)
-    nc_core_emit_alloc_retry_or_exit_into(nc, handle_slow_jnz, alloc_retry_target, 182)
+    nc_core_emit_alloc_fail_into(nc, heap_slow_jnz, 181)
+    nc_core_emit_alloc_fail_into(nc, handle_slow_jnz, 182)
 
     let done_target = (*nc).code.len
     nc_patch_u32_le(nc, done_jmp + 1, done_target - (done_jmp + 5))
