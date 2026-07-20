@@ -67,6 +67,7 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 | nth_by(k) (1M rows, 1000 groups, k=2) | | ~45 | ~46 | **0.98x — parity/win** | counting-sort + positional pick, any key/any k |
 | transform_mean/sum/min/max/count_by (1M rows, 1000 dense keys) | | ~10 | ~23 | **0.43x — Sounio wins (2.3x)** | dense direct-index broadcast, no hashing |
 | transform_std_by (1M rows, 1000 dense keys) | | ~18 | ~20 | **0.93x — Sounio wins** | two-pass exact Σ(x-mean)² + bf_sqrt |
+| cummax_by / cummin_by (1M rows, 1000 dense keys) | | ~11 | ~19 | **0.59x — Sounio wins** | dense direct-index running extreme, row-aligned |
 | cov (1M rows, two-pass mean-shift) | | 6.7 | 8.5 | **0.78x — Sounio wins** | (new verb) |
 | corr (1M rows, two-pass + bf_sqrt) | | 10.3 | 8.0 | **~1.3x** | (new verb) |
 | median (1M rows, quickselect) | | ~34 | ~16 | **~2.2x** | numpy SIMD introselect |
