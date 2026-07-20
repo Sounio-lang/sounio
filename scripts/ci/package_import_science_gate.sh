@@ -5,8 +5,13 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 MADAROS="$ROOT_DIR/bin/madaros"
+RAW_MADAROS="${MADAROS_RAW_BIN:-}"
 if [[ ! -x "$MADAROS" ]]; then
   echo '[package-import-science] FAIL: Madaros launcher not found' >&2
+  exit 1
+fi
+if [[ -z "$RAW_MADAROS" || ! -x "$RAW_MADAROS" || "$(head -c 2 "$RAW_MADAROS" 2>/dev/null)" == '#!' ]]; then
+  echo '[package-import-science] FAIL: MADAROS_RAW_BIN must name an explicit current-source Madaros ELF' >&2
   exit 1
 fi
 if ! "$MADAROS" --version 2>&1 | grep -qF 'Madaros'; then
@@ -54,6 +59,7 @@ run_package_test() {
 }
 
 printf '[package-import-science] compiler=%s\n' "$MADAROS"
+printf '[package-import-science] raw=%s\n' "$RAW_MADAROS"
 "$MADAROS" --version
 printf '[package-import-science] stdlib=%s\n' "$SOUNIO_STDLIB_PATH"
 
