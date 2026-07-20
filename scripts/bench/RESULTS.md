@@ -102,6 +102,8 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 | zscore_pop_by (1M rows, 1000 dense keys) | | ~50 | ~718 | **0.07x — wins (14x)** | dense two-pass; cumsum_sq/cumsum_abs/cummax_abs share the batch |
 | ewm_by (1M rows, 1000 dense keys) | | ~35 | ~500 | **0.07x — wins (14x)** | dense per-group EWM recurrence vs pandas groupby.apply(ewm) |
 | weighted_var_by (1M rows, 1000 groups, 2 cols) | | ~37 | ~611 | **0.06x — wins (16x)** | dense; weighted_std/rss/rmse/skew_pop/kurt_pop/midrange/running_range/last_over_first share the batch |
+| count_above_mean_by (1M rows, 1000 dense keys) | | ~39 | ~504 | **0.08x — wins (13x)** | dense 3-pass; sign_sum/count_pos/frac_pos/max_abs/range_ratio + abs-cumulatives share the batch |
+| sign_sum_by (1M rows, 1000 dense keys) | | ~58 | ~420 | **0.14x — wins (7x)** | dense one-pass sign reduce |
 | cov (1M rows, two-pass mean-shift) | | 6.7 | 8.5 | **0.78x — Sounio wins** | (new verb) |
 | corr (1M rows, two-pass + bf_sqrt) | | 10.3 | 8.0 | **~1.3x** | (new verb) |
 | median (1M rows, quickselect) | | ~34 | ~16 | **~2.2x** | numpy SIMD introselect |
