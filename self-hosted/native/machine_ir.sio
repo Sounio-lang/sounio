@@ -17,6 +17,13 @@ pub let MIR_MAX_BLOCKS: i64 = 1
 pub let MIR_MAX_INSTRS: i64 = 4096
 pub let MIR_MAX_CALL_ARGS: i64 = 8
 
+// MIR_MAX_FLOAT_SLOTS history:
+//   256 (silent float-typing drop past wall) → 2048 (2026-07-20, align with NC_MAX_VREGS).
+// Indexed by IR stack-slot / vreg id during native_v2 legalize. Past 256, float
+// marks were silently dropped → int path for float arithmetic (wrong code / SEGV).
+// Mark overflow is fail-closed (supported=false, float_slot_capacity).
+pub let MIR_MAX_FLOAT_SLOTS: i64 = 2048
+
 pub let MIR_OPERAND_NONE: i64 = 0
 pub let MIR_OPERAND_GPR64: i64 = 1
 pub let MIR_OPERAND_STACK_SLOT: i64 = 2
@@ -126,7 +133,7 @@ pub struct MachineFunction {
     pub base_slot_count: i64,
     pub supported: bool,
     pub unsupported_detail: string,
-    pub is_float_slot: [i64; 256],
+    pub is_float_slot: [i64; 2048],
 }
 
 pub struct NativeV2LegalizeSummary {
@@ -262,7 +269,7 @@ pub fn machine_function_new() -> MachineFunction with Mut, Panic, Div {
         base_slot_count: 0,
         supported: true,
         unsupported_detail: "",
-        is_float_slot: [0; 256],
+        is_float_slot: [0; 2048],
     }
 }
 
@@ -881,7 +888,13 @@ pub fn native_v2_legalize_summary_from_machine(func: MachineFunction) -> NativeV
         return out
     }
 
-    var is_float_slot: [i64; 256] = [0; 256]
+    if func.base_slot_count > MIR_MAX_FLOAT_SLOTS || func.temp_count > MIR_MAX_FLOAT_SLOTS {
+        out.supported = false
+        out.unsupported_detail = "float_slot_capacity"
+        return out
+    }
+
+    var is_float_slot: [i64; 2048] = [0; 2048]
     var i: i64 = 0
     while i < func.blocks[0].instr_count {
         let instr = func.blocks[0].instrs[i as usize]
@@ -893,10 +906,10 @@ pub fn native_v2_legalize_summary_from_machine(func: MachineFunction) -> NativeV
         } else if instr.opcode == MIR_OP_PSEUDO_COPY {
             let src_slot = machine_instr_src1_value(instr)
             let dst_slot = machine_instr_dst_value(instr)
-            let src_is_float = if src_slot >= 0 && src_slot < 256 { is_float_slot[src_slot as usize] } else { 0 }
+            let src_is_float = if src_slot >= 0 && src_slot < MIR_MAX_FLOAT_SLOTS { is_float_slot[src_slot as usize] } else { 0 }
             if src_is_float == 1 {
                 out.legal_instr_count = out.legal_instr_count + 1
-                if dst_slot >= 0 && dst_slot < 256 {
+                if dst_slot >= 0 && dst_slot < MIR_MAX_FLOAT_SLOTS {
                     is_float_slot[dst_slot as usize] = 1
                 }
             } else {
@@ -905,12 +918,12 @@ pub fn native_v2_legalize_summary_from_machine(func: MachineFunction) -> NativeV
         } else if instr.opcode == MIR_OP_PSEUDO_BINOP {
             let s1 = machine_instr_src1_value(instr)
             let s2 = machine_instr_src2_value(instr)
-            let s1f = if s1 >= 0 && s1 < 256 { is_float_slot[s1 as usize] } else { 0 }
-            let s2f = if s2 >= 0 && s2 < 256 { is_float_slot[s2 as usize] } else { 0 }
+            let s1f = if s1 >= 0 && s1 < MIR_MAX_FLOAT_SLOTS { is_float_slot[s1 as usize] } else { 0 }
+            let s2f = if s2 >= 0 && s2 < MIR_MAX_FLOAT_SLOTS { is_float_slot[s2 as usize] } else { 0 }
             if s1f == 1 || s2f == 1 {
                 out.legal_instr_count = out.legal_instr_count + 1
                 let dslot = machine_instr_dst_value(instr)
-                if dslot >= 0 && dslot < 256 {
+                if dslot >= 0 && dslot < MIR_MAX_FLOAT_SLOTS {
                     if machine_instr_bin_op(instr) == BinaryOp::OpAdd || machine_instr_bin_op(instr) == BinaryOp::OpSub || machine_instr_bin_op(instr) == BinaryOp::OpMul || machine_instr_bin_op(instr) == BinaryOp::OpDiv {
                         is_float_slot[dslot as usize] = 1
                     }
@@ -960,17 +973,17 @@ pub fn native_v2_legalize_summary_from_machine(func: MachineFunction) -> NativeV
             out.legal_instr_count = out.legal_instr_count + 4
         } else if instr.opcode == MIR_OP_PSEUDO_LOAD_FLOAT {
             out.legal_instr_count = out.legal_instr_count + 1
-            if machine_instr_dst_value(instr) >= 0 && machine_instr_dst_value(instr) < 256 {
+            if machine_instr_dst_value(instr) >= 0 && machine_instr_dst_value(instr) < MIR_MAX_FLOAT_SLOTS {
                 is_float_slot[machine_instr_dst_value(instr) as usize] = 1
             }
         } else if instr.opcode == MIR_OP_PSEUDO_INT_TO_FLOAT {
             out.legal_instr_count = out.legal_instr_count + 1
-            if machine_instr_dst_value(instr) >= 0 && machine_instr_dst_value(instr) < 256 {
+            if machine_instr_dst_value(instr) >= 0 && machine_instr_dst_value(instr) < MIR_MAX_FLOAT_SLOTS {
                 is_float_slot[machine_instr_dst_value(instr) as usize] = 1
             }
         } else if instr.opcode == MIR_OP_PSEUDO_FLOAT_TO_INT {
             out.legal_instr_count = out.legal_instr_count + 1
-            if machine_instr_dst_value(instr) >= 0 && machine_instr_dst_value(instr) < 256 {
+            if machine_instr_dst_value(instr) >= 0 && machine_instr_dst_value(instr) < MIR_MAX_FLOAT_SLOTS {
                 is_float_slot[machine_instr_dst_value(instr) as usize] = 0
             }
         } else {
@@ -987,13 +1000,18 @@ pub fn native_v2_legalize_summary_from_machine(func: MachineFunction) -> NativeV
 pub fn native_v2_legalize_ir_summary_ref(func: &IrFunction) -> NativeV2LegalizeSummary with Mut, Panic, Div {
     var out = native_v2_legalize_summary_new()
     out.source_instr_count = (*func).instr_count
+    if (*func).reg_count > MIR_MAX_FLOAT_SLOTS {
+        out.supported = false
+        out.unsupported_detail = "float_slot_capacity"
+        return out
+    }
 
-    var is_float_slot: [i64; 256] = [0; 256]
+    var is_float_slot: [i64; 2048] = [0; 2048]
     var i: i64 = 0
     while i < (*func).instr_count {
         let instr = (*func).instrs[i as usize]
         if instr.op == IrOpcode::IrNop {
-            if instr.imm_flags == IR_FLOAT_REG_MARKER_FLAG && instr.dst >= 0 && instr.dst < 256 {
+            if instr.imm_flags == IR_FLOAT_REG_MARKER_FLAG && instr.dst >= 0 && instr.dst < MIR_MAX_FLOAT_SLOTS {
                 is_float_slot[instr.dst as usize] = 1
             }
             i = i + 1
@@ -1013,10 +1031,10 @@ pub fn native_v2_legalize_ir_summary_ref(func: &IrFunction) -> NativeV2LegalizeS
         } else if instr.op == IrOpcode::IrCopy {
             let src_slot = instr.src1
             let dst_slot = instr.dst
-            let src_is_float = if src_slot >= 0 && src_slot < 256 { is_float_slot[src_slot as usize] } else { 0 }
+            let src_is_float = if src_slot >= 0 && src_slot < MIR_MAX_FLOAT_SLOTS { is_float_slot[src_slot as usize] } else { 0 }
             if src_is_float == 1 {
                 out.legal_instr_count = out.legal_instr_count + 1
-                if dst_slot >= 0 && dst_slot < 256 {
+                if dst_slot >= 0 && dst_slot < MIR_MAX_FLOAT_SLOTS {
                     is_float_slot[dst_slot as usize] = 1
                 }
             } else {
@@ -1025,13 +1043,13 @@ pub fn native_v2_legalize_ir_summary_ref(func: &IrFunction) -> NativeV2LegalizeS
         } else if instr.op == IrOpcode::IrBinOp {
             let s1 = instr.src1
             let s2 = instr.src2
-            let s1f = if s1 >= 0 && s1 < 256 { is_float_slot[s1 as usize] } else { 0 }
-            let s2f = if s2 >= 0 && s2 < 256 { is_float_slot[s2 as usize] } else { 0 }
+            let s1f = if s1 >= 0 && s1 < MIR_MAX_FLOAT_SLOTS { is_float_slot[s1 as usize] } else { 0 }
+            let s2f = if s2 >= 0 && s2 < MIR_MAX_FLOAT_SLOTS { is_float_slot[s2 as usize] } else { 0 }
             let s1f_marked = (instr.imm_flags / 2) & 1
             let s2f_marked = (instr.imm_flags / 4) & 1
             if s1f == 1 || s2f == 1 || s1f_marked == 1 || s2f_marked == 1 {
                 out.legal_instr_count = out.legal_instr_count + 1
-                if instr.dst >= 0 && instr.dst < 256 {
+                if instr.dst >= 0 && instr.dst < MIR_MAX_FLOAT_SLOTS {
                     if instr.bin_op == BinaryOp::OpAdd || instr.bin_op == BinaryOp::OpSub || instr.bin_op == BinaryOp::OpMul || instr.bin_op == BinaryOp::OpDiv {
                         is_float_slot[instr.dst as usize] = 1
                     }
@@ -1081,17 +1099,17 @@ pub fn native_v2_legalize_ir_summary_ref(func: &IrFunction) -> NativeV2LegalizeS
             out.legal_instr_count = out.legal_instr_count + 4
         } else if instr.op == IrOpcode::IrLoadFloat {
             out.legal_instr_count = out.legal_instr_count + 1
-            if instr.dst >= 0 && instr.dst < 256 {
+            if instr.dst >= 0 && instr.dst < MIR_MAX_FLOAT_SLOTS {
                 is_float_slot[instr.dst as usize] = 1
             }
         } else if instr.op == IrOpcode::IrIntToFloat {
             out.legal_instr_count = out.legal_instr_count + 1
-            if instr.dst >= 0 && instr.dst < 256 {
+            if instr.dst >= 0 && instr.dst < MIR_MAX_FLOAT_SLOTS {
                 is_float_slot[instr.dst as usize] = 1
             }
         } else if instr.op == IrOpcode::IrFloatToInt {
             out.legal_instr_count = out.legal_instr_count + 1
-            if instr.dst >= 0 && instr.dst < 256 {
+            if instr.dst >= 0 && instr.dst < MIR_MAX_FLOAT_SLOTS {
                 is_float_slot[instr.dst as usize] = 0
             }
         } else {
@@ -1119,7 +1137,7 @@ fn native_v2_reset_machine_function_out(out: &! MachineFunction, base_slots: i64
     (*out).supported = true
     (*out).unsupported_detail = ""
     var i: i64 = 0
-    while i < 256 {
+    while i < MIR_MAX_FLOAT_SLOTS {
         (*out).is_float_slot[i as usize] = 0
         i = i + 1
     }
@@ -1127,12 +1145,18 @@ fn native_v2_reset_machine_function_out(out: &! MachineFunction, base_slots: i64
 
 pub fn native_v2_lower_legal_function_from_ir_ref(func: &IrFunction, out: &! MachineFunction) with Mut, Panic, Div, Alloc {
     native_v2_reset_machine_function_out(out, (*func).reg_count, (*func).instr_count)
+    // Fail closed when IR vregs exceed the float-typing table (was silent wrong SSE/int mix).
+    if (*func).reg_count > MIR_MAX_FLOAT_SLOTS {
+        (*out).supported = false
+        (*out).unsupported_detail = "float_slot_capacity"
+        return
+    }
 
     var i: i64 = 0
     while i < (*func).instr_count {
         let ir_instr = (*func).instrs[i as usize]
         if ir_instr.op == IrOpcode::IrNop {
-            if ir_instr.imm_flags == IR_FLOAT_REG_MARKER_FLAG && ir_instr.dst >= 0 && ir_instr.dst < 256 {
+            if ir_instr.imm_flags == IR_FLOAT_REG_MARKER_FLAG && ir_instr.dst >= 0 && ir_instr.dst < MIR_MAX_FLOAT_SLOTS {
                 (*out).is_float_slot[ir_instr.dst as usize] = 1
             }
             i = i + 1
@@ -1159,10 +1183,10 @@ pub fn native_v2_lower_legal_function_from_ir_ref(func: &IrFunction, out: &! Mac
         } else if instr.opcode == MIR_OP_PSEUDO_COPY {
             let src_slot = machine_instr_src1_value(instr)
             let dst_slot = machine_instr_dst_value(instr)
-            let src_is_float = if src_slot >= 0 && src_slot < 256 { (*out).is_float_slot[src_slot as usize] } else { 0 }
+            let src_is_float = if src_slot >= 0 && src_slot < MIR_MAX_FLOAT_SLOTS { (*out).is_float_slot[src_slot as usize] } else { 0 }
             if src_is_float == 1 {
                 native_v2_emit_legal_instr_mut(out, native_v2_make_float_move(dst_slot, src_slot))
-                if dst_slot >= 0 && dst_slot < 256 {
+                if dst_slot >= 0 && dst_slot < MIR_MAX_FLOAT_SLOTS {
                     (*out).is_float_slot[dst_slot as usize] = 1
                 }
             } else {
@@ -1174,8 +1198,8 @@ pub fn native_v2_lower_legal_function_from_ir_ref(func: &IrFunction, out: &! Mac
         } else if instr.opcode == MIR_OP_PSEUDO_BINOP {
             let s1 = machine_instr_src1_value(instr)
             let s2 = machine_instr_src2_value(instr)
-            let s1f = if s1 >= 0 && s1 < 256 { (*out).is_float_slot[s1 as usize] } else { 0 }
-            let s2f = if s2 >= 0 && s2 < 256 { (*out).is_float_slot[s2 as usize] } else { 0 }
+            let s1f = if s1 >= 0 && s1 < MIR_MAX_FLOAT_SLOTS { (*out).is_float_slot[s1 as usize] } else { 0 }
+            let s2f = if s2 >= 0 && s2 < MIR_MAX_FLOAT_SLOTS { (*out).is_float_slot[s2 as usize] } else { 0 }
             let s1f_marked = ((*func).instrs[i as usize].imm_flags / 2) & 1
             let s2f_marked = ((*func).instrs[i as usize].imm_flags / 4) & 1
             let lhs_float = if s1f == 1 || s1f_marked == 1 { 1 } else { 0 }
@@ -1183,7 +1207,7 @@ pub fn native_v2_lower_legal_function_from_ir_ref(func: &IrFunction, out: &! Mac
             if lhs_float == 1 || rhs_float == 1 {
                 native_v2_emit_legal_instr_mut(out, native_v2_make_float_binop(machine_instr_dst_value(instr), s1, s2, machine_instr_bin_op(instr), lhs_float, rhs_float))
                 let dslot = machine_instr_dst_value(instr)
-                if dslot >= 0 && dslot < 256 {
+                if dslot >= 0 && dslot < MIR_MAX_FLOAT_SLOTS {
                     if machine_instr_bin_op(instr) == BinaryOp::OpAdd || machine_instr_bin_op(instr) == BinaryOp::OpSub || machine_instr_bin_op(instr) == BinaryOp::OpMul || machine_instr_bin_op(instr) == BinaryOp::OpDiv {
                         (*out).is_float_slot[dslot as usize] = 1
                     }
@@ -1299,17 +1323,17 @@ pub fn native_v2_lower_legal_function_from_ir_ref(func: &IrFunction, out: &! Mac
             native_v2_emit_legal_instr_mut(out, native_v2_make_index_store(base, idx, src))
         } else if instr.opcode == MIR_OP_PSEUDO_LOAD_FLOAT {
             native_v2_emit_legal_instr_mut(out, native_v2_make_load_float_rip(machine_instr_dst_value(instr), machine_instr_src1_value(instr)))
-            if machine_instr_dst_value(instr) >= 0 && machine_instr_dst_value(instr) < 256 {
+            if machine_instr_dst_value(instr) >= 0 && machine_instr_dst_value(instr) < MIR_MAX_FLOAT_SLOTS {
                 (*out).is_float_slot[machine_instr_dst_value(instr) as usize] = 1
             }
         } else if instr.opcode == MIR_OP_PSEUDO_INT_TO_FLOAT {
             native_v2_emit_legal_instr_mut(out, native_v2_make_int_to_float(machine_instr_dst_value(instr), machine_instr_src1_value(instr)))
-            if machine_instr_dst_value(instr) >= 0 && machine_instr_dst_value(instr) < 256 {
+            if machine_instr_dst_value(instr) >= 0 && machine_instr_dst_value(instr) < MIR_MAX_FLOAT_SLOTS {
                 (*out).is_float_slot[machine_instr_dst_value(instr) as usize] = 1
             }
         } else if instr.opcode == MIR_OP_PSEUDO_FLOAT_TO_INT {
             native_v2_emit_legal_instr_mut(out, native_v2_make_float_to_int(machine_instr_dst_value(instr), machine_instr_src1_value(instr)))
-            if machine_instr_dst_value(instr) >= 0 && machine_instr_dst_value(instr) < 256 {
+            if machine_instr_dst_value(instr) >= 0 && machine_instr_dst_value(instr) < MIR_MAX_FLOAT_SLOTS {
                 (*out).is_float_slot[machine_instr_dst_value(instr) as usize] = 0
             }
         }
@@ -1329,6 +1353,11 @@ pub fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction wit
     if !func.supported {
         out.supported = false
         out.unsupported_detail = func.unsupported_detail
+        return out
+    }
+    if func.base_slot_count > MIR_MAX_FLOAT_SLOTS || func.temp_count > MIR_MAX_FLOAT_SLOTS {
+        out.supported = false
+        out.unsupported_detail = "float_slot_capacity"
         return out
     }
 
@@ -1351,10 +1380,10 @@ pub fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction wit
             // Sprint 87: propagate float-ness for COPY
             let src_slot = machine_instr_src1_value(instr)
             let dst_slot = machine_instr_dst_value(instr)
-            let src_is_float = if src_slot >= 0 && src_slot < 256 { out.is_float_slot[src_slot as usize] } else { 0 }
+            let src_is_float = if src_slot >= 0 && src_slot < MIR_MAX_FLOAT_SLOTS { out.is_float_slot[src_slot as usize] } else { 0 }
             if src_is_float == 1 {
                 out = _emit_legal_byval(out, native_v2_make_float_move(dst_slot, src_slot))
-                if dst_slot >= 0 && dst_slot < 256 {
+                if dst_slot >= 0 && dst_slot < MIR_MAX_FLOAT_SLOTS {
                     out.is_float_slot[dst_slot as usize] = 1
                 }
             } else {
@@ -1367,12 +1396,12 @@ pub fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction wit
             // Sprint 87: check if either operand is a float slot → emit FLOAT_BINOP
             let s1 = machine_instr_src1_value(instr)
             let s2 = machine_instr_src2_value(instr)
-            let s1f = if s1 >= 0 && s1 < 256 { out.is_float_slot[s1 as usize] } else { 0 }
-            let s2f = if s2 >= 0 && s2 < 256 { out.is_float_slot[s2 as usize] } else { 0 }
+            let s1f = if s1 >= 0 && s1 < MIR_MAX_FLOAT_SLOTS { out.is_float_slot[s1 as usize] } else { 0 }
+            let s2f = if s2 >= 0 && s2 < MIR_MAX_FLOAT_SLOTS { out.is_float_slot[s2 as usize] } else { 0 }
             if s1f == 1 || s2f == 1 {
                 out = _emit_legal_byval(out, native_v2_make_float_binop(machine_instr_dst_value(instr), s1, s2, machine_instr_bin_op(instr), s1f, s2f))
                 let dslot = machine_instr_dst_value(instr)
-                if dslot >= 0 && dslot < 256 {
+                if dslot >= 0 && dslot < MIR_MAX_FLOAT_SLOTS {
                     if machine_instr_bin_op(instr) == BinaryOp::OpAdd || machine_instr_bin_op(instr) == BinaryOp::OpSub || machine_instr_bin_op(instr) == BinaryOp::OpMul || machine_instr_bin_op(instr) == BinaryOp::OpDiv {
                         out.is_float_slot[dslot as usize] = 1
                     }
@@ -1489,19 +1518,19 @@ pub fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction wit
         } else if instr.opcode == MIR_OP_PSEUDO_LOAD_FLOAT {
             // Sprint 87: float literal → LOAD_FLOAT_RIP stack slot
             out = _emit_legal_byval(out, native_v2_make_load_float_rip(machine_instr_dst_value(instr), machine_instr_src1_value(instr)))
-            if machine_instr_dst_value(instr) >= 0 && machine_instr_dst_value(instr) < 256 {
+            if machine_instr_dst_value(instr) >= 0 && machine_instr_dst_value(instr) < MIR_MAX_FLOAT_SLOTS {
                 out.is_float_slot[machine_instr_dst_value(instr) as usize] = 1
             }
         } else if instr.opcode == MIR_OP_PSEUDO_INT_TO_FLOAT {
             // Sprint 87: int stack slot → CVTSI2SD → float stack slot
             out = _emit_legal_byval(out, native_v2_make_int_to_float(machine_instr_dst_value(instr), machine_instr_src1_value(instr)))
-            if machine_instr_dst_value(instr) >= 0 && machine_instr_dst_value(instr) < 256 {
+            if machine_instr_dst_value(instr) >= 0 && machine_instr_dst_value(instr) < MIR_MAX_FLOAT_SLOTS {
                 out.is_float_slot[machine_instr_dst_value(instr) as usize] = 1
             }
         } else if instr.opcode == MIR_OP_PSEUDO_FLOAT_TO_INT {
             // Sprint 87: float stack slot → CVTTSD2SI → int stack slot
             out = _emit_legal_byval(out, native_v2_make_float_to_int(machine_instr_dst_value(instr), machine_instr_src1_value(instr)))
-            if machine_instr_dst_value(instr) >= 0 && machine_instr_dst_value(instr) < 256 {
+            if machine_instr_dst_value(instr) >= 0 && machine_instr_dst_value(instr) < MIR_MAX_FLOAT_SLOTS {
                 out.is_float_slot[machine_instr_dst_value(instr) as usize] = 0
             }
         } else if instr.opcode == MIR_OP_PSEUDO_LOAD_GLOBAL {
