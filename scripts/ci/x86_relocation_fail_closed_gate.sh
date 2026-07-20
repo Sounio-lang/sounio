@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 SOURCE="self-hosted/native/codegen_x86_linux.sio"
+RELOC_SOURCE="self-hosted/native/reloc.sio"
 FIXTURE="tests/fixtures/x86_relocation_fail_closed/policy_selftest.sio"
 MODE="${SOUNIO_X86_RELOC_GATE_MODE:-source}"
 
@@ -18,17 +19,18 @@ case "$MODE" in
   *) fail "invalid_mode_${MODE}" ;;
 esac
 
-for path in "$SOURCE" "$FIXTURE"; do
+for path in "$SOURCE" "$RELOC_SOURCE" "$FIXTURE"; do
   [[ -f "$path" ]] || fail "missing_${path//\//_}"
 done
 
-python3 - "$SOURCE" "$FIXTURE" <<'PY'
+python3 - "$SOURCE" "$RELOC_SOURCE" "$FIXTURE" <<'PY'
 from pathlib import Path
 import re
 import sys
 
-source_path, fixture_path = map(Path, sys.argv[1:])
+source_path, reloc_source_path, fixture_path = map(Path, sys.argv[1:])
 source = source_path.read_text(encoding="utf-8")
+reloc_source = reloc_source_path.read_text(encoding="utf-8")
 fixture = fixture_path.read_text(encoding="utf-8")
 
 
@@ -107,6 +109,26 @@ require(
     "legacy_append_overflow_not_marked",
 )
 require("t.count < 256" not in policy, "legacy_256_limit_still_authoritative")
+
+require(
+    "pub fn relocation_table_capacity() -> i64 { 4096 }" in reloc_source,
+    "public_relocation_capacity_marker_missing",
+)
+require(
+    reloc_source.count("idx >= 0 && idx < relocation_table_capacity()") == 4,
+    "public_relocation_append_paths_not_all_checked",
+)
+require(
+    reloc_source.count("t.count = relocation_table_capacity() + 1") == 4,
+    "public_relocation_overflow_not_all_marked",
+)
+require("t.count < 256" not in reloc_source, "public_legacy_256_limit_still_authoritative")
+reloc_apply = reloc_source[reloc_source.find("pub fn apply_relocations("):]
+require(
+    "table.count < 0 || table.count > relocation_table_capacity()" in reloc_apply,
+    "public_apply_overflow_guard_missing",
+)
+require("b.len = -1" in reloc_apply, "public_apply_refusal_sentinel_missing")
 
 bare_legacy_append = re.compile(r"(?<![A-Za-z0-9_])add_(?:call|rip|data_section)_reloc\(")
 require(
@@ -208,13 +230,17 @@ require(
     "fixture_does_not_call_policy_selftest",
 )
 require(
-    "X86_RELOCATION_FAIL_CLOSED_SELFTEST_PASS legacy=4096 flat=65536 rela=341 shared=pending_relocs_refused" in fixture,
+    "public_relocation_table_fail_closed" in fixture,
+    "fixture_does_not_call_public_relocation_policy",
+)
+require(
+    "X86_RELOCATION_FAIL_CLOSED_SELFTEST_PASS legacy_public=4096 legacy_x86=4096 flat=65536 rela=341 shared=pending_relocs_refused" in fixture,
     "fixture_pass_marker_missing",
 )
 
 print(
     "X86_RELOCATION_FAIL_CLOSED_SOURCE_RECEIPT "
-    "status=pass flat_capacity=65536 legacy_capacity=4096 "
+    "status=pass flat_capacity=65536 legacy_capacity=4096 public_legacy_capacity=4096 "
     "legacy_256_limit=removed rela_capacity=341 apply=checked "
     "overflow=fail_closed shared_pending=refused "
     "code_overflow_rc=19 relocation_refusal_rc=20 issue_919_abi=preserved"
@@ -272,8 +298,8 @@ selftest_rc=$?
 set -e
 [[ "$selftest_rc" -eq 0 ]] || fail "policy_selftest_rc_${selftest_rc}"
 grep -Fxq \
-  'X86_RELOCATION_FAIL_CLOSED_SELFTEST_PASS legacy=4096 flat=65536 rela=341 shared=pending_relocs_refused' \
+  'X86_RELOCATION_FAIL_CLOSED_SELFTEST_PASS legacy_public=4096 legacy_x86=4096 flat=65536 rela=341 shared=pending_relocs_refused' \
   "$WORK_DIR/policy-selftest.stdout" || fail "policy_selftest_marker_missing"
 
 printf '%s\n' \
-  "X86_RELOCATION_FAIL_CLOSED_PASS mode=runtime compiler_sha256=$compiler_sha256 policy_selftest_rc=0 flat_capacity=65536 legacy_capacity=4096 rela_capacity=341 relocation_refusal_rc=20 artifact_overflow=not_run merge_ready=1"
+  "X86_RELOCATION_FAIL_CLOSED_PASS mode=runtime compiler_sha256=$compiler_sha256 policy_selftest_rc=0 flat_capacity=65536 legacy_capacity=4096 public_legacy_capacity=4096 rela_capacity=341 relocation_refusal_rc=20 artifact_overflow=not_run merge_ready=1"
