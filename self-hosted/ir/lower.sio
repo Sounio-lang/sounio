@@ -2698,6 +2698,57 @@ fn lower_name_is_packed_string_producer(n: Name) -> bool with Div {
     false
 }
 
+// Builtins whose buffer argument is a native-v2 GC handle (index into the
+// handle table), NOT a raw *u8 and NOT a slot address. Canonical call shape is
+// handle-by-value: str_from_bytes(buf, n) / write_file(path, buf, n).
+// native-v2 OpRef is LEA of the stack slot holding that handle, so &buf passes
+// a pointer and resolve_handle SEGVs / writes garbage (#933 residual after #1247).
+// Call-site auto-unwrap (strip OpRef / load handle from a ref-typed slot) makes
+// &buf share the proven handle unpack path without changing the builtin body.
+// Do NOT add an unconditional deref inside the builtin — that broke the
+// canonical handle shape and Madaros self-host (see DATA_IO_TRILHA_B note).
+fn lower_name_is_handle_buf_builtin(n: Name) -> bool with Div {
+    if n.len == 14 {
+        // str_from_bytes
+        return n.buf[0] == 115 as i8 && n.buf[1] == 116 as i8 && n.buf[2] == 114 as i8
+            && n.buf[3] == 95 as i8 && n.buf[4] == 102 as i8 && n.buf[5] == 114 as i8
+            && n.buf[6] == 111 as i8 && n.buf[7] == 109 as i8 && n.buf[8] == 95 as i8
+            && n.buf[9] == 98 as i8 && n.buf[10] == 121 as i8 && n.buf[11] == 116 as i8
+            && n.buf[12] == 101 as i8 && n.buf[13] == 115 as i8
+    }
+    if n.len == 10 {
+        // write_file
+        return n.buf[0] == 119 as i8 && n.buf[1] == 114 as i8 && n.buf[2] == 105 as i8
+            && n.buf[3] == 116 as i8 && n.buf[4] == 101 as i8 && n.buf[5] == 95 as i8
+            && n.buf[6] == 102 as i8 && n.buf[7] == 105 as i8 && n.buf[8] == 108 as i8
+            && n.buf[9] == 101 as i8
+    }
+    false
+}
+
+// Buffer argument index for handle-buf builtins: str_from_bytes(buf,n) → 0,
+// write_file(path,buf,n) → 1. -1 when not a handle-buf builtin.
+fn lower_handle_buf_arg_index(n: Name) -> i64 with Div {
+    if n.len == 14 {
+        // str_from_bytes
+        let ok = n.buf[0] == 115 as i8 && n.buf[1] == 116 as i8 && n.buf[2] == 114 as i8
+            && n.buf[3] == 95 as i8 && n.buf[4] == 102 as i8 && n.buf[5] == 114 as i8
+            && n.buf[6] == 111 as i8 && n.buf[7] == 109 as i8 && n.buf[8] == 95 as i8
+            && n.buf[9] == 98 as i8 && n.buf[10] == 121 as i8 && n.buf[11] == 116 as i8
+            && n.buf[12] == 101 as i8 && n.buf[13] == 115 as i8
+        if ok { return 0 }
+    }
+    if n.len == 10 {
+        // write_file
+        let ok = n.buf[0] == 119 as i8 && n.buf[1] == 114 as i8 && n.buf[2] == 105 as i8
+            && n.buf[3] == 116 as i8 && n.buf[4] == 101 as i8 && n.buf[5] == 95 as i8
+            && n.buf[6] == 102 as i8 && n.buf[7] == 105 as i8 && n.buf[8] == 108 as i8
+            && n.buf[9] == 101 as i8
+        if ok { return 1 }
+    }
+    0 - 1
+}
+
 // Word-size integer type names for println/print scalar_kind=1 dispatch.
 // Broader than i64-only: i8/i16/i32/i64, u8/u16/u32/u64, isize/usize.
 // Does NOT include f32/f64 (kind 2), string, bool, or char — those keep their
@@ -7948,6 +7999,78 @@ impl Lowerer {
         }
     }
 
+    // Lower an expression to a native-v2 GC array handle (for str_from_bytes /
+    // write_file buffer args). Strips & / &! (OpRef is LEA of the handle slot)
+    // and loads once from a ref-typed local/param slot so both `buf` and `&buf`
+    // reach the builtin as a handle index.
+    fn lower_expr_as_array_handle_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if e.kind == ExprKind::ExprUnary {
+            if e.un_op == UnaryOp::OpRef || e.un_op == UnaryOp::OpRefMut {
+                match e.left {
+                    Some(inner) => {
+                        return self.lower_expr_as_array_handle_ref(&(*inner))
+                    }
+                    None => {}
+                }
+            }
+        }
+        if e.kind == ExprKind::ExprIdent {
+            if self.lookup_local_is_ref(e.name) {
+                let pair = self.lower_expr_ref(e)
+                var lo1 = pair.0
+                let src = pair.1
+                let pair_d = lo1.fresh_reg()
+                lo1 = pair_d.0
+                let dst = pair_d.1
+                // Slot holds the address of the caller's handle word; load it.
+                lo1 = lo1.emit(ir_unaryop(dst, UnaryOp::OpDeref, src))
+                return (lo1, dst)
+            }
+        }
+        self.lower_expr_ref(e)
+    }
+
+    // Like lower_expr_args_ref, but argument `buf_arg_idx` is forced through the
+    // handle-unwrap path (D2 residual #933 / #1247). Other args are unchanged.
+    fn lower_expr_args_handle_buf_ref(self, opt: &Option<Box<ExprList>>, buf_arg_idx: i64) -> LowerExprArgsResult with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        var current = opt
+        var regs: [i64; 64] = [0; 64]
+        var reg_count: i64 = 0
+        while true {
+            match *current {
+                Some(list) => {
+                    let pair_head = if reg_count == buf_arg_idx {
+                        lo.lower_expr_as_array_handle_ref(&(*list).head)
+                    } else {
+                        lo.lower_expr_ref(&(*list).head)
+                    }
+                    lo = pair_head.0
+                    if reg_count < 64 {
+                        regs[reg_count as usize] = pair_head.1
+                        reg_count = reg_count + 1
+                    } else {
+                        break
+                    }
+                    current = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        if reg_count <= 0 {
+            let empty = IrRegList { head: 0, tail: None }
+            LowerExprArgsResult { lowerer: lo, regs: empty, count: 0 }
+        } else {
+            var idx = reg_count - 1
+            var args = IrRegList { head: regs[idx as usize], tail: None }
+            while idx > 0 {
+                idx = idx - 1
+                args = IrRegList { head: regs[idx as usize], tail: Some(Box::new(args)) }
+            }
+            LowerExprArgsResult { lowerer: lo, regs: args, count: reg_count }
+        }
+    }
+
     fn lower_expr_args(self, opt: Option<Box<ExprList>>) -> LowerExprArgsResult with Mut, Panic, Div, Alloc, IO {
         self.lower_expr_args_ref(&opt)
     }
@@ -9389,7 +9512,15 @@ impl Lowerer {
         if hof_closure_local_fn >= 0 && lo1.lower_function_is_transparent_hof(fn_id) {
             return lo1.lower_hof_captured_closure_local_call(hof_closure_local_fn, callee_name, &e.args)
         }
-        let pair_args: LowerExprArgsResult = lo1.lower_expr_args_ref(&e.args)
+        // D2 residual (#933 after #1247): str_from_bytes / write_file expect a GC
+        // handle by value. Auto-unwrap &buf / &!buf / ref-typed slots so both
+        // shapes share the handle unpack path (no builtin-body always-deref).
+        let handle_buf_idx = lower_handle_buf_arg_index(callee_name)
+        let pair_args: LowerExprArgsResult = if handle_buf_idx >= 0 {
+            lo1.lower_expr_args_handle_buf_ref(&e.args, handle_buf_idx)
+        } else {
+            lo1.lower_expr_args_ref(&e.args)
+        }
         let lo2 = pair_args.lowerer
         let args: Option<Box<IrRegList>> = if pair_args.count <= 0 { None } else { Some(Box::new(pair_args.regs)) }
         let argc = pair_args.count
