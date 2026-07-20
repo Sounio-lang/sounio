@@ -6103,6 +6103,19 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
             ty_error()
         }
     } else if is_error_or_unknown(base_ty) {
+        // Receiver failed to type (common multi-module residual when
+        // Type::method associated constructors leave TyUnknown). Still reject
+        // method names that match *no* registered impl method — so e.mean()
+        // fails at check (E011) instead of SEGV at lower preseed — while
+        // known names (e.val / e.std / e.add) soft-accept for cascade.
+        // See docs/audit/MADAROS_DUAL_GUM_KNOWLEDGE_IMPORT_2026-07-19.md.
+        if !fn_sig_table_has_method_name((*c).fn_sigs, e.name) {
+            checker_report_error_at_inplace(c, e.span, 11, 0, 0, 0)
+            let call_start_borrows = (*c).borrows
+            checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            return ty_error()
+        }
         let call_start_borrows = (*c).borrows
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
         checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
@@ -6662,10 +6675,23 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         }
     }
     var direct_sig_id: i64 = -1
+    // Type::method associated-function path (e.g. E::of / Epistemic::measured).
+    // When the method is registered, resolve it so the return type is known and
+    // subsequent instance methods typecheck. When lookup misses (multi-module
+    // residual for some imported associated forms), fall through to the legacy
+    // path-as-first-segment behaviour rather than hard-rejecting — unknown
+    // *instance* methods are rejected in checker_check_method_call_with_base_ty
+    // even under TyUnknown receivers (see is_error_or_unknown branch).
     match e.left {
         Some(callee_expr) => {
             if (*callee_expr).kind == ExprKind::ExprIdent {
                 direct_sig_id = checker_fn_sigs_find_inplace(c, (*callee_expr).name)
+            } else if (*callee_expr).kind == ExprKind::ExprPath && (*callee_expr).path.seg_count >= 2 {
+                let path_type_name = checker_copy_string_list_to_name((*callee_expr).path.segments)
+                let path_method_name = checker_copy_string_list_tail_to_name((*callee_expr).path.segments)
+                // Prefer semantic match (kind+name) then name-only self_type_name.
+                let recv_ty = ty_named(path_type_name)
+                direct_sig_id = fn_sig_table_find_method_semantic((*c).fn_sigs, recv_ty, path_method_name)
             }
         }
         None => {}
@@ -19422,6 +19448,14 @@ impl Checker {
                 (c, ty_error())
             }
         } else if is_error_or_unknown(base_ty) {
+            // Mirror inplace: reject nonexistent method names under untyped receivers.
+            if !fn_sig_table_has_method_name(c.fn_sigs, e.name) {
+                c = c.report_error_at(e.span, 11, 0, 0, 0)
+                let call_start_borrows = c.borrows
+                c = c.check_expr_list_no_type_no_linear_consume(e.args)
+                c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                return (c, ty_error())
+            }
             let call_start_borrows = c.borrows
             c = c.check_expr_list_no_type_no_linear_consume(e.args)
             c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
@@ -19550,6 +19584,14 @@ impl Checker {
                 (c, ty_error())
             }
         } else if is_error_or_unknown(base_ty) {
+            // Mirror inplace: reject nonexistent method names under untyped receivers.
+            if !fn_sig_table_has_method_name(c.fn_sigs, e.name) {
+                c = c.report_error_at(e.span, 11, 0, 0, 0)
+                let call_start_borrows = c.borrows
+                c = c.check_expr_list_no_type_no_linear_consume(e.args)
+                c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                return (c, ty_error())
+            }
             let call_start_borrows = c.borrows
             c = c.check_expr_list_no_type_no_linear_consume(e.args)
             c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
