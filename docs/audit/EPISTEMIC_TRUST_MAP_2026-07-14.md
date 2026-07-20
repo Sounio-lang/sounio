@@ -49,7 +49,8 @@ A result is usable under native import iff **both** hold:
 | `covariance` | `cov_new` and accessors | self-contained |
 | `knowledge` (**free-function** `ep_*` API) | `ep_measured` / `ep_add` / `ep_mul` / `ep_merge` / `ep_gate` | **D3 partial 2026-07-19** — free-function surface imports under Madaros; see `EPISTEMIC_KNOWLEDGE_MADAROS_D3_2026-07-19` |
 | `order_spread_exact` (`order_spread4`) | CPC N=4 exact spread ≈ `2.044226` (scaled µ-units `2044225`/`2044226`) | **stdlib leaf 2026-07-20** — algebra inlined via field-wise `OsOct` (no `algebra::` use). Gate: `scripts/madaros_order_spread_native_gate.sh` + Section A `ORDER_SPREAD_TRUST_OK`. `product4_exact` remains available (pulls free-function `knowledge`); method-form `Epistemic::measured` still Root-2. |
-| `product_nonassoc` (structural variance) | Fano variance `0.25` / non-Fano `4.25` (κ=1, base σ²=0.25) | **stdlib leaf 2026-07-20** — algebra inlined via field-wise `PnOct` (no `algebra::` use). Gate: `scripts/madaros_product_nonassoc_native_gate.sh` + Section A `PRODUCT_NONASSOC_TRUST_OK`. Knowledge-free `product_nonassoc_augment` is the hard numeric witness; `product_nonassoc(Epistemic,…)` uses field-form `Epistemic` under Madaros (direct `ep_*` + leaf multi-import trips E035). Historic `epistemic::propagate::product_nonassoc` removed (propagate still multi-module-fragile via xoshiro). |
+| `product_nonassoc` (structural variance) | Fano variance `0.25` / non-Fano `4.25` (κ=1, base σ²=0.25) | **stdlib leaf 2026-07-20** — algebra inlined via field-wise `PnOct` (no `algebra::` use). Gate: `scripts/madaros_product_nonassoc_native_gate.sh` + Section A `PRODUCT_NONASSOC_TRUST_OK`. Knowledge-free `product_nonassoc_augment` is the hard numeric witness; `product_nonassoc(Epistemic,…)` uses field-form `Epistemic` under Madaros (direct `ep_*` + leaf multi-import trips E035). Historic `epistemic::propagate::product_nonassoc` removed. |
+| `propagate` (delta-method + MC) | product `6`/`0.25`; `exp_delta(1,σ²=0.01)` → `e` / `e²·0.01`; MC identity mean≈`1` var≈`0.01`; MC square E[X²]≈`4.01` var≈`0.16` | **2026-07-20 multi-module green** for free-function `Epistemic` + `exp_delta`/`product`/`ln`/`sin`/`cos_delta` and value-style LCG MC kernels (`monte_carlo_identity`, `monte_carlo_square`). Gate: `scripts/madaros_propagate_native_gate.sh` + Section A `PROPAGATE_TRUST_OK`. Caveats: literal export names `exp`/`cos` SEGV at call site (use `_delta`); exclusive-ref xoshiro inside imported bodies untrustworthy (MC uses Knuth LCG+CLT); generic `monte_carlo(x,f,n)` fn-ptr still fragile. |
 | `algebra::associator_field` | non-Fano ‖α‖²=`4`, g2=`2`, aug var=`4.25`; pentagon (e1,e2,e4,e1) var=`0.96` | **2026-07-20 multi-module green** after #1274 oct_mul lo/hi split + pub API surface (`assoc_field_*`, `pentagon_*`, `af_*`). Gate: `scripts/madaros_associator_field_native_gate.sh`. L0: `associator_field_octonion` + `associator_field_pentagon`. |
 | `algebra::octonion` (`oct_mul`, `oct_associator`, …) | e1·e2→e3; non-Fano ‖[e1,e2,e4]‖²=`4` | **2026-07-20** lo/hi frame split. Gate: `scripts/madaros_algebra_octonion_import_gate.sh`. |
 
@@ -84,7 +85,8 @@ makes `use algebra::associator_field` compile+run with correct sentinels.
 | Module / form | Failure | Consequence |
 |---|---|---|
 | `knowledge` **method-call** form (`Epistemic::measured`, `e.val()`) | SEGV in method-call lowering (Root 2) | use free `ep_*` API under Madaros; methods still OK under lean_single |
-| `propagate` (full module) | blocked / fragile multi-module (xoshiro, multi-use) | full propagation layer not yet native-trustworthy; **structural nonassoc path is** — use `epistemic::product_nonassoc` leaf |
+| `propagate` **export names** `exp` / `cos` (call site) | SEGV when the imported symbol is literally named `exp` or `cos` | use `exp_delta` / `cos_delta` (same math); wrappers remain for lean_single / source-compat |
+| `propagate::monte_carlo` (generic fn-ptr form) | fragile / NaN under multi-module when combined with exclusive-ref RNG | use `monte_carlo_identity` / `monte_carlo_square` (value-style LCG) |
 | `uncertain_eq` | method / multi-module path | equality-under-uncertainty native-import-blocked |
 
 Method-form and remaining modules are usable today only by **free-function rewrite**,
@@ -92,13 +94,16 @@ Method-form and remaining modules are usable today only by **free-function rewri
 
 ## Blast radius
 
-The corruption/blockage is not peripheral. `Knowledge<T>` (the headline type) and
-the entire `propagate` uncertainty-propagation layer are **native-import-unusable**;
-`gum`'s coverage intervals are **silently wrong** for finite samples. What still
-works under native import is the self-contained numeric core: GUM point+`u_c`,
-correlation/covariance, and p-box dispersion. A real PBPK/GUM pipeline that imports
-`knowledge`/`propagate` must run under lean_single (which the dissertation gate
-already does) — it is **not** portable to the default native engine today.
+The remaining corruption/blockage is not peripheral. Method-form `Knowledge<T>`
+still SEGV's (Root 2); `gum`'s coverage intervals are **silently wrong** for finite
+samples; literal `exp`/`cos` import names and exclusive-ref xoshiro inside module
+bodies remain traps. What works under native import today is the free-function
+numeric core: GUM point+`u_c`, correlation/covariance, p-box dispersion,
+`order_spread4`, `product_nonassoc`, and **`propagate` delta-method + value-style
+MC kernels** (`exp_delta`, `product`, `monte_carlo_identity` / `_square`). A real
+PBPK/GUM pipeline can import free-function `knowledge` + `propagate` under
+default Madaros when it uses those surfaces — method-form APIs and `gum` U95 still
+need lean_single or workarounds.
 
 Every failure here reduces to one of three already-filed compiler dispatches:
 

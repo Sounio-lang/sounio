@@ -32,6 +32,8 @@ runproof "knowledge: free Epistemic" tests/epistemic_trust/knowledge_trust.sio  
 runproof "order_spread4: CPC N=4"    tests/epistemic_trust/order_spread_trust.sio ORDER_SPREAD_TRUST_OK
 # Structural nonassoc variance leaf (2026-07-20): self-contained PnOct path; no algebra:: use.
 runproof "product_nonassoc: fano/nonfano" tests/epistemic_trust/product_nonassoc_trust.sio PRODUCT_NONASSOC_TRUST_OK
+# Full propagate delta-method + value-style LCG MC (2026-07-20): exp_delta/product + MC kernels.
+runproof "propagate: exp_delta/product/MC" tests/epistemic_trust/propagate_trust.sio PROPAGATE_TRUST_OK
 
 echo "### B. KNOWN-CORRUPTED trip-wire (informational) ###"
 echo "== gum k95 coverage factor (should be 2776 = t95(4); bug gives 1960) =="
