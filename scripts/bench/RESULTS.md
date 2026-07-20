@@ -79,6 +79,8 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 | sample_n_by (1M rows, 1000 groups, n=10) | | ~732 | ~1193 | **0.61x — Sounio wins** | seeded hash-priority top-n; pandas groupby.sample is slow |
 | sample_n_by (1M rows, 1000 groups, n=100) | | ~1564 | ~1298 | **~1.2x — loss** | O(sz·n) bounded buffer at large n; quickselect-threshold would flatten |
 | cumsum_rev_by (1M rows, 1000 dense keys) | | ~69 | ~286 | **0.24x — Sounio wins (4.1x)** | dense reverse-pass suffix-sum vs pandas double-reverse+cumsum |
+| expanding_mean_by (1M rows, 1000 dense keys) | | ~31 | ~496 | **0.06x — Sounio wins (16x)** | dense Welford; pandas groupby.expanding().mean() very slow |
+| expanding_std_by (1M rows, 1000 dense keys) | | ~281 | ~521 | **0.54x — Sounio wins** | dense Welford + bf_sqrt (expanding sum ≡ cumsum_by) |
 | cov (1M rows, two-pass mean-shift) | | 6.7 | 8.5 | **0.78x — Sounio wins** | (new verb) |
 | corr (1M rows, two-pass + bf_sqrt) | | 10.3 | 8.0 | **~1.3x** | (new verb) |
 | median (1M rows, quickselect) | | ~34 | ~16 | **~2.2x** | numpy SIMD introselect |
