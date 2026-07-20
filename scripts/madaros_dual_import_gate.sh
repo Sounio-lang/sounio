@@ -26,6 +26,10 @@ cd "$ROOT"
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT/stdlib}"
 unset SOUNIO_SOUC_ENGINE || true
 
+# Dual multi-module lower+codegen needs ~120000 KiB soft stack (65536 KiB
+# lowers cleanly then fails to emit ELF). Prefer unlimited; fall back to 128 MiB.
+ulimit -s unlimited 2>/dev/null || ulimit -s 131072 2>/dev/null || true
+
 SOUC="${SOUC:-$ROOT/bin/souc}"
 OUT="$(mktemp -d)"
 trap 'rm -rf "$OUT"' EXIT
