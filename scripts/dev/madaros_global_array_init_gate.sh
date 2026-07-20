@@ -95,7 +95,8 @@ run_case "scalar_f64_print" '
 var G: f64 = 1.5
 fn main() -> i64 with IO {
   print(G)
-  print("\n")
+  print("
+")
   println(G)
   if G != 1.5 { return 1 }
   0
@@ -107,11 +108,47 @@ run_case "scalar_i64_print" '
 var G: i64 = 42
 fn main() -> i64 with IO {
   print(G)
-  print("\n")
+  print("
+")
   println(G)
   if G != 42 { return 1 }
   0
 }
 ' '42'
+
+# 7) Wave8: packed i8 signed load (movsx) + u8 zero-extend (#1325 residual)
+run_case "i8_signed" '
+var NEG: [i8; 4] = [-1, -128, 127, 0]
+var UPOS: [u8; 2] = [255, 128]
+fn main() -> i64 with IO {
+  print_int(NEG[0] as i64); print(" "); print_int(NEG[1] as i64); print(" "); print_int(NEG[2] as i64); print("
+")
+  print_int(UPOS[0] as i64); print(" "); print_int(UPOS[1] as i64); print("
+")
+  if NEG[0] as i64 != 0 - 1 { return 1 }
+  if NEG[1] as i64 != 0 - 128 { return 2 }
+  if NEG[2] as i64 != 127 { return 3 }
+  if UPOS[0] as i64 != 255 { return 4 }
+  if UPOS[1] as i64 != 128 { return 5 }
+  0
+}
+' '-1 -128 127'
+
+# 8) Wave8: const-fold element-list (`0 - n`, bool, binary arith)
+run_case "constfold_list" '
+var A: [i64; 3] = [0 - 1, 0 - 2, 3]
+var B: [bool; 2] = [true, false]
+fn main() -> i64 with IO {
+  print_int(A[0]); print(" "); print_int(A[1]); print(" "); print_int(A[2]); print("
+")
+  if A[0] != 0 - 1 { return 1 }
+  if A[1] != 0 - 2 { return 2 }
+  if A[2] != 3 { return 3 }
+  if !B[0] { return 4 }
+  if B[1] { return 5 }
+  0
+}
+' '-1 -2 3'
+
 
 echo "GLOBAL_ARRAY_INIT_GATE_OK"

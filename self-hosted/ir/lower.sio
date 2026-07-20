@@ -1301,6 +1301,25 @@ fn lower_array_literal_word_scalar_ref(e: &Expr, repeat_ident_scalar_kind: i64) 
     }
 }
 
+// BSS hyper_algebra_kind encoding for packed globals (physical size + signedness):
+//   1  = u8  — physical 1 byte, IndexGet label_id=3 (movzx)
+//   17 = i8  — physical 1 byte, IndexGet label_id=4 (movsx)
+//   8  = i64/f64/other — physical 8 bytes, IndexGet label_id=2
+// Init emit must use lower_bss_elem_physical_size so i8 is not treated as 17-byte stride.
+fn lower_bss_elem_physical_size(kind: i64) -> i64 {
+    if kind == 1 || kind == 17 {
+        1
+    } else if kind <= 0 {
+        8
+    } else {
+        kind
+    }
+}
+
+fn lower_bss_elem_is_signed_byte(kind: i64) -> bool {
+    kind == 17
+}
+
 fn lower_typeexpr_bss_elem_size(ty_opt: &Option<Box<TypeExpr>>) -> i64 with Panic, Div {
     match *ty_opt {
         Some(ty) => {
@@ -1311,7 +1330,13 @@ fn lower_typeexpr_bss_elem_size(ty_opt: &Option<Box<TypeExpr>>) -> i64 with Pani
                         let name = ir_path_first_name((*elem).path)
                         if name.len == 2 {
                             let first = name.buf[0] as i64
-                            if (first == 105 || first == 117) && (name.buf[1] as i64) == 56 {
+                            let second = name.buf[1] as i64
+                            // 'i' '8' → signed packed byte (movsx on load)
+                            if first == 105 && second == 56 {
+                                return 17
+                            }
+                            // 'u' '8' → unsigned packed byte (movzx on load)
+                            if first == 117 && second == 56 {
                                 return 1
                             }
                         }
@@ -8007,7 +8032,8 @@ impl Lowerer {
                         if target_base_is_string {
                             index_set_instr.label_id = 3
                         } else if target_global_elem_size > 0 {
-                            index_set_instr.label_id = if target_global_elem_size == 1 { 3 } else { 2 }
+                            // Byte store is size-only (i8 and u8 both write al).
+                            index_set_instr.label_id = if lower_bss_elem_physical_size(target_global_elem_size) == 1 { 3 } else { 2 }
                         } else if target_base_is_ref {
                             index_set_instr.label_id = 1
                         }
@@ -9873,14 +9899,22 @@ impl Lowerer {
         let dst = pair_d.1
         var instr = ir_index_get(dst, base, idx)
         // label_id routing for native-v2 codegen_x86_linux IrIndexGet:
-        //   3 = raw byte load  movzx rax, byte [base+idx]   (packed *u8 / BSS i8)
-        //   2 = raw word load  mov  rax, [base+idx*8]       (BSS non-byte)
-        //   1 = ref array      deref handle slot then *8
+        //   4 = raw signed byte load  movsx rax, byte [base+idx]  (BSS i8)
+        //   3 = raw byte load         movzx rax, byte [base+idx]  (packed *u8 / BSS u8)
+        //   2 = raw word load         mov  rax, [base+idx*8]      (BSS non-byte)
+        //   1 = ref array             deref handle slot then *8
         //   0 = local/param GC handle resolve then *8
+        // hyper_algebra_kind 17 = i8 (signed), 1 = u8 (unsigned); both physical size 1.
         if base_is_string {
             instr.label_id = 3
         } else if global_elem_size > 0 {
-            instr.label_id = if global_elem_size == 1 { 3 } else { 2 }
+            if lower_bss_elem_is_signed_byte(global_elem_size) {
+                instr.label_id = 4
+            } else if lower_bss_elem_physical_size(global_elem_size) == 1 {
+                instr.label_id = 3
+            } else {
+                instr.label_id = 2
+            }
         } else if base_is_ref {
             instr.label_id = 1
         }
