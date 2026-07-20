@@ -166,6 +166,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.madaros-multimodule-print-import-bugs-2026-07-13 | repo_only | docs/audit/MADAROS_MULTIMODULE_PRINT_IMPORT_BUGS_2026-07-13.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-native-multimodule-scale-2026-07-14 | repo_only | docs/audit/MADAROS_NATIVE_MULTIMODULE_SCALE_2026-07-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-native-v2-codegen-census-2026-06-19 | repo_only | docs/audit/MADAROS_NATIVE_V2_CODEGEN_CENSUS_2026-06-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.madaros-native-v2-f64-remaining-bugs-2026-07-20 | repo_only | docs/audit/MADAROS_NATIVE_V2_F64_REMAINING_BUGS_2026-07-20.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-net-mod-sio-standalone-check-silent-fail-2026-07-01 | repo_only | docs/audit/MADAROS_NET_MOD_SIO_STANDALONE_CHECK_SILENT_FAIL_2026-07-01.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-open-pr-worktree-disposition-2026-06-21 | repo_only | docs/audit/MADAROS_OPEN_PR_WORKTREE_DISPOSITION_2026-06-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-operational-handoff-2026-06-21 | repo_only | docs/audit/MADAROS_OPERATIONAL_HANDOFF_2026-06-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
