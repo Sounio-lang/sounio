@@ -27,6 +27,10 @@ fn module_frontend_lower_trace_enabled() -> bool with IO, Mut, Panic, Div {
     str_eq(read_env("SOUNIO_MODULE_FRONTEND_LOWER_TRACE"), "1")
 }
 
+fn module_frontend_import_authority_trace_enabled() -> bool with IO, Mut, Panic, Div {
+    str_eq(read_env("SOUNIO_IMPORT_AUTHORITY_TRACE"), "1")
+}
+
 fn module_frontend_dump_merged_calls_enabled() -> bool with IO, Mut, Panic, Div {
     str_eq(read_env("SOUNIO_DUMP_MERGED_CALLS"), "1")
 }
@@ -156,6 +160,12 @@ var MODULE_FRONTEND_IMPORTED_SIMPLE_FAILURE_KIND: i64 = 0
 // Flat pointer storage is bootstrap-safe. Each pointer owns a heap-pinned
 // LowerExternBindingHandle; aggregate Name arrays in BSS are not stable.
 var MF_EXTERN_BINDING_PTRS: [i64; 2048] = [0; 2048]
+// The handle keeps the aggregate Names consumed by lowering. Frontend
+// authorization uses these exact textual identities so a bootstrap aggregate
+// copy cannot silently change which authored import a call selects.
+var MF_EXTERN_BINDING_LOCAL_NAMES: [string; 2048] = [""; 2048]
+var MF_EXTERN_BINDING_EXPORT_NAMES: [string; 2048] = [""; 2048]
+var MF_EXTERN_BINDING_QUALIFIER_PATHS: [string; 2048] = [""; 2048]
 var MF_PROGRAM_ITEM_PTRS: [i64; 256] = [0; 256]
 var MF_IMPORT_AUTHORITY_STUB_COUNTS: [i64; 256] = [0; 256]
 var MF_IMPORT_AUTHORITY_ERROR_COUNT: i64 = 0
@@ -6210,16 +6220,19 @@ fn module_frontend_binding_already_present(
     defining_module_id: i64,
     export_name: Name,
     qualifier_path: &AstPath,
-) -> bool with Mut, Panic, Div {
+) -> bool with Mut, Panic, Div, Alloc {
+    let local_name_text = str_from_bytes(local_name.buf, local_name.len)
+    let export_name_text = str_from_bytes(export_name.buf, export_name.len)
+    let qualifier_path_text = use_path_ref_to_string(qualifier_path)
     var i: i64 = 0
     while i < count {
         let binding = (*binding_ptrs)[i as usize] as *mut LowerExternBindingHandle
         if binding as i64 != 0 {
             if (*binding).caller_module_id == caller_module_id &&
                (*binding).defining_module_id == defining_module_id &&
-               ir_name_eq((*binding).local_name, local_name) &&
-               ir_name_eq((*binding).export_name, export_name) &&
-               module_frontend_path_equal(&(*binding).qualifier_path, qualifier_path) {
+               str_eq(MF_EXTERN_BINDING_LOCAL_NAMES[i as usize], local_name_text) &&
+               str_eq(MF_EXTERN_BINDING_EXPORT_NAMES[i as usize], export_name_text) &&
+               str_eq(MF_EXTERN_BINDING_QUALIFIER_PATHS[i as usize], qualifier_path_text) {
                 return true
             }
         }
@@ -6236,7 +6249,7 @@ fn module_frontend_append_external_binding(
     defining_module_id: i64,
     export_name: Name,
     qualifier_path: &AstPath,
-) -> i64 with Mut, Panic, Div, Alloc {
+) -> i64 with IO, Mut, Panic, Div, Alloc {
     if count < 0 || count >= 2048 {
         return -1
     }
@@ -6265,6 +6278,23 @@ fn module_frontend_append_external_binding(
     (*binding).export_name = export_name
     (*binding).qualifier_path = (*qualifier_path)
     (*binding).used_by_call = false
+    MF_EXTERN_BINDING_LOCAL_NAMES[count as usize] = str_from_bytes(local_name.buf, local_name.len)
+    MF_EXTERN_BINDING_EXPORT_NAMES[count as usize] = str_from_bytes(export_name.buf, export_name.len)
+    MF_EXTERN_BINDING_QUALIFIER_PATHS[count as usize] = use_path_ref_to_string(qualifier_path)
+    if module_frontend_import_authority_trace_enabled() {
+        print("module_frontend_import_authority: phase=append index=")
+        print_int(count)
+        print(" caller=")
+        print_int(caller_module_id)
+        print(" defining=")
+        print_int(defining_module_id)
+        print(" local=")
+        print(MF_EXTERN_BINDING_LOCAL_NAMES[count as usize])
+        print(" export=")
+        print(MF_EXTERN_BINDING_EXPORT_NAMES[count as usize])
+        print(" qualifier=")
+        println(MF_EXTERN_BINDING_QUALIFIER_PATHS[count as usize])
+    }
     count + 1
 }
 
@@ -6475,6 +6505,7 @@ fn module_frontend_binding_find_bare(
     local_name: Name,
     binding_count: i64,
 ) -> i64 with Mut, Panic, Div {
+    let local_name_text = str_from_bytes(local_name.buf, local_name.len)
     var found: i64 = -1
     var matches: i64 = 0
     var i: i64 = 0
@@ -6482,7 +6513,7 @@ fn module_frontend_binding_find_bare(
         let binding = MF_EXTERN_BINDING_PTRS[i as usize] as *mut LowerExternBindingHandle
         if binding as i64 != 0 &&
            (*binding).caller_module_id == caller_module_id &&
-           ir_name_eq((*binding).local_name, local_name) {
+           str_eq(MF_EXTERN_BINDING_LOCAL_NAMES[i as usize], local_name_text) {
             found = i
             matches = matches + 1
         }
@@ -6496,7 +6527,9 @@ fn module_frontend_binding_find_qualified(
     call_path: &AstPath,
     export_name: Name,
     binding_count: i64,
-) -> i64 with Mut, Panic, Div {
+) -> i64 with Mut, Panic, Div, Alloc {
+    let call_path_text = use_path_ref_to_string(call_path)
+    let export_name_text = str_from_bytes(export_name.buf, export_name.len)
     var found: i64 = -1
     var matches: i64 = 0
     var i: i64 = 0
@@ -6504,13 +6537,15 @@ fn module_frontend_binding_find_qualified(
         let binding = MF_EXTERN_BINDING_PTRS[i as usize] as *mut LowerExternBindingHandle
         if binding as i64 != 0 &&
            (*binding).caller_module_id == caller_module_id &&
-           ir_name_eq((*binding).export_name, export_name) &&
-           module_frontend_call_path_has_import_prefix(
-               call_path,
-               &(*binding).qualifier_path,
-           ) {
-            found = i
-            matches = matches + 1
+           str_eq(MF_EXTERN_BINDING_EXPORT_NAMES[i as usize], export_name_text) {
+            let selected_path = str_concat(
+                MF_EXTERN_BINDING_QUALIFIER_PATHS[i as usize],
+                str_concat("::", MF_EXTERN_BINDING_EXPORT_NAMES[i as usize]),
+            )
+            if str_eq(call_path_text, selected_path) {
+                found = i
+                matches = matches + 1
+            }
         }
         i = i + 1
     }
@@ -7021,13 +7056,12 @@ fn module_frontend_authority_rewrite_expr_mut(
                     )
                     return
                 }
-                let binding = MF_EXTERN_BINDING_PTRS[binding_index as usize] as *mut LowerExternBindingHandle
                 module_frontend_binding_mark_used(binding_index)
-                let rewritten = Box::new(*callee)
-                (*rewritten).kind = ExprKind::ExprIdent
-                (*rewritten).name = (*binding).local_name
-                (*rewritten).path = empty_path()
-                (*stage).e.left = Some(rewritten)
+                var rewritten = *callee
+                rewritten.kind = ExprKind::ExprIdent
+                rewritten.name = make_name(MF_EXTERN_BINDING_LOCAL_NAMES[binding_index as usize])
+                rewritten.path = empty_path()
+                (*stage).e.left = Some(Box::new(rewritten))
                 MF_IMPORT_AUTHORITY_QUALIFIED_REWRITE_COUNT = MF_IMPORT_AUTHORITY_QUALIFIED_REWRITE_COUNT + 1
             }
         }
@@ -7174,13 +7208,13 @@ fn module_frontend_prepend_used_checker_stubs(
             // public export; otherwise it could mask E175.
             if module_frontend_items_directly_export_public_function(
                 &(*target_handle).items,
-                (*binding).export_name,
+                make_name(MF_EXTERN_BINDING_EXPORT_NAMES[i as usize]),
                 4096,
             ) {
                 let stub = module_frontend_checker_stub_item(
                     &(*target_handle).items,
-                    (*binding).local_name,
-                    (*binding).export_name,
+                    make_name(MF_EXTERN_BINDING_LOCAL_NAMES[i as usize]),
+                    make_name(MF_EXTERN_BINDING_EXPORT_NAMES[i as usize]),
                     4096,
                 )
                 match stub {

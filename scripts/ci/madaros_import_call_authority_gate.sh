@@ -84,7 +84,17 @@ grep -Fq 'module_frontend_prepare_import_authority(' <<<"$collector_shape" ||
 grep -Fq 'module_frontend_authority_rewrite_item_list_opt(' <<<"$authority_shape" ||
   fail authority_ast_rewrite_missing
 grep -Fq '(*callee).kind == ExprKind::ExprPath' "$FRONTEND" || fail qualified_path_classifier_missing
-grep -Fq '(*rewritten).kind = ExprKind::ExprIdent' "$FRONTEND" || fail qualified_path_rewrite_missing
+grep -Fq 'rewritten.kind = ExprKind::ExprIdent' "$FRONTEND" || fail qualified_path_rewrite_missing
+grep -Fq 'rewritten.name = make_name(MF_EXTERN_BINDING_LOCAL_NAMES[binding_index as usize])' "$FRONTEND" ||
+  fail qualified_path_exact_local_name_missing
+for sidecar in \
+  MF_EXTERN_BINDING_LOCAL_NAMES \
+  MF_EXTERN_BINDING_EXPORT_NAMES \
+  MF_EXTERN_BINDING_QUALIFIER_PATHS; do
+  grep -Fq "var $sidecar: [string; 2048]" "$FRONTEND" || fail "binding_sidecar_${sidecar}_missing"
+done
+grep -Fq 'let selected_path = str_concat(' "$FRONTEND" || fail qualified_exact_path_selection_missing
+grep -Fq 'str_eq(call_path_text, selected_path)' "$FRONTEND" || fail qualified_exact_path_comparison_missing
 grep -Fq 'module_frontend_prepend_used_checker_stubs(' <<<"$authority_shape" ||
   fail checker_stub_adapter_missing
 grep -Fq 'visibility_is_pub((*item).visibility)' "$FRONTEND" || fail checker_stub_public_guard_missing
