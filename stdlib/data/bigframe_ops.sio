@@ -12,7 +12,7 @@
 // per-group distinct-count (nunique), per-group idxmax / idxmin, per-group mode,
 // rolling correlation, rolling covariance / skewness / kurtosis, rolling quantile,
 // and grouped rolling sum / mean / max / min / var / std / median / quantile;
-// grouped nlargest / nsmallest.
+// grouped nlargest / nsmallest; grouped first / last / nth.
 // Each is an O(n)-expected pass (or two), allocates its result on the heap via
 // bf_new, and scales to the millions of rows a BigFrame holds. The reductions/joins
 // gather COLUMN-MAJOR through the raw column pointers (bf_col_ptr + read_f64/
@@ -3443,4 +3443,146 @@ pub fn bf_nlargest_by(src: &BigFrame, key_col: i64, val_col: i64, n: i64) -> Big
 /// with up to n rows per group. O(n_rows * n). NATIVE + lean_single only (heap).
 pub fn bf_nsmallest_by(src: &BigFrame, key_col: i64, val_col: i64, n: i64) -> BigFrame with Alloc, Mut, Div, Panic {
     bf_ntop_by(src, key_col, val_col, n, 0.0 - 1.0)
+}
+
+/// Per-group FIRST / LAST value (like pandas df.groupby(key)[val].first() / .last()):
+/// for each distinct `key_col`, the `val_col` at the earliest (keepfirst=1) / latest
+/// (keepfirst=0) row of that group in input order. DENSE integer keys 0..1023 only
+/// (direct-index accumulator, no hashing -- the same fast dense-key contract as
+/// bf_groupby_sum; keys outside [0,1024) are skipped). Returns [key, value] ascending by
+/// key. O(n), a single pass. NATIVE + lean_single only (heap for the output frame).
+fn bf_firstlast_by(src: &BigFrame, key_col: i64, val_col: i64, keepfirst: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var vals: [f64; 1024] = [0.0; 1024]
+    var seen: [i64; 1024] = [0; 1024]
+    let nr = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(2, 16)
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    var i: i64 = 0
+    while i < nr {
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 {
+            if seen[k] == 0 { seen[k] = 1; vals[k] = read_f64(vp, i) }
+            else { if keepfirst == 0 { vals[k] = read_f64(vp, i) } }
+        }
+        i = i + 1
+    }
+    var row: [f64; 64] = [0.0; 64]
+    var k2: i64 = 0
+    while k2 < 1024 {
+        if seen[k2] == 1 { row[0] = k2 as f64; row[1] = vals[k2]; bf_push_row(&!out, &row, 2) }
+        k2 = k2 + 1
+    }
+    out
+}
+
+/// Per-group FIRST value (pandas df.groupby(key)[val].first()): the val at the earliest
+/// row of each group. Dense integer keys 0..1023 (see bf_firstlast_by). Returns
+/// [key, value] ascending by key. NATIVE + lean_single only.
+pub fn bf_first_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    bf_firstlast_by(src, key_col, val_col, 1)
+}
+
+/// Per-group LAST value (pandas df.groupby(key)[val].last()): the val at the latest row
+/// of each group. Dense integer keys 0..1023 (see bf_firstlast_by). Returns [key, value]
+/// ascending by key. NATIVE + lean_single only.
+pub fn bf_last_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    bf_firstlast_by(src, key_col, val_col, 0)
+}
+
+/// Per-group NTH value (like pandas df.groupby(key)[val].nth(k)): for each distinct
+/// `key_col`, the `val_col` at position `k` within that group in input order. `k>=0`
+/// counts from the group start (0 = first); `k<0` counts from the end (-1 = last). A
+/// group with fewer than |k|+1 (for k>=0: k+1) elements is omitted. Handles ANY f64 key
+/// (unlike first/last). O(n) via factorize + counting-sort of row indices into contiguous
+/// per-group regions, then a direct positional pick. Returns [key, value] in first-seen
+/// group order. NATIVE + lean_single only (heap).
+pub fn bf_nth_by(src: &BigFrame, key_col: i64, val_col: i64, k: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let nr = bf_nrows(src)
+    let nc = bf_ncols(src)
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || nr <= 0 { return bf_new(2, 1) }
+    var size: i64 = 16
+    while size < nr + nr { size = size * 2 }
+    let mask = size - 1
+    let occ = heap_alloc(size * 8) as *mut f64
+    let hk  = heap_alloc(size * 8) as *mut f64
+    let hid = heap_alloc(size * 8) as *mut f64
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let id = heap_alloc(nr * 8) as *mut i64
+    let sizes = heap_alloc(nr * 8) as *mut i64
+    var gcount: i64 = 0
+    var r: i64 = 0
+    while r < nr {
+        let kk = read_f64(kp, r)
+        var slot = bf_ghash(kk, mask)
+        var done = false
+        while !done {
+            if read_f64(occ, slot) == 0.0 {
+                write_f64(occ, slot, 1.0)
+                write_f64(hk, slot, kk)
+                write_f64(hid, slot, gcount as f64)
+                write_i64(id, r, gcount)
+                write_i64(sizes, gcount, 1)
+                gcount = gcount + 1
+                done = true
+            } else {
+                if read_f64(hk, slot) == kk {
+                    let g = read_f64(hid, slot) as i64
+                    write_i64(id, r, g)
+                    write_i64(sizes, g, read_i64(sizes, g) + 1)
+                    done = true
+                } else {
+                    slot = (slot + 1) & mask
+                }
+            }
+        }
+        r = r + 1
+    }
+    let offsets = heap_alloc(nr * 8) as *mut i64
+    let cursor = heap_alloc(nr * 8) as *mut i64
+    var acc: i64 = 0
+    var g: i64 = 0
+    while g < gcount {
+        write_i64(offsets, g, acc)
+        write_i64(cursor, g, acc)
+        acc = acc + read_i64(sizes, g)
+        g = g + 1
+    }
+    let flat = heap_alloc(nr * 8) as *mut i64
+    r = 0
+    while r < nr {
+        let g2 = read_i64(id, r)
+        let p = read_i64(cursor, g2)
+        write_i64(flat, p, r)
+        write_i64(cursor, g2, p + 1)
+        r = r + 1
+    }
+    var out = bf_new(2, gcount)
+    g = 0
+    while g < gcount {
+        let base = read_i64(offsets, g)
+        let sz = read_i64(sizes, g)
+        var target = k
+        if k < 0 { target = sz + k }
+        if target >= 0 && target < sz {
+            let row = read_i64(flat, base + target)
+            var rw: [f64; 64] = [0.0; 64]
+            rw[0] = read_f64(kp, row)
+            rw[1] = read_f64(vp, row)
+            bf_push_row(&!out, &rw, 2)
+        }
+        g = g + 1
+    }
+    heap_free(occ as *mut i8)
+    heap_free(hk as *mut i8)
+    heap_free(hid as *mut i8)
+    heap_free(id as *mut i8)
+    heap_free(sizes as *mut i8)
+    heap_free(offsets as *mut i8)
+    heap_free(cursor as *mut i8)
+    heap_free(flat as *mut i8)
+    out
 }
