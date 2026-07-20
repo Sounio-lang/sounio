@@ -8,13 +8,16 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LAUNCHER="$ROOT_DIR/bin/madaros"
 SOURCE="$ROOT_DIR/tests/issue_1194/d4_closure_fixed_array_witness.sio"
 EXPECTED_STDOUT="$ROOT_DIR/tests/issue_1194/d4_closure_fixed_array_witness.stdout"
+PARSER_EXPRS="$ROOT_DIR/self-hosted/parser/exprs.sio"
+PARSER_PATTERNS="$ROOT_DIR/self-hosted/parser/patterns.sio"
+PARSER_CORE="$ROOT_DIR/self-hosted/parser/parser.sio"
 RAW_MADAROS="${SOUNIO_MADAROS_ISSUE_1194_D4_RAW_BIN:-${MADAROS_RAW_BIN:-}}"
 EXPECTED_RAW_SHA256="${SOUNIO_MADAROS_ISSUE_1194_D4_EXPECTED_SHA256:-}"
 KEEP_WORK="${SOUNIO_MADAROS_ISSUE_1194_D4_KEEP_WORK:-0}"
 TIMEOUT_SECONDS="${SOUNIO_MADAROS_ISSUE_1194_D4_TIMEOUT_SECONDS:-180}"
 RUNTIME_TIMEOUT_SECONDS="${SOUNIO_MADAROS_ISSUE_1194_D4_RUNTIME_TIMEOUT_SECONDS:-30}"
 
-SOURCE_SHA256="6e463b9db920c85618b2a12f0918a70dc18432952a6801aa737e178f6e5a0817"
+SOURCE_SHA256="2cbab5555355ca8f17746c29c9c8c58a885ca73c42be75348d13ca7e1a7f6d78"
 STDOUT_SHA256="76af54e5e747102a8daaa3636afc6beeff5772b4bbff37250721c6024b1a1d84"
 PINNED_D4_SOURCE_SHA256="5e4f0cdc7643b21f99d890d8318e9eba870a82a909db619bd4d45f90621d6336"
 PINNED_MAIN_STALE_SHA256="11e7730f01f5382f1f8a5afc3599d7069b3d917f6972e6e47ffb57aa6bf4421e"
@@ -69,7 +72,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-for path in "$LAUNCHER" "$SOURCE" "$EXPECTED_STDOUT"; do
+for path in "$LAUNCHER" "$SOURCE" "$EXPECTED_STDOUT" "$PARSER_EXPRS" "$PARSER_PATTERNS" "$PARSER_CORE"; do
   [[ -f "$path" ]] || fail "missing_${path#"$ROOT_DIR"/}"
 done
 [[ -x "$LAUNCHER" ]] || fail launcher_not_executable
@@ -84,13 +87,31 @@ function_count="$(grep -Ec '^fn ' "$SOURCE" || true)"
 [[ "$struct_count" -eq 30 ]] || fail fixture_struct_count
 [[ "$function_count" -eq 63 ]] || fail fixture_function_count
 [[ $((struct_count + function_count)) -eq 93 ]] || fail fixture_top_level_item_count
+grep -Fxq '        else if k == TokenKind::Ident || k == TokenKind::Knowledge || k == TokenKind::Close || k == TokenKind::Unit || k == TokenKind::Kernel || k == TokenKind::PolicyLower {' "$PARSER_EXPRS" ||
+  fail policy_identifier_expression_branch_missing
+[[ "$(grep -Fc 'TokenKind::PolicyLower' "$PARSER_EXPRS" || true)" -eq 1 ]] ||
+  fail policy_identifier_expression_branch_not_unique
+grep -Fxq '        } else if k == TokenKind::Ident || k == TokenKind::Handle || k == TokenKind::Unit || k == TokenKind::Kernel || k == TokenKind::PolicyLower {' "$PARSER_PATTERNS" ||
+  fail policy_identifier_pattern_branch_missing
+[[ "$(grep -Fc 'TokenKind::PolicyLower' "$PARSER_PATTERNS" || true)" -eq 1 ]] ||
+  fail policy_identifier_pattern_branch_not_unique
+grep -Fxq '        if k == TokenKind::Ident || tk_is_keyword(k) {' "$PARSER_CORE" ||
+  fail expect_ident_keyword_contract_missing
+grep -Fxq 'fn d4_item_00(policy: D4Receipt00) -> i64 { d4_item_01(policy.value) }' "$SOURCE" ||
+  fail policy_parameter_field_call_shape_missing
+grep -Fxq 'fn d4_item_01(value: i64) -> i64 { value }' "$SOURCE" ||
+  fail policy_parameter_call_target_missing
+grep -Fxq '    let policy = D4Receipt00 { value: 100 }' "$SOURCE" ||
+  fail policy_let_pattern_shape_missing
+grep -Fxq '    values[0] = d4_item_00(policy)' "$SOURCE" ||
+  fail policy_let_expression_shape_missing
 grep -Fxq '    var values: [i64; 8] = [0; 8]' "$SOURCE" || fail fixed_array_shape_missing
 [[ "$(grep -Ec '^    values\[[0-7]\] = ' "$SOURCE" || true)" -eq 8 ]] || fail fixed_array_write_count
 grep -Fxq '    if checksum != 1194 { return 94 }' "$SOURCE" || fail runtime_exit_oracle_missing
 printf '%s\n' 'ISSUE_1194_D4_CLOSURE_WITNESS checksum=1194 items=93' |
   cmp -s - "$EXPECTED_STDOUT" || fail expected_stdout_contract
 
-printf 'MADAROS_ISSUE_1194_D4_CLOSURE_WITNESS_SOURCE_PASS fixture_sha256=%s original_d4_sha256=%s top_level_items=93 structs=30 functions=63 fixed_array_len=8 runtime=not_run\n' \
+printf 'MADAROS_ISSUE_1194_D4_CLOSURE_WITNESS_SOURCE_PASS fixture_sha256=%s original_d4_sha256=%s top_level_items=93 structs=30 functions=63 fixed_array_len=8 contextual_policy=expression+pattern runtime=not_run\n' \
   "$actual_source_sha256" "$PINNED_D4_SOURCE_SHA256"
 
 if [[ "$SOURCE_ONLY" -eq 1 ]]; then
@@ -134,6 +155,7 @@ if [[ "$KEEP_WORK" != 1 ]]; then
 fi
 
 INFO_LOG="$WORK/launcher.info"
+PROBE_LOG="$WORK/probe-frontend.log"
 CHECK_LOG="$WORK/check.log"
 COMPILE_LOG="$WORK/compile.log"
 ELF="$WORK/d4-closure-fixed-array.elf"
@@ -145,12 +167,12 @@ show_tail() {
 }
 
 has_fatal_log() {
-  grep -Eiq 'segmentation fault|core dumped|terminated by signal|fatal:|bus error|illegal instruction' "$1"
+  grep -Eiq 'segmentation fault|core dumped|terminated by signal|fatal:|panic:|bus error|illegal instruction' "$1"
 }
 
 has_forbidden_evidence() {
   grep -Eiq \
-    'closure parser incomplete|AST closure incomplete|raw AST parser reported failure|native_prebundle:|falling back to full IR path|compact modular IR table path|legacy compact IR differential enabled|SELFHOST=fallback|driver_orchestration.*status=fallback' \
+    'Parse failed|probe_frontend: fail|closure parser incomplete|AST closure incomplete|raw AST parser reported failure|native_prebundle:|falling back to full IR path|compact modular IR table path|legacy compact IR differential enabled|SELFHOST=fallback|driver_orchestration.*status=fallback' \
     "$1"
 }
 
@@ -181,6 +203,26 @@ if ! env \
 fi
 grep -Fxq "raw_elf:      $RAW_MADAROS" "$INFO_LOG" || fail launcher_raw_identity_mismatch
 launcher_sha256="$(sha256sum "$LAUNCHER" | awk '{print $1}')"
+
+set +e
+timeout --signal=TERM --kill-after=5s "$TIMEOUT_SECONDS" \
+  env -u MADAROS_BIN -u SOUC_BIN -u SOUNIO_MADAROS_BIN -u SOUNIO_SOUC_BIN \
+    SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib" \
+    OMEGA_SOUC_ALLOW_LOCAL_FALLBACK=0 \
+    "$RAW_MADAROS" --probe-frontend "$SOURCE" >"$PROBE_LOG" 2>&1
+probe_rc=$?
+set -e
+if [[ "$probe_rc" -ne 0 ]]; then
+  show_tail "$PROBE_LOG"
+  fail "probe_frontend_rc_${probe_rc}"
+fi
+assert_clean_compiler_log probe_frontend "$PROBE_LOG"
+[[ "$(grep -Fxc 'Main file: 93' "$PROBE_LOG" || true)" -eq 1 ]] ||
+  fail probe_frontend_main_item_count
+[[ "$(grep -Fxc 'Type check complete for module 0' "$PROBE_LOG" || true)" -eq 1 ]] ||
+  fail probe_frontend_typecheck_complete_count
+[[ "$(grep -Fxc 'probe_frontend: ok' "$PROBE_LOG" || true)" -eq 1 ]] ||
+  fail probe_frontend_ok_marker_count
 
 set +e
 timeout --signal=TERM --kill-after=5s "$TIMEOUT_SECONDS" \
@@ -259,5 +301,6 @@ if ! cmp -s "$EXPECTED_STDOUT" "$RUNTIME_STDOUT"; then
 fi
 
 elf_sha256="$(sha256sum "$ELF" | awk '{print $1}')"
-printf 'MADAROS_ISSUE_1194_D4_CLOSURE_WITNESS_PASS issue=1194 witness=d4_closure_fixed_array compiler_provenance=explicit_raw_hash raw_sha256=%s launcher_sha256=%s fixture_sha256=%s top_level_items=93 fixed_array_len=8 check=clean compile=full_ir elf_sha256=%s runtime_exit=0 stdout_sha256=%s fallback=none known_stale_hashes=rejected\n' \
+[[ "$(sha256sum "$RAW_MADAROS" | awk '{print $1}')" == "$raw_sha256" ]] || fail raw_binary_changed_during_gate
+printf 'MADAROS_ISSUE_1194_D4_CLOSURE_WITNESS_PASS issue=1194 witness=d4_closure_fixed_array compiler_provenance=explicit_raw_hash raw_sha256=%s launcher_sha256=%s fixture_sha256=%s top_level_items=93 fixed_array_len=8 contextual_policy=expression+pattern probe_frontend=clean check=clean compile=full_ir elf_sha256=%s runtime_exit=0 stdout_sha256=%s fallback=none known_stale_hashes=rejected\n' \
   "$raw_sha256" "$launcher_sha256" "$actual_source_sha256" "$elf_sha256" "$actual_stdout_sha256"
