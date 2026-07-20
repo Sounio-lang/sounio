@@ -335,6 +335,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.ecosystem.physical-extraction-canonical-cutover-execution | repo_only | docs/ecosystem/PHYSICAL_EXTRACTION_CANONICAL_CUTOVER_EXECUTION.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.ecosystem.physical-extraction-canonical-production-gap-assessment | repo_only | docs/ecosystem/PHYSICAL_EXTRACTION_CANONICAL_PRODUCTION_GAP_ASSESSMENT.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.ecosystem.physical-extraction-canonical-production-mapping-decision | repo_only | docs/ecosystem/PHYSICAL_EXTRACTION_CANONICAL_PRODUCTION_MAPPING_DECISION.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.ecosystem.physical-extraction-canonical-production-repository-catalog | repo_only | docs/ecosystem/PHYSICAL_EXTRACTION_CANONICAL_PRODUCTION_REPOSITORY_CATALOG.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.ecosystem.physical-extraction-inventory | repo_only | docs/ecosystem/PHYSICAL_EXTRACTION_INVENTORY.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.ecosystem.physical-extraction-materialization | repo_only | docs/ecosystem/PHYSICAL_EXTRACTION_MATERIALIZATION.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.ecosystem.physical-extraction-source-removal-authorization | repo_only | docs/ecosystem/PHYSICAL_EXTRACTION_SOURCE_REMOVAL_AUTHORIZATION.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
