@@ -1712,13 +1712,14 @@ fn ir_module_canonical_fn_id_for_index(module: &IrModule, fn_id: i64) -> i64 wit
 }
 
 // Rewrite fn refs via whole-function writeback; nested instr writes are dropped by lean_single.
-fn ir_module_compact_duplicate_fn_refs(module: IrModule) -> IrModule with Mut, Div, Panic {
-    var out = module
+// In-place on &! IrModule (memory wall P0): never take/return full IrModule by value.
+fn ir_module_compact_duplicate_fn_refs(module: &! IrModule) with Mut, Div, Panic {
     var pass: i64 = 0
     while pass < 2 {
         var fi: i64 = 0
-        while fi < out.fn_count {
-            var f = out.functions[fi as usize]
+        while fi < (*module).fn_count {
+            // A14: whole-function copy/writeback — do not reintroduce IrInstr by-value.
+            var f = (*module).functions[fi as usize]
             var changed: bool = false
             var ii: i64 = 0
             while ii < f.instr_count {
@@ -1727,16 +1728,16 @@ fn ir_module_compact_duplicate_fn_refs(module: IrModule) -> IrModule with Mut, D
                     let nm = f.instrs[ii as usize].name
                     var canon: i64 = old_id
                     if nm.len > 0 {
-                        let by_name = ir_merge_find_function_name_index(&out, nm)
-                        if by_name >= 0 && out.functions[by_name as usize].instr_count > 0 {
+                        let by_name = ir_merge_find_function_name_index(module, nm)
+                        if by_name >= 0 && (*module).functions[by_name as usize].instr_count > 0 {
                             canon = by_name
                         }
                     } else if old_id >= 0 {
-                        canon = ir_module_canonical_fn_id_for_index(&out, old_id)
+                        canon = ir_module_canonical_fn_id_for_index(module, old_id)
                     }
                     if canon >= 0
-                        && canon < out.fn_count
-                        && out.functions[canon as usize].instr_count > 0
+                        && canon < (*module).fn_count
+                        && (*module).functions[canon as usize].instr_count > 0
                         && canon != old_id {
                         f.instrs[ii as usize].fn_id = canon
                         changed = true
@@ -1745,13 +1746,12 @@ fn ir_module_compact_duplicate_fn_refs(module: IrModule) -> IrModule with Mut, D
                 ii = ii + 1
             }
             if changed {
-                out.functions[fi as usize] = f
+                (*module).functions[fi as usize] = f
             }
             fi = fi + 1
         }
         pass = pass + 1
     }
-    out
 }
 
 // Deep-copy an IrFunction so lean_single struct assignment does not alias instr slots.
@@ -1768,26 +1768,23 @@ fn ir_function_deep_copy(func: IrFunction) -> IrFunction with Mut, Panic, Div {
 // When merge leaves import stubs (ic=0) alongside lowered duplicates at higher
 // fn_id, copy the canonical body into the stub slot so codegen fn_offsets for
 // stale low indices still reach real implementations.
-fn ir_module_promote_canonical_into_stub_slots(module: IrModule) -> IrModule with Mut, Div, Panic {
-    var out = module
+// In-place on &! IrModule (memory wall P0).
+fn ir_module_promote_canonical_into_stub_slots(module: &! IrModule) with Mut, Div, Panic {
     var fi: i64 = 0
-    while fi < out.fn_count {
-        if out.functions[fi as usize].instr_count == 0 {
-            let sym_name = out.functions[fi as usize].name
+    while fi < (*module).fn_count {
+        if (*module).functions[fi as usize].instr_count == 0 {
+            let sym_name = (*module).functions[fi as usize].name
             if sym_name.len > 0 {
-                let canon = ir_merge_find_function_name_index(&out, sym_name)
-                if canon >= 0 && canon != fi && out.functions[canon as usize].instr_count > 0 {
-                    out.functions[fi as usize] = ir_function_deep_copy(out.functions[canon as usize])
+                let canon = ir_merge_find_function_name_index(module, sym_name)
+                if canon >= 0 && canon != fi && (*module).functions[canon as usize].instr_count > 0 {
+                    (*module).functions[fi as usize] = ir_function_deep_copy((*module).functions[canon as usize])
                 }
             }
         }
         fi = fi + 1
     }
-    out
 }
 
-// Materialize merged IR, resolve call targets on an owned IrModule (not through
-// &! Box<IrModule> — lean_single drops those writes), and return the finalized module.
 // Ensure every call to a BUILTIN name (str_char_at, str_len, str_from_bytes, ...)
 // points at a slot bearing that name so codegen emits the builtin body. Builtins
 // carry no IR body (instr_count==0, synthesized at codegen), so the normal name
@@ -1795,11 +1792,14 @@ fn ir_module_promote_canonical_into_stub_slots(module: IrModule) -> IrModule wit
 // builtin referenced ONLY transitively (an imported fn's body calls it, the root
 // module never does) is also absent from the merged module entirely. Append a
 // named stub when missing and rebind the call. Whole-function writeback per A14.
-fn ir_module_ensure_builtin_call_targets(module: IrModule) -> IrModule with Mut, Div, Panic {
-    var out = module
+// In-place on &! IrModule (memory wall P0): mutate through exclusive ref of the
+// unboxed module (same pattern as ir_module_resolve_named_calls / resolve_all).
+// Do not take/return full IrModule by value — multi-mod modules are hundreds of MB.
+fn ir_module_ensure_builtin_call_targets(module: &! IrModule) with Mut, Div, Panic {
     var fi: i64 = 0
-    while fi < out.fn_count {
-        var f = out.functions[fi as usize]
+    while fi < (*module).fn_count {
+        // A14: whole-function copy/writeback — do not reintroduce IrInstr by-value.
+        var f = (*module).functions[fi as usize]
         var changed: bool = false
         var ii: i64 = 0
         while ii < f.instr_count {
@@ -1809,17 +1809,17 @@ fn ir_module_ensure_builtin_call_targets(module: IrModule) -> IrModule with Mut,
                 if cn.len > 0 && native_v2_builtin_id_for_name(cn) != 0 {
                     let cur = f.instrs[ii as usize].fn_id
                     var ok: bool = false
-                    if cur >= 0 && cur < out.fn_count {
-                        if ir_name_eq(out.functions[cur as usize].name, cn) { ok = true }
+                    if cur >= 0 && cur < (*module).fn_count {
+                        if ir_name_eq((*module).functions[cur as usize].name, cn) { ok = true }
                     }
                     if !ok {
-                        var target = ir_merge_find_function_name_index(&out, cn)
-                        if target < 0 && out.fn_count < IR_MAX_FUNCS {
+                        var target = ir_merge_find_function_name_index(module, cn)
+                        if target < 0 && (*module).fn_count < IR_MAX_FUNCS {
                             var stub = ir_empty_function()
                             stub.name = cn
-                            out.functions[out.fn_count as usize] = stub
-                            target = out.fn_count
-                            out.fn_count = out.fn_count + 1
+                            (*module).functions[(*module).fn_count as usize] = stub
+                            target = (*module).fn_count
+                            (*module).fn_count = (*module).fn_count + 1
                         }
                         if target >= 0 {
                             f.instrs[ii as usize].fn_id = target
@@ -1830,29 +1830,30 @@ fn ir_module_ensure_builtin_call_targets(module: IrModule) -> IrModule with Mut,
             }
             ii = ii + 1
         }
-        if changed { out.functions[fi as usize] = f }
+        if changed { (*module).functions[fi as usize] = f }
         fi = fi + 1
     }
-    out
 }
 
-fn ir_module_finalize_merged_calls(module: IrModule) -> IrModule with Mut, Div, Panic {
-    var out = module
-    ir_module_resolve_named_calls(&! out)
+// Finalize merged multi-mod call targets in place. Memory wall P0: take &! IrModule
+// only — never copy full IrModule through promote/compact/ensure/resolve chain.
+// A14 invariant preserved: rebinds use whole-function writeback (not IrInstr by-value).
+fn ir_module_finalize_merged_calls(module: &! IrModule) with Mut, Div, Panic {
+    ir_module_resolve_named_calls(module)
     // Promote before compaction so import stubs at low fn_id gain bodies while
     // seed main still references those indices.
-    out = ir_module_promote_canonical_into_stub_slots(out)
-    out = ir_module_compact_duplicate_fn_refs(out)
-    out = ir_module_promote_canonical_into_stub_slots(out)
+    ir_module_promote_canonical_into_stub_slots(module)
+    ir_module_compact_duplicate_fn_refs(module)
+    ir_module_promote_canonical_into_stub_slots(module)
     // Two passes after promotion: duplicate import stubs (ic=0) can alias lowered
     // bodies under the same name at higher fn_id; promotion fills stub slots first.
     var pass: i64 = 0
     while pass < 2 {
         var fi: i64 = 0
-        while fi < out.fn_count {
+        while fi < (*module).fn_count {
             // A14: whole-function copy/writeback (see ir_module_compact_duplicate_fn_refs)
-            // — nested `out.functions[fi].instrs[ii].fn_id=v` writes are dropped.
-            var f = out.functions[fi as usize]
+            // — nested `(*module).functions[fi].instrs[ii].fn_id=v` writes are dropped.
+            var f = (*module).functions[fi as usize]
             var changed: bool = false
             var ii: i64 = 0
             while ii < f.instr_count {
@@ -1860,7 +1861,7 @@ fn ir_module_finalize_merged_calls(module: IrModule) -> IrModule with Mut, Div, 
                 if op == IrOpcode::IrCall || op == IrOpcode::IrCallSret || op == IrOpcode::IrLoadFnRef {
                     let cur_fn = f.instrs[ii as usize].fn_id
                     let cur_nm = f.instrs[ii as usize].name
-                    let new_id = ir_module_resolve_call_target_fields(&out, cur_fn, cur_nm)
+                    let new_id = ir_module_resolve_call_target_fields(module, cur_fn, cur_nm)
                     if new_id != cur_fn {
                         f.instrs[ii as usize].fn_id = new_id
                         changed = true
@@ -1869,24 +1870,23 @@ fn ir_module_finalize_merged_calls(module: IrModule) -> IrModule with Mut, Div, 
                 ii = ii + 1
             }
             if changed {
-                out.functions[fi as usize] = f
+                (*module).functions[fi as usize] = f
             }
             fi = fi + 1
         }
         pass = pass + 1
     }
-    out = ir_module_ensure_builtin_call_targets(out)
-    out
+    ir_module_ensure_builtin_call_targets(module)
 }
 
-// Reinstall seed user main after finalize: owned-module finalize passes can clobber
+// Reinstall seed user main after finalize: finalize passes can clobber
 // fn=0 under the lean_single JIT. Stub slots are already promoted; keep seed fn_ids.
-fn ir_module_restore_user_main_calls(module: IrModule, user_main: IrFunction) -> IrModule with Mut, Div, Panic {
-    var out = module
-    if out.fn_count <= 0 {
-        return out
+// In-place on &! IrModule (memory wall P0).
+fn ir_module_restore_user_main_calls(module: &! IrModule, user_main: IrFunction) with Mut, Div, Panic {
+    if (*module).fn_count <= 0 {
+        return
     }
-    var slot = out.functions[0 as usize]
+    var slot = (*module).functions[0 as usize]
     slot.name = user_main.name
     slot.instr_count = user_main.instr_count
     slot.reg_count = user_main.reg_count
@@ -1908,16 +1908,15 @@ fn ir_module_restore_user_main_calls(module: IrModule, user_main: IrFunction) ->
     var ii: i64 = 0
     while ii < user_main.instr_count && ii < IR_MAX_INSTRS {
         var ins = user_main.instrs[ii as usize]
-        if (ins.op == IrOpcode::IrCall || ins.op == IrOpcode::IrCallSret) && ins.fn_id >= 0 && ins.fn_id < out.fn_count {
-            if out.functions[ins.fn_id as usize].returns_float == 1 {
+        if (ins.op == IrOpcode::IrCall || ins.op == IrOpcode::IrCallSret) && ins.fn_id >= 0 && ins.fn_id < (*module).fn_count {
+            if (*module).functions[ins.fn_id as usize].returns_float == 1 {
                 ins.imm_flags = IR_FLOAT_REG_MARKER_FLAG
             }
         }
         slot.instrs[ii as usize] = ins
         ii = ii + 1
     }
-    out.functions[0 as usize] = slot
-    out
+    (*module).functions[0 as usize] = slot
 }
 
 // Resolve fn_id=-1 named calls (cross-module calls emitted by module_frontend_ir_named_call)
@@ -5191,8 +5190,13 @@ fn module_frontend_merge_imported_into(
         return false
     }
     let user_main_snapshot = ir_function_deep_copy((*module_box).functions[0 as usize])
-    var finalized = ir_module_finalize_merged_calls(*module_box)
-    (*out_module) = ir_module_restore_user_main_calls(finalized, user_main_snapshot)
+    // Memory wall P0: finalize/restore in place on the boxed module — no full
+    // IrModule by-value chain (promote/compact/ensure/resolve each used to copy).
+    ir_module_finalize_merged_calls(&! (*module_box))
+    ir_module_restore_user_main_calls(&! (*module_box), user_main_snapshot)
+    // Residual full densify: one writeback into the caller-owned out_module.
+    // Honest residual — densify of Box→local remains; finalize path itself is byref.
+    (*out_module) = *module_box
     true
 }
 
@@ -5359,13 +5363,14 @@ pub fn module_frontend_compile_imported_to_file(
         print("DUMPALL: pre_finalize\n")
         ir_module_dump_all_calls_diag(&(*module_box))
     }
-    var merged_module = ir_module_finalize_merged_calls(*module_box)
-    merged_module = ir_module_restore_user_main_calls(merged_module, user_main_snapshot)
+    // Memory wall P0: finalize/restore in place — no full IrModule by-value locals.
+    ir_module_finalize_merged_calls(&! (*module_box))
+    ir_module_restore_user_main_calls(&! (*module_box), user_main_snapshot)
     if str_eq(read_env("SOUNIO_DUMP_ALL_CALLS"), "1") {
         print("DUMPALL: post_finalize\n")
-        ir_module_dump_all_calls_diag(&merged_module)
+        ir_module_dump_all_calls_diag(&(*module_box))
     }
-    let fn_count = merged_module.fn_count
+    let fn_count = (*module_box).fn_count
     trace.last_stage = "done"
     trace.last_module_index = loaded - 1
     trace.merged_modules = loaded
@@ -5377,20 +5382,20 @@ pub fn module_frontend_compile_imported_to_file(
         return 1
     }
     if module_frontend_dump_merged_calls_enabled() {
-        ir_module_dump_merge_calls(&merged_module)
+        ir_module_dump_merge_calls(&(*module_box))
     }
     if optimize {
-        let cleanup_receipt = opt_cleanup_module_inplace(&! merged_module)
+        let cleanup_receipt = opt_cleanup_module_inplace(&! (*module_box))
         module_frontend_print_rebracket_receipt("merged-post-finalize", cleanup_receipt)
     } else {
         module_frontend_print_rebracket_disabled("merged-disabled", fn_count)
     }
     // Finalization and cleanup are complete; codegen receives an immutable
     // module reference after this audit snapshot.
-    module_frontend_print_ordered_path_receipt("merged-final", optimize, &merged_module)
+    module_frontend_print_ordered_path_receipt("merged-final", optimize, &(*module_box))
     parser_reset_last_errors()
     let target_spec = native_resolve_target("native", "auto", false)
-    let write_rc = compile_native_v2_preview_to_file(&merged_module, target_spec, output_path)
+    let write_rc = compile_native_v2_preview_to_file(&(*module_box), target_spec, output_path)
     if write_rc != 0 {
         print("Error: Failed to write native binary to ")
         print(output_path)
