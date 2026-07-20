@@ -61,6 +61,8 @@ for path in \
   "$FIXTURES/selective_negative/leaf.sio" \
   "$FIXTURES/qualified/main.sio" \
   "$FIXTURES/qualified/leaf.sio" \
+  "$FIXTURES/glob_multi/main.sio" \
+  "$FIXTURES/glob_multi/leaf.sio" \
   "$FIXTURES/duplicate_order/left.sio" \
   "$FIXTURES/duplicate_order/right.sio" \
   "$FIXTURES/duplicate_order/left_first.sio" \
@@ -81,6 +83,11 @@ for field in caller_module_id local_name defining_module_id export_name qualifie
 done
 grep -Fq 'MF_IMPORT_AUTHORITY_PREPARED_COLLECTION_ID = (*out).collection_id' <<<"$collector_shape" ||
   fail collector_authority_receipt_missing
+grep -Fq 'module_frontend_snapshot_program_item_handles(programs, (*out).node_count)' <<<"$collector_shape" ||
+  fail collector_item_handle_snapshot_missing
+if grep -Fq 'let program = (*programs)[module_id]' "$FRONTEND"; then
+  fail export_scan_whole_program_copy_reintroduced
+fi
 grep -Fq 'module_frontend_prepare_import_authority(' <<<"$collector_shape" ||
   fail collector_authority_prepare_missing
 grep -Fq 'module_frontend_authority_rewrite_item_list_opt(' <<<"$authority_shape" ||
@@ -146,6 +153,8 @@ fi
 grep -Fq 'use leaf::{allowed}' "$FIXTURES/selective_negative/main.sio" || fail selective_fixture_import
 grep -Fq 'leaked()' "$FIXTURES/selective_negative/main.sio" || fail selective_fixture_leak_call
 grep -Fq 'leaf::answer()' "$FIXTURES/qualified/main.sio" || fail qualified_fixture_call
+grep -Fq 'use leaf::*' "$FIXTURES/glob_multi/main.sio" || fail glob_fixture_import
+grep -Fq 'second()' "$FIXTURES/glob_multi/main.sio" || fail glob_fixture_second_call
 [[ "$(grep -Fc 'pub fn picked()' "$FIXTURES/duplicate_order/left.sio")" -eq 1 ]] || fail left_picked_missing
 [[ "$(grep -Fc 'pub fn picked()' "$FIXTURES/duplicate_order/right.sio")" -eq 1 ]] || fail right_picked_missing
 
@@ -161,7 +170,7 @@ source_sha256="$({
   sha256sum "$LOWER" | awk '{print $1}'
 } | sha256sum | awk '{print $1}')"
 
-printf 'MADAROS_IMPORT_CALL_AUTHORITY_SOURCE_PASS binding=caller+local+defining+export+qualifier checker_adapter=collection-owned lowering=explicit-only global_unique_fallback=absent fixtures=selective-reject,qualified-call,duplicate-order-x2 source_sha256=%s\n' "$source_sha256"
+printf 'MADAROS_IMPORT_CALL_AUTHORITY_SOURCE_PASS binding=caller+local+defining+export+qualifier checker_adapter=collection-owned lowering=explicit-only global_unique_fallback=absent fixtures=selective-reject,qualified-call,duplicate-order-x2,glob-multi source_sha256=%s\n' "$source_sha256"
 
 if [[ "$MODE" == "source-only" ]]; then
   exit 0
@@ -285,8 +294,10 @@ compile_case duplicate_left_first "$FIXTURES/duplicate_order/left_first.sio"
 run_exit_42 duplicate_left_first
 compile_case duplicate_right_first "$FIXTURES/duplicate_order/right_first.sio"
 run_exit_42 duplicate_right_first
+compile_case glob_multi "$FIXTURES/glob_multi/main.sio"
+run_exit_42 glob_multi
 
 final_compiler_sha256="$(sha256sum "$RAW_MADAROS" | awk '{print $1}')"
 [[ "$final_compiler_sha256" == "$compiler_sha256" ]] || fail compiler_changed_during_gate
-printf 'MADAROS_IMPORT_CALL_AUTHORITY_RUNTIME_PASS compiler_provenance=source-fresh compiler_sha256=%s source_sha256=%s selective_negative=E137+no-elf+pre-lowering qualified=42 duplicate_left_first=42 duplicate_right_first=42 closure_order=both compact=disabled fallback=none\n' \
+printf 'MADAROS_IMPORT_CALL_AUTHORITY_RUNTIME_PASS compiler_provenance=source-fresh compiler_sha256=%s source_sha256=%s selective_negative=E137+no-elf+pre-lowering qualified=42 duplicate_left_first=42 duplicate_right_first=42 glob_multi=42 closure_order=both compact=disabled fallback=none\n' \
   "$compiler_sha256" "$source_sha256"
