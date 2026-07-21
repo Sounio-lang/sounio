@@ -302,11 +302,36 @@ does not prove arbitrary construction impossible. Nor does a single-module
 success prove the multimodule native path. The direct controls are a stable
 preflight, not a substitute for the source-fresh imported witness below.
 
+## Library-First Preflight
+
+The next bounded step is a generic library module:
+
+~~~
+stdlib/epistemic/observation_provenance.sio
+~~~
+
+It uses the existing epistemic private-struct pattern. The module keeps its
+receipt representations private and exposes narrow constructors and accessors
+for opportunity, presence, selection, measurement act, recorded measurement,
+observation-feature use, and unresolved-route abstention. This prevents a
+caller from directly fabricating a receipt or reading a private field on the
+current compiler path; it does not claim cryptographic non-forgeability,
+external authority, or empirical validity.
+
+The paired small-import smoke proves a deliberately limited point: the module
+can cross one import boundary and preserve the selected distinct receipt types.
+It is not the full collision family, a source-fresh acceptance, or a closure of
+#901. The larger import-bearing witness remains conditional on the compiler
+acceptance path below. On the current wrapper, this smoke reports
+`source=fallback` and `fallback=unresolved_default_x86_64_linux`; it is
+therefore default/fallback runtime evidence only, never a fallback=0 or
+current-source claim.
+
 ## Future Executable Boundary
 
-Only after the source-fresh imported-native #901 acceptance path exists, a
-future import-bearing fixture may introduce nominal records for the receipt
-taxonomy and test the following conditions:
+Only after the source-fresh imported-native #901 acceptance path exists, the
+full import-bearing collision fixture may exercise the receipt taxonomy and
+test the following conditions:
 
 1. **EncounterPresenceReceipt** is rejected where a
    **RecordedMeasurementReceipt** is required.
@@ -354,19 +379,19 @@ Owner: codex-root-psychiatric-state-inference-20260721
 Concept-IDs: SOUNIO-SCIENCE-RESEARCH-BOUNDARY; SOUNIO-ORDERED-PATH-PROVENANCE; SOUNIO-HYPERCOMPLEX-ZD-EVIDENCE
 Intent-Preserved: model complex psychiatric and medical systems without promoting records, analogies, or model outputs into unearned empirical or clinical authority
 Transformation: refine the research-only ObservationProcessReceipt into separately auditable opportunity, presence, selection, measurement-act, reactivity, model, feature-use, and abstention boundaries
-Types-Changed: none; proposed future library vocabulary only
+Types-Changed: private library-level nominal receipt types for opportunity, presence, selection, measurement act, recorded measurement, observation-feature use, and abstention; no parser or core type-system change
 Effects-Changed: none
 IR-Changed: none
-Claims-Introduced: a future library fixture can preserve distinct observation-process provenance categories through a bounded source-to-IR path
+Claims-Introduced: a narrow library API can preserve distinct observation-process provenance categories through direct and small-import controls; a future source-fresh import fixture can test the broader collision matrix
 Claims-Forbidden: that absence from care indicates stability; that assessment is always neutral or always an intervention; that informative observation identifies a causal effect; that a care-system feature transports to a new setting; that this contract authorizes a clinical action
 Assumptions: the study or deployment can state relevant opportunity, channel, selection, measurement-act, and use context; any reactivity claim has separately scoped empirical evidence
-Write-Set: docs/research/psychiatric_informative_observation_contract_2026-07-21.md
+Write-Set: docs/research/psychiatric_informative_observation_contract_2026-07-21.md; stdlib/epistemic/observation_provenance.sio; tests/run-pass/epistemic_observation_provenance_import_smoke.sio; tests/compile-fail/epistemic_observation_provenance_direct_construction.sio; tests/compile-fail/epistemic_observation_presence_cannot_be_measurement.sio; tests/compile-fail/epistemic_observation_feature_cannot_identify.sio
 Read-Set: docs/research/psychiatric_temporal_authority_receipt_matrix_2026-07-21.md; docs/research/psychiatric_counterfactual_authority_abstention_contract_2026-07-21.md; docs/internal/concepts/SEMANTIC_LANE_CONTRACT.md
-Positive-Witness: future synthetic import-bearing receipt fixture after #901 source-fresh imported-native acceptance
-Negative-Witness: future compile-fail substitutions from presence/act/feature-use/regularized representations into measurements, reactivity, identification, transport, or decision categories
-Acceptance-Gate: bash scripts/dev/check_docs_consistency.sh; source-fresh imported fixture only after #901, with fallback=0
+Positive-Witness: direct receipt control and bounded two-module library import smoke on the current default/fallback wrapper; future synthetic import-bearing receipt fixture after #901 source-fresh imported-native acceptance
+Negative-Witness: imported direct-construction rejection and substitutions from presence or feature-use into measurements or identification; future expanded substitutions from act/regularized representations into reactivity, transport, or decision categories
+Acceptance-Gate: bash scripts/dev/check_docs_consistency.sh; filtered local harness for the direct controls and qualified default/fallback small-import smoke; source-fresh full import fixture only after #901, with fallback=0
 Integration-Target: research documentation branch; future library-first package after owner acceptance
-Authoritative-Only-If: a source-fresh imported-native witness proves the claimed receipt distinction without fallback, while all empirical and clinical claims remain independently governed
+Authoritative-Only-If: the narrow API is authoritative only for its selected nominal categories; the broader path is authoritative only if a source-fresh imported-native witness proves the claimed receipt distinction without fallback, while all empirical and clinical claims remain independently governed
 ~~~
 
 ## Integration Receipt
@@ -374,13 +399,13 @@ Authoritative-Only-If: a source-fresh imported-native witness proves the claimed
 ~~~
 Semantic-Outcome: informative observation is represented as a structured and ordered research provenance boundary rather than a missingness flag or neutral state readout
 Concept-Status-Before: ObservationProcessReceipt names the general observation mechanism but does not distinguish opportunity, presence, selection, assessment act, reactivity status, and task-specific feature use
-Concept-Status-After: those proposed distinctions have an explicit no-promotion matrix, collision design, and source-fresh future fixture boundary
+Concept-Status-After: opportunity, presence, selection, measurement act, recorded measurement, feature use, and abstention have a narrow private-receipt library preflight plus an explicit no-promotion matrix, collision design, and source-fresh future fixture boundary
 Distinctions-Added: opportunity != presence != selection != measurement act != recorded response; reactivity status != intervention effect; prediction use != causal identification; regularization != original observation history
 Distinctions-Preserved: ordered path != commutative endpoint; model representation != empirical claim; compilation != clinical authority
 Distinctions-Erased: none
 Evidence-Run: bash scripts/dev/check_docs_consistency.sh; bash scripts/dev/check_docs_registry.sh; git diff --check
-Fallback-Path: none; documentation-only research contract
-Legacy-Kept: the umbrella ObservationProcessReceipt remains the prior temporal-matrix vocabulary; the direct nominal controls remain bounded preflight evidence, not imported-native parity
+Fallback-Path: current small-import smoke reports source=fallback and fallback=unresolved_default_x86_64_linux; it is retained only as a qualified API smoke, never as source-fresh evidence
+Legacy-Kept: the umbrella ObservationProcessReceipt remains the prior temporal-matrix vocabulary; the direct and small-import nominal controls remain bounded preflight evidence, not imported-native parity
 Conflicting-Lanes: none observed at claim time; imported-native #901 work remains owned by the compiler/PBPK lane
 Next-Semantic-Interface: consider a library-first synthetic receipt fixture only after #901 source-fresh imported-native acceptance
 ~~~
