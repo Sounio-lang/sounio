@@ -337,7 +337,10 @@ The author reviewed, verified and takes full responsibility for all content, inc
 > The scite MCP was the intended verifier but was quota-blocked; WebSearch was used
 > instead, so **Smart-Citation tallies (supporting/contrasting) are not attached** — only
 > existence, authorship, venue and DOI are confirmed. Ref 9 (Ansuini et al.) is newly added
-> to close the §2 "low intrinsic dimensionality" [CHECK].
+> to close the §2 "low intrinsic dimensionality" [CHECK]. A subsequent scite pass (2026-07-21)
+> completed the mandatory retraction/correction check **clean** for refs 3 (Engelken), 7
+> (Benettin, Part 1) and 8 (Dieci–Van Vleck) — `retraction_notices` absent; tallies still not
+> attached (scite backend was intermittent).
 
 1. Saxe AM, McClelland JL, Ganguli S. Exact solutions to the nonlinear dynamics of learning in deep linear neural networks. In: 2nd International Conference on Learning Representations (ICLR); 2014. arXiv:1312.6120.
 2. Pennington J, Schoenholz SS, Ganguli S. Resurrecting the sigmoid in deep learning through dynamical isometry: theory and practice. In: Advances in Neural Information Processing Systems 30 (NIPS 2017); 2017. p. 4785–95.
