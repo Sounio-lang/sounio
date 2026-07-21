@@ -143,8 +143,9 @@ DecisionCandidateSetReceipt
 UniqueActionAbstentionReceipt
     why uniqueness was not established, missing receipt links, permitted next research step
 
-ClinicalAuthorizationReceipt
-    external, role-bound authorization not constructible from statistical receipts
+ExternalClinicalAuthorizationBoundary
+    external, role-bound authorization boundary; deliberately not a Stage 3
+    constructible nominal library record
 ```
 
 `ActionFeasibilityReceipt` is intentionally not a pharmacological eligibility
@@ -172,7 +173,7 @@ But the reverse direction is prohibited:
 point estimate                   != DecisionCandidateSetReceipt
 confidence interval              != InferenceRegularityReceipt
 nonregularity warning            != DecisionCandidateSetReceipt
-DecisionCandidateSetReceipt      != ClinicalAuthorizationReceipt
+DecisionCandidateSetReceipt      != external clinical authorization
 UniqueActionAbstentionReceipt    != causal effect failure
 ```
 
@@ -291,8 +292,9 @@ AcquisitionAbstentionReceipt
     the exact missing decision, validity, burden, implementation, or authority
     prerequisite that prevents even a research acquisition candidate
 
-AcquisitionAuthorizationReceipt
-    external, role-bound authorization not constructible from these receipts
+ExternalAcquisitionAuthorizationBoundary
+    external, role-bound authorization boundary; deliberately not a Stage 3
+    constructible nominal library record
 ```
 
 An `InformationValueAssessmentReceipt` cannot be constructed merely from an
@@ -356,9 +358,9 @@ compile-fail/psychiatric_nonregular_warning_cannot_prove_tie.sio
     expected EqualityOfEffectsReceipt
     found InferenceRegularityReceipt
 
-compile-fail/psychiatric_candidate_set_cannot_authorize_clinical_action.sio
-    expected ClinicalAuthorizationReceipt
-    found DecisionCandidateSetReceipt
+capability-only/psychiatric_candidate_set_cannot_authorize_clinical_action.sio
+    reserved for a separately justified opaque/capability design; it must not
+    be implemented as a public nominal authorization record in Stage 3
 
 compile-fail/psychiatric_associator_probe_cannot_explain_decision_ambiguity.sio
     expected ParenthesizationSensitivityReceipt
@@ -368,9 +370,9 @@ compile-fail/psychiatric_uncertainty_cannot_authorize_acquisition.sio
     expected ResearchAcquisitionCandidateReceipt
     found DecisionUncertaintyReceipt
 
-compile-fail/psychiatric_information_value_cannot_authorize_clinical_test.sio
-    expected AcquisitionAuthorizationReceipt
-    found InformationValueAssessmentReceipt
+capability-only/psychiatric_information_value_cannot_authorize_clinical_test.sio
+    reserved for the same capability-only acceptance surface, never an
+    ordinary nominal Stage 3 fixture
 ```
 
 The associator negative is deliberately conceptual. It prevents a mathematically
@@ -382,7 +384,15 @@ otherwise well-formed uncertainty or information-value calculation from
 becoming an instruction to obtain a measurement. A future positive control must
 construct `ResearchAcquisitionCandidateReceipt` only from the declared
 decision, information-value, observation-validity, burden, and external-limit
-receipts; it still cannot construct `AcquisitionAuthorizationReceipt`.
+receipts.
+
+The two `capability-only` entries are design constraints, not #901-gated Stage
+3 compile fixtures. Any public nominal authorization record would prove only a
+selected type mismatch while leaving the named record forgeable. They become
+executable acceptance cases only if a separately reviewed opaque/capability
+mechanism supplies an external authority token, a threat model, and attacker
+fixtures. Until then, the research package has no authorization constructor at
+all.
 
 ## 7. Acceptance Standard
 
@@ -438,7 +448,7 @@ Transformation: literature-backed DTR nonregularity and set-valued comparison co
 Types-Changed: none
 Effects-Changed: none
 IR-Changed: none
-Claims-Introduced: future synthetic psychiatric fixtures should distinguish a declared decision contrast, inference regularity, candidate-set basis, decision-relative information value, research acquisition candidate, unique-action abstention, and external clinical authorization
+Claims-Introduced: future synthetic psychiatric fixtures should distinguish a declared decision contrast, inference regularity, candidate-set basis, decision-relative information value, research acquisition candidate, unique-action abstention, and an external clinical-authorization boundary
 Claims-Forbidden: equality of effects from a zero-spanning interval; unique patient action from argmax or a candidate set; research acquisition from uncertainty alone; clinical test order from information value; causal identification from regular inference; nonassociativity from decision ambiguity; clinical recommendation, treatment selection, dosing, safety, or validation
 Assumptions: cited DTR sources constrain statistical representation and evaluation; they do not validate a psychiatric mechanism, an individual action, a clinical workflow, or a future Sounio package
 Write-Set: docs/research/psychiatric_nonregular_decision_boundary_contract_2026-07-21.md; docs/governance/topic-registry.v1.json; docs/governance/DOCS_ACCEPTANCE_REPORT.md
@@ -453,7 +463,7 @@ Authoritative-Only-If: the sources, stated limitations, current Concept-ID contr
 ```text
 Semantic-Outcome: nonregular statistical inference, near-zero decision contrast, competing-outcome ambiguity, decision-relative information value, research acquisition, and clinical authority are represented as distinct research boundaries
 Concept-Status-Before: psychiatric research contracts retained abstention and authority boundaries but had no dedicated nonregular-versus-unique-action contract
-Concept-Status-After: a point estimate, inferential regularity assessment, candidate set, information-value assessment, research acquisition candidate, equality claim, and external clinical authorization have separate prospective receipt roles
+Concept-Status-After: a point estimate, inferential regularity assessment, candidate set, information-value assessment, research acquisition candidate, equality claim, and external clinical-authorization boundary have separate prospective roles
 Distinctions-Added: point estimate != unique action; nonregularity != equality; uncertainty != information value; information value != acquisition authorization; candidate set != recommendation; decision ambiguity != nonassociativity
 Distinctions-Preserved: research model != empirical result; causal estimand != authority; compiler success != clinical validation
 Distinctions-Erased: none

@@ -119,7 +119,7 @@ compiler path accepts the psychiatric runtime suite.
 | `DyadicIdentificationReceipt` | design/assumptions for a named spillover estimand. | evidence that assumptions hold. |
 | `DyadicEffectEstimate` | bounded estimate for the named dyadic/interference estimand. | authority to alter another person's relationship, environment, or care. |
 | `DyadicInterferenceAbstentionReceipt` | unresolved membership, role, measurement, scope, support, or identification. | no effect, no relationship, or permission to ignore a gap. |
-| `RelationshipInterventionAuthorizationReceipt` | external, role-bound authorization. | a constructible result of statistical receipts. |
+| external relationship-intervention authorization | role-bound authority outside the library. | a constructible result of statistical receipts or a Stage 3 nominal record. |
 
 Every receipt must carry the relevant protocol, temporal, observation-process,
 uncertainty, and scope references from the preceding psychiatric contracts.
@@ -205,9 +205,9 @@ compile-fail/psychiatric_interference_scope_cannot_claim_identification.sio
     expected DyadicIdentificationReceipt
     found InterferenceScopeReceipt
 
-compile-fail/psychiatric_dyadic_effect_cannot_authorize_relationship_intervention.sio
-    expected RelationshipInterventionAuthorizationReceipt
-    found DyadicEffectEstimate
+capability-only/psychiatric_dyadic_effect_cannot_authorize_relationship_intervention.sio
+    reserved for a separately justified opaque/capability design; it must not
+    be implemented as a public nominal authorization record in Stage 3
 
 compile-fail/psychiatric_dyadic_history_cannot_claim_nonassociativity.sio
     expected ParenthesizationSensitivityReceipt
@@ -216,6 +216,13 @@ compile-fail/psychiatric_dyadic_history_cannot_claim_nonassociativity.sio
 
 The positive is an API/protocol witness only. It cannot make linkage valid,
 prove a measurement model, identify a spillover effect, or authorize action.
+The `capability-only` entry is not an imported nominal fixture: a public
+nominal relationship-intervention authorization record would be forgeable and
+would therefore test only a selected category mismatch. It can become an
+executable acceptance case only after a separate opaque/capability design
+supplies an external authority token, threat model, and attacker fixtures.
+Until then, the dyadic adapter has no relationship-intervention authorization
+constructor.
 
 ## 8. Acceptance Standard
 
@@ -240,7 +247,7 @@ Transformation: dyadic interdependence and causal-interference distinctions are 
 Types-Changed: none
 Effects-Changed: none
 IR-Changed: none
-Claims-Introduced: future synthetic fixtures distinguish membership, role mapping, paired observation, interaction event, actor-partner association, interference scope, spillover estimand, identification, dyadic effect, and external authorization
+Claims-Introduced: future synthetic fixtures distinguish membership, role mapping, paired observation, interaction event, actor-partner association, interference scope, spillover estimand, identification, dyadic effect, and an external authorization boundary
 Claims-Forbidden: inferred linkage; interaction from co-occurrence; causal partner effect from APIM association; identified spillover from an interference label; relationship intervention from an estimate; nonassociativity from directed history; psychiatric or clinical mechanism, recommendation, safety, or validation
 Assumptions: cited sources motivate social/dyadic modeling and causal-interference boundaries; they do not establish a psychiatric mechanism, valid consent/linkage, causal effect, or future Sounio package
 Write-Set: docs/research/psychiatric_dyadic_interference_contract_2026-07-21.md; docs/governance/topic-registry.v1.json; docs/governance/DOCS_ACCEPTANCE_REPORT.md
@@ -255,7 +262,7 @@ Authoritative-Only-If: sources, limitations, current Concept-ID contracts, and s
 ```text
 Semantic-Outcome: observations, dyadic association, causal interference, relationship authority, and nonassociative representation are separate research categories
 Concept-Status-Before: psychiatric contracts represented ordered context and abstention but had no dedicated dyadic association-versus-interference boundary
-Concept-Status-After: membership, role, pairing, interaction coding, association, spillover estimand, identification, effect, and authorization have distinct prospective receipt roles
+Concept-Status-After: membership, role, pairing, interaction coding, association, spillover estimand, identification, effect, and the external authorization boundary have distinct prospective roles
 Distinctions-Added: paired records != dyadic history; association != spillover; scope != identification; dyadic effect != relationship authority; direction != nonassociativity
 Distinctions-Preserved: research model != empirical result; causal estimand != authority; compiler success != clinical validation
 Distinctions-Erased: none
