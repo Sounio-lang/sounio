@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
 # Verticals: epistemic::knightian (p-box), clinical::aminoglycoside_pbpk (PK),
-# cybernetic::languaging (Maturana). Multi-module drivers -> lean_single engine.
+# cybernetic::languaging (Maturana). Multi-module drivers under default Madaros.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 SOUC=./bin/souc
 OUT="$(mktemp -d)"; trap 'rm -rf "$OUT"' EXIT
 fail=0
+engine_info="$($SOUC info 2>&1)"
+if ! grep -qF 'Madaros v' <<<"$engine_info"; then
+  echo "FAIL: knightian/PBPK/languaging gate requires default Madaros" >&2
+  printf '%s\n' "$engine_info" >&2
+  exit 1
+fi
 run() { # module driver sentinel [softcheck]
   echo "== $2 =="
   if [ "${4:-}" = "softcheck" ]; then
@@ -14,7 +20,7 @@ run() { # module driver sentinel [softcheck]
   else
     $SOUC check "$1" >/dev/null 2>&1 || { echo "FAIL check $1"; fail=1; }
   fi
-  if SOUNIO_SOUC_ENGINE=lean_single $SOUC compile "$2" -o "$OUT/x.elf" >/dev/null 2>&1; then
+  if $SOUC compile "$2" -o "$OUT/x.elf" >/dev/null 2>&1; then
     chmod +x "$OUT/x.elf"; "$OUT/x.elf" | grep -q "$3" || { echo "FAIL run $2"; fail=1; }
   else echo "FAIL compile $2"; fail=1; fi
 }

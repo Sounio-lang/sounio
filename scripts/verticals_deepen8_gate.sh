@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Deepen-batch 8: extend coverage of already-shipped verticals with untested public API.
-# Multi-module drivers -> lean_single engine.
+# Multi-module drivers under default Madaros.
 #   core::result             — IntResult/FloatResult monad (ok/err, unwrap, unwrap_or, err)
 #   algebra::jordan          — exceptional Jordan algebra J3(O): trace, det, Jordan product, square
 #   algebra::cayley_dickson  — CD tower: commutativity/associativity by level (168 = |PSL(2,7)|)
@@ -10,10 +10,16 @@ export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 SOUC=./bin/souc
 OUT="$(mktemp -d)"; trap 'rm -rf "$OUT"' EXIT
 fail=0
+engine_info="$($SOUC info 2>&1)"
+if ! grep -qF 'Madaros v' <<<"$engine_info"; then
+  echo "FAIL: verticals deepen8 gate requires default Madaros" >&2
+  printf '%s\n' "$engine_info" >&2
+  exit 1
+fi
 run() { # module driver sentinel
   echo "== $2 =="
   $SOUC check "$1" >/dev/null 2>&1 || { echo "FAIL check $1"; fail=1; }
-  if SOUNIO_SOUC_ENGINE=lean_single $SOUC compile "$2" -o "$OUT/x.elf" >/dev/null 2>&1; then
+  if $SOUC compile "$2" -o "$OUT/x.elf" >/dev/null 2>&1; then
     chmod +x "$OUT/x.elf"; "$OUT/x.elf" | grep -q "$3" || { echo "FAIL run $2"; fail=1; }
   else echo "FAIL compile $2"; fail=1; fi
 }
