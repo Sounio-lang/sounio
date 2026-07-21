@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Gate for stdlib data::bigrat (unbounded exact rational over BigInt). lean_single engine.
+# Gate for stdlib data::bigrat (unbounded exact rational over BigInt).
 # IMPORTANT: because souc has a codegen capacity wall that can SILENTLY emit wrong big values with a
 # clean exit, the correctness signal is the DIGIT-FOR-DIGIT DIFF of the run-proof's printed values
 # against the Python arbitrary-precision oracle (scripts/research/bigrat_oracle.py) -- NOT the program
@@ -10,10 +10,16 @@ export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 SOUC=./bin/souc
 OUT="$(mktemp -d)"; trap 'rm -rf "$OUT"' EXIT
 fail=0
+engine_info="$($SOUC info 2>&1)"
+if ! grep -qF 'Madaros v' <<<"$engine_info"; then
+  echo "FAIL: BigRat gate requires default Madaros" >&2
+  printf '%s\n' "$engine_info" >&2
+  exit 1
+fi
 echo "== check data/bigrat.sio =="
 $SOUC check stdlib/data/bigrat.sio >/dev/null 2>&1 || echo "NOTE: standalone check quirk on stdlib/data/bigrat.sio (Madaros check-mode; driver + oracle prove the API)"
 echo "== run-proof + ORACLE DIFF: unbounded exact rational =="
-if SOUNIO_SOUC_ENGINE=lean_single $SOUC compile tests/stdlib/data/test_bigrat_stdlib.sio -o "$OUT/x.elf" >/dev/null 2>&1; then
+if $SOUC compile tests/stdlib/data/test_bigrat_stdlib.sio -o "$OUT/x.elf" >/dev/null 2>&1; then
   chmod +x "$OUT/x.elf"
   "$OUT/x.elf" > "$OUT/run.txt" 2>&1 || true
   # reconstruct each multi-line big value into a single decimal, key=value
