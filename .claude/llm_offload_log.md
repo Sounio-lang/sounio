@@ -3226,3 +3226,9 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 | 2026-07-19 | xai/Grok 4.3 | math-review | stdlib/epistemic/gum.sio (dof_to_i64) | PASS | Confirmed WS, t-tables, Type A/B, and round-half-up `dof+0.5` as correct GUM table lookup. Raw: `/tmp/llm-offload-0n5IXJ/`. |
 | 2026-07-19 | deepseek | review | test_prescription_chain_e2e.sio | PROVIDER_ERROR | Insufficient Balance. |
 | 2026-07-19 | xai/Grok 4.3 | review | test_prescription_chain_e2e.sio | ADDRESSED | Wired GUM U95 into `gum_band_decide`; documented Matzke *0.06 L/h and illustrative CV=0.25; claims_not_made bedside. Dead-code GUM critique fixed. Raw: `/tmp/llm-offload-bh5nkB/`. |
+
+## 2026-07-21 - psychiatric counterfactual authority and abstention boundary
+
+| Date | Provider | Task | Target | Outcome | Note |
+|---|---|---|---|---|---|
+| 2026-07-21 | xai/Grok 4.3; deepseek; gemini/openrouter; zai; groq attempted | raw external-facing research review | docs/research/psychiatric_counterfactual_authority_abstention_contract_2026-07-21.md | PASS_SINGLE_PROVIDER_DEGRADED | Grok confirmed that the document separates counterfactual questions, causal identification, transport, selective calibration, abstention, and clinical decision authority, with no patient-level action licensed. DeepSeek returned Insufficient Balance; Gemini/OpenRouter returned HTTP 402 insufficient credits; ZAI returned weekly/monthly limit exhausted; Groq returned invalid API key. No review finding required a change. Raw: `/tmp/llm-offload-K3e5ZX/`, `/tmp/llm-offload-5qBS3q/`. |
