@@ -209,7 +209,126 @@ it cannot decide who is entitled to issue the token.
 These are authority-preservation invariants, not clinical, legal, security, or
 empirical validation claims.
 
-## 6. Threat Model And Synthetic Collisions
+## 6. Temporal Authority Is A Protocol, Not A Token Field
+
+The capability's static type can preserve which operations are unavailable to
+ordinary program code. It cannot, on its own, decide whether an external
+issuer still endorses an action at the moment it is attempted. That question
+is temporal and protocol-bound.
+
+This distinction is independently motivated by explicit-time authorization
+logic: a right valid over an interval needs a uniform proof over that interval;
+separate proofs over adjacent or overlapping intervals do not automatically
+compose into continuous authority. [DeYoung, Garg, and Pfenning's
+authorization logic](https://www.cs.cmu.edu/~fp/papers/CMU-CS-07-166.pdf)
+makes that non-composition explicit. The point for Sounio is conservative: a
+cached decision reference, two valid-looking timestamps, or a locally chosen
+epoch must not synthesize uninterrupted external permission.
+
+Likewise, the revocation literature treats revocation as an enforcement and
+proof problem, not a mutable bit. [Georges et
+al.](https://popl21.sigplan.org/details/POPL-2021-research-papers/6/Efficient-and-Provable-Local-Capability-Revocation-using-Uninitialized-Capabilities)
+provide a mechanically reasoned revocation construction on a capability
+machine. That does not transfer its result to Sounio; it does rule out calling
+an authority feature "revocable" merely because a record contains an
+`is_revoked` field. Recent work on
+[revocable capability typestate](https://pldi26.sigplan.org/details/pldi-2026-papers/80/Typestate-via-Revocable-Capabilities)
+is also useful design pressure: authority state may change across calls and
+need not coincide with lexical scope.
+
+### 6.1 Proposed Abstract State Machine
+
+The following is a future contract vocabulary, not current syntax or runtime
+behavior. It describes what a future trusted adapter would have to make
+observable and what ordinary research code must never manufacture.
+
+```text
+ResearchActionRequestReceipt
+    | external endowment for the exact request
+    v
+EndowedAuthorityCapability(scope, purpose, request_id, issuer_ref, epoch)
+    | attenuation only
+    v
+AttenuatedAuthorityCapability(narrower_scope, same request binding)
+    | freshness/revocation verification immediately before presentation
+    +--> AuthorityAbstentionReceipt(reason)
+    v
+PresentedAuthorityAttemptTrace
+    | external adapter response
+    +--> ExternalActionOutcomeReference
+    +--> AuthorityAbstentionReceipt(reason)
+    +--> ExternalActionFailureReference
+```
+
+`ExternalActionOutcomeReference` remains a reference to an externally reported
+outcome. It is not a proof that the physical, institutional, clinical, legal,
+or interpersonal world is in the claimed state. A local attempt trace also
+cannot be promoted to an outcome reference.
+
+The critical transition is the one immediately before presentation. A future
+adapter must choose one explicit mode and make its limitations visible:
+
+| Freshness mode | What the adapter can honestly establish | What it cannot establish by itself |
+|---|---|---|
+| Live issuer check | an issuer-controlled verifier reported the request/scope/purpose acceptable at that check. | action completion, issuer legitimacy, or a guarantee after the check unless the external protocol binds execution. |
+| Short-lived signed assertion | a verifier accepted an issuer assertion within its declared validity window. | live revocation that occurs after assertion issuance. |
+| Offline cached assertion | only that a locally cached assertion had previously been observed. | current permission; it must normally yield abstention for authority exercise. |
+| No verifier or trustworthy clock | no live authority fact. | permission; the only valid result is `AuthorityAbstentionReceipt`. |
+
+This is deliberately stricter than type-level expiry. A type parameter or
+timestamp can bind a proposed epoch to a request, but cannot make a caller's
+clock, a network response, or an issuer revocation event trustworthy.
+
+### 6.2 Non-Associative Authorization Composition
+
+The existing psychiatric work insists that ordered histories cannot be freely
+reassociated. Authority has the same structural property. These expressions
+must remain distinguishable:
+
+```text
+verify(request, capability); execute(request)
+verify(request_a, capability); execute(request_b)
+verify(request, capability_at_epoch_1); execute(request at epoch_2)
+verify(attenuated_scope); compose_with_wider_request
+```
+
+They may share a score, a request family, a token lineage, or a nearby time
+window without sharing authority. A future effect or capability API therefore
+needs a request-bound presentation operation, not a generic `authorize()`
+whose result can be reused later or redirected to another request.
+
+This also gives a clean boundary for proof-carrying authorization. Proof
+checking can be deliberately simpler than proof search, as in [Appel and
+Felten's proof-carrying authentication
+framework](https://collaborate.princeton.edu/en/publications/proof-carrying-authentication/).
+But checking a proof of a policy claim is still different from owning an
+unforgeable, fresh, request-bound capability to invoke an external adapter.
+The future Sounio contract must represent those steps separately.
+
+### 6.3 Required Adversarial Tests
+
+Before any authority feature is described as usable, its imported test suite
+must include all of the following. Each test needs a positive control and a
+negative collision; in particular, a type-check-only positive is insufficient.
+
+| Collision | Expected refusal or evidence boundary |
+|---|---|
+| `request_a` verified, `request_b` presented | no presentation capability for `request_b`. |
+| same subject/action, widened purpose or target | attenuation cannot widen; abstain or require new endowment. |
+| cached success followed by revocation | no exercise from the cached local value alone. |
+| stale assertion with apparently valid local fields | abstain unless the declared freshness mode accepts it. |
+| two adjacent valid intervals with a gap or different issuer epoch | no inferred continuous authority. |
+| issuer rotation or authority-chain substitution | old lineage cannot silently bind the new issuer reference. |
+| duplicate or retry of an otherwise accepted request | external adapter receives an explicit replay/nonce discipline; a local linear value alone is not sufficient evidence. |
+| verified request followed by different external action payload | refuse; request binding covers the payload identity, not just a label. |
+| adapter timeout or unverifiable outcome | `AuthorityAbstentionReceipt` or `ExternalActionFailureReference`, never success. |
+| local trace replayed as external outcome | reject; attempt and outcome have different nominal and capability boundaries. |
+
+The runtime acceptance must also record the selected freshness mode and its
+verification evidence. Without that receipt, an apparently successful test can
+only demonstrate local control flow, not authority preservation.
+
+## 7. Threat Model And Synthetic Collisions
 
 The first adversary is ordinary importing code. It may construct every public
 record, replay every public byte string, retain stale values, and select an
@@ -231,7 +350,7 @@ importing code can construct or widen an authority capability, if revocation is
 represented only by caller-controlled data, or if an action trace is accepted
 as evidence that an external action occurred.
 
-## 7. Delivery Order
+## 8. Delivery Order
 
 1. **Current research boundary:** keep authority external and produce only
    research requests, evidence, and abstentions. This is the current status.
@@ -261,7 +380,7 @@ The order matters. A nominal type check before opacity, a capability before
 revocation design, or an action trace before external confirmation are all
 different claims. They may not be reassociated into one apparent proof.
 
-## 8. Cross-Domain Reuse Without Ontology Leakage
+## 9. Cross-Domain Reuse Without Ontology Leakage
 
 | Domain | Research code may form | It may not form |
 |---|---|---|
@@ -274,7 +393,7 @@ different claims. They may not be reassociated into one apparent proof.
 The reusable part is the refusal to invent authority. The ontology of an action,
 the accountable issuer, and the external confirmation remain domain-specific.
 
-## 9. Semantic-Lane Declaration
+## 10. Semantic-Lane Declaration
 
 ```text
 Semantic-Lane-ID: external-authority-capability-boundary-v0
