@@ -9,24 +9,20 @@
 #   NONZERO PASS
 #   COMP i 0   for i in 0..15  (16 lines)
 #
-# Residual closed by this gate (Wave12 STAR):
+# Residual closed by this gate (Wave12):
 #   #1383 → multi-mod check specializes generics (check: OK)
 #   Wave12 collapse → when generics instantiate, collapse specialized merged
 #            items into programs[0] and lower as single-module (avoids SEGV in
 #            multi-mod body lower of generic templates — measured: cd_add_exact
 #            after summary_done / bodies_begin).
-#   Wave12 handoff → whole-Program writeback for that collapse:
+#   Wave12 STAR → freestanding specialized-items handoff for that collapse:
 #            lean_single drops nested field-in-array store
-#            `(*programs)[0].items = specialized_ir`, leaving only main body-
-#            lowered and mono cd_* stubs with ic=0 → ZD FAIL + SEGV. Fix:
-#            copy Program out, assign items, write full struct back.
-#   Wave12 float-poison → after collapse, CDElement (f64) and
-#            CDElementExact{,__i64} share one Lowerer layout table; by-name
-#            fallback on field `c` marked exact i64 array loads as float
-#            (field_array_float=1) → SEGV mid index lower. Fix: when the owner
-#            local has a known struct type, trust that layout only.
+#            `(*programs)[0].items = specialized_ir` (and whole-Program array
+#            writeback SEGV'd at seed_begin). Fix: out-param monomorphized
+#            list + module_frontend_lower_specialized_items_box (no programs[]
+#            mutation; freestanding no-externs lower).
 #
-# Requires a current-source Madaros that includes the above
+# Requires a current-source Madaros that includes both fixes
 # (artifacts/self-hosted/madaros or MADAROS_RAW_BIN). The committed prebuilt
 # may lag.
 
@@ -48,8 +44,6 @@ echo "== madaros_cd_exact_e2e_gate =="
 
 RAW=""
 for cand in "${MADAROS_RAW_BIN:-}" "${SOUNIO_MADAROS_BIN:-}" \
-            "$ROOT/artifacts/self-hosted/madaros-cd-exact-e2e2" \
-            "$ROOT/artifacts/self-hosted/madaros-cd-exact-e2e" \
             "$ROOT/artifacts/self-hosted/madaros-w12-spec" \
             "$ROOT/artifacts/self-hosted/madaros" \
             "$ROOT/bin/madaros-linux-x86_64"; do
@@ -93,11 +87,7 @@ set +e
 "$RAW" compile "$SRC" -o "$ELF" >"$OUT/compile.log" 2>&1
 cc_rc=$?
 set -e
-# Madaros writes a bare ELF without the exec bit; chmod before -x checks / run.
-if [[ -f "$ELF" ]]; then
-  chmod +x "$ELF" || true
-fi
-if [[ $cc_rc -ne 0 || ! -x "$ELF" ]]; then
+if [[ $cc_rc -ne 0 || ! -f "$ELF" || ! -s "$ELF" ]]; then
   echo "MADAROS_CD_EXACT_E2E_GATE_BLOCKED reason=compile_failed cc_rc=$cc_rc" >&2
   # Loud residual class markers for triage
   if grep -q 'dep_begin 1' "$OUT/compile.log" && ! grep -q 'dep_lower_done 1\|specialized_collapse\|lower_done' "$OUT/compile.log"; then
@@ -106,6 +96,7 @@ if [[ $cc_rc -ne 0 || ! -x "$ELF" ]]; then
   tail -60 "$OUT/compile.log" >&2 || true
   exit 1
 fi
+chmod +x "$ELF" 2>/dev/null || true
 echo "compile: OK elf=$(stat -c%s "$ELF") bytes"
 if grep -q 'specialized_collapse lower_count=1' "$OUT/compile.log"; then
   echo "path=specialized_collapse"
