@@ -16,7 +16,7 @@ use native::codegen_x86_linux::{compile_native_v2_preview_to_file, native_resolv
 use check::knowledge_context::{knowledge_context_validate_items, knowledge_context_validate_items_values_only}
 use resolve::mod::{resolve_modules}
 use module_parse::{extract_imports_from_ast, file_exists, file_path_to_module_path, load_module_file}
-use check::specializer::{specialize_generics, spec_last_instantiated, spec_append_item_lists}
+use check::specializer::{specialize_generics, spec_last_instantiated, spec_mono_marker_count, spec_append_item_lists}
 
 // Multi-module parse accumulates every module's GLOBAL_VAR_INIT_* side-table
 // entries so imported f64/i64 BSS constants survive to lower time. Without
@@ -5462,27 +5462,196 @@ fn module_frontend_lower_program_full_traced(
 // per-module check_modules_verdict_boot4 so ordinary multi-module code stays
 // byte-identical. handled=true means `verdict` is the authoritative merged
 // verdict (0 ok / 1 reject).
-fn module_frontend_specialized_typecheck(programs: &! [Program; 256], count: i64) -> (bool, i64) with IO, Mut, Panic, Div, Alloc {
-    if count <= 0 {
-        return (false, 0)
-    }
+// Merge every loaded module's items (last → first) into one list for the
+// WP-A3 specializer. Order matches module_frontend_specialized_typecheck /
+// visibility preflight so free-var exclusion sees the same imported names.
+fn module_frontend_merge_program_items(
+    programs: &! [Program; 256],
+    count: i64
+) -> Option<Box<ItemList>> with Mut, Alloc {
     var merged: Option<Box<ItemList>> = None
     var i: i64 = count - 1
     while i >= 0 {
         merged = spec_append_item_lists((*programs)[i as usize].items, merged)
         i = i - 1
     }
-    let specialized = specialize_generics(merged)
-    if !spec_last_instantiated() {
+    merged
+}
+
+// WP-A3 typecheck-only residual (callers that do not own programs for rewrite).
+// Prefer module_frontend_specialized_prepare when IR lower follows — that path
+// rewrites programs[0] to the monomorphized merged list so body lower never
+// sees generic templates (Wave12 cd_exact residual: SEGV in cd_add_exact body
+// lower on trait-method loops over [F;2048]).
+fn module_frontend_specialized_typecheck(programs: &! [Program; 256], count: i64) -> (bool, i64) with IO, Mut, Panic, Div, Alloc {
+    if count <= 0 {
+        return (false, 0)
+    }
+    let specialized = specialize_generics(module_frontend_merge_program_items(programs, count))
+    // i64 mono-marker gate — not bare `if !bool` (CI-seed fragile).
+    let mono_n: i64 = spec_mono_marker_count()
+    if mono_n <= 0 {
         return (false, 0)
     }
     if str_eq(read_env("SOUNIO_MM_SPEC_TRACE"), "1") {
         print("mm_spec: specialized-typecheck over merged ")
         print_int(count)
-        print(" modules (generic instantiated)\n")
+        print(" modules mono_markers=")
+        print_int(mono_n)
+        print("\n")
     }
     let verdict = check_items_verdict_boot4(specialized)
     (true, verdict)
+}
+
+// WP-A3 full prepare: merge → specialize → typecheck, and when a generic was
+// actually monomorphized, emit a monomorphized item list for single-module IR
+// lower (specializer design intent; see specializer.sio multi-module lane
+// notes). Collapse signal is *specialized_items_out:
+//   None  → use plain multi-module check+lower over `count` modules
+//   Some  → return value is typecheck verdict; out-param holds the monomorphized
+//           merge and the caller MUST lower THAT list as freestanding single module
+// Return: typecheck verdict when specialized_items_out is Some (collapse path);
+// ignored when out-param stays None (ordinary multi-mod). Do NOT return (bool, i64)
+// from a function that also takes &! out-params — measured Wave12 CI failure:
+// lean_single seed misreads tuple.0 as true after early return (false, 0), so
+// callers collapsed with specialized_items=None → ir_summary_failed on every
+// non-generic multi-mod (imported_deref_f64_array gate, dual_import). Gate
+// collapse on Option occupancy only.
+//
+// Handoff MUST NOT rely on nested field-in-array store
+// `(*programs)[0].items = specialized_ir` — lean_single drops it (A8/A14/A10),
+// leaving only main body-lowered and mono cd_* stubs with ic=0 → ZD FAIL +
+// SEGV. Whole-Program array writeback is also fragile for large Program
+// (measured Wave12 STAR: seed_begin SEGV after writeback). Caller lowers the
+// out-param list directly via module_frontend_lower_specialized_items_box.
+fn module_frontend_specialized_prepare(
+    programs: &! [Program; 256],
+    count: i64,
+    specialized_items_out: &! Option<Box<ItemList>>
+) -> i64 with IO, Mut, Panic, Div, Alloc {
+    // Always clear: Option occupancy is the sole collapse signal.
+    *specialized_items_out = None
+    if count <= 0 {
+        return 0
+    }
+    // First specialize: typecheck only. Do NOT park this list on programs[0]
+    // yet — checker collect may mutate Item/fn_def through the shared Box
+    // spine, which would leave body lower seeing only main with live clones
+    // stripped (measured: body_fn_count 4 but only main body-lowered → ZD FAIL
+    // / SEGV on empty mono stubs).
+    let specialized_tc = specialize_generics(module_frontend_merge_program_items(programs, count))
+    // Seed-safe i64 mono markers. Leave specialized_items_out as None when
+    // mono_n==0 so Option occupancy stays the sole collapse arm.
+    let mono_n: i64 = spec_mono_marker_count()
+    if mono_n <= 0 {
+        return 0
+    }
+    if str_eq(read_env("SOUNIO_MM_SPEC_TRACE"), "1") {
+        print("mm_spec: specialized-prepare over merged ")
+        print_int(count)
+        print(" modules mono_markers=")
+        print_int(mono_n)
+        print(" (collapse candidate)\n")
+    }
+    let verdict = check_items_verdict_boot4(specialized_tc)
+    // Second specialize: fresh monomorphized list for IR lower, rebuilt from
+    // still-intact per-module originals (merge only reads programs[i].items).
+    // Monomorphized + retained non-generic items from every module live in
+    // one list under same-name mono. Multi-mod template body lower SEGV'd on
+    // cd_add_exact / trait-method array loops (Wave12 residual).
+    let specialized_ir = specialize_generics(module_frontend_merge_program_items(programs, count))
+    let mono_n2: i64 = spec_mono_marker_count()
+    if mono_n2 <= 0 {
+        return 0
+    }
+    let ir_slots = module_frontend_count_lowered_ir_slots(&specialized_ir)
+    if ir_slots <= 0 {
+        return 0
+    }
+    if str_eq(read_env("SOUNIO_MM_SPEC_TRACE"), "1") {
+        print("mm_spec: specialized_ir ir_slots=")
+        print_int(ir_slots)
+        print(" mono_markers=")
+        print_int(mono_n2)
+        print("\n")
+    }
+    // Out-param handoff (lean_single-safe). No programs[] mutation.
+    // Some(...) is the authoritative "handled / collapse" signal for callers.
+    *specialized_items_out = specialized_ir
+    verdict
+}
+
+// True when the lowered module has at least one `main` with a non-empty body.
+// Specialized collapse must not ship a hollow main (measured dual gum+knowledge:
+// specialized lower left main@53 ic=0 → silent rc=0 without DUAL_GUM_KNOWLEDGE_OK).
+fn module_frontend_module_has_main_body(module: &IrModule) -> bool {
+    let watch_main = make_name("main")
+    var fi: i64 = 0
+    while fi < (*module).fn_count {
+        if ir_name_eq((*module).functions[fi as usize].name, watch_main) {
+            if (*module).functions[fi as usize].instr_count > 0 {
+                return true
+            }
+        }
+        fi = fi + 1
+    }
+    false
+}
+
+// Single-module lower of a monomorphized item list produced by
+// module_frontend_specialized_prepare. Lowers the out-param items as a
+// freestanding Program (no programs[] writeback) while still allowing
+// multi-mod extern resolution against the original loaded modules. Pure
+// no-externs freestanding failed dual with ir_summary_failed; with-externs
+// + hollow-main guard is the green path (cd_exact body-lowers, dual falls
+// back to multi-mod when main stays ic=0).
+fn module_frontend_lower_specialized_items_box(
+    items: &Option<Box<ItemList>>,
+    programs: &! [Program; 256],
+    program_count: i64,
+    trace: &! LoadMultimoduleIrTrace
+) -> ModuleFrontendLowerDirectBoxResult with IO, Mut, Panic, Div, Alloc {
+    print("lower_specialized: begin\n")
+    // program_count stays at the original loaded module count so extern
+    // lookup still sees sibling modules; the ITEMS being lowered are the
+    // monomorphized merge (not programs[0].items).
+    let seed_lower = module_frontend_lower_program_items_box_traced_with_externs(
+        items,
+        programs,
+        program_count,
+        0,
+        trace
+    )
+    print("lower_specialized: done\n")
+    if !seed_lower.ok {
+        return module_frontend_lower_direct_box_error(seed_lower.error_msg)
+    }
+    match seed_lower.module {
+        Some(module_box) => {
+            if module_frontend_dump_merged_calls_enabled() {
+                print("MERGE_DUMP: specialized_module\n")
+                ir_module_dump_merge_calls(&(*module_box))
+            }
+            // Hollow-main guard: collapse without a body-lowered main is
+            // worse than multi-mod (silent rc=0). Caller falls back.
+            if !module_frontend_module_has_main_body(&(*module_box)) {
+                print("lower_specialized: hollow_main — reject for multi-mod fallback\n")
+                return module_frontend_lower_direct_box_error("specialized_hollow_main")
+            }
+            trace.merged_modules = 1
+            // Resolve same-module call targets (mono names already in one list).
+            ir_module_resolve_all_call_targets(&! (*module_box))
+            if module_frontend_dump_merged_calls_enabled() {
+                print("MERGE_DUMP: specialized_module_post_resolve\n")
+                ir_module_dump_merge_calls(&(*module_box))
+            }
+            module_frontend_lower_direct_box_ok(module_box, ir_empty_validated_patch_stats())
+        }
+        None => {
+            module_frontend_lower_direct_box_error("specialized_lower_no_module")
+        }
+    }
 }
 
 // Finalize merged multi-mod IR in place and return the live Box. No densify.
@@ -5498,10 +5667,19 @@ fn module_frontend_merge_imported_box(
     }
 
     trace.last_stage = "typecheck"
-    let spec_tc = module_frontend_specialized_typecheck(programs, loaded)
+    // Wave12: specialize+collapse when generics instantiate so body lower
+    // sees monomorphized items (not free-var templates).
+    var specialized_items: Option<Box<ItemList>> = None
+    let prep_verdict = module_frontend_specialized_prepare(programs, loaded, &! specialized_items)
+    // Option occupancy is the collapse signal (not a (bool,i64) tuple — see prepare).
+    var use_collapse = false
+    match specialized_items {
+        Some(_) => { use_collapse = true }
+        None => { use_collapse = false }
+    }
     var verdict: i64 = 0
-    if spec_tc.0 {
-        verdict = spec_tc.1
+    if use_collapse {
+        verdict = prep_verdict
     } else {
         verdict = check_modules_verdict_boot4(programs, loaded)
     }
@@ -5513,7 +5691,24 @@ fn module_frontend_merge_imported_box(
 
     // Per-module check_program_with_artifacts cannot see cross-module imports and
     // either rejects (E137) or spins; multimodule verdict above is authoritative.
-    let lowered = module_frontend_lower_programs_array_direct_box(programs, loaded, trace)
+    // Specialized collapse: freestanding lower of monomorphized list (no array
+    // writeback). On hollow-main / lower failure, fall back to multi-mod so dual
+    // gum+knowledge stays green. Ordinary multi-mod: lower_programs_array_direct_box.
+    var used_specialized: bool = false
+    var lowered: ModuleFrontendLowerDirectBoxResult = module_frontend_lower_direct_box_error("uninitialized")
+    if use_collapse {
+        lowered = module_frontend_lower_specialized_items_box(&specialized_items, programs, loaded, trace)
+        if lowered.ok {
+            used_specialized = true
+        } else {
+            print("imported_merge: specialized lower failed (")
+            print(lowered.error_msg)
+            print(") — multi-mod fallback\n")
+            lowered = module_frontend_lower_programs_array_direct_box(programs, loaded, trace)
+        }
+    } else {
+        lowered = module_frontend_lower_programs_array_direct_box(programs, loaded, trace)
+    }
     if !lowered.ok {
         print("IR lowering failed during merge: ")
         print(lowered.error_msg)
@@ -5525,11 +5720,15 @@ fn module_frontend_merge_imported_box(
         print("IR lowering produced empty module\n")
         return module_frontend_lower_direct_box_error("ir_lowering_empty_module")
     }
-    let user_main_snapshot = ir_function_deep_copy((*module_box).functions[0 as usize])
-    // Memory wall P0: finalize/restore in place on the boxed module — no full
-    // IrModule by-value chain (promote/compact/ensure/resolve each used to copy).
-    ir_module_finalize_merged_calls(&! (*module_box))
-    ir_module_restore_user_main_calls(&! (*module_box), user_main_snapshot)
+    // Specialized freestanding path already resolve_all_call_targets; multi-mod
+    // still needs finalize/restore of merged import stubs.
+    if !used_specialized {
+        let user_main_snapshot = ir_function_deep_copy((*module_box).functions[0 as usize])
+        // Memory wall P0: finalize/restore in place on the boxed module — no full
+        // IrModule by-value chain (promote/compact/ensure/resolve each used to copy).
+        ir_module_finalize_merged_calls(&! (*module_box))
+        ir_module_restore_user_main_calls(&! (*module_box), user_main_snapshot)
+    }
     module_frontend_lower_direct_box_ok(module_box, ir_empty_validated_patch_stats())
 }
 
@@ -5655,14 +5854,27 @@ pub fn module_frontend_compile_imported_to_file(
 
     trace.last_stage = "typecheck"
     print("imported_compile: typecheck_begin\n")
-    // WP-A3: when a cross-module generic is instantiated, take the verdict from
-    // the merged + monomorphized item list (drops the E008 CDElementExact__T
-    // mono-mismatch); otherwise use the normal per-module verdict. The programs
-    // array is left untouched, so IR lowering below is unchanged.
-    let spec_tc = module_frontend_specialized_typecheck(&! programs, loaded)
+    // WP-A3 + Wave12: when a cross-module generic is instantiated, monomorphize
+    // the merged item list (drops E008 CDElementExact__T mono-mismatch) AND
+    // lower the monomorphized list as a freestanding single module. Leaving
+    // programs untouched after typecheck-only specialize caused SEGV in
+    // multi-mod body lower of generic templates (cd_add_exact residual).
+    // Nested field-in-array / whole-Program array writeback is not the handoff
+    // (lean_single drops nested stores; whole-Program writeback SEGV'd at
+    // seed_begin). Out-param list + freestanding lower is the lean_single-safe
+    // path. Ordinary multi-module (no instantiation) still uses per-module
+    // check+lower.
+    var specialized_items: Option<Box<ItemList>> = None
+    let prep_verdict = module_frontend_specialized_prepare(&! programs, loaded, &! specialized_items)
+    // Option occupancy is the collapse signal (not a (bool,i64) tuple — see prepare).
+    var use_collapse = false
+    match specialized_items {
+        Some(_) => { use_collapse = true }
+        None => { use_collapse = false }
+    }
     var verdict: i64 = 0
-    if spec_tc.0 {
-        verdict = spec_tc.1
+    if use_collapse {
+        verdict = prep_verdict
     } else {
         verdict = check_modules_verdict_boot4(&! programs, loaded)
     }
@@ -5674,10 +5886,29 @@ pub fn module_frontend_compile_imported_to_file(
     }
     trace.typechecked_modules = loaded
     print("imported_compile: typecheck ok\n")
+    if use_collapse && loaded > 1 {
+        print("imported_compile: specialized_collapse lower_count=1 (from ")
+        print_int(loaded)
+        print(" modules)\n")
+    }
 
     trace.last_stage = "lower_merge"
     print("imported_compile: lower_begin\n")
-    let lowered = module_frontend_lower_programs_array_direct_box(&! programs, loaded, &! trace)
+    var used_specialized: bool = false
+    var lowered: ModuleFrontendLowerDirectBoxResult = module_frontend_lower_direct_box_error("uninitialized")
+    if use_collapse {
+        lowered = module_frontend_lower_specialized_items_box(&specialized_items, &! programs, loaded, &! trace)
+        if lowered.ok {
+            used_specialized = true
+        } else {
+            print("imported_compile: specialized lower failed (")
+            print(lowered.error_msg)
+            print(") — multi-mod fallback\n")
+            lowered = module_frontend_lower_programs_array_direct_box(&! programs, loaded, &! trace)
+        }
+    } else {
+        lowered = module_frontend_lower_programs_array_direct_box(&! programs, loaded, &! trace)
+    }
     print("imported_compile: lower_done\n")
     if !lowered.ok {
         print("IR lowering failed during merge: ")
@@ -5688,11 +5919,16 @@ pub fn module_frontend_compile_imported_to_file(
     }
 
     let module_box = lowered.module
-    // A single module has no cross-module calls to finalize. Compile the boxed
-    // IrModule directly so the bridge never materializes or returns the very
-    // large module by value.
-    if loaded == 1 {
-        ir_module_resolve_all_call_targets(&! (*module_box))
+    // Single module (true single-file OR Wave12 specialized collapse that kept
+    // a body-lowered main) has no cross-module calls to finalize. Compile the
+    // boxed IrModule directly so the bridge never materializes or returns the
+    // very large module by value.
+    if used_specialized || loaded == 1 {
+        // Specialized path already ran resolve_all inside lower_specialized_items_box;
+        // true single-module still needs resolve here.
+        if !used_specialized {
+            ir_module_resolve_all_call_targets(&! (*module_box))
+        }
         let fn_count = (*module_box).fn_count
         trace.last_stage = "done"
         trace.last_module_index = 0

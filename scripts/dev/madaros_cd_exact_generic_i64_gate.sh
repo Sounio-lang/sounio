@@ -50,7 +50,7 @@ set +e
 compile_rc=$?
 set -e
 
-if [[ $compile_rc -ne 0 || ! -x "$OUT/cd.elf" ]]; then
+if [[ $compile_rc -ne 0 || ! -f "$OUT/cd.elf" || ! -s "$OUT/cd.elf" ]]; then
   echo "RED status=compile_fail rc=$compile_rc"
   echo "----- compile tail -----"
   tail -40 "$OUT/compile.log" || true
@@ -62,6 +62,7 @@ if [[ $compile_rc -ne 0 || ! -x "$OUT/cd.elf" ]]; then
   echo "MADAROS_CD_EXACT_GENERIC_I64_GATE_FAIL" >&2
   exit 1
 fi
+chmod +x "$OUT/cd.elf" 2>/dev/null || true
 
 set +e
 "$OUT/cd.elf" >"$OUT/run.out" 2>"$OUT/run.err"
