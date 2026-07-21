@@ -348,6 +348,55 @@ each active defeater routes to abstention or further review. This remains an
 auditability property of a synthetic program. It neither proves a safety case
 adequate nor determines who has institutional authority.
 
+## Artifact Identity Is Not A Runtime Result
+
+An assurance argument is only as strong as the identity of the artifact that
+actually produced an observation. A source commit, a source archive, a
+compiler executable, a build invocation, and a native execution are connected
+facts, not aliases for one another. The distinction matters whenever a
+checked-in compiler ELF and a source-fresh ELF produce different traces, reach
+different resource boundaries, or fail at different lifecycle stages.
+
+- The existing [Sounio science-research boundary](../internal/concepts/science-research-boundary.md) already keeps compiler source snapshots, source-fresh compiler hashes, and run receipts distinct.
+- The [in-toto specification](https://github.com/in-toto/docs/blob/master/in-toto-spec.md) models supply-chain steps, actors, materials, and products as separately verifiable metadata.
+- The [Reproducible Builds project](https://reproducible-builds.org/docs/plans/) treats independent reconstruction from declared source and environment as a stronger result than a single successful build.
+
+This does not require a full reproducible-build implementation before a
+research fixture can be useful. It requires that a report refuse to merge
+incompatible compiler artifacts into one result.
+
+```text
+SourceSnapshotReceipt != CompilerArtifactReceipt
+CompilerArtifactReceipt + BuildInvocationReceipt != RuntimeExecutionReceipt
+RuntimeExecutionReceipt != SemanticAcceptanceReceipt
+matching artifact hash != independently reproduced semantic result
+source-fresh label != declared source closure
+```
+
+### Proposed Artifact-Provenance Receipts
+
+| Receipt | It may state | It must carry or reference | It must not silently become |
+| --- | --- | --- | --- |
+| `SourceSnapshotReceipt` | exact source revision or archive identity. | repository/ref, source digest, and included-input boundary. | proof that a compiler was built from it. |
+| `CompilerArtifactReceipt` | an executable compiler artifact selected for a run. | artifact digest, build source snapshot, target, and toolchain/build receipt. | evidence that another ELF has the same behavior. |
+| `BuildInvocationReceipt` | the command, declared environment, resolver/target selection, input files, and requested output path. | compiler-artifact identity and normalized input scope. | proof that an ELF was produced or executed. |
+| `RuntimeExecutionReceipt` | exact produced output identity, exit status, stdout/stderr digests, and execution environment. | successful build receipt and runtime command. | a semantic proof beyond the covered fixture. |
+| `SemanticAcceptanceReceipt` | an explicitly scoped gate verdict tied to all preceding identities. | named assertions, expected refusal/success, and excluded fallback paths. | clinical validation, general compiler correctness, or an independent replay. |
+| `ArtifactDivergenceReceipt` | two non-identical source/artifact/invocation chains with incompatible outcomes. | both chains, the first observed divergence, and the comparison boundary. | a claim that either chain is canonical without a declared selection rule. |
+
+The current compiler investigation illustrates the value of
+`ArtifactDivergenceReceipt`: a checked-in ELF that reaches one IR boundary and
+a source-fresh ELF that reaches a later native-write boundary are not
+contradictory results until they are falsely treated as the same artifact.
+The correct next operation is to bind each run to source and artifact identity,
+then compare like with like.
+
+For future psychiatric or medical-research fixtures, this prevents a subtler
+but equally important mistake: a receipt that represents a scientific model
+must preserve which code, parameters, input schema, and execution path
+produced it. A provenance chain can establish traceability; it cannot establish
+the model's biological adequacy, causal identification, or clinical value.
+
 ## Falsifiers
 
 This direction should be revised or demoted if:
@@ -363,6 +412,10 @@ This direction should be revised or demoted if:
   validation, approval, or authority to act; or
 - an active defeater can be dropped, reordered as an original premise, or
   converted into a resolved conclusion without an explicit review route;
+- source, compiler artifact, build invocation, and runtime output are merged
+  despite incompatible identities or first-divergence evidence;
+- an artifact digest, source-fresh label, or single successful native run is
+  presented as an independent replay or a general semantic theorem; or
 - a research decision candidate can reach a clinical-action API without an
   independently governed validation boundary.
 
@@ -372,16 +425,16 @@ This direction should be revised or demoted if:
 Semantic-Lane-ID: psychiatric-counterfactual-authority-research-v0
 Owner: codex-root
 Concept-IDs: SOUNIO-ORDERED-PATH-PROVENANCE; SOUNIO-SCIENCE-RESEARCH-BOUNDARY; SOUNIO-PHYSICAL-OBSERVATION; SOUNIO-EPISTEMIC-NUMERIC-VALUE
-Intent-Preserved: counterfactual representation, causal identification, transportability, calibration, abstention, assurance arguments, defeaters, and clinical validation remain distinct claims
-Transformation: literature-backed research boundary mapped to existing workflow syntax and prospective library receipts; assurance cases remain scoped audit artifacts
+Intent-Preserved: counterfactual representation, causal identification, transportability, calibration, abstention, assurance arguments, artifact provenance, defeaters, and clinical validation remain distinct claims
+Transformation: literature-backed research boundary mapped to existing workflow syntax and prospective library receipts; assurance cases and compiler provenance remain scoped audit artifacts
 Types-Changed: none
 Effects-Changed: none
 IR-Changed: none
-Claims-Introduced: future Sounio psychiatric fixtures should treat abstention and unresolved assurance defeaters as explicit evidence-bearing outputs and require separate authority receipts
-Claims-Forbidden: patient-level effect estimation, treatment recommendation, automated action, causal identification from fit, transport from label matching, safety certification or authority from an assurance snapshot, and clinical validation from compiler success
+Claims-Introduced: future Sounio psychiatric fixtures should treat abstention, unresolved assurance defeaters, and source-build-artifact-runtime provenance as explicit evidence-bearing outputs and require separate authority receipts
+Claims-Forbidden: patient-level effect estimation, treatment recommendation, automated action, causal identification from fit, transport from label matching, safety certification or authority from an assurance snapshot, independent replay from a hash alone, and clinical validation from compiler success
 Assumptions: cited work supplies design constraints, not a biological model or validation of any future Sounio package
 Write-Set: docs/research/psychiatric_counterfactual_authority_abstention_contract_2026-07-21.md; docs/governance/topic-registry.v1.json; docs/governance/DOCS_AUTHORITY_MATRIX.md
-Read-Set: docs/research/psychiatric_state_inference_contract_2026-07-21.md; tests/frontend/defer_action_counterfactual_basic.sio; tests/frontend/plan_acquisition_counterfactual_basic.sio; tests/frontend/propose_alternatives_counterfactual_basic.sio; stdlib/causal/README.md
+Read-Set: docs/research/psychiatric_state_inference_contract_2026-07-21.md; docs/internal/concepts/science-research-boundary.md; tests/frontend/defer_action_counterfactual_basic.sio; tests/frontend/plan_acquisition_counterfactual_basic.sio; tests/frontend/propose_alternatives_counterfactual_basic.sio; stdlib/causal/README.md
 Positive-Witness: existing frontend counterfactual/deferral fixtures demonstrate workflow-shaped objects; the synthetic authority collision gate is prospective
 Negative-Witness: no existing counterfactual or deferred workflow object is accepted as clinical authority by this document
 Acceptance-Gate: bash scripts/dev/check_docs_consistency.sh; bash scripts/dev/check_docs_registry.sh
@@ -394,8 +447,8 @@ Authoritative-Only-If: the cited sources, current Sounio surfaces, and forbidden
 ```text
 Semantic-Outcome: synthetic nominal authority constructor and negative category-substitution witness added
 Concept-Status-Before: counterfactual workflow syntax existed without a dedicated authority-boundary witness
-Concept-Status-After: the selected library protocol requires question, identification, transport, and selective-risk receipts for a research candidate; abstention and unresolved assurance defeaters remain distinct
-Distinctions-Added: counterfactual question != research decision candidate; abstention != implicit fallback; evidence != assurance argument != authority
+Concept-Status-After: the selected library protocol requires question, identification, transport, and selective-risk receipts for a research candidate; abstention, unresolved assurance defeaters, and artifact provenance remain distinct
+Distinctions-Added: counterfactual question != research decision candidate; abstention != implicit fallback; evidence != assurance argument != authority; source != compiler artifact != runtime result
 Distinctions-Preserved: formal model != empirical claim; compile success != clinical validation
 Distinctions-Erased: none
 Evidence-Run: bin/souc run tests/run-pass/psychiatric_counterfactual_authority_receipt_chain.sio; bin/souc check tests/compile-fail/psychiatric_counterfactual_question_cannot_authorize.sio; bash scripts/run_sio_test_suite.sh psychiatric_counterfactual_authority_receipt_chain --verbose; bash scripts/run_sio_test_suite.sh psychiatric_counterfactual_question_cannot_authorize --verbose
