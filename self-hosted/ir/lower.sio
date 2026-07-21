@@ -136,6 +136,11 @@ let LOWER_GLOBAL_SCALAR_F64: i64 = 3
 // Word-size integer scalar global (`var G: i64 = …`). Distinct from 0/unknown so
 // `print(G)` / `println(G)` can select print_int instead of the char* printer.
 let LOWER_GLOBAL_SCALAR_I64: i64 = 1
+// Non-f64 fixed array global (`var A: [i64; N] = …`, including N=1). Distinct from
+// scalar kinds so Ident lowering loads the BSS *address* for IndexGet, not the
+// stored element value. Without this, `[T; 1]` (bss_size <= 8) took the scalar
+// load path and IndexGet treated the init word as a pointer → SEGV.
+let LOWER_GLOBAL_ARRAY: i64 = 4
 
 pub struct LowerGlobalTypeTable {
     // Indexed by IrModule.functions slot. Keep this aligned with IR_MAX_FUNCS;
@@ -2889,11 +2894,29 @@ fn lower_type_expr_is_array_of_f64(te: &TypeExpr) -> bool with Mut, Panic, Div {
     }
 }
 
+fn lower_type_expr_is_array(te: &TypeExpr) -> bool with Mut, Panic, Div {
+    if (*te).kind == TypeExprKind::TypeReference || (*te).kind == TypeExprKind::TypeRefMut {
+        match (*te).inner {
+            Some(inner_ty) => return lower_type_expr_is_array(&(*inner_ty)),
+            None => return false,
+        }
+    }
+    (*te).kind == TypeExprKind::TypeArray
+}
+
+fn lower_global_kind_is_array_base(kind: i64) -> bool {
+    // Bases that IndexGet must address via BSS_BASE+off (not load the init word).
+    kind == LOWER_GLOBAL_ELEM_F64 || kind == LOWER_GLOBAL_ARRAY
+}
+
 fn lower_global_elem_kind(ty_opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
     match *ty_opt {
         Some(ty) => {
             if lower_type_expr_is_f64(&(*ty)) { return LOWER_GLOBAL_SCALAR_F64 }
             if lower_type_expr_is_array_of_f64(&(*ty)) { return LOWER_GLOBAL_ELEM_F64 }
+            // Any fixed array (incl. [i64; 1], [i8; N], …) needs address form.
+            // Must precede the integer-scalar check: TypeArray is not TypeNamed.
+            if lower_type_expr_is_array(&(*ty)) { return LOWER_GLOBAL_ARRAY }
             // Scalar integers: needed so print/println of `var G: i64` routes to
             // print_int (same SEGV class as untyped f64 → char*).
             if lower_type_expr_is_integer(&(*ty)) { return LOWER_GLOBAL_SCALAR_I64 }
@@ -10636,16 +10659,26 @@ impl Lowerer {
                 // global metadata for stores. A callee can update the backing
                 // slot, so reads must reload it instead of using that stale
                 // per-function snapshot. Aggregate bindings remain base pointers.
+                // 1-element arrays have bss_size <= 8 but are still aggregates —
+                // reloading the init word would make IndexGet treat it as a ptr.
                 if self.lookup_local_is_global(e.name) && self.lookup_local_global_bss_size(e.name) <= 8 {
-                    let bss_off = self.lookup_local_global_bss_offset(e.name)
-                    let pair = self.fresh_reg()
-                    let lo = pair.0
-                    let reg = pair.1
-                    let lo2 = lo.emit(ir_load_global(reg, bss_off, e.name))
-                    if self.lookup_local_scalar_kind(e.name) == 2 || self.bss_global_scalar_kind(e.name) == 2 {
-                        return (lo2.emit(ir_mark_float_reg(reg)), reg)
+                    let local_g_fn = lowerer_lookup_fn_id_by_name_ref(&self, e.name)
+                    let local_g_kind = if local_g_fn >= 0 {
+                        lower_global_type_table_lookup(&(*self.global_types), local_g_fn)
+                    } else {
+                        0
                     }
-                    return (lo2, reg)
+                    if !lower_global_kind_is_array_base(local_g_kind) {
+                        let bss_off = self.lookup_local_global_bss_offset(e.name)
+                        let pair = self.fresh_reg()
+                        let lo = pair.0
+                        let reg = pair.1
+                        let lo2 = lo.emit(ir_load_global(reg, bss_off, e.name))
+                        if self.lookup_local_scalar_kind(e.name) == 2 || self.bss_global_scalar_kind(e.name) == 2 {
+                            return (lo2.emit(ir_mark_float_reg(reg)), reg)
+                        }
+                        return (lo2, reg)
+                    }
                 }
                 (self, src)
             } else {
@@ -10655,18 +10688,22 @@ impl Lowerer {
                     if fn_strategy == IR_STRATEGY_BSS_GLOBAL {
                         let bss_off = self.module.functions[fn_id as usize].param_count
                         let gsize = self.module.functions[fn_id as usize].bss_size
+                        let global_elem_kind = lower_global_type_table_lookup(&(*self.global_types), fn_id)
                         let ref_pair = self.fresh_reg()
                         let lo2 = ref_pair.0
                         let ref_reg = ref_pair.1
                         var lo3 = lo2
-                        if gsize > 8 {
+                        // Multi-word BSS (gsize > 8) and *all* array globals —
+                        // including `[T; 1]` where gsize == elem_size <= 8 —
+                        // must materialize the BSS base address for IndexGet.
+                        // Scalar path loads the stored word (correct for `var G: i64`).
+                        if gsize > 8 || lower_global_kind_is_array_base(global_elem_kind) {
                             lo3 = lo2.emit(ir_load_imm(ref_reg, BSS_BASE_LINUX + bss_off))
                         } else {
                             lo3 = lo2.emit(ir_load_global(ref_reg, bss_off, e.name))
                         }
                         // BSS metadata is applied only when the global is used;
                         // eagerly loading every global can exhaust main's IR budget.
-                        let global_elem_kind = lower_global_type_table_lookup(&(*lo3.global_types), fn_id)
                         if global_elem_kind == LOWER_GLOBAL_SCALAR_F64 {
                             lo3 = lo3.emit(ir_mark_float_reg(ref_reg))
                         } else if global_elem_kind == LOWER_GLOBAL_ELEM_F64 {
