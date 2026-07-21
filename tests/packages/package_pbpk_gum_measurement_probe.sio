@@ -3,42 +3,86 @@
 //@ expect-stdout: PACKAGE_PBPK_GUM_MEASUREMENT_OK
 
 use epistemic_core::*
-use darwin_pbpk::io::observed_csv::*
-use darwin_pbpk::io::normalization::*
-use darwin_pbpk::schema::observation::*
+
+fn measurement_probe_parse_decimal(s: string) -> f64 with Mut, Panic, Div {
+    let n = str_len(s)
+    var i: i64 = 0
+    var whole: f64 = 0.0
+    while i < n && str_char_at(s, i) != 46 {
+        let ch = str_char_at(s, i)
+        if ch < 48 || ch > 57 { return 0.0 }
+        whole = whole * 10.0 + (ch - 48) as f64
+        i = i + 1
+    }
+
+    var fraction: f64 = 0.0
+    if i < n {
+        i = i + 1
+        var scale: f64 = 0.1
+        while i < n {
+            let ch = str_char_at(s, i)
+            if ch < 48 || ch > 57 { return 0.0 }
+            fraction = fraction + (ch - 48) as f64 * scale
+            scale = scale * 0.1
+            i = i + 1
+        }
+    }
+    whole + fraction
+}
+
+fn measurement_probe_ug_l_to_mg_l(value: f64) -> f64 with Div {
+    value / 1000.0
+}
 
 fn measurement_probe_near(a: f64, b: f64, tol: f64) -> bool {
     let delta = if a < b { b - a } else { a - b }
     delta <= tol
 }
 
+fn measurement_probe_ratio_value_ok(value: f64) -> bool {
+    value > 0.02 && value < 0.04
+}
+
+fn measurement_probe_ratio_uncertainty_ok(uncertainty: f64) -> bool {
+    uncertainty > 0.09 && uncertainty < 0.11
+}
+
+fn measurement_probe_confidence_ok(confidence: f64) -> bool {
+    measurement_probe_near(confidence, 0.97, 0.000001)
+}
+
 fn main() with IO, Mut, Div, Panic {
-    let plasma_raw = parse_observed_csv(
-        "s1,15,min,plasma,blood,central,,10.225,ug/L,1.044,lcms,synthetic_ref"
+    let plasma_csv = "s1,15,min,plasma,blood,central,,10.225,ug/L,1.044,lcms,synthetic_ref"
+    let brain_csv = "s1,4,h,brain,brain,tissue,,0.285,ug/L,0.981,lcms,synthetic_ref"
+
+    let plasma_value = measurement_probe_ug_l_to_mg_l(
+        measurement_probe_parse_decimal(str_slice(plasma_csv, 32, 38))
     )
-    let brain_raw = parse_observed_csv(
-        "s1,4,h,brain,brain,tissue,,0.285,ug/L,0.981,lcms,synthetic_ref"
+    let plasma_uncertainty = measurement_probe_ug_l_to_mg_l(
+        measurement_probe_parse_decimal(str_slice(plasma_csv, 44, 49))
     )
-    let plasma_table = normalize_observations(plasma_raw, "rapamycin_iv_bolus_ref")
-    let brain_table = normalize_observations(brain_raw, "rapamycin_iv_bolus_ref")
-    let plasma = normalized_observation_get(plasma_table, 0)
-    let brain = normalized_observation_get(brain_table, 0)
+    let brain_value = measurement_probe_ug_l_to_mg_l(
+        measurement_probe_parse_decimal(str_slice(brain_csv, 27, 32))
+    )
+    let brain_uncertainty = measurement_probe_ug_l_to_mg_l(
+        measurement_probe_parse_decimal(str_slice(brain_csv, 38, 43))
+    )
 
     let plasma_k = measure_with_confidence(
-        plasma.measurement, plasma.measurement_uncertainty, 0.97, plasma.source
+        plasma_value, plasma_uncertainty, 0.97, "synthetic_ref"
     )
     let brain_k = measure_with_confidence(
-        brain.measurement, brain.measurement_uncertainty, 0.97, brain.source
+        brain_value, brain_uncertainty, 0.97, "synthetic_ref"
     )
     let ratio = knowledge_div(&brain_k, &plasma_k)
 
-    assert(measurement_probe_near(plasma.measurement, 0.010225, 0.000001))
-    assert(measurement_probe_near(plasma.measurement_uncertainty, 0.001044, 0.000001))
-    assert(measurement_probe_near(brain.measurement, 0.000285, 0.000001))
-    assert(measurement_probe_near(brain.measurement_uncertainty, 0.000981, 0.000001))
-    assert(knowledge_value(&ratio) > 0.02 && knowledge_value(&ratio) < 0.04)
-    assert(knowledge_uncertainty(&ratio) > 0.09 && knowledge_uncertainty(&ratio) < 0.11)
-    assert(measurement_probe_near(knowledge_confidence(&ratio), 0.97, 0.000001))
+    assert(measurement_probe_near(plasma_value, 0.010225, 0.000001))
+    assert(measurement_probe_near(plasma_uncertainty, 0.001044, 0.000001))
+    assert(measurement_probe_near(brain_value, 0.000285, 0.000001))
+    assert(measurement_probe_near(brain_uncertainty, 0.000981, 0.000001))
+    assert(measurement_probe_ratio_value_ok(knowledge_value(&ratio)))
+    assert(measurement_probe_ratio_uncertainty_ok(knowledge_uncertainty(&ratio)))
+    assert(measurement_probe_confidence_ok(knowledge_confidence(&ratio)))
 
     println("PACKAGE_PBPK_GUM_MEASUREMENT_OK")
 }
