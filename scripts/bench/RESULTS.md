@@ -125,6 +125,9 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 | geomean_dense / geostd_dense | | ~13.8 | ~159 | **0.09x — wins 11x** | ln-LUT + exp |
 | gini_coef_dense (inequality) | | ~17.4 | ~125 | **0.14x — wins 7x** | histogram ascending walk |
 | theil_dense / atkinson1 / hoover (inequality) | | ~17.4 | ~230 | **0.08x — wins 13x** | histogram + ln-LUT + exp |
+| power_mean_dense(p) / lehmer_mean(p) / contraharmonic (1M rows, 1000 keys) | | ~13.6 | ~175 | **0.08x — wins 13x** | v^p lookup-table; pandas = per-group lambda |
+| hill_number(q) / renyi(a) / tsallis(q) / perplexity / kl_uniform | | ~64 | ~247 | **0.26x — wins 4x** | histogram + bf_pow per bucket |
+| p90p10_ratio / quartile_dispersion | | ~13.6 | ~227 | **0.06x — wins 16x** | histogram + interpolated percentiles |
 | cov (1M rows, two-pass mean-shift) | | 6.7 | 8.5 | **0.78x — Sounio wins** | (new verb) |
 | corr (1M rows, two-pass + bf_sqrt) | | 10.3 | 8.0 | **~1.3x** | (new verb) |
 | median (1M rows, quickselect) | | ~34 | ~16 | **~2.2x** | numpy SIMD introselect |
