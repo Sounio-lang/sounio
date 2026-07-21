@@ -1216,6 +1216,10 @@ fn lowerer_preseed_impl_method_summaries_mut(
     }
 }
 
+// BSS allocation size for a type expression. Packed globals (i8/u8/bool/char)
+// must report physical width 1 so `[i8; N]` reserves N bytes, not N*8.
+// (Wave8 fixed IndexGet/init *stride* via hyper_algebra_kind; wave9 closes the
+// residual over-alloc from always returning 8 for TypeNamed.)
 fn lower_typeexpr_byte_size(ty_opt: &Option<Box<TypeExpr>>) -> i64 with Div {
     match *ty_opt {
         Some(ty) => {
@@ -1229,6 +1233,27 @@ fn lower_typeexpr_byte_size(ty_opt: &Option<Box<TypeExpr>>) -> i64 with Div {
                         return inner_size * 1024
                     }
                     _ => { return 8 }
+                }
+            }
+            if (*ty).kind == TypeExprKind::TypeNamed {
+                let name = ir_path_first_name((*ty).path)
+                // i8 / u8
+                if name.len == 2 {
+                    let first = name.buf[0] as i64
+                    let second = name.buf[1] as i64
+                    if (first == 105 || first == 117) && second == 56 {
+                        return 1
+                    }
+                }
+                // bool / char
+                if name.len == 4 {
+                    let is_bool = name.buf[0] == 98 as i8 && name.buf[1] == 111 as i8
+                        && name.buf[2] == 111 as i8 && name.buf[3] == 108 as i8
+                    let is_char = name.buf[0] == 99 as i8 && name.buf[1] == 104 as i8
+                        && name.buf[2] == 97 as i8 && name.buf[3] == 114 as i8
+                    if is_bool || is_char {
+                        return 1
+                    }
                 }
             }
             return 8
@@ -1371,6 +1396,21 @@ fn lower_bss_elem_is_signed_byte(kind: i64) -> bool {
     kind == 17
 }
 
+// True when a BSS slot is an aggregate base (array), not a scalar value load.
+// Historically `bss_size > 8` was the only discriminator — fine when every
+// element reserved 8 bytes, but wave9 packs i8/u8 at physical width so
+// `[i8; 4]` has size 4 and would be mis-read as a scalar (base = first byte
+// value → IndexGet SEGV). Packed byte arrays set hyper_algebra_kind 1/17.
+fn lower_bss_slot_is_aggregate(bss_size: i64, hyper_kind: i64) -> bool {
+    if bss_size > 8 {
+        return true
+    }
+    if hyper_kind == 1 || hyper_kind == 17 {
+        return true
+    }
+    false
+}
+
 fn lower_typeexpr_bss_elem_size(ty_opt: &Option<Box<TypeExpr>>) -> i64 with Panic, Div {
     match *ty_opt {
         Some(ty) => {
@@ -1388,6 +1428,18 @@ fn lower_typeexpr_bss_elem_size(ty_opt: &Option<Box<TypeExpr>>) -> i64 with Pani
                             }
                             // 'u' '8' → unsigned packed byte (movzx on load)
                             if first == 117 && second == 56 {
+                                return 1
+                            }
+                        }
+                        // bool / char → packed unsigned byte (movzx); also marks
+                        // the slot as aggregate under lower_bss_slot_is_aggregate
+                        // even when N*1 ≤ 8 (wave9).
+                        if name.len == 4 {
+                            let is_bool = name.buf[0] == 98 as i8 && name.buf[1] == 111 as i8
+                                && name.buf[2] == 111 as i8 && name.buf[3] == 108 as i8
+                            let is_char = name.buf[0] == 99 as i8 && name.buf[1] == 104 as i8
+                                && name.buf[2] == 97 as i8 && name.buf[3] == 114 as i8
+                            if is_bool || is_char {
                                 return 1
                             }
                         }
@@ -5791,10 +5843,15 @@ impl Lowerer {
             return 0
         }
         // Aggregate bases (arrays/structs) are not print scalars.
-        if self.module.functions[fn_id as usize].bss_size > 8 {
+        // Packed [i8;N]/[u8;N] can have bss_size ≤ 8 — use hyper kind too (#1353).
+        // Type-table array kinds (incl. [T;1]) are also non-scalar (#1350).
+        let gkind = lower_global_type_table_lookup(&(*self.global_types), fn_id)
+        if lower_bss_slot_is_aggregate(
+            self.module.functions[fn_id as usize].bss_size,
+            self.module.functions[fn_id as usize].hyper_algebra_kind
+        ) || lower_global_kind_is_array_base(gkind) {
             return 0
         }
-        let gkind = lower_global_type_table_lookup(&(*self.global_types), fn_id)
         if gkind == LOWER_GLOBAL_SCALAR_F64 {
             return 2
         }
@@ -10705,16 +10762,20 @@ impl Lowerer {
                 // global metadata for stores. A callee can update the backing
                 // slot, so reads must reload it instead of using that stale
                 // per-function snapshot. Aggregate bindings remain base pointers.
-                // 1-element arrays have bss_size <= 8 but are still aggregates —
-                // reloading the init word would make IndexGet treat it as a ptr.
-                if self.lookup_local_is_global(e.name) && self.lookup_local_global_bss_size(e.name) <= 8 {
-                    let local_g_fn = lowerer_lookup_fn_id_by_name_ref(&self, e.name)
-                    let local_g_kind = if local_g_fn >= 0 {
-                        lower_global_type_table_lookup(&(*self.global_types), local_g_fn)
-                    } else {
-                        0
+                // Scalar reload only for true scalars. Aggregates keep base pointers:
+                // - multi-word BSS (gsize > 8)
+                // - packed [i8;N]/[u8;N]/bool/char (hyper 1/17) even when size ≤ 8 (#1353)
+                // - any fixed array incl. [T; 1] via type-table LOWER_GLOBAL_ARRAY (#1350)
+                if self.lookup_local_is_global(e.name) {
+                    let gsize = self.lookup_local_global_bss_size(e.name)
+                    var hyper_kind: i64 = 8
+                    var local_g_kind: i64 = 0
+                    let gfn = lowerer_lookup_fn_id_by_name_ref(&self, e.name)
+                    if gfn >= 0 && gfn < self.module.fn_count {
+                        hyper_kind = self.module.functions[gfn as usize].hyper_algebra_kind
+                        local_g_kind = lower_global_type_table_lookup(&(*self.global_types), gfn)
                     }
-                    if !lower_global_kind_is_array_base(local_g_kind) {
+                    if !lower_bss_slot_is_aggregate(gsize, hyper_kind) && !lower_global_kind_is_array_base(local_g_kind) {
                         let bss_off = self.lookup_local_global_bss_offset(e.name)
                         let pair = self.fresh_reg()
                         let lo = pair.0
@@ -10734,16 +10795,16 @@ impl Lowerer {
                     if fn_strategy == IR_STRATEGY_BSS_GLOBAL {
                         let bss_off = self.module.functions[fn_id as usize].param_count
                         let gsize = self.module.functions[fn_id as usize].bss_size
+                        let hyper_kind = self.module.functions[fn_id as usize].hyper_algebra_kind
                         let global_elem_kind = lower_global_type_table_lookup(&(*self.global_types), fn_id)
                         let ref_pair = self.fresh_reg()
                         let lo2 = ref_pair.0
                         let ref_reg = ref_pair.1
                         var lo3 = lo2
-                        // Multi-word BSS (gsize > 8) and *all* array globals —
-                        // including `[T; 1]` where gsize == elem_size <= 8 —
-                        // must materialize the BSS base address for IndexGet.
-                        // Scalar path loads the stored word (correct for `var G: i64`).
-                        if gsize > 8 || lower_global_kind_is_array_base(global_elem_kind) {
+                        // Aggregate → absolute BSS base pointer. Scalar → load value.
+                        // Multi-word, packed byte arrays (#1353), and any array kind
+                        // including `[T; 1]` (#1350) must not take the scalar load path.
+                        if lower_bss_slot_is_aggregate(gsize, hyper_kind) || lower_global_kind_is_array_base(global_elem_kind) {
                             lo3 = lo2.emit(ir_load_imm(ref_reg, BSS_BASE_LINUX + bss_off))
                         } else {
                             lo3 = lo2.emit(ir_load_global(ref_reg, bss_off, e.name))

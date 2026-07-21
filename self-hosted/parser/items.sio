@@ -17,7 +17,11 @@ fn items_reverse_item_list_opt(items: Option<Box<ItemList>>) -> Option<Box<ItemL
 // Returns (ok, word). Covers the Sounio negative idiom `0 - n` (no unary-minus
 // in the style guide) so element-list packing does not silently drop slots and
 // collapse into a wrong array-repeat fill of the remaining literal.
-// Non-const expressions return ok=false (caller skips — residual for runtime inits).
+//
+// Wave9: also folds `as T` casts of const words, and Ident referring to a
+// previously recorded *scalar* global init (`var X: i64 = 7; [X, 20, 30]`).
+// True non-const (calls, multi-word idents) return ok=false — element-list
+// recording is fail-closed (all slots or none), not partial skip/shift.
 fn items_eval_global_init_word(e: &Expr) -> (bool, i64) with Div {
     if (*e).kind == ExprKind::ExprIntLit {
         return (true, (*e).int_val)
@@ -30,6 +34,29 @@ fn items_eval_global_init_word(e: &Expr) -> (bool, i64) with Div {
     }
     if (*e).kind == ExprKind::ExprBoolFalse {
         return (true, 0)
+    }
+    // Cast of a const word keeps the init word (identity on BSS fill bits).
+    // Unblocks `[1 as i64, 2 as i64]` which wave8 still dropped entirely.
+    if (*e).kind == ExprKind::ExprCast {
+        match (*e).left {
+            Some(operand) => {
+                let pair = items_eval_global_init_word(&(*operand))
+                if pair.0 {
+                    return (true, pair.1)
+                }
+            }
+            _ => {}
+        }
+        return (false, 0)
+    }
+    // Scalar global already recorded earlier in the same compile unit.
+    // Only count==1 (scalar / array-repeat fill word) is safe to re-use.
+    if (*e).kind == ExprKind::ExprIdent {
+        let c = ast_global_var_init_count((*e).name)
+        if c == 1 {
+            return (true, ast_global_var_init_nth((*e).name, 0))
+        }
+        return (false, 0)
     }
     if (*e).kind == ExprKind::ExprUnary && (*e).un_op == UnaryOp::OpNeg {
         match (*e).left {
@@ -125,7 +152,10 @@ fn items_eval_global_init_word(e: &Expr) -> (bool, i64) with Div {
 //   - scalar `42` / `-42` / `0 - n` / `1.5` / unary-neg floats / true|false
 //   - array-repeat `[V; N]`  → one fill word (i64 value or f64 bits)
 //   - element-list `[a, b, c]` → one word per element, same name hash, source order
-// Non-const elements are silently skipped (BSS stays zero for those slots).
+//   - cast/ident of the above (wave9)
+// Element-list is fail-closed: every slot must const-fold or *none* are recorded.
+// (Wave8 partial skip shifted remaining words left — `[f(),20,30]` → `20 30 0`.)
+// True runtime inits (calls) remain a residual: BSS stays zero, no silent shift.
 fn items_record_global_int_init(name: Name, init: &Expr) with Mut, Div {
     if (*init).kind == ExprKind::ExprArrayLit {
         // Repeat form: left = fill value, right = count → single fill word
@@ -134,16 +164,37 @@ fn items_record_global_int_init(name: Name, init: &Expr) with Mut, Div {
                 items_record_global_int_init(name, &(*repeat_val))
             }
             None => {
-                // Element-list form: [a, b, c] — record each const word in source order
+                // Element-list form: [a, b, c] — evaluate all slots first.
                 // (args is already reversed into source order by parse_array_literal).
                 var cur = (*init).args
+                var words: [i64; 128] = [0; 128]
+                var n: i64 = 0
+                var all_ok = true
                 while true {
                     match cur {
                         Some(node) => {
-                            items_record_global_int_init(name, &(*node).head)
+                            let pair = items_eval_global_init_word(&(*node).head)
+                            if !pair.0 {
+                                all_ok = false
+                                break
+                            }
+                            if n < 128 {
+                                words[n as usize] = pair.1
+                                n = n + 1
+                            } else {
+                                all_ok = false
+                                break
+                            }
                             cur = (*node).tail
                         }
                         None => { break }
+                    }
+                }
+                if all_ok {
+                    var i: i64 = 0
+                    while i < n {
+                        ast_record_global_var_init(name, words[i as usize])
+                        i = i + 1
                     }
                 }
             }
