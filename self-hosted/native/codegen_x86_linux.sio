@@ -3764,14 +3764,57 @@ fn emit_builtin_str_eq(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Di
     c
 }
 
-// str_slice(s: *u8, start: i64) -> *u8
-// Returns s + start (pointer arithmetic — string is null-terminated)
+// str_slice(s: *u8, start: i64, end: i64) -> *u8
+// Returns a newly allocated, NUL-terminated copy of s[start..end].
 fn emit_builtin_str_slice(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
-    // rdi = string pointer, rsi = start offset
-    // result = rdi + rsi
-    c.code = emit_add_reg_reg(c.code, 7, 6)  // add rdi, rsi
-    c.code = emit_mov_reg_reg(c.code, 0, 7)  // mov rax, rdi
+    c.code = emit_push_rbp(c.code)
+    c.code = emit_mov_rbp_rsp(c.code)
+    c.code = emit_sub_rsp_imm32(c.code, 48)
+    c.code = emit_store_reg_rbp_disp32(c.code, -8, 7)   // s
+    c.code = emit_store_reg_rbp_disp32(c.code, -16, 6)  // start
+    c.code = emit_store_reg_rbp_disp32(c.code, -24, 2)  // end
+
+    // len = end - start
+    c.code = emit_load_rbp_disp32_rax(c.code, -24)
+    c.code = emit_mov_rcx_rax(c.code)
+    c.code = emit_load_rbp_disp32_rax(c.code, -16)
+    c.code = emit_sub_reg_reg(c.code, 1, 0)
+    c.code = emit_store_reg_rbp_disp32(c.code, -32, 1)
+
+    // Allocate len + 1 bytes from RuntimeContext.heap_cursor.
+    c = emit_load_runtime_context_field_rax(c, runtime_context_field_heap_cursor())
+    c.code = emit_store_rax_rbp_disp32(c.code, -40)
+    c.code = emit_load_rbp_disp32_rax(c.code, -32)
+    var ab = c.code
+    ab = emit_byte(ab, 0x48)
+    ab = emit_byte(ab, 0x83)
+    ab = emit_byte(ab, 0xc0)
+    ab = emit_byte(ab, 0x01)
+    c.code = ab
+    c.code = emit_mov_rcx_rax(c.code)
+    c = emit_load_runtime_context_field_rax(c, runtime_context_field_heap_cursor())
+    c.code = emit_add_reg_reg(c.code, 0, 1)
+    c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_cursor())
+
+    // Copy exactly len bytes, then append NUL.
+    c.code = emit_load_rbp_disp32_rax(c.code, -8)
+    c.code = emit_mov_rsi_rax(c.code)
+    c.code = emit_load_rbp_disp32_rax(c.code, -16)
+    c.code = emit_add_reg_reg(c.code, 6, 0)
+    c.code = emit_load_rbp_disp32_rax(c.code, -40)
+    c.code = emit_mov_rdi_rax(c.code)
+    c.code = emit_load_rbp_disp32_rax(c.code, -32)
+    c.code = emit_mov_rcx_rax(c.code)
+    c.code = emit_byte(c.code, 0xfc)  // cld
+    c.code = emit_byte(c.code, 0xf3)
+    c.code = emit_byte(c.code, 0xa4)  // rep movsb
+    c.code = emit_byte(c.code, 0xc6)
+    c.code = emit_byte(c.code, 0x07)
+    c.code = emit_byte(c.code, 0x00)  // mov byte [rdi], 0
+    c.code = emit_load_rbp_disp32_rax(c.code, -40)
+    c.code = emit_mov_rsp_rbp(c.code)
+    c.code = emit_pop_rbp(c.code)
     c.code = emit_ret(c.code)
     c
 }

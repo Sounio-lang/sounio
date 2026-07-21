@@ -3232,3 +3232,9 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 | Date | Provider | Task | Target | Outcome | Note |
 |---|---|---|---|---|---|
 | 2026-07-20 | xai/Grok 4.3; zai/GLM-5.2 attempted | math-review | Madaros declared-function precedence, dereferenced field layout, contextual `level` parsing, and package gate diff | NO_MATHEMATICAL_CONTENT_SINGLE_PROVIDER_DEGRADED | xAI found no mathematical claims to review. Z.AI returned fair-usage code 1310 and reported a reset at 2026-07-25 12:21:37 UTC. The patch changes compiler name resolution, parser plumbing, field-layout recovery, and acceptance routing; it does not change Knowledge formulas or scientific claims. Raw: `/tmp/llm-offload-4zesaF/`. |
+
+## 2026-07-21 - Madaros PBPK measurement probe
+
+| Date | Provider | Task | Target | Outcome | Note |
+|---|---|---|---|---|---|
+| 2026-07-21 | xai/Grok 4.3 | math-review | tests/packages/package_pbpk_gum_measurement_probe.sio | PASS | Confirmed normalized plasma `0.010225 +/- 0.001044` mg/L, brain `0.000285 +/- 0.000981` mg/L, quotient approximately `0.02787`, first-order GUM quotient uncertainty approximately `0.096`, and preserved confidence `0.97`. Raw: `/tmp/llm-offload-dY7gJ6/`. |
