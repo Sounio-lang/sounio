@@ -177,15 +177,33 @@ fn main() -> i64 with IO {
 }
 ' '7 20 30'
 
-# 11) Wave9: non-const element-list is fail-closed (no left-shift of remaining words)
-# `[ten(), 20, 30]` must NOT become `20 30 0`. Residual runtime init → all zero.
-run_case "nonconst_failclosed" '
+# 11) Wave10: pure zero-arg call in element-list folds to real values
+# (wave9 residual was fail-closed BSS zero; must never left-shift to `20 30 0`).
+run_case "call_list_pure" '
 fn ten() -> i64 { 10 }
 var A: [i64; 3] = [ten(), 20, 30]
 fn main() -> i64 with IO {
   print_int(A[0]); print(" "); print_int(A[1]); print(" "); print_int(A[2]); print("
 ")
-  // Fail-closed: no partial record → BSS zero (not shifted 20 30 0).
+  if A[0] != 10 { return 1 }
+  if A[1] != 20 { return 2 }
+  if A[2] != 30 { return 3 }
+  0
+}
+' '10 20 30'
+
+# 12) Wave10 residual: non-foldable call (multi-stmt body) stays fail-closed zeros
+# (no partial record / left-shift of remaining const words).
+run_case "nonconst_failclosed" '
+fn multi() -> i64 {
+  let x = 10
+  x
+}
+var A: [i64; 3] = [multi(), 20, 30]
+fn main() -> i64 with IO {
+  print_int(A[0]); print(" "); print_int(A[1]); print(" "); print_int(A[2]); print("
+")
+  // Fail-closed: multi-stmt pure body not folded → BSS zero (not shifted 20 30 0).
   if A[0] != 0 { return 1 }
   if A[1] != 0 { return 2 }
   if A[2] != 0 { return 3 }
@@ -193,7 +211,7 @@ fn main() -> i64 with IO {
 }
 ' '0 0 0'
 
-# 12) Wave9: packed i8 BSS size is physical (adjacent arrays independent + dense)
+# 13) Wave9: packed i8 BSS size is physical (adjacent arrays independent + dense)
 run_case "i8_adjacent" '
 var A: [i8; 4] = [1, 2, 3, 4]
 var B: [i8; 4] = [10, 20, 30, 40]
