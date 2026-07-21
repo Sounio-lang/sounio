@@ -120,6 +120,11 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 | entropy_dense_by (Shannon, 1M rows, 1000 keys, vmax=101) | | ~31.9 | ~305 | **0.10x — wins 10x** | value histogram + bf_ln per bucket; pandas = per-group lambda |
 | inv_simpson_dense / renyi2 / norm_entropy / entropy_bits | | ~31.9 | ~267 | **0.12x — wins 8x** | same histogram engine |
 | sum_ln / mean_ln / log_range / var_ln / std_ln (dense) | | ~15.9 | ~24.5 | **0.65x — wins 1.5x** | ln lookup-table + single accumulation pass (beats vectorized np.log + native transform) |
+| softmax_dense_by / softmax_max_prob (1M rows, 1000 keys, vmax=102) | | ~17.8 | ~217 | **0.08x — wins 12x** | exp lookup-table; pandas = per-group lambda |
+| logsumexp / logmeanexp_dense | | ~14.0 | ~115 | **0.12x — wins 8x** | exp-LUT + one pass |
+| geomean_dense / geostd_dense | | ~13.8 | ~159 | **0.09x — wins 11x** | ln-LUT + exp |
+| gini_coef_dense (inequality) | | ~17.4 | ~125 | **0.14x — wins 7x** | histogram ascending walk |
+| theil_dense / atkinson1 / hoover (inequality) | | ~17.4 | ~230 | **0.08x — wins 13x** | histogram + ln-LUT + exp |
 | cov (1M rows, two-pass mean-shift) | | 6.7 | 8.5 | **0.78x — Sounio wins** | (new verb) |
 | corr (1M rows, two-pass + bf_sqrt) | | 10.3 | 8.0 | **~1.3x** | (new verb) |
 | median (1M rows, quickselect) | | ~34 | ~16 | **~2.2x** | numpy SIMD introselect |
