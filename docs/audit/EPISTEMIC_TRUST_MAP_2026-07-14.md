@@ -2,14 +2,14 @@
 topic_id: repo.docs.audit.epistemic-trust-map-2026-07-14
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
+last_validated: 2026-07-21
 validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.epistemic-trust-map-2026-07-14
 -->
 
 # Epistemic trust map — which stdlib/epistemic results a real program can trust today
 
-**Date:** 2026-07-14
+**Date:** 2026-07-14 (Wave10 k95 closeout 2026-07-21)
 **Toolchain:** `./bin/souc` → Madaros v0.80.0 (default **native** engine)
 **Scope:** core uncertainty primitives (GUM, uncertainty propagation, Knowledge<T>,
 correlation/covariance, imprecise probability). Bounded, not exhaustive.
@@ -17,12 +17,12 @@ correlation/covariance, imprecise probability). Bounded, not exhaustive.
 
 ## Why this exists
 
-Sounio's differentiator is *trustworthy* uncertainty. But building one modest I/O
-vertical surfaced five distinct imported-module codegen defects, one of which
-(the `f64→i64` cast bitcast) makes the GUM coverage factor **silently wrong**.
-That raised the real readiness question: *when a program imports an epistemic
-module — the way real code uses the stdlib — which results can it trust, and which
-are silently corrupted?* Nobody had mapped it. This is that map, for the default
+Sounio's differentiator is *trustworthy* uncertainty. Building one modest I/O
+vertical originally surfaced five distinct imported-module codegen defects, one
+of which (the `f64→i64` cast bitcast) made the GUM coverage factor **silently
+wrong**. That raised the real readiness question: *when a program imports an
+epistemic module — the way real code uses the stdlib — which results can it
+trust, and which are silently corrupted?* This is that map, for the default
 native path (the lean_single engine is a separate, narrower story).
 
 ## The two axes
@@ -33,9 +33,10 @@ A result is usable under native import iff **both** hold:
    module transitively `use`s another stdlib module (multi-module native path —
    thin-link failure / segfault, see the dispatches) or hits a module-specific
    miscompile.
-2. **Numerically correct** — the called path contains no `f64 → i64/i32` cast
-   (which bitcasts under import — `MADAROS_IMPORTED_MODULE_F64_CAST_BITCAST`) and
-   no `&local_array`→builtin (`DATA_IO_TRILHA_B_BUILTIN_BUFPTR_DISPATCH`).
+2. **Numerically correct** — the called path must not hit residual mis-lowerings
+   (historical: `f64 → i64/i32` param cast bitcast — **D1 CLOSED** #983/#1252;
+   residual: some exclusive-ref / fn-ptr fragile paths; D2 `&local_array`→builtin
+   largely fixed for I/O).
 
 ## The map (empirically classified; all verified by the gate)
 
@@ -43,7 +44,7 @@ A result is usable under native import iff **both** hold:
 
 | Module | Verified result | Notes |
 |---|---|---:|
-| `gum` | `gum_value`, `gum_std_u` (u_c), `gum_dof` (nu_eff) | value=98.3, u_c=0.290402, nu_eff=4.17 — first-principles exact |
+| `gum` | `gum_value`, `gum_std_u` (u_c), `gum_dof` (nu_eff), **`gum_k95` / `gum_u95` / `gum_u99`** | value=98.3, u_c=0.290402 on Type-B-heavy budget; **finite-dof** Type-A-dominant (n=5, tiny Type-B) → ν_eff≈4, **k95≈2.776**, U95≈0.372 — Student-t, not normal 1.96. **Wave10 residual closeout** (mis-designed 1960 witness retired). Gate: Section A `GUM_TRUST_OK` + `witness_gum_k95` → `2776`. |
 | `correlation` | `covariance` of independents = 0 | self-contained; this is the **analytic** (shared-source) covariance, exact 0 for no shared variable — not a finite-sample estimator, so the exact-zero check is appropriate |
 | `knightian` (p-box) | `pb_gap`, `pb_midpoint` | self-contained |
 | `covariance` | `cov_new` and accessors | self-contained |
@@ -55,12 +56,10 @@ A result is usable under native import iff **both** hold:
 | `algebra::associator_field` | non-Fano ‖α‖²=`4`, g2=`2`, aug var=`4.25`; pentagon (e1,e2,e4,e1) var=`0.96` | **2026-07-20 multi-module green** after #1274 oct_mul lo/hi split + pub API surface (`assoc_field_*`, `pentagon_*`, `af_*`). Gate: `scripts/madaros_associator_field_native_gate.sh`. L0: `associator_field_octonion` + `associator_field_pentagon`. |
 | `algebra::octonion` (`oct_mul`, `oct_associator`, …) | e1·e2→e3; non-Fano ‖[e1,e2,e4]‖²=`4` | **2026-07-20** lo/hi frame split. Gate: `scripts/madaros_algebra_octonion_import_gate.sh`. |
 
-Heuristic: **self-contained modules (no stdlib `use` deps) that avoid `f64→i64`
-casts import cleanly and return correct numbers.** Method-call form on
-`Epistemic` is now TRUSTWORTHY under multi-module Madaros (Wave9 residual
-closeout). (`order_spread_exact` / `product_nonassoc` remain self-contained leaves
-for CPC independence; `algebra::associator_field` is also importable under default
-Madaros for programs that want the shared seven-window artifact.)
+Heuristic: **self-contained modules (no stdlib `use` deps) import cleanly and
+return correct numbers** under default Madaros. Method-call form on `Epistemic`
+is TRUSTWORTHY (Wave9). Finite-dof GUM coverage (`k95`/`U95`/`U99`) is TRUSTWORTHY
+(Wave10 — D1/#983/#1252 + stdlib `dof_to_i64` arithmetic-source + rounding).
 
 **Update 2026-07-20 (oct_mul):** `algebra::octonion::oct_mul` imports cleanly under
 default Madaros after splitting the 8-component exclusive-ref body into
@@ -73,16 +72,26 @@ needs ~0x23e0 and SEGV'd (measured single-file and multi-module). Gate:
 on non-`pub` imports; lean_single only warned). Publicizing the L0 surface
 makes `use algebra::associator_field` compile+run with correct sentinels.
 
+**Update 2026-07-21 (Wave10 — gum k95):** D1 closed by #983 root-cause + #1252
+joint D5+D1 land; stdlib `dof_to_i64` uses arithmetic-source + half-up round.
+The Section B trip-wire that printed `CONFIRMED CORRUPT (k95=1960)` was **false
+negative**: its budget was Type-B-dominant (ν_eff≈2.8e4), so k95=1.960 is the
+correct normal approximation. Replaced with Type-A-dominant witness (`k95i=2776`)
+and promoted into Section A. Finite-sample U95/U99 from imported `gum` are safe
+to report under default Madaros.
+
 ### ⚠️ Importable but specific outputs CORRUPTED
 
 | Module | Corrupted output | Root |
 |---|---|---|
-| `gum` | `gum_k95`, `gum_u95`, `gum_u99` (coverage factors / expanded uncertainty) | `dof_to_i64(nu_eff)` bitcasts → k95 = 1.960 for **all** dof; correct is `t95(nu_eff)` (e.g. 2.776 at nu=4). `u_c` and `value` are unaffected. **Note:** stdlib GUM-site workaround may land separately (prescription-chain lane). |
+| — | *(none currently gated)* | Historical D1 gum k95 → **CLOSED Wave10**. |
 
-**Guidance:** report point estimate + combined standard uncertainty `u_c`; do
-**not** rely on `U95`/`U99` from an imported `gum` until the cast bug is fixed.
+**Guidance:** report point estimate + `u_c` + expanded `U95`/`U99` from imported
+`gum` freely for finite-dof budgets. Prefer Type-A-dominant smoke tests when
+validating Student-t coverage (Type-B-only or Type-B-dominant budgets correctly
+converge to k≈1.96).
 
-### ❌ Not usable via native import (compile fails)
+### ❌ Not usable via native import (compile fails / fragile)
 
 | Module / form | Failure | Consequence |
 |---|---|---|
@@ -97,38 +106,33 @@ need free-function rewrite, inlining into `main()`, or lean_single.
 
 ## Blast radius
 
-The remaining corruption/blockage is not peripheral. `gum`'s coverage intervals
-are **silently wrong** for finite samples (f64→i64 cast); exclusive-ref xoshiro
-inside module bodies remain traps. What works under native import today includes
-the free-function **and method-form** `Epistemic` numeric core, GUM point+`u_c`,
+What works under native import today includes the free-function **and method-form**
+`Epistemic` numeric core, **full GUM** (value + `u_c` + finite-dof `k95`/`U95`/`U99`),
 correlation/covariance, p-box dispersion, `order_spread4`, `product_nonassoc`,
 and **`propagate` delta-method + value-style MC kernels**. A real PBPK/GUM
-pipeline can import `knowledge` + `propagate` under default Madaros when it uses
-those surfaces — `gum` U95 still needs a cast fix or lean_single/workaround.
+pipeline can import `gum` + `knowledge` + `propagate` under default Madaros when
+it uses those surfaces. Residual traps: exclusive-ref xoshiro inside module
+bodies; generic `monte_carlo` fn-ptr form; language `Knowledge<T>` generics.
 
-Every failure here reduces to one of three already-filed compiler dispatches:
+Historical failures reduce to filed compiler dispatches (status as of Wave10):
 
-- `MADAROS_IMPORTED_MODULE_F64_CAST_BITCAST_2026-07-14` — silent numeric corruption.
-- `DATA_IO_TRILHA_B_BUILTIN_BUFPTR_DISPATCH_2026-07-14` — `&buf`→builtin.
-- multi-module native path (`MADAROS_MULTIMODULE_*`, and this doc's segfault
-  witnesses) — importing any module with `use` deps.
-
-Fixing the imported-module native path therefore unblocks I/O readers, cross-module
-reuse, correct coverage factors, **and** the Knowledge<T>/propagation core at once.
-That single infrastructure fix, not more application verticals, is what makes the
-epistemic stdlib trustworthy under real use.
+- `MADAROS_IMPORTED_MODULE_F64_CAST_BITCAST_2026-07-14` — **CLOSED** (#983/#1252; gum k95 gated).
+- `DATA_IO_TRILHA_B_BUILTIN_BUFPTR_DISPATCH_2026-07-14` — largely fixed for I/O readers/writers.
+- multi-module native path (`MADAROS_MULTIMODULE_*`) — substantially improved;
+  residual memory-wall / fragile exclusive-ref chains remain.
 
 ## Living boundary
 
-`scripts/epistemic_trust_gate.sh` gates the trustworthy set (Section A) and carries
-trip-wires (B/C) that print when a known-broken result starts working — so this map
-is updated the moment a compiler fix lands, not by memory.
+`scripts/epistemic_trust_gate.sh` gates the trustworthy set (Section A), including
+finite-dof gum k95 (`witness_gum_k95` → `2776`). Section B (k95 trip-wire) is
+**retired**. Update this map when a residual Section C / fragile form graduates.
 
 ## AI disclosure
 
-Classification and repros by AI agent (Claude) under human direction, on Madaros
+Classification and repros by AI agent under human direction, on Madaros
 v0.80.0. Substantive math claims (Student-t coverage factor; RSS combined
 uncertainty) were confirmed by the mandatory math-review offload in the linked
 dispatches; the elementary trust criteria (Cov of independents = 0, p-box
 gap/midpoint, u_c) by a math-review offload logged in `.claude/llm_offload_log.md`.
-No `stdlib/epistemic` or `self-hosted/` sources were modified. GAIDeT-ICMJE 2025.
+Wave10 closeout re-measured on `origin/main` (post-#1252): Type-A-dominant
+`k95i=2776`, Type-B-dominant `k95=1.960` (correct). GAIDeT-ICMJE 2025.
