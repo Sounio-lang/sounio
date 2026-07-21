@@ -7431,3 +7431,318 @@ pub fn bf_theil_dense_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64) 
 pub fn bf_atkinson1_dense_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_inequality_dense(src, key_col, val_col, vmax, 2) }
 /// Per-group HOOVER / ROBIN-HOOD INDEX (share of total to redistribute for equality), broadcast. Dense histogram. NATIVE + lean_single.
 pub fn bf_hoover_dense_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_inequality_dense(src, key_col, val_col, vmax, 3) }
+
+/// Power b^e for b>0 via exp(e·ln b) (composes bf_ln + bf_exp; ~1e-12 rel). Returns 0.0 for
+/// b<=0 as a domain sentinel. Needs a scratch i64 `sc`. NATIVE + lean_single only.
+fn bf_pow(b: f64, e: f64, sc: *mut i64) -> f64 with Mut, Div, Panic {
+    if b <= 0.0 { return 0.0 }
+    bf_exp(e * bf_ln(b, sc), sc)
+}
+
+/// Per-group POWER-MEAN family via v^p lookup tables (dense integer values 1..vmax). mode 0 =
+/// Hölder/power mean of order p ((Σvᵖ/n)^(1/p)); mode 1 = Lehmer mean L_p (Σvᵖ/Σvᵖ⁻¹). ln/exp
+/// are evaluated once per distinct value; a single pass sums the tabulated powers. Broadcast.
+/// O(n + vrange). NATIVE + lean_single only.
+fn bf_group_powermean_dense(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64, p: f64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var nn:  [f64; 1024] = [0.0; 1024]
+    var svp: [f64; 1024] = [0.0; 1024]
+    var svq: [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || n <= 0 || vmax < 0 { return out }
+    let vm1 = vmax + 1
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let sc = heap_alloc(8) as *mut i64
+    let lvp = heap_alloc(vm1 * 8) as *mut f64
+    let lvq = heap_alloc(vm1 * 8) as *mut f64
+    var v: i64 = 1
+    while v < vm1 { write_f64(lvp, v, bf_pow(v as f64, p, sc)); write_f64(lvq, v, bf_pow(v as f64, p - 1.0, sc)) v = v + 1 }
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        let vi = read_f64(vp, i) as i64
+        if k >= 0 && k < 1024 && vi >= 1 && vi < vm1 { nn[k] = nn[k] + 1.0; svp[k] = svp[k] + read_f64(lvp, vi); svq[k] = svq[k] + read_f64(lvq, vi) }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        let m = nn[g]
+        if m > 0.0 {
+            if mode == 0 { res[g] = bf_pow(svp[g] / m, 1.0 / p, sc) }
+            else { if svq[g] != 0.0 { res[g] = svp[g] / svq[g] } }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, res[k]) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    heap_free(lvp as *mut i8)
+    heap_free(lvq as *mut i8)
+    heap_free(sc as *mut i8)
+    out
+}
+/// Per-group POWER (Hölder) MEAN of order p, broadcast: (Σvᵖ/n)^(1/p). p=1 arithmetic, p=2 RMS,
+/// p→0 geometric, p=−1 harmonic. Dense v^p LUT. NATIVE + lean_single only.
+pub fn bf_power_mean_dense_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64, p: f64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_powermean_dense(src, key_col, val_col, vmax, p, 0) }
+/// Per-group LEHMER MEAN L_p (Σvᵖ/Σvᵖ⁻¹), broadcast. p=0 harmonic, p=1 arithmetic, p=2 contraharmonic. Dense LUT. NATIVE + lean_single.
+pub fn bf_lehmer_mean_dense_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64, p: f64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_powermean_dense(src, key_col, val_col, vmax, p, 1) }
+/// Per-group CONTRAHARMONIC MEAN (Σv²/Σv = Lehmer L_2), broadcast. Dense LUT. NATIVE + lean_single only.
+pub fn bf_contraharmonic_mean_dense_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_powermean_dense(src, key_col, val_col, vmax, 2.0, 1) }
+
+/// Per-group DIVERSITY / GENERALIZED-ENTROPY family via a value histogram (dense keys 0..1023 +
+/// values 0..vmax). From the value distribution pᵢ=fᵢ/n it forms Σpᵢ^q (q=order) and Shannon H;
+/// modes: 0 = Hill number qD ((Σpᵢ^q)^(1/(1−q)); q→1 ⇒ exp H), 1 = Rényi entropy (ln(Σpᵢ^q)/(1−q);
+/// q→1 ⇒ H), 2 = Tsallis entropy ((1−Σpᵢ^q)/(q−1); q→1 ⇒ H), 3 = KL divergence from uniform
+/// (ln k − H). Broadcast. O(n + G·vrange). NATIVE + lean_single only.
+fn bf_group_diversity_dense(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64, q: f64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var cnt: [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || n <= 0 || vmax < 0 { return out }
+    let vm1 = vmax + 1
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let hist = heap_alloc(1024 * vm1 * 8) as *mut i64
+    let sc = heap_alloc(8) as *mut i64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        let vi = read_f64(vp, i) as i64
+        if k >= 0 && k < 1024 && vi >= 0 && vi < vm1 { write_i64(hist, k * vm1 + vi, read_i64(hist, k * vm1 + vi) + 1); cnt[k] = cnt[k] + 1.0 }
+        i = i + 1
+    }
+    let isone = q > 0.999999999 && q < 1.000000001
+    var g: i64 = 0
+    while g < 1024 {
+        if cnt[g] > 0.0 {
+            let nf = cnt[g]
+            let base = g * vm1
+            var v: i64 = 0
+            var spq = 0.0
+            var hh = 0.0
+            var nd = 0.0
+            while v < vm1 {
+                let f = read_i64(hist, base + v)
+                if f > 0 {
+                    let pp = (f as f64) / nf
+                    nd = nd + 1.0
+                    hh = hh - pp * bf_ln(pp, sc)
+                    if !isone { spq = spq + bf_pow(pp, q, sc) }
+                }
+                v = v + 1
+            }
+            if mode == 0 { if isone { res[g] = bf_exp(hh, sc) } else { res[g] = bf_pow(spq, 1.0 / (1.0 - q), sc) } }
+            else { if mode == 1 { if isone { res[g] = hh } else { res[g] = bf_ln(spq, sc) / (1.0 - q) } }
+            else { if mode == 2 { if isone { res[g] = hh } else { res[g] = (1.0 - spq) / (q - 1.0) } }
+            else { if nd > 1.0 { res[g] = bf_ln(nd, sc) - hh } else { res[g] = 0.0 } } } }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, res[k]) } else { write_f64(op, i, read_f64(vp, i)) } i = i + 1 }
+    heap_free(hist as *mut i8)
+    heap_free(sc as *mut i8)
+    out
+}
+/// Per-group HILL NUMBER of order q (effective #categories, qD), broadcast. Dense histogram. q=0 richness, q=1 exp(Shannon), q=2 inv-Simpson. NATIVE + lean_single.
+pub fn bf_hill_number_dense_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64, q: f64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_diversity_dense(src, key_col, val_col, vmax, q, 0) }
+/// Per-group RÉNYI ENTROPY of order α, broadcast. Dense histogram. α=1 ⇒ Shannon, α=2 ⇒ collision entropy. NATIVE + lean_single.
+pub fn bf_renyi_dense_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64, alpha: f64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_diversity_dense(src, key_col, val_col, vmax, alpha, 1) }
+/// Per-group TSALLIS ENTROPY of order q, broadcast. Dense histogram. q→1 ⇒ Shannon. NATIVE + lean_single only.
+pub fn bf_tsallis_dense_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64, q: f64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_diversity_dense(src, key_col, val_col, vmax, q, 2) }
+/// Per-group PERPLEXITY (Hill number of order 1 = exp(Shannon entropy) = effective vocabulary size), broadcast. Dense histogram. NATIVE + lean_single.
+pub fn bf_perplexity_dense_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_diversity_dense(src, key_col, val_col, vmax, 1.0, 0) }
+/// Per-group KL DIVERGENCE from the uniform distribution (ln k − H, how concentrated vs even), broadcast. Dense histogram. NATIVE + lean_single.
+pub fn bf_kl_uniform_dense_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_diversity_dense(src, key_col, val_col, vmax, 2.0, 3) }
+
+/// Per-group QUANTILE-RATIO dispersion via a value histogram (dense keys 0..1023 + values
+/// 0..vmax). mode 0 = P90/P10 decile ratio; mode 1 = quartile coefficient of dispersion
+/// (q75−q25)/(q75+q25). Percentiles use bf_qpos_from_hist (linear interpolation). Broadcast.
+/// O(n + G·vrange). NATIVE + lean_single only.
+fn bf_group_qratio_dense(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var cnt: [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || n <= 0 || vmax < 0 { return out }
+    let vm1 = vmax + 1
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let hist = heap_alloc(1024 * vm1 * 8) as *mut i64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        let vi = read_f64(vp, i) as i64
+        if k >= 0 && k < 1024 && vi >= 0 && vi < vm1 { write_i64(hist, k * vm1 + vi, read_i64(hist, k * vm1 + vi) + 1); cnt[k] = cnt[k] + 1.0 }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        if cnt[g] > 0.0 {
+            let sz = cnt[g] as i64
+            let base = g * vm1
+            if mode == 0 {
+                let p10 = bf_qpos_from_hist(hist, base, vm1, sz, 0.10)
+                let p90 = bf_qpos_from_hist(hist, base, vm1, sz, 0.90)
+                if p10 > 0.0 { res[g] = p90 / p10 }
+            } else {
+                let q1 = bf_qpos_from_hist(hist, base, vm1, sz, 0.25)
+                let q3 = bf_qpos_from_hist(hist, base, vm1, sz, 0.75)
+                let den = q3 + q1
+                if den != 0.0 { res[g] = (q3 - q1) / den }
+            }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, res[k]) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    heap_free(hist as *mut i8)
+    out
+}
+/// Per-group P90/P10 DECILE RATIO (dispersion), broadcast. Dense histogram + interpolated percentiles. NATIVE + lean_single.
+pub fn bf_p90p10_ratio_dense_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_qratio_dense(src, key_col, val_col, vmax, 0) }
+/// Per-group QUARTILE COEFFICIENT OF DISPERSION ((q75−q25)/(q75+q25)), broadcast. Dense histogram. NATIVE + lean_single only.
+pub fn bf_quartile_dispersion_dense_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_qratio_dense(src, key_col, val_col, vmax, 1) }
+
+/// Per-group ROBUST LOCATION / SHAPE statistics from interpolated percentiles (dense keys
+/// 0..1023 + integer values 0..vmax). All modes reduce a per-group value histogram through
+/// bf_qpos_from_hist (linear-interpolated quantiles). modes: 0=percentile(param q), 1=trimean
+/// ((q25+2·q50+q75)/4), 2=midhinge ((q25+q75)/2), 3=P95/P05 ratio, 4=Bowley/quartile skewness
+/// ((q75+q25−2·q50)/(q75−q25)), 5=Moors/octile kurtosis ((E7−E5+E3−E1)/(E6−E2)), 6=robust CV
+/// (IQR/median), 7=decile range (P90−P10). Broadcast. O(n + G·vrange). NATIVE + lean_single.
+fn bf_group_robustloc_dense(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64, param: f64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var cnt: [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || n <= 0 || vmax < 0 { return out }
+    let vm1 = vmax + 1
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let hist = heap_alloc(1024 * vm1 * 8) as *mut i64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        let vi = read_f64(vp, i) as i64
+        if k >= 0 && k < 1024 && vi >= 0 && vi < vm1 { write_i64(hist, k * vm1 + vi, read_i64(hist, k * vm1 + vi) + 1); cnt[k] = cnt[k] + 1.0 }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        if cnt[g] > 0.0 {
+            let sz = cnt[g] as i64
+            let base = g * vm1
+            if mode == 0 { res[g] = bf_qpos_from_hist(hist, base, vm1, sz, param) }
+            else { if mode == 1 { res[g] = (bf_qpos_from_hist(hist, base, vm1, sz, 0.25) + 2.0 * bf_qpos_from_hist(hist, base, vm1, sz, 0.5) + bf_qpos_from_hist(hist, base, vm1, sz, 0.75)) / 4.0 }
+            else { if mode == 2 { res[g] = (bf_qpos_from_hist(hist, base, vm1, sz, 0.25) + bf_qpos_from_hist(hist, base, vm1, sz, 0.75)) / 2.0 }
+            else { if mode == 3 { let b = bf_qpos_from_hist(hist, base, vm1, sz, 0.05); if b > 0.0 { res[g] = bf_qpos_from_hist(hist, base, vm1, sz, 0.95) / b } }
+            else { if mode == 4 { let q1 = bf_qpos_from_hist(hist, base, vm1, sz, 0.25); let q2 = bf_qpos_from_hist(hist, base, vm1, sz, 0.5); let q3 = bf_qpos_from_hist(hist, base, vm1, sz, 0.75); let d = q3 - q1; if d != 0.0 { res[g] = (q3 + q1 - 2.0 * q2) / d } }
+            else { if mode == 5 { let e1 = bf_qpos_from_hist(hist, base, vm1, sz, 0.125); let e2 = bf_qpos_from_hist(hist, base, vm1, sz, 0.25); let e3 = bf_qpos_from_hist(hist, base, vm1, sz, 0.375); let e5 = bf_qpos_from_hist(hist, base, vm1, sz, 0.625); let e6 = bf_qpos_from_hist(hist, base, vm1, sz, 0.75); let e7 = bf_qpos_from_hist(hist, base, vm1, sz, 0.875); let d = e6 - e2; if d != 0.0 { res[g] = (e7 - e5 + e3 - e1) / d } }
+            else { if mode == 6 { let q2 = bf_qpos_from_hist(hist, base, vm1, sz, 0.5); if q2 != 0.0 { res[g] = (bf_qpos_from_hist(hist, base, vm1, sz, 0.75) - bf_qpos_from_hist(hist, base, vm1, sz, 0.25)) / q2 } }
+            else { res[g] = bf_qpos_from_hist(hist, base, vm1, sz, 0.9) - bf_qpos_from_hist(hist, base, vm1, sz, 0.1) } } } } } } }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, res[k]) } else { write_f64(op, i, read_f64(vp, i)) } i = i + 1 }
+    heap_free(hist as *mut i8)
+    out
+}
+/// Per-group interpolated PERCENTILE at fraction q (0..1), broadcast. Dense histogram. NATIVE + lean_single only.
+pub fn bf_percentile_dense_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64, q: f64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_robustloc_dense(src, key_col, val_col, vmax, q, 0) }
+/// Per-group TUKEY TRIMEAN ((q25 + 2·median + q75)/4, a robust center), broadcast. Dense histogram. NATIVE + lean_single.
+pub fn bf_trimean_dense_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_robustloc_dense(src, key_col, val_col, vmax, 0.0, 1) }
+/// Per-group MIDHINGE ((q25 + q75)/2), broadcast. Dense histogram. NATIVE + lean_single only.
+pub fn bf_midhinge_dense_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_robustloc_dense(src, key_col, val_col, vmax, 0.0, 2) }
+/// Per-group P95/P05 RATIO (wide dispersion ratio), broadcast. Dense histogram. NATIVE + lean_single only.
+pub fn bf_p95p05_ratio_dense_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_robustloc_dense(src, key_col, val_col, vmax, 0.0, 3) }
+/// Per-group BOWLEY (quartile) SKEWNESS ((q75+q25−2·median)/IQR, robust skew in [−1,1]), broadcast. Dense histogram. NATIVE + lean_single.
+pub fn bf_bowley_skew_dense_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_robustloc_dense(src, key_col, val_col, vmax, 0.0, 4) }
+/// Per-group MOORS (octile) KURTOSIS ((E7−E5+E3−E1)/(E6−E2), robust tail weight), broadcast. Dense histogram. NATIVE + lean_single.
+pub fn bf_moors_kurt_dense_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_robustloc_dense(src, key_col, val_col, vmax, 0.0, 5) }
+/// Per-group ROBUST CV (IQR / median, a robust coefficient of variation), broadcast. Dense histogram. NATIVE + lean_single.
+pub fn bf_robust_cv_dense_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_robustloc_dense(src, key_col, val_col, vmax, 0.0, 6) }
+/// Per-group DECILE RANGE (P90 − P10, absolute robust spread), broadcast. Dense histogram. NATIVE + lean_single only.
+pub fn bf_decile_range_dense_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_robustloc_dense(src, key_col, val_col, vmax, 0.0, 7) }
+
+/// Per-group TRIMMED / WINSORIZED MEAN via a value histogram (dense keys 0..1023 + values
+/// 0..vmax). Symmetric trim of floor(trim·n) items from each tail (by rank). An ascending
+/// bucket walk splits each value's rank span [c, c+f) against the kept window [lo, hi); mode 0
+/// averages the kept values, mode 1 replaces trimmed tails with the boundary values (Winsor).
+/// Broadcast. O(n + G·vrange). NATIVE + lean_single only.
+fn bf_group_trimstat_dense(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64, trim: f64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var cnt: [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || n <= 0 || vmax < 0 { return out }
+    let vm1 = vmax + 1
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let hist = heap_alloc(1024 * vm1 * 8) as *mut i64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        let vi = read_f64(vp, i) as i64
+        if k >= 0 && k < 1024 && vi >= 0 && vi < vm1 { write_i64(hist, k * vm1 + vi, read_i64(hist, k * vm1 + vi) + 1); cnt[k] = cnt[k] + 1.0 }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        if cnt[g] > 0.0 {
+            let sz = cnt[g] as i64
+            let lo = (trim * cnt[g]) as i64
+            let hi = sz - lo
+            if hi > lo {
+                let base = g * vm1
+                var v: i64 = 0
+                var c: i64 = 0
+                var sumt = 0.0
+                var nt: i64 = 0
+                var vlo = 0.0
+                var vhi = 0.0
+                while v < vm1 {
+                    let f = read_i64(hist, base + v)
+                    if f > 0 {
+                        let cend = c + f
+                        if c <= lo && lo < cend { vlo = v as f64 }
+                        if c <= hi - 1 && hi - 1 < cend { vhi = v as f64 }
+                        var a = c; if lo > a { a = lo }
+                        var b = cend; if hi < b { b = hi }
+                        if b > a { let ci = b - a; sumt = sumt + (v as f64) * (ci as f64); nt = nt + ci }
+                        c = cend
+                    }
+                    v = v + 1
+                }
+                if mode == 0 { if nt > 0 { res[g] = sumt / (nt as f64) } }
+                else { res[g] = (vlo * (lo as f64) + sumt + vhi * ((sz - hi) as f64)) / cnt[g] }
+            }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, res[k]) } else { write_f64(op, i, read_f64(vp, i)) } i = i + 1 }
+    heap_free(hist as *mut i8)
+    out
+}
+/// Per-group TRIMMED MEAN (drop floor(trim·n) from each tail, average the rest), broadcast. Dense histogram. NATIVE + lean_single.
+pub fn bf_trimmed_mean_dense_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64, trim: f64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_trimstat_dense(src, key_col, val_col, vmax, trim, 0) }
+/// Per-group WINSORIZED MEAN (clamp floor(trim·n) tail items to the boundary values, then mean), broadcast. Dense histogram. NATIVE + lean_single.
+pub fn bf_winsorized_mean_dense_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64, trim: f64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_trimstat_dense(src, key_col, val_col, vmax, trim, 1) }

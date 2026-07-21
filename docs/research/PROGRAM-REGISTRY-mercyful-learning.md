@@ -35,10 +35,13 @@ Partiu-se de um princípio — treinar modelos pelo caminho de menor sofrimento,
 | Geometria de 𝕊 | **sólido** — matemática verificada, autocontida |
 | Leitura espinosana | **original** — filosofia da matemática, com um ponto a verificar |
 | Assinatura de treinamento | **ausente no alvo** — instrumento sobreviveu a doze revisões e disse não |
+| **Camada de embedding em 𝕊** (spec) | **registrada, não rodada** — primeira construção que *põe* a estrutura; ver §9 |
 
 > **Distinção que estava faltando neste registro:** o teorema de conexidade (§1.4) demoliu o passo de montanha **em 𝕊**. Não diz nada sobre campos clínicos ou de decisão, que quase certamente *têm* barreiras — não se chega da evitação à recuperação sem atravessar distresse. A maquinaria de passo de montanha está vacante em 𝕊 e **viva** no domínio que motivou tudo.
 >
 > ⚠️ **Atualização após o Piloto 1 (ver PREREG-piloto1-addendum2).** A conjectura "campos reais quase certamente têm barreira" foi **testada e falsificada** em campos semânticos reais (DreamBank, PMI gpt2 + Qwen, sujeito único e agregado, com sensibilidade demonstrada a ≥~1,5σ). A forma **topológica** do passo de montanha está agora falsificada em ambos os domínios testados; o que sobrevive é a forma **orçamentária** (§A.2), que nunca dependeu de desconexão.
+>
+> 🆕 **Movimento para a frente (2026-07-21).** Registrada e mesclada a **spec da camada de embedding em 𝕊** (`docs/research/sedenion-embedding-spec.md`, PR #1369) — a primeira construção que *põe* a estrutura em vez de perguntar se objetos padrão a têm. Ainda **não rodada**. Ver §9.
 
 ---
 
@@ -320,9 +323,9 @@ Este é o ativo metodológico, e vale listá-lo porque é o que se leva para o p
 - [x] **arXiv 2512.13002** — **EXISTE** (Koebisu, math.DG; busca independente 2026-07-20). A fatoração do determinante e a parametrização do cone são dele; **não** reivindicável como original. A matemática permanece verificada numericamente a $10^{-14}$.
 - [~] **Simplicidade de $\mathbb S$** — literatura favorável encontrada (McCrimmon; arXiv 1610.03844); enunciado exato para $\mathbb S$ real ainda a extrair (§2.1).
 - [x] **Moreno / Reggiani** para $ZD(\mathbb S)\cong V_2(\mathbb R^7)$ — segunda fonte independente confirmada: arXiv **2411.18881** (*"The geometry of sedenion zero divisors"*).
-- [ ] **Referências de Lyapunov**: Engelken, Wolf & Abbott; Vogt et al.; Ginelli et al. (vetores covariantes); Benettin et al. e Dieci–Van Vleck (algoritmo QR).
-- [ ] **Isometria dinâmica**: Saxe et al.; Pennington et al. — enunciados exatos.
-- [ ] **Colapso de posto**: Dong et al.
+- [x] **Referências de Lyapunov**: Engelken, Wolf & Abbott (PhRvR 5.043044); Vogt et al. (título corrigido: *On Lyapunov Exponents for RNNs*, Front Appl Math Stat 2022); Ginelli et al. (PRL 99.130601); Benettin et al. (Meccanica 15) e Dieci–Van Vleck (Appl Numer Math 17) — **verificadas + retração checada (scite)**; preenchidas em `probe-preprint-draft.md` (PR #1367).
+- [~] **Isometria dinâmica**: Saxe et al. (ICLR 2014, arXiv:1312.6120); Pennington et al. (NeurIPS 2017) — refs **verificadas e citadas** (#1367); *enunciados exatos* ainda a extrair no corpo do probe.
+- [x] **Colapso de posto**: Dong et al. (ICML 2021, arXiv:2103.03404) — verificada e citada (#1367).
 - [ ] Limite de Biss ($2^n-4n+4=4$ para $n=4$) — conferir o enunciado exato (aniquilador vs variedade).
 
 ---
@@ -351,6 +354,18 @@ Uma versão honesta da conclusão, portanto: *o princípio está formulado e o s
 
 ---
 
+## 9. A primeira construção — camada de embedding em 𝕊 (spec registrada, não rodada)
+
+Os oito negativos e os quatro objetos são **retrospectivos**: perguntaram se objetos padrão **têm** a estrutura — e todos compunham aditivamente, onde §A.6 já dizia que não podiam tê-la. A camada de embedding em $\mathbb S$ é a **primeira construção que *põe* a estrutura** e pergunta se ela faz trabalho: o primeiro experimento para a frente, não sobre o terreno.
+
+- **Spec registrada e mesclada:** `docs/research/sedenion-embedding-spec.md` (PR #1369). Entidades/relações em $\mathbb S^d$, composição de Cayley–Dickson; escore que separa **confiança** ($\alpha=\sigma_{\min}/\lVert\cdot\rVert$, na forma fechada do Objeto A §1.2 — sem SVD) de **direção**; supervisão de aniquilação por **violação de tipo** (não por ausência no grafo, que confunde mundo-aberto com impossibilidade). Falseador pré-registrado; desenho fatorial C1–C4 **pareado por parâmetros**. A tese forte é a aniquilação como conteúdo — o contraste **C4 (𝕊) vs C3 (𝕆)**.
+
+- **Achado de literatura (verificado, scite + WebSearch — ver Apêndice):** KG embedding **octoniônico já existe e já deu null** — OctonionE (extensão no QuatE, NeurIPS 2019) e ConvO/OMult (ACML 2021). Consequência: **C3 é reprodução/baseline, não construção**. Mas o null deles foi obtido no setup de *álgebra de divisão* ($r$ normalizada, perda padrão), que a §5 da spec identifica como incapaz de exprimir aniquilação — logo é o **baseline esperado de C3**, não uma refutação. **Sedênio KG embedding não tem trabalho publicado**: C4 é construção genuína.
+
+- **Estado:** spec + falseador apenas. **Não rodada.** Se der negativo, será — pelo desenho da própria spec — o **primeiro negativo sobre a tese**, e não mais um sobre o terreno; é isso que a distingue dos oito anteriores e o que a torna o próximo experimento que vale a pena.
+
+---
+
 ## Apêndice — Log de verificação (resolvido 2026-07-20, busca independente)
 
 Registro do que foi checado do §6, com o método, para que a próxima pessoa não refaça:
@@ -358,4 +373,6 @@ Registro do que foi checado do §6, com o método, para que a próxima pessoa n�
 - **arXiv 2512.13002 — EXISTE.** WebSearch independente retorna `arxiv.org/abs/2512.13002`, `/html`, `/pdf`: *"Determinant Factorization for Left Multiplication in the Sedenions"*, **Shoot Koebisu**, math.DG, submetido 2025-12-15, revisto 2026-03-26. **Consequência:** a fatoração de §1.1 e a parametrização de §1.3 são de Koebisu — atribuir, não reivindicar. Nosso: a verificação numérica ($10^{-14}$) e o cruzamento codim-4 ↔ posto-4. *(Cautela metodológica: a primeira leitura por WebFetch confabulou um resumo plausível a partir da URL+tópico; só a busca independente por título+autor confirmou a existência. Padrão a repetir: nunca confiar num resumo de página como prova de existência — buscar o identificador de forma independente.)*
 - **ZD(𝕊) ≅ V₂(ℝ⁷) — segunda fonte independente:** arXiv **2411.18881**, *"The geometry of sedenion zero divisors"*. Usar junto de Koebisu.
 - **Simplicidade de 𝕊 — favorável, a fechar:** McCrimmon (simplicidade de doublings de Cayley–Dickson) + arXiv **1610.03844**, *"Simple graded rings, non-associative crossed products and Cayley–Dickson doublings"*. Extrair o enunciado exato para $\mathbb S$ real antes de escrever §2.1 (é a premissa que carrega o argumento espinosano).
-- **Ainda abertos** (não verificados nesta passada): refs de Lyapunov (Engelken/Wolf–Abbott, Vogt, Ginelli, Benettin, Dieci–Van Vleck), isometria dinâmica (Saxe, Pennington), colapso de posto (Dong et al.), limite de Biss.
+- **Fechados na passada de 2026-07-21 (scite + WebSearch, via PR #1367):** refs de Lyapunov (Engelken/Wolf–Abbott, Vogt — título corrigido, Ginelli, Benettin, Dieci–Van Vleck; retração checada), isometria dinâmica (Saxe, Pennington) e colapso de posto (Dong) — todas verificadas e preenchidas em `probe-preprint-draft.md`. A checagem apanhou um DOI inferido errado (Farooq: *Sci Rep* → **Nat Commun** `10.1038/s41467-019-12915-x`) — reforça o padrão "resolver o identificador, nunca inferi-lo".
+- **Ainda abertos:** enunciados *exatos* de isometria dinâmica (a extrair no corpo do probe) e o limite de Biss.
+- **KG embedding octoniônico/sedeniônico (para a §9, verificado 2026-07-21):** octônio **já publicado e null** — OctonionE (extensão no QuatE, NeurIPS 2019, arXiv:1904.10281) e ConvO/OMult (ACML 2021, arXiv:2106.15230), ambos retração-limpos no scite; sedênio **sem trabalho publicado**.
