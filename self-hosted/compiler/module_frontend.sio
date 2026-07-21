@@ -4676,10 +4676,18 @@ pub fn module_frontend_check_imported_modules_verdict(main_path: string) -> i64 
 // whose Box POINTER is copied shallow by struct assignment. Left alone,
 // that pointer would keep referencing dep_box's soon-to-be-reset memory.
 //
-// The intended re-box path snapshots call_args into BSS scratch before reset.
-// The current bootstrap corrupts IrRegList heads during that move, so callers
-// conservatively reset only dependency windows with no live call chains. The
-// scratch machinery remains here for a future bootstrap-safe re-box repair.
+// Re-box path (Wave9 / memory-wall residual):
+//   1. Scan newly-appended functions; snapshot every live call_args chain into
+//      BSS fixed arrays (NOT Box-arena) — reg heads only, max 8 args/site.
+//   2. __arena_reset(dep mark) — reclaim the dep lowering window.
+//   3. Rebuild fresh Box<IrRegList> chains from BSS and write them back via the
+//      A14 whole-function idiom (by-value IrFunction, 2-level field store,
+//      1-level array writeback). Nested
+//      `(*module).functions[fi].instrs[ii].call_args = …` is a 3-level store
+//      through Box that lean_single silently DROPS — that was the residual
+//      that forced the post-#832 "skip when live call_args" retreat. Do NOT
+//      reintroduce A8 by-value IrInstr argument scramble.
+// Overflow (sites > MF_AREBOX_CAP) still skips reset for that module only.
 // ============================================================================
 let MF_AREBOX_CAP: i64 = 8192
 var MF_AREBOX_FI: [i64; 8192] = [0; 8192]
@@ -4688,40 +4696,53 @@ var MF_AREBOX_ARGC: [i64; 8192] = [0; 8192]
 var MF_AREBOX_ARGS: [i64; 65536] = [0; 65536]
 var MF_AREBOX_COUNT: i64 = 0
 var MF_AREBOX_OVERFLOW: bool = false
+// Loud metrics (session totals across lower_array dep merges).
+var MF_AREBOX_RESET_OK: i64 = 0
+var MF_AREBOX_RESET_SKIP: i64 = 0
+var MF_AREBOX_SITES_RECLAIMED: i64 = 0
 
 fn mf_arebox_reset_scratch() with Mut {
     MF_AREBOX_COUNT = 0
     MF_AREBOX_OVERFLOW = false
 }
 
-// Extract up to 8 regs from a call_args chain into MF_AREBOX_ARGS[slot*8 ..].
-// Extra args beyond 8 are truncated (existing convention elsewhere in the
-// codebase caps call-arg capture at 8/16; no observed call site needs more).
-fn mf_arebox_extract(slot: i64, args: Option<Box<IrRegList>>) -> i64 with Mut, Panic, Div {
+// Extract up to 8 reg heads from the call_args chain at (fi, ii) into
+// MF_AREBOX_ARGS[slot*8 ..]. Walks via module indices so we never pass a
+// Box-carrying Option into a helper by value (defense in depth vs A8-class
+// large-struct/Box by-value miscompiles). Extra args beyond 8 are truncated
+// (same convention as native_v2_collect_call_args / tco_extract_call_args).
+fn mf_arebox_extract_at(module: &IrModule, fi: i64, ii: i64, slot: i64) -> i64 with Mut, Panic, Div {
     var n: i64 = 0
-    var cur = args
-    while n < 8 {
-        match cur {
-            Some(node) => {
-                MF_AREBOX_ARGS[(slot * 8 + n) as usize] = (*node).head
-                cur = (*node).tail
-                n = n + 1
+    match (*module).functions[fi as usize].instrs[ii as usize].call_args {
+        Some(node0) => {
+            MF_AREBOX_ARGS[(slot * 8 + n) as usize] = (*node0).head
+            n = 1
+            var cur = (*node0).tail
+            while n < 8 {
+                match cur {
+                    Some(node) => {
+                        MF_AREBOX_ARGS[(slot * 8 + n) as usize] = (*node).head
+                        cur = (*node).tail
+                        n = n + 1
+                    }
+                    _ => { return n }
+                }
             }
-            _ => { return n }
+            n
         }
+        _ => 0
     }
-    n
 }
 
 // Record one (fi, ii) call-arg site for post-reset re-boxing, extracting its
 // args NOW while the source (pre-reset) memory is still valid.
-fn mf_arebox_record(fi: i64, ii: i64, args: Option<Box<IrRegList>>) with Mut, Panic, Div {
+fn mf_arebox_record_at(module: &IrModule, fi: i64, ii: i64) with Mut, Panic, Div {
     if MF_AREBOX_COUNT >= MF_AREBOX_CAP {
         MF_AREBOX_OVERFLOW = true
         return
     }
     let slot = MF_AREBOX_COUNT
-    let n = mf_arebox_extract(slot, args)
+    let n = mf_arebox_extract_at(module, fi, ii, slot)
     MF_AREBOX_FI[slot as usize] = fi
     MF_AREBOX_II[slot as usize] = ii
     MF_AREBOX_ARGC[slot as usize] = n
@@ -4754,7 +4775,7 @@ fn mf_arebox_scan(module: &IrModule, fn_lo: i64, fn_hi: i64) -> bool with Mut, P
         var ii: i64 = 0
         while ii < ic {
             match (*module).functions[fi as usize].instrs[ii as usize].call_args {
-                Some(_) => mf_arebox_record(fi, ii, (*module).functions[fi as usize].instrs[ii as usize].call_args)
+                Some(_) => mf_arebox_record_at(module, fi, ii)
                 _ => {}
             }
             ii = ii + 1
@@ -4766,13 +4787,27 @@ fn mf_arebox_scan(module: &IrModule, fn_lo: i64, fn_hi: i64) -> bool with Mut, P
 
 // Write the rebuilt (post-reset) call_args chains back into `module`. Must be
 // called strictly after __arena_reset.
+//
+// A14 whole-function writeback: lean_single drops 3-level nested stores of the
+// form `(*module).functions[fi].instrs[ii].call_args = rebuilt`, leaving the
+// shallow (now-dangling) Box pointer in place — that is the observed
+// "corrupts IrRegList heads" residual after arena reclaim. Copy the IrFunction
+// out, mutate call_args on the owned local (2-level field store, same proven
+// pattern as fn_id rebinding), write the whole function back once.
+// Do NOT take IrInstr by value (A8 scramble).
 fn mf_arebox_apply(module: &! IrModule) with Alloc, Mut, Panic, Div {
     var s: i64 = 0
     while s < MF_AREBOX_COUNT {
         let fi = MF_AREBOX_FI[s as usize]
         let ii = MF_AREBOX_II[s as usize]
         let rebuilt = mf_arebox_rebuild(s)
-        (*module).functions[fi as usize].instrs[ii as usize].call_args = rebuilt
+        if fi >= 0 && fi < (*module).fn_count {
+            var f = (*module).functions[fi as usize]
+            if ii >= 0 && ii < f.instr_count {
+                f.instrs[ii as usize].call_args = rebuilt
+                (*module).functions[fi as usize] = f
+            }
+        }
         s = s + 1
     }
 }
@@ -4959,17 +4994,27 @@ fn module_frontend_lower_programs_array_direct_box(
                         // (source still valid), reset, then rebuild fresh in the
                         // freed window.
                         let dep_merge_new_fn_count = (*acc_box).fn_count
+                        // Snapshot live call_args for newly-appended functions into BSS,
+                        // then reclaim the dep window and re-box chains into acc (A14
+                        // whole-function writeback). Skip only on scratch overflow.
                         let dep_arena_scan_ok = mf_arebox_scan(&(*acc_box), dep_merge_old_fn_count, dep_merge_new_fn_count)
-                        // The current bootstrap corrupts IrRegList heads while moving
-                        // them through the scratch re-box path. Preserve correctness by
-                        // reclaiming only dependency windows with no live call chains.
-                        let dep_arena_can_reset = dep_arena_scan_ok && MF_AREBOX_COUNT == 0
-                        if dep_arena_can_reset {
+                        let dep_rebox_sites = MF_AREBOX_COUNT
+                        if dep_arena_scan_ok {
                             __arena_reset(dep_arena_mark)
                             mf_arebox_apply(&! (*acc_box))
-                        } else {
-                            print("lower_array: arena_reset_skipped (live call_args) module ")
+                            MF_AREBOX_RESET_OK = MF_AREBOX_RESET_OK + 1
+                            MF_AREBOX_SITES_RECLAIMED = MF_AREBOX_SITES_RECLAIMED + dep_rebox_sites
+                            print("lower_array: arena_reset_ok module ")
                             print_int(i)
+                            print(" rebox_sites ")
+                            print_int(dep_rebox_sites)
+                            print("\n")
+                        } else {
+                            MF_AREBOX_RESET_SKIP = MF_AREBOX_RESET_SKIP + 1
+                            print("lower_array: arena_reset_skipped (call-arg scratch overflow) module ")
+                            print_int(i)
+                            print(" sites ")
+                            print_int(dep_rebox_sites)
                             print("\n")
                         }
                         print("lower_array: merge_done ")
@@ -4987,6 +5032,13 @@ fn module_frontend_lower_programs_array_direct_box(
             trace.last_stage = "done"
             print("lower_array: final_fn_count ")
             print_int((*acc_box).fn_count)
+            print("\n")
+            print("lower_array: arena_reset_totals ok=")
+            print_int(MF_AREBOX_RESET_OK)
+            print(" skip=")
+            print_int(MF_AREBOX_RESET_SKIP)
+            print(" sites_reclaimed=")
+            print_int(MF_AREBOX_SITES_RECLAIMED)
             print("\n")
             module_frontend_lower_direct_box_ok(acc_box, ir_empty_validated_patch_stats())
         }
