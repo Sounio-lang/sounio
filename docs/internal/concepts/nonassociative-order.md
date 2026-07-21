@@ -86,7 +86,7 @@ Assumptions: supplied tags describe a synthetic fixture or declared protocol map
 Write-Set: stdlib/epistemic/parenthesization_receipts.sio; tests/run-pass/epistemic_parenthesization_receipts_import_smoke.sio; tests/compile-fail/epistemic_*parenthesization*.sio; docs/internal/concepts/nonassociative-order.md; docs/internal/concepts/bindings.tsv
 Read-Set: stdlib/epistemic/observation_provenance.sio; docs/internal/concepts/ordered-path-provenance.md; docs/research/psychiatric_nonassociativity_representation_contract_2026-07-21.md
 Positive-Witness: imported synthetic receipt smoke carries history source identity through ordered path, boundary, design, probe, contest, feature, sensitivity, and abstention, while separately checking each shared contest component
-Negative-Witness: ordered path != aggregation boundary; aggregation boundary != bracketing design; algebraic probe != parenthesization sensitivity; imported callers cannot fabricate sensitivity; sensitivity != clinical authority
+Negative-Witness: ordered path != aggregation boundary; aggregation boundary != bracketing design; algebraic probe != parenthesization sensitivity; contest != discriminating feature; imported callers cannot fabricate sensitivity; sensitivity != clinical authority
 Acceptance-Gate: bin/souc check stdlib/epistemic/parenthesization_receipts.sio; scripts/run_sio_test_suite.sh --test-list /tmp/sounio-parenthesization-receipts-20260721.list --jobs 1 --verbose
 Integration-Target: #901-gated source-fresh imported psychiatric collision suite
 Authoritative-Only-If: these receipts prove only the selected nominal program boundaries; no semantic or empirical authority follows from a default-wrapper run
