@@ -272,6 +272,36 @@ receipt distinction through a selected source-to-IR path. It does not prove a
 valid measurement model, identify a causal graph, quantify assessment
 reactivity, or establish a clinical effect.
 
+## Direct Control Before Import Closure
+
+The direct controls below make the smallest nominal boundary executable now:
+
+~~~
+tests/run-pass/psychiatric_informative_observation_receipt_chain.sio
+tests/compile-fail/psychiatric_presence_cannot_be_measurement.sio
+tests/compile-fail/psychiatric_observation_feature_cannot_identify.sio
+~~~
+
+They prove only that a selected library API refuses two category substitutions:
+
+~~~
+EncounterPresenceReceipt != RecordedMeasurementReceipt
+ObservationFeatureUseReceipt != IdentificationReceipt
+~~~
+
+The passing direct control constructs a recorded measurement only from declared
+opportunity, presence, selection, and measurement-act receipts; it also emits
+an explicit abstention for an unresolved observation route. The negative
+controls then demonstrate that presence cannot stand in for a recorded measure
+and that a feature intended for prediction cannot stand in for an
+identification receipt.
+
+This is deliberately weaker than opacity, empirical validity, or import-path
+preservation. Its record constructors remain ordinary nominal records, so it
+does not prove arbitrary construction impossible. Nor does a single-module
+success prove the multimodule native path. The direct controls are a stable
+preflight, not a substitute for the source-fresh imported witness below.
+
 ## Future Executable Boundary
 
 Only after the source-fresh imported-native #901 acceptance path exists, a
@@ -350,7 +380,7 @@ Distinctions-Preserved: ordered path != commutative endpoint; model representati
 Distinctions-Erased: none
 Evidence-Run: bash scripts/dev/check_docs_consistency.sh; bash scripts/dev/check_docs_registry.sh; git diff --check
 Fallback-Path: none; documentation-only research contract
-Legacy-Kept: the umbrella ObservationProcessReceipt remains the prior temporal-matrix vocabulary
+Legacy-Kept: the umbrella ObservationProcessReceipt remains the prior temporal-matrix vocabulary; the direct nominal controls remain bounded preflight evidence, not imported-native parity
 Conflicting-Lanes: none observed at claim time; imported-native #901 work remains owned by the compiler/PBPK lane
 Next-Semantic-Interface: consider a library-first synthetic receipt fixture only after #901 source-fresh imported-native acceptance
 ~~~
