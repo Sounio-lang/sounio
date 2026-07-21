@@ -112,6 +112,11 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 | **batch-13 (10 verbs, set 5)** — net_over_gross, sum_pos_frac, mean_pos/neg, count_changes, max_abs_dev, sum_sq_dev, cumsum_dev_abs, cumcount_le_prev, cumcount_positive_frac | | | | **all win** | dense sign/deviation/running passes vs pandas per-group lambdas — completes the +50 push (~130 grouped verbs total) |
 | **curated (10 verbs)** — weighted_skew/kurt, lag-k autocorr, ratio_mean/sum **win** (weighted_skew 0.14x); median/q1/q3/iqr **~2.9x loss** (quantile-bound, pandas Cython) + mad_median (no native, wins) | | | | mixed | analytic dense verbs win; quantile family maps to the C3 select dispatch |
 | median_dense_by / q1/q3/iqr_dense (1M rows, 1000 dense keys, int values 0..100) | | ~13.4 | ~32.9 | **0.41x — Sounio wins (2.4x)** | histogram bucket + cumulative-count walk, NO quickselect (flips the general median_by ~2.9x loss to a win for dense int values) |
+| nunique_dense_by (1M rows, 1000 dense keys, vmax=100) | | ~14.3 | ~42.8 | **0.33x — wins 3x** | value histogram, no sort |
+| mode_dense_by / mode_count/mode_frac | | ~14.3 | ~164 | **0.09x — wins 11x** | pandas mode = per-group lambda |
+| gini_impurity_dense_by / simpson_dense | | ~14.2 | ~261 | **0.05x — wins 20x** | pandas = value_counts lambda |
+| any_positive_by / all_positive_by | | ~11.3 | ~13.6 | **0.83x — wins** | dense boolean reduction (beats native transform-max) |
+| cumany_positive_by / cumall_positive_by | | ~7.9 | ~18.0 | **0.44x — wins 2.3x** | single ordered pass (beats groupby.cummax) |
 | cov (1M rows, two-pass mean-shift) | | 6.7 | 8.5 | **0.78x — Sounio wins** | (new verb) |
 | corr (1M rows, two-pass + bf_sqrt) | | 10.3 | 8.0 | **~1.3x** | (new verb) |
 | median (1M rows, quickselect) | | ~34 | ~16 | **~2.2x** | numpy SIMD introselect |
