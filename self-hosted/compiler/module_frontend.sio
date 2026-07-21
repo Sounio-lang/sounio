@@ -578,6 +578,51 @@ fn ir_epistemic_offset_id(id: i64, offset: i64) -> i64 {
     if id >= 0 { id + offset } else { id }
 }
 
+// Scalar-only epistemic id shift. Prefer this over IrInstr by-value adjust
+// (A8: IrInstr carries Option<Box<IrRegList>> call_args — by-value scramble).
+fn ir_merge_adjusted_label_id(
+    op: IrOpcode,
+    label_id: i64,
+    contest_offset: i64,
+    robust_offset: i64,
+    decision_offset: i64,
+    deferred_offset: i64,
+    validated_offset: i64,
+    acquisition_plan_offset: i64,
+    recourse_plan_offset: i64,
+    alternative_set_offset: i64,
+    transition_plan_offset: i64,
+    observed_transition_offset: i64,
+    rollback_certificate_offset: i64
+) -> i64 {
+    if op == IrOpcode::IrContest || op == IrOpcode::IrLiftKnowledge {
+        return ir_epistemic_offset_id(label_id, contest_offset)
+    } else if op == IrOpcode::IrProveRobust {
+        return ir_epistemic_offset_id(label_id, robust_offset)
+    } else if op == IrOpcode::IrAdmitAction {
+        return ir_epistemic_offset_id(label_id, decision_offset)
+    } else if op == IrOpcode::IrDeferAction {
+        return ir_epistemic_offset_id(label_id, deferred_offset)
+    } else if op == IrOpcode::IrValidated {
+        return ir_epistemic_offset_id(label_id, validated_offset)
+    } else if op == IrOpcode::IrPlanAcquisition {
+        return ir_epistemic_offset_id(label_id, acquisition_plan_offset)
+    } else if op == IrOpcode::IrPlanRecourse {
+        return ir_epistemic_offset_id(label_id, recourse_plan_offset)
+    } else if op == IrOpcode::IrProposeAlternatives {
+        return ir_epistemic_offset_id(label_id, alternative_set_offset)
+    } else if op == IrOpcode::IrCommitAlternative {
+        return ir_epistemic_offset_id(label_id, transition_plan_offset)
+    } else if op == IrOpcode::IrObserveTransition {
+        return ir_epistemic_offset_id(label_id, observed_transition_offset)
+    } else if op == IrOpcode::IrRollbackTransition {
+        return ir_epistemic_offset_id(label_id, rollback_certificate_offset)
+    }
+    label_id
+}
+
+// Legacy wrapper: only for residual call sites. Prefer scalar label_id path
+// on the multi-mod merge hot path (no IrInstr by-value).
 fn ir_merge_adjust_epistemic_instr(
     instr: IrInstr,
     contest_offset: i64,
@@ -593,216 +638,209 @@ fn ir_merge_adjust_epistemic_instr(
     rollback_certificate_offset: i64
 ) -> IrInstr with Mut {
     var out = instr
-    if out.op == IrOpcode::IrContest || out.op == IrOpcode::IrLiftKnowledge {
-        out.label_id = ir_epistemic_offset_id(out.label_id, contest_offset)
-    } else if out.op == IrOpcode::IrProveRobust {
-        out.label_id = ir_epistemic_offset_id(out.label_id, robust_offset)
-    } else if out.op == IrOpcode::IrAdmitAction {
-        out.label_id = ir_epistemic_offset_id(out.label_id, decision_offset)
-    } else if out.op == IrOpcode::IrDeferAction {
-        out.label_id = ir_epistemic_offset_id(out.label_id, deferred_offset)
-    } else if out.op == IrOpcode::IrValidated {
-        out.label_id = ir_epistemic_offset_id(out.label_id, validated_offset)
-    } else if out.op == IrOpcode::IrPlanAcquisition {
-        out.label_id = ir_epistemic_offset_id(out.label_id, acquisition_plan_offset)
-    } else if out.op == IrOpcode::IrPlanRecourse {
-        out.label_id = ir_epistemic_offset_id(out.label_id, recourse_plan_offset)
-    } else if out.op == IrOpcode::IrProposeAlternatives {
-        out.label_id = ir_epistemic_offset_id(out.label_id, alternative_set_offset)
-    } else if out.op == IrOpcode::IrCommitAlternative {
-        out.label_id = ir_epistemic_offset_id(out.label_id, transition_plan_offset)
-    } else if out.op == IrOpcode::IrObserveTransition {
-        out.label_id = ir_epistemic_offset_id(out.label_id, observed_transition_offset)
-    } else if out.op == IrOpcode::IrRollbackTransition {
-        out.label_id = ir_epistemic_offset_id(out.label_id, rollback_certificate_offset)
-    }
+    out.label_id = ir_merge_adjusted_label_id(
+        out.op,
+        out.label_id,
+        contest_offset,
+        robust_offset,
+        decision_offset,
+        deferred_offset,
+        validated_offset,
+        acquisition_plan_offset,
+        recourse_plan_offset,
+        alternative_set_offset,
+        transition_plan_offset,
+        observed_transition_offset,
+        rollback_certificate_offset
+    )
     out
 }
 
-fn ir_merge_epistemic_sections(dst: IrEpistemicSection, src: IrEpistemicSection) -> IrEpistemicSection with Mut, Panic, Div {
-    var merged = dst
-    let family_offset = dst.model_family_count
-    let policy_offset = dst.policy_count
-    let decision_policy_offset = dst.decision_policy_count
-    let deferral_policy_offset = dst.deferral_policy_count
-    let acquisition_policy_offset = dst.acquisition_policy_count
-    let recourse_policy_offset = dst.recourse_policy_count
-    let validation_offset = dst.validation_count
-    let mechanistic_offset = dst.mechanistic_report_count
-    let posterior_weights_offset = dst.posterior_weights_count
-    let counterexample_offset = dst.counterexample_count
-    let audit_offset = dst.audit_count
-    let contest_offset = dst.contest_count
-    let contest_witness_offset = dst.contest_witness_count
-    let robust_offset = dst.robust_proof_count
-    let decision_certificate_offset = dst.decision_certificate_count
-    let deferred_certificate_offset = dst.deferred_certificate_count
-    let deferred_reason_witness_offset = dst.deferred_reason_witness_count
-    let acquisition_plan_offset = dst.acquisition_plan_count
-    let acquisition_reason_witness_offset = dst.acquisition_reason_witness_count
-    let recourse_plan_offset = dst.recourse_plan_count
-    let recourse_reason_witness_offset = dst.recourse_reason_witness_count
-    let alternative_policy_offset = dst.alternative_policy_count
-    let alternative_frontier_offset = dst.alternative_frontier_count
-    let alternative_candidate_offset = dst.alternative_candidate_count
-    let alternative_set_offset = dst.alternative_set_count
-    let alternative_reason_witness_offset = dst.alternative_reason_witness_count
-    let transition_policy_offset = dst.transition_policy_count
-    let transition_step_offset = dst.transition_step_count
-    let transition_protocol_offset = dst.transition_protocol_count
-    let transition_plan_offset = dst.transition_plan_count
-    let transition_reason_witness_offset = dst.transition_reason_witness_count
-    let monitoring_policy_offset = dst.monitoring_policy_count
-    let observed_transition_offset = dst.observed_transition_count
-    let rollback_certificate_offset = dst.rollback_certificate_count
-    let validated_offset = dst.validated_manifest_count
+// In-place epistemic section merge (Wave10 memory wall).
+// Avoids full IrEpistemicSection by-value (dst+src params + return + local).
+fn ir_merge_epistemic_sections_into(dst: &! IrEpistemicSection, src: &IrEpistemicSection) with Mut, Panic, Div {
+    let family_offset = (*dst).model_family_count
+    let policy_offset = (*dst).policy_count
+    let decision_policy_offset = (*dst).decision_policy_count
+    let deferral_policy_offset = (*dst).deferral_policy_count
+    let acquisition_policy_offset = (*dst).acquisition_policy_count
+    let recourse_policy_offset = (*dst).recourse_policy_count
+    let validation_offset = (*dst).validation_count
+    let mechanistic_offset = (*dst).mechanistic_report_count
+    let posterior_weights_offset = (*dst).posterior_weights_count
+    let counterexample_offset = (*dst).counterexample_count
+    let audit_offset = (*dst).audit_count
+    let contest_offset = (*dst).contest_count
+    let contest_witness_offset = (*dst).contest_witness_count
+    let robust_offset = (*dst).robust_proof_count
+    let decision_certificate_offset = (*dst).decision_certificate_count
+    let deferred_certificate_offset = (*dst).deferred_certificate_count
+    let deferred_reason_witness_offset = (*dst).deferred_reason_witness_count
+    let acquisition_plan_offset = (*dst).acquisition_plan_count
+    let acquisition_reason_witness_offset = (*dst).acquisition_reason_witness_count
+    let recourse_plan_offset = (*dst).recourse_plan_count
+    let recourse_reason_witness_offset = (*dst).recourse_reason_witness_count
+    let alternative_policy_offset = (*dst).alternative_policy_count
+    let alternative_frontier_offset = (*dst).alternative_frontier_count
+    let alternative_candidate_offset = (*dst).alternative_candidate_count
+    let alternative_set_offset = (*dst).alternative_set_count
+    let alternative_reason_witness_offset = (*dst).alternative_reason_witness_count
+    let transition_policy_offset = (*dst).transition_policy_count
+    let transition_step_offset = (*dst).transition_step_count
+    let transition_protocol_offset = (*dst).transition_protocol_count
+    let transition_plan_offset = (*dst).transition_plan_count
+    let transition_reason_witness_offset = (*dst).transition_reason_witness_count
+    let monitoring_policy_offset = (*dst).monitoring_policy_count
+    let observed_transition_offset = (*dst).observed_transition_count
+    let rollback_certificate_offset = (*dst).rollback_certificate_count
+    let validated_offset = (*dst).validated_manifest_count
 
     var i: i64 = 0
-    while i < src.model_family_count && merged.model_family_count < IR_MAX_EPI_MODEL_FAMILIES {
-        var info = src.model_families[i]
-        info.id = merged.model_family_count
-        merged.model_families[merged.model_family_count as usize] = info
-        merged.model_family_count = merged.model_family_count + 1
+    while i < (*src).model_family_count && (*dst).model_family_count < IR_MAX_EPI_MODEL_FAMILIES {
+        var info = (*src).model_families[i]
+        info.id = (*dst).model_family_count
+        (*dst).model_families[(*dst).model_family_count as usize] = info
+        (*dst).model_family_count = (*dst).model_family_count + 1
         i = i + 1
     }
 
     i = 0
-    while i < src.policy_count && merged.policy_count < IR_MAX_EPI_POLICIES {
-        var info = src.policies[i]
-        info.id = merged.policy_count
-        merged.policies[merged.policy_count as usize] = info
-        merged.policy_count = merged.policy_count + 1
+    while i < (*src).policy_count && (*dst).policy_count < IR_MAX_EPI_POLICIES {
+        var info = (*src).policies[i]
+        info.id = (*dst).policy_count
+        (*dst).policies[(*dst).policy_count as usize] = info
+        (*dst).policy_count = (*dst).policy_count + 1
         i = i + 1
     }
 
     i = 0
-    while i < src.decision_policy_count && merged.decision_policy_count < IR_MAX_EPI_DECISION_POLICIES {
-        var info = src.decision_policies[i]
-        info.id = merged.decision_policy_count
-        merged.decision_policies[merged.decision_policy_count as usize] = info
-        merged.decision_policy_count = merged.decision_policy_count + 1
+    while i < (*src).decision_policy_count && (*dst).decision_policy_count < IR_MAX_EPI_DECISION_POLICIES {
+        var info = (*src).decision_policies[i]
+        info.id = (*dst).decision_policy_count
+        (*dst).decision_policies[(*dst).decision_policy_count as usize] = info
+        (*dst).decision_policy_count = (*dst).decision_policy_count + 1
         i = i + 1
     }
 
     i = 0
-    while i < src.deferral_policy_count && merged.deferral_policy_count < IR_MAX_EPI_DEFERRAL_POLICIES {
-        var info = src.deferral_policies[i]
-        info.id = merged.deferral_policy_count
-        merged.deferral_policies[merged.deferral_policy_count as usize] = info
-        merged.deferral_policy_count = merged.deferral_policy_count + 1
+    while i < (*src).deferral_policy_count && (*dst).deferral_policy_count < IR_MAX_EPI_DEFERRAL_POLICIES {
+        var info = (*src).deferral_policies[i]
+        info.id = (*dst).deferral_policy_count
+        (*dst).deferral_policies[(*dst).deferral_policy_count as usize] = info
+        (*dst).deferral_policy_count = (*dst).deferral_policy_count + 1
         i = i + 1
     }
 
     i = 0
-    while i < src.acquisition_policy_count && merged.acquisition_policy_count < IR_MAX_EPI_ACQUISITION_POLICIES {
-        var info = src.acquisition_policies[i]
-        info.id = merged.acquisition_policy_count
-        merged.acquisition_policies[merged.acquisition_policy_count as usize] = info
-        merged.acquisition_policy_count = merged.acquisition_policy_count + 1
+    while i < (*src).acquisition_policy_count && (*dst).acquisition_policy_count < IR_MAX_EPI_ACQUISITION_POLICIES {
+        var info = (*src).acquisition_policies[i]
+        info.id = (*dst).acquisition_policy_count
+        (*dst).acquisition_policies[(*dst).acquisition_policy_count as usize] = info
+        (*dst).acquisition_policy_count = (*dst).acquisition_policy_count + 1
         i = i + 1
     }
 
     i = 0
-    while i < src.recourse_policy_count && merged.recourse_policy_count < IR_MAX_EPI_RECOURSE_POLICIES {
-        var info = src.recourse_policies[i]
-        info.id = merged.recourse_policy_count
-        merged.recourse_policies[merged.recourse_policy_count as usize] = info
-        merged.recourse_policy_count = merged.recourse_policy_count + 1
+    while i < (*src).recourse_policy_count && (*dst).recourse_policy_count < IR_MAX_EPI_RECOURSE_POLICIES {
+        var info = (*src).recourse_policies[i]
+        info.id = (*dst).recourse_policy_count
+        (*dst).recourse_policies[(*dst).recourse_policy_count as usize] = info
+        (*dst).recourse_policy_count = (*dst).recourse_policy_count + 1
         i = i + 1
     }
 
     i = 0
-    while i < src.validation_count && merged.validation_count < IR_MAX_EPI_VALIDATIONS {
-        var info = src.validations[i]
-        info.id = merged.validation_count
-        merged.validations[merged.validation_count as usize] = info
-        merged.validation_count = merged.validation_count + 1
+    while i < (*src).validation_count && (*dst).validation_count < IR_MAX_EPI_VALIDATIONS {
+        var info = (*src).validations[i]
+        info.id = (*dst).validation_count
+        (*dst).validations[(*dst).validation_count as usize] = info
+        (*dst).validation_count = (*dst).validation_count + 1
         i = i + 1
     }
 
     i = 0
-    while i < src.mechanistic_report_count && merged.mechanistic_report_count < IR_MAX_EPI_MECHANISTIC_REPORTS {
-        var info = src.mechanistic_reports[i]
-        info.id = merged.mechanistic_report_count
-        merged.mechanistic_reports[merged.mechanistic_report_count as usize] = info
-        merged.mechanistic_report_count = merged.mechanistic_report_count + 1
+    while i < (*src).mechanistic_report_count && (*dst).mechanistic_report_count < IR_MAX_EPI_MECHANISTIC_REPORTS {
+        var info = (*src).mechanistic_reports[i]
+        info.id = (*dst).mechanistic_report_count
+        (*dst).mechanistic_reports[(*dst).mechanistic_report_count as usize] = info
+        (*dst).mechanistic_report_count = (*dst).mechanistic_report_count + 1
         i = i + 1
     }
 
     i = 0
-    while i < src.posterior_weights_count && merged.posterior_weights_count < IR_MAX_EPI_POSTERIOR_WEIGHTS {
-        var info = src.posterior_weights[i]
-        info.id = merged.posterior_weights_count
-        merged.posterior_weights[merged.posterior_weights_count as usize] = info
-        merged.posterior_weights_count = merged.posterior_weights_count + 1
+    while i < (*src).posterior_weights_count && (*dst).posterior_weights_count < IR_MAX_EPI_POSTERIOR_WEIGHTS {
+        var info = (*src).posterior_weights[i]
+        info.id = (*dst).posterior_weights_count
+        (*dst).posterior_weights[(*dst).posterior_weights_count as usize] = info
+        (*dst).posterior_weights_count = (*dst).posterior_weights_count + 1
         i = i + 1
     }
 
     i = 0
-    while i < src.counterexample_count && merged.counterexample_count < IR_MAX_EPI_COUNTEREXAMPLES {
-        var info = src.counterexamples[i]
-        info.id = merged.counterexample_count
-        merged.counterexamples[merged.counterexample_count as usize] = info
-        merged.counterexample_count = merged.counterexample_count + 1
+    while i < (*src).counterexample_count && (*dst).counterexample_count < IR_MAX_EPI_COUNTEREXAMPLES {
+        var info = (*src).counterexamples[i]
+        info.id = (*dst).counterexample_count
+        (*dst).counterexamples[(*dst).counterexample_count as usize] = info
+        (*dst).counterexample_count = (*dst).counterexample_count + 1
         i = i + 1
     }
 
     i = 0
-    while i < src.audit_count && merged.audit_count < IR_MAX_EPI_AUDITS {
-        var info = src.audits[i]
-        info.id = merged.audit_count
+    while i < (*src).audit_count && (*dst).audit_count < IR_MAX_EPI_AUDITS {
+        var info = (*src).audits[i]
+        info.id = (*dst).audit_count
         info.family_id = ir_epistemic_offset_id(info.family_id, family_offset)
         info.policy_id = ir_epistemic_offset_id(info.policy_id, policy_offset)
         info.mechanistic_report_id = ir_epistemic_offset_id(info.mechanistic_report_id, mechanistic_offset)
         info.posterior_weights_id = ir_epistemic_offset_id(info.posterior_weights_id, posterior_weights_offset)
         info.counterexample_id = ir_epistemic_offset_id(info.counterexample_id, counterexample_offset)
-        merged.audits[merged.audit_count as usize] = info
-        merged.audit_count = merged.audit_count + 1
+        (*dst).audits[(*dst).audit_count as usize] = info
+        (*dst).audit_count = (*dst).audit_count + 1
         i = i + 1
     }
 
     i = 0
-    while i < src.contest_count && merged.contest_count < IR_MAX_EPI_CONTESTS {
-        var info = src.contests[i]
-        info.id = merged.contest_count
+    while i < (*src).contest_count && (*dst).contest_count < IR_MAX_EPI_CONTESTS {
+        var info = (*src).contests[i]
+        info.id = (*dst).contest_count
         info.audit_id = ir_epistemic_offset_id(info.audit_id, audit_offset)
         info.family_id = ir_epistemic_offset_id(info.family_id, family_offset)
         info.policy_id = ir_epistemic_offset_id(info.policy_id, policy_offset)
         info.mechanistic_report_id = ir_epistemic_offset_id(info.mechanistic_report_id, mechanistic_offset)
         info.posterior_weights_id = ir_epistemic_offset_id(info.posterior_weights_id, posterior_weights_offset)
         info.counterexample_id = ir_epistemic_offset_id(info.counterexample_id, counterexample_offset)
-        merged.contests[merged.contest_count as usize] = info
-        merged.contest_count = merged.contest_count + 1
+        (*dst).contests[(*dst).contest_count as usize] = info
+        (*dst).contest_count = (*dst).contest_count + 1
         i = i + 1
     }
 
     i = 0
-    while i < src.contest_witness_count && merged.contest_witness_count < IR_MAX_EPI_CONTEST_WITNESSES {
-        var info = src.contest_witnesses[i]
-        info.id = merged.contest_witness_count
+    while i < (*src).contest_witness_count && (*dst).contest_witness_count < IR_MAX_EPI_CONTEST_WITNESSES {
+        var info = (*src).contest_witnesses[i]
+        info.id = (*dst).contest_witness_count
         info.contest_id = ir_epistemic_offset_id(info.contest_id, contest_offset)
-        merged.contest_witnesses[merged.contest_witness_count as usize] = info
-        merged.contest_witness_count = merged.contest_witness_count + 1
+        (*dst).contest_witnesses[(*dst).contest_witness_count as usize] = info
+        (*dst).contest_witness_count = (*dst).contest_witness_count + 1
         i = i + 1
     }
 
     i = 0
-    while i < src.robust_proof_count && merged.robust_proof_count < IR_MAX_EPI_ROBUST_PROOFS {
-        var info = src.robust_proofs[i]
-        info.id = merged.robust_proof_count
+    while i < (*src).robust_proof_count && (*dst).robust_proof_count < IR_MAX_EPI_ROBUST_PROOFS {
+        var info = (*src).robust_proofs[i]
+        info.id = (*dst).robust_proof_count
         info.audit_id = ir_epistemic_offset_id(info.audit_id, audit_offset)
         info.contest_id = ir_epistemic_offset_id(info.contest_id, contest_offset)
         info.policy_id = ir_epistemic_offset_id(info.policy_id, policy_offset)
-        merged.robust_proofs[merged.robust_proof_count as usize] = info
-        merged.robust_proof_count = merged.robust_proof_count + 1
+        (*dst).robust_proofs[(*dst).robust_proof_count as usize] = info
+        (*dst).robust_proof_count = (*dst).robust_proof_count + 1
         i = i + 1
     }
 
     i = 0
-    while i < src.validated_manifest_count && merged.validated_manifest_count < IR_MAX_EPI_VALIDATED_MANIFESTS {
-        let src_info = src.validated_manifests[i]
-        merged.validated_manifests[merged.validated_manifest_count as usize] = IrValidatedManifestInfo {
-            id: merged.validated_manifest_count,
+    while i < (*src).validated_manifest_count && (*dst).validated_manifest_count < IR_MAX_EPI_VALIDATED_MANIFESTS {
+        let src_info = (*src).validated_manifests[i]
+        (*dst).validated_manifests[(*dst).validated_manifest_count as usize] = IrValidatedManifestInfo {
+            id: (*dst).validated_manifest_count,
             span_start: src_info.span_start,
             span_end: src_info.span_end,
             audit_id: ir_epistemic_offset_id(src_info.audit_id, audit_offset),
@@ -814,63 +852,63 @@ fn ir_merge_epistemic_sections(dst: IrEpistemicSection, src: IrEpistemicSection)
             },
             inner_ty: src_info.inner_ty,
         }
-        merged.validated_manifest_count = merged.validated_manifest_count + 1
+        (*dst).validated_manifest_count = (*dst).validated_manifest_count + 1
         i = i + 1
     }
 
     i = 0
-    while i < src.decision_certificate_count && merged.decision_certificate_count < IR_MAX_EPI_DECISION_CERTIFICATES {
-        var info = src.decision_certificates[i]
-        info.id = merged.decision_certificate_count
+    while i < (*src).decision_certificate_count && (*dst).decision_certificate_count < IR_MAX_EPI_DECISION_CERTIFICATES {
+        var info = (*src).decision_certificates[i]
+        info.id = (*dst).decision_certificate_count
         info.audit_id = ir_epistemic_offset_id(info.audit_id, audit_offset)
         info.robust_proof_id = ir_epistemic_offset_id(info.robust_proof_id, robust_offset)
         info.decision_policy_id = ir_epistemic_offset_id(info.decision_policy_id, decision_policy_offset)
-        merged.decision_certificates[merged.decision_certificate_count as usize] = info
-        merged.decision_certificate_count = merged.decision_certificate_count + 1
+        (*dst).decision_certificates[(*dst).decision_certificate_count as usize] = info
+        (*dst).decision_certificate_count = (*dst).decision_certificate_count + 1
         i = i + 1
     }
 
     i = 0
-    while i < src.deferred_certificate_count && merged.deferred_certificate_count < IR_MAX_EPI_DEFERRED_CERTIFICATES {
-        var info = src.deferred_certificates[i]
-        info.id = merged.deferred_certificate_count
+    while i < (*src).deferred_certificate_count && (*dst).deferred_certificate_count < IR_MAX_EPI_DEFERRED_CERTIFICATES {
+        var info = (*src).deferred_certificates[i]
+        info.id = (*dst).deferred_certificate_count
         info.audit_id = ir_epistemic_offset_id(info.audit_id, audit_offset)
         info.contest_id = ir_epistemic_offset_id(info.contest_id, contest_offset)
         info.robust_proof_id = ir_epistemic_offset_id(info.robust_proof_id, robust_offset)
         info.deferral_policy_id = ir_epistemic_offset_id(info.deferral_policy_id, deferral_policy_offset)
-        merged.deferred_certificates[merged.deferred_certificate_count as usize] = info
-        merged.deferred_certificate_count = merged.deferred_certificate_count + 1
+        (*dst).deferred_certificates[(*dst).deferred_certificate_count as usize] = info
+        (*dst).deferred_certificate_count = (*dst).deferred_certificate_count + 1
         i = i + 1
     }
 
     i = 0
-    while i < src.deferred_reason_witness_count && merged.deferred_reason_witness_count < IR_MAX_EPI_DEFERRED_REASON_WITNESSES {
-        var info = src.deferred_reason_witnesses[i]
-        info.id = merged.deferred_reason_witness_count
+    while i < (*src).deferred_reason_witness_count && (*dst).deferred_reason_witness_count < IR_MAX_EPI_DEFERRED_REASON_WITNESSES {
+        var info = (*src).deferred_reason_witnesses[i]
+        info.id = (*dst).deferred_reason_witness_count
         info.deferred_certificate_id = ir_epistemic_offset_id(info.deferred_certificate_id, deferred_certificate_offset)
-        merged.deferred_reason_witnesses[merged.deferred_reason_witness_count as usize] = info
-        merged.deferred_reason_witness_count = merged.deferred_reason_witness_count + 1
+        (*dst).deferred_reason_witnesses[(*dst).deferred_reason_witness_count as usize] = info
+        (*dst).deferred_reason_witness_count = (*dst).deferred_reason_witness_count + 1
         i = i + 1
     }
 
     i = 0
-    while i < src.acquisition_plan_count && merged.acquisition_plan_count < IR_MAX_EPI_ACQUISITION_PLANS {
-        var info = src.acquisition_plans[i]
-        info.id = merged.acquisition_plan_count
+    while i < (*src).acquisition_plan_count && (*dst).acquisition_plan_count < IR_MAX_EPI_ACQUISITION_PLANS {
+        var info = (*src).acquisition_plans[i]
+        info.id = (*dst).acquisition_plan_count
         info.deferred_certificate_id = ir_epistemic_offset_id(info.deferred_certificate_id, deferred_certificate_offset)
         info.acquisition_policy_id = ir_epistemic_offset_id(info.acquisition_policy_id, acquisition_policy_offset)
         info.audit_id = ir_epistemic_offset_id(info.audit_id, audit_offset)
         info.contest_id = ir_epistemic_offset_id(info.contest_id, contest_offset)
-        merged.acquisition_plans[merged.acquisition_plan_count as usize] = info
-        merged.acquisition_plan_count = merged.acquisition_plan_count + 1
+        (*dst).acquisition_plans[(*dst).acquisition_plan_count as usize] = info
+        (*dst).acquisition_plan_count = (*dst).acquisition_plan_count + 1
         i = i + 1
     }
 
     i = 0
-    while i < src.acquisition_reason_witness_count && merged.acquisition_reason_witness_count < IR_MAX_EPI_ACQUISITION_REASON_WITNESSES {
-        let src_info = src.acquisition_reason_witnesses[i]
-        merged.acquisition_reason_witnesses[merged.acquisition_reason_witness_count as usize] = IrAcquisitionReasonWitnessInfo {
-            id: merged.acquisition_reason_witness_count,
+    while i < (*src).acquisition_reason_witness_count && (*dst).acquisition_reason_witness_count < IR_MAX_EPI_ACQUISITION_REASON_WITNESSES {
+        let src_info = (*src).acquisition_reason_witnesses[i]
+        (*dst).acquisition_reason_witnesses[(*dst).acquisition_reason_witness_count as usize] = IrAcquisitionReasonWitnessInfo {
+            id: (*dst).acquisition_reason_witness_count,
             span_start: src_info.span_start,
             span_end: src_info.span_end,
             acquisition_plan_id: if src_info.acquisition_plan_id >= 0 {
@@ -879,186 +917,267 @@ fn ir_merge_epistemic_sections(dst: IrEpistemicSection, src: IrEpistemicSection)
                 src_info.acquisition_plan_id
             },
         }
-        merged.acquisition_reason_witness_count = merged.acquisition_reason_witness_count + 1
+        (*dst).acquisition_reason_witness_count = (*dst).acquisition_reason_witness_count + 1
         i = i + 1
     }
 
     i = 0
-    while i < src.recourse_plan_count && merged.recourse_plan_count < IR_MAX_EPI_RECOURSE_PLANS {
-        var info = src.recourse_plans[i]
-        info.id = merged.recourse_plan_count
+    while i < (*src).recourse_plan_count && (*dst).recourse_plan_count < IR_MAX_EPI_RECOURSE_PLANS {
+        var info = (*src).recourse_plans[i]
+        info.id = (*dst).recourse_plan_count
         info.deferred_certificate_id = ir_epistemic_offset_id(info.deferred_certificate_id, deferred_certificate_offset)
         info.recourse_policy_id = ir_epistemic_offset_id(info.recourse_policy_id, recourse_policy_offset)
         info.audit_id = ir_epistemic_offset_id(info.audit_id, audit_offset)
         info.contest_id = ir_epistemic_offset_id(info.contest_id, contest_offset)
-        merged.recourse_plans[merged.recourse_plan_count as usize] = info
-        merged.recourse_plan_count = merged.recourse_plan_count + 1
+        (*dst).recourse_plans[(*dst).recourse_plan_count as usize] = info
+        (*dst).recourse_plan_count = (*dst).recourse_plan_count + 1
         i = i + 1
     }
 
     i = 0
-    while i < src.recourse_reason_witness_count && merged.recourse_reason_witness_count < IR_MAX_EPI_RECOURSE_REASON_WITNESSES {
-        var info = src.recourse_reason_witnesses[i]
-        info.id = merged.recourse_reason_witness_count
+    while i < (*src).recourse_reason_witness_count && (*dst).recourse_reason_witness_count < IR_MAX_EPI_RECOURSE_REASON_WITNESSES {
+        var info = (*src).recourse_reason_witnesses[i]
+        info.id = (*dst).recourse_reason_witness_count
         info.recourse_plan_id = ir_epistemic_offset_id(info.recourse_plan_id, recourse_plan_offset)
-        merged.recourse_reason_witnesses[merged.recourse_reason_witness_count as usize] = info
-        merged.recourse_reason_witness_count = merged.recourse_reason_witness_count + 1
+        (*dst).recourse_reason_witnesses[(*dst).recourse_reason_witness_count as usize] = info
+        (*dst).recourse_reason_witness_count = (*dst).recourse_reason_witness_count + 1
         i = i + 1
     }
 
     i = 0
-    while i < src.alternative_policy_count && merged.alternative_policy_count < IR_MAX_EPI_ALTERNATIVE_POLICIES {
-        var info = src.alternative_policies[i]
-        info.id = merged.alternative_policy_count
-        merged.alternative_policies[merged.alternative_policy_count as usize] = info
-        merged.alternative_policy_count = merged.alternative_policy_count + 1
+    while i < (*src).alternative_policy_count && (*dst).alternative_policy_count < IR_MAX_EPI_ALTERNATIVE_POLICIES {
+        var info = (*src).alternative_policies[i]
+        info.id = (*dst).alternative_policy_count
+        (*dst).alternative_policies[(*dst).alternative_policy_count as usize] = info
+        (*dst).alternative_policy_count = (*dst).alternative_policy_count + 1
         i = i + 1
     }
 
     i = 0
-    while i < src.alternative_frontier_count && merged.alternative_frontier_count < IR_MAX_EPI_ALTERNATIVE_FRONTIERS {
-        var info = src.alternative_frontiers[i]
-        info.id = merged.alternative_frontier_count
+    while i < (*src).alternative_frontier_count && (*dst).alternative_frontier_count < IR_MAX_EPI_ALTERNATIVE_FRONTIERS {
+        var info = (*src).alternative_frontiers[i]
+        info.id = (*dst).alternative_frontier_count
         info.alternative_policy_id = ir_epistemic_offset_id(info.alternative_policy_id, alternative_policy_offset)
         info.audit_id = ir_epistemic_offset_id(info.audit_id, audit_offset)
         info.contest_id = ir_epistemic_offset_id(info.contest_id, contest_offset)
         info.source_policy_id = ir_epistemic_offset_id(info.source_policy_id, recourse_policy_offset)
         info.source_plan_id = ir_epistemic_offset_id(info.source_plan_id, recourse_plan_offset)
         info.candidate_start = ir_epistemic_offset_id(info.candidate_start, alternative_candidate_offset)
-        merged.alternative_frontiers[merged.alternative_frontier_count as usize] = info
-        merged.alternative_frontier_count = merged.alternative_frontier_count + 1
+        (*dst).alternative_frontiers[(*dst).alternative_frontier_count as usize] = info
+        (*dst).alternative_frontier_count = (*dst).alternative_frontier_count + 1
         i = i + 1
     }
 
     i = 0
-    while i < src.alternative_candidate_count && merged.alternative_candidate_count < IR_MAX_EPI_ALTERNATIVE_CANDIDATES {
-        var info = src.alternative_candidates[i]
-        info.id = merged.alternative_candidate_count
+    while i < (*src).alternative_candidate_count && (*dst).alternative_candidate_count < IR_MAX_EPI_ALTERNATIVE_CANDIDATES {
+        var info = (*src).alternative_candidates[i]
+        info.id = (*dst).alternative_candidate_count
         info.frontier_id = ir_epistemic_offset_id(info.frontier_id, alternative_frontier_offset)
         info.source_policy_id = ir_epistemic_offset_id(info.source_policy_id, recourse_policy_offset)
         info.source_plan_id = ir_epistemic_offset_id(info.source_plan_id, recourse_plan_offset)
         info.audit_id = ir_epistemic_offset_id(info.audit_id, audit_offset)
         info.contest_id = ir_epistemic_offset_id(info.contest_id, contest_offset)
-        merged.alternative_candidates[merged.alternative_candidate_count as usize] = info
-        merged.alternative_candidate_count = merged.alternative_candidate_count + 1
+        (*dst).alternative_candidates[(*dst).alternative_candidate_count as usize] = info
+        (*dst).alternative_candidate_count = (*dst).alternative_candidate_count + 1
         i = i + 1
     }
 
     i = 0
-    while i < src.alternative_set_count && merged.alternative_set_count < IR_MAX_EPI_ALTERNATIVE_SETS {
-        var info = src.alternative_sets[i]
-        info.id = merged.alternative_set_count
+    while i < (*src).alternative_set_count && (*dst).alternative_set_count < IR_MAX_EPI_ALTERNATIVE_SETS {
+        var info = (*src).alternative_sets[i]
+        info.id = (*dst).alternative_set_count
         info.frontier_id = ir_epistemic_offset_id(info.frontier_id, alternative_frontier_offset)
         info.audit_id = ir_epistemic_offset_id(info.audit_id, audit_offset)
         info.contest_id = ir_epistemic_offset_id(info.contest_id, contest_offset)
         info.candidate_start = ir_epistemic_offset_id(info.candidate_start, alternative_candidate_offset)
-        merged.alternative_sets[merged.alternative_set_count as usize] = info
-        merged.alternative_set_count = merged.alternative_set_count + 1
+        (*dst).alternative_sets[(*dst).alternative_set_count as usize] = info
+        (*dst).alternative_set_count = (*dst).alternative_set_count + 1
         i = i + 1
     }
 
     i = 0
-    while i < src.alternative_reason_witness_count && merged.alternative_reason_witness_count < IR_MAX_EPI_ALTERNATIVE_REASON_WITNESSES {
-        var info = src.alternative_reason_witnesses[i]
-        info.id = merged.alternative_reason_witness_count
+    while i < (*src).alternative_reason_witness_count && (*dst).alternative_reason_witness_count < IR_MAX_EPI_ALTERNATIVE_REASON_WITNESSES {
+        var info = (*src).alternative_reason_witnesses[i]
+        info.id = (*dst).alternative_reason_witness_count
         info.alternative_set_id = ir_epistemic_offset_id(info.alternative_set_id, alternative_set_offset)
         info.candidate_id = ir_epistemic_offset_id(info.candidate_id, alternative_candidate_offset)
-        merged.alternative_reason_witnesses[merged.alternative_reason_witness_count as usize] = info
-        merged.alternative_reason_witness_count = merged.alternative_reason_witness_count + 1
+        (*dst).alternative_reason_witnesses[(*dst).alternative_reason_witness_count as usize] = info
+        (*dst).alternative_reason_witness_count = (*dst).alternative_reason_witness_count + 1
         i = i + 1
     }
 
     i = 0
-    while i < src.transition_policy_count && merged.transition_policy_count < IR_MAX_EPI_TRANSITION_POLICIES {
-        var info = src.transition_policies[i]
-        info.id = merged.transition_policy_count
-        merged.transition_policies[merged.transition_policy_count as usize] = info
-        merged.transition_policy_count = merged.transition_policy_count + 1
+    while i < (*src).transition_policy_count && (*dst).transition_policy_count < IR_MAX_EPI_TRANSITION_POLICIES {
+        var info = (*src).transition_policies[i]
+        info.id = (*dst).transition_policy_count
+        (*dst).transition_policies[(*dst).transition_policy_count as usize] = info
+        (*dst).transition_policy_count = (*dst).transition_policy_count + 1
         i = i + 1
     }
 
     i = 0
-    while i < src.transition_step_count && merged.transition_step_count < IR_MAX_EPI_TRANSITION_STEPS {
-        var info = src.transition_steps[i]
-        info.id = merged.transition_step_count
+    while i < (*src).transition_step_count && (*dst).transition_step_count < IR_MAX_EPI_TRANSITION_STEPS {
+        var info = (*src).transition_steps[i]
+        info.id = (*dst).transition_step_count
         info.protocol_id = ir_epistemic_offset_id(info.protocol_id, transition_protocol_offset)
-        merged.transition_steps[merged.transition_step_count as usize] = info
-        merged.transition_step_count = merged.transition_step_count + 1
+        (*dst).transition_steps[(*dst).transition_step_count as usize] = info
+        (*dst).transition_step_count = (*dst).transition_step_count + 1
         i = i + 1
     }
 
     i = 0
-    while i < src.transition_protocol_count && merged.transition_protocol_count < IR_MAX_EPI_TRANSITION_PROTOCOLS {
-        var info = src.transition_protocols[i]
-        info.id = merged.transition_protocol_count
+    while i < (*src).transition_protocol_count && (*dst).transition_protocol_count < IR_MAX_EPI_TRANSITION_PROTOCOLS {
+        var info = (*src).transition_protocols[i]
+        info.id = (*dst).transition_protocol_count
         info.transition_policy_id = ir_epistemic_offset_id(info.transition_policy_id, transition_policy_offset)
         info.step_start = ir_epistemic_offset_id(info.step_start, transition_step_offset)
-        merged.transition_protocols[merged.transition_protocol_count as usize] = info
-        merged.transition_protocol_count = merged.transition_protocol_count + 1
+        (*dst).transition_protocols[(*dst).transition_protocol_count as usize] = info
+        (*dst).transition_protocol_count = (*dst).transition_protocol_count + 1
         i = i + 1
     }
 
     i = 0
-    while i < src.transition_plan_count && merged.transition_plan_count < IR_MAX_EPI_TRANSITION_PLANS {
-        var info = src.transition_plans[i]
-        info.id = merged.transition_plan_count
+    while i < (*src).transition_plan_count && (*dst).transition_plan_count < IR_MAX_EPI_TRANSITION_PLANS {
+        var info = (*src).transition_plans[i]
+        info.id = (*dst).transition_plan_count
         info.transition_policy_id = ir_epistemic_offset_id(info.transition_policy_id, transition_policy_offset)
         info.transition_protocol_id = ir_epistemic_offset_id(info.transition_protocol_id, transition_protocol_offset)
         info.alternative_option_id = ir_epistemic_offset_id(info.alternative_option_id, alternative_candidate_offset)
         info.audit_id = ir_epistemic_offset_id(info.audit_id, audit_offset)
         info.contest_id = ir_epistemic_offset_id(info.contest_id, contest_offset)
-        merged.transition_plans[merged.transition_plan_count as usize] = info
-        merged.transition_plan_count = merged.transition_plan_count + 1
+        (*dst).transition_plans[(*dst).transition_plan_count as usize] = info
+        (*dst).transition_plan_count = (*dst).transition_plan_count + 1
         i = i + 1
     }
 
     i = 0
-    while i < src.transition_reason_witness_count && merged.transition_reason_witness_count < IR_MAX_EPI_TRANSITION_REASON_WITNESSES {
-        var info = src.transition_reason_witnesses[i]
-        info.id = merged.transition_reason_witness_count
+    while i < (*src).transition_reason_witness_count && (*dst).transition_reason_witness_count < IR_MAX_EPI_TRANSITION_REASON_WITNESSES {
+        var info = (*src).transition_reason_witnesses[i]
+        info.id = (*dst).transition_reason_witness_count
         info.transition_plan_id = ir_epistemic_offset_id(info.transition_plan_id, transition_plan_offset)
-        merged.transition_reason_witnesses[merged.transition_reason_witness_count as usize] = info
-        merged.transition_reason_witness_count = merged.transition_reason_witness_count + 1
+        (*dst).transition_reason_witnesses[(*dst).transition_reason_witness_count as usize] = info
+        (*dst).transition_reason_witness_count = (*dst).transition_reason_witness_count + 1
         i = i + 1
     }
 
     i = 0
-    while i < src.monitoring_policy_count && merged.monitoring_policy_count < IR_MAX_EPI_MONITORING_POLICIES {
-        var info = src.monitoring_policies[i]
-        info.id = merged.monitoring_policy_count
-        merged.monitoring_policies[merged.monitoring_policy_count as usize] = info
-        merged.monitoring_policy_count = merged.monitoring_policy_count + 1
+    while i < (*src).monitoring_policy_count && (*dst).monitoring_policy_count < IR_MAX_EPI_MONITORING_POLICIES {
+        var info = (*src).monitoring_policies[i]
+        info.id = (*dst).monitoring_policy_count
+        (*dst).monitoring_policies[(*dst).monitoring_policy_count as usize] = info
+        (*dst).monitoring_policy_count = (*dst).monitoring_policy_count + 1
         i = i + 1
     }
 
     i = 0
-    while i < src.observed_transition_count && merged.observed_transition_count < IR_MAX_EPI_OBSERVED_TRANSITIONS {
-        var info = src.observed_transitions[i]
-        info.id = merged.observed_transition_count
-        info.transition_plan_id = ir_epistemic_offset_id(info.transition_plan_id, transition_plan_offset)
-        info.monitoring_policy_id = ir_epistemic_offset_id(info.monitoring_policy_id, monitoring_policy_offset)
-        info.audit_id = ir_epistemic_offset_id(info.audit_id, audit_offset)
-        info.contest_id = ir_epistemic_offset_id(info.contest_id, contest_offset)
-        merged.observed_transitions[merged.observed_transition_count as usize] = info
-        merged.observed_transition_count = merged.observed_transition_count + 1
-        i = i + 1
-    }
-
-    i = 0
-    while i < src.rollback_certificate_count && merged.rollback_certificate_count < IR_MAX_EPI_ROLLBACK_CERTIFICATES {
-        var info = src.rollback_certificates[i]
-        info.id = merged.rollback_certificate_count
+    while i < (*src).observed_transition_count && (*dst).observed_transition_count < IR_MAX_EPI_OBSERVED_TRANSITIONS {
+        var info = (*src).observed_transitions[i]
+        info.id = (*dst).observed_transition_count
         info.transition_plan_id = ir_epistemic_offset_id(info.transition_plan_id, transition_plan_offset)
         info.monitoring_policy_id = ir_epistemic_offset_id(info.monitoring_policy_id, monitoring_policy_offset)
         info.audit_id = ir_epistemic_offset_id(info.audit_id, audit_offset)
         info.contest_id = ir_epistemic_offset_id(info.contest_id, contest_offset)
-        merged.rollback_certificates[merged.rollback_certificate_count as usize] = info
-        merged.rollback_certificate_count = merged.rollback_certificate_count + 1
+        (*dst).observed_transitions[(*dst).observed_transition_count as usize] = info
+        (*dst).observed_transition_count = (*dst).observed_transition_count + 1
         i = i + 1
     }
 
+    i = 0
+    while i < (*src).rollback_certificate_count && (*dst).rollback_certificate_count < IR_MAX_EPI_ROLLBACK_CERTIFICATES {
+        var info = (*src).rollback_certificates[i]
+        info.id = (*dst).rollback_certificate_count
+        info.transition_plan_id = ir_epistemic_offset_id(info.transition_plan_id, transition_plan_offset)
+        info.monitoring_policy_id = ir_epistemic_offset_id(info.monitoring_policy_id, monitoring_policy_offset)
+        info.audit_id = ir_epistemic_offset_id(info.audit_id, audit_offset)
+        info.contest_id = ir_epistemic_offset_id(info.contest_id, contest_offset)
+        (*dst).rollback_certificates[(*dst).rollback_certificate_count as usize] = info
+        (*dst).rollback_certificate_count = (*dst).rollback_certificate_count + 1
+        i = i + 1
+    }
+}
+
+// Compatibility: densifies once into a local then merges in place.
+fn ir_merge_epistemic_sections(dst: IrEpistemicSection, src: IrEpistemicSection) -> IrEpistemicSection with Mut, Panic, Div {
+    var merged = dst
+    ir_merge_epistemic_sections_into(&! merged, &src)
     merged
 }
+
+fn ir_merge_algebra_tables_into(dst: &! IrAlgebraTable, src: &IrAlgebraTable) with Mut, Panic, Div {
+    var si: i64 = 0
+    while si < (*src).count && (*dst).count < 32 {
+        let candidate = (*src).entries[si]
+        if candidate.is_valid {
+            var exists: bool = false
+            var di: i64 = 0
+            while di < (*dst).count {
+                let entry = (*dst).entries[di]
+                if entry.is_valid && entry.algebra_tag == candidate.algebra_tag && ir_name_eq(entry.name, candidate.name) {
+                    exists = true
+                    di = (*dst).count
+                } else {
+                    di = di + 1
+                }
+            }
+            if exists == false {
+                let idx = (*dst).count
+                (*dst).entries[idx as usize] = candidate
+                (*dst).count = idx + 1
+            }
+        }
+        si = si + 1
+    }
+}
+
+fn ir_merge_algebra_tables(dst: IrAlgebraTable, src: IrAlgebraTable) -> IrAlgebraTable with Mut, Panic, Div {
+    var merged = dst
+    ir_merge_algebra_tables_into(&! merged, &src)
+    merged
+}
+
+
+// In-place ontology parameter-link merge (Wave10). Prefer over by-value API.
+// Same semantics as ir::ir_merge_ontology_parameter_links: compose audit links only;
+// destination class/property tables remain authoritative.
+fn ir_merge_ontology_parameter_links_into(dst: &! IrOntologyTable, src: &IrOntologyTable) with Mut, Panic, Div {
+    var si: i64 = 0
+    while si < (*src).parameter_link_count && si < 128 && (*dst).parameter_link_count < 128 {
+        let candidate = (*src).parameter_links[si as usize]
+        if candidate.is_valid {
+            var exists = false
+            var di: i64 = 0
+            while di < (*dst).parameter_link_count {
+                let current = (*dst).parameter_links[di as usize]
+                if current.is_valid &&
+                   current.parameter_index == candidate.parameter_index &&
+                   ir_name_eq(current.function_name, candidate.function_name) &&
+                   ir_name_eq(current.class_name, candidate.class_name) {
+                    exists = true
+                    di = (*dst).parameter_link_count
+                } else {
+                    di = di + 1
+                }
+            }
+            if !exists {
+                let idx = (*dst).parameter_link_count
+                (*dst).parameter_links[idx as usize] = candidate
+                (*dst).parameter_link_count = idx + 1
+            }
+        }
+        si = si + 1
+    }
+}
+
+// Proven exclusive-ref surface: &! IrModule (not nested field &!).
+// lean_single has historically dropped/miscompiled nested exclusive field refs
+// through Box; keep mutations on the whole module ref.
+fn ir_merge_sections_into_module(dst: &! IrModule, src: &IrModule) with Mut, Panic, Div {
+    ir_merge_epistemic_sections_into(&! (*dst).epistemic, &(*src).epistemic)
+    ir_merge_algebra_tables_into(&! (*dst).algebras, &(*src).algebras)
+    ir_merge_ontology_parameter_links_into(&! (*dst).ontologies, &(*src).ontologies)
+}
+
+
 
 // ============================================================
 // IR module merging
@@ -1098,8 +1217,9 @@ fn ir_merge_modules_into(dst: &! IrModule, src: &IrModule) with Mut, Panic, Div 
                     func.instrs[ii].fn_id = func.instrs[ii].fn_id + fn_offset
                 }
             }
-            func.instrs[ii] = ir_merge_adjust_epistemic_instr(
-                func.instrs[ii],
+            let _epi_lid = ir_merge_adjusted_label_id(
+                func.instrs[ii].op,
+                func.instrs[ii].label_id,
                 contest_offset,
                 robust_offset,
                 decision_offset,
@@ -1112,6 +1232,9 @@ fn ir_merge_modules_into(dst: &! IrModule, src: &IrModule) with Mut, Panic, Div 
                 observed_transition_offset,
                 rollback_certificate_offset
             )
+            if _epi_lid != func.instrs[ii].label_id {
+                func.instrs[ii].label_id = _epi_lid
+            }
             ii = ii + 1
         }
         func.compile_strategy = (*src).functions[fi].compile_strategy
@@ -1129,9 +1252,7 @@ fn ir_merge_modules_into(dst: &! IrModule, src: &IrModule) with Mut, Panic, Div 
         si = si + 1
     }
 
-    (*dst).epistemic = ir_merge_epistemic_sections((*dst).epistemic, (*src).epistemic)
-    (*dst).algebras = ir_merge_algebra_tables((*dst).algebras, (*src).algebras)
-    (*dst).ontologies = ir_merge_ontology_parameter_links((*dst).ontologies, (*src).ontologies)
+    ir_merge_sections_into_module(dst, src)
 }
 
 // Compatibility wrapper: only for call sites that still own both modules by
@@ -1193,8 +1314,9 @@ fn ir_merge_prepare_function_with_remap_from_func(
                 }
             }
         }
-        func.instrs[ii as usize] = ir_merge_adjust_epistemic_instr(
-            func.instrs[ii as usize],
+        let _epi_lid = ir_merge_adjusted_label_id(
+            func.instrs[ii as usize].op,
+            func.instrs[ii as usize].label_id,
             contest_offset,
             robust_offset,
             decision_offset,
@@ -1207,6 +1329,9 @@ fn ir_merge_prepare_function_with_remap_from_func(
             observed_transition_offset,
             rollback_certificate_offset
         )
+        if _epi_lid != func.instrs[ii as usize].label_id {
+            func.instrs[ii as usize].label_id = _epi_lid
+        }
         ii = ii + 1
     }
     func
@@ -1289,6 +1414,100 @@ fn ir_merge_remap_existing_call_targets(func: IrFunction, src: &IrModule, dst: &
     out
 }
 
+// Memory wall Wave10: single IrFunction materialization for place+remap.
+// Old lower_array path did:
+//   dep_func = src.functions[mfi]                         // copy 1
+//   dep_func = remap_existing_call_targets(dep_func, ...) // copy 2 in+out
+//   func = prepare_with_remap_from_func(dep_func, ...)    // copy 3 in+out
+//   dst.functions[dst_fi] = func                          // copy 4
+// Each IrFunction is ~[IrInstr;4096] (~1 MiB). Peak temps stacked.
+// New: one local + one slot write. Remap call targets + prepare map +
+// epistemic label shifts in a single instr pass. Scalar field stores only
+// on the owned local (no IrInstr by-value; A8/A14 safe).
+fn ir_merge_place_and_remap_function(
+    dst: &! IrModule,
+    src: &IrModule,
+    src_fi: i64,
+    dst_fi: i64,
+    dep_fn_count: i64,
+    fn_remap: &[i64; 2048],
+    contest_offset: i64,
+    robust_offset: i64,
+    decision_offset: i64,
+    deferred_offset: i64,
+    validated_offset: i64,
+    acquisition_plan_offset: i64,
+    recourse_plan_offset: i64,
+    alternative_set_offset: i64,
+    transition_plan_offset: i64,
+    observed_transition_offset: i64,
+    rollback_certificate_offset: i64
+) with Mut, Panic, Div {
+    if src_fi < 0 || src_fi >= (*src).fn_count {
+        return
+    }
+    if dst_fi < 0 || dst_fi >= IR_MAX_FUNCS {
+        return
+    }
+    // One full-function materialization from the dependency module.
+    var func = (*src).functions[src_fi as usize]
+    func.compile_strategy = (*src).functions[src_fi as usize].compile_strategy
+    var ii: i64 = 0
+    while ii < func.instr_count {
+        let op = func.instrs[ii as usize].op
+        // Combined remap_existing + prepare map for direct fn refs.
+        if ir_merge_is_direct_fn_ref_opcode(op) {
+            let old_id = func.instrs[ii as usize].fn_id
+            if old_id >= 0 && old_id < dep_fn_count {
+                // Name-based remap to already-merged bodies in dst (remap_existing).
+                let target_name = (*src).functions[old_id as usize].name
+                let named_id = ir_merge_find_function_name_index(dst, target_name)
+                if named_id >= 0 {
+                    func.instrs[ii as usize].fn_id = named_id
+                } else {
+                    // Planned append index from fn_remap (prepare path).
+                    let mapped_id = fn_remap[old_id as usize]
+                    if mapped_id >= 0 {
+                        let dep_name = (*src).functions[old_id as usize].name
+                        let current_name = ir_merge_function_name_at(dst, old_id)
+                        if ir_name_eq(dep_name, current_name) || ir_merge_find_function_name_index(dst, dep_name) < 0 {
+                            func.instrs[ii as usize].fn_id = mapped_id
+                        }
+                    }
+                }
+            }
+        }
+        // Scalar-only epistemic label shift — never rebind IrInstr by value.
+        let new_lid = ir_merge_adjusted_label_id(
+            op,
+            func.instrs[ii as usize].label_id,
+            contest_offset,
+            robust_offset,
+            decision_offset,
+            deferred_offset,
+            validated_offset,
+            acquisition_plan_offset,
+            recourse_plan_offset,
+            alternative_set_offset,
+            transition_plan_offset,
+            observed_transition_offset,
+            rollback_certificate_offset
+        )
+        if new_lid != func.instrs[ii as usize].label_id {
+            func.instrs[ii as usize].label_id = new_lid
+        }
+        ii = ii + 1
+    }
+    // Index-bind before whole-element store (lean_single proven pattern).
+    if dst_fi < (*dst).fn_count {
+        (*dst).functions[dst_fi as usize] = func
+    } else if dst_fi == (*dst).fn_count && (*dst).fn_count < IR_MAX_FUNCS {
+        let idx = (*dst).fn_count
+        (*dst).functions[idx as usize] = func
+        (*dst).fn_count = idx + 1
+    }
+}
+
 // Takes &! IrModule (not &! Box<IrModule>): the latter triggers a lean_single
 // codegen bug where (*box_ref).field reads garbage. Callers materialize the
 // IrModule reference via &! (*acc_box) at the call site.
@@ -1317,8 +1536,9 @@ fn ir_merge_append_function_into_box(dst: &! IrModule, src: &IrModule, src_fi: i
                 func.instrs[ii as usize].fn_id = func.instrs[ii as usize].fn_id + fn_offset
             }
         }
-        func.instrs[ii as usize] = ir_merge_adjust_epistemic_instr(
-            func.instrs[ii as usize],
+        let _epi_lid = ir_merge_adjusted_label_id(
+            func.instrs[ii as usize].op,
+            func.instrs[ii as usize].label_id,
             contest_offset,
             robust_offset,
             decision_offset,
@@ -1331,6 +1551,9 @@ fn ir_merge_append_function_into_box(dst: &! IrModule, src: &IrModule, src_fi: i
             observed_transition_offset,
             rollback_certificate_offset
         )
+        if _epi_lid != func.instrs[ii as usize].label_id {
+            func.instrs[ii as usize].label_id = _epi_lid
+        }
         ii = ii + 1
     }
     let dst_idx = (*dst).fn_count
@@ -1956,33 +2179,6 @@ fn ir_module_resolve_named_calls(module: &! IrModule) with Mut, Div, Panic {
         }
         fi = fi + 1
     }
-}
-
-fn ir_merge_algebra_tables(dst: IrAlgebraTable, src: IrAlgebraTable) -> IrAlgebraTable with Mut, Panic, Div {
-    var merged = dst
-    var si: i64 = 0
-    while si < src.count && merged.count < 32 {
-        let candidate = src.entries[si]
-        if candidate.is_valid {
-            var exists: bool = false
-            var di: i64 = 0
-            while di < merged.count {
-                let entry = merged.entries[di]
-                if entry.is_valid && entry.algebra_tag == candidate.algebra_tag && ir_name_eq(entry.name, candidate.name) {
-                    exists = true
-                    di = merged.count
-                } else {
-                    di = di + 1
-                }
-            }
-            if exists == false {
-                merged.entries[merged.count as usize] = candidate
-                merged.count = merged.count + 1
-            }
-        }
-        si = si + 1
-    }
-    merged
 }
 
 fn ir_epistemic_section_is_empty(epistemic: IrEpistemicSection) -> bool {
@@ -4945,14 +5141,12 @@ fn module_frontend_lower_programs_array_direct_box(
                             // dst_fi < acc_fn_before = a DEDUP reuse (body already present):
                             // skip re-placing it. Only place newly-appended functions.
                             if dst_fi >= acc_fn_before {
-                                // Remap cross-module call targets by symbol name while fn_id
-                                // values are still in the dependency module index space.
-                                var dep_func = (*dep_box).functions[mfi as usize]
-                                dep_func = ir_merge_remap_existing_call_targets(dep_func, &(*dep_box), &(*acc_box))
-                                var func = ir_merge_prepare_function_with_remap_from_func(
-                                    dep_func,
+                                // Wave10: single-pass place+remap (one IrFunction local).
+                                ir_merge_place_and_remap_function(
+                                    &! (*acc_box),
                                     &(*dep_box),
-                                    &(*acc_box),
+                                    mfi,
+                                    dst_fi,
                                     dep_fn_count,
                                     &fn_remap,
                                     contest_offset,
@@ -4967,12 +5161,6 @@ fn module_frontend_lower_programs_array_direct_box(
                                     observed_transition_offset,
                                     rollback_certificate_offset
                                 )
-                                if dst_fi < (*acc_box).fn_count {
-                                    (*acc_box).functions[dst_fi as usize] = func
-                                } else if dst_fi == (*acc_box).fn_count && (*acc_box).fn_count < IR_MAX_FUNCS {
-                                    (*acc_box).functions[dst_fi as usize] = func
-                                    (*acc_box).fn_count = (*acc_box).fn_count + 1
-                                }
                             }
                             mfi = mfi + 1
                         }
@@ -4982,9 +5170,8 @@ fn module_frontend_lower_programs_array_direct_box(
                             (*acc_box).string_count = (*acc_box).string_count + 1
                             si = si + 1
                         }
-                        (*acc_box).epistemic = ir_merge_epistemic_sections((*acc_box).epistemic, (*dep_box).epistemic)
-                        (*acc_box).algebras = ir_merge_algebra_tables((*acc_box).algebras, (*dep_box).algebras)
-                        (*acc_box).ontologies = ir_merge_ontology_parameter_links((*acc_box).ontologies, (*dep_box).ontologies)
+                        // In-place section merge via &! IrModule (no section by-value).
+                        ir_merge_sections_into_module(&! (*acc_box), &(*dep_box))
                         // Every field copied into acc_box above (functions incl.
                         // instrs, string_table entries, epistemic, algebras) is a
                         // plain value copy with no Box field except IrInstr.call_args
