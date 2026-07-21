@@ -5,10 +5,10 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 # The PETAB baseline and PBPK/GUM workflow import stdlib + packages/* modules.
-# Madaros owns package-import acceptance plus focused string-range and PBPK/GUM
-# runtime proofs. The two large PBPK witnesses still cross the unresolved program
-# layout-catalog boundary, so retain the bootstrap compiler only for those named
-# witnesses until that separate parity blocker is closed.
+# Madaros owns package-import acceptance plus a focused PBPK/GUM runtime proof
+# that also exercises bounded CSV string slicing. The two large PBPK witnesses
+# cross the unresolved program layout-catalog boundary, so retain the bootstrap
+# compiler only for those named witnesses until that parity blocker is closed.
 OUT_DIR="$(mktemp -d /tmp/sounio-package-pbpk-gum.XXXXXX)"
 trap 'rm -rf "$OUT_DIR"' EXIT
 
@@ -41,7 +41,6 @@ export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
 
 BASELINE="tests/stdlib/darwin_pbpk/test_observed_petab_fit_e2e.sio"
 WORKFLOW="tests/packages/package_pbpk_gum_workflow.sio"
-SLICE_PROBE="tests/run-pass/madaros_str_slice_range.sio"
 MEASUREMENT_PROBE="tests/packages/package_pbpk_gum_measurement_probe.sio"
 
 printf '[package-pbpk-gum] package-acceptance-madaros=%s\n' "$RAW_MADAROS"
@@ -79,7 +78,6 @@ run_madaros_witness() {
   fi
 }
 
-run_madaros_witness "$SLICE_PROBE" 'STR_SLICE_RANGE_OK' 'str_slice_range'
 run_madaros_witness "$MEASUREMENT_PROBE" 'PACKAGE_PBPK_GUM_MEASUREMENT_OK' 'measurement_probe'
 
 printf '[package-pbpk-gum] run canonical observed PETAB baseline %s\n' "$BASELINE"
