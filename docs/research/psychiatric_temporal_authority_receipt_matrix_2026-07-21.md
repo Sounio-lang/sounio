@@ -163,6 +163,68 @@ target setting is comparable can yield a reliable-looking score without a
 transportable causal result. Choosing a time zero after inspecting an outcome
 can yield a polished trajectory while changing the estimand itself.
 
+## Functional Path State Is Not A Scalar
+
+The same discipline applies one level below a clinical trajectory. A receptor
+occupancy observation or an aggregate activation proxy is not a complete
+functional state. At minimum, a research model that needs to distinguish
+mechanisms must preserve the measurement system, pathway vector, time window,
+and prior regulatory state instead of collapsing them into one total.
+
+```text
+same occupancy != same G-protein and beta-arrestin pathway vector
+same activation proxy != same desensitization or internalization state
+same pathway endpoint != same assay time window or measurement system
+same cumulative exposure != same ordered exposure history
+same functional model state != a patient-specific effect or treatment decision
+```
+
+This is a modeling boundary, not a claim about the effect of any drug in any
+person. It follows the literature's warning that GPCR efficacy is
+multidimensional, that time and assay context can alter an apparent bias, and
+that receptor regulation can alter later responsiveness.
+
+- Urban et al. (2007), [functional selectivity across D2-mediated effectors](https://pubmed.ncbi.nlm.nih.gov/16554739/).
+- Gundry et al. (2017), [assay, cell-system, and kinetic confounding in bias assessment](https://pubmed.ncbi.nlm.nih.gov/28174517/).
+- Hoare et al. (2020), [kinetic measurement of efficacy and ligand bias](https://pmc.ncbi.nlm.nih.gov/articles/PMC7000712/).
+- Kolb et al. (2020), [IUPHAR community guidance on time- and state-dependent GPCR bias](https://pmc.ncbi.nlm.nih.gov/articles/PMC7612872/).
+- Grundmann et al. (2015), [G-protein, arrestin, desensitization, and internalization as distinct GPCR processes](https://pmc.ncbi.nlm.nih.gov/articles/PMC5595354/).
+
+The 2020 IUPHAR guidance is particularly useful here: the reported bias can be
+cell-phenotype and physiological-state dependent, signaling efficacy can
+change over time, and an appropriate time point may differ across pathways.
+Therefore a single endpoint must not silently stand in for the complete time
+course or for another assay system.
+
+### Proposed Functional-Path Receipts
+
+These are proposed library-level names only. They are not current Sounio
+syntax, receptor measurements, clinical biomarkers, or validated
+pharmacodynamic estimands.
+
+| Receipt | It may state | It must carry or reference | It must not silently become |
+| --- | --- | --- | --- |
+| `FunctionalPathwayObservation` | measured pathway-specific readouts under a declared assay. | receptor, ligand/exposure fixture, cell/assay system, time window, and raw observation provenance. | a pathway-independent efficacy value. |
+| `FunctionalPathStateReceipt` | a model's declared vector of G-protein, beta-arrestin, and other chosen pathway coordinates. | the observation/model mapping and coordinate definitions. | a clinical state, a causal effect, or proof that the vector is complete. |
+| `KineticWindowReceipt` | onset, peak, duration, sample window, and aggregation rule. | clock origin, sampling rule, and assay context. | a timeless property of the ligand or receptor. |
+| `DesensitizationStateReceipt` | the modelled regulatory state relevant to a later response. | preceding exposure/order and the modelled regulatory mechanism. | evidence of in-vivo tolerance, global receptor loss, or a treatment instruction. |
+| `InternalizationStateReceipt` | declared compartment/trafficking state in a model or assay. | measurement method and temporal window. | a substitute for functional-path or clinical-outcome evidence. |
+| `FunctionalPathDivergenceReceipt` | that two declared vectors or trajectories differ despite a selected shared scalar. | the shared projection, both path identities, and the comparison domain. | superiority, safety, or clinical relevance. |
+
+The crucial refusal is:
+
+```text
+ActivationProxyReceipt != FunctionalPathStateReceipt
+FunctionalPathStateReceipt != DesensitizationStateReceipt
+KineticWindowReceipt != assay-independent ligand property
+FunctionalPathDivergenceReceipt != clinical recommendation
+```
+
+Thus a program may preserve an equal scalar as a comparison fact while still
+requiring explicit evidence before it calls the underlying functional paths
+equivalent. The distinction encodes equifinality: an observed endpoint can be
+shared while the upstream routes and later reachable states differ.
+
 ## First Import-Bearing Collision Matrix
 
 After #901 has an accepted current-source imported-native gate, the next
@@ -177,6 +239,9 @@ these substitutions fail:
 | Identification collision | Same model fit and question. | Assumption/sensitivity receipt. | Question cannot form source effect without identification. |
 | Transport collision | Same source estimate. | Target context and measurement map. | Source effect cannot satisfy a target-context API. |
 | Abstention collision | Same unresolved score. | Missing time origin, support, transport, or calibration. | Each gap emits distinct abstention provenance. |
+| Functional-path collision | Same occupancy or chosen activation scalar. | G-protein/beta-arrestin pathway vector and assay domain. | An activation proxy cannot satisfy `FunctionalPathStateReceipt`. |
+| Kinetic-window collision | Same selected pathway endpoint. | Time-zero, sample window, and aggregation rule. | A single endpoint cannot satisfy a time-course requirement. |
+| Regulatory-history collision | Same cumulative synthetic exposure. | Ordered prior exposure and modelled desensitization state. | A cumulative total cannot satisfy `DesensitizationStateReceipt`. |
 
 The fixture must use synthetic constants only. It should have an imported leaf
 and a main module so that the selected receipt identities cross the source,
@@ -204,6 +269,8 @@ This proposal should be revised, narrowed, or rejected if:
   compile-fail collision without a new language feature;
 - an imported native fixture erases a selected receipt identity despite a
   passing direct control;
+- equal scalar functional proxies can substitute for unequal pathway vectors,
+  kinetic windows, or regulatory-history receipts;
 - the proposed `ObservationProcessReceipt` merely duplicates values already in
   `TemporalOriginReceipt` and adds no discriminating test;
 - a documentation or API path promotes a selective-risk receipt into a causal
@@ -224,9 +291,9 @@ Transformation: literature-backed temporal authority matrix mapped to existing o
 Types-Changed: none
 Effects-Changed: none
 IR-Changed: none
-Claims-Introduced: a future library fixture should represent time origin and observation process as evidence-bearing prerequisites rather than infer them from a trajectory
-Claims-Forbidden: causal identification from timestamps or model fit; clinical authority from a receipt, a score, a reporting checklist, or compilation
-Assumptions: cited work supplies methodological constraints and reporting boundaries, not a psychiatric mechanism or a validated intervention
+Claims-Introduced: a future library fixture should represent time origin, observation process, functional-path state, kinetic window, and regulatory history as evidence-bearing prerequisites rather than infer them from a trajectory or scalar proxy
+Claims-Forbidden: causal identification from timestamps or model fit; pathway equivalence from a scalar proxy; clinical authority from a receipt, a score, a reporting checklist, or compilation
+Assumptions: cited work supplies methodological and assay-context constraints, not a psychiatric mechanism, a patient-specific effect, or a validated intervention
 Write-Set: docs/research/psychiatric_temporal_authority_receipt_matrix_2026-07-21.md; docs/governance/topic-registry.v1.json; docs/governance/DOCS_AUTHORITY_MATRIX.md
 Read-Set: docs/research/psychiatric_state_inference_contract_2026-07-21.md; docs/research/psychiatric_counterfactual_authority_abstention_contract_2026-07-21.md; tests/compiler/ordered_path_provenance_imported_leaf.sio; tests/compiler/ordered_path_provenance_imported_main.sio
 Positive-Witness: direct psychiatric authority receipt control 8e8d4ccce; existing ordered-path imported provenance surface
@@ -241,8 +308,8 @@ Authoritative-Only-If: cited constraints, exact receipt boundaries, and no-clini
 ```text
 Semantic-Outcome: temporal-origin and observation-process evidence requirements are made explicit for the future authority fixture
 Concept-Status-Before: order provenance and authority receipts were specified without a dedicated target-trial time-zero and observation-process matrix
-Concept-Status-After: time origin, dynamic regime, observation process, identification, transport, selective risk, evaluation, and abstention have separate stated authority boundaries
-Distinctions-Added: recorded time != causal time zero; observed trajectory != observation process; reporting != clinical validation
+Concept-Status-After: time origin, dynamic regime, observation process, functional-path state, kinetic window, identification, transport, selective risk, evaluation, and abstention have separate stated authority boundaries
+Distinctions-Added: recorded time != causal time zero; observed trajectory != observation process; equal activation proxy != equal functional-path state; reporting != clinical validation
 Distinctions-Preserved: ordered path != commutative endpoint; model projection != causal effect; compilation != clinical authority
 Distinctions-Erased: none
 Evidence-Run: node scripts/docs/sync_governance_metadata.mjs; bash scripts/dev/check_docs_consistency.sh; bash scripts/dev/check_docs_registry.sh
