@@ -1,0 +1,115 @@
+// Biodiversity + inequality showcase: a per-site survey profile over data::bigframe,
+// composing ~16 of the grouped diversity / inequality / robust order-statistic verbs
+// (batches 11-15) end-to-end. Every verb is a dense histogram / LUT reduction over a
+// heap BigFrame (lean_single) -- each beats pandas' per-group lambda at 1M rows.
+//
+// Scenario: two nature reserves, each with 8 individual observations. Per observation we
+// record the SPECIES id (col 1, a categorical distribution) and the biomass/INCOME of the
+// individual (col 2, a magnitude). Reserva A is species-diverse but resource-UNEQUAL;
+// Reserva B is a near-monoculture but perfectly EQUAL. The verbs quantify both axes.
+//
+// Run: SOUNIO_SOUC_ENGINE=lean_single ./bin/souc compile examples/data/biodiversity_inequality_showcase.sio -o out && ./out
+use data::bigframe::*
+use data::bigframe_ops::*
+
+fn approx(a: f64, b: f64) -> bool { let d = a - b; if d < 0.0 { (0.0 - d) < 0.00001 } else { d < 0.00001 } }
+
+fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
+    // Build 2 sites x 8 observations = 16 rows. col0=site, col1=species id, col2=income.
+    // Reserva A species {0,0,0,1,1,2,2,3} (rich), income {10,10,20,20,30,40,50,100} (skewed).
+    // Reserva B species {0,0,0,0,0,0,0,1} (dominated), income {5,5,5,5,5,5,5,5} (equal).
+    var aSp: [f64;8] = [0.0;8]; aSp[0]=0.0; aSp[1]=0.0; aSp[2]=0.0; aSp[3]=1.0; aSp[4]=1.0; aSp[5]=2.0; aSp[6]=2.0; aSp[7]=3.0
+    var aIn: [f64;8] = [0.0;8]; aIn[0]=10.0; aIn[1]=10.0; aIn[2]=20.0; aIn[3]=20.0; aIn[4]=30.0; aIn[5]=40.0; aIn[6]=50.0; aIn[7]=100.0
+    var bSp: [f64;8] = [0.0;8]; bSp[0]=0.0; bSp[1]=0.0; bSp[2]=0.0; bSp[3]=0.0; bSp[4]=0.0; bSp[5]=0.0; bSp[6]=0.0; bSp[7]=1.0
+    var bIn: [f64;8] = [0.0;8]; bIn[0]=5.0; bIn[1]=5.0; bIn[2]=5.0; bIn[3]=5.0; bIn[4]=5.0; bIn[5]=5.0; bIn[6]=5.0; bIn[7]=5.0
+
+    var df = bf_new(3, 16)
+    var site: i64 = 0
+    while site < 2 {
+        var j: i64 = 0
+        while j < 8 {
+            var row: [f64;64] = [0.0;64]
+            row[0] = site as f64
+            if site == 0 { row[1] = aSp[j]; row[2] = aIn[j] } else { row[1] = bSp[j]; row[2] = bIn[j] }
+            bf_push_row(&!df, &row, 3)
+            j = j + 1
+        }
+        site = site + 1
+    }
+
+    // ---- DIVERSITY axis (species column 1, integer ids 0..3) ----
+    let rich = bf_nunique_dense_by(&df, 0, 1, 3)          // species richness
+    let shan = bf_entropy_dense_by(&df, 0, 1, 3)          // Shannon entropy (nats)
+    let ppx  = bf_perplexity_dense_by(&df, 0, 1, 3)       // effective # species (Hill q=1)
+    let invs = bf_inv_simpson_dense_by(&df, 0, 1, 3)      // inverse Simpson (Hill q=2)
+    let gimp = bf_gini_impurity_dense_by(&df, 0, 1, 3)    // Gini-Simpson diversity
+    let even = bf_norm_entropy_dense_by(&df, 0, 1, 3)     // Pielou evenness (0..1)
+
+    // ---- INEQUALITY axis (income column 2, magnitudes 0..100) ----
+    let gini = bf_gini_coef_dense_by(&df, 0, 2, 100)      // Gini coefficient
+    let thl  = bf_theil_dense_by(&df, 0, 2, 100)          // Theil-T index
+    let atk  = bf_atkinson1_dense_by(&df, 0, 2, 100)      // Atkinson (eps=1)
+    let hoov = bf_hoover_dense_by(&df, 0, 2, 100)         // Hoover / Robin-Hood
+
+    // ---- ROBUST location / spread (income column 2) ----
+    let med  = bf_median_dense_by(&df, 0, 2, 100)         // median
+    let trm  = bf_trimean_dense_by(&df, 0, 2, 100)        // Tukey trimean
+    let tmn  = bf_trimmed_mean_dense_by(&df, 0, 2, 100, 0.25) // 25% trimmed mean
+    let gm   = bf_geomean_dense_by(&df, 0, 2, 100)        // geometric mean
+    let pr   = bf_p90p10_ratio_dense_by(&df, 0, 2, 100)   // P90/P10 dispersion
+    let bws  = bf_bowley_skew_dense_by(&df, 0, 2, 100)    // quartile skewness
+
+    // ---- run-proof: assert the headline facts for both sites (row 0 = A, row 8 = B) ----
+    // Reserva A: diverse but unequal.
+    if bf_get(&rich, 0, 0) != 4.0 { print("FAIL A richness\n"); return 1 }
+    if !approx(bf_get(&shan, 0, 0), 1.3208883431) { print("FAIL A shannon\n"); return 2 }
+    if !approx(bf_get(&ppx,  0, 0), 3.7467482975) { print("FAIL A perplexity\n"); return 3 }
+    if !approx(bf_get(&invs, 0, 0), 3.5555555556) { print("FAIL A inv_simpson\n"); return 4 }
+    if !approx(bf_get(&gimp, 0, 0), 0.71875)      { print("FAIL A gini_impurity\n"); return 5 }
+    if !approx(bf_get(&even, 0, 0), 0.9528195311) { print("FAIL A evenness\n"); return 6 }
+    if !approx(bf_get(&gini, 0, 0), 0.4017857143) { print("FAIL A gini_coef\n"); return 7 }
+    if !approx(bf_get(&thl,  0, 0), 0.2717600145) { print("FAIL A theil\n"); return 8 }
+    if !approx(bf_get(&atk,  0, 0), 0.2441104161) { print("FAIL A atkinson\n"); return 9 }
+    if !approx(bf_get(&hoov, 0, 0), 0.3035714286) { print("FAIL A hoover\n"); return 10 }
+    if !approx(bf_get(&med,  0, 0), 25.0)         { print("FAIL A median\n"); return 11 }
+    if !approx(bf_get(&trm,  0, 0), 27.5)         { print("FAIL A trimean\n"); return 12 }
+    if !approx(bf_get(&tmn,  0, 0), 27.5)         { print("FAIL A trimmed\n"); return 13 }
+    if !approx(bf_get(&gm,   0, 0), 26.456135438) { print("FAIL A geomean\n"); return 14 }
+    if !approx(bf_get(&pr,   0, 0), 6.5)          { print("FAIL A p90p10\n"); return 15 }
+    if !approx(bf_get(&bws,  0, 0), 0.4)          { print("FAIL A bowley\n"); return 16 }
+    // Reserva B: monoculture but equal -- diversity collapses, every inequality index is 0.
+    if bf_get(&rich, 8, 0) != 2.0                 { print("FAIL B richness\n"); return 17 }
+    if !approx(bf_get(&ppx,  8, 0), 1.457569265)  { print("FAIL B perplexity\n"); return 18 }
+    if bf_get(&ppx, 8, 0) >= bf_get(&ppx, 0, 0)   { print("FAIL B less diverse\n"); return 19 }
+    if !approx(bf_get(&gini, 8, 0), 0.0)          { print("FAIL B gini_coef\n"); return 20 }
+    if !approx(bf_get(&thl,  8, 0), 0.0)          { print("FAIL B theil\n"); return 21 }
+    if !approx(bf_get(&hoov, 8, 0), 0.0)          { print("FAIL B hoover\n"); return 22 }
+    if !approx(bf_get(&med,  8, 0), 5.0)          { print("FAIL B median\n"); return 23 }
+    if !approx(bf_get(&gm,   8, 0), 5.0)          { print("FAIL B geomean\n"); return 24 }
+    if !approx(bf_get(&pr,   8, 0), 1.0)          { print("FAIL B p90p10\n"); return 25 }
+
+    // ---- report ----
+    print("=== two-reserve survey: biodiversity + resource inequality ===\n")
+    var s: i64 = 0
+    while s < 2 {
+        let b = s * 8
+        if s == 0 { print("Reserva A") } else { print("Reserva B") }
+        print(" | richness=");    print(bf_get(&rich, b, 0) as i64)
+        print(" shannonX1000=");  print((bf_get(&shan, b, 0) * 1000.0) as i64)
+        print(" effSpeciesX100="); print((bf_get(&ppx,  b, 0) * 100.0) as i64)
+        print(" evennessX100=");  print((bf_get(&even, b, 0) * 100.0) as i64)
+        print("\n          | giniX1000=");  print((bf_get(&gini, b, 0) * 1000.0) as i64)
+        print(" theilX1000=");    print((bf_get(&thl,  b, 0) * 1000.0) as i64)
+        print(" atkinsonX1000="); print((bf_get(&atk,  b, 0) * 1000.0) as i64)
+        print("\n          | median=");     print(bf_get(&med, b, 0) as i64)
+        print(" trimean=");       print(bf_get(&trm, b, 0) as i64)
+        print(" geomeanX100=");   print((bf_get(&gm, b, 0) * 100.0) as i64)
+        print(" p90p10X100=");    print((bf_get(&pr, b, 0) * 100.0) as i64)
+        print("\n")
+        s = s + 1
+    }
+    print("interpretation: A is species-rich (4 species, evenness 0.95) but resource-unequal ")
+    print("(Gini 0.40); B is a monoculture (effective ~1.5 species) with perfect equality (Gini 0).\n")
+    print("SHOWCASE_OK\n")
+    return 0
+}
