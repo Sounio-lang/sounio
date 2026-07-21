@@ -3179,6 +3179,13 @@ fn lower_type_expr_is_ref_like(ty: &TypeExpr) -> bool {
     (*ty).kind == TypeExprKind::TypeReference || (*ty).kind == TypeExprKind::TypeRefMut
 }
 
+fn lower_opt_type_is_ref_like(opt: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
+    match *opt {
+        Some(ty) => lower_type_expr_is_ref_like(&(*ty)),
+        None => false,
+    }
+}
+
 // True when the first parameter is &T / &!T (typical method self-by-ref).
 fn lower_fn_first_param_is_ref(params: &Option<Box<ParamList>>) -> i64 with Alloc, Mut, Div {
     match *params {
@@ -4940,6 +4947,25 @@ impl Lowerer {
         while i >= 0 {
             if stk.depths[i as usize] <= lo.scope_depth && ir_name_eq(stk.names[i as usize], name) {
                 stk.scalar_kind[i as usize] = kind
+                lo.locals = Box::new(stk)
+                return lo
+            }
+            i = i - 1
+        }
+        lo
+    }
+
+    // Mark a local as holding a reference (&T / &!T / &[T;N]). IndexGet/Set then
+    // use label_id=1 (ref_array: load handle from the pointed-to slot). Required for
+    // `var p = &!arr; p[i] = v` — without this the local takes the GC-handle array
+    // path and writes into the wrong place (global BSS alias silently misses).
+    fn bind_local_ref(self, name: Name) -> Lowerer with Mut, Alloc, Panic, Div {
+        var lo = self
+        var stk = *lo.locals
+        var i = stk.count - 1
+        while i >= 0 {
+            if stk.depths[i as usize] <= lo.scope_depth && ir_name_eq(stk.names[i as usize], name) {
+                stk.is_ref[i as usize] = 1
                 lo.locals = Box::new(stk)
                 return lo
             }
@@ -7874,6 +7900,26 @@ impl Lowerer {
             _ => {}
         }
         lo = lo.bind_local(s.name, bind_reg, is_mut)
+        // Ref-typed locals (annotated &T / &!T, or RHS is & / &! expr) must be marked
+        // is_ref so IndexGet/Set use the ref_array path. Params already get this from
+        // their type; let/var bindings previously did not — so `var p = &!GG; p[i]=v`
+        // wrote through the GC-handle path and missed BSS (Defect B alias form).
+        var bind_as_ref = lower_opt_type_is_ref_like(&s.ty)
+        if !bind_as_ref {
+            match s.expr {
+                Some(rhs_ref) => {
+                    if (*rhs_ref).kind == ExprKind::ExprUnary {
+                        if (*rhs_ref).un_op == UnaryOp::OpRef || (*rhs_ref).un_op == UnaryOp::OpRefMut {
+                            bind_as_ref = true
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if bind_as_ref {
+            lo = lo.bind_local_ref(s.name)
+        }
         if fixed_array_len >= 0 {
             lo = lo.bind_local_fixed_array_len(s.name, fixed_array_len)
         }
@@ -10142,6 +10188,62 @@ impl Lowerer {
     }
 
     fn lower_unary_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        // BSS aggregate &GG / &!GG: native-v2 OpRef is LEA of a stack slot, and
+        // ref_array_* then does load[slot] → resolve_handle → +object_header.
+        // Stash (bss_addr - header) in the slot so the +header step lands on the
+        // true BSS base (direct GG[i] stays on raw IndexGet without header).
+        // Without this, &!GG LEAs a slot holding the plain BSS address; the
+        // callee writes at BSS+header and GG[i] still reads the untouched base.
+        if e.un_op == UnaryOp::OpRef || e.un_op == UnaryOp::OpRefMut {
+            match e.left {
+                Some(operand) => {
+                    if (*operand).kind == ExprKind::ExprIdent {
+                        var bss_off: i64 = -1
+                        var is_agg = false
+                        if self.lookup_local_is_global((*operand).name) {
+                            let gsize = self.lookup_local_global_bss_size((*operand).name)
+                            var hyper_kind: i64 = 8
+                            var local_g_kind: i64 = 0
+                            let gfn = lowerer_lookup_fn_id_by_name_ref(&self, (*operand).name)
+                            if gfn >= 0 && gfn < self.module.fn_count {
+                                hyper_kind = self.module.functions[gfn as usize].hyper_algebra_kind
+                                local_g_kind = lower_global_type_table_lookup(&(*self.global_types), gfn)
+                            }
+                            if lower_bss_slot_is_aggregate(gsize, hyper_kind) || lower_global_kind_is_array_base(local_g_kind) {
+                                bss_off = self.lookup_local_global_bss_offset((*operand).name)
+                                is_agg = true
+                            }
+                        } else {
+                            let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, (*operand).name)
+                            if fn_id >= 0 && fn_id < self.module.fn_count {
+                                if self.module.functions[fn_id as usize].compile_strategy == IR_STRATEGY_BSS_GLOBAL {
+                                    let gsize = self.module.functions[fn_id as usize].bss_size
+                                    let hyper_kind = self.module.functions[fn_id as usize].hyper_algebra_kind
+                                    let global_elem_kind = lower_global_type_table_lookup(&(*self.global_types), fn_id)
+                                    if lower_bss_slot_is_aggregate(gsize, hyper_kind) || lower_global_kind_is_array_base(global_elem_kind) {
+                                        bss_off = self.module.functions[fn_id as usize].param_count
+                                        is_agg = true
+                                    }
+                                }
+                            }
+                        }
+                        if is_agg && bss_off >= 0 {
+                            let adjusted = BSS_BASE_LINUX + bss_off - IR_NATIVE_V2_OBJECT_HEADER_SIZE
+                            let pair_s = self.fresh_reg()
+                            var lo = pair_s.0
+                            let src = pair_s.1
+                            lo = lo.emit(ir_load_imm(src, adjusted))
+                            let pair_d = lo.fresh_reg()
+                            lo = pair_d.0
+                            let dst = pair_d.1
+                            lo = lo.emit(ir_unaryop(dst, e.un_op, src))
+                            return (lo, dst)
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
         // `*b` where b is a Box reads field 0 of the heap object (where lower_box_new
         // stored the value via ir_field_set(ptr, 0, val)), so route Box deref to
         // IrFieldGet(0) — codegen resolves the handle. IrUnaryOp(OpDeref) stays a raw
