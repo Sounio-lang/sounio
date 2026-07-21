@@ -10291,14 +10291,48 @@ impl Lowerer {
         (lo3, dst)
     }
 
-    // Receiver struct type for a method call, when the receiver is a simple local
-    // (e.g. `c.method()` -> type of `c`). Used to mangle the call to the same name the
-    // impl method was registered under. Empty when the type can't be determined here.
+    // Receiver struct type for a method call. Used to mangle the call to the same
+    // name the impl method was registered under. Empty when the type can't be
+    // determined here. Covers:
+    //   - local idents (`c.method()`)
+    //   - chained method receivers (`a.add(&b).get()`) via return_struct_name
+    //   - associated/free call receivers (`E::of(3.0).get()`)
+    //   - primitive index receivers (`a.c[i].er_add(...)`)
     fn lower_method_recv_type(self, left: &Option<Box<Expr>>) -> Name with Mut, Panic, Div, Alloc {
         match *left {
             Some(recv) => {
                 if (*recv).kind == ExprKind::ExprIdent {
                     return self.lookup_local_struct_type((*recv).name)
+                }
+                // Root 2 chain residual: method call on a method result.
+                // `a.add(&b).get()` — outer mangling needs the inner method's
+                // return_struct_name (E), not an empty name that invents bare "get".
+                if (*recv).kind == ExprKind::ExprMethodCall {
+                    let inner_recv = self.lower_method_recv_type(&(*recv).left)
+                    let inner_call = if inner_recv.len > 0 {
+                        ir_mangle_method_name(inner_recv, (*recv).name)
+                    } else {
+                        (*recv).name
+                    }
+                    let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, inner_call)
+                    let ret = self.return_struct_name_for_fn_id(fn_id)
+                    if ret.len > 0 {
+                        return ret
+                    }
+                    // Self-returning methods often omit a distinct return name in
+                    // edge stubs; reuse the receiver type when known.
+                    if inner_recv.len > 0 {
+                        return inner_recv
+                    }
+                    return ir_empty_name()
+                }
+                // Associated / free call as receiver: `E::of(3.0).get()`.
+                if (*recv).kind == ExprKind::ExprCall {
+                    let ret = self.expr_call_return_struct_name_ref(&(*recv))
+                    if ret.len > 0 {
+                        return ret
+                    }
+                    return ir_empty_name()
                 }
                 // Primitive-receiver fallback for a non-ident scalar receiver such
                 // as an array element `a.c[i]` (the imported cd_exact lane calls

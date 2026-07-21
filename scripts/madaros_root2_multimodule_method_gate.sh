@@ -36,6 +36,15 @@ run_ok "same-module method+associated (regression)" \
   tests/run-pass/madaros_root2_method_associated.sio \
   ROOT2_METHOD_ASSOCIATED_OK
 
+# Inline method chain on imported Epistemic (science path; was residual SEGV)
+run_ok "multi-module Epistemic method chain" \
+  tests/run-pass/madaros_root2_multimodule_method_chain.sio \
+  ROOT2_MULTIMODULE_METHOD_CHAIN_OK
+
+run_ok "same-module method chain (regression)" \
+  tests/run-pass/madaros_root2_method_chain.sio \
+  ROOT2_METHOD_CHAIN_OK
+
 mkdir -p "$ROOT/artifacts/compiler"
 COMMIT="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 STATUS=fail
@@ -49,11 +58,14 @@ cat >"$ROOT/artifacts/compiler/madaros_root2_multimodule_method_receipt.v1.json"
   "claims": [
     "multimodule_instance_method_call",
     "multimodule_method_f64_print",
+    "multimodule_inline_method_chain",
+    "same_module_inline_method_chain",
     "epistemic_measured_val_add_std_import"
   ],
   "claims_not_made": [
     "enum_ctor_path",
-    "full_root2_census_closed"
+    "full_root2_census_closed",
+    "arbitrary_depth_method_chain_census"
   ]
 }
 EOF
