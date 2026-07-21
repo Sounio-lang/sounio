@@ -757,6 +757,344 @@ fn lowerer_new_from_program_summary_owned(summary: IrProgramSummary, epistemic: 
     lo
 }
 
+// Wave11 memory wall: attach a Lowerer to the multi-mod *accumulator* so a
+// dependency can preseed + body-lower directly into acc (no second full
+// Box<IrModule> concurrent with acc). Preserves fn_count / string_table /
+// epistemic / algebras / bss / exports — body lower appends. Fresh metadata
+// tables (structs/enums/globals) are rebuilt from extern + dep preseed, same
+// as a standalone per-dep lowerer.
+fn lowerer_from_acc_module(module: Box<IrModule>) -> Lowerer with Alloc, Mut, Panic, Div, IO {
+    var lo = Lowerer {
+        module: module,
+        epistemic_contests: Box::new(empty_lower_epistemic_contest_index()),
+        current_fn: IR_INVALID_FN,
+        current_func: Box::new(ir_empty_function()),
+        current_func_loaded: false,
+        env: None,
+        locals: Box::new(empty_lower_local_stack()),
+        scope_depth: 0,
+        loop_labels: Box::new(empty_lower_loop_labels()),
+        loop_depth: 0,
+        error_count: 0,
+        had_error: false,
+        enum_variants: Box::new(empty_enum_variant_table()),
+        struct_layouts: Box::new(empty_struct_layout_table()),
+        global_types: Box::new(empty_lower_global_type_table()),
+        array_elem_float_regs: [IR_INVALID_REG; 512],
+        array_elem_float_reg_count: 0,
+        variance_base_regs: [IR_INVALID_REG; 1024],
+        variance_value_regs: [IR_INVALID_REG; 1024],
+        variance_base_reg_count: 0,
+        debug_mode: false,
+        probe_mode: false,
+        closure_caps: Box::new(empty_closure_cap_table()),
+        pending_closure_fn_id: -1,
+        allow_direct_capturing_closure_literal: false,
+        pending_variance_reg: -1,
+    }
+    // Knowledge layout is required for epistemic field lowering; match
+    // lowerer_new_with_epistemic. Do NOT wipe module.epistemic / strings.
+    lo.struct_layouts = Box::new(ir_register_knowledge_layout(*lo.struct_layouts))
+    if lower_live_diag_enabled() {
+        print("CONTEST_IR_INDEX_BIND constructor=acc_attach contest_count=")
+        print_int((*lo.epistemic_contests).contest_count)
+        print("\n")
+    }
+    lo
+}
+
+// True if `name` already has a lowered body in the lowerer's module (DEDUP).
+// MUST extract Box<IrModule> to a local first: nested `(*(*lo).module).field`
+// reads (and `&(*(*lo).module)`) hit the documented lean_single Box-nested
+// ref hazard (garbage fn_count / names → DEDUP fails → dep main overwrites
+// seed main). Same extract-to-local idiom as preseed_fn_signature / A14.
+fn lowerer_name_has_body_mut(lo: &! Lowerer, name: Name) -> bool with Mut, Panic, Div {
+    var module_box = (*lo).module
+    var has: bool = false
+    var i: i64 = 0
+    while i < (*module_box).fn_count {
+        if ir_name_eq((*module_box).functions[i as usize].name, name) {
+            if (*module_box).functions[i as usize].instr_count > 0 {
+                has = true
+            }
+            (*lo).module = module_box
+            return has
+        }
+        i = i + 1
+    }
+    (*lo).module = module_box
+    false
+}
+
+// Wave11 into-acc: stdlib modules ship test `main`s (gum/knowledge). Never
+// re-lower `main` into the accumulator — the seed program owns the entry.
+// Hard skip (not only has_body) so entry cannot flip even if name/body
+// DEDUP miscompiles under lean_single.
+fn lowerer_name_is_main(name: Name) -> bool {
+    name.len == 4
+        && (name.buf[0] as i64) == 109
+        && (name.buf[1] as i64) == 97
+        && (name.buf[2] as i64) == 105
+        && (name.buf[3] as i64) == 110
+}
+
+fn lowerer_dep_should_skip_fn_mut(lo: &! Lowerer, name: Name) -> bool with Mut, Panic, Div {
+    if lowerer_name_is_main(name) {
+        return true
+    }
+    lowerer_name_has_body_mut(lo, name)
+}
+
+// Preseed a dep fn signature into acc, but never clobber an already-lowered body
+// (multi-mod DEDUP for shared private helper names across modules).
+fn lowerer_preseed_fn_signature_dedup_mut(
+    lo: &! Lowerer,
+    name: Name,
+    params: &Option<Box<ParamList>>,
+    return_type: &Option<Box<TypeExpr>>,
+    effects: &Option<Box<EffectList>>
+) with Mut, Panic, Div, Alloc {
+    if lowerer_name_has_body_mut(lo, name) {
+        return
+    }
+    lowerer_preseed_fn_signature_mut(lo, name, params, return_type, effects)
+}
+
+fn lowerer_preseed_impl_method_summaries_dedup_mut(
+    lo: &! Lowerer,
+    type_name: Name,
+    methods: &Option<Box<ItemList>>,
+    skip_name: Name
+) with Mut, Panic, Div, Alloc {
+    var current = methods
+    while true {
+        match *current {
+            Some(list) => {
+                let head = &(*list).head
+                if head.kind == ItemKind::ItemFn {
+                    let mangled = ir_mangle_method_name(type_name, head.name)
+                    if !ir_name_eq(mangled, skip_name) {
+                        let fn_def_opt_ref: &Option<Box<FnDef>> = &head.fn_def
+                        match *fn_def_opt_ref {
+                            Some(fd) => {
+                                lowerer_preseed_fn_signature_dedup_mut(
+                                    lo,
+                                    mangled,
+                                    &(*fd).params,
+                                    &(*fd).return_type,
+                                    &(*fd).effects
+                                )
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                current = &(*list).tail
+            }
+            _ => break
+        }
+    }
+}
+
+// Preseed a dependency's items into the accumulator. Skips names that already
+// have bodies (DEDUP — same policy as ir_merge place path existing_body_idx).
+// Skips re-allocating BSS slots that already exist. Struct/enum layouts always
+// re-register into this lowerer's fresh metadata tables.
+fn lowerer_preseed_dep_items_into_acc_mut(
+    lo: &! Lowerer,
+    items: &Option<Box<ItemList>>,
+    skip_name: Name
+) with Mut, Panic, Div, Alloc {
+    var current = items
+    while true {
+        match *current {
+            Some(list) => {
+                let head = &(*list).head
+                let kind = head.kind
+                let name = head.name
+                if kind == ItemKind::ItemFn {
+                    if !ir_name_eq(name, skip_name) {
+                        let fn_def_opt_ref: &Option<Box<FnDef>> = &head.fn_def
+                        match *fn_def_opt_ref {
+                            Some(fd) => {
+                                // DEDUP / never re-lower dep `main` (seed owns entry).
+                                if !lowerer_dep_should_skip_fn_mut(lo, name) {
+                                    let fn_id_sig = lowerer_find_or_add_fn_id_mut(lo, name)
+                                    if fn_id_sig >= 0 {
+                                        let strategy_sig = lowerer_compute_strategy_from_ast_ref(&(*fd).return_type, &(*fd).effects)
+                                        var module_box_sig = (*lo).module
+                                        var fn_slot_sig = (*module_box_sig).functions[fn_id_sig as usize]
+                                        fn_slot_sig.compile_strategy = strategy_sig
+                                        fn_slot_sig.returns_float = lower_opt_return_float_code(&(*fd).return_type)
+                                        fn_slot_sig.return_struct_name = lower_opt_type_named_name(&(*fd).return_type)
+                                        fn_slot_sig.param_count = ir_param_list_count_ref(&(*fd).params)
+                                        fn_slot_sig.first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
+                                        if strategy_sig == IR_STRATEGY_INSTRUMENTED {
+                                            fn_slot_sig.param_count = fn_slot_sig.param_count + 1
+                                            if fn_slot_sig.prof_counter_id < 0 {
+                                                let ctr_idx_sig = (*module_box_sig).prof_counter_count
+                                                if ctr_idx_sig < 64 {
+                                                    (*module_box_sig).prof_counters[ctr_idx_sig as usize] = IrProfCounterInfo {
+                                                        fn_id: fn_id_sig,
+                                                        fn_name: name,
+                                                        counter_id: ctr_idx_sig,
+                                                    }
+                                                    (*module_box_sig).prof_counter_count = ctr_idx_sig + 1
+                                                    fn_slot_sig.prof_counter_id = ctr_idx_sig
+                                                } else {
+                                                    lo.error_count = lo.error_count + 1
+                                                    lo.had_error = true
+                                                }
+                                            }
+                                        }
+                                        (*module_box_sig).functions[fn_id_sig as usize] = fn_slot_sig
+                                        (*lo).module = module_box_sig
+                                    }
+                                    let fn_id_ps = lowerer_find_or_add_fn_id_mut(lo, name)
+                                    if fn_id_ps >= 0 {
+                                        if (*fd).is_kernel {
+                                            (*(*lo).module).functions[fn_id_ps as usize].compile_strategy = 6
+                                        } else if visibility_to_bool(head.visibility) {
+                                            (*(*lo).module).functions[fn_id_ps as usize].compile_strategy = 7
+                                            let exp_count = (*(*lo).module).export_count
+                                            if exp_count < 64 {
+                                                (*(*lo).module).export_names[exp_count as usize] = name
+                                                (*(*lo).module).export_count = exp_count + 1
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {
+                                // BSS / global var slot. Do not re-allocate if name exists.
+                                let existing = lowerer_lookup_fn_id_by_name_ref(lo, name)
+                                if existing < 0 {
+                                    let bss_fn_id = lowerer_find_or_add_fn_id_mut(lo, name)
+                                    if bss_fn_id >= 0 {
+                                        lowerer_record_global_type_mut(lo, bss_fn_id, &head.type_alias_ty)
+                                        var mbox2 = (*lo).module
+                                        var bss_slot = (*mbox2).functions[bss_fn_id as usize]
+                                        let bss_off = (*mbox2).bss_total_size
+                                        let bss_size = lower_typeexpr_byte_size(&head.type_alias_ty)
+                                        let aligned_size = ((bss_size + 7) / 8) * 8
+                                        bss_slot.compile_strategy = 99
+                                        bss_slot.param_count = bss_off
+                                        bss_slot.bss_size = bss_size
+                                        bss_slot.hyper_algebra_kind = lower_typeexpr_bss_elem_size(&head.type_alias_ty)
+                                        lower_apply_global_var_init(&! bss_slot, name)
+                                        (*mbox2).functions[bss_fn_id as usize] = bss_slot
+                                        (*mbox2).bss_total_size = bss_off + aligned_size
+                                        (*lo).module = mbox2
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else if kind == ItemKind::ItemStruct {
+                    let struct_def_opt_ref: &Option<Box<StructDef>> = &head.struct_def
+                    match *struct_def_opt_ref {
+                        Some(sd) => {
+                            lowerer_register_struct_fields_direct_mut(lo, name, &(*sd).fields)
+                        }
+                        _ => {}
+                    }
+                } else if kind == ItemKind::ItemEnum {
+                    let enum_def_opt_ref: &Option<Box<EnumDef>> = &head.enum_def
+                    match *enum_def_opt_ref {
+                        Some(ed) => {
+                            lowerer_register_enum_variants_mut(lo, name, &(*ed).variants, 0)
+                        }
+                        _ => {}
+                    }
+                } else if kind == ItemKind::ItemImpl {
+                    let impl_def_opt_ref: &Option<Box<ImplDef>> = &head.impl_def
+                    match *impl_def_opt_ref {
+                        Some(id) => {
+                            lowerer_preseed_impl_method_summaries_dedup_mut(lo, name, &(*id).methods, skip_name)
+                        }
+                        _ => {}
+                    }
+                }
+                current = &(*list).tail
+            }
+            _ => break
+        }
+    }
+}
+
+// Body-lower dep items into acc, skipping any name that already has a body
+// (DEDUP). Stubs (ic==0) and newly preseeded slots are filled in place — call
+// targets resolve by name to absolute acc indices (A14-friendly).
+//
+// ItemImpl uses the proven lower_impl_methods_ref path (by-value Lowerer)
+// after filtering methods that already have bodies. The hand-rolled method
+// walk was observed not to fill Epistemic_measured/val stubs (ic stayed 0).
+fn lowerer_lower_program_bodies_dedup_mut(
+    lo: &! Lowerer,
+    items: &Option<Box<ItemList>>
+) with Mut, Panic, Div, Alloc, IO {
+    var current = items
+    while true {
+        match *current {
+            Some(list) => {
+                let head = &(*list).head
+                let kind = head.kind
+                let name = head.name
+                if kind == ItemKind::ItemFn {
+                    if !lowerer_dep_should_skip_fn_mut(lo, name) {
+                        let fn_def_opt_ref: &Option<Box<FnDef>> = &head.fn_def
+                        match *fn_def_opt_ref {
+                            Some(fd) => {
+                                lowerer_lower_fn_item_mut(lo, name, &(*fd))
+                            }
+                            _ => {}
+                        }
+                    }
+                } else if kind == ItemKind::ItemImpl {
+                    // Proven path: extract Lowerer by value, lower_impl_methods_ref,
+                    // write back. Skip individual methods that already have bodies
+                    // by pre-checking each mangled name and only invoking the
+                    // full impl lower when at least one method needs a body —
+                    // lower_impl_methods_ref itself overwrites; we still want
+                    // first-body DEDUP for shared mangled names, so lower each
+                    // method individually with the same find_or_add idiom as
+                    // lower_impl_methods_ref (mangle + lowerer_lower_fn_item_mut).
+                    let impl_def_opt_ref: &Option<Box<ImplDef>> = &head.impl_def
+                    match *impl_def_opt_ref {
+                        Some(id) => {
+                            var mcur = &(*id).methods
+                            while true {
+                                match *mcur {
+                                    Some(mlist) => {
+                                        let mhead = &(*mlist).head
+                                        if mhead.kind == ItemKind::ItemFn {
+                                            let mangled = ir_mangle_method_name(name, mhead.name)
+                                            if !lowerer_dep_should_skip_fn_mut(lo, mangled) {
+                                                let mfd_opt: &Option<Box<FnDef>> = &mhead.fn_def
+                                                match *mfd_opt {
+                                                    Some(fd) => {
+                                                        lowerer_lower_fn_item_mut(lo, mangled, &(*fd))
+                                                    }
+                                                    _ => {}
+                                                }
+                                            }
+                                        }
+                                        mcur = &(*mlist).tail
+                                    }
+                                    _ => break
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                current = &(*list).tail
+            }
+            _ => break
+        }
+    }
+}
+
 fn lowerer_new_from_program_summary_flat(summary: &IrProgramSummaryFlat, epistemic: IrEpistemicSection) -> Lowerer with Alloc, Mut, Panic, Div {
     var lo = lowerer_new()
     var module_box = lo.module
@@ -11934,6 +12272,93 @@ fn lower_program_bodies_from_summary_with_epistemic_boxed_owned(
 ) -> IrLowerBoxResult with Mut, Panic, Div, Alloc, IO {
     let lo = lowerer_new_from_program_summary_owned(summary, epistemic)
     var lo2 = lo.lower_program_bodies_ref(&prog.items)
+    var patch_stats = ir_empty_validated_patch_stats()
+    if !lo2.had_error {
+        var module_box = lo2.module
+        patch_stats = ir_patch_validated_calls(&! (*module_box))
+        lo2.module = module_box
+    }
+    IrLowerBoxResult {
+        module: lo2.module,
+        error_count: lo2.error_count,
+        had_error: lo2.had_error,
+        patch_stats: patch_stats,
+    }
+}
+
+// Wave11: lower one dependency's items *into* the multi-mod accumulator.
+// Avoids allocating a second full Box<IrModule> per dep (acc+dep dual peak).
+// Call targets bind to absolute acc fn_ids by name.
+//
+// Body lower uses the proven lower_program_bodies_ref path (fills ItemFn +
+// ItemImpl methods). Dep test `main`s may briefly overwrite the seed entry —
+// the multi-mod driver restores seed_user_main after all deps. DEDUP preseed
+// still skips re-signature of existing bodies where possible.
+// Caller owns arena mark/reset + call_args re-box for newly written functions.
+fn lower_dep_program_items_into_acc_with_externs(
+    items: &Option<Box<ItemList>>,
+    programs: &! [Program; 256],
+    program_count: i64,
+    self_index: i64,
+    acc: Box<IrModule>
+) -> IrLowerBoxResult with Mut, Panic, Div, Alloc, IO {
+    var lo = lowerer_from_acc_module(acc)
+    var i: i64 = 0
+    while i < program_count {
+        if i != self_index {
+            let ext_prog = (*programs)[i as usize]
+            lowerer_preseed_external_struct_items_mut(&! lo, &ext_prog.items)
+        }
+        i = i + 1
+    }
+    lowerer_preseed_dep_items_into_acc_mut(&! lo, items, ir_empty_name())
+    // Proven body lower (ItemFn + ItemImpl).
+    var lo2 = lo.lower_program_bodies_ref(items)
+    // Force-fill any remaining zero-body impl methods. Observed residual under
+    // into-acc: lower_program_bodies_ref can leave Epistemic_measured/val at
+    // ic=0 when stubs were pre-created by seed body lower of the root main.
+    // Walk items again and lower mangled methods that still have no body.
+    var current = items
+    while true {
+        match *current {
+            Some(list) => {
+                let head = &(*list).head
+                if head.kind == ItemKind::ItemImpl {
+                    let type_name = head.name
+                    let impl_def_opt_ref: &Option<Box<ImplDef>> = &head.impl_def
+                    match *impl_def_opt_ref {
+                        Some(id) => {
+                            var mcur = &(*id).methods
+                            while true {
+                                match *mcur {
+                                    Some(mlist) => {
+                                        let mhead = &(*mlist).head
+                                        if mhead.kind == ItemKind::ItemFn {
+                                            let mangled = ir_mangle_method_name(type_name, mhead.name)
+                                            if !lowerer_name_has_body_mut(&! lo2, mangled) {
+                                                let mfd_opt: &Option<Box<FnDef>> = &mhead.fn_def
+                                                match *mfd_opt {
+                                                    Some(fd) => {
+                                                        lowerer_lower_fn_item_mut(&! lo2, mangled, &(*fd))
+                                                    }
+                                                    _ => {}
+                                                }
+                                            }
+                                        }
+                                        mcur = &(*mlist).tail
+                                    }
+                                    _ => break
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                current = &(*list).tail
+            }
+            _ => break
+        }
+    }
     var patch_stats = ir_empty_validated_patch_stats()
     if !lo2.had_error {
         var module_box = lo2.module
