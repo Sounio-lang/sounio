@@ -66,15 +66,15 @@ We regard (4) and (6) as the substantive contributions. (6) in particular: the i
 
 ## 2. Related work
 
-**Dynamical isometry.** Saxe et al. and Pennington et al. established the programme of controlling the entire singular spectrum of the input–output Jacobian near unity, and the mean-field machinery for predicting when this is achievable. The criterion is by construction a bulk criterion: it is satisfied by a composition in which a low-dimensional subspace has been extinguished, provided the remaining directions are well conditioned. [CHECK: exact statements and citations]
+**Dynamical isometry.** Saxe et al. and Pennington et al. established the programme of controlling the entire singular spectrum of the input–output Jacobian near unity, and the mean-field machinery for predicting when this is achievable. The criterion is by construction a bulk criterion: it is satisfied by a composition in which a low-dimensional subspace has been extinguished, provided the remaining directions are well conditioned. [1,2]
 
-**Lyapunov spectra of recurrent networks.** The spectrum of $P_T$ as $T$ grows is, up to normalisation, the Lyapunov spectrum of the recurrent map, and this has been computed for RNNs — including in relation to trainability and chaos. Our $G_m(T)$ growth coefficient $\beta$ is a difference of Lyapunov exponents, $\lambda_{m+1}-\lambda_m$. We therefore make no claim of novelty for the spectral measurement itself; the contribution lies in the discriminant and the null. [CHECK: Engelken, Wolf & Abbott; Vogt et al. — exact references]
+**Lyapunov spectra of recurrent networks.** The spectrum of $P_T$ as $T$ grows is, up to normalisation, the Lyapunov spectrum of the recurrent map, and this has been computed for RNNs — including in relation to trainability and chaos. Our $G_m(T)$ growth coefficient $\beta$ is a difference of Lyapunov exponents, $\lambda_{m+1}-\lambda_m$. We therefore make no claim of novelty for the spectral measurement itself; the contribution lies in the discriminant and the null. [3,4]
 
-**Covariant Lyapunov vectors.** The question of whether the contracting directions of successive factors align is, in dynamical-systems language, a question about the Oseledets filtration and its covariant vectors. Our $A^{\mathrm{carry}}$ is a finite-$T$, network-adapted version of this measurement. [CHECK: Ginelli et al.]
+**Covariant Lyapunov vectors.** The question of whether the contracting directions of successive factors align is, in dynamical-systems language, a question about the Oseledets filtration and its covariant vectors. Our $A^{\mathrm{carry}}$ is a finite-$T$, network-adapted version of this measurement. [5]
 
-**Rank collapse.** Dong et al. showed that pure attention degenerates doubly exponentially towards rank one. This is the opposite limiting case to the one we probe: total collapse of the bulk, rather than extinction of a small subspace with a healthy bulk. Our classifier is designed to separate the two. [CHECK]
+**Rank collapse.** Dong et al. showed that pure attention degenerates doubly exponentially towards rank one. This is the opposite limiting case to the one we probe: total collapse of the bulk, rather than extinction of a small subspace with a healthy bulk. Our classifier is designed to separate the two. [6]
 
-**Low intrinsic dimensionality.** Trained networks are widely reported to have low effective rank. This is the principal confounder for any alignment-based measurement, because a shared low-rank signal subspace forces the *complementary* subspaces to align trivially. Section 3.4 addresses it. [CHECK]
+**Low intrinsic dimensionality.** Trained networks are widely reported to have low effective rank. This is the principal confounder for any alignment-based measurement, because a shared low-rank signal subspace forces the *complementary* subspaces to align trivially. Section 3.4 addresses it. [9]
 
 ---
 
@@ -332,13 +332,23 @@ The author reviewed, verified and takes full responsibility for all content, inc
 
 ## References
 
-[FILL — Vancouver]
+> **Verification note (2026-07-21).** All entries below were verified by independent
+> title+author search (bibliographic details cross-checked against the publisher/arXiv
+> record, not against a page summary — the appendix pattern of the program registry).
+> The scite MCP was the intended verifier but was quota-blocked; WebSearch was used
+> instead, so **Smart-Citation tallies (supporting/contrasting) are not attached** — only
+> existence, authorship, venue and DOI are confirmed. Ref 9 (Ansuini et al.) is newly added
+> to close the §2 "low intrinsic dimensionality" [CHECK]. A subsequent scite pass (2026-07-21)
+> completed the mandatory retraction/correction check **clean** for refs 3 (Engelken), 7
+> (Benettin, Part 1) and 8 (Dieci–Van Vleck) — `retraction_notices` absent; tallies still not
+> attached (scite backend was intermittent).
 
-1. Saxe AM, McClelland JL, Ganguli S. [CHECK]
-2. Pennington J, Schoenholz SS, Ganguli S. [CHECK]
-3. Engelken R, Wolf F, Abbott LF. [CHECK]
-4. Vogt R, et al. [CHECK]
-5. Ginelli F, et al. [CHECK]
-6. Dong Y, Cordonnier J-B, Loukas A. [CHECK]
-7. Benettin G, Galgani L, Giorgilli A, Strelcyn J-M. [CHECK]
-8. Dieci L, Van Vleck ES. [CHECK]
+1. Saxe AM, McClelland JL, Ganguli S. Exact solutions to the nonlinear dynamics of learning in deep linear neural networks. In: 2nd International Conference on Learning Representations (ICLR); 2014. arXiv:1312.6120.
+2. Pennington J, Schoenholz SS, Ganguli S. Resurrecting the sigmoid in deep learning through dynamical isometry: theory and practice. In: Advances in Neural Information Processing Systems 30 (NIPS 2017); 2017. p. 4785–95.
+3. Engelken R, Wolf F, Abbott LF. Lyapunov spectra of chaotic recurrent neural networks. Phys Rev Res. 2023;5(4):043044. doi:10.1103/PhysRevResearch.5.043044.
+4. Vogt R, Puelma Touzel M, Shlizerman E, Lajoie G. On Lyapunov exponents for RNNs: understanding information propagation using dynamical systems tools. Front Appl Math Stat. 2022;8:818799. doi:10.3389/fams.2022.818799.
+5. Ginelli F, Poggi P, Turchi A, Chaté H, Livi R, Politi A. Characterizing dynamics with covariant Lyapunov vectors. Phys Rev Lett. 2007;99(13):130601. doi:10.1103/PhysRevLett.99.130601.
+6. Dong Y, Cordonnier J-B, Loukas A. Attention is not all you need: pure attention loses rank doubly exponentially with depth. In: Proceedings of the 38th International Conference on Machine Learning (ICML); PMLR 139; 2021. p. 2793–803.
+7. Benettin G, Galgani L, Giorgilli A, Strelcyn J-M. Lyapunov characteristic exponents for smooth dynamical systems and for Hamiltonian systems; a method for computing all of them. Part 1: Theory. Meccanica. 1980;15(1):9–20. doi:10.1007/BF02128236. [Part 2: Numerical application. Meccanica. 1980;15(1):21–30. doi:10.1007/BF02128237.]
+8. Dieci L, Van Vleck ES. Computation of a few Lyapunov exponents for continuous and discrete dynamical systems. Appl Numer Math. 1995;17(3):275–91. doi:10.1016/0168-9274(95)00033-Q.
+9. Ansuini A, Laio A, Macke JH, Zoccolan D. Intrinsic dimension of data representations in deep neural networks. In: Advances in Neural Information Processing Systems 32 (NeurIPS 2019); 2019. p. 6109–19. arXiv:1905.12784.
