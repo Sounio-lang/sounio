@@ -112,6 +112,105 @@ estimated network alone does not establish the most effective intervention.
 Sounio may represent a control objective and its assumptions, but it must not
 compile a controllability score into a clinical instruction.
 
+## Programming-Language Feasibility
+
+This direction is executable in programming-language terms. None of its
+ingredients requires a claim that Sounio has discovered an entirely new kind of
+type system.
+
+- **Typestate** already demonstrates the core move: an entity's admissible
+  operations can depend on a statically tracked state and transition relation.
+  The original formulation was designed to be embedded in a compiler; modern
+  work continues to extend typestate with capabilities and richer protocols.
+  [Strom and Yemini's typestate concept](https://research.ibm.com/publications/typestate-a-programming-language-concept-for-enhancing-software-reliability)
+  and [Mungo's typestate/session-type toolchain](https://www.dcs.gla.ac.uk/research/mungo/publication/pub5/)
+  are direct precedents for ``this receipt is required before that operation.''
+- **Session and protocol types** show that typechecking can enforce a permitted
+  sequence of transitions, not only the shape of one message. That is useful
+  for trajectories and staged evidence, but a protocol alone does not establish
+  biological or causal truth.
+- **Causal calculi** already distinguish observation, intervention, and richer
+  policies. For example, sigma-calculus extends reasoning beyond a single atomic
+  intervention to conditional and stochastic interventions.
+  [Correa and Bareinboim (2020)](https://ojs.aaai.org/index.php/AAAI/article/view/6567)
+  supplies a formal precedent for refusing to treat every policy as a plain
+  assignment.
+- **Probabilistic programming** can represent generative models and causal
+  interventions, including program transformations used to encode an
+  intervention. It does not make an inferred causal structure valid merely
+  because the posterior fits data.
+  [Witty et al.](https://arxiv.org/abs/1910.14124) is a useful boundary
+  reference.
+- **Expressive measurement types** show that units and measurement assumptions
+  can be made construction-relevant rather than retained only as comments.
+  [Measuring with confidence](https://acta.imeko.org/index.php/acta-imeko/article/view/1412)
+  is a nearby metrological precedent.
+
+The open scientific question is therefore not "can a PL express this?" It can.
+The hard question is which distinctions deserve first-class enforcement, which
+belong to a model library, and which must remain evidence-bearing claims rather
+than types.
+
+### What Is Plausibly Specific to Sounio
+
+Sounio should not claim novelty from any one primitive above. A bounded,
+testable contribution would instead be the composition of five independently
+auditable layers:
+
+```text
+nominal evidence categories
+  + epistemic numeric/provenance receipts
+  + ordered and parenthesized trajectories
+  + causal-assumption and policy boundaries
+  + current-source source-to-IR preservation witness
+```
+
+The last line matters. A library can encode distinct receipts, but the current
+`SOUNIO-ORDERED-PATH-PROVENANCE` witness independently observes selected typed
+identities after compiler cleanup and imported-module finalization. That does
+not establish compiler-wide preservation; it gives a concrete standard that a
+future psychiatric fixture must meet before we say the distinction survived the
+language implementation.
+
+### Library-First, Compiler-Certified Architecture
+
+The implementation should remain incremental.
+
+| Phase | Mechanism | Why it is enough at that phase | What it must not claim |
+| --- | --- | --- | --- |
+| 0 | Plain record receipts and explicit constructors in a research package. | Makes inputs and assumptions inspectable. | Runtime data alone prove no semantic exclusion. |
+| 1 | Existing ontology classes and compile-fail category tests. | Rejects an occupancy observation where a functional surrogate is required. | No complete functional model or causal mechanism. |
+| 2 | Typed trajectory constructors carrying order, grouping, and time basis. | Makes path collisions testable against endpoint collisions. | No claim that all composition is non-associative. |
+| 3 | Audit-only source-to-IR trace for the bounded fixture. | Checks that selected category identities survive the actual lowering path. | No optimizer authority and no compiler-wide theorem. |
+| 4 | Causal-effect and policy receipts in the research ring. | Forces stated estimands and assumptions before a policy is considered. | No treatment recommendation or automatic action. |
+| 5 | Separately governed validation interface. | Keeps empirical and clinical evidence outside a compiler pass. | No regulatory or clinical readiness. |
+
+Sounio's existing effect annotations continue to describe computational effects
+such as `IO`, `Mut`, `Panic`, or allocation. They must not be overloaded to
+mean receptor activation, a biological mechanism, or a therapeutic outcome.
+Those are model-level claims with their own receipts and evidence boundaries.
+
+### Smallest Implementable Surface
+
+The first execution should use no new parser syntax, no global effect-system
+change, and no patient data. It needs only existing ontology nominal types plus
+ordinary library records to express:
+
+```text
+ReceptorOccupancyObservation
+FunctionalContextReceipt
+FunctionalStateSurrogate
+PathwayVectorReceipt
+OrderedTrajectoryReceipt
+CausalAssumptionReceipt
+DecisionProposalReceipt
+```
+
+These names are proposed vocabulary, not declared standard-library types. The
+gate must prove their non-substitutability through the collision matrix above.
+Only a repeated need across independent packages would justify a new language
+primitive, type constructor, or compiler IR field.
+
 ## Proposed Semantic Decomposition
 
 The following is a prospective taxonomy, not new Sounio syntax and not an
