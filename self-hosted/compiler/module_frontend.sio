@@ -11,7 +11,7 @@ use ir::opt_cleanup::{OcpCleanupModuleReceipt, opt_cleanup_module_inplace}
 use io::env::{read_env}
 use io::trace::{io_trace_i64_string}
 use check::mod::{check_items_verdict_boot4, check_items_verdict_boot4_with_ontocache_sidecar, check_modules_verdict_boot4, check_program_epistemic_into, check_program_with_artifacts, checker_to_ir_epistemic_into, checker_apply_ir_metadata, checker_apply_ir_ontology_parameter_links_from_items}
-use ir::lower::{lower_program_to_ir_trace, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_bodies_from_summary_flat_with_epistemic_ref, lower_program_bodies_from_summary_with_epistemic_boxed_owned}
+use ir::lower::{lower_program_to_ir_trace, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_bodies_from_summary_flat_with_epistemic_ref, lower_program_bodies_from_summary_with_epistemic_boxed_owned, lower_dep_program_items_into_acc_with_externs}
 use native::codegen_x86_linux::{compile_native_v2_preview_to_file, native_resolve_target, native_v2_builtin_id_for_name}
 use check::knowledge_context::{knowledge_context_validate_items, knowledge_context_validate_items_values_only}
 use resolve::mod::{resolve_modules}
@@ -34,6 +34,34 @@ fn module_frontend_global_init_compile_end() with Mut {
 
 fn module_frontend_lower_trace_enabled() -> bool with IO, Mut, Panic, Div {
     str_eq(read_env("SOUNIO_MODULE_FRONTEND_LOWER_TRACE"), "1")
+}
+
+// Wave13 into-acc multi-mod dep lower (default ON). Avoids concurrent
+// acc+dep Box<IrModule> peak. Set SOUNIO_MADAROS_DEP_MERGE=place to force
+// the proven dep_box + place+remap path (A/B measurement / rollback).
+fn module_frontend_into_acc_enabled() -> bool with IO, Mut, Panic, Div {
+    !str_eq(read_env("SOUNIO_MADAROS_DEP_MERGE"), "place")
+}
+
+// Smallest `main` body (user entry). Dep stdlib mains are larger selftests.
+// Must NOT assume fn_id=0 — into-acc fills dep helpers into low indices
+// (measured: os_oct_mul at fi=0); restoring functions[0] clobbered it → SEGV.
+fn module_frontend_find_user_main_idx(module: &IrModule) -> i64 with Mut, Div, Panic {
+    var user_main: i64 = 0 - 1
+    var user_main_ic: i64 = 1000000000
+    var mfi: i64 = 0
+    let main_nm = make_name("main")
+    while mfi < (*module).fn_count {
+        if ir_name_eq((*module).functions[mfi as usize].name, main_nm) {
+            let mic = (*module).functions[mfi as usize].instr_count
+            if mic > 0 && mic < user_main_ic {
+                user_main = mfi
+                user_main_ic = mic
+            }
+        }
+        mfi = mfi + 1
+    }
+    user_main
 }
 
 fn module_frontend_dump_merged_calls_enabled() -> bool with IO, Mut, Panic, Div {
@@ -5098,15 +5126,31 @@ fn module_frontend_lower_programs_array_direct_box(
         return module_frontend_lower_direct_box_error(seed_lower.error_msg)
     }
     match seed_lower.module {
-        Some(acc_box) => {
+        Some(seed_acc) => {
+            // var so into-acc can rebind the Box after each dep (takes acc by value).
+            var acc_box = seed_acc
             if module_frontend_dump_merged_calls_enabled() {
                 print("MERGE_DUMP: seed_module\n")
                 ir_module_dump_merge_calls(&(*acc_box))
             }
             trace.merged_modules = 1
-            // Snapshot seed user main before dependency merges: in-place acc_box writes
-            // can clobber fn=0 under the lean_single &!Box<IrModule> JIT path.
-            var seed_user_main = ir_function_deep_copy((*acc_box).functions[0 as usize])
+            // Snapshot seed *user* main (by name, smallest body) — NOT functions[0].
+            // Into-acc fills dep helpers into low fn_ids (os_oct_mul at fi=0 measured);
+            // restoring functions[0] destroyed those bodies → order_spread SEGV.
+            var seed_main_idx = module_frontend_find_user_main_idx(&(*acc_box))
+            if seed_main_idx < 0 {
+                seed_main_idx = 0
+            }
+            var seed_user_main = ir_function_deep_copy((*acc_box).functions[seed_main_idx as usize])
+            let into_acc_default = module_frontend_into_acc_enabled()
+            if into_acc_default {
+                print("lower_array: dep_mode into_acc\n")
+            } else {
+                print("lower_array: dep_mode place_remap\n")
+            }
+            print("lower_array: seed_main_idx ")
+            print_int(seed_main_idx)
+            print("\n")
 
             var i: i64 = 1
             while i < loaded {
@@ -5119,144 +5163,43 @@ fn module_frontend_lower_programs_array_direct_box(
                 // load/typecheck phase and must stay live for OTHER modules'
                 // extern resolution, so it is intentionally allocated before
                 // this mark and is untouched by the reset below -- only the
-                // per-module lowering scratch (dep_box and everything it
-                // pulls in) falls inside [mark, reset).
+                // per-module lowering scratch falls inside [mark, reset).
                 let dep_arena_mark = __arena_mark()
                 let dep_items = (*programs)[i as usize].items
-                let dep_lower = module_frontend_lower_program_items_box_traced_with_externs(&dep_items, programs, loaded, i, trace)
-                print("lower_array: dep_lower_done ")
-                print_int(i)
-                print("\n")
-                if !dep_lower.ok {
-                    return module_frontend_lower_direct_box_error(dep_lower.error_msg)
-                }
-                match dep_lower.module {
-                    Some(dep_box) => {
-                        print("lower_array: merge_begin ")
-                        print_int(i)
-                        print("\n")
-                        let dep_fn_count = (*dep_box).fn_count
-                        // Snapshot before this module's functions are appended --
-                        // acc_box.fn_count only grows in the mfi loop below, so
-                        // this is the exact appended range [old_fn_count, ..).
-                        let dep_merge_old_fn_count = (*acc_box).fn_count
-                        let string_offset = (*acc_box).string_count
-                        let contest_offset = (*acc_box).epistemic.contest_count
-                        let robust_offset = (*acc_box).epistemic.robust_proof_count
-                        let decision_offset = (*acc_box).epistemic.decision_certificate_count
-                        let deferred_offset = (*acc_box).epistemic.deferred_certificate_count
-                        let validated_offset = (*acc_box).epistemic.validated_manifest_count
-                        let acquisition_plan_offset = (*acc_box).epistemic.acquisition_plan_count
-                        let recourse_plan_offset = (*acc_box).epistemic.recourse_plan_count
-                        let alternative_set_offset = (*acc_box).epistemic.alternative_set_count
-                        let transition_plan_offset = (*acc_box).epistemic.transition_plan_count
-                        let observed_transition_offset = (*acc_box).epistemic.observed_transition_count
-                        let rollback_certificate_offset = (*acc_box).epistemic.rollback_certificate_count
-                        let bss_offset_delta = (*acc_box).bss_total_size
-                        // Functions with index < acc_fn_before existed before this dep merge;
-                        // a fn_remap target below this marks a DEDUP reuse (skip re-placing).
-                        let acc_fn_before = (*acc_box).fn_count
-                        var fn_remap: [i64; 2048] = [-1; 2048]
-                        var append_count: i64 = 0
-                        var rfi: i64 = 0
-                        while rfi < dep_fn_count {
-                            let dep_ic = (*dep_box).functions[rfi as usize].instr_count
-                            var stub_idx: i64 = 0 - 1
-                            var existing_body_idx: i64 = 0 - 1
-                            var sfi: i64 = 0
-                            while sfi < (*acc_box).fn_count {
-                                if ir_name_eq(
-                                    (*acc_box).functions[sfi as usize].name,
-                                    (*dep_box).functions[rfi as usize].name
-                                ) {
-                                    if (*acc_box).functions[sfi as usize].instr_count <= 0 {
-                                        stub_idx = sfi
-                                    } else {
-                                        existing_body_idx = sfi
-                                    }
-                                }
-                                sfi = sfi + 1
-                            }
-                            if existing_body_idx >= 0 {
-                                // DEDUP: this function's body is already merged (a shared
-                                // import pulled in via another module). Point dep's callers
-                                // at the existing copy and skip re-appending the duplicate
-                                // body. Post-merge call finalize (ir_module_finalize_merged_calls)
-                                // resolves every call by name to this kept copy.
-                                fn_remap[rfi as usize] = existing_body_idx
-                            } else if stub_idx >= 0 && dep_ic > 0 {
-                                // Keep import stubs (ic=0) at low fn_id indices and append
-                                // lowered bodies — matches the 3-module clinical+knightian
-                                // layout where stub slots survive for post-finalize promotion.
-                                let planned_idx = (*acc_box).fn_count + append_count
-                                if planned_idx < IR_MAX_FUNCS {
-                                    fn_remap[rfi as usize] = planned_idx
-                                    append_count = append_count + 1
-                                }
-                            } else {
-                                let planned_idx = (*acc_box).fn_count + append_count
-                                if planned_idx < IR_MAX_FUNCS {
-                                    fn_remap[rfi as usize] = planned_idx
-                                    append_count = append_count + 1
-                                }
-                            }
-                            rfi = rfi + 1
-                        }
 
-                        var mfi: i64 = 0
-                        while mfi < dep_fn_count {
-                            let dst_fi = fn_remap[mfi as usize]
-                            // dst_fi < acc_fn_before = a DEDUP reuse (body already present):
-                            // skip re-placing it. Only place newly-appended functions.
-                            if dst_fi >= acc_fn_before {
-                                // Wave10: single-pass place+remap (one IrFunction local).
-                                // Wave11: bss_offset_delta relocates dep BSS past acc BSS.
-                                ir_merge_place_and_remap_function(
-                                    &! (*acc_box),
-                                    &(*dep_box),
-                                    mfi,
-                                    dst_fi,
-                                    dep_fn_count,
-                                    &fn_remap,
-                                    contest_offset,
-                                    robust_offset,
-                                    decision_offset,
-                                    deferred_offset,
-                                    validated_offset,
-                                    acquisition_plan_offset,
-                                    recourse_plan_offset,
-                                    alternative_set_offset,
-                                    transition_plan_offset,
-                                    observed_transition_offset,
-                                    rollback_certificate_offset,
-                                    bss_offset_delta
-                                )
-                            }
-                            mfi = mfi + 1
-                        }
-                        // Grow acc BSS by the dep module's local BSS footprint.
-                        (*acc_box).bss_total_size = (*acc_box).bss_total_size + (*dep_box).bss_total_size
-                        var si: i64 = 0
-                        while si < (*dep_box).string_count && (*acc_box).string_count < IR_MAX_STRINGS {
-                            (*acc_box).string_table[(*acc_box).string_count as usize] = (*dep_box).string_table[si as usize]
-                            (*acc_box).string_count = (*acc_box).string_count + 1
-                            si = si + 1
-                        }
-                        // In-place section merge via &! IrModule (no section by-value).
-                        ir_merge_sections_into_module(&! (*acc_box), &(*dep_box))
-                        // Every field copied into acc_box above (functions incl.
-                        // instrs, string_table entries, epistemic, algebras) is a
-                        // plain value copy with no Box field except IrInstr.call_args
-                        // (Option<Box<IrRegList>> -- audited: the only Box reachable
-                        // from IrModule/IrFunction/IrInstr). Re-box those chains
-                        // before reclaiming dep_box's arena window: extract now
-                        // (source still valid), reset, then rebuild fresh in the
-                        // freed window.
-                        let dep_merge_new_fn_count = (*acc_box).fn_count
-                        // Snapshot live call_args for newly-appended functions into BSS,
-                        // then reclaim the dep window and re-box chains into acc (A14
-                        // whole-function writeback). Skip only on scratch overflow.
-                        let dep_arena_scan_ok = mf_arebox_scan(&(*acc_box), dep_merge_old_fn_count, dep_merge_new_fn_count)
+                if into_acc_default {
+                    // Wave13: body-lower dep directly into acc (no concurrent dep_box).
+                    // Fills seed-preseeded stubs (ic=0) and appends new names in place.
+                    // Call targets already bind to absolute acc fn_ids by name.
+                    let dep_fn_before = (*acc_box).fn_count
+                    let into_result = lower_dep_program_items_into_acc_with_externs(
+                        &dep_items,
+                        programs,
+                        loaded,
+                        i,
+                        acc_box
+                    )
+                    print("lower_array: into_acc_done ")
+                    print_int(i)
+                    print("\n")
+                    if into_result.had_error {
+                        return module_frontend_lower_direct_box_error("ir_into_acc_failed")
+                    }
+                    acc_box = into_result.module
+                    // Into-acc fills stubs at low fn_ids AND may append. Re-box
+                    // call_args for the whole module before arena_reset so filled
+                    // stubs' chains (allocated post-mark) are not left dangling.
+                    // Opt-out: SOUNIO_INTO_ACC_NO_RESET=1 keeps post-mark boxes live
+                    // (peak slightly higher; useful for residual diagnosis).
+                    if str_eq(read_env("SOUNIO_INTO_ACC_NO_RESET"), "1") {
+                        MF_AREBOX_RESET_SKIP = MF_AREBOX_RESET_SKIP + 1
+                        print("lower_array: arena_reset_skipped (into_acc_no_reset) module ")
+                        print_int(i)
+                        print(" fn_after ")
+                        print_int((*acc_box).fn_count)
+                        print("\n")
+                    } else {
+                        let dep_arena_scan_ok = mf_arebox_scan(&(*acc_box), 0, (*acc_box).fn_count)
                         let dep_rebox_sites = MF_AREBOX_COUNT
                         if dep_arena_scan_ok {
                             __arena_reset(dep_arena_mark)
@@ -5267,6 +5210,10 @@ fn module_frontend_lower_programs_array_direct_box(
                             print_int(i)
                             print(" rebox_sites ")
                             print_int(dep_rebox_sites)
+                            print(" into_acc fn_before ")
+                            print_int(dep_fn_before)
+                            print(" fn_after ")
+                            print_int((*acc_box).fn_count)
                             print("\n")
                         } else {
                             MF_AREBOX_RESET_SKIP = MF_AREBOX_RESET_SKIP + 1
@@ -5276,17 +5223,148 @@ fn module_frontend_lower_programs_array_direct_box(
                             print_int(dep_rebox_sites)
                             print("\n")
                         }
-                        print("lower_array: merge_done ")
-                        print_int(i)
-                        print("\n")
                     }
-                    None => return module_frontend_lower_direct_box_error("ir_lowering_failed")
+                } else {
+                    // Proven path: full dep_box lower + place+remap + section merge.
+                    let dep_lower = module_frontend_lower_program_items_box_traced_with_externs(&dep_items, programs, loaded, i, trace)
+                    print("lower_array: dep_lower_done ")
+                    print_int(i)
+                    print("\n")
+                    if !dep_lower.ok {
+                        return module_frontend_lower_direct_box_error(dep_lower.error_msg)
+                    }
+                    match dep_lower.module {
+                        Some(dep_box) => {
+                            print("lower_array: merge_begin ")
+                            print_int(i)
+                            print("\n")
+                            let dep_fn_count = (*dep_box).fn_count
+                            let dep_merge_old_fn_count = (*acc_box).fn_count
+                            let string_offset = (*acc_box).string_count
+                            let contest_offset = (*acc_box).epistemic.contest_count
+                            let robust_offset = (*acc_box).epistemic.robust_proof_count
+                            let decision_offset = (*acc_box).epistemic.decision_certificate_count
+                            let deferred_offset = (*acc_box).epistemic.deferred_certificate_count
+                            let validated_offset = (*acc_box).epistemic.validated_manifest_count
+                            let acquisition_plan_offset = (*acc_box).epistemic.acquisition_plan_count
+                            let recourse_plan_offset = (*acc_box).epistemic.recourse_plan_count
+                            let alternative_set_offset = (*acc_box).epistemic.alternative_set_count
+                            let transition_plan_offset = (*acc_box).epistemic.transition_plan_count
+                            let observed_transition_offset = (*acc_box).epistemic.observed_transition_count
+                            let rollback_certificate_offset = (*acc_box).epistemic.rollback_certificate_count
+                            let bss_offset_delta = (*acc_box).bss_total_size
+                            let acc_fn_before = (*acc_box).fn_count
+                            var fn_remap: [i64; 2048] = [-1; 2048]
+                            var append_count: i64 = 0
+                            var rfi: i64 = 0
+                            while rfi < dep_fn_count {
+                                let dep_ic = (*dep_box).functions[rfi as usize].instr_count
+                                var stub_idx: i64 = 0 - 1
+                                var existing_body_idx: i64 = 0 - 1
+                                var sfi: i64 = 0
+                                while sfi < (*acc_box).fn_count {
+                                    if ir_name_eq(
+                                        (*acc_box).functions[sfi as usize].name,
+                                        (*dep_box).functions[rfi as usize].name
+                                    ) {
+                                        if (*acc_box).functions[sfi as usize].instr_count <= 0 {
+                                            stub_idx = sfi
+                                        } else {
+                                            existing_body_idx = sfi
+                                        }
+                                    }
+                                    sfi = sfi + 1
+                                }
+                                if existing_body_idx >= 0 {
+                                    fn_remap[rfi as usize] = existing_body_idx
+                                } else if stub_idx >= 0 && dep_ic > 0 {
+                                    let planned_idx = (*acc_box).fn_count + append_count
+                                    if planned_idx < IR_MAX_FUNCS {
+                                        fn_remap[rfi as usize] = planned_idx
+                                        append_count = append_count + 1
+                                    }
+                                } else {
+                                    let planned_idx = (*acc_box).fn_count + append_count
+                                    if planned_idx < IR_MAX_FUNCS {
+                                        fn_remap[rfi as usize] = planned_idx
+                                        append_count = append_count + 1
+                                    }
+                                }
+                                rfi = rfi + 1
+                            }
+
+                            var mfi: i64 = 0
+                            while mfi < dep_fn_count {
+                                let dst_fi = fn_remap[mfi as usize]
+                                if dst_fi >= acc_fn_before {
+                                    ir_merge_place_and_remap_function(
+                                        &! (*acc_box),
+                                        &(*dep_box),
+                                        mfi,
+                                        dst_fi,
+                                        dep_fn_count,
+                                        &fn_remap,
+                                        contest_offset,
+                                        robust_offset,
+                                        decision_offset,
+                                        deferred_offset,
+                                        validated_offset,
+                                        acquisition_plan_offset,
+                                        recourse_plan_offset,
+                                        alternative_set_offset,
+                                        transition_plan_offset,
+                                        observed_transition_offset,
+                                        rollback_certificate_offset,
+                                        bss_offset_delta
+                                    )
+                                }
+                                mfi = mfi + 1
+                            }
+                            (*acc_box).bss_total_size = (*acc_box).bss_total_size + (*dep_box).bss_total_size
+                            var si: i64 = 0
+                            while si < (*dep_box).string_count && (*acc_box).string_count < IR_MAX_STRINGS {
+                                (*acc_box).string_table[(*acc_box).string_count as usize] = (*dep_box).string_table[si as usize]
+                                (*acc_box).string_count = (*acc_box).string_count + 1
+                                si = si + 1
+                            }
+                            ir_merge_sections_into_module(&! (*acc_box), &(*dep_box))
+                            let dep_merge_new_fn_count = (*acc_box).fn_count
+                            let dep_arena_scan_ok = mf_arebox_scan(&(*acc_box), dep_merge_old_fn_count, dep_merge_new_fn_count)
+                            let dep_rebox_sites = MF_AREBOX_COUNT
+                            if dep_arena_scan_ok {
+                                __arena_reset(dep_arena_mark)
+                                mf_arebox_apply(&! (*acc_box))
+                                MF_AREBOX_RESET_OK = MF_AREBOX_RESET_OK + 1
+                                MF_AREBOX_SITES_RECLAIMED = MF_AREBOX_SITES_RECLAIMED + dep_rebox_sites
+                                print("lower_array: arena_reset_ok module ")
+                                print_int(i)
+                                print(" rebox_sites ")
+                                print_int(dep_rebox_sites)
+                                print("\n")
+                            } else {
+                                MF_AREBOX_RESET_SKIP = MF_AREBOX_RESET_SKIP + 1
+                                print("lower_array: arena_reset_skipped (call-arg scratch overflow) module ")
+                                print_int(i)
+                                print(" sites ")
+                                print_int(dep_rebox_sites)
+                                print("\n")
+                            }
+                            print("lower_array: merge_done ")
+                            print_int(i)
+                            print("\n")
+                            let _keep_string_offset = string_offset
+                        }
+                        None => return module_frontend_lower_direct_box_error("ir_lowering_failed")
+                    }
                 }
                 trace.merged_modules = trace.merged_modules + 1
                 i = i + 1
             }
 
-            (*acc_box).functions[0] = seed_user_main
+            // Restore user main at its seed index (not fn_id=0).
+            if seed_main_idx >= 0 && seed_main_idx < (*acc_box).fn_count {
+                (*acc_box).functions[seed_main_idx as usize] = seed_user_main
+            }
 
             trace.last_stage = "done"
             print("lower_array: final_fn_count ")
