@@ -45,13 +45,13 @@ Types-Changed: StructFieldEntry gains value_type_name; StructLayoutTable gains p
 Effects-Changed: layout allocation is explicit through Alloc
 IR-Changed: lowering-only layout metadata retains nominal field result identity; no SOIR serialization or scientific payload claim
 Claims-Introduced: an imported two-module witness can distinguish same-spelled fields at different outer and inner offsets and execute the inner value
-Claims-Forbidden: general aggregate ABI parity, arbitrary dynamic reflection, D12 runtime parity, physical or clinical validity, SOIR round-trip preservation, and closure of #901 without D6/D11/D12 plus Foundry evidence
+Claims-Forbidden: general aggregate ABI parity, arbitrary dynamic reflection, layout-capacity closure, D11/D12 runtime parity without their exact source lineage, physical or clinical validity, SOIR round-trip preservation, and closure of #901 without the separately scoped integration and Foundry evidence
 Assumptions: registered field declarations retain nominal TypeNamed paths during one source-fresh compiler invocation
 Write-Set: self-hosted/ir/ir.sio, self-hosted/ir/lower.sio, self-hosted/compiler/main.sio, tests/compiler/madaros_imported_runtime_acceptance/*
 Read-Set: parser FieldDefList types, modular import closure, native-v2 field-get emission
 Positive-Witness: issue_901_nested_field_chain_main.sio prints 520 and ISSUE_901_NESTED_FIELD_CHAIN_OK through the current-source imported path
 Negative-Witness: a typed known-layout field miss lowers as an explicit error and never selects a same-named field from a different layout
-Acceptance-Gate: source-fresh Madaros runs the nested-field witness, D6, D11, and the 257-layout witness with fallback=0
+Acceptance-Gate: source-fresh Madaros runs the forward-declared nested-field witness and the exact available D6 imported witness with no fallback marker
 Integration-Target: origin/main
 Authoritative-Only-If: current-source compiler, exact source inputs, executable ELFs, and no fallback marker prove each listed witness
 ```
