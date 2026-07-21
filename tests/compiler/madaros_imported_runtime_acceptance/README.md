@@ -1,6 +1,7 @@
 # Madaros Imported Runtime Acceptance Fixtures
 
-These fixtures are the dedicated issue #862 slice of
+These fixtures cover the imported-runtime acceptance slice for issues #862
+and #901 in
 `scripts/ci/madaros_imported_runtime_acceptance_gate.sh`.
 
 - `issue_862_positive.sio` combines a named selective import, a caller-local
@@ -9,6 +10,11 @@ These fixtures are the dedicated issue #862 slice of
 - `issue_862_private_main.sio` imports a genuinely private function from its
   sibling leaf. Compilation must reject it with E175 and must not leave the
   requested ELF behind.
+- `issue_901_layout_capacity_main.sio` imports and field-accesses `Layout255`
+  from a sibling module declaring 256 layouts. The lowerer also carries its
+  `Knowledge` layout, so the final access exercises catalog entry 257. Its
+  executable must exit 0 and print `ISSUE_901_LAYOUT_CAPACITY_OK` followed by
+  one line feed.
 
 The same gate uses the existing issue #921 rational repro and the existing
 issue #901 probability stdlib test directly. It does not build a compiler.

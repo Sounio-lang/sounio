@@ -15,6 +15,11 @@ RUNTIME_TIMEOUT_SECONDS="${SOUNIO_MADAROS_IMPORTED_RUNTIME_EXEC_TIMEOUT_SECONDS:
 ISSUE_921_SOURCE="$ROOT_DIR/docs/handoff/repros/multimodule_thinlink_rc12_madaros.sio"
 ISSUE_901_SOURCE="$ROOT_DIR/tests/stdlib/prob/test_prob_stdlib.sio"
 FIXTURE_DIR="$ROOT_DIR/tests/compiler/madaros_imported_runtime_acceptance"
+ISSUE_901_ITEM_CHAIN_MAIN="$FIXTURE_DIR/issue_901_item_chain_main.sio"
+ISSUE_901_ITEM_CHAIN_LEAF="$FIXTURE_DIR/issue_901_item_chain_leaf.sio"
+ISSUE_901_ITEM_CHAIN_NESTED="$FIXTURE_DIR/issue_901_item_chain_nested.sio"
+ISSUE_901_LAYOUT_CAPACITY_MAIN="$FIXTURE_DIR/issue_901_layout_capacity_main.sio"
+ISSUE_901_LAYOUT_CAPACITY_LEAF="$FIXTURE_DIR/issue_901_layout_capacity_leaf.sio"
 ISSUE_862_POSITIVE="$FIXTURE_DIR/issue_862_positive.sio"
 ISSUE_862_PUBLIC_LEAF="$FIXTURE_DIR/issue_862_public_leaf.sio"
 ISSUE_862_PRIVATE_MAIN="$FIXTURE_DIR/issue_862_private_main.sio"
@@ -381,6 +386,11 @@ RAW_SHA256="$(sha256sum "$RAW_MADAROS" | awk '{print $1}')"
 
 require_sha256 "$ISSUE_921_SOURCE" 222e34365d37fee43d762c40db336211afdfb2d88ee7b840597fe3e1af3c7059 issue_921_exact_repro
 require_sha256 "$ISSUE_901_SOURCE" 986e8a570310367e7b035d69653ee89bc849adb2d56166f3f4270bad2e988f99 issue_901_prob_stdlib
+require_sha256 "$ISSUE_901_ITEM_CHAIN_MAIN" 84eb48da4d52acc53efd717b90809b51d56b1f77850e26e11e6d68b762ca272e issue_901_item_chain_main
+require_sha256 "$ISSUE_901_ITEM_CHAIN_LEAF" 9977a30ac80ea1fae87d9b9be44f4707ede8f2962646d7099bf2ec4dfdebc38e issue_901_item_chain_leaf
+require_sha256 "$ISSUE_901_ITEM_CHAIN_NESTED" 8dccd536f720dd292c823207cad0ee03f4e170f3dfc6a92c9bef2a37f932e22c issue_901_item_chain_nested
+require_sha256 "$ISSUE_901_LAYOUT_CAPACITY_MAIN" d6d54e468297434e7b3f4b26cbbfc4a2f8d0af2a6a1f249daee6580ef34bf234 issue_901_layout_capacity_main
+require_sha256 "$ISSUE_901_LAYOUT_CAPACITY_LEAF" f8aa765b7adb6c6366945c86c9a87d606c43891aa28ee8ea7a9f7ae135a55105 issue_901_layout_capacity_leaf
 require_sha256 "$ISSUE_862_POSITIVE" 2fe4b0bee43ef8b55f349dc17320733c967c53ac595c4a1e4beffbae8a8d2094 issue_862_positive
 require_sha256 "$ISSUE_862_PUBLIC_LEAF" 505b2f5255663bdefe49e4cfb94d97ccfb25a8acf1259d0835744ad389be9d19 issue_862_public_leaf
 require_sha256 "$ISSUE_862_PRIVATE_MAIN" f6e69122a94788f4db5a82ded8dd62138455b098678f59dab01901fd48baa8fa issue_862_private_main
@@ -425,6 +435,16 @@ run_build issue_921 "$ISSUE_921_SOURCE" "$WORK/issue_921.elf"
 assert_positive_build issue_921 "$CASE_RC" "$CASE_LOG" "$CASE_ELF" "$CASE_BUILD_CWD"
 run_exact_runtime issue_921 "$CASE_ELF" "$WORK/issue_921.expected" 11_LF
 
+printf '42\n' >"$WORK/issue_901_item_chain.expected"
+run_build issue_901_item_chain "$ISSUE_901_ITEM_CHAIN_MAIN" "$WORK/issue_901_item_chain.elf"
+assert_positive_build issue_901_item_chain "$CASE_RC" "$CASE_LOG" "$CASE_ELF" "$CASE_BUILD_CWD"
+run_exact_runtime issue_901_item_chain "$CASE_ELF" "$WORK/issue_901_item_chain.expected" 42_LF
+
+printf 'ISSUE_901_LAYOUT_CAPACITY_OK\n' >"$WORK/issue_901_layout_capacity.expected"
+run_build issue_901_layout_capacity "$ISSUE_901_LAYOUT_CAPACITY_MAIN" "$WORK/issue_901_layout_capacity.elf"
+assert_positive_build issue_901_layout_capacity "$CASE_RC" "$CASE_LOG" "$CASE_ELF" "$CASE_BUILD_CWD"
+run_exact_runtime issue_901_layout_capacity "$CASE_ELF" "$WORK/issue_901_layout_capacity.expected" LAYOUT_CAPACITY_257_LF
+
 printf 'PROB_STDLIB_OK\n' >"$WORK/issue_901.expected"
 run_build issue_901 "$ISSUE_901_SOURCE" "$WORK/issue_901.elf"
 assert_positive_build issue_901 "$CASE_RC" "$CASE_LOG" "$CASE_ELF" "$CASE_BUILD_CWD"
@@ -445,6 +465,6 @@ assert_private_rejection "$CASE_RC" "$CASE_LOG" "$CASE_ELF" "$CASE_BUILD_CWD"
 
 FINAL_RAW_SHA256="$(sha256sum "$RAW_MADAROS" | awk '{print $1}')"
 [[ "$FINAL_RAW_SHA256" == "$RAW_SHA256" ]] || fail final_receipt raw_compiler_changed_during_gate
-printf 'MADAROS_IMPORTED_RUNTIME_ACCEPTANCE_RECEIPT status=pass issues=921+901+862 raw_authority=explicit_sha256 raw_sha256=%s driver=full_ir_noncompact compact=disabled fallback=none issue_921=elf+exit0+11_LF issue_901=elf+exit0+PROB_STDLIB_OK_LF issue_901_functions=%s issue_901_code_bytes=%s issue_901_relocations=%s issue_862=elf+exit0+0.500000_LF issue_862_true_private=E175+elf_absent crashes=separately_classified\n' \
+printf 'MADAROS_IMPORTED_RUNTIME_ACCEPTANCE_RECEIPT status=pass issues=921+901+862 raw_authority=explicit_sha256 raw_sha256=%s driver=full_ir_noncompact compact=disabled fallback=none issue_921=elf+exit0+11_LF issue_901_item_chain=elf+exit0+42_LF issue_901_layout_capacity=elf+exit0+257_catalog_layouts issue_901=elf+exit0+PROB_STDLIB_OK_LF issue_901_functions=%s issue_901_code_bytes=%s issue_901_relocations=%s issue_862=elf+exit0+0.500000_LF issue_862_true_private=E175+elf_absent crashes=separately_classified\n' \
   "$RAW_SHA256" "$ISSUE_901_FUNCTIONS" "$ISSUE_901_CODE_BYTES" "$ISSUE_901_RELOCATIONS"
 printf 'MADAROS_IMPORTED_RUNTIME_ACCEPTANCE_PASS\n'

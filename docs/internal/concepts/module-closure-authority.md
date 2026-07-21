@@ -97,6 +97,29 @@ Integration-Target: origin/main
 Authoritative-Only-If: one source-fresh compiler passes both gates with context_state=resolved, runtime_state=pass, aggregate_witness_mode=check-only, checker_refinement=TyUnknown-to-TyFn, paths=inplace+by-value, private_fn_ref=E175x2, runtime_exit=42, and no fallback marker
 ```
 
+## Issue #901 Stable Item Ownership Lane
+
+```text
+Semantic-Lane-ID: modulegraph-issue901-stable-items
+Owner: Codex root compiler lane
+Concept-IDs: SOUNIO-MODULE-CLOSURE-AUTHORITY
+Intent-Preserved: every authored item in an imported module remains visible to closure discovery, explicit import authority, checker preparation, and canonical full-IR lowering
+Transformation: ModuleGraph publishes its ItemList handle from the parsed pinned Program before the legacy Program-array compatibility copy; later closure traversal reads the handle and does not replace it from the aggregate carrier
+Types-Changed: none
+Effects-Changed: none
+IR-Changed: none
+Claims-Introduced: the #901 item-chain witness proves that two exports after the first item and a nested import after that first export reach a native ELF through the full noncompact path
+Claims-Forbidden: persistent ModuleId, canonical import-binding serialization, complete ModuleGraph epic closure, generic aggregate transport, global fallback authorization, general large-graph capacity, or scientific validation of the imported library
+Assumptions: parsed Box-backed Program and ItemList storage remain valid for the duration of one compiler invocation
+Write-Set: self-hosted/compiler/module_frontend.sio, self-hosted/compiler/module_parse.sio, scripts/ci/madaros_imported_runtime_acceptance_gate.sh, tests/compiler/madaros_imported_runtime_acceptance/*
+Read-Set: checker module array compatibility path, lowerer ItemList-handle consumption, native full-IR driver
+Positive-Witness: madaros_imported_runtime_acceptance_gate.sh reports issue_901_item_chain=elf+exit0+42_LF and issue_901=elf+exit0+PROB_STDLIB_OK_LF with compact=disabled and fallback=none
+Negative-Witness: existing #862 private-import witness remains E175 with no ELF; missing or ambiguous imports remain fail-closed
+Acceptance-Gate: scripts/ci/madaros_imported_runtime_acceptance_gate.sh with one explicit source-fresh compiler SHA
+Integration-Target: origin/main
+Authoritative-Only-If: the source-fresh gate passes #921, #901 item-chain, real #901 prob stdlib, and #862 privacy without a compact or fallback marker
+```
+
 ## Current Boundary
 
 The `ModuleId` stored in `IrFunction.defining_module_id` is an index in the active

@@ -178,6 +178,182 @@ var MF_IMPORT_AUTHORITY_NODE_COUNT: i64 = 0
 var MF_IMPORT_AUTHORITY_PREPARED_COLLECTION_ID: i64 = 0
 var MF_IMPORT_AUTHORITY_COLLECTOR_ENABLED: bool = true
 
+struct ModuleFrontendImportList {
+    paths: [AstPath; 256],
+    count: i64,
+    overflow: bool,
+}
+
+fn module_frontend_clear_ast_path(out: &!AstPath) with Mut {
+    var i: i64 = 0
+    while i < 128 {
+        (*out).segments.head_buf[i as usize] = 0
+        i = i + 1
+    }
+    (*out).segments.head_len = 0
+    (*out).segments.tail = None
+    (*out).seg_count = 0
+}
+
+fn module_frontend_copy_string_list_into(
+    source: &StringList,
+    out: &!StringList,
+    remaining: i64,
+) -> bool with Mut, Alloc {
+    if remaining <= 0 || (*source).head_len <= 0 || (*source).head_len > 128 {
+        return false
+    }
+    var i: i64 = 0
+    while i < 128 {
+        (*out).head_buf[i as usize] = (*source).head_buf[i as usize]
+        i = i + 1
+    }
+    (*out).head_len = (*source).head_len
+    match (*source).tail {
+        None => {
+            (*out).tail = None
+            remaining == 1
+        }
+        Some(next) => {
+            if remaining <= 1 {
+                return false
+            }
+            var copied_tail = Box::new(StringList {
+                head_buf: [0; 128],
+                head_len: 0,
+                tail: None,
+            })
+            if !module_frontend_copy_string_list_into(
+                &(*next),
+                &!(*copied_tail),
+                remaining - 1,
+            ) {
+                return false
+            }
+            (*out).tail = Some(copied_tail)
+            true
+        }
+    }
+}
+
+fn module_frontend_copy_ast_path_into(
+    source: &AstPath,
+    out: &!AstPath,
+) -> bool with Mut, Alloc {
+    let count = (*source).seg_count
+    if count <= 0 || count > 256 {
+        return false
+    }
+    module_frontend_clear_ast_path(out)
+    if !module_frontend_copy_string_list_into(
+        &(*source).segments,
+        &!(*out).segments,
+        count,
+    ) {
+        module_frontend_clear_ast_path(out)
+        return false
+    }
+    (*out).seg_count = count
+    true
+}
+
+fn module_frontend_extract_imports_walk_ref_into(
+    list: &ItemList,
+    out: &!ModuleFrontendImportList,
+) with Mut, Panic, Div, Alloc {
+    if (*list).head.kind == ItemKind::ItemUse {
+        if (*out).count >= 256 {
+            (*out).overflow = true
+        } else {
+            let import_index = (*out).count
+            var import_path = Box::new(empty_path())
+            if module_frontend_copy_ast_path_into(
+                &(*list).head.use_path,
+                &!(*import_path),
+            ) {
+                (*out).paths[import_index] = *import_path
+                (*out).count = import_index + 1
+            } else {
+                (*out).overflow = true
+            }
+        }
+    }
+    match (*list).tail {
+        None => {}
+        Some(next) => module_frontend_extract_imports_walk_ref_into(&(*next), out)
+    }
+}
+
+fn module_frontend_extract_imports_from_items(
+    items: &Option<Box<ItemList>>,
+) -> ModuleFrontendImportList with Mut, Panic, Div, Alloc {
+    var imports = ModuleFrontendImportList {
+        paths: [empty_path(); 256],
+        count: 0,
+        overflow: false,
+    }
+    match *items {
+        None => {}
+        Some(list) => module_frontend_extract_imports_walk_ref_into(&(*list), &!imports)
+    }
+    imports
+}
+
+// The Program array remains a compatibility carrier for checker entrypoints.
+// ModuleGraph owns these pinned ItemList handles: closure discovery, export
+// authority, and lowering must observe one complete list per ModuleId.
+fn module_frontend_publish_program_item_handle(
+    module_id: i64,
+    program: &Program,
+) -> bool with Mut, Panic, Div, Alloc {
+    if module_id < 0 || module_id >= 256 {
+        return false
+    }
+    var item_handle = MF_PROGRAM_ITEM_PTRS[module_id as usize] as *mut LowerProgramItemsHandle
+    if item_handle as i64 == 0 {
+        item_handle = heap_alloc(32) as *mut LowerProgramItemsHandle
+        if item_handle as i64 == 0 {
+            return false
+        }
+        MF_PROGRAM_ITEM_PTRS[module_id as usize] = item_handle as i64
+    }
+    (*item_handle).items = (*program).items
+    true
+}
+
+fn module_frontend_program_item_handles_available(loaded: i64) -> bool with Mut, Panic, Div {
+    if loaded < 0 || loaded > 256 {
+        return false
+    }
+    var i: i64 = 0
+    while i < loaded {
+        if MF_PROGRAM_ITEM_PTRS[i as usize] == 0 {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn module_frontend_imports_from_program_item_handle(module_id: i64) -> ModuleFrontendImportList with Mut, Panic, Div, Alloc {
+    if module_id < 0 || module_id >= 256 {
+        return ModuleFrontendImportList {
+            paths: [empty_path(); 256],
+            count: 0,
+            overflow: true,
+        }
+    }
+    let item_handle = MF_PROGRAM_ITEM_PTRS[module_id as usize] as *mut LowerProgramItemsHandle
+    if item_handle as i64 == 0 {
+        return ModuleFrontendImportList {
+            paths: [empty_path(); 256],
+            count: 0,
+            overflow: true,
+        }
+    }
+    module_frontend_extract_imports_from_items(&(*item_handle).items)
+}
+
 // The bootstrap drops direct writes to large Expr/Stmt/Item locals. Stage
 // rewritten nodes behind pointers, matching the generic-specializer spine.
 struct ModuleFrontendAuthorityExprStage {
@@ -3089,8 +3265,12 @@ pub fn module_frontend_collect_ast_closure_programs_into(
         return false
     }
     let root_logical_path = use_path_ref_to_string(&(*root_program).module_path)
-    // Aggregate arrays are pointer tables in the current bootstrap ABI. Pin the
-    // Program in arena-backed storage before publishing its slot.
+    // Publish the parser-owned ItemList before the compatibility copy. The
+    // aggregate Program array may not retain a recursive tail under bootstrap.
+    if !module_frontend_publish_program_item_handle(0, &(*root_program)) {
+        (*out).saturated = true
+        return false
+    }
     (*programs)[0] = *root_program
     (*out).paths[0] = main_path
     (*out).logical_paths[0] = root_logical_path
@@ -3100,7 +3280,7 @@ pub fn module_frontend_collect_ast_closure_programs_into(
     while work_front < (*out).node_count {
         let caller_path = (*out).paths[work_front]
         let cur_dir = module_frontend_path_directory_slice(caller_path)
-        let imports = extract_imports_from_ast((*programs)[work_front])
+        let imports = module_frontend_imports_from_program_item_handle(work_front)
         if imports.overflow {
             (*out).saturated = true
         }
@@ -3169,10 +3349,17 @@ pub fn module_frontend_collect_ast_closure_programs_into(
                                 }
                             } else {
                                 dependency_id = candidate_dependency_id
-                                (*programs)[dependency_id] = *dependency_program
-                                (*out).paths[dependency_id] = dependency_path
-                                (*out).logical_paths[dependency_id] = dependency_logical_path
-                                (*out).node_count = dependency_id + 1
+                                if !module_frontend_publish_program_item_handle(
+                                    dependency_id,
+                                    &(*dependency_program),
+                                ) {
+                                    (*out).saturated = true
+                                } else {
+                                    (*programs)[dependency_id] = *dependency_program
+                                    (*out).paths[dependency_id] = dependency_path
+                                    (*out).logical_paths[dependency_id] = dependency_logical_path
+                                    (*out).node_count = dependency_id + 1
+                                }
                             }
                         }
                     }
@@ -3199,7 +3386,7 @@ pub fn module_frontend_collect_ast_closure_programs_into(
         (*out).unresolved_count == 0 &&
         (*out).ambiguity_count == 0
     if structurally_complete {
-        if !module_frontend_snapshot_program_item_handles(programs, (*out).node_count) {
+        if !module_frontend_program_item_handles_available((*out).node_count) {
             (*out).saturated = true
         } else {
             module_frontend_validate_import_surfaces(out, programs)
@@ -3270,7 +3457,7 @@ fn module_frontend_collected_snapshot_status(
             prior_node = prior_node + 1
         }
 
-        let imports = extract_imports_from_ast((*programs)[node_id])
+        let imports = module_frontend_imports_from_program_item_handle(node_id)
         if imports.overflow {
             return 5
         }
@@ -6270,6 +6457,20 @@ fn module_frontend_function_defining_module(
     IR_DEFINING_MODULE_UNKNOWN
 }
 
+fn module_frontend_name_ref_eq(a: &Name, b: &Name) -> bool with Mut, Panic, Div {
+    if (*a).len != (*b).len {
+        return false
+    }
+    var i: i64 = 0
+    while i < (*a).len {
+        if (*a).buf[i as usize] != (*b).buf[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
 fn module_frontend_binding_already_present(
     binding_ptrs: &![i64; 2048],
     count: i64,
@@ -6282,25 +6483,21 @@ fn module_frontend_binding_already_present(
     if candidate_qualifier_index < 0 || candidate_qualifier_index >= 2048 {
         return false
     }
-    let local_name_text = str_from_bytes(local_name.buf, local_name.len)
-    let export_name_text = str_from_bytes(export_name.buf, export_name.len)
     var i: i64 = 0
     while i < count {
         let binding = (*binding_ptrs)[i as usize] as *mut LowerExternBindingHandle
         if binding as i64 != 0 {
-            if (*binding).caller_module_id == caller_module_id &&
-               (*binding).defining_module_id == defining_module_id &&
-               str_eq(MF_EXTERN_BINDING_LOCAL_NAMES[i as usize], local_name_text) &&
-               str_eq(MF_EXTERN_BINDING_EXPORT_NAMES[i as usize], export_name_text) &&
-               str_eq(
-                   MF_EXTERN_BINDING_QUALIFIER_PATHS[i as usize],
-                   MF_EXTERN_BINDING_QUALIFIER_PATHS[candidate_qualifier_index as usize]
-               ) &&
-               str_eq(
-                   MF_EXTERN_BINDING_QUALIFIED_NAMES[i as usize],
-                   MF_EXTERN_BINDING_QUALIFIED_NAMES[candidate_qualifier_index as usize]
-               ) {
-                return true
+            // Preserve binding identity through simple nested checks. The
+            // bootstrap's chained aggregate/string predicate can collapse
+            // distinct exports after the first ItemList entry.
+            if (*binding).caller_module_id == caller_module_id {
+                if (*binding).defining_module_id == defining_module_id {
+                    if module_frontend_name_ref_eq(&(*binding).local_name, &local_name) {
+                        if module_frontend_name_ref_eq(&(*binding).export_name, &export_name) {
+                            return true
+                        }
+                    }
+                }
             }
         }
         i = i + 1
@@ -6329,6 +6526,16 @@ fn module_frontend_append_external_binding(
         export_name,
         count,
     ) {
+        if module_frontend_import_authority_trace_enabled() {
+            print("module_frontend_import_authority: phase=duplicate caller=")
+            print_int(caller_module_id)
+            print(" defining=")
+            print_int(defining_module_id)
+            print(" local=")
+            print(str_from_bytes(local_name.buf, local_name.len))
+            print(" export=")
+            println(str_from_bytes(export_name.buf, export_name.len))
+        }
         return count
     }
     var binding = (*binding_ptrs)[count as usize] as *mut LowerExternBindingHandle
@@ -6393,6 +6600,14 @@ fn module_frontend_collect_external_binding_name(
         name,
     )
     if import_anchor.len <= 0 {
+        if module_frontend_import_authority_trace_enabled() {
+            print("module_frontend_import_authority: phase=anchor_missing caller=")
+            print_int(self_index)
+            print(" defining=")
+            print_int(module_index)
+            print(" name=")
+            println(str_from_bytes(name.buf, name.len))
+        }
         return count
     }
     var qualifier_path = empty_path()
@@ -6413,6 +6628,14 @@ fn module_frontend_collect_external_binding_name(
         return -1
     }
     if !authorized {
+        if module_frontend_import_authority_trace_enabled() {
+            print("module_frontend_import_authority: phase=not_authorized caller=")
+            print_int(self_index)
+            print(" defining=")
+            print_int(module_index)
+            print(" name=")
+            println(str_from_bytes(name.buf, name.len))
+        }
         return count
     }
     module_frontend_append_external_binding(
@@ -6487,6 +6710,14 @@ fn module_frontend_collect_external_bindings(
                     Some(list) => {
                         let item = &(*list).head
                         if item.kind == ItemKind::ItemFn {
+                            if module_frontend_import_authority_trace_enabled() {
+                                print("module_frontend_import_authority: phase=scan caller=")
+                                print_int(self_index)
+                                print(" defining=")
+                                print_int(module_index)
+                                print(" name=")
+                                println(str_from_bytes(item.name.buf, item.name.len))
+                            }
                             count = module_frontend_collect_external_binding_name(
                                 closure,
                                 programs,
@@ -6624,7 +6855,11 @@ fn module_frontend_snapshot_program_item_handles(
             }
             MF_PROGRAM_ITEM_PTRS[i as usize] = item_handle as i64
         }
-        (*item_handle).items = (*programs)[i as usize].items
+        // This materialization is the #901 bootstrap boundary: the legacy
+        // aggregate carrier is read once into a local before its pinned
+        // ItemList is published to authority and lowering.
+        let program = (*programs)[i as usize]
+        (*item_handle).items = program.items
         i = i + 1
     }
     true
@@ -7435,6 +7670,13 @@ fn module_frontend_strip_import_authority_stubs(
         if count > 0 {
             let items = (*programs)[i as usize].items
             (*programs)[i as usize].items = module_frontend_drop_item_prefix(items, count)
+            let refreshed = module_frontend_publish_program_item_handle(
+                i,
+                &(*programs)[i as usize],
+            )
+            if !refreshed {
+                MF_IMPORT_AUTHORITY_ERROR_COUNT = MF_IMPORT_AUTHORITY_ERROR_COUNT + 1
+            }
             MF_IMPORT_AUTHORITY_STUB_COUNTS[i as usize] = 0
         }
         i = i + 1
@@ -7460,9 +7702,21 @@ fn module_frontend_prepare_import_authority(
         reset_i = reset_i + 1
     }
 
-    if !module_frontend_snapshot_program_item_handles(programs, loaded) {
-        module_frontend_report_import_authority_error((*file_paths)[0], "<snapshot>", "program_items_handle_alloc_failed")
-        return false
+    // Closure collection already materialized the authoritative ItemList handle
+    // for every module. Re-snapshotting here from the aggregate Program
+    // compatibility carrier can erase a recursive tail before export scanning.
+    // Fail closed when collection did not publish a required handle instead.
+    var handle_i: i64 = 0
+    while handle_i < loaded {
+        if MF_PROGRAM_ITEM_PTRS[handle_i as usize] == 0 {
+            module_frontend_report_import_authority_error(
+                (*file_paths)[handle_i as usize],
+                "<snapshot>",
+                "missing_program_items_handle",
+            )
+            return false
+        }
+        handle_i = handle_i + 1
     }
 
     var caller_module_id: i64 = 0
@@ -7485,6 +7739,7 @@ fn module_frontend_prepare_import_authority(
                 caller_module_id = loaded
             } else {
                 MF_IMPORT_AUTHORITY_BINDING_COUNT = MF_IMPORT_AUTHORITY_BINDING_COUNT + binding_count
+                let qualified_rewrites_before = MF_IMPORT_AUTHORITY_QUALIFIED_REWRITE_COUNT
                 let rewritten_items = module_frontend_authority_rewrite_item_list_opt(
                     (*caller_handle).items,
                     caller_module_id,
@@ -7494,7 +7749,16 @@ fn module_frontend_prepare_import_authority(
                     loaded,
                     binding_count,
                 )
-                (*programs)[caller_module_id as usize].items = rewritten_items
+                // Keep the canonical ItemList on its pinned handle. Assigning
+                // the rewritten recursive list through the legacy Program
+                // array can truncate its tail under the bootstrap aggregate
+                // ABI; that array remains checker compatibility only.
+                if MF_IMPORT_AUTHORITY_QUALIFIED_REWRITE_COUNT > qualified_rewrites_before {
+                    (*caller_handle).items = rewritten_items
+                    (*programs)[caller_module_id as usize].items = (*caller_handle).items
+                } else {
+                    (*programs)[caller_module_id as usize].items = rewritten_items
+                }
                 if MF_IMPORT_AUTHORITY_ERROR_COUNT == 0 {
                     let stub_count = module_frontend_prepend_used_checker_stubs(
                         programs,
@@ -7704,11 +7968,15 @@ fn module_frontend_lower_programs_array_direct_box(
         return module_frontend_lower_direct_box_error("no_modules_loaded")
     }
 
-    // ModuleGraph remains the owner of Program topology. Lowering snapshots
-    // only stable ItemList handles because repeated external projections from
-    // the large Program array are not reliable under the bootstrap ABI.
-    if !module_frontend_snapshot_program_item_handles(programs, loaded) {
-        return module_frontend_lower_direct_box_error("program_items_handle_alloc_failed")
+    // The collector already published the closure-owned ItemList handles.
+    // Lowering must consume that exact snapshot, never rebuild it from the
+    // Program compatibility array after authority preparation.
+    var handle_i: i64 = 0
+    while handle_i < loaded {
+        if MF_PROGRAM_ITEM_PTRS[handle_i as usize] == 0 {
+            return module_frontend_lower_direct_box_error("program_items_handle_missing")
+        }
+        handle_i = handle_i + 1
     }
 
     trace.last_stage = "lower_summary"
