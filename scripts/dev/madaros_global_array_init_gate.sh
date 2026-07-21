@@ -192,9 +192,9 @@ fn main() -> i64 with IO {
 }
 ' '10 20 30'
 
-# 12) Wave10 residual: non-foldable call (multi-stmt body) stays fail-closed zeros
-# (no partial record / left-shift of remaining const words).
-run_case "nonconst_failclosed" '
+# 12) Wave12: multi-stmt pure return chain folds (was Wave10 residual BSS zero).
+# Must never left-shift remaining const words to `20 30 0`.
+run_case "call_list_multistmt" '
 fn multi() -> i64 {
   let x = 10
   x
@@ -203,7 +203,41 @@ var A: [i64; 3] = [multi(), 20, 30]
 fn main() -> i64 with IO {
   print_int(A[0]); print(" "); print_int(A[1]); print(" "); print_int(A[2]); print("
 ")
-  // Fail-closed: multi-stmt pure body not folded → BSS zero (not shifted 20 30 0).
+  if A[0] != 10 { return 1 }
+  if A[1] != 20 { return 2 }
+  if A[2] != 30 { return 3 }
+  0
+}
+' '10 20 30'
+
+# 12b) Wave12: multi-stmt pure chain with dependent lets
+run_case "call_list_multistmt_chain" '
+fn multi() -> i64 {
+  let x = 10
+  let y = x + 5
+  y
+}
+var A: [i64; 3] = [multi(), 20, 30]
+fn main() -> i64 with IO {
+  print_int(A[0]); print(" "); print_int(A[1]); print(" "); print_int(A[2]); print("
+")
+  if A[0] != 15 { return 1 }
+  if A[1] != 20 { return 2 }
+  if A[2] != 30 { return 3 }
+  0
+}
+' '15 20 30'
+
+# 12c) Residual: effectful callee stays fail-closed zeros (no left-shift).
+run_case "nonconst_failclosed" '
+fn impure() -> i64 with IO {
+  10
+}
+var A: [i64; 3] = [impure(), 20, 30]
+fn main() -> i64 with IO {
+  print_int(A[0]); print(" "); print_int(A[1]); print(" "); print_int(A[2]); print("
+")
+  // Fail-closed: effects prevent fold → BSS zero (not shifted 20 30 0).
   if A[0] != 0 { return 1 }
   if A[1] != 0 { return 2 }
   if A[2] != 0 { return 3 }

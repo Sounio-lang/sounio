@@ -13,6 +13,38 @@ fn items_reverse_item_list_opt(items: Option<Box<ItemList>>) -> Option<Box<ItemL
     items_reverse_item_list_loop(items, None)
 }
 
+// Scratch env for pure-fn multi-stmt body fold (`let x = 10; x`).
+// Active only while items_maybe_record_pure_fn_const walks a body; never
+// published into GLOBAL_VAR_INIT (avoids local/global name collisions).
+var PURE_FN_LOCAL_N: i64 = 0
+var PURE_FN_LOCAL_H: [i64; 32] = [0; 32]
+var PURE_FN_LOCAL_V: [i64; 32] = [0; 32]
+
+fn pure_fn_local_reset() with Mut {
+    PURE_FN_LOCAL_N = 0
+}
+
+fn pure_fn_local_bind(name: Name, value: i64) with Mut, Div {
+    if PURE_FN_LOCAL_N < 32 {
+        PURE_FN_LOCAL_H[PURE_FN_LOCAL_N as usize] = ast_name_hash(name)
+        PURE_FN_LOCAL_V[PURE_FN_LOCAL_N as usize] = value
+        PURE_FN_LOCAL_N = PURE_FN_LOCAL_N + 1
+    }
+}
+
+// Most-recent local wins (shadowing). Returns (found, value).
+fn pure_fn_local_lookup(name: Name) -> (bool, i64) with Div {
+    let h = ast_name_hash(name)
+    var i = PURE_FN_LOCAL_N
+    while i > 0 {
+        i = i - 1
+        if PURE_FN_LOCAL_H[i as usize] == h {
+            return (true, PURE_FN_LOCAL_V[i as usize])
+        }
+    }
+    (false, 0)
+}
+
 // Const-fold a global-init expression to one i64 word (int value or f64 bits).
 // Returns (ok, word). Covers the Sounio negative idiom `0 - n` (no unary-minus
 // in the style guide) so element-list packing does not silently drop slots and
@@ -22,9 +54,11 @@ fn items_reverse_item_list_opt(items: Option<Box<ItemList>>) -> Option<Box<ItemL
 // previously recorded *scalar* global init (`var X: i64 = 7; [X, 20, 30]`).
 // Wave10: zero-arg pure function calls fold when the callee was recorded as a
 // pure const (`fn ten() -> i64 { 10 }; [ten(), 20, 30]` → real values, not
-// BSS zeros). Non-foldable residual (effects, params, multi-stmt bodies)
-// still returns ok=false — element-list recording is fail-closed (all slots
-// or none), not partial skip/shift.
+// BSS zeros).
+// Wave12: pure multi-stmt return chains (`let x = 10; x`) fold via the
+// pure-fn local env. Non-foldable residual (effects, params, mutation,
+// non-const) still returns ok=false — element-list recording is fail-closed
+// (all slots or none), not partial skip/shift.
 fn items_eval_global_init_word(e: &Expr) -> (bool, i64) with Div {
     if (*e).kind == ExprKind::ExprIntLit {
         return (true, (*e).int_val)
@@ -89,7 +123,12 @@ fn items_eval_global_init_word(e: &Expr) -> (bool, i64) with Div {
     // Scalar global already recorded earlier in the same compile unit.
     // Only count==1 (scalar / array-repeat fill word) is safe to re-use.
     // (Also pure zero-arg fns recorded by items_maybe_record_pure_fn_const.)
+    // Wave12: pure-fn locals shadow globals during multi-stmt body fold.
     if (*e).kind == ExprKind::ExprIdent {
+        let lp = pure_fn_local_lookup((*e).name)
+        if lp.0 {
+            return (true, lp.1)
+        }
         let c = ast_global_var_init_count((*e).name)
         if c == 1 {
             return (true, ast_global_var_init_nth((*e).name, 0))
@@ -185,10 +224,60 @@ fn items_eval_global_init_word(e: &Expr) -> (bool, i64) with Div {
     (false, 0)
 }
 
-// If `fn name() -> T { <const-expr> }` (zero params, no effects, single-stmt body),
-// record its folded word under `name` so later global element-list slots can call it
-// (`[ten(), 20, 30]`). Multi-stmt / effects / params stay unrecorded → residual
-// fail-closed zeros for any list that still contains non-foldable calls.
+// Const-eval a pure function body as a return-only chain:
+//   zero or more `let name = <const-expr>` binders, then a final `StmtExpr`
+//   (`<const-expr>` or `return <const-expr>`).
+// Locals bind into PURE_FN_LOCAL_*; caller resets the table.
+// Rejects mut (`var`/`=`), control flow, and non-foldable exprs → ok=false.
+fn items_eval_pure_stmt_list(list: &StmtList) -> (bool, i64) with Mut, Div {
+    match (*list).tail {
+        Some(rest) => {
+            // Non-final: must be immutable `let` with a foldable initializer.
+            if (*list).head.kind != StmtKind::StmtLet {
+                return (false, 0)
+            }
+            match (*list).head.expr {
+                Some(e) => {
+                    let pair = items_eval_global_init_word(&(*e))
+                    if !pair.0 {
+                        return (false, 0)
+                    }
+                    pure_fn_local_bind((*list).head.name, pair.1)
+                    items_eval_pure_stmt_list(&(*rest))
+                }
+                None => {
+                    (false, 0)
+                }
+            }
+        }
+        None => {
+            // Final statement: expression (incl. bare `return <const>`).
+            if (*list).head.kind != StmtKind::StmtExpr {
+                return (false, 0)
+            }
+            match (*list).head.expr {
+                Some(e) => {
+                    items_eval_global_init_word(&(*e))
+                }
+                None => {
+                    (false, 0)
+                }
+            }
+        }
+    }
+}
+
+// If `fn name() -> T { ... }` is zero-param, effect-free, and its body is a pure
+// const return chain, record the folded word under `name` so later global
+// element-list slots can call it (`[ten(), 20, 30]`, `[multi(), 20, 30]`).
+//
+// Accepted bodies (Wave10 single-stmt + Wave12 multi-stmt):
+//   { 10 }
+//   { return 10 }
+//   { let x = 10; x }
+//   { let x = 10; let y = x + 1; y }
+// Intermediate statements must be immutable `let`. Mutation / effects / params /
+// non-const remain residual fail-closed zeros (no left-shift of remaining words).
 fn items_maybe_record_pure_fn_const(
     name: Name,
     params: &Option<Box<ParamList>>,
@@ -213,25 +302,11 @@ fn items_maybe_record_pure_fn_const(
     }
     match (*body).stmts {
         Some(list) => {
-            // Single statement only — multi-stmt bodies are residual.
-            match (*list).tail {
-                Some(_) => {
-                    return
-                }
-                None => {
-                    if (*list).head.kind != StmtKind::StmtExpr {
-                        return
-                    }
-                    match (*list).head.expr {
-                        Some(e) => {
-                            let pair = items_eval_global_init_word(&(*e))
-                            if pair.0 {
-                                ast_record_global_var_init(name, pair.1)
-                            }
-                        }
-                        None => {}
-                    }
-                }
+            pure_fn_local_reset()
+            let pair = items_eval_pure_stmt_list(&(*list))
+            pure_fn_local_reset()
+            if pair.0 {
+                ast_record_global_var_init(name, pair.1)
             }
         }
         None => {}
@@ -245,9 +320,10 @@ fn items_maybe_record_pure_fn_const(
 //   - element-list `[a, b, c]` → one word per element, same name hash, source order
 //   - cast/ident of the above (wave9)
 //   - zero-arg pure calls of the above (wave10), when callee body was recorded
+//   - multi-stmt pure return chains (wave12): `let x = c; x` / nested pure lets
 // Element-list is fail-closed: every slot must const-fold or *none* are recorded.
 // (Wave8 partial skip shifted remaining words left — `[f(),20,30]` → `20 30 0`.)
-// Residual: effects/params/multi-stmt callees → BSS zero, no silent shift.
+// Residual: effects/params/mutation/non-const callees → BSS zero, no silent shift.
 fn items_record_global_int_init(name: Name, init: &Expr) with Mut, Div {
     if (*init).kind == ExprKind::ExprArrayLit {
         // Repeat form: left = fill value, right = count → single fill word
