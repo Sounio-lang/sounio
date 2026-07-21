@@ -310,22 +310,56 @@ fn lower_monolithic_public_probe_boundary(label: string) with IO {
 }
 
 // Sprint 116: Register Knowledge<f64> struct layout (value, variance, confidence)
-fn ir_register_knowledge_layout(table: StructLayoutTable) -> StructLayoutTable with Mut, Panic, Div {
+fn lower_struct_layout_find_idx_ref(table: &StructLayoutTable, type_name: Name) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < (*table).count {
+        let entry = struct_layout_table_entry_at_ref(table, i)
+        if ir_name_eq(entry.type_name, type_name) {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn lower_struct_layout_append_empty_mut(table: &!StructLayoutTable, type_name: Name) -> i64 with Mut, Panic, Div, Alloc {
+    var entry = empty_struct_layout_entry()
+    entry.type_name = type_name
+    if struct_layout_table_append_mut(table, entry) {
+        return (*table).count - 1
+    }
+    -1
+}
+
+fn lower_struct_layout_get_or_append_mut(table: &!StructLayoutTable, type_name: Name) -> i64 with Mut, Panic, Div, Alloc {
+    let existing = lower_struct_layout_find_idx_ref(&(*table), type_name)
+    if existing >= 0 {
+        return existing
+    }
+    lower_struct_layout_append_empty_mut(table, type_name)
+}
+
+// Sprint 116: Register Knowledge<f64> struct layout (value, variance, confidence)
+fn ir_register_knowledge_layout(table: StructLayoutTable) -> StructLayoutTable with Mut, Panic, Div, Alloc {
     var t = table
-    if t.count >= 256 {
+    if t.complete == 0 {
         return t
     }
-    let idx = t.count
+    if lower_struct_layout_find_idx_ref(&t, make_name("Knowledge")) >= 0 {
+        return t
+    }
     var fields: [StructFieldEntry; 64] = [empty_struct_field_entry(); 64]
-    fields[0] = StructFieldEntry { name: make_name("value"), index: 0, is_float: 0 }
-    fields[1] = StructFieldEntry { name: make_name("variance"), index: 1, is_float: 0 }
-    fields[2] = StructFieldEntry { name: make_name("confidence"), index: 2, is_float: 0 }
-    t.entries[idx as usize] = StructLayoutEntry {
+    fields[0] = StructFieldEntry { name: make_name("value"), index: 0, is_float: 0, value_type_name: ir_empty_name() }
+    fields[1] = StructFieldEntry { name: make_name("variance"), index: 1, is_float: 0, value_type_name: ir_empty_name() }
+    fields[2] = StructFieldEntry { name: make_name("confidence"), index: 2, is_float: 0, value_type_name: ir_empty_name() }
+    let entry = StructLayoutEntry {
         type_name: make_name("Knowledge"),
         fields: fields,
         field_count: 3,
     }
-    t.count = idx + 1
+    if !struct_layout_table_append_mut(&!t, entry) {
+        t.complete = 0
+    }
     t
 }
 
@@ -625,7 +659,7 @@ fn lowerer_seed_module_from_summary(lo_in: Lowerer, summary: &IrProgramSummary) 
     lo
 }
 
-fn lowerer_seed_metadata_from_summary(lo_in: Lowerer, summary: &IrProgramSummary) -> Lowerer with Mut, Panic, Div {
+fn lowerer_seed_metadata_from_summary(lo_in: Lowerer, summary: &IrProgramSummary) -> Lowerer with Mut, Panic, Div, Alloc {
     var lo = lo_in
     var enum_variants = *lo.enum_variants
     enum_variants.count = 0
@@ -637,22 +671,11 @@ fn lowerer_seed_metadata_from_summary(lo_in: Lowerer, summary: &IrProgramSummary
     enum_variants.count = vi
     lo.enum_variants = Box::new(enum_variants)
 
-    var struct_layouts = *lo.struct_layouts
-    struct_layouts.count = 0
-    var si: i64 = 0
-    while si < (*summary.struct_layouts).count && si < 256 {
-        var entry = empty_struct_layout_entry()
-        entry.type_name = (*summary.struct_layouts).entries[si as usize].type_name
-        entry.field_count = (*summary.struct_layouts).entries[si as usize].field_count
-        var fi: i64 = 0
-        while fi < entry.field_count && fi < 64 {
-            entry.fields[fi as usize] = (*summary.struct_layouts).entries[si as usize].fields[fi as usize]
-            fi = fi + 1
-        }
-        struct_layouts.entries[si as usize] = entry
-        si = si + 1
+    var struct_layouts = empty_struct_layout_table()
+    if !struct_layout_table_copy_into(&(*summary.struct_layouts), &!struct_layouts) {
+        lo.error_count = lo.error_count + 1
+        lo.had_error = true
     }
-    struct_layouts.count = si
     lo.struct_layouts = Box::new(struct_layouts)
 
     var global_types = empty_lower_global_type_table()
@@ -665,18 +688,50 @@ fn lowerer_seed_metadata_from_summary(lo_in: Lowerer, summary: &IrProgramSummary
     lo
 }
 
+// Residual ref path (prefer lowerer_new_from_program_summary_owned on multi-mod).
+// Wave10: densify the *live* summary module once — do not lowerer_new() an empty
+// IrModule then seed while summary still holds the first (empty+live concurrent).
+// Still one densify copy (ref cannot move); owned path reuses the Box with zero densify.
 fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEpistemicSection) -> Lowerer with Alloc, Mut, Panic, Div, IO {
-    var lo = lowerer_new()
-    (*lo.module).epistemic = (*epistemic)
+    var module_box = Box::new(*(*summary).module)
+    // Match seed/owned body path: rebuild string table during body lower.
+    (*module_box).string_count = 0
+    (*module_box).epistemic = (*epistemic)
+    let layouts_complete = (*(*summary).struct_layouts).complete
+    var lo = Lowerer {
+        module: module_box,
+        epistemic_contests: Box::new(empty_lower_epistemic_contest_index()),
+        current_fn: IR_INVALID_FN,
+        current_func: Box::new(ir_empty_function()),
+        current_func_loaded: false,
+        env: None,
+        locals: Box::new(empty_lower_local_stack()),
+        scope_depth: 0,
+        loop_labels: Box::new(empty_lower_loop_labels()),
+        loop_depth: 0,
+        error_count: if layouts_complete != 0 { 0 } else { 1 },
+        had_error: layouts_complete == 0,
+        enum_variants: Box::new(*(*summary).enum_variants),
+        struct_layouts: Box::new(*(*summary).struct_layouts),
+        global_types: Box::new(*(*summary).global_types),
+        array_elem_float_regs: [IR_INVALID_REG; 512],
+        array_elem_float_reg_count: 0,
+        variance_base_regs: [IR_INVALID_REG; 1024],
+        variance_value_regs: [IR_INVALID_REG; 1024],
+        variance_base_reg_count: 0,
+        debug_mode: false,
+        probe_mode: summary.probe_mode,
+        closure_caps: Box::new(empty_closure_cap_table()),
+        pending_closure_fn_id: -1,
+        allow_direct_capturing_closure_literal: false,
+        pending_variance_reg: -1,
+    }
     lo.epistemic_contests = lower_epistemic_contest_index_from_ref(epistemic)
     if lower_live_diag_enabled() {
-        print("CONTEST_IR_INDEX_BIND constructor=summary contest_count=")
+        print("CONTEST_IR_INDEX_BIND constructor=summary_densify contest_count=")
         print_int((*lo.epistemic_contests).contest_count)
         print("\n")
     }
-    lo = lowerer_seed_module_from_summary(lo, summary)
-    lo = lowerer_seed_metadata_from_summary(lo, summary)
-    lo.probe_mode = summary.probe_mode
     lo
 }
 
@@ -686,6 +741,7 @@ fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEp
 // Consume the owned summary and reuse its live Boxes. string_count is zeroed to
 // match seed behaviour (body lower rebuilds the string table).
 fn lowerer_new_from_program_summary_owned(summary: IrProgramSummary, epistemic: &IrEpistemicSection) -> Lowerer with Alloc, Mut, Panic, Div, IO {
+    let layouts_complete = (*summary.struct_layouts).complete
     var lo = Lowerer {
         module: summary.module,
         epistemic_contests: Box::new(empty_lower_epistemic_contest_index()),
@@ -697,8 +753,8 @@ fn lowerer_new_from_program_summary_owned(summary: IrProgramSummary, epistemic: 
         scope_depth: 0,
         loop_labels: Box::new(empty_lower_loop_labels()),
         loop_depth: 0,
-        error_count: 0,
-        had_error: false,
+        error_count: if layouts_complete != 0 { 0 } else { 1 },
+        had_error: layouts_complete == 0,
         enum_variants: summary.enum_variants,
         struct_layouts: summary.struct_layouts,
         global_types: summary.global_types,
@@ -1009,8 +1065,7 @@ fn lowerer_preseed_external_struct_items_mut(
                             // lean_single handling of &(*box).field through
                             // FieldDefList head). Build the layout entry directly.
                             var sl_box = (*lo).struct_layouts
-                            let pre_count = (*sl_box).count
-                            if pre_count < 256 {
+                            if lower_struct_layout_find_idx_ref(&(*sl_box), head_owned.name) < 0 {
                                 var entry = empty_struct_layout_entry()
                                 entry.type_name = head_owned.name
                                 var fc: i64 = 0
@@ -1029,6 +1084,7 @@ fn lowerer_preseed_external_struct_items_mut(
                                                 // the real class from the field type, matching
                                                 // ir_fast_summary_register_struct_fields_owned.
                                                 is_float: if lower_type_expr_is_f64(&(*flist).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*flist).head.ty) { 2 } else if lower_type_expr_is_integer(&(*flist).head.ty) { 3 } else { 0 },
+                                                value_type_name: lower_type_expr_named_name(&(*flist).head.ty),
                                             }
                                             fc = fc + 1
                                             fcur = (*flist).tail
@@ -1037,9 +1093,10 @@ fn lowerer_preseed_external_struct_items_mut(
                                     }
                                 }
                                 entry.field_count = fc
-                                (*sl_box).entries[pre_count as usize] = entry
-                                (*sl_box).count = pre_count + 1
-                                (*lo).struct_layouts = sl_box
+                                if !struct_layout_table_append_mut(&!(*sl_box), entry) {
+                                    (*lo).error_count = (*lo).error_count + 1
+                                    (*lo).had_error = true
+                                }
                             }
                         }
                         _ => {}
@@ -1083,23 +1140,14 @@ fn lowerer_register_struct_fields_direct_mut(
     fields: &Option<Box<FieldDefList>>
 ) with Mut, Panic, Div, Alloc {
     var sl_box = (*lo).struct_layouts
-    var layout_idx: i64 = -1
-    var si: i64 = 0
-    while si < (*sl_box).count {
-        if ir_name_eq((*sl_box).entries[si as usize].type_name, type_name) {
-            layout_idx = si
-        }
-        si = si + 1
-    }
+    var layout_idx = lower_struct_layout_find_idx_ref(&(*sl_box), type_name)
     if layout_idx < 0 {
-        let pre_count = (*sl_box).count
-        if pre_count >= 256 {
+        layout_idx = lower_struct_layout_append_empty_mut(&!(*sl_box), type_name)
+        if layout_idx < 0 {
             lo.error_count = lo.error_count + 1
             lo.had_error = true
             return
         }
-        layout_idx = pre_count
-        (*sl_box).count = pre_count + 1
     }
 
     var entry = empty_struct_layout_entry()
@@ -1119,6 +1167,7 @@ fn lowerer_register_struct_fields_direct_mut(
                     // FIRST-registered field entry — the one actually found by name lookup —
                     // without the i64 marker).
                     is_float: if lower_type_expr_is_f64(&(*flist).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*flist).head.ty) { 2 } else if lower_type_expr_is_integer(&(*flist).head.ty) { 3 } else { 0 },
+                    value_type_name: lower_type_expr_named_name(&(*flist).head.ty),
                 }
                 fc = fc + 1
                 fcur = &(*flist).tail
@@ -1127,7 +1176,10 @@ fn lowerer_register_struct_fields_direct_mut(
         }
     }
     entry.field_count = fc
-    (*sl_box).entries[layout_idx as usize] = entry
+    if !struct_layout_table_set_entry_at_mut(&!(*sl_box), layout_idx, entry) {
+        lo.error_count = lo.error_count + 1
+        lo.had_error = true
+    }
     (*lo).struct_layouts = sl_box
 }
 
@@ -1142,42 +1194,36 @@ fn lowerer_register_struct_fields_mut(
     while true {
         match *current {
             Some(list) => {
-                var layout_idx: i64 = -1
-                var si: i64 = 0
-                while si < (*(*lo).struct_layouts).count {
-                    if ir_name_eq((*(*lo).struct_layouts).entries[si as usize].type_name, type_name) {
-                        layout_idx = si
-                    }
-                    si = si + 1
-                }
+                var layout_table = (*lo).struct_layouts
+                var layout_idx = lower_struct_layout_find_idx_ref(&(*layout_table), type_name)
                 if layout_idx < 0 {
-                    if (*(*lo).struct_layouts).count < 256 {
-                        layout_idx = (*(*lo).struct_layouts).count
-                        (*(*lo).struct_layouts).entries[layout_idx as usize] = StructLayoutEntry {
-                            type_name: type_name,
-                            fields: [empty_struct_field_entry(); 64],
-                            field_count: 0,
-                        }
-                        (*(*lo).struct_layouts).count = layout_idx + 1
-                    } else {
+                    layout_idx = lower_struct_layout_append_empty_mut(&!(*layout_table), type_name)
+                    if layout_idx < 0 {
                         lo.error_count = lo.error_count + 1
                         lo.had_error = true
                         return
                     }
                 }
-                let fc = (*(*lo).struct_layouts).entries[layout_idx as usize].field_count
+                var layout_entry = struct_layout_table_entry_at_ref(&(*layout_table), layout_idx)
+                let fc = layout_entry.field_count
                 if fc < 64 {
-                    (*(*lo).struct_layouts).entries[layout_idx as usize].fields[fc as usize] = StructFieldEntry {
+                    layout_entry.fields[fc as usize] = StructFieldEntry {
                         name: (*list).head.name,
                         index: field_idx,
                         // println i64-segfault fix: see note in lowerer_register_struct_fields_direct_mut.
                         is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else if lower_type_expr_is_integer(&(*list).head.ty) { 3 } else { 0 },
+                        value_type_name: lower_type_expr_named_name(&(*list).head.ty),
                     }
-                    (*(*lo).struct_layouts).entries[layout_idx as usize].field_count = fc + 1
+                    layout_entry.field_count = fc + 1
+                    if !struct_layout_table_set_entry_at_mut(&!(*layout_table), layout_idx, layout_entry) {
+                        lo.error_count = lo.error_count + 1
+                        lo.had_error = true
+                    }
                 } else {
                     lo.error_count = lo.error_count + 1
                     lo.had_error = true
                 }
+                (*lo).struct_layouts = layout_table
                 current = &(*list).tail
                 field_idx = field_idx + 1
             }
@@ -1216,6 +1262,10 @@ fn lowerer_preseed_impl_method_summaries_mut(
     }
 }
 
+// BSS allocation size for a type expression. Packed globals (i8/u8/bool/char)
+// must report physical width 1 so `[i8; N]` reserves N bytes, not N*8.
+// (Wave8 fixed IndexGet/init *stride* via hyper_algebra_kind; wave9 closes the
+// residual over-alloc from always returning 8 for TypeNamed.)
 fn lower_typeexpr_byte_size(ty_opt: &Option<Box<TypeExpr>>) -> i64 with Div {
     match *ty_opt {
         Some(ty) => {
@@ -1229,6 +1279,27 @@ fn lower_typeexpr_byte_size(ty_opt: &Option<Box<TypeExpr>>) -> i64 with Div {
                         return inner_size * 1024
                     }
                     _ => { return 8 }
+                }
+            }
+            if (*ty).kind == TypeExprKind::TypeNamed {
+                let name = ir_path_first_name((*ty).path)
+                // i8 / u8
+                if name.len == 2 {
+                    let first = name.buf[0] as i64
+                    let second = name.buf[1] as i64
+                    if (first == 105 || first == 117) && second == 56 {
+                        return 1
+                    }
+                }
+                // bool / char
+                if name.len == 4 {
+                    let is_bool = name.buf[0] == 98 as i8 && name.buf[1] == 111 as i8
+                        && name.buf[2] == 111 as i8 && name.buf[3] == 108 as i8
+                    let is_char = name.buf[0] == 99 as i8 && name.buf[1] == 104 as i8
+                        && name.buf[2] == 97 as i8 && name.buf[3] == 114 as i8
+                    if is_bool || is_char {
+                        return 1
+                    }
                 }
             }
             return 8
@@ -1371,6 +1442,21 @@ fn lower_bss_elem_is_signed_byte(kind: i64) -> bool {
     kind == 17
 }
 
+// True when a BSS slot is an aggregate base (array), not a scalar value load.
+// Historically `bss_size > 8` was the only discriminator — fine when every
+// element reserved 8 bytes, but wave9 packs i8/u8 at physical width so
+// `[i8; 4]` has size 4 and would be mis-read as a scalar (base = first byte
+// value → IndexGet SEGV). Packed byte arrays set hyper_algebra_kind 1/17.
+fn lower_bss_slot_is_aggregate(bss_size: i64, hyper_kind: i64) -> bool {
+    if bss_size > 8 {
+        return true
+    }
+    if hyper_kind == 1 || hyper_kind == 17 {
+        return true
+    }
+    false
+}
+
 fn lower_typeexpr_bss_elem_size(ty_opt: &Option<Box<TypeExpr>>) -> i64 with Panic, Div {
     match *ty_opt {
         Some(ty) => {
@@ -1388,6 +1474,18 @@ fn lower_typeexpr_bss_elem_size(ty_opt: &Option<Box<TypeExpr>>) -> i64 with Pani
                             }
                             // 'u' '8' → unsigned packed byte (movzx on load)
                             if first == 117 && second == 56 {
+                                return 1
+                            }
+                        }
+                        // bool / char → packed unsigned byte (movzx); also marks
+                        // the slot as aggregate under lower_bss_slot_is_aggregate
+                        // even when N*1 ≤ 8 (wave9).
+                        if name.len == 4 {
+                            let is_bool = name.buf[0] == 98 as i8 && name.buf[1] == 111 as i8
+                                && name.buf[2] == 111 as i8 && name.buf[3] == 108 as i8
+                            let is_char = name.buf[0] == 99 as i8 && name.buf[1] == 104 as i8
+                                && name.buf[2] == 97 as i8 && name.buf[3] == 114 as i8
+                            if is_bool || is_char {
                                 return 1
                             }
                         }
@@ -1830,42 +1928,32 @@ fn ir_fast_summary_register_struct_fields_owned(
     match fields {
         Some(list) => {
             var table_value = table
-            var layout_idx: i64 = -1
-            var si: i64 = 0
-            while si < table_value.count {
-                if ir_name_eq(table_value.entries[si as usize].type_name, type_name) {
-                    layout_idx = si
-                }
-                si = si + 1
-            }
+            var layout_idx = lower_struct_layout_find_idx_ref(&table_value, type_name)
             if layout_idx < 0 {
-                if table_value.count < 256 {
-                    layout_idx = table_value.count
-                    table_value.entries[layout_idx as usize] = StructLayoutEntry {
-                        type_name: type_name,
-                        fields: [empty_struct_field_entry(); 64],
-                        field_count: 0,
-                    }
-                    table_value.count = layout_idx + 1
-                } else {
+                layout_idx = lower_struct_layout_append_empty_mut(&!table_value, type_name)
+                if layout_idx < 0 {
                     return table_value
                 }
             }
-            let fc = table_value.entries[layout_idx as usize].field_count
+            let fc = struct_layout_table_entry_at_ref(&table_value, layout_idx).field_count
             if fc < 64 {
                 // Two-level nested store `table.entries[i].fields[fc] = …` is dropped by
                 // the lean_single by-value-aggregate miscompile, so the field never lands
                 // and field-index resolution later falls back to a name hash (OOB access).
                 // Build in a local entry, then assign it back once (single level).
-                var lay_entry = table_value.entries[layout_idx as usize]
+                var lay_entry = struct_layout_table_entry_at_ref(&table_value, layout_idx)
                 lay_entry.fields[fc as usize] = StructFieldEntry {
                     name: (*list).head.name,
                     index: idx,
                     // println i64-segfault fix: see note in lowerer_register_struct_fields_direct_mut.
                     is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else if lower_type_expr_is_integer(&(*list).head.ty) { 3 } else { 0 },
+                    value_type_name: lower_type_expr_named_name(&(*list).head.ty),
                 }
                 lay_entry.field_count = fc + 1
-                table_value.entries[layout_idx as usize] = lay_entry
+                if !struct_layout_table_set_entry_at_mut(&!table_value, layout_idx, lay_entry) {
+                    table_value.complete = 0
+                    return table_value
+                }
             }
             ir_fast_summary_register_struct_fields_owned(table_value, type_name, (*list).tail, idx + 1)
         }
@@ -2146,8 +2234,8 @@ fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
             global_types: global_types,
             probe_mode: false,
         },
-        error_count: 0,
-        had_error: false,
+        error_count: if struct_layouts.complete != 0 { 0 } else { 1 },
+        had_error: struct_layouts.complete == 0,
     }
 }
 
@@ -3079,6 +3167,19 @@ fn lower_opt_type_named_name(opt: &Option<Box<TypeExpr>>) -> Name with Mut, Pani
     }
 }
 
+// Nominal result carrier of a declared field. Scalar and array fields keep an
+// empty name; references unwrap to their named carrier so `outer.inner.field`
+// can remain layout-directed instead of falling back to a global field name.
+fn lower_type_expr_named_name(te: &TypeExpr) -> Name with Mut, Panic, Div {
+    if (*te).kind == TypeExprKind::TypeNamed {
+        return ir_path_first_name((*te).path)
+    }
+    if (*te).kind == TypeExprKind::TypeReference || (*te).kind == TypeExprKind::TypeRefMut {
+        return lower_opt_type_named_name(&(*te).inner)
+    }
+    ir_empty_name()
+}
+
 // Struct-type name of a parameter, unwrapping `&T` / `&!T`. Used so a method body's
 // `self.method()` (and `param.method()`) can resolve the receiver's type — params were
 // previously bound with an empty struct_type, so `self.other()` hit the body-less-fn crash.
@@ -3094,6 +3195,13 @@ fn lower_param_struct_type_name(ty: &TypeExpr) -> Name with Mut, Panic, Div {
 
 fn lower_type_expr_is_ref_like(ty: &TypeExpr) -> bool {
     (*ty).kind == TypeExprKind::TypeReference || (*ty).kind == TypeExprKind::TypeRefMut
+}
+
+fn lower_opt_type_is_ref_like(opt: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
+    match *opt {
+        Some(ty) => lower_type_expr_is_ref_like(&(*ty)),
+        None => false,
+    }
 }
 
 // True when the first parameter is &T / &!T (typical method self-by-ref).
@@ -4865,6 +4973,25 @@ impl Lowerer {
         lo
     }
 
+    // Mark a local as holding a reference (&T / &!T / &[T;N]). IndexGet/Set then
+    // use label_id=1 (ref_array: load handle from the pointed-to slot). Required for
+    // `var p = &!arr; p[i] = v` — without this the local takes the GC-handle array
+    // path and writes into the wrong place (global BSS alias silently misses).
+    fn bind_local_ref(self, name: Name) -> Lowerer with Mut, Alloc, Panic, Div {
+        var lo = self
+        var stk = *lo.locals
+        var i = stk.count - 1
+        while i >= 0 {
+            if stk.depths[i as usize] <= lo.scope_depth && ir_name_eq(stk.names[i as usize], name) {
+                stk.is_ref[i as usize] = 1
+                lo.locals = Box::new(stk)
+                return lo
+            }
+            i = i - 1
+        }
+        lo
+    }
+
     fn lookup_local_scalar_kind(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
         var i = (*self.locals).count - 1
         while i >= 0 {
@@ -5512,47 +5639,72 @@ impl Lowerer {
         }
     }
 
-    // Phase 3.2: Proper struct field index lookup via layout table
-    fn field_idx_from_name(self, struct_name: Name, field_name: Name) -> i64 with Mut, Panic, Div {
-        // Search layout table for the struct
-        var si: i64 = 0
-        while si < (*self.struct_layouts).count {
-            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, struct_name) {
-                // Found struct — search its fields
-                var fi: i64 = 0
-                while fi < (*self.struct_layouts).entries[si as usize].field_count {
-                    if ir_name_eq((*self.struct_layouts).entries[si as usize].fields[fi as usize].name, field_name) {
-                        return (*self.struct_layouts).entries[si as usize].fields[fi as usize].index
-                    }
-                    fi = fi + 1
-                }
-                // Field not found in the named layout. Keep searching the rest
-                // of the table before falling back to the legacy hash path;
-                // partially seeded layouts must not collapse every miss to .0.
-                var sj: i64 = 0
-                while sj < (*self.struct_layouts).count {
-                    var fj: i64 = 0
-                    while fj < (*self.struct_layouts).entries[sj as usize].field_count {
-                        if ir_name_eq((*self.struct_layouts).entries[sj as usize].fields[fj as usize].name, field_name) {
-                            return (*self.struct_layouts).entries[sj as usize].fields[fj as usize].index
-                        }
-                        fj = fj + 1
-                    }
-                    sj = sj + 1
-                }
-                if field_name.len <= 0 {
-                    return 0
-                }
-                return (field_name.buf[0] as i64) % 64
+    fn field_entry_for_struct(self, type_name: Name, field_name: Name) -> StructFieldEntry with Mut, Panic, Div {
+        let layout_idx = lower_struct_layout_find_idx_ref(&(*self.struct_layouts), type_name)
+        if layout_idx < 0 {
+            return empty_struct_field_entry()
+        }
+        let entry = struct_layout_table_entry_at_ref(&(*self.struct_layouts), layout_idx)
+        var fi: i64 = 0
+        while fi < entry.field_count {
+            if ir_name_eq(entry.fields[fi as usize].name, field_name) {
+                return entry.fields[fi as usize]
             }
-            si = si + 1
+            fi = fi + 1
         }
-        // Struct not in layout table — fallback: use first byte hash (legacy compat)
-        if field_name.len <= 0 {
-            0
-        } else {
-            (field_name.buf[0] as i64) % 64
+        empty_struct_field_entry()
+    }
+
+    fn field_value_type_name_for_struct(self, type_name: Name, field_name: Name) -> Name with Mut, Panic, Div {
+        self.field_entry_for_struct(type_name, field_name).value_type_name
+    }
+
+    // Returns a nominal aggregate type only where lowering can prove it from
+    // local bindings, field declarations, a struct literal, or a declared
+    // call result. Unknown shapes remain explicitly untyped callers of the
+    // compatibility path; known shapes never borrow another layout by name.
+    fn expr_struct_type_name_ref(self, expr: &Expr) -> Name with Mut, Panic, Div, Alloc {
+        if (*expr).kind == ExprKind::ExprIdent {
+            return self.lookup_local_struct_type((*expr).name)
         }
+        if (*expr).kind == ExprKind::ExprCall {
+            return self.expr_call_return_struct_name_ref(expr)
+        }
+        if (*expr).kind == ExprKind::ExprStructLit {
+            return ir_path_first_name((*expr).path)
+        }
+        if (*expr).kind == ExprKind::ExprUnary && (*expr).un_op == UnaryOp::OpDeref {
+            match (*expr).left {
+                Some(base) => return self.expr_struct_type_name_ref(&(*base)),
+                None => return ir_empty_name(),
+            }
+        }
+        if (*expr).kind == ExprKind::ExprFieldAccess {
+            match (*expr).left {
+                Some(base) => {
+                    let base_type = self.expr_struct_type_name_ref(&(*base))
+                    if base_type.len > 0 {
+                        return self.field_value_type_name_for_struct(base_type, (*expr).name)
+                    }
+                }
+                _ => {}
+            }
+        }
+        ir_empty_name()
+    }
+
+    // Phase 3.2: proper field lookup for a known struct layout. A known
+    // layout miss is a lowering refusal, not permission to select a same-named
+    // field from another struct or to hash into an arbitrary offset.
+    fn field_idx_from_name(self, struct_name: Name, field_name: Name) -> i64 with Mut, Panic, Div {
+        if struct_name.len <= 0 {
+            return self.field_idx_from_name_simple(field_name)
+        }
+        let entry = self.field_entry_for_struct(struct_name, field_name)
+        if entry.name.len > 0 {
+            return entry.index
+        }
+        -1
     }
 
     // Phase 3.2: Lookup struct field index without needing struct name
@@ -5565,10 +5717,11 @@ impl Lowerer {
         }
         var si: i64 = 0
         while si < (*self.struct_layouts).count {
+            let entry = struct_layout_table_entry_at_ref(&(*self.struct_layouts), si)
             var fi: i64 = 0
-            while fi < (*self.struct_layouts).entries[si as usize].field_count {
-                if ir_name_eq((*self.struct_layouts).entries[si as usize].fields[fi as usize].name, n) {
-                    return (*self.struct_layouts).entries[si as usize].fields[fi as usize].index
+            while fi < entry.field_count {
+                if ir_name_eq(entry.fields[fi as usize].name, n) {
+                    return entry.fields[fi as usize].index
                 }
                 fi = fi + 1
             }
@@ -5588,11 +5741,12 @@ impl Lowerer {
         }
         var si: i64 = 0
         while si < (*self.struct_layouts).count {
-            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, struct_name) {
+            let entry = struct_layout_table_entry_at_ref(&(*self.struct_layouts), si)
+            if ir_name_eq(entry.type_name, struct_name) {
                 var fi: i64 = 0
-                while fi < (*self.struct_layouts).entries[si as usize].field_count {
-                    if ir_name_eq((*self.struct_layouts).entries[si as usize].fields[fi as usize].name, field_name) {
-                        return (*self.struct_layouts).entries[si as usize].fields[fi as usize].index
+                while fi < entry.field_count {
+                    if ir_name_eq(entry.fields[fi as usize].name, field_name) {
+                        return entry.fields[fi as usize].index
                     }
                     fi = fi + 1
                 }
@@ -5606,10 +5760,11 @@ impl Lowerer {
     fn field_is_float_by_name_simple(self, n: Name) -> bool with Mut, Panic, Div {
         var si: i64 = 0
         while si < (*self.struct_layouts).count {
+            let entry = struct_layout_table_entry_at_ref(&(*self.struct_layouts), si)
             var fi: i64 = 0
-            while fi < (*self.struct_layouts).entries[si as usize].field_count {
-                if ir_name_eq((*self.struct_layouts).entries[si as usize].fields[fi as usize].name, n) {
-                    return (*self.struct_layouts).entries[si as usize].fields[fi as usize].is_float == 1
+            while fi < entry.field_count {
+                if ir_name_eq(entry.fields[fi as usize].name, n) {
+                    return entry.fields[fi as usize].is_float == 1
                 }
                 fi = fi + 1
             }
@@ -5622,20 +5777,7 @@ impl Lowerer {
         if type_name.len <= 0 {
             return false
         }
-        var si: i64 = 0
-        while si < (*self.struct_layouts).count {
-            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
-                var fi: i64 = 0
-                while fi < (*self.struct_layouts).entries[si as usize].field_count {
-                    if ir_name_eq((*self.struct_layouts).entries[si as usize].fields[fi as usize].name, field_name) {
-                        return (*self.struct_layouts).entries[si as usize].fields[fi as usize].is_float == 1
-                    }
-                    fi = fi + 1
-                }
-            }
-            si = si + 1
-        }
-        false
+        self.field_entry_for_struct(type_name, field_name).is_float == 1
     }
 
     // println i64-segfault fix: field analogue of field_is_float_by_name_simple,
@@ -5643,10 +5785,11 @@ impl Lowerer {
     fn field_is_int_by_name_simple(self, n: Name) -> bool with Mut, Panic, Div {
         var si: i64 = 0
         while si < (*self.struct_layouts).count {
+            let entry = struct_layout_table_entry_at_ref(&(*self.struct_layouts), si)
             var fi: i64 = 0
-            while fi < (*self.struct_layouts).entries[si as usize].field_count {
-                if ir_name_eq((*self.struct_layouts).entries[si as usize].fields[fi as usize].name, n) {
-                    return (*self.struct_layouts).entries[si as usize].fields[fi as usize].is_float == 3
+            while fi < entry.field_count {
+                if ir_name_eq(entry.fields[fi as usize].name, n) {
+                    return entry.fields[fi as usize].is_float == 3
                 }
                 fi = fi + 1
             }
@@ -5660,36 +5803,14 @@ impl Lowerer {
         if type_name.len <= 0 {
             return false
         }
-        var si: i64 = 0
-        while si < (*self.struct_layouts).count {
-            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
-                var fi: i64 = 0
-                while fi < (*self.struct_layouts).entries[si as usize].field_count {
-                    if ir_name_eq((*self.struct_layouts).entries[si as usize].fields[fi as usize].name, field_name) {
-                        return (*self.struct_layouts).entries[si as usize].fields[fi as usize].is_float == 3
-                    }
-                    fi = fi + 1
-                }
-            }
-            si = si + 1
-        }
-        false
+        self.field_entry_for_struct(type_name, field_name).is_float == 3
     }
 
     // println i64-segfault fix: field analogue of field_is_float_for_base_ref.
     fn field_is_int_for_base_ref(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> bool with Mut, Panic, Div, Alloc {
         match *base_opt {
             Some(base_expr) => {
-                if (*base_expr).kind == ExprKind::ExprIdent {
-                    let type_name = self.lookup_local_struct_type((*base_expr).name)
-                    if self.field_is_int_for_struct(type_name, field_name) {
-                        return true
-                    }
-                }
-                if (*base_expr).kind == ExprKind::ExprUnary && (*base_expr).un_op == UnaryOp::OpDeref {
-                    return self.field_is_int_for_base_ref(&(*base_expr).left, field_name)
-                }
-                false
+                self.field_is_int_for_struct(self.expr_struct_type_name_ref(&(*base_expr)), field_name)
             }
             _ => false,
         }
@@ -5699,29 +5820,17 @@ impl Lowerer {
         if type_name.len <= 0 {
             return false
         }
-        var si: i64 = 0
-        while si < (*self.struct_layouts).count {
-            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
-                var fi: i64 = 0
-                while fi < (*self.struct_layouts).entries[si as usize].field_count {
-                    if ir_name_eq((*self.struct_layouts).entries[si as usize].fields[fi as usize].name, field_name) {
-                        return (*self.struct_layouts).entries[si as usize].fields[fi as usize].is_float == 2
-                    }
-                    fi = fi + 1
-                }
-            }
-            si = si + 1
-        }
-        false
+        self.field_entry_for_struct(type_name, field_name).is_float == 2
     }
 
     fn field_array_elem_is_float_by_name_simple(self, field_name: Name) -> bool with Mut, Panic, Div {
         var si: i64 = 0
         while si < (*self.struct_layouts).count {
+            let entry = struct_layout_table_entry_at_ref(&(*self.struct_layouts), si)
             var fi: i64 = 0
-            while fi < (*self.struct_layouts).entries[si as usize].field_count {
-                if ir_name_eq((*self.struct_layouts).entries[si as usize].fields[fi as usize].name, field_name) {
-                    if (*self.struct_layouts).entries[si as usize].fields[fi as usize].is_float == 2 {
+            while fi < entry.field_count {
+                if ir_name_eq(entry.fields[fi as usize].name, field_name) {
+                    if entry.fields[fi as usize].is_float == 2 {
                         return true
                     }
                 }
@@ -5735,16 +5844,7 @@ impl Lowerer {
     fn field_is_float_for_base_ref(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> bool with Mut, Panic, Div, Alloc {
         match *base_opt {
             Some(base_expr) => {
-                if (*base_expr).kind == ExprKind::ExprIdent {
-                    let type_name = self.lookup_local_struct_type((*base_expr).name)
-                    if self.field_is_float_for_struct(type_name, field_name) {
-                        return true
-                    }
-                }
-                if (*base_expr).kind == ExprKind::ExprUnary && (*base_expr).un_op == UnaryOp::OpDeref {
-                    return self.field_is_float_for_base_ref(&(*base_expr).left, field_name)
-                }
-                false
+                self.field_is_float_for_struct(self.expr_struct_type_name_ref(&(*base_expr)), field_name)
             }
             _ => false,
         }
@@ -5753,11 +5853,9 @@ impl Lowerer {
     fn field_idx_for_base_ref(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> i64 with Mut, Panic, Div, Alloc {
         match *base_opt {
             Some(base_expr) => {
-                if (*base_expr).kind == ExprKind::ExprIdent {
-                    let type_name = self.lookup_local_struct_type((*base_expr).name)
-                    if type_name.len > 0 {
-                        return self.field_idx_from_name(type_name, field_name)
-                    }
+                let type_name = self.expr_struct_type_name_ref(&(*base_expr))
+                if type_name.len > 0 {
+                    return self.field_idx_from_name(type_name, field_name)
                 }
                 if (*base_expr).kind == ExprKind::ExprUnary && (*base_expr).un_op == UnaryOp::OpDeref {
                     return self.field_idx_for_base_ref(&(*base_expr).left, field_name)
@@ -5771,12 +5869,9 @@ impl Lowerer {
     fn field_array_elem_is_float_for_base_ref(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> bool with Mut, Panic, Div, Alloc {
         match *base_opt {
             Some(owner_expr) => {
-                if (*owner_expr).kind == ExprKind::ExprIdent {
-                    let type_name = self.lookup_local_struct_type((*owner_expr).name)
-                    if self.field_array_elem_is_float_for_struct(type_name, field_name) {
-                        return true
-                    }
-                    return self.field_array_elem_is_float_by_name_simple(field_name)
+                let type_name = self.expr_struct_type_name_ref(&(*owner_expr))
+                if type_name.len > 0 {
+                    return self.field_array_elem_is_float_for_struct(type_name, field_name)
                 }
                 self.field_array_elem_is_float_by_name_simple(field_name)
             }
@@ -5800,10 +5895,15 @@ impl Lowerer {
             return 0
         }
         // Aggregate bases (arrays/structs) are not print scalars.
-        if self.module.functions[fn_id as usize].bss_size > 8 {
+        // Packed [i8;N]/[u8;N] can have bss_size ≤ 8 — use hyper kind too (#1353).
+        // Type-table array kinds (incl. [T;1]) are also non-scalar (#1350).
+        let gkind = lower_global_type_table_lookup(&(*self.global_types), fn_id)
+        if lower_bss_slot_is_aggregate(
+            self.module.functions[fn_id as usize].bss_size,
+            self.module.functions[fn_id as usize].hyper_algebra_kind
+        ) || lower_global_kind_is_array_base(gkind) {
             return 0
         }
-        let gkind = lower_global_type_table_lookup(&(*self.global_types), fn_id)
         if gkind == LOWER_GLOBAL_SCALAR_F64 {
             return 2
         }
@@ -6126,60 +6226,57 @@ impl Lowerer {
         if type_name.len <= 0 {
             return lo
         }
-        var si: i64 = 0
-        while si < (*lo.struct_layouts).count {
-            if ir_name_eq((*lo.struct_layouts).entries[si as usize].type_name, type_name) {
-                var current_existing = fields
-                while true {
-                    match *current_existing {
-                        Some(list_existing) => {
-                            let literal_float_kind = lower_struct_field_float_kind_ref(&(*list_existing).head.value)
-                            if literal_float_kind > 0 {
-                                var fi_existing: i64 = 0
-                                while fi_existing < (*lo.struct_layouts).entries[si as usize].field_count {
-                                    if ir_name_eq((*lo.struct_layouts).entries[si as usize].fields[fi_existing as usize].name, (*list_existing).head.name) {
-                                        (*lo.struct_layouts).entries[si as usize].fields[fi_existing as usize].is_float = literal_float_kind
-                                    }
-                                    fi_existing = fi_existing + 1
+        var layout_table = lo.struct_layouts
+        var layout_idx = lower_struct_layout_find_idx_ref(&(*layout_table), type_name)
+        if layout_idx >= 0 {
+            var existing_entry = struct_layout_table_entry_at_ref(&(*layout_table), layout_idx)
+            var current_existing = fields
+            while true {
+                match *current_existing {
+                    Some(list_existing) => {
+                        let literal_float_kind = lower_struct_field_float_kind_ref(&(*list_existing).head.value)
+                        if literal_float_kind > 0 {
+                            var fi_existing: i64 = 0
+                            while fi_existing < existing_entry.field_count {
+                                if ir_name_eq(existing_entry.fields[fi_existing as usize].name, (*list_existing).head.name) {
+                                    existing_entry.fields[fi_existing as usize].is_float = literal_float_kind
                                 }
+                                fi_existing = fi_existing + 1
                             }
-                            current_existing = &(*list_existing).tail
                         }
-                        _ => break
+                        current_existing = &(*list_existing).tail
                     }
+                    _ => break
                 }
-                return lo
             }
-            si = si + 1
+            if !struct_layout_table_set_entry_at_mut(&!(*layout_table), layout_idx, existing_entry) {
+                return lo.report_error()
+            }
+            lo.struct_layouts = layout_table
+            return lo
         }
-        if (*lo.struct_layouts).count >= 256 {
+        layout_idx = lower_struct_layout_append_empty_mut(&!(*layout_table), type_name)
+        if layout_idx < 0 {
             return lo.report_error()
         }
-        let layout_idx = (*lo.struct_layouts).count
-        (*lo.struct_layouts).entries[layout_idx as usize] = StructLayoutEntry {
-            type_name: type_name,
-            fields: [empty_struct_field_entry(); 64],
-            field_count: 0,
-        }
-        (*lo.struct_layouts).count = layout_idx + 1
 
         var current = fields
         var field_idx: i64 = 0
+        var new_entry = struct_layout_table_entry_at_ref(&(*layout_table), layout_idx)
         while true {
             match *current {
                 Some(list) => {
-                    let fc = (*lo.struct_layouts).entries[layout_idx as usize].field_count
+                    let fc = new_entry.field_count
                     if fc < 64 {
                         // Single-level idiom: the two-level `(*box).entries[i].fields[fc] = …`
                         // store is dropped by the lean_single by-value-aggregate miscompile.
-                        var lay_entry = (*lo.struct_layouts).entries[layout_idx as usize]
-                        lay_entry.fields[fc as usize] = StructFieldEntry {
+                        new_entry.fields[fc as usize] = StructFieldEntry {
                             name: (*list).head.name,
                             index: field_idx,
                             is_float: lower_struct_field_float_kind_ref(&(*list).head.value),
+                            value_type_name: ir_empty_name(),
                         }
-                        lay_entry.field_count = fc + 1
-                        (*lo.struct_layouts).entries[layout_idx as usize] = lay_entry
+                        new_entry.field_count = fc + 1
                     }
                     current = &(*list).tail
                     field_idx = field_idx + 1
@@ -6187,6 +6284,10 @@ impl Lowerer {
                 _ => break
             }
         }
+        if !struct_layout_table_set_entry_at_mut(&!(*layout_table), layout_idx, new_entry) {
+            return lo.report_error()
+        }
+        lo.struct_layouts = layout_table
         lo
     }
 
@@ -6243,38 +6344,25 @@ impl Lowerer {
             print_int(idx)
             print("\n")
         }
-        var layout_idx: i64 = -1
-        var si: i64 = 0
-        while si < (*lo.struct_layouts).count {
-            if ir_name_eq((*lo.struct_layouts).entries[si as usize].type_name, type_name) {
-                layout_idx = si
-            }
-            si = si + 1
-        }
+        var layout_table = lo.struct_layouts
+        var layout_idx = lower_struct_layout_find_idx_ref(&(*layout_table), type_name)
         if layout_idx < 0 {
-            if (*lo.struct_layouts).count < 256 {
-                layout_idx = (*lo.struct_layouts).count
-                (*lo.struct_layouts).entries[layout_idx as usize] = StructLayoutEntry {
-                    type_name: type_name,
-                    fields: [empty_struct_field_entry(); 64],
-                    field_count: 0,
-                }
-                (*lo.struct_layouts).count = (*lo.struct_layouts).count + 1
-            } else {
+            layout_idx = lower_struct_layout_append_empty_mut(&!(*layout_table), type_name)
+            if layout_idx < 0 {
                 return lo.report_error()
             }
         }
         var current = fields
         var field_idx = idx
+        var layout_entry = struct_layout_table_entry_at_ref(&(*layout_table), layout_idx)
         while true {
             match *current {
                 Some(list) => {
-                    let fc = (*lo.struct_layouts).entries[layout_idx as usize].field_count
+                    let fc = layout_entry.field_count
                     if fc < 64 {
                         // Single-level idiom: the two-level `(*box).entries[i].fields[fc] = …`
                         // store is dropped by the lean_single by-value-aggregate miscompile.
-                        var lay_entry = (*lo.struct_layouts).entries[layout_idx as usize]
-                        lay_entry.fields[fc as usize] = StructFieldEntry {
+                        layout_entry.fields[fc as usize] = StructFieldEntry {
                             name: (*list).head.name,
                             index: field_idx,
                             // println i64-segfault fix: reuse the `is_float` numeric-kind slot
@@ -6282,9 +6370,9 @@ impl Lowerer {
                             // f64-array). Existing consumers only test `== 1` / `== 2`, so this
                             // is inert for them; field_is_int_* below tests `== 3`.
                             is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else if lower_type_expr_is_integer(&(*list).head.ty) { 3 } else { 0 },
+                            value_type_name: lower_type_expr_named_name(&(*list).head.ty),
                         }
-                        lay_entry.field_count = fc + 1
-                        (*lo.struct_layouts).entries[layout_idx as usize] = lay_entry
+                        layout_entry.field_count = fc + 1
                     }
                     current = &(*list).tail
                     field_idx = field_idx + 1
@@ -6292,11 +6380,15 @@ impl Lowerer {
                 _ => break
             }
         }
+        if !struct_layout_table_set_entry_at_mut(&!(*layout_table), layout_idx, layout_entry) {
+            return lo.report_error()
+        }
+        lo.struct_layouts = layout_table
         if lower_ordered_diag_enabled() {
             print("lower_ordered: struct_fields_done type=")
             print(str_from_bytes(type_name.buf, type_name.len))
             print(" field_count=")
-            print_int((*lo.struct_layouts).entries[layout_idx as usize].field_count)
+            print_int(layout_entry.field_count)
             print("\n")
         }
         lo
@@ -7795,6 +7887,26 @@ impl Lowerer {
             _ => {}
         }
         lo = lo.bind_local(s.name, bind_reg, is_mut)
+        // Ref-typed locals (annotated &T / &!T, or RHS is & / &! expr) must be marked
+        // is_ref so IndexGet/Set use the ref_array path. Params already get this from
+        // their type; let/var bindings previously did not — so `var p = &!GG; p[i]=v`
+        // wrote through the GC-handle path and missed BSS (Defect B alias form).
+        var bind_as_ref = lower_opt_type_is_ref_like(&s.ty)
+        if !bind_as_ref {
+            match s.expr {
+                Some(rhs_ref) => {
+                    if (*rhs_ref).kind == ExprKind::ExprUnary {
+                        if (*rhs_ref).un_op == UnaryOp::OpRef || (*rhs_ref).un_op == UnaryOp::OpRefMut {
+                            bind_as_ref = true
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if bind_as_ref {
+            lo = lo.bind_local_ref(s.name)
+        }
         if fixed_array_len >= 0 {
             lo = lo.bind_local_fixed_array_len(s.name, fixed_array_len)
         }
@@ -9858,8 +9970,24 @@ impl Lowerer {
         let lo1 = pair_b.0
         let base = pair_b.1
         let fidx = lo1.field_idx_for_base_ref(&e.left, e.name)
-        let field_is_float = lo1.field_is_float_for_base_ref(&e.left, e.name) || lo1.field_is_float_by_name_simple(e.name)
-        let field_array_elem_is_float = lo1.field_array_elem_is_float_for_base_ref(&e.left, e.name)
+        let base_type = match e.left {
+            Some(base_expr) => lo1.expr_struct_type_name_ref(&(*base_expr)),
+            _ => ir_empty_name(),
+        }
+        let field_is_float = if base_type.len > 0 {
+            lo1.field_is_float_for_struct(base_type, e.name)
+        } else {
+            lo1.field_is_float_by_name_simple(e.name)
+        }
+        let field_array_elem_is_float = if base_type.len > 0 {
+            lo1.field_array_elem_is_float_for_struct(base_type, e.name)
+        } else {
+            lo1.field_array_elem_is_float_by_name_simple(e.name)
+        }
+        if fidx < 0 {
+            let lo_error = lo1.report_error()
+            return (lo_error, 0)
+        }
         let base_is_ref = match e.left {
             Some(base_expr_ref) => {
                 if (*base_expr_ref).kind == ExprKind::ExprIdent {
@@ -9891,18 +10019,19 @@ impl Lowerer {
             print("\n")
             var di: i64 = 0
             while di < (*lo1.struct_layouts).count {
+                let dump_entry = struct_layout_table_entry_at_ref(&(*lo1.struct_layouts), di)
                 print("  [")
                 print_int(di)
                 print("] ")
-                print(str_from_bytes((*lo1.struct_layouts).entries[di as usize].type_name.buf, (*lo1.struct_layouts).entries[di as usize].type_name.len))
+                print(str_from_bytes(dump_entry.type_name.buf, dump_entry.type_name.len))
                 print(" fc=")
-                print_int((*lo1.struct_layouts).entries[di as usize].field_count)
+                print_int(dump_entry.field_count)
                 var dj: i64 = 0
-                while dj < (*lo1.struct_layouts).entries[di as usize].field_count {
+                while dj < dump_entry.field_count {
                     print(" ")
-                    print(str_from_bytes((*lo1.struct_layouts).entries[di as usize].fields[dj as usize].name.buf, (*lo1.struct_layouts).entries[di as usize].fields[dj as usize].name.len))
+                    print(str_from_bytes(dump_entry.fields[dj as usize].name.buf, dump_entry.fields[dj as usize].name.len))
                     print(":")
-                    print_int((*lo1.struct_layouts).entries[di as usize].fields[dj as usize].index)
+                    print_int(dump_entry.fields[dj as usize].index)
                     dj = dj + 1
                 }
                 print("\n")
@@ -10070,6 +10199,62 @@ impl Lowerer {
     }
 
     fn lower_unary_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        // BSS aggregate &GG / &!GG: native-v2 OpRef is LEA of a stack slot, and
+        // ref_array_* then does load[slot] → resolve_handle → +object_header.
+        // Stash (bss_addr - header) in the slot so the +header step lands on the
+        // true BSS base (direct GG[i] stays on raw IndexGet without header).
+        // Without this, &!GG LEAs a slot holding the plain BSS address; the
+        // callee writes at BSS+header and GG[i] still reads the untouched base.
+        if e.un_op == UnaryOp::OpRef || e.un_op == UnaryOp::OpRefMut {
+            match e.left {
+                Some(operand) => {
+                    if (*operand).kind == ExprKind::ExprIdent {
+                        var bss_off: i64 = -1
+                        var is_agg = false
+                        if self.lookup_local_is_global((*operand).name) {
+                            let gsize = self.lookup_local_global_bss_size((*operand).name)
+                            var hyper_kind: i64 = 8
+                            var local_g_kind: i64 = 0
+                            let gfn = lowerer_lookup_fn_id_by_name_ref(&self, (*operand).name)
+                            if gfn >= 0 && gfn < self.module.fn_count {
+                                hyper_kind = self.module.functions[gfn as usize].hyper_algebra_kind
+                                local_g_kind = lower_global_type_table_lookup(&(*self.global_types), gfn)
+                            }
+                            if lower_bss_slot_is_aggregate(gsize, hyper_kind) || lower_global_kind_is_array_base(local_g_kind) {
+                                bss_off = self.lookup_local_global_bss_offset((*operand).name)
+                                is_agg = true
+                            }
+                        } else {
+                            let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, (*operand).name)
+                            if fn_id >= 0 && fn_id < self.module.fn_count {
+                                if self.module.functions[fn_id as usize].compile_strategy == IR_STRATEGY_BSS_GLOBAL {
+                                    let gsize = self.module.functions[fn_id as usize].bss_size
+                                    let hyper_kind = self.module.functions[fn_id as usize].hyper_algebra_kind
+                                    let global_elem_kind = lower_global_type_table_lookup(&(*self.global_types), fn_id)
+                                    if lower_bss_slot_is_aggregate(gsize, hyper_kind) || lower_global_kind_is_array_base(global_elem_kind) {
+                                        bss_off = self.module.functions[fn_id as usize].param_count
+                                        is_agg = true
+                                    }
+                                }
+                            }
+                        }
+                        if is_agg && bss_off >= 0 {
+                            let adjusted = BSS_BASE_LINUX + bss_off - IR_NATIVE_V2_OBJECT_HEADER_SIZE
+                            let pair_s = self.fresh_reg()
+                            var lo = pair_s.0
+                            let src = pair_s.1
+                            lo = lo.emit(ir_load_imm(src, adjusted))
+                            let pair_d = lo.fresh_reg()
+                            lo = pair_d.0
+                            let dst = pair_d.1
+                            lo = lo.emit(ir_unaryop(dst, e.un_op, src))
+                            return (lo, dst)
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
         // `*b` where b is a Box reads field 0 of the heap object (where lower_box_new
         // stored the value via ir_field_set(ptr, 0, val)), so route Box deref to
         // IrFieldGet(0) — codegen resolves the handle. IrUnaryOp(OpDeref) stays a raw
@@ -10721,16 +10906,20 @@ impl Lowerer {
                 // global metadata for stores. A callee can update the backing
                 // slot, so reads must reload it instead of using that stale
                 // per-function snapshot. Aggregate bindings remain base pointers.
-                // 1-element arrays have bss_size <= 8 but are still aggregates —
-                // reloading the init word would make IndexGet treat it as a ptr.
-                if self.lookup_local_is_global(e.name) && self.lookup_local_global_bss_size(e.name) <= 8 {
-                    let local_g_fn = lowerer_lookup_fn_id_by_name_ref(&self, e.name)
-                    let local_g_kind = if local_g_fn >= 0 {
-                        lower_global_type_table_lookup(&(*self.global_types), local_g_fn)
-                    } else {
-                        0
+                // Scalar reload only for true scalars. Aggregates keep base pointers:
+                // - multi-word BSS (gsize > 8)
+                // - packed [i8;N]/[u8;N]/bool/char (hyper 1/17) even when size ≤ 8 (#1353)
+                // - any fixed array incl. [T; 1] via type-table LOWER_GLOBAL_ARRAY (#1350)
+                if self.lookup_local_is_global(e.name) {
+                    let gsize = self.lookup_local_global_bss_size(e.name)
+                    var hyper_kind: i64 = 8
+                    var local_g_kind: i64 = 0
+                    let gfn = lowerer_lookup_fn_id_by_name_ref(&self, e.name)
+                    if gfn >= 0 && gfn < self.module.fn_count {
+                        hyper_kind = self.module.functions[gfn as usize].hyper_algebra_kind
+                        local_g_kind = lower_global_type_table_lookup(&(*self.global_types), gfn)
                     }
-                    if !lower_global_kind_is_array_base(local_g_kind) {
+                    if !lower_bss_slot_is_aggregate(gsize, hyper_kind) && !lower_global_kind_is_array_base(local_g_kind) {
                         let bss_off = self.lookup_local_global_bss_offset(e.name)
                         let pair = self.fresh_reg()
                         let lo = pair.0
@@ -10750,16 +10939,16 @@ impl Lowerer {
                     if fn_strategy == IR_STRATEGY_BSS_GLOBAL {
                         let bss_off = self.module.functions[fn_id as usize].param_count
                         let gsize = self.module.functions[fn_id as usize].bss_size
+                        let hyper_kind = self.module.functions[fn_id as usize].hyper_algebra_kind
                         let global_elem_kind = lower_global_type_table_lookup(&(*self.global_types), fn_id)
                         let ref_pair = self.fresh_reg()
                         let lo2 = ref_pair.0
                         let ref_reg = ref_pair.1
                         var lo3 = lo2
-                        // Multi-word BSS (gsize > 8) and *all* array globals —
-                        // including `[T; 1]` where gsize == elem_size <= 8 —
-                        // must materialize the BSS base address for IndexGet.
-                        // Scalar path loads the stored word (correct for `var G: i64`).
-                        if gsize > 8 || lower_global_kind_is_array_base(global_elem_kind) {
+                        // Aggregate → absolute BSS base pointer. Scalar → load value.
+                        // Multi-word, packed byte arrays (#1353), and any array kind
+                        // including `[T; 1]` (#1350) must not take the scalar load path.
+                        if lower_bss_slot_is_aggregate(gsize, hyper_kind) || lower_global_kind_is_array_base(global_elem_kind) {
                             lo3 = lo2.emit(ir_load_imm(ref_reg, BSS_BASE_LINUX + bss_off))
                         } else {
                             lo3 = lo2.emit(ir_load_global(ref_reg, bss_off, e.name))

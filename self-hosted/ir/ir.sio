@@ -2176,6 +2176,10 @@ pub struct StructFieldEntry {
     name: Name,
     index: i64,
     is_float: i64,
+    // Named field type retained for typed chained access during lowering.
+    // Empty means scalar, array, or a literal-only layout with no declared
+    // nominal result type available.
+    value_type_name: Name,
 }
 
 // Layout for one struct type: name + ordered fields
@@ -2185,14 +2189,33 @@ pub struct StructLayoutEntry {
     field_count: i64,
 }
 
-// Table of all known struct layouts (populated during lowering)
-pub struct StructLayoutTable {
-    entries: [StructLayoutEntry; 256],
+// A layout entry is deliberately large: each carries up to 64 named fields.
+// Keep the catalog paged so an imported closure does not turn every summary
+// transport into a multi-megabyte by-value copy or silently lose entry 257.
+pub struct StructLayoutPage {
+    entries: [StructLayoutEntry; 8],
     count: i64,
+    next: Option<Box<StructLayoutPage>>,
+}
+
+// The first page remains inline for the common small-program path. Additional
+// pages are allocated only when an imported closure actually needs them.
+pub struct StructLayoutTable {
+    entries: [StructLayoutEntry; 8],
+    count: i64,
+    overflow_pages: Option<Box<StructLayoutPage>>,
+    // i64 rather than bool because summary carriers cross by value.
+    // Zero is a sticky, fail-closed catalog transport error.
+    complete: i64,
 }
 
 fn empty_struct_field_entry() -> StructFieldEntry {
-    StructFieldEntry { name: ir_empty_name(), index: 0, is_float: 0 }
+    StructFieldEntry {
+        name: ir_empty_name(),
+        index: 0,
+        is_float: 0,
+        value_type_name: ir_empty_name(),
+    }
 }
 
 fn empty_struct_layout_entry() -> StructLayoutEntry {
@@ -2203,11 +2226,164 @@ fn empty_struct_layout_entry() -> StructLayoutEntry {
     }
 }
 
+fn empty_struct_layout_page() -> StructLayoutPage {
+    StructLayoutPage {
+        entries: [empty_struct_layout_entry(); 8],
+        count: 0,
+        next: None,
+    }
+}
+
 fn empty_struct_layout_table() -> StructLayoutTable {
     StructLayoutTable {
-        entries: [empty_struct_layout_entry(); 256],
+        entries: [empty_struct_layout_entry(); 8],
         count: 0,
+        overflow_pages: None,
+        complete: 1,
     }
+}
+
+fn struct_layout_page_entry_at_ref(
+    page: &StructLayoutPage,
+    index: i64,
+) -> StructLayoutEntry with Mut, Panic, Div {
+    if index < 0 {
+        return empty_struct_layout_entry()
+    }
+    if index < (*page).count && index < 8 {
+        return (*page).entries[index as usize]
+    }
+    match (*page).next {
+        Some(next) => struct_layout_page_entry_at_ref(&(*next), index - (*page).count),
+        None => empty_struct_layout_entry(),
+    }
+}
+
+fn struct_layout_page_set_entry_at_mut(
+    page: &!StructLayoutPage,
+    index: i64,
+    entry: StructLayoutEntry,
+) -> bool with Mut, Panic, Div {
+    if index < 0 {
+        return false
+    }
+    if index < (*page).count && index < 8 {
+        (*page).entries[index as usize] = entry
+        return true
+    }
+    match (*page).next {
+        Some(next) => struct_layout_page_set_entry_at_mut(&!(*next), index - (*page).count, entry),
+        None => false,
+    }
+}
+
+fn struct_layout_page_append_mut(
+    page: &!StructLayoutPage,
+    entry: StructLayoutEntry,
+) -> bool with Mut, Panic, Div, Alloc {
+    if (*page).count < 8 {
+        let index = (*page).count
+        (*page).entries[index as usize] = entry
+        (*page).count = index + 1
+        return true
+    }
+    match (*page).next {
+        Some(next) => struct_layout_page_append_mut(&!(*next), entry),
+        None => {
+            var next = Box::new(empty_struct_layout_page())
+            (*next).entries[0] = entry
+            (*next).count = 1
+            (*page).next = Some(next)
+            true
+        }
+    }
+}
+
+// These accessors are the only supported transport boundary for the layout
+// catalog. They keep all callers exact across the inline/page boundary.
+pub fn struct_layout_table_entry_at_ref(
+    table: &StructLayoutTable,
+    index: i64,
+) -> StructLayoutEntry with Mut, Panic, Div {
+    if index < 0 || index >= (*table).count {
+        return empty_struct_layout_entry()
+    }
+    if index < 8 {
+        return (*table).entries[index as usize]
+    }
+    match (*table).overflow_pages {
+        Some(first) => struct_layout_page_entry_at_ref(&(*first), index - 8),
+        None => empty_struct_layout_entry(),
+    }
+}
+
+pub fn struct_layout_table_set_entry_at_mut(
+    table: &!StructLayoutTable,
+    index: i64,
+    entry: StructLayoutEntry,
+) -> bool with Mut, Panic, Div {
+    if index < 0 || index >= (*table).count {
+        return false
+    }
+    if index < 8 {
+        (*table).entries[index as usize] = entry
+        return true
+    }
+    match (*table).overflow_pages {
+        Some(first) => struct_layout_page_set_entry_at_mut(&!(*first), index - 8, entry),
+        None => {
+            (*table).complete = 0
+            false
+        }
+    }
+}
+
+pub fn struct_layout_table_append_mut(
+    table: &!StructLayoutTable,
+    entry: StructLayoutEntry,
+) -> bool with Mut, Panic, Div, Alloc {
+    if (*table).count < 8 {
+        let index = (*table).count
+        (*table).entries[index as usize] = entry
+        (*table).count = index + 1
+        return true
+    }
+
+    var appended = false
+    match (*table).overflow_pages {
+        Some(first) => appended = struct_layout_page_append_mut(&!(*first), entry),
+        None => {
+            var first = Box::new(empty_struct_layout_page())
+            (*first).entries[0] = entry
+            (*first).count = 1
+            (*table).overflow_pages = Some(first)
+            appended = true
+        }
+    }
+    if appended {
+        (*table).count = (*table).count + 1
+    } else {
+        (*table).complete = 0
+    }
+    appended
+}
+
+pub fn struct_layout_table_copy_into(
+    source: &StructLayoutTable,
+    out: &!StructLayoutTable,
+) -> bool with Mut, Panic, Div, Alloc {
+    if (*source).complete == 0 {
+        (*out).complete = 0
+        return false
+    }
+    var i: i64 = 0
+    while i < (*source).count {
+        if !struct_layout_table_append_mut(out, struct_layout_table_entry_at_ref(source, i)) {
+            return false
+        }
+        i = i + 1
+    }
+    true
 }
 
 // ============================================================================
@@ -3769,6 +3945,11 @@ pub fn ir_empty_module() -> IrModule {
 pub let BSS_MAX_GLOBALS: i64 = 2047
 pub let BSS_BASE_LINUX: i64 = 0x10000000
 pub let IR_STRATEGY_BSS_GLOBAL: i64 = 99
+// Must match native::gc::native_v2_object_header_size(). BSS aggregate & / &!
+// refs stash (bss_addr - header) so native-v2 ref_array_* (load slot; resolve
+// raw ptr; add header to index) lands on the true BSS base. Direct GG[i] still
+// uses raw IndexGet (label_id=2) at BSS_BASE+off with no header.
+pub let IR_NATIVE_V2_OBJECT_HEADER_SIZE: i64 = 32
 
 pub fn bss_name_hash(n: Name) -> i64 with Div {
     var hash: i64 = 5381

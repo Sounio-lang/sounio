@@ -105,8 +105,10 @@ cat >"$ROOT/artifacts/epistemic/knowledge_madaros_e2e_receipt.v1.json" <<EOF
   "claims_not_made": [
     "language_knowledge_t_generic_import",
     "full_root2_census_closed",
-    "gum_k95_f64_i64_cast_fixed",
     "numpy_sklearn"
+  ],
+  "closed_elsewhere": [
+    "gum_k95_f64_i64_cast_fixed (Wave10: scripts/epistemic_trust_gate.sh Section A; #1252+#983)"
   ]
 }
 EOF

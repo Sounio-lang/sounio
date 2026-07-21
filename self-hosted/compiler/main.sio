@@ -645,11 +645,11 @@ fn run_probe_ir_opt_strategy(args: ArgList, flag_index: i64) with IO, Mut, Panic
     if ir_result.ok && parse_errors == 0 {
         println("probe_ir_opt_strategy: ok")
         print("probe_ir_opt_strategy: functions=")
-        print_int(ir_result.module.fn_count)
+        print_int((*ir_result.module).fn_count)
         print("\n")
         var fi: i64 = 0
-        while fi < ir_result.module.fn_count {
-            let func = ir_result.module.functions[fi as usize]
+        while fi < (*ir_result.module).fn_count {
+            let func = (*ir_result.module).functions[fi as usize]
             print("probe_ir_opt_strategy: fn=")
             compiler_manifest_print_name(func.name)
             print(" strategy=")
@@ -1568,7 +1568,8 @@ fn compiler_preflight_ir_load(path: string) -> CompilerIrLoadResult with IO, Mut
         return compiler_ir_load_result_error(preflight_errors)
     }
 
-    return compiler_ir_load_result_ok(ir_result.module)
+    // Densify into CompilerIrLoadResult (still stack IrModule) at the preflight boundary.
+    return compiler_ir_load_result_ok(*ir_result.module)
 }
 
 fn compiler_ir_buffers_equal(buf_a: [i8; 131072], len_a: i64, buf_b: [i8; 131072], len_b: i64) -> bool with Mut {
@@ -2282,7 +2283,7 @@ fn run_emit_obj_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, A
     if !ir_result.ok {
         panic("emit-obj: frontend failed")
     }
-    let obj = compile_to_obj(&ir_result.module)
+    let obj = compile_to_obj(&(*ir_result.module))
     let ok = io_write_elf_to_file(output_path, obj)
     if ok {
         println("emit-obj: " + output_path + " (" + int_to_string(obj.len) + " bytes)")
@@ -2296,7 +2297,7 @@ fn run_emit_so_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Al
     let output_path = compiler_mode_output_path(args, "output.so")
     let ir_result = load_multimodule_ir(source_path)
     if !ir_result.ok { panic("emit-so: frontend failed") }
-    let so = compile_to_shared(&ir_result.module)
+    let so = compile_to_shared(&(*ir_result.module))
     let ok = io_write_elf_to_file(output_path, so)
     if ok { println("emit-so: " + output_path + " (" + int_to_string(so.len) + " bytes)"); return }
     panic("emit-so: write failed")
@@ -3138,8 +3139,8 @@ fn run_native_v2_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Pani
         panic("native-v2-compile failed: visibility preflight")
     }
     // The boxed compile-to-file route is SRET-safe for both imported and
-    // single-module programs. Returning MultiModuleIrResult by value embeds a
-    // full IrModule and crashes larger sources before the backend is reached.
+    // single-module programs. MultiModuleIrResult.module is now Box<IrModule>
+    // (no densify at the legacy load API); prefer this file route for large IR.
     let optimize = compiler_mode_has_flag(args, "-O") || compiler_mode_has_flag(args, "--optimize")
     let rc = module_frontend_compile_imported_to_file(source_path, out_path, optimize)
     if rc != 0 {
@@ -5248,16 +5249,16 @@ fn compile(opts: CompilerOptions) -> CompileResult with IO, Mut, Panic, Div, All
                 pi = pi + 1
             }
             let profile = sprof_parse(prof_buf, prof_size)
-            sprof_apply_promotion(&!ir_result.module, &profile)
+            sprof_apply_promotion(&! (*ir_result.module), &profile)
 
             // Sprint 48: log promotion decisions
             var li: i64 = 0
-            while li < ir_result.module.fn_count {
-                let lcount = sprof_lookup(&profile, &ir_result.module.functions[li as usize].name)
+            while li < (*ir_result.module).fn_count {
+                let lcount = sprof_lookup(&profile, &(*ir_result.module).functions[li as usize].name)
                 let ltarget = sprof_promotion_target(lcount)
                 if ltarget >= 0 {
                     print("[sprof] ")
-                    compiler_manifest_print_name(ir_result.module.functions[li as usize].name)
+                    compiler_manifest_print_name((*ir_result.module).functions[li as usize].name)
                     println(": count " + int_to_string(lcount) + " -> strategy " + ir_strategy_name(ltarget))
                 }
                 li = li + 1
@@ -5269,48 +5270,50 @@ fn compile(opts: CompilerOptions) -> CompileResult with IO, Mut, Panic, Div, All
     }
 
     // Sprint 49: Apply inlining pass when -O is set
+    // By-value opt passes densify temporarily; re-box to keep MultiModuleIrResult boxed.
     if opts.optimize {
-        let pre_inline_count = ir_result.module.fn_count
-        ir_result.module = inl_run_pass(ir_result.module)
+        let pre_inline_count = (*ir_result.module).fn_count
+        ir_result.module = Box::new(inl_run_pass(*ir_result.module))
         println("[inline] pass complete: " + int_to_string(pre_inline_count) + " functions processed")
     }
 
     // Sprint 50: Profile-guided function layout
     if has_valid_profile {
-        let layout_result = layout_sort_by_profile(ir_result.module, &loaded_profile)
-        ir_result.module = layout_result.module
+        let layout_result = layout_sort_by_profile(*ir_result.module, &loaded_profile)
+        ir_result.module = Box::new(layout_result.module)
         if layout_result.reordered {
-            println("[layout] reordered " + int_to_string(ir_result.module.fn_count) + " functions (" + int_to_string(layout_result.hot_count) + " hot, " + int_to_string(layout_result.cold_count) + " cold)")
+            println("[layout] reordered " + int_to_string((*ir_result.module).fn_count) + " functions (" + int_to_string(layout_result.hot_count) + " hot, " + int_to_string(layout_result.cold_count) + " cold)")
         }
     }
 
     // Sprint 51: const_fold + DCE cleanup after inlining
     if opts.optimize {
-        let pre_opt_count = ir_result.module.fn_count
-        ir_result.module = opt_cleanup_module(ir_result.module)
+        let pre_opt_count = (*ir_result.module).fn_count
+        ir_result.module = Box::new(opt_cleanup_module(*ir_result.module))
         println("[opt] const_prop + dce applied to " + int_to_string(pre_opt_count) + " functions")
-        let loop_result = lopt_optimize_module(ir_result.module)
-        ir_result.module = loop_result.module
+        let loop_result = lopt_optimize_module(*ir_result.module)
+        ir_result.module = Box::new(loop_result.module)
         if loop_result.functions_changed > 0 {
             println("[loop] hoisted " + int_to_string(loop_result.invariants_hoisted) +
                     " invariants across " + int_to_string(loop_result.functions_changed) + " functions")
         }
-        ir_result.module = opt_cleanup_module(ir_result.module)
+        ir_result.module = Box::new(opt_cleanup_module(*ir_result.module))
     }
 
     // Sprint 54: Tail call optimization
     if opts.optimize {
-        let tco_result = tco_run_pass(ir_result.module)
-        ir_result.module = tco_result.0
+        let tco_result = tco_run_pass(*ir_result.module)
+        ir_result.module = Box::new(tco_result.0)
         let tco_ctx = tco_result.1
         if tco_ctx.stats.transformed > 0 {
             println("[tco] " + int_to_string(tco_ctx.stats.transformed) + " tail call(s) converted to loops")
         }
     }
 
+    // compile_multimodule_native_with_ir still takes IrModule by value.
     let exit_code = compile_multimodule_native_with_ir(
         opts.input_file,
-        ir_result.module,
+        *ir_result.module,
         opts.output_file,
         opts.target,
         "auto",
@@ -5335,7 +5338,7 @@ fn compile(opts: CompilerOptions) -> CompileResult with IO, Mut, Panic, Div, All
         errors = compile_push_ir_failure(errors, ir_result.error_msg)
     } else {
         let target_spec = native_resolve_target(opts.target, "auto", false)
-        let native_result = compile_native(&ir_result.module, target_spec)
+        let native_result = compile_native(&(*ir_result.module), target_spec)
         if !native_result.ok {
             errors = compile_errors_push_lines(errors, "error: ", native_result.error_msg)
         }
@@ -9038,7 +9041,7 @@ fn run_probe_machine_ir(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div
     let ir_result = load_multimodule_ir_probe_summary(source_path)
     let parse_errors = parser_last_error_count()
     if ir_result.ok && parse_errors == 0 {
-        let mir = native_v2_build_machine_module(&ir_result.module, true)
+        let mir = native_v2_build_machine_module(&(*ir_result.module), true)
         print("[machine-ir] fn_count=")
         print_int(mir.fn_count)
         print(" ir_instrs=")
@@ -12095,10 +12098,10 @@ fn compiler_main_test_emit_print_f64_produces_code() -> bool with Mut, Panic, Di
 }
 
 // T404: Knowledge<f64> layout registration has 3 fields
-fn compiler_main_test_knowledge_layout_registered() -> bool with Mut, Panic, Div {
+fn compiler_main_test_knowledge_layout_registered() -> bool with Mut, Panic, Div, Alloc {
     let table = ir_register_knowledge_layout(empty_struct_layout_table())
     if table.count != 1 { return false }
-    let entry = table.entries[0]
+    let entry = struct_layout_table_entry_at_ref(&table, 0)
     if !ir_name_eq(entry.type_name, make_name("Knowledge")) { return false }
     if entry.field_count != 3 { return false }
     if !ir_name_eq(entry.fields[0].name, make_name("value")) { return false }
@@ -12111,16 +12114,17 @@ fn compiler_main_test_knowledge_layout_registered() -> bool with Mut, Panic, Div
 }
 
 // T405: Knowledge field index lookup resolves value=0, variance=1, confidence=2
-fn compiler_main_test_knowledge_field_idx_lookup() -> bool with Mut, Panic, Div {
+fn compiler_main_test_knowledge_field_idx_lookup() -> bool with Mut, Panic, Div, Alloc {
     let table = ir_register_knowledge_layout(empty_struct_layout_table())
     // Scan for "value" field
     var found_value: i64 = -1
     var si: i64 = 0
     while si < table.count {
+        let entry = struct_layout_table_entry_at_ref(&table, si)
         var fi: i64 = 0
-        while fi < table.entries[si].field_count {
-            if ir_name_eq(table.entries[si].fields[fi].name, make_name("value")) {
-                found_value = table.entries[si].fields[fi].index
+        while fi < entry.field_count {
+            if ir_name_eq(entry.fields[fi].name, make_name("value")) {
+                found_value = entry.fields[fi].index
             }
             fi = fi + 1
         }
@@ -12131,10 +12135,11 @@ fn compiler_main_test_knowledge_field_idx_lookup() -> bool with Mut, Panic, Div 
     var found_var: i64 = -1
     si = 0
     while si < table.count {
+        let entry = struct_layout_table_entry_at_ref(&table, si)
         var fi2: i64 = 0
-        while fi2 < table.entries[si].field_count {
-            if ir_name_eq(table.entries[si].fields[fi2].name, make_name("variance")) {
-                found_var = table.entries[si].fields[fi2].index
+        while fi2 < entry.field_count {
+            if ir_name_eq(entry.fields[fi2].name, make_name("variance")) {
+                found_var = entry.fields[fi2].index
             }
             fi2 = fi2 + 1
         }
@@ -12145,10 +12150,11 @@ fn compiler_main_test_knowledge_field_idx_lookup() -> bool with Mut, Panic, Div 
     var found_conf: i64 = -1
     si = 0
     while si < table.count {
+        let entry = struct_layout_table_entry_at_ref(&table, si)
         var fi3: i64 = 0
-        while fi3 < table.entries[si].field_count {
-            if ir_name_eq(table.entries[si].fields[fi3].name, make_name("confidence")) {
-                found_conf = table.entries[si].fields[fi3].index
+        while fi3 < entry.field_count {
+            if ir_name_eq(entry.fields[fi3].name, make_name("confidence")) {
+                found_conf = entry.fields[fi3].index
             }
             fi3 = fi3 + 1
         }
@@ -12988,9 +12994,9 @@ fn compiler_main_test_gum_mul_full_chain() -> bool with Mut, Div, Panic {
 }
 
 // T468: Knowledge layout field count = 3 (value, variance, confidence)
-fn compiler_main_test_knowledge_layout_fields_3() -> bool with Mut, Panic, Div {
+fn compiler_main_test_knowledge_layout_fields_3() -> bool with Mut, Panic, Div, Alloc {
     let table = ir_register_knowledge_layout(empty_struct_layout_table())
-    table.count == 1 && table.entries[0 as usize].field_count == 3
+    table.count == 1 && struct_layout_table_entry_at_ref(&table, 0).field_count == 3
 }
 
 // T469: GUM sub full chain — field_get + OpAdd (not OpSub) + alloc + field_set

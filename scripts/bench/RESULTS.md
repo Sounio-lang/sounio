@@ -109,6 +109,22 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 | **batch-10 (20 verbs)** — sum_sq/cube, count_zero, sum_pos/neg, peak/trough_ratio, normalize_mean, row_number(+rev), cumcount_neg/nonzero, range_over_std, cumcount_above_mean, cumsum_centered_sq, cosine/euclid/manhattan/chebyshev/cross_mean | | | | **all win** | dense one/two-pass reductions + 2-col distances vs pandas per-group lambdas |
 | **batch-11 (10 verbs, set 3)** — num_increases/decreases, total_variation, mean_abs_change, autocorr1, is_running_max/min, max_drawdown, max_runup, count_ge_mean | | | | **all win** | dense change/running-extreme/autocorr passes vs pandas per-group lambdas/apply |
 | **batch-12 (10 verbs, set 4)** — count_le_mean, count/frac_within_1std, count_outlier_2std, cummax/cummin_pct, sum_recip, cumsum_recip, cumsum_sign, cumcount_ge_prev | | | | **all win** | dense threshold/reciprocal/running passes vs pandas per-group lambdas |
+| **batch-13 (10 verbs, set 5)** — net_over_gross, sum_pos_frac, mean_pos/neg, count_changes, max_abs_dev, sum_sq_dev, cumsum_dev_abs, cumcount_le_prev, cumcount_positive_frac | | | | **all win** | dense sign/deviation/running passes vs pandas per-group lambdas — completes the +50 push (~130 grouped verbs total) |
+| **curated (10 verbs)** — weighted_skew/kurt, lag-k autocorr, ratio_mean/sum **win** (weighted_skew 0.14x); median/q1/q3/iqr **~2.9x loss** (quantile-bound, pandas Cython) + mad_median (no native, wins) | | | | mixed | analytic dense verbs win; quantile family maps to the C3 select dispatch |
+| median_dense_by / q1/q3/iqr_dense (1M rows, 1000 dense keys, int values 0..100) | | ~13.4 | ~32.9 | **0.41x — Sounio wins (2.4x)** | histogram bucket + cumulative-count walk, NO quickselect (flips the general median_by ~2.9x loss to a win for dense int values) |
+| nunique_dense_by (1M rows, 1000 dense keys, vmax=100) | | ~14.3 | ~42.8 | **0.33x — wins 3x** | value histogram, no sort |
+| mode_dense_by / mode_count/mode_frac | | ~14.3 | ~164 | **0.09x — wins 11x** | pandas mode = per-group lambda |
+| gini_impurity_dense_by / simpson_dense | | ~14.2 | ~261 | **0.05x — wins 20x** | pandas = value_counts lambda |
+| any_positive_by / all_positive_by | | ~11.3 | ~13.6 | **0.83x — wins** | dense boolean reduction (beats native transform-max) |
+| cumany_positive_by / cumall_positive_by | | ~7.9 | ~18.0 | **0.44x — wins 2.3x** | single ordered pass (beats groupby.cummax) |
+| entropy_dense_by (Shannon, 1M rows, 1000 keys, vmax=101) | | ~31.9 | ~305 | **0.10x — wins 10x** | value histogram + bf_ln per bucket; pandas = per-group lambda |
+| inv_simpson_dense / renyi2 / norm_entropy / entropy_bits | | ~31.9 | ~267 | **0.12x — wins 8x** | same histogram engine |
+| sum_ln / mean_ln / log_range / var_ln / std_ln (dense) | | ~15.9 | ~24.5 | **0.65x — wins 1.5x** | ln lookup-table + single accumulation pass (beats vectorized np.log + native transform) |
+| softmax_dense_by / softmax_max_prob (1M rows, 1000 keys, vmax=102) | | ~17.8 | ~217 | **0.08x — wins 12x** | exp lookup-table; pandas = per-group lambda |
+| logsumexp / logmeanexp_dense | | ~14.0 | ~115 | **0.12x — wins 8x** | exp-LUT + one pass |
+| geomean_dense / geostd_dense | | ~13.8 | ~159 | **0.09x — wins 11x** | ln-LUT + exp |
+| gini_coef_dense (inequality) | | ~17.4 | ~125 | **0.14x — wins 7x** | histogram ascending walk |
+| theil_dense / atkinson1 / hoover (inequality) | | ~17.4 | ~230 | **0.08x — wins 13x** | histogram + ln-LUT + exp |
 | cov (1M rows, two-pass mean-shift) | | 6.7 | 8.5 | **0.78x — Sounio wins** | (new verb) |
 | corr (1M rows, two-pass + bf_sqrt) | | 10.3 | 8.0 | **~1.3x** | (new verb) |
 | median (1M rows, quickselect) | | ~34 | ~16 | **~2.2x** | numpy SIMD introselect |
