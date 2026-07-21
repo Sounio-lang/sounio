@@ -18,8 +18,8 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.probe
 **Demetrios Chiuratto Agourakis**
 *Independent researcher*
 
-**Status:** draft v0.2 — arXiv target: cs.LG (cross-list math.DS)
-**Markers:** `[FILL]` = still open (no committed artefact). Run numbers below are taken from `docs/research/PROBE-RESULT-*.md` and the harnesses they cite (`run_probe_full.py`, `train_and_probe_lstm.py`, `deep_ffn_*.py`, `mechanism_analysis.py`, `align_curve.py`).
+**Status:** draft v0.3 — arXiv target: cs.LG (cross-list math.DS)
+**Markers:** `[FILL]` = still open (only Zenodo deposit). Run numbers from `PROBE-RESULT-*.md`, multi-seed panels in `PROBE-RESULT-multiseed.md` / `artifacts/multiseed_*.json`, and the harnesses they cite.
 
 ---
 
@@ -180,7 +180,7 @@ It is therefore the conditional null of the mechanism: any excess of the observe
 
 ### 4.2 Untrained initialisation
 
-Same architecture, same input vectors, freshly drawn parameters. The decisive control curves of Section 6.1 used a single untrained seed against the trained seed (`run_probe_full.py`); a multi-seed ($n\ge 16$) init panel is [FILL: not yet archived]. Asks whether the pattern was acquired or was present in the parameterisation from the start. **In our application this null was decisive.**
+Same architecture, same input vectors, freshly drawn parameters. The decisive control curves of Section 6.1 used a single untrained seed against the trained seed (`run_probe_full.py`). A multi-seed panel (`multiseed_lstm_init.py`; $n{=}16$ seeds × $16$ sequences, pure-numpy analytic Jacobians, $H{=}40$, $T{=}30$) confirms that INIT h→h at $k{=}4$ is $0.992\pm 0.005$ (min $0.981$, max $0.997$; every seed $>0.95$). Asks whether the pattern was acquired or was present in the parameterisation from the start. **In our application this null was decisive, and the multi-seed panel shows it is not a one-seed fluke.**
 
 ### 4.3 Gate-wise weight shuffle
 
@@ -246,7 +246,7 @@ We apply the probe to two architectures. The first, an LSTM, produced an apparen
 An apparent signature was observed at Cohen $d=+56$. It did not survive:
 
 1. **`align(k)` shape.** The curve followed the low-rank profile — trained h→h $0.76,0.84,0.90,0.92,0.95,0.96,0.97$ at $k=1,2,3,4,6,8,12$ (baseline at $k{=}12$ is $0.55$) — rather than a small-$k$ shoulder with a healthy bulk.
-2. **Untrained-initialisation control (decisive).** Alignment in the untrained network was $0.99$–$1.00$ at $k=4$–$12$, *higher* than the trained $0.92$. An equal value would have been ambiguous, since learned structure could be superimposed on architectural structure; a value that *decreases* with training cannot be read as acquisition.
+2. **Untrained-initialisation control (decisive).** Alignment in the untrained network was $0.99$–$1.00$ at $k=4$–$12$, *higher* than the trained $0.92$. An equal value would have been ambiguous, since learned structure could be superimposed on architectural structure; a value that *decreases* with training cannot be read as acquisition. Multi-seed ($n{=}16$, §4.2): INIT@$k{=}4$ mean $0.992\pm 0.005$, min $0.981$ — every seed above the trained value.
 
 **Scale check** (`probe_h256_init.py`, `PROBE-RESULT-h256-scale.md`): untrained $H{=}256$, $T{=}200$, pure-numpy analytic LSTM Jacobian (validated to $7\times 10^{-8}$ against autograd). INIT h→h $\approx 1.00$ at every $k\in\{1,\ldots,63\}$ against baseline $\sqrt{k/(2H)}\in[0.04,0.35]$. The architectural confound is sharper at scale, not weaker.
 
@@ -267,22 +267,29 @@ Excess: $-0.02$. **Any signal above the null in a trained network of this class 
 
 ### 6.3 Result on the clean target
 
-ResMLP, width $W=96$, depth $L=8$, trained to **96%** test accuracy on $y=\operatorname{sign}(x_0x_1+x_2x_3-x_4x_5)$ (`deep_ffn_train.py`; Adam, $5000$ steps, BCE-with-logits, test $n{=}4000$).
+ResMLP, width $W=96$, depth $L=8$. **Single-seed reference** (`deep_ffn_train.py`): **96%** test accuracy (Adam, $5000$ steps, BCE-with-logits, test $n{=}4000$). **Multi-seed panel** (`multiseed_resmlp.py`; $n{=}16$ seeds, early-stop at acc $\ge 0.90$, mean acc $0.941\pm 0.006$):
 
 | $k$ | 1 | 2 | 4 | 8 | 16 | 32 | 48 |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| baseline $\sqrt{k/d}$ | 0.10 | 0.14 | 0.20 | 0.29 | 0.41 | 0.58 | 0.71 |
-| trained | 0.09 | 0.12 | 0.17 | 0.25 | 0.36 | 0.53 | 0.66 |
-| untrained | 0.08 | 0.12 | 0.17 | 0.25 | 0.35 | 0.51 | 0.64 |
-| orientation scramble | 0.08 | 0.12 | 0.17 | 0.24 | 0.35 | 0.51 | 0.64 |
+| baseline $\sqrt{k/W}$ | 0.10 | 0.14 | 0.20 | 0.29 | 0.41 | 0.58 | 0.71 |
+| trained (16 seeds) | 0.083 | 0.121 | 0.174 | 0.250 | 0.359 | 0.519 | 0.649 |
+| untrained | 0.080 | 0.114 | 0.168 | 0.243 | 0.349 | 0.507 | 0.635 |
+| orientation scramble | 0.081 | 0.118 | 0.169 | 0.244 | 0.350 | 0.507 | 0.635 |
 
-Trained $\approx$ untrained $\approx$ orientation-scramble null at every $k$. No shoulder at small $k$; no plateau at large $k$; no architectural inflation.
+Trained $\approx$ untrained $\approx$ orientation-scramble null at every $k$ (absolute levels). No shoulder at small $k$; no plateau at large $k$; no architectural inflation.
 
-> ⚠️ **Two reporting requirements before this table is citable.**
->
-> **(i) Dispersion.** The values above are means over $n{=}16$ input draws and $n{=}16$ orientation scrambles, **single training seed**. The pre-registered statistic is the *paired* distribution $\Delta_i = \mathrm{align}_i - \operatorname{median}_b \mathrm{align}_{i,b}^{\mathrm{scr}}$ over input points and seeds, with an empirical $p$-value. Trained exceeds untrained by 0.01–0.02 at large $k$; without a spread this offset is uninterpretable, and "$\approx$" is an eyeball judgement rather than a result. [FILL: multi-seed $\Delta$ distribution and empirical $p$ — not in the committed artefact; requires a re-run of `deep_ffn_train.py` with seed panel]
->
-> **(ii) Baseline.** All three conditions sit systematically below the analytic $\sqrt{k/d}$, by a margin too consistent to be noise. The likely cause is a mismatch between the analytic expression (derived for the mean squared cosine between uniformly random subspaces) and the statistic actually computed. The **orientation-scramble null is the correct comparator** and should lead; $\sqrt{k/d}$ belongs in a footnote with this caveat. Fortunately the conclusion is unchanged, since trained $\approx$ scramble exactly.
+**Paired $\Delta$ (multi-seed).** For each seed and input, $\Delta_i(k)=\mathrm{align}_i^{\mathrm{tr}}(k)-\operatorname{median}_{b=1\ldots 8}\mathrm{align}_{i,b}^{\mathrm{scr}}(k)$; pooled $n{=}16\times 16{=}256$. One-sided sign-flip $p$ under $H_0$: $\Delta$ symmetric about 0 ($B{=}9999$):
+
+| $k$ | mean $\Delta$ | sd | $p_{\mathrm{signflip}}$ |
+|---:|---:|---:|---:|
+| 1 | $+0.0025$ | 0.025 | 0.053 |
+| 4 | $+0.0043$ | 0.013 | 0.0001 |
+| 16 | $+0.0090$ | 0.006 | 0.0001 |
+| 48 | $+0.0134$ | 0.003 | 0.0001 |
+
+A mean $\Delta$ of order $0.01$ is *detectable* at this $n$ for $k\ge 2$, but is **not** a subspace-annihilation signal: (i) no $k$ meets a substantive threshold mean$\Delta>0.05$ with $p<0.05$; (ii) mean $\Delta$ *rises* with $k$ (opposite of a small-$k$ shoulder); (iii) absolute curves remain on the scramble / init floor. The single-seed “trained exceeds untrained by $0.01$–$0.02$ at large $k$” eyeball is a tiny offset, not a signature. Full tables: `PROBE-RESULT-multiseed.md`.
+
+> ⚠️ **Baseline caveat.** All three conditions sit systematically below the analytic $\sqrt{k/W}$, by a margin too consistent to be noise. The likely cause is a mismatch between the analytic expression (derived for the mean squared cosine between uniformly random subspaces) and the statistic actually computed. The **orientation-scramble null is the correct comparator** and should lead; $\sqrt{k/W}$ belongs in a footnote with this caveat.
 
 ### 6.4 Scope
 
@@ -322,11 +329,12 @@ This is, notably, what the framework predicts. Under additive composition, annih
 
 Harnesses and result notes live in the Sounio repository under `docs/research/`:
 
-- Protocol / analysis: `train_and_probe_lstm.py`, `run_probe_full.py`, `probe_h256_init.py`, `deep_ffn_probe.py`, `deep_ffn_train.py`, `mechanism_analysis.py`, `align_curve.py`, `lyapunov_qr.py`
-- Frozen result notes: `PROBE-RESULT-lstm-adding.md`, `PROBE-RESULT-h256-scale.md`, `PROBE-RESULT-deep-ffn.md`, `probe-corrected-protocol.md`, `align-curve-and-target.md`, `lyapunov-repositioning.md`
+- Protocol / analysis: `train_and_probe_lstm.py`, `run_probe_full.py`, `probe_h256_init.py`, `deep_ffn_probe.py`, `deep_ffn_train.py`, `multiseed_lstm_init.py`, `multiseed_resmlp.py`, `mechanism_analysis.py`, `align_curve.py`, `lyapunov_qr.py`
+- Frozen result notes: `PROBE-RESULT-lstm-adding.md`, `PROBE-RESULT-h256-scale.md`, `PROBE-RESULT-deep-ffn.md`, `PROBE-RESULT-multiseed.md`, `probe-corrected-protocol.md`, `align-curve-and-target.md`, `lyapunov-repositioning.md`
+- Multi-seed JSON: `artifacts/multiseed_lstm_init.json`, `artifacts/multiseed_resmlp.json`
 - Repository: [https://github.com/Sounio-lang/sounio](https://github.com/Sounio-lang/sounio) (paths above on the commit that lands this draft)
 
-[FILL: frozen artefact tarball + DOI — Zenodo not yet deposited.] Sequences, seeds and per-window statistics for a camera-ready re-run should be persisted in that deposit.
+[FILL: frozen artefact tarball + DOI — Zenodo not yet deposited.] The multi-seed JSONs above are the minimum deposit payload for a camera-ready re-run.
 
 ---
 
