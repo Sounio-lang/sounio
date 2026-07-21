@@ -64,16 +64,32 @@ expect_runtime_witness() {
   }
 }
 
+expect_known_baseline_boundary() {
+  [[ "$CASE_RC" -eq 1 ]] || {
+    cat "$CASE_LOG" >&2
+    fail "256-custom-layout baseline must exit rc=1, got rc=$CASE_RC"
+  }
+  [[ "$CASE_MARKER" -eq 0 ]] || {
+    cat "$CASE_LOG" >&2
+    fail "256-custom-layout baseline unexpectedly printed its runtime witness"
+  }
+  grep -Fxq 'run_check_mode: verdict=0' "$CASE_LOG" || {
+    cat "$CASE_LOG" >&2
+    fail "256-custom-layout baseline did not reach a clean imported check"
+  }
+  grep -Fxq 'IR lowering failed during merge: ir_summary_failed' "$CASE_LOG" || {
+    cat "$CASE_LOG" >&2
+    fail "256-custom-layout baseline changed before the known IR-summary boundary"
+  }
+}
+
 run_case 255
 expect_runtime_witness "255-custom-layout boundary"
 
 run_case 256
 case "$EXPECT" in
   baseline)
-    if [[ "$CASE_RC" -eq 0 && "$CASE_MARKER" -eq 1 ]]; then
-      cat "$CASE_LOG" >&2
-      fail "256-custom-layout boundary already executes; rerun with SOUNIO_MADAROS_STRUCT_LAYOUT_CAPACITY_EXPECT=resolved"
-    fi
+    expect_known_baseline_boundary
     echo "[madaros-struct-layout-capacity] BASELINE: 255 custom + Knowledge executes; 256 custom exposes the unrepaired catalog boundary"
     echo "[madaros-struct-layout-capacity] baseline_log=$CASE_LOG"
     ;;
