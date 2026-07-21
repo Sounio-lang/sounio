@@ -33,6 +33,7 @@ Longitudinal work adds a necessary preceding boundary:
 ```text
 same recorded time != aligned causal time zero
 same symptom trajectory != same observation process
+same repeated score != comparable latent construct
 same action label != same dynamic treatment strategy
 same fitted state transition != identified effect of that strategy
 same source estimate != transported target-context estimate
@@ -84,6 +85,26 @@ regularly sampled model trace and an irregular, covariate-driven clinical trace
 must not receive the same observation-process authority simply because their
 values are numerically aligned.
 
+### Repeated Measurement Needs A Comparability Claim
+
+Longitudinal measurement invariance asks whether an instrument represents the
+same construct in the same metric across time, groups, reporters, or other
+declared conditions. Without that evidence, a change in observed score may be
+a change in item functioning, response process, language, reporting context,
+or measurement model rather than a change in the intended latent construct.
+
+- Olino (2020), [clinical applications of measurement invariance](https://pmc.ncbi.nlm.nih.gov/articles/PMC7895483/).
+- Liu et al. (2017), [longitudinal invariance for ordered-categorical measures](https://pmc.ncbi.nlm.nih.gov/articles/PMC5121102/).
+- Karcher et al. (2022), [measurement noninvariance in biological psychiatry](https://pmc.ncbi.nlm.nih.gov/articles/PMC9106809/).
+- Horvath et al. (2025), [longitudinal PHQ-9 invariance during pharmacotherapy](https://pmc.ncbi.nlm.nih.gov/articles/PMC11915754/).
+
+These sources do not make every longitudinal score invalid. They instead
+license a condition on its interpretation: a model must name the measurement
+model and the tested comparability scope before it treats a score difference as
+evidence of comparable construct change. Failed, partial, or untested
+invariance should remain an explicit route to qualification, sensitivity
+analysis, or abstention.
+
 ### Shift, Calibration, And Live Evaluation Remain Separate
 
 Clinical distribution shift can involve more than observed covariate shift, and
@@ -113,6 +134,9 @@ standard-library APIs.
 | `TemporalOriginReceipt` | eligibility event, assignment window, time zero, follow-up horizon, outcome clock. | protocol identifier and data-mapping caveats. | evidence that time zero is unbiased or clinically appropriate. |
 | `RegimeDefinitionReceipt` | stage-specific action rule, admissible history, action semantics, target outcome. | a well-defined strategy and decision-stage ordering. | evidence that the strategy is feasible, identified, or beneficial. |
 | `ObservationProcessReceipt` | measurement schedule, trigger, missingness/visit mechanism, source-system identity. | how observations entered the record and which process is assumed. | a claim that irregular observation is ignorable. |
+| `MeasurementModelReceipt` | instrument/items, response coding, reporter, language, scoring/latent-model version, and intended construct. | the measurement function and its known limits. | evidence that scores are comparable across time or context. |
+| `MeasurementInvarianceReceipt` | tested comparability level and the time/group/reporter scope under a declared method. | model specification, fit/sensitivity criteria, failures, and partial-invariance decisions. | proof that the latent construct is complete, causally identified, or universally comparable. |
+| `MeasurementNoninvarianceAbstentionReceipt` | failed, absent, or out-of-scope comparability evidence and its affected comparisons. | the measurement model, failure mode, and review/sensitivity route. | a zero change, a compatible trajectory, or an ignorable warning. |
 | `IdentificationReceipt` | stated estimand, graph/design, consistency, exchangeability, positivity/support, sensitivity plan. | explicit assumptions and an analysis family. | proof that its assumptions hold in a real population. |
 | `TransportReceipt` | source/target definition, measurement map, effect-modifier treatment, shift assumptions. | target-context evidence and a transport analysis. | target validation from a shared label or feature schema. |
 | `SelectiveRiskReceipt` | loss, calibration cohort, coverage/risk target, shift assumption, expiry or review window. | calibration procedure and deployment domain. | a causal effect or action recommendation. |
@@ -124,6 +148,11 @@ The matrix deliberately separates two often conflated facts. A
 `ObservationProcessReceipt` can make its data-generating limitations visible.
 Neither replaces the other, and neither converts a state trajectory into an
 intervention effect.
+
+Likewise, an `ObservationProcessReceipt` can say how a value reached the record
+while a `MeasurementModelReceipt` says what the value was intended to measure.
+Neither is a `MeasurementInvarianceReceipt`. A regular schedule with identical
+numeric scores does not establish that the measurement function is stable.
 
 ## The Evidence Path Is Ordered
 
@@ -162,6 +191,21 @@ claim. For example, applying a calibration result before deciding whether the
 target setting is comparable can yield a reliable-looking score without a
 transportable causal result. Choosing a time zero after inspecting an outcome
 can yield a polished trajectory while changing the estimand itself.
+
+Before comparing a longitudinal projection, a distinct measurement path is
+required:
+
+```text
+ObservationReceipt + ObservationProcessReceipt + MeasurementModelReceipt
+  -> RecordedMeasurementReceipt
+
+RecordedMeasurementReceipt + MeasurementInvarianceReceipt
+  -> ComparableMeasurementProjection | MeasurementNoninvarianceAbstentionReceipt
+```
+
+This is not a claim that a type checker can establish psychometric invariance.
+It makes the study/model evidence and its boundary explicit, so a repeated
+score cannot silently become a comparable latent-state trajectory.
 
 ## Functional Path State Is Not A Scalar
 
@@ -236,6 +280,7 @@ these substitutions fail:
 | Time-zero collision | Same recorded timestamp and trajectory values. | Eligibility/assignment alignment. | No conversion from raw timestamp to `TemporalOriginReceipt`. |
 | Observation-process collision | Same measured values. | Scheduled versus covariate-driven observation provenance. | A scheduled-process receipt cannot satisfy an irregular-process requirement. |
 | Regime collision | Same endpoint scalar. | Ordered action/history rule. | A trajectory projection cannot satisfy `RegimeDefinitionReceipt`. |
+| Measurement-invariance collision | Same instrument label and observed score change. | Measurement model, time/group/reporter scope, and tested comparability. | A score difference cannot satisfy a comparable-trajectory API. |
 | Identification collision | Same model fit and question. | Assumption/sensitivity receipt. | Question cannot form source effect without identification. |
 | Transport collision | Same source estimate. | Target context and measurement map. | Source effect cannot satisfy a target-context API. |
 | Abstention collision | Same unresolved score. | Missing time origin, support, transport, or calibration. | Each gap emits distinct abstention provenance. |
@@ -271,6 +316,9 @@ This proposal should be revised, narrowed, or rejected if:
   passing direct control;
 - equal scalar functional proxies can substitute for unequal pathway vectors,
   kinetic windows, or regulatory-history receipts;
+- a repeated score or a shared instrument label can satisfy a comparable
+  latent-trajectory requirement without a declared measurement model and
+  invariance scope;
 - the proposed `ObservationProcessReceipt` merely duplicates values already in
   `TemporalOriginReceipt` and adds no discriminating test;
 - a documentation or API path promotes a selective-risk receipt into a causal
@@ -291,9 +339,9 @@ Transformation: literature-backed temporal authority matrix mapped to existing o
 Types-Changed: none
 Effects-Changed: none
 IR-Changed: none
-Claims-Introduced: a future library fixture should represent time origin, observation process, functional-path state, kinetic window, and regulatory history as evidence-bearing prerequisites rather than infer them from a trajectory or scalar proxy
-Claims-Forbidden: causal identification from timestamps or model fit; pathway equivalence from a scalar proxy; clinical authority from a receipt, a score, a reporting checklist, or compilation
-Assumptions: cited work supplies methodological and assay-context constraints, not a psychiatric mechanism, a patient-specific effect, or a validated intervention
+Claims-Introduced: a future library fixture should represent time origin, observation process, measurement model/invariance, functional-path state, kinetic window, and regulatory history as evidence-bearing prerequisites rather than infer them from a trajectory or scalar proxy
+Claims-Forbidden: causal identification from timestamps or model fit; comparable latent change from a repeated score; pathway equivalence from a scalar proxy; clinical authority from a receipt, a score, a reporting checklist, or compilation
+Assumptions: cited work supplies methodological, psychometric, and assay-context constraints, not a psychiatric mechanism, a patient-specific effect, or a validated intervention
 Write-Set: docs/research/psychiatric_temporal_authority_receipt_matrix_2026-07-21.md; docs/governance/topic-registry.v1.json; docs/governance/DOCS_AUTHORITY_MATRIX.md
 Read-Set: docs/research/psychiatric_state_inference_contract_2026-07-21.md; docs/research/psychiatric_counterfactual_authority_abstention_contract_2026-07-21.md; tests/compiler/ordered_path_provenance_imported_leaf.sio; tests/compiler/ordered_path_provenance_imported_main.sio
 Positive-Witness: direct psychiatric authority receipt control 8e8d4ccce; existing ordered-path imported provenance surface
@@ -308,8 +356,8 @@ Authoritative-Only-If: cited constraints, exact receipt boundaries, and no-clini
 ```text
 Semantic-Outcome: temporal-origin and observation-process evidence requirements are made explicit for the future authority fixture
 Concept-Status-Before: order provenance and authority receipts were specified without a dedicated target-trial time-zero and observation-process matrix
-Concept-Status-After: time origin, dynamic regime, observation process, functional-path state, kinetic window, identification, transport, selective risk, evaluation, and abstention have separate stated authority boundaries
-Distinctions-Added: recorded time != causal time zero; observed trajectory != observation process; equal activation proxy != equal functional-path state; reporting != clinical validation
+Concept-Status-After: time origin, dynamic regime, observation process, measurement model/invariance, functional-path state, kinetic window, identification, transport, selective risk, evaluation, and abstention have separate stated authority boundaries
+Distinctions-Added: recorded time != causal time zero; observed trajectory != observation process; repeated score != comparable latent construct; equal activation proxy != equal functional-path state; reporting != clinical validation
 Distinctions-Preserved: ordered path != commutative endpoint; model projection != causal effect; compilation != clinical authority
 Distinctions-Erased: none
 Evidence-Run: node scripts/docs/sync_governance_metadata.mjs; bash scripts/dev/check_docs_consistency.sh; bash scripts/dev/check_docs_registry.sh
