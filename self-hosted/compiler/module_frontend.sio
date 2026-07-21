@@ -16,7 +16,7 @@ use native::codegen_x86_linux::{compile_native_v2_preview_to_file, native_resolv
 use check::knowledge_context::{knowledge_context_validate_items, knowledge_context_validate_items_values_only}
 use resolve::mod::{resolve_modules}
 use module_parse::{extract_imports_from_ast, file_exists, file_path_to_module_path, load_module_file}
-use check::specializer::{specialize_generics, spec_last_instantiated, spec_append_item_lists}
+use check::specializer::{specialize_generics, spec_last_instantiated, spec_mono_marker_count, spec_append_item_lists}
 
 // Multi-module parse accumulates every module's GLOBAL_VAR_INIT_* side-table
 // entries so imported f64/i64 BSS constants survive to lower time. Without
@@ -5488,13 +5488,17 @@ fn module_frontend_specialized_typecheck(programs: &! [Program; 256], count: i64
         return (false, 0)
     }
     let specialized = specialize_generics(module_frontend_merge_program_items(programs, count))
-    if !spec_last_instantiated() {
+    // i64 mono-marker gate — not bare `if !bool` (CI-seed fragile).
+    let mono_n: i64 = spec_mono_marker_count()
+    if mono_n <= 0 {
         return (false, 0)
     }
     if str_eq(read_env("SOUNIO_MM_SPEC_TRACE"), "1") {
         print("mm_spec: specialized-typecheck over merged ")
         print_int(count)
-        print(" modules (generic instantiated)\n")
+        print(" modules mono_markers=")
+        print_int(mono_n)
+        print("\n")
     }
     let verdict = check_items_verdict_boot4(specialized)
     (true, verdict)
@@ -5537,13 +5541,18 @@ fn module_frontend_specialized_prepare(
     // stripped (measured: body_fn_count 4 but only main body-lowered → ZD FAIL
     // / SEGV on empty mono stubs).
     let specialized_tc = specialize_generics(module_frontend_merge_program_items(programs, count))
-    if !spec_last_instantiated() {
+    // Seed-safe i64 mono markers. Leave specialized_items_out as None when
+    // mono_n==0 so Option occupancy stays the sole collapse arm.
+    let mono_n: i64 = spec_mono_marker_count()
+    if mono_n <= 0 {
         return 0
     }
     if str_eq(read_env("SOUNIO_MM_SPEC_TRACE"), "1") {
         print("mm_spec: specialized-prepare over merged ")
         print_int(count)
-        print(" modules (collapse to single-module lower)\n")
+        print(" modules mono_markers=")
+        print_int(mono_n)
+        print(" (collapse candidate)\n")
     }
     let verdict = check_items_verdict_boot4(specialized_tc)
     // Second specialize: fresh monomorphized list for IR lower, rebuilt from
@@ -5552,9 +5561,19 @@ fn module_frontend_specialized_prepare(
     // one list under same-name mono. Multi-mod template body lower SEGV'd on
     // cd_add_exact / trait-method array loops (Wave12 residual).
     let specialized_ir = specialize_generics(module_frontend_merge_program_items(programs, count))
+    let mono_n2: i64 = spec_mono_marker_count()
+    if mono_n2 <= 0 {
+        return 0
+    }
+    let ir_slots = module_frontend_count_lowered_ir_slots(&specialized_ir)
+    if ir_slots <= 0 {
+        return 0
+    }
     if str_eq(read_env("SOUNIO_MM_SPEC_TRACE"), "1") {
         print("mm_spec: specialized_ir ir_slots=")
-        print_int(module_frontend_count_lowered_ir_slots(&specialized_ir))
+        print_int(ir_slots)
+        print(" mono_markers=")
+        print_int(mono_n2)
         print("\n")
     }
     // Out-param handoff (lean_single-safe). No programs[] mutation.
