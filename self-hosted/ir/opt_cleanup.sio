@@ -9022,10 +9022,12 @@ fn ocp_compact_nops(func: IrFunction) -> IrFunction with Mut, Div, Panic {
 // and never forms an intermediate `&! IrFunction` to a module array slot, never
 // copies a whole `IrFunction` or a whole `IrInstr` with live call_args.
 //
-// Pass set is the safe scalar/control subset: constructor writebacks
-// (`ir_nop` / `ir_copy` / `ir_load_imm` / `ir_return`) and scalar field stores
-// (`.src1` / `.src2`). Full const-fold / SCCP / compact_nops / e-graph stay on
-// the by-value stack-local path used by main.sio self-tests.
+// Pass set (Wave9 full peels): constructor writebacks
+// (`ir_nop` / `ir_copy` / `ir_load_imm` / `ir_return` / `ir_jump` / `ir_binop`)
+// and scalar field stores (`.src1` / `.src2` / compact field-wise moves).
+// Full e-graph / mul3_sr / LICM / epistemic rewrites stay on the by-value
+// stack-local path used by main.sio self-tests. Const-fold / SCCP-lite /
+// compact_nops are now field-wise (never by-value IrFunction).
 
 // Dedup IrLoadImm → IrCopy when an earlier reg already holds the same imm.
 fn ocp_mfi_dedup_imm(module: &! IrModule, fi: i64) with Mut, Div, Panic {
@@ -9320,6 +9322,336 @@ fn ocp_mfi_dce_once(module: &! IrModule, fi: i64) -> i64 with Mut, Div, Panic {
     removed
 }
 
+// Core integer const-fold via module+fi peels (no by-value IrFunction).
+// Subset of ocp_const_fold_pass_b both-const arithmetic/bitwise/compare plus
+// partial-constant identity/annihilation. Heavy chain rewrites (Block L/M/…)
+// stay on the by-value self-test spine.
+fn ocp_mfi_const_fold(module: &! IrModule, fi: i64) with Mut, Div, Panic {
+    var is_const: [bool; 256] = [false; 256]
+    var const_val: [i64; 256] = [0; 256]
+    var i: i64 = 0
+    while i < (*module).functions[fi as usize].instr_count {
+        let op = (*module).functions[fi as usize].instrs[i as usize].op
+        let dst = (*module).functions[fi as usize].instrs[i as usize].dst
+        if dst >= 0 && dst < 256 {
+            is_const[dst as usize] = false
+        }
+        if ocp_is_load_imm(op) || op == IrOpcode::IrLoadBool {
+            if dst >= 0 && dst < 256 {
+                is_const[dst as usize] = true
+                const_val[dst as usize] = (*module).functions[fi as usize].instrs[i as usize].imm_i64
+            }
+        }
+        if op == IrOpcode::IrCopy {
+            let s1 = (*module).functions[fi as usize].instrs[i as usize].src1
+            if s1 >= 0 && s1 < 256 && is_const[s1 as usize] {
+                if dst >= 0 && dst < 256 {
+                    let v = const_val[s1 as usize]
+                    (*module).functions[fi as usize].instrs[i as usize] = ir_load_imm(dst, v)
+                    is_const[dst as usize] = true
+                    const_val[dst as usize] = v
+                }
+            }
+        }
+        if ocp_is_binop(op) {
+            let s1 = (*module).functions[fi as usize].instrs[i as usize].src1
+            let s2 = (*module).functions[fi as usize].instrs[i as usize].src2
+            let bin = (*module).functions[fi as usize].instrs[i as usize].bin_op
+            let s1_ok = s1 >= 0 && s1 < 256
+            let s2_ok = s2 >= 0 && s2 < 256
+            let s1_known = s1_ok && is_const[s1 as usize]
+            let s2_known = s2_ok && is_const[s2 as usize]
+            // Both-constant fold (integer lattice).
+            if s1_known && s2_known {
+                let v1 = const_val[s1 as usize]
+                let v2 = const_val[s2 as usize]
+                var fold_val: i64 = 0
+                var did_fold = false
+                if bin == BinaryOp::OpAdd {
+                    fold_val = v1 + v2
+                    did_fold = true
+                }
+                if bin == BinaryOp::OpSub {
+                    fold_val = v1 - v2
+                    did_fold = true
+                }
+                if bin == BinaryOp::OpMul {
+                    fold_val = v1 * v2
+                    did_fold = true
+                }
+                if bin == BinaryOp::OpDiv && v2 != 0 {
+                    fold_val = v1 / v2
+                    did_fold = true
+                }
+                if bin == BinaryOp::OpRem && v2 != 0 {
+                    fold_val = v1 % v2
+                    did_fold = true
+                }
+                if bin == BinaryOp::OpBitAnd {
+                    fold_val = v1 & v2
+                    did_fold = true
+                }
+                if bin == BinaryOp::OpBitOr {
+                    fold_val = v1 | v2
+                    did_fold = true
+                }
+                if bin == BinaryOp::OpBitXor {
+                    fold_val = v1 ^ v2
+                    did_fold = true
+                }
+                if bin == BinaryOp::OpShl && v2 >= 0 && v2 < 64 {
+                    fold_val = v1 << v2
+                    did_fold = true
+                }
+                if bin == BinaryOp::OpShr && v2 >= 0 && v2 < 64 {
+                    fold_val = v1 >> v2
+                    did_fold = true
+                }
+                if bin == BinaryOp::OpEq {
+                    fold_val = if v1 == v2 { 1 } else { 0 }
+                    did_fold = true
+                }
+                if bin == BinaryOp::OpNe {
+                    fold_val = if v1 != v2 { 1 } else { 0 }
+                    did_fold = true
+                }
+                if bin == BinaryOp::OpLt {
+                    fold_val = if v1 < v2 { 1 } else { 0 }
+                    did_fold = true
+                }
+                if bin == BinaryOp::OpLe {
+                    fold_val = if v1 <= v2 { 1 } else { 0 }
+                    did_fold = true
+                }
+                if bin == BinaryOp::OpGt {
+                    fold_val = if v1 > v2 { 1 } else { 0 }
+                    did_fold = true
+                }
+                if bin == BinaryOp::OpGe {
+                    fold_val = if v1 >= v2 { 1 } else { 0 }
+                    did_fold = true
+                }
+                if bin == BinaryOp::OpAnd {
+                    fold_val = if (v1 != 0) && (v2 != 0) { 1 } else { 0 }
+                    did_fold = true
+                }
+                if bin == BinaryOp::OpOr {
+                    fold_val = if (v1 != 0) || (v2 != 0) { 1 } else { 0 }
+                    did_fold = true
+                }
+                if did_fold && dst >= 0 && dst < 256 {
+                    (*module).functions[fi as usize].instrs[i as usize] = ir_load_imm(dst, fold_val)
+                    is_const[dst as usize] = true
+                    const_val[dst as usize] = fold_val
+                }
+            }
+            // Partial-constant identity / annihilation (exactly one side known).
+            if (s1_known && !s2_known) || (!s1_known && s2_known) {
+                let v1 = if s1_known { const_val[s1 as usize] } else { 0 }
+                let v2 = if s2_known { const_val[s2 as usize] } else { 0 }
+                if bin == BinaryOp::OpMul {
+                    if s2_known && v2 == 1 {
+                        (*module).functions[fi as usize].instrs[i as usize] = ir_copy(dst, s1)
+                    }
+                    if s1_known && v1 == 1 {
+                        (*module).functions[fi as usize].instrs[i as usize] = ir_copy(dst, s2)
+                    }
+                    if s2_known && v2 == 0 {
+                        (*module).functions[fi as usize].instrs[i as usize] = ir_load_imm(dst, 0)
+                        if dst >= 0 && dst < 256 {
+                            is_const[dst as usize] = true
+                            const_val[dst as usize] = 0
+                        }
+                    }
+                    if s1_known && v1 == 0 {
+                        (*module).functions[fi as usize].instrs[i as usize] = ir_load_imm(dst, 0)
+                        if dst >= 0 && dst < 256 {
+                            is_const[dst as usize] = true
+                            const_val[dst as usize] = 0
+                        }
+                    }
+                }
+                if bin == BinaryOp::OpAdd {
+                    if s2_known && v2 == 0 {
+                        (*module).functions[fi as usize].instrs[i as usize] = ir_copy(dst, s1)
+                    }
+                    if s1_known && v1 == 0 {
+                        (*module).functions[fi as usize].instrs[i as usize] = ir_copy(dst, s2)
+                    }
+                }
+                if bin == BinaryOp::OpSub {
+                    if s2_known && v2 == 0 {
+                        (*module).functions[fi as usize].instrs[i as usize] = ir_copy(dst, s1)
+                    }
+                }
+                if bin == BinaryOp::OpBitOr {
+                    if s2_known && v2 == 0 {
+                        (*module).functions[fi as usize].instrs[i as usize] = ir_copy(dst, s1)
+                    }
+                    if s1_known && v1 == 0 {
+                        (*module).functions[fi as usize].instrs[i as usize] = ir_copy(dst, s2)
+                    }
+                }
+                if bin == BinaryOp::OpBitAnd {
+                    if (s2_known && v2 == 0) || (s1_known && v1 == 0) {
+                        (*module).functions[fi as usize].instrs[i as usize] = ir_load_imm(dst, 0)
+                        if dst >= 0 && dst < 256 {
+                            is_const[dst as usize] = true
+                            const_val[dst as usize] = 0
+                        }
+                    }
+                }
+                if bin == BinaryOp::OpBitXor {
+                    if s2_known && v2 == 0 {
+                        (*module).functions[fi as usize].instrs[i as usize] = ir_copy(dst, s1)
+                    }
+                    if s1_known && v1 == 0 {
+                        (*module).functions[fi as usize].instrs[i as usize] = ir_copy(dst, s2)
+                    }
+                }
+            }
+        }
+        // Unary OpNeg of a known constant.
+        if op == IrOpcode::IrUnaryOp {
+            let un = (*module).functions[fi as usize].instrs[i as usize].un_op
+            let s1 = (*module).functions[fi as usize].instrs[i as usize].src1
+            if un == UnaryOp::OpNeg && s1 >= 0 && s1 < 256 && is_const[s1 as usize] {
+                if dst >= 0 && dst < 256 {
+                    let v = 0 - const_val[s1 as usize]
+                    (*module).functions[fi as usize].instrs[i as usize] = ir_load_imm(dst, v)
+                    is_const[dst as usize] = true
+                    const_val[dst as usize] = v
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+// SCCP-lite (Wegman & Zadeck style lattice over a linear scan): fold branches
+// whose condition is a known constant; re-fold binops after copy chains.
+// Does not form &! functions[fi] or invoke cp_optimize_function (by-value).
+fn ocp_mfi_sccp(module: &! IrModule, fi: i64) with Mut, Div, Panic {
+    // Pass 1: rebuild lattice + fold remaining both-const / copy-of-const.
+    ocp_mfi_const_fold(module, fi)
+    // Pass 2: branch folding on known conditions.
+    var is_const: [bool; 256] = [false; 256]
+    var const_val: [i64; 256] = [0; 256]
+    var i: i64 = 0
+    while i < (*module).functions[fi as usize].instr_count {
+        let op = (*module).functions[fi as usize].instrs[i as usize].op
+        let dst = (*module).functions[fi as usize].instrs[i as usize].dst
+        if dst >= 0 && dst < 256 {
+            is_const[dst as usize] = false
+        }
+        if ocp_is_load_imm(op) || op == IrOpcode::IrLoadBool {
+            if dst >= 0 && dst < 256 {
+                is_const[dst as usize] = true
+                const_val[dst as usize] = (*module).functions[fi as usize].instrs[i as usize].imm_i64
+            }
+        }
+        if op == IrOpcode::IrCopy {
+            let s1 = (*module).functions[fi as usize].instrs[i as usize].src1
+            if s1 >= 0 && s1 < 256 && is_const[s1 as usize] && dst >= 0 && dst < 256 {
+                is_const[dst as usize] = true
+                const_val[dst as usize] = const_val[s1 as usize]
+            }
+        }
+        if op == IrOpcode::IrBranchTrue {
+            let cond = (*module).functions[fi as usize].instrs[i as usize].src1
+            let lab = (*module).functions[fi as usize].instrs[i as usize].label_id
+            if cond >= 0 && cond < 256 && is_const[cond as usize] {
+                if const_val[cond as usize] != 0 {
+                    (*module).functions[fi as usize].instrs[i as usize] = ir_jump(lab)
+                } else {
+                    (*module).functions[fi as usize].instrs[i as usize] = ir_nop()
+                }
+            }
+        }
+        if op == IrOpcode::IrBranchFalse {
+            let cond = (*module).functions[fi as usize].instrs[i as usize].src1
+            let lab = (*module).functions[fi as usize].instrs[i as usize].label_id
+            if cond >= 0 && cond < 256 && is_const[cond as usize] {
+                if const_val[cond as usize] == 0 {
+                    (*module).functions[fi as usize].instrs[i as usize] = ir_jump(lab)
+                } else {
+                    (*module).functions[fi as usize].instrs[i as usize] = ir_nop()
+                }
+            }
+        }
+        i = i + 1
+    }
+    // Pass 3: unreachable after unconditional jump/return (SCCP reachability).
+    ocp_mfi_dead_after_jump(module, fi)
+}
+
+// Field-wise instruction move for compact_nops: never whole-IrInstr copy.
+// Transfers call_args by field assign then clears the source slot (module_frontend
+// already uses this pattern for call_args rebuild).
+fn ocp_mfi_instr_move_fields(module: &! IrModule, fi: i64, dst_i: i64, src_i: i64) with Mut, Div, Panic {
+    let op = (*module).functions[fi as usize].instrs[src_i as usize].op
+    let dst = (*module).functions[fi as usize].instrs[src_i as usize].dst
+    let s1 = (*module).functions[fi as usize].instrs[src_i as usize].src1
+    let s2 = (*module).functions[fi as usize].instrs[src_i as usize].src2
+    let imm = (*module).functions[fi as usize].instrs[src_i as usize].imm_i64
+    let immf = (*module).functions[fi as usize].instrs[src_i as usize].imm_f64
+    let lab = (*module).functions[fi as usize].instrs[src_i as usize].label_id
+    let fnid = (*module).functions[fi as usize].instrs[src_i as usize].fn_id
+    let fidx = (*module).functions[fi as usize].instrs[src_i as usize].field_idx
+    let flags = (*module).functions[fi as usize].instrs[src_i as usize].imm_flags
+    let bin = (*module).functions[fi as usize].instrs[src_i as usize].bin_op
+    let un = (*module).functions[fi as usize].instrs[src_i as usize].un_op
+    let nm = (*module).functions[fi as usize].instrs[src_i as usize].name
+    let ac = (*module).functions[fi as usize].instrs[src_i as usize].arg_count
+    (*module).functions[fi as usize].instrs[dst_i as usize].op = op
+    (*module).functions[fi as usize].instrs[dst_i as usize].dst = dst
+    (*module).functions[fi as usize].instrs[dst_i as usize].src1 = s1
+    (*module).functions[fi as usize].instrs[dst_i as usize].src2 = s2
+    (*module).functions[fi as usize].instrs[dst_i as usize].imm_i64 = imm
+    (*module).functions[fi as usize].instrs[dst_i as usize].imm_f64 = immf
+    (*module).functions[fi as usize].instrs[dst_i as usize].label_id = lab
+    (*module).functions[fi as usize].instrs[dst_i as usize].fn_id = fnid
+    (*module).functions[fi as usize].instrs[dst_i as usize].field_idx = fidx
+    (*module).functions[fi as usize].instrs[dst_i as usize].imm_flags = flags
+    (*module).functions[fi as usize].instrs[dst_i as usize].bin_op = bin
+    (*module).functions[fi as usize].instrs[dst_i as usize].un_op = un
+    (*module).functions[fi as usize].instrs[dst_i as usize].name = nm
+    (*module).functions[fi as usize].instrs[dst_i as usize].arg_count = ac
+    // Move call_args ownership: field assign then clear source before NOP.
+    // (Same field-level call_args write pattern as module_frontend arebox.)
+    if ac > 0 {
+        (*module).functions[fi as usize].instrs[dst_i as usize].call_args =
+            (*module).functions[fi as usize].instrs[src_i as usize].call_args
+        (*module).functions[fi as usize].instrs[src_i as usize].call_args = None
+        (*module).functions[fi as usize].instrs[src_i as usize].arg_count = 0
+    } else {
+        (*module).functions[fi as usize].instrs[dst_i as usize].call_args = None
+    }
+}
+
+// Compact IrNop holes by field-wise dense packing. Label ids are symbolic.
+fn ocp_mfi_compact_nops(module: &! IrModule, fi: i64) with Mut, Div, Panic {
+    var write: i64 = 0
+    var read: i64 = 0
+    let ic = (*module).functions[fi as usize].instr_count
+    while read < ic {
+        let op = (*module).functions[fi as usize].instrs[read as usize].op
+        if op != IrOpcode::IrNop {
+            if write != read {
+                ocp_mfi_instr_move_fields(module, fi, write, read)
+            }
+            write = write + 1
+        }
+        read = read + 1
+    }
+    var fill = write
+    while fill < ic {
+        (*module).functions[fi as usize].instrs[fill as usize] = ir_nop()
+        fill = fill + 1
+    }
+    (*module).functions[fi as usize].instr_count = write
+}
+
 // Safe multi-module function cleanup via module+fi field access only.
 fn opt_cleanup_function_mfi(module: &! IrModule, fi: i64) with Mut, Div, Panic {
     let ic = (*module).functions[fi as usize].instr_count
@@ -9327,6 +9659,7 @@ fn opt_cleanup_function_mfi(module: &! IrModule, fi: i64) with Mut, Div, Panic {
         return
     }
     ocp_mfi_dedup_imm(module, fi)
+    ocp_mfi_const_fold(module, fi)
     ocp_mfi_copy_prop(module, fi)
     ocp_mfi_dse(module, fi)
     ocp_mfi_redundant_jump(module, fi)
@@ -9342,6 +9675,10 @@ fn opt_cleanup_function_mfi(module: &! IrModule, fi: i64) with Mut, Div, Panic {
         }
         iter = iter + 1
     }
+    // SCCP-lite + compact: previously deferred (by-value path only).
+    ocp_mfi_sccp(module, fi)
+    let _ = ocp_mfi_dce_once(module, fi)
+    ocp_mfi_compact_nops(module, fi)
 }
 
 // Run safe field-wise cleanup on every function without copying IrModule or
@@ -9349,7 +9686,8 @@ fn opt_cleanup_function_mfi(module: &! IrModule, fi: i64) with Mut, Div, Panic {
 pub fn opt_cleanup_module_inplace(module: &! IrModule) -> OcpCleanupModuleReceipt with Mut, Div, Panic {
     // Exact-bitwise rebracket audit still lives on the by-value const-fold
     // spine (self-test / pipeline probe path). Multi-module -O uses mfi peels
-    // only, so audit deltas stay zero here until that spine is field-wise.
+    // (including core const-fold / SCCP-lite / compact_nops); heavy Block-L
+    // rebracket authority is not yet field-wise, so audit deltas stay zero.
     var audit = ocp_empty_exact_bitwise_rebracket_pass_audit()
     var last_application_function_index: i64 = -1
     var transaction_ontology_parameter_link_count: i64 = 0
