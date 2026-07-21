@@ -1529,12 +1529,33 @@ fn ir_merge_place_and_remap_function(
             }
         }
         // Relative BSS offsets in global load/store (codegen adds BSS_BASE).
-        if bss_offset_delta != 0 {
-            if op == IrOpcode::IrLoadGlobal || op == IrOpcode::IrStoreGlobal {
+        // Wave13: prefer name→existing BSS slot when seed preseeded (or prior
+        // merge DEDUP'd) the global — plain +delta is wrong for those slots.
+        if op == IrOpcode::IrLoadGlobal || op == IrOpcode::IrStoreGlobal {
+            let gname = func.instrs[ii as usize].name
+            var named_bss: i64 = 0 - 1
+            if gname.len > 0 {
+                var gi: i64 = 0
+                while gi < (*dst).fn_count {
+                    if ir_name_eq((*dst).functions[gi as usize].name, gname)
+                        && (*dst).functions[gi as usize].compile_strategy == IR_STRATEGY_BSS_GLOBAL
+                    {
+                        named_bss = gi
+                        gi = (*dst).fn_count
+                    } else {
+                        gi = gi + 1
+                    }
+                }
+            }
+            if named_bss >= 0 {
+                func.instrs[ii as usize].imm_i64 = (*dst).functions[named_bss as usize].param_count
+            } else if bss_offset_delta != 0 {
                 func.instrs[ii as usize].imm_i64 = func.instrs[ii as usize].imm_i64 + bss_offset_delta
             }
-            // Aggregate path bakes BSS_BASE+local_off as IrLoadImm absolute.
-            // Remap addresses in the BSS window; skip unrelated immediates.
+        }
+        // Aggregate path bakes BSS_BASE+local_off as IrLoadImm absolute.
+        // Remap addresses in the BSS window; skip unrelated immediates.
+        if bss_offset_delta != 0 {
             if op == IrOpcode::IrLoadImm {
                 let imm = func.instrs[ii as usize].imm_i64
                 if imm >= BSS_BASE_LINUX && imm < BSS_BASE_LINUX + 268435456 {
@@ -5161,6 +5182,7 @@ fn module_frontend_lower_programs_array_direct_box(
                         var rfi: i64 = 0
                         while rfi < dep_fn_count {
                             let dep_ic = (*dep_box).functions[rfi as usize].instr_count
+                            let dep_is_bss = (*dep_box).functions[rfi as usize].compile_strategy == IR_STRATEGY_BSS_GLOBAL
                             var stub_idx: i64 = 0 - 1
                             var existing_body_idx: i64 = 0 - 1
                             var sfi: i64 = 0
@@ -5169,7 +5191,14 @@ fn module_frontend_lower_programs_array_direct_box(
                                     (*acc_box).functions[sfi as usize].name,
                                     (*dep_box).functions[rfi as usize].name
                                 ) {
-                                    if (*acc_box).functions[sfi as usize].instr_count <= 0 {
+                                    // Wave13: seed may have preseeded external BSS so bare
+                                    // Ident from main resolves. DEDUP those slots by name
+                                    // (instr_count is 0 for scalar BSS — do not treat as stub).
+                                    if dep_is_bss
+                                        && (*acc_box).functions[sfi as usize].compile_strategy == IR_STRATEGY_BSS_GLOBAL
+                                    {
+                                        existing_body_idx = sfi
+                                    } else if (*acc_box).functions[sfi as usize].instr_count <= 0 {
                                         stub_idx = sfi
                                     } else {
                                         existing_body_idx = sfi
@@ -5183,6 +5212,7 @@ fn module_frontend_lower_programs_array_direct_box(
                                 // at the existing copy and skip re-appending the duplicate
                                 // body. Post-merge call finalize (ir_module_finalize_merged_calls)
                                 // resolves every call by name to this kept copy.
+                                // Also covers Wave13 seed-preseeded BSS globals.
                                 fn_remap[rfi as usize] = existing_body_idx
                             } else if stub_idx >= 0 && dep_ic > 0 {
                                 // Keep import stubs (ic=0) at low fn_id indices and append
@@ -5203,6 +5233,9 @@ fn module_frontend_lower_programs_array_direct_box(
                             rfi = rfi + 1
                         }
 
+                        // Wave13: when seed preseeded dep BSS, DEDUP skips those slots —
+                        // only grow acc BSS by non-deduped dep BSS size (not full dep total).
+                        var bss_grow: i64 = 0
                         var mfi: i64 = 0
                         while mfi < dep_fn_count {
                             let dst_fi = fn_remap[mfi as usize]
@@ -5231,11 +5264,36 @@ fn module_frontend_lower_programs_array_direct_box(
                                     rollback_certificate_offset,
                                     bss_offset_delta
                                 )
+                                if (*dep_box).functions[mfi as usize].compile_strategy == IR_STRATEGY_BSS_GLOBAL {
+                                    let bsz = (*dep_box).functions[mfi as usize].bss_size
+                                    let aligned = ((bsz + 7) / 8) * 8
+                                    bss_grow = bss_grow + aligned
+                                }
                             }
                             mfi = mfi + 1
                         }
-                        // Grow acc BSS by the dep module's local BSS footprint.
-                        (*acc_box).bss_total_size = (*acc_box).bss_total_size + (*dep_box).bss_total_size
+                        // Prefer exact non-deduped BSS growth. When the dep had no BSS
+                        // slots at all (or only non-BSS), fall back keeps prior behaviour
+                        // for any untracked BSS footprint (should be zero when DEDUP-clean).
+                        if bss_grow > 0 {
+                            (*acc_box).bss_total_size = (*acc_box).bss_total_size + bss_grow
+                        } else {
+                            // No newly-placed BSS: if every dep BSS was DEDUP'd, grow 0.
+                            // If dep had no BSS_GLOBAL entries, also grow 0 (dep.bss may
+                            // still be 0). Only use full dep.bss when we placed nothing
+                            // and dep claims BSS we failed to classify — defensive.
+                            var dep_bss_slots: i64 = 0
+                            var dbi: i64 = 0
+                            while dbi < dep_fn_count {
+                                if (*dep_box).functions[dbi as usize].compile_strategy == IR_STRATEGY_BSS_GLOBAL {
+                                    dep_bss_slots = dep_bss_slots + 1
+                                }
+                                dbi = dbi + 1
+                            }
+                            if dep_bss_slots == 0 && (*dep_box).bss_total_size > 0 {
+                                (*acc_box).bss_total_size = (*acc_box).bss_total_size + (*dep_box).bss_total_size
+                            }
+                        }
                         var si: i64 = 0
                         while si < (*dep_box).string_count && (*acc_box).string_count < IR_MAX_STRINGS {
                             (*acc_box).string_table[(*acc_box).string_count as usize] = (*dep_box).string_table[si as usize]
