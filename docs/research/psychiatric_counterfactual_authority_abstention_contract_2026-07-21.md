@@ -240,6 +240,7 @@ executable bridge should be synthetic and should prove only receipt separation:
 | Calibration versus causality | Same model projection and scalar uncertainty. | Calibration cohort/domain receipt. | Selective prediction cannot construct causal authority. |
 | Positivity boundary | Same trajectory and candidate action. | Support certificate. | Missing support yields `AbstentionReceipt`, never extrapolated action. |
 | Abstention routing | Same failed threshold. | Acquisition/review route. | Different missing evidence yields distinct abstention provenance. |
+| Assurance-case boundary | Same named evidence records. | Claim scope, argument route, and unresolved defeaters. | Evidence list cannot silently become a safety or authority claim. |
 
 The gate must use synthetic constants, reject category substitutions at compile
 time, and execute natively only to show that the typed distinction survives the
@@ -279,6 +280,74 @@ transportability, calibration after deployment shift, clinical utility, consent,
 or governance approval. Those remain empirical and institutional questions.
 The purpose of the type boundary is to make their absence impossible to hide.
 
+## An Assurance Case Is Not Authority
+
+The receipts above can make inputs, assumptions, and abstention visible. A
+larger system still needs to record how a bounded claim was argued from those
+receipts, what could defeat that argument, and which residual uncertainties
+remain open. Safety-assurance literature calls this an assurance case: a
+structured argument supported by evidence. It is a useful architecture for
+research software, but it is not a certificate that a system is safe or may be
+used clinically.
+
+- Burton (2022), [a causal model of safety assurance for machine learning](https://publica.fhg.de/entities/publication/70ef8558-aa21-4044-b6bc-729aa8ffbb2a), distinguishes categories of evidence and the argument that combines them.
+- NIST's [AI RMF core](https://airc.nist.gov/airmf-resources/airmf/5-sec-core/) requires documented context, limits, TEVV, monitoring, and risk management across a system lifecycle; it does not endorse an individual implementation.
+- The UK ICO's [argument-based assurance-case guidance](https://ico.org.uk/for-organisations/uk-gdpr-guidance-and-resources/artificial-intelligence/explaining-decisions-made-with-artificial-intelligence/annexe-5-argument-based-assurance-cases/) distinguishes claims, arguments, and evidence in AI governance.
+- Gohar et al. (2025), [a taxonomy of real-world defeaters](https://arxiv.org/abs/2502.00238), treats gaps and counter-evidence as explicit challenges to an assurance argument rather than as inconvenient omissions.
+
+The important design implication is negative. Evidence is not an argument;
+an argument is not an authorization; and a closed-looking argument must remain
+revisable when a defeater, a target-context change, or a new observation is
+recorded.
+
+```text
+EvidenceReferenceReceipt != ClaimScopeReceipt
+ClaimScopeReceipt + ArgumentStepReceipt != AssuranceCaseSnapshot
+AssuranceCaseSnapshot + open DefeaterReceipt != authority to act
+AssuranceCaseSnapshot != external validation, approval, or clinical action
+```
+
+### Proposed Assurance Receipts
+
+These names are future library vocabulary, not a current certification
+framework, regulator interface, or Sounio language feature.
+
+| Receipt | It may state | It must carry or reference | It must not silently become |
+| --- | --- | --- | --- |
+| `ClaimScopeReceipt` | a narrow research claim, intended context, expiry/review condition, and forbidden extrapolations. | population/context boundary, model or protocol version, and claim owner. | a universal safety or effectiveness statement. |
+| `EvidenceReferenceReceipt` | immutable reference to a measurement, test, analysis, or externally governed artifact. | provenance, method, scope, and known limits. | a conclusion merely because it exists. |
+| `ArgumentStepReceipt` | the stated inference route from scoped evidence to a bounded claim. | premises, inference rule or review method, and unresolved assumptions. | proof that the inference is sound in every context. |
+| `DefeaterReceipt` | counter-evidence, an assumption challenge, a missing test, or a target-context mismatch. | affected claim/argument, severity, disposition, and re-review route. | a resolved risk, a silent warning, or an exception callers may ignore. |
+| `ResidualUncertaintyReceipt` | uncertainty intentionally left after the stated review. | its source, scope, and monitoring or abstention route. | a numerical confidence score with no semantic boundary. |
+| `AssuranceCaseSnapshot` | a versioned graph of scoped claims, evidence references, argument steps, defeaters, and residual uncertainty. | all active nodes plus its invalidation/review trigger. | external validation, authorization, or a license to deploy. |
+
+For this lane, a `FunctionalPathDivergenceReceipt`,
+`ObservationProcessReceipt`, or `AbstentionReceipt` can be an evidence or
+defeater node in a future assurance case. None becomes a global conclusion by
+being placed in that graph. This is exactly where the non-associative idea
+becomes useful outside algebra: adding a new observation after an argument has
+been formed is not the same operation as treating it as an original premise.
+The order and role of evidence change the claim that survives review.
+
+### Executable Boundary For A Future Fixture
+
+After the imported-native acceptance path is repaired, the assurance-case
+fixture should use synthetic constants and prove only these refusals:
+
+```text
+EvidenceReferenceReceipt -> ClaimScopeReceipt                 rejected
+ClaimScopeReceipt + EvidenceReferenceReceipt -> authority     rejected
+open DefeaterReceipt -> closed AssuranceCaseSnapshot          rejected
+expired ClaimScopeReceipt -> current snapshot                 rejected
+AssuranceCaseSnapshot -> ClinicalActionAuthority              rejected
+```
+
+The positive control may construct an `AssuranceCaseSnapshot` only when each
+evidence reference has declared scope, each argument has named premises, and
+each active defeater routes to abstention or further review. This remains an
+auditability property of a synthetic program. It neither proves a safety case
+adequate nor determines who has institutional authority.
+
 ## Falsifiers
 
 This direction should be revised or demoted if:
@@ -290,6 +359,10 @@ This direction should be revised or demoted if:
   protocol in a preregistered target-context study;
 - selective-risk evidence is presented as causal identification in the
   implementation or its documentation;
+- an assurance-case snapshot is presented as a safety certificate, external
+  validation, approval, or authority to act; or
+- an active defeater can be dropped, reordered as an original premise, or
+  converted into a resolved conclusion without an explicit review route;
 - a research decision candidate can reach a clinical-action API without an
   independently governed validation boundary.
 
@@ -299,13 +372,13 @@ This direction should be revised or demoted if:
 Semantic-Lane-ID: psychiatric-counterfactual-authority-research-v0
 Owner: codex-root
 Concept-IDs: SOUNIO-ORDERED-PATH-PROVENANCE; SOUNIO-SCIENCE-RESEARCH-BOUNDARY; SOUNIO-PHYSICAL-OBSERVATION; SOUNIO-EPISTEMIC-NUMERIC-VALUE
-Intent-Preserved: counterfactual representation, causal identification, transportability, calibration, abstention, and clinical validation remain distinct claims
-Transformation: none; literature-backed research boundary mapped to existing workflow syntax and prospective library receipts
+Intent-Preserved: counterfactual representation, causal identification, transportability, calibration, abstention, assurance arguments, defeaters, and clinical validation remain distinct claims
+Transformation: literature-backed research boundary mapped to existing workflow syntax and prospective library receipts; assurance cases remain scoped audit artifacts
 Types-Changed: none
 Effects-Changed: none
 IR-Changed: none
-Claims-Introduced: future Sounio psychiatric fixtures should treat abstention as explicit evidence-bearing output and require separate authority receipts
-Claims-Forbidden: patient-level effect estimation, treatment recommendation, automated action, causal identification from fit, transport from label matching, and clinical validation from compiler success
+Claims-Introduced: future Sounio psychiatric fixtures should treat abstention and unresolved assurance defeaters as explicit evidence-bearing outputs and require separate authority receipts
+Claims-Forbidden: patient-level effect estimation, treatment recommendation, automated action, causal identification from fit, transport from label matching, safety certification or authority from an assurance snapshot, and clinical validation from compiler success
 Assumptions: cited work supplies design constraints, not a biological model or validation of any future Sounio package
 Write-Set: docs/research/psychiatric_counterfactual_authority_abstention_contract_2026-07-21.md; docs/governance/topic-registry.v1.json; docs/governance/DOCS_AUTHORITY_MATRIX.md
 Read-Set: docs/research/psychiatric_state_inference_contract_2026-07-21.md; tests/frontend/defer_action_counterfactual_basic.sio; tests/frontend/plan_acquisition_counterfactual_basic.sio; tests/frontend/propose_alternatives_counterfactual_basic.sio; stdlib/causal/README.md
@@ -321,8 +394,8 @@ Authoritative-Only-If: the cited sources, current Sounio surfaces, and forbidden
 ```text
 Semantic-Outcome: synthetic nominal authority constructor and negative category-substitution witness added
 Concept-Status-Before: counterfactual workflow syntax existed without a dedicated authority-boundary witness
-Concept-Status-After: the selected library protocol requires question, identification, transport, and selective-risk receipts for a research candidate and keeps abstention distinct
-Distinctions-Added: counterfactual question != research decision candidate; abstention != implicit fallback
+Concept-Status-After: the selected library protocol requires question, identification, transport, and selective-risk receipts for a research candidate; abstention and unresolved assurance defeaters remain distinct
+Distinctions-Added: counterfactual question != research decision candidate; abstention != implicit fallback; evidence != assurance argument != authority
 Distinctions-Preserved: formal model != empirical claim; compile success != clinical validation
 Distinctions-Erased: none
 Evidence-Run: bin/souc run tests/run-pass/psychiatric_counterfactual_authority_receipt_chain.sio; bin/souc check tests/compile-fail/psychiatric_counterfactual_question_cannot_authorize.sio; bash scripts/run_sio_test_suite.sh psychiatric_counterfactual_authority_receipt_chain --verbose; bash scripts/run_sio_test_suite.sh psychiatric_counterfactual_question_cannot_authorize --verbose
