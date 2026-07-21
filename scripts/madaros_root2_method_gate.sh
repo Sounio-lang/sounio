@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # scripts/madaros_root2_method_gate.sh
 #
-# Madaros Root 2 gate: associated Type::method + same-module &self methods.
-# Multi-module instance method calls remain residual (document, do not fail gate).
+# Madaros Root 2 gate: associated Type::method + same-module &self methods +
+# multi-module instance methods (Wave9 residual closeout — required green).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -36,23 +36,14 @@ run_ok "multi-module associated import" \
   tests/run-pass/madaros_root2_associated_import.sio \
   ROOT2_ASSOCIATED_IMPORT_OK
 
-# Residual: multi-module instance method — expected compile fail under Madaros
-echo "== residual multi-module instance method (expect fail) =="
-cat >"$OUT/mm.sio" <<'EOF'
-use epistemic::knowledge::{Epistemic, ep_measured}
-fn main() -> i32 with IO, Mut, Div, Panic {
-    let e = ep_measured(10.0, 0.5)
-    print(e.val())
-    print("\n")
-    print("UNEXPECTED_MM_METHOD_OK\n")
-    return 0
-}
-EOF
-if "$SOUC" compile "$OUT/mm.sio" -o "$OUT/mm.elf" >"$OUT/mmc.log" 2>&1; then
-  echo "NOTE: multi-module instance method COMPILED — residual may be FIXED; update audit"
-else
-  echo "OK multi-module instance method still blocked (residual documented)"
-fi
+# Multi-module instance method (was residual; now required)
+run_ok "multi-module instance method" \
+  tests/run-pass/madaros_root2_multimodule_method.sio \
+  ROOT2_MULTIMODULE_METHOD_OK
+
+run_ok "knowledge method form" \
+  tests/run-pass/madaros_knowledge_method_form.sio \
+  KNOWLEDGE_METHOD_FORM_OK
 
 mkdir -p "$ROOT/artifacts/compiler"
 COMMIT="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
@@ -68,11 +59,12 @@ cat >"$ROOT/artifacts/compiler/madaros_root2_method_receipt.v1.json" <<EOF
     "same_module_self_ref_method_call",
     "same_module_associated_type_method",
     "same_module_method_on_method_return",
-    "multimodule_associated_type_method_import"
+    "multimodule_associated_type_method_import",
+    "multimodule_instance_method_call",
+    "epistemic_method_form_multimodule"
   ],
   "claims_not_made": [
-    "multimodule_instance_method_call",
-    "full_root2_null_deref_closed",
+    "full_root2_census_closed",
     "enum_ctor_path"
   ]
 }

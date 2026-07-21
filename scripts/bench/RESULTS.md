@@ -84,6 +84,31 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 | cumprod_by (1M rows, 1000 dense keys) | | ~12 | ~17 | **0.70x — Sounio wins** | dense running product (expanding_max/min ≡ cummax/cummin_by) |
 | zscore_by (1M rows, 1000 dense keys) | | ~270 | ~694 | **0.39x — Sounio wins** | dense two-pass Welford; demean/minmax/sem/range share the engine |
 | head_mask_by / tail_mask_by (1M rows, 1000 dense keys) | | (fast, single pass) | | **win** | dense per-group counter mask (fwd head / rev tail) |
+| mad_by (1M rows, 1000 dense keys) | | ~43 | ~592 | **0.07x — wins (14x)** | dense 3-pass; pandas has no native transform('mad') |
+| kurt_by (1M rows, 1000 dense keys) | | ~52 | ~484 | **0.11x — wins (9x)** | dense power-moments; pandas kurt via lambda |
+| any_by (1M rows, 1000 dense keys) | | ~33 | ~407 | **0.08x — wins (12x)** | dense OR reduce+broadcast |
+| cumany_by / cumall_by (1M rows, 1000 dense keys) | | ~22 | ~495 | **0.05x — wins (22x)** | dense running OR/AND flag |
+| skew_by (1M rows, 1000 dense keys) | | ~51 | ~21 | ~2.5x — loss | pandas transform('skew') is fast native Cython |
+| group_first_by / group_last_by (1M rows, 1000 dense keys) | | ~37 | ~17 | ~2.1x — loss | pandas transform('first'/'last') fast native |
+| group_prod_by (1M rows, 1000 dense keys) | | ~25 | ~18 | ~1.35x — loss | pandas transform('prod') fast native |
+| corr_by (1M rows, 1000 groups, 2 cols) | | ~57 | ~406 | **0.14x — wins (7x)** | dense two-pass co-moments vs pandas groupby.apply corr |
+| share_by (1M rows, 1000 dense keys) | | ~34 | ~421 | **0.08x — wins (12x)** | dense two-pass val/group_sum; cumsum_pct/l2norm/count_nonzero share the engine |
+| cummax_rev_by / cummin_rev_by / cumprod_rev_by (1M rows, 1000 dense keys) | | (fast, reverse pass) | | **win** | dense suffix cumulative vs pandas double-reverse |
+| clip_std_by (sigma-clip, 1M rows, 1000 groups) | | ~88 | ~1485 | **0.06x — wins (17x)** | dense two-pass; pandas transform-lambda clip is very slow |
+| normalize_l1_by (1M rows, 1000 dense keys) | | ~60 | ~497 | **0.12x — wins (8x)** | dense two-pass; absdev/harmean/rms/coefvar/argmax_pos/is_max/cumcount_frac/sumabs share the engine |
+| weighted_mean_by (1M rows, 1000 groups, 2 cols) | | ~30 | ~331 | **0.09x — wins (11x)** | dense two-pass Σvw/Σw vs pandas groupby.apply |
+| first_diff_by (1M rows, 1000 dense keys) | | ~35 | ~403 | **0.09x — wins (11x)** | dense; is_min/argmin/meansq/var_pop/std_pop/pct_of_first/cummean_rev/weighted_sum share the batch |
+| OLS predict_by (1M rows, 1000 groups, 2 cols) | | ~90 | ~2102 | **0.04x — wins (23x)** | dense 3-pass per-group regression vs pandas groupby.apply(polyfit); slope/intercept/r2/residual/cov_pop share the engine |
+| zscore_pop_by (1M rows, 1000 dense keys) | | ~50 | ~718 | **0.07x — wins (14x)** | dense two-pass; cumsum_sq/cumsum_abs/cummax_abs share the batch |
+| ewm_by (1M rows, 1000 dense keys) | | ~35 | ~500 | **0.07x — wins (14x)** | dense per-group EWM recurrence vs pandas groupby.apply(ewm) |
+| weighted_var_by (1M rows, 1000 groups, 2 cols) | | ~37 | ~611 | **0.06x — wins (16x)** | dense; weighted_std/rss/rmse/skew_pop/kurt_pop/midrange/running_range/last_over_first share the batch |
+| count_above_mean_by (1M rows, 1000 dense keys) | | ~39 | ~504 | **0.08x — wins (13x)** | dense 3-pass; sign_sum/count_pos/frac_pos/max_abs/range_ratio + abs-cumulatives share the batch |
+| sign_sum_by (1M rows, 1000 dense keys) | | ~58 | ~420 | **0.14x — wins (7x)** | dense one-pass sign reduce |
+| fano_factor_by (1M rows, 1000 dense keys) | | ~24 | ~491 | **0.05x — wins (20x)** | dense two-pass var/mean; snr/cv2 share the engine |
+| drawdown_by (1M rows, 1000 dense keys) | | ~13 | ~85 | **0.16x — wins** | LEAN single-running-max pass (vs pandas v - groupby.cummax); runup/drawdown_pct/running_argmax likewise lean |
+| **batch-10 (20 verbs)** — sum_sq/cube, count_zero, sum_pos/neg, peak/trough_ratio, normalize_mean, row_number(+rev), cumcount_neg/nonzero, range_over_std, cumcount_above_mean, cumsum_centered_sq, cosine/euclid/manhattan/chebyshev/cross_mean | | | | **all win** | dense one/two-pass reductions + 2-col distances vs pandas per-group lambdas |
+| **batch-11 (10 verbs, set 3)** — num_increases/decreases, total_variation, mean_abs_change, autocorr1, is_running_max/min, max_drawdown, max_runup, count_ge_mean | | | | **all win** | dense change/running-extreme/autocorr passes vs pandas per-group lambdas/apply |
+| **batch-12 (10 verbs, set 4)** — count_le_mean, count/frac_within_1std, count_outlier_2std, cummax/cummin_pct, sum_recip, cumsum_recip, cumsum_sign, cumcount_ge_prev | | | | **all win** | dense threshold/reciprocal/running passes vs pandas per-group lambdas |
 | cov (1M rows, two-pass mean-shift) | | 6.7 | 8.5 | **0.78x — Sounio wins** | (new verb) |
 | corr (1M rows, two-pass + bf_sqrt) | | 10.3 | 8.0 | **~1.3x** | (new verb) |
 | median (1M rows, quickselect) | | ~34 | ~16 | **~2.2x** | numpy SIMD introselect |

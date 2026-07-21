@@ -133,6 +133,14 @@ fn empty_lower_loop_labels() -> LowerLoopLabels {
 
 let LOWER_GLOBAL_ELEM_F64: i64 = 2
 let LOWER_GLOBAL_SCALAR_F64: i64 = 3
+// Word-size integer scalar global (`var G: i64 = …`). Distinct from 0/unknown so
+// `print(G)` / `println(G)` can select print_int instead of the char* printer.
+let LOWER_GLOBAL_SCALAR_I64: i64 = 1
+// Non-f64 fixed array global (`var A: [i64; N] = …`, including N=1). Distinct from
+// scalar kinds so Ident lowering loads the BSS *address* for IndexGet, not the
+// stored element value. Without this, `[T; 1]` (bss_size <= 8) took the scalar
+// load path and IndexGet treated the init word as a pointer → SEGV.
+let LOWER_GLOBAL_ARRAY: i64 = 4
 
 pub struct LowerGlobalTypeTable {
     // Indexed by IrModule.functions slot. Keep this aligned with IR_MAX_FUNCS;
@@ -669,6 +677,52 @@ fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEp
     lo = lowerer_seed_module_from_summary(lo, summary)
     lo = lowerer_seed_metadata_from_summary(lo, summary)
     lo.probe_mode = summary.probe_mode
+    lo
+}
+
+// Memory wall residual (post-#1319/#1336): body lower used to call lowerer_new()
+// (full empty IrModule) then seed stubs from the summary module — a second full
+// empty materialization per dep while the summary Box still held the first.
+// Consume the owned summary and reuse its live Boxes. string_count is zeroed to
+// match seed behaviour (body lower rebuilds the string table).
+fn lowerer_new_from_program_summary_owned(summary: IrProgramSummary, epistemic: &IrEpistemicSection) -> Lowerer with Alloc, Mut, Panic, Div, IO {
+    var lo = Lowerer {
+        module: summary.module,
+        epistemic_contests: Box::new(empty_lower_epistemic_contest_index()),
+        current_fn: IR_INVALID_FN,
+        current_func: Box::new(ir_empty_function()),
+        current_func_loaded: false,
+        env: None,
+        locals: Box::new(empty_lower_local_stack()),
+        scope_depth: 0,
+        loop_labels: Box::new(empty_lower_loop_labels()),
+        loop_depth: 0,
+        error_count: 0,
+        had_error: false,
+        enum_variants: summary.enum_variants,
+        struct_layouts: summary.struct_layouts,
+        global_types: summary.global_types,
+        array_elem_float_regs: [IR_INVALID_REG; 512],
+        array_elem_float_reg_count: 0,
+        variance_base_regs: [IR_INVALID_REG; 1024],
+        variance_value_regs: [IR_INVALID_REG; 1024],
+        variance_base_reg_count: 0,
+        debug_mode: false,
+        probe_mode: summary.probe_mode,
+        closure_caps: Box::new(empty_closure_cap_table()),
+        pending_closure_fn_id: -1,
+        allow_direct_capturing_closure_literal: false,
+        pending_variance_reg: -1,
+    }
+    (*lo.module).epistemic = (*epistemic)
+    lo.epistemic_contests = lower_epistemic_contest_index_from_ref(epistemic)
+    if lower_live_diag_enabled() {
+        print("CONTEST_IR_INDEX_BIND constructor=summary_owned contest_count=")
+        print_int((*lo.epistemic_contests).contest_count)
+        print("\n")
+    }
+    // Match lowerer_seed_module_from_summary: body path rebuilds strings.
+    (*lo.module).string_count = 0
     lo
 }
 
@@ -1298,6 +1352,25 @@ fn lower_array_literal_word_scalar_ref(e: &Expr, repeat_ident_scalar_kind: i64) 
     }
 }
 
+// BSS hyper_algebra_kind encoding for packed globals (physical size + signedness):
+//   1  = u8  — physical 1 byte, IndexGet label_id=3 (movzx)
+//   17 = i8  — physical 1 byte, IndexGet label_id=4 (movsx)
+//   8  = i64/f64/other — physical 8 bytes, IndexGet label_id=2
+// Init emit must use lower_bss_elem_physical_size so i8 is not treated as 17-byte stride.
+fn lower_bss_elem_physical_size(kind: i64) -> i64 {
+    if kind == 1 || kind == 17 {
+        1
+    } else if kind <= 0 {
+        8
+    } else {
+        kind
+    }
+}
+
+fn lower_bss_elem_is_signed_byte(kind: i64) -> bool {
+    kind == 17
+}
+
 fn lower_typeexpr_bss_elem_size(ty_opt: &Option<Box<TypeExpr>>) -> i64 with Panic, Div {
     match *ty_opt {
         Some(ty) => {
@@ -1308,7 +1381,13 @@ fn lower_typeexpr_bss_elem_size(ty_opt: &Option<Box<TypeExpr>>) -> i64 with Pani
                         let name = ir_path_first_name((*elem).path)
                         if name.len == 2 {
                             let first = name.buf[0] as i64
-                            if (first == 105 || first == 117) && (name.buf[1] as i64) == 56 {
+                            let second = name.buf[1] as i64
+                            // 'i' '8' → signed packed byte (movsx on load)
+                            if first == 105 && second == 56 {
+                                return 17
+                            }
+                            // 'u' '8' → unsigned packed byte (movzx on load)
+                            if first == 117 && second == 56 {
                                 return 1
                             }
                         }
@@ -2861,11 +2940,32 @@ fn lower_type_expr_is_array_of_f64(te: &TypeExpr) -> bool with Mut, Panic, Div {
     }
 }
 
+fn lower_type_expr_is_array(te: &TypeExpr) -> bool with Mut, Panic, Div {
+    if (*te).kind == TypeExprKind::TypeReference || (*te).kind == TypeExprKind::TypeRefMut {
+        match (*te).inner {
+            Some(inner_ty) => return lower_type_expr_is_array(&(*inner_ty)),
+            None => return false,
+        }
+    }
+    (*te).kind == TypeExprKind::TypeArray
+}
+
+fn lower_global_kind_is_array_base(kind: i64) -> bool {
+    // Bases that IndexGet must address via BSS_BASE+off (not load the init word).
+    kind == LOWER_GLOBAL_ELEM_F64 || kind == LOWER_GLOBAL_ARRAY
+}
+
 fn lower_global_elem_kind(ty_opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
     match *ty_opt {
         Some(ty) => {
             if lower_type_expr_is_f64(&(*ty)) { return LOWER_GLOBAL_SCALAR_F64 }
             if lower_type_expr_is_array_of_f64(&(*ty)) { return LOWER_GLOBAL_ELEM_F64 }
+            // Any fixed array (incl. [i64; 1], [i8; N], …) needs address form.
+            // Must precede the integer-scalar check: TypeArray is not TypeNamed.
+            if lower_type_expr_is_array(&(*ty)) { return LOWER_GLOBAL_ARRAY }
+            // Scalar integers: needed so print/println of `var G: i64` routes to
+            // print_int (same SEGV class as untyped f64 → char*).
+            if lower_type_expr_is_integer(&(*ty)) { return LOWER_GLOBAL_SCALAR_I64 }
             0
         }
         _ => 0,
@@ -5684,6 +5784,35 @@ impl Lowerer {
         }
     }
 
+    // Scalar kind for a module-level BSS global identified by name.
+    // Returns 2 for `var G: f64`, 1 for word-size integer scalars, else 0.
+    // Locals already carry scalar_kind; this is the print/println dispatch
+    // fallback that #1325 did for array-element indexing only.
+    fn bss_global_scalar_kind(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, name)
+        if fn_id < 0 {
+            return 0
+        }
+        if fn_id >= self.module.fn_count {
+            return 0
+        }
+        if self.module.functions[fn_id as usize].compile_strategy != IR_STRATEGY_BSS_GLOBAL {
+            return 0
+        }
+        // Aggregate bases (arrays/structs) are not print scalars.
+        if self.module.functions[fn_id as usize].bss_size > 8 {
+            return 0
+        }
+        let gkind = lower_global_type_table_lookup(&(*self.global_types), fn_id)
+        if gkind == LOWER_GLOBAL_SCALAR_F64 {
+            return 2
+        }
+        if gkind == LOWER_GLOBAL_SCALAR_I64 {
+            return 1
+        }
+        0
+    }
+
     fn index_base_elem_is_float_ref(self, base_opt: &Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc {
         match *base_opt {
             Some(base_expr) => {
@@ -5784,7 +5913,13 @@ impl Lowerer {
             return true
         }
         if (*e).kind == ExprKind::ExprIdent {
-            return self.lookup_local_scalar_kind((*e).name) == 2
+            if self.lookup_local_scalar_kind((*e).name) == 2 {
+                return true
+            }
+            // Module-level `var G: f64` is a BSS slot, not a local with scalar_kind=2.
+            // Without this fallback, `print(G)` stays on the char* printer and SEGVs
+            // (array path already falls back via index_base_elem_is_float_ref).
+            return self.bss_global_scalar_kind((*e).name) == 2
         }
         if (*e).kind == ExprKind::ExprCast {
             return lower_cast_type_is_f64(&(*e).cast_type)
@@ -5888,7 +6023,12 @@ impl Lowerer {
             return 3
         }
         if (*e).kind == ExprKind::ExprIdent {
-            return self.lookup_local_scalar_kind((*e).name)
+            let local_sk = self.lookup_local_scalar_kind((*e).name)
+            if local_sk != 0 {
+                return local_sk
+            }
+            // BSS scalar global fallback: see bss_global_scalar_kind.
+            return self.bss_global_scalar_kind((*e).name)
         }
         if (*e).kind == ExprKind::ExprCast {
             if lower_cast_type_is_f64(&(*e).cast_type) { return 2 }
@@ -7970,7 +8110,8 @@ impl Lowerer {
                         if target_base_is_string {
                             index_set_instr.label_id = 3
                         } else if target_global_elem_size > 0 {
-                            index_set_instr.label_id = if target_global_elem_size == 1 { 3 } else { 2 }
+                            // Byte store is size-only (i8 and u8 both write al).
+                            index_set_instr.label_id = if lower_bss_elem_physical_size(target_global_elem_size) == 1 { 3 } else { 2 }
                         } else if target_base_is_ref {
                             index_set_instr.label_id = 1
                         }
@@ -9843,14 +9984,22 @@ impl Lowerer {
         let dst = pair_d.1
         var instr = ir_index_get(dst, base, idx)
         // label_id routing for native-v2 codegen_x86_linux IrIndexGet:
-        //   3 = raw byte load  movzx rax, byte [base+idx]   (packed *u8 / BSS i8)
-        //   2 = raw word load  mov  rax, [base+idx*8]       (BSS non-byte)
-        //   1 = ref array      deref handle slot then *8
+        //   4 = raw signed byte load  movsx rax, byte [base+idx]  (BSS i8)
+        //   3 = raw byte load         movzx rax, byte [base+idx]  (packed *u8 / BSS u8)
+        //   2 = raw word load         mov  rax, [base+idx*8]      (BSS non-byte)
+        //   1 = ref array             deref handle slot then *8
         //   0 = local/param GC handle resolve then *8
+        // hyper_algebra_kind 17 = i8 (signed), 1 = u8 (unsigned); both physical size 1.
         if base_is_string {
             instr.label_id = 3
         } else if global_elem_size > 0 {
-            instr.label_id = if global_elem_size == 1 { 3 } else { 2 }
+            if lower_bss_elem_is_signed_byte(global_elem_size) {
+                instr.label_id = 4
+            } else if lower_bss_elem_physical_size(global_elem_size) == 1 {
+                instr.label_id = 3
+            } else {
+                instr.label_id = 2
+            }
         } else if base_is_ref {
             instr.label_id = 1
         }
@@ -10572,16 +10721,26 @@ impl Lowerer {
                 // global metadata for stores. A callee can update the backing
                 // slot, so reads must reload it instead of using that stale
                 // per-function snapshot. Aggregate bindings remain base pointers.
+                // 1-element arrays have bss_size <= 8 but are still aggregates —
+                // reloading the init word would make IndexGet treat it as a ptr.
                 if self.lookup_local_is_global(e.name) && self.lookup_local_global_bss_size(e.name) <= 8 {
-                    let bss_off = self.lookup_local_global_bss_offset(e.name)
-                    let pair = self.fresh_reg()
-                    let lo = pair.0
-                    let reg = pair.1
-                    let lo2 = lo.emit(ir_load_global(reg, bss_off, e.name))
-                    if self.lookup_local_scalar_kind(e.name) == 2 {
-                        return (lo2.emit(ir_mark_float_reg(reg)), reg)
+                    let local_g_fn = lowerer_lookup_fn_id_by_name_ref(&self, e.name)
+                    let local_g_kind = if local_g_fn >= 0 {
+                        lower_global_type_table_lookup(&(*self.global_types), local_g_fn)
+                    } else {
+                        0
                     }
-                    return (lo2, reg)
+                    if !lower_global_kind_is_array_base(local_g_kind) {
+                        let bss_off = self.lookup_local_global_bss_offset(e.name)
+                        let pair = self.fresh_reg()
+                        let lo = pair.0
+                        let reg = pair.1
+                        let lo2 = lo.emit(ir_load_global(reg, bss_off, e.name))
+                        if self.lookup_local_scalar_kind(e.name) == 2 || self.bss_global_scalar_kind(e.name) == 2 {
+                            return (lo2.emit(ir_mark_float_reg(reg)), reg)
+                        }
+                        return (lo2, reg)
+                    }
                 }
                 (self, src)
             } else {
@@ -10591,18 +10750,22 @@ impl Lowerer {
                     if fn_strategy == IR_STRATEGY_BSS_GLOBAL {
                         let bss_off = self.module.functions[fn_id as usize].param_count
                         let gsize = self.module.functions[fn_id as usize].bss_size
+                        let global_elem_kind = lower_global_type_table_lookup(&(*self.global_types), fn_id)
                         let ref_pair = self.fresh_reg()
                         let lo2 = ref_pair.0
                         let ref_reg = ref_pair.1
                         var lo3 = lo2
-                        if gsize > 8 {
+                        // Multi-word BSS (gsize > 8) and *all* array globals —
+                        // including `[T; 1]` where gsize == elem_size <= 8 —
+                        // must materialize the BSS base address for IndexGet.
+                        // Scalar path loads the stored word (correct for `var G: i64`).
+                        if gsize > 8 || lower_global_kind_is_array_base(global_elem_kind) {
                             lo3 = lo2.emit(ir_load_imm(ref_reg, BSS_BASE_LINUX + bss_off))
                         } else {
                             lo3 = lo2.emit(ir_load_global(ref_reg, bss_off, e.name))
                         }
                         // BSS metadata is applied only when the global is used;
                         // eagerly loading every global can exhaust main's IR budget.
-                        let global_elem_kind = lower_global_type_table_lookup(&(*lo3.global_types), fn_id)
                         if global_elem_kind == LOWER_GLOBAL_SCALAR_F64 {
                             lo3 = lo3.emit(ir_mark_float_reg(ref_reg))
                         } else if global_elem_kind == LOWER_GLOBAL_ELEM_F64 {
@@ -11294,15 +11457,14 @@ fn lower_program_to_ir_summary_box_with_epistemic_ref(prog: &Program, epistemic:
     lowerer_preseed_program_items_mut(&! lo, &prog.items, ir_empty_name())
     let error_count = lo.error_count
     let had_error = lo.had_error
+    // Memory wall residual: do NOT Box::new(ir_empty_program_summary()) then
+    // overwrite fields. ir_empty_program_summary materializes a full empty
+    // IrModule (~[IrFunction;2048]) that is immediately discarded — a second
+    // empty module per dep on top of lowerer_new. Box the live summary Boxes
+    // directly (probe path already does this).
     let inner = ir_program_summary_from_lowerer(lo)
-    var summary_box = Box::new(ir_empty_program_summary())
-    (*summary_box).module = inner.module
-    (*summary_box).enum_variants = inner.enum_variants
-    (*summary_box).struct_layouts = inner.struct_layouts
-    (*summary_box).global_types = inner.global_types
-    (*summary_box).probe_mode = inner.probe_mode
     IrProgramSummaryBoxResult {
-        summary: summary_box,
+        summary: Box::new(inner),
         error_count: error_count,
         had_error: had_error,
     }
@@ -11330,15 +11492,10 @@ fn lower_program_to_ir_summary_box_with_externs_ref(
     lowerer_preseed_program_items_mut(&! lo, &prog.items, ir_empty_name())
     let error_count = lo.error_count
     let had_error = lo.had_error
+    // Same residual as with_epistemic_ref: skip empty IrProgramSummary densify.
     let inner = ir_program_summary_from_lowerer(lo)
-    var summary_box = Box::new(ir_empty_program_summary())
-    (*summary_box).module = inner.module
-    (*summary_box).enum_variants = inner.enum_variants
-    (*summary_box).struct_layouts = inner.struct_layouts
-    (*summary_box).global_types = inner.global_types
-    (*summary_box).probe_mode = inner.probe_mode
     IrProgramSummaryBoxResult {
-        summary: summary_box,
+        summary: Box::new(inner),
         error_count: error_count,
         had_error: had_error,
     }
@@ -11575,6 +11732,29 @@ fn lower_program_bodies_from_summary_with_epistemic_boxed_ref(
     epistemic: &IrEpistemicSection
 ) -> IrLowerBoxResult with Mut, Panic, Div, Alloc, IO {
     let lo = lowerer_new_from_program_summary(summary, epistemic)
+    var lo2 = lo.lower_program_bodies_ref(&prog.items)
+    var patch_stats = ir_empty_validated_patch_stats()
+    if !lo2.had_error {
+        var module_box = lo2.module
+        patch_stats = ir_patch_validated_calls(&! (*module_box))
+        lo2.module = module_box
+    }
+    IrLowerBoxResult {
+        module: lo2.module,
+        error_count: lo2.error_count,
+        had_error: lo2.had_error,
+        patch_stats: patch_stats,
+    }
+}
+
+// Prefer this on multi-mod hot paths: consumes the summary and reuses its
+// IrModule Box so body lower does not allocate a second empty IrModule.
+fn lower_program_bodies_from_summary_with_epistemic_boxed_owned(
+    prog: &Program,
+    summary: IrProgramSummary,
+    epistemic: &IrEpistemicSection
+) -> IrLowerBoxResult with Mut, Panic, Div, Alloc, IO {
+    let lo = lowerer_new_from_program_summary_owned(summary, epistemic)
     var lo2 = lo.lower_program_bodies_ref(&prog.items)
     var patch_stats = ir_empty_validated_patch_stats()
     if !lo2.had_error {

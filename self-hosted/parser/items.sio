@@ -13,38 +13,120 @@ fn items_reverse_item_list_opt(items: Option<Box<ItemList>>) -> Option<Box<ItemL
     items_reverse_item_list_loop(items, None)
 }
 
-// Record a compile-time integer/float global initializer for native BSS fill.
-// Covers:
-//   - scalar `42` / `-42` / `1.5` / unary-neg floats
-//   - array-repeat `[V; N]`  → one fill word (i64 value or f64 bits)
-//   - element-list `[a, b, c]` → one word per element, same name hash, source order
-// Non-literal elements are silently skipped (BSS stays zero for those slots).
-fn items_record_global_int_init(name: Name, init: &Expr) with Mut, Div {
-    if (*init).kind == ExprKind::ExprIntLit {
-        ast_record_global_var_init(name, (*init).int_val)
-        return
+// Const-fold a global-init expression to one i64 word (int value or f64 bits).
+// Returns (ok, word). Covers the Sounio negative idiom `0 - n` (no unary-minus
+// in the style guide) so element-list packing does not silently drop slots and
+// collapse into a wrong array-repeat fill of the remaining literal.
+// Non-const expressions return ok=false (caller skips — residual for runtime inits).
+fn items_eval_global_init_word(e: &Expr) -> (bool, i64) with Div {
+    if (*e).kind == ExprKind::ExprIntLit {
+        return (true, (*e).int_val)
     }
-    if (*init).kind == ExprKind::ExprFloatLit {
-        // Module-level `let/var X: f64 = <lit>`: record the IEEE-754 bits so the
-        // BSS-global initializer emits the value. int_val is 0 for a float literal,
-        // so without this branch f64 globals silently read 0.
-        // Also covers f64 array-repeat fill: `[1.5; N]` recurses into this branch.
-        ast_record_global_var_init(name, f64_to_bits((*init).float_val))
-        return
+    if (*e).kind == ExprKind::ExprFloatLit {
+        return (true, f64_to_bits((*e).float_val))
     }
-    if (*init).kind == ExprKind::ExprUnary && (*init).un_op == UnaryOp::OpNeg {
-        match (*init).left {
+    if (*e).kind == ExprKind::ExprBoolTrue {
+        return (true, 1)
+    }
+    if (*e).kind == ExprKind::ExprBoolFalse {
+        return (true, 0)
+    }
+    if (*e).kind == ExprKind::ExprUnary && (*e).un_op == UnaryOp::OpNeg {
+        match (*e).left {
             Some(operand) => {
-                if (*operand).kind == ExprKind::ExprIntLit {
-                    ast_record_global_var_init(name, 0 - (*operand).int_val)
-                } else if (*operand).kind == ExprKind::ExprFloatLit {
-                    ast_record_global_var_init(name, f64_to_bits(0.0 - (*operand).float_val))
+                let pair = items_eval_global_init_word(&(*operand))
+                if pair.0 {
+                    // Integers: arithmetic negate. Floats: re-negate via bits
+                    // only when the operand was a float lit (bits path above).
+                    if (*operand).kind == ExprKind::ExprFloatLit {
+                        return (true, f64_to_bits(0.0 - (*operand).float_val))
+                    }
+                    return (true, 0 - pair.1)
                 }
             }
             _ => {}
         }
-        return
+        return (false, 0)
     }
+    if (*e).kind == ExprKind::ExprBinary {
+        match (*e).left {
+            Some(lhs) => {
+                match (*e).right {
+                    Some(rhs) => {
+                        let lp = items_eval_global_init_word(&(*lhs))
+                        let rp = items_eval_global_init_word(&(*rhs))
+                        if !lp.0 || !rp.0 {
+                            return (false, 0)
+                        }
+                        // Float binary: both sides float lits → fold bits.
+                        if (*lhs).kind == ExprKind::ExprFloatLit && (*rhs).kind == ExprKind::ExprFloatLit {
+                            let a = (*lhs).float_val
+                            let b = (*rhs).float_val
+                            if (*e).bin_op == BinaryOp::OpAdd {
+                                return (true, f64_to_bits(a + b))
+                            }
+                            if (*e).bin_op == BinaryOp::OpSub {
+                                return (true, f64_to_bits(a - b))
+                            }
+                            if (*e).bin_op == BinaryOp::OpMul {
+                                return (true, f64_to_bits(a * b))
+                            }
+                            if (*e).bin_op == BinaryOp::OpDiv {
+                                return (true, f64_to_bits(a / b))
+                            }
+                            return (false, 0)
+                        }
+                        // Integer / mixed-folded int words.
+                        let a = lp.1
+                        let b = rp.1
+                        if (*e).bin_op == BinaryOp::OpAdd {
+                            return (true, a + b)
+                        }
+                        if (*e).bin_op == BinaryOp::OpSub {
+                            return (true, a - b)
+                        }
+                        if (*e).bin_op == BinaryOp::OpMul {
+                            return (true, a * b)
+                        }
+                        if (*e).bin_op == BinaryOp::OpDiv {
+                            if b == 0 {
+                                return (false, 0)
+                            }
+                            return (true, a / b)
+                        }
+                        if (*e).bin_op == BinaryOp::OpRem {
+                            if b == 0 {
+                                return (false, 0)
+                            }
+                            return (true, a % b)
+                        }
+                        if (*e).bin_op == BinaryOp::OpBitAnd {
+                            return (true, a & b)
+                        }
+                        if (*e).bin_op == BinaryOp::OpBitOr {
+                            return (true, a | b)
+                        }
+                        if (*e).bin_op == BinaryOp::OpBitXor {
+                            return (true, a ^ b)
+                        }
+                        return (false, 0)
+                    }
+                    None => { return (false, 0) }
+                }
+            }
+            None => { return (false, 0) }
+        }
+    }
+    (false, 0)
+}
+
+// Record a compile-time integer/float/bool global initializer for native BSS fill.
+// Covers:
+//   - scalar `42` / `-42` / `0 - n` / `1.5` / unary-neg floats / true|false
+//   - array-repeat `[V; N]`  → one fill word (i64 value or f64 bits)
+//   - element-list `[a, b, c]` → one word per element, same name hash, source order
+// Non-const elements are silently skipped (BSS stays zero for those slots).
+fn items_record_global_int_init(name: Name, init: &Expr) with Mut, Div {
     if (*init).kind == ExprKind::ExprArrayLit {
         // Repeat form: left = fill value, right = count → single fill word
         match (*init).left {
@@ -52,7 +134,7 @@ fn items_record_global_int_init(name: Name, init: &Expr) with Mut, Div {
                 items_record_global_int_init(name, &(*repeat_val))
             }
             None => {
-                // Element-list form: [a, b, c] — record each literal in source order
+                // Element-list form: [a, b, c] — record each const word in source order
                 // (args is already reversed into source order by parse_array_literal).
                 var cur = (*init).args
                 while true {
@@ -66,6 +148,11 @@ fn items_record_global_int_init(name: Name, init: &Expr) with Mut, Div {
                 }
             }
         }
+        return
+    }
+    let pair = items_eval_global_init_word(init)
+    if pair.0 {
+        ast_record_global_var_init(name, pair.1)
     }
 }
 
