@@ -4891,6 +4891,8 @@ pub fn module_frontend_check_imported_modules_verdict(main_path: string) -> i64 
 // Re-box path (Wave9 / memory-wall residual):
 //   1. Scan newly-appended functions; snapshot every live call_args chain into
 //      BSS fixed arrays (NOT Box-arena) — reg heads only, max 8 args/site.
+//      Wider chains mark overflow and keep the module arena alive rather than
+//      silently rebuilding a truncated argument list.
 //   2. __arena_reset(dep mark) — reclaim the dep lowering window.
 //   3. Rebuild fresh Box<IrRegList> chains from BSS and write them back via the
 //      A14 whole-function idiom (by-value IrFunction, 2-level field store,
@@ -4921,8 +4923,8 @@ fn mf_arebox_reset_scratch() with Mut {
 // Extract up to 8 reg heads from the call_args chain at (fi, ii) into
 // MF_AREBOX_ARGS[slot*8 ..]. Walks via module indices so we never pass a
 // Box-carrying Option into a helper by value (defense in depth vs A8-class
-// large-struct/Box by-value miscompiles). Extra args beyond 8 are truncated
-// (same convention as native_v2_collect_call_args / tco_extract_call_args).
+// large-struct/Box by-value miscompiles). A wider chain cannot be rebuilt from
+// this scratch slot, so mark overflow and let the caller skip the arena reset.
 fn mf_arebox_extract_at(module: &IrModule, fi: i64, ii: i64, slot: i64) -> i64 with Mut, Panic, Div {
     var n: i64 = 0
     match (*module).functions[fi as usize].instrs[ii as usize].call_args {
@@ -4939,6 +4941,10 @@ fn mf_arebox_extract_at(module: &IrModule, fi: i64, ii: i64, slot: i64) -> i64 w
                     }
                     _ => { return n }
                 }
+            }
+            match cur {
+                Some(_) => { MF_AREBOX_OVERFLOW = true }
+                _ => {}
             }
             n
         }
