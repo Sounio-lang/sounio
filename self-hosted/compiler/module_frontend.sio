@@ -1219,16 +1219,34 @@ fn ir_merge_modules_into(dst: &! IrModule, src: &IrModule) with Mut, Panic, Div 
     let transition_plan_offset = (*dst).epistemic.transition_plan_count
     let observed_transition_offset = (*dst).epistemic.observed_transition_count
     let rollback_certificate_offset = (*dst).epistemic.rollback_certificate_count
+    // Wave11: relocate src BSS past dst BSS (same residual as lower_array path).
+    let bss_offset_delta = (*dst).bss_total_size
 
     var fi: i64 = 0
     while fi < (*src).fn_count && (*dst).fn_count < IR_MAX_FUNCS {
         var func = (*src).functions[fi]
         func.compile_strategy = (*src).functions[fi].compile_strategy
+        if func.compile_strategy == IR_STRATEGY_BSS_GLOBAL {
+            if bss_offset_delta != 0 {
+                func.param_count = func.param_count + bss_offset_delta
+            }
+        }
         var ii: i64 = 0
         while ii < func.instr_count {
             if func.instrs[ii].op == IrOpcode::IrCall {
                 if func.instrs[ii].fn_id >= 0 {
                     func.instrs[ii].fn_id = func.instrs[ii].fn_id + fn_offset
+                }
+            }
+            if bss_offset_delta != 0 {
+                if func.instrs[ii].op == IrOpcode::IrLoadGlobal || func.instrs[ii].op == IrOpcode::IrStoreGlobal {
+                    func.instrs[ii].imm_i64 = func.instrs[ii].imm_i64 + bss_offset_delta
+                }
+                if func.instrs[ii].op == IrOpcode::IrLoadImm {
+                    let imm = func.instrs[ii].imm_i64
+                    if imm >= BSS_BASE_LINUX && imm < BSS_BASE_LINUX + 268435456 {
+                        func.instrs[ii].imm_i64 = imm + bss_offset_delta
+                    }
                 }
             }
             let _epi_lid = ir_merge_adjusted_label_id(
@@ -1252,11 +1270,19 @@ fn ir_merge_modules_into(dst: &! IrModule, src: &IrModule) with Mut, Panic, Div 
             ii = ii + 1
         }
         func.compile_strategy = (*src).functions[fi].compile_strategy
+        if func.compile_strategy == IR_STRATEGY_BSS_GLOBAL {
+            // strategy re-copy may have clobbered param_count; re-apply delta from src base.
+            if bss_offset_delta != 0 {
+                func.param_count = (*src).functions[fi].param_count + bss_offset_delta
+            }
+        }
         let dst_idx = (*dst).fn_count
         (*dst).functions[dst_idx as usize] = func
         (*dst).fn_count = dst_idx + 1
         fi = fi + 1
     }
+
+    (*dst).bss_total_size = (*dst).bss_total_size + (*src).bss_total_size
 
     var si: i64 = 0
     while si < (*src).string_count && (*dst).string_count < IR_MAX_STRINGS {
@@ -1438,6 +1464,10 @@ fn ir_merge_remap_existing_call_targets(func: IrFunction, src: &IrModule, dst: &
 // New: one local + one slot write. Remap call targets + prepare map +
 // epistemic label shifts in a single instr pass. Scalar field stores only
 // on the owned local (no IrInstr by-value; A8/A14 safe).
+// Wave11: also remap BSS offsets. Each module lowers BSS slots with
+// module-local param_count/imm starting at 0. Without +bss_offset_delta
+// (= dst.bss_total_size at merge time), two imported modules' f64 globals
+// collide at BSS+0 — last init wins (A_CONST and B_CONST both read as 2.5).
 fn ir_merge_place_and_remap_function(
     dst: &! IrModule,
     src: &IrModule,
@@ -1455,7 +1485,8 @@ fn ir_merge_place_and_remap_function(
     alternative_set_offset: i64,
     transition_plan_offset: i64,
     observed_transition_offset: i64,
-    rollback_certificate_offset: i64
+    rollback_certificate_offset: i64,
+    bss_offset_delta: i64
 ) with Mut, Panic, Div {
     if src_fi < 0 || src_fi >= (*src).fn_count {
         return
@@ -1466,6 +1497,12 @@ fn ir_merge_place_and_remap_function(
     // One full-function materialization from the dependency module.
     var func = (*src).functions[src_fi as usize]
     func.compile_strategy = (*src).functions[src_fi as usize].compile_strategy
+    // BSS slot: param_count holds the module-local BSS byte offset.
+    if func.compile_strategy == IR_STRATEGY_BSS_GLOBAL {
+        if bss_offset_delta != 0 {
+            func.param_count = func.param_count + bss_offset_delta
+        }
+    }
     var ii: i64 = 0
     while ii < func.instr_count {
         let op = func.instrs[ii as usize].op
@@ -1488,6 +1525,20 @@ fn ir_merge_place_and_remap_function(
                             func.instrs[ii as usize].fn_id = mapped_id
                         }
                     }
+                }
+            }
+        }
+        // Relative BSS offsets in global load/store (codegen adds BSS_BASE).
+        if bss_offset_delta != 0 {
+            if op == IrOpcode::IrLoadGlobal || op == IrOpcode::IrStoreGlobal {
+                func.instrs[ii as usize].imm_i64 = func.instrs[ii as usize].imm_i64 + bss_offset_delta
+            }
+            // Aggregate path bakes BSS_BASE+local_off as IrLoadImm absolute.
+            // Remap addresses in the BSS window; skip unrelated immediates.
+            if op == IrOpcode::IrLoadImm {
+                let imm = func.instrs[ii as usize].imm_i64
+                if imm >= BSS_BASE_LINUX && imm < BSS_BASE_LINUX + 268435456 {
+                    func.instrs[ii as usize].imm_i64 = imm + bss_offset_delta
                 }
             }
         }
@@ -5101,6 +5152,7 @@ fn module_frontend_lower_programs_array_direct_box(
                         let transition_plan_offset = (*acc_box).epistemic.transition_plan_count
                         let observed_transition_offset = (*acc_box).epistemic.observed_transition_count
                         let rollback_certificate_offset = (*acc_box).epistemic.rollback_certificate_count
+                        let bss_offset_delta = (*acc_box).bss_total_size
                         // Functions with index < acc_fn_before existed before this dep merge;
                         // a fn_remap target below this marks a DEDUP reuse (skip re-placing).
                         let acc_fn_before = (*acc_box).fn_count
@@ -5158,6 +5210,7 @@ fn module_frontend_lower_programs_array_direct_box(
                             // skip re-placing it. Only place newly-appended functions.
                             if dst_fi >= acc_fn_before {
                                 // Wave10: single-pass place+remap (one IrFunction local).
+                                // Wave11: bss_offset_delta relocates dep BSS past acc BSS.
                                 ir_merge_place_and_remap_function(
                                     &! (*acc_box),
                                     &(*dep_box),
@@ -5175,11 +5228,14 @@ fn module_frontend_lower_programs_array_direct_box(
                                     alternative_set_offset,
                                     transition_plan_offset,
                                     observed_transition_offset,
-                                    rollback_certificate_offset
+                                    rollback_certificate_offset,
+                                    bss_offset_delta
                                 )
                             }
                             mfi = mfi + 1
                         }
+                        // Grow acc BSS by the dep module's local BSS footprint.
+                        (*acc_box).bss_total_size = (*acc_box).bss_total_size + (*dep_box).bss_total_size
                         var si: i64 = 0
                         while si < (*dep_box).string_count && (*acc_box).string_count < IR_MAX_STRINGS {
                             (*acc_box).string_table[(*acc_box).string_count as usize] = (*dep_box).string_table[si as usize]
