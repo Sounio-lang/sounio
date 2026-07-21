@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # scripts/epistemic_knowledge_madaros_e2e_gate.sh
 #
-# D3 partial: free-function Epistemic API imports under default Madaros.
-# Does NOT pin lean_single. Method-call form remains blocked (Root 2).
+# D3 + Wave9 residual closeout: free-function AND method-form Epistemic API
+# under default Madaros multi-module. Does NOT pin lean_single.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -56,12 +56,30 @@ else
   fi
 fi
 
-# --- Residual method-call trip-wire (expected fail under Madaros) ---
-echo "== method-call residual (expect fail) =="
-if "$SOUC" compile tests/epistemic_trust/witness_import_knowledge_method.sio -o "$OUT/meth.elf" >"$OUT/methc.log" 2>&1; then
-  echo "NOTE: method-call form compiled — Root 2 may be FIXED; update trust map"
+# --- Method-call form (Wave9 residual closeout: required green) ---
+echo "== method-call form (required) =="
+if ! "$SOUC" compile tests/epistemic_trust/witness_import_knowledge_method.sio -o "$OUT/meth.elf" >"$OUT/methc.log" 2>&1; then
+  echo "FAIL: method-call form compile"; tail -20 "$OUT/methc.log" || true; fail=1
 else
-  echo "OK method-call form still blocked under Madaros (Root 2 residual)"
+  chmod +x "$OUT/meth.elf"
+  if ! "$OUT/meth.elf" >"$OUT/meth.log" 2>&1 || ! grep -q "KNOWLEDGE_METHOD_OK" "$OUT/meth.log"; then
+    echo "FAIL: method-call form run"; cat "$OUT/meth.log" || true; fail=1
+  else
+    echo "PASS: KNOWLEDGE_METHOD_OK"
+  fi
+fi
+
+# Free vs method parity
+echo "== free vs method parity =="
+if ! "$SOUC" compile tests/epistemic_trust/knowledge_method_parity.sio -o "$OUT/par.elf" >"$OUT/parc.log" 2>&1; then
+  echo "FAIL: method parity compile"; tail -20 "$OUT/parc.log" || true; fail=1
+else
+  chmod +x "$OUT/par.elf"
+  if ! "$OUT/par.elf" >"$OUT/par.log" 2>&1 || ! grep -q "KNOWLEDGE_METHOD_PARITY_OK" "$OUT/par.log"; then
+    echo "FAIL: method parity run"; cat "$OUT/par.log" || true; fail=1
+  else
+    echo "PASS: KNOWLEDGE_METHOD_PARITY_OK"
+  fi
 fi
 
 mkdir -p "$ROOT/artifacts/epistemic"
@@ -76,17 +94,18 @@ cat >"$ROOT/artifacts/epistemic/knowledge_madaros_e2e_receipt.v1.json" <<EOF
   "engine": "madaros_default",
   "lean_single_pin": false,
   "commit": "$COMMIT",
-  "d3_scope": "free_function_epistemic_api",
+  "d3_scope": "free_and_method_epistemic_api",
   "claims": [
     "madaros_multimodule_import_epistemic_knowledge_free_api",
+    "madaros_multimodule_import_epistemic_knowledge_method_api",
     "ep_measured_add_mul_merge_gate_numeric",
+    "free_vs_method_numeric_parity",
     "knowledge_sio_selftest_all_pass_under_madaros"
   ],
   "claims_not_made": [
-    "method_call_form_epistemic_measured_under_madaros",
     "language_knowledge_t_generic_import",
-    "full_root2_method_lowering_fix",
-    "propagate_import_without_further_work",
+    "full_root2_census_closed",
+    "gum_k95_f64_i64_cast_fixed",
     "numpy_sklearn"
   ]
 }

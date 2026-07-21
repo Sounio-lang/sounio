@@ -9,13 +9,15 @@
 # (mod/half.sio missing) → E137 / incomplete closure. Brace form
 # `use mod::{half}` already worked.
 #
-# Also covers multi-module -O: opt_cleanup_module_inplace must not SEGV after
-# lower_done and must still print 1.500000. Root cause was by-value IrFunction
-# copies (Box/call_args, A8 family) plus miscompiled `&! functions[fi]` array-
-# element exclusive refs; cleanup mutates via module+fi field access only.
+# Also covers multi-module -O full peels (Wave9): opt_cleanup_module_inplace
+# must not SEGV after lower_done and must still print 1.500000, plus integer
+# const-fold surface 42 and SCCP-lite branch surface 7. Root cause was by-value
+# IrFunction copies (Box/call_args, A8 family) plus miscompiled
+# `&! functions[fi]` array-element exclusive refs; cleanup mutates via
+# module+fi field peels only (dedup/copy/DSE/control/CSE/DCE + const-fold +
+# SCCP-lite + compact_nops).
 #
-# PASS = check rc=0, default compile+run rc=0 with 1.500000, -O compile+run
-# rc=0 with 1.500000.
+# PASS = check rc=0, default compile+run rc=0 with 1.500000/42/7, -O same.
 # See docs/audit/MADAROS_MULTIMODULE_PRINT_IMPORT_BUGS_2026-07-13.md.
 
 set -uo pipefail
@@ -98,15 +100,29 @@ run_compile_and_execute() {
     cat "$run_out" >&2
     exit 1
   fi
+  # Const-fold surface (folded_sum → 42) and SCCP-lite branch surface (7).
+  local line2 line3
+  line2="$(sed -n '2p' "$run_out" | tr -d '\r')"
+  line3="$(sed -n '3p' "$run_out" | tr -d '\r')"
+  if [[ "$line2" != "42" ]]; then
+    echo "NAMED_PATH_IMPORT_GATE_BLOCKED reason=stdout_missing_constfold_42 label=${label} line2=${line2}" >&2
+    cat "$run_out" >&2
+    exit 1
+  fi
+  if [[ "$line3" != "7" ]]; then
+    echo "NAMED_PATH_IMPORT_GATE_BLOCKED reason=stdout_missing_sccp_7 label=${label} line3=${line3}" >&2
+    cat "$run_out" >&2
+    exit 1
+  fi
 
-  log "${label}: PASS stdout=$(tr -d '\n' < "$run_out")"
+  log "${label}: PASS stdout=$(tr '\n' '|' < "$run_out")"
 }
 
 # Default (no -O) must stay green.
 run_compile_and_execute "default"
 
-# -O multi-module opt_cleanup path: must also emit 1.500000 (no SEGV).
+# -O multi-module opt_cleanup full peels: 1.500000 + constfold 42 + sccp 7.
 run_compile_and_execute "opt" -O
 
-echo "NAMED_PATH_IMPORT_GATE_PASS raw_sha256=${RAW_SHA256:0:16} default+opt"
+echo "NAMED_PATH_IMPORT_GATE_PASS raw_sha256=${RAW_SHA256:0:16} default+opt full_peels"
 exit 0

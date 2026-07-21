@@ -680,6 +680,52 @@ fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEp
     lo
 }
 
+// Memory wall residual (post-#1319/#1336): body lower used to call lowerer_new()
+// (full empty IrModule) then seed stubs from the summary module — a second full
+// empty materialization per dep while the summary Box still held the first.
+// Consume the owned summary and reuse its live Boxes. string_count is zeroed to
+// match seed behaviour (body lower rebuilds the string table).
+fn lowerer_new_from_program_summary_owned(summary: IrProgramSummary, epistemic: &IrEpistemicSection) -> Lowerer with Alloc, Mut, Panic, Div, IO {
+    var lo = Lowerer {
+        module: summary.module,
+        epistemic_contests: Box::new(empty_lower_epistemic_contest_index()),
+        current_fn: IR_INVALID_FN,
+        current_func: Box::new(ir_empty_function()),
+        current_func_loaded: false,
+        env: None,
+        locals: Box::new(empty_lower_local_stack()),
+        scope_depth: 0,
+        loop_labels: Box::new(empty_lower_loop_labels()),
+        loop_depth: 0,
+        error_count: 0,
+        had_error: false,
+        enum_variants: summary.enum_variants,
+        struct_layouts: summary.struct_layouts,
+        global_types: summary.global_types,
+        array_elem_float_regs: [IR_INVALID_REG; 512],
+        array_elem_float_reg_count: 0,
+        variance_base_regs: [IR_INVALID_REG; 1024],
+        variance_value_regs: [IR_INVALID_REG; 1024],
+        variance_base_reg_count: 0,
+        debug_mode: false,
+        probe_mode: summary.probe_mode,
+        closure_caps: Box::new(empty_closure_cap_table()),
+        pending_closure_fn_id: -1,
+        allow_direct_capturing_closure_literal: false,
+        pending_variance_reg: -1,
+    }
+    (*lo.module).epistemic = (*epistemic)
+    lo.epistemic_contests = lower_epistemic_contest_index_from_ref(epistemic)
+    if lower_live_diag_enabled() {
+        print("CONTEST_IR_INDEX_BIND constructor=summary_owned contest_count=")
+        print_int((*lo.epistemic_contests).contest_count)
+        print("\n")
+    }
+    // Match lowerer_seed_module_from_summary: body path rebuilds strings.
+    (*lo.module).string_count = 0
+    lo
+}
+
 fn lowerer_new_from_program_summary_flat(summary: &IrProgramSummaryFlat, epistemic: IrEpistemicSection) -> Lowerer with Alloc, Mut, Panic, Div {
     var lo = lowerer_new()
     var module_box = lo.module
@@ -11395,15 +11441,14 @@ fn lower_program_to_ir_summary_box_with_epistemic_ref(prog: &Program, epistemic:
     lowerer_preseed_program_items_mut(&! lo, &prog.items, ir_empty_name())
     let error_count = lo.error_count
     let had_error = lo.had_error
+    // Memory wall residual: do NOT Box::new(ir_empty_program_summary()) then
+    // overwrite fields. ir_empty_program_summary materializes a full empty
+    // IrModule (~[IrFunction;2048]) that is immediately discarded — a second
+    // empty module per dep on top of lowerer_new. Box the live summary Boxes
+    // directly (probe path already does this).
     let inner = ir_program_summary_from_lowerer(lo)
-    var summary_box = Box::new(ir_empty_program_summary())
-    (*summary_box).module = inner.module
-    (*summary_box).enum_variants = inner.enum_variants
-    (*summary_box).struct_layouts = inner.struct_layouts
-    (*summary_box).global_types = inner.global_types
-    (*summary_box).probe_mode = inner.probe_mode
     IrProgramSummaryBoxResult {
-        summary: summary_box,
+        summary: Box::new(inner),
         error_count: error_count,
         had_error: had_error,
     }
@@ -11431,15 +11476,10 @@ fn lower_program_to_ir_summary_box_with_externs_ref(
     lowerer_preseed_program_items_mut(&! lo, &prog.items, ir_empty_name())
     let error_count = lo.error_count
     let had_error = lo.had_error
+    // Same residual as with_epistemic_ref: skip empty IrProgramSummary densify.
     let inner = ir_program_summary_from_lowerer(lo)
-    var summary_box = Box::new(ir_empty_program_summary())
-    (*summary_box).module = inner.module
-    (*summary_box).enum_variants = inner.enum_variants
-    (*summary_box).struct_layouts = inner.struct_layouts
-    (*summary_box).global_types = inner.global_types
-    (*summary_box).probe_mode = inner.probe_mode
     IrProgramSummaryBoxResult {
-        summary: summary_box,
+        summary: Box::new(inner),
         error_count: error_count,
         had_error: had_error,
     }
@@ -11676,6 +11716,29 @@ fn lower_program_bodies_from_summary_with_epistemic_boxed_ref(
     epistemic: &IrEpistemicSection
 ) -> IrLowerBoxResult with Mut, Panic, Div, Alloc, IO {
     let lo = lowerer_new_from_program_summary(summary, epistemic)
+    var lo2 = lo.lower_program_bodies_ref(&prog.items)
+    var patch_stats = ir_empty_validated_patch_stats()
+    if !lo2.had_error {
+        var module_box = lo2.module
+        patch_stats = ir_patch_validated_calls(&! (*module_box))
+        lo2.module = module_box
+    }
+    IrLowerBoxResult {
+        module: lo2.module,
+        error_count: lo2.error_count,
+        had_error: lo2.had_error,
+        patch_stats: patch_stats,
+    }
+}
+
+// Prefer this on multi-mod hot paths: consumes the summary and reuses its
+// IrModule Box so body lower does not allocate a second empty IrModule.
+fn lower_program_bodies_from_summary_with_epistemic_boxed_owned(
+    prog: &Program,
+    summary: IrProgramSummary,
+    epistemic: &IrEpistemicSection
+) -> IrLowerBoxResult with Mut, Panic, Div, Alloc, IO {
+    let lo = lowerer_new_from_program_summary_owned(summary, epistemic)
     var lo2 = lo.lower_program_bodies_ref(&prog.items)
     var patch_stats = ir_empty_validated_patch_stats()
     if !lo2.had_error {
