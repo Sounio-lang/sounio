@@ -109,6 +109,7 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 | **batch-10 (20 verbs)** — sum_sq/cube, count_zero, sum_pos/neg, peak/trough_ratio, normalize_mean, row_number(+rev), cumcount_neg/nonzero, range_over_std, cumcount_above_mean, cumsum_centered_sq, cosine/euclid/manhattan/chebyshev/cross_mean | | | | **all win** | dense one/two-pass reductions + 2-col distances vs pandas per-group lambdas |
 | **batch-11 (10 verbs, set 3)** — num_increases/decreases, total_variation, mean_abs_change, autocorr1, is_running_max/min, max_drawdown, max_runup, count_ge_mean | | | | **all win** | dense change/running-extreme/autocorr passes vs pandas per-group lambdas/apply |
 | **batch-12 (10 verbs, set 4)** — count_le_mean, count/frac_within_1std, count_outlier_2std, cummax/cummin_pct, sum_recip, cumsum_recip, cumsum_sign, cumcount_ge_prev | | | | **all win** | dense threshold/reciprocal/running passes vs pandas per-group lambdas |
+| **batch-13 (10 verbs, set 5)** — net_over_gross, sum_pos_frac, mean_pos/neg, count_changes, max_abs_dev, sum_sq_dev, cumsum_dev_abs, cumcount_le_prev, cumcount_positive_frac | | | | **all win** | dense sign/deviation/running passes vs pandas per-group lambdas — completes the +50 push (~130 grouped verbs total) |
 | cov (1M rows, two-pass mean-shift) | | 6.7 | 8.5 | **0.78x — Sounio wins** | (new verb) |
 | corr (1M rows, two-pass + bf_sqrt) | | 10.3 | 8.0 | **~1.3x** | (new verb) |
 | median (1M rows, quickselect) | | ~34 | ~16 | **~2.2x** | numpy SIMD introselect |
