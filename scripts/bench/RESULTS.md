@@ -132,6 +132,7 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 | bowley_skew / moors_kurt / robust_cv / p95p05 | | ~14 | ~185 | **0.07x — wins 13x** | robust shape from octiles/quartiles |
 | trimmed_mean(t) / winsorized_mean(t) | | ~13.9 | ~126 | **0.11x — wins 9x** | histogram rank-window split |
 | median_scaled / q1/q3/iqr/percentile_scaled (FIXED-PRECISION float, 1M rows, 1000 keys, 2dp, range 0-6.99) | | ~229 | ~265 | **0.86x — wins** | scaled histogram (round v*100); flips the general-float bf_median_by 5.36x LOSS to a win for narrow fixed-precision ranges |
+| trimean/midhinge/bowley/moors/robust_cv/decile_range/p95p05 + trimmed/winsorized_scaled (FIXED-PRECISION float, 1M rows, 1000 keys) | | ~245 | ~1600 | **0.15x — wins 7x** | scaled histogram; pandas float robust-stats = per-group lambda (1.1-1.8s) |
 | cov (1M rows, two-pass mean-shift) | | 6.7 | 8.5 | **0.78x — Sounio wins** | (new verb) |
 | corr (1M rows, two-pass + bf_sqrt) | | 10.3 | 8.0 | **~1.3x** | (new verb) |
 | median (1M rows, quickselect) | | ~34 | ~16 | **~2.2x** | numpy SIMD introselect |
