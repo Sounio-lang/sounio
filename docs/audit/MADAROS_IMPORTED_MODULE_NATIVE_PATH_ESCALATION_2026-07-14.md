@@ -33,7 +33,7 @@ factors, and the entire `Knowledge<T>` / uncertainty-propagation core at once.**
 
 | # | Defect | Symptom | Repro / dispatch | Blocks |
 |---|---|---|---|---|
-| D1 | **`f64 → i64/i32` cast whose operand is an f64 *parameter* is a bitcast**, not a truncating convert — **general, reproduces single-file** (not imported-only; see 2026-07-16 update below) | silent wrong numbers (e.g. `f(4.172)` for `fn f(x:f64)->i64 { x as i64 }` → `4616383272838735331`) | `MADAROS_IMPORTED_MODULE_F64_CAST_BITCAST_2026-07-14`; **root-caused in #983** | correct GUM coverage `k95`/`U95`/`U99`; any fn casting an f64 param→int (confidence scaling, indices) |
+| D1 | **`f64 → i64/i32` cast whose operand is an f64 *parameter* is a bitcast**, not a truncating convert — **general, reproduces single-file** (not imported-only; see 2026-07-16 update below) | ~~silent wrong numbers~~ **CLOSED** (#983 + #1252; Wave10 trust gate) — `f(4.172)→4`; finite-dof `gum_k95≈2.776` | `MADAROS_IMPORTED_MODULE_F64_CAST_BITCAST_2026-07-14`; **root-caused in #983**; **joint land #1252** | ~~correct GUM coverage~~ **unblocked** — gated by `scripts/epistemic_trust_gate.sh` Section A |
 | D2 | **`&local_array` passed to a builtin gets a wrong base pointer** | SIGSEGV / garbage bytes | `DATA_IO_TRILHA_B_BUILTIN_BUFPTR_DISPATCH_2026-07-14` | `read_file`, `write_file`, `str_from_bytes` → all Data I/O **readers** and the file sink |
 | D3 | **Multi-module native lowering fails** — segfault in `lower_array` dep-lowering, or thin-link `rc=12` | native compile fails whenever the program's dep closure has ≥2 modules or a module `use`s another | this doc's witnesses (`knowledge`, `propagate`, `order_spread_exact`, `uncertain_eq`); extends `MADAROS_MULTIMODULE_FALLBACK_SEGFAULT_2026-06-30`, `MADAROS_NATIVE_MULTIMODULE_SCALE_2026-07-14`, `MADAROS_MULTIMODULE_NATIVE_SEED_SEGFAULT_2026-06-22` | cross-module reuse (`data::csv` + `epistemic::gum`); `Knowledge<T>`, `propagate`, and any module with `use` deps |
 | D4 | **named `use m::sym` E137 + `print_f64` E137** in importing programs | type-check rejects valid code | `MADAROS_MULTIMODULE_PRINT_IMPORT_BUGS_2026-07-13` | selective imports; float printing in importing programs |
@@ -94,23 +94,24 @@ ergonomics). D1 and D3 both bottom out in the imported-module lowering/merge sta
 
 ## Trust boundary this currently imposes
 
-`docs/audit/EPISTEMIC_TRUST_MAP_2026-07-14.md` classifies the fallout: only
-self-contained, cast-free epistemic modules (GUM point+`u_c`, correlation,
-p-box, covariance) are usable under native import today; `Knowledge<T>`, the
-propagation layer, and GUM coverage intervals are not. A real PBPK/GUM pipeline
-must therefore run under **lean_single**, not the default native engine.
+`docs/audit/EPISTEMIC_TRUST_MAP_2026-07-14.md` (Wave10 update): full GUM
+(value + `u_c` + finite-dof `k95`/`U95`/`U99`), free+method `Epistemic`,
+`propagate` delta-method + value-style MC, correlation/p-box are usable under
+native import. Residual fragile forms: generic `monte_carlo` fn-ptr, exclusive-ref
+xoshiro, language `Knowledge<T>` generics. A real PBPK/GUM pipeline can use
+default Madaros for those promoted surfaces — not lean_single-only.
 
 ## Verification hooks (how to confirm each fix)
 
 These gates already exist and will flip the moment a defect is fixed — no manual
 re-checking:
 
-- **D1:** `scripts/epistemic_trust_gate.sh` Section B prints "coverage factor may be
-  FIXED" when `gum_k95` stops returning 1960; the `f64→i64` minimal repro in the
-  D1 dispatch / #983. NB: the existing `witness_gum_k95.sio` is **mis-designed** — its
-  input has a dominant infinite-dof Type-B, so nu_eff is large and `k95=1.960` is
-  *correct* there (it can never flip). A genuine small-dof trip-wire is
-  `gum_combine2(100.0, gum_type_a(1.0,5), gum_type_b(0.0001))` → 1960 (bug) vs 2776 (fixed).
+- **D1:** **CLOSED Wave10.** `scripts/epistemic_trust_gate.sh` Section A now
+  **gates** finite-dof `k95i=2776` via Type-A-dominant `witness_gum_k95.sio`
+  (`gum_combine2(98.3, gum_type_a(0.30,5), gum_type_b_uniform(0.001))`). The
+  pre-Wave10 Section B trip-wire expected 1960 on a Type-B-dominant budget and
+  could never flip (k95=1.960 was correct there). Issues #932/#983 closed;
+  joint land #1252.
 - **D5 (#986):** the −20 zero-cast HANG/SEGFAULT programs above (`test_fem`, `matnm_test`,
   `arima_levinson_ar2`, `autodiff_tape_basic`) must run correctly once params are float-marked.
 - **D2:** the byte-exact round-trip in the D2 dispatch (`str_from_bytes`/`write_file`

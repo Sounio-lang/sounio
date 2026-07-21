@@ -89,9 +89,11 @@ cat >"$ROOT/artifacts/compiler/madaros_knowledge_method_residual_receipt.v1.json
   ],
   "claims_not_made": [
     "language_knowledge_t_generic_import",
-    "gum_k95_f64_i64_cast_fixed",
     "full_root2_census_closed",
     "enum_ctor_path"
+  ],
+  "closed_elsewhere": [
+    "gum_k95_f64_i64_cast_fixed (Wave10: scripts/epistemic_trust_gate.sh Section A; #1252+#983)"
   ]
 }
 EOF

@@ -665,18 +665,49 @@ fn lowerer_seed_metadata_from_summary(lo_in: Lowerer, summary: &IrProgramSummary
     lo
 }
 
+// Residual ref path (prefer lowerer_new_from_program_summary_owned on multi-mod).
+// Wave10: densify the *live* summary module once — do not lowerer_new() an empty
+// IrModule then seed while summary still holds the first (empty+live concurrent).
+// Still one densify copy (ref cannot move); owned path reuses the Box with zero densify.
 fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEpistemicSection) -> Lowerer with Alloc, Mut, Panic, Div, IO {
-    var lo = lowerer_new()
-    (*lo.module).epistemic = (*epistemic)
+    var module_box = Box::new(*(*summary).module)
+    // Match seed/owned body path: rebuild string table during body lower.
+    (*module_box).string_count = 0
+    (*module_box).epistemic = (*epistemic)
+    var lo = Lowerer {
+        module: module_box,
+        epistemic_contests: Box::new(empty_lower_epistemic_contest_index()),
+        current_fn: IR_INVALID_FN,
+        current_func: Box::new(ir_empty_function()),
+        current_func_loaded: false,
+        env: None,
+        locals: Box::new(empty_lower_local_stack()),
+        scope_depth: 0,
+        loop_labels: Box::new(empty_lower_loop_labels()),
+        loop_depth: 0,
+        error_count: 0,
+        had_error: false,
+        enum_variants: Box::new(*(*summary).enum_variants),
+        struct_layouts: Box::new(*(*summary).struct_layouts),
+        global_types: Box::new(*(*summary).global_types),
+        array_elem_float_regs: [IR_INVALID_REG; 512],
+        array_elem_float_reg_count: 0,
+        variance_base_regs: [IR_INVALID_REG; 1024],
+        variance_value_regs: [IR_INVALID_REG; 1024],
+        variance_base_reg_count: 0,
+        debug_mode: false,
+        probe_mode: summary.probe_mode,
+        closure_caps: Box::new(empty_closure_cap_table()),
+        pending_closure_fn_id: -1,
+        allow_direct_capturing_closure_literal: false,
+        pending_variance_reg: -1,
+    }
     lo.epistemic_contests = lower_epistemic_contest_index_from_ref(epistemic)
     if lower_live_diag_enabled() {
-        print("CONTEST_IR_INDEX_BIND constructor=summary contest_count=")
+        print("CONTEST_IR_INDEX_BIND constructor=summary_densify contest_count=")
         print_int((*lo.epistemic_contests).contest_count)
         print("\n")
     }
-    lo = lowerer_seed_module_from_summary(lo, summary)
-    lo = lowerer_seed_metadata_from_summary(lo, summary)
-    lo.probe_mode = summary.probe_mode
     lo
 }
 
