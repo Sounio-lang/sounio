@@ -22,8 +22,8 @@ use check::refinement::*
 use check::units::*
 use check::env::*
 use check::traits::*
-use check::mod::{check_program, check_program_epistemic_into, check_modules_verdict_boot4_with_visibility}
-use check::specializer::{specialize_generics}
+use check::mod::{check_program, check_program_epistemic_into, check_items_verdict_boot4, check_modules_verdict_boot4_with_visibility}
+use check::specializer::{specialize_generics, spec_last_instantiated, spec_append_item_lists}
 use check::ownership::*
 use check::lint::*
 use check::layout::*
@@ -2083,11 +2083,37 @@ fn compiler_visibility_preflight(source_path: string) -> bool with IO, Mut, Pani
     print("run_check_mode: about to check ")
     print_int(closure.node_count)
     print(" modules\n")
-    let verdict = check_modules_verdict_boot4_with_visibility(
-        &!programs,
-        closure.node_count,
-        true
-    )
+    // WP-A3 specialized multi-module typecheck (same design as
+    // module_frontend_specialized_typecheck on the IR-merge/compile path):
+    // merge all modules' items, monomorphize turbofish instantiations, then
+    // check the specialized list. Without this pass, generic template bodies
+    // that construct `S {..}` / call trait methods on a type parameter F
+    // emit spurious E008 (`expected S / found S__F`) and E011 (no method on
+    // F) — blocking `cd_exact_generic_i64` and related ExactRing engines.
+    // Fall back to the plain multi-module checker when no generic was
+    // actually instantiated so ordinary multi-module code stays identical.
+    var merged: Option<Box<ItemList>> = None
+    var mi: i64 = closure.node_count - 1
+    while mi >= 0 {
+        merged = spec_append_item_lists(programs[mi as usize].items, merged)
+        mi = mi - 1
+    }
+    let specialized = specialize_generics(merged)
+    var verdict: i64 = 0
+    if spec_last_instantiated() {
+        if str_eq(read_env("SOUNIO_MM_SPEC_TRACE"), "1") {
+            print("run_check_mode: specialized-typecheck over merged ")
+            print_int(closure.node_count)
+            print(" modules\n")
+        }
+        verdict = check_items_verdict_boot4(specialized)
+    } else {
+        verdict = check_modules_verdict_boot4_with_visibility(
+            &!programs,
+            closure.node_count,
+            true
+        )
+    }
     print("run_check_mode: verdict=")
     print_int(verdict)
     print("\n")
