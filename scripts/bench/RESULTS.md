@@ -107,6 +107,7 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 | fano_factor_by (1M rows, 1000 dense keys) | | ~24 | ~491 | **0.05x — wins (20x)** | dense two-pass var/mean; snr/cv2 share the engine |
 | drawdown_by (1M rows, 1000 dense keys) | | ~13 | ~85 | **0.16x — wins** | LEAN single-running-max pass (vs pandas v - groupby.cummax); runup/drawdown_pct/running_argmax likewise lean |
 | **batch-10 (20 verbs)** — sum_sq/cube, count_zero, sum_pos/neg, peak/trough_ratio, normalize_mean, row_number(+rev), cumcount_neg/nonzero, range_over_std, cumcount_above_mean, cumsum_centered_sq, cosine/euclid/manhattan/chebyshev/cross_mean | | | | **all win** | dense one/two-pass reductions + 2-col distances vs pandas per-group lambdas |
+| **batch-11 (10 verbs, set 3)** — num_increases/decreases, total_variation, mean_abs_change, autocorr1, is_running_max/min, max_drawdown, max_runup, count_ge_mean | | | | **all win** | dense change/running-extreme/autocorr passes vs pandas per-group lambdas/apply |
 | cov (1M rows, two-pass mean-shift) | | 6.7 | 8.5 | **0.78x — Sounio wins** | (new verb) |
 | corr (1M rows, two-pass + bf_sqrt) | | 10.3 | 8.0 | **~1.3x** | (new verb) |
 | median (1M rows, quickselect) | | ~34 | ~16 | **~2.2x** | numpy SIMD introselect |
