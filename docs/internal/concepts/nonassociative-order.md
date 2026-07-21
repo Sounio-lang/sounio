@@ -29,6 +29,7 @@ The associator and its norm are executable mathematical objects.
 - `stdlib/algebra/associator_field.sio`
 - `stdlib/epistemic/uncertain_octonion.sio`
 - `stdlib/epistemic/perturbation_graph.sio`
+- `stdlib/epistemic/parenthesization_receipts.sio` (nominal research boundary)
 - `self-hosted/ir/ir.sio` (`IrAssociator`)
 - `self-hosted/native/lower_ir.sio`
 - K-AXI/GPU associator kernels
@@ -46,3 +47,63 @@ The associator and its norm are executable mathematical objects.
 - A system is physically octonionic merely because the associator models it.
 - `kappa * norm_sq(associator)` is a physical variance term without a binding,
   units, and discriminating experiment.
+
+## Ordered Path Receipt Boundary
+
+`parenthesization_receipts.sio` keeps a narrower distinction executable before
+any algebraic carrier is selected:
+
+```text
+OrderedTransformationPathI64
+!= AggregationBoundaryI64
+!= BracketingDesignI64
+!= AlgebraicAssociatorProbeI64
+!= ParenthesizationSensitivityI64
+!= clinical authority
+```
+
+An `OrderedTransformationPathI64` is explicitly still an ordered,
+function-composition path. A parenthesization-sensitive result requires a
+declared aggregation boundary, two distinct predeclared groupings, a matched
+candidate-model contest, and a declared synthetic discriminating feature. The
+library records those categories with private constructors; it does not make an
+algebraic, physical, psychiatric, causal, or clinical conclusion.
+
+### Semantic Lane Declaration
+
+```text
+Semantic-Lane-ID: EPISTEMIC-PARENTHESIZATION-RECEIPTS-V0-20260721
+Owner: Codex
+Concept-IDs: SOUNIO-NONASSOCIATIVE-ORDER; SOUNIO-ORDERED-PATH-PROVENANCE; SOUNIO-SCIENCE-RESEARCH-BOUNDARY
+Intent-Preserved: preserve an operational distinction between sequence order, declared grouping boundaries, algebraic probes, and research conclusions
+Transformation: add private-constructor nominal receipts that require a declared aggregation boundary and contest before a synthetic parenthesization-sensitivity receipt is constructible
+Types-Changed: added OrderedTransformationPathI64, AggregationBoundaryI64, BracketingDesignI64, AlgebraicAssociatorProbeI64, AssociativityContestI64, BracketDiscriminatingFeatureI64, ParenthesizationSensitivityI64, and ParenthesizationAbstentionI64
+Effects-Changed: none
+IR-Changed: none
+Claims-Introduced: import callers cannot silently substitute an ordered path, an aggregation boundary, or an algebraic probe for a parenthesization-sensitivity receipt
+Claims-Forbidden: physical nonassociativity, biological or psychiatric mechanism, empirical model fit, causal effect, treatment effect, clinical utility, or clinical authority
+Assumptions: supplied tags describe a synthetic fixture or declared protocol mapping; they do not validate that mapping
+Write-Set: stdlib/epistemic/parenthesization_receipts.sio; tests/run-pass/epistemic_parenthesization_receipts_import_smoke.sio; tests/compile-fail/epistemic_*parenthesization*.sio; docs/internal/concepts/nonassociative-order.md; docs/internal/concepts/bindings.tsv
+Read-Set: stdlib/epistemic/observation_provenance.sio; docs/internal/concepts/ordered-path-provenance.md; docs/research/psychiatric_nonassociativity_representation_contract_2026-07-21.md
+Positive-Witness: imported synthetic receipt smoke carries history source identity through ordered path, boundary, design, probe, contest, feature, sensitivity, and abstention, while separately checking each shared contest component
+Negative-Witness: ordered path != aggregation boundary; aggregation boundary != bracketing design; algebraic probe != parenthesization sensitivity; imported callers cannot fabricate sensitivity; sensitivity != clinical authority
+Acceptance-Gate: bin/souc check stdlib/epistemic/parenthesization_receipts.sio; scripts/run_sio_test_suite.sh --test-list /tmp/sounio-parenthesization-receipts-20260721.list --jobs 1 --verbose
+Integration-Target: #901-gated source-fresh imported psychiatric collision suite
+Authoritative-Only-If: these receipts prove only the selected nominal program boundaries; no semantic or empirical authority follows from a default-wrapper run
+```
+
+### Integration Receipt
+
+```text
+Semantic-Outcome: the language now preserves the difference between ordered processing and a separately declared parenthesization-sensitive research scaffold
+Concept-Status-Before: ordered-path provenance and nonassociative algebra were independently represented, with no generic nominal bridge requiring a boundary and contest before sensitivity
+Concept-Status-After: imported callers can construct the synthetic sensitivity receipt only after the declared typed chain, while incompatible receipts refuse substitution
+Distinctions-Added: ordered path != aggregation boundary; aggregation boundary != bracketing design; algebraic probe != sensitivity receipt; sensitivity receipt != clinical authority
+Distinctions-Preserved: ordinary function composition remains associative; declared nonassociative algebra remains separate from a protocol boundary; observation provenance remains non-clinical
+Distinctions-Erased: none
+Evidence-Run: library check passed; one imported positive smoke and four compile-fail substitutions passed under the default Madaros wrapper
+Fallback-Path: default wrapper reported target-resolution fallback=unresolved_default_x86_64_linux; results are nominal API evidence only, not source-fresh imported-native proof
+Legacy-Kept: associator field, ordered-path compiler IR, observation-provenance receipts, and existing research contracts remain unchanged
+Conflicting-Lanes: #901 retains ownership of source-fresh imported-native acceptance and target-resolution repair
+Next-Semantic-Interface: an import-bearing synthetic collision may proceed only after #901 supplies a current-source no-target-fallback acceptance gate
+```
