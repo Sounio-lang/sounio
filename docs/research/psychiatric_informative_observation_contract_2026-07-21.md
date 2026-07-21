@@ -219,6 +219,17 @@ aggregation, imputation, windowing, or grid alignment. Those transformations
 can be valuable, but their result is a transformed representation, not the
 original observation history.
 
+This is a general provenance distinction, not a psychiatric exception. The
+[W3C PROV Data Model](https://www.w3.org/TR/prov-dm/) defines derivation as a
+transformation, update, or construction of one entity from another; it does not
+make the generated entity identical to the entity used. In EHR preprocessing,
+turning irregular records into model-ready features requires decisions about
+variables, resampling, and missing-data handling, each of which changes the
+analysis representation ([FIDDLE](https://pmc.ncbi.nlm.nih.gov/articles/PMC7727385/)).
+The receipt boundary below records that a derivation was declared. It does not
+certify that a transformation recovered a complete history, a latent state, or
+a clinically valid counterfactual.
+
 ~~~
 raw encounter/selection history + transformation receipt
   -> regularized analysis representation
@@ -313,6 +324,7 @@ stdlib/epistemic/observation_provenance.sio
 It uses the existing epistemic private-struct pattern. The module keeps its
 receipt representations private and exposes narrow constructors and accessors
 for opportunity, presence, selection, measurement act, recorded measurement,
+observation-history reference, transformation, regularized representation,
 observation-feature use, and unresolved-route abstention. This prevents a
 caller from directly fabricating a receipt or reading a private field on the
 current compiler path; it does not claim cryptographic non-forgeability,
@@ -327,6 +339,38 @@ acceptance path below. On the current wrapper, this smoke reports
 therefore default/fallback runtime evidence only, never a fallback=0 or
 current-source claim.
 
+### Transformation-Provenance Extension
+
+The current preflight adds a deliberately narrow derivation chain:
+
+~~~
+RecordedMeasurementReceipt + opaque history reference
+  -> ObservationHistoryReceipt
+
+ObservationHistoryReceipt + ObservationTransformationReceipt
+  -> RegularizedObservationRepresentation
+~~~
+
+`ObservationHistoryReceipt` is anchored to one already-typed recorded
+measurement and carries an opaque history reference. It does **not** say that
+the reference names a complete sequence, that every encounter was captured, or
+that the sequence is an empirically valid measurement model. The transformation
+receipt names only a synthetic method and parameterization tag; it does not
+validate interpolation, aggregation, imputation, or grid alignment.
+
+The two imported negative controls make the category boundary executable on the
+current compiler path:
+
+~~~
+RegularizedObservationRepresentation != ObservationHistoryReceipt
+outside caller != constructor of private RegularizedObservationRepresentation
+~~~
+
+Thus a regularized representation requires a declared transformation to be
+constructed by this API, and it cannot be passed where the API requires a
+history receipt. This is still a small nominal boundary, not full provenance
+graph completeness or a source-fresh imported-native closure.
+
 ## Future Executable Boundary
 
 Only after the source-fresh imported-native #901 acceptance path exists, the
@@ -340,7 +384,8 @@ test the following conditions:
 3. **ObservationFeatureUseReceipt** is rejected where an
    **IdentificationReceipt** or **TransportReceipt** is required.
 4. A **RegularizedObservationRepresentation** cannot substitute for an
-   **ObservationProcessReceipt** without a declared transformation receipt.
+   **ObservationHistoryReceipt** or **ObservationProcessReceipt**; its API
+   construction requires a declared transformation receipt.
 5. **ObservationProcessAbstentionReceipt** remains a normal, inspectable result
    and cannot be coerced into a zero observation or a decision candidate.
 
@@ -379,16 +424,16 @@ Owner: codex-root-psychiatric-state-inference-20260721
 Concept-IDs: SOUNIO-SCIENCE-RESEARCH-BOUNDARY; SOUNIO-ORDERED-PATH-PROVENANCE; SOUNIO-HYPERCOMPLEX-ZD-EVIDENCE
 Intent-Preserved: model complex psychiatric and medical systems without promoting records, analogies, or model outputs into unearned empirical or clinical authority
 Transformation: refine the research-only ObservationProcessReceipt into separately auditable opportunity, presence, selection, measurement-act, reactivity, model, feature-use, and abstention boundaries
-Types-Changed: private library-level nominal receipt types for opportunity, presence, selection, measurement act, recorded measurement, observation-feature use, and abstention; no parser or core type-system change
+Types-Changed: private library-level nominal receipt types for opportunity, presence, selection, measurement act, recorded measurement, observation-history reference, transformation, regularized representation, observation-feature use, and abstention; no parser or core type-system change
 Effects-Changed: none
 IR-Changed: none
-Claims-Introduced: a narrow library API can preserve distinct observation-process provenance categories through direct and small-import controls; a future source-fresh import fixture can test the broader collision matrix
+Claims-Introduced: a narrow library API can preserve distinct observation-process and transformation-provenance categories through direct and small-import controls; a future source-fresh import fixture can test the broader collision matrix
 Claims-Forbidden: that absence from care indicates stability; that assessment is always neutral or always an intervention; that informative observation identifies a causal effect; that a care-system feature transports to a new setting; that this contract authorizes a clinical action
 Assumptions: the study or deployment can state relevant opportunity, channel, selection, measurement-act, and use context; any reactivity claim has separately scoped empirical evidence
-Write-Set: docs/research/psychiatric_informative_observation_contract_2026-07-21.md; stdlib/epistemic/observation_provenance.sio; tests/run-pass/epistemic_observation_provenance_import_smoke.sio; tests/compile-fail/epistemic_observation_provenance_direct_construction.sio; tests/compile-fail/epistemic_observation_presence_cannot_be_measurement.sio; tests/compile-fail/epistemic_observation_feature_cannot_identify.sio
+Write-Set: docs/research/psychiatric_informative_observation_contract_2026-07-21.md; stdlib/epistemic/observation_provenance.sio; tests/run-pass/epistemic_observation_provenance_import_smoke.sio; tests/compile-fail/epistemic_observation_provenance_direct_construction.sio; tests/compile-fail/epistemic_observation_presence_cannot_be_measurement.sio; tests/compile-fail/epistemic_observation_feature_cannot_identify.sio; tests/compile-fail/epistemic_regularized_observation_cannot_be_history.sio; tests/compile-fail/epistemic_regularized_observation_direct_construction.sio
 Read-Set: docs/research/psychiatric_temporal_authority_receipt_matrix_2026-07-21.md; docs/research/psychiatric_counterfactual_authority_abstention_contract_2026-07-21.md; docs/internal/concepts/SEMANTIC_LANE_CONTRACT.md
-Positive-Witness: direct receipt control and bounded two-module library import smoke on the current default/fallback wrapper; future synthetic import-bearing receipt fixture after #901 source-fresh imported-native acceptance
-Negative-Witness: imported direct-construction rejection and substitutions from presence or feature-use into measurements or identification; future expanded substitutions from act/regularized representations into reactivity, transport, or decision categories
+Positive-Witness: direct receipt control and bounded two-module library import smoke, including a history-plus-transformation-to-regularized chain, on the current default/fallback wrapper; future synthetic import-bearing receipt fixture after #901 source-fresh imported-native acceptance
+Negative-Witness: imported direct-construction rejection and substitutions from presence, feature-use, or regularized representation into measurements, identification, or history; future expanded substitutions from act/regularized representations into reactivity, transport, or decision categories
 Acceptance-Gate: bash scripts/dev/check_docs_consistency.sh; filtered local harness for the direct controls and qualified default/fallback small-import smoke; source-fresh full import fixture only after #901, with fallback=0
 Integration-Target: research documentation branch; future library-first package after owner acceptance
 Authoritative-Only-If: the narrow API is authoritative only for its selected nominal categories; the broader path is authoritative only if a source-fresh imported-native witness proves the claimed receipt distinction without fallback, while all empirical and clinical claims remain independently governed
@@ -399,8 +444,8 @@ Authoritative-Only-If: the narrow API is authoritative only for its selected nom
 ~~~
 Semantic-Outcome: informative observation is represented as a structured and ordered research provenance boundary rather than a missingness flag or neutral state readout
 Concept-Status-Before: ObservationProcessReceipt names the general observation mechanism but does not distinguish opportunity, presence, selection, assessment act, reactivity status, and task-specific feature use
-Concept-Status-After: opportunity, presence, selection, measurement act, recorded measurement, feature use, and abstention have a narrow private-receipt library preflight plus an explicit no-promotion matrix, collision design, and source-fresh future fixture boundary
-Distinctions-Added: opportunity != presence != selection != measurement act != recorded response; reactivity status != intervention effect; prediction use != causal identification; regularization != original observation history
+Concept-Status-After: opportunity, presence, selection, measurement act, recorded measurement, observation-history reference, transformation, regularized representation, feature use, and abstention have a narrow private-receipt library preflight plus an explicit no-promotion matrix, collision design, and source-fresh future fixture boundary
+Distinctions-Added: opportunity != presence != selection != measurement act != recorded response; history reference != regularized representation; derivation receipt != raw-history recovery; reactivity status != intervention effect; prediction use != causal identification; regularization != original observation history
 Distinctions-Preserved: ordered path != commutative endpoint; model representation != empirical claim; compilation != clinical authority
 Distinctions-Erased: none
 Evidence-Run: bash scripts/dev/check_docs_consistency.sh; bash scripts/dev/check_docs_registry.sh; git diff --check
