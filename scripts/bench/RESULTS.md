@@ -117,6 +117,9 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 | gini_impurity_dense_by / simpson_dense | | ~14.2 | ~261 | **0.05x — wins 20x** | pandas = value_counts lambda |
 | any_positive_by / all_positive_by | | ~11.3 | ~13.6 | **0.83x — wins** | dense boolean reduction (beats native transform-max) |
 | cumany_positive_by / cumall_positive_by | | ~7.9 | ~18.0 | **0.44x — wins 2.3x** | single ordered pass (beats groupby.cummax) |
+| entropy_dense_by (Shannon, 1M rows, 1000 keys, vmax=101) | | ~31.9 | ~305 | **0.10x — wins 10x** | value histogram + bf_ln per bucket; pandas = per-group lambda |
+| inv_simpson_dense / renyi2 / norm_entropy / entropy_bits | | ~31.9 | ~267 | **0.12x — wins 8x** | same histogram engine |
+| sum_ln / mean_ln / log_range / var_ln / std_ln (dense) | | ~15.9 | ~24.5 | **0.65x — wins 1.5x** | ln lookup-table + single accumulation pass (beats vectorized np.log + native transform) |
 | cov (1M rows, two-pass mean-shift) | | 6.7 | 8.5 | **0.78x — Sounio wins** | (new verb) |
 | corr (1M rows, two-pass + bf_sqrt) | | 10.3 | 8.0 | **~1.3x** | (new verb) |
 | median (1M rows, quickselect) | | ~34 | ~16 | **~2.2x** | numpy SIMD introselect |

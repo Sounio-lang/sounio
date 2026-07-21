@@ -7042,3 +7042,172 @@ fn bf_cumboolpos(src: &BigFrame, key_col: i64, val_col: i64, mode: i64) -> BigFr
 pub fn bf_cumany_positive_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_cumboolpos(src, key_col, val_col, 0) }
 /// Per-group CUMULATIVE ALL-POSITIVE (1 while every value seen so far is positive, in row order), per row. Dense keys. NATIVE + lean_single.
 pub fn bf_cumall_positive_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_cumboolpos(src, key_col, val_col, 1) }
+
+/// Natural logarithm via exponent/mantissa split: x = m·2^e (m in [1,2)), ln x = e·ln2 + ln m,
+/// ln m = 2·atanh(t) with t=(m-1)/(m+1) (|t|<1/3, fast series). Needs a scratch i64 `sc` (bit
+/// reinterpret, no persistent state; allocate once per call site, reuse across a loop). Returns
+/// 0.0 for x<=0 as a domain sentinel (log undefined). Accurate to ~1e-12 on normal doubles.
+fn bf_ln(x: f64, sc: *mut i64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    let bits = f64_to_bits(x)
+    let e = ((bits >> 52) & 2047) - 1023
+    let mbits = (bits & 4503599627370495) | 4607182418800017408   // mantissa | (1023<<52) => m in [1,2)
+    write_i64(sc, 0, mbits)
+    let m = read_f64(sc as *mut f64, 0)
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var term = t
+    var sum = t
+    var kk = 3.0
+    var j: i64 = 0
+    while j < 12 { term = term * t2; sum = sum + term / kk; kk = kk + 2.0; j = j + 1 }
+    (e as f64) * 0.6931471805599453 + 2.0 * sum
+}
+
+/// Per-group value-DISTRIBUTION ENTROPY statistics via a value histogram (dense integer keys
+/// 0..1023 + integer values 0..vmax; no sort). Uses H = ln(n) − (Σ f·ln f)/n (nats). Broadcast.
+/// modes: 0=entropy(nats) 1=entropy(bits) 2=normalized(H/ln k) 3=renyi2(−ln Σp²) 4=inv_simpson(1/Σp²).
+/// O(n + G·vrange). NATIVE + lean_single only.
+fn bf_group_entropy_dense(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var cnt: [f64; 1024] = [0.0; 1024]
+    var hh:  [f64; 1024] = [0.0; 1024]
+    var nk:  [f64; 1024] = [0.0; 1024]
+    var sq:  [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || n <= 0 || vmax < 0 { return out }
+    let vm1 = vmax + 1
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let hist = heap_alloc(1024 * vm1 * 8) as *mut i64
+    let sc = heap_alloc(8) as *mut i64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        let v = read_f64(vp, i) as i64
+        if k >= 0 && k < 1024 && v >= 0 && v < vm1 { write_i64(hist, k * vm1 + v, read_i64(hist, k * vm1 + v) + 1); cnt[k] = cnt[k] + 1.0 }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        if cnt[g] > 0.0 {
+            let base = g * vm1
+            var v: i64 = 0
+            var nd = 0.0
+            var slf = 0.0
+            var ss = 0.0
+            while v < vm1 {
+                let f = read_i64(hist, base + v)
+                if f > 0 { let ff = f as f64; nd = nd + 1.0; ss = ss + ff * ff; slf = slf + ff * bf_ln(ff, sc) }
+                v = v + 1
+            }
+            nk[g] = nd
+            sq[g] = ss
+            hh[g] = bf_ln(cnt[g], sc) - slf / cnt[g]
+        }
+        g = g + 1
+    }
+    g = 0
+    while g < 1024 {
+        if cnt[g] > 0.0 {
+            let nn = cnt[g]
+            if mode == 0 { res[g] = hh[g] }
+            else { if mode == 1 { res[g] = hh[g] / 0.6931471805599453 }
+            else { if mode == 2 { if nk[g] > 1.0 { res[g] = hh[g] / bf_ln(nk[g], sc) } else { res[g] = 0.0 } }
+            else { if mode == 3 { res[g] = 0.0 - bf_ln(sq[g] / (nn * nn), sc) }
+            else { res[g] = (nn * nn) / sq[g] } } } }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, res[k]) } else { write_f64(op, i, read_f64(vp, i)) } i = i + 1 }
+    heap_free(hist as *mut i8)
+    heap_free(sc as *mut i8)
+    out
+}
+/// Per-group SHANNON ENTROPY (nats) of the value distribution, broadcast. Dense histogram (see
+/// bf_group_entropy_dense). pandas needs a per-group lambda -- big win. NATIVE + lean_single only.
+pub fn bf_entropy_dense_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_entropy_dense(src, key_col, val_col, vmax, 0) }
+/// Per-group SHANNON ENTROPY in BITS (H/ln2), broadcast. Dense histogram. NATIVE + lean_single only.
+pub fn bf_entropy_bits_dense_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_entropy_dense(src, key_col, val_col, vmax, 1) }
+/// Per-group NORMALIZED ENTROPY (evenness, H/ln(nunique) in 0..1; 0 if <2 distinct), broadcast. Dense histogram. NATIVE + lean_single.
+pub fn bf_norm_entropy_dense_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_entropy_dense(src, key_col, val_col, vmax, 2) }
+/// Per-group RENYI ENTROPY of order 2 (−ln Σpᵢ²), broadcast. Dense histogram. NATIVE + lean_single only.
+pub fn bf_renyi2_dense_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_entropy_dense(src, key_col, val_col, vmax, 3) }
+/// Per-group INVERSE SIMPSON index (1/Σpᵢ², Hill number q=2 = effective #categories), broadcast. Dense histogram. NATIVE + lean_single.
+pub fn bf_inv_simpson_dense_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_entropy_dense(src, key_col, val_col, vmax, 4) }
+
+/// Per-group LOG-VALUE reductions via a ln LOOKUP TABLE (dense integer values 1..vmax; v<=0
+/// skipped since ln is undefined there). ln is evaluated once per distinct value into a small
+/// cache-resident LUT, then a SINGLE accumulation pass over the rows sums lut[v] / lut[v]²
+/// per key -- no per-row transcendental and no large histogram, so it beats pandas' vectorized
+/// np.log + groupby.transform. modes: 0=Σln v, 1=mean ln v (= log geometric mean), 2=log range
+/// (ln max − ln min), 3=variance of ln v (ddof=1), 4=std of ln v. Broadcast. O(n + vrange).
+/// NATIVE + lean_single only.
+fn bf_group_logstat_dense(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var nn:   [f64; 1024] = [0.0; 1024]
+    var sl:   [f64; 1024] = [0.0; 1024]
+    var sl2:  [f64; 1024] = [0.0; 1024]
+    var lmn:  [f64; 1024] = [0.0; 1024]
+    var lmx:  [f64; 1024] = [0.0; 1024]
+    var res:  [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || n <= 0 || vmax < 0 { return out }
+    let vm1 = vmax + 1
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let sc = heap_alloc(8) as *mut i64
+    let lut = heap_alloc(vm1 * 8) as *mut f64
+    var v: i64 = 1
+    while v < vm1 { write_f64(lut, v, bf_ln(v as f64, sc)) v = v + 1 }
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        let vi = read_f64(vp, i) as i64
+        if k >= 0 && k < 1024 && vi >= 1 && vi < vm1 {
+            let l = read_f64(lut, vi)
+            if nn[k] == 0.0 { lmn[k] = l; lmx[k] = l } else { if l < lmn[k] { lmn[k] = l }; if l > lmx[k] { lmx[k] = l } }
+            nn[k] = nn[k] + 1.0; sl[k] = sl[k] + l; sl2[k] = sl2[k] + l * l
+        }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        let m = nn[g]
+        if m > 0.0 {
+            if mode == 0 { res[g] = sl[g] }
+            else { if mode == 1 { res[g] = sl[g] / m }
+            else { if mode == 2 { res[g] = lmx[g] - lmn[g] }
+            else {
+                var vv = 0.0
+                if m > 1.0 { vv = (sl2[g] - sl[g] * sl[g] / m) / (m - 1.0) }
+                if vv < 0.0 { vv = 0.0 }
+                if mode == 3 { res[g] = vv } else { res[g] = bf_sqrt(vv, sc) }
+            } } }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, res[k]) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    heap_free(lut as *mut i8)
+    heap_free(sc as *mut i8)
+    out
+}
+/// Per-group SUM OF LOGS (Σ ln v, integer v in 1..vmax) -- log-likelihood building block, broadcast. Dense histogram. NATIVE + lean_single.
+pub fn bf_sum_ln_dense_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_logstat_dense(src, key_col, val_col, vmax, 0) }
+/// Per-group MEAN OF LOGS (mean ln v = log of the geometric mean), broadcast. Dense histogram. NATIVE + lean_single.
+pub fn bf_mean_ln_dense_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_logstat_dense(src, key_col, val_col, vmax, 1) }
+/// Per-group LOG RANGE (ln(max) − ln(min) = ln(max/min)), broadcast. Dense histogram. NATIVE + lean_single.
+pub fn bf_log_range_dense_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_logstat_dense(src, key_col, val_col, vmax, 2) }
+/// Per-group VARIANCE OF LOGS (ddof=1, for lognormal fit), broadcast. Dense histogram. NATIVE + lean_single only.
+pub fn bf_var_ln_dense_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_logstat_dense(src, key_col, val_col, vmax, 3) }
+/// Per-group STD OF LOGS (sqrt of the ddof=1 log-variance = log of the geometric std dev), broadcast. Dense histogram. NATIVE + lean_single.
+pub fn bf_std_ln_dense_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_logstat_dense(src, key_col, val_col, vmax, 4) }
