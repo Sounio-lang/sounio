@@ -230,8 +230,8 @@ use a missing receipt as a zero, a high-confidence default, or a recommendation.
 
 ## First Synthetic Collision Gate
 
-After the imported-native #901 gate is accepted, the first executable bridge
-should be synthetic and should prove only receipt separation:
+After the imported-native #901 gate is accepted, the first import-bearing
+executable bridge should be synthetic and should prove only receipt separation:
 
 | Collision | Hold fixed | Vary | Required result |
 | --- | --- | --- | --- |
@@ -245,6 +245,26 @@ The gate must use synthetic constants, reject category substitutions at compile
 time, and execute natively only to show that the typed distinction survives the
 selected source-to-IR path. It must not ingest patient data, output a dose, or
 claim clinical performance.
+
+Before #901 acceptance, the direct single-module control is
+`tests/run-pass/psychiatric_counterfactual_authority_receipt_chain.sio`, with
+the paired negative
+`tests/compile-fail/psychiatric_counterfactual_question_cannot_authorize.sio`.
+It is a nominal library-protocol witness, not opaque-capability enforcement:
+the positive constructor requires distinct question, identification, transport,
+and selective-risk receipts before it forms a research candidate; abstention
+remains a separate output. The negative must be rejected when a
+`CounterfactualQuestionReceipt` is passed where a `ResearchDecisionCandidate`
+is required. This proves a selected API boundary only. It does not make
+arbitrary struct construction impossible, prove the intermediate causal or
+transport promotions, or establish clinical authority.
+
+On 2026-07-21 this direct control passed through the default Madaros v0.80.0
+wrapper and the focused suite harness. Its paired negative was rejected with
+`E009`, `expected ResearchDecisionCandidate`, and `found
+CounterfactualQuestionReceipt`. This is direct single-module compiler evidence
+only; it is not an imported-native #901 acceptance result, an intermediate
+promotion proof, a causal identification result, or a clinical validation.
 
 ## What Types Can And Cannot Enforce
 
@@ -294,4 +314,20 @@ Negative-Witness: no existing counterfactual or deferred workflow object is acce
 Acceptance-Gate: bash scripts/dev/check_docs_consistency.sh; bash scripts/dev/check_docs_registry.sh
 Integration-Target: internal research planning only
 Authoritative-Only-If: the cited sources, current Sounio surfaces, and forbidden claims remain aligned
+```
+
+## Integration Receipt
+
+```text
+Semantic-Outcome: synthetic nominal authority constructor and negative category-substitution witness added
+Concept-Status-Before: counterfactual workflow syntax existed without a dedicated authority-boundary witness
+Concept-Status-After: the selected library protocol requires question, identification, transport, and selective-risk receipts for a research candidate and keeps abstention distinct
+Distinctions-Added: counterfactual question != research decision candidate; abstention != implicit fallback
+Distinctions-Preserved: formal model != empirical claim; compile success != clinical validation
+Distinctions-Erased: none
+Evidence-Run: bin/souc run tests/run-pass/psychiatric_counterfactual_authority_receipt_chain.sio; bin/souc check tests/compile-fail/psychiatric_counterfactual_question_cannot_authorize.sio; bash scripts/run_sio_test_suite.sh psychiatric_counterfactual_authority_receipt_chain --verbose; bash scripts/run_sio_test_suite.sh psychiatric_counterfactual_question_cannot_authorize --verbose
+Fallback-Path: no fallback path is evidence for clinical authority
+Legacy-Kept: existing Counterfactual, Deferred, and acquisition workflow fixtures remain unchanged
+Conflicting-Lanes: none at the claimed files; imported-native #901 remains an independent acceptance dependency
+Next-Semantic-Interface: module-opaque receipt constructors or a capability surface, if and only if API-boundary evidence is insufficient
 ```
