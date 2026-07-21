@@ -2,9 +2,9 @@
 topic_id: repo.docs.internal.concepts.module-layout-identity
 authority: repo_only
 audience: users
-last_validated: 2026-07-21
-validated_by: E3-local
-source_of_truth: docs/internal/concepts/registry.tsv#SOUNIO-MODULE-LAYOUT-IDENTITY
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.concepts.module-layout-identity
 -->
 
 # Module Layout Identity
