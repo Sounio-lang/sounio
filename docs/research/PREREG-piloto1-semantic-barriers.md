@@ -195,11 +195,40 @@ Independente deste piloto e ainda em aberto desde o O-SSM: **demonstrar recupera
 
 Nota metodológica curta, com o negativo (se for o caso) em destaque e não em rodapé. Se positivo, é a §A.2 do registro deixando de ser conjectura — e a pergunta afiada que justifica uma submissão ao CEP.
 
+---
+
+## Apêndice — Referências (verificadas 2026-07-21)
+
+> **Nota de verificação.** As entradas abaixo fundamentam afirmações de literatura do corpo do
+> pré-registro e foram **acrescentadas após o registro** (não fazem parte do corpo carimbado de 20/07).
+> Verificação por checagem independente de título+autor: **existência, autoria, venue e DOI confirmados**;
+> retração/correção checada via scite (`retraction_notices` ausente = sem retração) para as entradas 1–3.
+> O DOI da entrada 3 foi **corrigido** nesta verificação — uma inferência inicial apontava para
+> `10.1038/s41598-019-40871-5` (*Sci Rep*), que o registro real resolve para um artigo não relacionado;
+> o correto é *Nat Commun* abaixo.
+
+1. **Sonho como modelo de psicose** (§2, §7) — Scarone S, Manzone ML, Gambini O, Kantzas I, Limosani I,
+   D'Agostino A, Hobson JA. The dream as a model for psychosis: an experimental approach using bizarreness
+   as a cognitive marker. *Schizophr Bull*. 2008;34(3):515–22. doi:10.1093/schbul/sbm116. *(sem retração)*
+2. **Falha de monitorização da fonte** (§2) — Johnson MK, Hashtroudi S, Lindsay DS. Source monitoring.
+   *Psychol Bull*. 1993;114(1):3–28. doi:10.1037/0033-2909.114.1.3. *(sem retração)*
+3. **Curvatura de Ollivier–Ricci com precedente em psicopatologia** (§3.2) — Farooq H, Chen Y, Georgiou TT,
+   Tannenbaum A, Lenglet C. Network curvature as a hallmark of brain structural connectivity.
+   *Nat Commun*. 2019;10:4937. doi:10.1038/s41467-019-12915-x. *(sem retração)* — **Ressalva:** o precedente
+   firme é conectividade estrutural/envelhecimento e transtornos do neurodesenvolvimento (p.ex. TEA), **não**
+   depressão. Ler §3.2 como "precedente em psicopatologia geral", não "em depressão".
+4. **Normas Hall/Van de Castle e disponibilização no DreamBank** (§2) — Domhoff GW. *The Scientific Study of
+   Dreams: Neural Networks, Cognitive Development, and Content Analysis*. Washington, DC: American
+   Psychological Association; 2003.
+
 ## Divulgação de uso de IA (GAIDeT / ICMJE 2025)
 
 - **Claude Opus 4.8 (Claude Code)** — verificação dos termos de uso e do inventário de séries do DreamBank
   por tamanho (resolução do `[FILL]` bloqueante de §2), fixação dos parâmetros de execução (§3.1, §4, §6.2),
   formatação e registro deste pré-registro. Implementação e execução do pipeline (pós-registro) sob a mesma
   divulgação.
+- **Claude Fable 5 (Claude Code)** — verificação bibliográfica do Apêndice de Referências (2026-07-21) via
+  scite MCP + busca independente por WebSearch; correção do DOI da entrada 3. Nenhuma citação foi gerada sem
+  recuperação do registro real.
 
 O autor revisou, verificou e assume responsabilidade integral pelo conteúdo, incluindo todos os resultados numéricos e sua interpretação.
