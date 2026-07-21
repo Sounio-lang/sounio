@@ -59,27 +59,36 @@ per-module. A robust fix likely carries the init value on the parsed AST/Program
 (so it travels with the module to lowering) instead of a reset-prone global table,
 or brackets every native-path load loop. Blocks: `lognormal_pdf` (stats).
 
-## Defect B — passing a global array by `&!` ref computes a wrong address
+## Defect B — passing a global array by `&!` ref — **FIXED (wave10e, 2026-07-21)**
 
-Passing **any module-level global array** by `&!` reference segfaults; direct
-indexing of the same global works, and passing a **local** array by ref to the
-same callee works.
+Passing **any module-level global array** by `&!` reference used to silently
+miss BSS (or SIGSEGV on older layouts); direct indexing of the same global
+worked, and passing a **local** array by ref to the same callee worked.
 
 Minimal repro:
 ```sounio
 var GG: [f64; 4] = [0.0; 4]
 fn wr(a: &![f64; 4]) with Mut { a[0] = 5.0 }
 fn main() -> i32 with IO, Mut, Div, Panic { wr(&!GG) print_int(f64_to_bits(GG[0])) 0 }
-// -> rc=139 (SIGSEGV). Same with a LOCAL array: rc=0.
+// was: GG[0] bits stayed 0 (write at BSS+object_header). Now: 4617315517961601024.
 ```
-Root cause: the ref path (`ir/lower.sio` ~10398, `IR_STRATEGY_BSS_GLOBAL` branch)
-emits `ir_load_imm(BSS_BASE_LINUX + functions[fn_id].param_count)` as the array's
-address. `addr(&!GG)` returns a plausible-looking high address, but writing through
-it faults — so `param_count` is stale/wrong relative to the final BSS layout that
-direct access and local-array refs use. Fix: source the global's BSS offset from
-the same tracking that direct access uses, or reconcile `param_count` with the
-final layout. Blocks: `eigen` (linalg — the emitter passes module-level
-`[f64;65536]` matrices by ref).
+Root cause (two cooperating bugs):
+1. **OpRef of BSS aggregate** LEA'd a stack slot holding the plain BSS address;
+   native-v2 `ref_array_*` then does `load[slot] → resolve raw → +object_header`,
+   so stores landed at `BSS+header` while `GG[i]` (raw IndexGet) still read
+   `BSS+0`.
+2. **`var p = &!arr` did not mark `is_ref`**, so IndexSet through the alias used
+   the GC-handle array path instead of `ref_array`.
+
+Fix (`self-hosted/ir/lower.sio` + `IR_NATIVE_V2_OBJECT_HEADER_SIZE` in `ir.sio`):
+- OpRef/OpRefMut of a BSS aggregate stashes `(bss_addr - object_header)` so the
+  `+header` step lands on the true BSS base.
+- let/var bindings from a ref type or from an `&`/`&!` RHS call `bind_local_ref`.
+
+Gate: `scripts/ci/madaros_global_array_ref_gate.sh` /
+`tests/run-pass/global_array_ref_mut.sio` (cross-fn f64/i64, local+global alias,
+direct store control). Unblocks linalg emitters that pass module-level matrices
+by ref.
 
 ## Note — `print_f64` mangles negatives
 
@@ -89,7 +98,8 @@ final layout. Blocks: `eigen` (linalg — the emitter passes module-level
 
 ## Migration status
 
-SPECIAL: green on Madaros. STATS: 18/19 (blocked on Defect A). LINALG: blocked on
-Defect B. After the compiler fixes ship in the prebuilt (madaros-prebuilt-refresh),
-the SPECIAL gate can drop `SOUNIO_SOUC_ENGINE=lean_single`; STATS/LINALG stay on
-lean_single until A and B land.
+SPECIAL: green on Madaros. STATS: 18/19 (blocked on Defect A). LINALG: Defect B
+(global `&!` array ref) is fixed wave10e — remaining linalg blockers are
+independent of that ref path. After the compiler fixes ship in the prebuilt
+(madaros-prebuilt-refresh), the SPECIAL gate can drop
+`SOUNIO_SOUC_ENGINE=lean_single`; STATS stays on lean_single until A lands.
