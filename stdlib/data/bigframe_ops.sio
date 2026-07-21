@@ -27,7 +27,8 @@
 // grouped cummin-abs / cummean-abs / cumsum-pos / cumsum-centered; count-pos / frac-pos / sign-sum / max-abs / range-ratio / count-above-mean;
 // grouped fano / snr / cv2; drawdown / drawdown-pct / runup / running-argmax; cumcount-positive / cumsum-neg / count-negative;
 // grouped runcount x4; sum-sq/cube/count-zero/sum-pos/neg/peak/trough-ratio; normalize-mean; cosine/euclid/manhattan/chebyshev/cross-mean; range-over-std/cumcount-above-mean/cumsum-centered-sq;
-// grouped num-increases/decreases/total-variation/mean-abs-change; autocorr1; is-running-max/min/max-drawdown/max-runup; count-ge-mean.
+// grouped num-increases/decreases/total-variation/mean-abs-change; autocorr1; is-running-max/min/max-drawdown/max-runup; count-ge-mean;
+// grouped count-le-mean/within-1std/frac-within-1std/outlier-2std; cummax-pct/cummin-pct; sum-recip/cumsum-recip/cumsum-sign; cumcount-ge-prev.
 // Each is an O(n)-expected pass (or two), allocates its result on the heap via
 // bf_new, and scales to the millions of rows a BigFrame holds. The reductions/joins
 // gather COLUMN-MAJOR through the raw column pointers (bf_col_ptr + read_f64/
@@ -6522,5 +6523,88 @@ pub fn bf_count_ge_mean_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFra
     var g: i64=0; while g<1024 { if cnt[g]>0.0 {mean[g]=sum[g]/cnt[g]} g=g+1 }
     i=0; while i<n { let k=read_f64(kp,i) as i64; if k>=0&&k<1024 { if read_f64(vp,i)>=mean[k] {c[k]=c[k]+1.0} } i=i+1 }
     i=0; while i<n { let k=read_f64(kp,i) as i64; if k>=0&&k<1024 {write_f64(op,i,c[k])} else {write_f64(op,i,read_f64(vp,i))} i=i+1 }
+    out
+}
+
+/// Per-group two-pass THRESHOLD-count engine shared by bf_count_le_mean_by /
+/// bf_count_within_1std_by / bf_frac_within_1std_by / bf_count_outlier_2std_by: mode 0 count
+/// of val≤mean, 1 count of |val−mean|≤std, 2 fraction |val−mean|≤std, 3 count of
+/// |val−mean|>2·std (2-sigma outliers), broadcast. Sample std (ddof=1). DENSE keys 0..1023
+/// (no hashing). O(n). NATIVE + lean_single only.
+fn bf_group_thr(src: &BigFrame, kc: i64, vc: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var sum: [f64;1024]=[0.0;1024]; var ssq: [f64;1024]=[0.0;1024]; var cnt: [f64;1024]=[0.0;1024]; var mean: [f64;1024]=[0.0;1024]; var sd: [f64;1024]=[0.0;1024]; var c: [f64;1024]=[0.0;1024]
+    let n=bf_nrows(src); var out=bf_new(1,n); out.n_rows=n
+    if kc<0||kc>=bf_ncols(src)||vc<0||vc>=bf_ncols(src)||n<=0 { return out }
+    let kp=bf_col_ptr(src,kc) as *mut f64; let vp=bf_col_ptr(src,vc) as *mut f64; let op=bf_col_ptr(&out,0) as *mut f64; let sc=heap_alloc(8) as *mut i64
+    var i: i64=0
+    while i<n { let k=read_f64(kp,i) as i64; if k>=0&&k<1024 { let v=read_f64(vp,i); sum[k]=sum[k]+v; ssq[k]=ssq[k]+v*v; cnt[k]=cnt[k]+1.0 } i=i+1 }
+    var g: i64=0; while g<1024 { if cnt[g]>0.0 { mean[g]=sum[g]/cnt[g]; if cnt[g]>1.0 { var va=(ssq[g]-sum[g]*sum[g]/cnt[g])/(cnt[g]-1.0); if va>0.0 {sd[g]=bf_sqrt(va,sc)} } } g=g+1 }
+    i=0
+    while i<n { let k=read_f64(kp,i) as i64; if k>=0&&k<1024 { let v=read_f64(vp,i)
+        if mode==0 { if v<=mean[k] {c[k]=c[k]+1.0} } else { if mode==3 { if bf_fabs(v-mean[k])>2.0*sd[k] {c[k]=c[k]+1.0} } else { if bf_fabs(v-mean[k])<=sd[k] {c[k]=c[k]+1.0} } } } i=i+1 }
+    i=0; while i<n { let k=read_f64(kp,i) as i64; if k>=0&&k<1024 { if mode==2 { if cnt[k]>0.0 {write_f64(op,i,c[k]/cnt[k])} else {write_f64(op,i,0.0)} } else {write_f64(op,i,c[k])} } else {write_f64(op,i,read_f64(vp,i))} i=i+1 }
+    heap_free(sc as *mut i8)
+    out
+}
+/// Per-group COUNT ≤ MEAN, broadcast. Dense. NATIVE + lean_single.
+pub fn bf_count_le_mean_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_thr(src, key_col, val_col, 0) }
+/// Per-group COUNT WITHIN 1 STD (|val−mean|≤std), broadcast. Dense. NATIVE + lean_single.
+pub fn bf_count_within_1std_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_thr(src, key_col, val_col, 1) }
+/// Per-group FRACTION WITHIN 1 STD, broadcast. Dense. NATIVE + lean_single.
+pub fn bf_frac_within_1std_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_thr(src, key_col, val_col, 2) }
+/// Per-group COUNT of 2-SIGMA OUTLIERS (|val−mean|>2·std), broadcast. Dense. NATIVE + lean_single.
+pub fn bf_count_outlier_2std_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_thr(src, key_col, val_col, 3) }
+
+/// Per-group RUNNING-EXTREME-FRACTION engine shared by bf_cummax_pct_by / bf_cummin_pct_by:
+/// mode 0 running_max/group_max, 1 running_min/group_min (a per-row fraction of the group's
+/// eventual extreme). DENSE keys 0..1023 (two-pass: group extremes, then running). O(n).
+/// NATIVE + lean_single only.
+fn bf_group_rpct(src: &BigFrame, kc: i64, vc: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var gmx: [f64;1024]=[0.0;1024]; var gmn: [f64;1024]=[0.0;1024]; var seen: [i64;1024]=[0;1024]; var rmx: [f64;1024]=[0.0;1024]; var rmn: [f64;1024]=[0.0;1024]; var rseen: [i64;1024]=[0;1024]
+    let n=bf_nrows(src); var out=bf_new(1,n); out.n_rows=n
+    if kc<0||kc>=bf_ncols(src)||vc<0||vc>=bf_ncols(src)||n<=0 { return out }
+    let kp=bf_col_ptr(src,kc) as *mut f64; let vp=bf_col_ptr(src,vc) as *mut f64; let op=bf_col_ptr(&out,0) as *mut f64
+    var i: i64=0
+    while i<n { let k=read_f64(kp,i) as i64; if k>=0&&k<1024 { let v=read_f64(vp,i); if seen[k]==0 {seen[k]=1;gmx[k]=v;gmn[k]=v} else { if v>gmx[k]{gmx[k]=v} if v<gmn[k]{gmn[k]=v} } } i=i+1 }
+    i=0
+    while i<n { let k=read_f64(kp,i) as i64; if k>=0&&k<1024 { let v=read_f64(vp,i); if rseen[k]==0 {rseen[k]=1;rmx[k]=v;rmn[k]=v} else { if v>rmx[k]{rmx[k]=v} if v<rmn[k]{rmn[k]=v} }
+        if mode==0 { if gmx[k]!=0.0 {write_f64(op,i,rmx[k]/gmx[k])} else {write_f64(op,i,0.0)} } else { if gmn[k]!=0.0 {write_f64(op,i,rmn[k]/gmn[k])} else {write_f64(op,i,0.0)} } } else {write_f64(op,i,read_f64(vp,i))} i=i+1 }
+    out
+}
+/// Per-group running-MAX fraction (running_max/group_max). Dense. NATIVE + lean_single.
+pub fn bf_cummax_pct_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_rpct(src, key_col, val_col, 0) }
+/// Per-group running-MIN fraction (running_min/group_min). Dense. NATIVE + lean_single.
+pub fn bf_cummin_pct_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_rpct(src, key_col, val_col, 1) }
+
+/// Per-group RECIPROCAL / sign cumulative engine shared by bf_sum_recip_by /
+/// bf_cumsum_recip_by / bf_cumsum_sign_by: mode 0 Σ(1/val) broadcast, 1 running Σ(1/val),
+/// 2 running Σ sign(val). DENSE keys 0..1023 (no hashing). O(n). NATIVE + lean_single only.
+fn bf_group_rec(src: &BigFrame, kc: i64, vc: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var a: [f64;1024]=[0.0;1024]; var run: [f64;1024]=[0.0;1024]
+    let n=bf_nrows(src); var out=bf_new(1,n); out.n_rows=n
+    if kc<0||kc>=bf_ncols(src)||vc<0||vc>=bf_ncols(src)||n<=0 { return out }
+    let kp=bf_col_ptr(src,kc) as *mut f64; let vp=bf_col_ptr(src,vc) as *mut f64; let op=bf_col_ptr(&out,0) as *mut f64
+    if mode==0 { var i: i64=0; while i<n { let k=read_f64(kp,i) as i64; if k>=0&&k<1024 { let v=read_f64(vp,i); if v!=0.0 {a[k]=a[k]+1.0/v} } i=i+1 }
+        i=0; while i<n { let k=read_f64(kp,i) as i64; if k>=0&&k<1024 {write_f64(op,i,a[k])} else {write_f64(op,i,read_f64(vp,i))} i=i+1 } return out }
+    var i: i64=0
+    while i<n { let k=read_f64(kp,i) as i64; if k>=0&&k<1024 { let v=read_f64(vp,i); if mode==1 { if v!=0.0 {run[k]=run[k]+1.0/v} } else {run[k]=run[k]+bf_sgn(v)} write_f64(op,i,run[k]) } else {write_f64(op,i,read_f64(vp,i))} i=i+1 }
+    out
+}
+/// Per-group Σ(1/val) (sum of reciprocals), broadcast. Dense. NATIVE + lean_single.
+pub fn bf_sum_recip_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_rec(src, key_col, val_col, 0) }
+/// Per-group running Σ(1/val). Dense. NATIVE + lean_single.
+pub fn bf_cumsum_recip_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_rec(src, key_col, val_col, 1) }
+/// Per-group running Σ sign(val). Dense. NATIVE + lean_single.
+pub fn bf_cumsum_sign_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_rec(src, key_col, val_col, 2) }
+
+/// Per-group running COUNT of val≥previous-in-group (count of non-decreasing steps so far).
+/// DENSE keys 0..1023 (previous-value tracker; one pass). O(n). NATIVE + lean_single only.
+pub fn bf_cumcount_ge_prev_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var prev: [f64;1024]=[0.0;1024]; var seen: [i64;1024]=[0;1024]; var c: [f64;1024]=[0.0;1024]
+    let n=bf_nrows(src); var out=bf_new(1,n); out.n_rows=n
+    if key_col<0||key_col>=bf_ncols(src)||val_col<0||val_col>=bf_ncols(src)||n<=0 { return out }
+    let kp=bf_col_ptr(src,key_col) as *mut f64; let vp=bf_col_ptr(src,val_col) as *mut f64; let op=bf_col_ptr(&out,0) as *mut f64
+    var i: i64=0
+    while i<n { let k=read_f64(kp,i) as i64; if k>=0&&k<1024 { let v=read_f64(vp,i); if seen[k]==1 { if v>=prev[k] {c[k]=c[k]+1.0} } prev[k]=v; seen[k]=1; write_f64(op,i,c[k]) } else {write_f64(op,i,read_f64(vp,i))} i=i+1 }
     out
 }
