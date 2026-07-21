@@ -12,6 +12,13 @@ cd "$ROOT_DIR"
 OUT_DIR="$(mktemp -d /tmp/sounio-package-pbpk-gum.XXXXXX)"
 trap 'rm -rf "$OUT_DIR"' EXIT
 
+# Current Madaros lowering uses multi-megabyte fixed-array frames. GitHub-hosted
+# runners default to an 8 MiB stack, which faults in lower_array before codegen.
+if ! ulimit -s unlimited 2>/dev/null; then
+  echo '[package-pbpk-gum] FAIL: current-source Madaros requires an unlimited stack for this gate' >&2
+  exit 1
+fi
+
 RAW_MADAROS="${MADAROS_RAW_BIN:-}"
 if [[ -z "$RAW_MADAROS" ]]; then
   RAW_MADAROS="$OUT_DIR/madaros-current-source"
