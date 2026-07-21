@@ -11,7 +11,7 @@ use ir::opt_cleanup::{OcpCleanupModuleReceipt, opt_cleanup_module_inplace}
 use io::env::{read_env}
 use io::trace::{io_trace_i64_string}
 use check::mod::{check_items_verdict_boot4, check_items_verdict_boot4_with_ontocache_sidecar, check_modules_verdict_boot4, check_program_epistemic_into, check_program_with_artifacts, checker_to_ir_epistemic_into, checker_apply_ir_metadata, checker_apply_ir_ontology_parameter_links_from_items}
-use ir::lower::{lower_program_to_ir_trace, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_bodies_from_summary_flat_with_epistemic_ref}
+use ir::lower::{lower_program_to_ir_trace, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_bodies_from_summary_flat_with_epistemic_ref, lower_program_bodies_from_summary_with_epistemic_boxed_owned}
 use native::codegen_x86_linux::{compile_native_v2_preview_to_file, native_resolve_target, native_v2_builtin_id_for_name}
 use check::knowledge_context::{knowledge_context_validate_items, knowledge_context_validate_items_values_only}
 use resolve::mod::{resolve_modules}
@@ -4416,10 +4416,10 @@ fn module_frontend_lower_program_box_traced_with_epistemic(
     trace.summary_seeded_modules = trace.summary_seeded_modules + 1
     trace.last_stage = "lower_bodies"
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_begin\n") }
-    var summary_val = (*summary_result.summary)
-    let body_result = lower_program_bodies_from_summary_with_epistemic_boxed_ref(
+    // Consume summary Box: reuse its IrModule for body lower (no second empty).
+    let body_result = lower_program_bodies_from_summary_with_epistemic_boxed_owned(
         program,
-        &summary_val,
+        *summary_result.summary,
         epistemic
     )
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_done\n") }
@@ -4479,10 +4479,10 @@ fn module_frontend_lower_program_items_box_traced(
     trace.summary_seeded_modules = trace.summary_seeded_modules + 1
     trace.last_stage = "lower_bodies"
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_begin\n") }
-    var summary_val = (*summary_result.summary)
-    let body_result = lower_program_bodies_from_summary_with_epistemic_boxed_ref(
+    // Consume summary Box: reuse its IrModule for body lower (no second empty).
+    let body_result = lower_program_bodies_from_summary_with_epistemic_boxed_owned(
         &program,
-        &summary_val,
+        *summary_result.summary,
         &epistemic
     )
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_done\n") }
@@ -4530,10 +4530,10 @@ fn module_frontend_lower_program_box_traced_with_externs(
     trace.summary_seeded_modules = trace.summary_seeded_modules + 1
     trace.last_stage = "lower_bodies"
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_begin\n") }
-    var summary_val = (*summary_result.summary)
-    let body_result = lower_program_bodies_from_summary_with_epistemic_boxed_ref(
+    // Consume summary Box: reuse its IrModule for body lower (no second empty).
+    let body_result = lower_program_bodies_from_summary_with_epistemic_boxed_owned(
         program,
-        &summary_val,
+        *summary_result.summary,
         &epistemic
     )
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_done\n") }
@@ -4582,10 +4582,10 @@ fn module_frontend_lower_program_items_box_traced_with_externs(
     trace.summary_seeded_modules = trace.summary_seeded_modules + 1
     trace.last_stage = "lower_bodies"
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_begin\n") }
-    var summary_val = (*summary_result.summary)
-    let body_result = lower_program_bodies_from_summary_with_epistemic_boxed_ref(
+    // Consume summary Box: reuse its IrModule for body lower (no second empty).
+    let body_result = lower_program_bodies_from_summary_with_epistemic_boxed_owned(
         &program,
-        &summary_val,
+        *summary_result.summary,
         &epistemic
     )
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_done\n") }
@@ -5011,15 +5011,17 @@ fn module_frontend_lower_programs_array_boxed(
 }
 
 fn bridge_lower_imported_modules_box(main_path: string, trace: &! LoadMultimoduleIrTrace) -> ModuleFrontendLowerBoxResult with IO, Mut, Div, Panic, Alloc {
-    let ir_result = load_multimodule_ir_traced(main_path, trace)
-    if !ir_result.ok {
-        return module_frontend_lower_box_error(ir_result.error_msg)
+    // Keep the merged Box canonical — do not densify through MultiModuleIrResult
+    // then Box::new again (was a full second materialization).
+    let boxed = load_multimodule_ir_to_box_traced(main_path, trace)
+    if !boxed.ok {
+        return module_frontend_lower_box_error(boxed.error_msg)
     }
-    if ir_result.module.fn_count <= 0 {
+    if (*boxed.module).fn_count <= 0 {
         return module_frontend_lower_box_error("ir_lowering_failed")
     }
     trace.last_stage = "done"
-    module_frontend_lower_box_ok(Box::new(ir_result.module), ir_empty_validated_patch_stats())
+    module_frontend_lower_box_ok(boxed.module, ir_empty_validated_patch_stats())
 }
 
 pub fn bridge_lower_module_box(main_path: string, trace: &! LoadMultimoduleIrTrace) -> ModuleFrontendLowerBoxResult with IO, Mut, Div, Panic, Alloc {
@@ -5092,10 +5094,10 @@ fn module_frontend_lower_program_full_traced(
     trace.summary_seeded_modules = trace.summary_seeded_modules + 1
     trace.last_stage = "lower_bodies"
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_begin\n") }
-    var summary_val = (*summary_result.summary)
-    let body_result = lower_program_bodies_from_summary_with_epistemic_boxed_ref(
+    // Consume summary Box: reuse its IrModule for body lower (no second empty).
+    let body_result = lower_program_bodies_from_summary_with_epistemic_boxed_owned(
         &program,
-        &summary_val,
+        *summary_result.summary,
         &epistemic
     )
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_done\n") }
@@ -5230,9 +5232,9 @@ fn module_frontend_merge_imported_into(
     if !merged.ok {
         return false
     }
-    // Residual densify for callers that still own a stack IrModule (legacy
-    // MultiModuleIrResult). Prefer module_frontend_merge_imported_box / the
-    // compile-to-file path which never densifies.
+    // Residual densify only when the caller still owns a stack IrModule.
+    // Prefer merge_imported_box / merge_imported_into_box / compile-to-file
+    // (and load_multimodule_ir_to_box_traced) which keep the Box canonical.
     (*out_module) = *merged.module
     true
 }
@@ -6313,7 +6315,10 @@ pub fn preflight_multimodule_frontend(main_path: string) -> MultiModuleFrontendR
     multimodule_frontend_error(imported_summary.error_msg)
 }
 
-pub fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIrTrace) -> MultiModuleIrResult with IO, Mut, Div, Panic, Alloc {
+// Box-preserving multi-mod load. Single-module paths still densify once into a
+// fresh Box (legacy load_multimodule_lower_program_traced returns IrModule by
+// value). Multi-mod keeps the merge Box end-to-end — no empty+densify pair.
+fn load_multimodule_ir_to_box_traced(main_path: string, trace: &! LoadMultimoduleIrTrace) -> ModuleFrontendLowerDirectBoxResult with IO, Mut, Div, Panic, Alloc {
     parser_reset_last_errors()
     var main_prog = load_module_file(main_path)
     let main_parse_errors = parser_last_error_count()
@@ -6321,7 +6326,7 @@ pub fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIr
         print("Parse failed during IR lowering for module 0: ")
         print_int(main_parse_errors)
         print(" errors\n")
-        return multimodule_ir_error("parse_failed")
+        return module_frontend_lower_direct_box_error("parse_failed")
     }
     if module_frontend_lower_trace_enabled() { print("module_frontend_full: main_loaded\n") }
     trace.loaded_modules = 1
@@ -6338,14 +6343,14 @@ pub fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIr
         if module_frontend_lower_trace_enabled() { print("module_frontend_lower: typecheck_done\n") }
         if single_verdict_no_use != 0 {
             print("Type check failed during IR lowering for module 0\n")
-            return multimodule_ir_error("type_check_failed")
+            return module_frontend_lower_direct_box_error("type_check_failed")
         }
         trace.typechecked_modules = 1
         trace.last_stage = "lower_single"
         var single_lower_result_no_use = load_multimodule_lower_program_traced(main_prog, single_epistemic_no_use, 0, trace)
         if single_lower_result_no_use.fn_count <= 0 {
             print("IR lowering failed for module 0\n")
-            return multimodule_ir_error("ir_lowering_failed")
+            return module_frontend_lower_direct_box_error("ir_lowering_failed")
         }
         trace.merged_modules = 1
         trace.last_stage = "done"
@@ -6354,10 +6359,11 @@ pub fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIr
         print(" functions\n")
         if single_lower_result_no_use.fn_count <= 0 {
             print("IR lowering produced empty module\n")
-            return multimodule_ir_error("ir_lowering_empty_module")
+            return module_frontend_lower_direct_box_error("ir_lowering_empty_module")
         }
         parser_reset_last_errors()
-        return multimodule_ir_ok(single_lower_result_no_use)
+        // Single densify residual: flat lower returns IrModule by value.
+        return module_frontend_lower_direct_box_ok(Box::new(single_lower_result_no_use), ir_empty_validated_patch_stats())
     }
 
     let main_imports_fast = module_frontend_import_files_from_source(main_path)
@@ -6371,14 +6377,14 @@ pub fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIr
         if module_frontend_lower_trace_enabled() { print("module_frontend_lower: typecheck_done\n") }
         if single_verdict != 0 {
             print("Type check failed during IR lowering for module 0\n")
-            return multimodule_ir_error("type_check_failed")
+            return module_frontend_lower_direct_box_error("type_check_failed")
         }
         trace.typechecked_modules = 1
         trace.last_stage = "lower_single"
         var single_lower_result = load_multimodule_lower_program_traced(main_prog, single_epistemic, 0, trace)
         if single_lower_result.fn_count <= 0 {
             print("IR lowering failed for module 0\n")
-            return multimodule_ir_error("ir_lowering_failed")
+            return module_frontend_lower_direct_box_error("ir_lowering_failed")
         }
         trace.merged_modules = 1
         trace.last_stage = "done"
@@ -6387,10 +6393,10 @@ pub fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIr
         print(" functions\n")
         if single_lower_result.fn_count <= 0 {
             print("IR lowering produced empty module\n")
-            return multimodule_ir_error("ir_lowering_empty_module")
+            return module_frontend_lower_direct_box_error("ir_lowering_empty_module")
         }
         parser_reset_last_errors()
-        return multimodule_ir_ok(single_lower_result)
+        return module_frontend_lower_direct_box_ok(Box::new(single_lower_result), ir_empty_validated_patch_stats())
     }
 
     var programs: [Program; 256] = [mf_empty_program(); 256]
@@ -6441,15 +6447,13 @@ pub fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIr
 
     if loaded <= 0 {
         trace.last_stage = "empty"
-        return multimodule_ir_error("no_modules_loaded")
+        return module_frontend_lower_direct_box_error("no_modules_loaded")
     }
 
-    // Keep the merged module in a Box through finalize. Densify only once into
-    // MultiModuleIrResult at the API boundary (legacy callers still take IrModule
-    // by value). Avoids: empty stack module + densify into it + return densify.
+    // Multi-mod: Box stays boxed through finalize. No densify here.
     let merged = module_frontend_merge_imported_box(&! programs, loaded, trace)
     if !merged.ok {
-        return multimodule_ir_error("ir_lowering_failed")
+        return module_frontend_lower_direct_box_error("ir_lowering_failed")
     }
     let module_box = merged.module
 
@@ -6461,12 +6465,20 @@ pub fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIr
 
     if (*module_box).fn_count <= 0 {
         print("IR lowering produced empty module\n")
-        return multimodule_ir_error("ir_lowering_empty_module")
+        return module_frontend_lower_direct_box_error("ir_lowering_empty_module")
     }
 
     parser_reset_last_errors()
-    // Single densify: Box → MultiModuleIrResult.module (API residual).
-    multimodule_ir_ok(*module_box)
+    module_frontend_lower_direct_box_ok(module_box, ir_empty_validated_patch_stats())
+}
+
+pub fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIrTrace) -> MultiModuleIrResult with IO, Mut, Div, Panic, Alloc {
+    let boxed = load_multimodule_ir_to_box_traced(main_path, trace)
+    if !boxed.ok {
+        return multimodule_ir_error(boxed.error_msg)
+    }
+    // API residual densify: MultiModuleIrResult still embeds IrModule by value.
+    multimodule_ir_ok(*boxed.module)
 }
 
 pub fn load_multimodule_ir(main_path: string) -> MultiModuleIrResult with IO, Mut, Div, Panic, Alloc {
@@ -6474,18 +6486,18 @@ pub fn load_multimodule_ir(main_path: string) -> MultiModuleIrResult with IO, Mu
     load_multimodule_ir_traced(main_path, &! trace)
 }
 
-// Write merged multi-mod IR into a caller-owned module. One densify from the
-// live Box into MultiModuleIrResult happens inside load_multimodule_ir_traced,
-// then this moves that module into `out`. Prefer
-// module_frontend_compile_imported_to_file / merge_imported_box for zero densify
-// (Box stays boxed end-to-end).
+// Write merged multi-mod IR into a caller-owned module. Densifies once from the
+// live Box into `out` — no intermediate MultiModuleIrResult densify+copy.
+// Prefer module_frontend_compile_imported_to_file / merge_imported_box for zero
+// densify (Box stays boxed end-to-end).
 pub fn load_multimodule_ir_into(main_path: string, out: &! IrModule) -> MultiModuleFrontendResult with IO, Mut, Div, Panic, Alloc {
     var trace = empty_load_multimodule_ir_trace()
-    let result = load_multimodule_ir_traced(main_path, &! trace)
-    if !result.ok {
-        return multimodule_frontend_error(result.error_msg)
+    let boxed = load_multimodule_ir_to_box_traced(main_path, &! trace)
+    if !boxed.ok {
+        return multimodule_frontend_error(boxed.error_msg)
     }
-    (*out) = result.module
+    // Single densify when caller still owns a stack IrModule.
+    (*out) = *boxed.module
     multimodule_frontend_ok()
 }
 
