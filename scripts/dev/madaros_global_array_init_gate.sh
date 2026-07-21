@@ -151,4 +151,63 @@ fn main() -> i64 with IO {
 ' '-1 -2 3'
 
 
+# 9) Wave9: cast element-list (`1 as i64`) — was fully dropped → zeros
+run_case "cast_list" '
+var A: [i64; 2] = [1 as i64, 2 as i64]
+fn main() -> i64 with IO {
+  print_int(A[0]); print(" "); print_int(A[1]); print("
+")
+  if A[0] != 1 { return 1 }
+  if A[1] != 2 { return 2 }
+  0
+}
+' '1 2'
+
+# 10) Wave9: ident of earlier scalar global in element-list
+run_case "ident_list" '
+var X: i64 = 7
+var A: [i64; 3] = [X, 20, 30]
+fn main() -> i64 with IO {
+  print_int(A[0]); print(" "); print_int(A[1]); print(" "); print_int(A[2]); print("
+")
+  if A[0] != 7 { return 1 }
+  if A[1] != 20 { return 2 }
+  if A[2] != 30 { return 3 }
+  0
+}
+' '7 20 30'
+
+# 11) Wave9: non-const element-list is fail-closed (no left-shift of remaining words)
+# `[ten(), 20, 30]` must NOT become `20 30 0`. Residual runtime init → all zero.
+run_case "nonconst_failclosed" '
+fn ten() -> i64 { 10 }
+var A: [i64; 3] = [ten(), 20, 30]
+fn main() -> i64 with IO {
+  print_int(A[0]); print(" "); print_int(A[1]); print(" "); print_int(A[2]); print("
+")
+  // Fail-closed: no partial record → BSS zero (not shifted 20 30 0).
+  if A[0] != 0 { return 1 }
+  if A[1] != 0 { return 2 }
+  if A[2] != 0 { return 3 }
+  0
+}
+' '0 0 0'
+
+# 12) Wave9: packed i8 BSS size is physical (adjacent arrays independent + dense)
+run_case "i8_adjacent" '
+var A: [i8; 4] = [1, 2, 3, 4]
+var B: [i8; 4] = [10, 20, 30, 40]
+fn main() -> i64 with IO {
+  print_int(A[0] as i64); print(" "); print_int(A[3] as i64); print(" ");
+  print_int(B[0] as i64); print(" "); print_int(B[3] as i64); print("
+")
+  if A[0] as i64 != 1 { return 1 }
+  if A[3] as i64 != 4 { return 2 }
+  if B[0] as i64 != 10 { return 3 }
+  if B[3] as i64 != 40 { return 4 }
+  0
+}
+' '1 4 10 40'
+
+
 echo "GLOBAL_ARRAY_INIT_GATE_OK"
