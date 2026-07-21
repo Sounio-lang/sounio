@@ -67,22 +67,17 @@ do
   else echo "OK witness: $f"; fi
 done
 
-# 4) Dual import residual (expect Madaros E175 / fail — do not require green)
-echo "== dual gum+knowledge import residual =="
-cat >"$OUT/dual.sio" <<'EOF'
-use epistemic::knowledge::{Epistemic}
-use epistemic::gum::{gum_type_a}
-fn main() -> i32 with IO, Mut, Div, Panic {
-    let e = Epistemic::measured(1.0, 0.1)
-    let _a = gum_type_a(1.0, 5)
-    print(e.val()); print("\n")
-    return 0
-}
-EOF
-if "$SOUC" compile "$OUT/dual.sio" -o "$OUT/dual.elf" >"$OUT/dualc.log" 2>&1; then
-  echo "NOTE: dual gum+knowledge import now works — update claims_not_made"
+# 4) Dual gum+knowledge import (required green — dual_import landing; do not regress)
+echo "== dual gum+knowledge import (required) =="
+if ! "$SOUC" compile tests/run-pass/madaros_dual_gum_knowledge.sio -o "$OUT/dual.elf" >"$OUT/dualc.log" 2>&1; then
+  echo "FAIL: dual gum+knowledge compile"; tail -20 "$OUT/dualc.log" || true; fail=1
 else
-  echo "OK dual import still blocked under Madaros (E175 residual documented)"
+  chmod +x "$OUT/dual.elf"
+  if ! "$OUT/dual.elf" >"$OUT/dual.log" 2>&1 || ! grep -q "DUAL_GUM_KNOWLEDGE_OK" "$OUT/dual.log"; then
+    echo "FAIL: dual gum+knowledge run"; cat "$OUT/dual.log" || true; fail=1
+  else
+    echo "PASS: DUAL_GUM_KNOWLEDGE_OK"
+  fi
 fi
 
 mkdir -p "$ROOT/artifacts/clinical"
@@ -101,10 +96,10 @@ cat >"$ROOT/artifacts/clinical/ousadia_epistemic_method_rx_receipt.v1.json" <<EO
     "measured_val_std_add_is_credible_drive_decision",
     "type_a_u95_t4_band_adjust",
     "renal_refuse_same_mg_per_kg",
-    "compile_fail_confidence_witnesses_present"
+    "compile_fail_confidence_witnesses_present",
+    "dual_gum_and_knowledge_import_under_madaros"
   ],
   "claims_not_made": [
-    "dual_gum_and_knowledge_import_under_madaros",
     "bedside_dosing_product",
     "nonmem_foce",
     "language_knowledge_t_generic",
