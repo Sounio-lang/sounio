@@ -59,7 +59,8 @@ AbstentionReceipt
     missing prerequisite, reason, source provenance, and research review route
 
 OrderedHistoryReceipt
-    role/event/observation sequence with time and aggregation boundaries
+    role/event/observation sequence with time references and, where grouping is
+    used, an explicit reference to a separately justified aggregation boundary
 
 ModelContestReceipt
     candidate representations, discriminating feature, evaluation plan, and
@@ -88,6 +89,29 @@ than reimplementing its provenance and abstention logic.
 The table is a dependency graph, not a workflow for a clinician. Each adapter
 can return an abstention that retains its missing prerequisite rather than
 defaulting to a scalar, a zero, or a confident label.
+
+### 4.1 Canonical Composition Rules
+
+The generic core supplies shared *shape*, not a hidden supertype or an
+implicit conversion lattice. A future adapter must name an explicit
+scope-preserving constructor whenever it composes receipts from another
+contract. Names that look nearby in prose are deliberately not aliases:
+
+| Terms | Canonical distinction | Forbidden convenience conversion |
+|---|---|---|
+| `CausalEffectEstimate` / `SourceContextEffectEstimate` / `TargetContextEffectEstimate` | The first is the counterfactual contract's general identified-effect term. The latter two make the source or target context explicit. | No effect name may be silently widened, narrowed, or transported without a receipt that carries the corresponding context and transport assumptions. |
+| `ResearchDecisionCandidate` / `DecisionCandidateSetReceipt` | The former is a bounded counterfactual research comparison with harms, eligibility, and selective-prediction inputs. The latter preserves unresolved multiplicity or preference ambiguity in a nonregular decision problem. | A candidate set is not a research decision candidate, unique action, or treatment instruction. |
+| `ClinicalEvaluationReceipt` / `ClinicalValidationReceipt` / `ClinicalAuthorizationReceipt` | Evaluation names independently governed study/workflow evidence; validation names the broader empirical-and-governance evidence class; authorization names a role-bound permission to act. All remain external. | Neither evaluation nor validation, alone or together with compiler receipts, may construct authorization. |
+| `AbstentionReceipt` / specialized abstentions | The generic receipt records the common refusal payload. A specialized receipt records its distinct failed prerequisite, such as noninvariance, nonregular uniqueness, acquisition, dyadic identification, model adequacy, or parenthesization. | A specialized abstention may not be dropped, by name alone, into an unrelated API or erased into a harmless null/zero result. |
+| `OrderedHistoryReceipt` / `AggregationBoundaryReceipt` | A history records ordered evidence. A boundary explains why a particular grouping denotes a distinct intervention, reset, time scale, or aggregation rule. | An ordered sequence, even one that references a boundary, may not certify bracket sensitivity. |
+
+For the initial nominal implementation, the safe representation is explicit
+composition: a specialized record carries or references an
+`AbstentionReceipt`, a context-scoped effect carries its scope receipt, and an
+adapter constructor checks every named input. There is no ambient inheritance,
+string-name matching, or automatic receipt coercion. A later trait, opaque
+module, or capability design would need its own threat model and acceptance
+tests before it changes this rule.
 
 ## 5. Staged Delivery
 
@@ -118,11 +142,13 @@ one positive constructor, and paired compile-fail callers for each forbidden
 substitution.
 
 ```text
-ObservationReceipt                 cannot satisfy CausalEffectReceipt
+ObservationReceipt                 cannot satisfy CausalEffectEstimate
 AssumptionReceipt                  cannot satisfy EvidenceReferenceReceipt
-AbstentionReceipt                  cannot satisfy DecisionCandidateReceipt
+AbstentionReceipt                  cannot satisfy ResearchDecisionCandidate
 OrderedHistoryReceipt              cannot satisfy AggregationBoundaryReceipt
 EvidenceReferenceReceipt           cannot satisfy ClinicalAuthorizationReceipt
+DecisionCandidateSetReceipt        cannot satisfy ResearchDecisionCandidate
+ClinicalValidationReceipt          cannot satisfy ClinicalAuthorizationReceipt
 ```
 
 All values are synthetic tokens. There is no patient data, identity, medication,
