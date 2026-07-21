@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Deepen-batch 12: extend coverage of already-shipped deterministic utility APIs.
-# Multi-module drivers -> lean_single engine.
+# Multi-module drivers use default Madaros, with an explicit residual fallback.
 #   path::lib          - join/parent/filename/stem/extension/from_bytes edge cases
 #   iter::range        - stepped ranges, reset, empty ranges, 64-item collect cap
 #   random::pcg64_core - bit helpers, 128-bit carry/mul, deterministic PCG stepping
@@ -10,19 +10,25 @@ export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 SOUC=./bin/souc
 OUT="$(mktemp -d)"; trap 'rm -rf "$OUT"' EXIT
 fail=0
+engine_info="$($SOUC info 2>&1)"
+grep -qF 'Madaros v' <<<"$engine_info" || { echo "FAIL: deepen12 gate requires default Madaros" >&2; exit 1; }
 run() { # module driver sentinel [softcheck]
-  echo "== $2 =="
-  if [ "${4:-}" = "softcheck" ]; then
-    $SOUC check "$1" >/dev/null 2>&1 || echo "NOTE: standalone check quirk on $1 (driver proves the API)"
+  local mode="${4:-strict}" engine="${5:-madaros}"
+  echo "== $2 [$engine] =="
+  local -a check_cmd=("$SOUC" check "$1")
+  [ "$engine" = "lean_single" ] && check_cmd=(env SOUNIO_SOUC_ENGINE=lean_single "$SOUC" check "$1")
+  if [ "$mode" = "softcheck" ]; then
+    "${check_cmd[@]}" >/dev/null 2>&1 || echo "NOTE: standalone check quirk on $1 ($engine check-mode; driver proves the API)"
   else
-    $SOUC check "$1" >/dev/null 2>&1 || { echo "FAIL check $1"; fail=1; }
+    "${check_cmd[@]}" >/dev/null 2>&1 || { echo "FAIL check $1"; fail=1; }
   fi
-  if SOUNIO_SOUC_ENGINE=lean_single $SOUC compile "$2" -o "$OUT/x.elf" >/dev/null 2>&1; then
+  if { [ "$engine" = "lean_single" ] && SOUNIO_SOUC_ENGINE=lean_single $SOUC compile "$2" -o "$OUT/x.elf" >/dev/null 2>&1; } ||
+     { [ "$engine" = "madaros" ] && $SOUC compile "$2" -o "$OUT/x.elf" >/dev/null 2>&1; }; then
     chmod +x "$OUT/x.elf"; "$OUT/x.elf" | grep -q "$3" || { echo "FAIL run $2"; fail=1; }
   else echo "FAIL compile $2"; fail=1; fi
 }
 run stdlib/path/lib.sio             tests/stdlib/path/test_path_deep_stdlib.sio        PATH_DEEP_STDLIB_OK
 run stdlib/iter/range.sio           tests/stdlib/iter/test_range_deep_stdlib.sio       RANGE_DEEP_STDLIB_OK
-run stdlib/random/pcg64_core.sio    tests/stdlib/random/test_pcg64_core_deep_stdlib.sio PCG64_CORE_DEEP_STDLIB_OK
+run stdlib/random/pcg64_core.sio    tests/stdlib/random/test_pcg64_core_deep_stdlib.sio PCG64_CORE_DEEP_STDLIB_OK softcheck lean_single
 [ $fail -eq 0 ] && echo "VERTICALS_DEEPEN12_GATE_OK"
 exit $fail
