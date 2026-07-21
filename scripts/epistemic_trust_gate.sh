@@ -28,6 +28,9 @@ runproof "gum: value + u_c"          tests/epistemic_trust/gum_trust.sio        
 runproof "correlation: covariance"   tests/epistemic_trust/correlation_trust.sio CORRELATION_TRUST_OK
 runproof "knightian: p-box"          tests/epistemic_trust/knightian_trust.sio   KNIGHTIAN_TRUST_OK
 runproof "knowledge: free Epistemic" tests/epistemic_trust/knowledge_trust.sio   KNOWLEDGE_TRUST_OK
+# Method form + free/method parity (Wave9 residual closeout — was Root-2 blocked).
+runproof "knowledge: method Epistemic" tests/epistemic_trust/knowledge_method_parity.sio KNOWLEDGE_METHOD_PARITY_OK
+runproof "knowledge: method witness" tests/epistemic_trust/witness_import_knowledge_method.sio KNOWLEDGE_METHOD_OK
 # CPC N=4 exact-spread leaf (2026-07-20): self-contained OsOct path; no algebra:: use.
 runproof "order_spread4: CPC N=4"    tests/epistemic_trust/order_spread_trust.sio ORDER_SPREAD_TRUST_OK
 # Structural nonassoc variance leaf (2026-07-20): self-contained PnOct path; no algebra:: use.
@@ -43,21 +46,15 @@ if $SOUC compile tests/epistemic_trust/witness_gum_k95.sio -o "$OUT/k.elf" >/dev
   else echo "!! k95=$k95 — coverage factor may be FIXED; update trust map + re-enable U95"; fi
 else echo "witness_gum_k95 failed to compile (unexpected)"; fi
 
-echo "### C. KNOWN-UNIMPORTABLE trip-wire (informational) ###"
-# Free-function knowledge import is now Section A. Residual: method-call form (Root 2).
-echo "== witness_import_knowledge_method (expected: native compile FAILS) =="
-if $SOUC compile tests/epistemic_trust/witness_import_knowledge_method.sio -o "$OUT/w.elf" >/dev/null 2>&1; then
-  echo "!! method-call knowledge now COMPILES — Root 2 may be FIXED; update trust map"
-else echo "CONFIRMED unimportable (method-call form, as documented)"; fi
+echo "### C. promoted witnesses (must stay green) ###"
+# order_spread_exact + product_nonassoc + knowledge free + knowledge method → Section A.
+# Residual multi-module: gum k95 f64→i64 cast (Section B); do not reintroduce algebra:: uses
+# that still SEGV under exclusive-ref import chains without current-source evidence.
 
-# order_spread_exact + product_nonassoc promoted to Section A.
-# Residual multi-module: algebra::associator_field / algebra::octonion exclusive-ref
-# import chain still SEGV at runtime under Madaros — do not reintroduce algebra:: uses.
-
-# Legacy free-function witness should now succeed (informational flip)
-echo "== witness_import_knowledge free API (expected: now COMPILES) =="
+# Legacy free-function witness must still succeed
+echo "== witness_import_knowledge free API =="
 if $SOUC compile tests/epistemic_trust/witness_import_knowledge.sio -o "$OUT/w.elf" >/dev/null 2>&1; then
-  echo "OK free-function knowledge import COMPILES (promoted to Section A)"
+  echo "OK free-function knowledge import COMPILES (Section A)"
 else echo "FAIL unexpected: free knowledge import broke"; fail=1; fi
 
 echo
