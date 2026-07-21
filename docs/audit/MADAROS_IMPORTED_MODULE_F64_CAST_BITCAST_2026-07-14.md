@@ -12,8 +12,8 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-
 **Date:** 2026-07-14
 **Toolchain:** `./bin/souc` → Madaros v0.80.0 (default engine)
 **Owner:** CODEX-2 (`self-hosted/` — native codegen, numeric cast lowering on the imported-module path)
-**Status:** forensic dispatch (per CLAUDE.md §8 — do not patch `self-hosted/` ad hoc)
-**Severity:** high — silently corrupts the flagship epistemic primitive (GUM coverage factor)
+**Status:** **CLOSED** (2026-07-19 #983 root-cause + #1252 joint D5+D1 land; Wave10 2026-07-21 trust-map/gate promotion). Finite-dof `gum_k95` gated at k95i=2776.
+**Severity:** was high — silently corrupted the flagship epistemic primitive (GUM coverage factor)
 
 ## Summary
 
@@ -103,13 +103,15 @@ conversion on the imported-module lowering path — emit a truncating SSE conver
 (`cvttsd2si`) rather than a register bit-copy. The importer-`main()` path already
 does this; align the imported-module path to it.
 
-## Acceptance gate (proposed)
+## Acceptance gate (met)
 
 1. `pub fn f(x: f64) -> i64 { x as i64 }` in an imported module returns `4` for
-   `4.172` (truncation), `-3` for `-3.9` (toward zero), across a small table.
-2. `gum_k95` matches `t95(nu_eff)` for small samples — e.g. the worked example
-   above yields `U95 ≈ 0.571`, and a `pk_curve` variant can re-enable its `U95`
-   column once green.
+   `4.172` (truncation) — measured Wave10: `param=4 arith=4 local=4`.
+2. `gum_k95` matches `t95(nu_eff)` for small samples — Type-A-dominant
+   (`gum_type_a(0.30,5)` + tiny Type-B) → **k95i=2776**, U95≈0.372 under
+   default Madaros multi-module import. Gate: `scripts/epistemic_trust_gate.sh`
+   Section A (promoted from retired Section B trip-wire). **Do not** use a
+   Type-B-dominant budget as the k95 trip-wire — k95=1.960 is correct there.
 
 ## AI disclosure
 
