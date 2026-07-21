@@ -430,7 +430,7 @@ Transformation: literature-backed research boundary mapped to existing workflow 
 Types-Changed: none
 Effects-Changed: none
 IR-Changed: none
-Claims-Introduced: future Sounio psychiatric fixtures should treat abstention, unresolved assurance defeaters, and source-build-artifact-runtime provenance as explicit evidence-bearing outputs and require separate authority receipts
+Claims-Introduced: future Sounio psychiatric fixtures should treat abstention, unresolved assurance defeaters, and source-build-artifact-runtime provenance as explicit evidence-bearing outputs while preserving an external authority boundary
 Claims-Forbidden: patient-level effect estimation, treatment recommendation, automated action, causal identification from fit, transport from label matching, safety certification or authority from an assurance snapshot, independent replay from a hash alone, and clinical validation from compiler success
 Assumptions: cited work supplies design constraints, not a biological model or validation of any future Sounio package
 Write-Set: docs/research/psychiatric_counterfactual_authority_abstention_contract_2026-07-21.md; docs/governance/topic-registry.v1.json; docs/governance/DOCS_AUTHORITY_MATRIX.md
@@ -445,7 +445,7 @@ Authoritative-Only-If: the cited sources, current Sounio surfaces, and forbidden
 ## Integration Receipt
 
 ```text
-Semantic-Outcome: synthetic nominal authority constructor and negative category-substitution witness added
+Semantic-Outcome: synthetic nominal research-candidate constructor and negative category-substitution witness added; no authority constructor exists
 Concept-Status-Before: counterfactual workflow syntax existed without a dedicated authority-boundary witness
 Concept-Status-After: the selected library protocol requires question, identification, transport, and selective-risk receipts for a research candidate; abstention, unresolved assurance defeaters, and artifact provenance remain distinct
 Distinctions-Added: counterfactual question != research decision candidate; abstention != implicit fallback; evidence != assurance argument != authority; source != compiler artifact != runtime result
