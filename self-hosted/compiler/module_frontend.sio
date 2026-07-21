@@ -4233,9 +4233,11 @@ fn module_frontend_lower_imported_source_recursive(path: string, depth: i64, tra
 // Multi-module IR loading (shared by bytecode + native paths)
 // ============================================================
 
+// Box-preserving multi-mod IR result. After #1348 the merge path keeps
+// IrModule heap-indirect end-to-end; this struct no longer densifies on return.
 pub struct MultiModuleIrResult {
     ok: bool,
-    module: IrModule,
+    module: Box<IrModule>,
     error_msg: string,
 }
 
@@ -4284,12 +4286,12 @@ pub fn empty_load_multimodule_ir_trace() -> LoadMultimoduleIrTrace {
     }
 }
 
-fn multimodule_ir_ok(m: IrModule) -> MultiModuleIrResult {
+fn multimodule_ir_ok(m: Box<IrModule>) -> MultiModuleIrResult {
     MultiModuleIrResult { ok: true, module: m, error_msg: "" }
 }
 
 fn multimodule_ir_error(msg: string) -> MultiModuleIrResult {
-    MultiModuleIrResult { ok: false, module: ir_empty_module(), error_msg: msg }
+    MultiModuleIrResult { ok: false, module: Box::new(ir_empty_module()), error_msg: msg }
 }
 
 pub fn empty_multimodule_ir_result() -> MultiModuleIrResult {
@@ -6716,8 +6718,8 @@ pub fn load_multimodule_ir_traced(main_path: string, trace: &! LoadMultimoduleIr
     if !boxed.ok {
         return multimodule_ir_error(boxed.error_msg)
     }
-    // API residual densify: MultiModuleIrResult still embeds IrModule by value.
-    multimodule_ir_ok(*boxed.module)
+    // Box stays boxed: MultiModuleIrResult.module is Box<IrModule> (no densify).
+    multimodule_ir_ok(boxed.module)
 }
 
 pub fn load_multimodule_ir(main_path: string) -> MultiModuleIrResult with IO, Mut, Div, Panic, Alloc {
@@ -6725,17 +6727,16 @@ pub fn load_multimodule_ir(main_path: string) -> MultiModuleIrResult with IO, Mu
     load_multimodule_ir_traced(main_path, &! trace)
 }
 
-// Write merged multi-mod IR into a caller-owned module. Densifies once from the
-// live Box into `out` — no intermediate MultiModuleIrResult densify+copy.
-// Prefer module_frontend_compile_imported_to_file / merge_imported_box for zero
-// densify (Box stays boxed end-to-end).
+// Write merged multi-mod IR into a caller-owned stack module. Densifies once
+// from the live Box into `out`. Prefer MultiModuleIrResult / merge_imported_box
+// / module_frontend_compile_imported_to_file when the caller can keep Box.
 pub fn load_multimodule_ir_into(main_path: string, out: &! IrModule) -> MultiModuleFrontendResult with IO, Mut, Div, Panic, Alloc {
     var trace = empty_load_multimodule_ir_trace()
     let boxed = load_multimodule_ir_to_box_traced(main_path, &! trace)
     if !boxed.ok {
         return multimodule_frontend_error(boxed.error_msg)
     }
-    // Single densify when caller still owns a stack IrModule.
+    // Explicit densify: caller owns a stack IrModule out-parameter.
     (*out) = *boxed.module
     multimodule_frontend_ok()
 }
@@ -7168,7 +7169,8 @@ pub fn load_multimodule_ir_probe_summary_traced(main_path: string, trace: &! Loa
     }
 
     parser_reset_last_errors()
-    multimodule_ir_ok(merged_module)
+    // Probe path still builds a stack merged_module; box once at the API boundary.
+    multimodule_ir_ok(Box::new(merged_module))
 }
 
 pub fn load_multimodule_ir_probe_summary(main_path: string) -> MultiModuleIrResult with IO, Mut, Div, Panic, Alloc {
