@@ -6,9 +6,11 @@ cd "$ROOT_DIR"
 
 # The PETAB baseline and PBPK/GUM workflow import stdlib + packages/* modules.
 # Madaros owns package-import acceptance plus a focused PBPK/GUM runtime proof
-# that also exercises bounded CSV string slicing. The two large PBPK witnesses
-# cross the unresolved program layout-catalog boundary, so retain the bootstrap
-# compiler only for those named witnesses until that parity blocker is closed.
+# that also exercises bounded CSV string slicing. Imported nominal layout
+# identity is covered separately below. The two large PBPK witnesses still hit
+# native-v2 rc=12 in parse_observed_delimited, normalize_observations, and
+# normalized_observation_table_concat, so retain the bootstrap compiler only
+# for those named witnesses until that codegen blocker is closed.
 OUT_DIR="$(mktemp -d /tmp/sounio-package-pbpk-gum.XXXXXX)"
 trap 'rm -rf "$OUT_DIR"' EXIT
 
@@ -58,6 +60,12 @@ printf '[package-pbpk-gum] run package import contract gate\n'
 MADAROS_RAW_BIN="$RAW_MADAROS" \
   bash "$ROOT_DIR/scripts/ci/package_import_science_gate.sh" >"$OUT_DIR/package_import_science.log" 2>&1
 cat "$OUT_DIR/package_import_science.log"
+
+printf '[package-pbpk-gum] run imported nominal layout acceptance gate\n'
+MADAROS_RAW_BIN="$RAW_MADAROS" \
+  bash "$ROOT_DIR/scripts/ci/madaros_imported_runtime_acceptance_gate.sh" \
+  >"$OUT_DIR/imported_runtime_acceptance.log" 2>&1
+cat "$OUT_DIR/imported_runtime_acceptance.log"
 
 run_madaros_witness() {
   local source="$1"
