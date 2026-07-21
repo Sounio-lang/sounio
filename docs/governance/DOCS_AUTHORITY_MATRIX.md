@@ -798,6 +798,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.probe-result-deep-ffn | historical | docs/research/PROBE-RESULT-deep-ffn.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.probe-result-h256-scale | historical | docs/research/PROBE-RESULT-h256-scale.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.probe-result-lstm-adding | historical | docs/research/PROBE-RESULT-lstm-adding.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.probe-result-multiseed | historical | docs/research/PROBE-RESULT-multiseed.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.probe-usage | historical | docs/research/probe-usage.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.program-registry-mercyful-learning | historical | docs/research/PROGRAM-REGISTRY-mercyful-learning.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.proof-checker-family-matrix-2026-06-23 | historical | docs/research/proof-checker-family-matrix-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
