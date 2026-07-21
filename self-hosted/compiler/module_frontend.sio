@@ -3,7 +3,7 @@
 // Multimodule frontend and IR-loading lane split from module_loader.sio.
 // Keeps frontend probes off the native/wasm/optimizer/thin-link backend surface.
 
-use parser::ast::{AstPath, empty_path, Item, ItemKind, ItemList, Name, ParamList, Program, StringList, make_name}
+use parser::ast::{AstPath, empty_path, Item, ItemKind, ItemList, Name, ParamList, Program, StringList, make_name, ast_reset_global_var_inits, GLOBAL_VAR_INIT_SUPPRESS_RESET}
 use parser::mod::{count_items}
 use parser::parser::{parser_last_error_count, parser_reset_last_errors}
 use ir::ir::*
@@ -17,6 +17,20 @@ use check::knowledge_context::{knowledge_context_validate_items, knowledge_conte
 use resolve::mod::{resolve_modules}
 use module_parse::{extract_imports_from_ast, file_exists, file_path_to_module_path, load_module_file}
 use check::specializer::{specialize_generics, spec_last_instantiated, spec_append_item_lists}
+
+// Multi-module parse accumulates every module's GLOBAL_VAR_INIT_* side-table
+// entries so imported f64/i64 BSS constants survive to lower time. Without
+// suppress, each load_module_file → parse_items_preloaded reset wipes earlier
+// modules and imported constants read as zero (Defect A / stats lognormal_pdf).
+// Bracket every multi-mod load+lower path; restore suppress=0 for isolation.
+fn module_frontend_global_init_compile_begin() with Mut {
+    ast_reset_global_var_inits()
+    GLOBAL_VAR_INIT_SUPPRESS_RESET = 1
+}
+
+fn module_frontend_global_init_compile_end() with Mut {
+    GLOBAL_VAR_INIT_SUPPRESS_RESET = 0
+}
 
 fn module_frontend_lower_trace_enabled() -> bool with IO, Mut, Panic, Div {
     str_eq(read_env("SOUNIO_MODULE_FRONTEND_LOWER_TRACE"), "1")
@@ -5503,6 +5517,10 @@ pub fn module_frontend_compile_imported_to_file(
     optimize: bool,
 ) -> i32 with IO, Mut, Div, Panic, Alloc {
     parser_reset_last_errors()
+    // One reset + suppress for the full multi-mod load/typecheck/lower window so
+    // imported module f64 constants (e.g. stats::densities::DE_LN_SQRT_2PI) remain
+    // in GLOBAL_VAR_INIT_* until BSS slots are seeded at lower time.
+    module_frontend_global_init_compile_begin()
     print("imported_compile: begin\n")
     var trace = empty_load_multimodule_ir_trace()
     print("imported_compile: load_begin\n")
@@ -5510,6 +5528,7 @@ pub fn module_frontend_compile_imported_to_file(
     print("imported_compile: load_done\n")
     if parser_last_error_count() > 0 {
         print("Parse failed during imported compile\n")
+        module_frontend_global_init_compile_end()
         return 1
     }
 
@@ -5570,6 +5589,7 @@ pub fn module_frontend_compile_imported_to_file(
 
     if loaded <= 0 {
         print("Multi-module IR failed: no_modules_loaded\n")
+        module_frontend_global_init_compile_end()
         return 1
     }
     trace.resolved_modules = loaded
@@ -5593,6 +5613,7 @@ pub fn module_frontend_compile_imported_to_file(
     print("imported_compile: typecheck_done\n")
     if verdict != 0 {
         print("Type check failed during imported IR merge\n")
+        module_frontend_global_init_compile_end()
         return 1
     }
     trace.typechecked_modules = loaded
@@ -5606,6 +5627,7 @@ pub fn module_frontend_compile_imported_to_file(
         print("IR lowering failed during merge: ")
         print(lowered.error_msg)
         print("\n")
+        module_frontend_global_init_compile_end()
         return 1
     }
 
@@ -5624,6 +5646,7 @@ pub fn module_frontend_compile_imported_to_file(
         print(" functions\n")
         if fn_count <= 0 {
             print("IR lowering produced empty module\n")
+            module_frontend_global_init_compile_end()
             return 1
         }
         if optimize {
@@ -5644,11 +5667,13 @@ pub fn module_frontend_compile_imported_to_file(
             print(" rc=")
             print_int(single_write_rc)
             print("\n")
+            module_frontend_global_init_compile_end()
             return 1
         }
         print("Written to ")
         print(output_path)
         print("\n")
+        module_frontend_global_init_compile_end()
         return 0
     }
     if module_frontend_dump_merged_calls_enabled() {
@@ -5676,6 +5701,7 @@ pub fn module_frontend_compile_imported_to_file(
     print(" functions\n")
     if fn_count <= 0 {
         print("IR lowering produced empty module\n")
+        module_frontend_global_init_compile_end()
         return 1
     }
     if module_frontend_dump_merged_calls_enabled() {
@@ -5699,11 +5725,13 @@ pub fn module_frontend_compile_imported_to_file(
         print(" rc=")
         print_int(write_rc)
         print("\n")
+        module_frontend_global_init_compile_end()
         return 1
     }
     print("Written to ")
     print(output_path)
     print("\n")
+    module_frontend_global_init_compile_end()
     0
 }
 
@@ -6561,12 +6589,16 @@ pub fn preflight_multimodule_frontend(main_path: string) -> MultiModuleFrontendR
 // value). Multi-mod keeps the merge Box end-to-end — no empty+densify pair.
 fn load_multimodule_ir_to_box_traced(main_path: string, trace: &! LoadMultimoduleIrTrace) -> ModuleFrontendLowerDirectBoxResult with IO, Mut, Div, Panic, Alloc {
     parser_reset_last_errors()
+    // Same bracket as compile_imported_to_file: accumulate GLOBAL_VAR_INIT_* across
+    // main + all deps so imported f64 constants survive multi-mod lower.
+    module_frontend_global_init_compile_begin()
     var main_prog = load_module_file(main_path)
     let main_parse_errors = parser_last_error_count()
     if main_parse_errors > 0 {
         print("Parse failed during IR lowering for module 0: ")
         print_int(main_parse_errors)
         print(" errors\n")
+        module_frontend_global_init_compile_end()
         return module_frontend_lower_direct_box_error("parse_failed")
     }
     if module_frontend_lower_trace_enabled() { print("module_frontend_full: main_loaded\n") }
@@ -6584,6 +6616,7 @@ fn load_multimodule_ir_to_box_traced(main_path: string, trace: &! LoadMultimodul
         if module_frontend_lower_trace_enabled() { print("module_frontend_lower: typecheck_done\n") }
         if single_verdict_no_use != 0 {
             print("Type check failed during IR lowering for module 0\n")
+            module_frontend_global_init_compile_end()
             return module_frontend_lower_direct_box_error("type_check_failed")
         }
         trace.typechecked_modules = 1
@@ -6591,6 +6624,7 @@ fn load_multimodule_ir_to_box_traced(main_path: string, trace: &! LoadMultimodul
         var single_lower_result_no_use = load_multimodule_lower_program_traced(main_prog, single_epistemic_no_use, 0, trace)
         if single_lower_result_no_use.fn_count <= 0 {
             print("IR lowering failed for module 0\n")
+            module_frontend_global_init_compile_end()
             return module_frontend_lower_direct_box_error("ir_lowering_failed")
         }
         trace.merged_modules = 1
@@ -6600,10 +6634,12 @@ fn load_multimodule_ir_to_box_traced(main_path: string, trace: &! LoadMultimodul
         print(" functions\n")
         if single_lower_result_no_use.fn_count <= 0 {
             print("IR lowering produced empty module\n")
+            module_frontend_global_init_compile_end()
             return module_frontend_lower_direct_box_error("ir_lowering_empty_module")
         }
         parser_reset_last_errors()
         // Single densify residual: flat lower returns IrModule by value.
+        module_frontend_global_init_compile_end()
         return module_frontend_lower_direct_box_ok(Box::new(single_lower_result_no_use), ir_empty_validated_patch_stats())
     }
 
@@ -6618,6 +6654,7 @@ fn load_multimodule_ir_to_box_traced(main_path: string, trace: &! LoadMultimodul
         if module_frontend_lower_trace_enabled() { print("module_frontend_lower: typecheck_done\n") }
         if single_verdict != 0 {
             print("Type check failed during IR lowering for module 0\n")
+            module_frontend_global_init_compile_end()
             return module_frontend_lower_direct_box_error("type_check_failed")
         }
         trace.typechecked_modules = 1
@@ -6625,6 +6662,7 @@ fn load_multimodule_ir_to_box_traced(main_path: string, trace: &! LoadMultimodul
         var single_lower_result = load_multimodule_lower_program_traced(main_prog, single_epistemic, 0, trace)
         if single_lower_result.fn_count <= 0 {
             print("IR lowering failed for module 0\n")
+            module_frontend_global_init_compile_end()
             return module_frontend_lower_direct_box_error("ir_lowering_failed")
         }
         trace.merged_modules = 1
@@ -6634,9 +6672,11 @@ fn load_multimodule_ir_to_box_traced(main_path: string, trace: &! LoadMultimodul
         print(" functions\n")
         if single_lower_result.fn_count <= 0 {
             print("IR lowering produced empty module\n")
+            module_frontend_global_init_compile_end()
             return module_frontend_lower_direct_box_error("ir_lowering_empty_module")
         }
         parser_reset_last_errors()
+        module_frontend_global_init_compile_end()
         return module_frontend_lower_direct_box_ok(Box::new(single_lower_result), ir_empty_validated_patch_stats())
     }
 
@@ -6688,12 +6728,14 @@ fn load_multimodule_ir_to_box_traced(main_path: string, trace: &! LoadMultimodul
 
     if loaded <= 0 {
         trace.last_stage = "empty"
+        module_frontend_global_init_compile_end()
         return module_frontend_lower_direct_box_error("no_modules_loaded")
     }
 
     // Multi-mod: Box stays boxed through finalize. No densify here.
     let merged = module_frontend_merge_imported_box(&! programs, loaded, trace)
     if !merged.ok {
+        module_frontend_global_init_compile_end()
         return module_frontend_lower_direct_box_error("ir_lowering_failed")
     }
     let module_box = merged.module
@@ -6706,10 +6748,12 @@ fn load_multimodule_ir_to_box_traced(main_path: string, trace: &! LoadMultimodul
 
     if (*module_box).fn_count <= 0 {
         print("IR lowering produced empty module\n")
+        module_frontend_global_init_compile_end()
         return module_frontend_lower_direct_box_error("ir_lowering_empty_module")
     }
 
     parser_reset_last_errors()
+    module_frontend_global_init_compile_end()
     module_frontend_lower_direct_box_ok(module_box, ir_empty_validated_patch_stats())
 }
 
