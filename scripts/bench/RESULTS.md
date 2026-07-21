@@ -111,6 +111,7 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 | **batch-12 (10 verbs, set 4)** — count_le_mean, count/frac_within_1std, count_outlier_2std, cummax/cummin_pct, sum_recip, cumsum_recip, cumsum_sign, cumcount_ge_prev | | | | **all win** | dense threshold/reciprocal/running passes vs pandas per-group lambdas |
 | **batch-13 (10 verbs, set 5)** — net_over_gross, sum_pos_frac, mean_pos/neg, count_changes, max_abs_dev, sum_sq_dev, cumsum_dev_abs, cumcount_le_prev, cumcount_positive_frac | | | | **all win** | dense sign/deviation/running passes vs pandas per-group lambdas — completes the +50 push (~130 grouped verbs total) |
 | **curated (10 verbs)** — weighted_skew/kurt, lag-k autocorr, ratio_mean/sum **win** (weighted_skew 0.14x); median/q1/q3/iqr **~2.9x loss** (quantile-bound, pandas Cython) + mad_median (no native, wins) | | | | mixed | analytic dense verbs win; quantile family maps to the C3 select dispatch |
+| median_dense_by / q1/q3/iqr_dense (1M rows, 1000 dense keys, int values 0..100) | | ~13.4 | ~32.9 | **0.41x — Sounio wins (2.4x)** | histogram bucket + cumulative-count walk, NO quickselect (flips the general median_by ~2.9x loss to a win for dense int values) |
 | cov (1M rows, two-pass mean-shift) | | 6.7 | 8.5 | **0.78x — Sounio wins** | (new verb) |
 | corr (1M rows, two-pass + bf_sqrt) | | 10.3 | 8.0 | **~1.3x** | (new verb) |
 | median (1M rows, quickselect) | | ~34 | ~16 | **~2.2x** | numpy SIMD introselect |
