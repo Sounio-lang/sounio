@@ -72,3 +72,52 @@ already O(n) and faster than pandas' groupby machinery — only the inner select
 - Losing call sites: `stdlib/data/bigframe_ops.sio` — `bf_quickselect`, `bf_group_quantile`,
   `bf_rank_by`, `bf_winsorize_by`, `bf_sort_by`, `bf_sort_radix`.
 - Benchmark table with the honest loss rows: `scripts/bench/RESULTS.md`.
+
+---
+
+## UPDATE 2026-07-21 — ESCALATION (still unactioned; sharper evidence)
+
+`select_f64`/`sort_f64` are **not yet in `self-hosted/`** (grep is empty), so the data-lane
+order-statistic losses remain open. Two developments since this doc was filed make the ask
+both **more surgical** and **more urgent**, and confirm it can only be closed in the compiler:
+
+**1. The dense-integer order-statistic family now ALL WINS — which isolates the bottleneck to
+the float inner-select alone.** Batches 11–15 added a value-histogram / `bf_qpos_from_hist`
+path for integer (and fixed-precision) values:
+
+| verb | ratio vs pandas | how |
+|---|---|---|
+| `bf_median_dense_by`/`q1`/`q3`/`iqr` (#1362) | **0.41×** | value histogram, no select |
+| `bf_percentile_dense_by(q)`/`trimean`/`midhinge`/`decile_range` (#1378) | **0.08×** | interpolated percentiles over the histogram |
+| `bf_trimmed_mean`/`winsorized_mean`/`bowley_skew`/`moors_kurt`/`robust_cv` (#1378) | **0.07–0.11×** | rank-window / octile walk over the histogram |
+
+These win **9–14×**. Since the *identical grouping + broadcast machinery* wraps both the dense
+(winning) and the float (losing) quantiles, the grouping is empirically O(n) and already
+faster than pandas' `groupby`. **The only slow component in the float case is the inner
+selection.** That is exactly what `select_f64`/`sort_f64` replaces.
+
+**2. Fresh float number is worse than the original estimate: `bf_median_by` at 1M rows /
+1000 groups with ~1000 distinct values per group = ~760 ms vs pandas ~142 ms = ~5.4× LOSS**
+(the original 2.9× was measured with fewer distinct values; more distinct → more selection work).
+
+**3. A pure-Sounio radix f64 select does NOT help — confirming the root cause is builtin
+overhead, not the algorithm.** I implemented the f64→sortable-u64 bit trick
+(`key = bits ^ ((bits >> 63) | INT64_MIN)`) + an LSD radix sort and timed the *inner loop
+only* (1000 groups × 1000 elems, no grouping/broadcast): **~697 ms** — no better than the
+quickselect it would replace, and still ~5× pandas. The `read_f64`/`write_f64` per-element
+builtin calls dominate every pure-Sounio selection variant. **=> a stdlib rewrite cannot close
+this; a native intrinsic (real machine code, register-resident partition) is required.**
+
+**Reference for the implementer.** Either contract works; both match today's `bf_quickselect`:
+- introselect on raw f64 (`select_f64(ptr, n, k)`), same partition invariant `a[<k] ≤ a[k] ≤ a[>k]`; or
+- radix via the sign-flip key above (`sort_f64` / partial-radix `select_f64`), then map back.
+
+**Interim mitigation already shipped stdlib-side (does NOT replace the ask):**
+`bf_median_scaled_by` / `bf_q1_scaled_by` / `bf_q3_scaled_by` / `bf_iqr_scaled_by` /
+`bf_percentile_scaled_by` win 0.86× for **fixed-precision, narrow-range** floats (round to
+int via a scale, reuse the histogram). This covers the measurement beachhead only; the
+**general float** median/quantile/rank/winsorize surface still needs `select_f64`/`sort_f64`.
+
+**Priority.** This is now the **single remaining loss class** across ~184 grouped verbs + 2
+executable capstones — literally everything else in `stdlib/data/bigframe_ops.sio` beats pandas.
+One codegen builtin flips the entire remaining set.
