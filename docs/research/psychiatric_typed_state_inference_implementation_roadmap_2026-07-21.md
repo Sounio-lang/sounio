@@ -113,6 +113,15 @@ string-name matching, or automatic receipt coercion. A later trait, opaque
 module, or capability design would need its own threat model and acceptance
 tests before it changes this rule.
 
+`ClinicalAuthorizationReceipt` is deliberately absent from the Stage 2 and
+Stage 3 constructible library surface. Defining a public nominal authorization
+record merely to prove that another public record cannot be passed to it would
+be a narrow category check, not an authority boundary: arbitrary code could
+still forge the nominal record. Until a separately justified opaque or
+capability mechanism exists, the correct executable claim is narrower: the
+library forms research receipts only, and authorization has no constructor in
+its module set.
+
 ## 5. Staged Delivery
 
 ### Stage 0: Design Evidence
@@ -142,17 +151,23 @@ one positive constructor, and paired compile-fail callers for each forbidden
 substitution.
 
 ```text
-ObservationReceipt                 cannot satisfy CausalEffectEstimate
 AssumptionReceipt                  cannot satisfy EvidenceReferenceReceipt
-AbstentionReceipt                  cannot satisfy ResearchDecisionCandidate
+DefeaterReceipt                    cannot satisfy ClaimScopeReceipt
+AbstentionReceipt                  cannot satisfy EvidenceReferenceReceipt
 OrderedHistoryReceipt              cannot satisfy AggregationBoundaryReceipt
-EvidenceReferenceReceipt           cannot satisfy ClinicalAuthorizationReceipt
-DecisionCandidateSetReceipt        cannot satisfy ResearchDecisionCandidate
-ClinicalValidationReceipt          cannot satisfy ClinicalAuthorizationReceipt
 ```
 
 All values are synthetic tokens. There is no patient data, identity, medication,
 diagnosis, clinical action, or performance claim.
+
+The Stage 2 module set does not define `CausalEffectEstimate`,
+`ResearchDecisionCandidate`, `DecisionCandidateSetReceipt`,
+`ClinicalValidationReceipt`, or `ClinicalAuthorizationReceipt`; those belong
+to later scientific adapters or the external boundary. Cross-adapter negatives
+are introduced only after both relevant adapters exist, beginning with
+`DecisionCandidateSetReceipt != ResearchDecisionCandidate` in the nonregular
+and counterfactual composition stage. An authorization fixture is not a Stage
+2 substitute for a capability design.
 
 ### Stage 3: One Adapter At A Time
 
