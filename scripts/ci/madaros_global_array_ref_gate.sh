@@ -35,3 +35,4 @@ if grep -q 'FAIL ' <<<"$out"; then
   exit 1
 fi
 echo "PASS madaros_global_array_ref_gate"
+echo "MADAROS_GLOBAL_ARRAY_REF_GATE_OK"
