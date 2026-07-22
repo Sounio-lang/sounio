@@ -197,6 +197,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.madaros-wave13-showcase-2026-07-21 | repo_only | docs/audit/MADAROS_WAVE13_SHOWCASE_2026-07-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-wave13-tip-green-2026-07-21 | repo_only | docs/audit/MADAROS_WAVE13_TIP_GREEN_2026-07-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-wave13e-global-list-args-2026-07-21 | repo_only | docs/audit/MADAROS_WAVE13E_GLOBAL_LIST_ARGS_2026-07-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.madaros-wave15-showcase-2026-07-22 | repo_only | docs/audit/MADAROS_WAVE15_SHOWCASE_2026-07-22.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.modular-compiler-audit-2026-06-10 | repo_only | docs/audit/MODULAR_COMPILER_AUDIT_2026-06-10.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.modular-compiler-stack-clash-2026-05-29 | repo_only | docs/audit/MODULAR_COMPILER_STACK_CLASH_2026-05-29.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.modular-pipe-coverage-map-2026-06-01 | repo_only | docs/audit/MODULAR_PIPE_COVERAGE_MAP_2026-06-01.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -367,6 +368,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.getting-started | repo_only | docs/GETTING_STARTED.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.github.profile.readme | repo_only | docs/github/profile/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.glossary | repo_only | docs/GLOSSARY.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.governance.branch-policy | repo_only | docs/governance/BRANCH_POLICY.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.governance.data-access-credentials | repo_only | docs/governance/data_access_credentials.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.governance.docs-conventions | repo_only | docs/governance/DOCS_CONVENTIONS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.gpu.abide-associator-null | repo_only | docs/gpu/ABIDE_ASSOCIATOR_NULL.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
