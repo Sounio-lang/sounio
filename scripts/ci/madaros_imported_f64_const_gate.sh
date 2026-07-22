@@ -12,12 +12,13 @@ SOUC="${SOUC:-$ROOT/bin/souc}"
 MIN="$ROOT/tests/run-pass/imported_f64_global_const.sio"
 SCI="$ROOT/tests/run-pass/imported_f64_lognormal_science.sio"
 BSS="$ROOT/tests/run-pass/imported_module_f64_const.sio"
+BARE="$ROOT/tests/run-pass/imported_module_f64_const_bare_ident.sio"
 
 if [[ ! -x "$SOUC" ]]; then
   echo "FAIL: souc not executable at $SOUC" >&2
   exit 2
 fi
-if [[ ! -f "$MIN" || ! -f "$SCI" || ! -f "$BSS" ]]; then
+if [[ ! -f "$MIN" || ! -f "$SCI" || ! -f "$BSS" || ! -f "$BARE" ]]; then
   echo "FAIL: missing witness files" >&2
   exit 2
 fi
@@ -76,6 +77,26 @@ if ! grep -q '4609434218613702656' <<<"$out_bss"; then
 fi
 if ! grep -q '4612811918334230528' <<<"$out_bss"; then
   echo "FAIL: missing B_CONST bits 2.5" >&2
+  exit 1
+fi
+
+echo "== madaros_imported_f64_const_gate: bare cross-mod Ident (Wave13) =="
+out_bare="$("$SOUC" run "$BARE" 2>&1)" || {
+  echo "$out_bare"
+  echo "FAIL: bare cross-mod Ident witness compile/run non-zero" >&2
+  exit 1
+}
+echo "$out_bare"
+if ! grep -q 'BARE_CROSSMOD_F64_IDENT_OK' <<<"$out_bare"; then
+  echo "FAIL: missing BARE_CROSSMOD_F64_IDENT_OK" >&2
+  exit 1
+fi
+if grep -q 'FAIL ' <<<"$out_bare"; then
+  echo "FAIL: assertion marker in bare Ident output" >&2
+  exit 1
+fi
+if ! grep -q '4609434218613702656' <<<"$out_bare"; then
+  echo "FAIL: missing A_CONST bits 1.5 on bare Ident path" >&2
   exit 1
 fi
 
