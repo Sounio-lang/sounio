@@ -16,7 +16,7 @@ use native::codegen_x86_linux::{compile_native_v2_preview_to_file, native_resolv
 use check::knowledge_context::{knowledge_context_validate_items, knowledge_context_validate_items_values_only}
 use resolve::mod::{resolve_modules}
 use module_parse::{extract_imports_from_ast, file_exists, file_path_to_module_path, load_module_file}
-use check::specializer::{specialize_generics, spec_last_instantiated, spec_mono_marker_count, spec_append_item_lists}
+use check::specializer::{specialize_generics, spec_last_instantiated, spec_mono_marker_count, spec_append_item_lists, spec_dce_unreachable_item_fns}
 
 // Multi-module parse accumulates every module's GLOBAL_VAR_INIT_* side-table
 // entries so imported f64/i64 BSS constants survive to lower time. Without
@@ -5560,11 +5560,15 @@ fn module_frontend_specialized_prepare(
     // Monomorphized + retained non-generic items from every module live in
     // one list under same-name mono. Multi-mod template body lower SEGV'd on
     // cd_add_exact / trait-method array loops (Wave12 residual).
-    let specialized_ir = specialize_generics(module_frontend_merge_program_items(programs, count))
+    let specialized_raw = specialize_generics(module_frontend_merge_program_items(programs, count))
     let mono_n2: i64 = spec_mono_marker_count()
     if mono_n2 <= 0 {
         return 0
     }
+    // Wave13: drop unused top-level ItemFns (e.g. full f64 CD helpers when
+    // only transitive `cd_sigma` is live) before body lower. Reachability
+    // from main; non-fn items always kept. No-op without main.
+    let specialized_ir = spec_dce_unreachable_item_fns(specialized_raw)
     let ir_slots = module_frontend_count_lowered_ir_slots(&specialized_ir)
     if ir_slots <= 0 {
         return 0
@@ -5574,7 +5578,7 @@ fn module_frontend_specialized_prepare(
         print_int(ir_slots)
         print(" mono_markers=")
         print_int(mono_n2)
-        print("\n")
+        print(" (post-dce)\n")
     }
     // Out-param handoff (lean_single-safe). No programs[] mutation.
     // Some(...) is the authoritative "handled / collapse" signal for callers.
