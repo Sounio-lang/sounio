@@ -8128,3 +8128,172 @@ pub fn bf_perplexity_scaled_by(src: &BigFrame, key_col: i64, val_col: i64, scale
 pub fn bf_inv_simpson_scaled_by(src: &BigFrame, key_col: i64, val_col: i64, scaled_max: i64, scale: f64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_diversity_scaled(src, key_col, val_col, scaled_max, scale, 2) }
 /// Per-group GINI-SIMPSON IMPURITY (1−Σp²) of the fixed-precision value distribution, broadcast. Scaled histogram. NATIVE + lean_single.
 pub fn bf_gini_impurity_scaled_by(src: &BigFrame, key_col: i64, val_col: i64, scaled_max: i64, scale: f64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_diversity_scaled(src, key_col, val_col, scaled_max, scale, 3) }
+
+/// Per-group MEDIAN ABSOLUTE DEVIATION (the canonical robust scale) via two histograms (dense
+/// keys 0..1023). Values are bucketed as round(v·scale) in 0..scaled_max (scale=1 for integer
+/// data); per group the median m comes from bf_qpos_from_hist, then a DEVIATION histogram indexed
+/// by |2v − 2m| (integer, since 2m is integer for a median of integers) is walked for the median
+/// of |v − m|. mode 0 = MAD, mode 1 = MADN (= 1.4826·MAD, a consistent σ estimator under
+/// normality). Result divided back by scale. Broadcast. O(n + G·scaled_range). NATIVE + lean_single.
+fn bf_group_mad(src: &BigFrame, key_col: i64, val_col: i64, scaled_max: i64, scale: f64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var cnt: [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || n <= 0 || scaled_max < 0 || scale <= 0.0 { return out }
+    let vm1 = scaled_max + 1
+    let dvm1 = 2 * scaled_max + 1
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let hist = heap_alloc(1024 * vm1 * 8) as *mut i64
+    let devh = heap_alloc(dvm1 * 8) as *mut i64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        let s = (read_f64(vp, i) * scale + 0.5) as i64
+        if k >= 0 && k < 1024 && s >= 0 && s < vm1 { write_i64(hist, k * vm1 + s, read_i64(hist, k * vm1 + s) + 1); cnt[k] = cnt[k] + 1.0 }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        if cnt[g] > 0.0 {
+            let sz = cnt[g] as i64
+            let base = g * vm1
+            let m = bf_qpos_from_hist(hist, base, vm1, sz, 0.5)
+            let twoM = (2.0 * m + 0.5) as i64
+            var d: i64 = 0
+            while d < dvm1 { write_i64(devh, d, 0); d = d + 1 }
+            var v: i64 = 0
+            while v < vm1 {
+                let f = read_i64(hist, base + v)
+                if f > 0 { var dd = 2 * v - twoM; if dd < 0 { dd = 0 - dd }; if dd >= 0 && dd < dvm1 { write_i64(devh, dd, read_i64(devh, dd) + f) } }
+                v = v + 1
+            }
+            let madreal = bf_qpos_from_hist(devh, 0, dvm1, sz, 0.5) / (2.0 * scale)
+            if mode == 0 { res[g] = madreal } else { res[g] = madreal * 1.4826 }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    heap_free(hist as *mut i8)
+    heap_free(devh as *mut i8)
+    out
+}
+/// Per-group MEDIAN ABSOLUTE DEVIATION (robust scale) of dense integer values, broadcast. NATIVE + lean_single.
+pub fn bf_mad_median_dense_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_mad(src, key_col, val_col, vmax, 1.0, 0) }
+/// Per-group NORMALIZED MAD (1.4826·MAD ≈ robust σ) of dense integer values, broadcast. NATIVE + lean_single.
+pub fn bf_madn_dense_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_mad(src, key_col, val_col, vmax, 1.0, 1) }
+/// Per-group MEDIAN ABSOLUTE DEVIATION of fixed-precision float values, broadcast. Scaled histogram. NATIVE + lean_single.
+pub fn bf_mad_median_scaled_by(src: &BigFrame, key_col: i64, val_col: i64, scaled_max: i64, scale: f64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_mad(src, key_col, val_col, scaled_max, scale, 0) }
+/// Per-group NORMALIZED MAD (1.4826·MAD ≈ robust σ) of fixed-precision float values, broadcast. Scaled histogram. NATIVE + lean_single.
+pub fn bf_madn_scaled_by(src: &BigFrame, key_col: i64, val_col: i64, scaled_max: i64, scale: f64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_mad(src, key_col, val_col, scaled_max, scale, 1) }
+
+/// Per-group GINI MEAN DIFFERENCE (population mean absolute difference, (1/n²)ΣΣ|xᵢ−xⱼ| = 2·mean·Gini),
+/// an absolute robust dispersion, via a histogram ascending rank-walk (dense keys 0..1023, buckets
+/// round(v·scale)). Result divided back by scale. Broadcast. O(n + G·scaled_range). NATIVE + lean_single.
+fn bf_group_gini_mean_diff(src: &BigFrame, key_col: i64, val_col: i64, scaled_max: i64, scale: f64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var cnt: [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || n <= 0 || scaled_max < 0 || scale <= 0.0 { return out }
+    let vm1 = scaled_max + 1
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let hist = heap_alloc(1024 * vm1 * 8) as *mut i64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        let s = (read_f64(vp, i) * scale + 0.5) as i64
+        if k >= 0 && k < 1024 && s >= 0 && s < vm1 { write_i64(hist, k * vm1 + s, read_i64(hist, k * vm1 + s) + 1); cnt[k] = cnt[k] + 1.0 }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        if cnt[g] > 0.0 {
+            let nf = cnt[g]
+            let base = g * vm1
+            var v: i64 = 0
+            var c = 0.0
+            var gacc = 0.0
+            while v < vm1 {
+                let f = read_i64(hist, base + v)
+                if f > 0 { let ff = f as f64; gacc = gacc + (v as f64) * ff * (2.0 * c + ff - nf); c = c + ff }
+                v = v + 1
+            }
+            res[g] = 2.0 * gacc / (nf * nf) / scale
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    heap_free(hist as *mut i8)
+    out
+}
+/// Per-group GINI MEAN DIFFERENCE of dense integer values (absolute dispersion), broadcast. NATIVE + lean_single.
+pub fn bf_gini_mean_diff_dense_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_gini_mean_diff(src, key_col, val_col, vmax, 1.0) }
+/// Per-group GINI MEAN DIFFERENCE of fixed-precision float values, broadcast. Scaled histogram. NATIVE + lean_single.
+pub fn bf_gini_mean_diff_scaled_by(src: &BigFrame, key_col: i64, val_col: i64, scaled_max: i64, scale: f64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_gini_mean_diff(src, key_col, val_col, scaled_max, scale) }
+
+/// Per-group POWER-MEAN family for FIXED-PRECISION FLOAT values via v^p LUTs over scaled buckets
+/// (round(v·scale) in 1..scaled_max). Float sibling of bf_group_powermean_dense; every power mean
+/// scales linearly so the result divides back by scale. mode 0 = Hölder/power mean of order p
+/// ((Σvᵖ/n)^(1/p)), mode 1 = Lehmer mean L_p (Σvᵖ/Σvᵖ⁻¹). Broadcast. O(n + scaled_range).
+/// NATIVE + lean_single only.
+fn bf_group_powermean_scaled(src: &BigFrame, key_col: i64, val_col: i64, scaled_max: i64, scale: f64, p: f64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var nn:  [f64; 1024] = [0.0; 1024]
+    var svp: [f64; 1024] = [0.0; 1024]
+    var svq: [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || n <= 0 || scaled_max < 0 || scale <= 0.0 { return out }
+    let vm1 = scaled_max + 1
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let sc = heap_alloc(8) as *mut i64
+    let lvp = heap_alloc(vm1 * 8) as *mut f64
+    let lvq = heap_alloc(vm1 * 8) as *mut f64
+    var v: i64 = 1
+    while v < vm1 { write_f64(lvp, v, bf_pow(v as f64, p, sc)); write_f64(lvq, v, bf_pow(v as f64, p - 1.0, sc)) v = v + 1 }
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        let s = (read_f64(vp, i) * scale + 0.5) as i64
+        if k >= 0 && k < 1024 && s >= 1 && s < vm1 { nn[k] = nn[k] + 1.0; svp[k] = svp[k] + read_f64(lvp, s); svq[k] = svq[k] + read_f64(lvq, s) }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        let m = nn[g]
+        if m > 0.0 {
+            if mode == 0 { res[g] = bf_pow(svp[g] / m, 1.0 / p, sc) / scale }
+            else { if svq[g] != 0.0 { res[g] = svp[g] / svq[g] / scale } }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    heap_free(lvp as *mut i8)
+    heap_free(lvq as *mut i8)
+    heap_free(sc as *mut i8)
+    out
+}
+/// Per-group HARMONIC MEAN (power mean p=−1) of fixed-precision float values, broadcast. Scaled LUT. NATIVE + lean_single.
+pub fn bf_harmonic_mean_scaled_by(src: &BigFrame, key_col: i64, val_col: i64, scaled_max: i64, scale: f64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_powermean_scaled(src, key_col, val_col, scaled_max, scale, 0.0 - 1.0, 0) }
+/// Per-group ROOT MEAN SQUARE (power mean p=2) of fixed-precision float values, broadcast. Scaled LUT. NATIVE + lean_single.
+pub fn bf_rms_scaled_by(src: &BigFrame, key_col: i64, val_col: i64, scaled_max: i64, scale: f64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_powermean_scaled(src, key_col, val_col, scaled_max, scale, 2.0, 0) }
+/// Per-group CONTRAHARMONIC MEAN (Lehmer L_2 = Σv²/Σv) of fixed-precision float values, broadcast. Scaled LUT. NATIVE + lean_single.
+pub fn bf_contraharmonic_mean_scaled_by(src: &BigFrame, key_col: i64, val_col: i64, scaled_max: i64, scale: f64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_powermean_scaled(src, key_col, val_col, scaled_max, scale, 2.0, 1) }
+/// Per-group POWER (Hölder) MEAN of order p for fixed-precision float values, broadcast. Scaled LUT. NATIVE + lean_single.
+pub fn bf_power_mean_scaled_by(src: &BigFrame, key_col: i64, val_col: i64, scaled_max: i64, scale: f64, p: f64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_powermean_scaled(src, key_col, val_col, scaled_max, scale, p, 0) }
