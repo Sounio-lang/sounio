@@ -245,6 +245,49 @@ fn main() -> i64 with IO {
 }
 ' '0 0 0'
 
+# 12d) Wave13e: pure paramful SINGLE-STMT calls with const args fold.
+# Shapes: binary-of-Idents (kind1) and bare Ident identity (kind2).
+# Must never left-shift remaining const words to `1 2 0`.
+# Multi-stmt paramful (`let x = a + 1; x`) remains residual fail-closed (12e).
+run_case "call_list_args" '
+fn add2(a: i64, b: i64) -> i64 { a + b }
+fn mul2(a: i64, b: i64) -> i64 { a * b }
+fn id1(x: i64) -> i64 { x }
+var A: [i64; 3] = [add2(10, 20), 1, 2]
+var B: [i64; 3] = [mul2(3, 7), id1(9), 5]
+fn main() -> i64 with IO {
+  print_int(A[0]); print(" "); print_int(A[1]); print(" "); print_int(A[2]); print("
+")
+  print_int(B[0]); print(" "); print_int(B[1]); print(" "); print_int(B[2]); print("
+")
+  if A[0] != 30 { return 1 }
+  if A[1] != 1 { return 2 }
+  if A[2] != 2 { return 3 }
+  if B[0] != 21 { return 4 }
+  if B[1] != 9 { return 5 }
+  if B[2] != 5 { return 6 }
+  0
+}
+' '30 1 2
+21 9 5'
+
+# 12e) Wave13e residual: multi-stmt pure paramful stays fail-closed BSS zero
+# (body-pointer registry path poisoned same-module single-stmt folds; skipped).
+run_case "call_list_args_multistmt_residual" '
+fn f(a: i64) -> i64 {
+  let x = a + 1
+  x
+}
+var C: [i64; 2] = [f(9), 2]
+fn main() -> i64 with IO {
+  print_int(C[0]); print(" "); print_int(C[1]); print("
+")
+  if C[0] != 0 { return 1 }
+  if C[1] != 0 { return 2 }
+  0
+}
+' '0 0'
+
 # 13) Wave9: packed i8 BSS size is physical (adjacent arrays independent + dense)
 run_case "i8_adjacent" '
 var A: [i8; 4] = [1, 2, 3, 4]
