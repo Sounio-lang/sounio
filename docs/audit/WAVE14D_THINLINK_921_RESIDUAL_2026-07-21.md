@@ -1,10 +1,10 @@
 <!-- docs:meta
 topic_id: repo.docs.audit.wave14d-thinlink-921-residual-2026-07-21
 authority: repo_only
-audience: maintainers
-last_validated: 2026-07-21
-validated_by: wave14-agent-d
-source_of_truth: docs/handoff/repros/multimodule_thinlink_rc12_madaros.sio
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.wave14d-thinlink-921-residual-2026-07-21
 -->
 
 # Wave14 Agent D — #921 thin-link residual measure (2026-07-21)
