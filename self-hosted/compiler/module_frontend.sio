@@ -12,7 +12,7 @@ use io::env::{read_env}
 use io::trace::{io_trace_i64_string}
 use check::mod::{check_items_verdict_boot4, check_items_verdict_boot4_with_ontocache_sidecar, check_modules_verdict_boot4, check_program_epistemic_into, check_program_with_artifacts, checker_to_ir_epistemic_into, checker_apply_ir_metadata, checker_apply_ir_ontology_parameter_links_from_items}
 use ir::lower::{lower_program_to_ir_trace, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_bodies_from_summary_flat_with_epistemic_ref, lower_program_bodies_from_summary_with_epistemic_boxed_owned}
-use native::codegen_x86_linux::{compile_native_v2_preview_to_file, native_resolve_target, native_v2_builtin_id_for_name}
+use native::codegen_x86_linux::{compile_native_v2_preview_to_file, native_resolve_target, native_v2_builtin_id_for_name, native_v2_builtin_returns_float}
 use check::knowledge_context::{knowledge_context_validate_items, knowledge_context_validate_items_values_only}
 use resolve::mod::{resolve_modules}
 use module_parse::{extract_imports_from_ast, file_exists, file_path_to_module_path, load_module_file}
@@ -2098,6 +2098,10 @@ fn ir_module_promote_canonical_into_stub_slots(module: &! IrModule) with Mut, Di
 // In-place on &! IrModule (memory wall P0): mutate through exclusive ref of the
 // unboxed module (same pattern as ir_module_resolve_named_calls / resolve_all).
 // Do not take/return full IrModule by value — multi-mod modules are hundreds of MB.
+// Wave14e: float-returning empty stubs (exp/cos/sin/log/sqrt) must set
+// returns_float=1 and stamp IR_FLOAT_REG_MARKER_FLAG on call sites. Otherwise
+// bare float intrinsics look correct under print_f64/f64_to_bits (integer ABI
+// on bits) but subsequent f64 arithmetic cvtsi2sd's the bit pattern.
 fn ir_module_ensure_builtin_call_targets(module: &! IrModule) with Mut, Div, Panic {
     var fi: i64 = 0
     while fi < (*module).fn_count {
@@ -2109,17 +2113,22 @@ fn ir_module_ensure_builtin_call_targets(module: &! IrModule) with Mut, Div, Pan
             let op = f.instrs[ii as usize].op
             if op == IrOpcode::IrCall || op == IrOpcode::IrCallSret {
                 let cn = f.instrs[ii as usize].name
-                if cn.len > 0 && native_v2_builtin_id_for_name(cn) != 0 {
+                let bid = if cn.len > 0 { native_v2_builtin_id_for_name(cn) } else { 0 }
+                if cn.len > 0 && bid != 0 {
                     let cur = f.instrs[ii as usize].fn_id
                     var ok: bool = false
                     if cur >= 0 && cur < (*module).fn_count {
                         if ir_name_eq((*module).functions[cur as usize].name, cn) { ok = true }
                     }
+                    var target = cur
                     if !ok {
-                        var target = ir_merge_find_function_name_index(module, cn)
+                        target = ir_merge_find_function_name_index(module, cn)
                         if target < 0 && (*module).fn_count < IR_MAX_FUNCS {
                             var stub = ir_empty_function()
                             stub.name = cn
+                            if native_v2_builtin_returns_float(bid) {
+                                stub.returns_float = 1
+                            }
                             (*module).functions[(*module).fn_count as usize] = stub
                             target = (*module).fn_count
                             (*module).fn_count = (*module).fn_count + 1
@@ -2127,6 +2136,30 @@ fn ir_module_ensure_builtin_call_targets(module: &! IrModule) with Mut, Div, Pan
                         if target >= 0 {
                             f.instrs[ii as usize].fn_id = target
                             changed = true
+                        }
+                    }
+                    // Advertise f64 return on empty float-intrinsic stubs (new or pre-existing)
+                    // and stamp the call site so native core does not mark the result INT.
+                    if target >= 0 && target < (*module).fn_count && native_v2_builtin_returns_float(bid) {
+                        let stub_ic = (*module).functions[target as usize].instr_count
+                        if stub_ic == 0 {
+                            if (*module).functions[target as usize].returns_float != 1 {
+                                var tf = (*module).functions[target as usize]
+                                tf.returns_float = 1
+                                (*module).functions[target as usize] = tf
+                            }
+                            if f.instrs[ii as usize].imm_flags != IR_FLOAT_REG_MARKER_FLAG {
+                                f.instrs[ii as usize].imm_flags = IR_FLOAT_REG_MARKER_FLAG
+                                changed = true
+                            }
+                        } else {
+                            // User/stdlib body shares the name: still honour declared returns_float.
+                            if (*module).functions[target as usize].returns_float == 1 {
+                                if f.instrs[ii as usize].imm_flags != IR_FLOAT_REG_MARKER_FLAG {
+                                    f.instrs[ii as usize].imm_flags = IR_FLOAT_REG_MARKER_FLAG
+                                    changed = true
+                                }
+                            }
                         }
                     }
                 }
@@ -5929,6 +5962,11 @@ pub fn module_frontend_compile_imported_to_file(
         if !used_specialized {
             ir_module_resolve_all_call_targets(&! (*module_box))
         }
+        // Wave14e: single-file / specialized-collapse never enter multi-mod
+        // finalize_merged_calls, so bare float intrinsics (exp/cos/sin/log/sqrt)
+        // would keep returns_float=0 empty stubs and subsequent f64 arithmetic
+        // would cvtsi2sd the IEEE bit pattern. Stamp here before codegen.
+        ir_module_ensure_builtin_call_targets(&! (*module_box))
         let fn_count = (*module_box).fn_count
         trace.last_stage = "done"
         trace.last_module_index = 0
