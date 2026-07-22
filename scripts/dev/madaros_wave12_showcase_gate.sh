@@ -11,20 +11,24 @@
 #     3. order_spread     — scripts/madaros_order_spread_native_gate.sh
 #     4. k95              — scripts/epistemic_trust_gate.sh
 #                          (Section A + finite-dof gum k95i=2776)
-#
-#   HONEST PROBE (recorded; does NOT fail the showcase unless REQUIRE_CD_EXACT=1):
 #     5. cd_exact         — scripts/dev/madaros_cd_exact_generic_i64_gate.sh
-#                          (if the script is present; else status=missing_script)
+#                          (DEFAULT REQUIRED after #1392 ZD PROVED e2e)
 #
-# Exit 0 when every REQUIRED sub-gate is green. cd_exact residual remains an
-# explicit non-claim while red. Writes machine-readable receipt:
+# Wave13 note: REQUIRE_CD_EXACT defaults ON. Set REQUIRE_CD_EXACT=0 only for
+# legacy residual packaging that intentionally omits the closed e2e claim.
+# Prefer scripts/dev/madaros_wave13_showcase_gate.sh for the public full-green
+# surface. If stock prebuilt lags #1392, rebuild:
+#   scripts/dev/souc-build-lock.sh make build-madaros
+#   # or: MADAROS_RAW_BIN=artifacts/self-hosted/madaros
+#
+# Exit 0 when every REQUIRED sub-gate is green. Writes machine-readable receipt:
 #   artifacts/compiler/madaros_wave12_showcase_receipt.v1.json
 #
 # Does not rebuild Madaros. Does not pin lean_single. Uses default bin/souc.
 #
 # Usage:
 #   bash scripts/dev/madaros_wave12_showcase_gate.sh
-#   REQUIRE_CD_EXACT=1 bash scripts/dev/madaros_wave12_showcase_gate.sh
+#   REQUIRE_CD_EXACT=0 bash scripts/dev/madaros_wave12_showcase_gate.sh  # legacy residual-only
 #   SOUC=./bin/souc bash scripts/dev/madaros_wave12_showcase_gate.sh
 set -euo pipefail
 
@@ -36,7 +40,8 @@ ulimit -s unlimited 2>/dev/null || ulimit -s 131072 2>/dev/null || true
 
 SOUC="${SOUC:-$ROOT/bin/souc}"
 export SOUC
-REQUIRE_CD_EXACT="${REQUIRE_CD_EXACT:-0}"
+# Wave13 / #1392: cd_exact e2e ZD PROVED is REQUIRED by default.
+REQUIRE_CD_EXACT="${REQUIRE_CD_EXACT:-1}"
 
 RECEIPT_DIR="$ROOT/artifacts/compiler"
 RECEIPT="$RECEIPT_DIR/madaros_wave12_showcase_receipt.v1.json"
@@ -77,12 +82,13 @@ echo "log_dir=$LOG_DIR"
 echo
 
 # name|script|expected_token|required(1/0)
+# cd_exact base required flag is 1 after #1392; REQUIRE_CD_EXACT=0 demotes it.
 GATES=(
   "wave11_tip_green|scripts/dev/madaros_wave11_tip_green_gate.sh|MADAROS_WAVE11_TIP_GREEN_GATE_OK|1"
   "dual|scripts/madaros_dual_import_gate.sh|MADAROS_DUAL_IMPORT_GATE_OK|1"
   "order_spread|scripts/madaros_order_spread_native_gate.sh|MADAROS_ORDER_SPREAD_NATIVE_GATE_OK|1"
   "k95|scripts/epistemic_trust_gate.sh|EPISTEMIC_TRUST_GATE_OK|1"
-  "cd_exact|scripts/dev/madaros_cd_exact_generic_i64_gate.sh|MADAROS_CD_EXACT_GENERIC_I64_GATE_OK|0"
+  "cd_exact|scripts/dev/madaros_cd_exact_generic_i64_gate.sh|MADAROS_CD_EXACT_GENERIC_I64_GATE_OK|1"
 )
 
 declare -a RESULT_NAMES=()
@@ -104,10 +110,15 @@ run_one() {
   local start end dur rc
   local class="required"
   [[ "$required" == "1" ]] || class="honest_probe"
-  # Promote cd_exact to required when explicitly requested.
-  if [[ "$name" == "cd_exact" && "$REQUIRE_CD_EXACT" == "1" ]]; then
-    required="1"
-    class="required_by_env"
+  # cd_exact: default required (#1392). REQUIRE_CD_EXACT=0 demotes to honest probe.
+  if [[ "$name" == "cd_exact" ]]; then
+    if [[ "$REQUIRE_CD_EXACT" == "1" ]]; then
+      required="1"
+      class="required"
+    else
+      required="0"
+      class="honest_probe_legacy"
+    fi
   fi
 
   idx=$((idx + 1))
@@ -237,7 +248,7 @@ PY
 RAW_REL="$(relpath_under_root "${RAW:-}")"
 SOUC_REL="$(relpath_under_root "$SOUC")"
 
-# Dynamic claims: promote cd_exact only when actually green.
+# Dynamic claims: cd_exact is a required claim after #1392 when green.
 CLAIMS_JSON='[
     "wave11_tip_green_superseding_wave10",
     "dual_gum_knowledge_import_native",
@@ -263,12 +274,14 @@ if [[ "$cd_exact_status" == "pass" ]]; then
     "gum_k95_f64_i64_cast_fixed",
     "epistemic_trust_section_a_native",
     "cd_exact_generic_i64_elf",
+    "cd_exact_zd_proved_pr1392",
     "public_showcase_receipt_wave12"
   ]'
 else
-  # Keep the residual explicit while red.
+  # Keep the residual explicit while red (fails showcase when REQUIRE_CD_EXACT=1).
   CLAIMS_NOT_JSON='[
     "cd_exact_generic_i64_elf",
+    "cd_exact_zd_proved_pr1392",
     "all_stdlib_dual_pairs",
     "language_knowledge_t_generic_import",
     "multi_module_irmodule_memory_wall_closed",
@@ -309,7 +322,8 @@ cat >"$RECEIPT" <<EOF
     "k95": "$(for i in "${!RESULT_NAMES[@]}"; do [[ "${RESULT_NAMES[$i]}" == "k95" ]] && echo "${RESULT_STATUS[$i]}"; done)",
     "cd_exact": "$cd_exact_status",
     "required_red_count": $fail_required,
-    "note": "Wave12 packages Wave11 tip-green + dual + order_spread + k95 for public showcase; cd_exact is an honest residual probe"
+    "pr_cd_exact_e2e": 1392,
+    "note": "Wave12 showcase post-#1392: Wave11 tip-green + dual + order_spread + k95 + REQUIRED cd_exact (ZD PROVED). REQUIRE_CD_EXACT=0 restores legacy residual-only packaging. Prefer wave13 showcase for full-green public surface."
   },
   "verdict": "$OVERALL"
 }
@@ -327,14 +341,22 @@ done
 echo "overall=$OVERALL"
 echo "showcase_verdict=$SHOWCASE_VERDICT"
 echo "cd_exact=$cd_exact_status"
+echo "require_cd_exact=$REQUIRE_CD_EXACT"
 echo "receipt: $RECEIPT"
 
 if [[ $fail_required -eq 0 ]]; then
   echo "MADAROS_WAVE12_SHOWCASE_GATE_OK"
-  if [[ "$cd_exact_status" != "pass" ]]; then
-    echo "NOTE: cd_exact residual is RED/not-pass — claim boundary preserved (not invented green)"
+  if [[ "$cd_exact_status" == "pass" ]]; then
+    echo "NOTE: cd_exact GREEN (ZD PROVED) — required after PR #1392"
+  elif [[ "$REQUIRE_CD_EXACT" != "1" ]]; then
+    echo "NOTE: cd_exact residual is RED/not-pass — legacy REQUIRE_CD_EXACT=0 packaging (not invented green)"
   fi
   exit 0
+fi
+if [[ "$cd_exact_status" != "pass" && "$REQUIRE_CD_EXACT" == "1" ]]; then
+  echo "NOTE: cd_exact RED while required — rebuild Madaros if stock prebuilt lags #1392:" >&2
+  echo "  scripts/dev/souc-build-lock.sh make build-madaros" >&2
+  echo "  # or MADAROS_RAW_BIN=artifacts/self-hosted/madaros bash $0" >&2
 fi
 echo "MADAROS_WAVE12_SHOWCASE_GATE_FAIL" >&2
 exit 1
