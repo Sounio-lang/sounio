@@ -5187,177 +5187,40 @@ fn module_frontend_lower_programs_array_direct_box(
                 // per-module lowering scratch falls inside [mark, reset).
                 let dep_arena_mark = __arena_mark()
                 let dep_items = (*programs)[i as usize].items
-                let dep_lower = module_frontend_lower_program_items_box_traced_with_externs(&dep_items, programs, loaded, i, trace)
-                print("lower_array: dep_lower_done ")
-                print_int(i)
-                print("\n")
-                if !dep_lower.ok {
-                    return module_frontend_lower_direct_box_error(dep_lower.error_msg)
-                }
-                match dep_lower.module {
-                    Some(dep_box) => {
-                        print("lower_array: merge_begin ")
-                        print_int(i)
-                        print("\n")
-                        let dep_fn_count = (*dep_box).fn_count
-                        // Snapshot before this module's functions are appended --
-                        // acc_box.fn_count only grows in the mfi loop below, so
-                        // this is the exact appended range [old_fn_count, ..).
-                        let dep_merge_old_fn_count = (*acc_box).fn_count
-                        let string_offset = (*acc_box).string_count
-                        let contest_offset = (*acc_box).epistemic.contest_count
-                        let robust_offset = (*acc_box).epistemic.robust_proof_count
-                        let decision_offset = (*acc_box).epistemic.decision_certificate_count
-                        let deferred_offset = (*acc_box).epistemic.deferred_certificate_count
-                        let validated_offset = (*acc_box).epistemic.validated_manifest_count
-                        let acquisition_plan_offset = (*acc_box).epistemic.acquisition_plan_count
-                        let recourse_plan_offset = (*acc_box).epistemic.recourse_plan_count
-                        let alternative_set_offset = (*acc_box).epistemic.alternative_set_count
-                        let transition_plan_offset = (*acc_box).epistemic.transition_plan_count
-                        let observed_transition_offset = (*acc_box).epistemic.observed_transition_count
-                        let rollback_certificate_offset = (*acc_box).epistemic.rollback_certificate_count
-                        let bss_offset_delta = (*acc_box).bss_total_size
-                        // Functions with index < acc_fn_before existed before this dep merge;
-                        // a fn_remap target below this marks a DEDUP reuse (skip re-placing).
-                        let acc_fn_before = (*acc_box).fn_count
-                        var fn_remap: [i64; 2048] = [-1; 2048]
-                        var append_count: i64 = 0
-                        var rfi: i64 = 0
-                        while rfi < dep_fn_count {
-                            let dep_ic = (*dep_box).functions[rfi as usize].instr_count
-                            let dep_is_bss = (*dep_box).functions[rfi as usize].compile_strategy == IR_STRATEGY_BSS_GLOBAL
-                            var stub_idx: i64 = 0 - 1
-                            var existing_body_idx: i64 = 0 - 1
-                            var sfi: i64 = 0
-                            while sfi < (*acc_box).fn_count {
-                                if ir_name_eq(
-                                    (*acc_box).functions[sfi as usize].name,
-                                    (*dep_box).functions[rfi as usize].name
-                                ) {
-                                    // Wave13: seed may have preseeded external BSS so bare
-                                    // Ident from main resolves. DEDUP those slots by name
-                                    // (instr_count is 0 for scalar BSS — do not treat as stub).
-                                    if dep_is_bss
-                                        && (*acc_box).functions[sfi as usize].compile_strategy == IR_STRATEGY_BSS_GLOBAL
-                                    {
-                                        existing_body_idx = sfi
-                                    } else if (*acc_box).functions[sfi as usize].instr_count <= 0 {
-                                        stub_idx = sfi
-                                    } else {
-                                        existing_body_idx = sfi
-                                    }
-                                }
-                                sfi = sfi + 1
-                            }
-                            if existing_body_idx >= 0 {
-                                // DEDUP: this function's body is already merged (a shared
-                                // import pulled in via another module). Point dep's callers
-                                // at the existing copy and skip re-appending the duplicate
-                                // body. Post-merge call finalize (ir_module_finalize_merged_calls)
-                                // resolves every call by name to this kept copy.
-                                // Also covers Wave13 seed-preseeded BSS globals.
-                                fn_remap[rfi as usize] = existing_body_idx
-                            } else if stub_idx >= 0 && dep_ic > 0 {
-                                // Keep import stubs (ic=0) at low fn_id indices and append
-                                // lowered bodies — matches the 3-module clinical+knightian
-                                // layout where stub slots survive for post-finalize promotion.
-                                let planned_idx = (*acc_box).fn_count + append_count
-                                if planned_idx < IR_MAX_FUNCS {
-                                    fn_remap[rfi as usize] = planned_idx
-                                    append_count = append_count + 1
-                                }
-                            } else {
-                                let planned_idx = (*acc_box).fn_count + append_count
-                                if planned_idx < IR_MAX_FUNCS {
-                                    fn_remap[rfi as usize] = planned_idx
-                                    append_count = append_count + 1
-                                }
-                            }
-                            rfi = rfi + 1
-                        }
 
-                        // Wave13: when seed preseeded dep BSS, DEDUP skips those slots —
-                        // only grow acc BSS by non-deduped dep BSS size (not full dep total).
-                        var bss_grow: i64 = 0
-                        var mfi: i64 = 0
-                        while mfi < dep_fn_count {
-                            let dst_fi = fn_remap[mfi as usize]
-                            // dst_fi < acc_fn_before = a DEDUP reuse (body already present):
-                            // skip re-placing it. Only place newly-appended functions.
-                            if dst_fi >= acc_fn_before {
-                                // Wave10: single-pass place+remap (one IrFunction local).
-                                // Wave11: bss_offset_delta relocates dep BSS past acc BSS.
-                                ir_merge_place_and_remap_function(
-                                    &! (*acc_box),
-                                    &(*dep_box),
-                                    mfi,
-                                    dst_fi,
-                                    dep_fn_count,
-                                    &fn_remap,
-                                    contest_offset,
-                                    robust_offset,
-                                    decision_offset,
-                                    deferred_offset,
-                                    validated_offset,
-                                    acquisition_plan_offset,
-                                    recourse_plan_offset,
-                                    alternative_set_offset,
-                                    transition_plan_offset,
-                                    observed_transition_offset,
-                                    rollback_certificate_offset,
-                                    bss_offset_delta
-                                )
-                                if (*dep_box).functions[mfi as usize].compile_strategy == IR_STRATEGY_BSS_GLOBAL {
-                                    let bsz = (*dep_box).functions[mfi as usize].bss_size
-                                    let aligned = ((bsz + 7) / 8) * 8
-                                    bss_grow = bss_grow + aligned
-                                }
-                            }
-                            mfi = mfi + 1
-                        }
-                        // Prefer exact non-deduped BSS growth. When the dep had no BSS
-                        // slots at all (or only non-BSS), fall back keeps prior behaviour
-                        // for any untracked BSS footprint (should be zero when DEDUP-clean).
-                        if bss_grow > 0 {
-                            (*acc_box).bss_total_size = (*acc_box).bss_total_size + bss_grow
-                        } else {
-                            // No newly-placed BSS: if every dep BSS was DEDUP'd, grow 0.
-                            // If dep had no BSS_GLOBAL entries, also grow 0 (dep.bss may
-                            // still be 0). Only use full dep.bss when we placed nothing
-                            // and dep claims BSS we failed to classify — defensive.
-                            var dep_bss_slots: i64 = 0
-                            var dbi: i64 = 0
-                            while dbi < dep_fn_count {
-                                if (*dep_box).functions[dbi as usize].compile_strategy == IR_STRATEGY_BSS_GLOBAL {
-                                    dep_bss_slots = dep_bss_slots + 1
-                                }
-                                dbi = dbi + 1
-                            }
-                            if dep_bss_slots == 0 && (*dep_box).bss_total_size > 0 {
-                                (*acc_box).bss_total_size = (*acc_box).bss_total_size + (*dep_box).bss_total_size
-                            }
-                        }
-                        var si: i64 = 0
-                        while si < (*dep_box).string_count && (*acc_box).string_count < IR_MAX_STRINGS {
-                            (*acc_box).string_table[(*acc_box).string_count as usize] = (*dep_box).string_table[si as usize]
-                            (*acc_box).string_count = (*acc_box).string_count + 1
-                            si = si + 1
-                        }
-                        // In-place section merge via &! IrModule (no section by-value).
-                        ir_merge_sections_into_module(&! (*acc_box), &(*dep_box))
-                        // Every field copied into acc_box above (functions incl.
-                        // instrs, string_table entries, epistemic, algebras) is a
-                        // plain value copy with no Box field except IrInstr.call_args
-                        // (Option<Box<IrRegList>> -- audited: the only Box reachable
-                        // from IrModule/IrFunction/IrInstr). Re-box those chains
-                        // before reclaiming dep_box's arena window: extract now
-                        // (source still valid), reset, then rebuild fresh in the
-                        // freed window.
-                        let dep_merge_new_fn_count = (*acc_box).fn_count
-                        // Snapshot live call_args for newly-appended functions into BSS,
-                        // then reclaim the dep window and re-box chains into acc (A14
-                        // whole-function writeback). Skip only on scratch overflow.
-                        let dep_arena_scan_ok = mf_arebox_scan(&(*acc_box), dep_merge_old_fn_count, dep_merge_new_fn_count)
+                if into_acc_default {
+                    // Wave13: body-lower dep directly into acc (no concurrent dep_box).
+                    // Fills seed-preseeded stubs (ic=0) and appends new names in place.
+                    // Call targets already bind to absolute acc fn_ids by name.
+                    let dep_fn_before = (*acc_box).fn_count
+                    let into_result = lower_dep_program_items_into_acc_with_externs(
+                        &dep_items,
+                        programs,
+                        loaded,
+                        i,
+                        acc_box
+                    )
+                    print("lower_array: into_acc_done ")
+                    print_int(i)
+                    print("\n")
+                    if into_result.had_error {
+                        return module_frontend_lower_direct_box_error("ir_into_acc_failed")
+                    }
+                    acc_box = into_result.module
+                    // Into-acc fills stubs at low fn_ids AND may append. Re-box
+                    // call_args for the whole module before arena_reset so filled
+                    // stubs' chains (allocated post-mark) are not left dangling.
+                    // Opt-out: SOUNIO_INTO_ACC_NO_RESET=1 keeps post-mark boxes live
+                    // (peak slightly higher; useful for residual diagnosis).
+                    if str_eq(read_env("SOUNIO_INTO_ACC_NO_RESET"), "1") {
+                        MF_AREBOX_RESET_SKIP = MF_AREBOX_RESET_SKIP + 1
+                        print("lower_array: arena_reset_skipped (into_acc_no_reset) module ")
+                        print_int(i)
+                        print(" fn_after ")
+                        print_int((*acc_box).fn_count)
+                        print("\n")
+                    } else {
+                        let dep_arena_scan_ok = mf_arebox_scan(&(*acc_box), 0, (*acc_box).fn_count)
                         let dep_rebox_sites = MF_AREBOX_COUNT
                         if dep_arena_scan_ok {
                             __arena_reset(dep_arena_mark)
@@ -5417,6 +5280,7 @@ fn module_frontend_lower_programs_array_direct_box(
                             var rfi: i64 = 0
                             while rfi < dep_fn_count {
                                 let dep_ic = (*dep_box).functions[rfi as usize].instr_count
+                                let dep_is_bss = (*dep_box).functions[rfi as usize].compile_strategy == IR_STRATEGY_BSS_GLOBAL
                                 var stub_idx: i64 = 0 - 1
                                 var existing_body_idx: i64 = 0 - 1
                                 var sfi: i64 = 0
@@ -5425,7 +5289,14 @@ fn module_frontend_lower_programs_array_direct_box(
                                         (*acc_box).functions[sfi as usize].name,
                                         (*dep_box).functions[rfi as usize].name
                                     ) {
-                                        if (*acc_box).functions[sfi as usize].instr_count <= 0 {
+                                        // Wave13: seed may have preseeded external BSS so bare
+                                        // Ident from main resolves. DEDUP those slots by name
+                                        // (instr_count is 0 for scalar BSS — do not treat as stub).
+                                        if dep_is_bss
+                                            && (*acc_box).functions[sfi as usize].compile_strategy == IR_STRATEGY_BSS_GLOBAL
+                                        {
+                                            existing_body_idx = sfi
+                                        } else if (*acc_box).functions[sfi as usize].instr_count <= 0 {
                                             stub_idx = sfi
                                         } else {
                                             existing_body_idx = sfi
@@ -5451,6 +5322,9 @@ fn module_frontend_lower_programs_array_direct_box(
                                 rfi = rfi + 1
                             }
 
+                            // Wave13: when seed preseeded dep BSS, DEDUP skips those slots —
+                            // only grow acc BSS by non-deduped dep BSS size (not full dep total).
+                            var bss_grow: i64 = 0
                             var mfi: i64 = 0
                             while mfi < dep_fn_count {
                                 let dst_fi = fn_remap[mfi as usize]
@@ -5475,10 +5349,36 @@ fn module_frontend_lower_programs_array_direct_box(
                                         rollback_certificate_offset,
                                         bss_offset_delta
                                     )
+                                    if (*dep_box).functions[mfi as usize].compile_strategy == IR_STRATEGY_BSS_GLOBAL {
+                                        let bsz = (*dep_box).functions[mfi as usize].bss_size
+                                        let aligned = ((bsz + 7) / 8) * 8
+                                        bss_grow = bss_grow + aligned
+                                    }
                                 }
                                 mfi = mfi + 1
                             }
-                            (*acc_box).bss_total_size = (*acc_box).bss_total_size + (*dep_box).bss_total_size
+                            // Prefer exact non-deduped BSS growth. When the dep had no BSS
+                            // slots at all (or only non-BSS), fall back keeps prior behaviour
+                            // for any untracked BSS footprint (should be zero when DEDUP-clean).
+                            if bss_grow > 0 {
+                                (*acc_box).bss_total_size = (*acc_box).bss_total_size + bss_grow
+                            } else {
+                                // No newly-placed BSS: if every dep BSS was DEDUP'd, grow 0.
+                                // If dep had no BSS_GLOBAL entries, also grow 0 (dep.bss may
+                                // still be 0). Only use full dep.bss when we placed nothing
+                                // and dep claims BSS we failed to classify — defensive.
+                                var dep_bss_slots: i64 = 0
+                                var dbi: i64 = 0
+                                while dbi < dep_fn_count {
+                                    if (*dep_box).functions[dbi as usize].compile_strategy == IR_STRATEGY_BSS_GLOBAL {
+                                        dep_bss_slots = dep_bss_slots + 1
+                                    }
+                                    dbi = dbi + 1
+                                }
+                                if dep_bss_slots == 0 && (*dep_box).bss_total_size > 0 {
+                                    (*acc_box).bss_total_size = (*acc_box).bss_total_size + (*dep_box).bss_total_size
+                                }
+                            }
                             var si: i64 = 0
                             while si < (*dep_box).string_count && (*acc_box).string_count < IR_MAX_STRINGS {
                                 (*acc_box).string_table[(*acc_box).string_count as usize] = (*dep_box).string_table[si as usize]

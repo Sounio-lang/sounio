@@ -1578,6 +1578,92 @@ fn lowerer_preseed_external_bss_globals_mut(
     }
 }
 
+// Into-acc external preseed: same as lowerer_preseed_external_struct_items_mut
+// but NEVER clobber a name that already has a body in acc. Without this, dep N+1
+// re-preseeding dep N / seed `main` and ItemImpl methods zeros their instr_count
+// (measured: user main ic=62 → 0; Epistemic_measured/val stay empty after gum).
+fn lowerer_preseed_external_items_into_acc_mut(
+    lo: &! Lowerer,
+    items: &Option<Box<ItemList>>
+) with Mut, Panic, Div, Alloc {
+    var current = items
+    while true {
+        match *current {
+            Some(list) => {
+                let head_owned = (*list).head
+                if head_owned.kind == ItemKind::ItemStruct {
+                    match head_owned.struct_def {
+                        Some(sd) => {
+                            var sl_box = (*lo).struct_layouts
+                            // Skip duplicate type_name entries in this lowerer's table.
+                            var already: bool = false
+                            var si: i64 = 0
+                            while si < (*sl_box).count {
+                                if ir_name_eq((*sl_box).entries[si as usize].type_name, head_owned.name) {
+                                    already = true
+                                }
+                                si = si + 1
+                            }
+                            let pre_count = (*sl_box).count
+                            if !already && pre_count < 256 {
+                                var entry = empty_struct_layout_entry()
+                                entry.type_name = head_owned.name
+                                var fc: i64 = 0
+                                var fcur = (*sd).fields
+                                var keep_going = true
+                                while keep_going && fc < 64 {
+                                    match fcur {
+                                        Some(flist) => {
+                                            entry.fields[fc as usize] = StructFieldEntry {
+                                                name: (*flist).head.name,
+                                                index: fc,
+                                                is_float: if lower_type_expr_is_f64(&(*flist).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*flist).head.ty) { 2 } else if lower_type_expr_is_integer(&(*flist).head.ty) { 3 } else { 0 },
+                                            }
+                                            fc = fc + 1
+                                            fcur = (*flist).tail
+                                        }
+                                        _ => { keep_going = false }
+                                    }
+                                }
+                                entry.field_count = fc
+                                (*sl_box).entries[pre_count as usize] = entry
+                                (*sl_box).count = pre_count + 1
+                                (*lo).struct_layouts = sl_box
+                            } else {
+                                (*lo).struct_layouts = sl_box
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if head_owned.kind == ItemKind::ItemFn {
+                    let fn_def_opt_ref: &Option<Box<FnDef>> = &head_owned.fn_def
+                    match *fn_def_opt_ref {
+                        Some(fd) => {
+                            // Skip main entirely on into-acc (seed owns entry); skip any body.
+                            if !lowerer_dep_should_skip_fn_mut(lo, head_owned.name) {
+                                lowerer_preseed_fn_signature_mut(lo, head_owned.name, &(*fd).params, &(*fd).return_type, &(*fd).effects)
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if head_owned.kind == ItemKind::ItemImpl {
+                    let impl_def_opt_ref: &Option<Box<ImplDef>> = &head_owned.impl_def
+                    match *impl_def_opt_ref {
+                        Some(id) => {
+                            lowerer_preseed_impl_method_summaries_dedup_mut(lo, head_owned.name, &(*id).methods, ir_empty_name())
+                        }
+                        _ => {}
+                    }
+                }
+                current = &(*list).tail
+            }
+            _ => break
+        }
+    }
+}
+
 fn lowerer_register_struct_fields_direct_mut(
     lo: &! Lowerer,
     type_name: Name,
