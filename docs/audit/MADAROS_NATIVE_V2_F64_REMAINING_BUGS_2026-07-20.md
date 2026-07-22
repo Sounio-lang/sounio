@@ -145,3 +145,14 @@ Defect B (global `&!` array ref) is fixed wave10e — remaining linalg blockers 
 independent of that ref path. After the compiler fixes ship in the prebuilt
 (madaros-prebuilt-refresh), the SPECIAL/STATS gates can drop
 `SOUNIO_SOUC_ENGINE=lean_single` where they still pin it.
+
+## Defect A″ — into-acc f64 BSS arithmetic loses float mark (Wave15 D 2026-07-22) — **FIXED**
+
+Distinct from A (const wiped → 0 → pdf=1.0) and A′ (offset collision). Const
+**init and bits** were correct; same-module `DE + 1.0` / `0.0 - DE` inside an
+imported module did `cvtsi2sd` on IEEE bits (~4.6e18), so
+`lognormal_pdf(1,0,1)` returned `~1e-300`. Root: into-acc
+`lowerer_from_acc_module` empty `global_types` + skip re-record when seed already
+preseeded the BSS slot. Fix + gate:
+`docs/audit/MADAROS_IMPORTED_F64_BSS_ARITH_2026-07-22.md`,
+`scripts/madaros_imported_f64_bss_arith_gate.sh`.
