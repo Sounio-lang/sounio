@@ -2052,12 +2052,27 @@ fn lower_typeexpr_bss_elem_size(ty_opt: &Option<Box<TypeExpr>>) -> i64 with Pani
     }
 }
 
-// Apply parse-time GLOBAL_VAR_INIT_* side-table data onto a BSS global slot.
-// - count == 0: no recorded init (BSS stays zero)
+// Apply parse-time GLOBAL_VAR_INIT_* / GLOBAL_STR_INIT_* side-table data onto a
+// BSS global slot.
+// - string init present: returns_float=1, prof_counter_id=BSS_INIT_STRING_MAGIC,
+//   return_struct_name = normalized literal payload (see ir.sio)
+// - count == 0: no recorded int/float init (BSS stays zero unless string)
 // - count == 1: scalar or array-repeat fill → returns_float=1, prof_counter_id=word
 // - count  > 1: element-list → also pack words into instrs[] for per-element stores
 // Presence uses count (not value!=0) so a list starting with 0 still inits.
 fn lower_apply_global_var_init(slot: &! IrFunction, name: Name) with Mut, Div {
+    // Wave15e: string literal globals (magic+len+bytes in GLOBAL_VAR_INIT_*).
+    // Must run before the multi-word element-list path or magic words would be
+    // mis-emitted as per-element BSS fills.
+    if ast_global_str_init_present(name) == 1 {
+        let payload = ast_global_str_init_name(name)
+        // Payload already has surrounding quotes stripped; expand escapes only.
+        (*slot).returns_float = 1
+        (*slot).prof_counter_id = BSS_INIT_STRING_MAGIC
+        (*slot).return_struct_name = ir_normalize_string_literal_name(payload)
+        (*slot).instr_count = 0
+        return
+    }
     let count = ast_global_var_init_count(name)
     if count <= 0 {
         return
