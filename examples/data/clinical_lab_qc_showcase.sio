@@ -1,0 +1,92 @@
+// Clinical-lab QC showcase: per-cohort robust profiling of a fixed-precision biomarker over
+// data::bigframe, composing the SCALED-histogram order-statistic / geometric / inequality verbs
+// (the fixed-precision-float family). Lab assays report to a fixed number of decimals, so the
+// scaled histogram (round(v*scale)) is exact -- and it beats pandas' per-group lambda while
+// dodging the general-float quickselect that loses ~5x (see the select_f64 dispatch #1359).
+//
+// Scenario: serum CRP (C-reactive protein, mg/L, 2-decimal) measured in two cohorts of 5.
+// Controls are low and tight; Patients are elevated, right-skewed, with one acute outlier.
+// Lognormal-friendly readouts (geometric mean / geometric SD) are the clinical norm for CRP.
+//
+// Run: SOUNIO_SOUC_ENGINE=lean_single ./bin/souc compile examples/data/clinical_lab_qc_showcase.sio -o out && ./out
+use data::bigframe::*
+use data::bigframe_ops::*
+
+fn approx(a: f64, b: f64) -> bool { let d = a - b; if d < 0.0 { (0.0 - d) < 0.00001 } else { d < 0.00001 } }
+
+fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
+    // 2 cohorts x 5 CRP readings (mg/L, 2-decimal). col0=cohort, col1=CRP.
+    // Controls {0.50,0.75,1.00,1.25,1.50}; Patients {2.00,4.00,6.00,8.00,50.00}.
+    var cCtl: [f64;8] = [0.0;8]; cCtl[0]=0.50; cCtl[1]=0.75; cCtl[2]=1.00; cCtl[3]=1.25; cCtl[4]=1.50
+    var cPat: [f64;8] = [0.0;8]; cPat[0]=2.00; cPat[1]=4.00; cPat[2]=6.00; cPat[3]=8.00; cPat[4]=50.00
+
+    var df = bf_new(2, 16)
+    var coh: i64 = 0
+    while coh < 2 {
+        var j: i64 = 0
+        while j < 5 {
+            var row: [f64;64] = [0.0;64]
+            row[0] = coh as f64
+            if coh == 0 { row[1] = cCtl[j] } else { row[1] = cPat[j] }
+            bf_push_row(&!df, &row, 2)
+            j = j + 1
+        }
+        coh = coh + 1
+    }
+
+    let scale = 100.0        // 2-decimal precision
+    let smax: i64 = 5000     // covers CRP up to 50.00 mg/L
+
+    // ---- robust center / spread (fixed-precision scaled histogram) ----
+    let med  = bf_median_scaled_by(&df, 0, 1, smax, scale)      // median CRP
+    let iqr  = bf_iqr_scaled_by(&df, 0, 1, smax, scale)         // IQR
+    let rcv  = bf_robust_cv_scaled_by(&df, 0, 1, smax, scale)   // IQR/median (robust CV)
+    let tmn  = bf_trimmed_mean_scaled_by(&df, 0, 1, smax, scale, 0.2) // outlier-resistant mean
+    let bws  = bf_bowley_skew_scaled_by(&df, 0, 1, smax, scale) // quartile skewness
+    // ---- lognormal readout (CRP is log-normally distributed) ----
+    let gm   = bf_geomean_scaled_by(&df, 0, 1, smax, scale)     // geometric mean
+    let gs   = bf_geostd_scaled_by(&df, 0, 1, smax, scale)      // geometric SD
+    // ---- between-subject heterogeneity ----
+    let gini = bf_gini_coef_scaled_by(&df, 0, 1, smax, scale)   // Gini of CRP across the cohort
+
+    // ---- run-proof: assert every per-cohort fact (row 0 = Controls, row 5 = Patients) ----
+    if !approx(bf_get(&med,  0, 0), 1.00)        { print("FAIL Ctl median\n"); return 1 }
+    if !approx(bf_get(&iqr,  0, 0), 0.50)        { print("FAIL Ctl iqr\n"); return 2 }
+    if !approx(bf_get(&rcv,  0, 0), 0.50)        { print("FAIL Ctl robust_cv\n"); return 3 }
+    if !approx(bf_get(&tmn,  0, 0), 1.00)        { print("FAIL Ctl trimmed\n"); return 4 }
+    if !approx(bf_get(&bws,  0, 0), 0.00)        { print("FAIL Ctl bowley\n"); return 5 }
+    if !approx(bf_get(&gm,   0, 0), 0.93197982)  { print("FAIL Ctl geomean\n"); return 6 }
+    if !approx(bf_get(&gs,   0, 0), 1.54305123)  { print("FAIL Ctl geostd\n"); return 7 }
+    if !approx(bf_get(&gini, 0, 0), 0.20)        { print("FAIL Ctl gini\n"); return 8 }
+    if !approx(bf_get(&med,  5, 0), 6.00)        { print("FAIL Pat median\n"); return 9 }
+    if !approx(bf_get(&iqr,  5, 0), 4.00)        { print("FAIL Pat iqr\n"); return 10 }
+    if !approx(bf_get(&rcv,  5, 0), 0.66666667)  { print("FAIL Pat robust_cv\n"); return 11 }
+    if !approx(bf_get(&tmn,  5, 0), 6.00)        { print("FAIL Pat trimmed\n"); return 12 }
+    if !approx(bf_get(&gm,   5, 0), 7.18886364)  { print("FAIL Pat geomean\n"); return 13 }
+    if !approx(bf_get(&gs,   5, 0), 3.32919184)  { print("FAIL Pat geostd\n"); return 14 }
+    if !approx(bf_get(&gini, 5, 0), 0.57142857)  { print("FAIL Pat gini\n"); return 15 }
+    // the acute outlier (50) must NOT move the robust center: trimmed mean == median for Patients
+    if !approx(bf_get(&tmn, 5, 0), bf_get(&med, 5, 0)) { print("FAIL outlier resistance\n"); return 16 }
+
+    // ---- report ----
+    print("=== serum CRP QC by cohort (fixed-precision robust profiling) ===\n")
+    var c: i64 = 0
+    while c < 2 {
+        let b = c * 5
+        if c == 0 { print("Controls") } else { print("Patients") }
+        print(" | medianX100=");    print((bf_get(&med, b, 0) * 100.0) as i64)
+        print(" iqrX100=");         print((bf_get(&iqr, b, 0) * 100.0) as i64)
+        print(" robustCVx100=");    print((bf_get(&rcv, b, 0) * 100.0) as i64)
+        print("\n         | geomeanX100="); print((bf_get(&gm, b, 0) * 100.0) as i64)
+        print(" geoSDx100=");       print((bf_get(&gs, b, 0) * 100.0) as i64)
+        print(" trimmedX100=");     print((bf_get(&tmn, b, 0) * 100.0) as i64)
+        print(" giniX100=");        print((bf_get(&gini, b, 0) * 100.0) as i64)
+        print("\n")
+        c = c + 1
+    }
+    print("interpretation: Controls sit near 1.0 mg/L (tight, Gini 0.20); Patients are elevated ")
+    print("(median 6.0, geomean 7.2 mg/L) and heterogeneous (Gini 0.57) -- yet the acute 50 mg/L ")
+    print("outlier leaves the robust center (trimmed mean == median == 6.0) unmoved.\n")
+    print("SHOWCASE_OK\n")
+    return 0
+}
