@@ -135,6 +135,7 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 | trimean/midhinge/bowley/moors/robust_cv/decile_range/p95p05 + trimmed/winsorized_scaled (FIXED-PRECISION float, 1M rows, 1000 keys) | | ~245 | ~1600 | **0.15x — wins 7x** | scaled histogram; pandas float robust-stats = per-group lambda (1.1-1.8s) |
 | geomean/geostd + gini_coef/theil/atkinson/hoover + entropy/perplexity/inv_simpson/gini_impurity (FIXED-PRECISION float, 1M rows) | | ~22 | ~180 | **0.12x — wins 8x** | scaled histogram/LUT; pandas float = per-group lambda |
 | mad_median/madn (robust scale) + gini_mean_diff + harmonic/rms/contraharmonic/power_mean_scaled (1M rows, 1000 keys) | | ~18 | ~150 | **0.12x — wins 8x** | MAD via 2 histograms; pandas = per-group lambda |
+| weighted_median/q1/q3/iqr/percentile + weighted_geomean + weighted_entropy (value+weight, 1M rows) | | ~23 | ~260 | **0.09x — wins 11x** | weight histogram; pandas = groupby.apply lambda |
 | cov (1M rows, two-pass mean-shift) | | 6.7 | 8.5 | **0.78x — Sounio wins** | (new verb) |
 | corr (1M rows, two-pass + bf_sqrt) | | 10.3 | 8.0 | **~1.3x** | (new verb) |
 | median (1M rows, quickselect) | | ~34 | ~16 | **~2.2x** | numpy SIMD introselect |
