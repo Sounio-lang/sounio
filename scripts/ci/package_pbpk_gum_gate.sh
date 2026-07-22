@@ -4,16 +4,37 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
-
 # The PETAB baseline and PBPK/GUM workflow import stdlib + packages/* modules.
-# lean_single resolves those imports and enforces the full effect/ontology
-# surface; the Madaros default (bin/souc since 2026-06-14) does not yet — it
-# fails this workflow with a spurious "effect not declared (missing: GPU)"
-# during multimodule thin-link. Pin the raw ELF to lean_single, matching the
-# package import sub-gate (package_import_science_gate.sh). The raw lean_single
-# ELF only accepts the positional `SRC OUT` CLI, so route the souc `run`/`compile`
-# verbs this gate uses through souc-native-wrapper.sh. Override via SOUNIO_SOUC_BIN.
+# Madaros owns package-import acceptance plus a focused PBPK/GUM runtime proof
+# that also exercises bounded CSV string slicing. Imported nominal layout
+# identity is covered separately below. The two large PBPK witnesses still hit
+# native-v2 rc=12 in parse_observed_delimited, normalize_observations, and
+# normalized_observation_table_concat, so retain the bootstrap compiler only
+# for those named witnesses until that codegen blocker is closed.
+OUT_DIR="$(mktemp -d /tmp/sounio-package-pbpk-gum.XXXXXX)"
+trap 'rm -rf "$OUT_DIR"' EXIT
+
+# Current Madaros lowering uses multi-megabyte fixed-array frames. GitHub-hosted
+# runners default to an 8 MiB stack, which faults in lower_array before codegen.
+if ! ulimit -s unlimited 2>/dev/null; then
+  echo '[package-pbpk-gum] FAIL: current-source Madaros requires an unlimited stack for this gate' >&2
+  exit 1
+fi
+
+RAW_MADAROS="${MADAROS_RAW_BIN:-}"
+if [[ -z "$RAW_MADAROS" ]]; then
+  RAW_MADAROS="$OUT_DIR/madaros-current-source"
+  bash "$ROOT_DIR/scripts/ci/build_modular_madaros.sh" "$RAW_MADAROS"
+fi
+if [[ ! -x "$RAW_MADAROS" || "$(head -c 2 "$RAW_MADAROS" 2>/dev/null)" == '#!' ]]; then
+  echo '[package-pbpk-gum] FAIL: current-source raw Madaros ELF unavailable' >&2
+  exit 1
+fi
+if ! "$RAW_MADAROS" --version | grep -qF 'Madaros'; then
+  echo '[package-pbpk-gum] FAIL: compiler does not identify as Madaros' >&2
+  exit 1
+fi
+
 LEAN_SOUC="${SOUNIO_SOUC_BIN:-$ROOT_DIR/bin/souc-lean-single-x86_64}"
 if [[ ! -x "$LEAN_SOUC" ]]; then
   LEAN_SOUC="$ROOT_DIR/bin/souc-linux-x86_64"
@@ -29,15 +50,50 @@ export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
 
 BASELINE="tests/stdlib/darwin_pbpk/test_observed_petab_fit_e2e.sio"
 WORKFLOW="tests/packages/package_pbpk_gum_workflow.sio"
-OUT_DIR="$(mktemp -d /tmp/sounio-package-pbpk-gum.XXXXXX)"
-trap 'rm -rf "$OUT_DIR"' EXIT
+MEASUREMENT_PROBE="tests/packages/package_pbpk_gum_measurement_probe.sio"
 
-printf '[package-pbpk-gum] souc=%s\n' "$SOUC_BIN"
+printf '[package-pbpk-gum] package-acceptance-madaros=%s\n' "$RAW_MADAROS"
+printf '[package-pbpk-gum] legacy-runtime-souc=%s\n' "$SOUC_BIN"
 printf '[package-pbpk-gum] stdlib=%s\n' "$SOUNIO_STDLIB_PATH"
 
 printf '[package-pbpk-gum] run package import contract gate\n'
-bash "$ROOT_DIR/scripts/ci/package_import_science_gate.sh" >"$OUT_DIR/package_import_science.log" 2>&1
+MADAROS_RAW_BIN="$RAW_MADAROS" \
+  bash "$ROOT_DIR/scripts/ci/package_import_science_gate.sh" >"$OUT_DIR/package_import_science.log" 2>&1
 cat "$OUT_DIR/package_import_science.log"
+
+printf '[package-pbpk-gum] run imported nominal layout acceptance gate\n'
+MADAROS_RAW_BIN="$RAW_MADAROS" \
+  bash "$ROOT_DIR/scripts/ci/madaros_imported_runtime_acceptance_gate.sh" \
+  >"$OUT_DIR/imported_runtime_acceptance.log" 2>&1
+cat "$OUT_DIR/imported_runtime_acceptance.log"
+
+run_madaros_witness() {
+  local source="$1"
+  local marker="$2"
+  local stem="$3"
+  local elf="$OUT_DIR/$stem.elf"
+  local log="$OUT_DIR/$stem.log"
+
+  printf '[package-pbpk-gum] run focused Madaros witness %s\n' "$source"
+  if ! "$RAW_MADAROS" --native-compile "$source" -o "$elf" >"$log" 2>&1; then
+    cat "$log" >&2
+    echo "[package-pbpk-gum] FAIL: Madaros could not compile $source" >&2
+    exit 1
+  fi
+  chmod +x "$elf"
+  if ! "$elf" >>"$log" 2>&1; then
+    cat "$log" >&2
+    echo "[package-pbpk-gum] FAIL: Madaros witness failed: $source" >&2
+    exit 1
+  fi
+  if ! grep -qF "$marker" "$log"; then
+    cat "$log" >&2
+    echo "[package-pbpk-gum] FAIL: Madaros marker missing: $marker" >&2
+    exit 1
+  fi
+}
+
+run_madaros_witness "$MEASUREMENT_PROBE" 'PACKAGE_PBPK_GUM_MEASUREMENT_OK' 'measurement_probe'
 
 printf '[package-pbpk-gum] run canonical observed PETAB baseline %s\n' "$BASELINE"
 if ! "$SOUC_BIN" run "$BASELINE" >"$OUT_DIR/observed_petab.log" 2>&1; then

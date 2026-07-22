@@ -3226,3 +3226,16 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 | 2026-07-19 | xai/Grok 4.3 | math-review | stdlib/epistemic/gum.sio (dof_to_i64) | PASS | Confirmed WS, t-tables, Type A/B, and round-half-up `dof+0.5` as correct GUM table lookup. Raw: `/tmp/llm-offload-0n5IXJ/`. |
 | 2026-07-19 | deepseek | review | test_prescription_chain_e2e.sio | PROVIDER_ERROR | Insufficient Balance. |
 | 2026-07-19 | xai/Grok 4.3 | review | test_prescription_chain_e2e.sio | ADDRESSED | Wired GUM U95 into `gum_band_decide`; documented Matzke *0.06 L/h and illustrative CV=0.25; claims_not_made bedside. Dead-code GUM critique fixed. Raw: `/tmp/llm-offload-bh5nkB/`. |
+
+## 2026-07-20 - Madaros declared-function precedence and package acceptance
+
+| Date | Provider | Task | Target | Outcome | Note |
+|---|---|---|---|---|---|
+| 2026-07-20 | xai/Grok 4.3; zai/GLM-5.2 attempted | math-review | Madaros declared-function precedence, dereferenced field layout, contextual `level` parsing, and package gate diff | NO_MATHEMATICAL_CONTENT_SINGLE_PROVIDER_DEGRADED | xAI found no mathematical claims to review. Z.AI returned fair-usage code 1310 and reported a reset at 2026-07-25 12:21:37 UTC. The patch changes compiler name resolution, parser plumbing, field-layout recovery, and acceptance routing; it does not change Knowledge formulas or scientific claims. Raw: `/tmp/llm-offload-4zesaF/`. |
+
+## 2026-07-21 - Madaros PBPK measurement probe
+
+| Date | Provider | Task | Target | Outcome | Note |
+|---|---|---|---|---|---|
+| 2026-07-21 | xai/Grok 4.3 | math-review | tests/packages/package_pbpk_gum_measurement_probe.sio | PASS | Confirmed normalized plasma `0.010225 +/- 0.001044` mg/L, brain `0.000285 +/- 0.000981` mg/L, quotient approximately `0.02787`, first-order GUM quotient uncertainty approximately `0.096`, and preserved confidence `0.97`. Raw: `/tmp/llm-offload-dY7gJ6/`. |
+| 2026-07-21 | xai/Grok 4.3 | math-review | tests/packages/package_pbpk_gum_measurement_probe.sio (bounded CSV-slice form) | PASS | Recomputed the exact CSV slices and decimal parsing, `ug/L` to `mg/L` conversion, plasma `0.010225 +/- 0.001044` mg/L, brain `0.000285 +/- 0.000981` mg/L, quotient approximately `0.02787`, first-order GUM quotient uncertainty approximately `0.096`, and preserved confidence `0.97`; no correction required. Raw: `/tmp/llm-offload-3631Gz/`. |

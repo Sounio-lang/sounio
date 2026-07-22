@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Gate for data::bigrat extensions (sub/div/cmp/from_decimal/col_mean). lean_single. The big values are
+# Gate for data::bigrat extensions (sub/div/cmp/from_decimal/col_mean). The big values are
 # DIFFED against the Python oracle (bigrat_oracle.py ext) -- exit/token are not the signal (souc wall).
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -7,8 +7,14 @@ export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 SOUC=./bin/souc
 OUT="$(mktemp -d)"; trap 'rm -rf "$OUT"' EXIT
 fail=0
+engine_info="$($SOUC info 2>&1)"
+if ! grep -qF 'Madaros v' <<<"$engine_info"; then
+  echo "FAIL: BigRat extension gate requires default Madaros" >&2
+  printf '%s\n' "$engine_info" >&2
+  exit 1
+fi
 echo "== run-proof + ORACLE DIFF: bigrat extensions =="
-if SOUNIO_SOUC_ENGINE=lean_single $SOUC compile tests/stdlib/data/test_bigrat_ext_stdlib.sio -o "$OUT/x.elf" >/dev/null 2>&1; then
+if $SOUC compile tests/stdlib/data/test_bigrat_ext_stdlib.sio -o "$OUT/x.elf" >/dev/null 2>&1; then
   chmod +x "$OUT/x.elf"; "$OUT/x.elf" > "$OUT/run.txt" 2>&1 || true
   awk '/=/{k=$0; while(k !~ /~/){getline; k=k $0} gsub(/~/,"",k); gsub(/[ \t]/,"",k); print k}' "$OUT/run.txt" | grep -E "(bigdec|colmean)_(num|den)=" | sort > "$OUT/recon.txt"
   python3 scripts/research/bigrat_oracle.py ext | sort > "$OUT/oracle.txt"

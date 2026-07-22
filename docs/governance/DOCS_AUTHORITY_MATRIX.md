@@ -148,7 +148,6 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.lean-single-scan-type-qualified-path-2026-07-04 | repo_only | docs/audit/LEAN_SINGLE_SCAN_TYPE_QUALIFIED_PATH_2026-07-04.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.lean-single-use-as-alias-2026-07-05 | repo_only | docs/audit/LEAN_SINGLE_USE_AS_ALIAS_2026-07-05.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-archive-triage-2026-06-21 | repo_only | docs/audit/MADAROS_ARCHIVE_TRIAGE_2026-06-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.audit.madaros-bare-float-arith-return-2026-07-21 | repo_only | docs/audit/MADAROS_BARE_FLOAT_ARITH_RETURN_2026-07-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-boxnew-sigsegv-2026-06-19 | repo_only | docs/audit/MADAROS_BOXNEW_SIGSEGV_2026-06-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-builtin-emission-2026-06-24 | repo_only | docs/audit/MADAROS_BUILTIN_EMISSION_2026-06-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-closures-step1-fix-2026-06-24 | repo_only | docs/audit/MADAROS_CLOSURES_STEP1_FIX_2026-06-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -158,7 +157,6 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.madaros-for-loop-lowering-2026-06-20 | repo_only | docs/audit/MADAROS_FOR_LOOP_LOWERING_2026-06-20.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-impl-method-two-roots-2026-06-23 | repo_only | docs/audit/MADAROS_IMPL_METHOD_TWO_ROOTS_2026-06-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-impl-methods-three-layer-fix-2026-06-23 | repo_only | docs/audit/MADAROS_IMPL_METHODS_THREE_LAYER_FIX_2026-06-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.audit.madaros-imported-array-byvalue-913-2026-07-21 | repo_only | docs/audit/MADAROS_IMPORTED_ARRAY_BYVALUE_913_2026-07-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-imported-module-f64-cast-bitcast-2026-07-14 | repo_only | docs/audit/MADAROS_IMPORTED_MODULE_F64_CAST_BITCAST_2026-07-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-imported-module-native-path-escalation-2026-07-14 | repo_only | docs/audit/MADAROS_IMPORTED_MODULE_NATIVE_PATH_ESCALATION_2026-07-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-match-guards-2026-06-24 | repo_only | docs/audit/MADAROS_MATCH_GUARDS_2026-06-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -181,7 +179,6 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.madaros-raw-references-codegen-2026-06-24 | repo_only | docs/audit/MADAROS_RAW_REFERENCES_CODEGEN_2026-06-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-root2-enum-fncount-2026-06-20 | repo_only | docs/audit/MADAROS_ROOT2_ENUM_FNCOUNT_2026-06-20.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-root2-method-associated-2026-07-19 | repo_only | docs/audit/MADAROS_ROOT2_METHOD_ASSOCIATED_2026-07-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.audit.madaros-root2-method-chain-2026-07-21 | repo_only | docs/audit/MADAROS_ROOT2_METHOD_CHAIN_2026-07-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-root2-multimodule-method-2026-07-19 | repo_only | docs/audit/MADAROS_ROOT2_MULTIMODULE_METHOD_2026-07-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-root2-readonly-probe-2026-06-21 | repo_only | docs/audit/MADAROS_ROOT2_READONLY_PROBE_2026-06-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-selfhost-tier1-module-resolver-2026-06-24 | repo_only | docs/audit/MADAROS_SELFHOST_TIER1_MODULE_RESOLVER_2026-06-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -191,12 +188,6 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.madaros-struct-field-index-fallback-2026-06-23 | repo_only | docs/audit/MADAROS_STRUCT_FIELD_INDEX_FALLBACK_2026-06-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-tuple-let-desugar-2026-06-25 | repo_only | docs/audit/MADAROS_TUPLE_LET_DESUGAR_2026-06-25.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-wave11-tip-green-2026-07-21 | repo_only | docs/audit/MADAROS_WAVE11_TIP_GREEN_2026-07-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.audit.madaros-wave12-showcase-2026-07-21 | repo_only | docs/audit/MADAROS_WAVE12_SHOWCASE_2026-07-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.audit.madaros-wave12-tip-green-2026-07-21 | repo_only | docs/audit/MADAROS_WAVE12_TIP_GREEN_2026-07-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.audit.madaros-wave13-bare-crossmod-f64-ident-2026-07-21 | repo_only | docs/audit/MADAROS_WAVE13_BARE_CROSSMOD_F64_IDENT_2026-07-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.audit.madaros-wave13-showcase-2026-07-21 | repo_only | docs/audit/MADAROS_WAVE13_SHOWCASE_2026-07-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.audit.madaros-wave13-tip-green-2026-07-21 | repo_only | docs/audit/MADAROS_WAVE13_TIP_GREEN_2026-07-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.audit.madaros-wave13e-global-list-args-2026-07-21 | repo_only | docs/audit/MADAROS_WAVE13E_GLOBAL_LIST_ARGS_2026-07-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.modular-compiler-audit-2026-06-10 | repo_only | docs/audit/MODULAR_COMPILER_AUDIT_2026-06-10.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.modular-compiler-stack-clash-2026-05-29 | repo_only | docs/audit/MODULAR_COMPILER_STACK_CLASH_2026-05-29.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.modular-pipe-coverage-map-2026-06-01 | repo_only | docs/audit/MODULAR_PIPE_COVERAGE_MAP_2026-06-01.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -243,7 +234,6 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.stats-ols-diag-e2e-vertical-2026-07-18 | repo_only | docs/audit/STATS_OLS_DIAG_E2E_VERTICAL_2026-07-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.stats-scipy-e2e-vertical-2026-07-18 | repo_only | docs/audit/STATS_SCIPY_E2E_VERTICAL_2026-07-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.stats-shapiro-e2e-vertical-2026-07-18 | repo_only | docs/audit/STATS_SHAPIRO_E2E_VERTICAL_2026-07-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.audit.wave14d-thinlink-921-residual-2026-07-21 | repo_only | docs/audit/WAVE14D_THINLINK_921_RESIDUAL_2026-07-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.windows-assert-a64-parity.ad-hessian-diagonal | repo_only | docs/audit/windows_assert_a64_parity/AD_HESSIAN_DIAGONAL.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.windows-assert-a64-parity.ad-hessian-offdiagonal | repo_only | docs/audit/windows_assert_a64_parity/AD_HESSIAN_OFFDIAGONAL.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.windows-assert-a64-parity.ad-shadows-first-order | repo_only | docs/audit/windows_assert_a64_parity/AD_SHADOWS_FIRST_ORDER.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -475,6 +465,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.internal.concepts.epistemic-numeric-value | repo_only | docs/internal/concepts/epistemic-numeric-value.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.explicit-discharge | repo_only | docs/internal/concepts/explicit-discharge.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.hypercomplex-zero-divisor-evidence | repo_only | docs/internal/concepts/hypercomplex-zero-divisor-evidence.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.internal.concepts.module-layout-identity | repo_only | docs/internal/concepts/module-layout-identity.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.nonassociative-order | repo_only | docs/internal/concepts/nonassociative-order.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.ordered-path-provenance | repo_only | docs/internal/concepts/ordered-path-provenance.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.physical-observation | repo_only | docs/internal/concepts/physical-observation.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -806,7 +797,6 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.probe-result-deep-ffn | historical | docs/research/PROBE-RESULT-deep-ffn.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.probe-result-h256-scale | historical | docs/research/PROBE-RESULT-h256-scale.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.probe-result-lstm-adding | historical | docs/research/PROBE-RESULT-lstm-adding.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.research.probe-result-multiseed | historical | docs/research/PROBE-RESULT-multiseed.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.probe-usage | historical | docs/research/probe-usage.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.program-registry-mercyful-learning | historical | docs/research/PROGRAM-REGISTRY-mercyful-learning.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.proof-checker-family-matrix-2026-06-23 | historical | docs/research/proof-checker-family-matrix-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

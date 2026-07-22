@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Deepen-batch 6: extend coverage of already-shipped verticals with untested public API.
-# Multi-module drivers -> lean_single engine.
+# Multi-module drivers run under the default Madaros engine.
 #   epistemic::covariance — correlation-aware GUM propagation u_y^2 = J Sigma J^T, det/trace/scale/PD
 #   algebra::octonion     — normed-division-algebra identities (unit norms, e_i^2=-1, |ab|=|a||b|, anticommute)
 #   crypto::sha256        — hashes vs published FIPS 180-4 / NIST test vectors ("abc", empty)
@@ -10,10 +10,16 @@ export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 SOUC=./bin/souc
 OUT="$(mktemp -d)"; trap 'rm -rf "$OUT"' EXIT
 fail=0
+engine_info="$($SOUC info 2>&1)"
+if ! grep -qF 'Madaros v' <<<"$engine_info"; then
+  echo "FAIL: deepen6 gate requires default Madaros" >&2
+  printf '%s\n' "$engine_info" >&2
+  exit 1
+fi
 run() { # module driver sentinel
   echo "== $2 =="
   $SOUC check "$1" >/dev/null 2>&1 || { echo "FAIL check $1"; fail=1; }
-  if SOUNIO_SOUC_ENGINE=lean_single $SOUC compile "$2" -o "$OUT/x.elf" >/dev/null 2>&1; then
+  if $SOUC compile "$2" -o "$OUT/x.elf" >/dev/null 2>&1; then
     chmod +x "$OUT/x.elf"; "$OUT/x.elf" | grep -q "$3" || { echo "FAIL run $2"; fail=1; }
   else echo "FAIL compile $2"; fail=1; fi
 }

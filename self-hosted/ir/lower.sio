@@ -310,22 +310,56 @@ fn lower_monolithic_public_probe_boundary(label: string) with IO {
 }
 
 // Sprint 116: Register Knowledge<f64> struct layout (value, variance, confidence)
-fn ir_register_knowledge_layout(table: StructLayoutTable) -> StructLayoutTable with Mut, Panic, Div {
+fn lower_struct_layout_find_idx_ref(table: &StructLayoutTable, type_name: Name) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < (*table).count {
+        let entry = struct_layout_table_entry_at_ref(table, i)
+        if ir_name_eq(entry.type_name, type_name) {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn lower_struct_layout_append_empty_mut(table: &!StructLayoutTable, type_name: Name) -> i64 with Mut, Panic, Div, Alloc {
+    var entry = empty_struct_layout_entry()
+    entry.type_name = type_name
+    if struct_layout_table_append_mut(table, entry) {
+        return (*table).count - 1
+    }
+    -1
+}
+
+fn lower_struct_layout_get_or_append_mut(table: &!StructLayoutTable, type_name: Name) -> i64 with Mut, Panic, Div, Alloc {
+    let existing = lower_struct_layout_find_idx_ref(&(*table), type_name)
+    if existing >= 0 {
+        return existing
+    }
+    lower_struct_layout_append_empty_mut(table, type_name)
+}
+
+// Sprint 116: Register Knowledge<f64> struct layout (value, variance, confidence)
+fn ir_register_knowledge_layout(table: StructLayoutTable) -> StructLayoutTable with Mut, Panic, Div, Alloc {
     var t = table
-    if t.count >= 256 {
+    if t.complete == 0 {
         return t
     }
-    let idx = t.count
+    if lower_struct_layout_find_idx_ref(&t, make_name("Knowledge")) >= 0 {
+        return t
+    }
     var fields: [StructFieldEntry; 64] = [empty_struct_field_entry(); 64]
-    fields[0] = StructFieldEntry { name: make_name("value"), index: 0, is_float: 0 }
-    fields[1] = StructFieldEntry { name: make_name("variance"), index: 1, is_float: 0 }
-    fields[2] = StructFieldEntry { name: make_name("confidence"), index: 2, is_float: 0 }
-    t.entries[idx as usize] = StructLayoutEntry {
+    fields[0] = StructFieldEntry { name: make_name("value"), index: 0, is_float: 0, value_type_name: ir_empty_name() }
+    fields[1] = StructFieldEntry { name: make_name("variance"), index: 1, is_float: 0, value_type_name: ir_empty_name() }
+    fields[2] = StructFieldEntry { name: make_name("confidence"), index: 2, is_float: 0, value_type_name: ir_empty_name() }
+    let entry = StructLayoutEntry {
         type_name: make_name("Knowledge"),
         fields: fields,
         field_count: 3,
     }
-    t.count = idx + 1
+    if !struct_layout_table_append_mut(&!t, entry) {
+        t.complete = 0
+    }
     t
 }
 
@@ -625,7 +659,7 @@ fn lowerer_seed_module_from_summary(lo_in: Lowerer, summary: &IrProgramSummary) 
     lo
 }
 
-fn lowerer_seed_metadata_from_summary(lo_in: Lowerer, summary: &IrProgramSummary) -> Lowerer with Mut, Panic, Div {
+fn lowerer_seed_metadata_from_summary(lo_in: Lowerer, summary: &IrProgramSummary) -> Lowerer with Mut, Panic, Div, Alloc {
     var lo = lo_in
     var enum_variants = *lo.enum_variants
     enum_variants.count = 0
@@ -637,22 +671,11 @@ fn lowerer_seed_metadata_from_summary(lo_in: Lowerer, summary: &IrProgramSummary
     enum_variants.count = vi
     lo.enum_variants = Box::new(enum_variants)
 
-    var struct_layouts = *lo.struct_layouts
-    struct_layouts.count = 0
-    var si: i64 = 0
-    while si < (*summary.struct_layouts).count && si < 256 {
-        var entry = empty_struct_layout_entry()
-        entry.type_name = (*summary.struct_layouts).entries[si as usize].type_name
-        entry.field_count = (*summary.struct_layouts).entries[si as usize].field_count
-        var fi: i64 = 0
-        while fi < entry.field_count && fi < 64 {
-            entry.fields[fi as usize] = (*summary.struct_layouts).entries[si as usize].fields[fi as usize]
-            fi = fi + 1
-        }
-        struct_layouts.entries[si as usize] = entry
-        si = si + 1
+    var struct_layouts = empty_struct_layout_table()
+    if !struct_layout_table_copy_into(&(*summary.struct_layouts), &!struct_layouts) {
+        lo.error_count = lo.error_count + 1
+        lo.had_error = true
     }
-    struct_layouts.count = si
     lo.struct_layouts = Box::new(struct_layouts)
 
     var global_types = empty_lower_global_type_table()
@@ -674,6 +697,7 @@ fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEp
     // Match seed/owned body path: rebuild string table during body lower.
     (*module_box).string_count = 0
     (*module_box).epistemic = (*epistemic)
+    let layouts_complete = (*(*summary).struct_layouts).complete
     var lo = Lowerer {
         module: module_box,
         epistemic_contests: Box::new(empty_lower_epistemic_contest_index()),
@@ -685,8 +709,8 @@ fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEp
         scope_depth: 0,
         loop_labels: Box::new(empty_lower_loop_labels()),
         loop_depth: 0,
-        error_count: 0,
-        had_error: false,
+        error_count: if layouts_complete != 0 { 0 } else { 1 },
+        had_error: layouts_complete == 0,
         enum_variants: Box::new(*(*summary).enum_variants),
         struct_layouts: Box::new(*(*summary).struct_layouts),
         global_types: Box::new(*(*summary).global_types),
@@ -717,6 +741,7 @@ fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEp
 // Consume the owned summary and reuse its live Boxes. string_count is zeroed to
 // match seed behaviour (body lower rebuilds the string table).
 fn lowerer_new_from_program_summary_owned(summary: IrProgramSummary, epistemic: &IrEpistemicSection) -> Lowerer with Alloc, Mut, Panic, Div, IO {
+    let layouts_complete = (*summary.struct_layouts).complete
     var lo = Lowerer {
         module: summary.module,
         epistemic_contests: Box::new(empty_lower_epistemic_contest_index()),
@@ -728,8 +753,8 @@ fn lowerer_new_from_program_summary_owned(summary: IrProgramSummary, epistemic: 
         scope_depth: 0,
         loop_labels: Box::new(empty_lower_loop_labels()),
         loop_depth: 0,
-        error_count: 0,
-        had_error: false,
+        error_count: if layouts_complete != 0 { 0 } else { 1 },
+        had_error: layouts_complete == 0,
         enum_variants: summary.enum_variants,
         struct_layouts: summary.struct_layouts,
         global_types: summary.global_types,
@@ -1438,8 +1463,7 @@ fn lowerer_preseed_external_struct_items_mut(
                             // lean_single handling of &(*box).field through
                             // FieldDefList head). Build the layout entry directly.
                             var sl_box = (*lo).struct_layouts
-                            let pre_count = (*sl_box).count
-                            if pre_count < 256 {
+                            if lower_struct_layout_find_idx_ref(&(*sl_box), head_owned.name) < 0 {
                                 var entry = empty_struct_layout_entry()
                                 entry.type_name = head_owned.name
                                 var fc: i64 = 0
@@ -1458,6 +1482,7 @@ fn lowerer_preseed_external_struct_items_mut(
                                                 // the real class from the field type, matching
                                                 // ir_fast_summary_register_struct_fields_owned.
                                                 is_float: if lower_type_expr_is_f64(&(*flist).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*flist).head.ty) { 2 } else if lower_type_expr_is_integer(&(*flist).head.ty) { 3 } else { 0 },
+                                                value_type_name: lower_type_expr_named_name(&(*flist).head.ty),
                                             }
                                             fc = fc + 1
                                             fcur = (*flist).tail
@@ -1466,9 +1491,10 @@ fn lowerer_preseed_external_struct_items_mut(
                                     }
                                 }
                                 entry.field_count = fc
-                                (*sl_box).entries[pre_count as usize] = entry
-                                (*sl_box).count = pre_count + 1
-                                (*lo).struct_layouts = sl_box
+                                if !struct_layout_table_append_mut(&!(*sl_box), entry) {
+                                    (*lo).error_count = (*lo).error_count + 1
+                                    (*lo).had_error = true
+                                }
                             }
                         }
                         _ => {}
@@ -1670,23 +1696,14 @@ fn lowerer_register_struct_fields_direct_mut(
     fields: &Option<Box<FieldDefList>>
 ) with Mut, Panic, Div, Alloc {
     var sl_box = (*lo).struct_layouts
-    var layout_idx: i64 = -1
-    var si: i64 = 0
-    while si < (*sl_box).count {
-        if ir_name_eq((*sl_box).entries[si as usize].type_name, type_name) {
-            layout_idx = si
-        }
-        si = si + 1
-    }
+    var layout_idx = lower_struct_layout_find_idx_ref(&(*sl_box), type_name)
     if layout_idx < 0 {
-        let pre_count = (*sl_box).count
-        if pre_count >= 256 {
+        layout_idx = lower_struct_layout_append_empty_mut(&!(*sl_box), type_name)
+        if layout_idx < 0 {
             lo.error_count = lo.error_count + 1
             lo.had_error = true
             return
         }
-        layout_idx = pre_count
-        (*sl_box).count = pre_count + 1
     }
 
     var entry = empty_struct_layout_entry()
@@ -1706,6 +1723,7 @@ fn lowerer_register_struct_fields_direct_mut(
                     // FIRST-registered field entry — the one actually found by name lookup —
                     // without the i64 marker).
                     is_float: if lower_type_expr_is_f64(&(*flist).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*flist).head.ty) { 2 } else if lower_type_expr_is_integer(&(*flist).head.ty) { 3 } else { 0 },
+                    value_type_name: lower_type_expr_named_name(&(*flist).head.ty),
                 }
                 fc = fc + 1
                 fcur = &(*flist).tail
@@ -1714,7 +1732,10 @@ fn lowerer_register_struct_fields_direct_mut(
         }
     }
     entry.field_count = fc
-    (*sl_box).entries[layout_idx as usize] = entry
+    if !struct_layout_table_set_entry_at_mut(&!(*sl_box), layout_idx, entry) {
+        lo.error_count = lo.error_count + 1
+        lo.had_error = true
+    }
     (*lo).struct_layouts = sl_box
 }
 
@@ -1729,42 +1750,36 @@ fn lowerer_register_struct_fields_mut(
     while true {
         match *current {
             Some(list) => {
-                var layout_idx: i64 = -1
-                var si: i64 = 0
-                while si < (*(*lo).struct_layouts).count {
-                    if ir_name_eq((*(*lo).struct_layouts).entries[si as usize].type_name, type_name) {
-                        layout_idx = si
-                    }
-                    si = si + 1
-                }
+                var layout_table = (*lo).struct_layouts
+                var layout_idx = lower_struct_layout_find_idx_ref(&(*layout_table), type_name)
                 if layout_idx < 0 {
-                    if (*(*lo).struct_layouts).count < 256 {
-                        layout_idx = (*(*lo).struct_layouts).count
-                        (*(*lo).struct_layouts).entries[layout_idx as usize] = StructLayoutEntry {
-                            type_name: type_name,
-                            fields: [empty_struct_field_entry(); 64],
-                            field_count: 0,
-                        }
-                        (*(*lo).struct_layouts).count = layout_idx + 1
-                    } else {
+                    layout_idx = lower_struct_layout_append_empty_mut(&!(*layout_table), type_name)
+                    if layout_idx < 0 {
                         lo.error_count = lo.error_count + 1
                         lo.had_error = true
                         return
                     }
                 }
-                let fc = (*(*lo).struct_layouts).entries[layout_idx as usize].field_count
+                var layout_entry = struct_layout_table_entry_at_ref(&(*layout_table), layout_idx)
+                let fc = layout_entry.field_count
                 if fc < 64 {
-                    (*(*lo).struct_layouts).entries[layout_idx as usize].fields[fc as usize] = StructFieldEntry {
+                    layout_entry.fields[fc as usize] = StructFieldEntry {
                         name: (*list).head.name,
                         index: field_idx,
                         // println i64-segfault fix: see note in lowerer_register_struct_fields_direct_mut.
                         is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else if lower_type_expr_is_integer(&(*list).head.ty) { 3 } else { 0 },
+                        value_type_name: lower_type_expr_named_name(&(*list).head.ty),
                     }
-                    (*(*lo).struct_layouts).entries[layout_idx as usize].field_count = fc + 1
+                    layout_entry.field_count = fc + 1
+                    if !struct_layout_table_set_entry_at_mut(&!(*layout_table), layout_idx, layout_entry) {
+                        lo.error_count = lo.error_count + 1
+                        lo.had_error = true
+                    }
                 } else {
                     lo.error_count = lo.error_count + 1
                     lo.had_error = true
                 }
+                (*lo).struct_layouts = layout_table
                 current = &(*list).tail
                 field_idx = field_idx + 1
             }
@@ -2469,42 +2484,32 @@ fn ir_fast_summary_register_struct_fields_owned(
     match fields {
         Some(list) => {
             var table_value = table
-            var layout_idx: i64 = -1
-            var si: i64 = 0
-            while si < table_value.count {
-                if ir_name_eq(table_value.entries[si as usize].type_name, type_name) {
-                    layout_idx = si
-                }
-                si = si + 1
-            }
+            var layout_idx = lower_struct_layout_find_idx_ref(&table_value, type_name)
             if layout_idx < 0 {
-                if table_value.count < 256 {
-                    layout_idx = table_value.count
-                    table_value.entries[layout_idx as usize] = StructLayoutEntry {
-                        type_name: type_name,
-                        fields: [empty_struct_field_entry(); 64],
-                        field_count: 0,
-                    }
-                    table_value.count = layout_idx + 1
-                } else {
+                layout_idx = lower_struct_layout_append_empty_mut(&!table_value, type_name)
+                if layout_idx < 0 {
                     return table_value
                 }
             }
-            let fc = table_value.entries[layout_idx as usize].field_count
+            let fc = struct_layout_table_entry_at_ref(&table_value, layout_idx).field_count
             if fc < 64 {
                 // Two-level nested store `table.entries[i].fields[fc] = …` is dropped by
                 // the lean_single by-value-aggregate miscompile, so the field never lands
                 // and field-index resolution later falls back to a name hash (OOB access).
                 // Build in a local entry, then assign it back once (single level).
-                var lay_entry = table_value.entries[layout_idx as usize]
+                var lay_entry = struct_layout_table_entry_at_ref(&table_value, layout_idx)
                 lay_entry.fields[fc as usize] = StructFieldEntry {
                     name: (*list).head.name,
                     index: idx,
                     // println i64-segfault fix: see note in lowerer_register_struct_fields_direct_mut.
                     is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else if lower_type_expr_is_integer(&(*list).head.ty) { 3 } else { 0 },
+                    value_type_name: lower_type_expr_named_name(&(*list).head.ty),
                 }
                 lay_entry.field_count = fc + 1
-                table_value.entries[layout_idx as usize] = lay_entry
+                if !struct_layout_table_set_entry_at_mut(&!table_value, layout_idx, lay_entry) {
+                    table_value.complete = 0
+                    return table_value
+                }
             }
             ir_fast_summary_register_struct_fields_owned(table_value, type_name, (*list).tail, idx + 1)
         }
@@ -2785,8 +2790,8 @@ fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
             global_types: global_types,
             probe_mode: false,
         },
-        error_count: 0,
-        had_error: false,
+        error_count: if struct_layouts.complete != 0 { 0 } else { 1 },
+        had_error: struct_layouts.complete == 0,
     }
 }
 
@@ -3716,6 +3721,19 @@ fn lower_opt_type_named_name(opt: &Option<Box<TypeExpr>>) -> Name with Mut, Pani
         }
         None => ir_empty_name(),
     }
+}
+
+// Nominal result carrier of a declared field. Scalar and array fields keep an
+// empty name; references unwrap to their named carrier so `outer.inner.field`
+// can remain layout-directed instead of falling back to a global field name.
+fn lower_type_expr_named_name(te: &TypeExpr) -> Name with Mut, Panic, Div {
+    if (*te).kind == TypeExprKind::TypeNamed {
+        return ir_path_first_name((*te).path)
+    }
+    if (*te).kind == TypeExprKind::TypeReference || (*te).kind == TypeExprKind::TypeRefMut {
+        return lower_opt_type_named_name(&(*te).inner)
+    }
+    ir_empty_name()
 }
 
 // Struct-type name of a parameter, unwrapping `&T` / `&!T`. Used so a method body's
@@ -5714,7 +5732,7 @@ impl Lowerer {
             match (*e).left {
                 Some(callee_expr) => {
                     let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
-                    if ir_name_is_measure(callee_name) {
+                    if ir_name_is_measure(callee_name) && lowerer_lookup_fn_id_by_name_ref(&self, callee_name) < 0 {
                         let unc_pair = self.lower_measure_uncertainty_arg_ref(&(*e).args)
                         var lo = unc_pair.0
                         let unc_reg = unc_pair.1
@@ -6177,47 +6195,72 @@ impl Lowerer {
         }
     }
 
-    // Phase 3.2: Proper struct field index lookup via layout table
-    fn field_idx_from_name(self, struct_name: Name, field_name: Name) -> i64 with Mut, Panic, Div {
-        // Search layout table for the struct
-        var si: i64 = 0
-        while si < (*self.struct_layouts).count {
-            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, struct_name) {
-                // Found struct — search its fields
-                var fi: i64 = 0
-                while fi < (*self.struct_layouts).entries[si as usize].field_count {
-                    if ir_name_eq((*self.struct_layouts).entries[si as usize].fields[fi as usize].name, field_name) {
-                        return (*self.struct_layouts).entries[si as usize].fields[fi as usize].index
-                    }
-                    fi = fi + 1
-                }
-                // Field not found in the named layout. Keep searching the rest
-                // of the table before falling back to the legacy hash path;
-                // partially seeded layouts must not collapse every miss to .0.
-                var sj: i64 = 0
-                while sj < (*self.struct_layouts).count {
-                    var fj: i64 = 0
-                    while fj < (*self.struct_layouts).entries[sj as usize].field_count {
-                        if ir_name_eq((*self.struct_layouts).entries[sj as usize].fields[fj as usize].name, field_name) {
-                            return (*self.struct_layouts).entries[sj as usize].fields[fj as usize].index
-                        }
-                        fj = fj + 1
-                    }
-                    sj = sj + 1
-                }
-                if field_name.len <= 0 {
-                    return 0
-                }
-                return (field_name.buf[0] as i64) % 64
+    fn field_entry_for_struct(self, type_name: Name, field_name: Name) -> StructFieldEntry with Mut, Panic, Div {
+        let layout_idx = lower_struct_layout_find_idx_ref(&(*self.struct_layouts), type_name)
+        if layout_idx < 0 {
+            return empty_struct_field_entry()
+        }
+        let entry = struct_layout_table_entry_at_ref(&(*self.struct_layouts), layout_idx)
+        var fi: i64 = 0
+        while fi < entry.field_count {
+            if ir_name_eq(entry.fields[fi as usize].name, field_name) {
+                return entry.fields[fi as usize]
             }
-            si = si + 1
+            fi = fi + 1
         }
-        // Struct not in layout table — fallback: use first byte hash (legacy compat)
-        if field_name.len <= 0 {
-            0
-        } else {
-            (field_name.buf[0] as i64) % 64
+        empty_struct_field_entry()
+    }
+
+    fn field_value_type_name_for_struct(self, type_name: Name, field_name: Name) -> Name with Mut, Panic, Div {
+        self.field_entry_for_struct(type_name, field_name).value_type_name
+    }
+
+    // Returns a nominal aggregate type only where lowering can prove it from
+    // local bindings, field declarations, a struct literal, or a declared
+    // call result. Unknown shapes remain explicitly untyped callers of the
+    // compatibility path; known shapes never borrow another layout by name.
+    fn expr_struct_type_name_ref(self, expr: &Expr) -> Name with Mut, Panic, Div, Alloc {
+        if (*expr).kind == ExprKind::ExprIdent {
+            return self.lookup_local_struct_type((*expr).name)
         }
+        if (*expr).kind == ExprKind::ExprCall {
+            return self.expr_call_return_struct_name_ref(expr)
+        }
+        if (*expr).kind == ExprKind::ExprStructLit {
+            return ir_path_first_name((*expr).path)
+        }
+        if (*expr).kind == ExprKind::ExprUnary && (*expr).un_op == UnaryOp::OpDeref {
+            match (*expr).left {
+                Some(base) => return self.expr_struct_type_name_ref(&(*base)),
+                None => return ir_empty_name(),
+            }
+        }
+        if (*expr).kind == ExprKind::ExprFieldAccess {
+            match (*expr).left {
+                Some(base) => {
+                    let base_type = self.expr_struct_type_name_ref(&(*base))
+                    if base_type.len > 0 {
+                        return self.field_value_type_name_for_struct(base_type, (*expr).name)
+                    }
+                }
+                _ => {}
+            }
+        }
+        ir_empty_name()
+    }
+
+    // Phase 3.2: proper field lookup for a known struct layout. A known
+    // layout miss is a lowering refusal, not permission to select a same-named
+    // field from another struct or to hash into an arbitrary offset.
+    fn field_idx_from_name(self, struct_name: Name, field_name: Name) -> i64 with Mut, Panic, Div {
+        if struct_name.len <= 0 {
+            return self.field_idx_from_name_simple(field_name)
+        }
+        let entry = self.field_entry_for_struct(struct_name, field_name)
+        if entry.name.len > 0 {
+            return entry.index
+        }
+        -1
     }
 
     // Phase 3.2: Lookup struct field index without needing struct name
@@ -6230,10 +6273,11 @@ impl Lowerer {
         }
         var si: i64 = 0
         while si < (*self.struct_layouts).count {
+            let entry = struct_layout_table_entry_at_ref(&(*self.struct_layouts), si)
             var fi: i64 = 0
-            while fi < (*self.struct_layouts).entries[si as usize].field_count {
-                if ir_name_eq((*self.struct_layouts).entries[si as usize].fields[fi as usize].name, n) {
-                    return (*self.struct_layouts).entries[si as usize].fields[fi as usize].index
+            while fi < entry.field_count {
+                if ir_name_eq(entry.fields[fi as usize].name, n) {
+                    return entry.fields[fi as usize].index
                 }
                 fi = fi + 1
             }
@@ -6253,11 +6297,12 @@ impl Lowerer {
         }
         var si: i64 = 0
         while si < (*self.struct_layouts).count {
-            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, struct_name) {
+            let entry = struct_layout_table_entry_at_ref(&(*self.struct_layouts), si)
+            if ir_name_eq(entry.type_name, struct_name) {
                 var fi: i64 = 0
-                while fi < (*self.struct_layouts).entries[si as usize].field_count {
-                    if ir_name_eq((*self.struct_layouts).entries[si as usize].fields[fi as usize].name, field_name) {
-                        return (*self.struct_layouts).entries[si as usize].fields[fi as usize].index
+                while fi < entry.field_count {
+                    if ir_name_eq(entry.fields[fi as usize].name, field_name) {
+                        return entry.fields[fi as usize].index
                     }
                     fi = fi + 1
                 }
@@ -6271,10 +6316,11 @@ impl Lowerer {
     fn field_is_float_by_name_simple(self, n: Name) -> bool with Mut, Panic, Div {
         var si: i64 = 0
         while si < (*self.struct_layouts).count {
+            let entry = struct_layout_table_entry_at_ref(&(*self.struct_layouts), si)
             var fi: i64 = 0
-            while fi < (*self.struct_layouts).entries[si as usize].field_count {
-                if ir_name_eq((*self.struct_layouts).entries[si as usize].fields[fi as usize].name, n) {
-                    return (*self.struct_layouts).entries[si as usize].fields[fi as usize].is_float == 1
+            while fi < entry.field_count {
+                if ir_name_eq(entry.fields[fi as usize].name, n) {
+                    return entry.fields[fi as usize].is_float == 1
                 }
                 fi = fi + 1
             }
@@ -6287,20 +6333,7 @@ impl Lowerer {
         if type_name.len <= 0 {
             return false
         }
-        var si: i64 = 0
-        while si < (*self.struct_layouts).count {
-            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
-                var fi: i64 = 0
-                while fi < (*self.struct_layouts).entries[si as usize].field_count {
-                    if ir_name_eq((*self.struct_layouts).entries[si as usize].fields[fi as usize].name, field_name) {
-                        return (*self.struct_layouts).entries[si as usize].fields[fi as usize].is_float == 1
-                    }
-                    fi = fi + 1
-                }
-            }
-            si = si + 1
-        }
-        false
+        self.field_entry_for_struct(type_name, field_name).is_float == 1
     }
 
     // println i64-segfault fix: field analogue of field_is_float_by_name_simple,
@@ -6308,10 +6341,11 @@ impl Lowerer {
     fn field_is_int_by_name_simple(self, n: Name) -> bool with Mut, Panic, Div {
         var si: i64 = 0
         while si < (*self.struct_layouts).count {
+            let entry = struct_layout_table_entry_at_ref(&(*self.struct_layouts), si)
             var fi: i64 = 0
-            while fi < (*self.struct_layouts).entries[si as usize].field_count {
-                if ir_name_eq((*self.struct_layouts).entries[si as usize].fields[fi as usize].name, n) {
-                    return (*self.struct_layouts).entries[si as usize].fields[fi as usize].is_float == 3
+            while fi < entry.field_count {
+                if ir_name_eq(entry.fields[fi as usize].name, n) {
+                    return entry.fields[fi as usize].is_float == 3
                 }
                 fi = fi + 1
             }
@@ -6325,33 +6359,14 @@ impl Lowerer {
         if type_name.len <= 0 {
             return false
         }
-        var si: i64 = 0
-        while si < (*self.struct_layouts).count {
-            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
-                var fi: i64 = 0
-                while fi < (*self.struct_layouts).entries[si as usize].field_count {
-                    if ir_name_eq((*self.struct_layouts).entries[si as usize].fields[fi as usize].name, field_name) {
-                        return (*self.struct_layouts).entries[si as usize].fields[fi as usize].is_float == 3
-                    }
-                    fi = fi + 1
-                }
-            }
-            si = si + 1
-        }
-        false
+        self.field_entry_for_struct(type_name, field_name).is_float == 3
     }
 
     // println i64-segfault fix: field analogue of field_is_float_for_base_ref.
     fn field_is_int_for_base_ref(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> bool with Mut, Panic, Div, Alloc {
         match *base_opt {
             Some(base_expr) => {
-                if (*base_expr).kind == ExprKind::ExprIdent {
-                    let type_name = self.lookup_local_struct_type((*base_expr).name)
-                    if self.field_is_int_for_struct(type_name, field_name) {
-                        return true
-                    }
-                }
-                false
+                self.field_is_int_for_struct(self.expr_struct_type_name_ref(&(*base_expr)), field_name)
             }
             _ => false,
         }
@@ -6361,29 +6376,17 @@ impl Lowerer {
         if type_name.len <= 0 {
             return false
         }
-        var si: i64 = 0
-        while si < (*self.struct_layouts).count {
-            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
-                var fi: i64 = 0
-                while fi < (*self.struct_layouts).entries[si as usize].field_count {
-                    if ir_name_eq((*self.struct_layouts).entries[si as usize].fields[fi as usize].name, field_name) {
-                        return (*self.struct_layouts).entries[si as usize].fields[fi as usize].is_float == 2
-                    }
-                    fi = fi + 1
-                }
-            }
-            si = si + 1
-        }
-        false
+        self.field_entry_for_struct(type_name, field_name).is_float == 2
     }
 
     fn field_array_elem_is_float_by_name_simple(self, field_name: Name) -> bool with Mut, Panic, Div {
         var si: i64 = 0
         while si < (*self.struct_layouts).count {
+            let entry = struct_layout_table_entry_at_ref(&(*self.struct_layouts), si)
             var fi: i64 = 0
-            while fi < (*self.struct_layouts).entries[si as usize].field_count {
-                if ir_name_eq((*self.struct_layouts).entries[si as usize].fields[fi as usize].name, field_name) {
-                    if (*self.struct_layouts).entries[si as usize].fields[fi as usize].is_float == 2 {
+            while fi < entry.field_count {
+                if ir_name_eq(entry.fields[fi as usize].name, field_name) {
+                    if entry.fields[fi as usize].is_float == 2 {
                         return true
                     }
                 }
@@ -6397,13 +6400,7 @@ impl Lowerer {
     fn field_is_float_for_base_ref(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> bool with Mut, Panic, Div, Alloc {
         match *base_opt {
             Some(base_expr) => {
-                if (*base_expr).kind == ExprKind::ExprIdent {
-                    let type_name = self.lookup_local_struct_type((*base_expr).name)
-                    if self.field_is_float_for_struct(type_name, field_name) {
-                        return true
-                    }
-                }
-                false
+                self.field_is_float_for_struct(self.expr_struct_type_name_ref(&(*base_expr)), field_name)
             }
             _ => false,
         }
@@ -6412,11 +6409,12 @@ impl Lowerer {
     fn field_idx_for_base_ref(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> i64 with Mut, Panic, Div, Alloc {
         match *base_opt {
             Some(base_expr) => {
-                if (*base_expr).kind == ExprKind::ExprIdent {
-                    let type_name = self.lookup_local_struct_type((*base_expr).name)
-                    if type_name.len > 0 {
-                        return self.field_idx_from_name(type_name, field_name)
-                    }
+                let type_name = self.expr_struct_type_name_ref(&(*base_expr))
+                if type_name.len > 0 {
+                    return self.field_idx_from_name(type_name, field_name)
+                }
+                if (*base_expr).kind == ExprKind::ExprUnary && (*base_expr).un_op == UnaryOp::OpDeref {
+                    return self.field_idx_for_base_ref(&(*base_expr).left, field_name)
                 }
                 self.field_idx_from_name_simple(field_name)
             }
@@ -6427,18 +6425,12 @@ impl Lowerer {
     fn field_array_elem_is_float_for_base_ref(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> bool with Mut, Panic, Div, Alloc {
         match *base_opt {
             Some(owner_expr) => {
-                if (*owner_expr).kind == ExprKind::ExprIdent {
-                    let type_name = self.lookup_local_struct_type((*owner_expr).name)
-                    // When the owner local has a known struct type, trust THAT
-                    // layout only. Cross-struct by-name fallback poisons
-                    // CDElementExact{,__i64}.c (i64 / generic F) via CDElement.c
-                    // (f64 array, is_float=2) once both live in one specialized
-                    // collapse module — Wave12 cd_exact residual: index lower
-                    // marks i64 component loads as float (field_array_float=1).
-                    if type_name.len > 0 {
-                        return self.field_array_elem_is_float_for_struct(type_name, field_name)
-                    }
-                    return self.field_array_elem_is_float_by_name_simple(field_name)
+                let type_name = self.expr_struct_type_name_ref(&(*owner_expr))
+                // When the owner has a known struct type, trust that layout
+                // only. Cross-struct by-name fallback can poison fields that
+                // share a name but have different element types.
+                if type_name.len > 0 {
+                    return self.field_array_elem_is_float_for_struct(type_name, field_name)
                 }
                 self.field_array_elem_is_float_by_name_simple(field_name)
             }
@@ -6793,60 +6785,57 @@ impl Lowerer {
         if type_name.len <= 0 {
             return lo
         }
-        var si: i64 = 0
-        while si < (*lo.struct_layouts).count {
-            if ir_name_eq((*lo.struct_layouts).entries[si as usize].type_name, type_name) {
-                var current_existing = fields
-                while true {
-                    match *current_existing {
-                        Some(list_existing) => {
-                            let literal_float_kind = lower_struct_field_float_kind_ref(&(*list_existing).head.value)
-                            if literal_float_kind > 0 {
-                                var fi_existing: i64 = 0
-                                while fi_existing < (*lo.struct_layouts).entries[si as usize].field_count {
-                                    if ir_name_eq((*lo.struct_layouts).entries[si as usize].fields[fi_existing as usize].name, (*list_existing).head.name) {
-                                        (*lo.struct_layouts).entries[si as usize].fields[fi_existing as usize].is_float = literal_float_kind
-                                    }
-                                    fi_existing = fi_existing + 1
+        var layout_table = lo.struct_layouts
+        var layout_idx = lower_struct_layout_find_idx_ref(&(*layout_table), type_name)
+        if layout_idx >= 0 {
+            var existing_entry = struct_layout_table_entry_at_ref(&(*layout_table), layout_idx)
+            var current_existing = fields
+            while true {
+                match *current_existing {
+                    Some(list_existing) => {
+                        let literal_float_kind = lower_struct_field_float_kind_ref(&(*list_existing).head.value)
+                        if literal_float_kind > 0 {
+                            var fi_existing: i64 = 0
+                            while fi_existing < existing_entry.field_count {
+                                if ir_name_eq(existing_entry.fields[fi_existing as usize].name, (*list_existing).head.name) {
+                                    existing_entry.fields[fi_existing as usize].is_float = literal_float_kind
                                 }
+                                fi_existing = fi_existing + 1
                             }
-                            current_existing = &(*list_existing).tail
                         }
-                        _ => break
+                        current_existing = &(*list_existing).tail
                     }
+                    _ => break
                 }
-                return lo
             }
-            si = si + 1
+            if !struct_layout_table_set_entry_at_mut(&!(*layout_table), layout_idx, existing_entry) {
+                return lo.report_error()
+            }
+            lo.struct_layouts = layout_table
+            return lo
         }
-        if (*lo.struct_layouts).count >= 256 {
+        layout_idx = lower_struct_layout_append_empty_mut(&!(*layout_table), type_name)
+        if layout_idx < 0 {
             return lo.report_error()
         }
-        let layout_idx = (*lo.struct_layouts).count
-        (*lo.struct_layouts).entries[layout_idx as usize] = StructLayoutEntry {
-            type_name: type_name,
-            fields: [empty_struct_field_entry(); 64],
-            field_count: 0,
-        }
-        (*lo.struct_layouts).count = layout_idx + 1
 
         var current = fields
         var field_idx: i64 = 0
+        var new_entry = struct_layout_table_entry_at_ref(&(*layout_table), layout_idx)
         while true {
             match *current {
                 Some(list) => {
-                    let fc = (*lo.struct_layouts).entries[layout_idx as usize].field_count
+                    let fc = new_entry.field_count
                     if fc < 64 {
                         // Single-level idiom: the two-level `(*box).entries[i].fields[fc] = …`
                         // store is dropped by the lean_single by-value-aggregate miscompile.
-                        var lay_entry = (*lo.struct_layouts).entries[layout_idx as usize]
-                        lay_entry.fields[fc as usize] = StructFieldEntry {
+                        new_entry.fields[fc as usize] = StructFieldEntry {
                             name: (*list).head.name,
                             index: field_idx,
                             is_float: lower_struct_field_float_kind_ref(&(*list).head.value),
+                            value_type_name: ir_empty_name(),
                         }
-                        lay_entry.field_count = fc + 1
-                        (*lo.struct_layouts).entries[layout_idx as usize] = lay_entry
+                        new_entry.field_count = fc + 1
                     }
                     current = &(*list).tail
                     field_idx = field_idx + 1
@@ -6854,6 +6843,10 @@ impl Lowerer {
                 _ => break
             }
         }
+        if !struct_layout_table_set_entry_at_mut(&!(*layout_table), layout_idx, new_entry) {
+            return lo.report_error()
+        }
+        lo.struct_layouts = layout_table
         lo
     }
 
@@ -6910,38 +6903,25 @@ impl Lowerer {
             print_int(idx)
             print("\n")
         }
-        var layout_idx: i64 = -1
-        var si: i64 = 0
-        while si < (*lo.struct_layouts).count {
-            if ir_name_eq((*lo.struct_layouts).entries[si as usize].type_name, type_name) {
-                layout_idx = si
-            }
-            si = si + 1
-        }
+        var layout_table = lo.struct_layouts
+        var layout_idx = lower_struct_layout_find_idx_ref(&(*layout_table), type_name)
         if layout_idx < 0 {
-            if (*lo.struct_layouts).count < 256 {
-                layout_idx = (*lo.struct_layouts).count
-                (*lo.struct_layouts).entries[layout_idx as usize] = StructLayoutEntry {
-                    type_name: type_name,
-                    fields: [empty_struct_field_entry(); 64],
-                    field_count: 0,
-                }
-                (*lo.struct_layouts).count = (*lo.struct_layouts).count + 1
-            } else {
+            layout_idx = lower_struct_layout_append_empty_mut(&!(*layout_table), type_name)
+            if layout_idx < 0 {
                 return lo.report_error()
             }
         }
         var current = fields
         var field_idx = idx
+        var layout_entry = struct_layout_table_entry_at_ref(&(*layout_table), layout_idx)
         while true {
             match *current {
                 Some(list) => {
-                    let fc = (*lo.struct_layouts).entries[layout_idx as usize].field_count
+                    let fc = layout_entry.field_count
                     if fc < 64 {
                         // Single-level idiom: the two-level `(*box).entries[i].fields[fc] = …`
                         // store is dropped by the lean_single by-value-aggregate miscompile.
-                        var lay_entry = (*lo.struct_layouts).entries[layout_idx as usize]
-                        lay_entry.fields[fc as usize] = StructFieldEntry {
+                        layout_entry.fields[fc as usize] = StructFieldEntry {
                             name: (*list).head.name,
                             index: field_idx,
                             // println i64-segfault fix: reuse the `is_float` numeric-kind slot
@@ -6949,9 +6929,9 @@ impl Lowerer {
                             // f64-array). Existing consumers only test `== 1` / `== 2`, so this
                             // is inert for them; field_is_int_* below tests `== 3`.
                             is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else if lower_type_expr_is_integer(&(*list).head.ty) { 3 } else { 0 },
+                            value_type_name: lower_type_expr_named_name(&(*list).head.ty),
                         }
-                        lay_entry.field_count = fc + 1
-                        (*lo.struct_layouts).entries[layout_idx as usize] = lay_entry
+                        layout_entry.field_count = fc + 1
                     }
                     current = &(*list).tail
                     field_idx = field_idx + 1
@@ -6959,11 +6939,15 @@ impl Lowerer {
                 _ => break
             }
         }
+        if !struct_layout_table_set_entry_at_mut(&!(*layout_table), layout_idx, layout_entry) {
+            return lo.report_error()
+        }
+        lo.struct_layouts = layout_table
         if lower_ordered_diag_enabled() {
             print("lower_ordered: struct_fields_done type=")
             print(str_from_bytes(type_name.buf, type_name.len))
             print(" field_count=")
-            print_int((*lo.struct_layouts).entries[layout_idx as usize].field_count)
+            print_int(layout_entry.field_count)
             print("\n")
         }
         lo
@@ -10245,10 +10229,17 @@ impl Lowerer {
             let lo_args_pl = pair_args_pl.lowerer
             let args_pl: Option<Box<IrRegList>> = if pair_args_pl.count <= 0 { None } else { Some(Box::new(pair_args_pl.regs)) }
             let argc_pl = pair_args_pl.count
-            let pair_dst_pl = lo_args_pl.fresh_reg()
-            let lo_dst_pl = pair_dst_pl.0
-            let dst_pl = pair_dst_pl.1
-            var lo_call_pl = lo_dst_pl.emit(ir_call(dst_pl, fn_id_print, pl_print_name, args_pl, argc_pl))
+            var lo_call_pl = lo_args_pl
+            var dst_pl: i64 = -1
+            // println() is a newline-only operation. Calling print with zero
+            // arguments leaves its pointer parameter undefined and can corrupt
+            // the following call, so only emit the payload call when one exists.
+            if argc_pl > 0 {
+                let pair_dst_pl = lo_call_pl.fresh_reg()
+                lo_call_pl = pair_dst_pl.0
+                dst_pl = pair_dst_pl.1
+                lo_call_pl = lo_call_pl.emit(ir_call(dst_pl, fn_id_print, pl_print_name, args_pl, argc_pl))
+            }
 
             let fn_id_print_char = lowerer_find_or_add_fn_id_mut(&! lo_call_pl, make_name("print_char"))
             let pair_nl_reg = lo_call_pl.fresh_reg()
@@ -10260,7 +10251,7 @@ impl Lowerer {
             let lo_nl_dst = pair_nl_dst.0
             let nl_dst = pair_nl_dst.1
             let lo_call_nl = lo_nl_dst.emit(ir_call(nl_dst, fn_id_print_char, make_name("print_char"), nl_args, 1))
-            return (lo_call_nl, dst_pl)
+            return (lo_call_nl, if dst_pl >= 0 { dst_pl } else { nl_dst })
         }
         if ir_name_is_some(callee_name) {
             return self.lower_expr_args_first(&e.args)
@@ -10319,7 +10310,7 @@ impl Lowerer {
         if ir_name_is_lift_knowledge(callee_name) {
             return self.lower_lift_knowledge_call(e.span, e.args)
         }
-        if ir_name_is_measure(callee_name) {
+        if ir_name_is_measure(callee_name) && lowerer_lookup_fn_id_by_name_ref(&self, callee_name) < 0 {
             return self.lower_measure_call_ref(e.span, &e.args)
         }
         if self.name_is_variance_of(callee_name) {
@@ -10538,8 +10529,24 @@ impl Lowerer {
         let lo1 = pair_b.0
         let base = pair_b.1
         let fidx = lo1.field_idx_for_base_ref(&e.left, e.name)
-        let field_is_float = lo1.field_is_float_for_base_ref(&e.left, e.name) || lo1.field_is_float_by_name_simple(e.name)
-        let field_array_elem_is_float = lo1.field_array_elem_is_float_for_base_ref(&e.left, e.name)
+        let base_type = match e.left {
+            Some(base_expr) => lo1.expr_struct_type_name_ref(&(*base_expr)),
+            _ => ir_empty_name(),
+        }
+        let field_is_float = if base_type.len > 0 {
+            lo1.field_is_float_for_struct(base_type, e.name)
+        } else {
+            lo1.field_is_float_by_name_simple(e.name)
+        }
+        let field_array_elem_is_float = if base_type.len > 0 {
+            lo1.field_array_elem_is_float_for_struct(base_type, e.name)
+        } else {
+            lo1.field_array_elem_is_float_by_name_simple(e.name)
+        }
+        if fidx < 0 {
+            let lo_error = lo1.report_error()
+            return (lo_error, 0)
+        }
         let base_is_ref = match e.left {
             Some(base_expr_ref) => {
                 if (*base_expr_ref).kind == ExprKind::ExprIdent {
@@ -10571,18 +10578,19 @@ impl Lowerer {
             print("\n")
             var di: i64 = 0
             while di < (*lo1.struct_layouts).count {
+                let dump_entry = struct_layout_table_entry_at_ref(&(*lo1.struct_layouts), di)
                 print("  [")
                 print_int(di)
                 print("] ")
-                print(str_from_bytes((*lo1.struct_layouts).entries[di as usize].type_name.buf, (*lo1.struct_layouts).entries[di as usize].type_name.len))
+                print(str_from_bytes(dump_entry.type_name.buf, dump_entry.type_name.len))
                 print(" fc=")
-                print_int((*lo1.struct_layouts).entries[di as usize].field_count)
+                print_int(dump_entry.field_count)
                 var dj: i64 = 0
-                while dj < (*lo1.struct_layouts).entries[di as usize].field_count {
+                while dj < dump_entry.field_count {
                     print(" ")
-                    print(str_from_bytes((*lo1.struct_layouts).entries[di as usize].fields[dj as usize].name.buf, (*lo1.struct_layouts).entries[di as usize].fields[dj as usize].name.len))
+                    print(str_from_bytes(dump_entry.fields[dj as usize].name.buf, dump_entry.fields[dj as usize].name.len))
                     print(":")
-                    print_int((*lo1.struct_layouts).entries[di as usize].fields[dj as usize].index)
+                    print_int(dump_entry.fields[dj as usize].index)
                     dj = dj + 1
                 }
                 print("\n")

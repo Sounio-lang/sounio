@@ -6,6 +6,7 @@ cd "$ROOT_DIR"
 
 ARTIFACT_ROOT="${SOUNIO_PACKAGE_SUPPORT_ARTIFACT_ROOT:-$(mktemp -d /tmp/sounio-package-support.XXXXXX)}"
 mkdir -p "$ARTIFACT_ROOT"
+PACKAGE_SUPPORT_MADAROS_RAW="${MADAROS_RAW_BIN:-}"
 
 log() {
   printf '[package-support] %s\n' "$*"
@@ -24,6 +25,18 @@ run_step() {
     sed -n '1,220p' "$log_path" >&2
     exit "$rc"
   fi
+}
+
+prepare_current_source_madaros() {
+  if [[ -z "$PACKAGE_SUPPORT_MADAROS_RAW" ]]; then
+    PACKAGE_SUPPORT_MADAROS_RAW="$ARTIFACT_ROOT/madaros-current-source"
+    bash "$ROOT_DIR/scripts/ci/build_modular_madaros.sh" "$PACKAGE_SUPPORT_MADAROS_RAW"
+  fi
+  if [[ ! -x "$PACKAGE_SUPPORT_MADAROS_RAW" || "$(head -c 2 "$PACKAGE_SUPPORT_MADAROS_RAW" 2>/dev/null)" == '#!' ]]; then
+    echo "package support requires a current-source raw Madaros ELF" >&2
+    return 1
+  fi
+  "$PACKAGE_SUPPORT_MADAROS_RAW" --version | grep -qF 'Madaros'
 }
 
 run_compiled_fixture() {
@@ -203,8 +216,9 @@ echo 'SOUNIO_PACKAGE_SUPPORT_GATE_START'
 echo "repo=$ROOT_DIR"
 echo "artifact_root=$ARTIFACT_ROOT"
 
+run_step package-madaros-current-source prepare_current_source_madaros
 run_step package-import-science env -u SOUC_BIN -u SOUNIO_SOUC_BIN -u SOUNIO_STDLIB_PATH \
-  -u MADAROS_BIN -u MADAROS_RAW_BIN -u SOUNIO_MADAROS_BIN \
+  -u MADAROS_BIN -u SOUNIO_MADAROS_BIN MADAROS_RAW_BIN="$PACKAGE_SUPPORT_MADAROS_RAW" \
   bash "$ROOT_DIR/scripts/ci/package_import_science_gate.sh"
 run_step pkg-manifest-fixture run_compiled_fixture tests/run-pass/pkg_manifest_parse_e2e.sio 'pkg_manifest_parse_e2e: ALL PASS'
 run_step pkg-registry-fixture run_compiled_fixture tests/run-pass/pkg_registry_basic.sio 'pkg_registry_basic: ALL PASS'

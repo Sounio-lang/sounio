@@ -4,19 +4,20 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
-
-# Package tests import stdlib modules and/or packages/*. lean_single resolves
-# packages/ imports; Madaros default does not yet. Use lean_single for this gate.
-LEAN_SOUC="$ROOT_DIR/bin/souc-lean-single-x86_64"
-if [[ ! -x "$LEAN_SOUC" ]]; then
-  LEAN_SOUC="$ROOT_DIR/bin/souc-linux-x86_64"
-fi
-if [[ ! -x "$LEAN_SOUC" ]]; then
-  echo '[package-import-science] FAIL: lean_single compiler ELF not found' >&2
+MADAROS="$ROOT_DIR/bin/madaros"
+RAW_MADAROS="${MADAROS_RAW_BIN:-}"
+if [[ ! -x "$MADAROS" ]]; then
+  echo '[package-import-science] FAIL: Madaros launcher not found' >&2
   exit 1
 fi
-SOUC_BIN="$LEAN_SOUC"
+if [[ -z "$RAW_MADAROS" || ! -x "$RAW_MADAROS" || "$(head -c 2 "$RAW_MADAROS" 2>/dev/null)" == '#!' ]]; then
+  echo '[package-import-science] FAIL: MADAROS_RAW_BIN must name an explicit current-source Madaros ELF' >&2
+  exit 1
+fi
+if ! "$MADAROS" --version 2>&1 | grep -qF 'Madaros'; then
+  echo '[package-import-science] FAIL: package acceptance requires Madaros' >&2
+  exit 1
+fi
 
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
 
@@ -43,7 +44,7 @@ run_package_test() {
   local log="$OUT_DIR/$(basename "$path").log"
   local elf="$OUT_DIR/$(basename "$path").elf"
   printf '[package-import-science] run %s (%s)\n' "$label" "$path"
-  if ! "$SOUC_BIN" "$path" "$elf" >"$log" 2>&1; then
+  if ! "$MADAROS" compile "$path" -o "$elf" >"$log" 2>&1; then
     cat "$log" >&2
     printf '[package-import-science] FAIL: compile failed: %s\n' "$label" >&2
     exit 1
@@ -57,7 +58,9 @@ run_package_test() {
   cat "$log" "$log.run"
 }
 
-printf '[package-import-science] souc=%s\n' "$SOUC_BIN"
+printf '[package-import-science] compiler=%s\n' "$MADAROS"
+printf '[package-import-science] raw=%s\n' "$RAW_MADAROS"
+"$MADAROS" --version
 printf '[package-import-science] stdlib=%s\n' "$SOUNIO_STDLIB_PATH"
 
 for MANIFEST in "${PACKAGES[@]}"; do
@@ -154,7 +157,7 @@ printf '[package-import-science] compile negative missing-package fixture %s\n' 
 NEGATIVE_LOG="$OUT_DIR/missing_package.log"
 NEGATIVE_ELF="$OUT_DIR/missing_package.elf"
 set +e
-"$SOUC_BIN" "$NEGATIVE" "$NEGATIVE_ELF" >"$NEGATIVE_LOG" 2>&1
+"$MADAROS" compile "$NEGATIVE" -o "$NEGATIVE_ELF" >"$NEGATIVE_LOG" 2>&1
 negative_rc=$?
 set -e
 if [[ $negative_rc -eq 0 && -x "$NEGATIVE_ELF" ]]; then
