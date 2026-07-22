@@ -368,6 +368,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.getting-started | repo_only | docs/GETTING_STARTED.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.github.profile.readme | repo_only | docs/github/profile/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.glossary | repo_only | docs/GLOSSARY.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.governance.branch-policy | repo_only | docs/governance/BRANCH_POLICY.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.governance.data-access-credentials | repo_only | docs/governance/data_access_credentials.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.governance.docs-conventions | repo_only | docs/governance/DOCS_CONVENTIONS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.gpu.abide-associator-null | repo_only | docs/gpu/ABIDE_ASSOCIATOR_NULL.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

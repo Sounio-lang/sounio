@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.madaros-wave15-prebuilt-fire-measurement-2026-07-22
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-wave15-prebuilt-fire-measurement-2026-07-22
+-->
+
 # Madaros Wave15 PREBUILT FIRE measurement (2026-07-22)
 
 ## Claim under test
