@@ -60,6 +60,7 @@ OrderedTransformationPathI64
 != BracketingDesignI64
 != AlgebraicAssociatorProbeI64
 != BasisTripleAssociatorProbeI64
+!= BasisTripleAssociatorAbstentionI64
 != ParenthesizationSensitivityI64
 != clinical authority
 ```
@@ -78,6 +79,12 @@ nonzero result for that declared carrier only. It does not bind the carrier to
 a biological process, an empirical representation, a psychiatric mechanism,
 or the parenthesization-sensitive model contest.
 
+`BasisTripleAssociatorAbstentionI64` preserves the complementary zero result
+for one selected basis triple. That zero does not certify that a wider carrier,
+an empirical system, or a representation contest is associative; it only
+refuses to fabricate a nonzero basis-triple probe where the declared arithmetic
+returned zero.
+
 `PipelineOrderSensitivityI64` records the narrower collision in which two
 declared transformations produce different synthetic outputs in opposite
 orders. It remains distinct from a parenthesization result: a difference
@@ -92,16 +99,16 @@ Owner: Codex
 Concept-IDs: SOUNIO-NONASSOCIATIVE-ORDER; SOUNIO-ORDERED-PATH-PROVENANCE; SOUNIO-SCIENCE-RESEARCH-BOUNDARY
 Intent-Preserved: preserve an operational distinction between sequence order, declared grouping boundaries, algebraic probes, and research conclusions
 Transformation: add private-constructor nominal receipts that require a declared aggregation boundary and contest before a synthetic parenthesization-sensitivity receipt is constructible
-Types-Changed: added OrderedTransformationPathI64, PipelineOrderSensitivityI64, AggregationBoundaryI64, BracketingDesignI64, AlgebraicAssociatorProbeI64, BasisTripleAssociatorProbeI64, AssociativityContestI64, BracketDiscriminatingFeatureI64, ParenthesizationSensitivityI64, and ParenthesizationAbstentionI64
+Types-Changed: added OrderedTransformationPathI64, PipelineOrderSensitivityI64, AggregationBoundaryI64, BracketingDesignI64, AlgebraicAssociatorProbeI64, BasisTripleAssociatorProbeI64, BasisTripleAssociatorAbstentionI64, AssociativityContestI64, BracketDiscriminatingFeatureI64, ParenthesizationSensitivityI64, and ParenthesizationAbstentionI64
 Effects-Changed: none
 IR-Changed: none
-Claims-Introduced: import callers cannot silently substitute an ordered path, a pipeline-order collision, an aggregation boundary, a nominal algebraic probe, or a nonzero basis-triple associator probe for a parenthesization-sensitivity receipt
+Claims-Introduced: import callers cannot silently substitute an ordered path, a pipeline-order collision, an aggregation boundary, a nominal algebraic probe, a nonzero basis-triple associator probe, or a zero basis-triple abstention for a parenthesization-sensitivity receipt
 Claims-Forbidden: physical nonassociativity, biological or psychiatric mechanism, empirical model fit, causal effect, treatment effect, clinical utility, or clinical authority
 Assumptions: supplied tags describe a synthetic fixture or declared protocol mapping; they do not validate that mapping
 Write-Set: stdlib/epistemic/parenthesization_receipts.sio; tests/run-pass/epistemic_parenthesization_receipts_import_smoke.sio; tests/compile-fail/epistemic_*parenthesization*.sio; docs/internal/concepts/nonassociative-order.md; docs/internal/concepts/bindings.tsv
 Read-Set: stdlib/epistemic/observation_provenance.sio; docs/internal/concepts/ordered-path-provenance.md; docs/research/psychiatric_nonassociativity_representation_contract_2026-07-21.md
 Positive-Witness: imported synthetic receipt smoke carries history source identity through ordered path, boundary, design, probe, contest, feature, sensitivity, and abstention, while separately checking each shared contest component
-Negative-Witness: ordered path != aggregation boundary; pipeline-order sensitivity != parenthesization sensitivity; aggregation boundary != bracketing design; algebraic probe != parenthesization sensitivity; nonzero basis-triple associator probe != parenthesization sensitivity; contest != discriminating feature; imported callers cannot fabricate sensitivity; sensitivity != clinical authority
+Negative-Witness: ordered path != aggregation boundary; pipeline-order sensitivity != parenthesization sensitivity; aggregation boundary != bracketing design; algebraic probe != parenthesization sensitivity; nonzero basis-triple associator probe != parenthesization sensitivity; zero basis-triple abstention != parenthesization sensitivity; contest != discriminating feature; imported callers cannot fabricate sensitivity; sensitivity != clinical authority
 Acceptance-Gate: bin/souc check stdlib/epistemic/parenthesization_receipts.sio; scripts/run_sio_test_suite.sh --test-list /tmp/sounio-parenthesization-receipts-20260721.list --jobs 1 --verbose
 Integration-Target: #901-gated source-fresh imported psychiatric collision suite
 Authoritative-Only-If: these receipts prove only the selected nominal program boundaries; no semantic or empirical authority follows from a default-wrapper run
@@ -113,7 +120,7 @@ Authoritative-Only-If: these receipts prove only the selected nominal program bo
 Semantic-Outcome: the language now preserves the difference between ordered processing, pipeline-order sensitivity, and a separately declared parenthesization-sensitive research scaffold
 Concept-Status-Before: ordered-path provenance and nonassociative algebra were independently represented, with no generic nominal bridge requiring a boundary and contest before sensitivity
 Concept-Status-After: imported callers can construct the synthetic sensitivity receipt only after the declared typed chain, while incompatible receipts refuse substitution
-Distinctions-Added: ordered path != pipeline-order sensitivity; pipeline-order sensitivity != parenthesization sensitivity; ordered path != aggregation boundary; aggregation boundary != bracketing design; nominal algebraic probe != basis-triple associator result != sensitivity receipt; sensitivity receipt != clinical authority
+Distinctions-Added: ordered path != pipeline-order sensitivity; pipeline-order sensitivity != parenthesization sensitivity; ordered path != aggregation boundary; aggregation boundary != bracketing design; nominal algebraic probe != nonzero basis-triple probe != zero basis-triple abstention != sensitivity receipt; sensitivity receipt != clinical authority
 Distinctions-Preserved: ordinary function composition remains associative; declared nonassociative algebra remains separate from a protocol boundary; observation provenance remains non-clinical
 Distinctions-Erased: none
 Evidence-Run: library check passed; one imported positive smoke and four compile-fail substitutions passed under the default Madaros wrapper
