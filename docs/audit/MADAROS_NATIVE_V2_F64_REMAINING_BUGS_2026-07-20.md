@@ -131,11 +131,22 @@ Gate: `scripts/ci/madaros_global_array_ref_gate.sh` /
 direct store control). Unblocks linalg emitters that pass module-level matrices
 by ref.
 
-## Note — `print_f64` mangles negatives
+## Note — `print_f64` mangles negatives — **CLOSED (Wave15 B, 2026-07-22)**
 
-`print_f64(-2.0)` prints `-0.000000`. Off the parity path (emitters use
-`f64_to_bits`), but worth a separate fix. Do not diagnose f64 values through
-`print_f64` — always `f64_to_bits`.
+Was: `print_f64` of any negative printed `-0.000000` (sign kept, magnitude
+zeroed). Root cause and fix landed earlier as #1286 / #890
+(`emit_builtin_print_f64` reloads abs bits from `xmm0` after the `'-'` write —
+rdi held stdout fd). Residual closeout: dedicated `print_f64` witness + gate.
+
+- Witness: `tests/run-pass/print_f64_negative.sio` — cases `-0.0`, `-2.0`,
+  `-0.5`, positive `+2.0`; `f64_to_bits` oracle; `print_int` control.
+- Gate: `scripts/ci/madaros_print_f64_negative_gate.sh` →
+  `MADAROS_PRINT_F64_NEGATIVE_GATE_OK` (also re-runs
+  `tests/run-pass/println_f64_negative.sio`).
+- Audit: `docs/audit/MADAROS_PRINT_NEGATIVE_F64_2026-07-14.md` (FIXED 2026-07-20).
+
+Parity emitters may still prefer `f64_to_bits` for exact equality; display of
+negatives is now trustworthy under default Madaros.
 
 ## Migration status
 
@@ -145,3 +156,14 @@ Defect B (global `&!` array ref) is fixed wave10e — remaining linalg blockers 
 independent of that ref path. After the compiler fixes ship in the prebuilt
 (madaros-prebuilt-refresh), the SPECIAL/STATS gates can drop
 `SOUNIO_SOUC_ENGINE=lean_single` where they still pin it.
+
+## Defect A″ — into-acc f64 BSS arithmetic loses float mark (Wave15 D 2026-07-22) — **FIXED**
+
+Distinct from A (const wiped → 0 → pdf=1.0) and A′ (offset collision). Const
+**init and bits** were correct; same-module `DE + 1.0` / `0.0 - DE` inside an
+imported module did `cvtsi2sd` on IEEE bits (~4.6e18), so
+`lognormal_pdf(1,0,1)` returned `~1e-300`. Root: into-acc
+`lowerer_from_acc_module` empty `global_types` + skip re-record when seed already
+preseeded the BSS slot. Fix + gate:
+`docs/audit/MADAROS_IMPORTED_F64_BSS_ARITH_2026-07-22.md`,
+`scripts/madaros_imported_f64_bss_arith_gate.sh`.

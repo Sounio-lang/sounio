@@ -159,6 +159,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.madaros-impl-method-two-roots-2026-06-23 | repo_only | docs/audit/MADAROS_IMPL_METHOD_TWO_ROOTS_2026-06-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-impl-methods-three-layer-fix-2026-06-23 | repo_only | docs/audit/MADAROS_IMPL_METHODS_THREE_LAYER_FIX_2026-06-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-imported-array-byvalue-913-2026-07-21 | repo_only | docs/audit/MADAROS_IMPORTED_ARRAY_BYVALUE_913_2026-07-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.madaros-imported-f64-bss-arith-2026-07-22 | repo_only | docs/audit/MADAROS_IMPORTED_F64_BSS_ARITH_2026-07-22.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-imported-module-f64-cast-bitcast-2026-07-14 | repo_only | docs/audit/MADAROS_IMPORTED_MODULE_F64_CAST_BITCAST_2026-07-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-imported-module-native-path-escalation-2026-07-14 | repo_only | docs/audit/MADAROS_IMPORTED_MODULE_NATIVE_PATH_ESCALATION_2026-07-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-match-guards-2026-06-24 | repo_only | docs/audit/MADAROS_MATCH_GUARDS_2026-06-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -197,6 +198,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.madaros-wave13-showcase-2026-07-21 | repo_only | docs/audit/MADAROS_WAVE13_SHOWCASE_2026-07-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-wave13-tip-green-2026-07-21 | repo_only | docs/audit/MADAROS_WAVE13_TIP_GREEN_2026-07-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-wave13e-global-list-args-2026-07-21 | repo_only | docs/audit/MADAROS_WAVE13E_GLOBAL_LIST_ARGS_2026-07-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.madaros-wave15-prebuilt-fire-measurement-2026-07-22 | repo_only | docs/audit/MADAROS_WAVE15_PREBUILT_FIRE_MEASUREMENT_2026-07-22.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-wave15c-issue901-scale-closeout-2026-07-22 | repo_only | docs/audit/MADAROS_WAVE15C_ISSUE901_SCALE_CLOSEOUT_2026-07-22.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.modular-compiler-audit-2026-06-10 | repo_only | docs/audit/MODULAR_COMPILER_AUDIT_2026-06-10.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.modular-compiler-stack-clash-2026-05-29 | repo_only | docs/audit/MODULAR_COMPILER_STACK_CLASH_2026-05-29.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
