@@ -16,12 +16,42 @@ fn items_reverse_item_list_opt(items: Option<Box<ItemList>>) -> Option<Box<ItemL
 // Scratch env for pure-fn multi-stmt body fold (`let x = 10; x`).
 // Active only while items_maybe_record_pure_fn_const walks a body; never
 // published into GLOBAL_VAR_INIT (avoids local/global name collisions).
+// Wave13e: also binds const call-site args for pure paramful callees.
 var PURE_FN_LOCAL_N: i64 = 0
 var PURE_FN_LOCAL_H: [i64; 32] = [0; 32]
 var PURE_FN_LOCAL_V: [i64; 32] = [0; 32]
 
+// Pure paramful registry (Wave13e) — append-only tables mirroring
+// GLOBAL_VAR_INIT_* (which is known to accumulate correctly under the seed).
+//   KIND 1 = binary of two Idents → OP + ARG_V0/1
+//   KIND 2 = bare Ident 1-param → ARG_V0
+//   KIND 3 = multi-stmt / other → BODY walker
+var PURE_FN_REG_N: i64 = 0
+var PURE_FN_REG_HASH: [i64; 128] = [0; 128]
+var PURE_FN_REG_PC: [i64; 128] = [0; 128]
+var PURE_FN_REG_KIND: [i64; 128] = [0; 128]
+var PURE_FN_REG_OP: [i64; 128] = [0; 128]
+var PURE_FN_REG_PH0: [i64; 128] = [0; 128]
+var PURE_FN_REG_PH1: [i64; 128] = [0; 128]
+var PURE_FN_REG_PH2: [i64; 128] = [0; 128]
+var PURE_FN_REG_PH3: [i64; 128] = [0; 128]
+var PURE_FN_REG_BODY: [*mut StmtList; 128] = [0 as *mut StmtList; 128]
+var PURE_FN_CALL_DEPTH: i64 = 0
+var PURE_FN_ACTIVE_SLOT: i64 = 0 - 1
+var PURE_FN_ARG_V0: i64 = 0
+var PURE_FN_ARG_V1: i64 = 0
+var PURE_FN_ARG_V2: i64 = 0
+var PURE_FN_ARG_V3: i64 = 0
+
 fn pure_fn_local_reset() with Mut {
     PURE_FN_LOCAL_N = 0
+}
+
+pub fn items_reset_pure_fn_reg() with Mut {
+    PURE_FN_REG_N = 0
+    PURE_FN_CALL_DEPTH = 0
+    PURE_FN_ACTIVE_SLOT = 0 - 1
+    pure_fn_local_reset()
 }
 
 fn pure_fn_local_bind(name: Name, value: i64) with Mut, Div {
@@ -32,9 +62,37 @@ fn pure_fn_local_bind(name: Name, value: i64) with Mut, Div {
     }
 }
 
-// Most-recent local wins (shadowing). Returns (found, value).
+fn pure_fn_local_bind_hash(h: i64, value: i64) with Mut {
+    if PURE_FN_LOCAL_N < 32 {
+        PURE_FN_LOCAL_H[PURE_FN_LOCAL_N as usize] = h
+        PURE_FN_LOCAL_V[PURE_FN_LOCAL_N as usize] = value
+        PURE_FN_LOCAL_N = PURE_FN_LOCAL_N + 1
+    }
+}
+
 fn pure_fn_local_lookup(name: Name) -> (bool, i64) with Div {
     let h = ast_name_hash(name)
+    // Positional param values for the active pure call first (by registered
+    // param name-hash). Prefer these over the local-env hash table so two
+    // short params cannot shadow each other if their djb2 hashes collide or
+    // the hash table store is lossy under the seed.
+    if PURE_FN_ACTIVE_SLOT >= 0 {
+        let slot = PURE_FN_ACTIVE_SLOT
+        let pc = PURE_FN_REG_PC[slot as usize]
+        if pc >= 1 && PURE_FN_REG_PH0[slot as usize] == h {
+            return (true, PURE_FN_ARG_V0)
+        }
+        if pc >= 2 && PURE_FN_REG_PH1[slot as usize] == h {
+            return (true, PURE_FN_ARG_V1)
+        }
+        if pc >= 3 && PURE_FN_REG_PH2[slot as usize] == h {
+            return (true, PURE_FN_ARG_V2)
+        }
+        if pc >= 4 && PURE_FN_REG_PH3[slot as usize] == h {
+            return (true, PURE_FN_ARG_V3)
+        }
+    }
+    // Multi-stmt pure bodies: immutable `let` binders (most-recent wins).
     var i = PURE_FN_LOCAL_N
     while i > 0 {
         i = i - 1
@@ -43,6 +101,222 @@ fn pure_fn_local_lookup(name: Name) -> (bool, i64) with Div {
         }
     }
     (false, 0)
+}
+
+// Fold a binary op over two already-bound pure-call arg words.
+fn pure_fn_fold_binop(op: BinaryOp, a: i64, b: i64) -> (bool, i64) with Div {
+    if op == BinaryOp::OpAdd {
+        return (true, a + b)
+    }
+    if op == BinaryOp::OpSub {
+        return (true, a - b)
+    }
+    if op == BinaryOp::OpMul {
+        return (true, a * b)
+    }
+    if op == BinaryOp::OpDiv {
+        if b == 0 {
+            return (false, 0)
+        }
+        return (true, a / b)
+    }
+    if op == BinaryOp::OpRem {
+        if b == 0 {
+            return (false, 0)
+        }
+        return (true, a % b)
+    }
+    if op == BinaryOp::OpBitAnd {
+        return (true, a & b)
+    }
+    if op == BinaryOp::OpBitOr {
+        return (true, a | b)
+    }
+    if op == BinaryOp::OpBitXor {
+        return (true, a ^ b)
+    }
+    (false, 0)
+}
+
+// Fast path: 2-param pure body is a single binary of two Idents → ARG_V0 op ARG_V1.
+fn pure_fn_try_binary_ident_body(body_ptr: *mut StmtList) -> (bool, i64) with Div {
+    match (*body_ptr).tail {
+        Some(_) => {
+            return (false, 0)
+        }
+        None => {}
+    }
+    if (*body_ptr).head.kind != StmtKind::StmtExpr {
+        return (false, 0)
+    }
+    match (*body_ptr).head.expr {
+        Some(ex) => {
+            if (*ex).kind != ExprKind::ExprBinary {
+                return (false, 0)
+            }
+            match (*ex).left {
+                Some(lhs) => {
+                    match (*ex).right {
+                        Some(rhs) => {
+                            if (*lhs).kind != ExprKind::ExprIdent {
+                                return (false, 0)
+                            }
+                            if (*rhs).kind != ExprKind::ExprIdent {
+                                return (false, 0)
+                            }
+                            pure_fn_fold_binop((*ex).bin_op, PURE_FN_ARG_V0, PURE_FN_ARG_V1)
+                        }
+                        None => {
+                            (false, 0)
+                        }
+                    }
+                }
+                None => {
+                    (false, 0)
+                }
+            }
+        }
+        None => {
+            (false, 0)
+        }
+    }
+}
+
+fn pure_fn_reg_find(name: Name) -> (bool, i64) with Div {
+    let h = ast_name_hash(name)
+    var i: i64 = 0
+    while i < PURE_FN_REG_N {
+        if PURE_FN_REG_HASH[i as usize] == h {
+            return (true, i)
+        }
+        i = i + 1
+    }
+    (false, 0)
+}
+
+// Classify pure body shape for registry. Returns (kind, op_as_i64).
+// kind 1 = binary two Idents, kind 2 = bare Ident, kind 3 = general.
+fn pure_fn_classify_body(body: &Block, nparams: i64) -> (i64, i64) with Div {
+    match (*body).stmts {
+        None => {
+            return (0, 0)
+        }
+        Some(list) => {
+            match (*list).tail {
+                Some(_) => {
+                    // multi-stmt
+                    return (3, 0)
+                }
+                None => {
+                    if (*list).head.kind != StmtKind::StmtExpr {
+                        return (3, 0)
+                    }
+                    match (*list).head.expr {
+                        Some(ex) => {
+                            if (*ex).kind == ExprKind::ExprBinary && nparams == 2 {
+                                match (*ex).left {
+                                    Some(lhs) => {
+                                        match (*ex).right {
+                                            Some(rhs) => {
+                                                if (*lhs).kind == ExprKind::ExprIdent && (*rhs).kind == ExprKind::ExprIdent {
+                                                    return (1, (*ex).bin_op as i64)
+                                                }
+                                            }
+                                            None => {}
+                                        }
+                                    }
+                                    None => {}
+                                }
+                            }
+                            if (*ex).kind == ExprKind::ExprIdent && nparams == 1 {
+                                return (2, 0)
+                            }
+                            return (3, 0)
+                        }
+                        None => {
+                            return (0, 0)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Magic words stored as the first GLOBAL_VAR_INIT entry under a pure paramful
+// function name. Zero-arg pure stores a single ordinary value (count==1);
+// paramful stores a multi-word descriptor (count>=3) beginning with a magic.
+// Uses the proven GLOBAL_VAR_INIT_* side-table (append works for many entries).
+//   MAGIC_BINOP   = -900001 → words: magic, op, pc, ph0, ph1
+//   MAGIC_IDENT   = -900002 → words: magic, pc, ph0
+//   MAGIC_GENERAL = -900003 → words: magic, pc, body_slot, ph0..ph3
+
+// Record pure paramful body into GLOBAL_VAR_INIT multi-word form. ≤4 params.
+fn pure_fn_reg_record(
+    name: Name,
+    params: &Option<Box<ParamList>>,
+    body: &Block
+) with Mut, Div {
+    // Already has any init words under this name — do not clobber.
+    if ast_global_var_init_count(name) != 0 {
+        return
+    }
+    var ph0: i64 = 0
+    var ph1: i64 = 0
+    var ph2: i64 = 0
+    var ph3: i64 = 0
+    var n: i64 = 0
+    var cur = *params
+    while true {
+        match cur {
+            Some(node) => {
+                let hh = ast_name_hash((*node).head.name)
+                if n == 0 {
+                    ph0 = hh
+                } else if n == 1 {
+                    ph1 = hh
+                } else if n == 2 {
+                    ph2 = hh
+                } else if n == 3 {
+                    ph3 = hh
+                }
+                n = n + 1
+                cur = (*node).tail
+            }
+            None => {
+                break
+            }
+        }
+    }
+    if n < 1 || n > 4 {
+        return
+    }
+    let cls = pure_fn_classify_body(body, n)
+    if cls.0 == 0 {
+        return
+    }
+    if cls.0 == 1 {
+        // magic, op, pc, ph0, ph1
+        ast_record_global_var_init(name, 0 - 900001)
+        ast_record_global_var_init(name, cls.1)
+        ast_record_global_var_init(name, n)
+        ast_record_global_var_init(name, ph0)
+        ast_record_global_var_init(name, ph1)
+        return
+    }
+    if cls.0 == 2 {
+        // magic, pc, ph0
+        ast_record_global_var_init(name, 0 - 900002)
+        ast_record_global_var_init(name, n)
+        ast_record_global_var_init(name, ph0)
+        return
+    }
+    // kind 3 (multi-stmt / general body): residual. Do NOT register.
+    // Prior approach stored `*mut StmtList` body pointers in PURE_FN_REG_BODY
+    // and multi-word magic -900003 descriptors; that path failed to fold AND
+    // poisoned same-module kind-1/2 descriptors (add2 alone green; add2+multi
+    // def → entire element-list fail-closed zeros). Leave multi-stmt paramful
+    // fail-closed by design until a non-pointer body registry is proven.
 }
 
 // Const-fold a global-init expression to one i64 word (int value or f64 bits).
@@ -56,10 +330,11 @@ fn pure_fn_local_lookup(name: Name) -> (bool, i64) with Div {
 // pure const (`fn ten() -> i64 { 10 }; [ten(), 20, 30]` → real values, not
 // BSS zeros).
 // Wave12: pure multi-stmt return chains (`let x = 10; x`) fold via the
-// pure-fn local env. Non-foldable residual (effects, params, mutation,
-// non-const) still returns ok=false — element-list recording is fail-closed
-// (all slots or none), not partial skip/shift.
-fn items_eval_global_init_word(e: &Expr) -> (bool, i64) with Div {
+// pure-fn local env.
+// Wave13e: pure paramful calls with const args (`fn add(a,b){a+b}; [add(10,20),1,2]`).
+// Non-foldable residual (effects, mutation, non-const, >4 params) still returns
+// ok=false — element-list recording is fail-closed (all slots or none).
+fn items_eval_global_init_word(e: &Expr) -> (bool, i64) with Mut, Div {
     if (*e).kind == ExprKind::ExprIntLit {
         return (true, (*e).int_val)
     }
@@ -97,28 +372,224 @@ fn items_eval_global_init_word(e: &Expr) -> (bool, i64) with Div {
             }
         }
     }
-    // Zero-arg call of a pure function whose body was recorded as a const word.
-    // Callee must be a simple Ident; any args → non-const residual.
+    // Pure function call:
+    //   - zero-arg: body pre-folded into GLOBAL_VAR_INIT (Wave10/12)
+    //   - with const args: bind params from PURE_FN_REG and fold body (Wave13e)
+    // Callee must be a simple Ident. Effects / non-const / arity mismatch → fail.
     if (*e).kind == ExprKind::ExprCall {
-        match (*e).args {
-            Some(_) => {
-                return (false, 0)
-            }
-            None => {
-                match (*e).left {
-                    Some(callee) => {
-                        if (*callee).kind == ExprKind::ExprIdent {
-                            let c = ast_global_var_init_count((*callee).name)
-                            if c == 1 {
-                                return (true, ast_global_var_init_nth((*callee).name, 0))
+        match (*e).left {
+            Some(callee) => {
+                if (*callee).kind != ExprKind::ExprIdent {
+                    return (false, 0)
+                }
+                match (*e).args {
+                    None => {
+                        // Zero-arg pure word under the function name.
+                        let c = ast_global_var_init_count((*callee).name)
+                        if c == 1 {
+                            return (true, ast_global_var_init_nth((*callee).name, 0))
+                        }
+                        return (false, 0)
+                    }
+                    Some(_) => {
+                        // Paramful pure: descriptor lives in GLOBAL_VAR_INIT multi-word.
+                        let c = ast_global_var_init_count((*callee).name)
+                        if c < 3 {
+                            return (false, 0)
+                        }
+                        if PURE_FN_CALL_DEPTH >= 8 {
+                            return (false, 0)
+                        }
+                        let magic = ast_global_var_init_nth((*callee).name, 0)
+                        // Decode descriptor.
+                        var kind: i64 = 0
+                        var op_i: i64 = 0
+                        var pc: i64 = 0
+                        var ph0: i64 = 0
+                        var ph1: i64 = 0
+                        var ph2: i64 = 0
+                        var ph3: i64 = 0
+                        var body_slot: i64 = 0 - 1
+                        if magic == 0 - 900001 {
+                            // binop: magic, op, pc, ph0, ph1
+                            if c < 5 {
+                                return (false, 0)
+                            }
+                            kind = 1
+                            op_i = ast_global_var_init_nth((*callee).name, 1)
+                            pc = ast_global_var_init_nth((*callee).name, 2)
+                            ph0 = ast_global_var_init_nth((*callee).name, 3)
+                            ph1 = ast_global_var_init_nth((*callee).name, 4)
+                        } else if magic == 0 - 900002 {
+                            // ident: magic, pc, ph0
+                            if c < 3 {
+                                return (false, 0)
+                            }
+                            kind = 2
+                            pc = ast_global_var_init_nth((*callee).name, 1)
+                            ph0 = ast_global_var_init_nth((*callee).name, 2)
+                        } else if magic == 0 - 900003 {
+                            // general: magic, pc, slot, ph0..ph3
+                            if c < 7 {
+                                return (false, 0)
+                            }
+                            kind = 3
+                            pc = ast_global_var_init_nth((*callee).name, 1)
+                            body_slot = ast_global_var_init_nth((*callee).name, 2)
+                            ph0 = ast_global_var_init_nth((*callee).name, 3)
+                            ph1 = ast_global_var_init_nth((*callee).name, 4)
+                            ph2 = ast_global_var_init_nth((*callee).name, 5)
+                            ph3 = ast_global_var_init_nth((*callee).name, 6)
+                        } else {
+                            return (false, 0)
+                        }
+                        // Save outer local env.
+                        var saved_n = PURE_FN_LOCAL_N
+                        var saved_h: [i64; 32] = [0; 32]
+                        var saved_v: [i64; 32] = [0; 32]
+                        var si: i64 = 0
+                        while si < saved_n {
+                            saved_h[si as usize] = PURE_FN_LOCAL_H[si as usize]
+                            saved_v[si as usize] = PURE_FN_LOCAL_V[si as usize]
+                            si = si + 1
+                        }
+                        pure_fn_local_reset()
+                        PURE_FN_CALL_DEPTH = PURE_FN_CALL_DEPTH + 1
+                        // Stash ph* into REG slot 0 temporarily for lookup (ACTIVE uses 0).
+                        // For kind 1/2 we don't need REG; set PH scratch via ARG path only.
+                        PURE_FN_ACTIVE_SLOT = 0
+                        PURE_FN_REG_PC[0] = pc
+                        PURE_FN_REG_PH0[0] = ph0
+                        PURE_FN_REG_PH1[0] = ph1
+                        PURE_FN_REG_PH2[0] = ph2
+                        PURE_FN_REG_PH3[0] = ph3
+                        PURE_FN_ARG_V0 = 0
+                        PURE_FN_ARG_V1 = 0
+                        PURE_FN_ARG_V2 = 0
+                        PURE_FN_ARG_V3 = 0
+                        var bound = true
+                        var an: i64 = 0
+                        var acur = (*e).args
+                        while true {
+                            match acur {
+                                Some(anode) => {
+                                    if an >= pc {
+                                        bound = false
+                                        break
+                                    }
+                                    let ap = items_eval_global_init_word(&(*anode).head)
+                                    if !ap.0 {
+                                        bound = false
+                                        break
+                                    }
+                                    if an == 0 {
+                                        PURE_FN_ARG_V0 = ap.1
+                                        pure_fn_local_bind_hash(ph0, ap.1)
+                                    } else if an == 1 {
+                                        PURE_FN_ARG_V1 = ap.1
+                                        pure_fn_local_bind_hash(ph1, ap.1)
+                                    } else if an == 2 {
+                                        PURE_FN_ARG_V2 = ap.1
+                                        pure_fn_local_bind_hash(ph2, ap.1)
+                                    } else {
+                                        PURE_FN_ARG_V3 = ap.1
+                                        pure_fn_local_bind_hash(ph3, ap.1)
+                                    }
+                                    an = an + 1
+                                    acur = (*anode).tail
+                                }
+                                None => {
+                                    break
+                                }
                             }
                         }
+                        if an != pc {
+                            bound = false
+                        }
+                        var result_ok = false
+                        var result_word: i64 = 0
+                        if bound {
+                            if kind == 1 {
+                                let op = op_i as BinaryOp
+                                let folded = pure_fn_fold_binop(op, PURE_FN_ARG_V0, PURE_FN_ARG_V1)
+                                result_ok = folded.0
+                                result_word = folded.1
+                            } else if kind == 2 {
+                                result_ok = true
+                                result_word = PURE_FN_ARG_V0
+                            } else if kind == 3 {
+                                if body_slot >= 0 && body_slot < PURE_FN_REG_N {
+                                    let body_ptr = PURE_FN_REG_BODY[body_slot as usize]
+                                    if body_ptr != 0 as *mut StmtList {
+                                        var bcur: *mut StmtList = body_ptr
+                                        while bcur != 0 as *mut StmtList {
+                                            var has_tail = false
+                                            match (*bcur).tail {
+                                                Some(_) => { has_tail = true }
+                                                None => { has_tail = false }
+                                            }
+                                            if has_tail {
+                                                if (*bcur).head.kind != StmtKind::StmtLet {
+                                                    result_ok = false
+                                                    break
+                                                }
+                                                match (*bcur).head.expr {
+                                                    Some(ex) => {
+                                                        let bp = items_eval_global_init_word(&(*ex))
+                                                        if !bp.0 {
+                                                            result_ok = false
+                                                            break
+                                                        }
+                                                        pure_fn_local_bind((*bcur).head.name, bp.1)
+                                                    }
+                                                    None => {
+                                                        result_ok = false
+                                                        break
+                                                    }
+                                                }
+                                                match (*bcur).tail {
+                                                    Some(next) => { bcur = next as *mut StmtList }
+                                                    None => { bcur = 0 as *mut StmtList }
+                                                }
+                                            } else {
+                                                if (*bcur).head.kind != StmtKind::StmtExpr {
+                                                    result_ok = false
+                                                    break
+                                                }
+                                                match (*bcur).head.expr {
+                                                    Some(ex) => {
+                                                        let bp = items_eval_global_init_word(&(*ex))
+                                                        result_ok = bp.0
+                                                        result_word = bp.1
+                                                    }
+                                                    None => { result_ok = false }
+                                                }
+                                                break
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        PURE_FN_CALL_DEPTH = PURE_FN_CALL_DEPTH - 1
+                        PURE_FN_ACTIVE_SLOT = 0 - 1
+                        pure_fn_local_reset()
+                        var ri: i64 = 0
+                        while ri < saved_n {
+                            pure_fn_local_bind_hash(saved_h[ri as usize], saved_v[ri as usize])
+                            ri = ri + 1
+                        }
+                        if result_ok {
+                            return (true, result_word)
+                        }
+                        return (false, 0)
                     }
-                    _ => {}
                 }
             }
+            _ => {
+                return (false, 0)
+            }
         }
-        return (false, 0)
     }
     // Scalar global already recorded earlier in the same compile unit.
     // Only count==1 (scalar / array-repeat fill word) is safe to re-use.
@@ -267,29 +738,29 @@ fn items_eval_pure_stmt_list(list: &StmtList) -> (bool, i64) with Mut, Div {
     }
 }
 
-// If `fn name() -> T { ... }` is zero-param, effect-free, and its body is a pure
-// const return chain, record the folded word under `name` so later global
-// element-list slots can call it (`[ten(), 20, 30]`, `[multi(), 20, 30]`).
+// If `fn name(...) -> T { ... }` is effect-free and its body is a pure const
+// return chain, register it for global element-list call fold:
 //
-// Accepted bodies (Wave10 single-stmt + Wave12 multi-stmt):
+//   zero-param (Wave10/12): fold body now → GLOBAL_VAR_INIT word under `name`
+//     so later `[ten(), 20, 30]` / `[multi(), 20, 30]` read real values.
+//   paramful ≤4 (Wave13e): register body+param hashes so later
+//     `[add2(10, 20), 1, 2]` binds const args and folds the body at the call site.
+//
+// Accepted bodies:
 //   { 10 }
 //   { return 10 }
 //   { let x = 10; x }
 //   { let x = 10; let y = x + 1; y }
-// Intermediate statements must be immutable `let`. Mutation / effects / params /
-// non-const remain residual fail-closed zeros (no left-shift of remaining words).
+//   { a + b }          // params as Idents
+//   { let x = a + 1; x }
+// Intermediate statements must be immutable `let`. Mutation / effects /
+// non-const / >4 params remain residual fail-closed zeros (no left-shift).
 fn items_maybe_record_pure_fn_const(
     name: Name,
     params: &Option<Box<ParamList>>,
     effects: &Option<Box<EffectList>>,
     body: &Block
 ) with Mut, Div {
-    match *params {
-        Some(_) => {
-            return
-        }
-        None => {}
-    }
     match *effects {
         Some(_) => {
             return
@@ -300,6 +771,15 @@ fn items_maybe_record_pure_fn_const(
     if ast_global_var_init_count(name) != 0 {
         return
     }
+    match *params {
+        Some(_) => {
+            // Wave13e: pure paramful → body registry (call-site fold).
+            pure_fn_reg_record(name, params, body)
+            return
+        }
+        None => {}
+    }
+    // Zero-param: fold now into GLOBAL_VAR_INIT (Wave10/12).
     match (*body).stmts {
         Some(list) => {
             pure_fn_local_reset()
@@ -321,9 +801,10 @@ fn items_maybe_record_pure_fn_const(
 //   - cast/ident of the above (wave9)
 //   - zero-arg pure calls of the above (wave10), when callee body was recorded
 //   - multi-stmt pure return chains (wave12): `let x = c; x` / nested pure lets
+//   - pure paramful calls with const args (wave13e): `add2(10, 20)` etc.
 // Element-list is fail-closed: every slot must const-fold or *none* are recorded.
 // (Wave8 partial skip shifted remaining words left — `[f(),20,30]` → `20 30 0`.)
-// Residual: effects/params/mutation/non-const callees → BSS zero, no silent shift.
+// Residual: effects / mutation / non-const / >4-param callees → BSS zero, no silent shift.
 fn items_record_global_int_init(name: Name, init: &Expr) with Mut, Div {
     if (*init).kind == ExprKind::ExprArrayLit {
         // Repeat form: left = fill value, right = count → single fill word
