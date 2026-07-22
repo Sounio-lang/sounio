@@ -236,6 +236,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.stats-ols-diag-e2e-vertical-2026-07-18 | repo_only | docs/audit/STATS_OLS_DIAG_E2E_VERTICAL_2026-07-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.stats-scipy-e2e-vertical-2026-07-18 | repo_only | docs/audit/STATS_SCIPY_E2E_VERTICAL_2026-07-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.stats-shapiro-e2e-vertical-2026-07-18 | repo_only | docs/audit/STATS_SHAPIRO_E2E_VERTICAL_2026-07-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.wave14d-thinlink-921-residual-2026-07-21 | repo_only | docs/audit/WAVE14D_THINLINK_921_RESIDUAL_2026-07-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.windows-assert-a64-parity.ad-hessian-diagonal | repo_only | docs/audit/windows_assert_a64_parity/AD_HESSIAN_DIAGONAL.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.windows-assert-a64-parity.ad-hessian-offdiagonal | repo_only | docs/audit/windows_assert_a64_parity/AD_HESSIAN_OFFDIAGONAL.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.windows-assert-a64-parity.ad-shadows-first-order | repo_only | docs/audit/windows_assert_a64_parity/AD_SHADOWS_FIRST_ORDER.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -798,6 +799,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.probe-result-deep-ffn | historical | docs/research/PROBE-RESULT-deep-ffn.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.probe-result-h256-scale | historical | docs/research/PROBE-RESULT-h256-scale.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.probe-result-lstm-adding | historical | docs/research/PROBE-RESULT-lstm-adding.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.probe-result-multiseed | historical | docs/research/PROBE-RESULT-multiseed.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.probe-usage | historical | docs/research/probe-usage.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.program-registry-mercyful-learning | historical | docs/research/PROGRAM-REGISTRY-mercyful-learning.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.proof-checker-family-matrix-2026-06-23 | historical | docs/research/proof-checker-family-matrix-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
