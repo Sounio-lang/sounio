@@ -179,6 +179,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.madaros-raw-references-codegen-2026-06-24 | repo_only | docs/audit/MADAROS_RAW_REFERENCES_CODEGEN_2026-06-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-root2-enum-fncount-2026-06-20 | repo_only | docs/audit/MADAROS_ROOT2_ENUM_FNCOUNT_2026-06-20.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-root2-method-associated-2026-07-19 | repo_only | docs/audit/MADAROS_ROOT2_METHOD_ASSOCIATED_2026-07-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.madaros-root2-method-chain-2026-07-21 | repo_only | docs/audit/MADAROS_ROOT2_METHOD_CHAIN_2026-07-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-root2-multimodule-method-2026-07-19 | repo_only | docs/audit/MADAROS_ROOT2_MULTIMODULE_METHOD_2026-07-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-root2-readonly-probe-2026-06-21 | repo_only | docs/audit/MADAROS_ROOT2_READONLY_PROBE_2026-06-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-selfhost-tier1-module-resolver-2026-06-24 | repo_only | docs/audit/MADAROS_SELFHOST_TIER1_MODULE_RESOLVER_2026-06-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -798,6 +799,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.probe-result-deep-ffn | historical | docs/research/PROBE-RESULT-deep-ffn.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.probe-result-h256-scale | historical | docs/research/PROBE-RESULT-h256-scale.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.probe-result-lstm-adding | historical | docs/research/PROBE-RESULT-lstm-adding.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.probe-result-multiseed | historical | docs/research/PROBE-RESULT-multiseed.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.probe-usage | historical | docs/research/probe-usage.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.program-registry-mercyful-learning | historical | docs/research/PROGRAM-REGISTRY-mercyful-learning.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.proof-checker-family-matrix-2026-06-23 | historical | docs/research/proof-checker-family-matrix-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
