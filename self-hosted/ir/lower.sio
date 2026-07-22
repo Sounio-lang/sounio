@@ -1506,6 +1506,78 @@ fn lowerer_preseed_external_struct_items_mut(
     }
 }
 
+// Wave13: preseed module-level BSS globals from an external program into this
+// lowerer. Required so seed (main) bare Idents of `use m::{CONST}` emit
+// IrLoadGlobal against a real IR_STRATEGY_BSS_GLOBAL slot. Without this, the
+// seed body is lowered before deps are merged, Ident misses the global, and
+// report_error/emit_unit yields 0 at runtime (Wave12 explicit non-claim).
+//
+// Call only after own items are preseeded, and only for modules that will be
+// merged *after* this one (seed: deps 1..n in order). That keeps BSS offsets
+// aligned with the multi-mod merge layout (own BSS first, then each dep).
+// Free-function / struct preseed stays in lowerer_preseed_external_struct_items_mut
+// (no BSS allocation there).
+fn lowerer_preseed_external_bss_globals_mut(
+    lo: &! Lowerer,
+    items: &Option<Box<ItemList>>
+) with Mut, Panic, Div, Alloc {
+    var current = items
+    while true {
+        match *current {
+            Some(list) => {
+                let head = &(*list).head
+                // Module-level `let G: T = ...` is ItemFn with fn_def = None
+                // (same encoding as lowerer_preseed_program_items_mut).
+                if head.kind == ItemKind::ItemFn {
+                    let fn_def_opt_ref: &Option<Box<FnDef>> = &head.fn_def
+                    match *fn_def_opt_ref {
+                        Some(_fd) => {}
+                        _ => {
+                            let name = head.name
+                            // Skip if this name already has a BSS slot (DEDUP
+                            // across multi-import of the same leaf).
+                            var already: i64 = 0 - 1
+                            var fi: i64 = 0
+                            let mref = (*lo).module
+                            while fi < (*mref).fn_count {
+                                if ir_name_eq((*mref).functions[fi as usize].name, name)
+                                    && (*mref).functions[fi as usize].compile_strategy == IR_STRATEGY_BSS_GLOBAL
+                                {
+                                    already = fi
+                                    fi = (*mref).fn_count
+                                } else {
+                                    fi = fi + 1
+                                }
+                            }
+                            if already < 0 {
+                                let bss_fn_id = lowerer_find_or_add_fn_id_mut(lo, name)
+                                if bss_fn_id >= 0 {
+                                    lowerer_record_global_type_mut(lo, bss_fn_id, &head.type_alias_ty)
+                                    var mbox = (*lo).module
+                                    var bss_slot = (*mbox).functions[bss_fn_id as usize]
+                                    let bss_off = (*mbox).bss_total_size
+                                    let bss_size = lower_typeexpr_byte_size(&head.type_alias_ty)
+                                    let aligned_size = ((bss_size + 7) / 8) * 8
+                                    bss_slot.compile_strategy = IR_STRATEGY_BSS_GLOBAL
+                                    bss_slot.param_count = bss_off
+                                    bss_slot.bss_size = bss_size
+                                    bss_slot.hyper_algebra_kind = lower_typeexpr_bss_elem_size(&head.type_alias_ty)
+                                    lower_apply_global_var_init(&! bss_slot, name)
+                                    (*mbox).functions[bss_fn_id as usize] = bss_slot
+                                    (*mbox).bss_total_size = bss_off + aligned_size
+                                    (*lo).module = mbox
+                                }
+                            }
+                        }
+                    }
+                }
+                current = &(*list).tail
+            }
+            _ => break
+        }
+    }
+}
+
 // Into-acc external preseed: same as lowerer_preseed_external_struct_items_mut
 // but NEVER clobber a name that already has a body in acc. Without this, dep N+1
 // re-preseeding dep N / seed `main` and ItemImpl methods zeros their instr_count
@@ -12174,7 +12246,9 @@ fn lower_program_to_ir_summary_box_with_epistemic_ref(prog: &Program, epistemic:
 
 // Multi-module variant: preseeds external struct layouts before lowering own
 // items, so cross-module `use lib::{PublicStruct}` then `s.x` resolves to the
-// right field_idx.
+// right field_idx. Wave13 also preseeds external BSS globals into the *seed*
+// (self_index == 0) after own items, so bare `use m::{CONST}` Idents load
+// real BSS slots instead of reading 0.
 fn lower_program_to_ir_summary_box_with_externs_ref(
     prog: &Program,
     programs: &! [Program; 256],
@@ -12187,11 +12261,25 @@ fn lower_program_to_ir_summary_box_with_externs_ref(
     while i < program_count {
         if i != self_index {
             let ext_prog = (*programs)[i as usize]
+            // Structs + free-fn signatures only — no BSS allocation here.
             lowerer_preseed_external_struct_items_mut(&! lo, &ext_prog.items)
         }
         i = i + 1
     }
+    // Own items first so seed BSS layout is: [own globals | dep1 | dep2 | ...],
+    // matching multi-mod merge order (seed, then deps 1..n).
     lowerer_preseed_program_items_mut(&! lo, &prog.items, ir_empty_name())
+    // Wave13 bare cross-mod f64 Ident: only the seed module needs external BSS
+    // slots at body-lower time (deps resolve their own globals locally). Walk
+    // deps in merge order so offsets match ir_merge place+remap.
+    if self_index == 0 {
+        var di: i64 = 1
+        while di < program_count {
+            let dep_prog = (*programs)[di as usize]
+            lowerer_preseed_external_bss_globals_mut(&! lo, &dep_prog.items)
+            di = di + 1
+        }
+    }
     let error_count = lo.error_count
     let had_error = lo.had_error
     // Same residual as with_epistemic_ref: skip empty IrProgramSummary densify.

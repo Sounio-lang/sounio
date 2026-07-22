@@ -92,9 +92,13 @@ Status: **CLOSED wave11** (source fix). **Prebuilt refreshed Wave12e (2026-07-21
 `scripts/ci/madaros_imported_f64_const_gate.sh` and the Wave12 tip-green lock
 (`scripts/dev/madaros_wave12_tip_green_gate.sh`, gate `imported_f64`).
 
-Residual (explicit non-claim): bare `use m::{CONST}` Ident of a global **from main**
-still reads 0 under multi-mod native; science path uses same-module helpers
-(`get_*` / dens functions). Separate from A′ BSS offset collision.
+Residual closed Wave13 (2026-07-21): bare `use m::{CONST}` Ident of a global
+**from main** — seed now preseeds external BSS after own items
+(`lowerer_preseed_external_bss_globals_mut`); merge DEDUPs BSS by name and
+resolves `IrLoadGlobal` by name. Gate arm:
+`tests/run-pass/imported_module_f64_const_bare_ident.sio` via
+`scripts/ci/madaros_imported_f64_const_gate.sh`.
+Audit: `docs/audit/MADAROS_WAVE13_BARE_CROSSMOD_F64_IDENT_2026-07-21.md`.
 
 ## Defect B — passing a global array by `&!` ref — **FIXED (wave10e, 2026-07-21)**
 
