@@ -1374,6 +1374,14 @@ pub var GLOBAL_VAR_INIT_VALUES: [i64; 128] = [0; 128]
 // keep the per-parse reset (isolation between independent programs).
 pub var GLOBAL_VAR_INIT_SUPPRESS_RESET: i64 = 0
 
+// Wave15e string-literal global encoding inside GLOBAL_VAR_INIT_* (same table
+// as i64/f64 words so the seed-proven accumulate path is reused):
+//   word[0] = AST_BSS_INIT_STRING_MAGIC
+//   word[1] = payload_len (quotes stripped, escapes not expanded here)
+//   word[2..] = little-endian packed payload bytes (8 per word)
+// lower reconstructs a Name for codegen LEA+BSS store.
+pub let AST_BSS_INIT_STRING_MAGIC: i64 = 0 - 800001
+
 pub fn ast_name_hash(n: Name) -> i64 with Div {
     var hash: i64 = 5381
     var i = 0
@@ -1393,6 +1401,58 @@ pub fn ast_record_global_var_init(name: Name, value: i64) with Mut, Div {
         GLOBAL_VAR_INIT_HASHES[GLOBAL_VAR_INIT_COUNT as usize] = ast_name_hash(name)
         GLOBAL_VAR_INIT_VALUES[GLOBAL_VAR_INIT_COUNT as usize] = value
         GLOBAL_VAR_INIT_COUNT = GLOBAL_VAR_INIT_COUNT + 1
+    }
+}
+
+// Strip surrounding `"` from a string-literal Name (token text form).
+// Escape expansion is applied later by ir_normalize_string_literal_name when
+// the payload is reconstructed as a Name that still has no surrounding quotes.
+pub fn ast_string_lit_payload(lit: Name) -> Name {
+    var out = empty_name()
+    var start: i64 = 0
+    var end = lit.len
+    if lit.len >= 2 && lit.buf[0] == 34 as i8 && lit.buf[(lit.len - 1) as usize] == 34 as i8 {
+        start = 1
+        end = lit.len - 1
+    }
+    var i = start
+    while i < end && out.len < 128 {
+        out.buf[out.len as usize] = lit.buf[i as usize]
+        out.len = out.len + 1
+        i = i + 1
+    }
+    out
+}
+
+// Pack a string-literal global into GLOBAL_VAR_INIT_* as magic+len+bytes.
+// Reuses the integer-word side table (proven under multi-mod suppress-reset).
+pub fn ast_record_global_str_init(name: Name, lit: Name) with Mut, Div {
+    let payload = ast_string_lit_payload(lit)
+    // Budget: magic + len + ceil(len/8) words must fit remaining table slots.
+    let words_needed = 2 + (payload.len + 7) / 8
+    if GLOBAL_VAR_INIT_COUNT + words_needed > 128 {
+        return
+    }
+    ast_record_global_var_init(name, AST_BSS_INIT_STRING_MAGIC)
+    ast_record_global_var_init(name, payload.len)
+    var off: i64 = 0
+    while off < payload.len {
+        var word: i64 = 0
+        var place: i64 = 1
+        var b: i64 = 0
+        while b < 8 && off + b < payload.len {
+            let byte = payload.buf[(off + b) as usize] as i64
+            // little-endian pack without relying on variable shift amounts
+            if byte < 0 {
+                word = word + ((byte + 256) * place)
+            } else {
+                word = word + (byte * place)
+            }
+            place = place * 256
+            b = b + 1
+        }
+        ast_record_global_var_init(name, word)
+        off = off + 8
     }
 }
 
@@ -1439,4 +1499,48 @@ pub fn ast_global_var_init_nth(name: Name, index: i64) -> i64 with Div {
         i = i + 1
     }
     0
+}
+
+// 1 if GLOBAL_VAR_INIT words for `name` encode a string literal (Wave15e).
+// Defined after count/nth — no forward references.
+pub fn ast_global_str_init_present(name: Name) -> i64 with Div {
+    let c = ast_global_var_init_count(name)
+    if c < 2 {
+        return 0
+    }
+    if ast_global_var_init_nth(name, 0) == AST_BSS_INIT_STRING_MAGIC {
+        return 1
+    }
+    0
+}
+
+// Reconstruct payload Name from packed GLOBAL_VAR_INIT words (no surrounding quotes).
+pub fn ast_global_str_init_name(name: Name) -> Name with Div {
+    if ast_global_str_init_present(name) == 0 {
+        return empty_name()
+    }
+    let plen = ast_global_var_init_nth(name, 1)
+    var out = empty_name()
+    if plen <= 0 {
+        return out
+    }
+    var wi: i64 = 0
+    let nwords = (plen + 7) / 8
+    while wi < nwords {
+        var word = ast_global_var_init_nth(name, 2 + wi)
+        var b: i64 = 0
+        while b < 8 && out.len < plen && out.len < 128 {
+            let byte = word - (word / 256) * 256
+            if byte < 0 {
+                out.buf[out.len as usize] = (byte + 256) as i8
+            } else {
+                out.buf[out.len as usize] = byte as i8
+            }
+            out.len = out.len + 1
+            word = word / 256
+            b = b + 1
+        }
+        wi = wi + 1
+    }
+    out
 }

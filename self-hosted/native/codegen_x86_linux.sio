@@ -7,7 +7,7 @@
 module native::codegen_x86_linux
 
 use parser::ast::{Name}
-use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_MAX_FUNCS, IR_MAX_STRINGS, IR_FLOAT_REG_MARKER_FLAG, ir_name_eq, BSS_BASE_LINUX, IR_STRATEGY_BSS_GLOBAL}
+use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_MAX_FUNCS, IR_MAX_STRINGS, IR_FLOAT_REG_MARKER_FLAG, ir_name_eq, BSS_BASE_LINUX, IR_STRATEGY_BSS_GLOBAL, BSS_INIT_STRING_MAGIC}
 use native::encode::*
 use native::elf::*
 use native::aarch64::*
@@ -9271,9 +9271,19 @@ fn emit_global_var_inits_into(nc: &! NativeCompiler, module: &IrModule) with Mut
             if elem <= 0 {
                 elem = 8
             }
-            // Element-list form: distinct per-element words packed into instrs[].
-            // Prefer this over rep-stos fill even when bss_size is multi-word.
-            if func.instr_count > 1 {
+            // Wave15e: string-literal BSS init — LEA rodata pointer into BSS.
+            // return_struct_name holds the normalized payload (quotes stripped).
+            // Must not take the imm-fill path (prof_counter_id is the magic, not data).
+            if init_val == BSS_INIT_STRING_MAGIC {
+                let str_offset = nc_rodata_add_name_value(nc, func.return_struct_name)
+                let lea_pos = (*nc).code.len
+                nc_emit_lea_rax_rip_disp32(nc, 0)
+                nc_add_rodata_reloc(nc, lea_pos + 3, str_offset)
+                nc_emit_mov_reg_imm(nc, 3, abs_addr)
+                nc_emit_store_rax_mem_rbx_disp32(nc, 0)
+            } else if func.instr_count > 1 {
+                // Element-list form: distinct per-element words packed into instrs[].
+                // Prefer this over rep-stos fill even when bss_size is multi-word.
                 var ei: i64 = 0
                 while ei < func.instr_count {
                     let word = func.instrs[ei as usize].imm_i64
