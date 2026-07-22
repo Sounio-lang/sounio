@@ -1238,3 +1238,362 @@ pub fn spec_mono_marker_count() -> i64 with Mut, Panic, Div {
 pub fn spec_append_item_lists(a: Option<Box<ItemList>>, b: Option<Box<ItemList>>) -> Option<Box<ItemList>> with Mut, Alloc {
     spec_append_items(a, b)
 }
+
+// ============================================================
+// Specialized-list reachability DCE (Wave13)
+// ============================================================
+//
+// After merge→specialize, the monomorphized ItemList still carries every
+// top-level ItemFn from every imported module (e.g. full f64 cayley_dickson
+// arithmetic when only `cd_sigma` is used). Body-lowering those unused
+// aggregate f64 CD helpers is a known SEGV surface (Wave12 residual class:
+// float-layout poison / large [f64;2048] loops). This pass marks callables
+// reachable from `main` via fixed-point BFS over ExprCall + ExprMethodCall
+// edges, then drops unmarked top-level ItemFns. Non-fn items (structs,
+// impls, traits, …) are always kept so layout + method dispatch survive.
+//
+// Seed-safe: local i64 hash tables only (no Name/Option globals).
+
+let SPEC_DCE_MAX: i64 = 512
+
+fn spec_dce_hash_find(marks: &[i64; 512], count: i64, h: i64) -> bool {
+    var i: i64 = 0
+    while i < count {
+        if marks[i as usize] == h {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn spec_dce_hash_insert(marks: &! [i64; 512], count: &! i64, h: i64) -> bool with Mut {
+    if h == 0 {
+        return false
+    }
+    if spec_dce_hash_find(marks, *count, h) {
+        return false
+    }
+    if *count >= SPEC_DCE_MAX {
+        return false
+    }
+    marks[(*count) as usize] = h
+    *count = *count + 1
+    true
+}
+
+// Walk an expression tree; insert callee / method name hashes into `marks`.
+fn spec_dce_scan_expr(e: Expr, marks: &! [i64; 512], count: &! i64) with Mut, Panic, Div {
+    if e.kind == ExprKind::ExprCall {
+        let callee = spec_call_expr_callee_name(e)
+        if !name_is_empty(callee) {
+            var _ins = spec_dce_hash_insert(marks, count, ast_name_hash(callee))
+        }
+    } else if e.kind == ExprKind::ExprMethodCall {
+        if !name_is_empty(e.name) {
+            var _ins = spec_dce_hash_insert(marks, count, ast_name_hash(e.name))
+        }
+    }
+    match e.left {
+        Some(b) => spec_dce_scan_expr(*b, marks, count)
+        None => {}
+    }
+    match e.right {
+        Some(b) => spec_dce_scan_expr(*b, marks, count)
+        None => {}
+    }
+    match e.else_expr {
+        Some(b) => spec_dce_scan_expr(*b, marks, count)
+        None => {}
+    }
+    match e.closure_body {
+        Some(b) => spec_dce_scan_expr(*b, marks, count)
+        None => {}
+    }
+    match e.block {
+        Some(b) => spec_dce_scan_block(*b, marks, count)
+        None => {}
+    }
+    match e.handler_block {
+        Some(b) => spec_dce_scan_block(*b, marks, count)
+        None => {}
+    }
+    match e.args {
+        Some(list) => {
+            spec_dce_scan_expr((*list).head, marks, count)
+            var cur = (*list).tail
+            var going = true
+            while going {
+                match cur {
+                    None => { going = false }
+                    Some(rest) => {
+                        spec_dce_scan_expr((*rest).head, marks, count)
+                        cur = (*rest).tail
+                    }
+                }
+            }
+        }
+        None => {}
+    }
+    match e.arms {
+        Some(list) => {
+            match (*list).head.guard {
+                Some(g) => spec_dce_scan_expr(*g, marks, count)
+                None => {}
+            }
+            spec_dce_scan_expr((*list).head.body, marks, count)
+            var cur = (*list).tail
+            var going = true
+            while going {
+                match cur {
+                    None => { going = false }
+                    Some(rest) => {
+                        match (*rest).head.guard {
+                            Some(g) => spec_dce_scan_expr(*g, marks, count)
+                            None => {}
+                        }
+                        spec_dce_scan_expr((*rest).head.body, marks, count)
+                        cur = (*rest).tail
+                    }
+                }
+            }
+        }
+        None => {}
+    }
+    match e.fields {
+        Some(list) => {
+            spec_dce_scan_expr((*list).head.value, marks, count)
+            var cur = (*list).tail
+            var going = true
+            while going {
+                match cur {
+                    None => { going = false }
+                    Some(rest) => {
+                        spec_dce_scan_expr((*rest).head.value, marks, count)
+                        cur = (*rest).tail
+                    }
+                }
+            }
+        }
+        None => {}
+    }
+}
+
+fn spec_dce_scan_block(b: Block, marks: &! [i64; 512], count: &! i64) with Mut, Panic, Div {
+    var cur = b.stmts
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                match (*list).head.expr {
+                    Some(ex) => spec_dce_scan_expr(*ex, marks, count)
+                    None => {}
+                }
+                match (*list).head.target {
+                    Some(ex) => spec_dce_scan_expr(*ex, marks, count)
+                    None => {}
+                }
+                cur = (*list).tail
+            }
+        }
+    }
+}
+
+// If item is a marked callable (top-level ItemFn or impl/trait method),
+// scan its body and extend the mark set. Returns true if any new hash
+// was inserted.
+fn spec_dce_scan_item_if_marked(
+    it: Item,
+    marks: &! [i64; 512],
+    count: &! i64
+) -> bool with Mut, Panic, Div {
+    let before = *count
+    if it.kind == ItemKind::ItemFn {
+        let h = ast_name_hash(it.name)
+        if spec_dce_hash_find(marks, *count, h) {
+            match it.fn_def {
+                Some(fd) => spec_dce_scan_block((*fd).body, marks, count)
+                None => {}
+            }
+        }
+    } else if it.kind == ItemKind::ItemImpl {
+        match it.impl_def {
+            Some(id) => {
+                var mcur = (*id).methods
+                var mgoing = true
+                while mgoing {
+                    match mcur {
+                        None => { mgoing = false }
+                        Some(mlist) => {
+                            let mit = (*mlist).head
+                            if mit.kind == ItemKind::ItemFn {
+                                let mh = ast_name_hash(mit.name)
+                                if spec_dce_hash_find(marks, *count, mh) {
+                                    match mit.fn_def {
+                                        Some(fd) => spec_dce_scan_block((*fd).body, marks, count)
+                                        None => {}
+                                    }
+                                }
+                            }
+                            mcur = (*mlist).tail
+                        }
+                    }
+                }
+            }
+            None => {}
+        }
+    } else if it.kind == ItemKind::ItemTrait {
+        match it.trait_def {
+            Some(td) => {
+                var mcur = (*td).methods
+                var mgoing = true
+                while mgoing {
+                    match mcur {
+                        None => { mgoing = false }
+                        Some(mlist) => {
+                            let mit = (*mlist).head
+                            if mit.kind == ItemKind::ItemFn {
+                                let mh = ast_name_hash(mit.name)
+                                if spec_dce_hash_find(marks, *count, mh) {
+                                    match mit.fn_def {
+                                        Some(fd) => spec_dce_scan_block((*fd).body, marks, count)
+                                        None => {}
+                                    }
+                                }
+                            }
+                            mcur = (*mlist).tail
+                        }
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+    *count > before
+}
+
+fn spec_dce_scan_list_if_marked(
+    items: Option<Box<ItemList>>,
+    marks: &! [i64; 512],
+    count: &! i64
+) -> bool with Mut, Panic, Div {
+    var changed = false
+    var cur = items
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                if spec_dce_scan_item_if_marked((*list).head, marks, count) {
+                    changed = true
+                }
+                cur = (*list).tail
+            }
+        }
+    }
+    changed
+}
+
+fn spec_dce_has_main(items: Option<Box<ItemList>>) -> bool with Mut, Panic, Div {
+    let main_h = ast_name_hash(make_name("main"))
+    var cur = items
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                let it = (*list).head
+                if it.kind == ItemKind::ItemFn {
+                    if ast_name_hash(it.name) == main_h {
+                        return true
+                    }
+                }
+                cur = (*list).tail
+            }
+        }
+    }
+    false
+}
+
+fn spec_dce_count_item_fns(items: Option<Box<ItemList>>) -> i64 with Mut, Panic, Div {
+    var n: i64 = 0
+    var cur = items
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                if (*list).head.kind == ItemKind::ItemFn {
+                    n = n + 1
+                }
+                cur = (*list).tail
+            }
+        }
+    }
+    n
+}
+
+// Drop top-level ItemFns whose name hash is not in `marks`. Keep every
+// non-fn item (and keep order of survivors).
+fn spec_dce_filter_items(
+    items: Option<Box<ItemList>>,
+    marks: &[i64; 512],
+    mark_count: i64
+) -> Option<Box<ItemList>> with Mut, Alloc, Panic, Div {
+    match items {
+        None => None
+        Some(list) => {
+            let it = (*list).head
+            let rest = spec_dce_filter_items((*list).tail, marks, mark_count)
+            if it.kind == ItemKind::ItemFn {
+                let h = ast_name_hash(it.name)
+                if spec_dce_hash_find(marks, mark_count, h) {
+                    return Some(Box::new(ItemList { head: it, tail: rest }))
+                }
+                return rest
+            }
+            Some(Box::new(ItemList { head: it, tail: rest }))
+        }
+    }
+}
+
+// Public entry: reachability-DCE unused top-level ItemFns from a specialized
+// (or otherwise merged) item list, rooted at `main`. No-op when main is
+// missing (caller keeps the list for hollow-main fallback paths).
+pub fn spec_dce_unreachable_item_fns(
+    items: Option<Box<ItemList>>
+) -> Option<Box<ItemList>> with IO, Mut, Panic, Div, Alloc {
+    if !spec_dce_has_main(items) {
+        return items
+    }
+    var marks: [i64; 512] = [0; 512]
+    var mark_count: i64 = 0
+    let main_h = ast_name_hash(make_name("main"))
+    var _seeded = spec_dce_hash_insert(&! marks, &! mark_count, main_h)
+
+    // Fixed-point: scan bodies of marked callables, extend mark set.
+    var fuel: i64 = 0
+    var going = true
+    while going {
+        let changed = spec_dce_scan_list_if_marked(items, &! marks, &! mark_count)
+        fuel = fuel + 1
+        if !changed || fuel > SPEC_DCE_MAX {
+            going = false
+        }
+    }
+
+    let before_fns = spec_dce_count_item_fns(items)
+    let out = spec_dce_filter_items(items, &marks, mark_count)
+    let after_fns = spec_dce_count_item_fns(out)
+    if str_eq(read_env("SOUNIO_MM_SPEC_TRACE"), "1") {
+        print("spec_dce: item_fns ")
+        print_int(before_fns)
+        print(" -> ")
+        print_int(after_fns)
+        print(" marks=")
+        print_int(mark_count)
+        print("\n")
+    }
+    out
+}
