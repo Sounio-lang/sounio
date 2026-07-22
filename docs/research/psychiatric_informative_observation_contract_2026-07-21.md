@@ -248,7 +248,7 @@ regularized analysis representation
   != raw observation-process receipt
 ~~~
 
-The non-associativity here is concrete. Consider two ordered paths:
+The ordered distinction here is concrete. Consider two ordered paths:
 
 ~~~
 path A: assessment -> recorded response -> clinical contact -> later assessment
@@ -272,6 +272,71 @@ become part of the future observation process. This is a feedback-risk receipt,
 not an assertion that every monitoring system produces harmful or useful
 feedback.
 
+### Order Is Not Yet An Algebraic Law
+
+The founder's non-associative intuition is a strong design question here, but
+the words must be earned precisely. The two paths above establish that ordered
+event histories are not interchangeable. They do **not**, by themselves,
+establish a non-associative operator. Ordinary composition of well-typed
+functions is associative:
+
+~~~
+T3 compose (T2 compose T1) = (T3 compose T2) compose T1
+~~~
+
+So a preprocessing system may be order-sensitive without being a
+non-associative algebra. The first discriminating claim is usually
+non-commutativity or pipeline non-interchangeability:
+
+~~~
+T2(T1(H)) != T1(T2(H))
+~~~
+
+but only if both paths are defined on the declared representation and their
+outputs are compared at the same declared semantic level. A claim of
+parenthesization sensitivity needs more: a closed representation family, a
+named binary fusion or aggregation operator distinct from ordinary function
+composition, both bracketed expressions well-typed, and a synthetic collision
+where their declared meanings or outputs differ. Without that apparatus,
+"non-associative" is an intuition to investigate, not an established property
+of a preprocessing pipeline.
+
+This is not a retreat to a neutral feature table. EHR extraction, timestamps,
+aggregation windows, and imputation determine which information is available
+to a prediction task. A wrong timestamp can produce temporal leakage whose
+effect changes with aggregation windows and prediction-renewal frequency
+([dynamic EHR preparation guidance](https://pmc.ncbi.nlm.nih.gov/articles/PMC12579287/));
+aggregation and partition choices can themselves create label leakage
+([leakage framework](https://pmc.ncbi.nlm.nih.gov/articles/PMC10746313/)).
+The important language contribution is to retain the ordered transformation
+path and the availability boundary rather than treating its final feature value
+as self-explanatory.
+
+An illustrative synthetic pipeline makes the distinction concrete without
+making a clinical assertion. Let an event history contain values `0` at time 0
+and `4` at time 3, with no records at times 1 or 2. Forward-fill onto the unit
+grid first; two-unit means after forward-fill can yield `[0, 2]`. Aggregating the
+observed values in those windows first can yield `[0, 4]`; a window-level
+missingness rule then has a different input from the grid-level one. This is a
+pipeline-order collision, not a proof that either imputation is valid, that a
+latent state changed, or that function composition ceased to be associative.
+
+Before any executable algebraic feature, a future generic layer should name:
+
+| Proposed receipt | Must retain | Must not establish |
+| --- | --- | --- |
+| `TransformationStepReceipt` | input/output representation kinds, method/configuration, time-availability boundary, and declared information loss. | that the method is empirically valid or fit for a person. |
+| `TransformationPathReceipt` | ordered steps, source/version identity, and every declared intermediate representation. | that equal terminal vectors have equal histories or causal meaning. |
+| `TransformationFusionBoundaryReceipt` | the explicitly defined operator, legal operands, bracketed grouping, and discriminating test. | non-associativity merely from chronology or a named sequence. |
+| `TransformationPathAbstentionReceipt` | missing method, timestamp, availability, scope, or composition definition. | a harmless default fill, stable state, or decision candidate. |
+
+The first implementation target remains a synthetic, source-fresh import
+fixture after #901. It must reject a path that loses the declared source or
+step receipt, and it must reject a parenthesization claim that supplies no
+operator-plus-collision witness. No such receipt forms a measurement model,
+transport receipt, causal estimate, clinical recommendation, or external
+authority.
+
 ## Synthetic Collision Matrix
 
 The first implementation must be synthetic. It must never consume patient data,
@@ -287,6 +352,8 @@ infer an individual's state, or emit a clinical recommendation.
 | Care-system shift | Same measured values and model parameters. | Monitoring policy or access/channel context. | A source-system feature cannot silently become transport evidence. |
 | Resampling collision | Same grid-aligned values. | Original encounter and selection histories. | The regularized table retains a transformation receipt and cannot replace raw provenance. |
 | Source-propagation collision | Same regularized numeric value and transformation method. | Declared source-system identity. | The regularized value retains its source tag; a matching tag is still not transport or measurement-equivalence evidence. |
+| Pipeline-order collision | Same raw synthetic history and named output task. | Grid-level imputation before aggregation versus window-level aggregation before a missingness rule. | The path records distinct ordered step receipts; neither terminal vector becomes raw history or state truth. |
+| Parenthesization-claim collision | Same ordered step labels. | Declared binary fusion operator and a discriminating bracketed witness. | Without a well-typed operator and collision, classify as ordered or non-commutative only, not non-associative. |
 | Feedback collision | Same initial score. | Prediction does versus does not change later monitoring. | The later observation process has distinct ordered provenance. |
 
 The collision matrix has a deliberately modest proof target: preserve the
@@ -441,17 +508,17 @@ Semantic-Lane-ID: psychiatric-informative-observation-research-v0
 Owner: codex-root-psychiatric-state-inference-20260721
 Concept-IDs: SOUNIO-SCIENCE-RESEARCH-BOUNDARY; SOUNIO-ORDERED-PATH-PROVENANCE; SOUNIO-HYPERCOMPLEX-ZD-EVIDENCE
 Intent-Preserved: model complex psychiatric and medical systems without promoting records, analogies, or model outputs into unearned empirical or clinical authority
-Transformation: refine the research-only ObservationProcessReceipt into separately auditable opportunity, presence, selection, measurement-act, reactivity, model, feature-use, and abstention boundaries, while preserving declared source-system and transformation identity across a selected regularization path
-Types-Changed: private library-level nominal receipt types for opportunity, presence, selection, measurement act, recorded measurement, observation-history reference, transformation, regularized representation, observation-feature use, and abstention; declared source-system and transformation identity now propagate from route inputs into the private recorded/history/regularized representations; no parser or core type-system change
+Transformation: refine the research-only ObservationProcessReceipt into separately auditable opportunity, presence, selection, measurement-act, reactivity, model, feature-use, and abstention boundaries, while preserving declared source-system and transformation identity across a selected regularization path and distinguishing pipeline order from an earned parenthesization-sensitive algebraic claim
+Types-Changed: private library-level nominal receipt types for opportunity, presence, selection, measurement act, recorded measurement, observation-history reference, transformation, regularized representation, observation-feature use, and abstention; declared source-system and transformation identity now propagate from route inputs into the private recorded/history/regularized representations; future step/path/fusion receipts are documentation-only proposals; no parser or core type-system change
 Effects-Changed: none
 IR-Changed: none
-Claims-Introduced: a narrow library API can preserve distinct observation-process and transformation-provenance categories, including declared source-system identity across a selected regularization path, through direct and small-import controls; a future source-fresh import fixture can test the broader collision matrix
+Claims-Introduced: a narrow library API can preserve distinct observation-process and transformation-provenance categories, including declared source-system identity across a selected regularization path, through direct and small-import controls; order-sensitive preprocessing is distinguished from an unproven non-associative composition claim; a future source-fresh import fixture can test the broader collision matrix
 Claims-Forbidden: that absence from care indicates stability; that assessment is always neutral or always an intervention; that informative observation identifies a causal effect; that a care-system feature transports to a new setting; that this contract authorizes a clinical action
 Assumptions: the study or deployment can state relevant opportunity, channel, selection, measurement-act, and use context; any reactivity claim has separately scoped empirical evidence
 Write-Set: docs/research/psychiatric_informative_observation_contract_2026-07-21.md; stdlib/epistemic/observation_provenance.sio; tests/run-pass/epistemic_observation_provenance_import_smoke.sio; tests/compile-fail/epistemic_observation_provenance_direct_construction.sio; tests/compile-fail/epistemic_observation_presence_cannot_be_measurement.sio; tests/compile-fail/epistemic_observation_feature_cannot_identify.sio; tests/compile-fail/epistemic_regularized_observation_cannot_be_history.sio; tests/compile-fail/epistemic_regularized_observation_direct_construction.sio; tests/compile-fail/epistemic_regularized_observation_cannot_be_recorded_measurement.sio
 Read-Set: docs/research/psychiatric_temporal_authority_receipt_matrix_2026-07-21.md; docs/research/psychiatric_counterfactual_authority_abstention_contract_2026-07-21.md; docs/internal/concepts/SEMANTIC_LANE_CONTRACT.md
 Positive-Witness: direct receipt control and bounded two-module library import smoke, including a history-plus-transformation-to-regularized chain with declared source-system and transformation identity propagation, on the current default/fallback wrapper; future synthetic import-bearing receipt fixture after #901 source-fresh imported-native acceptance
-Negative-Witness: imported direct-construction rejection and substitutions from presence, feature-use, or regularized representation into measurements, identification, or history; future expanded substitutions from act/regularized representations into reactivity, transport, or decision categories
+Negative-Witness: imported direct-construction rejection and substitutions from presence, feature-use, or regularized representation into measurements, identification, or history; a parenthesization claim without a declared closed operator and discriminating collision; future expanded substitutions from act/regularized representations into reactivity, transport, or decision categories
 Acceptance-Gate: bash scripts/dev/check_docs_consistency.sh; filtered local harness for the direct controls and qualified default/fallback small-import smoke; source-fresh full import fixture only after #901, with fallback=0
 Integration-Target: research documentation branch; future library-first package after owner acceptance
 Authoritative-Only-If: the narrow API is authoritative only for its selected nominal categories; the broader path is authoritative only if a source-fresh imported-native witness proves the claimed receipt distinction without fallback, while all empirical and clinical claims remain independently governed
@@ -462,13 +529,13 @@ Authoritative-Only-If: the narrow API is authoritative only for its selected nom
 ~~~
 Semantic-Outcome: informative observation is represented as a structured and ordered research provenance boundary rather than a missingness flag or neutral state readout
 Concept-Status-Before: ObservationProcessReceipt names the general observation mechanism but does not distinguish opportunity, presence, selection, assessment act, reactivity status, and task-specific feature use
-Concept-Status-After: opportunity, presence, selection, measurement act, recorded measurement, observation-history reference, transformation, regularized representation, feature use, and abstention have a narrow private-receipt library preflight plus an explicit no-promotion matrix, collision design, declared source-identity propagation, and source-fresh future fixture boundary
-Distinctions-Added: opportunity != presence != selection != measurement act != recorded response; source identity continuity != source equivalence or transport; history reference != regularized representation; regularized representation != raw recorded measurement; derivation receipt != raw-history recovery; reactivity status != intervention effect; prediction use != causal identification; regularization != original observation history
+Concept-Status-After: opportunity, presence, selection, measurement act, recorded measurement, observation-history reference, transformation, regularized representation, feature use, and abstention have a narrow private-receipt library preflight plus an explicit no-promotion matrix, collision design, declared source-identity propagation, an order-versus-algebra audit, and source-fresh future fixture boundary
+Distinctions-Added: opportunity != presence != selection != measurement act != recorded response; source identity continuity != source equivalence or transport; history reference != regularized representation; regularized representation != raw recorded measurement; pipeline order sensitivity != non-associative fusion; derivation receipt != raw-history recovery; reactivity status != intervention effect; prediction use != causal identification; regularization != original observation history
 Distinctions-Preserved: ordered path != commutative endpoint; model representation != empirical claim; compilation != clinical authority
 Distinctions-Erased: none
 Evidence-Run: bash scripts/dev/check_docs_consistency.sh; bash scripts/dev/check_docs_registry.sh; git diff --check
 Fallback-Path: current small-import smoke reports source=fallback and fallback=unresolved_default_x86_64_linux; it is retained only as a qualified API smoke, never as source-fresh evidence
 Legacy-Kept: the umbrella ObservationProcessReceipt remains the prior temporal-matrix vocabulary; the direct and small-import nominal controls remain bounded preflight evidence, not imported-native parity
 Conflicting-Lanes: none observed at claim time; imported-native #901 work remains owned by the compiler/PBPK lane
-Next-Semantic-Interface: consider a library-first synthetic receipt fixture only after #901 source-fresh imported-native acceptance
+Next-Semantic-Interface: after #901 source-fresh imported-native acceptance, consider a generic transformation-path fixture with explicit availability boundaries and an operator-plus-collision requirement before any parenthesization-sensitive claim
 ~~~
