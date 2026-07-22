@@ -18,14 +18,14 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.probe
 **Demetrios Chiuratto Agourakis**
 *Independent researcher*
 
-**Status:** draft v0.1 — arXiv target: cs.LG (cross-list math.DS)
-**Markers:** `[FILL]` = number or detail to be taken from the run artefacts. `[CHECK]` = claim requiring a citation check before submission.
+**Status:** draft v0.3 — arXiv target: cs.LG (cross-list math.DS)
+**Markers:** `[FILL]` = still open (only Zenodo deposit). Run numbers from `PROBE-RESULT-*.md`, multi-seed panels in `PROBE-RESULT-multiseed.md` / `artifacts/multiseed_*.json`, and the harnesses they cite.
 
 ---
 
 ## Abstract
 
-When gradients vanish across a deep or recurrent composition, at least three structurally distinct mechanisms can be responsible, and they call for different remedies: (i) *magnitude decay*, in which the whole singular spectrum of the composed Jacobian slides downward; (ii) *rank collapse*, in which the representation degenerates towards rank one; and (iii) *structural subspace annihilation*, in which a small subspace is extinguished while the bulk of the spectrum remains healthy. Existing diagnostics — dynamical isometry, Lyapunov spectra, rank-collapse measures — characterise bulk properties and do not separate the third case from the first two. We introduce a discriminative probe consisting of a depth-resolved gap statistic, two principal-angle alignment measures (consecutive-factor and prefix-to-next-factor), and an `align(k)` curve whose *shape* distinguishes a small dead subspace from generic low effective rank. The central methodological contribution is a conditional null — the **orientation scramble** — which inserts random orthogonal matrices between factors, exactly preserving every local singular value, local multiplicity and depth while destroying only the geometric correspondence between the output of one factor and the input of the next. On synthetic chains with known ground truth we show that a gap statistic alone is *not* evidence of selective composition: matched chains with rotated singular bases produce gaps exceeding two decades at depth. Applied to a trained LSTM on a long-dependency copy task, the probe returns a negative: an apparent positive at [FILL: d=56] is eliminated by the `align(k)` shape, which follows the low-rank profile, and by the untrained-initialisation control, in which alignment is *higher* ([FILL: 0.99–1.00]) than in the trained network. Vanishing gradients in this setting are magnitude and rank, not structural annihilation.
+When gradients vanish across a deep or recurrent composition, at least three structurally distinct mechanisms can be responsible, and they call for different remedies: (i) *magnitude decay*, in which the whole singular spectrum of the composed Jacobian slides downward; (ii) *rank collapse*, in which the representation degenerates towards rank one; and (iii) *structural subspace annihilation*, in which a small subspace is extinguished while the bulk of the spectrum remains healthy. Existing diagnostics — dynamical isometry, Lyapunov spectra, rank-collapse measures — characterise bulk properties and do not separate the third case from the first two. We introduce a discriminative probe consisting of a depth-resolved gap statistic, two principal-angle alignment measures (consecutive-factor and prefix-to-next-factor), and an `align(k)` curve whose *shape* distinguishes a small dead subspace from generic low effective rank. The central methodological contribution is a conditional null — the **orientation scramble** — which inserts random orthogonal matrices between factors, exactly preserving every local singular value, local multiplicity and depth while destroying only the geometric correspondence between the output of one factor and the input of the next. On synthetic chains with known ground truth we show that a gap statistic alone is *not* evidence of selective composition: matched chains with rotated singular bases produce gaps exceeding two decades at depth. Applied to a trained LSTM on the long-dependency *adding* problem, the probe returns a negative: an apparent positive (Cohen $d=+56$ at a frozen $m^\dagger=4$ against the orientation-scramble null alone) is eliminated by the `align(k)` shape, which follows the low-rank profile (trained h→h stays $0.9\to0.97$ out to $k=12$), and by the untrained-initialisation control, in which alignment is *higher* ($0.99$–$1.00$) than in the trained network ($0.92$ at $k=4$). Vanishing gradients in this setting are magnitude and rank, not structural annihilation.
 
 **Keywords:** vanishing gradients, Jacobian spectra, Lyapunov exponents, principal angles, recurrent networks, negative results, null models
 
@@ -170,15 +170,17 @@ This preserves **exactly**: every local singular value, every local multiplicity
 
 It is therefore the conditional null of the mechanism: any excess of the observed statistic over this null is attributable to inter-factor geometry and to nothing else.
 
-Protocol: [FILL: 64] signed-permutation scrambles per sequence; [FILL: 16] Haar scrambles on a fixed subset of [FILL: 32] sequences; identical maximisation over $m$; identical censoring treatment. Report the paired distribution
+**As executed in the runs of Section 6.** One orientation scramble per sequence, with each $Q_t$ drawn by QR factorisation of a standard-normal matrix (Haar on $O(n)$ up to the usual sign convention of the thin QR), applied independently to each of $n=40$ sequences for the full control curves (`run_probe_full.py`) and $n=200$ sequences for the Cohen-$d$ readout (`train_and_probe_lstm.py`). The ResMLP clean-target curves average $16$ input draws and $16$ independent scrambles (`deep_ffn_train.py`). Identical maximisation over $m$ (or the frozen discovery/confirmation split for $m^\dagger$); identical censoring treatment.
 
-$$\Delta_i(T) = G_i^*(T) - \operatorname{median}_b G_{i,b}^{*,\mathrm{scr}}(T)$$
-
-rather than per-sequence labels. Empirical $p = (1+\#\{G_{\mathrm{null}}\ge G_{\mathrm{obs}}\})/(B+1)$.
+> **Protocol debt.** A heavier design — $64$ signed-permutation scrambles per sequence plus $16$ Haar scrambles on a fixed subset of $32$ sequences, with the paired distribution
+>
+> $$\Delta_i(T) = G_i^*(T) - \operatorname{median}_b G_{i,b}^{*,\mathrm{scr}}(T)$$
+>
+> and empirical $p = (1+\#\{G_{\mathrm{null}}\ge G_{\mathrm{obs}}\})/(B+1)$ — is the right report form for a camera-ready submission. It is **not** what the committed artefacts used. Until that re-run is archived, the numbers below are means over sequences / draws, not paired $\Delta$ distributions.
 
 ### 4.2 Untrained initialisation
 
-Same architecture, [FILL: 16] independent seeds, same input vectors. Asks whether the pattern was acquired or was present in the parameterisation from the start. **In our application this null was decisive.**
+Same architecture, same input vectors, freshly drawn parameters. The decisive control curves of Section 6.1 used a single untrained seed against the trained seed (`run_probe_full.py`). A multi-seed panel (`multiseed_lstm_init.py`; $n{=}16$ seeds × $16$ sequences, pure-numpy analytic Jacobians, $H{=}40$, $T{=}30$) confirms that INIT h→h at $k{=}4$ is $0.992\pm 0.005$ (min $0.981$, max $0.997$; every seed $>0.95$). Asks whether the pattern was acquired or was present in the parameterisation from the start. **In our application this null was decisive, and the multi-seed panel shows it is not a one-seed fluke.**
 
 ### 4.3 Gate-wise weight shuffle
 
@@ -198,9 +200,15 @@ A random chain with injected low-rank structure. This is the null that fires in 
 
 ### 5.1 The three regimes are separable
 
-[FILL: table — aligned-basis chain, rotated-basis chain, Gaussian chain, planted low-rank chain; $G^*$, $m^*$, $A^{\mathrm{local}}$, $A^{\mathrm{carry}}$, `align(k)` shape]
+Calibration on depth-$T{=}16$ products of local $4/8/4$ spectra (`mechanism_analysis.py`; `probe-corrected-protocol.md`):
 
-Reference values from the calibration runs: alignment [FILL: aligned 0.988, rotated 0.530, Gaussian 0.415] against a baseline of $\sqrt{k/D}$; `align(k)` shoulder at [FILL: $k=4$] for the annihilation construction versus [FILL: $k=10$] for planted low rank versus baseline for the null construction.
+| stack | mean cos (dying $4$-subspaces) | `gap_dominance` ($T{=}16$) | $P(\mathrm{gap\_dominance}>1)$ under null |
+|---|---:|---:|---:|
+| **aligned** (common zero-divisor basis — genuine composing annihilation) | **0.988** | 5.71 | — |
+| **rotating** (matched $4/8/4$ per factor, bases re-drawn) | 0.530 | **99.4** | **97%** |
+| real Gaussian | 0.415 | 0.33 | 1% |
+
+Reference alignment against a baseline of $\sqrt{k/D}$: aligned $0.988$, rotated $0.530$, Gaussian $0.415$. The `align(k)` shoulder (`align_curve.py`, depth-$12$ stacks) sits at $k=4$ for the annihilation construction (align $0.99\to0.85$, peak $\gg$ baseline $0.50$), at $k=10$ for planted low rank (shared-complement rank $r{=}6$, dead $\approx 10$), and tracks the baseline for the Gaussian null.
 
 ### 5.2 A gap alone is not evidence
 
@@ -221,7 +229,7 @@ Consequently:
 
 > $G > 1$ or $G > 2$ is not, by itself, evidence of selective composition.
 
-A companion observation from an earlier iteration of this work makes the same point from the other side: a gap-dominance statistic gave [FILL: 99] for the rotated control against [FILL: 5.7] for genuine aligned structure, passing a fixed threshold in [FILL: 97%] of null samples. Against a Gaussian null the same statistic appeared significant at a [FILL: 1%] false-positive rate. **The choice of null, not the statistic, determined the conclusion.**
+A companion observation from an earlier iteration of this work makes the same point from the other side: a gap-dominance statistic gave $99.4$ for the rotated control against $5.71$ for genuine aligned structure, passing a fixed threshold in $97\%$ of null samples. Against a Gaussian null the same statistic appeared significant at a $1\%$ false-positive rate. **The choice of null, not the statistic, determined the conclusion.**
 
 Censoring beyond $T=8$ in the table above is the numerical ceiling of Section 3.5 and is removed by the QR method in the current implementation.
 
@@ -233,12 +241,14 @@ We apply the probe to two architectures. The first, an LSTM, produced an apparen
 
 ### 6.1 Target 1 — LSTM, and an architectural confound
 
-[FILL: hidden size $H=256$, task, lag sweep, training budget, final accuracy]
+**Primary run** (`run_probe_full.py`, `PROBE-RESULT-lstm-adding.md`): LSTMCell, hidden size $H=40$, trained on the *adding* problem (two marked positions in a length-$T{=}30$ sequence; target $=$ sum of the marked values) for $2500$ Adam steps, test MSE $8\times 10^{-4}$ against chance variance $\approx 0.17$. Control curves average $n=40$ sequences. A naive readout — orientation-scramble null alone, frozen $m^\dagger=4$ — reported trained h→h alignment $0.92$ versus scramble $0.27$, **Cohen $d=+56$**, and would have been labelled subspace death.
 
-An apparent signature was observed at [FILL: $d=56$]. It did not survive:
+An apparent signature was observed at Cohen $d=+56$. It did not survive:
 
-1. **`align(k)` shape.** The curve followed the low-rank profile — alignment persisting to large $k$ — rather than exhibiting a shoulder at small $k$.
-2. **Untrained-initialisation control (decisive).** Alignment in the untrained network was [FILL: 0.99–1.00], *higher* than in the trained network. An equal value would have been ambiguous, since learned structure could be superimposed on architectural structure; a value that *decreases* with training cannot be read as acquisition.
+1. **`align(k)` shape.** The curve followed the low-rank profile — trained h→h $0.76,0.84,0.90,0.92,0.95,0.96,0.97$ at $k=1,2,3,4,6,8,12$ (baseline at $k{=}12$ is $0.55$) — rather than a small-$k$ shoulder with a healthy bulk.
+2. **Untrained-initialisation control (decisive).** Alignment in the untrained network was $0.99$–$1.00$ at $k=4$–$12$, *higher* than the trained $0.92$. An equal value would have been ambiguous, since learned structure could be superimposed on architectural structure; a value that *decreases* with training cannot be read as acquisition. Multi-seed ($n{=}16$, §4.2): INIT@$k{=}4$ mean $0.992\pm 0.005$, min $0.981$ — every seed above the trained value.
+
+**Scale check** (`probe_h256_init.py`, `PROBE-RESULT-h256-scale.md`): untrained $H{=}256$, $T{=}200$, pure-numpy analytic LSTM Jacobian (validated to $7\times 10^{-8}$ against autograd). INIT h→h $\approx 1.00$ at every $k\in\{1,\ldots,63\}$ against baseline $\sqrt{k/(2H)}\in[0.04,0.35]$. The architectural confound is sharper at scale, not weaker.
 
 The mechanism of the confound is now identified and is worth stating, because it generalises: **in an LSTM the same recurrent weight matrix $W_{hh}$ appears at every time step.** Successive $J_t$ are therefore the same operator modulated by gates, and they share singular structure by construction. Any recurrence with a shared backbone will exhibit near-unit alignment independently of learning. This is the same disqualification that excludes S4 and Mamba (Section 3.6), arriving through a different route: there, a diagonal state matrix; here, a repeated dense one.
 
@@ -246,39 +256,46 @@ The mechanism of the confound is now identified and is worth stating, because it
 
 A feedforward network with **distinct weights per layer** has no shared backbone, and therefore nothing that fabricates alignment. This is confirmed at initialisation: branch Jacobians $F'_l = J_l - I$ in an untrained network sit at or marginally below the analytic baseline.
 
-[FILL: confirm width/depth of this initialisation check — the tabulated baseline implies $d=64$, whereas the trained network below has $W=96$]
+**Initialisation cleanliness check** (`deep_ffn_probe.py`): untrained residual FFN with *distinct* random weights per layer, depth $L{=}24$, ambient dimension $d{=}64$, branch width $h{=}128$; curves averaged over $12$ input draws. The tabulated baseline uses $d{=}64$ (this check), not the trained width of Section 6.3.
 
 | $k$ | 1 | 2 | 4 | 8 | 16 | 32 |
 |---|---:|---:|---:|---:|---:|---:|
 | baseline $\sqrt{k/d}$ | 0.12 | 0.18 | 0.25 | 0.35 | 0.50 | 0.71 |
 | untrained $F'_l$ | 0.10 | 0.15 | 0.21 | 0.30 | 0.43 | 0.64 |
 
-Excess: $-0.02$. **Any signal above the null in a trained network of this class would therefore be real.**
+Excess: $-0.02$. **Any signal above the null in a trained network of this class would therefore be real.** (The trained ResMLP of §6.3 uses width $W{=}96$; its own init row is reported there and likewise sits at the scramble baseline.)
 
 ### 6.3 Result on the clean target
 
-ResMLP, width $W=96$, depth $L=8$, trained to [FILL: 96%] accuracy on $y=\operatorname{sign}(x_0x_1+x_2x_3-x_4x_5)$.
+ResMLP, width $W=96$, depth $L=8$. **Single-seed reference** (`deep_ffn_train.py`): **96%** test accuracy (Adam, $5000$ steps, BCE-with-logits, test $n{=}4000$). **Multi-seed panel** (`multiseed_resmlp.py`; $n{=}16$ seeds, early-stop at acc $\ge 0.90$, mean acc $0.941\pm 0.006$):
 
 | $k$ | 1 | 2 | 4 | 8 | 16 | 32 | 48 |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| baseline $\sqrt{k/d}$ | 0.10 | 0.14 | 0.20 | 0.29 | 0.41 | 0.58 | 0.71 |
-| trained | 0.09 | 0.12 | 0.17 | 0.25 | 0.36 | 0.53 | 0.66 |
-| untrained | 0.08 | 0.12 | 0.17 | 0.25 | 0.35 | 0.51 | 0.64 |
-| orientation scramble | 0.08 | 0.12 | 0.17 | 0.24 | 0.35 | 0.51 | 0.64 |
+| baseline $\sqrt{k/W}$ | 0.10 | 0.14 | 0.20 | 0.29 | 0.41 | 0.58 | 0.71 |
+| trained (16 seeds) | 0.083 | 0.121 | 0.174 | 0.250 | 0.359 | 0.519 | 0.649 |
+| untrained | 0.080 | 0.114 | 0.168 | 0.243 | 0.349 | 0.507 | 0.635 |
+| orientation scramble | 0.081 | 0.118 | 0.169 | 0.244 | 0.350 | 0.507 | 0.635 |
 
-Trained $\approx$ untrained $\approx$ orientation-scramble null at every $k$. No shoulder at small $k$; no plateau at large $k$; no architectural inflation.
+Trained $\approx$ untrained $\approx$ orientation-scramble null at every $k$ (absolute levels). No shoulder at small $k$; no plateau at large $k$; no architectural inflation.
 
-> ⚠️ **Two reporting requirements before this table is citable.**
->
-> **(i) Dispersion.** The values above are point estimates. The pre-registered statistic is the *paired* distribution $\Delta_i = \mathrm{align}_i - \operatorname{median}_b \mathrm{align}_{i,b}^{\mathrm{scr}}$ over input points and seeds, with an empirical $p$-value. Trained exceeds untrained by 0.01–0.02 at large $k$; without a spread this offset is uninterpretable, and "$\approx$" is an eyeball judgement rather than a result. The data required is already computed. [FILL: $n$ input points, $n$ seeds, $\Delta$ distribution, $p$]
->
-> **(ii) Baseline.** All three conditions sit systematically below the analytic $\sqrt{k/d}$, by a margin too consistent to be noise. The likely cause is a mismatch between the analytic expression (derived for the mean squared cosine between uniformly random subspaces) and the statistic actually computed. The **orientation-scramble null is the correct comparator** and should lead; $\sqrt{k/d}$ belongs in a footnote with this caveat. Fortunately the conclusion is unchanged, since trained $\approx$ scramble exactly.
+**Paired $\Delta$ (multi-seed).** For each seed and input, $\Delta_i(k)=\mathrm{align}_i^{\mathrm{tr}}(k)-\operatorname{median}_{b=1\ldots 8}\mathrm{align}_{i,b}^{\mathrm{scr}}(k)$; pooled $n{=}16\times 16{=}256$. One-sided sign-flip $p$ under $H_0$: $\Delta$ symmetric about 0 ($B{=}9999$):
+
+| $k$ | mean $\Delta$ | sd | $p_{\mathrm{signflip}}$ |
+|---:|---:|---:|---:|
+| 1 | $+0.0025$ | 0.025 | 0.053 |
+| 4 | $+0.0043$ | 0.013 | 0.0001 |
+| 16 | $+0.0090$ | 0.006 | 0.0001 |
+| 48 | $+0.0134$ | 0.003 | 0.0001 |
+
+A mean $\Delta$ of order $0.01$ is *detectable* at this $n$ for $k\ge 2$, but is **not** a subspace-annihilation signal: (i) no $k$ meets a substantive threshold mean$\Delta>0.05$ with $p<0.05$; (ii) mean $\Delta$ *rises* with $k$ (opposite of a small-$k$ shoulder); (iii) absolute curves remain on the scramble / init floor. The single-seed “trained exceeds untrained by $0.01$–$0.02$ at large $k$” eyeball is a tiny offset, not a signature. Full tables: `PROBE-RESULT-multiseed.md`.
+
+> ⚠️ **Baseline caveat.** All three conditions sit systematically below the analytic $\sqrt{k/W}$, by a margin too consistent to be noise. The likely cause is a mismatch between the analytic expression (derived for the mean squared cosine between uniformly random subspaces) and the statistic actually computed. The **orientation-scramble null is the correct comparator** and should lead; $\sqrt{k/W}$ belongs in a footnote with this caveat.
 
 ### 6.4 Scope
 
 Vanishing gradients in these networks are magnitude decay and low effective rank in *non-aligned* directions — not annihilation over a common subspace.
 
-We state the scope without softening. The clean target is a residual network of moderate depth ($L=8$) that trains successfully to [FILL: 96%]. Residual connections exist precisely to prevent composition failure, and a network that trains well may simply have no composition failure to detect. This is therefore a negative obtained under conditions favourable to absence. The strongest remaining test in this class would be a plain (non-residual) network deep enough to exhibit genuine optimisation difficulty; we did not run it.
+We state the scope without softening. The clean target is a residual network of moderate depth ($L=8$) that trains successfully to $96\%$. Residual connections exist precisely to prevent composition failure, and a network that trains well may simply have no composition failure to detect. This is therefore a negative obtained under conditions favourable to absence. The strongest remaining test in this class would be a plain (non-residual) network deep enough to exhibit genuine optimisation difficulty; we did not run it.
 
 What the result does establish: **the signature is not a fingerprint left by ordinary training.** If a link between non-associative composition and learning exists, it must be engineered into an architecture or an objective, not discovered in networks that compose additively.
 
@@ -304,29 +321,34 @@ This is, notably, what the framework predicts. Under additive composition, annih
 - Single task family.
 - The discovery/confirmation split controls selection of $m$ but not selection of architecture or task.
 - The performance link is not tested; no claim of a failure mode is made.
-- [FILL: any remaining censoring after the QR conversion]
+- Product-formation censoring of $G(T)$ (ceiling $\sim 12$–$16$ decades for direct SVD of $P_T$) is removed by the discrete QR / Lyapunov method (`lyapunov_qr.py`): at $T{=}256$ the QR spectrum reaches $\min\log_{10}\sigma\approx -312$ with a gap of $34.6$ decades, with no residual ceiling in the recorded range. Remaining numerical risk is ordinary floating-point noise in the per-step QR, not product-formation censoring.
 
 ---
 
 ## 9. Code and data availability
 
-[FILL: repository, commit, artefact DOI — Zenodo]
+Harnesses and result notes live in the Sounio repository under `docs/research/`:
 
-Sequences, seeds and per-window statistics are persisted in the artefact.
+- Protocol / analysis: `train_and_probe_lstm.py`, `run_probe_full.py`, `probe_h256_init.py`, `deep_ffn_probe.py`, `deep_ffn_train.py`, `multiseed_lstm_init.py`, `multiseed_resmlp.py`, `mechanism_analysis.py`, `align_curve.py`, `lyapunov_qr.py`
+- Frozen result notes: `PROBE-RESULT-lstm-adding.md`, `PROBE-RESULT-h256-scale.md`, `PROBE-RESULT-deep-ffn.md`, `PROBE-RESULT-multiseed.md`, `probe-corrected-protocol.md`, `align-curve-and-target.md`, `lyapunov-repositioning.md`
+- Multi-seed JSON: `artifacts/multiseed_lstm_init.json`, `artifacts/multiseed_resmlp.json`
+- Repository: [https://github.com/Sounio-lang/sounio](https://github.com/Sounio-lang/sounio) (paths above on the commit that lands this draft)
+
+[FILL: frozen artefact tarball + DOI — Zenodo not yet deposited.] The multi-seed JSONs above are the minimum deposit payload for a camera-ready re-run.
 
 ---
 
 ## Acknowledgements
 
-[FILL]
+None beyond the AI tools listed below.
 
 ## AI contribution disclosure (GAIDeT / ICMJE 2025)
 
 The following generative AI tools were used, with the tasks delegated to each:
 
-- [FILL: tool + version] — [FILL: task, e.g. critical review of experimental design, null model specification]
-- [FILL: tool + version] — [FILL: task, e.g. implementation of the probe and controls]
-- [FILL: tool + version] — [FILL: task, e.g. drafting of the manuscript]
+- **Claude Opus 4.8 (Claude Code)** — critical review of experimental design and null-model specification across the successive protocol revisions; drafting assistance on method sections.
+- **Claude / Codex agents (Claude Code, OpenAI Codex)** — implementation support for the probe harnesses and control scripts under `docs/research/`.
+- **Claude Opus 4.8 / Grok (xAI)** — drafting and editorial passes on this manuscript; bibliographic verification of references (PR #1367); filling of run numbers from committed artefacts (this draft).
 
 The author reviewed, verified and takes full responsibility for all content, including all numerical results and their interpretation.
 

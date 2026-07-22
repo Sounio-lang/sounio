@@ -64,6 +64,42 @@ Residual / future: carrying init words on the AST/Program (no process-global tab
 would be more robust under capacity pressure (`GLOBAL_VAR_INIT_*` is still 128 slots)
 and re-parse-heavy probe paths; not required for the measured science vertical.
 
+## Defect A′ — multi-mod BSS offset collision (two modules with BSS scalars) — **FIXED (wave11, 2026-07-21)**
+
+When **two imported modules** each own a module-level f64/i64 BSS global, each is
+lowered with **module-local** BSS offset 0. Multi-mod merge used to append functions
+**without** relocating `param_count` / `IrLoadGlobal`/`IrStoreGlobal` immediates by
+`acc.bss_total_size`, so both slots and both loads shared `BSS_BASE+0`. Last init wins:
+
+```
+// a.sio: let A_CONST: f64 = 1.5
+// b.sio: let B_CONST: f64 = 2.5
+// was: both get_*_bits() → 2.5 bits | now: 1.5 and 2.5 distinct
+```
+
+**Fix (wave11 Agent D, PR #1382):** `ir_merge_place_and_remap_function` /
+`ir_merge_modules_into` add `bss_offset_delta = dst.bss_total_size` to BSS slot
+offsets and global load/store immediates (and absolute `BSS_BASE+off` `IrLoadImm`),
+then `dst.bss_total_size += src.bss_total_size`. Complements Wave11e Defect A
+suppress (`GLOBAL_VAR_INIT` accumulate) — both are required for multi-import science
+with per-module constants.
+
+Gate: `tests/run-pass/imported_module_f64_const.sio` (A then B, both nonzero and
+distinct) via `scripts/ci/madaros_imported_f64_const_gate.sh`.
+
+Status: **CLOSED wave11** (source fix). **Prebuilt refreshed Wave12e (2026-07-21)** —
+`bin/madaros-linux-x86_64` now carries the remap; default `bin/souc` passes
+`scripts/ci/madaros_imported_f64_const_gate.sh` and the Wave12 tip-green lock
+(`scripts/dev/madaros_wave12_tip_green_gate.sh`, gate `imported_f64`).
+
+Residual closed Wave13 (2026-07-21): bare `use m::{CONST}` Ident of a global
+**from main** — seed now preseeds external BSS after own items
+(`lowerer_preseed_external_bss_globals_mut`); merge DEDUPs BSS by name and
+resolves `IrLoadGlobal` by name. Gate arm:
+`tests/run-pass/imported_module_f64_const_bare_ident.sio` via
+`scripts/ci/madaros_imported_f64_const_gate.sh`.
+Audit: `docs/audit/MADAROS_WAVE13_BARE_CROSSMOD_F64_IDENT_2026-07-21.md`.
+
 ## Defect B — passing a global array by `&!` ref — **FIXED (wave10e, 2026-07-21)**
 
 Passing **any module-level global array** by `&!` reference used to silently
@@ -103,8 +139,9 @@ by ref.
 
 ## Migration status
 
-SPECIAL: green on Madaros. STATS: Defect A closed Wave11e (lognormal_pdf const). LINALG: Defect B
-(global `&!` array ref) is fixed wave10e — remaining linalg blockers are
+SPECIAL: green on Madaros. STATS: Defect A closed Wave11e (lognormal_pdf const);
+Defect A′ multi-mod BSS remap closed wave11 (A_CONST/B_CONST distinct). LINALG:
+Defect B (global `&!` array ref) is fixed wave10e — remaining linalg blockers are
 independent of that ref path. After the compiler fixes ship in the prebuilt
-(madaros-prebuilt-refresh), the SPECIAL gate can drop
-`SOUNIO_SOUC_ENGINE=lean_single`; STATS stays on lean_single until A lands.
+(madaros-prebuilt-refresh), the SPECIAL/STATS gates can drop
+`SOUNIO_SOUC_ENGINE=lean_single` where they still pin it.

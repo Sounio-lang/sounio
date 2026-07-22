@@ -69,6 +69,13 @@ if [[ -f tests/run-pass/madaros_root2_multimodule_method.sio ]]; then
     ROOT2_MULTIMODULE_METHOD_OK
 fi
 
+# Inline method chain on imported Epistemic (Root-2 chain residual closeout)
+if [[ -f tests/run-pass/madaros_root2_multimodule_method_chain.sio ]]; then
+  run_ok "root2 multimodule method chain regression" \
+    tests/run-pass/madaros_root2_multimodule_method_chain.sio \
+    ROOT2_MULTIMODULE_METHOD_CHAIN_OK
+fi
+
 mkdir -p "$ROOT/artifacts/compiler"
 COMMIT="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 STATUS=fail
@@ -84,16 +91,19 @@ cat >"$ROOT/artifacts/compiler/madaros_knowledge_method_residual_receipt.v1.json
   "claims": [
     "epistemic_method_form_multimodule_import",
     "epistemic_measured_val_add_mul_std_method_path",
+    "epistemic_inline_method_chain_multimodule",
     "free_vs_method_numeric_parity",
     "legacy_method_witness_now_required_green"
   ],
   "claims_not_made": [
     "language_knowledge_t_generic_import",
     "full_root2_census_closed",
-    "enum_ctor_path"
+    "enum_ctor_path",
+    "arbitrary_depth_method_chain_census"
   ],
   "closed_elsewhere": [
-    "gum_k95_f64_i64_cast_fixed (Wave10: scripts/epistemic_trust_gate.sh Section A; #1252+#983)"
+    "gum_k95_f64_i64_cast_fixed (Wave10: scripts/epistemic_trust_gate.sh Section A; #1252+#983)",
+    "root2_inline_method_chain (lower_method_recv_type MethodCall/Call; scripts/madaros_root2_method_gate.sh)"
   ]
 }
 EOF

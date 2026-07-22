@@ -1463,6 +1463,54 @@ fn checker_lower_named_type_with_args_mut(c: *mut Checker, path: AstPath, type_a
             }
         }
     }
+    // Generic struct type application: `S<T>` / `S<F>` must monomorphize to the
+    // mangled name `S__T` / `S__F` — matching the by-value lower_named_type_with_args
+    // and checker_check_struct_lit_inplace paths. Without this the *mut spine (the
+    // path that actually runs during check) dropped type_args and returned bare
+    // `ty_named(S)`, so a body `return S { .. }` typed as `S__F` failed E008
+    // (expected S / found S__F) and field element methods on F failed E011.
+    // See Wave11 cd_exact_generic_i64 / ExactRing residual.
+    match type_args {
+        Some(args) => {
+            let tmpl_idx = struct_table_find((*c).structs, name)
+            if tmpl_idx >= 0 {
+                let tmpl = struct_table_get((*c).structs, tmpl_idx)
+                if tmpl.is_generic_template {
+                    let lowered_args = checker_lower_type_expr_list_mut(c, *args)
+                    let tmpl_name = tmpl.name
+                    let tmpl_fields = field_info_list_clone(&tmpl.fields)
+                    let tmpl_tp_buf = TypeParamBuf { names: tmpl.type_param_names, count: tmpl.type_param_count }
+                    let tmpl_is_linear = tmpl.is_linear
+                    let tmpl_visibility_kind = tmpl.visibility_kind
+                    let tmpl_defining_module_id = tmpl.defining_module_id
+                    let tmpl_visibility = tmpl.visibility
+                    let tmpl_defining_module = tmpl.defining_module
+                    let mangled = mangle_generic_name(&tmpl_name, &lowered_args)
+                    let existing_idx = struct_table_find((*c).structs, mangled)
+                    if existing_idx >= 0 {
+                        return ty_named(mangled)
+                    }
+                    let mono_fields = monomorphize_fields(tmpl_fields, tmpl_tp_buf, &lowered_args)
+                    let mono_info = StructInfo {
+                        name: mangled,
+                        fields: mono_fields.0,
+                        field_count: mono_fields.1,
+                        is_linear: tmpl_is_linear,
+                        type_param_count: 0,
+                        type_param_names: [Name { buf: [0; 128], len: 0 }; 8],
+                        is_generic_template: false,
+                        visibility_kind: tmpl_visibility_kind,
+                        defining_module_id: tmpl_defining_module_id,
+                        visibility: tmpl_visibility,
+                        defining_module: tmpl_defining_module,
+                    }
+                    struct_table_add((*c).structs, mono_info)
+                    return ty_named(mangled)
+                }
+            }
+        }
+        None => {}
+    }
     checker_lower_named_type_mut(c, path)
 }
 

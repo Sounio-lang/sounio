@@ -45,6 +45,15 @@ run_ok "knowledge method form" \
   tests/run-pass/madaros_knowledge_method_form.sio \
   KNOWLEDGE_METHOD_FORM_OK
 
+# Inline method chain (was residual: SEGV at seed lower for non-Ident receivers)
+run_ok "same-module method chain" \
+  tests/run-pass/madaros_root2_method_chain.sio \
+  ROOT2_METHOD_CHAIN_OK
+
+run_ok "multi-module method chain" \
+  tests/run-pass/madaros_root2_multimodule_method_chain.sio \
+  ROOT2_MULTIMODULE_METHOD_CHAIN_OK
+
 mkdir -p "$ROOT/artifacts/compiler"
 COMMIT="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 STATUS=fail
@@ -59,13 +68,16 @@ cat >"$ROOT/artifacts/compiler/madaros_root2_method_receipt.v1.json" <<EOF
     "same_module_self_ref_method_call",
     "same_module_associated_type_method",
     "same_module_method_on_method_return",
+    "same_module_inline_method_chain",
     "multimodule_associated_type_method_import",
     "multimodule_instance_method_call",
+    "multimodule_inline_method_chain",
     "epistemic_method_form_multimodule"
   ],
   "claims_not_made": [
     "full_root2_census_closed",
-    "enum_ctor_path"
+    "enum_ctor_path",
+    "arbitrary_depth_method_chain_census"
   ]
 }
 EOF
