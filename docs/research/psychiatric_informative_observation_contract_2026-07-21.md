@@ -2,13 +2,14 @@
 topic_id: repo.docs.research.psychiatric-informative-observation-contract-2026-07-21
 authority: historical
 audience: researchers
-last_validated: 2026-07-21
+last_validated: 2026-03-07
 validated_by: A6
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.psychiatric-informative-observation-contract-2026-07-21
 -->
 
+
 <!-- docs:status-note:start -->
-> Docs status: historical
+> Docs status: `historical`
 > This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
 <!-- docs:status-note:end -->
 
@@ -389,11 +390,28 @@ constructed by this API, and it cannot be passed where the API requires a
 history receipt. This is still a small nominal boundary, not full provenance
 graph completeness or a source-fresh imported-native closure.
 
-## Future Executable Boundary
+## Source-Bound Executable Boundary
 
-Only after the source-fresh imported-native #901 acceptance path exists, the
-full import-bearing collision fixture may exercise the receipt taxonomy and
-test the following conditions:
+The bounded import smokes now have a dedicated source-bound acceptance route:
+
+    SOUNIO_EPISTEMIC_RECEIPT_SOURCE_FRESH_KEEP=1 bash scripts/ci/epistemic_receipt_source_fresh_gate.sh
+
+It refuses a dirty checkout, builds a raw Madaros ELF from the committed
+checkout, records source and binary hashes, invokes that raw ELF directly for
+both import smokes, rejects fallback markers, and rechecks the source HEAD
+and tree after runtime evidence. A supplied or prebuilt ELF is deliberately
+not an alternate path through this gate.
+
+On the 2026-07-24 current-main prebuilt raw ELF, direct execution stopped at
+AST closure incomplete nodes=1 before either receipt smoke could be checked.
+The wrapper did execute both smokes, but declared source=fallback. Those
+observations establish neither a source-fresh runtime pass nor a semantic
+failure of the receipt library; they identify the missing provenance layer
+precisely.
+
+The broader import-bearing collision fixture remains conditional on the #901
+source-fresh imported-native acceptance path and should test the following
+conditions:
 
 1. **EncounterPresenceReceipt** is rejected where a
    **RecordedMeasurementReceipt** is required.
@@ -408,10 +426,10 @@ test the following conditions:
    and cannot be coerced into a zero observation or a decision candidate.
 
 The positive fixture should use distinct synthetic constants and execute with a
-source-fresh compiler (fallback=0) only to show that selected distinctions
-survive the bounded lowering/runtime path. The negative fixtures must reject
-category substitutions at compile time. None of these checks licenses a
-clinical workflow or requires a new parser feature.
+source-fresh compiler only to show that selected distinctions survive the
+bounded lowering/runtime path. The negative fixtures must reject category
+substitutions at compile time. None of these checks licenses a clinical
+workflow or requires a new parser feature.
 
 ## Falsifiers And Stop Conditions
 
@@ -445,16 +463,16 @@ Transformation: refine the research-only ObservationProcessReceipt into separate
 Types-Changed: private library-level nominal receipt types for opportunity, presence, selection, measurement act, recorded measurement, observation-history reference, transformation, regularized representation, observation-feature use, and abstention; declared source-system and transformation identity now propagate from route inputs into the private recorded/history/regularized representations; no parser or core type-system change
 Effects-Changed: none
 IR-Changed: none
-Claims-Introduced: a narrow library API can preserve distinct observation-process and transformation-provenance categories, including declared source-system identity across a selected regularization path, through direct and small-import controls; a future source-fresh import fixture can test the broader collision matrix
+Claims-Introduced: a narrow library API can preserve distinct observation-process and transformation-provenance categories, including declared source-system identity across a selected regularization path, through direct and small-import controls; a source-bound raw-ELF gate can test those two bounded import smokes without wrapper fallback; a future #901 fixture can test the broader collision matrix
 Claims-Forbidden: that absence from care indicates stability; that assessment is always neutral or always an intervention; that informative observation identifies a causal effect; that a care-system feature transports to a new setting; that this contract authorizes a clinical action
 Assumptions: the study or deployment can state relevant opportunity, channel, selection, measurement-act, and use context; any reactivity claim has separately scoped empirical evidence
-Write-Set: docs/research/psychiatric_informative_observation_contract_2026-07-21.md; stdlib/epistemic/observation_provenance.sio; tests/run-pass/epistemic_observation_provenance_import_smoke.sio; tests/compile-fail/epistemic_observation_provenance_direct_construction.sio; tests/compile-fail/epistemic_observation_presence_cannot_be_measurement.sio; tests/compile-fail/epistemic_observation_feature_cannot_identify.sio; tests/compile-fail/epistemic_regularized_observation_cannot_be_history.sio; tests/compile-fail/epistemic_regularized_observation_direct_construction.sio; tests/compile-fail/epistemic_regularized_observation_cannot_be_recorded_measurement.sio
+Write-Set: docs/research/psychiatric_informative_observation_contract_2026-07-21.md; stdlib/epistemic/observation_provenance.sio; tests/run-pass/epistemic_observation_provenance_import_smoke.sio; tests/compile-fail/epistemic_observation_provenance_direct_construction.sio; tests/compile-fail/epistemic_observation_presence_cannot_be_measurement.sio; tests/compile-fail/epistemic_observation_feature_cannot_identify.sio; tests/compile-fail/epistemic_regularized_observation_cannot_be_history.sio; tests/compile-fail/epistemic_regularized_observation_direct_construction.sio; tests/compile-fail/epistemic_regularized_observation_cannot_be_recorded_measurement.sio; scripts/ci/epistemic_receipt_source_fresh_gate.sh
 Read-Set: docs/research/psychiatric_temporal_authority_receipt_matrix_2026-07-21.md; docs/research/psychiatric_counterfactual_authority_abstention_contract_2026-07-21.md; docs/internal/concepts/SEMANTIC_LANE_CONTRACT.md
-Positive-Witness: direct receipt control and bounded two-module library import smoke, including a history-plus-transformation-to-regularized chain with declared source-system and transformation identity propagation, on the current default/fallback wrapper; future synthetic import-bearing receipt fixture after #901 source-fresh imported-native acceptance
+Positive-Witness: direct receipt control and bounded two-module library import smoke, including a history-plus-transformation-to-regularized chain with declared source-system and transformation identity propagation; wrapper evidence is qualified when it declares fallback, while the current-source claim requires epistemic_receipt_source_fresh_gate.sh and its receipt
 Negative-Witness: imported direct-construction rejection and substitutions from presence, feature-use, or regularized representation into measurements, identification, or history; future expanded substitutions from act/regularized representations into reactivity, transport, or decision categories
-Acceptance-Gate: bash scripts/dev/check_docs_consistency.sh; filtered local harness for the direct controls and qualified default/fallback small-import smoke; source-fresh full import fixture only after #901, with fallback=0
-Integration-Target: research documentation branch; future library-first package after owner acceptance
-Authoritative-Only-If: the narrow API is authoritative only for its selected nominal categories; the broader path is authoritative only if a source-fresh imported-native witness proves the claimed receipt distinction without fallback, while all empirical and clinical claims remain independently governed
+Acceptance-Gate: bash scripts/dev/check_docs_consistency.sh; filtered local harness for direct controls; bash scripts/ci/epistemic_receipt_source_fresh_gate.sh for the source-bound direct-raw two-smoke receipt; source-fresh full collision fixture only after #901
+Integration-Target: current-main private epistemic library; future broader library-first collision package after #901 owner acceptance
+Authoritative-Only-If: the narrow API is authoritative only for its selected nominal categories; direct raw runtime evidence requires a clean-checkout source-build receipt from epistemic_receipt_source_fresh_gate.sh; the broader path remains authoritative only if its separate #901 source-fresh imported-native witness proves the claimed receipt distinction without fallback, while all empirical and clinical claims remain independently governed
 ~~~
 
 ## Integration Receipt
@@ -466,9 +484,9 @@ Concept-Status-After: opportunity, presence, selection, measurement act, recorde
 Distinctions-Added: opportunity != presence != selection != measurement act != recorded response; source identity continuity != source equivalence or transport; history reference != regularized representation; regularized representation != raw recorded measurement; derivation receipt != raw-history recovery; reactivity status != intervention effect; prediction use != causal identification; regularization != original observation history
 Distinctions-Preserved: ordered path != commutative endpoint; model representation != empirical claim; compilation != clinical authority
 Distinctions-Erased: none
-Evidence-Run: bash scripts/dev/check_docs_consistency.sh; bash scripts/dev/check_docs_registry.sh; git diff --check
-Fallback-Path: current small-import smoke reports source=fallback and fallback=unresolved_default_x86_64_linux; it is retained only as a qualified API smoke, never as source-fresh evidence
+Evidence-Run: bash scripts/dev/check_docs_consistency.sh; bash scripts/dev/check_docs_registry.sh; local wrapper smokes with source=fallback; direct raw prebuilt replay blocked at AST closure before semantic smoke; git diff --check
+Fallback-Path: current wrapper small-import smokes report source=fallback and fallback=unresolved_default_x86_64_linux; they are retained only as qualified API smokes, never as source-fresh evidence
 Legacy-Kept: the umbrella ObservationProcessReceipt remains the prior temporal-matrix vocabulary; the direct and small-import nominal controls remain bounded preflight evidence, not imported-native parity
 Conflicting-Lanes: none observed at claim time; imported-native #901 work remains owned by the compiler/PBPK lane
-Next-Semantic-Interface: consider a library-first synthetic receipt fixture only after #901 source-fresh imported-native acceptance
+Next-Semantic-Interface: run epistemic_receipt_source_fresh_gate.sh on Foundry; then consider the broader library-first synthetic collision fixture after #901 source-fresh imported-native acceptance
 ~~~
