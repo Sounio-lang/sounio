@@ -12,6 +12,7 @@ KEEP_WORK="${SOUNIO_EPISTEMIC_RECEIPT_SOURCE_FRESH_KEEP:-0}"
 
 OBSERVATION_SMOKE="$ROOT_DIR/tests/run-pass/epistemic_observation_provenance_import_smoke.sio"
 PARENTHESIZATION_SMOKE="$ROOT_DIR/tests/run-pass/epistemic_parenthesization_receipts_import_smoke.sio"
+STATE_ALIASING_SMOKE="$ROOT_DIR/tests/run-pass/epistemic_state_aliasing_receipts_import_smoke.sio"
 
 fail() {
   echo "[epistemic-receipt-source-fresh] FAIL: $*" >&2
@@ -79,6 +80,7 @@ if [[ "${1:-}" == '--structural-only' ]]; then
   [[ -f "$ROOT_DIR/self-hosted/compiler/main.sio" ]] || fail 'missing modular compiler entry source'
   [[ -f "$OBSERVATION_SMOKE" ]] || fail "missing observation smoke: $OBSERVATION_SMOKE"
   [[ -f "$PARENTHESIZATION_SMOKE" ]] || fail "missing parenthesization smoke: $PARENTHESIZATION_SMOKE"
+  [[ -f "$STATE_ALIASING_SMOKE" ]] || fail "missing state-aliasing smoke: $STATE_ALIASING_SMOKE"
   echo '[epistemic-receipt-source-fresh] PASS: structural source-build and direct-raw receipt wiring is present'
   exit 0
 fi
@@ -105,6 +107,7 @@ LEAN_SHA256="$(portable_sha256 self-hosted/compiler/lean_single.sio)"
 BUILDER_SHA256="$(portable_sha256 "$BUILD_SCRIPT")"
 OBSERVATION_SHA256="$(portable_sha256 stdlib/epistemic/observation_provenance.sio)"
 PARENTHESIZATION_SHA256="$(portable_sha256 stdlib/epistemic/parenthesization_receipts.sio)"
+STATE_ALIASING_SHA256="$(portable_sha256 stdlib/epistemic/state_aliasing_receipts.sio)"
 RAW_MADAROS="$WORK/madaros"
 BUILD_LOG="$WORK/source-build.log"
 RECEIPT="$WORK/source-fresh-receipt.tsv"
@@ -128,6 +131,7 @@ RAW_SHA256="$(portable_sha256 "$RAW_MADAROS")"
 
 run_direct_smoke observation "$OBSERVATION_SMOKE" 'EPISTEMIC_OBSERVATION_PROVENANCE_IMPORT_SMOKE_PASS'
 run_direct_smoke parenthesization "$PARENTHESIZATION_SMOKE" 'EPISTEMIC_PARENTHESIZATION_RECEIPTS_IMPORT_SMOKE_PASS'
+run_direct_smoke state_aliasing "$STATE_ALIASING_SMOKE" 'EPISTEMIC_STATE_ALIASING_RECEIPTS_IMPORT_SMOKE_PASS'
 
 [[ -z "$(git status --porcelain)" ]] || fail 'source tree changed during direct raw receipt evidence'
 [[ "$(git rev-parse HEAD)" == "$SOURCE_HEAD" ]] || fail 'source HEAD changed during direct raw receipt evidence'
@@ -141,6 +145,7 @@ printf 'lean_single_sio_sha256\t%s\n' "$LEAN_SHA256" >>"$RECEIPT"
 printf 'build_script_sha256\t%s\n' "$BUILDER_SHA256" >>"$RECEIPT"
 printf 'observation_provenance_sha256\t%s\n' "$OBSERVATION_SHA256" >>"$RECEIPT"
 printf 'parenthesization_receipts_sha256\t%s\n' "$PARENTHESIZATION_SHA256" >>"$RECEIPT"
+printf 'state_aliasing_receipts_sha256\t%s\n' "$STATE_ALIASING_SHA256" >>"$RECEIPT"
 printf 'raw_madaros_sha256\t%s\n' "$RAW_SHA256" >>"$RECEIPT"
 printf 'execution_mode\tdirect-raw-elf-no-wrapper\n' >>"$RECEIPT"
 
