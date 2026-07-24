@@ -15,6 +15,21 @@ fail() {
 
 [[ -n "$RAW_MADAROS" ]] || fail "MADAROS_RAW_BIN must name a current-source Madaros ELF"
 [[ -x "$RAW_MADAROS" ]] || fail "Madaros ELF is missing or not executable: $RAW_MADAROS"
+
+stack_kb="${SOUNIO_MADAROS_CALL_ARITY_13_STACK_KB:-131072}"
+[[ "$stack_kb" =~ ^[1-9][0-9]*$ && ${#stack_kb} -le 9 ]] || fail "invalid stack size: $stack_kb"
+stack_before="$(ulimit -S -s 2>/dev/null)" || fail "soft stack limit is unavailable"
+[[ "$stack_before" == "unlimited" || "$stack_before" =~ ^[0-9]+$ ]] || fail "invalid soft stack limit: $stack_before"
+if [[ "$stack_before" != "unlimited" ]] && ((stack_before < stack_kb)); then
+  ulimit -S -s "$stack_kb" 2>/dev/null || fail "could not raise soft stack limit to ${stack_kb} KiB"
+fi
+stack_after="$(ulimit -S -s 2>/dev/null)" || fail "soft stack limit is unavailable after update"
+[[ "$stack_after" == "unlimited" || "$stack_after" =~ ^[0-9]+$ ]] || fail "invalid updated soft stack limit: $stack_after"
+if [[ "$stack_after" != "unlimited" ]] && ((stack_after < stack_kb)); then
+  fail "soft stack limit remained below ${stack_kb} KiB: $stack_after"
+fi
+echo "[madaros-call-arity-13] stack_kb before=$stack_before after=$stack_after requested=$stack_kb"
+
 trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$WORK"
 
