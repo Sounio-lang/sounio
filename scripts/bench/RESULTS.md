@@ -8,6 +8,7 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 
 | operation | 1M rows | Sounio ms | pandas ms | Sounio/pandas | before |
 |---|---|---|---|---|---|
+| two-sample tests: welch/cohens_d/glass/pooled_sd/point_biserial + mannwhitney_u/cles/rank_biserial/ks (1M rows, 1000 keys, 2 groups) | | ~18 | ~430 | **0.04x — wins 24x** | one-pass moments / group-split histogram; pandas = scipy + groupby.apply |
 | col_sum (8-accumulator ILP) | | 1.44 | 0.55 | **2.6x** | 3.9x |
 | col_mean (via 8-acc sum) | | 2.05 | 1.00 | **2.1x** | 2.3x |
 | filter_count (`bf_count_gt`, raw scan) | | 1.84 | 0.74 | **2.5x** | 12.1x |
