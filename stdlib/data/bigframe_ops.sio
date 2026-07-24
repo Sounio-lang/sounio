@@ -8432,3 +8432,113 @@ pub fn bf_weighted_geomean_dense_by(src: &BigFrame, key_col: i64, val_col: i64, 
 pub fn bf_weighted_geomean_scaled_by(src: &BigFrame, key_col: i64, val_col: i64, wt_col: i64, scaled_max: i64, scale: f64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_wstat_dense(src, key_col, val_col, wt_col, scaled_max, scale, 0) }
 /// Per-group WEIGHTED ENTROPY (Shannon entropy of the per-value weight distribution), broadcast. NATIVE + lean_single.
 pub fn bf_weighted_entropy_dense_by(src: &BigFrame, key_col: i64, val_col: i64, wt_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_wstat_dense(src, key_col, val_col, wt_col, vmax, 1.0, 1) }
+
+/// Per-group CATEGORICAL-ASSOCIATION analytics between two low-cardinality integer columns x,y
+/// via a 2D joint histogram (dense keys 0..1023; x in 0..xmax, y in 0..ymax, both <= 255). One
+/// joint count table per group yields the marginals, Shannon entropies H(X), H(Y), H(X,Y), the
+/// mutual information MI = H(X)+H(Y)-H(X,Y), and the chi-square statistic. modes:
+///   0 mutual information            5 variation of information (H(X,Y)-MI)
+///   1 joint entropy H(X,Y)          6 symmetric uncertainty (2MI/(H(X)+H(Y)))
+///   2 conditional entropy H(Y|X)    7 chi-square statistic
+///   3 normalized MI (MI/sqrt(HxHy)) 8 Cramer's V
+///   4 uncertainty coefficient U(Y|X)=MI/H(Y)   9 mean-square contingency phi^2 = chi2/N
+/// Broadcast. O(n + G*(xmax+1)*(ymax+1)). NATIVE + lean_single only.
+fn bf_group_joint2d(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, xmax: i64, ymax: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var cnt: [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || x_col < 0 || x_col >= nc || y_col < 0 || y_col >= nc || n <= 0 || xmax < 0 || xmax > 255 || ymax < 0 || ymax > 255 { return out }
+    let yp1 = ymax + 1
+    let xym = (xmax + 1) * yp1
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let xp = bf_col_ptr(src, x_col) as *mut f64
+    let yp = bf_col_ptr(src, y_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let joint = heap_alloc(1024 * xym * 8) as *mut i64
+    let sc = heap_alloc(8) as *mut i64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        let x = read_f64(xp, i) as i64
+        let y = read_f64(yp, i) as i64
+        if k >= 0 && k < 1024 && x >= 0 && x <= xmax && y >= 0 && y <= ymax { let idx = k * xym + x * yp1 + y; write_i64(joint, idx, read_i64(joint, idx) + 1); cnt[k] = cnt[k] + 1.0 }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        if cnt[g] > 0.0 {
+            let nf = cnt[g]
+            let base = g * xym
+            var rowsum: [f64; 256] = [0.0; 256]
+            var colsum: [f64; 256] = [0.0; 256]
+            var hxy = 0.0
+            var x: i64 = 0
+            while x <= xmax {
+                var y: i64 = 0
+                while y <= ymax {
+                    let j = read_i64(joint, base + x * yp1 + y)
+                    if j > 0 { let jf = j as f64; rowsum[x] = rowsum[x] + jf; colsum[y] = colsum[y] + jf; let p = jf / nf; hxy = hxy - p * bf_ln(p, sc) }
+                    y = y + 1
+                }
+                x = x + 1
+            }
+            var hx = 0.0
+            x = 0
+            while x <= xmax { if rowsum[x] > 0.0 { let px = rowsum[x] / nf; hx = hx - px * bf_ln(px, sc) } x = x + 1 }
+            var hy = 0.0
+            var y2: i64 = 0
+            while y2 <= ymax { if colsum[y2] > 0.0 { let py = colsum[y2] / nf; hy = hy - py * bf_ln(py, sc) } y2 = y2 + 1 }
+            let mi = hx + hy - hxy
+            var chi2 = 0.0
+            x = 0
+            while x <= xmax {
+                var y: i64 = 0
+                while y <= ymax {
+                    let e = rowsum[x] * colsum[y] / nf
+                    if e > 0.0 { let d = (read_i64(joint, base + x * yp1 + y) as f64) - e; chi2 = chi2 + d * d / e }
+                    y = y + 1
+                }
+                x = x + 1
+            }
+            if mode == 0 { res[g] = mi }
+            else { if mode == 1 { res[g] = hxy }
+            else { if mode == 2 { res[g] = hxy - hx }
+            else { if mode == 3 { let d = hx * hy; if d > 0.0 { res[g] = mi / bf_sqrt(d, sc) } }
+            else { if mode == 4 { if hy > 0.0 { res[g] = mi / hy } }
+            else { if mode == 5 { res[g] = hxy - mi }
+            else { if mode == 6 { let d = hx + hy; if d > 0.0 { res[g] = 2.0 * mi / d } }
+            else { if mode == 7 { res[g] = chi2 }
+            else { if mode == 8 { var md = xmax; if ymax < md { md = ymax }; if md > 0 { res[g] = bf_sqrt(chi2 / (nf * (md as f64)), sc) } }
+            else { res[g] = chi2 / nf } } } } } } } } }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    heap_free(joint as *mut i8)
+    heap_free(sc as *mut i8)
+    out
+}
+/// Per-group MUTUAL INFORMATION MI(X;Y) between two integer columns (nats), broadcast. Joint 2D histogram. NATIVE + lean_single.
+pub fn bf_mutual_info_dense_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, xmax: i64, ymax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_joint2d(src, key_col, x_col, y_col, xmax, ymax, 0) }
+/// Per-group JOINT ENTROPY H(X,Y) (nats), broadcast. Joint 2D histogram. NATIVE + lean_single.
+pub fn bf_joint_entropy_dense_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, xmax: i64, ymax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_joint2d(src, key_col, x_col, y_col, xmax, ymax, 1) }
+/// Per-group CONDITIONAL ENTROPY H(Y|X) (nats), broadcast. Joint 2D histogram. NATIVE + lean_single.
+pub fn bf_conditional_entropy_dense_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, xmax: i64, ymax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_joint2d(src, key_col, x_col, y_col, xmax, ymax, 2) }
+/// Per-group NORMALIZED MUTUAL INFORMATION (MI/sqrt(H(X)·H(Y)), 0..1), broadcast. Joint 2D histogram. NATIVE + lean_single.
+pub fn bf_normalized_mi_dense_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, xmax: i64, ymax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_joint2d(src, key_col, x_col, y_col, xmax, ymax, 3) }
+/// Per-group UNCERTAINTY COEFFICIENT U(Y|X) = MI/H(Y) (Theil's U, asymmetric), broadcast. Joint 2D histogram. NATIVE + lean_single.
+pub fn bf_uncertainty_coeff_dense_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, xmax: i64, ymax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_joint2d(src, key_col, x_col, y_col, xmax, ymax, 4) }
+/// Per-group VARIATION OF INFORMATION (H(X,Y)-MI, a metric), broadcast. Joint 2D histogram. NATIVE + lean_single.
+pub fn bf_variation_of_info_dense_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, xmax: i64, ymax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_joint2d(src, key_col, x_col, y_col, xmax, ymax, 5) }
+/// Per-group SYMMETRIC UNCERTAINTY (2MI/(H(X)+H(Y)), 0..1), broadcast. Joint 2D histogram. NATIVE + lean_single.
+pub fn bf_symmetric_uncertainty_dense_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, xmax: i64, ymax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_joint2d(src, key_col, x_col, y_col, xmax, ymax, 6) }
+/// Per-group CHI-SQUARE statistic of independence, broadcast. Joint 2D histogram. NATIVE + lean_single.
+pub fn bf_chi2_dense_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, xmax: i64, ymax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_joint2d(src, key_col, x_col, y_col, xmax, ymax, 7) }
+/// Per-group CRAMER'S V (chi-square-based categorical association, 0..1), broadcast. Joint 2D histogram. NATIVE + lean_single.
+pub fn bf_cramers_v_dense_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, xmax: i64, ymax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_joint2d(src, key_col, x_col, y_col, xmax, ymax, 8) }
+/// Per-group MEAN-SQUARE CONTINGENCY phi^2 (= chi2/N), broadcast. Joint 2D histogram. NATIVE + lean_single.
+pub fn bf_phi2_dense_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, xmax: i64, ymax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_joint2d(src, key_col, x_col, y_col, xmax, ymax, 9) }
