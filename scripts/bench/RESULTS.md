@@ -9,6 +9,7 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 | operation | 1M rows | Sounio ms | pandas ms | Sounio/pandas | before |
 |---|---|---|---|---|---|
 | per-group p-values: ttest_pvalue / mannwhitney_pvalue (tie-corrected) / ks_pvalue (1M rows, 1000 keys, 2 groups) | | ~18 | ~460 | **0.04x — wins 25x** | one-pass stat + tested stats:: CDF vs scipy/pandas groupby.apply |
+| per-group K-sample: anova_pvalue / kruskal_pvalue (tie-corrected) (1M rows, 1000 keys, 4 groups) | | ~22 | ~460 | **0.03-0.12x — wins 8-33x** | one-pass SSB/SSW or rank-sums + tested stats:: CDF vs groupby.apply |
 | two-sample tests: welch/cohens_d/glass/pooled_sd/point_biserial + mannwhitney_u/cles/rank_biserial/ks (1M rows, 1000 keys, 2 groups) | | ~18 | ~430 | **0.04x — wins 24x** | one-pass moments / group-split histogram; pandas = scipy + groupby.apply |
 | col_sum (8-accumulator ILP) | | 1.44 | 0.55 | **2.6x** | 3.9x |
 | col_mean (via 8-acc sum) | | 2.05 | 1.00 | **2.1x** | 2.3x |
