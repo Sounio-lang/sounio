@@ -35,4 +35,4 @@ grep -Fxq 'MADAROS_IMPORTED_CALL_ARITY_13_OK' "$WORK/run.log" || {
   fail "runtime marker is missing"
 }
 
-echo "[madaros-call-arity-13] PASS: imported call preserved all 13 ordered arguments"
+echo "[madaros-call-arity-13] PASS: imported calls preserved 7, 8, 9, and 13 ordered arguments"
