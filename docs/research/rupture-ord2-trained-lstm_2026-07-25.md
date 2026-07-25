@@ -43,9 +43,9 @@ Sedenion-aligned stacks remain the **declared positive control** in
 
 ---
 
-## 2. Measured result (CI defaults)
+## 2. Measured results
 
-Config (override with env): `H=20 T=24 STEPS=600 N_SEQ=40 SEED=20260725`.
+### CI defaults (`H=20 T=24 STEPS=600 N_SEQ=40`)
 
 | Quantity | Trained | Init |
 |---|---|---|
@@ -54,6 +54,17 @@ Config (override with env): `H=20 T=24 STEPS=600 N_SEQ=40 SEED=20260725`.
 | Cohen d (vs scramble) | large (+) | large (+) |
 | `align(k)` at large k | flat-high | flat-high |
 | init ≥ trained? | **yes** | — |
+
+### Heavier (`H=32 T=32 STEPS=1200 N_SEQ=64`, test MSE ≈ 0.009)
+
+| Quantity | Trained | Init |
+|---|---|---|
+| confirm align | 0.937 | 0.995 |
+| Cohen d vs scramble | +46 | — |
+| init ≥ trained? | **yes** | — |
+| shape | flat-high (not annihilation) | — |
+
+Verdict unchanged under heavier training.
 
 **Controls that reject subspace death:**
 

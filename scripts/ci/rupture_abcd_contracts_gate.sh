@@ -56,6 +56,19 @@ if grep -q 'ORD2_TRAINED_VERDICT ORD2_TRAINED_SUBSPACE_DEATH' /tmp/rupture_ord2_
 fi
 grep -qE 'ORD2_TRAINED_VERDICT ORD2_TRAINED_(NO_SIGNATURE|SKIP)' /tmp/rupture_ord2_trained_out.txt
 
+echo "-- Ord 2″ trained diagonal S4 multi-path (structured SSM family) --"
+$PYTHON scripts/research/rupture_ord2_trained_s4_probe.py | tee /tmp/rupture_ord2_s4_out.txt
+grep -q 'ORD2_S4_CONTRACT_OK' /tmp/rupture_ord2_s4_out.txt
+if grep -q 'ORD2_S4_VERDICT ORD2_S4_BROKEN' /tmp/rupture_ord2_s4_out.txt; then
+  echo "trained S4 probe broken" >&2
+  exit 1
+fi
+if grep -q 'ORD2_S4_VERDICT ORD2_S4_SUBSPACE_DEATH' /tmp/rupture_ord2_s4_out.txt; then
+  echo "unexpected S4 SUBSPACE_DEATH — requires human review before green gate" >&2
+  exit 1
+fi
+grep -qE 'ORD2_S4_VERDICT ORD2_S4_(NO_SIGNATURE|SKIP)' /tmp/rupture_ord2_s4_out.txt
+
 echo "-- R3 Fano-restriction probe (Φ_fp) --"
 $PYTHON scripts/research/rupture_r3_fano_restriction_probe.py | tee /tmp/rupture_r3_out.txt
 grep -q 'R3_CONTRACT_PROBE_OK' /tmp/rupture_r3_out.txt
@@ -89,6 +102,7 @@ test -f docs/research/rupture-abcd-claims_2026-07-24.md
 test -f docs/research/rupture-programme-synthesis_2026-07-25.md
 test -f docs/research/rupture-ord2-alignment_2026-07-25.md
 test -f docs/research/rupture-ord2-trained-lstm_2026-07-25.md
+test -f docs/research/rupture-ord2-trained-s4_2026-07-25.md
 test -f docs/research/rupture-r2-full-tubular_2026-07-25.md
 test -f docs/research/rupture-r3-fano-phi_2026-07-25.md
 test -f docs/research/rupture-r4-fano-field_2026-07-25.md
