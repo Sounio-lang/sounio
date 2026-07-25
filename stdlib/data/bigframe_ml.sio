@@ -362,3 +362,78 @@ fn bf_group_mcacc(src: &BigFrame, key_col: i64, yt_col: i64, yp_col: i64) -> Big
 }
 /// Per-group MULTI-CLASS ACCURACY (any integer labels), broadcast. NATIVE + lean_single.
 pub fn bf_multiclass_accuracy_by(src: &BigFrame, key_col: i64, yt_col: i64, yp_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_mcacc(src, key_col, yt_col, yp_col) }
+
+/// Per-group closed-form RIDGE REGRESSION (columns key, x, y; L2 penalty `lam` on the slope). One
+/// co-moment pass gives slope b = Sxy/(Sxx+lam), intercept a = ȳ − b·x̄. modes: 0 slope, 1 intercept,
+/// 2 per-row prediction a+b·x. The sklearn.linear_model.Ridge analog, per key, closed-form (wins).
+/// Broadcast. O(n). NATIVE + lean_single only.
+fn bf_group_ridge(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, lam: f64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var cn:  [f64; 1024] = [0.0; 1024]
+    var sx:  [f64; 1024] = [0.0; 1024]
+    var sy:  [f64; 1024] = [0.0; 1024]
+    var sxx: [f64; 1024] = [0.0; 1024]
+    var sxy: [f64; 1024] = [0.0; 1024]
+    var b0:  [f64; 1024] = [0.0; 1024]
+    var b1:  [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || x_col < 0 || x_col >= nc || y_col < 0 || y_col >= nc || n <= 0 { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let xp = bf_col_ptr(src, x_col) as *mut f64
+    let yp = bf_col_ptr(src, y_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 { let x = read_f64(xp, i); let y = read_f64(yp, i); cn[k] = cn[k] + 1.0; sx[k] = sx[k] + x; sy[k] = sy[k] + y; sxx[k] = sxx[k] + x * x; sxy[k] = sxy[k] + x * y }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        let m = cn[g]
+        if m > 0.0 {
+            let Sxx = sxx[g] - sx[g] * sx[g] / m
+            let Sxy = sxy[g] - sx[g] * sy[g] / m
+            let den = Sxx + lam
+            if den != 0.0 { b1[g] = Sxy / den; b0[g] = sy[g] / m - b1[g] * sx[g] / m }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 { if mode == 0 { write_f64(op, i, b1[k]) } else { if mode == 1 { write_f64(op, i, b0[k]) } else { write_f64(op, i, b0[k] + b1[k] * read_f64(xp, i)) } } } else { write_f64(op, i, 0.0) }
+        i = i + 1
+    }
+    out
+}
+/// Per-group RIDGE slope (L2 penalty lam), broadcast. NATIVE + lean_single.
+pub fn bf_ridge_slope_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, lam: f64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_ridge(src, key_col, x_col, y_col, lam, 0) }
+/// Per-group RIDGE intercept, broadcast. NATIVE + lean_single.
+pub fn bf_ridge_intercept_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, lam: f64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_ridge(src, key_col, x_col, y_col, lam, 1) }
+/// Per-group RIDGE per-row prediction a+b·x, broadcast. NATIVE + lean_single.
+pub fn bf_ridge_predict_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, lam: f64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_ridge(src, key_col, x_col, y_col, lam, 2) }
+
+/// Per-group MAX-ABS SCALER (columns key, value): each value divided by the group's max|value|,
+/// mapping into [−1,1]. Two passes (max|·| then scale). The sklearn.preprocessing.MaxAbsScaler
+/// analog per key. Per row. O(n). NATIVE + lean_single only.
+fn bf_group_maxabs(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var mx: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || n <= 0 { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    var i: i64 = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { var a = read_f64(vp, i); if a < 0.0 { a = 0.0 - a }; if a > mx[k] { mx[k] = a } } i = i + 1 }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 && mx[k] > 0.0 { write_f64(op, i, read_f64(vp, i) / mx[k]) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    out
+}
+/// Per-group MAX-ABS SCALED value (value / max|value| in the group), per row. NATIVE + lean_single.
+pub fn bf_maxabs_scale_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_maxabs(src, key_col, val_col) }
