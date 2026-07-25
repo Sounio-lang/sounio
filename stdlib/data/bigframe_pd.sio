@@ -1,0 +1,347 @@
+// data::bigframe_pd — the pandas.Series method package on BigFrame columns: rolling / expanding /
+// ewm windows, lag transforms, ranks, order statistics, and a rich reduction suite. Self-contained;
+// order-stat reductions use an in-module shell sort.
+use data::bigframe::*
+
+fn pd_sqrt(x: f64, sc: *mut i64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    let b = f64_to_bits(x); write_i64(sc, 0, (b + 4607182418800017408) >> 1)
+    var y = read_f64(sc as *mut f64, 0); if y < 0.0 { y = 0.0 - y }
+    y = 0.5 * (y + x / y); y = 0.5 * (y + x / y); y = 0.5 * (y + x / y); y = 0.5 * (y + x / y); y = 0.5 * (y + x / y); y = 0.5 * (y + x / y)
+    y
+}
+// shell sort ascending on a heap f64 buffer of length m
+fn pd_sort(buf: *mut f64, m: i64) with Mut, Div, Panic {
+    var gap = m / 2
+    while gap > 0 {
+        var i = gap
+        while i < m {
+            let tmp = read_f64(buf, i); var j = i
+            while j >= gap && read_f64(buf, j - gap) > tmp { write_f64(buf, j, read_f64(buf, j - gap)); j = j - gap }
+            write_f64(buf, j, tmp); i = i + 1
+        }
+        gap = gap / 2
+    }
+}
+// quantile from a sorted buffer (linear interpolation, numpy default)
+fn pd_quant_sorted(buf: *mut f64, m: i64, q: f64) -> f64 with Mut, Div, Panic {
+    if m == 1 { return read_f64(buf, 0) }
+    let h = q * ((m - 1) as f64)
+    let lo = h as i64; let fr = h - (lo as f64)
+    if lo >= m - 1 { return read_f64(buf, m - 1) }
+    read_f64(buf, lo) + fr * (read_f64(buf, lo + 1) - read_f64(buf, lo))
+}
+
+/// ROLLING window engine (trailing window of size w). col -> col.
+fn pd_roll(src: &BigFrame, col: i64, w: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src); var out = bf_new(1, n); out.n_rows = n
+    if col < 0 || col >= bf_ncols(src) || n <= 0 || w <= 0 { return out }
+    let cp = bf_col_ptr(src, col) as *mut f64; let op = bf_col_ptr(&out, 0) as *mut f64
+    let sc = heap_alloc(8) as *mut i64
+    var i: i64 = 0
+    while i < n {
+        var lo = i - w + 1; if lo < 0 { lo = 0 }
+        var sum = 0.0; var ssq = 0.0; var mn = read_f64(cp, lo); var mx = read_f64(cp, lo); var cnt = 0.0
+        var mxi = 0.0; var mni = 0.0
+        var j = lo
+        while j <= i { let x = read_f64(cp, j); sum = sum + x; ssq = ssq + x * x; cnt = cnt + 1.0
+            if x > mx { mx = x; mxi = (j - lo) as f64 }; if x < mn { mn = x; mni = (j - lo) as f64 }; j = j + 1 }
+        let mean = sum / cnt; var varp = ssq / cnt - mean * mean; if varp < 0.0 { varp = 0.0 }
+        var vs = 0.0; if cnt > 1.0 { vs = (ssq - sum * mean) / (cnt - 1.0) }
+        let last = read_f64(cp, i); var v = 0.0
+        if mode == 0 { v = sum } else { if mode == 1 { v = mean } else { if mode == 2 { v = mn } else { if mode == 3 { v = mx } else { if mode == 4 { v = vs } else { if mode == 5 { v = pd_sqrt(vs, sc) } else { if mode == 6 { v = cnt } else { if mode == 7 { v = mx - mn } else { if mode == 8 { v = ssq } else { if mode == 9 { let sdw = pd_sqrt(varp, sc); if sdw > 0.0 { v = (last - mean) / sdw } } else { if mode == 10 { v = mxi } else { if mode == 11 { v = mni } else { v = ssq / cnt } } } } } } } } } } } }
+        write_f64(op, i, v); i = i + 1
+    }
+    heap_free(sc as *mut i8); out
+}
+/// EXPANDING engine (from start to i). col -> col.
+fn pd_expand(src: &BigFrame, col: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src); var out = bf_new(1, n); out.n_rows = n
+    if col < 0 || col >= bf_ncols(src) || n <= 0 { return out }
+    let cp = bf_col_ptr(src, col) as *mut f64; let op = bf_col_ptr(&out, 0) as *mut f64
+    let sc = heap_alloc(8) as *mut i64
+    var sum = 0.0; var ssq = 0.0; var mn = read_f64(cp, 0); var mx = read_f64(cp, 0); var cnt = 0.0
+    var i: i64 = 0
+    while i < n {
+        let x = read_f64(cp, i); sum = sum + x; ssq = ssq + x * x; cnt = cnt + 1.0
+        if x > mx { mx = x }; if x < mn { mn = x }
+        let mean = sum / cnt; var varp = ssq / cnt - mean * mean; if varp < 0.0 { varp = 0.0 }
+        var vs = 0.0; if cnt > 1.0 { vs = (ssq - sum * mean) / (cnt - 1.0) }
+        var v = 0.0
+        if mode == 0 { v = sum } else { if mode == 1 { v = mean } else { if mode == 2 { v = mn } else { if mode == 3 { v = mx } else { if mode == 4 { v = vs } else { if mode == 5 { v = pd_sqrt(vs, sc) } else { if mode == 6 { v = cnt } else { v = mx - mn } } } } } } }
+        write_f64(op, i, v); i = i + 1
+    }
+    heap_free(sc as *mut i8); out
+}
+/// EWM engine (exponential weighting, alpha=2/(span+1), adjust=false). col -> col.
+fn pd_ewm(src: &BigFrame, col: i64, span: f64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src); var out = bf_new(1, n); out.n_rows = n
+    if col < 0 || col >= bf_ncols(src) || n <= 0 { return out }
+    let cp = bf_col_ptr(src, col) as *mut f64; let op = bf_col_ptr(&out, 0) as *mut f64
+    let sc = heap_alloc(8) as *mut i64
+    let al = 2.0 / (span + 1.0)
+    var m = read_f64(cp, 0); var s2 = 0.0; var acc = 0.0
+    var i: i64 = 0
+    while i < n {
+        let x = read_f64(cp, i)
+        if i == 0 { m = x; s2 = 0.0; acc = x } else {
+            let d = x - m; m = m + al * d; s2 = (1.0 - al) * (s2 + al * d * d); acc = al * x + (1.0 - al) * acc }
+        var v = 0.0
+        if mode == 0 { v = m } else { if mode == 1 { v = s2 } else { if mode == 2 { v = pd_sqrt(s2, sc) } else { v = acc } } }
+        write_f64(op, i, v); i = i + 1
+    }
+    heap_free(sc as *mut i8); out
+}
+/// LAG engine (shift by k, k>=1). col -> col.
+fn pd_lag(src: &BigFrame, col: i64, k: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src); var out = bf_new(1, n); out.n_rows = n
+    if col < 0 || col >= bf_ncols(src) || n <= 0 || k < 1 { return out }
+    let cp = bf_col_ptr(src, col) as *mut f64; let op = bf_col_ptr(&out, 0) as *mut f64
+    var i: i64 = 0
+    while i < n {
+        var v = 0.0
+        if i >= k { let x = read_f64(cp, i); let xp = read_f64(cp, i - k)
+            if mode == 0 { v = xp } else { if mode == 1 { v = x - xp } else { if mode == 2 { if xp != 0.0 { v = (x - xp) / xp } } else { if mode == 3 { if xp != 0.0 { v = x / xp } } else { v = xp - x } } } }
+        }
+        write_f64(op, i, v); i = i + 1
+    }
+    out
+}
+/// RANK engine (col -> col of ranks). O(n^2).
+fn pd_rank(src: &BigFrame, col: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src); var out = bf_new(1, n); out.n_rows = n
+    if col < 0 || col >= bf_ncols(src) || n <= 0 { return out }
+    let cp = bf_col_ptr(src, col) as *mut f64; let op = bf_col_ptr(&out, 0) as *mut f64
+    var i: i64 = 0
+    while i < n {
+        let x = read_f64(cp, i); var less = 0.0; var eq = 0.0
+        var j: i64 = 0
+        while j < n { let y = read_f64(cp, j); if y < x { less = less + 1.0 }; if y == x { eq = eq + 1.0 }; j = j + 1 }
+        var v = 0.0
+        if mode == 0 { v = less + (eq + 1.0) / 2.0 } else { if mode == 1 { v = less + 1.0 } else { if mode == 2 { v = less + eq } else { if mode == 3 { v = less + 1.0 } else { if mode == 4 { v = less + 1.0 } else { v = (less + (eq + 1.0) / 2.0) / (n as f64) } } } } }
+        write_f64(op, i, v); i = i + 1
+    }
+    out
+}
+/// SCALAR-ARG elementwise engine. col,s -> col.
+fn pd_smap(src: &BigFrame, col: i64, s: f64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src); var out = bf_new(1, n); out.n_rows = n
+    if col < 0 || col >= bf_ncols(src) || n <= 0 { return out }
+    let cp = bf_col_ptr(src, col) as *mut f64; let op = bf_col_ptr(&out, 0) as *mut f64
+    var i: i64 = 0
+    while i < n {
+        let x = read_f64(cp, i); var v = 0.0
+        if mode == 0 { v = x + s } else { if mode == 1 { v = x - s } else { if mode == 2 { v = x * s } else { if mode == 3 { if s != 0.0 { v = x / s } } else { if mode == 4 { if s != 0.0 { v = x - (((x / s) as i64) as f64) * s } } else { if mode == 5 { if s != 0.0 { v = ((x / s) as i64) as f64 } } else { if mode == 6 { if x > 0.0 { v = exp(s * ln(x)) } } else { if mode == 7 { if x < s { v = s } else { v = x } } else { if mode == 8 { if x > s { v = s } else { v = x } } else { if mode == 9 { let p = exp(s * 2.302585092994046); v = (((x * p) + 0.5) as i64) as f64 / p } else { if mode == 10 { if x > s { v = 1.0 } } else { if x >= s { v = 1.0 } } } } } } } } } } } }
+        write_f64(op, i, v); i = i + 1
+    }
+    out
+}
+/// CLIP engine (col, lo, hi -> col).
+fn pd_clip(src: &BigFrame, col: i64, lo: f64, hi: f64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src); var out = bf_new(1, n); out.n_rows = n
+    if col < 0 || col >= bf_ncols(src) || n <= 0 { return out }
+    let cp = bf_col_ptr(src, col) as *mut f64; let op = bf_col_ptr(&out, 0) as *mut f64
+    var i: i64 = 0
+    while i < n { var x = read_f64(cp, i); if x < lo { x = lo }; if x > hi { x = hi }; write_f64(op, i, x); i = i + 1 }
+    out
+}
+/// REDUCTION engine (col -> scalar). Sort-based order stats included.
+fn pd_reduce(src: &BigFrame, col: i64, mode: i64) -> f64 with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    if col < 0 || col >= bf_ncols(src) || n <= 0 { return 0.0 }
+    let cp = bf_col_ptr(src, col) as *mut f64
+    let sc = heap_alloc(8) as *mut i64
+    let nf = n as f64
+    var sum = 0.0; var ssq = 0.0; var s3 = 0.0; var s4 = 0.0; var l1 = 0.0; var prod = 1.0
+    var mn = read_f64(cp, 0); var mx = read_f64(cp, 0); var mni = 0.0; var mxi = 0.0
+    var slog = 0.0; var hrec = 0.0; var l1d = 0.0; var pos = 0.0; var neg = 0.0; var zero = 0.0; var abovem = 0.0
+    var mono_inc = 1.0; var mono_dec = 1.0; var signch = 0.0; var zeroc = 0.0
+    var mean0 = sum
+    var i: i64 = 0
+    while i < n { sum = sum + read_f64(cp, i); i = i + 1 }
+    let mean = sum / nf
+    i = 0
+    while i < n {
+        let x = read_f64(cp, i); let d = x - mean
+        ssq = ssq + x * x; s3 = s3 + d * d * d; s4 = s4 + d * d * d * d
+        var ax = x; if ax < 0.0 { ax = 0.0 - ax }; l1 = l1 + ax; prod = prod * x
+        var ad2 = d; if ad2 < 0.0 { ad2 = 0.0 - ad2 }; l1d = l1d + ad2
+        if x < mn { mn = x; mni = i as f64 }; if x > mx { mx = x; mxi = i as f64 }
+        if x > 0.0 { slog = slog + ln(x); hrec = hrec + 1.0 / x; pos = pos + 1.0 }
+        if x < 0.0 { neg = neg + 1.0 }; if x == 0.0 { zero = zero + 1.0 }
+        if x > mean { abovem = abovem + 1.0 }
+        if i > 0 { let pv = read_f64(cp, i - 1)
+            if x < pv { mono_inc = 0.0 }; if x > pv { mono_dec = 0.0 }
+            if (x > 0.0 && pv < 0.0) || (x < 0.0 && pv > 0.0) { signch = signch + 1.0 }
+            if (x >= 0.0 && pv < 0.0) || (x < 0.0 && pv >= 0.0) { zeroc = zeroc + 1.0 } }
+        i = i + 1
+    }
+    let m2 = ssq / nf - mean * mean; let sd = pd_sqrt(m2, sc)
+    var vs = 0.0; if nf > 1.0 { vs = (ssq - sum * mean) / (nf - 1.0) }
+    let m3 = s3 / nf; let m4 = s4 / nf
+    var skew = 0.0; if m2 > 0.0 { skew = m3 / (m2 * sd) }
+    var kurt = 0.0; if m2 > 0.0 { kurt = m4 / (m2 * m2) - 3.0 }
+    // sorted buffer for order stats
+    let buf = heap_alloc(n * 8) as *mut f64
+    i = 0; while i < n { write_f64(buf, i, read_f64(cp, i)); i = i + 1 }
+    pd_sort(buf, n)
+    let med = pd_quant_sorted(buf, n, 0.5)
+    let q1 = pd_quant_sorted(buf, n, 0.25); let q3 = pd_quant_sorted(buf, n, 0.75)
+    // nunique
+    var nun = 0.0; i = 0
+    while i < n { if i == 0 || read_f64(buf, i) != read_f64(buf, i - 1) { nun = nun + 1.0 }; i = i + 1 }
+    // mad about median
+    var madm = 0.0; i = 0
+    while i < n { var dd = read_f64(cp, i) - med; if dd < 0.0 { dd = 0.0 - dd }; madm = madm + dd; i = i + 1 }
+    madm = madm / nf
+    var r = 0.0
+    if mode == 0 { r = nf } else { if mode == 1 { r = sum } else { if mode == 2 { r = mean } else { if mode == 3 { r = med } else { if mode == 4 { r = mn } else { if mode == 5 { r = mx } else { if mode == 6 { r = pd_sqrt(vs, sc) } else { if mode == 7 { r = vs } else { if mode == 8 { r = sd } else { if mode == 9 { r = m2 } else { if mode == 10 { if nf > 0.0 { r = pd_sqrt(vs, sc) / pd_sqrt(nf, sc) } } else { if mode == 11 { r = skew } else { if mode == 12 { r = kurt } else { if mode == 13 { r = l1d / nf } else { if mode == 14 { r = madm } else { if mode == 15 { r = prod } else { if mode == 16 { r = nun } else { if mode == 17 { if nun == nf { r = 1.0 } } else { if mode == 18 { r = mono_inc } else { if mode == 19 { r = mono_dec } else { if mode == 20 { r = mxi } else { if mode == 21 { r = mni } else { if mode == 22 { r = mxi } else { if mode == 23 { r = mni } else { if mode == 24 { if mean != 0.0 { r = sd / mean } } else { if mode == 25 { r = exp(slog / nf) } else { if mode == 26 { if hrec > 0.0 { r = nf / hrec } } else { if mode == 27 { r = pd_sqrt(ssq / nf, sc) } else { if mode == 28 { r = q3 - q1 } else { if mode == 29 { r = mx - mn } else { if mode == 30 { r = ssq } else { if mode == 31 { r = pd_sqrt(ssq, sc) } else { if mode == 32 { r = pd_quant_sorted(buf, n, 0.05) } else { if mode == 33 { r = q1 } else { if mode == 34 { r = med } else { if mode == 35 { r = q3 } else { if mode == 36 { r = pos } else { if mode == 37 { r = neg } else { if mode == 38 { r = zero } else { if mode == 39 { r = abovem } else { if mode == 40 { r = signch } else { if mode == 41 { r = zeroc } else { if mode == 42 { r = read_f64(cp, 0) } else { if mode == 43 { r = read_f64(cp, n - 1) } else { if mode == 44 { r = mx - mn } else { if mode == 45 { r = m2 } else { if mode == 46 { r = m3 } else { if mode == 47 { r = m4 } else { if mode == 48 { r = l1 / nf } else { r = l1 } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } }
+    heap_free(sc as *mut i8); heap_free(buf as *mut i8)
+    r
+}
+/// AUX reduction with a scalar arg (col, s -> scalar): quantile(q), autocorr(lag).
+fn pd_areduce(src: &BigFrame, col: i64, s: f64, mode: i64) -> f64 with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    if col < 0 || col >= bf_ncols(src) || n <= 0 { return 0.0 }
+    let cp = bf_col_ptr(src, col) as *mut f64
+    if mode == 0 {
+        let buf = heap_alloc(n * 8) as *mut f64
+        var i: i64 = 0; while i < n { write_f64(buf, i, read_f64(cp, i)); i = i + 1 }
+        pd_sort(buf, n); let q = pd_quant_sorted(buf, n, s); heap_free(buf as *mut i8); return q
+    }
+    // autocorr at lag k=s
+    let k = s as i64
+    if k < 1 || k >= n { return 0.0 }
+    var sa = 0.0; var i2: i64 = 0; while i2 < n { sa = sa + read_f64(cp, i2); i2 = i2 + 1 }
+    let mean = sa / (n as f64)
+    var num = 0.0; var den = 0.0; i2 = 0
+    while i2 < n { let d = read_f64(cp, i2) - mean; den = den + d * d
+        if i2 >= k { num = num + d * (read_f64(cp, i2 - k) - mean) }; i2 = i2 + 1 }
+    if den > 0.0 { return num / den }
+    0.0
+}
+/// PAIRWISE reduction (col1,col2 -> scalar).
+fn pd_binreduce(src: &BigFrame, c1: i64, c2: i64, mode: i64) -> f64 with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src); let ncx = bf_ncols(src)
+    if c1 < 0 || c1 >= ncx || c2 < 0 || c2 >= ncx || n <= 0 { return 0.0 }
+    let p1 = bf_col_ptr(src, c1) as *mut f64; let p2 = bf_col_ptr(src, c2) as *mut f64
+    let sc = heap_alloc(8) as *mut i64
+    var dot = 0.0; var sa = 0.0; var sb = 0.0; var saa = 0.0; var sbb = 0.0; var man = 0.0; var euc = 0.0
+    var i: i64 = 0
+    while i < n { let a = read_f64(p1, i); let b = read_f64(p2, i); dot = dot + a * b; sa = sa + a; sb = sb + b
+        saa = saa + a * a; sbb = sbb + b * b; var d = a - b; if d < 0.0 { d = 0.0 - d }; man = man + d; euc = euc + (a - b) * (a - b); i = i + 1 }
+    let nf = n as f64; let cov = dot / nf - (sa / nf) * (sb / nf)
+    let va = saa / nf - (sa / nf) * (sa / nf); let vb = sbb / nf - (sb / nf) * (sb / nf)
+    var r = 0.0
+    if mode == 0 { let de = pd_sqrt(va, sc) * pd_sqrt(vb, sc); if de > 0.0 { r = cov / de } } else { if mode == 1 { r = cov } else { if mode == 2 { r = dot } else { if mode == 3 { let de = pd_sqrt(saa, sc) * pd_sqrt(sbb, sc); if de > 0.0 { r = dot / de } } else { if mode == 4 { r = pd_sqrt(euc, sc) } else { if mode == 5 { r = man } else { r = dot } } } } } }
+    heap_free(sc as *mut i8); r
+}
+
+pub fn bf_pd_rolling_sum(src: &BigFrame, col: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pd_roll(src, col, w, 0) }
+pub fn bf_pd_rolling_mean(src: &BigFrame, col: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pd_roll(src, col, w, 1) }
+pub fn bf_pd_rolling_min(src: &BigFrame, col: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pd_roll(src, col, w, 2) }
+pub fn bf_pd_rolling_max(src: &BigFrame, col: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pd_roll(src, col, w, 3) }
+pub fn bf_pd_rolling_var(src: &BigFrame, col: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pd_roll(src, col, w, 4) }
+pub fn bf_pd_rolling_std(src: &BigFrame, col: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pd_roll(src, col, w, 5) }
+pub fn bf_pd_rolling_count(src: &BigFrame, col: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pd_roll(src, col, w, 6) }
+pub fn bf_pd_rolling_range(src: &BigFrame, col: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pd_roll(src, col, w, 7) }
+pub fn bf_pd_rolling_sumsq(src: &BigFrame, col: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pd_roll(src, col, w, 8) }
+pub fn bf_pd_rolling_zscore(src: &BigFrame, col: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pd_roll(src, col, w, 9) }
+pub fn bf_pd_rolling_argmax(src: &BigFrame, col: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pd_roll(src, col, w, 10) }
+pub fn bf_pd_rolling_argmin(src: &BigFrame, col: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pd_roll(src, col, w, 11) }
+pub fn bf_pd_rolling_meanabs(src: &BigFrame, col: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pd_roll(src, col, w, 12) }
+pub fn bf_pd_expanding_sum(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { pd_expand(src, col, 0) }
+pub fn bf_pd_expanding_mean(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { pd_expand(src, col, 1) }
+pub fn bf_pd_expanding_min(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { pd_expand(src, col, 2) }
+pub fn bf_pd_expanding_max(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { pd_expand(src, col, 3) }
+pub fn bf_pd_expanding_var(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { pd_expand(src, col, 4) }
+pub fn bf_pd_expanding_std(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { pd_expand(src, col, 5) }
+pub fn bf_pd_expanding_count(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { pd_expand(src, col, 6) }
+pub fn bf_pd_expanding_range(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { pd_expand(src, col, 7) }
+pub fn bf_pd_ewm_mean(src: &BigFrame, col: i64, span: f64) -> BigFrame with Alloc, Mut, Div, Panic { pd_ewm(src, col, span, 0) }
+pub fn bf_pd_ewm_var(src: &BigFrame, col: i64, span: f64) -> BigFrame with Alloc, Mut, Div, Panic { pd_ewm(src, col, span, 1) }
+pub fn bf_pd_ewm_std(src: &BigFrame, col: i64, span: f64) -> BigFrame with Alloc, Mut, Div, Panic { pd_ewm(src, col, span, 2) }
+pub fn bf_pd_ewm_sum(src: &BigFrame, col: i64, span: f64) -> BigFrame with Alloc, Mut, Div, Panic { pd_ewm(src, col, span, 3) }
+pub fn bf_pd_shift(src: &BigFrame, col: i64, k: i64) -> BigFrame with Alloc, Mut, Div, Panic { pd_lag(src, col, k, 0) }
+pub fn bf_pd_diff(src: &BigFrame, col: i64, k: i64) -> BigFrame with Alloc, Mut, Div, Panic { pd_lag(src, col, k, 1) }
+pub fn bf_pd_pct_change(src: &BigFrame, col: i64, k: i64) -> BigFrame with Alloc, Mut, Div, Panic { pd_lag(src, col, k, 2) }
+pub fn bf_pd_ratio(src: &BigFrame, col: i64, k: i64) -> BigFrame with Alloc, Mut, Div, Panic { pd_lag(src, col, k, 3) }
+pub fn bf_pd_rdiff(src: &BigFrame, col: i64, k: i64) -> BigFrame with Alloc, Mut, Div, Panic { pd_lag(src, col, k, 4) }
+pub fn bf_pd_rank_average(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { pd_rank(src, col, 0) }
+pub fn bf_pd_rank_min(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { pd_rank(src, col, 1) }
+pub fn bf_pd_rank_max(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { pd_rank(src, col, 2) }
+pub fn bf_pd_rank_first(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { pd_rank(src, col, 3) }
+pub fn bf_pd_rank_dense(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { pd_rank(src, col, 4) }
+pub fn bf_pd_rank_pct(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { pd_rank(src, col, 5) }
+pub fn bf_pd_add_scalar(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pd_smap(src, col, s, 0) }
+pub fn bf_pd_sub_scalar(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pd_smap(src, col, s, 1) }
+pub fn bf_pd_mul_scalar(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pd_smap(src, col, s, 2) }
+pub fn bf_pd_div_scalar(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pd_smap(src, col, s, 3) }
+pub fn bf_pd_mod_scalar(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pd_smap(src, col, s, 4) }
+pub fn bf_pd_floordiv_scalar(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pd_smap(src, col, s, 5) }
+pub fn bf_pd_pow_scalar(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pd_smap(src, col, s, 6) }
+pub fn bf_pd_clip_lower(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pd_smap(src, col, s, 7) }
+pub fn bf_pd_clip_upper(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pd_smap(src, col, s, 8) }
+pub fn bf_pd_round_scalar(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pd_smap(src, col, s, 9) }
+pub fn bf_pd_gt_scalar(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pd_smap(src, col, s, 10) }
+pub fn bf_pd_ge_scalar(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pd_smap(src, col, s, 11) }
+pub fn bf_pd_clip(src: &BigFrame, col: i64, lo: f64, hi: f64) -> BigFrame with Alloc, Mut, Div, Panic { pd_clip(src, col, lo, hi) }
+pub fn bf_pd_count(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 0) }
+pub fn bf_pd_sum(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 1) }
+pub fn bf_pd_mean(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 2) }
+pub fn bf_pd_median(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 3) }
+pub fn bf_pd_min(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 4) }
+pub fn bf_pd_max(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 5) }
+pub fn bf_pd_std(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 6) }
+pub fn bf_pd_var(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 7) }
+pub fn bf_pd_std_pop(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 8) }
+pub fn bf_pd_var_pop(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 9) }
+pub fn bf_pd_sem(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 10) }
+pub fn bf_pd_skew(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 11) }
+pub fn bf_pd_kurt(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 12) }
+pub fn bf_pd_mad(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 13) }
+pub fn bf_pd_mad_median(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 14) }
+pub fn bf_pd_prod(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 15) }
+pub fn bf_pd_nunique(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 16) }
+pub fn bf_pd_is_unique(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 17) }
+pub fn bf_pd_is_monotonic_increasing(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 18) }
+pub fn bf_pd_is_monotonic_decreasing(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 19) }
+pub fn bf_pd_idxmax(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 20) }
+pub fn bf_pd_idxmin(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 21) }
+pub fn bf_pd_argmax(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 22) }
+pub fn bf_pd_argmin(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 23) }
+pub fn bf_pd_cv(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 24) }
+pub fn bf_pd_gmean(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 25) }
+pub fn bf_pd_hmean(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 26) }
+pub fn bf_pd_rms(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 27) }
+pub fn bf_pd_iqr(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 28) }
+pub fn bf_pd_range(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 29) }
+pub fn bf_pd_energy(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 30) }
+pub fn bf_pd_l2norm(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 31) }
+pub fn bf_pd_q05(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 32) }
+pub fn bf_pd_q25(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 33) }
+pub fn bf_pd_q50(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 34) }
+pub fn bf_pd_q75(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 35) }
+pub fn bf_pd_positive_count(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 36) }
+pub fn bf_pd_negative_count(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 37) }
+pub fn bf_pd_zero_count(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 38) }
+pub fn bf_pd_above_mean_count(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 39) }
+pub fn bf_pd_sign_changes(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 40) }
+pub fn bf_pd_zero_crossings(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 41) }
+pub fn bf_pd_first(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 42) }
+pub fn bf_pd_last(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 43) }
+pub fn bf_pd_peak_to_peak(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 44) }
+pub fn bf_pd_m2(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 45) }
+pub fn bf_pd_m3(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 46) }
+pub fn bf_pd_m4(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 47) }
+pub fn bf_pd_meanabs(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 48) }
+pub fn bf_pd_l1norm(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pd_reduce(src, col, 49) }
+pub fn bf_pd_quantile(src: &BigFrame, col: i64, q: f64) -> f64 with Alloc, Mut, Div, Panic { pd_areduce(src, col, q, 0) }
+pub fn bf_pd_autocorr(src: &BigFrame, col: i64, lag: f64) -> f64 with Alloc, Mut, Div, Panic { pd_areduce(src, col, lag, 1) }
+pub fn bf_pd_corr(src: &BigFrame, c1: i64, c2: i64) -> f64 with Alloc, Mut, Div, Panic { pd_binreduce(src, c1, c2, 0) }
+pub fn bf_pd_cov(src: &BigFrame, c1: i64, c2: i64) -> f64 with Alloc, Mut, Div, Panic { pd_binreduce(src, c1, c2, 1) }
+pub fn bf_pd_dot(src: &BigFrame, c1: i64, c2: i64) -> f64 with Alloc, Mut, Div, Panic { pd_binreduce(src, c1, c2, 2) }
+pub fn bf_pd_cosine_sim(src: &BigFrame, c1: i64, c2: i64) -> f64 with Alloc, Mut, Div, Panic { pd_binreduce(src, c1, c2, 3) }
+pub fn bf_pd_euclidean(src: &BigFrame, c1: i64, c2: i64) -> f64 with Alloc, Mut, Div, Panic { pd_binreduce(src, c1, c2, 4) }
+pub fn bf_pd_manhattan(src: &BigFrame, c1: i64, c2: i64) -> f64 with Alloc, Mut, Div, Panic { pd_binreduce(src, c1, c2, 5) }
+pub fn bf_pd_crosssum(src: &BigFrame, c1: i64, c2: i64) -> f64 with Alloc, Mut, Div, Panic { pd_binreduce(src, c1, c2, 6) }

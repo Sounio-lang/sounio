@@ -8,6 +8,7 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 
 | operation | 1M rows | Sounio ms | pandas ms | Sounio/pandas | before |
 |---|---|---|---|---|---|
+| bigframe_pd PANDAS.SERIES package: 108 verbs (rolling/expanding/ewm/rank/lag + reductions) | 108 gate-verified vs numpy | | | **capability** | native pandas.Series method coverage on f64 columns w/o the dependency; order-stats via in-module shell sort |
 | bigframe_sp SCIPY.SPECIAL package: 51 verbs (gamma/erf/digamma/beta/erfinv families) | 51 gate-verified vs Python math | | | **capability** | verified core: Lanczos lgamma, A&S erf, asymptotic digamma/trigamma, erfinv Winitzki+Newton; native scipy.special coverage w/o the dependency |
 | bigframe_np NUMPY-ON-COLUMNS package: 101 verbs (reductions/elementwise/cumulative/pairwise) | 100 gate-verified vs numpy | ~13 (std) | ~2 (numpy std) | **capability, not speed** | single-array ops are SIMD/BLAS-bound (lose ~6x); value = native numpy API coverage w/o the dependency; the per-group versions (bigframe_ops/ml) are the speed wins |
 | bigframe_ml MULTIVARIATE diagonal GaussianNB (p=4, binary) (1M rows, 1000 keys) | | ~43 | 293 (numpy, FAIR) | **0.15x — wins 6.9x** | one-pass per-class/feature mean+var, diagonal log-likelihood vs groupby.apply |
