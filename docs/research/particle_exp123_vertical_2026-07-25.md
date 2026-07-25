@@ -17,11 +17,11 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.parti
 
 **Date:** 2026-07-25  
 **Orthography:** EN-UK  
-**Status:** `PARTICLE_EXP123_OK` (58/58 checks under lean_single)  
+**Status:** `PARTICLE_EXP123_OK` (62/62 checks under lean_single)  
 **Source:** `examples/particle_physics/exp123_z_metrology_nonunitary_ew.sio`  
 **Gate:** `scripts/ci/particle_exp123_gate.sh`  
 **JSON receipt:** `examples/particle_physics/results/exp123_deficit_curve.json`  
-**Stdlib:** tree / on-shell-Δρ / G_F-Sirlin Δr M_W APIs in `ew_precision.sio`
+**Stdlib:** tree / on-shell-Δρ / G_F-Sirlin Δr + **`EpistemicTension`** in `ew_precision.sio`
 
 ---
 
@@ -34,7 +34,7 @@ GUM / effects discipline, where novelty can grow without paper-first pressure.
 |---|---|---|
 | **1** | Γ(Z→ee) metrology + uncertainty budget + confidence gate | GUM provenance to observable; budget of PDG sources |
 | **2** | Non-unitarity at Z pole: deficit(s), peak σ with `NonUnitary`, deficit vs √s **JSON** | Effect-typed unstable intermediate; machine-readable curve |
-| **3** | EW tension ladder: tree → Δρ → G_F-Δr pulls, S/T/U | Tension as first-class object that improves under honest construction |
+| **3** | EW tension ladder via typed **`EpistemicTension`** | Tension is a passable object (`tension_improves`), not print keys only |
 
 ---
 
@@ -45,7 +45,7 @@ export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
 export SOUNIO_SOUC_ENGINE=lean_single   # full run path
 
 ./bin/souc run examples/particle_physics/exp123_z_metrology_nonunitary_ew.sio
-# expect: PARTICLE_EXP123_OK  (58 PASS)
+# expect: PARTICLE_EXP123_OK  (62 PASS)
 
 bash scripts/ci/particle_exp123_gate.sh
 # expect: PARTICLE_EXP123_GATE_OK
