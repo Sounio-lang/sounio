@@ -8,6 +8,8 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 
 | operation | 1M rows | Sounio ms | pandas ms | Sounio/pandas | before |
 |---|---|---|---|---|---|
+| bigframe_ml MULTIVARIATE diagonal GaussianNB (p=4, binary) (1M rows, 1000 keys) | | ~43 | 293 (numpy, FAIR) | **0.15x — wins 6.9x** | one-pass per-class/feature mean+var, diagonal log-likelihood vs groupby.apply |
+| bigframe_ml MULTIVARIATE LDA shared-covariance (p=4, binary) (1M rows, 1000 keys) | | ~95 | 289 (numpy, FAIR) | **0.33x — wins 3.0x** | one-pass pooled covariance + Gaussian-elim solve Σ[w0|w1]=[μ0|μ1] vs groupby.apply(LDA) |
 | bigframe_ml MULTIVARIATE ridge/OLS (p=4 features, Gram+Gaussian-elim) (1M rows, 1000 keys) | | ~125 | 161 (numpy normal-eq, FAIR) | **0.78x — wins 1.3x** | one-pass symmetric Gram XᵀX + per-group d×d solve vs groupby.apply(np.linalg.solve); modest because numpy's per-group work is a real BLAS matmul |
 | bigframe_ml BINNED-IRLS LOGISTIC (boundary-breaker: iterative made to WIN) (1M rows, 1000 keys, vmax 20) | | ~27 | 234 (numpy binned, FAIR) / 270 (numpy naive) | **0.12x — wins 8.7x fair / 10x vs naive** | exact bit-match to per-row IRLS; per-bin sufficient stats built once, IRLS re-sums bins not rows |
 | bigframe_ml LDA fit+predict (closed-form, pooled variance) (1M rows, 1000 keys) | | ~18 | ~77 | **0.23x — wins 4.3x** | one-pass per-class mean + pooled var + discriminant vs groupby.apply(LDA) |

@@ -1019,3 +1019,221 @@ pub fn bf_mvridge_predict_by(src: &BigFrame, key_col: i64, f0_col: i64, p: i64, 
 /// Per-group MULTIVARIATE coefficient j (0 = intercept, 1..p = feature coefs). lambda=0 = OLS.
 /// NATIVE + lean_single.
 pub fn bf_mvridge_coef_by(src: &BigFrame, key_col: i64, f0_col: i64, p: i64, y_col: i64, lambda: f64, j: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_mvridge(src, key_col, f0_col, p, y_col, lambda, j + 1) }
+
+/// Per-group MULTIVARIATE diagonal-covariance GAUSSIAN NAIVE BAYES (binary; columns key, then p
+/// CONTIGUOUS feature columns from f0_col, then y∈{0,1}). One pass fits per-class, per-feature mean
+/// and population variance + class priors; classifies by the diagonal-Gaussian log-likelihood
+/// ls_c = ln(prior_c) - Σ_j [½ ln(2π var_cj) + (x_j-μ_cj)²/(2 var_cj)]. The sklearn GaussianNB
+/// analog per key, now p-dimensional, closed-form (wins). modes: 0 = predicted class, 1 = P(y=1|x).
+/// p in 1..7. O(n·p). NATIVE + lean_single only.
+fn bf_group_mvgnb(src: &BigFrame, key_col: i64, f0_col: i64, p: i64, y_col: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var n0: [f64; 1024] = [0.0; 1024]
+    var n1: [f64; 1024] = [0.0; 1024]
+    var lp0: [f64; 1024] = [0.0; 1024]
+    var lp1: [f64; 1024] = [0.0; 1024]
+    var ok: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || y_col < 0 || y_col >= nc || n <= 0 || p < 1 || p > 7 || f0_col < 0 || f0_col + p > nc { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let yp = bf_col_ptr(src, y_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let fptr = heap_alloc(p * 8) as *mut i64
+    var fc: i64 = 0
+    while fc < p { write_i64(fptr, fc, bf_col_ptr(src, f0_col + fc)); fc = fc + 1 }
+    let s0 = heap_alloc(1024 * p * 8) as *mut f64
+    let q0 = heap_alloc(1024 * p * 8) as *mut f64
+    let s1 = heap_alloc(1024 * p * 8) as *mut f64
+    let q1 = heap_alloc(1024 * p * 8) as *mut f64
+    let m0 = heap_alloc(1024 * p * 8) as *mut f64
+    let v0 = heap_alloc(1024 * p * 8) as *mut f64
+    let m1 = heap_alloc(1024 * p * 8) as *mut f64
+    let v1 = heap_alloc(1024 * p * 8) as *mut f64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 {
+            let cls1 = read_f64(yp, i) > 0.5
+            if cls1 { n1[k] = n1[k] + 1.0 } else { n0[k] = n0[k] + 1.0 }
+            var j: i64 = 0
+            while j < p { let xj = read_f64(read_i64(fptr, j) as *mut f64, i); let idx = k * p + j; if cls1 { write_f64(s1, idx, read_f64(s1, idx) + xj); write_f64(q1, idx, read_f64(q1, idx) + xj * xj) } else { write_f64(s0, idx, read_f64(s0, idx) + xj); write_f64(q0, idx, read_f64(q0, idx) + xj * xj) } j = j + 1 }
+        }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        if n0[g] > 0.0 && n1[g] > 0.0 {
+            let tot = n0[g] + n1[g]
+            lp0[g] = ln(n0[g] / tot); lp1[g] = ln(n1[g] / tot); ok[g] = 1.0
+            var j: i64 = 0
+            while j < p { let idx = g * p + j
+                let mu0 = read_f64(s0, idx) / n0[g]; let va0 = read_f64(q0, idx) / n0[g] - mu0 * mu0
+                let mu1 = read_f64(s1, idx) / n1[g]; let va1 = read_f64(q1, idx) / n1[g] - mu1 * mu1
+                write_f64(m0, idx, mu0); write_f64(v0, idx, va0); write_f64(m1, idx, mu1); write_f64(v1, idx, va1)
+                if va0 <= 0.0 || va1 <= 0.0 { ok[g] = 0.0 }
+                j = j + 1 }
+        }
+        g = g + 1
+    }
+    let tau = 6.283185307179586
+    i = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 && ok[k] > 0.5 {
+            var ls0 = lp0[k]; var ls1 = lp1[k]
+            var j: i64 = 0
+            while j < p { let xj = read_f64(read_i64(fptr, j) as *mut f64, i); let idx = k * p + j
+                let mu0 = read_f64(m0, idx); let va0 = read_f64(v0, idx); let mu1 = read_f64(m1, idx); let va1 = read_f64(v1, idx)
+                ls0 = ls0 - 0.5 * ln(tau * va0) - (xj - mu0) * (xj - mu0) / (2.0 * va0)
+                ls1 = ls1 - 0.5 * ln(tau * va1) - (xj - mu1) * (xj - mu1) / (2.0 * va1)
+                j = j + 1 }
+            if mode == 0 { if ls1 > ls0 { write_f64(op, i, 1.0) } else { write_f64(op, i, 0.0) } } else { write_f64(op, i, 1.0 / (1.0 + exp(ls0 - ls1))) }
+        } else { write_f64(op, i, 0.0) }
+        i = i + 1
+    }
+    heap_free(fptr as *mut i8); heap_free(s0 as *mut i8); heap_free(q0 as *mut i8); heap_free(s1 as *mut i8); heap_free(q1 as *mut i8)
+    heap_free(m0 as *mut i8); heap_free(v0 as *mut i8); heap_free(m1 as *mut i8); heap_free(v1 as *mut i8)
+    out
+}
+/// Per-group multivariate diagonal-GNB predicted class (0/1). NATIVE + lean_single.
+pub fn bf_mvgnb_predict_by(src: &BigFrame, key_col: i64, f0_col: i64, p: i64, y_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_mvgnb(src, key_col, f0_col, p, y_col, 0) }
+/// Per-group multivariate diagonal-GNB P(y=1|x). NATIVE + lean_single.
+pub fn bf_mvgnb_proba_by(src: &BigFrame, key_col: i64, f0_col: i64, p: i64, y_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_mvgnb(src, key_col, f0_col, p, y_col, 1) }
+
+/// Per-group MULTIVARIATE LINEAR DISCRIMINANT ANALYSIS (binary, p features with a SHARED pooled
+/// covariance; columns key, then p CONTIGUOUS feature columns from f0_col, then y∈{0,1}). One pass
+/// accumulates per-class means and cross-products, forms the pooled within-class covariance Σ, and
+/// -- reusing the Gaussian-elimination solver from the multivariate ridge -- solves Σ[w0|w1] =
+/// [μ0|μ1] per group (two right-hand sides). Classifies by the linear discriminant
+/// δ_c(x) = xᵀ Σ⁻¹ μ_c - ½ μ_cᵀ Σ⁻¹ μ_c + ln(prior_c). The sklearn
+/// LinearDiscriminantAnalysis(solver='lsqr') analog per key, p-dimensional, closed-form (wins).
+/// modes: 0 = predicted class, 1 = P(y=1|x). p in 1..7. O(n·p² + keys·p³). NATIVE + lean_single only.
+fn bf_group_mvlda(src: &BigFrame, key_col: i64, f0_col: i64, p: i64, y_col: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var n0: [f64; 1024] = [0.0; 1024]
+    var n1: [f64; 1024] = [0.0; 1024]
+    var cst0: [f64; 1024] = [0.0; 1024]
+    var cst1: [f64; 1024] = [0.0; 1024]
+    var ok: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || y_col < 0 || y_col >= nc || n <= 0 || p < 1 || p > 7 || f0_col < 0 || f0_col + p > nc { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let yp = bf_col_ptr(src, y_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let fptr = heap_alloc(p * 8) as *mut i64
+    var fc: i64 = 0
+    while fc < p { write_i64(fptr, fc, bf_col_ptr(src, f0_col + fc)); fc = fc + 1 }
+    let s0 = heap_alloc(1024 * p * 8) as *mut f64
+    let s1 = heap_alloc(1024 * p * 8) as *mut f64
+    let C0 = heap_alloc(1024 * p * p * 8) as *mut f64
+    let C1 = heap_alloc(1024 * p * p * 8) as *mut f64
+    let w0 = heap_alloc(1024 * p * 8) as *mut f64
+    let w1 = heap_alloc(1024 * p * 8) as *mut f64
+    let mm0 = heap_alloc(1024 * p * 8) as *mut f64
+    let mm1 = heap_alloc(1024 * p * 8) as *mut f64
+    let xv = heap_alloc(p * 8) as *mut f64
+    // one pass: per-class Σx and Σ x_j x_k
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 {
+            let cls1 = read_f64(yp, i) > 0.5
+            var j: i64 = 0
+            while j < p { write_f64(xv, j, read_f64(read_i64(fptr, j) as *mut f64, i)); j = j + 1 }
+            if cls1 { n1[k] = n1[k] + 1.0 } else { n0[k] = n0[k] + 1.0 }
+            let sb = k * p; let cb = k * p * p
+            j = 0
+            while j < p { let xj = read_f64(xv, j)
+                if cls1 { write_f64(s1, sb + j, read_f64(s1, sb + j) + xj) } else { write_f64(s0, sb + j, read_f64(s0, sb + j) + xj) }
+                var l: i64 = j
+                while l < p { let prod = xj * read_f64(xv, l); let ix = cb + j * p + l; if cls1 { write_f64(C1, ix, read_f64(C1, ix) + prod) } else { write_f64(C0, ix, read_f64(C0, ix) + prod) }; l = l + 1 }
+                j = j + 1 }
+        }
+        i = i + 1
+    }
+    // per group: build Σ, solve Σ[w0|w1]=[μ0|μ1]
+    let A = heap_alloc(64 * 8) as *mut f64
+    let B = heap_alloc(16 * 8) as *mut f64
+    var g: i64 = 0
+    while g < 1024 {
+        if n0[g] > 0.0 && n1[g] > 0.0 && (n0[g] + n1[g]) > 2.0 {
+            let tot = n0[g] + n1[g]; let sb = g * p; let cb = g * p * p
+            var j: i64 = 0
+            while j < p { write_f64(mm0, sb + j, read_f64(s0, sb + j) / n0[g]); write_f64(mm1, sb + j, read_f64(s1, sb + j) / n1[g]); j = j + 1 }
+            // Σ = [ Σ_c (C_c - n_c μ_c μ_cᵀ) ] / (N-2), symmetric
+            j = 0
+            while j < p {
+                var l: i64 = j
+                while l < p {
+                    let sw = (read_f64(C0, cb + j * p + l) - n0[g] * read_f64(mm0, sb + j) * read_f64(mm0, sb + l)) + (read_f64(C1, cb + j * p + l) - n1[g] * read_f64(mm1, sb + j) * read_f64(mm1, sb + l))
+                    let val = sw / (tot - 2.0)
+                    write_f64(A, j * p + l, val); write_f64(A, l * p + j, val)
+                    l = l + 1
+                }
+                write_f64(B, j * 2 + 0, read_f64(mm0, sb + j)); write_f64(B, j * 2 + 1, read_f64(mm1, sb + j))
+                j = j + 1
+            }
+            // Gaussian elimination with partial pivot, 2 RHS columns
+            var col: i64 = 0; var good = 1
+            while col < p {
+                var piv = col; var pmax = read_f64(A, col * p + col); if pmax < 0.0 { pmax = 0.0 - pmax }
+                var rr = col + 1
+                while rr < p { var av = read_f64(A, rr * p + col); if av < 0.0 { av = 0.0 - av }; if av > pmax { pmax = av; piv = rr }; rr = rr + 1 }
+                if pmax < 0.000000000001 { good = 0; col = p } else {
+                    if piv != col { var t: i64 = 0; while t < p { let tmp = read_f64(A, col * p + t); write_f64(A, col * p + t, read_f64(A, piv * p + t)); write_f64(A, piv * p + t, tmp); t = t + 1 }; var tc: i64 = 0; while tc < 2 { let tb = read_f64(B, col * 2 + tc); write_f64(B, col * 2 + tc, read_f64(B, piv * 2 + tc)); write_f64(B, piv * 2 + tc, tb); tc = tc + 1 } }
+                    let pv = read_f64(A, col * p + col); var row2 = col + 1
+                    while row2 < p { let f = read_f64(A, row2 * p + col) / pv
+                        var t2: i64 = 0; while t2 < p { write_f64(A, row2 * p + t2, read_f64(A, row2 * p + t2) - f * read_f64(A, col * p + t2)); t2 = t2 + 1 }
+                        var t3: i64 = 0; while t3 < 2 { write_f64(B, row2 * 2 + t3, read_f64(B, row2 * 2 + t3) - f * read_f64(B, col * 2 + t3)); t3 = t3 + 1 }
+                        row2 = row2 + 1 }
+                    col = col + 1
+                }
+            }
+            if good == 1 {
+                var rb = p - 1
+                while rb >= 0 {
+                    var cc: i64 = 0
+                    while cc < 2 {
+                        var sm = read_f64(B, rb * 2 + cc)
+                        var jj = rb + 1
+                        while jj < p { let wj = if cc == 0 { read_f64(w0, sb + jj) } else { read_f64(w1, sb + jj) }; sm = sm - read_f64(A, rb * p + jj) * wj; jj = jj + 1 }
+                        let sol = sm / read_f64(A, rb * p + rb)
+                        if cc == 0 { write_f64(w0, sb + rb, sol) } else { write_f64(w1, sb + rb, sol) }
+                        cc = cc + 1
+                    }
+                    rb = rb - 1
+                }
+                // constants: -0.5 μ_cᵀ w_c + ln π_c
+                var mw0 = 0.0; var mw1 = 0.0
+                var jc: i64 = 0
+                while jc < p { mw0 = mw0 + read_f64(mm0, sb + jc) * read_f64(w0, sb + jc); mw1 = mw1 + read_f64(mm1, sb + jc) * read_f64(w1, sb + jc); jc = jc + 1 }
+                cst0[g] = 0.0 - 0.5 * mw0 + ln(n0[g] / tot); cst1[g] = 0.0 - 0.5 * mw1 + ln(n1[g] / tot); ok[g] = 1.0
+            }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 && ok[k] > 0.5 {
+            let sb = k * p
+            var d0 = cst0[k]; var d1 = cst1[k]
+            var j: i64 = 0
+            while j < p { let xj = read_f64(read_i64(fptr, j) as *mut f64, i); d0 = d0 + xj * read_f64(w0, sb + j); d1 = d1 + xj * read_f64(w1, sb + j); j = j + 1 }
+            if mode == 0 { if d1 > d0 { write_f64(op, i, 1.0) } else { write_f64(op, i, 0.0) } } else { write_f64(op, i, 1.0 / (1.0 + exp(d0 - d1))) }
+        } else { write_f64(op, i, 0.0) }
+        i = i + 1
+    }
+    heap_free(fptr as *mut i8); heap_free(s0 as *mut i8); heap_free(s1 as *mut i8); heap_free(C0 as *mut i8); heap_free(C1 as *mut i8)
+    heap_free(w0 as *mut i8); heap_free(w1 as *mut i8); heap_free(mm0 as *mut i8); heap_free(mm1 as *mut i8); heap_free(xv as *mut i8)
+    heap_free(A as *mut i8); heap_free(B as *mut i8)
+    out
+}
+/// Per-group multivariate LDA predicted class (0/1). NATIVE + lean_single.
+pub fn bf_mvlda_predict_by(src: &BigFrame, key_col: i64, f0_col: i64, p: i64, y_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_mvlda(src, key_col, f0_col, p, y_col, 0) }
+/// Per-group multivariate LDA P(y=1|x). NATIVE + lean_single.
+pub fn bf_mvlda_proba_by(src: &BigFrame, key_col: i64, f0_col: i64, p: i64, y_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_mvlda(src, key_col, f0_col, p, y_col, 1) }
