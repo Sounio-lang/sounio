@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Classify the #901 visibility frontier without changing the bootstrap gate.
 #
-# This companion job consumes a compiler artifact retained by the recovery
-# receipt and runs the strict checker and frontend probes side by side. It is
-# diagnostic only: a bridge artifact is allowed to expose the next semantic
-# boundary, but never counts as an operational Madaros generation.
+# This companion job consumes a provenance-checked compiler artifact retained
+# by the recovery gate and collects strict-checker/frontend probes side by side.
+# It does not classify language semantics: logs remain evidence for a later
+# decision. A bridge artifact is diagnostic only, never an operational Madaros
+# generation.
 
 set -euo pipefail
 
@@ -28,12 +29,23 @@ fail() {
   exit 1
 }
 
+safe_component() {
+  [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]]
+}
+
+safe_orangefs_path() {
+  [[ "$1" =~ ^/orangefs/[A-Za-z0-9._/-]+$ ]]
+}
+
 case "$COMPILER_KIND" in
-  bridge|stage1) ;;
-  *) fail 'SOUNIO_MADAROS_RECOVERY_COMPILER_KIND must be bridge or stage1' ;;
+  bridge|stage2) ;;
+  *) fail 'SOUNIO_MADAROS_RECOVERY_COMPILER_KIND must be bridge or stage2' ;;
 esac
 
 [[ -n "$RECOVERY_RESULT_DIR" ]] || fail 'SOUNIO_MADAROS_RECOVERY_RESULT_DIR is required'
+safe_orangefs_path "$RECOVERY_RESULT_DIR" || fail 'SOUNIO_MADAROS_RECOVERY_RESULT_DIR must be an absolute OrangeFS path without whitespace'
+safe_orangefs_path "$ORANGEFS_TMP" || fail 'ORANGEFS_TMP must be an absolute OrangeFS path without whitespace'
+safe_component "$RUN_ID" || fail 'RUN_ID may contain only letters, digits, dot, underscore, and dash'
 
 SOURCE_COMMIT="$(git -C "$REPO" rev-parse "$SOURCE_REF")"
 [[ -z "$(git -C "$REPO" status --porcelain)" ]] || fail 'source checkout is dirty; commit the probe launcher first'
@@ -84,6 +96,15 @@ RESULT_DIR=$RESULT_DIR
 RECOVERY_RESULT_DIR=$RECOVERY_RESULT_DIR
 COMPILER_KIND=$COMPILER_KIND
 COMPILER=\$RECOVERY_RESULT_DIR/gate-work/madaros-\$COMPILER_KIND
+if [[ "\$COMPILER_KIND" == bridge ]]; then
+  PROVENANCE=\$RECOVERY_RESULT_DIR/gate-work/bridge-provenance.tsv
+  EXPECTED_SHA_KEY=bridge_madaros_sha256
+  ARTIFACT_ROLE=diagnostic_bridge
+else
+  PROVENANCE=\$RECOVERY_RESULT_DIR/gate-work/bootstrap-recovery-receipt.tsv
+  EXPECTED_SHA_KEY=stage2_madaros_sha256
+  ARTIFACT_ROLE=operational_fixed_point
+fi
 
 rm -rf "\$ROOT"
 mkdir -p "\$REPO"
@@ -92,6 +113,17 @@ cd "\$REPO"
 
 sha256() {
   sha256sum "\$1" 2>/dev/null | awk '{print \$1}' || shasum -a 256 "\$1" | awk '{print \$1}'
+}
+
+tsv_value() {
+  awk -F '\\t' -v key="\$1" '\$1 == key { print \$2; exit }' "\$2"
+}
+
+block() {
+  printf 'classification\\tBLOCKED\\n' > "\$RESULT_DIR/status.tsv"
+  printf 'reason\\t%s\\n' "\$1" >> "\$RESULT_DIR/status.tsv"
+  echo 'status=BLOCKED' >> "\$RESULT_DIR/environment.tsv"
+  exit 0
 }
 
 run_probe() {
@@ -111,18 +143,29 @@ run_probe() {
   echo 'source_commit=$SOURCE_COMMIT'
   echo "job_id=\${SLURM_JOB_ID:-manual}"
   echo "compiler_kind=\$COMPILER_KIND"
+  echo "artifact_role=\$ARTIFACT_ROLE"
   echo "compiler_path=\$COMPILER"
+  echo "provenance_receipt=\$PROVENANCE"
 } > "\$RESULT_DIR/environment.tsv"
 
 if [[ ! -x "\$COMPILER" || "\$(head -c4 "\$COMPILER" 2>/dev/null)" != \$'\\x7fELF' ]]; then
-  printf 'classification\\tBLOCKED\\n' > "\$RESULT_DIR/status.tsv"
-  printf 'reason\\tmissing_%s_artifact\\n' "\$COMPILER_KIND" >> "\$RESULT_DIR/status.tsv"
-  echo 'status=BLOCKED' >> "\$RESULT_DIR/environment.tsv"
-  exit 0
+  block "missing_\${COMPILER_KIND}_artifact"
 fi
 
-printf 'compiler_sha256\\t%s\\n' "\$(sha256 "\$COMPILER")" >> "\$RESULT_DIR/environment.tsv"
-printf 'classification\\tOBSERVED\\n' > "\$RESULT_DIR/status.tsv"
+[[ -r "\$PROVENANCE" ]] || block 'missing_provenance_receipt'
+[[ "\$(tsv_value source_commit "\$PROVENANCE")" == "$SOURCE_COMMIT" ]] || block 'provenance_source_commit_mismatch'
+[[ "\$(tsv_value artifact_role "\$PROVENANCE")" == "\$ARTIFACT_ROLE" ]] || block 'provenance_artifact_role_mismatch'
+if [[ "\$COMPILER_KIND" == bridge ]]; then
+  [[ "\$(tsv_value closure_status "\$PROVENANCE")" == complete ]] || block 'bridge_closure_incomplete'
+  [[ "\$(tsv_value closure_parse_failed "\$PROVENANCE")" == false ]] || block 'bridge_closure_parse_failed'
+fi
+if [[ "\$COMPILER_KIND" == stage2 ]]; then
+  [[ "\$(tsv_value operational_fixed_point "\$PROVENANCE")" == sha256-stage1-equals-stage2 ]] || block 'missing_operational_fixed_point'
+fi
+COMPILER_SHA256="\$(sha256 "\$COMPILER")"
+[[ "\$(tsv_value "\$EXPECTED_SHA_KEY" "\$PROVENANCE")" == "\$COMPILER_SHA256" ]] || block 'provenance_compiler_sha256_mismatch'
+printf 'compiler_sha256\\t%s\\n' "\$COMPILER_SHA256" >> "\$RESULT_DIR/environment.tsv"
+printf 'classification\\tCOLLECTED\\n' > "\$RESULT_DIR/status.tsv"
 
 run_probe strict_main --check "\$REPO/self-hosted/compiler/main.sio"
 run_probe frontend_main --probe-frontend "\$REPO/self-hosted/compiler/main.sio"
@@ -130,7 +173,7 @@ run_probe frontend_private_fn --probe-frontend "\$REPO/tests/multimodule/visibil
 run_probe frontend_private_struct --probe-frontend "\$REPO/tests/multimodule/visibility_struct_private_main.sio"
 run_probe frontend_private_enum --probe-frontend "\$REPO/tests/multimodule/visibility_enum_private_main.sio"
 
-echo 'status=OBSERVED' >> "\$RESULT_DIR/environment.tsv"
+echo 'status=COLLECTED' >> "\$RESULT_DIR/environment.tsv"
 EOF
 
 $KUBECTL -n "$NS" cp "$SBATCH" "$LOGIN_POD:$REMOTE_SBATCH"

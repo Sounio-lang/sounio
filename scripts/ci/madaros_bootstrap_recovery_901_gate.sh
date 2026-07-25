@@ -60,6 +60,7 @@ if [[ "$KEEP_WORK" != '1' ]]; then
 fi
 
 BRIDGE="$WORK/madaros-bridge"
+BRIDGE_PROVENANCE="$WORK/bridge-provenance.tsv"
 STAGE1="$WORK/madaros-stage1"
 STAGE2="$WORK/madaros-stage2"
 RECEIPT="$WORK/bootstrap-recovery-receipt.tsv"
@@ -77,6 +78,8 @@ if ! env \
   fail 'audited legacy bridge could not build Madaros from current source'
 fi
 require_raw_elf "$BRIDGE" 'bridge Madaros'
+LEGACY_SHA256="$(portable_sha256 "$LEGACY_BOOTSTRAP")"
+BRIDGE_SHA256="$(portable_sha256 "$BRIDGE")"
 
 "$BRIDGE" --science-boundary-closure "$ROOT_DIR/self-hosted/compiler/main.sio" >"$WORK/bridge-closure.log" 2>&1 || {
   cat "$WORK/bridge-closure.log" >&2
@@ -90,6 +93,18 @@ grep -Fxq $'parse_failed\tfalse' "$WORK/bridge-closure.log" || {
   cat "$WORK/bridge-closure.log" >&2
   fail 'bridge Madaros still reports parser failure in the compiler closure'
 }
+
+# A bridge may be useful for a bounded diagnostic before it can produce M_(n+1),
+# but it is never an operational generation. Record its exact source/artifact
+# relation before attempting stage1 so companion probes cannot borrow provenance
+# from a later successful fixed point.
+printf 'receipt_version\tmadaros-bootstrap-recovery-bridge-v1\n' >"$BRIDGE_PROVENANCE"
+printf 'source_commit\t%s\n' "$SOURCE_COMMIT" >>"$BRIDGE_PROVENANCE"
+printf 'artifact_role\tdiagnostic_bridge\n' >>"$BRIDGE_PROVENANCE"
+printf 'legacy_bootstrap_sha256\t%s\n' "$LEGACY_SHA256" >>"$BRIDGE_PROVENANCE"
+printf 'bridge_madaros_sha256\t%s\n' "$BRIDGE_SHA256" >>"$BRIDGE_PROVENANCE"
+printf 'closure_status\tcomplete\n' >>"$BRIDGE_PROVENANCE"
+printf 'closure_parse_failed\tfalse\n' >>"$BRIDGE_PROVENANCE"
 
 if ! env \
   -u MADAROS_RAW_BIN \
@@ -121,8 +136,6 @@ if ! env \
 fi
 require_raw_elf "$STAGE2" 'second operational Madaros generation'
 
-LEGACY_SHA256="$(portable_sha256 "$LEGACY_BOOTSTRAP")"
-BRIDGE_SHA256="$(portable_sha256 "$BRIDGE")"
 STAGE1_SHA256="$(portable_sha256 "$STAGE1")"
 STAGE2_SHA256="$(portable_sha256 "$STAGE2")"
 [[ "$STAGE1_SHA256" == "$STAGE2_SHA256" ]] || fail "operational fixed point diverged: stage1=$STAGE1_SHA256 stage2=$STAGE2_SHA256"
@@ -187,6 +200,7 @@ SOUNIO_MADAROS_SCOPE_CONTEXTUAL_KEEP=1 \
 printf 'receipt_version\tmadaros-bootstrap-recovery-901-v1\n' >"$RECEIPT"
 printf 'source_commit\t%s\n' "$SOURCE_COMMIT" >>"$RECEIPT"
 printf 'bootstrap_mode\tquarantined-lean-audit-bridge\n' >>"$RECEIPT"
+printf 'artifact_role\toperational_fixed_point\n' >>"$RECEIPT"
 printf 'legacy_bootstrap_sha256\t%s\n' "$LEGACY_SHA256" >>"$RECEIPT"
 printf 'bridge_madaros_sha256\t%s\n' "$BRIDGE_SHA256" >>"$RECEIPT"
 printf 'stage1_madaros_sha256\t%s\n' "$STAGE1_SHA256" >>"$RECEIPT"
