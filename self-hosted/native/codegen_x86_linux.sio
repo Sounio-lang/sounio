@@ -1134,10 +1134,27 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
     if name_is_str_from_bytes((*func).name) { return 22 }
     if name_is_heap_alloc((*func).name) { return 23 }
     if name_is_heap_free((*func).name) { return 24 }
+    if name_is_syscall6((*func).name) { return 27 }
     0
 }
 
 // M4: argv and string builtins
+
+// syscall6(nr, a1..a6) raw Linux syscall builtin (id 27). Checker arm:
+// call_expr_is_syscall6 in check/check.sio; lowering arm in ir/lower.sio.
+fn name_is_syscall6(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 8 { return false }
+    if n.buf[0] != 115 as i8 { return false }     // 's'
+    if n.buf[1] != 121 as i8 { return false }     // 'y'
+    if n.buf[2] != 115 as i8 { return false }     // 's'
+    if n.buf[3] != 99 as i8 { return false }      // 'c'
+    if n.buf[4] != 97 as i8 { return false }      // 'a'
+    if n.buf[5] != 108 as i8 { return false }     // 'l'
+    if n.buf[6] != 108 as i8 { return false }     // 'l'
+    if n.buf[7] != 54 as i8 { return false }      // '6'
+    true
+}
+
 fn name_is_get_arg_count(n: Name) -> bool with Mut, Panic, Div {
     // Source-level spelling is "arg_count"; retain the older
     // "get_arg_count" backend alias for hand-built IR witnesses.
@@ -3502,6 +3519,36 @@ fn emit_builtin_heap_free_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_patch_u32_le(nc, null_patch, done_offset - (null_patch + 4))
 }
 
+// syscall6(nr, a1, a2, a3, a4, a5, a6) -> i64 — raw Linux syscall escape
+// hatch (builtin id 27), the Madaros twin of lean_single's emit_syscall6_x86
+// (self-hosted/compiler/lean_single.sio:9709). Args arrive per the IrCall
+// SysV marshalling: rdi=nr, rsi=a1, rdx=a2, rcx=a3, r8=a4, r9=a5, a6 on the
+// stack at [rsp+8] (return address at [rsp]; nc_core_push_call_stack_args
+// pads to 16B BEFORE pushing stack args, so a6 is always the first slot).
+// The kernel ABI wants rax=nr, rdi=a1, rsi=a2, rdx=a3, r10=a4 (NOT rcx),
+// r8=a5, r9=a6, so the body shuffles registers in destructive-safe order
+// (each move frees its own source before the next read) and loads a6 last,
+// before any push would shift the stack slots. Return value stays in rax.
+fn emit_builtin_syscall6_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_mov_reg_reg(nc, 0, 7)   // mov rax, rdi  (nr)
+    nc_emit_mov_reg_reg(nc, 7, 6)   // mov rdi, rsi  (a1)
+    nc_emit_mov_reg_reg(nc, 6, 2)   // mov rsi, rdx  (a2)
+    nc_emit_mov_reg_reg(nc, 2, 1)   // mov rdx, rcx  (a3)
+    nc_emit_byte(nc, 0x4d)          // mov r10, r8   (a4; kernel arg4 reg)
+    nc_emit_byte(nc, 0x89)
+    nc_emit_byte(nc, 0xc2)
+    nc_emit_byte(nc, 0x4d)          // mov r8, r9    (a5)
+    nc_emit_byte(nc, 0x89)
+    nc_emit_byte(nc, 0xc8)
+    nc_emit_byte(nc, 0x4c)          // mov r9, [rsp+8]  (a6)
+    nc_emit_byte(nc, 0x8b)
+    nc_emit_byte(nc, 0x4c)
+    nc_emit_byte(nc, 0x24)
+    nc_emit_byte(nc, 0x08)
+    nc_emit_syscall(nc)
+    nc_emit_ret(nc)
+}
+
 // ============================================================================
 // M4: argv access builtins
 // ============================================================================
@@ -4038,14 +4085,12 @@ fn native_v2_rodata_append_updated_tail(nc: &! NativeCompiler, updated: NativeCo
     let append_base = if (*nc).flat_rodata_len > 0 { (*nc).flat_rodata_len } else { (*nc).rodata.len }
     var src = src_start
     if (*nc).flat_rodata_len > 0 {
-        var bytes = (*nc).flat_rodata_bytes
         var len = (*nc).flat_rodata_len
-        while src < updated.rodata.len && len < 8192 {
-            bytes[len as usize] = updated.rodata.bytes[src as usize]
+        while src < updated.rodata.len && len < 262144 {
+            NC_BIG_RODATA[len as usize] = updated.rodata.bytes[src as usize]
             len = len + 1
             src = src + 1
         }
-        (*nc).flat_rodata_bytes = bytes
         (*nc).flat_rodata_len = len
     } else {
         var t = (*nc).rodata
@@ -6074,6 +6119,7 @@ pub fn native_v2_builtin_id_for_name(name: Name) -> i64 with Mut, Panic, Div {
     if name_is_str_from_bytes(name) { return 22 }
     if name_is_heap_alloc(name) { return 23 }
     if name_is_heap_free(name) { return 24 }
+    if name_is_syscall6(name) { return 27 }
     0
 }
 
@@ -6129,6 +6175,7 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     if builtin_id == 24 { emit_builtin_heap_free_into(nc); return }
     if builtin_id == 25 { native_v2_persist_builtin_emit_into(nc, emit_builtin_f64_bits_identity((*nc))); return }
     if builtin_id == 26 { native_v2_persist_builtin_emit_into(nc, emit_builtin_f64_bits_identity((*nc))); return }
+    if builtin_id == 27 { emit_builtin_syscall6_into(nc); return }
 }
 
 pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func: MachineFunction, fn_index: i64) -> NativeCompiler with Mut, Panic, Div, Alloc {
@@ -6686,40 +6733,36 @@ fn nc_core_emit_alloc_into(nc: &! NativeCompiler, dst: i64, type_tag: i64, elem_
 }
 
 fn nc_rodata_add_ir_instr_name(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64) -> i64 with Mut, Panic, Div {
-    var bytes = (*nc).flat_rodata_bytes
     var len = (*nc).flat_rodata_len
     let offset = len
     var i = 0
     let name_len = (*func).instrs[instr_index as usize].name.len
-    while i < name_len && len < 8192 {
-        bytes[len as usize] = (*func).instrs[instr_index as usize].name.buf[i as usize]
+    while i < name_len && len < 262144 {
+        NC_BIG_RODATA[len as usize] = (*func).instrs[instr_index as usize].name.buf[i as usize]
         len = len + 1
         i = i + 1
     }
-    if len < 8192 {
-        bytes[len as usize] = 0
+    if len < 262144 {
+        NC_BIG_RODATA[len as usize] = 0
         len = len + 1
     }
-    (*nc).flat_rodata_bytes = bytes
     (*nc).flat_rodata_len = len
     offset
 }
 
 fn nc_rodata_add_name_value(nc: &! NativeCompiler, name: Name) -> i64 with Mut, Panic, Div {
-    var bytes = (*nc).flat_rodata_bytes
     var len = (*nc).flat_rodata_len
     let offset = len
     var i = 0
-    while i < name.len && len < 8192 {
-        bytes[len as usize] = name.buf[i as usize]
+    while i < name.len && len < 262144 {
+        NC_BIG_RODATA[len as usize] = name.buf[i as usize]
         len = len + 1
         i = i + 1
     }
-    if len < 8192 {
-        bytes[len as usize] = 0
+    if len < 262144 {
+        NC_BIG_RODATA[len as usize] = 0
         len = len + 1
     }
-    (*nc).flat_rodata_bytes = bytes
     (*nc).flat_rodata_len = len
     offset
 }
@@ -7695,12 +7738,10 @@ pub fn native_v2_rodata_len_into(nc: &! NativeCompiler) -> i64 {
 }
 
 pub fn native_v2_rodata_append_byte_into(nc: &! NativeCompiler, byte: i64) with Mut, Panic, Div {
-    var bytes = (*nc).flat_rodata_bytes
     var len = (*nc).flat_rodata_len
-    if len >= 0 && len < 8192 {
-        bytes[len as usize] = byte as i8
+    if len >= 0 && len < 262144 {
+        NC_BIG_RODATA[len as usize] = byte as i8
         len = len + 1
-        (*nc).flat_rodata_bytes = bytes
         (*nc).flat_rodata_len = len
     }
 }
@@ -9274,7 +9315,18 @@ fn emit_global_var_inits_into(nc: &! NativeCompiler, module: &IrModule) with Mut
             // Wave15e: string-literal BSS init — LEA rodata pointer into BSS.
             // return_struct_name holds the normalized payload (quotes stripped).
             // Must not take the imm-fill path (prof_counter_id is the magic, not data).
-            if init_val == BSS_INIT_STRING_MAGIC {
+            // The string-magic guard also requires a non-empty payload Name.
+            // Zero-valued scalar/array fills carry init_val == 0; when the
+            // imported BSS_INIT_STRING_MAGIC constant folds to 0 (observed in
+            // the seed-built compiler binary — cross-module `pub let`
+            // constants with `0 - N` initializers can resolve to 0), an
+            // unguarded comparison misroutes every zero fill down the LEA
+            // path and stores a pointer-to-empty-string instead of 0.
+            // Real string-literal globals always carry their payload in
+            // return_struct_name; zero fills have ir_empty_name() there.
+            // Known residual: a module-level `var S: string = ""` has an
+            // empty payload and would take the scalar path instead.
+            if init_val == BSS_INIT_STRING_MAGIC && func.return_struct_name.len > 0 {
                 let str_offset = nc_rodata_add_name_value(nc, func.return_struct_name)
                 let lea_pos = (*nc).code.len
                 nc_emit_lea_rax_rip_disp32(nc, 0)
@@ -10329,7 +10381,7 @@ fn native_v2_build_elf_image_into(nc: &! NativeCompiler, base_addr: i64, entry_o
     if (*nc).flat_rodata_len > 0 {
         i = 0
         while i < rodata_len && (rodata_offset + i) < 4194304 {
-            NC_BIG_ELF[(rodata_offset + i) as usize] = (*nc).flat_rodata_bytes[i as usize]
+            NC_BIG_ELF[(rodata_offset + i) as usize] = NC_BIG_RODATA[i as usize]
             i = i + 1
         }
     } else {
@@ -10804,7 +10856,7 @@ fn compile_native_finalize_and_write_ref(nc: &! NativeCompiler, base_addr: i64, 
         if (*nc).flat_rodata_len > 0 {
             var ri: i64 = 0
             while ri < rodata_len {
-                NATIVE_ELF_BUF[NATIVE_ELF_OFF as usize] = (*nc).flat_rodata_bytes[ri as usize]
+                NATIVE_ELF_BUF[NATIVE_ELF_OFF as usize] = NC_BIG_RODATA[ri as usize]
                 NATIVE_ELF_OFF = NATIVE_ELF_OFF + 1
                 ri = ri + 1
             }
