@@ -18,6 +18,7 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 | per-group variance homogeneity: Bartlett + Levene (1M rows, 1000 keys, 4 groups) | | ~38 | ~749 | **0.05x — wins 20x** | one/two-pass moments + chi2_sf/f_sf vs groupby.apply |
 | per-group normality: D'Agostino-Pearson normaltest (K2, p, skew/kurt z) (1M rows, 1000 keys) | | ~20 | ~88 | **0.22x — wins 4.4x** | one moment pass + D'Agostino transform vs groupby.apply |
 | per-group chi-square: goodness-of-fit + test-of-independence p-value (1M rows, 1000 keys) | | ~26 | ~3004 | **0.01x — wins 114x** | 1D/joint histogram + chi2_sf vs groupby.apply crosstab |
+| per-group F-test (variance ratio) + one-proportion z-test + Wilson CI (1M rows, 1000 keys) | | ~17 | ~407 | **0.04x — wins 24x** | one-pass moments/counts + f_sf/f_cdf/Phi vs groupby.apply |
 | two-sample tests: welch/cohens_d/glass/pooled_sd/point_biserial + mannwhitney_u/cles/rank_biserial/ks (1M rows, 1000 keys, 2 groups) | | ~18 | ~430 | **0.04x — wins 24x** | one-pass moments / group-split histogram; pandas = scipy + groupby.apply |
 | col_sum (8-accumulator ILP) | | 1.44 | 0.55 | **2.6x** | 3.9x |
 | col_mean (via 8-acc sum) | | 2.05 | 1.00 | **2.1x** | 2.3x |
