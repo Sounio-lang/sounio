@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.handoff.deep-four-lanes-2026-07-25
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.handoff.deep-four-lanes-2026-07-25
+-->
+
 # Deep four lanes — 2026-07-25
 
 Branch: `research/particle-exp123-20260725`  

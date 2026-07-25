@@ -428,6 +428,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.handoff.continuity.wp-a5 | repo_only | docs/handoff/continuity/WP-A5.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.continuity.wp-b1 | repo_only | docs/handoff/continuity/WP-B1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.continuity.wp-b2 | repo_only | docs/handoff/continuity/WP-B2.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.handoff.deep-four-lanes-2026-07-25 | repo_only | docs/handoff/deep_four_lanes_2026-07-25.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.exact-engine-prereqs | repo_only | docs/handoff/exact_engine_prereqs.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.gpu-knowledge-vecmat-swarm-plan | repo_only | docs/handoff/gpu_knowledge_vecmat_swarm_plan.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.madaros-fixed-array-call-boundary-alias-2026-07-14 | repo_only | docs/handoff/madaros_fixed_array_call_boundary_alias_2026-07-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -697,10 +698,15 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.erdos-90-planar-search-plan | historical | docs/research/erdos-90-planar-search-plan.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.erdos-sat-smt-unsat-scope-2026-06-23 | historical | docs/research/erdos-sat-smt-unsat-scope-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.erosion-hebbian-result | historical | docs/research/erosion-hebbian-result.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.falsification-ledger-falsifiers-2026-07-25 | historical | docs/research/falsification_ledger_falsifiers_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.falsification-ledger-spec-2026-07-25 | historical | docs/research/falsification_ledger_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.fano-arcs-blocking-sounio-note | historical | docs/research/fano-arcs-blocking-sounio-note.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.fisher-matrix-fix | historical | docs/research/FISHER_MATRIX_FIX.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.research.functor-f-jet-functoriality-falsifiers-2026-07-25 | historical | docs/research/functor_f_jet_functoriality_falsifiers_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.research.functor-f-jet-functoriality-spec-2026-07-25 | historical | docs/research/functor_f_jet_functoriality_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.functor-f-field-functoriality-spec-2026-07-25 | historical | docs/research/functor_f_field_functoriality_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.functor-f-g2-covariance-falsifiers-2026-07-25 | historical | docs/research/functor_f_g2_covariance_falsifiers_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.functor-f-g2-covariance-spec-2026-07-25 | historical | docs/research/functor_f_g2_covariance_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.functor-f-g2-equivariance-spec-2026-07-25 | historical | docs/research/functor_f_g2_equivariance_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.functor-f-phi-fp-equivariant-spec-2026-07-25 | historical | docs/research/functor_f_phi_fp_equivariant_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.furey-charge-g2 | historical | docs/research/furey_charge_g2.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.furey-octonion-generation | historical | docs/research/furey_octonion_generation.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.gpu-swarm-coordination-2026-07-05 | historical | docs/research/gpu-swarm-coordination-2026-07-05.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -781,6 +787,8 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.madore-spindle-q3q11-2026-05-30 | historical | docs/research/madore-spindle-q3q11-2026-05-30.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.mercy-exchange-rate | historical | docs/research/mercy-exchange-rate.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.mercyful-learning | historical | docs/research/mercyful-learning.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.mercyful-runtime-falsifiers-2026-07-25 | historical | docs/research/mercyful_runtime_falsifiers_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.mercyful-runtime-spec-2026-07-25 | historical | docs/research/mercyful_runtime_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.moonshot-a-abide-f32-cohort-analysis | historical | docs/research/moonshot-a-abide-f32-cohort-analysis.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.moonshot-a-abide-transport-conditioned-orc | historical | docs/research/moonshot-a-abide-transport-conditioned-orc.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.moonshot-a-orc-implementation-decision | historical | docs/research/moonshot-a-orc-implementation-decision.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
