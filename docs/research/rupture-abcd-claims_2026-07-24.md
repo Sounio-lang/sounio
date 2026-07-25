@@ -17,12 +17,14 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.ruptu
 
 **Date:** 2026-07-24  
 **Orthography:** EN-UK  
-**Status:** working research contract (not a clinical or ML result)  
+**Status:** executable contract ladder green on `main` (PRs #1432, #1446); not a clinical or ML result  
+**Discursive map:** `rupture-programme-synthesis_2026-07-25.md`  
 **Parents:** `nonassociativity-as-rupture.md` (PR #1237), `rupture-as-singularity.md`,
 `petitot-semantic-potential.md`, `sedenion_zd_fibers.md`, Frente A measure tests,
 `probe-corrected-protocol.md`  
-**Harnesses:** `scripts/research/rupture_r2_fiber_measure_contract.py`,
+**Harnesses:** `scripts/research/rupture_r2_{fiber_measure_contract,full_tubular_probe}.py`,
 `scripts/research/rupture_r3_fano_restriction_probe.py`,
+`scripts/research/rupture_r4_fano_field_contract.py`,
 `scripts/ci/rupture_abcd_contracts_gate.sh`
 
 ---
