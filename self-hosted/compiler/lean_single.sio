@@ -517,6 +517,10 @@ var KM_CACHE_SS_5:  [i64; 32] = [-1; 32]
 var KM_CACHE_SS_6:  [i64; 32] = [-1; 32]
 var KM_CACHE_SS_7:  [i64; 32] = [-1; 32]
 var KM_CACHE_COUNT: i64 = 0
+// β¹⁰: per-channel input variance slots (σ² of the k-th Knowledge .value seed).
+// Enables FO GUM reconstruction: Var(y) = Σ_k (∂y/∂x_k)² · σ²_k, including
+// correlated cancellation on subtract: Var(L−R) = Σ_k (sL_k − sR_k)² · σ²_k.
+var CHANNEL_INPUT_VAR_SLOT: [i64; 8] = [-1; 8]
 // β⁶ multi-channel sensitivity: shadow buffers for channels 1-3 (∂y/∂xₖ)
 var EXPR_SSHADOW_1:  i64 = -1
 var VAR_SSHADOW_1:   [i64; 2048] = [-1; 2048]
@@ -8325,6 +8329,54 @@ fn emit_f64_div_from_rcx_rax_x86() with Mut {
     em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8)
     em(0xf2); em(0x0f); em(0x5e); em(0xc1)
     em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)
+}
+
+// β¹⁰ — FO GUM Var(L−R) = Σ_k (sL_k − sR_k)² · σ²_k into a new stack slot.
+// Cancels identical product paths (a·b − a·b → 0) that slot-identity cannot see.
+fn emit_fo_channel_contrib_sub_x86(acc_slot: i64, ls: i64, rs: i64, ch: i64) with Mut {
+    if ch < 0 || ch >= 8 { return }
+    let iv = CHANNEL_INPUT_VAR_SLOT[ch as usize]
+    if iv < 0 { return }
+    if ls < 0 && rs < 0 { return }
+    if ls >= 0 { emit_load_var(ls) } else { emit_imm64(0) }
+    em(0x50)
+    if rs >= 0 { emit_load_var(rs) } else { emit_imm64(0) }
+    em(0x59)
+    emit_f64_sub_from_rcx_rax_x86()
+    // rax = ds; square
+    em(0x50)
+    em(0x59)
+    emit_f64_mul_from_rcx_rax_x86()
+    // rax = ds²; × σ²_k
+    em(0x50)
+    emit_load_var(iv)
+    em(0x59)
+    emit_f64_mul_from_rcx_rax_x86()
+    // rax = contrib; acc += contrib
+    em(0x50)
+    emit_load_var(acc_slot)
+    em(0x59)
+    emit_f64_add_from_rcx_rax_x86()
+    emit_store_var(acc_slot)
+}
+
+fn emit_fo_var_from_sens_diff_sub_x86(
+    ls0: i64, ls1: i64, ls2: i64, ls3: i64, ls4: i64, ls5: i64, ls6: i64, ls7: i64,
+    rs0: i64, rs1: i64, rs2: i64, rs3: i64, rs4: i64, rs5: i64, rs6: i64, rs7: i64
+) -> i64 with Mut {
+    let out = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_imm64(0)
+    emit_store_var(out)
+    emit_fo_channel_contrib_sub_x86(out, ls0, rs0, 0)
+    emit_fo_channel_contrib_sub_x86(out, ls1, rs1, 1)
+    emit_fo_channel_contrib_sub_x86(out, ls2, rs2, 2)
+    emit_fo_channel_contrib_sub_x86(out, ls3, rs3, 3)
+    emit_fo_channel_contrib_sub_x86(out, ls4, rs4, 4)
+    emit_fo_channel_contrib_sub_x86(out, ls5, rs5, 5)
+    emit_fo_channel_contrib_sub_x86(out, ls6, rs6, 6)
+    emit_fo_channel_contrib_sub_x86(out, ls7, rs7, 7)
+    return out
 }
 
 fn emit_load_operand_value_x86(slot: i64, ty: i64, ty_hash: i64, tok: i64) with IO, Mut, Panic, Div {
@@ -16668,6 +16720,10 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                         b4_vseed = NEXT_SLOT
                         NEXT_SLOT = NEXT_SLOT + 1
                         emit_store_var(b4_vseed)               // store variance shadow
+                        // β¹⁰: bind this Knowledge's σ² to its FO channel index
+                        if MEAS_KNOW_IDX >= 0 && MEAS_KNOW_IDX < 8 {
+                            CHANNEL_INPUT_VAR_SLOT[MEAS_KNOW_IDX as usize] = b4_vseed
+                        }
                         em(0x58)                               // pop rax (restore ptr)
                         em(0x48); em(0x8b); em(0x00)          // mov rax, [rax]   (.value)
                         // Save .value before sensitivity seed (emit_imm64 overwrites rax)
@@ -18676,13 +18732,30 @@ fn compile_additive() with IO, Mut, Panic, Div {
                         } else if left_vshadow_a < 0 {
                             EXPR_VSHADOW = right_vshadow_a  // Var(0 + b) = Var(b), pass through
                         } else {
-                            let b4va_res = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-                            emit_load_var(left_vshadow_a)
-                            em(0x50)
-                            emit_load_var(right_vshadow_a)
-                            em(0x59); emit_f64_add_from_rcx_rax_x86()
-                            emit_store_var(b4va_res)
-                            EXPR_VSHADOW = b4va_res
+                            // β¹⁰: FO sensitivity-difference variance on sub when multi-channel
+                            // AD shadows are live (cancels a·b − a·b). Else blind sum.
+                            var use_fo: i64 = 0
+                            if op == 18 {
+                                if left_sshadow_a >= 0 || right_sshadow_a >= 0 || left_sshadow_a_1 >= 0 || right_sshadow_a_1 >= 0 || left_sshadow_a_2 >= 0 || right_sshadow_a_2 >= 0 || left_sshadow_a_3 >= 0 || right_sshadow_a_3 >= 0 || left_sshadow_a_4 >= 0 || right_sshadow_a_4 >= 0 || left_sshadow_a_5 >= 0 || right_sshadow_a_5 >= 0 || left_sshadow_a_6 >= 0 || right_sshadow_a_6 >= 0 || left_sshadow_a_7 >= 0 || right_sshadow_a_7 >= 0 {
+                                    use_fo = 1
+                                }
+                            }
+                            if use_fo == 1 {
+                                EXPR_VSHADOW = emit_fo_var_from_sens_diff_sub_x86(
+                                    left_sshadow_a, left_sshadow_a_1, left_sshadow_a_2, left_sshadow_a_3,
+                                    left_sshadow_a_4, left_sshadow_a_5, left_sshadow_a_6, left_sshadow_a_7,
+                                    right_sshadow_a, right_sshadow_a_1, right_sshadow_a_2, right_sshadow_a_3,
+                                    right_sshadow_a_4, right_sshadow_a_5, right_sshadow_a_6, right_sshadow_a_7
+                                )
+                            } else {
+                                let b4va_res = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                                emit_load_var(left_vshadow_a)
+                                em(0x50)
+                                emit_load_var(right_vshadow_a)
+                                em(0x59); emit_f64_add_from_rcx_rax_x86()
+                                emit_store_var(b4va_res)
+                                EXPR_VSHADOW = b4va_res
+                            }
                         }
                     }
                     if left_sshadow_a >= 0 || right_sshadow_a >= 0 {
@@ -29018,6 +29091,8 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         MEAS_CALL_IDX = 0
         MEAS_KNOW_IDX = 0
         KM_CACHE_COUNT = 0
+        CHANNEL_INPUT_VAR_SLOT[0] = 0 - 1; CHANNEL_INPUT_VAR_SLOT[1] = 0 - 1; CHANNEL_INPUT_VAR_SLOT[2] = 0 - 1; CHANNEL_INPUT_VAR_SLOT[3] = 0 - 1
+        CHANNEL_INPUT_VAR_SLOT[4] = 0 - 1; CHANNEL_INPUT_VAR_SLOT[5] = 0 - 1; CHANNEL_INPUT_VAR_SLOT[6] = 0 - 1; CHANNEL_INPUT_VAR_SLOT[7] = 0 - 1
 
         // Register parameters
         p = p + 1  // skip name
@@ -34419,6 +34494,10 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
                     let b4a_vseed = NEXT_SLOT
                     NEXT_SLOT = NEXT_SLOT + 1
                     emit_store_var_a64(b4a_vseed)             // store variance shadow
+                    // β¹⁰: bind σ² to FO channel (parity with x86 path)
+                    if MEAS_KNOW_IDX >= 0 && MEAS_KNOW_IDX < 8 {
+                        CHANNEL_INPUT_VAR_SLOT[MEAS_KNOW_IDX as usize] = b4a_vseed
+                    }
                     emit_load_var_a64(b4a_ptr_slot)           // restore ptr
                     em32(0xF9400000)                          // ldr x0, [x0] (.value)
                     EXPR_VSHADOW = b4a_vseed
@@ -36959,6 +37038,8 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
         VAR_COUNT = 0; NEXT_SLOT = 1; BREAK_COUNT = 0; LAST_STMT_HAS_VALUE = 0
         // β⁴/β⁶/β⁷: reset shadow state for new function scope (a64)
         EXPR_VSHADOW = -1; EXPR_SSHADOW = -1; EXPR_SSHADOW_1 = -1; EXPR_SSHADOW_2 = -1; EXPR_SSHADOW_3 = -1; EXPR_SSHADOW_4 = -1; EXPR_SSHADOW_5 = -1; EXPR_SSHADOW_6 = -1; EXPR_SSHADOW_7 = -1; MEAS_CALL_IDX = 0; MEAS_KNOW_IDX = 0; KM_CACHE_COUNT = 0
+        CHANNEL_INPUT_VAR_SLOT[0] = 0 - 1; CHANNEL_INPUT_VAR_SLOT[1] = 0 - 1; CHANNEL_INPUT_VAR_SLOT[2] = 0 - 1; CHANNEL_INPUT_VAR_SLOT[3] = 0 - 1
+        CHANNEL_INPUT_VAR_SLOT[4] = 0 - 1; CHANNEL_INPUT_VAR_SLOT[5] = 0 - 1; CHANNEL_INPUT_VAR_SLOT[6] = 0 - 1; CHANNEL_INPUT_VAR_SLOT[7] = 0 - 1
         EXPR_HSHADOW_00 = -1; EXPR_HSHADOW_01 = -1; EXPR_HSHADOW_02 = -1; EXPR_HSHADOW_03 = -1; EXPR_HSHADOW_11 = -1; EXPR_HSHADOW_12 = -1; EXPR_HSHADOW_13 = -1; EXPR_HSHADOW_22 = -1; EXPR_HSHADOW_23 = -1; EXPR_HSHADOW_33 = -1
     EXPR_HSHADOW_04 = -1; EXPR_HSHADOW_05 = -1; EXPR_HSHADOW_06 = -1; EXPR_HSHADOW_07 = -1
     EXPR_HSHADOW_14 = -1; EXPR_HSHADOW_15 = -1; EXPR_HSHADOW_16 = -1; EXPR_HSHADOW_17 = -1

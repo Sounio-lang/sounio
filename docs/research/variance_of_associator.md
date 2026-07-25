@@ -16,7 +16,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.varia
 # Variance of the Octonion Associator — GUM First-Order Analysis
 
 **Date**: 2026-04-13
-**Status**: Derivation (β-thread). Numerical check pending.
+**Status**: Derivation (β-thread). Numerical check **closed** (Exp2 2026-07-25). Residual `Var(a·b−a·b)` closed by **β¹⁰** (2026-07-25): FO sensitivity-difference GUM on subtract + `CHANNEL_INPUT_VAR_SLOT`.
 **Related**: `docs/research/zeta_variance_fix_plan.md`, Part II of the non-associative connectomics draft, `feedback_variance_deep_chains.md`.
 
 ## Why this matters
