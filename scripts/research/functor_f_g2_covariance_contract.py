@@ -66,11 +66,21 @@ def cusp_wells(a, b):
     return sorted([x for x in real_roots if 3.0 * x * x + a > 1e-9])
 
 
-def phi_fp(alpha, tau=0.0, A0=-1.0):
+def phi_fp(alpha, tau=0.0, A0=-1.0, ref_axis=None):
+    # Canonical polar coordinate: b is the NATURAL PAIRING <alpha, e_m> against a
+    # configuration-determined imaginary axis e_m, NOT a basis argmax. On the seven
+    # basis-aligned Fano lines the jet is single-axis, so e_m = e_argmax and the two
+    # coincide exactly -- the only regime this contract exercises (hence its honest
+    # `weak_covariance_witness` note). The pairing form is the G2-equivariant one:
+    # under a generic / continuous automorphism the argmax readout is provably NOT
+    # covariant while the pairing is. See
+    #   scripts/research/functor_f_g2_equivariance_contract.py      (H_CHARACTERISED)
+    #   scripts/research/functor_f_phi_fp_equivariant_contract.py   (E_GREEN)
+    # Pass ref_axis=e_m to evaluate the equivariant b off the basis-aligned lines.
     norm = float(np.linalg.norm(alpha))
     alpha_im = alpha.copy()
     alpha_im[0] = 0.0
-    idx = int(np.argmax(np.abs(alpha_im)))
+    idx = int(np.argmax(np.abs(alpha_im))) if ref_axis is None else int(ref_axis)
     coeff = float(alpha_im[idx])
     a = A0 + norm * norm / 4.0
     b = tau + coeff / 2.0

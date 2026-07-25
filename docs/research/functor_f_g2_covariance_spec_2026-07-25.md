@@ -37,6 +37,17 @@ For every Fano line `L` and every off-line direction `u`:
 
 If these hold uniformly, Functor F is **line-independent**; the choice of worked line in R3 was a convenience, not a special case.
 
+> **Scope of this contract (refined 2026-07-25).** The uniformity proved here is the
+> `e_m = e_argmax` restriction — to the finite subgroup of signed basis permutations —
+> of a stronger statement. Under a *generic* or *continuous* automorphism `g ∈ G₂`,
+> Φ_fp's `b` extracted by coordinate `argmax` is **not** covariant (it sign-flips the
+> selected pole); the natural pairing `b := ⟨α, e_m⟩` is. That obstruction and its fix
+> are executed in `functor_f_g2_equivariance_contract.py` (`H_CHARACTERISED`) and
+> `functor_f_phi_fp_equivariant_contract.py` (`E_GREEN`). `phi_fp` here now carries an
+> optional `ref_axis` so the equivariant `b` can be evaluated off the basis-aligned
+> lines; the default reproduces the on-basis `argmax` exactly, so every clause below is
+> unchanged.
+
 ---
 
 ## 3. Contract clauses
