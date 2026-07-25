@@ -285,6 +285,9 @@ pub fn m_w_prediction_ep() -> Epistemic with Mut, Div, Panic {
 /// Consistency check: SM prediction vs PDG direct measurement.
 /// Returns the pull: (M_W^pred - M_W^meas) / σ_total.
 /// A large pull (|pull| > 2) indicates BSM physics tension.
+///
+/// Uses tree-level `m_w_prediction_ep` (no Δr). Prefer
+/// `m_w_consistency_pull_radiative` for a fairer SM comparison.
 pub fn m_w_consistency_pull() -> f64 with Mut, Div, Panic {
     let pred = m_w_prediction_ep()
     let meas = mass_w()  // 80.377 ± 0.012 GeV (PDG direct)
@@ -292,6 +295,244 @@ pub fn m_w_consistency_pull() -> f64 with Mut, Div, Panic {
     let sigma_total = sqrt_f64(pred.variance() + meas.variance())
     if sigma_total == 0.0 { return 0.0 }
     diff / sigma_total
+}
+
+/// GUM-exact SM M_W prediction with leading radiative Δρ (ρ-parameter).
+///
+/// On-shell definition:
+///   ρ = M_W² / (M_Z² cos²θ_W) = 1 + Δρ
+///   M_W = M_Z √[(1 − sin²θ_W)(1 + Δρ)]
+///
+/// Δρ is the leading top-loop (QCD-corrected) piece from `delta_rho_ep`.
+/// Do **not** fold −Δα into this form: Δα belongs in the G_F-based Δr
+/// relation, not the on-shell M_W = M_Z cos θ_W path. Higher-order /
+/// full Δr residuals remain as intentional construction debt.
+///
+/// Variance from M_Z, sin²θ_W, and m_t (via Δρ).
+pub fn m_w_prediction_ep_radiative() -> Epistemic with Mut, Div, Panic {
+    let mz = mass_z()
+    let s2w = sin2_theta_w()
+    let mt = mass_top()
+    let as_mz = alpha_s_mz()
+    let pi = 3.141592653589793
+
+    let mz_v = mz.val()
+    let s2w_v = s2w.val()
+    let mt_v = mt.val()
+    let as_v = as_mz.val()
+
+    // Leading Δρ with QCD correction (same central as delta_rho_ep)
+    let delta_qcd = 0.0 - 2.0 * as_v / pi * (pi * pi / 9.0 - 1.0 / 6.0)
+    let factor = 1.1663787e-5 * (1.0 + delta_qcd) / (8.0 * pi * pi * 1.4142135623730951)
+    let drho = 3.0 * factor * mt_v * mt_v
+
+    let cos2 = 1.0 - s2w_v
+    let mw2 = mz_v * mz_v * cos2 * (1.0 + drho)
+    if mw2 <= 0.0 { return Epistemic::certain(0.0) }
+    let mw_v = sqrt_f64(mw2)
+
+    // GUM (independent inputs M_Z, sin²θ_W, m_t):
+    // ∂M_W/∂M_Z ≈ M_W/M_Z
+    // ∂M_W/∂s2w via cos2
+    // ∂M_W/∂m_t via Δρ ∝ m_t²
+    let dmw_dmz = mw_v / mz_v
+    let var_mz = dmw_dmz * dmw_dmz * mz.variance()
+
+    let dmw2_ds2w = mz_v * mz_v * (1.0 + drho) * (0.0 - 1.0)
+    let dmw_ds2w = dmw2_ds2w / (2.0 * mw_v)
+    let var_s2w = dmw_ds2w * dmw_ds2w * s2w.variance()
+
+    let d_drho_dmt = 6.0 * factor * mt_v
+    let dmw2_dmt = mz_v * mz_v * cos2 * d_drho_dmt
+    let dmw_dmt = dmw2_dmt / (2.0 * mw_v)
+    let var_mt = dmw_dmt * dmw_dmt * mt.variance()
+
+    let var_mw = var_mz + var_s2w + var_mt
+    var conf = mz.confidence()
+    if s2w.confidence() < conf { conf = s2w.confidence() }
+    if mt.confidence() < conf { conf = mt.confidence() }
+    Epistemic::new(mw_v, var_mw, conf)
+}
+
+/// Pull using radiative M_W prediction (includes leading Δρ).
+pub fn m_w_consistency_pull_radiative() -> f64 with Mut, Div, Panic {
+    let pred = m_w_prediction_ep_radiative()
+    let meas = mass_w()
+    let diff = pred.val() - meas.val()
+    let sigma_total = sqrt_f64(pred.variance() + meas.variance())
+    if sigma_total == 0.0 { return 0.0 }
+    diff / sigma_total
+}
+
+/// Leptonic vacuum-polarisation Δα_lep(M_Z) at leading-log order.
+///
+/// For each charged lepton: (α/π) [(1/3) ln(M_Z²/m_ℓ²) − 5/9].
+pub fn delta_alpha_lep(mz: f64) -> f64 with Mut, Div, Panic {
+    let pi = 3.141592653589793
+    let a = alpha_em().val()
+    let me = 0.0005109989
+    let mmu = 0.1056583745
+    let mtau = 1.77686
+    var sum = 0.0
+    var i: i64 = 0
+    while i < 3 {
+        var mf = me
+        if i == 1 { mf = mmu }
+        if i == 2 { mf = mtau }
+        sum = sum + (a / pi) * ((1.0 / 3.0) * ln_f64(mz * mz / (mf * mf)) - 5.0 / 9.0)
+        i = i + 1
+    }
+    sum
+}
+
+/// Hadronic five-flavour vacuum polarisation at M_Z (PDG central).
+/// Δα_had^(5)(M_Z) ≈ 0.02766 ± 0.00010 — not fitted to M_W.
+pub fn delta_alpha_had() -> Epistemic {
+    Epistemic::measured(0.02766, 0.00010)
+}
+
+/// Top contribution to running of α (standard numerical central).
+pub fn delta_alpha_top() -> f64 {
+    0.0 - 0.000072
+}
+
+/// Total Δα(M_Z) = Δα_lep + Δα_had + Δα_top.
+pub fn delta_alpha_total(mz: f64) -> f64 with Mut, Div, Panic {
+    delta_alpha_lep(mz) + delta_alpha_had().val() + delta_alpha_top()
+}
+
+/// Residual after (Δα, Δρ) extraction — pure-weak / bosonic scale.
+///
+/// Construction form (not fitted to M_W^PDG):
+///   Δr_rem = 0.0075 + (α/4π) ln(m_H / 100 GeV)
+///
+/// 0.0075 is the O(10⁻²) EW-review scale for the remainder when Δα
+/// already includes hadronic VP; the log is a mild Higgs dependence.
+pub fn delta_r_rem_bos(m_h: f64) -> f64 with Mut, Div, Panic {
+    let pi = 3.141592653589793
+    let a = alpha_em().val()
+    0.0075 + (a / (4.0 * pi)) * ln_f64(m_h / 100.0)
+}
+
+/// Sirlin Δr at given on-shell s²_W:
+///   Δr = Δα − (c²/s²) Δρ + Δr_rem
+pub fn delta_r_sirlin(s2w: f64, drho: f64, dalpha: f64, drem: f64) -> f64 with Div, Panic {
+    if s2w <= 0.0 || s2w >= 1.0 { return 0.0 }
+    let c2 = 1.0 - s2w
+    dalpha - (c2 / s2w) * drho + drem
+}
+
+/// G_F-based SM M_W prediction (Sirlin Δr, self-consistent on-shell s²_W).
+///
+///   A0 = π α / (√2 G_F)
+///   M_W² = (M_Z² / 2) [ 1 + √(1 − 4 A0 / (M_Z² (1 − Δr))) ]
+///
+/// Iterates s²_W = 1 − M_W²/M_Z². GUM variance from M_Z, m_t, Δα_had.
+pub fn m_w_prediction_ep_gf() -> Epistemic with Mut, Div, Panic {
+    let mz = mass_z()
+    let mt = mass_top()
+    let mh = mass_h()
+    let as_mz = alpha_s_mz()
+    let dah = delta_alpha_had()
+    let pi = 3.141592653589793
+    let gf = 1.1663787e-5
+    let a = alpha_em().val()
+
+    let mz_v = mz.val()
+    let mt_v = mt.val()
+    let mh_v = mh.val()
+    let as_v = as_mz.val()
+
+    let delta_qcd = 0.0 - 2.0 * as_v / pi * (pi * pi / 9.0 - 1.0 / 6.0)
+    let factor = gf * (1.0 + delta_qcd) / (8.0 * pi * pi * 1.4142135623730951)
+    let drho = 3.0 * factor * mt_v * mt_v
+    let dalpha = delta_alpha_lep(mz_v) + dah.val() + delta_alpha_top()
+    let drem = delta_r_rem_bos(mh_v)
+    let a0 = pi * a / (1.4142135623730951 * gf)
+
+    // Self-consistent iteration on M_W
+    var mw_v = 80.35
+    var k: i64 = 0
+    while k < 40 {
+        let s2 = 1.0 - (mw_v / mz_v) * (mw_v / mz_v)
+        if s2 <= 0.0 || s2 >= 1.0 { return Epistemic::certain(0.0) }
+        let dr = delta_r_sirlin(s2, drho, dalpha, drem)
+        let denom = mz_v * mz_v * (1.0 - dr)
+        if denom <= 0.0 { return Epistemic::certain(0.0) }
+        let x = 4.0 * a0 / denom
+        if x <= 0.0 || x >= 1.0 { return Epistemic::certain(0.0) }
+        let disc = 1.0 - x
+        let mw_new = mz_v * sqrt_f64(0.5 * (1.0 + sqrt_f64(disc)))
+        let step = mw_new - mw_v
+        let abs_step = if step < 0.0 { 0.0 - step } else { step }
+        mw_v = mw_new
+        if abs_step < 1.0e-12 { k = 40 } else { k = k + 1 }
+    }
+
+    // GUM: numerical derivatives for M_Z, m_t, Δα_had
+    let eps_mz = 1.0e-5
+    let mw_mz_p = m_w_gf_central(mz_v + eps_mz, mt_v, mh_v, as_v, dah.val())
+    let mw_mz_m = m_w_gf_central(mz_v - eps_mz, mt_v, mh_v, as_v, dah.val())
+    let dmw_dmz = (mw_mz_p - mw_mz_m) / (2.0 * eps_mz)
+
+    let eps_mt = 1.0e-3
+    let mw_mt_p = m_w_gf_central(mz_v, mt_v + eps_mt, mh_v, as_v, dah.val())
+    let mw_mt_m = m_w_gf_central(mz_v, mt_v - eps_mt, mh_v, as_v, dah.val())
+    let dmw_dmt = (mw_mt_p - mw_mt_m) / (2.0 * eps_mt)
+
+    let eps_da = 1.0e-5
+    let mw_da_p = m_w_gf_central(mz_v, mt_v, mh_v, as_v, dah.val() + eps_da)
+    let mw_da_m = m_w_gf_central(mz_v, mt_v, mh_v, as_v, dah.val() - eps_da)
+    let dmw_dda = (mw_da_p - mw_da_m) / (2.0 * eps_da)
+
+    let var_mw = dmw_dmz * dmw_dmz * mz.variance()
+        + dmw_dmt * dmw_dmt * mt.variance()
+        + dmw_dda * dmw_dda * dah.variance()
+
+    var conf = mz.confidence()
+    if mt.confidence() < conf { conf = mt.confidence() }
+    if dah.confidence() < conf { conf = dah.confidence() }
+    Epistemic::new(mw_v, var_mw, conf)
+}
+
+/// Pull using G_F-based Sirlin Δr M_W prediction.
+pub fn m_w_consistency_pull_gf() -> f64 with Mut, Div, Panic {
+    let pred = m_w_prediction_ep_gf()
+    let meas = mass_w()
+    let diff = pred.val() - meas.val()
+    let sigma_total = sqrt_f64(pred.variance() + meas.variance())
+    if sigma_total == 0.0 { return 0.0 }
+    diff / sigma_total
+}
+
+/// Central-value helper for finite-difference GUM (no Epistemic packaging).
+fn m_w_gf_central(mz_v: f64, mt_v: f64, mh_v: f64, as_v: f64, dah_v: f64) -> f64 with Mut, Div, Panic {
+    let pi = 3.141592653589793
+    let gf = 1.1663787e-5
+    let a = alpha_em().val()
+    let delta_qcd = 0.0 - 2.0 * as_v / pi * (pi * pi / 9.0 - 1.0 / 6.0)
+    let factor = gf * (1.0 + delta_qcd) / (8.0 * pi * pi * 1.4142135623730951)
+    let drho = 3.0 * factor * mt_v * mt_v
+    let dalpha = delta_alpha_lep(mz_v) + dah_v + delta_alpha_top()
+    let drem = delta_r_rem_bos(mh_v)
+    let a0 = pi * a / (1.4142135623730951 * gf)
+    var mw_v = 80.35
+    var k: i64 = 0
+    while k < 40 {
+        let s2 = 1.0 - (mw_v / mz_v) * (mw_v / mz_v)
+        if s2 <= 0.0 || s2 >= 1.0 { return 0.0 }
+        let dr = delta_r_sirlin(s2, drho, dalpha, drem)
+        let denom = mz_v * mz_v * (1.0 - dr)
+        if denom <= 0.0 { return 0.0 }
+        let x = 4.0 * a0 / denom
+        if x <= 0.0 || x >= 1.0 { return 0.0 }
+        let mw_new = mz_v * sqrt_f64(0.5 * (1.0 + sqrt_f64(1.0 - x)))
+        let step = mw_new - mw_v
+        let abs_step = if step < 0.0 { 0.0 - step } else { step }
+        mw_v = mw_new
+        if abs_step < 1.0e-12 { k = 40 } else { k = k + 1 }
+    }
+    mw_v
 }
 
 /// GUM-exact g-2 leading QED contribution with α_EM uncertainty.
