@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Gate for docs/research/rupture-abcd-claims_2026-07-24.md
 #
-# R2-partial  — fiber + Frente A measure + random control
-# R3_GREEN    — Φ_fp jet + (i)–(iii+) path classes (single-line; D3 forbidden)
-# R4_GREEN    — multi-line field + Φ_fp Path C/D from cross-line jet (D3 forbidden)
+# R2-partial       — fiber + Frente A measure + random control
+# R2_FULL_MEASURED — exact det/rank anchors + MC tubular measurements (not a proof)
+# R3_GREEN         — Φ_fp jet + path classes (single-line; D3 forbidden)
+# R4_GREEN         — multi-line field + Φ_fp Path C/D from cross-line jet (D3 forbidden)
 #
 # Usage:
 #   bash scripts/ci/rupture_abcd_contracts_gate.sh
@@ -12,12 +13,18 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 
-echo "== rupture A+B+C+D (+R4 field) contracts =="
+echo "== rupture A+B+C+D (+R2 full measured + R4 field) contracts =="
 
-echo "-- R2 fiber+measure --"
+echo "-- R2 fiber+measure (partial) --"
 python3 scripts/research/rupture_r2_fiber_measure_contract.py | tee /tmp/rupture_r2_out.txt
 grep -q 'R2_CONTRACT_OK' /tmp/rupture_r2_out.txt
 grep -q 'R2_PARTIAL PASS' /tmp/rupture_r2_out.txt
+
+echo "-- R2 full tubular (measured, not proved) --"
+python3 scripts/research/rupture_r2_full_tubular_probe.py | tee /tmp/rupture_r2_full_out.txt
+grep -q 'R2_FULL_PROBE_OK' /tmp/rupture_r2_full_out.txt
+grep -q 'R2_FULL_VERDICT R2_FULL_MEASURED' /tmp/rupture_r2_full_out.txt
+grep -q 'EXACT_ANCHORS' /tmp/rupture_r2_full_out.txt
 
 echo "-- R3 Fano-restriction probe (Φ_fp) --"
 python3 scripts/research/rupture_r3_fano_restriction_probe.py | tee /tmp/rupture_r3_out.txt
@@ -49,6 +56,7 @@ fi
 
 # Claim docs present
 test -f docs/research/rupture-abcd-claims_2026-07-24.md
+test -f docs/research/rupture-r2-full-tubular_2026-07-25.md
 test -f docs/research/rupture-r3-fano-phi_2026-07-25.md
 test -f docs/research/rupture-r4-fano-field_2026-07-25.md
 

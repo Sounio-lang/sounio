@@ -195,11 +195,11 @@ def main() -> int:
     print(
         f"R2_FULL_DIAG fibers7={len(fib)==7} size12={full_sizes_ok} "
         f"intra0={intra_bad==0} measure={measure_ok} "
-        f"NOTE=continuous_tubular_d_sing_still_open"
+        f"NOTE=see_rupture_r2_full_tubular_probe_for_R2_FULL_MEASURED"
     )
-    # Partial is the gate; full continuous law remains open by design
+    # Partial is the combinatorial gate; continuous tubular lives in the companion probe
     if full_sizes_ok and partial_ok:
-        print("R2_FULL_STATUS PARTIAL_PLUS_ALL_FIBER_SIZES_OK")
+        print("R2_FULL_STATUS PARTIAL_OK_COMPANION_IS_FULL_MEASURED")
     else:
         print("R2_FULL_STATUS OPEN_OR_PARTIAL_FAIL")
 

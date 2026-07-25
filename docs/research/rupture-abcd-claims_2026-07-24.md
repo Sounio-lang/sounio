@@ -145,13 +145,22 @@ parallel faces until a green functor says otherwise.
 > (ii) On the canonical rational slice, on-locus Var\(=0\) and off-locus Var\(=1/150\) (Frente A numbers).  
 > (iii) Uniform random mixed-half pairs annihilate at rate \(\ll 1\) vs structured fiber partners.
 
-**R2-full (still open as a single law on all of 𝕊):**
+**R2-full (measured, not proved):**
 
-> Separation of \(\mu_{\mathrm{loc}/\varepsilon}\) from \(\mu_{\mathrm{G}}\) on **all seven** fibers by
-> \((p_{\mathrm{ann}}, p_{\mathrm{fiber}}, \mathrm{Var})\) jointly, plus optional continuous \(d_{\mathrm{sing}}\)
-> tubular mass. Alignment (2″) remains a **separate** contract aimed at non-sedenion models first.
+> Exact anchors on the discriminant hypersurface + continuous \(d_{\mathrm{sing}}\) tubular
+> measurements that separate \(\mu_{\mathrm{loc}}\) from \(\mu_{\mathrm{G}}\) across all seven fibers.
 
-Executable: `scripts/research/rupture_r2_fiber_measure_contract.py`.
+| Layer | Content | Status |
+|---|---|---|
+| **Exact** | \(\det L_x=0\), rank 12 on all 84 primitives; transversal vanishing order 4 on all 168 edges; exact poly per fiber | PASS |
+| **Measured** | uniform MC tube upper bound; local \(d_{\mathrm{sing}}\sim t^{1/4}\) slopes uniform across 7 fibers; model tube mass estimator (declared approx.) | `R2_FULL_MEASURED` |
+| **Not claimed** | continuous law as theorem; D3; clinical content | — |
+
+Executables:
+- partial: `scripts/research/rupture_r2_fiber_measure_contract.py`
+- full (measured): `scripts/research/rupture_r2_full_tubular_probe.py`
+
+Note: `docs/research/rupture-r2-full-tubular_2026-07-25.md`
 
 ### Explicit non-claims (R2)
 
