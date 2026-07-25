@@ -508,3 +508,135 @@ fn bf_group_spearman(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, vmax:
 pub fn bf_spearman_rho_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_spearman(src, key_col, x_col, y_col, vmax, 0) }
 /// Per-group SPEARMAN two-sided P-VALUE (t-approximation), broadcast. Uses stats::student_t. NATIVE + lean_single.
 pub fn bf_spearman_pvalue_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_spearman(src, key_col, x_col, y_col, vmax, 1) }
+
+/// Per-group SIMPLE OLS REGRESSION inference (columns key, x, y): fits y = a + b·x per key in one
+/// co-moment pass and reports the standard errors, t-tests, F-test and CI that scipy.stats.linregress
+/// gives. Sxx/Syy/Sxy are the centred sums; MSE = SSE/(n−2). modes: 0 = slope SE, 1 = slope p-value
+/// (t = b/SE(b), df=n−2), 2 = intercept SE, 3 = intercept p-value, 4 = overall F-test p-value
+/// (f_sf(t_slope², 1, n−2)), 5 = slope 95% CI lower, 6 = slope 95% CI upper (b ± t_.975·SE). Uses the
+/// tested stats::student_t / stats::fisher_f. Returns 0 for keys with n<3 or zero x-variance.
+/// O(n). NATIVE + lean_single only.
+fn bf_group_ols(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var cn:  [f64; 1024] = [0.0; 1024]
+    var sx:  [f64; 1024] = [0.0; 1024]
+    var sy:  [f64; 1024] = [0.0; 1024]
+    var sxx: [f64; 1024] = [0.0; 1024]
+    var syy: [f64; 1024] = [0.0; 1024]
+    var sxy: [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || x_col < 0 || x_col >= nc || y_col < 0 || y_col >= nc || n <= 0 { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let xp = bf_col_ptr(src, x_col) as *mut f64
+    let yp = bf_col_ptr(src, y_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let sc = heap_alloc(8) as *mut i64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 { let x = read_f64(xp, i); let y = read_f64(yp, i); cn[k] = cn[k] + 1.0; sx[k] = sx[k] + x; sy[k] = sy[k] + y; sxx[k] = sxx[k] + x * x; syy[k] = syy[k] + y * y; sxy[k] = sxy[k] + x * y }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        let m = cn[g]
+        if m > 2.0 {
+            let mx = sx[g] / m; let my = sy[g] / m
+            let Sxx = sxx[g] - sx[g] * sx[g] / m
+            let Syy = syy[g] - sy[g] * sy[g] / m
+            let Sxy = sxy[g] - sx[g] * sy[g] / m
+            if Sxx > 0.0 {
+                let slope = Sxy / Sxx
+                let icpt = my - slope * mx
+                var sse = Syy - Sxy * Sxy / Sxx; if sse < 0.0 { sse = 0.0 }
+                let df = m - 2.0
+                let mse = sse / df
+                let se_s = bfs_sqrt(mse / Sxx, sc)
+                if mode == 0 { res[g] = se_s }
+                else { if mode == 1 { if se_s > 0.0 { res[g] = t_two_tail(slope / se_s, df) } }
+                else { if mode == 2 { res[g] = bfs_sqrt(mse * (1.0 / m + mx * mx / Sxx), sc) }
+                else { if mode == 3 { let se_i = bfs_sqrt(mse * (1.0 / m + mx * mx / Sxx), sc); if se_i > 0.0 { res[g] = t_two_tail(icpt / se_i, df) } }
+                else { if mode == 4 { if se_s > 0.0 { let ts = slope / se_s; res[g] = f_sf(ts * ts, 1.0, df) } }
+                else { let tc = t_quantile(0.975, df); if mode == 5 { res[g] = slope - tc * se_s } else { res[g] = slope + tc * se_s } } } } } }
+            }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    heap_free(sc as *mut i8)
+    out
+}
+/// Per-group OLS SLOPE STANDARD ERROR, broadcast. NATIVE + lean_single.
+pub fn bf_ols_slope_se_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_ols(src, key_col, x_col, y_col, 0) }
+/// Per-group OLS SLOPE two-sided P-VALUE (H0: slope=0), broadcast. Uses stats::student_t. NATIVE + lean_single.
+pub fn bf_ols_slope_pvalue_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_ols(src, key_col, x_col, y_col, 1) }
+/// Per-group OLS INTERCEPT STANDARD ERROR, broadcast. NATIVE + lean_single.
+pub fn bf_ols_intercept_se_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_ols(src, key_col, x_col, y_col, 2) }
+/// Per-group OLS INTERCEPT two-sided P-VALUE (H0: intercept=0), broadcast. Uses stats::student_t. NATIVE + lean_single.
+pub fn bf_ols_intercept_pvalue_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_ols(src, key_col, x_col, y_col, 3) }
+/// Per-group OLS OVERALL F-TEST P-VALUE (model significance), broadcast. Uses stats::fisher_f. NATIVE + lean_single.
+pub fn bf_ols_f_pvalue_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_ols(src, key_col, x_col, y_col, 4) }
+/// Per-group OLS SLOPE 95% CI LOWER bound (b − t_.975·SE), broadcast. Uses stats::student_t. NATIVE + lean_single.
+pub fn bf_ols_slope_ci_lo_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_ols(src, key_col, x_col, y_col, 5) }
+/// Per-group OLS SLOPE 95% CI UPPER bound (b + t_.975·SE), broadcast. Uses stats::student_t. NATIVE + lean_single.
+pub fn bf_ols_slope_ci_hi_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_ols(src, key_col, x_col, y_col, 6) }
+
+/// Per-group ONE-SAMPLE inference on a value column (columns key, value). One pass gives n/mean/SD;
+/// per key it forms the standard error and defers the tail/quantile to stats::student_t. modes:
+/// 0 = 95% CI lower for the mean (mean − t_.975(n−1)·SEM), 1 = 95% CI upper, 2 = one-sample t vs
+/// param mu0 ((mean−mu0)/SEM), 3 = its two-sided p-value (df=n−1). Sample SD uses ddof=1. Returns
+/// 0 for keys with n<2 or zero variance. O(n). NATIVE + lean_single only.
+fn bf_group_onesample(src: &BigFrame, key_col: i64, val_col: i64, param: f64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var cn:  [f64; 1024] = [0.0; 1024]
+    var sv:  [f64; 1024] = [0.0; 1024]
+    var sq:  [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || n <= 0 { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let sc = heap_alloc(8) as *mut i64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 { let v = read_f64(vp, i); cn[k] = cn[k] + 1.0; sv[k] = sv[k] + v; sq[k] = sq[k] + v * v }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        let m = cn[g]
+        if m > 1.0 {
+            let mean = sv[g] / m
+            var vr = (sq[g] - sv[g] * sv[g] / m) / (m - 1.0); if vr < 0.0 { vr = 0.0 }
+            let sem = bfs_sqrt(vr / m, sc)
+            let df = m - 1.0
+            if sem > 0.0 {
+                if mode == 0 { res[g] = mean - t_quantile(0.975, df) * sem }
+                else { if mode == 1 { res[g] = mean + t_quantile(0.975, df) * sem }
+                else { if mode == 2 { res[g] = (mean - param) / sem }
+                else { res[g] = t_two_tail((mean - param) / sem, df) } } }
+            }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    heap_free(sc as *mut i8)
+    out
+}
+/// Per-group 95% CI LOWER bound for the mean (t-interval), broadcast. Uses stats::student_t. NATIVE + lean_single.
+pub fn bf_mean_ci_lo_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_onesample(src, key_col, val_col, 0.0, 0) }
+/// Per-group 95% CI UPPER bound for the mean (t-interval), broadcast. Uses stats::student_t. NATIVE + lean_single.
+pub fn bf_mean_ci_hi_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_onesample(src, key_col, val_col, 0.0, 1) }
+/// Per-group ONE-SAMPLE t STATISTIC vs mu0 ((mean−mu0)/SEM), broadcast. NATIVE + lean_single.
+pub fn bf_one_sample_t_by(src: &BigFrame, key_col: i64, val_col: i64, mu0: f64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_onesample(src, key_col, val_col, mu0, 2) }
+/// Per-group ONE-SAMPLE t-test two-sided P-VALUE (H0: mean=mu0), broadcast. Uses stats::student_t. NATIVE + lean_single.
+pub fn bf_one_sample_ttest_pvalue_by(src: &BigFrame, key_col: i64, val_col: i64, mu0: f64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_onesample(src, key_col, val_col, mu0, 3) }
