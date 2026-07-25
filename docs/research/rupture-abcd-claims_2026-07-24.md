@@ -151,6 +151,15 @@ parallel faces until a green functor says otherwise.
 > \((p_{\mathrm{ann}}, p_{\mathrm{fiber}}, \mathrm{Var})\) jointly, plus optional continuous \(d_{\mathrm{sing}}\)
 > tubular mass. Alignment (2″) remains a **separate** contract aimed at non-sedenion models first.
 
+**Status (2026-07-25, measured — not proved):** `scripts/research/rupture_r2_full_tubular_probe.py`
+certifies exactly that all 84 primitives have \(\det L_x = 0\) with \(\operatorname{rank} L_x = 12\)
+(corank 4 — high-contact points of the discriminant hypersurface), and that on transversal rational
+slices through all 168 census edges \(\det L_{x(\alpha)}\) vanishes to order exactly \(4\) with
+leading coefficient exactly \(256\), identically on all seven fibers (exact local \(p_{\mathrm{fiber}} = 1/7\)).
+Measured (Monte Carlo, declared seed): the uniform tube mass is \(\mu(<0.5) \lesssim 10^{-4} \ll \mu_G\),
+and per-fiber local transversal slopes agree within \(1.6\%\). Verdict `R2_FULL_MEASURED`; a proved
+continuous law remains open.
+
 Executable: `scripts/research/rupture_r2_fiber_measure_contract.py`.
 
 ### Explicit non-claims (R2)

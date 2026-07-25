@@ -19,6 +19,12 @@ python3 scripts/research/rupture_r2_fiber_measure_contract.py | tee /tmp/rupture
 grep -q 'R2_CONTRACT_OK' /tmp/rupture_r2_out.txt
 grep -q 'R2_PARTIAL PASS' /tmp/rupture_r2_out.txt
 
+echo "-- R2-full tubular probe (d_sing continuous law) --"
+python3 scripts/research/rupture_r2_full_tubular_probe.py | tee /tmp/rupture_r2full_out.txt
+grep -q 'R2_FULL_PROBE_OK' /tmp/rupture_r2full_out.txt
+grep -q 'EXACT_ANCHORS det0=84/84 rank12=84/84 -> PASS' /tmp/rupture_r2full_out.txt
+grep -q 'R2_FULL_VERDICT R2_FULL_MEASURED' /tmp/rupture_r2full_out.txt
+
 echo "-- R3 Fano-restriction probe (Φ_fp) --"
 python3 scripts/research/rupture_r3_fano_restriction_probe.py | tee /tmp/rupture_r3_out.txt
 grep -q 'R3_CONTRACT_PROBE_OK' /tmp/rupture_r3_out.txt
