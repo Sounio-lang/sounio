@@ -640,3 +640,64 @@ pub fn bf_mean_ci_hi_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame 
 pub fn bf_one_sample_t_by(src: &BigFrame, key_col: i64, val_col: i64, mu0: f64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_onesample(src, key_col, val_col, mu0, 2) }
 /// Per-group ONE-SAMPLE t-test two-sided P-VALUE (H0: mean=mu0), broadcast. Uses stats::student_t. NATIVE + lean_single.
 pub fn bf_one_sample_ttest_pvalue_by(src: &BigFrame, key_col: i64, val_col: i64, mu0: f64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_onesample(src, key_col, val_col, mu0, 3) }
+
+/// Per-group PAIRED-SAMPLE inference (columns key, x, y): tests the within-pair difference d=x−y
+/// per key. One pass accumulates n/Σd/Σd²; the paired t-test reduces to a one-sample t on d.
+/// modes: 0 = paired t ((mean_d)/SEM_d), 1 = two-sided p-value (df=n−1), 2 = Cohen's dz
+/// (mean_d/SD_d, paired effect size), 3 = mean-difference 95% CI lower, 4 = CI upper. SD uses
+/// ddof=1. Returns 0 for n<2 or zero difference-variance. O(n). NATIVE + lean_single only.
+fn bf_group_paired(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var cn:  [f64; 1024] = [0.0; 1024]
+    var sd:  [f64; 1024] = [0.0; 1024]
+    var sq:  [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || x_col < 0 || x_col >= nc || y_col < 0 || y_col >= nc || n <= 0 { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let xp = bf_col_ptr(src, x_col) as *mut f64
+    let yp = bf_col_ptr(src, y_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let sc = heap_alloc(8) as *mut i64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 { let d = read_f64(xp, i) - read_f64(yp, i); cn[k] = cn[k] + 1.0; sd[k] = sd[k] + d; sq[k] = sq[k] + d * d }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        let m = cn[g]
+        if m > 1.0 {
+            let md = sd[g] / m
+            var vr = (sq[g] - sd[g] * sd[g] / m) / (m - 1.0); if vr < 0.0 { vr = 0.0 }
+            let sdd = bfs_sqrt(vr, sc)
+            let sem = bfs_sqrt(vr / m, sc)
+            let df = m - 1.0
+            if mode == 2 { if sdd > 0.0 { res[g] = md / sdd } }
+            else { if sem > 0.0 {
+                if mode == 0 { res[g] = md / sem }
+                else { if mode == 1 { res[g] = t_two_tail(md / sem, df) }
+                else { if mode == 3 { res[g] = md - t_quantile(0.975, df) * sem }
+                else { res[g] = md + t_quantile(0.975, df) * sem } } }
+            } }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    heap_free(sc as *mut i8)
+    out
+}
+/// Per-group PAIRED t STATISTIC (of d=x−y), broadcast. NATIVE + lean_single.
+pub fn bf_paired_t_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_paired(src, key_col, x_col, y_col, 0) }
+/// Per-group PAIRED t-test two-sided P-VALUE (H0: mean(x−y)=0), broadcast. Uses stats::student_t. NATIVE + lean_single.
+pub fn bf_paired_ttest_pvalue_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_paired(src, key_col, x_col, y_col, 1) }
+/// Per-group PAIRED COHEN'S dz effect size (mean_d/SD_d), broadcast. NATIVE + lean_single.
+pub fn bf_cohens_dz_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_paired(src, key_col, x_col, y_col, 2) }
+/// Per-group MEAN-DIFFERENCE 95% CI LOWER bound (paired), broadcast. Uses stats::student_t. NATIVE + lean_single.
+pub fn bf_mean_diff_ci_lo_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_paired(src, key_col, x_col, y_col, 3) }
+/// Per-group MEAN-DIFFERENCE 95% CI UPPER bound (paired), broadcast. Uses stats::student_t. NATIVE + lean_single.
+pub fn bf_mean_diff_ci_hi_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_paired(src, key_col, x_col, y_col, 4) }
