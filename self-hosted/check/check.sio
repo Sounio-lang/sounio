@@ -3341,6 +3341,11 @@ fn checker_collect_runtime_builtins_inplace(c: *mut Checker) with Mut, Panic, Di
     checker_bind_import_unknown_inplace(c, make_name("uncertainty_of"))
     checker_bind_import_unknown_inplace(c, make_name("hessian_of"))
     checker_bind_import_unknown_inplace(c, make_name("chain_to_knowledge_into"))
+    // syscall6: raw syscall builtin emitted by native codegen (no .sio
+    // definition). Same E137 preflight hazard as print_f64 above for any
+    // 2+-module program that calls it (self-hosted/io/file_write.sio,
+    // self-hosted/lsp/server.sio).
+    checker_bind_import_unknown_inplace(c, make_name("syscall6"))
     // Runtime memory / float / string intrinsics emitted directly by codegen (no .sio
     // definition), referenced across the self-hosted compiler. The per-module frontend
     // resolves these; the imported all-modules typecheck must register them too or they
@@ -6707,6 +6712,18 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         // type (hlir_to_gpu.sio hardcodes GpuU32 for the read; all integer binops
         // lower as i32), so widening the checker type to i64 keeps strict integer
         // typing intact without changing the emitted register width.
+        return ty_i64()
+    }
+    // syscall6(nr, a1..a6) -> i64 with IO: raw Linux syscall escape hatch,
+    // mirroring the lean_single builtin (lean_single.sio emit_syscall6_x86).
+    // No user-declared signature exists; without this arm the callee ident
+    // falls through to the unbound-identifier check (E137). Codegen emits the
+    // SysV->kernel register shuffle (rcx->r10, nr->rax) as a named builtin.
+    if call_expr_is_syscall6(e.left) {
+        checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+        var effects_io: [i64; 8] = [0; 8]
+        effects_io[0] = 0  // IO (effects.sio: 0=IO)
+        checker_check_callee_effects_inplace(c, e.span, effects_io, 1)
         return ty_i64()
     }
     if call_expr_is_box_new(e.left) {
@@ -12875,6 +12892,23 @@ fn call_expr_is_gpu_barrier(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Di
             if name_eq(n, make_name("gpu_barrier_sync")) { return true }
             if name_eq(n, make_name("gpu_sync_threads")) { return true }
             false
+        }
+        None => false
+    }
+}
+
+// syscall6(nr, a1..a6): raw Linux syscall escape hatch, implicit builtin with
+// no user-declared signature (same recognition-by-name pattern as the GPU
+// intrinsics above). MUST stay in sync with the lowering arm in
+// self-hosted/ir/lower.sio (lower_call_expr_ref) and the codegen builtin in
+// self-hosted/native/codegen_x86_linux.sio (emit_builtin_syscall6_into).
+fn call_expr_is_syscall6(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            name_eq((*expr).name, make_name("syscall6"))
         }
         None => false
     }
