@@ -3226,3 +3226,9 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 | 2026-07-19 | xai/Grok 4.3 | math-review | stdlib/epistemic/gum.sio (dof_to_i64) | PASS | Confirmed WS, t-tables, Type A/B, and round-half-up `dof+0.5` as correct GUM table lookup. Raw: `/tmp/llm-offload-0n5IXJ/`. |
 | 2026-07-19 | deepseek | review | test_prescription_chain_e2e.sio | PROVIDER_ERROR | Insufficient Balance. |
 | 2026-07-19 | xai/Grok 4.3 | review | test_prescription_chain_e2e.sio | ADDRESSED | Wired GUM U95 into `gum_band_decide`; documented Matzke *0.06 L/h and illustrative CV=0.25; claims_not_made bedside. Dead-code GUM critique fixed. Raw: `/tmp/llm-offload-bh5nkB/`. |
+
+## 2026-07-25 - rupture A/B/C/D contracts landing
+
+| Date | Provider | Task | Target | Outcome | Note |
+|---|---|---|---|---|---|
+| 2026-07-25 | xai/Grok 4.3 | math-review | docs/research/rupture-abcd-claims_2026-07-24.md + scripts/research/rupture_r{2,r3}_*.py | PASS_WITH_NOTES | All contract predicates verified (D0 ZD def, Fano-line associator vanishing, 84/168 ZD primitives, Frente A Var=0 and 1/150 over Q, cd_sigma sign law, R2 gate matches script, R3 correctly stays R3_HINT). Two non-blocking notes: d_sing exponent 1/16 conventional-not-derived (TIGHTENABLE); ord-2/ord-M/ord-P parallelism labelled quarantine-only, no leap executed (no action). Raw: `/tmp/llm-offload-aBC2iv/`. |
