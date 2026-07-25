@@ -56,6 +56,7 @@ fi
 
 # Claim docs present
 test -f docs/research/rupture-abcd-claims_2026-07-24.md
+test -f docs/research/rupture-programme-synthesis_2026-07-25.md
 test -f docs/research/rupture-r2-full-tubular_2026-07-25.md
 test -f docs/research/rupture-r3-fano-phi_2026-07-25.md
 test -f docs/research/rupture-r4-fano-field_2026-07-25.md
