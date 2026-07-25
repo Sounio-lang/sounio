@@ -13,7 +13,7 @@ source_of_truth: repo.docs.research.functor-f-paper-skeleton-2026-07-25
 **Orthography:** EN-UK
 **Status:** SKELETON — section map + bounded claims + reproducibility, no narrative prose
 **Consolidates:** the Functor-F programme, `docs/research/functor_f_*_spec_2026-07-25.md`
-(nine rungs) and `docs/research/rupture-programme-synthesis_2026-07-25.md`
+(eleven rungs) and `docs/research/rupture-programme-synthesis_2026-07-25.md`
 **Does not supersede** `docs/papers/rupture_functor_f_synthesis_2026-07-25.md` (a broader
 draft covering Mercyful Learning and the Falsification Ledger, which are out of scope
 here); this skeleton is the narrower, Functor-F-only submission plan.
@@ -59,12 +59,15 @@ findings as "located obstructions" rather than negatives, avoids the D3-adjacent
 > on associative sub-fields and picks up one covariant ord-1 correction — the associator
 > itself — elsewhere; that correction is proved to be the G₂ 3-form under its defining
 > contraction identity, and the resulting tower of invariants `{δ,φ,ψ}` is proved to close
-> at ord-2. Two cross-column bridges — to Petitot's morphodynamics and to Ollivier–Ricci
-> curvature — are then shown **canonically obstructed**, each for a located, mechanistic
-> reason, not merely unproved. Nine executable contracts bound every claim; no identity
-> between algebra and semantics is asserted.
+> at ord-2. Three cross-column probes follow: the bridges to Petitot's morphodynamics and
+> to Ollivier–Ricci curvature are **canonically obstructed**, each for a located,
+> mechanistic reason; the bridge to ord-3 (Massey/Borromean) is instead **located** — the
+> secondary ternary operation is empty in the octonions (a division algebra) and, in the
+> sedenions, coincides exactly with the ord-2 zero-divisor fibre, though its quotient
+> admits no canonical fill without imposed A∞ structure. Eleven executable contracts bound
+> every claim; no identity between algebra and semantics is asserted.
 
-(≈150 words.)
+(≈160 words.)
 
 ---
 
@@ -78,7 +81,7 @@ identity theorem across columns. It is:
 1. **An instrumented, G₂-equivariant functor** from associator jets to stratification
    data, with every non-obvious step (uniformity, covariance, coherence, closure)
    discharged by a named executable contract rather than asserted.
-2. **A discipline for reporting obstructions as first-class results.** Four of the nine
+2. **A discipline for reporting obstructions as first-class results.** Four of the eleven
    rungs are *characterisations of failure* (`H_CHARACTERISED`, `K_CHARACTERISED`,
    `B_OBSTRUCTED`, `M_CHARACTERISED`), each naming its verdict type **before** computing,
    each locating the mechanism (a non-invariant coordinate; a non-associative coupling; a
@@ -90,11 +93,16 @@ identity theorem across columns. It is:
    ord-2. This is a boundary result: it tells the programme where the algebraic sensor
    saturates and where it must hand off to a **functor**, not further contraction, to
    reach ord-M or ord-P (`rupture-programme-synthesis §3`, "non-collapse" rule).
-4. **Two located cross-column obstructions**, each independently probed and, in one case,
-   independently reviewed: the algebra reaches Petitot's cusp canonically but not the
-   butterfly (`B_OBSTRUCTED`, sharpened to a proved vanishing by `PHI_JETS_VANISH_PROVEN`),
-   and the algebra's oriented content is invisible to Ollivier–Ricci curvature on the
-   canonical Fano graph for a symmetry-forced reason (`M_CHARACTERISED`).
+4. **Three cross-column probes — two located obstructions and one located bridge.** The
+   algebra reaches Petitot's cusp canonically but not the butterfly (`B_OBSTRUCTED`,
+   sharpened to a proved vanishing by `PHI_JETS_VANISH_PROVEN`); the algebra's oriented
+   content is invisible to Ollivier–Ricci curvature on the canonical Fano graph for a
+   symmetry-forced reason (`M_CHARACTERISED`); and the ord-3 (Massey/Borromean) secondary
+   ternary structure is **located** — empty in 𝕆, coinciding in 𝕊 with the ord-2
+   zero-divisor fibre (`SECONDARY_TERNARY_LOCATED`), with a 2-dim quotient that the bare
+   algebra cannot canonically fill (`NO_CANONICAL_FILL`, a recorded near-miss refuted by a
+   bracketing-consistency test). The cross-column frontier is therefore **not uniformly
+   negative**: ord-P and ord-M are coincidences, ord-3 genuinely attaches to ord-2.
 
 **What this is explicitly not**, restated from the synthesis: not a claim that
 non-associative structure helps any learned model; not a clinical mapping; not a proof
@@ -118,10 +126,12 @@ beyond the cusp-plane path classes; not a self-hosting/compiler claim.
 | 9 | Cross-column I: the algebra → Petitot bridge | The cusp (2 canonical G₂-invariants: depth+tilt) closes canonically; the butterfly's third control does not — the antisymmetric cubic invariant `φ(α₁,α₂,α₃)` vanishes on the coupling jets (measured over 840 configs) | `functor_f_petitot_bridge_contract.py` | `FUNCTOR_F_PETITOT_VERDICT B_OBSTRUCTED` (5/5) |
 | 10 | The vanishing, proved | `φ(a₁,a₂,a₃)=0` is upgraded from measurement to a structural theorem: single-axis associator + PG(2,2) incidence lemma (no Fano line lies in a 4-point complement) + trilinearity | `functor_f_phi_jets_vanish_contract.py` | `FUNCTOR_F_PHI_JETS_VERDICT PHI_JETS_VANISH_PROVEN` (6/6) |
 | 11 | Cross-column II: the algebra ↔ ord-M (Ollivier–Ricci) bridge | On the canonical Fano-incidence graphs (K₇; Heawood), ORC is a single edge-transitivity-forced scalar with **zero degrees of freedom**; 16 distinct signed octonion tables (16 distinct `φ`) all induce the identical graph and identical curvature — the bridge is a symmetry/dimension coincidence, not a map | `functor_f_orc_fano_bridge_contract.py` | `FUNCTOR_F_ORC_VERDICT M_CHARACTERISED` (6/6) |
-| 12 | Discussion | The algebraic column is closed (§3–8); both cross-column probes attempted (§9–11) return **located, mechanistic** obstructions rather than forced matches — read as the programme's preferred kind of result, not a dead end | synthesis §5 architecture diagram | — |
-| 13 | What is not claimed | See §5 below | — | — |
-| 14 | Related work | See §6 below | — | — |
-| App. A | Reproducibility | See §7 below | all nine contracts | all PASS |
+| 12 | Cross-column III: the algebra ↔ ord-3 (Massey/Borromean) | The secondary ternary operation (defined where the primary associator vanishes) is **empty in 𝕆** (division algebra — the algebraic reason the octonion associator is not a Massey object) and, in 𝕊, **is** the ord-2 zero-divisor fibre: 42 ZD with `ker L_b=ker R_b=`4-dim (the merged `seam_coincidence` `lo⊕hi` fibre); indeterminacy `14` vs generic `16` gives a distinguishable 2-dim quotient; no Borromean triple exists | `functor_f_ord3_secondary_ternary_contract.py` | `FUNCTOR_F_ORD3_VERDICT SECONDARY_TERNARY_LOCATED` (6/6) |
+| 13 | Can the ord-3 quotient be filled? | The 2-dim quotient is **reachable** by intrinsic ternary composites but **not canonically fillable**: the four bracketings/orderings span the full quotient (rank 2, all 42 ZD), so the value is bracketing-selected not forced; 𝕊 has no differential, so classical Massey cannot pick a representative. An initial `(a·c)·b` "canonical invariant" is refuted by a bracketing-consistency test (recorded near-miss) | `functor_f_ord3_quotient_fill_contract.py` | `FUNCTOR_F_ORD3FILL_VERDICT NO_CANONICAL_FILL` (6/6) |
+| 14 | Discussion | The algebraic column is closed (§3–8); the three cross-column probes (§9–13) return **located, mechanistic** results — two coincidence-obstructions (ord-P, ord-M) and one genuine attachment of ord-3 to the ord-2 ZD fibre — rather than forced matches; the frontier is not uniformly negative | synthesis §5 architecture diagram | — |
+| 15 | What is not claimed | See §5 below | — | — |
+| 16 | Related work | See §6 below | — | — |
+| App. A | Reproducibility | See §7 below | all eleven contracts | all PASS |
 
 ---
 
@@ -145,6 +155,15 @@ beyond the cusp-plane path classes; not a self-hosting/compiler claim.
   invariant; the unweighted incidence graph and any canonically-uniform weighting of
   it) — not every conceivable construction. Orientation-sensitive / signed variants are
   named as open next edges, not attempted here.
+- **Not a claim of a canonical ord-3 invariant.** §12–13 locate the secondary ternary
+  operation on the ord-2 ZD fibre and show its 2-dim quotient is *reachable* but
+  *bracketing-selected*, not canonically filled; a genuine ord-3 invariant would require
+  *imposing* A∞/differential structure (the open positive follow-up), which is not done
+  here. The `(a·c)·b` near-miss is reported and refuted, not claimed.
+- **Not the (topological) Massey product.** §12–13's object is a secondary ternary
+  operation on a plain (differential-free) algebra; only Massey's *definedness pattern*
+  (secondary lives where primary vanishes) transfers. The empirical path-Massey negative
+  in `BORROMEAN_AINFINITY.md` is a *different* argument, cited but not leaned on.
 - **Not a claim about non-algebraic orders in general.** §8's closure result is scoped
   to the **algebraic column** only (ord-1 `φ`, ord-2 `ψ`); it says nothing about ord-M
   (curvature) or ord-P (bifurcation) as sensors in their own right — only that the
@@ -204,12 +223,12 @@ at the time of writing this skeleton; they exist on a sibling research branch
 (`research/rupture-ord2-alignment-20260725`, commit `6693894dc`, "Functor F
 jet-functoriality witness (F_GREEN 7/7)") that has not been merged here. This skeleton
 therefore cites `F_GREEN` as the documented antecedent of `G_GREEN` but does **not**
-report a freshly re-run verdict for it — only the nine contracts in §7.1, all physically
+report a freshly re-run verdict for it — only the eleven contracts in §7.1, all physically
 present and re-executed in this session, are load-bearing for this document's claims.
 Before submission, either merge that branch's rung or re-derive it on this branch and
 re-verify.
 
-### 7.1 The nine executable contracts (all re-run live, this session)
+### 7.1 The eleven executable contracts (all re-run live, this session)
 
 | Contract (`scripts/research/`) | Verdict token | Clauses | Exit | CI gate |
 |---|---|---|---|---|
@@ -222,15 +241,18 @@ re-verify.
 | `functor_f_petitot_bridge_contract.py` | `FUNCTOR_F_PETITOT_VERDICT B_OBSTRUCTED` | 5/5 PASS | 0 | — |
 | `functor_f_phi_jets_vanish_contract.py` | `FUNCTOR_F_PHI_JETS_VERDICT PHI_JETS_VANISH_PROVEN` | 6/6 PASS | 0 | — |
 | `functor_f_orc_fano_bridge_contract.py` | `FUNCTOR_F_ORC_VERDICT M_CHARACTERISED` | 6/6 PASS | 0 | — |
+| `functor_f_ord3_secondary_ternary_contract.py` | `FUNCTOR_F_ORD3_VERDICT SECONDARY_TERNARY_LOCATED` | 6/6 PASS | 0 | — |
+| `functor_f_ord3_quotient_fill_contract.py` | `FUNCTOR_F_ORD3FILL_VERDICT NO_CANONICAL_FILL` | 6/6 PASS | 0 | — |
 
-All nine are pure-Python (numpy), self-contained, and independently re-audit the
+All eleven are pure-Python (numpy), self-contained, and independently re-audit the
 inherited octonion core (a `Q0`/`M0`/`B0`/`C0`/`P0`-style axiom check) before using it —
 each contract distrusts the shared core rather than assuming it.
 
 ```bash
 for f in functor_f_g2_covariance functor_f_g2_equivariance functor_f_phi_fp_equivariant \
          functor_f_field_functoriality functor_f_g2_coherence functor_f_g2_tower_closure \
-         functor_f_petitot_bridge functor_f_phi_jets_vanish functor_f_orc_fano_bridge; do
+         functor_f_petitot_bridge functor_f_phi_jets_vanish functor_f_orc_fano_bridge \
+         functor_f_ord3_secondary_ternary functor_f_ord3_quotient_fill; do
   python3 scripts/research/${f}_contract.py || echo "FAIL: $f"
 done
 ```
@@ -289,8 +311,8 @@ listed here rather than in this document's prose.
 
 ### 7.3 One-command full-ladder check (proposed, not yet wired)
 
-No single gate currently runs all nine Functor-F contracts together (only
+No single gate currently runs all eleven Functor-F contracts together (only
 `functor_f_g2_covariance_gate.sh` exists as a dedicated CI gate; the rest are verified by
 direct `python3` invocation grepping their verdict token, as in §7.1). A follow-up before
 submission should add a `functor_f_full_ladder_gate.sh` analogous to
-`rupture_abcd_contracts_gate.sh`, so the whole `G→Q, B, PHI_JETS, M` arc is one command.
+`rupture_abcd_contracts_gate.sh`, so the whole `G→Q, B, PHI_JETS, M, ord-3` arc is one command.
