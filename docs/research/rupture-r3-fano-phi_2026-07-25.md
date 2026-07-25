@@ -16,7 +16,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.ruptu
 
 **Date:** 2026-07-25  
 **Orthography:** EN-UK  
-**Status:** partial close of B-contract (R3_PARTIAL); D3 still forbidden  
+**Status:** B-contract operational close (`R3_GREEN`); D3 still forbidden; field-level follow-on is R4  
 **Harness:** `scripts/research/rupture_r3_fano_restriction_probe.py`  
 **Parents:** `rupture-abcd-claims_2026-07-24.md` §B, `petitot-semantic-potential.md`,
 `rupture-as-singularity.md`
@@ -135,36 +135,72 @@ b &= \tau + \frac{\alpha_m}{2},
 | **JET** | linearity + single-axis pure associators | **PASS** (all 4 off-line units on worked line) |
 | **(i)** | \(\varepsilon=0\Rightarrow\alpha=0\Rightarrow(a,b)=(A_0,\tau)\) | **PASS** |
 | **(ii)** | increasing \(|\varepsilon|\) yields fold crossing (2→1 wells) for some \(\tau\) | **PASS** |
-| **(iii)** | \(\mathrm{sign}(\varepsilon)\) flips \(b\) (even \(a\)) and flips which well is deeper | **PASS** (weak form: well asymmetry) |
-| **(iii+)** | crossing *type* = contrariety vs contradiction as distinct strata | **OPEN** |
+| **(iii)** | \(\mathrm{sign}(\varepsilon)\) flips \(b\) (even \(a\)) and flips which well is deeper | **PASS** |
+| **(iii+)** | contrariety vs contradiction as **two path classes** from the same jet | **PASS** (operational) |
 | **D3** | semantic square = algebraic locus | **FORBIDDEN** |
 
-**Verdict:** `R3_PARTIAL` — first-principles jet + (i)–(iii weak).  
-**Not:** `R3_GREEN`.
+**Verdict:** `R3_GREEN` — operational B-contract under Φ_fp.  
+**Still not D3** (no identity of varieties / potentials with ZD).
 
 Norm-only control: \(\Phi(\alpha)=(A_0+\|\alpha\|^2/4,\;\tau)\) is identical for
 \(\pm\varepsilon\) and **cannot** flip wells — so direction is load-bearing, not cosmetic.
 
 ---
 
-## 5. What remains for R3_GREEN
+## 5. Clause (iii+) — two path classes from one jet
 
-1. **Contrariety vs contradiction** as two topologically distinct moves in the
-   control space (Petitot impossibility theorem), not only left/right well bias
-   under a single cusp.
-2. Optionally: lift \(A_0\) from a declared semantic potential on the quaternion
-   subalgebra (still not from 𝕆 alone — honesty).
-3. Multi-line field: two Fano lines meeting in one unit; associator between lines
-   as the system-level obstruction (already qualitative in
-   `petitot-semantic-potential.md` §2–3).
+The even/odd split of \(\alpha\) under Φ_fp yields two control paths from the
+same Fano-neighbourhood coupling:
+
+### Path C — contrariety (even jet only)
+
+Set \(\tau=-\alpha_m/2\) so \(b\equiv 0\). Sweep \(\varepsilon\):
+
+- start bistable, symmetric poles at \(\pm 1\);
+- both wells approach the origin;
+- end monostable **neutral** (\(x=0\)).
+
+Operational reading: both contraries can dissolve into a neutral term
+(“both false” / neutralisation is possible).
+
+### Path D — contradiction (odd jet)
+
+Set \(\tau=0\) so \(b=\alpha_m/2\). Sweep \(\varepsilon\):
+
+- start bistable;
+- for \(|\varepsilon|\gtrsim 0.5\), monostable **polar** (\(|x|\gtrsim 0.5\));
+- \(\mathrm{sign}(\varepsilon)\) selects which pole;
+- no neutral monostable on the path.
+
+Operational reading: one pole deepens as the other vanishes; “neither” does
+not occur.
+
+### Why this is non-Booleanisability (operational)
+
+A Boolean lattice \(2^2\) has a **single** complement type. Hosting both a
+*neutralisation* path class and a *polar-selection* path class as distinct
+moves is exactly Petitot’s obstruction, realised here as two path classes in
+the cusp plane **from the same algebraic jet**. This is an **operational
+witness**, not a topos-theoretic theorem and not D3.
 
 ---
 
-## 6. Reproduce
+## 6. What remains after R3_GREEN
+
+1. Multi-line field: two Fano lines meeting in one unit (system-level obstruction).
+2. Optional: lift \(A_0\) from a declared semantic potential on the quaternion
+   subalgebra (still not from 𝕆 alone).
+3. Keep D3 closed until a natural \(\Phi\) without unit-choice narrative exists
+   *and* a variety-level correspondence is proved (not expected soon).
+
+---
+
+## 7. Reproduce
 
 ```bash
 python3 scripts/research/rupture_r3_fano_restriction_probe.py
-# expect: JET_LEMMA PASS, CLAUSE_I/II/III PASS, R3_VERDICT R3_PARTIAL
+# expect: JET_LEMMA PASS, CLAUSE_I/II/III/III_PLUS PASS, R3_VERDICT R3_GREEN
+# expect marker: D3_identity_still_forbidden
 
 bash scripts/ci/rupture_abcd_contracts_gate.sh
 # expect: RUPTURE_ABCD_CONTRACTS_OK
@@ -172,7 +208,7 @@ bash scripts/ci/rupture_abcd_contracts_gate.sh
 
 ---
 
-## 7. AI disclosure
+## 8. AI disclosure
 
 Derivation and harness under human direction (2026-07-25). No clinical claims.
 GAIDeT-ICMJE 2025.

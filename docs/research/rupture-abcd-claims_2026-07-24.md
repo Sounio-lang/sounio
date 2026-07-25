@@ -193,7 +193,7 @@ or non-Fano only rescales \(V\) without changing stratum type → parallel forma
 Executable probe: `scripts/research/rupture_r3_fano_restriction_probe.py`.  
 Derivation (2026-07-25): `docs/research/rupture-r3-fano-phi_2026-07-25.md`.
 
-### Φ_fp (first principles — R3_PARTIAL)
+### Φ_fp (first principles — R3_GREEN operational)
 
 Exact jet: \([e_i+\varepsilon e_u,e_j,e_k]=\varepsilon[e_u,e_j,e_k]\), single-axis support.
 
@@ -204,15 +204,43 @@ b = \tau + \frac{\alpha_m}{2},\qquad A_0=-1\text{ (unit choice)}.
 
 | Verdict | Meaning |
 |---|---|
-| `R3_PARTIAL` | JET + (i)+(ii)+(iii-weak well asymmetry) under Φ_fp — **current** |
-| `R3_GREEN` | also separates contrariety vs contradiction strata — **open** |
+| `R3_PARTIAL` | JET + (i)+(ii)+(iii) under Φ_fp |
+| `R3_GREEN` | + (iii+) even/odd path classes = contrariety vs contradiction — **current** |
+
+**Path C (contrariety):** \(\tau=-\alpha_m/2\) (\(b\equiv 0\)) → neutral monostable.  
+**Path D (contradiction):** \(\tau=0\) (\(b=\alpha_m/2\)) → polar monostable, sign selects pole.
+
+Detail: `docs/research/rupture-r3-fano-phi_2026-07-25.md`.
 
 ### Explicit non-claims (R3)
 
-- No isomorphism \(B(V_{\mathrm{cusp}})\cong ZD(𝕊)\).  
+- No isomorphism \(B(V_{\mathrm{cusp}})\cong ZD(𝕊)\) (**D3 still forbidden**).  
 - No Wildgen E₆–E₈ = magic square **theorem** (label conjecture only).  
 - No ECSS / affect / depression smuggle.  
-- `R3_PARTIAL` ≠ D3 and ≠ full Petitot impossibility theorem.
+- `R3_GREEN` = operational path-class non-Booleanisability, **not** a topos theorem and not D3.
+
+---
+
+## 4b. R4 — multi-line Fano field (system level)
+
+R3 is the neighbourhood of **one** line. R4 is the **field of seven squares**
+plus Φ_fp path classes sourced from the **cross-line** jet.
+
+| ID | Fact | Status |
+|---|---|---|
+| F1–F2 | 7 lines associative; pairwise meet in 1 unit | PASS |
+| F3–F4 | cross-line non-Fano \(\|\mathrm{assoc}\|=2\); census 7+28 | PASS |
+| F5 | two-line mixing jet linear; L1-internal \(\|\alpha\|=0\), cross \(\|\alpha\|=2\) | PASS |
+| F6 | worked pair shares one term | PASS |
+| F7 | multi-line Φ_fp Path C/D from cross jet (not single-line off-unit) | PASS |
+
+| Verdict | Meaning |
+|---|---|
+| `R4_PARTIAL` | F1–F6 field census |
+| `R4_GREEN` | F1–F7 multi-line path classes — **current** |
+
+Harness: `scripts/research/rupture_r4_fano_field_contract.py`  
+Note: `docs/research/rupture-r4-fano-field_2026-07-25.md`
 
 ---
 
@@ -272,8 +300,9 @@ b = \tau + \frac{\alpha_m}{2},\qquad A_0=-1\text{ (unit choice)}.
 ```bash
 bash scripts/ci/rupture_abcd_contracts_gate.sh
 # expects: RUPTURE_ABCD_CONTRACTS_OK
-# R2: partial contract must PASS
-# R3: probe must RUN; verdict may be R3_OPEN until worked Φ satisfies (i)–(iii)
+# R2: PARTIAL PASS
+# R3: GREEN (single-line path classes) + D3_identity_still_forbidden
+# R4: GREEN (field + multi-line path classes) + D3_identity_still_forbidden
 ```
 
 ---
