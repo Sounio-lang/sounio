@@ -1,0 +1,145 @@
+// data::bigframe_ml — per-group machine-learning metrics at BigFrame scale (the sklearn.metrics
+// analog). sklearn scores ONE array of predictions; these score PER GROUP over up to 1M rows in a
+// single pass and broadcast the metric column -- a structural win sklearn's groupby.apply cannot
+// match. Inputs: (key, y_true, y_pred) columns.
+use data::bigframe::*
+
+/// Newton sqrt (builtin sqrt is wrong for args > ~1e6; the MCC denominator can be large). NATIVE + lean_single.
+fn ml_sqrt(x: f64, sc: *mut i64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    let b = f64_to_bits(x)
+    write_i64(sc, 0, (b + 4607182418800017408) >> 1)
+    var y = read_f64(sc as *mut f64, 0)
+    if y < 0.0 { y = 0.0 - y }
+    y = 0.5 * (y + x / y); y = 0.5 * (y + x / y); y = 0.5 * (y + x / y); y = 0.5 * (y + x / y); y = 0.5 * (y + x / y); y = 0.5 * (y + x / y)
+    y
+}
+
+/// Per-group BINARY CLASSIFICATION metrics (columns key, y_true∈{0,1}, y_pred∈{0,1}). One pass
+/// accumulates the confusion counts TP/FP/FN/TN per key. modes: 0 accuracy, 1 precision, 2 recall
+/// (sensitivity), 3 specificity, 4 F1, 5 Matthews correlation coefficient, 6 balanced accuracy.
+/// Broadcast. O(n). NATIVE + lean_single only.
+fn bf_group_clfmetric(src: &BigFrame, key_col: i64, yt_col: i64, yp_col: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var tp: [f64; 1024] = [0.0; 1024]
+    var fp: [f64; 1024] = [0.0; 1024]
+    var fnn: [f64; 1024] = [0.0; 1024]
+    var tn: [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || yt_col < 0 || yt_col >= nc || yp_col < 0 || yp_col >= nc || n <= 0 { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let ytp = bf_col_ptr(src, yt_col) as *mut f64
+    let ypp = bf_col_ptr(src, yp_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let sc = heap_alloc(8) as *mut i64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 {
+            let a = read_f64(ytp, i) > 0.5
+            let b = read_f64(ypp, i) > 0.5
+            if a { if b { tp[k] = tp[k] + 1.0 } else { fnn[k] = fnn[k] + 1.0 } } else { if b { fp[k] = fp[k] + 1.0 } else { tn[k] = tn[k] + 1.0 } }
+        }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        let T = tp[g]; let P = fp[g]; let F = fnn[g]; let N = tn[g]
+        let tot = T + P + F + N
+        if tot > 0.0 {
+            if mode == 0 { res[g] = (T + N) / tot }
+            else { if mode == 1 { if T + P > 0.0 { res[g] = T / (T + P) } }
+            else { if mode == 2 { if T + F > 0.0 { res[g] = T / (T + F) } }
+            else { if mode == 3 { if N + P > 0.0 { res[g] = N / (N + P) } }
+            else { if mode == 4 { let d = 2.0 * T + P + F; if d > 0.0 { res[g] = 2.0 * T / d } }
+            else { if mode == 5 { let den = ml_sqrt((T + P) * (T + F) * (N + P) * (N + F), sc); if den > 0.0 { res[g] = (T * N - P * F) / den } }
+            else { var rc = 0.0; var sp = 0.0; if T + F > 0.0 { rc = T / (T + F) }; if N + P > 0.0 { sp = N / (N + P) }; res[g] = (rc + sp) / 2.0 } } } } } }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    heap_free(sc as *mut i8)
+    out
+}
+/// Per-group ACCURACY, broadcast. NATIVE + lean_single.
+pub fn bf_accuracy_by(src: &BigFrame, key_col: i64, yt_col: i64, yp_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_clfmetric(src, key_col, yt_col, yp_col, 0) }
+/// Per-group PRECISION, broadcast. NATIVE + lean_single.
+pub fn bf_precision_by(src: &BigFrame, key_col: i64, yt_col: i64, yp_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_clfmetric(src, key_col, yt_col, yp_col, 1) }
+/// Per-group RECALL (sensitivity / TPR), broadcast. NATIVE + lean_single.
+pub fn bf_recall_by(src: &BigFrame, key_col: i64, yt_col: i64, yp_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_clfmetric(src, key_col, yt_col, yp_col, 2) }
+/// Per-group SPECIFICITY (TNR), broadcast. NATIVE + lean_single.
+pub fn bf_specificity_by(src: &BigFrame, key_col: i64, yt_col: i64, yp_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_clfmetric(src, key_col, yt_col, yp_col, 3) }
+/// Per-group F1 SCORE, broadcast. NATIVE + lean_single.
+pub fn bf_f1_score_by(src: &BigFrame, key_col: i64, yt_col: i64, yp_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_clfmetric(src, key_col, yt_col, yp_col, 4) }
+/// Per-group MATTHEWS CORRELATION COEFFICIENT, broadcast. NATIVE + lean_single.
+pub fn bf_mcc_by(src: &BigFrame, key_col: i64, yt_col: i64, yp_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_clfmetric(src, key_col, yt_col, yp_col, 5) }
+/// Per-group BALANCED ACCURACY, broadcast. NATIVE + lean_single.
+pub fn bf_balanced_accuracy_by(src: &BigFrame, key_col: i64, yt_col: i64, yp_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_clfmetric(src, key_col, yt_col, yp_col, 6) }
+
+/// Per-group REGRESSION metrics (columns key, y_true, y_pred). One pass accumulates the residual
+/// sums. modes: 0 MSE, 1 RMSE, 2 MAE, 3 R², 4 MAPE, 5 explained variance. Broadcast. O(n).
+/// NATIVE + lean_single only.
+fn bf_group_regmetric(src: &BigFrame, key_col: i64, yt_col: i64, yp_col: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var cn:  [f64; 1024] = [0.0; 1024]
+    var sse: [f64; 1024] = [0.0; 1024]
+    var sae: [f64; 1024] = [0.0; 1024]
+    var syt: [f64; 1024] = [0.0; 1024]
+    var sq:  [f64; 1024] = [0.0; 1024]
+    var smp: [f64; 1024] = [0.0; 1024]
+    var sr:  [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || yt_col < 0 || yt_col >= nc || yp_col < 0 || yp_col >= nc || n <= 0 { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let ytp = bf_col_ptr(src, yt_col) as *mut f64
+    let ypp = bf_col_ptr(src, yp_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let sc = heap_alloc(8) as *mut i64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 {
+            let t = read_f64(ytp, i); let p = read_f64(ypp, i); let r = t - p
+            var ar = r; if ar < 0.0 { ar = 0.0 - ar }
+            cn[k] = cn[k] + 1.0; sse[k] = sse[k] + r * r; sae[k] = sae[k] + ar; syt[k] = syt[k] + t; sq[k] = sq[k] + t * t; sr[k] = sr[k] + r
+            if t != 0.0 { var at = t; if at < 0.0 { at = 0.0 - at }; smp[k] = smp[k] + ar / at }
+        }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        let m = cn[g]
+        if m > 0.0 {
+            if mode == 0 { res[g] = sse[g] / m }
+            else { if mode == 1 { res[g] = ml_sqrt(sse[g] / m, sc) }
+            else { if mode == 2 { res[g] = sae[g] / m }
+            else { if mode == 3 { let sstot = sq[g] - syt[g] * syt[g] / m; if sstot > 0.0 { res[g] = 1.0 - sse[g] / sstot } }
+            else { if mode == 4 { res[g] = smp[g] / m }
+            else { let vr = sse[g] / m - (sr[g] / m) * (sr[g] / m); let vy = sq[g] / m - (syt[g] / m) * (syt[g] / m); if vy > 0.0 { res[g] = 1.0 - vr / vy } } } } } }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    heap_free(sc as *mut i8)
+    out
+}
+/// Per-group MEAN SQUARED ERROR, broadcast. NATIVE + lean_single.
+pub fn bf_mse_by(src: &BigFrame, key_col: i64, yt_col: i64, yp_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_regmetric(src, key_col, yt_col, yp_col, 0) }
+/// Per-group ROOT MEAN SQUARED ERROR, broadcast. NATIVE + lean_single.
+pub fn bf_rmse_by(src: &BigFrame, key_col: i64, yt_col: i64, yp_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_regmetric(src, key_col, yt_col, yp_col, 1) }
+/// Per-group MEAN ABSOLUTE ERROR, broadcast. NATIVE + lean_single.
+pub fn bf_mae_by(src: &BigFrame, key_col: i64, yt_col: i64, yp_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_regmetric(src, key_col, yt_col, yp_col, 2) }
+/// Per-group R² (coefficient of determination), broadcast. NATIVE + lean_single.
+pub fn bf_r2_score_by(src: &BigFrame, key_col: i64, yt_col: i64, yp_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_regmetric(src, key_col, yt_col, yp_col, 3) }
+/// Per-group MEAN ABSOLUTE PERCENTAGE ERROR, broadcast. NATIVE + lean_single.
+pub fn bf_mape_by(src: &BigFrame, key_col: i64, yt_col: i64, yp_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_regmetric(src, key_col, yt_col, yp_col, 4) }
+/// Per-group EXPLAINED VARIANCE score, broadcast. NATIVE + lean_single.
+pub fn bf_explained_variance_by(src: &BigFrame, key_col: i64, yt_col: i64, yp_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_regmetric(src, key_col, yt_col, yp_col, 5) }
