@@ -310,6 +310,9 @@ fn lower_monolithic_public_probe_boundary(label: string) with IO {
 }
 
 // Sprint 116: Register Knowledge<f64> struct layout (value, variance, confidence)
+// β-Madaros 2026-07-25: value/variance/confidence are f64 — is_float MUST be 1.
+// With is_float=0, FieldGet marks the register int and a.value * a.value uses
+// integer imul on IEEE bits (observed: aa=0, Var(4a²)=0 under default Madaros).
 fn ir_register_knowledge_layout(table: StructLayoutTable) -> StructLayoutTable with Mut, Panic, Div {
     var t = table
     if t.count >= 256 {
@@ -317,9 +320,9 @@ fn ir_register_knowledge_layout(table: StructLayoutTable) -> StructLayoutTable w
     }
     let idx = t.count
     var fields: [StructFieldEntry; 64] = [empty_struct_field_entry(); 64]
-    fields[0] = StructFieldEntry { name: make_name("value"), index: 0, is_float: 0, elem_type_name: ir_empty_name() }
-    fields[1] = StructFieldEntry { name: make_name("variance"), index: 1, is_float: 0, elem_type_name: ir_empty_name() }
-    fields[2] = StructFieldEntry { name: make_name("confidence"), index: 2, is_float: 0, elem_type_name: ir_empty_name() }
+    fields[0] = StructFieldEntry { name: make_name("value"), index: 0, is_float: 1, elem_type_name: ir_empty_name() }
+    fields[1] = StructFieldEntry { name: make_name("variance"), index: 1, is_float: 1, elem_type_name: ir_empty_name() }
+    fields[2] = StructFieldEntry { name: make_name("confidence"), index: 2, is_float: 1, elem_type_name: ir_empty_name() }
     t.entries[idx as usize] = StructLayoutEntry {
         type_name: make_name("Knowledge"),
         fields: fields,
@@ -5779,8 +5782,11 @@ impl Lowerer {
             if local_v >= 0 {
                 return (self, local_v)
             }
-            if ir_name_eq(self.lookup_local_struct_type((*e).name), make_name("Knowledge")) {
-                return self.lower_knowledge_variance_for_ident((*e).name)
+            // Knowledge / measure locals: try variance shadow + field-1 even if
+            // struct_type was not tagged "Knowledge" (generic Knowledge[f64] path).
+            let kn_pair = self.lower_knowledge_variance_for_ident((*e).name)
+            if kn_pair.1 >= 0 {
+                return kn_pair
             }
             return (self, -1)
         }
@@ -8590,6 +8596,27 @@ impl Lowerer {
         if lo.pending_variance_reg >= 0 {
             lo = lo.bind_local_variance_reg(s.name, lo.pending_variance_reg)
             lo.pending_variance_reg = -1
+        } else {
+            // β-Madaros: `let a1 = k.value` — seed variance from Knowledge base if pending missed
+            match s.expr {
+                Some(rhs_v) => {
+                    if (*rhs_v).kind == ExprKind::ExprFieldAccess && ir_name_eq((*rhs_v).name, make_name("value")) {
+                        match (*rhs_v).left {
+                            Some(base_v) => {
+                                if (*base_v).kind == ExprKind::ExprIdent {
+                                    let vpair2 = lo.lower_knowledge_variance_for_ident((*base_v).name)
+                                    lo = vpair2.0
+                                    if vpair2.1 >= 0 {
+                                        lo = lo.bind_local_variance_reg(s.name, vpair2.1)
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
         if lower_opt_type_is_array_of_f64(&s.ty) {
             lo = lo.bind_local_array_elem_float(s.name)
@@ -8701,6 +8728,15 @@ impl Lowerer {
                 _ => {}
             }
         }
+        // Annotation TypeKnowledge[T] → bind local as Knowledge for FO GUM field/variance paths
+        match s.ty {
+            Some(ann_ty) => {
+                if (*ann_ty).kind == TypeExprKind::TypeKnowledge {
+                    lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"))
+                }
+            }
+            _ => {}
+        }
         match s.expr {
             Some(expr_box) => {
                 if (*expr_box).kind == ExprKind::ExprStructLit {
@@ -8710,6 +8746,10 @@ impl Lowerer {
                     let callee_struct_name = match *callee_opt_struct_ref {
                         Some(c) => lo.expr_to_callee_name_ref(&(*c)),
                         None => ir_empty_name(),
+                    }
+                    // measure(...) → Knowledge (return-name lookup often misses builtins)
+                    if ir_name_is_measure(callee_struct_name) {
+                        lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"))
                     }
                     if !ir_name_is_box(callee_struct_name) {
                         let ret_name = lo.expr_call_return_struct_name_ref(&(*expr_box))
@@ -10698,6 +10738,22 @@ impl Lowerer {
         }
         if field_array_elem_is_float {
             lo3 = lo3.bind_reg_array_elem_float(dst)
+        }
+        // β-Madaros: Knowledge.value extraction seeds let-bound variance shadow
+        // so variance_of(a1) and FO product/sub work after `let a1 = k.value`.
+        if ir_name_eq(e.name, make_name("value")) {
+            match e.left {
+                Some(base_expr) => {
+                    if (*base_expr).kind == ExprKind::ExprIdent {
+                        let vpair = lo3.lower_knowledge_variance_for_ident((*base_expr).name)
+                        lo3 = vpair.0
+                        if vpair.1 >= 0 {
+                            lo3.pending_variance_reg = vpair.1
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
         (lo3, dst)
     }

@@ -14,13 +14,17 @@ Package: `experiments/deep_four/`, receipts in `results/deep_four/`
 
 ## L1 — β on Madaros
 
-| Test | Madaros (default) | lean_single β¹¹ |
-|---|---|---|
-| `Var(a·b−a·b)=0` | often PASS | PASS |
-| Fano FO `Var(4a₁²)=64σ²` | **FAIL_HONEST** (garbage value / zero var) | **PASS** |
+| Test | Madaros (default) pre-fix | Madaros post `is_float` fix | lean_single β¹¹ |
+|---|---|---|---|
+| `a1=k.value; a1*a1` value | **aa=0** (int imul on IEEE bits) | **aa=1, A=4** | PASS |
+| `Var(a·b−a·b)=0` | often PASS | PASS | PASS |
+| Fano FO `Var(4a₁²)=64σ²` | FAIL (garbage A) | **FAIL_HONEST** (A=4 ok, **var still 0**) | **PASS** |
 
-**Verdict:** `MADAROS_GUM_GAP`. β¹⁰/β¹¹ live on lean_single seed only.  
-**Next port:** IR variance binding in `self-hosted/ir/lower.sio` + native codegen, not a lean_single-only shadow.
+**Root cause (value):** `ir_register_knowledge_layout` had `is_float: 0` on value/variance/confidence.  
+**Fix shipped:** `is_float: 1` + Knowledge struct bind on `measure` / `TypeKnowledge` + variance seed attempts on `.value` lets.
+
+**Residual:** Madaros `variance_of` / FO product variance still returns 0 (lean_single correct).  
+**Verdict:** `MADAROS_VALUE_FIXED_VARIANCE_RESIDUAL`.
 
 ## L2 — Multi-component octonion associator
 
