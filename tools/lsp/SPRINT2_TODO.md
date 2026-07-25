@@ -1,5 +1,9 @@
 # sounio-lsp Sprint 2 — deferred parity items
 
+**Status 2026-07-25: all four items LANDED (v0.4.0, see `CHANGELOG.md`).
+Probe coverage lives in `tools/lsp/test_protocol.sh` (T9/T10/T11/T12).**
+The design notes below are kept for historical context.
+
 These four items remain from the 2026-05-17 audit's patch list. They
 were intentionally not addressed by the parity-patches sprint
 (`feature/lsp-parity-patches`, v0.3.0) because each requires a longer
