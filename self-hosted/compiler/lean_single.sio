@@ -8379,6 +8379,46 @@ fn emit_fo_var_from_sens_diff_sub_x86(
     return out
 }
 
+// β¹¹ — FO Var(y) = Σ_k s_k(y)² · σ²_k from live sensitivity shadows.
+// Fixes independent-product under-count on a·a (needs 4a²σ², not 2a²σ²).
+fn emit_fo_channel_contrib_sq_x86(acc_slot: i64, s_slot: i64, ch: i64) with Mut {
+    if ch < 0 || ch >= 8 { return }
+    let iv = CHANNEL_INPUT_VAR_SLOT[ch as usize]
+    if iv < 0 { return }
+    if s_slot < 0 { return }
+    emit_load_var(s_slot)
+    em(0x50)
+    em(0x59)
+    emit_f64_mul_from_rcx_rax_x86()
+    em(0x50)
+    emit_load_var(iv)
+    em(0x59)
+    emit_f64_mul_from_rcx_rax_x86()
+    em(0x50)
+    emit_load_var(acc_slot)
+    em(0x59)
+    emit_f64_add_from_rcx_rax_x86()
+    emit_store_var(acc_slot)
+}
+
+fn emit_fo_var_from_sens_x86(
+    s0: i64, s1: i64, s2: i64, s3: i64, s4: i64, s5: i64, s6: i64, s7: i64
+) -> i64 with Mut {
+    let out = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_imm64(0)
+    emit_store_var(out)
+    emit_fo_channel_contrib_sq_x86(out, s0, 0)
+    emit_fo_channel_contrib_sq_x86(out, s1, 1)
+    emit_fo_channel_contrib_sq_x86(out, s2, 2)
+    emit_fo_channel_contrib_sq_x86(out, s3, 3)
+    emit_fo_channel_contrib_sq_x86(out, s4, 4)
+    emit_fo_channel_contrib_sq_x86(out, s5, 5)
+    emit_fo_channel_contrib_sq_x86(out, s6, 6)
+    emit_fo_channel_contrib_sq_x86(out, s7, 7)
+    return out
+}
+
 fn emit_load_operand_value_x86(slot: i64, ty: i64, ty_hash: i64, tok: i64) with IO, Mut, Panic, Div {
     emit_load_var(slot)
     if knowledge_hash_is(ty_hash) {
@@ -17362,6 +17402,15 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
             em(0x59); emit_f64_add_from_rcx_rax_x86()
             emit_store_var(b4s7_res)
             EXPR_SSHADOW_7 = b4s7_res
+        }
+        // β¹¹: rebuild Var from FO sensitivities after product sens is complete.
+        if left_f64 == 1 && op == 19 {
+            if EXPR_SSHADOW >= 0 || EXPR_SSHADOW_1 >= 0 || EXPR_SSHADOW_2 >= 0 || EXPR_SSHADOW_3 >= 0 || EXPR_SSHADOW_4 >= 0 || EXPR_SSHADOW_5 >= 0 || EXPR_SSHADOW_6 >= 0 || EXPR_SSHADOW_7 >= 0 {
+                EXPR_VSHADOW = emit_fo_var_from_sens_x86(
+                    EXPR_SSHADOW, EXPR_SSHADOW_1, EXPR_SSHADOW_2, EXPR_SSHADOW_3,
+                    EXPR_SSHADOW_4, EXPR_SSHADOW_5, EXPR_SSHADOW_6, EXPR_SSHADOW_7
+                )
+            }
         }
         // β⁷: Hessian through * — H_jk(a*b) = H_jk(a)*b + s_j(a)*s_k(b) + s_k(a)*s_j(b) + a*H_jk(b)
         // Pair (0,0): s_j=s_k=ch0
