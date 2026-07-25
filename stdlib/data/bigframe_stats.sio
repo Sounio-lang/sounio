@@ -938,3 +938,81 @@ pub fn bf_hedges_g_by(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64) 
 pub fn bf_cohens_d_ci_lo_by(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_effsize(src, key_col, grp_col, val_col, 1) }
 /// Per-group COHEN'S d 95% CI UPPER bound, broadcast. NATIVE + lean_single.
 pub fn bf_cohens_d_ci_hi_by(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_effsize(src, key_col, grp_col, val_col, 2) }
+
+/// Per-group D'AGOSTINO-PEARSON NORMALITY test (scipy.stats.normaltest), columns key, value. One
+/// pass accumulates n/Σx/Σx²/Σx³/Σx⁴ per key -> central moments -> the skewness (D'Agostino) and
+/// kurtosis (Anscombe-Glynn) z-scores; K² = Z_skew² + Z_kurt² ~ χ²(2). modes: 0 = K² statistic,
+/// 1 = p-value χ²_sf(K²,2), 2 = skewness z-score, 3 = kurtosis z-score. Needs n>7. Returns 0 for
+/// n<8 or zero variance. O(n). NATIVE + lean_single only.
+fn bf_group_normaltest(src: &BigFrame, key_col: i64, val_col: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var cn: [f64; 1024] = [0.0; 1024]
+    var s1: [f64; 1024] = [0.0; 1024]
+    var s2: [f64; 1024] = [0.0; 1024]
+    var s3: [f64; 1024] = [0.0; 1024]
+    var s4: [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || n <= 0 { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let sc = heap_alloc(8) as *mut i64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 { let v = read_f64(vp, i); let v2 = v * v; cn[k] = cn[k] + 1.0; s1[k] = s1[k] + v; s2[k] = s2[k] + v2; s3[k] = s3[k] + v2 * v; s4[k] = s4[k] + v2 * v2 }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        let nn = cn[g]
+        if nn > 7.0 {
+            let xb = s1[g] / nn
+            let m2 = s2[g] / nn - xb * xb
+            if m2 > 0.0 {
+                let m3 = s3[g] / nn - 3.0 * xb * s2[g] / nn + 2.0 * xb * xb * xb
+                let m4 = s4[g] / nn - 4.0 * xb * s3[g] / nn + 6.0 * xb * xb * s2[g] / nn - 3.0 * xb * xb * xb * xb
+                let g1 = m3 / (m2 * bfs_sqrt(m2, sc))
+                let b2 = m4 / (m2 * m2)
+                // skewness z (D'Agostino)
+                let Y = g1 * bfs_sqrt((nn + 1.0) * (nn + 3.0) / (6.0 * (nn - 2.0)), sc)
+                let bb = 3.0 * (nn * nn + 27.0 * nn - 70.0) * (nn + 1.0) * (nn + 3.0) / ((nn - 2.0) * (nn + 5.0) * (nn + 7.0) * (nn + 9.0))
+                let W2 = 0.0 - 1.0 + bfs_sqrt(2.0 * (bb - 1.0), sc)
+                let delta = 1.0 / bfs_sqrt(0.5 * ln(W2), sc)
+                let alpha = bfs_sqrt(2.0 / (W2 - 1.0), sc)
+                let Ya = Y / alpha
+                let Zs = delta * ln(Ya + bfs_sqrt(Ya * Ya + 1.0, sc))
+                // kurtosis z (Anscombe-Glynn)
+                let E = 3.0 * (nn - 1.0) / (nn + 1.0)
+                let vark = 24.0 * nn * (nn - 2.0) * (nn - 3.0) / ((nn + 1.0) * (nn + 1.0) * (nn + 3.0) * (nn + 5.0))
+                let Xk = (b2 - E) / bfs_sqrt(vark, sc)
+                let b1 = (6.0 * (nn * nn - 5.0 * nn + 2.0) / ((nn + 7.0) * (nn + 9.0))) * bfs_sqrt(6.0 * (nn + 3.0) * (nn + 5.0) / (nn * (nn - 2.0) * (nn - 3.0)), sc)
+                let A = 6.0 + (8.0 / b1) * (2.0 / b1 + bfs_sqrt(1.0 + 4.0 / (b1 * b1), sc))
+                let base = (1.0 - 2.0 / A) / (1.0 + Xk * bfs_sqrt(2.0 / (A - 4.0), sc))
+                var cbrt = 0.0
+                if base > 0.0 { cbrt = exp(ln(base) / 3.0) } else { if base < 0.0 { cbrt = 0.0 - exp(ln(0.0 - base) / 3.0) } }
+                let Zk = ((1.0 - 2.0 / (9.0 * A)) - cbrt) / bfs_sqrt(2.0 / (9.0 * A), sc)
+                let K2 = Zs * Zs + Zk * Zk
+                if mode == 0 { res[g] = K2 }
+                else { if mode == 1 { res[g] = chi2_sf(K2, 2.0) }
+                else { if mode == 2 { res[g] = Zs } else { res[g] = Zk } } }
+            }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    heap_free(sc as *mut i8)
+    out
+}
+/// Per-group D'AGOSTINO-PEARSON K² normality statistic, broadcast. NATIVE + lean_single.
+pub fn bf_normaltest_stat_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_normaltest(src, key_col, val_col, 0) }
+/// Per-group NORMALITY TEST P-VALUE (χ²_sf(K²,2)), broadcast. Uses stats::chi_square. NATIVE + lean_single.
+pub fn bf_normaltest_pvalue_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_normaltest(src, key_col, val_col, 1) }
+/// Per-group SKEWNESS Z-SCORE (D'Agostino), broadcast. NATIVE + lean_single.
+pub fn bf_skew_zscore_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_normaltest(src, key_col, val_col, 2) }
+/// Per-group KURTOSIS Z-SCORE (Anscombe-Glynn), broadcast. NATIVE + lean_single.
+pub fn bf_kurt_zscore_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_normaltest(src, key_col, val_col, 3) }
