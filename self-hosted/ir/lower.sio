@@ -3036,9 +3036,14 @@ fn lowerer_lower_opt_expr_mut(
     lo: &! Lowerer,
     opt: &Option<Box<Expr>>
 ) -> i64 with Mut, Panic, Div, Alloc, IO {
-    let pair = (*lo).lower_opt_expr_ref(opt)
-    (*lo) = pair.0
-    pair.1
+    match *opt {
+        Some(e) => lowerer_lower_expr_mut(lo, &(*e)),
+        None => {
+            let pair = (*lo).emit_unit()
+            (*lo) = pair.0
+            pair.1
+        }
+    }
 }
 
 fn lowerer_lower_binary_expr_mut(
@@ -3135,6 +3140,21 @@ fn lowerer_lower_binary_expr_mut(
     }
     lowerer_emit_mut(lo, ir_binop_typed(dst, lhs, e.bin_op, rhs, lhs_expr_is_float, rhs_expr_is_float))
     dst
+}
+
+// Keep binary lowering on a single mutable Lowerer path. `Lowerer` has large
+// inline metadata tables, so a by-value ExprBinary dispatch can exhaust the
+// raw self-hosted compiler's native stack even for `1 != 0`.
+fn lowerer_lower_expr_mut(
+    lo: &! Lowerer,
+    e: &Expr
+) -> i64 with Mut, Panic, Div, Alloc, IO {
+    if (*e).kind == ExprKind::ExprBinary {
+        return lowerer_lower_binary_expr_mut(lo, e)
+    }
+    let pair = (*lo).lower_expr_ref(e)
+    (*lo) = pair.0
+    pair.1
 }
 
 fn lowerer_lower_fn_params_mut(
@@ -8380,7 +8400,8 @@ impl Lowerer {
                         let expr_opt_ref = &stmt_ref.expr
                         match *expr_opt_ref {
                             Some(expr_box) => {
-                                lo.lower_expr_ref(&(*expr_box))
+                                let expr_reg = lowerer_lower_expr_mut(&! lo, &(*expr_box))
+                                (lo, expr_reg)
                             }
                             _ => {
                                 lo.emit_unit()
@@ -8563,10 +8584,9 @@ impl Lowerer {
             }
             _ => {}
         }
-        let pair = lhs_lo.lower_opt_expr_ref(&s.expr)
-        var lo = pair.0
+        let reg = lowerer_lower_opt_expr_mut(&! lhs_lo, &s.expr)
+        var lo = lhs_lo
         lo.allow_direct_capturing_closure_literal = false
-        let reg = pair.1
         var fixed_array_len = lower_opt_type_fixed_array_len(&s.ty)
         var fixed_array_word_scalar = lower_opt_type_fixed_array_word_scalar(&s.ty)
         var rhs_array_elem_is_float = false
@@ -9030,10 +9050,9 @@ impl Lowerer {
         while true {
             match *current {
                 Some(list) => {
-                    let pair_head = lo.lower_expr_ref(&(*list).head)
-                    lo = pair_head.0
+                    let head_reg = lowerer_lower_expr_mut(&! lo, &(*list).head)
                     if reg_count < 64 {
-                        regs[reg_count as usize] = pair_head.1
+                        regs[reg_count as usize] = head_reg
                         reg_count = reg_count + 1
                     } else {
                         break
