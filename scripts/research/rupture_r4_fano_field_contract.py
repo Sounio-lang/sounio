@@ -3,13 +3,14 @@
 
 R3 closed the *neighbourhood of one line* (jet + path classes).
 R4 certifies the *field* of squares: 7 Fano lines, pairwise incidence 1,
-cross-line non-associativity, and a two-line mixing jet that cannot be
-cancelled by a single-line τ (system obstruction).
+cross-line non-associativity, two-line mixing jet (system residual), and a
+multi-line Φ_fp into the cusp plane with Path C/D path classes sourced from
+the *cross-line* associator (not an off-line unit of a single square).
 
 Does NOT claim D3. Does NOT claim clinical content.
 
-Exit 0 → R4_CONTRACT_OK and R4_VERDICT R4_PARTIAL
-(R4_GREEN reserved for a multi-line Φ into control space with path classes).
+Exit 0 → R4_CONTRACT_OK and R4_VERDICT R4_GREEN
+(when F1–F7 pass). R4_PARTIAL if only field census (F1–F6) passes.
 
 See docs/research/rupture-r4-fano-field_2026-07-25.md
 """
@@ -82,6 +83,69 @@ def unique_support(v: list[float], tol: float = 1e-9) -> Optional[tuple[int, flo
     if len(hits) != 1:
         return None
     return hits[0]
+
+
+def _cbrt(x: float) -> float:
+    if x >= 0.0:
+        return x ** (1.0 / 3.0)
+    return -((-x) ** (1.0 / 3.0))
+
+
+def _real_roots_cubic_depressed(p: float, q: float) -> list[float]:
+    disc = (q / 2.0) ** 2 + (p / 3.0) ** 3
+    roots: list[float] = []
+    if disc > 1e-14:
+        s = math.sqrt(disc)
+        roots.append(_cbrt(-q / 2.0 + s) + _cbrt(-q / 2.0 - s))
+    elif abs(disc) <= 1e-14:
+        u = _cbrt(-q / 2.0)
+        roots.extend([2.0 * u, -u])
+    else:
+        r = math.sqrt(-p / 3.0)
+        phi = math.acos(max(-1.0, min(1.0, (-q / 2.0) / (r ** 3))))
+        for k in range(3):
+            roots.append(2.0 * r * math.cos((phi + 2.0 * math.pi * k) / 3.0))
+    out: list[float] = []
+    for x in sorted(roots):
+        if not out or abs(x - out[-1]) > 1e-8:
+            out.append(x)
+    return out
+
+
+def cusp_minima(a: float, b: float) -> list[float]:
+    roots = _real_roots_cubic_depressed(a, b)
+    mins = [x for x in roots if 3.0 * x * x + a > 1e-9]
+    if mins:
+        return mins
+    if abs(b) < 1e-12 and a >= -1e-12:
+        return [0.0]
+    return []
+
+
+def V_cusp(x: float, a: float, b: float) -> float:
+    return 0.25 * x**4 + 0.5 * a * x * x + b * x
+
+
+def deepest_well(mins: list[float], a: float, b: float) -> float:
+    return min(mins, key=lambda x: V_cusp(x, a, b))
+
+
+A0 = -1.0  # unit of opposition depth (semantic; same as R3)
+
+
+def phi_fp(alpha: list[float], tau: float) -> tuple[float, float]:
+    """Same Φ_fp as R3; α may now be the *cross-line* field jet."""
+    nsq = sum(x * x for x in alpha)
+    a = A0 + nsq / 4.0
+    sup = unique_support(alpha)
+    signed = (sup[1] / 2.0) if sup is not None else 0.0
+    return a, tau + signed
+
+
+def alpha_cross(delta: float, a1: int, a2: int, s: int, z_unit: int) -> list[float]:
+    """α(δ) = [e_a1 + δ e_a2, e_s, e_z] — multi-line mixing jet."""
+    x = vadd(e(a1), vscale(e(a2), delta))
+    return associator(x, e(s), e(z_unit))
 
 
 def main() -> int:
@@ -248,12 +312,97 @@ def main() -> int:
     f6_ok = (set(L1) & set(L2)) == {s}
     print(f"F6_SHARED_TERM L1={L1} L2={L2} meet=e{s} -> {'PASS' if f6_ok else 'FAIL'}")
 
-    all_ok = f1_ok and f2_ok and f3_ok and f4_ok and f5_ok and f6_ok
-    if all_ok:
+    # --- (F7) multi-line Φ_fp path classes from the *cross-line* jet ---
+    # Source of α is L1⊕L2 mixing, not an off-line unit of a single square (R3).
+    # Path C: τ = -α_m/2 ⇒ b≡0 → neutral monostable as |δ| grows
+    # Path D: τ = 0 ⇒ b=α_m/2 → polar monostable; sign(δ) selects pole
+    f7_ok = False
+    if f5_ok and pure_n >= 1.5:
+        delta_grid = [0.0, 0.25, 0.5, 0.75, 1.0, 1.1, 1.25]
+        path_c = []
+        path_d = []
+        for delta in delta_grid:
+            alpha = alpha_cross(delta, a1, a2, s, z_unit)
+            sup = unique_support(alpha)
+            am = sup[1] if sup is not None else 0.0
+            # Path C — field contrariety (even jet only)
+            tau_c = -am / 2.0
+            a_c, b_c = phi_fp(alpha, tau_c)
+            mins_c = cusp_minima(a_c, b_c)
+            d_c = deepest_well(mins_c, a_c, b_c) if mins_c else float("nan")
+            path_c.append((delta, len(mins_c), d_c, abs(d_c) if mins_c else float("nan"), b_c))
+            print(
+                f"FIELD_PATH_C delta={delta:.2f} ||α||={norm(alpha):.3f} "
+                f"n={len(mins_c)} deepest={d_c:+.4f} b={b_c:.3e}"
+                if mins_c
+                else f"FIELD_PATH_C delta={delta:.2f} n=0"
+            )
+            # Path D — field contradiction (odd jet)
+            a_d, b_d = phi_fp(alpha, 0.0)
+            mins_d = cusp_minima(a_d, b_d)
+            d_d = deepest_well(mins_d, a_d, b_d) if mins_d else float("nan")
+            path_d.append((delta, len(mins_d), d_d, abs(d_d) if mins_d else float("nan"), b_d))
+            print(
+                f"FIELD_PATH_D delta={delta:.2f} ||α||={norm(alpha):.3f} "
+                f"n={len(mins_d)} deepest={d_d:+.4f} b={b_d:+.3f}"
+                if mins_d
+                else f"FIELD_PATH_D delta={delta:.2f} n=0"
+            )
+
+        c_start_bi = path_c[0][1] == 2
+        c_b0 = all(abs(r[4]) < 1e-9 for r in path_c)
+        c_end_neutral = path_c[-1][1] == 1 and path_c[-1][3] < 0.25
+        c_mono_neutral = all((r[1] != 1) or (r[3] < 0.35) for r in path_c)
+        path_c_ok = c_start_bi and c_b0 and c_end_neutral and c_mono_neutral
+
+        d_hi = [r for r in path_d if r[0] >= 0.75]
+        d_pos_ok = all(r[1] == 1 and r[3] > 0.5 for r in d_hi)
+        alpha_neg = alpha_cross(-1.0, a1, a2, s, z_unit)
+        a_n, b_n = phi_fp(alpha_neg, 0.0)
+        mins_n = cusp_minima(a_n, b_n)
+        d_neg_ok = len(mins_n) == 1 and abs(mins_n[0]) > 0.5
+        d_flip = bool(d_hi and mins_n and d_hi[-1][2] * mins_n[0] < 0)
+        d_no_neutral = all((r[1] != 1) or (r[3] > 0.5) for r in path_d if r[0] != 0.0)
+        path_d_ok = d_pos_ok and d_neg_ok and d_flip and d_no_neutral
+
+        # Source discrimination: α at δ=1 equals pure cross (field), not L1-internal
+        alpha_1 = alpha_cross(1.0, a1, a2, s, z_unit)
+        source_is_cross = abs(norm(alpha_1) - pure_n) < 1e-6
+        l1_alpha = associator(vadd(e(a1), e(b1)), e(s), e(z_unit))
+        source_not_l1 = norm(l1_alpha) < 1e-9
+
+        f7_ok = path_c_ok and path_d_ok and source_is_cross and source_not_l1
+        print(
+            f"F7_PATH_C field_contrariety -> {'PASS' if path_c_ok else 'FAIL'} "
+            f"(start_bi={c_start_bi} b0={c_b0} end_neutral={c_end_neutral})"
+        )
+        print(
+            f"F7_PATH_D field_contradiction -> {'PASS' if path_d_ok else 'FAIL'} "
+            f"(polar+={d_pos_ok} polar-={d_neg_ok} flip={d_flip})"
+        )
+        print(
+            f"F7_SOURCE cross_jet={source_is_cross} not_L1_internal={source_not_l1} "
+            f"-> {'PASS' if source_is_cross and source_not_l1 else 'FAIL'}"
+        )
+        print(f"F7_MULTI_LINE_PHI_PATHS -> {'PASS' if f7_ok else 'FAIL'}")
+    else:
+        print("F7_MULTI_LINE_PHI_PATHS SKIP (F5 failed)")
+
+    partial_ok = f1_ok and f2_ok and f3_ok and f4_ok and f5_ok and f6_ok
+    green_ok = partial_ok and f7_ok
+
+    if green_ok:
+        print("R4_VERDICT R4_GREEN")
+        print(
+            "R4_NOTE field+Phi_fp Path_C/D from cross-line jet; "
+            "source=L1⊕L2_not_single_line_off; D3_identity_still_forbidden"
+        )
+        print("R4_CONTRACT_OK")
+        return 0
+    if partial_ok:
         print("R4_VERDICT R4_PARTIAL")
         print(
-            "R4_NOTE field=7_lines incidence=1 cross_assoc=2 mixing_jet_linear; "
-            "multi_line_Phi_path_classes_open; D3_forbidden"
+            "R4_NOTE field=7_lines census OK; multi_line_Phi_path_classes_failed; D3_forbidden"
         )
         print("R4_CONTRACT_OK")
         return 0

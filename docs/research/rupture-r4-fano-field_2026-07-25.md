@@ -1,17 +1,22 @@
 <!-- docs:meta
 topic_id: repo.docs.research.rupture-r4-fano-field-2026-07-25
-authority: repo_only
+authority: historical
 audience: researchers
-last_validated: 2026-07-25
-validated_by: grok
-source_of_truth: docs/research/rupture-r4-fano-field_2026-07-25.md
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.rupture-r4-fano-field-2026-07-25
 -->
 
-# R4 — multi-line Fano field obstruction (system-level)
+<!-- docs:status-note:start -->
+> Docs status: `historical`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
+
+# R4 — multi-line Fano field obstruction + multi-line Φ_fp
 
 **Date:** 2026-07-25  
 **Orthography:** EN-UK  
-**Status:** `R4_PARTIAL` (field census + mixing jet); multi-line Φ path classes open  
+**Status:** `R4_GREEN` (field census + multi-line path classes); D3 still forbidden  
 **Harness:** `scripts/research/rupture_r4_fano_field_contract.py`  
 **Parents:** `rupture-r3-fano-phi_2026-07-25.md` (R3_GREEN), `petitot-semantic-potential.md` §2–3,
 `rupture-abcd-claims_2026-07-24.md`
@@ -27,22 +32,23 @@ R3 closes the **neighbourhood of one Fano line** \(L_\star\):
 
 Petitot’s square in isolation is still the wrong level for the octonion model: the
 algebraic non-Booleanisability of 𝕆 is a property of the **field of squares**
-(seven quaternion subalgebras), not of one line. R4 certifies that field.
+(seven quaternion subalgebras), not of one line. R4 certifies that field **and**
+lifts Φ_fp so its path classes are sourced from the **cross-line** jet.
 
 ---
 
-## 2. Field facts (executed)
+## 2. Field facts F1–F6 (executed)
 
 | ID | Statement | Result |
 |---|---|---|
 | **F1** | Each of the 7 Fano lines is internally associative | PASS |
-| **F2** | Every pair of lines meets in **exactly one** unit (Fano incidence) | PASS (21 pairs) |
-| **F3** | Cross-line non-Fano triples on a worked pair have \(\|\mathrm{assoc}\|=2\) | PASS |
-| **F4** | Census on all \(\binom{7}{3}=35\) Im triples: 7 Fano (assoc 0) + 28 non-Fano (assoc 2) | PASS |
-| **F5** | Two-line mixing \(x=e_{a_1}+\delta e_{a_2}\) yields a **linear cross jet**; residual \(\|\alpha\|=2\) at \(\delta=1\); pure L1 perturbation of the same form gives \(\|\alpha\|=0\) | PASS |
+| **F2** | Every pair of lines meets in **exactly one** unit | PASS (21 pairs) |
+| **F3** | Cross-line non-Fano triples have \(\|\mathrm{assoc}\|=2\) | PASS |
+| **F4** | Census: 7 Fano (assoc 0) + 28 non-Fano (assoc 2) | PASS |
+| **F5** | Two-line mixing jet linear; L1-internal \(\|\alpha\|=0\), cross \(\|\alpha\|=2\) | PASS |
 | **F6** | Worked pair \(L_1=(1,2,3)\), \(L_2=(1,4,5)\) share \(e_1\) | PASS |
 
-### The system residual (load-bearing contrast)
+### System residual (load-bearing contrast)
 
 ```text
 F5_BASE_ON_L1          [e2,e1,e3] ||α|| = 0     (all on L1)
@@ -50,33 +56,49 @@ F5_L1_INTERNAL_PERTURB e2+e3 on L1   ||α|| = 0
 F5_RESIDUAL_CROSS_δ1   e2+e4 (L1⊕L2) ||α|| = 2
 ```
 
-Coupling a second square through the shared term produces an obstruction that
-**does not appear** under internal perturbation of a single square. That is the
-field-level rupture object.
-
 ---
 
-## 3. Relation to R3 Φ_fp
+## 3. F7 — multi-line Φ_fp path classes (R4_GREEN)
 
-| Object | Algebraic support | Cancel with single-line \(\tau\)? |
+**Source of α (not R3):**
+
+\[
+x(\delta)=e_{a_1}+\delta e_{a_2},\qquad
+\alpha(\delta)=[x(\delta),e_s,e_z]
+\]
+
+with \(a_1\in L_1\setminus\{s\}\), \(a_2\in L_2\setminus\{s\}\), \(s=L_1\cap L_2\),
+\(z\) on \(L_1\). When the base triple lies on \(L_1\), \(\alpha(\delta)=\delta\cdot
+[e_{a_2},e_s,e_z]\) — pure field term.
+
+**Same Φ_fp as R3** (unit \(A_0=-1\)):
+
+\[
+a=A_0+\frac{\|\alpha\|^2}{4},\qquad
+b=\tau+\frac{\alpha_m}{2}.
+\]
+
+| Path | Dial | Outcome under increasing \(\lvert\delta\rvert\) |
 |---|---|---|
-| R3 neighbourhood jet | one line + off-line unit | even/odd split; Path C cancels *odd control*, not \(\alpha\) itself |
-| R4 cross jet | two lines through shared unit | residual \(\|\alpha\|\) stays \(O(1)\); not an L1-only phenomenon |
+| **C (field contrariety)** | \(\tau=-\alpha_m/2\) \(\Rightarrow b\equiv 0\) | monostable **neutral** \(x=0\) |
+| **D (field contradiction)** | \(\tau=0\) \(\Rightarrow b=\alpha_m/2\) | monostable **polar**; \(\mathrm{sign}(\delta)\) selects pole |
 
-R3’s \(\tau\) dials the **cusp control plane** for one square’s ambient shadow.
-R4’s cross associator is present **before** any control map: it is the reason a
-system of squares cannot be Booleanised by treating each square in isolation.
+**Source check:** \(\|\alpha(1)\|=\|\mathrm{pure\ cross}\|\); L1-internal
+perturbation of the same form still gives \(\|\alpha\|=0\).
+
+So the path classes are **not** a re-run of single-line off-unit coupling: they
+are driven by coupling a second square through the shared term.
 
 ---
 
-## 4. Verdict ladder
+## 4. Verdict
 
 | Verdict | Meaning |
 |---|---|
-| `R4_PARTIAL` | F1–F6 field census + mixing jet — **current** |
-| `R4_GREEN` | multi-line Φ into control space with path-class separation (open) |
+| `R4_PARTIAL` | F1–F6 only |
+| `R4_GREEN` | F1–F7 — **current** |
 
-**D3** (identity of Petitot potential with algebraic locus) remains **forbidden**.
+**D3** remains **forbidden** (no identity of Petitot potential with algebraic locus).
 
 ---
 
@@ -84,15 +106,15 @@ system of squares cannot be Booleanised by treating each square in isolation.
 
 ```bash
 python3 scripts/research/rupture_r4_fano_field_contract.py
-# expect: R4_VERDICT R4_PARTIAL, R4_CONTRACT_OK
+# expect: R4_VERDICT R4_GREEN, F7_MULTI_LINE_PHI_PATHS PASS
 
 bash scripts/ci/rupture_abcd_contracts_gate.sh
-# expect: RUPTURE_ABCD_CONTRACTS_OK (includes R3_GREEN + R4_PARTIAL)
+# expect: RUPTURE_ABCD_CONTRACTS_OK
 ```
 
 ---
 
 ## 6. AI disclosure
 
-Field contract under human direction (2026-07-25). No clinical claims.
+Field + multi-line Φ under human direction (2026-07-25). No clinical claims.
 GAIDeT-ICMJE 2025.
