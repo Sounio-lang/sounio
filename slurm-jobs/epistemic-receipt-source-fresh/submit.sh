@@ -91,8 +91,8 @@ cat >"$SBATCH" <<EOF
 #SBATCH -c $JOB_CPUS
 #SBATCH --mem=$JOB_MEM
 #SBATCH --time=$JOB_TIME
-#SBATCH -o $ORANGEFS_ROOT/$RUN_ID.slurmout
-#SBATCH -e $ORANGEFS_ROOT/$RUN_ID.slurmout
+#SBATCH -o /tmp/$RUN_ID-%j.slurmout
+#SBATCH -e /tmp/$RUN_ID-%j.slurmerr
 set -u -o pipefail
 
 ROOT=/tmp/$RUN_ID-\${SLURM_JOB_ID:-manual}
@@ -102,6 +102,8 @@ ARCHIVE=$REMOTE_ARCHIVE
 COMMIT_OBJECT=$REMOTE_COMMIT
 EXPECTED_COMMIT=$SOURCE_COMMIT
 EXPECTED_TREE=$SOURCE_TREE
+
+exec >"\$RESULT_DIR/runner.log" 2>&1
 
 fail() {
   echo "[epistemic-receipt-source-fresh-slurm] FAIL: \$*" >&2
