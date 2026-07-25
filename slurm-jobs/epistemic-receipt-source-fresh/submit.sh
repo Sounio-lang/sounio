@@ -44,7 +44,7 @@ Set WORKER_LOWER_TRACE=1 only for crash localization. It enables the existing
 module-frontend and IR-lowering traces inside the worker's raw ELF.
 
 WORKER_PROBE=source-fresh-gate runs the acceptance gate. WORKER_PROBE=block-ladder
-builds the same raw ELF and runs four generated worker-local programs to locate
+builds the same raw ELF and runs five generated worker-local programs to locate
 the first block shape that reproduces a lowering crash. The probe never changes
 the checked-out source tree and is not acceptance evidence.
 EOF
@@ -170,6 +170,15 @@ if [[ "\$WORKER_PROBE" == 'block-ladder' ]]; then
 fn main() with IO, Panic {
 }
 SIO
+  cat >"\$PROBE_ROOT/local_assert_helper.sio" <<'SIO'
+fn op_require_nonzero(tag: i64) -> i64 with Panic {
+    assert(tag != 0)
+    tag
+}
+
+fn main() with IO, Panic {
+}
+SIO
   cat >"\$PROBE_ROOT/import_empty.sio" <<'SIO'
 use epistemic::observation_provenance::*
 
@@ -207,6 +216,7 @@ SIO
   }
 
   run_probe empty_main "\$PROBE_ROOT/empty_main.sio"
+  run_probe local_assert_helper "\$PROBE_ROOT/local_assert_helper.sio"
   run_probe import_empty "\$PROBE_ROOT/import_empty.sio"
   run_probe import_literal_let "\$PROBE_ROOT/import_literal_let.sio"
   run_probe import_first_call "\$PROBE_ROOT/import_first_call.sio"
