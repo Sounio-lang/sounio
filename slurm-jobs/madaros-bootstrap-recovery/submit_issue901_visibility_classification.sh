@@ -34,7 +34,7 @@ safe_component() {
 }
 
 safe_orangefs_path() {
-  [[ "$1" =~ ^/orangefs/[A-Za-z0-9._/-]+$ ]]
+  [[ "$1" =~ ^/orangefs/[A-Za-z0-9._/-]+$ ]] && [[ "/$1/" != *'/../'* ]]
 }
 
 case "$COMPILER_KIND" in
