@@ -36,6 +36,7 @@ GUM / effects discipline, where novelty can grow without paper-first pressure.
 | **2** | Non-unitarity at Z pole: deficit(s), peak σ with `NonUnitary`, deficit vs √s **JSON** | Effect-typed unstable intermediate; machine-readable curve |
 | **3** | EW tension ladder via typed **`EpistemicTension`** | Tension is a passable object (`tension_improves`), not print keys only |
 | **4** | Unstable spectrum Z **and** W (shared deficit axioms) | NonUnitary is not a Z one-off; `sounio.broken_structure.v1` receipts |
+| **5** | Dual broken-structure receipt QFT + 𝕊 ZD | Shared schema, **explicit non-isomorphism** |
 
 ---
 
@@ -56,6 +57,12 @@ bash scripts/ci/particle_exp123_gate.sh
 # expect: PARTICLE_EXP4_OK  (21 PASS)
 bash scripts/ci/particle_unstable_effect_gate.sh
 # expect: PARTICLE_EXP4_GATE_OK
+
+# EXP5 — dual broken-structure receipt QFT + sedenion ZD (N3)
+./bin/souc run examples/particle_physics/exp5_broken_structure_dual.sio
+# expect: PARTICLE_EXP5_OK
+bash scripts/ci/particle_broken_structure_dual_gate.sh
+# expect: PARTICLE_EXP5_GATE_OK
 ```
 
 **Engine note:**
@@ -160,19 +167,31 @@ open. No BSM claim.
 
 Receipts emit `schema: sounio.broken_structure.v1` (N3 dual-domain ready).
 
+## EXP5 — Dual broken-structure (N3)
+
+Schema: `sounio.broken_structure.v1` — see `docs/research/receipt_broken_structure.v1.md`.
+
+| Domain | Coordinate | Endpoint proximity |
+|---|---|---:|
+| `qft_unstable` (Z) | √s | 1.000 at pole |
+| `sedenion_zd` | path t → canonical ZD | 1.000 at t=1; ‖z*w‖²=0 |
+
+**Mandatory disclaimer:** NonUnitary deficit **is not** a sedenion zero-divisor.  
+Analogy level: receipt geometry + typed honesty only.
+
 ## Novelty (construction, not paper)
 
 1. **Runnable metrology budget** — who owns the variance.  
 2. **Compiler-enforced NonUnitary** + deficit JSON.  
 3. **Typed `EpistemicTension` ladder** (`tension_improves`).  
 4. **Shared deficit axioms on Z and W** — effect is spectrum-wide.  
-5. **Science-boundary allowlist** research → scientific-package-candidate.
+5. **Dual-domain receipt** QFT + 𝕊 with **non-isomorphism** gated.  
+6. **Science-boundary allowlist** research → scientific-package-candidate.
 
 ---
 
 ## Next construction (α programme)
 
-- **N3** dual broken-structure receipt QFT + 𝕊 (rupture ZD).  
 - **N4** Madaros run SEGV (compiler worktree).  
 - **N5** oracle audit.  
 - Do **not** prioritise fitting residual M_W pull to 0σ.
