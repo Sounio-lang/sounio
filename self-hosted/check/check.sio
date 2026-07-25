@@ -4237,6 +4237,10 @@ fn checker_bind_fn_params_inplace(c: *mut Checker, opt: Option<Box<ParamList> >)
     }
 }
 
+fn checker_preflight_trace_enabled() -> bool with IO, Mut, Panic, Div {
+    str_eq(read_env("SOUNIO_CHECK_PREFLIGHT_TRACE"), "1")
+}
+
 fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(fd) => {
@@ -4285,7 +4289,23 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             checker_push_const_scope_inplace(c)
             checker_bind_fn_params_inplace(c, (*fd).params)
             (*c).escape_provenance = 0
+            if checker_preflight_trace_enabled() {
+                print("check-preflight: body-begin name=")
+                print_name_value((*fd).name)
+                print(" span=")
+                print_int((*fd).span.start)
+                print("..")
+                print_int((*fd).span.end)
+                print("\n")
+            }
             let body_ty = checker_check_block_inplace(c, (*fd).body)
+            if checker_preflight_trace_enabled() {
+                print("check-preflight: body-end span=")
+                print_int((*fd).span.start)
+                print("..")
+                print_int((*fd).span.end)
+                print("\n")
+            }
             if sig_id >= 0 {
                 let sig2 = fn_sig_table_get((*c).fn_sigs, sig_id)
                 if !checker_fn_body_return_compatible_inplace(c, body_ty, sig2.return_type) {
@@ -4662,6 +4682,15 @@ fn checker_check_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, P
     } else if e.kind == ExprKind::ExprContinue {
         result = checker_check_continue_expr_inplace(c, e)
     } else {
+        if checker_preflight_trace_enabled() {
+            print("check-preflight: expr-fallback depth=")
+            print_int((*c).expr_depth)
+            print(" span=")
+            print_int(e.span.start)
+            print("..")
+            print_int(e.span.end)
+            print("\n")
+        }
         result = checker_check_expr_mut(c, e)
     }
     if (*c).expr_depth > 0 {
@@ -5030,50 +5059,97 @@ fn checker_check_opt_block_inplace(c: *mut Checker, opt: Option<Box<Block> >) ->
     }
 }
 
-// *mut ExprIf handler — FULL transcription of check_if_expr (16122), not a bridge: the
-// condition, then-block, AND else are all checked via the *mut spine so a nested enum
-// path-expr anywhere in an `if … else if …` chain reaches checker_check_path_expr_inplace
-// and dodges the by-value check_path_expr SRET crash. The non-recursive work (bool check,
-// condition narrowing, branch-type compat) is faithful to the by-value original.
+// *mut ExprIf handler. The parser represents `else if` as a boxed ExprIf in else_expr.
+// Walking that chain recursively kept one large Expr frame per branch, so diagnostic tables
+// with long chains could exhaust the default bootstrap stack before reaching a leaf call.
+// This keeps each condition/then check in source order, then reconstructs E007 comparisons
+// from the innermost branch outward, matching the recursive result and diagnostic order.
 fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
-    let cond_ty = checker_check_opt_expr_inplace(c, e.left)
-    // Condition must be bool (skip E006 when the condition already failed typechecking).
-    if !is_error_or_unknown(cond_ty) && !is_bool_type(cond_ty) {
-        let cond_is_cmp = match e.left {
-            Some(cond_box) => {
-                let cond_expr = *cond_box
-                cond_expr.bin_op == BinaryOp::OpEq || cond_expr.bin_op == BinaryOp::OpNe
-                    || cond_expr.bin_op == BinaryOp::OpLt || cond_expr.bin_op == BinaryOp::OpLe
-                    || cond_expr.bin_op == BinaryOp::OpGt || cond_expr.bin_op == BinaryOp::OpGe
+    var branch_types: [TypeEntry; 256] = [ty_error(); 256]
+    var branch_spans: [Span; 256] = [e.span; 256]
+    var branch_has_else: [bool; 256] = [false; 256]
+    var branch_count: i64 = 0
+    var current = e
+    var terminal_ty = ty_unit()
+    var done = false
+
+    while !done {
+        let cond_ty = checker_check_opt_expr_inplace(c, current.left)
+        if !is_error_or_unknown(cond_ty) && !is_bool_type(cond_ty) {
+            let cond_is_cmp = match current.left {
+                Some(cond_box) => {
+                    let cond_expr = *cond_box
+                    cond_expr.bin_op == BinaryOp::OpEq || cond_expr.bin_op == BinaryOp::OpNe
+                        || cond_expr.bin_op == BinaryOp::OpLt || cond_expr.bin_op == BinaryOp::OpLe
+                        || cond_expr.bin_op == BinaryOp::OpGt || cond_expr.bin_op == BinaryOp::OpGe
+                }
+                None => false
             }
-            None => false
-        }
-        if !cond_is_cmp {
-            checker_report_mismatch_inplace(c, e.span, 6, ty_bool(), cond_ty)
-        }
-    }
-    // Condition narrowing (mirrors check_if_expr: push a refinement guard for the then-branch)
-    let saved_cond_env = (*c).refine_cond_env
-    let cond_guard = if_cond_extract_pred(e.left)
-    if cond_guard.0 != 0 {
-        (*c).refine_cond_env = refine_static_env_push((*c).refine_cond_env, cond_guard.1)
-    }
-    let then_ty = checker_check_opt_block_inplace(c, e.block)
-    (*c).refine_cond_env = saved_cond_env
-    match e.else_expr {
-        Some(else_e) => {
-            let else_ty = checker_check_expr_inplace(c, *else_e)
-            (*c).refine_cond_env = saved_cond_env
-            if !checker_types_compatible_inplace(c, then_ty, else_ty) {
-                checker_report_mismatch_inplace(c, e.span, 7, then_ty, else_ty)
+            if !cond_is_cmp {
+                checker_report_mismatch_inplace(c, current.span, 6, ty_bool(), cond_ty)
             }
-            then_ty
         }
-        None => {
-            (*c).refine_cond_env = saved_cond_env
-            ty_unit()
+
+        let saved_cond_env = (*c).refine_cond_env
+        let cond_guard = if_cond_extract_pred(current.left)
+        if cond_guard.0 != 0 {
+            (*c).refine_cond_env = refine_static_env_push((*c).refine_cond_env, cond_guard.1)
+        }
+        let then_ty = checker_check_opt_block_inplace(c, current.block)
+        (*c).refine_cond_env = saved_cond_env
+
+        branch_types[branch_count as usize] = then_ty
+        branch_spans[branch_count as usize] = current.span
+        match current.else_expr {
+            Some(else_e) => {
+                branch_has_else[branch_count as usize] = true
+                let else_expr = *else_e
+                branch_count = branch_count + 1
+                if else_expr.kind == ExprKind::ExprIf {
+                    // Match checker_check_expr_inplace: each nested else-if has its
+                    // own expression-depth frame, and is rejected before entering
+                    // when the parent has already reached the configured limit.
+                    if (*c).expr_depth >= MAX_EXPR_DEPTH {
+                        checker_report_error_at_inplace(c, else_expr.span, 61, (*c).expr_depth, MAX_EXPR_DEPTH, 0)
+                        terminal_ty = ty_error()
+                        done = true
+                    } else {
+                        (*c).expr_depth = (*c).expr_depth + 1
+                        current = else_expr
+                    }
+                } else {
+                    terminal_ty = checker_check_expr_inplace(c, else_expr)
+                    done = true
+                }
+            }
+            None => {
+                branch_count = branch_count + 1
+                terminal_ty = ty_unit()
+                done = true
+            }
         }
     }
+
+    var result_ty = terminal_ty
+    var i = branch_count - 1
+    while i >= 0 {
+        if branch_has_else[i as usize] {
+            let then_ty = branch_types[i as usize]
+            if !checker_types_compatible_inplace(c, then_ty, result_ty) {
+                checker_report_mismatch_inplace(c, branch_spans[i as usize], 7, then_ty, result_ty)
+            }
+            result_ty = then_ty
+        } else {
+            result_ty = ty_unit()
+        }
+        // The recursive form returned from one nested checker_check_expr_inplace
+        // frame before comparing the parent branch. Preserve that virtual unwind.
+        if i > 0 && (*c).expr_depth > 0 {
+            (*c).expr_depth = (*c).expr_depth - 1
+        }
+        i = i - 1
+    }
+    result_ty
 }
 
 
@@ -6342,6 +6418,13 @@ fn checker_check_call_args_inplace(c: *mut Checker, args: ExprListHandle, params
         if implicit_borrow && (*c).suppress_linear_consume_depth > 0 {
             (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth - 1
         }
+        if checker_preflight_trace_enabled() && (*c).expr_depth >= 4 {
+            print("check-preflight: call-arg-expr-end depth=")
+            print_int((*c).expr_depth)
+            print(" span=")
+            print_int(call_span.start)
+            print("\n")
+        }
         var primitive_exact = false
         if arg_ty.kind == param_info.ty.kind {
             if arg_ty.kind == TypeKind::TyI64
@@ -6355,15 +6438,72 @@ fn checker_check_call_args_inplace(c: *mut Checker, args: ExprListHandle, params
         }
         let has_param_info = !name_is_empty(param_info.name) || param_info.ty.kind != TypeKind::TyError
         if has_param_info && !primitive_exact {
-            if !checker_call_arg_types_compatible_inplace(c, arg_expr, arg_ty, param_info.ty) {
+            if checker_preflight_trace_enabled() && (*c).expr_depth >= 4 {
+                print("check-preflight: call-arg-contract-begin depth=")
+                print_int((*c).expr_depth)
+                print(" span=")
+                print_int(call_span.start)
+                print("\n")
+            }
+            let types_compatible = checker_call_arg_types_compatible_inplace(c, arg_expr, arg_ty, param_info.ty)
+            if !types_compatible {
                 checker_report_mismatch_inplace(c, call_span, 9, param_info.ty, arg_ty)
+            }
+            if checker_preflight_trace_enabled() && (*c).expr_depth >= 4 {
+                print("check-preflight: call-arg-compatible-end depth=")
+                print_int((*c).expr_depth)
+                print(" span=")
+                print_int(call_span.start)
+                print("\n")
             }
             if arg_ty.kind != TypeKind::TyFn && param_info.ty.kind != TypeKind::TyFn {
                 checker_check_call_arg_borrow_boundary_inplace(c, arg_expr, param_info.ty, call_span)
+                if checker_preflight_trace_enabled() && (*c).expr_depth >= 4 {
+                    print("check-preflight: call-arg-borrow-end depth=")
+                    print_int((*c).expr_depth)
+                    print(" span=")
+                    print_int(call_span.start)
+                    print("\n")
+                }
                 checker_check_call_arg_refinement_boundary_inplace(c, arg_expr, arg_ty, param_info.ty, call_span)
+                if checker_preflight_trace_enabled() && (*c).expr_depth >= 4 {
+                    print("check-preflight: call-arg-refinement-end depth=")
+                    print_int((*c).expr_depth)
+                    print(" span=")
+                    print_int(call_span.start)
+                    print("\n")
+                }
                 checker_check_call_arg_knowledge_boundary_inplace(c, arg_ty, param_info.ty, call_span)
+                if checker_preflight_trace_enabled() && (*c).expr_depth >= 4 {
+                    print("check-preflight: call-arg-knowledge-end depth=")
+                    print_int((*c).expr_depth)
+                    print(" span=")
+                    print_int(call_span.start)
+                    print("\n")
+                }
                 checker_check_call_arg_unit_boundary_inplace(c, arg_ty, param_info.ty, call_span)
+                if checker_preflight_trace_enabled() && (*c).expr_depth >= 4 {
+                    print("check-preflight: call-arg-unit-end depth=")
+                    print_int((*c).expr_depth)
+                    print(" span=")
+                    print_int(call_span.start)
+                    print("\n")
+                }
                 checker_ontology_boundary_check_call_arg_contract_inplace(c, arg_ty, param_info.ty, call_span)
+                if checker_preflight_trace_enabled() && (*c).expr_depth >= 4 {
+                    print("check-preflight: call-arg-ontology-end depth=")
+                    print_int((*c).expr_depth)
+                    print(" span=")
+                    print_int(call_span.start)
+                    print("\n")
+                }
+            }
+            if checker_preflight_trace_enabled() && (*c).expr_depth >= 4 {
+                print("check-preflight: call-arg-contract-end depth=")
+                print_int((*c).expr_depth)
+                print(" span=")
+                print_int(call_span.start)
+                print("\n")
             }
         }
         if has_param_info &&
@@ -6642,6 +6782,15 @@ fn checker_enum_visible_inplace(c: *mut Checker, enum_idx: i64) -> bool with Mut
 }
 
 fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    if checker_preflight_trace_enabled() && (*c).expr_depth >= 4 {
+        print("check-preflight: call depth=")
+        print_int((*c).expr_depth)
+        print(" span=")
+        print_int(e.span.start)
+        print("..")
+        print_int(e.span.end)
+        print("\n")
+    }
     if checker_expr_is_gpu_launch_invocation_call(e) {
         match e.left {
             Some(desc) => {
@@ -6730,7 +6879,21 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         return checker_check_box_new_expr_inplace(c, e)
     }
     if call_expr_should_bridge_by_value(e) {
+        if checker_preflight_trace_enabled() && (*c).expr_depth >= 4 {
+            print("check-preflight: call-bridge-by-value depth=")
+            print_int((*c).expr_depth)
+            print(" span=")
+            print_int(e.span.start)
+            print("\n")
+        }
         return checker_check_expr_mut(c, e)
+    }
+    if checker_preflight_trace_enabled() && (*c).expr_depth >= 4 {
+        print("check-preflight: call-dispatch-inplace depth=")
+        print_int((*c).expr_depth)
+        print(" span=")
+        print_int(e.span.start)
+        print("\n")
     }
     // Preamble: multitest then hypothesis effects (shallow state, no sub-expr check).
     if multitest_effect_enabled((*c).current_effects, (*c).current_effect_count) {
@@ -6750,6 +6913,13 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
                 checker_store_from_value(c, pen)
             }
         }
+    }
+    if checker_preflight_trace_enabled() && (*c).expr_depth >= 4 {
+        print("check-preflight: call-preamble-end depth=")
+        print_int((*c).expr_depth)
+        print(" span=")
+        print_int(e.span.start)
+        print("\n")
     }
     var direct_sig_id: i64 = -1
     // Type::method associated-function path (e.g. E::of / Epistemic::measured).
@@ -6774,6 +6944,13 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         None => {}
     }
     if direct_sig_id >= 0 {
+        if checker_preflight_trace_enabled() && (*c).expr_depth >= 4 {
+            print("check-preflight: direct-found depth=")
+            print_int((*c).expr_depth)
+            print(" span=")
+            print_int(e.span.start)
+            print("\n")
+        }
         if (*c).enforce_visibility && !checker_fn_sig_visible_inplace(c, direct_sig_id) {
             checker_report_error_at_inplace(c, e.span, 175, 0, 0, 0)
         }
@@ -6797,6 +6974,13 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             }
             None => {}
         }
+        if checker_preflight_trace_enabled() && (*c).expr_depth >= 4 {
+            print("check-preflight: direct-args-begin depth=")
+            print_int((*c).expr_depth)
+            print(" span=")
+            print_int(e.span.start)
+            print("\n")
+        }
         checker_check_call_args_inplace(
             c,
             expr_list_handle(e.args),
@@ -6804,8 +6988,29 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             direct_sig.param_count,
             e.span,
         )
+        if checker_preflight_trace_enabled() && (*c).expr_depth >= 4 {
+            print("check-preflight: direct-args-end depth=")
+            print_int((*c).expr_depth)
+            print(" span=")
+            print_int(e.span.start)
+            print("\n")
+        }
         checker_check_callee_effects_inplace(c, e.span, direct_sig.effects, direct_sig.effect_count)
+        if checker_preflight_trace_enabled() && (*c).expr_depth >= 4 {
+            print("check-preflight: direct-effects-end depth=")
+            print_int((*c).expr_depth)
+            print(" span=")
+            print_int(e.span.start)
+            print("\n")
+        }
         checker_release_call_arg_borrows_inplace(c, e.args, effective_params, call_start_borrows)
+        if checker_preflight_trace_enabled() && (*c).expr_depth >= 4 {
+            print("check-preflight: direct-release-end depth=")
+            print_int((*c).expr_depth)
+            print(" span=")
+            print_int(e.span.start)
+            print("\n")
+        }
         return effective_return_type
     }
     // Callee via the *mut spine, matched locally so the call path does not pass
@@ -6915,8 +7120,27 @@ fn checker_check_callee_effects_inplace(c: *mut Checker, span: Span, callee_effe
         return
     }
     let missing_pair = find_missing_effects(callee_effects, callee_effect_count, (*c).current_effects, (*c).current_effect_count)
-    let t = (*c).report_effect_error(span, missing_pair.0, missing_pair.1)
-    checker_store_from_value(c, t)
+    checker_report_effect_error_inplace(c, span, missing_pair.0, missing_pair.1)
+}
+
+fn checker_report_effect_error_inplace(c: *mut Checker, span: Span, missing: [i64; 8], missing_count: i64) with Mut, IO, Panic, Div {
+    (*c).error_count = (*c).error_count + 1
+    (*c).had_error = true
+    print("error[E035]")
+    if span.start > 0 || span.end > 0 {
+        print(" at ")
+        print_int(span.start)
+        print("..")
+        print_int(span.end)
+    }
+    print(": effect not declared in function signature (missing: ")
+    var i: i64 = 0
+    while i < missing_count {
+        if i > 0 { print(", ") }
+        print_effect_name(missing[i as usize])
+        i = i + 1
+    }
+    print(")\n")
 }
 
     fn checker_release_call_arg_borrows_inplace(c: *mut Checker, args: Option<Box<ExprList> >, params: Option<Box<FnParamList> >, call_start_borrows: BorrowEnv) with Mut, Panic, Div, Alloc, IO {
@@ -7135,8 +7359,7 @@ fn checker_check_call_arg_refinement_boundary_inplace(c: *mut Checker, arg_expr:
             // Build conjunction and discharge with one call
             if axiom_count > 0 {
                 if axiom_overflow {
-                    let t = (*c).report_warning_at(call_span, 42, 0, 0, 0)
-                    checker_store_from_value(c, t)
+                    checker_report_warning_at_mut(c, call_span, 42, 0, 0, 0)
                 }
                 var conjoined = axiom_preds[0]
                 var ci: i64 = 1
@@ -7161,8 +7384,7 @@ fn checker_check_call_arg_refinement_boundary_inplace(c: *mut Checker, arg_expr:
     // To suppress: #[allow(W040)] on the call site (not yet implemented).
     // To force proof: annotate the argument with an explicit refinement type.
     (*c).refine_runtime_checked = (*c).refine_runtime_checked + 1
-    let t = (*c).report_warning_at(call_span, 40, 0, 0, 0)
-    checker_store_from_value(c, t)
+    checker_report_warning_at_mut(c, call_span, 40, 0, 0, 0)
 }
 
 fn checker_check_call_arg_knowledge_boundary_inplace(c: *mut Checker, arg_ty: TypeEntry, param_ty: TypeEntry, call_span: Span) with Mut, Panic, Div, Alloc, IO {
