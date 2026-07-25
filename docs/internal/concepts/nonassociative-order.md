@@ -60,6 +60,9 @@ OrderedTransformationPathI64
 != AggregationBoundaryI64
 != BracketingDesignI64
 != AlgebraicAssociatorProbeI64
+!= BasisTripleAssociatorProbeI64
+!= BasisTripleAssociatorAbstentionI64
+!= RefinedStateRepresentationContestPlanI64
 != ParenthesizationSensitivityI64
 != clinical authority
 ```
@@ -70,6 +73,34 @@ declared aggregation boundary, two distinct predeclared groupings, a matched
 candidate-model contest, and a declared synthetic discriminating feature. The
 library records those categories with private constructors; it does not make an
 algebraic, physical, psychiatric, causal, or clinical conclusion.
+
+`BasisTripleAssociatorProbeI64` is a separate, explicitly mathematical bridge:
+it delegates to `stdlib/algebra/associator_field.sio`, the canonical octonion
+basis carrier, and requires a nonzero norm before recording the selected basis
+tags. `tests/run-pass/associator_field_octonion.sio` fixes the two controls used
+here: Fano triple `(1,2,3)` has `norm_sq = 0`, while non-Fano triple `(1,2,4)`
+has `norm_sq = 4`. The receipt may establish a nonzero result for that declared
+carrier only. It does not bind the carrier to a biological process, an empirical
+representation, a psychiatric mechanism, or the parenthesization-sensitive
+model contest.
+
+`BasisTripleAssociatorAbstentionI64` preserves the complementary zero result
+for one selected basis triple. That zero does not certify that a wider carrier,
+an empirical system, or a representation contest is associative; it only
+refuses to fabricate a nonzero basis-triple probe where the declared arithmetic
+returned zero.
+
+`RefinedStateRepresentationContestPlanI64` is a stronger research-plan
+boundary, not an empirical result. It is constructible only from a prior
+`StateRefinementRequestI64` and a bracketing design with the same declared
+source system and target feature. It carries distinct tags for a refined
+ordered-state baseline, a capacity-matched associative control, a
+bracket-sensitive candidate, and declared capacity/held-out-evaluation plans.
+It also requires plans for a triple-composition probe, an associative-projection
+control, and a bracket-null control. Those tags preserve what a future
+preregistration must compare and audit; they do not say that capacity was
+matched, external validation occurred, the associator was activated, a model
+was fit, or any model won.
 
 `PipelineOrderSensitivityI64` records the narrower collision in which two
 declared transformations produce different synthetic outputs in opposite
@@ -84,18 +115,18 @@ Semantic-Lane-ID: EPISTEMIC-PARENTHESIZATION-RECEIPTS-V0-20260721
 Owner: Codex
 Concept-IDs: SOUNIO-NONASSOCIATIVE-ORDER; SOUNIO-ORDERED-PATH-PROVENANCE; SOUNIO-SCIENCE-RESEARCH-BOUNDARY
 Intent-Preserved: preserve an operational distinction between sequence order, declared grouping boundaries, algebraic probes, and research conclusions
-Transformation: add private-constructor nominal receipts that require a declared aggregation boundary and contest before a synthetic parenthesization-sensitivity receipt is constructible
-Types-Changed: added OrderedTransformationPathI64, PipelineOrderSensitivityI64, AggregationBoundaryI64, BracketingDesignI64, AlgebraicAssociatorProbeI64, AssociativityContestI64, BracketDiscriminatingFeatureI64, ParenthesizationSensitivityI64, and ParenthesizationAbstentionI64
-Effects-Changed: none
+Transformation: add private-constructor nominal receipts that require a declared aggregation boundary and contest before a synthetic parenthesization-sensitivity receipt is constructible, then bind a stronger preregistered representation-contest plan to a prior state-refinement obligation
+Types-Changed: added OrderedTransformationPathI64, PipelineOrderSensitivityI64, AggregationBoundaryI64, BracketingDesignI64, AlgebraicAssociatorProbeI64, BasisTripleAssociatorProbeI64, BasisTripleAssociatorAbstentionI64, AssociativityContestI64, RefinedStateRepresentationContestPlanI64, BracketDiscriminatingFeatureI64, ParenthesizationSensitivityI64, and ParenthesizationAbstentionI64
+Effects-Changed: the BasisTripleAssociatorProbeI64 and BasisTripleAssociatorAbstentionI64 constructors declare Mut, Div, Panic, and NonAssoc for the selected basis-associator computation; the RefinedStateRepresentationContestPlanI64 constructor declares Panic for cross-receipt and candidate-distinctness refusal
 IR-Changed: none
-Claims-Introduced: import callers cannot silently substitute an ordered path, a pipeline-order collision, an aggregation boundary, or an algebraic probe for a parenthesization-sensitivity receipt
+Claims-Introduced: import callers cannot silently substitute an ordered path, a pipeline-order collision, an aggregation boundary, a nominal algebraic probe, a nonzero basis-triple associator probe, a zero basis-triple abstention, or a preregistered refined-state contest plan for a parenthesization-sensitivity receipt
 Claims-Forbidden: physical nonassociativity, biological or psychiatric mechanism, empirical model fit, causal effect, treatment effect, clinical utility, or clinical authority
 Assumptions: supplied tags describe a synthetic fixture or declared protocol mapping; they do not validate that mapping
-Write-Set: stdlib/epistemic/parenthesization_receipts.sio; tests/run-pass/epistemic_parenthesization_receipts_import_smoke.sio; tests/compile-fail/epistemic_*parenthesization*.sio; docs/internal/concepts/nonassociative-order.md; docs/internal/concepts/bindings.tsv
-Read-Set: stdlib/epistemic/observation_provenance.sio; docs/internal/concepts/ordered-path-provenance.md; docs/research/psychiatric_nonassociativity_representation_contract_2026-07-21.md
-Positive-Witness: imported synthetic receipt smoke carries history source identity through ordered path, boundary, design, probe, contest, feature, sensitivity, and abstention, while separately checking each shared contest component
-Negative-Witness: ordered path != aggregation boundary; pipeline-order sensitivity != parenthesization sensitivity; aggregation boundary != bracketing design; algebraic probe != parenthesization sensitivity; contest != discriminating feature; imported callers cannot fabricate sensitivity; sensitivity != clinical authority
-Acceptance-Gate: bin/souc check stdlib/epistemic/parenthesization_receipts.sio; scripts/run_sio_test_suite.sh --test-list /tmp/sounio-parenthesization-receipts-20260721.list --jobs 1 --verbose
+Write-Set: stdlib/epistemic/parenthesization_receipts.sio; stdlib/epistemic/state_aliasing_receipts.sio; tests/run-pass/epistemic_parenthesization_receipts_import_smoke.sio; tests/run-pass/epistemic_state_aliasing_receipts_import_smoke.sio; tests/compile-fail/epistemic_*parenthesization*.sio; tests/compile-fail/epistemic_exact_associator_probe_cannot_replace_parenthesization_sensitivity.sio; tests/compile-fail/epistemic_basis_associator_abstention_cannot_replace_parenthesization_sensitivity.sio; tests/compile-fail/epistemic_refined_state_contest_plan_cannot_replace_parenthesization_sensitivity.sio; tests/compile-fail/epistemic_refined_state_contest_plan_direct_construction.sio; tests/fixtures/epistemic/basis_triple_associator_probe_rejects_fano.sio; tests/fixtures/epistemic/basis_triple_associator_abstention_rejects_nonfano.sio; scripts/ci/epistemic_receipt_source_fresh_gate.sh; docs/internal/concepts/nonassociative-order.md
+Read-Set: stdlib/algebra/associator_field.sio; stdlib/algebra/octonion.sio; tests/run-pass/associator_field_octonion.sio; stdlib/epistemic/observation_provenance.sio; stdlib/epistemic/state_aliasing_receipts.sio; docs/internal/concepts/ordered-path-provenance.md; docs/research/psychiatric_informative_observation_contract_2026-07-21.md
+Positive-Witness: the declared carrier control binds `(1,2,3)` to norm_sq=0 and `(1,2,4)` to norm_sq=4; imported synthetic receipt smoke carries history source identity through ordered path, boundary, design, exact probe, zero abstention, a source/target-matched state-refinement obligation, distinct ordered/associative/bracket-sensitive plan tags, and declared triple-composition, associative-projection, and bracket-null control plans before contest, feature, sensitivity, and abstention
+Negative-Witness: ordered path != aggregation boundary; pipeline-order sensitivity != parenthesization sensitivity; aggregation boundary != bracketing design; nominal algebraic probe != parenthesization sensitivity; nonzero basis-triple associator probe != parenthesization sensitivity; zero basis-triple abstention != parenthesization sensitivity; refined-state contest plan != parenthesization sensitivity; imported callers cannot fabricate a refined-state contest plan or sensitivity; sensitivity != clinical authority
+Acceptance-Gate: bin/souc check stdlib/epistemic/parenthesization_receipts.sio; bin/souc run tests/run-pass/epistemic_parenthesization_receipts_import_smoke.sio; scripts/run_sio_test_suite.sh --filter-prefix epistemic_ --jobs 1 --verbose; scripts/ci/epistemic_receipt_source_fresh_gate.sh
 Integration-Target: #901-gated source-fresh imported psychiatric collision suite
 Authoritative-Only-If: these receipts prove only the selected nominal program boundaries; no semantic or empirical authority follows from a default-wrapper run
 ```
@@ -105,13 +136,13 @@ Authoritative-Only-If: these receipts prove only the selected nominal program bo
 ```text
 Semantic-Outcome: the language now preserves the difference between ordered processing, pipeline-order sensitivity, and a separately declared parenthesization-sensitive research scaffold
 Concept-Status-Before: ordered-path provenance and nonassociative algebra were independently represented, with no generic nominal bridge requiring a boundary and contest before sensitivity
-Concept-Status-After: imported callers can construct the synthetic sensitivity receipt only after the declared typed chain, while incompatible receipts refuse substitution
-Distinctions-Added: ordered path != pipeline-order sensitivity; pipeline-order sensitivity != parenthesization sensitivity; ordered path != aggregation boundary; aggregation boundary != bracketing design; algebraic probe != sensitivity receipt; sensitivity receipt != clinical authority
+Concept-Status-After: imported callers can construct the synthetic sensitivity receipt only after the declared typed chain, while a separate source/target-matched refined-state representation contest plan preserves the baseline obligations without becoming a result
+Distinctions-Added: ordered path != pipeline-order sensitivity; pipeline-order sensitivity != parenthesization sensitivity; ordered path != aggregation boundary; aggregation boundary != bracketing design; nominal algebraic probe != nonzero basis-triple probe != zero basis-triple abstention != refined-state contest plan != sensitivity receipt; sensitivity receipt != clinical authority
 Distinctions-Preserved: ordinary function composition remains associative; declared nonassociative algebra remains separate from a protocol boundary; observation provenance remains non-clinical
 Distinctions-Erased: none
-Evidence-Run: library check passed; one imported positive smoke and four compile-fail substitutions passed under the default Madaros wrapper
+Evidence-Run: basis `(1,2,4)` is checked against norm_sq=4 and basis `(1,2,3)` against norm_sq=0; imported smokes carry both source identity and the refined-state contest plan; the source-fresh gate also requires raw runtime refusal when a nonzero probe is called on `(1,2,3)` or a zero abstention is called on `(1,2,4)`; focused compile-fail substitutions and current-source gate remain required
 Fallback-Path: default wrapper reported target-resolution fallback=unresolved_default_x86_64_linux; results are nominal API evidence only, not source-fresh imported-native proof
-Legacy-Kept: associator field, ordered-path compiler IR, observation-provenance receipts, and existing research contracts remain unchanged
+Legacy-Kept: associator field, ordered-path compiler IR, observation-provenance receipts, and existing research contracts remain unchanged; state-aliasing receipts retain their prior semantics and expose only their existing source-system tag
 Conflicting-Lanes: #901 retains ownership of source-fresh imported-native acceptance and target-resolution repair
 Next-Semantic-Interface: an import-bearing synthetic collision may proceed only after #901 supplies a current-source no-target-fallback acceptance gate
 ```
@@ -197,5 +228,5 @@ Evidence-Run: focused library check, imported positive smoke, compile-fail subst
 Fallback-Path: default wrapper may execute the imports with source=fallback; it is retained only as qualified API evidence, not current-source runtime evidence
 Legacy-Kept: observation provenance and parenthesization receipts remain unchanged; no latent-state, causal, or clinical type is introduced
 Conflicting-Lanes: #901 owns current-source imported-native repair and generated governance metadata; this lane modifies neither compiler source nor generated governance files
-Next-Semantic-Interface: after source-fresh receipt, use an empirical preregistration to test whether a declared ordered-state model already removes the collision before proposing a bracket-sensitive carrier
+Next-Semantic-Interface: after source-fresh receipt, preregister an empirical representation contest in which bag, refined ordered-state, capacity-matched associative, and bracket-sensitive models share observation provenance and external validation; require a triple-composition probe, associative-projection control, and bracket-null control so a dormant or associatively collapsed carrier cannot be promoted; a bracket-sensitive carrier remains only a candidate if it beats the refined ordered-state and associative controls
 ```

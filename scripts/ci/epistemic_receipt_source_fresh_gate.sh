@@ -13,6 +13,8 @@ KEEP_WORK="${SOUNIO_EPISTEMIC_RECEIPT_SOURCE_FRESH_KEEP:-0}"
 OBSERVATION_SMOKE="$ROOT_DIR/tests/run-pass/epistemic_observation_provenance_import_smoke.sio"
 PARENTHESIZATION_SMOKE="$ROOT_DIR/tests/run-pass/epistemic_parenthesization_receipts_import_smoke.sio"
 STATE_ALIASING_SMOKE="$ROOT_DIR/tests/run-pass/epistemic_state_aliasing_receipts_import_smoke.sio"
+BASIS_PROBE_REJECTION="$ROOT_DIR/tests/fixtures/epistemic/basis_triple_associator_probe_rejects_fano.sio"
+BASIS_ABSTENTION_REJECTION="$ROOT_DIR/tests/fixtures/epistemic/basis_triple_associator_abstention_rejects_nonfano.sio"
 
 fail() {
   echo "[epistemic-receipt-source-fresh] FAIL: $*" >&2
@@ -74,6 +76,38 @@ run_direct_smoke() {
   }
 }
 
+run_direct_assertion_refusal() {
+  local label="$1"
+  local source="$2"
+  local marker="$3"
+  local log="$WORK/$label.run.log"
+  local cwd="$WORK/$label.run-cwd"
+  local rc
+
+  mkdir -p "$cwd"
+  set +e
+  (
+    cd "$cwd"
+    exec env \
+      -u MADAROS_RAW_BIN \
+      -u SOUNIO_MADAROS_BIN \
+      SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib" \
+      "$RAW_MADAROS" run "$source"
+  ) >"$log" 2>&1
+  rc=$?
+  set -e
+
+  [[ "$rc" -eq 1 ]] || {
+    cat "$log" >&2
+    fail "$label direct raw refusal exited rc=$rc, expected 1"
+  }
+  assert_no_fallback_marker "$log"
+  grep -Fxq "$marker" "$log" || {
+    cat "$log" >&2
+    fail "$label direct raw refusal omitted runtime-entry marker $marker"
+  }
+}
+
 if [[ "${1:-}" == '--structural-only' ]]; then
   [[ $# -eq 1 ]] || fail 'usage: epistemic_receipt_source_fresh_gate.sh [--structural-only]'
   [[ -x "$BUILD_SCRIPT" ]] || fail "missing current-source builder: $BUILD_SCRIPT"
@@ -81,6 +115,8 @@ if [[ "${1:-}" == '--structural-only' ]]; then
   [[ -f "$OBSERVATION_SMOKE" ]] || fail "missing observation smoke: $OBSERVATION_SMOKE"
   [[ -f "$PARENTHESIZATION_SMOKE" ]] || fail "missing parenthesization smoke: $PARENTHESIZATION_SMOKE"
   [[ -f "$STATE_ALIASING_SMOKE" ]] || fail "missing state-aliasing smoke: $STATE_ALIASING_SMOKE"
+  [[ -f "$BASIS_PROBE_REJECTION" ]] || fail "missing basis-probe refusal fixture: $BASIS_PROBE_REJECTION"
+  [[ -f "$BASIS_ABSTENTION_REJECTION" ]] || fail "missing basis-abstention refusal fixture: $BASIS_ABSTENTION_REJECTION"
   echo '[epistemic-receipt-source-fresh] PASS: structural source-build and direct-raw receipt wiring is present'
   exit 0
 fi
@@ -132,6 +168,8 @@ RAW_SHA256="$(portable_sha256 "$RAW_MADAROS")"
 run_direct_smoke observation "$OBSERVATION_SMOKE" 'EPISTEMIC_OBSERVATION_PROVENANCE_IMPORT_SMOKE_PASS'
 run_direct_smoke parenthesization "$PARENTHESIZATION_SMOKE" 'EPISTEMIC_PARENTHESIZATION_RECEIPTS_IMPORT_SMOKE_PASS'
 run_direct_smoke state_aliasing "$STATE_ALIASING_SMOKE" 'EPISTEMIC_STATE_ALIASING_RECEIPTS_IMPORT_SMOKE_PASS'
+run_direct_assertion_refusal basis_probe_rejects_fano "$BASIS_PROBE_REJECTION" 'EPISTEMIC_BASIS_PROBE_REJECTS_FANO_RUNTIME_ENTERED'
+run_direct_assertion_refusal basis_abstention_rejects_nonfano "$BASIS_ABSTENTION_REJECTION" 'EPISTEMIC_BASIS_ABSTENTION_REJECTS_NONFANO_RUNTIME_ENTERED'
 
 [[ -z "$(git status --porcelain)" ]] || fail 'source tree changed during direct raw receipt evidence'
 [[ "$(git rev-parse HEAD)" == "$SOURCE_HEAD" ]] || fail 'source HEAD changed during direct raw receipt evidence'
