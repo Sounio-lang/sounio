@@ -14,6 +14,7 @@
          test-knowledge-context-static \
          test-semantic-knowledge-spine \
          test-madaros-identity test-real-language-runner test-project-spine \
+         build-madaros madaros-root-audit \
          ops-guardrail-local ops-infra-up ops-strict-up ops-status \
          website-verified-snapshot
 
@@ -67,9 +68,16 @@ test-stdlib:         ## Run stdlib integration tests (subset)
 	$(SOUC) run tests/stdlib/bayes/test_prior_e2e.sio
 	$(SOUC) run tests/stdlib/complex/test_complex.sio
 
-build-madaros:       ## Build the Stage1 modular compiler (Madaros)
-	@echo "→ Building Madaros (Stage1 modular compiler)"
+build-madaros:       ## Build Madaros from the declared operational Madaros seed
+	@echo "→ Building Madaros from the declared operational seed"
+	SOUNIO_MADAROS_BOOTSTRAP_MODE=madaros-seed \
+	SOUNIO_MADAROS_SEED=./bin/madaros-linux-x86_64 \
 	bash scripts/ci/build_modular_madaros.sh artifacts/self-hosted/madaros
+
+madaros-root-audit:  ## Re-derive the Lean seed; heavyweight root-of-trust audit (#725)
+	@echo "→ Running the heavyweight Lean root-of-trust audit"
+	SOUNIO_MADAROS_BOOTSTRAP_MODE=lean-audit \
+	bash scripts/ci/build_modular_madaros.sh artifacts/self-hosted/madaros-root-audit
 
 test-madaros-identity: ## Verify Madaros identifies as the Stage1 modular Sounio compiler
 	@bash scripts/gates/g6_madaros_identity.sh

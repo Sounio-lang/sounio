@@ -6,22 +6,27 @@
 #
 # Default OUTPUT_PATH: bin/madaros
 #
-# The build derives a *source-tracking* seed from the current lean_single.sio
-# before compiling main.sio. The checked-in bin/souc-lean-single-x86_64 seed lags
-# the source (it predates the #719 arena/vmem fixes: the 16MB resolve_imports SRC
-# guard and __arena_*/__pool_* intrinsics) and fails main.sio at the import wall
-# ("import too large for SRC buffer: patterns.sio"). Rather than freeze a new seed
-# binary (bootstrap-chain provenance rot is tracked separately in #725), we compile
-# the current lean_single.sio with a committed bootstrap ELF to obtain a fresh seed
-# that carries the current source's features, then compile main.sio with THAT seed.
+# The build has two explicit bootstrap modes:
+#
+#   madaros-seed: compile current main.sio with a declared, raw Madaros ELF.
+#                 This is the operational path: M_n -> M_(n+1).
+#   lean-audit:   derive a fresh lean_single seed from the legacy bootstrap ELF,
+#                 then compile main.sio. This is a root-of-trust audit path.
+#
+# The C -> lean_single chain is currently bit-rotted (#725), so using it as the
+# default development path makes current Madaros progress depend on a historical
+# compiler bug. madaros-seed does not claim to repair that root chain; callers
+# must record the seed digest and run lean-audit independently when auditing it.
 # Because these compiles are CPU-heavy, the script serializes through
 # scripts/dev/souc-build-lock.sh so multiple agents do not stampede the workspace pod.
 #
 # Environment:
-#   SOUC_BIN / SOUNIO_SOUC_BIN — override the bootstrap ELF. If it already points at
-#                                a fresh source-tracking seed (e.g. a gen3.elf from
-#                                `make build`), it is used directly for main.sio with
-#                                no extra lean_single derivation.
+#   SOUNIO_MADAROS_BOOTSTRAP_MODE — `madaros-seed`, `lean-audit`, or
+#                                   `external-seed`. Defaults to `madaros-seed`.
+#   SOUNIO_MADAROS_SEED           — raw Madaros ELF required by `madaros-seed`.
+#   SOUC_BIN / SOUNIO_SOUC_BIN    — raw ELF required by `external-seed`; a legacy
+#                                   explicit override remains accepted as an
+#                                   explicit external-seed selection.
 #   SOUNIO_STDLIB_PATH         — forwarded to the seed compiler
 #   SOUNIO_BUILD_LOCK          — override the global build lock path
 
@@ -58,9 +63,65 @@ resolve_bootstrap_elf() {
     return 1
 }
 
-BOOTSTRAP_ELF="$(resolve_bootstrap_elf)"
+require_raw_elf() {
+    local cand="$1"
+    [[ -n "$cand" && -x "$cand" && -s "$cand" ]] || {
+        echo "error: build_modular_madaros: seed is missing, empty, or not executable: $cand" >&2
+        return 1
+    }
+    [[ "$(head -c4 "$cand" 2>/dev/null)" == $'\x7fELF' ]] || {
+        echo "error: build_modular_madaros: seed is not a raw ELF: $cand" >&2
+        return 1
+    }
+}
+
+require_madaros_seed() {
+    local cand="$1"
+    local banner
+    require_raw_elf "$cand"
+    banner="$("$cand" --version 2>&1 || true)"
+    [[ "$banner" == *"Madaros"* ]] || {
+        echo "error: build_modular_madaros: operational seed does not identify as Madaros: $cand" >&2
+        return 1
+    }
+}
+
 LEAN_SRC="$ROOT_DIR/self-hosted/compiler/lean_single.sio"
 SRC="$ROOT_DIR/self-hosted/compiler/main.sio"
+BOOTSTRAP_MODE="${SOUNIO_MADAROS_BOOTSTRAP_MODE:-}"
+MADAROS_SEED="${SOUNIO_MADAROS_SEED:-$ROOT_DIR/bin/madaros-linux-x86_64}"
+
+# A caller that expressly supplies the legacy override is selecting an external
+# seed. All other callers advance from the versioned operational Madaros seed.
+if [[ -z "$BOOTSTRAP_MODE" ]]; then
+    if [[ -n "${SOUC_BIN:-}" || -n "${SOUNIO_SOUC_BIN:-}" ]]; then
+        BOOTSTRAP_MODE="external-seed"
+    else
+        BOOTSTRAP_MODE="madaros-seed"
+    fi
+fi
+
+case "$BOOTSTRAP_MODE" in
+    madaros-seed|lean-audit|external-seed) ;;
+    *)
+        echo "error: build_modular_madaros: unsupported SOUNIO_MADAROS_BOOTSTRAP_MODE=$BOOTSTRAP_MODE" >&2
+        echo "  expected: madaros-seed, lean-audit, or external-seed" >&2
+        exit 2
+        ;;
+esac
+
+if [[ "$BOOTSTRAP_MODE" == "madaros-seed" ]]; then
+    [[ -z "${SOUC_BIN:-}" && -z "${SOUNIO_SOUC_BIN:-}" ]] || {
+        echo "error: build_modular_madaros: madaros-seed cannot be combined with SOUC_BIN/SOUNIO_SOUC_BIN" >&2
+        exit 2
+    }
+    require_madaros_seed "$MADAROS_SEED"
+fi
+
+if [[ "$BOOTSTRAP_MODE" == "external-seed" && -z "${SOUC_BIN:-}" && -z "${SOUNIO_SOUC_BIN:-}" ]]; then
+    echo "error: build_modular_madaros: external-seed requires SOUC_BIN or SOUNIO_SOUC_BIN" >&2
+    exit 2
+fi
 
 if [[ ! -f "$SRC" ]]; then
     echo "error: modular compiler source not found: $SRC" >&2
@@ -70,11 +131,8 @@ fi
 mkdir -p "$(dirname "$OUT")"
 rm -f "$OUT"
 
-# Derive a source-tracking seed. If SOUC_BIN/SOUNIO_SOUC_BIN was explicitly set we
-# trust it as an already-fresh seed (e.g. a gen3.elf) and use it directly. Otherwise
-# the bootstrap ELF is a committed binary that may lag the source, so we first
-# compile the CURRENT lean_single.sio with it to obtain a fresh seed that carries the
-# current source's features (arena/vmem #719 etc.), then compile main.sio with that.
+# Select a declared operational Madaros seed, an explicit external source-tracking
+# seed, or a lean audit derivation. Every non-default path is named by the caller.
 TMP_SEED_DIR=""
 cleanup() {
     if [[ -n "$TMP_SEED_DIR" && -d "$TMP_SEED_DIR" ]]; then
@@ -83,17 +141,24 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if [[ -n "${SOUC_BIN:-}" || -n "${SOUNIO_SOUC_BIN:-}" ]]; then
+if [[ "$BOOTSTRAP_MODE" == "madaros-seed" ]]; then
+    SEED="$MADAROS_SEED"
+    echo "→ bootstrap mode: madaros-seed (operational M_n -> M_(n+1))"
+    echo "  Madaros seed: $SEED"
+elif [[ "$BOOTSTRAP_MODE" == "external-seed" ]]; then
+    BOOTSTRAP_ELF="$(resolve_bootstrap_elf)"
     SEED="$BOOTSTRAP_ELF"
-    echo "→ using provided seed directly (SOUC_BIN/SOUNIO_SOUC_BIN): $SEED"
+    echo "→ bootstrap mode: explicit legacy seed (SOUC_BIN/SOUNIO_SOUC_BIN): $SEED"
 else
+    BOOTSTRAP_ELF="$(resolve_bootstrap_elf)"
     if [[ ! -f "$LEAN_SRC" ]]; then
         echo "error: lean_single source not found for seed derivation: $LEAN_SRC" >&2
         exit 1
     fi
     TMP_SEED_DIR="$(mktemp -d "${TMPDIR:-/tmp}/madaros-seed.XXXXXX")"
     SEED="$TMP_SEED_DIR/gen_seed.elf"
-    echo "→ deriving source-tracking seed from lean_single.sio (committed seed lags; see #725)"
+    echo "→ bootstrap mode: lean-audit (root-of-trust audit; see #725)"
+    echo "  deriving source-tracking seed from lean_single.sio"
     echo "  bootstrap ELF: $BOOTSTRAP_ELF"
     echo "  lean src:      $LEAN_SRC"
     echo "  gen seed:      $SEED"
@@ -111,8 +176,15 @@ echo "  seed:  $SEED"
 echo "  src:   $SRC"
 echo "  out:   $OUT"
 
-# Serialize heavy build via the global workspace lock.
-scripts/dev/souc-build-lock.sh "$SEED" "$SRC" "$OUT"
+# A raw Madaros ELF does not accept the legacy positional source/output form:
+# its second positional argument is parsed as another input file. Keep the
+# native-v2 compile verb explicit on the operational M_n -> M_(n+1) path while
+# preserving the legacy invocation contract for the root-audit seed paths.
+if [[ "$BOOTSTRAP_MODE" == "madaros-seed" ]]; then
+    scripts/dev/souc-build-lock.sh "$SEED" --native-v2-compile "$SRC" "$OUT"
+else
+    scripts/dev/souc-build-lock.sh "$SEED" "$SRC" "$OUT"
+fi
 
 if [[ ! -s "$OUT" ]]; then
     echo "error: modular compiler build produced no output: $OUT" >&2
