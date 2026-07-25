@@ -8,6 +8,7 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 
 | operation | 1M rows | Sounio ms | pandas ms | Sounio/pandas | before |
 |---|---|---|---|---|---|
+| bigframe_ml RIDGE regression (closed-form) + MaxAbsScaler (1M rows, 1000 keys) | | ~19 | ~84 | **0.22x — wins 4.5x** | one co-moment pass (closed-form) vs groupby.apply(Ridge) |
 | data::bigframe_ml per-group metrics: accuracy/precision/recall/F1/MCC + MSE/RMSE/R2/MAE (1M rows, 1000 keys) | | ~16 | ~104 | **0.15x — wins 6.7x** | one-pass confusion/residual sums vs groupby.apply(sklearn.metrics) |
 | bigframe_ml ranking/prob metrics: roc_auc / gini / log_loss / brier (1M rows, 1000 keys) | | ~20 | ~81 | **0.24x — wins 4.1x** | label-split score histogram (rank AUC) / one-pass vs groupby.apply(roc_auc_score) |
 | bigframe_ml per-group LOGISTIC REGRESSION fit (IRLS, correctness-verified capability) | | ~610 | ~126 | **~4.8x LOSS (compute-bound)** | 10 IRLS passes; per-row scalar sigmoid loop vs numpy SIMD — honest loss pending C3 vectorization; a NEW capability (per-group trained classifier) |
