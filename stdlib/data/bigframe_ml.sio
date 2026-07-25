@@ -216,3 +216,149 @@ pub fn bf_auc_gini_by(src: &BigFrame, key_col: i64, yt_col: i64, score_col: i64,
 pub fn bf_log_loss_by(src: &BigFrame, key_col: i64, yt_col: i64, prob_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_probmetric(src, key_col, yt_col, prob_col, 0, 2) }
 /// Per-group BRIER SCORE (mean squared error of probabilities), broadcast. NATIVE + lean_single.
 pub fn bf_brier_score_by(src: &BigFrame, key_col: i64, yt_col: i64, prob_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_probmetric(src, key_col, yt_col, prob_col, 0, 3) }
+
+/// Per-group univariate LOGISTIC REGRESSION fit (columns key, x, y∈{0,1}), fitted by `niter`
+/// Newton-Raphson (IRLS) iterations -- each iteration is one pass accumulating the gradient and
+/// 2×2 Hessian per key. The scikit-learn analog, but a separate model PER KEY over 1M rows.
+/// modes: 0 = intercept β₀, 1 = slope β₁, 2 = per-row predicted probability σ(β₀+β₁x). Broadcast.
+/// O(niter·n). NATIVE + lean_single only.
+fn bf_group_logistic(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, niter: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var b0: [f64; 1024] = [0.0; 1024]
+    var b1: [f64; 1024] = [0.0; 1024]
+    var g0: [f64; 1024] = [0.0; 1024]
+    var g1: [f64; 1024] = [0.0; 1024]
+    var h00: [f64; 1024] = [0.0; 1024]
+    var h01: [f64; 1024] = [0.0; 1024]
+    var h11: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || x_col < 0 || x_col >= nc || y_col < 0 || y_col >= nc || n <= 0 || niter <= 0 { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let xp = bf_col_ptr(src, x_col) as *mut f64
+    let yp = bf_col_ptr(src, y_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    var it: i64 = 0
+    while it < niter {
+        var c: i64 = 0
+        while c < 1024 { g0[c] = 0.0; g1[c] = 0.0; h00[c] = 0.0; h01[c] = 0.0; h11[c] = 0.0; c = c + 1 }
+        var i: i64 = 0
+        while i < n {
+            let k = read_f64(kp, i) as i64
+            if k >= 0 && k < 1024 {
+                let x = read_f64(xp, i); let y = read_f64(yp, i)
+                let eta = b0[k] + b1[k] * x
+                var p = 0.5
+                if eta > 30.0 { p = 1.0 } else { if eta < 0.0 - 30.0 { p = 0.0 } else { p = 1.0 / (1.0 + exp(0.0 - eta)) } }
+                let w = p * (1.0 - p); let r = y - p
+                g0[k] = g0[k] + r; g1[k] = g1[k] + x * r
+                h00[k] = h00[k] + w; h01[k] = h01[k] + x * w; h11[k] = h11[k] + x * x * w
+            }
+            i = i + 1
+        }
+        var g: i64 = 0
+        while g < 1024 {
+            let det = h00[g] * h11[g] - h01[g] * h01[g]
+            var ad = det; if ad < 0.0 { ad = 0.0 - ad }
+            if ad > 0.000000000001 { b0[g] = b0[g] + (h11[g] * g0[g] - h01[g] * g1[g]) / det; b1[g] = b1[g] + (0.0 - h01[g] * g0[g] + h00[g] * g1[g]) / det }
+            g = g + 1
+        }
+        it = it + 1
+    }
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 {
+            if mode == 0 { write_f64(op, i, b0[k]) }
+            else { if mode == 1 { write_f64(op, i, b1[k]) }
+            else { let eta = b0[k] + b1[k] * read_f64(xp, i); var p = 0.5; if eta > 30.0 { p = 1.0 } else { if eta < 0.0 - 30.0 { p = 0.0 } else { p = 1.0 / (1.0 + exp(0.0 - eta)) } }; write_f64(op, i, p) } }
+        } else { write_f64(op, i, 0.0) }
+        i = i + 1
+    }
+    out
+}
+/// Per-group LOGISTIC REGRESSION intercept β₀ (IRLS fit), broadcast. NATIVE + lean_single.
+pub fn bf_logistic_coef0_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, niter: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_logistic(src, key_col, x_col, y_col, niter, 0) }
+/// Per-group LOGISTIC REGRESSION slope β₁ (IRLS fit), broadcast. NATIVE + lean_single.
+pub fn bf_logistic_coef1_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, niter: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_logistic(src, key_col, x_col, y_col, niter, 1) }
+/// Per-group LOGISTIC REGRESSION predicted probability σ(β₀+β₁x) per row, broadcast. NATIVE + lean_single.
+pub fn bf_logistic_predict_proba_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, niter: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_logistic(src, key_col, x_col, y_col, niter, 2) }
+
+/// Per-group additional CONFUSION-derived classification metrics (columns key, y_true∈{0,1},
+/// y_pred∈{0,1}). One confusion-count pass. modes: 0 Cohen's κ (chance-corrected agreement),
+/// 1 NPV, 2 false-positive rate, 3 false-negative rate, 4 Jaccard/threat score TP/(TP+FP+FN).
+/// Broadcast. O(n). NATIVE + lean_single only.
+fn bf_group_clfmetric2(src: &BigFrame, key_col: i64, yt_col: i64, yp_col: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var tp: [f64; 1024] = [0.0; 1024]
+    var fp: [f64; 1024] = [0.0; 1024]
+    var fnn: [f64; 1024] = [0.0; 1024]
+    var tn: [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || yt_col < 0 || yt_col >= nc || yp_col < 0 || yp_col >= nc || n <= 0 { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let ytp = bf_col_ptr(src, yt_col) as *mut f64
+    let ypp = bf_col_ptr(src, yp_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 { let a = read_f64(ytp, i) > 0.5; let b = read_f64(ypp, i) > 0.5; if a { if b { tp[k] = tp[k] + 1.0 } else { fnn[k] = fnn[k] + 1.0 } } else { if b { fp[k] = fp[k] + 1.0 } else { tn[k] = tn[k] + 1.0 } } }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        let T = tp[g]; let P = fp[g]; let F = fnn[g]; let N = tn[g]; let tot = T + P + F + N
+        if tot > 0.0 {
+            if mode == 0 { let po = (T + N) / tot; let pe = ((T + F) * (T + P) + (N + P) * (N + F)) / (tot * tot); if pe < 1.0 { res[g] = (po - pe) / (1.0 - pe) } }
+            else { if mode == 1 { if N + F > 0.0 { res[g] = N / (N + F) } }
+            else { if mode == 2 { if P + N > 0.0 { res[g] = P / (P + N) } }
+            else { if mode == 3 { if F + T > 0.0 { res[g] = F / (F + T) } }
+            else { if T + P + F > 0.0 { res[g] = T / (T + P + F) } } } } }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    out
+}
+/// Per-group COHEN'S KAPPA (chance-corrected agreement), broadcast. NATIVE + lean_single.
+pub fn bf_cohen_kappa_by(src: &BigFrame, key_col: i64, yt_col: i64, yp_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_clfmetric2(src, key_col, yt_col, yp_col, 0) }
+/// Per-group NEGATIVE PREDICTIVE VALUE, broadcast. NATIVE + lean_single.
+pub fn bf_npv_by(src: &BigFrame, key_col: i64, yt_col: i64, yp_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_clfmetric2(src, key_col, yt_col, yp_col, 1) }
+/// Per-group FALSE-POSITIVE RATE, broadcast. NATIVE + lean_single.
+pub fn bf_fpr_by(src: &BigFrame, key_col: i64, yt_col: i64, yp_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_clfmetric2(src, key_col, yt_col, yp_col, 2) }
+/// Per-group FALSE-NEGATIVE RATE, broadcast. NATIVE + lean_single.
+pub fn bf_fnr_by(src: &BigFrame, key_col: i64, yt_col: i64, yp_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_clfmetric2(src, key_col, yt_col, yp_col, 3) }
+/// Per-group JACCARD (threat score) TP/(TP+FP+FN), broadcast. NATIVE + lean_single.
+pub fn bf_jaccard_by(src: &BigFrame, key_col: i64, yt_col: i64, yp_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_clfmetric2(src, key_col, yt_col, yp_col, 4) }
+
+/// Per-group MULTI-CLASS ACCURACY (fraction of rows with y_true == y_pred, any integer labels),
+/// broadcast. One pass. O(n). NATIVE + lean_single only.
+fn bf_group_mcacc(src: &BigFrame, key_col: i64, yt_col: i64, yp_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var cn: [f64; 1024] = [0.0; 1024]
+    var ok: [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || yt_col < 0 || yt_col >= nc || yp_col < 0 || yp_col >= nc || n <= 0 { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let ytp = bf_col_ptr(src, yt_col) as *mut f64
+    let ypp = bf_col_ptr(src, yp_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    var i: i64 = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { cn[k] = cn[k] + 1.0; if read_f64(ytp, i) == read_f64(ypp, i) { ok[k] = ok[k] + 1.0 } } i = i + 1 }
+    var g: i64 = 0
+    while g < 1024 { if cn[g] > 0.0 { res[g] = ok[g] / cn[g] } g = g + 1 }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    out
+}
+/// Per-group MULTI-CLASS ACCURACY (any integer labels), broadcast. NATIVE + lean_single.
+pub fn bf_multiclass_accuracy_by(src: &BigFrame, key_col: i64, yt_col: i64, yp_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_mcacc(src, key_col, yt_col, yp_col) }
