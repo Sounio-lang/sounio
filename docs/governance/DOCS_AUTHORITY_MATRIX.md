@@ -826,6 +826,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.runtime-abi-gate-blocker-query-envelope-2026-06-24 | historical | docs/research/runtime-abi-gate-blocker-query-envelope-2026-06-24.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.rupture-abcd-claims-2026-07-24 | historical | docs/research/rupture-abcd-claims_2026-07-24.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.rupture-as-singularity | historical | docs/research/rupture-as-singularity.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.rupture-r2-full-tubular-2026-07-25 | historical | docs/research/rupture-r2-full-tubular_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.rupture-r3-fano-phi-2026-07-25 | historical | docs/research/rupture-r3-fano-phi_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.rupture-r4-fano-field-2026-07-25 | historical | docs/research/rupture-r4-fano-field_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.sat-rup-microkernel-2026-06-23 | historical | docs/research/sat-rup-microkernel-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
