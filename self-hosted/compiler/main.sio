@@ -22,7 +22,7 @@ use check::refinement::*
 use check::units::*
 use check::env::*
 use check::traits::*
-use check::mod::{check_program, check_program_epistemic_into, check_items_verdict_boot4, check_modules_verdict_boot4_with_visibility}
+use check::mod::{check_program, check_program_epistemic_into, check_items_verdict_boot4, check_modules_verdict_boot4_with_authority, check_modules_visibility_verdict_boot4_with_authority}
 use check::specializer::{specialize_generics, spec_last_instantiated, spec_append_item_lists}
 use check::ownership::*
 use check::lint::*
@@ -52,7 +52,7 @@ use resolve::mod::{resolve_modules, resolve_program, ResolveBatchResult}
 use module_native_driver::{compile_multimodule_native, compile_multimodule_native_advanced, compile_multimodule_native_with_ir, compile_multimodule_native_maybe_streaming_for_target, compile_multimodule_llvm}
 use module_frontend::{load_multimodule_ir, load_multimodule_ir_traced, load_multimodule_ir_into, load_multimodule_ir_fn_count_traced, load_multimodule_ir_probe_summary, load_multimodule_ir_probe_summary_traced, empty_load_multimodule_ir_trace, module_frontend_compile_imported_to_file}
 use module_frontend::{preflight_multimodule_frontend, load_multimodule_epistemic_into, MultiModuleIrResult, MultiModuleFrontendResult, LoadMultimoduleIrTrace, empty_multimodule_ir_result, bridge_lower_single_module_box, ModuleFrontendLowerBoxResult, module_frontend_import_files_from_source, ImportPathList}
-use module_frontend::{ModuleClosure, module_frontend_collect_ast_closure_into}
+use module_frontend::{ModuleClosure, module_frontend_collect_ast_closure_into, module_frontend_build_module_authority}
 use module_parse::{ImportList, load_module_file, extract_imports_from_ast, file_exists}
 use frontend_callsite_probe::{run_frontend_callsite_probe}
 use parser::parser::{parser_last_error_count}
@@ -2046,6 +2046,7 @@ fn compiler_visibility_preflight(source_path: string) -> bool with IO, Mut, Pani
         unresolved_count: 0,
         saturated: false,
         parse_failed: false,
+        parse_failure_path: "",
     }
     if !module_frontend_collect_ast_closure_into(source_path, &!closure) {
         print("run_check_mode: AST closure incomplete nodes=")
@@ -2054,6 +2055,10 @@ fn compiler_visibility_preflight(source_path: string) -> bool with IO, Mut, Pani
         print_int(closure.unresolved_count)
         print(" saturated=")
         if closure.saturated { print("true") } else { print("false") }
+        if closure.parse_failed {
+            print(" parse_failure_path=")
+            print(closure.parse_failure_path)
+        }
         print("\n")
         return false
     }
@@ -2100,20 +2105,48 @@ fn compiler_visibility_preflight(source_path: string) -> bool with IO, Mut, Pani
     }
     let specialized = specialize_generics(merged)
     var verdict: i64 = 0
-    if spec_last_instantiated() {
-        if str_eq(read_env("SOUNIO_MM_SPEC_TRACE"), "1") {
-            print("run_check_mode: specialized-typecheck over merged ")
-            print_int(closure.node_count)
-            print(" modules\n")
+    let authority = module_authority_alloc()
+    module_authority_init_in_place(authority)
+    let authority_ok = module_frontend_build_module_authority(
+        &closure,
+        &!programs,
+        authority
+    )
+    if !authority_ok {
+        if module_authority_has_unresolved_import(authority) {
+            print("run_check_mode: module authority has unresolved named import\n")
+        } else {
+            print("run_check_mode: module authority incomplete or ambiguous\n")
         }
-        verdict = check_items_verdict_boot4(specialized)
+        verdict = 1
     } else {
-        verdict = check_modules_verdict_boot4_with_visibility(
-            &!programs,
-            closure.node_count,
-            true
-        )
+        if spec_last_instantiated() {
+            // A flattened specialization cannot prove source-module privacy.
+            // Probe the unflattened programs for access violations first,
+            // then let specialization own generic type normalization.
+            verdict = check_modules_visibility_verdict_boot4_with_authority(
+                &!programs,
+                closure.node_count,
+                authority
+            )
+        } else {
+            verdict = check_modules_verdict_boot4_with_authority(
+                &!programs,
+                closure.node_count,
+                authority,
+                true
+            )
+        }
+        if verdict == 0 && spec_last_instantiated() {
+            if str_eq(read_env("SOUNIO_MM_SPEC_TRACE"), "1") {
+                print("run_check_mode: specialized-typecheck over merged ")
+                print_int(closure.node_count)
+                print(" modules\n")
+            }
+            verdict = check_items_verdict_boot4(specialized)
+        }
     }
+    heap_free(authority as i64)
     print("run_check_mode: verdict=")
     print_int(verdict)
     print("\n")
@@ -2136,6 +2169,7 @@ fn run_science_boundary_closure_report(
         unresolved_count: 0,
         saturated: false,
         parse_failed: false,
+        parse_failure_path: "",
     }
     let complete = module_frontend_collect_ast_closure_into(source_path, &!closure)
     println("SOUNIO_BOUNDARY_CLOSURE_V1")
@@ -2145,6 +2179,8 @@ fn run_science_boundary_closure_report(
     if closure.saturated { println("true") } else { println("false") }
     print("parse_failed\t")
     if closure.parse_failed { println("true") } else { println("false") }
+    print("parse_failure_path\t")
+    println(closure.parse_failure_path)
     var i: i64 = 0
     while i < closure.node_count {
         print("node\t")
@@ -12124,10 +12160,10 @@ fn compiler_main_test_emit_print_f64_produces_code() -> bool with Mut, Panic, Di
 }
 
 // T404: Knowledge<f64> layout registration has 3 fields
-fn compiler_main_test_knowledge_layout_registered() -> bool with Mut, Panic, Div {
+fn compiler_main_test_knowledge_layout_registered() -> bool with Mut, Panic, Div, Alloc {
     let table = ir_register_knowledge_layout(empty_struct_layout_table())
     if table.count != 1 { return false }
-    let entry = table.entries[0]
+    let entry = struct_layout_table_entry_at_ref(&table, 0)
     if !ir_name_eq(entry.type_name, make_name("Knowledge")) { return false }
     if entry.field_count != 3 { return false }
     if !ir_name_eq(entry.fields[0].name, make_name("value")) { return false }
@@ -12140,16 +12176,17 @@ fn compiler_main_test_knowledge_layout_registered() -> bool with Mut, Panic, Div
 }
 
 // T405: Knowledge field index lookup resolves value=0, variance=1, confidence=2
-fn compiler_main_test_knowledge_field_idx_lookup() -> bool with Mut, Panic, Div {
+fn compiler_main_test_knowledge_field_idx_lookup() -> bool with Mut, Panic, Div, Alloc {
     let table = ir_register_knowledge_layout(empty_struct_layout_table())
     // Scan for "value" field
     var found_value: i64 = -1
     var si: i64 = 0
     while si < table.count {
+        let entry = struct_layout_table_entry_at_ref(&table, si)
         var fi: i64 = 0
-        while fi < table.entries[si].field_count {
-            if ir_name_eq(table.entries[si].fields[fi].name, make_name("value")) {
-                found_value = table.entries[si].fields[fi].index
+        while fi < entry.field_count {
+            if ir_name_eq(entry.fields[fi].name, make_name("value")) {
+                found_value = entry.fields[fi].index
             }
             fi = fi + 1
         }
@@ -12160,10 +12197,11 @@ fn compiler_main_test_knowledge_field_idx_lookup() -> bool with Mut, Panic, Div 
     var found_var: i64 = -1
     si = 0
     while si < table.count {
+        let entry = struct_layout_table_entry_at_ref(&table, si)
         var fi2: i64 = 0
-        while fi2 < table.entries[si].field_count {
-            if ir_name_eq(table.entries[si].fields[fi2].name, make_name("variance")) {
-                found_var = table.entries[si].fields[fi2].index
+        while fi2 < entry.field_count {
+            if ir_name_eq(entry.fields[fi2].name, make_name("variance")) {
+                found_var = entry.fields[fi2].index
             }
             fi2 = fi2 + 1
         }
@@ -12174,10 +12212,11 @@ fn compiler_main_test_knowledge_field_idx_lookup() -> bool with Mut, Panic, Div 
     var found_conf: i64 = -1
     si = 0
     while si < table.count {
+        let entry = struct_layout_table_entry_at_ref(&table, si)
         var fi3: i64 = 0
-        while fi3 < table.entries[si].field_count {
-            if ir_name_eq(table.entries[si].fields[fi3].name, make_name("confidence")) {
-                found_conf = table.entries[si].fields[fi3].index
+        while fi3 < entry.field_count {
+            if ir_name_eq(entry.fields[fi3].name, make_name("confidence")) {
+                found_conf = entry.fields[fi3].index
             }
             fi3 = fi3 + 1
         }
@@ -13017,9 +13056,9 @@ fn compiler_main_test_gum_mul_full_chain() -> bool with Mut, Div, Panic {
 }
 
 // T468: Knowledge layout field count = 3 (value, variance, confidence)
-fn compiler_main_test_knowledge_layout_fields_3() -> bool with Mut, Panic, Div {
+fn compiler_main_test_knowledge_layout_fields_3() -> bool with Mut, Panic, Div, Alloc {
     let table = ir_register_knowledge_layout(empty_struct_layout_table())
-    table.count == 1 && table.entries[0 as usize].field_count == 3
+    table.count == 1 && struct_layout_table_entry_at_ref(&table, 0).field_count == 3
 }
 
 // T469: GUM sub full chain — field_get + OpAdd (not OpSub) + alloc + field_set

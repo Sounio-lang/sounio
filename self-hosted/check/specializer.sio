@@ -189,18 +189,25 @@ fn spec_known_names_push(kn: SpecKnownNames, n: Name) -> SpecKnownNames with Mut
     out
 }
 
+// The multi-module preflight merges the compiler into one long ItemList.
+// Keep these collectors iterative so bootstrap stays within the default stack.
 fn spec_collect_known_names(items: Option<Box<ItemList>>, acc: SpecKnownNames) -> SpecKnownNames with Mut, Panic, Div {
-    match items {
-        None => acc
-        Some(list) => {
-            var out = acc
-            let it = (*list).head
-            if it.kind == ItemKind::ItemStruct || it.kind == ItemKind::ItemEnum {
-                out = spec_known_names_push(out, it.name)
+    var out = acc
+    var cur = items
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                let it = (*list).head
+                if it.kind == ItemKind::ItemStruct || it.kind == ItemKind::ItemEnum {
+                    out = spec_known_names_push(out, it.name)
+                }
+                cur = (*list).tail
             }
-            spec_collect_known_names((*list).tail, out)
         }
     }
+    out
 }
 
 // ============================================================
@@ -416,73 +423,81 @@ fn spec_struct_tp_hash_of(opt: Option<Box<TypeParamDefList>>, n: i64) -> i64 wit
 }
 
 fn spec_collect_generic_structs(items: Option<Box<ItemList>>) with Mut, Panic, Div, Alloc {
-    match items {
-        None => {}
-        Some(list) => {
-            let it = (*list).head
-            if it.kind == ItemKind::ItemStruct {
-                match it.struct_def {
-                    Some(sd_box) => {
-                        let tp_count = spec_struct_tp_count_of((*sd_box).type_params)
-                        if tp_count > 0 && tp_count <= 4 && SPEC_ST_COUNT < 256 && spec_struct_table_find(it.name) < 0 {
-                            let slot = SPEC_ST_COUNT
-                            let p = heap_alloc(4096) as *mut SpecStNode
-                            (*p).name_hash = ast_name_hash(it.name)
-                            (*p).tp_count = tp_count
-                            (*p).tp_h0 = spec_struct_tp_hash_of((*sd_box).type_params, 0)
-                            (*p).tp_h1 = spec_struct_tp_hash_of((*sd_box).type_params, 1)
-                            (*p).tp_h2 = spec_struct_tp_hash_of((*sd_box).type_params, 2)
-                            (*p).tp_h3 = spec_struct_tp_hash_of((*sd_box).type_params, 3)
-                            (*p).sd = it.struct_def
-                            SPEC_ST_PTRS[slot as usize] = p as i64
-                            SPEC_ST_COUNT = SPEC_ST_COUNT + 1
+    var cur = items
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                let it = (*list).head
+                if it.kind == ItemKind::ItemStruct {
+                    match it.struct_def {
+                        Some(sd_box) => {
+                            let tp_count = spec_struct_tp_count_of((*sd_box).type_params)
+                            if tp_count > 0 && tp_count <= 4 && SPEC_ST_COUNT < 256 && spec_struct_table_find(it.name) < 0 {
+                                let slot = SPEC_ST_COUNT
+                                let p = heap_alloc(4096) as *mut SpecStNode
+                                (*p).name_hash = ast_name_hash(it.name)
+                                (*p).tp_count = tp_count
+                                (*p).tp_h0 = spec_struct_tp_hash_of((*sd_box).type_params, 0)
+                                (*p).tp_h1 = spec_struct_tp_hash_of((*sd_box).type_params, 1)
+                                (*p).tp_h2 = spec_struct_tp_hash_of((*sd_box).type_params, 2)
+                                (*p).tp_h3 = spec_struct_tp_hash_of((*sd_box).type_params, 3)
+                                (*p).sd = it.struct_def
+                                SPEC_ST_PTRS[slot as usize] = p as i64
+                                SPEC_ST_COUNT = SPEC_ST_COUNT + 1
+                            }
                         }
+                        None => {}
                     }
-                    None => {}
                 }
+                cur = (*list).tail
             }
-            spec_collect_generic_structs((*list).tail)
         }
     }
 }
 
 fn spec_collect_generic_fns(items: Option<Box<ItemList>>, known: SpecKnownNames) with IO, Mut, Panic, Div, Alloc {
-    match items {
-        None => {}
-        Some(list) => {
-            let it = (*list).head
-            if it.kind == ItemKind::ItemFn {
-                match it.fn_def {
-                    Some(fd_box) => {
-                        let tp = spec_collect_free_vars_from_fndef((*fd_box), known)
-                        if tp.count > 0 && SPEC_GF_COUNT < 256 && spec_generic_table_find(it.name) < 0 {
-                            let slot = SPEC_GF_COUNT
-                            let p = heap_alloc(4096) as *mut SpecGfNode
-                            (*p).name_hash = ast_name_hash(it.name)
-                            (*p).tp_count = tp.count
-                            (*p).tp_h0 = spec_tp_hash_at(tp, 0)
-                            (*p).tp_h1 = spec_tp_hash_at(tp, 1)
-                            (*p).tp_h2 = spec_tp_hash_at(tp, 2)
-                            (*p).tp_h3 = spec_tp_hash_at(tp, 3)
-                            (*p).fd = it.fn_def
-                            SPEC_GF_PTRS[slot as usize] = p as i64
-                            SPEC_GF_NEEDED[slot as usize] = false
-                            SPEC_GF_COUNT = SPEC_GF_COUNT + 1
-                            if spec_trace_enabled() {
-                                print("specializer: registered=")
-                                print(spec_name_to_string(it.name))
-                                print(" slot=")
-                                print_int(spec_generic_table_find(it.name))
-                                print(" tp=")
-                                print_int(spec_generic_table_tp_count(slot))
-                                print("\n")
+    var cur = items
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                let it = (*list).head
+                if it.kind == ItemKind::ItemFn {
+                    match it.fn_def {
+                        Some(fd_box) => {
+                            let tp = spec_collect_free_vars_from_fndef((*fd_box), known)
+                            if tp.count > 0 && SPEC_GF_COUNT < 256 && spec_generic_table_find(it.name) < 0 {
+                                let slot = SPEC_GF_COUNT
+                                let p = heap_alloc(4096) as *mut SpecGfNode
+                                (*p).name_hash = ast_name_hash(it.name)
+                                (*p).tp_count = tp.count
+                                (*p).tp_h0 = spec_tp_hash_at(tp, 0)
+                                (*p).tp_h1 = spec_tp_hash_at(tp, 1)
+                                (*p).tp_h2 = spec_tp_hash_at(tp, 2)
+                                (*p).tp_h3 = spec_tp_hash_at(tp, 3)
+                                (*p).fd = it.fn_def
+                                SPEC_GF_PTRS[slot as usize] = p as i64
+                                SPEC_GF_NEEDED[slot as usize] = false
+                                SPEC_GF_COUNT = SPEC_GF_COUNT + 1
+                                if spec_trace_enabled() {
+                                    print("specializer: registered=")
+                                    print(spec_name_to_string(it.name))
+                                    print(" slot=")
+                                    print_int(spec_generic_table_find(it.name))
+                                    print(" tp=")
+                                    print_int(spec_generic_table_tp_count(slot))
+                                    print("\n")
+                                }
                             }
                         }
+                        None => {}
                     }
-                    None => {}
                 }
+                cur = (*list).tail
             }
-            spec_collect_generic_fns((*list).tail, known)
         }
     }
 }

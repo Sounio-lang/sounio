@@ -3,7 +3,7 @@
 // Multimodule frontend and IR-loading lane split from module_loader.sio.
 // Keeps frontend probes off the native/wasm/optimizer/thin-link backend surface.
 
-use parser::ast::{AstPath, empty_path, Item, ItemKind, ItemList, Name, ParamList, Program, StringList, make_name, ast_reset_global_var_inits, GLOBAL_VAR_INIT_SUPPRESS_RESET}
+use parser::ast::{AstPath, empty_path, ImportItemList, Item, ItemKind, ItemList, Name, ParamList, Program, StringList, make_name, ast_reset_global_var_inits, GLOBAL_VAR_INIT_SUPPRESS_RESET}
 use parser::mod::{count_items}
 use parser::parser::{parser_last_error_count, parser_reset_last_errors}
 use ir::ir::*
@@ -15,6 +15,7 @@ use ir::lower::{lower_program_to_ir_trace, lower_program_to_ir_with_epistemic_tr
 use native::codegen_x86_linux::{compile_native_v2_preview_to_file, native_resolve_target, native_v2_builtin_id_for_name, native_v2_builtin_returns_float}
 use check::knowledge_context::{knowledge_context_validate_items, knowledge_context_validate_items_values_only}
 use resolve::mod::{resolve_modules}
+use resolve::imports::{ModuleAuthority, module_authority_bind_import_name, module_authority_is_valid}
 use module_parse::{extract_imports_from_ast, file_exists, file_path_to_module_path, load_module_file}
 use check::specializer::{specialize_generics, spec_last_instantiated, spec_mono_marker_count, spec_append_item_lists, spec_dce_unreachable_item_fns}
 
@@ -2394,6 +2395,142 @@ pub struct ModuleClosure {
     pub unresolved_count: i64,
     pub saturated: bool,
     pub parse_failed: bool,
+    pub parse_failure_path: string,
+}
+
+fn module_frontend_closure_find_path(closure: &ModuleClosure, path: string) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < (*closure).node_count {
+        if str_eq((*closure).paths[i], path) {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn module_frontend_path_tail_name(segments: StringList) -> Name with Mut, Panic, Div, Alloc {
+    match segments.tail {
+        None => make_name(module_frontend_string_segment(segments))
+        Some(rest) => module_frontend_path_tail_name(*rest)
+    }
+}
+
+// `use a::b` is token-identical for a named item and a nested module. The
+// closure resolver prefers the complete file path when it exists; only its
+// fallback to the parent file means the tail is an item to bind.
+fn module_frontend_direct_use_selects_named_item(
+    path: AstPath,
+    owner_dir: string,
+    selected_path: string
+) -> bool with IO, Mut, Panic, Div, Alloc {
+    let full_rel_path = module_frontend_ast_import_relpath(path)
+    let full_path = module_frontend_resolve_ast_import_relpath(full_rel_path, owner_dir)
+    !str_eq(full_path, selected_path)
+}
+
+fn module_frontend_bind_authority_import_items(
+    authority: *mut ModuleAuthority,
+    owner_module_id: i64,
+    target_module_id: i64,
+    target_items: Option<Box<ItemList>>,
+    names: Option<Box<ImportItemList>>
+) with Mut, Panic, Div, Alloc {
+    match names {
+        None => {}
+        Some(list) => {
+            module_authority_bind_import_name(
+                authority,
+                owner_module_id,
+                target_module_id,
+                (*list).head,
+                target_items
+            )
+            module_frontend_bind_authority_import_items(
+                authority,
+                owner_module_id,
+                target_module_id,
+                target_items,
+                (*list).tail
+            )
+        }
+    }
+}
+
+fn module_frontend_bind_authority_items(
+    authority: *mut ModuleAuthority,
+    closure: &ModuleClosure,
+    programs: &! [Program; 256],
+    owner_module_id: i64,
+    items: Option<Box<ItemList>>
+) with IO, Mut, Panic, Div, Alloc {
+    match items {
+        None => {}
+        Some(list) => {
+            let item = (*list).head
+            if item.kind == ItemKind::ItemUse && !item.use_glob {
+                let owner_path = (*closure).paths[owner_module_id as usize]
+                let owner_dir = module_frontend_path_directory_slice(owner_path)
+                let target_path = resolve_import_file_path(item.use_path, owner_dir)
+                let target_module_id = module_frontend_closure_find_path(closure, target_path)
+                if target_module_id >= 0 {
+                    let target_items = (*programs)[target_module_id as usize].items
+                    if item.use_items == None
+                        && item.use_path.seg_count >= 2
+                        && module_frontend_direct_use_selects_named_item(item.use_path, owner_dir, target_path) {
+                        let local_name = module_frontend_path_tail_name(item.use_path.segments)
+                        module_authority_bind_import_name(
+                            authority,
+                            owner_module_id,
+                            target_module_id,
+                            local_name,
+                            target_items
+                        )
+                    } else if item.use_items != None {
+                        module_frontend_bind_authority_import_items(
+                            authority,
+                            owner_module_id,
+                            target_module_id,
+                            target_items,
+                            item.use_items
+                        )
+                    }
+                }
+            }
+            module_frontend_bind_authority_items(
+                authority,
+                closure,
+                programs,
+                owner_module_id,
+                (*list).tail
+            )
+        }
+    }
+}
+
+// Build a bounded authority over direct imports only. Glob imports, aliases,
+// reexports, and ancestry-sensitive visibility remain on their legacy path
+// until the canonical logical ModuleGraph exists.
+pub fn module_frontend_build_module_authority(
+    closure: &ModuleClosure,
+    programs: &! [Program; 256],
+    authority: *mut ModuleAuthority
+) -> bool with IO, Mut, Panic, Div, Alloc {
+    if authority == (0 as *mut ModuleAuthority) || (*closure).node_count <= 0 {
+        return false
+    }
+    var owner_module_id: i64 = 0
+    while owner_module_id < (*closure).node_count && owner_module_id < 256 {
+        module_frontend_bind_authority_items(
+            authority,
+            closure,
+            programs,
+            owner_module_id,
+            (*programs)[owner_module_id as usize].items
+        )
+        owner_module_id = owner_module_id + 1
+    }
+    module_authority_is_valid(authority)
 }
 
 pub fn module_frontend_collect_ast_closure_into(
@@ -2405,11 +2542,13 @@ pub fn module_frontend_collect_ast_closure_into(
     (*out).unresolved_count = 0
     (*out).saturated = false
     (*out).parse_failed = false
+    (*out).parse_failure_path = ""
 
     parser_reset_last_errors()
     let main_prog = load_module_file(main_path)
     if parser_last_error_count() > 0 {
         (*out).parse_failed = true
+        (*out).parse_failure_path = main_path
         return false
     }
     (*out).paths[0] = main_path
@@ -2423,6 +2562,7 @@ pub fn module_frontend_collect_ast_closure_into(
         let work_prog = load_module_file(caller_path)
         if parser_last_error_count() > 0 {
             (*out).parse_failed = true
+            (*out).parse_failure_path = caller_path
             work_front = (*out).node_count
         }
         let imports = extract_imports_from_ast(work_prog)
