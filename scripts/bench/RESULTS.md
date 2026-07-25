@@ -8,6 +8,7 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 
 | operation | 1M rows | Sounio ms | pandas ms | Sounio/pandas | before |
 |---|---|---|---|---|---|
+| bigframe_np NUMPY-ON-COLUMNS package: 101 verbs (reductions/elementwise/cumulative/pairwise) | 100 gate-verified vs numpy | ~13 (std) | ~2 (numpy std) | **capability, not speed** | single-array ops are SIMD/BLAS-bound (lose ~6x); value = native numpy API coverage w/o the dependency; the per-group versions (bigframe_ops/ml) are the speed wins |
 | bigframe_ml MULTIVARIATE diagonal GaussianNB (p=4, binary) (1M rows, 1000 keys) | | ~43 | 293 (numpy, FAIR) | **0.15x — wins 6.9x** | one-pass per-class/feature mean+var, diagonal log-likelihood vs groupby.apply |
 | bigframe_ml MULTIVARIATE LDA shared-covariance (p=4, binary) (1M rows, 1000 keys) | | ~95 | 289 (numpy, FAIR) | **0.33x — wins 3.0x** | one-pass pooled covariance + Gaussian-elim solve Σ[w0|w1]=[μ0|μ1] vs groupby.apply(LDA) |
 | bigframe_ml MULTIVARIATE ridge/OLS (p=4 features, Gram+Gaussian-elim) (1M rows, 1000 keys) | | ~125 | 161 (numpy normal-eq, FAIR) | **0.78x — wins 1.3x** | one-pass symmetric Gram XᵀX + per-group d×d solve vs groupby.apply(np.linalg.solve); modest because numpy's per-group work is a real BLAS matmul |
