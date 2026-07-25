@@ -9,6 +9,7 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 | operation | 1M rows | Sounio ms | pandas ms | Sounio/pandas | before |
 |---|---|---|---|---|---|
 | data::bigframe_ml per-group metrics: accuracy/precision/recall/F1/MCC + MSE/RMSE/R2/MAE (1M rows, 1000 keys) | | ~16 | ~104 | **0.15x — wins 6.7x** | one-pass confusion/residual sums vs groupby.apply(sklearn.metrics) |
+| bigframe_ml ranking/prob metrics: roc_auc / gini / log_loss / brier (1M rows, 1000 keys) | | ~20 | ~81 | **0.24x — wins 4.1x** | label-split score histogram (rank AUC) / one-pass vs groupby.apply(roc_auc_score) |
 | per-group p-values: ttest_pvalue / mannwhitney_pvalue (tie-corrected) / ks_pvalue (1M rows, 1000 keys, 2 groups) | | ~18 | ~460 | **0.04x — wins 25x** | one-pass stat + tested stats:: CDF vs scipy/pandas groupby.apply |
 | per-group K-sample: anova_pvalue / kruskal_pvalue (tie-corrected) (1M rows, 1000 keys, 4 groups) | | ~22 | ~460 | **0.03-0.12x — wins 8-33x** | one-pass SSB/SSW or rank-sums + tested stats:: CDF vs groupby.apply |
 | per-group correlation inference: pearson_pvalue / pearson CI (Fisher z) / spearman_rho+p (1M rows, 1000 keys, 2 cols) | | ~20-41 | ~150-267 | **0.13-0.15x — wins 7-8x** | one-pass co-moments (Pearson) or rank-LUT co-moment (Spearman) + t_two_tail vs groupby.apply |
