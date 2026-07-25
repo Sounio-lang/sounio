@@ -3,8 +3,8 @@
 #
 # Three executable verticals on the particle_physics stdlib:
 #   EXP1 — Z metrology (GUM Γ(Z→ee) + budget + confidence gate)
-#   EXP2 — NonUnitary at Z pole (deficit scan + peak xsec with NonUnitary effect)
-#   EXP3 — EW tension (M_W pull, S/T/U, Δρ)
+#   EXP2 — NonUnitary at Z pole (deficit vs √s curve + peak xsec with NonUnitary)
+#   EXP3 — EW tension (M_W tree vs radiative Δρ pull, S/T/U, Δρ)
 #
 # Prefer lean_single for this package (Madaros science-boundary may block
 # examples → protected scientific modules). Override with SOUNIO_SOUC_ENGINE.
@@ -27,10 +27,13 @@ echo "== particle exp123 (engine=$SOUNIO_SOUC_ENGINE) =="
 }
 
 grep -q 'PARTICLE_EXP123_OK' "$OUT"
-grep -q 'PARTICLE_EXP123_PASS 42' "$OUT"
+grep -q 'PARTICLE_EXP123_PASS 51' "$OUT"
 grep -q 'EXP1_DOMINANT_SOURCE' "$OUT"
 grep -q 'EXP2_DEFICIT_POLE 1.000000' "$OUT"
-grep -q 'EXP3_MW_PULL' "$OUT"
+grep -q 'EXP2_SCAN_DEFICIT_POLE' "$OUT"
+grep -q 'EXP3_MW_PULL_TREE' "$OUT"
+grep -q 'EXP3_MW_PULL_RAD' "$OUT"
+grep -q 'EXP3_MW_PRED_RAD' "$OUT"
 grep -q 'EXP1_DONE' "$OUT"
 grep -q 'EXP2_DONE' "$OUT"
 grep -q 'EXP3_DONE' "$OUT"

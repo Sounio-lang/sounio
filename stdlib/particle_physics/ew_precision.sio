@@ -285,9 +285,79 @@ pub fn m_w_prediction_ep() -> Epistemic with Mut, Div, Panic {
 /// Consistency check: SM prediction vs PDG direct measurement.
 /// Returns the pull: (M_W^pred - M_W^meas) / σ_total.
 /// A large pull (|pull| > 2) indicates BSM physics tension.
+///
+/// Uses tree-level `m_w_prediction_ep` (no Δr). Prefer
+/// `m_w_consistency_pull_radiative` for a fairer SM comparison.
 pub fn m_w_consistency_pull() -> f64 with Mut, Div, Panic {
     let pred = m_w_prediction_ep()
     let meas = mass_w()  // 80.377 ± 0.012 GeV (PDG direct)
+    let diff = pred.val() - meas.val()
+    let sigma_total = sqrt_f64(pred.variance() + meas.variance())
+    if sigma_total == 0.0 { return 0.0 }
+    diff / sigma_total
+}
+
+/// GUM-exact SM M_W prediction with leading radiative Δρ (ρ-parameter).
+///
+/// On-shell definition:
+///   ρ = M_W² / (M_Z² cos²θ_W) = 1 + Δρ
+///   M_W = M_Z √[(1 − sin²θ_W)(1 + Δρ)]
+///
+/// Δρ is the leading top-loop (QCD-corrected) piece from `delta_rho_ep`.
+/// Do **not** fold −Δα into this form: Δα belongs in the G_F-based Δr
+/// relation, not the on-shell M_W = M_Z cos θ_W path. Higher-order /
+/// full Δr residuals remain as intentional construction debt.
+///
+/// Variance from M_Z, sin²θ_W, and m_t (via Δρ).
+pub fn m_w_prediction_ep_radiative() -> Epistemic with Mut, Div, Panic {
+    let mz = mass_z()
+    let s2w = sin2_theta_w()
+    let mt = mass_top()
+    let as_mz = alpha_s_mz()
+    let pi = 3.141592653589793
+
+    let mz_v = mz.val()
+    let s2w_v = s2w.val()
+    let mt_v = mt.val()
+    let as_v = as_mz.val()
+
+    // Leading Δρ with QCD correction (same central as delta_rho_ep)
+    let delta_qcd = 0.0 - 2.0 * as_v / pi * (pi * pi / 9.0 - 1.0 / 6.0)
+    let factor = 1.1663787e-5 * (1.0 + delta_qcd) / (8.0 * pi * pi * 1.4142135623730951)
+    let drho = 3.0 * factor * mt_v * mt_v
+
+    let cos2 = 1.0 - s2w_v
+    let mw2 = mz_v * mz_v * cos2 * (1.0 + drho)
+    if mw2 <= 0.0 { return Epistemic::certain(0.0) }
+    let mw_v = sqrt_f64(mw2)
+
+    // GUM (independent inputs M_Z, sin²θ_W, m_t):
+    // ∂M_W/∂M_Z ≈ M_W/M_Z
+    // ∂M_W/∂s2w via cos2
+    // ∂M_W/∂m_t via Δρ ∝ m_t²
+    let dmw_dmz = mw_v / mz_v
+    let var_mz = dmw_dmz * dmw_dmz * mz.variance()
+
+    let dmw2_ds2w = mz_v * mz_v * (1.0 + drho) * (0.0 - 1.0)
+    let dmw_ds2w = dmw2_ds2w / (2.0 * mw_v)
+    let var_s2w = dmw_ds2w * dmw_ds2w * s2w.variance()
+
+    let d_drho_dmt = 6.0 * factor * mt_v
+    let dmw2_dmt = mz_v * mz_v * cos2 * d_drho_dmt
+    let dmw_dmt = dmw2_dmt / (2.0 * mw_v)
+    let var_mt = dmw_dmt * dmw_dmt * mt.variance()
+
+    let var_mw = var_mz + var_s2w + var_mt
+    var conf = mz.confidence()
+    if s2w.confidence() < conf { conf = s2w.confidence() }
+    if mt.confidence() < conf { conf = mt.confidence() }
+    Epistemic::new(mw_v, var_mw, conf)
+}
+
+/// Pull using radiative M_W prediction (includes leading Δρ).
+pub fn m_w_consistency_pull_radiative() -> f64 with Mut, Div, Panic {
+    let pred = m_w_prediction_ep_radiative()
+    let meas = mass_w()
     let diff = pred.val() - meas.val()
     let sigma_total = sqrt_f64(pred.variance() + meas.variance())
     if sigma_total == 0.0 { return 0.0 }
