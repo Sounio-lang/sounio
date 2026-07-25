@@ -16,7 +16,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.ruptu
 
 **Date:** 2026-07-25  
 **Orthography:** EN-UK  
-**Status:** partial close of B-contract (R3_PARTIAL); D3 still forbidden  
+**Status:** B-contract operational close (`R3_GREEN`); D3 still forbidden; field-level follow-on is R4  
 **Harness:** `scripts/research/rupture_r3_fano_restriction_probe.py`  
 **Parents:** `rupture-abcd-claims_2026-07-24.md` §B, `petitot-semantic-potential.md`,
 `rupture-as-singularity.md`

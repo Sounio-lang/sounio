@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Gate for docs/research/rupture-abcd-claims_2026-07-24.md
 #
-# R2-partial must PASS (fiber + Frente A measure + random control).
-# R3 probe must RUN with sound divergence reconfirm; R3_GREEN is not required
-# (hypothesis remains open until B-contract (i)–(iii) are met).
+# R2-partial  — fiber + Frente A measure + random control
+# R3_GREEN    — Φ_fp jet + (i)–(iii+) path classes (D3 still forbidden)
+# R4_PARTIAL  — multi-line Fano field census + cross mixing jet
 #
 # Usage:
 #   bash scripts/ci/rupture_abcd_contracts_gate.sh
@@ -12,7 +12,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 
-echo "== rupture A+B+C+D contracts =="
+echo "== rupture A+B+C+D (+R4 field) contracts =="
 
 echo "-- R2 fiber+measure --"
 python3 scripts/research/rupture_r2_fiber_measure_contract.py | tee /tmp/rupture_r2_out.txt
@@ -34,8 +34,15 @@ else
   exit 1
 fi
 
+echo "-- R4 multi-line Fano field --"
+python3 scripts/research/rupture_r4_fano_field_contract.py | tee /tmp/rupture_r4_out.txt
+grep -q 'R4_CONTRACT_OK' /tmp/rupture_r4_out.txt
+grep -q 'R4_VERDICT R4_PARTIAL' /tmp/rupture_r4_out.txt
+grep -q 'F5_SYSTEM_RESIDUAL nonzero_cross -> PASS' /tmp/rupture_r4_out.txt
+
 # Claim docs present
 test -f docs/research/rupture-abcd-claims_2026-07-24.md
 test -f docs/research/rupture-r3-fano-phi_2026-07-25.md
+test -f docs/research/rupture-r4-fano-field_2026-07-25.md
 
 echo "RUPTURE_ABCD_CONTRACTS_OK"

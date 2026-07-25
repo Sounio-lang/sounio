@@ -221,6 +221,27 @@ Detail: `docs/research/rupture-r3-fano-phi_2026-07-25.md`.
 
 ---
 
+## 4b. R4 — multi-line Fano field (system level)
+
+R3 is the neighbourhood of **one** line. R4 is the **field of seven squares**.
+
+| ID | Fact | Status |
+|---|---|---|
+| F1–F2 | 7 lines associative; pairwise meet in 1 unit | PASS |
+| F3–F4 | cross-line non-Fano \(\|\mathrm{assoc}\|=2\); census 7+28 | PASS |
+| F5 | two-line mixing jet linear; L1-internal perturb \(\|\alpha\|=0\), cross \(\|\alpha\|=2\) | PASS |
+| F6 | worked pair shares one term | PASS |
+
+| Verdict | Meaning |
+|---|---|
+| `R4_PARTIAL` | field census + system residual — **current** |
+| `R4_GREEN` | multi-line Φ + path classes — **open** |
+
+Harness: `scripts/research/rupture_r4_fano_field_contract.py`  
+Note: `docs/research/rupture-r4-fano-field_2026-07-25.md`
+
+---
+
 ## 5. Claim ladder diagram
 
 ```text
@@ -277,8 +298,9 @@ Detail: `docs/research/rupture-r3-fano-phi_2026-07-25.md`.
 ```bash
 bash scripts/ci/rupture_abcd_contracts_gate.sh
 # expects: RUPTURE_ABCD_CONTRACTS_OK
-# R2: partial contract must PASS
-# R3: probe must RUN; verdict may be R3_OPEN until worked Φ satisfies (i)–(iii)
+# R2: PARTIAL PASS
+# R3: GREEN (path classes) + D3_identity_still_forbidden
+# R4: PARTIAL (field census + system residual)
 ```
 
 ---
