@@ -9,6 +9,7 @@ set -euo pipefail
 REPO="${REPO:-$(pwd)}"
 SOURCE_REF="${SOURCE_REF:-HEAD}"
 SOURCE_REMOTE="${SOURCE_REMOTE:-}"
+WORKER_GIT_SSL_VERIFY="${WORKER_GIT_SSL_VERIFY:-true}"
 NS="${NS:-slurm-pilot}"
 KUBECTL="${KUBECTL:-kubectl}"
 PARTITION="${PARTITION:-gpu-orangefs}"
@@ -24,13 +25,17 @@ Usage:
   SOURCE_REF=<commit-or-ref> bash slurm-jobs/epistemic-receipt-source-fresh/submit.sh
 
 Environment:
-  REPO, SOURCE_REF, SOURCE_REMOTE, NS, KUBECTL, PARTITION, NODELIST,
-  JOB_MEM, JOB_CPUS, JOB_TIME, RUN_ID
+  REPO, SOURCE_REF, SOURCE_REMOTE, WORKER_GIT_SSL_VERIFY, NS, KUBECTL,
+  PARTITION, NODELIST, JOB_MEM, JOB_CPUS, JOB_TIME, RUN_ID
 
 This is the direct-Slurm fallback for sessions where BeagleCockpit MCP is not
 loaded. It streams the worker's gate output back through srun. The worker
 clones the exact published source commit into worker-local scratch/PVC cache;
 OrangeFS is intentionally not used.
+
+Set WORKER_GIT_SSL_VERIFY=false only for a worker image with a documented
+missing CA bundle. That transport exception is reported in the job output;
+the requested commit and tree are still checked before the source build.
 EOF
 }
 
@@ -46,6 +51,7 @@ fi
 [[ $# -eq 0 ]] || fail 'usage: submit.sh [--help]'
 [[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]] || fail "unsafe RUN_ID: $RUN_ID"
 [[ "$JOB_CPUS" =~ ^[1-9][0-9]*$ ]] || fail "invalid JOB_CPUS: $JOB_CPUS"
+[[ "$WORKER_GIT_SSL_VERIFY" == 'true' || "$WORKER_GIT_SSL_VERIFY" == 'false' ]] || fail "invalid WORKER_GIT_SSL_VERIFY: $WORKER_GIT_SSL_VERIFY"
 
 SOURCE_COMMIT="$(git -C "$REPO" rev-parse "$SOURCE_REF")"
 SOURCE_TREE="$(git -C "$REPO" rev-parse "$SOURCE_COMMIT^{tree}")"
@@ -83,6 +89,7 @@ REPO="\$ROOT/repo"
 EXPECTED_COMMIT="$SOURCE_COMMIT"
 EXPECTED_TREE="$SOURCE_TREE"
 SOURCE_REMOTE="$SOURCE_REMOTE"
+WORKER_GIT_SSL_VERIFY="$WORKER_GIT_SSL_VERIFY"
 
 cleanup() {
   rm -rf "\$ROOT"
@@ -96,6 +103,7 @@ fail() {
 
 echo "source_fresh_slurm_job_id=\${SLURM_JOB_ID:-manual}"
 echo "source_remote=\$SOURCE_REMOTE"
+echo "worker_git_ssl_verify=\$WORKER_GIT_SSL_VERIFY"
 echo "requested_commit=\$EXPECTED_COMMIT"
 echo "requested_tree=\$EXPECTED_TREE"
 echo "worker_host=\$(hostname)"
@@ -105,7 +113,12 @@ rm -rf "\$ROOT"
 mkdir -p "\$REPO"
 git -C "\$REPO" init -q || fail 'git init failed'
 git -C "\$REPO" remote add origin "\$SOURCE_REMOTE" || fail 'git remote setup failed'
-git -C "\$REPO" fetch --no-tags --depth=1 origin "\$EXPECTED_COMMIT" || fail 'worker could not fetch requested source commit'
+if [[ "\$WORKER_GIT_SSL_VERIFY" == 'false' ]]; then
+  echo 'worker_git_tls_transport=unverified-ca-bundle-missing'
+  git -C "\$REPO" -c http.sslVerify=false fetch --no-tags --depth=1 origin "\$EXPECTED_COMMIT" || fail 'worker could not fetch requested source commit'
+else
+  git -C "\$REPO" fetch --no-tags --depth=1 origin "\$EXPECTED_COMMIT" || fail 'worker could not fetch requested source commit'
+fi
 git -C "\$REPO" checkout -q --detach FETCH_HEAD || fail 'worker could not checkout requested source commit'
 
 [[ "\$(git -C "\$REPO" rev-parse HEAD)" == "\$EXPECTED_COMMIT" ]] || fail 'worker HEAD does not match requested commit'
