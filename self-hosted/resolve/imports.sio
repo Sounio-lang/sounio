@@ -65,6 +65,262 @@ pub struct ModuleRegistry {
     overflow: bool,
 }
 
+// ModuleAuthority is intentionally separate from ModuleRegistry. The registry
+// carries public exports for resolver/linker consumers; this table preserves
+// the exact candidate selected by a caller import before visibility decides
+// whether that candidate is accessible.
+pub struct ModuleBinding {
+    owner_module_id: i64,
+    local_name: Name,
+    target_module_id: i64,
+    target_name: Name,
+    kind: SymbolKind,
+}
+
+pub struct ModuleAuthority {
+    bindings: [ModuleBinding; 4096],
+    binding_count: i64,
+    overflow: bool,
+    ambiguous: bool,
+    unresolved: bool,
+}
+
+fn empty_module_binding() -> ModuleBinding {
+    ModuleBinding {
+        owner_module_id: 0 - 1,
+        local_name: Name { buf: [0; 128], len: 0 },
+        target_module_id: 0 - 1,
+        target_name: Name { buf: [0; 128], len: 0 },
+        kind: SymbolKind::SymVariable,
+    }
+}
+
+pub fn module_authority_alloc() -> *mut ModuleAuthority with Alloc {
+    // Keep the authority heap-owned. Passing its 4096-entry backing array by
+    // value would recreate the large-aggregate ABI hazard in the bootstrap.
+    heap_alloc(2097152) as *mut ModuleAuthority
+}
+
+pub fn module_authority_init_in_place(authority: *mut ModuleAuthority) with Mut, Panic, Div {
+    // Initialize one slot at a time. The authority lives on the heap precisely
+    // so bootstrap code never has to materialize its 1MiB-plus backing array
+    // as an aggregate temporary.
+    var i: i64 = 0
+    while i < 4096 {
+        (*authority).bindings[i as usize] = empty_module_binding()
+        i = i + 1
+    }
+    (*authority).binding_count = 0
+    (*authority).overflow = false
+    (*authority).ambiguous = false
+    (*authority).unresolved = false
+}
+
+fn module_binding_same_target(a: ModuleBinding, target_module_id: i64, target_name: Name, kind: SymbolKind) -> bool with Mut, Panic, Div {
+    a.target_module_id == target_module_id && name_eq(a.target_name, target_name) && a.kind == kind
+}
+
+pub fn module_authority_add_binding(
+    authority: *mut ModuleAuthority,
+    owner_module_id: i64,
+    local_name: Name,
+    target_module_id: i64,
+    target_name: Name,
+    kind: SymbolKind
+) with Mut, Panic, Div {
+    if name_is_empty(local_name) || name_is_empty(target_name) {
+        return
+    }
+    var i: i64 = 0
+    while i < (*authority).binding_count {
+        let prior = (*authority).bindings[i as usize]
+        if prior.owner_module_id == owner_module_id
+            && name_eq(prior.local_name, local_name)
+            && prior.kind == kind {
+            if !module_binding_same_target(prior, target_module_id, target_name, kind) {
+                (*authority).ambiguous = true
+            }
+            return
+        }
+        i = i + 1
+    }
+    if (*authority).binding_count >= 4096 {
+        (*authority).overflow = true
+        return
+    }
+    let slot = (*authority).binding_count
+    (*authority).bindings[slot as usize] = ModuleBinding {
+        owner_module_id: owner_module_id,
+        local_name: local_name,
+        target_module_id: target_module_id,
+        target_name: target_name,
+        kind: kind,
+    }
+    (*authority).binding_count = slot + 1
+}
+
+pub fn module_authority_find_binding(
+    authority: *mut ModuleAuthority,
+    owner_module_id: i64,
+    local_name: Name,
+    kind: SymbolKind
+) -> i64 with Mut, Panic, Div {
+    if authority == (0 as *mut ModuleAuthority) || (*authority).overflow || (*authority).ambiguous || (*authority).unresolved {
+        return 0 - 1
+    }
+    var i: i64 = 0
+    while i < (*authority).binding_count {
+        let binding = (*authority).bindings[i as usize]
+        if binding.owner_module_id == owner_module_id
+            && binding.kind == kind
+            && name_eq(binding.local_name, local_name) {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+pub fn module_authority_is_valid(authority: *mut ModuleAuthority) -> bool with Mut, Panic, Div {
+    authority != (0 as *mut ModuleAuthority) && !(*authority).overflow && !(*authority).ambiguous && !(*authority).unresolved
+}
+
+pub fn module_authority_has_unresolved_import(authority: *mut ModuleAuthority) -> bool with Mut, Panic, Div {
+    authority != (0 as *mut ModuleAuthority) && (*authority).unresolved
+}
+
+pub fn module_authority_binding_target_module(authority: *mut ModuleAuthority, binding_idx: i64) -> i64 with Mut, Panic, Div {
+    if authority == (0 as *mut ModuleAuthority) || binding_idx < 0 || binding_idx >= (*authority).binding_count {
+        0 - 1
+    } else {
+        (*authority).bindings[binding_idx as usize].target_module_id
+    }
+}
+
+pub fn module_authority_binding_target_name(authority: *mut ModuleAuthority, binding_idx: i64) -> Name with Mut, Panic, Div {
+    if authority == (0 as *mut ModuleAuthority) || binding_idx < 0 || binding_idx >= (*authority).binding_count {
+        Name { buf: [0; 128], len: 0 }
+    } else {
+        (*authority).bindings[binding_idx as usize].target_name
+    }
+}
+
+fn module_authority_bind_variant(
+    authority: *mut ModuleAuthority,
+    owner_module_id: i64,
+    local_name: Name,
+    target_module_id: i64,
+    enum_name: Name,
+    variants: Option<Box<VariantDefList>>
+) -> bool with Mut, Panic, Div, Alloc {
+    match variants {
+        None => false
+        Some(list) => {
+            var found = false
+            if name_eq((*list).head.name, local_name) {
+                module_authority_add_binding(
+                    authority,
+                    owner_module_id,
+                    local_name,
+                    target_module_id,
+                    enum_name,
+                    SymbolKind::SymEnumVariant
+                )
+                found = true
+            }
+            if module_authority_bind_variant(
+                authority,
+                owner_module_id,
+                local_name,
+                target_module_id,
+                enum_name,
+                (*list).tail
+            ) {
+                found = true
+            }
+            found
+        }
+    }
+}
+
+fn module_authority_bind_name_from_items(
+    authority: *mut ModuleAuthority,
+    owner_module_id: i64,
+    target_module_id: i64,
+    local_name: Name,
+    items: Option<Box<ItemList>>
+) -> bool with Mut, Panic, Div, Alloc {
+    match items {
+        None => false
+        Some(list) => {
+            let item = (*list).head
+            var found = false
+            if item.kind == ItemKind::ItemFn && name_eq(item.name, local_name) {
+                module_authority_add_binding(authority, owner_module_id, local_name, target_module_id, item.name, SymbolKind::SymFunction)
+                found = true
+            } else if item.kind == ItemKind::ItemStruct && name_eq(item.name, local_name) {
+                module_authority_add_binding(authority, owner_module_id, local_name, target_module_id, item.name, SymbolKind::SymStruct)
+                found = true
+            } else if item.kind == ItemKind::ItemEnum {
+                if name_eq(item.name, local_name) {
+                    module_authority_add_binding(authority, owner_module_id, local_name, target_module_id, item.name, SymbolKind::SymEnum)
+                    found = true
+                }
+                match item.enum_def {
+                    None => {}
+                    Some(def) => {
+                        if module_authority_bind_variant(
+                            authority,
+                            owner_module_id,
+                            local_name,
+                            target_module_id,
+                            item.name,
+                            (*def).variants
+                        ) {
+                            found = true
+                        }
+                    }
+                }
+            }
+            if module_authority_bind_name_from_items(
+                authority,
+                owner_module_id,
+                target_module_id,
+                local_name,
+                (*list).tail
+            ) {
+                found = true
+            }
+            found
+        }
+    }
+}
+
+pub fn module_authority_bind_import_name(
+    authority: *mut ModuleAuthority,
+    owner_module_id: i64,
+    target_module_id: i64,
+    local_name: Name,
+    target_items: Option<Box<ItemList>>
+) with Mut, Panic, Div, Alloc {
+    if target_module_id < 0 {
+        (*authority).unresolved = true
+        return
+    }
+    if !module_authority_bind_name_from_items(
+        authority,
+        owner_module_id,
+        target_module_id,
+        local_name,
+        target_items
+    ) {
+        // A named use declaration is evidence, even when its requested
+        // symbol is absent. Never allow that declaration to fall through to
+        // an unrelated global definition with the same spelling.
+        (*authority).unresolved = true
+    }
+}
+
 fn empty_module_export() -> ModuleExport {
     ModuleExport { name: Name { buf: [0; 128], len: 0 }, kind: SymbolKind::SymVariable }
 }

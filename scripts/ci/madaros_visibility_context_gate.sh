@@ -123,6 +123,75 @@ expect_context_runtime() {
   }
 }
 
+expect_public_facade_runtime() {
+  expect_context_runtime public-facade \
+    "$FIXTURES/public_facade_main.sio" \
+    'PASS public_facade_module_authority'
+}
+
+expect_local_shadow_runtime() {
+  expect_context_runtime local-shadow \
+    "$FIXTURES/local_binding_shadows_direct_import_main.sio" \
+    'PASS local_binding_shadows_direct_import'
+}
+
+expect_context_clean_check() {
+  local label="$1"
+  local source="$2"
+  local log="$WORK/$label.check.log"
+  local rc=0
+
+  set +e
+  MADAROS_RAW_BIN="$RAW_MADAROS" "$MADAROS" check "$source" >"$log" 2>&1
+  rc=$?
+  set -e
+
+  is_fatal_log "$log" && {
+    cat "$log" >&2
+    fail "$label produced a fatal compiler log"
+  }
+  [[ "$rc" -eq 0 ]] || {
+    cat "$log" >&2
+    fail "$label must check clean, got rc=$rc"
+  }
+  [[ "$(count_marker 'error[E' "$log")" -eq 0 ]] || {
+    cat "$log" >&2
+    fail "$label checked clean while still emitting compiler diagnostics"
+  }
+  grep -Fq 'check: OK' "$log" || {
+    cat "$log" >&2
+    fail "$label returned 0 without the check success marker"
+  }
+}
+
+expect_unresolved_named_import_rejection() {
+  local log="$WORK/unresolved-named-import.log"
+  local rc=0
+
+  set +e
+  MADAROS_RAW_BIN="$RAW_MADAROS" "$MADAROS" check \
+    "$FIXTURES/unresolved_named_import_main.sio" >"$log" 2>&1
+  rc=$?
+  set -e
+
+  is_fatal_log "$log" && {
+    cat "$log" >&2
+    fail 'unresolved named import produced a fatal compiler log'
+  }
+  [[ "$rc" -eq 1 ]] || {
+    cat "$log" >&2
+    fail "unresolved named import must reject with rc=1, got rc=$rc"
+  }
+  [[ "$(count_marker 'error[E' "$log")" -eq 0 ]] || {
+    cat "$log" >&2
+    fail 'unresolved named import must fail at authority construction, not bind an unrelated global symbol'
+  }
+  grep -Fqx 'run_check_mode: module authority has unresolved named import' "$log" || {
+    cat "$log" >&2
+    fail 'unresolved named import did not emit the authority receipt'
+  }
+}
+
 expect_private_rejection() {
   local label="$1"
   local source="$2"
@@ -174,8 +243,13 @@ if [[ "$single_state" == resolved ]]; then
     'PASS duplicate_private_single_context'
   expect_context_runtime matrix18 "$FIXTURES/duplicate_private_18_main.sio" \
     'PASS duplicate_private_18_context'
+  expect_public_facade_runtime
+  expect_local_shadow_runtime
+  expect_context_clean_check local-value-shadow "$FIXTURES/local_value_shadows_import_main.sio"
   runtime_state="pass"
 fi
+
+expect_unresolved_named_import_rejection
 
 expect_private_rejection private-fn \
   "$ROOT_DIR/tests/multimodule/visibility_fn_private_main.sio" E175 \
@@ -186,8 +260,17 @@ expect_private_rejection private-struct \
 expect_private_rejection private-enum \
   "$ROOT_DIR/tests/multimodule/visibility_enum_private_main.sio" E177 \
   'enum constructor is private in its defining module'
+expect_private_rejection private-generic \
+  "$FIXTURES/private_generic_import_main.sio" E175 \
+  'function is private in its defining module'
+expect_private_rejection private-function-value \
+  "$FIXTURES/private_function_value_main.sio" E175 \
+  'function is private in its defining module'
+expect_private_rejection private-enum-struct-variant \
+  "$FIXTURES/private_enum_struct_variant_main.sio" E177 \
+  'enum constructor is private in its defining module'
 
-echo "[madaros-visibility-context] receipt issue=854 context_state=$single_state runtime_state=$runtime_state single_e175=$([[ "$single_state" == baseline ]] && echo 1 || echo 0) matrix_e175=$([[ "$matrix_state" == baseline ]] && echo 18 || echo 0) true_private_fn=E175 true_private_struct=E176 true_private_enum=E177"
+echo "[madaros-visibility-context] receipt issue=854 context_state=$single_state runtime_state=$runtime_state single_e175=$([[ "$single_state" == baseline ]] && echo 1 || echo 0) matrix_e175=$([[ "$matrix_state" == baseline ]] && echo 18 || echo 0) unresolved_named_import=authority-reject local_shadow=exact-local local_value_shadow=env-local true_private_fn=E175 true_private_struct=E176 true_private_enum=E177 private_generic=E175 private_function_value=E175 private_enum_struct_variant=E177"
 
 if [[ "$EXPECT" == baseline && "$single_state" != baseline ]]; then
   fail "expected the pinned baseline, got $single_state"
