@@ -8,6 +8,7 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 
 | operation | 1M rows | Sounio ms | pandas ms | Sounio/pandas | before |
 |---|---|---|---|---|---|
+| bigframe_ml DECISION STUMP fit+predict (depth-1 CART, histogram) (1M rows, 1000 keys) | | ~22 | ~300 | **0.07x — wins 14x** | one-pass histogram + threshold scan vs groupby.apply threshold search |
 | bigframe_ml PCA explained-variance-ratio (closed-form 2x2 eigen) (1M rows, 1000 keys) | | ~20 | ~142 | **0.14x — wins 7x** | one-pass covariance + 2x2 eigendecomposition vs groupby.apply(eigvalsh) |
 | bigframe_ml CONFUSION-MATRIX cells (TP/FP/FN/TN) (1M rows, 1000 keys) | | ~10 | ~55 | **wins** | one-pass confusion counts vs groupby.apply |
 | bigframe_ml NEAREST-CENTROID fit+predict (closed-form) (1M rows, 1000 keys) | | ~16 | ~75 | **0.22x — wins 4.6x** | one-pass per-class centroid + nearest-centroid predict vs groupby.apply |

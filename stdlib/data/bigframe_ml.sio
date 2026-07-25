@@ -663,3 +663,81 @@ pub fn bf_confusion_fp_by(src: &BigFrame, key_col: i64, yt_col: i64, yp_col: i64
 pub fn bf_confusion_fn_by(src: &BigFrame, key_col: i64, yt_col: i64, yp_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_confusion(src, key_col, yt_col, yp_col, 2) }
 /// Per-group confusion TRUE NEGATIVES, broadcast. NATIVE + lean_single.
 pub fn bf_confusion_tn_by(src: &BigFrame, key_col: i64, yt_col: i64, yp_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_confusion(src, key_col, yt_col, yp_col, 3) }
+
+/// Per-group DECISION STUMP — the depth-1 CART tree, the atom of the tree/ensemble family
+/// (columns key, x∈[0,vmax] integer-valued, y∈{0,1}). For each key it histograms (pos,neg) by
+/// x-value in one pass, then finds the threshold t and direction that MAXIMIZE training accuracy
+/// (predict 1 if x>=t, or the flipped rule). Closed scan over the value range -> wins. modes:
+/// 0 = best training accuracy, 1 = best threshold t, 2 = predicted class per row under the best
+/// stump. Broadcast. O(n + keys*vmax). NATIVE + lean_single only.
+fn bf_group_stump(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, vmax: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var totp: [f64; 1024] = [0.0; 1024]
+    var totn: [f64; 1024] = [0.0; 1024]
+    var bacc: [f64; 1024] = [0.0; 1024]
+    var bthr: [f64; 1024] = [0.0; 1024]
+    var bdir: [f64; 1024] = [0.0; 1024]
+    var seen: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || x_col < 0 || x_col >= nc || y_col < 0 || y_col >= nc || n <= 0 || vmax < 1 || vmax > 4095 { return out }
+    let v = vmax + 1
+    let hp = heap_alloc(1024 * v * 8) as *mut i64
+    let hn = heap_alloc(1024 * v * 8) as *mut i64
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let xp = bf_col_ptr(src, x_col) as *mut f64
+    let yp = bf_col_ptr(src, y_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        var xb = read_f64(xp, i) as i64
+        if xb < 0 { xb = 0 }; if xb > vmax { xb = vmax }
+        if k >= 0 && k < 1024 {
+            seen[k] = 1.0
+            let idx = k * v + xb
+            if read_f64(yp, i) > 0.5 { write_i64(hp, idx, read_i64(hp, idx) + 1); totp[k] = totp[k] + 1.0 } else { write_i64(hn, idx, read_i64(hn, idx) + 1); totn[k] = totn[k] + 1.0 } }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        if seen[g] > 0.5 {
+            let tp_all = totp[g]; let tn_all = totn[g]; let tot = tp_all + tn_all
+            var best = 0.0; var bt = 0.0; var bd = 1.0
+            // cumulative pos/neg with x < t, scanning t from 0..v
+            var cp = 0.0; var cnn = 0.0
+            var t: i64 = 0
+            while t <= v {
+                // predict 1 if x>=t: TP = tp_all-cp, TN = cnn ; correct = (tp_all-cp)+cnn
+                let acc_ge = (tp_all - cp + cnn) / tot
+                // predict 1 if x<t:  TP = cp, TN = tn_all-cnn ; correct = cp + (tn_all-cnn)
+                let acc_lt = (cp + tn_all - cnn) / tot
+                if acc_ge > best { best = acc_ge; bt = t as f64; bd = 1.0 }
+                if acc_lt > best { best = acc_lt; bt = t as f64; bd = 0.0 }
+                if t < v { let idx = g * v + t; cp = cp + read_i64(hp, idx) as f64; cnn = cnn + read_i64(hn, idx) as f64 }
+                t = t + 1
+            }
+            bacc[g] = best; bthr[g] = bt; bdir[g] = bd
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 && seen[k] > 0.5 {
+            if mode == 0 { write_f64(op, i, bacc[k]) }
+            else { if mode == 1 { write_f64(op, i, bthr[k]) }
+            else { let xb = read_f64(xp, i); let ge = xb >= bthr[k]; if bdir[k] > 0.5 { if ge { write_f64(op, i, 1.0) } else { write_f64(op, i, 0.0) } } else { if ge { write_f64(op, i, 0.0) } else { write_f64(op, i, 1.0) } } } }
+        } else { write_f64(op, i, 0.0) }
+        i = i + 1
+    }
+    heap_free(hp as *mut i8); heap_free(hn as *mut i8)
+    out
+}
+/// Per-group decision-stump TRAINING ACCURACY, broadcast. NATIVE + lean_single.
+pub fn bf_stump_accuracy_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_stump(src, key_col, x_col, y_col, vmax, 0) }
+/// Per-group decision-stump BEST THRESHOLD, broadcast. NATIVE + lean_single.
+pub fn bf_stump_threshold_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_stump(src, key_col, x_col, y_col, vmax, 1) }
+/// Per-group decision-stump PREDICTED CLASS, broadcast. NATIVE + lean_single.
+pub fn bf_stump_predict_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_stump(src, key_col, x_col, y_col, vmax, 2) }
