@@ -5701,10 +5701,16 @@ impl Lowerer {
     }
 
     fn emit_variance_scale(self, variance_reg: i64, scale_reg: i64) -> (Lowerer, i64) with Mut, Panic, Div {
-        let pair_sq = self.fresh_reg()
-        var lo = pair_sq.0
+        // Snapshot scale into a private temp so later ops cannot clobber it mid-formula.
+        let snap_pair = self.fresh_reg()
+        var lo = snap_pair.0
+        let scale_snap = snap_pair.1
+        lo = lo.emit(ir_copy(scale_snap, scale_reg))
+        lo = lo.emit(ir_mark_float_reg(scale_snap))
+        let pair_sq = lo.fresh_reg()
+        lo = pair_sq.0
         let scale_sq = pair_sq.1
-        lo = lo.emit(ir_binop_typed(scale_sq, scale_reg, BinaryOp::OpMul, scale_reg, true, true))
+        lo = lo.emit(ir_binop_typed(scale_sq, scale_snap, BinaryOp::OpMul, scale_snap, true, true))
         lo = lo.emit(ir_mark_float_reg(scale_sq))
         let pair_dst = lo.fresh_reg()
         lo = pair_dst.0
@@ -5712,6 +5718,76 @@ impl Lowerer {
         lo = lo.emit(ir_binop_typed(dst, scale_sq, BinaryOp::OpMul, variance_reg, true, true))
         lo = lo.emit(ir_mark_float_reg(dst))
         (lo, dst)
+    }
+
+    fn emit_variance_scale_const(self, variance_reg: i64, scale: f64) -> (Lowerer, i64) with Mut, Panic, Div {
+        let c = self.emit_f64_const(scale)
+        c.0.emit_variance_scale(variance_reg, c.1)
+    }
+
+    // Independent FO product: Var(a*b) = b² Va + a² Vb.
+    // Fully inlined (no nested emit_variance_scale pair bindings) because the
+    // two-call form collapsed at runtime to 2·a²·Vb — both addends became the
+    // right-hand term (measured 2026-07-25: av=2,bv=3 → 0.020 instead of 0.0325).
+    fn emit_variance_independent_product(
+        self,
+        lhs_val: i64,
+        rhs_val: i64,
+        lv: i64,
+        rv: i64
+    ) -> (Lowerer, i64) with Mut, Panic, Div {
+        // Private copies of all four inputs first.
+        let a_p = self.fresh_reg()
+        var lo = a_p.0
+        let a = a_p.1
+        lo = lo.emit(ir_copy(a, lhs_val))
+        lo = lo.emit(ir_mark_float_reg(a))
+        let b_p = lo.fresh_reg()
+        lo = b_p.0
+        let b = b_p.1
+        lo = lo.emit(ir_copy(b, rhs_val))
+        lo = lo.emit(ir_mark_float_reg(b))
+        let va_p = lo.fresh_reg()
+        lo = va_p.0
+        let va = va_p.1
+        lo = lo.emit(ir_copy(va, lv))
+        lo = lo.emit(ir_mark_float_reg(va))
+        let vb_p = lo.fresh_reg()
+        lo = vb_p.0
+        let vb = vb_p.1
+        lo = lo.emit(ir_copy(vb, rv))
+        lo = lo.emit(ir_mark_float_reg(vb))
+        // bb = b*b
+        let bb_p = lo.fresh_reg()
+        lo = bb_p.0
+        let bb = bb_p.1
+        lo = lo.emit(ir_binop_typed(bb, b, BinaryOp::OpMul, b, true, true))
+        lo = lo.emit(ir_mark_float_reg(bb))
+        // term_l = bb * va = b² Va
+        let t1_p = lo.fresh_reg()
+        lo = t1_p.0
+        let t1 = t1_p.1
+        lo = lo.emit(ir_binop_typed(t1, bb, BinaryOp::OpMul, va, true, true))
+        lo = lo.emit(ir_mark_float_reg(t1))
+        // aa = a*a
+        let aa_p = lo.fresh_reg()
+        lo = aa_p.0
+        let aa = aa_p.1
+        lo = lo.emit(ir_binop_typed(aa, a, BinaryOp::OpMul, a, true, true))
+        lo = lo.emit(ir_mark_float_reg(aa))
+        // term_r = aa * vb = a² Vb
+        let t2_p = lo.fresh_reg()
+        lo = t2_p.0
+        let t2 = t2_p.1
+        lo = lo.emit(ir_binop_typed(t2, aa, BinaryOp::OpMul, vb, true, true))
+        lo = lo.emit(ir_mark_float_reg(t2))
+        // result = term_l + term_r
+        let r_p = lo.fresh_reg()
+        lo = r_p.0
+        let r = r_p.1
+        lo = lo.emit(ir_binop_typed(r, t1, BinaryOp::OpAdd, t2, true, true))
+        lo = lo.emit(ir_mark_float_reg(r))
+        (lo, r)
     }
 
     fn expr_is_same_ident_ref(self, lhs: &Option<Box<Expr>>, rhs: &Option<Box<Expr>>) -> bool with Mut, Panic, Div {
@@ -5731,6 +5807,134 @@ impl Lowerer {
             _ => {}
         }
         false
+    }
+
+    // Fully correlated FO for c·x·x: f = c x² ⇒ Var = (2 c x)² Var(x) = 4 c² x² Var(x).
+    fn emit_variance_const_square_ident(
+        self,
+        scale: f64,
+        x_name: Name
+    ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let v_pair = self.lower_knowledge_variance_for_ident(x_name)
+        var lo = v_pair.0
+        let lv0 = v_pair.1
+        let lv_pair = if lv0 >= 0 { (lo, lv0) } else { lo.emit_zero_variance() }
+        lo = lv_pair.0
+        let lv = lv_pair.1
+        // 4 Var(x) via scale(Var, 2)
+        let two_pair = lo.emit_f64_const(2.0)
+        lo = two_pair.0
+        let four_v_pair = lo.emit_variance_scale(lv, two_pair.1)
+        lo = four_v_pair.0
+        // 4 x² Var(x)
+        let x_reg = lo.lookup_local(x_name)
+        let x_pair = if x_reg >= 0 {
+            (lo, x_reg)
+        } else {
+            lo.emit_f64_const(0.0)
+        }
+        lo = x_pair.0
+        let four_x2_pair = lo.emit_variance_scale(four_v_pair.1, x_pair.1)
+        lo = four_x2_pair.0
+        // c² · 4 x² Var(x)
+        lo.emit_variance_scale_const(four_x2_pair.1, scale)
+    }
+
+    // Try correlated FO for (c*x)*x or x*(c*x). Returns (lo, reg) with reg>=0 on hit.
+    fn try_variance_const_square_chain(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        // Pattern A: (c * x) * x  or  (x * c) * x
+        match (*e).left {
+            Some(le) => {
+                if (*le).kind == ExprKind::ExprBinary && (*le).bin_op == BinaryOp::OpMul {
+                    match (*le).left {
+                        Some(lle) => {
+                            match (*le).right {
+                                Some(lre) => {
+                                    match (*e).right {
+                                        Some(re) => {
+                                            if (*re).kind == ExprKind::ExprIdent {
+                                                // c * x  where right of outer is x
+                                                if (*lle).kind == ExprKind::ExprFloatLit && (*lre).kind == ExprKind::ExprIdent {
+                                                    if ir_name_eq((*lre).name, (*re).name) {
+                                                        return self.emit_variance_const_square_ident((*lle).float_val, (*re).name)
+                                                    }
+                                                }
+                                                if (*lle).kind == ExprKind::ExprIntLit && (*lre).kind == ExprKind::ExprIdent {
+                                                    if ir_name_eq((*lre).name, (*re).name) {
+                                                        return self.emit_variance_const_square_ident((*lle).int_val as f64, (*re).name)
+                                                    }
+                                                }
+                                                // x * c  where right of outer is x
+                                                if (*lre).kind == ExprKind::ExprFloatLit && (*lle).kind == ExprKind::ExprIdent {
+                                                    if ir_name_eq((*lle).name, (*re).name) {
+                                                        return self.emit_variance_const_square_ident((*lre).float_val, (*re).name)
+                                                    }
+                                                }
+                                                if (*lre).kind == ExprKind::ExprIntLit && (*lle).kind == ExprKind::ExprIdent {
+                                                    if ir_name_eq((*lle).name, (*re).name) {
+                                                        return self.emit_variance_const_square_ident((*lre).int_val as f64, (*re).name)
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+        // Pattern B: x * (c * x)  or  x * (x * c)
+        match (*e).right {
+            Some(re) => {
+                if (*re).kind == ExprKind::ExprBinary && (*re).bin_op == BinaryOp::OpMul {
+                    match (*re).left {
+                        Some(rle) => {
+                            match (*re).right {
+                                Some(rre) => {
+                                    match (*e).left {
+                                        Some(le) => {
+                                            if (*le).kind == ExprKind::ExprIdent {
+                                                if (*rle).kind == ExprKind::ExprFloatLit && (*rre).kind == ExprKind::ExprIdent {
+                                                    if ir_name_eq((*rre).name, (*le).name) {
+                                                        return self.emit_variance_const_square_ident((*rle).float_val, (*le).name)
+                                                    }
+                                                }
+                                                if (*rle).kind == ExprKind::ExprIntLit && (*rre).kind == ExprKind::ExprIdent {
+                                                    if ir_name_eq((*rre).name, (*le).name) {
+                                                        return self.emit_variance_const_square_ident((*rle).int_val as f64, (*le).name)
+                                                    }
+                                                }
+                                                if (*rre).kind == ExprKind::ExprFloatLit && (*rle).kind == ExprKind::ExprIdent {
+                                                    if ir_name_eq((*rle).name, (*le).name) {
+                                                        return self.emit_variance_const_square_ident((*rre).float_val, (*le).name)
+                                                    }
+                                                }
+                                                if (*rre).kind == ExprKind::ExprIntLit && (*rle).kind == ExprKind::ExprIdent {
+                                                    if ir_name_eq((*rle).name, (*le).name) {
+                                                        return self.emit_variance_const_square_ident((*rre).int_val as f64, (*le).name)
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+        (self, -1)
     }
 
     fn lower_knowledge_variance_for_ident(self, name: Name) -> (Lowerer, i64) with Mut, Panic, Div, Alloc {
@@ -5864,40 +6068,48 @@ impl Lowerer {
                     lo = x_pair.0
                     return lo.emit_variance_scale(four_v_pair.1, x_pair.1)
                 }
-                // Constant * x: Var(c*x) = c² Var(x) only (no spurious Var(c)).
-                let left_is_lit = match (*e).left {
+                // Constant * x: Var(c*x) = c² Var(x) only — read c from AST, not re-lowered regs.
+                match (*e).left {
                     Some(le) => {
-                        (*le).kind == ExprKind::ExprFloatLit || (*le).kind == ExprKind::ExprIntLit
+                        if (*le).kind == ExprKind::ExprFloatLit {
+                            return lo.emit_variance_scale_const(rv, (*le).float_val)
+                        }
+                        if (*le).kind == ExprKind::ExprIntLit {
+                            return lo.emit_variance_scale_const(rv, (*le).int_val as f64)
+                        }
                     }
-                    _ => false,
+                    _ => {}
                 }
-                let right_is_lit = match (*e).right {
+                match (*e).right {
                     Some(re) => {
-                        (*re).kind == ExprKind::ExprFloatLit || (*re).kind == ExprKind::ExprIntLit
+                        if (*re).kind == ExprKind::ExprFloatLit {
+                            return lo.emit_variance_scale_const(lv, (*re).float_val)
+                        }
+                        if (*re).kind == ExprKind::ExprIntLit {
+                            return lo.emit_variance_scale_const(lv, (*re).int_val as f64)
+                        }
                     }
-                    _ => false,
+                    _ => {}
                 }
-                if left_is_lit && !right_is_lit {
-                    let lhs_val_pair = lo.lower_opt_expr_ref(&(*e).left)
-                    lo = lhs_val_pair.0
-                    return lo.emit_variance_scale(rv, lhs_val_pair.1)
+                // Correlated chain: (c*x)*x or x*(c*x) → Var = 4 c² x² Var(x).
+                // Independent FO on these factors undercounts (0.320 vs 0.640 for 4*x*x).
+                let corr_pair = lo.try_variance_const_square_chain(e)
+                if corr_pair.1 >= 0 {
+                    return corr_pair
                 }
-                if right_is_lit && !left_is_lit {
-                    let rhs_val_pair = lo.lower_opt_expr_ref(&(*e).right)
-                    lo = rhs_val_pair.0
-                    return lo.emit_variance_scale(lv, rhs_val_pair.1)
-                }
+                lo = corr_pair.0
+                // Independent product: Var(a*b) = b² Va + a² Vb (inlined helper).
+                // Capture value reg ids into plain i64 locals before the next lower
+                // so a subsequent pair binding cannot clobber the left id.
                 let lhs_val_pair = lo.lower_opt_expr_ref(&(*e).left)
                 lo = lhs_val_pair.0
-                let lhs_val = lhs_val_pair.1
+                let lhs_v = lhs_val_pair.1
                 let rhs_val_pair = lo.lower_opt_expr_ref(&(*e).right)
                 lo = rhs_val_pair.0
-                let rhs_val = rhs_val_pair.1
-                let term_l_pair = lo.emit_variance_scale(lv, rhs_val)
-                lo = term_l_pair.0
-                let term_r_pair = lo.emit_variance_scale(rv, lhs_val)
-                lo = term_r_pair.0
-                return lo.emit_variance_add(term_l_pair.1, term_r_pair.1)
+                let rhs_v = rhs_val_pair.1
+                let lv_cap = lv
+                let rv_cap = rv
+                return lo.emit_variance_independent_product(lhs_v, rhs_v, lv_cap, rv_cap)
             }
             return (lo, -1)
         }
