@@ -16,6 +16,7 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 | per-group paired inference: paired t-test / Cohen's dz / mean-diff 95% CI (1M rows, 1000 keys) | | ~16 | ~103 | **0.15x — wins 6.6x** | one-pass over d=x-y + t_two_tail/t_quantile vs groupby.apply ttest_rel |
 | per-group two-proportion z-test + Wald CI (1M rows, 1000 keys, 2 groups, binary outcome) | | ~17 | ~457 | **0.04x — wins 28x** | one-pass counts + local normal Phi vs groupby.apply |
 | per-group variance homogeneity: Bartlett + Levene (1M rows, 1000 keys, 4 groups) | | ~38 | ~749 | **0.05x — wins 20x** | one/two-pass moments + chi2_sf/f_sf vs groupby.apply |
+| per-group normality: D'Agostino-Pearson normaltest (K2, p, skew/kurt z) (1M rows, 1000 keys) | | ~20 | ~88 | **0.22x — wins 4.4x** | one moment pass + D'Agostino transform vs groupby.apply |
 | two-sample tests: welch/cohens_d/glass/pooled_sd/point_biserial + mannwhitney_u/cles/rank_biserial/ks (1M rows, 1000 keys, 2 groups) | | ~18 | ~430 | **0.04x — wins 24x** | one-pass moments / group-split histogram; pandas = scipy + groupby.apply |
 | col_sum (8-accumulator ILP) | | 1.44 | 0.55 | **2.6x** | 3.9x |
 | col_mean (via 8-acc sum) | | 2.05 | 1.00 | **2.1x** | 2.3x |
