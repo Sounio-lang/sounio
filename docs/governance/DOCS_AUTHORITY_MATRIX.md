@@ -699,6 +699,8 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.erosion-hebbian-result | historical | docs/research/erosion-hebbian-result.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.fano-arcs-blocking-sounio-note | historical | docs/research/fano-arcs-blocking-sounio-note.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.fisher-matrix-fix | historical | docs/research/FISHER_MATRIX_FIX.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.functor-f-jet-functoriality-falsifiers-2026-07-25 | historical | docs/research/functor_f_jet_functoriality_falsifiers_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.functor-f-jet-functoriality-spec-2026-07-25 | historical | docs/research/functor_f_jet_functoriality_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.furey-charge-g2 | historical | docs/research/furey_charge_g2.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.furey-octonion-generation | historical | docs/research/furey_octonion_generation.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.gpu-swarm-coordination-2026-07-05 | historical | docs/research/gpu-swarm-coordination-2026-07-05.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -800,6 +802,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.octonion-pbpk | historical | docs/research/octonion_pbpk.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.octonion-validation-report | historical | docs/research/OCTONION_VALIDATION_REPORT.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.onn-benchmark-analysis | historical | docs/research/ONN_BENCHMARK_ANALYSIS.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.particle-exp123-vertical-2026-07-25 | historical | docs/research/particle_exp123_vertical_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.particle-physics-epistemic-audit | historical | docs/research/particle_physics_epistemic_audit.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.pb-highwidth-microkernel-2026-06-23 | historical | docs/research/pb-highwidth-microkernel-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.petitot-semantic-potential | historical | docs/research/petitot-semantic-potential.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -921,6 +924,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.superpowers.specs.2026-07-19-linalg-parity-design | repo_only | docs/superpowers/specs/2026-07-19-linalg-parity-design.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.superpowers.specs.2026-07-19-special-scipy-parity-design | repo_only | docs/superpowers/specs/2026-07-19-special-scipy-parity-design.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.superpowers.specs.2026-07-19-stats-dist-parity-design | repo_only | docs/superpowers/specs/2026-07-19-stats-dist-parity-design.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.superpowers.specs.2026-07-25-associator-gum-variance-design | repo_only | docs/superpowers/specs/2026-07-25-associator-gum-variance-design.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.test-infrastructure-v2 | repo_only | docs/test-infrastructure-v2.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.testing | repo_only | docs/TESTING.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.theory.epistemic-monotonicity | repo_only | docs/theory/epistemic_monotonicity.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
