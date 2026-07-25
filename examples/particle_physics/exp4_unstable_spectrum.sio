@@ -1,0 +1,243 @@
+// examples/particle_physics/exp4_unstable_spectrum.sio
+//
+// EXP4 — Unstable spectrum: NonUnitary is not a Z one-off (N1)
+//
+// Axioms for deficit d(s) of any unstable species (Z, W):
+//   A1  d(s_pole) ≈ 1
+//   A2  d(s) → 0 far off pole
+//   A3  peak is unique among sampled off-pole points
+//   A4  high wing monotone: mid > hi > thr
+//   A5  unitarity threshold √s > M
+//   A6  particle id tags correct (NU_Z / NU_W)
+//
+// Also forces `with NonUnitary` via Z peak xsec (compiler-enforced).
+//
+// Run:
+//   export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
+//   export SOUNIO_SOUC_ENGINE=lean_single
+//   ./bin/souc run examples/particle_physics/exp4_unstable_spectrum.sio
+// Gate:
+//   bash scripts/ci/particle_unstable_effect_gate.sh
+
+use particle_physics::sm_params::{mass_z, mass_w}
+use particle_physics::nonunitary::{
+    nu_z_propagator, nu_w_propagator,
+    nu_deficit, nu_deficit_pct,
+    eemm_z_peak_xsec_nu,
+    nu_unitarity_threshold, nu_z_unitarity_threshold, nu_w_unitarity_threshold,
+    NU_Z, NU_W,
+}
+
+fn abs_f(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn within(a: f64, b: f64, tol: f64) -> bool {
+    abs_f(a - b) < tol
+}
+
+fn print_pass(tag: i64) with IO {
+    print("PASS ")
+    print_int(tag)
+    print("\n")
+}
+
+fn print_fail(tag: i64) with IO {
+    print("FAIL ")
+    print_int(tag)
+    print("\n")
+}
+
+// Name must not be `chk` (Madaros multi-module collision).
+fn pass_if(cond: bool, tag: i64) -> i64 with IO {
+    if cond {
+        print_pass(tag)
+        1
+    } else {
+        print_fail(tag)
+        0
+    }
+}
+
+// Shared axiom suite for one unstable species.
+// Returns pass count (expected 8 per species).
+fn scan_species(
+    mass: f64,
+    gamma: f64,
+    particle_id: i64,
+    make_z: bool,
+    tag_base: i64
+) -> i64 with IO, Mut, Div, Panic {
+    var n: i64 = 0
+    let s_pole = mass * mass
+    let s_far = 1.0
+    let s_hi = (mass + 5.0) * (mass + 5.0)
+    let s_mid = s_pole * 1.01
+
+    // Build propagators (Z or W)
+    var prop_pole = nu_z_propagator(s_pole, gamma)
+    var prop_far = nu_z_propagator(s_far, gamma)
+    var prop_hi = nu_z_propagator(s_hi, gamma)
+    var prop_mid = nu_z_propagator(s_mid, gamma)
+    if make_z == false {
+        prop_pole = nu_w_propagator(s_pole, gamma)
+        prop_far = nu_w_propagator(s_far, gamma)
+        prop_hi = nu_w_propagator(s_hi, gamma)
+        prop_mid = nu_w_propagator(s_mid, gamma)
+    }
+
+    let d_pole = nu_deficit(prop_pole)
+    let d_far = nu_deficit(prop_far)
+    let d_hi = nu_deficit(prop_hi)
+    let d_mid = nu_deficit(prop_mid)
+    let thr = nu_unitarity_threshold(mass, gamma, 0.01)
+    let s_thr = thr * thr
+    var prop_thr = nu_z_propagator(s_thr, gamma)
+    if make_z == false {
+        prop_thr = nu_w_propagator(s_thr, gamma)
+    }
+    let d_thr = nu_deficit(prop_thr)
+
+    print("EXP4_SPECIES ")
+    if make_z {
+        print("Z")
+    } else {
+        print("W")
+    }
+    print("\n")
+    print("EXP4_MASS ")
+    print_f64(mass)
+    print("\n")
+    print("EXP4_DEFICIT_POLE ")
+    print_f64(d_pole)
+    print("\n")
+    print("EXP4_DEFICIT_FAR ")
+    print_f64(d_far)
+    print("\n")
+    print("EXP4_DEFICIT_MID ")
+    print_f64(d_mid)
+    print("\n")
+    print("EXP4_DEFICIT_HI5 ")
+    print_f64(d_hi)
+    print("\n")
+    print("EXP4_DEFICIT_THR ")
+    print_f64(d_thr)
+    print("\n")
+    print("EXP4_UNITARITY_THRESH_SQRT_S ")
+    print_f64(thr)
+    print("\n")
+
+    // A1 pole ≈ 1
+    n = n + pass_if(within(d_pole, 1.0, 0.01), tag_base + 1)
+    // A2 far small
+    n = n + pass_if(d_far < 0.05, tag_base + 2)
+    // A3 peak unique among samples
+    n = n + pass_if(d_pole > d_mid && d_pole > d_hi && d_pole > d_far, tag_base + 3)
+    // A4 high wing monotone
+    n = n + pass_if(d_mid > d_hi && d_hi > d_thr, tag_base + 4)
+    // A5 threshold above mass, deficit near 1%
+    n = n + pass_if(thr > mass, tag_base + 5)
+    n = n + pass_if(d_thr < 0.02 && d_thr > 0.0, tag_base + 6)
+    // A6 particle id
+    n = n + pass_if(prop_pole.particle == particle_id, tag_base + 7)
+    // variance / confidence positive on pole
+    n = n + pass_if(prop_pole.amp_sq.variance() > 0.0, tag_base + 8)
+
+    // JSON receipt point for this species (broken_structure-ready shape)
+    print("EXP4_SPECIES_JSON {")
+    print("\"schema\":\"sounio.broken_structure.v1\",")
+    print("\"domain\":\"qft_unstable\",")
+    if make_z {
+        print("\"species\":\"Z\",")
+    } else {
+        print("\"species\":\"W\",")
+    }
+    print("\"coordinate\":\"sqrt_s\",")
+    print("\"effect_or_type\":\"NonUnitary\",")
+    print("\"points\":[")
+    print("{\"label\":\"pole\",\"coord\":")
+    print_f64(mass)
+    print(",\"proximity\":")
+    print_f64(d_pole)
+    print("},")
+    print("{\"label\":\"mid\",\"coord\":")
+    print_f64(mass * 1.005)
+    print(",\"proximity\":")
+    print_f64(d_mid)
+    print("},")
+    print("{\"label\":\"hi5\",\"coord\":")
+    print_f64(mass + 5.0)
+    print(",\"proximity\":")
+    print_f64(d_hi)
+    print("},")
+    print("{\"label\":\"thr1pct\",\"coord\":")
+    print_f64(thr)
+    print(",\"proximity\":")
+    print_f64(d_thr)
+    print("}]}\n")
+
+    n
+}
+
+fn main() -> i32 with IO, NonUnitary, Mut, Div, Panic {
+    print("PARTICLE_EXP4_BEGIN\n")
+
+    let mz = mass_z().val()
+    let mw = mass_w().val()
+    let gamma_z = 2.4952
+    let gamma_w = 2.085
+
+    // Z spectrum (tags 401–408)
+    let n_z = scan_species(mz, gamma_z, NU_Z(), true, 400)
+    // W spectrum (tags 501–508)
+    let n_w = scan_species(mw, gamma_w, NU_W(), false, 500)
+
+    // Effect-enforced peak path (Z) — NonUnitary in main signature
+    let peak = eemm_z_peak_xsec_nu(0.08399, 0.08399, gamma_z)
+    print("EXP4_Z_PEAK_XSEC ")
+    print_f64(peak.val())
+    print("\n")
+    var n_fx: i64 = 0
+    n_fx = n_fx + pass_if(peak.val() > 1.0e-7 && peak.val() < 1.0e-4, 601)
+    n_fx = n_fx + pass_if(peak.variance() > 0.0, 602)
+
+    // Cross-species: both poles at 1, both thresholds above mass
+    let thr_z = nu_z_unitarity_threshold(gamma_z, 0.01)
+    let thr_w = nu_w_unitarity_threshold(gamma_w, 0.01)
+    print("EXP4_THRESH_Z ")
+    print_f64(thr_z)
+    print("\n")
+    print("EXP4_THRESH_W ")
+    print_f64(thr_w)
+    print("\n")
+    n_fx = n_fx + pass_if(thr_z > mz && thr_w > mw, 603)
+    // Generic threshold matches species wrappers
+    n_fx = n_fx + pass_if(within(nu_unitarity_threshold(mz, gamma_z, 0.01), thr_z, 1.0e-9), 604)
+    n_fx = n_fx + pass_if(within(nu_unitarity_threshold(mw, gamma_w, 0.01), thr_w, 1.0e-9), 605)
+
+    let npass = n_z + n_w + n_fx
+    // Expected: Z=8, W=8, fx=5 → 21
+    let expected: i64 = 21
+    let nfail = expected - npass
+
+    print("PARTICLE_EXP4_PASS ")
+    print_int(npass)
+    print("\n")
+    print("PARTICLE_EXP4_FAIL ")
+    print_int(nfail)
+    print("\n")
+    print("PARTICLE_EXP4_NZ ")
+    print_int(n_z)
+    print("\n")
+    print("PARTICLE_EXP4_NW ")
+    print_int(n_w)
+    print("\n")
+
+    if npass == expected {
+        print("PARTICLE_EXP4_OK\n")
+        0
+    } else {
+        print("PARTICLE_EXP4_FAILED\n")
+        1
+    }
+}
