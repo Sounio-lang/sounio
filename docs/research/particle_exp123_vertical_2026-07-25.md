@@ -53,12 +53,19 @@ bash scripts/ci/particle_exp123_gate.sh
 # and checks Madaros science-boundary: no E-SRB-002 for this example
 ```
 
-**Engine note:** Full executable run is validated under **lean_single**. Madaros
-still has residual typecheck failures (E008) inside `particle_physics` imports —
-that is **not** claimed fixed here. What **is** fixed for Madaros is the
-science-boundary allowlist: `research` → `scientific-package-candidate` no longer
-emits `E-SRB-002` (see `tools/science_boundary/attestor.py` and
-`examples/particle_physics` row in `science-rings.tsv`).
+**Engine note:**
+
+| Surface | Status |
+|---|---|
+| lean_single **run** | **green** (58/58, gate path) |
+| Madaros **check** | **green** (no E008/E137 on this vertical) |
+| Madaros science-boundary | **no E-SRB-002** (`research` → `scientific-package-candidate` allowlist) |
+| Madaros **run**/native lower | **SEGV** in `lower_array` on imported IR — compiler residual, not claimed |
+
+Madaros typecheck fixes for this vertical: (1) `stdlib/complex/lib.sio` splits
+the sixth `extern "C"` (`atan2`) into a second block — Madaros drops symbols past
+the fifth in one block; (2) local helpers renamed `chk`→`pass_if`, `near`→`within`
+(name collisions under multi-module Madaros typecheck).
 
 ---
 

@@ -75,23 +75,29 @@ with open(json_path, "w", encoding="utf-8") as fh:
 print(f"EXP2_DEFICIT_JSON_WRITTEN {json_path}")
 PY
 
-# Science-boundary allowlist check under Madaros preflight (advisory):
-# public research example must not emit E-SRB-002 against particle_physics.
-echo "== particle exp123 science-boundary allowlist (Madaros advisory) =="
+# Madaros check path: science-boundary allowlist + typecheck.
+# Full Madaros *run* still SEGV in imported lowering (compiler residual) —
+# not claimed green here. Typecheck must be clean.
+echo "== particle exp123 Madaros check (boundary + typecheck) =="
 BOUND_ERR=/tmp/particle_exp123_boundary_err.txt
-# Force Madaros engine for boundary preflight only; tolerate typecheck failure.
 set +e
 SOUNIO_SOUC_ENGINE=madaros ./bin/souc check "$SRC" >"$BOUND_ERR" 2>&1
+MAD_RC=$?
 set -e
 if grep -q 'E-SRB-002' "$BOUND_ERR"; then
   echo "science-boundary allowlist failed: E-SRB-002 still present" >&2
   grep 'E-SRB-002' "$BOUND_ERR" >&2
   exit 1
 fi
-# Expect the particle_physics carve-out (public) so path is research-callable.
-if ! grep -q 'science-boundary' "$BOUND_ERR"; then
-  echo "warning: no science-boundary preflight output (engine may lack attestor)" >&2
+if ! grep -q 'check: OK' "$BOUND_ERR" && ! grep -q 'verdict=0' "$BOUND_ERR"; then
+  # Prefer explicit OK; fall back to exit code + no error[
+  if [[ "$MAD_RC" -ne 0 ]] || grep -q 'error\[' "$BOUND_ERR"; then
+    echo "Madaros typecheck failed:" >&2
+    tail -40 "$BOUND_ERR" >&2
+    exit 1
+  fi
 fi
 echo "PARTICLE_EXP123_BOUNDARY_OK (no E-SRB-002)"
+echo "PARTICLE_EXP123_MADAROS_CHECK_OK"
 
 echo "PARTICLE_EXP123_GATE_OK"
