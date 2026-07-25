@@ -7,6 +7,7 @@ validated_by: A6
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.rupture-abcd-claims-2026-07-24
 -->
 
+
 <!-- docs:status-note:start -->
 > Docs status: `historical`
 > This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
@@ -189,14 +190,29 @@ Exhibit one **worked opposition** and a candidate map
 **Fail condition:** every natural \(\Phi\) either never needs non-Fano to match Petitot-like strata,
 or non-Fano only rescales \(V\) without changing stratum type → parallel formalisms; keep D1 only.
 
-Executable probe (candidate \(\Phi\), honest verdict):  
-`scripts/research/rupture_r3_fano_restriction_probe.py`.
+Executable probe: `scripts/research/rupture_r3_fano_restriction_probe.py`.  
+Derivation (2026-07-25): `docs/research/rupture-r3-fano-phi_2026-07-25.md`.
+
+### Φ_fp (first principles — R3_PARTIAL)
+
+Exact jet: \([e_i+\varepsilon e_u,e_j,e_k]=\varepsilon[e_u,e_j,e_k]\), single-axis support.
+
+\[
+a = A_0 + \frac{\|\alpha\|^2}{4},\qquad
+b = \tau + \frac{\alpha_m}{2},\qquad A_0=-1\text{ (unit choice)}.
+\]
+
+| Verdict | Meaning |
+|---|---|
+| `R3_PARTIAL` | JET + (i)+(ii)+(iii-weak well asymmetry) under Φ_fp — **current** |
+| `R3_GREEN` | also separates contrariety vs contradiction strata — **open** |
 
 ### Explicit non-claims (R3)
 
 - No isomorphism \(B(V_{\mathrm{cusp}})\cong ZD(𝕊)\).  
 - No Wildgen E₆–E₈ = magic square **theorem** (label conjecture only).  
-- No ECSS / affect / depression smuggle.
+- No ECSS / affect / depression smuggle.  
+- `R3_PARTIAL` ≠ D3 and ≠ full Petitot impossibility theorem.
 
 ---
 
