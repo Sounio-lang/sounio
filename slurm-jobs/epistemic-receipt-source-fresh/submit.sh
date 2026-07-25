@@ -10,6 +10,7 @@ REPO="${REPO:-$(pwd)}"
 SOURCE_REF="${SOURCE_REF:-HEAD}"
 SOURCE_REMOTE="${SOURCE_REMOTE:-}"
 WORKER_GIT_SSL_VERIFY="${WORKER_GIT_SSL_VERIFY:-true}"
+WORKER_LOWER_TRACE="${WORKER_LOWER_TRACE:-0}"
 NS="${NS:-slurm-pilot}"
 KUBECTL="${KUBECTL:-kubectl}"
 PARTITION="${PARTITION:-gpu-orangefs}"
@@ -25,8 +26,8 @@ Usage:
   SOURCE_REF=<commit-or-ref> bash slurm-jobs/epistemic-receipt-source-fresh/submit.sh
 
 Environment:
-  REPO, SOURCE_REF, SOURCE_REMOTE, WORKER_GIT_SSL_VERIFY, NS, KUBECTL,
-  PARTITION, NODELIST, JOB_MEM, JOB_CPUS, JOB_TIME, RUN_ID
+  REPO, SOURCE_REF, SOURCE_REMOTE, WORKER_GIT_SSL_VERIFY, WORKER_LOWER_TRACE,
+  NS, KUBECTL, PARTITION, NODELIST, JOB_MEM, JOB_CPUS, JOB_TIME, RUN_ID
 
 This is the direct-Slurm fallback for sessions where BeagleCockpit MCP is not
 loaded. It streams the worker's gate output back through srun. The worker
@@ -36,6 +37,9 @@ OrangeFS is intentionally not used.
 Set WORKER_GIT_SSL_VERIFY=false only for a worker image with a documented
 missing CA bundle. That transport exception is reported in the job output;
 the requested commit and tree are still checked before the source build.
+
+Set WORKER_LOWER_TRACE=1 only for crash localization. It enables the existing
+module-frontend and IR-lowering traces inside the worker's raw ELF.
 EOF
 }
 
@@ -52,6 +56,7 @@ fi
 [[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]] || fail "unsafe RUN_ID: $RUN_ID"
 [[ "$JOB_CPUS" =~ ^[1-9][0-9]*$ ]] || fail "invalid JOB_CPUS: $JOB_CPUS"
 [[ "$WORKER_GIT_SSL_VERIFY" == 'true' || "$WORKER_GIT_SSL_VERIFY" == 'false' ]] || fail "invalid WORKER_GIT_SSL_VERIFY: $WORKER_GIT_SSL_VERIFY"
+[[ "$WORKER_LOWER_TRACE" == '0' || "$WORKER_LOWER_TRACE" == '1' ]] || fail "invalid WORKER_LOWER_TRACE: $WORKER_LOWER_TRACE"
 
 SOURCE_COMMIT="$(git -C "$REPO" rev-parse "$SOURCE_REF")"
 SOURCE_TREE="$(git -C "$REPO" rev-parse "$SOURCE_COMMIT^{tree}")"
@@ -90,6 +95,7 @@ EXPECTED_COMMIT="$SOURCE_COMMIT"
 EXPECTED_TREE="$SOURCE_TREE"
 SOURCE_REMOTE="$SOURCE_REMOTE"
 WORKER_GIT_SSL_VERIFY="$WORKER_GIT_SSL_VERIFY"
+WORKER_LOWER_TRACE="$WORKER_LOWER_TRACE"
 
 cleanup() {
   rm -rf "\$ROOT"
@@ -104,6 +110,7 @@ fail() {
 echo "source_fresh_slurm_job_id=\${SLURM_JOB_ID:-manual}"
 echo "source_remote=\$SOURCE_REMOTE"
 echo "worker_git_ssl_verify=\$WORKER_GIT_SSL_VERIFY"
+echo "worker_lower_trace=\$WORKER_LOWER_TRACE"
 echo "requested_commit=\$EXPECTED_COMMIT"
 echo "requested_tree=\$EXPECTED_TREE"
 echo "worker_host=\$(hostname)"
@@ -124,6 +131,12 @@ git -C "\$REPO" checkout -q --detach FETCH_HEAD || fail 'worker could not checko
 [[ "\$(git -C "\$REPO" rev-parse HEAD)" == "\$EXPECTED_COMMIT" ]] || fail 'worker HEAD does not match requested commit'
 [[ "\$(git -C "\$REPO" rev-parse 'HEAD^{tree}')" == "\$EXPECTED_TREE" ]] || fail 'worker tree does not match requested tree'
 [[ -z "\$(git -C "\$REPO" status --porcelain)" ]] || fail 'worker source tree is not clean'
+
+if [[ "\$WORKER_LOWER_TRACE" == '1' ]]; then
+  export SOUNIO_MODULE_FRONTEND_LOWER_TRACE=1
+  export SOUNIO_LOWER_SUMMARY_TRACE=1
+  export SOUNIO_LOWER_LIVE_TRACE=1
+fi
 
 chmod +x "\$REPO/bin/souc-linux-x86_64" \\
   "\$REPO/scripts/ci/build_modular_madaros.sh" \\
