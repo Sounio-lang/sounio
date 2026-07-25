@@ -19,17 +19,20 @@ python3 scripts/research/rupture_r2_fiber_measure_contract.py | tee /tmp/rupture
 grep -q 'R2_CONTRACT_OK' /tmp/rupture_r2_out.txt
 grep -q 'R2_PARTIAL PASS' /tmp/rupture_r2_out.txt
 
-echo "-- R3 Fano-restriction probe --"
+echo "-- R3 Fano-restriction probe (Φ_fp) --"
 python3 scripts/research/rupture_r3_fano_restriction_probe.py | tee /tmp/rupture_r3_out.txt
 grep -q 'R3_CONTRACT_PROBE_OK' /tmp/rupture_r3_out.txt
 grep -q 'DIVERGENCE' /tmp/rupture_r3_out.txt
+grep -q 'JET_LEMMA PASS' /tmp/rupture_r3_out.txt
+grep -q 'R3_VERDICT R3_PARTIAL' /tmp/rupture_r3_out.txt
 # Must not falsely claim D3 / R3_GREEN
 if grep -q 'R3_VERDICT R3_GREEN' /tmp/rupture_r3_out.txt; then
   echo "unexpected R3_GREEN without full B-contract" >&2
   exit 1
 fi
 
-# Claim doc present
+# Claim docs present
 test -f docs/research/rupture-abcd-claims_2026-07-24.md
+test -f docs/research/rupture-r3-fano-phi_2026-07-25.md
 
 echo "RUPTURE_ABCD_CONTRACTS_OK"
