@@ -246,6 +246,7 @@ if [[ "$single_state" == resolved ]]; then
   expect_public_facade_runtime
   expect_local_shadow_runtime
   expect_context_clean_check local-value-shadow "$FIXTURES/local_value_shadows_import_main.sio"
+  expect_context_clean_check unsupported-named-import "$FIXTURES/unsupported_named_import_main.sio"
   runtime_state="pass"
 fi
 
@@ -270,7 +271,7 @@ expect_private_rejection private-enum-struct-variant \
   "$FIXTURES/private_enum_struct_variant_main.sio" E177 \
   'enum constructor is private in its defining module'
 
-echo "[madaros-visibility-context] receipt issue=854 context_state=$single_state runtime_state=$runtime_state single_e175=$([[ "$single_state" == baseline ]] && echo 1 || echo 0) matrix_e175=$([[ "$matrix_state" == baseline ]] && echo 18 || echo 0) unresolved_named_import=authority-reject local_shadow=exact-local local_value_shadow=env-local true_private_fn=E175 true_private_struct=E176 true_private_enum=E177 private_generic=E175 private_function_value=E175 private_enum_struct_variant=E177"
+echo "[madaros-visibility-context] receipt issue=854 context_state=$single_state runtime_state=$runtime_state single_e175=$([[ "$single_state" == baseline ]] && echo 1 || echo 0) matrix_e175=$([[ "$matrix_state" == baseline ]] && echo 18 || echo 0) unresolved_named_import=authority-reject unsupported_named_import=legacy local_shadow=exact-local local_value_shadow=env-local true_private_fn=E175 true_private_struct=E176 true_private_enum=E177 private_generic=E175 private_function_value=E175 private_enum_struct_variant=E177"
 
 if [[ "$EXPECT" == baseline && "$single_state" != baseline ]]; then
   fail "expected the pinned baseline, got $single_state"

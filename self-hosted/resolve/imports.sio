@@ -243,28 +243,36 @@ fn module_authority_bind_variant(
     }
 }
 
+// Result values for a direct named import. The first vertical owns only
+// functions, structs, enums, and enum variants. A same-spelled item from a
+// different namespace is evidence for the legacy resolver, not an absent
+// declaration and not permission to bind a global lookalike.
+fn module_authority_bind_missing() -> i64 { 0 }
+fn module_authority_bind_exact() -> i64 { 1 }
+fn module_authority_bind_unsupported() -> i64 { 2 }
+
 fn module_authority_bind_name_from_items(
     authority: *mut ModuleAuthority,
     owner_module_id: i64,
     target_module_id: i64,
     local_name: Name,
     items: Option<Box<ItemList>>
-) -> bool with Mut, Panic, Div, Alloc {
+) -> i64 with Mut, Panic, Div, Alloc {
     match items {
-        None => false
+        None => module_authority_bind_missing()
         Some(list) => {
             let item = (*list).head
-            var found = false
+            var result = module_authority_bind_missing()
             if item.kind == ItemKind::ItemFn && name_eq(item.name, local_name) {
                 module_authority_add_binding(authority, owner_module_id, local_name, target_module_id, item.name, SymbolKind::SymFunction)
-                found = true
+                result = module_authority_bind_exact()
             } else if item.kind == ItemKind::ItemStruct && name_eq(item.name, local_name) {
                 module_authority_add_binding(authority, owner_module_id, local_name, target_module_id, item.name, SymbolKind::SymStruct)
-                found = true
+                result = module_authority_bind_exact()
             } else if item.kind == ItemKind::ItemEnum {
                 if name_eq(item.name, local_name) {
                     module_authority_add_binding(authority, owner_module_id, local_name, target_module_id, item.name, SymbolKind::SymEnum)
-                    found = true
+                    result = module_authority_bind_exact()
                 }
                 match item.enum_def {
                     None => {}
@@ -277,21 +285,27 @@ fn module_authority_bind_name_from_items(
                             item.name,
                             (*def).variants
                         ) {
-                            found = true
+                            result = module_authority_bind_exact()
                         }
                     }
                 }
+            } else if name_eq(item.name, local_name) {
+                result = module_authority_bind_unsupported()
             }
-            if module_authority_bind_name_from_items(
+            let tail_result = module_authority_bind_name_from_items(
                 authority,
                 owner_module_id,
                 target_module_id,
                 local_name,
                 (*list).tail
-            ) {
-                found = true
+            )
+            if tail_result == module_authority_bind_exact() {
+                result = module_authority_bind_exact()
+            } else if result == module_authority_bind_missing()
+                && tail_result == module_authority_bind_unsupported() {
+                result = module_authority_bind_unsupported()
             }
-            found
+            result
         }
     }
 }
@@ -307,13 +321,14 @@ pub fn module_authority_bind_import_name(
         (*authority).unresolved = true
         return
     }
-    if !module_authority_bind_name_from_items(
+    let bind_result = module_authority_bind_name_from_items(
         authority,
         owner_module_id,
         target_module_id,
         local_name,
         target_items
-    ) {
+    )
+    if bind_result == module_authority_bind_missing() {
         // A named use declaration is evidence, even when its requested
         // symbol is absent. Never allow that declaration to fall through to
         // an unrelated global definition with the same spelling.
