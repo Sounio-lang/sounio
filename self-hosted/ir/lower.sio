@@ -5694,7 +5694,8 @@ impl Lowerer {
         let pair = self.fresh_reg()
         var lo = pair.0
         let dst = pair.1
-        lo = lo.emit(ir_binop(dst, lhs_v, BinaryOp::OpAdd, rhs_v))
+        // Always f64: Var(a)±Var(b) are floats
+        lo = lo.emit(ir_binop_typed(dst, lhs_v, BinaryOp::OpAdd, rhs_v, true, true))
         lo = lo.emit(ir_mark_float_reg(dst))
         (lo, dst)
     }
@@ -5703,12 +5704,12 @@ impl Lowerer {
         let pair_sq = self.fresh_reg()
         var lo = pair_sq.0
         let scale_sq = pair_sq.1
-        lo = lo.emit(ir_binop(scale_sq, scale_reg, BinaryOp::OpMul, scale_reg))
+        lo = lo.emit(ir_binop_typed(scale_sq, scale_reg, BinaryOp::OpMul, scale_reg, true, true))
         lo = lo.emit(ir_mark_float_reg(scale_sq))
         let pair_dst = lo.fresh_reg()
         lo = pair_dst.0
         let dst = pair_dst.1
-        lo = lo.emit(ir_binop(dst, scale_sq, BinaryOp::OpMul, variance_reg))
+        lo = lo.emit(ir_binop_typed(dst, scale_sq, BinaryOp::OpMul, variance_reg, true, true))
         lo = lo.emit(ir_mark_float_reg(dst))
         (lo, dst)
     }
@@ -5733,6 +5734,7 @@ impl Lowerer {
     }
 
     fn lower_knowledge_variance_for_ident(self, name: Name) -> (Lowerer, i64) with Mut, Panic, Div, Alloc {
+        // Prefer SSA variance shadow (correct for scalars extracted from Knowledge).
         let shadow = self.lookup_local_variance_reg(name)
         if shadow >= 0 {
             return (self, shadow)
@@ -5744,6 +5746,11 @@ impl Lowerer {
         let base_shadow = self.lookup_variance_for_base_reg(base)
         if base_shadow >= 0 {
             return (self, base_shadow)
+        }
+        // Only field-get variance (idx 1) when this local is a Knowledge object —
+        // never on a scalar f64 that was extracted via .value.
+        if !ir_name_eq(self.lookup_local_struct_type(name), make_name("Knowledge")) {
+            return (self, -1)
         }
         let pair = self.fresh_reg()
         var lo = pair.0
@@ -5768,7 +5775,7 @@ impl Lowerer {
                         let pair_v = lo.fresh_reg()
                         lo = pair_v.0
                         let variance_reg = pair_v.1
-                        lo = lo.emit(ir_binop(variance_reg, unc_reg, BinaryOp::OpMul, unc_reg))
+                        lo = lo.emit(ir_binop_typed(variance_reg, unc_reg, BinaryOp::OpMul, unc_reg, true, true))
                         lo = lo.emit(ir_mark_float_reg(variance_reg))
                         return (lo, variance_reg)
                     }
@@ -5837,20 +5844,48 @@ impl Lowerer {
                     lo = two_pair.0
                     return lo.emit_variance_scale(lv, two_pair.1)
                 }
+                // Fully correlated cancel: same variance SSA slot on both sides (x-x, or
+                // two lets that still share one variance reg — rare). Also when both
+                // operands are Idents with identical variance shadows.
+                if (*e).bin_op == BinaryOp::OpSub && lv >= 0 && lv == rv {
+                    return lo.emit_zero_variance()
+                }
                 return lo.emit_variance_add(lv, rv)
             }
             if (*e).bin_op == BinaryOp::OpMul {
                 if same_ident {
-                    let lhs_val_pair = lo.lower_opt_expr_ref(&(*e).left)
-                    lo = lhs_val_pair.0
+                    // FO: Var(x*x) = (2x)² Var(x) = 4 x² Var(x).
+                    // Do it as scale(Var, 2) → 4Var, then scale by x → 4 x² Var.
                     let two_pair = lo.emit_f64_const(2.0)
                     lo = two_pair.0
-                    let scale_pair = lo.fresh_reg()
-                    lo = scale_pair.0
-                    let scale = scale_pair.1
-                    lo = lo.emit(ir_binop(scale, two_pair.1, BinaryOp::OpMul, lhs_val_pair.1))
-                    lo = lo.emit(ir_mark_float_reg(scale))
-                    return lo.emit_variance_scale(lv, scale)
+                    let four_v_pair = lo.emit_variance_scale(lv, two_pair.1)
+                    lo = four_v_pair.0
+                    let x_pair = lo.lower_opt_expr_ref(&(*e).left)
+                    lo = x_pair.0
+                    return lo.emit_variance_scale(four_v_pair.1, x_pair.1)
+                }
+                // Constant * x: Var(c*x) = c² Var(x) only (no spurious Var(c)).
+                let left_is_lit = match (*e).left {
+                    Some(le) => {
+                        (*le).kind == ExprKind::ExprFloatLit || (*le).kind == ExprKind::ExprIntLit
+                    }
+                    _ => false,
+                }
+                let right_is_lit = match (*e).right {
+                    Some(re) => {
+                        (*re).kind == ExprKind::ExprFloatLit || (*re).kind == ExprKind::ExprIntLit
+                    }
+                    _ => false,
+                }
+                if left_is_lit && !right_is_lit {
+                    let lhs_val_pair = lo.lower_opt_expr_ref(&(*e).left)
+                    lo = lhs_val_pair.0
+                    return lo.emit_variance_scale(rv, lhs_val_pair.1)
+                }
+                if right_is_lit && !left_is_lit {
+                    let rhs_val_pair = lo.lower_opt_expr_ref(&(*e).right)
+                    lo = rhs_val_pair.0
+                    return lo.emit_variance_scale(lv, rhs_val_pair.1)
                 }
                 let lhs_val_pair = lo.lower_opt_expr_ref(&(*e).left)
                 lo = lhs_val_pair.0
@@ -8597,22 +8632,14 @@ impl Lowerer {
             lo = lo.bind_local_variance_reg(s.name, lo.pending_variance_reg)
             lo.pending_variance_reg = -1
         } else {
-            // β-Madaros: `let a1 = k.value` — seed variance from Knowledge base if pending missed
+            // β-Madaros: bind FO variance for any pure RHS (k.value, a*b, 4.0*x, …)
+            // so variance_of(local) works after `let x = <expr>`.
             match s.expr {
                 Some(rhs_v) => {
-                    if (*rhs_v).kind == ExprKind::ExprFieldAccess && ir_name_eq((*rhs_v).name, make_name("value")) {
-                        match (*rhs_v).left {
-                            Some(base_v) => {
-                                if (*base_v).kind == ExprKind::ExprIdent {
-                                    let vpair2 = lo.lower_knowledge_variance_for_ident((*base_v).name)
-                                    lo = vpair2.0
-                                    if vpair2.1 >= 0 {
-                                        lo = lo.bind_local_variance_reg(s.name, vpair2.1)
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
+                    let vpair2 = lo.lower_expr_variance_ref(&(*rhs_v))
+                    lo = vpair2.0
+                    if vpair2.1 >= 0 {
+                        lo = lo.bind_local_variance_reg(s.name, vpair2.1)
                     }
                 }
                 _ => {}
@@ -10023,11 +10050,11 @@ impl Lowerer {
         // field 0: value
         let lo5 = lo4.emit(ir_field_set(dst_reg, 0, value_reg, make_name("value")))
 
-        // field 1: variance = uncertainty * uncertainty
+        // field 1: variance = uncertainty * uncertainty (must be f64 mulsd, not imul)
         let var_pair = lo5.fresh_reg()
         let lo6 = var_pair.0
         let variance_reg = var_pair.1
-        var lo7 = lo6.emit(ir_binop(variance_reg, unc_reg, BinaryOp::OpMul, unc_reg))
+        var lo7 = lo6.emit(ir_binop_typed(variance_reg, unc_reg, BinaryOp::OpMul, unc_reg, true, true))
         lo7 = lo7.emit(ir_mark_float_reg(variance_reg))
         let lo8 = lo7.emit(ir_field_set(dst_reg, 1, variance_reg, make_name("variance")))
 
