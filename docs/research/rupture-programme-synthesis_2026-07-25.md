@@ -215,9 +215,9 @@ exactly why R4 exists.
 ## 8. Open edges (honest queue)
 
 1. **Functor F** — homology of meaning as a formal functor, not only path classes.  
-2. **Ord 2″ trained non-sedenion targets** — LSTM + diagonal S4 both
-   `NO_SIGNATURE` under full controls (init+shape); protocol §5 performance-link
-   and full complex HiPPO-S4/Mamba still open.  
+2. **Ord 2″ trained line complete for LSTM adding** — instrument OK; LSTM+S4
+   `NO_SIGNATURE`; protocol §5 **`ORD2_PERF_NO_LINK`** (long-T degrades but
+   uncorrelated with alignment). Full HiPPO-S4/Mamba optional.  
 3. **R2 continuous law as theorem** — lift measured \(t^{1/4}\) contact to a proof.  
 4. **#1237 merge / ADE–Wildgen** — literature map vs catastrophe-controversy landmine.  
 5. **External paper** — this synthesis is the skeleton; prose for arXiv still needs human voice and offload review under repo policy.
