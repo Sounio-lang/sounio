@@ -11,6 +11,7 @@ SOURCE_REF="${SOURCE_REF:-HEAD}"
 SOURCE_REMOTE="${SOURCE_REMOTE:-}"
 WORKER_GIT_SSL_VERIFY="${WORKER_GIT_SSL_VERIFY:-true}"
 WORKER_LOWER_TRACE="${WORKER_LOWER_TRACE:-0}"
+WORKER_PROBE="${WORKER_PROBE:-source-fresh-gate}"
 NS="${NS:-slurm-pilot}"
 KUBECTL="${KUBECTL:-kubectl}"
 PARTITION="${PARTITION:-gpu-orangefs}"
@@ -27,7 +28,8 @@ Usage:
 
 Environment:
   REPO, SOURCE_REF, SOURCE_REMOTE, WORKER_GIT_SSL_VERIFY, WORKER_LOWER_TRACE,
-  NS, KUBECTL, PARTITION, NODELIST, JOB_MEM, JOB_CPUS, JOB_TIME, RUN_ID
+  WORKER_PROBE, NS, KUBECTL, PARTITION, NODELIST, JOB_MEM, JOB_CPUS,
+  JOB_TIME, RUN_ID
 
 This is the direct-Slurm fallback for sessions where BeagleCockpit MCP is not
 loaded. It streams the worker's gate output back through srun. The worker
@@ -40,6 +42,11 @@ the requested commit and tree are still checked before the source build.
 
 Set WORKER_LOWER_TRACE=1 only for crash localization. It enables the existing
 module-frontend and IR-lowering traces inside the worker's raw ELF.
+
+WORKER_PROBE=source-fresh-gate runs the acceptance gate. WORKER_PROBE=block-ladder
+builds the same raw ELF and runs four generated worker-local programs to locate
+the first block shape that reproduces a lowering crash. The probe never changes
+the checked-out source tree and is not acceptance evidence.
 EOF
 }
 
@@ -57,6 +64,7 @@ fi
 [[ "$JOB_CPUS" =~ ^[1-9][0-9]*$ ]] || fail "invalid JOB_CPUS: $JOB_CPUS"
 [[ "$WORKER_GIT_SSL_VERIFY" == 'true' || "$WORKER_GIT_SSL_VERIFY" == 'false' ]] || fail "invalid WORKER_GIT_SSL_VERIFY: $WORKER_GIT_SSL_VERIFY"
 [[ "$WORKER_LOWER_TRACE" == '0' || "$WORKER_LOWER_TRACE" == '1' ]] || fail "invalid WORKER_LOWER_TRACE: $WORKER_LOWER_TRACE"
+[[ "$WORKER_PROBE" == 'source-fresh-gate' || "$WORKER_PROBE" == 'block-ladder' ]] || fail "invalid WORKER_PROBE: $WORKER_PROBE"
 
 SOURCE_COMMIT="$(git -C "$REPO" rev-parse "$SOURCE_REF")"
 SOURCE_TREE="$(git -C "$REPO" rev-parse "$SOURCE_COMMIT^{tree}")"
@@ -96,6 +104,7 @@ EXPECTED_TREE="$SOURCE_TREE"
 SOURCE_REMOTE="$SOURCE_REMOTE"
 WORKER_GIT_SSL_VERIFY="$WORKER_GIT_SSL_VERIFY"
 WORKER_LOWER_TRACE="$WORKER_LOWER_TRACE"
+WORKER_PROBE="$WORKER_PROBE"
 
 cleanup() {
   rm -rf "\$ROOT"
@@ -111,6 +120,7 @@ echo "source_fresh_slurm_job_id=\${SLURM_JOB_ID:-manual}"
 echo "source_remote=\$SOURCE_REMOTE"
 echo "worker_git_ssl_verify=\$WORKER_GIT_SSL_VERIFY"
 echo "worker_lower_trace=\$WORKER_LOWER_TRACE"
+echo "worker_probe=\$WORKER_PROBE"
 echo "requested_commit=\$EXPECTED_COMMIT"
 echo "requested_tree=\$EXPECTED_TREE"
 echo "worker_host=\$(hostname)"
@@ -144,8 +154,68 @@ chmod +x "\$REPO/bin/souc-linux-x86_64" \\
   "\$REPO/scripts/dev/souc-build-lock.sh"
 
 cd "\$REPO"
-SOUNIO_EPISTEMIC_RECEIPT_SOURCE_FRESH_KEEP=0 \\
-  bash "\$REPO/scripts/ci/epistemic_receipt_source_fresh_gate.sh"
+if [[ "\$WORKER_PROBE" == 'block-ladder' ]]; then
+  RAW_MADAROS="\$ROOT/probe-madaros"
+  PROBE_ROOT="\$ROOT/block-ladder"
+  BUILD_LOG="\$ROOT/probe-build.log"
+  mkdir -p "\$PROBE_ROOT/cwd"
+  if ! bash "\$REPO/scripts/ci/build_modular_madaros.sh" "\$RAW_MADAROS" >"\$BUILD_LOG" 2>&1; then
+    tail -n 120 "\$BUILD_LOG" >&2 || true
+    fail 'block-ladder current-source build failed'
+  fi
+  [[ -x "\$RAW_MADAROS" ]] || fail 'block-ladder build did not emit an executable raw ELF'
+  [[ -z "\$(git -C "\$REPO" status --porcelain)" ]] || fail 'source tree changed during block-ladder build'
+
+  cat >"\$PROBE_ROOT/empty_main.sio" <<'SIO'
+fn main() with IO, Panic {
+}
+SIO
+  cat >"\$PROBE_ROOT/import_empty.sio" <<'SIO'
+use epistemic::observation_provenance::*
+
+fn main() with IO, Panic {
+}
+SIO
+  cat >"\$PROBE_ROOT/import_literal_let.sio" <<'SIO'
+use epistemic::observation_provenance::*
+
+fn main() with IO, Panic {
+    let marker = 1
+}
+SIO
+  cat >"\$PROBE_ROOT/import_first_call.sio" <<'SIO'
+use epistemic::observation_provenance::*
+
+fn main() with IO, Panic {
+    let opportunity = op_observation_opportunity_i64(10, 11)
+}
+SIO
+
+  run_probe() {
+    local label="\$1"
+    local source="\$2"
+    echo "block_ladder_begin=\$label"
+    (
+      cd "\$PROBE_ROOT/cwd"
+      exec env \\
+        -u MADAROS_RAW_BIN \\
+        -u SOUNIO_MADAROS_BIN \\
+        SOUNIO_STDLIB_PATH="\$REPO/stdlib" \\
+        "\$RAW_MADAROS" run "\$source"
+    )
+    echo "block_ladder_pass=\$label"
+  }
+
+  run_probe empty_main "\$PROBE_ROOT/empty_main.sio"
+  run_probe import_empty "\$PROBE_ROOT/import_empty.sio"
+  run_probe import_literal_let "\$PROBE_ROOT/import_literal_let.sio"
+  run_probe import_first_call "\$PROBE_ROOT/import_first_call.sio"
+  [[ -z "\$(git -C "\$REPO" status --porcelain)" ]] || fail 'source tree changed during block-ladder probe'
+  echo '[epistemic-receipt-source-fresh] PASS: block-ladder completed'
+else
+  SOUNIO_EPISTEMIC_RECEIPT_SOURCE_FRESH_KEEP=0 \\
+    bash "\$REPO/scripts/ci/epistemic_receipt_source_fresh_gate.sh"
+fi
 EOF
 chmod 700 "$RUNNER"
 
