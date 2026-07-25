@@ -1146,6 +1146,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.rupture-abcd-claims-2026-07-24 | historical | docs/research/rupture-abcd-claims_2026-07-24.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.rupture-as-singularity | historical | docs/research/rupture-as-singularity.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.rupture-ord2-alignment-2026-07-25 | historical | docs/research/rupture-ord2-alignment_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.rupture-ord2-trained-lstm-2026-07-25 | historical | docs/research/rupture-ord2-trained-lstm_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.rupture-programme-synthesis-2026-07-25 | historical | docs/research/rupture-programme-synthesis_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.rupture-r2-full-tubular-2026-07-25 | historical | docs/research/rupture-r2-full-tubular_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.rupture-r3-fano-phi-2026-07-25 | historical | docs/research/rupture-r3-fano-phi_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

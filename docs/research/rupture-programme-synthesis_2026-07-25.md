@@ -215,9 +215,9 @@ exactly why R4 exists.
 ## 8. Open edges (honest queue)
 
 1. **Functor F** — homology of meaning as a formal functor, not only path classes.  
-2. **Ord 2″ trained targets** — instrument is gated (`ORD2_INSTRUMENT_OK`); next is
-   trained LSTM/S4 over hundreds of paths (protocol §3–5). Synthetic baselines only
-   for now (`rupture-ord2-alignment_2026-07-25.md`).  
+2. **Ord 2″ trained LSTM** — gated multi-path probe
+   (`ORD2_TRAINED_NO_SIGNATURE` on adding problem; init+shape controls). S4 and
+   performance-link (protocol §5) still open.  
 3. **R2 continuous law as theorem** — lift measured \(t^{1/4}\) contact to a proof.  
 4. **#1237 merge / ADE–Wildgen** — literature map vs catastrophe-controversy landmine.  
 5. **External paper** — this synthesis is the skeleton; prose for arXiv still needs human voice and offload review under repo policy.
