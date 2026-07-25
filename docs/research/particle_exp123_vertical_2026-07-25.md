@@ -63,21 +63,27 @@ bash scripts/ci/particle_unstable_effect_gate.sh
 # expect: PARTICLE_EXP5_OK
 bash scripts/ci/particle_broken_structure_dual_gate.sh
 # expect: PARTICLE_EXP5_GATE_OK
+
+# Madaros-runnable core (N4) + oracle (N5)
+SOUNIO_SOUC_ENGINE=madaros ./bin/souc run examples/particle_physics/exp123_madaros_core.sio
+# expect: PARTICLE_MADAROS_CORE_OK
+bash scripts/ci/particle_exp123_oracle_gate.sh
+# expect: PARTICLE_EXP123_ORACLE_GATE_OK
 ```
 
 **Engine note:**
 
 | Surface | Status |
 |---|---|
-| lean_single **run** | **green** (EXP123 62/62, EXP4 21/21) |
-| Madaros **check** | **green** (no E008/E137 on this vertical) |
-| Madaros science-boundary | **no E-SRB-002** (`research` → `scientific-package-candidate` allowlist) |
-| Madaros **run**/native lower | **SEGV** in `lower_array` on imported IR — compiler residual, not claimed |
+| lean_single **run** | **green** (EXP123 62/62, EXP4 21/21, EXP5 8/8) |
+| Madaros **check** | **green** |
+| Madaros science-boundary | **no E-SRB-002** |
+| Madaros **run core** | **green** (`exp123_madaros_core.sio`, 11/11) |
+| Madaros **run full EXP123** | residual SEGV — `BLK-20260725-madaros-exp123-lower-array-segv` |
 
-Madaros typecheck fixes for this vertical: (1) `stdlib/complex/lib.sio` splits
-the sixth `extern "C"` (`atan2`) into a second block — Madaros drops symbols past
-the fifth in one block; (2) local helpers renamed `chk`→`pass_if`, `near`→`within`
-(name collisions under multi-module Madaros typecheck).
+Particle-side mitigations: free-function Epistemic in `nonunitary.sio`;
+`epistemic_chain_z` / `nonunitary_amp` splits; `atan2` second extern block;
+helpers `pass_if` / `within` (avoid `chk`/`near` name collisions).
 
 ---
 
