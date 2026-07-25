@@ -24,6 +24,10 @@ EVIDENCE_LEVELS = {
 }
 VERDICTS = {'alive', 'negative', 'dormant', 'refuted'}
 REQUIRED_FIELDS = ['claim', 'hypothesis', 'falsifier', 'evidence', 'harness', 'gate', 'verdict']
+PROVENANCE_VALUES = {
+    'absent', 'cancelled', 'annihilated', 'below_resolution', 'rounded', 'gated', 'unknown'
+}
+ZERO_KEYWORDS = {'zero', 'annihilat', 'cancel', 'round', 'resolution', 'absent', 'gated', 'unknown'}
 
 
 @dataclass
@@ -39,6 +43,7 @@ class Claim:
     verdict: str
     note: Optional[str] = None
     archive_reason: Optional[str] = None
+    provenance: Optional[str] = None
     sha: str = ''
 
 
@@ -102,6 +107,7 @@ def scan_file(path):
                 verdict=fields['verdict'],
                 note=fields.get('note'),
                 archive_reason=fields.get('archive_reason'),
+                provenance=fields.get('provenance'),
                 sha=get_repo_sha(),
             ))
     return claims
@@ -222,6 +228,7 @@ def write_ledger(claims, out_dir):
                 'verdict': c.verdict,
                 'note': c.note,
                 'archive_reason': c.archive_reason,
+                'provenance': c.provenance,
             }
             f.write(json.dumps(record, ensure_ascii=False) + '\n')
     print(f"LEDGER_WRITTEN {out_path} claims={len(claims)}")
