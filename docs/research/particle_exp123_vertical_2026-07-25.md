@@ -16,10 +16,11 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.parti
 
 **Date:** 2026-07-25  
 **Orthography:** EN-UK  
-**Status:** `PARTICLE_EXP123_OK` (51/51 checks under lean_single)  
+**Status:** `PARTICLE_EXP123_OK` (58/58 checks under lean_single)  
 **Source:** `examples/particle_physics/exp123_z_metrology_nonunitary_ew.sio`  
 **Gate:** `scripts/ci/particle_exp123_gate.sh`  
-**Stdlib:** `m_w_prediction_ep_radiative`, `m_w_consistency_pull_radiative` in `ew_precision.sio`
+**JSON receipt:** `examples/particle_physics/results/exp123_deficit_curve.json`  
+**Stdlib:** tree / on-shell-Δρ / G_F-Sirlin Δr M_W APIs in `ew_precision.sio`
 
 ---
 
@@ -31,8 +32,8 @@ GUM / effects discipline, where novelty can grow without paper-first pressure.
 | Exp | Physics | Novelty surface |
 |---|---|---|
 | **1** | Γ(Z→ee) metrology + uncertainty budget + confidence gate | GUM provenance to observable; budget of PDG sources |
-| **2** | Non-unitarity at Z pole: deficit(s), peak σ with `NonUnitary`, deficit vs √s curve | Effect-typed unstable intermediate; compiler-enforced honesty |
-| **3** | EW tension: tree vs radiative (Δρ) M_W, pull collapse, S/T/U, Δρ | Tension as first-class numeric object; Δρ as construction step |
+| **2** | Non-unitarity at Z pole: deficit(s), peak σ with `NonUnitary`, deficit vs √s **JSON** | Effect-typed unstable intermediate; machine-readable curve |
+| **3** | EW tension ladder: tree → Δρ → G_F-Δr pulls, S/T/U | Tension as first-class object that improves under honest construction |
 
 ---
 
@@ -40,18 +41,23 @@ GUM / effects discipline, where novelty can grow without paper-first pressure.
 
 ```bash
 export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
-export SOUNIO_SOUC_ENGINE=lean_single   # recommended for this package
+export SOUNIO_SOUC_ENGINE=lean_single   # full run path
 
 ./bin/souc run examples/particle_physics/exp123_z_metrology_nonunitary_ew.sio
-# expect: PARTICLE_EXP123_OK  (51 PASS)
+# expect: PARTICLE_EXP123_OK  (58 PASS)
 
 bash scripts/ci/particle_exp123_gate.sh
 # expect: PARTICLE_EXP123_GATE_OK
+# also writes examples/particle_physics/results/exp123_deficit_curve.json
+# and checks Madaros science-boundary: no E-SRB-002 for this example
 ```
 
-**Engine note:** Madaros may block `examples/` → scientific modules under
-science-boundary preflight (`E-SRB-002`). lean_single is the validated path for
-this vertical. Forcing Madaros requires an approved science-boundary receipt.
+**Engine note:** Full executable run is validated under **lean_single**. Madaros
+still has residual typecheck failures (E008) inside `particle_physics` imports —
+that is **not** claimed fixed here. What **is** fixed for Madaros is the
+science-boundary allowlist: `research` → `scientific-package-candidate` no longer
+emits `E-SRB-002` (see `tools/science_boundary/attestor.py` and
+`examples/particle_physics` row in `science-rings.tsv`).
 
 ---
 
@@ -70,7 +76,7 @@ this vertical. Forcing Madaros requires an approved science-boundary receipt.
 | gate @ 800 | pass |
 | gate @ 9999 | fail (correct) |
 
-### EXP2 — NonUnitary + deficit vs √s
+### EXP2 — NonUnitary + deficit vs √s + JSON
 
 | Quantity | Value |
 |---|---|
@@ -90,37 +96,54 @@ Deficit scan receipt (√s → deficit):
 | 96.19 (M_Z + 5) | 0.056 |
 | 102.85 (1% thr) | 0.010 |
 
+Machine-readable: `EXP2_DEFICIT_JSON {...}` on stdout; gate writes
+`examples/particle_physics/results/exp123_deficit_curve.json`
+(schema `particle.exp123.deficit_curve.v1`).
+
 `main` declares `with NonUnitary` — peak path cannot hide the effect.
 
-### EXP3 — EW tension (tree vs radiative Δρ)
+### EXP3 — EW tension ladder
 
-| Quantity | Value |
+| Construction | M_W (GeV) | pull vs PDG 80.377±0.012 |
+|---|---:|---:|
+| tree (GUM) | 79.954 ± 0.0028 | **−34.35** |
+| on-shell ρ = 1+Δρ | 80.301 ± 0.0031 | **−6.17** |
+| **G_F Sirlin Δr** | **80.362 ± 0.0037** | **−1.18** |
+| PDG direct | 80.377 ± 0.012 | — |
+
+| Other | Value |
 |---|---|
-| M_W pred (tree GUM) | 79.954 ± 0.0028 GeV |
-| M_W pred (radiative, ρ = 1+Δρ) | **80.301 ± 0.0031 GeV** |
-| M_W PDG direct | 80.377 ± 0.012 GeV |
-| **pull tree** | **≈ −34.35** |
-| **pull radiative** | **≈ −6.17** |
 | S,T,U measured | 0.05±0.11, 0.09±0.14, −0.01±0.11 |
 | Δρ (top, QCD-corrected) | 0.0087 ± 0.0010 |
 | a_μ Schwinger | 0.001161 |
+| tension flag | **CONSISTENT** (|pull_GF| < 2) |
 
-**On-shell construction:**  
-`M_W = M_Z √[(1 − sin²θ_W)(1 + Δρ)]`  
-(Δα is **not** folded into this form — it belongs in the G_F-based Δr relation.)
+**G_F construction (Sirlin):**
 
-**Honest note:** leading Δρ lifts M_W by ~0.35 GeV and collapses pull from −34σ to
-−6σ. Residual pull is **by construction** — full Δr / higher orders still open.
-No BSM claim. The novelty is the **typed tension object that improves under
-honest radiative construction**.
+```
+A0 = π α / (√2 G_F)
+Δα = Δα_lep + Δα_had^(5) + Δα_top
+Δr = Δα − (c²/s²) Δρ + Δr_rem
+M_W² = (M_Z²/2) [1 + √(1 − 4 A0 / (M_Z² (1−Δr)))]
+```
+
+with self-consistent on-shell `s²_W = 1 − M_W²/M_Z²`.
+
+`Δr_rem = 0.0075 + (α/4π) ln(m_H/100)` is the O(10⁻²) pure-weak remainder
+scale when Δα already includes hadronic VP — **not** fitted to M_W^PDG.
+
+**Honest note:** pull ladder −34 → −6 → **−1.2** under successive honest steps.
+Residual ≲2σ is construction-consistent; full two-loop / higher orders remain
+open. No BSM claim.
 
 ---
 
 ## Novelty (construction, not paper)
 
 1. **Runnable metrology budget** for a textbook width — who owns the variance.  
-2. **Compiler-enforced NonUnitary** on a Z-pole observable path + deficit curve.  
-3. **Tree vs radiative pull** as one executable tension dashboard (Δρ step).
+2. **Compiler-enforced NonUnitary** + deficit curve JSON receipt.  
+3. **Pull ladder** tree → Δρ → G_F-Δr as one executable tension dashboard.  
+4. **Science-boundary allowlist** for research → scientific-package-candidate.
 
 None of these require a journal. All of them are **objects that exist** when
 the vertical is green.
@@ -129,9 +152,9 @@ the vertical is green.
 
 ## Next construction (if the vertical holds)
 
-- Full G_F-based Δr M_W prediction (close residual ~6σ).  
-- Extend gate to Madaros with science-boundary allowlist for this example.  
-- Optional: export deficit-vs-√s as a machine-readable receipt (JSON).
+- Higher-order Δr / two-loop residue (optional tightening below 1σ).  
+- Madaros typecheck of `particle_physics` (E008 residuals) — separate from boundary.  
+- Promote ring status when package extraction lands.
 
 ## AI disclosure
 

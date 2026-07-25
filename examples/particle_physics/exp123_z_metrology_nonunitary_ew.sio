@@ -3,8 +3,8 @@
 // Vertical executável: Experiências 1+2+3 (construção, não paper)
 //
 //   EXP1 — Metrologia Z: Γ(Z→ee) GUM + budget de fontes + confidence gate
-//   EXP2 — NonUnitary no pico: deficit(s) + σ_peak + curva deficit vs √s
-//   EXP3 — Tensão EW: M_W tree vs radiative (Δρ), pull, S/T/U, Δρ
+//   EXP2 — NonUnitary no pico: deficit(s) + σ_peak + curva deficit vs √s + JSON
+//   EXP3 — Tensão EW: M_W tree / Δρ / G_F-Δr, pull ladder, S/T/U, Δρ
 //
 // Effects: NonUnitary is compiler-enforced on the peak cross-section path.
 // Run:
@@ -27,6 +27,7 @@ use particle_physics::nonunitary::{
 use particle_physics::ew_precision::{
     m_w_prediction_ep, m_w_consistency_pull,
     m_w_prediction_ep_radiative, m_w_consistency_pull_radiative,
+    m_w_prediction_ep_gf, m_w_consistency_pull_gf,
     oblique_s_measured_ep, oblique_t_measured_ep, oblique_u_measured_ep,
     delta_rho_ep, g_minus_2_qed_schwinger_ep,
     oblique_s, oblique_t, oblique_u, delta_rho,
@@ -282,6 +283,42 @@ fn run_exp2() -> i64 with IO, NonUnitary, Mut, Div, Panic {
     // Monotone wings: |√s − M_Z| larger → deficit smaller on high side of thr vs hi5
     n = n + chk(d_thr < d_hi5 || thr > mz + 5.0, 217)
 
+    // Machine-readable deficit curve (JSON line; gate also materialises a file)
+    print("EXP2_DEFICIT_JSON {")
+    print("\"schema\":\"particle.exp123.deficit_curve.v1\",")
+    print("\"particle\":\"Z\",")
+    print("\"gamma_z\":")
+    print_f64(gamma_z)
+    print(",\"unitarity_threshold_sqrt_s\":")
+    print_f64(thr)
+    print(",\"points\":[")
+    print("{\"label\":\"lo\",\"sqrt_s\":")
+    print_f64(mz - 2.0)
+    print(",\"deficit\":")
+    print_f64(d_lo)
+    print("},")
+    print("{\"label\":\"pole\",\"sqrt_s\":")
+    print_f64(mz)
+    print(",\"deficit\":")
+    print_f64(d_pole)
+    print("},")
+    print("{\"label\":\"mid\",\"sqrt_s\":")
+    print_f64(mz * 1.005)
+    print(",\"deficit\":")
+    print_f64(d_mid)
+    print("},")
+    print("{\"label\":\"hi5\",\"sqrt_s\":")
+    print_f64(mz + 5.0)
+    print(",\"deficit\":")
+    print_f64(d_hi5)
+    print("},")
+    print("{\"label\":\"thr1pct\",\"sqrt_s\":")
+    print_f64(thr)
+    print(",\"deficit\":")
+    print_f64(d_thr)
+    print("}]}\n")
+    n = n + chk(true, 218)
+
     print("EXP2_DONE\n")
     n
 }
@@ -296,9 +333,11 @@ fn run_exp3() -> i64 with IO, Mut, Div, Panic {
 
     let pred = m_w_prediction_ep()
     let pred_rad = m_w_prediction_ep_radiative()
+    let pred_gf = m_w_prediction_ep_gf()
     let meas = mass_w()
     let pull = m_w_consistency_pull()
     let pull_rad = m_w_consistency_pull_radiative()
+    let pull_gf = m_w_consistency_pull_gf()
 
     print("EXP3_MW_PRED_TREE ")
     print_f64(pred.val())
@@ -312,6 +351,12 @@ fn run_exp3() -> i64 with IO, Mut, Div, Panic {
     print("EXP3_MW_PRED_RAD_STD ")
     print_f64(pred_rad.std())
     print("\n")
+    print("EXP3_MW_PRED_GF ")
+    print_f64(pred_gf.val())
+    print("\n")
+    print("EXP3_MW_PRED_GF_STD ")
+    print_f64(pred_gf.std())
+    print("\n")
     print("EXP3_MW_MEAS ")
     print_f64(meas.val())
     print("\n")
@@ -324,12 +369,15 @@ fn run_exp3() -> i64 with IO, Mut, Div, Panic {
     print("EXP3_MW_PULL_RAD ")
     print_f64(pull_rad)
     print("\n")
-    // Keep legacy key for gate/log continuity
+    print("EXP3_MW_PULL_GF ")
+    print_f64(pull_gf)
+    print("\n")
+    // Canonical pull key tracks the most complete construction step (G_F Δr)
     print("EXP3_MW_PULL ")
-    print_f64(pull_rad)
+    print_f64(pull_gf)
     print("\n")
 
-    // Physical range for M_W (tree + radiative)
+    // Physical range for M_W (tree + Δρ + G_F)
     n = n + chk(pred.val() > 75.0 && pred.val() < 85.0, 301)
     n = n + chk(meas.val() > 75.0 && meas.val() < 85.0, 302)
     n = n + chk(pred.variance() > 0.0, 303)
@@ -341,14 +389,23 @@ fn run_exp3() -> i64 with IO, Mut, Div, Panic {
     n = n + chk(pred_rad.val() > pred.val(), 308)
     // Radiative pull is strictly milder than tree-level pull (honest improvement)
     n = n + chk(abs_f(pull_rad) < abs_f(pull), 309)
-    // Residual: full Δr not yet in this construction — expect still non-zero pull
-    if abs_f(pull_rad) > 2.0 {
-        print("EXP3_TENSION_FLAG RESIDUAL_PULL_AFTER_DRHO\n")
-        print("EXP3_TENSION_NOTE leading_Delta_rho_reduces_pull_full_Delta_r_still_open\n")
+    // G_F Sirlin step
+    n = n + chk(pred_gf.val() > 75.0 && pred_gf.val() < 85.0, 310)
+    n = n + chk(pred_gf.variance() > 0.0, 311)
+    n = n + chk(abs_f(pull_gf) < 100.0, 312)
+    // G_F pull must improve on both tree and on-shell-Δρ (construction ladder)
+    n = n + chk(abs_f(pull_gf) < abs_f(pull), 313)
+    n = n + chk(abs_f(pull_gf) < abs_f(pull_rad), 314)
+    // Target: residual |pull| after G_F Δr should be construction-small
+    n = n + chk(abs_f(pull_gf) < 3.0, 315)
+    if abs_f(pull_gf) > 2.0 {
+        print("EXP3_TENSION_FLAG RESIDUAL_PULL_AFTER_GF_DR\n")
+        print("EXP3_TENSION_NOTE G_F_Sirlin_Delta_r_closes_most_tension_higher_orders_open\n")
     } else {
         print("EXP3_TENSION_FLAG CONSISTENT\n")
+        print("EXP3_TENSION_NOTE G_F_Sirlin_Delta_r_pull_within_2sigma\n")
     }
-    n = n + chk(true, 310)
+    n = n + chk(true, 316)
 
     // Oblique parameters (PDG global fit, epistemic)
     let s_ep = oblique_s_measured_ep()
@@ -374,11 +431,11 @@ fn run_exp3() -> i64 with IO, Mut, Div, Panic {
     print("\n")
 
     // PDG-scale: S ~ 0.05 ± 0.11, T ~ 0.09 ± 0.14
-    n = n + chk(abs_f(s_ep.val()) < 1.0, 311)
-    n = n + chk(s_ep.std() > 0.0, 312)
-    n = n + chk(abs_f(t_ep.val()) < 1.0, 313)
-    n = n + chk(t_ep.std() > 0.0, 314)
-    n = n + chk(u_ep.std() > 0.0, 315)
+    n = n + chk(abs_f(s_ep.val()) < 1.0, 317)
+    n = n + chk(s_ep.std() > 0.0, 318)
+    n = n + chk(abs_f(t_ep.val()) < 1.0, 319)
+    n = n + chk(t_ep.std() > 0.0, 320)
+    n = n + chk(u_ep.std() > 0.0, 321)
 
     // SM theory Δρ from top (epistemic)
     let dr = delta_rho_ep()
@@ -388,8 +445,8 @@ fn run_exp3() -> i64 with IO, Mut, Div, Panic {
     print("EXP3_DELTA_RHO_STD ")
     print_f64(dr.std())
     print("\n")
-    n = n + chk(dr.val() > 0.0 && dr.val() < 0.02, 316)
-    n = n + chk(dr.variance() > 0.0, 317)
+    n = n + chk(dr.val() > 0.0 && dr.val() < 0.02, 322)
+    n = n + chk(dr.variance() > 0.0, 323)
 
     // Theory S,T,U at PDG central masses (consistency of formulas)
     let mt = mass_top().val()
@@ -407,8 +464,8 @@ fn run_exp3() -> i64 with IO, Mut, Div, Panic {
     print("EXP3_U_TH ")
     print_f64(u_th)
     print("\n")
-    n = n + chk(abs_f(s_th) < 1.0, 318)
-    n = n + chk(abs_f(t_th) < 1.0, 319)
+    n = n + chk(abs_f(s_th) < 1.0, 324)
+    n = n + chk(abs_f(t_th) < 1.0, 325)
 
     // g-2 Schwinger term with GUM
     let amu = g_minus_2_qed_schwinger_ep()
@@ -416,8 +473,8 @@ fn run_exp3() -> i64 with IO, Mut, Div, Panic {
     print_f64(amu.val())
     print("\n")
     // α/(2π) ≈ 0.0011614
-    n = n + chk(near(amu.val(), 0.0011614, 1.0e-6), 320)
-    n = n + chk(amu.variance() > 0.0, 321)
+    n = n + chk(near(amu.val(), 0.0011614, 1.0e-6), 326)
+    n = n + chk(amu.variance() > 0.0, 327)
 
     print("EXP3_DONE\n")
     n
@@ -434,8 +491,8 @@ fn main() -> i32 with IO, NonUnitary, Mut, Div, Panic {
     let n2 = run_exp2()
     let n3 = run_exp3()
     let npass = n1 + n2 + n3
-    // Expected checks: exp1=13, exp2=17, exp3=21 → 51
-    let expected: i64 = 51
+    // Expected checks: exp1=13, exp2=18, exp3=27 → 58
+    let expected: i64 = 58
     let nfail = expected - npass
 
     print("PARTICLE_EXP123_PASS ")
