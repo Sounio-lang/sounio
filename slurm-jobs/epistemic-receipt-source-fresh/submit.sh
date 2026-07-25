@@ -44,7 +44,7 @@ Set WORKER_LOWER_TRACE=1 only for crash localization. It enables the existing
 module-frontend and IR-lowering traces inside the worker's raw ELF.
 
 WORKER_PROBE=source-fresh-gate runs the acceptance gate. WORKER_PROBE=block-ladder
-builds the same raw ELF and runs eleven generated worker-local programs to locate
+builds the same raw ELF and runs twelve generated worker-local programs to locate
 the first block shape that reproduces a lowering crash. The probe never changes
 the checked-out source tree and is not acceptance evidence.
 EOF
@@ -196,6 +196,14 @@ fn local_literal_let(tag: i64) -> i64 {
 fn main() with IO, Panic {
 }
 SIO
+  cat >"\$PROBE_ROOT/local_literal_comparison_tail.sio" <<'SIO'
+fn local_literal_comparison_tail() -> bool {
+    1 != 0
+}
+
+fn main() with IO, Panic {
+}
+SIO
   cat >"\$PROBE_ROOT/local_comparison_tail.sio" <<'SIO'
 fn local_comparison_tail(tag: i64) -> bool {
     tag != 0
@@ -270,6 +278,7 @@ SIO
   run_probe empty_main "\$PROBE_ROOT/empty_main.sio"
   run_probe local_param_identity "\$PROBE_ROOT/local_param_identity.sio"
   run_probe local_literal_let "\$PROBE_ROOT/local_literal_let.sio"
+  run_probe local_literal_comparison_tail "\$PROBE_ROOT/local_literal_comparison_tail.sio"
   run_probe local_comparison_tail "\$PROBE_ROOT/local_comparison_tail.sio"
   run_probe local_comparison_let "\$PROBE_ROOT/local_comparison_let.sio"
   run_probe local_assert_constant "\$PROBE_ROOT/local_assert_constant.sio"
