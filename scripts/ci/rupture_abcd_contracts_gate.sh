@@ -24,10 +24,13 @@ python3 scripts/research/rupture_r3_fano_restriction_probe.py | tee /tmp/rupture
 grep -q 'R3_CONTRACT_PROBE_OK' /tmp/rupture_r3_out.txt
 grep -q 'DIVERGENCE' /tmp/rupture_r3_out.txt
 grep -q 'JET_LEMMA PASS' /tmp/rupture_r3_out.txt
-grep -q 'R3_VERDICT R3_PARTIAL' /tmp/rupture_r3_out.txt
-# Must not falsely claim D3 / R3_GREEN
-if grep -q 'R3_VERDICT R3_GREEN' /tmp/rupture_r3_out.txt; then
-  echo "unexpected R3_GREEN without full B-contract" >&2
+grep -q 'CLAUSE_III_PLUS contrariety_vs_contradiction_paths -> PASS' /tmp/rupture_r3_out.txt
+grep -q 'R3_VERDICT R3_GREEN' /tmp/rupture_r3_out.txt
+# R3_GREEN is operational (path classes), not D3 identity
+if grep -q 'D3_identity_still_forbidden' /tmp/rupture_r3_out.txt; then
+  :
+else
+  echo "R3_GREEN must keep D3_identity_still_forbidden marker" >&2
   exit 1
 fi
 

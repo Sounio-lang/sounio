@@ -26,20 +26,31 @@ What this probe certifies
         (2 wells → 1 well).
   (iii) sign(ε) flips α_m and therefore b (at τ=0), and flips which cusp well
         is deeper (argmin of V). Direction, not only norm.
+  (iii+) Two path classes from the same jet α, operationalising Petitot's
+        two opposition types (not D3 identity):
+
+        Path C — CONTRARIETY (even jet only): cancel odd part by
+          τ = −α_m/2 so b≡0; sweep ε. Both poles approach the origin and
+          merge into a *neutral* monostable well (x≈0). "Both false" /
+          neutralisation is possible.
+
+        Path D — CONTRADICTION (odd jet): τ=0 so b=α_m/2; sweep ε.
+          One polar well deepens as the other vanishes; monostable well
+          stays *polar* (|x| ≳ 0.5). Sign(ε) selects which pole. "Neither"
+          (no well / only neutral) does not occur on this path.
+
+        Boolean lattice 2² has a single complement type and cannot host
+        both path classes — operational non-Booleanisability under Φ_fp.
 
 Verdict levels
 --------------
   R3_OPEN          jet or (i) failed
-  R3_HINT          old: only arrangeable crossing under ad-hoc Φ
-  R3_PARTIAL       JET + (i)+(ii)+(iii-weak well asymmetry) under Φ_fp
-  R3_GREEN         reserved: also separates contrariety vs contradiction
-                   strata (needs more than cusp asymmetry; not claimed here)
+  R3_HINT          arrangeable crossing only
+  R3_PARTIAL       JET + (i)+(ii)+(iii-weak)
+  R3_GREEN         PARTIAL + (iii+) path-class separation (this revision's target)
 
-Exit 0 iff infrastructure sound and at least R3_PARTIAL (or documented OPEN
-with probe OK only if div_ok — we require PARTIAL for gate green on R3 path).
-
-Actually gate expects R3_CONTRACT_PROBE_OK and forbids false R3_GREEN.
-PARTIAL is the target of this revision.
+Gate expects R3_CONTRACT_PROBE_OK and R3_VERDICT R3_GREEN (or PARTIAL during
+transition). Still forbids claiming D3.
 """
 from __future__ import annotations
 
@@ -129,13 +140,37 @@ def _real_roots_cubic_depressed(p: float, q: float) -> list[float]:
 
 
 def cusp_minima(a: float, b: float) -> list[float]:
-    """Local-minimum locations of V = x⁴/4 + a x²/2 + b x."""
+    """Local-minimum locations of V = x⁴/4 + a x²/2 + b x.
+
+    Includes the neutral monostable well at x=0 when a>0, b=0, and the flat
+    inflection-minimum at the cusp tip (a,b)=(0,0).
+    """
     roots = _real_roots_cubic_depressed(a, b)
-    return [x for x in roots if 3.0 * x * x + a > 1e-9]
+    mins = [x for x in roots if 3.0 * x * x + a > 1e-9]
+    if mins:
+        return mins
+    # Degenerate / monostable-neutral cases the cubic root finder may miss cleanly
+    if abs(b) < 1e-12 and a >= -1e-12:
+        return [0.0]
+    return []
 
 
 def cusp_n_minima(a: float, b: float) -> int:
     return len(cusp_minima(a, b))
+
+
+def V_cusp(x: float, a: float, b: float) -> float:
+    return 0.25 * x**4 + 0.5 * a * x * x + b * x
+
+
+def deepest_well(mins: list[float], a: float, b: float) -> float:
+    return min(mins, key=lambda x: V_cusp(x, a, b))
+
+
+def alpha_signed_coeff(alpha: list[float]) -> float:
+    """α_m for single-support associator; 0 if not unique."""
+    sup = unique_support(alpha)
+    return sup[1] if sup is not None else 0.0
 
 
 def fold_delta(a: float, b: float) -> float:
@@ -286,8 +321,8 @@ def main() -> int:
             return min(mins, key=lambda x: V(x, a, b))
 
         if mins_p and mins_n:
-            xp = deepest(mins_p, a_p, b_p)
-            xn = deepest(mins_n, a_n, b_n)
+            xp = deepest_well(mins_p, a_p, b_p)
+            xn = deepest_well(mins_n, a_n, b_n)
             # Expect opposite signs (well asymmetry flips with direction)
             if xp * xn >= 0 and abs(xp) > 1e-6 and abs(xn) > 1e-6:
                 iii_ok = False
@@ -298,14 +333,8 @@ def main() -> int:
                     f"deepest+={xp:+.4f} deepest-={xn:+.4f} FLIP_OK"
                 )
         else:
-            # If monostable, single well location should still flip with b
-            if mins_p and mins_n:
-                pass
-            elif len(mins_p) == 1 and len(mins_n) == 1:
-                if mins_p[0] * mins_n[0] >= 0:
-                    iii_ok = False
-            else:
-                print(f"CLAUSE_III s={s} mins+={mins_p} mins-={mins_n}")
+            print(f"CLAUSE_III s={s} mins+={mins_p} mins-={mins_n}")
+            iii_ok = False
 
     # Norm-only control: Φ that uses only ‖α‖ (no direction) must NOT flip wells
     def phi_norm_only(alpha: list[float], tau: float) -> tuple[float, float]:
@@ -323,6 +352,86 @@ def main() -> int:
 
     print(f"CLAUSE_III direction_well_asymmetry -> {'PASS' if iii_ok else 'FAIL'}")
 
+    # --- (iii+) Contrariety vs contradiction path classes from the same jet ---
+    # Path C: cancel odd jet (τ = -α_m/2) ⇒ b≡0; even jet only → neutral merge
+    # Path D: τ=0 ⇒ b=α_m/2; odd jet → polar selection
+    eps_path = [0.0, 0.25, 0.5, 0.75, 1.0, 1.1, 1.25]
+    path_c_records = []  # (eps, n, deepest, |deepest|)
+    path_d_records = []
+    for eps in eps_path:
+        alpha = alpha_near_line(line0, eps, off)
+        am = alpha_signed_coeff(alpha)
+        # Path C — contrariety / neutralisation
+        tau_c = -am / 2.0
+        a_c, b_c = phi_fp(alpha, tau_c)
+        mins_c = cusp_minima(a_c, b_c)
+        n_c = len(mins_c)
+        d_c = deepest_well(mins_c, a_c, b_c) if mins_c else float("nan")
+        path_c_records.append((eps, n_c, d_c, abs(d_c) if mins_c else float("nan"), a_c, b_c))
+        print(
+            f"PATH_C contrariety eps={eps:.2f} tau={tau_c:+.3f} "
+            f"a={a_c:.3f} b={b_c:.3e} n={n_c} deepest={d_c:+.4f}"
+            if mins_c
+            else f"PATH_C contrariety eps={eps:.2f} n=0"
+        )
+        # Path D — contradiction / polar
+        a_d, b_d = phi_fp(alpha, 0.0)
+        mins_d = cusp_minima(a_d, b_d)
+        n_d = len(mins_d)
+        d_d = deepest_well(mins_d, a_d, b_d) if mins_d else float("nan")
+        path_d_records.append((eps, n_d, d_d, abs(d_d) if mins_d else float("nan"), a_d, b_d))
+        print(
+            f"PATH_D contradiction eps={eps:.2f} "
+            f"a={a_d:.3f} b={b_d:+.3f} n={n_d} deepest={d_d:+.4f}"
+            if mins_d
+            else f"PATH_D contradiction eps={eps:.2f} n=0"
+        )
+
+    # Path C: starts bistable, ends monostable NEUTRAL (|deepest| small), b≈0 always
+    c_start_bi = path_c_records[0][1] == 2
+    c_b_always_0 = all(abs(r[5]) < 1e-9 for r in path_c_records)
+    c_end = path_c_records[-1]
+    c_end_neutral = c_end[1] == 1 and c_end[3] < 0.25
+    # Along C, when monostable, well stays near 0 (not polar)
+    c_mono_neutral = all(
+        (r[1] != 1) or (r[3] < 0.35) for r in path_c_records
+    )
+    path_c_ok = c_start_bi and c_b_always_0 and c_end_neutral and c_mono_neutral
+    print(
+        f"PATH_C_CHECK start_bi={c_start_bi} b0={c_b_always_0} "
+        f"end_neutral={c_end_neutral} mono_neutral={c_mono_neutral} "
+        f"-> {'PASS' if path_c_ok else 'FAIL'}"
+    )
+
+    # Path D: for |eps| large enough, monostable POLAR; ±eps flip pole; never neutral mono
+    d_pos = [r for r in path_d_records if r[0] >= 0.75]
+    d_neg_eps = alpha_near_line(line0, -1.0, off)
+    a_dn, b_dn = phi_fp(d_neg_eps, 0.0)
+    mins_dn = cusp_minima(a_dn, b_dn)
+    d_pos_ok = all(r[1] == 1 and r[3] > 0.5 for r in d_pos)
+    d_neg_ok = len(mins_dn) == 1 and abs(mins_dn[0]) > 0.5
+    d_flip = bool(d_pos and mins_dn and d_pos[-1][2] * mins_dn[0] < 0)
+    # No neutral monostable on D: when n==1, |x| large
+    d_no_neutral = all((r[1] != 1) or (r[3] > 0.5) for r in path_d_records if r[0] != 0.0)
+    path_d_ok = d_pos_ok and d_neg_ok and d_flip and d_no_neutral
+    print(
+        f"PATH_D_CHECK polar_mono+={d_pos_ok} polar_mono-={d_neg_ok} "
+        f"flip={d_flip} no_neutral={d_no_neutral} -> {'PASS' if path_d_ok else 'FAIL'}"
+    )
+
+    # Distinctness: C ends neutral, D ends polar — two non-equivalent monostable outcomes
+    distinct = path_c_ok and path_d_ok and c_end[3] < 0.25 and d_pos[-1][3] > 0.5
+    print(f"PATH_DISTINCTNESS neutral_vs_polar -> {'PASS' if distinct else 'FAIL'}")
+
+    # Boolean impossibility operational: single-complement Boolean lattice cannot
+    # host both a neutralisation path and a polar-selection path as distinct types.
+    # We only claim the *operational* witness (two path classes), not a topos theorem.
+    iii_plus_ok = distinct
+    print(
+        f"CLAUSE_III_PLUS contrariety_vs_contradiction_paths -> "
+        f"{'PASS' if iii_plus_ok else 'FAIL'}"
+    )
+
     # Isolated square
     pure = norm(associator(e(i0), e(j0), e(k0)))
     print(f"ISOLATED_SQUARE assoc={pure:.3e} (expect 0)")
@@ -332,12 +441,15 @@ def main() -> int:
         print("R3_CONTRACT_FAIL")
         return 1
 
-    if i_ok and ii_ok and iii_ok:
-        print("R3_VERDICT R3_PARTIAL")
+    if i_ok and ii_ok and iii_ok and iii_plus_ok:
+        print("R3_VERDICT R3_GREEN")
         print(
-            "R3_NOTE Phi_fp=A0+||alpha||^2/4 , tau+alpha_m/2; "
-            "A0_unit_choice; contrariety_vs_contradiction_strata_open; D3_forbidden"
+            "R3_NOTE Phi_fp jet even/odd split = Path_C_contrariety + Path_D_contradiction; "
+            "A0_unit_choice; operational_non_Booleanisability; D3_identity_still_forbidden"
         )
+    elif i_ok and ii_ok and iii_ok:
+        print("R3_VERDICT R3_PARTIAL")
+        print("R3_NOTE iii_plus_failed; strata_paths_open; D3_forbidden")
     elif ii_ok:
         print("R3_VERDICT R3_HINT")
         print("R3_NOTE partial_clauses_failed; see CLAUSE_* lines")

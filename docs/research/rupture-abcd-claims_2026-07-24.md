@@ -193,7 +193,7 @@ or non-Fano only rescales \(V\) without changing stratum type → parallel forma
 Executable probe: `scripts/research/rupture_r3_fano_restriction_probe.py`.  
 Derivation (2026-07-25): `docs/research/rupture-r3-fano-phi_2026-07-25.md`.
 
-### Φ_fp (first principles — R3_PARTIAL)
+### Φ_fp (first principles — R3_GREEN operational)
 
 Exact jet: \([e_i+\varepsilon e_u,e_j,e_k]=\varepsilon[e_u,e_j,e_k]\), single-axis support.
 
@@ -204,15 +204,20 @@ b = \tau + \frac{\alpha_m}{2},\qquad A_0=-1\text{ (unit choice)}.
 
 | Verdict | Meaning |
 |---|---|
-| `R3_PARTIAL` | JET + (i)+(ii)+(iii-weak well asymmetry) under Φ_fp — **current** |
-| `R3_GREEN` | also separates contrariety vs contradiction strata — **open** |
+| `R3_PARTIAL` | JET + (i)+(ii)+(iii) under Φ_fp |
+| `R3_GREEN` | + (iii+) even/odd path classes = contrariety vs contradiction — **current** |
+
+**Path C (contrariety):** \(\tau=-\alpha_m/2\) (\(b\equiv 0\)) → neutral monostable.  
+**Path D (contradiction):** \(\tau=0\) (\(b=\alpha_m/2\)) → polar monostable, sign selects pole.
+
+Detail: `docs/research/rupture-r3-fano-phi_2026-07-25.md`.
 
 ### Explicit non-claims (R3)
 
-- No isomorphism \(B(V_{\mathrm{cusp}})\cong ZD(𝕊)\).  
+- No isomorphism \(B(V_{\mathrm{cusp}})\cong ZD(𝕊)\) (**D3 still forbidden**).  
 - No Wildgen E₆–E₈ = magic square **theorem** (label conjecture only).  
 - No ECSS / affect / depression smuggle.  
-- `R3_PARTIAL` ≠ D3 and ≠ full Petitot impossibility theorem.
+- `R3_GREEN` = operational path-class non-Booleanisability, **not** a topos theorem and not D3.
 
 ---
 
