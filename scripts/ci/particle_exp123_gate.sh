@@ -102,4 +102,22 @@ fi
 echo "PARTICLE_EXP123_BOUNDARY_OK (no E-SRB-002)"
 echo "PARTICLE_EXP123_MADAROS_CHECK_OK"
 
+# Madaros native *run* of the reduced core vertical (N4 partial)
+# Full EXP123 still SEGVs at lower_array — see docs/handoff/particle_exp123_madaros_lower_array_segv_2026-07-25.md
+echo "== particle exp123 Madaros core run =="
+CORE=examples/particle_physics/exp123_madaros_core.sio
+CORE_OUT=/tmp/particle_exp123_madaros_core_out.txt
+CORE_ERR=/tmp/particle_exp123_madaros_core_err.txt
+set +e
+SOUNIO_SOUC_ENGINE=madaros ./bin/souc run "$CORE" >"$CORE_OUT" 2>"$CORE_ERR"
+CORE_RC=$?
+set -e
+if ! grep -q 'PARTICLE_MADAROS_CORE_OK' "$CORE_OUT"; then
+  echo "Madaros core run failed (rc=$CORE_RC):" >&2
+  tail -40 "$CORE_ERR" >&2
+  tail -20 "$CORE_OUT" >&2
+  exit 1
+fi
+echo "PARTICLE_EXP123_MADAROS_RUN_OK (core)"
+
 echo "PARTICLE_EXP123_GATE_OK"
