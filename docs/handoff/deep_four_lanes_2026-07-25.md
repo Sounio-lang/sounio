@@ -21,10 +21,11 @@ Package: `experiments/deep_four/`, receipts in `results/deep_four/`
 | Fano FO `Var(4a₁²)=64σ²` | FAIL (garbage A) | **FAIL_HONEST** (A=4 ok, **var still 0**) | **PASS** |
 
 **Root cause (value):** `ir_register_knowledge_layout` had `is_float: 0` on value/variance/confidence.  
-**Fix shipped:** `is_float: 1` + Knowledge struct bind on `measure` / `TypeKnowledge` + variance seed attempts on `.value` lets.
+**Root cause (variance):** measure used int `unc*unc`; shadows preferred over Knowledge field-1; const×x double-counted; same-ident mul FO broken.
 
-**Residual:** Madaros `variance_of` / FO product variance still returns 0 (lean_single correct).  
-**Verdict:** `MADAROS_VALUE_FIXED_VARIANCE_RESIDUAL`.
+**Fix shipped (commit `4fbc89610`):** is_float=1; `ir_binop_typed` for σ²; field-1 variance load; let-RHS FO bind; same-ident `Var(x*x)=4x²Var`; const×x = c²Var(x); sub cancel on shared variance slot.
+
+**Verdict:** `MADAROS_GUM_FO_CLOSED` — default `bin/souc` PASSes Fano FO 64σ² and product cancel. Rebuild: `SOUC_BIN=./bin/souc-lean-single-x86_64 make build-madaros`.
 
 ## L2 — Multi-component octonion associator
 
