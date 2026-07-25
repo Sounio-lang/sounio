@@ -81,7 +81,7 @@ $KUBECTL -n "$NS" cp "$COMMIT_OBJECT" "$LOGIN_POD:/tmp/$RUN_ID.commit"
 $KUBECTL -n "$NS" exec "$LOGIN_POD" -- bash -lc "mv '/tmp/$RUN_ID.source.tgz' '$REMOTE_ARCHIVE'; mv '/tmp/$RUN_ID.commit' '$REMOTE_COMMIT'"
 
 cat >"$SBATCH" <<EOF
-#!/usr/bin/env bash
+#!/usr/bin/bash
 #SBATCH -J $RUN_ID
 #SBATCH -p $PARTITION
 #SBATCH -A $ACCOUNT
@@ -94,6 +94,10 @@ cat >"$SBATCH" <<EOF
 #SBATCH -o /tmp/$RUN_ID-%j.slurmout
 #SBATCH -e /tmp/$RUN_ID-%j.slurmerr
 set -u -o pipefail
+unset BASH_ENV ENV CDPATH GLOBIGNORE
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+export PATH=/usr/bin:/bin
+export HOME=/tmp
 
 ROOT=/tmp/$RUN_ID-\${SLURM_JOB_ID:-manual}
 REPO=\$ROOT/repo
@@ -161,9 +165,13 @@ EOF
 
 $KUBECTL -n "$NS" cp "$SBATCH" "$LOGIN_POD:/tmp/$RUN_ID.sbatch"
 $KUBECTL -n "$NS" exec "$LOGIN_POD" -- bash -lc "mv '/tmp/$RUN_ID.sbatch' '$ORANGEFS_ROOT/$RUN_ID.sbatch'"
-JOB_SUBMISSION="$($KUBECTL -n "$NS" exec "$LOGIN_POD" -- bash -lc "sbatch '$ORANGEFS_ROOT/$RUN_ID.sbatch'")"
+JOB_SUBMISSION="$($KUBECTL -n "$NS" exec "$LOGIN_POD" -- bash -lc "sbatch --parsable --hold --export=NIL --chdir='$ORANGEFS_ROOT' '$ORANGEFS_ROOT/$RUN_ID.sbatch'")"
+JOB_ID="${JOB_SUBMISSION%%;*}"
+[[ "$JOB_ID" =~ ^[0-9]+$ ]] || fail "sbatch did not return a numeric job id: $JOB_SUBMISSION"
+$KUBECTL -n "$NS" exec "$LOGIN_POD" -- bash -lc "sha256sum '$REMOTE_ARCHIVE' '$REMOTE_COMMIT' '$ORANGEFS_ROOT/$RUN_ID.sbatch' > '$RESULT_DIR/submission.sha256'; printf 'job_id=%s\\nsource_commit=%s\\nsource_tree=%s\\n' '$JOB_ID' '$SOURCE_COMMIT' '$SOURCE_TREE' > '$RESULT_DIR/submission.tsv'"
+$KUBECTL -n "$NS" exec "$LOGIN_POD" -- scontrol release "$JOB_ID"
 
-echo "$JOB_SUBMISSION"
+echo "Submitted batch job $JOB_ID"
 echo "SOURCE_COMMIT=$SOURCE_COMMIT"
 echo "SOURCE_TREE=$SOURCE_TREE"
 echo "RESULT_DIR=$RESULT_DIR"
