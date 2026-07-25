@@ -3,6 +3,7 @@
 #
 # R2-partial       — fiber + Frente A measure + random control
 # R2_FULL_MEASURED — exact det/rank anchors + MC tubular measurements (not a proof)
+# ORD2             — ord 2″ subspace alignment (gap alone is FP)
 # R3_GREEN         — Φ_fp jet + path classes (single-line; D3 forbidden)
 # R4_GREEN         — multi-line field + Φ_fp Path C/D from cross-line jet (D3 forbidden)
 #
@@ -25,6 +26,13 @@ python3 scripts/research/rupture_r2_full_tubular_probe.py | tee /tmp/rupture_r2_
 grep -q 'R2_FULL_PROBE_OK' /tmp/rupture_r2_full_out.txt
 grep -q 'R2_FULL_VERDICT R2_FULL_MEASURED' /tmp/rupture_r2_full_out.txt
 grep -q 'EXACT_ANCHORS' /tmp/rupture_r2_full_out.txt
+
+echo "-- Ord 2″ subspace alignment (composed annihilation instrument) --"
+python3 scripts/research/rupture_ord2_alignment_contract.py | tee /tmp/rupture_ord2_out.txt
+grep -q 'ORD2_CONTRACT_OK' /tmp/rupture_ord2_out.txt
+grep -q 'ORD2_VERDICT ORD2_INSTRUMENT_OK' /tmp/rupture_ord2_out.txt
+grep -q 'ALIGN_SEPARATION aligned_vs_rotating -> PASS' /tmp/rupture_ord2_out.txt
+grep -q 'GAP_ALONE_INVALID_AS_DISCRIMINANT -> PASS' /tmp/rupture_ord2_out.txt
 
 echo "-- R3 Fano-restriction probe (Φ_fp) --"
 python3 scripts/research/rupture_r3_fano_restriction_probe.py | tee /tmp/rupture_r3_out.txt
@@ -57,6 +65,7 @@ fi
 # Claim docs present
 test -f docs/research/rupture-abcd-claims_2026-07-24.md
 test -f docs/research/rupture-programme-synthesis_2026-07-25.md
+test -f docs/research/rupture-ord2-alignment_2026-07-25.md
 test -f docs/research/rupture-r2-full-tubular_2026-07-25.md
 test -f docs/research/rupture-r3-fano-phi_2026-07-25.md
 test -f docs/research/rupture-r4-fano-field_2026-07-25.md
