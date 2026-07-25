@@ -1016,3 +1016,123 @@ pub fn bf_normaltest_pvalue_by(src: &BigFrame, key_col: i64, val_col: i64) -> Bi
 pub fn bf_skew_zscore_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_normaltest(src, key_col, val_col, 2) }
 /// Per-group KURTOSIS Z-SCORE (Anscombe-Glynn), broadcast. NATIVE + lean_single.
 pub fn bf_kurt_zscore_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_normaltest(src, key_col, val_col, 3) }
+
+/// Per-group CHI-SQUARE GOODNESS-OF-FIT vs uniform (columns key, integer category 0..vmax). A 1D
+/// histogram per key; with K = #categories present and E = n/K, χ² = Σ(Oᵢ−E)²/E, df = K−1.
+/// modes: 0 = χ² statistic, 1 = p-value χ²_sf(χ², K−1). Returns 0 for K<2. O(n + G·vrange).
+/// NATIVE + lean_single only.
+fn bf_group_chi2gof(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var cn: [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || n <= 0 || vmax < 0 { return out }
+    let vm1 = vmax + 1
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let hist = heap_alloc(1024 * vm1 * 8) as *mut i64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        let v = read_f64(vp, i) as i64
+        if k >= 0 && k < 1024 && v >= 0 && v < vm1 { write_i64(hist, k * vm1 + v, read_i64(hist, k * vm1 + v) + 1); cn[k] = cn[k] + 1.0 }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        if cn[g] > 0.0 {
+            let base = g * vm1
+            var K = 0.0; var v: i64 = 0
+            while v < vm1 { if read_i64(hist, base + v) > 0 { K = K + 1.0 } v = v + 1 }
+            if K > 1.0 {
+                let E = cn[g] / K
+                var chi = 0.0; v = 0
+                while v < vm1 { if read_i64(hist, base + v) > 0 { let o = read_i64(hist, base + v) as f64; chi = chi + (o - E) * (o - E) / E } v = v + 1 }
+                if mode == 0 { res[g] = chi } else { res[g] = chi2_sf(chi, K - 1.0) }
+            }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    heap_free(hist as *mut i8)
+    out
+}
+/// Per-group CHI-SQUARE GOODNESS-OF-FIT statistic (vs uniform), broadcast. NATIVE + lean_single.
+pub fn bf_chi2_gof_stat_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_chi2gof(src, key_col, val_col, vmax, 0) }
+/// Per-group CHI-SQUARE GOODNESS-OF-FIT P-VALUE, broadcast. Uses stats::chi_square. NATIVE + lean_single.
+pub fn bf_chi2_gof_pvalue_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_chi2gof(src, key_col, val_col, vmax, 1) }
+
+/// Per-group CHI-SQUARE TEST OF INDEPENDENCE P-VALUE (columns key, integer categories x 0..xmax,
+/// y 0..ymax) via a per-key joint histogram. The Pearson χ² over cells with Eᵢⱼ = rowᵢ·colⱼ/N and
+/// df = (r−1)(c−1) (r,c = #present rows/cols) is reduced through stats::chi_square::chi2_sf — the
+/// p-value companion to the existing bf_chi2_dense_by statistic. Broadcast. O(n + G·xrange·yrange).
+/// NATIVE + lean_single only.
+fn bf_group_chi2ind(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, xmax: i64, ymax: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var cn: [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || x_col < 0 || x_col >= nc || y_col < 0 || y_col >= nc || n <= 0 || xmax < 0 || ymax < 0 { return out }
+    let xm1 = xmax + 1
+    let ym1 = ymax + 1
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let xp = bf_col_ptr(src, x_col) as *mut f64
+    let yp = bf_col_ptr(src, y_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let joint = heap_alloc(1024 * xm1 * ym1 * 8) as *mut i64
+    let rs = heap_alloc(1024 * xm1 * 8) as *mut f64
+    let cs = heap_alloc(1024 * ym1 * 8) as *mut f64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        let x = read_f64(xp, i) as i64
+        let y = read_f64(yp, i) as i64
+        if k >= 0 && k < 1024 && x >= 0 && x < xm1 && y >= 0 && y < ym1 {
+            let ji = (k * xm1 + x) * ym1 + y; write_i64(joint, ji, read_i64(joint, ji) + 1)
+            let ri = k * xm1 + x; write_f64(rs, ri, read_f64(rs, ri) + 1.0)
+            let ci = k * ym1 + y; write_f64(cs, ci, read_f64(cs, ci) + 1.0)
+            cn[k] = cn[k] + 1.0
+        }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        let N = cn[g]
+        if N > 0.0 {
+            var r = 0.0; var x: i64 = 0
+            while x < xm1 { if read_f64(rs, g * xm1 + x) > 0.0 { r = r + 1.0 } x = x + 1 }
+            var c = 0.0; var y: i64 = 0
+            while y < ym1 { if read_f64(cs, g * ym1 + y) > 0.0 { c = c + 1.0 } y = y + 1 }
+            if r > 1.0 && c > 1.0 {
+                var chi = 0.0
+                x = 0
+                while x < xm1 {
+                    let rx = read_f64(rs, g * xm1 + x)
+                    if rx > 0.0 {
+                        y = 0
+                        while y < ym1 {
+                            let cy = read_f64(cs, g * ym1 + y)
+                            if cy > 0.0 { let E = rx * cy / N; let o = read_i64(joint, (g * xm1 + x) * ym1 + y) as f64; chi = chi + (o - E) * (o - E) / E }
+                            y = y + 1
+                        }
+                    }
+                    x = x + 1
+                }
+                res[g] = chi2_sf(chi, (r - 1.0) * (c - 1.0))
+            }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    heap_free(joint as *mut i8); heap_free(rs as *mut i8); heap_free(cs as *mut i8)
+    out
+}
+/// Per-group CHI-SQUARE TEST-OF-INDEPENDENCE P-VALUE, broadcast (companion to bf_chi2_dense_by). NATIVE + lean_single.
+pub fn bf_chi2_contingency_pvalue_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, xmax: i64, ymax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_chi2ind(src, key_col, x_col, y_col, xmax, ymax) }
