@@ -1,4 +1,4 @@
-# Self-falsifying compilation R11 — widening the probe: still no new corroboration, and three hazards the technique must defend against
+# Self-falsifying compilation R11 — widening the probe: still no new corroboration, and five hazards with one answer
 
 **Date:** 2026-07-26
 **Orthography:** EN-UK
@@ -16,9 +16,9 @@ signature family: functions taking 2–3 integers and returning a scalar. Every
 function it accepted computed the same thing. R11 widens the probe to array-,
 set-, dict- and float-valued kernels.
 
-The widening worked, found nothing new, and **cost three separate crashes,
-each a hazard this technique has to defend against and none of them obvious in
-advance.**
+The widening worked, found nothing new, and **cost five separate failures — each
+a hazard this technique has to defend against, none of them obvious in advance,
+and all five with the same root cause and the same one-line answer (§3).**
 
 ---
 
@@ -159,5 +159,6 @@ output makes a crash inside a probed function diagnosable rather than silent.
 ## 7. AI disclosure
 
 Harness, gate and spec drafted under human direction (2026-07-26). All figures
-are machine-computed and re-runnable. The three hazards are recorded because
-each was hit, not anticipated. No clinical content. GAIDeT-ICMJE 2025.
+are machine-computed and re-runnable. The five hazards are recorded because
+each was hit, not anticipated — including the one this line had already solved
+elsewhere and solved again the hard way. No clinical content. GAIDeT-ICMJE 2025.
