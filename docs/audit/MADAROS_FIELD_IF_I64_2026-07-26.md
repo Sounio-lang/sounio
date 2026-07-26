@@ -1,7 +1,16 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.madaros-field-if-i64-2026-07-26
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-field-if-i64-2026-07-26
+-->
+
 # Madaros multimodule: i64 field load OK on return, wrong on if/sub
 
 **Date:** 2026-07-26  
-**Status:** residual open (stdlib workarounds live; native fix blocked by active claims on `self-hosted/native/**` + `self-hosted/ir/lower.sio`)  
+**Status:** residual open (stdlib workarounds live). **Claude-1 / Claude-2: help package below.**  
 **Witness:** `tests/multimodule/madaros_field_if_i64_{leaf,main}.sio`  
 **Gate:** `scripts/ci/madaros_field_if_i64_gate.sh`
 
@@ -31,35 +40,64 @@ re-materialises a clean i64.
 | `pb_is_credible` / `ck_is_credible` | same pattern (#1492) |
 | EXP123 confidence gates 111/113 | closed via ep_gate |
 
-## Suspected fix surface (for owner of native lane)
+## Smoking gun for Claude-1 / Claude-2
 
-Priority order for forensics:
+Measured `sub_conf(&e, 800)` under Madaros:
 
-1. **Native branch condition materialisation** for SSA values produced by `IrFieldGet` of i64  
-   (`self-hosted/native/codegen_x86_linux.sio` — active claim elsewhere)
-2. **Imported multimodule finalize / restore** of field-get results used as cmp operands  
-   (`self-hosted/compiler/module_frontend.sio` finalize path)
-3. **IR lower of `if` with field-loaded condition**  
-   (`self-hosted/ir/lower.sio` — active FO claim elsewhere)
+```
+printed i64 = -4573123946618028032
+bit pattern = 0xc089000000000000
+as f64      = -800.0   exactly
+```
 
-Acceptance for close:
+So the binop path is doing **float** `0.0 - 800.0` (or equivalent), not integer
+`846 - 800`. That fits:
+
+1. field value of `confidence` is seen as **0.0** on the binop path, and  
+2. `OpSub` / `OpGe` take the **float** arm of `nc_emit_core_binop`.
+
+Integer `return e.confidence` still prints **846** — so not every use of the
+field is broken; return vs binop diverge.
+
+### Where to look first
+
+| Site | File (approx) | Why |
+|---|---|---|
+| `IrFieldGet` emit + float mark | `codegen_x86_linux.sio` ~7272–7286 | marks dst float via `nc_core_field_is_float` / imm_flags |
+| float vs int binop | same file ~6788–6868 | `OpGe`/`OpSub` float override when reg typed float |
+| `IrBranchTrue` | same file ~7577–7582 | `test rax,rax` — needs clean 0/1 from int cmp |
+| ref vs handle FieldGet | `label_id == 1` branch at FieldGet | `&MiniEp` must use ref-field load |
+
+### Hypotheses
+
+**H1 (preferred):** `confidence` (i64 after two f64 fields) is wrongly
+float-marked after FieldGet; binops reinterpret / zero; return path still
+prints a prior integer materialisation of 846.
+
+**H2:** multimodule FieldGet on `&T` misses `label_id=1`, handle-resolve yields 0
+for some consumers; return uses another path.
+
+### Acceptance
 
 ```text
 MADAROS_FIELD_IF_I64_FIXED
 # requires: gate_field=1 gate_let=1 sub=46 via_arg=1 ret=846
+bash scripts/ci/madaros_field_if_i64_gate.sh
 ```
 
 ## Reproduction
 
 ```bash
 export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
-export MADAROS_RAW_BIN=artifacts/self-hosted/madaros   # or bin/madaros-linux-x86_64
+export MADAROS_RAW_BIN=artifacts/self-hosted/madaros
 bash scripts/ci/madaros_field_if_i64_gate.sh
-# expect: PASS: RESIDUAL documented  until native fix
+# residual: PASS: RESIDUAL documented
+# fixed:    PASS: FIXED
 ```
 
-## Coordination note
+## Coordination
 
-2026-07-26: `self-hosted/native/codegen_x86_linux.sio` held by claude co-own lane;
-`self-hosted/ir/lower.sio` held by fo-transcendental. This audit + witness ship
-without touching those files. Handoff ready for the native owner.
+Product workarounds already on main (`ep_i64_ge`, `pb_i64_ge`, `ck_i64_ge`).
+Do **not** drop them until FIXED is green. Founder asked Grok to help
+Claude-1/2 — this audit is the intake package; native patch is theirs (or
+shared if they free the claim).

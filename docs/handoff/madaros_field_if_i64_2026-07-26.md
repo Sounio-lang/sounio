@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.handoff.madaros-field-if-i64-2026-07-26
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.handoff.madaros-field-if-i64-2026-07-26
+-->
+
 # Handoff — Madaros i64 field-if residual
 
 **For:** native/codegen owner  
