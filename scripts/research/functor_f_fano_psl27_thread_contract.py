@@ -236,8 +236,35 @@ def main():
           f"phi-line-perm==ZD-fibre-perm: {n_equiv}/168; orbit on fibres={len(orbit)} (7=transitive) "
           f"{'PASS' if w5 else 'FAIL'}")
 
+    # W6 — the psi (ord-2 co-associator 4-form) threads the SAME fibres, dually:
+    # its 7 coassociative 4-planes = the ZD fibre octonion-supports = the Fano-line
+    # complements; psi calibrates (+-1) each. So the fibre carries BOTH a phi line
+    # (ord-1, its label) and a psi 4-plane (ord-2, its support) -- the G2 phi/psi duality.
+    import itertools as _it2
+    psi = np.zeros((8, 8, 8, 8))
+    for a in range(1, 8):
+        for b_ in range(1, 8):
+            for c in range(1, 8):
+                A = mul(mul(e(a, 8), e(b_, 8), 3), e(c, 8), 3) - mul(e(a, 8), mul(e(b_, 8), e(c, 8), 3), 3)
+                for d in range(1, 8):
+                    psi[a, b_, c, d] = -0.5 * float(np.dot(A, e(d, 8)))
+    psi_supp = set()
+    calib = set()
+    for T in _it2.combinations(range(1, 8), 4):
+        vals = [psi[p] for p in _it2.permutations(T)]
+        if max(abs(v) for v in vals) > TOL:
+            psi_supp.add(frozenset(T))
+            calib.add(round(max(abs(v) for v in vals), 6))
+    fibre_supps = set(frozenset(x % 8 for v in nullspace(Lmat4(e(i, 16) + e(j, 16)))
+                                for x in np.nonzero(np.abs(v) > TOL)[0]) for (i, j) in ZD)
+    fano_compl = set(frozenset(range(1, 8)) - L for L in PL)
+    w6 = (len(psi_supp) == 7 and psi_supp == fano_compl and psi_supp == fibre_supps and calib == {1.0})
+    print(f"W6_PSI_COASSOCIATIVE_FIBRE psi nonzero on {len(psi_supp)}/35 four-sets == Fano complements "
+          f"({psi_supp == fano_compl}) == ZD fibre supports ({psi_supp == fibre_supps}); calibration |psi|={sorted(calib)} "
+          f"{'PASS' if w6 else 'FAIL'}")
+
     print("=" * 70)
-    if core and w1 and w2 and w3 and w4 and w5:
+    if core and w1 and w2 and w3 and w4 and w5 and w6:
         print("FUNCTOR_F_FANO_VERDICT PSL27_THREADS_THE_TOWER")
         print("FUNCTOR_F_FANO_NOTE 42 sedenion ZD -> 7 Fano fibres (prior 168 structure); NEW: fibre-line "
               "== functor-F phi 3-form line (complement map, all 42); one explicit order-3 PSL(2,7) "
@@ -245,7 +272,9 @@ def main():
               "phi, ord-2 ZD fibre, ord-3 secondary op SHARE one Fano indexing and one PSL(2,7) action "
               "(operational unification across layers, NOT a single object, NOT an identity; D3 respected); "
               "verified for the FULL 168-element PSL(2,7): all in Aut(S), all equivariant, transitive on "
-              "the 7 fibres (W5)")
+              "the 7 fibres (W5); AND the psi 4-form (ord-2) threads the same fibres dually -- its 7 "
+              "coassociative 4-planes ARE the ZD fibre supports (= Fano complements), calibrated +-1 (W6): "
+              "the fibre carries a phi line (label) and a psi 4-plane (support), the G2 phi/psi duality")
         return 0
     print("FUNCTOR_F_FANO_VERDICT INCOMPLETE")
     return 1

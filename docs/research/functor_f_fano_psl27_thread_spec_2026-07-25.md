@@ -38,6 +38,12 @@ separate — the **algebraic** column (`φ`, `ψ`, the closed contraction tower)
 and one symmetry (`PSL(2,7)`). It is a shared structure across layers, **not** a claim
 that the three layers are a single object, and **not** an identity between them (D3).
 
+Sharper still (`W6`): the ZD fibre carries **both** functor-F forms at once — its `φ`
+**line** (ord-1, an associative 3-plane) is its *label*, and its octonion **support** is a
+`ψ` **coassociative 4-plane** (ord-2), the two related by the G₂ `φ`/`ψ` (Hodge) duality
+line ↔ complement. So the G₂ `φ`/`ψ` duality is **realised on each ZD fibre** via the
+shared Fano indexing (label = `φ` line, support = dual `ψ` 4-plane).
+
 ---
 
 ## 1. Results
@@ -49,6 +55,7 @@ that the three layers are a single object, and **not** an identity between them 
 | `W3_PSL27_EQUIVARIANCE` | an explicit `PSL(2,7)` Fano collineation (a signed-permutation octonion automorphism, order 3) lifted diagonally to `Aut(𝕊)` permutes the ZD fibres by the **same `π`** it induces on the `φ` lines — verified on all 42 ZD | the symmetry is shared, not coincidental. |
 | `W4_ORD3_ON_FIBRE` | the ord-3 secondary operation sits on these fibres (`ker L_b = ker R_b = ` 4-dim, uniform) | ord-1 `φ`, ord-2 ZD, ord-3 secondary all thread one `PSL(2,7)`. |
 | `W5_FULL_PSL27_TRANSITIVE` | the **full 168-element** `PSL(2,7)` is built (all GL(3,2) collineations, sign-solved): all `(g,g) ∈ Aut(𝕊)`, all `168` act equivariantly (`φ`-line-perm == ZD-fibre-perm), and the action is **transitive** on the 7 fibres (orbit `= 7`, line-stabiliser `= 24`) | not one generator — the whole group, one transitive `PSL(2,7)` orbit. |
+| `W6_PSI_COASSOCIATIVE_FIBRE` | the ord-2 co-associator 4-form `ψ` is nonzero on exactly **7 of 35** four-subsets = the 7 **coassociative 4-planes** = the Fano-line complements = **the ZD fibre octonion-supports**, and calibrates each (`\|ψ\|=1`) | the `ψ` 4-form threads the same fibres **dually**: the fibre's *support* IS a `ψ` 4-plane, as its *label* is a `φ` line — the G₂ `φ`/`ψ` duality. |
 
 Verdict: `FUNCTOR_F_FANO_VERDICT PSL27_THREADS_THE_TOWER`.
 
@@ -121,8 +128,9 @@ own symmetry **unifies the orders it had been probing separately**.
 1. **[DONE, `W5`]** All 168 collineations built; the joint action is a single **transitive**
    `PSL(2,7)` on the 7 fibres, equivariant with the φ-lines (168/168). Remaining: the same
    for `ψ`'s coassociative 4-planes (edge 2).
-2. **`ψ` (4-form) under the same thread** — does the co-associator's coassociative
-   4-planes align with the ZD fibres under `PSL(2,7)` too?
+2. **[DONE, `W6`]** The `ψ` co-associator's 7 coassociative 4-planes ARE the ZD fibre
+   supports (Fano complements), calibrated `±1`; so `φ` (line/label) and `ψ` (4-plane/support)
+   both thread the fibres, dually, under the same `PSL(2,7)`.
 3. **The ord-3 quotient as a `PSL(2,7)`-module — attempted, hits a structural wall.**
    The stabiliser of a single ZD *b* (equivalently of its fibre **as a subspace**) is
    **trivial**: the line-stabiliser `S₄` (order 24) permutes the **6 distinct fibres** of a
