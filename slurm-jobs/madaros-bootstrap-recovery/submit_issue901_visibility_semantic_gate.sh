@@ -145,6 +145,8 @@ done
 [[ "\$(tsv_value stage1_madaros_sha256 "\$PROVENANCE")" == "\$(tsv_value stage2_madaros_sha256 "\$PROVENANCE")" ]] || block 'stage1_stage2_hash_mismatch'
 COMPILER_SHA256="\$(sha256 "\$COMPILER")"
 [[ "\$(tsv_value stage2_madaros_sha256 "\$PROVENANCE")" == "\$COMPILER_SHA256" ]] || block 'provenance_compiler_sha256_mismatch'
+COMPILER_VERSION="\$("\$COMPILER" --version 2>&1)" || block 'stage2_identity_command_failed'
+grep -Fq Madaros <<< "\$COMPILER_VERSION" || block 'stage2_identity_mismatch'
 printf 'compiler_sha256\\t%s\\n' "\$COMPILER_SHA256" >> "\$RESULT_DIR/environment.tsv"
 
 set +e
