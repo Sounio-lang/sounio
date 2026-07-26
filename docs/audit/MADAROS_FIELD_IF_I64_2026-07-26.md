@@ -10,9 +10,9 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-
 # Madaros multimodule: i64 field load OK on return, wrong on if/sub
 
 **Date:** 2026-07-26  
-**Status:** **ROOT CAUSE FOUND + FIX IN FLIGHT** (2026-07-26 Grok)  
+**Status:** **CLOSED** (#1511 lower.sio + workaround drop)  
 **Witness:** `tests/multimodule/madaros_field_if_i64_{leaf,main}.sio`  
-**Gate:** `scripts/ci/madaros_field_if_i64_gate.sh`
+**Gate:** `scripts/ci/madaros_field_if_i64_gate.sh` → `MADAROS_FIELD_IF_I64_FIXED`
 
 ## Measured matrix (current-source Madaros, 2026-07-26)
 

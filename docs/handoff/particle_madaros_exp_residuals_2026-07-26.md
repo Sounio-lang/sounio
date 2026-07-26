@@ -67,3 +67,7 @@ Madaros imported multimodule:
 
 Native fix blocked this session by active claims on `self-hosted/native/**` and
 `self-hosted/ir/lower.sio`. Stdlib workarounds remain until `MADAROS_FIELD_IF_I64_FIXED`.
+
+## Field-if closeout
+
+**CLOSED** #1511 + workaround drop (direct `e.confidence >= k` restored).
