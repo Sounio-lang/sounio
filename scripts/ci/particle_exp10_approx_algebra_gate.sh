@@ -72,4 +72,21 @@ if ! grep -qE 'PARTICLE_EXP10_OK|PARTICLE_EXP10_PARTIAL_OK' "$MAD_OUT"; then
   exit 1
 fi
 echo "PARTICLE_EXP10_MADAROS_CORE_OK"
+
+# Residual #1 closeout surface: free-fn approx_effects physics (thin IR)
+echo "== particle exp10 Madaros physics thin vertical =="
+PHYS=examples/particle_physics/exp10_approx_physics.sio
+PHYS_OUT=/tmp/particle_exp10_physics_out.txt
+PHYS_ERR=/tmp/particle_exp10_physics_err.txt
+set +e
+SOUNIO_SOUC_ENGINE=madaros ./bin/souc run "$PHYS" >"$PHYS_OUT" 2>"$PHYS_ERR"
+PHYS_RC=$?
+set -e
+if ! grep -q 'PARTICLE_EXP10_PHYSICS_OK' "$PHYS_OUT"; then
+  echo "Madaros physics thin failed rc=$PHYS_RC" >&2
+  tail -40 "$PHYS_ERR" >&2
+  tail -20 "$PHYS_OUT" >&2
+  exit 1
+fi
+echo "PARTICLE_EXP10_MADAROS_PHYSICS_OK"
 echo "PARTICLE_EXP10_GATE_OK"

@@ -1,11 +1,10 @@
 <!-- docs:meta
-
 topic_id: repo.docs.papers.rupture-functor-f-synthesis-2026-07-25
-authority: draft
-audience: researchers
-last_validated: 2026-07-25
-validated_by: kimi
-source_of_truth: repo.docs.papers.rupture-functor-f-synthesis-2026-07-25
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.papers.rupture-functor-f-synthesis-2026-07-25
 -->
 
 # Rupture as Algebra: An Executable Bridge from Cayley–Dickson Zero Divisors to Petitot Morphodynamics
