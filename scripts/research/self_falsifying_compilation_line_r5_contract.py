@@ -124,16 +124,27 @@ def clause_w2(cited: dict) -> bool:
 
 
 def clause_w3(paper: str) -> bool:
-    """The related-work honesty markers must survive prose edits.
+    """The narrowed novelty claim must survive prose edits.
 
-    §7.2 is conjecture. If someone deletes the marker while leaving the list,
-    the paper starts asserting a novelty claim nobody verified — which is the
-    overclaim this whole line exists to study, committed in the venue where it
-    would do the most damage.
+    Searching the related work established that the MECHANISM IS NOT NOVEL, and
+    the claim was narrowed to proposition-binding. Prose gets rewritten; a
+    concession is the easiest sentence to lose. If it goes, the paper silently
+    re-widens to the claim the search refuted — the overclaim this whole line
+    exists to study, committed in the venue where it would do the most damage.
+    Negative-tested: turning "is not new" back into "is a contribution" fails
+    this clause.
     """
+    # These track the paper's ACTUAL honesty state, which changed when the
+    # related-work search was done: the load-bearing neighbours are now checked,
+    # and the finding was that the MECHANISM IS NOT NOVEL (Cargo build.rs runs
+    # arbitrary code before compilation and fails the build; snapshot testing
+    # binds a declared expected output). The novelty claim was narrowed to
+    # binding a declared PROPOSITION. These markers exist so that narrowing
+    # cannot be quietly widened again by a later prose edit.
     required = [
-        ("PARTIALLY VERIFIED", "the related-work heading still flags its status"),
-        ("not yet checked", "§7.2 is still marked as unchecked"),
+        ("is not new", "the paper still concedes the mechanism is not novel"),
+        ("build.rs", "the prior art that makes that concession concrete is still named"),
+        ("Residual risk", "the remaining unsearched risk is still stated"),
         ("SKELETON", "the artefact still declares itself a skeleton, not a draft"),
     ]
     ok = True
@@ -142,7 +153,7 @@ def clause_w3(paper: str) -> bool:
             print(f"  MISSING {needle!r} — {why}")
             ok = False
     print(f"W3_HONESTY_MARKERS {'PASS' if ok else 'FAIL'} — "
-          f"unverified sections still marked as unverified")
+          f"the narrowed novelty claim and its residual risk are still stated")
     return ok
 
 
@@ -194,11 +205,11 @@ def main() -> int:
         return 1
 
     suffix = "CI_WIRED" if wired == total_gates and total_gates else "CI_UNWIRED"
-    token = ("PAPER_SKELETON_TOKEN_BOUND__RELATED_WORK_PARTIALLY_VERIFIED"
-             f"__{suffix}")
+    token = f"PAPER_SKELETON_TOKEN_BOUND__NOVELTY_NARROWED_BY_SEARCH__{suffix}"
     print(f"  rungs cited        : {len(cited)}/{len(discovered_rungs())}")
     print(f"  tokens agreeing    : {len(cited)}/{len(cited)}")
-    print(f"  related work       : 2 neighbours checked, §7.2 unverified")
+    print(f"  related work       : load-bearing neighbours checked; mechanism "
+          f"conceded NOT novel; claim narrowed to proposition-binding")
     print(f"  gates wired into CI: {wired}/{total_gates} "
           f"— chain of custody is "
           f"{'closed' if suffix == 'CI_WIRED' else 'ASPIRATIONAL until wired'}")

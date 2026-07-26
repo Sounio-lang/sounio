@@ -1,6 +1,6 @@
 # Self-Falsifying Compilation — paper skeleton (OOPSLA 2027)
 
-**Status:** `SKELETON` — `PAPER_SKELETON_TOKEN_BOUND__RELATED_WORK_PARTIALLY_VERIFIED__CI_UNWIRED`
+**Status:** `SKELETON` — `PAPER_SKELETON_TOKEN_BOUND__NOVELTY_NARROWED_BY_SEARCH__CI_UNWIRED`
 **Date:** 2026-07-26
 **Harness:** `scripts/research/self_falsifying_compilation_line_r5_contract.py`
 **Gate:** `scripts/ci/self_falsifying_compilation_line_r5_gate.sh`
@@ -35,10 +35,14 @@ that live **outside the source** — a measured constant, a statistical result, 
 numerical experiment. Today those premises are recorded in prose and drift
 silently. We build a compiler that treats them as a compile-time obligation: it
 executes each claim's check after type-check and **before code generation**, and
-refuses to emit an artifact whose premises no longer hold. We then do the thing
-such papers usually omit: we ask, against a real scientific codebase's own
-history of self-correction, whether the mechanism would have caught anything.
-It would not — and the reason is precise, general, and worth more than the
+refuses to emit an artifact whose premises no longer hold. **Running an external
+process before compilation and failing the build is not new** — Cargo's
+`build.rs` has done it for years. What is new is *what the build is bound to*: a
+source-level claim declares the **proposition** its check reports, and the
+compiler refuses to emit code when the check reports a different one. We then do
+the thing such papers usually omit: we ask, against a real scientific codebase's
+own history of self-correction, whether any of it would have caught anything. It
+would not — and the reason is precise, general, and worth more than the
 mechanism.
 
 ---
@@ -47,9 +51,9 @@ mechanism.
 
 | # | Contribution | Evidence | Verdict token |
 |---|---|---|---|
-| C1 | A compiler that conditions code generation on the execution of external empirical checks, implemented in a self-hosted language. | R0 | `SUBSTRATE_LIVE__CORPUS_BOUND__HISTORICAL_FAILURES_ARE_INTERPRETIVE` |
+| C1 | An implementation of claim-gated code generation in a self-hosted compiler. **Not a novel capability** (cf. `build.rs`, §7.1); reported because the rest is measured on it. | R0 | `SUBSTRATE_LIVE__CORPUS_BOUND__HISTORICAL_FAILURES_ARE_INTERPRETIVE` |
 | C2 | What it costs to attach such a guard to a real scientific corpus, and the wall it hits: claims in **imported modules never execute**. | R1 | `BOUND_15__MODULE_CLOSURE_BLOCKS` |
-| C3 | **Verdict-token binding**: bind the build to the *proposition* the check reports, not merely to its exit status. | R2 | `TOKEN_BINDING_IMPLEMENTED__CATCHES_DRIFT_NOT_MISINTERPRETATION` |
+| C3 | **Verdict-token binding** — the paper's narrow novelty claim: bind the build to the *proposition* the check reports, where prior art binds an exit status (`build.rs`) or a literal output (snapshot testing). | R2 | `TOKEN_BINDING_IMPLEMENTED__CATCHES_DRIFT_NOT_MISINTERPRETATION` |
 | C4 | A distinction — *drift* vs *shared misinterpretation* — with an argument that the latter is out of reach of any self-falsifying scheme, and an empirical test of what does reach it. | R3 | `FALSIFIERS_NONVACUOUS_ONLY_FOR_CLOSED_FORM_CLAIMS` |
 | C5 | A retrospective over the corpus's own correction history under a predicate **fixed before the study ran**, reporting a negative result and a degenerate arm. | R4 | `RETROSPECTIVE_RUN__SOME_ARM_FIRED` |
 
@@ -121,25 +125,55 @@ the least obvious parts:
   *false*, the harness — executed, not inspected — exited 0 and emitted exactly
   the token the spec declared. Green, self-consistent, and wrong.
 
-## 7. Related work — **PARTIALLY VERIFIED, do not cite beyond §7.1**
+## 7. Related work — **load-bearing neighbours CHECKED (2026-07-26); the novelty claim was narrowed as a result**
 
-### 7.1 Checked (2026-07-26)
+Searching this section changed the paper. The first draft positioned the
+*mechanism* as the contribution. It is not.
+
+### 7.1 The mechanism is not novel — checked
+
+- **Cargo build scripts (`build.rs`).** Run **arbitrary code before the main
+  compilation**; if the script fails, the build fails. So "an external process
+  runs before compilation and can abort it" is standard practice, not a
+  contribution. Any claim that this paper introduces that capability would be
+  false.
+- **Snapshot / approval testing** (Jest, Vitest, golden-master files). Bind a
+  **declared expected output** to the actual output and fail on mismatch;
+  CI conventionally refuses to write new snapshots, so a mismatch gates the
+  merge. The closest neighbour to verdict-token binding.
+
+**What survives as the distinction, stated narrowly:** `build.rs` binds the
+build to a check's **exit status**; snapshot testing binds it to a check's
+**literal output**. Neither binds it to a **proposition the source declares** —
+there is no place in either to write *what the check is supposed to establish*,
+so neither can detect a check that still succeeds while establishing something
+else. That gap is what `verdict_token` fills, and it is a narrow claim.
+
+### 7.2 Nearest neighbours in scientific software — checked
 
 - **Continuous analysis** (Beaulieu-Jones & Greene, *Nature Biotechnology* 2017)
-  — Docker + CI to re-run a computational analysis whenever code or data change.
-  The closest neighbour found. Distinction: it re-runs an analysis *alongside*
-  the build and reports; it does not make the **compiler** withhold an artifact,
-  and it binds a pipeline rather than a stated proposition.
+  — Docker + CI re-running a computational analysis whenever code or data
+  change. Runs *alongside* the build and reports; does not withhold an artifact,
+  and binds a pipeline rather than a stated proposition.
 - **Executable papers** (*Toward Executable Scientific Publications*, Procedia
-  CS 2011) — ship data and code so a reader can re-validate. Distinction: the
-  document is the artifact; nothing blocks code generation.
+  CS 2011) — ship data and code so a reader can re-validate. The document is the
+  artifact; nothing blocks code generation.
 
-### 7.2 Conjectured, **not yet checked** — a full pass is required before submission
+### 7.3 Distinct by definition, argued rather than searched
 
-Design-by-contract and runtime assertions · refinement types and static analysis
-· `constexpr`/`comptime`/staging · build-system test gating · certified
-compilation and proof-carrying code · reproducible and hermetic builds (the
-*opposite* design goal — this deliberately makes the build depend on the world).
+Design-by-contract and runtime assertions, refinement types and static analysis,
+`constexpr`/`comptime`/staging, certified compilation and proof-carrying code:
+all describe or prove properties **of the program**. The premises here are
+propositions **about the world**, decided by running an experiment, and no
+amount of reasoning over the source settles them. Reproducible and hermetic
+builds are the *opposite* design goal — this deliberately makes the build depend
+on the world, which §6 shows is a cost as well as the point.
+
+**Residual risk.** The searches above were targeted, not exhaustive; a
+systematic pass over PL and research-software venues remains before submission.
+The novelty claim as now stated — *binding a build to a declared proposition
+rather than to an exit status or a literal output* — is the one that must
+survive it.
 
 ## 8. Threats
 
@@ -160,7 +194,9 @@ with the narrative rather than retro-fitted — is the contribution.
 
 ## Open before this becomes a draft
 
-1. §7.2 related-work pass, with verified references.
+1. A systematic related-work pass. §7.1–7.2 checked the load-bearing
+   neighbours and the novelty claim was narrowed as a result; the residual risk
+   is stated in §7.3.
 2. Decide whether the artefact is the compiler, the corpus, or both.
 3. Generalisation beyond one repository: the results are a case study and should
    be titled as one.
