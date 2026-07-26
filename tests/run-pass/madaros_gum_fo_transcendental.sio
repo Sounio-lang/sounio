@@ -1,0 +1,100 @@
+//@ run-pass
+//@ expect-stdout: MADAROS_GUM_FO_TRANSCENDENTAL_PASS
+
+// FO chain rule through unary math (sin/cos/sqrt) + second-order mean.
+//   s_out = f' * s_in
+//   H_out = f'' * s_in^2 + f' * H_in
+//   E2[f] ~= f(mu) + 0.5 * H * sigma^2
+//
+// Note: Madaros native exp/log currently misbehave (exp(0)~0.5); FO still
+// implements them, but this gate sticks to sin/cos/sqrt which are trustworthy.
+
+fn abs_f(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn main() with IO, Mut, Div, Epistemic {
+    // --- sqrt: mu=4, sigma=0.1, var=0.01
+    // f'=1/(2*2)=0.25, f''=-1/(4*8)=-1/32
+    // Var = 0.0625*0.01 = 0.000625
+    // E2 = 2 + 0.5*(-1/32)*0.01 = 2 - 0.00015625
+    let ks: Knowledge<f64> = measure(4.0, uncertainty: 0.1)
+    let xs = ks.value
+    let vs = variance_of(sqrt(xs))
+    let ms = second_order_mean(sqrt(xs))
+
+    // --- sin: mu=0, sigma=0.1
+    // f'=cos(0)=1, f''=-sin(0)=0 -> Var=0.01; E2=0
+    let kn: Knowledge<f64> = measure(0.0, uncertainty: 0.1)
+    let xn = kn.value
+    let vn = variance_of(sin(xn))
+    let mn = second_order_mean(sin(xn))
+
+    // --- cos: mu=0, sigma=0.1
+    // f'=-sin(0)=0, f''=-cos(0)=-1 -> Var=0; E2=1 + 0.5*(-1)*0.01 = 0.995
+    let kc: Knowledge<f64> = measure(0.0, uncertainty: 0.1)
+    let xc = kc.value
+    let vc = variance_of(cos(xc))
+    let mc = second_order_mean(cos(xc))
+
+    // --- sin at pi/6 = 0.5235987755982988, sigma=0.05
+    // f'=cos=sqrt(3)/2, f''=-sin=-0.5
+    // Var = (0.75)*0.0025 = 0.001875
+    // E2 = 0.5 + 0.5*(-0.5)*0.0025 = 0.5 - 0.000625 = 0.499375
+    let kp: Knowledge<f64> = measure(0.5235987755982988, uncertainty: 0.05)
+    let xp = kp.value
+    let vp = variance_of(sin(xp))
+    let mp = second_order_mean(sin(xp))
+
+    // --- composition: cos(x*x), mu=0.5, sigma=0.05, var=0.0025
+    // u=x^2: u=0.25, s_u=2x=1, H_u=2
+    // cos: f'=-sin(0.25), f''=-cos(0.25)
+    // s_out = -sin(0.25)*1
+    // H_out = -cos(0.25)*1 + (-sin(0.25))*2 = -cos(0.25) - 2*sin(0.25)
+    // Var = s_out^2 * 0.0025
+    // E2 = cos(0.25) + 0.5 * H_out * 0.0025
+    let kq: Knowledge<f64> = measure(0.5, uncertainty: 0.05)
+    let xq = kq.value
+    let vq = variance_of(cos(xq * xq))
+    let mq = second_order_mean(cos(xq * xq))
+    let c025 = cos(0.25)
+    let s025 = sin(0.25)
+    let s_out = 0.0 - s025
+    let h_out = (0.0 - c025) - 2.0 * s025
+    let vq_exp = s_out * s_out * 0.0025
+    let mq_exp = c025 + 0.5 * h_out * 0.0025
+
+    // --- nested through helper
+    // g(y)=sqrt(y); FO via interproc? pure helper with body sqrt(y)
+    // skip interproc math for now — inline only
+
+    print("vs="); print_f64(vs); print("\n")
+    print("ms="); print_f64(ms); print("\n")
+    print("vn="); print_f64(vn); print("\n")
+    print("mn="); print_f64(mn); print("\n")
+    print("vc="); print_f64(vc); print("\n")
+    print("mc="); print_f64(mc); print("\n")
+    print("vp="); print_f64(vp); print("\n")
+    print("mp="); print_f64(mp); print("\n")
+    print("vq="); print_f64(vq); print("\n")
+    print("mq="); print_f64(mq); print("\n")
+    print("vq_e="); print_f64(vq_exp); print("\n")
+    print("mq_e="); print_f64(mq_exp); print("\n")
+
+    let ok = abs_f(vs - 0.000625) < 1.0e-9
+        && abs_f(ms - (2.0 - 0.00015625)) < 1.0e-9
+        && abs_f(vn - 0.01) < 1.0e-9
+        && abs_f(mn - 0.0) < 1.0e-9
+        && abs_f(vc - 0.0) < 1.0e-9
+        && abs_f(mc - 0.995) < 1.0e-9
+        && abs_f(vp - 0.001875) < 1.0e-8
+        && abs_f(mp - 0.499375) < 1.0e-8
+        && abs_f(vq - vq_exp) < 1.0e-9
+        && abs_f(mq - mq_exp) < 1.0e-9
+    if ok {
+        print("MADAROS_GUM_FO_TRANSCENDENTAL_PASS\n")
+    } else {
+        print("MADAROS_GUM_FO_TRANSCENDENTAL_FAIL\n")
+    }
+}

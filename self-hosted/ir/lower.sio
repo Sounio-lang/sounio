@@ -6510,6 +6510,265 @@ impl Lowerer {
         lo
     }
 
+    // Unary math FO kind: 0=exp 1=sin 2=cos 3=sqrt 4=ln/log  (-1 = not unary math)
+    fn fo_unary_math_kind(self, n: Name) -> i64 with Div {
+        if n.len == 3
+            && n.buf[0] == 101 as i8 && n.buf[1] == 120 as i8 && n.buf[2] == 112 as i8 {
+            return 0
+        }
+        if n.len == 3
+            && n.buf[0] == 115 as i8 && n.buf[1] == 105 as i8 && n.buf[2] == 110 as i8 {
+            return 1
+        }
+        if n.len == 3
+            && n.buf[0] == 99 as i8 && n.buf[1] == 111 as i8 && n.buf[2] == 115 as i8 {
+            return 2
+        }
+        if n.len == 4
+            && n.buf[0] == 115 as i8 && n.buf[1] == 113 as i8
+            && n.buf[2] == 114 as i8 && n.buf[3] == 116 as i8 {
+            return 3
+        }
+        if n.len == 2
+            && n.buf[0] == 108 as i8 && n.buf[1] == 110 as i8 {
+            return 4
+        }
+        if n.len == 3
+            && n.buf[0] == 108 as i8 && n.buf[1] == 111 as i8 && n.buf[2] == 103 as i8 {
+            return 4
+        }
+        -1
+    }
+
+    fn fo_unary_math_fname(self, kind: i64) -> Name with Mut, Panic, Div {
+        if kind == 0 { return make_name("exp") }
+        if kind == 1 { return make_name("sin") }
+        if kind == 2 { return make_name("cos") }
+        if kind == 3 { return make_name("sqrt") }
+        // Prefer "log" — checker binds log, not ln (ln is unbound → E137).
+        make_name("log")
+    }
+
+    // Emit f64 call: fname(arg_reg) → dst reg
+    fn fo_emit_math_call1(self, fname: Name, arg_reg: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let fid = lowerer_find_or_add_fn_id_mut(&! lo, fname)
+        let args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_single(arg_reg)))
+        let dp = lo.fresh_reg()
+        lo = dp.0
+        let dst = dp.1
+        var instr = ir_call(dst, fid, fname, args, 1)
+        instr.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+        lo = lo.emit(instr)
+        lo = lo.emit(ir_mark_float_reg(dst))
+        (lo, dst)
+    }
+
+    // Chain rule: s_out = f'·s_in;  H_out = f''·s_in² + f'·H_in
+    fn fo_combine_unary_chain(
+        self,
+        s_in: [i64; 32],
+        h_in: [i64; 32],
+        fprime: i64,
+        f2: i64
+    ) -> Lowerer with Mut, Panic, Div {
+        var lo = self
+        var k: i64 = 0
+        while k < 32 {
+            let s = s_in[k as usize]
+            let h = h_in[k as usize]
+            var s_out: i64 = -1
+            var h_out: i64 = -1
+            if s >= 0 {
+                let sp = lo.fresh_reg()
+                lo = sp.0
+                s_out = sp.1
+                lo = lo.emit(ir_binop_typed(s_out, fprime, BinaryOp::OpMul, s, true, true))
+                lo = lo.emit(ir_mark_float_reg(s_out))
+                // f'' · s²
+                let s2p = lo.fresh_reg()
+                lo = s2p.0
+                let s2 = s2p.1
+                lo = lo.emit(ir_binop_typed(s2, s, BinaryOp::OpMul, s, true, true))
+                lo = lo.emit(ir_mark_float_reg(s2))
+                let f2s_p = lo.fresh_reg()
+                lo = f2s_p.0
+                let f2s = f2s_p.1
+                lo = lo.emit(ir_binop_typed(f2s, f2, BinaryOp::OpMul, s2, true, true))
+                lo = lo.emit(ir_mark_float_reg(f2s))
+                h_out = f2s
+            }
+            if h >= 0 {
+                let hp = lo.fresh_reg()
+                lo = hp.0
+                let fh = hp.1
+                lo = lo.emit(ir_binop_typed(fh, fprime, BinaryOp::OpMul, h, true, true))
+                lo = lo.emit(ir_mark_float_reg(fh))
+                let ap = lo.fo_reg_addsub_opt(h_out, fh, false)
+                lo = ap.0
+                h_out = ap.1
+            }
+            lo.fo_expr_sens[k as usize] = s_out
+            lo.fo_expr_hess[k as usize] = h_out
+            k = k + 1
+        }
+        lo
+    }
+
+    // FO through unary math: exp/sin/cos/sqrt/ln.
+    // Returns FO variance of f(arg); leaves fo_expr_sens/hess populated.
+    fn fo_apply_unary_math(
+        self,
+        kind: i64,
+        args: &Option<Box<ExprList>>
+    ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        // First arg only
+        var head_opt: Option<Box<Expr>> = None
+        match *args {
+            Some(list) => { head_opt = Some(Box::new((*list).head)) }
+            _ => {}
+        }
+        match head_opt {
+            Some(arg_expr) => {
+                // FO walk on argument
+                let pair_v = self.lower_expr_variance_ref(&(*arg_expr))
+                var lo = pair_v.0
+                let s_in = lo.fo_snapshot_expr_sens()
+                let h_in = lo.fo_snapshot_expr_hess()
+                var has = false
+                var ki: i64 = 0
+                while ki < 32 {
+                    if s_in[ki as usize] >= 0 || h_in[ki as usize] >= 0 { has = true }
+                    ki = ki + 1
+                }
+                if !has {
+                    return (lo.fo_clear_expr_sens(), -1)
+                }
+                // Arg value
+                let aval = lo.lower_expr_ref(&(*arg_expr))
+                lo = aval.0
+                let arg_reg = aval.1
+                // f(arg)
+                let fname = lo.fo_unary_math_fname(kind)
+                let res_p = lo.fo_emit_math_call1(fname, arg_reg)
+                lo = res_p.0
+                let res = res_p.1
+                // f' and f''
+                var fprime: i64 = -1
+                var f2: i64 = -1
+                if kind == 0 {
+                    // exp: f'=f''=result
+                    fprime = res
+                    f2 = res
+                } else if kind == 1 {
+                    // sin: f'=cos(arg), f''=-sin(arg)=-result
+                    let cp = lo.fo_emit_math_call1(make_name("cos"), arg_reg)
+                    lo = cp.0
+                    fprime = cp.1
+                    let zp = lo.emit_f64_const(0.0)
+                    lo = zp.0
+                    let np = lo.fresh_reg()
+                    lo = np.0
+                    f2 = np.1
+                    lo = lo.emit(ir_binop_typed(f2, zp.1, BinaryOp::OpSub, res, true, true))
+                    lo = lo.emit(ir_mark_float_reg(f2))
+                } else if kind == 2 {
+                    // cos: f'=-sin(arg), f''=-cos(arg)=-result
+                    let sp = lo.fo_emit_math_call1(make_name("sin"), arg_reg)
+                    lo = sp.0
+                    let sn = sp.1
+                    let zp = lo.emit_f64_const(0.0)
+                    lo = zp.0
+                    let np = lo.fresh_reg()
+                    lo = np.0
+                    fprime = np.1
+                    lo = lo.emit(ir_binop_typed(fprime, zp.1, BinaryOp::OpSub, sn, true, true))
+                    lo = lo.emit(ir_mark_float_reg(fprime))
+                    let np2 = lo.fresh_reg()
+                    lo = np2.0
+                    f2 = np2.1
+                    lo = lo.emit(ir_binop_typed(f2, zp.1, BinaryOp::OpSub, res, true, true))
+                    lo = lo.emit(ir_mark_float_reg(f2))
+                } else if kind == 3 {
+                    // sqrt: f'=1/(2·result), f''=-1/(4·arg·result)
+                    // Re-emit every const immediately before use (imm regs can be clobbered).
+                    let two_p = lo.emit_f64_const(2.0)
+                    lo = two_p.0
+                    let den = lo.fresh_reg()
+                    lo = den.0
+                    let dreg = den.1
+                    lo = lo.emit(ir_binop_typed(dreg, two_p.1, BinaryOp::OpMul, res, true, true))
+                    lo = lo.emit(ir_mark_float_reg(dreg))
+                    let one_p = lo.emit_f64_const(1.0)
+                    lo = one_p.0
+                    let fp = lo.fresh_reg()
+                    lo = fp.0
+                    fprime = fp.1
+                    lo = lo.emit(ir_binop_typed(fprime, one_p.1, BinaryOp::OpDiv, dreg, true, true))
+                    lo = lo.emit(ir_mark_float_reg(fprime))
+                    // f'' = -1 / (4 · arg · result)
+                    let ar = lo.fresh_reg()
+                    lo = ar.0
+                    let arg_res = ar.1
+                    lo = lo.emit(ir_binop_typed(arg_res, arg_reg, BinaryOp::OpMul, res, true, true))
+                    lo = lo.emit(ir_mark_float_reg(arg_res))
+                    let four_p = lo.emit_f64_const(4.0)
+                    lo = four_p.0
+                    let den4 = lo.fresh_reg()
+                    lo = den4.0
+                    let d4 = den4.1
+                    lo = lo.emit(ir_binop_typed(d4, four_p.1, BinaryOp::OpMul, arg_res, true, true))
+                    lo = lo.emit(ir_mark_float_reg(d4))
+                    let one2 = lo.emit_f64_const(1.0)
+                    lo = one2.0
+                    let inv = lo.fresh_reg()
+                    lo = inv.0
+                    let inv4 = inv.1
+                    lo = lo.emit(ir_binop_typed(inv4, one2.1, BinaryOp::OpDiv, d4, true, true))
+                    lo = lo.emit(ir_mark_float_reg(inv4))
+                    let zp = lo.emit_f64_const(0.0)
+                    lo = zp.0
+                    let np = lo.fresh_reg()
+                    lo = np.0
+                    f2 = np.1
+                    lo = lo.emit(ir_binop_typed(f2, zp.1, BinaryOp::OpSub, inv4, true, true))
+                    lo = lo.emit(ir_mark_float_reg(f2))
+                } else {
+                    // ln/log: f'=1/arg, f''=-1/arg²  (fresh 1.0 for each use)
+                    let one_p = lo.emit_f64_const(1.0)
+                    lo = one_p.0
+                    let fp = lo.fresh_reg()
+                    lo = fp.0
+                    fprime = fp.1
+                    lo = lo.emit(ir_binop_typed(fprime, one_p.1, BinaryOp::OpDiv, arg_reg, true, true))
+                    lo = lo.emit(ir_mark_float_reg(fprime))
+                    let aa = lo.fresh_reg()
+                    lo = aa.0
+                    let a2 = aa.1
+                    lo = lo.emit(ir_binop_typed(a2, arg_reg, BinaryOp::OpMul, arg_reg, true, true))
+                    lo = lo.emit(ir_mark_float_reg(a2))
+                    let one2 = lo.emit_f64_const(1.0)
+                    lo = one2.0
+                    let inv = lo.fresh_reg()
+                    lo = inv.0
+                    let inv_a2 = inv.1
+                    lo = lo.emit(ir_binop_typed(inv_a2, one2.1, BinaryOp::OpDiv, a2, true, true))
+                    lo = lo.emit(ir_mark_float_reg(inv_a2))
+                    let zp = lo.emit_f64_const(0.0)
+                    lo = zp.0
+                    let np = lo.fresh_reg()
+                    lo = np.0
+                    f2 = np.1
+                    lo = lo.emit(ir_binop_typed(f2, zp.1, BinaryOp::OpSub, inv_a2, true, true))
+                    lo = lo.emit(ir_mark_float_reg(f2))
+                }
+                lo = lo.fo_combine_unary_chain(s_in, h_in, fprime, f2)
+                lo.fo_emit_var_from_sens()
+            }
+            _ => (self.fo_clear_expr_sens(), -1),
+        }
+    }
+
     // Independent FO quotient: Var(a/b) = (1/b)² Va + (a/b²)² Vb.
     fn emit_variance_independent_div(
         self,
@@ -7922,6 +8181,11 @@ impl Lowerer {
                         // Seed FO channel: ∂/∂this = 1 for a fresh measure.
                         lo = lo.fo_seed_from_variance(variance_reg)
                         return (lo, variance_reg)
+                    }
+                    // FO chain rule through unary math (exp/sin/cos/sqrt/ln).
+                    let uk = self.fo_unary_math_kind(callee_name)
+                    if uk >= 0 {
+                        return self.fo_apply_unary_math(uk, &(*e).args)
                     }
                     // Inter-procedural FO via pure-fn transfer table.
                     let xfer = self.fo_apply_call_transfer(callee_name, &(*e).args, 0)
