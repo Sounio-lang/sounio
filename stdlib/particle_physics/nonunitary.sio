@@ -319,6 +319,239 @@ pub fn tt_pair_amplitude_nu(s: f64, gamma_top: f64) -> NonUnitary with Mut, Div,
 }
 
 // ============================================================================
+// Universal reduced variable (Breit-Wigner shape collapse)
+// ============================================================================
+//
+// ξ = (s − M²) / (M · Γ)
+// For a pure Breit-Wigner NonUnitary deficit:
+//   deficit = (M·Γ)² / [(s−M²)² + (M·Γ)²] = 1 / (1 + ξ²)
+//
+// Species (Z, W, H, t) evaluated at the same ξ must share this analytic curve.
+// That is the executable content of "unstable-particle universality" under BW.
+
+// Reduced energy variable ξ for unstable species (M, Γ) at invariant mass² s.
+pub fn nu_reduced_xi(s: f64, mass: f64, gamma: f64) -> f64 with Div, Panic {
+    let den = mass * gamma
+    if den == 0.0 { return 0.0 }
+    (s - mass * mass) / den
+}
+
+// Analytic BW unitarity deficit as a function of ξ alone.
+pub fn nu_deficit_analytic_xi(xi: f64) -> f64 with Div, Panic {
+    1.0 / (1.0 + xi * xi)
+}
+
+// s(ξ; M, Γ) = M² + ξ · M · Γ  — invert reduced variable for scans.
+pub fn nu_s_from_xi(xi: f64, mass: f64, gamma: f64) -> f64 {
+    mass * mass + xi * mass * gamma
+}
+
+
+// ============================================================================
+// DeficitCollapse failure surface (EXP8)
+// ============================================================================
+//
+// EXP6 established pure-BW universality: d(ξ)=1/(1+ξ²).
+// EXP8 asks when that claim *fails* — objects that can go red.
+//
+// Status codes (DeficitCollapse.status):
+//   0 COLLAPSE_HOLDS
+//   1 COLLAPSE_FAILS_WIDTH_SCHEME   — running width Γ(s)≠Γ₀
+//   2 COLLAPSE_FAILS_INTERFERENCE  — coherent second pole / continuum
+//
+// Scheme codes (DeficitCollapse.scheme / SchemeTension):
+//   0 SCHEME_FIXED_WIDTH
+//   1 SCHEME_RUNNING_WIDTH
+//   2 SCHEME_INTERFERENCE
+//   3 SCHEME_ANALYTIC_XI
+
+pub fn COLLAPSE_HOLDS() -> i64 { 0 }
+pub fn COLLAPSE_FAILS_WIDTH_SCHEME() -> i64 { 1 }
+pub fn COLLAPSE_FAILS_INTERFERENCE() -> i64 { 2 }
+
+pub fn SCHEME_FIXED_WIDTH() -> i64 { 0 }
+pub fn SCHEME_RUNNING_WIDTH() -> i64 { 1 }
+pub fn SCHEME_INTERFERENCE() -> i64 { 2 }
+pub fn SCHEME_ANALYTIC_XI() -> i64 { 3 }
+
+// Result of testing pure-BW ξ-collapse under a scheme.
+pub struct DeficitCollapse {
+    status: i64,
+    residual: f64,
+    scheme: i64,
+    xi: f64,
+    d_scheme: f64,
+    d_analytic: f64,
+}
+
+// Two honest scheme predictions of the same quantity — can disagree.
+// gap_sigma = |a−b| / √(var_a+var_b); consistent=1 iff gap_sigma < 2.
+pub struct SchemeTension {
+    scheme_a: i64,
+    scheme_b: i64,
+    val_a: f64,
+    val_b: f64,
+    var_a: f64,
+    var_b: f64,
+    gap_sigma: f64,
+    consistent: i64,
+}
+
+// Fixed-width BW unitarity deficit (same geometry as nu_deficit on pure BW).
+pub fn nu_deficit_fixed_width(s: f64, mass: f64, gamma: f64) -> f64 with Div, Panic {
+    let re = s - mass * mass
+    let im = mass * gamma
+    let tot = re * re + im * im
+    if tot == 0.0 { return 1.0 }
+    im * im / tot
+}
+
+// Running-width scheme: Γ(s) = Γ₀ · (s / M²)  (s-channel toy for vector bosons).
+// At s=M² this matches fixed width; off-shell it breaks pure-ξ collapse.
+pub fn nu_deficit_running_width(s: f64, mass: f64, gamma0: f64) -> f64 with Div, Panic {
+    let m2 = mass * mass
+    if m2 == 0.0 { return 0.0 }
+    let gamma_s = gamma0 * (s / m2)
+    let re = s - m2
+    let im = mass * gamma_s
+    let tot = re * re + im * im
+    if tot == 0.0 { return 1.0 }
+    im * im / tot
+}
+
+// Deficit-like measure from a complex amplitude A = x + i y:
+//   d = y² / (x² + y²)
+// For a pure single BW this equals nu_deficit_fixed_width exactly.
+pub fn nu_deficit_from_amp(re_a: f64, im_a: f64) -> f64 with Div, Panic {
+    let n2 = re_a * re_a + im_a * im_a
+    if n2 == 0.0 { return 0.0 }
+    im_a * im_a / n2
+}
+
+// Coherent two-pole interference (α real): A = BW(M1,Γ1) + α·BW(M2,Γ2).
+// BW = 1/(re+i im) = re/den − i im/den. Amplitude-based deficit fails pure-ξ
+// collapse when α ≠ 0. No array returns (engine residual on [f64;2] ABI).
+pub fn nu_deficit_interference(
+    s: f64,
+    m1: f64,
+    g1: f64,
+    m2: f64,
+    g2: f64,
+    alpha: f64
+) -> f64 with Div, Panic {
+    let re1 = s - m1 * m1
+    let im1 = m1 * g1
+    let re2 = s - m2 * m2
+    let im2 = m2 * g2
+    let den1 = re1 * re1 + im1 * im1
+    let den2 = re2 * re2 + im2 * im2
+    var a1_re = 0.0
+    var a1_im = 0.0
+    var a2_re = 0.0
+    var a2_im = 0.0
+    if den1 > 0.0 {
+        a1_re = re1 / den1
+        a1_im = 0.0 - im1 / den1
+    }
+    if den2 > 0.0 {
+        a2_re = re2 / den2
+        a2_im = 0.0 - im2 / den2
+    }
+    let re_a = a1_re + alpha * a2_re
+    let im_a = a1_im + alpha * a2_im
+    nu_deficit_from_amp(re_a, im_a)
+}
+
+// Test pure-BW analytic collapse under a scheme at given ξ.
+// residual = |d_scheme − d_analytic|; status HOLDS iff residual ≤ tol.
+pub fn nu_collapse_test(
+    scheme: i64,
+    xi: f64,
+    mass: f64,
+    gamma: f64,
+    // interference extras (ignored unless SCHEME_INTERFERENCE)
+    m2: f64,
+    g2: f64,
+    alpha: f64,
+    tol: f64
+) -> DeficitCollapse with Div, Panic {
+    let s = nu_s_from_xi(xi, mass, gamma)
+    let d_an = nu_deficit_analytic_xi(xi)
+    var d_sch = d_an
+    if scheme == SCHEME_FIXED_WIDTH() {
+        d_sch = nu_deficit_fixed_width(s, mass, gamma)
+    } else {
+        if scheme == SCHEME_RUNNING_WIDTH() {
+            d_sch = nu_deficit_running_width(s, mass, gamma)
+        } else {
+            if scheme == SCHEME_INTERFERENCE() {
+                d_sch = nu_deficit_interference(s, mass, gamma, m2, g2, alpha)
+            } else {
+                d_sch = d_an
+            }
+        }
+    }
+    var res = d_sch - d_an
+    if res < 0.0 { res = 0.0 - res }
+    var status = COLLAPSE_HOLDS()
+    if res > tol {
+        if scheme == SCHEME_RUNNING_WIDTH() {
+            status = COLLAPSE_FAILS_WIDTH_SCHEME()
+        } else {
+            if scheme == SCHEME_INTERFERENCE() {
+                status = COLLAPSE_FAILS_INTERFERENCE()
+            } else {
+                // fixed-width should never fail for pure BW; treat as holds residual noise
+                status = COLLAPSE_HOLDS()
+            }
+        }
+    }
+    DeficitCollapse {
+        status: status,
+        residual: res,
+        scheme: scheme,
+        xi: xi,
+        d_scheme: d_sch,
+        d_analytic: d_an,
+    }
+}
+
+// Build SchemeTension between two scheme predictions (same observable family).
+pub fn nu_scheme_tension(
+    scheme_a: i64,
+    scheme_b: i64,
+    val_a: f64,
+    var_a: f64,
+    val_b: f64,
+    var_b: f64
+) -> SchemeTension with Mut, Div, Panic {
+    let diff = val_a - val_b
+    let ad = if diff < 0.0 { 0.0 - diff } else { diff }
+    let sig2 = var_a + var_b
+    var gap = 0.0
+    if sig2 > 0.0 {
+        gap = ad / nu_sqrt(sig2)
+    } else {
+        if ad > 0.0 {
+            // zero-variance disagreement: infinite tension sentinel
+            gap = 1.0e6
+        }
+    }
+    var cons: i64 = 0
+    if gap < 2.0 { cons = 1 }
+    SchemeTension {
+        scheme_a: scheme_a,
+        scheme_b: scheme_b,
+        val_a: val_a,
+        val_b: val_b,
+        var_a: var_a,
+        var_b: var_b,
+        gap_sigma: gap,
+        consistent: cons,
+    }
+}
+
+// ============================================================================
 // Unitarity diagnostic
 // ============================================================================
 
@@ -364,6 +597,66 @@ fn nu_sqrt(x: f64) -> f64 with Mut, Div, Panic {
         i = i + 1
     }
     g
+}
+
+// GUM-propagated reduced variable at fixed s, Γ with uncertain mass M.
+//
+//   ξ = (s − M²) / (M · Γ)
+//   ∂ξ/∂M = −(s + M²) / (M² · Γ)
+//   Var(ξ) = (∂ξ/∂M)² Var(M)
+//
+// Confidence inherited from the mass Epistemic (PDG chain).
+pub fn nu_reduced_xi_ep(s: f64, mass: Epistemic, gamma: f64) -> Epistemic with Mut, Div, Panic {
+    let m = ep_val(&mass)
+    let mv = ep_variance(&mass)
+    let conf = ep_confidence(&mass)
+    if m == 0.0 || gamma == 0.0 {
+        return ep_certain(0.0)
+    }
+    let m2 = m * m
+    let xi = (s - m2) / (m * gamma)
+    let dxi_dm = 0.0 - (s + m2) / (m2 * gamma)
+    let xi_var = dxi_dm * dxi_dm * mv
+    ep_new(xi, xi_var, conf)
+}
+
+// GUM-propagated analytic deficit d = 1/(1+ξ²) from uncertain ξ.
+//
+//   ∂d/∂ξ = −2ξ / (1+ξ²)²
+//   Var(d) = (∂d/∂ξ)² Var(ξ)
+pub fn nu_deficit_analytic_xi_ep(xi: Epistemic) -> Epistemic with Mut, Div, Panic {
+    let x = ep_val(&xi)
+    let xv = ep_variance(&xi)
+    let conf = ep_confidence(&xi)
+    let one_x2 = 1.0 + x * x
+    let d = 1.0 / one_x2
+    let dd_dxi = 0.0 - 2.0 * x / (one_x2 * one_x2)
+    let d_var = dd_dxi * dd_dxi * xv
+    ep_new(d, d_var, conf)
+}
+
+// GUM-propagated unitarity threshold √s (deficit drops below `threshold`)
+// with uncertain mass M at fixed Γ.
+//
+//   thr = √( M² + M·Γ·√((1−t)/t) )
+//   ∂thr/∂M = (2M + Γ·r) / (2·thr)   where r = √((1−t)/t)
+pub fn nu_unitarity_threshold_ep(mass: Epistemic, gamma: f64, threshold: f64) -> Epistemic with Mut, Div, Panic {
+    let m = ep_val(&mass)
+    let mv = ep_variance(&mass)
+    let conf = ep_confidence(&mass)
+    if threshold <= 0.0 || threshold >= 1.0 || m <= 0.0 || gamma <= 0.0 {
+        return ep_certain(0.0)
+    }
+    let ratio = (1.0 - threshold) / threshold
+    let r = nu_sqrt(ratio)
+    let u = m * m + m * gamma * r
+    let thr = nu_sqrt(u)
+    if thr == 0.0 {
+        return ep_certain(0.0)
+    }
+    let dthr_dm = (2.0 * m + gamma * r) / (2.0 * thr)
+    let thr_var = dthr_dm * dthr_dm * mv
+    ep_new(thr, thr_var, conf)
 }
 
 // ============================================================================

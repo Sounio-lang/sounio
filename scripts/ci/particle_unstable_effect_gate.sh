@@ -58,4 +58,26 @@ if [[ "$MAD_RC" -ne 0 ]] || grep -q 'error\[' "$BOUND_ERR"; then
   fi
 fi
 
+
+# Madaros full run (SEGV closed via split helpers + local peak; 2026-07-26)
+echo "== particle exp4 Madaros full run =="
+FULL_OUT=/tmp/particle_exp4_madaros_full_out.txt
+FULL_ERR=/tmp/particle_exp4_madaros_full_err.txt
+set +e
+SOUNIO_SOUC_ENGINE=madaros ./bin/souc run "$SRC" >"$FULL_OUT" 2>"$FULL_ERR"
+FULL_RC=$?
+set -e
+if ! grep -q 'PARTICLE_EXP4_OK' "$FULL_OUT"; then
+  echo "Madaros full EXP4 failed (rc=$FULL_RC):" >&2
+  tail -40 "$FULL_ERR" >&2
+  tail -20 "$FULL_OUT" >&2
+  exit 1
+fi
+if grep -q '^FAIL ' "$FULL_OUT"; then
+  echo "unexpected FAIL in Madaros EXP4" >&2
+  grep '^FAIL ' "$FULL_OUT" >&2
+  exit 1
+fi
+echo "PARTICLE_EXP4_MADAROS_RUN_OK"
+
 echo "PARTICLE_EXP4_GATE_OK"
