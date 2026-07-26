@@ -6436,8 +6436,10 @@ impl Lowerer {
         self, name: Name, e: &Expr, p0: Name, p1: Name, p2: Name, p3: Name, nparams: i64
     ) -> bool with Mut, Panic, Div, Alloc, IO {
         if (*e).kind == ExprKind::ExprIdent {
-            if nparams >= 1 && ir_name_eq((*e).name, p0) {
-                fo_xfer_global_set(name, 1, 0.0, ir_empty_name())
+            // kind 1: identity of param i, with i stored in lit
+            let pi = self.fo_param_index4(e, p0, p1, p2, p3, nparams)
+            if pi >= 0 {
+                fo_xfer_global_set(name, 1, pi as f64, ir_empty_name())
                 return true
             }
             return false
@@ -6499,7 +6501,98 @@ impl Lowerer {
                 _ => {}
             }
         }
+        // Const-bool if: classify taken arm only.
+        if (*e).kind == ExprKind::ExprIf {
+            let cb = self.fo_if_const_bool(&(*e).left)
+            if cb == 1 {
+                return self.fo_try_simple_if_arm_transfer(name, &(*e).block, &(*e).else_expr, true, p0, p1, p2, p3, nparams)
+            }
+            if cb == 0 {
+                return self.fo_try_simple_if_arm_transfer(name, &(*e).block, &(*e).else_expr, false, p0, p1, p2, p3, nparams)
+            }
+        }
         false
+    }
+
+    // -1 unknown, 0 false, 1 true
+    fn fo_if_const_bool(self, cond_opt: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div {
+        match *cond_opt {
+            Some(c) => {
+                if (*c).kind == ExprKind::ExprBoolTrue { return 1 }
+                if (*c).kind == ExprKind::ExprBoolFalse { return 0 }
+            }
+            _ => {}
+        }
+        -1
+    }
+
+    fn fo_try_simple_if_arm_transfer(
+        self,
+        name: Name,
+        then_blk: &Option<Box<Block>>,
+        else_opt: &Option<Box<Expr>>,
+        take_then: bool,
+        p0: Name,
+        p1: Name,
+        p2: Name,
+        p3: Name,
+        nparams: i64
+    ) -> bool with Mut, Panic, Div, Alloc, IO {
+        if take_then {
+            match *then_blk {
+                Some(blk) => self.fo_try_simple_block_last_expr(name, &(*blk), p0, p1, p2, p3, nparams),
+                _ => false
+            }
+        } else {
+            match *else_opt {
+                Some(ee) => {
+                    if (*ee).kind == ExprKind::ExprBlock {
+                        match (*ee).block {
+                            Some(blk) => self.fo_try_simple_block_last_expr(name, &(*blk), p0, p1, p2, p3, nparams),
+                            _ => false
+                        }
+                    } else {
+                        self.fo_try_simple_expr_transfer(name, &(*ee), p0, p1, p2, p3, nparams)
+                    }
+                }
+                _ => false
+            }
+        }
+    }
+
+    fn fo_try_simple_block_last_expr(
+        self,
+        name: Name,
+        blk: &Block,
+        p0: Name,
+        p1: Name,
+        p2: Name,
+        p3: Name,
+        nparams: i64
+    ) -> bool with Mut, Panic, Div, Alloc, IO {
+        var current = &(*blk).stmts
+        var result = false
+        while true {
+            match *current {
+                Some(list) => {
+                    if (*list).head.kind == StmtKind::StmtLet || (*list).head.kind == StmtKind::StmtVar {
+                        // lets → not simple; bytecode path will handle
+                        return false
+                    }
+                    if (*list).head.kind == StmtKind::StmtExpr {
+                        match (*list).head.expr {
+                            Some(te) => {
+                                result = self.fo_try_simple_expr_transfer(name, &(*te), p0, p1, p2, p3, nparams)
+                            }
+                            _ => {}
+                        }
+                    }
+                    current = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        result
     }
 
     fn fo_compile_block_bytecode(
@@ -6562,6 +6655,8 @@ impl Lowerer {
     ) -> bool with Mut, Panic, Div, Alloc {
         if (*e).kind == ExprKind::ExprFloatLit { return fo_bc_emit_const((*e).float_val) }
         if (*e).kind == ExprKind::ExprIntLit { return fo_bc_emit_const((*e).int_val as f64) }
+        if (*e).kind == ExprKind::ExprBoolTrue { return fo_bc_emit_const(1.0) }
+        if (*e).kind == ExprKind::ExprBoolFalse { return fo_bc_emit_const(0.0) }
         if (*e).kind == ExprKind::ExprIdent {
             let pi = self.fo_param_index4(e, p0, p1, p2, p3, nparams)
             if pi >= 0 { return fo_bc_emit(1, pi) }
@@ -6581,6 +6676,13 @@ impl Lowerer {
                             if (*e).bin_op == BinaryOp::OpSub { return fo_bc_emit(4, 0) }
                             if (*e).bin_op == BinaryOp::OpMul { return fo_bc_emit(5, 0) }
                             if (*e).bin_op == BinaryOp::OpDiv { return fo_bc_emit(6, 0) }
+                            // Comparisons → 0/1 float for runtime if SELECT
+                            if (*e).bin_op == BinaryOp::OpLt { return fo_bc_emit(11, 0) }
+                            if (*e).bin_op == BinaryOp::OpLe { return fo_bc_emit(12, 0) }
+                            if (*e).bin_op == BinaryOp::OpGt { return fo_bc_emit(13, 0) }
+                            if (*e).bin_op == BinaryOp::OpGe { return fo_bc_emit(14, 0) }
+                            if (*e).bin_op == BinaryOp::OpEq { return fo_bc_emit(15, 0) }
+                            if (*e).bin_op == BinaryOp::OpNe { return fo_bc_emit(16, 0) }
                             return false
                         }
                         _ => return false
@@ -6589,7 +6691,93 @@ impl Lowerer {
                 _ => return false
             }
         }
+        if (*e).kind == ExprKind::ExprBlock {
+            return self.fo_bc_compile_block_value(&(*e).block, p0, p1, p2, p3, nparams)
+        }
+        if (*e).kind == ExprKind::ExprIf {
+            let cb = self.fo_if_const_bool(&(*e).left)
+            if cb == 1 {
+                return self.fo_bc_compile_block_value(&(*e).block, p0, p1, p2, p3, nparams)
+            }
+            if cb == 0 {
+                match (*e).else_expr {
+                    Some(ee) => return self.fo_bc_compile_expr(&(*ee), p0, p1, p2, p3, nparams),
+                    _ => return fo_bc_emit_const(0.0)
+                }
+            }
+            // Runtime if: cond, then, else, SELECT (op 9)
+            match (*e).left {
+                Some(cond) => {
+                    if !self.fo_bc_compile_expr(&(*cond), p0, p1, p2, p3, nparams) { return false }
+                }
+                _ => return false
+            }
+            if !self.fo_bc_compile_block_value(&(*e).block, p0, p1, p2, p3, nparams) { return false }
+            match (*e).else_expr {
+                Some(ee) => {
+                    if !self.fo_bc_compile_expr(&(*ee), p0, p1, p2, p3, nparams) { return false }
+                }
+                _ => {
+                    if !fo_bc_emit_const(0.0) { return false }
+                }
+            }
+            return fo_bc_emit(9, 0)
+        }
         false
+    }
+
+    // Compile a block leaving its trailing expression FO on the eval stack.
+    fn fo_bc_compile_block_value(
+        self,
+        blk_opt: &Option<Box<Block>>,
+        p0: Name,
+        p1: Name,
+        p2: Name,
+        p3: Name,
+        nparams: i64
+    ) -> bool with Mut, Panic, Div, Alloc {
+        match *blk_opt {
+            Some(blk) => {
+                var current = &(*blk).stmts
+                var has_expr = false
+                while true {
+                    match *current {
+                        Some(list) => {
+                            let stmt_ref = &(*list).head
+                            if stmt_ref.kind == StmtKind::StmtLet || stmt_ref.kind == StmtKind::StmtVar {
+                                match stmt_ref.expr {
+                                    Some(rhs) => {
+                                        if !self.fo_bc_compile_expr(&(*rhs), p0, p1, p2, p3, nparams) {
+                                            return false
+                                        }
+                                        let lh = fo_name_hash(stmt_ref.name)
+                                        let li = fo_bc_add_local(lh)
+                                        if li < 0 || !fo_bc_emit(7, li) { return false }
+                                    }
+                                    _ => return false
+                                }
+                            } else if stmt_ref.kind == StmtKind::StmtExpr {
+                                match stmt_ref.expr {
+                                    Some(te) => {
+                                        if !self.fo_bc_compile_expr(&(*te), p0, p1, p2, p3, nparams) {
+                                            return false
+                                        }
+                                        has_expr = true
+                                    }
+                                    _ => {}
+                                }
+                            } else {
+                                return false
+                            }
+                            current = &(*list).tail
+                        }
+                        _ => break
+                    }
+                }
+                has_expr
+            }
+            _ => false
+        }
     }
 
     // Lower FO for the N-th call argument (0-based). Returns (-1) if missing.
@@ -6694,9 +6882,16 @@ impl Lowerer {
         if kind == 6 {
             return self.fo_eval_bytecode(idx, args)
         }
-        // Lower arg0 FO
+        // Lower arg FO — kind 1 may identity any param index stored in lit
         var lo = self
-        let p0 = lo.fo_lower_nth_arg_variance(args, 0)
+        var arg_i: i64 = 0
+        if kind == 1 {
+            let pi = FO_XFER_LIT[idx as usize] as i64
+            if pi >= 0 && pi < 4 {
+                arg_i = pi
+            }
+        }
+        let p0 = lo.fo_lower_nth_arg_variance(args, arg_i)
         lo = p0.0
         let v0 = p0.1
         if v0 < 0 && kind != 3 && kind != 4 {
@@ -6950,6 +7145,187 @@ impl Lowerer {
                     k8 = k8 + 1
                 }
                 FO_EV_SP = sp + 1
+            } else if op >= 11 && op <= 16 {
+                // Comparison → 0/1 float, zero FO (threshold treated as discrete).
+                if FO_EV_SP < 2 {
+                    return (lo.fo_clear_expr_sens(), -1)
+                }
+                FO_EV_SP = FO_EV_SP - 1
+                let rsp = FO_EV_SP
+                FO_EV_SP = FO_EV_SP - 1
+                let lsp = FO_EV_SP
+                let lv = FO_EV_VAL[lsp as usize]
+                let rv = FO_EV_VAL[rsp as usize]
+                if lv < 0 || rv < 0 {
+                    return (lo.fo_clear_expr_sens(), -1)
+                }
+                let cpair = lo.fresh_reg()
+                lo = cpair.0
+                let cdst = cpair.1
+                // Comparisons as int then convert via float mul with 1.0 is heavy;
+                // emit float-typed compare path when possible (0.0/1.0).
+                // Integer compare then sitofp → exact 0.0/1.0 for SELECT blend.
+                let icmp = lo.fresh_reg()
+                lo = icmp.0
+                let ireg = icmp.1
+                if op == 11 {
+                    lo = lo.emit(ir_binop_typed(ireg, lv, BinaryOp::OpLt, rv, true, true))
+                } else if op == 12 {
+                    lo = lo.emit(ir_binop_typed(ireg, lv, BinaryOp::OpLe, rv, true, true))
+                } else if op == 13 {
+                    lo = lo.emit(ir_binop_typed(ireg, lv, BinaryOp::OpGt, rv, true, true))
+                } else if op == 14 {
+                    lo = lo.emit(ir_binop_typed(ireg, lv, BinaryOp::OpGe, rv, true, true))
+                } else if op == 15 {
+                    lo = lo.emit(ir_binop_typed(ireg, lv, BinaryOp::OpEq, rv, true, true))
+                } else {
+                    lo = lo.emit(ir_binop_typed(ireg, lv, BinaryOp::OpNe, rv, true, true))
+                }
+                lo = lo.emit(ir_int_to_float(cdst, ireg))
+                lo = lo.emit(ir_mark_float_reg(cdst))
+                let zpair = lo.emit_zero_variance()
+                lo = zpair.0
+                let sp = FO_EV_SP
+                FO_EV_VAL[sp as usize] = cdst
+                FO_EV_VAR[sp as usize] = zpair.1
+                var kc: i64 = 0
+                while kc < 32 {
+                    FO_EV_SENS[(sp * 32 + kc) as usize] = -1
+                    kc = kc + 1
+                }
+                FO_EV_SP = sp + 1
+            } else if op == 9 {
+                // SELECT: stack = [cond, then, else] (bottom→top). Runtime blend for 0/1 cond.
+                // result = cond*then + (1-cond)*else for value/var/sens.
+                if FO_EV_SP < 3 {
+                    return (lo.fo_clear_expr_sens(), -1)
+                }
+                FO_EV_SP = FO_EV_SP - 1
+                let esp = FO_EV_SP
+                FO_EV_SP = FO_EV_SP - 1
+                let tsp = FO_EV_SP
+                FO_EV_SP = FO_EV_SP - 1
+                let csp = FO_EV_SP
+                let cv = FO_EV_VAL[csp as usize]
+                let tv = FO_EV_VAL[tsp as usize]
+                let ev = FO_EV_VAL[esp as usize]
+                var cvar = FO_EV_VAR[csp as usize]
+                var tvar = FO_EV_VAR[tsp as usize]
+                var evar = FO_EV_VAR[esp as usize]
+                if cv < 0 || tv < 0 || ev < 0 {
+                    return (lo.fo_clear_expr_sens(), -1)
+                }
+                if cvar < 0 {
+                    let zc = lo.emit_zero_variance()
+                    lo = zc.0
+                    cvar = zc.1
+                }
+                if tvar < 0 {
+                    let zt = lo.emit_zero_variance()
+                    lo = zt.0
+                    tvar = zt.1
+                }
+                if evar < 0 {
+                    let ze = lo.emit_zero_variance()
+                    lo = ze.0
+                    evar = ze.1
+                }
+                // one = 1.0; inv = 1 - cond
+                let one_p = lo.emit_f64_const(1.0)
+                lo = one_p.0
+                let inv_p = lo.fresh_reg()
+                lo = inv_p.0
+                let inv = inv_p.1
+                lo = lo.emit(ir_binop_typed(inv, one_p.1, BinaryOp::OpSub, cv, true, true))
+                lo = lo.emit(ir_mark_float_reg(inv))
+                // result_val = cond*then + inv*else
+                let ct_p = lo.fresh_reg()
+                lo = ct_p.0
+                let ct = ct_p.1
+                lo = lo.emit(ir_binop_typed(ct, cv, BinaryOp::OpMul, tv, true, true))
+                lo = lo.emit(ir_mark_float_reg(ct))
+                let ie_p = lo.fresh_reg()
+                lo = ie_p.0
+                let ie = ie_p.1
+                lo = lo.emit(ir_binop_typed(ie, inv, BinaryOp::OpMul, ev, true, true))
+                lo = lo.emit(ir_mark_float_reg(ie))
+                let rv_p = lo.fresh_reg()
+                lo = rv_p.0
+                let rval = rv_p.1
+                lo = lo.emit(ir_binop_typed(rval, ct, BinaryOp::OpAdd, ie, true, true))
+                lo = lo.emit(ir_mark_float_reg(rval))
+                // sens[k] = cond*s_then[k] + inv*s_else[k], then Var = Σ s²σ²
+                // (more robust than blending variance scalars when cond is 0/1)
+                var ksel: i64 = 0
+                while ksel < 32 {
+                    let st = FO_EV_SENS[(tsp * 32 + ksel) as usize]
+                    let se = FO_EV_SENS[(esp * 32 + ksel) as usize]
+                    var out_s: i64 = -1
+                    if st >= 0 || se >= 0 {
+                        var term_t: i64 = -1
+                        var term_e: i64 = -1
+                        if st >= 0 {
+                            let tp = lo.fresh_reg()
+                            lo = tp.0
+                            term_t = tp.1
+                            lo = lo.emit(ir_binop_typed(term_t, cv, BinaryOp::OpMul, st, true, true))
+                            lo = lo.emit(ir_mark_float_reg(term_t))
+                        }
+                        if se >= 0 {
+                            let ep = lo.fresh_reg()
+                            lo = ep.0
+                            term_e = ep.1
+                            lo = lo.emit(ir_binop_typed(term_e, inv, BinaryOp::OpMul, se, true, true))
+                            lo = lo.emit(ir_mark_float_reg(term_e))
+                        }
+                        if term_t >= 0 && term_e >= 0 {
+                            let sp = lo.fresh_reg()
+                            lo = sp.0
+                            out_s = sp.1
+                            lo = lo.emit(ir_binop_typed(out_s, term_t, BinaryOp::OpAdd, term_e, true, true))
+                            lo = lo.emit(ir_mark_float_reg(out_s))
+                        } else if term_t >= 0 {
+                            out_s = term_t
+                        } else {
+                            out_s = term_e
+                        }
+                    }
+                    lo.fo_expr_sens[ksel as usize] = out_s
+                    FO_EV_SENS[(FO_EV_SP * 32 + ksel) as usize] = out_s
+                    ksel = ksel + 1
+                }
+                var rvar: i64 = -1
+                if lo.fo_expr_has_sens() {
+                    let vp = lo.fo_emit_var_from_sens()
+                    lo = vp.0
+                    rvar = vp.1
+                } else {
+                    // No sens: blend variance scalars with 0/1 cond
+                    let cvt_p = lo.fresh_reg()
+                    lo = cvt_p.0
+                    let cvt = cvt_p.1
+                    lo = lo.emit(ir_binop_typed(cvt, cv, BinaryOp::OpMul, tvar, true, true))
+                    lo = lo.emit(ir_mark_float_reg(cvt))
+                    let ive_p = lo.fresh_reg()
+                    lo = ive_p.0
+                    let ive = ive_p.1
+                    lo = lo.emit(ir_binop_typed(ive, inv, BinaryOp::OpMul, evar, true, true))
+                    lo = lo.emit(ir_mark_float_reg(ive))
+                    let rvar_p = lo.fresh_reg()
+                    lo = rvar_p.0
+                    rvar = rvar_p.1
+                    lo = lo.emit(ir_binop_typed(rvar, cvt, BinaryOp::OpAdd, ive, true, true))
+                    lo = lo.emit(ir_mark_float_reg(rvar))
+                }
+                if rvar < 0 {
+                    let zz = lo.emit_zero_variance()
+                    lo = zz.0
+                    rvar = zz.1
+                }
+                let sp3 = FO_EV_SP
+                FO_EV_VAL[sp3 as usize] = rval
+                FO_EV_VAR[sp3 as usize] = rvar
+                FO_EV_SP = sp3 + 1
             } else {
                 return (lo.fo_clear_expr_sens(), -1)
             }
