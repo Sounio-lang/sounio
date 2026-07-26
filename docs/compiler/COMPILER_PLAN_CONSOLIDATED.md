@@ -15,6 +15,52 @@ scattered across five lanes, two long-lived branches, ~19 stacked draft PRs and 
 plan-overview map that never reached `main`. Nobody could read it in one place.
 This is that one place.
 
+## What changed on 2026-07-26
+
+This document was assembled the same day a batch of compiler fixes landed, so the
+state below already reflects them. Recording them here because several are
+load-bearing for the rest of the document.
+
+**Three silent miscompiles were root-caused and fixed on `main`:**
+
+| | defect | fix |
+|---|---|---|
+| #1454 / #1194 | `policy` and its family were reserved words the expression and pattern parsers rejected as identifiers | #1470 |
+| #1474 | `[Aggregate; N]` repeat literals made all N elements alias one object | #1476 |
+| #1475 | binding an aggregate local (`var b = a`) copied the *handle*, not the value — including plain structs with no array anywhere | #1480 |
+
+**#1474 was the IR programme's real blocker.** `ir_empty_module()` is
+`[ir_empty_function(); 2048]` and `ir_empty_function()` is `[ir_nop(); 4096]`,
+so before the fix every `IrModule` was 2048 aliases of one function, each
+holding 4096 aliases of one instruction. #885's *"the raw zeroed IrModule
+reservation does not contain valid aggregate objects"* and #910's *"fixed-array
+ident-copy alias blocker"* were descriptions of this.
+
+**The size threshold that Lane A routes around does not exist.** Measured on
+both engines with loop-filled, fully-checksummed programs: return by value,
+parameter by value, tuple return and bare-vs-wrapped arrays all pass at 24 B,
+1 KiB, 8 KiB, 64 KiB, **128 KiB**, 256 KiB, 1 MiB and **8 MiB**. The specific
+artefact #887 calls impossible — a 128 KiB `[i8; 131072]` passed *and* returned
+by value with a full checksum — passes on both. Several Lane A workarounds
+(scalar-column storage, handle bridges, avoiding by-value returns) were built to
+route around a wall that measurement does not find, while the actual defect
+(aliasing) went undiagnosed. The whole stack is worth re-testing against a fixed
+compiler before more is layered on.
+
+**#1480 was corrupting dissertation-path science, not just compiler internals.**
+`tests/run-pass/rapamycin_epistemic_pbpk.sio` reported `s_cl=0.2486 /
+s_kp=0.2493 / s_fu=0.5021`, concluding fu_plasma dominates AUC uncertainty. The
+alias was contaminating the per-parameter perturbation copies. Corrected:
+`0.8503 / 0.000001 / 0.1497` — **CL_hepatic dominant**, independently confirmed
+by lean_single at `0.850705 / 0.000002 / 0.149293`. Any variance decomposition
+derived by perturbing copies of a struct before this date should be re-derived.
+
+**Still open from the same batch:** silent truncation of the relocation table
+above 65,536 entries (an ELF is written with unpatched relocation sites, rc=0);
+nested aggregate *fields* still share storage after #1480, because Madaros lays
+an array-typed field out as a handle where lean_single inlines it; and the
+branch-aware linear merge (#1471) is halted with eight eliminated hypotheses.
+
 ## How to read this
 
 Two rules, both learned the hard way in this repository.
@@ -127,12 +173,19 @@ explicit "NOT DONE" boundary lists. The blockage is structural, not sloppiness.
 Nothing merges while the bottom is blocked, and every rebase of the bottom
 invalidates every pinned base above it.
 
-**(b) A bootstrapping deadlock.** The blockers are codegen defects *of the
-current compiler*: native-v2 cannot execute the wide-`IrModule` roundtrip
-witness; 128 KiB arrays cannot be returned or passed by value; fixed-array
-ident-copy aliasing; measured code-capacity overflow (demand 5,355,994 bytes
-against a 2,097,152-byte tier). **The new IR architecture is blocked by the
-limits of the old compiler it exists to replace.**
+**(b) A bootstrapping deadlock — but not the one the drafts describe.** The
+blockers were stated as codegen limits of the current compiler: native-v2 cannot
+execute the wide-`IrModule` roundtrip witness; 128 KiB arrays cannot be returned
+or passed by value; fixed-array ident-copy aliasing; code-capacity overflow.
+
+Measured on 2026-07-26, **the size limits are not real** (see "What changed"
+above — by-value aggregates pass at every size to 8 MiB on both engines). The
+`IrModule` roundtrip failure and the "ident-copy alias" were the same single
+defect, #1474, now fixed. What remains genuinely true is the *shape* of the
+deadlock: architecture work was gated on compiler defects, and those defects
+were mis-described because nobody reduced them to a minimal repro. Three agents
+dispatched at three separately-catalogued blockers converged on the same two
+lines of `ir/lower.sio`.
 
 **(c) The oracle costs double.** Keeping the legacy pipeline as the differential
 oracle is correct, but it means every layer must be built twice and proven
@@ -237,7 +290,7 @@ distinct — conflating them is a bug this repository has already made once.
 |---|---|---|---|
 | linear, straight-line replay | E039 | E039 ✓ | E039 ✓ |
 | linear, never consumed | E040 | E040 ✓ | E040 ✓ |
-| linear, first use via `let` + by-value param | accept | **E039** ✗ | accept ✓ (#1464) |
+| linear, first use via `let` + by-value param | accept | **E039** ✗ | accept ✓ (#1464, merged in #1447) |
 | linear, consumed in **both** branches | accept | **E039** ✗ | accept ✓ (#1471) |
 | linear, consumed in **one** branch only | reject | **accepted** ✗ | E040 ✓ (#1471) |
 | **affine, straight-line double use** | reject | **accepted** ✗ | **still accepted** |
