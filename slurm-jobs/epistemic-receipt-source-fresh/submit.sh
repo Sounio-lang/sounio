@@ -12,6 +12,7 @@ SOURCE_REMOTE="${SOURCE_REMOTE:-}"
 WORKER_GIT_SSL_VERIFY="${WORKER_GIT_SSL_VERIFY:-true}"
 WORKER_LOWER_TRACE="${WORKER_LOWER_TRACE:-0}"
 WORKER_NV2_IR_TRACE="${WORKER_NV2_IR_TRACE:-0}"
+WORKER_PRESERVE_DIAGNOSTICS="${WORKER_PRESERVE_DIAGNOSTICS:-0}"
 WORKER_PROBE="${WORKER_PROBE:-source-fresh-gate}"
 NS="${NS:-slurm-pilot}"
 KUBECTL="${KUBECTL:-kubectl}"
@@ -29,7 +30,8 @@ Usage:
 
 Environment:
   REPO, SOURCE_REF, SOURCE_REMOTE, WORKER_GIT_SSL_VERIFY, WORKER_LOWER_TRACE,
-  WORKER_NV2_IR_TRACE, WORKER_PROBE, NS, KUBECTL, PARTITION, NODELIST, JOB_MEM, JOB_CPUS,
+  WORKER_NV2_IR_TRACE, WORKER_PRESERVE_DIAGNOSTICS, WORKER_PROBE, NS, KUBECTL, PARTITION,
+  NODELIST, JOB_MEM, JOB_CPUS,
   JOB_TIME, RUN_ID
 
 This is the direct-Slurm fallback for sessions where BeagleCockpit MCP is not
@@ -46,6 +48,11 @@ module-frontend and IR-lowering traces inside the worker's raw ELF.
 
 Set WORKER_NV2_IR_TRACE=1 only for backend crash localization. It enables the
 existing native-v2 IR trace inside the worker's raw ELF.
+
+Set WORKER_PRESERVE_DIAGNOSTICS=1 only for crash localization. It retains a
+compact worker-local log at the printed worker_root after removing the cloned
+source and raw compiler. Fetch that log from the admitted worker pod; OrangeFS
+is never used.
 
 WORKER_PROBE=source-fresh-gate runs the acceptance gate. WORKER_PROBE=block-ladder
 builds the same raw ELF and runs twelve generated worker-local programs to locate
@@ -69,6 +76,7 @@ fi
 [[ "$WORKER_GIT_SSL_VERIFY" == 'true' || "$WORKER_GIT_SSL_VERIFY" == 'false' ]] || fail "invalid WORKER_GIT_SSL_VERIFY: $WORKER_GIT_SSL_VERIFY"
 [[ "$WORKER_LOWER_TRACE" == '0' || "$WORKER_LOWER_TRACE" == '1' ]] || fail "invalid WORKER_LOWER_TRACE: $WORKER_LOWER_TRACE"
 [[ "$WORKER_NV2_IR_TRACE" == '0' || "$WORKER_NV2_IR_TRACE" == '1' ]] || fail "invalid WORKER_NV2_IR_TRACE: $WORKER_NV2_IR_TRACE"
+[[ "$WORKER_PRESERVE_DIAGNOSTICS" == '0' || "$WORKER_PRESERVE_DIAGNOSTICS" == '1' ]] || fail "invalid WORKER_PRESERVE_DIAGNOSTICS: $WORKER_PRESERVE_DIAGNOSTICS"
 [[ "$WORKER_PROBE" == 'source-fresh-gate' || "$WORKER_PROBE" == 'block-ladder' ]] || fail "invalid WORKER_PROBE: $WORKER_PROBE"
 
 SOURCE_COMMIT="$(git -C "$REPO" rev-parse "$SOURCE_REF")"
@@ -110,10 +118,16 @@ SOURCE_REMOTE="$SOURCE_REMOTE"
 WORKER_GIT_SSL_VERIFY="$WORKER_GIT_SSL_VERIFY"
 WORKER_LOWER_TRACE="$WORKER_LOWER_TRACE"
 WORKER_NV2_IR_TRACE="$WORKER_NV2_IR_TRACE"
+WORKER_PRESERVE_DIAGNOSTICS="$WORKER_PRESERVE_DIAGNOSTICS"
 WORKER_PROBE="$WORKER_PROBE"
 
 cleanup() {
-  rm -rf "\$ROOT"
+  if [[ "\$WORKER_PRESERVE_DIAGNOSTICS" == '1' ]]; then
+    rm -rf "\$REPO" "\$ROOT/block-ladder" "\$ROOT/probe-madaros"
+    echo "diagnostic_root_preserved=\$ROOT"
+  else
+    rm -rf "\$ROOT"
+  fi
 }
 trap cleanup EXIT
 
@@ -127,6 +141,7 @@ echo "source_remote=\$SOURCE_REMOTE"
 echo "worker_git_ssl_verify=\$WORKER_GIT_SSL_VERIFY"
 echo "worker_lower_trace=\$WORKER_LOWER_TRACE"
 echo "worker_nv2_ir_trace=\$WORKER_NV2_IR_TRACE"
+echo "worker_preserve_diagnostics=\$WORKER_PRESERVE_DIAGNOSTICS"
 echo "worker_probe=\$WORKER_PROBE"
 echo "requested_commit=\$EXPECTED_COMMIT"
 echo "requested_tree=\$EXPECTED_TREE"
@@ -135,6 +150,9 @@ echo "worker_root=\$ROOT"
 
 rm -rf "\$ROOT"
 mkdir -p "\$REPO"
+if [[ "\$WORKER_PRESERVE_DIAGNOSTICS" == '1' ]]; then
+  exec > >(tee "\$ROOT/worker.log") 2>&1
+fi
 git -C "\$REPO" init -q || fail 'git init failed'
 git -C "\$REPO" remote add origin "\$SOURCE_REMOTE" || fail 'git remote setup failed'
 if [[ "\$WORKER_GIT_SSL_VERIFY" == 'false' ]]; then
