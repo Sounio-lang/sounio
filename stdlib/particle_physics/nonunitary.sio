@@ -552,6 +552,75 @@ pub fn nu_scheme_tension(
 }
 
 // ============================================================================
+// Scheme × Approx product cell (EXP11)
+// ============================================================================
+//
+// Pairs a DeficitCollapse scheme test with an approximation-layer residual
+// profile. cell_residual = √(collapse_residual² + approx_combined²).
+// fails = 1 if collapse status ≠ HOLDS (scheme failure surface active).
+// approx_tension is reported separately (L4 NU∧NWA honesty flag).
+
+pub struct SchemeApproxCell {
+    scheme: i64,
+    collapse_status: i64,
+    collapse_residual: f64,
+    xi: f64,
+    approx_layers: i64,
+    approx_combined: f64,
+    approx_tension: i64,
+    cell_residual: f64,
+    fails: i64,
+}
+
+pub fn nu_scheme_approx_cell(
+    scheme: i64,
+    xi: f64,
+    mass: f64,
+    gamma: f64,
+    m2: f64,
+    g2: f64,
+    alpha: f64,
+    tol: f64,
+    approx_layers: i64,
+    approx_combined: f64,
+    approx_tension: i64
+) -> SchemeApproxCell with Mut, Div, Panic {
+    let c = nu_collapse_test(scheme, xi, mass, gamma, m2, g2, alpha, tol)
+    let cr = c.residual
+    let ar = approx_combined
+    let cell_r2 = cr * cr + ar * ar
+    // sqrt
+    var cell_r = 0.0
+    if cell_r2 > 0.0 {
+        var g = cell_r2
+        if g > 1.0 { g = cell_r2 / 2.0 }
+        var i: i64 = 0
+        while i < 40 {
+            g = 0.5 * (g + cell_r2 / g)
+            i = i + 1
+        }
+        cell_r = g
+    }
+    var fails: i64 = 0
+    if c.status != COLLAPSE_HOLDS() {
+        fails = 1
+    }
+    SchemeApproxCell {
+        scheme: scheme,
+        collapse_status: c.status,
+        collapse_residual: cr,
+        xi: xi,
+        approx_layers: approx_layers,
+        approx_combined: ar,
+        approx_tension: approx_tension,
+        cell_residual: cell_r,
+        fails: fails,
+    }
+}
+
+
+
+// ============================================================================
 // Unitarity diagnostic
 // ============================================================================
 
@@ -658,6 +727,85 @@ pub fn nu_unitarity_threshold_ep(mass: Epistemic, gamma: f64, threshold: f64) ->
     let thr_var = dthr_dm * dthr_dm * mv
     ep_new(thr, thr_var, conf)
 }
+
+// Joint GUM on (M, Γ) for reduced variable (uncorrelated by default).
+//
+//   ξ = (s − M²) / (M · Γ)
+//   ∂ξ/∂M = −(s + M²) / (M² · Γ)
+//   ∂ξ/∂Γ = −(s − M²) / (M · Γ²) = −ξ/Γ
+//   Var(ξ) = (∂ξ/∂M)² Var(M) + (∂ξ/∂Γ)² Var(Γ) + 2 ρ (∂ξ/∂M)(∂ξ/∂Γ) σ_M σ_Γ
+//
+// Confidence: min(conf_M, conf_Γ).
+pub fn nu_reduced_xi_joint_ep(s: f64, mass: Epistemic, gamma: Epistemic, rho: f64) -> Epistemic with Mut, Div, Panic {
+    let m = ep_val(&mass)
+    let g = ep_val(&gamma)
+    let mv = ep_variance(&mass)
+    let gv = ep_variance(&gamma)
+    let cm = ep_confidence(&mass)
+    let cg = ep_confidence(&gamma)
+    var conf = cm
+    if cg < conf { conf = cg }
+    if m == 0.0 || g == 0.0 {
+        return ep_certain(0.0)
+    }
+    let m2 = m * m
+    let xi = (s - m2) / (m * g)
+    let dxi_dm = 0.0 - (s + m2) / (m2 * g)
+    let dxi_dg = 0.0 - (s - m2) / (m * g * g)
+    let sm = nu_sqrt(mv)
+    let sg = nu_sqrt(gv)
+    // clamp |rho| ≤ 1 for safety
+    var r = rho
+    if r > 1.0 { r = 1.0 }
+    if r < 0.0 - 1.0 { r = 0.0 - 1.0 }
+    let xi_var = dxi_dm * dxi_dm * mv + dxi_dg * dxi_dg * gv + 2.0 * r * dxi_dm * dxi_dg * sm * sg
+    var xv = xi_var
+    if xv < 0.0 { xv = 0.0 }
+    ep_new(xi, xv, conf)
+}
+
+// Uncorrelated joint (ρ = 0).
+pub fn nu_reduced_xi_joint_uncorr_ep(s: f64, mass: Epistemic, gamma: Epistemic) -> Epistemic with Mut, Div, Panic {
+    nu_reduced_xi_joint_ep(s, mass, gamma, 0.0)
+}
+
+// Joint GUM unitarity threshold with uncertain (M, Γ).
+//   thr = √( M² + M·Γ·r ), r = √((1−t)/t)
+//   ∂thr/∂M = (2M + Γ r)/(2 thr)
+//   ∂thr/∂Γ = (M r)/(2 thr)
+pub fn nu_unitarity_threshold_joint_ep(mass: Epistemic, gamma: Epistemic, threshold: f64, rho: f64) -> Epistemic with Mut, Div, Panic {
+    let m = ep_val(&mass)
+    let g = ep_val(&gamma)
+    let mv = ep_variance(&mass)
+    let gv = ep_variance(&gamma)
+    let cm = ep_confidence(&mass)
+    let cg = ep_confidence(&gamma)
+    var conf = cm
+    if cg < conf { conf = cg }
+    if threshold <= 0.0 || threshold >= 1.0 || m <= 0.0 || g <= 0.0 {
+        return ep_certain(0.0)
+    }
+    let ratio = (1.0 - threshold) / threshold
+    let r = nu_sqrt(ratio)
+    let u = m * m + m * g * r
+    let thr = nu_sqrt(u)
+    if thr == 0.0 {
+        return ep_certain(0.0)
+    }
+    let dthr_dm = (2.0 * m + g * r) / (2.0 * thr)
+    let dthr_dg = (m * r) / (2.0 * thr)
+    let sm = nu_sqrt(mv)
+    let sg = nu_sqrt(gv)
+    var rh = rho
+    if rh > 1.0 { rh = 1.0 }
+    if rh < 0.0 - 1.0 { rh = 0.0 - 1.0 }
+    let thr_var = dthr_dm * dthr_dm * mv + dthr_dg * dthr_dg * gv + 2.0 * rh * dthr_dm * dthr_dg * sm * sg
+    var tv = thr_var
+    if tv < 0.0 { tv = 0.0 }
+    ep_new(thr, tv, conf)
+}
+
+
 
 // ============================================================================
 // Tests
