@@ -11721,6 +11721,53 @@ impl Lowerer {
         (lo11, dst_reg)
     }
 
+    // Knowledge(v, e=<confidence>, prov=<provenance>) -> Knowledge<f64> struct construction.
+    // Runtime semantics taken from lean_single by EXECUTION, not by assumption:
+    //   Knowledge(12.5, e=0.65, prov="src")  ->  .value 12.5  .variance 0.0  .confidence 0.65
+    // (`prov` has no slot in the 3-field IR layout registered by ir_register_knowledge_layout.
+    // `.epsilon` names the same quantity at the type level but reads 0.0 under Madaros -- a
+    // separate pre-existing lowering gap, unchanged here.) Named call arguments lower to
+    // their value expression, so arg0 is the value and arg1 is the epsilon expression.
+    fn lower_knowledge_ctor_call_ref(self, _span: Span, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let value_pair = self.lower_measure_value_arg_ref(args)
+        let lo1 = value_pair.0
+        let value_reg = value_pair.1
+
+        // Second argument is epsilon -> the confidence slot (NOT a sigma: variance is 0).
+        let conf_pair = lo1.lower_measure_uncertainty_arg_ref(args)
+        var lo2 = conf_pair.0
+        let conf_reg = conf_pair.1
+        lo2 = lo2.emit(ir_mark_float_reg(conf_reg))
+
+        let dst_pair = lo2.fresh_reg()
+        let lo3 = dst_pair.0
+        let dst_reg = dst_pair.1
+        let lo4 = lo3.emit(ir_alloc(dst_reg, 0))
+
+        // field 0: value
+        let lo5 = lo4.emit(ir_field_set(dst_reg, 0, value_reg, make_name("value")))
+
+        // field 1: variance = 0.0 (the call form declares confidence, not a sigma)
+        let var_pair = lo5.fresh_reg()
+        let lo6 = var_pair.0
+        let variance_reg = var_pair.1
+        var lo7 = lo6.emit(ir_load_float(variance_reg, 0.0))
+        lo7 = lo7.emit(ir_mark_float_reg(variance_reg))
+        let lo8 = lo7.emit(ir_field_set(dst_reg, 1, variance_reg, make_name("variance")))
+
+        // field 2: confidence = epsilon
+        var lo9 = lo8.emit(ir_field_set(dst_reg, 2, conf_reg, make_name("confidence")))
+        lo9 = lo9.bind_variance_for_base_reg(dst_reg, variance_reg)
+        lo9.pending_variance_reg = variance_reg
+        lo9 = lo9.fo_seed_from_variance(variance_reg)
+        var mk: i64 = 0
+        while mk < 32 {
+            lo9.fo_pending_sens[mk as usize] = lo9.fo_expr_sens[mk as usize]
+            mk = mk + 1
+        }
+        (lo9, dst_reg)
+    }
+
     fn lower_variance_of_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         match *args {
             Some(list) => {
@@ -12150,6 +12197,9 @@ impl Lowerer {
         }
         if ir_name_is_measure(callee_name) {
             return self.lower_measure_call_ref(e.span, &e.args)
+        }
+        if ir_name_is_knowledge_ctor(callee_name) {
+            return self.lower_knowledge_ctor_call_ref(e.span, &e.args)
         }
         if self.name_is_variance_of(callee_name) {
             return self.lower_variance_of_call_ref(&e.args)
