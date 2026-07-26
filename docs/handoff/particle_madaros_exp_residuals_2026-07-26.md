@@ -31,3 +31,10 @@ Local peak and thin physics vertical remain. Compiler: imported return ABI under
 ## Main regression note
 
 Merge of `research/particle-exp123-20260725` into main reintroduced vertex imports and broke Madaros full EXP123 SEGV path; this lane restores the Madaros-safe vertical.
+
+## CI note (2026-07-26): arity-13 stack
+
+`scripts/ci/madaros_imported_call_arity_13_gate.sh` default soft stack raised
+131072 → 524288 KiB. FO GUM multi-channel growth made 128 MiB insufficient on
+GitHub runners (SEGV / call-arg scratch overflow). Measured: 262144 passes;
+131072 fails. Contracts LoRA sync for `variance_covariance_blindness.sio` (β10).
