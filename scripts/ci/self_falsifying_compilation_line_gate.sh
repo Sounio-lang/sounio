@@ -61,6 +61,16 @@ CONTRACT_TOKEN="$(grep -m1 '^SELF_FALSIFYING_LINE_VERDICT ' <<<"$OUT" | awk '{pr
 [[ "$SPEC_TOKEN" == "$CONTRACT_TOKEN" ]] \
     || fail "verdict drift: spec says '${SPEC_TOKEN}', contract emits '${CONTRACT_TOKEN}'"
 
+# Resolution fix: the Status line is not the only place the verdict is stated.
+# A restatement in the prose drifted silently once (spec §1) while this gate
+# stayed green, because it compared only the header. Every in-prose
+# `SELF_FALSIFYING_LINE_VERDICT <TOKEN>` must agree too.
+while read -r prose_token; do
+    [[ -z "$prose_token" ]] && continue
+    [[ "$prose_token" == "$CONTRACT_TOKEN" ]] \
+        || fail "verdict drift in prose: found '${prose_token}', contract emits '${CONTRACT_TOKEN}'"
+done < <(grep -oE 'SELF_FALSIFYING_LINE_VERDICT [A-Za-z0-9_]+' "$SPEC" | awk '{print $2}')
+
 if [[ "${SFCL_RUN_COMPILER_GATE:-0}" == "1" ]]; then
     echo "--- running underlying mechanism gate ---"
     SFC_SKIP_BUILD=1 bash scripts/ci/self_falsifying_compiler_gate.sh \

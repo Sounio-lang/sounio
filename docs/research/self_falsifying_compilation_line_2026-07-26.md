@@ -1,8 +1,9 @@
-# Self-falsifying compilation — opening a research line: the substrate is live, the corpus is unbound, and the failures it must catch are interpretive
+# Self-falsifying compilation — opening a research line: the substrate is live, the corpus was unbound, and the failures it must catch are interpretive
 
 **Date:** 2026-07-26
 **Orthography:** EN-UK
-**Status:** `EXECUTABLE` — `SUBSTRATE_LIVE__CORPUS_UNBOUND__HISTORICAL_FAILURES_ARE_INTERPRETIVE`
+**Status:** `EXECUTABLE` — `SUBSTRATE_LIVE__CORPUS_BOUND__HISTORICAL_FAILURES_ARE_INTERPRETIVE`
+**Token history:** opened as `…__CORPUS_UNBOUND__…`; flipped to `…__CORPUS_BOUND__…` when rung R1 bound real gates. See §1.1 — the flip was caught by this document's own drift guard, not by hand.
 **Parents:** `self_falsifying_compiler_spec_2026-07-25.md` (the mechanism), `ast_native_claims_spec_2026-07-25.md` (claim syntax), `falsification_ledger_spec_2026-07-25.md` (claim schema)
 **Harness:** `scripts/research/self_falsifying_compilation_line_contract.py`
 **Gate:** `scripts/ci/self_falsifying_compilation_line_gate.sh`
@@ -29,8 +30,10 @@ Stated precisely, and each measured by the harness:
   **7/7 clauses pass**, including `F5_FAIL_BLOCKS` and `F7_DEFAULT_LANE_BLOCKS`
   — a falsified claim really does abort compilation with no ELF emitted, on
   both lanes, and `F6_TIMEOUT` really does kill a hung gate.
-- **The corpus is unbound.** The repository contains **9 native `claim` blocks
-  across 4 files, every one of them a test or a CI fixture — 0 in production
+- **The corpus was unbound** — *this is the audit finding, at the commit that
+  opened the line (`2ba3ece5a`); rung R1 has since changed it, see §1.1.* The
+  repository contained **9 native `claim` blocks across 4 files, every one of
+  them a test or a CI fixture — 0 in production
   source**, against **295 CI gates** and **40 research contracts**. Counting
   generously (any `.sio` file mentioning a `scripts/ci/*.sh` path, including
   the older comment-form claims), **11 of 295 gates (3.7%)** are named by a
@@ -65,6 +68,43 @@ that study is run, so it cannot be graded on a curve.
 | `S3_BINDING_GAP` | **11/295 (3.7%)** CI gates named by any claim | the guard covers almost nothing. |
 | `S4_RETROSPECTIVE` | **3/3** audited corrections were `SILENT`; token-agreement test **exact** in 3/3 | no claim gate would have fired while the claim was false. |
 
+### 1.1 The drift guard fired on this document — for real
+
+Rung R1 (`self_falsifying_compilation_line_r1_2026-07-26.md`) bound 15 real gates
+to native claims in `examples/epistemic/rupture_claims_verified.sio`. The moment
+those files entered the git index, this document's harness re-measured the tree
+and its gate went red **on its own accord**:
+
+```
+SELF_FALSIFYING_COMPILATION_LINE_GATE_FAIL: verdict drift:
+  spec says     'SUBSTRATE_LIVE__CORPUS_UNBOUND__HISTORICAL_FAILURES_ARE_INTERPRETIVE'
+  contract emits 'SUBSTRATE_LIVE__CORPUS_BOUND__HISTORICAL_FAILURES_ARE_INTERPRETIVE'
+```
+
+Production claims went `0 → 15`; gates named by a claim, `11/295 → 24/296`
+(8.1 %). This is the **drift** class of §3 — claim and check diverging over time
+— and it is the class §3 says *is* addressable. Here it was caught
+automatically, on a real change, with no synthetic test involved.
+
+> **The 8.1 % is partly self-referential — read it with that discount.** Most of
+> the `+13` is this line's own bookkeeping: R1's manifest binding gates, plus
+> R1's own gate entering the denominator. One bound claim,
+> `self_falsifying_compilation_line_audit_holds`, binds *this document's* gate to
+> a claim inside the very corpus this document measures. The circularity is
+> deliberate (the line should hold itself to its own discipline) but it means the
+> binding-coverage figure overstates how much *pre-existing* science is guarded.
+> The figure that does not move on its own artifacts is R1's module-closure
+> result (`self_falsifying_compilation_line_r1_2026-07-26.md` §2): no library
+> claim executes, whatever the coverage number says.
+
+It also exposes a design question the line has to answer, and that R2 inherits:
+**a spec is either a record or a live assertion, and a token-bound gate forces it
+to be the latter.** This document is an audit — a statement about a moment — yet
+its gate re-measures the current tree, so its token must track the present or the
+gate fails. The audit finding is preserved in prose above; the token now reports
+the live state. Whether that is the right convention for a corpus of 295 gates is
+an open design question, not a settled one.
+
 **A live instance, found while writing this.** The denominators above moved from
 `294/39` to `295/40` the moment this rung's own gate and contract were committed,
 while the verdict token stayed correct. That is precisely the **sub-token error**
@@ -72,7 +112,16 @@ of §2: the headline held, a supporting number underneath it went stale, and the
 gate — which checks only the token — stayed green. The failure mode is not
 hypothetical and it is not rare; it took under an hour to produce one.
 
-Verdict: `SELF_FALSIFYING_LINE_VERDICT SUBSTRATE_LIVE__CORPUS_UNBOUND__HISTORICAL_FAILURES_ARE_INTERPRETIVE`.
+Verdict: `SELF_FALSIFYING_LINE_VERDICT SUBSTRATE_LIVE__CORPUS_BOUND__HISTORICAL_FAILURES_ARE_INTERPRETIVE`
+(as audited: `…__CORPUS_UNBOUND__…`; see §1.1).
+
+> **And a second live instance, caught by eye and not by the gate.** This very
+> line still read `…__CORPUS_UNBOUND__…` after §1.1 had been written and the
+> Status line corrected — the gate stayed green throughout, because it compares
+> only the `Status:` line against the harness. A restatement of the verdict
+> *inside the prose* is below the guard's resolution. Two sub-token instances in
+> one document, in one session, is the honest measure of how sharp this failure
+> mode is.
 
 ---
 
@@ -195,12 +244,20 @@ build artifact to a **proposition**, and what that costs:
 
 | Rung | What it does | Verdict type fixed **now** |
 |---|---|---|
-| **R0** | this audit | done: `SUBSTRATE_LIVE__CORPUS_UNBOUND__HISTORICAL_FAILURES_ARE_INTERPRETIVE` |
-| **R1** | bind a sample of real gates to native claims in real sources; bind one in an **imported** module deliberately | `BOUND_N_OF_294__MODULE_CLOSURE_{BLOCKS,PASSES}` — and the module-closure result is reported whichever way it goes |
+| **R0** | this audit | done: `SUBSTRATE_LIVE__CORPUS_BOUND__HISTORICAL_FAILURES_ARE_INTERPRETIVE` (opened as `…UNBOUND…`, see §1.1) |
+| **R1** | bind a sample of real gates to native claims in real sources; bind one in an **imported** module deliberately | `BOUND_N__MODULE_CLOSURE_{BLOCKS,PASSES}`; the module-closure result is reported whichever way it goes. **Done:** `BOUND_15__MODULE_CLOSURE_BLOCKS` (`self_falsifying_compilation_line_r1_2026-07-26.md`) |
 | **R2** | verdict-token binding (harness emits, claim declares, mismatch is a compile error) | `TOKEN_BINDING_{IMPLEMENTED,BLOCKED}__CATCHES_DRIFT_NOT_MISINTERPRETATION` |
 | **R3** | executable falsifiers (must fail for the claim to live) | `FALSIFIERS_EXECUTABLE__GUARD_{NONVACUOUS,VACUOUS}` |
 | **R4** | retrospective over the correction history | see the operational definition below |
 | **R5** | write-up (`docs/papers/oopsla2027/`) | n/a |
+
+**Amendment to R1's verdict form.** R1's token was originally fixed as
+`BOUND_N_OF_294__MODULE_CLOSURE_{BLOCKS,PASSES}`. That form embeds the
+gate-population denominator, which moves whenever any gate is added — the token
+would have drifted with the claim unchanged, which is this line's own
+**sub-token** failure mode appearing inside its own verdict scheme. The form was
+corrected to carry the bound count only. Recorded here rather than substituted
+silently.
 
 ### R4's operational definition, fixed before the study runs
 
