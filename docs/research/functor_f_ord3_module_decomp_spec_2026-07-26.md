@@ -1,35 +1,38 @@
-# Functor F — the exact representation of the ord-3 secondary operation: `M = 2·V₃`
+# Functor F — what the ord-3 secondary module actually is (honest: it fills the class coordinate space; `2·V₃` is CD-doubling)
 
 **Date:** 2026-07-26
 **Orthography:** EN-UK
-**Status:** `EXECUTABLE` — `ORD3_MODULE_IS_2xV3`
-**Parent:** `functor_f_ord3_symmetry_fill_spec_2026-07-25.md` (`NO_INVARIANT_FILL` — the ord-3 secondary op is an invariant-free module)
+**Status:** `EXECUTABLE` — `ORD3_IMAGES_FILL_CLASS_COORD_SPACE`
+**Parent:** `functor_f_ord3_symmetry_fill_spec_2026-07-25.md` (`NO_INVARIANT_FILL`)
 **Harness:** `scripts/research/functor_f_ord3_module_decomp_contract.py`
 
 ---
 
-## 0. The result
+## 0. The result — and an overclaim, corrected
 
-The previous rung proved the ord-3 secondary operation is *invariant-free* (no canonical
-scalar fill exists, at any level). This rung asks the natural next question — *then what,
-exactly, is that module?* — and answers it in closed representation-theoretic form:
+An earlier draft of this rung announced `M = 2·V₃` as *"the exact representation-theoretic
+fingerprint of the ord-3 secondary operation"* — a genuinely-uncomputed discovery. **On scrutiny
+(advisor review + full module anatomy) that framing was an overclaim, and is corrected here.**
+It is the same label-drift failure mode already self-caught twice in this thread (associator-vs-`φ`
+at `E₆`; `S₄`-vs-order-192 group id): the computation was right, the *label on the object* drifted.
 
-> The ord-3 secondary ternary operation on the sedenion zero-divisor fibres,
-> `(x, y) ↦ (x·y)·b`, restricted to one Fano-line support-class, spans a **6-dimensional real
-> module `M`** for its symmetry group `G = 2³:S₄` (order 192, inside the full signed-octonion-
-> automorphism group `1344 = (ℤ2)³:PSL(2,7)`). That module is **exactly**
-> `M ≅ 2·V₃` — **two copies of a single 3-dimensional absolutely-irreducible real
-> representation `V₃`, with no trivial constituent.**
+The honest statement:
 
-This is a **new fact about a bespoke object.** The group and its irreps are entirely standard;
-what had not been computed is the decomposition of *this* module — the ord-3 secondary
-operation is this programme's own construction, so its representation-theoretic fingerprint is
-ours to compute. The certificate is **numerical** (double precision, machine-epsilon
-tolerances), not a symbolic proof.
+> Fix a Fano-line support-class `L` (6 zero-divisors `b = e_i+e_j`, `i,j` in `{L, L+8}`). The
+> ord-3 secondary images `{(x·y)·b : x,y ∈ F(b)=ker L_b}` are **non-degenerate**: each single `b`
+> already spans a **4-dimensional** image, and the six images together fill **exactly the 6-dim
+> coordinate space of the class's indices**, `M = span{e_i, e_{i+8} : i ∈ L}` (containing all six
+> `b`, and reaching the 6th dimension beyond the 5-dim span of the `b` themselves).
+>
+> As a module for the order-192 group `G = 2³:S₄` that 6-space **is** `2·V₃` — but the `2` is
+> merely the **Cayley-Dickson lower/upper doubling** (the lift is `diag(g,g)`, so `G` acts
+> *identically* on `span{e₁,e₂,e₃}` and `span{e₉,e₁₀,e₁₁}`), and `V₃` is the octonion-automorphism
+> action on a Fano line's 3 coordinates (absolutely irreducible). So **`2·V₃` fingerprints the class
+> *coordinate* structure — doubling × Fano-line action — not the ternary operation's content.**
 
-`V₃` being **non-trivial** is *why* `NO_INVARIANT_FILL` holds: a module with no trivial summand
-has no invariant line, so no canonical secondary value can exist. `2·V₃` is the precise
-representation-theoretic **form** of that no-go.
+The only genuinely **operation-dependent** fact is the **non-degeneracy** (clause `M2`): the
+operation's images *fill* this coordinate space. `2·V₃` itself is structural bookkeeping forced by
+the coordinate support and the CD doubling — modest, not a discovery.
 
 ---
 
@@ -37,46 +40,43 @@ representation-theoretic **form** of that no-go.
 
 | Clause | Result | Reading |
 |---|---|---|
-| `M1_MODULE` | `|G| = 192 = (ℤ2)³⋊S₄`; the secondary module `M` has `dim = 6`; `G`-stable (dev `1.8e-15`) | the object is a genuine 6-dim `G`-module. |
-| `M2_CHARACTER` | `⟨χ_M, χ_M⟩ = 4` (Σ of squared multiplicities); `⟨χ_M, 1⟩ = 0` (no invariant vector) | `M` is a sum of irreps with `Σ mᵢ² = 4` and **no trivial part**. |
-| `M3_COMMUTANT` | `End_G(M)` **non-abelian**, `dim = 4` (`‖[T₁,T₂]‖ = 0.58`); a generic self-adjoint commutant element splits `{3, 3}` | `End_G(M) ≅ M₂(ℝ)` ⟺ **one** absolutely-irreducible constituent at **multiplicity 2**; the `{3,3}` split rules out the quaternionic (`ℍ`) alternative (which would give `{6}`). |
-| `M4_V3_NONTRIVIAL` | `M = 2·V₃`, `V₃` a non-trivial 3-dim irrep ⟹ no trivial summand ⟹ invariant-free | the exact representation-theoretic **form** of `NO_INVARIANT_FILL`. |
+| `M1_MODULE` | `|G|=192`; `dim M = 6`; `G`-stable (dev `1.8e-15`) | `M` is a genuine 6-dim `G`-module. |
+| `M2_NONDEGENERACY` | per-`b` image dims `[4,4,4,4,4,4]`; the six fill **exactly** `span{e_i,e_{i+8}:i∈L}`; contains all 6 ZD `b` | **the one operation-dependent fact:** the ord-3 images are non-degenerate — they surject onto the class's full 6-dim coordinate space. |
+| `M3_2xV3` | `⟨χ,χ⟩=4`, `⟨χ,1⟩=0`, `dim End_G(M)=4` (computed in-harness, `=M₂(ℝ)`), non-abelian, `{3,3}` split over **4 seeds** | `M` is `2·V₃`, `V₃` absolutely irreducible at multiplicity 2 (the `{3,3}` split rules out the quaternionic `{6}` alternative). |
+| `M4_DEFLATION_CD_DOUBLING` | `V₃ = G|span{e₁,e₂,e₃}` abs. irreducible; upper half `span{e₉,e₁₀,e₁₁}` **identical** (dev `0.0`) | the `2` is the **Cayley-Dickson doubling**; `2·V₃` is the class **coordinate** structure, not a fine operation-invariant. |
 
-Verdict: `FUNCTOR_F_ORD3MOD_VERDICT ORD3_MODULE_IS_2xV3`.
-
----
-
-## 2. Why the inference is tight (not merely suggestive)
-
-For a real orthogonal module, `dim_ℝ End_G(M)` and the eigenstructure of its self-adjoint part
-pin the decomposition:
-
-- `End_G(M)` non-abelian of `dim 4` ⟹ it is `M₂(ℝ)` **or** `ℍ` (the two non-abelian real
-  algebras of dimension 4 that arise as a commutant). `M₂(ℝ)` ⟺ a single **absolutely-
-  irreducible** constituent at **multiplicity 2**; `ℍ` ⟺ a single **quaternionic-type**
-  6-dim irreducible.
-- **The `{3,3}` split decides it.** In the `ℍ` case the only *symmetric* commutant elements are
-  `ℝ·id` (the quaternion units `i,j,k` act skew), so a generic self-adjoint commutant element
-  would be **scalar → one eigenspace of dim 6**. We observe **two eigenspaces of dim 3**, so the
-  commutant is `M₂(ℝ)` and `V₃` is **absolutely irreducible** (real/orthogonal type).
-- **Consistency.** `⟨χ_M,χ_M⟩ = 4 = 2²·1` (`⟨χ_{V₃},χ_{V₃}⟩ = 1` since `V₃` absolutely
-  irreducible) and `⟨χ_M,1⟩ = 2·0 = 0` (`V₃` non-trivial) — both exactly the multiplicity-2
-  absolutely-irreducible signature.
-
-§10 math-review (Grok `[OK]`) confirmed all three links: the decomposition inference, the
-`M₂(ℝ)`-vs-`ℍ` distinction, and the character arithmetic.
+Verdict: `FUNCTOR_F_ORD3MOD_VERDICT ORD3_IMAGES_FILL_CLASS_COORD_SPACE`.
 
 ---
 
-## 3. What this is NOT
+## 2. Why the `2·V₃` deflates (the anatomy that corrected the headline)
 
-- **Not** a claim that the *group* `2³:S₄` / `1344 = PSL(2,7)` or its irreps are new — they are
-  entirely standard. The novelty is the decomposition of **this bespoke module**.
-- **Not** a symbolic proof — a **numerical** certificate (double precision, `1e-9`..`1e-15`
-  tolerances; the group elements are exact `0,±1` matrices, the SVD/eigenvalue steps are
-  floating-point).
-- **Not** the Petitot semantic conjecture (`petitot §4`, quarantined `D3`-class); **not** an
-  identity; **not** clinical.
+- `support(M) = {1,2,3,9,10,11}` **exactly**, and `dim M = 6` ⟹ `M` is *precisely* the coordinate
+  subspace `span{e₁,e₂,e₃,e₉,e₁₀,e₁₁}` — the class's lower Fano line `L={1,2,3}` and its upper copy
+  `L+8`. Nothing finer.
+- The sedenion lift is `diag(g,g)`: `G` acts the **same** on the lower and upper triples. Hence
+  `M = V₃ ⊕ V₃` with `V₃ = G|span{e₁,e₂,e₃}` — the multiplicity `2` is the CD doubling, full stop.
+- `V₃` is the (standard) octonion-automorphism action on a Fano line's 3 points, absolutely
+  irreducible (`⟨χ_{V₃},χ_{V₃}⟩ = 1`).
+- So `2·V₃` follows from `support + doubling` alone; it carries **no** information about the ternary
+  operation beyond `M2` (that the images reach all six coordinates).
+
+The `2·V₃` decomposition inference itself is sound (advisor-confirmed, independently re-enumerated):
+`dim End_G(M)=4` non-abelian `⟹ M₂(ℝ)` or `ℍ`; the `{3,3}` split (over multiple seeds) rules out
+`ℍ` (which would give `{6}`), forcing `V₃` absolutely irreducible at multiplicity 2. What was wrong
+was only the *label* — calling a coordinate-space fact a fingerprint of the operation.
+
+---
+
+## 3. What this is / is NOT
+
+- **Is:** an honest anatomy — the ord-3 images are non-degenerate (fill the class coordinate
+  6-space), which as a `G`-module is `2·V₃ =` CD-doubling of the Fano-line octonion action.
+- **Not** a genuinely-new invariant of the ternary operation — the earlier "fingerprint of the
+  ord-3 operation" headline was an overclaim, retracted here.
+- **Not** a claim about the group/PSL(2,7)/its irreps being new (all standard); **not** symbolic
+  (numerical certificate, machine precision); **not** the Petitot conjecture (`D3`-quarantined);
+  **not** clinical.
 
 ---
 
@@ -84,22 +84,24 @@ pin the decomposition:
 
 ```bash
 python3 scripts/research/functor_f_ord3_module_decomp_contract.py
-# expect: M1..M4 PASS, FUNCTOR_F_ORD3MOD_VERDICT ORD3_MODULE_IS_2xV3
+# expect: M1..M4 PASS, FUNCTOR_F_ORD3MOD_VERDICT ORD3_IMAGES_FILL_CLASS_COORD_SPACE
 ```
 
-Pure Python (numpy). Builds the order-192 group from the signed-octonion collineation
-transversal, forms the ord-3 secondary module `M`, and reads off `⟨χ,χ⟩`, `⟨χ,1⟩`, the
-commutant dimension/commutativity, and the generic-eigenvalue split.
+Builds the order-192 group, forms the ord-3 module `M`, and verifies: `M` = the class coordinate
+6-space (per-`b` dim 4, non-degenerate fill); `dim End_G(M)=4` in-harness; the `{3,3}` split over
+4 seeds; and the CD-doubling deflation (`upper ≡ lower`, `V₃` absolutely irreducible).
 
 ---
 
 ## 5. AI disclosure
 
-Probe, contract, and note produced under human direction (2026-07-26), continuing the ord-3
-thread ("find something genuinely uncomputed"). The result is a **new fact about a bespoke
-object**: `M = 2·V₃` is the exact decomposition of *this programme's* ord-3 secondary module —
-the group and its irreps are standard, the module is ours. The certificate is **numerical**
-(machine precision), not symbolic. §10 math-review (Grok `[OK]` on the decomposition logic, the
-`M₂(ℝ)`-vs-`ℍ` distinction, and the character arithmetic; framing tightened from "uncomputed"
-to "this module realises `2·V₃`"; numerical-certificate caveat recorded). No new group, no
-semantic claim, no clinical content. GAIDeT-ICMJE 2025.
+Probe, contract, and note produced under human direction (2026-07-26), continuing the "find
+something genuinely uncomputed" push. **An initial framing (`2·V₃` = the fingerprint of the ord-3
+operation, committed `62fd3ebc1`) was an overclaim; advisor review + full anatomy showed `M` is just
+the class's 6-dim coordinate space and the `2` is Cayley-Dickson doubling — corrected in this rung
+(verdict changed to `ORD3_IMAGES_FILL_CLASS_COORD_SPACE`).** The sound, modest content is: the ord-3
+images are non-degenerate (fill the class coordinate space), and that space is `2·V₃` = doubling ×
+Fano-line octonion action. Certificate numerical (machine precision), not symbolic; the two harness
+gaps the review flagged (in-harness `dim End`, multi-seed genericity) are now closed. §10 math-review
+(Grok `[OK]`) had validated the `2·V₃` *inference*; the deflation is a framing correction, not a math
+error, so no re-offload. No new group, no semantic claim, no clinical content. GAIDeT-ICMJE 2025.
