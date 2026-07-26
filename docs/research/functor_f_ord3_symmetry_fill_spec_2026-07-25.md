@@ -26,12 +26,16 @@ select the canonical secondary value the bracketing could not?
 
 ---
 
+> **Group-identification correction (2026-07-26).** A later computation (while hunting for genuinely-uncomputed structure) found the acting symmetry is **not** the abstract `S₄` (order 24) as first stated: the 24 line-fixing collineation-representatives are a transversal that **generates a group of order 192** = `(ℤ₂)³ ⋊ S₄`, itself inside the full signed-automorphism group of 𝕆 of order **1344 = 8·168 = (ℤ₂)³ : PSL(2,7)** (sign-kernel `(ℤ₂)³`, verified). The invariant-free **result is unaffected** — the invariant test uses the generating-set common-kernel, which computes the *generated group's* invariants regardless of the exact order. Only the group label was wrong; it is corrected throughout.
+
+---
+
 ## 1. Result
 
 | Clause | Result | Reading |
 |---|---|---|
 | `Z1_SINGLE_FIBRE_STAB_TRIVIAL` | the stabiliser of a single ZD `b` (its fibre **as a subspace**) inside the lifted `PSL(2,7)` is **trivial** (order 1) | there is no group to average a single quotient `Q` over — the naive symmetrisation is empty. |
-| `Z2_CLASS_S4` | the right group is the **line-stabiliser `S₄`** (order 24); it acts on the 8-dim support-class and permutes its **6 fibres** | the symmetry lives at the class level, not the single fibre. |
+| `Z2_CLASS_S4` | the acting group is the **signed-octonion-automorphism line-stabiliser, order 192** = `(ℤ₂)³ ⋊ S₄` (CORRECTION 2026-07-26: not the abstract `S₄` of order 24 — the 24 collineation-reps are a transversal generating the order-192 group; it sits in the full signed-auto group of 𝕆 of order `1344 = 8·168 = (ℤ₂)³:PSL(2,7)`); it acts on the 8-dim support-class and permutes its **6 fibres** (its collineation quotient is `S₄`) | the symmetry lives at the class level, not the single fibre. |
 | `Z3_NO_S4_INVARIANT_IN_SPAN` | `dim(S₄-invariants ∩ class-level secondary span) = 0` for **all 7 classes** | the secondary content carries **no** `S₄`-invariant vector. The two ambient `S₄`-invariants (`e₀`, `e₈=ℓ`) lie in the *complement* of the secondary span, not in it. |
 | `Z4_NO_GENUINE_FILL` | the ord-3 secondary operation is an **invariant-free `S₄`-module** | no canonical value can exist at bare-algebra, single-fibre, *or* class-symmetry level. |
 
@@ -42,7 +46,7 @@ Verdict: `FUNCTOR_F_ORD3SYM_VERDICT NO_INVARIANT_FILL`.
 ## 2. The honest resolution — and the two bugs caught on the way
 
 `NO_CANONICAL_FILL` is now **explained**, not merely observed: the ord-3 secondary
-operation is a canonical `S₄`-module with **no invariant line**, so there is nothing for a
+operation is a canonical module (for the order-192 group) with **no invariant line**, so there is nothing for a
 symmetry-canonical *value* to be. The canonical object is the **module** (canonical as a
 representation), not a scalar. This closes the fill question the parent rung left open:
 imposing structure could still define one, but the algebra + its full `PSL(2,7)`/`S₄`
