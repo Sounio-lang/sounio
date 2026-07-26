@@ -155,15 +155,45 @@ def main():
     print(f"E4_SPLIT the octonion trilinear xyz = Re-part (E6/Albert cubic, bracketing-independent) + "
           f"Im-part whose bracketing-ambiguity = associator = phi {'PASS' if e4 else 'FAIL'}")
 
+    # E5 — the bridge is CUBIC-SPECIFIC: Re(octonion word) is bracketing-independent at
+    # length <=3 but NOT at length >=4, so the clean split does not lift to the E7 quartic.
+    def all_brackets(f):
+        if len(f) == 1:
+            return [f[0]]
+        r = []
+        for k in range(1, len(f)):
+            for Lf in all_brackets(f[:k]):
+                for Rf in all_brackets(f[k:]):
+                    r.append(o(Lf, Rf))
+        return r
+    spread = {}
+    for nlen in (3, 4):
+        w = 0.0
+        for _ in range(40):
+            f = [rng.standard_normal(8) for _ in range(nlen)]
+            res = [Re(b) for b in all_brackets(f)]
+            w = max(w, max(res) - min(res))
+        spread[nlen] = w
+    # and the mechanism: Re[x,y,z]=0 but Re([x,y,z]*w) != 0
+    xx, yy, zz, ww = (rng.standard_normal(8) for _ in range(4))
+    assoc4 = o(o(xx, yy), zz) - o(xx, o(yy, zz))
+    e5 = spread[3] < 1e-9 and spread[4] > 1e-3 and abs(Re(o(assoc4, ww))) > 1e-6
+    print(f"E5_CUBIC_SPECIFIC Re bracketing-spread: len3={spread[3]:.1e} (independent) len4={spread[4]:.1e} "
+          f"(DEPENDENT); Re([x,y,z]*w)={Re(o(assoc4, ww)):+.2f}!=0 => the E6-cubic shadow is length-3 "
+          f"(cubic) only, does NOT lift to the E7 quartic {'PASS' if e5 else 'FAIL'}")
+
     print("=" * 70)
-    if e1 and e2 and e3 and e4:
+    if e1 and e2 and e3 and e4 and e5:
         print("FUNCTOR_F_E6_VERDICT PHI_IS_G2_SHADOW_OF_E6_CUBIC")
         print("FUNCTOR_F_E6_NOTE octonion triple product splits G2-equivariantly: Re(xyz) is the "
               "bracketing-independent octonion cross-term of the Albert-algebra cubic form N(J3(O)) "
               "(F4=Aut(J3(O)), E6 preserves N projectively), verified G2-invariant; the complementary "
               "imaginary bracketing-ambiguity is the associator = the G2 3-form phi = the functor-F "
               "object. functor F lives in the G2 (non-associative) complement of the E6 cubic invariant. "
-              "CONCRETE algebra, NOT the Petitot semantic conjecture (D3-quarantined)")
+              "The bridge is CUBIC-SPECIFIC (E5): Re(word) is bracketing-independent only at length<=3 "
+              "(the associator is 3-linear = the cubic degree), NOT at length>=4, so it does NOT lift to "
+              "the E7 quartic by this mechanism -- functor F sits at the E6 rung. CONCRETE algebra, NOT "
+              "the Petitot semantic conjecture (D3-quarantined)")
         return 0
     print("FUNCTOR_F_E6_VERDICT INCOMPLETE")
     return 1

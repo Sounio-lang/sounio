@@ -41,6 +41,7 @@ it inside the exceptional tower — **concretely**, not via the Petitot semantic
 | `E2_G2_PRESERVES_ALBERT_CUBIC` | the Albert cubic form `N(J₃(𝕆)) = abc − a·n(x) − b·n(y) − c·n(z) + 2Re(xyz)` is invariant under `G₂ = Aut(𝕆)` acting on the off-diagonal octonions (rel dev `3e-15`) | `G₂ ⊂ F₄ = Aut(J₃(𝕆))`; `Re(xyz)` is the octonion cross-term of the `E₆`/`F₄` invariant. |
 | `E3_ASSOCIATOR_IS_G2_PIECE` | the associator is imaginary (`Re=0`, `‖·‖≠0`), `φ₁₂₃ = +1` | the complementary piece is the `G₂` 3-form `φ`, the functor-F object. |
 | `E4_SPLIT` | `x·y·z = Re-part` (the `E₆`/Albert cubic term) `+ Im-part` whose bracketing-ambiguity `= [x,y,z] = φ` | the two pieces are the whole content of the octonion trilinear form. |
+| `E5_CUBIC_SPECIFIC` | `Re(octonion word)` is bracketing-independent at length `≤3` (`3e-15`) but **not** at length `≥4` (`spread ~70`); the mechanism is `Re[x,y,z]=0` vs `Re([x,y,z]·w)≠0` | the bridge is **cubic-specific** — the associator is 3-linear = the cubic degree, so it matches `E₆` and does **not** lift to the `E₇` quartic by this mechanism. Functor F sits at the `E₆` rung. |
 
 Verdict: `FUNCTOR_F_E6_VERDICT PHI_IS_G2_SHADOW_OF_E6_CUBIC`.
 
@@ -94,8 +95,11 @@ PHI_IS_G2_SHADOW_OF_E6_CUBIC   the associator φ is the G2 non-associative compl
 
 1. **`ψ` and the `F₄`/`E₆` structure** — does the co-associator 4-form `ψ` correspond to a
    piece of a higher `J₃(𝕆)` invariant (the quartic / the adjoint)?
-2. **Up the square** — the same real/imaginary split for `E₇` (the Freudenthal triple system
-   over `J₃(𝕆)`) and `E₈` (magic-square `(𝕆,𝕆)`); is there a functor-F object at each rung?
+2. **[RESOLVED as a boundary, `E5`]** The split does **not** lift to `E₇` by the same
+   mechanism: `Re(octonion word)` is bracketing-independent only at length `≤3`, and the
+   associator's 3-linearity matches the *cubic* (`E₆`) degree specifically. Any `E₇`/`E₈`
+   functor-F object would need a genuinely different construction (the FTS quartic is
+   well-defined by trace/adjoint mechanisms, not by `Re`-of-a-word) — open, not this rung.
 3. **The `PSL(2,7)`/Fano structure inside `F₄`** — does the Fano threading of the ZD fibres
    correspond to a Weyl/subgroup structure of `F₄`? (Concrete; not the semantic claim.)
 
