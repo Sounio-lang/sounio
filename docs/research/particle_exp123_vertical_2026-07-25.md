@@ -17,11 +17,11 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.parti
 
 **Date:** 2026-07-25  
 **Orthography:** EN-UK  
-**Status:** `PARTICLE_EXP123_OK` (62/62 checks under lean_single)  
+**Status:** `PARTICLE_EXP123_OK` (58/58 checks under lean_single)  
 **Source:** `examples/particle_physics/exp123_z_metrology_nonunitary_ew.sio`  
 **Gate:** `scripts/ci/particle_exp123_gate.sh`  
 **JSON receipt:** `examples/particle_physics/results/exp123_deficit_curve.json`  
-**Stdlib:** tree / on-shell-Δρ / G_F-Sirlin Δr + **`EpistemicTension`** in `ew_precision.sio`
+**Stdlib:** tree / on-shell-Δρ / G_F-Sirlin Δr M_W APIs in `ew_precision.sio`
 
 ---
 
@@ -34,9 +34,7 @@ GUM / effects discipline, where novelty can grow without paper-first pressure.
 |---|---|---|
 | **1** | Γ(Z→ee) metrology + uncertainty budget + confidence gate | GUM provenance to observable; budget of PDG sources |
 | **2** | Non-unitarity at Z pole: deficit(s), peak σ with `NonUnitary`, deficit vs √s **JSON** | Effect-typed unstable intermediate; machine-readable curve |
-| **3** | EW tension ladder via typed **`EpistemicTension`** | Tension is a passable object (`tension_improves`), not print keys only |
-| **4** | Unstable spectrum Z **and** W (shared deficit axioms) | NonUnitary is not a Z one-off; `sounio.broken_structure.v1` receipts |
-| **5** | Dual broken-structure receipt QFT + 𝕊 ZD | Shared schema, **explicit non-isomorphism** |
+| **3** | EW tension ladder: tree → Δρ → G_F-Δr pulls, S/T/U | Tension as first-class object that improves under honest construction |
 
 ---
 
@@ -47,43 +45,27 @@ export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
 export SOUNIO_SOUC_ENGINE=lean_single   # full run path
 
 ./bin/souc run examples/particle_physics/exp123_z_metrology_nonunitary_ew.sio
-# expect: PARTICLE_EXP123_OK  (62 PASS)
+# expect: PARTICLE_EXP123_OK  (58 PASS)
 
 bash scripts/ci/particle_exp123_gate.sh
 # expect: PARTICLE_EXP123_GATE_OK
-
-# EXP4 — unstable spectrum Z+W (N1)
-./bin/souc run examples/particle_physics/exp4_unstable_spectrum.sio
-# expect: PARTICLE_EXP4_OK  (21 PASS)
-bash scripts/ci/particle_unstable_effect_gate.sh
-# expect: PARTICLE_EXP4_GATE_OK
-
-# EXP5 — dual broken-structure receipt QFT + sedenion ZD (N3)
-./bin/souc run examples/particle_physics/exp5_broken_structure_dual.sio
-# expect: PARTICLE_EXP5_OK
-bash scripts/ci/particle_broken_structure_dual_gate.sh
-# expect: PARTICLE_EXP5_GATE_OK
-
-# Madaros-runnable core (N4) + oracle (N5)
-SOUNIO_SOUC_ENGINE=madaros ./bin/souc run examples/particle_physics/exp123_madaros_core.sio
-# expect: PARTICLE_MADAROS_CORE_OK
-bash scripts/ci/particle_exp123_oracle_gate.sh
-# expect: PARTICLE_EXP123_ORACLE_GATE_OK
+# also writes examples/particle_physics/results/exp123_deficit_curve.json
+# and checks Madaros science-boundary: no E-SRB-002 for this example
 ```
 
 **Engine note:**
 
 | Surface | Status |
 |---|---|
-| lean_single **run** | **green** (EXP123 62/62, EXP4 21/21, EXP5 8/8) |
-| Madaros **check** | **green** |
-| Madaros science-boundary | **no E-SRB-002** |
-| Madaros **run core** | **green** (`exp123_madaros_core.sio`, 11/11) |
-| Madaros **run full EXP123** | residual SEGV — `BLK-20260725-madaros-exp123-lower-array-segv` |
+| lean_single **run** | **green** (58/58, gate path) |
+| Madaros **check** | **green** (no E008/E137 on this vertical) |
+| Madaros science-boundary | **no E-SRB-002** (`research` → `scientific-package-candidate` allowlist) |
+| Madaros **run**/native lower | **SEGV** in `lower_array` on imported IR — compiler residual, not claimed |
 
-Particle-side mitigations: free-function Epistemic in `nonunitary.sio`;
-`epistemic_chain_z` / `nonunitary_amp` splits; `atan2` second extern block;
-helpers `pass_if` / `within` (avoid `chk`/`near` name collisions).
+Madaros typecheck fixes for this vertical: (1) `stdlib/complex/lib.sio` splits
+the sixth `extern "C"` (`atan2`) into a second block — Madaros drops symbols past
+the fifth in one block; (2) local helpers renamed `chk`→`pass_if`, `near`→`within`
+(name collisions under multi-module Madaros typecheck).
 
 ---
 
@@ -164,43 +146,23 @@ open. No BSM claim.
 
 ---
 
-## EXP4 — Unstable spectrum (Z + W)
-
-| Species | M (GeV) | d(pole) | d(mid) | thr √s (1%) |
-|---|---:|---:|---:|---:|
-| Z | 91.188 | 1.000 | 0.882 | 102.85 |
-| W | 80.377 | 1.000 | 0.871 | 90.15 |
-
-Receipts emit `schema: sounio.broken_structure.v1` (N3 dual-domain ready).
-
-## EXP5 — Dual broken-structure (N3)
-
-Schema: `sounio.broken_structure.v1` — see `docs/research/receipt_broken_structure.v1.md`.
-
-| Domain | Coordinate | Endpoint proximity |
-|---|---|---:|
-| `qft_unstable` (Z) | √s | 1.000 at pole |
-| `sedenion_zd` | path t → canonical ZD | 1.000 at t=1; ‖z*w‖²=0 |
-
-**Mandatory disclaimer:** NonUnitary deficit **is not** a sedenion zero-divisor.  
-Analogy level: receipt geometry + typed honesty only.
-
 ## Novelty (construction, not paper)
 
-1. **Runnable metrology budget** — who owns the variance.  
-2. **Compiler-enforced NonUnitary** + deficit JSON.  
-3. **Typed `EpistemicTension` ladder** (`tension_improves`).  
-4. **Shared deficit axioms on Z and W** — effect is spectrum-wide.  
-5. **Dual-domain receipt** QFT + 𝕊 with **non-isomorphism** gated.  
-6. **Science-boundary allowlist** research → scientific-package-candidate.
+1. **Runnable metrology budget** for a textbook width — who owns the variance.  
+2. **Compiler-enforced NonUnitary** + deficit curve JSON receipt.  
+3. **Pull ladder** tree → Δρ → G_F-Δr as one executable tension dashboard.  
+4. **Science-boundary allowlist** for research → scientific-package-candidate.
+
+None of these require a journal. All of them are **objects that exist** when
+the vertical is green.
 
 ---
 
-## Next construction (α programme)
+## Next construction (if the vertical holds)
 
-- **N4** Madaros run SEGV (compiler worktree).  
-- **N5** oracle audit.  
-- Do **not** prioritise fitting residual M_W pull to 0σ.
+- Higher-order Δr / two-loop residue (optional tightening below 1σ).  
+- Madaros typecheck of `particle_physics` (E008 residuals) — separate from boundary.  
+- Promote ring status when package extraction lands.
 
 ## AI disclosure
 

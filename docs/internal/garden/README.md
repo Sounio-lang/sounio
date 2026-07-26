@@ -69,7 +69,9 @@ Most seeds should start as `Garden` or `Hypothesis`. A seed becomes
 - [`The Zero of Encounter`](seeds/2026-07-11-the-zero-of-encounter.md) — the
   executable butterfly showing that absence, cancellation, annihilation,
   resolution, and rounding can remain distinct when their surface value is
-  zero; default native-v2 execution remains blocked.
+  zero; driven through the Garden-to-Claim pipeline to the ledger-scoped claim
+  `garden_zero_encounter_pipeline`; default native-v2 execution remains
+  blocked.
 
 ## Hard Boundaries
 

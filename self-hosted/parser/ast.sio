@@ -943,6 +943,7 @@ pub enum ItemKind {
     ItemAlgebra,
     ItemStudy,
     ItemOntology,
+    ItemClaim,
 }
 
 // ============================================================================
@@ -1550,4 +1551,299 @@ pub fn ast_global_str_init_name(name: Name) -> Name with Div {
         wi = wi + 1
     }
     out
+}
+
+// ============================================================
+// Claim declaration (AST-native falsification claims)
+// ============================================================
+//
+// Syntax: `claim name { field = value, ... }` where each value is a string
+// literal, an integer/float literal, or a path such as
+// `Evidence::InstrumentControlled`. Claims are compile-time metadata for the
+// falsification ledger (docs/research/ast_native_claims_spec_2026-07-25.md,
+// future rung 1): they carry no runtime semantics and never reach resolve,
+// check, or codegen — the parse driver (parser::mod) drops ItemKind::ItemClaim
+// items from the item stream after parse_claim_item records them here.
+//
+// The registry uses flat primitive arrays (same pattern as GLOBAL_VAR_INIT_*)
+// because global struct-array initializers are not supported. Field text is
+// stored as ast_name_hash digests; recovering source text from a claim is a
+// future rung (the comment ledger and the claim_ast preprocessor remain the
+// text-preserving extraction paths).
+
+pub let CLAIM_VALUE_NONE: i64 = 0
+pub let CLAIM_VALUE_STRING: i64 = 1
+pub let CLAIM_VALUE_INT: i64 = 2
+pub let CLAIM_VALUE_FLOAT: i64 = 3
+pub let CLAIM_VALUE_PATH: i64 = 4
+
+pub struct ClaimField {
+    name: Name,
+    value: Name,      // token text (string literals keep their quotes)
+    kind: i64,        // CLAIM_VALUE_*
+}
+
+pub struct ClaimDecl {
+    name: Name,
+    fields: [ClaimField; 16],
+    n_fields: i32,
+}
+
+pub fn empty_claim_field() -> ClaimField {
+    ClaimField { name: empty_name(), value: empty_name(), kind: CLAIM_VALUE_NONE }
+}
+
+pub fn empty_claim_decl() -> ClaimDecl {
+    ClaimDecl {
+        name: empty_name(),
+        fields: [empty_claim_field(); 16],
+        n_fields: 0,
+    }
+}
+
+// Flat claim registry: up to 64 claims, up to 16 fields each (row-major).
+pub var CLAIM_COUNT: i64 = 0
+pub var CLAIM_NAME_HASHES: [i64; 64] = [0; 64]
+pub var CLAIM_FIELD_COUNTS: [i64; 64] = [0; 64]
+pub var CLAIM_FIELD_NAME_HASHES: [i64; 1024] = [0; 1024]
+pub var CLAIM_FIELD_VALUE_HASHES: [i64; 1024] = [0; 1024]
+pub var CLAIM_FIELD_KINDS: [i64; 1024] = [0; 1024]
+
+// Text-preserving claim registry extension (self-falsifying compiler rung,
+// docs/research/self_falsifying_compiler_spec_2026-07-25.md). The hash arrays
+// above cannot be inverted, so gate paths and verdicts would be unrecoverable.
+// Claim and field NAMES are stored as flat byte arrays (128 bytes per entry,
+// row-major: claim name at slot*128, field name at (slot*16+field)*128).
+// Field VALUES are stored as byte-offset spans into the source file: Names
+// returned by current_name() do not survive the parse path for StringLit
+// tokens (struct-return/store limitations), so the value text is recovered by
+// slicing the source between CLAIM_FIELD_VALUE_START/END instead. All of this
+// is fed directly from parse_claim_item (the note functions below); the
+// hash-based lookup API is unchanged.
+pub var CLAIM_NAME_TEXT_LENS: [i64; 64] = [0; 64]
+pub var CLAIM_NAME_TEXT: [i8; 8192] = [0; 8192]
+pub var CLAIM_FIELD_NAME_TEXT_LENS: [i64; 1024] = [0; 1024]
+pub var CLAIM_FIELD_NAME_TEXT: [i8; 131072] = [0; 131072]
+pub var CLAIM_FIELD_VALUE_START: [i64; 1024] = [0; 1024]
+pub var CLAIM_FIELD_VALUE_END: [i64; 1024] = [0; 1024]
+
+pub fn ast_reset_claims() with Mut {
+    CLAIM_COUNT = 0
+}
+
+pub fn ast_record_claim(decl: ClaimDecl) with Mut, Div {
+    if CLAIM_COUNT >= 64 {
+        return
+    }
+    let slot = CLAIM_COUNT
+    CLAIM_NAME_HASHES[slot as usize] = ast_name_hash(decl.name)
+    var nf = decl.n_fields as i64
+    if nf > 16 {
+        nf = 16
+    }
+    CLAIM_FIELD_COUNTS[slot as usize] = nf
+    var i: i64 = 0
+    while i < nf {
+        let base = slot * 16 + i
+        CLAIM_FIELD_NAME_HASHES[base as usize] = ast_name_hash(decl.fields[i as usize].name)
+        CLAIM_FIELD_VALUE_HASHES[base as usize] = ast_name_hash(decl.fields[i as usize].value)
+        CLAIM_FIELD_KINDS[base as usize] = decl.fields[i as usize].kind
+        i = i + 1
+    }
+    CLAIM_COUNT = CLAIM_COUNT + 1
+}
+
+// Text-preserving recording (self-falsifying compiler rung).
+//
+// Names stored inside a ClaimDecl do not survive the parse -> registry path
+// intact: field values arrive truncated (struct store / struct-return
+// limitations; rung 1 documented text recovery as future work for this
+// reason). parse_claim_item therefore feeds the text/span arrays DIRECTLY
+// from parser locals and token spans via the functions below, bypassing the
+// lossy path. Ordering contract: the note functions are called while the
+// claim is parsed, i.e. BEFORE ast_record_claim increments CLAIM_COUNT, so
+// the pending slot is CLAIM_COUNT.
+pub fn ast_claim_note_name_text(name: Name) with Mut, Div {
+    if CLAIM_COUNT >= 64 {
+        return
+    }
+    let slot = CLAIM_COUNT
+    var name_len = name.len
+    if name_len > 128 {
+        name_len = 128
+    }
+    CLAIM_NAME_TEXT_LENS[slot as usize] = name_len
+    var c: i64 = 0
+    while c < name_len {
+        CLAIM_NAME_TEXT[(slot * 128 + c) as usize] = name.buf[c as usize]
+        c = c + 1
+    }
+}
+
+pub fn ast_claim_note_field_name(field_idx: i64, fname: Name) with Mut, Div {
+    if CLAIM_COUNT >= 64 {
+        return
+    }
+    if field_idx < 0 || field_idx >= 16 {
+        return
+    }
+    let base = CLAIM_COUNT * 16 + field_idx
+    var fn_len = fname.len
+    if fn_len > 128 {
+        fn_len = 128
+    }
+    CLAIM_FIELD_NAME_TEXT_LENS[base as usize] = fn_len
+    var fi: i64 = 0
+    while fi < fn_len {
+        CLAIM_FIELD_NAME_TEXT[(base * 128 + fi) as usize] = fname.buf[fi as usize]
+        fi = fi + 1
+    }
+}
+
+// Record the source byte-offset span of a claim field's value token(s). For
+// paths (Evidence::InstrumentControlled) the span covers the whole path; for
+// string literals it includes the surrounding quotes.
+pub fn ast_claim_note_field_span(field_idx: i64, vstart: i64, vend: i64) with Mut, Div {
+    if CLAIM_COUNT >= 64 {
+        return
+    }
+    if field_idx < 0 || field_idx >= 16 {
+        return
+    }
+    let base = CLAIM_COUNT * 16 + field_idx
+    CLAIM_FIELD_VALUE_START[base as usize] = vstart
+    CLAIM_FIELD_VALUE_END[base as usize] = vend
+}
+
+// Number of claims recorded since the last ast_reset_claims.
+pub fn ast_claim_count() -> i64 {
+    CLAIM_COUNT
+}
+
+// Field count for the claim named `name`, or 0 when absent. Distinct from a
+// claim with zero fields only in that ast_claim_present disambiguates.
+pub fn ast_claim_present(name: Name) -> i64 with Div {
+    let h = ast_name_hash(name)
+    var i: i64 = 0
+    while i < CLAIM_COUNT {
+        if CLAIM_NAME_HASHES[i as usize] == h {
+            return 1
+        }
+        i = i + 1
+    }
+    0
+}
+
+pub fn ast_claim_field_count(name: Name) -> i64 with Div {
+    let h = ast_name_hash(name)
+    var i: i64 = 0
+    while i < CLAIM_COUNT {
+        if CLAIM_NAME_HASHES[i as usize] == h {
+            return CLAIM_FIELD_COUNTS[i as usize]
+        }
+        i = i + 1
+    }
+    0
+}
+
+// Value kind (CLAIM_VALUE_*) of field `field` on claim `name`, or
+// CLAIM_VALUE_NONE when either is absent.
+pub fn ast_claim_field_kind(name: Name, field: Name) -> i64 with Div {
+    let h = ast_name_hash(name)
+    let fh = ast_name_hash(field)
+    var i: i64 = 0
+    while i < CLAIM_COUNT {
+        if CLAIM_NAME_HASHES[i as usize] == h {
+            let nf = CLAIM_FIELD_COUNTS[i as usize]
+            var j: i64 = 0
+            while j < nf {
+                let base = i * 16 + j
+                if CLAIM_FIELD_NAME_HASHES[base as usize] == fh {
+                    return CLAIM_FIELD_KINDS[base as usize]
+                }
+                j = j + 1
+            }
+            return CLAIM_VALUE_NONE
+        }
+        i = i + 1
+    }
+    CLAIM_VALUE_NONE
+}
+
+// ============================================================
+// Slot-based text accessors (self-falsifying compiler rung)
+// ============================================================
+// Unlike the hash-based lookups above, these rebuild the recorded source text
+// so tooling (the claim executor) can enumerate claims without knowing their
+// names in advance. Out-of-range indices yield empty names/fields.
+
+// Rebuild the name of the claim recorded at `slot`
+// (0 <= slot < ast_claim_count()).
+pub fn ast_claim_slot_name(slot: i64) -> Name with Mut, Div {
+    var n = empty_name()
+    if slot < 0 || slot >= CLAIM_COUNT {
+        return n
+    }
+    let len = CLAIM_NAME_TEXT_LENS[slot as usize]
+    var i: i64 = 0
+    while i < len && i < 128 {
+        n.buf[i as usize] = CLAIM_NAME_TEXT[(slot * 128 + i) as usize]
+        i = i + 1
+    }
+    n.len = len
+    n
+}
+
+// Field count of the claim recorded at `slot`, or 0 when out of range.
+pub fn ast_claim_slot_field_count(slot: i64) -> i64 {
+    if slot < 0 || slot >= CLAIM_COUNT {
+        return 0
+    }
+    CLAIM_FIELD_COUNTS[slot as usize]
+}
+
+// Rebuild field `field_idx` (name and CLAIM_VALUE_* kind) of the claim
+// recorded at `slot`. The value Name is always empty: value text is recovered
+// from the source file via ast_claim_slot_value_start/end instead.
+pub fn ast_claim_slot_field(slot: i64, field_idx: i64) -> ClaimField with Mut, Div {
+    var f = empty_claim_field()
+    if slot < 0 || slot >= CLAIM_COUNT {
+        return f
+    }
+    if field_idx < 0 || field_idx >= CLAIM_FIELD_COUNTS[slot as usize] {
+        return f
+    }
+    let base = slot * 16 + field_idx
+    f.kind = CLAIM_FIELD_KINDS[base as usize]
+    let nlen = CLAIM_FIELD_NAME_TEXT_LENS[base as usize]
+    var i: i64 = 0
+    while i < nlen && i < 128 {
+        f.name.buf[i as usize] = CLAIM_FIELD_NAME_TEXT[(base * 128 + i) as usize]
+        i = i + 1
+    }
+    f.name.len = nlen
+    f
+}
+
+// Source byte-offset span of field `field_idx`'s value on the claim at
+// `slot`, or 0 when out of range. Slice the compiled source file between
+// start (inclusive) and end (exclusive) to recover the value text.
+pub fn ast_claim_slot_value_start(slot: i64, field_idx: i64) -> i64 {
+    if slot < 0 || slot >= CLAIM_COUNT {
+        return 0
+    }
+    if field_idx < 0 || field_idx >= CLAIM_FIELD_COUNTS[slot as usize] {
+        return 0
+    }
+    CLAIM_FIELD_VALUE_START[(slot * 16 + field_idx) as usize]
+}
+
+pub fn ast_claim_slot_value_end(slot: i64, field_idx: i64) -> i64 {
+    if slot < 0 || slot >= CLAIM_COUNT {
+        return 0
+    }
+    if field_idx < 0 || field_idx >= CLAIM_FIELD_COUNTS[slot as usize] {
+        return 0
+    }
+    CLAIM_FIELD_VALUE_END[(slot * 16 + field_idx) as usize]
 }

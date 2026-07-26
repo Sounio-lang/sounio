@@ -55,6 +55,7 @@ use module_frontend::{preflight_multimodule_frontend, load_multimodule_epistemic
 use module_frontend::{ModuleClosure, module_frontend_collect_ast_closure_into}
 use module_parse::{ImportList, load_module_file, extract_imports_from_ast, file_exists}
 use frontend_callsite_probe::{run_frontend_callsite_probe}
+use claim_executor::{claim_executor_verify}
 use parser::parser::{parser_last_error_count}
 use ir::opt_strategy::{ir_opt_apply_strategy, ir_opt_find_return_vreg, ir_opt_max_label, ir_opt_max_vreg}
 use ir::lower::{ir_patch_validated_calls, lower_program_to_ir, lower_program_to_ir_with_epistemic, lower_program_to_ir_probe_summary_ref, lower_program_to_ir_probe_summary_box_ref, lower_program_to_ir_summary_box_probe_with_epistemic_ref, lower_program_function_body_from_summary_with_epistemic_ref, lower_program_to_ir_summary_flat_with_epistemic_ref, lower_program_function_body_from_summary_flat_with_epistemic_ref, lower_program_to_ir_summary_flat_owned_with_epistemic_ref}
@@ -1179,6 +1180,8 @@ struct CompilerOptions {
     // Sprint 47: .sprof profile-guided strategy promotion
     use_profile: bool,
     use_profile_path: string,
+    // Self-falsifying compiler rung: execute claim gates before codegen
+    verify_claims: bool,
 }
 
 pub struct CompileResult {
@@ -2175,6 +2178,14 @@ fn run_check_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Allo
         panic("check failed")
     }
     if compiler_visibility_preflight(source_path) {
+        // Self-falsifying compiler rung: check mode has no codegen, so claim
+        // gates run here in place of it when --verify-claims is passed.
+        if compiler_mode_has_flag(args, "--verify-claims") {
+            let claim_fail_count = claim_executor_verify(source_path)
+            if claim_fail_count != 0 {
+                panic("check failed: verify-claims gate failure")
+            }
+        }
         println(compiler_check_ok_message())
         return
     }
@@ -3164,6 +3175,14 @@ fn run_native_v2_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Pani
     if !compiler_visibility_preflight(source_path) {
         panic("native-v2-compile failed: visibility preflight")
     }
+    // Self-falsifying compiler rung: after type-check (preflights above),
+    // before codegen — execute claim gates when --verify-claims is passed.
+    if compiler_mode_has_flag(args, "--verify-claims") {
+        let claim_fail_count = claim_executor_verify(source_path)
+        if claim_fail_count != 0 {
+            panic("native-v2-compile aborted: verify-claims gate failure")
+        }
+    }
     // The boxed compile-to-file route is SRET-safe for both imported and
     // single-module programs. MultiModuleIrResult.module is now Box<IrModule>
     // (no densify at the legacy load API); prefer this file route for large IR.
@@ -3641,6 +3660,7 @@ fn print_help() with IO {
     println("  --probe-wasm-dispatch <source.sio> [out.wasm]  Probe wasm dispatch marker path")
     println("  --show-profile <file>  Inspect .sprof profile and show promotion decisions")
     println("  --use-profile <file>   Apply .sprof profile for strategy promotion")
+    println("  --verify-claims        Execute claim gates after type-check, before codegen (self-falsifying compiler)")
     println("  -h, --help             Print this help message")
     println("")
     println("Examples:")
@@ -3667,6 +3687,7 @@ fn parse_options(args: ArgList) -> CompilerOptions with IO, Mut, Panic, Div {
     var debug_witnesses = false
     var use_profile = false
     var use_profile_path = ""
+    var verify_claims = false
 
     var i: i64 = 0
     while i < args.len {
@@ -3748,6 +3769,9 @@ fn parse_options(args: ArgList) -> CompilerOptions with IO, Mut, Panic, Div {
                 use_profile = true
             }
         }
+        else if arg == "--verify-claims" {
+            verify_claims = true
+        }
         else if arg == "-h" || arg == "--help" {
             print_help()
             exit_process(0)
@@ -3783,6 +3807,7 @@ fn parse_options(args: ArgList) -> CompilerOptions with IO, Mut, Panic, Div {
         debug_witnesses: debug_witnesses,
         use_profile: use_profile,
         use_profile_path: use_profile_path,
+        verify_claims: verify_claims,
     }
 }
 
@@ -28305,6 +28330,15 @@ fn main() with IO, Mut, Panic, Div, Alloc {
     }
 
     let opts = parse_options(args)
+
+    // Self-falsifying compiler rung: execute claim gates after type-check,
+    // before any codegen lane below runs.
+    if opts.verify_claims {
+        let claim_fail_count = claim_executor_verify(opts.input_file)
+        if claim_fail_count != 0 {
+            panic("verify-claims: compilation aborted by self-falsifying claim gates")
+        }
+    }
 
     // GPU dispatch: when --gpu-target is set, bypass native ELF and emit GPU code
     if str_len(opts.gpu_target) > 0 {
