@@ -425,9 +425,9 @@ fn ir_register_knowledge_layout(table: StructLayoutTable) -> StructLayoutTable w
     }
     let idx = t.count
     var fields: [StructFieldEntry; 64] = [empty_struct_field_entry(); 64]
-    fields[0] = StructFieldEntry { name: make_name("value"), index: 0, is_float: 1, elem_type_name: ir_empty_name() }
-    fields[1] = StructFieldEntry { name: make_name("variance"), index: 1, is_float: 1, elem_type_name: ir_empty_name() }
-    fields[2] = StructFieldEntry { name: make_name("confidence"), index: 2, is_float: 1, elem_type_name: ir_empty_name() }
+    fields[0] = StructFieldEntry { name: make_name("value"), index: 0, is_float: 1, elem_type_name: ir_empty_name(), word_scalar_array_len: 0, named_type_name: ir_empty_name() }
+    fields[1] = StructFieldEntry { name: make_name("variance"), index: 1, is_float: 1, elem_type_name: ir_empty_name(), word_scalar_array_len: 0, named_type_name: ir_empty_name() }
+    fields[2] = StructFieldEntry { name: make_name("confidence"), index: 2, is_float: 1, elem_type_name: ir_empty_name(), word_scalar_array_len: 0, named_type_name: ir_empty_name() }
     t.entries[idx as usize] = StructLayoutEntry {
         type_name: make_name("Knowledge"),
         fields: fields,
@@ -1631,6 +1631,10 @@ fn lowerer_preseed_external_struct_items_mut(
                                                 // ir_fast_summary_register_struct_fields_owned.
                                                 is_float: if lower_type_expr_is_f64(&(*flist).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*flist).head.ty) { 2 } else if lower_type_expr_is_integer(&(*flist).head.ty) { 3 } else { 0 },
                                                 elem_type_name: lower_type_expr_array_elem_name(&(*flist).head.ty),
+                                                // #1479: shape of an AGGREGATE field, so a struct copy can allocate
+                                                // fresh backing storage for it instead of sharing the handle.
+                                                word_scalar_array_len: lower_type_expr_word_scalar_array_len(&(*flist).head.ty),
+                                                named_type_name: lower_type_expr_named_type_name(&(*flist).head.ty),
                                             }
                                             fc = fc + 1
                                             fcur = (*flist).tail
@@ -1791,6 +1795,10 @@ fn lowerer_preseed_external_items_into_acc_mut(
                                                 name: (*flist).head.name,
                                                 index: fc,
                                                 is_float: if lower_type_expr_is_f64(&(*flist).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*flist).head.ty) { 2 } else if lower_type_expr_is_integer(&(*flist).head.ty) { 3 } else { 0 },
+                                                // #1479: aggregate-field shape (this site predates and still
+                                                // omits elem_type_name; left as-is, that is a separate lane).
+                                                word_scalar_array_len: lower_type_expr_word_scalar_array_len(&(*flist).head.ty),
+                                                named_type_name: lower_type_expr_named_type_name(&(*flist).head.ty),
                                             }
                                             fc = fc + 1
                                             fcur = (*flist).tail
@@ -1880,6 +1888,10 @@ fn lowerer_register_struct_fields_direct_mut(
                     // without the i64 marker).
                     is_float: if lower_type_expr_is_f64(&(*flist).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*flist).head.ty) { 2 } else if lower_type_expr_is_integer(&(*flist).head.ty) { 3 } else { 0 },
                     elem_type_name: lower_type_expr_array_elem_name(&(*flist).head.ty),
+                    // #1479: shape of an AGGREGATE field, so a struct copy can allocate
+                    // fresh backing storage for it instead of sharing the handle.
+                    word_scalar_array_len: lower_type_expr_word_scalar_array_len(&(*flist).head.ty),
+                    named_type_name: lower_type_expr_named_type_name(&(*flist).head.ty),
                 }
                 fc = fc + 1
                 fcur = &(*flist).tail
@@ -1934,6 +1946,10 @@ fn lowerer_register_struct_fields_mut(
                         // println i64-segfault fix: see note in lowerer_register_struct_fields_direct_mut.
                         is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else if lower_type_expr_is_integer(&(*list).head.ty) { 3 } else { 0 },
                         elem_type_name: lower_type_expr_array_elem_name(&(*list).head.ty),
+                        // #1479: shape of an AGGREGATE field, so a struct copy can allocate
+                        // fresh backing storage for it instead of sharing the handle.
+                        word_scalar_array_len: lower_type_expr_word_scalar_array_len(&(*list).head.ty),
+                        named_type_name: lower_type_expr_named_type_name(&(*list).head.ty),
                     }
                     (*(*lo).struct_layouts).entries[layout_idx as usize].field_count = fc + 1
                 } else {
@@ -2103,6 +2119,28 @@ fn lower_opt_type_fixed_array_word_scalar(ty_opt: &Option<Box<TypeExpr>>) -> boo
 fn lower_opt_type_word_scalar_array_len(ty_opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
     if !lower_opt_type_fixed_array_word_scalar(ty_opt) { return 0 - 1 }
     lower_opt_type_fixed_array_len(ty_opt)
+}
+
+// #1479: element count of a `[T; N]` type ONLY when T is a WORD SCALAR, else 0.
+// ZERO — not -1 — is the unknown value, so that a StructFieldEntry literal which
+// OMITS the field (this language permits partial struct literals, and one
+// registration site in this file already relies on that) degrades to the FLAT
+// copy instead of presenting a plain scalar field as a zero-length array.
+fn lower_type_expr_word_scalar_array_len(te: &TypeExpr) -> i64 with Mut, Panic, Div {
+    if !lower_type_expr_fixed_array_word_scalar_ref(te) { return 0 }
+    let n = lower_type_expr_fixed_array_len_ref(te)
+    if n <= 0 { return 0 }
+    n
+}
+
+// #1479: first path segment of a PLAINLY NAMED field type (`inner: Inner` ->
+// "Inner"), else empty. Compound and generic spellings (`[T; N]`, `&T`,
+// `Option<Box<T>>` when it is not TypeNamed) return empty and therefore stay on
+// the flat copy. A primitive name such as "i64" is returned but is harmless:
+// the deep copy only acts on a name that resolves to a REGISTERED struct layout.
+fn lower_type_expr_named_type_name(te: &TypeExpr) -> Name with Mut, Panic, Div {
+    if (*te).kind != TypeExprKind::TypeNamed { return ir_empty_name() }
+    ir_path_first_name((*te).path)
 }
 
 fn lower_array_literal_fixed_len_ref(e: &Expr) -> i64 with Alloc, Mut, Div {
@@ -2717,6 +2755,10 @@ fn ir_fast_summary_register_struct_fields_owned(
                     // println i64-segfault fix: see note in lowerer_register_struct_fields_direct_mut.
                     is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else if lower_type_expr_is_integer(&(*list).head.ty) { 3 } else { 0 },
                     elem_type_name: lower_type_expr_array_elem_name(&(*list).head.ty),
+                    // #1479: shape of an AGGREGATE field, so a struct copy can allocate
+                    // fresh backing storage for it instead of sharing the handle.
+                    word_scalar_array_len: lower_type_expr_word_scalar_array_len(&(*list).head.ty),
+                    named_type_name: lower_type_expr_named_type_name(&(*list).head.ty),
                 }
                 lay_entry.field_count = fc + 1
                 table_value.entries[layout_idx as usize] = lay_entry
@@ -5064,6 +5106,235 @@ impl Lowerer {
             let slot_reg = pair_slot.1
             lo = lo.emit(ir_field_get(slot_reg, src_reg, i, fname))
             lo = lo.emit(ir_field_set(dst_reg, i, slot_reg, fname))
+            i = i + 1
+        }
+        (lo, dst_reg)
+    }
+
+    // #1479: ONE lookup shared by every per-field query the deep copy makes.
+    //
+    // Returns `layout_entry_index * 64 + field_entry_index` for the entry that
+    // registers slot `slot_index` of `type_name`, or -1 when absent.
+    //
+    // Why one position instead of three independent scans: a struct type can be
+    // registered TWICE (declaration pass plus import / literal seeding) by
+    // DIFFERENT code paths, and those paths do not populate identical fields —
+    // one of them omits `elem_type_name` outright. Independent scans could
+    // therefore read the field name from one registration and the array length
+    // from another. Resolving the position once and reading every field from it
+    // makes that impossible. The scan rule (FIRST matching type entry, then the
+    // first field whose `index` equals the slot) is byte-identical to
+    // struct_layout_slot_count and struct_layout_field_name_at.
+    fn struct_layout_field_pos(self, type_name: Name, slot_index: i64) -> i64 with Mut, Panic, Div, Alloc {
+        if type_name.len <= 0 { return 0 - 1 }
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
+                var fi: i64 = 0
+                let fc = (*self.struct_layouts).entries[si as usize].field_count
+                while fi < fc && fi < 64 {
+                    if (*self.struct_layouts).entries[si as usize].fields[fi as usize].index == slot_index {
+                        return si * 64 + fi
+                    }
+                    fi = fi + 1
+                }
+                return 0 - 1
+            }
+            si = si + 1
+        }
+        0 - 1
+    }
+
+    fn struct_layout_pos_field_name(self, pos: i64) -> Name with Mut, Panic, Div, Alloc {
+        if pos < 0 { return ir_empty_name() }
+        let si = pos / 64
+        let fi = pos - si * 64
+        if si >= (*self.struct_layouts).count { return ir_empty_name() }
+        (*self.struct_layouts).entries[si as usize].fields[fi as usize].name
+    }
+
+    fn struct_layout_pos_array_len(self, pos: i64) -> i64 with Mut, Panic, Div, Alloc {
+        if pos < 0 { return 0 }
+        let si = pos / 64
+        let fi = pos - si * 64
+        if si >= (*self.struct_layouts).count { return 0 }
+        (*self.struct_layouts).entries[si as usize].fields[fi as usize].word_scalar_array_len
+    }
+
+    fn struct_layout_pos_is_float(self, pos: i64) -> i64 with Mut, Panic, Div, Alloc {
+        if pos < 0 { return 0 }
+        let si = pos / 64
+        let fi = pos - si * 64
+        if si >= (*self.struct_layouts).count { return 0 }
+        (*self.struct_layouts).entries[si as usize].fields[fi as usize].is_float
+    }
+
+    fn struct_layout_pos_named_type(self, pos: i64) -> Name with Mut, Panic, Div, Alloc {
+        if pos < 0 { return ir_empty_name() }
+        let si = pos / 64
+        let fi = pos - si * 64
+        if si >= (*self.struct_layouts).count { return ir_empty_name() }
+        (*self.struct_layouts).entries[si as usize].fields[fi as usize].named_type_name
+    }
+
+    // #1479: how deep the value-copy follows nested STRUCT fields. 2 covers
+    // `Outer { inner: Inner }` and `L0 { l1: L1 { l2: L2 } }`.
+    //
+    // A DEPTH cap, deliberately, rather than a visited-type set: a
+    // self-referential or mutually recursive struct type must not spin at
+    // LOWERING time, and depth alone guarantees termination however the cycle is
+    // spelled. A field past the cap simply keeps the shared handle, which is the
+    // #1475 flat behaviour — never worse than what shipped.
+    fn struct_deep_copy_max_depth(self) -> i64 {
+        let _lo = self
+        2
+    }
+
+    // #1479: instructions held in reserve below IR_MAX_INSTRS. A deep copy is
+    // emitted only when its PROJECTED cost fits in what is left, so a struct big
+    // enough that following its aggregate fields would not fit degrades to the
+    // flat copy rather than pushing the function past the 4096-instruction cap.
+    fn struct_deep_copy_instr_headroom(self) -> i64 {
+        let _lo = self
+        512
+    }
+
+    // #1479: instruction cost of emit_fixed_array_value_copy. That copy is a
+    // LOOP, so this is O(1) in the element count: alloc(1) + optional float
+    // marker(1) + three ir_load_imm(3) + label(1) + cmp(1) + branch_false(1) +
+    // index_get(1) + index_set(1) + add(1) + copy(1) + jump(1) + label(1) = 15.
+    // Rounded UP to 16: over-estimating only makes the budget conservative,
+    // whereas under-estimating would let a copy run past the cap.
+    fn struct_deep_copy_array_cost(self) -> i64 {
+        let _lo = self
+        16
+    }
+
+    // #1479: cost of the null-handle guard around one deep field —
+    // ir_load_imm(0) + cmp + branch_false + the overwriting field_set + label.
+    fn struct_deep_copy_guard_cost(self) -> i64 {
+        let _lo = self
+        5
+    }
+
+    // #1479: slot count of a nested STRUCT-typed field, or -1 when it is not a
+    // field the deep copy may follow.
+    //
+    // Excluded for the same reasons they are excluded at the top level:
+    //   Box       — reference semantics by construction; the self-hosted AST is
+    //               Box-linked and deep-copying would change its meaning.
+    //   Knowledge — variance rides ALONGSIDE the slots (pending_variance_reg),
+    //               so copying slots alone would half-copy it.
+    // Everything else falls out of struct_layout_slot_count returning -1: a
+    // primitive name, a generic head such as Option, an unregistered type.
+    fn nested_struct_field_slot_count(self, field_type_name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        if field_type_name.len <= 0 { return 0 - 1 }
+        if ir_name_is_box(field_type_name) { return 0 - 1 }
+        if ir_name_eq(field_type_name, make_name("Knowledge")) { return 0 - 1 }
+        self.struct_layout_slot_count(field_type_name)
+    }
+
+    // #1479: PROJECTED instruction count of emit_struct_value_copy_deep for this
+    // type at this depth. It tracks the emitter arm for arm and must keep doing
+    // so: an over-estimate only degrades the copy to flat, an under-estimate
+    // would let it overrun IR_MAX_INSTRS.
+    fn struct_deep_copy_cost(self, type_name: Name, slot_count: i64, depth: i64) -> i64 with Mut, Panic, Div, Alloc {
+        var total: i64 = 1
+        var i: i64 = 0
+        while i < slot_count && i < 64 {
+            total = total + 2
+            let pos = self.struct_layout_field_pos(type_name, i)
+            let arr_len = self.struct_layout_pos_array_len(pos)
+            if arr_len > 0 {
+                total = total + self.struct_deep_copy_guard_cost() + self.struct_deep_copy_array_cost()
+            } else if depth < self.struct_deep_copy_max_depth() {
+                let nested_name = self.struct_layout_pos_named_type(pos)
+                let nested_slots = self.nested_struct_field_slot_count(nested_name)
+                if nested_slots > 0 {
+                    total = total + self.struct_deep_copy_guard_cost() + self.struct_deep_copy_cost(nested_name, nested_slots, depth + 1)
+                }
+            }
+            i = i + 1
+        }
+        total
+    }
+
+    // #1479: value-copy a struct handle, following AGGREGATE fields instead of
+    // sharing them.
+    //
+    // #1475 made `var s2 = s1` copy the outer slots, which fixed scalar fields.
+    // The copy stayed FLAT, so a field holding an array or a nested struct copied
+    // the 64-bit HANDLE and `s2.arr[0] = 99` was still observed through `s1` —
+    // check passed, the ELF ran, exit 0, wrong answer. This walks into those
+    // fields: fresh backing storage, contents copied.
+    //
+    // The REPRESENTATION is unchanged. Madaros lays a struct out as one word per
+    // field (`lower_struct_literal_expr_ref`, count_struct_fields * 8) with an
+    // aggregate field held as a handle, where lean_single INLINES it
+    // (struct_like_nslots = st_total_size / 8). Making the two agree would touch
+    // struct-literal lowering, every field offset, the native backend and the
+    // SOIR wire layout; this is local to the copy site and touches none of them.
+    //
+    // Every field is FLAT-copied FIRST and only then, under a guard, overwritten
+    // with the deep copy. The pre-#1479 behaviour is therefore the floor: an
+    // unknown shape, a type past the depth cap, or a null slot all keep the
+    // shared handle rather than losing the value.
+    //
+    // That guard is not tidiness. A slot can legitimately hold 0 — a field never
+    // assigned an aggregate — and native_v2_resolve_handle_to_object_base_rax_into
+    // treats 0 as a handle-table INDEX, so an unguarded copy would dereference
+    // whatever entry 0 holds. Trading an aliasing bug for a segfault is not a fix.
+    fn emit_struct_value_copy_deep(self, src_reg: i64, type_name: Name, slot_count: i64, depth: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let pair_dst = self.fresh_reg()
+        var lo = pair_dst.0
+        let dst_reg = pair_dst.1
+        lo = lo.emit(ir_alloc(dst_reg, lo.aggregate_storage_bytes(slot_count)))
+        var i: i64 = 0
+        while i < slot_count && i < 64 {
+            let pos = lo.struct_layout_field_pos(type_name, i)
+            let fname = lo.struct_layout_pos_field_name(pos)
+            let pair_slot = lo.fresh_reg()
+            lo = pair_slot.0
+            let slot_reg = pair_slot.1
+            lo = lo.emit(ir_field_get(slot_reg, src_reg, i, fname))
+            lo = lo.emit(ir_field_set(dst_reg, i, slot_reg, fname))
+            let arr_len = lo.struct_layout_pos_array_len(pos)
+            var nested_name = ir_empty_name()
+            var nested_slots: i64 = 0 - 1
+            if arr_len <= 0 && depth < lo.struct_deep_copy_max_depth() {
+                nested_name = lo.struct_layout_pos_named_type(pos)
+                nested_slots = lo.nested_struct_field_slot_count(nested_name)
+            }
+            if arr_len > 0 || nested_slots > 0 {
+                let pair_zero = lo.emit_i64_const(0)
+                lo = pair_zero.0
+                let zero_reg = pair_zero.1
+                let pair_cond = lo.fresh_reg()
+                lo = pair_cond.0
+                let cond_reg = pair_cond.1
+                lo = lo.emit(ir_binop(cond_reg, slot_reg, BinaryOp::OpNe, zero_reg))
+                let pair_skip = lo.fresh_label()
+                lo = pair_skip.0
+                let skip_label = pair_skip.1
+                lo = lo.emit(ir_branch_false(cond_reg, skip_label))
+                if arr_len > 0 {
+                    // is_float == 2 is the registered marker for an array-of-f64
+                    // field. Marking the fresh handle float here reproduces exactly
+                    // what the struct LITERAL does for the same field:
+                    // lower_array_literal_expr_ref marks the handle, then
+                    // lower_struct_fields_ref field_sets it, which propagates the
+                    // float class to the destination field.
+                    let elem_is_float = lo.struct_layout_pos_is_float(pos) == 2
+                    let arr_pair = lo.emit_fixed_array_value_copy(slot_reg, arr_len, elem_is_float)
+                    lo = arr_pair.0
+                    lo = lo.emit(ir_field_set(dst_reg, i, arr_pair.1, fname))
+                } else {
+                    let sub_pair = lo.emit_struct_value_copy_deep(slot_reg, nested_name, nested_slots, depth + 1)
+                    lo = sub_pair.0
+                    lo = lo.emit(ir_field_set(dst_reg, i, sub_pair.1, fname))
+                }
+                lo = lo.emit(ir_label(skip_label))
+            }
             i = i + 1
         }
         (lo, dst_reg)
@@ -8508,6 +8779,10 @@ impl Lowerer {
                             // element type name empty (method dispatch falls back to the
                             // float/i64 heuristic, matching prior behavior).
                             elem_type_name: ir_empty_name(),
+                            // #1479: likewise no declared type here, so the aggregate
+                            // shape is UNKNOWN and the copy stays flat for this entry.
+                            word_scalar_array_len: 0,
+                            named_type_name: ir_empty_name(),
                         }
                         lay_entry.field_count = fc + 1
                         (*lo.struct_layouts).entries[layout_idx as usize] = lay_entry
@@ -8614,6 +8889,10 @@ impl Lowerer {
                             // is inert for them; field_is_int_* below tests `== 3`.
                             is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else if lower_type_expr_is_integer(&(*list).head.ty) { 3 } else { 0 },
                             elem_type_name: lower_type_expr_array_elem_name(&(*list).head.ty),
+                            // #1479: shape of an AGGREGATE field, so a struct copy can allocate
+                            // fresh backing storage for it instead of sharing the handle.
+                            word_scalar_array_len: lower_type_expr_word_scalar_array_len(&(*list).head.ty),
+                            named_type_name: lower_type_expr_named_type_name(&(*list).head.ty),
                         }
                         lay_entry.field_count = fc + 1
                         (*lo.struct_layouts).entries[layout_idx as usize] = lay_entry
@@ -10137,17 +10416,35 @@ impl Lowerer {
                         // else-arm with a length but no word-scalar element) on the old
                         // path: their element count, not a struct slot count, governs.
                         //
-                        // BOUNDARY: the copy is flat. Madaros lays a struct out as
-                        // count_struct_fields * 8 with an array-typed field held as a
-                        // HANDLE (lower_struct_literal_expr_ref), whereas lean_single
-                        // inlines it (struct_like_nslots = st_total_size/8). So for
-                        // `struct S { arr: [i64;4] }`, `var s2 = s1; s2.arr[0] = ...` is
-                        // still observed through s1. Fixing that needs the struct layout
-                        // to become inline, which is a representation change, not a
-                        // copy-site change.
+                        // #1479: the copy is no longer flat. Madaros still lays a
+                        // struct out as count_struct_fields * 8 with an array-typed
+                        // field held as a HANDLE (lower_struct_literal_expr_ref) where
+                        // lean_single inlines it (struct_like_nslots = st_total_size/8),
+                        // so `struct S { arr: [i64;4] }` + `s2.arr[0] = ...` USED to be
+                        // observed through s1. Rather than change the representation,
+                        // emit_struct_value_copy_deep allocates fresh backing storage for
+                        // each aggregate FIELD and copies its contents.
+                        //
+                        // REMAINING BOUNDARY: an array-of-struct field (`[Inner; N]`).
+                        // Copying the array would give fresh element SLOTS whose element
+                        // handles still alias — a half-fix, and half-fixes in aliasing are
+                        // how a new miscompile class gets born. Those fields keep the
+                        // shared handle and are reported as still broken, consistent with
+                        // the #1475 carve-out for `[Struct;N]` LOCALS.
                         let st_name = lo.lookup_local_struct_type((*rhs_ident).name)
                         let slot_count = lo.struct_layout_slot_count(st_name)
-                        let struct_copy_pair = lo.emit_struct_value_copy(reg, st_name, slot_count)
+                        // Budget the deep copy BEFORE emitting any of it. `emit` turns an
+                        // overrun past IR_MAX_INSTRS into a lowering error, so a struct
+                        // whose aggregate fields will not fit degrades to the #1475 flat
+                        // copy — strictly the previous behaviour — instead of breaking a
+                        // build the user did not ask us to break.
+                        let deep_cost = lo.struct_deep_copy_cost(st_name, slot_count, 0)
+                        let deep_room = IR_MAX_INSTRS - lo.struct_deep_copy_instr_headroom() - lo.current_func.instr_count
+                        let struct_copy_pair = if deep_cost <= deep_room {
+                            lo.emit_struct_value_copy_deep(reg, st_name, slot_count, 0)
+                        } else {
+                            lo.emit_struct_value_copy(reg, st_name, slot_count)
+                        }
                         lo = struct_copy_pair.0
                         bind_reg = struct_copy_pair.1
                     } else {
