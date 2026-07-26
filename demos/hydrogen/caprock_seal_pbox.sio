@@ -1,0 +1,187 @@
+// demos/hydrogen/caprock_seal_pbox.sio
+//
+// Caprock capillary sealing integrity for underground hydrogen storage (UHS)
+// with a P-BOX — separating aleatory scatter from epistemic ignorance —
+// plus a value-of-information statement, all in one deterministic run.
+//
+// Written for Dr. Emmanuel Stamatakis (NCSR Demokritos, H2Lab), following his
+// most recent paper: "A Review of Caprock Integrity in Underground Hydrogen
+// Storage Sites" (Hydrogen 6(4):91, 2025) — which identifies wettability,
+// interfacial tension and diffusion as the sealing controls, and notes how
+// scarce and conflicting H2 contact-angle measurements still are.
+//
+// Physics (Young–Laplace breakthrough pressure of the caprock):
+//     P_c = 2·γ·cos(θ) / r
+//   γ : H2–brine interfacial tension  ~ N(70, 5) mN/m        (aleatory)
+//   r : pore-throat radius, shale     ~ lognormal(median 15 nm, σ_log 0.5)
+//                                                              (aleatory)
+//   θ : H2/brine/rock contact angle   ∈ [10°, 40°] — INTERVAL, not Gaussian:
+//       the literature reports few, mutually inconsistent values, so θ is
+//       epistemic. Treating it as a Gaussian would be a category error.
+// Sealing criterion: P_c ≥ Δρ·g·h for a target column h = 800 m
+// (Δρ ≈ 950 kg/m³ brine–H2 density contrast).
+//
+// Outputs:
+//   1. GUM at θ = 25° (what a standard analysis would report)
+//   2. Monte Carlo per θ scenario (aleatory truth at fixed θ)
+//   3. The p-box: reliability ∈ [P_lo, P_hi] — the WIDTH is the ignorance
+//   4. Value of information: narrow θ to [20°, 30°] (a ±5° measurement
+//      campaign) and watch the p-box width collapse 3x.
+
+// ─── pure-Sounio math (runs on every engine) ───
+
+fn mh_sqrt(x: f64) -> f64 with Mut {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 30 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn mh_exp(x: f64) -> f64 with Mut, Div {
+    if x > 700.0 { return 1.0e200 }
+    if x < 0.0 - 700.0 { return 0.0 }
+    var kf = x / 0.6931471805599453
+    var k = kf as i64
+    if kf < 0.0 {
+        if kf != (k as f64) { k = k - 1 }
+    }
+    let r = x - (k as f64) * 0.6931471805599453
+    var s = 1.0
+    var term = 1.0
+    var n: i64 = 1
+    while n < 25 { term = term * r / (n as f64); s = s + term; n = n + 1 }
+    var result = s
+    if k >= 0 {
+        var i: i64 = 0
+        while i < k { result = result * 2.0; i = i + 1 }
+    } else {
+        var i: i64 = 0
+        while i < (0 - k) { result = result / 2.0; i = i + 1 }
+    }
+    result
+}
+
+// cos for small |x| (θ ∈ [10°, 40°] → x ∈ [0.17, 0.70] rad): Taylor to x^6,
+// worst-case error ~1.4e-6 — far below the physics uncertainty.
+fn mh_cos(x: f64) -> f64 {
+    let x2 = x * x
+    1.0 - x2 / 2.0 + x2 * x2 / 24.0 - x2 * x2 * x2 / 720.0
+}
+
+// ─── PRNG (xorshift, deterministic seed) ───
+
+var RNG_A: i64 = 0
+var RNG_B: i64 = 0
+
+fn rng_init() with Mut {
+    RNG_A = 314159265
+    RNG_B = 271828182
+}
+
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A
+    let y = RNG_B
+    RNG_A = y
+    x = x ^ (x << 23)
+    x = x ^ (x >> 17)
+    x = x ^ (y ^ (y >> 26))
+    RNG_B = x
+    let r = x + y
+    if r < 0 { 0 - r } else { r }
+}
+
+fn rand_uniform() -> f64 with Mut, Div {
+    let r = rng_next()
+    (r % 10000) as f64 / 10000.0
+}
+
+fn rand_normal() -> f64 with Mut, Div {
+    var sum = 0.0
+    var j = 0
+    while j < 12 { sum = sum + rand_uniform(); j = j + 1 }
+    sum - 6.0
+}
+
+fn rand_gaussian(mu: f64, sigma: f64) -> f64 with Mut, Div {
+    mu + sigma * rand_normal()
+}
+
+// ─── physics: one Monte Carlo scenario at fixed contact angle ───
+// returns sealing reliability [%] for an 800 m column; prints P_c stats.
+// ln(15e-9 m) = -18.0152146 (median pore-throat radius)
+
+fn seal_mc(theta_deg: f64, n: i64) -> f64 with IO, Mut, Div {
+    let theta = theta_deg * 3.141592653589793 / 180.0
+    let cth = mh_cos(theta)
+    let threshold = 950.0 * 9.81 * 800.0    // Pa needed to seal 800 m
+    var i: i64 = 0
+    var hits: i64 = 0
+    var sum = 0.0
+    var sumsq = 0.0
+    while i < n {
+        let gamma = rand_gaussian(70.0, 5.0) / 1000.0         // N/m
+        let r = mh_exp(rand_gaussian(0.0 - 18.0152146, 0.5))  // m
+        let pc = 2.0 * gamma * cth / r                        // Pa
+        sum = sum + pc
+        sumsq = sumsq + pc * pc
+        if pc >= threshold { hits = hits + 1 }
+        i = i + 1
+    }
+    let mean = sum / (n as f64) / 1000000.0
+    let sd = mh_sqrt(sumsq / (n as f64) - (sum / (n as f64)) * (sum / (n as f64))) / 1000000.0
+    let rel = 100.0 * (hits as f64) / (n as f64)
+    print("theta = "); println(theta_deg)
+    print("   P_c mean [MPa]: "); println(mean)
+    print("   P_c std  [MPa]: "); println(sd)
+    print("   seal reliability [%]: "); println(rel)
+    rel
+}
+
+// ─── main ───
+
+fn main() -> i32 with IO, Mut, Div {
+    print("=== Caprock sealing integrity — GUM / MC / p-box / VoI ===")
+    println("")
+
+    // 1. GUM at theta = 25 deg (the standard single-number analysis)
+    let c25 = mh_cos(25.0 * 3.141592653589793 / 180.0)
+    let pc_nom = 2.0 * 0.070 * c25 / 0.000000015 / 1000000.0
+    let s_ln = mh_sqrt((5.0 / 70.0) * (5.0 / 70.0) + 0.25)
+    print("GUM (theta=25):   P_c [MPa]: "); println(pc_nom)
+    print("                  sigma [MPa]: "); println(pc_nom * s_ln)
+    println("")
+
+    // 2.+3. p-box: aleatory MC at each end of the epistemic theta interval
+    let n: i64 = 10000
+    rng_init()
+    let rel_lo_theta = seal_mc(10.0, n)   // most water-wet -> best seal
+    let rel_mid = seal_mc(25.0, n)
+    let rel_hi_theta = seal_mc(40.0, n)   // least water-wet -> worst seal
+    println("")
+    print("P-BOX on seal reliability (800 m column):")
+    println("")
+    print("   [worst theta=40]  ...  [best theta=10]  [%]:")
+    println("")
+    println(rel_hi_theta)
+    println(rel_lo_theta)
+    print("   epistemic width [pp]: "); println(rel_lo_theta - rel_hi_theta)
+    println("")
+
+    // 4. value of information: a ±5 deg contact-angle campaign
+    print("VoI: narrow theta to [20, 30] deg (one careful measurement):")
+    println("")
+    let rel20 = seal_mc(20.0, n)
+    let rel30 = seal_mc(30.0, n)
+    print("   new epistemic width [pp]: "); println(rel20 - rel30)
+    println("")
+
+    print("The ~20-point p-box width is PURE EPISTEMIC IGNORANCE about")
+    println("")
+    print("wettability — not physics scatter. One +-5 deg contact-angle")
+    println("")
+    print("campaign cuts it ~3x. That is the experiment to fund next.")
+    println("")
+    println("CAPROCK_SEAL_PBOX_OK")
+    0
+}
