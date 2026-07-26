@@ -41,7 +41,7 @@ require_path() {
 
 [[ -d "$REPO/.git" || -f "$REPO/.git" ]] || fail "REPO is not a Git worktree: $REPO"
 [[ -z "$(git -C "$REPO" status --porcelain)" ]] || fail 'source checkout is dirty; commit the candidate before source-fresh Slurm evidence'
-SOURCE_COMMIT="$(git -C "$REPO" rev-parse "$SOURCE_REF")"
+SOURCE_COMMIT="$(git -C "$REPO" rev-parse "${SOURCE_REF}^{commit}")"
 SOURCE_TREE="$(git -C "$REPO" rev-parse "${SOURCE_COMMIT}^{tree}")"
 
 for path in \
