@@ -39,7 +39,7 @@ assert_direct_raw_log() {
   local log="$1"
 
   if grep -Eiq \
-    'lean_single|source=fallback|native_prebundle:|SELFHOST=fallback|compatibility fallback|multimodule native thin-link compilation failed|imported_simple_ir_emit_failed' \
+    'lean_single|falling back to the legacy|native_prebundle:|SELFHOST=fallback|compatibility fallback|multimodule native thin-link compilation failed|imported_simple_ir_emit_failed' \
     "$log"; then
     cat "$log" >&2
     fail "direct raw #901 compile observed a forbidden fallback or historical scale failure: $log"
@@ -94,6 +94,8 @@ if ! env \
   -u SOUNIO_MADAROS_BIN \
   -u SOUNIO_SOUC_ENGINE \
   -u SOUNIO_ENABLE_COMPACT_IMPORTED_IR \
+  -u SOUNIO_MADAROS_DEP_MERGE \
+  -u SOUNIO_INTO_ACC_NO_RESET \
   -u SOUC_BIN \
   -u SOUNIO_SOUC_BIN \
   SOUNIO_BUILD_LOCK="$WORK/souc-build.lock" \
@@ -109,6 +111,8 @@ if ! env \
   -u SOUNIO_MADAROS_BIN \
   -u SOUNIO_SOUC_ENGINE \
   -u SOUNIO_ENABLE_COMPACT_IMPORTED_IR \
+  -u SOUNIO_MADAROS_DEP_MERGE \
+  -u SOUNIO_INTO_ACC_NO_RESET \
   SOUC_BIN="$STAGE1" \
   SOUNIO_BUILD_LOCK="$WORK/souc-build.lock" \
   SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib" \
@@ -123,6 +127,8 @@ if ! env \
   -u SOUNIO_MADAROS_BIN \
   -u SOUNIO_SOUC_ENGINE \
   -u SOUNIO_ENABLE_COMPACT_IMPORTED_IR \
+  -u SOUNIO_MADAROS_DEP_MERGE \
+  -u SOUNIO_INTO_ACC_NO_RESET \
   SOUC_BIN="$STAGE2" \
   SOUNIO_BUILD_LOCK="$WORK/souc-build.lock" \
   SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib" \
@@ -166,6 +172,8 @@ run_direct_case() {
       -u SOUNIO_MADAROS_BIN \
       -u SOUNIO_SOUC_ENGINE \
       -u SOUNIO_ENABLE_COMPACT_IMPORTED_IR \
+      -u SOUNIO_MADAROS_DEP_MERGE \
+      -u SOUNIO_INTO_ACC_NO_RESET \
       -u SOUC_BIN \
       -u SOUNIO_SOUC_BIN \
       SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib" \
@@ -197,6 +205,51 @@ TEXTBOOK_MERGED="$CASE_MERGED"
 run_direct_case stdlib-driver "$DRIVER" 'PROB_STDLIB_OK'
 DRIVER_MERGED="$CASE_MERGED"
 
+run_public_default_case() {
+  local source="$1"
+  local expected="$2"
+  local case_dir="$WORK/public-default"
+  local elf="$case_dir/public-default.elf"
+  local compile_log="$case_dir/compile.log"
+  local run_log="$case_dir/run.log"
+
+  mkdir -p "$case_dir"
+  if ! (
+    cd "$case_dir"
+    exec env \
+      -u SOUNIO_MADAROS_BIN \
+      -u SOUNIO_ENABLE_COMPACT_IMPORTED_IR \
+      -u SOUNIO_MADAROS_DEP_MERGE \
+      -u SOUNIO_INTO_ACC_NO_RESET \
+      -u SOUC_BIN \
+      -u SOUNIO_SOUC_BIN \
+      MADAROS_RAW_BIN="$STAGE3" \
+      SOUNIO_SOUC_ENGINE=madaros \
+      SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib" \
+      "$ROOT_DIR/bin/souc" compile "$source" -o "$elf"
+  ) >"$compile_log" 2>&1; then
+    cat "$compile_log" >&2 || true
+    fail 'public default Madaros compile failed for the #901 acceptance probe'
+  fi
+  assert_direct_raw_log "$compile_log"
+  [[ -s "$elf" ]] || fail 'public default Madaros compile emitted no ELF for the #901 acceptance probe'
+  [[ "$(head -c4 "$elf" 2>/dev/null)" == $'\x7fELF' ]] || fail 'public default Madaros output is not an ELF for the #901 acceptance probe'
+  chmod +x "$elf"
+  if ! "$elf" >"$run_log" 2>&1; then
+    cat "$run_log" >&2 || true
+    fail 'public default Madaros ELF exited nonzero for the #901 acceptance probe'
+  fi
+  grep -Eq "$expected" "$run_log" || {
+    cat "$run_log" >&2 || true
+    fail "public default Madaros stdout missed the #901 witness: /$expected/"
+  }
+  CASE_MERGED="$(awk '/Merged IR:/{n=$NF} END{print n}' "$compile_log" 2>/dev/null || true)"
+  printf '[madaros-issue901-scale-source-fresh] PASS: public-default merged_ir=%s\n' "${CASE_MERGED:-unknown}"
+}
+
+run_public_default_case "$PROBE" 'm=5(\.0+)?'
+PUBLIC_DEFAULT_MERGED="$CASE_MERGED"
+
 require_clean_source
 [[ "$(git rev-parse HEAD)" == "$SOURCE_HEAD" ]] || fail 'source HEAD changed during direct raw scale acceptance'
 [[ "$(git rev-parse 'HEAD^{tree}')" == "$SOURCE_TREE" ]] || fail 'source tree changed during direct raw scale acceptance'
@@ -218,12 +271,17 @@ printf 'operational_fixed_point\tsha256-stage2-equals-stage3\n' >>"$RECEIPT"
 printf 'acceptance_mode\tdirect-raw-elf-no-wrapper\n' >>"$RECEIPT"
 printf 'engine_fallback\t0\n' >>"$RECEIPT"
 printf 'compact_imported_ir\t0\n' >>"$RECEIPT"
+printf 'default_merge_mode\tinto-acc\n' >>"$RECEIPT"
+printf 'target_resolution\tauto-x86_64-linux\n' >>"$RECEIPT"
 printf 'acceptance_probe\tm=5.000000\n' >>"$RECEIPT"
 printf 'acceptance_probe_merged_ir\t%s\n' "${PROBE_MERGED:-unknown}" >>"$RECEIPT"
 printf 'textbook_probe\tPROB_TEXTBOOK_OK\n' >>"$RECEIPT"
 printf 'textbook_probe_merged_ir\t%s\n' "${TEXTBOOK_MERGED:-unknown}" >>"$RECEIPT"
 printf 'stdlib_driver\tPROB_STDLIB_OK\n' >>"$RECEIPT"
 printf 'stdlib_driver_merged_ir\t%s\n' "${DRIVER_MERGED:-unknown}" >>"$RECEIPT"
+printf 'public_default_route\tbin/souc-compile-pinned-to-stage3\n' >>"$RECEIPT"
+printf 'public_default_probe\tm=5.000000\n' >>"$RECEIPT"
+printf 'public_default_probe_merged_ir\t%s\n' "${PUBLIC_DEFAULT_MERGED:-unknown}" >>"$RECEIPT"
 
 cat "$RECEIPT"
 echo "[madaros-issue901-scale-source-fresh] PASS: source_head=$SOURCE_HEAD stage3_sha256=$STAGE3_SHA256 receipt=$RECEIPT"
