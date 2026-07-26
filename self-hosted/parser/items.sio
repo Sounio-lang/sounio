@@ -4,7 +4,7 @@
 
 use parser::ast::*
 use lexer::token::*
-use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, pt_read_kind_code, parser_peek_ahead, parser_advance, mk_expr, error_expr, dummy_type_expr, parser_take_expr_box}
+use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, pt_read_kind_code, pt_read_start, pt_read_end, parser_peek_ahead, parser_advance, mk_expr, error_expr, dummy_type_expr, parser_take_expr_box}
 use parser::types::*
 use parser::exprs::*
 use parser::stmts::*
@@ -5631,6 +5631,10 @@ fn parse_claim_item(p: Parser, visibility: Visibility) -> (Parser, Item) with Mu
 
     var decl = empty_claim_decl()
     decl.name = name
+    // Feed the text-preserving registry directly from the parser local (the
+    // ClaimDecl storage path is lossy for nested Names; see
+    // ast_claim_note_field_text).
+    ast_claim_note_name_text(name)
 
     while pa.peek() != TokenKind::RBrace && pa.peek() != TokenKind::Eof {
         while pa.peek() == TokenKind::Semi || pa.peek() == TokenKind::Newline || pa.peek() == TokenKind::Comma {
@@ -5648,9 +5652,11 @@ fn parse_claim_item(p: Parser, visibility: Visibility) -> (Parser, Item) with Mu
             let field_name = pa.current_name()
             pa = pa.advance()
             pa = pa.expect(TokenKind::Eq)
+            let vstart = pt_read_start(pa.pos)
 
             var fv = empty_claim_field()
             fv.name = field_name
+            var fv_ok = true
             let vk = pa.peek()
             if vk == TokenKind::StringLit {
                 fv.value = pa.current_name()
@@ -5671,11 +5677,20 @@ fn parse_claim_item(p: Parser, visibility: Visibility) -> (Parser, Item) with Mu
                 fv.value = val_pair.1
                 fv.kind = CLAIM_VALUE_PATH
             } else {
+                fv_ok = false
                 pa.had_error = true
                 pa.error_count = pa.error_count + 1
                 pa = pa.advance()
             }
-            if decl.n_fields < 16 {
+            let vend = pt_read_end(pa.pos - 1)
+            if fv_ok && decl.n_fields < 16 {
+                // Text-preserving registry (self-falsifying compiler rung):
+                // feed the field name and the value's source span directly
+                // from parser state. Names nested in ClaimDecl do not survive
+                // the struct store path (values arrive truncated), so the
+                // value text is recovered by slicing the source file.
+                ast_claim_note_field_name(decl.n_fields as i64, field_name)
+                ast_claim_note_field_span(decl.n_fields as i64, vstart, vend)
                 decl.fields[decl.n_fields as usize] = fv
                 decl.n_fields = decl.n_fields + 1
             }
