@@ -12,12 +12,23 @@
 module particle_physics::nonunitary_amp
 
 use epistemic::knowledge::{
-    Epistemic, ep_scale, ep_mul, ep_square, ep_val,
+    Epistemic, ep_scale, ep_mul, ep_square, ep_val, ep_certain,
 }
 use particle_physics::sm_params::{coupling_g, sin2_theta_w}
 use particle_physics::vertex::{nc_coupling_electron, nc_coupling_muon}
 use particle_physics::nonunitary::{
     NonUnitary, NU_Z, nu_z_propagator,
+}
+
+// Madaros multimodule: raw f64 returns from vertex (and f64*f64 of those values)
+// are not float-typed in native codegen — ga_e*ga_e → 0, 0.0-ga_e → garbage.
+// Route squares through Epistemic ep_square so the float path is forced.
+fn coupling_sq_sum(gv: f64, ga: f64) -> f64 with Mut, Div, Panic {
+    let gv_ep = ep_certain(gv)
+    let ga_ep = ep_certain(ga)
+    let gv2 = ep_square(&gv_ep)
+    let ga2 = ep_square(&ga_ep)
+    ep_val(&gv2) + ep_val(&ga2)
 }
 
 /// e⁺e⁻ → Z → μ⁺μ⁻ amplitude squared, wrapped in NonUnitary.
@@ -31,17 +42,21 @@ pub fn eemm_z_amplitude_nu(s: f64, gamma_z: f64) -> NonUnitary with Mut, Div, Pa
     let cw4 = cw_sq * cw_sq
     let (gv_e, ga_e) = nc_coupling_electron()
     let (gv_m, ga_m) = nc_coupling_muon()
-    let c_e = gv_e * gv_e + ga_e * ga_e
-    let c_m = gv_m * gv_m + ga_m * ga_m
+    let c_e = coupling_sq_sum(gv_e, ga_e)
+    let c_m = coupling_sq_sum(gv_m, ga_m)
     let g2 = ep_square(&g)
     let g4 = ep_square(&g2)
     let num = ep_scale(&g4, c_e * c_m / cw4)
     let prop = nu_z_propagator(s, gamma_z)
-    let combined = ep_mul(&prop.amp_sq, &num)
+    // Local bind of prop fields — avoid nested &prop.amp_sq into ep_mul.
+    let amp_sq = prop.amp_sq
+    let denom_re = prop.denom_re
+    let denom_im = prop.denom_im
+    let combined = ep_mul(&amp_sq, &num)
     NonUnitary {
         amp_sq: combined,
-        denom_re: prop.denom_re,
-        denom_im: prop.denom_im,
+        denom_re: denom_re,
+        denom_im: denom_im,
         particle: NU_Z(),
     }
 }

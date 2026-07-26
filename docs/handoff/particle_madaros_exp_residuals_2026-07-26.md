@@ -37,7 +37,8 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.handoff.partic
 | `ep_gate` field-if | stdlib `ep_i64_ge` (still needs native fix) |
 | `pb_is_credible` / `ck_is_credible` | same call-arg pattern |
 | Thin EXP10 physics vertical | remains (IR size) |
-| Vertex/amplitude on full EXP123 | remains (SEGV residual) |
+| Vertex/amplitude on full EXP123 | **partial close** EXP13 — `eemm_z_amplitude_nu` Madaros-safe via ep_square on vertex f64 (raw f64*f64 of imported negatives was 0) |
+
 
 Compiler residual: i64 field-if mis-branch in imported native codegen.
 
