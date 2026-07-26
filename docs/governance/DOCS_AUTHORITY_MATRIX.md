@@ -268,6 +268,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.competitive-position-2026 | repo_only | docs/COMPETITIVE_POSITION_2026.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.compiler.async-design | repo_only | docs/compiler/ASYNC_DESIGN.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.compiler.closure-type-theory | repo_only | docs/compiler/CLOSURE_TYPE_THEORY.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.compiler.compiler-plan-consolidated | repo_only | docs/compiler/COMPILER_PLAN_CONSOLIDATED.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.compiler.confidence-effect-design | repo_only | docs/compiler/CONFIDENCE_EFFECT_DESIGN.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.compiler.debugging-guide | repo_only | docs/compiler/DEBUGGING_GUIDE.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.compiler.effect-dispatch-integration | historical | docs/compiler/EFFECT_DISPATCH_INTEGRATION.md | - | A4 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
