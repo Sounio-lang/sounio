@@ -402,6 +402,12 @@ pub struct IrLowerBoxResult {
 
 var LOWER_MONOLITHIC_PUBLIC_PROBE_TRACE: bool = false
 
+// vreg holding the live lane counter while a `kernel fn` body is lowered inside
+// the CPU lane loop; -1 outside a kernel. `gpu_thread_id_x()` lowers to a copy of
+// this instead of a call to a name that binds to nothing (which left its dst vreg
+// unwritten, i.e. reading 0). See lowerer_lower_fn_mut and the ExprCall lowering.
+var LOWER_KERNEL_TID_REG: i64 = 0 - 1
+
 pub fn lower_monolithic_public_probe_trace_set(enabled: bool) with Mut {
     LOWER_MONOLITHIC_PUBLIC_PROBE_TRACE = enabled
 }
@@ -3405,6 +3411,10 @@ fn lowerer_lower_fn_item_mut(
     }
 
     (*lo).scope_depth = (*lo).scope_depth + 1
+    // Parameters are assigned consecutive vregs by lowerer_lower_fn_params_mut,
+    // which calls lowerer_fresh_reg_mut once per parameter in declaration order.
+    // Capturing the counter here lets parameter i be addressed as base + i.
+    let kernel_param_reg_base = (*(*lo).current_func).reg_count
     if ir_param_list_count_ref(&fd.params) > 0 {
         lowerer_lower_fn_params_mut(lo, &fd.params)
     }
@@ -3416,9 +3426,59 @@ fn lowerer_lower_fn_item_mut(
         print("\n")
     }
 
+    // ---- kernel CPU lane loop (#1504) ----
+    // A `kernel fn` on a CPU host must run its body once per lane, not once with
+    // every GPU intrinsic reading 0 — the latter is a silent wrong answer, correct
+    // at index 0 and zero everywhere else. lean_single has emitted this fallback
+    // in x86 since lean_single.sio:29335; expressing it here in the IR gives the
+    // Madaros path the same semantics without touching a backend.
+    //
+    //   tid = 0
+    // top:
+    //   if !(tid < extent) goto end
+    //   <body>            // gpu_thread_id_x() lowers to a copy of tid
+    //   tid = tid + 1
+    //   goto top
+    // end:
+    var kernel_tid_reg: i64 = 0 - 1
+    var kernel_top_label: i64 = 0 - 1
+    var kernel_end_label: i64 = 0 - 1
+    if fd.is_kernel {
+        let kernel_extent_idx = lower_kernel_extent_param_index(&fd.params)
+        if kernel_extent_idx >= 0 {
+            let kernel_extent_reg = kernel_param_reg_base + kernel_extent_idx
+            kernel_tid_reg = lowerer_fresh_reg_mut(lo)
+            (*lo) = (*lo).emit(ir_load_imm(kernel_tid_reg, 0))
+            let ktop_pair = (*lo).fresh_label()
+            (*lo) = ktop_pair.0
+            kernel_top_label = ktop_pair.1
+            let kend_pair = (*lo).fresh_label()
+            (*lo) = kend_pair.0
+            kernel_end_label = kend_pair.1
+            (*lo) = (*lo).emit(ir_label(kernel_top_label))
+            let kcond_reg = lowerer_fresh_reg_mut(lo)
+            (*lo) = (*lo).emit(ir_binop(kcond_reg, kernel_tid_reg, BinaryOp::OpLt, kernel_extent_reg))
+            (*lo) = (*lo).emit(ir_branch_false(kcond_reg, kernel_end_label))
+            LOWER_KERNEL_TID_REG = kernel_tid_reg
+        }
+    }
+
     let bpair = (*lo).lower_block_ref(&fd.body)
     (*lo) = bpair.0
     let result_reg = bpair.1
+
+    if kernel_tid_reg >= 0 {
+        LOWER_KERNEL_TID_REG = 0 - 1
+        let kone_pair = (*lo).emit_i64_const(1)
+        (*lo) = kone_pair.0
+        let kone_reg = kone_pair.1
+        let knext_reg = lowerer_fresh_reg_mut(lo)
+        (*lo) = (*lo).emit(ir_binop(knext_reg, kernel_tid_reg, BinaryOp::OpAdd, kone_reg))
+        (*lo) = (*lo).emit(ir_copy(kernel_tid_reg, knext_reg))
+        (*lo) = (*lo).emit(ir_jump(kernel_top_label))
+        (*lo) = (*lo).emit(ir_label(kernel_end_label))
+    }
+    // ---- end kernel CPU lane loop ----
     if lower_live_diag_enabled() {
         print("lower_live: fn_after_block name=")
         print(str_from_bytes(name.buf, name.len))
@@ -3954,6 +4014,29 @@ fn lower_param_struct_type_name(ty: &TypeExpr) -> Name with Mut, Panic, Div {
         return lower_opt_type_named_name(&(*ty).inner)
     }
     ir_empty_name()
+}
+
+// Index of a kernel's launch-extent parameter: the first `i64` parameter.
+// Mirrors lean_single's kernel_extent_slot discovery (lean_single.sio:29210) so
+// both engines agree on which argument bounds the lane loop. -1 when the kernel
+// has no i64 parameter, in which case there is no extent and the body is lowered
+// unwrapped exactly as before.
+fn lower_kernel_extent_param_index(params: &Option<Box<ParamList>>) -> i64 with Mut, Panic, Div {
+    var current = params
+    var idx: i64 = 0
+    while true {
+        match *current {
+            Some(list) => {
+                if name_eq(lower_param_struct_type_name(&(*list).head.ty), make_name("i64")) {
+                    return idx
+                }
+                idx = idx + 1
+                current = &(*list).tail
+            }
+            _ => return 0 - 1,
+        }
+    }
+    0 - 1
 }
 
 fn lower_type_expr_is_ref_like(ty: &TypeExpr) -> bool {
@@ -12247,6 +12330,16 @@ impl Lowerer {
         let pair_d = lo2.fresh_reg()
         let lo3 = pair_d.0
         let dst = pair_d.1
+        // gpu_thread_id_x() inside a kernel lane loop is the loop counter, not a
+        // call. resolve.sio:1059 allowlists the 12 GPU intrinsics as implicit
+        // builtins that are never bound, so the emitted call names nothing and
+        // leaves `dst` unwritten — which reads as 0 and is why every lane looked
+        // like lane 0. Outside a kernel LOWER_KERNEL_TID_REG is -1 and this is
+        // skipped, preserving the previous behaviour for the other 11 intrinsics.
+        if LOWER_KERNEL_TID_REG >= 0 && name_eq(callee_name, make_name("gpu_thread_id_x")) {
+            let lo_tid = lo3.emit(ir_copy(dst, LOWER_KERNEL_TID_REG))
+            return (lo_tid, dst)
+        }
         let callee_strat_ext: i64 = if fn_id >= 0 && fn_id < (*lo3.module).fn_count { (*lo3.module).functions[fn_id as usize].compile_strategy } else { 0 }
         if callee_strat_ext == 6 {
             let lo_ext = lo3.emit(ir_call_extern(dst, callee_name, args, argc))
