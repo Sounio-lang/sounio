@@ -144,21 +144,37 @@ REPO=\$ROOT/repo
 RESULT_DIR=$RESULT_DIR
 ARCHIVE=$REMOTE_ARCHIVE
 ARCHIVE_SHA256=$ARCHIVE_SHA256
-rm -rf "\$ROOT"
-mkdir -p "\$REPO"
-
-actual_sha=\$(sha256sum "\$ARCHIVE" | awk '{print \$1}')
-if [[ "\$actual_sha" != "\$ARCHIVE_SHA256" ]]; then
-  mkdir -p "\$RESULT_DIR"
-  printf 'exit_code\\t125\\nstatus\\tFAIL\\nclass\\tharness-routing\\nreason\\tarchive-sha-mismatch\\n' >"\$RESULT_DIR/status.tsv"
+write_status() {
+  local code="\$1"
+  local status="\$2"
+  local class="\$3"
+  local reason="\${4:-}"
+  {
+    printf 'exit_code\\t%s\\n' "\$code"
+    printf 'status\\t%s\\n' "\$status"
+    printf 'class\\t%s\\n' "\$class"
+    [[ -z "\$reason" ]] || printf 'reason\\t%s\\n' "\$reason"
+  } >"\$RESULT_DIR/status.tsv" || true
+}
+setup_fail() {
+  write_status 125 FAIL harness-routing "\$1"
   exit 125
+}
+
+rm -rf "\$ROOT" || setup_fail worker-root-cleanup-failed
+mkdir -p "\$REPO" || setup_fail worker-root-create-failed
+
+actual_sha=""
+actual_sha=\$(sha256sum "\$ARCHIVE" | awk '{print \$1}') || setup_fail archive-sha-read-failed
+if [[ "\$actual_sha" != "\$ARCHIVE_SHA256" ]]; then
+  setup_fail archive-sha-mismatch
 fi
 
-tar -xzf "\$ARCHIVE" -C "\$REPO"
+tar -xzf "\$ARCHIVE" -C "\$REPO" || setup_fail archive-extract-failed
 chmod +x "\$REPO/bin/souc" "\$REPO/bin/madaros" "\$REPO/bin/souc-linux-x86_64" \\
   "\$REPO/scripts/ci/build_modular_madaros.sh" \\
   "\$REPO/scripts/ci/madaros_native_multimodule_scale_source_fresh_gate.sh" \\
-  "\$REPO/scripts/dev/souc-build-lock.sh"
+  "\$REPO/scripts/dev/souc-build-lock.sh" || setup_fail archive-permission-setup-failed
 
 {
   printf 'source_head\\t%s\\n' '$SOURCE_COMMIT'
@@ -168,7 +184,7 @@ chmod +x "\$REPO/bin/souc" "\$REPO/bin/madaros" "\$REPO/bin/souc-linux-x86_64" \
   printf 'host\\t%s\\n' "\$(hostname)"
   printf 'partition\\t%s\\n' '$PARTITION'
   printf 'resources\\tcpus=$JOB_CPUS mem=$JOB_MEM time=$JOB_TIME\\n'
-} >"\$RESULT_DIR/environment.tsv"
+} >"\$RESULT_DIR/environment.tsv" || setup_fail environment-receipt-write-failed
 
 set +e
 SOUNIO_MADAROS_ISSUE901_SCALE_SOURCE_FRESH_KEEP=1 \\
@@ -177,15 +193,19 @@ SOUNIO_MADAROS_ISSUE901_SCALE_SOURCE_FRESH_DIR="\$ROOT/gate-work" \\
 RC=\$?
 set -e
 
-cp "\$ROOT/gate.log" "\$RESULT_DIR/gate.log"
+cp "\$ROOT/gate.log" "\$RESULT_DIR/gate.log" || setup_fail gate-log-copy-failed
 if [[ -f "\$ROOT/gate-work/madaros_native_multimodule_scale_901_source_fresh_receipt.tsv" ]]; then
-  cp "\$ROOT/gate-work/madaros_native_multimodule_scale_901_source_fresh_receipt.tsv" "\$RESULT_DIR/receipt.tsv"
+  cp "\$ROOT/gate-work/madaros_native_multimodule_scale_901_source_fresh_receipt.tsv" "\$RESULT_DIR/receipt.tsv" || setup_fail gate-receipt-copy-failed
 fi
-tar -C "\$ROOT" -czf "\$RESULT_DIR/gate-work.tgz" gate-work 2>/dev/null || true
+if ! tar -C "\$ROOT" -czf "\$RESULT_DIR/gate-work.tgz" gate-work; then
+  write_status 125 FAIL harness-routing evidence-bundle-write-failed
+  rm -rf "\$ROOT"
+  exit 125
+fi
 if [[ "\$RC" -eq 0 ]]; then
-  printf 'exit_code\\t0\\nstatus\\tPASS\\nclass\\tgreen\\n' >"\$RESULT_DIR/status.tsv"
+  write_status 0 PASS green
 else
-  printf 'exit_code\\t%s\\nstatus\\tFAIL\\nclass\\tfixable-or-blocked-see-gate-log\\n' "\$RC" >"\$RESULT_DIR/status.tsv"
+  write_status "\$RC" FAIL fixable-or-blocked-see-gate-log
 fi
 rm -rf "\$ROOT"
 exit "\$RC"
