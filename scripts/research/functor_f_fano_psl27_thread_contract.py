@@ -133,6 +133,30 @@ def fano_collineation_auto():
     return None, pi
 
 
+def all_collineation_autos():
+    """All 168 GL(3,2)=PSL(2,7) Fano collineations as signed-perm octonion automorphisms."""
+    import itertools as _it
+    out = []
+    for bv in _it.product([0, 1], repeat=9):
+        M = np.array(bv).reshape(3, 3)
+        if int(round(np.linalg.det(M))) % 2 != 1:
+            continue
+        pi = {}
+        for i in range(1, 8):
+            b = np.array([(i >> k) & 1 for k in range(3)])
+            jj = M @ b % 2
+            pi[i] = int(jj[0] | (jj[1] << 1) | (jj[2] << 2))
+        for mask in range(128):
+            s = [1] + [1 if (mask >> k) & 1 == 0 else -1 for k in range(7)]
+            g = np.zeros((8, 8)); g[:, 0] = e(0, 8)
+            for i in range(1, 8):
+                g[:, i] = s[i] * e(pi[i], 8)
+            if max(np.linalg.norm(g @ mul(e(i, 8), e(j, 8), 3) - mul(g[:, i], g[:, j], 3))
+                   for i in range(8) for j in range(8)) < TOL:
+                out.append((g, pi)); break
+    return out
+
+
 def main():
     print("=" * 70)
     print("FUNCTOR F — the Fano / PSL(2,7) thread (ord-1 phi <-> ord-2 ZD <-> ord-3)")
@@ -193,15 +217,35 @@ def main():
     print(f"W4_ORD3_ON_FIBRE the ord-3 secondary op lives on these fibres (ker L_b dim {sorted(dims)}, uniform) "
           f"=> ord-1 phi, ord-2 ZD, ord-3 secondary thread one PSL(2,7) {'PASS' if w4 else 'FAIL'}")
 
+    # W5 — the FULL PSL(2,7): all 168 collineations act equivariantly (phi lines == ZD fibres)
+    # and transitively on the 7 fibres. Upgrades W3 from one generator to the whole group.
+    autos = all_collineation_autos()
+    n_auto = 0; n_equiv = 0
+    for (gg, ppi) in autos:
+        G2 = np.zeros((16, 16)); G2[:8, :8] = gg; G2[8:, 8:] = gg
+        if max(np.linalg.norm(G2 @ mul(e(i, 16), e(j, 16), 4) - mul(G2[:, i], G2[:, j], 4))
+               for i in range(16) for j in range(16)) < 1e-9:
+            n_auto += 1
+        if all(zd_line(G2 @ (e(i, 16) + e(j, 16))) == frozenset(ppi[p] for p in zd_line(e(i, 16) + e(j, 16)))
+               for (i, j) in ZD):
+            n_equiv += 1
+    L0 = sorted(PL, key=lambda x: sorted(x))[0]
+    orbit = set(frozenset(ppi[p] for p in L0) for (gg, ppi) in autos)
+    w5 = (len(autos) == 168 and n_auto == 168 and n_equiv == 168 and len(orbit) == 7)
+    print(f"W5_FULL_PSL27_TRANSITIVE |group|={len(autos)}; (g,g) in Aut(S): {n_auto}/168; "
+          f"phi-line-perm==ZD-fibre-perm: {n_equiv}/168; orbit on fibres={len(orbit)} (7=transitive) "
+          f"{'PASS' if w5 else 'FAIL'}")
+
     print("=" * 70)
-    if core and w1 and w2 and w3 and w4:
+    if core and w1 and w2 and w3 and w4 and w5:
         print("FUNCTOR_F_FANO_VERDICT PSL27_THREADS_THE_TOWER")
         print("FUNCTOR_F_FANO_NOTE 42 sedenion ZD -> 7 Fano fibres (prior 168 structure); NEW: fibre-line "
               "== functor-F phi 3-form line (complement map, all 42); one explicit order-3 PSL(2,7) "
               "collineation (verified in Aut(S)) acts by the SAME pi on phi lines AND ZD fibres; so ord-1 "
               "phi, ord-2 ZD fibre, ord-3 secondary op SHARE one Fano indexing and one PSL(2,7) action "
               "(operational unification across layers, NOT a single object, NOT an identity; D3 respected); "
-              "computational evidence over 42 ZD + one generator, not a forall-PSL(2,7) proof")
+              "verified for the FULL 168-element PSL(2,7): all in Aut(S), all equivariant, transitive on "
+              "the 7 fibres (W5)")
         return 0
     print("FUNCTOR_F_FANO_VERDICT INCOMPLETE")
     return 1

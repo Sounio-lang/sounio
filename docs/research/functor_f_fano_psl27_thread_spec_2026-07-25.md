@@ -48,6 +48,7 @@ that the three layers are a single object, and **not** an identity between them 
 | `W2_FIBRE_EQ_PHI_LINE` | each `e_i + e_{8+k}` has fibre-line = the Fano line through `(i,k)` (its octonion-support is that line's complement); the **7 fibre-lines are exactly the 7 `φ` structure-constant lines** | **the new identity**: the ZD fibre index *is* the functor-F 3-form. |
 | `W3_PSL27_EQUIVARIANCE` | an explicit `PSL(2,7)` Fano collineation (a signed-permutation octonion automorphism, order 3) lifted diagonally to `Aut(𝕊)` permutes the ZD fibres by the **same `π`** it induces on the `φ` lines — verified on all 42 ZD | the symmetry is shared, not coincidental. |
 | `W4_ORD3_ON_FIBRE` | the ord-3 secondary operation sits on these fibres (`ker L_b = ker R_b = ` 4-dim, uniform) | ord-1 `φ`, ord-2 ZD, ord-3 secondary all thread one `PSL(2,7)`. |
+| `W5_FULL_PSL27_TRANSITIVE` | the **full 168-element** `PSL(2,7)` is built (all GL(3,2) collineations, sign-solved): all `(g,g) ∈ Aut(𝕊)`, all `168` act equivariantly (`φ`-line-perm == ZD-fibre-perm), and the action is **transitive** on the 7 fibres (orbit `= 7`, line-stabiliser `= 24`) | not one generator — the whole group, one transitive `PSL(2,7)` orbit. |
 
 Verdict: `FUNCTOR_F_FANO_VERDICT PSL27_THREADS_THE_TOWER`.
 
@@ -93,9 +94,10 @@ cores before use.)
 - **Not** a new proof of the 168-orbit theorem (prior work) — it threads it to `φ`.
 - **Not** a claim that `PSL(2,7)` is the full `Aut(𝕊)` — it is the Fano-collineation
   subgroup that this rung exhibits acting equivariantly.
-- **Not** a `∀`-`PSL(2,7)` structural proof — `W3` is computational evidence over the 42
-  ZD for one explicit order-3 generator (itself re-verified in `Aut(𝕊)`); building all 168
-  and proving transitivity is the §7.1 next edge.
+- **Not** an *abstract* structural proof — `W5` verifies the equivariance and transitivity
+  computationally over the **full 168-element** `PSL(2,7)` (every collineation re-checked in
+  `Aut(𝕊)`), which closes the one-generator gap but is exhaustive computation, not a
+  representation-theoretic derivation.
 - **Not** D3, not an identity, not clinical.
 
 ---
@@ -116,14 +118,19 @@ own symmetry **unifies the orders it had been probing separately**.
 
 ## 7. Suggested next edges
 
-1. **Full `PSL(2,7)` orbit on `φ`/`ψ`/ZD jointly** — build all 168 collineations and
-   confirm the joint action is a single transitive `PSL(2,7)` on the 7-fibre × φ-line
-   incidence (this rung exhibits one order-3 generator).
+1. **[DONE, `W5`]** All 168 collineations built; the joint action is a single **transitive**
+   `PSL(2,7)` on the 7 fibres, equivariant with the φ-lines (168/168). Remaining: the same
+   for `ψ`'s coassociative 4-planes (edge 2).
 2. **`ψ` (4-form) under the same thread** — does the co-associator's coassociative
    4-planes align with the ZD fibres under `PSL(2,7)` too?
-3. **The ord-3 quotient as a `PSL(2,7)`-module** — decompose the 2-dim quotient `Q`
-   (`NO_CANONICAL_FILL`) under the fibre stabiliser; a distinguished sub-rep would be the
-   symmetry-canonical secondary value the bare-algebra bracketing could not supply.
+3. **The ord-3 quotient as a `PSL(2,7)`-module — attempted, hits a structural wall.**
+   The stabiliser of a single ZD *b* (equivalently of its fibre **as a subspace**) is
+   **trivial**: the line-stabiliser `S₄` (order 24) permutes the **6 distinct fibres** of a
+   support-class rather than acting on one, so there is no group to average a single `Q`
+   over, and no naive `Stab`-invariant secondary vector exists. A symmetry-canonical fill,
+   if any, must therefore live at the level of the **6-fibre support-class** as an `S₄`
+   (or `PSL(2,7)`) module — a genuinely harder, open question, recorded here rather than
+   forced. `NO_CANONICAL_FILL` stands at the single-fibre level.
 
 ---
 
