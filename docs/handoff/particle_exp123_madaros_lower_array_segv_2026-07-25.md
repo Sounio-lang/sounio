@@ -70,3 +70,10 @@ bash scripts/ci/particle_exp123_gate.sh
 ## AI disclosure
 
 Handoff under human direction (2026-07-25).
+
+## Follow-up (2026-07-26 novelty lane)
+
+- **EXP4** full Madaros run closed via same split/free-fn/local-peak pattern (`exp4_unstable_spectrum.sio`).
+- **EXP6** universal ξ vertical is Madaros full green without peak ABI (no `eemm_z_peak_xsec_nu` call).
+- Imported peak residual under full EXP123 IR remains open for a true compiler fix.
+
