@@ -5052,6 +5052,53 @@ fn stmt_is_deref_indexed_elem_field_store(p0: i64) -> bool with Panic, Mut {
     return false
 }
 
+// name.f1[i].f2 = expr and deeper — the AUTO-DEREF twin of
+// stmt_is_deref_indexed_elem_field_store: identical chain, bare-ident root, no `(* )`.
+// Same disease, same magnitude: measured on a single file whose two fns differ ONLY in the
+// root spelling, `(*m).blks[1].ins[0].op = 77` stored 77 while `m.blks[1].ins[0].op = 77`
+// stored nothing — rc=0, zero errors, zero warnings, Madaros correct on both. The narrow
+// ident-root handlers cover only ONE field hop before the index (stmt_is_indexed_field_field_store
+// requires TK[p0+3]==41), so every deeper ident chain fell to the generic assignment path.
+// Live casualties found by shape census: ir/dead_code.sio:260 (dce_mark_reachable marks no
+// instruction reachable), native/codegen_plan.sio:1325 (scheduling priorities stay zero),
+// with the shape appearing ~131 times under self-hosted/ (compiler/main.sio alone ~95) plus
+// the bootstrap chain.
+// The DISPATCH gates this on token_chain_root_is_pointer, following the established pattern
+// of stmt_is_field_field_store_shape at :23245 — a VALUE struct root has a different address
+// story and is left to the generic path, which is why this predicate is shape-only.
+fn stmt_is_ident_indexed_elem_field_store(p0: i64) -> bool with Panic, Mut {
+    if TK[p0 as usize] != 3 { return false }        // bare-ident root
+    if TK[(p0 + 1) as usize] != 50 { return false } // must start with `. field`, not `[`
+    var p = p0 + 1
+    var saw_index: i64 = 0
+    while p < TC {
+        if TK[p as usize] == 50 {                   // . field
+            if TK[(p + 1) as usize] != 3 { return false }
+            p = p + 2
+            continue
+        }
+        if TK[p as usize] == 41 {                   // [ … ]
+            var depth: i64 = 1
+            p = p + 1
+            while p < TC && depth > 0 {
+                if TK[p as usize] == 41 { depth = depth + 1 }
+                if TK[p as usize] == 42 { depth = depth - 1 }
+                p = p + 1
+            }
+            saw_index = 1
+            continue
+        }
+        if TK[p as usize] == 16 {                   // =
+            if saw_index == 0 { return false }
+            if p < p0 + 3 { return false }
+            if TK[(p - 1) as usize] != 3 { return false }
+            return TK[(p - 2) as usize] == 50       // must END in `. field`
+        }
+        return false
+    }
+    return false
+}
+
 // name.f1.f2 = expr  — AUTO-DEREF two-level store (ident root, no explicit `(* )`).
 // Shape only: (3|79) 50 3 50 3 16. For a VALUE struct root the generic assignment
 // path already handles this correctly, so the dispatch gates this on the root var
@@ -22374,14 +22421,22 @@ fn compile_deref_field_field_array_store_x86() with IO, Mut, Panic, Div {
 // the expression-statement fall-through, the statement is also correctly typed as a unit
 // (LAST_STMT_HAS_VALUE stays 0), which is what makes it legal as a tail-if arm.
 fn compile_deref_indexed_elem_field_store_x86() with IO, Mut, Panic, Div {
-    let name_tok = EP + 2
+    // Serves BOTH root spellings, which differ only in where the name sits and how many
+    // tokens precede the chain: `(*name)<chain>` and the auto-deref `name<chain>`. The
+    // pointee is loaded identically for both, so the chain walk below is shared verbatim.
+    var name_tok = EP
+    var chain_start = EP + 1
+    if TK[EP as usize] == 6 {
+        name_tok = EP + 2
+        chain_start = EP + 4
+    }
     let ns = TS[name_tok as usize]
     let ne = TE[name_tok as usize]
     // Locate the terminating `=` up front (same scan the predicate ran) so every
     // diagnostic path can consume the whole statement instead of leaving a token tail
     // for the statement loop to re-parse as an expression (which produced a spurious
     // second "unknown identifier" cascade).
-    var eq_pos = EP + 4
+    var eq_pos = chain_start
     while eq_pos < TC && TK[eq_pos as usize] != 16 {
         if TK[eq_pos as usize] == 41 {
             var sdepth: i64 = 1
@@ -22425,7 +22480,7 @@ fn compile_deref_indexed_elem_field_store_x86() with IO, Mut, Panic, Div {
         compile_or()
         return
     }
-    EP = EP + 4  // skip ( * name )
+    EP = chain_start  // past `( * name )` or past the bare `name`
     emit_load_var(lslot)  // rax = base pointer
     var pending_off: i64 = 0
     var target_ty: i64 = 0
@@ -23715,6 +23770,19 @@ fn compile_stmt() with IO, Mut, Panic, Div {
     if stmt_is_deref_indexed_elem_field_store(EP) {
         compile_deref_indexed_elem_field_store_x86()
         return
+    }
+
+    // name.arr[i].field = expr — the auto-deref twin of the shape above, for a POINTER-LIKE
+    // root only. Gated exactly like stmt_is_field_field_store_shape below: a value struct
+    // root has a different address story and the generic path already handles the simple
+    // cases, so it falls through rather than being intercepted here. Dispatched at this
+    // point (not earlier) so every narrow ident-root handler above keeps its shapes — those
+    // cover one field hop before the index; this catches the deeper chains they miss.
+    if stmt_is_ident_indexed_elem_field_store(EP) {
+        if token_chain_root_is_pointer(EP) {
+            compile_deref_indexed_elem_field_store_x86()
+            return
+        }
     }
 
     // return expr
