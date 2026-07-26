@@ -49,9 +49,28 @@ Every build in one recovery run receives a lock private to that run's work
 directory. This prevents scheduler-worker residue from being mistaken for a
 compiler result while still serializing the three generations.
 
-The receipt records the source commit, the legacy and generated hashes, both
+The receipt records the source commit, the legacy and generated hashes, the
 direct runtime gate outcomes, and the fact that promotion requires a separate
 reviewed tracked-seed update.
+
+## Exact-Import Semantic Gate
+
+The recovery gate establishes the stage-2 artifact lineage. It does not by
+itself claim the #901 exact-import authority contract. Once a recovery result
+is green, run the companion semantic gate against the same source snapshot:
+
+```bash
+SOURCE_REF=<recovery-source-commit> \
+SOUNIO_MADAROS_RECOVERY_RESULT_DIR=<recovery-result-dir> \
+  bash slurm-jobs/madaros-bootstrap-recovery/submit_issue901_visibility_semantic_gate.sh
+```
+
+The companion rejects a missing or mismatched recovery receipt before running
+fixtures. It requires the retained `madaros-stage2` ELF to match the receipt's
+stage-1/stage-2 SHA-256 fixed point, then runs the visibility context gate with
+that raw ELF explicitly selected. Its narrow receipt classifies the result as
+`GREEN`, `FIXABLE`, `BLOCKED`, or `TIMEOUT`; it never promotes the retained
+artifact into a tracked seed.
 
 ## What It Does Not Claim
 
@@ -59,7 +78,9 @@ Passing this recovery gate does not automatically replace
 `bin/madaros-linux-x86_64`, close the independent AST-closure blocker in #1194,
 or prove the historical C-to-lean bootstrap root. It proves that a specified
 current-source snapshot has regained an operational Madaros fixed point and
-that the #901 semantic witnesses hold at that fixed point.
+that the recovery gate's nominal-layout, layout-capacity, and contextual-scope
+witnesses hold at that fixed point. The exact-import authority contract still
+requires the companion semantic gate above.
 
 The normal source-bound gate remains:
 
