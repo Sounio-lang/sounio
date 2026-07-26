@@ -1,0 +1,1240 @@
+// data::bigframe_stats — per-group two-sample hypothesis-test P-VALUES at BigFrame scale.
+//
+// The bridge between the fast per-group two-sample statistics in data::bigframe_ops (t / U / D,
+// computed in one dense pass over up to 1M rows) and the tested distribution CDFs in the stats
+// package (stats::student_t, stats::distributions). scipy's per-group equivalent is a
+// groupby.apply(scipy.stats....) lambda — hundreds of ms; these run in one pass and broadcast a
+// p-value column. Input frame: (key, group in {0,1}, value); per key, group 0 = control vs
+// group 1 = treatment.
+use data::bigframe::*
+use stats::student_t::*
+use stats::chi_square::*
+use stats::fisher_f::*
+
+/// Standard-normal CDF Φ(z) via the Abramowitz-Stegun 7.1.26 erf approximation (abs err < 1.5e-7).
+/// Local to avoid importing stats::distributions, whose normal_cdf name would shadow the one
+/// student_t uses internally. NATIVE + lean_single.
+fn bfs_ncdf(z: f64) -> f64 with Mut, Div, Panic {
+    var x = z / 1.4142135623730951      // z / sqrt(2)
+    var sign = 1.0
+    if x < 0.0 { sign = 0.0 - 1.0; x = 0.0 - x }
+    let t = 1.0 / (1.0 + 0.3275911 * x)
+    let y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * exp(0.0 - x * x)
+    let erf = sign * y
+    0.5 * (1.0 + erf)
+}
+
+/// Per-group Welch two-sample t-test P-VALUE (two-sided) + Welch-Satterthwaite dof, broadcast.
+/// One pass accumulates n/Σ/Σ² per (key,group); per key it forms the Welch t and the
+/// Satterthwaite dof, then defers to the tested stats::student_t::t_two_tail. modes: 0 = p-value,
+/// 1 = Welch-Satterthwaite dof, 2 = significant-at-0.05 flag (1/0). Sample variances use ddof=1;
+/// returns 0 for keys missing a group, with n<2 in a group, or zero pooled variance. O(n).
+/// NATIVE + lean_single only.
+fn bf_group_ttest(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var n0:  [f64; 1024] = [0.0; 1024]
+    var s0:  [f64; 1024] = [0.0; 1024]
+    var ss0: [f64; 1024] = [0.0; 1024]
+    var n1:  [f64; 1024] = [0.0; 1024]
+    var s1:  [f64; 1024] = [0.0; 1024]
+    var ss1: [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || grp_col < 0 || grp_col >= nc || val_col < 0 || val_col >= nc || n <= 0 { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let gp = bf_col_ptr(src, grp_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 {
+            let g = read_f64(gp, i) as i64
+            let v = read_f64(vp, i)
+            if g == 1 { n1[k] = n1[k] + 1.0; s1[k] = s1[k] + v; ss1[k] = ss1[k] + v * v }
+            else { if g == 0 { n0[k] = n0[k] + 1.0; s0[k] = s0[k] + v; ss0[k] = ss0[k] + v * v } }
+        }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        if n0[g] > 1.0 && n1[g] > 1.0 {
+            let a0 = n0[g]; let a1 = n1[g]
+            let m0 = s0[g] / a0; let m1 = s1[g] / a1
+            var v0 = (ss0[g] - s0[g] * s0[g] / a0) / (a0 - 1.0); if v0 < 0.0 { v0 = 0.0 }
+            var v1 = (ss1[g] - s1[g] * s1[g] / a1) / (a1 - 1.0); if v1 < 0.0 { v1 = 0.0 }
+            let se0 = v0 / a0; let se1 = v1 / a1; let se = se0 + se1
+            if se > 0.0 {
+                let t = (m1 - m0) / sqrt(se)
+                let dof = (se * se) / (se0 * se0 / (a0 - 1.0) + se1 * se1 / (a1 - 1.0))
+                if mode == 0 { res[g] = t_two_tail(t, dof) }
+                else { if mode == 1 { res[g] = dof }
+                else { if t_two_tail(t, dof) < 0.05 { res[g] = 1.0 } else { res[g] = 0.0 } } }
+            }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    out
+}
+/// Per-group Welch two-sample t-test P-VALUE (two-sided), broadcast. Uses stats::student_t. NATIVE + lean_single.
+pub fn bf_ttest_pvalue_by(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_ttest(src, key_col, grp_col, val_col, 0) }
+/// Per-group WELCH-SATTERTHWAITE degrees of freedom, broadcast. NATIVE + lean_single.
+pub fn bf_welch_dof_by(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_ttest(src, key_col, grp_col, val_col, 1) }
+/// Per-group SIGNIFICANCE FLAG (1 if two-sided Welch p < 0.05, else 0), broadcast. NATIVE + lean_single.
+pub fn bf_ttest_sig_by(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_ttest(src, key_col, grp_col, val_col, 2) }
+
+/// Per-group RANK-TEST P-VALUES (dense integer value 0..vmax) via a per-key group-split value
+/// histogram. One ascending walk yields the Mann-Whitney U1 (wins + ½ ties), the tie-sum
+/// Σ(tⱼ³−tⱼ) over pooled value multiplicities, and the KS statistic D. mode 0 = Mann-Whitney
+/// two-sided p (large-sample normal approximation WITH the tie correction to the variance and a
+/// continuity correction — required here since dense-integer values are heavily tied). mode 1 =
+/// two-sample KS p (asymptotic Kolmogorov series; approximate/conservative on tied data).
+/// Broadcast. O(n + G·vrange). NATIVE + lean_single only.
+fn bf_group_ranktest(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64, vmax: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var nn0: [f64; 1024] = [0.0; 1024]
+    var nn1: [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || grp_col < 0 || grp_col >= nc || val_col < 0 || val_col >= nc || n <= 0 || vmax < 0 { return out }
+    let vm1 = vmax + 1
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let gp = bf_col_ptr(src, grp_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let h0 = heap_alloc(1024 * vm1 * 8) as *mut i64
+    let h1 = heap_alloc(1024 * vm1 * 8) as *mut i64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        let v = read_f64(vp, i) as i64
+        if k >= 0 && k < 1024 && v >= 0 && v < vm1 {
+            let g = read_f64(gp, i) as i64
+            if g == 1 { let idx = k * vm1 + v; write_i64(h1, idx, read_i64(h1, idx) + 1); nn1[k] = nn1[k] + 1.0 }
+            else { if g == 0 { let idx = k * vm1 + v; write_i64(h0, idx, read_i64(h0, idx) + 1); nn0[k] = nn0[k] + 1.0 } }
+        }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        if nn0[g] > 0.0 && nn1[g] > 0.0 {
+            let N0 = nn0[g]; let N1 = nn1[g]; let N = N0 + N1
+            let base = g * vm1
+            var v: i64 = 0
+            var cum0 = 0.0
+            var wins = 0.0
+            var tiepairs = 0.0
+            var tsum = 0.0
+            var c0 = 0.0; var c1 = 0.0; var ks = 0.0
+            while v < vm1 {
+                let a0 = read_i64(h0, base + v) as f64
+                let a1 = read_i64(h1, base + v) as f64
+                if a1 > 0.0 { wins = wins + a1 * cum0; tiepairs = tiepairs + a1 * a0 }
+                let tj = a0 + a1
+                if tj > 0.0 { tsum = tsum + (tj * tj * tj - tj) }
+                cum0 = cum0 + a0
+                c0 = c0 + a0; c1 = c1 + a1
+                let d = c1 / N1 - c0 / N0; let da = if d < 0.0 { 0.0 - d } else { d }; if da > ks { ks = da }
+                v = v + 1
+            }
+            if mode == 0 {
+                let U1 = wins + 0.5 * tiepairs
+                let mu = N1 * N0 / 2.0
+                var vr = 0.0
+                if N > 1.0 { vr = (N1 * N0 / 12.0) * ((N + 1.0) - tsum / (N * (N - 1.0))) }
+                if vr > 0.0 {
+                    let sig = sqrt(vr)
+                    var za = U1 - mu; if za < 0.0 { za = 0.0 - za }
+                    za = (za - 0.5) / sig; if za < 0.0 { za = 0.0 }
+                    res[g] = 2.0 * (1.0 - bfs_ncdf(za))
+                } else { res[g] = 1.0 }
+            } else {
+                let ne = N1 * N0 / N
+                let sne = sqrt(ne)
+                let lam = (sne + 0.12 + 0.11 / sne) * ks
+                var sum = 0.0
+                var kk: i64 = 1
+                var sgn = 1.0
+                while kk <= 100 {
+                    let e = 0.0 - 2.0 * (kk as f64) * (kk as f64) * lam * lam
+                    sum = sum + sgn * exp(e)
+                    sgn = 0.0 - sgn
+                    kk = kk + 1
+                }
+                var p = 2.0 * sum
+                if p < 0.0 { p = 0.0 }; if p > 1.0 { p = 1.0 }
+                res[g] = p
+            }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    heap_free(h0 as *mut i8)
+    heap_free(h1 as *mut i8)
+    out
+}
+/// Per-group MANN-WHITNEY two-sided P-VALUE (tie-corrected large-sample normal approximation with
+/// continuity correction), broadcast. Correct on the heavily-tied dense-integer values this takes.
+/// NATIVE + lean_single only.
+pub fn bf_mannwhitney_pvalue_by(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_ranktest(src, key_col, grp_col, val_col, vmax, 0) }
+/// Per-group two-sample KOLMOGOROV-SMIRNOV P-VALUE (asymptotic Kolmogorov series; approximate on
+/// tied/discrete data), broadcast. NATIVE + lean_single only.
+pub fn bf_ks_pvalue_by(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_ranktest(src, key_col, grp_col, val_col, vmax, 1) }
+
+/// Per-group ONE-WAY ANOVA (K groups per key, columns key, group 0..ngroups-1, value). One pass
+/// accumulates n/Σ/Σ² per (key,group) on the heap; per key it forms SSB (between), SSW (within),
+/// the F ratio and defers the tail to the tested stats::fisher_f::f_sf. K = #groups actually
+/// present. modes: 0 = F statistic, 1 = p-value F_sf(F, K−1, N−K), 2 = eta² (SSB/SST effect size).
+/// Returns 0 for keys with <2 groups present or zero within-group variance. O(n + G·ngroups).
+/// NATIVE + lean_single only.
+fn bf_group_anova(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64, ngroups: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || grp_col < 0 || grp_col >= nc || val_col < 0 || val_col >= nc || n <= 0 || ngroups <= 1 || ngroups > 1024 { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let gp = bf_col_ptr(src, grp_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let stride = ngroups
+    let cn = heap_alloc(1024 * stride * 8) as *mut f64
+    let cs = heap_alloc(1024 * stride * 8) as *mut f64
+    let cq = heap_alloc(1024 * stride * 8) as *mut f64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        let g = read_f64(gp, i) as i64
+        if k >= 0 && k < 1024 && g >= 0 && g < stride {
+            let v = read_f64(vp, i)
+            let idx = k * stride + g
+            write_f64(cn, idx, read_f64(cn, idx) + 1.0)
+            write_f64(cs, idx, read_f64(cs, idx) + v)
+            write_f64(cq, idx, read_f64(cq, idx) + v * v)
+        }
+        i = i + 1
+    }
+    var kk: i64 = 0
+    while kk < 1024 {
+        let base = kk * stride
+        var K = 0.0; var N = 0.0; var S = 0.0; var SS = 0.0; var ssw = 0.0
+        var g: i64 = 0
+        while g < stride {
+            let ng = read_f64(cn, base + g)
+            if ng > 0.0 { let sg = read_f64(cs, base + g); let qg = read_f64(cq, base + g); K = K + 1.0; N = N + ng; S = S + sg; SS = SS + qg; ssw = ssw + (qg - sg * sg / ng) }
+            g = g + 1
+        }
+        if K > 1.0 && N > K {
+            let sst = SS - S * S / N
+            var ssb = sst - ssw; if ssb < 0.0 { ssb = 0.0 }
+            if ssw > 0.0 {
+                let f = (ssb / (K - 1.0)) / (ssw / (N - K))
+                if mode == 0 { res[kk] = f }
+                else { if mode == 1 { res[kk] = f_sf(f, K - 1.0, N - K) }
+                else { if sst > 0.0 { res[kk] = ssb / sst } } }
+            }
+        }
+        kk = kk + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    heap_free(cn as *mut i8); heap_free(cs as *mut i8); heap_free(cq as *mut i8)
+    out
+}
+/// Per-group one-way ANOVA F STATISTIC, broadcast. NATIVE + lean_single.
+pub fn bf_anova_f_by(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64, ngroups: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_anova(src, key_col, grp_col, val_col, ngroups, 0) }
+/// Per-group one-way ANOVA P-VALUE (F_sf(F, K−1, N−K)), broadcast. Uses stats::fisher_f. NATIVE + lean_single.
+pub fn bf_anova_pvalue_by(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64, ngroups: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_anova(src, key_col, grp_col, val_col, ngroups, 1) }
+/// Per-group ANOVA η² (eta-squared, SSB/SST between-group variance fraction), broadcast. NATIVE + lean_single.
+pub fn bf_anova_eta2_by(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64, ngroups: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_anova(src, key_col, grp_col, val_col, ngroups, 2) }
+
+/// Per-group KRUSKAL-WALLIS H test (K groups per key, dense integer value 0..vmax) via a per-key
+/// value histogram split by group. One ascending walk assigns mid-ranks (ties averaged),
+/// accumulates each group's rank sum R_g and the tie sum Σ(tⱼ³−tⱼ); H = [12/(N(N+1))]·Σ(R_g²/n_g)
+/// − 3(N+1), corrected by C = 1 − Σ(tⱼ³−tⱼ)/(N³−N). modes: 0 = H (tie-corrected), 1 = p-value
+/// chi²_sf(H, K−1), 2 = ε² (epsilon-squared H/(N−1) effect size). Broadcast. O(n + G·vrange·ngroups).
+/// NATIVE + lean_single only.
+fn bf_group_kruskal(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64, vmax: i64, ngroups: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || grp_col < 0 || grp_col >= nc || val_col < 0 || val_col >= nc || n <= 0 || vmax < 0 || ngroups <= 1 || ngroups > 1024 { return out }
+    let vm1 = vmax + 1
+    let stride = ngroups
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let gp = bf_col_ptr(src, grp_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let hist = heap_alloc(1024 * vm1 * stride * 8) as *mut i64   // [key][value][group]
+    let R = heap_alloc(1024 * stride * 8) as *mut f64            // rank sums [key][group]
+    let cn = heap_alloc(1024 * stride * 8) as *mut f64           // group counts [key][group]
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        let v = read_f64(vp, i) as i64
+        let g = read_f64(gp, i) as i64
+        if k >= 0 && k < 1024 && v >= 0 && v < vm1 && g >= 0 && g < stride {
+            let idx = (k * vm1 + v) * stride + g
+            write_i64(hist, idx, read_i64(hist, idx) + 1)
+            let ci = k * stride + g
+            write_f64(cn, ci, read_f64(cn, ci) + 1.0)
+        }
+        i = i + 1
+    }
+    var kk: i64 = 0
+    while kk < 1024 {
+        var N = 0.0; var K = 0.0
+        var g: i64 = 0
+        while g < stride { let ng = read_f64(cn, kk * stride + g); if ng > 0.0 { N = N + ng; K = K + 1.0 } g = g + 1 }
+        if K > 1.0 && N > 1.0 {
+            // rank-sum walk
+            var start = 0.0
+            var tsum = 0.0
+            var v: i64 = 0
+            while v < vm1 {
+                let hbase = (kk * vm1 + v) * stride
+                var c = 0.0
+                g = 0
+                while g < stride { c = c + (read_i64(hist, hbase + g) as f64); g = g + 1 }
+                if c > 0.0 {
+                    let midrank = start + (c + 1.0) / 2.0
+                    g = 0
+                    while g < stride { let cg = read_i64(hist, hbase + g) as f64; if cg > 0.0 { let ri = kk * stride + g; write_f64(R, ri, read_f64(R, ri) + cg * midrank) } g = g + 1 }
+                    tsum = tsum + (c * c * c - c)
+                    start = start + c
+                }
+                v = v + 1
+            }
+            var sumR = 0.0
+            g = 0
+            while g < stride { let ng = read_f64(cn, kk * stride + g); if ng > 0.0 { let rg = read_f64(R, kk * stride + g); sumR = sumR + rg * rg / ng } g = g + 1 }
+            var H = (12.0 / (N * (N + 1.0))) * sumR - 3.0 * (N + 1.0)
+            let denom = N * N * N - N
+            if denom > 0.0 { let C = 1.0 - tsum / denom; if C > 0.0 { H = H / C } }
+            if H < 0.0 { H = 0.0 }
+            if mode == 0 { res[kk] = H }
+            else { if mode == 1 { res[kk] = chi2_sf(H, K - 1.0) }
+            else { if N > 1.0 { res[kk] = H / (N - 1.0) } } }
+        }
+        kk = kk + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    heap_free(hist as *mut i8); heap_free(R as *mut i8); heap_free(cn as *mut i8)
+    out
+}
+/// Per-group KRUSKAL-WALLIS H statistic (tie-corrected), broadcast. NATIVE + lean_single.
+pub fn bf_kruskal_h_by(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64, vmax: i64, ngroups: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_kruskal(src, key_col, grp_col, val_col, vmax, ngroups, 0) }
+/// Per-group KRUSKAL-WALLIS P-VALUE (chi²_sf(H, K−1)), broadcast. Uses stats::chi_square. NATIVE + lean_single.
+pub fn bf_kruskal_pvalue_by(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64, vmax: i64, ngroups: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_kruskal(src, key_col, grp_col, val_col, vmax, ngroups, 1) }
+/// Per-group KRUSKAL-WALLIS ε² (epsilon-squared H/(N−1) effect size), broadcast. NATIVE + lean_single.
+pub fn bf_kruskal_epsilon2_by(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64, vmax: i64, ngroups: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_kruskal(src, key_col, grp_col, val_col, vmax, ngroups, 2) }
+
+/// Newton sqrt with a bit-trick seed (the builtin sqrt is wrong for args > ~1e6, and the Pearson
+/// denominator reaches ~1e10 at 1M-row scale). Needs a scratch i64 `sc`. NATIVE + lean_single.
+fn bfs_sqrt(x: f64, sc: *mut i64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    let b = f64_to_bits(x)
+    let seed = (b + 4607182418800017408) >> 1
+    write_i64(sc, 0, seed)
+    var y = read_f64(sc as *mut f64, 0)
+    if y < 0.0 { y = 0.0 - y }
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y
+}
+
+/// Per-group PEARSON CORRELATION inference (columns key, x, y). One pass accumulates the
+/// co-moments n/Σx/Σy/Σx²/Σy²/Σxy; per key it forms r and, via the exact t-transform and Fisher
+/// z, its p-value and 95% CI. modes: 0 = r, 1 = two-sided p (t = r·√((n−2)/(1−r²)), df=n−2, via
+/// stats::student_t::t_two_tail), 2 = CI lower, 3 = CI upper (Fisher z ± 1.96/√(n−3), back-tanh).
+/// Returns 0 for keys with n<3 (n<4 for CI) or a degenerate column. O(n). NATIVE + lean_single.
+fn bf_group_pearson(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var cn:  [f64; 1024] = [0.0; 1024]
+    var sx:  [f64; 1024] = [0.0; 1024]
+    var sy:  [f64; 1024] = [0.0; 1024]
+    var sxx: [f64; 1024] = [0.0; 1024]
+    var syy: [f64; 1024] = [0.0; 1024]
+    var sxy: [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || x_col < 0 || x_col >= nc || y_col < 0 || y_col >= nc || n <= 0 { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let xp = bf_col_ptr(src, x_col) as *mut f64
+    let yp = bf_col_ptr(src, y_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let sc = heap_alloc(8) as *mut i64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 { let x = read_f64(xp, i); let y = read_f64(yp, i); cn[k] = cn[k] + 1.0; sx[k] = sx[k] + x; sy[k] = sy[k] + y; sxx[k] = sxx[k] + x * x; syy[k] = syy[k] + y * y; sxy[k] = sxy[k] + x * y }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        let m = cn[g]
+        if m > 2.0 {
+            let dx = m * sxx[g] - sx[g] * sx[g]
+            let dy = m * syy[g] - sy[g] * sy[g]
+            if dx > 0.0 && dy > 0.0 {
+                var r = (m * sxy[g] - sx[g] * sy[g]) / bfs_sqrt(dx * dy, sc)
+                if r > 1.0 { r = 1.0 }; if r < 0.0 - 1.0 { r = 0.0 - 1.0 }
+                if mode == 0 { res[g] = r }
+                else { if mode == 1 {
+                    if r > 0.0 - 1.0 && r < 1.0 { let t = r * bfs_sqrt((m - 2.0) / (1.0 - r * r), sc); res[g] = t_two_tail(t, m - 2.0) }
+                } else {
+                    if m > 3.0 && r > 0.0 - 1.0 && r < 1.0 {
+                        let zf = 0.5 * ln((1.0 + r) / (1.0 - r))
+                        let se = 1.0 / bfs_sqrt(m - 3.0, sc)
+                        var zc = zf - 1.959963985 * se
+                        if mode == 3 { zc = zf + 1.959963985 * se }
+                        let e2 = exp(2.0 * zc)
+                        res[g] = (e2 - 1.0) / (e2 + 1.0)
+                    }
+                } }
+            }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    heap_free(sc as *mut i8)
+    out
+}
+/// Per-group PEARSON r, broadcast. NATIVE + lean_single.
+pub fn bf_pearson_r_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_pearson(src, key_col, x_col, y_col, 0) }
+/// Per-group PEARSON two-sided P-VALUE, broadcast. Uses stats::student_t. NATIVE + lean_single.
+pub fn bf_pearson_pvalue_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_pearson(src, key_col, x_col, y_col, 1) }
+/// Per-group PEARSON 95% CI LOWER bound (Fisher z), broadcast. NATIVE + lean_single.
+pub fn bf_pearson_ci_lo_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_pearson(src, key_col, x_col, y_col, 2) }
+/// Per-group PEARSON 95% CI UPPER bound (Fisher z), broadcast. NATIVE + lean_single.
+pub fn bf_pearson_ci_hi_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_pearson(src, key_col, x_col, y_col, 3) }
+
+/// Per-group SPEARMAN RANK CORRELATION inference (columns key, integer x/y in 0..vmax). Per key,
+/// value histograms of x and y give mid-rank lookup tables (ties averaged); a co-moment pass over
+/// the row ranks yields ρ = Pearson-on-ranks. modes: 0 = ρ, 1 = two-sided p (t = ρ·√((n−2)/(1−ρ²)),
+/// df=n−2, via stats::student_t::t_two_tail). Broadcast. O(n + G·vrange). NATIVE + lean_single only.
+fn bf_group_spearman(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, vmax: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var cn:  [f64; 1024] = [0.0; 1024]
+    var srx: [f64; 1024] = [0.0; 1024]
+    var sry: [f64; 1024] = [0.0; 1024]
+    var sxx: [f64; 1024] = [0.0; 1024]
+    var syy: [f64; 1024] = [0.0; 1024]
+    var sxy: [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || x_col < 0 || x_col >= nc || y_col < 0 || y_col >= nc || n <= 0 || vmax < 0 { return out }
+    let vm1 = vmax + 1
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let xp = bf_col_ptr(src, x_col) as *mut f64
+    let yp = bf_col_ptr(src, y_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let sc = heap_alloc(8) as *mut i64
+    let hx = heap_alloc(1024 * vm1 * 8) as *mut i64
+    let hy = heap_alloc(1024 * vm1 * 8) as *mut i64
+    let mrx = heap_alloc(1024 * vm1 * 8) as *mut f64
+    let mry = heap_alloc(1024 * vm1 * 8) as *mut f64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        let x = read_f64(xp, i) as i64
+        let y = read_f64(yp, i) as i64
+        if k >= 0 && k < 1024 && x >= 0 && x < vm1 && y >= 0 && y < vm1 { let ix = k * vm1 + x; write_i64(hx, ix, read_i64(hx, ix) + 1); let iy = k * vm1 + y; write_i64(hy, iy, read_i64(hy, iy) + 1); cn[k] = cn[k] + 1.0 }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        if cn[g] > 0.0 {
+            let base = g * vm1
+            var sxr = 0.0; var v: i64 = 0
+            while v < vm1 { let c = read_i64(hx, base + v) as f64; if c > 0.0 { write_f64(mrx, base + v, sxr + (c + 1.0) / 2.0); sxr = sxr + c } v = v + 1 }
+            var syr = 0.0; v = 0
+            while v < vm1 { let c = read_i64(hy, base + v) as f64; if c > 0.0 { write_f64(mry, base + v, syr + (c + 1.0) / 2.0); syr = syr + c } v = v + 1 }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        let x = read_f64(xp, i) as i64
+        let y = read_f64(yp, i) as i64
+        if k >= 0 && k < 1024 && x >= 0 && x < vm1 && y >= 0 && y < vm1 {
+            let rx = read_f64(mrx, k * vm1 + x); let ry = read_f64(mry, k * vm1 + y)
+            srx[k] = srx[k] + rx; sry[k] = sry[k] + ry; sxx[k] = sxx[k] + rx * rx; syy[k] = syy[k] + ry * ry; sxy[k] = sxy[k] + rx * ry
+        }
+        i = i + 1
+    }
+    g = 0
+    while g < 1024 {
+        let m = cn[g]
+        if m > 2.0 {
+            let dx = m * sxx[g] - srx[g] * srx[g]
+            let dy = m * syy[g] - sry[g] * sry[g]
+            if dx > 0.0 && dy > 0.0 {
+                var rho = (m * sxy[g] - srx[g] * sry[g]) / bfs_sqrt(dx * dy, sc)
+                if rho > 1.0 { rho = 1.0 }; if rho < 0.0 - 1.0 { rho = 0.0 - 1.0 }
+                if mode == 0 { res[g] = rho }
+                else { if rho > 0.0 - 1.0 && rho < 1.0 { let t = rho * bfs_sqrt((m - 2.0) / (1.0 - rho * rho), sc); res[g] = t_two_tail(t, m - 2.0) } }
+            }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    heap_free(sc as *mut i8); heap_free(hx as *mut i8); heap_free(hy as *mut i8); heap_free(mrx as *mut i8); heap_free(mry as *mut i8)
+    out
+}
+/// Per-group SPEARMAN ρ (rank correlation), broadcast. NATIVE + lean_single.
+pub fn bf_spearman_rho_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_spearman(src, key_col, x_col, y_col, vmax, 0) }
+/// Per-group SPEARMAN two-sided P-VALUE (t-approximation), broadcast. Uses stats::student_t. NATIVE + lean_single.
+pub fn bf_spearman_pvalue_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_spearman(src, key_col, x_col, y_col, vmax, 1) }
+
+/// Per-group SIMPLE OLS REGRESSION inference (columns key, x, y): fits y = a + b·x per key in one
+/// co-moment pass and reports the standard errors, t-tests, F-test and CI that scipy.stats.linregress
+/// gives. Sxx/Syy/Sxy are the centred sums; MSE = SSE/(n−2). modes: 0 = slope SE, 1 = slope p-value
+/// (t = b/SE(b), df=n−2), 2 = intercept SE, 3 = intercept p-value, 4 = overall F-test p-value
+/// (f_sf(t_slope², 1, n−2)), 5 = slope 95% CI lower, 6 = slope 95% CI upper (b ± t_.975·SE). Uses the
+/// tested stats::student_t / stats::fisher_f. Returns 0 for keys with n<3 or zero x-variance.
+/// O(n). NATIVE + lean_single only.
+fn bf_group_ols(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var cn:  [f64; 1024] = [0.0; 1024]
+    var sx:  [f64; 1024] = [0.0; 1024]
+    var sy:  [f64; 1024] = [0.0; 1024]
+    var sxx: [f64; 1024] = [0.0; 1024]
+    var syy: [f64; 1024] = [0.0; 1024]
+    var sxy: [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || x_col < 0 || x_col >= nc || y_col < 0 || y_col >= nc || n <= 0 { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let xp = bf_col_ptr(src, x_col) as *mut f64
+    let yp = bf_col_ptr(src, y_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let sc = heap_alloc(8) as *mut i64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 { let x = read_f64(xp, i); let y = read_f64(yp, i); cn[k] = cn[k] + 1.0; sx[k] = sx[k] + x; sy[k] = sy[k] + y; sxx[k] = sxx[k] + x * x; syy[k] = syy[k] + y * y; sxy[k] = sxy[k] + x * y }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        let m = cn[g]
+        if m > 2.0 {
+            let mx = sx[g] / m; let my = sy[g] / m
+            let Sxx = sxx[g] - sx[g] * sx[g] / m
+            let Syy = syy[g] - sy[g] * sy[g] / m
+            let Sxy = sxy[g] - sx[g] * sy[g] / m
+            if Sxx > 0.0 {
+                let slope = Sxy / Sxx
+                let icpt = my - slope * mx
+                var sse = Syy - Sxy * Sxy / Sxx; if sse < 0.0 { sse = 0.0 }
+                let df = m - 2.0
+                let mse = sse / df
+                let se_s = bfs_sqrt(mse / Sxx, sc)
+                if mode == 0 { res[g] = se_s }
+                else { if mode == 1 { if se_s > 0.0 { res[g] = t_two_tail(slope / se_s, df) } }
+                else { if mode == 2 { res[g] = bfs_sqrt(mse * (1.0 / m + mx * mx / Sxx), sc) }
+                else { if mode == 3 { let se_i = bfs_sqrt(mse * (1.0 / m + mx * mx / Sxx), sc); if se_i > 0.0 { res[g] = t_two_tail(icpt / se_i, df) } }
+                else { if mode == 4 { if se_s > 0.0 { let ts = slope / se_s; res[g] = f_sf(ts * ts, 1.0, df) } }
+                else { let tc = t_quantile(0.975, df); if mode == 5 { res[g] = slope - tc * se_s } else { res[g] = slope + tc * se_s } } } } } }
+            }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    heap_free(sc as *mut i8)
+    out
+}
+/// Per-group OLS SLOPE STANDARD ERROR, broadcast. NATIVE + lean_single.
+pub fn bf_ols_slope_se_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_ols(src, key_col, x_col, y_col, 0) }
+/// Per-group OLS SLOPE two-sided P-VALUE (H0: slope=0), broadcast. Uses stats::student_t. NATIVE + lean_single.
+pub fn bf_ols_slope_pvalue_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_ols(src, key_col, x_col, y_col, 1) }
+/// Per-group OLS INTERCEPT STANDARD ERROR, broadcast. NATIVE + lean_single.
+pub fn bf_ols_intercept_se_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_ols(src, key_col, x_col, y_col, 2) }
+/// Per-group OLS INTERCEPT two-sided P-VALUE (H0: intercept=0), broadcast. Uses stats::student_t. NATIVE + lean_single.
+pub fn bf_ols_intercept_pvalue_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_ols(src, key_col, x_col, y_col, 3) }
+/// Per-group OLS OVERALL F-TEST P-VALUE (model significance), broadcast. Uses stats::fisher_f. NATIVE + lean_single.
+pub fn bf_ols_f_pvalue_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_ols(src, key_col, x_col, y_col, 4) }
+/// Per-group OLS SLOPE 95% CI LOWER bound (b − t_.975·SE), broadcast. Uses stats::student_t. NATIVE + lean_single.
+pub fn bf_ols_slope_ci_lo_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_ols(src, key_col, x_col, y_col, 5) }
+/// Per-group OLS SLOPE 95% CI UPPER bound (b + t_.975·SE), broadcast. Uses stats::student_t. NATIVE + lean_single.
+pub fn bf_ols_slope_ci_hi_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_ols(src, key_col, x_col, y_col, 6) }
+
+/// Per-group ONE-SAMPLE inference on a value column (columns key, value). One pass gives n/mean/SD;
+/// per key it forms the standard error and defers the tail/quantile to stats::student_t. modes:
+/// 0 = 95% CI lower for the mean (mean − t_.975(n−1)·SEM), 1 = 95% CI upper, 2 = one-sample t vs
+/// param mu0 ((mean−mu0)/SEM), 3 = its two-sided p-value (df=n−1). Sample SD uses ddof=1. Returns
+/// 0 for keys with n<2 or zero variance. O(n). NATIVE + lean_single only.
+fn bf_group_onesample(src: &BigFrame, key_col: i64, val_col: i64, param: f64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var cn:  [f64; 1024] = [0.0; 1024]
+    var sv:  [f64; 1024] = [0.0; 1024]
+    var sq:  [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || n <= 0 { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let sc = heap_alloc(8) as *mut i64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 { let v = read_f64(vp, i); cn[k] = cn[k] + 1.0; sv[k] = sv[k] + v; sq[k] = sq[k] + v * v }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        let m = cn[g]
+        if m > 1.0 {
+            let mean = sv[g] / m
+            var vr = (sq[g] - sv[g] * sv[g] / m) / (m - 1.0); if vr < 0.0 { vr = 0.0 }
+            let sem = bfs_sqrt(vr / m, sc)
+            let df = m - 1.0
+            if sem > 0.0 {
+                if mode == 0 { res[g] = mean - t_quantile(0.975, df) * sem }
+                else { if mode == 1 { res[g] = mean + t_quantile(0.975, df) * sem }
+                else { if mode == 2 { res[g] = (mean - param) / sem }
+                else { res[g] = t_two_tail((mean - param) / sem, df) } } }
+            }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    heap_free(sc as *mut i8)
+    out
+}
+/// Per-group 95% CI LOWER bound for the mean (t-interval), broadcast. Uses stats::student_t. NATIVE + lean_single.
+pub fn bf_mean_ci_lo_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_onesample(src, key_col, val_col, 0.0, 0) }
+/// Per-group 95% CI UPPER bound for the mean (t-interval), broadcast. Uses stats::student_t. NATIVE + lean_single.
+pub fn bf_mean_ci_hi_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_onesample(src, key_col, val_col, 0.0, 1) }
+/// Per-group ONE-SAMPLE t STATISTIC vs mu0 ((mean−mu0)/SEM), broadcast. NATIVE + lean_single.
+pub fn bf_one_sample_t_by(src: &BigFrame, key_col: i64, val_col: i64, mu0: f64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_onesample(src, key_col, val_col, mu0, 2) }
+/// Per-group ONE-SAMPLE t-test two-sided P-VALUE (H0: mean=mu0), broadcast. Uses stats::student_t. NATIVE + lean_single.
+pub fn bf_one_sample_ttest_pvalue_by(src: &BigFrame, key_col: i64, val_col: i64, mu0: f64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_onesample(src, key_col, val_col, mu0, 3) }
+
+/// Per-group PAIRED-SAMPLE inference (columns key, x, y): tests the within-pair difference d=x−y
+/// per key. One pass accumulates n/Σd/Σd²; the paired t-test reduces to a one-sample t on d.
+/// modes: 0 = paired t ((mean_d)/SEM_d), 1 = two-sided p-value (df=n−1), 2 = Cohen's dz
+/// (mean_d/SD_d, paired effect size), 3 = mean-difference 95% CI lower, 4 = CI upper. SD uses
+/// ddof=1. Returns 0 for n<2 or zero difference-variance. O(n). NATIVE + lean_single only.
+fn bf_group_paired(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var cn:  [f64; 1024] = [0.0; 1024]
+    var sd:  [f64; 1024] = [0.0; 1024]
+    var sq:  [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || x_col < 0 || x_col >= nc || y_col < 0 || y_col >= nc || n <= 0 { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let xp = bf_col_ptr(src, x_col) as *mut f64
+    let yp = bf_col_ptr(src, y_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let sc = heap_alloc(8) as *mut i64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 { let d = read_f64(xp, i) - read_f64(yp, i); cn[k] = cn[k] + 1.0; sd[k] = sd[k] + d; sq[k] = sq[k] + d * d }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        let m = cn[g]
+        if m > 1.0 {
+            let md = sd[g] / m
+            var vr = (sq[g] - sd[g] * sd[g] / m) / (m - 1.0); if vr < 0.0 { vr = 0.0 }
+            let sdd = bfs_sqrt(vr, sc)
+            let sem = bfs_sqrt(vr / m, sc)
+            let df = m - 1.0
+            if mode == 2 { if sdd > 0.0 { res[g] = md / sdd } }
+            else { if sem > 0.0 {
+                if mode == 0 { res[g] = md / sem }
+                else { if mode == 1 { res[g] = t_two_tail(md / sem, df) }
+                else { if mode == 3 { res[g] = md - t_quantile(0.975, df) * sem }
+                else { res[g] = md + t_quantile(0.975, df) * sem } } }
+            } }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    heap_free(sc as *mut i8)
+    out
+}
+/// Per-group PAIRED t STATISTIC (of d=x−y), broadcast. NATIVE + lean_single.
+pub fn bf_paired_t_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_paired(src, key_col, x_col, y_col, 0) }
+/// Per-group PAIRED t-test two-sided P-VALUE (H0: mean(x−y)=0), broadcast. Uses stats::student_t. NATIVE + lean_single.
+pub fn bf_paired_ttest_pvalue_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_paired(src, key_col, x_col, y_col, 1) }
+/// Per-group PAIRED COHEN'S dz effect size (mean_d/SD_d), broadcast. NATIVE + lean_single.
+pub fn bf_cohens_dz_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_paired(src, key_col, x_col, y_col, 2) }
+/// Per-group MEAN-DIFFERENCE 95% CI LOWER bound (paired), broadcast. Uses stats::student_t. NATIVE + lean_single.
+pub fn bf_mean_diff_ci_lo_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_paired(src, key_col, x_col, y_col, 3) }
+/// Per-group MEAN-DIFFERENCE 95% CI UPPER bound (paired), broadcast. Uses stats::student_t. NATIVE + lean_single.
+pub fn bf_mean_diff_ci_hi_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_paired(src, key_col, x_col, y_col, 4) }
+
+/// Per-group TWO-PROPORTION z-test (columns key, group∈{0,1}, binary outcome 0/1). One pass counts
+/// n and #successes per (key,group); per key it compares p1 vs p0. modes: 0 = proportion difference
+/// p1−p0, 1 = pooled two-proportion z ((p1−p0)/√(p̄(1−p̄)(1/n1+1/n0))), 2 = its two-sided p-value
+/// (normal approx via the local A&S Φ), 3 = Wald 95% CI lower for the difference, 4 = CI upper.
+/// Returns 0 for keys missing a group or with a degenerate pooled proportion. O(n). NATIVE + lean_single.
+fn bf_group_twoprop(src: &BigFrame, key_col: i64, grp_col: i64, out_col: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var n0: [f64; 1024] = [0.0; 1024]
+    var x0: [f64; 1024] = [0.0; 1024]
+    var n1: [f64; 1024] = [0.0; 1024]
+    var x1: [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || grp_col < 0 || grp_col >= nc || out_col < 0 || out_col >= nc || n <= 0 { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let gp = bf_col_ptr(src, grp_col) as *mut f64
+    let vp = bf_col_ptr(src, out_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let sc = heap_alloc(8) as *mut i64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 {
+            let g = read_f64(gp, i) as i64
+            let v = read_f64(vp, i)
+            if g == 1 { n1[k] = n1[k] + 1.0; if v > 0.0 { x1[k] = x1[k] + 1.0 } }
+            else { if g == 0 { n0[k] = n0[k] + 1.0; if v > 0.0 { x0[k] = x0[k] + 1.0 } } }
+        }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        if n0[g] > 0.0 && n1[g] > 0.0 {
+            let p0 = x0[g] / n0[g]; let p1 = x1[g] / n1[g]; let diff = p1 - p0
+            if mode == 0 { res[g] = diff }
+            else { if mode == 3 || mode == 4 {
+                let seW = bfs_sqrt(p1 * (1.0 - p1) / n1[g] + p0 * (1.0 - p0) / n0[g], sc)
+                if mode == 3 { res[g] = diff - 1.959963985 * seW } else { res[g] = diff + 1.959963985 * seW }
+            } else {
+                let pp = (x0[g] + x1[g]) / (n0[g] + n1[g])
+                let se = bfs_sqrt(pp * (1.0 - pp) * (1.0 / n1[g] + 1.0 / n0[g]), sc)
+                if se > 0.0 { let z = diff / se; if mode == 1 { res[g] = z } else { var za = z; if za < 0.0 { za = 0.0 - za }; res[g] = 2.0 * (1.0 - bfs_ncdf(za)) } }
+            } }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    heap_free(sc as *mut i8)
+    out
+}
+/// Per-group PROPORTION DIFFERENCE (p1−p0), broadcast. NATIVE + lean_single.
+pub fn bf_prop_diff_by(src: &BigFrame, key_col: i64, grp_col: i64, out_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_twoprop(src, key_col, grp_col, out_col, 0) }
+/// Per-group TWO-PROPORTION z STATISTIC (pooled), broadcast. NATIVE + lean_single.
+pub fn bf_prop_z_by(src: &BigFrame, key_col: i64, grp_col: i64, out_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_twoprop(src, key_col, grp_col, out_col, 1) }
+/// Per-group TWO-PROPORTION z-test two-sided P-VALUE, broadcast. NATIVE + lean_single.
+pub fn bf_prop_ztest_pvalue_by(src: &BigFrame, key_col: i64, grp_col: i64, out_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_twoprop(src, key_col, grp_col, out_col, 2) }
+/// Per-group PROPORTION-DIFFERENCE Wald 95% CI LOWER, broadcast. NATIVE + lean_single.
+pub fn bf_prop_diff_ci_lo_by(src: &BigFrame, key_col: i64, grp_col: i64, out_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_twoprop(src, key_col, grp_col, out_col, 3) }
+/// Per-group PROPORTION-DIFFERENCE Wald 95% CI UPPER, broadcast. NATIVE + lean_single.
+pub fn bf_prop_diff_ci_hi_by(src: &BigFrame, key_col: i64, grp_col: i64, out_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_twoprop(src, key_col, grp_col, out_col, 4) }
+
+/// Per-group BARTLETT test of equal variances (columns key, group 0..ngroups−1, value). One pass
+/// gives n/Σ/Σ² per (key,group); B = [(N−K)ln s²_p − Σ(nᵢ−1)ln s²ᵢ] / C with the standard
+/// correction C. modes: 0 = B statistic, 1 = p-value χ²_sf(B, K−1). Sensitive to normality
+/// (use Levene otherwise). Returns 0 if any present group has zero variance or K<2. O(n + G·ngroups).
+/// NATIVE + lean_single only.
+fn bf_group_bartlett(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64, ngroups: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || grp_col < 0 || grp_col >= nc || val_col < 0 || val_col >= nc || n <= 0 || ngroups <= 1 || ngroups > 1024 { return out }
+    let stride = ngroups
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let gp = bf_col_ptr(src, grp_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let cn = heap_alloc(1024 * stride * 8) as *mut f64
+    let cs = heap_alloc(1024 * stride * 8) as *mut f64
+    let cq = heap_alloc(1024 * stride * 8) as *mut f64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        let g = read_f64(gp, i) as i64
+        if k >= 0 && k < 1024 && g >= 0 && g < stride { let v = read_f64(vp, i); let idx = k * stride + g; write_f64(cn, idx, read_f64(cn, idx) + 1.0); write_f64(cs, idx, read_f64(cs, idx) + v); write_f64(cq, idx, read_f64(cq, idx) + v * v) }
+        i = i + 1
+    }
+    var kk: i64 = 0
+    while kk < 1024 {
+        let base = kk * stride
+        var K = 0.0; var N = 0.0; var sumdf = 0.0; var suml = 0.0; var sumrec = 0.0; var bad = false
+        var g: i64 = 0
+        while g < stride {
+            let ng = read_f64(cn, base + g)
+            if ng > 1.0 { let sg = read_f64(cs, base + g); let qg = read_f64(cq, base + g); var v = (qg - sg * sg / ng) / (ng - 1.0); if v <= 0.0 { bad = true } else { K = K + 1.0; N = N + ng; sumdf = sumdf + (ng - 1.0) * v; suml = suml + (ng - 1.0) * ln(v); sumrec = sumrec + 1.0 / (ng - 1.0) } }
+            else { if ng > 0.0 { bad = true } }
+            g = g + 1
+        }
+        if K > 1.0 && !bad && N > K {
+            let sp = sumdf / (N - K)
+            let bnum = (N - K) * ln(sp) - suml
+            let C = 1.0 + (sumrec - 1.0 / (N - K)) / (3.0 * (K - 1.0))
+            let B = bnum / C
+            if mode == 0 { res[kk] = B } else { res[kk] = chi2_sf(B, K - 1.0) }
+        }
+        kk = kk + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    heap_free(cn as *mut i8); heap_free(cs as *mut i8); heap_free(cq as *mut i8)
+    out
+}
+/// Per-group BARTLETT statistic (equal-variance test), broadcast. NATIVE + lean_single.
+pub fn bf_bartlett_stat_by(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64, ngroups: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_bartlett(src, key_col, grp_col, val_col, ngroups, 0) }
+/// Per-group BARTLETT P-VALUE (χ²_sf(B, K−1)), broadcast. Uses stats::chi_square. NATIVE + lean_single.
+pub fn bf_bartlett_pvalue_by(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64, ngroups: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_bartlett(src, key_col, grp_col, val_col, ngroups, 1) }
+
+/// Per-group LEVENE test of equal variances (mean-based; columns key, group 0..ngroups−1, value).
+/// Two passes: group means, then the ANOVA F on the absolute deviations z=|x−mean_g| (robust to
+/// non-normality). modes: 0 = W statistic, 1 = p-value F_sf(W, K−1, N−K). Returns 0 for K<2 or
+/// zero within-group deviation spread. O(n + G·ngroups). NATIVE + lean_single only.
+fn bf_group_levene(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64, ngroups: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || grp_col < 0 || grp_col >= nc || val_col < 0 || val_col >= nc || n <= 0 || ngroups <= 1 || ngroups > 1024 { return out }
+    let stride = ngroups
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let gp = bf_col_ptr(src, grp_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let cn = heap_alloc(1024 * stride * 8) as *mut f64
+    let cs = heap_alloc(1024 * stride * 8) as *mut f64
+    let zs = heap_alloc(1024 * stride * 8) as *mut f64
+    let zq = heap_alloc(1024 * stride * 8) as *mut f64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        let g = read_f64(gp, i) as i64
+        if k >= 0 && k < 1024 && g >= 0 && g < stride { let v = read_f64(vp, i); let idx = k * stride + g; write_f64(cn, idx, read_f64(cn, idx) + 1.0); write_f64(cs, idx, read_f64(cs, idx) + v) }
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        let g = read_f64(gp, i) as i64
+        if k >= 0 && k < 1024 && g >= 0 && g < stride { let idx = k * stride + g; let ng = read_f64(cn, idx); if ng > 0.0 { let mean = read_f64(cs, idx) / ng; var z = read_f64(vp, i) - mean; if z < 0.0 { z = 0.0 - z }; write_f64(zs, idx, read_f64(zs, idx) + z); write_f64(zq, idx, read_f64(zq, idx) + z * z) } }
+        i = i + 1
+    }
+    var kk: i64 = 0
+    while kk < 1024 {
+        let base = kk * stride
+        var K = 0.0; var N = 0.0; var totz = 0.0; var ssb = 0.0; var ssw = 0.0
+        var g: i64 = 0
+        while g < stride { let ng = read_f64(cn, base + g); if ng > 0.0 { let zsum = read_f64(zs, base + g); K = K + 1.0; N = N + ng; totz = totz + zsum; ssb = ssb + zsum * zsum / ng; ssw = ssw + (read_f64(zq, base + g) - zsum * zsum / ng) } g = g + 1 }
+        if K > 1.0 && N > K {
+            let SSB = ssb - totz * totz / N
+            if ssw > 0.0 {
+                let W = (SSB / (K - 1.0)) / (ssw / (N - K))
+                if mode == 0 { res[kk] = W } else { res[kk] = f_sf(W, K - 1.0, N - K) }
+            }
+        }
+        kk = kk + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    heap_free(cn as *mut i8); heap_free(cs as *mut i8); heap_free(zs as *mut i8); heap_free(zq as *mut i8)
+    out
+}
+/// Per-group LEVENE statistic (mean-based equal-variance test), broadcast. NATIVE + lean_single.
+pub fn bf_levene_stat_by(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64, ngroups: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_levene(src, key_col, grp_col, val_col, ngroups, 0) }
+/// Per-group LEVENE P-VALUE (F_sf(W, K−1, N−K)), broadcast. Uses stats::fisher_f. NATIVE + lean_single.
+pub fn bf_levene_pvalue_by(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64, ngroups: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_levene(src, key_col, grp_col, val_col, ngroups, 1) }
+
+/// Per-group additional TWO-SAMPLE EFFECT SIZES (columns key, group∈{0,1}, value). One pass over
+/// n/Σ/Σ² per (key,group) gives Cohen's d; modes: 0 = Hedges' g (bias-corrected d, ×J=1−3/(4N−9)),
+/// 1 = Cohen's d 95% CI lower, 2 = CI upper (d ± 1.96·SE(d), SE²=(n1+n0)/(n1n0)+d²/(2(n1+n0−2))).
+/// Returns 0 for keys missing a group or zero pooled variance. O(n). NATIVE + lean_single only.
+fn bf_group_effsize(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var n0: [f64; 1024] = [0.0; 1024]
+    var s0: [f64; 1024] = [0.0; 1024]
+    var q0: [f64; 1024] = [0.0; 1024]
+    var n1: [f64; 1024] = [0.0; 1024]
+    var s1: [f64; 1024] = [0.0; 1024]
+    var q1: [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || grp_col < 0 || grp_col >= nc || val_col < 0 || val_col >= nc || n <= 0 { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let gp = bf_col_ptr(src, grp_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let sc = heap_alloc(8) as *mut i64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 { let g = read_f64(gp, i) as i64; let v = read_f64(vp, i); if g == 1 { n1[k] = n1[k] + 1.0; s1[k] = s1[k] + v; q1[k] = q1[k] + v * v } else { if g == 0 { n0[k] = n0[k] + 1.0; s0[k] = s0[k] + v; q0[k] = q0[k] + v * v } } }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        if n0[g] > 1.0 && n1[g] > 1.0 {
+            let a0 = n0[g]; let a1 = n1[g]
+            var v0 = (q0[g] - s0[g] * s0[g] / a0) / (a0 - 1.0); if v0 < 0.0 { v0 = 0.0 }
+            var v1 = (q1[g] - s1[g] * s1[g] / a1) / (a1 - 1.0); if v1 < 0.0 { v1 = 0.0 }
+            let dof = a1 + a0 - 2.0
+            let psd = bfs_sqrt(((a1 - 1.0) * v1 + (a0 - 1.0) * v0) / dof, sc)
+            if psd > 0.0 {
+                let d = (s1[g] / a1 - s0[g] / a0) / psd
+                let nn = a1 + a0
+                if mode == 0 { res[g] = d * (1.0 - 3.0 / (4.0 * nn - 9.0)) }
+                else { let se = bfs_sqrt(nn / (a1 * a0) + d * d / (2.0 * dof), sc); if mode == 1 { res[g] = d - 1.959963985 * se } else { res[g] = d + 1.959963985 * se } }
+            }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    heap_free(sc as *mut i8)
+    out
+}
+/// Per-group HEDGES' g (bias-corrected Cohen's d), broadcast. NATIVE + lean_single.
+pub fn bf_hedges_g_by(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_effsize(src, key_col, grp_col, val_col, 0) }
+/// Per-group COHEN'S d 95% CI LOWER bound, broadcast. NATIVE + lean_single.
+pub fn bf_cohens_d_ci_lo_by(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_effsize(src, key_col, grp_col, val_col, 1) }
+/// Per-group COHEN'S d 95% CI UPPER bound, broadcast. NATIVE + lean_single.
+pub fn bf_cohens_d_ci_hi_by(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_effsize(src, key_col, grp_col, val_col, 2) }
+
+/// Per-group D'AGOSTINO-PEARSON NORMALITY test (scipy.stats.normaltest), columns key, value. One
+/// pass accumulates n/Σx/Σx²/Σx³/Σx⁴ per key -> central moments -> the skewness (D'Agostino) and
+/// kurtosis (Anscombe-Glynn) z-scores; K² = Z_skew² + Z_kurt² ~ χ²(2). modes: 0 = K² statistic,
+/// 1 = p-value χ²_sf(K²,2), 2 = skewness z-score, 3 = kurtosis z-score. Needs n>7. Returns 0 for
+/// n<8 or zero variance. O(n). NATIVE + lean_single only.
+fn bf_group_normaltest(src: &BigFrame, key_col: i64, val_col: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var cn: [f64; 1024] = [0.0; 1024]
+    var s1: [f64; 1024] = [0.0; 1024]
+    var s2: [f64; 1024] = [0.0; 1024]
+    var s3: [f64; 1024] = [0.0; 1024]
+    var s4: [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || n <= 0 { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let sc = heap_alloc(8) as *mut i64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 { let v = read_f64(vp, i); let v2 = v * v; cn[k] = cn[k] + 1.0; s1[k] = s1[k] + v; s2[k] = s2[k] + v2; s3[k] = s3[k] + v2 * v; s4[k] = s4[k] + v2 * v2 }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        let nn = cn[g]
+        if nn > 7.0 {
+            let xb = s1[g] / nn
+            let m2 = s2[g] / nn - xb * xb
+            if m2 > 0.0 {
+                let m3 = s3[g] / nn - 3.0 * xb * s2[g] / nn + 2.0 * xb * xb * xb
+                let m4 = s4[g] / nn - 4.0 * xb * s3[g] / nn + 6.0 * xb * xb * s2[g] / nn - 3.0 * xb * xb * xb * xb
+                let g1 = m3 / (m2 * bfs_sqrt(m2, sc))
+                let b2 = m4 / (m2 * m2)
+                // skewness z (D'Agostino)
+                let Y = g1 * bfs_sqrt((nn + 1.0) * (nn + 3.0) / (6.0 * (nn - 2.0)), sc)
+                let bb = 3.0 * (nn * nn + 27.0 * nn - 70.0) * (nn + 1.0) * (nn + 3.0) / ((nn - 2.0) * (nn + 5.0) * (nn + 7.0) * (nn + 9.0))
+                let W2 = 0.0 - 1.0 + bfs_sqrt(2.0 * (bb - 1.0), sc)
+                let delta = 1.0 / bfs_sqrt(0.5 * ln(W2), sc)
+                let alpha = bfs_sqrt(2.0 / (W2 - 1.0), sc)
+                let Ya = Y / alpha
+                let Zs = delta * ln(Ya + bfs_sqrt(Ya * Ya + 1.0, sc))
+                // kurtosis z (Anscombe-Glynn)
+                let E = 3.0 * (nn - 1.0) / (nn + 1.0)
+                let vark = 24.0 * nn * (nn - 2.0) * (nn - 3.0) / ((nn + 1.0) * (nn + 1.0) * (nn + 3.0) * (nn + 5.0))
+                let Xk = (b2 - E) / bfs_sqrt(vark, sc)
+                let b1 = (6.0 * (nn * nn - 5.0 * nn + 2.0) / ((nn + 7.0) * (nn + 9.0))) * bfs_sqrt(6.0 * (nn + 3.0) * (nn + 5.0) / (nn * (nn - 2.0) * (nn - 3.0)), sc)
+                let A = 6.0 + (8.0 / b1) * (2.0 / b1 + bfs_sqrt(1.0 + 4.0 / (b1 * b1), sc))
+                let base = (1.0 - 2.0 / A) / (1.0 + Xk * bfs_sqrt(2.0 / (A - 4.0), sc))
+                var cbrt = 0.0
+                if base > 0.0 { cbrt = exp(ln(base) / 3.0) } else { if base < 0.0 { cbrt = 0.0 - exp(ln(0.0 - base) / 3.0) } }
+                let Zk = ((1.0 - 2.0 / (9.0 * A)) - cbrt) / bfs_sqrt(2.0 / (9.0 * A), sc)
+                let K2 = Zs * Zs + Zk * Zk
+                if mode == 0 { res[g] = K2 }
+                else { if mode == 1 { res[g] = chi2_sf(K2, 2.0) }
+                else { if mode == 2 { res[g] = Zs } else { res[g] = Zk } } }
+            }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    heap_free(sc as *mut i8)
+    out
+}
+/// Per-group D'AGOSTINO-PEARSON K² normality statistic, broadcast. NATIVE + lean_single.
+pub fn bf_normaltest_stat_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_normaltest(src, key_col, val_col, 0) }
+/// Per-group NORMALITY TEST P-VALUE (χ²_sf(K²,2)), broadcast. Uses stats::chi_square. NATIVE + lean_single.
+pub fn bf_normaltest_pvalue_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_normaltest(src, key_col, val_col, 1) }
+/// Per-group SKEWNESS Z-SCORE (D'Agostino), broadcast. NATIVE + lean_single.
+pub fn bf_skew_zscore_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_normaltest(src, key_col, val_col, 2) }
+/// Per-group KURTOSIS Z-SCORE (Anscombe-Glynn), broadcast. NATIVE + lean_single.
+pub fn bf_kurt_zscore_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_normaltest(src, key_col, val_col, 3) }
+
+/// Per-group CHI-SQUARE GOODNESS-OF-FIT vs uniform (columns key, integer category 0..vmax). A 1D
+/// histogram per key; with K = #categories present and E = n/K, χ² = Σ(Oᵢ−E)²/E, df = K−1.
+/// modes: 0 = χ² statistic, 1 = p-value χ²_sf(χ², K−1). Returns 0 for K<2. O(n + G·vrange).
+/// NATIVE + lean_single only.
+fn bf_group_chi2gof(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var cn: [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || n <= 0 || vmax < 0 { return out }
+    let vm1 = vmax + 1
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let hist = heap_alloc(1024 * vm1 * 8) as *mut i64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        let v = read_f64(vp, i) as i64
+        if k >= 0 && k < 1024 && v >= 0 && v < vm1 { write_i64(hist, k * vm1 + v, read_i64(hist, k * vm1 + v) + 1); cn[k] = cn[k] + 1.0 }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        if cn[g] > 0.0 {
+            let base = g * vm1
+            var K = 0.0; var v: i64 = 0
+            while v < vm1 { if read_i64(hist, base + v) > 0 { K = K + 1.0 } v = v + 1 }
+            if K > 1.0 {
+                let E = cn[g] / K
+                var chi = 0.0; v = 0
+                while v < vm1 { if read_i64(hist, base + v) > 0 { let o = read_i64(hist, base + v) as f64; chi = chi + (o - E) * (o - E) / E } v = v + 1 }
+                if mode == 0 { res[g] = chi } else { res[g] = chi2_sf(chi, K - 1.0) }
+            }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    heap_free(hist as *mut i8)
+    out
+}
+/// Per-group CHI-SQUARE GOODNESS-OF-FIT statistic (vs uniform), broadcast. NATIVE + lean_single.
+pub fn bf_chi2_gof_stat_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_chi2gof(src, key_col, val_col, vmax, 0) }
+/// Per-group CHI-SQUARE GOODNESS-OF-FIT P-VALUE, broadcast. Uses stats::chi_square. NATIVE + lean_single.
+pub fn bf_chi2_gof_pvalue_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_chi2gof(src, key_col, val_col, vmax, 1) }
+
+/// Per-group CHI-SQUARE TEST OF INDEPENDENCE P-VALUE (columns key, integer categories x 0..xmax,
+/// y 0..ymax) via a per-key joint histogram. The Pearson χ² over cells with Eᵢⱼ = rowᵢ·colⱼ/N and
+/// df = (r−1)(c−1) (r,c = #present rows/cols) is reduced through stats::chi_square::chi2_sf — the
+/// p-value companion to the existing bf_chi2_dense_by statistic. Broadcast. O(n + G·xrange·yrange).
+/// NATIVE + lean_single only.
+fn bf_group_chi2ind(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, xmax: i64, ymax: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var cn: [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || x_col < 0 || x_col >= nc || y_col < 0 || y_col >= nc || n <= 0 || xmax < 0 || ymax < 0 { return out }
+    let xm1 = xmax + 1
+    let ym1 = ymax + 1
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let xp = bf_col_ptr(src, x_col) as *mut f64
+    let yp = bf_col_ptr(src, y_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let joint = heap_alloc(1024 * xm1 * ym1 * 8) as *mut i64
+    let rs = heap_alloc(1024 * xm1 * 8) as *mut f64
+    let cs = heap_alloc(1024 * ym1 * 8) as *mut f64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        let x = read_f64(xp, i) as i64
+        let y = read_f64(yp, i) as i64
+        if k >= 0 && k < 1024 && x >= 0 && x < xm1 && y >= 0 && y < ym1 {
+            let ji = (k * xm1 + x) * ym1 + y; write_i64(joint, ji, read_i64(joint, ji) + 1)
+            let ri = k * xm1 + x; write_f64(rs, ri, read_f64(rs, ri) + 1.0)
+            let ci = k * ym1 + y; write_f64(cs, ci, read_f64(cs, ci) + 1.0)
+            cn[k] = cn[k] + 1.0
+        }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        let N = cn[g]
+        if N > 0.0 {
+            var r = 0.0; var x: i64 = 0
+            while x < xm1 { if read_f64(rs, g * xm1 + x) > 0.0 { r = r + 1.0 } x = x + 1 }
+            var c = 0.0; var y: i64 = 0
+            while y < ym1 { if read_f64(cs, g * ym1 + y) > 0.0 { c = c + 1.0 } y = y + 1 }
+            if r > 1.0 && c > 1.0 {
+                var chi = 0.0
+                x = 0
+                while x < xm1 {
+                    let rx = read_f64(rs, g * xm1 + x)
+                    if rx > 0.0 {
+                        y = 0
+                        while y < ym1 {
+                            let cy = read_f64(cs, g * ym1 + y)
+                            if cy > 0.0 { let E = rx * cy / N; let o = read_i64(joint, (g * xm1 + x) * ym1 + y) as f64; chi = chi + (o - E) * (o - E) / E }
+                            y = y + 1
+                        }
+                    }
+                    x = x + 1
+                }
+                res[g] = chi2_sf(chi, (r - 1.0) * (c - 1.0))
+            }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    heap_free(joint as *mut i8); heap_free(rs as *mut i8); heap_free(cs as *mut i8)
+    out
+}
+/// Per-group CHI-SQUARE TEST-OF-INDEPENDENCE P-VALUE, broadcast (companion to bf_chi2_dense_by). NATIVE + lean_single.
+pub fn bf_chi2_contingency_pvalue_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, xmax: i64, ymax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_chi2ind(src, key_col, x_col, y_col, xmax, ymax) }
+
+/// Per-group TWO-SAMPLE F-TEST for equal variances (columns key, group∈{0,1}, value). One pass over
+/// n/Σ/Σ² per (key,group); F = s²₁/s²₀, df=(n1−1, n0−1). modes: 0 = F ratio, 1 = two-sided p-value
+/// (2·min(F_cdf, F_sf)). Sample variances ddof=1. Returns 0 for n<2 in a group or zero denominator
+/// variance. O(n). NATIVE + lean_single only.
+fn bf_group_varftest(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var n0: [f64; 1024] = [0.0; 1024]
+    var s0: [f64; 1024] = [0.0; 1024]
+    var q0: [f64; 1024] = [0.0; 1024]
+    var n1: [f64; 1024] = [0.0; 1024]
+    var s1: [f64; 1024] = [0.0; 1024]
+    var q1: [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || grp_col < 0 || grp_col >= nc || val_col < 0 || val_col >= nc || n <= 0 { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let gp = bf_col_ptr(src, grp_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 { let g = read_f64(gp, i) as i64; let v = read_f64(vp, i); if g == 1 { n1[k] = n1[k] + 1.0; s1[k] = s1[k] + v; q1[k] = q1[k] + v * v } else { if g == 0 { n0[k] = n0[k] + 1.0; s0[k] = s0[k] + v; q0[k] = q0[k] + v * v } } }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        if n0[g] > 1.0 && n1[g] > 1.0 {
+            let v0 = (q0[g] - s0[g] * s0[g] / n0[g]) / (n0[g] - 1.0)
+            let v1 = (q1[g] - s1[g] * s1[g] / n1[g]) / (n1[g] - 1.0)
+            if v0 > 0.0 && v1 > 0.0 {
+                let F = v1 / v0
+                if mode == 0 { res[g] = F }
+                else { let hi = f_sf(F, n1[g] - 1.0, n0[g] - 1.0); let lo = f_cdf(F, n1[g] - 1.0, n0[g] - 1.0); var mn = hi; if lo < mn { mn = lo }; res[g] = 2.0 * mn }
+            }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    out
+}
+/// Per-group VARIANCE RATIO F = s²₁/s²₀, broadcast. NATIVE + lean_single.
+pub fn bf_var_ratio_by(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_varftest(src, key_col, grp_col, val_col, 0) }
+/// Per-group F-TEST two-sided P-VALUE for equal variances, broadcast. Uses stats::fisher_f. NATIVE + lean_single.
+pub fn bf_var_ftest_pvalue_by(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_varftest(src, key_col, grp_col, val_col, 1) }
+
+/// Per-group ONE-PROPORTION inference (columns key, binary outcome 0/1). One pass counts n and
+/// #successes; p̂ = x/n. modes: 0 = z vs param p0 ((p̂−p0)/√(p0(1−p0)/n)), 1 = its two-sided
+/// p-value, 2 = Wilson 95% CI lower, 3 = Wilson 95% CI upper (CI ignores p0). Returns 0 for n<1.
+/// O(n). NATIVE + lean_single only.
+fn bf_group_oneprop(src: &BigFrame, key_col: i64, out_col: i64, p0: f64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var cn: [f64; 1024] = [0.0; 1024]
+    var cx: [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || out_col < 0 || out_col >= nc || n <= 0 { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, out_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let sc = heap_alloc(8) as *mut i64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 { cn[k] = cn[k] + 1.0; if read_f64(vp, i) > 0.0 { cx[k] = cx[k] + 1.0 } }
+        i = i + 1
+    }
+    let zc = 1.959963985
+    var g: i64 = 0
+    while g < 1024 {
+        let m = cn[g]
+        if m > 0.0 {
+            let ph = cx[g] / m
+            if mode == 0 || mode == 1 {
+                let se = bfs_sqrt(p0 * (1.0 - p0) / m, sc)
+                if se > 0.0 { let z = (ph - p0) / se; if mode == 0 { res[g] = z } else { var za = z; if za < 0.0 { za = 0.0 - za }; res[g] = 2.0 * (1.0 - bfs_ncdf(za)) } }
+            } else {
+                let cen = ph + zc * zc / (2.0 * m)
+                let hw = zc * bfs_sqrt(ph * (1.0 - ph) / m + zc * zc / (4.0 * m * m), sc)
+                let den = 1.0 + zc * zc / m
+                if mode == 2 { res[g] = (cen - hw) / den } else { res[g] = (cen + hw) / den }
+            }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    heap_free(sc as *mut i8)
+    out
+}
+/// Per-group ONE-PROPORTION z-test two-sided P-VALUE (H0: p=p0), broadcast. NATIVE + lean_single.
+pub fn bf_one_prop_ztest_pvalue_by(src: &BigFrame, key_col: i64, out_col: i64, p0: f64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_oneprop(src, key_col, out_col, p0, 1) }
+/// Per-group WILSON 95% CI LOWER for a proportion, broadcast. NATIVE + lean_single.
+pub fn bf_wilson_ci_lo_by(src: &BigFrame, key_col: i64, out_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_oneprop(src, key_col, out_col, 0.5, 2) }
+/// Per-group WILSON 95% CI UPPER for a proportion, broadcast. NATIVE + lean_single.
+pub fn bf_wilson_ci_hi_by(src: &BigFrame, key_col: i64, out_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_oneprop(src, key_col, out_col, 0.5, 3) }

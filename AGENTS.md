@@ -126,6 +126,58 @@ Use `bash scripts/dev/sounio_semantic_status.sh` before assigning overlapping
 semantic work. Scanner output is observational; dirty worktrees are potential
 writers, not automatic ownership claims.
 
+### Live lane coordination
+
+`bin/sounio-coord` is the live, cross-worktree coordination surface. It stores
+short-lived leases outside Git, keyed by the repository's shared Git directory,
+so attached worktrees see the same active claims.
+
+Before the first write in an implementation lane:
+
+1. Run `bin/sounio-coord brief` (also shown by `./sounio-whereami --quick`).
+2. Claim the exact write set:
+   `bin/sounio-coord claim --agent <id> --lane <id> --intent "<goal>" --files <paths...>`.
+3. Keep long-running work alive with
+   `bin/sounio-coord heartbeat --agent <id> --lane <id>`.
+4. Release on completion, abort, or handoff with
+   `bin/sounio-coord release --agent <id> --lane <id> --reason "<result>"`.
+
+Put `--files` last and quote glob scopes such as
+`'self-hosted/compiler/**'`. The command refuses overlapping active claims.
+Claims expire after four hours by default; expiry makes abandoned work visible,
+but does not authorize overwriting dirty files. Git status and executable repo
+truth still outrank coordination metadata. Treat this as runtime presence, not a
+durable handoff record; blockers and consequential handoffs still belong in the
+repository contracts named below.
+
+Project hooks in `.codex/hooks.json` and `.claude/settings.json` automate the
+common path. They register session presence, refresh a 30-minute lease during
+active turns, and reserve files before structured `Write`, `Edit`, or
+`apply_patch` calls. Claude releases its session lease on `SessionEnd`; Codex
+currently has no session-end event, so its inactive hook lease expires. Codex
+users must review and trust the project hook with `/hooks` once per hook hash.
+Shell commands can write arbitrary files and cannot be scoped reliably, so a
+manual exact scope remains mandatory before write-bearing Bash commands. The
+startup hook prints the session's agent/lane identity; reuse it with
+`bin/sounio-coord scope --agent <session-agent> --lane <session-lane> --intent "<goal>" --files <paths...>`
+instead of creating a second overlapping lease.
+
+Agents can exchange live messages across worktrees:
+
+- Send a directed request with
+  `bin/sounio-coord send --agent <id> --lane <id> --to-agent <id> --to-lane <id> --kind request --message "<text>"`.
+- Read pending messages with
+  `bin/sounio-coord inbox --agent <id> --lane <id>`.
+- After acting on a message, acknowledge it with
+  `bin/sounio-coord ack --agent <id> --lane <id> --message <message-id>`.
+
+Prompt and post-tool hooks inject unread messages into the agent's active turn.
+A rejected structured write also sends a request to the current owner
+automatically. Use
+`info`, `request`, `reply`, `blocker`, or `handoff` as message kinds. Messages
+coordinate work in progress; durable blockers still require the blocker
+contract.
+
 If an agent leaves a blocker for another agent, it must use that contract's
 Blocker-ID, severity, class, evidence, owner, worktree, branch, acceptance gate,
 and next-action fields.

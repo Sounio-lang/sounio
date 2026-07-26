@@ -1,4 +1,4 @@
-//! stdlib/epistemic/propagate.d
+//! stdlib/epistemic/propagate.sio
 //!
 //! Variance Propagation: The Delta Method
 //!
@@ -9,9 +9,26 @@
 //! - Univariate functions (exp, log, sin, cos, etc.)
 //! - Multivariate functions (products, quotients, compositions)
 //! - Monte Carlo propagation for complex cases
+//!
+//! Madaros native-import (2026-07-20 / Wave6 C):
+//!   Multi-module path is green for free-function Epistemic + delta-method
+//!   product / exp / ln / sin / cos and for value-style LCG MC kernels
+//!   (monte_carlo_identity, monte_carlo_square).
+//!   Call sites named literally `exp`/`cos` were SEGV under multi-module
+//!   Madaros when codegen name-matched float intrinsics (#1287 workaround
+//!   used exp_delta/cos_delta). Fixed: empty-stub builtins only
+//!   (instr_count == 0) — user/stdlib bodies keep their IR
+//!   (self-hosted/native/codegen_x86_linux.sio). exp_delta/cos_delta remain
+//!   as aliases of exp/cos for source-compat.
+//!   Remaining caveats:
+//!     - exclusive-ref xoshiro inside imported bodies is untrustworthy —
+//!       MC uses return-by-value Knuth LCG + CLT (rapamycin pattern).
+//!     - generic monte_carlo(x, f, n) with fn-ptr may still be fragile;
+//!       prefer the fixed kernels for native witnesses.
+//!   product_nonassoc lives in epistemic::product_nonassoc (PnOct leaf).
+//!   Does NOT claim lean_single ≡ Madaros.
 
 use epistemic::knowledge::{Epistemic, ep_clamp_conf, ep_min_conf, ep_decay, ep_combine};
-use algebra::associator_field::{assoc_field_octonion, af_augmented_variance};
 
 // ============================================================================
 // UNIVARIATE PROPAGATION
@@ -19,15 +36,21 @@ use algebra::associator_field::{assoc_field_octonion, af_augmented_variance};
 
 // Propagate variance through exponential: e^x
 // Var(e^X) ≈ e^(2X) · Var(X)
+// Canonical export name under Madaros multi-module (Wave6 C / codegen fix:
+// user-bodied free fns named exp are no longer hijacked by float intrinsics).
 pub fn exp(x: Epistemic) -> Epistemic with Mut, Div, Panic {
-    let value = exp_f64(x.val)
-    let variance = exp_f64(2.0 * x.val) * x.variance
-
+    let value = prop_exp_series(x.val)
+    let variance = prop_exp_series(2.0 * x.val) * x.variance
     Epistemic {
         val: value,
         variance: variance,
         confidence: ep_decay(x.confidence, 0.95),
     }
+}
+
+// Alias of exp (kept for #1287-era witnesses / docs that used exp_delta).
+pub fn exp_delta(x: Epistemic) -> Epistemic with Mut, Div, Panic {
+    exp(x)
 }
 
 // Propagate variance through natural log: ln(x)
@@ -73,17 +96,23 @@ pub fn sin(x: Epistemic) -> Epistemic with Mut, Div, Panic {
 
 // Propagate variance through cosine: cos(x)
 // Var(cos X) ≈ sin²(X) · Var(X)
+// Canonical export name under Madaros multi-module (see exp above).
 pub fn cos(x: Epistemic) -> Epistemic with Mut, Div, Panic {
-    let value = cos_f64(x.val)
+    let value = sin_f64(x.val + 1.5707963267948966)
     let sin_x = sin_f64(x.val)
     let variance = sin_x * sin_x * x.variance
-
     Epistemic {
         val: value,
         variance: variance,
         confidence: ep_decay(x.confidence, 0.98),
     }
 }
+
+// Alias of cos (kept for #1287-era witnesses / docs that used cos_delta).
+pub fn cos_delta(x: Epistemic) -> Epistemic with Mut, Div, Panic {
+    cos(x)
+}
+
 
 // Propagate variance through tangent: tan(x)
 // Var(tan X) ≈ sec⁴(X) · Var(X)
@@ -117,7 +146,7 @@ pub fn inverse(x: Epistemic) -> Epistemic with Mut, Div, Panic {
 // Propagate variance through logistic sigmoid: 1/(1 + e^(-x))
 // Var(σ(X)) ≈ σ(X)² · (1 - σ(X))² · Var(X)
 pub fn sigmoid(x: Epistemic) -> Epistemic with Mut, Div, Panic {
-    let s = 1.0 / (1.0 + exp_f64(0.0 - x.val))
+    let s = 1.0 / (1.0 + prop_exp_series(0.0 - x.val))
     let derivative = s * (1.0 - s)
     let variance = derivative * derivative * x.variance
 
@@ -253,29 +282,9 @@ pub fn product_correlated(
 // Associative triple   ⇒ ‖α‖² = 0 ⇒ no augmentation (order was safe).
 // Non-associative triple ⇒ variance grows by exactly the order-ambiguity carried.
 //
-// The associator coupling itself is the verified primitive in
-// algebra::associator_field (window 7); this makes it a first-class propagation
-// rule alongside sum/product/quotient rather than a manual, opt-in call.
-
-// Augment a scalar observable's variance with the order-indeterminacy of the
-// non-associative octonion triple (a,b,c) it was computed through.
-// `base.val` is unchanged (the structural term is uncertainty, not a bias);
-// confidence passes through, since the order-ambiguity is expressed in the
-// variance channel per the GUM-augmentation model — not double-counted as a
-// separate confidence penalty.
-pub fn product_nonassoc(
-    base: Epistemic,
-    a: &[f64; 8], b: &[f64; 8], c: &[f64; 8],
-    kappa: f64,
-) -> Epistemic with Mut, Div, Panic, NonAssoc {
-    let field = assoc_field_octonion(a, b, c, kappa)
-    let total = af_augmented_variance(base.variance, &field)
-    Epistemic {
-        val: base.val,
-        variance: if total < 0.0 { 0.0 } else { total },   // variance ≥ 0 (guards κ<0 / FP drift)
-        confidence: base.confidence,
-    }
-}
+// Canonical implementation lives in epistemic::product_nonassoc (PnOct leaf).
+// Import that module directly — do not reintroduce algebra::associator_field
+// into this file (exclusive-ref multi-module path SEGVs under Madaros native).
 
 // ============================================================================
 // FINITE-DIFF JACOBIAN HELPERS (for bivariate propagation)
@@ -328,47 +337,71 @@ pub fn propagate_2d_analytic(
 }
 
 // ============================================================================
-// MONTE CARLO PROPAGATION (using xoshiro)
+// MONTE CARLO PROPAGATION (value-style LCG; Madaros-native)
 // ============================================================================
 
-use random::xoshiro::{Xoshiro256, xoshiro_seed, standard_normal}
 
-// Helper: draw two N(0,1) samples in one call.
-// Workaround for ownership::double_mut_borrow on consecutive `standard_normal(&!rng)` in a loop.
-fn standard_normal_pair(rng: &!Xoshiro256) -> (f64, f64) with Prob, Mut, Div, Panic {
-    let a = standard_normal(rng)
-    let b = standard_normal(rng)
-    (a, b)
-}
 
 // Monte Carlo variance propagation for arbitrary functions
-pub fn monte_carlo(
-    x: Epistemic,
-    f: fn(f64) -> f64,
-    n_samples: i64,
-) -> Epistemic with Prob, Mut, Div, Panic {
-    let std = sqrt_f64(x.variance)
 
+// ---------------------------------------------------------------------------
+// Value-style LCG + CLT normal (Madaros-native MC)
+// Pattern from tests/run-pass/rapamycin_gum_vs_mc.sio (single-file proven).
+// No exclusive refs; no tuples on the hot path — struct NormalDraw only.
+// ---------------------------------------------------------------------------
+
+struct PropNormalDraw {
+    value: f64
+    seed: i64
+}
+
+fn prop_lcg_next(state: i64) -> i64 {
+    state * 6364136223846793005 + 1442695040888963407
+}
+
+fn prop_lcg_uniform(seed: i64) -> f64 with Mut, Div {
+    var s = seed
+    if s < 0 { s = 0 - s }
+    let m = 1073741824
+    var r = s
+    if r < 0 { r = 0 - r }
+    let bucket = r - (r / m) * m
+    (bucket as f64) / (m as f64)
+}
+
+fn prop_normal_sample(seed: i64) -> PropNormalDraw with Mut, Div {
+    var s = seed
+    var sum = 0.0
+    var j = 0
+    while j < 12 {
+        s = prop_lcg_next(s)
+        let u = prop_lcg_uniform(s)
+        sum = sum + u
+        j = j + 1
+    }
+    PropNormalDraw { value: sum - 6.0, seed: s }
+}
+
+// Madaros-native MC without function-pointer arguments.
+// Fixed kernels are the trustworthy surface under multi-module native.
+
+pub fn monte_carlo_identity(x: Epistemic, n_samples: i64) -> Epistemic with Prob, Mut, Div, Panic {
+    let std = sqrt_f64(x.variance)
     var sum = 0.0
     var sum_sq = 0.0
-    var rng = xoshiro_seed(12345)
-
+    var seed = 12345
     var i = 0
     while i < n_samples {
-        let z = standard_normal(&!rng)
-        let sample = x.val + z * std
-
-        let y = f(sample)
+        let z = prop_normal_sample(seed)
+        seed = z.seed
+        let y = x.val + z.value * std
         sum = sum + y
         sum_sq = sum_sq + y * y
-
         i = i + 1
     }
-
     let n = n_samples as f64
     let mean = sum / n
     let variance = (sum_sq / n) - (mean * mean)
-
     Epistemic {
         val: mean,
         variance: max_f64(variance, 0.0),
@@ -376,7 +409,62 @@ pub fn monte_carlo(
     }
 }
 
-// Monte Carlo for bivariate function
+pub fn monte_carlo_square(x: Epistemic, n_samples: i64) -> Epistemic with Prob, Mut, Div, Panic {
+    let std = sqrt_f64(x.variance)
+    var sum = 0.0
+    var sum_sq = 0.0
+    var seed = 12345
+    var i = 0
+    while i < n_samples {
+        let z = prop_normal_sample(seed)
+        seed = z.seed
+        let sample = x.val + z.value * std
+        let y = sample * sample
+        sum = sum + y
+        sum_sq = sum_sq + y * y
+        i = i + 1
+    }
+    let n = n_samples as f64
+    let mean = sum / n
+    let variance = (sum_sq / n) - (mean * mean)
+    Epistemic {
+        val: mean,
+        variance: max_f64(variance, 0.0),
+        confidence: ep_clamp_conf((900.0 * min_f64(n, 1000.0) / 1000.0) as i64),
+    }
+}
+
+// Generic MC with fn-ptr — value-style LCG; fn-ptr may still be fragile under
+// multi-module (prefer monte_carlo_identity / monte_carlo_square).
+pub fn monte_carlo(
+    x: Epistemic,
+    f: fn(f64) -> f64,
+    n_samples: i64,
+) -> Epistemic with Prob, Mut, Div, Panic {
+    let std = sqrt_f64(x.variance)
+    var sum = 0.0
+    var sum_sq = 0.0
+    var seed = 12345
+    var i = 0
+    while i < n_samples {
+        let z = prop_normal_sample(seed)
+        seed = z.seed
+        let sample = x.val + z.value * std
+        let y = f(sample)
+        sum = sum + y
+        sum_sq = sum_sq + y * y
+        i = i + 1
+    }
+    let n = n_samples as f64
+    let mean = sum / n
+    let variance = (sum_sq / n) - (mean * mean)
+    Epistemic {
+        val: mean,
+        variance: max_f64(variance, 0.0),
+        confidence: ep_clamp_conf((900.0 * min_f64(n, 1000.0) / 1000.0) as i64),
+    }
+}
+
 pub fn monte_carlo_2d(
     x: Epistemic,
     y: Epistemic,
@@ -385,28 +473,25 @@ pub fn monte_carlo_2d(
 ) -> Epistemic with Prob, Mut, Div, Panic {
     let std_x = sqrt_f64(x.variance)
     let std_y = sqrt_f64(y.variance)
-
     var sum = 0.0
     var sum_sq = 0.0
-    var rng = xoshiro_seed(67890)
-
+    var seed = 67890
     var i = 0
     while i < n_samples {
-        let zz = standard_normal_pair(&!rng)
-        let sample_x = x.val + zz.0 * std_x
-        let sample_y = y.val + zz.1 * std_y
-
+        let zx = prop_normal_sample(seed)
+        seed = zx.seed
+        let zy = prop_normal_sample(seed)
+        seed = zy.seed
+        let sample_x = x.val + zx.value * std_x
+        let sample_y = y.val + zy.value * std_y
         let result = f(sample_x, sample_y)
         sum = sum + result
         sum_sq = sum_sq + result * result
-
         i = i + 1
     }
-
     let n = n_samples as f64
     let mean = sum / n
     let variance = (sum_sq / n) - (mean * mean)
-
     Epistemic {
         val: mean,
         variance: max_f64(variance, 0.0),
@@ -422,19 +507,28 @@ fn abs_f64(x: f64) -> f64 {
     if x < 0.0 { 0.0 - x } else { x }
 }
 
-fn exp_f64(x: f64) -> f64 with Mut, Div, Panic {
-    if x > 10.0 { return 22026.465794806718 * exp_f64(x - 10.0) }
-    if x < -10.0 { return 0.00004539992976248485 * exp_f64(x + 10.0) }
-
+fn prop_exp_series(x: f64) -> f64 with Mut, Div, Panic {
+    // Iterative range reduction (no recursive self-call). Madaros imported-module
+    // path SEGV'd on the recursive form for some callers (measured 2026-07-20).
+    var xx = x
+    var scale = 1.0
+    while xx > 1.0 {
+        xx = xx - 1.0
+        scale = scale * 2.71828182845904523536
+    }
+    while xx < 0.0 - 1.0 {
+        xx = xx + 1.0
+        scale = scale * 0.36787944117144232159
+    }
     var result = 1.0
     var term = 1.0
     var i = 1
-    while i < 20 {
-        term = term * x / (i as f64)
+    while i < 24 {
+        term = term * xx / (i as f64)
         result = result + term
         i = i + 1
     }
-    result
+    result * scale
 }
 
 fn ln_f64(x: f64) -> f64 with Mut, Div, Panic {
@@ -468,7 +562,7 @@ fn sqrt_f64(x: f64) -> f64 with Mut, Div, Panic {
 }
 
 fn pow_f64(base: f64, exp: f64) -> f64 with Mut, Div, Panic {
-    exp_f64(exp * ln_f64(base))
+    prop_exp_series(exp * ln_f64(base))
 }
 
 fn sin_f64(x: f64) -> f64 with Mut, Div, Panic {
@@ -498,17 +592,4 @@ fn max_f64(a: f64, b: f64) -> f64 {
 
 fn min_f64(a: f64, b: f64) -> f64 {
     if a < b { a } else { b }
-}
-
-fn random_pair(state: u64) -> (f64, f64, u64) {
-    let a = 6364136223846793005_u64
-    let c = 1442695040888963407_u64
-
-    let s1 = state * a + c
-    let s2 = s1 * a + c
-
-    let u1 = ((s1 >> 32) as f64) / 4294967296.0
-    let u2 = ((s2 >> 32) as f64) / 4294967296.0
-
-    (max_f64(u1, 0.0000001), u2, s2)
 }

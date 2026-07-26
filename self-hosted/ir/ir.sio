@@ -8,9 +8,16 @@ use check::types::{TypeEntry, empty_type_entry}
 // These caps gate what the self-hosted pipeline can lower and execute.
 // Keep them aligned with the fixed backing storage in IrModule/IrFunction so
 // the lowering path can use the capacity that is already physically allocated.
+//
+// IR_MAX_INSTRS history:
+//   1024 → 2048 (earlier) → 4096 (2026-07-20, unsplit oct_mul).
+// Full exclusive-ref 8-component oct_mul lowers to ~2180 IR ops; under 2048 the
+// body filled the array, IrReturn was dropped, and core_ir codegen fell through
+// into main (ENTER/BEFORE_MUL re-entry storm). #1274 lo/hi split stayed green
+// because each half is ~1100 ops.
 pub let IR_MAX_FUNCS: i64 = 2048
 pub let IR_MAX_STRINGS: i64 = 4096
-pub let IR_MAX_INSTRS: i64 = 2048
+pub let IR_MAX_INSTRS: i64 = 4096
 pub let IR_MAX_PARAMS: i64 = 64
 pub let IR_INVALID_REG: i64 = -1
 pub let IR_INVALID_LABEL: i64 = -1
@@ -705,7 +712,7 @@ pub fn ir_strategy_name(s: i64) -> string {
 
 pub struct IrFunction {
     pub name: Name,
-    pub instrs: [IrInstr; 2048],
+    pub instrs: [IrInstr; 4096],
     pub instr_count: i64,
     pub reg_count: i64,
     pub label_count: i64,
@@ -719,6 +726,9 @@ pub struct IrFunction {
     pub is_sret: i64,             // 1 = SysV sret: rdi is hidden dest; explicit params shift to rsi+
     pub sret_dest_reg: i64,       // when is_sret==1: vreg receiving the hidden rdi destination
     pub bss_size: i64,            // for BSS-global vars: byte size of the global (8 for scalars)
+    // 1 = first param is &T / &!T (method self-by-ref). Call sites must pass an
+    // address; bare-value receivers need auto-OpRef (Root 2 method fix).
+    pub first_param_is_ref: i64,
 }
 
 pub struct IrAlgebraInfo {
@@ -2166,6 +2176,11 @@ pub struct StructFieldEntry {
     name: Name,
     index: i64,
     is_float: i64,
+    // Element type name of a fixed-size array field (`[T; N]` -> "T"); empty for
+    // non-array fields. Used to dispatch trait-method calls on a struct array
+    // element (`a.c[i].m()`) to the real `<T>_<method>` instead of a hardcoded
+    // `i64_<method>` (which is body-less for non-i64 T -> codegen crash).
+    elem_type_name: Name,
 }
 
 // Layout for one struct type: name + ordered fields
@@ -2182,7 +2197,7 @@ pub struct StructLayoutTable {
 }
 
 fn empty_struct_field_entry() -> StructFieldEntry {
-    StructFieldEntry { name: ir_empty_name(), index: 0, is_float: 0 }
+    StructFieldEntry { name: ir_empty_name(), index: 0, is_float: 0, elem_type_name: ir_empty_name() }
 }
 
 fn empty_struct_layout_entry() -> StructLayoutEntry {
@@ -3712,7 +3727,7 @@ fn ir_phi(dst: i64) -> IrInstr {
 pub fn ir_empty_function() -> IrFunction {
     IrFunction {
         name: ir_empty_name(),
-        instrs: [ir_nop(); 1024],
+        instrs: [ir_nop(); 4096],
         instr_count: 0,
         reg_count: 0,
         label_count: 0,
@@ -3726,6 +3741,7 @@ pub fn ir_empty_function() -> IrFunction {
         is_sret: 0,
         sret_dest_reg: -1,
         bss_size: 0,
+        first_param_is_ref: 0,
     }
 }
 
@@ -3758,6 +3774,15 @@ pub fn ir_empty_module() -> IrModule {
 pub let BSS_MAX_GLOBALS: i64 = 2047
 pub let BSS_BASE_LINUX: i64 = 0x10000000
 pub let IR_STRATEGY_BSS_GLOBAL: i64 = 99
+// Wave15e: module-level string literal BSS init. prof_counter_id holds this
+// magic; return_struct_name carries the normalized payload; codegen LEAs
+// rodata into the BSS slot (imm fill cannot encode a RIP-relative pointer).
+pub let BSS_INIT_STRING_MAGIC: i64 = 0 - 800001
+// Must match native::gc::native_v2_object_header_size(). BSS aggregate & / &!
+// refs stash (bss_addr - header) so native-v2 ref_array_* (load slot; resolve
+// raw ptr; add header to index) lands on the true BSS base. Direct GG[i] still
+// uses raw IndexGet (label_id=2) at BSS_BASE+off with no header.
+pub let IR_NATIVE_V2_OBJECT_HEADER_SIZE: i64 = 32
 
 pub fn bss_name_hash(n: Name) -> i64 with Div {
     var hash: i64 = 5381

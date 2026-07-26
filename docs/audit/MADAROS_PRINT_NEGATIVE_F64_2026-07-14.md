@@ -10,6 +10,14 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-
 # Madaros v0.80.0 — `print(f64)` drops the magnitude of negative floats
 
 **Date:** 2026-07-14
+**Status:** FIXED (2026-07-20) — `emit_builtin_print_f64` reloads abs bits from `xmm0`
+  after the `'-'` write (rdi held stdout fd). Regression:
+  `tests/run-pass/println_f64_negative.sio`.
+  **Wave15 B residual closeout (2026-07-22):** dedicated `print_f64` witness
+  `tests/run-pass/print_f64_negative.sio` (`-0.0`, `-2.0`, `-0.5`, `+2.0` +
+  bits oracle) and gate `scripts/ci/madaros_print_f64_negative_gate.sh`
+  (`MADAROS_PRINT_F64_NEGATIVE_GATE_OK`). Closes the stale Note in
+  `MADAROS_NATIVE_V2_F64_REMAINING_BUGS_2026-07-20.md` and issue #890.
 **Toolchain:** `./bin/souc` → Madaros v0.80.0
 **Owner:** CODEX-2 (`self-hosted/` float formatting in the print builtin)
 **Class:** compiler-semantics · **Severity:** B1 (any stdout of a negative number is wrong)

@@ -9,7 +9,7 @@
 // Symbols from modules that still have unresolved deps are left as forward refs
 // (accepted by the self-hosted runtime's flat-bundle approach).
 // Named imports only — glob imports caused type-checker stack overflow
-use parser::ast::{AstPath, empty_path, ImportItemList, ItemKind, ItemList, Name, Program, StringList}
+use parser::ast::{AstPath, empty_path, ImportItemList, ItemKind, ItemList, Name, Program, StringList, ast_reset_global_var_inits, GLOBAL_VAR_INIT_SUPPRESS_RESET}
 use ir::ir::{ir_empty_epistemic_section, ir_empty_function, ir_empty_module, ir_empty_name, ir_empty_validated_patch_stats, IrAlgebraTable, IrEpistemicSection, IrFunction, IrInstr, IrLowerResult, IR_MAX_EPI_ACQUISITION_PLANS, IR_MAX_EPI_ACQUISITION_POLICIES, IR_MAX_EPI_ACQUISITION_REASON_WITNESSES, IR_MAX_EPI_ALTERNATIVE_CANDIDATES, IR_MAX_EPI_ALTERNATIVE_FRONTIERS, IR_MAX_EPI_ALTERNATIVE_POLICIES, IR_MAX_EPI_ALTERNATIVE_REASON_WITNESSES, IR_MAX_EPI_ALTERNATIVE_SETS, IR_MAX_EPI_AUDITS, IR_MAX_EPI_CONTESTS, IR_MAX_EPI_CONTEST_WITNESSES, IR_MAX_EPI_COUNTEREXAMPLES, IR_MAX_EPI_DECISION_CERTIFICATES, IR_MAX_EPI_DECISION_POLICIES, IR_MAX_EPI_DEFERRAL_POLICIES, IR_MAX_EPI_DEFERRED_CERTIFICATES, IR_MAX_EPI_DEFERRED_REASON_WITNESSES, IR_MAX_EPI_MECHANISTIC_REPORTS, IR_MAX_EPI_MODEL_FAMILIES, IR_MAX_EPI_MONITORING_POLICIES, IR_MAX_EPI_OBSERVED_TRANSITIONS, IR_MAX_EPI_POLICIES, IR_MAX_EPI_POSTERIOR_WEIGHTS, IR_MAX_EPI_RECOURSE_PLANS, IR_MAX_EPI_RECOURSE_POLICIES, IR_MAX_EPI_RECOURSE_REASON_WITNESSES, IR_MAX_EPI_ROBUST_PROOFS, IR_MAX_EPI_ROLLBACK_CERTIFICATES, IR_MAX_EPI_TRANSITION_PLANS, IR_MAX_EPI_TRANSITION_POLICIES, IR_MAX_EPI_TRANSITION_PROTOCOLS, IR_MAX_EPI_TRANSITION_REASON_WITNESSES, IR_MAX_EPI_TRANSITION_STEPS, IR_MAX_EPI_VALIDATED_MANIFESTS, IR_MAX_EPI_VALIDATIONS, IR_MAX_FUNCS, IR_MAX_STRINGS, IrModule, ir_name_eq, IrOpcode, IrProfCounterInfo, IR_STRATEGY_STANDARD, make_name}
 use check::mod::{check_program_epistemic_into, check_program_with_artifacts, checker_apply_ir_metadata, checker_to_ir_epistemic_into}
 use resolve::mod::{resolve_modules, ResolveBatchResult}
@@ -253,6 +253,55 @@ fn file_path_mod_fallback(path: string) -> string with Mut, Panic, Div {
     str_concat(str_concat(base, "/mod"), ".sio")
 }
 
+// Drop the last segment of an AstPath. Returns (parent_path, true) when a
+// parent exists (original had >= 2 segments).
+fn ast_path_drop_last_segment(path: AstPath) -> (AstPath, bool) with Mut, Panic, Div, Alloc {
+    if path.seg_count < 2 {
+        return (path, false)
+    }
+    let segs = path.segments
+    match segs.tail {
+        None => (path, false)
+        Some(rest1) => {
+            match (*rest1).tail {
+                None => {
+                    // path was [head, last] → parent is [head]
+                    let parent = AstPath {
+                        segments: StringList {
+                            head_buf: segs.head_buf,
+                            head_len: segs.head_len,
+                            tail: None,
+                        },
+                        seg_count: 1,
+                    }
+                    (parent, true)
+                }
+                Some(_) => {
+                    // path was [head, ..., last] with >= 3 segments.
+                    let nested = AstPath {
+                        segments: *rest1,
+                        seg_count: path.seg_count - 1,
+                    }
+                    let nested_pair = ast_path_drop_last_segment(nested)
+                    if !nested_pair.1 {
+                        return (path, false)
+                    }
+                    let parent_tail = nested_pair.0.segments
+                    let parent = AstPath {
+                        segments: StringList {
+                            head_buf: segs.head_buf,
+                            head_len: segs.head_len,
+                            tail: Some(Box::new(parent_tail)),
+                        },
+                        seg_count: path.seg_count - 1,
+                    }
+                    (parent, true)
+                }
+            }
+        }
+    }
+}
+
 fn resolve_import_file_path(path: AstPath, cur_dir: string) -> string with IO, Mut, Panic, Div, Alloc {
     let local = use_path_to_file_path(path, cur_dir)
     if file_exists(local) {
@@ -269,6 +318,30 @@ fn resolve_import_file_path(path: AstPath, cur_dir: string) -> string with IO, M
     let pkg_mod = file_path_mod_fallback(pkg)
     if file_exists(pkg_mod) {
         return pkg_mod
+    }
+    // Named-import fallback (see module_frontend.resolve_import_file_path):
+    // bare `use mod::symbol` when `mod/symbol.sio` is missing → load `mod.sio`.
+    if path.seg_count >= 2 {
+        let parent_pair = ast_path_drop_last_segment(path)
+        if parent_pair.1 {
+            let parent = parent_pair.0
+            let parent_local = use_path_to_file_path(parent, cur_dir)
+            if file_exists(parent_local) {
+                return parent_local
+            }
+            let parent_stdlib = use_path_to_file_path(parent, "stdlib")
+            if file_exists(parent_stdlib) {
+                return parent_stdlib
+            }
+            let parent_pkg = use_path_to_package_file_path(parent)
+            if file_exists(parent_pkg) {
+                return parent_pkg
+            }
+            let parent_pkg_mod = file_path_mod_fallback(parent_pkg)
+            if file_exists(parent_pkg_mod) {
+                return parent_pkg_mod
+            }
+        }
     }
     local
 }
@@ -1125,6 +1198,13 @@ fn multimodule_frontend_error(msg: string) -> MultiModuleFrontendResult {
 }
 
 pub fn preflight_multimodule_frontend(main_path: string) -> MultiModuleFrontendResult with IO, Mut, Div, Panic, Alloc {
+    // One compilation = one fresh global-init table, then accumulate every module.
+    // Preflight is the first thing every compile path runs and it loads main + all
+    // imports, so resetting once here and suppressing the per-parse reset lets an
+    // imported module's f64 constants survive to lowering (they were previously
+    // wiped when the next module was parsed). See ast_record_global_var_init.
+    ast_reset_global_var_inits()
+    GLOBAL_VAR_INIT_SUPPRESS_RESET = 1
     let main_prog = load_module_file(main_path)
     let main_items = count_items(main_prog)
 

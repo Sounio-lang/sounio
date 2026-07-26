@@ -1,0 +1,71 @@
+//@ run-pass
+//@ requires: madaros
+// Wave11 Agent E — Defect A regression: imported-module f64 constants must not
+// read as 0 under multi-module native lowering.
+//
+// Stock origin/main (before this fix): leaf globals wiped when pad was parsed
+// after the leaf → LEAF_LN_SQRT_2PI bits = 0 at same-module use sites.
+// Science symptom: stats::densities::lognormal_pdf(1,0,1) returned 1.0 instead
+// of 1/sqrt(2π) because DE_LN_SQRT_2PI was zeroed (see lognormal science gate).
+//
+// Load order (BFS): main → leaf → pad. Pad is last; without suppress-reset the
+// leaf init words are gone before lower. Pad has no BSS globals so this witness
+// does not entangle the separate multi-mod BSS-offset-collision residual.
+//
+// Access pattern matches the science vertical: same-module use of the constant
+// (via leaf_const_via_fn), not cross-module bare Ident of the global from main.
+
+use imported_f64_global_const_leaf::{
+    leaf_const_via_fn,
+    leaf_half_via_fn,
+}
+use imported_f64_global_const_pad::{pad_touch}
+
+fn bits_eq(a: f64, b: f64) -> bool {
+    f64_to_bits(a) == f64_to_bits(b)
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    // Force pad into the dep closure (last-load → would wipe leaf GLOBAL_VAR_INIT).
+    let pad_v = pad_touch()
+    if pad_v != 7 {
+        println("FAIL pad_touch")
+        return 6
+    }
+
+    let expected_ln: f64 = 0.9189385332046727
+    let expected_half: f64 = 0.5
+
+    let via_fn = leaf_const_via_fn()
+    let half_f = leaf_half_via_fn()
+
+    print("via_fn_bits ")
+    print_int(f64_to_bits(via_fn))
+    println("")
+    print("half_fn_bits ")
+    print_int(f64_to_bits(half_f))
+    println("")
+    print("expected_ln_bits ")
+    print_int(f64_to_bits(expected_ln))
+    println("")
+    print("expected_half_bits ")
+    print_int(f64_to_bits(expected_half))
+    println("")
+
+    if !bits_eq(via_fn, expected_ln) {
+        println("FAIL via_fn LEAF_LN_SQRT_2PI (GLOBAL_VAR_INIT wiped?)")
+        return 1
+    }
+    if !bits_eq(half_f, expected_half) {
+        println("FAIL via_fn LEAF_HALF (GLOBAL_VAR_INIT wiped?)")
+        return 2
+    }
+    // Guard the known wrong science collapse (const wiped → 0.0).
+    if f64_to_bits(via_fn) == f64_to_bits(0.0) {
+        println("FAIL via_fn collapsed to 0.0")
+        return 3
+    }
+
+    println("IMPORTED_F64_GLOBAL_CONST_OK")
+    0
+}

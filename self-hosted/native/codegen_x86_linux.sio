@@ -7,7 +7,7 @@
 module native::codegen_x86_linux
 
 use parser::ast::{Name}
-use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_MAX_FUNCS, IR_MAX_STRINGS, IR_FLOAT_REG_MARKER_FLAG, ir_name_eq, BSS_BASE_LINUX, IR_STRATEGY_BSS_GLOBAL}
+use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_MAX_FUNCS, IR_MAX_STRINGS, IR_FLOAT_REG_MARKER_FLAG, ir_name_eq, BSS_BASE_LINUX, IR_STRATEGY_BSS_GLOBAL, BSS_INIT_STRING_MAGIC}
 use native::encode::*
 use native::elf::*
 use native::aarch64::*
@@ -1100,6 +1100,14 @@ fn native_v2_func_name_is_print(func: &IrFunction) -> bool with Mut, Panic, Div 
 }
 
 fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, Div {
+    // Empty stubs (instr_count == 0) from ir_module_ensure_builtin_call_targets
+    // still map to hand-coded float/string/IO intrinsics. User/stdlib free
+    // functions that share a name (e.g. epistemic::propagate::exp/cos) keep
+    // their lowered IR body — name-only hijack used the float intrinsic ABI
+    // on non-f64 args and SEGVd under multi-module Madaros (#1287 / Wave6 C).
+    if (*func).instr_count > 0 {
+        return 0
+    }
     if native_v2_func_name_is_print_int(func) { return 1 }
     if native_v2_func_name_is_print_char(func) { return 2 }
     if native_v2_func_name_is_print(func) { return 3 }
@@ -1120,14 +1128,33 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
     if name_is_log((*func).name) { return 17 }
     if name_is_sin((*func).name) { return 18 }
     if name_is_cos((*func).name) { return 19 }
+    if name_is_f64_to_bits((*func).name) { return 25 }
+    if name_is_bits_to_f64((*func).name) { return 26 }
     if name_is_assert((*func).name) { return 21 }
     if name_is_str_from_bytes((*func).name) { return 22 }
     if name_is_heap_alloc((*func).name) { return 23 }
     if name_is_heap_free((*func).name) { return 24 }
+    if name_is_syscall6((*func).name) { return 27 }
     0
 }
 
 // M4: argv and string builtins
+
+// syscall6(nr, a1..a6) raw Linux syscall builtin (id 27). Checker arm:
+// call_expr_is_syscall6 in check/check.sio; lowering arm in ir/lower.sio.
+fn name_is_syscall6(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 8 { return false }
+    if n.buf[0] != 115 as i8 { return false }     // 's'
+    if n.buf[1] != 121 as i8 { return false }     // 'y'
+    if n.buf[2] != 115 as i8 { return false }     // 's'
+    if n.buf[3] != 99 as i8 { return false }      // 'c'
+    if n.buf[4] != 97 as i8 { return false }      // 'a'
+    if n.buf[5] != 108 as i8 { return false }     // 'l'
+    if n.buf[6] != 108 as i8 { return false }     // 'l'
+    if n.buf[7] != 54 as i8 { return false }      // '6'
+    true
+}
+
 fn name_is_get_arg_count(n: Name) -> bool with Mut, Panic, Div {
     // Source-level spelling is "arg_count"; retain the older
     // "get_arg_count" backend alias for hand-built IR witnesses.
@@ -1317,6 +1344,38 @@ pub fn name_is_sqrt(n: Name) -> bool with Mut, Panic, Div {
     if n.buf[1] != 113 as i8 { return false }     // 'q'
     if n.buf[2] != 114 as i8 { return false }     // 'r'
     if n.buf[3] != 116 as i8 { return false }     // 't'
+    true
+}
+
+pub fn name_is_f64_to_bits(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 11 { return false }
+    if n.buf[0] != 102 as i8 { return false }     // 'f'
+    if n.buf[1] != 54 as i8 { return false }      // '6'
+    if n.buf[2] != 52 as i8 { return false }      // '4'
+    if n.buf[3] != 95 as i8 { return false }      // '_'
+    if n.buf[4] != 116 as i8 { return false }     // 't'
+    if n.buf[5] != 111 as i8 { return false }     // 'o'
+    if n.buf[6] != 95 as i8 { return false }      // '_'
+    if n.buf[7] != 98 as i8 { return false }      // 'b'
+    if n.buf[8] != 105 as i8 { return false }     // 'i'
+    if n.buf[9] != 116 as i8 { return false }     // 't'
+    if n.buf[10] != 115 as i8 { return false }    // 's'
+    true
+}
+
+pub fn name_is_bits_to_f64(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 11 { return false }
+    if n.buf[0] != 98 as i8 { return false }      // 'b'
+    if n.buf[1] != 105 as i8 { return false }     // 'i'
+    if n.buf[2] != 116 as i8 { return false }     // 't'
+    if n.buf[3] != 115 as i8 { return false }     // 's'
+    if n.buf[4] != 95 as i8 { return false }      // '_'
+    if n.buf[5] != 116 as i8 { return false }     // 't'
+    if n.buf[6] != 111 as i8 { return false }     // 'o'
+    if n.buf[7] != 95 as i8 { return false }      // '_'
+    if n.buf[8] != 102 as i8 { return false }     // 'f'
+    if n.buf[9] != 54 as i8 { return false }      // '6'
+    if n.buf[10] != 52 as i8 { return false }     // '4'
     true
 }
 
@@ -1724,11 +1783,72 @@ fn nc_emit_mov_rsp_rbp(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0xec)
 }
 
+// Linux x86-64 stack growth: the kernel only maps stack pages on demand.
+// A bare `sub rsp, large` leaves rsp in unmapped VA; the first deep store or
+// push can MAPERR if it skips past the guard gap. For frames ≥ one page we
+// allocate page-by-page with an explicit touch so each page faults in under
+// the current rsp (GCC/LLVM -fstack-clash-protection style). Clobbers r11
+// (caller-saved; free at prologue before param spill).
+//
+// Live callers: compile_ir_function_v2_core_ir_into, native_v2_core_begin_fn_spill_into.
+fn nc_emit_stack_probe_after_sub(nc: &! NativeCompiler) with Mut, Panic, Div {
+    // lean_single twin — no-op when frame < 4 KiB (rax steps below rsp immediately):
+    //   mov rax, rbp
+    // .L: sub rax, 0x1000 ; cmp rax, rsp ; jbe .E ; or byte ptr [rax], 0 ; jmp .L
+    // .E:
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0xe8)  // mov rax, rbp
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x2d); nc_emit_u32_le(nc, 0x1000)  // sub rax, 0x1000
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x39); nc_emit_byte(nc, 0xe0)  // cmp rax, rsp
+    nc_emit_byte(nc, 0x76); nc_emit_byte(nc, 0x05)                         // jbe +5
+    nc_emit_byte(nc, 0x80); nc_emit_byte(nc, 0x08); nc_emit_byte(nc, 0x00)  // or byte ptr [rax], 0
+    nc_emit_byte(nc, 0xeb); nc_emit_byte(nc, 0xf0)                         // jmp -16
+}
+
 fn nc_emit_sub_rsp_imm32(nc: &! NativeCompiler, val: i64) with Mut, Panic, Div {
-    nc_emit_byte(nc, 0x48)
-    nc_emit_byte(nc, 0x81)
-    nc_emit_byte(nc, 0xec)
+    if val <= 0 {
+        return
+    }
+    // Page size 4096. Below one page: single sub + post-probe (probe is a no-op
+    // when rbp-rsp < 4K). At/above one page: rsp-frontier page walk so each
+    // new page is touched with rsp already on that page (Linux grows on fault).
+    if val < 4096 {
+        nc_emit_byte(nc, 0x48)
+        nc_emit_byte(nc, 0x81)
+        nc_emit_byte(nc, 0xec)
+        nc_emit_u32_le(nc, val)
+        nc_emit_stack_probe_after_sub(nc)
+        return
+    }
+    // mov r11, val
+    nc_emit_byte(nc, 0x49); nc_emit_byte(nc, 0xc7); nc_emit_byte(nc, 0xc3)
     nc_emit_u32_le(nc, val)
+    // .L:
+    // cmp r11, 0x1000
+    nc_emit_byte(nc, 0x49); nc_emit_byte(nc, 0x81); nc_emit_byte(nc, 0xfb)
+    nc_emit_u32_le(nc, 0x1000)
+    // jb .Lrest  (+21)
+    nc_emit_byte(nc, 0x72); nc_emit_byte(nc, 0x15)
+    // sub rsp, 0x1000
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x81); nc_emit_byte(nc, 0xec)
+    nc_emit_u32_le(nc, 0x1000)
+    // or qword ptr [rsp], 0
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x83); nc_emit_byte(nc, 0x0c)
+    nc_emit_byte(nc, 0x24); nc_emit_byte(nc, 0x00)
+    // sub r11, 0x1000
+    nc_emit_byte(nc, 0x49); nc_emit_byte(nc, 0x81); nc_emit_byte(nc, 0xeb)
+    nc_emit_u32_le(nc, 0x1000)
+    // jmp .L  (-30)
+    nc_emit_byte(nc, 0xeb); nc_emit_byte(nc, 0xe2)
+    // .Lrest: sub rsp, r11
+    nc_emit_byte(nc, 0x4c); nc_emit_byte(nc, 0x29); nc_emit_byte(nc, 0xdc)
+    // test r11, r11
+    nc_emit_byte(nc, 0x4d); nc_emit_byte(nc, 0x85); nc_emit_byte(nc, 0xdb)
+    // jz .Ldone (+5)
+    nc_emit_byte(nc, 0x74); nc_emit_byte(nc, 0x05)
+    // or qword ptr [rsp], 0
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x83); nc_emit_byte(nc, 0x0c)
+    nc_emit_byte(nc, 0x24); nc_emit_byte(nc, 0x00)
+    // .Ldone:
 }
 
 fn nc_emit_add_rsp_imm32(nc: &! NativeCompiler, val: i64) with Mut, Panic, Div {
@@ -1963,6 +2083,16 @@ fn nc_emit_movzx_rax_byte_rdx_rbx(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x48)
     nc_emit_byte(nc, 0x0f)
     nc_emit_byte(nc, 0xb6)
+    nc_emit_byte(nc, 0x04)
+    nc_emit_byte(nc, 0x1a)
+}
+
+// MOVSX RAX, BYTE [RDX + RBX] — signed packed i8 BSS / raw-byte load
+// Encoding: REX.W 0F BE /r  with SIB [rdx+rbx] → 48 0f be 04 1a
+fn nc_emit_movsx_rax_byte_rdx_rbx(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0xbe)
     nc_emit_byte(nc, 0x04)
     nc_emit_byte(nc, 0x1a)
 }
@@ -2717,26 +2847,65 @@ fn native_v2_emit_gc_empty_frame_reset(nc: NativeCompiler) -> NativeCompiler wit
     c
 }
 
+// Hybrid base resolution (issue #919):
+//   handle id  ∈ [1, capacity)  → table lookup → object base
+//   raw pointer ≥ capacity      → already an object base (unboxed small value)
+// Unboxed ≤16 B value structs return the raw object base so they never consume
+// a handle-table slot; field load/store must accept both encodings.
 fn native_v2_resolve_handle_to_object_base_rax(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
     c.code = emit_mov_rbx_rax(c.code)
+    c.code = emit_mov_rax_imm(c.code, native_v2_handle_raw_ptr_threshold())
+    c.code = emit_cmp_rbx_rax(c.code)
+    c.code = emit_setae_al(c.code)
+    c.code = emit_movzx_rax_al(c.code)
+    c.code = emit_test_rax_rax(c.code)
+    let raw_jnz = c.code.len
+    c.code = emit_jnz_rel32(c.code)
+
+    c.code = emit_mov_rax_rbx(c.code)
     c.code = emit_imul_rbx_rbx_imm8(c.code, native_v2_handle_entry_size())
     c.code = emit_mov_reg_reg(c.code, 7, 3)
     c = emit_load_runtime_context_field_rax(c, runtime_context_field_handle_table_base())
     c.code = emit_mov_reg_reg(c.code, 3, 7)
     c.code = emit_add_rax_rbx(c.code)
     c.code = emit_load_rax_mem_rax_disp32(c.code, native_v2_handle_entry_field_object_base())
+    let done_jmp = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+
+    let raw_target = c.code.len
+    c.code = patch_u32_le(c.code, raw_jnz + 2, raw_target - (raw_jnz + 6))
+    c.code = emit_mov_rax_rbx(c.code)
+    let done_target = c.code.len
+    c.code = patch_u32_le(c.code, done_jmp + 1, done_target - (done_jmp + 5))
     c
 }
 
 fn native_v2_resolve_handle_to_object_base_rax_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_mov_rbx_rax(nc)
+    nc_emit_mov_rax_imm(nc, native_v2_handle_raw_ptr_threshold())
+    nc_emit_cmp_rbx_rax(nc)
+    nc_emit_setae_al(nc)
+    nc_emit_movzx_rax_al(nc)
+    nc_emit_test_rax_rax(nc)
+    let raw_jnz = (*nc).code.len
+    nc_emit_jnz_rel32(nc)
+
+    nc_emit_mov_rax_rbx(nc)
     nc_emit_imul_rbx_rbx_imm8(nc, native_v2_handle_entry_size())
     nc_emit_mov_reg_reg(nc, 7, 3)
     emit_load_runtime_context_field_rax_into(nc, runtime_context_field_handle_table_base())
     nc_emit_mov_reg_reg(nc, 3, 7)
     nc_emit_add_rax_rbx(nc)
     nc_emit_load_rax_mem_rax_disp32(nc, native_v2_handle_entry_field_object_base())
+    let done_jmp = (*nc).code.len
+    nc_emit_jmp_rel32(nc)
+
+    let raw_target = (*nc).code.len
+    nc_patch_u32_le(nc, raw_jnz + 2, raw_target - (raw_jnz + 6))
+    nc_emit_mov_rax_rbx(nc)
+    let done_target = (*nc).code.len
+    nc_patch_u32_le(nc, done_jmp + 1, done_target - (done_jmp + 5))
 }
 
 fn native_data_add_u64(st: StringTable, value: i64) -> StringTable with Mut, Panic, Div {
@@ -3350,6 +3519,36 @@ fn emit_builtin_heap_free_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_patch_u32_le(nc, null_patch, done_offset - (null_patch + 4))
 }
 
+// syscall6(nr, a1, a2, a3, a4, a5, a6) -> i64 — raw Linux syscall escape
+// hatch (builtin id 27), the Madaros twin of lean_single's emit_syscall6_x86
+// (self-hosted/compiler/lean_single.sio:9709). Args arrive per the IrCall
+// SysV marshalling: rdi=nr, rsi=a1, rdx=a2, rcx=a3, r8=a4, r9=a5, a6 on the
+// stack at [rsp+8] (return address at [rsp]; nc_core_push_call_stack_args
+// pads to 16B BEFORE pushing stack args, so a6 is always the first slot).
+// The kernel ABI wants rax=nr, rdi=a1, rsi=a2, rdx=a3, r10=a4 (NOT rcx),
+// r8=a5, r9=a6, so the body shuffles registers in destructive-safe order
+// (each move frees its own source before the next read) and loads a6 last,
+// before any push would shift the stack slots. Return value stays in rax.
+fn emit_builtin_syscall6_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_mov_reg_reg(nc, 0, 7)   // mov rax, rdi  (nr)
+    nc_emit_mov_reg_reg(nc, 7, 6)   // mov rdi, rsi  (a1)
+    nc_emit_mov_reg_reg(nc, 6, 2)   // mov rsi, rdx  (a2)
+    nc_emit_mov_reg_reg(nc, 2, 1)   // mov rdx, rcx  (a3)
+    nc_emit_byte(nc, 0x4d)          // mov r10, r8   (a4; kernel arg4 reg)
+    nc_emit_byte(nc, 0x89)
+    nc_emit_byte(nc, 0xc2)
+    nc_emit_byte(nc, 0x4d)          // mov r8, r9    (a5)
+    nc_emit_byte(nc, 0x89)
+    nc_emit_byte(nc, 0xc8)
+    nc_emit_byte(nc, 0x4c)          // mov r9, [rsp+8]  (a6)
+    nc_emit_byte(nc, 0x8b)
+    nc_emit_byte(nc, 0x4c)
+    nc_emit_byte(nc, 0x24)
+    nc_emit_byte(nc, 0x08)
+    nc_emit_syscall(nc)
+    nc_emit_ret(nc)
+}
+
 // ============================================================================
 // M4: argv access builtins
 // ============================================================================
@@ -3886,14 +4085,12 @@ fn native_v2_rodata_append_updated_tail(nc: &! NativeCompiler, updated: NativeCo
     let append_base = if (*nc).flat_rodata_len > 0 { (*nc).flat_rodata_len } else { (*nc).rodata.len }
     var src = src_start
     if (*nc).flat_rodata_len > 0 {
-        var bytes = (*nc).flat_rodata_bytes
         var len = (*nc).flat_rodata_len
-        while src < updated.rodata.len && len < 8192 {
-            bytes[len as usize] = updated.rodata.bytes[src as usize]
+        while src < updated.rodata.len && len < 262144 {
+            NC_BIG_RODATA[len as usize] = updated.rodata.bytes[src as usize]
             len = len + 1
             src = src + 1
         }
-        (*nc).flat_rodata_bytes = bytes
         (*nc).flat_rodata_len = len
     } else {
         var t = (*nc).rodata
@@ -4015,44 +4212,121 @@ fn emit_builtin_read_file(nc: NativeCompiler) -> NativeCompiler with Mut, Panic,
     c
 }
 
-// write_file(path: *u8, buf: *u8, len: i64) -> i64 (bytes written)
-// Uses sys_open (O_WRONLY|O_CREAT|O_TRUNC=577), sys_write, sys_close
+// write_file(path: *u8, buf_handle, len: i64) -> i64 (bytes written)
+// Native-v2 arrays are GC handles with 8-byte boxed element slots after a 32-byte
+// object header (same ABI as emit_builtin_str_from_bytes). The call shape is
+// write_file(path, buf, n) — handle by value, NOT &buf. We resolve the handle,
+// unpack low bytes into a packed contiguous buffer, then open/write/close.
+// Uses sys_open (O_WRONLY|O_CREAT|O_TRUNC=577), sys_write, sys_close.
 fn emit_builtin_write_file(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
     c.code = emit_push_rbp(c.code)
     c.code = emit_mov_rbp_rsp(c.code)
-    c.code = emit_sub_rsp_imm32(c.code, 32)
+    c.code = emit_sub_rsp_imm32(c.code, 64)
 
-    // Save args: rdi=path, rsi=buf, rdx=len
-    c.code = emit_store_reg_rbp_disp32(c.code, -8, 6)    // [rbp-8] = rsi (buf)
-    c.code = emit_store_reg_rbp_disp32(c.code, -16, 2)   // [rbp-16] = rdx (len)
+    // Save args: rdi=path, rsi=buf_handle, rdx=len
+    // Stack:
+    //   [rbp-8]  path
+    //   [rbp-16] buf_handle
+    //   [rbp-24] len
+    //   [rbp-32] object base
+    //   [rbp-40] packed buffer ptr
+    //   [rbp-48] fd
+    //   [rbp-56] bytes_written
+    c.code = emit_store_reg_rbp_disp32(c.code, -8, 7)    // [rbp-8] = rdi (path)
+    c.code = emit_store_reg_rbp_disp32(c.code, -16, 6)   // [rbp-16] = rsi (buf_handle)
+    c.code = emit_store_reg_rbp_disp32(c.code, -24, 2)   // [rbp-24] = rdx (len)
+
+    // Resolve buf_handle (rsi) -> object base pointer, save at [rbp-32]
+    c.code = emit_mov_reg_reg(c.code, 0, 6)             // rax = rsi (handle)
+    c = native_v2_resolve_handle_to_object_base_rax(c)   // rax = object base
+    c.code = emit_store_rax_rbp_disp32(c.code, -32)
+
+    // Bump-allocate len packed bytes from RuntimeContext.heap_cursor
+    c = emit_load_runtime_context_field_rax(c, runtime_context_field_heap_cursor())
+    c.code = emit_store_rax_rbp_disp32(c.code, -40)     // packed ptr = old cursor
+    c.code = emit_load_rbp_disp32_rax(c.code, -24)      // rax = len
+    c.code = emit_mov_rcx_rax(c.code)                   // rcx = len
+    c = emit_load_runtime_context_field_rax(c, runtime_context_field_heap_cursor())
+    c.code = emit_add_reg_reg(c.code, 0, 1)             // rax = cursor + len
+    c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_cursor())
+
+    // Copy-loop setup (mirrors emit_builtin_str_from_bytes):
+    //   rdx = object base (fixed)
+    //   rbx = element index, starts at header_words (native_v2_object_header_size()/8)
+    //   rsi = dest ptr (packed), running
+    //   rcx = remaining element count (countdown from len)
+    c.code = emit_load_rbp_disp32_rax(c.code, -32)      // rax = object base
+    c.code = emit_mov_reg_reg(c.code, 2, 0)             // rdx = object base
+    c.code = emit_mov_reg_imm(c.code, 3, native_v2_object_header_size() / 8)  // rbx = header_words
+    c.code = emit_load_rbp_disp32_rax(c.code, -40)      // rax = packed ptr
+    c.code = emit_mov_reg_reg(c.code, 6, 0)             // rsi = packed ptr
+    c.code = emit_load_rbp_disp32_rax(c.code, -24)      // rax = len
+    c.code = emit_mov_reg_reg(c.code, 1, 0)             // rcx = len
+
+    // copy_loop: (byte offsets from loop top) — identical body to str_from_bytes
+    //   0:  test rcx, rcx           — 3 bytes
+    //   3:  jz done_copy            — 2 bytes (rel8 +17)
+    //   5:  mov rax, [rdx+rbx*8]    — 4 bytes (unpack boxed element)
+    //   9:  mov [rsi], al          — 2 bytes (store low byte)
+    //   11: inc rbx                — 3 bytes
+    //   14: inc rsi                — 3 bytes
+    //   17: dec rcx                — 3 bytes
+    //   20: jmp copy_loop          — 2 bytes (rel8 -22)
+    //   22: done_copy:
+    var lb = c.code
+    lb = emit_byte(lb, 0x48)
+    lb = emit_byte(lb, 0x85)
+    lb = emit_byte(lb, 0xc9)                             // test rcx, rcx
+    c.code = lb
+    c.code = emit_jz_rel8(c.code, 17)                    // jz done_copy
+
+    lb = c.code
+    lb = emit_byte(lb, 0x48)
+    lb = emit_byte(lb, 0x8b)
+    lb = emit_byte(lb, 0x04)
+    lb = emit_byte(lb, 0xda)                             // mov rax, [rdx+rbx*8]
+    lb = emit_byte(lb, 0x88)
+    lb = emit_byte(lb, 0x06)                             // mov [rsi], al
+    lb = emit_byte(lb, 0x48)
+    lb = emit_byte(lb, 0xff)
+    lb = emit_byte(lb, 0xc3)                             // inc rbx
+    lb = emit_byte(lb, 0x48)
+    lb = emit_byte(lb, 0xff)
+    lb = emit_byte(lb, 0xc6)                             // inc rsi
+    lb = emit_byte(lb, 0x48)
+    lb = emit_byte(lb, 0xff)
+    lb = emit_byte(lb, 0xc9)                             // dec rcx
+    c.code = lb
+    c.code = emit_jmp_rel8(c.code, -22)                  // jmp copy_loop
+    // done_copy:
 
     // open(path, O_WRONLY|O_CREAT|O_TRUNC=577, 0755=493)
-    // rdi already = path
-    c.code = emit_mov_rax_rdi(c.code)                    // rax = path for Win64
+    c.code = emit_load_rbp_disp32_rax(c.code, -8)        // rax = path
+    c.code = emit_mov_reg_reg(c.code, 7, 0)             // rdi = path
     c = emit_open_syscall_for_target(c, c.target_os_id, 577, 493)
 
-    // Save fd/handle
-    c.code = emit_store_rax_rbp_disp32(c.code, -24)      // [rbp-24] = fd
+    // Save fd
+    c.code = emit_store_rax_rbp_disp32(c.code, -48)      // [rbp-48] = fd
 
-    // write(fd, buf, len)
+    // write(fd, packed, len)
     c.code = emit_mov_rdi_rax(c.code)                    // rdi = fd
-    c.code = emit_load_rbp_disp32_rax(c.code, -8)        // rax = buf
-    c.code = emit_mov_rsi_rax(c.code)                    // rsi = buf
-    c.code = emit_load_rbp_disp32_rax(c.code, -16)       // rax = len
+    c.code = emit_load_rbp_disp32_rax(c.code, -40)       // rax = packed
+    c.code = emit_mov_rsi_rax(c.code)                    // rsi = packed
+    c.code = emit_load_rbp_disp32_rax(c.code, -24)       // rax = len
     c.code = emit_mov_rdx_rax(c.code)                    // rdx = len
     c = emit_write_syscall_for_target(c, c.target_os_id)
 
     // Save bytes_written
-    c.code = emit_store_rax_rbp_disp32(c.code, -32)      // [rbp-32] = bytes_written
+    c.code = emit_store_rax_rbp_disp32(c.code, -56)      // [rbp-56] = bytes_written
 
     // close(fd)
-    c.code = emit_load_rbp_disp32_rax(c.code, -24)       // rax = fd
+    c.code = emit_load_rbp_disp32_rax(c.code, -48)       // rax = fd
     c.code = emit_mov_rdi_rax(c.code)                    // rdi = fd
     c = emit_close_syscall_for_target(c, c.target_os_id)
 
     // Return bytes_written
-    c.code = emit_load_rbp_disp32_rax(c.code, -32)
+    c.code = emit_load_rbp_disp32_rax(c.code, -56)
 
     c.code = emit_mov_rsp_rbp(c.code)
     c.code = emit_pop_rbp(c.code)
@@ -4072,6 +4346,21 @@ fn emit_builtin_sqrt(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div 
     c.code = emit_movq_xmm0_rax(c.code)               // movq xmm0, rax
     c.code = emit_sqrtsd_xmm0_xmm0(c.code)            // sqrtsd xmm0, xmm0
     c.code = emit_movq_rax_xmm0(c.code)               // movq rax, xmm0
+    c.code = emit_pop_rbp(c.code)
+    c.code = emit_ret(c.code)
+    c
+}
+
+// f64_to_bits / bits_to_f64 — pure IEEE-754 reinterpret. The 64-bit value is
+// identical whether read as f64 or i64, and this backend passes the argument in
+// rdi and returns in rax (same convention as emit_builtin_sqrt), so the body is
+// just `rax = rdi`. Without this the call defaults to fn 0 (the runtime entry)
+// and segfaults.
+fn emit_builtin_f64_bits_identity(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c.code = emit_push_rbp(c.code)
+    c.code = emit_mov_rbp_rsp(c.code)
+    c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi
     c.code = emit_pop_rbp(c.code)
     c.code = emit_ret(c.code)
     c
@@ -4621,8 +4910,10 @@ fn emit_builtin_print_f64(nc: NativeCompiler) -> NativeCompiler with Mut, Panic,
     c = emit_load_runtime_context_field_rdi(c, runtime_context_field_stdout_fd())
     c = emit_write_syscall_for_target(c, c.target_os_id)
 
-    // Clear sign bit
-    c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi
+    // Clear sign bit. rdi was overwritten with stdout fd for the '-' write;
+    // xmm0 still holds the original f64 bits across the syscall.
+    // Reloading from rdi zeroed every negative magnitude → printed "-0.000000".
+    c.code = emit_movq_rax_xmm0(c.code)               // movq rax, xmm0
     c.code = emit_mov_reg_imm(c.code, 3, 0x7FFFFFFFFFFFFFFF)
     c.code = emit_and_rax_rbx(c.code)
     c.code = emit_mov_reg_reg(c.code, 7, 0)           // mov rdi, rax
@@ -4780,12 +5071,20 @@ fn emit_builtin_file_size(nc: NativeCompiler) -> NativeCompiler with Mut, Panic,
 
     // Check for error
     c.code = emit_test_rax_rax(c.code)
-    // If error (rax < 0), return -1
-    // For simplicity: load st_size regardless, on error it'll be garbage
-    // but we can check: if rax != 0, return rax (the error code)
-    c.code = emit_jnz_rel8(c.code, 5)                    // if error, skip to return rax
-    // Load st_size from [rsp + 48]
-    c.code = emit_mov_rax_rsp_disp8(c.code, 48)          // rax = st_size
+    // stat error (rax != 0) → return rax (negative errno). Directory (st_mode
+    // S_IFDIR at offset 24) → -1 so file_exists()==false (a directory is never a
+    // valid source/import file). Otherwise load st_size at offset 48. Mirrors the
+    // lean_single emit_file_size directory guard. Fixed-size block, hand-computed
+    // relative jumps (block spans 32 bytes; targets: err/done = +32, dir = the
+    // `mov rax,-1`). Verified byte-exact vs a reference assembler.
+    c.code = emit_byte(c.code, 0x75); c.code = emit_byte(c.code, 0x1e)  // jnz +30 (stat error → return rax)
+    c.code = emit_byte(c.code, 0x8b); c.code = emit_byte(c.code, 0x44); c.code = emit_byte(c.code, 0x24); c.code = emit_byte(c.code, 0x18)  // mov eax,[rsp+24] (st_mode)
+    c.code = emit_byte(c.code, 0x25); c.code = emit_byte(c.code, 0x00); c.code = emit_byte(c.code, 0xf0); c.code = emit_byte(c.code, 0x00); c.code = emit_byte(c.code, 0x00)  // and eax,0xF000 (S_IFMT)
+    c.code = emit_byte(c.code, 0x3d); c.code = emit_byte(c.code, 0x00); c.code = emit_byte(c.code, 0x40); c.code = emit_byte(c.code, 0x00); c.code = emit_byte(c.code, 0x00)  // cmp eax,0x4000 (S_IFDIR)
+    c.code = emit_byte(c.code, 0x74); c.code = emit_byte(c.code, 0x07)  // je +7 (directory → -1)
+    c.code = emit_byte(c.code, 0x48); c.code = emit_byte(c.code, 0x8b); c.code = emit_byte(c.code, 0x44); c.code = emit_byte(c.code, 0x24); c.code = emit_byte(c.code, 0x30)  // mov rax,[rsp+48] (st_size)
+    c.code = emit_byte(c.code, 0xeb); c.code = emit_byte(c.code, 0x07)  // jmp +7 (done)
+    c.code = emit_byte(c.code, 0x48); c.code = emit_byte(c.code, 0xc7); c.code = emit_byte(c.code, 0xc0); c.code = emit_byte(c.code, 0xff); c.code = emit_byte(c.code, 0xff); c.code = emit_byte(c.code, 0xff); c.code = emit_byte(c.code, 0xff)  // mov rax,-1 (directory)
 
     c.code = emit_mov_rsp_rbp(c.code)
     c.code = emit_pop_rbp(c.code)
@@ -5039,32 +5338,37 @@ pub fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) 
     c.fn_offsets[fn_index as usize] = c.code.len
     c.symbols = symbol_data_add_name(c.symbols, fn_index, func.name.buf, func.name.len)
 
-    // Builtin dispatch — emit hand-coded assembly, skip normal IR lowering
-    // M3: print builtins
-    if name_is_print_int(func.name) { return emit_builtin_print_int(c) }
-    if name_is_print_char(func.name) { return emit_builtin_print_char(c) }
-    if name_is_print(func.name) { return emit_builtin_print_str(c) }
-    // M4: argv + string builtins
-    if name_is_get_arg_count(func.name) { return emit_builtin_get_arg_count(c) }
-    if name_is_get_arg(func.name) { return emit_builtin_get_arg(c) }
-    if name_is_str_len(func.name) { return emit_builtin_str_len(c) }
-    if name_is_str_char_at(func.name) { return emit_builtin_str_char_at(c) }
-    if name_is_str_eq(func.name) { return emit_builtin_str_eq(c) }
-    if name_is_str_slice(func.name) { return emit_builtin_str_slice(c) }
-    if name_is_starts_with(func.name) { return emit_builtin_starts_with(c) }
-    if name_is_str_concat(func.name) { return emit_builtin_str_concat(c) }
-    if name_is_str_from_bytes(func.name) { return emit_builtin_str_from_bytes(c) }
-    // M5: file I/O builtins
-    if name_is_read_file(func.name) { return emit_builtin_read_file(c) }
-    if name_is_write_file(func.name) { return emit_builtin_write_file(c) }
-    if name_is_file_size(func.name) { return emit_builtin_file_size(c) }
-    if name_is_sqrt(func.name) { return emit_builtin_sqrt(c) }
-    if name_is_print_f64(func.name) { return emit_builtin_print_f64(c) }
-    if name_is_exp(func.name) { return emit_builtin_exp(c) }
-    if name_is_log(func.name) { return emit_builtin_log(c) }
-    if name_is_sin(func.name) { return emit_builtin_sin(c) }
-    if name_is_cos(func.name) { return emit_builtin_cos(c) }
-    if name_is_assert(func.name) { return emit_builtin_assert(c) }
+    // Builtin dispatch — empty stubs only. User/stdlib bodies that share a
+    // builtin name (exp/cos/sin/log/sqrt/print_f64/…) compile as ordinary IR.
+    if func.instr_count == 0 {
+        // M3: print builtins
+        if name_is_print_int(func.name) { return emit_builtin_print_int(c) }
+        if name_is_print_char(func.name) { return emit_builtin_print_char(c) }
+        if name_is_print(func.name) { return emit_builtin_print_str(c) }
+        // M4: argv + string builtins
+        if name_is_get_arg_count(func.name) { return emit_builtin_get_arg_count(c) }
+        if name_is_get_arg(func.name) { return emit_builtin_get_arg(c) }
+        if name_is_str_len(func.name) { return emit_builtin_str_len(c) }
+        if name_is_str_char_at(func.name) { return emit_builtin_str_char_at(c) }
+        if name_is_str_eq(func.name) { return emit_builtin_str_eq(c) }
+        if name_is_str_slice(func.name) { return emit_builtin_str_slice(c) }
+        if name_is_starts_with(func.name) { return emit_builtin_starts_with(c) }
+        if name_is_str_concat(func.name) { return emit_builtin_str_concat(c) }
+        if name_is_str_from_bytes(func.name) { return emit_builtin_str_from_bytes(c) }
+        // M5: file I/O builtins
+        if name_is_read_file(func.name) { return emit_builtin_read_file(c) }
+        if name_is_write_file(func.name) { return emit_builtin_write_file(c) }
+        if name_is_file_size(func.name) { return emit_builtin_file_size(c) }
+        if name_is_sqrt(func.name) { return emit_builtin_sqrt(c) }
+        if name_is_f64_to_bits(func.name) { return emit_builtin_f64_bits_identity(c) }
+        if name_is_bits_to_f64(func.name) { return emit_builtin_f64_bits_identity(c) }
+        if name_is_print_f64(func.name) { return emit_builtin_print_f64(c) }
+        if name_is_exp(func.name) { return emit_builtin_exp(c) }
+        if name_is_log(func.name) { return emit_builtin_log(c) }
+        if name_is_sin(func.name) { return emit_builtin_sin(c) }
+        if name_is_cos(func.name) { return emit_builtin_cos(c) }
+        if name_is_assert(func.name) { return emit_builtin_assert(c) }
+    }
 
     // Sprint 38: Set compile strategy from IR function metadata
     c.current_strategy = func.compile_strategy
@@ -5128,7 +5432,7 @@ fn native_v2_local_frame_size(stack_slots: i64, spill_count: i64) -> i64 with Mu
 
 fn native_v2_load_temp_to_rax(nc: NativeCompiler, temp: i64) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
-    if temp < 0 || temp >= 512 {
+    if temp < 0 || temp >= NC_MAX_VREGS {
         c.code = emit_xor_rax_rax(c.code)
         return c
     }
@@ -5148,7 +5452,7 @@ fn native_v2_load_temp_to_rax(nc: NativeCompiler, temp: i64) -> NativeCompiler w
 
 fn native_v2_store_rax_to_temp(nc: NativeCompiler, temp: i64) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
-    if temp < 0 || temp >= 512 {
+    if temp < 0 || temp >= NC_MAX_VREGS {
         return c
     }
     let preg = c.vreg_to_preg[temp as usize]
@@ -5177,10 +5481,10 @@ fn native_v2_ra_simple(dst: i64, src1: i64, src2: i64) -> RaSimpleInstr {
     RaSimpleInstr { dst: dst, src1: src1, src2: src2 }
 }
 
-fn native_v2_machine_ra_instrs_into_ref(func: &MachineFunction, out: &! [RaSimpleInstr; 512], out_count: &! i64) with Mut, Panic, Div {
+fn native_v2_machine_ra_instrs_into_ref(func: &MachineFunction, out: &! [RaSimpleInstr; 4096], out_count: &! i64) with Mut, Panic, Div {
     var count: i64 = 0
     var i: i64 = 0
-    while i < (*func).blocks[0].instr_count && count < 512 {
+    while i < (*func).blocks[0].instr_count && count < RA_MAX_SIMPLE_INSTRS {
         let instr = (*func).blocks[0].instrs[i as usize]
         if instr.opcode == MIR_OP_LOAD_STACK || instr.opcode == MIR_OP_MOV_IMM || instr.opcode == MIR_OP_LOAD_DATA_ADDR ||
            instr.opcode == MIR_OP_CAPTURE_RET || instr.opcode == MIR_OP_ALLOC || instr.opcode == MIR_OP_LEA_STACK {
@@ -5208,7 +5512,7 @@ fn native_v2_machine_ra_instrs_into_ref(func: &MachineFunction, out: &! [RaSimpl
         } else if instr.opcode == MIR_OP_INDEX_STORE {
             out[count as usize] = native_v2_ra_simple(0 - 1, machine_instr_src1_value(instr), machine_instr_src2_value(instr))
             count = count + 1
-            if count < 512 {
+            if count < RA_MAX_SIMPLE_INSTRS {
                 out[count as usize] = native_v2_ra_simple(0 - 1, machine_instr_aux_value(instr), 0 - 1)
                 count = count + 1
             }
@@ -5218,8 +5522,8 @@ fn native_v2_machine_ra_instrs_into_ref(func: &MachineFunction, out: &! [RaSimpl
     *out_count = count
 }
 
-fn native_v2_machine_ra_instrs(func: MachineFunction) -> ([RaSimpleInstr; 512], i64) with Mut, Panic, Div {
-    var out: [RaSimpleInstr; 512] = [ra_empty_simple_instr(); 512]
+fn native_v2_machine_ra_instrs(func: MachineFunction) -> ([RaSimpleInstr; 4096], i64) with Mut, Panic, Div {
+    var out: [RaSimpleInstr; 4096] = [ra_empty_simple_instr(); 4096]
     var count: i64 = 0
     native_v2_machine_ra_instrs_into_ref(&func, &! out, &! count)
     (out, count)
@@ -5237,7 +5541,7 @@ fn native_v2_run_machine_regalloc_mut(nc: &! NativeCompiler, func: MachineFuncti
     state = regalloc_linear_scan(state, native_target_policy_x86_allocation_order_count())
 
     var i: i64 = 0
-    while i < 512 {
+    while i < NC_MAX_VREGS {
         (*nc).vreg_to_preg[i as usize] = -2
         (*nc).vreg_spill_slots[i as usize] = -1
         i = i + 1
@@ -5247,7 +5551,7 @@ fn native_v2_run_machine_regalloc_mut(nc: &! NativeCompiler, func: MachineFuncti
     while v < state.count {
         let interval = state.intervals[v as usize]
         let vreg = interval.vreg
-        if vreg >= 0 && vreg < 512 {
+        if vreg >= 0 && vreg < NC_MAX_VREGS {
             if interval.assigned_preg >= 0 {
                 (*nc).vreg_to_preg[vreg as usize] = native_target_policy_x86_allocation_order_reg_id(interval.assigned_preg)
             } else {
@@ -5262,14 +5566,14 @@ fn native_v2_run_machine_regalloc_mut(nc: &! NativeCompiler, func: MachineFuncti
 }
 
 fn native_v2_run_machine_regalloc_ref_mut(nc: &! NativeCompiler, func: &MachineFunction) with Mut, Panic, Div {
-    var instrs: [RaSimpleInstr; 512] = [ra_empty_simple_instr(); 512]
+    var instrs: [RaSimpleInstr; 4096] = [ra_empty_simple_instr(); 4096]
     var instr_count: i64 = 0
     native_v2_machine_ra_instrs_into_ref(func, &! instrs, &! instr_count)
     var state = liveness_compute_intervals(instrs, instr_count)
     state = regalloc_linear_scan(state, native_target_policy_x86_allocation_order_count())
 
     var i: i64 = 0
-    while i < 512 {
+    while i < NC_MAX_VREGS {
         (*nc).vreg_to_preg[i as usize] = -2
         (*nc).vreg_spill_slots[i as usize] = -1
         i = i + 1
@@ -5279,7 +5583,7 @@ fn native_v2_run_machine_regalloc_ref_mut(nc: &! NativeCompiler, func: &MachineF
     while v < state.count {
         let interval = state.intervals[v as usize]
         let vreg = interval.vreg
-        if vreg >= 0 && vreg < 512 {
+        if vreg >= 0 && vreg < NC_MAX_VREGS {
             if interval.assigned_preg >= 0 {
                 (*nc).vreg_to_preg[vreg as usize] = native_target_policy_x86_allocation_order_reg_id(interval.assigned_preg)
             } else {
@@ -5532,8 +5836,9 @@ fn native_v2_emit_machine_instr(nc: NativeCompiler, instr: MachineInstr) -> Nati
     if instr.opcode == MIR_OP_ALLOC {
         let payload_size = instr.src1.value
         let total_size = payload_size + native_v2_object_header_size()
-        let header_slots = native_v2_object_header_size() / 8
-        let alloc_retry_target = c.code.len
+        // MIR already carries the resolved payload size; ≤16 B means a SysV
+        // register-pair value struct (Rational/Box). Unbox: no handle slot.
+        let unboxed = payload_size > 0 && payload_size <= 16
         c = emit_load_runtime_context_field_rax(c, runtime_context_field_heap_cursor())
         c.code = emit_mov_rdx_rax(c.code)
         c.code = emit_mov_reg_imm(c.code, 1, total_size)
@@ -5548,6 +5853,32 @@ fn native_v2_emit_machine_instr(nc: NativeCompiler, instr: MachineInstr) -> Nati
         c.code = emit_test_rax_rax(c.code)
         let heap_slow_jnz = c.code.len
         c.code = emit_jnz_rel32(c.code)
+
+        if unboxed {
+            c.code = emit_mov_reg_reg(c.code, 0, 1)
+            c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_cursor())
+            c.code = emit_mov_rax_rdx(c.code)
+            c.code = emit_mov_rbx_rax(c.code)
+            c.code = emit_mov_rax_imm(c.code, instr.aux.value)
+            c.code = emit_store_rax_mem_rbx_disp32(c.code, native_v2_object_header_field_descriptor_id())
+            c.code = emit_mov_rax_imm(c.code, payload_size)
+            c.code = emit_store_rax_mem_rbx_disp32(c.code, native_v2_object_header_field_payload_size())
+            c.code = emit_xor_rax_rax(c.code)
+            c.code = emit_store_rax_mem_rbx_disp32(c.code, native_v2_object_header_field_flags())
+            c.code = emit_store_rax_mem_rbx_disp32(c.code, native_v2_object_header_field_handle_id())
+            c.code = emit_mov_rax_rdx(c.code)
+            let done_jmp_u = c.code.len
+            c.code = emit_jmp_rel32(c.code)
+
+            let heap_slow_path_u = c.code.len
+            c.code = patch_u32_le(c.code, heap_slow_jnz + 2, heap_slow_path_u - (heap_slow_jnz + 6))
+            c = native_v2_emit_gc_request_metadata(c, total_size, native_v2_gc_reason_heap_limit())
+            c.code = emit_exit(c.code, 181)
+
+            let done_target_u = c.code.len
+            c.code = patch_u32_le(c.code, done_jmp_u + 1, done_target_u - (done_jmp_u + 5))
+            return native_v2_store_rax_to_temp(c, instr.dst.value)
+        }
 
         c = emit_load_runtime_context_field_rax(c, runtime_context_field_handle_count())
         c.code = emit_mov_rbx_rax(c.code)
@@ -5599,45 +5930,16 @@ fn native_v2_emit_machine_instr(nc: NativeCompiler, instr: MachineInstr) -> Nati
         let done_jmp = c.code.len
         c.code = emit_jmp_rel32(c.code)
 
+        // Fail closed: no empty-frame reset (live roots not precisely mapped).
         let heap_slow_path = c.code.len
         c.code = patch_u32_le(c.code, heap_slow_jnz + 2, heap_slow_path - (heap_slow_jnz + 6))
         c = native_v2_emit_gc_request_metadata(c, total_size, native_v2_gc_reason_heap_limit())
-        c = emit_load_runtime_context_field_rax(c, runtime_context_field_pin_count())
-        c.code = emit_test_rax_rax(c.code)
-        let heap_pinned_jnz = c.code.len
-        c.code = emit_jnz_rel32(c.code)
-        c = native_v2_emit_current_frame_live_probe(c)
-        c.code = emit_test_rax_rax(c.code)
-        let heap_live_jnz = c.code.len
-        c.code = emit_jnz_rel32(c.code)
-        c = native_v2_emit_gc_empty_frame_reset(c)
-        let heap_retry_jmp = c.code.len
-        c.code = emit_jmp_rel32(c.code)
-        let heap_fail_exit = c.code.len
-        c.code = patch_u32_le(c.code, heap_pinned_jnz + 2, heap_fail_exit - (heap_pinned_jnz + 6))
-        c.code = patch_u32_le(c.code, heap_live_jnz + 2, heap_fail_exit - (heap_live_jnz + 6))
         c.code = emit_exit(c.code, 181)
-        c.code = patch_u32_le(c.code, heap_retry_jmp + 1, alloc_retry_target - (heap_retry_jmp + 5))
 
         let handle_slow_path = c.code.len
         c.code = patch_u32_le(c.code, handle_slow_jnz + 2, handle_slow_path - (handle_slow_jnz + 6))
         c = native_v2_emit_gc_request_metadata(c, total_size, native_v2_gc_reason_handle_table_full())
-        c = emit_load_runtime_context_field_rax(c, runtime_context_field_pin_count())
-        c.code = emit_test_rax_rax(c.code)
-        let handle_pinned_jnz = c.code.len
-        c.code = emit_jnz_rel32(c.code)
-        c = native_v2_emit_current_frame_live_probe(c)
-        c.code = emit_test_rax_rax(c.code)
-        let handle_live_jnz = c.code.len
-        c.code = emit_jnz_rel32(c.code)
-        c = native_v2_emit_gc_empty_frame_reset(c)
-        let handle_retry_jmp = c.code.len
-        c.code = emit_jmp_rel32(c.code)
-        let handle_fail_exit = c.code.len
-        c.code = patch_u32_le(c.code, handle_pinned_jnz + 2, handle_fail_exit - (handle_pinned_jnz + 6))
-        c.code = patch_u32_le(c.code, handle_live_jnz + 2, handle_fail_exit - (handle_live_jnz + 6))
         c.code = emit_exit(c.code, 182)
-        c.code = patch_u32_le(c.code, handle_retry_jmp + 1, alloc_retry_target - (handle_retry_jmp + 5))
 
         let done_target = c.code.len
         c.code = patch_u32_le(c.code, done_jmp + 1, done_target - (done_jmp + 5))
@@ -5817,7 +6119,24 @@ pub fn native_v2_builtin_id_for_name(name: Name) -> i64 with Mut, Panic, Div {
     if name_is_str_from_bytes(name) { return 22 }
     if name_is_heap_alloc(name) { return 23 }
     if name_is_heap_free(name) { return 24 }
+    if name_is_syscall6(name) { return 27 }
     0
+}
+
+// Wave14e: empty float-intrinsic stubs must advertise scalar f64 returns.
+// Without returns_float=1, call sites omit IR_FLOAT_REG_MARKER_FLAG, the
+// native core marks the result INT, and subsequent f64 arithmetic does
+// cvtsi2sd on the IEEE bit pattern (cos(0)*1000 → ~4.6e21).
+// Float-returning builtins: sqrt=14, exp=16, log=17, sin=18, cos=19,
+// bits_to_f64=26 (id 26 only via func_ref path today).
+pub fn native_v2_builtin_returns_float(builtin_id: i64) -> bool {
+    if builtin_id == 14 { return true }
+    if builtin_id == 16 { return true }
+    if builtin_id == 17 { return true }
+    if builtin_id == 18 { return true }
+    if builtin_id == 19 { return true }
+    if builtin_id == 26 { return true }
+    false
 }
 
 fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) with Mut, Panic, Div {
@@ -5854,6 +6173,9 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     if builtin_id == 22 { native_v2_persist_builtin_emit_into(nc, emit_builtin_str_from_bytes((*nc))); return }
     if builtin_id == 23 { emit_builtin_heap_alloc_into(nc); return }
     if builtin_id == 24 { emit_builtin_heap_free_into(nc); return }
+    if builtin_id == 25 { native_v2_persist_builtin_emit_into(nc, emit_builtin_f64_bits_identity((*nc))); return }
+    if builtin_id == 26 { native_v2_persist_builtin_emit_into(nc, emit_builtin_f64_bits_identity((*nc))); return }
+    if builtin_id == 27 { emit_builtin_syscall6_into(nc); return }
 }
 
 pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func: MachineFunction, fn_index: i64) -> NativeCompiler with Mut, Panic, Div, Alloc {
@@ -5869,13 +6191,13 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
     c.label_patch_count = 0
     c.current_frame_size = 0
     var rst_j = 0
-    while rst_j < 512 {
+    while rst_j < NC_MAX_VREGS {
         c.is_float_reg[rst_j as usize] = 0
         rst_j = rst_j + 1
     }
     c.current_strategy = 0
     var rst_ra = 0
-    while rst_ra < 512 {
+    while rst_ra < NC_MAX_VREGS {
         c.vreg_to_preg[rst_ra as usize] = -2
         c.vreg_spill_slots[rst_ra as usize] = -1
         rst_ra = rst_ra + 1
@@ -5886,29 +6208,34 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
     c.fn_offsets[fn_index as usize] = c.code.len
     c.symbols = symbol_data_add_name(c.symbols, fn_index, func.name.buf, func.name.len)
 
-    if name_is_print_int(func.name) { return emit_builtin_print_int(c) }
-    if name_is_print_char(func.name) { return emit_builtin_print_char(c) }
-    if name_is_print(func.name) { return emit_builtin_print_str(c) }
-    if name_is_get_arg_count(func.name) { return emit_builtin_get_arg_count(c) }
-    if name_is_get_arg(func.name) { return emit_builtin_get_arg(c) }
-    if name_is_str_len(func.name) { return emit_builtin_str_len(c) }
-    if name_is_str_char_at(func.name) { return emit_builtin_str_char_at(c) }
-    if name_is_str_eq(func.name) { return emit_builtin_str_eq(c) }
-    if name_is_str_slice(func.name) { return emit_builtin_str_slice(c) }
-    if name_is_starts_with(func.name) { return emit_builtin_starts_with(c) }
-    if name_is_str_concat(func.name) { return emit_builtin_str_concat(c) }
-    if name_is_read_file(func.name) { return emit_builtin_read_file(c) }
-    if name_is_write_file(func.name) { return emit_builtin_write_file(c) }
-    if name_is_file_size(func.name) { return emit_builtin_file_size(c) }
-    if name_is_sqrt(func.name) { return emit_builtin_sqrt(c) }
-    if name_is_print_f64(func.name) { return emit_builtin_print_f64(c) }
-    if name_is_exp(func.name) { return emit_builtin_exp(c) }
-    if name_is_log(func.name) { return emit_builtin_log(c) }
-    if name_is_sin(func.name) { return emit_builtin_sin(c) }
-    if name_is_cos(func.name) { return emit_builtin_cos(c) }
-    if name_is_assert(func.name) { return emit_builtin_assert(c) }
-    if name_is_heap_alloc(func.name) { emit_builtin_heap_alloc_into(&! c); return c }
-    if name_is_heap_free(func.name) { emit_builtin_heap_free_into(&! c); return c }
+    // Empty-stub builtins only — see native_v2_builtin_id_for_func_ref.
+    if func.instr_count == 0 {
+        if name_is_print_int(func.name) { return emit_builtin_print_int(c) }
+        if name_is_print_char(func.name) { return emit_builtin_print_char(c) }
+        if name_is_print(func.name) { return emit_builtin_print_str(c) }
+        if name_is_get_arg_count(func.name) { return emit_builtin_get_arg_count(c) }
+        if name_is_get_arg(func.name) { return emit_builtin_get_arg(c) }
+        if name_is_str_len(func.name) { return emit_builtin_str_len(c) }
+        if name_is_str_char_at(func.name) { return emit_builtin_str_char_at(c) }
+        if name_is_str_eq(func.name) { return emit_builtin_str_eq(c) }
+        if name_is_str_slice(func.name) { return emit_builtin_str_slice(c) }
+        if name_is_starts_with(func.name) { return emit_builtin_starts_with(c) }
+        if name_is_str_concat(func.name) { return emit_builtin_str_concat(c) }
+        if name_is_read_file(func.name) { return emit_builtin_read_file(c) }
+        if name_is_write_file(func.name) { return emit_builtin_write_file(c) }
+        if name_is_file_size(func.name) { return emit_builtin_file_size(c) }
+        if name_is_sqrt(func.name) { return emit_builtin_sqrt(c) }
+        if name_is_f64_to_bits(func.name) { return emit_builtin_f64_bits_identity(c) }
+        if name_is_bits_to_f64(func.name) { return emit_builtin_f64_bits_identity(c) }
+        if name_is_print_f64(func.name) { return emit_builtin_print_f64(c) }
+        if name_is_exp(func.name) { return emit_builtin_exp(c) }
+        if name_is_log(func.name) { return emit_builtin_log(c) }
+        if name_is_sin(func.name) { return emit_builtin_sin(c) }
+        if name_is_cos(func.name) { return emit_builtin_cos(c) }
+        if name_is_assert(func.name) { return emit_builtin_assert(c) }
+        if name_is_heap_alloc(func.name) { emit_builtin_heap_alloc_into(&! c); return c }
+        if name_is_heap_free(func.name) { emit_builtin_heap_free_into(&! c); return c }
+    }
 
     c.current_strategy = func.compile_strategy
 
@@ -5921,7 +6248,7 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
     while ra_v < ra_state.count {
         let ra_interval = ra_state.intervals[ra_v as usize]
         let ra_vreg = ra_interval.vreg
-        if ra_vreg >= 0 && ra_vreg < 512 {
+        if ra_vreg >= 0 && ra_vreg < NC_MAX_VREGS {
             if ra_interval.assigned_preg >= 0 {
                 c.vreg_to_preg[ra_vreg as usize] = native_target_policy_x86_allocation_order_reg_id(ra_interval.assigned_preg)
             } else {
@@ -6075,13 +6402,13 @@ fn nc_core_store_rax_to_temp(nc: &! NativeCompiler, temp: i64) with Mut, Panic, 
 }
 
 fn nc_core_mark_float_reg(nc: &! NativeCompiler, reg: i64) with Mut, Panic, Div {
-    if reg >= 0 && reg < 512 {
+    if reg >= 0 && reg < NC_MAX_VREGS {
         (*nc).is_float_reg[reg as usize] = 1
     }
 }
 
 fn nc_core_mark_int_reg(nc: &! NativeCompiler, reg: i64) with Mut, Panic, Div {
-    if reg >= 0 && reg < 512 {
+    if reg >= 0 && reg < NC_MAX_VREGS {
         (*nc).is_float_reg[reg as usize] = 2
     }
 }
@@ -6271,34 +6598,15 @@ fn nc_emit_core_float_binop_into(nc: &! NativeCompiler, op: BinaryOp) -> bool wi
     false
 }
 
-fn nc_core_emit_empty_frame_gc_reset_into(nc: &! NativeCompiler) with Mut, Panic, Div {
-    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_heap_base())
-    emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_cursor())
-    emit_store_runtime_context_imm_into(nc, runtime_context_field_handle_count(), 0)
-    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_collector_epoch())
-    nc_emit_mov_reg_imm(nc, 1, 1)
-    nc_emit_add_reg_reg(nc, 0, 1)
-    emit_store_rax_runtime_context_field_into(nc, runtime_context_field_collector_epoch())
-    emit_store_runtime_context_imm_into(nc, runtime_context_field_last_gc_stats(), 1)
-}
-
-fn nc_core_emit_alloc_retry_or_exit_into(nc: &! NativeCompiler, slow_jnz: i64, retry_target: i64, fail_code: i64) with Mut, Panic, Div {
+// Fail closed on allocation exhaustion (issue #919).
+// Core-IR frames do not publish precise live-root maps. Recycling the monotonic
+// arena / handle table under a false "empty frame" probe retargets handles that
+// remain live in callers (silent wrong values / SEGV). Until a collector can
+// prove every live root is traced, STOP with a dedicated exit code.
+fn nc_core_emit_alloc_fail_into(nc: &! NativeCompiler, slow_jnz: i64, fail_code: i64) with Mut, Panic, Div {
     let slow_path = (*nc).code.len
     nc_patch_u32_le(nc, slow_jnz + 2, slow_path - (slow_jnz + 6))
-
-    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_pin_count())
-    nc_emit_test_rax_rax(nc)
-    let pinned_jnz = (*nc).code.len
-    nc_emit_jnz_rel32(nc)
-
-    nc_core_emit_empty_frame_gc_reset_into(nc)
-    let retry_jmp = (*nc).code.len
-    nc_emit_jmp_rel32(nc)
-
-    let fail_exit = (*nc).code.len
-    nc_patch_u32_le(nc, pinned_jnz + 2, fail_exit - (pinned_jnz + 6))
     nc_emit_exit_code(nc, fail_code)
-    nc_patch_u32_le(nc, retry_jmp + 1, retry_target - (retry_jmp + 5))
 }
 
 fn nc_core_emit_alloc_into(nc: &! NativeCompiler, dst: i64, type_tag: i64, elem_count: i64) -> bool with Mut, Panic, Div {
@@ -6310,7 +6618,11 @@ fn nc_core_emit_alloc_into(nc: &! NativeCompiler, dst: i64, type_tag: i64, elem_
         return false
     }
 
-    let alloc_retry_target = (*nc).code.len
+    // ≤16 B value structs (SysV two-register return): heap-bump only, return the
+    // raw object base. No handle-table slot — eliminates the 2^20 wrap trigger
+    // for Rational / Box / other two-int value returns (issue #919 root fix).
+    let unboxed = elem_count == 0 && native_v2_is_small_value_struct_tag(type_tag)
+
     emit_load_runtime_context_field_rax_into(nc, runtime_context_field_heap_cursor())
     nc_emit_mov_rdx_rax(nc)
     nc_emit_mov_reg_imm(nc, 1, total_size)
@@ -6325,6 +6637,33 @@ fn nc_core_emit_alloc_into(nc: &! NativeCompiler, dst: i64, type_tag: i64, elem_
     nc_emit_test_rax_rax(nc)
     let heap_slow_jnz = (*nc).code.len
     nc_emit_jnz_rel32(nc)
+
+    if unboxed {
+        // Fast path: bump cursor, stamp header with handle_id=0, return object base.
+        nc_emit_mov_reg_reg(nc, 0, 6)
+        emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_cursor())
+
+        nc_emit_mov_rax_rdx(nc)
+        nc_emit_mov_rbx_rax(nc)
+        nc_emit_mov_rax_imm(nc, descriptor_id)
+        nc_emit_store_rax_mem_rbx_disp32(nc, native_v2_object_header_field_descriptor_id())
+        nc_emit_mov_rax_imm(nc, payload_size)
+        nc_emit_store_rax_mem_rbx_disp32(nc, native_v2_object_header_field_payload_size())
+        nc_emit_xor_rax_rax(nc)
+        nc_emit_store_rax_mem_rbx_disp32(nc, native_v2_object_header_field_flags())
+        nc_emit_store_rax_mem_rbx_disp32(nc, native_v2_object_header_field_handle_id())
+        // rax = object base (raw pointer encoding for hybrid resolve)
+        nc_emit_mov_rax_rdx(nc)
+        let done_jmp_u = (*nc).code.len
+        nc_emit_jmp_rel32(nc)
+
+        nc_core_emit_alloc_fail_into(nc, heap_slow_jnz, 181)
+
+        let done_target_u = (*nc).code.len
+        nc_patch_u32_le(nc, done_jmp_u + 1, done_target_u - (done_jmp_u + 5))
+        nc_core_store_rax_to_temp(nc, dst)
+        return true
+    }
 
     emit_load_runtime_context_field_rax_into(nc, runtime_context_field_handle_count())
     nc_emit_mov_rbx_rax(nc)
@@ -6384,8 +6723,8 @@ fn nc_core_emit_alloc_into(nc: &! NativeCompiler, dst: i64, type_tag: i64, elem_
     let done_jmp = (*nc).code.len
     nc_emit_jmp_rel32(nc)
 
-    nc_core_emit_alloc_retry_or_exit_into(nc, heap_slow_jnz, alloc_retry_target, 181)
-    nc_core_emit_alloc_retry_or_exit_into(nc, handle_slow_jnz, alloc_retry_target, 182)
+    nc_core_emit_alloc_fail_into(nc, heap_slow_jnz, 181)
+    nc_core_emit_alloc_fail_into(nc, handle_slow_jnz, 182)
 
     let done_target = (*nc).code.len
     nc_patch_u32_le(nc, done_jmp + 1, done_target - (done_jmp + 5))
@@ -6394,40 +6733,36 @@ fn nc_core_emit_alloc_into(nc: &! NativeCompiler, dst: i64, type_tag: i64, elem_
 }
 
 fn nc_rodata_add_ir_instr_name(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64) -> i64 with Mut, Panic, Div {
-    var bytes = (*nc).flat_rodata_bytes
     var len = (*nc).flat_rodata_len
     let offset = len
     var i = 0
     let name_len = (*func).instrs[instr_index as usize].name.len
-    while i < name_len && len < 8192 {
-        bytes[len as usize] = (*func).instrs[instr_index as usize].name.buf[i as usize]
+    while i < name_len && len < 262144 {
+        NC_BIG_RODATA[len as usize] = (*func).instrs[instr_index as usize].name.buf[i as usize]
         len = len + 1
         i = i + 1
     }
-    if len < 8192 {
-        bytes[len as usize] = 0
+    if len < 262144 {
+        NC_BIG_RODATA[len as usize] = 0
         len = len + 1
     }
-    (*nc).flat_rodata_bytes = bytes
     (*nc).flat_rodata_len = len
     offset
 }
 
 fn nc_rodata_add_name_value(nc: &! NativeCompiler, name: Name) -> i64 with Mut, Panic, Div {
-    var bytes = (*nc).flat_rodata_bytes
     var len = (*nc).flat_rodata_len
     let offset = len
     var i = 0
-    while i < name.len && len < 8192 {
-        bytes[len as usize] = name.buf[i as usize]
+    while i < name.len && len < 262144 {
+        NC_BIG_RODATA[len as usize] = name.buf[i as usize]
         len = len + 1
         i = i + 1
     }
-    if len < 8192 {
-        bytes[len as usize] = 0
+    if len < 262144 {
+        NC_BIG_RODATA[len as usize] = 0
         len = len + 1
     }
-    (*nc).flat_rodata_bytes = bytes
     (*nc).flat_rodata_len = len
     offset
 }
@@ -6441,8 +6776,8 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
     let flags = (*func).instrs[instr_index as usize].imm_flags
     let lhs_float_marked = (flags / 2) & 1
     let rhs_float_marked = (flags / 4) & 1
-    let lhs_known_int = if lhs >= 0 && lhs < 512 && (*nc).is_float_reg[lhs as usize] == 2 { 1 } else { 0 }
-    let rhs_known_int = if rhs >= 0 && rhs < 512 && (*nc).is_float_reg[rhs as usize] == 2 { 1 } else { 0 }
+    let lhs_known_int = if lhs >= 0 && lhs < NC_MAX_VREGS && (*nc).is_float_reg[lhs as usize] == 2 { 1 } else { 0 }
+    let rhs_known_int = if rhs >= 0 && rhs < NC_MAX_VREGS && (*nc).is_float_reg[rhs as usize] == 2 { 1 } else { 0 }
     // Path-sound float override: for arithmetic AND comparison ops, also count an
     // operand as float when the fixpoint typing (nc_compute_float_types) proved its
     // register is a pure FLOAT — every reaching definition is float. This rescues
@@ -6454,8 +6789,8 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
     let op_is_arith = if op == BinaryOp::OpAdd || op == BinaryOp::OpSub || op == BinaryOp::OpMul || op == BinaryOp::OpDiv { 1 } else { 0 }
     let op_is_compare = if op == BinaryOp::OpLt || op == BinaryOp::OpLe || op == BinaryOp::OpGt || op == BinaryOp::OpGe || op == BinaryOp::OpEq || op == BinaryOp::OpNe { 1 } else { 0 }
     let op_wants_float_typing = if op_is_arith == 1 || op_is_compare == 1 { 1 } else { 0 }
-    let lhs_typed_float = if op_wants_float_typing == 1 && lhs >= 0 && lhs < 512 && (*nc).reg_type[lhs as usize] == 1 { 1 } else { 0 }
-    let rhs_typed_float = if op_wants_float_typing == 1 && rhs >= 0 && rhs < 512 && (*nc).reg_type[rhs as usize] == 1 { 1 } else { 0 }
+    let lhs_typed_float = if op_wants_float_typing == 1 && lhs >= 0 && lhs < NC_MAX_VREGS && (*nc).reg_type[lhs as usize] == 1 { 1 } else { 0 }
+    let rhs_typed_float = if op_wants_float_typing == 1 && rhs >= 0 && rhs < NC_MAX_VREGS && (*nc).reg_type[rhs as usize] == 1 { 1 } else { 0 }
     let lhs_is_float = if (lhs_float_marked == 1 || lhs_typed_float == 1) && lhs_known_int == 0 { 1 } else { 0 }
     let rhs_is_float = if (rhs_float_marked == 1 || rhs_typed_float == 1) && rhs_known_int == 0 { 1 } else { 0 }
     if lhs_is_float == 1 || rhs_is_float == 1 {
@@ -6754,7 +7089,7 @@ fn nc_core_emit_println_i64_literal_sentinel_into(nc: &! NativeCompiler, value: 
 // every reaching definition is float. f64 float literals still reach SSE via the
 // lowering imm_flags bits (their loadimm+marker pair makes them CONFLICT here).
 fn nc_compute_float_types(nc: &! NativeCompiler, func: &IrFunction) with Mut, Panic, Div {
-    var ty: [i64; 512] = [0; 512]
+    var ty: [i64; 2048] = [0; 2048]
     var changed = true
     var iters = 0
     while changed && iters < 24 {
@@ -6775,7 +7110,7 @@ fn nc_compute_float_types(nc: &! NativeCompiler, func: &IrFunction) with Mut, Pa
             } else if op == IrOpcode::IrUnaryOp {
                 let uop = (*func).instrs[i as usize].un_op
                 if uop == UnaryOp::OpNeg {
-                    let t1 = if s1 >= 0 && s1 < 512 { ty[s1 as usize] } else { 0 }
+                    let t1 = if s1 >= 0 && s1 < NC_MAX_VREGS { ty[s1 as usize] } else { 0 }
                     if t1 == 1 {
                         def = 1
                     } else if t1 == 2 {
@@ -6787,7 +7122,7 @@ fn nc_compute_float_types(nc: &! NativeCompiler, func: &IrFunction) with Mut, Pa
                     def = 2
                 }
             } else if op == IrOpcode::IrCopy {
-                if s1 >= 0 && s1 < 512 { def = ty[s1 as usize] }
+                if s1 >= 0 && s1 < NC_MAX_VREGS { def = ty[s1 as usize] }
             } else if op == IrOpcode::IrCall || op == IrOpcode::IrFieldGet || op == IrOpcode::IrIndexGet {
                 if fl == IR_FLOAT_REG_MARKER_FLAG { def = 1 } else { def = 2 }
             } else if op == IrOpcode::IrBinOp {
@@ -6795,8 +7130,8 @@ fn nc_compute_float_types(nc: &! NativeCompiler, func: &IrFunction) with Mut, Pa
                 if bop == BinaryOp::OpAdd || bop == BinaryOp::OpSub || bop == BinaryOp::OpMul || bop == BinaryOp::OpDiv {
                     let lf = ((fl / 2) & 1) == 1
                     let rf = ((fl / 4) & 1) == 1
-                    let t1 = if s1 >= 0 && s1 < 512 { ty[s1 as usize] } else { 0 }
-                    let t2 = if s2 >= 0 && s2 < 512 { ty[s2 as usize] } else { 0 }
+                    let t1 = if s1 >= 0 && s1 < NC_MAX_VREGS { ty[s1 as usize] } else { 0 }
+                    let t2 = if s2 >= 0 && s2 < NC_MAX_VREGS { ty[s2 as usize] } else { 0 }
                     if lf || rf || t1 == 1 || t2 == 1 {
                         def = 1
                     } else if t1 == 2 && t2 == 2 {
@@ -6808,7 +7143,7 @@ fn nc_compute_float_types(nc: &! NativeCompiler, func: &IrFunction) with Mut, Pa
                     def = 2
                 }
             }
-            if d >= 0 && d < 512 && def >= 0 {
+            if d >= 0 && d < NC_MAX_VREGS && def >= 0 {
                 let cur = ty[d as usize]
                 var nv = cur
                 if cur == 0 {
@@ -6830,7 +7165,7 @@ fn nc_compute_float_types(nc: &! NativeCompiler, func: &IrFunction) with Mut, Pa
         iters = iters + 1
     }
     var r = 0
-    while r < 512 {
+    while r < NC_MAX_VREGS {
         (*nc).reg_type[r as usize] = ty[r as usize]
         r = r + 1
     }
@@ -6852,6 +7187,10 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
     }
     spill_ir_params_ref_mut(nc, func)
 
+    // saw_return: defense against truncated IR (pre-4096 IR_MAX_INSTRS wall dropped
+    // IrReturn on unsplit oct_mul → fallthrough into the next function / main
+    // re-entry storm). Always close the frame if no IrReturn/IrReturnSret was seen.
+    var saw_return = false
     var i = 0
     while i < (*func).instr_count && i < IR_MAX_INSTRS {
         let instr_op = (*func).instrs[i as usize].op
@@ -6938,14 +7277,22 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
                 nc_emit_mov_reg_imm(nc, 3, (*func).instrs[i as usize].field_idx + native_v2_object_header_size() / 8)
                 nc_emit_store_rax_mem_rdx_rbx8(nc)
             }
-            if (*func).instrs[i as usize].src2 >= 0 && (*func).instrs[i as usize].src2 < 512 {
+            if (*func).instrs[i as usize].src2 >= 0 && (*func).instrs[i as usize].src2 < NC_MAX_VREGS {
                 if (*nc).is_float_reg[(*func).instrs[i as usize].src2 as usize] == 1 {
                     nc_core_mark_float_field(nc, (*func).instrs[i as usize].src1, (*func).instrs[i as usize].field_idx)
                 }
             }
         } else if instr_op == IrOpcode::IrIndexGet {
             let base_reg = (*func).instrs[i as usize].src1
-            if (*func).instrs[i as usize].label_id == 3 {
+            if (*func).instrs[i as usize].label_id == 4 {
+                // BSS i8: sign-extend packed byte (parity with local [i8;N] box path).
+                native_v2_core_emit_raw_signed_byte_array_load_into(
+                    nc,
+                    (*func).instrs[i as usize].dst,
+                    base_reg,
+                    (*func).instrs[i as usize].src2,
+                )
+            } else if (*func).instrs[i as usize].label_id == 3 {
                 native_v2_core_emit_raw_byte_array_load_into(
                     nc,
                     (*func).instrs[i as usize].dst,
@@ -6981,7 +7328,7 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
                     (*func).instrs[i as usize].src2,
                 )
             }
-            let index_base_is_float_array = if base_reg >= 0 && base_reg < 512 { (*nc).is_float_reg[base_reg as usize] == 1 } else { false }
+            let index_base_is_float_array = if base_reg >= 0 && base_reg < NC_MAX_VREGS { (*nc).is_float_reg[base_reg as usize] == 1 } else { false }
             if (*func).instrs[i as usize].imm_flags == IR_FLOAT_REG_MARKER_FLAG || index_base_is_float_array {
                 nc_core_mark_float_reg(nc, (*func).instrs[i as usize].dst)
             } else {
@@ -7044,7 +7391,7 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
         } else if instr_op == IrOpcode::IrCopy {
             nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
             nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
-            if (*func).instrs[i as usize].src1 >= 0 && (*func).instrs[i as usize].src1 < 512 {
+            if (*func).instrs[i as usize].src1 >= 0 && (*func).instrs[i as usize].src1 < NC_MAX_VREGS {
                 if (*nc).is_float_reg[(*func).instrs[i as usize].src1 as usize] == 1 {
                     nc_core_mark_float_reg(nc, (*func).instrs[i as usize].dst)
                 } else {
@@ -7062,8 +7409,8 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             let uop = (*func).instrs[i as usize].un_op
             if uop == UnaryOp::OpNeg {
                 let src1 = (*func).instrs[i as usize].src1
-                let src1_marked_float = if src1 >= 0 && src1 < 512 && (*nc).is_float_reg[src1 as usize] == 1 { 1 } else { 0 }
-                let src1_typed_float = if src1 >= 0 && src1 < 512 && (*nc).reg_type[src1 as usize] == 1 { 1 } else { 0 }
+                let src1_marked_float = if src1 >= 0 && src1 < NC_MAX_VREGS && (*nc).is_float_reg[src1 as usize] == 1 { 1 } else { 0 }
+                let src1_typed_float = if src1 >= 0 && src1 < NC_MAX_VREGS && (*nc).reg_type[src1 as usize] == 1 { 1 } else { 0 }
                 if src1_marked_float == 1 || src1_typed_float == 1 {
                     nc_core_load_temp_to_rax(nc, src1)
                     nc_emit_movq_xmm1_rax(nc)
@@ -7190,11 +7537,13 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             nc_emit_mov_rsp_rbp(nc)
             nc_emit_pop_rbp(nc)
             nc_emit_ret(nc)
+            saw_return = true
         } else if instr_op == IrOpcode::IrReturnSret {
             nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
             nc_emit_mov_rsp_rbp(nc)
             nc_emit_pop_rbp(nc)
             nc_emit_ret(nc)
+            saw_return = true
         } else if instr_op == IrOpcode::IrLabel {
             nc_define_label(nc, (*func).instrs[i as usize].label_id)
         } else if instr_op == IrOpcode::IrJump {
@@ -7353,6 +7702,18 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
         i = i + 1
     }
 
+    // Fallthrough defense: if IR was truncated past IR_MAX_INSTRS (or a void body
+    // never received IrReturn), emit a synthetic epilogue so control cannot walk
+    // into the next function body (re-entry through main / wrong call target
+    // appearance). Correctness of the truncated body is not claimed — callers
+    // that hit this path still need a larger IR_MAX_INSTRS for full semantics.
+    if !saw_return {
+        nc_emit_mov_rax_imm(nc, 0)
+        nc_emit_mov_rsp_rbp(nc)
+        nc_emit_pop_rbp(nc)
+        nc_emit_ret(nc)
+    }
+
     patch_label_forwards_mut(nc)
     true
 }
@@ -7377,12 +7738,10 @@ pub fn native_v2_rodata_len_into(nc: &! NativeCompiler) -> i64 {
 }
 
 pub fn native_v2_rodata_append_byte_into(nc: &! NativeCompiler, byte: i64) with Mut, Panic, Div {
-    var bytes = (*nc).flat_rodata_bytes
     var len = (*nc).flat_rodata_len
-    if len >= 0 && len < 8192 {
-        bytes[len as usize] = byte as i8
+    if len >= 0 && len < 262144 {
+        NC_BIG_RODATA[len as usize] = byte as i8
         len = len + 1
-        (*nc).flat_rodata_bytes = bytes
         (*nc).flat_rodata_len = len
     }
 }
@@ -7891,28 +8250,33 @@ fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_f
     native_compiler_set_fn_offset(nc, fn_index, function_offset)
     (*nc).symbols = symbol_data_add_name((*nc).symbols, fn_index, func.name.buf, func.name.len)
 
-    if name_is_print_int(func.name) { (*nc) = emit_builtin_print_int((*nc)); return }
-    if name_is_print_char(func.name) { (*nc) = emit_builtin_print_char((*nc)); return }
-    if name_is_print(func.name) { (*nc) = emit_builtin_print_str((*nc)); return }
-    if name_is_get_arg_count(func.name) { (*nc) = emit_builtin_get_arg_count((*nc)); return }
-    if name_is_get_arg(func.name) { (*nc) = emit_builtin_get_arg((*nc)); return }
-    if name_is_str_len(func.name) { (*nc) = emit_builtin_str_len((*nc)); return }
-    if name_is_str_eq(func.name) { (*nc) = emit_builtin_str_eq((*nc)); return }
-    if name_is_str_slice(func.name) { (*nc) = emit_builtin_str_slice((*nc)); return }
-    if name_is_starts_with(func.name) { (*nc) = emit_builtin_starts_with((*nc)); return }
-    if name_is_str_concat(func.name) { (*nc) = emit_builtin_str_concat((*nc)); return }
-    if name_is_read_file(func.name) { (*nc) = emit_builtin_read_file((*nc)); return }
-    if name_is_write_file(func.name) { (*nc) = emit_builtin_write_file((*nc)); return }
-    if name_is_file_size(func.name) { (*nc) = emit_builtin_file_size((*nc)); return }
-    if name_is_sqrt(func.name) { (*nc) = emit_builtin_sqrt((*nc)); return }
-    if name_is_print_f64(func.name) { (*nc) = emit_builtin_print_f64((*nc)); return }
-    if name_is_exp(func.name) { (*nc) = emit_builtin_exp((*nc)); return }
-    if name_is_log(func.name) { (*nc) = emit_builtin_log((*nc)); return }
-    if name_is_sin(func.name) { (*nc) = emit_builtin_sin((*nc)); return }
-    if name_is_cos(func.name) { (*nc) = emit_builtin_cos((*nc)); return }
-    if name_is_assert(func.name) { (*nc) = emit_builtin_assert((*nc)); return }
-    if name_is_heap_alloc(func.name) { emit_builtin_heap_alloc_into(nc); return }
-    if name_is_heap_free(func.name) { emit_builtin_heap_free_into(nc); return }
+    // Empty-stub builtins only — see native_v2_builtin_id_for_func_ref.
+    if func.instr_count == 0 {
+        if name_is_print_int(func.name) { (*nc) = emit_builtin_print_int((*nc)); return }
+        if name_is_print_char(func.name) { (*nc) = emit_builtin_print_char((*nc)); return }
+        if name_is_print(func.name) { (*nc) = emit_builtin_print_str((*nc)); return }
+        if name_is_get_arg_count(func.name) { (*nc) = emit_builtin_get_arg_count((*nc)); return }
+        if name_is_get_arg(func.name) { (*nc) = emit_builtin_get_arg((*nc)); return }
+        if name_is_str_len(func.name) { (*nc) = emit_builtin_str_len((*nc)); return }
+        if name_is_str_eq(func.name) { (*nc) = emit_builtin_str_eq((*nc)); return }
+        if name_is_str_slice(func.name) { (*nc) = emit_builtin_str_slice((*nc)); return }
+        if name_is_starts_with(func.name) { (*nc) = emit_builtin_starts_with((*nc)); return }
+        if name_is_str_concat(func.name) { (*nc) = emit_builtin_str_concat((*nc)); return }
+        if name_is_read_file(func.name) { (*nc) = emit_builtin_read_file((*nc)); return }
+        if name_is_write_file(func.name) { (*nc) = emit_builtin_write_file((*nc)); return }
+        if name_is_file_size(func.name) { (*nc) = emit_builtin_file_size((*nc)); return }
+        if name_is_sqrt(func.name) { (*nc) = emit_builtin_sqrt((*nc)); return }
+        if name_is_f64_to_bits(func.name) { (*nc) = emit_builtin_f64_bits_identity((*nc)); return }
+        if name_is_bits_to_f64(func.name) { (*nc) = emit_builtin_f64_bits_identity((*nc)); return }
+        if name_is_print_f64(func.name) { (*nc) = emit_builtin_print_f64((*nc)); return }
+        if name_is_exp(func.name) { (*nc) = emit_builtin_exp((*nc)); return }
+        if name_is_log(func.name) { (*nc) = emit_builtin_log((*nc)); return }
+        if name_is_sin(func.name) { (*nc) = emit_builtin_sin((*nc)); return }
+        if name_is_cos(func.name) { (*nc) = emit_builtin_cos((*nc)); return }
+        if name_is_assert(func.name) { (*nc) = emit_builtin_assert((*nc)); return }
+        if name_is_heap_alloc(func.name) { emit_builtin_heap_alloc_into(nc); return }
+        if name_is_heap_free(func.name) { emit_builtin_heap_free_into(nc); return }
+    }
 
     (*nc).current_strategy = func.compile_strategy
     native_v2_run_machine_regalloc_mut(nc, machine_func)
@@ -8373,6 +8737,17 @@ pub fn native_v2_core_emit_raw_byte_array_load_into(nc: &! NativeCompiler, dst: 
     nc_core_load_temp_to_rax(nc, idx_reg)
     nc_emit_mov_reg_reg(nc, 3, 0)
     nc_emit_movzx_rax_byte_rdx_rbx(nc)
+    nc_core_store_rax_to_temp(nc, dst)
+}
+
+// Signed packed-byte load for BSS `[i8; N]` (label_id=4). Zero-extend would turn
+// -1 into 255 and break `i8 as i64` / signed compares vs local-array parity.
+pub fn native_v2_core_emit_raw_signed_byte_array_load_into(nc: &! NativeCompiler, dst: i64, base_reg: i64, idx_reg: i64) with Mut, Panic, Div {
+    nc_core_load_temp_to_rax(nc, base_reg)
+    nc_emit_mov_reg_reg(nc, 2, 0)
+    nc_core_load_temp_to_rax(nc, idx_reg)
+    nc_emit_mov_reg_reg(nc, 3, 0)
+    nc_emit_movsx_rax_byte_rdx_rbx(nc)
     nc_core_store_rax_to_temp(nc, dst)
 }
 
@@ -8912,6 +9287,14 @@ fn emit_entry_trampoline_split_into(nc: &! NativeCompiler, main_fn_index: i64) w
     emit_entry_trampoline_call_exit_into(nc, main_fn_index)
 }
 
+// Emit entry-time BSS fills for globals with a recorded init
+// (returns_float==1 is the "has init" flag; prof_counter_id holds the fill/first value).
+// Paths:
+//   - element-list (instr_count > 1): sequential stores of instrs[i].imm_i64
+//   - scalar / 1-elem: single 8-byte store of prof_counter_id
+//   - array-repeat `[V; N]` (instr_count == 0, bss_size > elem): rep stosq/stosb
+// f64 values are stored as IEEE-754 bit patterns (same path as i64 words).
+// hyper_algebra_kind: 1=u8, 17=i8 (both physical size 1), 8=qword.
 fn emit_global_var_inits_into(nc: &! NativeCompiler, module: &IrModule) with Mut, Panic, Div {
     var fi: i64 = 0
     while fi < (*module).fn_count {
@@ -8920,9 +9303,85 @@ fn emit_global_var_inits_into(nc: &! NativeCompiler, module: &IrModule) with Mut
             let bss_off = func.param_count
             let abs_addr = BSS_BASE_LINUX + bss_off
             let init_val = func.prof_counter_id
-            nc_emit_mov_rax_imm(nc, init_val)
-            nc_emit_mov_reg_imm(nc, 3, abs_addr)
-            nc_emit_store_rax_mem_rbx_disp32(nc, 0)
+            let total = func.bss_size
+            var elem = func.hyper_algebra_kind
+            // i8 uses kind 17 (signed); physical stride is still 1 byte.
+            if elem == 17 {
+                elem = 1
+            }
+            if elem <= 0 {
+                elem = 8
+            }
+            // Wave15e: string-literal BSS init — LEA rodata pointer into BSS.
+            // return_struct_name holds the normalized payload (quotes stripped).
+            // Must not take the imm-fill path (prof_counter_id is the magic, not data).
+            // The string-magic guard also requires a non-empty payload Name.
+            // Zero-valued scalar/array fills carry init_val == 0; when the
+            // imported BSS_INIT_STRING_MAGIC constant folds to 0 (observed in
+            // the seed-built compiler binary — cross-module `pub let`
+            // constants with `0 - N` initializers can resolve to 0), an
+            // unguarded comparison misroutes every zero fill down the LEA
+            // path and stores a pointer-to-empty-string instead of 0.
+            // Real string-literal globals always carry their payload in
+            // return_struct_name; zero fills have ir_empty_name() there.
+            // Known residual: a module-level `var S: string = ""` has an
+            // empty payload and would take the scalar path instead.
+            if init_val == BSS_INIT_STRING_MAGIC && func.return_struct_name.len > 0 {
+                let str_offset = nc_rodata_add_name_value(nc, func.return_struct_name)
+                let lea_pos = (*nc).code.len
+                nc_emit_lea_rax_rip_disp32(nc, 0)
+                nc_add_rodata_reloc(nc, lea_pos + 3, str_offset)
+                nc_emit_mov_reg_imm(nc, 3, abs_addr)
+                nc_emit_store_rax_mem_rbx_disp32(nc, 0)
+            } else if func.instr_count > 1 {
+                // Element-list form: distinct per-element words packed into instrs[].
+                // Prefer this over rep-stos fill even when bss_size is multi-word.
+                var ei: i64 = 0
+                while ei < func.instr_count {
+                    let word = func.instrs[ei as usize].imm_i64
+                    let addr = abs_addr + ei * elem
+                    nc_emit_mov_rax_imm(nc, word)
+                    nc_emit_mov_reg_imm(nc, 3, addr)
+                    if elem == 1 {
+                        // byte store: mov [rbx], al
+                        nc_emit_byte(nc, 0x88)
+                        nc_emit_byte(nc, 0x03)
+                    } else {
+                        nc_emit_store_rax_mem_rbx_disp32(nc, 0)
+                    }
+                    ei = ei + 1
+                }
+            } else if total <= 8 && elem >= 8 {
+                // Single word (scalar or 1-element array of 8-byte elems): one store.
+                nc_emit_mov_rax_imm(nc, init_val)
+                nc_emit_mov_reg_imm(nc, 3, abs_addr)
+                nc_emit_store_rax_mem_rbx_disp32(nc, 0)
+            } else if total > 0 {
+                // Array-repeat fill. DF=0 (ascending) is the process default.
+                // rax = fill value, rdi = dest, rcx = element count.
+                // Covers i64 and f64 fills (same 8-byte word path via rep stosq).
+                let count = total / elem
+                if count > 0 {
+                    nc_emit_mov_rax_imm(nc, init_val)
+                    nc_emit_mov_rdi_imm(nc, abs_addr)
+                    nc_emit_mov_reg_imm(nc, 1, count)
+                    if elem == 1 {
+                        // rep stosb
+                        nc_emit_byte(nc, 0xf3)
+                        nc_emit_byte(nc, 0xaa)
+                    } else {
+                        // rep stosq
+                        nc_emit_byte(nc, 0xf3)
+                        nc_emit_byte(nc, 0x48)
+                        nc_emit_byte(nc, 0xab)
+                    }
+                }
+            } else {
+                // Legacy slots with bss_size unset: scalar store
+                nc_emit_mov_rax_imm(nc, init_val)
+                nc_emit_mov_reg_imm(nc, 3, abs_addr)
+                nc_emit_store_rax_mem_rbx_disp32(nc, 0)
+            }
         }
         fi = fi + 1
     }
@@ -9922,7 +10381,7 @@ fn native_v2_build_elf_image_into(nc: &! NativeCompiler, base_addr: i64, entry_o
     if (*nc).flat_rodata_len > 0 {
         i = 0
         while i < rodata_len && (rodata_offset + i) < 4194304 {
-            NC_BIG_ELF[(rodata_offset + i) as usize] = (*nc).flat_rodata_bytes[i as usize]
+            NC_BIG_ELF[(rodata_offset + i) as usize] = NC_BIG_RODATA[i as usize]
             i = i + 1
         }
     } else {
@@ -10397,7 +10856,7 @@ fn compile_native_finalize_and_write_ref(nc: &! NativeCompiler, base_addr: i64, 
         if (*nc).flat_rodata_len > 0 {
             var ri: i64 = 0
             while ri < rodata_len {
-                NATIVE_ELF_BUF[NATIVE_ELF_OFF as usize] = (*nc).flat_rodata_bytes[ri as usize]
+                NATIVE_ELF_BUF[NATIVE_ELF_OFF as usize] = NC_BIG_RODATA[ri as usize]
                 NATIVE_ELF_OFF = NATIVE_ELF_OFF + 1
                 ri = ri + 1
             }

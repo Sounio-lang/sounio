@@ -22,8 +22,8 @@ use check::refinement::*
 use check::units::*
 use check::env::*
 use check::traits::*
-use check::mod::{check_program, check_program_epistemic_into, check_modules_verdict_boot4_with_visibility}
-use check::specializer::{specialize_generics}
+use check::mod::{check_program, check_program_epistemic_into, check_items_verdict_boot4, check_modules_verdict_boot4_with_visibility}
+use check::specializer::{specialize_generics, spec_last_instantiated, spec_append_item_lists}
 use check::ownership::*
 use check::lint::*
 use check::layout::*
@@ -645,11 +645,11 @@ fn run_probe_ir_opt_strategy(args: ArgList, flag_index: i64) with IO, Mut, Panic
     if ir_result.ok && parse_errors == 0 {
         println("probe_ir_opt_strategy: ok")
         print("probe_ir_opt_strategy: functions=")
-        print_int(ir_result.module.fn_count)
+        print_int((*ir_result.module).fn_count)
         print("\n")
         var fi: i64 = 0
-        while fi < ir_result.module.fn_count {
-            let func = ir_result.module.functions[fi as usize]
+        while fi < (*ir_result.module).fn_count {
+            let func = (*ir_result.module).functions[fi as usize]
             print("probe_ir_opt_strategy: fn=")
             compiler_manifest_print_name(func.name)
             print(" strategy=")
@@ -1568,7 +1568,8 @@ fn compiler_preflight_ir_load(path: string) -> CompilerIrLoadResult with IO, Mut
         return compiler_ir_load_result_error(preflight_errors)
     }
 
-    return compiler_ir_load_result_ok(ir_result.module)
+    // Densify into CompilerIrLoadResult (still stack IrModule) at the preflight boundary.
+    return compiler_ir_load_result_ok(*ir_result.module)
 }
 
 fn compiler_ir_buffers_equal(buf_a: [i8; 131072], len_a: i64, buf_b: [i8; 131072], len_b: i64) -> bool with Mut {
@@ -2082,11 +2083,37 @@ fn compiler_visibility_preflight(source_path: string) -> bool with IO, Mut, Pani
     print("run_check_mode: about to check ")
     print_int(closure.node_count)
     print(" modules\n")
-    let verdict = check_modules_verdict_boot4_with_visibility(
-        &!programs,
-        closure.node_count,
-        true
-    )
+    // WP-A3 specialized multi-module typecheck (same design as
+    // module_frontend_specialized_typecheck on the IR-merge/compile path):
+    // merge all modules' items, monomorphize turbofish instantiations, then
+    // check the specialized list. Without this pass, generic template bodies
+    // that construct `S {..}` / call trait methods on a type parameter F
+    // emit spurious E008 (`expected S / found S__F`) and E011 (no method on
+    // F) — blocking `cd_exact_generic_i64` and related ExactRing engines.
+    // Fall back to the plain multi-module checker when no generic was
+    // actually instantiated so ordinary multi-module code stays identical.
+    var merged: Option<Box<ItemList>> = None
+    var mi: i64 = closure.node_count - 1
+    while mi >= 0 {
+        merged = spec_append_item_lists(programs[mi as usize].items, merged)
+        mi = mi - 1
+    }
+    let specialized = specialize_generics(merged)
+    var verdict: i64 = 0
+    if spec_last_instantiated() {
+        if str_eq(read_env("SOUNIO_MM_SPEC_TRACE"), "1") {
+            print("run_check_mode: specialized-typecheck over merged ")
+            print_int(closure.node_count)
+            print(" modules\n")
+        }
+        verdict = check_items_verdict_boot4(specialized)
+    } else {
+        verdict = check_modules_verdict_boot4_with_visibility(
+            &!programs,
+            closure.node_count,
+            true
+        )
+    }
     print("run_check_mode: verdict=")
     print_int(verdict)
     print("\n")
@@ -2282,7 +2309,7 @@ fn run_emit_obj_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, A
     if !ir_result.ok {
         panic("emit-obj: frontend failed")
     }
-    let obj = compile_to_obj(&ir_result.module)
+    let obj = compile_to_obj(&(*ir_result.module))
     let ok = io_write_elf_to_file(output_path, obj)
     if ok {
         println("emit-obj: " + output_path + " (" + int_to_string(obj.len) + " bytes)")
@@ -2296,7 +2323,7 @@ fn run_emit_so_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Al
     let output_path = compiler_mode_output_path(args, "output.so")
     let ir_result = load_multimodule_ir(source_path)
     if !ir_result.ok { panic("emit-so: frontend failed") }
-    let so = compile_to_shared(&ir_result.module)
+    let so = compile_to_shared(&(*ir_result.module))
     let ok = io_write_elf_to_file(output_path, so)
     if ok { println("emit-so: " + output_path + " (" + int_to_string(so.len) + " bytes)"); return }
     panic("emit-so: write failed")
@@ -3138,8 +3165,8 @@ fn run_native_v2_compile_mode(args: ArgList, flag_index: i64) with IO, Mut, Pani
         panic("native-v2-compile failed: visibility preflight")
     }
     // The boxed compile-to-file route is SRET-safe for both imported and
-    // single-module programs. Returning MultiModuleIrResult by value embeds a
-    // full IrModule and crashes larger sources before the backend is reached.
+    // single-module programs. MultiModuleIrResult.module is now Box<IrModule>
+    // (no densify at the legacy load API); prefer this file route for large IR.
     let optimize = compiler_mode_has_flag(args, "-O") || compiler_mode_has_flag(args, "--optimize")
     let rc = module_frontend_compile_imported_to_file(source_path, out_path, optimize)
     if rc != 0 {
@@ -5248,16 +5275,16 @@ fn compile(opts: CompilerOptions) -> CompileResult with IO, Mut, Panic, Div, All
                 pi = pi + 1
             }
             let profile = sprof_parse(prof_buf, prof_size)
-            sprof_apply_promotion(&!ir_result.module, &profile)
+            sprof_apply_promotion(&! (*ir_result.module), &profile)
 
             // Sprint 48: log promotion decisions
             var li: i64 = 0
-            while li < ir_result.module.fn_count {
-                let lcount = sprof_lookup(&profile, &ir_result.module.functions[li as usize].name)
+            while li < (*ir_result.module).fn_count {
+                let lcount = sprof_lookup(&profile, &(*ir_result.module).functions[li as usize].name)
                 let ltarget = sprof_promotion_target(lcount)
                 if ltarget >= 0 {
                     print("[sprof] ")
-                    compiler_manifest_print_name(ir_result.module.functions[li as usize].name)
+                    compiler_manifest_print_name((*ir_result.module).functions[li as usize].name)
                     println(": count " + int_to_string(lcount) + " -> strategy " + ir_strategy_name(ltarget))
                 }
                 li = li + 1
@@ -5269,48 +5296,50 @@ fn compile(opts: CompilerOptions) -> CompileResult with IO, Mut, Panic, Div, All
     }
 
     // Sprint 49: Apply inlining pass when -O is set
+    // By-value opt passes densify temporarily; re-box to keep MultiModuleIrResult boxed.
     if opts.optimize {
-        let pre_inline_count = ir_result.module.fn_count
-        ir_result.module = inl_run_pass(ir_result.module)
+        let pre_inline_count = (*ir_result.module).fn_count
+        ir_result.module = Box::new(inl_run_pass(*ir_result.module))
         println("[inline] pass complete: " + int_to_string(pre_inline_count) + " functions processed")
     }
 
     // Sprint 50: Profile-guided function layout
     if has_valid_profile {
-        let layout_result = layout_sort_by_profile(ir_result.module, &loaded_profile)
-        ir_result.module = layout_result.module
+        let layout_result = layout_sort_by_profile(*ir_result.module, &loaded_profile)
+        ir_result.module = Box::new(layout_result.module)
         if layout_result.reordered {
-            println("[layout] reordered " + int_to_string(ir_result.module.fn_count) + " functions (" + int_to_string(layout_result.hot_count) + " hot, " + int_to_string(layout_result.cold_count) + " cold)")
+            println("[layout] reordered " + int_to_string((*ir_result.module).fn_count) + " functions (" + int_to_string(layout_result.hot_count) + " hot, " + int_to_string(layout_result.cold_count) + " cold)")
         }
     }
 
     // Sprint 51: const_fold + DCE cleanup after inlining
     if opts.optimize {
-        let pre_opt_count = ir_result.module.fn_count
-        ir_result.module = opt_cleanup_module(ir_result.module)
+        let pre_opt_count = (*ir_result.module).fn_count
+        ir_result.module = Box::new(opt_cleanup_module(*ir_result.module))
         println("[opt] const_prop + dce applied to " + int_to_string(pre_opt_count) + " functions")
-        let loop_result = lopt_optimize_module(ir_result.module)
-        ir_result.module = loop_result.module
+        let loop_result = lopt_optimize_module(*ir_result.module)
+        ir_result.module = Box::new(loop_result.module)
         if loop_result.functions_changed > 0 {
             println("[loop] hoisted " + int_to_string(loop_result.invariants_hoisted) +
                     " invariants across " + int_to_string(loop_result.functions_changed) + " functions")
         }
-        ir_result.module = opt_cleanup_module(ir_result.module)
+        ir_result.module = Box::new(opt_cleanup_module(*ir_result.module))
     }
 
     // Sprint 54: Tail call optimization
     if opts.optimize {
-        let tco_result = tco_run_pass(ir_result.module)
-        ir_result.module = tco_result.0
+        let tco_result = tco_run_pass(*ir_result.module)
+        ir_result.module = Box::new(tco_result.0)
         let tco_ctx = tco_result.1
         if tco_ctx.stats.transformed > 0 {
             println("[tco] " + int_to_string(tco_ctx.stats.transformed) + " tail call(s) converted to loops")
         }
     }
 
+    // compile_multimodule_native_with_ir still takes IrModule by value.
     let exit_code = compile_multimodule_native_with_ir(
         opts.input_file,
-        ir_result.module,
+        *ir_result.module,
         opts.output_file,
         opts.target,
         "auto",
@@ -5335,7 +5364,7 @@ fn compile(opts: CompilerOptions) -> CompileResult with IO, Mut, Panic, Div, All
         errors = compile_push_ir_failure(errors, ir_result.error_msg)
     } else {
         let target_spec = native_resolve_target(opts.target, "auto", false)
-        let native_result = compile_native(&ir_result.module, target_spec)
+        let native_result = compile_native(&(*ir_result.module), target_spec)
         if !native_result.ok {
             errors = compile_errors_push_lines(errors, "error: ", native_result.error_msg)
         }
@@ -6165,7 +6194,7 @@ fn compiler_main_test_dce_removes_dead() -> bool with Mut, Div, Panic {
 // Sprint 52: verify regalloc assigns a preg when register pressure is low (1 vreg, 1 preg)
 fn compiler_main_test_regalloc_assigns_preg() -> bool with Mut, Div, Panic {
     // Build: r0 = 3, r1 = r0 + 4, return r1
-    var ra_instrs: [RaSimpleInstr; 512] = [ra_empty_simple_instr(); 512]
+    var ra_instrs: [RaSimpleInstr; 4096] = [ra_empty_simple_instr(); 4096]
     ra_instrs[0 as usize] = ra_simple_instr(0, -1, -1)   // r0 = imm (def r0)
     ra_instrs[1 as usize] = ra_simple_instr(1, 0, -1)    // r1 = r0 + imm (def r1, use r0)
     ra_instrs[2 as usize] = ra_simple_instr(-1, 1, -1)   // return r1 (use r1)
@@ -6183,7 +6212,7 @@ fn compiler_main_test_regalloc_assigns_preg() -> bool with Mut, Div, Panic {
 // Sprint 52: verify regalloc spills when pressure exceeds available registers
 fn compiler_main_test_regalloc_spills_under_pressure() -> bool with Mut, Div, Panic {
     // Build: 6 live intervals all overlapping (start 0, end 10), only 1 preg
-    var ra_instrs: [RaSimpleInstr; 512] = [ra_empty_simple_instr(); 512]
+    var ra_instrs: [RaSimpleInstr; 4096] = [ra_empty_simple_instr(); 4096]
     var i = 0
     while i < 6 {
         ra_instrs[i as usize] = ra_simple_instr(i, -1, -1)
@@ -6259,7 +6288,7 @@ fn compiler_main_test_multipreg_map() -> bool {
 
 // T31: 2 non-overlapping vregs → 2 pregs assigned, 0 spilled
 fn compiler_main_test_multipreg_two_fit() -> bool with Mut, Div, Panic {
-    var ra_instrs: [RaSimpleInstr; 512] = [ra_empty_simple_instr(); 512]
+    var ra_instrs: [RaSimpleInstr; 4096] = [ra_empty_simple_instr(); 4096]
     ra_instrs[0 as usize] = ra_simple_instr(0, -1, -1)
     ra_instrs[1 as usize] = ra_simple_instr(-1, 0, -1)
     ra_instrs[2 as usize] = ra_simple_instr(1, -1, -1)
@@ -6275,7 +6304,7 @@ fn compiler_main_test_multipreg_two_fit() -> bool with Mut, Div, Panic {
 
 // T32: 4 non-overlapping vregs → all 4 pregs used, 0 spilled
 fn compiler_main_test_multipreg_four_fit() -> bool with Mut, Div, Panic {
-    var ra_instrs: [RaSimpleInstr; 512] = [ra_empty_simple_instr(); 512]
+    var ra_instrs: [RaSimpleInstr; 4096] = [ra_empty_simple_instr(); 4096]
     var i = 0
     while i < 4 {
         ra_instrs[(i * 2) as usize]     = ra_simple_instr(i, -1, -1)
@@ -6293,7 +6322,7 @@ fn compiler_main_test_multipreg_four_fit() -> bool with Mut, Div, Panic {
 
 // T33: 5 overlapping vregs with 4 pregs → exactly 1 spill
 fn compiler_main_test_multipreg_spill_one() -> bool with Mut, Div, Panic {
-    var ra_instrs: [RaSimpleInstr; 512] = [ra_empty_simple_instr(); 512]
+    var ra_instrs: [RaSimpleInstr; 4096] = [ra_empty_simple_instr(); 4096]
     // Define all 5 at pos 0, use all at pos 1 (all live simultaneously)
     var i = 0
     while i < 5 {
@@ -6343,7 +6372,7 @@ fn compiler_main_test_multipreg_epilogue_bytes() -> bool with Mut, Panic, Div {
 
 // T37: regalloc_linear_scan(state, 4) produces valid state (regression + 4-preg)
 fn compiler_main_test_multipreg_regalloc_four() -> bool with Mut, Div, Panic {
-    var ra_instrs: [RaSimpleInstr; 512] = [ra_empty_simple_instr(); 512]
+    var ra_instrs: [RaSimpleInstr; 4096] = [ra_empty_simple_instr(); 4096]
     ra_instrs[0 as usize] = ra_simple_instr(0, -1, -1)
     ra_instrs[1 as usize] = ra_simple_instr(-1, 0, -1)
     var state = liveness_compute_intervals(ra_instrs, 2)
@@ -9038,7 +9067,7 @@ fn run_probe_machine_ir(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div
     let ir_result = load_multimodule_ir_probe_summary(source_path)
     let parse_errors = parser_last_error_count()
     if ir_result.ok && parse_errors == 0 {
-        let mir = native_v2_build_machine_module(&ir_result.module, true)
+        let mir = native_v2_build_machine_module(&(*ir_result.module), true)
         print("[machine-ir] fn_count=")
         print_int(mir.fn_count)
         print(" ir_instrs=")

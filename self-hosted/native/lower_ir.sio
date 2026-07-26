@@ -42,10 +42,10 @@ pub fn preg_to_x86_reg(preg: i64) -> i64 {
 pub fn nc_run_regalloc(nc: NativeCompiler, func: IrFunction) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
     // 1. Build RaSimpleInstr array from IR instructions
-    var ra_instrs: [RaSimpleInstr; 512] = [ra_empty_simple_instr(); 512]
+    var ra_instrs: [RaSimpleInstr; 4096] = [ra_empty_simple_instr(); 4096]
     let count = func.instr_count
     var i = 0
-    while i < count && i < 128 {
+    while i < count && i < RA_MAX_SIMPLE_INSTRS && i < 4096 {
         let instr = func.instrs[i as usize]
         ra_instrs[i as usize] = ra_simple_instr(instr.dst, instr.src1, instr.src2)
         i = i + 1
@@ -58,7 +58,7 @@ pub fn nc_run_regalloc(nc: NativeCompiler, func: IrFunction) -> NativeCompiler w
     while v < state.count {
         let interval = state.intervals[v as usize]
         let vreg = interval.vreg
-        if vreg >= 0 && vreg < 512 {
+        if vreg >= 0 && vreg < NC_MAX_VREGS {
             if interval.assigned_preg >= 0 {
                 // Map logical preg to x86 reg number
                 c.vreg_to_preg[vreg as usize] = preg_to_x86_reg(interval.assigned_preg)
@@ -73,7 +73,7 @@ pub fn nc_run_regalloc(nc: NativeCompiler, func: IrFunction) -> NativeCompiler w
     var pi = 0
     while pi < func.param_count {
         let pvreg = func.param_regs[pi as usize]
-        if pvreg >= 0 && pvreg < 512 {
+        if pvreg >= 0 && pvreg < NC_MAX_VREGS {
             c.vreg_to_preg[pvreg as usize] = -2    // RA_UNASSIGNED: use stack fallback
         }
         pi = pi + 1
@@ -84,7 +84,7 @@ pub fn nc_run_regalloc(nc: NativeCompiler, func: IrFunction) -> NativeCompiler w
 // Load vreg to rax. Uses the physical register if allocated, else falls back to stack slot.
 pub fn nc_load_vreg_to_rax(nc: NativeCompiler, vreg: i64) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
-    if vreg < 0 || vreg >= 512 {
+    if vreg < 0 || vreg >= NC_MAX_VREGS {
         c.code = emit_xor_rax_rax(c.code)
         return c
     }
@@ -107,7 +107,7 @@ pub fn nc_load_vreg_to_rax(nc: NativeCompiler, vreg: i64) -> NativeCompiler with
 // Store rax to vreg. Uses the physical register if allocated, else falls back to stack slot.
 pub fn nc_store_rax_to_vreg(nc: NativeCompiler, vreg: i64) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
-    if vreg < 0 || vreg >= 512 {
+    if vreg < 0 || vreg >= NC_MAX_VREGS {
         return c
     }
     let preg = c.vreg_to_preg[vreg as usize]
@@ -133,7 +133,7 @@ pub fn nc_store_rax_to_vreg(nc: NativeCompiler, vreg: i64) -> NativeCompiler wit
 pub fn nc_min_frame_size(nc: NativeCompiler, func: IrFunction) -> i64 with Mut, Panic, Div {
     var max_stack_vreg: i64 = -1
     var v: i64 = 0
-    while v < func.reg_count && v < 512 {
+    while v < func.reg_count && v < NC_MAX_VREGS {
         if nc.vreg_to_preg[v as usize] < 0 {
             max_stack_vreg = v
         }
@@ -625,7 +625,7 @@ pub fn lower_copy(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
     if instr.dst >= 0 {
         c = nc_store_rax_to_vreg(c, instr.dst)
         // Propagate float type tracking
-        if instr.src1 >= 0 && instr.src1 < 512 {
+        if instr.src1 >= 0 && instr.src1 < NC_MAX_VREGS {
             c.is_float_reg[instr.dst as usize] = c.is_float_reg[instr.src1 as usize]
         }
     }
@@ -732,14 +732,14 @@ pub fn lower_ir_load_float_binop_operands(
 
     // Load lhs to xmm0: if it's an integer, convert via CVTSI2SD; else bit-move
     c = nc_load_vreg_to_rax(c, lhs)
-    if lhs >= 0 && lhs < 512 && c.is_float_reg[lhs as usize] == 0 {
+    if lhs >= 0 && lhs < NC_MAX_VREGS && c.is_float_reg[lhs as usize] == 0 {
         c.code = emit_cvtsi2sd_xmm0_rax(c.code)
     } else {
         c.code = emit_movq_xmm0_rax(c.code)
     }
     // Load rhs to xmm1: same pattern
     c = nc_load_vreg_to_rax(c, rhs)
-    if rhs >= 0 && rhs < 512 && c.is_float_reg[rhs as usize] == 0 {
+    if rhs >= 0 && rhs < NC_MAX_VREGS && c.is_float_reg[rhs as usize] == 0 {
         // Need rhs in xmm1, not xmm0 — use CVTSI2SD then move to xmm1
         c.code = emit_cvtsi2sd_xmm0_rax(c.code)
         c.code = emit_movq_rax_xmm0(c.code)     // xmm0 bits → rax
@@ -755,12 +755,12 @@ pub fn lower_ir_binop(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Di
 
     // Check if either operand is float
     var is_float = 0
-    if instr.src1 >= 0 && instr.src1 < 512 {
+    if instr.src1 >= 0 && instr.src1 < NC_MAX_VREGS {
         if c.is_float_reg[instr.src1 as usize] == 1 {
             is_float = 1
         }
     }
-    if instr.src2 >= 0 && instr.src2 < 512 {
+    if instr.src2 >= 0 && instr.src2 < NC_MAX_VREGS {
         if c.is_float_reg[instr.src2 as usize] == 1 {
             is_float = 1
         }

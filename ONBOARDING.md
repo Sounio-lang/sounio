@@ -72,7 +72,28 @@ IR ou claims científicas, leia também
 ## 7. Coordenação multi-agente
 
 - Múltiplas sessões Opus/Codex rodam concorrentes neste repo.
-- **Coordene antes de editar arquivos compartilhados.** Re-cheque `git status` antes de stage.
+- O `./sounio-whereami --quick` já mostra o resumo vivo de coordenação.
+- Antes da primeira edição, reserve a lane e seu conjunto de escrita:
+  `bin/sounio-coord claim --agent <id> --lane <id> --intent "<objetivo>" --files <caminhos...>`.
+- Mantenha tarefas longas vivas com
+  `bin/sounio-coord heartbeat --agent <id> --lane <id>`.
+- Ao terminar, abortar ou entregar a lane, rode
+  `bin/sounio-coord release --agent <id> --lane <id> --reason "<resultado ou handoff>"`.
+- Use `bin/sounio-coord check` antes de editar uma superfície compartilhada.
+- Claims são leases operacionais, não prova de atividade eterna. O TTL padrão é quatro horas;
+  claims vencidos aparecem como `STALE` e podem ser removidos com `bin/sounio-coord prune`.
+- Coloque `--files` por último e proteja globs com aspas, por exemplo
+  `'self-hosted/compiler/**'`.
+- Hooks de projeto registram automaticamente sessões Claude/Codex e reservam arquivos antes de
+  `Write`, `Edit` e `apply_patch`. No Codex, abra `/hooks` e aprove o hook quando seu hash mudar.
+- Escritas feitas dentro de comandos Bash continuam exigindo claim manual, pois o hook não pode
+  inferir com segurança todos os efeitos de um comando de shell. Reuse o agent/lane exibido pelo
+  hook de startup com `bin/sounio-coord scope`, evitando criar uma segunda lease sobreposta.
+- Para conversar com outra lane durante o trabalho, use `bin/sounio-coord send`; mensagens não
+  lidas entram automaticamente no próximo turno ou passo de ferramenta do destinatário. Consulte com
+  `bin/sounio-coord inbox` e confirme o tratamento com `bin/sounio-coord ack`.
+- **Re-cheque `git status` antes de stage.** Nunca trate uma claim como licença para
+  sobrescrever mudanças já presentes na worktree.
 - Edits podem aparecer no commit de outro agente sob mensagens não-relacionadas. Não brigue com a história.
 
 ## 8. Precedência quando docs divergem
