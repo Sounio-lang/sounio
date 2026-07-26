@@ -63,6 +63,11 @@ lean_lib «SounioMeasConf» where
 @[default_target]
 lean_lib «SounioHydrogenPbox» where
 
+-- The demo numbers as theorems: exact-rational receipt for the IDM and
+-- delivered-cost claims (native_decide over Rat; Python oracle retired).
+@[default_target]
+lean_lib «SounioHydrogenReceipt» where
+
 @[default_target]
 lean_lib «SounioProofObligation» where
 

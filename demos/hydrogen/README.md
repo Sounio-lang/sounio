@@ -266,6 +266,29 @@ Three facts the demos rely on, proved in core Lean 4 (no Mathlib, no
    evaluation transfers p-box bounds through a monotone chain with **no
    independence assumption**.
 
+## The receipt (`formal/lean4/SounioHydrogenReceipt.lean`)
+
+The Python oracle layer is retired: the demo **numbers themselves** are
+theorems. Over exact rationals (`Rat`), closed by `native_decide` on
+bignum arithmetic — no floats anywhere:
+
+- `crf_bracket`: CRF(7 %, 25 y) = `(7/100)·(107/100)²⁵/((107/100)²⁵−1)`
+  lies in `[0.0857, 0.0859]` — proved, not asserted; nothing
+  transcendental enters the receipt unproven.
+- `idm_final` / `idm_width`: the guarantee interval is exactly
+  `[27/32, 29/32]`, width exactly `1/16`.
+- `crossing_order`: the frequentist certifies exactly at cycle 30
+  (`24/27 < 0.90 ≤ 27/30`), the guarantee lags.
+- `campaign_size`: `0.90·2/(0.93−0.90) = 60` — exact.
+- `idm_never_crosses`: at a true 0.90 rate the lower bound never reaches
+  the 0.90 gate — proved for **all** `k, n` by `omega`, not numerically.
+- `delivered_bracket` / `nominal_bracket`: the chain's
+  `[5.113, 5.114]` / `[7.920, 7.921]` corner sandwiches and the
+  `[6.277, 6.278]` nominal — the `[5.11, 7.92] €/kg` the demo prints,
+  proved.
+
+What a script checks, this file proves.
+
 ## The stdlib modules (new, reusable)
 
 - **`stdlib/epistemic/pbox.sio`** — the p-box type: corner-exact interval
