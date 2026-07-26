@@ -11,6 +11,7 @@ export LC_ALL=C
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BUILD_SCRIPT="$ROOT_DIR/scripts/ci/build_modular_madaros.sh"
 KEEP_WORK="${SOUNIO_MADAROS_ISSUE901_SCALE_SOURCE_FRESH_KEEP:-0}"
+ARCHIVE_PROVENANCE_FILE="$ROOT_DIR/.issue901-scale-source-provenance.tsv"
 
 fail() {
   echo "[madaros-issue901-scale-source-fresh] FAIL: $*" >&2
@@ -35,6 +36,105 @@ require_clean_source() {
   [[ -z "$(git -C "$ROOT_DIR" status --porcelain)" ]] || fail 'source tree must be clean; commit the source under test before source-fresh evidence'
 }
 
+tsv_value() {
+  local file="$1"
+  local key="$2"
+  local value
+
+  value="$(awk -F '\t' -v key="$key" '
+    $1 == key {
+      count += 1
+      value = $2
+    }
+    END {
+      if (count != 1 || value == "") {
+        exit 1
+      }
+      print value
+    }
+  ' "$file")" || fail "archive provenance must contain exactly one nonempty $key entry: $file"
+  printf '%s\n' "$value"
+}
+
+assert_archive_sha256() {
+  local key="$1"
+  local path="$2"
+  local expected="$3"
+  local actual
+
+  actual="$(portable_sha256 "$path")"
+  [[ "$actual" == "$expected" ]] || fail "archive provenance hash mismatch for $key: expected=$expected actual=$actual"
+}
+
+verify_archive_provenance() {
+  assert_archive_sha256 main_sio_sha256 "$ROOT_DIR/self-hosted/compiler/main.sio" "$MAIN_SHA256"
+  assert_archive_sha256 lean_single_sio_sha256 "$ROOT_DIR/self-hosted/compiler/lean_single.sio" "$LEAN_SHA256"
+  assert_archive_sha256 build_script_sha256 "$BUILD_SCRIPT" "$BUILDER_SHA256"
+  assert_archive_sha256 gate_script_sha256 "$ROOT_DIR/scripts/ci/madaros_native_multimodule_scale_source_fresh_gate.sh" "$GATE_SHA256"
+  assert_archive_sha256 initial_bootstrap_sha256 "$BOOTSTRAP_PATH" "$BOOTSTRAP_SHA256"
+}
+
+load_source_provenance() {
+  BOOTSTRAP_PATH="$ROOT_DIR/bin/souc-linux-x86_64"
+  [[ -x "$BOOTSTRAP_PATH" ]] || fail "tracked initial bootstrap is missing: $BOOTSTRAP_PATH"
+
+  if git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    SOURCE_PROVENANCE_MODE='git-checkout'
+    require_clean_source
+    SOURCE_HEAD="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+    SOURCE_TREE="$(git -C "$ROOT_DIR" rev-parse 'HEAD^{tree}')"
+    MAIN_SHA256="$(portable_sha256 "$ROOT_DIR/self-hosted/compiler/main.sio")"
+    LEAN_SHA256="$(portable_sha256 "$ROOT_DIR/self-hosted/compiler/lean_single.sio")"
+    BUILDER_SHA256="$(portable_sha256 "$BUILD_SCRIPT")"
+    GATE_SHA256="$(portable_sha256 "$ROOT_DIR/scripts/ci/madaros_native_multimodule_scale_source_fresh_gate.sh")"
+    BOOTSTRAP_SHA256="$(portable_sha256 "$BOOTSTRAP_PATH")"
+    BOOTSTRAP_BLOB="$(git -C "$ROOT_DIR" ls-files -s -- bin/souc-linux-x86_64 | awk 'NR == 1 {print $2}')"
+    [[ -n "$BOOTSTRAP_BLOB" ]] || fail 'initial bootstrap is not tracked by this source tree'
+    return
+  fi
+
+  SOURCE_PROVENANCE_MODE='git-archive-exact-commit'
+  [[ -f "$ARCHIVE_PROVENANCE_FILE" ]] || fail "source has no Git metadata and no archive provenance: $ARCHIVE_PROVENANCE_FILE"
+  [[ "$(tsv_value "$ARCHIVE_PROVENANCE_FILE" source_origin)" == 'git-archive-exact-commit' ]] || fail 'archive provenance has an unsupported source origin'
+  SOURCE_HEAD="$(tsv_value "$ARCHIVE_PROVENANCE_FILE" source_head)"
+  SOURCE_TREE="$(tsv_value "$ARCHIVE_PROVENANCE_FILE" source_tree)"
+  MAIN_SHA256="$(tsv_value "$ARCHIVE_PROVENANCE_FILE" main_sio_sha256)"
+  LEAN_SHA256="$(tsv_value "$ARCHIVE_PROVENANCE_FILE" lean_single_sio_sha256)"
+  BUILDER_SHA256="$(tsv_value "$ARCHIVE_PROVENANCE_FILE" build_script_sha256)"
+  GATE_SHA256="$(tsv_value "$ARCHIVE_PROVENANCE_FILE" gate_script_sha256)"
+  BOOTSTRAP_SHA256="$(tsv_value "$ARCHIVE_PROVENANCE_FILE" initial_bootstrap_sha256)"
+  BOOTSTRAP_BLOB="$(tsv_value "$ARCHIVE_PROVENANCE_FILE" initial_bootstrap_git_blob)"
+  [[ "$SOURCE_HEAD" =~ ^[0-9a-f]{40}$ ]] || fail "archive provenance has an invalid source_head: $SOURCE_HEAD"
+  [[ "$SOURCE_TREE" =~ ^[0-9a-f]{40}$ ]] || fail "archive provenance has an invalid source_tree: $SOURCE_TREE"
+  [[ "$BOOTSTRAP_BLOB" =~ ^[0-9a-f]{40}$ ]] || fail "archive provenance has an invalid initial_bootstrap_git_blob"
+  verify_archive_provenance
+}
+
+assert_source_provenance_unchanged() {
+  if [[ "$SOURCE_PROVENANCE_MODE" == 'git-checkout' ]]; then
+    require_clean_source
+    [[ "$(git -C "$ROOT_DIR" rev-parse HEAD)" == "$SOURCE_HEAD" ]] || fail 'source HEAD changed during source-fresh evidence'
+    [[ "$(git -C "$ROOT_DIR" rev-parse 'HEAD^{tree}')" == "$SOURCE_TREE" ]] || fail 'source tree changed during source-fresh evidence'
+  else
+    verify_archive_provenance
+  fi
+}
+
+assert_seeded_build_log() {
+  local label="$1"
+  local log="$2"
+  local expected_seed="$3"
+
+  grep -Fq "using provided seed directly (SOUC_BIN/SOUNIO_SOUC_BIN): $expected_seed" "$log" || {
+    cat "$log" >&2 || true
+    fail "$label did not record the expected direct Madaros seed: $expected_seed"
+  }
+  grep -Fq "seed:  $expected_seed" "$log" || {
+    cat "$log" >&2 || true
+    fail "$label did not record the expected build seed line: $expected_seed"
+  }
+}
+
 assert_direct_raw_log() {
   local log="$1"
 
@@ -55,10 +155,18 @@ if [[ "${1:-}" == '--structural-only' ]]; then
   echo '[madaros-issue901-scale-source-fresh] PASS: source-build and direct-raw scale wiring is present'
   exit 0
 fi
-[[ $# -eq 0 ]] || fail 'usage: madaros_native_multimodule_scale_source_fresh_gate.sh [--structural-only]'
+if [[ "${1:-}" == '--provenance-only' ]]; then
+  [[ $# -eq 1 ]] || fail 'usage: madaros_native_multimodule_scale_source_fresh_gate.sh [--structural-only|--provenance-only]'
+  cd "$ROOT_DIR"
+  load_source_provenance
+  assert_source_provenance_unchanged
+  printf '[madaros-issue901-scale-source-fresh] PASS: source provenance mode=%s head=%s tree=%s\n' "$SOURCE_PROVENANCE_MODE" "$SOURCE_HEAD" "$SOURCE_TREE"
+  exit 0
+fi
+[[ $# -eq 0 ]] || fail 'usage: madaros_native_multimodule_scale_source_fresh_gate.sh [--structural-only|--provenance-only]'
 
 cd "$ROOT_DIR"
-require_clean_source
+load_source_provenance
 
 if [[ -n "${SOUNIO_MADAROS_ISSUE901_SCALE_SOURCE_FRESH_DIR:-}" ]]; then
   WORK="$SOUNIO_MADAROS_ISSUE901_SCALE_SOURCE_FRESH_DIR"
@@ -70,17 +178,6 @@ fi
 if [[ "$KEEP_WORK" != '1' ]]; then
   trap 'rm -rf "$WORK"' EXIT
 fi
-
-SOURCE_HEAD="$(git rev-parse HEAD)"
-SOURCE_TREE="$(git rev-parse 'HEAD^{tree}')"
-MAIN_SHA256="$(portable_sha256 self-hosted/compiler/main.sio)"
-LEAN_SHA256="$(portable_sha256 self-hosted/compiler/lean_single.sio)"
-BUILDER_SHA256="$(portable_sha256 "$BUILD_SCRIPT")"
-BOOTSTRAP_PATH="$ROOT_DIR/bin/souc-linux-x86_64"
-[[ -x "$BOOTSTRAP_PATH" ]] || fail "tracked initial bootstrap is missing: $BOOTSTRAP_PATH"
-BOOTSTRAP_SHA256="$(portable_sha256 "$BOOTSTRAP_PATH")"
-BOOTSTRAP_BLOB="$(git ls-files -s -- bin/souc-linux-x86_64 | awk 'NR == 1 {print $2}')"
-[[ -n "$BOOTSTRAP_BLOB" ]] || fail 'initial bootstrap is not tracked by this source tree'
 
 STAGE1="$WORK/madaros-stage1"
 STAGE2="$WORK/madaros-stage2"
@@ -113,6 +210,7 @@ if ! env \
   -u SOUNIO_ENABLE_COMPACT_IMPORTED_IR \
   -u SOUNIO_MADAROS_DEP_MERGE \
   -u SOUNIO_INTO_ACC_NO_RESET \
+  -u SOUNIO_SOUC_BIN \
   SOUC_BIN="$STAGE1" \
   SOUNIO_BUILD_LOCK="$WORK/souc-build.lock" \
   SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib" \
@@ -121,6 +219,7 @@ if ! env \
   fail 'Madaros stage1 could not rebuild current source'
 fi
 require_raw_madaros "$STAGE2"
+assert_seeded_build_log stage2 "$WORK/stage2-build.log" "$STAGE1"
 
 if ! env \
   -u MADAROS_RAW_BIN \
@@ -129,6 +228,7 @@ if ! env \
   -u SOUNIO_ENABLE_COMPACT_IMPORTED_IR \
   -u SOUNIO_MADAROS_DEP_MERGE \
   -u SOUNIO_INTO_ACC_NO_RESET \
+  -u SOUNIO_SOUC_BIN \
   SOUC_BIN="$STAGE2" \
   SOUNIO_BUILD_LOCK="$WORK/souc-build.lock" \
   SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib" \
@@ -137,10 +237,9 @@ if ! env \
   fail 'Madaros stage2 could not rebuild current source'
 fi
 require_raw_madaros "$STAGE3"
+assert_seeded_build_log stage3 "$WORK/stage3-build.log" "$STAGE2"
 
-require_clean_source
-[[ "$(git rev-parse HEAD)" == "$SOURCE_HEAD" ]] || fail 'source HEAD changed during fixed-point build'
-[[ "$(git rev-parse 'HEAD^{tree}')" == "$SOURCE_TREE" ]] || fail 'source tree changed during fixed-point build'
+assert_source_provenance_unchanged
 
 STAGE1_SHA256="$(portable_sha256 "$STAGE1")"
 STAGE2_SHA256="$(portable_sha256 "$STAGE2")"
@@ -250,16 +349,16 @@ run_public_default_case() {
 run_public_default_case "$PROBE" 'm=5(\.0+)?'
 PUBLIC_DEFAULT_MERGED="$CASE_MERGED"
 
-require_clean_source
-[[ "$(git rev-parse HEAD)" == "$SOURCE_HEAD" ]] || fail 'source HEAD changed during direct raw scale acceptance'
-[[ "$(git rev-parse 'HEAD^{tree}')" == "$SOURCE_TREE" ]] || fail 'source tree changed during direct raw scale acceptance'
+assert_source_provenance_unchanged
 
 printf 'receipt_version\tissue901-scale-source-fresh-v1\n' >"$RECEIPT"
+printf 'source_provenance_mode\t%s\n' "$SOURCE_PROVENANCE_MODE" >>"$RECEIPT"
 printf 'source_head\t%s\n' "$SOURCE_HEAD" >>"$RECEIPT"
 printf 'source_tree\t%s\n' "$SOURCE_TREE" >>"$RECEIPT"
 printf 'main_sio_sha256\t%s\n' "$MAIN_SHA256" >>"$RECEIPT"
 printf 'lean_single_sio_sha256\t%s\n' "$LEAN_SHA256" >>"$RECEIPT"
 printf 'build_script_sha256\t%s\n' "$BUILDER_SHA256" >>"$RECEIPT"
+printf 'gate_script_sha256\t%s\n' "$GATE_SHA256" >>"$RECEIPT"
 printf 'initial_bootstrap_repo_path\tbin/souc-linux-x86_64\n' >>"$RECEIPT"
 printf 'initial_bootstrap_git_blob\t%s\n' "$BOOTSTRAP_BLOB" >>"$RECEIPT"
 printf 'initial_bootstrap_sha256\t%s\n' "$BOOTSTRAP_SHA256" >>"$RECEIPT"
@@ -267,6 +366,8 @@ printf 'bootstrap_mode\tsource-tracking-lean-then-madaros-fixed-point\n' >>"$REC
 printf 'stage1_madaros_sha256\t%s\n' "$STAGE1_SHA256" >>"$RECEIPT"
 printf 'stage2_madaros_sha256\t%s\n' "$STAGE2_SHA256" >>"$RECEIPT"
 printf 'stage3_madaros_sha256\t%s\n' "$STAGE3_SHA256" >>"$RECEIPT"
+printf 'stage2_seed\tstage1-madaros-direct\n' >>"$RECEIPT"
+printf 'stage3_seed\tstage2-madaros-direct\n' >>"$RECEIPT"
 printf 'operational_fixed_point\tsha256-stage2-equals-stage3\n' >>"$RECEIPT"
 printf 'acceptance_mode\tdirect-raw-elf-no-wrapper\n' >>"$RECEIPT"
 printf 'engine_fallback\t0\n' >>"$RECEIPT"
@@ -279,9 +380,9 @@ printf 'textbook_probe\tPROB_TEXTBOOK_OK\n' >>"$RECEIPT"
 printf 'textbook_probe_merged_ir\t%s\n' "${TEXTBOOK_MERGED:-unknown}" >>"$RECEIPT"
 printf 'stdlib_driver\tPROB_STDLIB_OK\n' >>"$RECEIPT"
 printf 'stdlib_driver_merged_ir\t%s\n' "${DRIVER_MERGED:-unknown}" >>"$RECEIPT"
-printf 'public_default_route\tbin/souc-compile-pinned-to-stage3\n' >>"$RECEIPT"
-printf 'public_default_probe\tm=5.000000\n' >>"$RECEIPT"
-printf 'public_default_probe_merged_ir\t%s\n' "${PUBLIC_DEFAULT_MERGED:-unknown}" >>"$RECEIPT"
+printf 'public_wrapper_route\tbin/souc-compile-pinned-to-stage3\n' >>"$RECEIPT"
+printf 'public_wrapper_probe\tm=5.000000\n' >>"$RECEIPT"
+printf 'public_wrapper_probe_merged_ir\t%s\n' "${PUBLIC_DEFAULT_MERGED:-unknown}" >>"$RECEIPT"
 
 cat "$RECEIPT"
 echo "[madaros-issue901-scale-source-fresh] PASS: source_head=$SOURCE_HEAD stage3_sha256=$STAGE3_SHA256 receipt=$RECEIPT"
