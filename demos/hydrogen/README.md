@@ -217,8 +217,8 @@ what missing capacity-factor data costs.* Runs on the default engine:
   caller array as a slice argument *into* an imported module currently
   segfaults on the Madaros native path (minimal witness: 64-element array —
   same handle-vs-raw family as the syscall6 raw-ref fix in #1455; tracked
-  separately). The math is engine-independent; Madaros runs resume once the
-  compiler bug lands.
+  as issue #1510). The math is engine-independent; Madaros runs resume once
+  the compiler bug lands.
 
 ## Why this maps to his work
 
