@@ -408,6 +408,14 @@ var LOWER_MONOLITHIC_PUBLIC_PROBE_TRACE: bool = false
 // unwritten, i.e. reading 0). See lowerer_lower_fn_mut and the ExprCall lowering.
 var LOWER_KERNEL_TID_REG: i64 = 0 - 1
 
+// Label of the lane-increment block while a `kernel fn` body is lowered; -1
+// outside a kernel. `return` inside a kernel ends THAT LANE, not the launch —
+// CUDA semantics — so it lowers to a jump here instead of IrReturn, which would
+// abandon every remaining lane. lean_single gets this wrong in the same
+// direction (measured: a kernel returning at tid==2 of 8 runs 2 lanes under
+// lean_single); matching that bug was rejected in favour of matching CUDA.
+var LOWER_KERNEL_CONT_LABEL: i64 = 0 - 1
+
 pub fn lower_monolithic_public_probe_trace_set(enabled: bool) with Mut {
     LOWER_MONOLITHIC_PUBLIC_PROBE_TRACE = enabled
 }
@@ -3443,6 +3451,7 @@ fn lowerer_lower_fn_item_mut(
     var kernel_tid_reg: i64 = 0 - 1
     var kernel_top_label: i64 = 0 - 1
     var kernel_end_label: i64 = 0 - 1
+    var kernel_cont_label: i64 = 0 - 1
     if fd.is_kernel {
         let kernel_extent_idx = lower_kernel_extent_param_index(&fd.params)
         if kernel_extent_idx >= 0 {
@@ -3455,11 +3464,15 @@ fn lowerer_lower_fn_item_mut(
             let kend_pair = (*lo).fresh_label()
             (*lo) = kend_pair.0
             kernel_end_label = kend_pair.1
+            let kcont_pair = (*lo).fresh_label()
+            (*lo) = kcont_pair.0
+            kernel_cont_label = kcont_pair.1
             (*lo) = (*lo).emit(ir_label(kernel_top_label))
             let kcond_reg = lowerer_fresh_reg_mut(lo)
             (*lo) = (*lo).emit(ir_binop(kcond_reg, kernel_tid_reg, BinaryOp::OpLt, kernel_extent_reg))
             (*lo) = (*lo).emit(ir_branch_false(kcond_reg, kernel_end_label))
             LOWER_KERNEL_TID_REG = kernel_tid_reg
+            LOWER_KERNEL_CONT_LABEL = kernel_cont_label
         }
     }
 
@@ -3469,6 +3482,10 @@ fn lowerer_lower_fn_item_mut(
 
     if kernel_tid_reg >= 0 {
         LOWER_KERNEL_TID_REG = 0 - 1
+        LOWER_KERNEL_CONT_LABEL = 0 - 1
+        // Lane-continue target: `return` inside the body jumps here, so it ends
+        // the lane and the next one still runs.
+        (*lo) = (*lo).emit(ir_label(kernel_cont_label))
         let kone_pair = (*lo).emit_i64_const(1)
         (*lo) = kone_pair.0
         let kone_reg = kone_pair.1
@@ -12336,9 +12353,23 @@ impl Lowerer {
         // leaves `dst` unwritten — which reads as 0 and is why every lane looked
         // like lane 0. Outside a kernel LOWER_KERNEL_TID_REG is -1 and this is
         // skipped, preserving the previous behaviour for the other 11 intrinsics.
-        if LOWER_KERNEL_TID_REG >= 0 && name_eq(callee_name, make_name("gpu_thread_id_x")) {
-            let lo_tid = lo3.emit(ir_copy(dst, LOWER_KERNEL_TID_REG))
-            return (lo_tid, dst)
+        if name_eq(callee_name, make_name("gpu_thread_id_x")) {
+            if LOWER_KERNEL_TID_REG >= 0 {
+                let lo_tid = lo3.emit(ir_copy(dst, LOWER_KERNEL_TID_REG))
+                return (lo_tid, dst)
+            }
+            // Reached outside a kernel lane loop — typically a helper function
+            // that reads gpu_thread_id_x() and is called from a kernel. The lane
+            // counter is a vreg local to the kernel frame, so it cannot be seen
+            // from here and the read still degrades to 0.
+            //
+            // This is the residue of #1504 and it is announced rather than left
+            // silent: a wrong answer nobody is told about is the failure mode
+            // that let the original defect survive for weeks. lean_single does
+            // not get this right either — it skips the lane loop entirely for
+            // such a kernel (measured: 1 lane instead of 4).
+            print("warning: gpu_thread_id_x() outside a kernel lane loop reads 0")
+            print(" — inline it into the `kernel fn` body; a helper cannot see the lane counter (#1504)\n")
         }
         let callee_strat_ext: i64 = if fn_id >= 0 && fn_id < (*lo3.module).fn_count { (*lo3.module).functions[fn_id as usize].compile_strategy } else { 0 }
         if callee_strat_ext == 6 {
@@ -13257,6 +13288,14 @@ impl Lowerer {
         let pair = self.lower_opt_expr_ref(&e.left)
         let lo = pair.0
         let reg = pair.1
+        // Inside a kernel lane loop, `return` ends the lane, not the launch.
+        // Emitting IrReturn here would abandon every remaining lane — the shape
+        // `if (early_out) return` is common enough in kernels that getting this
+        // wrong reintroduces the same class of silent wrong answer #1504 is about.
+        if LOWER_KERNEL_CONT_LABEL >= 0 {
+            let lo_lane = lo.emit(ir_jump(LOWER_KERNEL_CONT_LABEL))
+            return (lo_lane, reg)
+        }
         let lo2 = lo.emit(ir_return(reg))
         (lo2, reg)
     }
