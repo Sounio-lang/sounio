@@ -51,3 +51,19 @@ Merge of `research/particle-exp123-20260725` into main reintroduced vertex impor
 131072 → 524288 KiB. FO GUM multi-channel growth made 128 MiB insufficient on
 GitHub runners (SEGV / call-arg scratch overflow). Measured: 262144 passes;
 131072 fails. Contracts LoRA sync for `variance_covariance_blindness.sio` (β10).
+
+## 4 — Native field-if residual (forensic, 2026-07-26)
+
+Witness: `tests/multimodule/madaros_field_if_i64_{leaf,main}.sio`  
+Gate: `scripts/ci/madaros_field_if_i64_gate.sh`  
+Audit: `docs/audit/MADAROS_FIELD_IF_I64_2026-07-26.md`
+
+Madaros imported multimodule:
+
+- `return e.confidence` / `+ 0` → **846 OK**
+- `if e.confidence >= m` / `let c; if c >= m` → **0 wrong**
+- `e.confidence - m` → **pointer-scale garbage**
+- `ge(e.confidence, m)` call-arg → **1 OK**
+
+Native fix blocked this session by active claims on `self-hosted/native/**` and
+`self-hosted/ir/lower.sio`. Stdlib workarounds remain until `MADAROS_FIELD_IF_I64_FIXED`.
