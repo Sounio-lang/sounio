@@ -13,6 +13,8 @@ reproducibility living inside the language itself**, not in an external toolbox.
 ```bash
 bin/souc run demos/hydrogen/mh_stage_uq.sio                              # stage model (any engine)
 SOUNIO_SOUC_ENGINE=lean_single bin/souc run demos/hydrogen/mh_cascade_uq.sio  # cascade (see note)
+bin/souc run demos/hydrogen/bayes_pilot.sio                              # value of pilot data (IDM)
+bin/souc run demos/hydrogen/hub_chain.sio                                # full chain: delivered EUR/kg
 ```
 
 Deterministic (seeded xorshift PRNG): every run prints the same numbers and
@@ -198,8 +200,71 @@ for a distribution. Uses the new **`stdlib/epistemic::pbox`** module.
 The statement a point-estimate study cannot make: *the probability of
 beating 4 €/kg is an interval, 71 % of cost variance is CAPEX (negotiate
 there, not on electrolyser efficiency at 4.5 %), and the 21-point gap is
-what missing capacity-factor data costs.* Runs on the default engine:
+what missing capacity-factor data costs.* Runs on both engines:
 `bin/souc run demos/hydrogen/smr_h2_lcoh.sio` → `SMR_H2_LCOH_OK`.
+
+## The pilot-data pricer (`bayes_pilot.sio`) — the value of data, in advance
+
+A UHS pilot runs cyclic pressure-hold tests; before any data the per-cycle
+hold probability is **vacuous** (p ∈ [0, 1], no prior shape). Three
+inference styles are compared cycle-by-cycle as a deterministic pilot log
+accumulates: frequentist k/n, Bayesian Beta(1,1) mean, and the **Imprecise
+Dirichlet Model** (Walley 1996, JRSS-B 58:3) whose posterior is an exact
+interval `[k/(n+s), (k+s)/(n+s)]` — no sampling, no prior invented.
+
+| after 30 cycles (27 holds) | value |
+| --- | --- |
+| frequentist | 0.900 — "certified!" |
+| Beta(1,1) mean | 0.875 |
+| **IDM guarantee (lower bound)** | **0.844 — not yet** |
+| cycles to a 0.90 *guarantee* at assumed fleet rate 0.93 | ~60 |
+
+*The 30 cycles between the point estimate's "yes" and the interval's
+"yes" are the price of the prior you refused to invent — and the exact
+size of the pilot campaign to fund. At the pilot's own 0.90 rate the
+guarantee never reaches 0.90 at any campaign size — the honest caveat.* Pure rational arithmetic, both engines:
+`bin/souc run demos/hydrogen/bayes_pilot.sio` → `BAYES_PILOT_OK`.
+
+## The full chain (`hub_chain.sio`) — delivered cost, decision-grade
+
+The chain nobody closes: production → compression → storage → **delivered
+€/kg**, every number from the Demokritos/FORTH literature (Energies
+16:6257 Crete case: 50 MW PEM, 46.4 kWh/kg, €1500/kW, LCOE 0.046–0.052
+€/kWh; MH compression energy 44–89 kWh_th/kg spanning his dual-stage and
+seven-stage papers; €500/kg tank storage cycling 37.29×/yr nominal, epistemic interval [30, 45]).
+
+Delivered cost is **monotone in every epistemic input**, so the p-box is
+exact by corner evaluation — machine-checked in Lean 4
+(`formal/lean4/SounioHydrogenPbox.lean`, `monotone_event_equiv`).
+
+| analysis | result |
+| --- | --- |
+| stage intervals | production [3.92, 4.66], compression [0.22, 1.78], storage [0.95, 1.43] €/kg |
+| delivered interval | **[5.11, 7.92] €/kg** (nominal 6.28) |
+| **p-box on P(< 6 €/kg)** | **[0 %, 100 %] — the decision is undetermined** |
+| ignorance decomposition | heat price alone: 93.6 % at best corner; compression energy: 50.5 %; **the pair: 98.9 %**; UHS loss 3.3/2.5 % and tank cycling 29.3/0.0 % (negligible for cost) |
+
+*The point estimate says "barely misses 6 €/kg". The chain says the
+decision is undetermined, then names the two knobs that decide it:
+compression technology choice and the waste-heat contract — his two
+compressor papers are literally the two endpoints of the decisive
+interval.* Both engines: `bin/souc run demos/hydrogen/hub_chain.sio` →
+`HUB_CHAIN_OK`.
+
+## The machine-checked algebra (`formal/lean4/SounioHydrogenPbox.lean`)
+
+Three facts the demos rely on, proved in core Lean 4 (no Mathlib, no
+`sorry`, built by the CI lean-proofs job):
+
+1. **Jensen / variance gap (n = 3)**: `(Σxᵢ)² ≤ 3·Σxᵢ²` via the Lagrange
+   identity — why nominal-point designs underestimate the mean.
+2. **Correlated-sum variance**: `var9(X+Y+Z) = Σvar9 + 2·Σcov9`, with the
+   corollary that nonnegative batch covariance can only inflate cascade
+   variance — the algebra behind "batch ΔH correlation doubles σ".
+3. **Monotone p-box propagation**: on a 2-point support, the sub-level
+   event of `f(X)` at `f(x₁)` equals that of `X` at `x₁` — endpoint
+   evaluation transfers p-box bounds through a monotone chain with **no
+   independence assumption**.
 
 ## The stdlib modules (new, reusable)
 
@@ -222,14 +287,19 @@ what missing capacity-factor data costs.* Runs on the default engine:
 
 ## Why this maps to his work
 
-- *Renewable Energy 148 (2020) 1118–1130* (seven-stage MH compression for
-  HRS) and *IJHE 2021* (dual-stage MH2C under thermal management): the stage
-  and cascade files are the per-stage core of those system models.
+- *Renewable Energy 147 (2020) 164–178*, DOI 10.1016/j.renene.2019.08.104
+  (seven-stage MH compression for HRS) and *IJHE 46 (2021) 29272–29287*
+  (dual-stage MH2C under thermal management): the stage
+  and cascade files are the per-stage core of those system models, and
+  their thermal-energy figures (44–89 kWh_th/kg) are the two endpoints of
+  the decisive interval in `hub_chain.sio`.
 - *Hydrogen* 6(4):91 (2025) (caprock integrity for UHS): the p-box demo
   quantifies the exact measurement gap the review identifies.
-- His techno-economic analyses (SMR/H2 feasibility, MH2C market benchmark)
-  run sensitivity by hand; here uncertainty is part of the program's value,
-  and the run is a reproducible receipt.
+- *Energies* 16:6257 (2023) (SMR/H2 feasibility, Crete): the hub-chain
+  demo is built entirely from its published parameters — and computes the
+  delivered-€/kg uncertainty the paper does not report.
+- His techno-economic analyses run sensitivity by hand; here uncertainty
+  is part of the program's value, and the run is a reproducible receipt.
 - For dual-use / safety contexts (INRASTES is an Energy & **Safety**
   institute; CALIPSO is EDF): deterministic receipts plus epistemic labels
   are the audit trail.

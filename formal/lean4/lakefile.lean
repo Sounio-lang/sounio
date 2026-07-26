@@ -58,6 +58,11 @@ lean_lib «SounioGradedModal» where
 @[default_target]
 lean_lib «SounioMeasConf» where
 
+-- Machine-checked algebra backing demos/hydrogen/ (Jensen/variance gap,
+-- correlated-sum variance decomposition, monotone p-box propagation).
+@[default_target]
+lean_lib «SounioHydrogenPbox» where
+
 @[default_target]
 lean_lib «SounioProofObligation» where
 
