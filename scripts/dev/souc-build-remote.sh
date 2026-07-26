@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# Build Madaros (and optionally run gates) on an IDLE SLURM COMPUTE NODE instead
+# of on the workspace pod.
+#
+# Why this exists
+# ---------------
+# The workspace pod has 12 CPUs. The cluster has ~204 idle ones
+# (cpuops-t560: 64, gpuorangefs-r770: 128, gpuorangefs-5860: 12). Every Madaros
+# build ran on the pod, serialized behind a global lock, because the k8s
+# liveness probe recycles the pod under CPU saturation -- on 2026-05-29 a
+# concurrent-build stampede pushed 15-min load to ~153 and evicted it twice
+# (CLAUDE.md section 4). The lock protects the pod from itself. It is the right
+# answer to the wrong problem: the build should not be on the pod.
+#
+# Compute nodes do NOT mount /workspace, cannot reach github, and have no
+# gcc/make. None of that matters: the Madaros build is self-contained -- a
+# Sounio ELF compiling .sio sources -- and the payload it needs is 7.9 MB.
+# So the repo subset is shipped through srun's stdin as a tarball.
+#
+# Measured 2026-07-26 on cpuops-t560-proxmox with 16 CPUs:
+#   payload 7.9 MB -> unpacked 70 MB -> build rc=0 in 220s -> smoke test OK
+# against roughly 10 minutes on the pod, while using zero pod CPU.
+#
+# Usage
+#   scripts/dev/souc-build-remote.sh                       # build only
+#   scripts/dev/souc-build-remote.sh --gate full           # + madaros_full_gate.sh
+#   scripts/dev/souc-build-remote.sh --gate corpus         # + corpus regression gate
+#   scripts/dev/souc-build-remote.sh --gate full --gate corpus
+#   SOUNIO_REMOTE_PARTITION=cpu-ops SOUNIO_REMOTE_CPUS=32 ...
+#
+# The built ELF stays on the node. Only text comes back. That is deliberate:
+# shipping a 101 MB ELF over srun's stdout is slower than rebuilding, and what
+# you almost always want is the gate verdict, not the binary. If you need the
+# binary locally, build locally.
+#
+# Falls back to a local build when SLURM is unavailable, so callers do not have
+# to branch.
+
+set -uo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+PARTITION="${SOUNIO_REMOTE_PARTITION:-cpu-ops}"
+CPUS="${SOUNIO_REMOTE_CPUS:-16}"
+TIMELIMIT="${SOUNIO_REMOTE_TIME:-00:40:00}"
+GATES=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --gate) GATES="$GATES $2"; shift 2 ;;
+    --partition) PARTITION="$2"; shift 2 ;;
+    --cpus) CPUS="$2"; shift 2 ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+
+if ! command -v srun >/dev/null 2>&1; then
+  echo "[remote-build] srun not available -- falling back to a local build" >&2
+  exec bash scripts/dev/souc-build-lock.sh \
+    bash scripts/ci/build_modular_madaros.sh artifacts/self-hosted/madaros
+fi
+
+if ! sinfo -p "$PARTITION" -h -o "%t" 2>/dev/null | grep -q "idle\|mix"; then
+  echo "[remote-build] no idle node in partition $PARTITION -- falling back to a local build" >&2
+  exec bash scripts/dev/souc-build-lock.sh \
+    bash scripts/ci/build_modular_madaros.sh artifacts/self-hosted/madaros
+fi
+
+echo "[remote-build] partition=$PARTITION cpus=$CPUS gates=${GATES:-none}"
+
+REMOTE_SCRIPT=$(cat <<REMOTE
+set -uo pipefail
+W=/tmp/sounio-remote-\$\$
+mkdir -p "\$W" && cd "\$W" || exit 1
+tar xzf - 2>/dev/null || { echo "REMOTE: untar failed"; exit 1; }
+echo "REMOTE: host=\$(hostname) nproc=\$(nproc) unpacked=\$(du -sh . | cut -f1)"
+export SOUNIO_STDLIB_PATH="\$W/stdlib"
+# A private lock path: the pod's global build lock is meaningless here, and
+# reusing it would serialize independent nodes against each other.
+export SOUNIO_BUILD_LOCK=/tmp/remote-build-\$\$.lock
+t0=\$SECONDS
+bash scripts/ci/build_modular_madaros.sh "\$W/madaros.elf" > "\$W/build.log" 2>&1
+rc=\$?
+echo "REMOTE: build rc=\$rc elapsed=\$((SECONDS-t0))s"
+if [ \$rc -ne 0 ]; then tail -20 "\$W/build.log"; rm -rf "\$W"; exit \$rc; fi
+ls -la "\$W/madaros.elf" | awk '{print "REMOTE: elf bytes="\$5}'
+for g in $GATES; do
+  case "\$g" in
+    full)
+      echo "REMOTE: --- madaros_full_gate ---"
+      MADAROS_RAW_BIN="\$W/madaros.elf" bash scripts/ci/madaros_full_gate.sh 2>&1 | tail -20
+      echo "REMOTE: full_gate rc=\$?"
+      ;;
+    corpus)
+      echo "REMOTE: --- corpus regression gate ---"
+      SOUNIO_MADAROS_CORPUS_BIN="\$W/madaros.elf" SOUNIO_TEST_JOBS=\$(nproc) \\
+        bash scripts/ci/madaros_corpus_regression_gate.sh 2>&1 | tail -25
+      echo "REMOTE: corpus_gate rc=\$?"
+      ;;
+    *) echo "REMOTE: unknown gate \$g" ;;
+  esac
+done
+rm -rf "\$W"
+REMOTE
+)
+
+# tests/ is included only when a gate needs it -- it is the bulk of the payload.
+PAYLOAD="self-hosted stdlib bin/souc-linux-x86_64 scripts"
+case "$GATES" in *full*|*corpus*) PAYLOAD="$PAYLOAD tests bin/madaros bin/madaros-linux-x86_64" ;; esac
+
+tar czf - $PAYLOAD 2>/dev/null \
+  | srun --partition="$PARTITION" --ntasks=1 --cpus-per-task="$CPUS" \
+         --time="$TIMELIMIT" bash -c "$REMOTE_SCRIPT" 2>&1 \
+  | grep -vE "^srun: (job|Job)|couldn't chdir"
