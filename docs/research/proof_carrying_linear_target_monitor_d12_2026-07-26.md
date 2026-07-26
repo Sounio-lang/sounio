@@ -153,7 +153,7 @@ The negative obligations are therefore of three kinds:
 | barrier (nested forge) | `E015` | ✅ yes | uninhabited seal has no value |
 | observation forged directly | `E012` | ✅ yes | payload type is non-`pub` |
 | outcome forged directly | `E046` | ✅ yes | payload type is non-`pub` |
-| **replay** | `E039` | ❌ **NO** | see below |
+| **replay** | `E039` | ✅ yes | shippable since the checker defect below was fixed |
 
 **Unforgeability is a property of the field's type, not of the struct.** Marking a struct `pub`
 makes it *constructible* by importers — constructor visibility follows the struct, not its fields.
@@ -164,14 +164,17 @@ and an outcome without consuming anything. Both types now wrap a **non-`pub` pay
 the same construction D11 uses for its barrier receipts (`D11ReceiptSeal`). The two rows above are
 the regression tests for that.
 
-**Replay is deliberately not shipped as a test.** Expressing it requires naming the value
-(`let o = …; use(o); use(o)`), but the modular Madaros checker currently raises a **spurious
-`E039` on the single-use pattern** `let x = <linear>; use(x)` as well. The repository's own
-positive tests `tests/run-pass/linear_struct_field_access.sio`, `linear_nested_consume.sio` and
-`linear_balanced_branches.sio` are rejected by `souc check` for this reason while running fine
-under lean_single. A replay test would therefore pass for the wrong reason — a vacuous test of
-exactly the kind the D-series audit (2026-07-25) exists to prevent. It will be added once the
-checker defect is fixed; the anti-replay property is claimed by the *type*, not by a test.
+**Replay was initially not shippable, and is now.** Expressing replay requires naming the value
+(`let o = …; use(o); use(o)`), but the modular Madaros checker used to raise a **spurious `E039` on
+the single-use pattern** too, so a replay test would have passed for the wrong reason — a vacuous
+test of exactly the kind the D-series audit (2026-07-25) exists to prevent.
+
+The defect was root-caused and fixed while building this stage (issue #1464): typing an
+identifier argument consumed the linear binding, and the explicit ownership-transfer step then
+consumed it a second time whenever the parameter was by value. Consumption during typing is now
+suppressed for every identifier argument, leaving the transfer decision to the single place that
+knows the by-ref/by-value distinction. With that, `E039` distinguishes genuine replay from
+first use, and the test is shipped.
 
 The positive dual is shipped and passes: `tests/run-pass/clinical_linear_target_monitor_witness.sio`
 consumes each observation exactly once and is accepted by `souc check` **and** runs, which is what
