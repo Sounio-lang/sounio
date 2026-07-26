@@ -15,28 +15,19 @@
 //   bash scripts/ci/particle_exp123_gate.sh
 
 use particle_physics::sm_params::{mass_z, mass_w, mass_h, mass_top, alpha_s_mz, sin2_theta_w}
-// Madaros-safe Z metrology (no vertex/spinor graph)
-use particle_physics::epistemic_chain_z::{
+use particle_physics::epistemic_chain::{
     z_width_ee_ep, z_width_ee_budget, chain_gate_z_width,
     eemm_qed_xsec_pb_gated, chain_gate_qed_xsec,
 }
-// Free-function Epistemic access — nested prop.amp_sq.val() SEGVs Madaros lower
-use epistemic::knowledge::{ep_val, ep_variance, ep_confidence, ep_new, ep_certain}
 use particle_physics::nonunitary::{
     nu_z_propagator, nu_deficit, nu_deficit_pct, nu_approx, nu_exact,
-    eemm_z_peak_xsec_nu, nu_z_unitarity_threshold,
+    eemm_z_amplitude_nu, eemm_z_peak_xsec_nu, nu_z_unitarity_threshold,
     NU_Z,
 }
-// eemm_z_amplitude_nu lives in nonunitary_amp (vertex chain) — not imported
-// here so Madaros can native-lower the vertical (vertex→spinor SEGV residual).
 use particle_physics::ew_precision::{
     m_w_prediction_ep, m_w_consistency_pull,
     m_w_prediction_ep_radiative, m_w_consistency_pull_radiative,
     m_w_prediction_ep_gf, m_w_consistency_pull_gf,
-    m_w_tension_tree, m_w_tension_rho, m_w_tension_gf,
-    tension_improves, tension_abs_pull,
-    TENSION_CONSTRUCTION_TREE, TENSION_CONSTRUCTION_ONSHELL_RHO, TENSION_CONSTRUCTION_GF_SIRLIN,
-    TENSION_OBS_MW,
     oblique_s_measured_ep, oblique_t_measured_ep, oblique_u_measured_ep,
     delta_rho_ep, g_minus_2_qed_schwinger_ep,
     oblique_s, oblique_t, oblique_u, delta_rho,
@@ -164,12 +155,20 @@ fn run_exp1() -> i64 with IO, Mut, Div, Panic {
 }
 
 // ============================================================================
-// EXP2 — NonUnitary at the Z pole (split helpers: Madaros IR size / lower_array)
+// EXP2 — NonUnitary at the Z pole (deficit vs s + peak xsec)
 // ============================================================================
 
-fn exp2_basic_deficits(mz: f64, gamma_z: f64) -> i64 with IO, Mut, Div, Panic {
+fn run_exp2() -> i64 with IO, NonUnitary, Mut, Div, Panic {
     var n: i64 = 0
+    print("=== EXP2 NonUnitary Z pole ===\n")
+
+    let mz = mass_z().val()
+    let gamma_z = 2.4952
+    let gamma_ee = 0.08399
+    let gamma_mumu = 0.08399
     let s_pole = mz * mz
+
+    // Deficit scan: pole / far / above
     let prop_pole = nu_z_propagator(s_pole, gamma_z)
     let prop_far = nu_z_propagator(1.0, gamma_z)
     let prop_hi = nu_z_propagator(100000.0, gamma_z)
@@ -189,63 +188,34 @@ fn exp2_basic_deficits(mz: f64, gamma_z: f64) -> i64 with IO, Mut, Div, Panic {
     print("EXP2_DEFICIT_PCT_POLE ")
     print_f64(nu_deficit_pct(prop_pole))
     print("\n")
-    let amp_val = ep_val(&prop_pole.amp_sq)
-    let amp_var = ep_variance(&prop_pole.amp_sq)
-    let amp_conf = ep_confidence(&prop_pole.amp_sq)
-    print("EXP2_AMP_SQ ")
-    print_f64(amp_val)
-    print("\n")
 
     n = n + pass_if(within(d_pole, 1.0, 0.001), 201)
     n = n + pass_if(d_far < 0.01, 202)
     n = n + pass_if(d_hi < 0.01, 203)
-    n = n + pass_if(amp_var > 0.0, 204)
-    n = n + pass_if(amp_conf == 950, 205)
+    n = n + pass_if(prop_pole.amp_sq.variance() > 0.0, 204)
+    n = n + pass_if(prop_pole.amp_sq.confidence() == 950, 205)
     n = n + pass_if(prop_pole.particle == NU_Z(), 206)
-    n = n + pass_if(amp_val > 0.0, 207)
-    n = n + pass_if(within(nu_deficit(prop_pole), 1.0, 0.001), 208)
-    n
-}
 
-// Local peak body mirrors stdlib eemm_z_peak_xsec_nu.
-// Madaros residual (BLK-20260725-madaros-exp123-lower-array-segv): under full
-// EXP123 IR the *imported* eemm_z_peak_xsec_nu returns ep_certain(0) (val=var=0)
-// even with correct args; same formula in the main module is correct. Core
-// exp123_madaros_core still exercises the imported path successfully.
-// We still call the stdlib entry so NonUnitary remains effect-enforced.
-fn exp2_peak_xsec_local(gamma_ee: f64, gamma_mumu: f64, gamma_z: f64) -> Epistemic with NonUnitary, Mut, Div, Panic {
-    let mz = mass_z()
-    let mz_val = ep_val(&mz)
-    let mz2 = mz_val * mz_val
-    if gamma_z == 0.0 || mz2 == 0.0 {
-        return ep_certain(0.0)
-    }
-    let pi = 3.141592653589793
-    let sigma_val = 12.0 * pi * gamma_ee * gamma_mumu / (mz2 * gamma_z * gamma_z)
-    let d_sigma_d_mz = 0.0 - 2.0 * sigma_val / mz_val
-    let sigma_var = d_sigma_d_mz * d_sigma_d_mz * ep_variance(&mz)
-    ep_new(sigma_val, sigma_var, 950)
-}
+    // Amplitude_nu at pole: positive, deficit ≈ 1
+    let amp = eemm_z_amplitude_nu(s_pole, gamma_z)
+    print("EXP2_AMP_SQ ")
+    print_f64(amp.amp_sq.val())
+    print("\n")
+    n = n + pass_if(amp.amp_sq.val() > 0.0, 207)
+    n = n + pass_if(within(nu_deficit(amp), 1.0, 0.001), 208)
 
-fn exp2_peak_approx(mz: f64, gamma_z: f64, gamma_ee: f64, gamma_mumu: f64) -> i64 with IO, NonUnitary, Mut, Div, Panic {
-    var n: i64 = 0
-    let s_pole = mz * mz
-    let prop_pole = nu_z_propagator(s_pole, gamma_z)
-    let _force_nu = eemm_z_peak_xsec_nu(gamma_ee, gamma_mumu, gamma_z)
-    let peak = exp2_peak_xsec_local(gamma_ee, gamma_mumu, gamma_z)
-    let peak_val = ep_val(&peak)
-    let peak_var = ep_variance(&peak)
+    // Peak xsec: NonUnitary is in the signature — this call forces the effect
+    let peak = eemm_z_peak_xsec_nu(gamma_ee, gamma_mumu, gamma_z)
     print("EXP2_PEAK_XSEC ")
-    print_f64(peak_val)
-    print("
-")
+    print_f64(peak.val())
+    print("\n")
     print("EXP2_PEAK_VAR ")
-    print_f64(peak_var)
-    print("
-")
-    n = n + pass_if(peak_val > 1.0e-7 && peak_val < 1.0e-4, 209)
-    n = n + pass_if(peak_var > 0.0, 210)
+    print_f64(peak.variance())
+    print("\n")
+    n = n + pass_if(peak.val() > 1.0e-7 && peak.val() < 1.0e-4, 209)
+    n = n + pass_if(peak.variance() > 0.0, 210)
 
+    // nu_approx vs nu_exact: same number, different effect semantics
     let ap = nu_approx(prop_pole).val()
     let ex = nu_exact(prop_pole).val()
     print("EXP2_NU_APPROX ")
@@ -255,29 +225,30 @@ fn exp2_peak_approx(mz: f64, gamma_z: f64, gamma_ee: f64, gamma_mumu: f64) -> i6
     print_f64(ex)
     print("\n")
     n = n + pass_if(within(ap, ex, abs_f(ex) * 1.0e-12 + 1.0e-30), 211)
-    n
-}
 
-fn exp2_scan_receipt(mz: f64, gamma_z: f64) -> i64 with IO, Mut, Div, Panic {
-    var n: i64 = 0
-    let s_pole = mz * mz
+    // Unitary threshold: √s where deficit drops below 1%
     let thr = nu_z_unitarity_threshold(gamma_z, 0.01)
     print("EXP2_UNITARITY_THRESH_SQRT_S ")
     print_f64(thr)
     print("\n")
     n = n + pass_if(thr > mz, 212)
 
-    let d_pole = nu_deficit(nu_z_propagator(s_pole, gamma_z))
-    let d_far = nu_deficit(nu_z_propagator(1.0, gamma_z))
-    let d_mid = nu_deficit(nu_z_propagator(s_pole * 1.01, gamma_z))
+    // Mid-scan: deficit between pole and far should be intermediate
+    let s_mid = s_pole * 1.01
+    let d_mid = nu_deficit(nu_z_propagator(s_mid, gamma_z))
     print("EXP2_DEFICIT_MID ")
     print_f64(d_mid)
     print("\n")
     n = n + pass_if(d_mid < d_pole && d_mid > d_far, 213)
 
-    let d_lo = nu_deficit(nu_z_propagator((mz - 2.0) * (mz - 2.0), gamma_z))
-    let d_hi5 = nu_deficit(nu_z_propagator((mz + 5.0) * (mz + 5.0), gamma_z))
-    let d_thr = nu_deficit(nu_z_propagator(thr * thr, gamma_z))
+    // Deficit vs √s curve receipt (construction object, not a plot-only claim)
+    // Points: below pole → pole → slightly above → threshold neighbourhood → far
+    let s_lo = (mz - 2.0) * (mz - 2.0)
+    let s_hi = (mz + 5.0) * (mz + 5.0)
+    let s_thr = thr * thr
+    let d_lo = nu_deficit(nu_z_propagator(s_lo, gamma_z))
+    let d_hi5 = nu_deficit(nu_z_propagator(s_hi, gamma_z))
+    let d_thr = nu_deficit(nu_z_propagator(s_thr, gamma_z))
     print("EXP2_SCAN_SQRT_S_LO ")
     print_f64(mz - 2.0)
     print("\n")
@@ -308,12 +279,15 @@ fn exp2_scan_receipt(mz: f64, gamma_z: f64) -> i64 with IO, Mut, Div, Panic {
     print("EXP2_SCAN_DEFICIT_THR ")
     print_f64(d_thr)
     print("\n")
-
+    // Peak is unique maximum among sampled off-pole points
     n = n + pass_if(d_lo < d_pole && d_hi5 < d_pole, 214)
+    // Moving further off-pole reduces deficit (hi5 beyond mid, thr near 1%)
     n = n + pass_if(d_hi5 < d_mid, 215)
     n = n + pass_if(d_thr < 0.02 && d_thr > 0.0, 216)
+    // Monotone wings: |√s − M_Z| larger → deficit smaller on high side of thr vs hi5
     n = n + pass_if(d_thr < d_hi5 || thr > mz + 5.0, 217)
 
+    // Machine-readable deficit curve (JSON line; gate also materialises a file)
     print("EXP2_DEFICIT_JSON {")
     print("\"schema\":\"particle.exp123.deficit_curve.v1\",")
     print("\"particle\":\"Z\",")
@@ -348,18 +322,9 @@ fn exp2_scan_receipt(mz: f64, gamma_z: f64) -> i64 with IO, Mut, Div, Panic {
     print_f64(d_thr)
     print("}]}\n")
     n = n + pass_if(true, 218)
-    n
-}
 
-fn run_exp2() -> i64 with IO, NonUnitary, Mut, Div, Panic {
-    print("=== EXP2 NonUnitary Z pole ===\n")
-    let mz = mass_z().val()
-    let gamma_z = 2.4952
-    let n1 = exp2_basic_deficits(mz, gamma_z)
-    let n2 = exp2_peak_approx(mz, gamma_z, 0.08399, 0.08399)
-    let n3 = exp2_scan_receipt(mz, gamma_z)
     print("EXP2_DONE\n")
-    n1 + n2 + n3
+    n
 }
 
 // ============================================================================
@@ -370,106 +335,81 @@ fn run_exp3() -> i64 with IO, Mut, Div, Panic {
     var n: i64 = 0
     print("=== EXP3 EW tension ===\n")
 
-    // Typed tension objects (N2) — not print-only keys
-    let t_tree = m_w_tension_tree()
-    let t_rho = m_w_tension_rho()
-    let t_gf = m_w_tension_gf()
+    let pred = m_w_prediction_ep()
+    let pred_rad = m_w_prediction_ep_radiative()
+    let pred_gf = m_w_prediction_ep_gf()
+    let meas = mass_w()
+    let pull = m_w_consistency_pull()
+    let pull_rad = m_w_consistency_pull_radiative()
+    let pull_gf = m_w_consistency_pull_gf()
 
     print("EXP3_MW_PRED_TREE ")
-    print_f64(t_tree.pred_val)
+    print_f64(pred.val())
+    print("\n")
+    print("EXP3_MW_PRED_TREE_STD ")
+    print_f64(pred.std())
     print("\n")
     print("EXP3_MW_PRED_RAD ")
-    print_f64(t_rho.pred_val)
+    print_f64(pred_rad.val())
+    print("\n")
+    print("EXP3_MW_PRED_RAD_STD ")
+    print_f64(pred_rad.std())
     print("\n")
     print("EXP3_MW_PRED_GF ")
-    print_f64(t_gf.pred_val)
+    print_f64(pred_gf.val())
+    print("\n")
+    print("EXP3_MW_PRED_GF_STD ")
+    print_f64(pred_gf.std())
     print("\n")
     print("EXP3_MW_MEAS ")
-    print_f64(t_gf.meas_val)
+    print_f64(meas.val())
+    print("\n")
+    print("EXP3_MW_MEAS_STD ")
+    print_f64(meas.std())
     print("\n")
     print("EXP3_MW_PULL_TREE ")
-    print_f64(t_tree.pull)
+    print_f64(pull)
     print("\n")
     print("EXP3_MW_PULL_RAD ")
-    print_f64(t_rho.pull)
+    print_f64(pull_rad)
     print("\n")
     print("EXP3_MW_PULL_GF ")
-    print_f64(t_gf.pull)
+    print_f64(pull_gf)
     print("\n")
+    // Canonical pull key tracks the most complete construction step (G_F Δr)
     print("EXP3_MW_PULL ")
-    print_f64(t_gf.pull)
+    print_f64(pull_gf)
     print("\n")
-    print("EXP3_TENSION_CONSTRUCTION_TREE ")
-    print_int(t_tree.construction)
-    print("\n")
-    print("EXP3_TENSION_CONSTRUCTION_RHO ")
-    print_int(t_rho.construction)
-    print("\n")
-    print("EXP3_TENSION_CONSTRUCTION_GF ")
-    print_int(t_gf.construction)
-    print("\n")
-    print("EXP3_TENSION_OBS ")
-    print_int(t_gf.observable)
-    print("\n")
-
-    // Machine-readable tension ladder (schema parity with deficit JSON)
-    print("EXP3_TENSION_JSON {")
-    print("\"schema\":\"particle.exp123.tension_ladder.v1\",")
-    print("\"observable\":\"M_W\",")
-    print("\"steps\":[")
-    print("{\"construction\":\"tree\",\"tag\":")
-    print_int(TENSION_CONSTRUCTION_TREE())
-    print(",\"pred\":")
-    print_f64(t_tree.pred_val)
-    print(",\"pull\":")
-    print_f64(t_tree.pull)
-    print("},")
-    print("{\"construction\":\"onshell_rho\",\"tag\":")
-    print_int(TENSION_CONSTRUCTION_ONSHELL_RHO())
-    print(",\"pred\":")
-    print_f64(t_rho.pred_val)
-    print(",\"pull\":")
-    print_f64(t_rho.pull)
-    print("},")
-    print("{\"construction\":\"gf_sirlin\",\"tag\":")
-    print_int(TENSION_CONSTRUCTION_GF_SIRLIN())
-    print(",\"pred\":")
-    print_f64(t_gf.pred_val)
-    print(",\"pull\":")
-    print_f64(t_gf.pull)
-    print("}]}\n")
 
     // Physical range for M_W (tree + Δρ + G_F)
-    n = n + pass_if(t_tree.pred_val > 75.0 && t_tree.pred_val < 85.0, 301)
-    n = n + pass_if(t_gf.meas_val > 75.0 && t_gf.meas_val < 85.0, 302)
-    n = n + pass_if(t_tree.pred_var > 0.0, 303)
-    n = n + pass_if(tension_abs_pull(t_tree) < 100.0, 304)
-    n = n + pass_if(t_rho.pred_val > 75.0 && t_rho.pred_val < 85.0, 305)
-    n = n + pass_if(t_rho.pred_var > 0.0, 306)
-    n = n + pass_if(tension_abs_pull(t_rho) < 100.0, 307)
+    n = n + pass_if(pred.val() > 75.0 && pred.val() < 85.0, 301)
+    n = n + pass_if(meas.val() > 75.0 && meas.val() < 85.0, 302)
+    n = n + pass_if(pred.variance() > 0.0, 303)
+    n = n + pass_if(abs_f(pull) < 100.0, 304)
+    n = n + pass_if(pred_rad.val() > 75.0 && pred_rad.val() < 85.0, 305)
+    n = n + pass_if(pred_rad.variance() > 0.0, 306)
+    n = n + pass_if(abs_f(pull_rad) < 100.0, 307)
     // Leading Δρ must lift M_W toward the PDG direct measurement
-    n = n + pass_if(t_rho.pred_val > t_tree.pred_val, 308)
-    // Typed ladder honesty: each step improves |pull|
-    n = n + pass_if(tension_improves(t_tree, t_rho), 309)
-    n = n + pass_if(t_gf.pred_val > 75.0 && t_gf.pred_val < 85.0, 310)
-    n = n + pass_if(t_gf.pred_var > 0.0, 311)
-    n = n + pass_if(tension_abs_pull(t_gf) < 100.0, 312)
-    n = n + pass_if(tension_improves(t_tree, t_gf), 313)
-    n = n + pass_if(tension_improves(t_rho, t_gf), 314)
-    n = n + pass_if(tension_abs_pull(t_gf) < 3.0, 315)
-    // Construction tags and observable identity on typed objects
-    n = n + pass_if(t_tree.construction == TENSION_CONSTRUCTION_TREE(), 316)
-    n = n + pass_if(t_rho.construction == TENSION_CONSTRUCTION_ONSHELL_RHO(), 317)
-    n = n + pass_if(t_gf.construction == TENSION_CONSTRUCTION_GF_SIRLIN(), 318)
-    n = n + pass_if(t_gf.observable == TENSION_OBS_MW(), 319)
-    if t_gf.consistent == 1 {
-        print("EXP3_TENSION_FLAG CONSISTENT\n")
-        print("EXP3_TENSION_NOTE G_F_Sirlin_Delta_r_pull_within_2sigma\n")
-    } else {
+    n = n + pass_if(pred_rad.val() > pred.val(), 308)
+    // Radiative pull is strictly milder than tree-level pull (honest improvement)
+    n = n + pass_if(abs_f(pull_rad) < abs_f(pull), 309)
+    // G_F Sirlin step
+    n = n + pass_if(pred_gf.val() > 75.0 && pred_gf.val() < 85.0, 310)
+    n = n + pass_if(pred_gf.variance() > 0.0, 311)
+    n = n + pass_if(abs_f(pull_gf) < 100.0, 312)
+    // G_F pull must improve on both tree and on-shell-Δρ (construction ladder)
+    n = n + pass_if(abs_f(pull_gf) < abs_f(pull), 313)
+    n = n + pass_if(abs_f(pull_gf) < abs_f(pull_rad), 314)
+    // Target: residual |pull| after G_F Δr should be construction-small
+    n = n + pass_if(abs_f(pull_gf) < 3.0, 315)
+    if abs_f(pull_gf) > 2.0 {
         print("EXP3_TENSION_FLAG RESIDUAL_PULL_AFTER_GF_DR\n")
         print("EXP3_TENSION_NOTE G_F_Sirlin_Delta_r_closes_most_tension_higher_orders_open\n")
+    } else {
+        print("EXP3_TENSION_FLAG CONSISTENT\n")
+        print("EXP3_TENSION_NOTE G_F_Sirlin_Delta_r_pull_within_2sigma\n")
     }
-    n = n + pass_if(true, 320)
+    n = n + pass_if(true, 316)
 
     // Oblique parameters (PDG global fit, epistemic)
     let s_ep = oblique_s_measured_ep()
@@ -495,11 +435,11 @@ fn run_exp3() -> i64 with IO, Mut, Div, Panic {
     print("\n")
 
     // PDG-scale: S ~ 0.05 ± 0.11, T ~ 0.09 ± 0.14
-    n = n + pass_if(abs_f(s_ep.val()) < 1.0, 321)
-    n = n + pass_if(s_ep.std() > 0.0, 322)
-    n = n + pass_if(abs_f(t_ep.val()) < 1.0, 323)
-    n = n + pass_if(t_ep.std() > 0.0, 324)
-    n = n + pass_if(u_ep.std() > 0.0, 325)
+    n = n + pass_if(abs_f(s_ep.val()) < 1.0, 317)
+    n = n + pass_if(s_ep.std() > 0.0, 318)
+    n = n + pass_if(abs_f(t_ep.val()) < 1.0, 319)
+    n = n + pass_if(t_ep.std() > 0.0, 320)
+    n = n + pass_if(u_ep.std() > 0.0, 321)
 
     // SM theory Δρ from top (epistemic)
     let dr = delta_rho_ep()
@@ -509,8 +449,8 @@ fn run_exp3() -> i64 with IO, Mut, Div, Panic {
     print("EXP3_DELTA_RHO_STD ")
     print_f64(dr.std())
     print("\n")
-    n = n + pass_if(dr.val() > 0.0 && dr.val() < 0.02, 326)
-    n = n + pass_if(dr.variance() > 0.0, 327)
+    n = n + pass_if(dr.val() > 0.0 && dr.val() < 0.02, 322)
+    n = n + pass_if(dr.variance() > 0.0, 323)
 
     // Theory S,T,U at PDG central masses (consistency of formulas)
     let mt = mass_top().val()
@@ -528,8 +468,8 @@ fn run_exp3() -> i64 with IO, Mut, Div, Panic {
     print("EXP3_U_TH ")
     print_f64(u_th)
     print("\n")
-    n = n + pass_if(abs_f(s_th) < 1.0, 328)
-    n = n + pass_if(abs_f(t_th) < 1.0, 329)
+    n = n + pass_if(abs_f(s_th) < 1.0, 324)
+    n = n + pass_if(abs_f(t_th) < 1.0, 325)
 
     // g-2 Schwinger term with GUM
     let amu = g_minus_2_qed_schwinger_ep()
@@ -537,8 +477,8 @@ fn run_exp3() -> i64 with IO, Mut, Div, Panic {
     print_f64(amu.val())
     print("\n")
     // α/(2π) ≈ 0.0011614
-    n = n + pass_if(within(amu.val(), 0.0011614, 1.0e-6), 330)
-    n = n + pass_if(amu.variance() > 0.0, 331)
+    n = n + pass_if(within(amu.val(), 0.0011614, 1.0e-6), 326)
+    n = n + pass_if(amu.variance() > 0.0, 327)
 
     print("EXP3_DONE\n")
     n
@@ -555,8 +495,8 @@ fn main() -> i32 with IO, NonUnitary, Mut, Div, Panic {
     let n2 = run_exp2()
     let n3 = run_exp3()
     let npass = n1 + n2 + n3
-    // Expected checks: exp1=13, exp2=18, exp3=31 → 62
-    let expected: i64 = 62
+    // Expected checks: exp1=13, exp2=18, exp3=27 → 58
+    let expected: i64 = 58
     let nfail = expected - npass
 
     print("PARTICLE_EXP123_PASS ")

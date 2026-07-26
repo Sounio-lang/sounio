@@ -9,7 +9,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.garde
 
 # The Zero of Encounter
 
-> **Status**: Garden seed with an executable witness | **Last validated**: 2026-07-11 | **Source**: live conversation in New Haven
+> **Status**: Garden seed driven to a ledger-scoped claim | **Last validated**: 2026-07-25 | **Source**: live conversation in New Haven
 
 ## Butterfly
 
@@ -100,6 +100,14 @@ clinical detail belongs in this seed.
   keeps the native frontier classified: `dd64` and the zero-event receipt run,
   `qd128` fails closed during native emission, and sedenion exits nonzero
   without crashing or proving its semantic marker.
+- [`docs/research/garden_to_claim_pipeline_spec_2026-07-25.md`](../../../research/garden_to_claim_pipeline_spec_2026-07-25.md)
+  specifies the Garden-to-Claim pipeline this seed was driven through.
+- [`scripts/research/garden_to_claim_pipeline_contract.py`](../../../../scripts/research/garden_to_claim_pipeline_contract.py)
+  verifies the stage evidence, including the no-overclaim ceiling.
+- [`scripts/ci/garden_to_claim_gate.sh`](../../../../scripts/ci/garden_to_claim_gate.sh)
+  composes both witness gates with the pipeline contract.
+- [`stdlib/epistemic/zero_encounter_pipeline_claim.sio`](../../../../stdlib/epistemic/zero_encounter_pipeline_claim.sio)
+  encodes the ledger-scoped claim `garden_zero_encounter_pipeline`.
 - [`FOUNDER_INTENT.md`](../../../../FOUNDER_INTENT.md) protects the underlying
   requirement that a zero result must not silently erase its path.
 
@@ -110,7 +118,7 @@ clinical detail belongs in this seed.
 | `Garden` | Captured: "many encounters are zeros" and "the Spinozan bad encounter is the sedenion zero divisor." |
 | `Hypothesis` | A typed zero-provenance taxonomy may distinguish absence from relational, numerical, metrological, and policy-produced zeros. Sedenion zero-divisor geometry may provide a useful model for some nonzero-factor interaction failures. |
 | `Executable` | `epistemic::zero_event` implements receipt evidence, accessors, typed discharge, and E176-gated opaque constructors. Its aggregate-return witness executes on default native-v2. EISA exposes derived `ZERO_OBSERVED` and `CORRECTION_NONZERO` flags without changing `val`/`err`/`u`. Remaining native frontiers are qd128/EISA backend emission and the sedenion semantic marker. |
-| `Claim-ready` | No. No biological, psychopharmacological, metaphysical, or novelty claim is established by this seed. |
+| `Claim-ready` | Yes (ledger-scoped): the narrow executable proposition `same surface value != same zero provenance` is encoded in the Falsification Ledger as `garden_zero_encounter_pipeline` at evidence `gate_green`. No biological, psychopharmacological, metaphysical, or novelty claim is established by this seed. |
 
 ## What This Is Not
 
