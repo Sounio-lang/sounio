@@ -52,11 +52,23 @@ pub struct D12PatientStateReceipt { receipt_id: D12ReceiptSeal }
 // NOTE on the single packed field: in Sounio, reading ANY field of a linear
 // struct consumes the whole value (see tests/run-pass/linear_struct_field_access.sio:
 // "only access one field to consume"). Two reads would be a double use. The
-// observation therefore carries one field encoding both quantities:
+// payload therefore carries one integer encoding both quantities:
 //     packed = observation_id * 4 + drift_code,  drift_code in {0,1,2}
 // so a single read yields both, and consumption stays exactly-once.
+//
+// NOTE on unforgeability: marking a struct `pub` makes it CONSTRUCTIBLE by
+// importers — visibility of the constructor follows the struct, not its
+// fields. The barrier therefore has to be the field's TYPE. Both payload
+// types below are non-`pub`, so an importer can name
+// `D12MonitorObservation` / `D12AccountedOutcome` in a signature but cannot
+// build one: the only routes are `certify_d12_monitor_observation` and the
+// three accounting functions. (This is the same construction D11 uses for its
+// barrier receipts, whose field type `D11ReceiptSeal` is likewise non-`pub`.)
+struct D12ObservationPayload { packed: i64 }
+struct D12OutcomePayload { outcome_id: i64, disposition: i64 }
+
 pub linear struct D12MonitorObservation {
-    packed: i64,
+    payload: D12ObservationPayload,
 }
 
 // The accounted outcome. Ordinary (non-linear) value: once an observation has
@@ -65,8 +77,7 @@ pub linear struct D12MonitorObservation {
 // disposition mirrors the three admissible dispositions:
 //   1 = renewed, 2 = degraded, 3 = revoked.
 pub struct D12AccountedOutcome {
-    outcome_id: i64,
-    disposition: i64,
+    payload: D12OutcomePayload,
 }
 
 // ---------------------------------------------------------------------------
@@ -78,7 +89,7 @@ pub fn certify_d12_monitor_observation(
 ) -> D12MonitorObservation with Panic {
     assert(observation_id > 0)
     assert(drift_code >= 0 && drift_code <= 2)
-    D12MonitorObservation { packed: observation_id * 4 + drift_code }
+    D12MonitorObservation { payload: D12ObservationPayload { packed: observation_id * 4 + drift_code } }
 }
 
 // ---------------------------------------------------------------------------
@@ -89,35 +100,35 @@ pub fn certify_d12_monitor_observation(
 
 // Renew: admissible only when no drift was observed.
 pub fn d12_account_renew(obs: D12MonitorObservation) -> D12AccountedOutcome with Panic, Div {
-    let p = obs.packed
+    let p = obs.payload.packed
     assert(p - (p / 4) * 4 == 0)
-    D12AccountedOutcome { outcome_id: p / 4, disposition: 1 }
+    D12AccountedOutcome { payload: D12OutcomePayload { outcome_id: p / 4, disposition: 1 } }
 }
 
 // Degrade: admissible when degradation was observed.
 pub fn d12_account_degrade(obs: D12MonitorObservation) -> D12AccountedOutcome with Panic, Div {
-    let p = obs.packed
+    let p = obs.payload.packed
     assert(p - (p / 4) * 4 == 1)
-    D12AccountedOutcome { outcome_id: p / 4, disposition: 2 }
+    D12AccountedOutcome { payload: D12OutcomePayload { outcome_id: p / 4, disposition: 2 } }
 }
 
 // Revoke: admissible on a revocation trigger.
 pub fn d12_account_revoke(obs: D12MonitorObservation) -> D12AccountedOutcome with Panic, Div {
-    let p = obs.packed
+    let p = obs.payload.packed
     assert(p - (p / 4) * 4 == 2)
-    D12AccountedOutcome { outcome_id: p / 4, disposition: 3 }
+    D12AccountedOutcome { payload: D12OutcomePayload { outcome_id: p / 4, disposition: 3 } }
 }
 
 // ---------------------------------------------------------------------------
 // Readers for the accounted outcome.
 // ---------------------------------------------------------------------------
-pub fn d12_outcome_id(o: D12AccountedOutcome) -> i64 { o.outcome_id }
-pub fn d12_outcome_disposition(o: D12AccountedOutcome) -> i64 { o.disposition }
+pub fn d12_outcome_id(o: D12AccountedOutcome) -> i64 { o.payload.outcome_id }
+pub fn d12_outcome_disposition(o: D12AccountedOutcome) -> i64 { o.payload.disposition }
 
 // A degraded or revoked disposition never rises again: this mirrors the D11
 // asymmetry (target evidence may preserve or lower a rank, never raise it).
 pub fn d12_disposition_is_downward(o: D12AccountedOutcome) -> bool {
-    o.disposition == 2 || o.disposition == 3
+    o.payload.disposition == 2 || o.payload.disposition == 3
 }
 
 // ---------------------------------------------------------------------------

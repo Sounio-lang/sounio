@@ -148,10 +148,21 @@ The negative obligations are therefore of three kinds:
 
 | obligation | diagnostic | test shipped | why |
 |---|---|---|---|
-| silent discard | `E040` | ✅ yes | distinguishable and imune to the checker defect below |
+| silent discard | `E040` | ✅ yes | distinguishable and immune to the checker defect below |
 | barrier (naive forge) | `E016` | ✅ yes (×4) | rejected by both `check` and `compile` |
 | barrier (nested forge) | `E015` | ✅ yes | uninhabited seal has no value |
+| observation forged directly | `E012` | ✅ yes | payload type is non-`pub` |
+| outcome forged directly | `E046` | ✅ yes | payload type is non-`pub` |
 | **replay** | `E039` | ❌ **NO** | see below |
+
+**Unforgeability is a property of the field's type, not of the struct.** Marking a struct `pub`
+makes it *constructible* by importers — constructor visibility follows the struct, not its fields.
+A first draft of this module declared `D12MonitorObservation` and `D12AccountedOutcome` as `pub`
+structs over plain `i64` fields, and both were forgeable from outside, which silently voided the two
+"producible?" claims in the table above: an importer could mint an observation without the producer
+and an outcome without consuming anything. Both types now wrap a **non-`pub` payload type**, which is
+the same construction D11 uses for its barrier receipts (`D11ReceiptSeal`). The two rows above are
+the regression tests for that.
 
 **Replay is deliberately not shipped as a test.** Expressing it requires naming the value
 (`let o = …; use(o); use(o)`), but the modular Madaros checker currently raises a **spurious
