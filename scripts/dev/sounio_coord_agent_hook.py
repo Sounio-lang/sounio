@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -46,6 +47,27 @@ def repo_root(cwd: str) -> Path | None:
 def safe_token(value: str, limit: int = 24) -> str:
     token = re.sub(r"[^A-Za-z0-9._-]", "_", value)[:limit]
     return token or "unknown"
+
+
+def worktree_token(root: Path) -> str:
+    """A short, stable token identifying THIS worktree.
+
+    Two things depend on this, both learned from issue #1477:
+
+    1. `session_id` is sometimes absent from the hook event. Falling back to the
+       literal string "unknown" put every agent in that state on the same lane
+       `session-unknown`, where they collided with each other and blocked
+       Edit/Write for entire sessions.
+    2. A lane that does not name the worktree collides with ITSELF when one
+       session works in more than one worktree: the claim is bound to the first
+       worktree and every later tool call is refused with
+       "claim belongs to worktree ...". Agents legitimately run in
+       .claude/worktrees/<name> while a claim was registered against the repo
+       root, so the paths never actually conflicted.
+
+    Including the worktree in the lane makes both impossible.
+    """
+    return safe_token(hashlib.sha1(str(root.resolve()).encode()).hexdigest()[:10])
 
 
 def run_coord(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -132,9 +154,16 @@ def main() -> int:
         return 0
 
     event_name = str(event.get("hook_event_name", ""))
-    session_id = safe_token(str(event.get("session_id", "unknown")))
+    raw_session = str(event.get("session_id") or "").strip()
     agent = safe_token(args.agent)
-    lane = f"session-{session_id}"
+    wt = worktree_token(root)
+    # Lane is scoped to (session, worktree). See worktree_token for why both are
+    # required. When session_id is absent the worktree token alone still keeps
+    # concurrent agents apart, instead of funnelling them into "session-unknown".
+    if raw_session:
+        lane = f"session-{safe_token(raw_session)}-{wt}"
+    else:
+        lane = f"session-wt-{wt}"
     intent = f"active {agent} session"
     common = scope_args(agent, lane, intent)
 
