@@ -55,6 +55,7 @@ for path in \
   scripts/ci/fixtures/madaros_m0_source_compat.patch \
   tests/run-pass/madaros_native_multimodule_scale_prob.sio \
   tests/run-pass/madaros_native_multimodule_scale_prob_textbook.sio \
+  tests/run-pass/madaros_native_multimodule_scale_prob_facade.sio \
   tests/run-pass/let_scope_binding_name.sio \
   tests/run-pass/let_policy_binding_name.sio \
   tests/run-pass/let_is_binding_name.sio \
@@ -90,6 +91,7 @@ git -C "$REPO" archive "$SOURCE_COMMIT" -- \
   scripts/ci/fixtures/madaros_m0_source_compat.patch \
   tests/run-pass/madaros_native_multimodule_scale_prob.sio \
   tests/run-pass/madaros_native_multimodule_scale_prob_textbook.sio \
+  tests/run-pass/madaros_native_multimodule_scale_prob_facade.sio \
   tests/run-pass/let_scope_binding_name.sio \
   tests/run-pass/let_policy_binding_name.sio \
   tests/run-pass/let_is_binding_name.sio \

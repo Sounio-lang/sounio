@@ -15,6 +15,7 @@ MADAROS_WRAPPER_PATH="$ROOT_DIR/bin/madaros"
 PROBE="$ROOT_DIR/tests/run-pass/madaros_native_multimodule_scale_prob.sio"
 TEXTBOOK="$ROOT_DIR/tests/run-pass/madaros_native_multimodule_scale_prob_textbook.sio"
 DRIVER="$ROOT_DIR/tests/stdlib/prob/test_prob_stdlib.sio"
+FACADE="$ROOT_DIR/tests/run-pass/madaros_native_multimodule_scale_prob_facade.sio"
 CONTEXT_SCOPE="$ROOT_DIR/tests/run-pass/let_scope_binding_name.sio"
 CONTEXT_POLICY="$ROOT_DIR/tests/run-pass/let_policy_binding_name.sio"
 CONTEXT_IS="$ROOT_DIR/tests/run-pass/let_is_binding_name.sio"
@@ -35,6 +36,7 @@ PROOF_INPUT_PATHS=(
   tests/run-pass/madaros_native_multimodule_scale_prob.sio
   tests/run-pass/madaros_native_multimodule_scale_prob_textbook.sio
   tests/stdlib/prob/test_prob_stdlib.sio
+  tests/run-pass/madaros_native_multimodule_scale_prob_facade.sio
   tests/run-pass/let_scope_binding_name.sio
   tests/run-pass/let_policy_binding_name.sio
   tests/run-pass/let_is_binding_name.sio
@@ -345,6 +347,7 @@ if [[ "${1:-}" == '--structural-only' ]]; then
   [[ -f "$PROBE" ]] || fail 'missing #901 acceptance probe'
   [[ -f "$TEXTBOOK" ]] || fail 'missing #901 textbook probe'
   [[ -f "$DRIVER" ]] || fail 'missing #901 stdlib driver'
+  [[ -f "$FACADE" ]] || fail 'missing #901 imported facade witness'
   [[ -f "$CONTEXT_SCOPE" && -f "$CONTEXT_POLICY" && -f "$CONTEXT_IS" && -f "$CONTEXT_STUDY" ]] || fail 'missing contextual-keyword bootstrap witnesses'
   [[ -f "$M0_COMPAT_PATCH" ]] || fail 'missing tracked M0 compatibility overlay'
   git apply --numstat "$M0_COMPAT_PATCH" >/dev/null || fail 'tracked M0 compatibility overlay is not a valid patch'
@@ -463,6 +466,17 @@ run_direct_case textbook "$TEXTBOOK" 'PROB_TEXTBOOK_OK'
 TEXTBOOK_MERGED="$CASE_MERGED"
 run_direct_case stdlib-driver "$DRIVER" 'PROB_STDLIB_OK'
 DRIVER_MERGED="$CASE_MERGED"
+assert_complete_closure facade-elf-42 "$STAGE3" "$FACADE" "$ROOT_DIR/tests/run-pass" "$WORK/facade-elf-42-closure.log"
+for required_facade_node in \
+  "$ROOT_DIR/stdlib/prob/lib.sio" \
+  "$ROOT_DIR/stdlib/prob/distributions.sio" \
+  "$ROOT_DIR/stdlib/special/gamma.sio" \
+  "$ROOT_DIR/stdlib/special/igamma.sio" \
+  "$ROOT_DIR/stdlib/special/erf.sio"; do
+  grep -Fxq 'node'$'\t'"$required_facade_node" "$WORK/facade-elf-42-closure.log" || fail "facade closure missed required physical module: $required_facade_node"
+done
+run_direct_case facade-elf-42 "$FACADE" '^42$'
+FACADE_MERGED="$CASE_MERGED"
 run_direct_case contextual-scope "$CONTEXT_SCOPE" '^LET_SCOPE_BINDING_OK$'
 run_direct_case contextual-policy "$CONTEXT_POLICY" '^LET_POLICY_BINDING_OK$'
 run_direct_case contextual-is "$CONTEXT_IS" '^LET_IS_BINDING_OK$'
@@ -508,7 +522,7 @@ run_public_wrapper_case() {
   printf '[madaros-issue901-scale-source-fresh] PASS: public-wrapper merged_ir=%s\n' "${CASE_MERGED:-unknown}"
 }
 
-run_public_wrapper_case "$PROBE" 'm=5(\.0+)?'
+run_public_wrapper_case "$FACADE" '^42$'
 PUBLIC_WRAPPER_MERGED="$CASE_MERGED"
 
 assert_source_provenance_unchanged
@@ -557,9 +571,11 @@ printf 'textbook_probe\tPROB_TEXTBOOK_OK\n' >>"$RECEIPT"
 printf 'textbook_probe_merged_ir\t%s\n' "${TEXTBOOK_MERGED:-unknown}" >>"$RECEIPT"
 printf 'stdlib_driver\tPROB_STDLIB_OK\n' >>"$RECEIPT"
 printf 'stdlib_driver_merged_ir\t%s\n' "${DRIVER_MERGED:-unknown}" >>"$RECEIPT"
+printf 'facade_vertical\tprob::lib::{uniform_mean}->ELF->42\n' >>"$RECEIPT"
+printf 'facade_vertical_merged_ir\t%s\n' "${FACADE_MERGED:-unknown}" >>"$RECEIPT"
 printf 'contextual_keyword_witnesses\tscope,policy,is,study\n' >>"$RECEIPT"
 printf 'public_wrapper_route\tbin/souc-compile-pinned-to-stage3\n' >>"$RECEIPT"
-printf 'public_wrapper_probe\tm=5.000000\n' >>"$RECEIPT"
+printf 'public_wrapper_probe\tprob-facade-ELF-42\n' >>"$RECEIPT"
 printf 'public_wrapper_probe_merged_ir\t%s\n' "${PUBLIC_WRAPPER_MERGED:-unknown}" >>"$RECEIPT"
 
 cat "$RECEIPT"
