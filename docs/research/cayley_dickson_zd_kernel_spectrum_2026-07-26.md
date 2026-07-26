@@ -124,14 +124,23 @@ reproduces the repository's Lean results: 84 valid primitives in 𝕊, each with
 (`prim_count_84`, `every_primitive_has_4_annihilators`). It further shows `dim ker(L_u) = 0` for a
 generic element such as `1 + e₃` — annihilation is a rare, structured property, not a generic one.
 
-**Structure of the subspaces (n = 16).** The 84 primitives induce only **42 distinct** 4-dimensional
-annihilated subspaces — exactly two primitives per subspace. The mutual-annihilation graph has degree
-4 and **maximum clique 2**: no three primitives annihilate one another pairwise. At most **3**
-kernels are linearly independent (spanning 12 of 16 dimensions); a full decomposition into four
-independent annihilated subspaces does **not** exist.
+**Structure of the subspaces (n = 16), exhaustively established.** The 84 primitives induce only
+**42 distinct** 4-dimensional annihilated subspaces — exactly two primitives per subspace. The
+mutual-annihilation graph has degree 4 and **maximum clique 2**: no three primitives annihilate one
+another pairwise. Exhaustive backtracking over all 42 kernels gives a **maximum of 3** linearly
+independent kernels (spanning 12 of 16 dimensions): a full decomposition into four independent
+annihilated subspaces does **not** exist. These four statements are exhaustive, not sampled.
 
-**Scaling.** The number of pairwise-independent kernels of the smallest class grows 3 → 5 → 13 for
-`n = 16, 32, 64`, i.e. roughly `n/5`, at about 75% of the `n/4` bound.
+**Scaling — lower bounds only.** For the smallest kernel class, a greedy search finds
+**≥ 3, ≥ 5, ≥ 13** independent kernels at `n = 16, 32, 64`, against the trivial upper bound `n/4`
+(4, 8, 16). Two caveats, stated because the distinction matters:
+- greedy establishes a **lower** bound; only `n = 16` has been settled exhaustively (max = 3);
+- the `n = 64` figure comes from a **sample** of 900 of the 1984 primitives, so it is a lower bound
+  twice over.
+The suggestive reading — growth roughly linear in `n`, at some 75% of the `n/4` bound — is therefore
+a **conjecture supported by three points**, not a determined sequence. It is reported here only
+because the qualitative direction (the budget grows with the tower rather than saturating) is what
+matters for applications; the exact maxima at `n ≥ 32` are open.
 
 **Kernel-dimension classes.** The observed dimension classes are `{4 + 8i}` with `2^(k−4)` of them —
 homogeneous in 𝕊 (all kernels 4-dimensional), bimodal at `n = 32` ({4, 12}), four classes at
@@ -141,7 +150,21 @@ kernel dimensions up the tower.
 
 ## Reproduction
 
-Exact-arithmetic scripts (independent of the repository's Lean corpus) build the CD table by
-recursion, compute `dim ker(L_u)` by rank over a prime field (entries are `0, ±1`, so the rank equals
-the rational rank), and enumerate cycle structures. Verification covers **all** primitives for
-`n ≤ 128`.
+`scripts/research/cd_zd_kernel_spectrum.py` is self-contained and independent of the repository's
+Lean corpus: it builds the CD multiplication table by recursion on the construction, computes
+`dim ker(L_u)` by rank over a prime field (entries are `0, ±1`, so the rank equals the rational
+rank), and enumerates cycle structures. Running it reproduces, in order:
+
+| output | claim it checks | scope |
+|---|---|---|
+| `c+ values` per dimension | the spectrum `{4+8i}`, its maximum, and the class count | **exhaustive**, `n ≤ 128` |
+| `degeneracy rule` | `c₊ = 0 ⟺ b′ = 0 ∨ a = b′` | **exhaustive**, `n ≤ 64` (992 index pairs at n=64) |
+| `structure at n = 16` | 42 distinct kernels, clique 2, max 3 independent | **exhaustive** |
+
+A note on counting: the script enumerates index **pairs** `(a,b)`; each pair yields two primitives,
+`e_a + e_b` and `e_a − e_b`, which share a kernel because `dim ker` does not depend on `s`
+(Theorem A). Hence 42 pairs ↔ 84 primitives at `n = 16`.
+
+Not covered by the script, and therefore stated as conjecture above: the maximum number of
+independent kernels for `n ≥ 32` (only greedy lower bounds are known) and the `n = 64` scaling
+figure (sampled).
