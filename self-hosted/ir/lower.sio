@@ -1625,7 +1625,7 @@ fn lowerer_preseed_external_struct_items_mut(
                                                 // instead of a direct load, corrupting the value. Compute
                                                 // the real class from the field type, matching
                                                 // ir_fast_summary_register_struct_fields_owned.
-                                                is_float: if lower_type_expr_is_f64(&(*flist).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*flist).head.ty) { 2 } else if lower_type_expr_is_integer(&(*flist).head.ty) { 3 } else { 0 },
+                                                is_float: if lower_type_expr_is_f64(&(*flist).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*flist).head.ty) { 2 } else if lower_type_expr_is_integer(&(*flist).head.ty) { 3 } else if lower_type_expr_is_pointer_like(&(*flist).head.ty) { 4 } else { 0 },
                                                 elem_type_name: lower_type_expr_array_elem_name(&(*flist).head.ty),
                                             }
                                             fc = fc + 1
@@ -1786,7 +1786,7 @@ fn lowerer_preseed_external_items_into_acc_mut(
                                             entry.fields[fc as usize] = StructFieldEntry {
                                                 name: (*flist).head.name,
                                                 index: fc,
-                                                is_float: if lower_type_expr_is_f64(&(*flist).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*flist).head.ty) { 2 } else if lower_type_expr_is_integer(&(*flist).head.ty) { 3 } else { 0 },
+                                                is_float: if lower_type_expr_is_f64(&(*flist).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*flist).head.ty) { 2 } else if lower_type_expr_is_integer(&(*flist).head.ty) { 3 } else if lower_type_expr_is_pointer_like(&(*flist).head.ty) { 4 } else { 0 },
                                             }
                                             fc = fc + 1
                                             fcur = (*flist).tail
@@ -1874,7 +1874,7 @@ fn lowerer_register_struct_fields_direct_mut(
                     // over the same struct_layouts table; a mismatch here would leave the
                     // FIRST-registered field entry — the one actually found by name lookup —
                     // without the i64 marker).
-                    is_float: if lower_type_expr_is_f64(&(*flist).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*flist).head.ty) { 2 } else if lower_type_expr_is_integer(&(*flist).head.ty) { 3 } else { 0 },
+                    is_float: if lower_type_expr_is_f64(&(*flist).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*flist).head.ty) { 2 } else if lower_type_expr_is_integer(&(*flist).head.ty) { 3 } else if lower_type_expr_is_pointer_like(&(*flist).head.ty) { 4 } else { 0 },
                     elem_type_name: lower_type_expr_array_elem_name(&(*flist).head.ty),
                 }
                 fc = fc + 1
@@ -1928,7 +1928,7 @@ fn lowerer_register_struct_fields_mut(
                         name: (*list).head.name,
                         index: field_idx,
                         // println i64-segfault fix: see note in lowerer_register_struct_fields_direct_mut.
-                        is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else if lower_type_expr_is_integer(&(*list).head.ty) { 3 } else { 0 },
+                        is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else if lower_type_expr_is_integer(&(*list).head.ty) { 3 } else if lower_type_expr_is_pointer_like(&(*list).head.ty) { 4 } else { 0 },
                         elem_type_name: lower_type_expr_array_elem_name(&(*list).head.ty),
                     }
                     (*(*lo).struct_layouts).entries[layout_idx as usize].field_count = fc + 1
@@ -2699,7 +2699,7 @@ fn ir_fast_summary_register_struct_fields_owned(
                     name: (*list).head.name,
                     index: idx,
                     // println i64-segfault fix: see note in lowerer_register_struct_fields_direct_mut.
-                    is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else if lower_type_expr_is_integer(&(*list).head.ty) { 3 } else { 0 },
+                    is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else if lower_type_expr_is_integer(&(*list).head.ty) { 3 } else if lower_type_expr_is_pointer_like(&(*list).head.ty) { 4 } else { 0 },
                     elem_type_name: lower_type_expr_array_elem_name(&(*list).head.ty),
                 }
                 lay_entry.field_count = fc + 1
@@ -3938,6 +3938,22 @@ fn lower_param_struct_type_name(ty: &TypeExpr) -> Name with Mut, Panic, Div {
 
 fn lower_type_expr_is_ref_like(ty: &TypeExpr) -> bool {
     (*ty).kind == TypeExprKind::TypeReference || (*ty).kind == TypeExprKind::TypeRefMut
+}
+
+// True when the type is anything the runtime represents AS A POINTER, which is what decides
+// whether a field access through it must LOAD before applying the next offset. TypeExprKind has
+// no Box variant — Box<T> parses as TypeNamed "Box" with a generic argument — so the name has to
+// be matched explicitly alongside the three syntactic pointer forms.
+fn lower_type_expr_is_pointer_like(ty: &TypeExpr) -> bool with Mut, Panic, Div {
+    if (*ty).kind == TypeExprKind::TypeReference { return true }
+    if (*ty).kind == TypeExprKind::TypeRefMut { return true }
+    if (*ty).kind == TypeExprKind::TypeRawPtr { return true }
+    if (*ty).kind == TypeExprKind::TypeNamed {
+        // A named type carries its identifier in `path`, not in a `name` field; the rest of
+        // this file reads it as ir_path_first_name((*ty).path).
+        return ir_name_eq(ir_path_first_name((*ty).path), make_name("Box"))
+    }
+    false
 }
 
 fn lower_opt_type_is_ref_like(opt: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
@@ -7637,6 +7653,32 @@ impl Lowerer {
         default_idx
     }
 
+    // True when the named field of any registered struct holds a POINTER (Box<T>, &T, &!T,
+    // *mut T). StructFieldEntry.is_float is already a type-class tag rather than a boolean —
+    // 1 = f64, 2 = array-of-f64, 3 = integer — and every consumer tests it by equality, so
+    // class 4 = pointer extends it without touching the 16 construction sites or any reader.
+    //
+    // This is what tells lower_field_access_expr_ref to mark a nested access for
+    // dereference. Without it, `h.inner.a` where `inner: Box<Inner>` lowered to two
+    // field_gets of which only the INNER one carried the deref marker (its base is an ident),
+    // so the backend computed base+off(inner)+off(a) — correct for an inline field, and for a
+    // Box a read of whatever lies at the pointer's own address. Measured: SIGSEGV in the
+    // compiled program, with the inline-field control returning 7 correctly on both engines.
+    fn field_is_pointer_by_name_simple(self, n: Name) -> bool with Mut, Panic, Div {
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            var fi: i64 = 0
+            while fi < (*self.struct_layouts).entries[si as usize].field_count {
+                if ir_name_eq((*self.struct_layouts).entries[si as usize].fields[fi as usize].name, n) {
+                    return (*self.struct_layouts).entries[si as usize].fields[fi as usize].is_float == 4
+                }
+                fi = fi + 1
+            }
+            si = si + 1
+        }
+        false
+    }
+
     fn field_is_float_by_name_simple(self, n: Name) -> bool with Mut, Panic, Div {
         var si: i64 = 0
         while si < (*self.struct_layouts).count {
@@ -8366,7 +8408,7 @@ impl Lowerer {
                             // with a new `3` marker for scalar-i64 fields (2 is already taken by
                             // f64-array). Existing consumers only test `== 1` / `== 2`, so this
                             // is inert for them; field_is_int_* below tests `== 3`.
-                            is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else if lower_type_expr_is_integer(&(*list).head.ty) { 3 } else { 0 },
+                            is_float: if lower_type_expr_is_f64(&(*list).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*list).head.ty) { 2 } else if lower_type_expr_is_integer(&(*list).head.ty) { 3 } else if lower_type_expr_is_pointer_like(&(*list).head.ty) { 4 } else { 0 },
                             elem_type_name: lower_type_expr_array_elem_name(&(*list).head.ty),
                         }
                         lay_entry.field_count = fc + 1
@@ -10069,11 +10111,30 @@ impl Lowerer {
                         Some(c) => lo.expr_to_callee_name_ref(&(*c)),
                         None => ir_empty_name(),
                     }
+                    // Box detection must look at the callee PATH's first segment, not at the
+                    // name expr_to_callee_name_ref returns. For `Box::new(...)` that function
+                    // sees an ExprPath with first="Box" and last="new" and, since they differ,
+                    // returns the MANGLED "Box_new" (its own comment explains why: bare-first
+                    // mis-resolved E::of as "E"). ir_name_is_box matches the 3-byte "Box"
+                    // exactly, so "Box_new" failed the test, the tagging branch below never ran,
+                    // and its comment described dead code. Measured: `let b = Box::new(x)` then
+                    // `*b` lowered with is_box_deref=0, took the raw pointer path, and the
+                    // compiled program SIGSEGVd — the "already working" case was broken too.
+                    let callee_is_box = match *callee_opt_struct_ref {
+                        Some(c) => {
+                            if (*c).kind == ExprKind::ExprPath {
+                                ir_name_is_box(ir_path_first_name((*c).path))
+                            } else {
+                                ir_name_is_box(callee_struct_name)
+                            }
+                        }
+                        None => false,
+                    }
                     // measure(...) → Knowledge (return-name lookup often misses builtins)
                     if ir_name_is_measure(callee_struct_name) {
                         lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"))
                     }
-                    if !ir_name_is_box(callee_struct_name) {
+                    if !callee_is_box {
                         let ret_name = lo.expr_call_return_struct_name_ref(&(*expr_box))
                         if ret_name.len > 0 {
                             lo = lo.bind_local_struct_type(s.name, ret_name)
@@ -10082,7 +10143,26 @@ impl Lowerer {
                         // `let b = Box::new(...)`: tag the local's struct-type slot with
                         // "Box" so `*b` lowers to a field-0 read (box deref through the
                         // handle) rather than a raw IrUnaryOp(OpDeref) pointer load.
-                        lo = lo.bind_local_struct_type(s.name, callee_struct_name)
+                        lo = lo.bind_local_struct_type(s.name, make_name("Box"))
+                    }
+                } else if (*expr_box).kind == ExprKind::ExprFieldAccess {
+                    // `let p = h.inner` where the FIELD is a Box: propagate "Box" into the
+                    // local's struct-type slot, exactly as the Box::new branch above does, so
+                    // that `*p` lowers to the field-0 read (box deref through the handle)
+                    // instead of a raw IrUnaryOp(OpDeref) pointer load.
+                    //
+                    // This branch did not exist, so type information was LOST at the bind: the
+                    // Box::new case tagged the local, the field case left the slot empty,
+                    // ir_name_is_box("") is false, and every subsequent deref took the raw
+                    // pointer path. Measured with a stepwise witness — construction ok, bind
+                    // ok, then `(*p).a` kills the process — so the defect is the lost tag at
+                    // the bind, not the field access and not offset arithmetic. Three earlier
+                    // attempts at the access site could not have worked for that reason.
+                    if lo.field_is_pointer_by_name_simple((*expr_box).name) {
+                        if lower_aggregate_diag_enabled() { print("lower_agg: BIND-BOX-FROM-FIELD fired\n") }
+                        lo = lo.bind_local_struct_type(s.name, make_name("Box"))
+                    } else {
+                        if lower_aggregate_diag_enabled() { print("lower_agg: bind-from-field NOT pointer class\n") }
                     }
                 } else if (*expr_box).kind == ExprKind::ExprMethodCall {
                     // `let s = a.add(&b)`: bind s to the method's return struct so
@@ -12077,8 +12157,46 @@ impl Lowerer {
 
     fn lower_field_access_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let pair_b = self.lower_opt_expr_ref(&e.left)
-        let lo1 = pair_b.0
-        let base = pair_b.1
+        let lo1_pre = pair_b.0
+        let base_pre = pair_b.1
+        // AUTO-DEREF THROUGH A POINTER-TYPED FIELD.
+        //
+        // A Box deref is represented in this IR as IrFieldGet with field index 0 — see
+        // native/codegen_x86_linux.sio:7404 and :7436 ("Box deref is lowered to IrFieldGet(0)
+        // earlier"). The lowerer only ever produced that step for an EXPLICIT `*x` whose operand
+        // is an ident bound to a Box local (lower_unary_expr_ref, is_box_deref). It was never
+        // produced for an auto-deref through a pointer-typed FIELD, so `h.inner.a` with
+        // `inner: Box<Inner>` lowered to two field_gets:
+        //     t1 = field_get(h,  idx(inner))     // t1 holds the Box, i.e. a pointer
+        //     t2 = field_get(t1, idx(a))         // applies a's offset TO THE POINTER ITSELF
+        // which is correct for an inline field and reads at the pointer's own address for a Box.
+        // Measured: the compiled program SIGSEGVs, while the identical shape with an inline
+        // field returns 7 on both engines. Inserting the missing middle step makes the chain
+        //     t1 = field_get(h, idx(inner))  ->  t2 = field_get(t1, 0)  ->  t3 = field_get(t2, idx(a))
+        //
+        // Recorded because it cost a build cycle: an earlier attempt set instr.label_id on the
+        // outer access instead, on the assumption that the backend consumed it as a deref marker
+        // for field access. It does not — no codegen site reads label_id for IrFieldGet — so that
+        // version changed nothing measurable.
+        var lo1 = lo1_pre
+        var base = base_pre
+        let base_field_is_ptr = match e.left {
+            Some(base_expr_ref) => {
+                if (*base_expr_ref).kind == ExprKind::ExprFieldAccess {
+                    lo1_pre.field_is_pointer_by_name_simple((*base_expr_ref).name)
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+        if base_field_is_ptr {
+            let pair_deref = lo1_pre.fresh_reg()
+            let lo_d = pair_deref.0
+            let deref_dst = pair_deref.1
+            lo1 = lo_d.emit(ir_field_get(deref_dst, base_pre, 0, ir_empty_name()))
+            base = deref_dst
+        }
         let fidx = lo1.field_idx_for_base_ref(&e.left, e.name)
         let field_is_float = lo1.field_is_float_for_base_ref(&e.left, e.name) || lo1.field_is_float_by_name_simple(e.name)
         let field_array_elem_is_float = lo1.field_array_elem_is_float_for_base_ref(&e.left, e.name)
@@ -12125,6 +12243,11 @@ impl Lowerer {
                     print(str_from_bytes((*lo1.struct_layouts).entries[di as usize].fields[dj as usize].name.buf, (*lo1.struct_layouts).entries[di as usize].fields[dj as usize].name.len))
                     print(":")
                     print_int((*lo1.struct_layouts).entries[di as usize].fields[dj as usize].index)
+                    // The type CLASS was missing from this dump, which is the one thing needed
+                    // to tell a mis-populated layout from a mis-consumed one. 1=f64,
+                    // 2=array-of-f64, 3=integer, 4=pointer (Box/&/&!/*mut), 0=other.
+                    print("/cls")
+                    print_int((*lo1.struct_layouts).entries[di as usize].fields[dj as usize].is_float)
                     dj = dj + 1
                 }
                 print("\n")
@@ -12401,6 +12524,11 @@ impl Lowerer {
         let pair_d = lo1.fresh_reg()
         let lo2 = pair_d.0
         let dst = pair_d.1
+        if lower_aggregate_diag_enabled() {
+            print("lower_agg: unary deref, is_box_deref=")
+            print_int(if is_box_deref { 1 } else { 0 })
+            print("\n")
+        }
         var lo3 = if is_box_deref {
             lo2.emit(ir_field_get(dst, src, 0, ir_empty_name()))
         } else {
