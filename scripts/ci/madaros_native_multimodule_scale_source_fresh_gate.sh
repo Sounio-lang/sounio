@@ -9,7 +9,7 @@ set -euo pipefail
 export LC_ALL=C
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-BUILD_SCRIPT="$ROOT_DIR/scripts/ci/build_modular_madaros.sh"
+MADAROS_ROOT_PATH="$ROOT_DIR/bin/madaros-linux-x86_64"
 KEEP_WORK="${SOUNIO_MADAROS_ISSUE901_SCALE_SOURCE_FRESH_KEEP:-0}"
 ARCHIVE_PROVENANCE_FILE="$ROOT_DIR/.issue901-scale-source-provenance.tsv"
 
@@ -68,15 +68,12 @@ assert_archive_sha256() {
 
 verify_archive_provenance() {
   assert_archive_sha256 main_sio_sha256 "$ROOT_DIR/self-hosted/compiler/main.sio" "$MAIN_SHA256"
-  assert_archive_sha256 lean_single_sio_sha256 "$ROOT_DIR/self-hosted/compiler/lean_single.sio" "$LEAN_SHA256"
-  assert_archive_sha256 build_script_sha256 "$BUILD_SCRIPT" "$BUILDER_SHA256"
   assert_archive_sha256 gate_script_sha256 "$ROOT_DIR/scripts/ci/madaros_native_multimodule_scale_source_fresh_gate.sh" "$GATE_SHA256"
-  assert_archive_sha256 initial_bootstrap_sha256 "$BOOTSTRAP_PATH" "$BOOTSTRAP_SHA256"
+  assert_archive_sha256 madaros_root_sha256 "$MADAROS_ROOT_PATH" "$MADAROS_ROOT_SHA256"
 }
 
 load_source_provenance() {
-  BOOTSTRAP_PATH="$ROOT_DIR/bin/souc-linux-x86_64"
-  [[ -x "$BOOTSTRAP_PATH" ]] || fail "tracked initial bootstrap is missing: $BOOTSTRAP_PATH"
+  require_raw_madaros "$MADAROS_ROOT_PATH"
 
   if git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     SOURCE_PROVENANCE_MODE='git-checkout'
@@ -84,12 +81,10 @@ load_source_provenance() {
     SOURCE_HEAD="$(git -C "$ROOT_DIR" rev-parse HEAD)"
     SOURCE_TREE="$(git -C "$ROOT_DIR" rev-parse 'HEAD^{tree}')"
     MAIN_SHA256="$(portable_sha256 "$ROOT_DIR/self-hosted/compiler/main.sio")"
-    LEAN_SHA256="$(portable_sha256 "$ROOT_DIR/self-hosted/compiler/lean_single.sio")"
-    BUILDER_SHA256="$(portable_sha256 "$BUILD_SCRIPT")"
     GATE_SHA256="$(portable_sha256 "$ROOT_DIR/scripts/ci/madaros_native_multimodule_scale_source_fresh_gate.sh")"
-    BOOTSTRAP_SHA256="$(portable_sha256 "$BOOTSTRAP_PATH")"
-    BOOTSTRAP_BLOB="$(git -C "$ROOT_DIR" ls-files -s -- bin/souc-linux-x86_64 | awk 'NR == 1 {print $2}')"
-    [[ -n "$BOOTSTRAP_BLOB" ]] || fail 'initial bootstrap is not tracked by this source tree'
+    MADAROS_ROOT_SHA256="$(portable_sha256 "$MADAROS_ROOT_PATH")"
+    MADAROS_ROOT_BLOB="$(git -C "$ROOT_DIR" ls-files -s -- bin/madaros-linux-x86_64 | awk 'NR == 1 {print $2}')"
+    [[ -n "$MADAROS_ROOT_BLOB" ]] || fail 'Madaros root is not tracked by this source tree'
     return
   fi
 
@@ -99,14 +94,12 @@ load_source_provenance() {
   SOURCE_HEAD="$(tsv_value "$ARCHIVE_PROVENANCE_FILE" source_head)"
   SOURCE_TREE="$(tsv_value "$ARCHIVE_PROVENANCE_FILE" source_tree)"
   MAIN_SHA256="$(tsv_value "$ARCHIVE_PROVENANCE_FILE" main_sio_sha256)"
-  LEAN_SHA256="$(tsv_value "$ARCHIVE_PROVENANCE_FILE" lean_single_sio_sha256)"
-  BUILDER_SHA256="$(tsv_value "$ARCHIVE_PROVENANCE_FILE" build_script_sha256)"
   GATE_SHA256="$(tsv_value "$ARCHIVE_PROVENANCE_FILE" gate_script_sha256)"
-  BOOTSTRAP_SHA256="$(tsv_value "$ARCHIVE_PROVENANCE_FILE" initial_bootstrap_sha256)"
-  BOOTSTRAP_BLOB="$(tsv_value "$ARCHIVE_PROVENANCE_FILE" initial_bootstrap_git_blob)"
+  MADAROS_ROOT_SHA256="$(tsv_value "$ARCHIVE_PROVENANCE_FILE" madaros_root_sha256)"
+  MADAROS_ROOT_BLOB="$(tsv_value "$ARCHIVE_PROVENANCE_FILE" madaros_root_git_blob)"
   [[ "$SOURCE_HEAD" =~ ^[0-9a-f]{40}$ ]] || fail "archive provenance has an invalid source_head: $SOURCE_HEAD"
   [[ "$SOURCE_TREE" =~ ^[0-9a-f]{40}$ ]] || fail "archive provenance has an invalid source_tree: $SOURCE_TREE"
-  [[ "$BOOTSTRAP_BLOB" =~ ^[0-9a-f]{40}$ ]] || fail "archive provenance has an invalid initial_bootstrap_git_blob"
+  [[ "$MADAROS_ROOT_BLOB" =~ ^[0-9a-f]{40}$ ]] || fail "archive provenance has an invalid madaros_root_git_blob"
   verify_archive_provenance
 }
 
@@ -164,7 +157,7 @@ assert_direct_raw_log() {
 
 if [[ "${1:-}" == '--structural-only' ]]; then
   [[ $# -eq 1 ]] || fail 'usage: madaros_native_multimodule_scale_source_fresh_gate.sh [--structural-only]'
-  [[ -x "$BUILD_SCRIPT" ]] || fail "missing modular source-build script: $BUILD_SCRIPT"
+  require_raw_madaros "$MADAROS_ROOT_PATH"
   [[ -f "$ROOT_DIR/tests/run-pass/madaros_native_multimodule_scale_prob.sio" ]] || fail 'missing #901 acceptance probe'
   [[ -f "$ROOT_DIR/tests/run-pass/madaros_native_multimodule_scale_prob_textbook.sio" ]] || fail 'missing #901 textbook probe'
   [[ -f "$ROOT_DIR/tests/stdlib/prob/test_prob_stdlib.sio" ]] || fail 'missing #901 stdlib driver'
@@ -200,24 +193,10 @@ STAGE2="$WORK/madaros-stage2"
 STAGE3="$WORK/madaros-stage3"
 RECEIPT="$WORK/madaros_native_multimodule_scale_901_source_fresh_receipt.tsv"
 
-# Stage 1 derives the current lean seed from the tracked initial bootstrap, then
-# compiles main.sio. Madaros uses its explicit native-v2 ABI, not the positional
-# lean bootstrap ABI, for stages 2 and 3.
-if ! env \
-  -u MADAROS_RAW_BIN \
-  -u SOUNIO_MADAROS_BIN \
-  -u SOUNIO_SOUC_ENGINE \
-  -u SOUNIO_ENABLE_COMPACT_IMPORTED_IR \
-  -u SOUNIO_MADAROS_DEP_MERGE \
-  -u SOUNIO_INTO_ACC_NO_RESET \
-  -u SOUC_BIN \
-  -u SOUNIO_SOUC_BIN \
-  SOUNIO_BUILD_LOCK="$WORK/souc-build.lock" \
-  SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib" \
-  bash "$BUILD_SCRIPT" "$STAGE1" >"$WORK/stage1-build.log" 2>&1; then
-  tail -n 120 "$WORK/stage1-build.log" >&2 || true
-  fail 'stage1 source build failed'
-fi
+# The tracked Madaros ELF is the constrained root of trust. Every generated
+# stage uses Madaros's explicit native-v2 ABI; no lean positional bridge is in
+# the operational self-hosting chain.
+build_from_madaros_seed stage1 "$MADAROS_ROOT_PATH" "$STAGE1" "$WORK/stage1-build.log"
 require_raw_madaros "$STAGE1"
 
 build_from_madaros_seed stage2 "$STAGE1" "$STAGE2" "$WORK/stage2-build.log"
@@ -338,21 +317,20 @@ PUBLIC_DEFAULT_MERGED="$CASE_MERGED"
 
 assert_source_provenance_unchanged
 
-printf 'receipt_version\tissue901-scale-source-fresh-v1\n' >"$RECEIPT"
+printf 'receipt_version\tissue901-scale-source-fresh-v2\n' >"$RECEIPT"
 printf 'source_provenance_mode\t%s\n' "$SOURCE_PROVENANCE_MODE" >>"$RECEIPT"
 printf 'source_head\t%s\n' "$SOURCE_HEAD" >>"$RECEIPT"
 printf 'source_tree\t%s\n' "$SOURCE_TREE" >>"$RECEIPT"
 printf 'main_sio_sha256\t%s\n' "$MAIN_SHA256" >>"$RECEIPT"
-printf 'lean_single_sio_sha256\t%s\n' "$LEAN_SHA256" >>"$RECEIPT"
-printf 'build_script_sha256\t%s\n' "$BUILDER_SHA256" >>"$RECEIPT"
 printf 'gate_script_sha256\t%s\n' "$GATE_SHA256" >>"$RECEIPT"
-printf 'initial_bootstrap_repo_path\tbin/souc-linux-x86_64\n' >>"$RECEIPT"
-printf 'initial_bootstrap_git_blob\t%s\n' "$BOOTSTRAP_BLOB" >>"$RECEIPT"
-printf 'initial_bootstrap_sha256\t%s\n' "$BOOTSTRAP_SHA256" >>"$RECEIPT"
-printf 'bootstrap_mode\tsource-tracking-lean-then-madaros-fixed-point\n' >>"$RECEIPT"
+printf 'madaros_root_repo_path\tbin/madaros-linux-x86_64\n' >>"$RECEIPT"
+printf 'madaros_root_git_blob\t%s\n' "$MADAROS_ROOT_BLOB" >>"$RECEIPT"
+printf 'madaros_root_sha256\t%s\n' "$MADAROS_ROOT_SHA256" >>"$RECEIPT"
+printf 'bootstrap_mode\ttracked-madaros-root-then-madaros-fixed-point\n' >>"$RECEIPT"
 printf 'stage1_madaros_sha256\t%s\n' "$STAGE1_SHA256" >>"$RECEIPT"
 printf 'stage2_madaros_sha256\t%s\n' "$STAGE2_SHA256" >>"$RECEIPT"
 printf 'stage3_madaros_sha256\t%s\n' "$STAGE3_SHA256" >>"$RECEIPT"
+printf 'stage1_seed\ttracked-madaros-root-direct\n' >>"$RECEIPT"
 printf 'stage2_seed\tstage1-madaros-direct\n' >>"$RECEIPT"
 printf 'stage3_seed\tstage2-madaros-direct\n' >>"$RECEIPT"
 printf 'operational_fixed_point\tsha256-stage2-equals-stage3\n' >>"$RECEIPT"

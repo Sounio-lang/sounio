@@ -43,14 +43,11 @@ SOURCE_TREE="$(git -C "$REPO" rev-parse "${SOURCE_COMMIT}^{tree}")"
 for path in \
   bin/souc \
   bin/madaros \
-  bin/souc-linux-x86_64 \
+  bin/madaros-linux-x86_64 \
   self-hosted \
   stdlib \
   tools/science_boundary \
-  scripts/ci/build_modular_madaros.sh \
   scripts/ci/madaros_native_multimodule_scale_source_fresh_gate.sh \
-  scripts/dev/souc-build-lock.sh \
-  scripts/dev/souc_build_lock.py \
   tests/run-pass/madaros_native_multimodule_scale_prob.sio \
   tests/run-pass/madaros_native_multimodule_scale_prob_textbook.sio \
   tests/stdlib/prob/test_prob_stdlib.sio; do
@@ -76,32 +73,27 @@ mkdir -p "$SNAP"
 git -C "$REPO" archive "$SOURCE_COMMIT" -- \
   bin/souc \
   bin/madaros \
-  bin/souc-linux-x86_64 \
+  bin/madaros-linux-x86_64 \
   self-hosted \
   stdlib \
   tools/science_boundary \
-  scripts/ci/build_modular_madaros.sh \
   scripts/ci/madaros_native_multimodule_scale_source_fresh_gate.sh \
-  scripts/dev/souc-build-lock.sh \
-  scripts/dev/souc_build_lock.py \
   tests/run-pass/madaros_native_multimodule_scale_prob.sio \
   tests/run-pass/madaros_native_multimodule_scale_prob_textbook.sio \
   tests/stdlib/prob/test_prob_stdlib.sio | tar -x -C "$SNAP"
 
-BOOTSTRAP_BLOB="$(git -C "$REPO" ls-tree "$SOURCE_COMMIT" -- bin/souc-linux-x86_64 | awk 'NR == 1 {print $3}')"
-[[ "$BOOTSTRAP_BLOB" =~ ^[0-9a-f]{40}$ ]] || fail 'initial bootstrap is not tracked by the source commit'
+MADAROS_ROOT_BLOB="$(git -C "$REPO" ls-tree "$SOURCE_COMMIT" -- bin/madaros-linux-x86_64 | awk 'NR == 1 {print $3}')"
+[[ "$MADAROS_ROOT_BLOB" =~ ^[0-9a-f]{40}$ ]] || fail 'Madaros root is not tracked by the source commit'
 
 {
-  printf 'provenance_version\tissue901-scale-source-fresh-archive-v1\n'
+  printf 'provenance_version\tissue901-scale-source-fresh-archive-v2\n'
   printf 'source_origin\tgit-archive-exact-commit\n'
   printf 'source_head\t%s\n' "$SOURCE_COMMIT"
   printf 'source_tree\t%s\n' "$SOURCE_TREE"
   printf 'main_sio_sha256\t%s\n' "$(portable_sha256 "$SNAP/self-hosted/compiler/main.sio")"
-  printf 'lean_single_sio_sha256\t%s\n' "$(portable_sha256 "$SNAP/self-hosted/compiler/lean_single.sio")"
-  printf 'build_script_sha256\t%s\n' "$(portable_sha256 "$SNAP/scripts/ci/build_modular_madaros.sh")"
   printf 'gate_script_sha256\t%s\n' "$(portable_sha256 "$SNAP/scripts/ci/madaros_native_multimodule_scale_source_fresh_gate.sh")"
-  printf 'initial_bootstrap_git_blob\t%s\n' "$BOOTSTRAP_BLOB"
-  printf 'initial_bootstrap_sha256\t%s\n' "$(portable_sha256 "$SNAP/bin/souc-linux-x86_64")"
+  printf 'madaros_root_git_blob\t%s\n' "$MADAROS_ROOT_BLOB"
+  printf 'madaros_root_sha256\t%s\n' "$(portable_sha256 "$SNAP/bin/madaros-linux-x86_64")"
 } >"$SNAP/.issue901-scale-source-provenance.tsv"
 
 bash "$SNAP/scripts/ci/madaros_native_multimodule_scale_source_fresh_gate.sh" --provenance-only
@@ -171,10 +163,8 @@ if [[ "\$actual_sha" != "\$ARCHIVE_SHA256" ]]; then
 fi
 
 tar -xzf "\$ARCHIVE" -C "\$REPO" || setup_fail archive-extract-failed
-chmod +x "\$REPO/bin/souc" "\$REPO/bin/madaros" "\$REPO/bin/souc-linux-x86_64" \\
-  "\$REPO/scripts/ci/build_modular_madaros.sh" \\
-  "\$REPO/scripts/ci/madaros_native_multimodule_scale_source_fresh_gate.sh" \\
-  "\$REPO/scripts/dev/souc-build-lock.sh" || setup_fail archive-permission-setup-failed
+chmod +x "\$REPO/bin/souc" "\$REPO/bin/madaros" "\$REPO/bin/madaros-linux-x86_64" \\
+  "\$REPO/scripts/ci/madaros_native_multimodule_scale_source_fresh_gate.sh" || setup_fail archive-permission-setup-failed
 
 {
   printf 'source_head\\t%s\\n' '$SOURCE_COMMIT'
