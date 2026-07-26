@@ -4366,6 +4366,58 @@ fn checker_place_root_local(c: *mut Checker, place: Expr) -> bool with Mut, Pani
     }
 }
 
+// True when an assignment target writes THROUGH an exclusive reference:
+//
+//     *p = v        p: &!T
+//     p.f = v       p: &!S
+//     p[i] = v      p: &![T; N] / &![T]
+//
+// Walks the place to its root binding — same shape as checker_place_root_local
+// above — and asks whether that binding is an exclusive reference.
+//
+// Only this shape generates `Mut` (#1488). The two authorities on what `Mut`
+// means disagree about a plain local `var`: docs/guide/LLM_PROGRAMMING_GUIDE.md:230
+// says "mutating `&!` refs or arrays" (narrow, what Madaros implements) and
+// docs/spec/LANGUAGE_SPECIFICATION.md:965 says "reading/writing mutable variables"
+// (broad, what lean_single implements). They AGREE about a write through an
+// exclusive reference. Generating the effect only where both readings agree closes
+// the unsound case without pre-empting an operator ruling on the other — and the
+// broad reading is viral over every loop counter in 1113 stdlib files, so adopting
+// it is a language decision, not a compiler fix.
+//
+// Conservative by construction: an unknown root yields false, so this can add a
+// required effect but never remove one, and cannot false-reject a program whose
+// place shape it does not recognise.
+fn checker_place_excl_ref_root(c: *mut Checker, place: Expr, depth: i64) -> bool with Mut, Panic, Div, Alloc, IO {
+    if depth > 16 { return false }
+    if place.kind == ExprKind::ExprIdent {
+        if !(*c).env.has_binding(place.name) { return false }
+        let root_ty = (*c).env.lookup(place.name)
+        // TyRefMut only — deliberately NOT TySliceMut.
+        //
+        // Measured 2026-07-26: lean_single requires Mut for a write through
+        // `&!T`, `&!S` and `&![T; N]`, and does NOT require it for a write
+        // through a slice `&![T]`. Including TySliceMut here made Madaros
+        // stricter than the seed and rejected existing intentional code —
+        // `kernel fn vec_add_in_place(n: i64, a: &![f64], …) with GPU` writes
+        // `a[tid] = …` and declares only GPU.
+        //
+        // Whether a slice write is Mut is a language question of the same kind
+        // as the local-`var` one, and answering it unilaterally inside a fix for
+        // a different defect would be drift. This closes the shapes on which
+        // both engines already agree; the slice case is left open and recorded.
+        return root_ty.kind == TypeKind::TyRefMut
+    }
+    if place.kind == ExprKind::ExprFieldAccess
+        || place.kind == ExprKind::ExprIndex
+        || place.kind == ExprKind::ExprUnary {
+        let base = expr_opt_get(place.left)
+        if base == 0 as *mut Expr { return false }
+        return checker_place_excl_ref_root(c, *base, depth + 1)
+    }
+    false
+}
+
 fn checker_expr_provenance(c: *mut Checker, e: Expr) -> i64 with Mut, Panic, Div, Alloc, IO {
     if e.kind == ExprKind::ExprUnary {
         if e.un_op == UnaryOp::OpRef || e.un_op == UnaryOp::OpRefMut {
@@ -7839,6 +7891,30 @@ fn checker_check_assign_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with
         }
     }
     checker_check_assign_mutability_inplace(c, s.target, s.span)
+    // Effect GENERATION at the store site (#1488).
+    //
+    // Madaros propagated declared effects correctly — a caller of a `with Mut`
+    // callee was required to declare it — but had no leaf-level SOURCE of Mut.
+    // Nothing anywhere introduced the effect at the point where mutation actually
+    // happens, so `fn poke(x: &!i64) { *x = 42 }` type-checked with no `with Mut`
+    // and every caller above it was unconstrained. The effect system propagated a
+    // fact nobody ever asserted: `with Mut` was true only where a human had written
+    // it, which makes the guarantee vacuous exactly at the leaves.
+    //
+    // Reuses checker_check_callee_effects_inplace rather than a new reporting path:
+    // requiring Mut here is the same question as requiring a callee's effect, and
+    // it already emits E035 with the missing-effect list.
+    match s.target {
+        Some(effect_target) => {
+            if checker_place_excl_ref_root(c, *effect_target, 0) {
+                var store_effects: [i64; 8] = [0; 8]
+                // 1 = Mut (effect_name_to_id, self-hosted/check/effects.sio:26)
+                store_effects[0] = 1
+                checker_check_callee_effects_inplace(c, s.span, store_effects, 1)
+            }
+        }
+        None => {}
+    }
     // Raw-reference escape (store sites): a reference may not be stored into a struct field,
     // an array element, or through a pointer — doing so lets it outlive its referent → a
     // dangling reference. References are second-class: pass them to functions and read/write
