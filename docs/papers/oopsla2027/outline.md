@@ -139,8 +139,10 @@ The independence sweep over 1 081 pairs. The trusted-base audit.
 
 ## 8. Related work — **load-bearing neighbours CHECKED (2026-07-26); every novelty claim was narrowed as a result**
 
-Searching this section changed the paper twice. Both times the **technique**
-turned out to be old and only the **semantics** survived.
+Searching this section changed the paper **three times**, and the pattern held
+every time: the **technique** was already old, and only a narrower **semantics**
+survived. Each search cost minutes and removed a claim that would not have
+survived review.
 
 ### 8.1 The compile-time mechanism is not new — checked
 
@@ -164,13 +166,38 @@ establishing something else.
   NiCad, tree-based methods) find them by exactly the normalisation this
   paper's harness uses.
 
-**What survives:** the technique is clone detection; the **semantics is not**.
+**What survives:** the technique is clone detection; the **framing is not**.
 Clone detection is posed as a *maintainability* problem — duplication is debt.
 Here the same measurement answers an *epistemic* question: **do these checks
 corroborate each other, or are they one check restated?** Plus two things a
 clone report does not give you — the **wrapper collapse** that turns a clone
 list into an irreducible base, and **auditing that base against independently
 computed ground truth**.
+
+### 8.2b And the epistemic idea is not new either — checked, third narrowing
+
+The reproducibility literature's standard taxonomy already separates **rerunning
+the same artifact** from an **independent re-implementation**, and already
+treats the latter as the stronger evidence. So "an independent derivation
+corroborates more than a re-run" is established vocabulary, not a finding here.
+(Consulted: Sinha et al., *Reproducibility, Replicability, and Repeatability*
+survey, arXiv 2402.07530 — read in summary only, the PDF did not yield verbatim
+definitions, so it is cited as orientation and must be quoted properly before
+submission.)
+
+**What survives, and it is now the whole of C6:** that taxonomy classifies
+*studies*, by human judgement, after the fact. This work makes it a
+**mechanically decidable property of a single codebase's own internal checks** —
+which of *my* checks are independent of *each other*, computed without asking
+anyone, and used to decide where auditing pays.
+
+**A tension worth stating, since it cuts against standard guidance.**
+Reproducibility practice says *share the code so others can re-run it*, which
+maximises repeatability. Corroboration wants the opposite: a second check that
+shares no derivation with the first. Both are goods; they are not the same good,
+and a corpus that maximises one can score zero on the other while looking
+healthy. This corpus did: 343 pairs of mutually re-runnable, mutually
+non-corroborating checks.
 
 ### 8.3 Nearest neighbours in scientific software — checked
 
@@ -191,10 +218,21 @@ and hermetic builds are the *opposite* design goal.
 ### 8.5 Residual risk
 
 The searches were targeted, not exhaustive; a systematic pass remains before
-submission. **Specifically not yet checked:** whether clone detection has
-already been applied to research software as a *validity* rather than a
-*maintainability* question. That is the closest thing to a prior claim of C6,
-and it is what a systematic pass must settle first.
+submission. Searching for clone detection applied to research software as a
+*validity* question surfaced only code-*sharing*-for-reproducibility work and
+duplication-as-debt case studies — nothing measuring whether a corpus's own
+checks corroborate one another. That is weak evidence of absence, not evidence
+of novelty.
+
+**Specifically not yet checked, in priority order:** (i) mutation-testing and
+test-suite-independence literature, which asks a structurally similar question
+about tests rather than about scientific checks; (ii) N-version programming,
+where independence of implementations is the entire premise and its measurement
+has been studied; (iii) whether any reproducibility-badging scheme already
+requires demonstrated implementation independence rather than accepting a
+declaration. **(ii) is the most dangerous to C6** — N-version programming has
+decades of work on exactly "are these two implementations independent", and if
+it contains a mechanical independence measure, C6 narrows again.
 
 ## 9. Threats
 
@@ -214,6 +252,14 @@ compiler at all: asking **where the evidence came from**, and refusing to count
 agreement between checks that share a derivation. That question is cheap to
 answer, decidable, and on this corpus it changed the status of a third of the
 cross-checks.
+
+Three literature searches narrowed this paper's claims three times, and each
+narrowing improved it. The compile-time mechanism went first, then the
+independence technique, then the epistemic framing. What is left is small and
+survives contact: **a study-level distinction made into a machine-checkable
+property of one codebase's internal evidence, and used to find where auditing
+pays.** Reporting the narrowings rather than the first draft is the same
+discipline the paper is about.
 
 ---
 
