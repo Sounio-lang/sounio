@@ -31,6 +31,10 @@ portable_sha256() {
   sha256sum "$1" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$1" | awk '{print $1}'
 }
 
+portable_mode() {
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
+}
+
 require_path() {
   [[ -e "$REPO/$1" ]] || fail "required source path is missing: $1"
 }
@@ -48,8 +52,13 @@ for path in \
   stdlib \
   tools/science_boundary \
   scripts/ci/madaros_native_multimodule_scale_source_fresh_gate.sh \
+  scripts/ci/fixtures/madaros_m0_source_compat.patch \
   tests/run-pass/madaros_native_multimodule_scale_prob.sio \
   tests/run-pass/madaros_native_multimodule_scale_prob_textbook.sio \
+  tests/run-pass/let_scope_binding_name.sio \
+  tests/run-pass/let_policy_binding_name.sio \
+  tests/run-pass/let_is_binding_name.sio \
+  tests/run-pass/let_study_binding_name.sio \
   tests/stdlib/prob/test_prob_stdlib.sio; do
   require_path "$path"
 done
@@ -78,15 +87,30 @@ git -C "$REPO" archive "$SOURCE_COMMIT" -- \
   stdlib \
   tools/science_boundary \
   scripts/ci/madaros_native_multimodule_scale_source_fresh_gate.sh \
+  scripts/ci/fixtures/madaros_m0_source_compat.patch \
   tests/run-pass/madaros_native_multimodule_scale_prob.sio \
   tests/run-pass/madaros_native_multimodule_scale_prob_textbook.sio \
+  tests/run-pass/let_scope_binding_name.sio \
+  tests/run-pass/let_policy_binding_name.sio \
+  tests/run-pass/let_is_binding_name.sio \
+  tests/run-pass/let_study_binding_name.sio \
   tests/stdlib/prob/test_prob_stdlib.sio | tar -x -C "$SNAP"
 
 MADAROS_ROOT_BLOB="$(git -C "$REPO" ls-tree "$SOURCE_COMMIT" -- bin/madaros-linux-x86_64 | awk 'NR == 1 {print $3}')"
 [[ "$MADAROS_ROOT_BLOB" =~ ^[0-9a-f]{40}$ ]] || fail 'Madaros root is not tracked by the source commit'
 
+MANIFEST="$SNAP/.issue901-scale-source-manifest.tsv"
+MANIFEST_PATHS="$TMP_ROOT/proof-input-paths.txt"
+find "$SNAP" -type f -print | LC_ALL=C sort >"$MANIFEST_PATHS"
+: >"$MANIFEST"
+while IFS= read -r absolute; do
+  relative="${absolute#"$SNAP"/}"
+  printf '%s\t%s\t%s\n' "$(portable_mode "$absolute")" "$relative" "$(portable_sha256 "$absolute")" >>"$MANIFEST"
+done <"$MANIFEST_PATHS"
+PROOF_INPUT_MANIFEST_SHA256="$(portable_sha256 "$MANIFEST")"
+
 {
-  printf 'provenance_version\tissue901-scale-source-fresh-archive-v2\n'
+  printf 'provenance_version\tissue901-scale-source-fresh-archive-v3\n'
   printf 'source_origin\tgit-archive-exact-commit\n'
   printf 'source_head\t%s\n' "$SOURCE_COMMIT"
   printf 'source_tree\t%s\n' "$SOURCE_TREE"
@@ -99,6 +123,8 @@ MADAROS_ROOT_BLOB="$(git -C "$REPO" ls-tree "$SOURCE_COMMIT" -- bin/madaros-linu
   printf 'acceptance_probe_sha256\t%s\n' "$(portable_sha256 "$SNAP/tests/run-pass/madaros_native_multimodule_scale_prob.sio")"
   printf 'textbook_probe_sha256\t%s\n' "$(portable_sha256 "$SNAP/tests/run-pass/madaros_native_multimodule_scale_prob_textbook.sio")"
   printf 'stdlib_driver_sha256\t%s\n' "$(portable_sha256 "$SNAP/tests/stdlib/prob/test_prob_stdlib.sio")"
+  printf 'm0_compat_patch_sha256\t%s\n' "$(portable_sha256 "$SNAP/scripts/ci/fixtures/madaros_m0_source_compat.patch")"
+  printf 'proof_input_manifest_sha256\t%s\n' "$PROOF_INPUT_MANIFEST_SHA256"
 } >"$SNAP/.issue901-scale-source-provenance.tsv"
 
 bash "$SNAP/scripts/ci/madaros_native_multimodule_scale_source_fresh_gate.sh" --provenance-only
