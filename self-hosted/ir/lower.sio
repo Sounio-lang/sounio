@@ -169,10 +169,13 @@ var FO_EV_SENS: [i64; 512] = [-1; 512]
 var FO_LOC_VAL: [i64; 8] = [-1; 8]
 var FO_LOC_VAR: [i64; 8] = [-1; 8]
 var FO_LOC_SENS: [i64; 256] = [-1; 256]
-var FO_ARG_VAL: [i64; 4] = [-1; 4]
-var FO_ARG_VAR: [i64; 4] = [-1; 4]
-var FO_ARG_SENS: [i64; 128] = [-1; 128]
+var FO_ARG_VAL: [i64; 8] = [-1; 8]
+var FO_ARG_VAR: [i64; 8] = [-1; 8]
+var FO_ARG_SENS: [i64; 256] = [-1; 256]
 var FO_ARG_N: i64 = 0
+// Active param name-hashes for bytecode/simple FO compile (≤8 params).
+var FO_BC_PARAM_HASH: [i64; 8] = [0; 8]
+var FO_BC_PARAM_N: i64 = 0
 
 fn fo_name_hash(n: Name) -> i64 with Mut, Panic, Div {
     var h: i64 = 5381
@@ -6360,13 +6363,18 @@ impl Lowerer {
     }
 
 
-    // Match expr Ident to param index; -1 if not a param. Supports ≤4 params.
+    // Match expr Ident to param index via FO_BC_PARAM_HASH (≤8 params).
     fn fo_param_index4(self, e: &Expr, p0: Name, p1: Name, p2: Name, p3: Name, nparams: i64) -> i64 with Mut, Panic, Div {
+        // p0–p3/nparams kept for call-site compatibility; hash table is authoritative.
         if (*e).kind != ExprKind::ExprIdent { return -1 }
-        if nparams >= 1 && ir_name_eq((*e).name, p0) { return 0 }
-        if nparams >= 2 && ir_name_eq((*e).name, p1) { return 1 }
-        if nparams >= 3 && ir_name_eq((*e).name, p2) { return 2 }
-        if nparams >= 4 && ir_name_eq((*e).name, p3) { return 3 }
+        let h = fo_name_hash((*e).name)
+        var i: i64 = 0
+        while i < FO_BC_PARAM_N {
+            if FO_BC_PARAM_HASH[i as usize] == h {
+                return i
+            }
+            i = i + 1
+        }
         -1
     }
 
@@ -6383,15 +6391,22 @@ impl Lowerer {
         var p2 = ir_empty_name()
         var p3 = ir_empty_name()
         var nparams: i64 = 0
+        FO_BC_PARAM_N = 0
         var pcur = &fd.params
         while true {
             match *pcur {
                 Some(pl) => {
-                    if nparams == 0 { p0 = (*pl).head.name; nparams = 1 }
-                    else if nparams == 1 { p1 = (*pl).head.name; nparams = 2 }
-                    else if nparams == 2 { p2 = (*pl).head.name; nparams = 3 }
-                    else if nparams == 3 { p3 = (*pl).head.name; nparams = 4 }
-                    else { return lo }
+                    if FO_BC_PARAM_N >= 8 {
+                        return lo
+                    }
+                    let pn = (*pl).head.name
+                    FO_BC_PARAM_HASH[FO_BC_PARAM_N as usize] = fo_name_hash(pn)
+                    if nparams == 0 { p0 = pn }
+                    else if nparams == 1 { p1 = pn }
+                    else if nparams == 2 { p2 = pn }
+                    else if nparams == 3 { p3 = pn }
+                    nparams = nparams + 1
+                    FO_BC_PARAM_N = FO_BC_PARAM_N + 1
                     pcur = &(*pl).tail
                 }
                 _ => break
@@ -6887,7 +6902,7 @@ impl Lowerer {
         var arg_i: i64 = 0
         if kind == 1 {
             let pi = FO_XFER_LIT[idx as usize] as i64
-            if pi >= 0 && pi < 4 {
+            if pi >= 0 && pi < 8 {
                 arg_i = pi
             }
         }
@@ -6955,7 +6970,7 @@ impl Lowerer {
         }
         FO_ARG_N = 0
         var ai: i64 = 0
-        while ai < 4 {
+        while ai < 8 {
             let pv = lo.fo_lower_nth_arg_variance(args, ai)
             lo = pv.0
             if pv.1 < 0 && !lo.fo_expr_has_sens() {
