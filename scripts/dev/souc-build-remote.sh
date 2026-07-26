@@ -41,8 +41,20 @@ set -uo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-PARTITION="${SOUNIO_REMOTE_PARTITION:-cpu-ops}"
-CPUS="${SOUNIO_REMOTE_CPUS:-16}"
+# Target policy comes from the cluster-ops tier document
+# (~devsounio/beagle/k8s/hpc-sota/ops/cluster-cpu-tiers.md, 2026-06-27):
+#
+#   r770  128 cores  128G  HPC-first     Slurm cap 120   <- batch belongs here
+#   r740   80 cores  515G  Balanced      cap 72          (NOT in sinfo today)
+#   t560   64 cores  192G  Service-first cap 32 FIXED    <- control-plane, etcd+apiserver
+#   5860   12 cores  128G  GPU-probe     cap 12
+#
+# The document is explicit: "NAO usar cpu-ops (t560) p/ jobs grandes -- e
+# control-plane, cap 32 EXCLUSIVE." Defaulting here to r770, which the same
+# document rates HPC-first at 0% CPU utilisation.
+PARTITION="${SOUNIO_REMOTE_PARTITION:-all}"
+NODE="${SOUNIO_REMOTE_NODE:-gpuorangefs-r770-proxmox}"
+CPUS="${SOUNIO_REMOTE_CPUS:-32}"
 TIMELIMIT="${SOUNIO_REMOTE_TIME:-00:40:00}"
 GATES=""
 
@@ -50,6 +62,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --gate) GATES="$GATES $2"; shift 2 ;;
     --partition) PARTITION="$2"; shift 2 ;;
+    --node) NODE="$2"; shift 2 ;;
     --cpus) CPUS="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -67,7 +80,17 @@ if ! sinfo -p "$PARTITION" -h -o "%t" 2>/dev/null | grep -q "idle\|mix"; then
     bash scripts/ci/build_modular_madaros.sh artifacts/self-hosted/madaros
 fi
 
-echo "[remote-build] partition=$PARTITION cpus=$CPUS gates=${GATES:-none}"
+case "$NODE" in
+  *t560*)
+    echo "[remote-build] REFUSING to target $NODE." >&2
+    echo "[remote-build] t560 is the single control-plane node (etcd + apiserver)." >&2
+    echo "[remote-build] cluster-cpu-tiers.md: do not send large jobs there." >&2
+    echo "[remote-build] Override with SOUNIO_REMOTE_ALLOW_T560=1 if you mean it." >&2
+    [ "${SOUNIO_REMOTE_ALLOW_T560:-0}" = "1" ] || exit 2
+    ;;
+esac
+
+echo "[remote-build] partition=$PARTITION node=$NODE cpus=$CPUS gates=${GATES:-none}"
 
 REMOTE_SCRIPT=$(cat <<REMOTE
 set -uo pipefail
@@ -110,6 +133,6 @@ PAYLOAD="self-hosted stdlib bin/souc-linux-x86_64 scripts"
 case "$GATES" in *full*|*corpus*) PAYLOAD="$PAYLOAD tests bin/madaros bin/madaros-linux-x86_64" ;; esac
 
 tar czf - $PAYLOAD 2>/dev/null \
-  | srun --partition="$PARTITION" --ntasks=1 --cpus-per-task="$CPUS" \
-         --time="$TIMELIMIT" bash -c "$REMOTE_SCRIPT" 2>&1 \
+  | srun --partition="$PARTITION" ${NODE:+--nodelist="$NODE"} --ntasks=1 \
+         --cpus-per-task="$CPUS" --time="$TIMELIMIT" bash -c "$REMOTE_SCRIPT" 2>&1 \
   | grep -vE "^srun: (job|Job)|couldn't chdir"
