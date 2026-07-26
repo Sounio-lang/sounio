@@ -62,6 +62,10 @@ the checked-out source tree and is not acceptance evidence.
 WORKER_PROBE=source-to-elf builds the same raw ELF, then executes the canonical
 source-to-ELF manifest through that exact compiler, including native assert
 success and failure exit-code behavior.
+
+WORKER_PROBE=assert-exit runs only the four canonical native assert cases. It
+keeps assertion semantics observable even when an unrelated source-to-ELF
+manifest case is already failing.
 EOF
 }
 
@@ -81,7 +85,7 @@ fi
 [[ "$WORKER_LOWER_TRACE" == '0' || "$WORKER_LOWER_TRACE" == '1' ]] || fail "invalid WORKER_LOWER_TRACE: $WORKER_LOWER_TRACE"
 [[ "$WORKER_NV2_IR_TRACE" == '0' || "$WORKER_NV2_IR_TRACE" == '1' ]] || fail "invalid WORKER_NV2_IR_TRACE: $WORKER_NV2_IR_TRACE"
 [[ "$WORKER_PRESERVE_DIAGNOSTICS" == '0' || "$WORKER_PRESERVE_DIAGNOSTICS" == '1' ]] || fail "invalid WORKER_PRESERVE_DIAGNOSTICS: $WORKER_PRESERVE_DIAGNOSTICS"
-[[ "$WORKER_PROBE" == 'source-fresh-gate' || "$WORKER_PROBE" == 'block-ladder' || "$WORKER_PROBE" == 'source-to-elf' ]] || fail "invalid WORKER_PROBE: $WORKER_PROBE"
+[[ "$WORKER_PROBE" == 'source-fresh-gate' || "$WORKER_PROBE" == 'block-ladder' || "$WORKER_PROBE" == 'source-to-elf' || "$WORKER_PROBE" == 'assert-exit' ]] || fail "invalid WORKER_PROBE: $WORKER_PROBE"
 
 SOURCE_COMMIT="$(git -C "$REPO" rev-parse "$SOURCE_REF")"
 SOURCE_TREE="$(git -C "$REPO" rev-parse "$SOURCE_COMMIT^{tree}")"
@@ -127,7 +131,7 @@ WORKER_PROBE="$WORKER_PROBE"
 
 cleanup() {
   if [[ "\$WORKER_PRESERVE_DIAGNOSTICS" == '1' ]]; then
-    rm -rf "\$REPO" "\$ROOT/block-ladder" "\$ROOT/probe-madaros"
+    rm -rf "\$REPO" "\$ROOT/block-ladder" "\$ROOT/probe-madaros" "\$ROOT/source-to-elf-madaros"
     echo "diagnostic_root_preserved=\$ROOT"
   else
     rm -rf "\$ROOT"
@@ -322,7 +326,7 @@ SIO
   run_probe import_first_call "\$PROBE_ROOT/import_first_call.sio"
   [[ -z "\$(git -C "\$REPO" status --porcelain)" ]] || fail 'source tree changed during block-ladder probe'
   echo '[epistemic-receipt-source-fresh] PASS: block-ladder completed'
-elif [[ "\$WORKER_PROBE" == 'source-to-elf' ]]; then
+elif [[ "\$WORKER_PROBE" == 'source-to-elf' || "\$WORKER_PROBE" == 'assert-exit' ]]; then
   RAW_MADAROS="\$ROOT/source-to-elf-madaros"
   BUILD_LOG="\$ROOT/source-to-elf-build.log"
   if ! bash "\$REPO/scripts/ci/build_modular_madaros.sh" "\$RAW_MADAROS" >"\$BUILD_LOG" 2>&1; then
@@ -331,10 +335,23 @@ elif [[ "\$WORKER_PROBE" == 'source-to-elf' ]]; then
   fi
   [[ -x "\$RAW_MADAROS" ]] || fail 'source-to-elf build did not emit an executable raw ELF'
   [[ -z "\$(git -C "\$REPO" status --porcelain)" ]] || fail 'source tree changed during source-to-elf build'
-  MADAROS_BIN="\$RAW_MADAROS" SOUNIO_STDLIB_PATH="\$REPO/stdlib" \\
-    bash "\$REPO/scripts/ci/madaros_source_to_elf_gate.sh"
+  if [[ "\$WORKER_PROBE" == 'assert-exit' ]]; then
+    ASSERT_MANIFEST="\$ROOT/assert-exit.tsv"
+    cat >"\$ASSERT_MANIFEST" <<'TSV'
+assert_true	tests/madaros/source_to_elf/assert_true_exit0.sio	0	assert_true_builtin
+assert_false	tests/madaros/source_to_elf/assert_false_exit1.sio	1	assert_false_builtin
+assert_literal_true	tests/madaros/source_to_elf/assert_literal_true_exit0.sio	0	assert_literal_true_builtin
+assert_literal_false	tests/madaros/source_to_elf/assert_literal_false_exit1.sio	1	assert_literal_false_builtin
+TSV
+    MADAROS_BIN="\$RAW_MADAROS" SOUNIO_STDLIB_PATH="\$REPO/stdlib" \\
+      SOUNIO_MADAROS_SOURCE_TO_ELF_MANIFEST="\$ASSERT_MANIFEST" \\
+      bash "\$REPO/scripts/ci/madaros_source_to_elf_gate.sh"
+  else
+    MADAROS_BIN="\$RAW_MADAROS" SOUNIO_STDLIB_PATH="\$REPO/stdlib" \\
+      bash "\$REPO/scripts/ci/madaros_source_to_elf_gate.sh"
+  fi
   [[ -z "\$(git -C "\$REPO" status --porcelain)" ]] || fail 'source tree changed during source-to-elf probe'
-  echo '[epistemic-receipt-source-fresh] PASS: source-to-elf completed'
+  echo "[epistemic-receipt-source-fresh] PASS: \$WORKER_PROBE completed"
 else
   SOUNIO_EPISTEMIC_RECEIPT_SOURCE_FRESH_KEEP=0 \\
     bash "\$REPO/scripts/ci/epistemic_receipt_source_fresh_gate.sh"
