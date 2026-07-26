@@ -58,6 +58,10 @@ WORKER_PROBE=source-fresh-gate runs the acceptance gate. WORKER_PROBE=block-ladd
 builds the same raw ELF and runs twelve generated worker-local programs to locate
 the first block shape that reproduces a lowering crash. The probe never changes
 the checked-out source tree and is not acceptance evidence.
+
+WORKER_PROBE=source-to-elf builds the same raw ELF, then executes the canonical
+source-to-ELF manifest through that exact compiler, including native assert
+success and failure exit-code behavior.
 EOF
 }
 
@@ -77,7 +81,7 @@ fi
 [[ "$WORKER_LOWER_TRACE" == '0' || "$WORKER_LOWER_TRACE" == '1' ]] || fail "invalid WORKER_LOWER_TRACE: $WORKER_LOWER_TRACE"
 [[ "$WORKER_NV2_IR_TRACE" == '0' || "$WORKER_NV2_IR_TRACE" == '1' ]] || fail "invalid WORKER_NV2_IR_TRACE: $WORKER_NV2_IR_TRACE"
 [[ "$WORKER_PRESERVE_DIAGNOSTICS" == '0' || "$WORKER_PRESERVE_DIAGNOSTICS" == '1' ]] || fail "invalid WORKER_PRESERVE_DIAGNOSTICS: $WORKER_PRESERVE_DIAGNOSTICS"
-[[ "$WORKER_PROBE" == 'source-fresh-gate' || "$WORKER_PROBE" == 'block-ladder' ]] || fail "invalid WORKER_PROBE: $WORKER_PROBE"
+[[ "$WORKER_PROBE" == 'source-fresh-gate' || "$WORKER_PROBE" == 'block-ladder' || "$WORKER_PROBE" == 'source-to-elf' ]] || fail "invalid WORKER_PROBE: $WORKER_PROBE"
 
 SOURCE_COMMIT="$(git -C "$REPO" rev-parse "$SOURCE_REF")"
 SOURCE_TREE="$(git -C "$REPO" rev-parse "$SOURCE_COMMIT^{tree}")"
@@ -318,6 +322,19 @@ SIO
   run_probe import_first_call "\$PROBE_ROOT/import_first_call.sio"
   [[ -z "\$(git -C "\$REPO" status --porcelain)" ]] || fail 'source tree changed during block-ladder probe'
   echo '[epistemic-receipt-source-fresh] PASS: block-ladder completed'
+elif [[ "\$WORKER_PROBE" == 'source-to-elf' ]]; then
+  RAW_MADAROS="\$ROOT/source-to-elf-madaros"
+  BUILD_LOG="\$ROOT/source-to-elf-build.log"
+  if ! bash "\$REPO/scripts/ci/build_modular_madaros.sh" "\$RAW_MADAROS" >"\$BUILD_LOG" 2>&1; then
+    tail -n 120 "\$BUILD_LOG" >&2 || true
+    fail 'source-to-elf current-source build failed'
+  fi
+  [[ -x "\$RAW_MADAROS" ]] || fail 'source-to-elf build did not emit an executable raw ELF'
+  [[ -z "\$(git -C "\$REPO" status --porcelain)" ]] || fail 'source tree changed during source-to-elf build'
+  MADAROS_BIN="\$RAW_MADAROS" SOUNIO_STDLIB_PATH="\$REPO/stdlib" \\
+    bash "\$REPO/scripts/ci/madaros_source_to_elf_gate.sh"
+  [[ -z "\$(git -C "\$REPO" status --porcelain)" ]] || fail 'source tree changed during source-to-elf probe'
+  echo '[epistemic-receipt-source-fresh] PASS: source-to-elf completed'
 else
   SOUNIO_EPISTEMIC_RECEIPT_SOURCE_FRESH_KEEP=0 \\
     bash "\$REPO/scripts/ci/epistemic_receipt_source_fresh_gate.sh"
