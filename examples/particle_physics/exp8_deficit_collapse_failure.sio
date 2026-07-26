@@ -1,0 +1,285 @@
+// examples/particle_physics/exp8_deficit_collapse_failure.sio
+//
+// EXP8 — DeficitCollapse failure surface + SchemeTension (depth vertical)
+//
+// EXP6 proved pure-BW ξ-universality. EXP8 builds objects that can *fail*:
+//
+//   1. Fixed-width scheme HOLDS d(ξ)=1/(1+ξ²)
+//   2. Running-width Γ(s)=Γ₀·s/M² FAILS collapse off-shell
+//   3. Coherent two-pole interference FAILS collapse
+//   4. SchemeTension between schemes (gap can exceed 2σ)
+//   5. Optional: M_W construction scheme gap (tree vs G_F) as precision dual
+//
+// Non-claims: not full SM lineshape; toys are construction falsifiers.
+//
+// Run:
+//   export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
+//   ./bin/souc run examples/particle_physics/exp8_deficit_collapse_failure.sio
+// Gate:
+//   bash scripts/ci/particle_exp8_collapse_gate.sh
+
+use particle_physics::sm_params::{mass_z, mass_w}
+use particle_physics::nonunitary::{
+    DeficitCollapse,
+    nu_s_from_xi,
+    nu_deficit_fixed_width, nu_deficit_running_width, nu_deficit_interference,
+    nu_collapse_test, nu_scheme_tension,
+    COLLAPSE_HOLDS, COLLAPSE_FAILS_WIDTH_SCHEME, COLLAPSE_FAILS_INTERFERENCE,
+    SCHEME_FIXED_WIDTH, SCHEME_RUNNING_WIDTH, SCHEME_INTERFERENCE,
+}
+use particle_physics::ew_precision::{
+    m_w_tension_tree, m_w_tension_gf, tension_abs_pull,
+}
+
+fn abs_f(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn within(a: f64, b: f64, tol: f64) -> bool {
+    abs_f(a - b) < tol
+}
+
+fn print_pass(tag: i64) with IO {
+    print("PASS ")
+    print_int(tag)
+    print("\n")
+}
+
+fn print_fail(tag: i64) with IO {
+    print("FAIL ")
+    print_int(tag)
+    print("\n")
+}
+
+fn pass_if(cond: bool, tag: i64) -> i64 with IO {
+    if cond {
+        print_pass(tag)
+        1
+    } else {
+        print_fail(tag)
+        0
+    }
+}
+
+fn print_collapse(label: i64, c: DeficitCollapse) with IO {
+    print("EXP8_COLLAPSE ")
+    print_int(label)
+    print(" status=")
+    print_int(c.status)
+    print(" scheme=")
+    print_int(c.scheme)
+    print(" xi=")
+    print_f64(c.xi)
+    print(" d_scheme=")
+    print_f64(c.d_scheme)
+    print(" d_analytic=")
+    print_f64(c.d_analytic)
+    print(" residual=")
+    print_f64(c.residual)
+    print("\n")
+}
+
+// Domain A — collapse holds / fails
+fn run_collapse_surface(mz: f64, gamma_z: f64) -> i64 with IO, Mut, Div, Panic {
+    var n: i64 = 0
+    print("=== EXP8 domain collapse_surface ===\n")
+
+    let xi1 = 1.0
+    let xi2 = 2.0
+    let tol_hold = 1.0e-9
+    let tol_fail = 1.0e-3
+
+    // Fixed width: must HOLD at ξ=1 and ξ=2
+    let c_f1 = nu_collapse_test(SCHEME_FIXED_WIDTH(), xi1, mz, gamma_z, 0.0, 0.0, 0.0, tol_hold)
+    let c_f2 = nu_collapse_test(SCHEME_FIXED_WIDTH(), xi2, mz, gamma_z, 0.0, 0.0, 0.0, tol_hold)
+    print_collapse(1, c_f1)
+    print_collapse(2, c_f2)
+    n = n + pass_if(c_f1.status == COLLAPSE_HOLDS() && c_f1.residual < tol_hold, 1201)
+    n = n + pass_if(c_f2.status == COLLAPSE_HOLDS() && c_f2.residual < tol_hold, 1202)
+    n = n + pass_if(within(c_f1.d_scheme, 0.5, 1.0e-12), 1203)
+    n = n + pass_if(within(c_f2.d_scheme, 0.2, 1.0e-12), 1204)
+
+    // Running width: must FAIL off-shell (ξ=2), may hold near pole ξ=0
+    let c_r0 = nu_collapse_test(SCHEME_RUNNING_WIDTH(), 0.0, mz, gamma_z, 0.0, 0.0, 0.0, tol_fail)
+    let c_r2 = nu_collapse_test(SCHEME_RUNNING_WIDTH(), xi2, mz, gamma_z, 0.0, 0.0, 0.0, tol_fail)
+    print_collapse(3, c_r0)
+    print_collapse(4, c_r2)
+    n = n + pass_if(c_r0.status == COLLAPSE_HOLDS() && c_r0.residual < tol_fail, 1205)
+    n = n + pass_if(c_r2.status == COLLAPSE_FAILS_WIDTH_SCHEME(), 1206)
+    n = n + pass_if(c_r2.residual > tol_fail, 1207)
+
+    // Interference: second vector near Z (Z' toy) — FAILS at ξ=1 when α≠0
+    let m2 = mz + 10.0
+    let g2 = 1.0
+    let alpha = 0.4
+    let c_i0 = nu_collapse_test(SCHEME_INTERFERENCE(), 0.0, mz, gamma_z, m2, g2, 0.0, tol_fail)
+    let c_i1 = nu_collapse_test(SCHEME_INTERFERENCE(), xi1, mz, gamma_z, m2, g2, alpha, tol_fail)
+    let c_i1_off = nu_collapse_test(SCHEME_INTERFERENCE(), xi1, mz, gamma_z, m2, g2, 0.0, tol_hold)
+    print_collapse(5, c_i0)
+    print_collapse(6, c_i1)
+    print_collapse(7, c_i1_off)
+    // α=0 reduces to pure BW — holds
+    n = n + pass_if(c_i1_off.status == COLLAPSE_HOLDS(), 1208)
+    // α≠0 fails collapse
+    n = n + pass_if(c_i1.status == COLLAPSE_FAILS_INTERFERENCE(), 1209)
+    n = n + pass_if(c_i1.residual > tol_fail, 1210)
+
+    // Direct residual grid receipt
+    let s2 = nu_s_from_xi(xi2, mz, gamma_z)
+    let d_fw = nu_deficit_fixed_width(s2, mz, gamma_z)
+    let d_rw = nu_deficit_running_width(s2, mz, gamma_z)
+    let d_in = nu_deficit_interference(s2, mz, gamma_z, m2, g2, alpha)
+    let d_an = nu_deficit_analytic_xi(xi2)
+    print("EXP8_GRID_XI2 fw=")
+    print_f64(d_fw)
+    print(" rw=")
+    print_f64(d_rw)
+    print(" int=")
+    print_f64(d_in)
+    print(" analytic=")
+    print_f64(d_an)
+    print("\n")
+    n = n + pass_if(within(d_fw, d_an, 1.0e-12), 1211)
+    n = n + pass_if(abs_f(d_rw - d_an) > tol_fail, 1212)
+    n = n + pass_if(abs_f(d_in - d_an) > tol_fail, 1213)
+
+    print("EXP8_COLLAPSE_JSON {")
+    print("\"schema\":\"particle.exp8.deficit_collapse.v1\",")
+    print("\"claim\":\"pure_BW_xi_collapse_has_failure_surface\",")
+    print("\"fixed_hold_xi2_residual\":")
+    print_f64(c_f2.residual)
+    print(",\"running_fail_xi2_residual\":")
+    print_f64(c_r2.residual)
+    print(",\"running_fail_status\":")
+    print_int(c_r2.status)
+    print(",\"interference_fail_xi1_residual\":")
+    print_f64(c_i1.residual)
+    print(",\"interference_fail_status\":")
+    print_int(c_i1.status)
+    print(",\"interference_alpha0_status\":")
+    print_int(c_i1_off.status)
+    print("}\n")
+    n
+}
+
+// Domain B — SchemeTension (deficit schemes + M_W constructions)
+fn run_scheme_tension(mz: f64, gamma_z: f64) -> i64 with IO, Mut, Div, Panic {
+    var n: i64 = 0
+    print("=== EXP8 domain scheme_tension ===\n")
+
+    let xi = 2.0
+    let s = nu_s_from_xi(xi, mz, gamma_z)
+    let d_fw = nu_deficit_fixed_width(s, mz, gamma_z)
+    let d_rw = nu_deficit_running_width(s, mz, gamma_z)
+    // Toy variances: relative 1% on each deficit measure (construction uncertainty)
+    let v_fw = d_fw * d_fw * 1.0e-4
+    let v_rw = d_rw * d_rw * 1.0e-4
+    let st_w = nu_scheme_tension(
+        SCHEME_FIXED_WIDTH(), SCHEME_RUNNING_WIDTH(),
+        d_fw, v_fw, d_rw, v_rw
+    )
+    print("EXP8_SCHEME_WIDTH gap_sigma=")
+    print_f64(st_w.gap_sigma)
+    print(" consistent=")
+    print_int(st_w.consistent)
+    print("\n")
+    // Schemes disagree: gap should be large (inconsistent at 2σ)
+    n = n + pass_if(st_w.gap_sigma > 2.0, 1301)
+    n = n + pass_if(st_w.consistent == 0, 1302)
+    n = n + pass_if(st_w.scheme_a == SCHEME_FIXED_WIDTH() && st_w.scheme_b == SCHEME_RUNNING_WIDTH(), 1303)
+
+    // Interference vs fixed at ξ=1
+    let m2 = mz + 10.0
+    let g2 = 1.0
+    let alpha = 0.4
+    let s1 = nu_s_from_xi(1.0, mz, gamma_z)
+    let d_f1 = nu_deficit_fixed_width(s1, mz, gamma_z)
+    let d_i1 = nu_deficit_interference(s1, mz, gamma_z, m2, g2, alpha)
+    let st_i = nu_scheme_tension(
+        SCHEME_FIXED_WIDTH(), SCHEME_INTERFERENCE(),
+        d_f1, d_f1 * d_f1 * 1.0e-4, d_i1, d_i1 * d_i1 * 1.0e-4
+    )
+    print("EXP8_SCHEME_INT gap_sigma=")
+    print_f64(st_i.gap_sigma)
+    print(" consistent=")
+    print_int(st_i.consistent)
+    print("\n")
+    n = n + pass_if(st_i.gap_sigma > 2.0 && st_i.consistent == 0, 1304)
+
+    // Fixed vs fixed self-tension: consistent
+    let st_self = nu_scheme_tension(
+        SCHEME_FIXED_WIDTH(), SCHEME_FIXED_WIDTH(),
+        d_fw, v_fw, d_fw, v_fw
+    )
+    n = n + pass_if(st_self.gap_sigma < 1.0e-9 && st_self.consistent == 1, 1305)
+
+    // Precision dual: tree vs G_F M_W predictions as scheme gap
+    let t0 = m_w_tension_tree()
+    let t2 = m_w_tension_gf()
+    let st_mw = nu_scheme_tension(
+        10, 12,
+        t0.pred_val, t0.pred_var, t2.pred_val, t2.pred_var
+    )
+    print("EXP8_SCHEME_MW gap_sigma=")
+    print_f64(st_mw.gap_sigma)
+    print(" mw_tree=")
+    print_f64(t0.pred_val)
+    print(" mw_gf=")
+    print_f64(t2.pred_val)
+    print("\n")
+    // Tree and G_F disagree at high significance on pred alone
+    n = n + pass_if(st_mw.gap_sigma > 2.0, 1306)
+    n = n + pass_if(tension_abs_pull(t2) < tension_abs_pull(t0), 1307)
+
+    print("EXP8_SCHEME_JSON {")
+    print("\"schema\":\"particle.exp8.scheme_tension.v1\",")
+    print("\"claim\":\"honest_schemes_can_disagree_beyond_2sigma\",")
+    print("\"width_gap_sigma\":")
+    print_f64(st_w.gap_sigma)
+    print(",\"width_consistent\":")
+    print_int(st_w.consistent)
+    print(",\"interference_gap_sigma\":")
+    print_f64(st_i.gap_sigma)
+    print(",\"mw_tree_gf_gap_sigma\":")
+    print_f64(st_mw.gap_sigma)
+    print(",\"non_isomorphism\":\"SchemeTension_is_not_EpistemicTension_vs_measurement\"")
+    print("}\n")
+    n
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    print("PARTICLE_EXP8_BEGIN\n")
+    print("EXP8_CLAIM deficit_collapse_failure_surface_and_scheme_tension\n")
+
+    let mz = mass_z().val()
+    let gamma_z = 2.4952
+    let n_a = run_collapse_surface(mz, gamma_z)
+    let n_b = run_scheme_tension(mz, gamma_z)
+    let npass = n_a + n_b
+    // A: 13 checks (1201–1213), B: 7 checks (1301–1307) → 20
+    let expected: i64 = 20
+    let nfail = expected - npass
+
+    print("PARTICLE_EXP8_PASS ")
+    print_int(npass)
+    print("\n")
+    print("PARTICLE_EXP8_FAIL ")
+    print_int(nfail)
+    print("\n")
+    print("PARTICLE_EXP8_NA ")
+    print_int(n_a)
+    print("\n")
+    print("PARTICLE_EXP8_NB ")
+    print_int(n_b)
+    print("\n")
+
+    if npass == expected {
+        print("PARTICLE_EXP8_OK\n")
+        print("PARTICLE_EXP8_COLLAPSE_OK\n")
+        print("PARTICLE_EXP8_SCHEME_OK\n")
+        0
+    } else {
+        print("PARTICLE_EXP8_FAILED\n")
+        1
+    }
+}
