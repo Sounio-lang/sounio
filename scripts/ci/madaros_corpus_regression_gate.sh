@@ -79,12 +79,29 @@ if ! "$MADAROS" compile "$src" -o "$elf" >/dev/null 2>&1; then
   exit 0
 fi
 chmod +x "$elf" 2>/dev/null
-if ! timeout 30 "$elf" >/dev/null 2>&1; then
-  echo "$name run"
+out="$("$WORK/timeout_run.sh" "$elf")" || { echo "$name run"; exit 0; }
+
+# If the test declares an expected marker, assert it. Exit status alone is not
+# evidence: a CPC 2026 receipt was found compiling, exiting 0 and printing ZERO
+# BYTES under Madaros while lean_single printed the full receipt, and this gate
+# reported it as newly fixed (#1498). A program that produces nothing scored the
+# same as one that produced the right answer.
+marker="$(sed -n 's|^//@ expect-stdout:[[:space:]]*||p' "$src" | head -1)"
+if [ -n "$marker" ]; then
+  case "$out" in
+    *"$marker"*) ;;
+    *) echo "$name stdout" ;;
+  esac
 fi
 exit 0
 INNER
 chmod +x "$WORK/run_one.sh"
+
+cat > "$WORK/timeout_run.sh" <<'TR'
+#!/usr/bin/env bash
+timeout 30 "$1" 2>/dev/null
+TR
+chmod +x "$WORK/timeout_run.sh"
 export MADAROS WORK
 
 printf '%s\n' "${PROGRAMS[@]}" \
@@ -102,7 +119,11 @@ if [[ "$REFRESH" == "1" ]]; then
     echo "#   SOUNIO_MADAROS_CORPUS_BIN=<madaros> SOUNIO_MADAROS_CORPUS_REFRESH=1 \\"
     echo "#     bash scripts/ci/madaros_corpus_regression_gate.sh"
     echo "#"
-    echo "# One entry per failing program: '<name>.sio compile' or '<name>.sio run'."
+    echo "# One entry per failing program:
+#   '<name>.sio compile'  -- did not compile
+#   '<name>.sio run'      -- compiled, non-zero exit or timeout
+#   '<name>.sio stdout'   -- ran fine but did not print its //@ expect-stdout
+#                            marker (165 of 1688 tests declare one)"
     echo "# These are PRE-EXISTING Madaros failures, NOT approvals. Shrinking this"
     echo "# file is the point; the gate blocks only on entries that are NEW."
     cat "$WORK/actual.txt"
