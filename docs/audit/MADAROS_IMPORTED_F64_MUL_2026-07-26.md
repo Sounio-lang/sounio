@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.madaros-imported-f64-mul-2026-07-26
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-imported-f64-mul-2026-07-26
+-->
+
 # Madaros multimodule: imported f64 prints OK, raw f64*f64 wrong
 
 **Date:** 2026-07-26  
