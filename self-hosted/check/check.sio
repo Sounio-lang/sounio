@@ -5035,6 +5035,94 @@ fn checker_check_opt_block_inplace(c: *mut Checker, opt: Option<Box<Block> >) ->
 // path-expr anywhere in an `if … else if …` chain reaches checker_check_path_expr_inplace
 // and dodges the by-value check_path_expr SRET crash. The non-recursive work (bool check,
 // condition narrowing, branch-type compat) is faithful to the by-value original.
+// ============================================================
+// Branch-aware merge of linear consumption
+//
+// A linear value must be consumed on EVERY path, so the two arms of an `if` are
+// alternatives, not a sequence. Threading them sequentially -- what happens
+// without these three calls -- is wrong in both directions:
+//
+//   if c { use(t) } else { use(t) }   E039, though sound (the else-arm
+//                                     inherited the then-arm's consumption)
+//   if c { use(t) }                   accepted, though `t` survives unconsumed
+//                                     on the implicit else path
+//
+// These mutate (*c).borrows fields in place rather than going through BorrowEnv
+// methods. Two other shapes were built and measured and neither is usable:
+// by-value `self -> BorrowEnv` methods (three aggregate round-trips per `if`),
+// and `&!BorrowEnv` methods (mutations never land; reaching one through a
+// pointer segfaults).
+// ============================================================
+
+// Record the on-entry `consumed` state for this branch level.
+fn checker_branch_enter_inplace(c: *mut Checker) with Mut, Panic, Div, Alloc, IO {
+    let d = (*c).borrows.branch_depth
+    (*c).borrows.branch_depth = d + 1
+    // Beyond the tracked nesting depth the counter stays balanced but nothing is
+    // stored; the merge then leaves state alone, degrading to the old sequential
+    // behaviour rather than merging against a stale snapshot.
+    if d < MAX_BRANCH_LEVELS {
+        var i: i64 = 0
+        while i < (*c).borrows.count {
+            (*c).borrows.branch_snap[i * MAX_BRANCH_SNAP + 2 * d] = (*c).borrows.entries[i].consumed
+            i = i + 1
+        }
+    }
+}
+
+// Stash the end-of-then-arm state and rewind to the on-entry state, so the
+// else-arm is checked from the same starting point the then-arm had.
+fn checker_branch_then_done_inplace(c: *mut Checker) with Mut, Panic, Div, Alloc, IO {
+    let d = (*c).borrows.branch_depth - 1
+    if d >= 0 && d < MAX_BRANCH_LEVELS {
+        var i: i64 = 0
+        while i < (*c).borrows.count {
+            (*c).borrows.branch_snap[i * MAX_BRANCH_SNAP + 2 * d + 1] = (*c).borrows.entries[i].consumed
+            (*c).borrows.entries[i].consumed = (*c).borrows.branch_snap[i * MAX_BRANCH_SNAP + 2 * d]
+            i = i + 1
+        }
+    }
+}
+
+// Combine the two arms and report values consumed on only one path. A linear
+// binding is consumed after the `if` only if BOTH arms consumed it; if exactly
+// one did, its fate depends on a runtime condition, which linearity forbids.
+fn checker_merge_if_branches_inplace(c: *mut Checker) with Mut, Panic, Div, Alloc, IO {
+    let d = (*c).borrows.branch_depth - 1
+    if d < 0 {
+        return
+    }
+    (*c).borrows.branch_depth = d
+    if d >= MAX_BRANCH_LEVELS {
+        return
+    }
+    var mismatch: i64 = 0
+    var i: i64 = 0
+    while i < (*c).borrows.count {
+        if (*c).borrows.entries[i].is_linear && !(*c).borrows.branch_snap[i * MAX_BRANCH_SNAP + 2 * d] {
+            let then_consumed = (*c).borrows.branch_snap[i * MAX_BRANCH_SNAP + 2 * d + 1]
+            let else_consumed = (*c).borrows.entries[i].consumed
+            if then_consumed != else_consumed {
+                mismatch = mismatch + 1
+                (*c).borrows.entries[i].consumed = true
+            } else {
+                (*c).borrows.entries[i].consumed = then_consumed
+            }
+        }
+        i = i + 1
+    }
+    if mismatch > 0 {
+        (*c).had_error = true
+        (*c).error_count = (*c).error_count + 1
+        (*c).diag_emitted = true
+        print("error[E040]: linear value not consumed on every path (")
+        print_int(mismatch)
+        print(" value(s) consumed in one branch only)\n")
+        print("   = help: a linear value must be consumed on both branches of an `if`, or on neither\n")
+        print("   = note: linear types enforce single-use semantics for resources\n")
+    }
+}
+
 fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let cond_ty = checker_check_opt_expr_inplace(c, e.left)
     // Condition must be bool (skip E006 when the condition already failed typechecking).
@@ -5058,8 +5146,13 @@ fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut
     if cond_guard.0 != 0 {
         (*c).refine_cond_env = refine_static_env_push((*c).refine_cond_env, cond_guard.1)
     }
+    checker_branch_enter_inplace(c)
     let then_ty = checker_check_opt_block_inplace(c, e.block)
+    checker_branch_then_done_inplace(c)
     (*c).refine_cond_env = saved_cond_env
+    // The `match` stays the TAIL expression and the merge is called from inside
+    // each arm: hoisting it into `let result = match { ... }` with trailing
+    // statements is a shape this compiler miscompiles.
     match e.else_expr {
         Some(else_e) => {
             let else_ty = checker_check_expr_inplace(c, *else_e)
@@ -5067,10 +5160,15 @@ fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut
             if !checker_types_compatible_inplace(c, then_ty, else_ty) {
                 checker_report_mismatch_inplace(c, e.span, 7, then_ty, else_ty)
             }
+            checker_merge_if_branches_inplace(c)
             then_ty
         }
         None => {
+            // No else-arm: nothing is consumed on that path, which is what
+            // branch_then_done rewound to, so the merge flags a value the
+            // then-arm consumed.
             (*c).refine_cond_env = saved_cond_env
+            checker_merge_if_branches_inplace(c)
             ty_unit()
         }
     }
@@ -6335,11 +6433,21 @@ fn checker_check_call_args_inplace(c: *mut Checker, args: ExprListHandle, params
         let implicit_borrow =
             arg_expr.kind == ExprKind::ExprIdent &&
             (param_info.ty.kind == TypeKind::TyRef || param_info.ty.kind == TypeKind::TyRefMut)
-        if implicit_borrow {
+        // Suppress consumption while TYPING an identifier argument, for every
+        // argument — not only implicit borrows. Evaluating an identifier goes
+        // through checker_check_ident_expr_inplace, which consumes any linear it
+        // names; the explicit block further down then consumed it a second time
+        // whenever the parameter was by value, producing a spurious E039 on the
+        // FIRST use (issue #1464). Ownership transfer is decided below, where the
+        // by-ref/by-value distinction is known; typing the argument must not
+        // itself transfer. Non-identifier arguments are unaffected: they name no
+        // binding, so there is nothing to consume either way.
+        let suppress_arg_consume = arg_expr.kind == ExprKind::ExprIdent
+        if suppress_arg_consume {
             (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth + 1
         }
         let arg_ty = checker_check_expr_inplace(c, arg_expr)
-        if implicit_borrow && (*c).suppress_linear_consume_depth > 0 {
+        if suppress_arg_consume && (*c).suppress_linear_consume_depth > 0 {
             (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth - 1
         }
         var primitive_exact = false

@@ -14,6 +14,13 @@
 // State values: 0 = Owned (unborrowed), 1 = SharedBorrow, 2 = ExclusiveBorrow
 // shared_count tracks number of active shared borrows
 
+// Two snapshot slots per nested `if` level; 16 levels of nesting are tracked.
+// Beyond that the merge degrades to the old sequential behaviour rather than
+// misreporting.
+pub const MAX_BRANCH_LEVELS: i64 = 16
+pub const MAX_BRANCH_SNAP: i64 = 32
+const BRANCH_SNAP_PLANE: i64 = 4096   // 128 entries * MAX_BRANCH_SNAP
+
 pub struct BorrowEntry {
     name: Name,
     state: i64,          // 0=Owned, 1=SharedBorrow, 2=ExclusiveBorrow
@@ -45,6 +52,11 @@ pub struct BorrowEnv {
     count: i64,
     scope_starts: [i64; 64],
     scope_depth: i64,
+    branch_depth: i64,   // nesting level of `if` currently being checked
+    // Snapshots of `consumed`, laid out FLAT as entry-major
+    // [entry * MAX_BRANCH_SNAP + 2*level (+1)], so the write is a single-level
+    // indexed store rather than the known-fragile `entries[i].snap[j]` shape.
+    branch_snap: [bool; BRANCH_SNAP_PLANE],
 }
 
 fn borrow_env_new() -> BorrowEnv {
@@ -53,6 +65,8 @@ fn borrow_env_new() -> BorrowEnv {
         count: 0,
         scope_starts: [0; 64],
         scope_depth: 0,
+        branch_depth: 0,
+        branch_snap: [false; BRANCH_SNAP_PLANE],
     }
 }
 
