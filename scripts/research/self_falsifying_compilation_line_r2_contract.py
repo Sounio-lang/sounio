@@ -88,6 +88,11 @@ def clause_t1() -> bool:
     # The outcome codes are integer literals (4 = MISMATCH, 5 = ABSENT) and the
     # reporting chain branches on `decided`, never on `outcome` — see the R2
     # spec §3.2 for why. Match the shape that is actually compiled.
+    #
+    # MAINTENANCE: these two patterns pin the implementation's magic numbers.
+    # If the outcome codes are ever restored to named module constants (a
+    # reasonable thing to do after a compiler fix), update the patterns here —
+    # a failure would then be a stale contract, NOT a regression in the guard.
     mismatch_block = re.search(
         r"decided == 4\b.*?failed = failed \+ 1", src, re.DOTALL)
     absent_block = re.search(
