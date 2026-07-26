@@ -29,6 +29,9 @@ struct LowerLocalStack {
     is_ref: [i64; 4096],
     // 0=other 1=int 2=float; used by println dispatch to avoid routing i64/f64 vars through print_str
     scalar_kind: [i64; 4096],
+    // Tuple-typed local: bit k set iff element k of the tuple is f64. 0 = not a
+    // tuple / no float elements. See lower_opt_type_tuple_float_mask (issue #1502).
+    tuple_float_mask: [i64; 4096],
     // f64 register carrying the GUM variance shadow for scalar locals, or -1 when absent.
     variance_regs: [i64; 4096],
     // -1 = not a capturing closure; otherwise the synthetic closure fn_id whose captures
@@ -53,6 +56,7 @@ fn empty_lower_local_stack() -> LowerLocalStack {
         is_global: [0; 4096],
         is_ref: [0; 4096],
         scalar_kind: [0; 4096],
+        tuple_float_mask: [0; 4096],
         variance_regs: [-1; 4096],
         closure_fn_id: [-1; 4096],
         count: 0,
@@ -3901,8 +3905,55 @@ fn lower_opt_type_is_array_of_f64(opt: &Option<Box<TypeExpr>>) -> bool with Mut,
     }
 }
 
+// #1502: a tuple element is accessed as a FieldAccess whose name is the decimal
+// slot index ("0", "1", ...). Returns the index, or -1 for an ordinary field name.
+fn lower_name_tuple_index(n: Name) -> i64 with Mut, Panic, Div {
+    if n.len <= 0 { return 0 - 1 }
+    if n.len > 2 { return 0 - 1 }
+    var v: i64 = 0
+    var i: i64 = 0
+    while i < n.len {
+        let c = n.buf[i as usize] as i64
+        if c < 48 { return 0 - 1 }
+        if c > 57 { return 0 - 1 }
+        v = v * 10 + (c - 48)
+        i = i + 1
+    }
+    v
+}
+
+// #1502: bit k set iff element k of a declared tuple type is f64. Tuple element
+// types are otherwise lost by lowering time -- lower_tuple_literal_expr_ref stores
+// a tuple as an untyped word aggregate, so `s.1` had no way to know it holds f64
+// bits and fell through to the integer path, where arithmetic cvtsi2sd-corrupted
+// it. This is the tuple analogue of the `2` f64-array code below.
+fn lower_type_list_float_mask(opt: &Option<Box<TypeExprList>>, bit: i64) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(list) => {
+            var m: i64 = 0
+            if bit < 32 {
+                if lower_type_expr_is_f64(&(*list).head) {
+                    m = 1 << (bit as u8)
+                }
+            }
+            m + lower_type_list_float_mask(&(*list).tail, bit + 1)
+        }
+        None => 0,
+    }
+}
+
+fn lower_opt_type_tuple_float_mask(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(te) => {
+            if (*te).kind != TypeExprKind::TypeTuple { return 0 }
+            lower_type_list_float_mask(&(*te).type_args, 0)
+        }
+        None => 0,
+    }
+}
+
 // returns_float classification for a declared return type: 1 = scalar f64, 2 = an
-// f64 array (`[f64; N]`), 0 = other. The `2` lets a caller's `let r = mk()` (mk
+// f64 array (`[f64; N]`), 1024+mask = a tuple with f64 element(s), 0 = other. The `2` lets a caller's `let r = mk()` (mk
 // returning an f64 array) flag `r` as a float-element local, so `r[i]` reads
 // classify as float instead of taking the integer path (cvtsi2sd corruption).
 // All consumers test `== 1`, so the new `2` value is inert for the scalar path.
@@ -3912,7 +3963,10 @@ fn lower_opt_return_float_code(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Pan
     } else if lower_opt_type_is_array_of_f64(opt) {
         2
     } else {
-        0
+        // 1024+mask keeps every existing consumer (all of which test == 1 or == 2)
+        // inert while carrying per-slot float-ness for tuple returns.
+        let tmask = lower_opt_type_tuple_float_mask(opt)
+        if tmask != 0 { 1024 + tmask } else { 0 }
     }
 }
 
@@ -5715,6 +5769,7 @@ impl Lowerer {
                 // Explicit 0: slot may be reused after scope-pop restores count.
                 // Callers that know a positive kind (for-IV int, float local) re-bind.
                 stk.scalar_kind[idx as usize] = 0
+                stk.tuple_float_mask[idx as usize] = 0
                 stk.variance_regs[idx as usize] = -1
                 stk.count = idx + 1
             lo.locals = Box::new(stk)
@@ -5737,6 +5792,35 @@ impl Lowerer {
             i = i - 1
         }
         lo
+    }
+
+    // #1502: record which slots of a tuple-typed local are f64, so `s.1` reads
+    // classify as float instead of taking the integer path (cvtsi2sd corruption).
+    fn bind_local_tuple_float_mask(self, name: Name, mask: i64) -> Lowerer with Mut, Alloc, Panic, Div {
+        var lo = self
+        if mask == 0 { return lo }
+        var stk = *lo.locals
+        var i = stk.count - 1
+        while i >= 0 {
+            if stk.depths[i as usize] <= lo.scope_depth && ir_name_eq(stk.names[i as usize], name) {
+                stk.tuple_float_mask[i as usize] = mask
+                lo.locals = Box::new(stk)
+                return lo
+            }
+            i = i - 1
+        }
+        lo
+    }
+
+    fn lookup_local_tuple_float_mask(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*self.locals).depths[i as usize] <= self.scope_depth && ir_name_eq((*self.locals).names[i as usize], name) {
+                return (*self.locals).tuple_float_mask[i as usize]
+            }
+            i = i - 1
+        }
+        0
     }
 
     fn bind_local_fixed_array_len(self, name: Name, array_len: i64) -> Lowerer with Mut, Alloc, Panic, Div {
@@ -8224,6 +8308,39 @@ impl Lowerer {
         false
     }
 
+    // #1502: tuple-slot float-ness for `base.N`, from the mask recorded on the
+    // tuple-typed local at its binding site.
+    fn opt_base_tuple_float_mask_ref(self, base_opt: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div, Alloc {
+        match *base_opt {
+            Some(base_expr) => {
+                if (*base_expr).kind == ExprKind::ExprIdent {
+                    return self.lookup_local_tuple_float_mask((*base_expr).name)
+                }
+                // `mk().1` with no intervening binding: take the mask straight off
+                // the callee's encoded return code.
+                if (*base_expr).kind == ExprKind::ExprCall {
+                    match (*base_expr).left {
+                        Some(callee_expr) => {
+                            let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
+                            let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
+                            if fn_id >= 0 && fn_id < self.module.fn_count {
+                                let code = self.module.functions[fn_id as usize].returns_float
+                                if code >= 1024 {
+                                    return code - 1024
+                                }
+                            }
+                            0
+                        }
+                        _ => 0,
+                    }
+                } else {
+                    0
+                }
+            }
+            _ => 0,
+        }
+    }
+
     fn expr_result_is_float_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
         if (*e).kind == ExprKind::ExprIntLit {
             return false
@@ -8280,6 +8397,16 @@ impl Lowerer {
             return false
         }
         if (*e).kind == ExprKind::ExprFieldAccess {
+            // #1502: a tuple slot (`s.1`) is NOT a named struct field -- both lookups
+            // below resolve by name against struct_layouts, so "1" matched nothing and
+            // an f64 slot was misclassified as integer. Consult the tuple mask first.
+            let tuple_idx = lower_name_tuple_index((*e).name)
+            if tuple_idx >= 0 {
+                let tuple_mask = self.opt_base_tuple_float_mask_ref(&(*e).left)
+                if tuple_mask != 0 {
+                    return (tuple_mask >> (tuple_idx as u8)) % 2 == 1
+                }
+            }
             return self.field_is_float_for_base_ref(&(*e).left, (*e).name) || self.field_is_float_by_name_simple((*e).name)
         }
         if (*e).kind == ExprKind::ExprIndex {
@@ -10057,6 +10184,48 @@ impl Lowerer {
         false
     }
 
+    // #1502: per-slot float mask of a tuple-producing initialiser -- either a call
+    // whose declared return type is a tuple (encoded 1024+mask by
+    // lower_opt_return_float_code) or a literal tuple, whose element expressions are
+    // classified directly.
+    fn expr_list_tuple_float_mask_ref(self, opt: &Option<Box<ExprList>>, bit: i64) -> i64 with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(list) => {
+                var m: i64 = 0
+                if bit < 32 {
+                    if self.expr_result_is_float_ref(&(*list).head) {
+                        m = 1 << (bit as u8)
+                    }
+                }
+                m + self.expr_list_tuple_float_mask_ref(&(*list).tail, bit + 1)
+            }
+            _ => 0,
+        }
+    }
+
+    fn expr_result_tuple_float_mask_ref(self, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprTupleLit {
+            return self.expr_list_tuple_float_mask_ref(&(*e).args, 0)
+        }
+        if (*e).kind != ExprKind::ExprCall {
+            return 0
+        }
+        match (*e).left {
+            Some(callee_expr) => {
+                let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
+                let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
+                if fn_id >= 0 && fn_id < self.module.fn_count {
+                    let code = self.module.functions[fn_id as usize].returns_float
+                    if code >= 1024 {
+                        return code - 1024
+                    }
+                }
+                0
+            }
+            _ => 0,
+        }
+    }
+
     fn lower_let_stmt_ref(self, s: &Stmt, is_mut: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lhs_lo = self
         match s.expr {
@@ -10235,6 +10404,21 @@ impl Lowerer {
                         lo = lo.bind_local_array_elem_float(s.name)
                     } else if rhs_array_elem_is_float {
                         lo = lo.bind_local_array_elem_float(s.name)
+                    }
+                }
+                _ => {}
+            }
+        }
+        // #1502: record which slots of a tuple-typed local are f64.
+        let annotated_tuple_mask = lower_opt_type_tuple_float_mask(&s.ty)
+        if annotated_tuple_mask != 0 {
+            lo = lo.bind_local_tuple_float_mask(s.name, annotated_tuple_mask)
+        } else {
+            match s.expr {
+                Some(expr_box_tup) => {
+                    let init_tuple_mask = lo.expr_result_tuple_float_mask_ref(&(*expr_box_tup))
+                    if init_tuple_mask != 0 {
+                        lo = lo.bind_local_tuple_float_mask(s.name, init_tuple_mask)
                     }
                 }
                 _ => {}
