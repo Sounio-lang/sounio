@@ -94,6 +94,11 @@ MADAROS_ROOT_BLOB="$(git -C "$REPO" ls-tree "$SOURCE_COMMIT" -- bin/madaros-linu
   printf 'gate_script_sha256\t%s\n' "$(portable_sha256 "$SNAP/scripts/ci/madaros_native_multimodule_scale_source_fresh_gate.sh")"
   printf 'madaros_root_git_blob\t%s\n' "$MADAROS_ROOT_BLOB"
   printf 'madaros_root_sha256\t%s\n' "$(portable_sha256 "$SNAP/bin/madaros-linux-x86_64")"
+  printf 'souc_wrapper_sha256\t%s\n' "$(portable_sha256 "$SNAP/bin/souc")"
+  printf 'madaros_wrapper_sha256\t%s\n' "$(portable_sha256 "$SNAP/bin/madaros")"
+  printf 'acceptance_probe_sha256\t%s\n' "$(portable_sha256 "$SNAP/tests/run-pass/madaros_native_multimodule_scale_prob.sio")"
+  printf 'textbook_probe_sha256\t%s\n' "$(portable_sha256 "$SNAP/tests/run-pass/madaros_native_multimodule_scale_prob_textbook.sio")"
+  printf 'stdlib_driver_sha256\t%s\n' "$(portable_sha256 "$SNAP/tests/stdlib/prob/test_prob_stdlib.sio")"
 } >"$SNAP/.issue901-scale-source-provenance.tsv"
 
 bash "$SNAP/scripts/ci/madaros_native_multimodule_scale_source_fresh_gate.sh" --provenance-only

@@ -10,6 +10,11 @@ export LC_ALL=C
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MADAROS_ROOT_PATH="$ROOT_DIR/bin/madaros-linux-x86_64"
+SOUC_WRAPPER_PATH="$ROOT_DIR/bin/souc"
+MADAROS_WRAPPER_PATH="$ROOT_DIR/bin/madaros"
+PROBE="$ROOT_DIR/tests/run-pass/madaros_native_multimodule_scale_prob.sio"
+TEXTBOOK="$ROOT_DIR/tests/run-pass/madaros_native_multimodule_scale_prob_textbook.sio"
+DRIVER="$ROOT_DIR/tests/stdlib/prob/test_prob_stdlib.sio"
 KEEP_WORK="${SOUNIO_MADAROS_ISSUE901_SCALE_SOURCE_FRESH_KEEP:-0}"
 ARCHIVE_PROVENANCE_FILE="$ROOT_DIR/.issue901-scale-source-provenance.tsv"
 
@@ -70,6 +75,11 @@ verify_archive_provenance() {
   assert_archive_sha256 main_sio_sha256 "$ROOT_DIR/self-hosted/compiler/main.sio" "$MAIN_SHA256"
   assert_archive_sha256 gate_script_sha256 "$ROOT_DIR/scripts/ci/madaros_native_multimodule_scale_source_fresh_gate.sh" "$GATE_SHA256"
   assert_archive_sha256 madaros_root_sha256 "$MADAROS_ROOT_PATH" "$MADAROS_ROOT_SHA256"
+  assert_archive_sha256 souc_wrapper_sha256 "$SOUC_WRAPPER_PATH" "$SOUC_WRAPPER_SHA256"
+  assert_archive_sha256 madaros_wrapper_sha256 "$MADAROS_WRAPPER_PATH" "$MADAROS_WRAPPER_SHA256"
+  assert_archive_sha256 acceptance_probe_sha256 "$PROBE" "$PROBE_SHA256"
+  assert_archive_sha256 textbook_probe_sha256 "$TEXTBOOK" "$TEXTBOOK_SHA256"
+  assert_archive_sha256 stdlib_driver_sha256 "$DRIVER" "$DRIVER_SHA256"
 }
 
 load_source_provenance() {
@@ -83,6 +93,11 @@ load_source_provenance() {
     MAIN_SHA256="$(portable_sha256 "$ROOT_DIR/self-hosted/compiler/main.sio")"
     GATE_SHA256="$(portable_sha256 "$ROOT_DIR/scripts/ci/madaros_native_multimodule_scale_source_fresh_gate.sh")"
     MADAROS_ROOT_SHA256="$(portable_sha256 "$MADAROS_ROOT_PATH")"
+    SOUC_WRAPPER_SHA256="$(portable_sha256 "$SOUC_WRAPPER_PATH")"
+    MADAROS_WRAPPER_SHA256="$(portable_sha256 "$MADAROS_WRAPPER_PATH")"
+    PROBE_SHA256="$(portable_sha256 "$PROBE")"
+    TEXTBOOK_SHA256="$(portable_sha256 "$TEXTBOOK")"
+    DRIVER_SHA256="$(portable_sha256 "$DRIVER")"
     MADAROS_ROOT_BLOB="$(git -C "$ROOT_DIR" ls-files -s -- bin/madaros-linux-x86_64 | awk 'NR == 1 {print $2}')"
     [[ -n "$MADAROS_ROOT_BLOB" ]] || fail 'Madaros root is not tracked by this source tree'
     return
@@ -96,6 +111,11 @@ load_source_provenance() {
   MAIN_SHA256="$(tsv_value "$ARCHIVE_PROVENANCE_FILE" main_sio_sha256)"
   GATE_SHA256="$(tsv_value "$ARCHIVE_PROVENANCE_FILE" gate_script_sha256)"
   MADAROS_ROOT_SHA256="$(tsv_value "$ARCHIVE_PROVENANCE_FILE" madaros_root_sha256)"
+  SOUC_WRAPPER_SHA256="$(tsv_value "$ARCHIVE_PROVENANCE_FILE" souc_wrapper_sha256)"
+  MADAROS_WRAPPER_SHA256="$(tsv_value "$ARCHIVE_PROVENANCE_FILE" madaros_wrapper_sha256)"
+  PROBE_SHA256="$(tsv_value "$ARCHIVE_PROVENANCE_FILE" acceptance_probe_sha256)"
+  TEXTBOOK_SHA256="$(tsv_value "$ARCHIVE_PROVENANCE_FILE" textbook_probe_sha256)"
+  DRIVER_SHA256="$(tsv_value "$ARCHIVE_PROVENANCE_FILE" stdlib_driver_sha256)"
   MADAROS_ROOT_BLOB="$(tsv_value "$ARCHIVE_PROVENANCE_FILE" madaros_root_git_blob)"
   [[ "$SOURCE_HEAD" =~ ^[0-9a-f]{40}$ ]] || fail "archive provenance has an invalid source_head: $SOURCE_HEAD"
   [[ "$SOURCE_TREE" =~ ^[0-9a-f]{40}$ ]] || fail "archive provenance has an invalid source_tree: $SOURCE_TREE"
@@ -158,9 +178,11 @@ assert_direct_raw_log() {
 if [[ "${1:-}" == '--structural-only' ]]; then
   [[ $# -eq 1 ]] || fail 'usage: madaros_native_multimodule_scale_source_fresh_gate.sh [--structural-only]'
   require_raw_madaros "$MADAROS_ROOT_PATH"
-  [[ -f "$ROOT_DIR/tests/run-pass/madaros_native_multimodule_scale_prob.sio" ]] || fail 'missing #901 acceptance probe'
-  [[ -f "$ROOT_DIR/tests/run-pass/madaros_native_multimodule_scale_prob_textbook.sio" ]] || fail 'missing #901 textbook probe'
-  [[ -f "$ROOT_DIR/tests/stdlib/prob/test_prob_stdlib.sio" ]] || fail 'missing #901 stdlib driver'
+  [[ -x "$SOUC_WRAPPER_PATH" ]] || fail 'missing executable public souc wrapper'
+  [[ -x "$MADAROS_WRAPPER_PATH" ]] || fail 'missing executable public Madaros wrapper'
+  [[ -f "$PROBE" ]] || fail 'missing #901 acceptance probe'
+  [[ -f "$TEXTBOOK" ]] || fail 'missing #901 textbook probe'
+  [[ -f "$DRIVER" ]] || fail 'missing #901 stdlib driver'
   echo '[madaros-issue901-scale-source-fresh] PASS: source-build and direct-raw scale wiring is present'
   exit 0
 fi
@@ -212,9 +234,6 @@ STAGE2_SHA256="$(portable_sha256 "$STAGE2")"
 STAGE3_SHA256="$(portable_sha256 "$STAGE3")"
 [[ "$STAGE2_SHA256" == "$STAGE3_SHA256" ]] || fail "Madaros fixed point diverged: stage2=$STAGE2_SHA256 stage3=$STAGE3_SHA256"
 
-PROBE="$ROOT_DIR/tests/run-pass/madaros_native_multimodule_scale_prob.sio"
-TEXTBOOK="$ROOT_DIR/tests/run-pass/madaros_native_multimodule_scale_prob_textbook.sio"
-DRIVER="$ROOT_DIR/tests/stdlib/prob/test_prob_stdlib.sio"
 for source in "$PROBE" "$TEXTBOOK" "$DRIVER"; do
   [[ -f "$source" ]] || fail "required #901 source is missing: $source"
 done
@@ -270,11 +289,11 @@ TEXTBOOK_MERGED="$CASE_MERGED"
 run_direct_case stdlib-driver "$DRIVER" 'PROB_STDLIB_OK'
 DRIVER_MERGED="$CASE_MERGED"
 
-run_public_default_case() {
+run_public_wrapper_case() {
   local source="$1"
   local expected="$2"
-  local case_dir="$WORK/public-default"
-  local elf="$case_dir/public-default.elf"
+  local case_dir="$WORK/public-wrapper"
+  local elf="$case_dir/public-wrapper.elf"
   local compile_log="$case_dir/compile.log"
   local run_log="$case_dir/run.log"
 
@@ -291,29 +310,29 @@ run_public_default_case() {
       MADAROS_RAW_BIN="$STAGE3" \
       SOUNIO_SOUC_ENGINE=madaros \
       SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib" \
-      "$ROOT_DIR/bin/souc" compile "$source" -o "$elf"
+      "$SOUC_WRAPPER_PATH" compile "$source" -o "$elf"
   ) >"$compile_log" 2>&1; then
     cat "$compile_log" >&2 || true
-    fail 'public default Madaros compile failed for the #901 acceptance probe'
+    fail 'public-wrapper Madaros compile failed for the #901 acceptance probe'
   fi
   assert_direct_raw_log "$compile_log"
-  [[ -s "$elf" ]] || fail 'public default Madaros compile emitted no ELF for the #901 acceptance probe'
-  [[ "$(head -c4 "$elf" 2>/dev/null)" == $'\x7fELF' ]] || fail 'public default Madaros output is not an ELF for the #901 acceptance probe'
+  [[ -s "$elf" ]] || fail 'public-wrapper Madaros compile emitted no ELF for the #901 acceptance probe'
+  [[ "$(head -c4 "$elf" 2>/dev/null)" == $'\x7fELF' ]] || fail 'public-wrapper Madaros output is not an ELF for the #901 acceptance probe'
   chmod +x "$elf"
   if ! "$elf" >"$run_log" 2>&1; then
     cat "$run_log" >&2 || true
-    fail 'public default Madaros ELF exited nonzero for the #901 acceptance probe'
+    fail 'public-wrapper Madaros ELF exited nonzero for the #901 acceptance probe'
   fi
   grep -Eq "$expected" "$run_log" || {
     cat "$run_log" >&2 || true
-    fail "public default Madaros stdout missed the #901 witness: /$expected/"
+    fail "public-wrapper Madaros stdout missed the #901 witness: /$expected/"
   }
   CASE_MERGED="$(awk '/Merged IR:/{n=$NF} END{print n}' "$compile_log" 2>/dev/null || true)"
-  printf '[madaros-issue901-scale-source-fresh] PASS: public-default merged_ir=%s\n' "${CASE_MERGED:-unknown}"
+  printf '[madaros-issue901-scale-source-fresh] PASS: public-wrapper merged_ir=%s\n' "${CASE_MERGED:-unknown}"
 }
 
-run_public_default_case "$PROBE" 'm=5(\.0+)?'
-PUBLIC_DEFAULT_MERGED="$CASE_MERGED"
+run_public_wrapper_case "$PROBE" 'm=5(\.0+)?'
+PUBLIC_WRAPPER_MERGED="$CASE_MERGED"
 
 assert_source_provenance_unchanged
 
@@ -326,7 +345,12 @@ printf 'gate_script_sha256\t%s\n' "$GATE_SHA256" >>"$RECEIPT"
 printf 'madaros_root_repo_path\tbin/madaros-linux-x86_64\n' >>"$RECEIPT"
 printf 'madaros_root_git_blob\t%s\n' "$MADAROS_ROOT_BLOB" >>"$RECEIPT"
 printf 'madaros_root_sha256\t%s\n' "$MADAROS_ROOT_SHA256" >>"$RECEIPT"
-printf 'bootstrap_mode\ttracked-madaros-root-then-madaros-fixed-point\n' >>"$RECEIPT"
+printf 'souc_wrapper_sha256\t%s\n' "$SOUC_WRAPPER_SHA256" >>"$RECEIPT"
+printf 'madaros_wrapper_sha256\t%s\n' "$MADAROS_WRAPPER_SHA256" >>"$RECEIPT"
+printf 'acceptance_probe_sha256\t%s\n' "$PROBE_SHA256" >>"$RECEIPT"
+printf 'textbook_probe_sha256\t%s\n' "$TEXTBOOK_SHA256" >>"$RECEIPT"
+printf 'stdlib_driver_sha256\t%s\n' "$DRIVER_SHA256" >>"$RECEIPT"
+printf 'proof_bootstrap_mode\ttracked-madaros-root-then-madaros-fixed-point\n' >>"$RECEIPT"
 printf 'stage1_madaros_sha256\t%s\n' "$STAGE1_SHA256" >>"$RECEIPT"
 printf 'stage2_madaros_sha256\t%s\n' "$STAGE2_SHA256" >>"$RECEIPT"
 printf 'stage3_madaros_sha256\t%s\n' "$STAGE3_SHA256" >>"$RECEIPT"
@@ -334,7 +358,7 @@ printf 'stage1_seed\ttracked-madaros-root-direct\n' >>"$RECEIPT"
 printf 'stage2_seed\tstage1-madaros-direct\n' >>"$RECEIPT"
 printf 'stage3_seed\tstage2-madaros-direct\n' >>"$RECEIPT"
 printf 'operational_fixed_point\tsha256-stage2-equals-stage3\n' >>"$RECEIPT"
-printf 'acceptance_mode\tdirect-raw-elf-no-wrapper\n' >>"$RECEIPT"
+printf 'direct_raw_acceptance_mode\tdirect-raw-elf-no-wrapper\n' >>"$RECEIPT"
 printf 'engine_fallback\t0\n' >>"$RECEIPT"
 printf 'compact_imported_ir\t0\n' >>"$RECEIPT"
 printf 'default_merge_mode\tinto-acc\n' >>"$RECEIPT"
@@ -347,7 +371,7 @@ printf 'stdlib_driver\tPROB_STDLIB_OK\n' >>"$RECEIPT"
 printf 'stdlib_driver_merged_ir\t%s\n' "${DRIVER_MERGED:-unknown}" >>"$RECEIPT"
 printf 'public_wrapper_route\tbin/souc-compile-pinned-to-stage3\n' >>"$RECEIPT"
 printf 'public_wrapper_probe\tm=5.000000\n' >>"$RECEIPT"
-printf 'public_wrapper_probe_merged_ir\t%s\n' "${PUBLIC_DEFAULT_MERGED:-unknown}" >>"$RECEIPT"
+printf 'public_wrapper_probe_merged_ir\t%s\n' "${PUBLIC_WRAPPER_MERGED:-unknown}" >>"$RECEIPT"
 
 cat "$RECEIPT"
 echo "[madaros-issue901-scale-source-fresh] PASS: source_head=$SOURCE_HEAD stage3_sha256=$STAGE3_SHA256 receipt=$RECEIPT"
