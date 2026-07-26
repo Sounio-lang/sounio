@@ -455,6 +455,15 @@ lean_lib «SounioTacrolimusDosingSafety» where
 @[default_target]
 lean_lib «SounioTacrolimusDDI» where
 
+-- Mercyful Learning scheduler correctness (MIMIC-IV vancomycin TDM line,
+-- Task 3): constrained argmin reaches the target (anti-Goodhart
+-- sufficiency), Goodhart-trap theorem (necessity), naive toxicity
+-- minimizer under-doses. Mathlib-free; abstract theorems pure,
+-- concrete MIMIC-IV instance via native_decide. Gate:
+-- scripts/ci/mercyful_lean_gate.sh.
+@[default_target]
+lean_lib «SounioMercyfulScheduler» where
+
 -- M2.5: Vancomycin-Knightian thrust — Fréchet outer enclosure for
 -- monotone-in-each-arg functions (joint-dependence resolution)
 @[default_target]
