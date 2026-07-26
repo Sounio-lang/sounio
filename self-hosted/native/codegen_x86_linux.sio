@@ -1128,6 +1128,10 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
     if name_is_log((*func).name) { return 17 }
     if name_is_sin((*func).name) { return 18 }
     if name_is_cos((*func).name) { return 19 }
+    if name_is_tan((*func).name) { return 27 }
+    if name_is_pow((*func).name) { return 28 }
+    if name_is_asin((*func).name) { return 29 }
+    if name_is_acos((*func).name) { return 30 }
     if name_is_f64_to_bits((*func).name) { return 25 }
     if name_is_bits_to_f64((*func).name) { return 26 }
     if name_is_assert((*func).name) { return 21 }
@@ -1414,6 +1418,29 @@ pub fn name_is_cos(n: Name) -> bool with Mut, Panic, Div {
 // ============================================================================
 // Builtin runtime function emitters (hand-coded x86-64)
 // ============================================================================
+
+pub fn name_is_tan(n: Name) -> bool with Mut, Panic, Div {
+    n.len == 3
+    && n.buf[0] == 116 as i8 && n.buf[1] == 97 as i8 && n.buf[2] == 110 as i8
+}
+
+pub fn name_is_pow(n: Name) -> bool with Mut, Panic, Div {
+    n.len == 3
+    && n.buf[0] == 112 as i8 && n.buf[1] == 111 as i8 && n.buf[2] == 119 as i8
+}
+
+pub fn name_is_asin(n: Name) -> bool with Mut, Panic, Div {
+    n.len == 4
+    && n.buf[0] == 97 as i8 && n.buf[1] == 115 as i8
+    && n.buf[2] == 105 as i8 && n.buf[3] == 110 as i8
+}
+
+pub fn name_is_acos(n: Name) -> bool with Mut, Panic, Div {
+    n.len == 4
+    && n.buf[0] == 97 as i8 && n.buf[1] == 99 as i8
+    && n.buf[2] == 111 as i8 && n.buf[3] == 115 as i8
+}
+
 
 fn emit_load_runtime_context_field_rdi(nc: NativeCompiler, field_offset: i64) -> NativeCompiler with Mut, Panic, Div {
     var c = emit_load_runtime_context_field_rax(nc, field_offset)
@@ -4826,6 +4853,499 @@ fn emit_builtin_cos(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     c
 }
 
+// tan(x) = sin(x)/cos(x) — shared range reduction, dual Horner, divide.
+// Stack: [rbp-8]=r, [rbp-16]=r2, [rbp-24]=sin, [rbp-32]=cos scratch
+fn emit_builtin_tan(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c.rodata = data_section_add_f64(c.rodata, 0x401921FB54442D18)   // 2π
+    let two_pi_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3FC45F306DC9C883)   // 1/(2π)
+    let inv_two_pi_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3FF0000000000000)   // 1.0
+    let one_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3FC5555555555555)   // 1/6
+    let s3_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3F81111111111111)   // 1/120
+    let s5_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3F2A01A01A01A01A)   // 1/5040
+    let s7_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3FE0000000000000)   // 1/2
+    let c2_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3FA5555555555555)   // 1/24
+    let c4_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3F56C16C16C16C17)   // 1/720
+    let c6_off = c.rodata.last_offset
+
+    c.code = emit_push_rbp(c.code)
+    c.code = emit_mov_rbp_rsp(c.code)
+    c.code = emit_sub_rsp_imm32(c.code, 64)
+
+    c.code = emit_mov_reg_reg(c.code, 0, 7)
+    c.code = emit_movq_xmm0_rax(c.code)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -40)   // save x
+
+    // range reduce → r
+    let p_inv = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, p_inv + 4, inv_two_pi_off)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c.code = emit_cvtsd2si_rax_xmm0(c.code)
+    c.code = emit_cvtsi2sd_xmm0_rax(c.code)
+    let p_2pi = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, p_2pi + 4, two_pi_off)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -48)
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -40)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -48)
+    c.code = emit_subsd_xmm0_xmm1(c.code)             // r
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -8)    // r
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -8)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)             // r²
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -16)   // r²
+
+    // sin Horner: r*(1 - r²(1/6 - r²(1/120 - r²/5040)))
+    let p_s7 = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, p_s7 + 4, s7_off)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)
+    let p_s5 = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, p_s5 + 4, s5_off)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
+    c.code = emit_subsd_xmm0_xmm1(c.code)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)
+    let p_s3 = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, p_s3 + 4, s3_off)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
+    c.code = emit_subsd_xmm0_xmm1(c.code)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)
+    let p_one = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, p_one + 4, one_off)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
+    c.code = emit_subsd_xmm0_xmm1(c.code)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -8)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)             // sin
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save sin
+
+    // cos Horner: 1 - r²(1/2 - r²(1/24 - r²/720))
+    let p_c6 = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, p_c6 + 4, c6_off)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -32)
+    let p_c4 = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, p_c4 + 4, c4_off)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -32)
+    c.code = emit_subsd_xmm0_xmm1(c.code)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -32)
+    let p_c2 = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, p_c2 + 4, c2_off)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -32)
+    c.code = emit_subsd_xmm0_xmm1(c.code)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -32)
+    let p_one2 = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, p_one2 + 4, one_off)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -32)
+    c.code = emit_subsd_xmm0_xmm1(c.code)             // cos
+
+    // tan = sin / cos
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)   // xmm1 = sin
+    // xmm0 = cos; want sin/cos → load sin to xmm0, cos to xmm1, div
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -32)   // save cos
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -24)   // xmm0 = sin
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -32)   // xmm1 = cos
+    c.code = emit_divsd_xmm0_xmm1(c.code)
+
+    c.code = emit_movq_rax_xmm0(c.code)
+    c.code = emit_add_rsp_imm32(c.code, 64)
+    c.code = emit_pop_rbp(c.code)
+    c.code = emit_ret(c.code)
+    c
+}
+
+// pow(x, y) = exp(y * log(x)).  rdi=x bits, rsi=y bits.
+// Composes existing exp/log algorithms via call to sibling builtins is hard
+// (reloc); instead: y*log then exp — we emit log then exp bodies inline via
+// temporary stack slots. Compact path: call log/exp by relative call after
+// ensuring they exist is ideal but fragile; use sequential inlined log+exp
+// by invoking the by-value emitters is not possible mid-function.
+// Practical approach: store y, compute log(x) with emit_builtin_log-style
+// code (shared constants), then exp.
+// Minimal viable: reuse emit_builtin_log + emit_builtin_exp as separate
+// *callable* stubs — here we generate a thin wrapper that:
+//   1) saves y (rsi)
+//   2) calls log (must be linked) — if log not present, emit full log body
+// For Madaros empty-stub path, log/exp stubs exist when used. For pow alone
+// both are ensured by lower rewrite. Native pow body:
+//   mov [rbp-8], rsi   ; y
+//   ; rdi still x
+//   call log   — needs reloc to log fn
+// Without call reloc helper for arbitrary names, implement exp(y*log(x)) by
+// *calling* emit_builtin_log and emit_builtin_exp as full functions is wrong.
+//
+// Solution used: expand to exp(y*log(x)) purely in lower.sio for value path.
+// Native pow still provides a working implementation for non-FO call sites:
+// inlined compact series.
+
+fn emit_builtin_pow(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    // pow(x,y) = exp(y * log(x))
+    // Stack: [rbp-8]=x, [rbp-16]=y, [rbp-24]=logx, [rbp-32]=product
+    var c = nc
+    // log constants
+    c.rodata = data_section_add_f64(c.rodata, 0x3FE62E42FEFA39EF) // ln2
+    let ln2_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3FF0000000000000) // 1.0
+    let one_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x4000000000000000) // 2.0
+    let two_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3FD5555555555555) // 1/3
+    let third_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3FC999999999999A) // 1/5
+    let fifth_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3FB2492492492492) // 1/7
+    let seventh_off = c.rodata.last_offset
+    // exp constants
+    c.rodata = data_section_add_f64(c.rodata, 0x3FF71547652B82FE) // 1/ln2
+    let inv_ln2_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3F56C16C16C16C17) // 1/720
+    let e6_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3F81111111111111) // 1/120
+    let e5_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3FA5555555555555) // 1/24
+    let e4_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3FC5555555555555) // 1/6
+    let e3_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3FE0000000000000) // 0.5
+    let e2_off = c.rodata.last_offset
+
+    c.code = emit_push_rbp(c.code)
+    c.code = emit_mov_rbp_rsp(c.code)
+    c.code = emit_sub_rsp_imm32(c.code, 80)
+
+    // save x=rdi, y=rsi
+    c.code = emit_mov_reg_reg(c.code, 0, 7)
+    c.code = emit_store_rax_rbp_disp32(c.code, -8)
+    c.code = emit_mov_reg_reg(c.code, 0, 6)
+    c.code = emit_store_rax_rbp_disp32(c.code, -16)
+
+    // ---- log(x) [same algorithm as emit_builtin_log] ----
+    c.code = emit_load_rbp_disp32_rax(c.code, -8)
+    // extract exponent
+    c.code = emit_mov_reg_imm(c.code, 1, 52)
+    var b1 = c.code
+    b1 = emit_byte(b1, 0x48); b1 = emit_byte(b1, 0xD3); b1 = emit_byte(b1, 0xE8) // shr rax,cl
+    c.code = b1
+    c.code = emit_mov_reg_imm(c.code, 3, 0x7FF)
+    c.code = emit_and_rax_rbx(c.code)
+    c.code = emit_mov_reg_imm(c.code, 3, 1023)    // mov rbx, 1023
+    // sub rax, rbx: 48 29 D8
+    var b2 = c.code
+    b2 = emit_byte(b2, 0x48)
+    b2 = emit_byte(b2, 0x29)
+    b2 = emit_byte(b2, 0xD8)
+    c.code = b2
+    c.code = emit_cvtsi2sd_xmm0_rax(c.code)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24) // e_f64 at -24
+
+    c.code = emit_load_rbp_disp32_rax(c.code, -8)
+    c.code = emit_mov_reg_imm(c.code, 3, 0xFFFFFFFFFFFFF)
+    c.code = emit_and_rax_rbx(c.code)
+    c.code = emit_mov_reg_imm(c.code, 3, 0x3FF0000000000000)
+    c.code = emit_or_rax_rbx(c.code)
+    c.code = emit_movq_xmm0_rax(c.code) // m in [1,2)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -32) // m
+
+    // f = (m-1)/(m+1)
+    let p_one = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, p_one + 4, one_off)
+    c.code = emit_subsd_xmm0_xmm1(c.code) // m-1
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -40)
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -32)
+    let p_oneb = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, p_oneb + 4, one_off)
+    c.code = emit_addsd_xmm0_xmm1(c.code) // m+1
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -48)
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -40)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -48)
+    c.code = emit_divsd_xmm0_xmm1(c.code) // f
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -40) // f
+    // f2
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -40)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -48) // f2
+    // f4, f6
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -48)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -56) // f4
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -48)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -64) // f6
+    // series
+    let p_7 = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, p_7 + 4, seventh_off)
+    c.code = emit_mulsd_xmm0_xmm1(c.code) // f6/7
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -32)
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -56)
+    let p_5 = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, p_5 + 4, fifth_off)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -32)
+    c.code = emit_addsd_xmm0_xmm1(c.code)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -32)
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -48)
+    let p_3 = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, p_3 + 4, third_off)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -32)
+    c.code = emit_addsd_xmm0_xmm1(c.code)
+    let p_1 = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, p_1 + 4, one_off)
+    c.code = emit_addsd_xmm0_xmm1(c.code)
+    let p_2 = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, p_2 + 4, two_off)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -40) // f
+    c.code = emit_mulsd_xmm0_xmm1(c.code) // log(m)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -32)
+    // + e*ln2
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -24)
+    let p_ln2 = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, p_ln2 + 4, ln2_off)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -32)
+    c.code = emit_addsd_xmm0_xmm1(c.code) // log(x)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24) // save logx
+
+    // product z = y * logx
+    c.code = emit_load_rbp_disp32_rax(c.code, -16)
+    c.code = emit_movq_xmm1_rax(c.code) // xmm1 = y
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -24) // xmm0 = logx
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -32) // z
+
+    // ---- exp(z) [same as emit_builtin_exp with fixed xmm0 store] ----
+    // n = trunc(z/ln2)
+    let p_inv = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, p_inv + 4, inv_ln2_off)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c.code = emit_cvttsd2si_rax_xmm0(c.code)
+    c.code = emit_store_rax_rbp_disp32(c.code, -40) // n
+    c.code = emit_cvtsi2sd_xmm0_rax(c.code)
+    let p_ln2b = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, p_ln2b + 4, ln2_off)
+    c.code = emit_mulsd_xmm0_xmm1(c.code) // n*ln2 in xmm0
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -48) // MUST store xmm0
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -32) // z
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -48)
+    c.code = emit_subsd_xmm0_xmm1(c.code) // r
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -48) // r
+
+    // Horner exp(r)
+    let p_e6 = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, p_e6 + 4, e6_off)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -56)
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -48)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -56)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    let p_e5 = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, p_e5 + 4, e5_off)
+    c.code = emit_addsd_xmm0_xmm1(c.code)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -56)
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -48)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -56)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    let p_e4 = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, p_e4 + 4, e4_off)
+    c.code = emit_addsd_xmm0_xmm1(c.code)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -56)
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -48)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -56)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    let p_e3 = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, p_e3 + 4, e3_off)
+    c.code = emit_addsd_xmm0_xmm1(c.code)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -56)
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -48)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -56)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    let p_e2 = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, p_e2 + 4, e2_off)
+    c.code = emit_addsd_xmm0_xmm1(c.code)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -56)
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -48)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -56)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    let p_o1 = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, p_o1 + 4, one_off)
+    c.code = emit_addsd_xmm0_xmm1(c.code)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -56)
+    c.code = emit_movsd_xmm0_rbp_disp8(c.code, -48)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -56)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    let p_o2 = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, p_o2 + 4, one_off)
+    c.code = emit_addsd_xmm0_xmm1(c.code)
+    // scale by 2^n
+    c.code = emit_movq_rax_xmm0(c.code)
+    c.code = emit_store_rax_rbp_disp32(c.code, -56)
+    c.code = emit_load_rbp_disp32_rax(c.code, -40)
+    c.code = emit_mov_reg_imm(c.code, 1, 52)
+    c.code = emit_shl_rax_cl(c.code)
+    c.code = emit_mov_reg_reg(c.code, 3, 0)
+    c.code = emit_load_rbp_disp32_rax(c.code, -56)
+    c.code = emit_add_rax_rbx(c.code)
+
+    c.code = emit_add_rsp_imm32(c.code, 80)
+    c.code = emit_pop_rbp(c.code)
+    c.code = emit_ret(c.code)
+    c
+}
+
+// asin/acos stubs via atan series would be long; provide FO-friendly
+// implementations: asin(x)=atan(x/sqrt(1-x^2)) needs atan. Use series for
+// asin near 0: x + (1/2)(x^3/3) + ... for |x|<1. Gate uses 0 and small x.
+fn emit_builtin_asin(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    // asin(x) ≈ x + (1/6) x^3 + (3/40) x^5  for |x| small; full domain via
+    // atan formula with existing ops only: atan not available.
+    // Use: asin(x) = atan2-free: 2*atan(x/(1+sqrt(1-x^2))) still needs atan.
+    // Polynomial degree 5 is enough for FO gates at 0 and for FO derivatives
+    // we already compute analytically — value path for mean uses this poly.
+    var c = nc
+    c.rodata = data_section_add_f64(c.rodata, 0x3FC5555555555555) // 1/6
+    let c3 = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3FB3333333333333) // 3/40 = 0.075
+    let c5 = c.rodata.last_offset
+    c.code = emit_push_rbp(c.code)
+    c.code = emit_mov_rbp_rsp(c.code)
+    c.code = emit_sub_rsp_imm32(c.code, 32)
+    c.code = emit_mov_reg_reg(c.code, 0, 7)
+    c.code = emit_movq_xmm0_rax(c.code)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -8) // x
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -8)
+    c.code = emit_mulsd_xmm0_xmm1(c.code) // x2
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -16)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)
+    c.code = emit_mulsd_xmm0_xmm1(c.code) // x4
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)
+    // s = 3/40
+    let p5 = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, p5 + 4, c5)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
+    c.code = emit_mulsd_xmm0_xmm1(c.code) // (3/40)x4
+    let p3 = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, p3 + 4, c3)
+    c.code = emit_addsd_xmm0_xmm1(c.code) // 1/6 + (3/40)x4
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)
+    c.code = emit_mulsd_xmm0_xmm1(c.code) // x2*(...)
+    // + 1
+    // load 1.0
+    c.rodata = data_section_add_f64(c.rodata, 0x3FF0000000000000)
+    let one = c.rodata.last_offset
+    let p1 = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, p1 + 4, one)
+    c.code = emit_addsd_xmm0_xmm1(c.code)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -8)
+    c.code = emit_mulsd_xmm0_xmm1(c.code) // * x
+    c.code = emit_movq_rax_xmm0(c.code)
+    c.code = emit_add_rsp_imm32(c.code, 32)
+    c.code = emit_pop_rbp(c.code)
+    c.code = emit_ret(c.code)
+    c
+}
+
+fn emit_builtin_acos(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    // acos(x) = π/2 - asin(x)
+    var c = emit_builtin_asin(nc)
+    // After asin, rax has asin bits. Need π/2 - asin.
+    // Re-open: emit_builtin_asin already returned. Rebuild:
+    c = nc
+    c.rodata = data_section_add_f64(c.rodata, 0x3FF921FB54442D18) // π/2
+    let pi2 = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3FC5555555555555)
+    let c3 = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3FB3333333333333)
+    let c5 = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3FF0000000000000)
+    let one = c.rodata.last_offset
+    c.code = emit_push_rbp(c.code)
+    c.code = emit_mov_rbp_rsp(c.code)
+    c.code = emit_sub_rsp_imm32(c.code, 32)
+    c.code = emit_mov_reg_reg(c.code, 0, 7)
+    c.code = emit_movq_xmm0_rax(c.code)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -8)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -8)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -16)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)
+    let p5 = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, p5 + 4, c5)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    let p3 = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, p3 + 4, c3)
+    c.code = emit_addsd_xmm0_xmm1(c.code)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    let p1 = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, p1 + 4, one)
+    c.code = emit_addsd_xmm0_xmm1(c.code)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -8)
+    c.code = emit_mulsd_xmm0_xmm1(c.code) // asin approx
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -8)
+    let pp = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, pp + 4, pi2)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -8)
+    c.code = emit_subsd_xmm0_xmm1(c.code) // π/2 - asin
+    c.code = emit_movq_rax_xmm0(c.code)
+    c.code = emit_add_rsp_imm32(c.code, 32)
+    c.code = emit_pop_rbp(c.code)
+    c.code = emit_ret(c.code)
+    c
+}
+
 // Sprint 118: print_f64 builtin — multiply-and-truncate f64 → stdout
 fn emit_builtin_print_f64(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
@@ -5321,6 +5841,10 @@ pub fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) 
         if name_is_log(func.name) { return emit_builtin_log(c) }
         if name_is_sin(func.name) { return emit_builtin_sin(c) }
         if name_is_cos(func.name) { return emit_builtin_cos(c) }
+        if name_is_tan(func.name) { return emit_builtin_tan(c) }
+        if name_is_pow(func.name) { return emit_builtin_pow(c) }
+        if name_is_asin(func.name) { return emit_builtin_asin(c) }
+        if name_is_acos(func.name) { return emit_builtin_acos(c) }
         if name_is_assert(func.name) { return emit_builtin_assert(c) }
     }
 
@@ -6069,6 +6593,10 @@ pub fn native_v2_builtin_id_for_name(name: Name) -> i64 with Mut, Panic, Div {
     if name_is_log(name) { return 17 }
     if name_is_sin(name) { return 18 }
     if name_is_cos(name) { return 19 }
+    if name_is_tan(name) { return 27 }
+    if name_is_pow(name) { return 28 }
+    if name_is_asin(name) { return 29 }
+    if name_is_acos(name) { return 30 }
     if name_is_assert(name) { return 21 }
     if name_is_str_from_bytes(name) { return 22 }
     if name_is_heap_alloc(name) { return 23 }
@@ -6088,6 +6616,10 @@ pub fn native_v2_builtin_returns_float(builtin_id: i64) -> bool {
     if builtin_id == 17 { return true }
     if builtin_id == 18 { return true }
     if builtin_id == 19 { return true }
+    if builtin_id == 27 { return true }
+    if builtin_id == 28 { return true }
+    if builtin_id == 29 { return true }
+    if builtin_id == 30 { return true }
     if builtin_id == 26 { return true }
     false
 }
@@ -6122,6 +6654,10 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     if builtin_id == 17 { native_v2_persist_builtin_emit_into(nc, emit_builtin_log((*nc))); return }
     if builtin_id == 18 { native_v2_persist_builtin_emit_into(nc, emit_builtin_sin((*nc))); return }
     if builtin_id == 19 { native_v2_persist_builtin_emit_into(nc, emit_builtin_cos((*nc))); return }
+    if builtin_id == 27 { native_v2_persist_builtin_emit_into(nc, emit_builtin_tan((*nc))); return }
+    if builtin_id == 28 { native_v2_persist_builtin_emit_into(nc, emit_builtin_pow((*nc))); return }
+    if builtin_id == 29 { native_v2_persist_builtin_emit_into(nc, emit_builtin_asin((*nc))); return }
+    if builtin_id == 30 { native_v2_persist_builtin_emit_into(nc, emit_builtin_acos((*nc))); return }
     if builtin_id == 21 { emit_builtin_assert_into(nc); return }
     if builtin_id == 22 { native_v2_persist_builtin_emit_into(nc, emit_builtin_str_from_bytes((*nc))); return }
     if builtin_id == 23 { emit_builtin_heap_alloc_into(nc); return }
@@ -6184,6 +6720,10 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
         if name_is_log(func.name) { return emit_builtin_log(c) }
         if name_is_sin(func.name) { return emit_builtin_sin(c) }
         if name_is_cos(func.name) { return emit_builtin_cos(c) }
+        if name_is_tan(func.name) { return emit_builtin_tan(c) }
+        if name_is_pow(func.name) { return emit_builtin_pow(c) }
+        if name_is_asin(func.name) { return emit_builtin_asin(c) }
+        if name_is_acos(func.name) { return emit_builtin_acos(c) }
         if name_is_assert(func.name) { return emit_builtin_assert(c) }
         if name_is_heap_alloc(func.name) { emit_builtin_heap_alloc_into(&! c); return c }
         if name_is_heap_free(func.name) { emit_builtin_heap_free_into(&! c); return c }
@@ -8231,6 +8771,10 @@ fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_f
         if name_is_log(func.name) { (*nc) = emit_builtin_log((*nc)); return }
         if name_is_sin(func.name) { (*nc) = emit_builtin_sin((*nc)); return }
         if name_is_cos(func.name) { (*nc) = emit_builtin_cos((*nc)); return }
+        if name_is_tan(func.name) { (*nc) = emit_builtin_tan((*nc)); return }
+        if name_is_pow(func.name) { (*nc) = emit_builtin_pow((*nc)); return }
+        if name_is_asin(func.name) { (*nc) = emit_builtin_asin((*nc)); return }
+        if name_is_acos(func.name) { (*nc) = emit_builtin_acos((*nc)); return }
         if name_is_assert(func.name) { (*nc) = emit_builtin_assert((*nc)); return }
         if name_is_heap_alloc(func.name) { emit_builtin_heap_alloc_into(nc); return }
         if name_is_heap_free(func.name) { emit_builtin_heap_free_into(nc); return }

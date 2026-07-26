@@ -6707,6 +6707,52 @@ impl Lowerer {
         }
     }
 
+
+    // Value rewrite: pow(base, c_lit) → exp(c * log(base)) using working natives.
+    fn lower_pow_const_value_ref(
+        self,
+        args: &Option<Box<ExprList>>
+    ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        match *args {
+            Some(list) => {
+                match (*list).tail {
+                    Some(rest) => {
+                        let exp_e = &(*rest).head
+                        var cval: f64 = 0.0
+                        var ok = false
+                        if (*exp_e).kind == ExprKind::ExprFloatLit {
+                            cval = (*exp_e).float_val
+                            ok = true
+                        }
+                        if (*exp_e).kind == ExprKind::ExprIntLit {
+                            cval = (*exp_e).int_val as f64
+                            ok = true
+                        }
+                        if !ok {
+                            return self.emit_f64_const(0.0)
+                        }
+                        let bp = self.lower_expr_ref(&(*list).head)
+                        var lo = bp.0
+                        let base = bp.1
+                        let lxp = lo.fo_emit_math_call1(make_name("log"), base)
+                        lo = lxp.0
+                        let lx = lxp.1
+                        let cp = lo.emit_f64_const(cval)
+                        lo = cp.0
+                        let prod = lo.fresh_reg()
+                        lo = prod.0
+                        let pr = prod.1
+                        lo = lo.emit(ir_binop_typed(pr, cp.1, BinaryOp::OpMul, lx, true, true))
+                        lo = lo.emit(ir_mark_float_reg(pr))
+                        lo.fo_emit_math_call1(make_name("exp"), pr)
+                    }
+                    _ => self.emit_f64_const(0.0),
+                }
+            }
+            _ => self.emit_f64_const(0.0),
+        }
+    }
+
     // Emit f64 call: fname(arg_reg) → dst reg
     fn fo_emit_math_call1(self, fname: Name, arg_reg: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
@@ -13507,6 +13553,26 @@ impl Lowerer {
         }
         if self.name_is_hessian_diag_of(callee_name) {
             return self.lower_hessian_diag_of_call_ref(&e.args)
+        }
+        if self.fo_name_is_pow(callee_name) {
+            // Prefer const-exponent rewrite so mean uses exp/log, not stub pow.
+            let pv = self.lower_pow_const_value_ref(&e.args)
+            // Always use rewrite when const; if non-const falls through with 0.0
+            // Check: if rewrite got const path it returns real value.
+            // Non-const still tries native pow.
+            match e.args {
+                Some(list) => {
+                    match (*list).tail {
+                        Some(rest) => {
+                            if (*rest).head.kind == ExprKind::ExprFloatLit || (*rest).head.kind == ExprKind::ExprIntLit {
+                                return pv
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
         }
         if self.name_is_uncertainty_of(callee_name) {
             return self.lower_uncertainty_of_call_ref(&e.args)
