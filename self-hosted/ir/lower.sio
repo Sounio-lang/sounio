@@ -5974,6 +5974,20 @@ impl Lowerer {
         && n.buf[16] == 110 as i8
     }
 
+    // hessian_diag_of(expr) → Σ_k H_kk (diagonal Hessian sum, FO channels)
+    fn name_is_hessian_diag_of(self, n: Name) -> bool with Div {
+        // "hessian_diag_of" = 15 chars
+        n.len == 15
+        && n.buf[0] == 104 as i8 && n.buf[1] == 101 as i8
+        && n.buf[2] == 115 as i8 && n.buf[3] == 115 as i8
+        && n.buf[4] == 105 as i8 && n.buf[5] == 97 as i8
+        && n.buf[6] == 110 as i8 && n.buf[7] == 95 as i8
+        && n.buf[8] == 100 as i8 && n.buf[9] == 105 as i8
+        && n.buf[10] == 97 as i8 && n.buf[11] == 103 as i8
+        && n.buf[12] == 95 as i8 && n.buf[13] == 111 as i8
+        && n.buf[14] == 102 as i8
+    }
+
     fn lower_measure_value_arg_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         match *args {
             Some(list) => self.lower_expr_ref(&(*list).head),
@@ -6198,6 +6212,27 @@ impl Lowerer {
                 lo = a_p.0
                 let nacc = a_p.1
                 lo = lo.emit(ir_binop_typed(nacc, acc, BinaryOp::OpAdd, t2, true, true))
+                lo = lo.emit(ir_mark_float_reg(nacc))
+                acc = nacc
+            }
+            k = k + 1
+        }
+        (lo, acc)
+    }
+
+    // Σ_k H_kk (raw diagonal Hessian sum; not scaled by σ²)
+    fn fo_emit_hess_diag_sum(self) -> (Lowerer, i64) with Mut, Panic, Div {
+        let z = self.emit_f64_const(0.0)
+        var lo = z.0
+        var acc = z.1
+        var k: i64 = 0
+        while k < 32 {
+            let hreg = lo.fo_expr_hess[k as usize]
+            if hreg >= 0 {
+                let a_p = lo.fresh_reg()
+                lo = a_p.0
+                let nacc = a_p.1
+                lo = lo.emit(ir_binop_typed(nacc, acc, BinaryOp::OpAdd, hreg, true, true))
                 lo = lo.emit(ir_mark_float_reg(nacc))
                 acc = nacc
             }
@@ -6552,6 +6587,16 @@ impl Lowerer {
             && n.buf[2] == 110 as i8 && n.buf[3] == 104 as i8 {
             return 7
         }
+        if n.len == 4
+            && n.buf[0] == 97 as i8 && n.buf[1] == 115 as i8
+            && n.buf[2] == 105 as i8 && n.buf[3] == 110 as i8 {
+            return 8
+        }
+        if n.len == 4
+            && n.buf[0] == 97 as i8 && n.buf[1] == 99 as i8
+            && n.buf[2] == 111 as i8 && n.buf[3] == 115 as i8 {
+            return 9
+        }
         -1
     }
 
@@ -6566,7 +6611,100 @@ impl Lowerer {
         }
         if kind == 5 { return make_name("tan") }
         if kind == 6 { return make_name("atan") }
+        if kind == 7 { return make_name("tanh") }
+        if kind == 8 { return make_name("asin") }
+        if kind == 9 { return make_name("acos") }
         make_name("tanh")
+    }
+
+    fn fo_name_is_pow(self, n: Name) -> bool with Div {
+        n.len == 3
+        && n.buf[0] == 112 as i8 && n.buf[1] == 111 as i8 && n.buf[2] == 119 as i8
+    }
+
+    // pow(base, exp) FO when exp is float/int literal constant.
+    // Uses exp/log (trustworthy natives) — Madaros has no working pow builtin.
+    fn fo_apply_pow_const(
+        self,
+        args: &Option<Box<ExprList>>
+    ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        match *args {
+            Some(list) => {
+                match (*list).tail {
+                    Some(rest) => {
+                        let exp_e = &(*rest).head
+                        var cval: f64 = 0.0
+                        var ok = false
+                        if (*exp_e).kind == ExprKind::ExprFloatLit {
+                            cval = (*exp_e).float_val
+                            ok = true
+                        }
+                        if (*exp_e).kind == ExprKind::ExprIntLit {
+                            cval = (*exp_e).int_val as f64
+                            ok = true
+                        }
+                        if !ok {
+                            return (self.fo_clear_expr_sens(), -1)
+                        }
+                        let pair_v = self.lower_expr_variance_ref(&(*list).head)
+                        var lo = pair_v.0
+                        let s_in = lo.fo_snapshot_expr_sens()
+                        let h_in = lo.fo_snapshot_expr_hess()
+                        var has = false
+                        var ki: i64 = 0
+                        while ki < 32 {
+                            if s_in[ki as usize] >= 0 || h_in[ki as usize] >= 0 { has = true }
+                            ki = ki + 1
+                        }
+                        if !has {
+                            return (lo.fo_clear_expr_sens(), -1)
+                        }
+                        let aval = lo.lower_expr_ref(&(*list).head)
+                        lo = aval.0
+                        let base = aval.1
+                        // lx = log(base);  x^{c-1} = exp((c-1)*lx);  x^c = exp(c*lx)
+                        let lxp = lo.fo_emit_math_call1(make_name("log"), base)
+                        lo = lxp.0
+                        let lx = lxp.1
+                        let cm1_p = lo.emit_f64_const(cval - 1.0)
+                        lo = cm1_p.0
+                        let cm1 = cm1_p.1
+                        let t1 = lo.fresh_reg()
+                        lo = t1.0
+                        let cm1_lx = t1.1
+                        lo = lo.emit(ir_binop_typed(cm1_lx, cm1, BinaryOp::OpMul, lx, true, true))
+                        lo = lo.emit(ir_mark_float_reg(cm1_lx))
+                        let y_p = lo.fo_emit_math_call1(make_name("exp"), cm1_lx)
+                        lo = y_p.0
+                        let y = y_p.1
+                        // f' = c * x^{c-1}
+                        let c_p = lo.emit_f64_const(cval)
+                        lo = c_p.0
+                        let creg = c_p.1
+                        let fp = lo.fresh_reg()
+                        lo = fp.0
+                        let fprime = fp.1
+                        lo = lo.emit(ir_binop_typed(fprime, creg, BinaryOp::OpMul, y, true, true))
+                        lo = lo.emit(ir_mark_float_reg(fprime))
+                        // f'' = (c-1)/base * f'
+                        let ratio = lo.fresh_reg()
+                        lo = ratio.0
+                        let r = ratio.1
+                        lo = lo.emit(ir_binop_typed(r, cm1, BinaryOp::OpDiv, base, true, true))
+                        lo = lo.emit(ir_mark_float_reg(r))
+                        let f2p = lo.fresh_reg()
+                        lo = f2p.0
+                        let f2 = f2p.1
+                        lo = lo.emit(ir_binop_typed(f2, r, BinaryOp::OpMul, fprime, true, true))
+                        lo = lo.emit(ir_mark_float_reg(f2))
+                        lo = lo.fo_combine_unary_chain(s_in, h_in, fprime, f2)
+                        lo.fo_emit_var_from_sens()
+                    }
+                    _ => (self.fo_clear_expr_sens(), -1),
+                }
+            }
+            _ => (self.fo_clear_expr_sens(), -1),
+        }
     }
 
     // Emit f64 call: fname(arg_reg) → dst reg
@@ -6852,6 +6990,87 @@ impl Lowerer {
                     lo = np.0
                     f2 = np.1
                     lo = lo.emit(ir_binop_typed(f2, zp.1, BinaryOp::OpSub, raw, true, true))
+                    lo = lo.emit(ir_mark_float_reg(f2))
+                } else if kind == 8 {
+                    // asin: f'=1/sqrt(1-arg²), f''=arg/(1-arg²)^{3/2}
+                    let one_p = lo.emit_f64_const(1.0)
+                    lo = one_p.0
+                    let a2p = lo.fresh_reg()
+                    lo = a2p.0
+                    let a2 = a2p.1
+                    lo = lo.emit(ir_binop_typed(a2, arg_reg, BinaryOp::OpMul, arg_reg, true, true))
+                    lo = lo.emit(ir_mark_float_reg(a2))
+                    let om = lo.fresh_reg()
+                    lo = om.0
+                    let one_m = om.1
+                    lo = lo.emit(ir_binop_typed(one_m, one_p.1, BinaryOp::OpSub, a2, true, true))
+                    lo = lo.emit(ir_mark_float_reg(one_m))
+                    let sp = lo.fo_emit_math_call1(make_name("sqrt"), one_m)
+                    lo = sp.0
+                    let sq = sp.1
+                    let one2 = lo.emit_f64_const(1.0)
+                    lo = one2.0
+                    let fp = lo.fresh_reg()
+                    lo = fp.0
+                    fprime = fp.1
+                    lo = lo.emit(ir_binop_typed(fprime, one2.1, BinaryOp::OpDiv, sq, true, true))
+                    lo = lo.emit(ir_mark_float_reg(fprime))
+                    // f'' = arg / (1-arg²)^{3/2} = arg / ((1-arg²)*sqrt)
+                    let den = lo.fresh_reg()
+                    lo = den.0
+                    let d = den.1
+                    lo = lo.emit(ir_binop_typed(d, one_m, BinaryOp::OpMul, sq, true, true))
+                    lo = lo.emit(ir_mark_float_reg(d))
+                    let f2p = lo.fresh_reg()
+                    lo = f2p.0
+                    f2 = f2p.1
+                    lo = lo.emit(ir_binop_typed(f2, arg_reg, BinaryOp::OpDiv, d, true, true))
+                    lo = lo.emit(ir_mark_float_reg(f2))
+                } else if kind == 9 {
+                    // acos: f'=-1/sqrt(1-arg²), f''=-arg/(1-arg²)^{3/2}
+                    let one_p = lo.emit_f64_const(1.0)
+                    lo = one_p.0
+                    let a2p = lo.fresh_reg()
+                    lo = a2p.0
+                    let a2 = a2p.1
+                    lo = lo.emit(ir_binop_typed(a2, arg_reg, BinaryOp::OpMul, arg_reg, true, true))
+                    lo = lo.emit(ir_mark_float_reg(a2))
+                    let om = lo.fresh_reg()
+                    lo = om.0
+                    let one_m = om.1
+                    lo = lo.emit(ir_binop_typed(one_m, one_p.1, BinaryOp::OpSub, a2, true, true))
+                    lo = lo.emit(ir_mark_float_reg(one_m))
+                    let sp = lo.fo_emit_math_call1(make_name("sqrt"), one_m)
+                    lo = sp.0
+                    let sq = sp.1
+                    let one2 = lo.emit_f64_const(1.0)
+                    lo = one2.0
+                    let inv = lo.fresh_reg()
+                    lo = inv.0
+                    let invs = inv.1
+                    lo = lo.emit(ir_binop_typed(invs, one2.1, BinaryOp::OpDiv, sq, true, true))
+                    lo = lo.emit(ir_mark_float_reg(invs))
+                    let zp = lo.emit_f64_const(0.0)
+                    lo = zp.0
+                    let fp = lo.fresh_reg()
+                    lo = fp.0
+                    fprime = fp.1
+                    lo = lo.emit(ir_binop_typed(fprime, zp.1, BinaryOp::OpSub, invs, true, true))
+                    lo = lo.emit(ir_mark_float_reg(fprime))
+                    let den = lo.fresh_reg()
+                    lo = den.0
+                    let d = den.1
+                    lo = lo.emit(ir_binop_typed(d, one_m, BinaryOp::OpMul, sq, true, true))
+                    lo = lo.emit(ir_mark_float_reg(d))
+                    let raw = lo.fresh_reg()
+                    lo = raw.0
+                    let rawf = raw.1
+                    lo = lo.emit(ir_binop_typed(rawf, arg_reg, BinaryOp::OpDiv, d, true, true))
+                    lo = lo.emit(ir_mark_float_reg(rawf))
+                    let np = lo.fresh_reg()
+                    lo = np.0
+                    f2 = np.1
+                    lo = lo.emit(ir_binop_typed(f2, zp.1, BinaryOp::OpSub, rawf, true, true))
                     lo = lo.emit(ir_mark_float_reg(f2))
                 } else {
                     // tanh: f'=1-t²=sech², f''=-2 t (1-t²)
@@ -8307,10 +8526,17 @@ impl Lowerer {
                         lo = lo.fo_seed_from_variance(variance_reg)
                         return (lo, variance_reg)
                     }
-                    // FO chain rule through unary math (exp/sin/cos/sqrt/ln/tan/atan/tanh).
+                    // FO chain rule through unary math (exp/sin/cos/sqrt/ln/tan/atan/tanh/asin/acos).
                     let uk = self.fo_unary_math_kind(callee_name)
                     if uk >= 0 {
                         return self.fo_apply_unary_math(uk, &(*e).args)
+                    }
+                    // pow(x, c) with constant c: f = x^c, f'=c x^{c-1}, f''=c(c-1)x^{c-2}
+                    if self.fo_name_is_pow(callee_name) {
+                        let pp = self.fo_apply_pow_const(&(*e).args)
+                        if pp.1 >= 0 || pp.0.fo_expr_has_sens() {
+                            return pp
+                        }
                     }
                     // Inter-procedural FO via pure-fn transfer table.
                     let xfer = self.fo_apply_call_transfer(callee_name, &(*e).args, 0)
@@ -9452,7 +9678,8 @@ impl Lowerer {
                     let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
                     if self.name_is_variance_of(callee_name)
                         || self.name_is_uncertainty_of(callee_name)
-                        || self.name_is_second_order_mean(callee_name) {
+                        || self.name_is_second_order_mean(callee_name)
+                        || self.name_is_hessian_diag_of(callee_name) {
                         return true
                     }
                     let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
@@ -12860,6 +13087,21 @@ impl Lowerer {
         }
     }
 
+    // hessian_diag_of(expr): Σ H_kk after FO walk
+    fn lower_hessian_diag_of_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        match *args {
+            Some(list) => {
+                let pair_v = self.lower_expr_variance_ref(&(*list).head)
+                var lo = pair_v.0
+                let hp = lo.fo_emit_hess_diag_sum()
+                lo = hp.0
+                lo = lo.emit(ir_mark_float_reg(hp.1))
+                (lo, hp.1)
+            }
+            _ => self.emit_f64_const(0.0),
+        }
+    }
+
     fn lower_uncertainty_of_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let pair_v = self.lower_variance_of_call_ref(args)
         var lo = pair_v.0
@@ -13262,6 +13504,9 @@ impl Lowerer {
         }
         if self.name_is_second_order_mean(callee_name) {
             return self.lower_second_order_mean_call_ref(&e.args)
+        }
+        if self.name_is_hessian_diag_of(callee_name) {
+            return self.lower_hessian_diag_of_call_ref(&e.args)
         }
         if self.name_is_uncertainty_of(callee_name) {
             return self.lower_uncertainty_of_call_ref(&e.args)
