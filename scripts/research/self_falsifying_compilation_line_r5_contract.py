@@ -57,7 +57,11 @@ RUNGS = {
 SPEC_TOKEN_RE = re.compile(
     r"^\*\*Status:\*\*\s*`[^`]*`\s*[—-]+\s*`([A-Za-z0-9_]+)`", re.MULTILINE)
 # Tokens cited in the paper's contribution table: | R1 | ... | `TOKEN` |
-CITE_RE = re.compile(r"\|\s*(R[0-4])\s*\|\s*`([A-Za-z0-9_]+)`\s*\|")
+# R[0-9], not R[0-4]: the first version was pinned to the rungs that existed
+# when it was written, so it silently stopped seeing citations once the line
+# grew past R4 — W2 reported them missing while W1 said every cited token
+# checked out. A guard scoped to today's data is a guard that decays.
+CITE_RE = re.compile(r"\|\s*(R[0-9]+)\s*\|\s*`([A-Za-z0-9_]+)`\s*\|")
 
 
 def read(rel: str) -> str:
@@ -73,13 +77,17 @@ def spec_token(rel: str) -> str | None:
 
 
 def clause_w1(paper: str) -> tuple[bool, dict]:
+    # Resolve specs by DISCOVERY, not from the hardcoded RUNGS seed: W1 used
+    # the seed while W2 globbed, so once the line grew past the seed W1 said
+    # "spec declares no token" for rungs whose specs were sitting right there.
+    known = discovered_rungs()
     cited = dict(CITE_RE.findall(paper))
     ok = True
     if not cited:
         print("  no rung/token citations found in the paper's contribution table")
         ok = False
     for rung, token in sorted(cited.items()):
-        declared = spec_token(RUNGS.get(rung, ""))
+        declared = spec_token(known.get(rung, ""))
         if declared is None:
             print(f"  {rung}: spec declares no token (spec missing?)")
             ok = False
