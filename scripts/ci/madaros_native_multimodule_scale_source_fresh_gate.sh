@@ -120,18 +120,34 @@ assert_source_provenance_unchanged() {
   fi
 }
 
-assert_seeded_build_log() {
+build_from_madaros_seed() {
   local label="$1"
-  local log="$2"
-  local expected_seed="$3"
+  local seed="$2"
+  local output="$3"
+  local log="$4"
 
-  grep -Fq "using provided seed directly (SOUC_BIN/SOUNIO_SOUC_BIN): $expected_seed" "$log" || {
+  if ! (
+    printf 'madaros_seed\t%s\n' "$seed"
+    printf 'madaros_seed_mode\tnative-v2-compile\n'
+    ulimit -s unlimited 2>/dev/null || ulimit -s 131072 2>/dev/null || true
+    exec env \
+      -u MADAROS_RAW_BIN \
+      -u SOUNIO_MADAROS_BIN \
+      -u SOUNIO_SOUC_ENGINE \
+      -u SOUNIO_ENABLE_COMPACT_IMPORTED_IR \
+      -u SOUNIO_MADAROS_DEP_MERGE \
+      -u SOUNIO_INTO_ACC_NO_RESET \
+      -u SOUC_BIN \
+      -u SOUNIO_SOUC_BIN \
+      SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib" \
+      "$seed" --native-v2-compile "$ROOT_DIR/self-hosted/compiler/main.sio" "$output"
+  ) >"$log" 2>&1; then
     cat "$log" >&2 || true
-    fail "$label did not record the expected direct Madaros seed: $expected_seed"
-  }
-  grep -Fq "seed:  $expected_seed" "$log" || {
+    fail "$label Madaros seed could not rebuild current source"
+  fi
+  grep -Fxq "madaros_seed"$'\t'"$seed" "$log" || {
     cat "$log" >&2 || true
-    fail "$label did not record the expected build seed line: $expected_seed"
+    fail "$label did not record the expected direct Madaros seed: $seed"
   }
 }
 
@@ -185,7 +201,8 @@ STAGE3="$WORK/madaros-stage3"
 RECEIPT="$WORK/madaros_native_multimodule_scale_901_source_fresh_receipt.tsv"
 
 # Stage 1 derives the current lean seed from the tracked initial bootstrap, then
-# compiles main.sio. Stages 2 and 3 intentionally use Madaros as their seed.
+# compiles main.sio. Madaros uses its explicit native-v2 ABI, not the positional
+# lean bootstrap ABI, for stages 2 and 3.
 if ! env \
   -u MADAROS_RAW_BIN \
   -u SOUNIO_MADAROS_BIN \
@@ -203,41 +220,11 @@ if ! env \
 fi
 require_raw_madaros "$STAGE1"
 
-if ! env \
-  -u MADAROS_RAW_BIN \
-  -u SOUNIO_MADAROS_BIN \
-  -u SOUNIO_SOUC_ENGINE \
-  -u SOUNIO_ENABLE_COMPACT_IMPORTED_IR \
-  -u SOUNIO_MADAROS_DEP_MERGE \
-  -u SOUNIO_INTO_ACC_NO_RESET \
-  -u SOUNIO_SOUC_BIN \
-  SOUC_BIN="$STAGE1" \
-  SOUNIO_BUILD_LOCK="$WORK/souc-build.lock" \
-  SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib" \
-  bash "$BUILD_SCRIPT" "$STAGE2" >"$WORK/stage2-build.log" 2>&1; then
-  tail -n 120 "$WORK/stage2-build.log" >&2 || true
-  fail 'Madaros stage1 could not rebuild current source'
-fi
+build_from_madaros_seed stage2 "$STAGE1" "$STAGE2" "$WORK/stage2-build.log"
 require_raw_madaros "$STAGE2"
-assert_seeded_build_log stage2 "$WORK/stage2-build.log" "$STAGE1"
 
-if ! env \
-  -u MADAROS_RAW_BIN \
-  -u SOUNIO_MADAROS_BIN \
-  -u SOUNIO_SOUC_ENGINE \
-  -u SOUNIO_ENABLE_COMPACT_IMPORTED_IR \
-  -u SOUNIO_MADAROS_DEP_MERGE \
-  -u SOUNIO_INTO_ACC_NO_RESET \
-  -u SOUNIO_SOUC_BIN \
-  SOUC_BIN="$STAGE2" \
-  SOUNIO_BUILD_LOCK="$WORK/souc-build.lock" \
-  SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib" \
-  bash "$BUILD_SCRIPT" "$STAGE3" >"$WORK/stage3-build.log" 2>&1; then
-  tail -n 120 "$WORK/stage3-build.log" >&2 || true
-  fail 'Madaros stage2 could not rebuild current source'
-fi
+build_from_madaros_seed stage3 "$STAGE2" "$STAGE3" "$WORK/stage3-build.log"
 require_raw_madaros "$STAGE3"
-assert_seeded_build_log stage3 "$WORK/stage3-build.log" "$STAGE2"
 
 assert_source_provenance_unchanged
 
