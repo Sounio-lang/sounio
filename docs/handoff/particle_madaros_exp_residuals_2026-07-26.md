@@ -2,7 +2,7 @@
 topic_id: repo.docs.handoff.particle-madaros-exp-residuals-2026-07-26
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
+last_validated: 2026-07-26
 validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.handoff.particle-madaros-exp-residuals-2026-07-26
 -->
@@ -17,16 +17,22 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.handoff.partic
 - Thin vertical `exp10_approx_physics.sio` Madaros **8/8**.
 - Gate requires `PARTICLE_EXP10_MADAROS_PHYSICS_OK`.
 - Original `approx_effects` untouched (lean full EXP10 30/30).
+- **2026-07-26 closeout:** `ep_gate` / `ep_require_conf` / `ep_is_credible` now compare
+  confidence via `ep_i64_ge(field, k)` call-arg boundary. Madaros multimodule mis-branches
+  on direct `if e.confidence >= k` even when returning the same field is correct.
+  Witness: `tests/multimodule/madaros_ep_gate_*.sio` + `scripts/ci/madaros_ep_gate_imported_gate.sh`.
+  Full EXP123 under Madaros: **58/58** after this fix (gates 111/113 were the fail).
 
-## 2 — Peak under full EXP123 IR (still open)
+## 2 — Peak under full EXP123 IR (narrowed)
 
-- Imported Epistemic **and** f64 returns from `nonunitary` can zero under large main IR.
-- Main-module **fully inlined** peak works; EXP123 restored Madaros-safe (chain_z, free-fn, local peak).
-- Expected checks **58** (lean-compatible EXP3 without EpistemicTension API).
+- Minimal imported `eemm_z_peak_xsec_nu` is OK under Madaros (not always zero).
+- Full EXP123 still uses **local peak body** as defence-in-depth (imported peak forced only for NonUnitary effect).
+- Core path exercises imported peak successfully.
 
 ## 3 — Drop workarounds (not yet)
 
-Local peak and thin physics vertical remain. Compiler: imported return ABI under large multimodule IR.
+Local peak and thin physics vertical remain. Compiler residual: i64 field-if mis-branch
+in imported native (stdlib workaround only; true fix is native codegen).
 
 ## Main regression note
 
