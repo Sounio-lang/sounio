@@ -131,6 +131,18 @@ own symmetry **unifies the orders it had been probing separately**.
 2. **[DONE, `W6`]** The `ψ` co-associator's 7 coassociative 4-planes ARE the ZD fibre
    supports (Fano complements), calibrated `±1`; so `φ` (line/label) and `ψ` (4-plane/support)
    both thread the fibres, dually, under the same `PSL(2,7)`.
+
+**∀n note — the symmetry persists, the clean 7-fibre indexing does not (probed 2026-07-26).**
+Verified against the concurrent trigintaduonion rung (`trigintaduonion_zd_contract.py`,
+`T_GREEN`, another agent's work — re-run and confirmed): at level 5 (`𝕋 = 4 × 𝕆`) the ZD
+fibre *count* grows `7 → 22` (7 sedenion labels preserved + 15 new), so the **clean
+`7`-Fano indexing of `W1`/`W2` is level-4 (sedenion) specific**. But the **`PSL(2,7)`
+symmetry itself persists up the tower**: the diagonal lift `(g,g,g,g)` of a Fano
+collineation is an automorphism of `𝕋` (residual `0.0`) and permutes the level-5 ZD set —
+consistent with the `cd-tower` orbit theorem ("168 acts on the growing ZD fibres ∀n"). So
+the *thread's symmetry* is an all-levels feature; only its clean single-multiplicity
+`7`-fibre form is sedenion-specific. The growing structure is the concurrent rung's
+subject; this note only records the symmetry-persistence, complementary to it.
 3. **The ord-3 quotient as a `PSL(2,7)`-module — attempted, hits a structural wall.**
    The stabiliser of a single ZD *b* (equivalently of its fibre **as a subspace**) is
    **trivial**: the line-stabiliser `S₄` (order 24) permutes the **6 distinct fibres** of a
