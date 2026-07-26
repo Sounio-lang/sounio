@@ -138,6 +138,19 @@ active:
    scripts/dev/souc-build-lock.sh ./bin/souc self-hosted/compiler/main.sio /tmp/out.elf
    ```
    Cheap `souc check <file>` does not need the lock.
+
+   > **Do NOT wrap `scripts/ci/build_modular_madaros.sh`** — it already takes the
+   > global lock itself (twice: for the seed derivation and for the main build).
+   > Wrapping it **self-deadlocks**, and the deadlock is silent: the outer wrapper
+   > waits for a lock its own child is waiting to acquire. Measured 2026-07-26 —
+   > one agent doing this blocked two others for ~27 minutes before the wedge was
+   > noticed. Call it directly:
+   > ```bash
+   > bash scripts/ci/build_modular_madaros.sh artifacts/self-hosted/madaros
+   > ```
+   > Better still, when the cluster is reachable, keep the build off the pod
+   > entirely — see `scripts/dev/souc-build-remote.sh`, which runs it on an idle
+   > SLURM node and needs no lock at all, because it consumes no pod CPU.
 2. **One worktree per agent.** Do not run a second agent directly on
    `/workspace/sounio`. Use a dedicated worktree (see [`.claude/AGENT_HANDOFF.md`](.claude/AGENT_HANDOFF.md)).
    Recommended ceiling: **≤2 agents doing compiler work at once** on this pod.
