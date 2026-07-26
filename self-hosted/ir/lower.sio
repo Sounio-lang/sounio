@@ -7653,32 +7653,6 @@ impl Lowerer {
         default_idx
     }
 
-    // True when the named field of any registered struct holds a POINTER (Box<T>, &T, &!T,
-    // *mut T). StructFieldEntry.is_float is already a type-class tag rather than a boolean —
-    // 1 = f64, 2 = array-of-f64, 3 = integer — and every consumer tests it by equality, so
-    // class 4 = pointer extends it without touching the 16 construction sites or any reader.
-    //
-    // This is what tells lower_field_access_expr_ref to mark a nested access for
-    // dereference. Without it, `h.inner.a` where `inner: Box<Inner>` lowered to two
-    // field_gets of which only the INNER one carried the deref marker (its base is an ident),
-    // so the backend computed base+off(inner)+off(a) — correct for an inline field, and for a
-    // Box a read of whatever lies at the pointer's own address. Measured: SIGSEGV in the
-    // compiled program, with the inline-field control returning 7 correctly on both engines.
-    fn field_is_pointer_by_name_simple(self, n: Name) -> bool with Mut, Panic, Div {
-        var si: i64 = 0
-        while si < (*self.struct_layouts).count {
-            var fi: i64 = 0
-            while fi < (*self.struct_layouts).entries[si as usize].field_count {
-                if ir_name_eq((*self.struct_layouts).entries[si as usize].fields[fi as usize].name, n) {
-                    return (*self.struct_layouts).entries[si as usize].fields[fi as usize].is_float == 4
-                }
-                fi = fi + 1
-            }
-            si = si + 1
-        }
-        false
-    }
-
     fn field_is_float_by_name_simple(self, n: Name) -> bool with Mut, Panic, Div {
         var si: i64 = 0
         while si < (*self.struct_layouts).count {
@@ -7803,6 +7777,48 @@ impl Lowerer {
             si = si + 1
         }
         false
+    }
+
+    // Pointer-class lookup for a field OF A KNOWN STRUCT TYPE. Deliberately type-aware: a
+    // by-NAME scan over every registered struct answers with the FIRST field of that name, so
+    // two structs sharing a field name but differing in pointer-ness get the wrong answer.
+    // A by-name version of this predicate existed briefly and was deleted rather than left
+    // available, because its failure mode is a silent wrong value, not an error. Measured — a program with `HolderInline { inner: Inner }` declared
+    // before `HolderBox { inner: Box<Inner> }` read hb.inner.a as 15922213421448 instead of
+    // 7: the by-name scan found the INLINE `inner` first, reported "not a pointer", the deref
+    // was not emitted, and a crash became a SILENT WRONG VALUE. Always resolve the receiver's
+    // type first.
+    fn field_is_pointer_for_struct(self, type_name: Name, field_name: Name) -> bool with Mut, Panic, Div {
+        if type_name.len <= 0 {
+            return false
+        }
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
+                var fi: i64 = 0
+                while fi < (*self.struct_layouts).entries[si as usize].field_count {
+                    if ir_name_eq((*self.struct_layouts).entries[si as usize].fields[fi as usize].name, field_name) {
+                        return (*self.struct_layouts).entries[si as usize].fields[fi as usize].is_float == 4
+                    }
+                    fi = fi + 1
+                }
+            }
+            si = si + 1
+        }
+        false
+    }
+
+    fn field_is_pointer_for_base_ref(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> bool with Mut, Panic, Div, Alloc {
+        match *base_opt {
+            Some(base_expr) => {
+                if (*base_expr).kind == ExprKind::ExprIdent {
+                    let type_name = self.lookup_local_struct_type((*base_expr).name)
+                    return self.field_is_pointer_for_struct(type_name, field_name)
+                }
+                false
+            }
+            _ => false,
+        }
     }
 
     fn field_is_float_for_base_ref(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> bool with Mut, Panic, Div, Alloc {
@@ -10158,7 +10174,11 @@ impl Lowerer {
                     // ok, then `(*p).a` kills the process — so the defect is the lost tag at
                     // the bind, not the field access and not offset arithmetic. Three earlier
                     // attempts at the access site could not have worked for that reason.
-                    if lo.field_is_pointer_by_name_simple((*expr_box).name) {
+                    // Type-aware: resolve the BASE's struct type, then ask whether THAT
+                    // struct's field is a pointer. The by-name variant answers with the first
+                    // same-named field in any struct, which silently produced a wrong value
+                    // when two structs shared a field name (see field_is_pointer_for_struct).
+                    if lo.field_is_pointer_for_base_ref(&(*expr_box).left, (*expr_box).name) {
                         if lower_aggregate_diag_enabled() { print("lower_agg: BIND-BOX-FROM-FIELD fired\n") }
                         lo = lo.bind_local_struct_type(s.name, make_name("Box"))
                     } else {
@@ -11887,7 +11907,44 @@ impl Lowerer {
         if ir_name_is_some(callee_name) {
             return self.lower_expr_args_first(&e.args)
         }
-        if ir_name_is_box(callee_name) {
+        // Box::new must be detected from the callee PATH's first segment, not from
+        // callee_name. expr_to_callee_name_ref (:10839-10847) mangles a two-segment path into
+        // Type_method, so `Box::new` arrives here as "Box_new" (len 7) while ir_name_is_box
+        // (ir/ir.sio:2347) requires the 3-byte "Box". The test therefore never matched,
+        // lower_box_new (:11126) was DEAD CODE, and the call fell through to the generic
+        // named-call path, which found no body for "Box_new" and let the backend synthesise a
+        // return-0 stub (codegen_x86_linux.sio:8253).
+        //
+        // Consequence, read off the emitted bytes rather than inferred: `let b = Box::new(x)`
+        // stored 0, and 0 is below the handle/raw-pointer threshold (2^20, gc.sio:43) so the
+        // hybrid resolver took the handle path into table slot 0 — never allocated, ids start
+        // at 1 — read object_base 0, and the field load faulted at 0x20. Field 0 and field 1
+        // differed only in the load constant, hence the identical crash at 0x20 and 0x28 that
+        // ruled out every offset-arithmetic explanation.
+        //
+        // Nothing here is a regression: ir_name_is_box(callee_name) and the mangling landed in
+        // the SAME commit (c29eb0cba), so the Madaros Box call path has been dead since birth.
+        // It went unnoticed because lower.sio is compiled by lean_single, which recognises Box
+        // at the token level (lean_single.sio:12214) and allocates for real — so the compiler
+        // builds itself without ever exercising this path, while 1367 Box::new call sites in
+        // self-hosted/ would each compile to a return-0 stub under Madaros.
+        //
+        // The same defect was fixed at the BIND site earlier (:10117-10133, commit 8409e3b21);
+        // this is the CALL site, which that fix missed. Box is the only affected builtin: every
+        // other ir_name_is_*(callee_name) predicate matches a bare-ident builtin, and the other
+        // Type::new spellings in the tree (ScanResult::new, Token::new, Span::new,
+        // LexError::new) are user impl methods that MUST keep going through the mangled path.
+        let callee_is_box_path = match *callee_opt_ref {
+            Some(c) => {
+                if (*c).kind == ExprKind::ExprPath {
+                    ir_name_is_box(ir_path_first_name((*c).path))
+                } else {
+                    ir_name_is_box(callee_name)
+                }
+            }
+            None => ir_name_is_box(callee_name),
+        }
+        if callee_is_box_path {
             return self.lower_box_new(&e.args)
         }
         if ir_name_is_prove_robust(callee_name) {
@@ -12183,7 +12240,8 @@ impl Lowerer {
         let base_field_is_ptr = match e.left {
             Some(base_expr_ref) => {
                 if (*base_expr_ref).kind == ExprKind::ExprFieldAccess {
-                    lo1_pre.field_is_pointer_by_name_simple((*base_expr_ref).name)
+                    // Type-aware for the same reason as the bind site above.
+                    lo1_pre.field_is_pointer_for_base_ref(&(*base_expr_ref).left, (*base_expr_ref).name)
                 } else {
                     false
                 }
