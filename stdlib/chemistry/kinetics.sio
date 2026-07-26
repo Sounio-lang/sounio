@@ -29,6 +29,7 @@ use plot::bar;
 fn r_const() -> f64 { gas_constant_approx() }
 
 fn abs_f64(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn pos_or_one(x: f64) -> f64 { if x > 0.0 { x } else { 1.0 } }
 fn check_near(a: f64, b: f64, tol: f64) -> bool { abs_f64(a - b) < tol }
 
 fn sqrt_approx(x: f64) -> f64 with Mut, Div, Panic {
@@ -55,14 +56,19 @@ fn dual_exp(a: Dual) -> Dual with Mut, Div, Panic {
 
 fn exp_approx(x: f64) -> f64 with Mut, Div, Panic {
     if x < -50.0 { return 0.0; }
+    if x > 50.0 { return 5.184705528587072e21 * exp_approx(x - 50.0); }  // exp(50)
     if x < 0.0 { return 1.0 / exp_approx(0.0 - x); }
+    // range reduction: exp(x) = exp(x/64)^64, Taylor is accurate for |u| <= 0.78
+    let u = x / 64.0;
     var sumv = 1.0; var term = 1.0; var k = 1;
     while k < 25 {
-        term = term * x / (k as f64);
+        term = term * u / (k as f64);
         sumv = sumv + term;
         k = k + 1;
     }
-    sumv
+    var r = sumv;
+    r = r * r; r = r * r; r = r * r; r = r * r; r = r * r; r = r * r;
+    r
 }
 
 // Real Arrhenius full GUM
@@ -139,7 +145,7 @@ fn big_crn_rate(ks: &[f64; 5], c: &[f64; 6]) -> [f64; 5] {
     ]
 }
 
-fn big_stoich_matrix() -> MatNM {
+fn big_stoich_matrix() -> MatNM with Mut, Panic {
     var nu = matnm_new(6 as i64, 5 as i64);
     // r0: H:-1 O2:-1 OH:1 O:1
     nu = matnm_set(nu, 0 as i64, 0 as i64, -1.0); nu = matnm_set(nu, 1 as i64, 0 as i64, -1.0);
@@ -159,7 +165,7 @@ fn big_stoich_matrix() -> MatNM {
     nu
 }
 
-fn big_dc_dt(c: &[f64; 6], ks: &[f64; 5]) -> [f64; 6] {
+fn big_dc_dt(c: &[f64; 6], ks: &[f64; 5]) -> [f64; 6] with Mut, Div, Panic {
     let nu = big_stoich_matrix();
     let rates = big_crn_rate(ks, c);
     var rates_mat = matnm_new(5 as i64, 1 as i64);
@@ -174,7 +180,7 @@ fn big_dc_dt(c: &[f64; 6], ks: &[f64; 5]) -> [f64; 6] {
     dc
 }
 
-fn big_crn_rhs(t: f64, y: &[f64; 64], dy: &![f64; 64]) with Mut {
+fn big_crn_rhs(t: f64, y: &[f64; 64], dy: &![f64; 64]) with Mut, Div, Panic {
     var c: [f64; 6] = [y[0],y[1],y[2],y[3],y[4],y[5]];
     let ks: [f64; 5] = [0.2, 0.1, 0.15, 0.05, 0.3]; // effective at T
     let dc = big_dc_dt(&c, &ks);
@@ -193,18 +199,18 @@ pub fn simulate_big_crn(init: &[f64; 6], dt: f64, steps: i64) -> [f64; 6] with M
     [y[0],y[1],y[2],y[3],y[4],y[5]]
 }
 
-fn crn_big_jacobian(c: &[f64; 6], ks: &[f64; 5], eps: f64) -> [[f64; 6]; 6] with Mut, Div, Panic {
-    var j: [[f64; 6]; 6] = [[0.0; 6]; 6];
+fn crn_big_jacobian(c: &[f64; 6], ks: &[f64; 5], eps: f64) -> MatNM with Mut, Div, Panic {
+    var j = matnm_new(6 as i64, 6 as i64);
     var base = big_dc_dt(c, ks);
-    var s = 0;
+    var s: i64 = 0;
     while s < 6 {
-        var cp = c; cp[s] += eps;
-        var cm = c; cm[s] -= eps;
+        var cp: [f64; 6] = [c[0], c[1], c[2], c[3], c[4], c[5]]; cp[s] += eps;
+        var cm: [f64; 6] = [c[0], c[1], c[2], c[3], c[4], c[5]]; cm[s] -= eps;
         var dcp = big_dc_dt(&cp, ks);
         var dcm = big_dc_dt(&cm, ks);
-        var i = 0;
+        var i: i64 = 0;
         while i < 6 {
-            j[i][s] = (dcp[i] - dcm[i]) / (2.0 * eps);
+            j = matnm_set(j, i, s, (dcp[i] - dcm[i]) / (2.0 * eps));
             i = i + 1;
         }
         s = s + 1;
@@ -221,7 +227,7 @@ pub fn propagate_big_unc(c: &[f64; 6], varc: &[f64; 6], ks: &[f64; 5], uks: &[f6
         var sumv = 0.0;
         var k = 0;
         while k < 6 {
-            sumv = sumv + j[i][k] * varc[k] * j[i][k]; // diag approx J V J^T
+            sumv = sumv + matnm_get(j, i as i64, k as i64) * varc[k] * matnm_get(j, i as i64, k as i64); // diag approx J V J^T
             k = k + 1;
         }
         newv[i] = sumv + (uks[0]*uks[0]+uks[1]*uks[1]+uks[2]*uks[2]+uks[3]*uks[3]+uks[4]*uks[4]) * 0.01 * dt;
@@ -251,7 +257,8 @@ pub fn test_big_crn() -> bool with Mut, Div, Panic {
     // Lit validation (GRI-Mech / Marinov 1995 / shock-tube at ~1000K scaled): H2O ~0.1-0.25, H2/O2 consumed
     // FULL Knowledge<CHEBI_15377> for water product
     let _k_h2o: CHEBI_15377 = chebi_water();
-    check_near(out[5], 0.18, 0.1) && out[5] > 0.05 && out[0] < 0.4
+    // RK4 cross-check with the hardcoded effective rates: H2O=0.00481, H=0.45424 (NOT lit-derived)
+    check_near(out[5], 0.0048, 0.002) && out[5] > 0.0 && check_near(out[0], 0.4542, 0.01)
 }
 
 pub fn test_big_epistemic() -> bool with Mut, Div, Panic {
@@ -285,7 +292,7 @@ fn crn_rate(r: &EpistemicReaction, c: &[f64; 4]) -> f64 with Mut, Div, Panic {
     rate
 }
 
-fn crn_rhs(t: f64, y: &[f64; 64], dy: &![f64; 64]) with Mut {
+fn crn_rhs(t: f64, y: &[f64; 64], dy: &![f64; 64]) with Mut, Div, Panic {
     var c: [f64; 4] = [y[0], y[1], y[2], y[3]];
     // real network: A->B k1, B->C k2, A+B->D k3
     let r0 = EpistemicReaction { stoich: [-1,1,0,0], k: Epistemic::measured(0.1, 0.001) };
@@ -314,13 +321,14 @@ pub fn simulate_crn(init: &[f64; 4], dt: f64, steps: i64) -> [f64; 4] with Mut, 
 
 // Real stoich matrix for the network: dc/dt = Nu * rates
 // Nu (4 species x 3 rxns): rows for A B C D, cols for r0 r1 r2
-fn stoich_matrix() -> [[f64; 3]; 4] {
-    [
-        [-1.0,  0.0, -1.0],  // A
-        [ 1.0, -1.0, -1.0],  // B
-        [ 0.0,  1.0,  0.0],  // C
-        [ 0.0,  0.0,  1.0]   // D
-    ]
+fn stoich_matrix() -> MatNM with Mut, Panic {
+    // MatNM build (lean_single cannot typecheck nested array literals)
+    var nu = matnm_new(4 as i64, 3 as i64);
+    nu = matnm_set(nu, 0 as i64, 0 as i64, -1.0); nu = matnm_set(nu, 0 as i64, 2 as i64, -1.0);  // A
+    nu = matnm_set(nu, 1 as i64, 0 as i64, 1.0); nu = matnm_set(nu, 1 as i64, 1 as i64, -1.0); nu = matnm_set(nu, 1 as i64, 2 as i64, -1.0);  // B
+    nu = matnm_set(nu, 2 as i64, 1 as i64, 1.0);  // C
+    nu = matnm_set(nu, 3 as i64, 2 as i64, 1.0);  // D
+    nu
 }
 
 // Compute rates from concs (mass action for this network)
@@ -332,7 +340,7 @@ fn compute_rates(c: &[f64; 4], ks: &[f64; 3]) -> [f64; 3] {
 }
 
 // dc/dt using stoich matrix * rates (real, can use linalg mat-vec in future)
-pub fn dc_dt(c: &[f64; 4], ks: &[f64; 3]) -> [f64; 4] {
+pub fn dc_dt(c: &[f64; 4], ks: &[f64; 3]) -> [f64; 4] with Mut, Panic {
     let nu = stoich_matrix();
     let rates = compute_rates(c, ks);
     var dc: [f64; 4] = [0.0; 4];
@@ -340,7 +348,7 @@ pub fn dc_dt(c: &[f64; 4], ks: &[f64; 3]) -> [f64; 4] {
     while i < 4 {
         var j = 0;
         while j < 3 {
-            dc[i] = dc[i] + nu[i][j] * rates[j];
+            dc[i] = dc[i] + matnm_get(nu, i as i64, j as i64) * rates[j];
             j = j + 1;
         }
         i = i + 1;
@@ -349,20 +357,20 @@ pub fn dc_dt(c: &[f64; 4], ks: &[f64; 3]) -> [f64; 4] {
 }
 
 // Numeric Jacobian for delta method GUM on network (real finite diff on dc/dt)
-fn crn_jacobian(c: &[f64; 4], ks: &[f64; 3], eps: f64) -> [[f64; 4]; 4] with Mut, Div, Panic {
-    var j: [[f64; 4]; 4] = [[0.0; 4]; 4];
+fn crn_jacobian(c: &[f64; 4], ks: &[f64; 3], eps: f64) -> MatNM with Mut, Div, Panic {
+    var j = matnm_new(4 as i64, 4 as i64);
     var base = dc_dt(c, ks);
-    var s = 0;
+    var s: i64 = 0;
     while s < 4 {
-        var cp = c;
+        var cp: [f64; 4] = [c[0], c[1], c[2], c[3]];
         cp[s] = cp[s] + eps;
-        var cm = c;
+        var cm: [f64; 4] = [c[0], c[1], c[2], c[3]];
         cm[s] = cm[s] - eps;
         var dc_p = dc_dt(&cp, ks);
         var dc_m = dc_dt(&cm, ks);
-        var i = 0;
+        var i: i64 = 0;
         while i < 4 {
-            j[i][s] = (dc_p[i] - dc_m[i]) / (2.0 * eps);
+            j = matnm_set(j, i, s, (dc_p[i] - dc_m[i]) / (2.0 * eps));
             i = i + 1;
         }
         s = s + 1;
@@ -382,10 +390,10 @@ pub fn propagate_crn_unc(c: &[f64; 4], varc: &[f64; 4], ks: &[f64; 3], uks: &[f6
             var inner = 0.0;
             var m = 0;
             while m < 4 {
-                inner = inner + j[i][m] * varc[m] * j[k][m];  // approx J V J^T simplified
+                inner = inner + matnm_get(j, i as i64, m as i64) * varc[m] * matnm_get(j, k as i64, m as i64);  // approx J V J^T simplified
                 m = m + 1;
             }
-            sum = sum + j[i][k] * inner;
+            sum = sum + matnm_get(j, i as i64, k as i64) * inner;
             k = k + 1;
         }
         // add unc from rates (simplified)
@@ -420,7 +428,8 @@ pub fn simulate_crn_epistemic(init_val: &[f64; 4], init_std: &[f64; 4], ks: &[f6
 pub fn test_crn() -> bool with Mut, Div, Panic {
     let init: [f64; 4] = [1.0, 0.0, 0.0, 0.0];
     let out = simulate_crn(&init, 0.1, 20);
-    check_near(out[0], 0.4, 0.3) && out[1] > 0.0
+    // A(2.0)=0.79290, B=0.14356 (independent RK4 cross-check; old 0.4 was tuned to a corrupt build)
+    check_near(out[0], 0.7929, 0.01) && check_near(out[1], 0.1436, 0.01)
 }
 
 pub fn test_crn_epistemic() -> bool with Mut, Div, Panic {
@@ -429,7 +438,7 @@ pub fn test_crn_epistemic() -> bool with Mut, Div, Panic {
     let ks: [f64; 3] = [0.1, 0.05, 0.2];
     let us: [f64; 3] = [0.001, 0.0005, 0.002];
     let (outv, outs) = simulate_crn_epistemic(&initv, &inits, &ks, &us, 0.1, 20);
-    check_near(outv[0], 0.4, 0.3) && outs[0] > 0.0
+    check_near(outv[0], 0.7929, 0.01) && outs[0] > 0.0  // A(2.0)=0.79290 (RK4 cross-check)
 }
 
 // Deep integration: use EState + solve_ode for chem CRN with full GUM
@@ -468,6 +477,9 @@ pub fn test_chem_full() -> bool with Mut, Div, Panic {
     let us: [f64; 3] = [0.001, 0.0005, 0.002];
     let (ov, ou) = simulate_chem_network_full(&iv, &is, &ks, &us, 0.1, 20);
     // real: for k1=0.1 at t=2, A~ exp(-0.2) ~0.8187
+    // KNOWN GAP (not chemistry): stdlib/epistemic/ode.sio ode_rhs_dispatch has no
+    // system_id==5 branch, so the EState path takes the zero-derivative fallback and
+    // ov stays at the initial state. Expectation is correct once that RHS exists.
     check_near(ov[0], 0.82, 0.05) && ou[0] > 0.0
 }
 
@@ -496,7 +508,8 @@ pub fn test_real_metabolic() -> bool with Mut, Div, Panic {
   let (a, b, c) = real_metabolic_network(24.0); // 24h
   // FULL Knowledge<CHEBI_15377>
   let _k_water: CHEBI_15377 = chebi_water();
-  check_near(a, 0.301, 0.01) && check_near(b, 0.3, 0.05) && c > 0.3  // approx calc
+  // analytic A->B->C, k1=0.05 k2=0.02, t=24: A=0.30119, B=0.52932, C=0.16949
+  check_near(a, 0.301, 0.01) && check_near(b, 0.5293, 0.01) && check_near(c, 0.1695, 0.01)
 }
 
 fn first_order_rhs(t: f64, y: &[f64; 64], dy: &![f64; 64]) with Mut {
@@ -529,7 +542,8 @@ pub fn test_transport_rd() -> bool with Mut, Div, Panic {
         rk4_step(transport_rhs, t, &!y, dt, 2);
         t = t + dt; i = i + 1;
     }
-    check_near(y[0], 0.6, 0.2) && y[1] > 0.0
+    // analytic t=1: y0=(e^-0.05+e^-0.07)/2=0.94181, y1=(e^-0.05-e^-0.07)/2=0.00942
+    check_near(y[0], 0.9418, 0.01) && check_near(y[1], 0.0094, 0.005)
 }
 
 // Phase 4: real pbpk bridge as metabolic CRN (Drug -> M with unc -> clearance)
@@ -691,7 +705,8 @@ pub fn test_general_crn() -> bool with Mut, Div, Panic {
     let init: [f64; 8] = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
     let ks: [f64; 8] = [0.1, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
     let out = simulate_general_crn(&init, &ks, nu, 3 as i64, 2 as i64, 0.1, 40 as i64);
-    check_near(out[2], 0.55, 0.3)
+    // analytic chain 0->1->2, k0=0.1 k1=0.05, t=4: C=1-e^-0.4-2(e^-0.4-e^-0.8)=0.03286
+    check_near(out[2], 0.0329, 0.01)
 }
 
 // 1. FULL STRUCTURAL ENSEMBLE (lit-backed: multiple plausible Nu + probs/posteriors, e.g. from arXiv 2505.15653 "Quantifying structural uncertainty in CRN inference")
@@ -881,7 +896,7 @@ pub fn fractional_crn_decay(c0: f64, uc0: f64, lambda: f64, ul: f64, t: f64, ut:
     // use caputo fractional + GUM rough on params (real for anomalous kinetics)
     let nom = fractional_decay_ml(c0, lambda, t, alpha);
     // simple prop (delta on c0, lambda; alpha epistemic too in full)
-    let urel = (uc0 / (if c0>0.0 {c0} else 1.0)) + (ul / (if lambda>0.0 {lambda} else 1.0)) + ut*0.01;
+    let urel = uc0 / pos_or_one(c0) + ul / pos_or_one(lambda) + ut * 0.01;
     (nom, abs_f64(nom) * urel)
 }
 
@@ -937,7 +952,7 @@ pub fn test_epistemic_pinn_crn() -> bool with Mut, Div, Panic {
 // Use Observe effect pattern (from epistemic/observe) for "measurement", GUM path vs MC samples.
 fn crn_with_observe(c: f64) -> f64 with Observe { c }  // declared for modeling observation
 
-pub fn test_crn_effect_handlers() -> bool with Mut, Div, Panic, Prob, Observe {
+pub fn test_crn_effect_handlers() -> bool with Mut, Div, Panic, Prob, Observe, IO {
     // ESTATÍSTICA PIVOT: Hybrid UQ demo - same CRN model via GUM | MC | Stochastic + Observe/Prob effects
     // GUM handler: analytic prop (current fractional decay GUM)
     let (gum_v, gum_u) = fractional_crn_decay(1.0, 0.05, 0.1, 0.01, 5.0, 0.0, 0.8);
@@ -1011,7 +1026,7 @@ pub fn test_more_pbpk_submodels() -> bool with Mut, Div, Panic {
 // Midazolam PBPK: EMA Annex3 Simcyp midazolam (k~0.2/h, t1/2~5h), Brill 2015 PMC4728292 (CLint values), McKnite 2026: at 24h remaining ~0.28 in scaled model
 // Fractional: Sopasakis 2017 fractional PK (alpha=0.587 amiodarone table), Mtshali 2023 Fractal Calc Appl (alpha=0.8 example v~0.34 at t=10), Ahmad 2025 enzyme frac
 // PINN/ensemble: CRNN/SciML papers (e.g. Nieves 2024), arXiv2505.15653 structural (probs 0.6-0.8 main path)
-pub fn validate_against_literature() -> bool with Mut, Div, Panic, Observe {
+pub fn validate_against_literature() -> bool with Mut, Div, Panic, Prob, Observe, IO {
     var ok = true;
     println("=== LIT VALIDATION (GRI-Mech/Marinov1995, EMA/Brill2015 midazolam, Sopasakis2017/Mtshali2023 frac, CRNN/arXiv) ===");
 
@@ -1030,7 +1045,7 @@ pub fn validate_against_literature() -> bool with Mut, Div, Panic, Observe {
     let (w_v, w_u, w_iri) = attach_chebi_to_crn_output(&big, &lit_big_crn_u, &mech_big_crn2);
     // FULL Knowledge<CHEBI_15377> for the lit water in this test
     let _k_water: CHEBI_15377 = chebi_water();
-    println("H2O2 H2O lit={} act={} tol={} {} | ChEBI_iri={} (water CHEBI_15377) {} | Knowledge<CHEBI_15377> demo | all_compounds_ontology={}", lit_h2o, big[5], tol_h2o, if pass_h2o "LIT PASS" else "LIT FAIL", h2o_chebi.id, if h2o_chebi.id == 15377 { "ONTOLOGY PASS" } else { "" }, if all_chebi_ok { "ALL PASS" } else { "FAIL" });
+    println("H2O2 H2O lit={} act={} tol={} {} | ChEBI_iri={} (water CHEBI_15377) {} | Knowledge<CHEBI_15377> demo | all_compounds_ontology={}", lit_h2o, big[5], tol_h2o, if pass_h2o { "LIT PASS" } else { "LIT FAIL" }, h2o_chebi.id, if h2o_chebi.id == 15377 { "ONTOLOGY PASS" } else { "" }, if all_chebi_ok { "ALL PASS" } else { "FAIL" });
     // FULL: list ChEBI for every compound
     println("COMPOUNDS ChEBI: H={} O2={} OH={} O={} H2={} H2O={}", chebi_map[0].id, chebi_map[1].id, chebi_map[2].id, chebi_map[3].id, chebi_map[4].id, chebi_map[5].id);
     if !pass_h2o || !all_chebi_ok { ok = false; }
@@ -1039,21 +1054,21 @@ pub fn validate_against_literature() -> bool with Mut, Div, Panic, Observe {
     let pbpk = simulate_pbpk_gut_liver_kidney(1.0, 0.05, 24.0);
     let lit_m1 = 0.28; let tol_m1 = 0.06;
     let pass_m1 = check_near(pbpk.0[1], lit_m1, tol_m1);
-    println("PBPK M1 lit={} act={} tol={} {}", lit_m1, pbpk.0[1], tol_m1, if pass_m1 "LIT PASS" else "LIT FAIL");
+    println("PBPK M1 lit={} act={} tol={} {}", lit_m1, pbpk.0[1], tol_m1, if pass_m1 { "LIT PASS" } else { "LIT FAIL" });
     if !pass_m1 { ok = false; }
 
     // Fractional alpha=0.8 vs Sopasakis/Mtshali (v=0.35 tol 0.05)
     let frac = fractional_crn_decay(1.0, 0.05, 0.1, 0.01, 10.0, 0.1, 0.8);
     let lit_frac = 0.35; let tol_frac = 0.05;
     let pass_frac = check_near(frac.0, lit_frac, tol_frac);
-    println("FRAC v@10a0.8 lit={} act={} tol={} {}", lit_frac, frac.0, tol_frac, if pass_frac "LIT PASS" else "LIT FAIL");
+    println("FRAC v@10a0.8 lit={} act={} tol={} {}", lit_frac, frac.0, tol_frac, if pass_frac { "LIT PASS" } else { "LIT FAIL" });
     if !pass_frac { ok = false; }
 
     // PINN k vs SciML true 0.1 (tol 0.01)
     let pinnk = bench_epistemic_pinn_crn(5);
     let lit_k = 0.1; let tol_k = 0.01;
     let pass_k = check_near(pinnk, lit_k, tol_k);
-    println("PINN k lit={} act={} tol={} {}", lit_k, pinnk, tol_k, if pass_k "LIT PASS" else "LIT FAIL");
+    println("PINN k lit={} act={} tol={} {}", lit_k, pinnk, tol_k, if pass_k { "LIT PASS" } else { "LIT FAIL" });
     if !pass_k { ok = false; }
 
     // Epistemic GUM report + budget (enhanced, more GUM)
@@ -1102,7 +1117,7 @@ pub fn validate_against_literature() -> bool with Mut, Div, Panic, Observe {
     );
     let lit_fe = 0.32; let tol_fe = 0.1;
     let pass_fe = check_near(fe_ov[2], lit_fe, tol_fe);
-    println("FRAC ENSEMBLE product lit={} act={} tol={} {}", lit_fe, fe_ov[2], tol_fe, if pass_fe "LIT PASS" else "LIT FAIL");
+    println("FRAC ENSEMBLE product lit={} act={} tol={} {}", lit_fe, fe_ov[2], tol_fe, if pass_fe { "LIT PASS" } else { "LIT FAIL" });
     if !pass_fe { ok = false; }
     // GUM for it
     gum_report(fe_ov[2], fe_ou[2]);
@@ -1112,7 +1127,7 @@ pub fn validate_against_literature() -> bool with Mut, Div, Panic, Observe {
     let (st_v, st_u) = simulate_stochastic_decay(1.0, 0.02, 0.2, 3.0, 25);
     let lit_st_mean = 0.5488; let tol_st = 0.15;
     let pass_st = check_near(st_v, lit_st_mean, tol_st) && st_u > 0.01;
-    println("STOCH DECAY mean lit={} act={} tol={} {} | u={} (intrinsic+LNA+epist) LIT GUM PASS", lit_st_mean, st_v, tol_st, if pass_st "LIT PASS" else "LIT FAIL", st_u);
+    println("STOCH DECAY mean lit={} act={} tol={} {} | u={} (intrinsic+LNA+epist) LIT GUM PASS", lit_st_mean, st_v, tol_st, if pass_st { "LIT PASS" } else { "LIT FAIL" }, st_u);
     if !pass_st { ok = false; }
     gum_report(st_v, st_u);
     println("GUM for STOCH: combined epistemic + intrinsic (LNA from propensities) LIT GUM PASS");
@@ -1127,7 +1142,7 @@ pub fn validate_against_literature() -> bool with Mut, Div, Panic, Observe {
     let (bk, bu, bid) = simulate_bayesian_posterior_crn(&bayes_lit_initv, &datas, &dus, 0.1, 0.02, nu_b, 3, 2, 0.2, 25, 8);
     let lit_bk = 0.11; let tol_b = 0.08;
     let pass_b = check_near(bk, lit_bk, tol_b) && bid > 1.0;
-    println("BAYES post_k lit={} act={} ident={} {}", lit_bk, bk, bid, if pass_b "LIT PASS" else "LIT FAIL");
+    println("BAYES post_k lit={} act={} ident={} {}", lit_bk, bk, bid, if pass_b { "LIT PASS" } else { "LIT FAIL" });
     if !pass_b { ok = false; }
 
     // Regulatory audit expanded in LIT (using crn_result_to_audit for bayes result)
@@ -1140,7 +1155,7 @@ pub fn validate_against_literature() -> bool with Mut, Div, Panic, Observe {
     ok
 }
 
-pub fn test_lit_validation() -> bool with Mut, Div, Panic, Observe {
+pub fn test_lit_validation() -> bool with Mut, Div, Panic, Prob, Observe, IO {
     validate_against_literature()
 }
 
@@ -1470,7 +1485,7 @@ pub fn full_budget_export(y: f64, uy: f64, contribs: &[f64; 4], lit_count: i64, 
 }
 
 // Expanded regulatory helper: produce full audit from CRN result (bayes/stoch/etc)
-pub fn crn_result_to_audit(val: f64, u: f64, epistemic_part: f64, intrinsic_part: f64, struct_part: f64, lit_n: i64, mode: i64) -> RegulatoryAudit with IO {
+pub fn crn_result_to_audit(val: f64, u: f64, epistemic_part: f64, intrinsic_part: f64, struct_part: f64, lit_n: i64, mode: i64) -> RegulatoryAudit with Mut, Div, Panic, IO {
     let total = epistemic_part*epistemic_part + intrinsic_part*intrinsic_part + struct_part*struct_part;
     let tot_u = if total > 0.0 { sqrt_approx(total) } else { u };
     let c: [f64; 4] = [
@@ -1682,7 +1697,7 @@ pub fn simulate_observed_general() -> f64 with Mut, Div, Panic, Observe {
     observe_conc(ov[2])
 }
 
-pub fn test_sounio_unique_observe() -> bool with Mut, Div, Panic {
+pub fn test_sounio_unique_observe() -> bool with Mut, Div, Panic, Observe {
     // effect declared; in full would have handler for epistemic interp
     let _ = simulate_observed_general(); // placeholder call
     true
@@ -1963,7 +1978,7 @@ pub fn test_bench_stochastic() -> bool with Mut, Div, Panic, Prob {
 }
 
 // Scale element (Phase 6 parallel): larger network sim + more samples for bayes scale
-pub fn bench_scale_bayes_samples(n_samples: i64) -> f64 with Mut, Div, Panic, Observe {
+pub fn bench_scale_bayes_samples(n_samples: i64) -> f64 with Mut, Div, Panic, Observe, IO {
     let datas: [f64; 4] = [0.55, 0.40, 0.30, 0.22];
     let dus: [f64; 4] = [0.03, 0.04, 0.03, 0.05];
     var nu = matnm_new(3 as i64, 2 as i64);
@@ -1975,7 +1990,7 @@ pub fn bench_scale_bayes_samples(n_samples: i64) -> f64 with Mut, Div, Panic, Ob
     pu + (if id > 2.0 { 0.0 } else { 0.1 })
 }
 
-pub fn test_bench_scale() -> bool with Mut, Div, Panic, Observe {
+pub fn test_bench_scale() -> bool with Mut, Div, Panic, Observe, IO {
     let m = bench_scale_bayes_samples(20);
     m < 0.2 && m > 0.0
 }
@@ -2016,7 +2031,7 @@ pub fn simulate_bayesian_posterior_crn(
     dt: f64,
     steps: i64,
     n_samples: i64
-) -> (f64, f64, f64) with Mut, Div, Panic, Observe {  // (post_mean_k, post_u, ident_score)
+) -> (f64, f64, f64) with Mut, Div, Panic, Observe, IO {  // (post_mean_k, post_u, ident_score)
     // fuller: use EStates for each observed data point
     // also epistemic-style proposal unc
     var data_es: [EState; 4] = [estate_new(1 as i64), estate_new(1 as i64), estate_new(1 as i64), estate_new(1 as i64)];
@@ -2075,7 +2090,7 @@ pub fn bayesian_structural_posterior(
     nrxn: i64,
     dt: f64,
     steps: i64
-) -> (f64, f64, f64) with Mut, Div, Panic, Observe {  // overall post_k, u, ident
+) -> (f64, f64, f64) with Mut, Div, Panic, Observe, IO {  // overall post_k, u, ident
     var total_p = 0.0;
     var i = 0; while i < n_plaus { total_p = total_p + model_probs[i]; i=i+1; }
     if total_p <= 0.0 { total_p = 1.0; }
@@ -2102,7 +2117,7 @@ pub fn bayesian_structural_posterior(
     (post_k, post_u, ident)
 }
 
-pub fn test_bayesian_ident_crn() -> bool with Mut, Div, Panic, Observe {
+pub fn test_bayesian_ident_crn() -> bool with Mut, Div, Panic, Observe, IO {
     // multiple data EState-like
     let datas: [f64; 4] = [0.55, 0.40, 0.30, 0.22];
     let dus: [f64; 4] = [0.03, 0.04, 0.03, 0.05];
@@ -2117,7 +2132,7 @@ pub fn test_bayesian_ident_crn() -> bool with Mut, Div, Panic, Observe {
     check_near(pk, 0.12, 0.1) && pu > 0.0 && pu < 0.15 && idsc > 0.5
 }
 
-pub fn test_bayesian_structural_tie() -> bool with Mut, Div, Panic, Observe {
+pub fn test_bayesian_structural_tie() -> bool with Mut, Div, Panic, Observe, IO {
     // reuse structural style nus + probs as model priors
     var nu1 = matnm_new(3 as i64, 2 as i64); nu1 = matnm_set(nu1, 0 as i64, 0 as i64, -1.0); nu1 = matnm_set(nu1, 1 as i64, 0 as i64, 1.0); nu1 = matnm_set(nu1, 1 as i64, 1 as i64, -1.0); nu1 = matnm_set(nu1, 2 as i64, 1 as i64, 1.0);
     var nu2 = matnm_new(3 as i64, 2 as i64); nu2 = matnm_set(nu2, 0 as i64, 0 as i64, -1.0); nu2 = matnm_set(nu2, 1 as i64, 0 as i64, 1.0); nu2 = matnm_set(nu2, 0 as i64, 1 as i64, -0.3); nu2 = matnm_set(nu2, 2 as i64, 1 as i64, 0.3);
@@ -2131,7 +2146,7 @@ pub fn test_bayesian_structural_tie() -> bool with Mut, Div, Panic, Observe {
 }
 
 // keep light compat wrapper for old test sites
-pub fn bayesian_identifiability_crn(data_v: f64, data_u: f64, prior_k: f64, prior_uk: f64) -> (f64, f64) with Mut, Div, Panic {
+pub fn bayesian_identifiability_crn(data_v: f64, data_u: f64, prior_k: f64, prior_uk: f64) -> (f64, f64) with Mut, Div, Panic, Observe, IO {
     let datas: [f64; 4] = [data_v, data_v*0.7, data_v*0.5, data_v*0.3];
     let dus: [f64; 4] = [data_u, data_u, data_u*0.8, data_u];
     var nu = matnm_new(3 as i64, 2 as i64);
