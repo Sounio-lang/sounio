@@ -23,16 +23,23 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.handoff.partic
   Witness: `tests/multimodule/madaros_ep_gate_*.sio` + `scripts/ci/madaros_ep_gate_imported_gate.sh`.
   Full EXP123 under Madaros: **58/58** after this fix (gates 111/113 were the fail).
 
-## 2 — Peak under full EXP123 IR (narrowed)
+## 2 — Peak under full EXP123 IR (**closed**)
 
-- Minimal imported `eemm_z_peak_xsec_nu` is OK under Madaros (not always zero).
-- Full EXP123 still uses **local peak body** as defence-in-depth (imported peak forced only for NonUnitary effect).
-- Core path exercises imported peak successfully.
+- Full EXP123 now uses **only** imported `eemm_z_peak_xsec_nu` (local peak body dropped 2026-07-26).
+- Madaros full vertical: **58/58** after drop; lean gate green.
+- EXP12 residual-closure ledger jointly asserts peak + gate + collapse + product.
 
-## 3 — Drop workarounds (not yet)
+## 3 — Drop workarounds (partial)
 
-Local peak and thin physics vertical remain. Compiler residual: i64 field-if mis-branch
-in imported native (stdlib workaround only; true fix is native codegen).
+| Workaround | Status |
+|---|---|
+| Local peak body | **dropped** |
+| `ep_gate` field-if | stdlib `ep_i64_ge` (still needs native fix) |
+| `pb_is_credible` / `ck_is_credible` | same call-arg pattern |
+| Thin EXP10 physics vertical | remains (IR size) |
+| Vertex/amplitude on full EXP123 | remains (SEGV residual) |
+
+Compiler residual: i64 field-if mis-branch in imported native codegen.
 
 ## Main regression note
 
