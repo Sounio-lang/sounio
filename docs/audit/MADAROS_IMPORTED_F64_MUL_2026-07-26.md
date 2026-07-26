@@ -37,7 +37,14 @@ Candidates:
 ## Product mitigation
 
 - #1514: first amp workaround via `ep_square`
-- Follow-up: `nonunitary_amp` avoids tuple couplings; uses `neutral_current_gv_ep` + exact `g_A²=0.25`
+- #1516: `nonunitary_amp` avoids tuple couplings; uses `neutral_current_gv_ep` + exact `g_A²=0.25`
+- Follow-up: `vertex` exports scalar `neutral_current_gv` / `neutral_current_ga` and
+  `nc_gv_*` / `nc_ga_*`; `amplitude` uses them (no imported tuple unpack)
+
+## True lower fix (Claude)
+
+Recipe: `docs/audit/MADAROS_TUPLE_F64_FLOAT_FIX_RECIPE_2026-07-26.md`  
+3-site patch in `self-hosted/ir/lower.sio` (returns_float=2 for all-f64 tuples + FieldGet float mark).
 
 ## Acceptance
 
