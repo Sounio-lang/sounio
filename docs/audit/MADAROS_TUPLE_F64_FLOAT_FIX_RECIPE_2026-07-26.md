@@ -34,14 +34,52 @@ Scalar imported `f64` already works (`returns_float == 1` on call sites).
 
 ### 1) Classify `(f64, f64)` return as float-element aggregate (`returns_float = 2`)
 
-Near `lower_opt_return_float_code` (~3915):
+Insert helpers next to `lower_opt_type_is_array_of_f64` (~3903), then extend
+`lower_opt_return_float_code`:
 
 ```sounio
-// After array-of-f64 check, add:
-// if return type is TypeTuple and every element is f64 → return 2
+fn lower_type_expr_is_tuple_of_all_f64(te: &TypeExpr) -> bool with Mut, Panic, Div {
+    if (*te).kind != TypeExprKind::TypeTuple { return false }
+    match (*te).type_args {
+        Some(list0) => {
+            var cur: Option<Box<TypeExprList>> = Some(list0)
+            var any = false
+            while true {
+                match cur {
+                    Some(list) => {
+                        if !lower_type_expr_is_f64(&(*list).head) { return false }
+                        any = true
+                        cur = (*list).tail
+                    }
+                    None => { break }
+                }
+            }
+            any
+        }
+        None => false,
+    }
+}
+
+fn lower_opt_type_is_tuple_of_all_f64(opt: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
+    match *opt {
+        Some(te) => lower_type_expr_is_tuple_of_all_f64(&(*te)),
+        None => false,
+    }
+}
+
+fn lower_opt_return_float_code(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
+    if lower_opt_type_is_f64(opt) {
+        1
+    } else if lower_opt_type_is_array_of_f64(opt) || lower_opt_type_is_tuple_of_all_f64(opt) {
+        2
+    } else {
+        0
+    }
+}
 ```
 
-Need a helper `lower_opt_type_is_tuple_of_all_f64(opt) -> bool` walking TypeTuple.
+Update the comment above `lower_opt_return_float_code`: `2` = f64 array **or**
+all-f64 TypeTuple (same float-element local flag).
 
 ### 2) Already present: `let r = mk()` binds float-element local when returns_float==2
 
@@ -51,20 +89,22 @@ marks `__tup` as float-element.
 
 ### 3) Field access: float-element base ⇒ FieldGet is float
 
-In `lower_field_access_expr_ref` (~12376), extend:
+In `lower_field_access_expr_ref` (~12371), replace the single `let field_is_float = ...`
+line with:
 
 ```sounio
-var field_is_float = lo1.field_is_float_for_base_ref(...) || lo1.field_is_float_by_name_simple(...)
-// ADD:
+var field_is_float = lo1.field_is_float_for_base_ref(&e.left, e.name) || lo1.field_is_float_by_name_simple(e.name)
+// Tuple desugar: let __tup = f(); let a = __tup.0 — float-element base
+// means .0/.1 are f64 even without a struct layout.
 match e.left {
-  Some(be) => {
-    if (*be).kind == ExprKind::ExprIdent {
-      if lo1.lookup_local_array_elem_float((*be).name) {
-        field_is_float = true
-      }
+    Some(be) => {
+        if (*be).kind == ExprKind::ExprIdent {
+            if lo1.lookup_local_array_elem_float((*be).name) {
+                field_is_float = true
+            }
+        }
     }
-  }
-  _ => {}
+    _ => {}
 }
 ```
 
