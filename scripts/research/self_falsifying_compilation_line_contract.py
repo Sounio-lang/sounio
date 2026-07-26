@@ -226,9 +226,11 @@ def clause_s4() -> tuple[bool, list[dict]]:
         return True, []
 
     rows = []
+    unreachable = []
     for sha, what, spec_path, harness_path in AUDITED_CORRECTIONS:
         if not git_ok("cat-file", "-e", f"{sha}^{{commit}}"):
-            print(f"S4_RETROSPECTIVE SKIP {sha} — commit not reachable")
+            print(f"  {sha} UNREACHABLE — commit not in this clone/branch")
+            unreachable.append(sha)
             continue
 
         before_spec = git("show", f"{sha}^:{spec_path}")
@@ -270,29 +272,48 @@ def clause_s4() -> tuple[bool, list[dict]]:
             "gate_touched": gate_touched,
             "silent": silent,
             "depth": depth,
+            "n_before_tokens": len(bh),
+            "exact": len(bh) == 1,
         })
 
+        # harness_tokens() collects every token the harness *could* emit, so a
+        # membership test over-approximates "the harness emitted this". Report
+        # the count: when exactly one non-placeholder token is reachable, the
+        # membership test is exact, not an approximation.
+        exact_note = "exact" if len(bh) == 1 else f"OVER-APPROX ({len(bh)} tokens emittable)"
         print(f"  {sha}  {what}")
-        print(f"      before: spec={bt} harness_agrees={agreed_before}")
+        print(f"      before: spec={bt} harness_agrees={agreed_before} [{exact_note}]")
         print(f"      after : spec={at} harness_agrees={agreed_after}")
         print(f"      token changed={token_changed} ({depth})  ci-gate touched={gate_touched}")
         print(f"      => {'SILENT — no claim gate would have fired' if silent else 'gate-visible'}")
 
-    if not rows:
-        print("S4_RETROSPECTIVE SKIP — no audited commits reachable")
-        return True, rows
-
     silent_n = sum(1 for r in rows if r["silent"])
     headline_n = sum(1 for r in rows if r["silent"] and r["depth"] == "headline")
     below_n = silent_n - headline_n
-    print(f"S4_RETROSPECTIVE {silent_n}/{len(rows)} audited corrections were SILENT "
-          f"— at the commit where the claim was false, spec and harness agreed "
-          f"and no CI gate changed, so no claim gate would have fired")
-    print(f"S4_RETROSPECTIVE   of those: {headline_n} wrong at the headline token "
-          f"(claim and check misinterpreted together), "
-          f"{below_n} wrong below the token's resolution")
-    ok = True  # measurement clause: it records, it does not require an outcome
-    print(f"S4_RETROSPECTIVE {'PASS' if ok else 'FAIL'} — measured")
+    n_exact = sum(1 for r in rows if r["exact"])
+
+    if rows:
+        print(f"S4_RETROSPECTIVE {silent_n}/{len(rows)} audited corrections were SILENT "
+              f"— at the commit where the claim was false, spec and harness agreed "
+              f"and no CI gate changed, so no claim gate would have fired")
+        print(f"S4_RETROSPECTIVE   of those: {headline_n} wrong at the headline token "
+              f"(claim and check misinterpreted together), "
+              f"{below_n} wrong below the token's resolution")
+        print(f"S4_RETROSPECTIVE   token-agreement test was exact (single emittable "
+              f"token) in {n_exact}/{len(rows)} cases")
+
+    # The clause records outcomes rather than requiring a particular one, but it
+    # MUST fail when it cannot measure: the audited commits are branch-local, so
+    # in a fresh clone or after a rebase this clause would otherwise degrade to
+    # a vacuous PASS while reporting nothing. An unmeasured clause is a failure.
+    ok = not unreachable
+    if unreachable:
+        print(f"S4_RETROSPECTIVE FAIL — {len(unreachable)}/{len(AUDITED_CORRECTIONS)} "
+              f"audited commits unreachable ({', '.join(unreachable)}); the clause "
+              f"cannot be evaluated in this clone. These commits are branch-local "
+              f"to the functor-F research lane and are not on main.")
+    else:
+        print(f"S4_RETROSPECTIVE PASS — all {len(rows)} audited commits measured")
     return ok, rows
 
 

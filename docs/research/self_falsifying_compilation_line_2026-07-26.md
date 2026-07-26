@@ -31,11 +31,17 @@ Stated precisely, and each measured by the harness:
   both lanes, and `F6_TIMEOUT` really does kill a hung gate.
 - **The corpus is unbound.** The repository contains **9 native `claim` blocks
   across 4 files, every one of them a test or a CI fixture — 0 in production
-  source**, against **294 CI gates** and **39 research contracts**. Counting
+  source**, against **295 CI gates** and **40 research contracts**. Counting
   generously (any `.sio` file mentioning a `scripts/ci/*.sh` path, including
-  the older comment-form claims), **11 of 294 gates (3.7%)** are named by a
+  the older comment-form claims), **11 of 295 gates (3.7%)** are named by a
   claim at all. The empirical surface of this project is essentially
   disconnected from the mechanism built to guard it.
+
+  > The gate and contract denominators are a **moving count over tracked files**
+  > (they include this line's own gate and contract) — re-derive with the
+  > command in §8 rather than quoting them; the figures above are as measured at
+  > the commit that introduced this document. The `0 production claims` figure
+  > is the load-bearing one and does not move with the denominator.
 - **The historical failures are interpretive.** For three known
   self-corrections, at the commit where the claim was false, the spec's verdict
   token and the harness's emitted token **agreed**, and no CI gate script
@@ -55,9 +61,16 @@ that study is run, so it cannot be graded on a curve.
 | Clause | Result | Status |
 |---|---|---|
 | `S1_SUBSTRATE_SURFACE` | claim executor, `--verify-claims` flag, text-preserving registry accessors, and mechanism gate all present | mechanism intact in source. |
-| `S2_CORPUS_GAP` | 9 native claims / 4 files, **all tests or fixtures; 0 production**; 294 CI gates, 39 contracts | corpus `UNBOUND`. |
-| `S3_BINDING_GAP` | **11/294 (3.7%)** CI gates named by any claim | the guard covers almost nothing. |
-| `S4_RETROSPECTIVE` | **3/3** audited corrections were `SILENT` | no claim gate would have fired while the claim was false. |
+| `S2_CORPUS_GAP` | 9 native claims / 4 files, **all tests or fixtures; 0 production**; 295 CI gates, 40 contracts | corpus `UNBOUND`. |
+| `S3_BINDING_GAP` | **11/295 (3.7%)** CI gates named by any claim | the guard covers almost nothing. |
+| `S4_RETROSPECTIVE` | **3/3** audited corrections were `SILENT`; token-agreement test **exact** in 3/3 | no claim gate would have fired while the claim was false. |
+
+**A live instance, found while writing this.** The denominators above moved from
+`294/39` to `295/40` the moment this rung's own gate and contract were committed,
+while the verdict token stayed correct. That is precisely the **sub-token error**
+of §2: the headline held, a supporting number underneath it went stale, and the
+gate — which checks only the token — stayed green. The failure mode is not
+hypothetical and it is not rare; it took under an hour to produce one.
 
 Verdict: `SELF_FALSIFYING_LINE_VERDICT SUBSTRATE_LIVE__CORPUS_UNBOUND__HISTORICAL_FAILURES_ARE_INTERPRETIVE`.
 
@@ -91,6 +104,20 @@ Two distinct mechanisms, both invisible to the mechanism as built:
 corrections*, not sampled. They are evidence that the failure mode exists and is
 not rare in this corpus; they are **not** an estimate of its frequency. That is
 what rung R4 is for.
+
+**Measurement honesty.** "Spec and harness agreed" is computed by testing whether
+the spec's declared token is among the tokens the harness *could* emit — an
+over-approximation in general, since a harness with several verdict branches
+would match more than one spec. The contract therefore reports the count: at all
+three parent commits exactly **one** non-placeholder token was emittable (the
+only other branch being `INCOMPLETE`), so here the test is **exact**, not
+approximate. Were that count ever `> 1`, the finding would have to weaken to "the
+spec's token was among those the harness could emit".
+
+**Reachability.** All three audited commits are **branch-local** to the functor-F
+research lane and are *not* reachable from `main`. `S4` fails rather than
+silently passing when they cannot be resolved, so the clause cannot degrade to a
+vacuous `PASS` in a fresh clone or after a rebase.
 
 ---
 
@@ -177,23 +204,46 @@ build artifact to a **proposition**, and what that costs:
 
 ### R4's operational definition, fixed before the study runs
 
-For a correction commit `c` with parent `c^`, a claim gate **would have caught**
-the error iff, at `c^`, with the claim bound as it is at `c`:
+For a correction commit `c` with parent `c^`, three arms are evaluated at `c^` —
+the state in which the claim was false:
 
-- **under exit-code gating** — the named harness exits non-zero at `c^`; or
-- **under token binding** — the verdict token declared in the spec at `c^`
+- **Arm A — exit-code gating.** The harness named at `c^` exits non-zero at `c^`.
+- **Arm B — token binding.** The verdict token declared in the spec at `c^`
   differs from the token the harness emits at `c^`.
+- **Arm C — cross-version replay.** The **corrected** harness (taken from `c`)
+  fails, or emits a token differing from `c^`'s declared one, when run against
+  the state at `c^`.
 
-A correction is **`SILENT`** iff neither holds. Corrections whose spec or
-harness does not exist at `c^`, or which do not name a verdict token, are
-reported as **`UNCLASSIFIABLE`** and counted separately — they are not
-redistributed into either bucket.
+**Arms A and B are known-blind by construction, and R4 is not an open question
+about them.** §2 already establishes that on the three audited cases both are
+silent, and the §3 proposition says why: a check authored together with its
+claim reports identically whether or not the claim is true. Predicting a near-zero
+rate for A and B and then "discovering" it would be theatre. R4 runs them only to
+measure the rate across the full correction history rather than three hand-picked
+commits — a frequency estimate, not a test of the mechanism.
 
-**The result is reported whatever it is.** If the catch rate is 0, that is the
-finding, and it is the more interesting one: it would mean compile-time claim
-gating does not address the failure mode that actually damages this corpus, and
-the line's value lies in R2/R3 plus a precisely-drawn negative boundary. No
-threshold for "success" is set, because none would be honest.
+**Arm C is the arm that can actually fire, and its outcome is genuinely
+unknown.** It asks a different question: *was the error computationally reachable
+at all?* If the corrected harness would have gone red at `c^`, the error was
+latent in the computation and a finer or later-authored check could have caught
+it — which is evidence that R3's resolution question is worth pursuing. If Arm C
+is also silent, the errors were purely interpretive, no check could have reached
+them, and the honest conclusion is that compile-time gating is the wrong
+instrument for this failure class.
+
+Classification, applied per correction:
+
+| Bucket | Condition |
+|---|---|
+| `CAUGHT_A` / `CAUGHT_B` / `CAUGHT_C` | the corresponding arm fires |
+| `SILENT` | no arm fires |
+| `UNCLASSIFIABLE` | spec or harness absent at `c^`, no verdict token declared, or the corrected harness cannot be executed against `c^`'s state (import, path or data dependencies) — counted separately, **never redistributed** into another bucket |
+
+`UNCLASSIFIABLE` is expected to be substantial for Arm C and that is not a
+failure of the study; an honest denominator matters more than a large one.
+
+**The result is reported whatever it is**, including all-silent. No threshold for
+"success" is set, because none would be honest.
 
 ---
 
@@ -248,9 +298,21 @@ SFC_SKIP_BUILD=1 SFC_TEST_TIMEOUT=1 bash scripts/ci/self_falsifying_compiler_gat
 # expect: F1..F7 PASS, SELF_FALSIFYING_COMPILER_GATE_OK
 ```
 
+Re-derive the denominators rather than quoting §1 (per `CLAUDE.md` §1):
+
+```bash
+git ls-files 'scripts/ci/*.sh'       | grep -c gate       # CI gates
+git ls-files 'scripts/research/*.py' | grep -c contract   # research contracts
+git grep -c '^claim ' -- '*.sio'                          # native claim blocks
+```
+
 The line gate applies the drift guard of §3 to this document: it fails if the
 verdict token declared in the Status line above disagrees with the token the
-harness emits.
+harness emits. **It does not check the numbers in §1** — which is exactly the
+sub-token blind spot the §1 note records, left in place rather than papered over.
+
+`S4` requires the audited commits to be reachable and **fails** if they are not;
+they are branch-local to the functor-F lane and absent from `main`.
 
 Pure Python 3 + git for the contract; bash for the gates.
 
