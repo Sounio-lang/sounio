@@ -5078,7 +5078,16 @@ fn checker_branch_then_done_inplace(c: *mut Checker) with Mut, Panic, Div, Alloc
         var i: i64 = 0
         while i < (*c).borrows.count {
             (*c).borrows.branch_snap[i * MAX_BRANCH_SNAP + 2 * d + 1] = (*c).borrows.entries[i].consumed
-            (*c).borrows.entries[i].consumed = (*c).borrows.branch_snap[i * MAX_BRANCH_SNAP + 2 * d]
+            // Whole-element read-modify-write. Assigning THROUGH a nested place --
+            // `(*c).borrows.entries[i].consumed = ...`, i.e. deref -> field -> index ->
+            // field -- is not resolved by the lean_single front end, which is the seed
+            // that builds Madaros. It reports `unknown identifier consumed` and the
+            // emitted store lands somewhere else in the Checker (issue #1471). The rest
+            // of this file already uses this idiom for the same reason; see the
+            // TypeEnv.bindings update in checker_env_mark_mutable_inplace.
+            var be_rewind = (*c).borrows.entries[i as usize]
+            be_rewind.consumed = (*c).borrows.branch_snap[i * MAX_BRANCH_SNAP + 2 * d]
+            (*c).borrows.entries[i as usize] = be_rewind
             i = i + 1
         }
     }
@@ -5102,12 +5111,14 @@ fn checker_merge_if_branches_inplace(c: *mut Checker) with Mut, Panic, Div, Allo
         if (*c).borrows.entries[i].is_linear && !(*c).borrows.branch_snap[i * MAX_BRANCH_SNAP + 2 * d] {
             let then_consumed = (*c).borrows.branch_snap[i * MAX_BRANCH_SNAP + 2 * d + 1]
             let else_consumed = (*c).borrows.entries[i].consumed
+            var be_merge = (*c).borrows.entries[i as usize]
             if then_consumed != else_consumed {
                 mismatch = mismatch + 1
-                (*c).borrows.entries[i].consumed = true
+                be_merge.consumed = true
             } else {
-                (*c).borrows.entries[i].consumed = then_consumed
+                be_merge.consumed = then_consumed
             }
+            (*c).borrows.entries[i as usize] = be_merge
         }
         i = i + 1
     }
