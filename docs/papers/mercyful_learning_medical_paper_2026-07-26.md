@@ -14,7 +14,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.papers.mercyfu
 **Author:** Demetrios Chiuratto Agourakis
 **Date:** 2026-07-26
 **Status:** Full manuscript draft — target journals: *Clinical Pharmacology & Therapeutics* or *Journal of Psychiatric Research*
-**Provenance:** Formal core: `docs/research/PROGRAM-REGISTRY-mercyful-learning.md` §A. Runtimes: `stdlib/clinical/mercyful.sio`, `scripts/research/mercyful_runtime_contract.py`. Benchmarks: `tests/run-pass/mercyful_exposure_therapy.sio`, `tests/run-pass/mercyful_clinical_sequencing.sio`, `tests/run-pass/mercyful_chemo_sequencing.sio`, `scripts/research/mercyful_chemo_contract.py`. Companion preprint: `docs/papers/mercyful_learning_preprint_2026-07-26.md`.
+**Provenance:** Formal core: `docs/research/PROGRAM-REGISTRY-mercyful-learning.md` §A. Runtimes: `stdlib/clinical/mercyful.sio`, `scripts/research/mercyful_runtime_contract.py`. Benchmarks: `tests/run-pass/mercyful_exposure_therapy.sio`, `tests/run-pass/mercyful_clinical_sequencing.sio`, `tests/run-pass/mercyful_chemo_sequencing.sio`, `scripts/research/mercyful_chemo_contract.py`, `scripts/research/mercyful_mimic_iv_vancomycin_contract.py`. Real-data correspondence analysis: `docs/research/mimic_iv_mercyful_validation_2026-07-26.md`. Companion preprint: `docs/papers/mercyful_learning_preprint_2026-07-26.md`.
 
 > **Scope statement (read first).** This paper formalizes a decision rule for treatment sequencing under a *suffering field* and demonstrates it on synthetic graphs. All patients, doses, regimens, therapeutic windows, drug–drug-interaction flags, toxicity grades, and suffering values in this paper are synthetic constructions. Cited clinical trials and guidelines shape the *structure* of the synthetic benchmarks only. Nothing here is medical guidance, a treatment recommendation, a dosing suggestion, or a clinical decision-support tool. No patient data were used; no clinical validation is claimed. The contribution is a formal framework, exact executable benchmarks, and pre-registered falsifiers.
 
@@ -28,7 +28,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.papers.mercyfu
 
 **Applications and results.** Three synthetic benchmarks, each with an executable, dual-implementation contract. (1) **Exposure therapy:** a naive raw-suffering minimizer prescribes avoidance (cost 0); the mercyful scheduler traverses distress and reaches recovery at integrated suffering 7, peak 5 — matching the structure of the clinical fact that exposure-based therapies require acute distress to work. (2) **Chemotherapy sequencing:** on a graph shaped after the relative-dose-intensity, dose-dense, and stop-and-go literature, dose reduction to minimize toxicity rediscovers under-treatment (Bonadonna's RDI < 85% hazard) as an unconstrained optimum; the mercyful scheduler reproduces Pareto dominance of continuous-until-progression (OPTIMOX structure), a G-CSF edge-admission gate (EORTC/NCCN structure), and an exact peak-aversion crossover price μ\* = 11. (3) **Pharmacokinetic co-medication sequencing:** suffering fields are derived from Knightian probability-box bands of synthetic vancomycin and tacrolimus regimens; therapeutic drug monitoring strictly lowers the field; drug–drug-interaction gates (nephrotoxin co-medication, CYP3A4 inhibition) act as Goodhart constraints on edge admission, including a case where an interaction doubles an AUC enclosure across a ceiling and the route becomes *infeasible* rather than silently relaxed.
 
-**Boundaries.** Everything reported is synthetic, small-graph, and combinatorial. No learning is performed; no patient data are used; no clinical or patient-level conclusion is drawn. All claims are separated into what is proven, what is measured, and what is conjectural, with pre-registered stop rules.
+**Boundaries.** Everything reported is synthetic, small-graph, and combinatorial. No learning is performed; no patient data are used; no clinical or patient-level conclusion is drawn. A structural-correspondence section compares the *shape* of the benchmarks' optima and infeasibilities with documented findings in exposure therapy, chemotherapy dose intensity, and — in the domain the suffering field is derived for — a 28,451-patient MIMIC-IV vancomycin cohort in which therapeutic drug monitoring was associated with lower mortality (post-matching OR 0.67–0.69, CIs excluding 1.0); the model predicts decision-structure direction only, never effect sizes. All claims are separated into what is proven, what is measured, and what is conjectural, with pre-registered stop rules.
 
 **Conclusions.** Suffering measured without a target constraint optimizes the measure; the repair belongs in the feasible set. The framework makes the aggregation-versus-peak ethical commitment a declared, computable parameter, and prices necessary versus gratuitous suffering as theorems of the graph.
 
@@ -315,7 +315,7 @@ The point of §7 is methodological, not clinical: the suffering field can be der
 
 ## 8. Validation against real clinical data (structural correspondence)
 
-Sections 5–7 demonstrate the framework on synthetic graphs whose structure was *chosen* to echo documented clinical phenomena. This section asks the natural follow-up question, at exactly the level of evidence available: **do the structures the scheduler reproduces correspond to structures observed in real clinical trials?** We answer it in two domains — exposure therapy and chemotherapy — and derive one falsifiable, retrospectively testable prediction. Three boundaries govern everything below:
+Sections 5–7 demonstrate the framework on synthetic graphs whose structure was *chosen* to echo documented clinical phenomena. This section asks the natural follow-up question, at exactly the level of evidence available: **do the structures the scheduler reproduces correspond to structures observed in real clinical trials?** We answer it in three domains — exposure therapy, chemotherapy, and vancomycin therapeutic drug monitoring — and derive one falsifiable, retrospectively testable prediction. Three boundaries govern everything below:
 
 1. **This is structural correspondence, not clinical validation.** The scheduler was never fitted to, trained on, or evaluated against patient data. What we compare is the *shape* of the model's optima and infeasibilities against the *shape* of documented clinical findings.
 2. **No outcome prediction.** The model predicts nothing about effect sizes, response rates, or survival curves. Where its structural direction matches a trial's direction, that is evidence the benchmark's structure is not fanciful — not evidence that the model captures clinical reality.
@@ -357,7 +357,23 @@ The structural mapping:
 
 **Honest asymmetries.** Bonadonna's RDI analysis is retrospective and confounded by indication: patients who receive dose reductions are typically older and frailer, so part of the sub-85% outcome penalty is selection, not dose. The model does not resolve that confound and does not need to: it reproduces the *decision structure* — under-dosing is the unconstrained optimum of any toxicity metric without an efficacy constraint — not the causal effect size. The 85% figure in the benchmark echoes the literature; it is not derived from it, and nothing in the model computes it. The model's `REM` is binary; the survival benefit in [19] is graded and measured over two decades.
 
-### 8.3 A testable prediction
+### 8.3 Vancomycin TDM: correspondence with the MIMIC-IV cohort (Wang et al. 2026)
+
+The strongest correspondence available to the framework is in the domain its suffering field is *derived* for. Section 7 showed on synthetic twins that TDM has a computable signature — band narrowing strictly lowers the field (0.675679 → 0.059420, C3) — and that a verification gate on edge admission makes the TDM route the unique feasible optimum. The real counterpart is the MIMIC-IV (v3.1) retrospective cohort of Wang et al. [31], compared here through a static, one-shot model analogue of what is clinically an iterative measure-and-re-dose process: 28,451 ICU patients receiving intravenous vancomycin, of whom 10,758 (37.8%) underwent TDM (≥1 measured concentration). After 1:1 propensity score matching (9,785 pairs, 33 covariates, all SMDs < 0.1, doubly robust adjustment), TDM was associated with lower AKI risk (OR 0.580, 95% CI 0.540–0.610), lower in-hospital mortality (OR 0.672, 95% CI 0.570–0.790), and lower ICU mortality (OR 0.691, 95% CI 0.580–0.820); Kaplan–Meier log-rank *P* < 0.001 for both mortality endpoints.
+
+The benchmark for this comparison (`scripts/research/mercyful_mimic_iv_vancomycin_contract.py`, V1–V7, V_GREEN; gate `scripts/ci/mercyful_mimic_iv_gate.sh`) extends the §7 graph with the two fixed-dosing arms the cohort compares: a sub-therapeutic conservative arm (synthetic Cmin band [4, 9] mg/L, s = 0.6) and a standard fixed-dose arm whose band straddles the window ([6, 26], s = 0.7), neither admitted to the target by the verification gate. Measured results, exact: (i) a toxicity-only minimizer selects the sub-therapeutic arm, which has no path to the target — under-dosing is the unconstrained optimum of a toxicity metric (V1); (ii) without the target constraint the raw minimizer never treats at all (V2); (iii) counterfactually admitting the unverified fixed-dose arm to the target makes it the cost optimum *in the graph* (∫s = 0.700 < 0.735099) — **the verification gate is what makes TDM optimal in the model**; this is a model-internal causality statement about edge admission, not a clinical counterfactual (V4); (iv) the mercyful scheduler's unique feasible optimum is the TDM-guided route, reproducing the §7.4 C1 numbers exactly (∫s = 0.735099, peak 0.675679, total 1.410778 at μ = 1; V5).
+
+| Model object (synthetic) | Clinical counterpart (Wang et al. 2026 [31]) |
+|---|---|
+| Naive toxicity minimizer selects the sub-therapeutic arm; it cannot reach the target | Confounding by indication: unadjusted, the monitored (sicker) group looks *worse* (AKI OR 2.98, 2.83–3.15) — naive metric-watching inverts the truth |
+| Fixed-dose arm straddles the window and fails the verification gate | Non-TDM arm (n = 17,693): dosing without measured levels, unverified exposure |
+| TDM band narrowing strictly lowers the field, 11.4× (C3, V3) | Post-PSM AKI risk lower with TDM: adjusted OR 0.580 (0.540–0.610) — *contested*: the study's own raw matched AKI counts favor non-TDM; see asymmetry (ii) |
+| Verification gate causal: without it, the unverified arm is the cost optimum in the graph (V4) | TDM arm (n = 10,758): dose adjusted to measured concentration |
+| Scheduler's unique feasible optimum is the TDM-guided route (V5) | TDM associated with lower in-hospital mortality OR 0.672 (0.570–0.790) and ICU mortality OR 0.691 (0.580–0.820) |
+
+**Honest asymmetries.** Four, stated rather than rounded off. (i) The cohort is observational; PSM with doubly robust adjustment reduces but does not eliminate residual confounding, treatment assignment is endogenous, and the model says nothing about causation — the correspondence is between two structures. (ii) The source paper's own post-PSM Table 1 reports raw matched toxicity counts *higher* in the TDM arm (AKI 76.37% vs 65.05%) while its adjusted post-PSM ORs favor TDM (0.580); we could not reconcile these from the published text, so we treat the study's toxicity-side estimates with caution and rest the correspondence on the mortality endpoints, for which the matched-cohort Kaplan–Meier analysis supplies a *raw, unadjusted* statistic (log-rank *P* < 0.001) rather than another adjusted one. (iii) The model predicts direction only — not OR 0.67, absolute risk, or any patient-level quantity; the fixed-arm p-boxes are declared, not derived from MIMIC-IV. (iv) The model's TDM is a one-shot band narrowing; clinical TDM is iterative re-dosing, which the static framework does not represent (§9.5, item 6). Subject to these, the direction the scheduler computes — verified, window-guided dosing dominates unverified dosing — matches the direction observed in 28,451 real patients, with confidence intervals excluding the null.
+
+### 8.4 A testable prediction
 
 The framework's structure yields one prediction sharp enough to be wrong, stated here so it can fail in public rather than guide treatment:
 
@@ -370,11 +386,11 @@ The framework's structure yields one prediction sharp enough to be wrong, stated
 
 **Boundary.** This is a hypothesis about real data generated by a synthetic model. Testing it requires retrospective cohort data this paper does not have and does not use. It is registered for falsifiability, not offered as a clinical recommendation.
 
-### 8.4 What is and is not validated
+### 8.5 What is and is not validated
 
 | Validated (structural correspondence) | Not validated |
 |---|---|
-| The benchmark optima and infeasibilities have the same *shape* as documented findings: passing through distress beats minimal contact [30]; benefit concentrates at RDI ≥ 85% [19]; sub-85% RDI is routine practice [20] | Any patient-level outcome, effect size, or survival curve |
+| The benchmark optima and infeasibilities have the same *shape* as documented findings: passing through distress beats minimal contact [30]; benefit concentrates at RDI ≥ 85% [19]; sub-85% RDI is routine practice [20]; TDM-guided dosing is associated with lower mortality and nephrotoxicity in 28,451 ICU patients [31] | Any patient-level outcome, effect size, or survival curve |
 | The Goodhart hazards in the synthetic graphs are not artifacts of the toys; they are the documented defaults of distress- and toxicity-minimizing practice | That the scheduler's selections are clinically correct for any patient |
 | The framework's repair direction — the therapeutic endpoint belongs in the feasible set — matches the direction of the clinical literature's conclusions | Any dosing, sequencing, or delivery-format recommendation |
 
@@ -409,7 +425,7 @@ The intended audience is computational psychiatry, clinical pharmacology methodo
 | The Cmax term is a sound outer bound | **Proven** (exact identity + subadditivity); tightness **not claimed** |
 | The p-boxes are valid for any joint parameter distribution | Inherited from the twins' monotone-corner enclosures [27]; **not re-proven here** |
 | The synthetic benchmarks reproduce the *structure* of documented clinical phenomena (RDI hazard, OPTIMOX dominance, G-CSF gate, exposure-through-distress) | **Argued by construction**, with the cited literature shaping structure only; **not a clinical validation** |
-| The structural direction of the benchmarks matches real-trial direction (massed PE > minimal contact [30]; benefit concentrated at RDI ≥ 85% [19]; sub-85% RDI routine in practice [20]) | **Structural correspondence** (§8) — shapes compared after the benchmarks were fixed, not data fitted; explicitly **not a clinical validation**; the spaced-PE vs PCT null result in [30] is outside the model's resolution |
+| The structural direction of the benchmarks matches real-trial direction (massed PE > minimal contact [30]; benefit concentrated at RDI ≥ 85% [19]; sub-85% RDI routine in practice [20]; TDM-guided dosing associated with lower ICU and in-hospital mortality in a 28,451-patient cohort [31]) | **Structural correspondence** (§8) — shapes compared after the benchmarks were fixed, not data fitted; explicitly **not a clinical validation**; the spaced-PE vs PCT null result in [30] is outside the model's resolution; [31] is observational and its matched toxicity counts are internally unreconciled (§8.3) |
 | Budgetary necessity (c\*_orc) is the right formalization of necessary suffering | **Position** — argued, not proven; the topological alternative was falsified [28] |
 | Learning under a suffering field is feasible and beneficial | **Conjectural** — out of scope; see §9.5 |
 | Any clinical or patient-level conclusion | **Not claimed** |
@@ -425,7 +441,7 @@ The intended audience is computational psychiatry, clinical pharmacology methodo
 7. **Binary targets.** Remission is binary; real response is graded (pCR vs PR vs SD). A multi-target extension is natural but unbuilt.
 8. **Disease-attributable suffering omitted.** The chemotherapy field prices treatment-attributable burden only (§6.2). Adding disease-attributable burden would change raw-minimizer behavior but not the anti-Goodhart conclusion.
 9. **Single agent, single patient.** No multi-patient fairness analysis, no clinician-in-the-loop protocol.
-10. **Structural correspondence is not clinical validation.** §8 compares the *shape* of the model's optima and infeasibilities with the shape of documented trial findings; nothing was fitted to, or tested against, patient data. The model has no analogue of present-centered therapy (whose null result against spaced PE in [30] bounds how far the exposure correspondence extends), cannot distinguish massed from spaced delivery within a fixed distress peak, and echoes an RDI literature that is retrospective and confounded by indication [19, 20]. The prediction of §8.3 is untested.
+10. **Structural correspondence is not clinical validation.** §8 compares the *shape* of the model's optima and infeasibilities with the shape of documented trial findings; nothing was fitted to, or tested against, patient data. The model has no analogue of present-centered therapy (whose null result against spaced PE in [30] bounds how far the exposure correspondence extends), cannot distinguish massed from spaced delivery within a fixed distress peak, and echoes an RDI literature that is retrospective and confounded by indication [19, 20]. The MIMIC-IV correspondence (§8.3) rests on a retrospective cohort whose adjusted mortality estimates we take as reported and whose matched toxicity counts we could not reconcile with the published adjusted ORs. The prediction of §8.4 is untested.
 
 ### 9.6 On novelty: what the framework is and is not
 
@@ -454,8 +470,9 @@ Each contract clause carries a falsifier and a stop rule (registered before the 
 | H7 necessity curve | Peaks equal or inverted across budgets | Necessity curve wrong |
 | H8 Sounio↔Python agreement | Any disagreement | Port unsound |
 | C1–C6 PK integration | Any of: no path in healthy scenario; shortcut admitted; TDM does not strictly reduce field; violation not priced at S_MAX; DDI gate non-causal; CYP band not recomputed | Integration layer unsound |
+| V1–V7 MIMIC-IV correspondence | Any of: toxicity minimizer reaches target; gate non-causal (unverified route not cheaper); selected path or ∫s/peak/total deviates from C1 canonical values; any cited CI includes 1.0 | Structural correspondence basis gone |
 
-Global verdicts: failure of M1, M3, M6, H1, H2, or H6 is **RED** (benchmark fails to demonstrate the phenomenon or is unsafe). Failure of any other clause is **AMBER** (fix the specific clause before claiming). Current status: **M_GREEN (6/6)**, **H_GREEN (8/8)**, **clinical integration 6/6** — reproduced for this manuscript on 2026-07-26.
+Global verdicts: failure of M1, M3, M6, H1, H2, or H6 is **RED** (benchmark fails to demonstrate the phenomenon or is unsafe). Failure of V4 or V5 is **RED** for the §8.3 correspondence claim. Failure of any other clause is **AMBER** (fix the specific clause before claiming). Current status: **M_GREEN (6/6)**, **H_GREEN (8/8)**, **clinical integration 6/6**, **MIMIC-IV correspondence V_GREEN (7/7)** — reproduced for this manuscript on 2026-07-26.
 
 ---
 
@@ -464,9 +481,10 @@ Global verdicts: failure of M1, M3, M6, H1, H2, or H6 is **RED** (benchmark fail
 All results are executable from the repository:
 
 ```bash
-# Python contracts: M1..M6 (M_GREEN), H1..H8 (H_GREEN)
+# Python contracts: M1..M6 (M_GREEN), H1..H8 (H_GREEN), V1..V7 (V_GREEN)
 python3 scripts/research/mercyful_runtime_contract.py
 python3 scripts/research/mercyful_chemo_contract.py
+python3 scripts/research/mercyful_mimic_iv_vancomycin_contract.py
 
 # Sounio-native benchmarks (lean_single bootstrap engine; see note below)
 SOUNIO_SOUC_ENGINE=lean_single bin/souc run tests/run-pass/mercyful_exposure_therapy.sio  # MERCYFUL_SOUNIO_PASS
@@ -478,11 +496,12 @@ bash scripts/ci/mercyful_runtime_gate.sh              # MERCYFUL_RUNTIME_GATE_OK
 bash scripts/ci/mercyful_sounio_gate.sh               # MERCYFUL_SOUNIO_GATE_OK
 bash scripts/ci/mercyful_chemo_sequencing_gate.sh     # MERCYFUL_CHEMO_GATE_OK
 bash scripts/ci/mercyful_clinical_sequencing_gate.sh  # MERCYFUL_CLINICAL_SEQ_GATE_OK
+bash scripts/ci/mercyful_mimic_iv_gate.sh             # MERCYFUL_MIMIC_IV_GATE_OK
 ```
 
 **Engine note (2026-07-26, this branch).** The Sounio-native benchmarks were executed for this manuscript through the lean_single bootstrap engine (`SOUNIO_SOUC_ENGINE=lean_single`); under the default Madaros engine the chemo test compiles but the produced binary segfaults in this environment (the documented Madaros multimodule fallback issue, `docs/audit/MADAROS_MULTIMODULE_FALLBACK_SEGFAULT_2026-06-30.md`). Under lean_single all native clauses pass and agree with the Python contract on every printed number (H8).
 
-Exact reported values (2026-07-26, branch `research/self-falsifying-compilation-line-20260726`). Exposure benchmark: ∫s = 7, peak 5, cost 12 at μ = 1. Chemotherapy benchmark: DD (8 weeks, ∫48, peak 8), STOP_GO (24 weeks, ∫81, peak 5), CONT (18 weeks, ∫84, peak 8, dominated); frontier {(48, 8), (81, 5)}; μ\* = 11; G-CSF off selects STOP_GO (total 86 at μ = 1); L₀ = 10 forces peak 8 at μ = 100, L₀ = 30 permits peak 5. PK integration: vancomycin field 0.675679 → 0.059420, tacrolimus field 1.251592 → 0, selected route integral 0.735099, peak 0.675679, total 1.410778, CYP-inhibited AUC_hi = 344.466490 vs ceiling 200.
+Exact reported values (2026-07-26, branch `research/self-falsifying-compilation-line-20260726`). Exposure benchmark: ∫s = 7, peak 5, cost 12 at μ = 1. Chemotherapy benchmark: DD (8 weeks, ∫48, peak 8), STOP_GO (24 weeks, ∫81, peak 5), CONT (18 weeks, ∫84, peak 8, dominated); frontier {(48, 8), (81, 5)}; μ\* = 11; G-CSF off selects STOP_GO (total 86 at μ = 1); L₀ = 10 forces peak 8 at μ = 100, L₀ = 30 permits peak 5. PK integration: vancomycin field 0.675679 → 0.059420, tacrolimus field 1.251592 → 0, selected route integral 0.735099, peak 0.675679, total 1.410778, CYP-inhibited AUC_hi = 344.466490 vs ceiling 200. MIMIC-IV correspondence (§8.3): fixed-arm suffering 0.6 (sub-therapeutic band [4, 9]) and 0.7 (straddling band [6, 26]); verification-gate counterfactual ∫s = 0.700 vs 0.735099; scheduler selects the TDM-guided route with the C1 canonical values above; cohort statistics n = 28,451, TDM n = 10,758 (37.8%), PSM 9,785 pairs, ORs 0.580/0.672/0.691 with all CIs excluding 1.0 [31].
 
 ---
 
@@ -524,6 +543,7 @@ Treatment sequencing optimizes what it is told to optimize. Told to minimize mea
 28. Agourakis DC. Program registry — Mercyful Learning, §A (principle, budgetary reformulation, anti-Goodhart axiom) and §5 (controlled negatives). `docs/research/PROGRAM-REGISTRY-mercyful-learning.md`, this repository, 2026.
 29. Agourakis DC. Mercyful Learning runtime spec and falsifiers; Sounio port spec; clinical integration spec; chemotherapy sequencing spec. `docs/research/mercyful_runtime_spec_2026-07-25.md`, `mercyful_runtime_falsifiers_2026-07-25.md`, `mercyful_sounio_port_spec_2026-07-25.md`, `mercyful_clinical_integration_spec_2026-07-25.md`, `mercyful_chemo_sequencing_spec_2026-07-26.md`, this repository, 2026.
 30. Foa EB, McLean CP, Zang Y, Zhong J, Powers MB, Kauffman BY, Rauch S, Porter K, Knowles K; STRONG STAR Consortium. Effect of prolonged exposure therapy delivered over 2 weeks vs 8 weeks vs present-centered therapy on PTSD symptom severity in military personnel: a randomized clinical trial. *JAMA* 2018;319(4):354–364. doi:10.1001/jama.2017.21242.
+31. Wang J, Huang C, Chen Y, et al. Vancomycin therapeutic drug monitoring is associated with reduced toxicity in ICU patients: a MIMIC-IV retrospective study. *Sci Rep* 16:15009, 2026. doi:10.1038/s41598-026-42395-1. *(Observational cohort; anchors the structural correspondence of §8.3 only — no causal or effect-size claim is adopted. See §8.3 honest asymmetries on the unreconciled matched toxicity counts.)*
 
 ---
 
