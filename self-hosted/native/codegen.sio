@@ -2466,7 +2466,9 @@ fn emit_builtin_exp(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
     c.relocs = add_rip_reloc(c.relocs, load_ln2_pos + 4, ln2_off)
     c.code = emit_mulsd_xmm0_xmm1(c.code)         // xmm0 = n_f64 * ln2
-    c.code = emit_movsd_rbp_disp8_xmm1(c.code, -16) // save n*ln2 to [rbp-16] temporarily
+    // MUST store xmm0 (product), not xmm1 (still holds ln2). Wrong save →
+    // r = x - ln2 instead of x - n*ln2, so exp(0) ≈ 0.5.
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -16) // save n*ln2 to [rbp-16]
     c.code = emit_movsd_xmm0_rbp_disp8(c.code, -8)  // xmm0 = x
     c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16) // xmm1 = n*ln2
     c.code = emit_subsd_xmm0_xmm1(c.code)         // xmm0 = r = x - n*ln2
@@ -2636,17 +2638,14 @@ fn emit_builtin_log(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     c.relocs = add_rip_reloc(c.relocs, load_one2_pos + 4, one_off)
     c.code = emit_addsd_xmm0_xmm1(c.code)         // xmm0 = m + 1
 
-    // f = (m-1) / (m+1)
-    c.code = emit_movsd_rbp_disp8_xmm1(c.code, -48) // save (m-1) to xmm1 via stack? No, swap:
-    // xmm1 = m+1, xmm0 = m-1
+    // f = (m-1) / (m+1).  m-1 already at [rbp-48]; do not store xmm1 there.
     c.code = emit_movsd_rbp_disp8_xmm0(c.code, -56)  // [rbp-56] = m+1
     c.code = emit_movsd_xmm0_rbp_disp8(c.code, -48)  // xmm0 = m-1
     c.code = emit_movsd_xmm1_rbp_disp8(c.code, -56)  // xmm1 = m+1
     c.code = emit_divsd_xmm0_xmm1(c.code)          // xmm0 = f = (m-1)/(m+1)
     c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)  // [rbp-24] = f
 
-    // Step 4: f^2
-    c.code = emit_movsd_rbp_disp8_xmm1(c.code, -24) // xmm1 = f (via store/load trick)
+    // Step 4: f^2  (load f into both xmms — never store xmm1 over f)
     c.code = emit_movsd_xmm0_rbp_disp8(c.code, -24) // xmm0 = f
     c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24) // xmm1 = f
     c.code = emit_mulsd_xmm0_xmm1(c.code)          // xmm0 = f^2
@@ -2670,8 +2669,8 @@ fn emit_builtin_log(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     c.relocs = add_rip_reloc(c.relocs, load_seventh_pos + 4, seventh_off)
     c.code = emit_mulsd_xmm0_xmm1(c.code)          // xmm0 = f^6 * (1/7)
 
-    // + f^4 / 5
-    c.code = emit_movsd_rbp_disp8_xmm1(c.code, -40)  // save partial to [rbp-40]
+    // + f^4 / 5  (must save xmm0 partial, not xmm1 which holds 1/7)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -40)  // save f^6/7 to [rbp-40]
     c.code = emit_movsd_xmm0_rbp_disp8(c.code, -48)  // xmm0 = f^4
     let load_fifth_pos = c.code.len
     c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
