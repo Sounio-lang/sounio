@@ -139,11 +139,23 @@ Four constraints fall out, all of them load-bearing for later rungs:
    colour**, and it is the sharpest argument yet for RQ2: if running a claim's
    check can change the tree, then "compile, then verify, then compile again"
    is not guaranteed to converge.
-4. **Most specs cannot be token-bound yet.** Only **23 of 77** research specs
-   with a `Status:` line (**30 %**) declare a machine-parseable verdict token;
-   the rest use prose (`` `HYPOTHESIS` → `EXECUTABLE` (target) ``). R2's drift
-   guard needs a token on both sides, so 70 % of the corpus needs a convention
-   change before it can be guarded at all.
+4. **Most specs cannot be token-bound yet — and the honest denominator is the
+   wide one.** Of **269** documents in `docs/research/`, only **79** carry a
+   `**Status:**` line at all, and only **24 (8.9 % of all specs)** declare a
+   machine-parseable verdict token; the rest use prose
+   (`` `HYPOTHESIS` → `EXECUTABLE` (target) ``). Quoted against the specs that
+   already follow the Status convention it is 24/79 ≈ 30 %, which is the
+   flattering framing — **R2 should plan against 8.9 %**, because a spec with no
+   Status line needs the convention introduced before a token can be bound to
+   it. R2's drift guard needs a token on both sides, so the overwhelming
+   majority of the corpus needs a convention change before it can be guarded at
+   all. Re-derive:
+
+   ```bash
+   ls docs/research/*.md | wc -l                                   # all specs
+   grep -l -E '^\*\*Status:\*\*' docs/research/*.md | wc -l        # with Status
+   grep -lE '^\*\*Status:\*\* `[^`]*` — `[A-Za-z0-9_]+`' docs/research/*.md | wc -l
+   ```
 
 ---
 

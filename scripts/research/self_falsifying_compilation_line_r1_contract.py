@@ -63,7 +63,12 @@ NON_HERMETIC_GATES = [
 
 # Paths under which a gate writing anything is presumed non-hermetic. Used for
 # the static half of B5; the dynamic half is the probe described in the spec.
-TREE_WRITE_PREFIXES = ("results/", ".sounio/")
+# The scan regex is DERIVED from this tuple — adding a prefix here is enough,
+# with no second pattern to keep in sync by hand.
+TREE_WRITE_PREFIXES = ("results/", ".sounio/", "artifacts/")
+TREE_WRITE_RE = re.compile(
+    "(?:" + "|".join(re.escape(p) for p in TREE_WRITE_PREFIXES) + r")[A-Za-z0-9_./-]*"
+)
 
 CLAIM_BLOCK_RE = re.compile(r"^claim\s+(\w+)\s*\{(.*?)^\}", re.MULTILINE | re.DOTALL)
 GATE_FIELD_RE = re.compile(r'gate\s*=\s*"([^"]+)"')
@@ -219,18 +224,17 @@ def clause_b5(bound: list[tuple[str, str]]) -> bool:
         ok = False
 
     for gate in sorted(bound_gates - set(known)):
-        body = read(gate)
-        hits = sorted({
-            m for m in re.findall(r"(?:results|\.sounio)/[A-Za-z0-9_./-]*", body)
-            if m.startswith(TREE_WRITE_PREFIXES)
-        })
+        hits = sorted(set(TREE_WRITE_RE.findall(read(gate))))
         if hits:
             print(f"  bound gate references tree-write paths {hits}: {gate}")
             ok = False
 
-    print(f"B5_HERMETIC {'PASS' if ok else 'FAIL'} — "
-          f"{len(NON_HERMETIC_GATES)} gates known to mutate the tree, none bound; "
-          f"static scan of {len(bound_gates)} bound gates clean")
+    if ok:
+        print(f"B5_HERMETIC PASS — {len(NON_HERMETIC_GATES)} gates known to mutate "
+              f"the tree, none bound; static scan of {len(bound_gates)} bound gates clean")
+    else:
+        print(f"B5_HERMETIC FAIL — a bound gate mutates the working tree "
+              f"(see above); binding it would make every compile dirty the repo")
     return ok
 
 
