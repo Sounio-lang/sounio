@@ -142,6 +142,93 @@ let LOWER_GLOBAL_SCALAR_I64: i64 = 1
 // load path and IndexGet treated the init word as a pointer → SEGV.
 let LOWER_GLOBAL_ARRAY: i64 = 4
 
+// Inter-procedural FO transfer table (module-global so it survives Lowerer
+// by-value churn). Reset at each program-items lower start.
+// kind: 0=none 1=id 2=scale 3=add 4=mul 5=fwd
+// Keys are polynomial hashes of Name bytes (Name aggregates do not survive
+// global array stores — same family as ClaimDecl name truncation).
+var FO_XFER_COUNT: i64 = 0
+var FO_XFER_KIND: [i64; 64] = [0; 64]
+var FO_XFER_LIT: [f64; 64] = [0.0; 64]
+var FO_XFER_HASH: [i64; 64] = [0; 64]
+var FO_XFER_FWD_HASH: [i64; 64] = [0; 64]
+
+fn fo_name_hash(n: Name) -> i64 with Mut, Panic, Div {
+    var h: i64 = 5381
+    var i: i64 = 0
+    while i < n.len && i < 64 {
+        let b = (n.buf[i as usize] as i64) & 255
+        h = h * 33 + b
+        i = i + 1
+    }
+    h + n.len
+}
+
+fn fo_xfer_global_reset() with Mut {
+    FO_XFER_COUNT = 0
+    var i: i64 = 0
+    while i < 64 {
+        FO_XFER_KIND[i as usize] = 0
+        FO_XFER_LIT[i as usize] = 0.0
+        FO_XFER_HASH[i as usize] = 0
+        FO_XFER_FWD_HASH[i as usize] = 0
+        i = i + 1
+    }
+}
+
+fn fo_xfer_global_lookup(name: Name) -> i64 with Mut, Panic, Div {
+    let h = fo_name_hash(name)
+    var i: i64 = 0
+    while i < FO_XFER_COUNT {
+        if FO_XFER_HASH[i as usize] == h {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn fo_xfer_global_lookup_hash(h: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < FO_XFER_COUNT {
+        if FO_XFER_HASH[i as usize] == h {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn fo_xfer_global_set(name: Name, kind: i64, lit: f64, fwd: Name) with Mut, Panic, Div, IO {
+    let existing = fo_xfer_global_lookup(name)
+    let h = fo_name_hash(name)
+    let fh = fo_name_hash(fwd)
+    if existing >= 0 {
+        FO_XFER_KIND[existing as usize] = kind
+        FO_XFER_LIT[existing as usize] = lit
+        FO_XFER_FWD_HASH[existing as usize] = fh
+        return
+    }
+    if FO_XFER_COUNT >= 64 {
+        return
+    }
+    let idx = FO_XFER_COUNT
+    FO_XFER_HASH[idx as usize] = h
+    FO_XFER_KIND[idx as usize] = kind
+    FO_XFER_LIT[idx as usize] = lit
+    FO_XFER_FWD_HASH[idx as usize] = fh
+    FO_XFER_COUNT = idx + 1
+    if lower_live_diag_enabled() {
+        print("lower_live: fo_xfer_set name=")
+        print(str_from_bytes(name.buf, name.len))
+        print(" kind=")
+        print_int(kind)
+        print(" count=")
+        print_int(FO_XFER_COUNT)
+        print("\n")
+    }
+}
+
 pub struct LowerGlobalTypeTable {
     // Indexed by IrModule.functions slot. Keep this aligned with IR_MAX_FUNCS;
     // source array lengths are literal-only in the bootstrap grammar.
@@ -237,6 +324,13 @@ struct Lowerer {
     fo_bind_count: i64,
     fo_bind_names: [Name; 128],
     fo_bind_sens: [i64; 4096],
+    // Inter-procedural FO: pure-fn transfer table (survives across function lowers).
+    // kind: 0=none 1=id(p0) 2=scale(lit*p0) 3=add(p0+p1) 4=mul(p0*p1) 5=fwd(g)
+    fo_xfer_count: i64,
+    fo_xfer_names: [Name; 64],
+    fo_xfer_kind: [i64; 64],
+    fo_xfer_lit: [f64; 64],
+    fo_xfer_fwd: [Name; 64],
 }
 
 struct IrPreparedCallArgs {
@@ -378,6 +472,11 @@ fn lowerer_new() -> Lowerer with Alloc {
         fo_bind_count: 0,
         fo_bind_names: [ir_empty_name(); 128],
         fo_bind_sens: [-1; 4096],
+        fo_xfer_count: 0,
+        fo_xfer_names: [ir_empty_name(); 64],
+        fo_xfer_kind: [0; 64],
+        fo_xfer_lit: [0.0; 64],
+        fo_xfer_fwd: [ir_empty_name(); 64],
     }
 }
 
@@ -729,6 +828,11 @@ fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEp
         fo_bind_count: 0,
         fo_bind_names: [ir_empty_name(); 128],
         fo_bind_sens: [-1; 4096],
+        fo_xfer_count: 0,
+        fo_xfer_names: [ir_empty_name(); 64],
+        fo_xfer_kind: [0; 64],
+        fo_xfer_lit: [0.0; 64],
+        fo_xfer_fwd: [ir_empty_name(); 64],
     }
     lo.epistemic_contests = lower_epistemic_contest_index_from_ref(epistemic)
     if lower_live_diag_enabled() {
@@ -779,6 +883,11 @@ fn lowerer_new_from_program_summary_owned(summary: IrProgramSummary, epistemic: 
         fo_bind_count: 0,
         fo_bind_names: [ir_empty_name(); 128],
         fo_bind_sens: [-1; 4096],
+        fo_xfer_count: 0,
+        fo_xfer_names: [ir_empty_name(); 64],
+        fo_xfer_kind: [0; 64],
+        fo_xfer_lit: [0.0; 64],
+        fo_xfer_fwd: [ir_empty_name(); 64],
     }
     (*lo.module).epistemic = (*epistemic)
     lo.epistemic_contests = lower_epistemic_contest_index_from_ref(epistemic)
@@ -832,6 +941,11 @@ fn lowerer_from_acc_module(module: Box<IrModule>) -> Lowerer with Alloc, Mut, Pa
         fo_bind_count: 0,
         fo_bind_names: [ir_empty_name(); 128],
         fo_bind_sens: [-1; 4096],
+        fo_xfer_count: 0,
+        fo_xfer_names: [ir_empty_name(); 64],
+        fo_xfer_kind: [0; 64],
+        fo_xfer_lit: [0.0; 64],
+        fo_xfer_fwd: [ir_empty_name(); 64],
     }
     // Knowledge layout is required for epistemic field lowering; match
     // lowerer_new_with_epistemic. Do NOT wipe module.epistemic / strings.
@@ -3213,6 +3327,11 @@ fn lowerer_lower_fn_item_mut(
     (*lo).variance_base_reg_count = 0
     (*lo).pending_variance_reg = -1
     (*lo).pending_closure_fn_id = -1
+    // Inter-procedural FO: register pure-fn transfer before body lower so later
+    // callers (e.g. main) see helpers defined earlier in the module.
+    // Note: fo_xfer_* is NOT cleared per-function — it accumulates across the module.
+    let lo_xfer = (*lo).fo_register_pure_fn_transfer(name, fd)
+    (*lo) = lo_xfer
     if lower_live_diag_enabled() {
         print("lower_live: fn_state_after_begin current_fn=")
         print_int((*lo).current_fn)
@@ -3353,6 +3472,7 @@ fn lowerer_lower_program_items_mut(
     lo: &! Lowerer,
     items: Option<Box<ItemList>>
 ) with Mut, Panic, Div, Alloc, IO {
+    fo_xfer_global_reset()
     var current = items
     while true {
         match current {
@@ -6130,6 +6250,345 @@ impl Lowerer {
         false
     }
 
+    // ─── Inter-procedural FO transfers for pure helpers ─────────────────────
+
+    fn fo_xfer_lookup(self, name: Name) -> i64 with Mut, Panic, Div {
+        fo_xfer_global_lookup(name)
+    }
+
+    fn fo_xfer_set(self, name: Name, kind: i64, lit: f64, fwd: Name) -> Lowerer with Mut, Panic, Div, IO {
+        fo_xfer_global_set(name, kind, lit, fwd)
+        self
+    }
+
+    // Match expr Ident to param index; -1 if not a param.
+    fn fo_param_index(self, e: &Expr, p0: Name, p1: Name, nparams: i64) -> i64 with Mut, Panic, Div {
+        if (*e).kind != ExprKind::ExprIdent {
+            return -1
+        }
+        if nparams >= 1 && ir_name_eq((*e).name, p0) {
+            return 0
+        }
+        if nparams >= 2 && ir_name_eq((*e).name, p1) {
+            return 1
+        }
+        -1
+    }
+
+    fn fo_expr_as_lit(self, e: &Expr) -> (bool, f64) with Mut, Panic, Div {
+        if (*e).kind == ExprKind::ExprFloatLit {
+            return (true, (*e).float_val)
+        }
+        if (*e).kind == ExprKind::ExprIntLit {
+            return (true, (*e).int_val as f64)
+        }
+        (false, 0.0)
+    }
+
+    // Classify pure helper body and record FO transfer (id / scale / add / mul / fwd).
+    fn fo_register_pure_fn_transfer(self, name: Name, fd: &FnDef) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        // Collect up to 2 param names.
+        var p0 = ir_empty_name()
+        var p1 = ir_empty_name()
+        var nparams: i64 = 0
+        var pcur = &fd.params
+        while true {
+            match *pcur {
+                Some(pl) => {
+                    if nparams == 0 {
+                        p0 = (*pl).head.name
+                        nparams = 1
+                    } else if nparams == 1 {
+                        p1 = (*pl).head.name
+                        nparams = 2
+                    } else {
+                        // >2 params: skip (unsupported transfer)
+                        return lo
+                    }
+                    pcur = &(*pl).tail
+                }
+                _ => break
+            }
+        }
+        if nparams <= 0 {
+            return lo
+        }
+        lo.fo_classify_block_transfer(name, &fd.body, p0, p1, nparams)
+    }
+
+    fn fo_classify_block_transfer(
+        self,
+        name: Name,
+        blk: &Block,
+        p0: Name,
+        p1: Name,
+        nparams: i64
+    ) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        var current = &(*blk).stmts
+        var found = false
+        // Find last StmtExpr and classify it (re-enter classification on that expr).
+        // Store pointer by processing in reverse-like overwrite.
+        while true {
+            match *current {
+                Some(list) => {
+                    let stmt_ref = &(*list).head
+                    if stmt_ref.kind == StmtKind::StmtExpr {
+                        match stmt_ref.expr {
+                            Some(te) => {
+                                lo = lo.fo_classify_expr_transfer(name, &(*te), p0, p1, nparams)
+                                found = true
+                            }
+                            _ => {}
+                        }
+                    } else if stmt_ref.kind == StmtKind::StmtLet || stmt_ref.kind == StmtKind::StmtVar {
+                        return lo
+                    }
+                    current = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        lo
+    }
+
+    fn fo_classify_expr_transfer(
+        self,
+        name: Name,
+        e: &Expr,
+        p0: Name,
+        p1: Name,
+        nparams: i64
+    ) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        // id: single param identity
+        if (*e).kind == ExprKind::ExprIdent {
+            if nparams >= 1 && ir_name_eq((*e).name, p0) {
+                return lo.fo_xfer_set(name, 1, 0.0, ir_empty_name())
+            }
+            return lo
+        }
+        // binary: scale / add / mul
+        if (*e).kind == ExprKind::ExprBinary {
+            match (*e).left {
+                Some(le) => {
+                    match (*e).right {
+                        Some(re) => {
+                            let li = lo.fo_param_index(&(*le), p0, p1, nparams)
+                            let ri = lo.fo_param_index(&(*re), p0, p1, nparams)
+                            let ll = lo.fo_expr_as_lit(&(*le))
+                            let rl = lo.fo_expr_as_lit(&(*re))
+                            if (*e).bin_op == BinaryOp::OpMul {
+                                // lit * p0 or p0 * lit
+                                if ll.0 && ri == 0 {
+                                    return lo.fo_xfer_set(name, 2, ll.1, ir_empty_name())
+                                }
+                                if rl.0 && li == 0 {
+                                    return lo.fo_xfer_set(name, 2, rl.1, ir_empty_name())
+                                }
+                                // p0 * p1
+                                if nparams >= 2 && ((li == 0 && ri == 1) || (li == 1 && ri == 0)) {
+                                    return lo.fo_xfer_set(name, 4, 0.0, ir_empty_name())
+                                }
+                            }
+                            if (*e).bin_op == BinaryOp::OpAdd {
+                                if nparams >= 2 && ((li == 0 && ri == 1) || (li == 1 && ri == 0)) {
+                                    return lo.fo_xfer_set(name, 3, 0.0, ir_empty_name())
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+            return lo
+        }
+        // forward: g(p0) or g(p0, p1) with args exactly params in order
+        if (*e).kind == ExprKind::ExprCall {
+            match (*e).left {
+                Some(callee) => {
+                    if (*callee).kind == ExprKind::ExprIdent {
+                        var acur = &(*e).args
+                        var ai: i64 = 0
+                        var ok = true
+                        while true {
+                            match *acur {
+                                Some(al) => {
+                                    let aidx = lo.fo_param_index(&(*al).head, p0, p1, nparams)
+                                    if aidx != ai {
+                                        ok = false
+                                    }
+                                    ai = ai + 1
+                                    if ai > nparams {
+                                        ok = false
+                                    }
+                                    acur = &(*al).tail
+                                }
+                                _ => break
+                            }
+                        }
+                        if ok && ai == nparams && ai > 0 {
+                            return lo.fo_xfer_set(name, 5, 0.0, (*callee).name)
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        lo
+    }
+
+    // Lower FO for the N-th call argument (0-based). Returns (-1) if missing.
+    fn fo_lower_nth_arg_variance(
+        self,
+        args: &Option<Box<ExprList>>,
+        n: i64
+    ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var acur = args
+        var ai: i64 = 0
+        while true {
+            match *acur {
+                Some(al) => {
+                    if ai == n {
+                        return self.lower_expr_variance_ref(&(*al).head)
+                    }
+                    ai = ai + 1
+                    acur = &(*al).tail
+                }
+                _ => break
+            }
+        }
+        (self.fo_clear_expr_sens(), -1)
+    }
+
+    fn fo_lower_nth_arg_value(
+        self,
+        args: &Option<Box<ExprList>>,
+        n: i64
+    ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var acur = args
+        var ai: i64 = 0
+        while true {
+            match *acur {
+                Some(al) => {
+                    if ai == n {
+                        return self.lower_expr_ref(&(*al).head)
+                    }
+                    ai = ai + 1
+                    acur = &(*al).tail
+                }
+                _ => break
+            }
+        }
+        self.emit_f64_const(0.0)
+    }
+
+    // Apply registered pure-fn FO transfer at a call site. depth limits FWD recursion.
+    fn fo_apply_call_transfer(
+        self,
+        callee: Name,
+        args: &Option<Box<ExprList>>,
+        depth: i64
+    ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if depth > 8 {
+            return (self.fo_clear_expr_sens(), -1)
+        }
+        let idx = self.fo_xfer_lookup(callee)
+        if idx < 0 {
+            if lower_live_diag_enabled() {
+                print("lower_live: fo_xfer_miss name=")
+                print(str_from_bytes(callee.buf, callee.len))
+                print(" count=")
+                print_int(FO_XFER_COUNT)
+                print("\n")
+            }
+            return (self.fo_clear_expr_sens(), -1)
+        }
+        if lower_live_diag_enabled() {
+            print("lower_live: fo_xfer_hit name=")
+            print(str_from_bytes(callee.buf, callee.len))
+            print(" kind=")
+            print_int(FO_XFER_KIND[idx as usize])
+            print("\n")
+        }
+        self.fo_apply_call_transfer_at(idx, args, depth)
+    }
+
+    fn fo_apply_call_transfer_at(
+        self,
+        idx: i64,
+        args: &Option<Box<ExprList>>,
+        depth: i64
+    ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if depth > 8 || idx < 0 || idx >= FO_XFER_COUNT {
+            return (self.fo_clear_expr_sens(), -1)
+        }
+        let kind = FO_XFER_KIND[idx as usize]
+        if kind <= 0 {
+            return (self.fo_clear_expr_sens(), -1)
+        }
+        // FWD: re-apply under same args (lookup target by hash).
+        if kind == 5 {
+            let fh = FO_XFER_FWD_HASH[idx as usize]
+            let fidx = fo_xfer_global_lookup_hash(fh)
+            if fidx < 0 {
+                return (self.fo_clear_expr_sens(), -1)
+            }
+            return self.fo_apply_call_transfer_at(fidx, args, depth + 1)
+        }
+        // Lower arg0 FO
+        var lo = self
+        let p0 = lo.fo_lower_nth_arg_variance(args, 0)
+        lo = p0.0
+        let v0 = p0.1
+        if v0 < 0 && kind != 3 && kind != 4 {
+            if !lo.fo_expr_has_sens() {
+                return (lo.fo_clear_expr_sens(), -1)
+            }
+        }
+        let s0 = lo.fo_snapshot_expr_sens()
+        if kind == 1 {
+            lo = lo.fo_restore_expr_sens(s0)
+            if v0 >= 0 {
+                return (lo, v0)
+            }
+            if lo.fo_expr_has_sens() {
+                return lo.fo_emit_var_from_sens()
+            }
+            return (lo.fo_clear_expr_sens(), -1)
+        }
+        if kind == 2 {
+            let lit = FO_XFER_LIT[idx as usize]
+            let c_pair = lo.emit_f64_const(lit)
+            lo = c_pair.0
+            var sL: [i64; 32] = [-1; 32]
+            let aval = lo.fo_lower_nth_arg_value(args, 0)
+            lo = aval.0
+            lo = lo.fo_combine_sens_mul(sL, s0, c_pair.1, aval.1)
+            return lo.fo_emit_var_from_sens()
+        }
+        // kind 3 add / 4 mul need arg1
+        let p1 = lo.fo_lower_nth_arg_variance(args, 1)
+        lo = p1.0
+        let s1 = lo.fo_snapshot_expr_sens()
+        if kind == 3 {
+            lo = lo.fo_combine_sens_addsub(s0, s1, false)
+            return lo.fo_emit_var_from_sens()
+        }
+        if kind == 4 {
+            let aval0 = lo.fo_lower_nth_arg_value(args, 0)
+            lo = aval0.0
+            let val0 = aval0.1
+            let aval1 = lo.fo_lower_nth_arg_value(args, 1)
+            lo = aval1.0
+            lo = lo.fo_combine_sens_mul(s0, s1, val0, aval1.1)
+            return lo.fo_emit_var_from_sens()
+        }
+        (lo.fo_clear_expr_sens(), -1)
+    }
+
     fn emit_variance_add(self, lhs_v: i64, rhs_v: i64) -> (Lowerer, i64) with Mut, Panic, Div {
         let pair = self.fresh_reg()
         var lo = pair.0
@@ -6425,6 +6884,17 @@ impl Lowerer {
                         lo = lo.fo_seed_from_variance(variance_reg)
                         return (lo, variance_reg)
                     }
+                    // Inter-procedural FO via pure-fn transfer table.
+                    let xfer = self.fo_apply_call_transfer(callee_name, &(*e).args, 0)
+                    var lo_x = xfer.0
+                    let xv = xfer.1
+                    if xv >= 0 {
+                        return (lo_x, xv)
+                    }
+                    if lo_x.fo_expr_has_sens() {
+                        return lo_x.fo_emit_var_from_sens()
+                    }
+                    return (lo_x.fo_clear_expr_sens(), -1)
                 }
                 _ => {}
             }
@@ -7923,6 +8393,7 @@ impl Lowerer {
     }
 
     fn lower_program_items_ref(self, items: &Option<Box<ItemList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        fo_xfer_global_reset()
         var lo = self
         var current = items
         while true {
