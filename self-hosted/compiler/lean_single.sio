@@ -5044,8 +5044,13 @@ fn stmt_is_deref_indexed_elem_field_store(p0: i64) -> bool with Panic, Mut {
         if TK[p as usize] == 16 {                   // =
             if saw_index == 0 { return false }
             if p < p0 + 6 { return false }
+            // Two terminal forms: `. field =` stores into a field, `] =` stores into an
+            // array ELEMENT. The element form is the one ir/opt_cleanup.sio uses for its
+            // whole-record instruction rewrites, e.g.
+            // (*module).functions[fi].instrs[i] = ir_copy(dst, found).
+            if TK[(p - 1) as usize] == 42 { return true }
             if TK[(p - 1) as usize] != 3 { return false }
-            return TK[(p - 2) as usize] == 50       // must END in `. field`
+            return TK[(p - 2) as usize] == 50
         }
         return false
     }
@@ -5091,8 +5096,11 @@ fn stmt_is_ident_indexed_elem_field_store(p0: i64) -> bool with Panic, Mut {
         if TK[p as usize] == 16 {                   // =
             if saw_index == 0 { return false }
             if p < p0 + 3 { return false }
+            // Same two terminal forms as the deref twin: `. field =` (field of an element)
+            // and `] =` (the element itself).
+            if TK[(p - 1) as usize] == 42 { return true }
             if TK[(p - 1) as usize] != 3 { return false }
-            return TK[(p - 2) as usize] == 50       // must END in `. field`
+            return TK[(p - 2) as usize] == 50
         }
         return false
     }
@@ -22584,6 +22592,50 @@ fn compile_deref_indexed_elem_field_store_x86() with IO, Mut, Panic, Div {
                 failed = 1
                 done = 1
                 continue
+            }
+            // Is this the TERMINAL step, i.e. `… [ idx ] = expr`? Then the store target is
+            // the array ELEMENT itself rather than a field of it, which needs the aggregate
+            // store form (elements are pointer-per-slot, so an aggregate RHS is copied into
+            // fresh element storage and the POINTER is written into the slot;
+            // materialize_aggregate_array_element_x86 no-ops for scalar elements and leaves
+            // the value in rax, so one path serves both).
+            var term_p = EP + 1
+            var term_depth: i64 = 1
+            while term_p < TC && term_depth > 0 {
+                if TK[term_p as usize] == 41 { term_depth = term_depth + 1 }
+                if TK[term_p as usize] == 42 { term_depth = term_depth - 1 }
+                term_p = term_p + 1
+            }
+            if TK[term_p as usize] == 16 {
+                let esiz_t = arr_hash_esiz(cur_hash)
+                let elem_ty_t = arr_hash_elem_ty(cur_hash)
+                let elem_hash_t = arr_hash_elem_hash(cur_hash)
+                if pending_off != 0 { em(0x48); em(0x8d); em(0x80); em32(pending_off) }
+                let arr_slot = NEXT_SLOT
+                NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var(arr_slot)  // save the array base address
+                EP = EP + 1               // skip [
+                compile_or()              // index in rax
+                if TK[EP as usize] == 37 { EP = EP + 1; EP = EP + 1 }  // 'as usize'
+                if TK[EP as usize] == 42 { EP = EP + 1 }  // ]
+                if TK[EP as usize] == 16 { EP = EP + 1 }  // =
+                em(0x50)                  // push index
+                compile_or()              // rhs in rax
+                let rhs_ty_t = EXPR_TY
+                let rhs_hash_t = EXPR_TY_HASH
+                if ty_eq(elem_ty_t, elem_hash_t, rhs_ty_t, rhs_hash_t) == false {
+                    tc_error(EP - 1, "assignment type mismatch")
+                }
+                materialize_aggregate_array_element_x86(cur_hash)
+                em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (value or fresh element ptr)
+                em(0x59)                      // pop rcx (index)
+                emit_load_var(arr_slot)       // rax = array base
+                if esiz_t == 8 {
+                    em(0x48); em(0x89); em(0x14); em(0xc8)  // mov [rax + rcx*8], rdx
+                } else {
+                    em(0x88); em(0x14); em(0x08)            // mov [rax + rcx], dl
+                }
+                return
             }
             if arr_hash_esiz(cur_hash) != 8 {
                 tc_error_hard(EP, "indexed element field store requires 8-byte array elements")

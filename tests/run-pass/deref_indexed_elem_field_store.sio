@@ -71,6 +71,33 @@ fn value_root_set(o: Outer, i: i64, j: i64, v: i64) -> Outer with Mut, Panic, Di
     c
 }
 
+fn mk_cell(av: i64, bv: bool) -> Cell {
+    Cell { a: av, b: bv }
+}
+
+// TERMINAL-INDEX form: the chain ends in `[j] =`, so the store target is the array ELEMENT
+// itself, not a field of it. This is the shape ir/opt_cleanup.sio uses 30 times for its
+// whole-record rewrites — (*module).functions[fi].instrs[i] = ir_copy(...) and = ir_nop() —
+// so pre-fix the optimizer's record moves AND its nop marking silently wrote nothing.
+// Elements are pointer-per-slot, so an aggregate RHS is copied into fresh element storage and
+// the pointer is written into the slot.
+fn set_whole_elem(o: &! Outer, i: i64, j: i64, av: i64) with Mut, Panic, Div {
+    (*o).ws[i as usize].cs[j as usize] = mk_cell(av, true)
+}
+
+// Same terminal form with a SCALAR element, where the aggregate materialisation must no-op.
+struct Rows {
+    row: [i64; 4],
+}
+
+struct Grid {
+    rows: [Rows; 2],
+}
+
+fn set_scalar_elem(g: &! Grid, i: i64, j: i64, v: i64) with Mut, Panic, Div {
+    (*g).rows[i as usize].row[j as usize] = v
+}
+
 // Deep chain: two indices, the opt_cleanup shape.
 fn set_deep(o: &! Outer, i: i64, j: i64, v: i64) with Mut, Panic {
     (*o).ws[i as usize].cs[j as usize].a = v
@@ -132,10 +159,30 @@ fn main() with IO, Mut, Panic, Div {
     if o.ws[1].cs[1].a != 0 { ok = false }
 
     // Value struct root: c.ws[i].cs[j].a = v on a by-value copy, returned.
+    // NOTE on semantics, verified identical on both engines: `var c = o` copies the TOP-LEVEL
+    // struct but shares the element pointers of its array-of-struct field, so the copy is
+    // SHALLOW and this write is visible through `o` as well. The assertions below therefore
+    // do not treat `o` as untouched — they only require that the store landed.
     let vout = value_root_set(o, 1, 2, 81)
     if vout.ws[1].cs[2].a != 81 { ok = false }
     if vout.ws[1].cs[3].a != 42 { ok = false }
     if vout.ws[0].cs[2].a != 0 { ok = false }
+
+    // Terminal-index, aggregate element: (*o).ws[i].cs[j] = mk_cell(...)
+    set_whole_elem(&!o, 0, 0, 55)
+    if o.ws[0].cs[0].a != 55 { ok = false }
+    if o.ws[0].cs[1].a != 64 { ok = false }
+    // A slot nothing above has written (ws[1].cs[2] carries 81 from the shallow-copy alias).
+    if o.ws[1].cs[0].a != 0 { ok = false }
+
+    // Terminal-index, scalar element: (*g).rows[i].row[j] = v
+    let gr0: Rows = Rows { row: [1, 2, 3, 4] }
+    let gr1: Rows = Rows { row: [5, 6, 7, 8] }
+    var g: Grid = Grid { rows: [gr0, gr1] }
+    set_scalar_elem(&!g, 1, 2, 99)
+    if g.rows[1].row[2] != 99 { ok = false }
+    if g.rows[1].row[3] != 8 { ok = false }
+    if g.rows[0].row[2] != 3 { ok = false }
 
     // Array-pointee root: (*cs)[i].a = v
     var bare: [Cell; 4] = [Cell { a: 0, b: false }, Cell { a: 0, b: false }, Cell { a: 0, b: false }, Cell { a: 0, b: false }]
