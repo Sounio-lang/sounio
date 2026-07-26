@@ -169,12 +169,16 @@ var FO_EV_SENS: [i64; 512] = [-1; 512]
 var FO_LOC_VAL: [i64; 8] = [-1; 8]
 var FO_LOC_VAR: [i64; 8] = [-1; 8]
 var FO_LOC_SENS: [i64; 256] = [-1; 256]
-var FO_ARG_VAL: [i64; 8] = [-1; 8]
-var FO_ARG_VAR: [i64; 8] = [-1; 8]
-var FO_ARG_SENS: [i64; 256] = [-1; 256]
+var FO_ARG_VAL: [i64; 16] = [-1; 16]
+var FO_ARG_VAR: [i64; 16] = [-1; 16]
+var FO_ARG_SENS: [i64; 512] = [-1; 512]
 var FO_ARG_N: i64 = 0
+// Diagonal Hessian H_kk regs for 2nd-order mean (bytecode stack/locals/args)
+var FO_EV_HESS: [i64; 512] = [-1; 512]
+var FO_LOC_HESS: [i64; 256] = [-1; 256]
+var FO_ARG_HESS: [i64; 512] = [-1; 512]
 // Active param name-hashes for bytecode/simple FO compile (≤8 params).
-var FO_BC_PARAM_HASH: [i64; 8] = [0; 8]
+var FO_BC_PARAM_HASH: [i64; 16] = [0; 16]
 var FO_BC_PARAM_N: i64 = 0
 
 fn fo_name_hash(n: Name) -> i64 with Mut, Panic, Div {
@@ -422,9 +426,12 @@ struct Lowerer {
     fo_sigma2: [i64; 32],
     fo_expr_sens: [i64; 32],
     fo_pending_sens: [i64; 32],
+    fo_expr_hess: [i64; 32],
+    fo_pending_hess: [i64; 32],
     fo_bind_count: i64,
     fo_bind_names: [Name; 128],
     fo_bind_sens: [i64; 4096],
+    fo_bind_hess: [i64; 4096],
     // Inter-procedural FO: pure-fn transfer table (survives across function lowers).
     // kind: 0=none 1=id(p0) 2=scale(lit*p0) 3=add(p0+p1) 4=mul(p0*p1) 5=fwd(g)
     fo_xfer_count: i64,
@@ -570,9 +577,12 @@ fn lowerer_new() -> Lowerer with Alloc {
         fo_sigma2: [-1; 32],
         fo_expr_sens: [-1; 32],
         fo_pending_sens: [-1; 32],
+        fo_expr_hess: [-1; 32],
+        fo_pending_hess: [-1; 32],
         fo_bind_count: 0,
         fo_bind_names: [ir_empty_name(); 128],
         fo_bind_sens: [-1; 4096],
+        fo_bind_hess: [-1; 4096],
         fo_xfer_count: 0,
         fo_xfer_names: [ir_empty_name(); 64],
         fo_xfer_kind: [0; 64],
@@ -926,9 +936,12 @@ fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEp
         fo_sigma2: [-1; 32],
         fo_expr_sens: [-1; 32],
         fo_pending_sens: [-1; 32],
+        fo_expr_hess: [-1; 32],
+        fo_pending_hess: [-1; 32],
         fo_bind_count: 0,
         fo_bind_names: [ir_empty_name(); 128],
         fo_bind_sens: [-1; 4096],
+        fo_bind_hess: [-1; 4096],
         fo_xfer_count: 0,
         fo_xfer_names: [ir_empty_name(); 64],
         fo_xfer_kind: [0; 64],
@@ -981,9 +994,12 @@ fn lowerer_new_from_program_summary_owned(summary: IrProgramSummary, epistemic: 
         fo_sigma2: [-1; 32],
         fo_expr_sens: [-1; 32],
         fo_pending_sens: [-1; 32],
+        fo_expr_hess: [-1; 32],
+        fo_pending_hess: [-1; 32],
         fo_bind_count: 0,
         fo_bind_names: [ir_empty_name(); 128],
         fo_bind_sens: [-1; 4096],
+        fo_bind_hess: [-1; 4096],
         fo_xfer_count: 0,
         fo_xfer_names: [ir_empty_name(); 64],
         fo_xfer_kind: [0; 64],
@@ -1039,9 +1055,12 @@ fn lowerer_from_acc_module(module: Box<IrModule>) -> Lowerer with Alloc, Mut, Pa
         fo_sigma2: [-1; 32],
         fo_expr_sens: [-1; 32],
         fo_pending_sens: [-1; 32],
+        fo_expr_hess: [-1; 32],
+        fo_pending_hess: [-1; 32],
         fo_bind_count: 0,
         fo_bind_names: [ir_empty_name(); 128],
         fo_bind_sens: [-1; 4096],
+        fo_bind_hess: [-1; 4096],
         fo_xfer_count: 0,
         fo_xfer_names: [ir_empty_name(); 64],
         fo_xfer_kind: [0; 64],
@@ -5941,6 +5960,20 @@ impl Lowerer {
         && n.buf[12] == 111 as i8 && n.buf[13] == 102 as i8
     }
 
+    // second_order_mean(expr) → E₂[f] ≈ f(μ) + ½ Σ_k H_kk σ²_k
+    fn name_is_second_order_mean(self, n: Name) -> bool with Div {
+        n.len == 17
+        && n.buf[0] == 115 as i8 && n.buf[1] == 101 as i8
+        && n.buf[2] == 99 as i8 && n.buf[3] == 111 as i8
+        && n.buf[4] == 110 as i8 && n.buf[5] == 100 as i8
+        && n.buf[6] == 95 as i8 && n.buf[7] == 111 as i8
+        && n.buf[8] == 114 as i8 && n.buf[9] == 100 as i8
+        && n.buf[10] == 101 as i8 && n.buf[11] == 114 as i8
+        && n.buf[12] == 95 as i8 && n.buf[13] == 109 as i8
+        && n.buf[14] == 101 as i8 && n.buf[15] == 97 as i8
+        && n.buf[16] == 110 as i8
+    }
+
     fn lower_measure_value_arg_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         match *args {
             Some(list) => self.lower_expr_ref(&(*list).head),
@@ -5967,6 +6000,7 @@ impl Lowerer {
         var k: i64 = 0
         while k < 32 {
             lo.fo_expr_sens[k as usize] = -1
+            lo.fo_expr_hess[k as usize] = -1
             k = k + 1
         }
         lo
@@ -5977,6 +6011,7 @@ impl Lowerer {
         var k: i64 = 0
         while k < 32 {
             lo.fo_pending_sens[k as usize] = -1
+            lo.fo_pending_hess[k as usize] = -1
             k = k + 1
         }
         lo
@@ -6007,6 +6042,7 @@ impl Lowerer {
                 let one = lo.emit_f64_const(1.0)
                 lo = one.0
                 lo.fo_expr_sens[k as usize] = one.1
+                // H_kk = 0 for pure seed (linear in x_k)
                 return lo
             }
             k = k + 1
@@ -6035,11 +6071,31 @@ impl Lowerer {
         snap
     }
 
+    fn fo_snapshot_expr_hess(self) -> [i64; 32] with Mut {
+        var snap: [i64; 32] = [-1; 32]
+        var k: i64 = 0
+        while k < 32 {
+            snap[k as usize] = self.fo_expr_hess[k as usize]
+            k = k + 1
+        }
+        snap
+    }
+
     fn fo_restore_expr_sens(self, snap: [i64; 32]) -> Lowerer with Mut {
         var lo = self
         var k: i64 = 0
         while k < 32 {
             lo.fo_expr_sens[k as usize] = snap[k as usize]
+            k = k + 1
+        }
+        lo
+    }
+
+    fn fo_restore_expr_hess(self, snap: [i64; 32]) -> Lowerer with Mut {
+        var lo = self
+        var k: i64 = 0
+        while k < 32 {
+            lo.fo_expr_hess[k as usize] = snap[k as usize]
             k = k + 1
         }
         lo
@@ -6054,6 +6110,7 @@ impl Lowerer {
                 var k: i64 = 0
                 while k < 32 {
                     lo.fo_bind_sens[(i * 32 + k) as usize] = lo.fo_expr_sens[k as usize]
+                    lo.fo_bind_hess[(i * 32 + k) as usize] = lo.fo_expr_hess[k as usize]
                     k = k + 1
                 }
                 return lo
@@ -6068,6 +6125,7 @@ impl Lowerer {
         var k2: i64 = 0
         while k2 < 32 {
             lo.fo_bind_sens[(idx * 32 + k2) as usize] = lo.fo_expr_sens[k2 as usize]
+            lo.fo_bind_hess[(idx * 32 + k2) as usize] = lo.fo_expr_hess[k2 as usize]
             k2 = k2 + 1
         }
         lo.fo_bind_count = idx + 1
@@ -6076,15 +6134,17 @@ impl Lowerer {
 
     fn fo_bind_pending_to_local(self, name: Name) -> Lowerer with Mut, Panic, Div {
         var lo = self
-        // Move pending_sens into expr_sens then bind.
+        // Move pending_sens/hess into expr then bind.
         var k: i64 = 0
         var any = false
         while k < 32 {
             lo.fo_expr_sens[k as usize] = lo.fo_pending_sens[k as usize]
+            lo.fo_expr_hess[k as usize] = lo.fo_pending_hess[k as usize]
             if lo.fo_pending_sens[k as usize] >= 0 {
                 any = true
             }
             lo.fo_pending_sens[k as usize] = -1
+            lo.fo_pending_hess[k as usize] = -1
             k = k + 1
         }
         if any {
@@ -6101,6 +6161,7 @@ impl Lowerer {
                 var k: i64 = 0
                 while k < 32 {
                     lo.fo_expr_sens[k as usize] = lo.fo_bind_sens[(i * 32 + k) as usize]
+                    lo.fo_expr_hess[k as usize] = lo.fo_bind_hess[(i * 32 + k) as usize]
                     k = k + 1
                 }
                 return lo
@@ -6108,6 +6169,41 @@ impl Lowerer {
             i = i + 1
         }
         lo.fo_clear_expr_sens()
+    }
+
+    // Second-order mean bias: (1/2) Σ_k H_kk · σ²_k
+    fn fo_emit_second_order_bias(self) -> (Lowerer, i64) with Mut, Panic, Div {
+        let z = self.emit_f64_const(0.0)
+        var lo = z.0
+        var acc = z.1
+        let half_p = lo.emit_f64_const(0.5)
+        lo = half_p.0
+        let half = half_p.1
+        var k: i64 = 0
+        while k < 32 {
+            let hreg = lo.fo_expr_hess[k as usize]
+            let sig = lo.fo_sigma2[k as usize]
+            if hreg >= 0 && sig >= 0 {
+                let t1_p = lo.fresh_reg()
+                lo = t1_p.0
+                let t1 = t1_p.1
+                lo = lo.emit(ir_binop_typed(t1, hreg, BinaryOp::OpMul, sig, true, true))
+                lo = lo.emit(ir_mark_float_reg(t1))
+                let t2_p = lo.fresh_reg()
+                lo = t2_p.0
+                let t2 = t2_p.1
+                lo = lo.emit(ir_binop_typed(t2, half, BinaryOp::OpMul, t1, true, true))
+                lo = lo.emit(ir_mark_float_reg(t2))
+                let a_p = lo.fresh_reg()
+                lo = a_p.0
+                let nacc = a_p.1
+                lo = lo.emit(ir_binop_typed(nacc, acc, BinaryOp::OpAdd, t2, true, true))
+                lo = lo.emit(ir_mark_float_reg(nacc))
+                acc = nacc
+            }
+            k = k + 1
+        }
+        (lo, acc)
     }
 
     // Var = Σ_k s_k² · σ²_k from current fo_expr_sens.
@@ -6145,58 +6241,80 @@ impl Lowerer {
         (lo, acc)
     }
 
-    // s_out[k] = sL[k] + sR[k]  (add) or sL[k] - sR[k] (sub)
-    fn fo_combine_sens_addsub(self, sL: [i64; 32], sR: [i64; 32], is_sub: bool) -> Lowerer with Mut, Panic, Div {
+    // Combine two optional float regs: a ± b (missing ≡ 0). Returns new reg or -1.
+    fn fo_reg_addsub_opt(self, a: i64, b: i64, is_sub: bool) -> (Lowerer, i64) with Mut, Panic, Div {
         var lo = self
-        var k: i64 = 0
-        while k < 32 {
-            let l = sL[k as usize]
-            let r = sR[k as usize]
-            if l < 0 && r < 0 {
-                lo.fo_expr_sens[k as usize] = -1
-            } else if r < 0 {
-                lo.fo_expr_sens[k as usize] = l
-            } else if l < 0 {
-                if is_sub {
-                    // 0 - r
-                    let zp = lo.emit_f64_const(0.0)
-                    lo = zp.0
-                    let dp = lo.fresh_reg()
-                    lo = dp.0
-                    let dst = dp.1
-                    lo = lo.emit(ir_binop_typed(dst, zp.1, BinaryOp::OpSub, r, true, true))
-                    lo = lo.emit(ir_mark_float_reg(dst))
-                    lo.fo_expr_sens[k as usize] = dst
-                } else {
-                    lo.fo_expr_sens[k as usize] = r
-                }
-            } else {
-                let op = if is_sub { BinaryOp::OpSub } else { BinaryOp::OpAdd }
+        if a < 0 && b < 0 {
+            return (lo, -1)
+        }
+        if b < 0 {
+            return (lo, a)
+        }
+        if a < 0 {
+            if is_sub {
+                let zp = lo.emit_f64_const(0.0)
+                lo = zp.0
                 let dp = lo.fresh_reg()
                 lo = dp.0
                 let dst = dp.1
-                lo = lo.emit(ir_binop_typed(dst, l, op, r, true, true))
+                lo = lo.emit(ir_binop_typed(dst, zp.1, BinaryOp::OpSub, b, true, true))
                 lo = lo.emit(ir_mark_float_reg(dst))
-                lo.fo_expr_sens[k as usize] = dst
+                return (lo, dst)
             }
+            return (lo, b)
+        }
+        let op = if is_sub { BinaryOp::OpSub } else { BinaryOp::OpAdd }
+        let dp = lo.fresh_reg()
+        lo = dp.0
+        let dst = dp.1
+        lo = lo.emit(ir_binop_typed(dst, a, op, b, true, true))
+        lo = lo.emit(ir_mark_float_reg(dst))
+        (lo, dst)
+    }
+
+    // s_out[k] = sL ± sR; H_out[k] = HL ± HR  (add/sub are linear → Hessian additive)
+    fn fo_combine_sens_addsub(
+        self,
+        sL: [i64; 32],
+        sR: [i64; 32],
+        hL: [i64; 32],
+        hR: [i64; 32],
+        is_sub: bool
+    ) -> Lowerer with Mut, Panic, Div {
+        var lo = self
+        var k: i64 = 0
+        while k < 32 {
+            let sp = lo.fo_reg_addsub_opt(sL[k as usize], sR[k as usize], is_sub)
+            lo = sp.0
+            lo.fo_expr_sens[k as usize] = sp.1
+            let hp = lo.fo_reg_addsub_opt(hL[k as usize], hR[k as usize], is_sub)
+            lo = hp.0
+            lo.fo_expr_hess[k as usize] = hp.1
             k = k + 1
         }
         lo
     }
 
-    // Product rule: s_out[k] = rhs_val · sL[k] + lhs_val · sR[k]
+    // Product: s = R·sL + L·sR;  H = R·HL + L·HR + 2·sL·sR  (diagonal, independent channels)
     fn fo_combine_sens_mul(
         self,
         sL: [i64; 32],
         sR: [i64; 32],
+        hL: [i64; 32],
+        hR: [i64; 32],
         lhs_val: i64,
         rhs_val: i64
     ) -> Lowerer with Mut, Panic, Div {
         var lo = self
+        let two_p = lo.emit_f64_const(2.0)
+        lo = two_p.0
+        let two = two_p.1
         var k: i64 = 0
         while k < 32 {
             let l = sL[k as usize]
             let r = sR[k as usize]
+            let hl = hL[k as usize]
+            let hr = hR[k as usize]
             var term_l: i64 = -1
             var term_r: i64 = -1
             if l >= 0 {
@@ -6213,30 +6331,57 @@ impl Lowerer {
                 lo = lo.emit(ir_binop_typed(term_r, lhs_val, BinaryOp::OpMul, r, true, true))
                 lo = lo.emit(ir_mark_float_reg(term_r))
             }
-            if term_l < 0 && term_r < 0 {
-                lo.fo_expr_sens[k as usize] = -1
-            } else if term_r < 0 {
-                lo.fo_expr_sens[k as usize] = term_l
-            } else if term_l < 0 {
-                lo.fo_expr_sens[k as usize] = term_r
-            } else {
-                let ap = lo.fresh_reg()
-                lo = ap.0
-                let dst = ap.1
-                lo = lo.emit(ir_binop_typed(dst, term_l, BinaryOp::OpAdd, term_r, true, true))
-                lo = lo.emit(ir_mark_float_reg(dst))
-                lo.fo_expr_sens[k as usize] = dst
+            let sp = lo.fo_reg_addsub_opt(term_l, term_r, false)
+            lo = sp.0
+            lo.fo_expr_sens[k as usize] = sp.1
+            // H = R·HL + L·HR + 2·sL·sR
+            var h_acc: i64 = -1
+            if hl >= 0 {
+                let t = lo.fresh_reg()
+                lo = t.0
+                h_acc = t.1
+                lo = lo.emit(ir_binop_typed(h_acc, rhs_val, BinaryOp::OpMul, hl, true, true))
+                lo = lo.emit(ir_mark_float_reg(h_acc))
             }
+            if hr >= 0 {
+                let t2 = lo.fresh_reg()
+                lo = t2.0
+                let thr = t2.1
+                lo = lo.emit(ir_binop_typed(thr, lhs_val, BinaryOp::OpMul, hr, true, true))
+                lo = lo.emit(ir_mark_float_reg(thr))
+                let ap = lo.fo_reg_addsub_opt(h_acc, thr, false)
+                lo = ap.0
+                h_acc = ap.1
+            }
+            if l >= 0 && r >= 0 {
+                let pr = lo.fresh_reg()
+                lo = pr.0
+                let prod = pr.1
+                lo = lo.emit(ir_binop_typed(prod, l, BinaryOp::OpMul, r, true, true))
+                lo = lo.emit(ir_mark_float_reg(prod))
+                let t2s = lo.fresh_reg()
+                lo = t2s.0
+                let twos = t2s.1
+                lo = lo.emit(ir_binop_typed(twos, two, BinaryOp::OpMul, prod, true, true))
+                lo = lo.emit(ir_mark_float_reg(twos))
+                let ap2 = lo.fo_reg_addsub_opt(h_acc, twos, false)
+                lo = ap2.0
+                h_acc = ap2.1
+            }
+            lo.fo_expr_hess[k as usize] = h_acc
             k = k + 1
         }
         lo
     }
 
-    // Quotient rule: s_out[k] = sL[k]/b − a·sR[k]/b²  (f = a/b).
+    // Quotient f=a/b: s = sL/b − a·sR/b²
+    // H = HL/b − 2·sL·sR/b² − a·HR/b² + 2·a·sR²/b³
     fn fo_combine_sens_div(
         self,
         sL: [i64; 32],
         sR: [i64; 32],
+        hL: [i64; 32],
+        hR: [i64; 32],
         lhs_val: i64,
         rhs_val: i64
     ) -> Lowerer with Mut, Panic, Div {
@@ -6247,14 +6392,24 @@ impl Lowerer {
         let bb = bb_p.1
         lo = lo.emit(ir_binop_typed(bb, rhs_val, BinaryOp::OpMul, rhs_val, true, true))
         lo = lo.emit(ir_mark_float_reg(bb))
+        // b³
+        let b3_p = lo.fresh_reg()
+        lo = b3_p.0
+        let b3 = b3_p.1
+        lo = lo.emit(ir_binop_typed(b3, bb, BinaryOp::OpMul, rhs_val, true, true))
+        lo = lo.emit(ir_mark_float_reg(b3))
+        let two_p = lo.emit_f64_const(2.0)
+        lo = two_p.0
+        let two = two_p.1
         var k: i64 = 0
         while k < 32 {
             let l = sL[k as usize]
             let r = sR[k as usize]
+            let hl = hL[k as usize]
+            let hr = hR[k as usize]
             var term_l: i64 = -1
             var term_r: i64 = -1
             if l >= 0 {
-                // sL / b
                 let tp = lo.fresh_reg()
                 lo = tp.0
                 term_l = tp.1
@@ -6262,7 +6417,6 @@ impl Lowerer {
                 lo = lo.emit(ir_mark_float_reg(term_l))
             }
             if r >= 0 {
-                // a * sR / b²
                 let ar_p = lo.fresh_reg()
                 lo = ar_p.0
                 let ar = ar_p.1
@@ -6274,28 +6428,83 @@ impl Lowerer {
                 lo = lo.emit(ir_binop_typed(term_r, ar, BinaryOp::OpDiv, bb, true, true))
                 lo = lo.emit(ir_mark_float_reg(term_r))
             }
-            if term_l < 0 && term_r < 0 {
-                lo.fo_expr_sens[k as usize] = -1
-            } else if term_r < 0 {
-                lo.fo_expr_sens[k as usize] = term_l
-            } else if term_l < 0 {
-                // 0 - term_r
-                let zp = lo.emit_f64_const(0.0)
-                lo = zp.0
-                let dp = lo.fresh_reg()
-                lo = dp.0
-                let dst = dp.1
-                lo = lo.emit(ir_binop_typed(dst, zp.1, BinaryOp::OpSub, term_r, true, true))
-                lo = lo.emit(ir_mark_float_reg(dst))
-                lo.fo_expr_sens[k as usize] = dst
-            } else {
-                let dp = lo.fresh_reg()
-                lo = dp.0
-                let dst = dp.1
-                lo = lo.emit(ir_binop_typed(dst, term_l, BinaryOp::OpSub, term_r, true, true))
-                lo = lo.emit(ir_mark_float_reg(dst))
-                lo.fo_expr_sens[k as usize] = dst
+            let sp = lo.fo_reg_addsub_opt(term_l, term_r, true)
+            lo = sp.0
+            lo.fo_expr_sens[k as usize] = sp.1
+            // H terms
+            var h_acc: i64 = -1
+            if hl >= 0 {
+                // HL / b
+                let t = lo.fresh_reg()
+                lo = t.0
+                h_acc = t.1
+                lo = lo.emit(ir_binop_typed(h_acc, hl, BinaryOp::OpDiv, rhs_val, true, true))
+                lo = lo.emit(ir_mark_float_reg(h_acc))
             }
+            if l >= 0 && r >= 0 {
+                // −2·sL·sR / b²
+                let pr = lo.fresh_reg()
+                lo = pr.0
+                let prod = pr.1
+                lo = lo.emit(ir_binop_typed(prod, l, BinaryOp::OpMul, r, true, true))
+                lo = lo.emit(ir_mark_float_reg(prod))
+                let t2s = lo.fresh_reg()
+                lo = t2s.0
+                let twos = t2s.1
+                lo = lo.emit(ir_binop_typed(twos, two, BinaryOp::OpMul, prod, true, true))
+                lo = lo.emit(ir_mark_float_reg(twos))
+                let td = lo.fresh_reg()
+                lo = td.0
+                let tdiv = td.1
+                lo = lo.emit(ir_binop_typed(tdiv, twos, BinaryOp::OpDiv, bb, true, true))
+                lo = lo.emit(ir_mark_float_reg(tdiv))
+                let ap = lo.fo_reg_addsub_opt(h_acc, tdiv, true)
+                lo = ap.0
+                h_acc = ap.1
+            }
+            if hr >= 0 {
+                // − a·HR / b²
+                let arh = lo.fresh_reg()
+                lo = arh.0
+                let ar = arh.1
+                lo = lo.emit(ir_binop_typed(ar, lhs_val, BinaryOp::OpMul, hr, true, true))
+                lo = lo.emit(ir_mark_float_reg(ar))
+                let td2 = lo.fresh_reg()
+                lo = td2.0
+                let tdiv2 = td2.1
+                lo = lo.emit(ir_binop_typed(tdiv2, ar, BinaryOp::OpDiv, bb, true, true))
+                lo = lo.emit(ir_mark_float_reg(tdiv2))
+                let ap2 = lo.fo_reg_addsub_opt(h_acc, tdiv2, true)
+                lo = ap2.0
+                h_acc = ap2.1
+            }
+            if r >= 0 {
+                // + 2·a·sR² / b³
+                let rr = lo.fresh_reg()
+                lo = rr.0
+                let r2 = rr.1
+                lo = lo.emit(ir_binop_typed(r2, r, BinaryOp::OpMul, r, true, true))
+                lo = lo.emit(ir_mark_float_reg(r2))
+                let ar2 = lo.fresh_reg()
+                lo = ar2.0
+                let a_r2 = ar2.1
+                lo = lo.emit(ir_binop_typed(a_r2, lhs_val, BinaryOp::OpMul, r2, true, true))
+                lo = lo.emit(ir_mark_float_reg(a_r2))
+                let t2a = lo.fresh_reg()
+                lo = t2a.0
+                let two_a = t2a.1
+                lo = lo.emit(ir_binop_typed(two_a, two, BinaryOp::OpMul, a_r2, true, true))
+                lo = lo.emit(ir_mark_float_reg(two_a))
+                let td3 = lo.fresh_reg()
+                lo = td3.0
+                let tdiv3 = td3.1
+                lo = lo.emit(ir_binop_typed(tdiv3, two_a, BinaryOp::OpDiv, b3, true, true))
+                lo = lo.emit(ir_mark_float_reg(tdiv3))
+                let ap3 = lo.fo_reg_addsub_opt(h_acc, tdiv3, false)
+                lo = ap3.0
+                h_acc = ap3.1
+            }
+            lo.fo_expr_hess[k as usize] = h_acc
             k = k + 1
         }
         lo
@@ -6396,7 +6605,7 @@ impl Lowerer {
         while true {
             match *pcur {
                 Some(pl) => {
-                    if FO_BC_PARAM_N >= 8 {
+                    if FO_BC_PARAM_N >= 16 {
                         return lo
                     }
                     let pn = (*pl).head.name
@@ -6902,7 +7111,7 @@ impl Lowerer {
         var arg_i: i64 = 0
         if kind == 1 {
             let pi = FO_XFER_LIT[idx as usize] as i64
-            if pi >= 0 && pi < 8 {
+            if pi >= 0 && pi < 16 {
                 arg_i = pi
             }
         }
@@ -6915,8 +7124,10 @@ impl Lowerer {
             }
         }
         let s0 = lo.fo_snapshot_expr_sens()
+        let h0 = lo.fo_snapshot_expr_hess()
         if kind == 1 {
             lo = lo.fo_restore_expr_sens(s0)
+            lo = lo.fo_restore_expr_hess(h0)
             if v0 >= 0 {
                 return (lo, v0)
             }
@@ -6929,18 +7140,21 @@ impl Lowerer {
             let lit = FO_XFER_LIT[idx as usize]
             let c_pair = lo.emit_f64_const(lit)
             lo = c_pair.0
+            // c * p0: empty left × (s0,h0) right with lhs=c, rhs=p0_val
             var sL: [i64; 32] = [-1; 32]
+            var hL: [i64; 32] = [-1; 32]
             let aval = lo.fo_lower_nth_arg_value(args, 0)
             lo = aval.0
-            lo = lo.fo_combine_sens_mul(sL, s0, c_pair.1, aval.1)
+            lo = lo.fo_combine_sens_mul(sL, s0, hL, h0, c_pair.1, aval.1)
             return lo.fo_emit_var_from_sens()
         }
         // kind 3 add / 4 mul need arg1
         let p1 = lo.fo_lower_nth_arg_variance(args, 1)
         lo = p1.0
         let s1 = lo.fo_snapshot_expr_sens()
+        let h1 = lo.fo_snapshot_expr_hess()
         if kind == 3 {
-            lo = lo.fo_combine_sens_addsub(s0, s1, false)
+            lo = lo.fo_combine_sens_addsub(s0, s1, h0, h1, false)
             return lo.fo_emit_var_from_sens()
         }
         if kind == 4 {
@@ -6949,7 +7163,7 @@ impl Lowerer {
             let val0 = aval0.1
             let aval1 = lo.fo_lower_nth_arg_value(args, 1)
             lo = aval1.0
-            lo = lo.fo_combine_sens_mul(s0, s1, val0, aval1.1)
+            lo = lo.fo_combine_sens_mul(s0, s1, h0, h1, val0, aval1.1)
             return lo.fo_emit_var_from_sens()
         }
         (lo.fo_clear_expr_sens(), -1)
@@ -6970,13 +7184,14 @@ impl Lowerer {
         }
         FO_ARG_N = 0
         var ai: i64 = 0
-        while ai < 8 {
+        while ai < 16 {
             let pv = lo.fo_lower_nth_arg_variance(args, ai)
             lo = pv.0
             if pv.1 < 0 && !lo.fo_expr_has_sens() {
                 break
             }
             let s = lo.fo_snapshot_expr_sens()
+            let h = lo.fo_snapshot_expr_hess()
             let av = lo.fo_lower_nth_arg_value(args, ai)
             lo = av.0
             FO_ARG_VAL[ai as usize] = av.1
@@ -6984,6 +7199,7 @@ impl Lowerer {
             var k: i64 = 0
             while k < 32 {
                 FO_ARG_SENS[(ai * 32 + k) as usize] = s[k as usize]
+                FO_ARG_HESS[(ai * 32 + k) as usize] = h[k as usize]
                 k = k + 1
             }
             FO_ARG_N = ai + 1
@@ -6997,6 +7213,7 @@ impl Lowerer {
             var k2: i64 = 0
             while k2 < 32 {
                 FO_LOC_SENS[(li * 32 + k2) as usize] = -1
+                FO_LOC_HESS[(li * 32 + k2) as usize] = -1
                 k2 = k2 + 1
             }
             li = li + 1
@@ -7015,6 +7232,7 @@ impl Lowerer {
                 var k3: i64 = 0
                 while k3 < 32 {
                     FO_EV_SENS[(sp * 32 + k3) as usize] = FO_ARG_SENS[(arg * 32 + k3) as usize]
+                    FO_EV_HESS[(sp * 32 + k3) as usize] = FO_ARG_HESS[(arg * 32 + k3) as usize]
                     k3 = k3 + 1
                 }
                 FO_EV_SP = sp + 1
@@ -7036,6 +7254,7 @@ impl Lowerer {
                 var k4: i64 = 0
                 while k4 < 32 {
                     FO_EV_SENS[(sp * 32 + k4) as usize] = -1
+                    FO_EV_HESS[(sp * 32 + k4) as usize] = -1
                     k4 = k4 + 1
                 }
                 FO_EV_SP = sp + 1
@@ -7049,10 +7268,14 @@ impl Lowerer {
                 let lsp = FO_EV_SP
                 var sL: [i64; 32] = [-1; 32]
                 var sR: [i64; 32] = [-1; 32]
+                var hL: [i64; 32] = [-1; 32]
+                var hR: [i64; 32] = [-1; 32]
                 var k5: i64 = 0
                 while k5 < 32 {
                     sL[k5 as usize] = FO_EV_SENS[(lsp * 32 + k5) as usize]
                     sR[k5 as usize] = FO_EV_SENS[(rsp * 32 + k5) as usize]
+                    hL[k5 as usize] = FO_EV_HESS[(lsp * 32 + k5) as usize]
+                    hR[k5 as usize] = FO_EV_HESS[(rsp * 32 + k5) as usize]
                     k5 = k5 + 1
                 }
                 let lv = FO_EV_VAL[lsp as usize]
@@ -7094,11 +7317,11 @@ impl Lowerer {
                 var out_var: i64 = -1
                 if has_sens {
                     if op == 3 || op == 4 {
-                        lo = lo.fo_combine_sens_addsub(sL, sR, op == 4)
+                        lo = lo.fo_combine_sens_addsub(sL, sR, hL, hR, op == 4)
                     } else if op == 5 {
-                        lo = lo.fo_combine_sens_mul(sL, sR, lv, rv)
+                        lo = lo.fo_combine_sens_mul(sL, sR, hL, hR, lv, rv)
                     } else {
-                        lo = lo.fo_combine_sens_div(sL, sR, lv, rv)
+                        lo = lo.fo_combine_sens_div(sL, sR, hL, hR, lv, rv)
                     }
                     let vp = lo.fo_emit_var_from_sens()
                     lo = vp.0
@@ -7128,9 +7351,11 @@ impl Lowerer {
                 FO_EV_VAL[sp2 as usize] = vdst
                 FO_EV_VAR[sp2 as usize] = out_var
                 let sOut = lo.fo_snapshot_expr_sens()
+                let hOut = lo.fo_snapshot_expr_hess()
                 var k6: i64 = 0
                 while k6 < 32 {
                     FO_EV_SENS[(sp2 * 32 + k6) as usize] = sOut[k6 as usize]
+                    FO_EV_HESS[(sp2 * 32 + k6) as usize] = hOut[k6 as usize]
                     k6 = k6 + 1
                 }
                 FO_EV_SP = sp2 + 1
@@ -7145,6 +7370,7 @@ impl Lowerer {
                 var k7: i64 = 0
                 while k7 < 32 {
                     FO_LOC_SENS[(arg * 32 + k7) as usize] = FO_EV_SENS[(sp * 32 + k7) as usize]
+                    FO_LOC_HESS[(arg * 32 + k7) as usize] = FO_EV_HESS[(sp * 32 + k7) as usize]
                     k7 = k7 + 1
                 }
             } else if op == 8 {
@@ -7157,6 +7383,7 @@ impl Lowerer {
                 var k8: i64 = 0
                 while k8 < 32 {
                     FO_EV_SENS[(sp * 32 + k8) as usize] = FO_LOC_SENS[(arg * 32 + k8) as usize]
+                    FO_EV_HESS[(sp * 32 + k8) as usize] = FO_LOC_HESS[(arg * 32 + k8) as usize]
                     k8 = k8 + 1
                 }
                 FO_EV_SP = sp + 1
@@ -7206,12 +7433,13 @@ impl Lowerer {
                 var kc: i64 = 0
                 while kc < 32 {
                     FO_EV_SENS[(sp * 32 + kc) as usize] = -1
+                    FO_EV_HESS[(sp * 32 + kc) as usize] = -1
                     kc = kc + 1
                 }
                 FO_EV_SP = sp + 1
             } else if op == 9 {
                 // SELECT: stack = [cond, then, else] (bottom→top). Runtime blend for 0/1 cond.
-                // result = cond*then + (1-cond)*else for value/var/sens.
+                // result = cond*then + (1-cond)*else for value/var/sens/hess.
                 if FO_EV_SP < 3 {
                     return (lo.fo_clear_expr_sens(), -1)
                 }
@@ -7269,8 +7497,7 @@ impl Lowerer {
                 let rval = rv_p.1
                 lo = lo.emit(ir_binop_typed(rval, ct, BinaryOp::OpAdd, ie, true, true))
                 lo = lo.emit(ir_mark_float_reg(rval))
-                // sens[k] = cond*s_then[k] + inv*s_else[k], then Var = Σ s²σ²
-                // (more robust than blending variance scalars when cond is 0/1)
+                // sens[k]/hess[k] = cond*then + inv*else (0/1 blend); Var = Σ s²σ²
                 var ksel: i64 = 0
                 while ksel < 32 {
                     let st = FO_EV_SENS[(tsp * 32 + ksel) as usize]
@@ -7307,6 +7534,41 @@ impl Lowerer {
                     }
                     lo.fo_expr_sens[ksel as usize] = out_s
                     FO_EV_SENS[(FO_EV_SP * 32 + ksel) as usize] = out_s
+                    // Hessian blend (same 0/1 cond; discrete threshold → no ∂cond)
+                    let ht = FO_EV_HESS[(tsp * 32 + ksel) as usize]
+                    let he = FO_EV_HESS[(esp * 32 + ksel) as usize]
+                    var out_h: i64 = -1
+                    if ht >= 0 || he >= 0 {
+                        var term_ht: i64 = -1
+                        var term_he: i64 = -1
+                        if ht >= 0 {
+                            let tp = lo.fresh_reg()
+                            lo = tp.0
+                            term_ht = tp.1
+                            lo = lo.emit(ir_binop_typed(term_ht, cv, BinaryOp::OpMul, ht, true, true))
+                            lo = lo.emit(ir_mark_float_reg(term_ht))
+                        }
+                        if he >= 0 {
+                            let ep = lo.fresh_reg()
+                            lo = ep.0
+                            term_he = ep.1
+                            lo = lo.emit(ir_binop_typed(term_he, inv, BinaryOp::OpMul, he, true, true))
+                            lo = lo.emit(ir_mark_float_reg(term_he))
+                        }
+                        if term_ht >= 0 && term_he >= 0 {
+                            let sp = lo.fresh_reg()
+                            lo = sp.0
+                            out_h = sp.1
+                            lo = lo.emit(ir_binop_typed(out_h, term_ht, BinaryOp::OpAdd, term_he, true, true))
+                            lo = lo.emit(ir_mark_float_reg(out_h))
+                        } else if term_ht >= 0 {
+                            out_h = term_ht
+                        } else {
+                            out_h = term_he
+                        }
+                    }
+                    lo.fo_expr_hess[ksel as usize] = out_h
+                    FO_EV_HESS[(FO_EV_SP * 32 + ksel) as usize] = out_h
                     ksel = ksel + 1
                 }
                 var rvar: i64 = -1
@@ -7353,6 +7615,7 @@ impl Lowerer {
         var k9: i64 = 0
         while k9 < 32 {
             lo.fo_expr_sens[k9 as usize] = FO_EV_SENS[(top * 32 + k9) as usize]
+            lo.fo_expr_hess[k9 as usize] = FO_EV_HESS[(top * 32 + k9) as usize]
             k9 = k9 + 1
         }
         let outv = FO_EV_VAR[top as usize]
@@ -7738,6 +8001,7 @@ impl Lowerer {
             lo = lv_pair.0
             let lv = lv_pair.1
             let sL = lo.fo_snapshot_expr_sens()
+            let hL = lo.fo_snapshot_expr_hess()
 
             let pair_rv = match (*e).right {
                 Some(r_expr) => lo.lower_expr_variance_ref(&(*r_expr)),
@@ -7752,12 +8016,13 @@ impl Lowerer {
             lo = rv_pair.0
             let rv = rv_pair.1
             let sR = lo.fo_snapshot_expr_sens()
+            let hR = lo.fo_snapshot_expr_hess()
 
             // Multi-channel FO path when either side carries seed sensitivities.
             if lo.fo_expr_or_snap_has_sens(sL) {
                 if (*e).bin_op == BinaryOp::OpAdd || (*e).bin_op == BinaryOp::OpSub {
                     let is_sub = (*e).bin_op == BinaryOp::OpSub
-                    lo = lo.fo_combine_sens_addsub(sL, sR, is_sub)
+                    lo = lo.fo_combine_sens_addsub(sL, sR, hL, hR, is_sub)
                     return lo.fo_emit_var_from_sens()
                 }
                 if (*e).bin_op == BinaryOp::OpMul {
@@ -7768,7 +8033,7 @@ impl Lowerer {
                     let rhs_val_pair = lo.lower_opt_expr_ref(&(*e).right)
                     lo = rhs_val_pair.0
                     let rhs_v = rhs_val_pair.1
-                    lo = lo.fo_combine_sens_mul(sL, sR, lhs_v, rhs_v)
+                    lo = lo.fo_combine_sens_mul(sL, sR, hL, hR, lhs_v, rhs_v)
                     return lo.fo_emit_var_from_sens()
                 }
                 if (*e).bin_op == BinaryOp::OpDiv {
@@ -7778,7 +8043,7 @@ impl Lowerer {
                     let rhs_val_pair = lo.lower_opt_expr_ref(&(*e).right)
                     lo = rhs_val_pair.0
                     let rhs_v = rhs_val_pair.1
-                    lo = lo.fo_combine_sens_div(sL, sR, lhs_v, rhs_v)
+                    lo = lo.fo_combine_sens_div(sL, sR, hL, hR, lhs_v, rhs_v)
                     return lo.fo_emit_var_from_sens()
                 }
             }
@@ -8783,7 +9048,9 @@ impl Lowerer {
             match (*e).left {
                 Some(callee_expr) => {
                     let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
-                    if self.name_is_variance_of(callee_name) || self.name_is_uncertainty_of(callee_name) {
+                    if self.name_is_variance_of(callee_name)
+                        || self.name_is_uncertainty_of(callee_name)
+                        || self.name_is_second_order_mean(callee_name) {
                         return true
                     }
                     let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
@@ -12166,6 +12433,31 @@ impl Lowerer {
         }
     }
 
+    // second_order_mean(expr): f(μ) + ½ Σ H_kk σ²_k  (diagonal FO Hessian bias)
+    fn lower_second_order_mean_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        match *args {
+            Some(list) => {
+                // Walk FO first so sens/hess are populated for the expression.
+                let pair_v = self.lower_expr_variance_ref(&(*list).head)
+                var lo = pair_v.0
+                let bias_p = lo.fo_emit_second_order_bias()
+                lo = bias_p.0
+                let bias = bias_p.1
+                // First-order mean: evaluate expression at seed means.
+                let val_p = lo.lower_expr_ref(&(*list).head)
+                lo = val_p.0
+                let mean1 = val_p.1
+                let dst_p = lo.fresh_reg()
+                lo = dst_p.0
+                let dst = dst_p.1
+                lo = lo.emit(ir_binop_typed(dst, mean1, BinaryOp::OpAdd, bias, true, true))
+                lo = lo.emit(ir_mark_float_reg(dst))
+                (lo, dst)
+            }
+            _ => self.emit_f64_const(0.0),
+        }
+    }
+
     fn lower_uncertainty_of_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let pair_v = self.lower_variance_of_call_ref(args)
         var lo = pair_v.0
@@ -12565,6 +12857,9 @@ impl Lowerer {
         }
         if self.name_is_variance_of(callee_name) {
             return self.lower_variance_of_call_ref(&e.args)
+        }
+        if self.name_is_second_order_mean(callee_name) {
+            return self.lower_second_order_mean_call_ref(&e.args)
         }
         if self.name_is_uncertainty_of(callee_name) {
             return self.lower_uncertainty_of_call_ref(&e.args)
