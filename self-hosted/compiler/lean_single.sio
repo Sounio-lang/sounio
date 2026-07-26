@@ -5063,9 +5063,9 @@ fn stmt_is_deref_indexed_elem_field_store(p0: i64) -> bool with Panic, Mut {
 // instruction reachable), native/codegen_plan.sio:1325 (scheduling priorities stay zero),
 // with the shape appearing ~131 times under self-hosted/ (compiler/main.sio alone ~95) plus
 // the bootstrap chain.
-// The DISPATCH gates this on token_chain_root_is_pointer, following the established pattern
-// of stmt_is_field_field_store_shape at :23245 — a VALUE struct root has a different address
-// story and is left to the generic path, which is why this predicate is shape-only.
+// This predicate is SHAPE-ONLY; root resolvability is decided at the dispatch by
+// ident_chain_root_supported, following the established gating pattern of
+// stmt_is_field_field_store_shape at :23245.
 fn stmt_is_ident_indexed_elem_field_store(p0: i64) -> bool with Panic, Mut {
     if TK[p0 as usize] != 3 { return false }        // bare-ident root
     if TK[(p0 + 1) as usize] != 50 { return false } // must start with `. field`, not `[`
@@ -5135,6 +5135,31 @@ fn stmt_is_field_field_array_store_shape(p0: i64) -> bool with Panic, Mut {
 
 // True when the var named by the token at p0 is a pointer/ref binding (so a
 // `name.f1.f2 = …` write must deref rather than write into a local struct slot).
+// Root-resolvability gate for the indexed-element field store on a BARE-IDENT root.
+// True only when the root is a LOCAL whose base address the store emitter can reproduce
+// exactly as the read path does (emit_load_var):
+//   - pointer-like root  → the slot holds the pointee address (ref/param roots);
+//   - plain struct root  → the slot ALSO holds a pointer to the struct's inline slots,
+//     because a struct value is represented as `lea rax,[rbp-(base+nslots-1)*8]` (see the
+//     struct-literal emission) and that pointer is what gets stored into the local. This is
+//     why reads like `c.heap.objects[i].mark_color` already work through a value root.
+// Anything else — globals (var_find has no slot), non-aggregate roots — returns false so the
+// statement falls through to the generic assignment path EXACTLY as before, rather than being
+// intercepted and hard-rejected. Without that, `G.arr[i].f = v` on a global struct would turn
+// from working code into a false reject.
+fn ident_chain_root_supported(p0: i64) -> bool with Panic, Mut, Div {
+    let lvi = var_find_idx(TS[p0 as usize], TE[p0 as usize])
+    if lvi < 0 { return false }
+    if var_find(TS[p0 as usize], TE[p0 as usize]) < 0 { return false }
+    let vt = VAR_TY[lvi as usize]
+    let vh = VAR_TY_HASH[lvi as usize]
+    if type_is_pointer_like(vt, vh) {
+        let it = ptr_hash_inner_ty(vh)
+        return it == 6 || it == 8
+    }
+    return vt == 6
+}
+
 fn token_chain_root_is_pointer(p0: i64) -> bool with Panic, Mut, Div {
     let lvi = var_find_idx(TS[p0 as usize], TE[p0 as usize])
     if lvi < 0 { return false }
@@ -22461,16 +22486,36 @@ fn compile_deref_indexed_elem_field_store_x86() with IO, Mut, Panic, Div {
     var failed: i64 = 0
     let lslot = var_find(ns, ne)
     let lvi = var_find_idx(ns, ne)
-    if lslot < 0 || lvi < 0 || type_is_pointer_like(VAR_TY[lvi as usize], VAR_TY_HASH[lvi as usize]) == false {
+    // The root must be a resolvable LOCAL; whether it is pointer-like or a plain struct is
+    // decided just below (a value root is legal only for the auto-deref spelling). Requiring
+    // pointer-like HERE would false-reject every value-rooted chain the dispatch admits.
+    if lslot < 0 || lvi < 0 {
         tc_error_hard(name_tok, "field access through deref requires ref or pointer binding")
         EP = eq_pos + 1
         compile_or()
         return
     }
-    var cur_ty = ptr_hash_inner_ty(VAR_TY_HASH[lvi as usize])
-    var cur_hash = ptr_hash_inner_hash(VAR_TY_HASH[lvi as usize])
-    // A struct pointee starts the chain at `.field`; an ARRAY pointee (&![T; N]) starts it
-    // at `[idx]` — `(*arrptr)[i].f = v`. Both are accepted here and discriminated by the
+    // Base address: emit_load_var(lslot) below, identical to the read path for BOTH a
+    // pointer-like root (slot holds the pointee address) and a plain struct root (slot holds
+    // the pointer to the struct's inline slots). Only the TYPE derivation differs.
+    var cur_ty = VAR_TY[lvi as usize]
+    var cur_hash = VAR_TY_HASH[lvi as usize]
+    if type_is_pointer_like(cur_ty, cur_hash) {
+        cur_ty = ptr_hash_inner_ty(VAR_TY_HASH[lvi as usize])
+        cur_hash = ptr_hash_inner_hash(VAR_TY_HASH[lvi as usize])
+    } else {
+        // The `(*name)` spelling asserts a pointer. A value root reaching it is the
+        // pre-existing type error and must stay a hard reject; only the auto-deref spelling
+        // may be value-rooted (gated by ident_chain_root_supported at the dispatch).
+        if TK[EP as usize] == 6 {
+            tc_error_hard(name_tok, "field access through deref requires ref or pointer binding")
+            EP = eq_pos + 1
+            compile_or()
+            return
+        }
+    }
+    // A struct root/pointee starts the chain at `.field`; an ARRAY pointee (&![T; N]) starts
+    // it at `[idx]` — `(*arrptr)[i].f = v`. Both are accepted here and discriminated by the
     // chain walk itself (the `.field` step demands a struct, the `[idx]` step an array), so
     // the array-rooted form is lowered correctly instead of being rejected for not being a
     // struct: it is another shape that previously reached the generic path and was lost.
@@ -23772,14 +23817,14 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         return
     }
 
-    // name.arr[i].field = expr — the auto-deref twin of the shape above, for a POINTER-LIKE
-    // root only. Gated exactly like stmt_is_field_field_store_shape below: a value struct
-    // root has a different address story and the generic path already handles the simple
-    // cases, so it falls through rather than being intercepted here. Dispatched at this
-    // point (not earlier) so every narrow ident-root handler above keeps its shapes — those
-    // cover one field hop before the index; this catches the deeper chains they miss.
+    // name.arr[i].field = expr — the auto-deref twin of the shape above, for a ref/param root
+    // OR a plain struct root (both keep their base address in the slot; see
+    // ident_chain_root_supported, which also makes globals and non-aggregate roots fall
+    // through untouched instead of being hard-rejected). Dispatched at this point (not
+    // earlier) so every narrow ident-root handler above keeps its shapes — those cover one
+    // field hop before the index; this catches the deeper chains they miss.
     if stmt_is_ident_indexed_elem_field_store(EP) {
-        if token_chain_root_is_pointer(EP) {
+        if ident_chain_root_supported(EP) {
             compile_deref_indexed_elem_field_store_x86()
             return
         }

@@ -59,6 +59,18 @@ fn set_via_ident_root(o: &! Outer, i: i64, j: i64, v: i64) with Mut, Panic {
     o.ws[i as usize].cs[j as usize].a = v
 }
 
+// VALUE struct root: a by-value param copied into a local, mutated, and returned — the
+// vm/gc.sio:258 gc_set_color shape. A struct value keeps its data address in the local's slot
+// (a struct literal evaluates to `lea rax,[rbp-(base+nslots-1)*8]`), which is why reads
+// through a value root always worked; only the store was dropped, so the GC never wrote a
+// mark colour. Two field hops precede the index here, which is what put it outside the narrow
+// one-hop ident handler.
+fn value_root_set(o: Outer, i: i64, j: i64, v: i64) -> Outer with Mut, Panic, Div {
+    var c = o
+    c.ws[i as usize].cs[j as usize].a = v
+    c
+}
+
 // Deep chain: two indices, the opt_cleanup shape.
 fn set_deep(o: &! Outer, i: i64, j: i64, v: i64) with Mut, Panic {
     (*o).ws[i as usize].cs[j as usize].a = v
@@ -72,7 +84,8 @@ fn move_cell(w: &! Wrap, dst: i64, src: i64) with Mut, Panic {
     (*w).cs[dst as usize].b = b
 }
 
-fn main() with IO, Mut, Panic {
+// Div is required because value_root_set declares it (the `as usize` index casts).
+fn main() with IO, Mut, Panic, Div {
     var ok = true
 
     // Explicit element lists (not `[V; N]` repeat literals) are used deliberately: repeat
@@ -117,6 +130,12 @@ fn main() with IO, Mut, Panic {
     if o.ws[0].cs[1].a != 64 { ok = false }
     if o.ws[0].cs[0].a != 0 { ok = false }
     if o.ws[1].cs[1].a != 0 { ok = false }
+
+    // Value struct root: c.ws[i].cs[j].a = v on a by-value copy, returned.
+    let vout = value_root_set(o, 1, 2, 81)
+    if vout.ws[1].cs[2].a != 81 { ok = false }
+    if vout.ws[1].cs[3].a != 42 { ok = false }
+    if vout.ws[0].cs[2].a != 0 { ok = false }
 
     // Array-pointee root: (*cs)[i].a = v
     var bare: [Cell; 4] = [Cell { a: 0, b: false }, Cell { a: 0, b: false }, Cell { a: 0, b: false }, Cell { a: 0, b: false }]
