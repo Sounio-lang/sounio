@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """
-Functor F — the exceptional bridge: the associator is the G2 shadow of the E6 cubic form.
+Functor F — the exceptional bridge: the G2 3-form phi IS the E6/Albert cubic cross-term.
 
 NOT the Petitot semantic conjecture (that stays quarantined). A concrete algebraic bridge:
-the octonion trilinear map (x,y,z) -> x*y*z splits G2-equivariantly into two pieces, and
-one of them is an exceptional-group invariant.
+the functor-F central object -- the G2 3-form phi -- is literally (the imaginary restriction
+of) an exceptional-group invariant.
 
   E1  The associator [x,y,z]=(xy)z - x(yz) is PURELY IMAGINARY (Re[x,y,z]=0), so
       Re(x*y*z) is bracketing-INDEPENDENT: a well-defined trilinear form on O.
   E2  That real trilinear form is exactly the octonion cross-term 2*Re(x y z) of the CUBIC
       FORM (determinant) N of the exceptional Jordan / Albert algebra J3(O), whose
-      automorphism group is F4 and which E6 preserves projectively. Verified: the built N
-      is invariant under G2 = Aut(O) acting on the off-diagonal octonions (G2 subset F4).
-  E3  The complementary (imaginary, non-associative) piece -- the bracketing AMBIGUITY of
-      the triple product -- is the associator = the G2 3-form phi = the functor-F object.
-  E4  So the single octonion trilinear form on O carries BOTH: its symmetric real part is
-      the E6/Albert cubic invariant, its alternating imaginary part is the functor-F G2
-      3-form. Functor F lives in the G2 (non-associative) complement of the E6 cubic form.
+      automorphism group is F4 and which E6 preserves projectively. Verified: N is
+      invariant under G2 = Aut(O) acting on the off-diagonal octonions (G2 subset F4).
+  E3  For IMAGINARY x,y,z, Re(x*y*z) = -phi(x,y,z): the G2 3-form phi IS the imaginary
+      restriction of that E6 cubic cross-term. So functor-F's phi sits INSIDE the E6 cubic.
+  E4  CORRECTION of an earlier draft: the scalar 3-form phi and the VECTOR-valued associator
+      [x,y,z] (the psi/4-form side) are DIFFERENT objects. phi = the cubic cross-term (scalar);
+      the associator = the non-associative / psi part (vector). The first draft conflated them.
 
-Verdict PHI_IS_G2_SHADOW_OF_E6_CUBIC. Concrete algebra, not the semantic conjecture
+Verdict PHI_IS_THE_E6_CUBIC_CROSSTERM. Concrete algebra, not the semantic conjecture
 (D3-quarantined, see functor_f_exceptional_frontier_note). Self-contained (octonions).
 """
 import numpy as np
@@ -136,24 +136,31 @@ def main():
     print(f"E2_G2_PRESERVES_ALBERT_CUBIC N(J3(O)) invariant under G2=Aut(O) on the octonion entries: "
           f"max rel dev = {worst_Ninv:.1e} (G2 subset F4=Aut(J3(O))) {'PASS' if e2 else 'FAIL'}")
 
-    # E3 — the imaginary/associator complement is the functor-F G2 3-form
-    #      Re(xyz) uses only the symmetric real part; the associator carries the rest.
-    x, y, z = rng.standard_normal(8), rng.standard_normal(8), rng.standard_normal(8)
-    assoc = o(o(x, y), z) - o(x, o(y, z))
-    # on imaginary basis units the associator is (twice) the G2 3-form / co-associator
-    phi_val = float(np.dot(o(e(1), e(2)), e(3)))              # phi_{123} structure const
-    e3 = (abs(Re(assoc)) < 1e-9 and np.linalg.norm(assoc) > 1e-9 and abs(abs(phi_val) - 1.0) < 1e-9)
-    print(f"E3_ASSOCIATOR_IS_G2_PIECE Re(assoc)={Re(assoc):.1e}, ||assoc||={np.linalg.norm(assoc):.2f} "
-          f"(imaginary), phi_123={phi_val:+.0f} (the G2 3-form) {'PASS' if e3 else 'FAIL'}")
+    # E3 — the G2 3-form phi IS the E6 cubic cross-term restricted to imaginary octonions.
+    #      For imaginary x,y,z:  Re(x*y*z) = -phi(x,y,z)  (phi = <xy,z>, the structure 3-form).
+    def imag(r):
+        v = r.standard_normal(8); v[0] = 0.0; return v
+    def phi3(x, y, z):
+        return float(np.dot(o(x, y), z))
+    worst_phi = 0.0
+    for _ in range(200):
+        x, y, z = imag(rng), imag(rng), imag(rng)
+        worst_phi = max(worst_phi, abs(Re(o(o(x, y), z)) + phi3(x, y, z)))
+    e3 = worst_phi < 1e-9
+    print(f"E3_PHI_IS_CUBIC_CROSSTERM Re(xyz)|imaginary == -phi(x,y,z): max dev {worst_phi:.1e} "
+          f"=> the G2 3-form phi IS the imaginary restriction of the E6/Albert cubic cross-term "
+          f"{'PASS' if e3 else 'FAIL'}")
 
-    # E4 — the split is the whole content: Re(xyz)=E6 cubic term, Im-bracketing-ambiguity=phi
-    #      confirm Re part is bracketing-independent (E6 side) AND the associator is the ambiguity
-    p1 = o(o(x, y), z); p2 = o(x, o(y, z))
-    split_ok = (abs(Re(p1) - Re(p2)) < 1e-9 and np.linalg.norm(p1 - p2) > 1e-9
-                and np.allclose(p1 - p2, assoc))
-    e4 = split_ok
-    print(f"E4_SPLIT the octonion trilinear xyz = Re-part (E6/Albert cubic, bracketing-independent) + "
-          f"Im-part whose bracketing-ambiguity = associator = phi {'PASS' if e4 else 'FAIL'}")
+    # E4 — the (vector-valued) associator is a SEPARATE object, NOT phi: it is the psi/4-form
+    #      side. phi (scalar 3-form) = cubic cross-term; associator (vector) = non-associativity.
+    x, y, z = imag(rng), imag(rng), imag(rng)
+    assoc = o(o(x, y), z) - o(x, o(y, z))                     # VECTOR (octonion)
+    phi_sc = phi3(x, y, z)                                    # SCALAR
+    # associator relates to psi (the 4-form): [e_a,e_b,e_c] = -2 sum_d psi_abcd e_d
+    e4 = (abs(Re(assoc)) < 1e-9 and np.linalg.norm(assoc) > 1e-9 and abs(phi_sc) > 1e-9)
+    print(f"E4_ASSOCIATOR_IS_SEPARATE associator is VECTOR (||.||={np.linalg.norm(assoc):.2f}, the psi/"
+          f"4-form side), phi is SCALAR ({phi_sc:+.2f}); they are DIFFERENT objects (correcting an earlier "
+          f"conflation) {'PASS' if e4 else 'FAIL'}")
 
     # E5 — the bridge is CUBIC-SPECIFIC: Re(octonion word) is bracketing-independent at
     # length <=3 but NOT at length >=4, so the clean split does not lift to the E7 quartic.
@@ -184,16 +191,16 @@ def main():
 
     print("=" * 70)
     if e1 and e2 and e3 and e4 and e5:
-        print("FUNCTOR_F_E6_VERDICT PHI_IS_G2_SHADOW_OF_E6_CUBIC")
-        print("FUNCTOR_F_E6_NOTE octonion triple product splits G2-equivariantly: Re(xyz) is the "
-              "bracketing-independent octonion cross-term of the Albert-algebra cubic form N(J3(O)) "
-              "(F4=Aut(J3(O)), E6 preserves N projectively), verified G2-invariant; the complementary "
-              "imaginary bracketing-ambiguity is the associator = the G2 3-form phi = the functor-F "
-              "object. functor F lives in the G2 (non-associative) complement of the E6 cubic invariant. "
-              "The bridge is CUBIC-SPECIFIC (E5): Re(word) is bracketing-independent only at length<=3 "
-              "(the associator is 3-linear = the cubic degree), NOT at length>=4, so it does NOT lift to "
-              "the E7 quartic by this mechanism -- functor F sits at the E6 rung. CONCRETE algebra, NOT "
-              "the Petitot semantic conjecture (D3-quarantined)")
+        print("FUNCTOR_F_E6_VERDICT PHI_IS_THE_E6_CUBIC_CROSSTERM")
+        print("FUNCTOR_F_E6_NOTE the G2 3-form phi (the functor-F central object) IS the imaginary "
+              "restriction of the octonion cross-term Re(xyz) of the Albert-algebra cubic form N(J3(O)) "
+              "(F4=Aut(J3(O)), E6 preserves N projectively; Re(xyz)|imaginary = -phi, verified; N is "
+              "G2-invariant, G2 subset F4). So functor-F's phi sits INSIDE the E6 cubic invariant. NOTE: "
+              "the scalar 3-form phi and the VECTOR associator [x,y,z] (the psi/4-form side) are DIFFERENT "
+              "objects -- an earlier draft conflated them; corrected here (E3/E4). The bridge is "
+              "CUBIC-SPECIFIC (E5): Re(word) bracketing-independent only at length<=3 (phi is 3-linear = "
+              "the cubic degree), does NOT lift to the E7 quartic. CONCRETE algebra, NOT the Petitot "
+              "semantic conjecture (D3-quarantined)")
         return 0
     print("FUNCTOR_F_E6_VERDICT INCOMPLETE")
     return 1
