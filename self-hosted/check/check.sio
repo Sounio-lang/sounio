@@ -5058,9 +5058,15 @@ fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut
     if cond_guard.0 != 0 {
         (*c).refine_cond_env = refine_static_env_push((*c).refine_cond_env, cond_guard.1)
     }
+    // Linear consumption is per-path, so the arms are checked as alternatives:
+    // record the entry state, check the then-arm, rewind, check the else-arm,
+    // then merge. Without this the else-arm inherits the then-arm's consumption
+    // (false E039) and a value consumed in only one arm slips through.
+    (*c).borrows = (*c).borrows.branch_enter()
     let then_ty = checker_check_opt_block_inplace(c, e.block)
+    (*c).borrows = (*c).borrows.branch_then_done()
     (*c).refine_cond_env = saved_cond_env
-    match e.else_expr {
+    let result = match e.else_expr {
         Some(else_e) => {
             let else_ty = checker_check_expr_inplace(c, *else_e)
             (*c).refine_cond_env = saved_cond_env
@@ -5070,10 +5076,26 @@ fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut
             then_ty
         }
         None => {
+            // No else-arm: nothing is consumed on that path, which is exactly
+            // what branch_then_done rewound to. The merge below then flags a
+            // value the then-arm consumed.
             (*c).refine_cond_env = saved_cond_env
             ty_unit()
         }
     }
+    let merged = (*c).borrows.branch_merge()
+    (*c).borrows = merged.0
+    if merged.1 > 0 {
+        (*c).had_error = true
+        (*c).error_count = (*c).error_count + 1
+        (*c).diag_emitted = true
+        print("error[E040]: linear value not consumed on every path (")
+        print_int(merged.1)
+        print(" value(s) consumed in one branch only)\n")
+        print("   = help: a linear value must be consumed on both branches of an `if`, or on neither\n")
+        print("   = note: linear types enforce single-use semantics for resources\n")
+    }
+    result
 }
 
 

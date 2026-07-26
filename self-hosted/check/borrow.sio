@@ -14,6 +14,12 @@
 // State values: 0 = Owned (unborrowed), 1 = SharedBorrow, 2 = ExclusiveBorrow
 // shared_count tracks number of active shared borrows
 
+// Two snapshot slots per nested `if` level; 16 levels of nesting are tracked.
+// Beyond that the merge degrades to the old sequential behaviour rather than
+// misreporting — see branch_enter.
+const MAX_BRANCH_LEVELS: i64 = 16
+const MAX_BRANCH_SNAP: i64 = 32
+
 pub struct BorrowEntry {
     name: Name,
     state: i64,          // 0=Owned, 1=SharedBorrow, 2=ExclusiveBorrow
@@ -22,6 +28,12 @@ pub struct BorrowEntry {
     consumed: bool,      // Whether a linear variable has been consumed
     scope_depth: i64,    // Scope where this entry was created
     provenance: i64,     // escape provenance: 0=first-class (param/global/safe), 1=local (frame-bound ref)
+    // Per-branch-level snapshots of `consumed`, used to merge the two arms of an
+    // `if` instead of threading one arm's consumption into the other. Two slots
+    // per level: 2*d holds the state on entry (the base), 2*d+1 holds the state
+    // at the end of the then-arm. See branch_enter / branch_then_done /
+    // branch_merge below.
+    branch_snap: [bool; MAX_BRANCH_SNAP],
 }
 
 fn empty_borrow_entry() -> BorrowEntry {
@@ -33,6 +45,7 @@ fn empty_borrow_entry() -> BorrowEntry {
         consumed: false,
         scope_depth: 0,
         provenance: 0,
+        branch_snap: [false; MAX_BRANCH_SNAP],
     }
 }
 
@@ -45,6 +58,7 @@ pub struct BorrowEnv {
     count: i64,
     scope_starts: [i64; 64],
     scope_depth: i64,
+    branch_depth: i64,   // nesting level of `if` currently being checked
 }
 
 fn borrow_env_new() -> BorrowEnv {
@@ -53,6 +67,7 @@ fn borrow_env_new() -> BorrowEnv {
         count: 0,
         scope_starts: [0; 64],
         scope_depth: 0,
+        branch_depth: 0,
     }
 }
 
@@ -246,6 +261,96 @@ impl BorrowEnv {
             }
         }
         env
+    }
+
+    // ============================================================
+    // Branch-aware merge of linear consumption
+    //
+    // A linear value must be consumed on EVERY path, so the two arms of an `if`
+    // are alternatives, not a sequence. Checking them sequentially — which is
+    // what happens without these three calls — is wrong in both directions:
+    //
+    //   if c { use(t) } else { use(t) }   was E039 (the else-arm saw the
+    //                                     then-arm's consumption) though sound
+    //   if c { use(t) }                   was accepted though `t` survives
+    //                                     unconsumed on the implicit else path
+    //
+    // Protocol, from checker_check_if_expr_inplace:
+    //   branch_enter()      before the then-arm   — record the entry state
+    //   branch_then_done()  after  the then-arm   — stash it, rewind to entry
+    //   branch_merge()      after  the else-arm   — combine, report mismatches
+    //
+    // An `if` with no `else` uses the same protocol: the empty else-arm consumes
+    // nothing, so a value consumed only in the then-arm is correctly a mismatch.
+    // ============================================================
+
+    // Record the on-entry `consumed` state for this branch level.
+    fn branch_enter(self) -> BorrowEnv with Mut, Panic, Div {
+        var env = self
+        let d = env.branch_depth
+        env.branch_depth = d + 1
+        // Beyond the tracked nesting depth we keep the counter balanced but
+        // store nothing; branch_merge then leaves state alone, degrading to the
+        // old sequential behaviour rather than merging against a stale snapshot.
+        if d >= MAX_BRANCH_LEVELS {
+            return env
+        }
+        var i: i64 = 0
+        while i < env.count {
+            env.entries[i].branch_snap[2 * d] = env.entries[i].consumed
+            i = i + 1
+        }
+        env
+    }
+
+    // Stash the end-of-then-arm state and rewind to the on-entry state, so the
+    // else-arm is checked from the same starting point the then-arm had.
+    fn branch_then_done(self) -> BorrowEnv with Mut, Panic, Div {
+        var env = self
+        let d = env.branch_depth - 1
+        if d < 0 || d >= MAX_BRANCH_LEVELS {
+            return env
+        }
+        var i: i64 = 0
+        while i < env.count {
+            env.entries[i].branch_snap[2 * d + 1] = env.entries[i].consumed
+            env.entries[i].consumed = env.entries[i].branch_snap[2 * d]
+            i = i + 1
+        }
+        env
+    }
+
+    // Combine the two arms. A linear binding is consumed after the `if` only if
+    // BOTH arms consumed it. If exactly one arm did, the value's fate depends on
+    // a runtime condition, which linearity forbids: count it as a mismatch and
+    // mark it consumed so the caller reports once instead of cascading.
+    // Returns (env, mismatch_count).
+    fn branch_merge(self) -> (BorrowEnv, i64) with Mut, Panic, Div {
+        var env = self
+        let d = env.branch_depth - 1
+        if d < 0 {
+            return (env, 0)
+        }
+        env.branch_depth = d
+        if d >= MAX_BRANCH_LEVELS {
+            return (env, 0)
+        }
+        var mismatch: i64 = 0
+        var i: i64 = 0
+        while i < env.count {
+            if env.entries[i].is_linear && !env.entries[i].branch_snap[2 * d] {
+                let then_consumed = env.entries[i].branch_snap[2 * d + 1]
+                let else_consumed = env.entries[i].consumed
+                if then_consumed != else_consumed {
+                    mismatch = mismatch + 1
+                    env.entries[i].consumed = true
+                } else {
+                    env.entries[i].consumed = then_consumed
+                }
+            }
+            i = i + 1
+        }
+        (env, mismatch)
     }
 
     // Release all exclusive borrows in the current scope.
