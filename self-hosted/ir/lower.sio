@@ -152,6 +152,27 @@ var FO_XFER_KIND: [i64; 64] = [0; 64]
 var FO_XFER_LIT: [f64; 64] = [0.0; 64]
 var FO_XFER_HASH: [i64; 64] = [0; 64]
 var FO_XFER_FWD_HASH: [i64; 64] = [0; 64]
+var FO_XFER_BC_OFF: [i64; 64] = [0; 64]
+var FO_XFER_BC_LEN: [i64; 64] = [0; 64]
+// FO bytecode: OP_PARAM=1 CONST=2 ADD=3 SUB=4 MUL=5 DIV=6 BIND=7 LOCAL=8
+var FO_BC_OP: [i64; 4096] = [0; 4096]
+var FO_BC_ARG: [i64; 4096] = [0; 4096]
+var FO_BC_LEN: i64 = 0
+var FO_BC_CONST_BITS: [i64; 256] = [0; 256]
+var FO_BC_CONST_N: i64 = 0
+var FO_BC_LOC_HASH: [i64; 8] = [0; 8]
+var FO_BC_LOC_N: i64 = 0
+var FO_EV_SP: i64 = 0
+var FO_EV_VAL: [i64; 16] = [-1; 16]
+var FO_EV_VAR: [i64; 16] = [-1; 16]
+var FO_EV_SENS: [i64; 512] = [-1; 512]
+var FO_LOC_VAL: [i64; 8] = [-1; 8]
+var FO_LOC_VAR: [i64; 8] = [-1; 8]
+var FO_LOC_SENS: [i64; 256] = [-1; 256]
+var FO_ARG_VAL: [i64; 4] = [-1; 4]
+var FO_ARG_VAR: [i64; 4] = [-1; 4]
+var FO_ARG_SENS: [i64; 128] = [-1; 128]
+var FO_ARG_N: i64 = 0
 
 fn fo_name_hash(n: Name) -> i64 with Mut, Panic, Div {
     var h: i64 = 5381
@@ -166,12 +187,17 @@ fn fo_name_hash(n: Name) -> i64 with Mut, Panic, Div {
 
 fn fo_xfer_global_reset() with Mut {
     FO_XFER_COUNT = 0
+    FO_BC_LEN = 0
+    FO_BC_CONST_N = 0
+    FO_BC_LOC_N = 0
     var i: i64 = 0
     while i < 64 {
         FO_XFER_KIND[i as usize] = 0
         FO_XFER_LIT[i as usize] = 0.0
         FO_XFER_HASH[i as usize] = 0
         FO_XFER_FWD_HASH[i as usize] = 0
+        FO_XFER_BC_OFF[i as usize] = 0
+        FO_XFER_BC_LEN[i as usize] = 0
         i = i + 1
     }
 }
@@ -227,6 +253,78 @@ fn fo_xfer_global_set(name: Name, kind: i64, lit: f64, fwd: Name) with Mut, Pani
         print_int(FO_XFER_COUNT)
         print("\n")
     }
+}
+
+fn fo_xfer_global_set_bc(name: Name, off: i64, len: i64) with Mut, Panic, Div, IO {
+    let existing = fo_xfer_global_lookup(name)
+    let h = fo_name_hash(name)
+    if existing >= 0 {
+        FO_XFER_KIND[existing as usize] = 6
+        FO_XFER_BC_OFF[existing as usize] = off
+        FO_XFER_BC_LEN[existing as usize] = len
+        return
+    }
+    if FO_XFER_COUNT >= 64 {
+        return
+    }
+    let idx = FO_XFER_COUNT
+    FO_XFER_HASH[idx as usize] = h
+    FO_XFER_KIND[idx as usize] = 6
+    FO_XFER_BC_OFF[idx as usize] = off
+    FO_XFER_BC_LEN[idx as usize] = len
+    FO_XFER_COUNT = idx + 1
+    if lower_live_diag_enabled() {
+        print("lower_live: fo_xfer_set_bc name=")
+        print(str_from_bytes(name.buf, name.len))
+        print(" len=")
+        print_int(len)
+        print("\n")
+    }
+}
+
+fn fo_bc_emit(op: i64, arg: i64) -> bool with Mut {
+    if FO_BC_LEN >= 4096 {
+        return false
+    }
+    FO_BC_OP[FO_BC_LEN as usize] = op
+    FO_BC_ARG[FO_BC_LEN as usize] = arg
+    FO_BC_LEN = FO_BC_LEN + 1
+    true
+}
+
+fn fo_bc_emit_const(v: f64) -> bool with Mut {
+    if FO_BC_CONST_N >= 256 {
+        return false
+    }
+    let ci = FO_BC_CONST_N
+    FO_BC_CONST_BITS[ci as usize] = f64_to_bits(v)
+    FO_BC_CONST_N = ci + 1
+    fo_bc_emit(2, ci)
+}
+
+fn fo_bc_find_local(h: i64) -> i64 with Mut {
+    var i: i64 = 0
+    while i < FO_BC_LOC_N {
+        if FO_BC_LOC_HASH[i as usize] == h {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn fo_bc_add_local(h: i64) -> i64 with Mut {
+    let existing = fo_bc_find_local(h)
+    if existing >= 0 {
+        return existing
+    }
+    if FO_BC_LOC_N >= 8 {
+        return -1
+    }
+    let idx = FO_BC_LOC_N
+    FO_BC_LOC_HASH[idx as usize] = h
+    FO_BC_LOC_N = idx + 1
+    idx
 }
 
 pub struct LowerGlobalTypeTable {
@@ -6261,140 +6359,108 @@ impl Lowerer {
         self
     }
 
-    // Match expr Ident to param index; -1 if not a param.
-    fn fo_param_index(self, e: &Expr, p0: Name, p1: Name, nparams: i64) -> i64 with Mut, Panic, Div {
-        if (*e).kind != ExprKind::ExprIdent {
-            return -1
-        }
-        if nparams >= 1 && ir_name_eq((*e).name, p0) {
-            return 0
-        }
-        if nparams >= 2 && ir_name_eq((*e).name, p1) {
-            return 1
-        }
+
+    // Match expr Ident to param index; -1 if not a param. Supports ≤4 params.
+    fn fo_param_index4(self, e: &Expr, p0: Name, p1: Name, p2: Name, p3: Name, nparams: i64) -> i64 with Mut, Panic, Div {
+        if (*e).kind != ExprKind::ExprIdent { return -1 }
+        if nparams >= 1 && ir_name_eq((*e).name, p0) { return 0 }
+        if nparams >= 2 && ir_name_eq((*e).name, p1) { return 1 }
+        if nparams >= 3 && ir_name_eq((*e).name, p2) { return 2 }
+        if nparams >= 4 && ir_name_eq((*e).name, p3) { return 3 }
         -1
     }
 
     fn fo_expr_as_lit(self, e: &Expr) -> (bool, f64) with Mut, Panic, Div {
-        if (*e).kind == ExprKind::ExprFloatLit {
-            return (true, (*e).float_val)
-        }
-        if (*e).kind == ExprKind::ExprIntLit {
-            return (true, (*e).int_val as f64)
-        }
+        if (*e).kind == ExprKind::ExprFloatLit { return (true, (*e).float_val) }
+        if (*e).kind == ExprKind::ExprIntLit { return (true, (*e).int_val as f64) }
         (false, 0.0)
     }
 
-    // Classify pure helper body and record FO transfer (id / scale / add / mul / fwd).
     fn fo_register_pure_fn_transfer(self, name: Name, fd: &FnDef) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self
-        // Collect up to 2 param names.
         var p0 = ir_empty_name()
         var p1 = ir_empty_name()
+        var p2 = ir_empty_name()
+        var p3 = ir_empty_name()
         var nparams: i64 = 0
         var pcur = &fd.params
         while true {
             match *pcur {
                 Some(pl) => {
-                    if nparams == 0 {
-                        p0 = (*pl).head.name
-                        nparams = 1
-                    } else if nparams == 1 {
-                        p1 = (*pl).head.name
-                        nparams = 2
-                    } else {
-                        // >2 params: skip (unsupported transfer)
-                        return lo
-                    }
+                    if nparams == 0 { p0 = (*pl).head.name; nparams = 1 }
+                    else if nparams == 1 { p1 = (*pl).head.name; nparams = 2 }
+                    else if nparams == 2 { p2 = (*pl).head.name; nparams = 3 }
+                    else if nparams == 3 { p3 = (*pl).head.name; nparams = 4 }
+                    else { return lo }
                     pcur = &(*pl).tail
                 }
                 _ => break
             }
         }
-        if nparams <= 0 {
+        if nparams <= 0 { return lo }
+        if lo.fo_try_simple_block_transfer(name, &fd.body, p0, p1, p2, p3, nparams) {
             return lo
         }
-        lo.fo_classify_block_transfer(name, &fd.body, p0, p1, nparams)
+        lo.fo_compile_block_bytecode(name, &fd.body, p0, p1, p2, p3, nparams)
     }
 
-    fn fo_classify_block_transfer(
-        self,
-        name: Name,
-        blk: &Block,
-        p0: Name,
-        p1: Name,
-        nparams: i64
-    ) -> Lowerer with Mut, Panic, Div, Alloc, IO {
-        var lo = self
+    fn fo_try_simple_block_transfer(
+        self, name: Name, blk: &Block, p0: Name, p1: Name, p2: Name, p3: Name, nparams: i64
+    ) -> bool with Mut, Panic, Div, Alloc, IO {
         var current = &(*blk).stmts
-        var found = false
-        // Find last StmtExpr and classify it (re-enter classification on that expr).
-        // Store pointer by processing in reverse-like overwrite.
+        var last_ok = false
         while true {
             match *current {
                 Some(list) => {
                     let stmt_ref = &(*list).head
+                    if stmt_ref.kind == StmtKind::StmtLet || stmt_ref.kind == StmtKind::StmtVar {
+                        return false
+                    }
                     if stmt_ref.kind == StmtKind::StmtExpr {
                         match stmt_ref.expr {
                             Some(te) => {
-                                lo = lo.fo_classify_expr_transfer(name, &(*te), p0, p1, nparams)
-                                found = true
+                                last_ok = self.fo_try_simple_expr_transfer(name, &(*te), p0, p1, p2, p3, nparams)
                             }
                             _ => {}
                         }
-                    } else if stmt_ref.kind == StmtKind::StmtLet || stmt_ref.kind == StmtKind::StmtVar {
-                        return lo
                     }
                     current = &(*list).tail
                 }
                 _ => break
             }
         }
-        lo
+        last_ok
     }
 
-    fn fo_classify_expr_transfer(
-        self,
-        name: Name,
-        e: &Expr,
-        p0: Name,
-        p1: Name,
-        nparams: i64
-    ) -> Lowerer with Mut, Panic, Div, Alloc, IO {
-        var lo = self
-        // id: single param identity
+    fn fo_try_simple_expr_transfer(
+        self, name: Name, e: &Expr, p0: Name, p1: Name, p2: Name, p3: Name, nparams: i64
+    ) -> bool with Mut, Panic, Div, Alloc, IO {
         if (*e).kind == ExprKind::ExprIdent {
             if nparams >= 1 && ir_name_eq((*e).name, p0) {
-                return lo.fo_xfer_set(name, 1, 0.0, ir_empty_name())
+                fo_xfer_global_set(name, 1, 0.0, ir_empty_name())
+                return true
             }
-            return lo
+            return false
         }
-        // binary: scale / add / mul
         if (*e).kind == ExprKind::ExprBinary {
             match (*e).left {
                 Some(le) => {
                     match (*e).right {
                         Some(re) => {
-                            let li = lo.fo_param_index(&(*le), p0, p1, nparams)
-                            let ri = lo.fo_param_index(&(*re), p0, p1, nparams)
-                            let ll = lo.fo_expr_as_lit(&(*le))
-                            let rl = lo.fo_expr_as_lit(&(*re))
+                            let li = self.fo_param_index4(&(*le), p0, p1, p2, p3, nparams)
+                            let ri = self.fo_param_index4(&(*re), p0, p1, p2, p3, nparams)
+                            let ll = self.fo_expr_as_lit(&(*le))
+                            let rl = self.fo_expr_as_lit(&(*re))
                             if (*e).bin_op == BinaryOp::OpMul {
-                                // lit * p0 or p0 * lit
-                                if ll.0 && ri == 0 {
-                                    return lo.fo_xfer_set(name, 2, ll.1, ir_empty_name())
-                                }
-                                if rl.0 && li == 0 {
-                                    return lo.fo_xfer_set(name, 2, rl.1, ir_empty_name())
-                                }
-                                // p0 * p1
+                                if ll.0 && ri == 0 { fo_xfer_global_set(name, 2, ll.1, ir_empty_name()); return true }
+                                if rl.0 && li == 0 { fo_xfer_global_set(name, 2, rl.1, ir_empty_name()); return true }
                                 if nparams >= 2 && ((li == 0 && ri == 1) || (li == 1 && ri == 0)) {
-                                    return lo.fo_xfer_set(name, 4, 0.0, ir_empty_name())
+                                    fo_xfer_global_set(name, 4, 0.0, ir_empty_name()); return true
                                 }
                             }
                             if (*e).bin_op == BinaryOp::OpAdd {
                                 if nparams >= 2 && ((li == 0 && ri == 1) || (li == 1 && ri == 0)) {
-                                    return lo.fo_xfer_set(name, 3, 0.0, ir_empty_name())
+                                    fo_xfer_global_set(name, 3, 0.0, ir_empty_name()); return true
                                 }
                             }
                         }
@@ -6403,9 +6469,8 @@ impl Lowerer {
                 }
                 _ => {}
             }
-            return lo
+            return false
         }
-        // forward: g(p0) or g(p0, p1) with args exactly params in order
         if (*e).kind == ExprKind::ExprCall {
             match (*e).left {
                 Some(callee) => {
@@ -6416,28 +6481,115 @@ impl Lowerer {
                         while true {
                             match *acur {
                                 Some(al) => {
-                                    let aidx = lo.fo_param_index(&(*al).head, p0, p1, nparams)
-                                    if aidx != ai {
-                                        ok = false
-                                    }
+                                    let aidx = self.fo_param_index4(&(*al).head, p0, p1, p2, p3, nparams)
+                                    if aidx != ai { ok = false }
                                     ai = ai + 1
-                                    if ai > nparams {
-                                        ok = false
-                                    }
+                                    if ai > nparams { ok = false }
                                     acur = &(*al).tail
                                 }
                                 _ => break
                             }
                         }
                         if ok && ai == nparams && ai > 0 {
-                            return lo.fo_xfer_set(name, 5, 0.0, (*callee).name)
+                            fo_xfer_global_set(name, 5, 0.0, (*callee).name)
+                            return true
                         }
                     }
                 }
                 _ => {}
             }
         }
+        false
+    }
+
+    fn fo_compile_block_bytecode(
+        self, name: Name, blk: &Block, p0: Name, p1: Name, p2: Name, p3: Name, nparams: i64
+    ) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let start = FO_BC_LEN
+        FO_BC_LOC_N = 0
+        var current = &(*blk).stmts
+        var has_expr = false
+        var ok = true
+        while true {
+            match *current {
+                Some(list) => {
+                    let stmt_ref = &(*list).head
+                    if stmt_ref.kind == StmtKind::StmtLet || stmt_ref.kind == StmtKind::StmtVar {
+                        match stmt_ref.expr {
+                            Some(rhs) => {
+                                if !lo.fo_bc_compile_expr(&(*rhs), p0, p1, p2, p3, nparams) {
+                                    ok = false
+                                } else {
+                                    let lh = fo_name_hash(stmt_ref.name)
+                                    let li = fo_bc_add_local(lh)
+                                    if li < 0 || !fo_bc_emit(7, li) { ok = false }
+                                }
+                            }
+                            _ => { ok = false }
+                        }
+                    } else if stmt_ref.kind == StmtKind::StmtExpr {
+                        match stmt_ref.expr {
+                            Some(te) => {
+                                if !lo.fo_bc_compile_expr(&(*te), p0, p1, p2, p3, nparams) {
+                                    ok = false
+                                } else {
+                                    has_expr = true
+                                }
+                            }
+                            _ => {}
+                        }
+                    } else {
+                        ok = false
+                    }
+                    current = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        if !ok || !has_expr {
+            FO_BC_LEN = start
+            return lo
+        }
+        let len = FO_BC_LEN - start
+        if len <= 0 { return lo }
+        fo_xfer_global_set_bc(name, start, len)
         lo
+    }
+
+    fn fo_bc_compile_expr(
+        self, e: &Expr, p0: Name, p1: Name, p2: Name, p3: Name, nparams: i64
+    ) -> bool with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprFloatLit { return fo_bc_emit_const((*e).float_val) }
+        if (*e).kind == ExprKind::ExprIntLit { return fo_bc_emit_const((*e).int_val as f64) }
+        if (*e).kind == ExprKind::ExprIdent {
+            let pi = self.fo_param_index4(e, p0, p1, p2, p3, nparams)
+            if pi >= 0 { return fo_bc_emit(1, pi) }
+            let lh = fo_name_hash((*e).name)
+            let li = fo_bc_find_local(lh)
+            if li >= 0 { return fo_bc_emit(8, li) }
+            return false
+        }
+        if (*e).kind == ExprKind::ExprBinary {
+            match (*e).left {
+                Some(le) => {
+                    match (*e).right {
+                        Some(re) => {
+                            if !self.fo_bc_compile_expr(&(*le), p0, p1, p2, p3, nparams) { return false }
+                            if !self.fo_bc_compile_expr(&(*re), p0, p1, p2, p3, nparams) { return false }
+                            if (*e).bin_op == BinaryOp::OpAdd { return fo_bc_emit(3, 0) }
+                            if (*e).bin_op == BinaryOp::OpSub { return fo_bc_emit(4, 0) }
+                            if (*e).bin_op == BinaryOp::OpMul { return fo_bc_emit(5, 0) }
+                            if (*e).bin_op == BinaryOp::OpDiv { return fo_bc_emit(6, 0) }
+                            return false
+                        }
+                        _ => return false
+                    }
+                }
+                _ => return false
+            }
+        }
+        false
     }
 
     // Lower FO for the N-th call argument (0-based). Returns (-1) if missing.
@@ -6538,6 +6690,10 @@ impl Lowerer {
             }
             return self.fo_apply_call_transfer_at(fidx, args, depth + 1)
         }
+        // kind 6: FO bytecode (let-bodies / nested arith / 3–4 params)
+        if kind == 6 {
+            return self.fo_eval_bytecode(idx, args)
+        }
         // Lower arg0 FO
         var lo = self
         let p0 = lo.fo_lower_nth_arg_variance(args, 0)
@@ -6584,6 +6740,235 @@ impl Lowerer {
             let aval1 = lo.fo_lower_nth_arg_value(args, 1)
             lo = aval1.0
             lo = lo.fo_combine_sens_mul(s0, s1, val0, aval1.1)
+            return lo.fo_emit_var_from_sens()
+        }
+        (lo.fo_clear_expr_sens(), -1)
+    }
+
+
+    // Execute FO bytecode for kind-6 transfer (let-bodies / nested arith).
+    fn fo_eval_bytecode(
+        self,
+        idx: i64,
+        args: &Option<Box<ExprList>>
+    ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let off = FO_XFER_BC_OFF[idx as usize]
+        let blen = FO_XFER_BC_LEN[idx as usize]
+        if blen <= 0 {
+            return (lo.fo_clear_expr_sens(), -1)
+        }
+        FO_ARG_N = 0
+        var ai: i64 = 0
+        while ai < 4 {
+            let pv = lo.fo_lower_nth_arg_variance(args, ai)
+            lo = pv.0
+            if pv.1 < 0 && !lo.fo_expr_has_sens() {
+                break
+            }
+            let s = lo.fo_snapshot_expr_sens()
+            let av = lo.fo_lower_nth_arg_value(args, ai)
+            lo = av.0
+            FO_ARG_VAL[ai as usize] = av.1
+            FO_ARG_VAR[ai as usize] = pv.1
+            var k: i64 = 0
+            while k < 32 {
+                FO_ARG_SENS[(ai * 32 + k) as usize] = s[k as usize]
+                k = k + 1
+            }
+            FO_ARG_N = ai + 1
+            ai = ai + 1
+        }
+        FO_EV_SP = 0
+        var li: i64 = 0
+        while li < 8 {
+            FO_LOC_VAL[li as usize] = -1
+            FO_LOC_VAR[li as usize] = -1
+            var k2: i64 = 0
+            while k2 < 32 {
+                FO_LOC_SENS[(li * 32 + k2) as usize] = -1
+                k2 = k2 + 1
+            }
+            li = li + 1
+        }
+        var pc: i64 = 0
+        while pc < blen {
+            let op = FO_BC_OP[(off + pc) as usize]
+            let arg = FO_BC_ARG[(off + pc) as usize]
+            if op == 1 {
+                if arg < 0 || arg >= FO_ARG_N || FO_EV_SP >= 16 {
+                    return (lo.fo_clear_expr_sens(), -1)
+                }
+                let sp = FO_EV_SP
+                FO_EV_VAL[sp as usize] = FO_ARG_VAL[arg as usize]
+                FO_EV_VAR[sp as usize] = FO_ARG_VAR[arg as usize]
+                var k3: i64 = 0
+                while k3 < 32 {
+                    FO_EV_SENS[(sp * 32 + k3) as usize] = FO_ARG_SENS[(arg * 32 + k3) as usize]
+                    k3 = k3 + 1
+                }
+                FO_EV_SP = sp + 1
+            } else if op == 2 {
+                if arg < 0 || arg >= FO_BC_CONST_N || FO_EV_SP >= 16 {
+                    return (lo.fo_clear_expr_sens(), -1)
+                }
+                let bits = FO_BC_CONST_BITS[arg as usize]
+                let cpair = lo.fresh_reg()
+                lo = cpair.0
+                let creg = cpair.1
+                lo = lo.emit(ir_load_imm(creg, bits))
+                lo = lo.emit(ir_mark_float_reg(creg))
+                let zpair = lo.emit_zero_variance()
+                lo = zpair.0
+                let sp = FO_EV_SP
+                FO_EV_VAL[sp as usize] = creg
+                FO_EV_VAR[sp as usize] = zpair.1
+                var k4: i64 = 0
+                while k4 < 32 {
+                    FO_EV_SENS[(sp * 32 + k4) as usize] = -1
+                    k4 = k4 + 1
+                }
+                FO_EV_SP = sp + 1
+            } else if op == 3 || op == 4 || op == 5 || op == 6 {
+                if FO_EV_SP < 2 {
+                    return (lo.fo_clear_expr_sens(), -1)
+                }
+                FO_EV_SP = FO_EV_SP - 1
+                let rsp = FO_EV_SP
+                FO_EV_SP = FO_EV_SP - 1
+                let lsp = FO_EV_SP
+                var sL: [i64; 32] = [-1; 32]
+                var sR: [i64; 32] = [-1; 32]
+                var k5: i64 = 0
+                while k5 < 32 {
+                    sL[k5 as usize] = FO_EV_SENS[(lsp * 32 + k5) as usize]
+                    sR[k5 as usize] = FO_EV_SENS[(rsp * 32 + k5) as usize]
+                    k5 = k5 + 1
+                }
+                let lv = FO_EV_VAL[lsp as usize]
+                let rv = FO_EV_VAL[rsp as usize]
+                var lvar = FO_EV_VAR[lsp as usize]
+                var rvar = FO_EV_VAR[rsp as usize]
+                if lv < 0 || rv < 0 {
+                    return (lo.fo_clear_expr_sens(), -1)
+                }
+                if lvar < 0 {
+                    let zp = lo.emit_zero_variance()
+                    lo = zp.0
+                    lvar = zp.1
+                }
+                if rvar < 0 {
+                    let zp2 = lo.emit_zero_variance()
+                    lo = zp2.0
+                    rvar = zp2.1
+                }
+                let vpair = lo.fresh_reg()
+                lo = vpair.0
+                let vdst = vpair.1
+                if op == 3 {
+                    lo = lo.emit(ir_binop_typed(vdst, lv, BinaryOp::OpAdd, rv, true, true))
+                } else if op == 4 {
+                    lo = lo.emit(ir_binop_typed(vdst, lv, BinaryOp::OpSub, rv, true, true))
+                } else if op == 5 {
+                    lo = lo.emit(ir_binop_typed(vdst, lv, BinaryOp::OpMul, rv, true, true))
+                } else {
+                    lo = lo.emit(ir_binop_typed(vdst, lv, BinaryOp::OpDiv, rv, true, true))
+                }
+                lo = lo.emit(ir_mark_float_reg(vdst))
+                var has_sens = false
+                var sk: i64 = 0
+                while sk < 32 {
+                    if sL[sk as usize] >= 0 || sR[sk as usize] >= 0 { has_sens = true }
+                    sk = sk + 1
+                }
+                var out_var: i64 = -1
+                if has_sens {
+                    if op == 3 || op == 4 {
+                        lo = lo.fo_combine_sens_addsub(sL, sR, op == 4)
+                    } else if op == 5 {
+                        lo = lo.fo_combine_sens_mul(sL, sR, lv, rv)
+                    } else {
+                        lo = lo.fo_combine_sens_div(sL, sR, lv, rv)
+                    }
+                    let vp = lo.fo_emit_var_from_sens()
+                    lo = vp.0
+                    out_var = vp.1
+                } else {
+                    if op == 3 || op == 4 {
+                        let ap = lo.emit_variance_add(lvar, rvar)
+                        lo = ap.0
+                        out_var = ap.1
+                    } else if op == 5 {
+                        let mp = lo.emit_variance_independent_product(lv, rv, lvar, rvar)
+                        lo = mp.0
+                        out_var = mp.1
+                    } else {
+                        let dp = lo.emit_variance_independent_div(lv, rv, lvar, rvar)
+                        lo = dp.0
+                        out_var = dp.1
+                    }
+                    lo = lo.fo_clear_expr_sens()
+                }
+                if out_var < 0 {
+                    let zp3 = lo.emit_zero_variance()
+                    lo = zp3.0
+                    out_var = zp3.1
+                }
+                let sp2 = FO_EV_SP
+                FO_EV_VAL[sp2 as usize] = vdst
+                FO_EV_VAR[sp2 as usize] = out_var
+                let sOut = lo.fo_snapshot_expr_sens()
+                var k6: i64 = 0
+                while k6 < 32 {
+                    FO_EV_SENS[(sp2 * 32 + k6) as usize] = sOut[k6 as usize]
+                    k6 = k6 + 1
+                }
+                FO_EV_SP = sp2 + 1
+            } else if op == 7 {
+                if FO_EV_SP < 1 || arg < 0 || arg >= 8 {
+                    return (lo.fo_clear_expr_sens(), -1)
+                }
+                FO_EV_SP = FO_EV_SP - 1
+                let sp = FO_EV_SP
+                FO_LOC_VAL[arg as usize] = FO_EV_VAL[sp as usize]
+                FO_LOC_VAR[arg as usize] = FO_EV_VAR[sp as usize]
+                var k7: i64 = 0
+                while k7 < 32 {
+                    FO_LOC_SENS[(arg * 32 + k7) as usize] = FO_EV_SENS[(sp * 32 + k7) as usize]
+                    k7 = k7 + 1
+                }
+            } else if op == 8 {
+                if arg < 0 || arg >= 8 || FO_EV_SP >= 16 {
+                    return (lo.fo_clear_expr_sens(), -1)
+                }
+                let sp = FO_EV_SP
+                FO_EV_VAL[sp as usize] = FO_LOC_VAL[arg as usize]
+                FO_EV_VAR[sp as usize] = FO_LOC_VAR[arg as usize]
+                var k8: i64 = 0
+                while k8 < 32 {
+                    FO_EV_SENS[(sp * 32 + k8) as usize] = FO_LOC_SENS[(arg * 32 + k8) as usize]
+                    k8 = k8 + 1
+                }
+                FO_EV_SP = sp + 1
+            } else {
+                return (lo.fo_clear_expr_sens(), -1)
+            }
+            pc = pc + 1
+        }
+        if FO_EV_SP < 1 {
+            return (lo.fo_clear_expr_sens(), -1)
+        }
+        let top = FO_EV_SP - 1
+        var k9: i64 = 0
+        while k9 < 32 {
+            lo.fo_expr_sens[k9 as usize] = FO_EV_SENS[(top * 32 + k9) as usize]
+            k9 = k9 + 1
+        }
+        let outv = FO_EV_VAR[top as usize]
+        if outv >= 0 {
+            return (lo, outv)
+        }
+        if lo.fo_expr_has_sens() {
             return lo.fo_emit_var_from_sens()
         }
         (lo.fo_clear_expr_sens(), -1)
