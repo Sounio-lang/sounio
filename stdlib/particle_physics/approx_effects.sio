@@ -128,6 +128,188 @@ pub fn h_bb_width_nwa_ep() -> Epistemic with NarrowWidthApproximation, Perturbat
     mh.scale(factor_lo).mul(&corr)
 }
 
+
+// ============================================================================
+// Approximation effect algebra (EXP10)
+// ============================================================================
+//
+// Runtime layer tags (not the compiler effect bits — those are separate).
+// A stack records which physical approximations are *active* in a computation
+// and the residual each layer contributes.
+//
+// Composition laws (executable, not paper):
+//   L1  Singleton stacks are always legal.
+//   L2  {NWA, Perturbative} is legal (e.g. H→bb NWA with LO α_s).
+//   L3  {NonUnitary, Perturbative} is legal (LO amplitude with unstable line).
+//   L4  {NonUnitary, NWA} is *typed-legal* if both effects are declared, but
+//       *physically in tension*: NWA takes Γ→0 while NonUnitary keeps Γ.
+//       `approx_stack_in_tension` flags this.
+//   L5  Triple stack {NU, NWA, Pert} inherits L4 tension + LO residual.
+//
+// Combined residual (construction): √(Σ r_i²) over active layers.
+
+pub fn APPROX_LAYER_NONUNITARY() -> i64 { 1 }
+pub fn APPROX_LAYER_PERTURBATIVE() -> i64 { 2 }
+pub fn APPROX_LAYER_NWA() -> i64 { 4 }
+
+pub struct ApproxStack {
+    layers: i64,
+    residual_nu: f64,
+    residual_nwa: f64,
+    residual_pert: f64,
+    legal: i64,
+}
+
+pub fn approx_stack_empty() -> ApproxStack {
+    ApproxStack {
+        layers: 0,
+        residual_nu: 0.0,
+        residual_nwa: 0.0,
+        residual_pert: 0.0,
+        legal: 1,
+    }
+}
+
+// NWA quality residual: Γ/M (small ⇒ excellent NWA).
+pub fn approx_nwa_residual(mass: f64, gamma: f64) -> f64 with Div, Panic {
+    if mass == 0.0 { return 1.0 }
+    let r = gamma / mass
+    if r < 0.0 { 0.0 - r } else { r }
+}
+
+// NonUnitary residual proxy: unitarity deficit in [0,1] (pole → 1).
+pub fn approx_nu_residual(deficit: f64) -> f64 {
+    if deficit < 0.0 { 0.0 } else { if deficit > 1.0 { 1.0 } else { deficit } }
+}
+
+// LO perturbative residual (construction scale): typical K-factor band.
+// Not a fit — a declared truncation scale for the stack algebra.
+pub fn approx_pert_residual_lo_default() -> f64 {
+    0.30
+}
+
+fn approx_has_layer(layers: i64, bit: i64) -> bool {
+    (layers / bit) % 2 == 1
+}
+
+// Recompute legality + tension after mutation.
+fn approx_finalize(s: ApproxStack) -> ApproxStack {
+    let nu = approx_has_layer(s.layers, APPROX_LAYER_NONUNITARY())
+    let pe = approx_has_layer(s.layers, APPROX_LAYER_PERTURBATIVE())
+    let nw = approx_has_layer(s.layers, APPROX_LAYER_NWA())
+    // All listed compositions are typed-legal; physical tension is separate.
+    let legal: i64 = 1
+    ApproxStack {
+        layers: s.layers,
+        residual_nu: s.residual_nu,
+        residual_nwa: s.residual_nwa,
+        residual_pert: s.residual_pert,
+        legal: legal,
+    }
+}
+
+pub fn approx_stack_push_nu(s: ApproxStack, deficit: f64) -> ApproxStack {
+    var layers = s.layers
+    if approx_has_layer(layers, APPROX_LAYER_NONUNITARY()) {
+        // already present
+    } else {
+        layers = layers + APPROX_LAYER_NONUNITARY()
+    }
+    let base = ApproxStack {
+        layers: layers,
+        residual_nu: approx_nu_residual(deficit),
+        residual_nwa: s.residual_nwa,
+        residual_pert: s.residual_pert,
+        legal: s.legal,
+    }
+    approx_finalize(base)
+}
+
+pub fn approx_stack_push_nwa(s: ApproxStack, mass: f64, gamma: f64) -> ApproxStack with Div, Panic {
+    var layers = s.layers
+    if approx_has_layer(layers, APPROX_LAYER_NWA()) {
+    } else {
+        layers = layers + APPROX_LAYER_NWA()
+    }
+    let base = ApproxStack {
+        layers: layers,
+        residual_nu: s.residual_nu,
+        residual_nwa: approx_nwa_residual(mass, gamma),
+        residual_pert: s.residual_pert,
+        legal: s.legal,
+    }
+    approx_finalize(base)
+}
+
+pub fn approx_stack_push_pert(s: ApproxStack, relative_unc: f64) -> ApproxStack {
+    var layers = s.layers
+    if approx_has_layer(layers, APPROX_LAYER_PERTURBATIVE()) {
+    } else {
+        layers = layers + APPROX_LAYER_PERTURBATIVE()
+    }
+    var r = relative_unc
+    if r < 0.0 { r = 0.0 - r }
+    let base = ApproxStack {
+        layers: layers,
+        residual_nu: s.residual_nu,
+        residual_nwa: s.residual_nwa,
+        residual_pert: r,
+        legal: s.legal,
+    }
+    approx_finalize(base)
+}
+
+// True when NonUnitary and NWA are both active (physical tension).
+pub fn approx_stack_in_tension(s: ApproxStack) -> bool {
+    approx_has_layer(s.layers, APPROX_LAYER_NONUNITARY()) && approx_has_layer(s.layers, APPROX_LAYER_NWA())
+}
+
+// Combined residual √(Σ r²) over active layers only.
+pub fn approx_stack_combined_residual(s: ApproxStack) -> f64 with Mut, Div, Panic {
+    var acc = 0.0
+    if approx_has_layer(s.layers, APPROX_LAYER_NONUNITARY()) {
+        acc = acc + s.residual_nu * s.residual_nu
+    }
+    if approx_has_layer(s.layers, APPROX_LAYER_NWA()) {
+        acc = acc + s.residual_nwa * s.residual_nwa
+    }
+    if approx_has_layer(s.layers, APPROX_LAYER_PERTURBATIVE()) {
+        acc = acc + s.residual_pert * s.residual_pert
+    }
+    // Newton sqrt
+    if acc <= 0.0 { return 0.0 }
+    var g = acc
+    if g > 1.0 { g = acc / 2.0 }
+    var i: i64 = 0
+    while i < 40 {
+        g = 0.5 * (g + acc / g)
+        i = i + 1
+    }
+    g
+}
+
+// Layer count (0–3).
+pub fn approx_stack_layer_count(s: ApproxStack) -> i64 {
+    var n: i64 = 0
+    if approx_has_layer(s.layers, APPROX_LAYER_NONUNITARY()) { n = n + 1 }
+    if approx_has_layer(s.layers, APPROX_LAYER_PERTURBATIVE()) { n = n + 1 }
+    if approx_has_layer(s.layers, APPROX_LAYER_NWA()) { n = n + 1 }
+    n
+}
+
+
+// Effect acknowledgements — force compiler effect without heavy Epistemic graphs.
+// Used by EXP10 Madaros-safe effect-stack core.
+pub fn approx_ack_perturbative() -> i64 with Perturbative {
+    let _flag = perturbative_sentinel()
+    1
+}
+
+pub fn approx_ack_nwa() -> i64 with NarrowWidthApproximation {
+    let _flag = nwa_sentinel()
+    1
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
