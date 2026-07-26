@@ -5107,6 +5107,57 @@ fn stmt_is_ident_indexed_elem_field_store(p0: i64) -> bool with Panic, Mut {
     return false
 }
 
+// (*name.field)<chain> = expr — the lvalue ROOT is a deref of a pointer held in a STRUCT
+// FIELD, e.g. `(*lo.module).string_count = 0`, `(*lo.module).string_table[i] = n`,
+// `(*lo.module).functions[i] = new_fn`, where Lowerer.module is a Box<IrModule>.
+// 37 such sites in self-hosted/ir/lower.sio — the LIVE Madaros IR lowerer.
+// No existing store predicate accepts this root: every deref-rooted one requires `)`
+// immediately after the simple name (checks at :4845 :4867 :4882 :4896 :4916 :4972 :4986),
+// and the only complex-root predicate (:4935) requires a PARENTHESISED inner base. So every
+// shape with this root reached the generic assignment path and lost its store, which is why
+// this predicate accepts the whole chain grammar rather than a single shape.
+// Base address: load the root, add the inner field offsets (inline), then LOAD the pointer
+// stored in the final inner field — that is the deref the `(* )` spells.
+fn stmt_is_deref_inner_root_store(p0: i64) -> bool with Panic, Mut {
+    if TK[p0 as usize] != 6 { return false }        // (
+    if TK[(p0 + 1) as usize] != 19 { return false } // *
+    if TK[(p0 + 2) as usize] != 3 { return false }  // simple-name root
+    if TK[(p0 + 3) as usize] != 50 { return false } // `.` — NOT the (*name) forms
+    var p = p0 + 3
+    while p < TC && TK[p as usize] == 50 && TK[(p + 1) as usize] == 3 {
+        p = p + 2
+    }
+    if TK[p as usize] != 7 { return false }         // )
+    p = p + 1
+    // A non-empty chain is required: `(*p.field) = v` is whole-pointee assignment, a
+    // different operation with its own handler, and this emitter has no target field for it.
+    if TK[p as usize] != 50 && TK[p as usize] != 41 { return false }
+    while p < TC {
+        if TK[p as usize] == 50 {
+            if TK[(p + 1) as usize] != 3 { return false }
+            p = p + 2
+            continue
+        }
+        if TK[p as usize] == 41 {
+            var depth: i64 = 1
+            p = p + 1
+            while p < TC && depth > 0 {
+                if TK[p as usize] == 41 { depth = depth + 1 }
+                if TK[p as usize] == 42 { depth = depth - 1 }
+                p = p + 1
+            }
+            continue
+        }
+        if TK[p as usize] == 16 {
+            if TK[(p - 1) as usize] == 42 { return true }
+            if TK[(p - 1) as usize] != 3 { return false }
+            return TK[(p - 2) as usize] == 50
+        }
+        return false
+    }
+    return false
+}
+
 // name.f1.f2 = expr  — AUTO-DEREF two-level store (ident root, no explicit `(* )`).
 // Shape only: (3|79) 50 3 50 3 16. For a VALUE struct root the generic assignment
 // path already handles this correctly, so the dispatch gates this on the root var
@@ -22459,9 +22510,18 @@ fn compile_deref_indexed_elem_field_store_x86() with IO, Mut, Panic, Div {
     // pointee is loaded identically for both, so the chain walk below is shared verbatim.
     var name_tok = EP
     var chain_start = EP + 1
+    var root_inner: i64 = 0   // 1 = `(*name.field…)` root: deref of a pointer FIELD
     if TK[EP as usize] == 6 {
         name_tok = EP + 2
         chain_start = EP + 4
+        if TK[(EP + 3) as usize] == 50 {
+            root_inner = 1
+            var rp = EP + 3
+            while rp < TC && TK[rp as usize] == 50 && TK[(rp + 1) as usize] == 3 {
+                rp = rp + 2
+            }
+            chain_start = rp + 1  // past the `)`
+        }
     }
     let ns = TS[name_tok as usize]
     let ne = TE[name_tok as usize]
@@ -22515,7 +22575,9 @@ fn compile_deref_indexed_elem_field_store_x86() with IO, Mut, Panic, Div {
         // The `(*name)` spelling asserts a pointer. A value root reaching it is the
         // pre-existing type error and must stay a hard reject; only the auto-deref spelling
         // may be value-rooted (gated by ident_chain_root_supported at the dispatch).
-        if TK[EP as usize] == 6 {
+        // `(*name.field)` is exempt: there the `*` applies to the FIELD, not to the root, so
+        // a value-struct root is perfectly legal.
+        if TK[EP as usize] == 6 && root_inner == 0 {
             tc_error_hard(name_tok, "field access through deref requires ref or pointer binding")
             EP = eq_pos + 1
             compile_or()
@@ -22533,9 +22595,74 @@ fn compile_deref_indexed_elem_field_store_x86() with IO, Mut, Panic, Div {
         compile_or()
         return
     }
-    EP = chain_start  // past `( * name )` or past the bare `name`
+    EP = chain_start  // past `( * name … )` or past the bare `name`
     emit_load_var(lslot)  // rax = base pointer
     var pending_off: i64 = 0
+    // `(*name.field…)` root: walk the INNER field chain inside the parens, accumulating inline
+    // offsets, then LOAD the pointer stored in the final inner field. That load is the deref
+    // the `(* )` spells, and it is what no existing predicate was willing to emit.
+    if root_inner == 1 {
+        var ip = name_tok + 1
+        var inner_off: i64 = 0
+        var inner_bad: i64 = 0
+        while inner_bad == 0 && TK[ip as usize] == 50 {
+            let itok = ip + 1
+            if cur_ty != 6 {
+                tc_error_hard(itok, "field access requires struct value")
+                inner_bad = 1
+                continue
+            }
+            let isi = st_find(cur_hash)
+            if isi < 0 {
+                tc_error_hard(itok, "unknown field access")
+                inner_bad = 1
+                continue
+            }
+            if st_private_access_denied(isi, itok) {
+                tc_error_hard(itok, "private struct field access")
+                inner_bad = 1
+                continue
+            }
+            let ifh = gl_name_hash(TS[itok as usize], TE[itok as usize])
+            ST_QUERY_NS = TS[itok as usize]
+            ST_QUERY_NE = TE[itok as usize]
+            let ioff = st_field_offset(isi, ifh)
+            let ifty = st_field_ty(isi, ifh)
+            let ifhash = st_field_hash(isi, ifh)
+            ST_QUERY_NS = -1
+            ST_QUERY_NE = -1
+            if ioff < 0 {
+                tc_error_hard(itok, "unknown field access")
+                inner_bad = 1
+                continue
+            }
+            inner_off = inner_off + ioff
+            cur_ty = ifty
+            cur_hash = ifhash
+            ip = ip + 2
+        }
+        if inner_bad == 1 {
+            EP = eq_pos + 1
+            compile_or()
+            return
+        }
+        if type_is_pointer_like(cur_ty, cur_hash) == false {
+            tc_error_hard(name_tok, "deref of a struct field requires a pointer-typed field")
+            EP = eq_pos + 1
+            compile_or()
+            return
+        }
+        if inner_off != 0 { em(0x48); em(0x8d); em(0x80); em32(inner_off) }  // lea rax,[rax+off]
+        em(0x48); em(0x8b); em(0x00)  // mov rax,[rax] — the pointer held in the field
+        cur_ty = ptr_hash_inner_ty(cur_hash)
+        cur_hash = ptr_hash_inner_hash(cur_hash)
+        if cur_ty != 6 && cur_ty != 8 {
+            tc_error_hard(name_tok, "field access through pointer/ref requires struct or array pointee")
+            EP = eq_pos + 1
+            compile_or()
+            return
+        }
+    }
     var target_ty: i64 = 0
     var target_hash: i64 = 0
     var done: i64 = 0
@@ -23880,6 +24007,15 @@ fn compile_stmt() with IO, Mut, Panic, Div {
             compile_deref_indexed_elem_field_store_x86()
             return
         }
+    }
+
+    // (*name.field)<chain> = expr — root is a deref of a pointer held in a struct field.
+    // Disjoint from every predicate above by construction (they all require `)` right after
+    // the simple name, or a parenthesised inner base), so no dispatch ordering hazard: this
+    // accepts the full chain grammar because nothing else ever accepted this root at all.
+    if stmt_is_deref_inner_root_store(EP) {
+        compile_deref_indexed_elem_field_store_x86()
+        return
     }
 
     // return expr
