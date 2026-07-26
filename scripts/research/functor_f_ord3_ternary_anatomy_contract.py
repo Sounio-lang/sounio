@@ -13,12 +13,17 @@ survives scrutiny (advisor + §10 Grok review), cleanly separated into KNOWN / N
       (x,y,b) with x,y in F(b), exactly 4 vanish identically -- precisely those that multiply b
       into x or y first: x(yb)=(xb)y=x(by)=(bx)y=0. Only the "multiply the pair x.y first"
       bracketings survive.
-  T3  THE REVERSAL LAW (NEW -- §10 Grok: "a new computed relation", not a known consequence of
-      conjugation/alternativity): b.(x.y) = (y.x).b for all x,y in F(b), verified on ALL 42 ZD.
-      Equivalently, since y.x = -x.y - 2<x,y>e0 for imaginary x,y, it is the clean anticommutator
-      identity {b, x.y} = b.(x.y) + (x.y).b = -2<x,y> b: b's anticommutator with its own fibre's
-      internal products stays ALONG b. (General to all 42 ZD => may ultimately be a derivable ZD
-      identity; flagged for a literature/citation check rather than claimed as deep.)
+  T3  THE REVERSAL LAW (verified, then PROVED -- a 3-line corollary of standard structure, NOT a
+      new identity): b.(x.y) = (y.x).b for all x,y in F(b), on ALL 42 ZD. Equivalently, since
+      y.x = -x.y - 2<x,y>e0 for imaginary x,y, the anticommutator form {b, x.y} = -2<x,y> b.
+      PROOF (T3b, checked elementwise): every Cayley-Dickson algebra is FLEXIBLE ([a,b,c]=-[c,b,a],
+      classical; verified for the sedenions here), and using the two-sided annihilation (T1):
+        (bx)y=0 => b(xy) = -[b,x,y];   y(xb)=0 => (yx)b = [y,x,b];   flex => [b,x,y] = -[y,x,b];
+      hence b(xy) - (yx)b = -[b,x,y] - [y,x,b] = 0. So the reversal law is the FLEXIBILITY law's
+      shadow on the annihilator fibres -- a folklore-adjacent corollary (§10 Grok initially called
+      it "a new computed relation" thinking of conjugation/alternativity, missing flexibility; the
+      3-line proof settles it). Both T1 and flexibility are documented (Moreno'98/Kivunge'04;
+      flexibility classical, e.g. Schafer / nLab; sedenion ZD geometry arXiv:2411.18881, 2024).
   T4  OPERATION SPLIT: the ord-3 op (x.y).b = S + C, S=1/2((xy)b+(yx)b) symmetric part,
       C=1/2((xy)b-(yx)b)=1/2[x,y].b commutator part; both nonzero. (Honest sym/antisym split --
       NOT a claim that S,C are irreducible G-submodules; Grok flagged that would need a separate
@@ -79,6 +84,10 @@ def e(i, n):
 
 def m4(x, y):
     return mul(x, y, 4)
+
+
+def assoc(a, b, c):
+    return m4(m4(a, b), c) - m4(a, m4(b, c))   # [a,b,c]
 
 
 def Lmat4(b):
@@ -157,8 +166,26 @@ def main():
                 anti = m4(b, m4(x, y)) + m4(m4(x, y), b)   # {b, xy}
                 worst_anti = max(worst_anti, np.linalg.norm(anti + 2 * (x @ y) * b))  # = -2<x,y> b
     t3 = worst_rev < 1e-9 and worst_anti < 1e-9
-    print(f"T3_REVERSAL_LAW (NEW, Grok) all 42 ZD: max||b(xy)-(yx)b||={worst_rev:.1e}; equivalently "
+    print(f"T3_REVERSAL_LAW all 42 ZD: max||b(xy)-(yx)b||={worst_rev:.1e}; equivalently "
           f"{{b,xy}}=-2<x,y>b, max dev={worst_anti:.1e} {'PASS' if t3 else 'FAIL'}")
+
+    # T3b — the 3-line PROOF: reversal law = flexibility's shadow on the annihilator fibres
+    rng = np.random.default_rng(0)
+    flex = max(np.linalg.norm(assoc(a := rng.standard_normal(16), bb := rng.standard_normal(16),
+               cc := rng.standard_normal(16)) + assoc(cc, bb, a)) for _ in range(80))
+    w_l = w_r = w_f = 0.0
+    for (i, j) in ZD:
+        b = e(i, 16) + e(j, 16); F = fibres[(i, j)]
+        for a in range(4):
+            for c in range(4):
+                x, y = F[a], F[c]
+                w_l = max(w_l, np.linalg.norm(m4(b, m4(x, y)) + assoc(b, x, y)))     # b(xy)=-[b,x,y]
+                w_r = max(w_r, np.linalg.norm(m4(m4(y, x), b) - assoc(y, x, b)))     # (yx)b=[y,x,b]
+                w_f = max(w_f, np.linalg.norm(assoc(b, x, y) + assoc(y, x, b)))       # flex
+    t3b = flex < 1e-9 and w_l < 1e-9 and w_r < 1e-9 and w_f < 1e-9
+    print(f"T3b_PROOF_VIA_FLEXIBILITY sedenions flexible (max||[a,b,c]+[c,b,a]||={flex:.1e}); "
+          f"b(xy)=-[b,x,y] ({w_l:.0e}), (yx)b=[y,x,b] ({w_r:.0e}), [b,x,y]=-[y,x,b] ({w_f:.0e}) "
+          f"=> reversal law is a 3-line corollary, NOT new {'PASS' if t3b else 'FAIL'}")
 
     # T4 — operation split S + C, both nonzero
     dom = [(bi, a, c) for bi in range(len(ZD)) for a in range(4) for c in range(4)]
@@ -178,15 +205,19 @@ def main():
           f"(sym), ||C||={np.linalg.norm(C):.2f} (commutator 1/2[x,y]b), both nonzero {'PASS' if t4 else 'FAIL'}")
 
     print("=" * 70)
-    if audit_core() and t1 and t2 and t3 and t4:
+    if audit_core() and t1 and t2 and t3 and t3b and t4:
         print("FUNCTOR_F_ORD3TERN_VERDICT ORD3_TERNARY_ANATOMY")
-        print("FUNCTOR_F_ORD3TERN_NOTE the ord-3 secondary op (x,y)->(x.y).b on sedenion ZD fibres: "
-              "b two-sided-annihilates its fibre (KNOWN, Moreno/Kivunge), collapsing 4 of 8 triple "
-              "bracketings; the surviving law obeys the NEW reversal identity b(xy)=(yx)b (all 42 ZD), "
-              "equivalently the anticommutator {b,xy}=-2<x,y>b; and the operation splits as symmetric + "
-              "commutator (1/2[x,y]b), both nonzero -- reconnecting to the associator theme. RETRACTED: an "
-              "earlier 'dim Hom_G(D,M)=6' claim (domain tied to b-vectors, orbit 24, not the clean 6-fibre "
-              "orbit -> ill-posed; Grok[WRONG]+orbit check). Numerical certificate; D3 respected")
+        print("FUNCTOR_F_ORD3TERN_NOTE the ord-3 secondary op (x,y)->(x.y).b on sedenion ZD fibres is "
+              "structurally DETERMINED BY KNOWN FACTS: b two-sided-annihilates its fibre (KNOWN, "
+              "Moreno/Kivunge), collapsing 4 of 8 triple bracketings; the reversal identity b(xy)=(yx)b "
+              "(all 42 ZD, equiv. {b,xy}=-2<x,y>b) is a 3-LINE COROLLARY of FLEXIBILITY (classical for all "
+              "CD algebras) + that annihilation -- NOT a new identity (proof T3b: b(xy)=-[b,x,y], "
+              "(yx)b=[y,x,b], flex [b,x,y]=-[y,x,b]); and the operation splits as symmetric + commutator "
+              "(1/2[x,y]b), both nonzero, reconnecting to the associator theme. RETRACTED: an earlier "
+              "'dim Hom_G(D,M)=6' claim (domain tied to b-vectors, orbit 24, not the clean 6-fibre orbit -> "
+              "ill-posed; Grok[WRONG]+orbit check). HONEST OUTCOME: this vein harbours no genuinely-new deep "
+              "invariant -- the ord-3 op is fixed by standard octonion/sedenion structure. Numerical "
+              "certificate; D3 respected")
         return 0
     print("FUNCTOR_F_ORD3TERN_VERDICT INCOMPLETE")
     return 1

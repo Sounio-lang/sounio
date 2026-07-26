@@ -1,4 +1,4 @@
-# Functor F — anatomy of the ord-3 secondary operation: two-sided annihilation, a new reversal law, and the S+C split
+# Functor F — anatomy of the ord-3 secondary operation: it is fixed by known octonion/sedenion structure
 
 **Date:** 2026-07-26
 **Orthography:** EN-UK
@@ -8,22 +8,25 @@
 
 ---
 
-## 0. The result
+## 0. The result — an honest negative
 
-After the module `M` deflated to the class coordinate space, the genuinely operation-specific
-object is not the *image* but the **operation as an algebraic map** `(x,y) ↦ (x·y)·b` on the
-sedenion zero-divisor fibres. Dissecting it — at higher risk, then pruned by advisor + §10 review —
-yields one **new** identity, cleanly separated from what is **known** and what had to be **retracted**:
+The push "find something genuinely uncomputed" was aimed, finally, at the ord-3 operation itself
+`(x,y) ↦ (x·y)·b` on the sedenion zero-divisor fibres. Dissected fully and pruned by advisor + §10
+review + a symbolic proof, the honest verdict is a **clean negative**:
 
-> **New (reversal law).** For every one of the 42 zero-divisors `b=e_i+e_j` and all `x,y ∈ F(b)`:
-> `b·(x·y) = (y·x)·b`. Equivalently — since `y·x = −x·y − 2⟨x,y⟩e₀` for imaginary `x,y` — the clean
-> anticommutator identity `{b, x·y} = −2⟨x,y⟩·b`: **`b`'s anticommutator with its own fibre's
-> internal products stays along `b`.** §10 (Grok) judged this "a new computed relation", not a known
-> consequence of conjugation/alternativity.
+> **The ord-3 secondary operation harbours no genuinely-new deep invariant — it is fixed by
+> standard octonion/sedenion structure.** Its every structural feature reduces to two known facts:
+> the **two-sided annihilation** `F(b)=ker L_b=ker R_b` (Moreno 1998, Kivunge 2004) and the
+> **flexibility** of every Cayley-Dickson algebra (classical).
 
-The operation then splits as `(x·y)·b = S + C` — a symmetric part `S` and a commutator part
-`C = ½[x,y]·b` — both nonzero, reconnecting the ord-3 operation to the **associator/commutator**
-theme the whole functor-F arc began with.
+Concretely: the annihilation kills 4 of the 8 triple bracketings; the surviving **reversal law**
+`b·(x·y) = (y·x)·b` (equivalently `{b,x·y} = −2⟨x,y⟩b`), which a first §10 pass had tentatively
+called "a new computed relation", is proved here to be a **3-line corollary of flexibility** — the
+flexibility law's shadow on the annihilator fibres. The operation splits as symmetric + commutator
+`(x·y)·b = S + ½[x,y]·b`, an honest sym/antisym decomposition. Nothing here is new.
+
+This is worth recording precisely *because* it is negative: it says where the genuinely-new
+invariant is **not** — the ord-3 vein is structurally determined, so the arc should look elsewhere.
 
 ---
 
@@ -31,63 +34,74 @@ theme the whole functor-F arc began with.
 
 | Clause | Result | Status |
 |---|---|---|
-| `T1_TWO_SIDED_ANNIHILATION` | all 42 ZD: `F(b)=ker L_b=ker R_b` (dim 4), `max‖x·b‖,‖b·x‖=1.1e-14` | **KNOWN** (Moreno 1998, Kivunge 2004) — cited, not claimed. |
-| `T2_BRACKETING_COLLAPSE` | the 4 "b-first" bracketings `x(yb),(xb)y,x(by),(bx)y` vanish identically | consequence of `T1`; only "multiply the pair `x·y` first" survives. |
-| `T3_REVERSAL_LAW` | all 42 ZD: `b(xy)=(yx)b` (dev `5.6e-16`); anticommutator form `{b,xy}=−2⟨x,y⟩b` (dev `6.3e-16`) | **NEW** (Grok) — a genuinely new computed identity (see §3 caveat). |
-| `T4_OPERATION_SPLIT` | `(xy)b = S + C`; `‖S‖=18.3` (sym), `‖C‖=41.0` (commutator `½[x,y]b`); both nonzero | honest sym/antisym split (**not** a claim `S,C` are irreducible submodules). |
+| `T1_TWO_SIDED_ANNIHILATION` | all 42 ZD: `F(b)=ker L_b=ker R_b` (dim 4), `max‖x·b‖,‖b·x‖=1.1e-14` | **KNOWN** (Moreno 1998, Kivunge 2004). |
+| `T2_BRACKETING_COLLAPSE` | the 4 "b-first" bracketings `x(yb),(xb)y,x(by),(bx)y` vanish | consequence of `T1`. |
+| `T3_REVERSAL_LAW` | all 42 ZD: `b(xy)=(yx)b` (dev `5.6e-16`); anticommutator `{b,xy}=−2⟨x,y⟩b` | true, **but** proved below to be derivable. |
+| `T3b_PROOF_VIA_FLEXIBILITY` | sedenions flexible; `b(xy)=−[b,x,y]`, `(yx)b=[y,x,b]`, `[b,x,y]=−[y,x,b]` | **3-line proof** ⟹ `T3` is a corollary, **not new**. |
+| `T4_OPERATION_SPLIT` | `(xy)b = S + C`, `‖S‖=18.3`, `‖C‖=41.0` (`=½[x,y]b`); both nonzero | honest sym/antisym split (not an irreducibility claim). |
 
 Verdict: `FUNCTOR_F_ORD3TERN_VERDICT ORD3_TERNARY_ANATOMY`.
 
 ---
 
-## 2. The higher-temperature path — and the retraction it produced
+## 2. The 3-line proof (reversal law = flexibility's shadow)
 
-The push "find something genuinely uncomputed" ran hot, and it is honest to record what it burned:
+Every Cayley-Dickson algebra is **flexible**: `[a,b,c] = −[c,b,a]` (classical; verified for the
+sedenions). With the two-sided annihilation `bx = xb = 0` for `x ∈ F(b)`:
 
-- **Retracted:** a probe claimed `dim Hom_G(D,M) = 6` — "a 6-dimensional space of `G`-equivariant
-  ternary operations." The domain `D = ⊕_b F(b)⊗F(b)` tied the operation to specific `b`-**vectors**,
-  whose `G`-orbit is **24** (four sign-variants `±e_i±e_j` per fibre) — while the **fibre** orbit is a
-  clean **6**. So `D` as built was **not** a clean `G`-module and the count was ill-posed. §10 (Grok)
-  flagged it `[WRONG]`; a direct orbit computation confirmed. Claim **withdrawn** — the second
-  retraction this session (after the `2·V₃` module-fingerprint overclaim), and the discipline working.
+```
+(bx)y = 0   ⟹   b(xy) = −[b,x,y]          [since [b,x,y] = (bx)y − b(xy)]
+y(xb) = 0   ⟹   (yx)b =  [y,x,b]          [since [y,x,b] = (yx)b − y(xb)]
+flexibility ⟹   [b,x,y] = −[y,x,b]
+∴  b(xy) − (yx)b = −[b,x,y] − [y,x,b] = 0.                              ∎
+```
 
-What survived that pruning is `T1`–`T4`: modest, but real and honestly bounded.
-
----
-
-## 3. What this is / is NOT
-
-- **Is:** an honest anatomy — known two-sided annihilation ⟹ bracketing collapse ⟹ a **new**
-  reversal/anticommutator identity ⟹ the operation `= S + C` (symmetric + commutator).
-- **Caveat on the reversal law's novelty:** it holds for **all** 42 ZD (not only the `G`-stabilised
-  fibres Grok assumed), so its generality means it may ultimately be a **derivable/known** ZD identity;
-  it is flagged for a literature/citation check rather than claimed as deep.
-- **Not** the retracted `dim Hom` count; **not** a claim `S,C` are irreducible `G`-submodules
-  (would need a separate check); **not** symbolic (numerical certificate, machine precision);
-  **not** the Petitot conjecture (`D3`-quarantined); **not** clinical.
+So the reversal law is a corollary of two documented facts. §10 (Grok) first flagged it as new,
+reasoning from conjugation/alternativity and missing flexibility; the proof settles it. (Literature:
+flexibility of CD algebras is classical — Schafer, nLab; sedenion ZD annihilators — Moreno 1998,
+Kivunge 2004, arXiv:2411.18881 (2024), arXiv:math/0702075.)
 
 ---
 
-## 4. Reproduce
+## 3. The higher-temperature path, and what it burned
+
+Running hot produced genuine reach and two honest retractions — both recorded:
+
+- **Retracted (this session):** `dim Hom_G(D,M) = 6` ("a 6-dim space of `G`-equivariant ternary
+  operations") — the domain `D` tied the operation to `b`-**vectors** (orbit 24), not the clean
+  6-**fibre** orbit, so `D` was not a `G`-module; count ill-posed (Grok `[WRONG]` + orbit check).
+- **Downgraded (this rung):** the reversal law from "new" to "3-line flexibility corollary."
+
+Combined with the earlier `2·V₃` module-fingerprint overclaim (deflated to CD-doubling of the
+coordinate space), the whole ord-3 "genuinely-new" chase closed negative — honestly, with proofs.
+
+---
+
+## 4. What this is / is NOT
+
+- **Is:** a complete, honest anatomy showing the ord-3 operation is determined by known structure
+  (two-sided annihilation + flexibility), with the reversal law proved as a corollary.
+- **Not** a new identity or invariant; **not** the retracted `dim Hom` count; **not** an
+  irreducibility claim for `S,C`; **not** symbolic beyond the elementwise numerical check of a
+  human-readable proof; **not** the Petitot conjecture (`D3`); **not** clinical.
+
+---
+
+## 5. Reproduce
 
 ```bash
 python3 scripts/research/functor_f_ord3_ternary_anatomy_contract.py
-# expect: T0..T4 PASS, FUNCTOR_F_ORD3TERN_VERDICT ORD3_TERNARY_ANATOMY
+# expect: T0..T4 (incl. T3b) PASS, FUNCTOR_F_ORD3TERN_VERDICT ORD3_TERNARY_ANATOMY
 ```
-
-Pure Python (numpy); embeds a core axiom-audit and verifies `T1`–`T4` on all 42 sedenion ZD.
 
 ---
 
-## 5. AI disclosure
+## 6. AI disclosure
 
-Probe, contract, and note produced under human direction (2026-07-26), continuing the "find
-something genuinely uncomputed" push at deliberately higher risk. Outcome, honestly bounded: the
-**two-sided annihilation** (`T1`) is a known sedenion ZD fact (Moreno/Kivunge), cited not claimed;
-the **bracketing collapse** (`T2`) is its consequence; the **reversal law / anticommutator identity**
-(`T3`, `b(xy)=(yx)b ⟺ {b,xy}=−2⟨x,y⟩b`, all 42 ZD) is §10-reviewed as a new computed relation, with
-a self-imposed caveat that its generality may make it a derivable/known identity (flagged for
-citation); the **`S+C` split** (`T4`) is an honest sym/antisym decomposition, not an irreducibility
-claim. One sub-claim from the hot path (`dim Hom_G(D,M)=6`) was **retracted** as ill-posed (domain not
-a clean `G`-module — Grok `[WRONG]` + orbit check). §10 Grok reviewed all findings. Numerical
-certificate; no semantic claim; no clinical content. GAIDeT-ICMJE 2025.
+Probe, contract, note, and proof produced under human direction (2026-07-26), closing the "find
+something genuinely uncomputed" push at high risk. **Honest outcome: negative.** The ord-3 operation
+is fixed by known octonion/sedenion structure — two-sided annihilation (Moreno/Kivunge) + flexibility
+(classical) — and the reversal law that looked new is a 3-line corollary (proof `T3b`). One hot-path
+sub-claim (`dim Hom_G(D,M)=6`) was retracted as ill-posed. §10 Grok reviewed the findings (and its own
+"new relation" read is corrected here by the flexibility proof). Numerical certificate of a
+human-readable proof; no new invariant, no semantic claim, no clinical content. GAIDeT-ICMJE 2025.
