@@ -289,6 +289,35 @@ bignum arithmetic — no floats anywhere:
 
 What a script checks, this file proves.
 
+## The extrapolation gate (`vanthoff_gate.sio`) — his own failure mode, armed
+
+His GHG 2025 paper showed PHREEQC defaults + van't Hoff extrapolation of
+the methanation equilibrium constant produce **misleading** results; his
+2026 geothermal paper models calcite scaling with the same class of
+extrapolation. This demo takes the shared core — calcite solubility,
+pK0 = 8.48 at 25 °C, ΔH ∈ [−12, −7] kJ/mol epistemic — and asks when an
+extrapolation stops being a fact and becomes a guess.
+
+Working in pK units, the arithmetic spine is **exactly rational** — and
+machine-checked in `formal/lean4/SounioHydrogenVanthoff.lean`
+(corner-exactness of linear maps, per-mille pK sandwiches, the SI
+straddle, the gate verdicts).
+
+| temperature | pK interval | width | SI interval (marginal brine) | verdict |
+| --- | --- | --- | --- | --- |
+| 25 °C | [8.480, 8.480] | 0 | [−0.300, −0.300] | CERTAIN_NO_SCALE |
+| 60 °C | [8.609, 8.701] | 0.09 | [−0.171, −0.079] | CERTAIN_NO_SCALE |
+| 90 °C | [8.699, 8.856] | 0.16 | **[−0.081, +0.076]** | **UNDETERMINED** |
+| 150 °C | [8.842, 9.101] | 0.26 | [+0.062, +0.321] | CERTAIN_SCALE |
+
+The point estimate (ΔH = −9.61) at 90 °C says SI = **+0.001** — a point
+geochem code reports "scale" on a rounding artifact. The p-box on the
+scaling decision is **[2.2 %, 97.2 %]**. At 150 °C the constant-ΔH and
+ΔCp-corrected models' intervals **don't overlap** — model-form
+uncertainty, invisible to any single-code run. *His GHG-2025 fix was a
+better correlation; the deeper fix is a code that knows when
+extrapolation has become a guess.* Both engines → `VANTHOFF_GATE_OK`.
+
 ## The stdlib modules (new, reusable)
 
 - **`stdlib/epistemic/pbox.sio`** — the p-box type: corner-exact interval
@@ -321,6 +350,11 @@ What a script checks, this file proves.
 - *Energies* 16:6257 (2023) (SMR/H2 feasibility, Crete): the hub-chain
   demo is built entirely from its published parameters — and computes the
   delivered-€/kg uncertainty the paper does not report.
+- *GHG: Sci. & Technol.* (2025) (H2–brine–calcite geochemistry) and the
+  2026 geothermal scaling paper: the van't Hoff gate demo arms the exact
+  failure mode they report — extrapolated equilibrium constants used
+  past their evidence — with an interval and a refusal instead of a
+  silent wrong answer.
 - His techno-economic analyses run sensitivity by hand; here uncertainty
   is part of the program's value, and the run is a reproducible receipt.
 - For dual-use / safety contexts (INRASTES is an Energy & **Safety**

@@ -68,6 +68,11 @@ lean_lib «SounioHydrogenPbox» where
 @[default_target]
 lean_lib «SounioHydrogenReceipt» where
 
+-- The van't Hoff extrapolation gate: rational spine of the calcite
+-- scaling demo (corner exactness, pK sandwiches, SI straddle, gate).
+@[default_target]
+lean_lib «SounioHydrogenVanthoff» where
+
 @[default_target]
 lean_lib «SounioProofObligation» where
 
