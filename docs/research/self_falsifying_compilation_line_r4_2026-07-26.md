@@ -16,7 +16,8 @@ five buckets, `UNCLASSIFIABLE` never redistributed — and stated in advance tha
 arms A and B were known-blind, with arm C the open question. The study ran as
 specified.
 
-> **Arms A and B fired zero times. Arm C fired twice — and both firings are
+> **Arms A and B fired zero times — and for the two objective corrections this
+> is now EXECUTED, not assumed. Arm C fired twice, and both firings are
 > tautological. Of the pairs where a prior claim even existed, 70 % could not be
 > graded at all, because the spec declared no verdict token.**
 
@@ -31,6 +32,22 @@ specified.
 
 `65` (commit, spec) pairs from `51` message-flagged commits. `20` had a prior
 claim; `6` of those were classifiable.
+
+**Arm A is executed where the harness can be run standalone.** These contracts
+are pure numpy computations with no repository dependencies — the same property
+that makes arm C degenerate makes the historical version simply runnable. For
+both objective corrections, the harness **as it stood at `c^` exits 0 and emits
+exactly the token the spec declared**:
+
+```
+daa0635d0^  exit 0, emitted ORD3_MODULE_IS_2xV3          (= declared)
+ec579a24c^  exit 0, emitted PHI_IS_G2_SHADOW_OF_E6_CUBIC (= declared)
+```
+
+So the check ran green and agreed with its claim *while the claim was false*.
+That is R0 §3's shared misinterpretation, demonstrated by execution rather than
+by static comparison. Where a harness cannot be run standalone the result is
+recorded as not-executed with the reason, never as a pass.
 
 **The verdict token says `SOME_ARM_FIRED`, and it is not being changed.** The
 criteria were fixed in the harness before running, and the mechanical outcome is
@@ -120,11 +137,11 @@ up to be able to reach.
   message used none of the flagged words is invisible here. P1 — the objective,
   token-change population — is `2`, which bounds how much the objective route
   can ever see in this history.
-- **Arm A was not executed.** Running a harness from an arbitrary historical
-  commit requires that commit's whole tree and data. It is recorded as
-  not-fired *with that reason stated*, on the ground that a rung is green when
-  committed by construction. If that assumption is wrong, arm A's zero is
-  unsupported rather than merely weak.
+- **Arm A is executed only where the harness is self-contained.** For the two
+  objective corrections it ran and exited 0 (§0), so their zero is measured. For
+  pairs whose harness cannot be run standalone the result is recorded as
+  not-executed with the reason; those contribute no evidence either way rather
+  than a silent pass.
 - **This line's own specs are excluded** from both populations. R0's token moved
   `UNBOUND → BOUND` because R1 did the binding — a state change, not a
   correction — and its commit message mentions corrections made elsewhere.

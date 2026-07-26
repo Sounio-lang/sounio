@@ -31,9 +31,11 @@ Pure Python 3 + git.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -138,6 +140,34 @@ def population_p2() -> list[dict]:
     return out
 
 
+def run_harness_blob(blob: str, timeout: int = 180) -> tuple[int | None, str | None]:
+    """Run a historical harness verbatim; return (exit code, emitted token).
+
+    (None, None) when it cannot be run standalone — missing imports, data files,
+    or a timeout. That is recorded as not-executed, never as a pass.
+    """
+    if not blob:
+        return None, None
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as fh:
+            fh.write(blob)
+            tmp = fh.name
+        r = subprocess.run([sys.executable, tmp], capture_output=True,
+                           text=True, timeout=timeout, cwd=REPO)
+        toks = HARNESS_TOKEN_RE.findall(r.stdout or "")
+        emitted = toks[-1] if toks else None
+        return r.returncode, emitted
+    except (subprocess.TimeoutExpired, OSError):
+        return None, None
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
 # ---------------------------------------------------------------- classify
 
 
@@ -183,11 +213,28 @@ def classify(sha: str, spec: str) -> dict:
         res["why"] = f"spec token {tok_before} not among {sorted(emit_before)}"
         return res
 
-    # Arm A — exit-code gating at c^. Not executed: running a harness from an
-    # arbitrary historical commit needs that commit's whole tree and data. The
-    # rung was green when committed by construction, so A is recorded as
-    # not-fired with the reason stated rather than silently assumed.
-    arm_a = "not fired (rung was green at c^ by construction; not executed)"
+    # Arm A — exit-code gating at c^, EXECUTED where the harness is
+    # self-contained. These contracts are pure numpy computations with no
+    # repository dependencies (the same property that makes arm C degenerate),
+    # so the historical version can simply be run. Where execution is not
+    # possible the result is recorded as not-executed WITH the reason, never
+    # silently assumed.
+    rc, emitted = run_harness_blob(h_before)
+    if rc is None:
+        arm_a = "NOT EXECUTED (harness could not be run standalone)"
+    elif rc != 0:
+        res["bucket"] = "CAUGHT_A"
+        res["why"] = f"harness at c^ exits {rc}"
+        return res
+    else:
+        arm_a = f"executed at c^: exit 0, emitted {emitted or '(no token)'}"
+        # Executed arm B: compare what the harness ACTUALLY emitted, not what
+        # it could emit. Strictly stronger than the static membership test.
+        if emitted and emitted != tok_before:
+            res["bucket"] = "CAUGHT_B"
+            res["why"] = (f"harness at c^ emitted {emitted}, spec declared "
+                          f"{tok_before} [arm A: {arm_a}]")
+            return res
 
     # Arm C — cross-version replay: the CORRECTED harness's token vs c^'s spec.
     h_after = git("show", f"{sha}:{harness}")

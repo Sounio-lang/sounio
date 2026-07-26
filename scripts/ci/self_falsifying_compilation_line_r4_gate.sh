@@ -42,6 +42,16 @@ CLASSIFIABLE="$(grep -m1 -oE 'classifiable pairs +: [0-9]+' <<<"$OUT" | grep -oE
 [[ -n "$CLASSIFIABLE" && "$CLASSIFIABLE" -gt 0 ]] \
     || fail "no classifiable pairs — the retrospective graded nothing"
 
+# Floor tied to the KNOWN population, not to zero. P1 (the objective, token-change
+# population) is exactly these two commits; both must still land in a graded
+# bucket. Without this, NO_PRIOR_CLAIM grows monotonically as specs accumulate
+# and the classifiable set can decay towards nothing while the gate stays green.
+for known in daa0635d0 ec579a24c; do
+    grep -qE "^ +(CAUGHT_[ABC]|SILENT): ${known}" <<<"$OUT" \
+        || fail "known correction ${known} no longer lands in a graded bucket — \
+the retrospective has lost the cases it was built to grade"
+done
+
 # Drift guard on this rung's own spec — header and prose alike.
 SPEC_TOKEN="$(grep -m1 -oE '^\*\*Status:\*\* `[^`]*` — `[A-Za-z0-9_]+`' "$SPEC" \
     | grep -oE '`[A-Za-z0-9_]+`$' | tr -d '`' || true)"
