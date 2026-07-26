@@ -11,6 +11,7 @@ SOURCE_REF="${SOURCE_REF:-HEAD}"
 SOURCE_REMOTE="${SOURCE_REMOTE:-}"
 WORKER_GIT_SSL_VERIFY="${WORKER_GIT_SSL_VERIFY:-true}"
 WORKER_LOWER_TRACE="${WORKER_LOWER_TRACE:-0}"
+WORKER_NV2_IR_TRACE="${WORKER_NV2_IR_TRACE:-0}"
 WORKER_PROBE="${WORKER_PROBE:-source-fresh-gate}"
 NS="${NS:-slurm-pilot}"
 KUBECTL="${KUBECTL:-kubectl}"
@@ -28,7 +29,7 @@ Usage:
 
 Environment:
   REPO, SOURCE_REF, SOURCE_REMOTE, WORKER_GIT_SSL_VERIFY, WORKER_LOWER_TRACE,
-  WORKER_PROBE, NS, KUBECTL, PARTITION, NODELIST, JOB_MEM, JOB_CPUS,
+  WORKER_NV2_IR_TRACE, WORKER_PROBE, NS, KUBECTL, PARTITION, NODELIST, JOB_MEM, JOB_CPUS,
   JOB_TIME, RUN_ID
 
 This is the direct-Slurm fallback for sessions where BeagleCockpit MCP is not
@@ -42,6 +43,9 @@ the requested commit and tree are still checked before the source build.
 
 Set WORKER_LOWER_TRACE=1 only for crash localization. It enables the existing
 module-frontend and IR-lowering traces inside the worker's raw ELF.
+
+Set WORKER_NV2_IR_TRACE=1 only for backend crash localization. It enables the
+existing native-v2 IR trace inside the worker's raw ELF.
 
 WORKER_PROBE=source-fresh-gate runs the acceptance gate. WORKER_PROBE=block-ladder
 builds the same raw ELF and runs twelve generated worker-local programs to locate
@@ -64,6 +68,7 @@ fi
 [[ "$JOB_CPUS" =~ ^[1-9][0-9]*$ ]] || fail "invalid JOB_CPUS: $JOB_CPUS"
 [[ "$WORKER_GIT_SSL_VERIFY" == 'true' || "$WORKER_GIT_SSL_VERIFY" == 'false' ]] || fail "invalid WORKER_GIT_SSL_VERIFY: $WORKER_GIT_SSL_VERIFY"
 [[ "$WORKER_LOWER_TRACE" == '0' || "$WORKER_LOWER_TRACE" == '1' ]] || fail "invalid WORKER_LOWER_TRACE: $WORKER_LOWER_TRACE"
+[[ "$WORKER_NV2_IR_TRACE" == '0' || "$WORKER_NV2_IR_TRACE" == '1' ]] || fail "invalid WORKER_NV2_IR_TRACE: $WORKER_NV2_IR_TRACE"
 [[ "$WORKER_PROBE" == 'source-fresh-gate' || "$WORKER_PROBE" == 'block-ladder' ]] || fail "invalid WORKER_PROBE: $WORKER_PROBE"
 
 SOURCE_COMMIT="$(git -C "$REPO" rev-parse "$SOURCE_REF")"
@@ -104,6 +109,7 @@ EXPECTED_TREE="$SOURCE_TREE"
 SOURCE_REMOTE="$SOURCE_REMOTE"
 WORKER_GIT_SSL_VERIFY="$WORKER_GIT_SSL_VERIFY"
 WORKER_LOWER_TRACE="$WORKER_LOWER_TRACE"
+WORKER_NV2_IR_TRACE="$WORKER_NV2_IR_TRACE"
 WORKER_PROBE="$WORKER_PROBE"
 
 cleanup() {
@@ -120,6 +126,7 @@ echo "source_fresh_slurm_job_id=\${SLURM_JOB_ID:-manual}"
 echo "source_remote=\$SOURCE_REMOTE"
 echo "worker_git_ssl_verify=\$WORKER_GIT_SSL_VERIFY"
 echo "worker_lower_trace=\$WORKER_LOWER_TRACE"
+echo "worker_nv2_ir_trace=\$WORKER_NV2_IR_TRACE"
 echo "worker_probe=\$WORKER_PROBE"
 echo "requested_commit=\$EXPECTED_COMMIT"
 echo "requested_tree=\$EXPECTED_TREE"
@@ -146,6 +153,10 @@ if [[ "\$WORKER_LOWER_TRACE" == '1' ]]; then
   export SOUNIO_MODULE_FRONTEND_LOWER_TRACE=1
   export SOUNIO_LOWER_SUMMARY_TRACE=1
   export SOUNIO_LOWER_LIVE_TRACE=1
+fi
+
+if [[ "\$WORKER_NV2_IR_TRACE" == '1' ]]; then
+  export SOUNIO_NV2_IR_TRACE=1
 fi
 
 chmod +x "\$REPO/bin/souc-linux-x86_64" \\
