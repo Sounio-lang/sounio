@@ -10,7 +10,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-
 # Madaros multimodule: i64 field load OK on return, wrong on if/sub
 
 **Date:** 2026-07-26  
-**Status:** residual open (stdlib workarounds live). **Claude-1 / Claude-2: help package below.**  
+**Status:** **ROOT CAUSE FOUND + FIX IN FLIGHT** (2026-07-26 Grok)  
 **Witness:** `tests/multimodule/madaros_field_if_i64_{leaf,main}.sio`  
 **Gate:** `scripts/ci/madaros_field_if_i64_gate.sh`
 
@@ -40,7 +40,23 @@ re-materialises a clean i64.
 | `pb_is_credible` / `ck_is_credible` | same pattern (#1492) |
 | EXP123 confidence gates 111/113 | closed via ep_gate |
 
-## Smoking gun for Claude-1 / Claude-2
+## ROOT CAUSE (confirmed)
+
+`self-hosted/ir/lower.sio` — `ir_register_knowledge_layout`:
+
+```text
+fields[2] confidence  is_float: 1   // WRONG — confidence is i64
+// should be is_float: 3  (integer marker)
+```
+
+`field_is_float_by_name_simple("confidence")` walks **all** layouts and returns
+true if **any** field named confidence has `is_float==1`. So MiniEp.confidence
+and Epistemic.confidence FieldGets get `IR_FLOAT_REG_MARKER_FLAG` even when the
+real type is i64. Then `OpGe`/`OpSub` take the float path in codegen.
+
+**Fix:** `is_float: 3` for confidence (landed in this lane's lower.sio).
+
+## Smoking gun (evidence)
 
 Measured `sub_conf(&e, 800)` under Madaros:
 

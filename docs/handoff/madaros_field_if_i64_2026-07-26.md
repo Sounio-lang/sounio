@@ -9,7 +9,8 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.handoff.madaro
 
 # Handoff — Madaros i64 field-if residual
 
-**For:** native/codegen owner  
+**Status:** FIXED in lower.sio (Knowledge.confidence is_float 1→3)
+**For:** native/codegen owner (was suspected; actual root was lower layout)  
 **Blocker class:** Madaros imported multimodule ABI / branch condition  
 **Evidence:** `docs/audit/MADAROS_FIELD_IF_I64_2026-07-26.md`  
 **Witness gate:** `scripts/ci/madaros_field_if_i64_gate.sh`  
