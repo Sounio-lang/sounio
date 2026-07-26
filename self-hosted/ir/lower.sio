@@ -4968,6 +4968,84 @@ impl Lowerer {
         false
     }
 
+    // True for expressions whose lowered register is a POINTER to a freshly
+    // allocated object rather than an immediate value. Array slots are 8-byte
+    // boxed pointers (`aggregate_storage_bytes` = elem_count * 8), so filling
+    // every slot from one such register aliases all N elements onto ONE object.
+    //
+    // The gate is deliberately SYNTACTIC: it recognises aggregate *literals*
+    // only. `[p; 4]` (struct variable) and `[mk(); 4]` (struct-returning call)
+    // are NOT covered — separating them from scalars needs element type
+    // information that the lowerer does not carry at this site.
+    fn expr_is_aggregate_value_ref(self, e: &Expr) -> bool {
+        let _lo = self
+        if e.kind == ExprKind::ExprStructLit { return true }
+        if e.kind == ExprKind::ExprArrayLit { return true }
+        if e.kind == ExprKind::ExprTupleLit { return true }
+        false
+    }
+
+    // Fill `base_reg[0 .. repeat_count]` with DISTINCT objects.
+    //
+    // The value expression is lowered exactly ONCE, but INSIDE the loop body.
+    // `IrAlloc` lowers to a runtime heap bump (`nc_core_emit_alloc_into`), so
+    // re-executing the body allocates a fresh object per iteration while the
+    // emitted IR stays O(1) in `repeat_count`. Unrolling the lowering instead
+    // would overflow IR_MAX_INSTRS (4096 per function) on real sources such as
+    // `[Token { .. }; 4096]` in self-hosted/compiler/lexer.sio.
+    //
+    // Hoisting safety: the live LICM path (`lopt_ir_is_hoistable_opcode` in
+    // ir/loop_opt.sio) allowlists only LoadImm/LoadFloat/LoadBool/Copy/BinOp/
+    // UnaryOp, so IrAlloc cannot be lifted into the preheader and re-alias the
+    // elements. Keep IrAlloc out of that allowlist.
+    fn lower_array_repeat_fill_distinct(self, base_reg: i64, value_expr: &Expr, repeat_count: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        if repeat_count <= 0 {
+            return self
+        }
+
+        let pair_idx = self.emit_i64_const(0)
+        var lo = pair_idx.0
+        let idx_reg = pair_idx.1
+
+        let pair_limit = lo.emit_i64_const(repeat_count)
+        lo = pair_limit.0
+        let limit_reg = pair_limit.1
+
+        let pair_one = lo.emit_i64_const(1)
+        lo = pair_one.0
+        let one_reg = pair_one.1
+
+        let pair_top = lo.fresh_label()
+        lo = pair_top.0
+        let top_label = pair_top.1
+
+        let pair_end = lo.fresh_label()
+        lo = pair_end.0
+        let end_label = pair_end.1
+
+        lo = lo.emit(ir_label(top_label))
+
+        let pair_cond = lo.fresh_reg()
+        lo = pair_cond.0
+        let cond_reg = pair_cond.1
+        lo = lo.emit(ir_binop(cond_reg, idx_reg, BinaryOp::OpLt, limit_reg))
+        lo = lo.emit(ir_branch_false(cond_reg, end_label))
+
+        let pair_value = lo.lower_expr_ref(value_expr)
+        lo = pair_value.0
+        let value_reg = pair_value.1
+        lo = lo.emit(ir_index_set(base_reg, idx_reg, value_reg))
+
+        let pair_next = lo.fresh_reg()
+        lo = pair_next.0
+        let next_reg = pair_next.1
+        lo = lo.emit(ir_binop(next_reg, idx_reg, BinaryOp::OpAdd, one_reg))
+        lo = lo.emit(ir_copy(idx_reg, next_reg))
+        lo = lo.emit(ir_jump(top_label))
+        lo = lo.emit(ir_label(end_label))
+        lo
+    }
+
     fn lower_array_repeat_fill(self, base_reg: i64, value_reg: i64, repeat_count: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         if repeat_count <= 0 {
             return self
@@ -5027,12 +5105,20 @@ impl Lowerer {
         match left_opt {
             Some(value_expr) => {
                 let elem_is_float = lower_expr_has_float_source_ref(&(*value_expr))
-                let zero_fill = lo.expr_is_zero_fill_value(*value_expr)
-                let pair_value = lo.lower_expr_ref(&(*value_expr))
-                lo = pair_value.0
-                let value_reg = pair_value.1
-                if !zero_fill {
-                    lo = lo.lower_array_repeat_fill(dst, value_reg, repeat_count)
+                // Aggregate literals must be re-materialised per slot, otherwise
+                // every element aliases one object. repeat_count <= 0 keeps the
+                // legacy path so the value expression is still lowered exactly
+                // as before for empty arrays.
+                if repeat_count > 0 && lo.expr_is_aggregate_value_ref(&(*value_expr)) {
+                    lo = lo.lower_array_repeat_fill_distinct(dst, &(*value_expr), repeat_count)
+                } else {
+                    let zero_fill = lo.expr_is_zero_fill_value(*value_expr)
+                    let pair_value = lo.lower_expr_ref(&(*value_expr))
+                    lo = pair_value.0
+                    let value_reg = pair_value.1
+                    if !zero_fill {
+                        lo = lo.lower_array_repeat_fill(dst, value_reg, repeat_count)
+                    }
                 }
                 if elem_is_float {
                     lo = lo.emit(ir_mark_float_reg(dst))
