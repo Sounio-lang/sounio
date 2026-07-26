@@ -71,6 +71,25 @@ fn mp_empty_program() -> Program {
     }
 }
 
+// Module identity — THE COPY THAT IS ACTUALLY USED. module_frontend.sio:18 imports
+// file_path_to_module_path and load_module_file from THIS module, not from module_loader.sio,
+// which carries a second, now-unused implementation of both. Editing the other one has no
+// effect on the preflight; that mistake cost a full build cycle to notice.
+//
+// Identity used to be the file BASENAME alone, which made every same-named file in a
+// different directory THE SAME MODULE to visibility_allows_access (check/check.sio:90, the
+// only caller of ast_path_eq). Two consequences, both measured with a deterministic 3-file
+// witness (bb/helper.sio and bb/aa/helper.sio, private callee, access running between them):
+//  - It is an OVER-ACCEPTANCE: colliding basenames make a private cross-module access legal.
+//  - Before ast_path_eq stopped reading `tail` for single-segment paths, that same case
+//    SIGSEGV'd with no diagnostic, because equal head bytes fell through to a read of an
+//    Option<Box<StringList>> field, which Madaros miscompiles. The crash was MASKING the
+//    over-acceptance: remove the crash alone and the case silently compiles.
+// Identity is now the PARENT DIRECTORY plus the basename, which distinguishes all 8 colliding
+// basename groups in main.sio's 105-file closure (encode, env, ir, layout, lower, mod,
+// opt_strategy, types — 20 files). It stays a SINGLE segment so no comparison ever walks a
+// Box-typed tail, and it uses the last two components rather than the whole path so the same
+// file reached by different spellings still gets one identity.
 fn file_path_to_module_path(path: string) -> AstPath with Mut, Panic, Div {
     var seg_buf: [i8; 128] = [0; 128]
     var seg_len: i64 = 0
@@ -78,10 +97,12 @@ fn file_path_to_module_path(path: string) -> AstPath with Mut, Panic, Div {
     var path_len = str_len(path)
     var i: i64 = 0
     var last_slash: i64 = 0 - 1
+    var prev_slash: i64 = 0 - 1
     var dot_pos: i64 = path_len
     while i < path_len {
         let ch = str_char_at(path, i)
         if ch == 47 {
+            prev_slash = last_slash
             last_slash = i
         }
         if ch == 46 {
@@ -89,7 +110,10 @@ fn file_path_to_module_path(path: string) -> AstPath with Mut, Panic, Div {
         }
         i = i + 1
     }
-    var start = last_slash + 1
+    var start = prev_slash + 1
+    if prev_slash < 0 {
+        start = last_slash + 1
+    }
     var end = dot_pos
     if end <= start {
         end = path_len

@@ -40,14 +40,27 @@ use ir::ir::*
 // Visibility / module-path helpers
 // ============================================================
 
-fn string_list_eq_sl(a: StringList, b: StringList) -> bool with Mut, Panic, Div {
+// Head-only segment comparison. Touches NO Option<Box<T>> field, which is the whole point:
+// reading `tail` — even as `tail == None` — is a read through a Box-typed struct field, and
+// Madaros miscompiles those (StructFieldEntry at ir/ir.sio:2175 carries no pointer metadata,
+// so field access computes base+off+off, correct for an inline field and wrong for a Box).
+// The note that used to sit on the tail comparison below tried to dodge this by replacing
+// `match` with `== None`; that does not help, because the read itself is the defect.
+fn string_list_head_eq_sl(a: StringList, b: StringList) -> bool with Mut, Panic, Div {
     if a.head_len != b.head_len { return false }
     var i: i64 = 0
     while i < a.head_len && i < 128 {
         if a.head_buf[i as usize] != b.head_buf[i as usize] { return false }
         i = i + 1
     }
-    // Avoid any Option<Box<T>> matching inside *mut callers: bin/souc miscompiles it.
+    true
+}
+
+fn string_list_eq_sl(a: StringList, b: StringList) -> bool with Mut, Panic, Div {
+    if !string_list_head_eq_sl(a, b) { return false }
+    // Reached only for genuinely multi-segment paths. Module identity is single-segment
+    // (compiler/module_loader.sio file_path_to_module_path returns seg_count 1), so
+    // ast_path_eq below never routes here today.
     if a.tail == None && b.tail == None { return true }
     if a.tail == None || b.tail == None { return false }
     string_list_eq_sl(*a.tail, *b.tail)
@@ -56,6 +69,15 @@ fn string_list_eq_sl(a: StringList, b: StringList) -> bool with Mut, Panic, Div 
 fn ast_path_eq(a: AstPath, b: AstPath) -> bool with Mut, Panic, Div {
     if a.seg_count != b.seg_count { return false }
     if a.seg_count == 0 { return true }
+    // seg_count 1 means the tail carries nothing to compare, so compare heads and return.
+    // This is not an optimisation: it is what stops the ONLY caller of ast_path_eq
+    // (visibility_allows_access, check.sio:90) from crashing the compiler. Two modules whose
+    // first segment bytes are EQUAL used to fall through to the tail walk above, and reading
+    // that Option<Box<StringList>> field SIGSEGVs with no diagnostic — reproduced with a
+    // deterministic 3-file witness: colliding basenames plus a private cross-module access,
+    // rc=139. Making the callee public (short-circuits at :6574) or the basenames distinct
+    // (byte loop exits early) both avoid the read, which is why the crash stayed hidden.
+    if a.seg_count == 1 { return string_list_head_eq_sl(a.segments, b.segments) }
     string_list_eq_sl(a.segments, b.segments)
 }
 
