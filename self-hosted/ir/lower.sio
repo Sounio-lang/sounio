@@ -229,13 +229,14 @@ struct Lowerer {
     // β-Madaros multi-channel FO GUM (lean_single β¹⁰/β¹¹ parity target).
     // Var(y) = Σ_k (∂y/∂x_k)² · σ²_k with up to 8 Knowledge seeds per function.
     // Enables partial-correlation products ((a*b)*a) and p1−p2 cancel.
+    // 16 channels: 8 was exhausted by ≥9 independent seeds in one function.
     fo_nchan: i64,
-    fo_sigma2: [i64; 8],
-    fo_expr_sens: [i64; 8],
-    fo_pending_sens: [i64; 8],
+    fo_sigma2: [i64; 16],
+    fo_expr_sens: [i64; 16],
+    fo_pending_sens: [i64; 16],
     fo_bind_count: i64,
     fo_bind_names: [Name; 128],
-    fo_bind_sens: [i64; 1024],
+    fo_bind_sens: [i64; 2048],
 }
 
 struct IrPreparedCallArgs {
@@ -371,12 +372,12 @@ fn lowerer_new() -> Lowerer with Alloc {
         allow_direct_capturing_closure_literal: false,
         pending_variance_reg: -1,
         fo_nchan: 0,
-        fo_sigma2: [-1; 8],
-        fo_expr_sens: [-1; 8],
-        fo_pending_sens: [-1; 8],
+        fo_sigma2: [-1; 16],
+        fo_expr_sens: [-1; 16],
+        fo_pending_sens: [-1; 16],
         fo_bind_count: 0,
         fo_bind_names: [ir_empty_name(); 128],
-        fo_bind_sens: [-1; 1024],
+        fo_bind_sens: [-1; 2048],
     }
 }
 
@@ -722,12 +723,12 @@ fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEp
         allow_direct_capturing_closure_literal: false,
         pending_variance_reg: -1,
         fo_nchan: 0,
-        fo_sigma2: [-1; 8],
-        fo_expr_sens: [-1; 8],
-        fo_pending_sens: [-1; 8],
+        fo_sigma2: [-1; 16],
+        fo_expr_sens: [-1; 16],
+        fo_pending_sens: [-1; 16],
         fo_bind_count: 0,
         fo_bind_names: [ir_empty_name(); 128],
-        fo_bind_sens: [-1; 1024],
+        fo_bind_sens: [-1; 2048],
     }
     lo.epistemic_contests = lower_epistemic_contest_index_from_ref(epistemic)
     if lower_live_diag_enabled() {
@@ -772,12 +773,12 @@ fn lowerer_new_from_program_summary_owned(summary: IrProgramSummary, epistemic: 
         allow_direct_capturing_closure_literal: false,
         pending_variance_reg: -1,
         fo_nchan: 0,
-        fo_sigma2: [-1; 8],
-        fo_expr_sens: [-1; 8],
-        fo_pending_sens: [-1; 8],
+        fo_sigma2: [-1; 16],
+        fo_expr_sens: [-1; 16],
+        fo_pending_sens: [-1; 16],
         fo_bind_count: 0,
         fo_bind_names: [ir_empty_name(); 128],
-        fo_bind_sens: [-1; 1024],
+        fo_bind_sens: [-1; 2048],
     }
     (*lo.module).epistemic = (*epistemic)
     lo.epistemic_contests = lower_epistemic_contest_index_from_ref(epistemic)
@@ -825,12 +826,12 @@ fn lowerer_from_acc_module(module: Box<IrModule>) -> Lowerer with Alloc, Mut, Pa
         allow_direct_capturing_closure_literal: false,
         pending_variance_reg: -1,
         fo_nchan: 0,
-        fo_sigma2: [-1; 8],
-        fo_expr_sens: [-1; 8],
-        fo_pending_sens: [-1; 8],
+        fo_sigma2: [-1; 16],
+        fo_expr_sens: [-1; 16],
+        fo_pending_sens: [-1; 16],
         fo_bind_count: 0,
         fo_bind_names: [ir_empty_name(); 128],
-        fo_bind_sens: [-1; 1024],
+        fo_bind_sens: [-1; 2048],
     }
     // Knowledge layout is required for epistemic field lowering; match
     // lowerer_new_with_epistemic. Do NOT wipe module.epistemic / strings.
@@ -4443,7 +4444,7 @@ impl Lowerer {
         lo.fo_nchan = 0
         lo.fo_bind_count = 0
         var fci: i64 = 0
-        while fci < 8 {
+        while fci < 16 {
             lo.fo_sigma2[fci as usize] = -1
             lo.fo_expr_sens[fci as usize] = -1
             lo.fo_pending_sens[fci as usize] = -1
@@ -5743,7 +5744,7 @@ impl Lowerer {
     fn fo_clear_expr_sens(self) -> Lowerer with Mut {
         var lo = self
         var k: i64 = 0
-        while k < 8 {
+        while k < 16 {
             lo.fo_expr_sens[k as usize] = -1
             k = k + 1
         }
@@ -5753,7 +5754,7 @@ impl Lowerer {
     fn fo_clear_pending_sens(self) -> Lowerer with Mut {
         var lo = self
         var k: i64 = 0
-        while k < 8 {
+        while k < 16 {
             lo.fo_pending_sens[k as usize] = -1
             k = k + 1
         }
@@ -5762,7 +5763,7 @@ impl Lowerer {
 
     fn fo_expr_has_sens(self) -> bool with Mut {
         var k: i64 = 0
-        while k < 8 {
+        while k < 16 {
             if self.fo_expr_sens[k as usize] >= 0 {
                 return true
             }
@@ -5789,7 +5790,7 @@ impl Lowerer {
             }
             k = k + 1
         }
-        if lo.fo_nchan >= 8 {
+        if lo.fo_nchan >= 16 {
             // Channel table full — leave sens empty (caller falls back to scalar Var).
             return lo.fo_clear_expr_sens()
         }
@@ -5803,20 +5804,20 @@ impl Lowerer {
         lo
     }
 
-    fn fo_snapshot_expr_sens(self) -> [i64; 8] with Mut {
-        var snap: [i64; 8] = [-1; 8]
+    fn fo_snapshot_expr_sens(self) -> [i64; 16] with Mut {
+        var snap: [i64; 16] = [-1; 16]
         var k: i64 = 0
-        while k < 8 {
+        while k < 16 {
             snap[k as usize] = self.fo_expr_sens[k as usize]
             k = k + 1
         }
         snap
     }
 
-    fn fo_restore_expr_sens(self, snap: [i64; 8]) -> Lowerer with Mut {
+    fn fo_restore_expr_sens(self, snap: [i64; 16]) -> Lowerer with Mut {
         var lo = self
         var k: i64 = 0
-        while k < 8 {
+        while k < 16 {
             lo.fo_expr_sens[k as usize] = snap[k as usize]
             k = k + 1
         }
@@ -5830,8 +5831,8 @@ impl Lowerer {
         while i < lo.fo_bind_count {
             if ir_name_eq(lo.fo_bind_names[i as usize], name) {
                 var k: i64 = 0
-                while k < 8 {
-                    lo.fo_bind_sens[(i * 8 + k) as usize] = lo.fo_expr_sens[k as usize]
+                while k < 16 {
+                    lo.fo_bind_sens[(i * 16 + k) as usize] = lo.fo_expr_sens[k as usize]
                     k = k + 1
                 }
                 return lo
@@ -5844,8 +5845,8 @@ impl Lowerer {
         let idx = lo.fo_bind_count
         lo.fo_bind_names[idx as usize] = name
         var k2: i64 = 0
-        while k2 < 8 {
-            lo.fo_bind_sens[(idx * 8 + k2) as usize] = lo.fo_expr_sens[k2 as usize]
+        while k2 < 16 {
+            lo.fo_bind_sens[(idx * 16 + k2) as usize] = lo.fo_expr_sens[k2 as usize]
             k2 = k2 + 1
         }
         lo.fo_bind_count = idx + 1
@@ -5857,7 +5858,7 @@ impl Lowerer {
         // Move pending_sens into expr_sens then bind.
         var k: i64 = 0
         var any = false
-        while k < 8 {
+        while k < 16 {
             lo.fo_expr_sens[k as usize] = lo.fo_pending_sens[k as usize]
             if lo.fo_pending_sens[k as usize] >= 0 {
                 any = true
@@ -5877,8 +5878,8 @@ impl Lowerer {
         while i < lo.fo_bind_count {
             if ir_name_eq(lo.fo_bind_names[i as usize], name) {
                 var k: i64 = 0
-                while k < 8 {
-                    lo.fo_expr_sens[k as usize] = lo.fo_bind_sens[(i * 8 + k) as usize]
+                while k < 16 {
+                    lo.fo_expr_sens[k as usize] = lo.fo_bind_sens[(i * 16 + k) as usize]
                     k = k + 1
                 }
                 return lo
@@ -5894,7 +5895,7 @@ impl Lowerer {
         var lo = z.0
         var acc = z.1
         var k: i64 = 0
-        while k < 8 {
+        while k < 16 {
             let sreg = lo.fo_expr_sens[k as usize]
             let sig = lo.fo_sigma2[k as usize]
             if sreg >= 0 && sig >= 0 {
@@ -5924,10 +5925,10 @@ impl Lowerer {
     }
 
     // s_out[k] = sL[k] + sR[k]  (add) or sL[k] - sR[k] (sub)
-    fn fo_combine_sens_addsub(self, sL: [i64; 8], sR: [i64; 8], is_sub: bool) -> Lowerer with Mut, Panic, Div {
+    fn fo_combine_sens_addsub(self, sL: [i64; 16], sR: [i64; 16], is_sub: bool) -> Lowerer with Mut, Panic, Div {
         var lo = self
         var k: i64 = 0
-        while k < 8 {
+        while k < 16 {
             let l = sL[k as usize]
             let r = sR[k as usize]
             if l < 0 && r < 0 {
@@ -5965,14 +5966,14 @@ impl Lowerer {
     // Product rule: s_out[k] = rhs_val · sL[k] + lhs_val · sR[k]
     fn fo_combine_sens_mul(
         self,
-        sL: [i64; 8],
-        sR: [i64; 8],
+        sL: [i64; 16],
+        sR: [i64; 16],
         lhs_val: i64,
         rhs_val: i64
     ) -> Lowerer with Mut, Panic, Div {
         var lo = self
         var k: i64 = 0
-        while k < 8 {
+        while k < 16 {
             let l = sL[k as usize]
             let r = sR[k as usize]
             var term_l: i64 = -1
@@ -6010,9 +6011,9 @@ impl Lowerer {
         lo
     }
 
-    fn fo_expr_or_snap_has_sens(self, snap: [i64; 8]) -> bool with Mut {
+    fn fo_expr_or_snap_has_sens(self, snap: [i64; 16]) -> bool with Mut {
         var k: i64 = 0
-        while k < 8 {
+        while k < 16 {
             if snap[k as usize] >= 0 || self.fo_expr_sens[k as usize] >= 0 {
                 return true
             }
@@ -10660,7 +10661,7 @@ impl Lowerer {
         // Seed FO channel so `let k = measure(...)` then k.value shares the same σ² channel.
         lo11 = lo11.fo_seed_from_variance(variance_reg)
         var mk: i64 = 0
-        while mk < 8 {
+        while mk < 16 {
             lo11.fo_pending_sens[mk as usize] = lo11.fo_expr_sens[mk as usize]
             mk = mk + 1
         }
@@ -11377,7 +11378,7 @@ impl Lowerer {
                             lo3.pending_variance_reg = vpair.1
                             lo3 = lo3.fo_seed_from_variance(vpair.1)
                             var pk: i64 = 0
-                            while pk < 8 {
+                            while pk < 16 {
                                 lo3.fo_pending_sens[pk as usize] = lo3.fo_expr_sens[pk as usize]
                                 pk = pk + 1
                             }
