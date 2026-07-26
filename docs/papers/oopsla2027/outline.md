@@ -1,6 +1,6 @@
 # Self-Falsifying Compilation — paper skeleton (OOPSLA 2027)
 
-**Status:** `SKELETON` — `PAPER_SKELETON_TOKEN_BOUND__RELATED_WORK_PARTIALLY_VERIFIED`
+**Status:** `SKELETON` — `PAPER_SKELETON_TOKEN_BOUND__RELATED_WORK_PARTIALLY_VERIFIED__CI_UNWIRED`
 **Date:** 2026-07-26
 **Harness:** `scripts/research/self_falsifying_compilation_line_r5_contract.py`
 **Gate:** `scripts/ci/self_falsifying_compilation_line_r5_gate.sh`
@@ -11,6 +11,15 @@
 > paper cannot drift away from its evidence while prose is written on top of it.
 > Chain of custody: **paper → spec** is checked here; **spec → contract** is
 > checked by each rung's own gate.
+>
+> **That chain is currently aspirational, and the verdict token says so.** None
+> of the line's six gates is invoked by any CI workflow — they have only ever
+> been run by hand. Until they are wired, `spec → contract` is guarded by a
+> check nobody executes. `W4_CI_WIRING` measures this and the token carries it
+> (`__CI_UNWIRED`), so the claim cannot be quietly assumed; wiring them flips it
+> to `__CI_WIRED` and this paragraph must change with it. `ci.yml` was left
+> untouched deliberately — another agent has uncommitted edits to it, and
+> staging that file would have swept their work into this line's commits.
 
 ---
 
