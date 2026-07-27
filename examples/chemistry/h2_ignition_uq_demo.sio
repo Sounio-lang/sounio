@@ -1,0 +1,103 @@
+// examples/chemistry/h2_ignition_uq_demo.sio
+//
+// Hydrogen combustion demo: complete GRI-Mech 3.0 H/O sub-mechanism
+// (10 species, 29 reactions, NASA-7 detailed balance) with NATIVE 1-sigma
+// uncertainty bands — the thing Cantera cannot do without an external
+// Monte Carlo wrapper.
+//
+// Protocol (identical to benchmarks/chemistry/gri30_h2_cantera_parity.py):
+//   2% H2 / 1% O2 / 97% N2, 1 atm, isothermal, H-atom seed 1e-11 mol/cm3.
+//
+// Prints:
+//   1. species concentrations + native 1-sigma at t = 1e-4 s, T = 1500 K
+//      (parity checkpoint vs Cantera 3.2 and the Python replica)
+//   2. isothermal ignition delays (max d[H2O]/dt) for T = 1400..1800 K
+//
+// Run:
+//   export SOUNIO_STDLIB_PATH=$(pwd)/stdlib SOUNIO_SOUC_ENGINE=lean_single
+//   ./bin/souc run examples/chemistry/h2_ignition_uq_demo.sio
+use chemistry::gri30_h2::*
+
+fn pi64(x: i64) with IO, Mut, Div, Panic {
+    if x < 0 { print("-"); pi64a(0 - x) } else { pi64a(x) }
+}
+fn pi64a(x: i64) with IO, Mut, Div, Panic {
+    if x >= 10 { pi64a(x / 10); digit(x % 10) } else { digit(x) }
+}
+fn digit(d: i64) with IO, Mut, Div, Panic {
+    if d == 0 { print("0") } else if d == 1 { print("1") } else if d == 2 { print("2") } else if d == 3 { print("3") } else if d == 4 { print("4") } else if d == 5 { print("5") } else if d == 6 { print("6") } else if d == 7 { print("7") } else if d == 8 { print("8") } else { print("9") }
+}
+fn pv(label: string, v: f64, scale: f64) with IO, Mut, Div, Panic {
+    print(label); pi64((v * scale) as i64); println("")
+}
+
+fn demo_init(t: f64) -> [f64; 10] with Mut, Div, Panic {
+    let m = 1.0 / (82.057 * t);
+    var c0: [f64; 10] = [0.0; 10];
+    c0[0] = m * 0.02;
+    c0[3] = m * 0.01;
+    c0[8] = m * 0.97;
+    c0[1] = 1.0e-11;
+    c0
+}
+
+// isothermal ignition delay (max d[H2O]/dt), seconds; early exit past the front
+fn ignition_delay(t: f64, dt: f64, max_steps: i64) -> f64 with Mut, Div, Panic {
+    let kc = g30_kc_all(t);
+    var y = demo_init(t);
+    var yt: [f64; 10] = [0.0; 10];
+    var prev_h2o = y[5];
+    var best_rate = 0.0;
+    var best_t = 0.0;
+    var s: i64 = 0;
+    var i: i64 = 0;
+    var done = false;
+    while s < max_steps && !done {
+        let k1 = g30_dc_kc(t, &y, &kc);
+        i = 0; while i < 10 { yt[i] = y[i] + 0.5 * dt * k1[i]; i = i + 1; }
+        let k2 = g30_dc_kc(t, &yt, &kc);
+        i = 0; while i < 10 { yt[i] = y[i] + 0.5 * dt * k2[i]; i = i + 1; }
+        let k3 = g30_dc_kc(t, &yt, &kc);
+        i = 0; while i < 10 { yt[i] = y[i] + dt * k3[i]; i = i + 1; }
+        let k4 = g30_dc_kc(t, &yt, &kc);
+        i = 0; while i < 10 { y[i] = y[i] + (dt / 6.0) * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i]); i = i + 1; }
+        s = s + 1;
+        let rate = (y[5] - prev_h2o) / dt;
+        prev_h2o = y[5];
+        let tnow = (s as f64) * dt;
+        if rate > best_rate { best_rate = rate; best_t = tnow - 0.5 * dt }
+        if best_t > 0.0 && rate < 0.05 * best_rate && tnow > 2.0 * best_t { done = true }
+    }
+    best_t
+}
+
+fn run_delay_sweep() with IO, Mut, Div, Panic {
+    println("IGNITION DELAYS (isothermal, seed H=1e-11 mol/cm3, 2%H2/1%O2/97%N2, 1 atm)");
+    print("  T= 1400K  t_ign="); pi64((ignition_delay(1400.0, 1.0e-8, 30000 as i64) * 1.0e6) as i64); println(" us");
+    print("  T= 1500K  t_ign="); pi64((ignition_delay(1500.0, 1.0e-8, 30000 as i64) * 1.0e6) as i64); println(" us");
+    print("  T= 1600K  t_ign="); pi64((ignition_delay(1600.0, 1.0e-8, 30000 as i64) * 1.0e6) as i64); println(" us");
+    print("  T= 1700K  t_ign="); pi64((ignition_delay(1700.0, 1.0e-8, 30000 as i64) * 1.0e6) as i64); println(" us");
+    print("  T= 1800K  t_ign="); pi64((ignition_delay(1800.0, 1.0e-8, 30000 as i64) * 1.0e6) as i64); println(" us");
+}
+
+fn main() -> i32 with Mut, Div, Panic, IO {
+    let t = 1500.0;
+    let c0 = demo_init(t);
+    var u0: [f64; 10] = [0.0; 10];
+    u0[0] = 0.01 * c0[0];
+    u0[3] = 0.01 * c0[3];
+    let (y, u) = simulate_gri30_h2_epistemic(&c0, &u0, t, 1.0e-8, 10000 as i64);
+    println("SOUNIO GRI-Mech 3.0 H/O (10 species, 29 reactions) + NATIVE 1-sigma UQ");
+    println("T=1500K t=1e-4s checkpoint (value e-9 mol/cm3, 1-sigma e-12):");
+    pv("  H2   v=", y[0], 1.0e9); pv("       u=", u[0], 1.0e12);
+    pv("  H    v=", y[1], 1.0e9); pv("       u=", u[1], 1.0e12);
+    pv("  O    v=", y[2], 1.0e9); pv("       u=", u[2], 1.0e12);
+    pv("  O2   v=", y[3], 1.0e9); pv("       u=", u[3], 1.0e12);
+    pv("  OH   v=", y[4], 1.0e9); pv("       u=", u[4], 1.0e12);
+    pv("  H2O  v=", y[5], 1.0e9); pv("       u=", u[5], 1.0e12);
+    pv("  HO2  v=", y[6], 1.0e9); pv("       u=", u[6], 1.0e12);
+    pv("  H2O2 v=", y[7], 1.0e9); pv("       u=", u[7], 1.0e12);
+    run_delay_sweep();
+    println("DEMO DONE");
+    0
+}

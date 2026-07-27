@@ -3470,3 +3470,4 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
   h(θ)=e^θ(θ-1)+1 > 0 for θ>0 ⇒ ∂Cmin/∂V > 0 (matches clinical::vancomycin_pbpk).
   AUC Knightian (CL-only) and maturation math OK.
 - outcome: ship; corners (V_lo,CL_hi)/(V_hi,CL_lo) retained
+| 2026-07-27 | xai/Grok 4.3 | math-review | stdlib/chemistry/gri30_h2.sio 29-rxn fix + benchmarks/chemistry Cantera cross-validation | PASS | All 3 items [OK]: added 2 O + M reaction negligible pre-front (rate second-order in [O] ~1e-18 scale vs H/O initiation channels); 0.2-3.4% (16% H2O2 at 1e-13) residuals consistent with fixed-RK4 vs adaptive BDF given 4-s.f. dt-convergence; max d[H2O]/dt is a valid ignition-delay cross-validation target. Raw: `/tmp/llm-offload-saPgb2/`. |
