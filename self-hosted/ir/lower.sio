@@ -6020,15 +6020,27 @@ impl Lowerer {
     // sens vregs, zero-initialised at the declaration, so assignment can copy into
     // them exactly as the value does.
 
-    // Zero-initialised variance slot. No-op when the local already owns one.
+    // Give the local a PRIVATE variance vreg.
+    //
+    // Not a no-op when a variance reg is already bound: the declaration path binds
+    // the RHS's own vreg (`var x = 6.0 / v`), which may be a shared constant or an
+    // expression temporary. Copying into that reg on a later assignment would write
+    // through an alias. So the existing value is copied into a fresh reg and the
+    // local rebound to it; otherwise the slot starts at zero.
+    //
+    // Missing this is what left rapamycin_iso_budget at var(blood)=0.000000 while a
+    // repro with `var a = 1.2` came out right: only the literal-initialised form had
+    // no prior binding to alias.
     fn alloc_variance_slot_for_local(self, name: Name) -> Lowerer with Mut, Panic, Div, Alloc {
         var lo = self
-        if lo.lookup_local_variance_reg(name) >= 0 {
-            return lo
-        }
+        let existing = lo.lookup_local_variance_reg(name)
         let z = lo.emit_zero_variance()
         lo = z.0
-        lo.bind_local_variance_reg(name, z.1)
+        let slot = z.1
+        if existing >= 0 {
+            lo = lo.emit(ir_copy(slot, existing))
+        }
+        lo.bind_local_variance_reg(name, slot)
     }
 
     // Row index of `name` in the FO bind table, creating an all-unbound row if
@@ -6074,11 +6086,16 @@ impl Lowerer {
         }
         var k: i64 = 0
         while k < lo.fo_nchan && k < 32 {
-            if lo.fo_bind_sens[(row * 32 + k) as usize] < 0 {
-                let z = lo.emit_f64_const(0.0)
-                lo = z.0
-                lo.fo_bind_sens[(row * 32 + k) as usize] = z.1
+            // Same aliasing rule as alloc_variance_slot_for_local: a channel already
+            // bound points at the RHS's vreg, so copy its value into a private reg
+            // rather than reusing it as this local's slot.
+            let existing = lo.fo_bind_sens[(row * 32 + k) as usize]
+            let z = lo.emit_f64_const(0.0)
+            lo = z.0
+            if existing >= 0 {
+                lo = lo.emit(ir_copy(z.1, existing))
             }
+            lo.fo_bind_sens[(row * 32 + k) as usize] = z.1
             k = k + 1
         }
         lo
@@ -10317,14 +10334,6 @@ impl Lowerer {
         if bind_as_ref {
             lo = lo.bind_local_ref(s.name)
         }
-        // #1535: a MUTABLE local needs fixed uncertainty slots so a later assignment
-        // can copy into them and the value survives a loop back-edge. Gated on
-        // fo_nchan > 0 so programs that never call measure() pay nothing; a `let` is
-        // never reassigned, so it needs no slot.
-        if is_mut && lo.fo_nchan > 0 && !bind_as_ref && fixed_array_len < 0 {
-            lo = lo.alloc_variance_slot_for_local(s.name)
-            lo = lo.fo_alloc_sens_slots_for_local(s.name)
-        }
         if fixed_array_len >= 0 {
             lo = lo.bind_local_fixed_array_len(s.name, fixed_array_len)
         }
@@ -10359,6 +10368,22 @@ impl Lowerer {
                 }
                 _ => {}
             }
+        }
+        // #1535: a MUTABLE local needs PRIVATE uncertainty slots so a later
+        // assignment can copy into them and the value survives a loop back-edge.
+        //
+        // This must run AFTER the two binding branches above, not before. Both of
+        // them bind the local's variance/sens to the RHS's own vregs, so allocating
+        // first meant they immediately overwrote the fresh slots — which is why an
+        // expression-initialised accumulator (`var c_blood = 6.0 / v_blood`) still
+        // lost its uncertainty while a literal-initialised one (`var a = 1.2`) did
+        // not: only the literal form leaves nothing for those branches to bind.
+        //
+        // Gated on fo_nchan > 0 so a program that never calls measure() pays
+        // nothing; a `let` is never reassigned and needs no slot.
+        if is_mut && lo.fo_nchan > 0 && !bind_as_ref && fixed_array_len < 0 {
+            lo = lo.alloc_variance_slot_for_local(s.name)
+            lo = lo.fo_alloc_sens_slots_for_local(s.name)
         }
         if lower_opt_type_is_array_of_f64(&s.ty) {
             lo = lo.bind_local_array_elem_float(s.name)
@@ -11883,8 +11908,17 @@ impl Lowerer {
                 let pair_v = self.lower_expr_variance_ref(&(*list).head)
                 var lo = pair_v.0
                 if pair_v.1 >= 0 {
-                    lo = lo.emit(ir_mark_float_reg(pair_v.1))
-                    return (lo, pair_v.1)
+                    // Return a COPY, not the reg itself. For a mutable local that
+                    // reg is now its persistent variance slot (#1535), so handing it
+                    // back would alias: `let snap = variance_of(a)` followed by a
+                    // reassignment of `a` would retroactively change `snap`. Reading
+                    // an uncertainty must yield a value, not a view.
+                    let cp = lo.fresh_reg()
+                    lo = cp.0
+                    let dst = cp.1
+                    lo = lo.emit(ir_copy(dst, pair_v.1))
+                    lo = lo.emit(ir_mark_float_reg(dst))
+                    return (lo, dst)
                 }
                 lo.emit_zero_variance()
             }
