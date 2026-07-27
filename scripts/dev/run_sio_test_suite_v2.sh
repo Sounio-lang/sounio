@@ -303,17 +303,19 @@ run_test() {
         if [[ ! "$line" =~ ^[[:space:]]*//@\  && ! "$line" =~ ^[[:space:]]*//\  && ! "$line" =~ ^[[:space:]]*$ ]]; then
             break
         fi
-        # NOTE: these two `=~` extractions capture EMPTY on real patterns
-        # (esp. ones with regex metachars like `[`), so existing error-pattern/
-        # expect-stdout tests match vacuously. Fixing it here is out of scope —
-        # it flips ~305 latent vacuous passes repo-wide. The `typecheck-fail`
-        # mode below therefore parses its own pattern robustly and does NOT rely
-        # on `error_patterns`. Tracked as a separate harness finding.
-        if [[ "$line" =~ "//@ expect-stdout:\ "(.*) ]]; then
-            expect_stdout+=("${BASH_REMATCH[1]}")
+        # Extraction by parameter expansion, not regex: the pattern that
+        # follows "//@ expect-stdout: " / "//@ error-pattern: " often contains
+        # regex metacharacters (`[`, `(`, ...), and quoting the whole =~
+        # pattern (as this used to) makes bash treat it as a literal string
+        # instead of a regex, so the capture group never captures and
+        # BASH_REMATCH[1] is always empty -- every expect-stdout/error-pattern
+        # assertion then matched vacuously. Parameter expansion has no
+        # metacharacter class to get this wrong for either annotation.
+        if [[ "$line" == "//@ expect-stdout: "* ]]; then
+            expect_stdout+=("${line#*//@ expect-stdout: }")
         fi
-        if [[ "$line" =~ "//@ error-pattern:\ "(.*) ]]; then
-            error_patterns+=("${BASH_REMATCH[1]}")
+        if [[ "$line" == "//@ error-pattern: "* ]]; then
+            error_patterns+=("${line#*//@ error-pattern: }")
         fi
     done < "$file"
     
