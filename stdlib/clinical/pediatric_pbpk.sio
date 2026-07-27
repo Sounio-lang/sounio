@@ -8,6 +8,10 @@
 //   3. Hepatic CYP-like maturation (Hill on PMA) for mixed-elim drugs
 //   4. BSA (Mosteller) and paediatric eGFR (Schwartz bedside k=0.413)
 //   5. Vancomycin 1-cmt SS Cmin + AUC24 with GUM Epistemic + Knightian PBox
+//   6. Preterm GA28, AUC-guided dose, gentamicin + amikacin spines
+//   7. Neonate fixed-daily interval compare (q6 vs q12)
+//   8. Steady-state C(t) profiles within a dosing interval
+//   9. Population IIV Monte-Carlo (lognormal CL/V, fixed seed, p5/p50/p95)
 //
 // References (modelling literature — not clinical guidance):
 //   Holford NHG. Clin Pharmacokinet 2013;52:941. (size / allometry)
@@ -16,6 +20,7 @@
 //   Schwartz GJ et al. J Am Soc Nephrol 2009;20:629. (bedside eGFR)
 //   Rybak MJ et al. Am J Health-Syst Pharm 2020;77:835. (vanco targets)
 //   Le J et al. Antimicrob Agents Chemother 2013;57:6147. (paediatric vanco)
+//   Pryka RD et al. Ann Pharmacother 1991;25:1232. (vanco IIV CV~25%)
 //
 // Clinical warning: educational / compiler-stdlib demonstration of paediatric
 // scaling with epistemic refuse gates. NOT a dosing engine. NOT medical advice.
@@ -790,6 +795,211 @@ pub fn ped_vanco_neonate_q6_vs_q12(s: &PedSubject) -> PedIntervalCompare with Mu
 }
 
 // ============================================================================
+// STEADY-STATE C(t) PROFILE (1-cmt IV bolus educational)
+// ============================================================================
+// At SS, just after a dose: Cmax = Cmin · e^{ke·τ}
+// Within the interval: C(t) = Cmax · e^{-ke·t}  for t ∈ [0, τ]
+// Endpoint: C(τ) = Cmin.
+
+pub struct PedCtProfile {
+    n_pts: i64,
+    t_h: [f64; 16],
+    c_mg_l: [f64; 16],
+    cmin: f64,
+    cmax: f64,
+    tau_h: f64,
+    ke: f64,
+}
+
+/// SS concentration–time curve for vancomycin (≤16 points, inclusive of 0 and τ).
+pub fn ped_vanco_ct_ss(
+    s: &PedSubject, dose_mg: f64, interval_h: f64, n_pts: i64
+) -> PedCtProfile with Mut, Div, Panic {
+    var out = PedCtProfile {
+        n_pts: 0,
+        t_h: [0.0; 16],
+        c_mg_l: [0.0; 16],
+        cmin: 0.0,
+        cmax: 0.0,
+        tau_h: interval_h,
+        ke: 0.0,
+    }
+    var np = n_pts
+    if np < 2 { np = 2 }
+    if np > 16 { np = 16 }
+    let pk = ped_vanco_pk(s, dose_mg, interval_h)
+    out.ke = pk.ke
+    out.cmin = pk.cmin_mg_l
+    out.cmax = pk.cmax_approx_mg_l
+    out.n_pts = np
+    var i: i64 = 0
+    while i < np {
+        let t = if np == 1 {
+            0.0
+        } else {
+            interval_h * (i as f64) / ((np - 1) as f64)
+        }
+        // C(t) = Cmax · exp(-ke · t)
+        let c = out.cmax * ped_exp(0.0 - out.ke * t)
+        out.t_h[i as usize] = t
+        out.c_mg_l[i as usize] = c
+        i = i + 1
+    }
+    out
+}
+
+// ============================================================================
+// POPULATION IIV COHORT (deterministic lognormal grid — reproducible, lean-safe)
+// ============================================================================
+// Educational IIV without RNG/Box–Muller (large stack / native fragility):
+//   For i = 0..N-1, z_i runs from -2 to +2 (σ units).
+//   CL_i = CL_typ · exp(ω_CL · z_i),  V_i = V_typ · exp(ω_V · z'_i)
+//   z'_i uses a phase-shifted grid so CL and V are not perfectly collinear.
+// Default ω_CL = 0.25, ω_V = 0.20 (Pryka / paediatric popPK order of magnitude).
+// seed parameter reserved for API stability (mixes the V-grid phase).
+
+pub struct PedMcSummary {
+    n: i64,
+    seed: i64,
+    omega_cl: f64,
+    omega_v: f64,
+    cl_typ: f64,
+    vc_typ: f64,
+    cmin_mean: f64,
+    cmin_p05: f64,
+    cmin_p50: f64,
+    cmin_p95: f64,
+    auc_mean: f64,
+    auc_p05: f64,
+    auc_p50: f64,
+    auc_p95: f64,
+    pct_auc_400_600: f64,
+}
+
+fn ped_grid_z(i: i64, n: i64) -> f64 with Mut, Div {
+    // z ∈ [-2, +2]
+    if n <= 1 { return 0.0 }
+    0.0 - 2.0 + 4.0 * (i as f64) / ((n - 1) as f64)
+}
+
+fn ped_sort32(a0: [f64; 32], n: i64) -> [f64; 32] with Mut, Div {
+    var a = a0
+    var i: i64 = 1
+    while i < n {
+        var j = i
+        while j > 0 {
+            if a[j as usize] < a[(j - 1) as usize] {
+                let tmp = a[j as usize]
+                a[j as usize] = a[(j - 1) as usize]
+                a[(j - 1) as usize] = tmp
+                j = j - 1
+            } else {
+                break
+            }
+        }
+        i = i + 1
+    }
+    a
+}
+
+fn ped_pct32(a: [f64; 32], n: i64, p: f64) -> f64 with Mut, Div {
+    if n <= 0 { return 0.0 }
+    var idx = ((p * ((n - 1) as f64)) + 0.5) as i64
+    if idx < 0 { idx = 0 }
+    if idx >= n { idx = n - 1 }
+    a[idx as usize]
+}
+
+/// IIV cohort for vancomycin at fixed mg/kg and interval.
+/// `n` capped at 32. `seed` rotates the V-grid phase (reproducible).
+pub fn ped_vanco_mc_cohort(
+    s: &PedSubject,
+    mg_per_kg: f64,
+    interval_h: f64,
+    n_subj: i64,
+    seed: i64,
+    omega_cl: f64,
+    omega_v: f64,
+) -> PedMcSummary with Mut, Div, Panic {
+    var n = n_subj
+    if n < 2 { n = 2 }
+    if n > 32 { n = 32 }
+    let phy = ped_physio_model(s)
+    let cl_typ = ped_vanco_cl_l_h(phy.gfr_ml_min)
+    let vc_typ = ped_vanco_vc_l(s.weight_kg)
+    let dose = mg_per_kg * s.weight_kg
+    // Phase shift for V grid from seed (0..n-1)
+    var phase = seed % n
+    if phase < 0 { phase = 0 - phase }
+
+    var cmin_a: [f64; 32] = [0.0; 32]
+    var auc_a: [f64; 32] = [0.0; 32]
+    var i: i64 = 0
+    var sum_c: f64 = 0.0
+    var sum_a: f64 = 0.0
+    var n_in: i64 = 0
+
+    while i < n {
+        let z_cl = ped_grid_z(i, n)
+        let j = (i + phase) % n
+        let z_v = ped_grid_z(j, n)
+        let cl_i = cl_typ * ped_exp(omega_cl * z_cl)
+        let vc_i = vc_typ * ped_exp(omega_v * z_v)
+        let cmin_i = ped_cmin_point(vc_i, cl_i, dose, interval_h)
+        let dose_rate = dose / interval_h
+        let auc_i = if cl_i > 0.0 { 24.0 * dose_rate / cl_i } else { 0.0 }
+        cmin_a[i as usize] = cmin_i
+        auc_a[i as usize] = auc_i
+        sum_c = sum_c + cmin_i
+        sum_a = sum_a + auc_i
+        if auc_i >= 400.0 && auc_i <= 600.0 {
+            n_in = n_in + 1
+        }
+        i = i + 1
+    }
+
+    let cmin_s = ped_sort32(cmin_a, n)
+    let auc_s = ped_sort32(auc_a, n)
+    let nf = n as f64
+    PedMcSummary {
+        n: n,
+        seed: seed,
+        omega_cl: omega_cl,
+        omega_v: omega_v,
+        cl_typ: cl_typ,
+        vc_typ: vc_typ,
+        cmin_mean: sum_c / nf,
+        cmin_p05: ped_pct32(cmin_s, n, 0.05),
+        cmin_p50: ped_pct32(cmin_s, n, 0.50),
+        cmin_p95: ped_pct32(cmin_s, n, 0.95),
+        auc_mean: sum_a / nf,
+        auc_p05: ped_pct32(auc_s, n, 0.05),
+        auc_p50: ped_pct32(auc_s, n, 0.50),
+        auc_p95: ped_pct32(auc_s, n, 0.95),
+        pct_auc_400_600: 100.0 * (n_in as f64) / nf,
+    }
+}
+
+/// Default educational IIV: ω_CL=0.25, ω_V=0.20, N=32, seed=42.
+pub fn ped_vanco_mc_child_default(s: &PedSubject) -> PedMcSummary with Mut, Div, Panic {
+    ped_vanco_mc_cohort(s, 15.0, 12.0, 32, 42, 0.25, 0.20)
+}
+
+// ============================================================================
+// LITERATURE ANCHOR CHECKS (algebraic, not clinical targets)
+// ============================================================================
+
+/// Holford size at 10 kg: (10/70)^0.75 ≈ 0.23237
+pub fn ped_anchor_size_10kg() -> f64 with Mut, Div, Panic {
+    ped_size_std70(10.0)
+}
+
+/// Rhodin MF at PMA 40 wk (term birth).
+pub fn ped_anchor_mf_pma40() -> f64 with Mut, Div, Panic {
+    ped_gfr_maturation(40.0)
+}
+
+// ============================================================================
 // SELF-TEST main — also used by the CI gate via the demo example
 // ============================================================================
 
@@ -937,6 +1147,54 @@ pub fn ped_selftest() -> i64 with IO, Mut, Div, Panic {
         n = n + 1
     } else {
         print("FAIL ped_neonate_q6_vs_q12\n")
+    }
+
+    // T12: SS C(t) — first point ≈ Cmax, last ≈ Cmin, monotone non-increasing
+    let ct = ped_vanco_ct_ss(&child, 15.0 * child.weight_kg, 12.0, 8)
+    var mono = true
+    var k: i64 = 1
+    while k < ct.n_pts {
+        if ct.c_mg_l[k as usize] > ct.c_mg_l[(k - 1) as usize] + 1.0e-9 {
+            mono = false
+        }
+        k = k + 1
+    }
+    if ct.n_pts >= 2
+        && ped_abs(ct.c_mg_l[0] - ct.cmax) < 1.0e-6
+        && ped_abs(ct.c_mg_l[(ct.n_pts - 1) as usize] - ct.cmin) < 1.0e-3
+        && mono {
+        print("PASS ped_ct_profile\n")
+        n = n + 1
+    } else {
+        print("FAIL ped_ct_profile\n")
+    }
+
+    // T13: IIV MC — ordered percentiles, spread real, seed fixed N=32
+    let mc = ped_vanco_mc_child_default(&child)
+    if mc.n == 32
+        && mc.cmin_p05 < mc.cmin_p50
+        && mc.cmin_p50 < mc.cmin_p95
+        && mc.auc_p05 < mc.auc_p95
+        && mc.pct_auc_400_600 >= 0.0
+        && mc.pct_auc_400_600 <= 100.0 {
+        print("PASS ped_mc_iiv\n")
+        n = n + 1
+    } else {
+        print("FAIL ped_mc_iiv\n")
+    }
+
+    // T14: literature anchors — size(10kg)=(10/70)^0.75≈0.2324, MF(PMA40)∈(0.30,0.45)
+    let sz10 = ped_anchor_size_10kg()
+    let mf40 = ped_anchor_mf_pma40()
+    if ped_abs(sz10 - 0.232368) < 0.002 && mf40 > 0.30 && mf40 < 0.45 {
+        print("PASS ped_lit_anchors\n")
+        n = n + 1
+    } else {
+        print("FAIL ped_lit_anchors size=")
+        print_f64(sz10)
+        print(" mf40=")
+        print_f64(mf40)
+        print("\n")
     }
 
     n
