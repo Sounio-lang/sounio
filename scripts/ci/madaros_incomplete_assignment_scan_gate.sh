@@ -52,6 +52,25 @@ fi
 chmod +x "$SOUC_BIN" 2>/dev/null || true
 [[ -x "$SOUC_BIN" ]] || { echo "[madaros-incomplete-assign] FAIL: not executable: $SOUC_BIN" >&2; exit 1; }
 
+# Madaros needs a large stack to RUN AT ALL: the bundle build reports 150 "stack frame too large"
+# warnings with frames up to ~31 MB, so compiling even a three-line program overflows the 16384 KiB
+# soft limit GitHub runners default to. Measured: at 16384 every case here fails with
+# "compile failed"; raised, all pass. This is the same requirement, and the same mechanism, as
+# madaros_imported_call_arity_13_gate.sh — which is why that gate had to raise it first, and why
+# these three had never actually run in CI until it stopped failing ahead of them.
+stack_kb="${SOUNIO_MADAROS_INCOMPLETE_ASSIGN_STACK_KB:-524288}"
+[[ "$stack_kb" =~ ^[1-9][0-9]*$ && ${#stack_kb} -le 9 ]] || { echo "[madaros-incomplete-assign] FAIL: invalid stack size: $stack_kb" >&2; exit 1; }
+stack_before="$(ulimit -S -s 2>/dev/null)" || { echo "[madaros-incomplete-assign] FAIL: soft stack limit unavailable" >&2; exit 1; }
+if [[ "$stack_before" != "unlimited" ]] && ((stack_before < stack_kb)); then
+  ulimit -S -s "$stack_kb" 2>/dev/null || { echo "[madaros-incomplete-assign] FAIL: could not raise soft stack limit to ${stack_kb} KiB" >&2; exit 1; }
+fi
+stack_after="$(ulimit -S -s 2>/dev/null)"
+if [[ "$stack_after" != "unlimited" ]] && ((stack_after < stack_kb)); then
+  echo "[madaros-incomplete-assign] FAIL: soft stack limit remained below ${stack_kb} KiB: $stack_after" >&2
+  exit 1
+fi
+printf '[madaros-incomplete-assign] stack_kb before=%s after=%s requested=%s\n' "$stack_before" "$stack_after" "$stack_kb"
+
 printf '[madaros-incomplete-assign] souc=%s\n' "$SOUC_BIN"
 
 fail=0
