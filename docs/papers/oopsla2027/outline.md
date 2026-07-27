@@ -70,6 +70,7 @@ derivation of that function already sitting unused in the repository.
 | C10 | **Corroboration depth as a corpus metric**, and a procedure that finds latent corroborations from source alone — validated by rediscovering the one a human found by reading. Depth 1 is the corpus's normal state. | R10 | `LATENT_CORROBORATION_FOUND` |
 | C11 | The procedure widened as far as isolation permits: **4 behaviour classes, zero new corroborations.** Wrappers are structurally unprobeable under isolation, and by C8's collapse probing them would add nothing. | R11 | `WIDER_PROBE__NO_NEW_PREEXISTING_CORROBORATION` |
 | C12 | **The fourth narrowing, and the one that withdraws a planned contribution.** C6's measure is not new and its central assumption is refuted by a study at 224 problems × 12 models; C6 survives one-sided, and the compiler rule it motivated is withdrawn rather than deferred (§8.6). | R12 | `PRIOR_ART_HAS_ARTEFACT_MEASURE__CLAIM_NARROWS_FOURTH` |
+| C13 | **The one-sidedness measured here, not transferred.** Perturb the shared object rather than the code: **15 pairs of this corpus's contracts have identical responses to all 36 perturbations while their structural similarity is 0.479–0.594**, below the threshold at which C6 calls them independent evidence. Pairs C6 calls independent agree *more* (0.571) than pairs it calls shared (0.512). | R13 | `STRUCTURAL_INDEPENDENCE_DOES_NOT_IMPLY_INDEPENDENT_FATE` |
 
 ### Methodological results that generalise
 
@@ -312,6 +313,17 @@ rank-deficiency of the left-multiplication matrix, *a route the corpus's own
 predicates never take*. That is independence of the **derivational route**, not
 of the **code**. It is what worked here; it is what the N-version literature
 still lacks a measure for; and this line cannot compute it either.
+
+R13 turns the fourth narrowing from a transfer into a measurement, and finds one
+thing the code measure can be replaced by in one direction. Perturbing the
+**shared object** instead of the code — flip the Cayley–Dickson sign on a
+targeted base pair — partitions the corpus by *evidential fate*, and that
+partition crosses the derivation boundary that structural distance draws.
+Co-sensitivity is a **negative test**: it can refuse a corroborator that shares
+fate with the claim, which is more than C6 could honestly do after §8.6. It
+cannot certify one, because insensitivity to a finite battery is not evidence of
+an independent route. A compile-time obligation built on it could say **no**;
+nothing in this paper lets it say **yes**.
 
 ---
 
