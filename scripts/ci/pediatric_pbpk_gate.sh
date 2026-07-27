@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Paediatric PBPK functional gate — maturation + vancomycin + Knightian.
+# Paediatric PBPK functional gate — preterm + AUC-guided vanco + gentamicin.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
@@ -20,8 +20,7 @@ if ! grep -q 'PEDIATRIC_PBPK_OK' "$OUT"; then
   rm -f "$OUT"
   exit 1
 fi
-# Require all six pass tags
-for tag in 3201 3202 3203 3204 3205 3206; do
+for tag in 3201 3202 3203 3204 3205 3206 3207 3208 3209; do
   if ! grep -q "PASS $tag" "$OUT"; then
     cat "$OUT" >&2
     echo "[pediatric-pbpk] FAIL: missing PASS $tag" >&2

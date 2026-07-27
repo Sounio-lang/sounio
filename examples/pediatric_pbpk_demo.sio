@@ -1,27 +1,33 @@
 // examples/pediatric_pbpk_demo.sio
 //
-// Paediatric PBPK functional receipt — maturation + vancomycin + Knightian TDM.
+// Paediatric PBPK functional receipt — maturation + AUC-guided vanco + gentamicin.
 //
-// Cohort (all 15 mg/kg q12h IV educational screen):
-//   neonate 2 wk → child 5 yr → adolescent 14 yr → adult 70 kg
+// Cohort: preterm GA28 → term neonate → infant → child → adolescent → adult
 //
-// Pass criteria:
-//   3201  adult CL matches Matzke@GFR120
-//   3202  renal MF: neonate < infant < adult
-//   3203  maturation penalty: neonate CL << allometric MF=1 counterfactual
-//   3204  child AUC24 in plausible band
-//   3205  Knightian pre-TDM REFUSE or wider; post-TDM narrower + gateable
-//   3206  ped_selftest returns 6/6
+// Pass tags:
+//   3201 adult CL Matzke@GFR120
+//   3202 renal MF: preterm < term neo < infant < adult
+//   3203 maturation penalty (term neo CL << MF=1 counterfactual)
+//   3204 child AUC24 band + GUM ep
+//   3205 Knightian Cmin narrows with TDM
+//   3206 ped_selftest == 9
+//   3207 preterm vs term (MF + CL)
+//   3208 AUC-guided dose hits 500 mg·h/L
+//   3209 gentamicin spine (CL order + p-box)
 //
 // Gate: scripts/ci/pediatric_pbpk_gate.sh
 
 use clinical::pediatric_pbpk::{
-    PedSubject, ped_neonate_term_2wk, ped_infant_6mo, ped_child_5yr,
-    ped_adolescent_14yr, ped_adult_ref_70kg,
+    PedSubject, ped_neonate_term_2wk, ped_preterm_ga28_2wk, ped_infant_6mo,
+    ped_child_5yr, ped_adolescent_14yr, ped_adult_ref_70kg,
     ped_pma_weeks, ped_gfr_maturation, ped_physio_model,
-    ped_vanco_pk_mg_per_kg, ped_vanco_cl_l_h_with_mf,
+    ped_vanco_pk, ped_vanco_pk_mg_per_kg, ped_vanco_cl_l_h_with_mf,
     ped_vanco_cmin_knightian, ped_vanco_is_safe_trough,
-    ped_vanco_auc24_ep, ped_selftest,
+    ped_vanco_auc24_ep, ped_vanco_dose_for_auc24, ped_vanco_auc_target_mid,
+    ped_vanco_auc24_knightian, ped_vanco_is_auc_on_target,
+    ped_vanco_auc_target_lo, ped_vanco_auc_target_hi,
+    ped_gent_pk_mg_per_kg, ped_gent_cmin_knightian, ped_gent_is_safe_trough,
+    ped_selftest,
 }
 use epistemic::knowledge::{ep_val, ep_std}
 use epistemic::knightian::{pb_lo_mean, pb_hi_mean, pb_gap, pb_confidence}
@@ -51,6 +57,8 @@ fn dump_subject(label: i64, s: &PedSubject, mgkg: f64, tau: f64) with IO, Mut, D
     print_int(label)
     print(" age_y=")
     print_f64(s.age_years)
+    print(" ga=")
+    print_f64(s.gest_weeks)
     print(" wt=")
     print_f64(s.weight_kg)
     print(" pma_w=")
@@ -61,8 +69,6 @@ fn dump_subject(label: i64, s: &PedSubject, mgkg: f64, tau: f64) with IO, Mut, D
     print_f64(phy.gfr_ml_min)
     print(" cl=")
     print_f64(pk.cl_l_h)
-    print(" vc=")
-    print_f64(pk.vc_l)
     print(" cmin=")
     print_f64(pk.cmin_mg_l)
     print(" auc24=")
@@ -72,15 +78,17 @@ fn dump_subject(label: i64, s: &PedSubject, mgkg: f64, tau: f64) with IO, Mut, D
 
 fn main() -> i32 with IO, Mut, Div, Panic {
     print("PEDIATRIC_PBPK_BEGIN\n")
-    print("CLAIM functional_paediatric_pbpk_maturation_vanco_knightian\n")
+    print("CLAIM paediatric_pbpk_preterm_auc_gentamicin\n")
     var n: i64 = 0
 
+    let preterm = ped_preterm_ga28_2wk()
     let neo = ped_neonate_term_2wk()
     let inf = ped_infant_6mo()
     let child = ped_child_5yr()
     let teen = ped_adolescent_14yr()
     let adult = ped_adult_ref_70kg()
 
+    dump_subject(0, &preterm, 15.0, 12.0)
     dump_subject(1, &neo, 15.0, 12.0)
     dump_subject(2, &inf, 15.0, 12.0)
     dump_subject(3, &child, 15.0, 12.0)
@@ -88,21 +96,22 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     dump_subject(5, &adult, 15.0, 12.0)
 
     let pk_a = ped_vanco_pk_mg_per_kg(&adult, 15.0, 12.0)
-    let p1 = abs_f(pk_a.cl_l_h - 5.1804) < 0.05
-    n = n + pass_if(p1, 3201)
+    n = n + pass_if(abs_f(pk_a.cl_l_h - 5.1804) < 0.05, 3201)
 
+    let mf_p = ped_gfr_maturation(ped_pma_weeks(&preterm))
     let mf_n = ped_gfr_maturation(ped_pma_weeks(&neo))
     let mf_i = ped_gfr_maturation(ped_pma_weeks(&inf))
     let mf_a = ped_gfr_maturation(ped_pma_weeks(&adult))
-    print("PED_MF neo=")
+    print("PED_MF preterm=")
+    print_f64(mf_p)
+    print(" term_neo=")
     print_f64(mf_n)
     print(" infant=")
     print_f64(mf_i)
     print(" adult=")
     print_f64(mf_a)
     print("\n")
-    let p2 = mf_n < mf_i && mf_i < mf_a && mf_a > 0.95
-    n = n + pass_if(p2, 3202)
+    n = n + pass_if(mf_p < mf_n && mf_n < mf_i && mf_i < mf_a && mf_a > 0.95, 3202)
 
     let pk_n = ped_vanco_pk_mg_per_kg(&neo, 15.0, 12.0)
     let pk_c = ped_vanco_pk_mg_per_kg(&child, 15.0, 12.0)
@@ -114,15 +123,10 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     print(" child=")
     print_f64(pk_c.cl_l_h)
     print("\n")
-    print("PED_CMIN neo=")
-    print_f64(pk_n.cmin_mg_l)
-    print(" child=")
-    print_f64(pk_c.cmin_mg_l)
-    print("\n")
-    // Rhodin MF cuts neonatal CL below pure allometry (MF=1); Matzke intercept
-    // softens the ratio — require ≤0.60× and absolute CL < child.
-    let p3 = pk_n.cl_l_h < cl_neo_mf1 * 0.60 && pk_n.cl_l_h < pk_c.cl_l_h && mf_n < 0.45
-    n = n + pass_if(p3, 3203)
+    n = n + pass_if(
+        pk_n.cl_l_h < cl_neo_mf1 * 0.60 && pk_n.cl_l_h < pk_c.cl_l_h && mf_n < 0.45,
+        3203
+    )
 
     print("PED_AUC24_CHILD ")
     print_f64(pk_c.auc24_mg_h_l)
@@ -133,9 +137,11 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     print(" std=")
     print_f64(ep_std(&auc_ep))
     print("\n")
-    let p4 = pk_c.auc24_mg_h_l > 50.0 && pk_c.auc24_mg_h_l < 2000.0
-        && abs_f(ep_val(&auc_ep) - pk_c.auc24_mg_h_l) < 1.0e-9
-    n = n + pass_if(p4, 3204)
+    n = n + pass_if(
+        pk_c.auc24_mg_h_l > 50.0 && pk_c.auc24_mg_h_l < 2000.0
+            && abs_f(ep_val(&auc_ep) - pk_c.auc24_mg_h_l) < 1.0e-9,
+        3204
+    )
 
     let dose_c = 15.0 * child.weight_kg
     let pre = ped_vanco_cmin_knightian(&child, dose_c, 12.0, 0)
@@ -158,32 +164,91 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     let post_safe = ped_vanco_is_safe_trough(&post, 10.0, 20.0, 800)
     if pre_safe { print("PED_PRE_DECISION PRESCRIBE\n") } else { print("PED_PRE_DECISION REFUSE\n") }
     if post_safe { print("PED_POST_DECISION PRESCRIBE\n") } else { print("PED_POST_DECISION REFUSE\n") }
-    // Pre-TDM must be wider; post must be credible. Prefer post safer, but
-    // if both refuse the maturation demo still holds on gap narrowing.
-    let p5 = pb_gap(&pre) > pb_gap(&post)
-        && pb_confidence(&pre) >= 800
-        && pb_confidence(&post) >= 800
-        && (post_safe || !pre_safe)
-    n = n + pass_if(p5, 3205)
+    n = n + pass_if(
+        pb_gap(&pre) > pb_gap(&post)
+            && pb_confidence(&pre) >= 800
+            && pb_confidence(&post) >= 800
+            && (post_safe || !pre_safe),
+        3205
+    )
 
     print("PED_SELFTEST_BEGIN\n")
     let st = ped_selftest()
     print("PED_SELFTEST_PASS ")
     print_int(st)
     print("\n")
-    let p6 = st == 6
-    n = n + pass_if(p6, 3206)
+    n = n + pass_if(st == 9, 3206)
+
+    // 3207 preterm vs term
+    let pk_p = ped_vanco_pk_mg_per_kg(&preterm, 15.0, 12.0)
+    print("PED_PRETERM cl=")
+    print_f64(pk_p.cl_l_h)
+    print(" mf=")
+    print_f64(mf_p)
+    print(" pma=")
+    print_f64(ped_pma_weeks(&preterm))
+    print("\n")
+    n = n + pass_if(
+        mf_p < mf_n && pk_p.cl_l_h < pk_n.cl_l_h && ped_pma_weeks(&preterm) < ped_pma_weeks(&neo),
+        3207
+    )
+
+    // 3208 AUC-guided
+    let d_star = ped_vanco_dose_for_auc24(&child, ped_vanco_auc_target_mid(), 12.0)
+    let pk_star = ped_vanco_pk(&child, d_star, 12.0)
+    print("PED_AUC_GUIDED dose_mg=")
+    print_f64(d_star)
+    print(" auc24=")
+    print_f64(pk_star.auc24_mg_h_l)
+    print("\n")
+    let auc_box = ped_vanco_auc24_knightian(&child, d_star, 12.0, 3)
+    print("PED_AUC_PBOX ")
+    print_f64(pb_lo_mean(&auc_box))
+    print("..")
+    print_f64(pb_hi_mean(&auc_box))
+    print("\n")
+    // Point estimate on target; post-TDM p-box may still span outside 400–600
+    // depending on CL band — require point hit + box contains mid.
+    let auc_ok = abs_f(pk_star.auc24_mg_h_l - 500.0) < 1.0
+        && pb_lo_mean(&auc_box) < 500.0
+        && pb_hi_mean(&auc_box) > 500.0
+    n = n + pass_if(auc_ok, 3208)
+
+    // 3209 gentamicin
+    let g_c = ped_gent_pk_mg_per_kg(&child, 2.5, 8.0)
+    let g_p = ped_gent_pk_mg_per_kg(&preterm, 2.5, 12.0)
+    let gbox = ped_gent_cmin_knightian(&child, 2.5 * child.weight_kg, 8.0, 0)
+    print("PED_GENT child_cl=")
+    print_f64(g_c.cl_l_h)
+    print(" preterm_cl=")
+    print_f64(g_p.cl_l_h)
+    print(" child_cmin=")
+    print_f64(g_c.cmin_mg_l)
+    print("\n")
+    print("PED_GENT_PBOX ")
+    print_f64(pb_lo_mean(&gbox))
+    print("..")
+    print_f64(pb_hi_mean(&gbox))
+    print("\n")
+    let g_safe = ped_gent_is_safe_trough(&gbox, 800)
+    if g_safe { print("PED_GENT_DECISION PRESCRIBE\n") } else { print("PED_GENT_DECISION REFUSE\n") }
+    n = n + pass_if(
+        g_c.cl_l_h > g_p.cl_l_h && g_c.cmin_mg_l > 0.0 && pb_gap(&gbox) > 0.0,
+        3209
+    )
 
     print("PED_LEDGER_JSON {")
-    print("\"schema\":\"sounio.pediatric_pbpk.v1\",")
-    print("\"neo_cmin\":")
-    print_f64(pk_n.cmin_mg_l)
-    print(",\"child_cmin\":")
-    print_f64(pk_c.cmin_mg_l)
+    print("\"schema\":\"sounio.pediatric_pbpk.v2\",")
+    print("\"preterm_cl\":")
+    print_f64(pk_p.cl_l_h)
+    print(",\"neo_cl\":")
+    print_f64(pk_n.cl_l_h)
     print(",\"adult_cl\":")
     print_f64(pk_a.cl_l_h)
-    print(",\"child_auc24\":")
-    print_f64(pk_c.auc24_mg_h_l)
+    print(",\"auc_guided\":")
+    print_f64(pk_star.auc24_mg_h_l)
+    print(",\"gent_child_cl\":")
+    print_f64(g_c.cl_l_h)
     print(",\"pass\":")
     print_int(n)
     print("}\n")
@@ -191,7 +256,7 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     print("PEDIATRIC_PBPK_PASS ")
     print_int(n)
     print("\n")
-    if n == 6 {
+    if n == 9 {
         print("PEDIATRIC_PBPK_OK\n")
         0
     } else {

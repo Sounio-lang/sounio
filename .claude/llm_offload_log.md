@@ -3458,3 +3458,11 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 - deepseek review: FAIL (Insufficient Balance)
 - xai math-review: OK — Holford allometry, Rhodin MF, Matzke CL, SS Cmin, AUC24, Knightian corners
 - outcome: proceed; deepseek balance blocked, orthogonal math review clean
+
+## 2026-07-27 — pediatric_pbpk ext (preterm/AUC/gent)
+- target: stdlib/clinical/pediatric_pbpk.sio
+- xai math-review: partial — flagged Cmin ∂/∂V sign as inverted
+- adjudication: REJECT flag. Canonical form Cmin=(D/V)/(e^{kτ}-1), θ=CL·τ/V;
+  h(θ)=e^θ(θ-1)+1 > 0 for θ>0 ⇒ ∂Cmin/∂V > 0 (matches clinical::vancomycin_pbpk).
+  AUC Knightian (CL-only) and maturation math OK.
+- outcome: ship; corners (V_lo,CL_hi)/(V_hi,CL_lo) retained
