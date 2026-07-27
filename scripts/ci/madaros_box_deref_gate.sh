@@ -43,13 +43,14 @@ export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
 # that says nothing about the working tree, and a later regression in lower.sio would not move it
 # at all. So the subject must be a Madaros built from the current source.
 #
-#   SOUNIO_MADAROS_BOX_DEREF_SOUC=<elf>   use an already-built one (what CI should do, to share a
-#                                         single ~10-minute bundle build across gates)
-#   unset                                 build one here, through the global build lock
-SOUC_BIN="${SOUNIO_MADAROS_BOX_DEREF_SOUC:-}"
+#   SOUNIO_MADAROS_BOX_DEREF_GATE_BIN=<elf>  use an already-built one — this is what CI does, via
+#                                            madaros_current_source_f64_lowering_gate.sh, so one
+#                                            ~10-minute bundle build is shared across gates
+#   unset                                    build one here, through the global build lock
+SOUC_BIN="${SOUNIO_MADAROS_BOX_DEREF_GATE_BIN:-}"
 if [[ -z "$SOUC_BIN" ]]; then
   SOUC_BIN="$OUT_DIR/madaros-from-source.elf"
-  printf '[madaros-box-deref] no SOUNIO_MADAROS_BOX_DEREF_SOUC; building Madaros from source\n'
+  printf '[madaros-box-deref] no SOUNIO_MADAROS_BOX_DEREF_GATE_BIN; building Madaros from source\n'
   if ! "$ROOT_DIR/scripts/dev/souc-build-lock.sh" \
         bash "$ROOT_DIR/scripts/ci/build_modular_madaros.sh" "$SOUC_BIN" \
         >"$OUT_DIR/build.log" 2>&1; then

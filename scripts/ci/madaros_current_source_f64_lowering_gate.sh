@@ -56,4 +56,8 @@ MADAROS_RAW_BIN="$MADAROS_ELF" \
 SOUNIO_MADAROS_CALL_ARITY_13_DIR="$WORK/imported-call-arity-13" \
   bash "$ROOT_DIR/scripts/ci/madaros_imported_call_arity_13_gate.sh"
 
-echo "[madaros-f64-lowering] PASS: one shared Madaros ELF passed dereference, global f64, direct capacity, imported capacity, and imported wide-call gates"
+SOUNIO_MADAROS_BOX_DEREF_GATE_BIN="$MADAROS_ELF" \
+SOUNIO_MADAROS_BOX_DEREF_GATE_DIR="$WORK/box-deref" \
+  bash "$ROOT_DIR/scripts/ci/madaros_box_deref_gate.sh"
+
+echo "[madaros-f64-lowering] PASS: one shared Madaros ELF passed dereference, global f64, direct capacity, imported capacity, imported wide-call, and Box allocation/deref gates"
