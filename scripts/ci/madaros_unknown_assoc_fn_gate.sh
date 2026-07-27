@@ -43,8 +43,10 @@ SOUC_BIN="${SOUNIO_MADAROS_UNKNOWN_ASSOC_FN_GATE_BIN:-}"
 if [[ -z "$SOUC_BIN" ]]; then
   SOUC_BIN="$OUT_DIR/madaros-from-source.elf"
   printf '[madaros-unknown-assoc-fn] no *_GATE_BIN; building Madaros from source\n'
-  if ! "$ROOT_DIR/scripts/dev/souc-build-lock.sh" \
-        bash "$ROOT_DIR/scripts/ci/build_modular_madaros.sh" "$SOUC_BIN" \
+  # NOT wrapped in scripts/dev/souc-build-lock.sh: build_modular_madaros.sh takes that lock
+  # itself (lines 101 and 115) and flock(1) is not reentrant across the extra process, so
+  # wrapping it deadlocks — the outer holds the lock while the inner waits for it forever.
+  if ! bash "$ROOT_DIR/scripts/ci/build_modular_madaros.sh" "$SOUC_BIN" \
         >"$OUT_DIR/build.log" 2>&1; then
     echo "[madaros-unknown-assoc-fn] FAIL: could not build Madaros from source" >&2
     tail -n 30 "$OUT_DIR/build.log" >&2 || true
