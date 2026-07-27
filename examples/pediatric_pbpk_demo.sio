@@ -6,11 +6,10 @@
 //
 // Pass tags:
 //   3201–3205 base spine (CL/MF/maturation/AUC/Knightian)
-//   3206 ped_selftest == 14
-//   3207–3211 preterm / AUC / gent / amik / q6-vs-q12
-//   3212 SS C(t) profile (8 points)
-//   3213 IIV Monte-Carlo N=32 child (p5<p50<p95)
-//   3214 literature anchors (size@10kg, MF@PMA40)
+//   3206 ped_selftest == 16
+//   3207–3214 preterm / AUC / gent / amik / q6-q12 / C(t) / IIV / anchors
+//   3215 fixed vs AUC-guided under IIV (% in 400–600)
+//   3216 multi-dose accumulation to SS
 //
 // Gate: scripts/ci/pediatric_pbpk_gate.sh
 
@@ -26,6 +25,7 @@ use clinical::pediatric_pbpk::{
     ped_gent_pk_mg_per_kg, ped_gent_cmin_knightian, ped_gent_is_safe_trough,
     ped_amik_pk_mg_per_kg, ped_amik_cmin_knightian, ped_amik_is_safe_trough,
     ped_vanco_neonate_q6_vs_q12, ped_vanco_ct_ss, ped_vanco_mc_child_default,
+    ped_vanco_indiv_child_default, ped_vanco_accumulation,
     ped_anchor_size_10kg, ped_anchor_mf_pma40,
     ped_selftest,
 }
@@ -177,7 +177,7 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     print("PED_SELFTEST_PASS ")
     print_int(st)
     print("\n")
-    n = n + pass_if(st == 14, 3206)
+    n = n + pass_if(st == 16, 3206)
 
     // 3207 preterm vs term
     let pk_p = ped_vanco_pk_mg_per_kg(&preterm, 15.0, 12.0)
@@ -358,8 +358,54 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     print("\n")
     n = n + pass_if(abs_f(sz10 - 0.232368) < 0.002 && mf40 > 0.30 && mf40 < 0.45, 3214)
 
+    // 3215 individualisation
+    let ind = ped_vanco_indiv_child_default(&child)
+    print("PED_INDIV fixed%=")
+    print_f64(ind.pct_fixed_in_target)
+    print(" guided%=")
+    print_f64(ind.pct_guided_in_target)
+    print(" auc_f_mean=")
+    print_f64(ind.auc_fixed_mean)
+    print(" auc_g_mean=")
+    print_f64(ind.auc_guided_mean)
+    print("\n")
+    print("PED_INDIV fixed_p05=")
+    print_f64(ind.auc_fixed_p05)
+    print(" p95=")
+    print_f64(ind.auc_fixed_p95)
+    print(" guided_p05=")
+    print_f64(ind.auc_guided_p05)
+    print(" p95=")
+    print_f64(ind.auc_guided_p95)
+    print("\n")
+    n = n + pass_if(
+        ind.pct_guided_in_target > ind.pct_fixed_in_target + 20.0
+            && ind.pct_guided_in_target > 95.0
+            && abs_f(ind.auc_guided_mean - 500.0) < 1.0,
+        3215
+    )
+
+    // 3216 accumulation
+    let acc = ped_vanco_accumulation(&child, 15.0 * child.weight_kg, 12.0, 6)
+    print("PED_ACC d90=")
+    print_int(acc.doses_to_90pct_cmin)
+    print(" frac1=")
+    print_f64(acc.frac_cmin_dose1)
+    print(" frac6=")
+    print_f64(acc.frac_cmin_last)
+    print(" cmin_ss=")
+    print_f64(acc.cmin_ss)
+    print("\n")
+    n = n + pass_if(
+        acc.frac_cmin_dose1 < acc.frac_cmin_last
+            && acc.frac_cmin_last > 0.95
+            && acc.doses_to_90pct_cmin >= 1
+            && acc.doses_to_90pct_cmin <= 6,
+        3216
+    )
+
     print("PED_LEDGER_JSON {")
-    print("\"schema\":\"sounio.pediatric_pbpk.v4\",")
+    print("\"schema\":\"sounio.pediatric_pbpk.v5\",")
     print("\"preterm_cl\":")
     print_f64(pk_p.cl_l_h)
     print(",\"neo_cl\":")
@@ -368,14 +414,14 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     print_f64(pk_a.cl_l_h)
     print(",\"auc_guided\":")
     print_f64(pk_star.auc24_mg_h_l)
-    print(",\"mc_cmin_p50\":")
-    print_f64(mc.cmin_p50)
-    print(",\"mc_auc_p50\":")
-    print_f64(mc.auc_p50)
     print(",\"mc_pct_target\":")
     print_f64(mc.pct_auc_400_600)
-    print(",\"ct_c0\":")
-    print_f64(ct.c_mg_l[0])
+    print(",\"indiv_fixed_pct\":")
+    print_f64(ind.pct_fixed_in_target)
+    print(",\"indiv_guided_pct\":")
+    print_f64(ind.pct_guided_in_target)
+    print(",\"acc_d90\":")
+    print_int(acc.doses_to_90pct_cmin)
     print(",\"pass\":")
     print_int(n)
     print("}\n")
@@ -383,7 +429,7 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     print("PEDIATRIC_PBPK_PASS ")
     print_int(n)
     print("\n")
-    if n == 14 {
+    if n == 16 {
         print("PEDIATRIC_PBPK_OK\n")
         0
     } else {
