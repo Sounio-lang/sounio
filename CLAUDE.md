@@ -195,6 +195,16 @@ The numbered principles below are binding. Each was learned from a measured fail
 
 11. **No drift to mean.** Excellence only. Atomic commits — one logical change per commit. No AI attribution in commit messages.
 
+12. **A blocker without a minimal repro is not diagnosed.** Cataloguing — an ID, a severity, an owner, an evidence level — documents a symptom; it does not converge on a cause, and the rigour of the catalogue can be mistaken for progress. Measured 2026-07-26: issue #1194 carried full classification and a "pinned reproduction" of two binaries plus a 1500-line module, and stayed open seven days; six three-line variants root-caused it in minutes. Worse, three separately-catalogued blockers with different owners turned out to be **one** defect in two lines of `ir/lower.sio`. If the reproduction does not fit in ~25 lines, the defect is not yet understood.
+
+13. **A premise that blocks work expires.** Re-measure before building around it. Measured 2026-07-26: at least three PRs state a large-aggregate by-value size limit as their blocker. There is no such limit — return and parameter passing succeed at every size from 24 B to 8 MiB on both engines, including the exact 128 KiB artefact one PR calls impossible. Roughly twenty days of scalar-column storage, handle bridges and scalar-result contracts were built to route around a wall nobody had measured. A source comment claiming `lean_single` miscompiles SRET is likewise false: `lean_single` passes, and Madaros segfaults on the idiom the code was rewritten *into* to escape it.
+
+14. **Depth of a PR stack is a defect.** A chain of drafts pinned to each other's SHAs cannot converge: rebasing the bottom invalidates every base above it. Measured 2026-07-26: two ten-deep chains, ~19 PRs, 25 self-declared non-mergeable. The engineering inside them is excellent and none of it lands. Split leaves that stand alone and send them straight at `main`.
+
+15. **A prebuilt binary is not a baseline.** `bin/souc` and `bin/madaros` lag source — measured at 127 commits behind on 2026-07-26 — and silently route to `artifacts/self-hosted/madaros` once that exists. Using one as the "before" column produced a false flip that a same-commit rebuild disproved. Build the baseline from the actual base commit, with nothing else varying.
+
+16. **Green in CI is not evidence for a Madaros guarantee.** `full-test-suite` runs souc-stage2 (`lean_single`), the frozen bootstrap seed; most guarantees live in the modular Madaros compiler, which `lean_single` does not implement. Three silent miscompiles were fully green in CI on 2026-07-26 while Madaros computed wrong answers — one of them corrupting a dissertation-path PBPK variance decomposition into the wrong pharmacological conclusion. Verify on a Madaros built from the source under test, and mark Madaros-only semantics with `//@ requires: madaros`.
+
 ---
 
 ## 7. Sounio syntax (NOT Rust)

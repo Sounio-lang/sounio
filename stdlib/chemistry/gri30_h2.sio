@@ -1,0 +1,880 @@
+// ============================================================================
+// gri30_h2.sio — GRI-Mech 3.0 complete H/O sub-mechanism (hydrogen combustion)
+// ============================================================================
+// Data: extracted verbatim from Cantera's gri30.yaml (ck2yaml of the original
+// grimech30.dat + gri30_thermo.dat, GRI-Mech Version 3.0 7/30/99,
+// http://combustion.berkeley.edu/gri-mech/).
+//   - 10 species: H2 H O O2 OH H2O HO2 H2O2 N2 AR (index order)
+//   - 29 reactions: every GRI-Mech 3.0 reaction involving only H/O species,
+//     including third-body efficiencies, the specific-collider H+O2+X series,
+//     and the Troe falloff 2 OH (+M) <=> H2O2 (+M)
+//   - NASA7 polynomials (200-1000-3500 K) per species for thermochemistry
+//
+// Rates: forward modified Arrhenius k = A T^b exp(-Ea/(R_cal T)) exactly as in
+// grimech30.dat (cm^3/mol/s units, Ea in cal/mol, R_cal = 1.9872041).
+// Reverse rates are NOT hardcoded: k_rev = k_fwd / Kc(T), with Kc from the
+// NASA7 Gibbs free energies (Kp -> Kc with standard-state 1e5 Pa). This makes
+// the mechanism satisfy detailed balance by construction.
+//
+// Epistemic layer ("ligada"): each reaction carries a representative 1-sigma
+// relative uncertainty on its rate (order-of-magnitude fidelity to the
+// evaluated-data compilations: Baulch et al. 2005, Konnov 2008, Hong et al.
+// 2011). Uncertainty propagates through integration via the first-order GUM
+// delta method: per RK4 step,
+//   v+_i = v_i + 2 J_ii v_i dt + sum_k (J_ik dt)^2 v_k
+//        + sum_r (nu_ir * net_rate_r * dt * u_rel_r)^2
+// (diagonal first-order covariance step; cross-covariances dropped)
+// with J the central-difference Jacobian of the RHS wrt concentrations.
+// (d(net)/dk_r = nu*net/k_r exactly for Arrhenius/three-body — reverse scales
+// with k_fwd through Kc; linearization is approximate for the falloff rxn.)
+//
+// Units: concentrations in mol/cm^3, time in s, T in K.
+// Validation: all test expectations cross-checked against an independent
+// Python replication of the identical math (same tables, same formulas).
+
+fn g30_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e300 }
+    if x == 1.0 { return 0.0 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 36 {
+        term = term * t2
+        sum = sum + term / ((2 * k + 1) as f64)
+        k = k + 1
+    }
+    return 2.0 * sum + (e as f64) * 0.6931471805599453
+}
+
+fn g30_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 709.0 { return 1.0e300 }
+    if x < 0.0 - 709.0 { return 0.0 }
+    let ln2 = 0.6931471805599453
+    var kf = x / ln2
+    var k: i32 = 0
+    if kf >= 0.0 { k = kf as i32 } else { k = (kf as i32) - 1 }
+    let r = x - (k as f64) * ln2
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 32 {
+        term = term * r / (n as f64)
+        sum = sum + term
+        n = n + 1
+    }
+    var result = sum
+    if k >= 0 {
+        var i = 0
+        while i < k { result = result * 2.0; i = i + 1 }
+    } else {
+        var i = 0
+        while i < (0 - k) { result = result / 2.0; i = i + 1 }
+    }
+    return result
+}
+
+fn g30_pow(base: f64, n: f64) -> f64 with Mut, Div, Panic {
+    if base <= 0.0 { return 0.0 }
+    g30_exp(n * g30_ln(base))
+}
+
+fn g30_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn g30_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    if g > 1.0 { g = x * 0.5 } 
+    // 90 iterations: from g0=x<=1 the first step overshoots to ~0.5 and Newton
+    // then halves per step until g^2 ~ x; 40 iterations floor at ~9.09e-13,
+    // which silently corrupted u(HO2)/u(H2O2) in the epistemic runs.
+    var i = 0
+    while i < 90 { g = 0.5 * (g + x / g); i = i + 1 }
+    g
+}
+
+// ---------------- data tables (generated, do not hand-edit) ----------------
+
+pub fn g30_nsp() -> i64 { 10 as i64 }
+pub fn g30_nrxn() -> i64 { 29 as i64 }
+
+fn g30_nasa_low() -> [f64; 70] {
+[
+    2.34433112e00, 7.98052075e-03, -1.9478151e-05, 2.01572094e-08,
+    -7.37611761e-12, -9.17935173e02, 6.83010238e-01, 2.5e00,
+    7.05332819e-13, -1.99591964e-15, 2.30081632e-18, -9.27732332e-22,
+    2.54736599e04, -4.46682853e-01, 3.1682671e00, -3.27931884e-03,
+    6.64306396e-06, -6.12806624e-09, 2.11265971e-12, 2.91222592e04,
+    2.05193346e00, 3.78245636e00, -2.99673416e-03, 9.84730201e-06,
+    -9.68129509e-09, 3.24372837e-12, -1.06394356e03, 3.65767573e00,
+    3.99201543e00, -2.40131752e-03, 4.61793841e-06, -3.88113333e-09,
+    1.3641147e-12, 3.61508056e03, -1.03925458e-01, 4.19864056e00,
+    -2.0364341e-03, 6.52040211e-06, -5.48797062e-09, 1.77197817e-12,
+    -3.02937267e04, -8.49032208e-01, 4.30179801e00, -4.74912051e-03,
+    2.11582891e-05, -2.42763894e-08, 9.29225124e-12, 2.9480804e02,
+    3.71666245e00, 4.27611269e00, -5.42822417e-04, 1.67335701e-05,
+    -2.15770813e-08, 8.62454363e-12, -1.77025821e04, 3.43505074e00,
+    3.298677e00, 1.4082404e-03, -3.963222e-06, 5.641515e-09,
+    -2.444854e-12, -1.0208999e03, 3.950372e00, 2.5e00,
+    0.0, 0.0, 0.0, 0.0,
+    -7.45375e02, 4.366e00
+]
+}
+
+fn g30_nasa_high() -> [f64; 70] {
+[
+    3.3372792e00, -4.94024731e-05, 4.99456778e-07, -1.79566394e-10,
+    2.00255376e-14, -9.50158922e02, -3.20502331e00, 2.50000001e00,
+    -2.30842973e-11, 1.61561948e-14, -4.73515235e-18, 4.98197357e-22,
+    2.54736599e04, -4.46682914e-01, 2.56942078e00, -8.59741137e-05,
+    4.19484589e-08, -1.00177799e-11, 1.22833691e-15, 2.92175791e04,
+    4.78433864e00, 3.28253784e00, 1.48308754e-03, -7.57966669e-07,
+    2.09470555e-10, -2.16717794e-14, -1.08845772e03, 5.45323129e00,
+    3.09288767e00, 5.48429716e-04, 1.26505228e-07, -8.79461556e-11,
+    1.17412376e-14, 3.858657e03, 4.4766961e00, 3.03399249e00,
+    2.17691804e-03, -1.64072518e-07, -9.7041987e-11, 1.68200992e-14,
+    -3.00042971e04, 4.9667701e00, 4.0172109e00, 2.23982013e-03,
+    -6.3365815e-07, 1.1424637e-10, -1.07908535e-14, 1.11856713e02,
+    3.78510215e00, 4.16500285e00, 4.90831694e-03, -1.90139225e-06,
+    3.71185986e-10, -2.87908305e-14, -1.78617877e04, 2.91615662e00,
+    2.92664e00, 1.4879768e-03, -5.68476e-07, 1.0097038e-10,
+    -6.753351e-15, -9.227977e02, 5.980528e00, 2.5e00,
+    0.0, 0.0, 0.0, 0.0,
+    -7.45375e02, 4.366e00
+]
+}
+
+fn g30_rxn_a() -> [f64; 29] {
+[
+    1.2e17, 5.0e17, 3.87e04, 2.0e13,
+    9.63e06, 2.8e18, 2.08e19, 1.126e19,
+    2.6e19, 7.0e17, 2.65e16, 1.0e18,
+    9.0e16, 6.0e19, 2.2e22, 3.97e12,
+    4.48e13, 8.4e13, 1.21e07, 1.0e13,
+    2.16e08, 7.4e13, 3.57e04, 1.45e13,
+    2.0e12, 1.7e18, 1.3e11, 4.2e14,
+    5.0e15
+]
+}
+
+fn g30_rxn_b() -> [f64; 29] {
+[
+    -1.0e00, -1.0e00, 2.7e00, 0.0,
+    2.0e00, -8.6e-01, -1.24e00, -7.6e-01,
+    -1.24e00, -8.0e-01, -6.707e-01, -1.0e00,
+    -6.0e-01, -1.25e00, -2.0e00, 0.0,
+    0.0, 0.0, 2.0e00, 0.0,
+    1.51e00, -3.7e-01, 2.4e00, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    0.0
+]
+}
+
+fn g30_rxn_ea() -> [f64; 29] {
+[
+    0.0, 0.0, 6.26e03, 0.0,
+    4.0e03, 0.0, 0.0, 0.0,
+    0.0, 0.0, 1.7041e04, 0.0,
+    0.0, 0.0, 0.0, 6.71e02,
+    1.068e03, 6.35e02, 5.2e03, 3.6e03,
+    3.43e03, 0.0, -2.11e03, -5.0e02,
+    4.27e02, 2.941e04, -1.63e03, 1.2e04,
+    1.733e04
+]
+}
+
+// reaction type: 0 = modified Arrhenius, 1 = three-body (rate *= [M]_eff), 2 = Troe falloff
+fn g30_rxn_type() -> [i64; 29] {
+    [1 as i64, 1 as i64, 0 as i64, 0 as i64, 0 as i64, 1 as i64, 0 as i64, 0 as i64, 0 as i64, 0 as i64, 0 as i64, 1 as i64, 0 as i64, 0 as i64, 1 as i64, 0 as i64, 0 as i64, 0 as i64, 0 as i64, 0 as i64, 0 as i64, 2 as i64, 0 as i64, 0 as i64, 0 as i64, 0 as i64, 0 as i64, 0 as i64, 0 as i64]
+}
+
+// reactant orders, row-major [29][10]
+fn g30_reac() -> [f64; 290] {
+[
+    0.0, 0.0, 2.0e00, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 1.0e00,
+    1.0e00, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    1.0e00, 0.0, 1.0e00, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    1.0e00, 0.0, 0.0, 0.0,
+    1.0e00, 0.0, 0.0, 0.0,
+    0.0, 0.0, 1.0e00, 0.0,
+    0.0, 0.0, 0.0, 1.0e00,
+    0.0, 0.0, 0.0, 1.0e00,
+    0.0, 1.0e00, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 1.0e00, 0.0, 2.0e00,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 1.0e00,
+    0.0, 1.0e00, 0.0, 1.0e00,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 1.0e00, 0.0, 1.0e00,
+    0.0, 0.0, 0.0, 0.0,
+    1.0e00, 0.0, 0.0, 1.0e00,
+    0.0, 1.0e00, 0.0, 0.0,
+    0.0, 0.0, 0.0, 1.0e00,
+    0.0, 1.0e00, 0.0, 1.0e00,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 2.0e00,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    1.0e00, 2.0e00, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 2.0e00,
+    0.0, 0.0, 0.0, 1.0e00,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 1.0e00, 0.0, 0.0,
+    1.0e00, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 1.0e00,
+    0.0, 0.0, 0.0, 0.0,
+    1.0e00, 0.0, 0.0, 0.0,
+    0.0, 1.0e00, 0.0, 0.0,
+    0.0, 0.0, 1.0e00, 0.0,
+    0.0, 0.0, 0.0, 1.0e00,
+    0.0, 0.0, 0.0, 0.0,
+    1.0e00, 0.0, 0.0, 0.0,
+    0.0, 1.0e00, 0.0, 0.0,
+    0.0, 0.0, 0.0, 1.0e00,
+    0.0, 0.0, 0.0, 1.0e00,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 1.0e00, 0.0, 0.0,
+    1.0e00, 0.0, 0.0, 0.0,
+    1.0e00, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 2.0e00, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    2.0e00, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 1.0e00, 0.0,
+    1.0e00, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    1.0e00, 0.0, 0.0, 1.0e00,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 1.0e00, 0.0,
+    0.0, 1.0e00, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 2.0e00, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    2.0e00, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    1.0e00, 0.0, 1.0e00, 0.0,
+    0.0, 0.0
+]
+}
+
+// product orders, row-major [29][10]
+fn g30_prod() -> [f64; 290] {
+[
+    0.0, 0.0, 0.0, 1.0e00,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 1.0e00, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 1.0e00, 0.0, 0.0,
+    1.0e00, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 1.0e00, 1.0e00, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    1.0e00, 0.0, 1.0e00, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    1.0e00, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 1.0e00,
+    0.0, 0.0, 1.0e00, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 1.0e00,
+    1.0e00, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 1.0e00, 0.0,
+    1.0e00, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    1.0e00, 0.0, 0.0, 1.0e00,
+    0.0, 0.0, 1.0e00, 0.0,
+    1.0e00, 0.0, 0.0, 0.0,
+    0.0, 0.0, 1.0e00, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    2.0e00, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 1.0e00, 0.0,
+    0.0, 0.0, 0.0, 1.0e00,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 1.0e00, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    1.0e00, 0.0, 0.0, 1.0e00,
+    0.0, 0.0, 0.0, 0.0,
+    1.0e00, 0.0, 0.0, 1.0e00,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 2.0e00, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    1.0e00, 0.0, 0.0, 0.0,
+    0.0, 0.0, 1.0e00, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 1.0e00, 1.0e00,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 1.0e00, 0.0, 0.0,
+    0.0, 1.0e00, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 1.0e00, 0.0, 0.0,
+    0.0, 0.0, 1.0e00, 0.0,
+    0.0, 1.0e00, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 1.0e00, 0.0, 1.0e00,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 1.0e00, 1.0e00, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 1.0e00,
+    1.0e00, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 1.0e00,
+    0.0, 0.0, 0.0, 1.0e00,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 1.0e00, 0.0, 0.0,
+    0.0, 1.0e00, 0.0, 0.0,
+    0.0, 0.0, 0.0, 1.0e00,
+    0.0, 1.0e00, 0.0, 0.0,
+    0.0, 0.0
+]
+}
+
+// net stoichiometry, row-major [29][10]
+fn g30_nu() -> [f64; 290] {
+[
+    0.0, 0.0, -2.0e00, 1.0e00,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, -1.0e00,
+    -1.0e00, 0.0, 1.0e00, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    -1.0e00, 1.0e00, -1.0e00, 0.0,
+    1.0e00, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    -1.0e00, 1.0e00, 1.0e00, 0.0,
+    -1.0e00, 0.0, 0.0, 0.0,
+    0.0, 0.0, -1.0e00, 0.0,
+    1.0e00, 0.0, 1.0e00, -1.0e00,
+    0.0, 0.0, 0.0, -1.0e00,
+    0.0, -1.0e00, 0.0, 0.0,
+    1.0e00, 0.0, 0.0, 0.0,
+    0.0, -1.0e00, 0.0, -1.0e00,
+    0.0, 0.0, 1.0e00, 0.0,
+    0.0, 0.0, 0.0, -1.0e00,
+    0.0, -1.0e00, 0.0, 0.0,
+    1.0e00, 0.0, 0.0, 0.0,
+    0.0, -1.0e00, 0.0, -1.0e00,
+    0.0, 0.0, 1.0e00, 0.0,
+    0.0, 0.0, 0.0, -1.0e00,
+    0.0, -1.0e00, 0.0, 0.0,
+    1.0e00, 0.0, 0.0, 0.0,
+    0.0, -1.0e00, 1.0e00, -1.0e00,
+    1.0e00, 0.0, 0.0, 0.0,
+    0.0, 0.0, 1.0e00, -2.0e00,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    1.0e00, -2.0e00, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 1.0e00, -2.0e00,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, -1.0e00, 0.0, 0.0,
+    -1.0e00, 1.0e00, 0.0, 0.0,
+    0.0, 0.0, 0.0, -1.0e00,
+    1.0e00, 0.0, 0.0, 1.0e00,
+    -1.0e00, 0.0, 0.0, 0.0,
+    1.0e00, -1.0e00, 0.0, 1.0e00,
+    0.0, 0.0, -1.0e00, 0.0,
+    0.0, 0.0, 0.0, -1.0e00,
+    0.0, 0.0, 2.0e00, 0.0,
+    -1.0e00, 0.0, 0.0, 0.0,
+    1.0e00, -1.0e00, 0.0, 0.0,
+    0.0, 0.0, 1.0e00, -1.0e00,
+    0.0, 0.0, 0.0, -1.0e00,
+    0.0, 0.0, 1.0e00, 1.0e00,
+    0.0, -1.0e00, 0.0, 0.0,
+    -1.0e00, 1.0e00, 0.0, 0.0,
+    -1.0e00, 1.0e00, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, -2.0e00, 0.0,
+    0.0, 1.0e00, 0.0, 0.0,
+    0.0, 0.0, 1.0e00, 0.0,
+    -2.0e00, 1.0e00, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 1.0e00, -1.0e00, 1.0e00,
+    -1.0e00, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    -1.0e00, 1.0e00, 1.0e00, -1.0e00,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, -1.0e00, 1.0e00,
+    1.0e00, -1.0e00, 0.0, 0.0,
+    0.0, 0.0, 0.0, 1.0e00,
+    0.0, 0.0, -2.0e00, 1.0e00,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, 1.0e00, 0.0, 0.0,
+    -2.0e00, 1.0e00, 0.0, 0.0,
+    0.0, 0.0, 0.0, 1.0e00,
+    -1.0e00, 1.0e00, -1.0e00, 0.0,
+    0.0, 0.0
+]
+}
+
+// third-body efficiencies per reaction/species (default 1.0; the GRI-Mech
+// specific-collider reactions carry 0.0 for species with explicit rxns)
+fn g30_eff() -> [f64; 290] {
+[
+    2.4e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.54e01, 1.0e00, 1.0e00,
+    1.0e00, 8.3e-01, 2.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 6.0e00,
+    1.0e00, 1.0e00, 1.0e00, 7.0e-01,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 0.0, 1.0e00, 0.0,
+    1.0e00, 1.0e00, 0.0, 0.0,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 0.0, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 0.0,
+    1.0e00, 1.0e00, 1.0e00, 6.3e-01,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    7.3e-01, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 3.65e00, 1.0e00, 1.0e00,
+    1.0e00, 3.8e-01, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 2.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 6.0e00,
+    1.0e00, 1.0e00, 1.0e00, 7.0e-01,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00, 1.0e00, 1.0e00,
+    1.0e00, 1.0e00
+]
+}
+
+// sum of net stoich per reaction (for Kp -> Kc)
+fn g30_dn() -> [f64; 29] {
+[
+    -1.0e00, -1.0e00, 0.0, 0.0,
+    0.0, -1.0e00, -1.0e00, -1.0e00,
+    -1.0e00, -1.0e00, 0.0, -1.0e00,
+    -1.0e00, -1.0e00, -1.0e00, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    0.0, -1.0e00, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0,
+    0.0
+]
+}
+
+// representative 1-sigma relative uncertainties on k (see header docs)
+fn g30_urel() -> [f64; 29] {
+[
+    2.5e-01, 2.5e-01, 1.5e-01, 3.0e-01,
+    3.0e-01, 2.5e-01, 3.0e-01, 3.0e-01,
+    3.0e-01, 3.0e-01, 1.0e-01, 3.0e-01,
+    3.0e-01, 3.0e-01, 3.0e-01, 3.0e-01,
+    3.0e-01, 3.0e-01, 3.0e-01, 3.0e-01,
+    1.0e-01, 3.0e-01, 2.0e-01, 3.0e-01,
+    3.0e-01, 3.0e-01, 3.0e-01, 3.0e-01,
+    3.0e-01
+]
+}
+
+// falloff (only rxn 21): low-P Arrhenius + Troe parameters
+fn g30_fall_idx() -> i64 { 21 as i64 }
+fn g30_low_a() -> f64 { 2.3e18 }
+fn g30_low_b() -> f64 { -9.0e-01 }
+fn g30_low_ea() -> f64 { -1.7e03 }
+fn g30_troe_a() -> f64 { 7.346e-01 }
+fn g30_troe_t3() -> f64 { 9.4e01 }
+fn g30_troe_t1() -> f64 { 1.756e03 }
+fn g30_troe_t2() -> f64 { 5.182e03 }
+
+// ---------------- thermochemistry (NASA7) ----------------
+
+// standard Gibbs free energy G0/(R T) for species sp at temperature t
+fn g30_g_rt(sp: i64, t: f64) -> f64 with Mut, Div, Panic {
+    let lo = g30_nasa_low()
+    let hi = g30_nasa_high()
+    let base = if t <= 1000.0 { sp * 7 } else { 10000 + sp * 7 };  // 10000 marks high set
+    var a0 = 0.0; var a1 = 0.0; var a2 = 0.0; var a3 = 0.0; var a4 = 0.0; var a5 = 0.0; var a6 = 0.0;
+    if base >= 10000 {
+        let bb = base - 10000;
+        a0 = hi[bb]; a1 = hi[bb+1]; a2 = hi[bb+2]; a3 = hi[bb+3]; a4 = hi[bb+4]; a5 = hi[bb+5]; a6 = hi[bb+6];
+    } else {
+        a0 = lo[base]; a1 = lo[base+1]; a2 = lo[base+2]; a3 = lo[base+3]; a4 = lo[base+4]; a5 = lo[base+5]; a6 = lo[base+6];
+    }
+    let h_rt = a0 + a1*t/2.0 + a2*t*t/3.0 + a3*t*t*t/4.0 + a4*t*t*t*t/5.0 + a5/t;
+    let s_r = a0*g30_ln(t) + a1*t + a2*t*t/2.0 + a3*t*t*t/3.0 + a4*t*t*t*t/4.0 + a6;
+    h_rt - s_r
+}
+
+// Kp (dimensionless, standard state 1e5 Pa) for reaction r at t
+pub fn g30_kp(r: i64, t: f64) -> f64 with Mut, Div, Panic {
+    let nu = g30_nu();
+    var dg = 0.0;
+    var s: i64 = 0;
+    while s < 10 { dg = dg + nu[r*10+s] * g30_g_rt(s, t); s = s + 1; }
+    g30_exp(0.0 - dg)
+}
+
+// Kc in (mol/cm^3)^dn units: Kc = Kp * (c0 * 1e-6)^dn, c0 = P0/(R T) mol/m^3
+pub fn g30_kc(r: i64, t: f64) -> f64 with Mut, Div, Panic {
+    let dn = g30_dn();
+    let c0cm = 1.0e5 / (8.314462618 * t) * 1.0e-6;
+    g30_kp(r, t) * g30_pow(c0cm, dn[r])
+}
+
+// ---------------- rates ----------------
+
+// effective forward rate constant for reaction r at t with effective
+// third-body concentration m_eff (includes [M] factor for three-body and the
+// Troe falloff correction; Arrhenius reactions return plain k)
+pub fn g30_kfwd_eff(r: i64, t: f64, m_eff: f64) -> f64 with Mut, Div, Panic {
+    let aa = g30_rxn_a(); let bb = g30_rxn_b(); let ee = g30_rxn_ea();
+    let ty = g30_rxn_type();
+    let kf = aa[r] * g30_pow(t, bb[r]) * g30_exp(0.0 - ee[r] / (1.9872041 * t));
+    if ty[r] == 1 { return kf * m_eff }
+    if ty[r] == 2 {
+        let k0 = g30_low_a() * g30_pow(t, g30_low_b()) * g30_exp(0.0 - g30_low_ea() / (1.9872041 * t));
+        let pr = k0 * m_eff / kf;
+        if pr <= 0.0 { return 0.0 }
+        let fcent = (1.0 - g30_troe_a()) * g30_exp(0.0 - t / g30_troe_t3())
+                  + g30_troe_a() * g30_exp(0.0 - t / g30_troe_t1())
+                  + g30_exp(0.0 - g30_troe_t2() / t);
+        let lfc = g30_ln(fcent) / 2.302585092994046;
+        let cc = 0.0 - 0.4 - 0.67 * lfc;
+        let nn = 0.75 - 1.27 * lfc;
+        let dd = 0.14;
+        let lpr = g30_ln(pr) / 2.302585092994046;
+        let xx = (lpr + cc) / (nn - dd * (lpr + cc));
+        let logf = lfc / (1.0 + xx * xx);
+        return kf * (pr / (1.0 + pr)) * g30_pow(10.0, logf)
+    }
+    kf
+}
+
+pub fn g30_m_eff(r: i64, c: &[f64; 10]) -> f64 with Mut, Div, Panic {
+    let eff = g30_eff();
+    var m = 0.0;
+    var s: i64 = 0;
+    while s < 10 { m = m + eff[r*10+s] * c[s]; s = s + 1; }
+    m
+}
+
+// all equilibrium constants at t (Kc depends on T only — precompute per simulation)
+pub fn g30_kc_all(t: f64) -> [f64; 29] with Mut, Div, Panic {
+    var kc: [f64; 29] = [0.0; 29];
+    var r: i64 = 0;
+    while r < 29 { kc[r] = g30_kc(r, t); r = r + 1; }
+    kc
+}
+
+// forward and reverse rates for every reaction; returns (fwd[29], rev[29]) flattened
+fn g30_rates_fb(t: f64, c: &[f64; 10], kc: &[f64; 29], fwd: &![f64; 29], rev: &![f64; 29]) with Mut, Div, Panic {
+    let reac = g30_reac(); let prod = g30_prod();
+    var r: i64 = 0;
+    while r < 29 {
+        let kf = g30_kfwd_eff(r, t, g30_m_eff(r, c));
+        var f = kf;
+        var s: i64 = 0;
+        while s < 10 {
+            let o = reac[r*10+s];
+            if o == 2.0 { f = f * c[s] * c[s]; }
+            if o == 1.0 { f = f * c[s]; }
+            s = s + 1;
+        }
+        var rv = 0.0;
+        if kc[r] > 0.0 {
+            rv = kf / kc[r];
+            s = 0;
+            while s < 10 {
+                let o = prod[r*10+s];
+                if o == 2.0 { rv = rv * c[s] * c[s]; }
+                if o == 1.0 { rv = rv * c[s]; }
+                s = s + 1;
+            }
+        }
+        fwd[r] = f;
+        rev[r] = rv;
+        r = r + 1;
+    }
+}
+
+// dc_i/dt with precomputed Kc table
+pub fn g30_dc_kc(t: f64, c: &[f64; 10], kc: &[f64; 29]) -> [f64; 10] with Mut, Div, Panic {
+    let nu = g30_nu();
+    var fwd: [f64; 29] = [0.0; 29];
+    var rev: [f64; 29] = [0.0; 29];
+    g30_rates_fb(t, c, kc, &!fwd, &!rev);
+    var dc: [f64; 10] = [0.0; 10];
+    var i: i64 = 0;
+    while i < 10 {
+        var acc = 0.0;
+        var r: i64 = 0;
+        while r < 29 { acc = acc + nu[r*10+i] * (fwd[r] - rev[r]); r = r + 1; }
+        dc[i] = acc;
+        i = i + 1;
+    }
+    dc
+}
+
+// dc_i/dt for the full mechanism (convenience: recomputes Kc each call)
+pub fn g30_dc(t: f64, c: &[f64; 10]) -> [f64; 10] with Mut, Div, Panic {
+    let kc = g30_kc_all(t);
+    g30_dc_kc(t, c, &kc)
+}
+
+// ---------------- deterministic simulator (RK4, isothermal) ----------------
+
+pub fn simulate_gri30_h2(init: &[f64; 10], t_k: f64, dt: f64, steps: i64) -> [f64; 10] with Mut, Div, Panic {
+    let kc = g30_kc_all(t_k);
+    var y: [f64; 10] = [init[0], init[1], init[2], init[3], init[4], init[5], init[6], init[7], init[8], init[9]];
+    var yt: [f64; 10] = [0.0; 10];
+    var s: i64 = 0;
+    while s < steps {
+        let k1 = g30_dc_kc(t_k, &y, &kc);
+        var i: i64 = 0;
+        while i < 10 { yt[i] = y[i] + 0.5 * dt * k1[i]; i = i + 1; }
+        let k2 = g30_dc_kc(t_k, &yt, &kc);
+        i = 0;
+        while i < 10 { yt[i] = y[i] + 0.5 * dt * k2[i]; i = i + 1; }
+        let k3 = g30_dc_kc(t_k, &yt, &kc);
+        i = 0;
+        while i < 10 { yt[i] = y[i] + dt * k3[i]; i = i + 1; }
+        let k4 = g30_dc_kc(t_k, &yt, &kc);
+        i = 0;
+        while i < 10 { y[i] = y[i] + (dt / 6.0) * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i]); i = i + 1; }
+        s = s + 1;
+    }
+    y
+}
+
+// ---------------- epistemic layer (GUM delta method on rate uncertainties) ----------------
+
+fn g30_jacobian(t: f64, c: &[f64; 10], kc: &[f64; 29], eps: f64, jac: &![f64; 100]) with Mut, Div, Panic {
+    var s: i64 = 0;
+    while s < 10 {
+        var cp: [f64; 10] = [c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9]];
+        var cm: [f64; 10] = [c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9]];
+        cp[s] = cp[s] + eps;
+        cm[s] = cm[s] - eps;
+        let dcp = g30_dc_kc(t, &cp, kc);
+        let dcm = g30_dc_kc(t, &cm, kc);
+        var i: i64 = 0;
+        while i < 10 {
+            jac[i*10+s] = (dcp[i] - dcm[i]) / (2.0 * eps);
+            i = i + 1;
+        }
+        s = s + 1;
+    }
+}
+
+fn g30_propagate_unc(t: f64, c: &[f64; 10], kc: &[f64; 29], varc: &[f64; 10], dt: f64) -> [f64; 10] with Mut, Div, Panic {
+    let nu = g30_nu();
+    let urel = g30_urel();
+    var jac: [f64; 100] = [0.0; 100];
+    g30_jacobian(t, c, kc, 1.0e-12, &!jac);
+    var fwd: [f64; 29] = [0.0; 29];
+    var rev: [f64; 29] = [0.0; 29];
+    g30_rates_fb(t, c, kc, &!fwd, &!rev);
+    var newv: [f64; 10] = [0.0; 10];
+    var i: i64 = 0;
+    while i < 10 {
+        var sumv = 0.0;
+        var k: i64 = 0;
+        while k < 10 {
+            let jdt = jac[i*10+k] * dt;
+            sumv = sumv + jdt * jdt * varc[k];
+            k = k + 1;
+        }
+        // diagonal first-order covariance step: v + 2 J_ii v dt + (J dt)^2 v + rate-unc terms
+        sumv = varc[i] + 2.0 * jac[i*10+i] * varc[i] * dt + sumv;
+        var sumk = 0.0;
+        var r: i64 = 0;
+        while r < 29 {
+            let sens = nu[r*10+i] * (fwd[r] - rev[r]) * dt * urel[r];
+            sumk = sumk + sens * sens;
+            r = r + 1;
+        }
+        newv[i] = sumv + sumk;
+        i = i + 1;
+    }
+    newv
+}
+
+// epistemic simulation: values + 1-sigma uncertainties per species
+pub fn simulate_gri30_h2_epistemic(init: &[f64; 10], inits: &[f64; 10], t_k: f64, dt: f64, steps: i64) -> ([f64; 10], [f64; 10]) with Mut, Div, Panic {
+    let kc = g30_kc_all(t_k);
+    var y: [f64; 10] = [init[0], init[1], init[2], init[3], init[4], init[5], init[6], init[7], init[8], init[9]];
+    var v: [f64; 10] = [0.0; 10];
+    var i: i64 = 0;
+    while i < 10 { v[i] = inits[i] * inits[i]; i = i + 1; }
+    var yt: [f64; 10] = [0.0; 10];
+    var s: i64 = 0;
+    while s < steps {
+        let k1 = g30_dc_kc(t_k, &y, &kc);
+        i = 0;
+        while i < 10 { yt[i] = y[i] + 0.5 * dt * k1[i]; i = i + 1; }
+        let k2 = g30_dc_kc(t_k, &yt, &kc);
+        i = 0;
+        while i < 10 { yt[i] = y[i] + 0.5 * dt * k2[i]; i = i + 1; }
+        let k3 = g30_dc_kc(t_k, &yt, &kc);
+        i = 0;
+        while i < 10 { yt[i] = y[i] + dt * k3[i]; i = i + 1; }
+        let k4 = g30_dc_kc(t_k, &yt, &kc);
+        i = 0;
+        while i < 10 { y[i] = y[i] + (dt / 6.0) * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i]); i = i + 1; }
+        v = g30_propagate_unc(t_k, &y, &kc, &v, dt);
+        s = s + 1;
+    }
+    var u: [f64; 10] = [0.0; 10];
+    i = 0;
+    while i < 10 { u[i] = g30_sqrt(v[i]); i = i + 1; }
+    (y, u)
+}
+
+
+// ---------------- tests (all expectations from the independent Python replica) ----------------
+
+fn g30_check_near(a: f64, b: f64, tol: f64) -> bool { g30_abs(a - b) < tol }
+
+pub fn test_g30_rates() -> bool with Mut, Div, Panic {
+    // Python cross-check at T=1200K, [M]=1/(82.057*1200) mol/cm^3:
+    //   k00(2O+M, three-body, air-like m_eff)=1.0156e9, k02(O+H2)=5.7733e11,
+    //   k10(H+O2)=1.7968e11, k20(OH+H2)=2.2874e12,
+    //   k21(2OH(+M), Troe falloff, air-like m_eff)=5.4822e10
+    let t = 1200.0;
+    let m = 1.0 / (82.057 * t);
+    var c_air: [f64; 10] = [0.0; 10];
+    c_air[8] = m * 0.79;
+    c_air[3] = m * 0.21;
+    let m00 = g30_m_eff(0 as i64, &c_air);
+    let m21 = g30_m_eff(21 as i64, &c_air);
+    g30_check_near(g30_kfwd_eff(0 as i64, t, m00), 1.0156e9, 2.0e7) &&
+    g30_check_near(g30_kfwd_eff(2 as i64, t, m), 5.7733e11, 5.0e9) &&
+    g30_check_near(g30_kfwd_eff(10 as i64, t, m), 1.7968e11, 2.0e9) &&
+    g30_check_near(g30_kfwd_eff(20 as i64, t, m), 2.2874e12, 2.0e10) &&
+    g30_check_near(g30_kfwd_eff(21 as i64, t, m21), 5.4822e10, 1.0e9)
+}
+
+pub fn test_g30_thermo() -> bool with Mut, Div, Panic {
+    // NASA7 equilibrium constants at T=1200K (Python replica):
+    //   kc02=9.768e-1, kc10=1.575e-2, kc14(H+OH+M->H2O+M)=3.208e20
+    let t = 1200.0;
+    g30_check_near(g30_kc(2 as i64, t), 9.768e-1, 1.0e-2) &&
+    g30_check_near(g30_kc(10 as i64, t), 1.575e-2, 2.0e-4) &&
+    g30_check_near(g30_kc(14 as i64, t), 3.208e20, 5.0e18)
+}
+
+fn g30_demo_init(t: f64) -> [f64; 10] with Mut, Div, Panic {
+    // 2% H2 / 1% O2 / 97% N2 at 1 atm, H-atom seed 1e-11 (chain initiation)
+    let m = 1.0 / (82.057 * t);
+    var c0: [f64; 10] = [0.0; 10];
+    c0[0] = m * 0.02;
+    c0[3] = m * 0.01;
+    c0[8] = m * 0.97;
+    c0[1] = 1.0e-11;
+    c0
+}
+
+pub fn test_g30_sim() -> bool with Mut, Div, Panic {
+    // isothermal ignition at 1500 K; Python replica checkpoint at t=1e-4 s
+    // (dt=1e-8, 10000 steps, pre-front; the ignition front itself is
+    // exponentially sensitive, so fixed-time post-front states are not
+    // suitable for cross-language parity):
+    //   H2=1.44897e-7  OH=1.2667e-9  H2O=1.1978e-8  H=9.9532e-9  O2=7.3868e-8
+    let t = 1500.0;
+    let c0 = g30_demo_init(t);
+    let y = simulate_gri30_h2(&c0, t, 1.0e-8, 10000 as i64);
+    g30_check_near(y[0], 1.44897e-7, 7.0e-9) &&
+    g30_check_near(y[4], 1.2667e-9, 3.0e-10) &&
+    g30_check_near(y[5], 1.1978e-8, 1.2e-9) &&
+    g30_check_near(y[1], 9.9532e-9, 1.0e-9) &&
+    g30_check_near(y[3], 7.3868e-8, 4.0e-9)
+}
+
+pub fn test_g30_epistemic() -> bool with Mut, Div, Panic {
+    // same ignition + 1% standard uncertainty on initial H2/O2 and the
+    // per-reaction rate uncertainties; Python replica at t=1e-4 s:
+    //   u(H2)=1.4484e-9  u(H2O)=2.2225e-11  u(OH)=9.2001e-12  u(H)=2.2813e-11
+    let t = 1500.0;
+    let c0 = g30_demo_init(t);
+    var u0: [f64; 10] = [0.0; 10];
+    u0[0] = 0.01 * c0[0];
+    u0[3] = 0.01 * c0[3];
+    let (y, u) = simulate_gri30_h2_epistemic(&c0, &u0, t, 1.0e-8, 10000 as i64);
+    g30_check_near(y[0], 1.44897e-7, 7.0e-9) &&
+    g30_check_near(u[0], 1.4484e-9, 8.0e-11) &&
+    g30_check_near(u[5], 2.2225e-11, 5.0e-12) &&
+    g30_check_near(u[4], 9.2001e-12, 2.5e-12) &&
+    g30_check_near(u[1], 2.2813e-11, 4.0e-12)
+}
+
+fn main() -> i32 with Mut, Div, Panic, IO {
+    var f: i32 = 0;
+    if test_g30_rates() { println("PASS g30 rates") } else { f = f + 1; println("FAIL g30 rates") }
+    if test_g30_thermo() { println("PASS g30 thermo") } else { f = f + 1; println("FAIL g30 thermo") }
+    if test_g30_sim() { println("PASS g30 sim") } else { f = f + 1; println("FAIL g30 sim") }
+    if test_g30_epistemic() { println("PASS g30 epistemic") } else { f = f + 1; println("FAIL g30 epistemic") }
+    if f == 0 { println("GRI30_H2 REAL MECHANISM + NASA THERMO + EPISTEMIC UQ PASS") } else { println("GRI30_H2 FAIL") }
+    f
+}

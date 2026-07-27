@@ -16,7 +16,11 @@ fail() {
 [[ -n "$RAW_MADAROS" ]] || fail "MADAROS_RAW_BIN must name a current-source Madaros ELF"
 [[ -x "$RAW_MADAROS" ]] || fail "Madaros ELF is missing or not executable: $RAW_MADAROS"
 
-stack_kb="${SOUNIO_MADAROS_CALL_ARITY_13_STACK_KB:-131072}"
+# Soft stack for the Madaros *compiler process* (not the witness). After FO GUM
+# multi-channel growth, 128 MiB (131072 KiB) is insufficient on GitHub runners
+# (SEGV / call-arg scratch overflow during imported lower). Measured 2026-07-26:
+# 262144 KiB passes; 131072 fails. Default 512 MiB for headroom.
+stack_kb="${SOUNIO_MADAROS_CALL_ARITY_13_STACK_KB:-524288}"
 [[ "$stack_kb" =~ ^[1-9][0-9]*$ && ${#stack_kb} -le 9 ]] || fail "invalid stack size: $stack_kb"
 stack_before="$(ulimit -S -s 2>/dev/null)" || fail "soft stack limit is unavailable"
 [[ "$stack_before" == "unlimited" || "$stack_before" =~ ^[0-9]+$ ]] || fail "invalid soft stack limit: $stack_before"
