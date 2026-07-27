@@ -15,6 +15,8 @@
 | Knowledge ⊗ Knowledge | GUM value/variance construct + multi-channel FO combine | `knowledge_ops`, `pk_exposure` |
 | Multi-pass FO register | Reverse-order pure helpers expand nested FO (4-pass preregister) | `reverse_order` |
 | Correlate + H off-diag | `correlate(a,b,ρ)`; Var/E₂ include H_ij Cov_ij (16-ch) | `correlate` |
+| Quotient off-diag H | FO div combine tracks H_ij (with Cov) | `div_correlate` |
+| stdlib `epistemic::fo` | Pure FO-transfer helpers (css/clearance/mul/div) | `stdlib_surface` |
 | Control | `if` SELECT blend (const + runtime) | `div_if`, `if_helper` |
 | 2nd-order mean | `E₂[f] ≈ f(μ) + ½ Σ H_kk σ_k²` | `second_order_mean`, `fo_emit_second_order_bias` |
 | Hessian diag | `hessian_diag_of(expr) → Σ H_kk` | `pow_const` |
@@ -35,7 +37,7 @@ SOUNIO_FO_REBUILD=1 bash scripts/ci/madaros_gum_fo_trust_gate.sh
 
 Summary JSON lands under `$SOUNIO_FO_TRUST_DIR/summary.json` (or a temp dir printed by the script).
 
-**Measured 2026-07-27 (post correlate FO):** 22/22 PASS under rebuilt Madaros.
+**Measured 2026-07-27 (post div-offdiag + stdlib fo):** 24/24 PASS under rebuilt Madaros.
 
 ## Science driver
 
@@ -64,11 +66,12 @@ Multi-factor Css model with pure helpers (including `clearance_helper` with `exp
 4. **Correlated seeds** (shared η) are not modelled — treat as separate measures today.
 5. **pow native** is `exp(y·log x)`; FO mean also rewrites const-exponent `pow` to `exp(c·log)` in lower.
 6. **Method FO** inherits receiver sens only (view-style), not full mangled-method transfer.
-7. **No stdlib public wrapper** yet — builtins are compiler-injected (`variance_of`, `second_order_mean`, `hessian_diag_of`).
+7. **FO builtins remain compiler-injected** (`variance_of`, …) — stdlib `epistemic::fo` wraps *pure helpers*, not the builtins themselves (AST-walk requirement).
 
 ### Closed this session
 
 - **Interproc FO through unary math inside pure helpers.** Bytecode op `20+uk`; FWD skip for math names. Gate: `interproc_exp`.
+- **Quotient off-diag + stdlib fo surface.** `fo_combine_sens_div` tracks H_ij; `stdlib/epistemic/fo.sio` pure helpers; CI wires `madaros_gum_fo_trust_gate.sh`.
 - **Correlate + off-diagonal Hessian.** `correlate(a,b,ρ)` sets Cov=ρ·σa·σb between primary FO channels; product/add combine track H_ij (16×16); Var/E₂ pick up cross terms. Gate: `correlate` (ρ=1: E₂[(x+y)²]=9.09, Var=0.09).
 - **Multi-pass FO pure-fn registration.** `lowerer_fo_preregister_pure_fns_multipass_mut` (4 passes) before body lower so reverse-order nested helpers expand. Gate: `reverse_order`.
 - **Knowledge ⊗ Knowledge FO/GUM.** `lower_knowledge_binary_expr_ref` builds Knowledge with GUM variance and multi-channel FO; `.value` peel preserves FO binds. Gate: `knowledge_ops`.
@@ -76,7 +79,7 @@ Multi-factor Css model with pure helpers (including `clearance_helper` with `exp
 
 ## Gate inventory
 
-All files matching `tests/run-pass/madaros_gum_fo_*.sio` are members of the trust gate (22 files including `correlate`). Adding a new FO gate = drop a `madaros_gum_fo_*.sio` with a `MADAROS_GUM_FO_*_PASS` token.
+All files matching `tests/run-pass/madaros_gum_fo_*.sio` are members of the trust gate (24 files including `div_correlate`, `stdlib_surface`). Adding a new FO gate = drop a `madaros_gum_fo_*.sio` with a `MADAROS_GUM_FO_*_PASS` token.
 
 ## Next bold moves (ordered)
 
