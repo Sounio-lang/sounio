@@ -19,6 +19,8 @@ Status: full super mix + unique demos (epistemic general CRN with EState, effect
 - equilibrium.sio: K<->dG full GUM, real quadratic solver for A+B=C, Newton, Nernst electro with unc, real deltaG test.
 - acids.sio: pH GUM, titration, full epistemic calib, MM biochem with unc.
 - stoich/thermochem: real with GUM, limiting, Hess.
+- **GRI-Mech 3.0 real rates** (`gri_mech_rates`, `simulate_big_crn_gri` in kinetics.sio): modified Arrhenius k(T) = A·T^n·exp(−Ea/RT) from the actual grimech30.dat A/n/Ea parameters (no hardcoded effective constants), cross-checked against an independent Python replication at 1500 K / 1 atm. Run-pass coverage: tests/stdlib/chemistry/test_kinetics_gri_mech.sio.
+- **Epistemic general CRN respects user stoichiometry** (`simulate_general_epistemic`): values via general mass-action RK4 on the supplied Nu, variances via per-step delta method (central-difference Jacobian + rate sensitivities). Structural/fractional ensembles therefore show genuine between-model variance. Run-pass coverage: tests/stdlib/chemistry/test_kinetics_epistemic_ensemble.sio.
 - Deep novelty (super mix + this deep phase): structural ensembles (multiple Nu + posterior probs per CRN lit), Caputo fractional + epistemic kinetics (stdlib caputo), epistemic PINN/SciML CRN, effect handlers (GUM vs MC), more PBPK sub-models. All native UQ.
 - Units: dim_conc, dim_volume, Quantity + epistemic bridge.
 - All REAL formulas (series, GUM delta/Newton, mass action, Nernst, MM, quadratic), no stubs.
