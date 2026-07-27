@@ -485,7 +485,59 @@ executes the same markers without `SOUNIO_SOUC_ENGINE=lean_single`. Do not alter
 the semantic oracles while repairing compiler lowering, aggregate return, or
 privacy enforcement.
 
-## Reporting Issues
+## Bootstrap seed: imported-module typecheck errors are non-fatal (#1494)
 
-If you encounter any new issues, please report them at:
-https://github.com/sounio-lang/sounio/issues
+**Status: documented and frozen as a known property of the seed. Not fixed. Owner decision, 2026-07-27.**
+
+The `lean_single` seed (`self-hosted/compiler/lean_single.sio`) tolerates a
+typecheck error inside a module reached via `import`: the error is reported,
+and the build continues and still emits an ELF. The same construct, compiled
+as a standalone program instead of via an imported module, correctly refuses
+to emit (exit 2, no ELF) — the tolerance is specific to the imported-module
+path.
+
+The mechanism (`lean_single.sio:29451-29469`, "CONVERGENCE FIX") only rewinds
+and stubs an imported function with a clean `return 0` placeholder when that
+function accumulates **more than 10** typecheck errors
+(`fn_err_count > 10 && fn_is_import`, `:29454-29458`). Below that threshold,
+the function's already-emitted, partially-broken codegen is left in the
+binary as-is — not stubbed, not refused.
+
+This is not a hypothetical severity concern: #1494 was filed while
+root-causing #1471, where exactly this tolerance let a typecheck error that
+the checker had already reported (an unresolvable assignment place) reach
+codegen anyway. The resulting store had no valid address; inside Madaros's
+~8 MB `Checker` struct it landed in mapped memory instead of faulting, and
+silently corrupted name resolution — surfacing as three unrelated spurious
+`error[E137]` diagnostics in a different subsystem, on a different source
+file. Diagnosing that took roughly seven full rebuild cycles before the
+tolerated error (printed inline, scrolled past in the build log) was
+identified as the actual cause. As of #1494's filing, the current `main`
+build log already carries three such tolerated errors, from `lower.sio`,
+`imports.sio`, and `opt_cleanup.sio`.
+
+#1494 poses this as a policy decision among three options: (1) make
+imported-module typecheck errors fatal outright (correct in principle, but
+would fail the build on the three currently-tolerated errors, which would
+need repairing first, with blast radius measured against
+`tests/madaros_corpus_baseline.txt`); (2) keep them non-fatal but refuse to
+emit code for the specific construct that failed, rather than emitting
+something with no valid address; (3), stated in the issue as *the minimum*
+acceptable outcome — if the tolerance is load-bearing for the bootstrap
+chain (plausible, given three such errors already sit in the current
+build), say so explicitly in the source and here, **and** make the build
+print a prominent end-of-build summary of every tolerated error, rather
+than leaving it inline where it is lost.
+
+**What this entry does, and does not, close.** This documents the behaviour
+and its severity — the "say so explicitly" half of option 3. It does **not**
+implement the prominent end-of-build summary that #1494 names as the other
+half of the minimum acceptable outcome, and does not choose between options
+1/2/3 as a permanent policy. The seed (`lean_single`) is the frozen
+bootstrap artifact whose guarantee is bit-identical fixed-point
+self-regeneration, not per-construct correctness enforcement — that
+guarantee lives in Madaros, which type-checks through a different,
+modular checker (`self-hosted/check/`) and is not affected by this specific
+mechanism. Changing `lean_single.sio` risks perturbing that fixed point and
+was judged out of scope for this measurability pass; #1494 stays open for
+whoever picks option 1, 2, or the remainder of option 3.
