@@ -2,7 +2,7 @@
 topic_id: repo.docs.audit.module-frontend-lower-array-seed-crash-dispatch-2026-07-27
 authority: repo_only
 audience: users
-last_validated: 2026-07-27
+last_validated: 2026-03-07
 validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.module-frontend-lower-array-seed-crash-dispatch-2026-07-27
 -->
