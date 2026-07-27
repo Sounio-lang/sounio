@@ -144,6 +144,8 @@ FAIL=0
 SKIP=0
 KNOWN_FAILURE=0
 FLAKY=0
+VACUOUS_KNOWN=0
+VACUOUS_STALE=""
 ERRORS=""
 
 # Repo-level blocker manifest. This lets CI stay strict about new failures while
@@ -161,6 +163,35 @@ if [[ -n "$KNOWN_FAILURES_FILE" && -f "$KNOWN_FAILURES_FILE" ]]; then
         [[ -z "$line" ]] && continue
         KNOWN_FAILURE_MAP["$line"]=1
     done < "$KNOWN_FAILURES_FILE"
+fi
+
+# Vacuous-expect-stdout/error-pattern baseline. The //@ expect-stdout: / //@
+# error-pattern: extraction below used to quote the whole `=~` pattern, which
+# makes bash treat it as a literal string instead of a regex, so the capture
+# group never captured and every such assertion matched vacuously (an empty
+# expected string always matches). Fixing the extraction (see the comment at
+# the expect_stdout/error_patterns parse loop) makes every test whose
+# annotation was actually wrong fail for real, for the first time -- these are
+# PRE-EXISTING wrong annotations, not regressions caused by the fix. Mirrors
+# scripts/ci/madaros_corpus_regression_gate.sh: compare the failure LIST
+# against a checked-in baseline (tests/vacuous_expect_baseline.txt) and
+# tolerate only entries already listed there, so the fix can land without
+# turning the required `full-test-suite` CI job red. Unlike
+# KNOWN_FAILURES_FILE above, this baseline is always active (not gated to
+# --format junit with no filter) so it also covers local/manual runs.
+#
+# Regenerate: SOUNIO_VACUOUS_BASELINE_REFRESH=1 bash scripts/run_sio_test_suite.sh
+VACUOUS_BASELINE_FILE="$ROOT_DIR/tests/vacuous_expect_baseline.txt"
+VACUOUS_REFRESH="${SOUNIO_VACUOUS_BASELINE_REFRESH:-0}"
+declare -A VACUOUS_BASELINE_MAP=()
+if [[ "$VACUOUS_REFRESH" != "1" && -f "$VACUOUS_BASELINE_FILE" ]]; then
+    while IFS= read -r line; do
+        line="${line%%#*}"
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        [[ -z "$line" ]] && continue
+        VACUOUS_BASELINE_MAP["$line"]=1
+    done < "$VACUOUS_BASELINE_FILE"
 fi
 
 # JUnit XML output file
@@ -211,6 +242,7 @@ run_test() {
     local is_check_only=false
     local is_known_failure=false
     local is_flaky=false
+    local is_vacuous_baseline=false
     local timeout_val=30
     local skip_if=""
     local requires=""
@@ -256,7 +288,15 @@ run_test() {
         is_known_failure=true
         known_reason="${known_reason:-hardened diagnostics blocker manifest}"
     fi
-    
+
+    # See the VACUOUS_BASELINE_MAP loading comment above. Membership is
+    # recorded regardless of exit code, same as is_known_failure -- whether it
+    # counts as a tolerated failure (vxfail) or a "now passes, shrink the
+    # baseline" notice (vxpas) is decided once exit_code is known below.
+    if [[ "$VACUOUS_REFRESH" != "1" && -n "${VACUOUS_BASELINE_MAP[$rel_file]:-}" ]]; then
+        is_vacuous_baseline=true
+    fi
+
     # Check filter
     if ! test_matches_filter "$basename"; then
         return
@@ -437,6 +477,9 @@ run_test() {
         if $is_known_failure; then
             status="xpas"
             category="known-failure"
+        elif $is_vacuous_baseline; then
+            status="vxpas"
+            category="vacuous-baseline"
         elif $is_flaky; then
             status="pass"
             category="flaky"
@@ -448,6 +491,9 @@ run_test() {
         if $is_known_failure; then
             status="xfail"
             category="known-failure"
+        elif $is_vacuous_baseline; then
+            status="vxfail"
+            category="vacuous-baseline"
         elif $is_flaky; then
             status="fail"
             category="flaky"
@@ -456,16 +502,16 @@ run_test() {
             category="fail"
         fi
     fi
-    
+
     # Parse agent witness from raw output (if present)
     local agent_witness=""
     agent_witness=$(echo "$output" | sed -n 's/^agent_witness=//p' | head -n 1)
-    
+
     # Escape output for JSON
     local escaped_output
     escaped_output=$(echo "$test_output" | sed 's/"/\\"/g' | tr '\n' ' ' | sed 's/  */ /g' | head -c 200)
-    
-    local json="{\"status\":\"$status\",\"category\":\"$category\",\"name\":\"$basename\",\"time\":$duration,\"output\":\"$escaped_output\",\"idx\":$idx"
+
+    local json="{\"status\":\"$status\",\"category\":\"$category\",\"name\":\"$basename\",\"relfile\":\"$rel_file\",\"time\":$duration,\"output\":\"$escaped_output\",\"idx\":$idx"
     if [[ -n "$agent_witness" ]]; then
         json="$json,\"agent_witness\":$agent_witness"
     fi
@@ -609,6 +655,25 @@ for f in "$TEST_TMP"/result_*.json; do
                 echo "  XPAS  $name (known failure now passes)"
             fi
             ;;
+        vxfail)
+            # Tolerated because it is listed in tests/vacuous_expect_baseline.txt.
+            # Counted and reported, never silently dropped: a tolerated failure
+            # that does not appear in the summary is indistinguishable from a
+            # test that never ran.
+            ((VACUOUS_KNOWN++))
+            if [[ "$VERBOSE" == "1" ]]; then
+                echo "  VXFAIL  $name (vacuous-annotation baseline)"
+            fi
+            ;;
+        vxpas)
+            # Listed in the baseline but now passing. Always announced, not only
+            # under --verbose: the baseline must shrink as annotations are fixed,
+            # and a stale entry silently absorbing a pass is how a baseline rots
+            # into a permanent mute.
+            ((PASS++))
+            VACUOUS_STALE="${VACUOUS_STALE}    $name
+"
+            ;;
         skip)
             ((SKIP++))
             reason=$(echo "$result" | grep -o '"reason":"[^"]*"' | cut -d'"' -f4)
@@ -625,9 +690,17 @@ echo "=== Results ==="
 echo "  Pass: $PASS"
 echo "  Fail: $FAIL"
 [[ $KNOWN_FAILURE -gt 0 ]] && echo "  Known failures: $KNOWN_FAILURE"
+[[ $VACUOUS_KNOWN -gt 0 ]] && echo "  Vacuous-annotation baseline (tolerated): $VACUOUS_KNOWN"
 [[ $FLAKY -gt 0 ]] && echo "  Flaky: $FLAKY"
 echo "  Skip: $SKIP"
-echo "  Total: $((PASS + FAIL + SKIP + KNOWN_FAILURE))"
+echo "  Total: $((PASS + FAIL + SKIP + KNOWN_FAILURE + VACUOUS_KNOWN))"
+
+if [[ -n "$VACUOUS_STALE" ]]; then
+    echo ""
+    echo "=== Stale vacuous-annotation baseline entries (now passing) ==="
+    printf '%s' "$VACUOUS_STALE"
+    echo "  Remove these from tests/vacuous_expect_baseline.txt."
+fi
 
 # Generate JUnit XML if requested
 if [[ "$FORMAT" == "junit" ]]; then
@@ -664,6 +737,16 @@ XMLEOF
             xfail)
                 echo "    <testcase name=\"$name\" time=\"$time\">" >> "$JUNIT_FILE"
                 echo "      <skipped message=\"Known failure\"/>" >> "$JUNIT_FILE"
+                echo "    </testcase>" >> "$JUNIT_FILE"
+                ;;
+            vxfail)
+                echo "    <testcase name=\"$name\" time=\"$time\">" >> "$JUNIT_FILE"
+                echo "      <skipped message=\"Vacuous-annotation baseline: $output\"/>" >> "$JUNIT_FILE"
+                echo "    </testcase>" >> "$JUNIT_FILE"
+                ;;
+            vxpas)
+                echo "    <testcase name=\"$name\" time=\"$time\">" >> "$JUNIT_FILE"
+                echo "      <system-out>Vacuous-annotation baseline entry now passes; remove it</system-out>" >> "$JUNIT_FILE"
                 echo "    </testcase>" >> "$JUNIT_FILE"
                 ;;
             skip)
