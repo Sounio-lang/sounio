@@ -314,9 +314,17 @@ run_test() {
             no-gpu) [[ -z "${SOUNIO_GPU_AVAILABLE:-}" ]] && { echo "{\"status\":\"skip\",\"reason\":\"skip-if:no-gpu\",\"name\":\"$basename\",\"idx\":$idx}" > "$output_file"; return; } ;;
             no-llvm) [[ -z "${SOUNIO_LLVM_AVAILABLE:-}" ]] && { echo "{\"status\":\"skip\",\"reason\":\"skip-if:no-llvm\",\"name\":\"$basename\",\"idx\":$idx}" > "$output_file"; return; } ;;
             ci-only) [[ -n "${CI:-}" ]] && { echo "{\"status\":\"skip\",\"reason\":\"skip-if:ci-only\",\"name\":\"$basename\",\"idx\":$idx}" > "$output_file"; return; } ;;
+            # An unrecognized skip-if value must not fall through silently: that
+            # would let a typo (e.g. `no-gpu` misspelled) run the test unguarded
+            # while the annotation reads as if it were gating something -- the
+            # same "guard that asserts nothing" defect this file exists to remove.
+            *)
+                echo "{\"status\":\"fail\",\"category\":\"fail\",\"name\":\"$basename\",\"output\":\"unknown skip-if: $skip_if (expected: no-gpu|no-llvm|ci-only)\",\"idx\":$idx}" > "$output_file"
+                return
+                ;;
         esac
     fi
-    
+
     # Check requires
     if [[ -n "$requires" ]]; then
         case "$requires" in
@@ -327,6 +335,15 @@ run_test() {
             # stage2 binary. Skipped unless SOUNIO_MADAROS_AVAILABLE is set (a future
             # Madaros-based test job sets it). Tracked: Madaros-official migration.
             madaros) [[ -z "${SOUNIO_MADAROS_AVAILABLE:-}" ]] && { echo "{\"status\":\"skip\",\"reason\":\"requires:madaros\",\"name\":\"$basename\",\"idx\":$idx}" > "$output_file"; return; } ;;
+            # An unrecognized requires value must not fall through silently: a typo
+            # (e.g. `requires: madros`) would otherwise run the test against
+            # whatever engine is present instead of being gated as intended, with
+            # the annotation asserting nothing -- indistinguishable from the
+            # vacuous-match defect this PR exists to remove.
+            *)
+                echo "{\"status\":\"fail\",\"category\":\"fail\",\"name\":\"$basename\",\"output\":\"unknown requires: $requires (expected: gpu|llvm|madaros)\",\"idx\":$idx}" > "$output_file"
+                return
+                ;;
         esac
     fi
     
@@ -431,9 +448,11 @@ run_test() {
         # `check` runs the boundary-preserving visibility/type pass, whereas
         # `compile` can "pass" on unrelated backend / missing-main failures
         # without ever exercising the guarantee (see audit 2026-07-24).
-        # Parse the pinned pattern(s) locally & robustly (see note above: the
-        # shared error_patterns parse captures empty and is left as-is to avoid
-        # flipping ~305 latent vacuous tests repo-wide).
+        # Parse the pinned pattern(s) locally rather than reusing the shared
+        # error_patterns array above: this path runs `check`, not `compile`,
+        # a distinct contract (see the audit 2026-07-24 note above) that
+        # deserves its own local list rather than sharing state with the
+        # compile-fail path.
         local tf_patterns=()
         local pline
         while IFS= read -r pline; do
