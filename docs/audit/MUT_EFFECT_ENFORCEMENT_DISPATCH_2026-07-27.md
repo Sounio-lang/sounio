@@ -90,10 +90,76 @@ fns_with_exclusive_ref_param     = 6894
   ...AND write through it        =  254   <-- would newly need `with Mut`
 ```
 
-**254 functions** is the migration cost of turning enforcement on. Examples:
+**254 functions** would need `with Mut` added *directly*. Examples:
 `examples/algo/sorting_demo.sio::partition`, `::merge`, `::heapify`,
 `examples/algo/graph_demo.sio::dfs_visit`,
 `examples/collections/bitset_demo.sio::bitset_set`.
+
+### Correction (same day): the real cost is the transitive closure, ~1673
+
+**254 is not the migration cost. It is the seed of it.** An earlier revision of
+this dispatch recommended landing the 254 signature additions first as a
+"mechanical" prerequisite. That recommendation was wrong and is retracted
+below; this section records why, because the mechanism is the interesting part.
+
+Madaros *does* enforce effect **propagation** at call sites — that is exactly
+what `check_callee_effects` does. It simply never **originates** a `Mut`
+requirement from a mutation. So the effect system is consistent but
+incomplete: declared effects flow correctly from callee to caller, and no
+effect is ever born. Adding origination — which is what the specified rule
+requires — forces the entire propagation closure above each origin to be
+declared too. Verified directly:
+
+```
+fn writes(buf: &![i64; 4]) with Mut { (*buf)[0] = 1 }
+fn caller(buf: &![i64; 4]) { writes(buf) }        # no Mut
+
+$ ./bin/souc check cascade.sio                    # Madaros, default
+error[E035] ... : effect not declared in function signature (missing: Mut)
+```
+
+Computing the closure over the 254 origins (iterate: any function lacking
+`Mut` that calls a function in the set joins the set; repeat to fixpoint):
+
+```
+round 1: +430  -> 677
+round 2: +719  -> 1396
+round 3: +208  -> 1604
+round 4:  +58  -> 1662
+round 5:  +10  -> 1672
+round 6:   +1  -> 1673
+round 7:   +0  -> converged
+
+TRANSITIVE CLOSURE = 1673 functions
+  stdlib       980
+  examples     334
+  self-hosted  244   <-- the compiler's own source
+  tests        104
+  tools          7
+  benchmarks     4
+```
+
+Spot-checked for soundness rather than trusted: `examples/algo/graph_demo.sio::dfs`
+genuinely calls `dfs_visit`; `sorting_demo.sio::quicksort_range` calls
+`partition`; `::mergesort_recursive` calls `merge`. All three lack `Mut`.
+
+**Over-count caveat, stated plainly.** Call resolution here is by *name*
+(`\bname\s*\(`), not by module-aware resolution, so the closure over-counts
+where an unrelated function or method shares a name across modules. 1673 is an
+upper bound. It is not a tight one — but it would have to be wrong by more than
+6× to restore the "mechanical" framing, and the direction of the error is
+knowable only with a real call graph, which the modular checker could provide
+and this scan cannot.
+
+**This vindicates the 2026-07-11 assessment rather than narrowing it.** That
+dispatch's "would false-reject a large fraction of the ~6,000-file corpus" was
+closer to right than this dispatch's first estimate. The earlier revision here
+claimed 254 "materially narrows the risk"; it does not, because 254 counts
+origins and the compiler enforces the closure. **1673 of roughly 6,900 functions
+that take an exclusive reference is a fraction of the corpus, and 244 of them
+are in `self-hosted/`** — meaning the compiler would have to be re-annotated to
+compile itself under its own new rule, with all the bootstrap and fixed-point
+exposure that implies.
 
 Caveats on this number, stated rather than buried: it is **syntactic**, so it
 (a) misses closure-capture escapes entirely, (b) misses mutation that escapes
@@ -123,14 +189,17 @@ the maintainer, not a bug fix."**
 Two things have changed since, and both should be weighed before acting:
 
 1. A maintainer design decision now exists — escape-based inference, recorded in
-   §7.2.1 of the specification.
-2. The measured blast radius for the *escaping* case specifically is **254
-   functions**, not "a large fraction of ~6,000 files". The earlier estimate was
-   for E035 as a whole (all effects, including `IO`/`Div` and the non-escaping
-   local case, which the decision explicitly *excludes*).
+   §7.2.1 of the specification. That removes the "requires a maintainer design
+   decision" blocker, and only that one.
+2. The blast radius is now measured rather than estimated, and it **confirms**
+   the 2026-07-11 concern: 254 origins, **1673 functions in the transitive
+   closure**, 244 of them inside `self-hosted/`.
 
-That materially narrows the risk versus the 2026-07-11 assessment — but it does
-not eliminate the need for the regression discipline that dispatch prescribed.
+An earlier revision of this section argued the measurement *narrowed* the risk.
+It does not — that argument compared 254 origins against an estimate of the
+whole closure. Corrected above. The regression discipline that dispatch
+prescribed applies in full, and its scepticism about wiring E035-class
+enforcement is better supported now than when it was written.
 
 ## Implementation notes
 
@@ -144,11 +213,15 @@ not eliminate the need for the regression discipline that dispatch prescribed.
    handling in `self-hosted/check/check.sio` and the exclusive-reference
    machinery, and thread an "escapes" bit out of place resolution rather than
    pattern-matching syntax at the call site.
-3. **Migrate before enforcing, in that order.** Land the 254 signature
-   additions first (mechanical, individually reviewable, green under both
-   engines since `lean_single` already demands `Mut` there), *then* turn the
-   guard on. Enforcing first makes the corpus red for the duration of the
-   migration.
+3. **Migration order is still migrate-then-enforce, but the migration is not
+   mechanical.** It is 1673 functions including 244 in the compiler, and it must
+   be driven by the closure, not by the 254 origins — annotating an origin
+   without its callers makes the callers red immediately (see the Correction
+   section). Get a real call graph out of the modular checker before planning
+   the sweep; a name-based scan is not a safe migration driver even though it is
+   adequate for sizing. Consider whether the checker should *infer and
+   propagate* silently, requiring the annotation only at a module boundary,
+   which would collapse most of the 1673.
 4. **Do not touch `lean_single.sio`.** The seed's broad reading is a known,
    deliberately frozen property (`docs/compiler/KNOWN_LIMITATIONS.md`); relaxing
    it risks the bootstrap fixed point for no gain, since the correctness
@@ -160,8 +233,30 @@ not eliminate the need for the regression discipline that dispatch prescribed.
 
 ## Recommendation
 
-Land the **254-function signature migration** first as its own PR — it is
-mechanical, it is already required by one of the two engines, and it is a
-prerequisite for enforcement being landable at all. File the checker-side
-inference as a follow-up dispatch once that migration is green, and keep the
-guard off until then.
+**Do not start the signature migration, and do not wire the guard.** Both were
+recommended in the first revision of this dispatch; the closure measurement
+retracts both.
+
+What to decide first, because it changes the size of the work by an order of
+magnitude: **should the annotation be required at every function in the closure,
+or inferred-and-propagated silently with the annotation required only where the
+effect crosses a module boundary?**
+
+- *Annotation required everywhere* (what the current call-site enforcement
+  implies): ~1673 functions, 244 in the compiler itself, with bootstrap and
+  fixed-point exposure. This is a multi-week corpus migration, not a
+  prerequisite step.
+- *Inferred and propagated* (what §7.2.1's "the checker is intended to infer
+  this" already says): the checker derives `Mut` through the call graph and only
+  demands it be written where a caller cannot see the callee's body. Most of the
+  1673 collapse. This is more checker work and far less corpus churn, and it is
+  the reading the specification already commits to.
+
+The second option is almost certainly the intended design and is what §7.2.1
+says. It should be scoped and costed before any annotation lands, because
+annotating under option one and then implementing option two would leave ~1400
+signatures carrying an annotation the compiler no longer needs.
+
+Until that is decided, the specification (§7.2.1) and the guide correctly
+describe the intended rule and honestly record that neither engine implements
+it. That is a stable, non-misleading state to sit in.
