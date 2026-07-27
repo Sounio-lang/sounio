@@ -7242,6 +7242,248 @@ impl Lowerer {
         (false, 0.0)
     }
 
+    // True when expr is a Knowledge value (measure / Knowledge local / Knowledge binop).
+    fn opt_expr_is_knowledge_ref(self, opt: &Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(e) => self.expr_is_knowledge_ref(&(*e)),
+            _ => false
+        }
+    }
+
+    fn expr_is_knowledge_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprIdent {
+            return ir_name_eq(self.lookup_local_struct_type((*e).name), make_name("Knowledge"))
+        }
+        if (*e).kind == ExprKind::ExprCall {
+            match (*e).left {
+                Some(c) => {
+                    if (*c).kind == ExprKind::ExprIdent {
+                        if ir_name_is_measure((*c).name) { return true }
+                    }
+                }
+                _ => {}
+            }
+            return false
+        }
+        // Nested Knowledge arithmetic remains Knowledge.
+        if (*e).kind == ExprKind::ExprBinary {
+            let op = (*e).bin_op
+            if op == BinaryOp::OpAdd || op == BinaryOp::OpSub
+                || op == BinaryOp::OpMul || op == BinaryOp::OpDiv {
+                return self.opt_expr_is_knowledge_ref(&(*e).left)
+                    && self.opt_expr_is_knowledge_ref(&(*e).right)
+            }
+        }
+        false
+    }
+
+    // Load multi-channel FO for a Knowledge operand (named bind or seed from σ²).
+    fn fo_load_knowledge_operand_fo(
+        self, e_opt: &Option<Box<Expr>>, base_reg: i64
+    ) -> Lowerer with Mut, Panic, Div, Alloc {
+        var lo = self
+        match *e_opt {
+            Some(e) => {
+                if (*e).kind == ExprKind::ExprIdent {
+                    lo = lo.fo_load_local_sens((*e).name)
+                    if lo.fo_expr_has_sens() {
+                        return lo
+                    }
+                }
+            }
+            _ => {}
+        }
+        // Fall back: single channel from variance shadow / field.
+        var vreg = lo.lookup_variance_for_base_reg(base_reg)
+        if vreg < 0 {
+            // field-get variance from Knowledge object
+            let pair = lo.fresh_reg()
+            lo = pair.0
+            let dst = pair.1
+            var instr = ir_field_get(dst, base_reg, 1, make_name("variance"))
+            instr.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+            lo = lo.emit(instr)
+            lo = lo.emit(ir_mark_float_reg(dst))
+            vreg = dst
+            lo = lo.bind_variance_for_base_reg(base_reg, vreg)
+        }
+        lo.fo_seed_from_variance(vreg)
+    }
+
+    // Load .value field of a Knowledge base (float).
+    fn fo_knowledge_load_value(self, base_reg: i64) -> (Lowerer, i64) with Mut, Panic, Div {
+        let pair = self.fresh_reg()
+        var lo = pair.0
+        let dst = pair.1
+        var instr = ir_field_get(dst, base_reg, 0, make_name("value"))
+        instr.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+        lo = lo.emit(instr)
+        lo = lo.emit(ir_mark_float_reg(dst))
+        (lo, dst)
+    }
+
+    fn fo_knowledge_load_confidence(self, base_reg: i64) -> (Lowerer, i64) with Mut, Panic, Div {
+        let pair = self.fresh_reg()
+        var lo = pair.0
+        let dst = pair.1
+        var instr = ir_field_get(dst, base_reg, 2, make_name("confidence"))
+        instr.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+        lo = lo.emit(instr)
+        lo = lo.emit(ir_mark_float_reg(dst))
+        (lo, dst)
+    }
+
+    // Knowledge ⊗ Knowledge arithmetic: build new Knowledge with GUM variance + multi-channel FO.
+    fn lower_knowledge_binary_expr_ref(
+        self, e: &Expr
+    ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let pl = lo.lower_opt_expr_ref(&(*e).left)
+        lo = pl.0
+        let lhs = pl.1
+        lo = lo.fo_load_knowledge_operand_fo(&(*e).left, lhs)
+        let sL = lo.fo_snapshot_expr_sens()
+        let hL = lo.fo_snapshot_expr_hess()
+        let lval_p = lo.fo_knowledge_load_value(lhs)
+        lo = lval_p.0
+        let lval = lval_p.1
+        var lvar = lo.lookup_variance_for_base_reg(lhs)
+        if lvar < 0 {
+            let vp = lo.fresh_reg()
+            lo = vp.0
+            lvar = vp.1
+            var vi = ir_field_get(lvar, lhs, 1, make_name("variance"))
+            vi.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+            lo = lo.emit(vi)
+            lo = lo.emit(ir_mark_float_reg(lvar))
+        }
+        let lc_p = lo.fo_knowledge_load_confidence(lhs)
+        lo = lc_p.0
+        let lconf = lc_p.1
+
+        let pr = lo.lower_opt_expr_ref(&(*e).right)
+        lo = pr.0
+        let rhs = pr.1
+        lo = lo.fo_load_knowledge_operand_fo(&(*e).right, rhs)
+        let sR = lo.fo_snapshot_expr_sens()
+        let hR = lo.fo_snapshot_expr_hess()
+        let rval_p = lo.fo_knowledge_load_value(rhs)
+        lo = rval_p.0
+        let rval = rval_p.1
+        var rvar = lo.lookup_variance_for_base_reg(rhs)
+        if rvar < 0 {
+            let vp = lo.fresh_reg()
+            lo = vp.0
+            rvar = vp.1
+            var vi = ir_field_get(rvar, rhs, 1, make_name("variance"))
+            vi.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+            lo = lo.emit(vi)
+            lo = lo.emit(ir_mark_float_reg(rvar))
+        }
+        let rc_p = lo.fo_knowledge_load_confidence(rhs)
+        lo = rc_p.0
+        let rconf = rc_p.1
+
+        // result value
+        let vpair = lo.fresh_reg()
+        lo = vpair.0
+        let vdst = vpair.1
+        lo = lo.emit(ir_binop_typed(vdst, lval, (*e).bin_op, rval, true, true))
+        lo = lo.emit(ir_mark_float_reg(vdst))
+
+        // variance + FO sens
+        var out_var: i64 = -1
+        let has_fo = lo.fo_expr_or_snap_has_sens(sL) || lo.fo_expr_or_snap_has_sens(sR)
+        if has_fo {
+            if (*e).bin_op == BinaryOp::OpAdd || (*e).bin_op == BinaryOp::OpSub {
+                lo = lo.fo_combine_sens_addsub(sL, sR, hL, hR, (*e).bin_op == BinaryOp::OpSub)
+            } else if (*e).bin_op == BinaryOp::OpMul {
+                lo = lo.fo_combine_sens_mul(sL, sR, hL, hR, lval, rval)
+            } else if (*e).bin_op == BinaryOp::OpDiv {
+                lo = lo.fo_combine_sens_div(sL, sR, hL, hR, lval, rval)
+            } else {
+                return (lo.fo_clear_expr_sens(), -1)
+            }
+            let vp = lo.fo_emit_var_from_sens()
+            lo = vp.0
+            out_var = vp.1
+        } else {
+            lo = lo.fo_clear_expr_sens()
+            if (*e).bin_op == BinaryOp::OpAdd || (*e).bin_op == BinaryOp::OpSub {
+                let ap = lo.emit_variance_add(lvar, rvar)
+                lo = ap.0
+                out_var = ap.1
+            } else if (*e).bin_op == BinaryOp::OpMul {
+                let mp = lo.emit_variance_independent_product(lval, rval, lvar, rvar)
+                lo = mp.0
+                out_var = mp.1
+            } else if (*e).bin_op == BinaryOp::OpDiv {
+                let dp = lo.emit_variance_independent_div(lval, rval, lvar, rvar)
+                lo = dp.0
+                out_var = dp.1
+            } else {
+                return (lo, -1)
+            }
+        }
+        if out_var < 0 {
+            let zp = lo.emit_zero_variance()
+            lo = zp.0
+            out_var = zp.1
+        }
+
+        // confidence = min(lconf, rconf) via select-ish: if l < r then l else r
+        // Simple: use lconf (conservative) — better: fmin via compare
+        let conf_p = lo.fresh_reg()
+        lo = conf_p.0
+        let conf = conf_p.1
+        // conf = lconf < rconf ? lconf : rconf
+        let cmp_p = lo.fresh_reg()
+        lo = cmp_p.0
+        let cmp = cmp_p.1
+        lo = lo.emit(ir_binop_typed(cmp, lconf, BinaryOp::OpLt, rconf, true, true))
+        // blend: conf = cmp*lconf + (1-cmp)*rconf  (cmp as 0/1 float after sitofp if needed)
+        // Prefer: if we don't have select, just multiply path with float cmp may be 0/1
+        lo = lo.emit(ir_mark_float_reg(cmp))
+        let one_p = lo.emit_f64_const(1.0)
+        lo = one_p.0
+        let inv_p = lo.fresh_reg()
+        lo = inv_p.0
+        let inv = inv_p.1
+        lo = lo.emit(ir_binop_typed(inv, one_p.1, BinaryOp::OpSub, cmp, true, true))
+        lo = lo.emit(ir_mark_float_reg(inv))
+        let t1 = lo.fresh_reg()
+        lo = t1.0
+        let t1r = t1.1
+        lo = lo.emit(ir_binop_typed(t1r, cmp, BinaryOp::OpMul, lconf, true, true))
+        lo = lo.emit(ir_mark_float_reg(t1r))
+        let t2 = lo.fresh_reg()
+        lo = t2.0
+        let t2r = t2.1
+        lo = lo.emit(ir_binop_typed(t2r, inv, BinaryOp::OpMul, rconf, true, true))
+        lo = lo.emit(ir_mark_float_reg(t2r))
+        lo = lo.emit(ir_binop_typed(conf, t1r, BinaryOp::OpAdd, t2r, true, true))
+        lo = lo.emit(ir_mark_float_reg(conf))
+
+        // alloc Knowledge
+        let dst_p = lo.fresh_reg()
+        lo = dst_p.0
+        let dst = dst_p.1
+        lo = lo.emit(ir_alloc(dst, 0))
+        lo = lo.emit(ir_field_set(dst, 0, vdst, make_name("value")))
+        lo = lo.emit(ir_field_set(dst, 1, out_var, make_name("variance")))
+        lo = lo.emit(ir_field_set(dst, 2, conf, make_name("confidence")))
+        lo = lo.bind_variance_for_base_reg(dst, out_var)
+        lo.pending_variance_reg = out_var
+        // FO pending for let-bind of Knowledge product
+        var mk: i64 = 0
+        while mk < 32 {
+            lo.fo_pending_sens[mk as usize] = lo.fo_expr_sens[mk as usize]
+            lo.fo_pending_hess[mk as usize] = lo.fo_expr_hess[mk as usize]
+            mk = mk + 1
+        }
+        (lo, dst)
+    }
+
     fn fo_register_pure_fn_transfer(self, name: Name, fd: &FnDef) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self
         var p0 = ir_empty_name()
@@ -9066,14 +9308,31 @@ impl Lowerer {
                 match (*e).left {
                     Some(base_expr) => {
                         if (*base_expr).kind == ExprKind::ExprIdent {
-                            let kn_pair = self.lower_knowledge_variance_for_ident((*base_expr).name)
+                            let bname = (*base_expr).name
+                            var lo_fo = self.fo_load_local_sens(bname)
+                            if lo_fo.fo_expr_has_sens() {
+                                return lo_fo.fo_emit_var_from_sens()
+                            }
+                            let kn_pair = lo_fo.lower_knowledge_variance_for_ident(bname)
                             if kn_pair.1 >= 0 {
-                                // Seed/reuse FO channel for this Knowledge seed.
                                 let lo = kn_pair.0.fo_seed_from_variance(kn_pair.1)
                                 return (lo, kn_pair.1)
                             }
                             return kn_pair
                         }
+                        // Ephemeral Knowledge: lower base (Knowledge binary leaves FO + variance).
+                        let bp = self.lower_expr_ref(&(*base_expr))
+                        var lo_b = bp.0
+                        let breg = bp.1
+                        if lo_b.fo_expr_has_sens() {
+                            return lo_b.fo_emit_var_from_sens()
+                        }
+                        let bv = lo_b.lookup_variance_for_base_reg(breg)
+                        if bv >= 0 {
+                            lo_b = lo_b.fo_seed_from_variance(bv)
+                            return (lo_b, bv)
+                        }
+                        return (lo_b.fo_clear_expr_sens(), -1)
                     }
                     _ => {}
                 }
@@ -12245,6 +12504,11 @@ impl Lowerer {
                     if src_st.len > 0 {
                         lo = lo.bind_local_struct_type(s.name, src_st)
                     }
+                } else if (*expr_box).kind == ExprKind::ExprBinary {
+                    // Knowledge ⊗ Knowledge product/sum → result is Knowledge
+                    if lo.expr_is_knowledge_ref(&(*expr_box)) {
+                        lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"))
+                    }
                 }
             }
             _ => {}
@@ -14112,6 +14376,13 @@ impl Lowerer {
     }
 
     fn lower_binary_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        // Knowledge ⊗ Knowledge: GUM variance + multi-channel FO (not pointer arith).
+        if e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub
+            || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv {
+            if self.opt_expr_is_knowledge_ref(&e.left) && self.opt_expr_is_knowledge_ref(&e.right) {
+                return self.lower_knowledge_binary_expr_ref(e)
+            }
+        }
         let wide_bits = self.expr_wide_bits_ref(e)
         let lhs_expr_is_float = self.opt_expr_result_is_float_ref(&e.left)
         let pair_l = self.lower_opt_expr_ref(&e.left)
@@ -14277,27 +14548,79 @@ impl Lowerer {
         if field_array_elem_is_float {
             lo3 = lo3.bind_reg_array_elem_float(dst)
         }
-        // β-Madaros: Knowledge.value extraction seeds let-bound variance shadow
-        // so variance_of(a1) and FO product/sub work after `let a1 = k.value`.
-        // Also seed multi-channel FO sensitivity (∂/∂seed = 1) into pending_sens.
+        // β-Madaros: Knowledge.value extraction.
+        // Prefer multi-channel FO bind on Knowledge locals; for ephemeral Knowledge
+        // results ((kA*kB).value) reuse FO sens left by Knowledge binary lower.
         if ir_name_eq(e.name, make_name("value")) {
+            var handled = false
             match e.left {
                 Some(base_expr) => {
                     if (*base_expr).kind == ExprKind::ExprIdent {
-                        let vpair = lo3.lower_knowledge_variance_for_ident((*base_expr).name)
-                        lo3 = vpair.0
-                        if vpair.1 >= 0 {
-                            lo3.pending_variance_reg = vpair.1
-                            lo3 = lo3.fo_seed_from_variance(vpair.1)
+                        let bname = (*base_expr).name
+                        lo3 = lo3.fo_load_local_sens(bname)
+                        if lo3.fo_expr_has_sens() {
+                            let vp = lo3.fo_emit_var_from_sens()
+                            lo3 = vp.0
+                            if vp.1 >= 0 {
+                                lo3.pending_variance_reg = vp.1
+                            } else {
+                                let vpair = lo3.lower_knowledge_variance_for_ident(bname)
+                                lo3 = vpair.0
+                                if vpair.1 >= 0 {
+                                    lo3.pending_variance_reg = vpair.1
+                                }
+                            }
                             var pk: i64 = 0
                             while pk < 32 {
                                 lo3.fo_pending_sens[pk as usize] = lo3.fo_expr_sens[pk as usize]
+                                lo3.fo_pending_hess[pk as usize] = lo3.fo_expr_hess[pk as usize]
                                 pk = pk + 1
+                            }
+                            handled = true
+                        } else {
+                            let vpair = lo3.lower_knowledge_variance_for_ident(bname)
+                            lo3 = vpair.0
+                            if vpair.1 >= 0 {
+                                lo3.pending_variance_reg = vpair.1
+                                lo3 = lo3.fo_seed_from_variance(vpair.1)
+                                var pk2: i64 = 0
+                                while pk2 < 32 {
+                                    lo3.fo_pending_sens[pk2 as usize] = lo3.fo_expr_sens[pk2 as usize]
+                                    pk2 = pk2 + 1
+                                }
+                                handled = true
                             }
                         }
                     }
                 }
                 _ => {}
+            }
+            // Ephemeral Knowledge (e.g. (kA * kB).value): base already lowered with FO.
+            if !handled {
+                let bv = lo3.lookup_variance_for_base_reg(base)
+                if lo3.fo_expr_has_sens() {
+                    let vp = lo3.fo_emit_var_from_sens()
+                    lo3 = vp.0
+                    if vp.1 >= 0 {
+                        lo3.pending_variance_reg = vp.1
+                    } else if bv >= 0 {
+                        lo3.pending_variance_reg = bv
+                    }
+                    var pk3: i64 = 0
+                    while pk3 < 32 {
+                        lo3.fo_pending_sens[pk3 as usize] = lo3.fo_expr_sens[pk3 as usize]
+                        lo3.fo_pending_hess[pk3 as usize] = lo3.fo_expr_hess[pk3 as usize]
+                        pk3 = pk3 + 1
+                    }
+                } else if bv >= 0 {
+                    lo3.pending_variance_reg = bv
+                    lo3 = lo3.fo_seed_from_variance(bv)
+                    var pk4: i64 = 0
+                    while pk4 < 32 {
+                        lo3.fo_pending_sens[pk4 as usize] = lo3.fo_expr_sens[pk4 as usize]
+                        pk4 = pk4 + 1
+                    }
+                }
             }
         }
         (lo3, dst)
