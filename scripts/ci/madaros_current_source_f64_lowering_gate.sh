@@ -64,4 +64,8 @@ SOUNIO_MADAROS_UNKNOWN_ASSOC_FN_GATE_BIN="$MADAROS_ELF" \
 SOUNIO_MADAROS_UNKNOWN_ASSOC_FN_GATE_DIR="$WORK/unknown-assoc-fn" \
   bash "$ROOT_DIR/scripts/ci/madaros_unknown_assoc_fn_gate.sh"
 
-echo "[madaros-f64-lowering] PASS: one shared Madaros ELF passed dereference, global f64, direct capacity, imported capacity, imported wide-call, Box allocation/deref, and unknown-associated-fn gates"
+SOUNIO_MADAROS_INCOMPLETE_ASSIGN_GATE_BIN="$MADAROS_ELF" \
+SOUNIO_MADAROS_INCOMPLETE_ASSIGN_GATE_DIR="$WORK/incomplete-assign" \
+  bash "$ROOT_DIR/scripts/ci/madaros_incomplete_assignment_scan_gate.sh"
+
+echo "[madaros-f64-lowering] PASS: one shared Madaros ELF passed dereference, global f64, direct capacity, imported capacity, imported wide-call, Box allocation/deref, unknown-associated-fn, and incomplete-assignment-scan gates"
