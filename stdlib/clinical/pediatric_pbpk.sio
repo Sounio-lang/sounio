@@ -455,6 +455,12 @@ pub fn ped_neonate_term_2wk() -> PedSubject {
     ped_subject_ga(2.0 / 52.142857, 40.0, 3.5, 50.0, true)
 }
 
+/// Preterm neonate: GA 28 wk, postnatal 2 wk → PMA ≈ 30 wk, ~1.2 kg.
+/// Lower MF_renal than term neonate at the same postnatal age (Rhodin).
+pub fn ped_preterm_ga28_2wk() -> PedSubject {
+    ped_subject_ga(2.0 / 52.142857, 28.0, 1.2, 38.0, true)
+}
+
 pub fn ped_infant_6mo() -> PedSubject {
     ped_subject(0.5, 7.5, 67.0, true)
 }
@@ -470,6 +476,159 @@ pub fn ped_adolescent_14yr() -> PedSubject {
 pub fn ped_adult_ref_70kg() -> PedSubject {
     // age 30, GA ignored (MF→1); used as size reference
     ped_subject_ga(30.0, 40.0, 70.0, 175.0, true)
+}
+
+// ============================================================================
+// AUC-GUIDED VANCOMYCIN (ASHP/IDSA educational targets)
+// ============================================================================
+// AUC24/MIC target band 400–600 mg·h/L at MIC=1 (Rybak 2020).
+// AUC24_ss = 24 · (D/τ) / CL  →  monotone ↓ in CL only (V cancels).
+// Dose for target AUC*:  D* = AUC* · CL · τ / 24
+
+pub fn ped_vanco_auc_target_lo() -> f64 { 400.0 }
+pub fn ped_vanco_auc_target_hi() -> f64 { 600.0 }
+pub fn ped_vanco_auc_target_mid() -> f64 { 500.0 }
+
+/// Absolute dose (mg) that realises AUC24_target for the subject's model CL.
+pub fn ped_vanco_dose_for_auc24(
+    s: &PedSubject, auc24_target: f64, interval_h: f64
+) -> f64 with Mut, Div, Panic {
+    if auc24_target <= 0.0 { return 0.0 }
+    if interval_h <= 0.0 { return 0.0 }
+    let phy = ped_physio_model(s)
+    let cl = ped_vanco_cl_l_h(phy.gfr_ml_min)
+    // D = AUC · CL · τ / 24
+    auc24_target * cl * interval_h / 24.0
+}
+
+/// Knightian AUC24 enclosure: only CL uncertainty (AUC ↓ when CL ↑).
+/// Corners: AUC_lo at CL_hi, AUC_hi at CL_lo.
+pub fn ped_vanco_auc24_knightian(
+    s: &PedSubject,
+    dose_mg: f64,
+    interval_h: f64,
+    tdm_samples: i64,
+) -> PBox with Mut, Div, Panic {
+    if !ped_weight_ok(s.weight_kg) { return pb_vacuous() }
+    if !ped_dose_ok(dose_mg) { return pb_vacuous() }
+    if !ped_tau_ok(interval_h) { return pb_vacuous() }
+    if !ped_age_ok(s.age_years) { return pb_vacuous() }
+    if tdm_samples < 0 { return pb_vacuous() }
+
+    let phy = ped_physio_model(s)
+    let cl0 = ped_vanco_cl_l_h(phy.gfr_ml_min)
+    let bands = ped_band_frac(tdm_samples)
+    let f_cl = bands.1
+    let cl_lo = cl0 * (1.0 - f_cl)
+    let cl_hi = cl0 * (1.0 + f_cl)
+    if cl_lo <= 0.0 { return pb_vacuous() }
+
+    let dose_rate = dose_mg / interval_h
+    let auc_lo = 24.0 * dose_rate / cl_hi
+    let auc_hi = 24.0 * dose_rate / cl_lo
+    if auc_hi < auc_lo { return pb_vacuous() }
+
+    let conf = if tdm_samples >= 3 { 920 } else {
+        if tdm_samples >= 1 { 880 } else { 850 }
+    }
+    pb_new(auc_lo, auc_hi, 0.0, conf)
+}
+
+/// Educational AUC-band gate (default 400–600).
+pub fn ped_vanco_is_auc_on_target(p: &PBox, lo: f64, hi: f64, min_conf: i64) -> bool {
+    if pb_confidence(p) <= 0 { return false }
+    if !pb_is_credible(p, min_conf) { return false }
+    pb_within(p, lo, hi)
+}
+
+// ============================================================================
+// GENTAMICIN — same spine (renal maturation + allometry + Knightian Cmin)
+// ============================================================================
+// Hilf 1989 / Begg 1995 order: Vc ≈ 0.25 L/kg, CL ≈ 0.06 L/h per mL/min GFR.
+// Multi-daily educational trough window 0.5–2.0 mg/L (not extended-interval).
+
+pub struct PedGentPK {
+    dose_mg: f64,
+    interval_h: f64,
+    cl_l_h: f64,
+    vc_l: f64,
+    ke: f64,
+    cmin_mg_l: f64,
+    auc24_mg_h_l: f64,
+    gfr_ml_min: f64,
+    mf_renal: f64,
+}
+
+pub fn ped_gent_cl_l_h(gfr_ml_min: f64) -> f64 {
+    // Already in L/h when coefficient is 0.06 × (mL/min) — matches adult module.
+    0.06 * gfr_ml_min
+}
+
+pub fn ped_gent_vc_l(weight_kg: f64) -> f64 {
+    0.25 * weight_kg
+}
+
+pub fn ped_gent_pk(s: &PedSubject, dose_mg: f64, interval_h: f64) -> PedGentPK with Mut, Div, Panic {
+    let phy = ped_physio_model(s)
+    let cl = ped_gent_cl_l_h(phy.gfr_ml_min)
+    let vc = ped_gent_vc_l(s.weight_kg)
+    let ke = if vc > 0.0 { cl / vc } else { 0.0 }
+    let cmin = ped_cmin_point(vc, cl, dose_mg, interval_h)
+    let dose_rate = if interval_h > 0.0 { dose_mg / interval_h } else { 0.0 }
+    let auc24 = if cl > 0.0 { 24.0 * dose_rate / cl } else { 0.0 }
+    PedGentPK {
+        dose_mg: dose_mg,
+        interval_h: interval_h,
+        cl_l_h: cl,
+        vc_l: vc,
+        ke: ke,
+        cmin_mg_l: cmin,
+        auc24_mg_h_l: auc24,
+        gfr_ml_min: phy.gfr_ml_min,
+        mf_renal: phy.mf_renal,
+    }
+}
+
+pub fn ped_gent_pk_mg_per_kg(
+    s: &PedSubject, mg_per_kg: f64, interval_h: f64
+) -> PedGentPK with Mut, Div, Panic {
+    ped_gent_pk(s, mg_per_kg * s.weight_kg, interval_h)
+}
+
+pub fn ped_gent_cmin_knightian(
+    s: &PedSubject,
+    dose_mg: f64,
+    interval_h: f64,
+    tdm_samples: i64,
+) -> PBox with Mut, Div, Panic {
+    if !ped_weight_ok(s.weight_kg) { return pb_vacuous() }
+    if !ped_dose_ok(dose_mg) { return pb_vacuous() }
+    if !ped_tau_ok(interval_h) { return pb_vacuous() }
+    if !ped_age_ok(s.age_years) { return pb_vacuous() }
+    if tdm_samples < 0 { return pb_vacuous() }
+
+    let phy = ped_physio_model(s)
+    let cl0 = ped_gent_cl_l_h(phy.gfr_ml_min)
+    let vc0 = ped_gent_vc_l(s.weight_kg)
+    let bands = ped_band_frac(tdm_samples)
+    let f_vc = bands.0
+    let f_cl = bands.1
+    let vc_lo = vc0 * (1.0 - f_vc)
+    let vc_hi = vc0 * (1.0 + f_vc)
+    let cl_lo = cl0 * (1.0 - f_cl)
+    let cl_hi = cl0 * (1.0 + f_cl)
+    let c_lo = ped_cmin_point(vc_lo, cl_hi, dose_mg, interval_h)
+    let c_hi = ped_cmin_point(vc_hi, cl_lo, dose_mg, interval_h)
+    if c_hi < c_lo { return pb_vacuous() }
+    let conf = if tdm_samples >= 3 { 920 } else {
+        if tdm_samples >= 1 { 880 } else { 850 }
+    }
+    pb_new(c_lo, c_hi, 0.0, conf)
+}
+
+pub fn ped_gent_is_safe_trough(p: &PBox, min_conf: i64) -> bool {
+    // Multi-daily educational window 0.5–2.0 mg/L
+    ped_vanco_is_safe_trough(p, 0.5, 2.0, min_conf)
 }
 
 // ============================================================================
@@ -556,6 +715,43 @@ pub fn ped_selftest() -> i64 with IO, Mut, Div, Panic {
         print("FAIL ped_adult_cl_matzke cl=")
         print_f64(pk_a.cl_l_h)
         print("\n")
+    }
+
+    // T7: preterm GA28 PMA lower MF and lower absolute CL than term neonate
+    let pre = ped_preterm_ga28_2wk()
+    let mf_p = ped_gfr_maturation(ped_pma_weeks(&pre))
+    let pk_p = ped_vanco_pk_mg_per_kg(&pre, 15.0, 12.0)
+    if mf_p < mf_n && pk_p.cl_l_h < cl_neo && ped_pma_weeks(&pre) < ped_pma_weeks(&neo) {
+        print("PASS ped_preterm_vs_term\n")
+        n = n + 1
+    } else {
+        print("FAIL ped_preterm_vs_term\n")
+    }
+
+    // T8: AUC-guided dose realises ~500 mg·h/L mid-target on child
+    let d_star = ped_vanco_dose_for_auc24(&child, ped_vanco_auc_target_mid(), 12.0)
+    let pk_star = ped_vanco_pk(&child, d_star, 12.0)
+    if ped_abs(pk_star.auc24_mg_h_l - 500.0) < 1.0 && d_star > 0.0 {
+        print("PASS ped_auc_guided_dose\n")
+        n = n + 1
+    } else {
+        print("FAIL ped_auc_guided_dose auc=")
+        print_f64(pk_star.auc24_mg_h_l)
+        print("\n")
+    }
+
+    // T9: gentamicin CL scales with GFR; preterm Cmin machinery finite
+    let g_c = ped_gent_pk_mg_per_kg(&child, 2.5, 8.0)
+    let g_p = ped_gent_pk_mg_per_kg(&pre, 2.5, 12.0)
+    let gbox = ped_gent_cmin_knightian(&child, 2.5 * child.weight_kg, 8.0, 0)
+    if g_c.cl_l_h > g_p.cl_l_h
+        && g_c.cmin_mg_l > 0.0
+        && pb_gap(&gbox) > 0.0
+        && pb_confidence(&gbox) >= 800 {
+        print("PASS ped_gentamicin_spine\n")
+        n = n + 1
+    } else {
+        print("FAIL ped_gentamicin_spine\n")
     }
 
     n

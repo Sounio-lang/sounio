@@ -1,10 +1,10 @@
-# Paediatric PBPK — functional maturation + vancomycin receipt
+# Paediatric PBPK — functional maturation + AUC-guided vanco + gentamicin
 
 **Date:** 2026-07-27  
-**Status:** live  
+**Status:** live (v2: preterm + AUC + gentamicin)  
 **Module:** `stdlib/clinical/pediatric_pbpk.sio`  
 **Demo:** `examples/pediatric_pbpk_demo.sio`  
-**Gate:** `scripts/ci/pediatric_pbpk_gate.sh` → `PEDIATRIC_PBPK_GATE_OK`
+**Gate:** `scripts/ci/pediatric_pbpk_gate.sh` → `PEDIATRIC_PBPK_GATE_OK` (9/9)
 
 ## Scope
 
@@ -15,16 +15,20 @@ Educational / compiler-stdlib **paediatric PBPK spine** with:
 3. Hepatic CYP-like maturation (second organ axis)
 4. Mosteller BSA + Schwartz bedside eGFR helper
 5. Vancomycin 1-cmt SS Cmin + AUC24, GUM `Epistemic`, Knightian `PBox`
+6. **Preterm GA28** cohort (PMA 30 wk) vs term neonate
+7. **AUC-guided** dose for mid-target 500 mg·h/L + AUC p-box (↓CL only)
+8. **Gentamicin** on the same renal spine (Vc 0.25 L/kg, CL∝GFR)
 
-**Not medical guidance.** Adult trough window 10–20 mg/L is an educational screen only.
+**Not medical guidance.**
 
-## Expected physiology (same 15 mg/kg q12h)
+## Expected physiology (15 mg/kg q12h vancomycin)
 
-| Subject | Weight | MF_renal | Relative CL | Relative Cmin |
-|---|---:|---:|---|---|
-| Neonate ~2 wk | 3.5 kg | low | lowest | **highest** |
-| Child 5 yr | 20 kg | near mature | mid | mid |
-| Adult 70 kg | 70 kg | ~1 | Matzke@GFR120 | reference |
+| Subject | GA | Weight | MF_renal | CL (order) |
+|---|---:|---:|---:|---|
+| Preterm 2 wk | 28 | 1.2 kg | **lowest** | **lowest** |
+| Term neo 2 wk | 40 | 3.5 kg | low | low |
+| Child 5 yr | — | 20 kg | ~1 | mid |
+| Adult 70 kg | — | 70 kg | ~1 | Matzke@GFR120 |
 
 ## Reproduce
 
