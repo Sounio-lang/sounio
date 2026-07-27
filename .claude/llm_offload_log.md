@@ -3455,3 +3455,18 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 | 2026-07-26 | xai/Grok 4.3 | math-review | stdlib/chemistry/kinetics.sio repair diff r1 (MatNM rewrite, aliasing fix, effect clauses) | PASS | All 6 items [OK]: stoich/Jacobian MatNM equivalence, cp/cm explicit-copy fix (confirmed old form was an aliasing bug mutating caller state), pos_or_one arithmetic identity, braces/effects/imports compile-only. "No mathematical or numeric alterations introduced." Raw: `/tmp/llm-offload-PjFD2J/`. |
 | 2026-07-26 | xai/Grok 4.3 | math-review | stdlib/chemistry/kinetics.sio repair diff r2 (exp_approx range reduction + retuned test expectations) | PASS | All 8 items [OK]: range reduction algebraically exact (arrhenius k now 1.2e-5, rel err 4.3%<5%); retuned expectations verified against independent RK4/closed forms (crn A=0.7929, metabolic B=0.5293, big_crn H2O=0.00481, transport 0.9418, general_crn C=0.03286); chem_full gap (missing system_id==5 dispatch in epistemic::ode) correctly documented, not masked. Raw: `/tmp/llm-offload-1J309Q/`. |
 | 2026-07-26 | xai/Grok 4.3 | math-review | stdlib/chemistry/{kinetics,thermochem,stoichiometry}.sio real-validation lane (GRI-Mech k(T), nu-respecting epistemic ensembles, real GUM thermochem/stoich) | PASS | All 7 items [OK]: modified-Arrhenius gri_k formula/constants exact (GRI-Mech 3.0 grimech30.dat); termolecular k·[M] reduction standard at 1500K; RK4 Butcher tableau reproduces Python trajectory; per-step delta-method GUM (central-diff Jacobian + rate sensitivities, diagonal approx noted) correct; Gibbs/Hess/log10K RSS algebra exact; stoich yield math dimensionally correct; ensemble retunes match corrected Python replicas (zero-matrix degeneracy removed). "No formula, constant, or dimensional errors detected." Raw: `/tmp/llm-offload-ZSuk2C/`. |
+
+## 2026-07-27 — pediatric_pbpk clinical/math review
+- target: stdlib/clinical/pediatric_pbpk.sio
+- deepseek review: FAIL (Insufficient Balance)
+- xai math-review: OK — Holford allometry, Rhodin MF, Matzke CL, SS Cmin, AUC24, Knightian corners
+- outcome: proceed; deepseek balance blocked, orthogonal math review clean
+
+## 2026-07-27 — pediatric_pbpk ext (preterm/AUC/gent)
+- target: stdlib/clinical/pediatric_pbpk.sio
+- xai math-review: partial — flagged Cmin ∂/∂V sign as inverted
+- adjudication: REJECT flag. Canonical form Cmin=(D/V)/(e^{kτ}-1), θ=CL·τ/V;
+  h(θ)=e^θ(θ-1)+1 > 0 for θ>0 ⇒ ∂Cmin/∂V > 0 (matches clinical::vancomycin_pbpk).
+  AUC Knightian (CL-only) and maturation math OK.
+- outcome: ship; corners (V_lo,CL_hi)/(V_hi,CL_lo) retained
+
