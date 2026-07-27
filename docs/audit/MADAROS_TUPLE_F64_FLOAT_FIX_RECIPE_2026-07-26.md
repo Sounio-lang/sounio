@@ -9,9 +9,9 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-
 
 # Recipe: float-type `(f64, f64)` import unpack (for Claude native/lower)
 
-**Status:** residual open — product mitigates; this is the true lower fix  
-**Witness gate:** `scripts/ci/madaros_imported_f64_mul_gate.sh` → want `MADAROS_IMPORTED_F64_MUL_FIXED`  
-**Owner:** Claude-1 (`lower.sio` claim) — Grok cannot write that file while claimed
+**Status:** **APPLIED** (2026-07-27) — branch `fix/madaros-tuple-f64-float-20260727`  
+**Witness gate:** `scripts/ci/madaros_imported_f64_mul_gate.sh` → `MADAROS_IMPORTED_F64_MUL_FIXED`  
+**Evidence:** rebuilt Madaros; `tuple ga*ga=0.250000`, `tuple gv*gv=0.001412`
 
 ## Mechanism
 
