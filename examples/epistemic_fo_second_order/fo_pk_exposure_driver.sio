@@ -1,0 +1,114 @@
+//@ run-pass
+//@ expect-stdout: FO_PK_EXPOSURE_DRIVER_PASS
+
+// Scientific FO driver — oral steady-state exposure under Madaros FO GUM.
+//
+//   rate = F · Dose / τ
+//   CL   = CL0 · exp(η)
+//   Css  = rate / CL
+//
+// Measured 2026-07-27: interproc FO bytecode does **not** yet transfer
+// through `exp` inside pure helpers (`variance_of(clearance(cl0,eta))→0`
+// while the same expression inlined is FO-live). This driver therefore:
+//   • uses pure helpers only for *arithmetic* factors (rate)
+//   • inlines exp(η) in the FO-measured expressions
+// and records the Knowledge⊗Knowledge non-FO hole honestly.
+
+fn abs_f(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn infusion_rate(f: f64, dose: f64, tau: f64) -> f64 {
+    (f * dose) / tau
+}
+
+// Witness: interproc FO does not yet transfer through exp inside helpers.
+fn clearance_helper(cl0: f64, eta: f64) -> f64 {
+    cl0 * exp(eta)
+}
+
+fn main() with IO, Mut, Div, Epistemic {
+    // F=0.8±0.05, Dose=500±10 mg, τ=12 (fixed), CL0=5±0.3 L/h, η=0±0.1
+    let kF: Knowledge<f64> = measure(0.8, uncertainty: 0.05)
+    let kDose: Knowledge<f64> = measure(500.0, uncertainty: 10.0)
+    let kTau: Knowledge<f64> = measure(12.0, uncertainty: 0.0)
+    let kCL0: Knowledge<f64> = measure(5.0, uncertainty: 0.3)
+    let kEta: Knowledge<f64> = measure(0.0, uncertainty: 0.1)
+
+    let f = kF.value
+    let dose = kDose.value
+    let tau = kTau.value
+    let cl0 = kCL0.value
+    let eta = kEta.value
+
+    // Point eval (helpers ok for values)
+    let rate = infusion_rate(f, dose, tau)
+    let cl = cl0 * exp(eta)
+    let css = rate / cl
+    let css_pt = (0.8 * 500.0 / 12.0) / 5.0
+
+    // FO — rate via interproc arithmetic helper
+    let v_rate = variance_of(infusion_rate(f, dose, tau))
+    // FO — CL / Css with exp *inlined* (interproc exp hole)
+    let v_cl = variance_of(cl0 * exp(eta))
+    let v_css = variance_of(infusion_rate(f, dose, tau) / (cl0 * exp(eta)))
+    let m1_css = css
+    let m2_css = second_order_mean(infusion_rate(f, dose, tau) / (cl0 * exp(eta)))
+    let h_css = hessian_diag_of(infusion_rate(f, dose, tau) / (cl0 * exp(eta)))
+
+    // Analytic FO (independent) at η=0:
+    // Var(rate) = (D/τ)² σ_F² + (F/τ)² σ_D² = 4.784722…
+    let v_rate_ref = 4.784722222222
+    // Var(CL) = σ_CL0² + CL0² σ_η² = 0.09 + 0.25 = 0.34
+    let v_cl_ref = 0.34
+
+    print("css_point="); print_f64(css); print("\n")
+    print("css_ref="); print_f64(css_pt); print("\n")
+    print("v_rate="); print_f64(v_rate); print("\n")
+    print("v_cl="); print_f64(v_cl); print("\n")
+    print("v_css="); print_f64(v_css); print("\n")
+    print("m1_css="); print_f64(m1_css); print("\n")
+    print("m2_css="); print_f64(m2_css); print("\n")
+    print("h_css="); print_f64(h_css); print("\n")
+    print("bias="); print_f64(m2_css - m1_css); print("\n")
+
+    // Honesty: Knowledge product is not FO; peel is.
+    let k_prod = kF * kDose
+    let v_kprod = variance_of(k_prod.value)
+    let v_peel = variance_of(f * dose)
+    print("kprod_var="); print_f64(v_kprod); print("\n")
+    print("peel_FD_var="); print_f64(v_peel); print("\n")
+
+    // Interproc-exp hole witness (must stay 0 until FO bytecode gains unary math)
+    let v_helper = variance_of(clearance_helper(cl0, eta))
+    print("v_cl_helper="); print_f64(v_helper); print("\n")
+
+    let point_ok = abs_f(css - css_pt) < 1.0e-9
+    let rate_ok = abs_f(v_rate - v_rate_ref) < 1.0e-6
+    let cl_ok = abs_f(v_cl - v_cl_ref) < 1.0e-9
+    let css_var_ok = v_css > 0.1
+    let mean2_moves = abs_f(m2_css - m1_css) > 1.0e-4
+    let hess_live = abs_f(h_css) > 1.0e-9
+    let kprod_no_fo = abs_f(v_kprod) < 1.0e-12
+    let peel_has_fo = v_peel > 1.0
+    let helper_exp_hole = abs_f(v_helper) < 1.0e-12
+
+    let ok = point_ok && rate_ok && cl_ok && css_var_ok
+        && mean2_moves && hess_live && kprod_no_fo && peel_has_fo
+        && helper_exp_hole
+    if ok {
+        print("FO_PK_EXPOSURE_DRIVER_PASS\n")
+    } else {
+        print("FO_PK_EXPOSURE_DRIVER_FAIL\n")
+        print("point_ok="); if point_ok { print("1\n") } else { print("0\n") }
+        print("rate_ok="); if rate_ok { print("1\n") } else { print("0\n") }
+        print("cl_ok="); if cl_ok { print("1\n") } else { print("0\n") }
+        print("css_var_ok="); if css_var_ok { print("1\n") } else { print("0\n") }
+        print("mean2_moves="); if mean2_moves { print("1\n") } else { print("0\n") }
+        print("hess_live="); if hess_live { print("1\n") } else { print("0\n") }
+        print("kprod_no_fo="); if kprod_no_fo { print("1\n") } else { print("0\n") }
+        print("peel_has_fo="); if peel_has_fo { print("1\n") } else { print("0\n") }
+        print("helper_exp_hole="); if helper_exp_hole { print("1\n") } else { print("0\n") }
+    }
+}
