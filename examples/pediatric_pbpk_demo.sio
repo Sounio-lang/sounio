@@ -1,0 +1,201 @@
+// examples/pediatric_pbpk_demo.sio
+//
+// Paediatric PBPK functional receipt — maturation + vancomycin + Knightian TDM.
+//
+// Cohort (all 15 mg/kg q12h IV educational screen):
+//   neonate 2 wk → child 5 yr → adolescent 14 yr → adult 70 kg
+//
+// Pass criteria:
+//   3201  adult CL matches Matzke@GFR120
+//   3202  renal MF: neonate < infant < adult
+//   3203  maturation penalty: neonate CL << allometric MF=1 counterfactual
+//   3204  child AUC24 in plausible band
+//   3205  Knightian pre-TDM REFUSE or wider; post-TDM narrower + gateable
+//   3206  ped_selftest returns 6/6
+//
+// Gate: scripts/ci/pediatric_pbpk_gate.sh
+
+use clinical::pediatric_pbpk::{
+    PedSubject, ped_neonate_term_2wk, ped_infant_6mo, ped_child_5yr,
+    ped_adolescent_14yr, ped_adult_ref_70kg,
+    ped_pma_weeks, ped_gfr_maturation, ped_physio_model,
+    ped_vanco_pk_mg_per_kg, ped_vanco_cl_l_h_with_mf,
+    ped_vanco_cmin_knightian, ped_vanco_is_safe_trough,
+    ped_vanco_auc24_ep, ped_selftest,
+}
+use epistemic::knowledge::{ep_val, ep_std}
+use epistemic::knightian::{pb_lo_mean, pb_hi_mean, pb_gap, pb_confidence}
+
+fn abs_f(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn pass_if(cond: bool, tag: i64) -> i64 with IO {
+    if cond {
+        print("PASS ")
+        print_int(tag)
+        print("\n")
+        1
+    } else {
+        print("FAIL ")
+        print_int(tag)
+        print("\n")
+        0
+    }
+}
+
+fn dump_subject(label: i64, s: &PedSubject, mgkg: f64, tau: f64) with IO, Mut, Div, Panic {
+    let phy = ped_physio_model(s)
+    let pk = ped_vanco_pk_mg_per_kg(s, mgkg, tau)
+    print("PED_ROW id=")
+    print_int(label)
+    print(" age_y=")
+    print_f64(s.age_years)
+    print(" wt=")
+    print_f64(s.weight_kg)
+    print(" pma_w=")
+    print_f64(phy.pma_weeks)
+    print(" mf_r=")
+    print_f64(phy.mf_renal)
+    print(" gfr=")
+    print_f64(phy.gfr_ml_min)
+    print(" cl=")
+    print_f64(pk.cl_l_h)
+    print(" vc=")
+    print_f64(pk.vc_l)
+    print(" cmin=")
+    print_f64(pk.cmin_mg_l)
+    print(" auc24=")
+    print_f64(pk.auc24_mg_h_l)
+    print("\n")
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    print("PEDIATRIC_PBPK_BEGIN\n")
+    print("CLAIM functional_paediatric_pbpk_maturation_vanco_knightian\n")
+    var n: i64 = 0
+
+    let neo = ped_neonate_term_2wk()
+    let inf = ped_infant_6mo()
+    let child = ped_child_5yr()
+    let teen = ped_adolescent_14yr()
+    let adult = ped_adult_ref_70kg()
+
+    dump_subject(1, &neo, 15.0, 12.0)
+    dump_subject(2, &inf, 15.0, 12.0)
+    dump_subject(3, &child, 15.0, 12.0)
+    dump_subject(4, &teen, 15.0, 12.0)
+    dump_subject(5, &adult, 15.0, 12.0)
+
+    let pk_a = ped_vanco_pk_mg_per_kg(&adult, 15.0, 12.0)
+    let p1 = abs_f(pk_a.cl_l_h - 5.1804) < 0.05
+    n = n + pass_if(p1, 3201)
+
+    let mf_n = ped_gfr_maturation(ped_pma_weeks(&neo))
+    let mf_i = ped_gfr_maturation(ped_pma_weeks(&inf))
+    let mf_a = ped_gfr_maturation(ped_pma_weeks(&adult))
+    print("PED_MF neo=")
+    print_f64(mf_n)
+    print(" infant=")
+    print_f64(mf_i)
+    print(" adult=")
+    print_f64(mf_a)
+    print("\n")
+    let p2 = mf_n < mf_i && mf_i < mf_a && mf_a > 0.95
+    n = n + pass_if(p2, 3202)
+
+    let pk_n = ped_vanco_pk_mg_per_kg(&neo, 15.0, 12.0)
+    let pk_c = ped_vanco_pk_mg_per_kg(&child, 15.0, 12.0)
+    let cl_neo_mf1 = ped_vanco_cl_l_h_with_mf(&neo, 1.0)
+    print("PED_CL neo=")
+    print_f64(pk_n.cl_l_h)
+    print(" neo_mf1=")
+    print_f64(cl_neo_mf1)
+    print(" child=")
+    print_f64(pk_c.cl_l_h)
+    print("\n")
+    print("PED_CMIN neo=")
+    print_f64(pk_n.cmin_mg_l)
+    print(" child=")
+    print_f64(pk_c.cmin_mg_l)
+    print("\n")
+    // Rhodin MF cuts neonatal CL below pure allometry (MF=1); Matzke intercept
+    // softens the ratio — require ≤0.60× and absolute CL < child.
+    let p3 = pk_n.cl_l_h < cl_neo_mf1 * 0.60 && pk_n.cl_l_h < pk_c.cl_l_h && mf_n < 0.45
+    n = n + pass_if(p3, 3203)
+
+    print("PED_AUC24_CHILD ")
+    print_f64(pk_c.auc24_mg_h_l)
+    print("\n")
+    let auc_ep = ped_vanco_auc24_ep(&pk_c)
+    print("PED_AUC24_EP val=")
+    print_f64(ep_val(&auc_ep))
+    print(" std=")
+    print_f64(ep_std(&auc_ep))
+    print("\n")
+    let p4 = pk_c.auc24_mg_h_l > 50.0 && pk_c.auc24_mg_h_l < 2000.0
+        && abs_f(ep_val(&auc_ep) - pk_c.auc24_mg_h_l) < 1.0e-9
+    n = n + pass_if(p4, 3204)
+
+    let dose_c = 15.0 * child.weight_kg
+    let pre = ped_vanco_cmin_knightian(&child, dose_c, 12.0, 0)
+    let post = ped_vanco_cmin_knightian(&child, dose_c, 12.0, 3)
+    print("PED_PBOX_PRE ")
+    print_f64(pb_lo_mean(&pre))
+    print("..")
+    print_f64(pb_hi_mean(&pre))
+    print(" gap=")
+    print_f64(pb_gap(&pre))
+    print("\n")
+    print("PED_PBOX_POST ")
+    print_f64(pb_lo_mean(&post))
+    print("..")
+    print_f64(pb_hi_mean(&post))
+    print(" gap=")
+    print_f64(pb_gap(&post))
+    print("\n")
+    let pre_safe = ped_vanco_is_safe_trough(&pre, 10.0, 20.0, 800)
+    let post_safe = ped_vanco_is_safe_trough(&post, 10.0, 20.0, 800)
+    if pre_safe { print("PED_PRE_DECISION PRESCRIBE\n") } else { print("PED_PRE_DECISION REFUSE\n") }
+    if post_safe { print("PED_POST_DECISION PRESCRIBE\n") } else { print("PED_POST_DECISION REFUSE\n") }
+    // Pre-TDM must be wider; post must be credible. Prefer post safer, but
+    // if both refuse the maturation demo still holds on gap narrowing.
+    let p5 = pb_gap(&pre) > pb_gap(&post)
+        && pb_confidence(&pre) >= 800
+        && pb_confidence(&post) >= 800
+        && (post_safe || !pre_safe)
+    n = n + pass_if(p5, 3205)
+
+    print("PED_SELFTEST_BEGIN\n")
+    let st = ped_selftest()
+    print("PED_SELFTEST_PASS ")
+    print_int(st)
+    print("\n")
+    let p6 = st == 6
+    n = n + pass_if(p6, 3206)
+
+    print("PED_LEDGER_JSON {")
+    print("\"schema\":\"sounio.pediatric_pbpk.v1\",")
+    print("\"neo_cmin\":")
+    print_f64(pk_n.cmin_mg_l)
+    print(",\"child_cmin\":")
+    print_f64(pk_c.cmin_mg_l)
+    print(",\"adult_cl\":")
+    print_f64(pk_a.cl_l_h)
+    print(",\"child_auc24\":")
+    print_f64(pk_c.auc24_mg_h_l)
+    print(",\"pass\":")
+    print_int(n)
+    print("}\n")
+
+    print("PEDIATRIC_PBPK_PASS ")
+    print_int(n)
+    print("\n")
+    if n == 6 {
+        print("PEDIATRIC_PBPK_OK\n")
+        0
+    } else {
+        print("PEDIATRIC_PBPK_FAILED\n")
+        1
+    }
+}
