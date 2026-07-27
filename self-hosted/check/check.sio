@@ -883,7 +883,7 @@ fn call_expr_type_args(e: Expr) -> Option<Box<TypeExprList> > with Mut, Panic, D
     }
 }
 
-fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
+pub fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
     Checker {
         env: type_env_new(),
         borrows: borrow_env_new(),
@@ -981,7 +981,7 @@ fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
     }
 }
 
-fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
+pub fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     (*raw).env = type_env_new()
     (*raw).borrows = borrow_env_new()
     (*raw).units = register_builtin_units(unit_registry_new())
@@ -2014,7 +2014,7 @@ fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with 
     lowered
 }
 
-fn checker_collect_items_mut(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
+pub fn checker_collect_items_mut(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
     // Route through the true *mut collect spine (ItemFn handled in place,
     // other item kinds bridge by value). The crash lived here: the by-value
     // (*c).collect_items(items) copied the 164KB Checker into `self` and
@@ -2022,7 +2022,7 @@ fn checker_collect_items_mut(c: *mut Checker, items: Option<Box<ItemList> >) wit
     checker_collect_items_inplace(c, items)
 }
 
-fn checker_check_items_mut(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
+pub fn checker_check_items_mut(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
     checker_check_items_inplace(c, items)
 }
 
@@ -2861,6 +2861,38 @@ fn checker_prove_robust_names_mut(c: *mut Checker, contest_name: Name, policy_na
 // `checker_check_expr_mut` (a single copy, off the hello.sio path).
 // ============================================================
 
+// Byte-wise Name printer available BEFORE the report functions. print_name_value (~9716) does the
+// same thing but is defined after them, and Sounio has no forward references, so a diagnostic at
+// line 2864 cannot call it.
+fn print_name_bytes_early(n: Name) with IO, Mut, Panic, Div {
+    var i: i64 = 0
+    while i < n.len {
+        print_char(n.buf[i] as i64)
+        i = i + 1
+    }
+}
+
+// E175 with the offending function NAMED. Without this the visibility preflight is unactionable:
+// a self-compile of compiler/main.sio emitted 6181 E175 in which span.start was 0 in 100% of
+// cases (876 E177 and 98 E137 from the same build all carried real spans), and no diagnostic in
+// this compiler prints span.file_id — so across a 105-module closure an offset alone cannot even
+// say which file. The name is the only handle that survives.
+fn checker_report_private_fn_inplace(c: *mut Checker, span: Span, name: Name) with Mut, IO, Panic, Div {
+    (*c).error_count = (*c).error_count + 1
+    (*c).had_error = true
+    (*c).diag_emitted = true
+    print("error[E175]")
+    if span.start > 0 || span.end > 0 {
+        print(" at ")
+        print_int(span.start)
+        print("..")
+        print_int(span.end)
+    }
+    print(": function `")
+    print_name_bytes_early(name)
+    print("` is private in its defining module\n")
+}
+
 fn checker_report_error_at_inplace(c: *mut Checker, span: Span, code: i64, msg_a: i64, msg_b: i64, msg_c: i64) with Mut, IO, Panic, Div {
     (*c).error_count = (*c).error_count + 1
     (*c).had_error = true
@@ -3695,7 +3727,7 @@ fn checker_collect_type_alias_inplace(c: *mut Checker, name: Name, ty_opt: Optio
     }
 }
 
-fn checker_collect_items_inplace(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
+pub fn checker_collect_items_inplace(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
     // Stash the program items so the deep call-arg compat path can resolve
     // ontology subclass relations by name (E009 subsumption). Single shallow
     // pointer write — persists where deep ontology_kernel mutation does not.
@@ -6825,7 +6857,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     }
     if direct_sig_id >= 0 {
         if (*c).enforce_visibility && !checker_fn_sig_visible_inplace(c, direct_sig_id) {
-            checker_report_error_at_inplace(c, e.span, 175, 0, 0, 0)
+            checker_report_private_fn_inplace(c, e.span, fn_sig_table_get((*c).fn_sigs, direct_sig_id).name)
         }
         let call_start_borrows = (*c).borrows
         let direct_sig = fn_sig_table_get((*c).fn_sigs, direct_sig_id)
@@ -6905,7 +6937,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     if callee_ty.kind == TypeKind::TyFn && callee_ty.fn_sig_id >= 0 {
         let sig = fn_sig_table_get((*c).fn_sigs, callee_ty.fn_sig_id)
         if (*c).enforce_visibility && !checker_fn_sig_visible_inplace(c, callee_ty.fn_sig_id) {
-            checker_report_error_at_inplace(c, e.span, 175, 0, 0, 0)
+            checker_report_private_fn_inplace(c, e.span, sig.name)
         }
         let call_start_borrows = (*c).borrows
         var effective_params = fn_param_list_clone(&sig.params)
@@ -7934,7 +7966,7 @@ fn checker_check_items_inner_store_return_error_count_mut(c: *mut Checker, items
     (*c).error_count
 }
 
-fn checker_check_items_inner_store_return_had_error_mut(c: *mut Checker, items: Option<Box<ItemList> >) -> i64 with Mut, Panic, Div, Alloc, IO {
+pub fn checker_check_items_inner_store_return_had_error_mut(c: *mut Checker, items: Option<Box<ItemList> >) -> i64 with Mut, Panic, Div, Alloc, IO {
     // Route through the true *mut spine: no 164KB by-value Checker copy
     // ever lands on the hot path, so the layout-sensitive stale-stack
     // codegen crash never fires. (Was: `(*c).check_items(items)` by value.)
@@ -8221,7 +8253,7 @@ fn check_policy_requirements_to_ir_export(
     }
 }
 
-fn checker_export_ir_epistemic_into_local(checker: &Checker, ep: &! IrEpistemicSection) with Mut, Panic, Div, Alloc {
+pub fn checker_export_ir_epistemic_into_local(checker: &Checker, ep: &! IrEpistemicSection) with Mut, Panic, Div, Alloc {
     ep.model_family_count = checker.model_families.count
     if ep.model_family_count > IR_MAX_EPI_MODEL_FAMILIES {
         ep.model_family_count = IR_MAX_EPI_MODEL_FAMILIES
