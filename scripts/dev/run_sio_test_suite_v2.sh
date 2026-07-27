@@ -697,9 +697,12 @@ echo "  Total: $((PASS + FAIL + SKIP + KNOWN_FAILURE + VACUOUS_KNOWN))"
 
 if [[ -n "$VACUOUS_STALE" ]]; then
     echo ""
-    echo "=== Stale vacuous-annotation baseline entries (now passing) ==="
+    echo "=== Vacuous-annotation baseline entries that passed in THIS run ==="
     printf '%s' "$VACUOUS_STALE"
-    echo "  Remove these from tests/vacuous_expect_baseline.txt."
+    echo "  The baseline is calibrated against the CI engine (souc-stage2 /"
+    echo "  lean_single, via SOUNIO_TEST_SOUC_BIN). Under a different engine most"
+    echo "  entries pass, so this list is only a removal instruction when the run"
+    echo "  used the CI engine. Confirm there before deleting an entry."
 fi
 
 # Generate JUnit XML if requested
