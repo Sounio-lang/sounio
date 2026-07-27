@@ -1,10 +1,10 @@
 # Paediatric PBPK — functional maturation + AUC-guided vanco + gentamicin
 
 **Date:** 2026-07-27  
-**Status:** live (v2: preterm + AUC + gentamicin)  
+**Status:** live (v3: + amikacin + neonate q6 vs q12)  
 **Module:** `stdlib/clinical/pediatric_pbpk.sio`  
 **Demo:** `examples/pediatric_pbpk_demo.sio`  
-**Gate:** `scripts/ci/pediatric_pbpk_gate.sh` → `PEDIATRIC_PBPK_GATE_OK` (9/9)
+**Gate:** `scripts/ci/pediatric_pbpk_gate.sh` → `PEDIATRIC_PBPK_GATE_OK` (11/11)
 
 ## Scope
 
@@ -18,6 +18,9 @@ Educational / compiler-stdlib **paediatric PBPK spine** with:
 6. **Preterm GA28** cohort (PMA 30 wk) vs term neonate
 7. **AUC-guided** dose for mid-target 500 mg·h/L + AUC p-box (↓CL only)
 8. **Gentamicin** on the same renal spine (Vc 0.25 L/kg, CL∝GFR)
+9. **Amikacin** (Vc 0.27 L/kg, CL∝GFR, trough screen 4–8 mg/L)
+10. **Neonate interval compare**: fixed 30 mg/kg/day as q6h vs q12h
+    (Cmin_q6 > Cmin_q12, Cmax_q6 < Cmax_q12, AUC24 equal)
 
 **Not medical guidance.**
 
