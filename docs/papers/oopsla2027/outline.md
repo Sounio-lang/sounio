@@ -63,10 +63,13 @@ derivation of that function already sitting unused in the repository.
 
 | # | Contribution | Rung | Verdict token |
 |---|---|---|---|
-| C6 | **Evidential independence as a static property.** Prior art binds *what* a check reports; nothing asks **where the evidence came from**. Measured: **343/1081 contract pairs share a derivation**. | R6 | `INDEPENDENCE_CHECKABLE__CORROBORATION_BINDS` |
+| C6 | **Evidential independence as a static property.** Prior art binds *what* a check reports; nothing asks **where the evidence came from**. Measured: **343/1081 contract pairs share a derivation**. **Read in one direction only** — see C12 and §8.6. | R6 | `INDEPENDENCE_CHECKABLE__CORROBORATION_BINDS` |
 | C7 | Auditing what the sharing exposes: the shared kernel checked against an independent derivation over 5 440 products. | R7 | `SHARED_KERNEL_CORROBORATED` |
 | C8 | **The trusted base of a research corpus**: enumerate shared derivations, rank by blast radius, **collapse wrappers into kernels**, audit what is irreducible. 23 clusters → 12 kernels; 51 contracts rest on essentially one function. | R8 | `TRUSTED_BASE_MAPPED__KERNELS_AGREE` |
 | C9 | Completing the audit, and **measuring the method's boundary**: 6 kernels corroborated, 2 with no adjudicator, and a principled reason for each. | R9 | `TRUSTED_BASE_PARTIALLY_AUDITABLE` |
+| C10 | **Corroboration depth as a corpus metric**, and a procedure that finds latent corroborations from source alone — validated by rediscovering the one a human found by reading. Depth 1 is the corpus's normal state. | R10 | `LATENT_CORROBORATION_FOUND` |
+| C11 | The procedure widened as far as isolation permits: **4 behaviour classes, zero new corroborations.** Wrappers are structurally unprobeable under isolation, and by C8's collapse probing them would add nothing. | R11 | `WIDER_PROBE__NO_NEW_PREEXISTING_CORROBORATION` |
+| C12 | **The fourth narrowing, and the one that withdraws a planned contribution.** C6's measure is not new and its central assumption is refuted by a study at 224 problems × 12 models; C6 survives one-sided, and the compiler rule it motivated is withdrawn rather than deferred (§8.6). | R12 | `PRIOR_ART_HAS_ARTEFACT_MEASURE__CLAIM_NARROWS_FOURTH` |
 
 ### Methodological results that generalise
 
@@ -226,20 +229,60 @@ of novelty.
 
 **Specifically not yet checked, in priority order:** (i) mutation-testing and
 test-suite-independence literature, which asks a structurally similar question
-about tests rather than about scientific checks; (ii) N-version programming,
-where independence of implementations is the entire premise and its measurement
-has been studied; (iii) whether any reproducibility-badging scheme already
-requires demonstrated implementation independence rather than accepting a
-declaration. **(ii) is the most dangerous to C6** — N-version programming has
-decades of work on exactly "are these two implementations independent", and if
-it contains a mechanical independence measure, C6 narrows again.
+about tests rather than about scientific checks; (iii) whether any
+reproducibility-badging scheme already requires demonstrated implementation
+independence rather than accepting a declaration.
+
+### 8.6 (ii) N-version programming — CHECKED, and it narrowed C6 a fourth time
+
+This section previously listed N-version programming as *"the most dangerous to
+C6 — decades of work on exactly 'are these two implementations independent', and
+if it contains a mechanical independence measure, C6 narrows again."* R12 ran
+that search. It does, and it did.
+
+**Nogueira, Pattabiraman, Vieira & Campos, arXiv:2607.02808 (2 July 2026)**
+measure structural diversity with **CodeBLEU** — lexical n-grams (0.1), weighted
+n-grams (0.1), AST similarity (0.4), dataflow similarity (0.4) — across 224
+problems, 12 models, 5 languages. Structural diversity is moderate; the
+implementations nonetheless fail on the same tests far more often than
+independence predicts, three- and five-version ensembles realise only 0.43 and
+0.44 of the achievable reliability gain, and manual fault analysis finds that
+*even different failure patterns often share root causes*. Knight & Leveson
+established the original negative in 1986, attributed to shared interpretation
+of the specification.
+
+Separately, **Type-4 (semantic) clone detection** is a mature field defined
+around fragments *"functionally similar without being textually similar"* —
+explicitly, code *"structurally different enough that a model clone detector may
+not find them to be within its structural similarity threshold."* That is C6's
+failure mode, named and studied by another community.
+
+**What this does to C6, precisely.** C6's measure consults strictly less
+information than CodeBLEU: canonicalised syntax and nothing else, omitting dataflow
+and lexical n-grams — 60 % of CodeBLEU by weight. (Less information, not a
+sub-computation: the two syntactic measures differ and neither contains the other.) The richer
+measure was tested against behavioural failure independence at a scale we cannot
+approach and does not predict it; a poorer measure cannot do better on the same
+question. C6 therefore survives **one-sided only**: high structural similarity
+reliably indicates *shared* evidence (that is Type-2 clone detection, and it
+works — the 343 pairs are real), while low structural similarity does **not**
+license the inference to independent evidence. The paper must not make that
+second inference, and R12's gate guards the concession.
+
+**What this does to the roadmap.** The obvious next contribution — a
+`corroborator` claim field where the compiler refuses codegen unless a second
+derivation measures as independent — is **withdrawn**, not deferred. Its premise
+is refuted, and it was separately pre-registered at 0/3 on the historical
+replay.
 
 ## 9. Threats
 
 Single repository, single author. `n = 6` classifiable pairs in the
 retrospective. Message-matched population with unknown recall. Arm A executed
-only where a harness runs standalone. Independence measured structurally, which
-is a lower bound. Predictive kernels audited at levels 4–5 only. The line's own
+only where a harness runs standalone. **Independence measured structurally,
+which §8.6 establishes is a one-sided test and not a lower bound on evidential
+independence** — it detects shared evidence, it does not certify independent
+evidence. Predictive kernels audited at levels 4–5 only. The line's own
 artefacts excluded from its own measurements, and the self-referential share of
 coverage disclosed.
 
@@ -253,13 +296,22 @@ agreement between checks that share a derivation. That question is cheap to
 answer, decidable, and on this corpus it changed the status of a third of the
 cross-checks.
 
-Three literature searches narrowed this paper's claims three times, and each
+Four literature searches narrowed this paper's claims four times, and each
 narrowing improved it. The compile-time mechanism went first, then the
-independence technique, then the epistemic framing. What is left is small and
-survives contact: **a study-level distinction made into a machine-checkable
-property of one codebase's internal evidence, and used to find where auditing
-pays.** Reporting the narrowings rather than the first draft is the same
-discipline the paper is about.
+independence technique, then the epistemic framing, then — in §8.6 — the
+inference the independence measure licenses. What is left is small and survives
+contact: **a study-level distinction made into a machine-checkable property of
+one codebase's internal evidence, used to find where auditing pays, and read in
+one direction only.** Reporting the narrowings rather than the first draft is
+the same discipline the paper is about.
+
+What the fourth narrowing leaves open is worth naming, because the arc answered
+it once by hand and cannot answer it by machine. The audits that actually caught
+things (R7, R9) did not use structural distance: R9's ground truth was
+rank-deficiency of the left-multiplication matrix, *a route the corpus's own
+predicates never take*. That is independence of the **derivational route**, not
+of the **code**. It is what worked here; it is what the N-version literature
+still lacks a measure for; and this line cannot compute it either.
 
 ---
 
