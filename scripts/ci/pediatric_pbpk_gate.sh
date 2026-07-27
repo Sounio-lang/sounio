@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Paediatric PBPK gate v3 — amikacin + neonate q6 vs q12.
+# Paediatric PBPK gate v5 — individualisation + multi-dose accumulation.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
@@ -20,7 +20,7 @@ if ! grep -q 'PEDIATRIC_PBPK_OK' "$OUT"; then
   rm -f "$OUT"
   exit 1
 fi
-for tag in 3201 3202 3203 3204 3205 3206 3207 3208 3209 3210 3211; do
+for tag in 3201 3202 3203 3204 3205 3206 3207 3208 3209 3210 3211 3212 3213 3214 3215 3216; do
   if ! grep -q "PASS $tag" "$OUT"; then
     cat "$OUT" >&2
     echo "[pediatric-pbpk] FAIL: missing PASS $tag" >&2
