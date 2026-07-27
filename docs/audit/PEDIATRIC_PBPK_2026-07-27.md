@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.pediatric-pbpk-2026-07-27
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.pediatric-pbpk-2026-07-27
+-->
+
 # Paediatric PBPK — functional maturation + AUC-guided vanco + gentamicin
 
 **Date:** 2026-07-27  
