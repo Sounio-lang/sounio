@@ -7350,6 +7350,12 @@ impl Lowerer {
             match (*e).left {
                 Some(callee) => {
                     if (*callee).kind == ExprKind::ExprIdent {
+                        // Unary math (exp/log/sin/…): do NOT FWD to the math name —
+                        // those are not FO transfer entries. Fall through to bytecode
+                        // which emits op 20+kind with chain-rule Hessians.
+                        if self.fo_unary_math_kind((*callee).name) >= 0 {
+                            return false
+                        }
                         var acur = &(*e).args
                         var ai: i64 = 0
                         var ok = true
@@ -7595,6 +7601,30 @@ impl Lowerer {
                 }
             }
             return fo_bc_emit(9, 0)
+        }
+        // Unary math call: exp/sin/cos/sqrt/log/... → opcode 20+kind
+        if (*e).kind == ExprKind::ExprCall {
+            match (*e).left {
+                Some(callee) => {
+                    if (*callee).kind == ExprKind::ExprIdent {
+                        let uk = self.fo_unary_math_kind((*callee).name)
+                        if uk >= 0 {
+                            match (*e).args {
+                                Some(alist) => {
+                                    if !self.fo_bc_compile_expr(&(*alist).head, p0, p1, p2, p3, nparams) {
+                                        return false
+                                    }
+                                    // op = 20 + kind (0=exp … 9=acos)
+                                    return fo_bc_emit(20 + uk, 0)
+                                }
+                                _ => return false
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+            return false
         }
         false
     }
@@ -8252,6 +8282,182 @@ impl Lowerer {
                 FO_EV_VAL[sp3 as usize] = rval
                 FO_EV_VAR[sp3 as usize] = rvar
                 FO_EV_SP = sp3 + 1
+            } else if op >= 20 && op <= 29 {
+                // Unary math FO: kind = op - 20; stack top = arg
+                if FO_EV_SP < 1 {
+                    return (lo.fo_clear_expr_sens(), -1)
+                }
+                FO_EV_SP = FO_EV_SP - 1
+                let sp = FO_EV_SP
+                let av = FO_EV_VAL[sp as usize]
+                if av < 0 {
+                    return (lo.fo_clear_expr_sens(), -1)
+                }
+                var s_in: [i64; 32] = [-1; 32]
+                var h_in: [i64; 32] = [-1; 32]
+                var k_u: i64 = 0
+                while k_u < 32 {
+                    s_in[k_u as usize] = FO_EV_SENS[(sp * 32 + k_u) as usize]
+                    h_in[k_u as usize] = FO_EV_HESS[(sp * 32 + k_u) as usize]
+                    k_u = k_u + 1
+                }
+                let kind = op - 20
+                let fname = lo.fo_unary_math_fname(kind)
+                let res_p = lo.fo_emit_math_call1(fname, av)
+                lo = res_p.0
+                let res = res_p.1
+                // f' and f'' (same rules as fo_apply_unary_math)
+                var fprime: i64 = -1
+                var f2: i64 = -1
+                if kind == 0 {
+                    fprime = res
+                    f2 = res
+                } else if kind == 1 {
+                    let cp = lo.fo_emit_math_call1(make_name("cos"), av)
+                    lo = cp.0
+                    fprime = cp.1
+                    let zp = lo.emit_f64_const(0.0)
+                    lo = zp.0
+                    let np = lo.fresh_reg()
+                    lo = np.0
+                    f2 = np.1
+                    lo = lo.emit(ir_binop_typed(f2, zp.1, BinaryOp::OpSub, res, true, true))
+                    lo = lo.emit(ir_mark_float_reg(f2))
+                } else if kind == 2 {
+                    let sp2 = lo.fo_emit_math_call1(make_name("sin"), av)
+                    lo = sp2.0
+                    let sn = sp2.1
+                    let zp = lo.emit_f64_const(0.0)
+                    lo = zp.0
+                    let np = lo.fresh_reg()
+                    lo = np.0
+                    fprime = np.1
+                    lo = lo.emit(ir_binop_typed(fprime, zp.1, BinaryOp::OpSub, sn, true, true))
+                    lo = lo.emit(ir_mark_float_reg(fprime))
+                    let np2 = lo.fresh_reg()
+                    lo = np2.0
+                    f2 = np2.1
+                    lo = lo.emit(ir_binop_typed(f2, zp.1, BinaryOp::OpSub, res, true, true))
+                    lo = lo.emit(ir_mark_float_reg(f2))
+                } else if kind == 3 {
+                    let two_p = lo.emit_f64_const(2.0)
+                    lo = two_p.0
+                    let den = lo.fresh_reg()
+                    lo = den.0
+                    let dreg = den.1
+                    lo = lo.emit(ir_binop_typed(dreg, two_p.1, BinaryOp::OpMul, res, true, true))
+                    lo = lo.emit(ir_mark_float_reg(dreg))
+                    let one_p = lo.emit_f64_const(1.0)
+                    lo = one_p.0
+                    let fp = lo.fresh_reg()
+                    lo = fp.0
+                    fprime = fp.1
+                    lo = lo.emit(ir_binop_typed(fprime, one_p.1, BinaryOp::OpDiv, dreg, true, true))
+                    lo = lo.emit(ir_mark_float_reg(fprime))
+                    let ar = lo.fresh_reg()
+                    lo = ar.0
+                    let arg_res = ar.1
+                    lo = lo.emit(ir_binop_typed(arg_res, av, BinaryOp::OpMul, res, true, true))
+                    lo = lo.emit(ir_mark_float_reg(arg_res))
+                    let four_p = lo.emit_f64_const(4.0)
+                    lo = four_p.0
+                    let den4 = lo.fresh_reg()
+                    lo = den4.0
+                    let d4 = den4.1
+                    lo = lo.emit(ir_binop_typed(d4, four_p.1, BinaryOp::OpMul, arg_res, true, true))
+                    lo = lo.emit(ir_mark_float_reg(d4))
+                    let one2 = lo.emit_f64_const(1.0)
+                    lo = one2.0
+                    let inv = lo.fresh_reg()
+                    lo = inv.0
+                    let inv4 = inv.1
+                    lo = lo.emit(ir_binop_typed(inv4, one2.1, BinaryOp::OpDiv, d4, true, true))
+                    lo = lo.emit(ir_mark_float_reg(inv4))
+                    let zp = lo.emit_f64_const(0.0)
+                    lo = zp.0
+                    let np = lo.fresh_reg()
+                    lo = np.0
+                    f2 = np.1
+                    lo = lo.emit(ir_binop_typed(f2, zp.1, BinaryOp::OpSub, inv4, true, true))
+                    lo = lo.emit(ir_mark_float_reg(f2))
+                } else if kind == 4 {
+                    let one_p = lo.emit_f64_const(1.0)
+                    lo = one_p.0
+                    let fp = lo.fresh_reg()
+                    lo = fp.0
+                    fprime = fp.1
+                    lo = lo.emit(ir_binop_typed(fprime, one_p.1, BinaryOp::OpDiv, av, true, true))
+                    lo = lo.emit(ir_mark_float_reg(fprime))
+                    let aa = lo.fresh_reg()
+                    lo = aa.0
+                    let a2 = aa.1
+                    lo = lo.emit(ir_binop_typed(a2, av, BinaryOp::OpMul, av, true, true))
+                    lo = lo.emit(ir_mark_float_reg(a2))
+                    let one2 = lo.emit_f64_const(1.0)
+                    lo = one2.0
+                    let inv = lo.fresh_reg()
+                    lo = inv.0
+                    let inv_a2 = inv.1
+                    lo = lo.emit(ir_binop_typed(inv_a2, one2.1, BinaryOp::OpDiv, a2, true, true))
+                    lo = lo.emit(ir_mark_float_reg(inv_a2))
+                    let zp = lo.emit_f64_const(0.0)
+                    lo = zp.0
+                    let np = lo.fresh_reg()
+                    lo = np.0
+                    f2 = np.1
+                    lo = lo.emit(ir_binop_typed(f2, zp.1, BinaryOp::OpSub, inv_a2, true, true))
+                    lo = lo.emit(ir_mark_float_reg(f2))
+                } else if kind == 5 {
+                    // tan: f'=1+t², f''=2t(1+t²)
+                    let one_p = lo.emit_f64_const(1.0)
+                    lo = one_p.0
+                    let t2p = lo.fresh_reg()
+                    lo = t2p.0
+                    let t2 = t2p.1
+                    lo = lo.emit(ir_binop_typed(t2, res, BinaryOp::OpMul, res, true, true))
+                    lo = lo.emit(ir_mark_float_reg(t2))
+                    let fp = lo.fresh_reg()
+                    lo = fp.0
+                    fprime = fp.1
+                    lo = lo.emit(ir_binop_typed(fprime, one_p.1, BinaryOp::OpAdd, t2, true, true))
+                    lo = lo.emit(ir_mark_float_reg(fprime))
+                    let two_p = lo.emit_f64_const(2.0)
+                    lo = two_p.0
+                    let tt = lo.fresh_reg()
+                    lo = tt.0
+                    let tterm = tt.1
+                    lo = lo.emit(ir_binop_typed(tterm, two_p.1, BinaryOp::OpMul, res, true, true))
+                    lo = lo.emit(ir_mark_float_reg(tterm))
+                    let f2p = lo.fresh_reg()
+                    lo = f2p.0
+                    f2 = f2p.1
+                    lo = lo.emit(ir_binop_typed(f2, tterm, BinaryOp::OpMul, fprime, true, true))
+                    lo = lo.emit(ir_mark_float_reg(f2))
+                } else {
+                    // default: treat as identity (f'=1,f''=0) for unknown residual kinds
+                    let one_p = lo.emit_f64_const(1.0)
+                    lo = one_p.0
+                    fprime = one_p.1
+                    let zp = lo.emit_f64_const(0.0)
+                    lo = zp.0
+                    f2 = zp.1
+                }
+                lo = lo.fo_combine_unary_chain(s_in, h_in, fprime, f2)
+                let vp = lo.fo_emit_var_from_sens()
+                lo = vp.0
+                let out_var = vp.1
+                let sOut = lo.fo_snapshot_expr_sens()
+                let hOut = lo.fo_snapshot_expr_hess()
+                let sp2 = FO_EV_SP
+                FO_EV_VAL[sp2 as usize] = res
+                FO_EV_VAR[sp2 as usize] = out_var
+                var k6: i64 = 0
+                while k6 < 32 {
+                    FO_EV_SENS[(sp2 * 32 + k6) as usize] = sOut[k6 as usize]
+                    FO_EV_HESS[(sp2 * 32 + k6) as usize] = hOut[k6 as usize]
+                    k6 = k6 + 1
+                }
+                FO_EV_SP = sp2 + 1
             } else {
                 return (lo.fo_clear_expr_sens(), -1)
             }
