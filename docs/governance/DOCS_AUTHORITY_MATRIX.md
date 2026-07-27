@@ -952,6 +952,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.trigintaduonion-zd-falsifiers-2026-07-25 | historical | docs/research/trigintaduonion_zd_falsifiers_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.trigintaduonion-zd-spec-2026-07-25 | historical | docs/research/trigintaduonion_zd_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.variance-of-associator | historical | docs/research/variance_of_associator.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.visibility-widening-non-monotonicity-2026-07-26 | historical | docs/research/visibility-widening-non-monotonicity_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.while-loop-bug-investigation | historical | docs/research/WHILE_LOOP_BUG_INVESTIGATION.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.zero-provenance-claims-falsifiers-2026-07-25 | historical | docs/research/zero_provenance_claims_falsifiers_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.zero-provenance-claims-spec-2026-07-25 | historical | docs/research/zero_provenance_claims_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
