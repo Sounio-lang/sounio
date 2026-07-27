@@ -962,13 +962,61 @@ D features a complete algebraic effect system. Effects describe computational si
 | Effect | Description | Operations |
 |--------|-------------|------------|
 | `IO` | Input/output | File, network, console operations |
-| `Mut` | Mutable state | Reading/writing mutable variables |
+| `Mut` | Mutable state that escapes the callee | Writing through an exclusive reference (`&!T`), a raw `*mut T`, or an array/struct reached through one. See §7.2.1. |
 | `Alloc` | Memory allocation | Heap allocation |
 | `Panic` | Recoverable failure | Panic and recovery |
 | `Async` | Asynchronous computation | Await, spawn |
 | `GPU` | GPU operations | Kernel launch, device memory |
 | `Prob` | Probabilistic computation | Sample, observe |
 | `Div` | Divergence | Potential non-termination |
+
+#### 7.2.1 `Mut` and local mutation — the escape rule
+
+`Mut` describes mutation that is **observable by the caller**. Mutating a
+function-local `var` is not: the binding dies with the frame, so it is invisible
+outside and does **not** require `Mut` in the signature.
+
+```sio
+// No `with Mut` needed: `y` is local, the mutation cannot escape.
+// (Division is omitted deliberately -- it would additionally require
+//  `with Div, Panic`, which is a separate obligation from `Mut`.)
+fn accumulate(n: i64) -> i64 {
+    var y = 1
+    y = y + n
+    y
+}
+
+// `with Mut` IS needed: the write is through an exclusive reference,
+// so the caller observes it.
+fn zero_first(buf: &![i64; 4]) with Mut {
+    (*buf)[0] = 0
+}
+```
+
+A mutation escapes — and therefore requires `Mut` — when it is written through
+an exclusive reference (`&!T`), a raw `*mut T`, an array or struct reached
+through either, or when it is captured by a closure that outlives the frame.
+The checker is intended to **infer** this from the function body rather than
+require the author to reason about it; the annotation is a declaration of the
+inferred fact, not an independent obligation.
+
+> **Implementation status (measured 2026-07-27, not a statement of intent).**
+> Neither shipped engine implements the rule above. Under the default compiler
+> (Madaros, `self-hosted/check/`) `Mut` is **not required for either case** —
+> `check_callee_effects` (`self-hosted/check/check.sio:11688`) enforces effects
+> only at *call sites*, propagating a callee's declared effects to its caller;
+> nothing demands `Mut` at an assignment. Under the frozen `lean_single`
+> bootstrap seed, `Mut` is required for **both** cases, including the local
+> `var` above. A live consequence: `self-hosted/ir/egraph.sio` fails
+> `SOUNIO_SOUC_ENGINE=lean_single souc check` at line 1549 — inside `eg_isqrt`
+> (`egraph.sio:1511`), on the statement `y = (y + x / y) / 2`, a mutation of a
+> function-local `var` in an otherwise pure integer helper. Verified by
+> isolation that the missing effect there is `Mut` and not `Div`: the seed
+> rejects a local `var` mutation with no division at all, and accepts a bare
+> division with no mutation. Closing this gap in the default compiler is
+> scoped in
+> `docs/audit/MUT_EFFECT_ENFORCEMENT_DISPATCH_2026-07-27.md`; the seed is
+> deliberately left frozen (see `docs/compiler/KNOWN_LIMITATIONS.md`).
 
 ### 7.3 Effect Annotations
 
