@@ -7602,7 +7602,7 @@ impl Lowerer {
             }
             return fo_bc_emit(9, 0)
         }
-        // Unary math call: exp/sin/cos/sqrt/log/... → opcode 20+kind
+        // Calls: unary math → op 20+kind; FO-transferred pure helpers → expand/inline
         if (*e).kind == ExprKind::ExprCall {
             match (*e).left {
                 Some(callee) => {
@@ -7620,6 +7620,11 @@ impl Lowerer {
                                 _ => return false
                             }
                         }
+                        // Nested multi-helper FO: expand registered transfer of callee
+                        // into this bytecode (param loads become call-arg subtrees).
+                        return self.fo_bc_expand_xfer_call(
+                            (*callee).name, &(*e).args, p0, p1, p2, p3, nparams, 0
+                        )
                     }
                 }
                 _ => {}
@@ -7627,6 +7632,217 @@ impl Lowerer {
             return false
         }
         false
+    }
+
+    // Compile the n-th argument of a call into FO bytecode (leaves value on stack).
+    fn fo_bc_compile_nth_arg(
+        self,
+        args: &Option<Box<ExprList>>,
+        n: i64,
+        p0: Name,
+        p1: Name,
+        p2: Name,
+        p3: Name,
+        nparams: i64
+    ) -> bool with Mut, Panic, Div, Alloc {
+        var acur = args
+        var ai: i64 = 0
+        while true {
+            match *acur {
+                Some(al) => {
+                    if ai == n {
+                        return self.fo_bc_compile_expr(&(*al).head, p0, p1, p2, p3, nparams)
+                    }
+                    ai = ai + 1
+                    acur = &(*al).tail
+                }
+                _ => break
+            }
+        }
+        false
+    }
+
+    // Expand a call to a pure FO-transferred helper into the current bytecode stream.
+    // depth limits FWD / nested-inline recursion.
+    fn fo_bc_expand_xfer_call(
+        self,
+        callee: Name,
+        args: &Option<Box<ExprList>>,
+        p0: Name,
+        p1: Name,
+        p2: Name,
+        p3: Name,
+        nparams: i64,
+        depth: i64
+    ) -> bool with Mut, Panic, Div, Alloc {
+        if depth > 8 {
+            return false
+        }
+        let idx = fo_xfer_global_lookup(callee)
+        if idx < 0 {
+            return false
+        }
+        let kind = FO_XFER_KIND[idx as usize]
+        if kind <= 0 {
+            return false
+        }
+        // kind 5 FWD → expand target under same args
+        if kind == 5 {
+            let fh = FO_XFER_FWD_HASH[idx as usize]
+            let fidx = fo_xfer_global_lookup_hash(fh)
+            if fidx < 0 {
+                return false
+            }
+            // Resolve name from hash by re-looking table — expand via kind at fidx
+            // by replaying transfer kinds (no Name for hash-only). Inline by index.
+            return self.fo_bc_expand_xfer_at(
+                fidx, args, p0, p1, p2, p3, nparams, depth + 1
+            )
+        }
+        self.fo_bc_expand_xfer_at(idx, args, p0, p1, p2, p3, nparams, depth)
+    }
+
+    fn fo_bc_expand_xfer_at(
+        self,
+        idx: i64,
+        args: &Option<Box<ExprList>>,
+        p0: Name,
+        p1: Name,
+        p2: Name,
+        p3: Name,
+        nparams: i64,
+        depth: i64
+    ) -> bool with Mut, Panic, Div, Alloc {
+        if depth > 8 || idx < 0 || idx >= FO_XFER_COUNT {
+            return false
+        }
+        let kind = FO_XFER_KIND[idx as usize]
+        if kind <= 0 {
+            return false
+        }
+        if kind == 5 {
+            let fh = FO_XFER_FWD_HASH[idx as usize]
+            let fidx = fo_xfer_global_lookup_hash(fh)
+            if fidx < 0 {
+                return false
+            }
+            return self.fo_bc_expand_xfer_at(
+                fidx, args, p0, p1, p2, p3, nparams, depth + 1
+            )
+        }
+        // kind 1: identity of param i (i in lit)
+        if kind == 1 {
+            let pi = FO_XFER_LIT[idx as usize] as i64
+            return self.fo_bc_compile_nth_arg(args, pi, p0, p1, p2, p3, nparams)
+        }
+        // kind 2: lit * arg0
+        if kind == 2 {
+            if !fo_bc_emit_const(FO_XFER_LIT[idx as usize]) {
+                return false
+            }
+            if !self.fo_bc_compile_nth_arg(args, 0, p0, p1, p2, p3, nparams) {
+                return false
+            }
+            return fo_bc_emit(5, 0)
+        }
+        // kind 3: arg0 + arg1
+        if kind == 3 {
+            if !self.fo_bc_compile_nth_arg(args, 0, p0, p1, p2, p3, nparams) {
+                return false
+            }
+            if !self.fo_bc_compile_nth_arg(args, 1, p0, p1, p2, p3, nparams) {
+                return false
+            }
+            return fo_bc_emit(3, 0)
+        }
+        // kind 4: arg0 * arg1
+        if kind == 4 {
+            if !self.fo_bc_compile_nth_arg(args, 0, p0, p1, p2, p3, nparams) {
+                return false
+            }
+            if !self.fo_bc_compile_nth_arg(args, 1, p0, p1, p2, p3, nparams) {
+                return false
+            }
+            return fo_bc_emit(5, 0)
+        }
+        // kind 6: inline callee bytecode with LOAD_PARAM → arg subtrees
+        if kind == 6 {
+            return self.fo_bc_inline_xfer_bytecode(
+                idx, args, p0, p1, p2, p3, nparams, depth
+            )
+        }
+        false
+    }
+
+    // Replay kind-6 bytecode of callee into current stream.
+    // op 1 (param i) → compile call arg i; op 7/8 locals remapped above FO_BC_LOC_N.
+    fn fo_bc_inline_xfer_bytecode(
+        self,
+        idx: i64,
+        args: &Option<Box<ExprList>>,
+        p0: Name,
+        p1: Name,
+        p2: Name,
+        p3: Name,
+        nparams: i64,
+        depth: i64
+    ) -> bool with Mut, Panic, Div, Alloc {
+        if depth > 8 {
+            return false
+        }
+        let off = FO_XFER_BC_OFF[idx as usize]
+        let blen = FO_XFER_BC_LEN[idx as usize]
+        if blen <= 0 {
+            return false
+        }
+        // Local base for remapping callee locals into parent slot space
+        let loc_base = FO_BC_LOC_N
+        // First pass: find max local index used
+        var max_loc: i64 = 0 - 1
+        var pci: i64 = 0
+        while pci < blen {
+            let op = FO_BC_OP[(off + pci) as usize]
+            let arg = FO_BC_ARG[(off + pci) as usize]
+            if op == 7 || op == 8 {
+                if arg > max_loc {
+                    max_loc = arg
+                }
+            }
+            pci = pci + 1
+        }
+        if max_loc >= 0 {
+            let need = loc_base + max_loc + 1
+            if need > 8 {
+                return false
+            }
+            // Grow FO_BC_LOC_N to reserve remapped slots (hashes unused for inline)
+            while FO_BC_LOC_N < need {
+                FO_BC_LOC_HASH[FO_BC_LOC_N as usize] = 0 - (FO_BC_LOC_N + 1)
+                FO_BC_LOC_N = FO_BC_LOC_N + 1
+            }
+        }
+        var pc: i64 = 0
+        while pc < blen {
+            let op = FO_BC_OP[(off + pc) as usize]
+            let arg = FO_BC_ARG[(off + pc) as usize]
+            if op == 1 {
+                // LOAD_PARAM arg → compile corresponding call argument
+                if !self.fo_bc_compile_nth_arg(args, arg, p0, p1, p2, p3, nparams) {
+                    return false
+                }
+            } else if op == 7 || op == 8 {
+                if !fo_bc_emit(op, arg + loc_base) {
+                    return false
+                }
+            } else {
+                // Re-emit as-is (const indices, binops, unary math, SELECT, cmp)
+                if !fo_bc_emit(op, arg) {
+                    return false
+                }
+            }
+            pc = pc + 1
+        }
+        true
     }
 
     // Compile a block leaving its trailing expression FO on the eval stack.

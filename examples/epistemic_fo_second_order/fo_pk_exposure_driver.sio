@@ -7,10 +7,8 @@
 //   CL   = CL0 · exp(η)
 //   Css  = rate / CL
 //
-// Measured 2026-07-27 (post unary bytecode): interproc FO transfers through
-// `exp`/`log` inside pure helpers — variance_of(clearance(cl0,eta)) matches
-// the inlined form. Nested multi-helper bodies are not yet bytecode-FO;
-// compose at the call site. Knowledge⊗Knowledge remains non-FO (honest hole).
+// Nested multi-helper FO is live: css_helper body calls infusion_rate +
+// clearance_helper (with exp). Knowledge⊗Knowledge remains non-FO.
 
 fn abs_f(x: f64) -> f64 {
     if x < 0.0 { return 0.0 - x }
@@ -21,13 +19,15 @@ fn infusion_rate(f: f64, dose: f64, tau: f64) -> f64 {
     (f * dose) / tau
 }
 
-// Interproc FO through exp — must match inlined CL0*exp(η).
 fn clearance_helper(cl0: f64, eta: f64) -> f64 {
     cl0 * exp(eta)
 }
 
+fn css_helper(f: f64, dose: f64, tau: f64, cl0: f64, eta: f64) -> f64 {
+    infusion_rate(f, dose, tau) / clearance_helper(cl0, eta)
+}
+
 fn main() with IO, Mut, Div, Epistemic {
-    // F=0.8±0.05, Dose=500±10 mg, τ=12 (fixed), CL0=5±0.3 L/h, η=0±0.1
     let kF: Knowledge<f64> = measure(0.8, uncertainty: 0.05)
     let kDose: Knowledge<f64> = measure(500.0, uncertainty: 10.0)
     let kTau: Knowledge<f64> = measure(12.0, uncertainty: 0.0)
@@ -40,28 +40,21 @@ fn main() with IO, Mut, Div, Epistemic {
     let cl0 = kCL0.value
     let eta = kEta.value
 
-    // Point eval
     let rate = infusion_rate(f, dose, tau)
     let cl = clearance_helper(cl0, eta)
     let css = rate / cl
     let css_pt = (0.8 * 500.0 / 12.0) / 5.0
 
-    // FO — rate via interproc arithmetic helper
     let v_rate = variance_of(infusion_rate(f, dose, tau))
-    // FO — CL via interproc helper with exp (unary bytecode 20+)
     let v_cl = variance_of(clearance_helper(cl0, eta))
     let v_cl_inline = variance_of(cl0 * exp(eta))
-    // FO — Css: compose helpers at call site
-    let v_css = variance_of(infusion_rate(f, dose, tau) / clearance_helper(cl0, eta))
+    let v_css = variance_of(css_helper(f, dose, tau, cl0, eta))
     let v_css_inline = variance_of(infusion_rate(f, dose, tau) / (cl0 * exp(eta)))
     let m1_css = css
-    let m2_css = second_order_mean(infusion_rate(f, dose, tau) / clearance_helper(cl0, eta))
-    let h_css = hessian_diag_of(infusion_rate(f, dose, tau) / clearance_helper(cl0, eta))
+    let m2_css = second_order_mean(css_helper(f, dose, tau, cl0, eta))
+    let h_css = hessian_diag_of(css_helper(f, dose, tau, cl0, eta))
 
-    // Analytic FO (independent) at η=0:
-    // Var(rate) = (D/τ)² σ_F² + (F/τ)² σ_D² = 4.784722…
     let v_rate_ref = 4.784722222222
-    // Var(CL) = σ_CL0² + CL0² σ_η² = 0.09 + 0.25 = 0.34
     let v_cl_ref = 0.34
 
     print("css_point="); print_f64(css); print("\n")
@@ -76,7 +69,6 @@ fn main() with IO, Mut, Div, Epistemic {
     print("h_css="); print_f64(h_css); print("\n")
     print("bias="); print_f64(m2_css - m1_css); print("\n")
 
-    // Honesty: Knowledge product is not FO; peel is.
     let k_prod = kF * kDose
     let v_kprod = variance_of(k_prod.value)
     let v_peel = variance_of(f * dose)
