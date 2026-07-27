@@ -60,4 +60,8 @@ SOUNIO_MADAROS_BOX_DEREF_GATE_BIN="$MADAROS_ELF" \
 SOUNIO_MADAROS_BOX_DEREF_GATE_DIR="$WORK/box-deref" \
   bash "$ROOT_DIR/scripts/ci/madaros_box_deref_gate.sh"
 
-echo "[madaros-f64-lowering] PASS: one shared Madaros ELF passed dereference, global f64, direct capacity, imported capacity, imported wide-call, and Box allocation/deref gates"
+SOUNIO_MADAROS_UNKNOWN_ASSOC_FN_GATE_BIN="$MADAROS_ELF" \
+SOUNIO_MADAROS_UNKNOWN_ASSOC_FN_GATE_DIR="$WORK/unknown-assoc-fn" \
+  bash "$ROOT_DIR/scripts/ci/madaros_unknown_assoc_fn_gate.sh"
+
+echo "[madaros-f64-lowering] PASS: one shared Madaros ELF passed dereference, global f64, direct capacity, imported capacity, imported wide-call, Box allocation/deref, and unknown-associated-fn gates"
