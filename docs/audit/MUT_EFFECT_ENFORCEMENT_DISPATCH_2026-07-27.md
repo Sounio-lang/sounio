@@ -231,6 +231,48 @@ enforcement is better supported now than when it was written.
 5. **Scope discipline.** `Div` is also unenforced by the seed (noted above).
    Do not bundle it. One effect per dispatch.
 
+## Live evidence (reviewer-reported, PR #1531, same day)
+
+Two data points surfaced in review of #1531, reported by the reviewer and
+recorded here as reported — **not independently reproduced.** An attempt to
+reproduce the second one directly (`souc check self-hosted/compiler/main.sio`
+under Madaros) hit the same AST-closure preflight abort this PR's own body
+already documents as advisory/inconclusive, so the reviewer's methodology
+(evidently a full self-compile, not a single-file `check`) was not repeated
+here.
+
+1. **The 880-file `requires: madaros` corpus is closer to landable than its
+   raw size implies.** Run against a from-source Madaros (merged `main`,
+   includes #1522) via `SOUNIO_TEST_SOUC_BIN` + `SOUNIO_MADAROS_AVAILABLE=1`:
+   `Pass: 579, Fail: 13, Known failures: 286, Skip: 2` (sums to 880). The 13
+   failures cluster into two named groups (4 misc; 9 in one `lorenz_i128_*`/
+   `lorenz_i256_*` interval/Taylor-solver family) rather than scattering — a
+   triage-sized problem, not a lane. This is a different corpus from the
+   1673-function closure above (it is the existing `requires: madaros` test
+   *annotations*, not functions requiring `Mut`), reported here because it
+   bears on how expensive "measure before deciding" turns out to be in
+   practice for Madaros-only-guard work generally. Two caveats the reviewer
+   attached and worth preserving: enabling this in CI means moving the engine
+   (`SOUNIO_TEST_SOUC_BIN`) together with the flag, not setting the flag alone
+   against `souc-stage2` — these tests are annotated precisely because
+   `lean_single` cannot compile them; and the marginal build cost is near zero
+   because `scripts/ci/madaros_current_source_f64_lowering_gate.sh` already
+   produces a shared from-source Madaros ELF for five other gates.
+
+2. **A measured argument for the "infer and propagate" reading, not the
+   "annotate everywhere" one.** E035 count on a Madaros self-compile reportedly
+   moved 226 → 230 after #1522 (`fix(check): generate Mut at the store site`)
+   landed. Read together with this dispatch's mechanism section: #1522 added
+   an *origination* point (the store site now originates `Mut` where nothing
+   did before), and because Madaros has no automatic propagation up the call
+   graph, four functions that write through an exclusive reference without
+   declaring it started failing honestly — the count rose, not fell, exactly
+   as this dispatch's closure argument predicts for *any* newly-added origin
+   under the current call-site-only enforcement. That is live, not
+   hypothetical, evidence that "annotate everywhere" scales badly one origin
+   at a time, and it is the concrete case for scoping the "inferred and
+   propagated" option in the Recommendation below before more origins land.
+
 ## Recommendation
 
 **Do not start the signature migration, and do not wire the guard.** Both were
