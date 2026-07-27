@@ -11,7 +11,7 @@
 
 ## 1. Result
 
-> **Fifteen pairs of this repository's contracts have byte-for-byte identical
+> **Twenty-one pairs of this repository's contracts have byte-for-byte identical
 > responses to all 36 targeted perturbations of the shared mathematical object,
 > while their R6 structural similarity is 0.479–0.594 — far below the 0.90
 > threshold at which R6 declares them independent evidence of one another.**
@@ -21,21 +21,21 @@ Verdict: `SELF_FALSIFYING_R13_VERDICT STRUCTURAL_INDEPENDENCE_DOES_NOT_IMPLY_IND
 | | |
 |---|---:|
 | contracts defining a CD-sign function | 31 |
-| usable (emit a verdict token) | 28 |
+| usable (emit a verdict token) | 30 |
 | perturbations + baseline + control | 36 + 1 + 1 |
-| probe runs | **1 178** |
+| probe runs | **1 254** |
 | informative mutants (kill 10–90 %) | **24** (pre-registered floor 8) |
 | distinct kill patterns | **6** |
-| identical-fate pairs below R6's threshold | **15**, all cross-derivation |
+| identical-fate pairs below R6's threshold | **21**, all cross-derivation |
 
 And the direction is the opposite of the one R6's inference needs:
 
 | pairs | n | mean kill-set agreement |
 |---|---:|---:|
-| R6 says **INDEPENDENT** (sim < 0.90) | 52 | **0.571** |
-| R6 says **SHARED** (sim ≥ 0.90) | 326 | 0.512 |
+| R6 says **INDEPENDENT** (sim < 0.90) | 101 | **0.565** |
+| R6 says **SHARED** (sim ≥ 0.90) | 334 | 0.513 |
 
-Gap **−0.059**. A measure that predicted shared evidential fate would show a
+Gap **−0.052**. A measure that predicted shared evidential fate would show a
 large *positive* gap. This one is slightly negative.
 
 ---
@@ -66,8 +66,9 @@ distinct kill patterns emerge. The finding is that this partition **crosses the
 derivation boundary**: both `cd_sigma` contracts land in a sensitivity class
 already occupied by `cds` contracts.
 
-- `cd_tower_zd_fiber_signed_localization` (25 kills) — identical to **3** `cds`
-  contracts, structural similarity **0.479**
+- `cd_tower_zd_fiber_signed_localization`, `..._spectral_classifier` and
+  `..._spectral_forall_n_progress` (25 kills each) — identical to **3** `cds`
+  contracts apiece, structural similarity **0.479–0.558**
 - `rupture_r4_fano_field` (9 kills) — identical to **12** `cds` contracts,
   structural similarity **0.512–0.594**
 
@@ -90,8 +91,8 @@ code you wrote to compute it*. R6 measures the code.
   needs no distributional assumption: these 15 pairs exist and are identical.
 - **Not high resolution.** 6 kill patterns over 28 contracts. Jaccard is
   effectively asking which of six buckets a contract is in.
-- **Not broad on the scarce side.** Only 2 `cd_sigma` contracts survive triage;
-  two more time out even on a 128-core node and are excluded and counted.
+- **Not broad on the scarce side.** 4 `cd_sigma` contracts, against 26 `cds`.
+  (The first run had 2 — see §5.2.)
 - **Not a compiler change.** Still Python-only. R12 withdrew the compiler rule;
   this rung is the local evidence for that withdrawal, not a reversal of it.
 
@@ -167,6 +168,33 @@ ones.
 
 This is the sixth self-catch on this line, and the second in two rungs where the
 guard failed its own negative test before the corpus was ever read.
+
+### 5.2 The first run undercounted, and the cause was again the harness
+
+R13 first reported **15** pairs over **28** usable contracts, excluding three for
+"no baseline verdict". The R14 call trace showed two of those three DO emit
+verdicts — `ZD_FIBER_SPECTRUM_COMPLETE_INVARIANT_N_LE_8` in 86 s and
+`ZD_FIBER_SPECTRAL_FORALL_N_STRONG_EVIDENCE_NOT_CLOSED` in 19 s. They had not
+been silent; they hit the 600 s cap under 96-way contention, and the harness
+recorded a timeout indistinguishably from a missing token.
+
+Both are `cd_sigma`, the scarce derivation family, so the loss fell entirely on
+the side of the comparison that had least data: the run went out with 2 of them
+instead of 4. Re-run at 6-way concurrency with a 2 400 s cap, identical
+36-mutant battery, null-wrap control inert for both, 25 kills each. Merged into
+`battery_results.json` so there is one source of truth, and the numbers above
+are the merged ones: **30 usable, 21 pairs**.
+
+Two changes follow, both kept:
+
+1. **A crash is a kill; a timeout is missing data.** The first analysis scored
+   any error as a kill, which would count a lost run as evidence. The 21 pairs
+   are identical under either convention — checked, not assumed — but the
+   conflation was real and is now fixed in the contract.
+2. **Concurrency is a measurement parameter, not an implementation detail.**
+   The same battery at 96 workers and at 6 workers gives different corpora. Any
+   result of this shape has to report the worker count, and a timeout has to be
+   reported as missing rather than folded into a verdict.
 
 ---
 

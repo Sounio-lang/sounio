@@ -74,8 +74,15 @@ def main() -> int:
     usable = [c for c in res if base[c]]
 
     def killed(c, m):
+        # A CRASH IS A KILL (the conclusion can no longer be established); a
+        # TIMEOUT or a lost output file is MISSING DATA and must not be scored
+        # as one. Added in R14; the 21 pairs are identical under either
+        # convention, which was checked rather than assumed.
         r = res[c].get(m, {})
-        return (r.get("verdict") != base[c]) or bool(r.get("error"))
+        err = str(r.get("error") or "")
+        if err.startswith(("TIMEOUT", "nojson")):
+            return False
+        return (r.get("verdict") != base[c]) or bool(err)
 
     print("R13 — does co-sensitivity track structural distance?")
     print("=" * 72)

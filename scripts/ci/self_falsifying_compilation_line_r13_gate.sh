@@ -42,7 +42,12 @@ done
 # C1 is not one number among many: if the harness contaminates the measurement
 # every figure below it is void. The first battery failed exactly here and
 # reported the contamination as a corpus finding (spec 5.1).
-grep -q "^C1_CONTROL_INERT PASS  28/28" <<<"$OUT" \
+#
+# Matched as N/N, not as a literal count. The first version pinned "28/28" and
+# went red the moment R14 recovered two contracts the battery had lost to a
+# timeout -- a guard that fails on its own subject growing is a guard that has
+# to be edited to stay green, which is how counts go stale.
+grep -qE "^C1_CONTROL_INERT PASS  ([0-9]+)/\1 inert" <<<"$OUT" \
     || fail "not every usable contract is inert to the null wrapper"
 
 # Verdict drift, header AND prose -- R11 shipped a stale headline with a green
