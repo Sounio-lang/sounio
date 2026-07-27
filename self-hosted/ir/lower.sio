@@ -3668,6 +3668,85 @@ fn lowerer_lower_impl_methods_mut(
     }
 }
 
+// Multi-pass FO pure-fn transfer registration.
+// Nested helper expand needs callees already in FO_XFER. Source order may put
+// callers first — one pass leaves them without FO; re-register until nested
+// expands see leaf helpers (depth budget matches fo_bc_expand depth 8).
+fn lowerer_fo_preregister_pure_fns_mut(
+    lo: &! Lowerer,
+    items: &Option<Box<ItemList>>
+) with Mut, Panic, Div, Alloc, IO {
+    var current = items
+    while true {
+        match *current {
+            Some(list) => {
+                let head = &(*list).head
+                if head.kind == ItemKind::ItemFn {
+                    match head.fn_def {
+                        Some(fd) => {
+                            let lo_x = (*lo).fo_register_pure_fn_transfer(head.name, &(*fd))
+                            (*lo) = lo_x
+                        }
+                        _ => {}
+                    }
+                } else if head.kind == ItemKind::ItemImpl {
+                    match head.impl_def {
+                        Some(id) => {
+                            var mcur = &(*id).methods
+                            while true {
+                                match *mcur {
+                                    Some(mlist) => {
+                                        let mhead = &(*mlist).head
+                                        if mhead.kind == ItemKind::ItemFn {
+                                            match mhead.fn_def {
+                                                Some(fd) => {
+                                                    let mangled = ir_mangle_method_name(head.name, mhead.name)
+                                                    let lo_x = (*lo).fo_register_pure_fn_transfer(mangled, &(*fd))
+                                                    (*lo) = lo_x
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                        mcur = &(*mlist).tail
+                                    }
+                                    _ => break
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                current = &(*list).tail
+            }
+            _ => break
+        }
+    }
+}
+
+fn lowerer_fo_preregister_pure_fns_multipass_mut(
+    lo: &! Lowerer,
+    items: &Option<Box<ItemList>>
+) with Mut, Panic, Div, Alloc, IO {
+    // 4 passes: reverse-order chains of depth 3 close by pass 4.
+    var pass: i64 = 0
+    while pass < 4 {
+        lowerer_fo_preregister_pure_fns_mut(lo, items)
+        pass = pass + 1
+    }
+}
+
+// Multi-mod FO: register pure transfers for one program's items without body lower.
+// FO_XFER is global — call once per loaded module *before* seed body lower so
+// imported helpers (e.g. epistemic::fo::fo_css) FO-transfer into user main.
+pub fn fo_preregister_program_items_multipass(
+    items: &Option<Box<ItemList>>
+) with Mut, Panic, Div, Alloc, IO {
+    // Best-effort multi-mod FO prepass (FO_XFER global). Residual: seed main may
+    // still lower before dep body availability for some import layouts.
+    var lo = lowerer_new()
+    lowerer_fo_preregister_pure_fns_multipass_mut(&! lo, items)
+}
+
 fn lowerer_lower_program_items_mut(
     lo: &! Lowerer,
     items: Option<Box<ItemList>>
@@ -7163,6 +7242,101 @@ impl Lowerer {
             }
             k = k + 1
         }
+        // Off-diag quotient Hessian (FO_HOFF_SNAP=L, FO_HOFF=R at entry):
+        // H_ij = HL_ij/b − sL_i sR_j/b² − sL_j sR_i/b² − a HR_ij/b² + 2 a sR_i sR_j/b³
+        var oi: i64 = 0
+        while oi < 16 {
+            var oj: i64 = oi + 1
+            while oj < 16 {
+                let hl = FO_HOFF_SNAP[(oi * 16 + oj) as usize]
+                let hr = FO_HOFF[(oi * 16 + oj) as usize]
+                let sli = sL[oi as usize]
+                let slj = sL[oj as usize]
+                let sri = sR[oi as usize]
+                let srj = sR[oj as usize]
+                var h_acc2: i64 = -1
+                if hl >= 0 {
+                    let t = lo.fresh_reg()
+                    lo = t.0
+                    h_acc2 = t.1
+                    lo = lo.emit(ir_binop_typed(h_acc2, hl, BinaryOp::OpDiv, rhs_val, true, true))
+                    lo = lo.emit(ir_mark_float_reg(h_acc2))
+                }
+                if sli >= 0 && srj >= 0 {
+                    let pr = lo.fresh_reg()
+                    lo = pr.0
+                    let prod = pr.1
+                    lo = lo.emit(ir_binop_typed(prod, sli, BinaryOp::OpMul, srj, true, true))
+                    lo = lo.emit(ir_mark_float_reg(prod))
+                    let td = lo.fresh_reg()
+                    lo = td.0
+                    let tdiv = td.1
+                    lo = lo.emit(ir_binop_typed(tdiv, prod, BinaryOp::OpDiv, bb, true, true))
+                    lo = lo.emit(ir_mark_float_reg(tdiv))
+                    let ap = lo.fo_reg_addsub_opt(h_acc2, tdiv, true)
+                    lo = ap.0
+                    h_acc2 = ap.1
+                }
+                if slj >= 0 && sri >= 0 {
+                    let pr2 = lo.fresh_reg()
+                    lo = pr2.0
+                    let prod2 = pr2.1
+                    lo = lo.emit(ir_binop_typed(prod2, slj, BinaryOp::OpMul, sri, true, true))
+                    lo = lo.emit(ir_mark_float_reg(prod2))
+                    let td2 = lo.fresh_reg()
+                    lo = td2.0
+                    let tdiv2 = td2.1
+                    lo = lo.emit(ir_binop_typed(tdiv2, prod2, BinaryOp::OpDiv, bb, true, true))
+                    lo = lo.emit(ir_mark_float_reg(tdiv2))
+                    let ap2 = lo.fo_reg_addsub_opt(h_acc2, tdiv2, true)
+                    lo = ap2.0
+                    h_acc2 = ap2.1
+                }
+                if hr >= 0 {
+                    let arh = lo.fresh_reg()
+                    lo = arh.0
+                    let ar = arh.1
+                    lo = lo.emit(ir_binop_typed(ar, lhs_val, BinaryOp::OpMul, hr, true, true))
+                    lo = lo.emit(ir_mark_float_reg(ar))
+                    let td3 = lo.fresh_reg()
+                    lo = td3.0
+                    let tdiv3 = td3.1
+                    lo = lo.emit(ir_binop_typed(tdiv3, ar, BinaryOp::OpDiv, bb, true, true))
+                    lo = lo.emit(ir_mark_float_reg(tdiv3))
+                    let ap3 = lo.fo_reg_addsub_opt(h_acc2, tdiv3, true)
+                    lo = ap3.0
+                    h_acc2 = ap3.1
+                }
+                if sri >= 0 && srj >= 0 {
+                    let prr = lo.fresh_reg()
+                    lo = prr.0
+                    let rprod = prr.1
+                    lo = lo.emit(ir_binop_typed(rprod, sri, BinaryOp::OpMul, srj, true, true))
+                    lo = lo.emit(ir_mark_float_reg(rprod))
+                    let ar2 = lo.fresh_reg()
+                    lo = ar2.0
+                    let a_rr = ar2.1
+                    lo = lo.emit(ir_binop_typed(a_rr, lhs_val, BinaryOp::OpMul, rprod, true, true))
+                    lo = lo.emit(ir_mark_float_reg(a_rr))
+                    let t2a = lo.fresh_reg()
+                    lo = t2a.0
+                    let two_a = t2a.1
+                    lo = lo.emit(ir_binop_typed(two_a, two, BinaryOp::OpMul, a_rr, true, true))
+                    lo = lo.emit(ir_mark_float_reg(two_a))
+                    let td4 = lo.fresh_reg()
+                    lo = td4.0
+                    let tdiv4 = td4.1
+                    lo = lo.emit(ir_binop_typed(tdiv4, two_a, BinaryOp::OpDiv, b3, true, true))
+                    lo = lo.emit(ir_mark_float_reg(tdiv4))
+                    let ap4 = lo.fo_reg_addsub_opt(h_acc2, tdiv4, false)
+                    lo = ap4.0
+                    h_acc2 = ap4.1
+                }
+                fo_hoff_set(oi, oj, h_acc2)
+                oj = oj + 1
+            }
+            oi = oi + 1
+        }
         lo
     }
 
@@ -10339,6 +10513,10 @@ impl Lowerer {
 
     fn lower_program_bodies_ref(self, items: &Option<Box<ItemList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self
+        // Multi-pass FO pure-fn pre-register (modular body path — reverse-order helpers).
+        // Do NOT fo_xfer_global_reset here: multi-mod prepass may have already
+        // registered imported pure helpers into the global FO_XFER table.
+        lowerer_fo_preregister_pure_fns_multipass_mut(&! lo, items)
         var current = items
         while true {
             match *current {
