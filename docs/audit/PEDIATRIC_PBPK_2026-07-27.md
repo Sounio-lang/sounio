@@ -1,10 +1,19 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.pediatric-pbpk-2026-07-27
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.pediatric-pbpk-2026-07-27
+-->
+
 # Paediatric PBPK — functional maturation + AUC-guided vanco + gentamicin
 
 **Date:** 2026-07-27  
-**Status:** live (v4 deep: C(t) + IIV MC + literature anchors)  
+**Status:** live (v5: AUC individualisation under IIV + multi-dose accumulation)  
 **Module:** `stdlib/clinical/pediatric_pbpk.sio`  
 **Demo:** `examples/pediatric_pbpk_demo.sio`  
-**Gate:** `scripts/ci/pediatric_pbpk_gate.sh` → `PEDIATRIC_PBPK_GATE_OK` (14/14)
+**Gate:** `scripts/ci/pediatric_pbpk_gate.sh` → `PEDIATRIC_PBPK_GATE_OK` (16/16)
 
 ## Scope
 
@@ -25,6 +34,8 @@ Educational / compiler-stdlib **paediatric PBPK spine** with:
 12. **IIV Monte-Carlo** N=32 lognormal CL/V (ω_CL=0.25, ω_V=0.20, seed=42)
 13. **Literature anchors**: size(10 kg)≈0.2324; MF(PMA 40)∈(0.30,0.45)
 14. **IIV grid cohort** (deterministic z∈[-2,2], not RNG — lean-safe)
+15. **Fixed vs AUC-guided** under IIV — %AUC in 400–600 (perfect-CL upper bound)
+16. **Multi-dose accumulation** — Cmin_n/Cmin_ss → 1; doses to 90% SS
 
 **Not medical guidance.**
 
