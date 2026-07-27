@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.madaros-tuple-f64-float-fix-recipe-2026-07-26
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-tuple-f64-float-fix-recipe-2026-07-26
+-->
+
 # Recipe: float-type `(f64, f64)` import unpack (for Claude native/lower)
 
 **Status:** residual open — product mitigates; this is the true lower fix  
