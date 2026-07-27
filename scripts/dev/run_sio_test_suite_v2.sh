@@ -387,7 +387,7 @@ run_test() {
         # Check expected stdout patterns
         if [[ $exit_code -eq 0 ]]; then
             for pattern in "${expect_stdout[@]}"; do
-                if ! echo "$output" | grep -qF "$pattern"; then
+                if ! echo "$output" | grep -qF -- "$pattern"; then
                     exit_code=1
                     test_output="missing stdout: $pattern"
                     break
@@ -414,7 +414,7 @@ run_test() {
 
         if [[ $exit_code -ne 124 && $test_output != "expected compile failure but passed" ]]; then
             for pattern in "${error_patterns[@]}"; do
-                if ! echo "$output" | grep -qiF "$pattern"; then
+                if ! echo "$output" | grep -qiF -- "$pattern"; then
                     exit_code=1
                     test_output="missing error: $pattern"
                     break
@@ -456,7 +456,7 @@ run_test() {
                 test_output="typecheck-fail requires //@ error-pattern to pin the diagnostic"
             else
                 for pattern in "${tf_patterns[@]}"; do
-                    if ! echo "$output" | grep -qiF "$pattern"; then
+                    if ! echo "$output" | grep -qiF -- "$pattern"; then
                         exit_code=1
                         test_output="missing error: $pattern"
                         break
