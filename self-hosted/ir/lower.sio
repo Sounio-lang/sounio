@@ -6004,6 +6004,128 @@ impl Lowerer {
         -1
     }
 
+    // ---- loop-carried uncertainty slots (#1535) ----
+    //
+    // A mutable local's VALUE lives in a fixed vreg and assignment copies into it
+    // (`ir_copy(dst, rhs)` in lower_assign_stmt_ref), so it survives a loop
+    // back-edge. Its variance and its per-channel sensitivities did not: assignment
+    // REBOUND them to the RHS's fresh vregs. A rebind is a compile-time map update,
+    // and a loop body's IR is emitted exactly once, so every iteration recomputed
+    // uncertainty from the pre-loop value and only the last one survived.
+    //
+    // Measured before this: a 20-step Euler accumulator `x = x + 0.1 * cl` reported
+    // var(x) = 0.015376 — one step's contribution — against a GUM truth of 6.1504.
+    //
+    // These helpers give a mutable local a FIXED variance vreg and fixed per-channel
+    // sens vregs, zero-initialised at the declaration, so assignment can copy into
+    // them exactly as the value does.
+
+    // Zero-initialised variance slot. No-op when the local already owns one.
+    fn alloc_variance_slot_for_local(self, name: Name) -> Lowerer with Mut, Panic, Div, Alloc {
+        var lo = self
+        if lo.lookup_local_variance_reg(name) >= 0 {
+            return lo
+        }
+        let z = lo.emit_zero_variance()
+        lo = z.0
+        lo.bind_local_variance_reg(name, z.1)
+    }
+
+    // Row index of `name` in the FO bind table, creating an all-unbound row if
+    // absent. -1 when the table is full (128 locals), in which case callers fall
+    // back to the pre-existing rebind behaviour rather than dropping the sens.
+    fn fo_bind_row_for(self, name: Name) -> (Lowerer, i64) with Mut, Panic, Div {
+        var lo = self
+        var i: i64 = 0
+        while i < lo.fo_bind_count {
+            if ir_name_eq(lo.fo_bind_names[i as usize], name) {
+                return (lo, i)
+            }
+            i = i + 1
+        }
+        if lo.fo_bind_count >= 128 {
+            return (lo, 0 - 1)
+        }
+        let idx = lo.fo_bind_count
+        lo.fo_bind_names[idx as usize] = name
+        var c: i64 = 0
+        while c < 32 {
+            lo.fo_bind_sens[(idx * 32 + c) as usize] = 0 - 1
+            c = c + 1
+        }
+        lo.fo_bind_count = idx + 1
+        (lo, idx)
+    }
+
+    // Zero-initialised sens slots for the channels that exist at this point.
+    // Bounded by fo_nchan rather than 32: channels are seeded by measure(), which
+    // in practice precedes the locals that accumulate through them, and allocating
+    // all 32 would cost register pressure in every program that touches f64.
+    fn fo_alloc_sens_slots_for_local(self, name: Name) -> Lowerer with Mut, Panic, Div {
+        var lo = self
+        if lo.fo_nchan <= 0 {
+            return lo
+        }
+        let row_pair = lo.fo_bind_row_for(name)
+        lo = row_pair.0
+        let row = row_pair.1
+        if row < 0 {
+            return lo
+        }
+        var k: i64 = 0
+        while k < lo.fo_nchan && k < 32 {
+            if lo.fo_bind_sens[(row * 32 + k) as usize] < 0 {
+                let z = lo.emit_f64_const(0.0)
+                lo = z.0
+                lo.fo_bind_sens[(row * 32 + k) as usize] = z.1
+            }
+            k = k + 1
+        }
+        lo
+    }
+
+    // Assignment-side counterpart of fo_bind_local_sens: COPY the expression's sens
+    // into the local's fixed slots instead of rebinding to the expression's vregs.
+    // A channel the new value no longer depends on is zeroed rather than left
+    // holding a stale sensitivity. Returns false when no slot exists, so the caller
+    // can fall back to the old rebind path.
+    fn fo_copy_expr_sens_into_local(self, name: Name) -> (Lowerer, bool) with Mut, Panic, Div {
+        var lo = self
+        var row: i64 = 0 - 1
+        var i: i64 = 0
+        while i < lo.fo_bind_count {
+            if ir_name_eq(lo.fo_bind_names[i as usize], name) {
+                row = i
+                i = lo.fo_bind_count
+            } else {
+                i = i + 1
+            }
+        }
+        if row < 0 {
+            return (lo, false)
+        }
+        var any: bool = false
+        var k: i64 = 0
+        while k < 32 {
+            let slot = lo.fo_bind_sens[(row * 32 + k) as usize]
+            if slot >= 0 {
+                any = true
+                let src = lo.fo_expr_sens[k as usize]
+                if src >= 0 {
+                    if src != slot {
+                        lo = lo.emit(ir_copy(slot, src))
+                    }
+                } else {
+                    let z = lo.emit_f64_const(0.0)
+                    lo = z.0
+                    lo = lo.emit(ir_copy(slot, z.1))
+                }
+            }
+            k = k + 1
+        }
+        (lo, any)
+    }
+
     fn bind_variance_for_base_reg(self, base_reg: i64, variance_reg: i64) -> Lowerer with Mut, Panic, Div {
         var lo = self
         if base_reg < 0 || variance_reg < 0 {
@@ -10195,6 +10317,14 @@ impl Lowerer {
         if bind_as_ref {
             lo = lo.bind_local_ref(s.name)
         }
+        // #1535: a MUTABLE local needs fixed uncertainty slots so a later assignment
+        // can copy into them and the value survives a loop back-edge. Gated on
+        // fo_nchan > 0 so programs that never call measure() pay nothing; a `let` is
+        // never reassigned, so it needs no slot.
+        if is_mut && lo.fo_nchan > 0 && !bind_as_ref && fixed_array_len < 0 {
+            lo = lo.alloc_variance_slot_for_local(s.name)
+            lo = lo.fo_alloc_sens_slots_for_local(s.name)
+        }
         if fixed_array_len >= 0 {
             lo = lo.bind_local_fixed_array_len(s.name, fixed_array_len)
         }
@@ -10471,9 +10601,29 @@ impl Lowerer {
                             }
                             lo = lo.emit(ir_copy(dst, rhs))
                             if rhs_variance >= 0 {
-                                lo = lo.bind_local_variance_reg((*target_expr).name, rhs_variance)
+                                // Copy into the local's fixed uncertainty slots, the
+                                // same discipline the value uses one line above. A
+                                // rebind here is correct in straight-line code and
+                                // silently wrong across a loop back-edge (#1535): the
+                                // body's IR is emitted once, so rebinding is a
+                                // compile-time map update with no runtime data flow,
+                                // and each iteration recomputes from the pre-loop
+                                // uncertainty. Locals with no slot keep the old rebind
+                                // path, which is no worse than before.
+                                let vslot = lo.lookup_local_variance_reg((*target_expr).name)
+                                if vslot >= 0 {
+                                    if vslot != rhs_variance {
+                                        lo = lo.emit(ir_copy(vslot, rhs_variance))
+                                    }
+                                } else {
+                                    lo = lo.bind_local_variance_reg((*target_expr).name, rhs_variance)
+                                }
                                 if lo.fo_expr_has_sens() {
-                                    lo = lo.fo_bind_local_sens((*target_expr).name)
+                                    let sens_pair = lo.fo_copy_expr_sens_into_local((*target_expr).name)
+                                    lo = sens_pair.0
+                                    if !sens_pair.1 {
+                                        lo = lo.fo_bind_local_sens((*target_expr).name)
+                                    }
                                 }
                                 // Re-assert float scalar_kind only when the RHS is
                                 // genuinely float; an int RHS that merely carries a
