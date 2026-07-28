@@ -76,6 +76,7 @@ derivation of that function already sitting unused in the repository.
 | C16 | **The invariance group, identified.** The blind spot is not "maps preserving the count" but maps acting **within the blocks** of the classification: the flip preserves the *identical set partition* of fibers (sizes [1,7,7] / [1,1,7,7,7,8] / [1,1,1,1,7,7,7,7,7,7,8,9]) and relabels every block, changing exactly **2 edges per fiber** because the perturbed pair's home fiber is the one the check never examines. **Any claim of the form "there are exactly N equivalence classes" has this blind spot by construction.** | R16 | `INVARIANCE_GROUP_IS_PARTITION_PRESERVING_NOT_MERELY_COUNT_PRESERVING` |
 | C17 | **Witness binding, in the compiler.** The repair C15/C16 identified, implemented and observed: a claim may declare a `witness`, and a build whose gate **exits 0 and emits exactly the declared verdict token** is REFUSED when the evidence fingerprint differs. Causally isolated. First compiler change since C3. | R17 | `WITNESS_BINDING_IMPLEMENTED__REFUSES_ON_PRESERVED_PROPOSITION` |
 | C19 | **Half of C16 derived, the rest reduced to one lemma.** C16's "two edges per fiber, all but one" follows from index arithmetic: the flipped pair is reachable only between the vertex-pair with `lo = h` and the one with `hi = H+h`, and the latter degenerates exactly at `Llo = H/2` — so the untouched fiber is **predicted, not observed**. Two candidate explanations of the equivariance were tested and **both refuted**. What is left: marking those two vertex-pairs does not refine the partition. | R19 | `LOCALITY_DERIVED__EQUIVARIANCE_REDUCED_TO_ONE_LEMMA` |
+| C20 | **Provenance binding, and a third failure class.** Every check above reads what a gate *emits*; none reads what a claim *cites*. Audited: **2 155 artifacts cited, 93 absent, 8 on an unmerged branch** — two of them the explicit Φ and the construction underpinning C17's own bound claim. The compiler now refuses a build whose cited derivation is not in the tree. Token binds the proposition, witness the evidence, provenance the availability. | R20 | `PROVENANCE_BINDING_IMPLEMENTED__CITED_DERIVATION_MUST_EXIST` |
 
 ### Methodological results that generalise
 
@@ -302,9 +303,12 @@ agreement between checks that share a derivation. That question is cheap to
 answer, decidable, and on this corpus it changed the status of a third of the
 cross-checks.
 
-C3's own limit is now measured, and then closed in the compiler (C17): a build
-whose check exits 0 and reports exactly the declared proposition is refused when
-its grounds have been replaced. The limit is not the impossibility of §5 but a
+C3's own limit is now measured, and then closed in the compiler twice. C17: a
+build whose check exits 0 and reports exactly the declared proposition is refused
+when its grounds have been replaced. C20: it is refused again when the derivation
+the claim cites is not in the tree — a failure class none of the earlier checks
+can reach, because all of them read what a gate emits and none reads what a claim
+depends on. The limit is not the impossibility of §5 but a
 **resolution** limit: a token is exactly as fine as the proposition it states,
 and propositions about counts are coarse. Sharpened in C16 — the token is blind
 to every map acting *within* the classification it counts, and the stronger a
