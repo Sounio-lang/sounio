@@ -6823,23 +6823,56 @@ impl Lowerer {
     ) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self
         var current = &(*blk).stmts
-        var found = false
-        // Find last StmtExpr and classify it (re-enter classification on that expr).
-        // Store pointer by processing in reverse-like overwrite.
+        // Support `let r = x+y; return r` (gum_cross_function): remember last
+        // pure let RHS; if the trailing return/expr is that local, classify RHS.
+        var last_let_name = ir_empty_name()
+        var last_let_expr: Option<Box<Expr>> = None
         while true {
             match *current {
                 Some(list) => {
                     let stmt_ref = &(*list).head
-                    if stmt_ref.kind == StmtKind::StmtExpr {
+                    if stmt_ref.kind == StmtKind::StmtLet || stmt_ref.kind == StmtKind::StmtVar {
                         match stmt_ref.expr {
                             Some(te) => {
-                                lo = lo.fo_classify_expr_transfer(name, &(*te), p0, p1, nparams)
-                                found = true
+                                last_let_name = stmt_ref.name
+                                last_let_expr = Some(te)
+                            }
+                            _ => {
+                                last_let_name = ir_empty_name()
+                                last_let_expr = None
+                            }
+                        }
+                    } else if stmt_ref.kind == StmtKind::StmtExpr {
+                        match stmt_ref.expr {
+                            Some(te) => {
+                                // Unwrap `return <e>` for classification.
+                                var e_ref: &Expr = &(*te)
+                                if (*te).kind == ExprKind::ExprReturn {
+                                    match (*te).left {
+                                        Some(inner) => { e_ref = &(*inner) }
+                                        _ => {}
+                                    }
+                                }
+                                // If returning a local that was just let-bound, classify the RHS.
+                                if (*e_ref).kind == ExprKind::ExprIdent && last_let_name.len > 0 {
+                                    if ir_name_eq((*e_ref).name, last_let_name) {
+                                        match last_let_expr {
+                                            Some(rhs) => {
+                                                lo = lo.fo_classify_expr_transfer(name, &(*rhs), p0, p1, nparams)
+                                            }
+                                            _ => {
+                                                lo = lo.fo_classify_expr_transfer(name, e_ref, p0, p1, nparams)
+                                            }
+                                        }
+                                    } else {
+                                        lo = lo.fo_classify_expr_transfer(name, e_ref, p0, p1, nparams)
+                                    }
+                                } else {
+                                    lo = lo.fo_classify_expr_transfer(name, e_ref, p0, p1, nparams)
+                                }
                             }
                             _ => {}
                         }
-                    } else if stmt_ref.kind == StmtKind::StmtLet || stmt_ref.kind == StmtKind::StmtVar {
-                        return lo
                     }
                     current = &(*list).tail
                 }
@@ -6858,6 +6891,15 @@ impl Lowerer {
         nparams: i64
     ) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self
+        // `return v` wraps the value — classify the inner expression.
+        if (*e).kind == ExprKind::ExprReturn {
+            match (*e).left {
+                Some(inner) => {
+                    return lo.fo_classify_expr_transfer(name, &(*inner), p0, p1, nparams)
+                }
+                _ => { return lo }
+            }
+        }
         // id: single param identity
         if (*e).kind == ExprKind::ExprIdent {
             if nparams >= 1 && ir_name_eq((*e).name, p0) {
@@ -8163,17 +8205,33 @@ impl Lowerer {
         default_idx
     }
 
+    // Name-only float heuristic. FIRST-MATCH was wrong: Knowledge.value (f64)
+    // is preseeded early, so ANY later struct field named `value` (e.g.
+    // Counter.value: i64) was mis-marked float → integer add became f64 add
+    // and println printed IEEE bits (method_receiver_correct FAIL).
+    // Require unanimous is_float==1 across ALL structs that share the name;
+    // if any non-float match exists, refuse and let field_is_float_for_base_ref
+    // decide from the typed base.
     fn field_is_float_by_name_simple(self, n: Name) -> bool with Mut, Panic, Div {
+        var saw_float = false
+        var saw_non_float = false
         var si: i64 = 0
         while si < (*self.struct_layouts).count {
             var fi: i64 = 0
             while fi < (*self.struct_layouts).entries[si as usize].field_count {
                 if ir_name_eq((*self.struct_layouts).entries[si as usize].fields[fi as usize].name, n) {
-                    return (*self.struct_layouts).entries[si as usize].fields[fi as usize].is_float == 1
+                    if (*self.struct_layouts).entries[si as usize].fields[fi as usize].is_float == 1 {
+                        saw_float = true
+                    } else {
+                        saw_non_float = true
+                    }
                 }
                 fi = fi + 1
             }
             si = si + 1
+        }
+        if saw_float && !saw_non_float {
+            return true
         }
         false
     }
@@ -8200,17 +8258,28 @@ impl Lowerer {
 
     // println i64-segfault fix: field analogue of field_is_float_by_name_simple,
     // testing the `is_float == 3` scalar-i64 marker set in register_struct_fields_ref.
+    // Same unanimous rule: a name shared by int and non-int fields must not
+    // force integer classification from name alone (base-typed lookup decides).
     fn field_is_int_by_name_simple(self, n: Name) -> bool with Mut, Panic, Div {
+        var saw_int = false
+        var saw_non_int = false
         var si: i64 = 0
         while si < (*self.struct_layouts).count {
             var fi: i64 = 0
             while fi < (*self.struct_layouts).entries[si as usize].field_count {
                 if ir_name_eq((*self.struct_layouts).entries[si as usize].fields[fi as usize].name, n) {
-                    return (*self.struct_layouts).entries[si as usize].fields[fi as usize].is_float == 3
+                    if (*self.struct_layouts).entries[si as usize].fields[fi as usize].is_float == 3 {
+                        saw_int = true
+                    } else {
+                        saw_non_int = true
+                    }
                 }
                 fi = fi + 1
             }
             si = si + 1
+        }
+        if saw_int && !saw_non_int {
+            return true
         }
         false
     }
