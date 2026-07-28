@@ -58,6 +58,21 @@ lean_lib «SounioGradedModal» where
 @[default_target]
 lean_lib «SounioMeasConf» where
 
+-- Machine-checked algebra backing demos/hydrogen/ (Jensen/variance gap,
+-- correlated-sum variance decomposition, monotone p-box propagation).
+@[default_target]
+lean_lib «SounioHydrogenPbox» where
+
+-- The demo numbers as theorems: exact-rational receipt for the IDM and
+-- delivered-cost claims (native_decide over Rat; Python oracle retired).
+@[default_target]
+lean_lib «SounioHydrogenReceipt» where
+
+-- The van't Hoff extrapolation gate: rational spine of the calcite
+-- scaling demo (corner exactness, pK sandwiches, SI straddle, gate).
+@[default_target]
+lean_lib «SounioHydrogenVanthoff» where
+
 @[default_target]
 lean_lib «SounioProofObligation» where
 
