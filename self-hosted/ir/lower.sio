@@ -181,6 +181,35 @@ var FO_ARG_HESS: [i64; 512] = [-1; 512]
 // Active param name-hashes for bytecode/simple FO compile (≤8 params).
 var FO_BC_PARAM_HASH: [i64; 16] = [0; 16]
 var FO_BC_PARAM_N: i64 = 0
+// Impl type while compiling method FO bodies (nested self.method expand).
+// Global Name literals are not supported — store buf/len separately.
+var FO_BC_IMPL_TYPE_BUF: [i8; 128] = [0; 128]
+var FO_BC_IMPL_TYPE_LEN: i64 = 0
+
+fn fo_bc_impl_type_get() -> Name with Mut {
+    var n = Name { buf: [0; 128], len: 0 }
+    var i: i64 = 0
+    while i < FO_BC_IMPL_TYPE_LEN && i < 128 {
+        n.buf[i as usize] = FO_BC_IMPL_TYPE_BUF[i as usize]
+        i = i + 1
+    }
+    n.len = FO_BC_IMPL_TYPE_LEN
+    n
+}
+
+fn fo_bc_impl_type_set(ty: Name) with Mut {
+    FO_BC_IMPL_TYPE_LEN = 0
+    var i: i64 = 0
+    while i < ty.len && i < 128 {
+        FO_BC_IMPL_TYPE_BUF[i as usize] = ty.buf[i as usize]
+        FO_BC_IMPL_TYPE_LEN = FO_BC_IMPL_TYPE_LEN + 1
+        i = i + 1
+    }
+}
+
+fn fo_bc_impl_type_clear() with Mut {
+    FO_BC_IMPL_TYPE_LEN = 0
+}
 // Off-diagonal FO Hessian H_ij (i,j < 16) + correlation ρ_ij for E₂/Var.
 // Index = i*16+j. Only i<j pairs are written; H_ji mirrors H_ij.
 var FO_HOFF: [i64; 256] = [-1; 256]
@@ -288,6 +317,7 @@ fn fo_xfer_global_reset() with Mut {
     FO_BC_LEN = 0
     FO_BC_CONST_N = 0
     FO_BC_LOC_N = 0
+    fo_bc_impl_type_clear()
     fo_hoff_clear()
     fo_cov_rho_clear()
     var i: i64 = 0
@@ -3728,9 +3758,11 @@ fn lowerer_fo_preregister_pure_fns_mut(
                                         if mhead.kind == ItemKind::ItemFn {
                                             match mhead.fn_def {
                                                 Some(fd) => {
+                                                    fo_bc_impl_type_set(head.name)
                                                     let mangled = ir_mangle_method_name(head.name, mhead.name)
                                                     let lo_x = (*lo).fo_register_pure_fn_transfer(mangled, &(*fd))
                                                     (*lo) = lo_x
+                                                    fo_bc_impl_type_clear()
                                                 }
                                                 _ => {}
                                             }
@@ -8542,6 +8574,17 @@ impl Lowerer {
             }
             return false
         }
+        // Nested method FO: self.other(...) expand mangled transfer under FO_BC_IMPL_TYPE.
+        if (*e).kind == ExprKind::ExprMethodCall {
+            if FO_BC_IMPL_TYPE_LEN > 0 {
+                let ity = fo_bc_impl_type_get()
+                let mangled = ir_mangle_method_name(ity, (*e).name)
+                return self.fo_bc_expand_xfer_call_recv(
+                    mangled, &(*e).left, &(*e).args, p0, p1, p2, p3, nparams, 0
+                )
+            }
+            return false
+        }
         // self.field / param.field → LOAD_PARAM_FIELD (method FO bodies)
         if (*e).kind == ExprKind::ExprFieldAccess {
             match (*e).left {
@@ -8586,11 +8629,126 @@ impl Lowerer {
         false
     }
 
+    // Xfer arg: free-fn args[n], or method expand (recv=param0, args[n-1]).
+    fn fo_bc_compile_xfer_arg(
+        self,
+        recv: &Option<Box<Expr>>,
+        args: &Option<Box<ExprList>>,
+        n: i64,
+        p0: Name,
+        p1: Name,
+        p2: Name,
+        p3: Name,
+        nparams: i64
+    ) -> bool with Mut, Panic, Div, Alloc {
+        match *recv {
+            Some(rbox) => {
+                if n == 0 {
+                    return self.fo_bc_compile_expr(&(*rbox), p0, p1, p2, p3, nparams)
+                }
+                return self.fo_bc_compile_nth_arg(args, n - 1, p0, p1, p2, p3, nparams)
+            }
+            _ => {
+                return self.fo_bc_compile_nth_arg(args, n, p0, p1, p2, p3, nparams)
+            }
+        }
+    }
+
+    // Inline LOAD_PARAM_FIELD: re-emit op17 against outer param if xfer arg is a param.
+    fn fo_bc_compile_xfer_arg_field(
+        self,
+        recv: &Option<Box<Expr>>,
+        args: &Option<Box<ExprList>>,
+        n: i64,
+        field_h: i64,
+        p0: Name,
+        p1: Name,
+        p2: Name,
+        p3: Name,
+        nparams: i64
+    ) -> bool with Mut, Panic, Div, Alloc {
+        var base_pi: i64 = 0 - 1
+        match *recv {
+            Some(rbox) => {
+                if n == 0 {
+                    base_pi = self.fo_param_index4(&(*rbox), p0, p1, p2, p3, nparams)
+                } else {
+                    var acur = args
+                    var ai: i64 = 0
+                    let want = n - 1
+                    while true {
+                        match *acur {
+                            Some(al) => {
+                                if ai == want {
+                                    base_pi = self.fo_param_index4(
+                                        &(*al).head, p0, p1, p2, p3, nparams
+                                    )
+                                    break
+                                }
+                                ai = ai + 1
+                                acur = &(*al).tail
+                            }
+                            _ => break
+                        }
+                    }
+                }
+            }
+            _ => {
+                var acur2 = args
+                var ai2: i64 = 0
+                while true {
+                    match *acur2 {
+                        Some(al) => {
+                            if ai2 == n {
+                                base_pi = self.fo_param_index4(
+                                    &(*al).head, p0, p1, p2, p3, nparams
+                                )
+                                break
+                            }
+                            ai2 = ai2 + 1
+                            acur2 = &(*al).tail
+                        }
+                        _ => break
+                    }
+                }
+            }
+        }
+        if base_pi < 0 {
+            return false
+        }
+        if FO_BC_LEN >= 4096 {
+            return false
+        }
+        FO_BC_OP[FO_BC_LEN as usize] = 17
+        FO_BC_ARG[FO_BC_LEN as usize] = base_pi
+        FO_BC_FIELD_HASH[FO_BC_LEN as usize] = field_h
+        FO_BC_LEN = FO_BC_LEN + 1
+        true
+    }
+
     // Expand a call to a pure FO-transferred helper into the current bytecode stream.
     // depth limits FWD / nested-inline recursion.
     fn fo_bc_expand_xfer_call(
         self,
         callee: Name,
+        args: &Option<Box<ExprList>>,
+        p0: Name,
+        p1: Name,
+        p2: Name,
+        p3: Name,
+        nparams: i64,
+        depth: i64
+    ) -> bool with Mut, Panic, Div, Alloc {
+        let no_recv: Option<Box<Expr>> = None
+        self.fo_bc_expand_xfer_call_recv(
+            callee, &no_recv, args, p0, p1, p2, p3, nparams, depth
+        )
+    }
+
+    fn fo_bc_expand_xfer_call_recv(
+        self,
+        callee: Name,
+        recv: &Option<Box<Expr>>,
         args: &Option<Box<ExprList>>,
         p0: Name,
         p1: Name,
@@ -8610,25 +8768,23 @@ impl Lowerer {
         if kind <= 0 {
             return false
         }
-        // kind 5 FWD → expand target under same args
         if kind == 5 {
             let fh = FO_XFER_FWD_HASH[idx as usize]
             let fidx = fo_xfer_global_lookup_hash(fh)
             if fidx < 0 {
                 return false
             }
-            // Resolve name from hash by re-looking table — expand via kind at fidx
-            // by replaying transfer kinds (no Name for hash-only). Inline by index.
             return self.fo_bc_expand_xfer_at(
-                fidx, args, p0, p1, p2, p3, nparams, depth + 1
+                fidx, recv, args, p0, p1, p2, p3, nparams, depth + 1
             )
         }
-        self.fo_bc_expand_xfer_at(idx, args, p0, p1, p2, p3, nparams, depth)
+        self.fo_bc_expand_xfer_at(idx, recv, args, p0, p1, p2, p3, nparams, depth)
     }
 
     fn fo_bc_expand_xfer_at(
         self,
         idx: i64,
+        recv: &Option<Box<Expr>>,
         args: &Option<Box<ExprList>>,
         p0: Name,
         p1: Name,
@@ -8651,48 +8807,43 @@ impl Lowerer {
                 return false
             }
             return self.fo_bc_expand_xfer_at(
-                fidx, args, p0, p1, p2, p3, nparams, depth + 1
+                fidx, recv, args, p0, p1, p2, p3, nparams, depth + 1
             )
         }
-        // kind 1: identity of param i (i in lit)
         if kind == 1 {
             let pi = FO_XFER_LIT[idx as usize] as i64
-            return self.fo_bc_compile_nth_arg(args, pi, p0, p1, p2, p3, nparams)
+            return self.fo_bc_compile_xfer_arg(recv, args, pi, p0, p1, p2, p3, nparams)
         }
-        // kind 2: lit * arg0
         if kind == 2 {
             if !fo_bc_emit_const(FO_XFER_LIT[idx as usize]) {
                 return false
             }
-            if !self.fo_bc_compile_nth_arg(args, 0, p0, p1, p2, p3, nparams) {
+            if !self.fo_bc_compile_xfer_arg(recv, args, 0, p0, p1, p2, p3, nparams) {
                 return false
             }
             return fo_bc_emit(5, 0)
         }
-        // kind 3: arg0 + arg1
         if kind == 3 {
-            if !self.fo_bc_compile_nth_arg(args, 0, p0, p1, p2, p3, nparams) {
+            if !self.fo_bc_compile_xfer_arg(recv, args, 0, p0, p1, p2, p3, nparams) {
                 return false
             }
-            if !self.fo_bc_compile_nth_arg(args, 1, p0, p1, p2, p3, nparams) {
+            if !self.fo_bc_compile_xfer_arg(recv, args, 1, p0, p1, p2, p3, nparams) {
                 return false
             }
             return fo_bc_emit(3, 0)
         }
-        // kind 4: arg0 * arg1
         if kind == 4 {
-            if !self.fo_bc_compile_nth_arg(args, 0, p0, p1, p2, p3, nparams) {
+            if !self.fo_bc_compile_xfer_arg(recv, args, 0, p0, p1, p2, p3, nparams) {
                 return false
             }
-            if !self.fo_bc_compile_nth_arg(args, 1, p0, p1, p2, p3, nparams) {
+            if !self.fo_bc_compile_xfer_arg(recv, args, 1, p0, p1, p2, p3, nparams) {
                 return false
             }
             return fo_bc_emit(5, 0)
         }
-        // kind 6: inline callee bytecode with LOAD_PARAM → arg subtrees
         if kind == 6 {
             return self.fo_bc_inline_xfer_bytecode(
-                idx, args, p0, p1, p2, p3, nparams, depth
+                idx, recv, args, p0, p1, p2, p3, nparams, depth
             )
         }
         false
@@ -8703,6 +8854,7 @@ impl Lowerer {
     fn fo_bc_inline_xfer_bytecode(
         self,
         idx: i64,
+        recv: &Option<Box<Expr>>,
         args: &Option<Box<ExprList>>,
         p0: Name,
         p1: Name,
@@ -8750,8 +8902,15 @@ impl Lowerer {
             let op = FO_BC_OP[(off + pc) as usize]
             let arg = FO_BC_ARG[(off + pc) as usize]
             if op == 1 {
-                // LOAD_PARAM arg → compile corresponding call argument
-                if !self.fo_bc_compile_nth_arg(args, arg, p0, p1, p2, p3, nparams) {
+                // LOAD_PARAM arg → compile corresponding call argument (recv-shifted)
+                if !self.fo_bc_compile_xfer_arg(recv, args, arg, p0, p1, p2, p3, nparams) {
+                    return false
+                }
+            } else if op == 17 {
+                let field_h = FO_BC_FIELD_HASH[(off + pc) as usize]
+                if !self.fo_bc_compile_xfer_arg_field(
+                    recv, args, arg, field_h, p0, p1, p2, p3, nparams
+                ) {
                     return false
                 }
             } else if op == 7 || op == 8 {
