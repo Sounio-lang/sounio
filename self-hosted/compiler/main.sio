@@ -2049,14 +2049,32 @@ fn compiler_visibility_preflight(source_path: string) -> bool with IO, Mut, Pani
         unresolved_count: 0,
         saturated: false,
         parse_failed: false,
+        parse_failed_path: "",
     }
     if !module_frontend_collect_ast_closure_into(source_path, &!closure) {
+        // Report the field that EXPLAINS the failure, not only the three that
+        // happen to look healthy.
+        //
+        // A dependency parse failure short-circuits the closure walk, so
+        // unresolved_count stays 0 and saturated stays false — the exact values a
+        // healthy-but-small closure has. Printing only those three said "something
+        // is wrong somewhere" and sent readers looking at import resolution, which
+        // was fine. The cause is parse_failed, and it names a file.
+        if closure.parse_failed {
+            print("run_check_mode: module failed to parse: ")
+            print(closure.parse_failed_path)
+            print("\n")
+            print("  note: the closure walk stops at the first parse failure, so the")
+            print(" node/unresolved/saturated counts below describe only what was reached\n")
+        }
         print("run_check_mode: AST closure incomplete nodes=")
         print_int(closure.node_count)
         print(" unresolved=")
         print_int(closure.unresolved_count)
         print(" saturated=")
         if closure.saturated { print("true") } else { print("false") }
+        print(" parse_failed=")
+        if closure.parse_failed { print("true") } else { print("false") }
         print("\n")
         return false
     }
@@ -2120,6 +2138,16 @@ fn compiler_visibility_preflight(source_path: string) -> bool with IO, Mut, Pani
     print("run_check_mode: verdict=")
     print_int(verdict)
     print("\n")
+    // A non-zero verdict is a TYPE error across the merged modules, not a
+    // visibility or parse problem. The caller turns `false` into
+    // "error: visibility preflight failed", which names the stage that ran rather
+    // than the thing that went wrong — a program whose only fault is a bad type
+    // gets told its visibility failed. Say so here, where the distinction is known.
+    if verdict != 0 {
+        print("run_check_mode: type checking failed across ")
+        print_int(closure.node_count)
+        print(" module(s); the diagnostics above name the offending declarations\n")
+    }
     verdict == 0
 }
 
@@ -2139,6 +2167,7 @@ fn run_science_boundary_closure_report(
         unresolved_count: 0,
         saturated: false,
         parse_failed: false,
+        parse_failed_path: "",
     }
     let complete = module_frontend_collect_ast_closure_into(source_path, &!closure)
     println("SOUNIO_BOUNDARY_CLOSURE_V1")
@@ -5178,7 +5207,12 @@ fn compile(opts: CompilerOptions) -> CompileResult with IO, Mut, Panic, Div, All
 
     if !compiler_visibility_preflight(opts.input_file) {
         var visibility_errors = compile_errors_new()
-        visibility_errors = compile_errors_push(visibility_errors, "error: visibility preflight failed")
+        // The preflight covers three distinct failures — a module that will not
+        // parse, an AST closure that could not be completed, and a type error
+        // across the merged modules — and this one message described only the
+        // stage. run_check_mode prints which of the three it was just above; say
+        // that here too, so the final line a user sees is not misleading on its own.
+        visibility_errors = compile_errors_push(visibility_errors, "error: preflight failed (parse, module closure, or type check — see run_check_mode output above)")
         return CompileResult {
             success: false,
             errors: visibility_errors,
