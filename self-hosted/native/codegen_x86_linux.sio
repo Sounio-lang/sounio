@@ -8778,11 +8778,74 @@ pub fn native_v2_core_emit_raw_byte_array_store_into(nc: &! NativeCompiler, base
     nc_emit_store_al_mem_rdx_rbx(nc)
 }
 
-pub fn native_v2_core_emit_ref_array_load_into(nc: &! NativeCompiler, dst: i64, base_ref: i64, idx_reg: i64) with Mut, Panic, Div {
-    // &![T; N] params point at the caller slot that stores the array handle.
+// Upper bound of the BSS window used by ref-array implicit-borrow
+// classification (issue #1510). Heap/runtime mmaps land above 2 GiB and
+// ref cells are stack LEAs (~0x7f..), so [BSS_BASE_LINUX, 0x80000000)
+// contains only raw BSS aggregate data addresses.
+fn native_v2_ref_array_bss_window_end() -> i64 { 2147483648 }
+
+// ref-array base resolution (issue #1510). The ref slot normally holds a
+// pointer to the caller's array cell (explicit &arr / &GG): dereferencing
+// yields the handle-or-raw-object-base. Implicit borrows f(arr) / f(GG)
+// skip cell materialization and hand the callee the array VALUE directly:
+// a bare GC handle (< threshold) for locals, or the raw BSS data address
+// for globals. Classify the slot value V instead of always dereferencing:
+//   V < threshold            -> bare handle: resolve directly
+//   V in BSS window          -> object base = V - object_header
+//   otherwise                -> true &cell: deref, then resolve (legacy)
+fn native_v2_ref_array_resolve_base_rax_into(nc: &! NativeCompiler, base_ref: i64) with Mut, Panic, Div {
     nc_core_load_temp_to_rax(nc, base_ref)
+    nc_emit_mov_rbx_rax(nc)                                  // rbx = V
+    nc_emit_mov_rax_imm(nc, native_v2_handle_raw_ptr_threshold())
+    nc_emit_cmp_rbx_rax(nc)
+    nc_emit_setae_al(nc)
+    nc_emit_movzx_rax_al(nc)
+    nc_emit_test_rax_rax(nc)
+    let not_handle_jnz = (*nc).code.len
+    nc_emit_jnz_rel32(nc)                                    // V >= threshold -> not_handle
+    // bare handle (implicit borrow of a local/heap array): resolve directly
+    nc_emit_mov_rax_rbx(nc)
+    native_v2_resolve_handle_to_object_base_rax_into(nc)
+    let done_jmp1 = (*nc).code.len
+    nc_emit_jmp_rel32(nc)
+    let not_handle = (*nc).code.len
+    nc_patch_u32_le(nc, not_handle_jnz + 2, not_handle - (not_handle_jnz + 6))
+    nc_emit_mov_rax_imm(nc, BSS_BASE_LINUX)
+    nc_emit_cmp_rbx_rax(nc)
+    nc_emit_setae_al(nc)                                     // V >= BSS_BASE ?
+    nc_emit_movzx_rax_al(nc)
+    nc_emit_test_rax_rax(nc)
+    let below_bss_jz = (*nc).code.len
+    nc_emit_jz_rel32(nc)                                     // V < BSS_BASE -> deref
+    nc_emit_mov_rax_imm(nc, native_v2_ref_array_bss_window_end())
+    nc_emit_cmp_rbx_rax(nc)
+    nc_emit_setae_al(nc)                                     // V >= window end ?
+    nc_emit_movzx_rax_al(nc)
+    nc_emit_test_rax_rax(nc)
+    let above_bss_jnz = (*nc).code.len
+    nc_emit_jnz_rel32(nc)                                    // V >= window end -> deref
+    // raw BSS aggregate (implicit borrow of a global array): the data has no
+    // object header, so base = V - header makes the +header step land on V.
+    nc_emit_mov_rax_rbx(nc)
+    nc_emit_sub_rax_imm8(nc, native_v2_object_header_size())
+    let done_jmp2 = (*nc).code.len
+    nc_emit_jmp_rel32(nc)
+    // true &cell (explicit & / re-passed ref param): deref, then resolve
+    let deref = (*nc).code.len
+    nc_patch_u32_le(nc, below_bss_jz + 2, deref - (below_bss_jz + 6))
+    nc_patch_u32_le(nc, above_bss_jnz + 2, deref - (above_bss_jnz + 6))
+    nc_emit_mov_rax_rbx(nc)
     nc_emit_load_rax_mem_rax(nc)
     native_v2_resolve_handle_to_object_base_rax_into(nc)
+    let done = (*nc).code.len
+    nc_patch_u32_le(nc, done_jmp1 + 1, done - (done_jmp1 + 5))
+    nc_patch_u32_le(nc, done_jmp2 + 1, done - (done_jmp2 + 5))
+}
+
+pub fn native_v2_core_emit_ref_array_load_into(nc: &! NativeCompiler, dst: i64, base_ref: i64, idx_reg: i64) with Mut, Panic, Div {
+    // &[T; N] / &![T; N] slots: explicit & points at the caller cell holding
+    // the handle; implicit borrows carry the bare handle / raw BSS address.
+    native_v2_ref_array_resolve_base_rax_into(nc, base_ref)
     nc_emit_mov_reg_reg(nc, 2, 0)
     nc_core_load_temp_to_rax(nc, idx_reg)
     nc_emit_mov_reg_reg(nc, 3, 0)
@@ -8793,10 +8856,9 @@ pub fn native_v2_core_emit_ref_array_load_into(nc: &! NativeCompiler, dst: i64, 
 }
 
 pub fn native_v2_core_emit_ref_array_store_into(nc: &! NativeCompiler, base_ref: i64, idx_reg: i64, src: i64) with Mut, Panic, Div {
-    // &![T; N] params point at the caller slot that stores the array handle.
-    nc_core_load_temp_to_rax(nc, base_ref)
-    nc_emit_load_rax_mem_rax(nc)
-    native_v2_resolve_handle_to_object_base_rax_into(nc)
+    // &[T; N] / &![T; N] slots: explicit & points at the caller cell holding
+    // the handle; implicit borrows carry the bare handle / raw BSS address.
+    native_v2_ref_array_resolve_base_rax_into(nc, base_ref)
     nc_emit_mov_reg_reg(nc, 2, 0)
     nc_core_load_temp_to_rax(nc, idx_reg)
     nc_emit_mov_reg_reg(nc, 3, 0)
