@@ -174,22 +174,26 @@ fn ce_is_token_char(c: i64) -> bool {
     (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 95
 }
 
-// The verdict token a gate emitted: the word following the LAST occurrence of
-// "_VERDICT " in its output. The corpus convention is `<PREFIX>_VERDICT
-// <TOKEN>`; taking the last occurrence means a gate that echoes a
-// sub-contract's verdict before stating its own is still read correctly.
-// Returns "" when the gate emitted no verdict at all.
-fn ce_extract_verdict_token(out: string) -> string with Mut, Panic, Div {
+// The word following the LAST occurrence of `needle` in a gate's output.
+// Taking the last occurrence means a gate that echoes a sub-contract's line
+// before stating its own is still read correctly. Returns "" when absent.
+//
+// Shared by the token and the witness readers rather than written twice. The
+// duplicate would be the exact failure this line measures — one derivation in
+// two shirts, agreeing because it is the same code, not because two routes
+// concur.
+fn ce_extract_after(out: string, needle: string, needle_len: i64) -> string
+        with Mut, Panic, Div {
     var at: i64 = -1
-    var scan = ce_find_sub(out, "_VERDICT ", 0)
+    var scan = ce_find_sub(out, needle, 0)
     while scan >= 0 {
         at = scan
-        scan = ce_find_sub(out, "_VERDICT ", scan + 1)
+        scan = ce_find_sub(out, needle, scan + 1)
     }
     if at < 0 {
         return ""
     }
-    let s = at + 9  // len("_VERDICT ")
+    let s = at + needle_len
     var e = s
     let n = str_len(out)
     while e < n && ce_is_token_char(str_char_at(out, e)) {
@@ -199,6 +203,28 @@ fn ce_extract_verdict_token(out: string) -> string with Mut, Panic, Div {
         return ""
     }
     str_slice(out, s, e)
+}
+
+// The verdict token a gate emitted. Corpus convention: `<PREFIX>_VERDICT <TOK>`.
+fn ce_extract_verdict_token(out: string) -> string with Mut, Panic, Div {
+    ce_extract_after(out, "_VERDICT ", 9)
+}
+
+// The WITNESS a gate emitted. Convention: `<PREFIX>_WITNESS <FINGERPRINT>`.
+//
+// WHY THIS EXISTS, and it is not a second token. A verdict token binds the
+// PROPOSITION a check reports. Its resolution is therefore bounded by the
+// invariance group of that proposition: a claim of the form "there are exactly
+// N classes" is satisfied by ANY state with N classes, so the token cannot see
+// a change that swaps every class for a different one. Measured on this
+// repository's own ZD-fiber contract: a single sign flip replaced all 24 fiber
+// geometries with 24 different ones, left the count at 24, and the token held.
+//
+// A witness binds the EVIDENCE that establishes the proposition — the labelling
+// itself, fingerprinted — so a change that preserves the proposition while
+// replacing its grounds is refused. Same mechanism as the token; strictly finer.
+fn ce_extract_witness(out: string) -> string with Mut, Panic, Div {
+    ce_extract_after(out, "_WITNESS ", 9)
 }
 
 // Final outcome once the declared token is compared with the emitted one.
@@ -228,6 +254,28 @@ fn ce_token_outcome(current: i64, want: string, got: string) -> i64 with Mut, Pa
         return CLAIM_GATE_PASS
     }
     4  // CLAIM_GATE_TOKEN_MISMATCH
+}
+
+// Same shape as ce_token_outcome, one level finer. Runs only after the token
+// decision, so a claim declaring both must satisfy the proposition first and
+// its grounds second.
+//
+// The fresh-variable discipline in the caller is load-bearing here too: this
+// returns a value, the caller assigns it to a NEW variable rather than back
+// into the one its enclosing condition reads. That hazard cost four builds in
+// R2 and it is the same code path.
+fn ce_witness_outcome(current: i64, want: string, got: string) -> i64
+        with Mut, Panic, Div {
+    if current != CLAIM_GATE_PASS {
+        return current
+    }
+    if str_len(got) == 0 {
+        return 7  // CLAIM_GATE_WITNESS_ABSENT
+    }
+    if ce_str_eq(want, got) {
+        return CLAIM_GATE_PASS
+    }
+    6  // CLAIM_GATE_WITNESS_MISMATCH
 }
 
 fn ce_str_eq(a: string, b: string) -> bool with Mut, Panic, Div {
@@ -351,6 +399,7 @@ pub fn claim_executor_verify(source_path: string) -> i64 with IO, Mut, Panic, Di
 
         var gate_idx: i64 = -1
         var token_idx: i64 = -1
+        var wit_idx: i64 = -1
         var archived = false
         var fi: i64 = 0
         while fi < n_fields {
@@ -363,6 +412,11 @@ pub fn claim_executor_verify(source_path: string) -> i64 with IO, Mut, Panic, Di
             // with the `verdict` field's archived scan below.
             if ce_name_eq_str(f.name, "verdict_token") {
                 token_idx = fi
+            }
+            // Optional: the fingerprint of the EVIDENCE, not of the claim.
+            // See ce_extract_witness for why a token alone is not enough.
+            if ce_name_eq_str(f.name, "witness") {
+                wit_idx = fi
             }
             if ce_name_eq_str(f.name, "verdict") {
                 let vs = ast_claim_slot_value_start(slot, fi)
@@ -414,7 +468,27 @@ pub fn claim_executor_verify(source_path: string) -> i64 with IO, Mut, Panic, Di
             // and is unreliable on this path — the reporting chain then took
             // the wrong arm even for a plainly passing gate with no token.
             // `outcome` stays the raw gate result; `decided` is the verdict.
-            if decided == CLAIM_GATE_PASS {
+
+            // Witness binding, one level finer than the token. Runs only if the
+            // proposition already holds, so a claim declaring both must satisfy
+            // what it asserts AND the grounds it asserts it on.
+            //
+            // Fresh variable again, for the same reason `decided` is fresh:
+            // `decided` is read by the conditions below, so the witness result
+            // goes into `settled` and nothing is written back.
+            var want_wit = ""
+            var got_wit = ""
+            var settled = decided
+            if decided == CLAIM_GATE_PASS && wit_idx >= 0 {
+                let wit_field = ast_claim_slot_field(slot, wit_idx)
+                let wit_vs = ast_claim_slot_value_start(slot, wit_idx)
+                let wit_ve = ast_claim_slot_value_end(slot, wit_idx)
+                want_wit = ce_value_text(src, wit_vs, wit_ve, wit_field.kind)
+                got_wit = ce_extract_witness(read_file(cap_path))
+                settled = ce_witness_outcome(decided, want_wit, got_wit)
+            }
+
+            if settled == CLAIM_GATE_PASS {
                 print("CLAIM_PASS ")
                 ce_print_name(cname)
                 print(" gate=")
@@ -423,9 +497,13 @@ pub fn claim_executor_verify(source_path: string) -> i64 with IO, Mut, Panic, Di
                     print(" verdict_token=")
                     print(got_tok)
                 }
+                if wit_idx >= 0 {
+                    print(" witness=")
+                    print(got_wit)
+                }
                 print("\n")
                 passed = passed + 1
-            } else if decided == 4 {  // CLAIM_GATE_TOKEN_MISMATCH
+            } else if settled == 4 {  // CLAIM_GATE_TOKEN_MISMATCH
                 print("CLAIM_TOKEN_MISMATCH ")
                 ce_print_name(cname)
                 print(" gate=")
@@ -436,7 +514,7 @@ pub fn claim_executor_verify(source_path: string) -> i64 with IO, Mut, Panic, Di
                 print(got_tok)
                 print("\n")
                 failed = failed + 1
-            } else if decided == 5 {  // CLAIM_GATE_TOKEN_ABSENT
+            } else if settled == 5 {  // CLAIM_GATE_TOKEN_ABSENT
                 print("CLAIM_TOKEN_ABSENT ")
                 ce_print_name(cname)
                 print(" gate=")
@@ -445,7 +523,27 @@ pub fn claim_executor_verify(source_path: string) -> i64 with IO, Mut, Panic, Di
                 print(want_tok)
                 print(" (gate emitted no _VERDICT token)\n")
                 failed = failed + 1
-            } else if decided == CLAIM_GATE_TIMEOUT {
+            } else if settled == 6 {  // CLAIM_GATE_WITNESS_MISMATCH
+                print("CLAIM_WITNESS_MISMATCH ")
+                ce_print_name(cname)
+                print(" gate=")
+                print(gate_path)
+                print(" declared=")
+                print(want_wit)
+                print(" emitted=")
+                print(got_wit)
+                print(" (the proposition still holds; its grounds changed)\n")
+                failed = failed + 1
+            } else if settled == 7 {  // CLAIM_GATE_WITNESS_ABSENT
+                print("CLAIM_WITNESS_ABSENT ")
+                ce_print_name(cname)
+                print(" gate=")
+                print(gate_path)
+                print(" declared=")
+                print(want_wit)
+                print(" (gate emitted no _WITNESS fingerprint)\n")
+                failed = failed + 1
+            } else if settled == CLAIM_GATE_TIMEOUT {
                 print("CLAIM_TIMEOUT ")
                 ce_print_name(cname)
                 print(" gate=")
@@ -459,7 +557,7 @@ pub fn claim_executor_verify(source_path: string) -> i64 with IO, Mut, Panic, Di
                 ce_print_name(cname)
                 print(" gate=")
                 print(gate_path)
-                if decided == CLAIM_GATE_SPAWN_ERR {
+                if settled == CLAIM_GATE_SPAWN_ERR {
                     print(" (spawn error)")
                 }
                 print("\n")
