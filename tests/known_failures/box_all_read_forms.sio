@@ -1,43 +1,37 @@
-//@ known-failure: Madaros miscompiles auto-deref through a Box<T>. A scalar field reads 0 with
-//@ known-failure: EXIT 0, a struct field SIGSEGVs; the explicit (*b) forms are correct, and
-//@ known-failure: lean_single compiles all ten assertions below correctly (BOXMATRIX OK).
+//@ known-failure: FIVE of the six read forms are now CORRECT; this file still fails on its last
+//@ known-failure: assertion, which is a reference (`&T`) case that fails for an accumulated reason
+//@ known-failure: unrelated to Box — measured: `p_ref(&x)` in isolation returns 9 on both the
+//@ known-failure: pre-fix and post-fix compilers, and the pre-fix compiler dies on line 2 of the
+//@ known-failure: same program while this one reaches line 6.
 //@ known-failure:
-//@ known-failure: MECHANISM, established: IrFieldGet carries label_id, which is how the lowerer
-//@ known-failure: signals "the base is a reference" (lower.sio, `if base_is_ref { instr.label_id = 1 }`).
-//@ known-failure: machine_ir.sio:516 lowers IrFieldGet to MIR_OP_PSEUDO_FIELD_GET with dst, src1 and
-//@ known-failure: field_idx ONLY — label_id is never propagated, so that flag reaches no instruction.
-//@ known-failure: What actually breaks is the FIELD INDEX: lookup_local_struct_type returns the
-//@ known-failure: literal "Box" for a Box local/param, no struct by that name exists, so
-//@ known-failure: field_idx_for_base_ref falls back to a by-name search and resolves the wrong slot.
-//@ known-failure: A correct fix needs the deref step (field_get(base, 0), the same step
-//@ known-failure: fd0fb03f3 added one level down for Box-typed FIELDS) plus the index resolved
-//@ known-failure: against T.
+//@ known-failure: What the Box fix repaired, all verified by value and not by exit code:
+//@ known-failure:   param scalar (explicit AND auto-deref)   90    -> 99
+//@ known-failure:   param struct (explicit AND auto-deref)   crash -> 111111
+//@ known-failure:   local scalar (explicit AND auto-deref)   crash -> 99
+//@ known-failure:   local struct auto-deref                  crash -> 111
+//@ known-failure:   homonym field (inline vs Box `inner`)    crash -> 99
 //@ known-failure:
-//@ known-failure: WHY THE SLOT CANNOT SIMPLY HOLD T: twelve sites read lookup_local_struct_type and
-//@ known-failure: two test it with ir_name_is_box — the explicit `*b` deref (lower_unary_expr_ref)
-//@ known-failure: and the `*p = v` store path. Measured: recording T there repairs all five read
-//@ known-failure: forms and SIGSEGVs on the first line of this file, i.e. it breaks `(*b)`.
+//@ known-failure: MECHANISM. `lookup_local_struct_type` returns the literal "Box" for a Box
+//@ known-failure: binding; no struct by that name exists, so field_idx_for_base_ref fell back to a
+//@ known-failure: by-name search and resolved the wrong slot — 0 for a scalar, a fault for a
+//@ known-failure: struct field. label_id cannot carry the deref: machine_ir.sio:516 lowers
+//@ known-failure: IrFieldGet to MIR_OP_PSEUDO_FIELD_GET with dst/src1/field_idx ONLY.
 //@ known-failure:
-//@ known-failure: FOUR ATTEMPTS, all built and measured, all reverted. Every one of them fixed the
-//@ known-failure: five read forms (99 / 111111 / 99 / 111 / 99, all correct) and every one broke a
-//@ known-failure: program that reads NO field at all:
-//@ known-failure:     fn takes_box(b: Box<Ex>) -> i64 { 7 }   // no field read
-//@ known-failure:     takes_box(Box::new(mk()))  then  let x = mk()   -> SIGSEGV
-//@ known-failure: which the unpatched compiler runs correctly. Refuted causes:
-//@ known-failure:   1. is_ref as the carrier            — label_id is not propagated (read the backend)
-//@ known-failure:   2. a [Name; 4096] size cliff (295KB) — a [i64; 4096] version breaks identically
-//@ known-failure:   3. a struct-valued if-expression store — statement stores break identically
-//@ known-failure:   4. a by-value `self` method reached through `&! Lowerer` — a free function taking
-//@ known-failure:      the layout table by reference breaks identically
-//@ known-failure: A DEAD [i64; 4096] array added to LowerLocalStack and never read or written
-//@ known-failure: changes nothing, so declaring a slot is safe; something about writing it at param
-//@ known-failure: bind time or reading it at the field-access site is not. That is the open question.
+//@ known-failure: The fix keeps struct_types holding "Box" (twelve sites read it, two test it with
+//@ known-failure: ir_name_is_box: the explicit `*b` deref and the `*p = v` store path) and adds a
+//@ known-failure: side table with the layout INDEX of T, plus the missing field_get(base, 0).
 //@ known-failure:
-//@ known-failure: WHY IT MATTERS: 174 auto-deref accesses on Box-typed names live in the compiler's
-//@ known-failure: own source, 162 of them in ir/lower.sio, 6 in parser/exprs.sio (including
-//@ known-failure: `let start = base.span` in parse_dot_expr_box). They are correct today only
-//@ known-failure: because lean_single compiles them. A Madaros-built Madaros inherits the
-//@ known-failure: miscompile, so this sits directly on the gen1 == gen2 path.
+//@ known-failure: SEVEN attempts. Four were reverted before the cause was known; the last three
+//@ known-failure: were each decided by one experiment whose opposite answer was recognisable:
+//@ known-failure:   1. a dead array (declared, never touched)      -> harmless
+//@ known-failure:   2. an array WRITTEN at bind time, never read   -> harmless
+//@ known-failure:      => the damage was the READ, done through a by-value `self` method that
+//@ known-failure:         copies the whole Lowerer on the hottest path. Reading the locals Box
+//@ known-failure:         directly removed the regression that killed attempts 1-4.
+//@ known-failure:   3. a trace at both write sites and the read   -> WRITE-A fired, WRITE-B never:
+//@ known-failure:         the *mut param path is the live one, the same two-paths trap as the seven
+//@ known-failure:         compile_ir_function variants. And `READ span layout=-1` with no WRITE at
+//@ known-failure:         all showed Box LOCALS were never registered, only params.
 
 struct Sp {
     a: i64,

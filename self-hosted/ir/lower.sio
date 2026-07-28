@@ -34,6 +34,9 @@ struct LowerLocalStack {
     // -1 = not a capturing closure; otherwise the synthetic closure fn_id whose captures
     // must be injected when this local is called (closures step 2).
     closure_fn_id: [i64; 4096],
+    // Layout-table index of the T in a Box<T> param/local; -1 otherwise. struct_types keeps
+    // holding the literal "Box" because twelve sites read it and two test it with ir_name_is_box.
+    box_inner_layout: [i64; 4096],
     count: i64,
 }
 
@@ -55,6 +58,7 @@ fn empty_lower_local_stack() -> LowerLocalStack {
         scalar_kind: [0; 4096],
         variance_regs: [-1; 4096],
         closure_fn_id: [-1; 4096],
+        box_inner_layout: [-1; 4096],
         count: 0,
     }
 }
@@ -3059,6 +3063,20 @@ fn lowerer_bind_local_mut(
     }
 }
 
+fn lowerer_bind_local_box_inner_mut(lo: &! Lowerer, name: Name, layout_idx: i64) with Mut, Alloc, Panic, Div {
+    if layout_idx < 0 { return }
+    var locals_box = (*lo).locals
+    var i = (*locals_box).count - 1
+    while i >= 0 {
+        if (*locals_box).depths[i as usize] <= (*lo).scope_depth && ir_name_eq((*locals_box).names[i as usize], name) {
+            (*locals_box).box_inner_layout[i as usize] = layout_idx
+            (*lo).locals = locals_box
+            return
+        }
+        i = i - 1
+    }
+}
+
 // *mut analogue: mark a just-bound param/local as a reference-typed binding so
 // field/index lowering can emit the extra dereference for &P / &[T;N] params.
 fn lowerer_mark_local_ref_mut(
@@ -3292,6 +3310,17 @@ fn lowerer_lower_fn_params_mut(
                 }
                 if lower_type_expr_is_ref_like(&(*list).head.ty) {
                     lowerer_mark_local_ref_mut(lo, (*list).head.name)
+                }
+                if lower_type_expr_is_box(&(*list).head.ty) {
+                    let bl = lower_struct_layout_index_of(&(*(*lo).struct_layouts), lower_box_inner_type_name(&(*list).head.ty))
+                    lowerer_bind_local_box_inner_mut(lo, (*list).head.name, bl)
+                    if str_eq(read_env("SOUNIO_BOX_TRACE"), "1") {
+                        print("boxtrace: WRITE-A ")
+                        print(str_from_bytes((*list).head.name.buf, (*list).head.name.len))
+                        print(" layout=")
+                        print_int(bl)
+                        print("\n")
+                    }
                 }
                 if lower_type_expr_is_array_of_f64(&(*list).head.ty) {
                     lowerer_mark_local_array_elem_float_mut(lo, (*list).head.name)
@@ -4029,6 +4058,45 @@ fn lower_opt_type_named_name(opt: &Option<Box<TypeExpr>>) -> Name with Mut, Pani
 // Struct-type name of a parameter, unwrapping `&T` / `&!T`. Used so a method body's
 // `self.method()` (and `param.method()`) can resolve the receiver's type — params were
 // previously bound with an empty struct_type, so `self.other()` hit the body-less-fn crash.
+fn lower_type_expr_is_box(ty: &TypeExpr) -> bool with Mut, Panic, Div {
+    if (*ty).kind != TypeExprKind::TypeNamed {
+        return false
+    }
+    ir_name_eq(ir_path_first_name((*ty).path), make_name("Box"))
+}
+
+fn lower_box_inner_type_name(ty: &TypeExpr) -> Name with Mut, Panic, Div {
+    match (*ty).type_args {
+        Some(list) => ir_path_first_name((*list).head.path),
+        None => ir_empty_name(),
+    }
+}
+
+fn lower_struct_layout_index_of(table: &StructLayoutTable, type_name: Name) -> i64 with Mut, Panic, Div {
+    if type_name.len <= 0 { return 0 - 1 }
+    var si: i64 = 0
+    while si < (*table).count {
+        if ir_name_eq((*table).entries[si as usize].type_name, type_name) { return si }
+        si = si + 1
+    }
+    0 - 1
+}
+
+// Read the side table WITHOUT copying the Lowerer. Bisected: writing this slot at param-bind time
+// is harmless (a written-but-never-read array changes nothing), while every earlier attempt read it
+// back through a by-value `self` method — which copies the whole ~struct Lowerer — at the
+// field-access site, the hottest path in the lowerer. That read is what broke four builds.
+fn lower_lookup_box_inner_layout(locals: Box<LowerLocalStack>, scope_depth: i64, name: Name) -> i64 with Mut, Panic, Div {
+    var i = (*locals).count - 1
+    while i >= 0 {
+        if (*locals).depths[i as usize] <= scope_depth && ir_name_eq((*locals).names[i as usize], name) {
+            return (*locals).box_inner_layout[i as usize]
+        }
+        i = i - 1
+    }
+    0 - 1
+}
+
 fn lower_param_struct_type_name(ty: &TypeExpr) -> Name with Mut, Panic, Div {
     if (*ty).kind == TypeExprKind::TypeNamed {
         return ir_path_first_name((*ty).path)
@@ -5889,6 +5957,42 @@ impl Lowerer {
             i = i - 1
         }
         lo
+    }
+
+    // Mirrors bind_local_struct_type including the copy/rebox discipline. Separate from
+    // struct_types on purpose: that slot keeps the literal "Box" because twelve sites read it and
+    // two test it with ir_name_is_box (the explicit `*b` deref and the `*p = v` store path).
+    fn bind_local_box_inner_layout(self, name: Name, layout_idx: i64) -> Lowerer with Mut, Alloc, Panic, Div {
+        if layout_idx < 0 { return self }
+        var lo = self
+        var stk = *lo.locals
+        var i = stk.count - 1
+        while i >= 0 {
+            if stk.depths[i as usize] <= lo.scope_depth && ir_name_eq(stk.names[i as usize], name) {
+                stk.box_inner_layout[i as usize] = layout_idx
+                lo.locals = Box::new(stk)
+                return lo
+            }
+            i = i - 1
+        }
+        lo
+    }
+
+    // Struct type of a call's FIRST argument: for `Box::new(mk())` that is the boxed type T.
+    fn expr_first_arg_struct_name_ref(self, call_expr: &Expr) -> Name with Mut, Panic, Div, Alloc {
+        match (*call_expr).args {
+            Some(arg_list) => {
+                let first = &(*arg_list).head
+                if (*first).kind == ExprKind::ExprCall {
+                    return self.expr_call_return_struct_name_ref(first)
+                }
+                if (*first).kind == ExprKind::ExprStructLit {
+                    return ir_path_first_name((*first).path)
+                }
+                ir_empty_name()
+            }
+            None => ir_empty_name(),
+        }
     }
 
     fn bind_local_struct_type(self, name: Name, type_name: Name) -> Lowerer with Mut, Alloc, Panic, Div {
@@ -9642,6 +9746,14 @@ impl Lowerer {
                         locals.wide_bits[idx as usize] = 0
                         locals.wide_signed[idx as usize] = 0
                         locals.is_ref[idx as usize] = if lower_type_expr_is_ref_like(&(*list).head.ty) { 1 } else { 0 }
+                        locals.box_inner_layout[idx as usize] = if lower_type_expr_is_box(&(*list).head.ty) { lower_struct_layout_index_of(&(*lo.struct_layouts), lower_box_inner_type_name(&(*list).head.ty)) } else { 0 - 1 }
+                        if lower_type_expr_is_box(&(*list).head.ty) && str_eq(read_env("SOUNIO_BOX_TRACE"), "1") {
+                            print("boxtrace: WRITE-B ")
+                            print(str_from_bytes((*list).head.name.buf, (*list).head.name.len))
+                            print(" layout=")
+                            print_int(locals.box_inner_layout[idx as usize])
+                            print("\n")
+                        }
                         // D5+D1 (#986+#983): f64 params → kind 2 (cast + float-print);
                         // word-size integer params (i8..i64/u8..u64/isize/usize) → kind 1
                         // (println safety). Bare int `as i64` stays identity because only
@@ -10708,6 +10820,8 @@ impl Lowerer {
                         // "Box" so `*b` lowers to a field-0 read (box deref through the
                         // handle) rather than a raw IrUnaryOp(OpDeref) pointer load.
                         lo = lo.bind_local_struct_type(s.name, make_name("Box"))
+                        let bxl = lower_struct_layout_index_of(&(*lo.struct_layouts), lo.expr_first_arg_struct_name_ref(&(*expr_box)))
+                        lo = lo.bind_local_box_inner_layout(s.name, bxl)
                     }
                 } else if (*expr_box).kind == ExprKind::ExprFieldAccess {
                     // `let p = h.inner` where the FIELD is a Box: propagate "Box" into the
@@ -10729,6 +10843,8 @@ impl Lowerer {
                     if lo.field_is_pointer_for_base_ref(&(*expr_box).left, (*expr_box).name) {
                         if lower_aggregate_diag_enabled() { print("lower_agg: BIND-BOX-FROM-FIELD fired\n") }
                         lo = lo.bind_local_struct_type(s.name, make_name("Box"))
+                        let bxl = lower_struct_layout_index_of(&(*lo.struct_layouts), lo.expr_first_arg_struct_name_ref(&(*expr_box)))
+                        lo = lo.bind_local_box_inner_layout(s.name, bxl)
                     } else {
                         if lower_aggregate_diag_enabled() { print("lower_agg: bind-from-field NOT pointer class\n") }
                     }
@@ -12849,14 +12965,39 @@ impl Lowerer {
             }
             _ => false,
         }
-        if base_field_is_ptr {
+        // The base ITSELF is a Box: dereference before applying the field offset, and resolve the
+        // index against T. Read through the locals Box directly — a by-value `self` lookup here is
+        // what broke the four previous attempts (bisected: the write at bind time is harmless).
+        let base_box_layout = match e.left {
+            Some(base_expr_ref) => {
+                if (*base_expr_ref).kind == ExprKind::ExprIdent {
+                    lower_lookup_box_inner_layout(lo1_pre.locals, lo1_pre.scope_depth, (*base_expr_ref).name)
+                } else {
+                    0 - 1
+                }
+            }
+            _ => 0 - 1,
+        }
+        let base_ident_is_box = base_box_layout >= 0
+        if str_eq(read_env("SOUNIO_BOX_TRACE"), "1") {
+            print("boxtrace: READ field=")
+            print(str_from_bytes(e.name.buf, e.name.len))
+            print(" layout=")
+            print_int(base_box_layout)
+            print("\n")
+        }
+        if base_field_is_ptr || base_ident_is_box {
             let pair_deref = lo1_pre.fresh_reg()
             let lo_d = pair_deref.0
             let deref_dst = pair_deref.1
             lo1 = lo_d.emit(ir_field_get(deref_dst, base_pre, 0, ir_empty_name()))
             base = deref_dst
         }
-        let fidx = lo1.field_idx_for_base_ref(&e.left, e.name)
+        let fidx = if base_ident_is_box {
+            lo1.field_idx_from_name((*lo1.struct_layouts).entries[base_box_layout as usize].type_name, e.name)
+        } else {
+            lo1.field_idx_for_base_ref(&e.left, e.name)
+        }
         let field_is_float = lo1.field_is_float_for_base_ref(&e.left, e.name) || lo1.field_is_float_by_name_simple(e.name)
         let field_array_elem_is_float = lo1.field_array_elem_is_float_for_base_ref(&e.left, e.name)
         let base_is_ref = match e.left {
