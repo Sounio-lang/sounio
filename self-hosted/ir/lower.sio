@@ -6823,23 +6823,56 @@ impl Lowerer {
     ) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self
         var current = &(*blk).stmts
-        var found = false
-        // Find last StmtExpr and classify it (re-enter classification on that expr).
-        // Store pointer by processing in reverse-like overwrite.
+        // Support `let r = x+y; return r` (gum_cross_function): remember last
+        // pure let RHS; if the trailing return/expr is that local, classify RHS.
+        var last_let_name = ir_empty_name()
+        var last_let_expr: Option<Box<Expr>> = None
         while true {
             match *current {
                 Some(list) => {
                     let stmt_ref = &(*list).head
-                    if stmt_ref.kind == StmtKind::StmtExpr {
+                    if stmt_ref.kind == StmtKind::StmtLet || stmt_ref.kind == StmtKind::StmtVar {
                         match stmt_ref.expr {
                             Some(te) => {
-                                lo = lo.fo_classify_expr_transfer(name, &(*te), p0, p1, nparams)
-                                found = true
+                                last_let_name = stmt_ref.name
+                                last_let_expr = Some(te)
+                            }
+                            _ => {
+                                last_let_name = ir_empty_name()
+                                last_let_expr = None
+                            }
+                        }
+                    } else if stmt_ref.kind == StmtKind::StmtExpr {
+                        match stmt_ref.expr {
+                            Some(te) => {
+                                // Unwrap `return <e>` for classification.
+                                var e_ref: &Expr = &(*te)
+                                if (*te).kind == ExprKind::ExprReturn {
+                                    match (*te).left {
+                                        Some(inner) => { e_ref = &(*inner) }
+                                        _ => {}
+                                    }
+                                }
+                                // If returning a local that was just let-bound, classify the RHS.
+                                if (*e_ref).kind == ExprKind::ExprIdent && last_let_name.len > 0 {
+                                    if ir_name_eq((*e_ref).name, last_let_name) {
+                                        match last_let_expr {
+                                            Some(rhs) => {
+                                                lo = lo.fo_classify_expr_transfer(name, &(*rhs), p0, p1, nparams)
+                                            }
+                                            _ => {
+                                                lo = lo.fo_classify_expr_transfer(name, e_ref, p0, p1, nparams)
+                                            }
+                                        }
+                                    } else {
+                                        lo = lo.fo_classify_expr_transfer(name, e_ref, p0, p1, nparams)
+                                    }
+                                } else {
+                                    lo = lo.fo_classify_expr_transfer(name, e_ref, p0, p1, nparams)
+                                }
                             }
                             _ => {}
                         }
-                    } else if stmt_ref.kind == StmtKind::StmtLet || stmt_ref.kind == StmtKind::StmtVar {
-                        return lo
                     }
                     current = &(*list).tail
                 }
@@ -6858,6 +6891,15 @@ impl Lowerer {
         nparams: i64
     ) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self
+        // `return v` wraps the value — classify the inner expression.
+        if (*e).kind == ExprKind::ExprReturn {
+            match (*e).left {
+                Some(inner) => {
+                    return lo.fo_classify_expr_transfer(name, &(*inner), p0, p1, nparams)
+                }
+                _ => { return lo }
+            }
+        }
         // id: single param identity
         if (*e).kind == ExprKind::ExprIdent {
             if nparams >= 1 && ir_name_eq((*e).name, p0) {
