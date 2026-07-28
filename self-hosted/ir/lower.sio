@@ -6553,6 +6553,142 @@ impl Lowerer {
         self.fo_load_local_sens(key)
     }
 
+    // FO of args[n].field (identity-return peel through pure call).
+    fn fo_field_variance_of_nth_arg(
+        self,
+        args: &Option<Box<ExprList>>,
+        n: i64,
+        field: Name
+    ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if n < 0 {
+            return (self.fo_clear_expr_sens(), -1)
+        }
+        var acur = args
+        var ai: i64 = 0
+        while true {
+            match *acur {
+                Some(al) => {
+                    if ai == n {
+                        return self.lower_expr_field_variance_ref(&(*al).head, field)
+                    }
+                    ai = ai + 1
+                    acur = &(*al).tail
+                }
+                _ => break
+            }
+        }
+        (self.fo_clear_expr_sens(), -1)
+    }
+
+    // FO of base.field: Ident keys, pure Call projections, identity FWD through args.
+    fn lower_expr_field_variance_ref(
+        self,
+        base: &Expr,
+        field: Name
+    ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if (*base).kind == ExprKind::ExprIdent {
+            let bname = (*base).name
+            var lo_f = self.fo_load_field_sens(bname, field)
+            if lo_f.fo_expr_has_sens() {
+                return lo_f.fo_emit_var_from_sens()
+            }
+            let key = self.fo_field_key(bname, field)
+            let fvar = lo_f.lookup_local_variance_reg(key)
+            if fvar >= 0 {
+                lo_f = lo_f.fo_seed_from_variance(fvar)
+                return (lo_f, fvar)
+            }
+            return (lo_f.fo_clear_expr_sens(), -1)
+        }
+        if (*base).kind == ExprKind::ExprCall {
+            match (*base).left {
+                Some(callee_expr) => {
+                    let callee = self.expr_to_callee_name_ref(&(*callee_expr))
+                    if callee.len > 0 {
+                        let proj = ir_mangle_method_name(callee, field)
+                        let xfer = self.fo_apply_call_transfer(proj, &(*base).args, 0)
+                        var lo_x = xfer.0
+                        let xv = xfer.1
+                        if xv >= 0 {
+                            return (lo_x, xv)
+                        }
+                        if lo_x.fo_expr_has_sens() {
+                            return lo_x.fo_emit_var_from_sens()
+                        }
+                        let idx = self.fo_xfer_lookup(callee)
+                        if idx >= 0 {
+                            var k = FO_XFER_KIND[idx as usize]
+                            var aidx = idx
+                            if k == 5 {
+                                let fh = FO_XFER_FWD_HASH[idx as usize]
+                                let fidx = fo_xfer_global_lookup_hash(fh)
+                                if fidx >= 0 {
+                                    aidx = fidx
+                                    k = FO_XFER_KIND[fidx as usize]
+                                }
+                            }
+                            if k == 1 {
+                                let pi = FO_XFER_LIT[aidx as usize] as i64
+                                return self.fo_field_variance_of_nth_arg(
+                                    &(*base).args, pi, field
+                                )
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+            return (self.fo_clear_expr_sens(), -1)
+        }
+        if (*base).kind == ExprKind::ExprMethodCall {
+            let recv_type = self.lower_method_recv_type(&(*base).left)
+            if recv_type.len > 0 {
+                let mangled = ir_mangle_method_name(recv_type, (*base).name)
+                let proj = ir_mangle_method_name(mangled, field)
+                let xfer = self.fo_apply_call_transfer_recv(
+                    proj, &(*base).left, &(*base).args, 0
+                )
+                var lo_m = xfer.0
+                let xv = xfer.1
+                if xv >= 0 {
+                    return (lo_m, xv)
+                }
+                if lo_m.fo_expr_has_sens() {
+                    return lo_m.fo_emit_var_from_sens()
+                }
+                let idx = self.fo_xfer_lookup(mangled)
+                if idx >= 0 {
+                    var k = FO_XFER_KIND[idx as usize]
+                    var aidx = idx
+                    if k == 5 {
+                        let fh = FO_XFER_FWD_HASH[idx as usize]
+                        let fidx = fo_xfer_global_lookup_hash(fh)
+                        if fidx >= 0 {
+                            aidx = fidx
+                            k = FO_XFER_KIND[fidx as usize]
+                        }
+                    }
+                    if k == 1 {
+                        let pi = FO_XFER_LIT[aidx as usize] as i64
+                        if pi == 0 {
+                            match (*base).left {
+                                Some(recv) => {
+                                    return self.lower_expr_field_variance_ref(&(*recv), field)
+                                }
+                                _ => {}
+                            }
+                        }
+                        return self.fo_field_variance_of_nth_arg(
+                            &(*base).args, pi - 1, field
+                        )
+                    }
+                }
+            }
+            return (self.fo_clear_expr_sens(), -1)
+        }
+        (self.fo_clear_expr_sens(), -1)
+    }
+
     // Bytecode path: field FO by field-name hash under base.
     fn fo_load_field_sens_by_hash(
         self,
@@ -8266,10 +8402,72 @@ impl Lowerer {
             }
         }
         if lo.fo_try_simple_block_transfer(name, &fd.body, p0, p1, p2, p3, nparams) {
+            lo.fo_register_struct_field_projections(name, &fd.body, p0, p1, p2, p3, nparams)
             return lo
         }
         FO_BC_USED_OPAQUE = 0
-        lo.fo_compile_block_bytecode(name, &fd.body, p0, p1, p2, p3, nparams)
+        lo = lo.fo_compile_block_bytecode(name, &fd.body, p0, p1, p2, p3, nparams)
+        lo.fo_register_struct_field_projections(name, &fd.body, p0, p1, p2, p3, nparams)
+        lo
+    }
+
+    // Pure fn returning StructLit { f: param_i }: mangle(fn,f) → identity param i.
+    fn fo_register_struct_field_projections(
+        self,
+        fn_name: Name,
+        blk: &Block,
+        p0: Name,
+        p1: Name,
+        p2: Name,
+        p3: Name,
+        nparams: i64
+    ) with Mut, Panic, Div, Alloc, IO {
+        var current = &(*blk).stmts
+        var last_e: Option<Box<Expr>> = None
+        while true {
+            match *current {
+                Some(list) => {
+                    if (*list).head.kind == StmtKind::StmtExpr {
+                        match (*list).head.expr {
+                            Some(te) => {
+                                last_e = Some(te)
+                            }
+                            _ => {}
+                        }
+                    }
+                    current = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        match last_e {
+            Some(e) => {
+                if (*e).kind == ExprKind::ExprStructLit {
+                    var fcur = &(*e).fields
+                    while true {
+                        match *fcur {
+                            Some(fl) => {
+                                let fname = (*fl).head.name
+                                if fname.len > 0 {
+                                    let pi = self.fo_param_index4(
+                                        &(*fl).head.value, p0, p1, p2, p3, nparams
+                                    )
+                                    if pi >= 0 {
+                                        let key = ir_mangle_method_name(fn_name, fname)
+                                        fo_xfer_global_set(
+                                            key, 1, pi as f64, ir_empty_name()
+                                        )
+                                    }
+                                }
+                                fcur = &(*fl).tail
+                            }
+                            _ => break
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     fn fo_try_simple_block_transfer(
@@ -10498,22 +10696,10 @@ impl Lowerer {
                     _ => {}
                 }
             }
-            // General struct field FO: keys bound at struct-literal let-bind.
+            // General struct field FO: local keys, pure-call projections, identity FWD.
             match (*e).left {
                 Some(base_expr) => {
-                    if (*base_expr).kind == ExprKind::ExprIdent {
-                        let bname = (*base_expr).name
-                        var lo_f = self.fo_load_field_sens(bname, (*e).name)
-                        if lo_f.fo_expr_has_sens() {
-                            return lo_f.fo_emit_var_from_sens()
-                        }
-                        let key = self.fo_field_key(bname, (*e).name)
-                        let fvar = lo_f.lookup_local_variance_reg(key)
-                        if fvar >= 0 {
-                            lo_f = lo_f.fo_seed_from_variance(fvar)
-                            return (lo_f, fvar)
-                        }
-                    }
+                    return self.lower_expr_field_variance_ref(&(*base_expr), (*e).name)
                 }
                 _ => {}
             }
