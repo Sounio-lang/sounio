@@ -73,6 +73,7 @@ derivation of that function already sitting unused in the repository.
 | C13 | **The one-sidedness measured here, not transferred.** Perturb the shared object rather than the code: **21 pairs of this corpus's contracts have identical responses to all 36 perturbations while their structural similarity is 0.479–0.594**, below the threshold at which C6 calls them independent evidence. Pairs C6 calls independent agree *more* (0.565) than pairs it calls shared (0.513). | R13 | `STRUCTURAL_INDEPENDENCE_DOES_NOT_IMPLY_INDEPENDENT_FATE` |
 | C14 | **The same instrument turned around, and a pre-registered hypothesis losing.** Of everything these contracts compute — to level 10, 1024 dimensions — how much does the conclusion depend on? **407 verdict changes, 117 crashes, 12 survivors in 536 cells**; levels 9 and 10 are pure verdict changes. Vacuity refuted; the corpus checks what it computes. | R14 | `VACUITY_REFUTED__CORPUS_CHECKS_WHAT_IT_COMPUTES` |
 | C15 | **The limit above C3, and its repair.** C3 binds the build to the *proposition* a check reports. That is still blind to anything preserving the proposition's truth: a flip changing **126 of 128 fiber graphs and every spectrum** leaves `#spectra = 24` intact, so the token holds. A token's resolution is bounded by the **invariance group of its proposition**. Repair, verified: **bind the witness, not the predicate**. | R15 | `TOKEN_RESOLUTION_BOUNDED_BY_PROPOSITION_INVARIANCE` |
+| C16 | **The invariance group, identified.** The blind spot is not "maps preserving the count" but maps acting **within the blocks** of the classification: the flip preserves the *identical set partition* of fibers (sizes [1,7,7] / [1,1,7,7,7,8] / [1,1,1,1,7,7,7,7,7,7,8,9]) and relabels every block, changing exactly **2 edges per fiber** because the perturbed pair's home fiber is the one the check never examines. **Any claim of the form "there are exactly N equivalence classes" has this blind spot by construction.** | R16 | `INVARIANCE_GROUP_IS_PARTITION_PRESERVING_NOT_MERELY_COUNT_PRESERVING` |
 
 ### Methodological results that generalise
 
@@ -301,7 +302,10 @@ cross-checks.
 
 C3's own limit is now measured too, and it is not the impossibility of §5 but a
 **resolution** limit: a token is exactly as fine as the proposition it states,
-and propositions about counts are coarse. The repair — bind a *witness* of the
+and propositions about counts are coarse. Sharpened in C16 — the token is blind
+to every map acting *within* the classification it counts, and the stronger a
+classification theorem is, the coarser its verdict token, because the theorem
+states a cardinality while its content is a labelling. The repair — bind a *witness* of the
 proposition rather than its truth value — is a strict strengthening of C3 and is
 verified rather than proposed (§C15).
 

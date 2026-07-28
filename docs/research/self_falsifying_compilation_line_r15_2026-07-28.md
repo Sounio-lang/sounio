@@ -68,7 +68,9 @@ structural rather than incidental:
 
 Here the proposition is *"there are 24 distinct spectra"*. The witness is
 *which* 24. The perturbation preserves the first and replaces the second
-entirely.
+entirely. (R16 identifies the group precisely: not maps preserving |X| but maps
+acting **within the blocks** of the classification. Count-preservation is a
+consequence of that, not the mechanism.)
 
 This is not the shared-misinterpretation impossibility of R0 §3 — the check is
 not wrong, and neither is the claim. It is a **resolution** limit: the token is
@@ -101,8 +103,13 @@ The general form: **bind a witness of the proposition, not its truth value.**
   only one found among the perturbations tested, at four levels, with controls.
   A systematic search over all pairs was not run.
 - **Not an explanation of why this family preserves the count.** The regularity
-  is measured across n = 5–8, not derived. That is open, and it looks like the
-  more interesting question.
+  is measured across n = 5–8, not derived. **R16 answers the mechanism**
+  (`self_falsifying_compilation_line_r16_2026-07-28.md`): the flip preserves the
+  whole set *partition* of fibers into spectrum-classes, changing exactly two
+  edges per fiber, because the flipped pair's home fiber is the one the contract
+  does not examine. So the group in §2 is **partition-preserving**, wider than
+  the count-preserving description used here. The regularity is still measured
+  rather than proved — R16 §3 keeps that limit.
 - **Not a compiler change.** Still Python-only.
 
 ---
