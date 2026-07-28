@@ -21,6 +21,7 @@
 | Shared FO channel | Same σ² reg / same peel reuses one channel (η+η → 4σ²; CL·V shared η) | `shared_channel` |
 | PK science via import | Oral Css FO through `use epistemic::fo::{fo_css,…}` multi-mod | `pk_import` |
 | Method FO | Mangled pure-method transfer; recv = param 0; f64 FO args | `method` |
+| Struct field FO | Struct-lit peels → `base_field` keys; alias copy; op17 `self.field` | `struct_field` |
 | Control | `if` SELECT blend (const + runtime) | `div_if`, `if_helper` |
 | 2nd-order mean | `E₂[f] ≈ f(μ) + ½ Σ H_kk σ_k²` | `second_order_mean`, `fo_emit_second_order_bias` |
 | Hessian diag | `hessian_diag_of(expr) → Σ H_kk` | `pow_const` |
@@ -45,7 +46,8 @@ Summary JSON lands under `$SOUNIO_FO_TRUST_DIR/summary.json` (or a temp dir prin
 **Measured 2026-07-28 (multi-mod import FO):** 25/25 PASS — `madaros_gum_fo_import` closes imported pure-helper FO (v_imp = v_peel for mul/div/css).  
 **Measured 2026-07-28 (shared channel freeze):** 26/26 PASS — `madaros_gum_fo_shared_channel` freezes σ²-reg channel identity (already live; no lowerer change).  
 **Measured 2026-07-28 (PK import science):** 27/27 PASS — `madaros_gum_fo_pk_import` + `examples/.../fo_pk_exposure_import_driver.sio`: imported `fo_css` matches local Css FO (Var=0.795833, E₂=6.724, H=7.292592).  
-**Measured 2026-07-28 (method FO):** 28/28 PASS — `madaros_gum_fo_method`: `ops.clearance`/`ops.css` match free-fn FO (Var CL=0.34, Css=0.795833, E₂=6.724).
+**Measured 2026-07-28 (method FO):** 28/28 PASS — `madaros_gum_fo_method`: `ops.clearance`/`ops.css` match free-fn FO (Var CL=0.34, Css=0.795833, E₂=6.724).  
+**Measured 2026-07-28 (struct field FO):** 29/29 PASS — `madaros_gum_fo_struct_field`: `pk.cl0` matches peel; alias; `pk.clearance(η)` via `self.cl0` = 0.34; exposure product FO live.
 
 ## Science drivers
 
@@ -77,7 +79,8 @@ Css = (F·Dose/τ)/(CL0·exp(η)) — **same numbers on local and imported helpe
 3. **Off-diagonal Hessian storage** — product/add/div *combine* track H_ij when Cov≠0; full symbolic H matrix is not materialised as a first-class value.
 4. **~~Shared peel / same σ² channel~~ CLOSED** — `fo_seed_from_variance` reuses channel by variance_reg; peels, lets, Knowledge aliases, and interproc params share correctly. Gate: `shared_channel`. Residual: *independent* `measure`s that *ought* to share a latent still need explicit `correlate(a,b,ρ)` or a single shared peel.
 5. **pow native** is `exp(y·log x)`; FO mean also rewrites const-exponent `pow` to `exp(c·log)` in lower.
-6. **~~Method FO~~ CLOSED for pure f64-arg methods** — mangled `Type_method` FO_XFER with recv as param 0. Gate: `method`. Residual: FO through `self.field` / struct field peels (field FO still 0); nested `self.other()` expand in method bodies.
+6. **~~Method FO~~ CLOSED for pure f64-arg methods** — mangled `Type_method` FO_XFER with recv as param 0. Gate: `method`.
+6b. **~~Struct field FO~~ CLOSED** — struct-lit inits bind FO to `base_field` keys; field access + alias copy; bytecode op 17 `LOAD_PARAM_FIELD` for `self.field` in method bodies. Gate: `struct_field`. Residual: nested `self.other()` expand; field FO for non-Ident bases.
 7. **FO builtins remain compiler-injected** (`variance_of`, …) — stdlib `epistemic::fo` wraps *pure helpers*, not the builtins themselves (AST-walk requirement).
 
 ### Closed this session
@@ -92,17 +95,18 @@ Css = (F·Dose/τ)/(CL0·exp(η)) — **same numbers on local and imported helpe
 - **Shared FO channel identity (freeze).** Measured live without new lowerer work: same σ² reg reuses channel; η+η, CL·V shared η, Knowledge alias, interproc double-use all match analytic; independent measures stay 2-channel. Gate: `shared_channel`.
 - **PK science via multi-mod import.** `fo_pk_exposure_import_driver` + gate `pk_import`: imported `fo_css`/`fo_clearance`/`fo_mul2` match local FO and audit table (Var Css, E₂, H, kprod, shared-η product).
 - **Method FO (f64-arg pure methods).** `fo_apply_call_transfer_recv` + xfer arg shift (recv=param0); eval continues past FO-empty self. Gate: `method` (mul2/clearance/css match free-fn).
+- **Struct field FO.** `fo_bind_struct_literal_fields` / `fo_load_field_sens` / alias copy; FO bytecode op 17 for `self.field`. Gate: `struct_field` (peel match + method clearance/exposure).
 
 ## Gate inventory
 
-All files matching `tests/run-pass/madaros_gum_fo_*.sio` are members of the trust gate (28 files including `method`). Adding a new FO gate = drop a `madaros_gum_fo_*.sio` with a `MADAROS_GUM_FO_*_PASS` token.
+All files matching `tests/run-pass/madaros_gum_fo_*.sio` are members of the trust gate (29 files including `struct_field`). Adding a new FO gate = drop a `madaros_gum_fo_*.sio` with a `MADAROS_GUM_FO_*_PASS` token.
 
 ## Next bold moves (ordered)
 
-1. **Field FO** — peel through struct fields / `self.cl0` (blocks field-centric method FO).
-2. **Nested method expand** — `self.other(...)` inside method bodies in FO bytecode.
-3. **Mutual pure-helper FO expand** — true recursive pure helpers (beyond multipass DAG).
-4. Keep `correlate` for *distinct* measures that share a latent in the science model.
+1. **Nested method expand** — `self.other(...)` inside method bodies in FO bytecode.
+2. **Mutual pure-helper FO expand** — true recursive pure helpers (beyond multipass DAG).
+3. Keep `correlate` for *distinct* measures that share a latent in the science model.
+4. Dissertation PK structs: store peels on fields; FO through methods that read `self.*`.
 
 ---
 

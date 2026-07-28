@@ -157,6 +157,7 @@ var FO_XFER_BC_LEN: [i64; 64] = [0; 64]
 // FO bytecode: OP_PARAM=1 CONST=2 ADD=3 SUB=4 MUL=5 DIV=6 BIND=7 LOCAL=8
 var FO_BC_OP: [i64; 4096] = [0; 4096]
 var FO_BC_ARG: [i64; 4096] = [0; 4096]
+var FO_BC_FIELD_HASH: [i64; 4096] = [0; 4096]
 var FO_BC_LEN: i64 = 0
 var FO_BC_CONST_BITS: [i64; 256] = [0; 256]
 var FO_BC_CONST_N: i64 = 0
@@ -387,6 +388,19 @@ fn fo_bc_emit(op: i64, arg: i64) -> bool with Mut {
     }
     FO_BC_OP[FO_BC_LEN as usize] = op
     FO_BC_ARG[FO_BC_LEN as usize] = arg
+    FO_BC_FIELD_HASH[FO_BC_LEN as usize] = 0
+    FO_BC_LEN = FO_BC_LEN + 1
+    true
+}
+
+// op 17: LOAD_PARAM_FIELD — ARG=param_idx, FO_BC_FIELD_HASH=field name hash.
+fn fo_bc_emit_param_field(param_idx: i64, field: Name) -> bool with Mut, Panic, Div {
+    if FO_BC_LEN >= 4096 {
+        return false
+    }
+    FO_BC_OP[FO_BC_LEN as usize] = 17
+    FO_BC_ARG[FO_BC_LEN as usize] = param_idx
+    FO_BC_FIELD_HASH[FO_BC_LEN as usize] = fo_name_hash(field)
     FO_BC_LEN = FO_BC_LEN + 1
     true
 }
@@ -6422,6 +6436,141 @@ impl Lowerer {
         lo.fo_clear_expr_sens()
     }
 
+    // Field FO key: base_field (same mangle as methods).
+    fn fo_field_key(self, base: Name, field: Name) -> Name with Mut, Panic, Div {
+        ir_mangle_method_name(base, field)
+    }
+
+    // After `let pk = Pk { cl0: e, ... }`, bind FO of each init onto base_field keys.
+    fn fo_bind_struct_literal_fields(
+        self,
+        base: Name,
+        fields: &Option<Box<StructFieldList>>
+    ) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        var current = fields
+        while true {
+            match *current {
+                Some(list) => {
+                    let fname = (*list).head.name
+                    if fname.len > 0 {
+                        let vpair = lo.lower_expr_variance_ref(&(*list).head.value)
+                        lo = vpair.0
+                        if lo.fo_expr_has_sens() {
+                            let key = lo.fo_field_key(base, fname)
+                            lo = lo.fo_bind_local_sens(key)
+                            if vpair.1 >= 0 {
+                                lo = lo.bind_local_variance_reg(key, vpair.1)
+                            }
+                        }
+                    }
+                    current = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        lo
+    }
+
+    fn fo_load_field_sens(
+        self,
+        base: Name,
+        field: Name
+    ) -> Lowerer with Mut, Panic, Div {
+        let key = self.fo_field_key(base, field)
+        self.fo_load_local_sens(key)
+    }
+
+    // Bytecode path: field FO by field-name hash under base.
+    fn fo_load_field_sens_by_hash(
+        self,
+        base: Name,
+        field_h: i64
+    ) -> Lowerer with Mut, Panic, Div {
+        var lo = self
+        if base.len <= 0 {
+            return lo.fo_clear_expr_sens()
+        }
+        var i: i64 = 0
+        while i < lo.fo_bind_count {
+            let nm = lo.fo_bind_names[i as usize]
+            if nm.len > base.len + 1 {
+                var prefix_ok = true
+                var pi: i64 = 0
+                while pi < base.len {
+                    if nm.buf[pi as usize] != base.buf[pi as usize] {
+                        prefix_ok = false
+                    }
+                    pi = pi + 1
+                }
+                if prefix_ok && nm.buf[base.len as usize] == 95 {
+                    var field = ir_empty_name()
+                    var j: i64 = base.len + 1
+                    while j < nm.len && field.len < 128 {
+                        field.buf[field.len as usize] = nm.buf[j as usize]
+                        field.len = field.len + 1
+                        j = j + 1
+                    }
+                    if fo_name_hash(field) == field_h {
+                        return lo.fo_load_local_sens(nm)
+                    }
+                }
+            }
+            i = i + 1
+        }
+        lo.fo_clear_expr_sens()
+    }
+
+    // `let pk2 = pk` — copy field FO binds.
+    fn fo_copy_struct_field_binds(
+        self,
+        from_base: Name,
+        to_base: Name
+    ) -> Lowerer with Mut, Panic, Div {
+        var lo = self
+        if from_base.len <= 0 || to_base.len <= 0 {
+            return lo
+        }
+        if ir_name_eq(from_base, to_base) {
+            return lo
+        }
+        let n = lo.fo_bind_count
+        var i: i64 = 0
+        while i < n {
+            let nm = lo.fo_bind_names[i as usize]
+            if nm.len > from_base.len + 1 {
+                var prefix_ok = true
+                var pi: i64 = 0
+                while pi < from_base.len {
+                    if nm.buf[pi as usize] != from_base.buf[pi as usize] {
+                        prefix_ok = false
+                    }
+                    pi = pi + 1
+                }
+                if prefix_ok && nm.buf[from_base.len as usize] == 95 {
+                    var field = ir_empty_name()
+                    var j: i64 = from_base.len + 1
+                    while j < nm.len && field.len < 128 {
+                        field.buf[field.len as usize] = nm.buf[j as usize]
+                        field.len = field.len + 1
+                        j = j + 1
+                    }
+                    lo = lo.fo_load_local_sens(nm)
+                    if lo.fo_expr_has_sens() {
+                        let tkey = lo.fo_field_key(to_base, field)
+                        lo = lo.fo_bind_local_sens(tkey)
+                        let vreg = lo.lookup_local_variance_reg(nm)
+                        if vreg >= 0 {
+                            lo = lo.bind_local_variance_reg(tkey, vreg)
+                        }
+                    }
+                }
+            }
+            i = i + 1
+        }
+        lo
+    }
+
     // Second-order mean bias: (1/2) Σ_k H_kk · σ²_k
     fn fo_emit_second_order_bias(self) -> (Lowerer, i64) with Mut, Panic, Div {
         let z = self.emit_f64_const(0.0)
@@ -8393,6 +8542,19 @@ impl Lowerer {
             }
             return false
         }
+        // self.field / param.field → LOAD_PARAM_FIELD (method FO bodies)
+        if (*e).kind == ExprKind::ExprFieldAccess {
+            match (*e).left {
+                Some(base) => {
+                    let pi = self.fo_param_index4(&(*base), p0, p1, p2, p3, nparams)
+                    if pi >= 0 {
+                        return fo_bc_emit_param_field(pi, (*e).name)
+                    }
+                }
+                _ => {}
+            }
+            return false
+        }
         false
     }
 
@@ -8994,6 +9156,106 @@ impl Lowerer {
                 while k3 < 32 {
                     FO_EV_SENS[(sp * 32 + k3) as usize] = FO_ARG_SENS[(arg * 32 + k3) as usize]
                     FO_EV_HESS[(sp * 32 + k3) as usize] = FO_ARG_HESS[(arg * 32 + k3) as usize]
+                    k3 = k3 + 1
+                }
+                FO_EV_SP = sp + 1
+            } else if op == 17 {
+                // LOAD_PARAM_FIELD: FO of field of method/free param (self.cl0).
+                if arg < 0 || FO_EV_SP >= 16 {
+                    return (lo.fo_clear_expr_sens(), -1)
+                }
+                let field_h = FO_BC_FIELD_HASH[(off + pc) as usize]
+                var loaded = false
+                // Prefer Ident base from method recv (param 0) or free-fn arg expr.
+                if arg == 0 {
+                    match *recv {
+                        Some(rbox) => {
+                            if (*rbox).kind == ExprKind::ExprIdent {
+                                lo = lo.fo_load_field_sens_by_hash((*rbox).name, field_h)
+                                loaded = lo.fo_expr_has_sens()
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if !loaded {
+                    // Free-fn path / non-ident: try FO of the arg expression then clear.
+                    lo = lo.fo_clear_expr_sens()
+                }
+                let s = lo.fo_snapshot_expr_sens()
+                let h = lo.fo_snapshot_expr_hess()
+                // Value of field: lower FieldAccess when recv/arg is available.
+                var vreg: i64 = -1
+                if arg == 0 {
+                    match *recv {
+                        Some(rbox) => {
+                            if (*rbox).kind == ExprKind::ExprIdent {
+                                // value via ordinary field get of lowered base
+                                let bp = lo.lower_expr_ref(&(*rbox))
+                                lo = bp.0
+                                let breg = bp.1
+                                // Reconstruct field name from bind table
+                                var fname = ir_empty_name()
+                                var bi: i64 = 0
+                                while bi < lo.fo_bind_count {
+                                    let nm = lo.fo_bind_names[bi as usize]
+                                    let bname = (*rbox).name
+                                    if nm.len > bname.len + 1 {
+                                        var pok = true
+                                        var qi: i64 = 0
+                                        while qi < bname.len {
+                                            if nm.buf[qi as usize] != bname.buf[qi as usize] {
+                                                pok = false
+                                            }
+                                            qi = qi + 1
+                                        }
+                                        if pok && nm.buf[bname.len as usize] == 95 {
+                                            var field = ir_empty_name()
+                                            var j: i64 = bname.len + 1
+                                            while j < nm.len && field.len < 128 {
+                                                field.buf[field.len as usize] = nm.buf[j as usize]
+                                                field.len = field.len + 1
+                                                j = j + 1
+                                            }
+                                            if fo_name_hash(field) == field_h {
+                                                fname = field
+                                            }
+                                        }
+                                    }
+                                    bi = bi + 1
+                                }
+                                if fname.len > 0 {
+                                    let fpair = lo.fresh_reg()
+                                    lo = fpair.0
+                                    vreg = fpair.1
+                                    let st = lo.lookup_local_struct_type((*rbox).name)
+                                    let fidx = if st.len > 0 {
+                                        lo.field_idx_from_name(st, fname)
+                                    } else {
+                                        lo.field_idx_from_name_simple(fname)
+                                    }
+                                    var finstr = ir_field_get(vreg, breg, fidx, fname)
+                                    finstr.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+                                    lo = lo.emit(finstr)
+                                    lo = lo.emit(ir_mark_float_reg(vreg))
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if vreg < 0 {
+                    let zp = lo.emit_f64_const(0.0)
+                    lo = zp.0
+                    vreg = zp.1
+                }
+                let sp = FO_EV_SP
+                FO_EV_VAL[sp as usize] = vreg
+                FO_EV_VAR[sp as usize] = -1
+                var k3: i64 = 0
+                while k3 < 32 {
+                    FO_EV_SENS[(sp * 32 + k3) as usize] = s[k3 as usize]
+                    FO_EV_HESS[(sp * 32 + k3) as usize] = h[k3 as usize]
                     k3 = k3 + 1
                 }
                 FO_EV_SP = sp + 1
@@ -9974,6 +10236,25 @@ impl Lowerer {
                     }
                     _ => {}
                 }
+            }
+            // General struct field FO: keys bound at struct-literal let-bind.
+            match (*e).left {
+                Some(base_expr) => {
+                    if (*base_expr).kind == ExprKind::ExprIdent {
+                        let bname = (*base_expr).name
+                        var lo_f = self.fo_load_field_sens(bname, (*e).name)
+                        if lo_f.fo_expr_has_sens() {
+                            return lo_f.fo_emit_var_from_sens()
+                        }
+                        let key = self.fo_field_key(bname, (*e).name)
+                        let fvar = lo_f.lookup_local_variance_reg(key)
+                        if fvar >= 0 {
+                            lo_f = lo_f.fo_seed_from_variance(fvar)
+                            return (lo_f, fvar)
+                        }
+                    }
+                }
+                _ => {}
             }
             return (self.fo_clear_expr_sens(), -1)
         }
@@ -13107,6 +13388,12 @@ impl Lowerer {
             Some(expr_box) => {
                 if (*expr_box).kind == ExprKind::ExprStructLit {
                     lo = lo.bind_local_struct_type(s.name, ir_path_first_name((*expr_box).path))
+                    lo = lo.fo_bind_struct_literal_fields(s.name, &(*expr_box).fields)
+                } else if (*expr_box).kind == ExprKind::ExprIdent {
+                    let src_st = lo.lookup_local_struct_type((*expr_box).name)
+                    if src_st.len > 0 {
+                        lo = lo.fo_copy_struct_field_binds((*expr_box).name, s.name)
+                    }
                 } else if (*expr_box).kind == ExprKind::ExprCall {
                     let callee_opt_struct_ref = &(*expr_box).left
                     let callee_struct_name = match *callee_opt_struct_ref {
