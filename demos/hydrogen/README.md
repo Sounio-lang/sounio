@@ -326,16 +326,13 @@ extrapolation has become a guess.* Both engines → `VANTHOFF_GATE_OK`.
   (`tests/run-pass/epistemic_pbox_selftest.sio`).
 - **`stdlib/epistemic/sobol_indices.sio`** — variance estimators on
   precomputed outputs: Jansen total/first-order, exact log-linear shares.
-  Pure Sounio; self-test green under lean_single
+  Pure Sounio; self-test green on **both** engines
   (`tests/run-pass/epistemic_sobol_indices_selftest.sio`). Complements the
   existing full-pipeline `epistemic::sobol` module (Sobol sequences,
   Saltelli sampling, dominance gates) with a dependency-free estimator
-  core. Engine note: passing a
-  caller array as a slice argument *into* an imported module currently
-  segfaults on the Madaros native path (minimal witness: 64-element array —
-  same handle-vs-raw family as the syscall6 raw-ref fix in #1455; tracked
-  as issue #1510). The math is engine-independent; Madaros runs resume once
-  the compiler bug lands.
+  core. (The Madaros slice-arg segfault this module surfaced — implicit
+  borrow of a caller array into a `&[f64; N]` parameter — was fixed in
+  #1545, closing issue #1510.)
 
 ## Why this maps to his work
 
