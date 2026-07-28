@@ -14,6 +14,9 @@ and prose drifts. This contract binds the draft to its evidence:
   W3_FIGURES_PINNED      the load-bearing measured figures are present
   W4_HONESTY_MARKERS     the measured/derived distinction and the limits
                          survive prose edits
+  W5_PEER_REVIEW_FIXES   the 2026-07-28 peer-review fixes survive: setwise
+                         stabiliser, threat model, prior-art engagement,
+                         fail-closed capture-race analysis
 
 Pure Python 3, no third-party imports.
 """
@@ -160,6 +163,26 @@ def clause_w4(paper: str) -> bool:
     return ok
 
 
+def clause_w5(paper: str) -> bool:
+    required = [
+        ("setwise", "Prop 2.9 uses the setwise (not pointwise) stabiliser"),
+        ("Threat model", "the threat model section (§4.4)"),
+        ("Metamorphic", "metamorphic testing engagement (§6)"),
+        ("go.sum", "hash-pinned fetching engagement (§6)"),
+        ("fixed-output", "Nix fixed-output derivations engagement (§6)"),
+        ("fail-closed", "the capture race is bounded as fail-closed (§4.3)"),
+        ("witness update", "the false-positive protocol (§4.4)"),
+    ]
+    ok = True
+    for needle, why in required:
+        if needle not in paper:
+            print(f"  MISSING {needle!r} — {why}")
+            ok = False
+    print(f"W5_PEER_REVIEW_FIXES {'PASS' if ok else 'FAIL'} — "
+          f"the 2026-07-28 peer-review fixes survive prose edits")
+    return ok
+
+
 def main() -> int:
     print("WITNESS-BASED COMPILATION PAPER — bound to the rung evidence it cites")
     print("=" * 74)
@@ -183,9 +206,11 @@ def main() -> int:
     print()
     w4 = clause_w4(paper)
     print()
+    w5 = clause_w5(paper)
+    print()
 
     print("=" * 74)
-    if not (w1 and w2 and w3 and w4):
+    if not (w1 and w2 and w3 and w4 and w5):
         print("WITNESS_PAPER_VERDICT INCOMPLETE")
         return 1
     print("WITNESS_PAPER_VERDICT DRAFT_TOKEN_BOUND__WITNESS_PINNED__LIMITS_STATED")

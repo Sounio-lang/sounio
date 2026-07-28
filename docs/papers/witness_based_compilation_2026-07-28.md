@@ -128,12 +128,16 @@ the world. Certifying algorithms [3] are the closest algorithmic neighbour:
 they return a witness beside the answer so that correctness reduces to
 checking. The difference is one of direction: a certifying algorithm's witness
 *establishes* the proposition for a checker; our witness *identifies* which
-evidence established it, for a builder. Reproducible builds [6] and
-software-provenance frameworks such as SLSA bind artifacts to their inputs by
+evidence established it, for a builder. Reproducible builds [6], hash-pinned fetching — Nix fixed-output derivations,
+Bazel's `download(sha256=…)`, Go's `go.sum` — and software-provenance
+frameworks such as SLSA bind artifacts to their inputs by
 hash — the same primitive — but towards the opposite design goal: they make the
 build independent of the world, where witness-based compilation makes the build
 depend on the world on purpose, and refuses when the world's relevant face
-changed. Section 6 develops these comparisons.
+changed. Metamorphic testing, finally, studies exactly the group this paper
+names — which transformations preserve a property — and exploits it to
+generate tests where no oracle exists; we use the same group to delimit where
+an oracle that exists is insufficient. Section 6 develops these comparisons.
 
 ---
 
@@ -229,17 +233,38 @@ claims the group has a precise description.
 **Proposition 2.9 (the invariance group of a count).** Let the evidence be a
 subset of a finite ground set of computable objects, $w(s) \subseteq X$ with
 $|X| = M$, and let the proposition be a cardinality statement, $p(s) =
-[\,|w(s)| = N\,]$ with $N \le M$. Then every transformation of $S$ that
-permutes the underlying objects of $X$ lies in $\mathrm{Inv}(p)$ — permutations
-preserve cardinality — while only those that fix the produced subset pointwise
-lie in $\mathrm{Stab}(w)$. The number of evidence values indistinguishable from
-the true one under $p$ is therefore $\binom{M}{N} - 1$: *any* exchange of
-contents at fixed cardinality preserves the proposition and moves the witness.
+[\,|w(s)| = N\,]$ with $N \le M$. Then every transformation of $S$ induced by
+permuting the underlying objects of $X$ lies in $\mathrm{Inv}(p)$ —
+permutations preserve cardinality — while such a permutation lies in
+$\mathrm{Stab}(w)$ if and only if it maps the produced subset to itself *as a
+set*: the witness is a single set value, and $w \circ \sigma = w$ asks that
+value to be preserved, not its elements. The stabiliser is therefore the
+**setwise** stabiliser of $w(s)$ in $\mathrm{Sym}(X)$ — permute within the
+produced subset and within its complement independently, order
+$N!\,(M - N)!$ — not the pointwise stabiliser, which fixes each produced object
+individually (order $(M - N)!$) and is a proper subgroup whenever $N \ge 2$.
+The number of evidence values indistinguishable from the true one under $p$ is
+$\binom{M}{N} - 1$, the orbit of $w(s)$ under $\mathrm{Sym}(X)$ minus the true
+value: *any* exchange of contents at fixed cardinality preserves the
+proposition and moves the witness, while a relabelling *internal* to the
+produced set moves nothing — not even the fingerprint, which in the
+implementation is a hash over the sorted enumeration (§3.4).
+
+The pointwise/setwise distinction is not pedantry: the earlier draft of this
+proposition required every produced object to be fixed, conflating the witness
+*value* (a set) with the group elements that act on its members, and thereby
+shrinking the stabiliser by a factor of $N!$ — with the orbit of supposedly
+distinct evidence values inflated by the same factor. For set-valued evidence
+the setwise reading is the correct one; the pointwise reading would be right
+only for *ordered* evidence — a tuple whose positions carry meaning — which is
+not the case at hand.
 
 The content of Proposition 2.9 is not the arithmetic but the shape: for a
 count, the invariance group contains the *largest* symmetry compatible with the
-predicate, and the stabiliser of the evidence contains only what leaves every
-object in place. The blind spot spans the entire gap between them. Rung R15
+predicate (all of $\mathrm{Sym}(X)$, order $M!$), and the stabiliser of the
+evidence contains exactly what permutes within the produced set and within its
+complement (order $N!\,(M - N)!$). The blind spot spans the gap between them —
+a factor of $\binom{M}{N}$, matching the orbit count above. Rung R15
 described the group in the motivating case as "maps preserving $|X|$"; rung R16
 measured that the actual flip does something narrower and more surprising — it
 preserves the whole set partition of fibres into spectrum-classes, identical
@@ -294,7 +319,7 @@ binding accepts **iff** the evidence is exactly the reference evidence: sound
 *Proof.* $V_{w,h}(s) = 1 \iff f(w(s)) = h = f(w(s_0)) \iff w(s) = w(s_0)$, the
 last step by injectivity. ∎
 
-Two honest caveats attach to Theorem 2.11, and both appear again in §4.3.
+Two honest caveats attach to Theorem 2.11, and both appear again in §§4.3–4.4.
 
 1. **The fingerprint is idealised.** Concrete $f$ is a cryptographic hash
    (SHA-256 in the implementation), injective only up to collision resistance.
@@ -475,7 +500,26 @@ the witness records it.
 
 The bound proposition covers $n = 5, 6, 7$ and says so: the $n = 8$ computation
 on which the anomaly was first found costs ~86 s and would hit the executor's
-30 s per-gate cap — a scoping decision recorded in the claim itself.
+30 s per-gate cap — a scoping decision recorded in the claim itself. Because
+$n = 8$ is the level where the anomaly was discovered, the exclusion deserves
+an argument rather than an apology. Three points. First, *the exclusion is
+inside the proposition*: the claim asserts the count law at $n = 5, 6, 7$ and
+nothing beyond it, so no $n = 8$ behaviour can pass silently — there is no
+claim at that level to violate, and a future $n = 8$ claim would be a new
+binding with its own witness, not a silent extension of this one. Second,
+*the phenomenon is level-agnostic*: the flip is an exhibited element of
+$\mathrm{Inv}(p) \setminus \mathrm{Stab}(w)$ at every level $n = 5, 6, 7, 8$
+(§2.4), so the bound levels already bind the same group element, acting by the
+same mechanism, that the $n = 8$ anomaly exhibited; $n = 8$ would add a larger
+instance of the same measured fact, not a new fact. Third, *the cap is a
+budget, not a boundary of the method*: the 30 s limit is an executor constant,
+and the tempting alternative — precompute the $n = 8$ spectra once and
+fingerprint the cache — would quietly change the evidence function from
+*computed at this build* to *read from a file*, weakening exactly the property
+the witness exists to bind. Binding the levels the build can afford to
+recompute, and declaring the boundary in the proposition, is the sound
+scoping; raising the budget is deferred engineering (§5), recorded here rather
+than disguised.
 
 This is, to our knowledge, the first claim in any compiler whose build is
 conditioned on a fingerprint of its evidence. It is also, plainly, **one claim
@@ -544,15 +588,97 @@ Each of these is recorded in the rung specs and survives into the paper.
   file; a library whose scientific premise has been refuted passes silently
   into every dependent build (rung R1, `MODULE_CLOSURE_BLOCKS` [17, §2]).
   Witness binding does not widen where claims run.
-- **The capture path is fixed.** Two concurrent `--verify-claims` compiles in
-  one container would clobber each other's captures; the per-process variant
-  segfaulted the compiler and the correct common case was preferred [16, §5;
-  13, §3]. Unresolved.
+- **The capture path is fixed, and the race is real but degrades fail-closed.**
+  The executor captures every gate's output at one container-wide path, so two
+  concurrent `--verify-claims` compiles can interleave and a build can read
+  another build's capture. The per-process fix died on a hard constraint: the
+  self-hosted compiler SIGSEGVs on runtime string building in this code path
+  [16, §3.1], so a `/tmp/…<pid>.out` path cannot be constructed at all, and the
+  correct common case was preferred to a broken compiler [16, §5; 13, §3].
+  "Unresolved" alone overstates the hazard, so we bound it precisely. Exit
+  statuses are never read from the capture — each build waits on its own gate
+  subprocess — so exit-code gating is immune; only token and witness
+  *extraction* reads the capture. A clobbered capture is almost always
+  fail-closed: it lacks this claim's token (`CLAIM_TOKEN_ABSENT`) or carries
+  the wrong one (`CLAIM_TOKEN_MISMATCH`), and the build is refused. A false
+  *accept* requires the concurrent build's gate to emit exactly this claim's
+  declared token and witness — for a witness-bound claim a 256-bit SHA-256
+  equality, and even for token-only claims it requires both compiles to share a
+  gate-output convention and a declared token, which in practice means two
+  compiles of the *same* source, where both runs pose the same question to the
+  same gates and a swapped capture answers it correctly. The residual hazard —
+  concurrent compiles of *different* sources with coinciding token conventions —
+  is real but narrow, and this workspace's parallel agents are the population
+  at risk. The operational mitigation is serialisation: an `flock` around
+  `--verify-claims` invocations, or separate containers. The designed
+  engineering fix — a fixed-path lock file taken with `O_EXCL` before the claim
+  loop, which needs no string construction and so avoids the segfault that
+  killed the PID variant — is recorded as future work rather than shipped:
+  shipping it means rebuilding the compiler and re-certifying R17's behaviour
+  receipt, and the window above did not justify that cost on the day.
+  Unresolved, but bounded.
 - **The fingerprint is authored.** Nothing computes it. An author who declares
   the fingerprint of the wrong evidence binds the wrong evidence, exactly.
 - **Single corpus.** The case study is one repository, one contract, one
   exhibited group element. Proposition 2.9 and Corollary 2.13 say the class is
   general; our evidence that it *occurs* at scale is one measured family.
+
+### 4.4 Threat model
+
+Witness binding is a guard, and a guard is only as honest as its statement of
+who it guards against.
+
+**Who is the adversary?** The principal adversary is not a person; it is
+*drift* — the world, the pipeline, or the author's own later edit replacing the
+evidence under a still-true proposition. Concretely: a dependency update that
+changes an enumeration order or a rounding; a refactor of the check that
+silently swaps which objects get counted; an upstream dataset regenerating with
+the same cardinality and different contents. This adversary has no goals and
+exploits no code, and it is the adversary the corpus actually produces (§4.1).
+The active adversary is bounded by trust already placed elsewhere: a claim's
+gate runs as a subprocess of the compiler, so whoever controls the gate
+controls the exit code, the verdict token, and the emitted witness alike. An
+attacker who can edit the gate can emit the declared fingerprint without
+computing anything, and no mechanism at this layer can prevent that — the gate
+is the trusted computing base. What the fingerprint adds against an active
+adversary is collision resistance and nothing more: an attacker who can move
+the evidence but *not* the gate must find a SHA-256 collision with the declared
+fingerprint to pass. Against drift that strength is ample; against a motivated
+forger the mechanism is exactly as strong as SHA-256, and we claim no more
+(§2.4, caveat 1).
+
+**What the fingerprint protects against.** (i) Evidence replacement under a
+preserved proposition — the paper's subject, elements of
+$\mathrm{Inv}(p) \setminus \mathrm{Stab}(w)$ realised by accident. (ii) Silent
+regeneration of computed objects by a changed pipeline, including
+nondeterminism: a nondeterministic gate mismatches against itself on
+recompilation, surfacing its own nondeterminism as a build failure rather than
+letting it through. (iii) Partial edits — a claim whose prose or proposition
+was adjusted to stay true while its evidence base moved underneath.
+
+**What it does not protect against.** (i) Shared misinterpretation: claim and
+check wrong together agree on a witness (§2.5). (ii) A compromised or lying
+gate (above). (iii) Every claim that declares no witness — the mechanism is
+opt-in, and ~294 of ~295 claims in the corpus are outside the model. (iv) The
+capture-path race (§4.3): concurrent compiles can read each other's captures;
+the failure degrades fail-closed except in the narrow window analysed there,
+and the mitigation is serialisation. (v) Joint rollback of evidence *and*
+fingerprint: the manifest is versioned, so a moved fingerprint is visible in
+review, but nothing stops an author updating claim and witness in one commit —
+which is why the protocol below treats a fingerprint update as a review event.
+
+**False-positive protocol.** A `CLAIM_WITNESS_MISMATCH` has exactly two
+readings. On unchanged intent it is the alarm the mechanism exists to raise:
+the evidence moved, and the build stops until a human finds out why. On
+intended change it is the mechanism's maintenance cost, and the response is a
+*witness update*: re-run the gate standalone to confirm the new evidence is
+deterministic and is the evidence meant, record the new fingerprint in the
+claim in the same commit as the change that moved the evidence, and let review
+see the fingerprint's diff beside the code's diff — a witness update is a
+review event of the same gravity as editing the claim itself. The cost is real:
+every legitimate evidence migration pays it, and §5's witness schemas (typed,
+diffable witnesses) are the planned relief, because today the mismatch says
+*that* the evidence moved, not *how*.
 
 ---
 
@@ -596,6 +722,11 @@ a typed witness (a canonical serialisation of the evidence) would let the
 compiler diff *how* the evidence moved, not just that it did. (v) A corpus
 study: what fraction of an empirical codebase's claims admit non-trivial
 $\mathrm{Inv}(p) \setminus \mathrm{Stab}(w)$, and at what authoring cost.
+(vi) The deferred engineering: raising the executor's 30 s per-gate budget (or
+a resumable gate protocol) so the production claim's $n = 8$ arm can be bound
+without weakening its evidence function (§3.4), and the fixed-path `O_EXCL`
+serialisation of the capture path designed in §4.3 — both are compiler rebuilds
+with receipt re-certification, and belong in one batch.
 
 ---
 
@@ -636,6 +767,48 @@ Witness-based compilation inverts the goal: the build *must* depend on the
 claimed face of the world, and refuse when that face is replaced. The
 reconciliation — reproducibility *relative to a witness set* — is the
 empirical-lockfile design deferred by the line (§5).
+
+**Hash-pinned fetching: Nix FODs, Bazel, go.sum.** Three deployed systems use
+the declared-hash primitive, and the comparison localises what is new here. A
+Nix *fixed-output derivation* declares the hash of a derivation's output in
+advance, and the build fails if the realised output differs [21]; Bazel's
+repository rules pin fetched archives (`http_archive(sha256=…)` and
+`repository_ctx.download(sha256=…)`) [22]; Go's `go.sum` records module-content
+hashes and refuses a module whose contents changed under a fixed version [23].
+All three bind a build to the identity of *fetched or produced inputs*, in
+service of hermeticity and supply-chain integrity — the pin exists so that
+everything else can be sandboxed. Two differences mark witness binding. First,
+*referent*: the fingerprint is of evidence for a proposition, computed fresh by
+re-running the check at each compile — not of a stored artifact fetched once —
+and the check must still run and the proposition must still hold, so witness
+binding binds $p$ and $w$ jointly where the pins bind $w$ alone (a `go.sum`
+entry says nothing about what the module *does*). Second, *direction*: pins
+exist to make the build independent of the world — the same name must forever
+yield the same bytes, and a mismatch is a supply-chain incident — where witness
+binding exists to keep the build dependent on the claimed face of the world,
+and a mismatch is the intended signal. `go.sum` is the closest in spirit: a
+`go.sum` mismatch *is* "the world moved under a fixed name". But its names are
+version strings, not propositions, and its enforcement lives in the toolchain's
+fetch path, not in a compiler's verdict on a claim about the world.
+
+**Metamorphic testing.** Metamorphic testing is the field that asks, of a
+program whose correctness has no test oracle, *which transformations of the
+input must preserve — or predictably change — the output*, and turns the
+answers (metamorphic relations) into follow-up test cases [24]. This is exactly
+the group question of §2 read in the opposite direction. Metamorphic testing
+*exploits* $\mathrm{Inv}(p)$ to manufacture new tests from old ones where no
+oracle exists; witness binding treats
+$\mathrm{Inv}(p) \setminus \mathrm{Stab}(w)$ as the region where an oracle that
+*does* exist — the proposition — is provably insufficient, and binds the
+witness so that transformations in that region are refused rather than
+exploited. The two compose: a metamorphic relation a gate is expected to
+satisfy is a candidate witness, and §2.5's open problem — the group is
+characterised, not computed — is the metamorphic tester's familiar situation
+that useful relations are found, not enumerated. The difference of setting
+remains: metamorphic relations are properties of a program's input–output
+behaviour, checked by a test runner after the fact; a witness is an identity
+statement about a claim's evidence, checked by the compiler before the
+artifact exists.
 
 **N-version programming and recovery blocks.** Avizienis's N-version systems
 tolerate faults by independent reimplementation and voting [8]; the line's own
@@ -757,6 +930,20 @@ the corpus was unbound, and the failures it must catch are interpretive.*
 survived only at the boundary.*
 `docs/research/self_falsifying_compilation_line_r14_2026-07-27.md`, 2026.
 
+[21] E. Dolstra, M. de Jonge, and E. Visser. Nix: a safe and policy-free system
+for software deployment. In *Proc. LISA*, 2004. (Fixed-output derivations:
+`outputHash` / `fetchurl`, Nix and Nixpkgs manuals.)
+
+[22] Bazel. *Repository rules and `repository_ctx.download` (`sha256`)*. Bazel
+documentation, https://bazel.build (accessed 2026-07-28).
+
+[23] The Go Authors. *Go Modules Reference: `go.sum` and the checksum
+database.* https://go.dev/ref/mod (accessed 2026-07-28).
+
+[24] T. Y. Chen, F.-C. Kuo, H. Liu, P.-L. Poon, D. Towey, T. H. Tse, and
+Z. Q. Zhou. Metamorphic testing: a review of challenges and opportunities.
+*ACM Computing Surveys*, 51(1):4:1–4:27, 2018.
+
 ---
 
 ## 9. AI disclosure
@@ -773,4 +960,9 @@ token drifts from its spec, if the witness fingerprints quoted here drift from
 the claim in the manifest, or if the measured/derived status distinctions of
 §2.3 are erased. The real and perturbed witness gates were re-run on
 2026-07-28 in the drafting session; the fingerprints in §3.4 are from those
-runs. No clinical content.
+runs. A peer-review round on 2026-07-28 produced five revisions (the setwise
+stabiliser of Proposition 2.9, the $n = 8$ exclusion argument, the threat
+model of §4.4, the prior-art engagements of §6, and the bounded analysis of
+the capture-path race in §4.3); the revised Proposition 2.9 was re-reviewed
+under the same math-review offload, and its one flag is addressed in the text
+and logged with the rest. No clinical content.
