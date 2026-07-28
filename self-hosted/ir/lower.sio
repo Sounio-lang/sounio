@@ -8706,10 +8706,109 @@ impl Lowerer {
         self.emit_f64_const(0.0)
     }
 
+    // Xfer arg i: free-fn args[i], or method (recv as param0 + args[i-1]).
+    fn fo_lower_xfer_arg_variance(
+        self,
+        recv: &Option<Box<Expr>>,
+        args: &Option<Box<ExprList>>,
+        n: i64
+    ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        match *recv {
+            Some(rbox) => {
+                if n == 0 {
+                    return self.lower_expr_variance_ref(&(*rbox))
+                }
+                return self.fo_lower_nth_arg_variance(args, n - 1)
+            }
+            _ => {
+                return self.fo_lower_nth_arg_variance(args, n)
+            }
+        }
+    }
+
+    fn fo_lower_xfer_arg_value(
+        self,
+        recv: &Option<Box<Expr>>,
+        args: &Option<Box<ExprList>>,
+        n: i64
+    ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        match *recv {
+            Some(rbox) => {
+                if n == 0 {
+                    return self.lower_expr_ref(&(*rbox))
+                }
+                return self.fo_lower_nth_arg_value(args, n - 1)
+            }
+            _ => {
+                return self.fo_lower_nth_arg_value(args, n)
+            }
+        }
+    }
+
+    fn fo_xfer_arg_exists(
+        self,
+        recv: &Option<Box<Expr>>,
+        args: &Option<Box<ExprList>>,
+        n: i64
+    ) -> bool with Mut, Panic, Div, Alloc {
+        match *recv {
+            Some(_) => {
+                if n == 0 {
+                    return true
+                }
+                var acur = args
+                var ai: i64 = 0
+                let want = n - 1
+                while true {
+                    match *acur {
+                        Some(al) => {
+                            if ai == want {
+                                return true
+                            }
+                            ai = ai + 1
+                            acur = &(*al).tail
+                        }
+                        _ => return false
+                    }
+                }
+                false
+            }
+            _ => {
+                var acur2 = args
+                var ai2: i64 = 0
+                while true {
+                    match *acur2 {
+                        Some(al) => {
+                            if ai2 == n {
+                                return true
+                            }
+                            ai2 = ai2 + 1
+                            acur2 = &(*al).tail
+                        }
+                        _ => return false
+                    }
+                }
+                false
+            }
+        }
+    }
+
     // Apply registered pure-fn FO transfer at a call site. depth limits FWD recursion.
     fn fo_apply_call_transfer(
         self,
         callee: Name,
+        args: &Option<Box<ExprList>>,
+        depth: i64
+    ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let no_recv: Option<Box<Expr>> = None
+        self.fo_apply_call_transfer_recv(callee, &no_recv, args, depth)
+    }
+
+    // Method FO: mangled name + receiver as param 0 (matches ItemImpl FO register).
+    fn fo_apply_call_transfer_recv(
+        self,
+        callee: Name,
+        recv: &Option<Box<Expr>>,
         args: &Option<Box<ExprList>>,
         depth: i64
     ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
@@ -8723,7 +8822,8 @@ impl Lowerer {
                 print(str_from_bytes(callee.buf, callee.len))
                 print(" count=")
                 print_int(FO_XFER_COUNT)
-                print("\n")
+                print("
+")
             }
             return (self.fo_clear_expr_sens(), -1)
         }
@@ -8732,14 +8832,16 @@ impl Lowerer {
             print(str_from_bytes(callee.buf, callee.len))
             print(" kind=")
             print_int(FO_XFER_KIND[idx as usize])
-            print("\n")
+            print("
+")
         }
-        self.fo_apply_call_transfer_at(idx, args, depth)
+        self.fo_apply_call_transfer_at(idx, recv, args, depth)
     }
 
     fn fo_apply_call_transfer_at(
         self,
         idx: i64,
+        recv: &Option<Box<Expr>>,
         args: &Option<Box<ExprList>>,
         depth: i64
     ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
@@ -8757,11 +8859,11 @@ impl Lowerer {
             if fidx < 0 {
                 return (self.fo_clear_expr_sens(), -1)
             }
-            return self.fo_apply_call_transfer_at(fidx, args, depth + 1)
+            return self.fo_apply_call_transfer_at(fidx, recv, args, depth + 1)
         }
         // kind 6: FO bytecode (let-bodies / nested arith / 3–4 params)
         if kind == 6 {
-            return self.fo_eval_bytecode(idx, args)
+            return self.fo_eval_bytecode(idx, recv, args)
         }
         // Lower arg FO — kind 1 may identity any param index stored in lit
         var lo = self
@@ -8772,7 +8874,7 @@ impl Lowerer {
                 arg_i = pi
             }
         }
-        let p0 = lo.fo_lower_nth_arg_variance(args, arg_i)
+        let p0 = lo.fo_lower_xfer_arg_variance(recv, args, arg_i)
         lo = p0.0
         let v0 = p0.1
         if v0 < 0 && kind != 3 && kind != 4 {
@@ -8800,13 +8902,13 @@ impl Lowerer {
             // c * p0: empty left × (s0,h0) right with lhs=c, rhs=p0_val
             var sL: [i64; 32] = [-1; 32]
             var hL: [i64; 32] = [-1; 32]
-            let aval = lo.fo_lower_nth_arg_value(args, 0)
+            let aval = lo.fo_lower_xfer_arg_value(recv, args, 0)
             lo = aval.0
             lo = lo.fo_combine_sens_mul(sL, s0, hL, h0, c_pair.1, aval.1)
             return lo.fo_emit_var_from_sens()
         }
         // kind 3 add / 4 mul need arg1
-        let p1 = lo.fo_lower_nth_arg_variance(args, 1)
+        let p1 = lo.fo_lower_xfer_arg_variance(recv, args, 1)
         lo = p1.0
         let s1 = lo.fo_snapshot_expr_sens()
         let h1 = lo.fo_snapshot_expr_hess()
@@ -8815,10 +8917,10 @@ impl Lowerer {
             return lo.fo_emit_var_from_sens()
         }
         if kind == 4 {
-            let aval0 = lo.fo_lower_nth_arg_value(args, 0)
+            let aval0 = lo.fo_lower_xfer_arg_value(recv, args, 0)
             lo = aval0.0
             let val0 = aval0.1
-            let aval1 = lo.fo_lower_nth_arg_value(args, 1)
+            let aval1 = lo.fo_lower_xfer_arg_value(recv, args, 1)
             lo = aval1.0
             lo = lo.fo_combine_sens_mul(s0, s1, h0, h1, val0, aval1.1)
             return lo.fo_emit_var_from_sens()
@@ -8831,6 +8933,7 @@ impl Lowerer {
     fn fo_eval_bytecode(
         self,
         idx: i64,
+        recv: &Option<Box<Expr>>,
         args: &Option<Box<ExprList>>
     ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
@@ -8842,14 +8945,15 @@ impl Lowerer {
         FO_ARG_N = 0
         var ai: i64 = 0
         while ai < 16 {
-            let pv = lo.fo_lower_nth_arg_variance(args, ai)
-            lo = pv.0
-            if pv.1 < 0 && !lo.fo_expr_has_sens() {
+            // Method recv (param0) often has no FO; still load later f64 args.
+            if !lo.fo_xfer_arg_exists(recv, args, ai) {
                 break
             }
+            let pv = lo.fo_lower_xfer_arg_variance(recv, args, ai)
+            lo = pv.0
             let s = lo.fo_snapshot_expr_sens()
             let h = lo.fo_snapshot_expr_hess()
-            let av = lo.fo_lower_nth_arg_value(args, ai)
+            let av = lo.fo_lower_xfer_arg_value(recv, args, ai)
             lo = av.0
             FO_ARG_VAL[ai as usize] = av.1
             FO_ARG_VAR[ai as usize] = pv.1
@@ -9784,12 +9888,26 @@ impl Lowerer {
             }
             return (self.fo_clear_expr_sens(), -1)
         }
-        // Method call: FO through receiver (field-chain / view methods).
-        // Pure free-fn helpers remain the interproc FO path; methods that only
-        // re-expose an f64 field inherit the receiver's sens/hess.
+        // Method call: mangled pure-method FO transfer (recv = param 0), else
+        // view-style FO through receiver only (field-chain / no FO body).
         if (*e).kind == ExprKind::ExprMethodCall {
             match (*e).left {
                 Some(recv) => {
+                    let recv_type = self.lower_method_recv_type(&(*e).left)
+                    if recv_type.len > 0 {
+                        let mangled = ir_mangle_method_name(recv_type, (*e).name)
+                        let xfer = self.fo_apply_call_transfer_recv(
+                            mangled, &(*e).left, &(*e).args, 0
+                        )
+                        var lo_m = xfer.0
+                        let xv = xfer.1
+                        if xv >= 0 {
+                            return (lo_m, xv)
+                        }
+                        if lo_m.fo_expr_has_sens() {
+                            return lo_m.fo_emit_var_from_sens()
+                        }
+                    }
                     return self.lower_expr_variance_ref(&(*recv))
                 }
                 _ => {
