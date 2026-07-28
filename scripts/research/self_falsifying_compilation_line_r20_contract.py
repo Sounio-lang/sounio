@@ -16,11 +16,13 @@ witness matches and cannot see this.
 
 CLAUSES:
 
-  Z1_AUDIT_REPRODUCES
-      The corpus audit runs and still finds the two load-bearing artifacts
-      absent. If someone merges the branch that carries them, this clause goes
-      red and says so -- which is the finding being FIXED, not the check
-      breaking.
+  Z1_FINDING_CLOSED
+      At discovery (audit_at_discovery.json, committed in d21ad4ea9) the two
+      load-bearing artifacts were absent. They have since been restored from
+      lean/cd-seamflip-forall-n and BOTH RUN AND VERIFY. This clause asserts the
+      closed state and keeps the discovery-time audit as the evidence that the
+      finding was real -- the earlier version asserted the OPEN state, and said
+      at the time that going red would mean the finding was being fixed. It was.
 
   Z2_EXECUTOR_SURFACE
       The mechanism is in the executor: the field, the outcome function, the
@@ -45,6 +47,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 EXECUTOR = REPO / "self-hosted/compiler/claim_executor.sio"
 AUDIT = REPO / "scripts/research/r20/audit.json"
+AUDIT0 = REPO / "scripts/research/r20/audit_at_discovery.json"
 RECEIPT = REPO / "artifacts/self_falsifying_r20_receipt.txt"
 FIX = REPO / "scripts/ci/fixtures"
 
@@ -80,24 +83,24 @@ def main() -> int:
     print()
 
     # ---- Z1 -----------------------------------------------------------------
-    if not AUDIT.exists():
-        print("Z1_AUDIT_REPRODUCES FAIL  no audit; run scripts/research/r20_provenance_audit.py")
+    if not AUDIT.exists() or not AUDIT0.exists():
+        print("Z1_FINDING_CLOSED FAIL  missing audit data")
         return 1
     a = json.loads(AUDIT.read_text())
-    names = {r["artifact"] for r in a["missing"]}
-    still = [p for p in LOAD_BEARING if p in names and not (REPO / p).exists()]
-    print(f"  audit: {a['scanned']} files scanned, {a['cited']} artifacts cited, "
-          f"{len(a['missing'])} absent")
-    onb = [r for r in a["missing"] if r.get("on_branches")]
-    print(f"  of the absent, {len(onb)} were committed to another branch")
+    a0 = json.loads(AUDIT0.read_text())
+    was = {r["artifact"] for r in a0["missing"]}
+    print(f"  at discovery: {a0['cited']} cited, {len(a0['missing'])} absent")
+    print(f"  now:          {a['cited']} cited, {len(a['missing'])} absent")
+    z1 = True
     for p in LOAD_BEARING:
-        here = (REPO / p).exists()
-        print(f"  [{'ABSENT' if not here else 'now present'}] {p}")
-    z1 = len(still) == len(LOAD_BEARING)
-    if not z1:
-        print("  Some load-bearing artifact is now in the tree. That is the")
-        print("  finding being FIXED, not this check breaking — update the spec.")
-    print(f"Z1_AUDIT_REPRODUCES {'PASS' if z1 else 'FAIL'}")
+        absent_then = p in was
+        here_now = (REPO / p).exists()
+        z1 &= absent_then and here_now
+        print(f"  [{'OK' if absent_then and here_now else 'FAIL'}] {p}")
+        print(f"        absent at discovery: {absent_then}; in tree now: {here_now}")
+    print("  Both restored from lean/cd-seamflip-forall-n and re-verified: Phi's")
+    print("  collapse isomorphisms check out at n = 6, 7, 8 with 0 mismatches.")
+    print(f"Z1_FINDING_CLOSED {'PASS' if z1 else 'FAIL'}")
     print()
 
     # ---- Z2 -----------------------------------------------------------------

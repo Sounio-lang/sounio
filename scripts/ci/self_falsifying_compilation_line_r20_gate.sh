@@ -51,7 +51,7 @@ fi
 
 OUT="$(python3 "$CONTRACT" 2>&1)" || { echo "$OUT"; fail "contract exited non-zero"; }
 echo "$OUT"
-for c in Z1_AUDIT_REPRODUCES Z2_EXECUTOR_SURFACE Z3_BEHAVIOUR_RECEIPT; do
+for c in Z1_FINDING_CLOSED Z2_EXECUTOR_SURFACE Z3_BEHAVIOUR_RECEIPT; do
     grep -q "^${c} PASS" <<<"$OUT" || fail "${c} did not PASS"
 done
 grep -q "build REFUSED on the absent artifact" <<<"$OUT" \
@@ -67,6 +67,13 @@ done < <(grep -oE 'SELF_FALSIFYING_R20_VERDICT [A-Za-z0-9_]+' "$SPEC" | awk '{pr
 grep -q "The instrument failed first" "$SPEC" || fail "the audit's own filter defect was deleted"
 grep -q "precondition was the negation" "$SPEC" || fail "the statement of that defect was deleted"
 grep -q "Not a claim that the completeness result is wrong" "$SPEC" || fail "the scope limit was deleted"
-grep -q "Not a defect count of 93" "$SPEC" || fail "the 93-vs-8-vs-2 distinction was deleted"
+grep -q "Not a defect count of 93" "$SPEC" || fail "the prose-vs-dependency distinction was deleted"
+# The correction of this spec's own first reading is one deletion away.
+grep -q "was corrected by looking" "$SPEC" \
+    || fail "the correction of the 'mostly planned names' dismissal was deleted"
+grep -q "never committed anywhere, on any branch" "$SPEC" \
+    || fail "the never-committed dependency finding was deleted"
+grep -q "self-destroys when the defect is fixed" "$SPEC" \
+    || fail "the self-destroying-fixture lesson was deleted"
 grep -q "Not content verification" "$SPEC" || fail "the existence-only concession was deleted"
 echo "SELF_FALSIFYING_COMPILATION_LINE_R20_GATE_OK"

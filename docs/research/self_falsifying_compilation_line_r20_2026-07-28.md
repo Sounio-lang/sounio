@@ -15,7 +15,10 @@
 > its claim declares, and match a witness fingerprint, while the derivation it
 > says it rests on is not in the tree. Two such artifacts underpin
 > `ZD_FIBER_SPECTRUM_COMPLETE_INVARIANT_N_LE_8` — the very claim this arc has
-> been studying — and both live on a branch that was never merged here.**
+> been studying — and at discovery both lived on a branch that was never merged
+> here. They have since been restored and re-verified (§1.3); a third, on which
+> the orbit theorem's own verification depends, was never committed anywhere at
+> all and remains absent.**
 
 Verdict: `SELF_FALSIFYING_R20_VERDICT PROVENANCE_BINDING_IMPLEMENTED__CITED_DERIVATION_MUST_EXIST`.
 
@@ -27,9 +30,14 @@ the exit status (R0), the proposition (R2), the evidence fingerprint (R17).
 
 916 files scanned across `scripts/research/`, `docs/research/` and
 `scripts/ci/`; **2 155 distinct repository artifacts cited; 93 absent from the
-tree.** Of those, **8 were committed to another branch** and 84 were never
-committed anywhere (mostly planned or prose filenames — not scored as defects
-here, and the distinction is kept in the data rather than argued away).
+tree.** Of those, **8 were committed to another branch**.
+
+**The distinction that matters is not where a citation went, but whether it is
+prose or load-bearing.** A docstring mention is a citation; an
+`exec_module`/`open`/`bash` on a path is a **dependency**. Separating them:
+**6 of the missing are hard dependencies** — loaded or executed with no
+fallback. See §1.3; the first version of this spec dismissed the
+never-committed bucket as "mostly planned names", which was too quick.
 
 The two that matter:
 
@@ -62,7 +70,32 @@ overstate what one `stat` establishes.
 | **missing** | **exits 0, token ✓, cited file absent** | **1** | **no** | **`CLAIM_PROVENANCE_MISSING`** |
 | compat | no `provenance` field | 0 | yes | `CLAIM_PASS` |
 
-The missing-probe cites the real path, not an invented one.
+The missing-probe cites a **synthetic** path, and that is itself a lesson: it
+first cited the real absence, and when that absence was repaired the probe
+silently stopped demonstrating anything. **A fixture built on a real defect
+self-destroys when the defect is fixed.** Real absences belong in the audit
+data; fixtures need a path that stays absent.
+
+### 1.3 The cascade, and the worst one
+
+Restoring the two artifacts above did not end it. Each repair revealed the next
+gap:
+
+1. `cd_tower_collapse_isomorphism.py` restored — it runs, and **all its collapse
+   isomorphisms verify at n = 6, 7, 8 with 0 mismatches**.
+2. Its docstring cites `cd_tower_auto_action_on_zd_fibers.py`, the orbit
+   theorem's verification script — **also absent**. Restored from the same
+   branch.
+3. That script loads `cd_tower_automorphism_oracle.py` via
+   `spec_from_file_location` + `exec_module`, with no fallback — and that file
+   was **never committed anywhere, on any branch, in the repository's entire
+   history** (`git log --all` returns nothing).
+
+So the orbit theorem's verification script — described in Φ's own docstring as
+*"PROVEN forall n and untouched"* — **cannot run in any checkout of this
+repository**. That is not a merge oversight like the first two; it is an
+artifact that never entered version control at all, and no gate can detect it
+because the script that needs it is not run by CI either.
 
 ---
 
@@ -99,9 +132,10 @@ was structurally identical to the corpus defect it was built to find.
   mathematics.
 - **Not content verification.** §1.2. A file can exist and be the wrong file;
   `provenance` does not look inside it.
-- **Not a defect count of 93.** 84 of those were never committed anywhere and
-  are mostly planned names in prose. The finding is the **8**, and within those
-  the **2** that carry a live claim.
+- **Not a defect count of 93.** Most citations are prose. The load-bearing
+  number is **6 hard dependencies**, and within those the one that was never
+  committed at all (§1.3). The first version of this spec called the
+  never-committed bucket "mostly planned names" and was corrected by looking.
 - **Not automatic.** A claim must declare its provenance. Nothing infers
   dependencies from a contract's imports or citations.
 - **Not a solution to shared misinterpretation.** R0 §3 is untouched, as in R17.

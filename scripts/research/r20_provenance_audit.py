@@ -78,7 +78,16 @@ def main() -> int:
     known_base = {Path(k).name: k for k in known}
     fams = families(known)
 
+    # A citation in prose and a dependency at runtime are not the same thing.
+    # Dismissing the never-committed bucket as "planned names" was too quick:
+    # cd_tower_automorphism_oracle.py is loaded by exec_module() with no
+    # fallback, was NEVER committed anywhere, and its absence means the orbit
+    # theorem's verification script cannot run in any checkout of this repo.
+    EXEC_CTX = re.compile(
+        r"(?:spec_from_file_location|exec_module|open\s*\(|runpy|subprocess|"
+        r"execfile|source_path|SourceFileLoader|bash\s+|python3?\s+)")
     cites: dict[str, set[str]] = {}
+    hard: set[str] = set()
     for p in files:
         rel = str(p.relative_to(REPO))
         try:
@@ -99,13 +108,25 @@ def main() -> int:
             if c == rel:
                 continue
             cites.setdefault(c, set()).add(rel)
+            # hard dependency if the citation sits on a line with an
+            # execution/loading construct
+            base = Path(c).name
+            for line in s.splitlines():
+                if base in line and EXEC_CTX.search(line):
+                    hard.add(c)
+                    break
 
     missing = {c: v for c, v in cites.items() if not (REPO / c).exists()}
+    missing_hard = {c for c in missing if c in hard}
 
     print("R20 — do the artifacts this corpus cites exist?")
     print("=" * 72)
     print(f"scanned {len(files)} files; {len(cites)} distinct artifacts cited; "
           f"{len(missing)} MISSING from the tree")
+    print(f"  of the missing, {len(missing_hard)} are HARD DEPENDENCIES "
+          f"(loaded/executed, not merely mentioned)")
+    for c in sorted(missing_hard):
+        print(f"      {c}")
     print()
 
     rows = []
@@ -122,7 +143,8 @@ def main() -> int:
             branches = ", ".join(sorted(
                 x.strip("* +").strip() for x in b.splitlines()
                 if "origin/" not in x))[:60]
-        rows.append({"artifact": c, "cited_by": sorted(citers),
+        rows.append({"artifact": c, "hard_dependency": c in hard,
+                     "cited_by": sorted(citers),
                      "last_commit": log, "on_branches": branches})
         print(f"  MISSING  {c}")
         print(f"      cited by: {', '.join(sorted(citers))}")
