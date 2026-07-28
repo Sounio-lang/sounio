@@ -20,7 +20,7 @@
 module claim_executor
 
 use parser::ast::*
-use module_parse::{load_module_file}
+use module_parse::{load_module_file, file_exists}
 use module_frontend::{preflight_multimodule_frontend}
 
 // Per-gate wall-clock timeout in milliseconds.
@@ -278,6 +278,32 @@ fn ce_witness_outcome(current: i64, want: string, got: string) -> i64
     6  // CLAIM_GATE_WITNESS_MISMATCH
 }
 
+// Provenance: the artifact a claim says its derivation rests on must be IN THE
+// TREE. This catches a failure class none of the checks above can reach, because
+// all of them read what the gate emits and none reads what the claim cites.
+//
+// Found by audit, not supposed: `cd_tower_collapse_isomorphism.py` -- the
+// explicit parity-collapse map Phi, cited by two contracts as the UPPER BOUND of
+// the completeness pincer for ZD_FIBER_SPECTRUM_COMPLETE_INVARIANT_N_LE_8 -- was
+// committed to another branch and is absent here. Gate green, token correct,
+// witness matching, derivation unavailable.
+//
+// Existence only. Content drift is the witness's job (a gate that fingerprints
+// its inputs already covers it), and claiming more here would overstate what one
+// stat call establishes.
+fn ce_provenance_outcome(current: i64, path: string) -> i64 with IO, Mut, Panic, Div {
+    if current != CLAIM_GATE_PASS {
+        return current
+    }
+    if str_len(path) == 0 {
+        return CLAIM_GATE_PASS
+    }
+    if file_exists(path) {
+        return CLAIM_GATE_PASS
+    }
+    8  // CLAIM_GATE_PROVENANCE_MISSING
+}
+
 fn ce_str_eq(a: string, b: string) -> bool with Mut, Panic, Div {
     let n = str_len(a)
     if n != str_len(b) {
@@ -400,6 +426,7 @@ pub fn claim_executor_verify(source_path: string) -> i64 with IO, Mut, Panic, Di
         var gate_idx: i64 = -1
         var token_idx: i64 = -1
         var wit_idx: i64 = -1
+        var prov_idx: i64 = -1
         var archived = false
         var fi: i64 = 0
         while fi < n_fields {
@@ -417,6 +444,10 @@ pub fn claim_executor_verify(source_path: string) -> i64 with IO, Mut, Panic, Di
             // See ce_extract_witness for why a token alone is not enough.
             if ce_name_eq_str(f.name, "witness") {
                 wit_idx = fi
+            }
+            // Optional: an artifact the claim's derivation depends on.
+            if ce_name_eq_str(f.name, "provenance") {
+                prov_idx = fi
             }
             if ce_name_eq_str(f.name, "verdict") {
                 let vs = ast_claim_slot_value_start(slot, fi)
@@ -488,7 +519,19 @@ pub fn claim_executor_verify(source_path: string) -> i64 with IO, Mut, Panic, Di
                 settled = ce_witness_outcome(decided, want_wit, got_wit)
             }
 
-            if settled == CLAIM_GATE_PASS {
+            // Provenance, after the witness. Fresh variable for the third
+            // time, for the reason recorded in ce_token_outcome.
+            var prov_path = ""
+            var final_out = settled
+            if settled == CLAIM_GATE_PASS && prov_idx >= 0 {
+                let pf = ast_claim_slot_field(slot, prov_idx)
+                let pvs = ast_claim_slot_value_start(slot, prov_idx)
+                let pve = ast_claim_slot_value_end(slot, prov_idx)
+                prov_path = ce_value_text(src, pvs, pve, pf.kind)
+                final_out = ce_provenance_outcome(settled, prov_path)
+            }
+
+            if final_out == CLAIM_GATE_PASS {
                 print("CLAIM_PASS ")
                 ce_print_name(cname)
                 print(" gate=")
@@ -501,9 +544,13 @@ pub fn claim_executor_verify(source_path: string) -> i64 with IO, Mut, Panic, Di
                     print(" witness=")
                     print(got_wit)
                 }
+                if prov_idx >= 0 {
+                    print(" provenance=")
+                    print(prov_path)
+                }
                 print("\n")
                 passed = passed + 1
-            } else if settled == 4 {  // CLAIM_GATE_TOKEN_MISMATCH
+            } else if final_out == 4 {  // CLAIM_GATE_TOKEN_MISMATCH
                 print("CLAIM_TOKEN_MISMATCH ")
                 ce_print_name(cname)
                 print(" gate=")
@@ -514,7 +561,7 @@ pub fn claim_executor_verify(source_path: string) -> i64 with IO, Mut, Panic, Di
                 print(got_tok)
                 print("\n")
                 failed = failed + 1
-            } else if settled == 5 {  // CLAIM_GATE_TOKEN_ABSENT
+            } else if final_out == 5 {  // CLAIM_GATE_TOKEN_ABSENT
                 print("CLAIM_TOKEN_ABSENT ")
                 ce_print_name(cname)
                 print(" gate=")
@@ -523,7 +570,7 @@ pub fn claim_executor_verify(source_path: string) -> i64 with IO, Mut, Panic, Di
                 print(want_tok)
                 print(" (gate emitted no _VERDICT token)\n")
                 failed = failed + 1
-            } else if settled == 6 {  // CLAIM_GATE_WITNESS_MISMATCH
+            } else if final_out == 6 {  // CLAIM_GATE_WITNESS_MISMATCH
                 print("CLAIM_WITNESS_MISMATCH ")
                 ce_print_name(cname)
                 print(" gate=")
@@ -534,7 +581,7 @@ pub fn claim_executor_verify(source_path: string) -> i64 with IO, Mut, Panic, Di
                 print(got_wit)
                 print(" (the proposition still holds; its grounds changed)\n")
                 failed = failed + 1
-            } else if settled == 7 {  // CLAIM_GATE_WITNESS_ABSENT
+            } else if final_out == 7 {  // CLAIM_GATE_WITNESS_ABSENT
                 print("CLAIM_WITNESS_ABSENT ")
                 ce_print_name(cname)
                 print(" gate=")
@@ -543,7 +590,16 @@ pub fn claim_executor_verify(source_path: string) -> i64 with IO, Mut, Panic, Di
                 print(want_wit)
                 print(" (gate emitted no _WITNESS fingerprint)\n")
                 failed = failed + 1
-            } else if settled == CLAIM_GATE_TIMEOUT {
+            } else if final_out == 8 {  // CLAIM_GATE_PROVENANCE_MISSING
+                print("CLAIM_PROVENANCE_MISSING ")
+                ce_print_name(cname)
+                print(" gate=")
+                print(gate_path)
+                print(" declared=")
+                print(prov_path)
+                print(" (the check passed; the derivation it cites is not in the tree)\n")
+                failed = failed + 1
+            } else if final_out == CLAIM_GATE_TIMEOUT {
                 print("CLAIM_TIMEOUT ")
                 ce_print_name(cname)
                 print(" gate=")
@@ -557,7 +613,7 @@ pub fn claim_executor_verify(source_path: string) -> i64 with IO, Mut, Panic, Di
                 ce_print_name(cname)
                 print(" gate=")
                 print(gate_path)
-                if settled == CLAIM_GATE_SPAWN_ERR {
+                if final_out == CLAIM_GATE_SPAWN_ERR {
                     print(" (spawn error)")
                 }
                 print("\n")
