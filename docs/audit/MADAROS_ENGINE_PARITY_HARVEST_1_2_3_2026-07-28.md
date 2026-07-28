@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.madaros-engine-parity-harvest-1-2-3-2026-07-28
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-engine-parity-harvest-1-2-3-2026-07-28
+-->
+
 # Engine parity harvest — batches 1–2–3 (2026-07-28)
 
 **Lane:** Madaros vs lean_single DIVERGE triage  
