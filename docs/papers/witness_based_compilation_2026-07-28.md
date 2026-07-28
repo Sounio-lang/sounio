@@ -338,8 +338,12 @@ Two honest caveats attach to Theorem 2.11, and both appear again in §§4.3–4.
 **Theorem 2.12 (strict refinement).** If $p$ factors through $w$ and $f$ is
 injective, then witness binding refines token binding: $V_{w,h}(s) = 1$
 implies $p(s) = p(s_0)$. The refinement is strict on the reachable states
-exactly when some $\sigma \in \mathrm{Inv}(p) \setminus \mathrm{Stab}(w)$ maps
-a reachable state to a reachable state.
+exactly when some $\sigma \in \mathrm{Inv}(p)$ maps a reachable state $s_0$ to
+a reachable state while moving the witness there: $w(\sigma(s_0)) \neq w(s_0)$.
+(The condition must be local in this way: membership in $\mathrm{Inv}(p)
+\setminus \mathrm{Stab}(w)$ only moves $w$ *somewhere*, and a transformation
+whose witness movement is confined to unreachable states does not separate the
+two verifiers on the states that can occur.)
 
 *Proof.* If $V_{w,h}(s) = 1$ then $w(s) = w(s_0)$ by Theorem 2.11, so $p(s) =
 \pi(w(s)) = \pi(w(s_0)) = p(s_0)$. Strictness: if such a $\sigma$ exists with
@@ -355,9 +359,10 @@ on reachable states, and the two verifiers agree there. ∎
 
 The motivating case is exactly the strict regime, and it is not hypothetical:
 the flip $\sigma(H/2, H + H/2)$ is an exhibited element of $\mathrm{Inv}(p)
-\setminus \mathrm{Stab}(w)$ at every level $n = 5, 6, 7, 8$, with generic
-sign flips at the same levels changing the count — the controls that make it a
-finding rather than a robustness observation [15, §1.1].
+\setminus \mathrm{Stab}(w)$ at every level $n = 5, 6, 7, 8$, moving the witness
+at the measured — hence reachable — states, with generic sign flips at the
+same levels changing the count — the controls that make it a finding rather
+than a robustness observation [15, §1.1].
 
 **Corollary 2.13 (coarseness of classification claims).** Any claim of the
 form "there are exactly $N$ equivalence classes" is strictly refined by witness
@@ -376,6 +381,10 @@ Three limits belong in the theory section, not in the fine print.
   limitation unchanged. The repository's own history measured three real
   self-corrections of which zero were reachable by any grade of binding
   [19, §2]; witness binding changes the reach of *identity*, not of *meaning*.
+  This is Pollack's regress — believing a machine-checked result requires
+  believing what the checker checked, and that belief is not itself
+  machine-checked [27] — read at the scale of a build: witness binding narrows
+  what must be believed to the identity of the evidence, and stops there.
 - **The group is characterised, not computed.** We exhibit elements of
   $\mathrm{Inv}(p) \setminus \mathrm{Stab}(w)$; we do not compute either group.
   Whether the partition-preserving maps in the motivating case form a group
@@ -539,11 +548,20 @@ The motivating error was not synthetic. The flip was discovered as an
 unexplained anomaly (rung R14: a perturbation that killed the contract's
 verdict at levels 4–7 and survived at 8), characterised as count-preserving
 with controls (R15), explained as partition-preserving (R16), and reduced to a
-single open equivariance lemma (R19). Only then was the mechanism built (R17)
-and the real claim bound (R18). The error class the mechanism catches is one
-the corpus actually produced, on its own load-bearing contract, at the boundary
-of its own analysis — R15's observation that the blind spot sits at $n = 8$
-precisely because that is the only level with nowhere higher to look [15, §1.2].
+single open equivariance lemma (R19). R14's kill pattern and §2.4's
+count-preservation at $n = 5, 6, 7, 8$ do not conflict, because they are
+statements about different propositions: R14's dying contracts were the
+spectral-classifier contracts, whose proposition is the spectrum *as a
+complete invariant* — a different, finer proposition than the count law —
+while R15's count-preservation is measured against the coarser cardinality
+proposition of §2.4, which the flip preserves at every level tested. Only then
+was the mechanism built (R17) and the real claim bound (R18). The error class
+the mechanism catches is one the corpus actually produced, on its own
+load-bearing contract, at the boundary of its own analysis — the contract
+checks its levels jointly and the tower is recursive, so a count-preserving
+flip below the top level has a second chance to be caught higher up, and the
+blind spot sits at $n = 8$ precisely because that is the only level with
+nowhere higher to look [15, §1.2].
 
 Against the corpus's *history*, we claim nothing: rung R4 measured the
 historical arms at zero for the earlier grades of binding, and nothing here
@@ -640,7 +658,12 @@ gate runs as a subprocess of the compiler, so whoever controls the gate
 controls the exit code, the verdict token, and the emitted witness alike. An
 attacker who can edit the gate can emit the declared fingerprint without
 computing anything, and no mechanism at this layer can prevent that — the gate
-is the trusted computing base. What the fingerprint adds against an active
+is the trusted computing base. Nor is the gate the whole of it: the base
+includes the executor, the shell that runs the gates, the string-scraping
+extraction convention, the shared capture path, and — because Sounio is
+self-hosted — a previous incarnation of the very compiler doing the checking,
+the bootstrap circularity of Thompson's trusting-trust lecture, which no audit
+of the current compiler's source closes [25]. What the fingerprint adds against an active
 adversary is collision resistance and nothing more: an attacker who can move
 the evidence but *not* the gate must find a SHA-256 collision with the declared
 fingerprint to pass. Against drift that strength is ample; against a motivated
@@ -751,7 +774,9 @@ which the line treats as the feature, not the bug [19, §4].
 
 **Certifying algorithms.** A certifying algorithm returns, beside its answer,
 a witness from which a checker can verify correctness more cheaply than
-recomputation [3]. This is the closest neighbour and the contrast is sharp:
+recomputation — the line of work that descends from Blum and Kannan's program
+result checking [26] and that McConnell et al. survey [3]. This is the closest
+neighbour and the contrast is sharp:
 there the witness *establishes* the proposition (the checker re-derives truth
 from it); here the witness *identifies* the evidence (the builder compares
 fingerprints). A certifying checker's witness is sound by construction; ours is
@@ -848,9 +873,21 @@ A verifier bound to a proposition is blind to exactly the proposition's
 invariance group; for the aggregate propositions by which scientific software
 actually states its claims, that group contains transformations an author would
 call errors — measured, in our case, as a single sign flip that replaced every
-spectrum while their count held at 24. The repair is not a finer proposition
-but a bound witness: fingerprint the evidence, declare the fingerprint, and let
-the compiler refuse the build when the grounds move beneath a true verdict.
+spectrum while their count held at 24. The repair, stated plainly, *is* a
+finer proposition: $p_w(s) = [\,f(w(s)) = h\,]$ is a predicate on states, so
+on this paper's own definitions (Definition 2.3) witness binding is token
+binding at the refined proposition that names the evidence's fingerprint —
+Theorem 2.12's strict refinement says exactly this, and we do not pretend
+otherwise. What is new is not the logic but the convention. For an empirical
+claim the refinement is *canonical* — the proposition determines the evidence
+it factors through, so there is a designated finer proposition rather than an
+arbitrary one — and its reference value is one a human cannot author unaided,
+because the fingerprint is computed, not intuited: the check computes it, the
+claim declares it, and the compiler refuses the build when the grounds move
+beneath a true verdict. The contribution is the engineering discipline of
+binding to the witness — the fingerprint declared beside the proposition it
+grounds, versioned with it, reviewed with it, and enforced before the artifact
+exists — not a new grade of predicate.
 Soundness and completeness come cheap (Theorem 2.11 is one line once the
 fingerprint is idealised); the honesty costs are elsewhere — the witness cannot
 say the evidence is well-founded, and almost nothing in the corpus is bound
@@ -944,6 +981,17 @@ database.* https://go.dev/ref/mod (accessed 2026-07-28).
 Z. Q. Zhou. Metamorphic testing: a review of challenges and opportunities.
 *ACM Computing Surveys*, 51(1):4:1–4:27, 2018.
 
+[25] K. Thompson. Reflections on trusting trust. *Communications of the ACM*,
+27(8):761–763, 1984.
+
+[26] M. Blum and S. Kannan. Designing programs that check their work.
+*Journal of the ACM*, 42(1):269–291, 1995.
+
+[27] R. Pollack. How to believe a machine-checked proof. BRICS Report Series
+RS-97-18, University of Aarhus, 1997. (Also in *Twenty Five Years of
+Constructive Type Theory*, Oxford Logic Guides 36, Oxford University Press,
+1998.)
+
 ---
 
 ## 9. AI disclosure
@@ -965,4 +1013,13 @@ stabiliser of Proposition 2.9, the $n = 8$ exclusion argument, the threat
 model of §4.4, the prior-art engagements of §6, and the bounded analysis of
 the capture-path race in §4.3); the revised Proposition 2.9 was re-reviewed
 under the same math-review offload, and its one flag is addressed in the text
-and logged with the rest. No clinical content.
+and logged with the rest. A re-review the same day produced three further
+corrections: the §4.1 reconciliation of R14's kill pattern with §2.4's
+count-preservation (different propositions, not a contradiction), the §7
+concession that witness binding is formally token binding at a refined
+proposition — the novelty being the convention, not the logic — and the
+Thompson, Blum–Kannan, and Pollack citations. A second math-review offload over those corrections (xai, zai)
+confirmed all three and caught one pre-existing imprecision: Theorem 2.12's
+strictness condition now requires the witness to move *at a reachable state*,
+since membership in $\mathrm{Inv}(p) \setminus \mathrm{Stab}(w)$ alone moves
+the witness only somewhere. No clinical content.
