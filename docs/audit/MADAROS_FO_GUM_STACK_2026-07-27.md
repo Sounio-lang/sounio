@@ -26,6 +26,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-
 | Correlate + H off-diag | `correlate(a,b,ρ)`; Var/E₂ include H_ij Cov_ij (16-ch) | `correlate` |
 | Quotient off-diag H | FO div combine tracks H_ij (with Cov) | `div_correlate` |
 | stdlib `epistemic::fo` | Pure FO-transfer helpers (css/clearance/mul/div) | `stdlib_surface` |
+| Multi-mod import FO | Prepass registers pure FO_XFER from *all* loaded modules; Program-by-value load avoids A14 nested field-address residual (`&programs[i].items` → None) | `import` |
 | Control | `if` SELECT blend (const + runtime) | `div_if`, `if_helper` |
 | 2nd-order mean | `E₂[f] ≈ f(μ) + ½ Σ H_kk σ_k²` | `second_order_mean`, `fo_emit_second_order_bias` |
 | Hessian diag | `hessian_diag_of(expr) → Σ H_kk` | `pow_const` |
@@ -46,7 +47,8 @@ SOUNIO_FO_REBUILD=1 bash scripts/ci/madaros_gum_fo_trust_gate.sh
 
 Summary JSON lands under `$SOUNIO_FO_TRUST_DIR/summary.json` (or a temp dir printed by the script).
 
-**Measured 2026-07-27 (post div-offdiag + stdlib fo):** 24/24 PASS under rebuilt Madaros.
+**Measured 2026-07-27 (post div-offdiag + stdlib fo):** 24/24 PASS under rebuilt Madaros.  
+**Measured 2026-07-28 (multi-mod import FO):** 25/25 PASS — `madaros_gum_fo_import` closes imported pure-helper FO (v_imp = v_peel for mul/div/css).
 
 ## Science drivers
 
@@ -139,23 +141,6 @@ Css = (F·Dose/τ)/(CL0·exp(η)) — **same numbers on local and imported helpe
 - **Knowledge ⊗ Knowledge FO/GUM.** `lower_knowledge_binary_expr_ref` builds Knowledge with GUM variance and multi-channel FO; `.value` peel preserves FO binds. Gate: `knowledge_ops`.
 - **Nested multi-helper FO bodies.** `fo_bc_expand_xfer_call` / `fo_bc_inline_xfer_bytecode` expand kinds 1–6 at compile time (LOAD_PARAM → call-arg subtrees; locals remapped). Gate: `nested_helpers` (css_h and exposure_h depth-2).
 - **Multi-mod imported pure-helper FO.** Module-frontend FO prepass walks all loaded `Program`s before seed body lower. Nested field-address `&programs[i].items` was A14 residual (Option::None → FO_XFER empty); fix: `var prog = programs[i]; fo_preregister(&prog.items)`. Gate: `import` (v_imp_mul=v_peel_mul=0.25; css match).
-- **Shared FO channel identity (freeze).** Measured live without new lowerer work: same σ² reg reuses channel; η+η, CL·V shared η, Knowledge alias, interproc double-use all match analytic; independent measures stay 2-channel. Gate: `shared_channel`.
-- **PK science via multi-mod import.** `fo_pk_exposure_import_driver` + gate `pk_import`: imported `fo_css`/`fo_clearance`/`fo_mul2` match local FO and audit table (Var Css, E₂, H, kprod, shared-η product).
-- **Method FO (f64-arg pure methods).** `fo_apply_call_transfer_recv` + xfer arg shift (recv=param0); eval continues past FO-empty self. Gate: `method` (mul2/clearance/css match free-fn).
-- **Struct field FO.** `fo_bind_struct_literal_fields` / `fo_load_field_sens` / alias copy; FO bytecode op 17 for `self.field`. Gate: `struct_field` (peel match + method clearance/exposure).
-- **Nested method FO.** `FO_BC_IMPL_TYPE` during method register; `fo_bc_expand_xfer_call_recv` for `self.other(...)` with recv=param0. Gate: `nested_method`.
-- **Mutual FO expand.** Cycle/miss primary-arg fallback; multipass skips solid non-opaque kind-6 (avoids re-register corruption). Gate: `mutual`.
-- **Field FO via pure call.** `fo_register_struct_field_projections` + `lower_expr_field_variance_ref` for Call/MethodCall bases. Gate: `field_call`.
-- **Nested field FO.** Recursive bind/projections; `fo_expr_struct_path_key`; call path `make().inner.cl0`. Gate: `nested_field`.
-- **Deep call-result field FO.** `fo_resolve_projected_fo` + path_suffix mangle (no mid1/mid2 ceiling); identity multi-level peel. Gate: `deep_field`.
-- **PK struct e2e.** Dissertation-shaped `Pk`: peels + nested methods + shared channel + call projections. Gate: `pk_struct`.
-- **Method FO Call-result receiver.** op17 projected FO + let-bind of pure Call-return fields. Gate: `method_call_recv`.
-- **Free-fn struct-arg field FO.** op17 free-arg path. Gate: `freefn_field`.
-- **Non-identity pure ctor FO.** Projected bytecode for computed field inits. Gate: `nonpure_ctor`.
-- **Correlate shared latent (freeze).** Distinct measures + `correlate` match shared peel. Gate: `correlate_latent`.
-- **Deep mutual FO (const depth).** `f_d0..f_d8` specializations. Gate: `mutual_deep`.
-- **Let-bound pure ctor FO.** Lets + field projection. Gate: `let_ctor`.
-- **Impure ctor pure-field FO (freeze).** Mut ctors keep field FO. Gate: `impure_ctor`.
 
 ## Gate inventory
 
