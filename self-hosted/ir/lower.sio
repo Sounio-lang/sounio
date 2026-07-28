@@ -154,6 +154,7 @@ var FO_XFER_HASH: [i64; 64] = [0; 64]
 var FO_XFER_FWD_HASH: [i64; 64] = [0; 64]
 var FO_XFER_BC_OFF: [i64; 64] = [0; 64]
 var FO_XFER_BC_LEN: [i64; 64] = [0; 64]
+var FO_XFER_OPAQUE: [i64; 64] = [0; 64]
 // FO bytecode: OP_PARAM=1 CONST=2 ADD=3 SUB=4 MUL=5 DIV=6 BIND=7 LOCAL=8
 var FO_BC_OP: [i64; 4096] = [0; 4096]
 var FO_BC_ARG: [i64; 4096] = [0; 4096]
@@ -185,6 +186,10 @@ var FO_BC_PARAM_N: i64 = 0
 // Global Name literals are not supported — store buf/len separately.
 var FO_BC_IMPL_TYPE_BUF: [i8; 128] = [0; 128]
 var FO_BC_IMPL_TYPE_LEN: i64 = 0
+// Expand stack for mutual-recursion cycle detection (xfer hashes).
+var FO_BC_EXPAND_HASH: [i64; 16] = [0; 16]
+var FO_BC_EXPAND_SP: i64 = 0
+var FO_BC_USED_OPAQUE: i64 = 0
 
 fn fo_bc_impl_type_get() -> Name with Mut {
     var n = Name { buf: [0; 128], len: 0 }
@@ -209,6 +214,36 @@ fn fo_bc_impl_type_set(ty: Name) with Mut {
 
 fn fo_bc_impl_type_clear() with Mut {
     FO_BC_IMPL_TYPE_LEN = 0
+}
+
+fn fo_bc_expand_stack_clear() with Mut {
+    FO_BC_EXPAND_SP = 0
+}
+
+fn fo_bc_expand_stack_push(h: i64) -> bool with Mut {
+    if FO_BC_EXPAND_SP >= 16 {
+        return false
+    }
+    FO_BC_EXPAND_HASH[FO_BC_EXPAND_SP as usize] = h
+    FO_BC_EXPAND_SP = FO_BC_EXPAND_SP + 1
+    true
+}
+
+fn fo_bc_expand_stack_pop() with Mut {
+    if FO_BC_EXPAND_SP > 0 {
+        FO_BC_EXPAND_SP = FO_BC_EXPAND_SP - 1
+    }
+}
+
+fn fo_bc_expand_stack_contains(h: i64) -> bool with Mut {
+    var i: i64 = 0
+    while i < FO_BC_EXPAND_SP {
+        if FO_BC_EXPAND_HASH[i as usize] == h {
+            return true
+        }
+        i = i + 1
+    }
+    false
 }
 // Off-diagonal FO Hessian H_ij (i,j < 16) + correlation ρ_ij for E₂/Var.
 // Index = i*16+j. Only i<j pairs are written; H_ji mirrors H_ij.
@@ -318,6 +353,7 @@ fn fo_xfer_global_reset() with Mut {
     FO_BC_CONST_N = 0
     FO_BC_LOC_N = 0
     fo_bc_impl_type_clear()
+    fo_bc_expand_stack_clear()
     fo_hoff_clear()
     fo_cov_rho_clear()
     var i: i64 = 0
@@ -328,6 +364,7 @@ fn fo_xfer_global_reset() with Mut {
         FO_XFER_FWD_HASH[i as usize] = 0
         FO_XFER_BC_OFF[i as usize] = 0
         FO_XFER_BC_LEN[i as usize] = 0
+        FO_XFER_OPAQUE[i as usize] = 0
         i = i + 1
     }
 }
@@ -388,10 +425,12 @@ fn fo_xfer_global_set(name: Name, kind: i64, lit: f64, fwd: Name) with Mut, Pani
 fn fo_xfer_global_set_bc(name: Name, off: i64, len: i64) with Mut, Panic, Div, IO {
     let existing = fo_xfer_global_lookup(name)
     let h = fo_name_hash(name)
+    let opq = FO_BC_USED_OPAQUE
     if existing >= 0 {
         FO_XFER_KIND[existing as usize] = 6
         FO_XFER_BC_OFF[existing as usize] = off
         FO_XFER_BC_LEN[existing as usize] = len
+        FO_XFER_OPAQUE[existing as usize] = opq
         return
     }
     if FO_XFER_COUNT >= 64 {
@@ -402,6 +441,7 @@ fn fo_xfer_global_set_bc(name: Name, off: i64, len: i64) with Mut, Panic, Div, I
     FO_XFER_KIND[idx as usize] = 6
     FO_XFER_BC_OFF[idx as usize] = off
     FO_XFER_BC_LEN[idx as usize] = len
+    FO_XFER_OPAQUE[idx as usize] = opq
     FO_XFER_COUNT = idx + 1
     if lower_live_diag_enabled() {
         print("lower_live: fo_xfer_set_bc name=")
@@ -3787,7 +3827,7 @@ fn lowerer_fo_preregister_pure_fns_multipass_mut(
     lo: &! Lowerer,
     items: &Option<Box<ItemList>>
 ) with Mut, Panic, Div, Alloc, IO {
-    // 4 passes: reverse-order chains of depth 3 close by pass 4.
+    // 8 passes: reverse-order DAG + mutual opaque→expand re-registration.
     var pass: i64 = 0
     while pass < 4 {
         lowerer_fo_preregister_pure_fns_mut(lo, items)
@@ -8214,9 +8254,21 @@ impl Lowerer {
             }
         }
         if nparams <= 0 { return lo }
+        // Multipass: keep solid kind-6 (re-registering mutual pairs corrupts FO).
+        let ex = fo_xfer_global_lookup(name)
+        if ex >= 0 {
+            if FO_XFER_KIND[ex as usize] == 6 {
+                if FO_XFER_BC_LEN[ex as usize] > 0 {
+                    if FO_XFER_OPAQUE[ex as usize] == 0 {
+                        return lo
+                    }
+                }
+            }
+        }
         if lo.fo_try_simple_block_transfer(name, &fd.body, p0, p1, p2, p3, nparams) {
             return lo
         }
+        FO_BC_USED_OPAQUE = 0
         lo.fo_compile_block_bytecode(name, &fd.body, p0, p1, p2, p3, nparams)
     }
 
@@ -8423,6 +8475,7 @@ impl Lowerer {
         var lo = self
         let start = FO_BC_LEN
         FO_BC_LOC_N = 0
+        FO_BC_USED_OPAQUE = 0
         var current = &(*blk).stmts
         var has_expr = false
         var ok = true
@@ -8745,6 +8798,38 @@ impl Lowerer {
         )
     }
 
+    // Mutual / missing-callee FO: use primary state arg (free arg0; method arg1).
+    fn fo_bc_expand_primary_arg(
+        self,
+        recv: &Option<Box<Expr>>,
+        args: &Option<Box<ExprList>>,
+        p0: Name,
+        p1: Name,
+        p2: Name,
+        p3: Name,
+        nparams: i64
+    ) -> bool with Mut, Panic, Div, Alloc {
+        FO_BC_USED_OPAQUE = 1
+        var pi: i64 = 0
+        match *recv {
+            Some(_) => {
+                // Method: skip self (param0); FO state usually first f64 arg.
+                pi = 1
+            }
+            _ => {
+                pi = 0
+            }
+        }
+        if self.fo_bc_compile_xfer_arg(recv, args, pi, p0, p1, p2, p3, nparams) {
+            return true
+        }
+        // Fallback: try arg0 (identity / self-only methods)
+        if pi != 0 {
+            return self.fo_bc_compile_xfer_arg(recv, args, 0, p0, p1, p2, p3, nparams)
+        }
+        false
+    }
+
     fn fo_bc_expand_xfer_call_recv(
         self,
         callee: Name,
@@ -8757,28 +8842,45 @@ impl Lowerer {
         nparams: i64,
         depth: i64
     ) -> bool with Mut, Panic, Div, Alloc {
-        if depth > 8 {
-            return false
+        if depth > 12 {
+            return self.fo_bc_expand_primary_arg(recv, args, p0, p1, p2, p3, nparams)
         }
         let idx = fo_xfer_global_lookup(callee)
         if idx < 0 {
-            return false
+            // Callee not registered yet (multipass) — opaque primary-arg FO.
+            return self.fo_bc_expand_primary_arg(recv, args, p0, p1, p2, p3, nparams)
+        }
+        let ch = FO_XFER_HASH[idx as usize]
+        if fo_bc_expand_stack_contains(ch) {
+            // Mutual recursion cycle — do not re-enter; primary-arg FO.
+            return self.fo_bc_expand_primary_arg(recv, args, p0, p1, p2, p3, nparams)
         }
         let kind = FO_XFER_KIND[idx as usize]
         if kind <= 0 {
-            return false
+            return self.fo_bc_expand_primary_arg(recv, args, p0, p1, p2, p3, nparams)
         }
+        if !fo_bc_expand_stack_push(ch) {
+            return self.fo_bc_expand_primary_arg(recv, args, p0, p1, p2, p3, nparams)
+        }
+        var ok = false
         if kind == 5 {
             let fh = FO_XFER_FWD_HASH[idx as usize]
             let fidx = fo_xfer_global_lookup_hash(fh)
-            if fidx < 0 {
-                return false
+            if fidx >= 0 {
+                ok = self.fo_bc_expand_xfer_at(
+                    fidx, recv, args, p0, p1, p2, p3, nparams, depth + 1
+                )
             }
-            return self.fo_bc_expand_xfer_at(
-                fidx, recv, args, p0, p1, p2, p3, nparams, depth + 1
+        } else {
+            ok = self.fo_bc_expand_xfer_at(
+                idx, recv, args, p0, p1, p2, p3, nparams, depth + 1
             )
         }
-        self.fo_bc_expand_xfer_at(idx, recv, args, p0, p1, p2, p3, nparams, depth)
+        fo_bc_expand_stack_pop()
+        if ok {
+            return true
+        }
+        self.fo_bc_expand_primary_arg(recv, args, p0, p1, p2, p3, nparams)
     }
 
     fn fo_bc_expand_xfer_at(
