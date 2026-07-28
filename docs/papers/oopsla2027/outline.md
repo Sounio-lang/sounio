@@ -74,6 +74,7 @@ derivation of that function already sitting unused in the repository.
 | C14 | **The same instrument turned around, and a pre-registered hypothesis losing.** Of everything these contracts compute — to level 10, 1024 dimensions — how much does the conclusion depend on? **407 verdict changes, 117 crashes, 12 survivors in 536 cells**; levels 9 and 10 are pure verdict changes. Vacuity refuted; the corpus checks what it computes. | R14 | `VACUITY_REFUTED__CORPUS_CHECKS_WHAT_IT_COMPUTES` |
 | C15 | **The limit above C3, and its repair.** C3 binds the build to the *proposition* a check reports. That is still blind to anything preserving the proposition's truth: a flip changing **126 of 128 fiber graphs and every spectrum** leaves `#spectra = 24` intact, so the token holds. A token's resolution is bounded by the **invariance group of its proposition**. Repair, verified: **bind the witness, not the predicate**. | R15 | `TOKEN_RESOLUTION_BOUNDED_BY_PROPOSITION_INVARIANCE` |
 | C16 | **The invariance group, identified.** The blind spot is not "maps preserving the count" but maps acting **within the blocks** of the classification: the flip preserves the *identical set partition* of fibers (sizes [1,7,7] / [1,1,7,7,7,8] / [1,1,1,1,7,7,7,7,7,7,8,9]) and relabels every block, changing exactly **2 edges per fiber** because the perturbed pair's home fiber is the one the check never examines. **Any claim of the form "there are exactly N equivalence classes" has this blind spot by construction.** | R16 | `INVARIANCE_GROUP_IS_PARTITION_PRESERVING_NOT_MERELY_COUNT_PRESERVING` |
+| C17 | **Witness binding, in the compiler.** The repair C15/C16 identified, implemented and observed: a claim may declare a `witness`, and a build whose gate **exits 0 and emits exactly the declared verdict token** is REFUSED when the evidence fingerprint differs. Causally isolated. First compiler change since C3. | R17 | `WITNESS_BINDING_IMPLEMENTED__REFUSES_ON_PRESERVED_PROPOSITION` |
 
 ### Methodological results that generalise
 
@@ -300,7 +301,9 @@ agreement between checks that share a derivation. That question is cheap to
 answer, decidable, and on this corpus it changed the status of a third of the
 cross-checks.
 
-C3's own limit is now measured too, and it is not the impossibility of §5 but a
+C3's own limit is now measured, and then closed in the compiler (C17): a build
+whose check exits 0 and reports exactly the declared proposition is refused when
+its grounds have been replaced. The limit is not the impossibility of §5 but a
 **resolution** limit: a token is exactly as fine as the proposition it states,
 and propositions about counts are coarse. Sharpened in C16 — the token is blind
 to every map acting *within* the classification it counts, and the stronger a
