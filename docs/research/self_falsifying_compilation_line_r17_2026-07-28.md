@@ -60,6 +60,26 @@ had to be re-verified, not assumed:
 | R0/R1 exit-code gating | 0 | yes | `CLAIM_PASS` + `CLAIM_SKIP` |
 | R0/R1 no claims | 0 | yes | `VERIFY_CLAIMS_NOOP` |
 
+### 1.3 The motivating case, bound (R18)
+
+`zd_fiber_spectra_count_law_holds` is now in the R1 bound-claims manifest — the
+first claim in this repository to declare a witness. Proposition: the ZD-fiber
+adjacency spectra number 3·2^(n−5) for n = 5, 6, 7. Witness: a sha256 over those
+spectra, sorted.
+
+| | rc | ELF | |
+|---|---:|---|---|
+| real gate | 0 | yes | `VERIFY_CLAIMS_OK pass=16`, witness `705d0afd…` |
+| perturbed twin | 1 | **no** | `CLAIM_WITNESS_MISMATCH`, emitted `e9f935cb…` |
+
+The twin applies the count-preserving flip R15 measured and R16 explained. It
+exits 0, reports 3/6/12 distinct spectra — the count law holds of the perturbed
+algebra exactly as of the real tower — and emits the **same** verdict token.
+Every spectrum differs, and only the witness records it.
+
+The bound proposition covers n = 5, 6, 7 and says so: the n = 8 computation the
+anomaly was first found on takes 86 s and would hit the executor's 30 s cap.
+
 ---
 
 ## 2. What was implemented
@@ -99,12 +119,14 @@ present, so a future refactor that reintroduces the hazard fails the clause.
 - **Not a solution to shared misinterpretation.** R0 §3 stands. A witness binds
   *which* evidence was used; it cannot tell whether that evidence is
   well-founded. If claim and check are wrong together, both agree on a witness.
-- **Not automatic.** A claim must declare a witness and its gate must emit one.
-  Nothing here computes a fingerprint for anybody, and no production claim in
-  this repository declares one yet — the corpus is still unbound in R1's sense.
-- **Not a demonstration on the real case.** The probes are fixtures with fixed
-  fingerprints. Binding the ZD-fiber contract that motivated this — hashing its
-  24 sorted spectra — is the obvious next step and was **not** done here.
+- **Not automatic.** A claim must declare a witness and its gate must emit one;
+  nothing here computes a fingerprint for anybody. **One production claim now
+  declares a witness** (`zd_fiber_spectra_count_law_holds`, added in R18 —
+  §1.3); the rest of the corpus is still unbound in R1's sense, 1 of ~295.
+- **The real case is now bound — see §1.3.** As shipped, this rung's probes were
+  fixtures with invented fingerprints, and the ZD-fiber contract that motivated
+  it was not bound. R18 closed that; the concession is kept here rather than
+  deleted, because what it conceded was true of this rung.
 - **Not validated against concurrent compiles.** The capture path is still the
   fixed one R2 chose deliberately (a per-process path SIGSEGV'd the compiler);
   two simultaneous `--verify-claims` runs in one container would still collide.

@@ -147,9 +147,14 @@ done < <(grep -oE 'SELF_FALSIFYING_R17_VERDICT [A-Za-z0-9_]+' "$SPEC" | awk '{pr
 # is to let it read as more than it is.
 grep -q "Not a solution to shared misinterpretation" "$SPEC" \
     || fail "the R0 3 scope limit was deleted"
-grep -q "no production claim in" "$SPEC" \
+# These two guarded sentences that R18 made false. Updated rather than dropped:
+# the corpus is still overwhelmingly unbound (1 of ~295), and the fact that THIS
+# rung shipped without binding the real case is part of its record.
+grep -q "1 of ~295" "$SPEC" \
     || fail "the disclosure that the corpus is still unbound was deleted"
-grep -q "Not a demonstration on the real case" "$SPEC" \
-    || fail "the disclosure that the motivating case is not yet bound was deleted"
+grep -q "The real case is now bound" "$SPEC" \
+    || fail "the pointer to R18's binding was deleted"
+grep -q "the concession is kept here rather than" "$SPEC" \
+    || fail "R17's own limit was erased instead of superseded"
 
 echo "SELF_FALSIFYING_COMPILATION_LINE_R17_GATE_OK"
