@@ -19,6 +19,7 @@
 | stdlib `epistemic::fo` | Pure FO-transfer helpers (css/clearance/mul/div) | `stdlib_surface` |
 | Multi-mod import FO | Prepass registers pure FO_XFER from *all* loaded modules; Program-by-value load avoids A14 nested field-address residual (`&programs[i].items` → None) | `import` |
 | Shared FO channel | Same σ² reg / same peel reuses one channel (η+η → 4σ²; CL·V shared η) | `shared_channel` |
+| PK science via import | Oral Css FO through `use epistemic::fo::{fo_css,…}` multi-mod | `pk_import` |
 | Control | `if` SELECT blend (const + runtime) | `div_if`, `if_helper` |
 | 2nd-order mean | `E₂[f] ≈ f(μ) + ½ Σ H_kk σ_k²` | `second_order_mean`, `fo_emit_second_order_bias` |
 | Hessian diag | `hessian_diag_of(expr) → Σ H_kk` | `pow_const` |
@@ -41,27 +42,32 @@ Summary JSON lands under `$SOUNIO_FO_TRUST_DIR/summary.json` (or a temp dir prin
 
 **Measured 2026-07-27 (post div-offdiag + stdlib fo):** 24/24 PASS under rebuilt Madaros.  
 **Measured 2026-07-28 (multi-mod import FO):** 25/25 PASS — `madaros_gum_fo_import` closes imported pure-helper FO (v_imp = v_peel for mul/div/css).  
-**Measured 2026-07-28 (shared channel freeze):** 26/26 PASS — `madaros_gum_fo_shared_channel` freezes σ²-reg channel identity (already live; no lowerer change).
+**Measured 2026-07-28 (shared channel freeze):** 26/26 PASS — `madaros_gum_fo_shared_channel` freezes σ²-reg channel identity (already live; no lowerer change).  
+**Measured 2026-07-28 (PK import science):** 27/27 PASS — `madaros_gum_fo_pk_import` + `examples/.../fo_pk_exposure_import_driver.sio`: imported `fo_css` matches local Css FO (Var=0.795833, E₂=6.724, H=7.292592).
 
-## Science driver
+## Science drivers
 
-`examples/epistemic_fo_second_order/fo_pk_exposure_driver.sio`
+| Path | File | FO surface |
+|------|------|------------|
+| Same-module pure helpers | `examples/epistemic_fo_second_order/fo_pk_exposure_driver.sio` | local `css_helper` |
+| **Multi-mod import (preferred science)** | `examples/epistemic_fo_second_order/fo_pk_exposure_import_driver.sio` | `use epistemic::fo::{fo_css,…}` |
 
-Multi-factor Css model with pure helpers (including `clearance_helper` with `exp`), FO variance, second-order mean, and an **honest negative**: `variance_of((kF * kDose).value)` is ~0 while peel `variance_of(f * dose)` is not.
+Both model Css = (F·Dose/τ)/(CL0·exp(η)). Import driver is the multi-mod receipt after FO prepass + Program-by-value fix.
 
-## Science driver measured (2026-07-27)
+## Science drivers measured (2026-07-27 / 2026-07-28)
 
-`examples/epistemic_fo_second_order/fo_pk_exposure_driver.sio` — Css = (F·Dose/τ)/(CL0·exp(η)):
+Css = (F·Dose/τ)/(CL0·exp(η)) — **same numbers on local and imported helpers**:
 
 | Quantity | Value |
 |----------|------:|
 | Css point | 6.666666 |
 | Var(rate) | 4.784722 (matches analytic) |
-| Var(CL) via `clearance_helper` | 0.340000 (matches analytic **and** inline) |
-| Var(Css) via nested `css_helper` | 0.795833 (matches call-site **and** fully inlined) |
+| Var(CL) via `fo_clearance` / local | 0.340000 (matches analytic **and** inline) |
+| Var(Css) via `fo_css` / nested local | 0.795833 (matches call-site **and** fully inlined) |
 | E₂[Css] | 6.724000 (bias +0.057333) |
 | Σ H_kk (Css) | 7.292592 |
-| `variance_of((kF*kDose).value)` | 689.0 (matches peel `f*dose`) |
+| `variance_of((kF*kDose).value)` / `fo_mul2` | 689.0 (matches peel `f*dose`) |
+| Shared-η `fo_clearance(5,η)·fo_clearance(50,η)` | 2500.0 |
 
 ## Known holes (do not paper over)
 
@@ -82,17 +88,18 @@ Multi-factor Css model with pure helpers (including `clearance_helper` with `exp
 - **Nested multi-helper FO bodies.** `fo_bc_expand_xfer_call` / `fo_bc_inline_xfer_bytecode` expand kinds 1–6 at compile time (LOAD_PARAM → call-arg subtrees; locals remapped). Gate: `nested_helpers` (css_h and exposure_h depth-2).
 - **Multi-mod imported pure-helper FO.** Module-frontend FO prepass walks all loaded `Program`s before seed body lower. Nested field-address `&programs[i].items` was A14 residual (Option::None → FO_XFER empty); fix: `var prog = programs[i]; fo_preregister(&prog.items)`. Gate: `import` (v_imp_mul=v_peel_mul=0.25; css match).
 - **Shared FO channel identity (freeze).** Measured live without new lowerer work: same σ² reg reuses channel; η+η, CL·V shared η, Knowledge alias, interproc double-use all match analytic; independent measures stay 2-channel. Gate: `shared_channel`.
+- **PK science via multi-mod import.** `fo_pk_exposure_import_driver` + gate `pk_import`: imported `fo_css`/`fo_clearance`/`fo_mul2` match local FO and audit table (Var Css, E₂, H, kprod, shared-η product).
 
 ## Gate inventory
 
-All files matching `tests/run-pass/madaros_gum_fo_*.sio` are members of the trust gate (26 files including `import`, `shared_channel`). Adding a new FO gate = drop a `madaros_gum_fo_*.sio` with a `MADAROS_GUM_FO_*_PASS` token.
+All files matching `tests/run-pass/madaros_gum_fo_*.sio` are members of the trust gate (27 files including `pk_import`). Adding a new FO gate = drop a `madaros_gum_fo_*.sio` with a `MADAROS_GUM_FO_*_PASS` token.
 
 ## Next bold moves (ordered)
 
 1. **Method FO** — full mangled-method transfer (not just receiver sens).
-2. **Science driver on `epistemic::fo` imports** — multi-mod is green; PK driver should call stdlib `fo_css` and match local-helper numbers.
-3. **Mutual pure-helper FO expand** — true recursive pure helpers (beyond multipass DAG).
-4. Keep `correlate` for *distinct* measures that share a latent in the science model.
+2. **Mutual pure-helper FO expand** — true recursive pure helpers (beyond multipass DAG).
+3. Keep `correlate` for *distinct* measures that share a latent in the science model.
+4. Dissertation / PBPK paths: prefer `use epistemic::fo::*` peels over copy-paste helpers.
 
 ---
 

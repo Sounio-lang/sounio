@@ -1,0 +1,127 @@
+//@ run-pass
+//@ expect-stdout: FO_PK_EXPOSURE_IMPORT_DRIVER_PASS
+
+// Scientific FO driver — multi-mod path via stdlib epistemic::fo.
+//
+// Same oral steady-state exposure model as fo_pk_exposure_driver.sio:
+//   rate = F · Dose / τ
+//   CL   = CL0 · exp(η)
+//   Css  = rate / CL
+//
+// All PK pure helpers are *imported* (fo_css, fo_clearance, …). Multi-mod FO
+// prepass must register FO_XFER so variance_of / second_order_mean match the
+// same-module local-helper driver (analytic refs frozen there).
+
+use epistemic::fo::{fo_infusion_rate, fo_clearance, fo_css, fo_mul2}
+
+fn abs_f(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+// Same-module peels for parity checks only (not the science path under test).
+fn local_rate(f: f64, dose: f64, tau: f64) -> f64 {
+    (f * dose) / tau
+}
+fn local_cl(cl0: f64, eta: f64) -> f64 {
+    cl0 * exp(eta)
+}
+fn local_css(f: f64, dose: f64, tau: f64, cl0: f64, eta: f64) -> f64 {
+    local_rate(f, dose, tau) / local_cl(cl0, eta)
+}
+
+fn main() with IO, Mut, Div, Epistemic {
+    let kF: Knowledge<f64> = measure(0.8, uncertainty: 0.05)
+    let kDose: Knowledge<f64> = measure(500.0, uncertainty: 10.0)
+    let kTau: Knowledge<f64> = measure(12.0, uncertainty: 0.0)
+    let kCL0: Knowledge<f64> = measure(5.0, uncertainty: 0.3)
+    let kEta: Knowledge<f64> = measure(0.0, uncertainty: 0.1)
+
+    let f = kF.value
+    let dose = kDose.value
+    let tau = kTau.value
+    let cl0 = kCL0.value
+    let eta = kEta.value
+
+    // ── Imported stdlib path (science surface under multi-mod FO) ──
+    let rate = fo_infusion_rate(f, dose, tau)
+    let cl = fo_clearance(cl0, eta)
+    let css = fo_css(f, dose, tau, cl0, eta)
+    let css_pt = (0.8 * 500.0 / 12.0) / 5.0
+
+    let v_rate = variance_of(fo_infusion_rate(f, dose, tau))
+    let v_cl = variance_of(fo_clearance(cl0, eta))
+    let v_cl_inline = variance_of(cl0 * exp(eta))
+    let v_css = variance_of(fo_css(f, dose, tau, cl0, eta))
+    let v_css_site = variance_of(
+        fo_infusion_rate(f, dose, tau) / fo_clearance(cl0, eta)
+    )
+    let v_css_local = variance_of(local_css(f, dose, tau, cl0, eta))
+    let m1_css = css
+    let m2_css = second_order_mean(fo_css(f, dose, tau, cl0, eta))
+    let m2_local = second_order_mean(local_css(f, dose, tau, cl0, eta))
+    let h_css = hessian_diag_of(fo_css(f, dose, tau, cl0, eta))
+
+    // Frozen analytic refs (same as same-module driver / audit).
+    let v_rate_ref = 4.784722222222
+    let v_cl_ref = 0.34
+    let v_css_ref = 0.795833
+    let m2_ref = 6.724
+
+    // Knowledge⊗Knowledge + shared peel product via fo_mul2
+    let k_prod = kF * kDose
+    let v_kprod = variance_of(k_prod.value)
+    let v_peel = variance_of(f * dose)
+    let v_mul2 = variance_of(fo_mul2(f, dose))
+
+    // Shared-η path through imported clearance twice (CL · "pseudo-V")
+    let v_shared = variance_of(fo_clearance(5.0, eta) * fo_clearance(50.0, eta))
+
+    print("css_point="); print_f64(css); print("\n")
+    print("v_rate="); print_f64(v_rate); print("\n")
+    print("v_cl="); print_f64(v_cl); print("\n")
+    print("v_css="); print_f64(v_css); print("\n")
+    print("v_css_site="); print_f64(v_css_site); print("\n")
+    print("v_css_local="); print_f64(v_css_local); print("\n")
+    print("m2_css="); print_f64(m2_css); print("\n")
+    print("m2_local="); print_f64(m2_local); print("\n")
+    print("h_css="); print_f64(h_css); print("\n")
+    print("bias="); print_f64(m2_css - m1_css); print("\n")
+    print("kprod_var="); print_f64(v_kprod); print("\n")
+    print("v_mul2="); print_f64(v_mul2); print("\n")
+    print("v_shared="); print_f64(v_shared); print("\n")
+
+    let point_ok = abs_f(css - css_pt) < 1.0e-9
+        && abs_f(css - local_css(f, dose, tau, cl0, eta)) < 1.0e-9
+    let rate_ok = abs_f(v_rate - v_rate_ref) < 1.0e-6
+    let cl_ok = abs_f(v_cl - v_cl_ref) < 1.0e-9
+        && abs_f(v_cl - v_cl_inline) < 1.0e-9
+    let css_ok = abs_f(v_css - v_css_site) < 1.0e-9
+        && abs_f(v_css - v_css_local) < 1.0e-9
+        && abs_f(v_css - v_css_ref) < 1.0e-4
+    let mean2_ok = abs_f(m2_css - m2_local) < 1.0e-9
+        && abs_f(m2_css - m2_ref) < 1.0e-3
+        && abs_f(m2_css - m1_css) > 1.0e-4
+    let hess_ok = abs_f(h_css) > 1.0e-9
+    let kprod_ok = abs_f(v_kprod - v_peel) < 1.0e-9
+        && abs_f(v_mul2 - v_peel) < 1.0e-9
+        && v_kprod > 1.0
+    // fo_clearance(5,η)*fo_clearance(50,η) = 250·exp(2η); Var at 0 = (500)²·0.01 = 2500
+    let shared_ok = abs_f(v_shared - 2500.0) < 1.0e-6
+
+    let ok = point_ok && rate_ok && cl_ok && css_ok && mean2_ok
+        && hess_ok && kprod_ok && shared_ok
+    if ok {
+        print("FO_PK_EXPOSURE_IMPORT_DRIVER_PASS\n")
+    } else {
+        print("FO_PK_EXPOSURE_IMPORT_DRIVER_FAIL\n")
+        print("point_ok="); if point_ok { print("1\n") } else { print("0\n") }
+        print("rate_ok="); if rate_ok { print("1\n") } else { print("0\n") }
+        print("cl_ok="); if cl_ok { print("1\n") } else { print("0\n") }
+        print("css_ok="); if css_ok { print("1\n") } else { print("0\n") }
+        print("mean2_ok="); if mean2_ok { print("1\n") } else { print("0\n") }
+        print("hess_ok="); if hess_ok { print("1\n") } else { print("0\n") }
+        print("kprod_ok="); if kprod_ok { print("1\n") } else { print("0\n") }
+        print("shared_ok="); if shared_ok { print("1\n") } else { print("0\n") }
+    }
+}
