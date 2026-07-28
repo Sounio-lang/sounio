@@ -94,9 +94,11 @@ labelling.
 - **Not a proof.** Step 1.1 is arithmetic and holds for all n. Steps 1.2 and 1.3
   are **measurements** at n = 5, 6, 7. The inference that a uniform two-edge
   change *must* preserve the classification is supported by those measurements,
-  **not established**: it would follow from the change being equivariant for
-  whatever relation makes fibers equivalent, and that equivariance is not proved
-  here.
+  **not established** *in this rung*: it would follow from the change being
+  equivariant for whatever relation makes fibers equivalent. **R21 establishes
+  exactly that equivariance** — both generating relations are F₂-linear and fix
+  `h` — so the inference is now a theorem. The concession is kept because it was
+  true of R16, which shipped without it.
 - **Not a refutation of anything.** As in R15: a perturbed sign table is not a
   Cayley–Dickson algebra, so nothing here bears on the n ≤ 8 completeness claim
   for the real tower. This measures the reach of a **check**.

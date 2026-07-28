@@ -80,12 +80,21 @@ The gap is now one statement about one assignment, rather than R16's "a uniform
 local change must preserve the classification" — which was never precise enough
 to attack.
 
+**Closed in R21** (`self_falsifying_compilation_line_r21_2026-07-28.md`): both
+relations generating the blocks are F₂-linear and fix `h` — the orbit action is
+the identity on seam bits and `h` is one, and `τ = swap(0, lsb(Y))` cannot move
+`h` because even weight forbids `lsb(Y) = n−2`. So each carries the added edge to
+the added edge, and R16's inference is a theorem. The proof needed
+`cd_tower_collapse_isomorphism.py`, which was **missing from this branch until
+R20 restored it** — the concrete cost of that provenance defect.
+
 ---
 
 ## 3. What this is NOT
 
 - **Not a proof of R16's inference.** The locality half is derived; the
-  equivariance half is not. Y3 is measured and the contract labels it so.
+  equivariance half is not — *in this rung*. R21 proves it; what R19 conceded
+  was true of R19 and stays on the record.
 - **Not a proof for all n.** L1 and L2 are arithmetic and hold for every n; L3
   and the marking result are checked at n = 5, 6 only.
 - **Not a statement about the real Cayley–Dickson tower.** As in R15 and R16, a

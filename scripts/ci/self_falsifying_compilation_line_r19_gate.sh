@@ -29,8 +29,13 @@ done < <(grep -oE 'SELF_FALSIFYING_R19_VERDICT [A-Za-z0-9_]+' "$SPEC" | awk '{pr
 # The concessions. A rung that derives half a result is one sentence away from
 # reading as if it derived all of it.
 grep -q "Not a proof of R16's inference" "$SPEC" || fail "the not-a-proof concession was deleted"
-grep -q "Y3 is measured and the contract labels it so" "$SPEC" \
-    || fail "the disclosure that the remaining half is measured was deleted"
+# R21 later proved the half R19 left measured. The guard now checks that R19's
+# own limit stays on the record AND that the pointer to the proof is there --
+# superseded, not erased, the same rule R17 got.
+grep -q "was true of R19 and stays on the record" "$SPEC" \
+    || fail "R19's own limit was erased instead of superseded"
+grep -q "Closed in R21" "$SPEC" \
+    || fail "the pointer to R21's proof was deleted"
 grep -q "Not a proof for all n" "$SPEC" || fail "the n-range limit was deleted"
 grep -q "Two explanations tested, both refuted" "$SPEC" \
     || fail "the refuted-hypotheses disclosure was deleted"
