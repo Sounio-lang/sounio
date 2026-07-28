@@ -6257,7 +6257,7 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
             let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
             let call_start_borrows = (*c).borrows
             checker_check_call_args_inplace(c, expr_list_handle(e.args), fn_param_list_handle(fn_param_list_clone(&sig.params)), sig.param_count, e.span)
-            checker_check_callee_effects_inplace(c, e.span, sig.effects, sig.effect_count)
+            checker_check_callee_effects_named_inplace(c, e.span, sig.effects, sig.effect_count, sig.name)
             checker_release_call_arg_borrows_inplace(c, e.args, fn_param_list_clone(&sig.params), call_start_borrows)
             sig.return_type
         } else {
@@ -6290,7 +6290,7 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
             let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
             let call_start_borrows = (*c).borrows
             checker_check_call_args_inplace(c, expr_list_handle(e.args), fn_param_list_handle(fn_param_list_clone(&sig.params)), sig.param_count, e.span)
-            checker_check_callee_effects_inplace(c, e.span, sig.effects, sig.effect_count)
+            checker_check_callee_effects_named_inplace(c, e.span, sig.effects, sig.effect_count, sig.name)
             checker_release_call_arg_borrows_inplace(c, e.args, fn_param_list_clone(&sig.params), call_start_borrows)
             sig.return_type
         } else {
@@ -6975,7 +6975,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             direct_sig.param_count,
             e.span,
         )
-        checker_check_callee_effects_inplace(c, e.span, direct_sig.effects, direct_sig.effect_count)
+        checker_check_callee_effects_named_inplace(c, e.span, direct_sig.effects, direct_sig.effect_count, direct_sig.name)
         checker_release_call_arg_borrows_inplace(c, e.args, effective_params, call_start_borrows)
         return effective_return_type
     }
@@ -7048,7 +7048,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             None => {}
         }
         checker_check_call_args_inplace(c, expr_list_handle(e.args), fn_param_list_handle(effective_params), sig.param_count, e.span)
-        checker_check_callee_effects_inplace(c, e.span, sig.effects, sig.effect_count)
+        checker_check_callee_effects_named_inplace(c, e.span, sig.effects, sig.effect_count, sig.name)
         checker_release_call_arg_borrows_inplace(c, e.args, effective_params, call_start_borrows)
         effective_return_type
     } else if is_error_or_unknown(callee_ty) {
@@ -7078,7 +7078,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
 }
 
 
-fn checker_check_callee_effects_inplace(c: *mut Checker, span: Span, callee_effects: [i64; 8], callee_effect_count: i64) with Mut, IO, Panic, Div, Alloc {
+fn checker_check_callee_effects_named_inplace(c: *mut Checker, span: Span, callee_effects: [i64; 8], callee_effect_count: i64, source: Name) with Mut, IO, Panic, Div, Alloc {
     if callee_effect_count == 0 {
         return
     }
@@ -7086,8 +7086,14 @@ fn checker_check_callee_effects_inplace(c: *mut Checker, span: Span, callee_effe
         return
     }
     let missing_pair = find_missing_effects(callee_effects, callee_effect_count, (*c).current_effects, (*c).current_effect_count)
-    let t = (*c).report_effect_error(span, missing_pair.0, missing_pair.1)
+    let t = (*c).report_effect_error_from(span, missing_pair.0, missing_pair.1, source)
     checker_store_from_value(c, t)
+}
+
+// Retained for the arms that synthesise an effect list with no signature behind it (Observe on
+// println, IO on syscall6, the store-site Mut from #1522): there is no callee name to report.
+fn checker_check_callee_effects_inplace(c: *mut Checker, span: Span, callee_effects: [i64; 8], callee_effect_count: i64) with Mut, IO, Panic, Div, Alloc {
+    checker_check_callee_effects_named_inplace(c, span, callee_effects, callee_effect_count, empty_name())
 }
 
     fn checker_release_call_arg_borrows_inplace(c: *mut Checker, args: Option<Box<ExprList> >, params: Option<Box<FnParamList> >, call_start_borrows: BorrowEnv) with Mut, Panic, Div, Alloc, IO {
@@ -11848,7 +11854,17 @@ impl Checker {
 
 
 
-    fn report_effect_error(self, span: Span, missing: [i64; 8], missing_count: i64) -> Checker with Mut, IO, Panic, Div {
+    // E035 names WHAT DEMANDED the effect. The span cannot locate it: on a self-compile of
+    // compiler/main.sio all 230 E035 carry span.start == 0, and no diagnostic in this compiler
+    // prints span.file_id, so an offset alone cannot even say which of 112 closure files it is in.
+    //
+    // The name is the CALLEE, not the enclosing function, deliberately. The enclosing function is
+    // what you edit, so it would read better — but the checker does not track it, and adding a
+    // `current_fn_name` field would mean keeping it in sync across 13 assignment sites and 6
+    // save/restore pairs. One missed restore prints a STALE name, and a confidently wrong
+    // attribution is worse than none. The callee name travels with the effect list it came from
+    // (both out of the same FnSig), so it cannot desynchronise by construction.
+    fn report_effect_error_from(self, span: Span, missing: [i64; 8], missing_count: i64, source: Name) -> Checker with Mut, IO, Panic, Div {
         var c = self
         c.error_count = c.error_count + 1
         c.had_error = true
@@ -11866,8 +11882,18 @@ impl Checker {
             print_effect_name(missing[i as usize])
             i = i + 1
         }
-        print(")\n")
+        print(")")
+        if source.len > 0 {
+            print(" -- required by `")
+            print_name_bytes_early(source)
+            print("`")
+        }
+        print("\n")
         c
+    }
+
+    fn report_effect_error(self, span: Span, missing: [i64; 8], missing_count: i64) -> Checker with Mut, IO, Panic, Div {
+        self.report_effect_error_from(span, missing, missing_count, empty_name())
     }
 
     fn check_callee_effects(self, span: Span, callee_effects: [i64; 8], callee_effect_count: i64) -> Checker with Mut, IO, Panic, Div {
