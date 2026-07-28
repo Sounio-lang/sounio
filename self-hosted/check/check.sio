@@ -5,6 +5,7 @@
 //
 // Methods return (Checker, ...) to thread state through value semantics.
 
+use io::env::{read_env}
 use check::refinement::*
 use check::types::*
 use check::defs::*
@@ -258,6 +259,14 @@ pub struct Checker {
     current_impl_type: TypeEntry,
     current_effects: [i64; 8],
     current_effect_count: i64,
+    // Effect inference (§7.2.1) publishes the inferred set into the signature of the function being
+    // checked, which means knowing WHICH signature that is. The name is stored beside the index as
+    // a GUARD: at a set-site this pair is not updated at, the index would still point at an earlier
+    // function and writing there would corrupt an unrelated signature silently. The write-back
+    // checks the name first and skips on mismatch, so a missed site costs lost propagation rather
+    // than a wrong effect set. -1 disables the write outright.
+    current_sig_id: i64,
+    current_sig_name: Name,
     multitest_count: i64,
     multitest_corrected: bool,
     last_literal_int: i64,
@@ -1045,6 +1054,8 @@ pub fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     (*raw).current_impl_type = ty_error()
     (*raw).current_effects = [0; 8]
     (*raw).current_effect_count = 0
+    (*raw).current_sig_id = 0 - 1
+    (*raw).current_sig_name = empty_name()
     (*raw).multitest_count = 0
     (*raw).multitest_corrected = false
     (*raw).last_literal_int = 0
@@ -1146,6 +1157,8 @@ fn checker_store_from_value(dst: *mut Checker, src: Checker) with Mut, Panic, Di
     (*dst).current_impl_type = src.current_impl_type
     (*dst).current_effects = src.current_effects
     (*dst).current_effect_count = src.current_effect_count
+    (*dst).current_sig_id = src.current_sig_id
+    (*dst).current_sig_name = src.current_sig_name
     (*dst).multitest_count = src.multitest_count
     (*dst).multitest_corrected = src.multitest_corrected
     (*dst).last_literal_int = src.last_literal_int
@@ -4039,6 +4052,8 @@ fn checker_check_impl_method_inplace(c: *mut Checker, item: Item) with Mut, Pani
                 (*c).current_return_type = sig.return_type
                 (*c).current_effects = sig.effects
                 (*c).current_effect_count = sig.effect_count
+                (*c).current_sig_id = sig_id
+                (*c).current_sig_name = sig.name
             }
             (*c).multitest_count = 0
             (*c).multitest_corrected = false
@@ -4060,6 +4075,7 @@ fn checker_check_impl_method_inplace(c: *mut Checker, item: Item) with Mut, Pani
             (*c).borrows = (*c).borrows.pop_scope()
             (*c).env = (*c).env.pop_scope()
             (*c).current_return_type = ty_unit()
+            (*c).current_sig_id = 0 - 1
             (*c).current_effects = saved_effects
             (*c).current_effect_count = saved_effect_count
             (*c).multitest_count = saved_multitest_count
@@ -4338,6 +4354,8 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
                 (*c).current_return_type = sig.return_type
                 (*c).current_effects = sig.effects
                 (*c).current_effect_count = sig.effect_count
+                (*c).current_sig_id = sig_id
+                (*c).current_sig_name = sig.name
                 // Per-call-site recording: note a `with Chaotic` (effect id 22) function.
                 if has_effect_id(sig.effects, sig.effect_count, 22) { equiv_set_chaotic() }
                 // Loud-failure guard (#187): warn on oversized by-value return.
@@ -4353,6 +4371,7 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             match (*fd).body.stmts {
                 None => {
                     (*c).current_return_type = ty_unit()
+                    (*c).current_sig_id = 0 - 1
                     (*c).current_effects = saved_effects
                     (*c).current_effect_count = saved_effect_count
                     (*c).multitest_count = saved_multitest_count
@@ -4385,6 +4404,7 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             (*c).borrows = (*c).borrows.pop_scope()
             (*c).env = (*c).env.pop_scope()
             (*c).current_return_type = ty_unit()
+            (*c).current_sig_id = 0 - 1
             (*c).current_effects = saved_effects
             (*c).current_effect_count = saved_effect_count
             (*c).multitest_count = saved_multitest_count
@@ -6113,6 +6133,7 @@ fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
     checker_pop_const_scope_inplace(c)
     (*c).borrows = (*c).borrows.pop_scope()
     (*c).env = (*c).env.pop_scope()
+    (*c).current_sig_id = 0 - 1
     (*c).current_effects = saved_effects
     (*c).current_effect_count = saved_effect_count
 
@@ -7078,6 +7099,46 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
 }
 
 
+// Effect INFERENCE, spec §7.2.1: "the checker is intended to infer this from the function body
+// rather than require the author to reason about it; the annotation is a declaration of the
+// inferred fact, not an independent obligation."
+//
+// STEP 1 of that, behind SOUNIO_EFFECT_INFER=1 and off by default so the shipped behaviour is
+// unchanged while this is measured. Instead of reporting E035, the effect the callee needs is
+// ADDED to the effect set in force for the function being checked. Adding only: an inferred set
+// grows as callees are discovered and never shrinks, so a declared effect cannot be dropped.
+//
+// What this step does NOT yet do is write the widened set back into the caller's FnSig, so a
+// caller-of-a-caller still sees the narrow DECLARED set and the inference stops after one level.
+// Doing that needs the checker to know which signature it is currently inside, and the only handle
+// would be a `current_sig_id` field kept in sync across 13 assignment sites and 6 save/restore
+// pairs — where a stale id would widen the WRONG function's effects, a silent semantic corruption
+// rather than a wrong message. Measured first, then decided.
+fn checker_widen_current_effects_inplace(c: *mut Checker, extra: [i64; 8], extra_count: i64) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < extra_count && i < 8 {
+        let e = extra[i as usize]
+        var seen = false
+        var j: i64 = 0
+        while j < (*c).current_effect_count && j < 8 {
+            if (*c).current_effects[j as usize] == e {
+                seen = true
+            }
+            j = j + 1
+        }
+        if !seen && (*c).current_effect_count < 8 {
+            let k = (*c).current_effect_count
+            (*c).current_effects[k as usize] = e
+            (*c).current_effect_count = k + 1
+        }
+        i = i + 1
+    }
+}
+
+fn checker_effect_inference_enabled() -> bool with IO, Mut, Panic, Div {
+    str_eq(read_env("SOUNIO_EFFECT_INFER"), "1")
+}
+
 fn checker_check_callee_effects_named_inplace(c: *mut Checker, span: Span, callee_effects: [i64; 8], callee_effect_count: i64, source: Name) with Mut, IO, Panic, Div, Alloc {
     if callee_effect_count == 0 {
         return
@@ -7086,6 +7147,43 @@ fn checker_check_callee_effects_named_inplace(c: *mut Checker, span: Span, calle
         return
     }
     let missing_pair = find_missing_effects(callee_effects, callee_effect_count, (*c).current_effects, (*c).current_effect_count)
+    if checker_effect_inference_enabled() {
+        checker_widen_current_effects_inplace(c, missing_pair.0, missing_pair.1)
+        // STEP 2: publish the inferred set into this function's own signature, so that ITS callers
+        // see the effect too and inference is transitive rather than one level deep. Without this,
+        // widening only silences the check locally — a pub fn could declare nothing and reach IO
+        // through two hops with nobody noticing.
+        //
+        // Guarded by name: current_sig_id is only trusted when the signature it points at still
+        // carries current_sig_name. A set-site that failed to update the pair leaves a stale index,
+        // and the guard turns that into a skipped write (lost propagation) instead of effects
+        // written onto an unrelated function.
+        if (*c).current_sig_id >= 0 {
+            let owner = fn_sig_table_get((*c).fn_sigs, (*c).current_sig_id)
+            if name_eq(owner.name, (*c).current_sig_name) {
+                let widened = fn_sig_table_widen_effects((*c).fn_sigs, (*c).current_sig_id, missing_pair.0, missing_pair.1)
+                // SOUNIO_EFFECT_INFER_TRACE makes the propagation OBSERVABLE. Without it, step 1
+                // (local widening) and step 2 (write-back) are indistinguishable by error count —
+                // both drive E035 to 0 — so there would be no evidence the publication happens at
+                // all. Prints once per effect actually added to a signature.
+                if widened && str_eq(read_env("SOUNIO_EFFECT_INFER_TRACE"), "1") {
+                    print("effect_infer: ")
+                    print_name_bytes_early(owner.name)
+                    print(" += ")
+                    var ti: i64 = 0
+                    while ti < missing_pair.1 {
+                        if ti > 0 { print(", ") }
+                        print_effect_name(missing_pair.0[ti as usize])
+                        ti = ti + 1
+                    }
+                    print(" (from ")
+                    print_name_bytes_early(source)
+                    print(")\n")
+                }
+            }
+        }
+        return
+    }
     let t = (*c).report_effect_error_from(span, missing_pair.0, missing_pair.1, source)
     checker_store_from_value(c, t)
 }
@@ -18407,12 +18505,15 @@ impl Checker {
                     c.current_return_type = sig.return_type
                     c.current_effects = sig.effects
                     c.current_effect_count = sig.effect_count
+                    c.current_sig_id = sig_id
+                    c.current_sig_name = sig.name
                 }
                 c.multitest_count = 0
                 c.multitest_corrected = false
                 match (*fd).body.stmts {
                     None => {
                         c.current_return_type = ty_unit()
+                        c.current_sig_id = 0 - 1
                         c.current_effects = saved_effects
                         c.current_effect_count = saved_effect_count
                         c.multitest_count = saved_multitest_count
@@ -18452,6 +18553,7 @@ impl Checker {
                 c.env = c.env.pop_scope()
                 c.current_return_type = ty_unit()
                 // Restore outer effects context
+                c.current_sig_id = 0 - 1
                 c.current_effects = saved_effects
                 c.current_effect_count = saved_effect_count
                 c.multitest_count = saved_multitest_count
@@ -18538,6 +18640,8 @@ impl Checker {
                     c.current_return_type = sig.return_type
                     c.current_effects = sig.effects
                     c.current_effect_count = sig.effect_count
+                    c.current_sig_id = sig_id
+                    c.current_sig_name = sig.name
                 }
                 c.multitest_count = 0
                 c.multitest_corrected = false
@@ -18562,6 +18666,7 @@ impl Checker {
                 c.env = c.env.pop_scope()
                 c.current_return_type = ty_unit()
                 // Restore outer effects context
+                c.current_sig_id = 0 - 1
                 c.current_effects = saved_effects
                 c.current_effect_count = saved_effect_count
                 c.multitest_count = saved_multitest_count
@@ -23272,6 +23377,7 @@ impl Checker {
         let body_ty = body_pair.1
 
         // Restore original effects (handler discharges the effect)
+        c.current_sig_id = 0 - 1
         c.current_effects = saved_effects
         c.current_effect_count = saved_count
 
@@ -23348,6 +23454,7 @@ impl Checker {
         c.env = c.env.pop_scope()
 
         // Restore outer effects context
+        c.current_sig_id = 0 - 1
         c.current_effects = saved_effects
         c.current_effect_count = saved_effect_count
 
