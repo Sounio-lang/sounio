@@ -18,6 +18,7 @@
 | Quotient off-diag H | FO div combine tracks H_ij (with Cov) | `div_correlate` |
 | stdlib `epistemic::fo` | Pure FO-transfer helpers (css/clearance/mul/div) | `stdlib_surface` |
 | Multi-mod import FO | Prepass registers pure FO_XFER from *all* loaded modules; Program-by-value load avoids A14 nested field-address residual (`&programs[i].items` → None) | `import` |
+| Shared FO channel | Same σ² reg / same peel reuses one channel (η+η → 4σ²; CL·V shared η) | `shared_channel` |
 | Control | `if` SELECT blend (const + runtime) | `div_if`, `if_helper` |
 | 2nd-order mean | `E₂[f] ≈ f(μ) + ½ Σ H_kk σ_k²` | `second_order_mean`, `fo_emit_second_order_bias` |
 | Hessian diag | `hessian_diag_of(expr) → Σ H_kk` | `pow_const` |
@@ -39,7 +40,8 @@ SOUNIO_FO_REBUILD=1 bash scripts/ci/madaros_gum_fo_trust_gate.sh
 Summary JSON lands under `$SOUNIO_FO_TRUST_DIR/summary.json` (or a temp dir printed by the script).
 
 **Measured 2026-07-27 (post div-offdiag + stdlib fo):** 24/24 PASS under rebuilt Madaros.  
-**Measured 2026-07-28 (multi-mod import FO):** 25/25 PASS — `madaros_gum_fo_import` closes imported pure-helper FO (v_imp = v_peel for mul/div/css).
+**Measured 2026-07-28 (multi-mod import FO):** 25/25 PASS — `madaros_gum_fo_import` closes imported pure-helper FO (v_imp = v_peel for mul/div/css).  
+**Measured 2026-07-28 (shared channel freeze):** 26/26 PASS — `madaros_gum_fo_shared_channel` freezes σ²-reg channel identity (already live; no lowerer change).
 
 ## Science driver
 
@@ -63,9 +65,9 @@ Multi-factor Css model with pure helpers (including `clearance_helper` with `exp
 
 ## Known holes (do not paper over)
 
-1. **Helper definition order** — nested expand requires callees registered before callers (source order). Reverse-order mutual recursion is not FO-expanded.
-3. **Off-diagonal Hessian** is not stored; independent seeds only need diagonal for the Taylor mean (cross terms need Cov≠0).
-4. **Correlated seeds** (shared η) are not modelled — treat as separate measures today.
+1. **Helper definition order** — multipass prereg handles reverse *definition* order for pure nested expand; true mutual recursion is still not FO-expanded.
+3. **Off-diagonal Hessian storage** — product/add/div *combine* track H_ij when Cov≠0; full symbolic H matrix is not materialised as a first-class value.
+4. **~~Shared peel / same σ² channel~~ CLOSED** — `fo_seed_from_variance` reuses channel by variance_reg; peels, lets, Knowledge aliases, and interproc params share correctly. Gate: `shared_channel`. Residual: *independent* `measure`s that *ought* to share a latent still need explicit `correlate(a,b,ρ)` or a single shared peel.
 5. **pow native** is `exp(y·log x)`; FO mean also rewrites const-exponent `pow` to `exp(c·log)` in lower.
 6. **Method FO** inherits receiver sens only (view-style), not full mangled-method transfer.
 7. **FO builtins remain compiler-injected** (`variance_of`, …) — stdlib `epistemic::fo` wraps *pure helpers*, not the builtins themselves (AST-walk requirement).
@@ -79,17 +81,18 @@ Multi-factor Css model with pure helpers (including `clearance_helper` with `exp
 - **Knowledge ⊗ Knowledge FO/GUM.** `lower_knowledge_binary_expr_ref` builds Knowledge with GUM variance and multi-channel FO; `.value` peel preserves FO binds. Gate: `knowledge_ops`.
 - **Nested multi-helper FO bodies.** `fo_bc_expand_xfer_call` / `fo_bc_inline_xfer_bytecode` expand kinds 1–6 at compile time (LOAD_PARAM → call-arg subtrees; locals remapped). Gate: `nested_helpers` (css_h and exposure_h depth-2).
 - **Multi-mod imported pure-helper FO.** Module-frontend FO prepass walks all loaded `Program`s before seed body lower. Nested field-address `&programs[i].items` was A14 residual (Option::None → FO_XFER empty); fix: `var prog = programs[i]; fo_preregister(&prog.items)`. Gate: `import` (v_imp_mul=v_peel_mul=0.25; css match).
+- **Shared FO channel identity (freeze).** Measured live without new lowerer work: same σ² reg reuses channel; η+η, CL·V shared η, Knowledge alias, interproc double-use all match analytic; independent measures stay 2-channel. Gate: `shared_channel`.
 
 ## Gate inventory
 
-All files matching `tests/run-pass/madaros_gum_fo_*.sio` are members of the trust gate (24 files including `div_correlate`, `stdlib_surface`). Adding a new FO gate = drop a `madaros_gum_fo_*.sio` with a `MADAROS_GUM_FO_*_PASS` token.
+All files matching `tests/run-pass/madaros_gum_fo_*.sio` are members of the trust gate (26 files including `import`, `shared_channel`). Adding a new FO gate = drop a `madaros_gum_fo_*.sio` with a `MADAROS_GUM_FO_*_PASS` token.
 
 ## Next bold moves (ordered)
 
-1. Multi-pass FO registration (tolerate reverse definition order / mutual pure helpers).
-3. Off-diagonal H_jk + optional correlation table.
-4. stdlib `epistemic::fo` surface wrapping the builtins for dissertation code.
-5. Wire `madaros_gum_fo_trust_gate.sh` into composite CI when branch policy allows.
+1. **Method FO** — full mangled-method transfer (not just receiver sens).
+2. **Science driver on `epistemic::fo` imports** — multi-mod is green; PK driver should call stdlib `fo_css` and match local-helper numbers.
+3. **Mutual pure-helper FO expand** — true recursive pure helpers (beyond multipass DAG).
+4. Keep `correlate` for *distinct* measures that share a latent in the science model.
 
 ---
 
