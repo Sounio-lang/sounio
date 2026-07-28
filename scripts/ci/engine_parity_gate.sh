@@ -167,6 +167,16 @@ if [ "$total" -eq 0 ]; then
     exit 1
 fi
 echo "[engine-parity] corpus=$total jobs=$JOBS timeout=${TIMEOUT}s"
+# Progress is checkable without polling the process table. A full run compiles and
+# executes every program under BOTH engines and takes ~13 min on a 6-job pod, which
+# is long enough that callers reach for a wait loop.
+#
+# Do NOT wait with `until ! pgrep -f engine_parity_gate`: that pattern matches the
+# waiting shell's own command line, so two such loops see each other and block
+# forever. Measured 2026-07-28 — three of them deadlocked for 5h13 on a gate that
+# had already exited. Poll this file instead, or run the gate in the foreground
+# and read its exit status.
+echo "[engine-parity] progress: wc -l $WORK/results.tsv   (of $total)"
 echo "[engine-parity] madaros=$MADAROS"
 echo "[engine-parity] lean   =$LEAN"
 
