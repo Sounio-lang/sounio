@@ -154,8 +154,11 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.madaros-closures-step1-fix-2026-06-24 | repo_only | docs/audit/MADAROS_CLOSURES_STEP1_FIX_2026-06-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-closures-step2-capture-2026-06-24 | repo_only | docs/audit/MADAROS_CLOSURES_STEP2_CAPTURE_2026-06-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-dual-gum-knowledge-import-2026-07-19 | repo_only | docs/audit/MADAROS_DUAL_GUM_KNOWLEDGE_IMPORT_2026-07-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.madaros-engine-parity-harvest-1-2-3-2026-07-28 | repo_only | docs/audit/MADAROS_ENGINE_PARITY_HARVEST_1_2_3_2026-07-28.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.madaros-engine-parity-nongum-cluster-2026-07-28 | repo_only | docs/audit/MADAROS_ENGINE_PARITY_NONGUM_CLUSTER_2026-07-28.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-enum-variant-sigsegv-2026-06-20 | repo_only | docs/audit/MADAROS_ENUM_VARIANT_SIGSEGV_2026-06-20.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-field-if-i64-2026-07-26 | repo_only | docs/audit/MADAROS_FIELD_IF_I64_2026-07-26.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.madaros-fo-cross-fn-return-2026-07-28 | repo_only | docs/audit/MADAROS_FO_CROSS_FN_RETURN_2026-07-28.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-for-loop-lowering-2026-06-20 | repo_only | docs/audit/MADAROS_FOR_LOOP_LOWERING_2026-06-20.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-impl-method-two-roots-2026-06-23 | repo_only | docs/audit/MADAROS_IMPL_METHOD_TWO_ROOTS_2026-06-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-impl-methods-three-layer-fix-2026-06-23 | repo_only | docs/audit/MADAROS_IMPL_METHODS_THREE_LAYER_FIX_2026-06-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
