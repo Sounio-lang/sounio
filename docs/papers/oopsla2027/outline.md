@@ -72,6 +72,7 @@ derivation of that function already sitting unused in the repository.
 | C12 | **The fourth narrowing, and the one that withdraws a planned contribution.** C6's measure is not new and its central assumption is refuted by a study at 224 problems × 12 models; C6 survives one-sided, and the compiler rule it motivated is withdrawn rather than deferred (§8.6). | R12 | `PRIOR_ART_HAS_ARTEFACT_MEASURE__CLAIM_NARROWS_FOURTH` |
 | C13 | **The one-sidedness measured here, not transferred.** Perturb the shared object rather than the code: **21 pairs of this corpus's contracts have identical responses to all 36 perturbations while their structural similarity is 0.479–0.594**, below the threshold at which C6 calls them independent evidence. Pairs C6 calls independent agree *more* (0.565) than pairs it calls shared (0.513). | R13 | `STRUCTURAL_INDEPENDENCE_DOES_NOT_IMPLY_INDEPENDENT_FATE` |
 | C14 | **The same instrument turned around, and a pre-registered hypothesis losing.** Of everything these contracts compute — to level 10, 1024 dimensions — how much does the conclusion depend on? **407 verdict changes, 117 crashes, 12 survivors in 536 cells**; levels 9 and 10 are pure verdict changes. Vacuity refuted; the corpus checks what it computes. | R14 | `VACUITY_REFUTED__CORPUS_CHECKS_WHAT_IT_COMPUTES` |
+| C15 | **The limit above C3, and its repair.** C3 binds the build to the *proposition* a check reports. That is still blind to anything preserving the proposition's truth: a flip changing **126 of 128 fiber graphs and every spectrum** leaves `#spectra = 24` intact, so the token holds. A token's resolution is bounded by the **invariance group of its proposition**. Repair, verified: **bind the witness, not the predicate**. | R15 | `TOKEN_RESOLUTION_BOUNDED_BY_PROPOSITION_INVARIANCE` |
 
 ### Methodological results that generalise
 
@@ -297,6 +298,12 @@ compiler at all: asking **where the evidence came from**, and refusing to count
 agreement between checks that share a derivation. That question is cheap to
 answer, decidable, and on this corpus it changed the status of a third of the
 cross-checks.
+
+C3's own limit is now measured too, and it is not the impossibility of §5 but a
+**resolution** limit: a token is exactly as fine as the proposition it states,
+and propositions about counts are coarse. The repair — bind a *witness* of the
+proposition rather than its truth value — is a strict strengthening of C3 and is
+verified rather than proposed (§C15).
 
 Four literature searches narrowed this paper's claims four times, and each
 narrowing improved it. The compile-time mechanism went first, then the
