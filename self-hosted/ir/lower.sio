@@ -6526,13 +6526,19 @@ impl Lowerer {
                 Some(list) => {
                     let fname = (*list).head.name
                     if fname.len > 0 {
-                        let vpair = lo.lower_expr_variance_ref(&(*list).head.value)
-                        lo = vpair.0
-                        if lo.fo_expr_has_sens() {
-                            let key = lo.fo_field_key(base, fname)
-                            lo = lo.fo_bind_local_sens(key)
-                            if vpair.1 >= 0 {
-                                lo = lo.bind_local_variance_reg(key, vpair.1)
+                        let val = &(*list).head.value
+                        if (*val).kind == ExprKind::ExprStructLit {
+                            let nest = lo.fo_field_key(base, fname)
+                            lo = lo.fo_bind_struct_literal_fields(nest, &(*val).fields)
+                        } else {
+                            let vpair = lo.lower_expr_variance_ref(val)
+                            lo = vpair.0
+                            if lo.fo_expr_has_sens() {
+                                let key = lo.fo_field_key(base, fname)
+                                lo = lo.fo_bind_local_sens(key)
+                                if vpair.1 >= 0 {
+                                    lo = lo.bind_local_variance_reg(key, vpair.1)
+                                }
                             }
                         }
                     }
@@ -6542,6 +6548,25 @@ impl Lowerer {
             }
         }
         lo
+    }
+
+    // Path key for Ident or Ident-rooted field chain (o / o_inner).
+    fn fo_expr_struct_path_key(self, e: &Expr) -> Name with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprIdent {
+            return (*e).name
+        }
+        if (*e).kind == ExprKind::ExprFieldAccess {
+            match (*e).left {
+                Some(base) => {
+                    let bk = self.fo_expr_struct_path_key(&(*base))
+                    if bk.len > 0 {
+                        return self.fo_field_key(bk, (*e).name)
+                    }
+                }
+                _ => {}
+            }
+        }
+        ir_empty_name()
     }
 
     fn fo_load_field_sens(
@@ -6580,111 +6605,158 @@ impl Lowerer {
         (self.fo_clear_expr_sens(), -1)
     }
 
-    // FO of base.field: Ident keys, pure Call projections, identity FWD through args.
+    // FO of base.field: Ident path keys, nested chains, Call path projections.
     fn lower_expr_field_variance_ref(
         self,
         base: &Expr,
         field: Name
     ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
-        if (*base).kind == ExprKind::ExprIdent {
-            let bname = (*base).name
-            var lo_f = self.fo_load_field_sens(bname, field)
+        // Ident-rooted chain: o.inner → path o_inner; then .cl0 → o_inner_cl0
+        let path_base = self.fo_expr_struct_path_key(base)
+        if path_base.len > 0 {
+            var lo_f = self.fo_load_field_sens(path_base, field)
             if lo_f.fo_expr_has_sens() {
                 return lo_f.fo_emit_var_from_sens()
             }
-            let key = self.fo_field_key(bname, field)
+            let key = self.fo_field_key(path_base, field)
             let fvar = lo_f.lookup_local_variance_reg(key)
             if fvar >= 0 {
                 lo_f = lo_f.fo_seed_from_variance(fvar)
                 return (lo_f, fvar)
             }
-            return (lo_f.fo_clear_expr_sens(), -1)
         }
+        // Call.field — top-level projection / identity FWD
         if (*base).kind == ExprKind::ExprCall {
+            return self.fo_field_variance_of_call_path(base, field, ir_empty_name(), ir_empty_name())
+        }
+        // (Call.mid).field — one nested field on call result
+        if (*base).kind == ExprKind::ExprFieldAccess {
             match (*base).left {
-                Some(callee_expr) => {
-                    let callee = self.expr_to_callee_name_ref(&(*callee_expr))
-                    if callee.len > 0 {
-                        let proj = ir_mangle_method_name(callee, field)
-                        let xfer = self.fo_apply_call_transfer(proj, &(*base).args, 0)
-                        var lo_x = xfer.0
-                        let xv = xfer.1
-                        if xv >= 0 {
-                            return (lo_x, xv)
-                        }
-                        if lo_x.fo_expr_has_sens() {
-                            return lo_x.fo_emit_var_from_sens()
-                        }
-                        let idx = self.fo_xfer_lookup(callee)
-                        if idx >= 0 {
-                            var k = FO_XFER_KIND[idx as usize]
-                            var aidx = idx
-                            if k == 5 {
-                                let fh = FO_XFER_FWD_HASH[idx as usize]
-                                let fidx = fo_xfer_global_lookup_hash(fh)
-                                if fidx >= 0 {
-                                    aidx = fidx
-                                    k = FO_XFER_KIND[fidx as usize]
+                Some(inner) => {
+                    if (*inner).kind == ExprKind::ExprCall {
+                        return self.fo_field_variance_of_call_path(
+                            &(*inner), field, (*base).name, ir_empty_name()
+                        )
+                    }
+                    // (Call.a.b).field — two nested fields on call result
+                    if (*inner).kind == ExprKind::ExprFieldAccess {
+                        match (*inner).left {
+                            Some(inner2) => {
+                                if (*inner2).kind == ExprKind::ExprCall {
+                                    return self.fo_field_variance_of_call_path(
+                                        &(*inner2), field, (*inner).name, (*base).name
+                                    )
                                 }
                             }
-                            if k == 1 {
-                                let pi = FO_XFER_LIT[aidx as usize] as i64
-                                return self.fo_field_variance_of_nth_arg(
-                                    &(*base).args, pi, field
-                                )
-                            }
+                            _ => {}
                         }
+                    }
+                    if (*inner).kind == ExprKind::ExprMethodCall {
+                        return self.fo_field_variance_of_method_path(
+                            &(*inner), field, (*base).name, ir_empty_name()
+                        )
                     }
                 }
                 _ => {}
             }
-            return (self.fo_clear_expr_sens(), -1)
         }
         if (*base).kind == ExprKind::ExprMethodCall {
-            let recv_type = self.lower_method_recv_type(&(*base).left)
-            if recv_type.len > 0 {
-                let mangled = ir_mangle_method_name(recv_type, (*base).name)
-                let proj = ir_mangle_method_name(mangled, field)
-                let xfer = self.fo_apply_call_transfer_recv(
-                    proj, &(*base).left, &(*base).args, 0
-                )
-                var lo_m = xfer.0
+            return self.fo_field_variance_of_method_path(
+                base, field, ir_empty_name(), ir_empty_name()
+            )
+        }
+        (self.fo_clear_expr_sens(), -1)
+    }
+
+    // FO of call(...).[mid1].[mid2].field via projected mangle path.
+    // mid1/mid2 empty = top-level field only.
+    fn fo_field_variance_of_call_path(
+        self,
+        call: &Expr,
+        field: Name,
+        mid1: Name,
+        mid2: Name
+    ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        match (*call).left {
+            Some(callee_expr) => {
+                let callee = self.expr_to_callee_name_ref(&(*callee_expr))
+                if callee.len <= 0 {
+                    return (self.fo_clear_expr_sens(), -1)
+                }
+                var proj = callee
+                if mid1.len > 0 {
+                    proj = ir_mangle_method_name(proj, mid1)
+                }
+                if mid2.len > 0 {
+                    proj = ir_mangle_method_name(proj, mid2)
+                }
+                proj = ir_mangle_method_name(proj, field)
+                let xfer = self.fo_apply_call_transfer(proj, &(*call).args, 0)
+                var lo_x = xfer.0
                 let xv = xfer.1
                 if xv >= 0 {
-                    return (lo_m, xv)
+                    return (lo_x, xv)
                 }
-                if lo_m.fo_expr_has_sens() {
-                    return lo_m.fo_emit_var_from_sens()
+                if lo_x.fo_expr_has_sens() {
+                    return lo_x.fo_emit_var_from_sens()
                 }
-                let idx = self.fo_xfer_lookup(mangled)
-                if idx >= 0 {
-                    var k = FO_XFER_KIND[idx as usize]
-                    var aidx = idx
-                    if k == 5 {
-                        let fh = FO_XFER_FWD_HASH[idx as usize]
-                        let fidx = fo_xfer_global_lookup_hash(fh)
-                        if fidx >= 0 {
-                            aidx = fidx
-                            k = FO_XFER_KIND[fidx as usize]
-                        }
-                    }
-                    if k == 1 {
-                        let pi = FO_XFER_LIT[aidx as usize] as i64
-                        if pi == 0 {
-                            match (*base).left {
-                                Some(recv) => {
-                                    return self.lower_expr_field_variance_ref(&(*recv), field)
-                                }
-                                _ => {}
+                // Identity FWD only for top-level field (no mid path)
+                if mid1.len == 0 && mid2.len == 0 {
+                    let idx = self.fo_xfer_lookup(callee)
+                    if idx >= 0 {
+                        var k = FO_XFER_KIND[idx as usize]
+                        var aidx = idx
+                        if k == 5 {
+                            let fh = FO_XFER_FWD_HASH[idx as usize]
+                            let fidx = fo_xfer_global_lookup_hash(fh)
+                            if fidx >= 0 {
+                                aidx = fidx
+                                k = FO_XFER_KIND[fidx as usize]
                             }
                         }
-                        return self.fo_field_variance_of_nth_arg(
-                            &(*base).args, pi - 1, field
-                        )
+                        if k == 1 {
+                            let pidx = FO_XFER_LIT[aidx as usize] as i64
+                            return self.fo_field_variance_of_nth_arg(
+                                &(*call).args, pidx, field
+                            )
+                        }
                     }
                 }
             }
+            _ => {}
+        }
+        (self.fo_clear_expr_sens(), -1)
+    }
+
+    fn fo_field_variance_of_method_path(
+        self,
+        mcall: &Expr,
+        field: Name,
+        mid1: Name,
+        mid2: Name
+    ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let recv_type = self.lower_method_recv_type(&(*mcall).left)
+        if recv_type.len <= 0 {
             return (self.fo_clear_expr_sens(), -1)
+        }
+        var proj = ir_mangle_method_name(recv_type, (*mcall).name)
+        if mid1.len > 0 {
+            proj = ir_mangle_method_name(proj, mid1)
+        }
+        if mid2.len > 0 {
+            proj = ir_mangle_method_name(proj, mid2)
+        }
+        proj = ir_mangle_method_name(proj, field)
+        let xfer = self.fo_apply_call_transfer_recv(
+            proj, &(*mcall).left, &(*mcall).args, 0
+        )
+        var lo_m = xfer.0
+        let xv = xfer.1
+        if xv >= 0 {
+            return (lo_m, xv)
+        }
+        if lo_m.fo_expr_has_sens() {
+            return lo_m.fo_emit_var_from_sens()
         }
         (self.fo_clear_expr_sens(), -1)
     }
@@ -8443,30 +8515,49 @@ impl Lowerer {
         match last_e {
             Some(e) => {
                 if (*e).kind == ExprKind::ExprStructLit {
-                    var fcur = &(*e).fields
-                    while true {
-                        match *fcur {
-                            Some(fl) => {
-                                let fname = (*fl).head.name
-                                if fname.len > 0 {
-                                    let pi = self.fo_param_index4(
-                                        &(*fl).head.value, p0, p1, p2, p3, nparams
-                                    )
-                                    if pi >= 0 {
-                                        let key = ir_mangle_method_name(fn_name, fname)
-                                        fo_xfer_global_set(
-                                            key, 1, pi as f64, ir_empty_name()
-                                        )
-                                    }
-                                }
-                                fcur = &(*fl).tail
-                            }
-                            _ => break
-                        }
-                    }
+                    self.fo_register_struct_lit_projections_at(
+                        fn_name, &(*e).fields, p0, p1, p2, p3, nparams
+                    )
                 }
             }
             _ => {}
+        }
+    }
+
+    fn fo_register_struct_lit_projections_at(
+        self,
+        prefix: Name,
+        fields: &Option<Box<StructFieldList>>,
+        p0: Name,
+        p1: Name,
+        p2: Name,
+        p3: Name,
+        nparams: i64
+    ) with Mut, Panic, Div, Alloc, IO {
+        var fcur = fields
+        while true {
+            match *fcur {
+                Some(fl) => {
+                    let fname = (*fl).head.name
+                    if fname.len > 0 {
+                        let val = &(*fl).head.value
+                        if (*val).kind == ExprKind::ExprStructLit {
+                            let nest = ir_mangle_method_name(prefix, fname)
+                            self.fo_register_struct_lit_projections_at(
+                                nest, &(*val).fields, p0, p1, p2, p3, nparams
+                            )
+                        } else {
+                            let pi = self.fo_param_index4(val, p0, p1, p2, p3, nparams)
+                            if pi >= 0 {
+                                let key = ir_mangle_method_name(prefix, fname)
+                                fo_xfer_global_set(key, 1, pi as f64, ir_empty_name())
+                            }
+                        }
+                    }
+                    fcur = &(*fl).tail
+                }
+                _ => break
+            }
         }
     }
 
@@ -13840,6 +13931,11 @@ impl Lowerer {
                     let src_st = lo.lookup_local_struct_type((*expr_box).name)
                     if src_st.len > 0 {
                         lo = lo.fo_copy_struct_field_binds((*expr_box).name, s.name)
+                    }
+                } else if (*expr_box).kind == ExprKind::ExprFieldAccess {
+                    let path = lo.fo_expr_struct_path_key(&(*expr_box))
+                    if path.len > 0 {
+                        lo = lo.fo_copy_struct_field_binds(path, s.name)
                     }
                 } else if (*expr_box).kind == ExprKind::ExprCall {
                     let callee_opt_struct_ref = &(*expr_box).left
