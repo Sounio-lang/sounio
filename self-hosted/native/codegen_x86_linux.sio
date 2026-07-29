@@ -4719,6 +4719,21 @@ fn emit_builtin_sin(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     let c5_off = c.rodata.last_offset
     c.rodata = data_section_add_f64(c.rodata, 0x3F2A01A01A01A01A)   // 1/5040
     let c7_off = c.rodata.last_offset
+    // Terms through x^13. The series previously stopped at x^7, which is accurate
+    // near zero and badly wrong at the ends of the reduced range: after reduction
+    // r lies in [-pi, pi], and at r = pi the x^7 truncation error is 7.5e-2. That
+    // is what made cos(3.0) return -1.1375 — outside [-1, 1] — and sin(3.0) return
+    // 0.091071 against a truth of 0.141120 (#1551).
+    //
+    // Worst-case truncation error at r = pi, by order: x^7 7.5e-2, x^9 6.9e-3,
+    // x^11 4.5e-4, x^13 2.1e-5. Three more terms buy three and a half decimal
+    // digits across the whole reduced range and cost three multiply-adds.
+    c.rodata = data_section_add_f64(c.rodata, 0x3EC71DE3A556C734)   // 1/362880   (9!)
+    let c9_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3E5AE64567F544E4)   // 1/39916800 (11!)
+    let c11_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3DE6124613A86D09)   // 1/6227020800 (13!)
+    let c13_off = c.rodata.last_offset
 
     c.code = emit_push_rbp(c.code)
     c.code = emit_mov_rbp_rsp(c.code)
@@ -4753,11 +4768,40 @@ fn emit_builtin_sin(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²
     c.code = emit_movsd_rbp_disp8_xmm0(c.code, -16)   // [rbp-16] = r²
 
-    // Step 2: Horner — sin(x) = r * (1 - r²(1/6 - r²(1/120 - r²*1/5040)))
-    // Innermost: s = 1/5040
+    // Step 2: Horner —
+    //   sin(x) = r(1 - r²(1/6 - r²(1/120 - r²(1/5040 - r²(1/9!
+    //                - r²(1/11! - r²/13!))))))
+    // Innermost: s = 1/13!
+    let sin_c13 = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, sin_c13 + 4, c13_off)
+    // s = 1/11! - r² * s
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
+    let sin_c11 = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, sin_c11 + 4, c11_off)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
+    c.code = emit_subsd_xmm0_xmm1(c.code)
+    // s = 1/9! - r² * s
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
+    let sin_c9 = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, sin_c9 + 4, c9_off)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
+    c.code = emit_subsd_xmm0_xmm1(c.code)
+    // s = 1/5040 - r² * s
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
     let sin_c7 = c.code.len
     c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
     c.relocs = add_rip_reloc(c.relocs, sin_c7 + 4, c7_off)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
+    c.code = emit_subsd_xmm0_xmm1(c.code)
     // s = 1/120 - r² * s
     c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
     c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²/5040
@@ -4816,6 +4860,16 @@ fn emit_builtin_cos(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     let cos_c4_off = c.rodata.last_offset
     c.rodata = data_section_add_f64(c.rodata, 0x3F56C16C16C16C17)   // 1/720
     let cos_c6_off = c.rodata.last_offset
+    // Terms through x^12, for the same reason as sin: the series stopped at x^6,
+    // whose truncation error at the end of the reduced range (r = pi) is 2.1e-1.
+    // That is what made cos(3.0) return -1.1375 — outside [-1, 1] (#1551).
+    // By order at r = pi: x^6 2.1e-1, x^8 2.4e-2, x^10 1.8e-3, x^12 1.0e-4.
+    c.rodata = data_section_add_f64(c.rodata, 0x3EFA01A01A01A01A)   // 1/40320      (8!)
+    let cos_c8_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3E927E4FB7789F5C)   // 1/3628800    (10!)
+    let cos_c10_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3E21EED8EFF8D898)   // 1/479001600  (12!)
+    let cos_c12_off = c.rodata.last_offset
 
     c.code = emit_push_rbp(c.code)
     c.code = emit_mov_rbp_rsp(c.code)
@@ -4849,11 +4903,39 @@ fn emit_builtin_cos(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²
     c.code = emit_movsd_rbp_disp8_xmm0(c.code, -16)   // [rbp-16] = r²
 
-    // Step 2: Horner — cos(x) = 1 - r²(1/2 - r²(1/24 - r²/720))
-    // Innermost: s = 1/720
+    // Step 2: Horner —
+    //   cos(x) = 1 - r²(1/2 - r²(1/24 - r²(1/720 - r²(1/8! - r²(1/10! - r²/12!)))))
+    // Innermost: s = 1/12!
+    let cos_c12 = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, cos_c12 + 4, cos_c12_off)
+    // s = 1/10! - r² * s
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
+    let cos_c10 = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, cos_c10 + 4, cos_c10_off)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
+    c.code = emit_subsd_xmm0_xmm1(c.code)
+    // s = 1/8! - r² * s
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
+    let cos_c8 = c.code.len
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, cos_c8 + 4, cos_c8_off)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
+    c.code = emit_subsd_xmm0_xmm1(c.code)
+    // s = 1/720 - r² * s
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)   // save
     let cos_c6 = c.code.len
     c.code = emit_movsd_xmm0_rip_disp32(c.code, 0)
     c.relocs = add_rip_reloc(c.relocs, cos_c6 + 4, cos_c6_off)
+    c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24)
+    c.code = emit_subsd_xmm0_xmm1(c.code)
     // s = 1/24 - r² * s
     c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16)   // xmm1 = r²
     c.code = emit_mulsd_xmm0_xmm1(c.code)             // xmm0 = r²/720

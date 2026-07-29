@@ -176,6 +176,39 @@ fn fo_xfer_global_reset() with Mut {
     }
 }
 
+// Chain-rule entries for the transcendentals, as kind-6 transfers:
+// d/dx f(g) = f'(g) · dg/dx, with f' emitted as a call and the sign in the lit.
+//
+// The rest of the table is discovered by analysing user functions, so builtins
+// never appeared in it. Without these, fo_apply_call_transfer treats sin/cos/exp
+// as opaque, clears the sensitivity, and the channel is re-seeded from the
+// result's variance — leaving the partial at the seed value 1.0 and computing
+// var(sin(x)) as 0 (#1549).
+//
+// log is deliberately absent: its derivative is 1/x, not a call, so it needs a
+// reciprocal kind rather than this one. Leaving it out keeps it honestly
+// unsupported instead of silently wrong.
+fn fo_xfer_seed_transcendentals() with Mut, Panic, Div, IO {
+    fo_xfer_global_set(make_name("sin"), 6, 1.0, make_name("cos"))
+    fo_xfer_global_set(make_name("cos"), 6, 0.0 - 1.0, make_name("sin"))
+    fo_xfer_global_set(make_name("exp"), 6, 1.0, make_name("exp"))
+}
+
+// Derivative function for a kind-6 entry, resolved from FO_XFER_FWD_HASH. The
+// table stores hashes rather than Names, so the mapping back is by comparison
+// against the transcendentals that have entries. An empty Name means "no rule",
+// and the caller clears the sensitivity rather than reporting a wrong derivative.
+fn fo_xfer_derivative_name(idx: i64) -> Name with Mut, Panic, Div {
+    if idx < 0 || idx >= FO_XFER_COUNT {
+        return ir_empty_name()
+    }
+    let want = FO_XFER_FWD_HASH[idx as usize]
+    if want == fo_name_hash(make_name("sin")) { return make_name("sin") }
+    if want == fo_name_hash(make_name("cos")) { return make_name("cos") }
+    if want == fo_name_hash(make_name("exp")) { return make_name("exp") }
+    ir_empty_name()
+}
+
 fn fo_xfer_global_lookup(name: Name) -> i64 with Mut, Panic, Div {
     let h = fo_name_hash(name)
     var i: i64 = 0
@@ -1219,6 +1252,13 @@ fn lowerer_lower_program_bodies_dedup_mut(
     lo: &! Lowerer,
     items: &Option<Box<ItemList>>
 ) with Mut, Panic, Div, Alloc, IO {
+    // Seed the transcendental chain-rule entries here, on the LIVE path.
+    //
+    // fo_xfer_global_reset() (:3578, :9019) looked like the initialisation point
+    // and is not: a single-module compile reaches lowering through this function,
+    // and seeding from the reset produced zero effect — verified with an
+    // unconditional print that never fired, and with SOUNIO_LOWER_LIVE_TRACE
+    // showing `fo_xfer_miss name=sin count=0`, an empty table at lookup time.
     var current = items
     while true {
         match *current {
@@ -3308,6 +3348,20 @@ fn lowerer_lower_fn_item_mut(
     name: Name,
     fd: &FnDef
 ) with Mut, Panic, Div, Alloc, IO {
+    // Seed the transcendental chain-rule entries here, on the confirmed live path.
+    //
+    // fo_xfer_global_reset (:3578, :9019) and lowerer_lower_program_bodies_dedup_mut
+    // both looked like the initialisation point and neither runs for a
+    // single-module compile — verified with unconditional prints that never fired.
+    // The dedup path is reached only through
+    // lower_dep_program_items_into_acc_with_externs, i.e. imports. THIS function is
+    // the one that emits the lower_live fn_* traces a plain compile produces, so it
+    // is the one that actually executes.
+    //
+    // fo_xfer_global_set is idempotent per name — it overwrites an existing entry
+    // rather than appending — so seeding once per function costs three table writes
+    // and cannot grow the table beyond its three entries.
+    fo_xfer_seed_transcendentals()
     if lower_live_diag_enabled() {
         print("lower_live: fn_before_find_or_add name=")
         print(str_from_bytes(name.buf, name.len))
@@ -7121,6 +7175,48 @@ impl Lowerer {
             let aval = lo.fo_lower_nth_arg_value(args, 0)
             lo = aval.0
             lo = lo.fo_combine_sens_mul(sL, s0, c_pair.1, aval.1)
+            return lo.fo_emit_var_from_sens()
+        }
+        // kind 6: chain rule for a unary function whose derivative is callable —
+        // d/dx f(g) = f'(g) · dg/dx, with f' emitted as a call.
+        //
+        // kind 2 multiplies the sensitivity by a COMPILE-TIME constant, which is
+        // right for `2.0 * x` and wrong for `sin(x)`, whose factor cos(x) depends
+        // on the argument. Precedent for emitting a call from lowering:
+        // uncertainty_of already emits sqrt this way.
+        if kind == 6 {
+            let dname = fo_xfer_derivative_name(idx)
+            if dname.len == 0 {
+                return (lo.fo_clear_expr_sens(), -1)
+            }
+            let aval = lo.fo_lower_nth_arg_value(args, 0)
+            lo = aval.0
+            let argv = aval.1
+            let dfn_id = lowerer_find_or_add_fn_id_mut(&! lo, dname)
+            let dargs: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_single(argv)))
+            let dpair = lo.fresh_reg()
+            lo = dpair.0
+            let dreg = dpair.1
+            var dcall = ir_call(dreg, dfn_id, dname, dargs, 1)
+            dcall.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+            lo = lo.emit(dcall)
+            lo = lo.emit(ir_mark_float_reg(dreg))
+            // Sign from FO_XFER_LIT, so d/dx cos = -sin is one entry, not a case.
+            let sign = FO_XFER_LIT[idx as usize]
+            var factor = dreg
+            if sign < 0.0 {
+                let sp = lo.emit_f64_const(sign)
+                lo = sp.0
+                let fp = lo.fresh_reg()
+                lo = fp.0
+                factor = fp.1
+                lo = lo.emit(ir_binop_typed(factor, dreg, BinaryOp::OpMul, sp.1, true, true))
+                lo = lo.emit(ir_mark_float_reg(factor))
+            }
+            // s_k <- factor * s_k for every live channel. fo_combine_sens_mul
+            // computes R*dL + L*dR; with the left sens empty this is factor * s0.
+            var sZ: [i64; 32] = [-1; 32]
+            lo = lo.fo_combine_sens_mul(sZ, s0, factor, factor)
             return lo.fo_emit_var_from_sens()
         }
         // kind 3 add / 4 mul need arg1
