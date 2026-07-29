@@ -1,12 +1,17 @@
 <!-- docs:meta
-
 topic_id: repo.docs.research.routon-zd-falsifiers-2026-07-26
-authority: repo_only
+authority: historical
 audience: researchers
-last_validated: 2026-07-26
-validated_by: kimi
-source_of_truth: repo.docs.research.routon-zd-falsifiers-2026-07-26
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.routon-zd-falsifiers-2026-07-26
 -->
+
+
+<!-- docs:status-note:start -->
+> Docs status: `historical`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
 
 # Routon ZD structure — falsifiers and stop rules
 

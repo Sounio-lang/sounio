@@ -1,9 +1,9 @@
 <!-- docs:meta
 topic_id: repo.docs.papers.mercyful-learning-medical-paper-2026-07-26
 authority: repo_only
-audience: researchers
-last_validated: 2026-07-26
-validated_by: paper-agent
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.papers.mercyful-learning-medical-paper-2026-07-26
 -->
 

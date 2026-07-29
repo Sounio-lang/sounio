@@ -1,3 +1,18 @@
+<!-- docs:meta
+topic_id: repo.docs.research.functor-f-ord3-module-decomp-spec-2026-07-26
+authority: historical
+audience: researchers
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.functor-f-ord3-module-decomp-spec-2026-07-26
+-->
+
+
+<!-- docs:status-note:start -->
+> Docs status: `historical`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
+
 # Functor F — what the ord-3 secondary module actually is (honest: it fills the class coordinate space; `2·V₃` is CD-doubling)
 
 **Date:** 2026-07-26

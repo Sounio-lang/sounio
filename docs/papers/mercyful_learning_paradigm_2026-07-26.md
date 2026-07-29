@@ -2,9 +2,9 @@
 topic_id: repo.docs.papers.mercyful-learning-paradigm-2026-07-26
 authority: repo_only
 audience: users
-last_validated: 2026-07-26
-validated_by: subagent-paradigm-paper
-source_of_truth: this file (topic-registry.v1.json registration pending, left to integrator)
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.papers.mercyful-learning-paradigm-2026-07-26
 -->
 
 # Mercyful Learning: A Suffering-Minimization Paradigm for Machine Learning

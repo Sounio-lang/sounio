@@ -2,10 +2,11 @@
 topic_id: repo.docs.research.cd-tower-zd-graph-invariants-spec-2026-07-26
 authority: historical
 audience: researchers
-last_validated: 2026-07-26
-validated_by: swarm-task3-zdgraph
+last_validated: 2026-03-07
+validated_by: A6
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.cd-tower-zd-graph-invariants-spec-2026-07-26
 -->
+
 
 <!-- docs:status-note:start -->
 > Docs status: `historical`

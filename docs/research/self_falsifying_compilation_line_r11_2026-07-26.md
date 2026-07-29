@@ -1,3 +1,18 @@
+<!-- docs:meta
+topic_id: repo.docs.research.self-falsifying-compilation-line-r11-2026-07-26
+authority: historical
+audience: researchers
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.self-falsifying-compilation-line-r11-2026-07-26
+-->
+
+
+<!-- docs:status-note:start -->
+> Docs status: `historical`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
+
 # Self-falsifying compilation R11 — widening the probe: still no new corroboration, and five hazards with one answer
 
 **Date:** 2026-07-26

@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.papers.mercyful-learning-preprint-2026-07-26
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.papers.mercyful-learning-preprint-2026-07-26
+-->
+
 # Mercyful Learning: A Formal Framework for Suffering-Budget-Aware Treatment Sequencing
 
 **Author:** Demetrios Chiuratto Agourakis

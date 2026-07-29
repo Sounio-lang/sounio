@@ -1,11 +1,17 @@
 <!-- docs:meta
 topic_id: repo.docs.research.independent-dataset-vancomycin-tdm-validation-2026-07-26
-authority: research-analysis
+authority: historical
 audience: researchers
-last_validated: 2026-07-26
-validated_by: subagent-independent-tdm-validation
-source_of_truth: this file (topic-registry.v1.json registration pending)
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.independent-dataset-vancomycin-tdm-validation-2026-07-26
 -->
+
+
+<!-- docs:status-note:start -->
+> Docs status: `historical`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
 
 # Independent-dataset validation — vancomycin TDM × Mercyful Learning
 

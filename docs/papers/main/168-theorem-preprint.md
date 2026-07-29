@@ -2,8 +2,8 @@
 topic_id: repo.docs.papers.main.168-theorem-preprint
 authority: repo_only
 audience: users
-last_validated: 2026-07-28
-validated_by: task2-168-paper
+last_validated: 2026-03-07
+validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.papers.main.168-theorem-preprint
 -->
 
