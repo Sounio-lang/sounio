@@ -4100,25 +4100,27 @@ fn emit_builtin_str_concat(nc: NativeCompiler) -> NativeCompiler with Mut, Panic
 }
 
 fn native_v2_rodata_append_updated_tail(nc: &! NativeCompiler, updated: NativeCompiler, src_start: i64) -> i64 with Mut, Panic, Div {
-    let append_base = if (*nc).flat_rodata_len > 0 { (*nc).flat_rodata_len } else { (*nc).rodata.len }
+    // #1547: always append into the flat rodata (NC_BIG_RODATA), never the inline
+    // nc.rodata. Every other rodata producer reachable from the lanes that use this
+    // funnel (compile_ir_function_v2_from_ir_into: strings via
+    // nc_rodata_add_ir_instr_name / nc_rodata_add_name_value, f64 literals as
+    // immediates) writes ONLY to the flat buffer, and the final ELF writers emit
+    // the flat buffer exclusively whenever flat_rodata_len > 0 — inline bytes are
+    // dropped without merging. A builtin emitted before the first flat byte (e.g.
+    // an extern "C" sqrt/exp/log stub in an early fn slot, retained multi-decl
+    // extern blocks) previously landed in the inline buffer here; its constants
+    // were then silently lost and its RIP-relative relocations aliased whatever
+    // flat bytes later occupied those offsets (exp/log returning string garbage
+    // in multi-module stdlib compiles). Single store => emission-order independent.
+    let append_base = (*nc).flat_rodata_len
     var src = src_start
-    if (*nc).flat_rodata_len > 0 {
-        var len = (*nc).flat_rodata_len
-        while src < updated.rodata.len && len < 262144 {
-            NC_BIG_RODATA[len as usize] = updated.rodata.bytes[src as usize]
-            len = len + 1
-            src = src + 1
-        }
-        (*nc).flat_rodata_len = len
-    } else {
-        var t = (*nc).rodata
-        while src < updated.rodata.len && t.len < 8192 {
-            t.bytes[t.len as usize] = updated.rodata.bytes[src as usize]
-            t.len = t.len + 1
-            src = src + 1
-        }
-        (*nc).rodata = t
+    var len = (*nc).flat_rodata_len
+    while src < updated.rodata.len && len < 262144 {
+        NC_BIG_RODATA[len as usize] = updated.rodata.bytes[src as usize]
+        len = len + 1
+        src = src + 1
     }
+    (*nc).flat_rodata_len = len
     append_base
 }
 
@@ -4442,7 +4444,7 @@ fn emit_builtin_exp(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
     c.relocs = add_rip_reloc(c.relocs, load_ln2_pos + 4, ln2_off)
     c.code = emit_mulsd_xmm0_xmm1(c.code)         // xmm0 = n_f64 * ln2
-    c.code = emit_movsd_rbp_disp8_xmm1(c.code, -16) // save n*ln2 to [rbp-16] temporarily
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -16) // save n*ln2 to [rbp-16] temporarily
     c.code = emit_movsd_xmm0_rbp_disp8(c.code, -8)  // xmm0 = x
     c.code = emit_movsd_xmm1_rbp_disp8(c.code, -16) // xmm1 = n*ln2
     c.code = emit_subsd_xmm0_xmm1(c.code)         // xmm0 = r = x - n*ln2
@@ -4549,8 +4551,8 @@ fn emit_builtin_log(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     // 1/5 = 0x3FC999999999999A
     c.rodata = data_section_add_f64(c.rodata, 0x3FC999999999999A)
     let fifth_off = c.rodata.last_offset
-    // 1/7 = 0x3FB2492492492492
-    c.rodata = data_section_add_f64(c.rodata, 0x3FB2492492492492)
+    // 1/7 = 0x3FC2492492492492
+    c.rodata = data_section_add_f64(c.rodata, 0x3FC2492492492492)
     let seventh_off = c.rodata.last_offset
 
     c.code = emit_push_rbp(c.code)
@@ -4613,8 +4615,7 @@ fn emit_builtin_log(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     c.code = emit_addsd_xmm0_xmm1(c.code)         // xmm0 = m + 1
 
     // f = (m-1) / (m+1)
-    c.code = emit_movsd_rbp_disp8_xmm1(c.code, -48) // save (m-1) to xmm1 via stack? No, swap:
-    // xmm1 = m+1, xmm0 = m-1
+    // xmm1 = m+1, xmm0 = m-1  (via [rbp-56]; [rbp-48] still holds m-1 from above)
     c.code = emit_movsd_rbp_disp8_xmm0(c.code, -56)  // [rbp-56] = m+1
     c.code = emit_movsd_xmm0_rbp_disp8(c.code, -48)  // xmm0 = m-1
     c.code = emit_movsd_xmm1_rbp_disp8(c.code, -56)  // xmm1 = m+1
@@ -4622,7 +4623,6 @@ fn emit_builtin_log(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     c.code = emit_movsd_rbp_disp8_xmm0(c.code, -24)  // [rbp-24] = f
 
     // Step 4: f^2
-    c.code = emit_movsd_rbp_disp8_xmm1(c.code, -24) // xmm1 = f (via store/load trick)
     c.code = emit_movsd_xmm0_rbp_disp8(c.code, -24) // xmm0 = f
     c.code = emit_movsd_xmm1_rbp_disp8(c.code, -24) // xmm1 = f
     c.code = emit_mulsd_xmm0_xmm1(c.code)          // xmm0 = f^2
@@ -4647,7 +4647,7 @@ fn emit_builtin_log(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     c.code = emit_mulsd_xmm0_xmm1(c.code)          // xmm0 = f^6 * (1/7)
 
     // + f^4 / 5
-    c.code = emit_movsd_rbp_disp8_xmm1(c.code, -40)  // save partial to [rbp-40]
+    c.code = emit_movsd_rbp_disp8_xmm0(c.code, -40)  // save partial (f^6/7) to [rbp-40]
     c.code = emit_movsd_xmm0_rbp_disp8(c.code, -48)  // xmm0 = f^4
     let load_fifth_pos = c.code.len
     c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
@@ -5159,19 +5159,34 @@ pub fn compile_module_streaming_begin(nc: NativeCompiler, module: &IrModule) -> 
 
 pub fn compile_module_streaming_finish_into(nc: &! NativeCompiler, module: &IrModule) with Mut, Panic, Div, Alloc {
     if module.prof_counter_count > 0 {
+        // #1547: keep profiler names in the same rodata store the rest of the
+        // compile used. String literals and persisted builtin constants in this
+        // lane live in the flat rodata (NC_BIG_RODATA), and the final ELF writer
+        // emits the flat buffer exclusively whenever flat_rodata_len > 0 — inline
+        // bytes written here would be dropped and their relocs would alias flat
+        // content. Fall back to the inline table only when flat is still empty.
+        let use_flat_rodata = (*nc).flat_rodata_len > 0
         var pi = 0
         while pi < module.prof_counter_count {
             let pc = module.prof_counters[pi as usize]
-            (*nc).rodata = string_table_add((*nc).rodata, pc.fn_name.buf, pc.fn_name.len)
-            (*nc).prof_counter_names[pi as usize] = (*nc).rodata.last_offset
+            if use_flat_rodata {
+                (*nc).prof_counter_names[pi as usize] = nc_rodata_add_name_value(nc, pc.fn_name)
+            } else {
+                (*nc).rodata = string_table_add((*nc).rodata, pc.fn_name.buf, pc.fn_name.len)
+                (*nc).prof_counter_names[pi as usize] = (*nc).rodata.last_offset
+            }
             pi = pi + 1
         }
         (*nc).prof_counter_count = module.prof_counter_count
 
         // Sprint 47: store "profile.sprof" filename in .rodata
         let sprof_name = make_sprof_filename()
-        (*nc).rodata = string_table_add((*nc).rodata, sprof_name.buf, sprof_name.len)
-        (*nc).prof_sprof_name_offset = (*nc).rodata.last_offset
+        if use_flat_rodata {
+            (*nc).prof_sprof_name_offset = nc_rodata_add_name_value(nc, sprof_name)
+        } else {
+            (*nc).rodata = string_table_add((*nc).rodata, sprof_name.buf, sprof_name.len)
+            (*nc).prof_sprof_name_offset = (*nc).rodata.last_offset
+        }
     }
 
     // Sprint 46: emit __prof_dump function (if counters exist)
