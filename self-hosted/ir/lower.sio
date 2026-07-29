@@ -10596,6 +10596,31 @@ impl Lowerer {
         // storage for both `let` and `var`, otherwise an indexed mutation through
         // either binding changes the other value.
         var bind_reg = reg
+        // #1548: `var arr: [f64; N]` WITHOUT an initializer must still
+        // allocate the backing object. The None-expr path above lowers to
+        // emit_unit (ir_load_imm 0), so the slot held the bare value 0 and
+        // the first indexed store or read resolved handle 0 → SIGSEGV on
+        // Madaros native (lean_single zero-initializes instead). Allocate
+        // exactly like the `[0.0; N]` repeat literal: ir_alloc_array with NO
+        // fill loop — lower_array_repeat_literal_ref skips the fill for
+        // zero-fill values because the fresh heap arena is zero pages, so
+        // every element reads 0 / 0.0 / false, matching lean_single parity.
+        match s.expr {
+            None => {
+                if fixed_array_len >= 0 {
+                    let uninit_pair = lo.fresh_reg()
+                    lo = uninit_pair.0
+                    let uninit_dst = uninit_pair.1
+                    lo = lo.emit(ir_alloc_array(uninit_dst, lo.aggregate_storage_bytes(fixed_array_len), fixed_array_len))
+                    if lower_opt_type_is_array_of_f64(&s.ty) {
+                        lo = lo.emit(ir_mark_float_reg(uninit_dst))
+                        lo = lo.bind_reg_array_elem_float(uninit_dst)
+                    }
+                    bind_reg = uninit_dst
+                }
+            }
+            _ => {}
+        }
         match s.expr {
             Some(rhs_ident) => {
                 if (*rhs_ident).kind == ExprKind::ExprIdent {
