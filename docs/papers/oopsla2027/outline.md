@@ -1,6 +1,6 @@
 # Self-Falsifying Compilation — paper skeleton (OOPSLA 2027)
 
-**Status:** `SKELETON` — `PAPER_SKELETON_TOKEN_BOUND__NOVELTY_NARROWED_BY_SEARCH__CI_UNWIRED`
+**Status:** `SKELETON` — `PAPER_SKELETON_TOKEN_BOUND__NOVELTY_NARROWED_BY_SEARCH__CI_WIRED`
 **Date:** 2026-07-26
 **Harness:** `scripts/research/self_falsifying_compilation_line_r5_contract.py`
 **Gate:** `scripts/ci/self_falsifying_compilation_line_r5_gate.sh`
@@ -12,14 +12,29 @@
 > Chain of custody: **paper → spec** is checked here; **spec → contract** is
 > checked by each rung's own gate.
 >
-> **That chain is currently aspirational, and the verdict token says so.** None
-> of the line's gates is invoked by any CI workflow — they have only ever been
-> run by hand. Until they are wired, `spec → contract` is guarded by a check
-> nobody executes. `W4_CI_WIRING` measures this and the token carries it
-> (`__CI_UNWIRED`), so the claim cannot be quietly assumed; wiring them flips it
-> to `__CI_WIRED` and this paragraph must change with it. `ci.yml` was left
-> untouched deliberately — another agent has uncommitted edits to it, and
-> staging that file would have swept their work into this line's commits.
+> **That chain is now executed.** All **21** of the line's gates are invoked by
+> `.github/workflows/ci.yml`; `W4_CI_WIRING` measures it and the token has
+> flipped to `__CI_WIRED`. This paragraph said it would have to change when
+> that happened, and this is it.
+>
+> **What wiring cost, and what it immediately found.** 20 gates run per push for
+> ~200 s; R6's corpus sweep costs **957 s** — O(pairs × functions²) over a corpus
+> grown from 47 files to 61 — so it runs **nightly** rather than being dropped.
+> A check too expensive for every push is not thereby exempt from running; it
+> runs on a cadence the repo can pay for, and the number is in the workflow.
+>
+> The compile arms (`SFCL_R2/R17/R20_RUN_COMPILE`) are deliberately **not**
+> wired: each needs a purpose-built self-hosted compiler, ~40 min per push.
+> Their behaviour receipts are bound to the executor's sha256, so editing the
+> executor turns those rungs **red** in CI rather than certifying stale
+> behaviour.
+>
+> **Two gates were already red the first time they ran.** R1's bound-claim count
+> had gone stale (15 → 16) the moment R18 added a claim to the manifest, and
+> R2's surface clause pinned a decision-variable name that R17 and R20
+> legitimately renamed while behaviour stayed identical. Both had been wrong for
+> as long as nobody executed them — which is precisely the condition this
+> paragraph used to describe.
 
 ---
 
@@ -54,7 +69,7 @@ derivation of that function already sitting unused in the repository.
 | # | Contribution | Rung | Verdict token |
 |---|---|---|---|
 | C1 | An implementation of claim-gated code generation in a self-hosted compiler. **Not a novel capability** (cf. `build.rs`, §8.1); reported because the rest is measured on it. | R0 | `SUBSTRATE_LIVE__CORPUS_BOUND__HISTORICAL_FAILURES_ARE_INTERPRETIVE` |
-| C2 | What it costs to attach such a guard to a real corpus, and the wall it hits: claims in **imported modules never execute**. | R1 | `BOUND_15__MODULE_CLOSURE_BLOCKS` |
+| C2 | What it costs to attach such a guard to a real corpus, and the wall it hits: claims in **imported modules never execute**. | R1 | `BOUND_16__MODULE_CLOSURE_BLOCKS` |
 | C3 | **Verdict-token binding**: bind the build to the *proposition* a check reports, where prior art binds an exit status or a literal output. | R2 | `TOKEN_BINDING_IMPLEMENTED__CATCHES_DRIFT_NOT_MISINTERPRETATION` |
 | C4 | *Drift* vs *shared misinterpretation*, with an argument that the latter is out of reach, and a test of what does reach it. | R3 | `FALSIFIERS_NONVACUOUS_ONLY_FOR_CLOSED_FORM_CLAIMS` |
 | C5 | A retrospective under a predicate **fixed before the study ran**: a negative result and a degenerate arm, reported as such. | R4 | `RETROSPECTIVE_RUN__SOME_ARM_FIRED` |

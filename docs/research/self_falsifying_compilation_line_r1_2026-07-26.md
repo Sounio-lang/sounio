@@ -1,8 +1,8 @@
-# Self-falsifying compilation R1 — binding the corpus: 15 real gates bound, and the module-closure wall measured
+# Self-falsifying compilation R1 — binding the corpus: 16 real gates bound, and the module-closure wall measured
 
 **Date:** 2026-07-26
 **Orthography:** EN-UK
-**Status:** `EXECUTABLE` — `BOUND_15__MODULE_CLOSURE_BLOCKS`
+**Status:** `EXECUTABLE` — `BOUND_16__MODULE_CLOSURE_BLOCKS`
 **Parents:** `self_falsifying_compilation_line_2026-07-26.md` (R0 audit: substrate live, corpus unbound), `self_falsifying_compiler_spec_2026-07-25.md` (the mechanism)
 **Harness:** `scripts/research/self_falsifying_compilation_line_r1_contract.py`
 **Gate:** `scripts/ci/self_falsifying_compilation_line_r1_gate.sh`
@@ -15,12 +15,12 @@ R0 measured that the mechanism guarded nothing: **0** native claims outside
 tests and CI fixtures. R1 attaches real gates to real claims, and walks into the
 module-closure limitation on purpose to see how hard the wall is.
 
-> **15 real CI gates are now verified before codegen — and the guard cannot be
+> **16 real CI gates are now verified before codegen — and the guard cannot be
 > put where the science lives.**
 
 - **Binding works.** `examples/epistemic/rupture_claims_verified.sio` carries
-  **15 native claims bound to 15 real CI gates** (no fixtures). Compiled with
-  `--verify-claims`, every gate runs before codegen: `VERIFY_CLAIMS_OK pass=15`,
+  **16 native claims bound to 16 real CI gates** (no fixtures). Compiled with
+  `--verify-claims`, every gate runs before codegen: `VERIFY_CLAIMS_OK pass=16`,
   ELF emitted, ~30 s wall-clock. Swapping one bound gate for an always-failing
   fixture gives `VERIFY_CLAIMS_FALSIFIED`, non-zero exit, **no ELF** — verified,
   not assumed.
@@ -38,12 +38,21 @@ this rung's deliverable *and* the evidence of the limitation's cost.
 
 ---
 
+> **COUNT MOVED, 15 → 16, AND HOW IT WAS FOUND.** R18 added
+> `zd_fiber_spectra_count_law_holds` to this manifest — the first claim in the
+> repository to declare a `witness`. The bound-claim count is a *measured*
+> figure, so the token moved with it and this spec's headline went stale the
+> moment that claim landed. Nobody noticed, because **R1's gate had never been
+> run by CI** — the very condition `W4_CI_WIRING` has carried since R5. It
+> surfaced only when the gates were finally wired, which is the argument for
+> wiring in one sentence.
+
 ## 1. Results
 
 | Clause | Result | Status |
 |---|---|---|
-| `B1_MANIFEST_BOUND` | 15 claims bound to real CI gates in a non-test, non-fixture source | binding achieved. |
-| `B2_GATES_EXIST` | all 15 bound gate paths exist and are executable | no dangling bindings. |
+| `B1_MANIFEST_BOUND` | 16 claims bound to real CI gates in a non-test, non-fixture source | binding achieved. |
+| `B2_GATES_EXIST` | all 16 bound gate paths exist and are executable | no dangling bindings. |
 | `B3_MODULE_CLOSURE` | probe is decisive by construction; recorded outcome `MODULE_CLOSURE_BLOCKS` | wall confirmed. |
 | `B4_TIMEOUT_BUDGET` | 5 gates known to exceed the executor budget, none bound | exclusions explicit. |
 | `B5_HERMETIC` | 1 gate known to mutate the working tree, not bound; static scan of the 15 clean | compiles do not dirty the repo. |

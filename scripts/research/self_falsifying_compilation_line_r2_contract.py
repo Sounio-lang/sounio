@@ -89,14 +89,24 @@ def clause_t1() -> bool:
     # reporting chain branches on `decided`, never on `outcome` — see the R2
     # spec §3.2 for why. Match the shape that is actually compiled.
     #
-    # MAINTENANCE: these two patterns pin the implementation's magic numbers.
+    # MAINTENANCE: these patterns pin the implementation's magic numbers.
     # If the outcome codes are ever restored to named module constants (a
     # reasonable thing to do after a compiler fix), update the patterns here —
     # a failure would then be a stale contract, NOT a regression in the guard.
+    #
+    # The note above anticipated the CODES changing and pinned the decision
+    # VARIABLE instead, as `decided == 4`. R17 then added witness binding and
+    # renamed the branch variable to `settled`; R20 added provenance and renamed
+    # it to `final_out`. Behaviour was identical throughout — T5's receipt
+    # confirms it on a real compiler — but this clause went red on the spelling.
+    # The variable name is an implementation detail those rungs were entitled to
+    # change; what this clause means to assert is that each outcome code
+    # increments the failure count. Matched that way now, so the next rename
+    # does not fail it again.
     mismatch_block = re.search(
-        r"decided == 4\b.*?failed = failed \+ 1", src, re.DOTALL)
+        r"\b\w+ == 4\b.*?failed = failed \+ 1", src, re.DOTALL)
     absent_block = re.search(
-        r"decided == 5\b.*?failed = failed \+ 1", src, re.DOTALL)
+        r"\b\w+ == 5\b.*?failed = failed \+ 1", src, re.DOTALL)
     if not mismatch_block:
         print("  token mismatch does not increment the failure count")
         ok = False
