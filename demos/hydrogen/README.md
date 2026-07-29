@@ -11,22 +11,18 @@ reproducibility living inside the language itself**, not in an external toolbox.
 ## Run
 
 ```bash
-bin/souc run demos/hydrogen/mh_stage_uq.sio                              # stage model (any engine)
-SOUNIO_SOUC_ENGINE=lean_single bin/souc run demos/hydrogen/mh_cascade_uq.sio  # cascade (see note)
+bin/souc run demos/hydrogen/mh_stage_uq.sio                              # stage model
+bin/souc run demos/hydrogen/mh_cascade_uq.sio                            # cascade
 bin/souc run demos/hydrogen/bayes_pilot.sio                              # value of pilot data (IDM)
 bin/souc run demos/hydrogen/hub_chain.sio                                # full chain: delivered EUR/kg
 ```
 
 Deterministic (seeded xorshift PRNG): every run prints the same numbers and
-ends with `MH_STAGE_UQ_OK` / `MH_CASCADE_UQ_OK`.
-
-**Engine note (hit live while building this demo):** the cascade file imports
-Sounio's own `stdlib/epistemic/pce.sio`, which calls libm through
-`extern "C"`. On the default Madaros engine the native path currently
-mis-lowers extern f64 returns (exp→0, observed 2026-07-26; the suite keeps
-its FFI tests on the lean_single stage2 engine). Until that lands, run the
-cascade with `SOUNIO_SOUC_ENGINE=lean_single` as above. The stage file uses
-pure-Sounio math only and runs on both engines with identical numbers.
+ends with `MH_STAGE_UQ_OK` / `MH_CASCADE_UQ_OK`. All demos run on the default
+Madaros engine as well as lean_single. (Historical note: the cascade imports
+`stdlib/epistemic/pce.sio`, which calls libm through `extern "C"`; until
+#1550 the Madaros native path dropped all but the first extern decl and
+mis-evaluated the exp/log builtins — issue #1547, fixed.)
 
 ## The model (`mh_stage_uq.sio`)
 
