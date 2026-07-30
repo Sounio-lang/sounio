@@ -82,7 +82,7 @@ they move with the corpus, and the contract re-measures them on every run.
 | `V1_VALUE_IS_A_LITERAL` | two sites, both quoted literals; one distinct value over 1213 topics | the field has no input |
 | `V2_ONE_DATE_FOR_EVERY_DOC` | census of the declared field over 1063 governed repo docs: `'2026-03-07': 1063` | one date, no exceptions |
 | `V3_DATE_PRECEDES_THE_REPO` | 0 commits older than the declared date; oldest commit 2026-05-31, i.e. **85 days** later | the corpus claims a validation older than its own history |
-| `V4_GATE_REJECTS_THE_TRUE_DATE` | hermetic hardlink farm; unmodified → `rc=0`, one truthful date → `rc=1` with `metadata mismatch for last_validated: expected "2026-03-07"` | the check rejects the truth |
+| `V4_GATE_REJECTS_THE_TRUE_DATE` | hermetic farm, **synced to consistency first**; then unmodified → `rc=0`, one truthful date → `rc=1` with `metadata mismatch for last_validated: expected "2026-03-07"` | the check rejects the truth |
 
 **V3 replaces a measurement that was tried and discarded.** The first attempt
 asked, per document, whether the declared date preceded the document's own
@@ -93,20 +93,42 @@ The surviving question needs no per-document dating and cannot be got wrong:
 **no commit in this repository is older than the date every document claims.**
 
 **V4 has two arms on purpose.** An instrument that fails on everything measures
-nothing. The farm is checked *unmodified* first and must reproduce the green
-result (`rc=0`); only then is one document given the date git records for its
-addition (2026-07-28 for R21's spec), and the same checker must reject it. Both
-arms are pinned by the gate, so this rung cannot decay into a one-armed
-instrument.
+nothing. The synced farm is checked *unmodified* first and must come back green
+(`rc=0`); only then is one document given the date git records for its addition
+(2026-07-28 for R21's spec), and the same checker must reject it. Both arms are
+pinned by the gate, so this rung cannot decay into a one-armed instrument.
 
-**The farm is hermetic and cheap.** R1's `B5_HERMETIC` excludes gates that
-dirty the working tree, so the demonstration must not edit a real document. The
-four trees the checker *walks* are copied with hardlinks — same bytes, no data
-movement — and every other root entry is symlinked, because the checker only
-resolves those (link targets, related artifacts). That distinction is the
-difference between a 0.4 s farm and a 130 s one; a whole-tree hardlink copy of
-29 GB takes 2 min 09 s and was measured before being rejected. Total rung cost:
-**~1.1 s**.
+**The farm is synced before it is measured, and that is a correction.** As first
+written, V4 measured the farm as-copied — so it inherited the repository's
+registry staleness, and went red whenever *anyone added a document without
+re-running the sync*. That happened **four times in the twelve hours after this
+rung landed**: this spec's own registration, then three from a co-working agent,
+the last of them committed (`1f3cdb484`), which turned the docs gate red on the
+branch and R22 with it. The clause was not wrong to refuse — the farm genuinely
+no longer reproduced green — but staleness is already the docs-registry gate's
+job, and a rung that duplicates another gate's alarm reports its neighbour's
+news instead of its own.
+
+The farm is now brought to consistency with the canonical sync **before** either
+control runs, so the clause asks one question only: *given a consistent corpus,
+does the checker still reject a document that tells the truth?* The separation
+is verified in the condition that motivated it — V4 passes while the
+repository's own docs gate is red.
+
+**Hermeticity had to be strengthened to allow it.** R1's `B5_HERMETIC` excludes
+gates that dirty the working tree, and a sync *writes* — `sync_governance_metadata.mjs`
+rewrites the three governance artifacts unconditionally (`:84-86`). Hardlinks
+would have written straight through into the real files. So every tree the sync
+can touch is now a **real** copy (`docs`, `examples`, `paper`, `spec`,
+`README.md`, and `website/src/content` — 2.4 MB of the 706 MB tree, the rest
+symlinked around a real spine), and the clause **asserts** non-interference
+rather than assuming it: the mtime and size of the three governance artifacts
+and the subject document are fingerprinted before the farm is built and compared
+after, with the gate failing on any breach.
+
+Cost, measured: the real copy is 2.6 s cold, sub-second warm; a whole-tree
+hardlink copy of 29 GB was measured at 2 min 09 s and rejected. Total rung cost
+is unchanged at **~1.1 s** warm.
 
 ## 4. Why this rung belongs to this line
 

@@ -18,6 +18,16 @@ for c in V1_VALUE_IS_A_LITERAL V2_ONE_DATE_FOR_EVERY_DOC \
          V3_DATE_PRECEDES_THE_REPO V4_GATE_REJECTS_THE_TRUE_DATE; do
     grep -q "^${c} PASS" <<<"$OUT" || fail "${c} did not PASS"
 done
+# The separation from registry staleness is the point of V4's farm sync: without
+# it this rung goes red whenever anyone adds a document, which is the docs-registry
+# gate's job and not this one's. If the sync is removed, say so here.
+grep -q 'V4 farm synced to consistency' <<<"$OUT" \
+    || fail "the farm is no longer synced before measurement -- V4 has gone back to inheriting registry staleness"
+# A sync WRITES. If a real copy ever degrades back into a hardlink it writes
+# through to the working tree, so hermeticity is asserted, not assumed.
+grep -qE 'V4 hermetic: [0-9]+ working-tree files unchanged' <<<"$OUT" \
+    || fail "hermeticity is no longer asserted after the farm sync"
+
 # An instrument with one arm measures nothing. Both controls must remain.
 grep -qE 'negative control -- farm unmodified: checker rc=0' <<<"$OUT" \
     || fail "the negative control no longer reproduces the green result"

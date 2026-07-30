@@ -66,11 +66,17 @@ REGISTRY = ROOT / "docs/governance/topic-registry.v1.json"
 # receipt in the spec stays reproducible.
 SUBJECT = "docs/research/self_falsifying_compilation_line_r21_2026-07-28.md"
 
-# The four trees the checker WALKS need real directories, so they are copied
-# with hardlinks (same bytes, no data movement). Everything else it merely
-# resolves -- link targets, related artifacts -- so a symlink is enough, and
-# that is the difference between a 0.4 s farm and a 130 s one.
-FARM_WALKED = ["docs", "examples", "paper", "website", "spec"]
+# The farm is SYNCED before it is measured (see clause_v4), so every tree the
+# sync can write must be a REAL copy -- a hardlink would write through to the
+# working tree, and sync_governance_metadata.mjs writes the three governance
+# artifacts unconditionally (:84-86). Everything else the checker merely
+# resolves -- link targets, related artifacts -- so a symlink is enough. Real
+# copy of these is 2.6 s; a whole-tree hardlink copy of 29 GB is 2 min 09 s.
+FARM_COPY = ["docs", "examples", "paper", "spec", "README.md"]
+# website is walked only under src/content (2.4 MB); the other 706 MB is
+# resolved, never written, so it is symlinked around a real spine.
+FARM_WEBSITE_COPY = "website/src/content"
+SYNC = "scripts/docs/sync_governance_metadata.mjs"
 
 META_RE = re.compile(r"^<!-- docs:meta\n([\s\S]*?)\n-->", re.M)
 FIELD_RE = re.compile(r"^last_validated:\s*(.+)$", re.M)
@@ -198,22 +204,66 @@ def clause_v4(literal: str) -> bool:
         print()
         return False
 
+    # Hermeticity is now load-bearing: the farm gets synced, and a sync writes.
+    # Fingerprint what the sync would rewrite in the working tree if a copy ever
+    # degraded back into a hardlink, and compare after.
+    witnessed = [ROOT / "docs/governance/topic-registry.v1.json",
+                 ROOT / "docs/governance/DOCS_AUTHORITY_MATRIX.md",
+                 ROOT / "docs/governance/DOCS_ACCEPTANCE_REPORT.md",
+                 subject]
+    before = {p: (p.stat().st_mtime_ns, p.stat().st_size)
+              for p in witnessed if p.is_file()}
+
     farm = Path(tempfile.mkdtemp(prefix="sfcl-r22-farm."))
     try:
-        # Hardlink farm: same bytes, different tree. The working tree is read
-        # but never written -- this line's own hermeticity rule (R1 B5).
-        walked = [p for p in FARM_WALKED if (ROOT / p).exists()]
-        cp = subprocess.run(["cp", "-al", *walked, str(farm)], cwd=str(ROOT),
+        # The farm is a real copy of what the sync writes, symlinks elsewhere.
+        # The working tree is read but never written -- this line's own
+        # hermeticity rule (R1 B5), and it is asserted below, not assumed.
+        copied = [p for p in FARM_COPY if (ROOT / p).exists()]
+        cp = subprocess.run(["cp", "-a", *copied, str(farm)], cwd=str(ROOT),
                             capture_output=True, text=True)
         if cp.returncode != 0:
             print(f"V4 farm could not be built: {cp.stderr.strip()[:200]}")
             print("V4_GATE_REJECTS_THE_TRUE_DATE FAIL")
             print()
             return False
+        # website: real spine down to src/content, symlinks for the rest.
+        web = ROOT / "website"
+        if web.is_dir():
+            (farm / "website/src").mkdir(parents=True)
+            subprocess.run(["cp", "-a", FARM_WEBSITE_COPY,
+                            str(farm / "website/src")], cwd=str(ROOT),
+                           capture_output=True, text=True)
+            for entry in sorted(os.listdir(web)):
+                if entry != "src":
+                    os.symlink(web / entry, farm / "website" / entry)
+            if (web / "src").is_dir():
+                for entry in sorted(os.listdir(web / "src")):
+                    if entry != "content":
+                        os.symlink(web / "src" / entry,
+                                   farm / "website/src" / entry)
+        skip = {".git", "website", *FARM_COPY}
         for entry in sorted(os.listdir(ROOT)):
-            if entry == ".git" or entry in FARM_WALKED:
+            if entry in skip:
                 continue
             os.symlink(ROOT / entry, farm / entry)
+
+        # SYNC THE FARM BEFORE MEASURING IT. Without this the negative control
+        # inherits the repository's registry staleness, and V4 goes red whenever
+        # anyone adds a document without re-running the sync -- which happened
+        # four times in the twelve hours after this rung landed, three of them
+        # from a co-working agent's uncommitted files. Staleness is already the
+        # docs-registry gate's job. This clause asks one question and should be
+        # answerable independently of that one: with a CONSISTENT corpus, does
+        # the checker still reject a document that tells the truth?
+        sync = subprocess.run(["node", str(ROOT / SYNC)], cwd=str(farm),
+                              capture_output=True, text=True)
+        if sync.returncode != 0:
+            print(f"V4 farm sync failed: {sync.stderr.strip()[:200]}")
+            print("V4_GATE_REJECTS_THE_TRUE_DATE FAIL")
+            print()
+            return False
+        print(f"V4 farm synced to consistency: {sync.stdout.strip()[:90]}")
 
         # NEGATIVE CONTROL. An instrument that fails on everything measures
         # nothing, so the farm must first reproduce the green result.
@@ -252,6 +302,17 @@ def clause_v4(literal: str) -> bool:
         ok = clean_green and rejected
     finally:
         shutil.rmtree(farm, ignore_errors=True)
+
+    touched = [p for p, sig in before.items()
+               if not p.is_file() or (p.stat().st_mtime_ns,
+                                      p.stat().st_size) != sig]
+    if touched:
+        for p in touched:
+            print(f"    HERMETICITY BREACH: {p.relative_to(ROOT)} was written")
+        ok = False
+    else:
+        print(f"V4 hermetic: {len(before)} working-tree files unchanged"
+              " across the farm sync")
 
     print(f"V4_GATE_REJECTS_THE_TRUE_DATE {'PASS' if ok else 'FAIL'}")
     print()
