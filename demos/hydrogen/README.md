@@ -12,6 +12,7 @@ reproducibility living inside the language itself**, not in an external toolbox.
 
 ```bash
 bin/souc run demos/hydrogen/mh7_reliability.sio                         # 7-stage HRS reliability (flagship)
+bin/souc run demos/hydrogen/trieres_chain.sio                           # TRIERES valley: dispensed EUR/kg p-box
 bin/souc run demos/hydrogen/mh_stage_uq.sio                              # stage model
 bin/souc run demos/hydrogen/mh_cascade_uq.sio                            # cascade
 bin/souc run demos/hydrogen/bayes_pilot.sio                              # value of pilot data (IDM)
@@ -76,6 +77,45 @@ exactly why the deliverable is a p-box, not a point reliability. The
 sensitivity analysis his paper offered itself as the tool for, run as one
 reproducible receipt: `bin/souc run demos/hydrogen/mh7_reliability.sio` →
 `MH7_RELIABILITY_OK`.
+
+## The valley chain (`trieres_chain.sio`) — TRIERES wellhead-to-dispensed cost as a p-box
+
+TRIERES is the EU hydrogen-valley project Demokritos is a paid beneficiary
+of (Grant Agreement 101112056, ~€197.5k). This demo prices the valley's core
+claim — hybridization lifts utilization — by chaining wellhead production →
+compression → storage → **dispensing** and asking the procurement question:
+does valley-scale green H2 beat the **€6/kg** dispensing gate?
+
+Sourced inputs are his literature exactly as in `hub_chain.sio` (Energies
+2023 CAPEX/O&M/LCOE/specific energy; the 44–89 kWh_th/kg compression span
+of his two compressor papers; heat price and tank cycling intervals). The
+valley-specific knobs are **illustrative assumptions, labeled in the file
+header**: CF ∈ [0.55, 0.80] (the utilization claim on trial — his published
+Crete electrolyser CF is [0.35, 0.44]), CAPEX ×[0.8, 1.2], specific energy
+±2.5 kWh/kg, dispensing [0.50, 1.50] €/kg (no citable source; swap slots).
+
+| analysis | result |
+| --- | --- |
+| delivered cost interval | **[4.46, 9.02] €/kg** (nominal 6.42 — misses the gate) |
+| conventional independence MC (n = 20 000) | mean 6.44, σ 0.52, **P(< €6/kg) = 20.8 %** — one number, pure assumption |
+| GUM first-order cross-check | σ 0.52, P(< 6) = 21.2 % — agrees |
+| **distribution-free corner p-box** | **[0 %, 100 %] — undetermined, no independence assumption** |
+
+The one-at-a-time corner table names the flippers: the **waste-heat
+contract** (78.6 % at its favourable end) and the **dispensing tariff**
+(76.2 %) each carry the gate alone; utilization CF (1.9 %) cannot — but the
+coalition CF + heat + dispensing flips it to 100 %. Sobol first-order
+shares of Var(D) (GUM-linear exact vs centered Jansen MC, sum 99.2 % — the
+small gap is genuine interaction share from the energy×price products):
+**heat price 32.2 % and dispensing 32.4 % dominate**, compression energy
+10.3 %, CF 6.1 %, and the electrolyser specs that dominate the literature
+(LCOE 2.5 %, CAPEX 5.3 %, specific energy 4.5 %) are minority shareholders.
+*For TRIERES: price the heat contract and the dispensing business model
+first; CF is a multiplier, not a saviour.* The shares are a map drawn under
+the assumption the p-box refuses — the interval is the deliverable, the map
+is how you shrink it. Monotonicity machine-checked in Lean 4
+(`SounioHydrogenPbox.monotone_event_equiv`). Both engines →
+`TRIERES_CHAIN_OK`.
 
 ## The model (`mh_stage_uq.sio`)
 
@@ -447,6 +487,11 @@ construction**. Both engines → `METHANATION_LOGK_GATE_OK`.
 - *Energies* 16:6257 (2023) (SMR/H2 feasibility, Crete): the hub-chain
   demo is built entirely from its published parameters — and computes the
   delivered-€/kg uncertainty the paper does not report.
+- TRIERES (EU hydrogen valley, Grant Agreement 101112056; Demokritos is a
+  paid beneficiary): `trieres_chain.sio` prices the valley's utilization
+  claim — the wellhead-to-dispensed €/kg p-box says the €6/kg gate is
+  decided by the heat contract and the dispensing tariff, not by the
+  electrolyser spec sheet.
 - *GHG: Sci. & Technol.* (2025), DOI 10.1002/ghg.2368 (H2–brine–calcite
   geochemistry) and the 2026 geothermal scaling paper: the two gate demos
   arm the exact failure mode they report — extrapolated equilibrium
