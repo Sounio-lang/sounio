@@ -35,6 +35,8 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-
 | Mutual FO expand | Cycle/miss → primary-arg FO; solid kind-6 skip on multipass | `mutual` |
 | Field FO via call | Pure struct-return projections + identity FWD field peel | `field_call` |
 | Nested field FO | `o.inner.cl0`, let-bind copy, `make(...).inner.cl0` paths | `nested_field` |
+| Deep call field FO | Arbitrary-depth `make().c.b.a.x` path_suffix peel | `deep_field` |
+| PK struct e2e | Peels + nested methods + shared channel + call projections | `pk_struct` |
 | Control | `if` SELECT blend (const + runtime) | `div_if`, `if_helper` |
 | 2nd-order mean | `E₂[f] ≈ f(μ) + ½ Σ H_kk σ_k²` | `second_order_mean`, `fo_emit_second_order_bias` |
 | Hessian diag | `hessian_diag_of(expr) → Σ H_kk` | `pow_const` |
@@ -64,7 +66,9 @@ Summary JSON lands under `$SOUNIO_FO_TRUST_DIR/summary.json` (or a temp dir prin
 **Measured 2026-07-28 (nested method FO):** 30/30 PASS — `madaros_gum_fo_nested_method`: `pk.css` via nested `self.rate/clearance` matches free/site (Var=0.795833, E₂=6.724).  
 **Measured 2026-07-28 (mutual FO):** 31/31 PASS — `madaros_gum_fo_mutual`: free/method mutual pairs at depth-1 match peel (Var=0.0121); DAG top still Var=4.  
 **Measured 2026-07-28 (field call FO):** 32/32 PASS — `madaros_gum_fo_field_call`: `make_pk(...).cl0`, `id_pk(pk).cl0`, nested identity match peels.  
-**Measured 2026-07-29 (nested field FO):** 33/33 PASS — `madaros_gum_fo_nested_field`: `o.inner.cl0`, let-bind, `make_outer(...).inner.cl0` match peels.
+**Measured 2026-07-29 (nested field FO):** 33/33 PASS — `madaros_gum_fo_nested_field`: `o.inner.cl0`, let-bind, `make_outer(...).inner.cl0` match peels.  
+**Measured 2026-07-30 (deep call field FO):** 35/35 PASS — `madaros_gum_fo_deep_field`: `make_d(...).c.b.a.x` (3 mids), identity nest, method-return nests match peels (Var=0.09).  
+**Measured 2026-07-30 (PK struct e2e):** 35/35 PASS — `madaros_gum_fo_pk_struct`: peels + nested methods + shared channel + call/nested projections on a dissertation-shaped `Pk` (Css Var=0.795833, E₂=6.724, CL=0.34).
 
 ## Science drivers
 
@@ -72,6 +76,7 @@ Summary JSON lands under `$SOUNIO_FO_TRUST_DIR/summary.json` (or a temp dir prin
 |------|------|------------|
 | Same-module pure helpers | `examples/epistemic_fo_second_order/fo_pk_exposure_driver.sio` | local `css_helper` |
 | **Multi-mod import (preferred science)** | `examples/epistemic_fo_second_order/fo_pk_exposure_import_driver.sio` | `use epistemic::fo::{fo_css,…}` |
+| **PK struct e2e (fields + methods)** | `tests/run-pass/madaros_gum_fo_pk_struct.sio` | `Pk` peels, `css` nested methods, call projections |
 
 Both model Css = (F·Dose/τ)/(CL0·exp(η)). Import driver is the multi-mod receipt after FO prepass + Program-by-value fix.
 
@@ -99,7 +104,9 @@ Css = (F·Dose/τ)/(CL0·exp(η)) — **same numbers on local and imported helpe
 6. **~~Method FO~~ CLOSED for pure f64-arg methods** — mangled `Type_method` FO_XFER with recv as param 0. Gate: `method`.
 6b. **~~Struct field FO~~ CLOSED** — struct-lit inits bind FO to `base_field` keys; field access + alias copy; bytecode op 17 `LOAD_PARAM_FIELD` for `self.field` in method bodies. Gate: `struct_field`.
 6b2. **~~Field FO via pure call~~ CLOSED** — `mangle(fn,field)` identity projections for struct-lit returns; identity FWD peels `.field` through args. Gate: `field_call`.
-6b3. **~~Nested field FO~~ CLOSED** — recursive struct-lit bind (`o_inner_cl0`); path keys; recursive projections; let-bind of nested struct copies FO. Gate: `nested_field`. Residual: non-pure constructors; >2 field nest on call results.
+6b3. **~~Nested field FO~~ CLOSED** — recursive struct-lit bind (`o_inner_cl0`); path keys; recursive projections; let-bind of nested struct copies FO. Gate: `nested_field`.
+6b4. **~~Deep call-result field FO~~ CLOSED** — recursive `fo_resolve_projected_fo` peels FieldAccess leftward to Call/MethodCall with arbitrary-depth path_suffix mangle (removes mid1/mid2 ceiling). Gate: `deep_field` (`make().c.b.a.x`, identity nest, method-return nests). Residual: non-pure constructors; method FO with Call-result receiver (`make_pk(...).css(...)`).
+6b5. **~~PK struct e2e~~ CLOSED for Ident-bound Pk** — peels, nested methods, shared channel, call/nested field projections on a dissertation-shaped `Pk`. Gate: `pk_struct`. Residual: method FO on Call-result receivers; method FO on let-alias of Call-return.
 6c. **~~Nested method FO~~ CLOSED** — FO bytecode expands `ExprMethodCall` via mangled `Type_method` under `FO_BC_IMPL_TYPE` (+ multipass register). Gate: `nested_method`.
 6d. **~~Mutual FO expand~~ CLOSED for fixed small depth** — expand stack cycle + missing-callee → primary-arg FO; multipass refreshes only opaque transfers (solid kind-6 kept). Gate: `mutual` (depth-1 even/odd free+method). Residual: deep data-dependent recursion not fully unrolled; primary-arg is an approximation on cycles.
 7. **FO builtins remain compiler-injected** (`variance_of`, …) — stdlib `epistemic::fo` wraps *pure helpers*, not the builtins themselves (AST-walk requirement).
@@ -121,17 +128,19 @@ Css = (F·Dose/τ)/(CL0·exp(η)) — **same numbers on local and imported helpe
 - **Mutual FO expand.** Cycle/miss primary-arg fallback; multipass skips solid non-opaque kind-6 (avoids re-register corruption). Gate: `mutual`.
 - **Field FO via pure call.** `fo_register_struct_field_projections` + `lower_expr_field_variance_ref` for Call/MethodCall bases. Gate: `field_call`.
 - **Nested field FO.** Recursive bind/projections; `fo_expr_struct_path_key`; call path `make().inner.cl0`. Gate: `nested_field`.
+- **Deep call-result field FO.** `fo_resolve_projected_fo` + path_suffix mangle (no mid1/mid2 ceiling); identity multi-level peel. Gate: `deep_field`.
+- **PK struct e2e.** Dissertation-shaped `Pk`: peels + nested methods + shared channel + call projections. Gate: `pk_struct`.
 
 ## Gate inventory
 
-All files matching `tests/run-pass/madaros_gum_fo_*.sio` are members of the trust gate (33 files including `nested_field`). Adding a new FO gate = drop a `madaros_gum_fo_*.sio` with a `MADAROS_GUM_FO_*_PASS` token.
+All files matching `tests/run-pass/madaros_gum_fo_*.sio` are members of the trust gate (35 files including `deep_field` + `pk_struct`). Adding a new FO gate = drop a `madaros_gum_fo_*.sio` with a `MADAROS_GUM_FO_*_PASS` token.
 
 ## Next bold moves (ordered)
 
-1. Dissertation PK structs: peels on fields + nested methods + shared channel + call/nested projections.
-2. Deep recursive FO unroll (beyond depth-1 primary-arg approximation).
+1. Method FO with Call-result receiver (`make_pk(...).css(...)`) and method FO on let-alias of Call-return.
+2. Deep recursive FO unroll beyond depth-1 primary-arg approximation on mutual cycles.
 3. Keep `correlate` for *distinct* measures that share a latent.
-4. Deeper call-result nests (`make().a.b.c`) if science needs them.
+4. Non-pure constructors (FO only through pure struct-return paths today).
 
 ---
 

@@ -6625,57 +6625,46 @@ impl Lowerer {
                 return (lo_f, fvar)
             }
         }
-        // Call.field — top-level projection / identity FWD
-        if (*base).kind == ExprKind::ExprCall {
-            return self.fo_field_variance_of_call_path(base, field, ir_empty_name(), ir_empty_name())
+        // Call/MethodCall-rooted field chains of arbitrary depth:
+        // make().c.b.a.x / h.make(x).b.a.x peel via recursive path_suffix mangle.
+        self.fo_resolve_projected_fo(base, field)
+    }
+
+    // Peel FieldAccess leftward until Call/MethodCall; path_suffix is the
+    // mangled field path under the current node (outer fields already folded in).
+    // make().c.b + field x → recurse: c then b_a_x → call path make_d_c_b_a_x.
+    fn fo_resolve_projected_fo(
+        self,
+        e: &Expr,
+        path_suffix: Name
+    ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if path_suffix.len <= 0 {
+            return (self.fo_clear_expr_sens(), -1)
         }
-        // (Call.mid).field — one nested field on call result
-        if (*base).kind == ExprKind::ExprFieldAccess {
-            match (*base).left {
+        if (*e).kind == ExprKind::ExprCall {
+            return self.fo_field_variance_of_call_path(e, path_suffix)
+        }
+        if (*e).kind == ExprKind::ExprMethodCall {
+            return self.fo_field_variance_of_method_path(e, path_suffix)
+        }
+        if (*e).kind == ExprKind::ExprFieldAccess {
+            match (*e).left {
                 Some(inner) => {
-                    if (*inner).kind == ExprKind::ExprCall {
-                        return self.fo_field_variance_of_call_path(
-                            &(*inner), field, (*base).name, ir_empty_name()
-                        )
-                    }
-                    // (Call.a.b).field — two nested fields on call result
-                    if (*inner).kind == ExprKind::ExprFieldAccess {
-                        match (*inner).left {
-                            Some(inner2) => {
-                                if (*inner2).kind == ExprKind::ExprCall {
-                                    return self.fo_field_variance_of_call_path(
-                                        &(*inner2), field, (*inner).name, (*base).name
-                                    )
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    if (*inner).kind == ExprKind::ExprMethodCall {
-                        return self.fo_field_variance_of_method_path(
-                            &(*inner), field, (*base).name, ir_empty_name()
-                        )
-                    }
+                    // FO of e.path = FO of inner.(e.name_path)
+                    let nested = ir_mangle_method_name((*e).name, path_suffix)
+                    return self.fo_resolve_projected_fo(&(*inner), nested)
                 }
                 _ => {}
             }
         }
-        if (*base).kind == ExprKind::ExprMethodCall {
-            return self.fo_field_variance_of_method_path(
-                base, field, ir_empty_name(), ir_empty_name()
-            )
-        }
         (self.fo_clear_expr_sens(), -1)
     }
 
-    // FO of call(...).[mid1].[mid2].field via projected mangle path.
-    // mid1/mid2 empty = top-level field only.
+    // FO of call(...).<path_suffix> via projected mangle (path may be multi-mid).
     fn fo_field_variance_of_call_path(
         self,
         call: &Expr,
-        field: Name,
-        mid1: Name,
-        mid2: Name
+        path_suffix: Name
     ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         match (*call).left {
             Some(callee_expr) => {
@@ -6683,14 +6672,7 @@ impl Lowerer {
                 if callee.len <= 0 {
                     return (self.fo_clear_expr_sens(), -1)
                 }
-                var proj = callee
-                if mid1.len > 0 {
-                    proj = ir_mangle_method_name(proj, mid1)
-                }
-                if mid2.len > 0 {
-                    proj = ir_mangle_method_name(proj, mid2)
-                }
-                proj = ir_mangle_method_name(proj, field)
+                let proj = ir_mangle_method_name(callee, path_suffix)
                 let xfer = self.fo_apply_call_transfer(proj, &(*call).args, 0)
                 var lo_x = xfer.0
                 let xv = xfer.1
@@ -6700,26 +6682,24 @@ impl Lowerer {
                 if lo_x.fo_expr_has_sens() {
                     return lo_x.fo_emit_var_from_sens()
                 }
-                // Identity FWD only for top-level field (no mid path)
-                if mid1.len == 0 && mid2.len == 0 {
-                    let idx = self.fo_xfer_lookup(callee)
-                    if idx >= 0 {
-                        var k = FO_XFER_KIND[idx as usize]
-                        var aidx = idx
-                        if k == 5 {
-                            let fh = FO_XFER_FWD_HASH[idx as usize]
-                            let fidx = fo_xfer_global_lookup_hash(fh)
-                            if fidx >= 0 {
-                                aidx = fidx
-                                k = FO_XFER_KIND[fidx as usize]
-                            }
+                // Identity FWD: id(arg).<path> → FO of arg.<path> (any depth).
+                let idx = self.fo_xfer_lookup(callee)
+                if idx >= 0 {
+                    var k = FO_XFER_KIND[idx as usize]
+                    var aidx = idx
+                    if k == 5 {
+                        let fh = FO_XFER_FWD_HASH[idx as usize]
+                        let fidx = fo_xfer_global_lookup_hash(fh)
+                        if fidx >= 0 {
+                            aidx = fidx
+                            k = FO_XFER_KIND[fidx as usize]
                         }
-                        if k == 1 {
-                            let pidx = FO_XFER_LIT[aidx as usize] as i64
-                            return self.fo_field_variance_of_nth_arg(
-                                &(*call).args, pidx, field
-                            )
-                        }
+                    }
+                    if k == 1 {
+                        let pidx = FO_XFER_LIT[aidx as usize] as i64
+                        return self.fo_path_variance_of_nth_arg(
+                            &(*call).args, pidx, path_suffix
+                        )
                     }
                 }
             }
@@ -6728,25 +6708,60 @@ impl Lowerer {
         (self.fo_clear_expr_sens(), -1)
     }
 
+    // FO of args[n].<path_suffix> (identity peel; path may be multi-level mangled).
+    fn fo_path_variance_of_nth_arg(
+        self,
+        args: &Option<Box<ExprList>>,
+        n: i64,
+        path_suffix: Name
+    ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if n < 0 || path_suffix.len <= 0 {
+            return (self.fo_clear_expr_sens(), -1)
+        }
+        var acur = args
+        var ai: i64 = 0
+        while true {
+            match *acur {
+                Some(al) => {
+                    if ai == n {
+                        let arg = &(*al).head
+                        // Ident-rooted: load base_path_suffix bind
+                        if (*arg).kind == ExprKind::ExprIdent {
+                            let key = ir_mangle_method_name((*arg).name, path_suffix)
+                            var lo_a = self.fo_load_local_sens(key)
+                            if lo_a.fo_expr_has_sens() {
+                                return lo_a.fo_emit_var_from_sens()
+                            }
+                            let fvar = lo_a.lookup_local_variance_reg(key)
+                            if fvar >= 0 {
+                                lo_a = lo_a.fo_seed_from_variance(fvar)
+                                return (lo_a, fvar)
+                            }
+                        }
+                        // Call/FieldAccess-rooted path under the arg
+                        return self.fo_resolve_projected_fo(arg, path_suffix)
+                    }
+                    ai = ai + 1
+                    acur = &(*al).tail
+                }
+                _ => break
+            }
+        }
+        (self.fo_clear_expr_sens(), -1)
+    }
+
+    // FO of recv.method(...).<path_suffix> via projected mangle.
     fn fo_field_variance_of_method_path(
         self,
         mcall: &Expr,
-        field: Name,
-        mid1: Name,
-        mid2: Name
+        path_suffix: Name
     ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let recv_type = self.lower_method_recv_type(&(*mcall).left)
         if recv_type.len <= 0 {
             return (self.fo_clear_expr_sens(), -1)
         }
         var proj = ir_mangle_method_name(recv_type, (*mcall).name)
-        if mid1.len > 0 {
-            proj = ir_mangle_method_name(proj, mid1)
-        }
-        if mid2.len > 0 {
-            proj = ir_mangle_method_name(proj, mid2)
-        }
-        proj = ir_mangle_method_name(proj, field)
+        proj = ir_mangle_method_name(proj, path_suffix)
         let xfer = self.fo_apply_call_transfer_recv(
             proj, &(*mcall).left, &(*mcall).args, 0
         )
