@@ -964,6 +964,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.subptx-phase-h-complete | historical | docs/research/subptx_phase_h_complete.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.subptx-sinkhorn16-2iter | historical | docs/research/subptx_sinkhorn16_2iter.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.suffering-aware-architecture-spec-2026-07-28 | historical | docs/research/suffering_aware_architecture_spec_2026-07-28.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.suffering-aware-deep-architecture-spec-2026-07-28 | historical | docs/research/suffering_aware_deep_architecture_spec_2026-07-28.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.sunflower-168-sounio-note | historical | docs/research/sunflower-168-sounio-note.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.the-reckoning | historical | docs/research/the-reckoning.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.train-and-probe-usage | historical | docs/research/train-and-probe-usage.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

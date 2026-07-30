@@ -2,10 +2,11 @@
 topic_id: repo.docs.research.suffering-aware-deep-architecture-spec-2026-07-28
 authority: historical
 audience: researchers
-last_validated: 2026-07-30
+last_validated: 2026-03-07
 validated_by: A6
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.suffering-aware-deep-architecture-spec-2026-07-28
 -->
+
 
 <!-- docs:status-note:start -->
 > Docs status: `historical`
