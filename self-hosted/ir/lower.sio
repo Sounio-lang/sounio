@@ -6395,6 +6395,20 @@ impl Lowerer {
         && n.buf[10] == 102 as i8
     }
 
+    // sensitivity_of(x, k) -> the forward-mode partial of x w.r.t. measured
+    // channel k. lean_single has had this since lean_single.sio:13008; Madaros
+    // already tracked the quantity in fo_expr_sens but had no way to read it out.
+    fn name_is_sensitivity_of(self, n: Name) -> bool with Div {
+        n.len == 14
+        && n.buf[0] == 115 as i8 && n.buf[1] == 101 as i8
+        && n.buf[2] == 110 as i8 && n.buf[3] == 115 as i8
+        && n.buf[4] == 105 as i8 && n.buf[5] == 116 as i8
+        && n.buf[6] == 105 as i8 && n.buf[7] == 118 as i8
+        && n.buf[8] == 105 as i8 && n.buf[9] == 116 as i8
+        && n.buf[10] == 121 as i8 && n.buf[11] == 95 as i8
+        && n.buf[12] == 111 as i8 && n.buf[13] == 102 as i8
+    }
+
     fn name_is_uncertainty_of(self, n: Name) -> bool with Div {
         n.len == 14
         && n.buf[0] == 117 as i8 && n.buf[1] == 110 as i8
@@ -8714,7 +8728,9 @@ impl Lowerer {
             match (*e).left {
                 Some(callee_expr) => {
                     let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
-                    if self.name_is_variance_of(callee_name) || self.name_is_uncertainty_of(callee_name) {
+                    if self.name_is_variance_of(callee_name)
+                        || self.name_is_uncertainty_of(callee_name)
+                        || self.name_is_sensitivity_of(callee_name) {
                         return true
                     }
                     let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
@@ -12282,6 +12298,53 @@ impl Lowerer {
         }
     }
 
+    // sensitivity_of(x, k): read channel k out of the per-channel partials that
+    // lower_expr_variance_ref already leaves in fo_expr_sens — the same array
+    // variance_of squares and sums. The channel index must be a literal, matching
+    // lean_single: channels are compile-time slots assigned by measure(), so a
+    // runtime k has nothing to select. A channel with no recorded partial is a
+    // genuine zero — x does not depend on input k.
+    fn lower_sensitivity_of_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        match *args {
+            Some(list) => {
+                let pair_v = self.lower_expr_variance_ref(&(*list).head)
+                var lo = pair_v.0
+                var chan: i64 = 0 - 1
+                match (*list).tail {
+                    Some(rest) => {
+                        if (*rest).head.kind == ExprKind::ExprIntLit && (*rest).head.int_val >= 0 {
+                            chan = (*rest).head.int_val
+                        }
+                    }
+                    _ => {}
+                }
+                if chan >= 0 && chan < 32 {
+                    let sens = lo.fo_expr_sens[chan as usize]
+                    if sens >= 0 {
+                        // Copy, not the reg: for a mutable local this is its
+                        // persistent sens slot, and returning it would alias (#1535).
+                        let cp = lo.fresh_reg()
+                        lo = cp.0
+                        let dst = cp.1
+                        lo = lo.emit(ir_copy(dst, sens))
+                        lo = lo.emit(ir_mark_float_reg(dst))
+                        return (lo, dst)
+                    }
+                }
+                let z = lo.emit_f64_const(0.0)
+                var lo_z = z.0
+                lo_z = lo_z.emit(ir_mark_float_reg(z.1))
+                (lo_z, z.1)
+            }
+            _ => {
+                let z = self.emit_f64_const(0.0)
+                var lo_z = z.0
+                lo_z = lo_z.emit(ir_mark_float_reg(z.1))
+                (lo_z, z.1)
+            }
+        }
+    }
+
     fn lower_uncertainty_of_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let pair_v = self.lower_variance_of_call_ref(args)
         var lo = pair_v.0
@@ -12703,6 +12766,9 @@ impl Lowerer {
         if self.name_is_uncertainty_of(callee_name) {
             return self.lower_uncertainty_of_call_ref(&e.args)
         }
+        if self.name_is_sensitivity_of(callee_name) {
+            return self.lower_sensitivity_of_call_ref(&e.args)
+        }
         if self.contest_witness_kind_from_callee(callee_name) >= 0 {
             return self.lower_contest_witness_call(e.span, callee_name)
         }
@@ -12823,7 +12889,16 @@ impl Lowerer {
             return (lo_ext, dst)
         }
         let pair_call = lo3.ir_lower_prepend_validated_arg(fn_id, args, argc)
-        let lo4 = pair_call.lo
+        // A call CONSUMES its arguments' pending variance. Lowering `k.value` sets
+        // pending_variance_reg to the raw channel so `let x = k.value` inherits it —
+        // correct for a bare projection, wrong once the projection is an argument.
+        // For `let s = sin(k.value)` the let binding saw the leaked pending reg and
+        // bound the RAW channel variance, taking the branch that never calls
+        // lower_expr_variance_ref and therefore never applies the chain rule.
+        // Symptom: sensitivity_of(s, 0) read exactly 1.0 — the unit seed — for every
+        // argument, while variance_of stayed correct because it re-derives (#1549).
+        var lo4 = pair_call.lo
+        lo4.pending_variance_reg = -1
         let final_args = pair_call.args
         let final_argc = pair_call.argc
         var call_instr = ir_call(dst, fn_id, callee_name, final_args, final_argc)
@@ -13412,7 +13487,10 @@ impl Lowerer {
         let lo3 = pair_fn.0
         let fn_id = pair_fn.1
         let pair_call = lo3.ir_lower_prepend_validated_arg(fn_id, args2, arg_count + 1)
-        let lo4 = pair_call.lo
+        // Same as the plain-call site: a method call consumes its arguments' pending
+        // variance, so it must not leak into an enclosing let binding.
+        var lo4 = pair_call.lo
+        lo4.pending_variance_reg = -1
         let final_args = pair_call.args
         let final_argc = pair_call.argc
         let pair_d = lo4.fresh_reg()
