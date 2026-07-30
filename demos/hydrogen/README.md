@@ -15,6 +15,7 @@ bin/souc run demos/hydrogen/mh_stage_uq.sio                              # stage
 bin/souc run demos/hydrogen/mh_cascade_uq.sio                            # cascade
 bin/souc run demos/hydrogen/bayes_pilot.sio                              # value of pilot data (IDM)
 bin/souc run demos/hydrogen/hub_chain.sio                                # full chain: delivered EUR/kg
+bin/souc run demos/hydrogen/methanation_logk_gate.sio                   # methanation log-K gate
 ```
 
 Deterministic (seeded xorshift PRNG): every run prints the same numbers and
@@ -314,6 +315,54 @@ uncertainty, invisible to any single-code run. *His GHG-2025 fix was a
 better correlation; the deeper fix is a code that knows when
 extrapolation has become a guess.* Both engines → `VANTHOFF_GATE_OK`.
 
+## The methanation log-K gate (`methanation_logk_gate.sio`) — the constant he had to calibrate by hand
+
+The companion to the calcite gate, aimed at the exact constant his
+GHG-2025 paper (DOI 10.1002/ghg.2368) had to fix: the methanation
+equilibrium. phreeqc.dat anchors `CO3-2 + 10H+ + 8e- = CH4 + 3H2O` at
+log K0 = 41.071, ΔH = −61.039 kcal/mol (25 °C); a naive constant-ΔH
+van't Hoff then extrapolates it to storage temperatures without
+protest. This demo puts a gate on that extrapolation — an honest,
+labeled heuristic: inside ±40 K of the anchor, report the point (with a
+0.25-log-unit anchor band); past it, **refuse the point** and report an
+interval that widens 0.05 log units per kelvin of overreach.
+
+| temperature | naive log K | honest answer | width |
+| --- | --- | --- | --- |
+| 50 °C | 37.610 ± 0.25 | in-window: trusted point | 0.5 |
+| 90 °C | 33.063 | **REFUSED** — [31.563, 34.563] | 3.0 |
+| 120 °C | 30.260 | **REFUSED** — [27.260, 33.260] | 6.0 |
+| 150 °C | 27.854 | **REFUSED** — [23.354, 32.354] | 9.0 |
+
+A toy first-order 30-yr H2-loss proxy (labeled ILLUSTRATIVE in the
+file; rate anchored to Bo et al. 2021's 0.72–2.76 % field range, DOI
+10.1016/j.ijhydene.2021.03.116) shows what the refusal is worth: the
+naive workflow prints 2.00 / 0.40 / 0.10 % at 90/120/150 °C and moves
+on; the same proxy through the honest band spans **[0.85, 4.68] %**
+(5.5×) at 90 °C, [0.072, 2.24] % (31×) at 120 °C and
+[0.0076, 1.33] % (177×) at 150 °C. The mapping is not the problem —
+the extrapolated log K is. A p-box on breaching Bo's worst field case
+(2.76 %) comes back **[0 %, 100 %] at 90 °C: undetermined.**
+
+The file's center is a **calibration slot**: his paper's fix was a
+hand-calibrated log K(T) predicting *less* methanation than the
+database default — and that expression is paywalled. So the demo
+encodes only the abstract-level finding as a labeled placeholder
+interval (calibrated log K = naive − [2, 6]; toy 90 °C loss drops from
+2.0 % to [0.064, 0.637] %), with a two-line swap point inviting his
+real expression. And it closes with why the phantom CH4 dies either
+way: even the *low* end of the 150 °C band is ~10^23 — near-total
+conversion on thermodynamics alone, which is exactly why an
+equilibrium constant cannot price the kinetic losses that real UHS
+sites see (DOI 10.1016/j.est.2023.106737).
+
+Reproducibility is engineered, not hoped for: the two compiler
+backends' f64 printers round differently and float contraction can flip
+a borderline Monte Carlo comparison, so every number is emitted by a
+digit-wise integer printer and the MC counts with a pure-integer
+comparison — **byte-identical output on Madaros and lean_single, by
+construction**. Both engines → `METHANATION_LOGK_GATE_OK`.
+
 ## The stdlib modules (new, reusable)
 
 - **`stdlib/epistemic/pbox.sio`** — the p-box type: corner-exact interval
@@ -343,11 +392,13 @@ extrapolation has become a guess.* Both engines → `VANTHOFF_GATE_OK`.
 - *Energies* 16:6257 (2023) (SMR/H2 feasibility, Crete): the hub-chain
   demo is built entirely from its published parameters — and computes the
   delivered-€/kg uncertainty the paper does not report.
-- *GHG: Sci. & Technol.* (2025) (H2–brine–calcite geochemistry) and the
-  2026 geothermal scaling paper: the van't Hoff gate demo arms the exact
-  failure mode they report — extrapolated equilibrium constants used
-  past their evidence — with an interval and a refusal instead of a
-  silent wrong answer.
+- *GHG: Sci. & Technol.* (2025), DOI 10.1002/ghg.2368 (H2–brine–calcite
+  geochemistry) and the 2026 geothermal scaling paper: the two gate demos
+  arm the exact failure mode they report — extrapolated equilibrium
+  constants used past their evidence — with an interval and a refusal
+  instead of a silent wrong answer. `vanthoff_gate.sio` gates the calcite
+  pK; `methanation_logk_gate.sio` gates the very log K his GHG paper had
+  to hand-calibrate, and carries a two-line slot for his expression.
 - His techno-economic analyses run sensitivity by hand; here uncertainty
   is part of the program's value, and the run is a reproducible receipt.
 - For dual-use / safety contexts (INRASTES is an Energy & **Safety**

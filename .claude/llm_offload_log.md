@@ -3474,3 +3474,9 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 | Date | Provider | Task | Target | Outcome | Note |
 |---|---|---|---|---|---|
 | 2026-07-28 | xai/Grok 4.3 | math-review | self-hosted/native/codegen_x86_linux.sio (emit_builtin_exp / emit_builtin_log fixes, #1547) | PASS | All four audited items [OK]: (1) exp range reduction n=rnd(x/ln2), r=x-n·ln2, Horner e^r, 2^n rescale — "standard and exact (modulo rounding)"; (2) log atanh identity ln(x)=e·ln2+2·atanh(f), f=(m-1)/(m+1); (3) 0x3FC2492492492492 == 1/7 double confirmed (old 0x3FB2… == 1/14, exponent field check); (4) xmm0/xmm1 + [rbp-40/-48/-56] store fixes eliminate the three live-value clobbers with no math change. "No mathematical errors or leaps remain." Raw: `/tmp/llm-offload-Lukyou/`. |
+
+## 2026-07-30 - methanation log-K gate demo (Stamatakis GHG-2025)
+
+| Date | Provider | Task | Target | Outcome | Note |
+|---|---|---|---|---|---|
+| 2026-07-30 | xai/Grok 4.3; zai/GLM-5.2 | math-review | demos/hydrogen/methanation_logk_gate.sio | ADDRESSED | Grok: 6/7 [OK] (van't Hoff form, dh/R·ln10 constants, mh_exp/mh_ln/pow10 series reductions, integer Irwin-Hall MC decision rule, loss30 corner monotonicity); [OVERREACH] band_halfwidth 0.05-log-units/K slope is uncalibrated — comment now says so explicitly and that every printed spread moves with it (that dependence is the demo's point). Z.AI: caught [WRONG] integer boundary logic — `thr = floor(T + 0.5)` with `sd > thr` wrongly excludes `sd = ceil(T)` whenever frac(T) >= 0.5 (O(1) count skew, not measure-zero); fixed to the faithful integer image `thr = floor(T)`, so `sd > thr` ⟺ `sd > T` exactly. No printed count changes (all four corners have frac(T) < 0.5); both engines still byte-identical. Raws: `/tmp/llm-offload-uTLS84/`, `/tmp/llm-offload-LAgrWK/`. |
