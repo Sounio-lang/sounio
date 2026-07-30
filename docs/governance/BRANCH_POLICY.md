@@ -66,17 +66,31 @@ is what found it. The safety conclusion was unaffected (no hooks means nothing
 propagates a local ref change to the remote), but the sentence asserting which
 hooks ran was false for as long as it stood.
 
-As of 2026-07-30 `.githooks/` exists and is tracked, holding one hook:
+As of 2026-07-30 `.githooks/` exists and is tracked, holding two hooks. Neither
+touches the remote:
 
 - `pre-commit` — refuses a commit that adds a governed document without the
-  registry entry that makes CI green. Reads the **staged** tree, touches no
-  remote, and is skippable with `git commit --no-verify` or
-  `SOUNIO_SKIP_DOCS_REGISTRY_HOOK=1`.
+  registry entry that makes CI green. Reads the **staged** tree, and is
+  skippable with `git commit --no-verify` or `SOUNIO_SKIP_DOCS_REGISTRY_HOOK=1`.
+- `post-merge` — regenerates the governance artifacts after a merge and records
+  a follow-up commit if anything changed. Verified on a real merge: the merge
+  commit alone fails the docs-registry check with 2 errors, and the follow-up
+  commit makes it green.
 
-The `post-merge` and offload-policy hooks remain **uninstalled**; they are
-available at `scripts/dev/git-hooks/post-merge` and via
-`scripts/dev/check_offload_policy.sh --install`. Installing them is a
-deliberate act, not a side effect of this correction.
+> **`post-merge` writes commits, and it stages with `git add -A docs/`.** On a
+> shared checkout — this repository routinely has three agents on one worktree —
+> a merge by one agent sweeps every other agent's uncommitted `docs/` work into
+> an automatic commit under a message about metadata regeneration. The hazard is
+> not hypothetical: the test merge that verified this hook produced a follow-up
+> commit containing a change to a research spec the merge had not brought in.
+> If that matters for your session, either commit or stash `docs/` before
+> merging, or narrow the hook's staging to the files the sync actually
+> rewrote. The hook is installed as written rather than silently altered.
+
+The offload-policy hook remains **uninstalled**; install it deliberately with
+`scripts/dev/check_offload_policy.sh --install` (note that it writes to
+`.git/hooks/`, which `core.hooksPath` currently overrides — it would need to
+land in `.githooks/` to run).
 
 Fresh clones activate hooks with `git config core.hooksPath .githooks`.
 

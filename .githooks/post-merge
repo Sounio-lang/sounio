@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# scripts/dev/git-hooks/post-merge  (installed to .git/hooks/post-merge by
+# scripts/dev/install-git-merge-drivers.sh)
+#
+# The governance-regen merge driver (see .gitattributes) resolves the generated
+# docs/governance artifacts during a merge, but it runs *mid-merge* — before all
+# of the other side's docs are materialized — so it can leave stale content.
+# This hook regenerates them from the fully-merged doc set after the merge
+# completes, and records a small follow-up commit if anything changed, so a
+# plain `git merge origin/main` leaves the tree correct and CI-green with no
+# manual `sync_governance_metadata.mjs` step.
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+[ -f "$ROOT/scripts/docs/sync_governance_metadata.mjs" ] || exit 0
+
+node "$ROOT/scripts/docs/sync_governance_metadata.mjs" >/dev/null 2>&1 || exit 0
+cd "$ROOT"
+
+# Only docs/* is touched by the sync; commit just that, as a safe follow-up
+# commit (never rewrites/amends history).
+if ! git diff --quiet -- docs/ 2>/dev/null; then
+    git add -A docs/
+    git commit -q -m "chore(docs): regenerate governance metadata after merge" || true
+    echo "post-merge: regenerated docs/governance metadata (follow-up commit)"
+fi
