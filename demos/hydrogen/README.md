@@ -11,6 +11,7 @@ reproducibility living inside the language itself**, not in an external toolbox.
 ## Run
 
 ```bash
+bin/souc run demos/hydrogen/mh7_reliability.sio                         # 7-stage HRS reliability (flagship)
 bin/souc run demos/hydrogen/mh_stage_uq.sio                              # stage model
 bin/souc run demos/hydrogen/mh_cascade_uq.sio                            # cascade
 bin/souc run demos/hydrogen/bayes_pilot.sio                              # value of pilot data (IDM)
@@ -24,6 +25,57 @@ Madaros engine as well as lean_single. (Historical note: the cascade imports
 `stdlib/epistemic/pce.sio`, which calls libm through `extern "C"`; until
 #1550 the Madaros native path dropped all but the first extern decl and
 mis-evaluated the exp/log builtins — issue #1547, fixed.)
+
+## The flagship (`mh7_reliability.sio`) — his seven-stage HRS compressor, reliability-quantified
+
+His first-author seven-stage paper (*Renewable Energy* 147 (2020) 164–178,
+DOI 10.1016/j.renene.2019.08.104) chains seven MH stages on 80 °C heat to
+reach 365 bar for 350-bar dispensing — and offers itself explicitly as a
+model and tool for sensitivity analysis. This demo takes the offer
+literally: the whole chain, plus the batch-to-batch alloy scatter no
+nominal-point run can see, as one deterministic receipt on both engines.
+
+The paper's per-stage alloy internals (its Table 3) sit behind a paywall,
+so the per-stage ΔH ladder (24–36 kJ/mol H2, batch half-widths
+±1.5–2.5 kJ/mol assigned by alloy maturity) is **representative — ours,
+labeled as such in the file header, with a swap slot for the real values**.
+What is his: both published system-level oracles reproduce exactly.
+
+| oracle (his paper) | demo |
+| --- | --- |
+| overall compression ratio 18.7 @ 80 °C | 18.700002 |
+| delivery pressure 365 bar | 365.000037 bar |
+| ratio 41.5 @ 120 °C | 41.500004 |
+
+Nominal chain: per-stage ratios 1.464–1.565 across overlapping temperature
+windows (20→35 … 65→80 °C), cumulative pressure 28.6 → 42.5 → 64.0 → 97.6 →
+150.2 → 233.3 → 365.0 bar from the implied 19.5 bar supply.
+
+Then the question HRS procurement actually asks: per-stage batch ΔH shifts
+as **intervals** (no published batch distributions), lognormal efficiency
+scatter (σ_ln η = 0.035) — what is P(P7 ≥ 350 bar), the dispensing gate?
+
+| analysis | P(≥ 350 bar) |
+| --- | --- |
+| batches at nominal ΔH (η scatter only) | 67.3 % |
+| independent batches | 65.3 % (GUM cross-check: 65.27 %) |
+| one batch fills all stages (full correlation) | 59.0 % (GUM: 59.85 %) |
+| **dependence cost — unobservable without batch data** | **6.2 pp** |
+| **distribution-free corner p-box** | **[1.3 %, 99.9 %] — the reliability is an interval, not a number** |
+
+Sobol first-order shares of Var(ln P7) — exact, because the model *is*
+linear in log space, cross-checked by a Saltelli/Jansen Monte Carlo whose
+indices sum to 99.995 %: efficiency scatter carries **75.0 %** of the
+variance; among alloy batches the high-pressure stages dominate (stage 6:
+4.7 %, stage 7: 4.3 %; stage 1: 2.7 %). The measurement priority falls out
+for free: *efficiency is the big lever; among the alloys, characterize
+stages 6–7 first.* And the honest floor: the longest published industrial
+MH-compressor campaigns run ~1 year / 10 000 cycles (Tarasov et al.,
+*J. Phys.: Energy* 2, 2020), so fleet batch data barely exists — which is
+exactly why the deliverable is a p-box, not a point reliability. The
+sensitivity analysis his paper offered itself as the tool for, run as one
+reproducible receipt: `bin/souc run demos/hydrogen/mh7_reliability.sio` →
+`MH7_RELIABILITY_OK`.
 
 ## The model (`mh_stage_uq.sio`)
 
@@ -384,7 +436,10 @@ construction**. Both engines → `METHANATION_LOGK_GATE_OK`.
 - *Renewable Energy 147 (2020) 164–178*, DOI 10.1016/j.renene.2019.08.104
   (seven-stage MH compression for HRS) and *IJHE 46 (2021) 29272–29287*
   (dual-stage MH2C under thermal management): the stage
-  and cascade files are the per-stage core of those system models, and
+  and cascade files are the per-stage core of those system models,
+  `mh7_reliability.sio` reproduces the seven-stage paper's published
+  system-level oracles exactly and computes the batch-uncertainty
+  reliability it does not report, and
   their thermal-energy figures (44–89 kWh_th/kg) are the two endpoints of
   the decisive interval in `hub_chain.sio`.
 - *Hydrogen* 6(4):91 (2025) (caprock integrity for UHS): the p-box demo
