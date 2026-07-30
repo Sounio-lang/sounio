@@ -83,9 +83,31 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if [[ -n "${SOUC_BIN:-}" || -n "${SOUNIO_SOUC_BIN:-}" ]]; then
-    SEED="$BOOTSTRAP_ELF"
-    echo "→ using provided seed directly (SOUC_BIN/SOUNIO_SOUC_BIN): $SEED"
+# SEED SELECTION.
+#
+# SOUC_BIN / SOUNIO_SOUC_BIN used to short-circuit derivation and pin SEED to the
+# committed prebuilt. Two things were wrong with that:
+#
+#   1. Those variables select the USER-FACING compiler (see bin/souc), not the
+#      bootstrap seed, and the workspace context hook exports SOUC_BIN — so an
+#      ordinary agent session silently opted out of derivation without asking.
+#   2. The committed prebuilt lags main.sio, which the message below already
+#      admits (#725). As of 2026-07-30 it SEGFAULTS compiling main.sio:
+#      deterministic, exit 139, no ELF. Derivation from lean_single.sio works.
+#
+# So they no longer choose the seed. To pin one deliberately, set
+# SOUNIO_MADAROS_SEED to its path — an explicit variable that means only this.
+# A pinned seed that cannot build main.sio falls back to derivation with a
+# warning rather than failing the build: a stale pin should cost time, not
+# correctness. (#1559)
+if [[ -n "${SOUNIO_MADAROS_SEED:-}" ]]; then
+    SEED="$SOUNIO_MADAROS_SEED"
+    if [[ ! -x "$SEED" ]]; then
+        echo "error: SOUNIO_MADAROS_SEED is not an executable file: $SEED" >&2
+        exit 1
+    fi
+    echo "→ using pinned seed (SOUNIO_MADAROS_SEED): $SEED"
+    PINNED_SEED=1
 else
     if [[ ! -f "$LEAN_SRC" ]]; then
         echo "error: lean_single source not found for seed derivation: $LEAN_SRC" >&2
@@ -112,10 +134,42 @@ echo "  src:   $SRC"
 echo "  out:   $OUT"
 
 # Serialize heavy build via the global workspace lock.
+#
+# `|| true` so a seed that crashes is diagnosed here rather than aborting under
+# set -e. The stale committed prebuilt segfaults on current main.sio, and the
+# useful response is to say which seed died and try a good one — not to hand the
+# caller a bare exit 139.
+set +e
 scripts/dev/souc-build-lock.sh "$SEED" "$SRC" "$OUT"
+BUILD_RC=$?
+set -e
 
-if [[ ! -s "$OUT" ]]; then
-    echo "error: modular compiler build produced no output: $OUT" >&2
+if [[ "$BUILD_RC" -ne 0 || ! -s "$OUT" ]]; then
+    echo "warning: seed failed to build the compiler (exit $BUILD_RC, output $([[ -s "$OUT" ]] && echo present || echo absent))" >&2
+    echo "warning:   seed was: $SEED" >&2
+    if [[ "${PINNED_SEED:-0}" == "1" && -f "$LEAN_SRC" ]]; then
+        # A pinned seed that cannot compile main.sio is stale, not fatal: derive a
+        # fresh one from lean_single.sio and retry once. This is the exact recovery
+        # a caller would do by hand after reading the message above.
+        echo "warning: pinned seed is unusable; deriving from lean_single.sio and retrying" >&2
+        TMP_SEED_DIR="$(mktemp -d "${TMPDIR:-/tmp}/madaros-seed.XXXXXX")"
+        SEED="$TMP_SEED_DIR/gen_seed.elf"
+        scripts/dev/souc-build-lock.sh "$BOOTSTRAP_ELF" "$LEAN_SRC" "$SEED"
+        if [[ ! -s "$SEED" ]]; then
+            echo "error: fallback seed derivation produced no output: $SEED" >&2
+            exit 1
+        fi
+        chmod +x "$SEED"
+        rm -f "$OUT"
+        set +e
+        scripts/dev/souc-build-lock.sh "$SEED" "$SRC" "$OUT"
+        BUILD_RC=$?
+        set -e
+    fi
+fi
+
+if [[ "$BUILD_RC" -ne 0 || ! -s "$OUT" ]]; then
+    echo "error: modular compiler build produced no output: $OUT (seed exit $BUILD_RC)" >&2
     exit 1
 fi
 
