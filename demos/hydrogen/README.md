@@ -1,7 +1,7 @@
 # demos/hydrogen — Metal-Hydride Hydrogen Compression, Uncertainty-Quantified
 
 A Sounio demonstration written for **Dr. Emmanuel Stamatakis** (NCSR Demokritos,
-Integrated Hydrogen Laboratory / H2Lab; CYRUS P.C.).
+Integrated Hydrogen Laboratory / H2Lab; CYRUS S.A.).
 
 It takes the single-stage core of the metal-hydride (MH) thermal compression
 concept he has published on for a decade — and shows what Sounio adds on top of
@@ -351,8 +351,8 @@ extrapolation has become a guess.* Both engines → `VANTHOFF_GATE_OK`.
 - His techno-economic analyses run sensitivity by hand; here uncertainty
   is part of the program's value, and the run is a reproducible receipt.
 - For dual-use / safety contexts (INRASTES is an Energy & **Safety**
-  institute; CALIPSO is EDF): deterministic receipts plus epistemic labels
-  are the audit trail.
+  institute, and he leads innovation at CYRUS S.A.): deterministic receipts
+  plus epistemic labels are the audit trail.
 
 ## Honest boundaries
 
