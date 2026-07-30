@@ -56,8 +56,29 @@ ls "$(git config --get core.hooksPath || echo .git/hooks)"
 # myth and deletion is unsafe until it is understood.
 ```
 
-As of 2026-07-21 the only active hooks are `post-merge` (governance-doc regen)
-and `pre-commit` (offload-policy check) — neither touches the remote.
+**Corrected 2026-07-30.** This section previously stated that `post-merge`
+(governance-doc regen) and `pre-commit` (offload-policy check) were the active
+hooks. They were not active, and had not been: `core.hooksPath` pointed at
+`.githooks`, a directory that **did not exist**, so git ran no hooks at all —
+including the `pre-commit` sitting in `.git/hooks`, which `core.hooksPath`
+overrides. The check in the block above is the one that reveals this; running it
+is what found it. The safety conclusion was unaffected (no hooks means nothing
+propagates a local ref change to the remote), but the sentence asserting which
+hooks ran was false for as long as it stood.
+
+As of 2026-07-30 `.githooks/` exists and is tracked, holding one hook:
+
+- `pre-commit` — refuses a commit that adds a governed document without the
+  registry entry that makes CI green. Reads the **staged** tree, touches no
+  remote, and is skippable with `git commit --no-verify` or
+  `SOUNIO_SKIP_DOCS_REGISTRY_HOOK=1`.
+
+The `post-merge` and offload-policy hooks remain **uninstalled**; they are
+available at `scripts/dev/git-hooks/post-merge` and via
+`scripts/dev/check_offload_policy.sh --install`. Installing them is a
+deliberate act, not a side effect of this correction.
+
+Fresh clones activate hooks with `git config core.hooksPath .githooks`.
 
 ---
 

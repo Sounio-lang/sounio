@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# .githooks/pre-commit — refuse a commit that adds or renames a governed
+# document without the registry entry that makes CI green.
+#
+# WHY THIS EXISTS. docs/governance/topic-registry.v1.json is derived from the
+# FILESYSTEM, so a document committed ahead of its registry entry leaves the
+# checked-in registry stale, and .github/workflows/ci.yml runs
+# scripts/dev/check_docs_registry.sh on every push. Between 2026-07-29 and
+# 2026-07-30 that happened five times in twelve hours across three agents --
+# four repaired by hand, one (1f3cdb484) sitting red on a branch with an open PR
+# for four hours. The ordering that avoids it (commit the doc, THEN sync, THEN
+# commit the sync) is not discoverable from the tooling. So it is enforced here
+# instead of being remembered.
+#
+# IT CHECKS THE STAGED TREE, NOT THE WORKING TREE. A hook that reads the working
+# tree answers a question nobody asked: it passes on a dirty tree that would
+# commit broken, and fails on a clean commit whose fix is merely unstaged. The
+# staged tree is materialised from `git write-tree` into a temporary farm.
+#
+# Escape hatches, in order of preference:
+#   git commit --no-verify              once, deliberately
+#   SOUNIO_SKIP_DOCS_REGISTRY_HOOK=1    for a scripted batch
+#
+# Install (per clone): git config core.hooksPath .githooks
+
+set -euo pipefail
+
+[[ "${SOUNIO_SKIP_DOCS_REGISTRY_HOOK:-0}" == "1" ]] && exit 0
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+# 1. FAST PATH. The overwhelming majority of commits touch no governed document,
+#    and they must cost nothing. Governed paths mirror scanRepoTopics() in
+#    scripts/docs/governance_registry.mjs.
+STAGED="$(git diff --cached --name-only --diff-filter=ACR || true)"
+[[ -n "$STAGED" ]] || exit 0
+
+if ! grep -qE '^(docs/.*\.md|README\.md|spec/LANGUAGE_SPECIFICATION\.md|examples/.*/README\.md|paper/.*\.md|website/src/content/.*)$' <<<"$STAGED"; then
+    exit 0
+fi
+
+# 2. The instrument. If it cannot run, say so and get out of the way: CI is the
+#    enforcing layer, this hook is only the early warning, and a hook that blocks
+#    a commit over its own missing dependency is a hook that gets disabled.
+if ! command -v node >/dev/null 2>&1; then
+    echo "[docs-registry] node absent — skipping (CI still enforces this)" >&2
+    exit 0
+fi
+if [[ ! -f scripts/docs/check_docs_registry.mjs ]]; then
+    exit 0
+fi
+
+FARM="$(mktemp -d "${TMPDIR:-/tmp}/sounio-precommit-docs.XXXXXX")"
+cleanup() { rm -rf "$FARM"; }
+trap cleanup EXIT
+
+# 3. Materialise exactly what is about to be committed. `git write-tree` turns
+#    the index into a tree; archiving that tree gives the staged content with no
+#    working-tree contamination in either direction.
+TREE="$(git write-tree)"
+git archive "$TREE" -- docs examples paper spec README.md website 2>/dev/null \
+    | tar -x -C "$FARM" 2>/dev/null || true
+
+# The checker also RESOLVES paths outside those trees (link targets, related
+# artifacts). Those are read, never written, so symlinks are enough.
+for entry in $(ls -A "$ROOT"); do
+    [[ "$entry" == ".git" ]] && continue
+    [[ -e "$FARM/$entry" ]] && continue
+    ln -s "$ROOT/$entry" "$FARM/$entry" 2>/dev/null || true
+done
+
+OUT="$(cd "$FARM" && node "$ROOT/scripts/docs/check_docs_registry.mjs" 2>&1 || true)"
+if ! grep -qE 'is stale|metadata mismatch|Missing repo doc path' <<<"$OUT"; then
+    exit 0
+fi
+
+cat >&2 <<EOF
+
+  ✗ docs registry is out of sync with the documents you are committing.
+
+$(grep -E '^- ' <<<"$OUT" | head -8 | sed 's/^/      /')
+
+  This is a CI-blocking gate (.github/workflows/ci.yml -> check_docs_registry.sh).
+  Fix it in the commit that causes it:
+
+      node scripts/docs/sync_governance_metadata.mjs
+      git add docs/governance/ \$(git diff --name-only docs/)
+      git commit --amend --no-edit     # or fold into your commit however you like
+
+  Deliberate exception:  git commit --no-verify
+
+EOF
+exit 1
