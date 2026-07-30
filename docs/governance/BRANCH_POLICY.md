@@ -94,10 +94,28 @@ touches the remote:
 > index. If anything is already staged when a merge finishes, it refuses and
 > leaves the regenerated tree uncommitted rather than folding that work in.
 
-The offload-policy hook remains **uninstalled**; install it deliberately with
-`scripts/dev/check_offload_policy.sh --install` (note that it writes to
-`.git/hooks/`, which `core.hooksPath` currently overrides — it would need to
-land in `.githooks/` to run).
+The offload-policy check (`.claude/AGENT_OFFLOAD_POLICY.md`) is **chained into
+the same `pre-commit`** as of 2026-07-30 — git runs exactly one `pre-commit`, so
+a second check means chaining, not a second file. Both checks run even when the
+first fails, because they are unrelated and stopping at the first would send you
+round the commit loop once per problem.
+
+Do **not** use `scripts/dev/check_offload_policy.sh --install`: it writes to
+`.git/hooks/pre-commit`, which `core.hooksPath` overrides. That is how it spent
+weeks appearing installed without ever running.
+
+> **This one refuses commits you have been making freely.** `docs/papers/**`,
+> `docs/dissertation/**`, `stdlib/clinical/**`, the listed `stdlib/epistemic`
+> modules and `formal/lean4/Sounio*.lean` now require a same-day row in
+> `.claude/llm_offload_log.md` whose Target column names the file. Measured on
+> the day it was installed: editing `docs/papers/witness_based_compilation_2026-07-28.md`
+> is refused until such a row exists. That is the policy working as written, and
+> the log shows the workflow is already in daily use — but it changes what a
+> plain `git commit` does on a paper.
+>
+> Bypasses, worst to best: `SOUNIO_SKIP_OFFLOAD_HOOK=1`, `git commit
+> --no-verify`, or a `WAIVED` row in the log with the reason. Prefer the WAIVED
+> row: it leaves a record, which is the entire point of the policy.
 
 Fresh clones activate hooks with `git config core.hooksPath .githooks`.
 
