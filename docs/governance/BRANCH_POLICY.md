@@ -77,15 +77,22 @@ touches the remote:
   commit alone fails the docs-registry check with 2 errors, and the follow-up
   commit makes it green.
 
-> **`post-merge` writes commits, and it stages with `git add -A docs/`.** On a
-> shared checkout — this repository routinely has three agents on one worktree —
-> a merge by one agent sweeps every other agent's uncommitted `docs/` work into
-> an automatic commit under a message about metadata regeneration. The hazard is
-> not hypothetical: the test merge that verified this hook produced a follow-up
-> commit containing a change to a research spec the merge had not brought in.
-> If that matters for your session, either commit or stash `docs/` before
-> merging, or narrow the hook's staging to the files the sync actually
-> rewrote. The hook is installed as written rather than silently altered.
+> **`post-merge` writes commits, so what it stages matters.** It stages only
+> paths that were **clean before the sync and dirty after** — the files the
+> regeneration itself produced. A path already modified when the merge began is
+> never staged, even if the sync also rewrote it: its content is then a mix of
+> someone's work and the regeneration, which cannot be separated, and the hook
+> says so on stderr instead of committing the mix.
+>
+> This replaced a `git add -A docs/`, which on a shared checkout — three agents
+> on one worktree here — swept every other agent's uncommitted `docs/` work into
+> an automatic commit labelled as metadata regeneration. Measured both ways on
+> the same merge: with an unrelated `docs/` file dirty, `git add -A docs/` stages
+> it; the narrowed hook leaves it dirty and out of the commit.
+>
+> Still true, and unavoidable for an automatic commit: the hook commits the
+> index. If anything is already staged when a merge finishes, it refuses and
+> leaves the regenerated tree uncommitted rather than folding that work in.
 
 The offload-policy hook remains **uninstalled**; install it deliberately with
 `scripts/dev/check_offload_policy.sh --install` (note that it writes to
