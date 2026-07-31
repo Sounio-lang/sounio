@@ -286,17 +286,18 @@ paragraph. Numbers must match §3 freezes.
 2. **\(\sum H_{kk}\) under multi-site FO load** may print ~7.20 vs solo-path
    7.292592 (multidose driver). Primary science claims are Var / \(E_2\) freezes.
 3. **Runtime (non-const) mutual FO depth** remains residual; unused by R1–R4.
-4. **Import↔method agreement — residual split (three layers, 2026-07-31):**
-   - **L0 Algebraic CLOSED:** pure surfaces `fo_css` ≡ site ≡ method ≡
-     call-result are definitionally equal; freezes exact ℚ
-     (`SounioFoCssSurfaceParity.lean`; `fo_css_surface_parity_gate.sh` 17/17).
-   - **L1 Semantic CLOSED:** surfaces desugar to one `FoExpr` AST; FO var is
-     a function of (AST, seeds) — surface independence is AST identity
-     (`SounioFoSurfaceTransfer.lean`; `fo_surface_transfer_gate.sh`;
-     spec `docs/research/fo_css_compiler_residual_half_spec_2026-07-31.md`).
-   - **L2 Compiler OPEN:** Madaros FO_XFER / multi-mod realises L1 for the
-     oral-Css fragment under FO trust ≥42 — still **gate-backed numerical
-     parity** (R4), not a FO_XFER soundness proof.
+4. **Import↔method agreement — residual split (four layers, 2026-07-31):**
+   - **L0 Algebraic CLOSED:** pure surfaces equal; freezes exact ℚ
+     (`SounioFoCssSurfaceParity`; `fo_css_surface_parity_gate` 17/17).
+   - **L1 Semantic CLOSED:** surfaces desugar to one `FoExpr` AST
+     (`SounioFoSurfaceTransfer`; `fo_surface_transfer_gate`).
+   - **L2-fragment CLOSED:** FO bytecode ops 1–6 stack machine; site ≡
+     import-expanded ≡ method RPN interpret to L1 desugar; Var=191/240
+     (`SounioFoBytecodeFragment`; `fo_bytecode_fragment_gate`).
+   - **L2-full OPEN:** Madaros `lower.sio` *emits* that RPN — still
+     **gate-backed numerical parity** (R4), not FO_XFER soundness.
+   Stack: `scripts/ci/fo_residual4_stack_gate.sh`. Spec:
+   `docs/research/fo_css_compiler_residual_half_spec_2026-07-31.md`.
 5. **Not a full PBPK28 clinical claim** — oral Css exemplar only.
 6. **Not clinical guidance** — dissertation methodology / compiler science.
 

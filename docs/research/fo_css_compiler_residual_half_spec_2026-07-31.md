@@ -15,23 +15,25 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.fo-cs
 
 # FO Css residual §5.4 — compiler half: semantic bridge (2026-07-31)
 
-**Status:** semantic intermediate layer **CLOSED**; Madaros FO_XFER soundness **OPEN**  
+**Status:** L0 + L1 + **L2-fragment** CLOSED; **L2-full** Madaros FO_XFER soundness **OPEN**  
 **Algebraic half:** `formal/lean4/SounioFoCssSurfaceParity.lean` (kernel-checked)  
 **Semantic bridge:** `formal/lean4/SounioFoSurfaceTransfer.lean`  
-**Executable cert:** `scripts/ci/fo_surface_transfer_gate.sh`  
+**Bytecode fragment:** `formal/lean4/SounioFoBytecodeFragment.lean`  
+**Stack gate:** `scripts/ci/fo_residual4_stack_gate.sh`  
 **IR evidence (unchanged):** R4 `scripts/ci/fo_pk_import_method_driver_gate.sh`
 
 ---
 
-## 1. Residual split (three layers)
+## 1. Residual split (four layers)
 
 | Layer | Claim | Status | Evidence |
 |-------|-------|--------|----------|
 | **L0 Algebraic** | Pure Rat maps for import/site/method/call-result agree; freezes exact ℚ | **CLOSED** | `SounioFoCssSurfaceParity` + `fo_css_surface_parity_gate` 17/17 |
 | **L1 Semantic** | Surfaces desugar to one `FoExpr` AST; FO var is a function of (AST, seeds) | **CLOSED** | `SounioFoSurfaceTransfer` + `fo_surface_transfer_gate` |
-| **L2 Compiler** | Madaros `lower.sio` FO_XFER / multipass / multi-mod realises L1 for the oral-Css fragment | **OPEN** | R4 green gates (numerical); no FO_XFER soundness proof |
+| **L2-fragment** | FO bytecode ops 1–6 stack machine: site ≡ import-expanded ≡ method RPN; run = L1 desugar; Var = 191/240 | **CLOSED** | `SounioFoBytecodeFragment` + `fo_bytecode_fragment_gate` |
+| **L2-full Compiler** | Madaros `lower.sio` FO_XFER / multipass / multi-mod *emits* the L2-fragment program for the oral-Css fragment | **OPEN** | R4 green gates (numerical); no FO_XFER soundness proof |
 
-Dissertation wording must not collapse L1 into L2.
+Dissertation wording must not collapse L2-fragment into L2-full.
 
 ---
 
@@ -56,15 +58,32 @@ at default seeds. Surface independence is **AST identity**, not compiler IR iden
 
 ---
 
-## 3. What would close L2 (compiler)
+## 3. L2-fragment (closed 2026-07-31)
+
+Madaros FO bytecode header (`lower.sio`):
+`OP_PARAM=1 CONST=2 ADD=3 SUB=4 MUL=5 DIV=6`.
+
+Oral Css RPN (after pure-helper XFER expand of `fo_css` / method bodies):
+
+```
+PARAM F; PARAM Dose; MUL; PARAM τ; DIV; PARAM CL0; PARAM eEta; MUL; DIV
+```
+
+Lean stack machine interprets this to `desugarSite` (`native_decide`).
+Import-expanded and method programs are definitionally the same RPN list.
+
+**Honest scope:** this proves *if* Madaros emits this RPN, FO semantics match L1.
+It does **not** prove Madaros emits it — that is L2-full.
+
+## 3b. What would close L2-full (compiler)
 
 A future phase must show, for the oral-Css FO fragment under FO trust ≥42:
 
-1. **Desugar faithfulness.** Multi-mod `fo_css`, `Pk.css`, `make_pk(...).css`, and call-site composition lower to FO bytecode whose FO channel Jacobian matches `jacCss` at means.
+1. **Emit faithfulness.** Multi-mod `fo_css`, `Pk.css`, `make_pk(...).css`, and call-site composition lower to FO bytecode equal to `cssSiteProg` (or FO-equivalent under stack semantics).
 2. **XFER composition.** Nested pure helper expand (`fo_bc_expand_xfer_call`) preserves FO of the expanded AST.
-3. **Multi-mod registration.** Module-frontend FO prepass registers imported pure helpers with the same bytecode as same-module definitions (gate `import` already measures this; needs a proof obligation, not a new number).
+3. **Multi-mod registration.** Module-frontend FO prepass registers imported pure helpers with the same bytecode as same-module definitions.
 
-**Acceptance gate (proposed, not yet built):** a Lean model of FO bytecode ops 0–20+ that interprets to `FoExpr`, plus a hand-translated oral-Css program whose Madaros FO dump matches. Until then, **R4 remains the L2 executable witness**.
+**Until then:** R4 remains the L2-full **executable** witness; L2-fragment is the **semantic** FO bytecode model.
 
 ---
 
@@ -79,13 +98,16 @@ A future phase must show, for the oral-Css FO fragment under FO trust ≥42:
 ## 5. Re-run
 
 ```bash
+bash scripts/ci/fo_residual4_stack_gate.sh         # L0+L1+L2-fragment+R4
+# or piecemeal:
 bash scripts/ci/fo_css_surface_parity_gate.sh      # L0
 bash scripts/ci/fo_surface_transfer_gate.sh        # L1
-bash scripts/ci/fo_pk_import_method_driver_gate.sh # L2 executable
+bash scripts/ci/fo_bytecode_fragment_gate.sh       # L2-fragment
+bash scripts/ci/fo_pk_import_method_driver_gate.sh # L2-full executable
 # optional:
-FO_CSS_LEAN_BUILD=1 bash scripts/ci/fo_surface_transfer_gate.sh
+FO_CSS_LEAN_BUILD=1 bash scripts/ci/fo_bytecode_fragment_gate.sh
 ```
 
 ---
 
-*Spec version fo-css-compiler-residual-half-v1 (2026-07-31).*
+*Spec version fo-css-compiler-residual-half-v2 (2026-07-31) — L2-fragment closed.*
