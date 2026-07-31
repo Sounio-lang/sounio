@@ -725,6 +725,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.fano-arcs-blocking-sounio-note | historical | docs/research/fano-arcs-blocking-sounio-note.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.federated-san-spec-2026-07-30 | historical | docs/research/federated_san_spec_2026-07-30.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.fisher-matrix-fix | historical | docs/research/FISHER_MATRIX_FIX.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.fo-pk-method-science-receipts-2026-07-31 | historical | docs/research/fo_pk_method_science_receipts_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.functor-f-e6-albert-shadow-spec-2026-07-25 | historical | docs/research/functor_f_e6_albert_shadow_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.functor-f-e8-capstone-spec-2026-07-26 | historical | docs/research/functor_f_e8_capstone_spec_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.functor-f-e9-affine-boundary-spec-2026-07-26 | historical | docs/research/functor_f_e9_affine_boundary_spec_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

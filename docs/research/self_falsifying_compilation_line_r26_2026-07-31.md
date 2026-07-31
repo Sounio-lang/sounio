@@ -1,3 +1,18 @@
+<!-- docs:meta
+topic_id: repo.docs.research.self-falsifying-compilation-line-r26-2026-07-31
+authority: historical
+audience: researchers
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.self-falsifying-compilation-line-r26-2026-07-31
+-->
+
+
+<!-- docs:status-note:start -->
+> Docs status: `historical`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
+
 # Self-falsifying compilation R26 — the never-committed oracle, reconstructed; the orbit theorem's verifier runs in-tree for the first time
 
 **Date:** 2026-07-31
