@@ -671,7 +671,14 @@ lean_lib «SounioFoCssSurfaceParity» where
 
 -- FO residual §5.4 semantic bridge (compiler half intermediate): surfaces
 -- desugar to one FoExpr AST; FO var is a function of (AST, seeds). Not a
--- Madaros FO_XFER soundness proof — that remains L2 open (R4 gates).
+-- Madaros FO_XFER soundness proof — that remains L2-full open (R4 gates).
 -- Companion: scripts/research/fo_surface_transfer_cert.py.
 @[default_target]
 lean_lib «SounioFoSurfaceTransfer» where
+
+-- FO residual §5.4 L2-fragment: Madaros FO bytecode ops 1–6 stack machine for
+-- oral Css. Site ≡ import-expanded ≡ method programs interpret to L1 desugar.
+-- Does not prove lower.sio emits them — R4 is the executable L2 witness.
+-- Companion: scripts/research/fo_bytecode_fragment_cert.py.
+@[default_target]
+lean_lib «SounioFoBytecodeFragment» where
