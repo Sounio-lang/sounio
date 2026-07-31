@@ -23,10 +23,13 @@ date: 2026-07-31
 **Full receipt index (tables + re-run commands):**  
 [`docs/research/fo_pk_method_science_receipts_2026-07-31.md`](../../research/fo_pk_method_science_receipts_2026-07-31.md)
 
+**Chapter prose handoff (ready-to-paste EN-UK + claim map):**  
+[`docs/dissertation/handoff/fo_pk_method_science_package.md`](../handoff/fo_pk_method_science_package.md)
+
 **Compiler stack:** Madaros FO trust ≥42/42  
 **Scope:** Oral steady-state Css under first-order GUM / FO. **Not clinical guidance.**
 
-This results file is the dissertation annex pointer for the four green science receipts R1–R4. Numbers are frozen by CI gates; re-derive before any external claim.
+This results file is the dissertation annex pointer for the four green science receipts R1–R4. Numbers are frozen by CI gates; re-derive before any external claim. Paste-ready methods/results prose lives in the handoff package (§4).
 
 ---
 
@@ -138,12 +141,31 @@ Stack map: `docs/audit/MADAROS_FO_GUM_STACK_2026-07-27.md`.
 
 ---
 
-## 9. LLM-offload review
+## 9. Dissertation placement
 
-| Provider | Task | Outcome |
-|----------|------|---------|
-| xAI (Grok) | math-review | OK on Css identity, τ-scaling, Var(E)=1575+1250ρ, kel cancellation; TIGHTENABLE on symbolic commutativity (addressed in residual 4) |
+Suggested subsection (numbering belongs to the prose session):
+
+**§4.x First-order GUM for oral steady-state Css (compiler surfaces)** — warm-up
+to GUM-through-ODE / PBPK28 epistemic budgets. Frame: JCGM 100:2008 first-order
+propagation is surface-independent across multi-mod stdlib helpers, struct
+methods, call-result receivers, and call-site composition.
+
+Ready-to-paste EN-UK paragraphs (opening, R1–R4 freezes, bridge to PBPK, short
+citation blurb, mandatory residuals):  
+[`docs/dissertation/handoff/fo_pk_method_science_package.md`](../handoff/fo_pk_method_science_package.md) §4–§5.
+
+Cross-links: `VISAO_GERAL.md` Contribution 1; `chapter_04.md` (PBPK28 clinical);
+`section_4_10_sobol_hdmr_package.md` (global SA); `m5_gum_4th_order_v1.md` (FO can understate MC).
 
 ---
 
-*Annex version fo-pk-method-science-v1. Prefer the research receipts file for full prose tables and citation sketch.*
+## 10. LLM-offload review
+
+| Provider | Task | Outcome |
+|----------|------|---------|
+| xAI (Grok) | math-review (annex) | OK on Css identity, τ-scaling, Var(E)=1575+1250ρ, kel cancellation; TIGHTENABLE on symbolic commutativity (addressed in residual 4) |
+| xAI + Z.AI | math-review (handoff package) | PASS — dual independent re-derivation of all freezes; zero [WRONG] |
+
+---
+
+*Annex version fo-pk-method-science-v1. Prefer the research receipts file for full tables; prefer the handoff package for chapter prose.*

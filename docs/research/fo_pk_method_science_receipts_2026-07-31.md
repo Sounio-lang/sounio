@@ -179,7 +179,13 @@ When citing in dissertation prose (EN-UK):
 
 > First-order GUM uncertainty for oral steady-state Css was executed under Madaros FO (trust ≥42). Struct methods, call-result projections, multi-mod `epistemic::fo` helpers, correlated latent η, dosing-interval scaling, and τ-uncertainty were measured as green CI receipts R1–R4 (2026-07-31); tables re-run via `scripts/ci/fo_pk_*_gate.sh`.
 
-Point to this file + the four drivers for the numerical annex.
+**Ready-to-paste chapter package (methods/results paragraphs + claim map):**  
+[`docs/dissertation/handoff/fo_pk_method_science_package.md`](../dissertation/handoff/fo_pk_method_science_package.md)
+
+**Quantitative annex:**  
+[`docs/dissertation/results/fo_pk_method_science_v1.md`](../dissertation/results/fo_pk_method_science_v1.md)
+
+Point to this file + the four drivers for the numerical freezes.
 
 ---
 

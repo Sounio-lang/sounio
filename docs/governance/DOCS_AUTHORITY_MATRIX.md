@@ -316,6 +316,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.dissertation.cross-drug-iso-budget-findings | repo_only | docs/dissertation/cross_drug_iso_budget_findings.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.dossier-template | repo_only | docs/dissertation/dossier_template.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.handoff.chapter-04 | repo_only | docs/dissertation/handoff/chapter_04.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.dissertation.handoff.fo-pk-method-science-package | repo_only | docs/dissertation/handoff/fo_pk_method_science_package.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.handoff.psychiatric-pgx-mtor-168-pop-package | repo_only | docs/dissertation/handoff/psychiatric_pgx_mtor_168_pop_package.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.handoff.section-4-10-sobol-hdmr-package | repo_only | docs/dissertation/handoff/section_4_10_sobol_hdmr_package.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.pbpk-claim-truth-table | repo_only | docs/dissertation/pbpk_claim_truth_table.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -700,6 +701,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.cd-tower-zd-fiber-signed-localization-2026-07-26 | historical | docs/research/cd_tower_zd_fiber_signed_localization_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.cd-tower-zd-fiber-spectral-classifier-2026-07-26 | historical | docs/research/cd_tower_zd_fiber_spectral_classifier_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.cd-tower-zd-fiber-spectral-forall-n-progress-2026-07-26 | historical | docs/research/cd_tower_zd_fiber_spectral_forall_n_progress_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.cd-tower-zd-fiber-v1-reduction-spec-2026-07-31 | historical | docs/research/cd_tower_zd_fiber_v1_reduction_spec_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.cd-tower-zd-graph-invariants-spec-2026-07-26 | historical | docs/research/cd_tower_zd_graph_invariants_spec_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.chi5-mathlib-free-novelty-2026-05-30 | historical | docs/research/chi5-mathlib-free-novelty-2026-05-30.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.chingon-zd-falsifiers-2026-07-25 | historical | docs/research/chingon_zd_falsifiers_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -978,9 +980,13 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.subptx-fmad-invariance | historical | docs/research/subptx_fmad_invariance.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.subptx-phase-h-complete | historical | docs/research/subptx_phase_h_complete.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.subptx-sinkhorn16-2iter | historical | docs/research/subptx_sinkhorn16_2iter.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.suffering-aware-architecture-robustness-spec-2026-07-31 | historical | docs/research/suffering_aware_architecture_robustness_spec_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.suffering-aware-architecture-spec-2026-07-28 | historical | docs/research/suffering_aware_architecture_spec_2026-07-28.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.suffering-aware-deep-architecture-spec-2026-07-28 | historical | docs/research/suffering_aware_deep_architecture_spec_2026-07-28.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.suffering-aware-expanded-channels-spec-2026-07-31 | historical | docs/research/suffering_aware_expanded_channels_spec_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.suffering-aware-extreme-depth-spec-2026-07-31 | historical | docs/research/suffering_aware_extreme_depth_spec_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.suffering-aware-game-theory-spec-2026-07-31 | historical | docs/research/suffering_aware_game_theory_spec_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.suffering-aware-large-architecture-spec-2026-07-31 | historical | docs/research/suffering_aware_large_architecture_spec_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.suffering-aware-multi-agent-scale-spec-2026-07-31 | historical | docs/research/suffering_aware_multi_agent_scale_spec_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.suffering-aware-multi-agent-sophisticated-spec-2026-07-31 | historical | docs/research/suffering_aware_multi_agent_sophisticated_spec_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.suffering-aware-multi-agent-spec-2026-07-30 | historical | docs/research/suffering_aware_multi_agent_spec_2026-07-30.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
