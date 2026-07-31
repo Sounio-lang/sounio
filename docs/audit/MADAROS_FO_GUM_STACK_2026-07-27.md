@@ -103,7 +103,11 @@ Oral Css = (F·Dose/τ)/(CL0·exp(η)). Import driver is the multi-mod free-help
 **Import↔method** (2026-07-31): multi-mod `fo_css`/`fo_clearance`/`fo_infusion_rate` bit-agree with Pk methods, call-result, and call-site composition on Css/CL/rate FO and E₂.  
 **Algebraic residual-4 closeout** (2026-07-31): pure surfaces definitionally equal + exact-ℚ FO freezes in
 `formal/lean4/SounioFoCssSurfaceParity.lean`; executable certificate
-`scripts/ci/fo_css_surface_parity_gate.sh` (17/17). Compiler IR commutativity remains R4 numerical parity.  
+`scripts/ci/fo_css_surface_parity_gate.sh` (17/17).  
+**Semantic bridge L1** (2026-07-31): surfaces desugar to one `FoExpr`; FO var is AST-determined —
+`formal/lean4/SounioFoSurfaceTransfer.lean` + `scripts/ci/fo_surface_transfer_gate.sh`.  
+**L2 Madaros FO_XFER soundness** remains OPEN (R4 numerical parity). Spec:
+`docs/research/fo_css_compiler_residual_half_spec_2026-07-31.md`.  
 **Dissertation index:** [`docs/research/fo_pk_method_science_receipts_2026-07-31.md`](../research/fo_pk_method_science_receipts_2026-07-31.md) — R1–R4 tables, re-run commands, citation sketch.
 
 ## Science drivers measured (2026-07-27 / 2026-07-28)

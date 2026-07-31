@@ -668,3 +668,10 @@ lean_lib «SounioCDTowerAutomorphism» where
 -- lake build optional under FO_CSS_LEAN_BUILD=1.
 @[default_target]
 lean_lib «SounioFoCssSurfaceParity» where
+
+-- FO residual §5.4 semantic bridge (compiler half intermediate): surfaces
+-- desugar to one FoExpr AST; FO var is a function of (AST, seeds). Not a
+-- Madaros FO_XFER soundness proof — that remains L2 open (R4 gates).
+-- Companion: scripts/research/fo_surface_transfer_cert.py.
+@[default_target]
+lean_lib «SounioFoSurfaceTransfer» where
