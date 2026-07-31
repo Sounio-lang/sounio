@@ -7,7 +7,6 @@ validated_by: A6
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.cd-tower-automorphism-freeze
 -->
 
-
 # The signed-monomial automorphism group of the Cayley-Dickson tower FREEZES at 168, while the zero-divisor fiber geometry grows
 
 **Honesty firewall.** Every claim below is tagged **PROVEN** (a general all-`n` argument),
