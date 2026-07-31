@@ -3044,6 +3044,28 @@ fn lowerer_emit_mut(lo: &! Lowerer, instr: IrInstr) with Mut, Panic, Div {
     }
 }
 
+fn lowerer_intern_string_mut(lo: &! Lowerer, n: Name) -> i64 with Mut, Panic, Div {
+    var module_box = (*lo).module
+    var i: i64 = 0
+    while i < (*module_box).string_count {
+        if ir_name_eq((*module_box).string_table[i as usize], n) {
+            (*lo).module = module_box
+            return i
+        }
+        i = i + 1
+    }
+    if (*module_box).string_count >= IR_MAX_STRINGS {
+        (*lo).module = module_box
+        lowerer_mark_error(lo)
+        return -1
+    }
+    let idx = (*module_box).string_count
+    (*module_box).string_table[idx as usize] = n
+    (*module_box).string_count = idx + 1
+    (*lo).module = module_box
+    idx
+}
+
 fn lowerer_lower_opt_expr_mut(
     lo: &! Lowerer,
     opt: &Option<Box<Expr>>
@@ -3268,6 +3290,43 @@ fn lowerer_lower_registered_named_call_mut(
     dst
 }
 
+fn lowerer_lower_string_literal_println_mut(lo: &! Lowerer, e: &Expr) -> i64 with Mut, Panic, Div, Alloc, IO {
+    match e.args {
+        Some(list) => {
+            match (*list).tail {
+                Some(_) => return IR_INVALID_REG,
+                _ => {}
+            }
+            if (*list).head.kind != ExprKind::ExprStringLit {
+                return IR_INVALID_REG
+            }
+            let literal_name = ir_normalize_string_literal_name((*list).head.name)
+            let string_idx = lowerer_intern_string_mut(lo, literal_name)
+            if string_idx < 0 {
+                return IR_INVALID_REG
+            }
+            let string_reg = lowerer_fresh_reg_mut(lo)
+            lowerer_emit_mut(lo, ir_load_string(string_reg, string_idx, literal_name))
+
+            let print_name = make_name("print")
+            let print_fn = lowerer_find_or_add_fn_id_mut(lo, print_name)
+            let print_dst = lowerer_fresh_reg_mut(lo)
+            let print_args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_single(string_reg)))
+            lowerer_emit_mut(lo, ir_call(print_dst, print_fn, print_name, print_args, 1))
+
+            let newline_reg = lowerer_fresh_reg_mut(lo)
+            lowerer_emit_mut(lo, ir_load_imm(newline_reg, 10))
+            let print_char_name = make_name("print_char")
+            let print_char_fn = lowerer_find_or_add_fn_id_mut(lo, print_char_name)
+            let newline_dst = lowerer_fresh_reg_mut(lo)
+            let newline_args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_single(newline_reg)))
+            lowerer_emit_mut(lo, ir_call(newline_dst, print_char_fn, print_char_name, newline_args, 1))
+            print_dst
+        }
+        _ => IR_INVALID_REG,
+    }
+}
+
 fn lowerer_block_ends_in_print_ref(blk: &Block) -> bool with Mut, Panic, Div, Alloc {
     var current = &blk.stmts
     while true {
@@ -3377,6 +3436,12 @@ fn lowerer_lower_expr_mut(
             Some(callee) => {
                 if (*callee).kind == ExprKind::ExprIdent && name_eq((*callee).name, make_name("assert")) {
                     return lowerer_lower_assert_call_mut(lo, e)
+                }
+                if (*callee).kind == ExprKind::ExprIdent && name_eq((*callee).name, make_name("println")) {
+                    let print_dst = lowerer_lower_string_literal_println_mut(lo, e)
+                    if print_dst >= 0 {
+                        return print_dst
+                    }
                 }
                 if (*callee).kind == ExprKind::ExprIdent {
                     let direct_dst = lowerer_lower_registered_named_call_mut(lo, e, (*callee).name)
