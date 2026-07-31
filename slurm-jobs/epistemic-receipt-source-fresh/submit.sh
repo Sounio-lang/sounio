@@ -66,6 +66,10 @@ success and failure exit-code behavior.
 WORKER_PROBE=assert-exit runs only the four canonical native assert cases. It
 keeps assertion semantics observable even when an unrelated source-to-ELF
 manifest case is already failing.
+
+WORKER_PROBE=receipt-values builds the same raw ELF and prints one marker for
+each observation-receipt predicate. It is diagnostic evidence only and does not
+replace the source-fresh acceptance gate.
 EOF
 }
 
@@ -85,7 +89,7 @@ fi
 [[ "$WORKER_LOWER_TRACE" == '0' || "$WORKER_LOWER_TRACE" == '1' ]] || fail "invalid WORKER_LOWER_TRACE: $WORKER_LOWER_TRACE"
 [[ "$WORKER_NV2_IR_TRACE" == '0' || "$WORKER_NV2_IR_TRACE" == '1' ]] || fail "invalid WORKER_NV2_IR_TRACE: $WORKER_NV2_IR_TRACE"
 [[ "$WORKER_PRESERVE_DIAGNOSTICS" == '0' || "$WORKER_PRESERVE_DIAGNOSTICS" == '1' ]] || fail "invalid WORKER_PRESERVE_DIAGNOSTICS: $WORKER_PRESERVE_DIAGNOSTICS"
-[[ "$WORKER_PROBE" == 'source-fresh-gate' || "$WORKER_PROBE" == 'block-ladder' || "$WORKER_PROBE" == 'source-to-elf' || "$WORKER_PROBE" == 'assert-exit' ]] || fail "invalid WORKER_PROBE: $WORKER_PROBE"
+[[ "$WORKER_PROBE" == 'source-fresh-gate' || "$WORKER_PROBE" == 'block-ladder' || "$WORKER_PROBE" == 'source-to-elf' || "$WORKER_PROBE" == 'assert-exit' || "$WORKER_PROBE" == 'receipt-values' ]] || fail "invalid WORKER_PROBE: $WORKER_PROBE"
 
 SOURCE_COMMIT="$(git -C "$REPO" rev-parse "$SOURCE_REF")"
 SOURCE_TREE="$(git -C "$REPO" rev-parse "$SOURCE_COMMIT^{tree}")"
@@ -326,6 +330,62 @@ SIO
   run_probe import_first_call "\$PROBE_ROOT/import_first_call.sio"
   [[ -z "\$(git -C "\$REPO" status --porcelain)" ]] || fail 'source tree changed during block-ladder probe'
   echo '[epistemic-receipt-source-fresh] PASS: block-ladder completed'
+elif [[ "\$WORKER_PROBE" == 'receipt-values' ]]; then
+  RAW_MADAROS="\$ROOT/receipt-values-madaros"
+  PROBE_ROOT="\$ROOT/receipt-values"
+  BUILD_LOG="\$ROOT/receipt-values-build.log"
+  mkdir -p "\$PROBE_ROOT/cwd"
+  if ! bash "\$REPO/scripts/ci/build_modular_madaros.sh" "\$RAW_MADAROS" >"\$BUILD_LOG" 2>&1; then
+    tail -n 120 "\$BUILD_LOG" >&2 || true
+    fail 'receipt-values current-source build failed'
+  fi
+  cat >"\$PROBE_ROOT/receipt_values.sio" <<'SIO'
+use epistemic::observation_provenance::*
+
+fn main() with IO, Panic {
+    let opportunity = op_observation_opportunity_i64(10, 11)
+    let presence = op_encounter_presence_i64(20, 21)
+    let selection = op_measurement_selection_i64(30, 31)
+    let act = op_measurement_act_i64(40, 41)
+    let recorded = op_record_measurement_i64(opportunity, presence, selection, act)
+    let history = op_observation_history_from_recorded_i64(recorded, 1001)
+    let history_source_ok = op_observation_history_source_system_tag_i64(history) == 11
+    let transformation = op_observation_transformation_i64(60, 61)
+    let regularized = op_regularize_observation_i64(history, transformation)
+    let feature_presence = op_encounter_presence_i64(20, 22)
+    let feature_selection = op_measurement_selection_i64(30, 31)
+    let feature = op_observation_feature_i64(feature_presence, feature_selection)
+    let unresolved_opportunity = op_observation_opportunity_i64(10, 11)
+    let abstention = op_abstain_unresolved_route_i64(unresolved_opportunity, 9000)
+    let route_ok = op_recorded_measurement_tag_i64(recorded) == 101
+    let regularization_ok = op_regularized_observation_tag_i64(regularized) == 1122
+    let source_ok = op_recorded_measurement_source_system_tag_i64(recorded) == 11 &&
+        op_regularized_observation_source_system_tag_i64(regularized) == 11
+    let transformation_ok = op_regularized_observation_transformation_method_tag_i64(regularized) == 60 &&
+        op_regularized_observation_transformation_parameterization_tag_i64(regularized) == 61
+    let feature_ok = op_observation_feature_tag_i64(feature) == 51
+    let abstention_ok = op_abstention_protocol_id_i64(abstention) == 10 &&
+        op_abstention_reason_tag_i64(abstention) == 9000
+
+    if route_ok { println("RECEIPT_ROUTE_PASS") } else { println("RECEIPT_ROUTE_FAIL") }
+    if history_source_ok { println("RECEIPT_HISTORY_SOURCE_PASS") } else { println("RECEIPT_HISTORY_SOURCE_FAIL") }
+    if regularization_ok { println("RECEIPT_REGULARIZATION_PASS") } else { println("RECEIPT_REGULARIZATION_FAIL") }
+    if source_ok { println("RECEIPT_SOURCE_PASS") } else { println("RECEIPT_SOURCE_FAIL") }
+    if transformation_ok { println("RECEIPT_TRANSFORMATION_PASS") } else { println("RECEIPT_TRANSFORMATION_FAIL") }
+    if feature_ok { println("RECEIPT_FEATURE_PASS") } else { println("RECEIPT_FEATURE_FAIL") }
+    if abstention_ok { println("RECEIPT_ABSTENTION_PASS") } else { println("RECEIPT_ABSTENTION_FAIL") }
+}
+SIO
+  (
+    cd "\$PROBE_ROOT/cwd"
+    exec env \
+      -u MADAROS_RAW_BIN \
+      -u SOUNIO_MADAROS_BIN \
+      SOUNIO_STDLIB_PATH="\$REPO/stdlib" \
+      "\$RAW_MADAROS" run "\$PROBE_ROOT/receipt_values.sio"
+  )
+  [[ -z "\$(git -C "\$REPO" status --porcelain)" ]] || fail 'source tree changed during receipt-values probe'
+  echo '[epistemic-receipt-source-fresh] PASS: receipt-values diagnostic completed'
 elif [[ "\$WORKER_PROBE" == 'source-to-elf' || "\$WORKER_PROBE" == 'assert-exit' ]]; then
   RAW_MADAROS="\$ROOT/source-to-elf-madaros"
   BUILD_LOG="\$ROOT/source-to-elf-build.log"
