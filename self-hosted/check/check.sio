@@ -236,6 +236,12 @@ pub struct Checker {
     current_impl_type: TypeEntry,
     current_effects: [i64; 8],
     current_effect_count: i64,
+    // Which function is being checked. current_module was already tracked (it is
+    // what makes E175 fire across modules); the FUNCTION was not, so E035 could
+    // name neither, and in a multi-module check its span -- which starts at 0 and
+    // carries no module identity -- pointed into whichever buffer the reader
+    // guessed. Two of them were attributed to the wrong file that way.
+    current_fn_name: Name,
     multitest_count: i64,
     multitest_corrected: bool,
     last_literal_int: i64,
@@ -926,6 +932,7 @@ fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
         current_impl_type: ty_error(),
         current_effects: [0; 8],
         current_effect_count: 0,
+        current_fn_name: empty_name(),
         multitest_count: 0,
         multitest_corrected: false,
         last_literal_int: 0,
@@ -3956,6 +3963,7 @@ fn checker_check_impl_method_inplace(c: *mut Checker, item: Item) with Mut, Pani
             // current_effects empty and firing a spurious E035 on the merged/imported
             // lane. The semantic lookup disambiguates by TypeKind (TyUnknown vs TyI64),
             // so each impl body sees ITS OWN declared effects.
+            (*c).current_fn_name = (*fd).name
             let sig_id = fn_sig_table_find_method_semantic((*c).fn_sigs, (*c).current_impl_type, (*fd).name)
             if sig_id >= 0 {
                 let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
@@ -4255,6 +4263,7 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             // return-type path until the expr spine lands — so the conservative
             // proven path ships. Revisit direct-read with a real return-mismatch
             // gate once `return <expr>` no longer crashes the check spine.
+            (*c).current_fn_name = (*fd).name
             let sig_id = fn_sig_table_find((*c).fn_sigs, (*fd).name)
             if sig_id >= 0 {
                 let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
@@ -9878,6 +9887,41 @@ fn print_contest_model_family(info: ContestInfo) with IO, Mut, Panic, Div {
 // Error reporting with diagnostics
 // ============================================================
 
+fn e035_print_ident(n: Name) with IO, Mut, Panic, Div {
+    if n.len <= 0 {
+        print("<unnamed>")
+        return
+    }
+    var i: i64 = 0
+    while i < n.len && i < 128 {
+        print_char(n.buf[i as usize] as i64)
+        i = i + 1
+    }
+}
+
+fn e035_print_module_path(p: AstPath) with IO, Mut, Panic, Div, Alloc {
+    if p.seg_count <= 0 {
+        print("<main>")
+        return
+    }
+    var seg = p.segments
+    var idx: i64 = 0
+    var more = true
+    while more && idx < p.seg_count && idx < 32 {
+        if idx > 0 { print("::") }
+        var j: i64 = 0
+        while j < seg.head_len && j < 128 {
+            print_char(seg.head_buf[j as usize] as i64)
+            j = j + 1
+        }
+        match seg.tail {
+            Some(t) => { seg = *t }
+            None => { more = false }
+        }
+        idx = idx + 1
+    }
+}
+
 impl Checker {
     fn report_error(self) -> Checker with Mut {
         var c = self
@@ -11651,11 +11695,21 @@ impl Checker {
 
 
 
-    fn report_effect_error(self, span: Span, missing: [i64; 8], missing_count: i64) -> Checker with Mut, IO, Panic, Div {
+    fn report_effect_error(self, span: Span, missing: [i64; 8], missing_count: i64) -> Checker with Mut, IO, Panic, Div, Alloc {
         var c = self
         c.error_count = c.error_count + 1
         c.had_error = true
         print("error[E035]")
+        // WHERE, before anything else. This diagnostic used to print only a span
+        // whose start is always 0 and which carries no module identity, so in a
+        // multi-module check the reader had to guess which file the offset
+        // indexed -- and guessing wrong is how two of these were blamed on the
+        // wrong module. current_module was already tracked for E175;
+        // current_fn_name is recorded now for the same reason.
+        print(" in ")
+        e035_print_module_path(c.current_module)
+        print("::")
+        e035_print_ident(c.current_fn_name)
         if span.start > 0 || span.end > 0 {
             print(" at ")
             print_int(span.start)
