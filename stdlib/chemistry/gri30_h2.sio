@@ -79,7 +79,7 @@ fn g30_exp(x: f64) -> f64 with Mut, Div, Panic {
     return result
 }
 
-fn g30_pow(base: f64, n: f64) -> f64 with Mut, Div, Panic {
+pub fn g30_pow(base: f64, n: f64) -> f64 with Mut, Div, Panic {
     if base <= 0.0 { return 0.0 }
     g30_exp(n * g30_ln(base))
 }
@@ -878,6 +878,66 @@ pub fn g30_uv_rhs(t: f64, c: &[f64; 10]) -> (f64, [f64; 10]) with Mut, Div, Pani
     (0.0 - t * num / den, dc)
 }
 
+// one ISOBARIC RHS evaluation at (t, c): returns (dT/dt, dc/dt[10]) for the
+// low-Mach constant-pressure path (flames). Same one-pass g_rt/h_rt/cp_r
+// structure as g30_uv_rhs; the energy equation is the isobaric sibling
+// dT/dt = -T · Σ h_rt·ω / Σ c·cp_r  (dh=const per unit mass; the constant-
+// volume form carries the -1 terms instead). Derivation: rho·cp dT/dt =
+// -Σ ω_i h_i  =>  R Σ c cp_r · dT/dt = -R T Σ h_rt ω.
+pub fn g30_cp_rhs(t: f64, c: &[f64; 10]) -> (f64, [f64; 10]) with Mut, Div, Panic {
+    var grt: [f64; 10] = [0.0; 10]
+    var hrt: [f64; 10] = [0.0; 10]
+    var cpr: [f64; 10] = [0.0; 10]
+    let tt = t * t
+    let t3 = tt * t
+    let t4 = t3 * t
+    let ln_t = g30_ln(t)
+    var s: i64 = 0
+    while s < 10 {
+        let a = g30_nasa7(s, t)
+        hrt[s] = a[0] + a[1] * t / 2.0 + a[2] * tt / 3.0 + a[3] * t3 / 4.0 + a[4] * t4 / 5.0 + a[5] / t
+        let s_r = a[0] * ln_t + a[1] * t + a[2] * tt / 2.0 + a[3] * t3 / 3.0 + a[4] * t4 / 4.0 + a[6]
+        grt[s] = hrt[s] - s_r
+        cpr[s] = a[0] + a[1] * t + a[2] * tt + a[3] * t3 + a[4] * t4
+        s = s + 1
+    }
+    let nu = g30_nu()
+    let dn = g30_dn()
+    let c0cm = 1.0e5 / (8.314462618 * t) * 1.0e-6
+    var kc: [f64; 29] = [0.0; 29]
+    var r: i64 = 0
+    while r < 29 {
+        var dg = 0.0
+        s = 0
+        while s < 10 { dg = dg + nu[r * 10 + s] * grt[s]; s = s + 1 }
+        kc[r] = g30_exp(0.0 - dg) * g30_pow(c0cm, dn[r])
+        r = r + 1
+    }
+    let dc = g30_dc_kc(t, c, &kc)
+    var num = 0.0
+    var den = 0.0
+    s = 0
+    while s < 10 {
+        num = num + hrt[s] * dc[s]
+        den = den + c[s] * cpr[s]
+        s = s + 1
+    }
+    (0.0 - t * num / den, dc)
+}
+
+// Out-param sibling of g30_cp_rhs (same computation, dc written to dc_out,
+// only dT/dt returned). The flame1d chemistry substep calls its RHS inside
+// an RK4 stage loop; holding/destructuring tuple-array returns in that loop
+// shape miscompiles on madaros (deterministic wrong values, same engine
+// class as the g30_uv_rhs 1000-step loop documented in
+// tests/stdlib/chemistry/test_gri30_h2_adiabatic.sio). The out-param form
+// is byte-parity clean on both lean_single and madaros.
+pub fn g30_cp_rhs_out(t: f64, c: &[f64; 10], dc_out: &![f64; 10]) -> f64 with Mut, Div, Panic {
+    let (dtdt, dc) = g30_cp_rhs(t, c);
+    var i: i64 = 0;
+    while i < 10 { dc_out[i] = dc[i]; i = i + 1 }
+    dtdt
+}
 // Adiabatic ignition delay by fixed-step explicit RK4 on the coupled (T, c)
 // system (house integrator, same step style as the isothermal path).
 // Returns (t_h2o, t_dT) in seconds: mid-step times of max Δ[H2O]/Δt and
