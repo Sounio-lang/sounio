@@ -76,6 +76,7 @@ n ≤ 10 (the prior rung's `V3` reached only n ≤ 8).
 | `A8_NULL_a` | a perturbed *pairing* `L' ≠ L_lo` always **breaks** the antisymmetry | measured |
 | `A8_NULL_b` | a foreign fiber's *matrix* never satisfies `L_lo`'s antisymmetry | measured |
 | `A9_LEAN` | the Lean file's `cdSigma`/`hi`/`P1`/`P3` are entrywise the ones measured here | measured (§8) |
+| `A11_A4GEN` | `A4`'s sub-lemma holds for **all** nonzero `a ≠ b`, not only `b = L_lo`; plus the swapped form | measured, **Lean-proven** (§8) |
 | `A10_DIAG` | the builder's `np.fill_diagonal(A, 0)` is a **no-op** — resonance already fails on the diagonal | measured, **Lean-proven** (§8) |
 
 ---
@@ -127,9 +128,17 @@ sub-lemma
 
 > `τ(l, L_lo) = −τ(l ⊕ L_lo, L_lo)`
 
-holds (`A4`, all fibers, n ≤ 10). So `res` fails **identically** on that column: row and column
-`L_lo` are zero, in every fiber. The isolated vertex is not an accident of small `n` — it is the
-same antisymmetry one level down, and it is the source of the `−1` in `2^{n-2}−1`.
+holds. So `res` fails **identically** on that column: row and column `L_lo` are zero, in every
+fiber. The isolated vertex is not an accident of small `n` — it is the same antisymmetry one
+level down, and it is the source of the `−1` in `2^{n-2}−1`.
+
+**This sub-lemma is now Lean-proven ∀n (`A4_sub`), and in more generality than the fiber needs:**
+`σ(a,b) = −σ(a ⊕ b, b)` for *all* nonzero `a ≠ b`, not only for `b = L_lo`. Two of its four
+induction branches need the swapped-argument form `σ(a,b) = −σ(a, a ⊕ b)`, derived inside the
+induction from the hypothesis plus `antisym`. The vanishing of the excluded column *and* row is
+proven too (`Asig_isolated`, `Asig_isolated_row`) — so the hypotheses `l ⊕ L_lo ≠ 0`,
+`y ⊕ L_lo ≠ 0` carried by `A1` do not quietly assume away the interesting line: those two lines
+are derived to be zero.
 
 Counting. The involution `l ↦ l ⊕ L_lo` is **fixed-point-free** on `[1,H) \ {L_lo}`: a fixed
 point would need `l ⊕ L_lo = l`, i.e. `L_lo = 0`, which is excluded — and `l = L_lo` is the one
@@ -243,10 +252,12 @@ verified against the lane's own generator rather than a reimplementation.
 | **`Asig (l ⊕ L_lo) y = − Asig l y`** (`A1`) | `A1` | **kernel-checked ∀n** |
 | `Asig l l = 0` — `fill_diagonal` is a no-op (`A10`) | `Asig_diag` | **kernel-checked ∀n** |
 | the additive form *is* the XOR form | `hi_eq_xor` | **kernel-checked ∀n** |
-| `A4`'s sub-lemma `τ(l,L_lo) = −τ(l ⊕ L_lo, L_lo)` | — | **not formalised** |
+| `σ(a,b) = −σ(a ⊕ b, b)` (`A4`, **all** nonzero `a ≠ b`) | `A4_sub` | **kernel-checked ∀n** |
+| the excluded column and row at `l = L_lo` vanish | `Asig_isolated`, `Asig_isolated_row` | **kernel-checked ∀n** |
+| `Asig l y = Asig y l` | `Asig_symm` | **kernel-checked ∀n** |
 | rank, spectra, the factorisation `Jᵀ M J` | — | numerical only |
 
-All 15 theorems in the file report `[propext, Quot.sound]` or
+All 22 theorems in the file report `[propext, Quot.sound]` or
 `[propext, Classical.choice, Quot.sound]` under `#print axioms` — no `sorryAx`, no
 `native_decide`.
 

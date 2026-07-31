@@ -40,6 +40,9 @@ tau(x,y) = cd_sigma(x,y,n-1) for the level-(n-1) sign. The contract's own builde
       tau(l, L_lo) = -tau(l ^ L_lo, L_lo) holds -- so res fails identically and row/column
       L_lo is ZERO. The isolated vertex sits at exactly l = L_lo, in every fiber. This is the
       source of the "-1" in 2^{n-2}-1; the sub-lemma is the same identity one level down.
+      PROVEN forall n in Lean (A4_sub), in full generality; the vanishing of the excluded
+      column AND row is proven too (Asig_isolated, Asig_isolated_row), so A1's hypotheses do
+      not assume away the interesting line -- those two lines are derived to be zero.
 
   A5  THE EXPLICIT FACTORISATION. Let reps = one label per pair {l, l^L_lo}, l != L_lo
       (|reps| = 2^{n-2}-1), M = A_sig[reps,reps], and J the (2^{n-2}-1) x (2^{n-1}-1) matrix
@@ -64,6 +67,23 @@ tau(x,y) = cd_sigma(x,y,n-1) for the level-(n-1) sign. The contract's own builde
 
   A0  PARITY. The vectorised sign_table/A_sig builders used here reproduce the in-tree
       builders of cd_tower_zd_fiber_spectral_forall_n_progress_contract.py entrywise.
+
+  A9  LEAN BRIDGE. formal/lean4/SounioZDFiberAntisym.lean's cdSigma, transcribed into Python,
+      equals the IN-TREE cd_sigma entrywise (n=4..8, all pairs), and its hi/P1/P3 equal this
+      builder's over all fibers n=6,7,8. With a negative control (two wrong hi-maps must
+      disagree). Without this bridge the formalisation could be about a lookalike.
+
+  A10 DIAGONAL. Resonance already FAILS on the diagonal (P1=+1 vs P3=-1), so the builder's
+      np.fill_diagonal(A,0) is a NO-OP -- a third vacuity, after A2's two -- and the Lean
+      `Asig`, which omits it, is the same matrix. Lean: Asig_diag.
+
+  A11 A4 IN GENERAL. The A4 sub-lemma is not fiber-specific: sigma(a,b) = -sigma(a^b, b) for
+      ALL nonzero a != b (n=4..8), together with the swapped form sigma(a,b) = -sigma(a, a^b)
+      that its induction needs, and a negative control. Lean: A4_sub.
+
+  FORMALISED. A1, A2, A3, A4 and A10 are all kernel-checked forall n in
+  formal/lean4/SounioZDFiberAntisym.lean (22 theorems, Mathlib-free, no sorry, no
+  native_decide). Only the numerical clauses are not.
 
 NOT CLAIMED. This closes the low-rank / factorisation half only. It does NOT close ∀n spectral
 completeness (#distinct spectra = 3*2^{n-5}): an explicit rank and factorisation do not exclude
@@ -451,6 +471,34 @@ def main():
           f"{'OK' if a10 else 'FAIL'} => the Lean `Asig` (which omits it) is the same matrix; "
           f"proven in Lean as Asig_diag")
 
+    # ---- A11 the A4 sub-lemma in the GENERAL form the Lean proof establishes ---------------
+    # Lean proves sigma(a,b) = -sigma(a^b, b) for ALL nonzero a != b, not just b = L_lo, plus
+    # the swapped-argument form its induction needs. Measure both, and a negative control.
+    a11 = a11_swap = a11_null = True
+    for n in (4, 5, 6, 7, 8):
+        T = lean_tab[n]
+        N = 1 << n
+        idx = np.arange(1, N)
+        A, B = np.meshgrid(idx, idx, indexing="ij")
+        mask = (A ^ B) != 0
+        if not np.array_equal(T[A[mask], B[mask]], -T[(A ^ B)[mask], B[mask]]):
+            a11 = False
+        if not np.array_equal(T[A[mask], B[mask]], -T[A[mask], (A ^ B)[mask]]):
+            a11_swap = False
+        # negative control: xoring with an unrelated value must NOT give the identity
+        if n >= 5:
+            wrong = (A ^ B ^ 1)
+            ok_w = (wrong[mask] != 0) & (wrong[mask] < N)
+            if np.array_equal(T[A[mask][ok_w], B[mask][ok_w]],
+                              -T[wrong[mask][ok_w], B[mask][ok_w]]):
+                a11_null = False
+    ok["A11"] = a11 and a11_swap and a11_null
+    print(f"A11_A4GEN   sigma(a,b) = -sigma(a^b, b) for ALL nonzero a != b (n=4..8) "
+          f"{'OK' if a11 else 'FAIL'};  swapped form sigma(a,b) = -sigma(a, a^b) "
+          f"{'OK' if a11_swap else 'FAIL'};  a perturbed xor-shift does NOT satisfy it "
+          f"{'OK' if a11_null else 'FAIL'} => A4's sub-lemma is general, not fiber-specific; "
+          f"proven in Lean as A4_sub, with Asig_isolated/_row giving the zero column AND row")
+
     print("=" * 78)
     if all(ok.values()):
         print("CD_TOWER_ZDFAN_VERDICT "
@@ -473,7 +521,7 @@ def main():
               "so the Lean theorem is about THE MEASURED OBJECT. The last gap closed by merging "
               "lean/cd-seamflip-forall-n, which carried `antisym` -- cited by this lane as "
               "'proven forall n' since 2026-07-11 while absent from the tree. What is NOT "
-              "formalised: A4's level-(n-1) sub-lemma, and everything numerical. Numerical "
+              "formalised: only the numerical clauses -- rank, spectra, the JtMJ factorisation, and the forall-n completeness, which stays OPEN. A4 IS formalised (A4_sub, in full generality) together with the zero column and row (Asig_isolated/_row). Numerical "
               "certificate over an exact integer sign table; D3 respected")
         return 0
     print("CD_TOWER_ZDFAN_VERDICT INCOMPLETE  failing=" +

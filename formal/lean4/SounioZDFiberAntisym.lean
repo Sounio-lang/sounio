@@ -19,20 +19,31 @@
     resB_inv    resB (l ⊕ L_lo) y = resB l y       A2_MASK
     A1          Asig (l ⊕ L_lo) y = - Asig l y     ** THE LEMMA, contract clause A1 **
     Asig_diag   Asig l l = 0                       the builder's fill_diagonal is REDUNDANT
+    A4_sub      σ(a,b) = - σ(a ⊕ b, b)             contract clause A4, IN FULL GENERALITY
+    Asig_isolated / Asig_isolated_row              the column and the row at l = L_lo are ZERO
+    Asig_symm   Asig l y = Asig y l
 
   Hypotheses throughout: `l, y, L_lo < H`, all of `l, y, l ⊕ L_lo, y ⊕ L_lo` nonzero. The last
-  two are exactly the contract's excluded row/column `l = L_lo` / `y = L_lo` — §3's isolated
-  vertex — so the Lean statement's side conditions ARE the paper proof's, not a weakening.
+  two are exactly the contract's excluded row/column `l = L_lo` / `y = L_lo` — the isolated
+  vertex — so the Lean statement's side conditions ARE the paper proof's, not a weakening. And
+  `Asig_isolated`/`Asig_isolated_row` show those two lines really are zero, so nothing is
+  quietly assumed away by the hypotheses: the excluded row and column are DERIVED to vanish.
+
+  `A4_sub` turned out to be more general than the fiber statement that motivated it: it holds for
+  ALL nonzero `a, b` with `a ≠ b`, not only for `b = L_lo`. Two of its four induction branches
+  need the swapped-argument form `σ(a,b) = -σ(a, a ⊕ b)`, which is derived inside the induction
+  from the hypothesis plus `antisym`.
 
   `Asig_diag` matters for honesty: the `Asig` defined here does NOT zero the diagonal, while the
   contract's builder calls `np.fill_diagonal(A, 0)`. The theorem shows resonance already FAILS
   on the diagonal (`P1 = 1`, `P3 = -1`), so that call is a no-op and the two matrices coincide.
   Without it, `A1` here would be about a slightly different object.
 
-  What is still NOT proven here:
-    * `A4`'s level-(n−1) sub-lemma `τ(l,L_lo) = −τ(l ⊕ L_lo, L_lo)` (why the isolated vertex sits
-      at `l = L_lo` rather than merely being excluded by hypothesis).
-    * everything numerical: rank, spectra, the factorisation `A_σ = Jᵀ M J`, the ∀n completeness.
+  `Asig_symm` cannot be used to get `Asig_isolated_row` from `Asig_isolated`: it requires
+  `l ⊕ L_lo ≠ 0`, which is exactly what `l = L_lo` violates. The row is proved directly.
+
+  What is still NOT proven here: everything numerical — rank, spectra, the factorisation
+  `A_σ = Jᵀ M J`, and the ∀n spectral completeness (`#spectra = 3·2^{n-5}`), which stays OPEN.
 
   Provenance. `cdSigma`, `cdSig0/'`, the four branch reductions `R_ll/R_lu/R_ul/R_uu`, the seam
   XOR bridge `seam_add_xor`/`xor_seam`, `antisym` and `cdSigma_pm` are reproduced verbatim from
@@ -398,6 +409,177 @@ theorem Asig_diag (l Llo n : Nat) (hl : l < 2^(n+1)) (hL : Llo < 2^(n+1))
   have hP1 : P1 l l Llo n = 1 := P1_diag l Llo n hl hL hl0 hlL
   have hP3 : P3 l l Llo n = -1 := P3_diag l Llo n hl hL hl0
   have hb : (P1 l l Llo n == P3 l l Llo n) = false := by rw [hP1, hP3]; decide
+  unfold Asig resB
+  simp [hb]
+
+/-! ## Tier 4: `A4` — why the isolated vertex sits at exactly `l = L_lo` -/
+
+theorem xor_zero_eq (x y : Nat) (h : x ^^^ y = 0) : x = y := by
+  have h2 : (x ^^^ y) ^^^ y = 0 ^^^ y := by rw [h]
+  rwa [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero, Nat.zero_xor] at h2
+
+theorem seam_xor_left (u v n : Nat) (hu : u < 2^(n+1)) (hv : v < 2^(n+1)) :
+    (u + 2^(n+1)) ^^^ v = (u ^^^ v) + 2^(n+1) := by
+  rw [Nat.xor_comm, xor_seam v u n hv hu, Nat.xor_comm v u]
+
+theorem xor_seam_cancel (x y n : Nat) (hx : x < 2^(n+1)) (hy : y < 2^(n+1)) :
+    (x + 2^(n+1)) ^^^ (y + 2^(n+1)) = x ^^^ y := by
+  rw [seam_add_xor x n hx, seam_add_xor y n hy, Nat.xor_assoc,
+      Nat.xor_comm (2^(n+1)) (y ^^^ 2^(n+1)), Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+
+/-- **The `A4` sub-lemma, ∀n and in full generality** — not only on a fiber:
+    `σ(a,b) = − σ(a ⊕ b, b)` for all nonzero `a, b` with `a ≠ b`. Proved by induction on the
+    level through the four branch reductions; the swapped-argument form needed by two of the
+    branches is derived inside from the induction hypothesis and `antisym`. -/
+theorem A4_sub : ∀ (m a b : Nat), a < 2^m → b < 2^m → a ≠ 0 → b ≠ 0 → a ^^^ b ≠ 0 →
+    cdSigma a b m = - cdSigma (a ^^^ b) b m
+  | 0, a, _, ha, _, ha0, _, _ => by
+      have : (2:Nat)^0 = 1 := rfl
+      omega
+  | 1, a, b, ha, hb, ha0, hb0, hab => by
+      have h2 : (2:Nat)^1 = 2 := rfl
+      have ha1 : a = 1 := by omega
+      have hb1 : b = 1 := by omega
+      subst ha1; subst hb1; simp at hab
+  | (m+2), a, b, ha, hb, ha0, hb0, hab => by
+    have h2H : 2^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+    -- the swapped form at level m+1, from the induction hypothesis plus `antisym`
+    have second : ∀ x y, x < 2^(m+1) → y < 2^(m+1) → x ≠ 0 → y ≠ 0 → x ^^^ y ≠ 0 →
+        cdSigma x y (m+1) = - cdSigma x (x ^^^ y) (m+1) := by
+      intro x y hx hy hx0 hy0 hxy
+      have hcl : x ^^^ y < 2^(m+1) := xorlt hx hy
+      have hcx : (x ^^^ y) ^^^ x = y := by
+        rw [Nat.xor_comm x y, Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+      have i1 : cdSigma (x ^^^ y) x (m+1) = - cdSigma y x (m+1) := by
+        have := A4_sub (m+1) (x ^^^ y) x hcl hx hxy hx0 (by rw [hcx]; exact hy0)
+        rw [hcx] at this; exact this
+      have hne : x ≠ x ^^^ y := by
+        intro h
+        exact hy0 (by rw [← hcx, ← h, Nat.xor_self])
+      have i2 : cdSigma x (x ^^^ y) (m+1) = - cdSigma (x ^^^ y) x (m+1) :=
+        antisym (m+1) x (x ^^^ y) hx hcl hx0 hxy hne
+      have hxney : x ≠ y := by intro h; exact hxy (by rw [h, Nat.xor_self])
+      have i3 : cdSigma x y (m+1) = - cdSigma y x (m+1) :=
+        antisym (m+1) x y hx hy hx0 hy0 hxney
+      rw [i2, i1, i3]; omega
+    by_cases haU : a ≥ 2^(m+1) <;> by_cases hbU : b ≥ 2^(m+1)
+    · -- both upper: a = u+H, b = v+H, a ⊕ b = u ⊕ v (lower)
+      obtain ⟨u, hae, hul⟩ : ∃ u, a = u + 2^(m+1) ∧ u < 2^(m+1) :=
+        ⟨a - 2^(m+1), by omega, by omega⟩
+      obtain ⟨v, hbe, hvl⟩ : ∃ v, b = v + 2^(m+1) ∧ v < 2^(m+1) :=
+        ⟨b - 2^(m+1), by omega, by omega⟩
+      have huv : u ^^^ v ≠ 0 := by rw [hae, hbe, xor_seam_cancel u v m hul hvl] at hab; exact hab
+      rw [hae, hbe, xor_seam_cancel u v m hul hvl, R_uu u v m hul hvl,
+          R_lu (u ^^^ v) v m (xorlt hul hvl) hvl]
+      by_cases hv0 : v = 0
+      · subst hv0; rw [if_pos rfl, Nat.xor_zero, cdSig0]
+      · rw [if_neg hv0]
+        by_cases hu0 : u = 0
+        · subst hu0
+          rw [Nat.zero_xor, cdSig0', sigma_self (m+1) v hvl hv0]
+          decide
+        · have hvu : v ^^^ u ≠ 0 := by
+            intro h; exact huv (by rw [Nat.xor_comm]; exact h)
+          have := second v u hvl hul hv0 hu0 hvu
+          rw [this, Nat.xor_comm v u]
+    · -- a upper, b lower
+      obtain ⟨u, hae, hul⟩ : ∃ u, a = u + 2^(m+1) ∧ u < 2^(m+1) :=
+        ⟨a - 2^(m+1), by omega, by omega⟩
+      have hbl : b < 2^(m+1) := by omega
+      rw [hae, seam_xor_left u b m hul hbl, R_ul u b m hul hbl,
+          R_ul (u ^^^ b) b m (xorlt hul hbl) hbl, if_neg hb0, if_neg hb0]
+      by_cases hu0 : u = 0
+      · subst hu0
+        rw [Nat.zero_xor, cdSig0, sigma_self (m+1) b hbl hb0]
+        decide
+      · by_cases hub : u ^^^ b = 0
+        · have hueq : u = b := xor_zero_eq u b hub
+          subst hueq
+          rw [hub, cdSig0, sigma_self (m+1) u hul hu0]
+        · rw [A4_sub (m+1) u b hul hbl hu0 hb0 hub]
+    · -- a lower, b upper
+      obtain ⟨v, hbe, hvl⟩ : ∃ v, b = v + 2^(m+1) ∧ v < 2^(m+1) :=
+        ⟨b - 2^(m+1), by omega, by omega⟩
+      have hal : a < 2^(m+1) := by omega
+      rw [hbe, xor_seam a v m hal hvl, R_lu a v m hal hvl,
+          R_uu (a ^^^ v) v m (xorlt hal hvl) hvl]
+      by_cases hv0 : v = 0
+      · subst hv0; rw [if_pos rfl, cdSig0]; decide
+      · rw [if_neg hv0]
+        by_cases hav : a ^^^ v = 0
+        · have haeq : a = v := xor_zero_eq a v hav
+          subst haeq
+          rw [hav, cdSig0', sigma_self (m+1) a hal ha0]
+        · have hva : v ^^^ a ≠ 0 := by
+            intro h; exact hav (by rw [Nat.xor_comm]; exact h)
+          have := second v a hvl hal hv0 ha0 hva
+          rw [this, Nat.xor_comm v a]
+    · -- both lower
+      have hal : a < 2^(m+1) := by omega
+      have hbl : b < 2^(m+1) := by omega
+      rw [R_ll a b m hal hbl, R_ll (a ^^^ b) b m (xorlt hal hbl) hbl]
+      exact A4_sub (m+1) a b hal hbl ha0 hb0 hab
+
+/-- **A4 itself.** On the excluded column `y = L_lo` the resonance predicate fails identically,
+    so the row and column at `l = L_lo` are ZERO — the isolated vertex is at exactly `L_lo`,
+    and that is the source of the `−1` in `rank = 2^{n-2} − 1`. -/
+theorem Asig_isolated (l Llo n : Nat) (hl : l < 2^(n+1)) (hL : Llo < 2^(n+1))
+    (hl0 : l ≠ 0) (hL0 : Llo ≠ 0) (hlL : l ^^^ Llo ≠ 0) :
+    Asig l Llo Llo n = 0 := by
+  have hml : l ^^^ Llo < 2^(n+1) := xorlt hl hL
+  -- P1 and P3 on the excluded column, via the m' = 0 branches
+  have hP1 : P1 l Llo Llo n = - cdSigma l Llo (n+1) := by
+    unfold P1 hi
+    rw [Nat.xor_self, R_ll l Llo n hl hL, R_uu (l ^^^ Llo) 0 n hml (Nat.two_pow_pos (n+1)),
+        if_pos rfl]
+    exact (Int.mul_neg_one _)
+  have hP3 : P3 l Llo Llo n = - cdSigma (l ^^^ Llo) Llo (n+1) := by
+    unfold P3 hi
+    rw [Nat.xor_self, R_lu l 0 n hl (Nat.two_pow_pos (n+1)), cdSig0,
+        R_ul (l ^^^ Llo) Llo n hml hL, if_neg hL0]
+    exact (Int.one_mul _)
+  have hne : (P1 l Llo Llo n == P3 l Llo Llo n) = false := by
+    rw [hP1, hP3, A4_sub (n+1) l Llo hl hL hl0 hL0 hlL]
+    rcases cdSigma_pm (n+1) (l ^^^ Llo) Llo with h | h <;> rw [h] <;> decide
+  unfold Asig resB
+  simp [hne]
+
+/-- `A_σ` is symmetric (both products are, and so is the mask). -/
+theorem Asig_symm (l y Llo n : Nat) (hl : l < 2^(n+1)) (hy : y < 2^(n+1)) (hL : Llo < 2^(n+1))
+    (hl0 : l ≠ 0) (hy0 : y ≠ 0) (hlL : l ^^^ Llo ≠ 0) (hyL : y ^^^ Llo ≠ 0) :
+    Asig l y Llo n = Asig y l Llo n := by
+  have e1 : P1 l y Llo n = P1 y l Llo n := P1_symm l y Llo n hl hy hL hl0 hy0 hlL hyL
+  have e2 : P3 l y Llo n = P3 y l Llo n := P3_symm l y Llo n hl hy hL hl0 hy0
+  have hres : resB l y Llo n = resB y l Llo n := by
+    unfold resB; rw [e1, e2]
+  unfold Asig
+  rw [hres, e1]
+
+/-- **A4, the other direction.** The ROW at `l = L_lo` is zero too. `Asig_symm` cannot be used
+    here — it requires `l ⊕ L_lo ≠ 0`, which is exactly what `l = L_lo` violates — so this is
+    proved directly, through the `u = 0` branches. -/
+theorem Asig_isolated_row (y Llo n : Nat) (hy : y < 2^(n+1)) (hL : Llo < 2^(n+1))
+    (hy0 : y ≠ 0) (hL0 : Llo ≠ 0) (hyL : y ^^^ Llo ≠ 0) :
+    Asig Llo y Llo n = 0 := by
+  have hml : y ^^^ Llo < 2^(n+1) := xorlt hy hL
+  have hP1 : P1 Llo y Llo n = cdSigma Llo y (n+1) := by
+    unfold P1 hi
+    rw [Nat.xor_self, R_ll Llo y n hL hy,
+        R_uu 0 (y ^^^ Llo) n (Nat.two_pow_pos (n+1)) hml, if_neg hyL, cdSig0']
+    exact (Int.mul_one _)
+  have hP3 : P3 Llo y Llo n = - cdSigma (y ^^^ Llo) Llo (n+1) := by
+    unfold P3 hi
+    rw [Nat.xor_self, R_lu Llo (y ^^^ Llo) n hL hml,
+        R_ul 0 y n (Nat.two_pow_pos (n+1)) hy, if_neg hy0, cdSig0]
+    exact (Int.mul_neg_one _)
+  have hA : cdSigma y Llo (n+1) = - cdSigma (y ^^^ Llo) Llo (n+1) :=
+    A4_sub (n+1) y Llo hy hL hy0 hL0 hyL
+  have hLy : Llo ≠ y := by intro h; exact hyL (by rw [← h, Nat.xor_self])
+  have hanti : cdSigma Llo y (n+1) = - cdSigma y Llo (n+1) :=
+    antisym (n+1) Llo y hL hy hL0 hy0 hLy
+  have hb : (P1 Llo y Llo n == P3 Llo y Llo n) = false := by
+    rw [hP1, hP3, ← hA, hanti]
+    rcases cdSigma_pm (n+1) y Llo with h | h <;> rw [h] <;> decide
   unfold Asig resB
   simp [hb]
 
