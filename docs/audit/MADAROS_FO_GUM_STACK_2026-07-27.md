@@ -85,10 +85,13 @@ Summary JSON lands under `$SOUNIO_FO_TRUST_DIR/summary.json` (or a temp dir prin
 | Path | File | FO surface |
 |------|------|------------|
 | Same-module pure helpers | `examples/epistemic_fo_second_order/fo_pk_exposure_driver.sio` | local `css_helper` |
-| **Multi-mod import (preferred science)** | `examples/epistemic_fo_second_order/fo_pk_exposure_import_driver.sio` | `use epistemic::fo::{fo_css,…}` |
-| **PK struct e2e (fields + methods)** | `tests/run-pass/madaros_gum_fo_pk_struct.sio` | `Pk` peels, `css` nested methods, call projections |
+| **Multi-mod import (preferred free helpers)** | `examples/epistemic_fo_second_order/fo_pk_exposure_import_driver.sio` | `use epistemic::fo::{fo_css,…}` |
+| **PK struct e2e (trust gate)** | `tests/run-pass/madaros_gum_fo_pk_struct.sio` | `Pk` peels, `css` nested methods, call projections |
+| **Pk-method dissertation driver** | `examples/epistemic_fo_second_order/fo_pk_struct_method_driver.sio` | methods + call-result + alias + free parity + shared η + correlate ρ=1 |
+| Gate | `scripts/ci/fo_pk_struct_method_driver_gate.sh` | greps science table; token `FO_PK_STRUCT_METHOD_DRIVER_PASS` |
 
-Both model Css = (F·Dose/τ)/(CL0·exp(η)). Import driver is the multi-mod receipt after FO prepass + Program-by-value fix.
+Oral Css = (F·Dose/τ)/(CL0·exp(η)). Import driver is the multi-mod free-helper receipt.  
+**Pk-method driver** (2026-07-31) is the science surface that uses FO 42/42 method stack end-to-end; measured table: Var Css=0.795833, E₂=6.724, CL=0.34, exposure shared=2825 / indep=1575 / ρ=1=2825.
 
 ## Science drivers measured (2026-07-27 / 2026-07-28)
 
