@@ -4972,7 +4972,7 @@ fn emit_builtin_cos(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     c
 }
 
-// Sprint 118: print_f64 builtin — multiply-and-truncate f64 → stdout
+// Sprint 118: print_f64 builtin — f64 → stdout, fraction rounded (#1573)
 fn emit_builtin_print_f64(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
 
@@ -5032,7 +5032,75 @@ fn emit_builtin_print_f64(nc: NativeCompiler) -> NativeCompiler with Mut, Panic,
     c.code = emit_cvttsd2si_rax_xmm0(c.code)
     c.code = emit_store_rax_rbp_disp32(c.code, -56)   // save int_part
 
-    // itoa for integer part
+    // Fractional part
+    c.code = emit_load_rbp_disp32_rax(c.code, -48)
+    c.code = emit_movq_xmm0_rax(c.code)
+    c.code = emit_load_rbp_disp32_rax(c.code, -56)
+    // cvtsi2sd xmm1, rax (F2 48 0F 2A C8)
+    var cb5 = c.code
+    cb5 = emit_byte(cb5, 0xF2)
+    cb5 = emit_byte(cb5, 0x48)
+    cb5 = emit_byte(cb5, 0x0F)
+    cb5 = emit_byte(cb5, 0x2A)
+    cb5 = emit_byte(cb5, 0xC8)
+    c.code = cb5
+
+    c.code = emit_subsd_xmm0_xmm1(c.code)
+
+    // Load 1e6 from .rodata
+    let movsd1_pos = c.code.len
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, movsd1_pos + 4, rodata_1e6_offset)
+
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    // Round, do not truncate. cvttsd2si biases every printed value downward by
+    // up to one unit in the last digit: 5.76 printed 5.759999, 2.675 printed
+    // 2.674999 (#1573). The integer part above still uses the truncating form,
+    // which is correct there and preserves the printable range (values up to
+    // ~9.2e18 still print; scaling the WHOLE number by 1e6 first would have
+    // capped it at ~9.2e12 and regressed 1e13 and 1e15, which print exactly
+    // today).
+    c.code = emit_cvtsd2si_rax_xmm0(c.code)
+
+    // Ensure non-negative
+    c.code = emit_test_rax_rax(c.code)
+    c.code = emit_jns_rel8(c.code, 3)
+    c.code = emit_xor_rax_rax(c.code)
+
+    // Carry. Rounding can lift the fraction to exactly 1000000 -- 0.9999995
+    // is the smallest case. The 6-digit itoa below emits only six digits, so
+    // an un-carried 1000000 would print as 0.000000: strictly worse than the
+    // truncation this replaces. Subtract the decade and bump the integer part,
+    // which has NOT been written yet -- that is why the integer itoa and the
+    // '.' now follow this block instead of preceding it.
+    c.code = emit_mov_reg_imm(c.code, 3, 1000000)     // mov rbx, 1000000
+    c.code = emit_sub_rax_rbx(c.code)                 // rax -= 1000000
+    c.code = emit_test_rax_rax(c.code)
+    let carry_jns_pos = c.code.len
+    c.code = emit_jns_rel8(c.code, 0)                 // >= 0 means it carried
+    c.code = emit_add_rax_rbx(c.code)                 // no carry: restore
+    let carry_jmp_pos = c.code.len
+    c.code = emit_jmp_rel8(c.code, 0)
+    let carry_target = c.code.len
+    var cbc = c.code                                  // inc qword [rbp-56]
+    cbc = emit_byte(cbc, 0x48)
+    cbc = emit_byte(cbc, 0xFF)
+    cbc = emit_byte(cbc, 0x45)
+    cbc = emit_byte(cbc, 0xC8)
+    c.code = cbc
+    if carry_jns_pos + 1 < nc_code_capacity_bytes() {
+        NC_BIG_CODE[(carry_jns_pos + 1) as usize] = low8(carry_target - (carry_jns_pos + 2)) as i8
+    }
+    if carry_jmp_pos + 1 < nc_code_capacity_bytes() {
+        NC_BIG_CODE[(carry_jmp_pos + 1) as usize] = low8(c.code.len - (carry_jmp_pos + 2)) as i8
+    }
+
+    // Park the fraction; the integer itoa below needs rax.
+    c.code = emit_store_rax_rbp_disp32(c.code, -64)
+
+    // itoa for integer part. Reloaded because the fraction computation above
+    // now runs first and leaves its own result in rax.
+    c.code = emit_load_rbp_disp32_rax(c.code, -56)
     c.code = emit_mov_reg_reg(c.code, 6, 5)           // mov rsi, rbp
     c.code = emit_sub_rsi_imm8(c.code, 1)
     c.code = emit_xor_rcx_rcx(c.code)
@@ -5069,35 +5137,8 @@ fn emit_builtin_print_f64(nc: NativeCompiler) -> NativeCompiler with Mut, Panic,
     c = emit_load_runtime_context_field_rdi(c, runtime_context_field_stdout_fd())
     c = emit_write_syscall_for_target(c, c.target_os_id)
 
-    // Fractional part
-    c.code = emit_load_rbp_disp32_rax(c.code, -48)
-    c.code = emit_movq_xmm0_rax(c.code)
-    c.code = emit_load_rbp_disp32_rax(c.code, -56)
-    // cvtsi2sd xmm1, rax (F2 48 0F 2A C8)
-    var cb5 = c.code
-    cb5 = emit_byte(cb5, 0xF2)
-    cb5 = emit_byte(cb5, 0x48)
-    cb5 = emit_byte(cb5, 0x0F)
-    cb5 = emit_byte(cb5, 0x2A)
-    cb5 = emit_byte(cb5, 0xC8)
-    c.code = cb5
-
-    c.code = emit_subsd_xmm0_xmm1(c.code)
-
-    // Load 1e6 from .rodata
-    let movsd1_pos = c.code.len
-    c.code = emit_movsd_xmm1_rip_disp32(c.code, 0)
-    c.relocs = add_rip_reloc(c.relocs, movsd1_pos + 4, rodata_1e6_offset)
-
-    c.code = emit_mulsd_xmm0_xmm1(c.code)
-    c.code = emit_cvttsd2si_rax_xmm0(c.code)
-
-    // Ensure non-negative
-    c.code = emit_test_rax_rax(c.code)
-    c.code = emit_jns_rel8(c.code, 3)
-    c.code = emit_xor_rax_rax(c.code)
-
-    // 6-digit fixed-width itoa (unrolled)
+    // 6-digit fixed-width itoa (unrolled), reading the parked fraction.
+    c.code = emit_load_rbp_disp32_rax(c.code, -64)
     c.code = emit_mov_reg_reg(c.code, 6, 5)           // mov rsi, rbp
     c.code = emit_sub_rsi_imm8(c.code, 3)
 
