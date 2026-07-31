@@ -65,9 +65,9 @@ verified off the degenerate locus -- so the step is fully SPECIFIED. SIX of the 
 Qred_hi_ll/_ul/_lu/_uu), with their exact hypotheses pinned by K12 and K13. ALL SIXTEEN cases are now PROVEN forall n in Lean -- the eight Q-rows (K12, K13) and the eight
 Q'-rows (K14). What remains is the ASSEMBLY. Its degenerate half is now understood (K16): Q is identically -1
 on the whole degenerate locus (PROVEN forall n as Qgen_degen) and Q' there is determined by the
-degeneracy pattern, which tau preserves. What is NOT done: the Q' pattern lemma in Lean, and the
-induction itself -- and note the reduction lemmas' hypotheses are about the REDUCED arguments
-while the degeneracy lemmas are about the current ones, so the two do not yet meet.
+degeneracy pattern, which tau preserves. K17 STITCHES the two halves: the gap tuples -- non-degenerate at m+2 but reducing to a
+degenerate one at m+1 -- all give Q = -1, so the three branches of the assembly are EXHAUSTIVE.
+What is NOT done: the gap lemma and the Q' pattern lemma in Lean, and the induction itself.
 
 Verdict L1_REDUCED_TO_SEAM_TAU_EQUIVARIANCE_OF_Q__NOT_PROVEN.
 Numerical certificate over an exact integer sign table; D3 respected.
@@ -538,6 +538,38 @@ def main():
           "(*) both sides are the same constant -1 (PROVEN forall n in Lean as Qgen_degen); for "
           "(*') both sides share a pattern hence a value. The pattern lemma for Q' is NOT yet "
           "in Lean.")
+
+    # ---- K17 THE BRIDGE: the gap cases also give -1, so the two halves meet ---------------
+    k17 = True
+    k17_gap = 0
+    for m in (4, 5):
+        Sn = sign_table_fast(m + 2).astype(np.int64)
+        H, N = 1 << (m + 1), 1 << (m + 2)
+
+        def degen(a, b, Y):
+            return (a == 0 or b == 0 or (a ^ Y) == 0 or (b ^ Y) == 0
+                    or a == b or (a ^ b ^ Y) == 0)
+
+        for Y in range(1, N):
+            W = Y if Y < H else Y - H
+            for a in range(N):
+                x = a if a < H else a - H
+                for b in range(N):
+                    if degen(a, b, Y):
+                        continue                       # covered by Qgen_degen (PROVEN)
+                    y = b if b < H else b - H
+                    if not degen(x, y, W):
+                        continue                       # covered by the 16 reduction lemmas
+                    k17_gap += 1
+                    if Q(Sn, a, b, Y) != -1:
+                        k17 = False
+    ok["K17"] = k17
+    print(f"K17_BRIDGE  the GAP cases -- non-degenerate at level m+2 but reducing to a DEGENERATE "
+          f"tuple at m+1, which no reduction lemma covers -- all give Q = -1 ({k17_gap} such "
+          f"tuples at levels 6 and 7) {'OK' if k17 else 'FAIL'}. So the assembly's three branches "
+          f"are exhaustive: degenerate at m+2 -> Qgen_degen (PROVEN forall n); reduced-degenerate "
+          f"-> this constant (MEASURED, not yet a Lean lemma); otherwise -> the sixteen reduction "
+          f"lemmas (PROVEN) plus the induction hypothesis, with Qgen_pow2 (PROVEN) as base case")
 
     print("=" * 78)
     if all(ok.values()):

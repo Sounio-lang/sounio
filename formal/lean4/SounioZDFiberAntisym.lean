@@ -1335,7 +1335,30 @@ theorem Qgen_degen (m W a b : Nat) (hW : W < 2^m) (ha : a < 2^m) (hb : b < 2^m) 
         antisym (m'+1) a (a ^^^ W) ha (Nat.xor_lt_two_pow ha hW) ha0 haW haWne]
     rcases cdSigma_pm (m'+1) (a ^^^ W) a with h1 | h1 <;> rw [h1] <;> decide
 
+/-- `sw 0 j = 0` for every j. -/
+theorem sw_map_zero (j : Nat) : sw 0 j = 0 := by
+  unfold sw; simp
+
+/-- Degenerate (★) when BOTH sides are degenerate: both products are `-1`.
+    Together with `Qgen_degen` and the fact that `τ` preserves the six degeneracies
+    (linear injective bit-swap; measured K16), this closes the degenerate half of the
+    mutual assembly without induction. The non-degenerate half still needs the 16-case
+    table assembled under the induction hypothesis. -/
+theorem star_both_degen (m Y a b j : Nat)
+    (hY : Y < 2^m) (ha : a < 2^m) (hb : b < 2^m) (hY0 : Y ≠ 0)
+    (hYa : sw Y j < 2^m) (ha' : sw a j < 2^m) (hb' : sw b j < 2^m)
+    (hY0' : sw Y j ≠ 0)
+    (hd : a = 0 ∨ b = 0 ∨ a ^^^ Y = 0 ∨ b ^^^ Y = 0 ∨ a = b ∨ a ^^^ b ^^^ Y = 0)
+    (hd' : sw a j = 0 ∨ sw b j = 0 ∨ sw a j ^^^ sw Y j = 0 ∨ sw b j ^^^ sw Y j = 0
+         ∨ sw a j = sw b j ∨ sw a j ^^^ sw b j ^^^ sw Y j = 0) :
+    Qgen Y a b m = Qgen (sw Y j) (sw a j) (sw b j) m := by
+  have hL : Qgen Y a b m = -1 := Qgen_degen m Y a b hY ha hb hY0 hd
+  have hR : Qgen (sw Y j) (sw a j) (sw b j) m = -1 :=
+    Qgen_degen m (sw Y j) (sw a j) (sw b j) hYa ha' hb' hY0' hd'
+  rw [hL, hR]
+
 end SounioZDFiberAntisym
+
 
 
 

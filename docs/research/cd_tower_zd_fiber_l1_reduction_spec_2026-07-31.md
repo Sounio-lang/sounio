@@ -55,6 +55,7 @@ No link is assumed.
 | `K8` | (★) needs no seam hypothesis: it holds for **every** `Y ≠ 0` | 0 violations, levels 5,6,7 |
 | `K9` | base case of (★): `Q` at a single-bit label is identically `−1` | 0 violations, levels 4..7; Lean `Qgen_pow2` ∀n |
 | `K15` | (★) for single-bit labels: `Q_Y(a,b) = Q_{τY}(τa,τb)` when `Y = 2^k` | 0 violations, levels 4..7; Lean `star_pow2` ∀n |
+| `K16` | on the degenerate locus, `Q ≡ −1`; `Q'` is pattern-determined | measured 5..7; Lean `Qgen_degen` ∀n |
 
 with `D1_Y(a,b) = σ(a,b)σ(a⊕Y,b)`, `D2_Y(c,y) = σ(c,y)σ(c,y⊕Y)`, and
 `e1 = D1_{τY}(τa,τb)·D1_Y(a,b)`, `e2` the same for `D2`.
@@ -104,8 +105,13 @@ makes the target *easier*, not harder.
   identically `−1` for all `a,b` and all bit positions `k < m` — proven ∀n.
 - **(★) holds for every single-bit label (K15 / `star_pow2`).** Both sides of
   `Q_Y(a,b) = Q_{τY}(τa,τb)` are the constant `−1` when `Y = 2^k`, so the
-  equivariance is a corollary of the base case. Multi-bit `Y` is the remaining
-  assembly of the mutual step (all 16 reduction cases already proven as K12–K14).
+  equivariance is a corollary of the base case.
+- **Degenerate locus closed for `Q` (K16 / `Qgen_degen`).** On any of the six
+  degeneracies, `Q ≡ −1` (proven ∀n). With `τ` preserving the pattern, both
+  sides of (★) are that constant (`star_both_degen`). `Q'` pattern lemma not yet
+  in Lean.
+- **Multi-bit non-degenerate assembly still open.** All 16 reduction cases are
+  proven (K12–K14); wiring them under the mutual IH remains.
 - (c) as a whole is untouched: **L2 remains where the previous rung left it**, with its
   triangle route walled.
 
