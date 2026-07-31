@@ -13,6 +13,7 @@ reproducibility living inside the language itself**, not in an external toolbox.
 ```bash
 bin/souc run demos/hydrogen/mh7_reliability.sio                         # 7-stage HRS reliability (flagship)
 bin/souc run demos/hydrogen/trieres_chain.sio                           # TRIERES valley: dispensed EUR/kg p-box
+bin/souc run demos/hydrogen/valley_chain_epistemic.sio                  # composed twin: subsurface -> compressor -> dispenser
 bin/souc run demos/hydrogen/mh_stage_uq.sio                              # stage model
 bin/souc run demos/hydrogen/mh_cascade_uq.sio                            # cascade
 bin/souc run demos/hydrogen/bayes_pilot.sio                              # value of pilot data (IDM)
@@ -117,6 +118,51 @@ the assumption the p-box refuses — the interval is the deliverable, the map
 is how you shrink it. Monotonicity machine-checked in Lean 4
 (`SounioHydrogenPbox.monotone_event_equiv`). Both engines →
 `TRIERES_CHAIN_OK`.
+
+## The composed valley chain (`valley_chain_epistemic.sio`) — the epistemic digital twin
+
+One receipt composing the three house models into a single chain:
+**subsurface geochemical loss → compressor reliability → dispensed
+EUR/kg**, with p-boxes propagated end-to-end. Composition is by
+construction — the component demos are not modified; their models are
+re-derived in-file with the same formulas, constants, seeds, and
+integer-decision idioms, and Sections B and C of the receipt reproduce
+`mh7_reliability.sio` (65.255 / 59.030 %, corner p-box [1.31, 99.89] %)
+and `trieres_chain.sio` (20.765 %, [0, 100]) digit for digit. The UHS
+brine-calcite 30-yr loss p-box **[0.458073, 2.630814] %** enters as a
+*pinned input* (re-derived by `uhs_brine_calcite.sio`, merged #1585),
+which keeps the twin chemistry-free.
+
+Both couplings are **ILLUSTRATIVE, labeled, with swap slots**: storage
+residence τ = 1 yr gives an availability factor
+`f_s = 1 − (L30/100)·(τ/30)`, and compressor reliability enters as an
+availability derate `f_c = R` on delivered kg:
+`CF_eff = f_s · f_c · CF`. D is decreasing in CF_eff and CF_eff is
+increasing in both factors, so the per-stage monotone chains keep the
+composed corner p-box **exact** — and it still spans **[0, 100] %**.
+
+The headline is what the coupling does to the *conventional* number:
+
+| analysis | P(dispensed < €6/kg) |
+| --- | --- |
+| conventional, no-coupling baseline | 20.765 % |
+| conventional, composed valley-chain | **3.630 %** (−17.1 pp) |
+| decomposition: subsurface only (R = 1) | 20.495 % |
+| decomposition: compressor only (L30 = 0) | 3.635 % |
+| distribution-free p-box, baseline and composed | [0, 100] % both |
+
+Closing the loop moves the conventional number violently but does not
+shrink the honest interval: the compressor's corner p-box on reliability
+is itself [1.3, 99.9] %. The one-at-a-time table says the same thing
+harsher — post-coupling, **only compressor R can flip the gate alone**
+(the eight economic intervals and the subsurface loss each move 0.00
+points); Sobol agrees (R carries ~94 % of Var(D) under the conventional
+measure, Jansen). *The euro is not in the rock at 1-yr residence — it is
+in the reliability data.* Reference engine: lean_single →
+`VALLEY_CHAIN_OK`. On Madaros the receipt is byte-identical through
+Section H, then hits the same pre-existing Saltelli-machinery SIGSEGV
+(#1570 family) as both component demos. Suite coverage:
+`tests/run-pass/valley_chain_epistemic_selftest.sio` (both engines).
 
 ## The model (`mh_stage_uq.sio`)
 
