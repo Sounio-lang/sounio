@@ -4291,6 +4291,51 @@ fn lower_expr_has_float_source_ref(e: &Expr) -> bool with Mut, Panic, Div {
     false
 }
 
+// #1569: conservative "subtree may evaluate a call" predicate. The legacy
+// scalar-variance algebra in lower_expr_variance_ref re-lowers operand
+// VALUES (lower_opt_expr_ref) to feed emit_variance_independent_product/div;
+// when the operand contains an effectful call (e.g. a Mut RNG) that
+// re-lowering executes the call a SECOND time, so
+// `let d = W[k] * (2.0 * rand_u() - 1.0)` advanced the PRNG twice per
+// iteration and Madaros diverged from lean_single. Whitelist the pure,
+// recursable kinds; everything else (Call/MethodCall, If, Block, Closure,
+// Match, literals-of-aggregate, ...) conservatively counts as "may call".
+fn lower_opt_expr_contains_call(opt: &Option<Box<Expr>>) -> bool with Mut, Panic, Div {
+    match *opt {
+        Some(e) => lower_expr_contains_call_ref(&(*e)),
+        None => false,
+    }
+}
+
+fn lower_expr_contains_call_ref(e: &Expr) -> bool with Mut, Panic, Div {
+    if (*e).kind == ExprKind::ExprIntLit { return false }
+    if (*e).kind == ExprKind::ExprFloatLit { return false }
+    if (*e).kind == ExprKind::ExprBoolTrue { return false }
+    if (*e).kind == ExprKind::ExprBoolFalse { return false }
+    if (*e).kind == ExprKind::ExprStringLit { return false }
+    if (*e).kind == ExprKind::ExprCharLit { return false }
+    if (*e).kind == ExprKind::ExprIdent { return false }
+    if (*e).kind == ExprKind::ExprPath { return false }
+    if (*e).kind == ExprKind::ExprBinary {
+        if lower_opt_expr_contains_call(&(*e).left) { return true }
+        return lower_opt_expr_contains_call(&(*e).right)
+    }
+    if (*e).kind == ExprKind::ExprUnary {
+        return lower_opt_expr_contains_call(&(*e).left)
+    }
+    if (*e).kind == ExprKind::ExprCast {
+        return lower_opt_expr_contains_call(&(*e).left)
+    }
+    if (*e).kind == ExprKind::ExprIndex {
+        if lower_opt_expr_contains_call(&(*e).left) { return true }
+        return lower_opt_expr_contains_call(&(*e).right)
+    }
+    if (*e).kind == ExprKind::ExprFieldAccess {
+        return lower_opt_expr_contains_call(&(*e).left)
+    }
+    true
+}
+
 fn lower_expr_is_f64_array_literal_ref(e: &Expr) -> bool with Mut, Panic, Div {
     if (*e).kind != ExprKind::ExprArrayLit { return false }
     match (*e).left {
@@ -7707,6 +7752,14 @@ impl Lowerer {
                     return corr_pair
                 }
                 lo = corr_pair.0
+                // #1569: the value re-lowering below would execute any
+                // effectful call in the operands a SECOND time (the first
+                // evaluation already happened in lower_let_stmt_ref).
+                // Variance of a call result is untracked anyway, so bail
+                // instead of re-emitting.
+                if lower_opt_expr_contains_call(&(*e).left) || lower_opt_expr_contains_call(&(*e).right) {
+                    return (lo, -1)
+                }
                 let lhs_val_pair = lo.lower_opt_expr_ref(&(*e).left)
                 lo = lhs_val_pair.0
                 let lhs_v = lhs_val_pair.1
@@ -7726,6 +7779,11 @@ impl Lowerer {
                         }
                     }
                     _ => {}
+                }
+                // #1569: same double-evaluation hazard as OpMul above —
+                // never re-lower an operand that may contain a call.
+                if lower_opt_expr_contains_call(&(*e).left) || lower_opt_expr_contains_call(&(*e).right) {
+                    return (lo, -1)
                 }
                 let lhs_val_pair = lo.lower_opt_expr_ref(&(*e).left)
                 lo = lhs_val_pair.0
