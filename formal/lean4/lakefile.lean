@@ -656,6 +656,9 @@ lean_lib «SounioFoSurfaceTransfer» where
 lean_lib «SounioFoBytecodeFragment» where
 @[default_target]
 lean_lib «SounioFoEmitPure» where
+@[default_target]
+lean_lib «SounioFoRegistrationFragment» where
+
 
 
 
