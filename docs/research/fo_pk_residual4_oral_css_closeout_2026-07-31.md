@@ -7,6 +7,7 @@ validated_by: A6
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.fo-pk-residual4-oral-css-closeout-2026-07-31
 -->
 
+
 <!-- docs:status-note:start -->
 > Docs status: `historical`
 > This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
@@ -69,6 +70,30 @@ STATUS ... L2_METHOD_XFER=CLOSED L2_MULTIMOD=CLOSED L2_FULL_ENGINE=OPEN
 ORAL_CSS_RESIDUAL4_CLOSED
 ```
 
+Optional Lean (all fragment modules wired in `formal/lean4/lakefile.lean`):
+
+```bash
+cd formal/lean4
+lake build SounioFoCssSurfaceParity SounioFoSurfaceTransfer \
+  SounioFoBytecodeFragment SounioFoEmitPure \
+  SounioFoRegistrationFragment SounioFoEngineInstallFragment \
+  SounioFoMethodXferFragment SounioFoMultimodFragment
+```
+
+Or per-gate: `FO_CSS_LEAN_BUILD=1 bash scripts/ci/fo_*_fragment_gate.sh`.
+
+## 5. Science receipts (R1–R4)
+
+| ID | Gate |
+|----|------|
+| R1 | `scripts/ci/fo_pk_struct_method_driver_gate.sh` |
+| R2 | `scripts/ci/fo_pk_struct_rho_tau_driver_gate.sh` |
+| R3 | `scripts/ci/fo_pk_struct_multidose_driver_gate.sh` |
+| R4 | `scripts/ci/fo_pk_import_method_driver_gate.sh` |
+
+Annex: `docs/dissertation/results/fo_pk_method_science_v1.md`  
+Prose package: `docs/dissertation/handoff/fo_pk_method_science_package.md`
+
 ---
 
-*Closeout fo-pk-residual4-oral-css-v1 (2026-07-31).*
+*Closeout fo-pk-residual4-oral-css-v2 (2026-07-31) — lakefile wired; stack green.*

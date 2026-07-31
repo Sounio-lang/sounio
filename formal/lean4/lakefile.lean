@@ -685,7 +685,31 @@ lean_lib «SounioFoBytecodeFragment» where
 
 -- FO residual §5.4 L2 pure-emit: fo_bc_compile_expr pure fragment (lower.sio
 -- ~9358–9367) formalised; compile(cssSite)=cssSiteProg; fo_css expand = site.
--- Registration/multipass/multi-mod feed still open; R4 remains live witness.
 -- Companion: scripts/research/fo_emit_pure_cert.py.
 @[default_target]
 lean_lib «SounioFoEmitPure» where
+
+-- FO residual §5.4 L2 registration fragment: multipass FO_XFER expand for
+-- oral Css pure helpers (local ≡ import registry).
+-- Companion: scripts/research/fo_registration_fragment_cert.py.
+@[default_target]
+lean_lib «SounioFoRegistrationFragment» where
+
+-- FO residual §5.4 L2 engine-install fragment: multipass register of oral Css
+-- pure helpers (forward/reverse/4-pass).
+-- Companion: scripts/research/fo_engine_install_fragment_cert.py.
+@[default_target]
+lean_lib «SounioFoEngineInstallFragment» where
+
+-- FO residual §5.4 L2 method FO_XFER peel (Pk.css / call-result → cssSite).
+-- Companion: scripts/research/fo_method_xfer_fragment_cert.py.
+@[default_target]
+lean_lib «SounioFoMethodXferFragment» where
+
+-- FO residual §5.4 L2 multi-mod prepass model (local ≡ import ≡ union).
+-- Companion: scripts/research/fo_multimod_fragment_cert.py.
+@[default_target]
+lean_lib «SounioFoMultimodFragment» where
+
+-- Oral Css residual §5.4 closeout: docs/research/fo_pk_residual4_oral_css_closeout_2026-07-31.md
+-- Stack gate: scripts/ci/fo_residual4_stack_gate.sh → ORAL_CSS_RESIDUAL4_CLOSED
