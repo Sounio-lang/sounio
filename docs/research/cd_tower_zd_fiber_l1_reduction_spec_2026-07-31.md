@@ -53,7 +53,6 @@ No link is assumed.
 | `K4` | equivalently, one statement: `e1(a,b,Y) = e1(a, b⊕Y, Y)` | 0 violations |
 | `K1` | `K4` regrouped **is** (★) | 0 violations, levels 5..8 |
 | `K8` | (★) needs no seam hypothesis: it holds for **every** `Y ≠ 0` | 0 violations, levels 5,6,7 |
-| `K9` | the base case: `Q` at a single-bit label is `−1` | 0 violations, levels 4..7; **Lean-proven ∀n** |
 | `K9` | base case of (★): `Q` at a single-bit label is identically `−1` | 0 violations, levels 4..7; Lean `Qgen_pow2` ∀n |
 
 with `D1_Y(a,b) = σ(a,b)σ(a⊕Y,b)`, `D2_Y(c,y) = σ(c,y)σ(c,y⊕Y)`, and
