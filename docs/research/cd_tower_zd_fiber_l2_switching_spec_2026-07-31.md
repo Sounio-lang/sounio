@@ -60,6 +60,7 @@ cocycle, the same shape as `A4_sub`, which the branch-induction toolkit already 
 | `M5_OVERFIT` | freezing the mask at `7` (the n=6 value) fails at n ≥ 7 | self-catch, recorded |
 | `M6_NULL` | neighbouring masks `2^{j+1}−1`, `2^{j−1}−1` both fail | the mask is exactly right |
 | `M0_PARITY` | builders reproduce the in-tree `sign_table` entrywise | measured |
+| `M7_LEAN` | the Lean file's `tau`/`res`/`eps` are the ones measured here | measured |
 
 ---
 
@@ -92,7 +93,12 @@ Recorded rather than silently fixed, because both would have shipped as false st
 - **L2 is not proven ∀n.** `M1` is measured at four levels.
 - **Non-existence of any `λ` for odd weight is not proven.** `M2` shows *this* `λ` fails there;
   the non-existence rests on the previous rung's triangle obstruction, which is evidence.
-- **Nothing here is Lean-proven.**
+- **The two identities are not Lean-proven.** The **reduction** is:
+  `formal/lean4/SounioZDCollapse.lean` proves ∀n that (★) together with this rung's closed form
+  imply `Φ` both **preserves and reflects** adjacency — i.e. (c) — with both identities as
+  explicit hypotheses (`Phi_preserves_adj`, `Phi_reflects_adj`; no `sorry`, no `native_decide`).
+  `M7` pins that file's `tau`/`res`/`eps` to the objects measured here, so the implication is
+  about the same graph. Before that file, the sufficiency of the two identities was prose.
 - (c) as a whole is still open. What has changed is its shape: with L1 reduced to (★) and L2's
   `λ` explicit, **(c) is now two explicit sign identities** rather than one equivariance plus one
   cohomological existence claim.

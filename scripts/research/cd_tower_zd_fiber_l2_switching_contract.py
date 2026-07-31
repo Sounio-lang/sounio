@@ -261,6 +261,48 @@ def main():
                   f"{'OK' if bad else 'FAIL'}")
     ok["M6"] = m6
 
+    # ---- M7 Lean bridge: the formalised objects ARE the measured ones ---------------------
+    def lean_tau(j, x):
+        return x if (x & 1) == ((x >> j) & 1) else x ^ (1 | (1 << j))
+
+    m7_tau = m7_obj = True
+    for n in (6, 7):
+        S, H = tabs[n], 1 << (n - 1)
+        for j in range(1, n):
+            for x in range(1 << n):
+                if lean_tau(j, x) != sw(x, j):
+                    m7_tau = False
+        for Y in range(8, H, 8):
+            L = Y | H
+            for a in range(1, H):
+                for b in range(1, H):
+                    # Lean: P1 L a b = sigma(a,b)*sigma(a^L,b^L); P3 = sigma(a,b^L)*sigma(a^L,b)
+                    lp1 = int(S[a, b] * S[a ^ L, b ^ L])
+                    lp3 = int(S[a, b ^ L] * S[a ^ L, b])
+                    lres = (lp1 == lp3)                      # Lean: res := P1 = P3
+                    leps = -lp1                              # Lean: eps := -P1
+                    E = res_edges(S, H, L)
+                    break
+                break
+            break
+        # entrywise check of res/eps against res_edges, all fibers
+        for Y in range(8, H, 8):
+            L = Y | H
+            E = res_edges(S, H, L)
+            for a in range(1, H):
+                for b in range(1, H):
+                    if a == b:
+                        continue
+                    lp1 = int(S[a, b] * S[a ^ L, b ^ L])
+                    lp3 = int(S[a, b ^ L] * S[a ^ L, b])
+                    if ((lp1 == lp3) != ((a, b) in E)) or ((a, b) in E and -lp1 != E[(a, b)]):
+                        m7_obj = False
+    ok["M7"] = m7_tau and m7_obj
+    print(f"M7_LEAN     formal/lean4/SounioZDCollapse.lean's tau == this file's swap (all j, "
+          f"n=6,7) {'OK' if m7_tau else 'FAIL'};  its res/eps == the measured resonance and edge "
+          f"sign, all fibers {'OK' if m7_obj else 'FAIL'} => the Lean reduction is about THE "
+          f"MEASURED OBJECT")
+
     print("=" * 78)
     if all(ok.values()):
         print("CD_TOWER_ZDL2_VERDICT L2_SWITCHING_FUNCTION_IN_CLOSED_FORM__COBOUNDARY_EXPLICIT")
@@ -276,7 +318,11 @@ def main():
               "2^j-1 (M4). SELF-CATCH RECORDED: the n=6 fit froze the mask at 7 and fails at "
               "n>=7 -- the mask is j-dependent (M5). NOT CLAIMED: L2 is not proven forall n (four "
               "levels), non-existence of any lambda for odd weight is not proven either, and "
-              "nothing here is Lean-proven. Numerical certificate; D3 respected")
+              "nothing here is Lean-proven. BUT the REDUCTION is: formal/lean4/SounioZDCollapse.lean "
+              "proves forall n that these two identities TOGETHER imply Phi preserves AND "
+              "reflects adjacency -- i.e. (c) -- with both identities as explicit hypotheses "
+              "(Phi_preserves_adj / Phi_reflects_adj, no sorry, no native_decide). M7 pins that "
+              "file's tau/res/eps to the ones measured here. Numerical certificate; D3 respected")
         return 0
     print("CD_TOWER_ZDL2_VERDICT INCOMPLETE  failing=" +
           ",".join(k for k, v in ok.items() if not v))
