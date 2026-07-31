@@ -15,27 +15,26 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.fo-cs
 
 # FO Css residual §5.4 — compiler half: semantic bridge (2026-07-31)
 
-**Status:** L0 + L1 + L2-fragment + **L2 pure-emit** CLOSED; **L2 registration/multipass** OPEN  
-**Algebraic half:** `formal/lean4/SounioFoCssSurfaceParity.lean`  
-**Semantic bridge:** `formal/lean4/SounioFoSurfaceTransfer.lean`  
-**Bytecode fragment:** `formal/lean4/SounioFoBytecodeFragment.lean`  
-**Pure emit:** `formal/lean4/SounioFoEmitPure.lean` (`fo_bc_compile_expr` pure fragment)  
+**Status:** L0–L2 registration **fragment** CLOSED; **L2 engine install** OPEN  
+**Modules:** `SounioFoCssSurfaceParity`, `SounioFoSurfaceTransfer`,
+`SounioFoBytecodeFragment`, `SounioFoEmitPure`, `SounioFoRegistrationFragment`  
 **Stack gate:** `scripts/ci/fo_residual4_stack_gate.sh`  
 **IR evidence:** R4 `scripts/ci/fo_pk_import_method_driver_gate.sh`
 
 ---
 
-## 1. Residual split (five layers)
+## 1. Residual split (six layers)
 
 | Layer | Claim | Status | Evidence |
 |-------|-------|--------|----------|
-| **L0 Algebraic** | Pure Rat maps agree; freezes exact ℚ | **CLOSED** | `SounioFoCssSurfaceParity` + gate 17/17 |
+| **L0 Algebraic** | Pure Rat maps agree; freezes exact ℚ | **CLOSED** | `SounioFoCssSurfaceParity` |
 | **L1 Semantic** | Surfaces desugar to one `FoExpr` | **CLOSED** | `SounioFoSurfaceTransfer` |
-| **L2-fragment** | FO ops 1–6 stack machine; RPN run = desugar | **CLOSED** | `SounioFoBytecodeFragment` |
-| **L2 pure-emit** | `fo_bc_compile_expr` pure fragment emits `cssSiteProg`; fo_css expand = site | **CLOSED** | `SounioFoEmitPure` + `fo_emit_pure_gate` |
-| **L2 registration** | Multipass / multi-mod / method FO_XFER always feed that pure AST into compile | **OPEN** | R4 numerical witness |
+| **L2-fragment** | FO ops 1–6 stack machine | **CLOSED** | `SounioFoBytecodeFragment` |
+| **L2 pure-emit** | `fo_bc_compile_expr` pure path | **CLOSED** | `SounioFoEmitPure` |
+| **L2 registration fragment** | Multipass FO_XFER expand of fo_css registry (local ≡ import); method peel = site; emit RPN | **CLOSED** | `SounioFoRegistrationFragment` + gate |
+| **L2 engine install** | Madaros multipass *always* installs those registry bodies before call sites | **OPEN** | R4 numerical witness |
 
-Dissertation wording must not collapse pure-emit into full registration soundness.
+Dissertation wording must not collapse registration *semantics* into engine *install* soundness.
 
 ---
 
@@ -91,14 +90,25 @@ Proved: `compile(cssSite) = cssSiteProg`, and `fo_css` XFER expand
 (`rate/clearance` bodies from `stdlib/epistemic/fo.sio`) is definitionally
 `cssSite`. Round-trip `run(compile e) = toFo e` for oral Css.
 
-## 3c. What would close L2 registration (remaining)
+## 3c. L2 registration fragment (closed 2026-07-31)
 
-1. **Multipass registration** always installs pure-helper bodies as FO_XFER kind-6 for `fo_css` / methods before call-site expand.
-2. **Multi-mod prepass** registers imported helpers with the same bytecode as same-module.
-3. **Method FO_XFER** mangles `Pk_css` and peels `self.cl0` to param FO matching param-3 in the pure model.
-4. Optional: EXP op-20 path for `exp(η)` vs eEta channel (FO-var equivalent at η=0).
+Models multipass FO_XFER expand (`fo_bc_expand_xfer_call` / PARAM→arg subst):
 
-**Until then:** R4 remains the **executable** registration witness.
+```
+Registry: fo_infusion_rate, fo_clearance, fo_css  (local ≡ import name-identity)
+expand(fo_css(p0..p4)) = cssSite
+compile(expand(...)) = cssSiteProg
+method peel model = cssSite
+```
+
+## 3d. What would close L2 engine install (remaining)
+
+1. Madaros multipass *always* installs those bodies as FO_XFER kind-6 before call sites.
+2. Multi-mod frontend prepass is faithful for all loaded modules (not just name-identity of bodies).
+3. Method FO_XFER + op17 field peel in full generality (not just the oral Css peel model).
+4. Optional: EXP op-20 vs eEta channel.
+
+**Until then:** R4 remains the **executable** engine-install witness.
 
 ---
 
@@ -119,9 +129,10 @@ bash scripts/ci/fo_css_surface_parity_gate.sh      # L0
 bash scripts/ci/fo_surface_transfer_gate.sh        # L1
 bash scripts/ci/fo_bytecode_fragment_gate.sh       # L2-fragment
 bash scripts/ci/fo_emit_pure_gate.sh               # L2 pure-emit
-bash scripts/ci/fo_pk_import_method_driver_gate.sh # registration executable
+bash scripts/ci/fo_registration_fragment_gate.sh   # L2 registration fragment
+bash scripts/ci/fo_pk_import_method_driver_gate.sh # engine-install executable
 ```
 
 ---
 
-*Spec version fo-css-compiler-residual-half-v3 (2026-07-31) — L2 pure-emit closed.*
+*Spec version fo-css-compiler-residual-half-v4 (2026-07-31) — L2 registration fragment closed.*
