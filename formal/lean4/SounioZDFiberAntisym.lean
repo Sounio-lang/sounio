@@ -1322,11 +1322,12 @@ theorem Qgen_degen (m W a b : Nat) (hW : W < 2^m) (ha : a < 2^m) (hb : b < 2^m) 
     rw [sigma_self (m'+1) a ha ha0, sigma_self (m'+1) (a ^^^ W) (Nat.xor_lt_two_pow ha hW) haW,
         antisym (m'+1) a (a ^^^ W) ha (Nat.xor_lt_two_pow ha hW) ha0 haW haWne]
     rcases cdSigma_pm (m'+1) (a ^^^ W) a with h1 | h1 <;> rw [h1] <;> decide
-  · have heb : b = a ^^^ W := by
-      have := xor_zero_eq (a ^^^ b) W (by rwa [Nat.xor_assoc] at h ⊢)
-      rw [← this, Nat.xor_comm a b, Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
-    subst heb
+  · have hab : a ^^^ b = W := xor_zero_eq (a ^^^ b) W h
+    have heb : b = a ^^^ W := by
+      have hh : a ^^^ (a ^^^ b) = a ^^^ W := congrArg (fun z => a ^^^ z) hab
+      rwa [← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor] at hh
     have hcancel : (a ^^^ W) ^^^ W = a := by rw [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+    rw [heb]
     unfold Qgen
     rw [hcancel,
         sigma_self (m'+1) a ha ha0,

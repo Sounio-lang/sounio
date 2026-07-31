@@ -63,7 +63,11 @@ in Lean (Qgen_eq_Qgen'). K11 gives the COMPLETE 16-case reduction table for the 
 verified off the degenerate locus -- so the step is fully SPECIFIED. SIX of the sixteen cases are now PROVEN forall n in Lean as standalone reduction lemmas
 (Qred_low_ll/_lu/_ul/_uu, Qred_hi_ll/_hi_ul), with minimal hypotheses pinned by K12. ALL EIGHT Q-cases are now PROVEN forall n in Lean (Qred_low_ll/_lu/_ul/_uu,
 Qred_hi_ll/_ul/_lu/_uu), with their exact hypotheses pinned by K12 and K13. ALL SIXTEEN cases are now PROVEN forall n in Lean -- the eight Q-rows (K12, K13) and the eight
-Q'-rows (K14). What remains is the ASSEMBLY of the mutual induction, not its cases.
+Q'-rows (K14). What remains is the ASSEMBLY. Its degenerate half is now understood (K16): Q is identically -1
+on the whole degenerate locus (PROVEN forall n as Qgen_degen) and Q' there is determined by the
+degeneracy pattern, which tau preserves. What is NOT done: the Q' pattern lemma in Lean, and the
+induction itself -- and note the reduction lemmas' hypotheses are about the REDUCED arguments
+while the degeneracy lemmas are about the current ones, so the two do not yet meet.
 
 Verdict L1_REDUCED_TO_SEAM_TAU_EQUIVARIANCE_OF_Q__NOT_PROVEN.
 Numerical certificate over an exact integer sign table; D3 respected.
@@ -503,6 +507,37 @@ def main():
     ok["K15"] = k15
     print(f"K15_STAR_POW2  (★) holds for every single-bit label Y=2^k "
           f"(levels 4..7, full a,b range) {'OK' if k15 else 'FAIL'} — Lean: star_pow2")
+
+    # ---- K16 the degenerate locus: Q is constant, Q' is pattern-determined ---------------
+    k15_q = k15_qp = True
+    for m in (5, 6, 7):
+        S, M = tabs[m], 1 << m
+
+        def QP(a, b, W):
+            return int(S[a, b] * S[b ^ W, a ^ W] * S[b ^ W, a] * S[a ^ W, b])
+
+        pat_tab = {}
+        for W in range(1, M):
+            for a in range(M):
+                for b in range(M):
+                    pat = (a == 0, b == 0, (a ^ W) == 0, (b ^ W) == 0, a == b, (a ^ b ^ W) == 0)
+                    if not any(pat):
+                        continue
+                    if Q(S, a, b, W) != -1:
+                        k15_q = False
+                    v = QP(a, b, W)
+                    if pat in pat_tab and pat_tab[pat] != v:
+                        k15_qp = False
+                    pat_tab[pat] = v
+        print(f"K16_DEGEN   level {m}: on the DEGENERATE locus, Q is identically -1 "
+              f"{'OK' if k15_q else 'FAIL'};  Q' is determined by the degeneracy PATTERN alone "
+              f"({len(pat_tab)} patterns) {'OK' if k15_qp else 'FAIL'}")
+    ok["K16"] = k15_q and k15_qp
+    print("K16_DEGEN   => tau preserves the degeneracy pattern (tau 0 = 0, tau is linear and "
+          "injective), so BOTH degenerate halves of the assembly close without induction: for "
+          "(*) both sides are the same constant -1 (PROVEN forall n in Lean as Qgen_degen); for "
+          "(*') both sides share a pattern hence a value. The pattern lemma for Q' is NOT yet "
+          "in Lean.")
 
     print("=" * 78)
     if all(ok.values()):
