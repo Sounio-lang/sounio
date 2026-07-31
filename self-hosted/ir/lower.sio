@@ -362,6 +362,7 @@ struct Lowerer {
     // STRUCTURALLY zero, not "unknown" -- measure() and every projection have
     // H = 0, so the common case costs no registers at all. Reuses the FO bind
     // rows so a local carries its Hessian exactly as it carries its gradient.
+    so_enabled: bool,
     so_expr_hess: [i64; 36],
     so_bind_hess: [i64; 576],
     // Inter-procedural FO: pure-fn transfer table (survives across function lowers).
@@ -532,6 +533,7 @@ fn lowerer_new() -> Lowerer with Alloc {
         fo_bind_count: 0,
         fo_bind_names: [ir_empty_name(); 128],
         fo_bind_sens: [-1; 4096],
+        so_enabled: false,
         so_expr_hess: [-1; 36],
         so_bind_hess: [-1; 576],
         fo_xfer_count: 0,
@@ -891,6 +893,7 @@ fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEp
         fo_bind_count: 0,
         fo_bind_names: [ir_empty_name(); 128],
         fo_bind_sens: [-1; 4096],
+        so_enabled: false,
         so_expr_hess: [-1; 36],
         so_bind_hess: [-1; 576],
         fo_xfer_count: 0,
@@ -948,6 +951,7 @@ fn lowerer_new_from_program_summary_owned(summary: IrProgramSummary, epistemic: 
         fo_bind_count: 0,
         fo_bind_names: [ir_empty_name(); 128],
         fo_bind_sens: [-1; 4096],
+        so_enabled: false,
         so_expr_hess: [-1; 36],
         so_bind_hess: [-1; 576],
         fo_xfer_count: 0,
@@ -1008,6 +1012,7 @@ fn lowerer_from_acc_module(module: Box<IrModule>) -> Lowerer with Alloc, Mut, Pa
         fo_bind_count: 0,
         fo_bind_names: [ir_empty_name(); 128],
         fo_bind_sens: [-1; 4096],
+        so_enabled: false,
         so_expr_hess: [-1; 36],
         so_bind_hess: [-1; 576],
         fo_xfer_count: 0,
@@ -3377,6 +3382,7 @@ fn lowerer_lower_fn_item_mut(
     // rather than appending — so seeding once per function costs three table writes
     // and cannot grow the table beyond its three entries.
     fo_xfer_seed_transcendentals()
+    (*lo).so_enabled = so_block_uses_hessian(&(*fd).body)
     if lower_live_diag_enabled() {
         print("lower_live: fn_before_find_or_add name=")
         print(str_from_bytes(name.buf, name.len))
@@ -4617,6 +4623,109 @@ fn captured_expr_misuses_value(e: &Expr, scan: CapturedClosureValueScan, in_call
                 args2 = &(*node2).tail
             }
             _ => break,
+        }
+    }
+    false
+}
+
+// Does this function ever ask for a Hessian?
+//
+// Second-order propagation is not free: the product rule emits cross terms
+// Sx_j*Sy_k for every float multiply whose operands carry seed channels. And
+// Madaros seeds an FO channel for ANY pure-float `let` (the beta-Madaros
+// behaviour), so fo_nchan is positive throughout an ordinary numeric program
+// -- gating on it filters nothing. dissertation_pbpk28_parity_ref_rapamycin.sio
+// uses no epistemic feature at all and still went from 1714 lines of output to
+// 9 under an ungated build.
+//
+// So the gate has to be the question the emission actually answers: does
+// hessian_of appear in this function. Shape mirrors captured_block_misuses_value
+// below, which walks the same AST.
+fn so_name_is_hessian_of_ident(e: &Expr) -> bool with Mut, Panic, Div {
+    if (*e).kind != ExprKind::ExprIdent { return false }
+    let n = (*e).name
+    n.len == 10
+        && n.buf[0] == 104 as i8 && n.buf[1] == 101 as i8
+        && n.buf[2] == 115 as i8 && n.buf[3] == 115 as i8
+        && n.buf[4] == 105 as i8 && n.buf[5] == 97 as i8
+        && n.buf[6] == 110 as i8 && n.buf[7] == 95 as i8
+        && n.buf[8] == 111 as i8 && n.buf[9] == 102 as i8
+}
+
+fn so_opt_expr_uses_hessian(opt: &Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc {
+    match *opt {
+        Some(e) => so_expr_uses_hessian(&(*e)),
+        None => false,
+    }
+}
+
+fn so_opt_block_uses_hessian(opt: &Option<Box<Block> >) -> bool with Mut, Panic, Div, Alloc {
+    match *opt {
+        Some(b) => so_block_uses_hessian(&(*b)),
+        None => false,
+    }
+}
+
+fn so_expr_list_uses_hessian(opt: &Option<Box<ExprList> >) -> bool with Mut, Panic, Div, Alloc {
+    var cur = opt
+    while true {
+        match *cur {
+            Some(node) => {
+                if so_expr_uses_hessian(&(*node).head) { return true }
+                cur = &(*node).tail
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
+fn so_arms_use_hessian(opt: &Option<Box<MatchArmList> >) -> bool with Mut, Panic, Div, Alloc {
+    var cur = opt
+    while true {
+        match *cur {
+            Some(node) => {
+                if so_expr_uses_hessian(&(*node).head.body) { return true }
+                if so_opt_expr_uses_hessian(&(*node).head.guard) { return true }
+                cur = &(*node).tail
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
+fn so_expr_uses_hessian(e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+    if (*e).kind == ExprKind::ExprCall {
+        match (*e).left {
+            Some(callee) => {
+                if so_name_is_hessian_of_ident(&(*callee)) { return true }
+            }
+            _ => {}
+        }
+    }
+    if so_opt_expr_uses_hessian(&(*e).left) { return true }
+    if so_opt_expr_uses_hessian(&(*e).right) { return true }
+    if so_opt_expr_uses_hessian(&(*e).else_expr) { return true }
+    if so_opt_expr_uses_hessian(&(*e).closure_body) { return true }
+    if so_expr_list_uses_hessian(&(*e).args) { return true }
+    if so_opt_block_uses_hessian(&(*e).block) { return true }
+    if so_opt_block_uses_hessian(&(*e).handler_block) { return true }
+    if so_arms_use_hessian(&(*e).arms) { return true }
+    false
+}
+
+fn so_block_uses_hessian(block: &Block) -> bool with Mut, Panic, Div, Alloc {
+    var cur = &(*block).stmts
+    while true {
+        match *cur {
+            Some(node) => {
+                let stmt = &(*node).head
+                if so_opt_expr_uses_hessian(&(*stmt).expr) { return true }
+                if so_opt_expr_uses_hessian(&(*stmt).target) { return true }
+                cur = &(*node).tail
+            }
+            _ => return false,
         }
     }
     false
@@ -7894,7 +8003,7 @@ impl Lowerer {
             var lo = pair_in.0
             let vin = pair_in.1
             var hi: i64 = 0
-            while hi < 36 && lo.fo_nchan > 0 {
+            while hi < 36 && lo.so_enabled {
                 let hk = lo.so_expr_hess[hi as usize]
                 if hk >= 0 {
                     let zp2 = lo.emit_f64_const(0.0)
@@ -7965,7 +8074,7 @@ impl Lowerer {
             if lo.fo_expr_or_snap_has_sens(sL) {
                 if (*e).bin_op == BinaryOp::OpAdd || (*e).bin_op == BinaryOp::OpSub {
                     let is_sub = (*e).bin_op == BinaryOp::OpSub
-                    if lo.fo_nchan > 0 {
+                    if lo.so_enabled {
                         lo = lo.so_combine_hess_addsub(hL, hR, is_sub)
                     }
                     lo = lo.fo_combine_sens_addsub(sL, sR, is_sub)
@@ -7979,7 +8088,7 @@ impl Lowerer {
                     let rhs_val_pair = lo.lower_opt_expr_ref(&(*e).right)
                     lo = rhs_val_pair.0
                     let rhs_v = rhs_val_pair.1
-                    if lo.fo_nchan > 0 {
+                    if lo.so_enabled {
                         lo = lo.so_combine_hess_mul(hL, hR, sL, sR, lhs_v, rhs_v)
                     }
                     lo = lo.fo_combine_sens_mul(sL, sR, lhs_v, rhs_v)
