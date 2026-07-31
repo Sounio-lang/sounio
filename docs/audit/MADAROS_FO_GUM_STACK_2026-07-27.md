@@ -37,6 +37,13 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-
 | Nested field FO | `o.inner.cl0`, let-bind copy, `make(...).inner.cl0` paths | `nested_field` |
 | Deep call field FO | Arbitrary-depth `make().c.b.a.x` path_suffix peel | `deep_field` |
 | PK struct e2e | Peels + nested methods + shared channel + call projections | `pk_struct` |
+| Method FO Call-result recv | `make_pk(...).css(...)` + let-alias of Call-return via self.field | `method_call_recv` |
+| Free-fn struct-arg field FO | `clearance_of(p,η)` / `css_of(make_pk(...),…)` via `p.cl0` | `freefn_field` |
+| Non-identity pure ctor FO | `make_dbl(x).cl0` / `make_scaled(x,s).cl0` projected bytecode | `nonpure_ctor` |
+| Correlate shared latent | distinct `measure`s joined by `correlate(a,b,ρ)` match shared peel | `correlate_latent` |
+| Deep mutual FO | Const-depth specializations `f_d0..f_d8` for `n<=0` / `n<0.5` chains | `mutual_deep` |
+| Let-bound pure ctor FO | `let y=x*2; Pk{cl0:y}` projections compile lets + field | `let_ctor` |
+| Impure ctor pure-field FO | Mut constructors still FO field slices of pure inits | `impure_ctor` |
 | Control | `if` SELECT blend (const + runtime) | `div_if`, `if_helper` |
 | 2nd-order mean | `E₂[f] ≈ f(μ) + ½ Σ H_kk σ_k²` | `second_order_mean`, `fo_emit_second_order_bias` |
 | Hessian diag | `hessian_diag_of(expr) → Σ H_kk` | `pow_const` |
@@ -68,7 +75,10 @@ Summary JSON lands under `$SOUNIO_FO_TRUST_DIR/summary.json` (or a temp dir prin
 **Measured 2026-07-28 (field call FO):** 32/32 PASS — `madaros_gum_fo_field_call`: `make_pk(...).cl0`, `id_pk(pk).cl0`, nested identity match peels.  
 **Measured 2026-07-29 (nested field FO):** 33/33 PASS — `madaros_gum_fo_nested_field`: `o.inner.cl0`, let-bind, `make_outer(...).inner.cl0` match peels.  
 **Measured 2026-07-30 (deep call field FO):** 35/35 PASS — `madaros_gum_fo_deep_field`: `make_d(...).c.b.a.x` (3 mids), identity nest, method-return nests match peels (Var=0.09).  
-**Measured 2026-07-30 (PK struct e2e):** 35/35 PASS — `madaros_gum_fo_pk_struct`: peels + nested methods + shared channel + call/nested projections on a dissertation-shaped `Pk` (Css Var=0.795833, E₂=6.724, CL=0.34).
+**Measured 2026-07-30 (PK struct e2e):** 35/35 PASS — `madaros_gum_fo_pk_struct`: peels + nested methods + shared channel + call/nested projections on a dissertation-shaped `Pk` (Css Var=0.795833, E₂=6.724, CL=0.34).  
+**Measured 2026-07-30 (method FO Call-result recv):** 36/36 PASS — `madaros_gum_fo_method_call_recv`: `make_pk(...).clearance/css`, let-alias of Call-return, `id_pk(make_pk(...)).clearance` match free/peel (CL=0.34, Css=0.795833, E₂=6.724).  
+**Measured 2026-07-30 (free-fn field + nonpure ctor + correlate latent):** 39/39 PASS — `freefn_field` (`clearance_of`/`css_of` on lit/call/alias), `nonpure_ctor` (`make_dbl`/`make_scaled` projected FO), `correlate_latent` (two independent η measures + ρ=1 match shared peel; PK-shaped product).  
+**Measured 2026-07-30 (mutual deep + let ctor + impure ctor):** 42/42 PASS — `mutual_deep` (f/g n=0..5 parity peels), `let_ctor` (let-bound field projections + alias), `impure_ctor` (Mut ctor pure-field FO + let).
 
 ## Science drivers
 
@@ -105,10 +115,17 @@ Css = (F·Dose/τ)/(CL0·exp(η)) — **same numbers on local and imported helpe
 6b. **~~Struct field FO~~ CLOSED** — struct-lit inits bind FO to `base_field` keys; field access + alias copy; bytecode op 17 `LOAD_PARAM_FIELD` for `self.field` in method bodies. Gate: `struct_field`.
 6b2. **~~Field FO via pure call~~ CLOSED** — `mangle(fn,field)` identity projections for struct-lit returns; identity FWD peels `.field` through args. Gate: `field_call`.
 6b3. **~~Nested field FO~~ CLOSED** — recursive struct-lit bind (`o_inner_cl0`); path keys; recursive projections; let-bind of nested struct copies FO. Gate: `nested_field`.
-6b4. **~~Deep call-result field FO~~ CLOSED** — recursive `fo_resolve_projected_fo` peels FieldAccess leftward to Call/MethodCall with arbitrary-depth path_suffix mangle (removes mid1/mid2 ceiling). Gate: `deep_field` (`make().c.b.a.x`, identity nest, method-return nests). Residual: non-pure constructors; method FO with Call-result receiver (`make_pk(...).css(...)`).
-6b5. **~~PK struct e2e~~ CLOSED for Ident-bound Pk** — peels, nested methods, shared channel, call/nested field projections on a dissertation-shaped `Pk`. Gate: `pk_struct`. Residual: method FO on Call-result receivers; method FO on let-alias of Call-return.
+6b4. **~~Deep call-result field FO~~ CLOSED** — recursive `fo_resolve_projected_fo` peels FieldAccess leftward to Call/MethodCall with arbitrary-depth path_suffix mangle (removes mid1/mid2 ceiling). Gate: `deep_field` (`make().c.b.a.x`, identity nest, method-return nests). Residual: non-pure constructors.
+6b5. **~~PK struct e2e~~ CLOSED for Ident-bound Pk** — peels, nested methods, shared channel, call/nested field projections on a dissertation-shaped `Pk`. Gate: `pk_struct`.
+6b6. **~~Method FO Call-result receiver~~ CLOSED for pure struct-return constructors** — op17 `LOAD_PARAM_FIELD` loads FO via `fo_load_field_sens_of_expr` (Ident binds **or** Call/MethodCall projected path); `let pk = make_pk(...)` binds projected FO onto `pk_*` via `fo_bind_call_result_field_fo`. Gate: `method_call_recv`.
+6b7. **~~Free-fn struct-arg field FO~~ CLOSED** — op17 resolves free-fn `args[n].field` (not only method recv); Call/alias args via projected FO. Gate: `freefn_field`.
+6b8. **~~Non-identity pure ctor field FO~~ CLOSED for pure field inits** — `fo_register_struct_lit_projections_at` compiles FO bytecode for non-param field exprs (`x*2`, `x*s`) under `mangle(fn,field)`. Gate: `nonpure_ctor`. Residual: let-bound field inits in ctor bodies (`let y = x*2; Pk{cl0:y}`) still miss projection.
+6b9. **~~Correlate distinct measures sharing a latent~~ FROZEN** — science path is explicit `correlate(a,b,ρ)` (or a single shared peel). Gate: `correlate_latent` (ρ=1 matches shared-peel Var; PK-shaped CL·V product).
+6b10. **~~Deep mutual FO~~ CLOSED for const depth 0..8** — multipass registers `name_d{d}` with `FO_SPECIALIZE_DEPTH` folding `n<=0` / `n<0.5` / `n<1` if-chains; else-arm expands `callee_d{d-1}`; call-site host-const IntLit selects specialization. Gate: `mutual_deep` (f/g n=0..5). Residual: runtime (non-const) depth still primary-arg on cycle; SELECT both-arms.
+6b11. **~~Let-bound pure ctor FO~~ CLOSED** — field projections compile preceding lets then field expr (`fo_bc_compile_lets_then_expr`). Gate: `let_ctor`.
+6b12. **~~Impure ctor pure-field FO~~ FROZEN** — Mut/IO on constructor does not block FO of pure field inits (identity / computed / let-bound). Gate: `impure_ctor`. No claim that FO tracks the effectful channel.
 6c. **~~Nested method FO~~ CLOSED** — FO bytecode expands `ExprMethodCall` via mangled `Type_method` under `FO_BC_IMPL_TYPE` (+ multipass register). Gate: `nested_method`.
-6d. **~~Mutual FO expand~~ CLOSED for fixed small depth** — expand stack cycle + missing-callee → primary-arg FO; multipass refreshes only opaque transfers (solid kind-6 kept). Gate: `mutual` (depth-1 even/odd free+method). Residual: deep data-dependent recursion not fully unrolled; primary-arg is an approximation on cycles.
+6d. **~~Mutual FO expand~~ CLOSED for fixed small depth + const deep** — expand stack cycle + missing-callee → primary-arg FO at generic register; const-depth specializations close deep unrolls. Gate: `mutual` + `mutual_deep`.
 7. **FO builtins remain compiler-injected** (`variance_of`, …) — stdlib `epistemic::fo` wraps *pure helpers*, not the builtins themselves (AST-walk requirement).
 
 ### Closed this session
@@ -130,17 +147,23 @@ Css = (F·Dose/τ)/(CL0·exp(η)) — **same numbers on local and imported helpe
 - **Nested field FO.** Recursive bind/projections; `fo_expr_struct_path_key`; call path `make().inner.cl0`. Gate: `nested_field`.
 - **Deep call-result field FO.** `fo_resolve_projected_fo` + path_suffix mangle (no mid1/mid2 ceiling); identity multi-level peel. Gate: `deep_field`.
 - **PK struct e2e.** Dissertation-shaped `Pk`: peels + nested methods + shared channel + call projections. Gate: `pk_struct`.
+- **Method FO Call-result receiver.** op17 projected FO + let-bind of pure Call-return fields. Gate: `method_call_recv`.
+- **Free-fn struct-arg field FO.** op17 free-arg path. Gate: `freefn_field`.
+- **Non-identity pure ctor FO.** Projected bytecode for computed field inits. Gate: `nonpure_ctor`.
+- **Correlate shared latent (freeze).** Distinct measures + `correlate` match shared peel. Gate: `correlate_latent`.
+- **Deep mutual FO (const depth).** `f_d0..f_d8` specializations. Gate: `mutual_deep`.
+- **Let-bound pure ctor FO.** Lets + field projection. Gate: `let_ctor`.
+- **Impure ctor pure-field FO (freeze).** Mut ctors keep field FO. Gate: `impure_ctor`.
 
 ## Gate inventory
 
-All files matching `tests/run-pass/madaros_gum_fo_*.sio` are members of the trust gate (35 files including `deep_field` + `pk_struct`). Adding a new FO gate = drop a `madaros_gum_fo_*.sio` with a `MADAROS_GUM_FO_*_PASS` token.
+All files matching `tests/run-pass/madaros_gum_fo_*.sio` are members of the trust gate (42 files). Adding a new FO gate = drop a `madaros_gum_fo_*.sio` with a `MADAROS_GUM_FO_*_PASS` token.
 
 ## Next bold moves (ordered)
 
-1. Method FO with Call-result receiver (`make_pk(...).css(...)`) and method FO on let-alias of Call-return.
-2. Deep recursive FO unroll beyond depth-1 primary-arg approximation on mutual cycles.
-3. Keep `correlate` for *distinct* measures that share a latent.
-4. Non-pure constructors (FO only through pure struct-return paths today).
+1. Runtime (non-const) mutual depth — still primary-arg on cycle under SELECT both-arms.
+2. Depth specialization beyond 8 / non-integer host depths.
+3. FO of effectful field values themselves (not in scope: impure_ctor only freezes pure field slices).
 
 ---
 

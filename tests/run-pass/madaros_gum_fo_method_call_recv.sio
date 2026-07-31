@@ -1,0 +1,113 @@
+//@ run-pass
+//@ expect-stdout: MADAROS_GUM_FO_METHOD_CALL_RECV_PASS
+
+// Method FO with Call-result receiver + let-alias of Call-return.
+// Residual after pk_struct (Ident-bound struct-lit methods only):
+//   make_pk(...).clearance(eta) / make_pk(...).css(...)
+//   let pk = make_pk(...); pk.clearance(eta)
+//
+// Ops-style methods (f64 FO only in args; self is a handle) already work on
+// Call/alias receivers — this gate requires self.field FO through pure
+// struct-return constructors.
+
+struct Pk {
+    cl0: f64
+    v0: f64
+}
+
+impl Pk {
+    fn clearance(self: &Pk, eta: f64) -> f64 {
+        self.cl0 * exp(eta)
+    }
+    fn rate(self: &Pk, f: f64, dose: f64, tau: f64) -> f64 {
+        (f * dose) / tau
+    }
+    fn css(self: &Pk, f: f64, dose: f64, tau: f64, eta: f64) -> f64 {
+        self.rate(f, dose, tau) / self.clearance(eta)
+    }
+}
+
+fn make_pk(cl0: f64, v0: f64) -> Pk {
+    Pk { cl0: cl0, v0: v0 }
+}
+
+fn id_pk(p: Pk) -> Pk {
+    p
+}
+
+fn free_clearance(cl0: f64, eta: f64) -> f64 {
+    cl0 * exp(eta)
+}
+
+fn free_css(f: f64, dose: f64, tau: f64, cl0: f64, eta: f64) -> f64 {
+    ((f * dose) / tau) / (cl0 * exp(eta))
+}
+
+fn abs_f(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn main() with IO, Mut, Div, Epistemic {
+    let kF: Knowledge<f64> = measure(0.8, uncertainty: 0.05)
+    let kDose: Knowledge<f64> = measure(500.0, uncertainty: 10.0)
+    let kCL0: Knowledge<f64> = measure(5.0, uncertainty: 0.3)
+    let kV: Knowledge<f64> = measure(50.0, uncertainty: 2.0)
+    let kEta: Knowledge<f64> = measure(0.0, uncertainty: 0.1)
+
+    let f = kF.value
+    let dose = kDose.value
+    let cl0 = kCL0.value
+    let v0 = kV.value
+    let eta = kEta.value
+    let tau = 12.0
+
+    // Struct-lit baseline (already green on method FO)
+    let pk_lit = Pk { cl0: cl0, v0: v0 }
+    let v_lit = variance_of(pk_lit.clearance(eta))
+    let v_peel = variance_of(cl0 * exp(eta))
+    let v_free = variance_of(free_clearance(cl0, eta))
+
+    // Call-result receiver (the residual)
+    let v_call = variance_of(make_pk(cl0, v0).clearance(eta))
+    let v_call_css = variance_of(make_pk(cl0, v0).css(f, dose, tau, eta))
+    let v_free_css = variance_of(free_css(f, dose, tau, cl0, eta))
+    let m2_call = second_order_mean(make_pk(cl0, v0).css(f, dose, tau, eta))
+    let m2_free = second_order_mean(free_css(f, dose, tau, cl0, eta))
+
+    // Let-alias of Call-return then method
+    let pk_alias = make_pk(cl0, v0)
+    let v_alias = variance_of(pk_alias.clearance(eta))
+    let v_alias_css = variance_of(pk_alias.css(f, dose, tau, eta))
+    let v_alias_field = variance_of(pk_alias.cl0)
+
+    // Identity through pure call then method (compose with field_call stack)
+    let v_id_call = variance_of(id_pk(make_pk(cl0, v0)).clearance(eta))
+
+    print("v_lit="); print_f64(v_lit); print("\n")
+    print("v_call="); print_f64(v_call); print("\n")
+    print("v_alias="); print_f64(v_alias); print("\n")
+    print("v_call_css="); print_f64(v_call_css); print("\n")
+    print("v_alias_css="); print_f64(v_alias_css); print("\n")
+    print("v_alias_field="); print_f64(v_alias_field); print("\n")
+    print("m2_call="); print_f64(m2_call); print("\n")
+    print("v_id_call="); print_f64(v_id_call); print("\n")
+
+    let ok = abs_f(v_lit - v_peel) < 1.0e-9
+        && abs_f(v_lit - v_free) < 1.0e-9
+        && abs_f(v_lit - 0.34) < 1.0e-4
+        && abs_f(v_call - v_lit) < 1.0e-9
+        && abs_f(v_alias - v_lit) < 1.0e-9
+        && abs_f(v_alias_field - 0.09) < 1.0e-9
+        && abs_f(v_call_css - v_free_css) < 1.0e-9
+        && abs_f(v_call_css - 0.795833) < 1.0e-4
+        && abs_f(v_alias_css - v_free_css) < 1.0e-9
+        && abs_f(m2_call - m2_free) < 1.0e-9
+        && abs_f(m2_call - 6.724) < 1.0e-3
+        && abs_f(v_id_call - v_lit) < 1.0e-9
+    if ok {
+        print("MADAROS_GUM_FO_METHOD_CALL_RECV_PASS\n")
+    } else {
+        print("MADAROS_GUM_FO_METHOD_CALL_RECV_FAIL\n")
+    }
+}

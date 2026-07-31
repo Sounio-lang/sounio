@@ -161,6 +161,7 @@ var FO_BC_ARG: [i64; 4096] = [0; 4096]
 var FO_BC_FIELD_HASH: [i64; 4096] = [0; 4096]
 var FO_BC_LEN: i64 = 0
 var FO_BC_CONST_BITS: [i64; 256] = [0; 256]
+var FO_BC_CONST_F64: [f64; 256] = [0.0; 256]
 var FO_BC_CONST_N: i64 = 0
 var FO_BC_LOC_HASH: [i64; 8] = [0; 8]
 var FO_BC_LOC_N: i64 = 0
@@ -190,6 +191,20 @@ var FO_BC_IMPL_TYPE_LEN: i64 = 0
 var FO_BC_EXPAND_HASH: [i64; 16] = [0; 16]
 var FO_BC_EXPAND_SP: i64 = 0
 var FO_BC_USED_OPAQUE: i64 = 0
+// Eval-time CALL_XFER recursion depth (mutual deep unroll bound).
+var FO_EV_CALL_DEPTH: i64 = 0
+// Value reg from nested fo_eval_bytecode_loaded (paired with returned variance).
+var FO_EV_CALL_RES_VAL: i64 = 0 - 1
+// Depth specialization for mutual FO: >=0 means compile if-chains as if param0==depth.
+// -1 = off (normal registration / runtime SELECT).
+var FO_SPECIALIZE_DEPTH: i64 = 0 - 1
+// Host-side known values for FO bytecode short-circuit (const depth if).
+var FO_ARG_HOST_VALID: [i64; 16] = [0; 16]
+var FO_ARG_HOST_VAL: [f64; 16] = [0.0; 16]
+var FO_EV_HOST_VALID: [i64; 16] = [0; 16]
+var FO_EV_HOST_VAL: [f64; 16] = [0.0; 16]
+var FO_LOC_HOST_VALID: [i64; 8] = [0; 8]
+var FO_LOC_HOST_VAL: [f64; 8] = [0.0; 8]
 
 fn fo_bc_impl_type_get() -> Name with Mut {
     var n = Name { buf: [0; 128], len: 0 }
@@ -475,12 +490,29 @@ fn fo_bc_emit_param_field(param_idx: i64, field: Name) -> bool with Mut, Panic, 
     true
 }
 
+// op 18: CALL_XFER — ARG=nargs (top of stack), FO_BC_FIELD_HASH=callee name hash.
+// Deferred pure-helper FO for mutual recursion / multipass miss (deep unroll at eval).
+fn fo_bc_emit_call_xfer(callee: Name, nargs: i64) -> bool with Mut, Panic, Div {
+    if FO_BC_LEN >= 4096 {
+        return false
+    }
+    if nargs < 0 || nargs > 16 {
+        return false
+    }
+    FO_BC_OP[FO_BC_LEN as usize] = 18
+    FO_BC_ARG[FO_BC_LEN as usize] = nargs
+    FO_BC_FIELD_HASH[FO_BC_LEN as usize] = fo_name_hash(callee)
+    FO_BC_LEN = FO_BC_LEN + 1
+    true
+}
+
 fn fo_bc_emit_const(v: f64) -> bool with Mut {
     if FO_BC_CONST_N >= 256 {
         return false
     }
     let ci = FO_BC_CONST_N
     FO_BC_CONST_BITS[ci as usize] = f64_to_bits(v)
+    FO_BC_CONST_F64[ci as usize] = v
     FO_BC_CONST_N = ci + 1
     fo_bc_emit(2, ci)
 }
@@ -3827,11 +3859,75 @@ fn lowerer_fo_preregister_pure_fns_multipass_mut(
     lo: &! Lowerer,
     items: &Option<Box<ItemList>>
 ) with Mut, Panic, Div, Alloc, IO {
-    // 8 passes: reverse-order DAG + mutual opaque→expand re-registration.
+    // 4 passes: reverse-order DAG + mutual opaque→expand re-registration.
     var pass: i64 = 0
     while pass < 4 {
         lowerer_fo_preregister_pure_fns_mut(lo, items)
         pass = pass + 1
+    }
+    // Depth specializations f_d0..f_d8 for mutual FO deep unroll (const n at call site).
+    // Register ascending depth so else-arm expands see callee_d{d-1}.
+    var d: i64 = 0
+    while d <= 8 {
+        FO_SPECIALIZE_DEPTH = d
+        lowerer_fo_preregister_depth_specs_mut(lo, items, d)
+        d = d + 1
+    }
+    FO_SPECIALIZE_DEPTH = 0 - 1
+}
+
+// Register name_d{d} specialized pure transfers (if-chains folded at depth d).
+fn lowerer_fo_preregister_depth_specs_mut(
+    lo: &! Lowerer,
+    items: &Option<Box<ItemList>>,
+    d: i64
+) with Mut, Panic, Div, Alloc, IO {
+    var current = items
+    while true {
+        match *current {
+            Some(list) => {
+                let head = &(*list).head
+                if head.kind == ItemKind::ItemFn {
+                    match head.fn_def {
+                        Some(fd) => {
+                            let lo_x = (*lo).fo_register_depth_spec(head.name, &(*fd), d)
+                            (*lo) = lo_x
+                        }
+                        _ => {}
+                    }
+                } else if head.kind == ItemKind::ItemImpl {
+                    match head.impl_def {
+                        Some(id) => {
+                            var mcur = &(*id).methods
+                            while true {
+                                match *mcur {
+                                    Some(mlist) => {
+                                        let mhead = &(*mlist).head
+                                        if mhead.kind == ItemKind::ItemFn {
+                                            match mhead.fn_def {
+                                                Some(fd) => {
+                                                    fo_bc_impl_type_set(head.name)
+                                                    let mangled = ir_mangle_method_name(head.name, mhead.name)
+                                                    let lo_x = (*lo).fo_register_depth_spec(mangled, &(*fd), d)
+                                                    (*lo) = lo_x
+                                                    fo_bc_impl_type_clear()
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                        mcur = &(*mlist).tail
+                                    }
+                                    _ => break
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                current = &(*list).tail
+            }
+            _ => break
+        }
     }
 }
 
@@ -6816,6 +6912,123 @@ impl Lowerer {
         lo.fo_clear_expr_sens()
     }
 
+    // Recover field Name from FO bytecode field hash (scan registered layouts).
+    fn fo_field_name_from_hash(self, field_h: i64) -> Name with Mut, Panic, Div {
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            var fi: i64 = 0
+            while fi < (*self.struct_layouts).entries[si as usize].field_count {
+                let nm = (*self.struct_layouts).entries[si as usize].fields[fi as usize].name
+                if nm.len > 0 {
+                    if fo_name_hash(nm) == field_h {
+                        return nm
+                    }
+                }
+                fi = fi + 1
+            }
+            si = si + 1
+        }
+        ir_empty_name()
+    }
+
+    // FO of e.<field_h>: Ident binds, or Call/MethodCall projected path.
+    // Closes method FO with Call-result receiver (make_pk(...).css via self.cl0).
+    fn fo_load_field_sens_of_expr(
+        self,
+        e: &Expr,
+        field_h: i64
+    ) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        if (*e).kind == ExprKind::ExprIdent {
+            lo = lo.fo_load_field_sens_by_hash((*e).name, field_h)
+            if lo.fo_expr_has_sens() {
+                return lo
+            }
+        }
+        let fname = lo.fo_field_name_from_hash(field_h)
+        if fname.len <= 0 {
+            return lo.fo_clear_expr_sens()
+        }
+        // Call/MethodCall/FieldAccess chains: projected mangle FO (make_pk_cl0, …).
+        if (*e).kind == ExprKind::ExprCall
+            || (*e).kind == ExprKind::ExprMethodCall
+            || (*e).kind == ExprKind::ExprFieldAccess
+        {
+            let pair = lo.fo_resolve_projected_fo(e, fname)
+            lo = pair.0
+            let vreg = pair.1
+            if vreg >= 0 {
+                lo = lo.fo_seed_from_variance(vreg)
+            }
+            if lo.fo_expr_has_sens() {
+                return lo
+            }
+        }
+        lo.fo_clear_expr_sens()
+    }
+
+    // After `let pk = make_pk(...)`, bind projected FO of each return field onto pk_*.
+    // Enables method FO on let-alias of Call-return (pk.clearance(eta) via self.cl0).
+    fn fo_bind_call_result_field_fo(
+        self,
+        local: Name,
+        call: &Expr
+    ) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        if local.len <= 0 {
+            return lo
+        }
+        var st = ir_empty_name()
+        if (*call).kind == ExprKind::ExprCall {
+            st = lo.expr_call_return_struct_name_ref(call)
+        } else if (*call).kind == ExprKind::ExprMethodCall {
+            let recv_type = lo.lower_method_recv_type(&(*call).left)
+            let call_name = if recv_type.len > 0 {
+                ir_mangle_method_name(recv_type, (*call).name)
+            } else {
+                (*call).name
+            }
+            let fn_id = lowerer_lookup_fn_id_by_name_ref(&lo, call_name)
+            st = lo.return_struct_name_for_fn_id(fn_id)
+        }
+        if st.len <= 0 {
+            return lo
+        }
+        var si: i64 = 0
+        while si < (*lo.struct_layouts).count {
+            if ir_name_eq((*lo.struct_layouts).entries[si as usize].type_name, st) {
+                var fi: i64 = 0
+                while fi < (*lo.struct_layouts).entries[si as usize].field_count {
+                    let fname = (*lo.struct_layouts).entries[si as usize].fields[fi as usize].name
+                    if fname.len > 0 {
+                        let pair = lo.fo_resolve_projected_fo(call, fname)
+                        lo = pair.0
+                        var vreg = pair.1
+                        if vreg >= 0 {
+                            lo = lo.fo_seed_from_variance(vreg)
+                        }
+                        if lo.fo_expr_has_sens() {
+                            let key = lo.fo_field_key(local, fname)
+                            lo = lo.fo_bind_local_sens(key)
+                            if vreg < 0 {
+                                let ep = lo.fo_emit_var_from_sens()
+                                lo = ep.0
+                                vreg = ep.1
+                            }
+                            if vreg >= 0 {
+                                lo = lo.bind_local_variance_reg(key, vreg)
+                            }
+                        }
+                    }
+                    fi = fi + 1
+                }
+                return lo
+            }
+            si = si + 1
+        }
+        lo
+    }
+
     // `let pk2 = pk` — copy field FO binds.
     fn fo_copy_struct_field_binds(
         self,
@@ -8498,7 +8711,122 @@ impl Lowerer {
         lo
     }
 
-    // Pure fn returning StructLit { f: param_i }: mangle(fn,f) → identity param i.
+    // Register name_d{d}: body compiled under FO_SPECIALIZE_DEPTH=d (must be set by caller).
+    // Only keeps the entry when the body actually depth-folded (has if on param0).
+    fn fo_register_depth_spec(
+        self,
+        name: Name,
+        fd: &FnDef,
+        d: i64
+    ) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        if d < 0 || d > 16 {
+            return lo
+        }
+        // Only specialize functions that already have a base FO transfer.
+        if fo_xfer_global_lookup(name) < 0 {
+            return lo
+        }
+        var p0 = ir_empty_name()
+        var p1 = ir_empty_name()
+        var p2 = ir_empty_name()
+        var p3 = ir_empty_name()
+        var nparams: i64 = 0
+        FO_BC_PARAM_N = 0
+        var pcur = &fd.params
+        while true {
+            match *pcur {
+                Some(pl) => {
+                    if FO_BC_PARAM_N >= 16 {
+                        return lo
+                    }
+                    let pn = (*pl).head.name
+                    FO_BC_PARAM_HASH[FO_BC_PARAM_N as usize] = fo_name_hash(pn)
+                    if nparams == 0 { p0 = pn }
+                    else if nparams == 1 { p1 = pn }
+                    else if nparams == 2 { p2 = pn }
+                    else if nparams == 3 { p3 = pn }
+                    nparams = nparams + 1
+                    FO_BC_PARAM_N = FO_BC_PARAM_N + 1
+                    pcur = &(*pl).tail
+                }
+                _ => break
+            }
+        }
+        if nparams <= 0 {
+            return lo
+        }
+        // Require a depth-if on the body so we don't explode FO_XFER with clones.
+        if !lo.fo_block_has_depth_if(&fd.body, p0, p1, p2, p3, nparams) {
+            return lo
+        }
+        let spec = lo.fo_depth_spec_name(name, d)
+        // Allow re-register (ascending d is once each).
+        FO_BC_USED_OPAQUE = 0
+        lo = lo.fo_compile_block_bytecode(spec, &fd.body, p0, p1, p2, p3, nparams)
+        lo
+    }
+
+    fn fo_block_has_depth_if(
+        self,
+        blk: &Block,
+        p0: Name,
+        p1: Name,
+        p2: Name,
+        p3: Name,
+        nparams: i64
+    ) -> bool with Mut, Panic, Div, Alloc {
+        var current = &(*blk).stmts
+        var last_e: Option<Box<Expr>> = None
+        while true {
+            match *current {
+                Some(list) => {
+                    if (*list).head.kind == StmtKind::StmtExpr {
+                        match (*list).head.expr {
+                            Some(te) => { last_e = Some(te) }
+                            _ => {}
+                        }
+                    }
+                    current = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        match last_e {
+            Some(e) => self.fo_expr_has_depth_if(&(*e), p0, p1, p2, p3, nparams),
+            _ => false
+        }
+    }
+
+    fn fo_expr_has_depth_if(
+        self,
+        e: &Expr,
+        p0: Name,
+        p1: Name,
+        p2: Name,
+        p3: Name,
+        nparams: i64
+    ) -> bool with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprIf {
+            // Temporarily probe fold with depth 0
+            let saved = FO_SPECIALIZE_DEPTH
+            FO_SPECIALIZE_DEPTH = 0
+            let f = self.fo_depth_if_fold(&(*e).left, p0, p1, p2, p3, nparams)
+            FO_SPECIALIZE_DEPTH = saved
+            if f >= 0 {
+                return true
+            }
+        }
+        if (*e).kind == ExprKind::ExprBlock {
+            match (*e).block {
+                Some(b) => return self.fo_block_has_depth_if(&(*b), p0, p1, p2, p3, nparams),
+                _ => {}
+            }
+        }
+        false
+    }
+
+    // Pure fn returning StructLit: mangle(fn,f) FO projection (param / expr / let).
     fn fo_register_struct_field_projections(
         self,
         fn_name: Name,
@@ -8531,7 +8859,7 @@ impl Lowerer {
             Some(e) => {
                 if (*e).kind == ExprKind::ExprStructLit {
                     self.fo_register_struct_lit_projections_at(
-                        fn_name, &(*e).fields, p0, p1, p2, p3, nparams
+                        fn_name, blk, &(*e).fields, p0, p1, p2, p3, nparams
                     )
                 }
             }
@@ -8539,7 +8867,105 @@ impl Lowerer {
         }
     }
 
+    // Compile preceding lets in blk, then field value — enables let y=x*2; S{f:y}.
+    fn fo_bc_compile_lets_then_expr(
+        self,
+        blk: &Block,
+        val: &Expr,
+        p0: Name,
+        p1: Name,
+        p2: Name,
+        p3: Name,
+        nparams: i64
+    ) -> bool with Mut, Panic, Div, Alloc {
+        FO_BC_LOC_N = 0
+        var current = &(*blk).stmts
+        while true {
+            match *current {
+                Some(list) => {
+                    let stmt_ref = &(*list).head
+                    if stmt_ref.kind == StmtKind::StmtLet || stmt_ref.kind == StmtKind::StmtVar {
+                        match stmt_ref.expr {
+                            Some(rhs) => {
+                                if !self.fo_bc_compile_expr(&(*rhs), p0, p1, p2, p3, nparams) {
+                                    return false
+                                }
+                                let lh = fo_name_hash(stmt_ref.name)
+                                let li = fo_bc_add_local(lh)
+                                if li < 0 || !fo_bc_emit(7, li) {
+                                    return false
+                                }
+                            }
+                            _ => return false
+                        }
+                    } else if stmt_ref.kind == StmtKind::StmtExpr {
+                        // Stop before trailing struct-lit / return expr
+                        break
+                    }
+                    current = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        self.fo_bc_compile_expr(val, p0, p1, p2, p3, nparams)
+    }
+
     fn fo_register_struct_lit_projections_at(
+        self,
+        prefix: Name,
+        blk: &Block,
+        fields: &Option<Box<StructFieldList>>,
+        p0: Name,
+        p1: Name,
+        p2: Name,
+        p3: Name,
+        nparams: i64
+    ) with Mut, Panic, Div, Alloc, IO {
+        var fcur = fields
+        while true {
+            match *fcur {
+                Some(fl) => {
+                    let fname = (*fl).head.name
+                    if fname.len > 0 {
+                        let val = &(*fl).head.value
+                        if (*val).kind == ExprKind::ExprStructLit {
+                            let nest = ir_mangle_method_name(prefix, fname)
+                            // Nested struct lit without outer lets on nested fields
+                            self.fo_register_struct_lit_projections_nested(
+                                nest, &(*val).fields, p0, p1, p2, p3, nparams
+                            )
+                        } else {
+                            let pi = self.fo_param_index4(val, p0, p1, p2, p3, nparams)
+                            if pi >= 0 {
+                                let key = ir_mangle_method_name(prefix, fname)
+                                fo_xfer_global_set(key, 1, pi as f64, ir_empty_name())
+                            } else {
+                                // Non-identity / let-bound field: compile lets + field expr.
+                                let key = ir_mangle_method_name(prefix, fname)
+                                let start = FO_BC_LEN
+                                FO_BC_USED_OPAQUE = 0
+                                if self.fo_bc_compile_lets_then_expr(
+                                    blk, val, p0, p1, p2, p3, nparams
+                                ) {
+                                    let len = FO_BC_LEN - start
+                                    if len > 0 {
+                                        fo_xfer_global_set_bc(key, start, len)
+                                    }
+                                } else {
+                                    FO_BC_LEN = start
+                                }
+                            }
+                        }
+                    }
+                    fcur = &(*fl).tail
+                }
+                _ => break
+            }
+        }
+    }
+
+    // Nested struct-lit fields (no outer let scope).
+    fn fo_register_struct_lit_projections_nested(
         self,
         prefix: Name,
         fields: &Option<Box<StructFieldList>>,
@@ -8558,7 +8984,7 @@ impl Lowerer {
                         let val = &(*fl).head.value
                         if (*val).kind == ExprKind::ExprStructLit {
                             let nest = ir_mangle_method_name(prefix, fname)
-                            self.fo_register_struct_lit_projections_at(
+                            self.fo_register_struct_lit_projections_nested(
                                 nest, &(*val).fields, p0, p1, p2, p3, nparams
                             )
                         } else {
@@ -8566,6 +8992,18 @@ impl Lowerer {
                             if pi >= 0 {
                                 let key = ir_mangle_method_name(prefix, fname)
                                 fo_xfer_global_set(key, 1, pi as f64, ir_empty_name())
+                            } else {
+                                let key = ir_mangle_method_name(prefix, fname)
+                                let start = FO_BC_LEN
+                                FO_BC_USED_OPAQUE = 0
+                                if self.fo_bc_compile_expr(val, p0, p1, p2, p3, nparams) {
+                                    let len = FO_BC_LEN - start
+                                    if len > 0 {
+                                        fo_xfer_global_set_bc(key, start, len)
+                                    }
+                                } else {
+                                    FO_BC_LEN = start
+                                }
                             }
                         }
                     }
@@ -8690,6 +9128,78 @@ impl Lowerer {
             }
         }
         false
+    }
+
+    // Depth-if fold under FO_SPECIALIZE_DEPTH: 1=then, 0=else, -1=not a depth cond.
+    // Matches n<=0, n<1, n<0.5 (even_mag), n==0 patterns on param0.
+    fn fo_depth_if_fold(
+        self,
+        cond_opt: &Option<Box<Expr>>,
+        p0: Name,
+        p1: Name,
+        p2: Name,
+        p3: Name,
+        nparams: i64
+    ) -> i64 with Mut, Panic, Div {
+        if FO_SPECIALIZE_DEPTH < 0 {
+            return 0 - 1
+        }
+        match *cond_opt {
+            Some(c) => {
+                if (*c).kind != ExprKind::ExprBinary {
+                    return 0 - 1
+                }
+                match (*c).left {
+                    Some(le) => {
+                        match (*c).right {
+                            Some(re) => {
+                                let li = self.fo_param_index4(&(*le), p0, p1, p2, p3, nparams)
+                                let ri = self.fo_param_index4(&(*re), p0, p1, p2, p3, nparams)
+                                let ll = self.fo_expr_as_lit(&(*le))
+                                let rl = self.fo_expr_as_lit(&(*re))
+                                // param0 ? lit — recursion-base only:
+                                //   n <= 0  |  n < 0.5 (even_mag)  |  n < 1
+                                // Exclude clamp_pos(x < 0.0) when x is data not depth.
+                                if li == 0 && rl.0 {
+                                    let thr = rl.1
+                                    let d = FO_SPECIALIZE_DEPTH as f64
+                                    if thr == 0.0 && (*c).bin_op == BinaryOp::OpLe {
+                                        if d <= 0.0 { return 1 } else { return 0 }
+                                    }
+                                    if thr == 0.5 && (*c).bin_op == BinaryOp::OpLt {
+                                        if d < 0.5 { return 1 } else { return 0 }
+                                    }
+                                    if thr == 1.0 && (*c).bin_op == BinaryOp::OpLt {
+                                        if d < 1.0 { return 1 } else { return 0 }
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        0 - 1
+    }
+
+    // Mangle pure-fn depth specialization: f + d3 → f_d3
+    fn fo_depth_spec_name(self, base: Name, d: i64) -> Name with Mut, Panic, Div {
+        var tag = ir_empty_name()
+        tag.buf[0] = 100 as i8  // 'd'
+        if d >= 0 && d <= 9 {
+            tag.buf[1] = (48 + d) as i8  // '0'+d
+            tag.len = 2
+        } else if d >= 10 && d <= 16 {
+            tag.buf[1] = (48 + (d / 10)) as i8
+            tag.buf[2] = (48 + (d % 10)) as i8
+            tag.len = 3
+        } else {
+            tag.len = 1
+        }
+        ir_mangle_method_name(base, tag)
     }
 
     // -1 unknown, 0 false, 1 true
@@ -8884,7 +9394,22 @@ impl Lowerer {
                     _ => return fo_bc_emit_const(0.0)
                 }
             }
-            // Runtime if: cond, then, else, SELECT (op 9)
+            // Depth specialization: fold if (param0<=0 / <0.5) using FO_SPECIALIZE_DEPTH.
+            if FO_SPECIALIZE_DEPTH >= 0 {
+                let dfold = self.fo_depth_if_fold(&(*e).left, p0, p1, p2, p3, nparams)
+                if dfold == 1 {
+                    return self.fo_bc_compile_block_value(&(*e).block, p0, p1, p2, p3, nparams)
+                }
+                if dfold == 0 {
+                    match (*e).else_expr {
+                        Some(ee) => return self.fo_bc_compile_expr(&(*ee), p0, p1, p2, p3, nparams),
+                        _ => return fo_bc_emit_const(0.0)
+                    }
+                }
+            }
+            // Runtime if: cond, then, else, SELECT (op 9).
+            // NOTE: both arms always evaluate — CALL_XFER in arms would recurse
+            // unbound on mutual pairs. Cycle/miss expand uses primary-arg FO.
             match (*e).left {
                 Some(cond) => {
                     if !self.fo_bc_compile_expr(&(*cond), p0, p1, p2, p3, nparams) { return false }
@@ -8918,6 +9443,16 @@ impl Lowerer {
                                     return fo_bc_emit(20 + uk, 0)
                                 }
                                 _ => return false
+                            }
+                        }
+                        // Depth specialization: prefer callee_d{d-1} when folding mutual.
+                        if FO_SPECIALIZE_DEPTH > 0 {
+                            let sd = FO_SPECIALIZE_DEPTH - 1
+                            let spec = self.fo_depth_spec_name((*callee).name, sd)
+                            if fo_xfer_global_lookup(spec) >= 0 {
+                                return self.fo_bc_expand_xfer_call(
+                                    spec, &(*e).args, p0, p1, p2, p3, nparams, 0
+                                )
                             }
                         }
                         // Nested multi-helper FO: expand registered transfer of callee
@@ -9103,6 +9638,7 @@ impl Lowerer {
     }
 
     // Mutual / missing-callee FO: use primary state arg (free arg0; method arg1).
+    // Kept as last-resort fallback when CALL_XFER cannot be emitted.
     fn fo_bc_expand_primary_arg(
         self,
         recv: &Option<Box<Expr>>,
@@ -9134,6 +9670,51 @@ impl Lowerer {
         false
     }
 
+    // Deferred CALL_XFER: compile each call arg onto the FO stack, then op 18.
+    // Enables deep mutual unroll at eval (cycle/miss no longer bake primary-arg).
+    fn fo_bc_emit_deferred_call_xfer(
+        self,
+        callee: Name,
+        recv: &Option<Box<Expr>>,
+        args: &Option<Box<ExprList>>,
+        p0: Name,
+        p1: Name,
+        p2: Name,
+        p3: Name,
+        nparams: i64
+    ) -> bool with Mut, Panic, Div, Alloc {
+        var nargs: i64 = 0
+        match *recv {
+            Some(rbox) => {
+                if !self.fo_bc_compile_expr(&(*rbox), p0, p1, p2, p3, nparams) {
+                    return false
+                }
+                nargs = nargs + 1
+            }
+            _ => {}
+        }
+        var acur = args
+        while true {
+            match *acur {
+                Some(al) => {
+                    if !self.fo_bc_compile_expr(&(*al).head, p0, p1, p2, p3, nparams) {
+                        return false
+                    }
+                    nargs = nargs + 1
+                    if nargs > 16 {
+                        return false
+                    }
+                    acur = &(*al).tail
+                }
+                _ => break
+            }
+        }
+        if nargs <= 0 {
+            return false
+        }
+        fo_bc_emit_call_xfer(callee, nargs)
+    }
+
     fn fo_bc_expand_xfer_call_recv(
         self,
         callee: Name,
@@ -9146,17 +9727,17 @@ impl Lowerer {
         nparams: i64,
         depth: i64
     ) -> bool with Mut, Panic, Div, Alloc {
+        // SELECT evals both arms — CALL_XFER on mutual cycle recurses unbound.
+        // Deep mutual unroll remains residual (primary-arg on cycle/miss).
         if depth > 12 {
             return self.fo_bc_expand_primary_arg(recv, args, p0, p1, p2, p3, nparams)
         }
         let idx = fo_xfer_global_lookup(callee)
         if idx < 0 {
-            // Callee not registered yet (multipass) — opaque primary-arg FO.
             return self.fo_bc_expand_primary_arg(recv, args, p0, p1, p2, p3, nparams)
         }
         let ch = FO_XFER_HASH[idx as usize]
         if fo_bc_expand_stack_contains(ch) {
-            // Mutual recursion cycle — do not re-enter; primary-arg FO.
             return self.fo_bc_expand_primary_arg(recv, args, p0, p1, p2, p3, nparams)
         }
         let kind = FO_XFER_KIND[idx as usize]
@@ -9303,6 +9884,12 @@ impl Lowerer {
                 FO_BC_LOC_N = FO_BC_LOC_N + 1
             }
         }
+        // new_base: absolute FO_BC index of the first re-emitted op (for jump remap).
+        // LOAD_PARAM expands to multiple ops, so 1:1 pc mapping fails for jumps after
+        // expanded params — JUMP targets assume 1:1 copy. CALL_XFER path avoids
+        // inlining mutual bodies (cycle → deferred), so jump remap is best-effort
+        // for non-param-expand paths (const/identity inlines).
+        let new_base = FO_BC_LEN
         var pc: i64 = 0
         while pc < blen {
             let op = FO_BC_OP[(off + pc) as usize]
@@ -9317,6 +9904,22 @@ impl Lowerer {
                 if !self.fo_bc_compile_xfer_arg_field(
                     recv, args, arg, field_h, p0, p1, p2, p3, nparams
                 ) {
+                    return false
+                }
+            } else if op == 18 {
+                // Re-emit CALL_XFER preserving callee hash (fo_bc_emit zeros it).
+                if FO_BC_LEN >= 4096 {
+                    return false
+                }
+                FO_BC_OP[FO_BC_LEN as usize] = 18
+                FO_BC_ARG[FO_BC_LEN as usize] = arg
+                FO_BC_FIELD_HASH[FO_BC_LEN as usize] = FO_BC_FIELD_HASH[(off + pc) as usize]
+                FO_BC_LEN = FO_BC_LEN + 1
+            } else if op == 21 || op == 22 {
+                // Remap absolute jump: rel within source transfer → new absolute.
+                let rel = arg - off
+                let new_target = new_base + rel
+                if !fo_bc_emit(op, new_target) {
                     return false
                 }
             } else if op == 7 || op == 8 {
@@ -9542,7 +10145,28 @@ impl Lowerer {
         if depth > 8 {
             return (self.fo_clear_expr_sens(), -1)
         }
-        let idx = self.fo_xfer_lookup(callee)
+        // Deep mutual: if free arg0 is host-const depth 0..8, prefer callee_d{n}.
+        var use_name = callee
+        let host0 = self.fo_xfer_arg_host_const(recv, args, 0)
+        if host0.0 {
+            let di = host0.1 as i64
+            // Accept exact integer depths (0.0, 1.0, …) and even_mag-style floats.
+            var d_use: i64 = 0 - 1
+            if host0.1 == (di as f64) && di >= 0 && di <= 8 {
+                d_use = di
+            } else if host0.1 >= 0.0 && host0.1 < 0.5 {
+                d_use = 0
+            } else if host0.1 >= 0.5 && host0.1 < 1.5 {
+                d_use = 1
+            }
+            if d_use >= 0 {
+                let spec = self.fo_depth_spec_name(callee, d_use)
+                if fo_xfer_global_lookup(spec) >= 0 {
+                    use_name = spec
+                }
+            }
+        }
+        let idx = self.fo_xfer_lookup(use_name)
         if idx < 0 {
             if lower_live_diag_enabled() {
                 print("lower_live: fo_xfer_miss name=")
@@ -9556,7 +10180,7 @@ impl Lowerer {
         }
         if lower_live_diag_enabled() {
             print("lower_live: fo_xfer_hit name=")
-            print(str_from_bytes(callee.buf, callee.len))
+            print(str_from_bytes(use_name.buf, use_name.len))
             print(" kind=")
             print_int(FO_XFER_KIND[idx as usize])
             print("
@@ -9684,6 +10308,14 @@ impl Lowerer {
             lo = av.0
             FO_ARG_VAL[ai as usize] = av.1
             FO_ARG_VAR[ai as usize] = pv.1
+            FO_ARG_HOST_VALID[ai as usize] = 0
+            FO_ARG_HOST_VAL[ai as usize] = 0.0
+            // Host const for short-circuit if (mutual depth unroll).
+            let host = lo.fo_xfer_arg_host_const(recv, args, ai)
+            if host.0 {
+                FO_ARG_HOST_VALID[ai as usize] = 1
+                FO_ARG_HOST_VAL[ai as usize] = host.1
+            }
             var k: i64 = 0
             while k < 32 {
                 FO_ARG_SENS[(ai * 32 + k) as usize] = s[k as usize]
@@ -9692,6 +10324,127 @@ impl Lowerer {
             }
             FO_ARG_N = ai + 1
             ai = ai + 1
+        }
+        lo.fo_eval_bytecode_core(idx, recv, args)
+    }
+
+    // Host-known constant for a transfer arg (IntLit / FloatLit), for lazy if.
+    fn fo_xfer_arg_host_const(
+        self,
+        recv: &Option<Box<Expr>>,
+        args: &Option<Box<ExprList>>,
+        n: i64
+    ) -> (bool, f64) with Mut, Panic, Div, Alloc {
+        match *recv {
+            Some(rbox) => {
+                if n == 0 {
+                    return self.fo_expr_host_const(&(*rbox))
+                }
+                return self.fo_nth_arg_host_const(args, n - 1)
+            }
+            _ => {
+                return self.fo_nth_arg_host_const(args, n)
+            }
+        }
+    }
+
+    fn fo_nth_arg_host_const(
+        self,
+        args: &Option<Box<ExprList>>,
+        n: i64
+    ) -> (bool, f64) with Mut, Panic, Div, Alloc {
+        if n < 0 {
+            return (false, 0.0)
+        }
+        var acur = args
+        var ai: i64 = 0
+        while true {
+            match *acur {
+                Some(al) => {
+                    if ai == n {
+                        return self.fo_expr_host_const(&(*al).head)
+                    }
+                    ai = ai + 1
+                    acur = &(*al).tail
+                }
+                _ => return (false, 0.0)
+            }
+        }
+        (false, 0.0)
+    }
+
+    fn fo_expr_host_const(self, e: &Expr) -> (bool, f64) with Mut, Panic, Div {
+        if (*e).kind == ExprKind::ExprIntLit {
+            return (true, (*e).int_val as f64)
+        }
+        if (*e).kind == ExprKind::ExprFloatLit {
+            return (true, (*e).float_val)
+        }
+        if (*e).kind == ExprKind::ExprBoolTrue {
+            return (true, 1.0)
+        }
+        if (*e).kind == ExprKind::ExprBoolFalse {
+            return (true, 0.0)
+        }
+        // n - 1 with n host-const
+        if (*e).kind == ExprKind::ExprBinary {
+            if (*e).bin_op == BinaryOp::OpSub {
+                match (*e).left {
+                    Some(le) => {
+                        match (*e).right {
+                            Some(re) => {
+                                let lh = self.fo_expr_host_const(&(*le))
+                                let rh = self.fo_expr_host_const(&(*re))
+                                if lh.0 && rh.0 {
+                                    return (true, lh.1 - rh.1)
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        (false, 0.0)
+    }
+
+    // Kind-6 eval with FO_ARG already installed (CALL_XFER nested re-entry).
+    fn fo_eval_bytecode_loaded(
+        self,
+        idx: i64
+    ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let no_recv: Option<Box<Expr>> = None
+        let no_args: Option<Box<ExprList>> = None
+        // Reset eval stack/locals; keep FO_ARG as installed by CALL_XFER.
+        FO_EV_SP = 0
+        var li: i64 = 0
+        while li < 8 {
+            FO_LOC_VAL[li as usize] = -1
+            FO_LOC_VAR[li as usize] = -1
+            var k2: i64 = 0
+            while k2 < 32 {
+                FO_LOC_SENS[(li * 32 + k2) as usize] = -1
+                FO_LOC_HESS[(li * 32 + k2) as usize] = -1
+                k2 = k2 + 1
+            }
+            li = li + 1
+        }
+        self.fo_eval_bytecode_core(idx, &no_recv, &no_args)
+    }
+
+    // Shared kind-6 bytecode interpreter (FO_ARG must be populated).
+    fn fo_eval_bytecode_core(
+        self,
+        idx: i64,
+        recv: &Option<Box<Expr>>,
+        args: &Option<Box<ExprList>>
+    ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let off = FO_XFER_BC_OFF[idx as usize]
+        let blen = FO_XFER_BC_LEN[idx as usize]
+        if blen <= 0 {
+            return (lo.fo_clear_expr_sens(), -1)
         }
         FO_EV_SP = 0
         var li: i64 = 0
@@ -9717,6 +10470,8 @@ impl Lowerer {
                 let sp = FO_EV_SP
                 FO_EV_VAL[sp as usize] = FO_ARG_VAL[arg as usize]
                 FO_EV_VAR[sp as usize] = FO_ARG_VAR[arg as usize]
+                FO_EV_HOST_VALID[sp as usize] = FO_ARG_HOST_VALID[arg as usize]
+                FO_EV_HOST_VAL[sp as usize] = FO_ARG_HOST_VAL[arg as usize]
                 var k3: i64 = 0
                 while k3 < 32 {
                     FO_EV_SENS[(sp * 32 + k3) as usize] = FO_ARG_SENS[(arg * 32 + k3) as usize]
@@ -9725,88 +10480,153 @@ impl Lowerer {
                 }
                 FO_EV_SP = sp + 1
             } else if op == 17 {
-                // LOAD_PARAM_FIELD: FO of field of method/free param (self.cl0).
+                // LOAD_PARAM_FIELD: FO of field of method/free param (self.cl0 / p.cl0).
+                // Ident binds, Call/MethodCall projected FO, free-fn struct args.
                 if arg < 0 || FO_EV_SP >= 16 {
                     return (lo.fo_clear_expr_sens(), -1)
                 }
                 let field_h = FO_BC_FIELD_HASH[(off + pc) as usize]
                 var loaded = false
-                // Prefer Ident base from method recv (param 0) or free-fn arg expr.
+                // Method recv (param 0)
                 if arg == 0 {
                     match *recv {
                         Some(rbox) => {
-                            if (*rbox).kind == ExprKind::ExprIdent {
-                                lo = lo.fo_load_field_sens_by_hash((*rbox).name, field_h)
-                                loaded = lo.fo_expr_has_sens()
+                            lo = lo.fo_load_field_sens_of_expr(&(*rbox), field_h)
+                            loaded = lo.fo_expr_has_sens()
+                        }
+                        _ => {}
+                    }
+                }
+                // Free-fn param field, or method param i>0: FO of args[want].field
+                var free_arg_want: i64 = 0 - 1
+                if !loaded {
+                    var want: i64 = arg
+                    match *recv {
+                        Some(_) => {
+                            if arg == 0 {
+                                want = 0 - 1
+                            } else {
+                                want = arg - 1
+                            }
+                        }
+                        _ => {
+                            want = arg
+                        }
+                    }
+                    if want >= 0 {
+                        free_arg_want = want
+                        var acur = args
+                        var ai: i64 = 0
+                        while true {
+                            match *acur {
+                                Some(al) => {
+                                    if ai == want {
+                                        lo = lo.fo_load_field_sens_of_expr(&(*al).head, field_h)
+                                        loaded = lo.fo_expr_has_sens()
+                                        break
+                                    }
+                                    ai = ai + 1
+                                    acur = &(*al).tail
+                                }
+                                _ => break
+                            }
+                        }
+                    }
+                }
+                if !loaded {
+                    lo = lo.fo_clear_expr_sens()
+                }
+                let s = lo.fo_snapshot_expr_sens()
+                let h = lo.fo_snapshot_expr_hess()
+                // Value of field: lower base + field_get (Ident, Call, MethodCall).
+                var vreg: i64 = -1
+                let fname = lo.fo_field_name_from_hash(field_h)
+                // Method recv value
+                if arg == 0 {
+                    match *recv {
+                        Some(rbox) => {
+                            if fname.len > 0 {
+                                let bp = lo.lower_expr_ref(&(*rbox))
+                                lo = bp.0
+                                let breg = bp.1
+                                var st = ir_empty_name()
+                                if (*rbox).kind == ExprKind::ExprIdent {
+                                    st = lo.lookup_local_struct_type((*rbox).name)
+                                } else if (*rbox).kind == ExprKind::ExprCall {
+                                    st = lo.expr_call_return_struct_name_ref(&(*rbox))
+                                } else if (*rbox).kind == ExprKind::ExprMethodCall {
+                                    let rt = lo.lower_method_recv_type(&(*rbox).left)
+                                    let cn = if rt.len > 0 {
+                                        ir_mangle_method_name(rt, (*rbox).name)
+                                    } else {
+                                        (*rbox).name
+                                    }
+                                    let fid = lowerer_lookup_fn_id_by_name_ref(&lo, cn)
+                                    st = lo.return_struct_name_for_fn_id(fid)
+                                }
+                                let fidx = if st.len > 0 {
+                                    lo.field_idx_from_name(st, fname)
+                                } else {
+                                    lo.field_idx_from_name_simple(fname)
+                                }
+                                let fpair = lo.fresh_reg()
+                                lo = fpair.0
+                                vreg = fpair.1
+                                var finstr = ir_field_get(vreg, breg, fidx, fname)
+                                finstr.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+                                lo = lo.emit(finstr)
+                                lo = lo.emit(ir_mark_float_reg(vreg))
                             }
                         }
                         _ => {}
                     }
                 }
-                if !loaded {
-                    // Free-fn path / non-ident: try FO of the arg expression then clear.
-                    lo = lo.fo_clear_expr_sens()
-                }
-                let s = lo.fo_snapshot_expr_sens()
-                let h = lo.fo_snapshot_expr_hess()
-                // Value of field: lower FieldAccess when recv/arg is available.
-                var vreg: i64 = -1
-                if arg == 0 {
-                    match *recv {
-                        Some(rbox) => {
-                            if (*rbox).kind == ExprKind::ExprIdent {
-                                // value via ordinary field get of lowered base
-                                let bp = lo.lower_expr_ref(&(*rbox))
-                                lo = bp.0
-                                let breg = bp.1
-                                // Reconstruct field name from bind table
-                                var fname = ir_empty_name()
-                                var bi: i64 = 0
-                                while bi < lo.fo_bind_count {
-                                    let nm = lo.fo_bind_names[bi as usize]
-                                    let bname = (*rbox).name
-                                    if nm.len > bname.len + 1 {
-                                        var pok = true
-                                        var qi: i64 = 0
-                                        while qi < bname.len {
-                                            if nm.buf[qi as usize] != bname.buf[qi as usize] {
-                                                pok = false
-                                            }
-                                            qi = qi + 1
+                // Free-fn / method free-arg value path
+                if vreg < 0 && free_arg_want >= 0 && fname.len > 0 {
+                    var acur2 = args
+                    var ai2: i64 = 0
+                    while true {
+                        match *acur2 {
+                            Some(al) => {
+                                if ai2 == free_arg_want {
+                                    let abase = &(*al).head
+                                    let bp = lo.lower_expr_ref(abase)
+                                    lo = bp.0
+                                    let breg = bp.1
+                                    var st = ir_empty_name()
+                                    if (*abase).kind == ExprKind::ExprIdent {
+                                        st = lo.lookup_local_struct_type((*abase).name)
+                                    } else if (*abase).kind == ExprKind::ExprCall {
+                                        st = lo.expr_call_return_struct_name_ref(abase)
+                                    } else if (*abase).kind == ExprKind::ExprMethodCall {
+                                        let rt = lo.lower_method_recv_type(&(*abase).left)
+                                        let cn = if rt.len > 0 {
+                                            ir_mangle_method_name(rt, (*abase).name)
+                                        } else {
+                                            (*abase).name
                                         }
-                                        if pok && nm.buf[bname.len as usize] == 95 {
-                                            var field = ir_empty_name()
-                                            var j: i64 = bname.len + 1
-                                            while j < nm.len && field.len < 128 {
-                                                field.buf[field.len as usize] = nm.buf[j as usize]
-                                                field.len = field.len + 1
-                                                j = j + 1
-                                            }
-                                            if fo_name_hash(field) == field_h {
-                                                fname = field
-                                            }
-                                        }
+                                        let fid = lowerer_lookup_fn_id_by_name_ref(&lo, cn)
+                                        st = lo.return_struct_name_for_fn_id(fid)
                                     }
-                                    bi = bi + 1
-                                }
-                                if fname.len > 0 {
-                                    let fpair = lo.fresh_reg()
-                                    lo = fpair.0
-                                    vreg = fpair.1
-                                    let st = lo.lookup_local_struct_type((*rbox).name)
                                     let fidx = if st.len > 0 {
                                         lo.field_idx_from_name(st, fname)
                                     } else {
                                         lo.field_idx_from_name_simple(fname)
                                     }
+                                    let fpair = lo.fresh_reg()
+                                    lo = fpair.0
+                                    vreg = fpair.1
                                     var finstr = ir_field_get(vreg, breg, fidx, fname)
                                     finstr.imm_flags = IR_FLOAT_REG_MARKER_FLAG
                                     lo = lo.emit(finstr)
                                     lo = lo.emit(ir_mark_float_reg(vreg))
+                                    break
                                 }
+                                ai2 = ai2 + 1
+                                acur2 = &(*al).tail
                             }
+                            _ => break
                         }
-                        _ => {}
                     }
                 }
                 if vreg < 0 {
@@ -9824,6 +10644,206 @@ impl Lowerer {
                     k3 = k3 + 1
                 }
                 FO_EV_SP = sp + 1
+            } else if op == 18 {
+                // CALL_XFER: stack has nargs FO values; re-enter pure helper FO at eval.
+                let nargs = arg
+                let callee_h = FO_BC_FIELD_HASH[(off + pc) as usize]
+                if nargs <= 0 || nargs > 16 || FO_EV_SP < nargs {
+                    return (lo.fo_clear_expr_sens(), -1)
+                }
+                if FO_EV_CALL_DEPTH >= 24 {
+                    return (lo.fo_clear_expr_sens(), -1)
+                }
+                // Pop nargs FO frames into temps (bottom-first order).
+                var tmp_val: [i64; 16] = [-1; 16]
+                var tmp_var: [i64; 16] = [-1; 16]
+                var tmp_sens: [i64; 512] = [-1; 512]
+                var tmp_hess: [i64; 512] = [-1; 512]
+                var tmp_host_v: [i64; 16] = [0; 16]
+                var tmp_host: [f64; 16] = [0.0; 16]
+                var ti: i64 = nargs - 1
+                while ti >= 0 {
+                    FO_EV_SP = FO_EV_SP - 1
+                    let spx = FO_EV_SP
+                    tmp_val[ti as usize] = FO_EV_VAL[spx as usize]
+                    tmp_var[ti as usize] = FO_EV_VAR[spx as usize]
+                    tmp_host_v[ti as usize] = FO_EV_HOST_VALID[spx as usize]
+                    tmp_host[ti as usize] = FO_EV_HOST_VAL[spx as usize]
+                    var tk: i64 = 0
+                    while tk < 32 {
+                        tmp_sens[(ti * 32 + tk) as usize] = FO_EV_SENS[(spx * 32 + tk) as usize]
+                        tmp_hess[(ti * 32 + tk) as usize] = FO_EV_HESS[(spx * 32 + tk) as usize]
+                        tk = tk + 1
+                    }
+                    ti = ti - 1
+                }
+                // Save outer FO_ARG / FO_LOC / FO_EV_SP
+                var sav_arg_n = FO_ARG_N
+                var sav_arg_val: [i64; 16] = [-1; 16]
+                var sav_arg_var: [i64; 16] = [-1; 16]
+                var sav_arg_sens: [i64; 512] = [-1; 512]
+                var sav_arg_hess: [i64; 512] = [-1; 512]
+                var sav_arg_host_v: [i64; 16] = [0; 16]
+                var sav_arg_host: [f64; 16] = [0.0; 16]
+                var sai: i64 = 0
+                while sai < 16 {
+                    sav_arg_val[sai as usize] = FO_ARG_VAL[sai as usize]
+                    sav_arg_var[sai as usize] = FO_ARG_VAR[sai as usize]
+                    sav_arg_host_v[sai as usize] = FO_ARG_HOST_VALID[sai as usize]
+                    sav_arg_host[sai as usize] = FO_ARG_HOST_VAL[sai as usize]
+                    var sak: i64 = 0
+                    while sak < 32 {
+                        sav_arg_sens[(sai * 32 + sak) as usize] = FO_ARG_SENS[(sai * 32 + sak) as usize]
+                        sav_arg_hess[(sai * 32 + sak) as usize] = FO_ARG_HESS[(sai * 32 + sak) as usize]
+                        sak = sak + 1
+                    }
+                    sai = sai + 1
+                }
+                var sav_loc_val: [i64; 8] = [-1; 8]
+                var sav_loc_var: [i64; 8] = [-1; 8]
+                var sav_loc_sens: [i64; 256] = [-1; 256]
+                var sav_loc_hess: [i64; 256] = [-1; 256]
+                var sli: i64 = 0
+                while sli < 8 {
+                    sav_loc_val[sli as usize] = FO_LOC_VAL[sli as usize]
+                    sav_loc_var[sli as usize] = FO_LOC_VAR[sli as usize]
+                    var slk: i64 = 0
+                    while slk < 32 {
+                        sav_loc_sens[(sli * 32 + slk) as usize] = FO_LOC_SENS[(sli * 32 + slk) as usize]
+                        sav_loc_hess[(sli * 32 + slk) as usize] = FO_LOC_HESS[(sli * 32 + slk) as usize]
+                        slk = slk + 1
+                    }
+                    sli = sli + 1
+                }
+                let sav_ev_sp = FO_EV_SP
+                // Install callee args
+                FO_ARG_N = nargs
+                var ai2: i64 = 0
+                while ai2 < nargs {
+                    FO_ARG_VAL[ai2 as usize] = tmp_val[ai2 as usize]
+                    FO_ARG_VAR[ai2 as usize] = tmp_var[ai2 as usize]
+                    FO_ARG_HOST_VALID[ai2 as usize] = tmp_host_v[ai2 as usize]
+                    FO_ARG_HOST_VAL[ai2 as usize] = tmp_host[ai2 as usize]
+                    var ak2: i64 = 0
+                    while ak2 < 32 {
+                        FO_ARG_SENS[(ai2 * 32 + ak2) as usize] = tmp_sens[(ai2 * 32 + ak2) as usize]
+                        FO_ARG_HESS[(ai2 * 32 + ak2) as usize] = tmp_hess[(ai2 * 32 + ak2) as usize]
+                        ak2 = ak2 + 1
+                    }
+                    ai2 = ai2 + 1
+                }
+                // Clear locals for nested eval
+                var cli: i64 = 0
+                while cli < 8 {
+                    FO_LOC_VAL[cli as usize] = -1
+                    FO_LOC_VAR[cli as usize] = -1
+                    var clk: i64 = 0
+                    while clk < 32 {
+                        FO_LOC_SENS[(cli * 32 + clk) as usize] = -1
+                        FO_LOC_HESS[(cli * 32 + clk) as usize] = -1
+                        clk = clk + 1
+                    }
+                    cli = cli + 1
+                }
+                FO_EV_SP = 0
+                FO_EV_CALL_DEPTH = FO_EV_CALL_DEPTH + 1
+                let cidx = fo_xfer_global_lookup_hash(callee_h)
+                var call_ok = false
+                var call_vreg: i64 = -1
+                if cidx >= 0 {
+                    let ckind = FO_XFER_KIND[cidx as usize]
+                    if ckind == 6 {
+                        let pair = lo.fo_eval_bytecode_loaded(cidx)
+                        lo = pair.0
+                        call_vreg = pair.1
+                        call_ok = call_vreg >= 0 || lo.fo_expr_has_sens()
+                    } else if ckind == 1 {
+                        // Identity param: FO_ARG[pi]
+                        let pi = FO_XFER_LIT[cidx as usize] as i64
+                        if pi >= 0 && pi < FO_ARG_N {
+                            call_vreg = FO_ARG_VAR[pi as usize]
+                            FO_EV_CALL_RES_VAL = FO_ARG_VAL[pi as usize]
+                            var k1: i64 = 0
+                            while k1 < 32 {
+                                lo.fo_expr_sens[k1 as usize] = FO_ARG_SENS[(pi * 32 + k1) as usize]
+                                lo.fo_expr_hess[k1 as usize] = FO_ARG_HESS[(pi * 32 + k1) as usize]
+                                k1 = k1 + 1
+                            }
+                            if call_vreg < 0 && lo.fo_expr_has_sens() {
+                                let ep = lo.fo_emit_var_from_sens()
+                                lo = ep.0
+                                call_vreg = ep.1
+                            }
+                            call_ok = call_vreg >= 0 || lo.fo_expr_has_sens()
+                        }
+                    } else if ckind == 5 {
+                        let fh = FO_XFER_FWD_HASH[cidx as usize]
+                        let fidx = fo_xfer_global_lookup_hash(fh)
+                        if fidx >= 0 {
+                            if FO_XFER_KIND[fidx as usize] == 6 {
+                                let pair = lo.fo_eval_bytecode_loaded(fidx)
+                                lo = pair.0
+                                call_vreg = pair.1
+                                call_ok = call_vreg >= 0 || lo.fo_expr_has_sens()
+                            }
+                        }
+                    }
+                }
+                FO_EV_CALL_DEPTH = FO_EV_CALL_DEPTH - 1
+                // Restore outer FO_ARG / FO_LOC
+                FO_ARG_N = sav_arg_n
+                sai = 0
+                while sai < 16 {
+                    FO_ARG_VAL[sai as usize] = sav_arg_val[sai as usize]
+                    FO_ARG_VAR[sai as usize] = sav_arg_var[sai as usize]
+                    FO_ARG_HOST_VALID[sai as usize] = sav_arg_host_v[sai as usize]
+                    FO_ARG_HOST_VAL[sai as usize] = sav_arg_host[sai as usize]
+                    var sak2: i64 = 0
+                    while sak2 < 32 {
+                        FO_ARG_SENS[(sai * 32 + sak2) as usize] = sav_arg_sens[(sai * 32 + sak2) as usize]
+                        FO_ARG_HESS[(sai * 32 + sak2) as usize] = sav_arg_hess[(sai * 32 + sak2) as usize]
+                        sak2 = sak2 + 1
+                    }
+                    sai = sai + 1
+                }
+                sli = 0
+                while sli < 8 {
+                    FO_LOC_VAL[sli as usize] = sav_loc_val[sli as usize]
+                    FO_LOC_VAR[sli as usize] = sav_loc_var[sli as usize]
+                    var slk2: i64 = 0
+                    while slk2 < 32 {
+                        FO_LOC_SENS[(sli * 32 + slk2) as usize] = sav_loc_sens[(sli * 32 + slk2) as usize]
+                        FO_LOC_HESS[(sli * 32 + slk2) as usize] = sav_loc_hess[(sli * 32 + slk2) as usize]
+                        slk2 = slk2 + 1
+                    }
+                    sli = sli + 1
+                }
+                FO_EV_SP = sav_ev_sp
+                if !call_ok {
+                    return (lo.fo_clear_expr_sens(), -1)
+                }
+                // Push nested FO result (value via FO_EV_CALL_RES_VAL).
+                let sOut = lo.fo_snapshot_expr_sens()
+                let hOut = lo.fo_snapshot_expr_hess()
+                if FO_EV_SP >= 16 {
+                    return (lo.fo_clear_expr_sens(), -1)
+                }
+                var out_val = FO_EV_CALL_RES_VAL
+                if out_val < 0 {
+                    let zp = lo.emit_f64_const(0.0)
+                    lo = zp.0
+                    out_val = zp.1
+                }
+                let sp = FO_EV_SP
+                FO_EV_VAL[sp as usize] = out_val
+                FO_EV_VAR[sp as usize] = call_vreg
+                var k18: i64 = 0
+                while k18 < 32 {
+                    FO_EV_SENS[(sp * 32 + k18) as usize] = sOut[k18 as usize]
+                    FO_EV_HESS[(sp * 32 + k18) as usize] = hOut[k18 as usize]
+                    k18 = k18 + 1
+                }
+                FO_EV_SP = sp + 1
             } else if op == 2 {
                 if arg < 0 || arg >= FO_BC_CONST_N || FO_EV_SP >= 16 {
                     return (lo.fo_clear_expr_sens(), -1)
@@ -9839,6 +10859,8 @@ impl Lowerer {
                 let sp = FO_EV_SP
                 FO_EV_VAL[sp as usize] = creg
                 FO_EV_VAR[sp as usize] = zpair.1
+                FO_EV_HOST_VALID[sp as usize] = 1
+                FO_EV_HOST_VAL[sp as usize] = FO_BC_CONST_F64[arg as usize]
                 var k4: i64 = 0
                 while k4 < 32 {
                     FO_EV_SENS[(sp * 32 + k4) as usize] = -1
@@ -9938,6 +10960,27 @@ impl Lowerer {
                 let sp2 = FO_EV_SP
                 FO_EV_VAL[sp2 as usize] = vdst
                 FO_EV_VAR[sp2 as usize] = out_var
+                // Host-const fold for n-1 depth counters (lazy if / mutual).
+                FO_EV_HOST_VALID[sp2 as usize] = 0
+                FO_EV_HOST_VAL[sp2 as usize] = 0.0
+                if FO_EV_HOST_VALID[lsp as usize] == 1 && FO_EV_HOST_VALID[rsp as usize] == 1 {
+                    let hl = FO_EV_HOST_VAL[lsp as usize]
+                    let hr = FO_EV_HOST_VAL[rsp as usize]
+                    FO_EV_HOST_VALID[sp2 as usize] = 1
+                    if op == 3 {
+                        FO_EV_HOST_VAL[sp2 as usize] = hl + hr
+                    } else if op == 4 {
+                        FO_EV_HOST_VAL[sp2 as usize] = hl - hr
+                    } else if op == 5 {
+                        FO_EV_HOST_VAL[sp2 as usize] = hl * hr
+                    } else {
+                        if hr != 0.0 {
+                            FO_EV_HOST_VAL[sp2 as usize] = hl / hr
+                        } else {
+                            FO_EV_HOST_VALID[sp2 as usize] = 0
+                        }
+                    }
+                }
                 let sOut = lo.fo_snapshot_expr_sens()
                 let hOut = lo.fo_snapshot_expr_hess()
                 var k6: i64 = 0
@@ -10018,6 +11061,29 @@ impl Lowerer {
                 let sp = FO_EV_SP
                 FO_EV_VAL[sp as usize] = cdst
                 FO_EV_VAR[sp as usize] = zpair.1
+                // Host-const compare → 0.0/1.0 for JUMP_IF_FALSE.
+                FO_EV_HOST_VALID[sp as usize] = 0
+                FO_EV_HOST_VAL[sp as usize] = 0.0
+                if FO_EV_HOST_VALID[lsp as usize] == 1 && FO_EV_HOST_VALID[rsp as usize] == 1 {
+                    let hl = FO_EV_HOST_VAL[lsp as usize]
+                    let hr = FO_EV_HOST_VAL[rsp as usize]
+                    var hv = 0.0
+                    if op == 11 {
+                        if hl < hr { hv = 1.0 }
+                    } else if op == 12 {
+                        if hl <= hr { hv = 1.0 }
+                    } else if op == 13 {
+                        if hl > hr { hv = 1.0 }
+                    } else if op == 14 {
+                        if hl >= hr { hv = 1.0 }
+                    } else if op == 15 {
+                        if hl == hr { hv = 1.0 }
+                    } else {
+                        if hl != hr { hv = 1.0 }
+                    }
+                    FO_EV_HOST_VALID[sp as usize] = 1
+                    FO_EV_HOST_VAL[sp as usize] = hv
+                }
                 var kc: i64 = 0
                 while kc < 32 {
                     FO_EV_SENS[(sp * 32 + kc) as usize] = -1
@@ -10367,15 +11433,50 @@ impl Lowerer {
                     k6 = k6 + 1
                 }
                 FO_EV_SP = sp2 + 1
+            } else if op == 21 {
+                // JUMP_IF_FALSE abs_pc: pop cond; if host-known 0.0 jump to abs_pc.
+                if FO_EV_SP < 1 {
+                    return (lo.fo_clear_expr_sens(), -1)
+                }
+                FO_EV_SP = FO_EV_SP - 1
+                let csp = FO_EV_SP
+                let cv = FO_EV_VAL[csp as usize]
+                if cv < 0 {
+                    return (lo.fo_clear_expr_sens(), -1)
+                }
+                var take_else = false
+                if FO_EV_HOST_VALID[csp as usize] == 1 {
+                    if FO_EV_HOST_VAL[csp as usize] == 0.0 {
+                        take_else = true
+                    }
+                }
+                // Unknown host cond: fall through to then arm (const-depth
+                // mutual always has host-known cond via IntLit args).
+                if take_else {
+                    let tgt = arg - off
+                    if tgt < 0 || tgt > blen {
+                        return (lo.fo_clear_expr_sens(), -1)
+                    }
+                    pc = tgt - 1
+                }
+            } else if op == 22 {
+                // Unconditional JUMP abs_pc
+                let tgt = arg - off
+                if tgt < 0 || tgt > blen {
+                    return (lo.fo_clear_expr_sens(), -1)
+                }
+                pc = tgt - 1
             } else {
                 return (lo.fo_clear_expr_sens(), -1)
             }
             pc = pc + 1
         }
         if FO_EV_SP < 1 {
+            FO_EV_CALL_RES_VAL = 0 - 1
             return (lo.fo_clear_expr_sens(), -1)
         }
         let top = FO_EV_SP - 1
+        FO_EV_CALL_RES_VAL = FO_EV_VAL[top as usize]
         var k9: i64 = 0
         while k9 < 32 {
             lo.fo_expr_sens[k9 as usize] = FO_EV_SENS[(top * 32 + k9) as usize]
@@ -10389,6 +11490,7 @@ impl Lowerer {
         if lo.fo_expr_has_sens() {
             return lo.fo_emit_var_from_sens()
         }
+        FO_EV_CALL_RES_VAL = 0 - 1
         (lo.fo_clear_expr_sens(), -1)
     }
 
@@ -13966,6 +15068,9 @@ impl Lowerer {
                         let ret_name = lo.expr_call_return_struct_name_ref(&(*expr_box))
                         if ret_name.len > 0 {
                             lo = lo.bind_local_struct_type(s.name, ret_name)
+                            // Project FO of pure struct-return fields onto the local
+                            // so method FO (self.field) works on Call-return aliases.
+                            lo = lo.fo_bind_call_result_field_fo(s.name, &(*expr_box))
                         }
                     } else {
                         // `let b = Box::new(...)`: tag the local's struct-type slot with
@@ -13986,6 +15091,8 @@ impl Lowerer {
                     let ret_name = lo.return_struct_name_for_fn_id(fn_id)
                     if ret_name.len > 0 {
                         lo = lo.bind_local_struct_type(s.name, ret_name)
+                        // Method constructors returning pure structs: same FO bind.
+                        lo = lo.fo_bind_call_result_field_fo(s.name, &(*expr_box))
                     }
                 } else if (*expr_box).kind == ExprKind::ExprIdent {
                     // `let b = nx`: propagate the source variable's struct type (e.g. a Box
