@@ -30,11 +30,11 @@ def main() -> int:
 
     final_index = count - 1
     witness_value = 900000 + count
-    total_layouts = count + 1 + int(args.own_layout)
+    declared_layouts = count + 1 + int(args.own_layout)
     shape = "own" if args.own_layout else "external"
     marker = (
         "PASS struct_layout_capacity "
-        f"shape={shape} custom_layouts={count} catalog_layouts={total_layouts}"
+        f"shape={shape} custom_layouts={count} declared_layouts={declared_layouts}"
     )
     main_lines = [
         "//@ run-pass",

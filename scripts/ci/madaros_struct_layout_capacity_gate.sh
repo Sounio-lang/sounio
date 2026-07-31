@@ -83,4 +83,4 @@ run_case external 255
 run_case external 256
 run_case own 254
 run_case own 255
-echo "[madaros-struct-layout-capacity] PASS raw_sha256=$RAW_SHA shapes=external,own catalog_layouts=256,257 executable=1 fallback=0"
+echo "[madaros-struct-layout-capacity] PASS raw_sha256=$RAW_SHA shapes=external,own declared_layouts=256,257 executable=1 fallback=0"

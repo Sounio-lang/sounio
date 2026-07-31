@@ -219,7 +219,7 @@ bootstrap_seed\tlean_single_source_tracking
 self_host_chain\tM1_to_M2_to_M3_madaros
 target_authority\tx86_64-linux_explicit
 imported_runtime\tpass
-catalog_layouts\t256,257_external_and_own
+declared_layouts\t256,257_external_and_own
 known_layout_miss\trefused_no_elf
 facade_vertical\tprob::lib::{uniform_mean}->closure->ELF->42
 default_souc\tcompile->executable_ELF->42

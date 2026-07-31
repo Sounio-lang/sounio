@@ -100,10 +100,11 @@ run_known_layout_miss() {
   [[ "$COMPILE_RC" -ne 0 ]] || { cat "$case_dir/compile.log" >&2; fail "$label known-layout miss unexpectedly compiled"; }
   [[ ! -e "$elf" ]] || fail "$label known-layout miss emitted an ELF"
   assert_no_fallback "$case_dir/compile.log"
+  grep -Fxq "LOWER_NOMINAL_LAYOUT_MISS type=$type_name field=family_id" "$case_dir/compile.log" \
+    || { cat "$case_dir/compile.log" >&2; fail "$label exact nominal miss marker absent"; }
   for marker in \
     'imported_compile: typecheck ok' \
     'imported_compile: lower_begin' \
-    "LOWER_NOMINAL_LAYOUT_MISS type=$type_name field=family_id" \
     'imported_compile: lower_done' \
     'IR lowering failed during merge:'; do
     grep -Fq "$marker" "$case_dir/compile.log" || { cat "$case_dir/compile.log" >&2; fail "$label negative causality marker absent: $marker"; }
