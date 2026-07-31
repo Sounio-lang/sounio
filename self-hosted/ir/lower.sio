@@ -3142,9 +3142,123 @@ fn lowerer_lower_binary_expr_mut(
     dst
 }
 
-// Keep binary lowering on a single mutable Lowerer path. `Lowerer` has large
-// inline metadata tables, so a by-value ExprBinary dispatch can exhaust the
-// raw self-hosted compiler's native stack even for `1 != 0`.
+fn lowerer_lookup_local_reg_ref(lo: &Lowerer, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+    var i = (*(*lo).locals).count - 1
+    while i >= 0 {
+        if (*(*lo).locals).depths[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*lo).locals).names[i as usize], name) {
+            return (*(*lo).locals).regs[i as usize]
+        }
+        i = i - 1
+    }
+    IR_INVALID_REG
+}
+
+fn lowerer_first_arg_needs_hof_dispatch_ref(lo: &Lowerer, args: &Option<Box<ExprList>>) -> bool with Mut, Panic, Div, Alloc {
+    match *args {
+        Some(list) => {
+            if (*list).head.kind == ExprKind::ExprClosure {
+                return true
+            }
+            if (*list).head.kind == ExprKind::ExprIdent {
+                var i = (*(*lo).locals).count - 1
+                while i >= 0 {
+                    if ir_name_eq((*(*lo).locals).names[i as usize], (*list).head.name) {
+                        return (*(*lo).locals).closure_fn_id[i as usize] >= 0
+                    }
+                    i = i - 1
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+fn lowerer_named_call_needs_special_dispatch(name: Name) -> bool with Mut, Panic, Div {
+    name_eq(name, make_name("print"))
+    || name_eq(name, make_name("print_int"))
+    || name_eq(name, make_name("print_char"))
+    || name_eq(name, make_name("println"))
+    || name_eq(name, make_name("assert"))
+    || name_eq(name, make_name("variance_of"))
+    || name_eq(name, make_name("uncertainty_of"))
+    || name_eq(name, make_name("sign_consensus"))
+    || name_eq(name, make_name("relative_band"))
+    || name_eq(name, make_name("max_tail_risk"))
+    || name_eq(name, make_name("mechanistic_divergence"))
+    || name_eq(name, make_name("identifiability_floor"))
+    || name_eq(name, make_name("disagreement"))
+    || name_eq(name, make_name("counterexamples"))
+    || name_eq(name, make_name("posterior_weights"))
+    || name_eq(name, make_name("__knowledge_kaxi_publish"))
+    || ir_name_is_some(name)
+    || ir_name_is_box(name)
+    || ir_name_is_prove_robust(name)
+    || ir_name_is_validate_manifest(name)
+    || ir_name_is_admit_action(name)
+    || ir_name_is_defer_action(name)
+    || ir_name_is_deferral_reason(name)
+    || ir_name_is_plan_acquisition(name)
+    || ir_name_is_acquisition_reason(name)
+    || ir_name_is_plan_recourse(name)
+    || ir_name_is_recourse_reason(name)
+    || ir_name_is_propose_alternatives(name)
+    || ir_name_is_commit_alternative(name)
+    || ir_name_is_alternative_count(name)
+    || ir_name_is_alternative_option(name)
+    || ir_name_is_alternative_reason(name)
+    || ir_name_is_transition_reason(name)
+    || ir_name_is_transition_step_count(name)
+    || ir_name_is_lift_knowledge(name)
+    || ir_name_is_measure(name)
+    || lower_handle_buf_arg_index(name) >= 0
+}
+
+// Return IR_INVALID_REG when the legacy dispatcher must preserve a special or
+// unresolved call shape. Ordinary preseeded functions stay on one borrowed
+// Lowerer allocation, avoiding the full aggregate copy at lower_call_expr_ref.
+fn lowerer_lower_registered_named_call_mut(
+    lo: &! Lowerer,
+    e: &Expr,
+    callee_name: Name
+) -> i64 with Mut, Panic, Div, Alloc, IO {
+    if lowerer_named_call_needs_special_dispatch(callee_name) {
+        return IR_INVALID_REG
+    }
+    if lowerer_lookup_local_reg_ref(&(*lo), callee_name) >= 0 {
+        return IR_INVALID_REG
+    }
+    if lowerer_first_arg_needs_hof_dispatch_ref(&(*lo), &e.args) {
+        return IR_INVALID_REG
+    }
+    let fn_id = lowerer_lookup_fn_id_by_name_ref(&(*lo), callee_name)
+    if fn_id < 0 || fn_id >= (*(*lo).module).fn_count {
+        return IR_INVALID_REG
+    }
+    let callee_strategy = (*(*lo).module).functions[fn_id as usize].compile_strategy
+    if callee_strategy == IR_STRATEGY_INSTRUMENTED {
+        return IR_INVALID_REG
+    }
+    let args = lowerer_lower_expr_args_mut(lo, &e.args)
+    let dst = lowerer_fresh_reg_mut(lo)
+    if callee_strategy == 6 {
+        lowerer_emit_mut(lo, ir_call_extern(dst, callee_name, args.0, args.1))
+        return dst
+    }
+    var call_instr = ir_call(dst, fn_id, callee_name, args.0, args.1)
+    if (*(*lo).module).functions[fn_id as usize].returns_float == 1 {
+        call_instr.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+    }
+    lowerer_emit_mut(lo, call_instr)
+    if call_instr.imm_flags == IR_FLOAT_REG_MARKER_FLAG {
+        lowerer_emit_mut(lo, ir_mark_float_reg(dst))
+    }
+    dst
+}
+
+// Keep expression lowering on a single mutable Lowerer path. `Lowerer` has
+// large inline metadata tables, so by-value dispatch can exhaust the raw
+// self-hosted compiler's native stack even for a small binary or named call.
 fn lowerer_lower_expr_mut(
     lo: &! Lowerer,
     e: &Expr
@@ -3157,6 +3271,12 @@ fn lowerer_lower_expr_mut(
             Some(callee) => {
                 if (*callee).kind == ExprKind::ExprIdent && name_eq((*callee).name, make_name("assert")) {
                     return lowerer_lower_assert_call_mut(lo, e)
+                }
+                if (*callee).kind == ExprKind::ExprIdent {
+                    let direct_dst = lowerer_lower_registered_named_call_mut(lo, e, (*callee).name)
+                    if direct_dst >= 0 {
+                        return direct_dst
+                    }
                 }
             }
             None => {}
