@@ -10,6 +10,10 @@ WORK="${SOUNIO_MADAROS_IMPORTED_RUNTIME_SOURCE_FRESH_DIR:-}"
 KEEP="${SOUNIO_MADAROS_IMPORTED_RUNTIME_SOURCE_FRESH_KEEP:-0}"
 STRUCTURAL_ONLY="${SOUNIO_MADAROS_IMPORTED_RUNTIME_SOURCE_FRESH_STRUCTURAL_ONLY:-0}"
 SRC="$ROOT_DIR/self-hosted/compiler/main.sio"
+FACADE="$ROOT_DIR/tests/run-pass/madaros_native_multimodule_scale_prob_facade.sio"
+D6="$ROOT_DIR/tests/run-pass/clinical_proof_carrying_policy_observation_associator_witness.sio"
+D11="$ROOT_DIR/tests/run-pass/clinical_shift_robust_risk_transport_witness.sio"
+D12="$ROOT_DIR/tests/run-pass/clinical_linear_target_monitor_witness.sio"
 
 fail() { echo "[madaros-imported-runtime-source-fresh] FAIL: $*" >&2; exit 1; }
 sha256() { sha256sum "$1" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$1" | awk '{print $1}'; }
@@ -28,7 +32,11 @@ for path in \
   scripts/ci/madaros_struct_layout_capacity_gate.sh \
   self-hosted/compiler/main.sio \
   self-hosted/ir/ir.sio \
-  self-hosted/ir/lower.sio; do
+  self-hosted/ir/lower.sio \
+  tests/run-pass/madaros_native_multimodule_scale_prob_facade.sio \
+  tests/run-pass/clinical_proof_carrying_policy_observation_associator_witness.sio \
+  tests/run-pass/clinical_shift_robust_risk_transport_witness.sio \
+  tests/run-pass/clinical_linear_target_monitor_witness.sio; do
   [[ -f "$ROOT_DIR/$path" ]] || fail "required source missing: $path"
 done
 
@@ -111,6 +119,50 @@ SOUNIO_MADAROS_STRUCT_LAYOUT_CAPACITY_KEEP=1 \
   bash "$ROOT_DIR/scripts/ci/madaros_struct_layout_capacity_gate.sh" \
   >"$WORK/layout-capacity.log" 2>&1 || { cat "$WORK/layout-capacity.log" >&2; fail 'layout capacity acceptance failed'; }
 
+SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib" "$M3" --science-boundary-closure "$FACADE" \
+  >"$WORK/facade-closure.log" 2>&1 || { cat "$WORK/facade-closure.log" >&2; fail 'facade closure enumeration failed'; }
+assert_no_fallback "$WORK/facade-closure.log"
+grep -Fxq $'status\tcomplete' "$WORK/facade-closure.log" || fail 'facade closure is incomplete'
+grep -Fxq $'saturated\tfalse' "$WORK/facade-closure.log" || fail 'facade closure saturated'
+grep -Fxq $'parse_failed\tfalse' "$WORK/facade-closure.log" || fail 'facade closure parse failed'
+for node in \
+  "$ROOT_DIR/stdlib/prob/lib.sio" \
+  "$ROOT_DIR/stdlib/prob/distributions.sio" \
+  "$ROOT_DIR/stdlib/special/gamma.sio" \
+  "$ROOT_DIR/stdlib/special/igamma.sio" \
+  "$ROOT_DIR/stdlib/special/erf.sio"; do
+  grep -Fxq $'node\t'"$node" "$WORK/facade-closure.log" || fail "facade closure missed physical node: $node"
+done
+
+run_imported_elf() {
+  local label="$1" source="$2" expected="$3"
+  local case_dir="$WORK/$label" elf="$WORK/$label/witness.elf"
+  mkdir -p "$case_dir"
+  SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib" "$M3" --check "$source" >"$case_dir/check.log" 2>&1 \
+    || { cat "$case_dir/check.log" >&2; fail "$label checker failed"; }
+  SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib" "$M3" --native-v2-compile "$source" -o "$elf" >"$case_dir/compile.log" 2>&1 \
+    || { cat "$case_dir/compile.log" >&2; fail "$label compile failed"; }
+  assert_no_fallback "$case_dir/compile.log"
+  grep -Fq 'imported_compile: typecheck ok' "$case_dir/compile.log" || fail "$label missed modular checker receipt"
+  grep -Fq 'Merged IR:' "$case_dir/compile.log" || fail "$label missed merged IR receipt"
+  [[ -s "$elf" ]] || fail "$label emitted no ELF"
+  [[ "$(od -An -tx1 -N4 "$elf" | tr -d ' \n')" == 7f454c46 ]] || fail "$label output is not ELF"
+  chmod +x "$elf"
+  set +e
+  "$elf" >"$case_dir/runtime.log" 2>&1
+  local runtime_rc=$?
+  set -e
+  [[ "$runtime_rc" -eq 0 ]] || { cat "$case_dir/runtime.log" >&2; fail "$label ELF rc=$runtime_rc"; }
+  if [[ -n "$expected" ]]; then
+    grep -Fxq "$expected" "$case_dir/runtime.log" || { cat "$case_dir/runtime.log" >&2; fail "$label exact marker absent"; }
+  fi
+}
+
+run_imported_elf facade-elf-42 "$FACADE" '42'
+run_imported_elf imported-d6 "$D6" ''
+run_imported_elf imported-d11 "$D11" ''
+run_imported_elf imported-d12 "$D12" 'PROOF-CARRYING LINEAR TARGET MONITOR D12 PASS'
+
 cat >"$WORK/receipt.tsv" <<EOF
 source_head\t$HEAD_SHA
 source_tree\t$TREE_SHA
@@ -126,6 +178,10 @@ fixed_point\tM2_equals_M3
 imported_runtime\tpass
 catalog_layouts\t256,257
 known_layout_miss\trefused_no_elf
+facade_vertical\tprob::lib::{uniform_mean}->closure->ELF->42
+imported_d6\tpass
+imported_d11\tpass
+imported_d12\tpass
 fallback\t0
 EOF
 
