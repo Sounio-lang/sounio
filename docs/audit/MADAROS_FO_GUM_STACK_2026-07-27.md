@@ -106,9 +106,10 @@ Oral Css = (F·Dose/τ)/(CL0·exp(η)). Import driver is the multi-mod free-help
 `scripts/ci/fo_css_surface_parity_gate.sh` (17/17).  
 **Semantic bridge L1** (2026-07-31): surfaces desugar to one `FoExpr`; FO var is AST-determined —
 `formal/lean4/SounioFoSurfaceTransfer.lean` + `scripts/ci/fo_surface_transfer_gate.sh`.  
-**L2-fragment** (2026-07-31): FO bytecode ops 1–6 stack machine; site ≡ import-expanded RPN
-interprets to L1 desugar — `SounioFoBytecodeFragment` + `fo_bytecode_fragment_gate.sh`.  
-**L2-full Madaros FO_XFER emit** remains OPEN (R4 numerical parity). Stack:
+**L2-fragment** (2026-07-31): FO bytecode ops 1–6 stack machine — `SounioFoBytecodeFragment`.  
+**L2 pure-emit** (2026-07-31): `fo_bc_compile_expr` pure fragment formalised —
+`SounioFoEmitPure` + `fo_emit_pure_gate.sh` (compile(cssSite)=cssSiteProg).  
+**L2 registration** (multipass/multi-mod/method feed) remains OPEN (R4). Stack:
 `scripts/ci/fo_residual4_stack_gate.sh`. Spec:
 `docs/research/fo_css_compiler_residual_half_spec_2026-07-31.md`.  
 **Dissertation index:** [`docs/research/fo_pk_method_science_receipts_2026-07-31.md`](../research/fo_pk_method_science_receipts_2026-07-31.md) — R1–R4 tables, re-run commands, citation sketch.

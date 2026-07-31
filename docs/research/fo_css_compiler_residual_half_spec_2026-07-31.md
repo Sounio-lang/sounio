@@ -15,25 +15,27 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.fo-cs
 
 # FO Css residual §5.4 — compiler half: semantic bridge (2026-07-31)
 
-**Status:** L0 + L1 + **L2-fragment** CLOSED; **L2-full** Madaros FO_XFER soundness **OPEN**  
-**Algebraic half:** `formal/lean4/SounioFoCssSurfaceParity.lean` (kernel-checked)  
+**Status:** L0 + L1 + L2-fragment + **L2 pure-emit** CLOSED; **L2 registration/multipass** OPEN  
+**Algebraic half:** `formal/lean4/SounioFoCssSurfaceParity.lean`  
 **Semantic bridge:** `formal/lean4/SounioFoSurfaceTransfer.lean`  
 **Bytecode fragment:** `formal/lean4/SounioFoBytecodeFragment.lean`  
+**Pure emit:** `formal/lean4/SounioFoEmitPure.lean` (`fo_bc_compile_expr` pure fragment)  
 **Stack gate:** `scripts/ci/fo_residual4_stack_gate.sh`  
-**IR evidence (unchanged):** R4 `scripts/ci/fo_pk_import_method_driver_gate.sh`
+**IR evidence:** R4 `scripts/ci/fo_pk_import_method_driver_gate.sh`
 
 ---
 
-## 1. Residual split (four layers)
+## 1. Residual split (five layers)
 
 | Layer | Claim | Status | Evidence |
 |-------|-------|--------|----------|
-| **L0 Algebraic** | Pure Rat maps for import/site/method/call-result agree; freezes exact ℚ | **CLOSED** | `SounioFoCssSurfaceParity` + `fo_css_surface_parity_gate` 17/17 |
-| **L1 Semantic** | Surfaces desugar to one `FoExpr` AST; FO var is a function of (AST, seeds) | **CLOSED** | `SounioFoSurfaceTransfer` + `fo_surface_transfer_gate` |
-| **L2-fragment** | FO bytecode ops 1–6 stack machine: site ≡ import-expanded ≡ method RPN; run = L1 desugar; Var = 191/240 | **CLOSED** | `SounioFoBytecodeFragment` + `fo_bytecode_fragment_gate` |
-| **L2-full Compiler** | Madaros `lower.sio` FO_XFER / multipass / multi-mod *emits* the L2-fragment program for the oral-Css fragment | **OPEN** | R4 green gates (numerical); no FO_XFER soundness proof |
+| **L0 Algebraic** | Pure Rat maps agree; freezes exact ℚ | **CLOSED** | `SounioFoCssSurfaceParity` + gate 17/17 |
+| **L1 Semantic** | Surfaces desugar to one `FoExpr` | **CLOSED** | `SounioFoSurfaceTransfer` |
+| **L2-fragment** | FO ops 1–6 stack machine; RPN run = desugar | **CLOSED** | `SounioFoBytecodeFragment` |
+| **L2 pure-emit** | `fo_bc_compile_expr` pure fragment emits `cssSiteProg`; fo_css expand = site | **CLOSED** | `SounioFoEmitPure` + `fo_emit_pure_gate` |
+| **L2 registration** | Multipass / multi-mod / method FO_XFER always feed that pure AST into compile | **OPEN** | R4 numerical witness |
 
-Dissertation wording must not collapse L2-fragment into L2-full.
+Dissertation wording must not collapse pure-emit into full registration soundness.
 
 ---
 
@@ -75,15 +77,28 @@ Import-expanded and method programs are definitionally the same RPN list.
 **Honest scope:** this proves *if* Madaros emits this RPN, FO semantics match L1.
 It does **not** prove Madaros emits it — that is L2-full.
 
-## 3b. What would close L2-full (compiler)
+## 3b. L2 pure-emit (closed 2026-07-31)
 
-A future phase must show, for the oral-Css FO fragment under FO trust ≥42:
+Formalises Madaros `fo_bc_compile_expr` pure path (`lower.sio` ~9358–9367):
 
-1. **Emit faithfulness.** Multi-mod `fo_css`, `Pk.css`, `make_pk(...).css`, and call-site composition lower to FO bytecode equal to `cssSiteProg` (or FO-equivalent under stack semantics).
-2. **XFER composition.** Nested pure helper expand (`fo_bc_expand_xfer_call`) preserves FO of the expanded AST.
-3. **Multi-mod registration.** Module-frontend FO prepass registers imported pure helpers with the same bytecode as same-module definitions.
+```
+compile(param i)     = [PARAM i]
+compile(mul a b)     = compile a ++ compile b ++ [MUL]
+compile(div a b)     = compile a ++ compile b ++ [DIV]
+```
 
-**Until then:** R4 remains the L2-full **executable** witness; L2-fragment is the **semantic** FO bytecode model.
+Proved: `compile(cssSite) = cssSiteProg`, and `fo_css` XFER expand
+(`rate/clearance` bodies from `stdlib/epistemic/fo.sio`) is definitionally
+`cssSite`. Round-trip `run(compile e) = toFo e` for oral Css.
+
+## 3c. What would close L2 registration (remaining)
+
+1. **Multipass registration** always installs pure-helper bodies as FO_XFER kind-6 for `fo_css` / methods before call-site expand.
+2. **Multi-mod prepass** registers imported helpers with the same bytecode as same-module.
+3. **Method FO_XFER** mangles `Pk_css` and peels `self.cl0` to param FO matching param-3 in the pure model.
+4. Optional: EXP op-20 path for `exp(η)` vs eEta channel (FO-var equivalent at η=0).
+
+**Until then:** R4 remains the **executable** registration witness.
 
 ---
 
@@ -98,16 +113,15 @@ A future phase must show, for the oral-Css FO fragment under FO trust ≥42:
 ## 5. Re-run
 
 ```bash
-bash scripts/ci/fo_residual4_stack_gate.sh         # L0+L1+L2-fragment+R4
+bash scripts/ci/fo_residual4_stack_gate.sh         # full stack
 # or piecemeal:
 bash scripts/ci/fo_css_surface_parity_gate.sh      # L0
 bash scripts/ci/fo_surface_transfer_gate.sh        # L1
 bash scripts/ci/fo_bytecode_fragment_gate.sh       # L2-fragment
-bash scripts/ci/fo_pk_import_method_driver_gate.sh # L2-full executable
-# optional:
-FO_CSS_LEAN_BUILD=1 bash scripts/ci/fo_bytecode_fragment_gate.sh
+bash scripts/ci/fo_emit_pure_gate.sh               # L2 pure-emit
+bash scripts/ci/fo_pk_import_method_driver_gate.sh # registration executable
 ```
 
 ---
 
-*Spec version fo-css-compiler-residual-half-v2 (2026-07-31) — L2-fragment closed.*
+*Spec version fo-css-compiler-residual-half-v3 (2026-07-31) — L2 pure-emit closed.*

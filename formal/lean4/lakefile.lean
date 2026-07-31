@@ -682,3 +682,10 @@ lean_lib «SounioFoSurfaceTransfer» where
 -- Companion: scripts/research/fo_bytecode_fragment_cert.py.
 @[default_target]
 lean_lib «SounioFoBytecodeFragment» where
+
+-- FO residual §5.4 L2 pure-emit: fo_bc_compile_expr pure fragment (lower.sio
+-- ~9358–9367) formalised; compile(cssSite)=cssSiteProg; fo_css expand = site.
+-- Registration/multipass/multi-mod feed still open; R4 remains live witness.
+-- Companion: scripts/research/fo_emit_pure_cert.py.
+@[default_target]
+lean_lib «SounioFoEmitPure» where
