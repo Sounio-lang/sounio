@@ -435,6 +435,22 @@ def main():
           f"{'OK' if a9_null else 'FAIL'} => formal/lean4/SounioZDFiberAntisym.lean proves A3 "
           f"about THE MEASURED OBJECT, not a lookalike")
 
+    # ---- A10 the builder's fill_diagonal is a no-op (needed for the Lean Asig to be THIS one)
+    a10 = True
+    for n in (6, 7, 8):
+        S, H = tables[n], 1 << (n - 1)
+        for Llo in range(1, H):
+            P1, P3 = parts_fast(n, Llo, S)
+            res = (P1 == P1.T) & (P3 == P3.T) & (P1 == P3)
+            raw = np.where(res, -P1, 0)            # NO np.fill_diagonal
+            if np.count_nonzero(np.diag(raw)) != 0:
+                a10 = False
+    ok["A10"] = a10
+    print(f"A10_DIAG    resonance already FAILS on the diagonal (P1=+1 vs P3=-1), so the "
+          f"builder's np.fill_diagonal(A,0) is a NO-OP, all fibers n=6,7,8 "
+          f"{'OK' if a10 else 'FAIL'} => the Lean `Asig` (which omits it) is the same matrix; "
+          f"proven in Lean as Asig_diag")
+
     print("=" * 78)
     if all(ok.values()):
         print("CD_TOWER_ZDFAN_VERDICT "
@@ -448,14 +464,17 @@ def main():
               "an exact spectral halving to a (2^{n-2}-1)-dim matrix (A6). NOT CLAIMED: ∀n "
               "spectral completeness (#spectra = 3*2^{n-5}) -- A6 reduces that question, it "
               "does not answer it; rank EQUALITY remains measured (n<=10). Two of the three "
-              "clauses of the in-tree resonance predicate are vacuous (A2). A3 IS FORMALISED: "
-              "formal/lean4/SounioZDFiberAntisym.lean proves core_P1/core_P3/P3_symm for ALL n, "
-              "Mathlib-free, no sorry, no native_decide, [propext,(Classical.choice),Quot.sound]; "
-              "A9 pins that file's cdSigma/hi/P1/P3 to the ones measured here, so the Lean "
-              "theorem is about THE MEASURED OBJECT. A1 additionally needs P1-symmetry, which "
-              "reduces to `antisym` -- proven forall n on the UNMERGED branch "
-              "lean/cd-seamflip-forall-n, NOT in this tree. Numerical certificate over an exact "
-              "integer sign table; D3 respected")
+              "clauses of the in-tree resonance predicate are vacuous (A2), and the builder's "
+              "fill_diagonal is a third no-op (A10). **A1 ITSELF IS LEAN-PROVEN forall n**: "
+              "formal/lean4/SounioZDFiberAntisym.lean proves core_P1/core_P3/P3_symm/P1_symm/"
+              "resB_inv/A1/Asig_diag, Mathlib-free, no sorry, no native_decide, "
+              "[propext,(Classical.choice),Quot.sound] on all 15 theorems; A9 pins that file's "
+              "cdSigma/hi/P1/P3 to the ones measured here and A10 pins its diagonal convention, "
+              "so the Lean theorem is about THE MEASURED OBJECT. The last gap closed by merging "
+              "lean/cd-seamflip-forall-n, which carried `antisym` -- cited by this lane as "
+              "'proven forall n' since 2026-07-11 while absent from the tree. What is NOT "
+              "formalised: A4's level-(n-1) sub-lemma, and everything numerical. Numerical "
+              "certificate over an exact integer sign table; D3 respected")
         return 0
     print("CD_TOWER_ZDFAN_VERDICT INCOMPLETE  failing=" +
           ",".join(k for k, v in ok.items() if not v))

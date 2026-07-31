@@ -52,8 +52,9 @@ identity supplies everything the prior rung was missing:
 | the `−1` | the isolated vertex sits at exactly `l = L_lo`, **derived**, not observed |
 | the spectrum | nonzero `spec(A_σ) = spec(2M)` — an **exact halving**, ∀n |
 
-**Evidence.** `A1` runs the lemma over **all fibers at n = 6..11** — `0` violations in
-`1 221 547 860` entry comparisons. `A5`'s rank equality is confirmed over **all** fibers at
+**Evidence.** The lemma is **proven ∀n in Lean** (§8, `A1`, kernel-checked, no `sorry`, no
+`native_decide`). Independently, `A1_LEMMA` runs it over **all fibers at n = 6..11** — `0`
+violations in `1 221 547 860` entry comparisons. `A5`'s rank equality is confirmed over **all** fibers at
 n ≤ 10 (the prior rung's `V3` reached only n ≤ 8).
 
 ---
@@ -75,6 +76,7 @@ n ≤ 10 (the prior rung's `V3` reached only n ≤ 8).
 | `A8_NULL_a` | a perturbed *pairing* `L' ≠ L_lo` always **breaks** the antisymmetry | measured |
 | `A8_NULL_b` | a foreign fiber's *matrix* never satisfies `L_lo`'s antisymmetry | measured |
 | `A9_LEAN` | the Lean file's `cdSigma`/`hi`/`P1`/`P3` are entrywise the ones measured here | measured (§8) |
+| `A10_DIAG` | the builder's `np.fill_diagonal(A, 0)` is a **no-op** — resonance already fails on the diagonal | measured, **Lean-proven** (§8) |
 
 ---
 
@@ -107,6 +109,9 @@ substitution in the recursion. Everything follows:
   `c(l,y) = c(m,m')` identically.) Then
   `res(m,y) ⟺ P1(m,y) = P3(m,y) ⟺ −P3(l,y) = −P1(l,y) ⟺ res(l,y)`. **The mask is invariant.**
 - **Sign.** On the support, `A(m,y) = −P1(m,y) = P3(l,y) = P1(l,y) = −A(l,y)`. ∎
+
+This whole argument is formalised: `core_P1`/`core_P3` (the substitution), `P1_symm`/`P3_symm`
+(the vacuity), `resB_inv` (the mask), `A1` (the conclusion) — see §8.
 
 The lemma has the shape of the seam-flip law because it *is* a seam flip: `L_lo ⊕ L = H`
 exactly, so `l ↦ l ⊕ L_lo` acts on the pair `(l, h(l))` as `(l ⊕ L_lo, l ⊕ H)` — a flip of the
@@ -228,19 +233,33 @@ verified against the lane's own generator rather than a reimplementation.
 `native_decide`**, axioms `[propext, Quot.sound]` or `[propext, Classical.choice, Quot.sound]`
 (Classical enters via `simp`; a logical axiom, not a computational trust anchor).
 
-| tier | statement | status |
+| statement | Lean name | status |
 |---|---|---|
-| **1** | `core_P1` : `P1 (l ⊕ L_lo) y = − P3 l y` | **kernel-checked ∀n** |
-| **1** | `core_P3` : `P3 (l ⊕ L_lo) y = − P1 l y` | **kernel-checked ∀n** |
-| **1** | `P3_symm` : `P3 l y = P3 y l` | **kernel-checked ∀n** |
-| **1** | `hi_eq_xor` : the additive form `(x ⊕ L_lo) + H` *is* the XOR form `x ⊕ L` | **kernel-checked ∀n** |
-| **2** | `P1_symm` ⇒ mask invariance ⇒ **`A1` itself** | **not in this tree** — reduces to `antisym`, proven ∀n on the unmerged branch `lean/cd-seamflip-forall-n` |
-| **3** | `A4`'s sub-lemma `τ(l,L_lo) = −τ(l ⊕ L_lo, L_lo)` | **not formalised** |
-| — | rank, spectra, the factorisation `Jᵀ M J` | numerical only |
+| `P1 (l ⊕ L_lo) y = − P3 l y` (`A3`) | `core_P1` | **kernel-checked ∀n** |
+| `P3 (l ⊕ L_lo) y = − P1 l y` (`A3`) | `core_P3` | **kernel-checked ∀n** |
+| `P3 l y = P3 y l` (`A2_VACUITY`) | `P3_symm` | **kernel-checked ∀n** |
+| `P1 l y = P1 y l` (`A2_VACUITY`) | `P1_symm` | **kernel-checked ∀n** (uses `antisym`) |
+| `resB (l ⊕ L_lo) y = resB l y` (`A2_MASK`) | `resB_inv` | **kernel-checked ∀n** |
+| **`Asig (l ⊕ L_lo) y = − Asig l y`** (`A1`) | `A1` | **kernel-checked ∀n** |
+| `Asig l l = 0` — `fill_diagonal` is a no-op (`A10`) | `Asig_diag` | **kernel-checked ∀n** |
+| the additive form *is* the XOR form | `hi_eq_xor` | **kernel-checked ∀n** |
+| `A4`'s sub-lemma `τ(l,L_lo) = −τ(l ⊕ L_lo, L_lo)` | — | **not formalised** |
+| rank, spectra, the factorisation `Jᵀ M J` | — | numerical only |
 
-So: **`A3` — the algebraic core, the whole substance of §2 — is formalised ∀n.** `A1` as stated
-in §0 is *not*: it needs `P1`-symmetry on top, and that reduces to `antisym`. Do not read this
-rung as "the lemma is Lean-proven"; read it as "the identity that makes the lemma work is."
+All 15 theorems in the file report `[propext, Quot.sound]` or
+`[propext, Classical.choice, Quot.sound]` under `#print axioms` — no `sorryAx`, no
+`native_decide`.
+
+**So the lemma itself is proven, not only its core.** The earlier version of this rung stopped
+at `A3` because `P1`-symmetry reduces to `antisym`, which lived only on the unmerged branch
+`lean/cd-seamflip-forall-n`. That branch is now merged (additively, 13 files, no deletions), and
+the gap closed.
+
+**Two obligations that came with it, both discharged.** (i) `Asig_diag`: the Lean `Asig` does
+not zero the diagonal while the builder calls `np.fill_diagonal(A, 0)`. Resonance already fails
+on the diagonal (`P1 = +1`, `P3 = −1`), so the call is a no-op and the matrices coincide —
+a **third vacuity** in the builder, after `A2`'s two. (ii) The hypotheses `l ⊕ L_lo ≠ 0` and
+`y ⊕ L_lo ≠ 0` are not a weakening: they are exactly §3's excluded row and column.
 
 The side conditions in the Lean statements are exactly §2's: `y ≠ 0` and `y ⊕ L_lo ≠ 0` — the
 latter being `y ≠ L_lo`, §3's excluded column.
