@@ -189,8 +189,13 @@ When citing in dissertation prose (EN-UK):
 **Quantitative annex:**  
 [`docs/dissertation/results/fo_pk_method_science_v1.md`](../dissertation/results/fo_pk_method_science_v1.md)
 
+**Residual §5.4 oral Css closeout:**  
+[`docs/research/fo_pk_residual4_oral_css_closeout_2026-07-31.md`](fo_pk_residual4_oral_css_closeout_2026-07-31.md)  
+(`bash scripts/ci/fo_residual4_stack_gate.sh` → `ORAL_CSS_RESIDUAL4_CLOSED`)
+
 Point to this file + the four drivers for the numerical freezes.
 
 ---
 
-*Receipts re-validated 2026-07-31. Re-run the four gates before claiming any number in external prose.*
+*Receipts re-validated 2026-07-31 (R1–R4 + residual-4 stack). Re-run the package
+commands in the annex before claiming any number in external prose.*

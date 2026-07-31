@@ -16,9 +16,11 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.fo-pk
 # FO residual §5.4 — oral Css closeout (2026-07-31)
 
 **Status:** **ORAL_CSS_CLOSED** under the layered stack below  
+**Science package:** R1–R4 FO PK method drivers (all `*_GATE_OK`)  
 **Executable end-to-end:** R4 `fo_pk_import_method_driver_gate.sh`  
 **Stack gate:** `scripts/ci/fo_residual4_stack_gate.sh`  
-**Detail spec:** `docs/research/fo_css_compiler_residual_half_spec_2026-07-31.md`
+**Detail spec:** `docs/research/fo_css_compiler_residual_half_spec_2026-07-31.md`  
+**Package re-validation:** 2026-07-31 (this workspace)
 
 ---
 

@@ -18,11 +18,14 @@ Css FO science closeout** that supports Contribution 1 (GUM-through-model) at th
 algebraic / steady-state layer before full ODE/PBPK budgets.  
 **Governing numerical annex:** [`docs/dissertation/results/fo_pk_method_science_v1.md`](../results/fo_pk_method_science_v1.md)  
 **Full receipt index:** [`docs/research/fo_pk_method_science_receipts_2026-07-31.md`](../../research/fo_pk_method_science_receipts_2026-07-31.md)  
+**Residual §5.4 closeout:** [`docs/research/fo_pk_residual4_oral_css_closeout_2026-07-31.md`](../../research/fo_pk_residual4_oral_css_closeout_2026-07-31.md)  
 **Compiler stack:** Madaros FO trust ≥42/42 — `scripts/ci/madaros_gum_fo_trust_gate.sh`  
+**Package re-validation:** R1–R4 + `fo_residual4_stack_gate.sh` → `ORAL_CSS_RESIDUAL4_CLOSED` (2026-07-31)  
 **Scope disclaimer:** Oral Css FO infrastructure and surface parity. **Not clinical guidance.**
 
 Drafting rules: quote freezes from §3 tables only; cite gate path + pass token;
-EN-UK orthography; do not upgrade residual 8.x items into theorems.
+EN-UK orthography; residual §5.4 is **oral Css closed** — do not upgrade
+L2 full-engine (arbitrary programs) into a theorem.
 
 ---
 
