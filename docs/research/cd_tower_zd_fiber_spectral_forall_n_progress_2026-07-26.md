@@ -61,6 +61,13 @@ Verdict: `CD_TOWER_ZDFAN_VERDICT ZD_FIBER_SPECTRAL_FORALL_N_STRONG_EVIDENCE_NOT_
   combinatorial factorisation. **Stalled.** The remaining route is the explicit algebraic factorisation
   `A_σ = Cᵀ S C` (Walsh / character-sum type, in the spirit of the ∀n kernel-dimension proof) — not
   found in-session.
+  > **Superseded 2026-07-31 — the factorisation was found.** It is not a Walsh character sum but a
+  > rank-2 folding: `A_σ(l ⊕ L_lo, y) = −A_σ(l, y)`, giving `A_σ = Jᵀ M J` with `J Jᵀ = 2I`, hence
+  > `rank(A_σ) ≤ 2^{n-2}−1` **derived ∀n** and an exact spectral halving. See
+  > [`cd_tower_zd_fiber_antisymmetry_lemma_spec_2026-07-31.md`](cd_tower_zd_fiber_antisymmetry_lemma_spec_2026-07-31.md).
+  > This closes the low-rank half only — `V1` (`#spectra = 3·2^{n-5}`) remains **OPEN**. The harness
+  > and verdict token of *this* rung are deliberately left untouched: they are measured objects in the
+  > R13/R14 kill-set corpora.
 - **Flank B — empirical boundary.** Pushed completeness to `n=9` (48) and `n=10` (96), both matching
   `3·2^{n-5}` (vectorised via a precomputed sign table). Five levels now stand.
 
