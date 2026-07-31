@@ -44,7 +44,7 @@ if [[ "$STRUCTURAL_ONLY" == 1 ]]; then
   grep -Fq 'M2_SHA' "$0" || fail 'M2 receipt contract missing'
   grep -Fq 'M3_SHA' "$0" || fail 'M3 receipt contract missing'
   grep -Fq 'M2_SHA" != "$M3_SHA' "$0" || fail 'fixed-point comparison missing'
-  echo '[madaros-imported-runtime-source-fresh] PASS structural_only=1'
+  echo '[madaros-imported-runtime-source-fresh] CHECK structural_only=1 acceptance=not_run'
   exit 0
 fi
 
@@ -140,11 +140,22 @@ run_imported_elf() {
   mkdir -p "$case_dir"
   SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib" "$M3" --check "$source" >"$case_dir/check.log" 2>&1 \
     || { cat "$case_dir/check.log" >&2; fail "$label checker failed"; }
-  SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib" "$M3" --native-v2-compile "$source" -o "$elf" >"$case_dir/compile.log" 2>&1 \
+  SOUNIO_DUMP_MERGED_CALLS=1 SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib" "$M3" --native-v2-compile "$source" -o "$elf" >"$case_dir/compile.log" 2>&1 \
     || { cat "$case_dir/compile.log" >&2; fail "$label compile failed"; }
   assert_no_fallback "$case_dir/compile.log"
   grep -Fq 'imported_compile: typecheck ok' "$case_dir/compile.log" || fail "$label missed modular checker receipt"
   grep -Fq 'Merged IR:' "$case_dir/compile.log" || fail "$label missed merged IR receipt"
+  local main_ic
+  main_ic="$(awk '
+    /^MERGE_DUMP: body user_main / { in_user_main = 1; next }
+    in_user_main && /^ name=main ic=[0-9]+$/ {
+      sub(/^ name=main ic=/, "")
+      print
+      exit
+    }
+    in_user_main && /^MERGE_DUMP:/ { exit }
+  ' "$case_dir/compile.log")"
+  [[ "$main_ic" =~ ^[0-9]+$ && "$main_ic" -gt 10 ]] || { cat "$case_dir/compile.log" >&2; fail "$label user_main body is absent or trivial ic=${main_ic:-missing}"; }
   [[ -s "$elf" ]] || fail "$label emitted no ELF"
   [[ "$(od -An -tx1 -N4 "$elf" | tr -d ' \n')" == 7f454c46 ]] || fail "$label output is not ELF"
   chmod +x "$elf"
@@ -163,6 +174,18 @@ run_imported_elf imported-d6 "$D6" ''
 run_imported_elf imported-d11 "$D11" ''
 run_imported_elf imported-d12 "$D12" 'PROOF-CARRYING LINEAR TARGET MONITOR D12 PASS'
 
+DEFAULT_DIR="$WORK/default-souc"
+DEFAULT_ELF="$DEFAULT_DIR/facade-default.elf"
+mkdir -p "$DEFAULT_DIR"
+MADAROS_RAW_BIN="$M3" SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib" \
+  "$ROOT_DIR/bin/souc" compile "$FACADE" -o "$DEFAULT_ELF" >"$DEFAULT_DIR/compile.log" 2>&1 \
+  || { cat "$DEFAULT_DIR/compile.log" >&2; fail 'default bin/souc facade compile failed'; }
+assert_no_fallback "$DEFAULT_DIR/compile.log"
+[[ -x "$DEFAULT_ELF" ]] || fail 'default bin/souc did not produce an executable artifact'
+[[ "$(od -An -tx1 -N4 "$DEFAULT_ELF" | tr -d ' \n')" == 7f454c46 ]] || fail 'default bin/souc output is not ELF'
+"$DEFAULT_ELF" >"$DEFAULT_DIR/runtime.log" 2>&1 || { cat "$DEFAULT_DIR/runtime.log" >&2; fail 'default bin/souc ELF failed'; }
+grep -Fxq '42' "$DEFAULT_DIR/runtime.log" || fail 'default bin/souc ELF missed 42'
+
 cat >"$WORK/receipt.tsv" <<EOF
 source_head\t$HEAD_SHA
 source_tree\t$TREE_SHA
@@ -175,14 +198,17 @@ m1_sha256\t$M1_SHA
 m2_sha256\t$M2_SHA
 m3_sha256\t$M3_SHA
 fixed_point\tM2_equals_M3
+bootstrap_seed\tlean_single_source_tracking
+self_host_chain\tM1_to_M2_to_M3_madaros
 imported_runtime\tpass
-catalog_layouts\t256,257
+catalog_layouts\t256,257_external_and_own
 known_layout_miss\trefused_no_elf
 facade_vertical\tprob::lib::{uniform_mean}->closure->ELF->42
+default_souc\tcompile->executable_ELF->42
 imported_d6\tpass
 imported_d11\tpass
 imported_d12\tpass
-fallback\t0
+witness_fallback\t0
 EOF
 
 cat "$WORK/receipt.tsv"

@@ -48,9 +48,11 @@ fi
 [[ "$KEEP_WORK" == 1 ]] || trap 'rm -rf "$WORK"' EXIT
 
 run_case() {
-  local custom="$1" dir="$WORK/custom-$1"
+  local shape="$1" custom="$2" dir="$WORK/$1-$2"
   mkdir -p "$dir"
-  python3 "$GENERATOR" --custom-layouts "$custom" --out-dir "$dir"
+  local generator_args=(--custom-layouts "$custom" --out-dir "$dir")
+  if [[ "$shape" == own ]]; then generator_args+=(--own-layout); fi
+  python3 "$GENERATOR" "${generator_args[@]}"
   local src="$dir/layout_capacity_main.sio" elf="$dir/witness.elf"
   local marker="$(<"$dir/expected_marker.txt")"
 
@@ -58,25 +60,27 @@ run_case() {
   SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib" "$RAW_MADAROS" --check "$src" >"$dir/check.log" 2>&1
   local check_rc=$?
   set -e
-  [[ "$check_rc" -eq 0 ]] || { cat "$dir/check.log" >&2; fail "$custom-layout checker failed rc=$check_rc"; }
+  [[ "$check_rc" -eq 0 ]] || { cat "$dir/check.log" >&2; fail "$shape/$custom checker failed rc=$check_rc"; }
 
   rm -f "$elf"
   set +e
   SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib" "$RAW_MADAROS" --native-v2-compile "$src" -o "$elf" >"$dir/compile.log" 2>&1
   local compile_rc=$?
   set -e
-  [[ "$compile_rc" -eq 0 ]] || { cat "$dir/compile.log" >&2; fail "$custom-layout compile failed rc=$compile_rc"; }
+  [[ "$compile_rc" -eq 0 ]] || { cat "$dir/compile.log" >&2; fail "$shape/$custom compile failed rc=$compile_rc"; }
   assert_no_fallback "$dir/compile.log"
-  assert_elf "$elf" "$custom-layout witness"
+  assert_elf "$elf" "$shape/$custom witness"
   chmod +x "$elf"
   set +e
   "$elf" >"$dir/runtime.log" 2>&1
   local runtime_rc=$?
   set -e
-  [[ "$runtime_rc" -eq 0 ]] || { cat "$dir/runtime.log" >&2; fail "$custom-layout ELF rc=$runtime_rc"; }
-  grep -Fxq "$marker" "$dir/runtime.log" || { cat "$dir/runtime.log" >&2; fail "$custom-layout exact marker absent"; }
+  [[ "$runtime_rc" -eq 0 ]] || { cat "$dir/runtime.log" >&2; fail "$shape/$custom ELF rc=$runtime_rc"; }
+  grep -Fxq "$marker" "$dir/runtime.log" || { cat "$dir/runtime.log" >&2; fail "$shape/$custom exact marker absent"; }
 }
 
-run_case 255
-run_case 256
-echo "[madaros-struct-layout-capacity] PASS raw_sha256=$RAW_SHA catalog_layouts=256,257 executable=1 fallback=0"
+run_case external 255
+run_case external 256
+run_case own 254
+run_case own 255
+echo "[madaros-struct-layout-capacity] PASS raw_sha256=$RAW_SHA shapes=external,own catalog_layouts=256,257 executable=1 fallback=0"
