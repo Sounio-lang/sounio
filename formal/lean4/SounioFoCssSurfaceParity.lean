@@ -228,9 +228,10 @@ def kel_point_ok : Bool :=
 
 theorem kel_point_freeze : kel_point_ok = true := by native_decide
 
-/-- At unit eEta the shared form equals the peeled form (definitional cancel). -/
+/-- At unit eEta the shared form equals the peeled form (computational cancel).
+    Not `rfl`: Rat reduction of `(CL0·1)/(V0·1)` is not definitionally `CL0/V0`. -/
 theorem kel_shared_eq_peeled_at_unit :
-    kelShared CL0 V0 1 = kelPeeled CL0 V0 := rfl
+    kelShared CL0 V0 1 = kelPeeled CL0 V0 := by native_decide
 
 def sensKelCL0 : Rat := 1 / V0
 def sensKelV0 : Rat := - CL0 / (V0 * V0)
