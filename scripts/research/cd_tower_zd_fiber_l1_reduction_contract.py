@@ -68,8 +68,10 @@ on the whole degenerate locus (PROVEN forall n as Qgen_degen) and Q' there is de
 degeneracy pattern, which tau preserves. K17 STITCHES the two halves: the gap tuples -- non-degenerate at m+2 but reducing to a
 degenerate one at m+1 -- all give Q = -1, so the three branches of the assembly are EXHAUSTIVE.
 The gap lemma's central case (b = H) is now PROVEN forall n in Lean (Qgen_H_right_low/_hi, K18);
-its remaining cases follow from it by Qgen_coset_left/right, which are proven. What is NOT done:
-those corollaries, the Q' pattern lemma, and the induction itself.
+and the b^Y = H pair follows from it by Qgen_coset_right (PROVEN: Qgen_H_right_low'/_hi'). K19
+shows the six '= H' conditions have only THREE roots; the two still unproven are a = H (which
+would follow from b = H by the symmetry K19 measures, not yet a Lean lemma) and a^b = H. What is
+NOT done: those two roots, the Q' pattern lemma, and the induction itself.
 
 Verdict L1_REDUCED_TO_SEAM_TAU_EQUIVARIANCE_OF_Q__NOT_PROVEN.
 Numerical certificate over an exact integer sign table; D3 respected.
@@ -591,6 +593,30 @@ def main():
           f"W != 0, both Y positions ({k18_n} checks, levels 6 and 7) {'OK' if k18 else 'FAIL'}. "
           f"Lean: Qgen_H_right_low, Qgen_H_right_hi -- PROVEN forall n, each closing on "
           f"deg_left/deg_right after the four branch reductions")
+
+    # ---- K19 the gap's root structure: six conditions, three roots, two still open ------
+    k19_sym = k19_roots = True
+    for m in (5, 6, 7):
+        S, M = tabs[m], 1 << m
+        H = 1 << (m - 1)
+        for L in range(M):
+            for a in range(M):
+                for b in range(M):
+                    if Q(S, a, b, L) != Q(S, b, a, L):
+                        k19_sym = False
+        for L in range(1, M):
+            for a in range(M):
+                if Q(S, a, H, L) != -1 or Q(S, H, a, L) != -1 or Q(S, a, a ^ H, L) != -1:
+                    k19_roots = False
+        print(f"K19_ROOTS   level {m}: Qgen is UNCONDITIONALLY symmetric in a,b "
+              f"{'OK' if k19_sym else 'FAIL'};  the three gap roots (b=H, a=H, a^b=H) each give "
+              f"-1 {'OK' if k19_roots else 'FAIL'}")
+    ok["K19"] = k19_sym and k19_roots
+    print("K19_ROOTS   => the six '= H' gap conditions have THREE roots: b=H (PROVEN forall n, "
+          "Qgen_H_right_low/_hi), a=H, and a^b=H. The conditions b^Y=H, a^Y=H and a^b^Y=H follow "
+          "from those by Qgen_coset_right/left (the b^Y=H pair is PROVEN: Qgen_H_right_low'/_hi'). "
+          "a=H would follow from b=H by the symmetry measured here -- that symmetry is NOT proven "
+          "in Lean, and a^b=H has no proof yet either")
 
     print("=" * 78)
     if all(ok.values()):

@@ -1449,4 +1449,18 @@ theorem Qgen_H_right_hi (m W a : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) (ha : a
       rcases cdSigma_pm (m+1) a W with h2 | h2 <;>
       rw [h1, h2] at hd ⊢ <;> revert hd <;> decide
 
+/-- Gap corollary, `Y` below the seam: `b ⊕ Y = H` reduces to `b = H` by `Qgen_coset_right`. -/
+theorem Qgen_H_right_low' (m W a b : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
+    (ha : a < 2^(m+2)) (hbe : b ^^^ W = 2^(m+1)) : Qgen W a b (m+2) = -1 := by
+  rw [Qgen_coset_right, hbe]
+  exact Qgen_H_right_low m W a hW hW0 ha
+
+/-- Gap corollary, `Y` above the seam. -/
+theorem Qgen_H_right_hi' (m W a b : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
+    (ha : a < 2^(m+2)) (hbe : b ^^^ (W + 2^(m+1)) = 2^(m+1)) :
+    Qgen (W + 2^(m+1)) a b (m+2) = -1 := by
+  rw [Qgen_coset_right, hbe]
+  exact Qgen_H_right_hi m W a hW hW0 ha
+
 end SounioZDFiberAntisym
+
