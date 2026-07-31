@@ -57,6 +57,7 @@ No link is assumed.
 | `K15` | (★) for single-bit labels: `Q_Y(a,b) = Q_{τY}(τa,τb)` when `Y = 2^k` | 0 violations, levels 4..7; Lean `star_pow2` ∀n |
 | `K16` | on the degenerate locus, `Q ≡ −1`; `Q'` is pattern-determined | measured 5..7; Lean `Qgen_degen` ∀n |
 | `K17` | the gap tuples no lemma covers also give `Q = −1` | 116 064 tuples, levels 6 and 7 — the branches are exhaustive |
+| `K18` | the gap lemma's central case `Q_Y(a, H) = −1`, both `Y` positions | 20 096 checks; **Lean-proven ∀n** (`Qgen_H_right_low/_hi`) |
 
 with `D1_Y(a,b) = σ(a,b)σ(a⊕Y,b)`, `D2_Y(c,y) = σ(c,y)σ(c,y⊕Y)`, and
 `e1 = D1_{τY}(τa,τb)·D1_Y(a,b)`, `e2` the same for `D2`.
@@ -123,7 +124,7 @@ makes the target *easier*, not harder.
   | branch | closes by | status |
   |---|---|---|
   | degenerate at `m+2` | `Qgen_degen`, both sides `−1` | **proven ∀n** |
-  | reduces to a degenerate tuple | the same constant `−1` | **measured**, no Lean lemma yet |
+  | reduces to a degenerate tuple | the same constant `−1` | central case **proven ∀n** (`Qgen_H_right_low/_hi`); its corollaries not written |
   | otherwise | one of the sixteen reduction lemmas + the mutual IH | **proven ∀n** |
   | base case | `Qgen_pow2` | **proven ∀n** |
 

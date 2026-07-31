@@ -1357,13 +1357,96 @@ theorem star_both_degen (m Y a b j : Nat)
     Qgen_degen m (sw Y j) (sw a j) (sw b j) hYa ha' hb' hY0' hd'
   rw [hL, hR]
 
+/-! ## Tier 9: the GAP lemma -- reduced-degenerate tuples also give `-1`
+
+The reduction lemmas' hypotheses are about the REDUCED arguments; `Qgen_degen` is about the
+CURRENT ones, and they do not coincide. The gap is exactly the tuples whose reduced form is
+degenerate without the current one being so -- equivalently (contract K17), those where one of
+`a, b, a⊕Y, b⊕Y, a⊕b, a⊕b⊕Y` equals the seam bit `H` rather than `0`. They give the same
+constant. Here is the central case, `b = H`. -/
+
+theorem Qgen_H_right_low (m W a : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) (ha : a < 2^(m+2)) :
+    Qgen W a (2^(m+1)) (m+2) = -1 := by
+  have hpos : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have h2H : 2^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  have hHW : (2:Nat)^(m+1) ^^^ W = W + 2^(m+1) := by
+    rw [Nat.xor_comm]; exact (seam_add_xor W m hW).symm
+  by_cases haU : a ≥ 2^(m+1)
+  · obtain ⟨u, hae, hul⟩ : ∃ u, a = u + 2^(m+1) ∧ u < 2^(m+1) :=
+      ⟨a - 2^(m+1), by omega, by omega⟩
+    have hxa : (u + 2^(m+1)) ^^^ W = (u ^^^ W) + 2^(m+1) := seam_xor_left u W m hul hW
+    have e1 : cdSigma (u + 2^(m+1)) (2^(m+1)) (m+2) = -1 := by
+      have h := R_uu u 0 m hul hpos; rw [Nat.zero_add] at h; rw [h, if_pos rfl]
+    have e4 : cdSigma ((u ^^^ W) + 2^(m+1)) (2^(m+1)) (m+2) = -1 := by
+      have h := R_uu (u ^^^ W) 0 m (xorlt hul hW) hpos; rw [Nat.zero_add] at h
+      rw [h, if_pos rfl]
+    have e2 : cdSigma ((u ^^^ W) + 2^(m+1)) (W + 2^(m+1)) (m+2) = cdSigma W (u ^^^ W) (m+1) := by
+      rw [R_uu (u ^^^ W) W m (xorlt hul hW) hW, if_neg hW0]
+    have e3 : cdSigma (u + 2^(m+1)) (W + 2^(m+1)) (m+2) = cdSigma W u (m+1) := by
+      rw [R_uu u W m hul hW, if_neg hW0]
+    unfold Qgen
+    rw [hae, hxa, hHW, e1, e2, e3, e4]
+    have hd := deg_right (m+1) W u hW hul hW0
+    rcases cdSigma_pm (m+1) W (u ^^^ W) with h1 | h1 <;>
+      rcases cdSigma_pm (m+1) W u with h2 | h2 <;>
+      rw [h1, h2] at hd ⊢ <;> revert hd <;> decide
+  · have hal : a < 2^(m+1) := by omega
+    have e1 : cdSigma a (2^(m+1)) (m+2) = 1 := by
+      have h := R_lu a 0 m hal hpos; rw [Nat.zero_add] at h; rw [h, cdSig0]
+    have e4 : cdSigma (a ^^^ W) (2^(m+1)) (m+2) = 1 := by
+      have h := R_lu (a ^^^ W) 0 m (xorlt hal hW) hpos; rw [Nat.zero_add] at h
+      rw [h, cdSig0]
+    have e2 : cdSigma (a ^^^ W) (W + 2^(m+1)) (m+2) = cdSigma W (a ^^^ W) (m+1) :=
+      R_lu (a ^^^ W) W m (xorlt hal hW) hW
+    have e3 : cdSigma a (W + 2^(m+1)) (m+2) = cdSigma W a (m+1) := R_lu a W m hal hW
+    unfold Qgen
+    rw [hHW, e1, e2, e3, e4]
+    have hd := deg_right (m+1) W a hW hal hW0
+    rcases cdSigma_pm (m+1) W (a ^^^ W) with h1 | h1 <;>
+      rcases cdSigma_pm (m+1) W a with h2 | h2 <;>
+      rw [h1, h2] at hd ⊢ <;> revert hd <;> decide
+
+theorem Qgen_H_right_hi (m W a : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) (ha : a < 2^(m+2)) :
+    Qgen (W + 2^(m+1)) a (2^(m+1)) (m+2) = -1 := by
+  have hpos : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have h2H : 2^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  have hHY : (2:Nat)^(m+1) ^^^ (W + 2^(m+1)) = W := by
+    rw [seam_add_xor W m hW, Nat.xor_comm W (2^(m+1)), ← Nat.xor_assoc, Nat.xor_self,
+        Nat.zero_xor]
+  by_cases haU : a ≥ 2^(m+1)
+  · obtain ⟨u, hae, hul⟩ : ∃ u, a = u + 2^(m+1) ∧ u < 2^(m+1) :=
+      ⟨a - 2^(m+1), by omega, by omega⟩
+    have hxa : (u + 2^(m+1)) ^^^ (W + 2^(m+1)) = u ^^^ W := xor_seam_cancel u W m hul hW
+    have e1 : cdSigma (u + 2^(m+1)) (2^(m+1)) (m+2) = -1 := by
+      have h := R_uu u 0 m hul hpos; rw [Nat.zero_add] at h; rw [h, if_pos rfl]
+    have e2 : cdSigma (u ^^^ W) W (m+2) = cdSigma (u ^^^ W) W (m+1) :=
+      R_ll (u ^^^ W) W m (xorlt hul hW) hW
+    have e3 : cdSigma (u + 2^(m+1)) W (m+2) = - cdSigma u W (m+1) := by
+      rw [R_ul u W m hul hW, if_neg hW0]
+    have e4 : cdSigma (u ^^^ W) (2^(m+1)) (m+2) = 1 := by
+      have h := R_lu (u ^^^ W) 0 m (xorlt hul hW) hpos; rw [Nat.zero_add] at h
+      rw [h, cdSig0]
+    unfold Qgen
+    rw [hae, hxa, hHY, e1, e2, e3, e4]
+    have hd := deg_left (m+1) W u hW hul hW0
+    rcases cdSigma_pm (m+1) (u ^^^ W) W with h1 | h1 <;>
+      rcases cdSigma_pm (m+1) u W with h2 | h2 <;>
+      rw [h1, h2] at hd ⊢ <;> revert hd <;> decide
+  · have hal : a < 2^(m+1) := by omega
+    have hxa : a ^^^ (W + 2^(m+1)) = (a ^^^ W) + 2^(m+1) := xor_seam a W m hal hW
+    have e1 : cdSigma a (2^(m+1)) (m+2) = 1 := by
+      have h := R_lu a 0 m hal hpos; rw [Nat.zero_add] at h; rw [h, cdSig0]
+    have e2 : cdSigma ((a ^^^ W) + 2^(m+1)) W (m+2) = - cdSigma (a ^^^ W) W (m+1) := by
+      rw [R_ul (a ^^^ W) W m (xorlt hal hW) hW, if_neg hW0]
+    have e3 : cdSigma a W (m+2) = cdSigma a W (m+1) := R_ll a W m hal hW
+    have e4 : cdSigma ((a ^^^ W) + 2^(m+1)) (2^(m+1)) (m+2) = -1 := by
+      have h := R_uu (a ^^^ W) 0 m (xorlt hal hW) hpos; rw [Nat.zero_add] at h
+      rw [h, if_pos rfl]
+    unfold Qgen
+    rw [hxa, hHY, e1, e2, e3, e4]
+    have hd := deg_left (m+1) W a hW hal hW0
+    rcases cdSigma_pm (m+1) (a ^^^ W) W with h1 | h1 <;>
+      rcases cdSigma_pm (m+1) a W with h2 | h2 <;>
+      rw [h1, h2] at hd ⊢ <;> revert hd <;> decide
+
 end SounioZDFiberAntisym
-
-
-
-
-
-
-
-
-

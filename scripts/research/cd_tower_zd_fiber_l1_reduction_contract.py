@@ -67,7 +67,9 @@ Q'-rows (K14). What remains is the ASSEMBLY. Its degenerate half is now understo
 on the whole degenerate locus (PROVEN forall n as Qgen_degen) and Q' there is determined by the
 degeneracy pattern, which tau preserves. K17 STITCHES the two halves: the gap tuples -- non-degenerate at m+2 but reducing to a
 degenerate one at m+1 -- all give Q = -1, so the three branches of the assembly are EXHAUSTIVE.
-What is NOT done: the gap lemma and the Q' pattern lemma in Lean, and the induction itself.
+The gap lemma's central case (b = H) is now PROVEN forall n in Lean (Qgen_H_right_low/_hi, K18);
+its remaining cases follow from it by Qgen_coset_left/right, which are proven. What is NOT done:
+those corollaries, the Q' pattern lemma, and the induction itself.
 
 Verdict L1_REDUCED_TO_SEAM_TAU_EQUIVARIANCE_OF_Q__NOT_PROVEN.
 Numerical certificate over an exact integer sign table; D3 respected.
@@ -570,6 +572,25 @@ def main():
           f"are exhaustive: degenerate at m+2 -> Qgen_degen (PROVEN forall n); reduced-degenerate "
           f"-> this constant (MEASURED, not yet a Lean lemma); otherwise -> the sixteen reduction "
           f"lemmas (PROVEN) plus the induction hypothesis, with Qgen_pow2 (PROVEN) as base case")
+
+    # ---- K18 the gap lemma's central case, exactly as stated in Lean ---------------------
+    k18 = True
+    k18_n = 0
+    for m in (4, 5):
+        Sn = sign_table_fast(m + 2).astype(np.int64)
+        H = 1 << (m + 1)
+        for W in range(1, H):
+            for a in range(1 << (m + 2)):
+                k18_n += 2
+                if Q(Sn, a, H, W) != -1:
+                    k18 = False
+                if Q(Sn, a, H, W + H) != -1:
+                    k18 = False
+    ok["K18"] = k18
+    print(f"K18_GAPLEM  the gap lemma's central case -- Q_Y(a, H) = -1 for every a and every "
+          f"W != 0, both Y positions ({k18_n} checks, levels 6 and 7) {'OK' if k18 else 'FAIL'}. "
+          f"Lean: Qgen_H_right_low, Qgen_H_right_hi -- PROVEN forall n, each closing on "
+          f"deg_left/deg_right after the four branch reductions")
 
     print("=" * 78)
     if all(ok.values()):
