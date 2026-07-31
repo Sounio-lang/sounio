@@ -147,7 +147,16 @@ run_imported_elf() {
   grep -Fq 'Merged IR:' "$case_dir/compile.log" || fail "$label missed merged IR receipt"
   local main_ic
   main_ic="$(awk '
-    /^MERGE_DUMP: body user_main / { in_user_main = 1; next }
+    /^MERGE_DUMP: body user_main / {
+      inline = $0
+      sub(/^.* name=main ic=/, "", inline)
+      if (inline ~ /^[0-9]+$/) {
+        print inline
+        exit
+      }
+      in_user_main = 1
+      next
+    }
     in_user_main && /^ name=main ic=[0-9]+$/ {
       sub(/^ name=main ic=/, "")
       print
