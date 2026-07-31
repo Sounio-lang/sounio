@@ -971,7 +971,64 @@ theorem Qred_hi_ul (m W u b : Nat) (hW : W < 2^(m+1)) (hu : u < 2^(m+1)) (hb : b
     rcases cdSigma_pm (m+1) (u ^^^ W) b with h4 | h4 <;>
     rw [h1, h2, h3, h4] <;> decide
 
+/-- From `a ⊕ v ⊕ W ≠ 0`: the two distinctness side conditions the hard cases need. -/
+theorem xor3_ne_left {a v W : Nat} (h : a ^^^ v ^^^ W ≠ 0) : a ≠ v ^^^ W := by
+  intro he; exact h (by rw [he, Nat.xor_assoc, Nat.xor_self])
+
+theorem xor3_ne_right {a v W : Nat} (h : a ^^^ v ^^^ W ≠ 0) : v ≠ a ^^^ W := by
+  intro he
+  exact h (by rw [he, ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor, Nat.xor_self])
+
+/-- Table row `Q / Y high / lu` -- one of the TWO hard cases. Here `b ⊕ Y` crosses from the
+    upper half to the LOWER one, so the branch reductions that apply are different, and the
+    identification with `Q'` costs two `antisym` transpositions. Their side conditions collapse
+    to the single extra hypothesis `a ⊕ v ⊕ W ≠ 0`. -/
+theorem Qred_hi_lu (m W a v : Nat) (hW : W < 2^(m+1)) (ha : a < 2^(m+1)) (hv : v < 2^(m+1))
+    (ha0 : a ≠ 0) (hv0 : v ≠ 0) (haW : a ^^^ W ≠ 0) (hvW : v ^^^ W ≠ 0)
+    (h3 : a ^^^ v ^^^ W ≠ 0) :
+    Qgen (W + 2^(m+1)) a (v + 2^(m+1)) (m+2) = - Qgen' W v a (m+1) := by
+  have hxa : a ^^^ (W + 2^(m+1)) = (a ^^^ W) + 2^(m+1) := xor_seam a W m ha hW
+  have hxb : (v + 2^(m+1)) ^^^ (W + 2^(m+1)) = v ^^^ W := xor_seam_cancel v W m hv hW
+  have e1 : cdSigma a (v ^^^ W) (m+1) = - cdSigma (v ^^^ W) a (m+1) :=
+    antisym (m+1) a (v ^^^ W) ha (xorlt hv hW) ha0 hvW (xor3_ne_left h3)
+  have e2 : cdSigma v (a ^^^ W) (m+1) = - cdSigma (a ^^^ W) v (m+1) :=
+    antisym (m+1) v (a ^^^ W) hv (xorlt ha hW) hv0 haW (xor3_ne_right h3)
+  unfold Qgen Qgen'
+  rw [hxa, hxb, R_lu a v m ha hv,
+      R_ul (a ^^^ W) (v ^^^ W) m (xorlt ha hW) (xorlt hv hW), if_neg hvW,
+      R_ll a (v ^^^ W) m ha (xorlt hv hW),
+      R_uu (a ^^^ W) v m (xorlt ha hW) hv, if_neg hv0, e1, e2]
+  rcases cdSigma_pm (m+1) v a with h1 | h1 <;>
+    rcases cdSigma_pm (m+1) (a ^^^ W) (v ^^^ W) with h2 | h2 <;>
+    rcases cdSigma_pm (m+1) (v ^^^ W) a with h4 | h4 <;>
+    rcases cdSigma_pm (m+1) (a ^^^ W) v with h5 | h5 <;>
+    rw [h1, h2, h4, h5] <;> decide
+
+/-- Table row `Q / Y high / uu` -- the other hard case. Both `a ⊕ Y` and `b ⊕ Y` land in the
+    lower half; same two transpositions, same extra hypothesis. -/
+theorem Qred_hi_uu (m W u v : Nat) (hW : W < 2^(m+1)) (hu : u < 2^(m+1)) (hv : v < 2^(m+1))
+    (hu0 : u ≠ 0) (hv0 : v ≠ 0) (huW : u ^^^ W ≠ 0) (hvW : v ^^^ W ≠ 0)
+    (h3 : u ^^^ v ^^^ W ≠ 0) :
+    Qgen (W + 2^(m+1)) (u + 2^(m+1)) (v + 2^(m+1)) (m+2) = - Qgen' W v u (m+1) := by
+  have hxa : (u + 2^(m+1)) ^^^ (W + 2^(m+1)) = u ^^^ W := xor_seam_cancel u W m hu hW
+  have hxb : (v + 2^(m+1)) ^^^ (W + 2^(m+1)) = v ^^^ W := xor_seam_cancel v W m hv hW
+  have e1 : cdSigma u (v ^^^ W) (m+1) = - cdSigma (v ^^^ W) u (m+1) :=
+    antisym (m+1) u (v ^^^ W) hu (xorlt hv hW) hu0 hvW (xor3_ne_left h3)
+  have e2 : cdSigma v (u ^^^ W) (m+1) = - cdSigma (u ^^^ W) v (m+1) :=
+    antisym (m+1) v (u ^^^ W) hv (xorlt hu hW) hv0 huW (xor3_ne_right h3)
+  unfold Qgen Qgen'
+  rw [hxa, hxb, R_uu u v m hu hv, if_neg hv0,
+      R_ll (u ^^^ W) (v ^^^ W) m (xorlt hu hW) (xorlt hv hW),
+      R_ul u (v ^^^ W) m hu (xorlt hv hW), if_neg hvW,
+      R_lu (u ^^^ W) v m (xorlt hu hW) hv, e1, e2]
+  rcases cdSigma_pm (m+1) v u with h1 | h1 <;>
+    rcases cdSigma_pm (m+1) (u ^^^ W) (v ^^^ W) with h2 | h2 <;>
+    rcases cdSigma_pm (m+1) (v ^^^ W) u with h4 | h4 <;>
+    rcases cdSigma_pm (m+1) (u ^^^ W) v with h5 | h5 <;>
+    rw [h1, h2, h4, h5] <;> decide
+
 end SounioZDFiberAntisym
+
 
 
 

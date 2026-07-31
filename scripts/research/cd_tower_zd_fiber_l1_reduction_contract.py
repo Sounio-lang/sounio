@@ -61,9 +61,9 @@ arguments). Q' is tau-equivariant in its own right, and Q = Q' EXCEPT on the deg
 so the step is a MUTUAL induction on the pair (Q, Q'). Their generic agreement is PROVEN forall n
 in Lean (Qgen_eq_Qgen'). K11 gives the COMPLETE 16-case reduction table for the mutual step,
 verified off the degenerate locus -- so the step is fully SPECIFIED. SIX of the sixteen cases are now PROVEN forall n in Lean as standalone reduction lemmas
-(Qred_low_ll/_lu/_ul/_uu, Qred_hi_ll/_hi_ul), with minimal hypotheses pinned by K12. The other
-two Q-cases (Y high, b upper) need the FULL non-degeneracy, the eight Q'-cases are not written,
-and the mutual induction is not assembled.
+(Qred_low_ll/_lu/_ul/_uu, Qred_hi_ll/_hi_ul), with minimal hypotheses pinned by K12. ALL EIGHT Q-cases are now PROVEN forall n in Lean (Qred_low_ll/_lu/_ul/_uu,
+Qred_hi_ll/_ul/_lu/_uu), with their exact hypotheses pinned by K12 and K13. The eight Q'-cases
+are not written, and the mutual induction is not assembled.
 
 Verdict L1_REDUCED_TO_SEAM_TAU_EQUIVARIANCE_OF_Q__NOT_PROVEN.
 Numerical certificate over an exact integer sign table; D3 respected.
@@ -410,6 +410,38 @@ def main():
           f"NO extra hypothesis; _ul, _uu, _hi_ll, _hi_ul need only b != 0 and b^W != 0. The "
           f"other TWO Q-cases (Y high, b upper) need the FULL non-degeneracy and are NOT proven; "
           f"the eight Q'-cases are not written")
+
+    # ---- K13 the two HARD Q-cases, with their exact hypotheses ---------------------------
+    k13 = True
+    k13_n = 0
+    for m in (4, 5):
+        Sn = sign_table_fast(m + 2).astype(np.int64)
+        Sm = sign_table_fast(m + 1).astype(np.int64)
+        H = 1 << (m + 1)
+
+        def QQ(S, a, b, W):
+            return int(S[a, b] * S[a ^ W, b ^ W] * S[a, b ^ W] * S[a ^ W, b])
+
+        def QP(S, a, b, W):
+            return int(S[a, b] * S[b ^ W, a ^ W] * S[b ^ W, a] * S[a ^ W, b])
+
+        for W in range(0, H):
+            for x in range(H):
+                for y in range(H):
+                    if not (x and y and (x ^ W) and (y ^ W) and (x ^ y ^ W)):
+                        continue
+                    k13_n += 2
+                    if QQ(Sn, x, y + H, W + H) != -QP(Sm, y, x, W):
+                        k13 = False
+                    if QQ(Sn, x + H, y + H, W + H) != -QP(Sm, y, x, W):
+                        k13 = False
+    ok["K13"] = k13
+    print(f"K13_HARD    the TWO hard Q-cases (Y high, b upper) hold under exactly the derived "
+          f"hypotheses -- a, v, a^W, v^W and a^v^W all nonzero ({k13_n} checks, levels 6->5 and "
+          f"7->6) {'OK' if k13 else 'FAIL'}. The extra condition is a^v^W != 0, NOT the coarser "
+          f"a != v an earlier scan suggested: both antisym transpositions the identification "
+          f"needs collapse to that single hypothesis. Lean: Qred_hi_lu, Qred_hi_uu -- ALL EIGHT "
+          f"Q-cases are now proven forall n")
 
     print("=" * 78)
     if all(ok.values()):
