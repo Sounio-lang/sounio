@@ -658,6 +658,9 @@ lean_lib «SounioFoBytecodeFragment» where
 lean_lib «SounioFoEmitPure» where
 @[default_target]
 lean_lib «SounioFoRegistrationFragment» where
+@[default_target]
+lean_lib «SounioFoEngineInstallFragment» where
+
 
 
 
