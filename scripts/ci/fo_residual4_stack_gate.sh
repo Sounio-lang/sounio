@@ -14,6 +14,9 @@ bash scripts/ci/fo_surface_transfer_gate.sh
 echo "=== L2-fragment FO bytecode ==="
 bash scripts/ci/fo_bytecode_fragment_gate.sh
 
+echo "=== L2 pure-emit (fo_bc_compile_expr pure fragment) ==="
+bash scripts/ci/fo_emit_pure_gate.sh
+
 echo "=== L2-executable R4 (Madaros numerical) ==="
 if [[ -x "${MADAROS_RAW_BIN:-artifacts/self-hosted/madaros}" ]] || [[ -x artifacts/self-hosted/madaros ]]; then
   export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$(pwd)/stdlib}"
@@ -24,4 +27,4 @@ else
 fi
 
 echo "FO_RESIDUAL4_STACK_GATE_OK"
-echo "STATUS L0=CLOSED L1=CLOSED L2_FRAGMENT=CLOSED L2_FULL=OPEN"
+echo "STATUS L0=CLOSED L1=CLOSED L2_FRAGMENT=CLOSED L2_PURE_EMIT=CLOSED L2_FULL_REGISTRATION=OPEN"

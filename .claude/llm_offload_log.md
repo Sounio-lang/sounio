@@ -3323,3 +3323,4 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 | 2026-07-31 | xai+zai math-review + lake build | math-review | SounioFoSurfaceTransfer.lean | PASS | L1 FoExpr semantic bridge; port from 6a7d998aa |
 | 2026-07-31 | fan-out | fan-out | fo_pk_method_science_package.md | PASS | residual three-layer wording |
 | 2026-07-31 | xai+zai | math-review | SounioFoBytecodeFragment.lean | PASS | L2-fragment port from dca0a09fa |
+| 2026-07-31 | xai+zai | math-review | SounioFoEmitPure.lean | PASS | L2 pure-emit port from f974c9c6a |

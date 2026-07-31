@@ -170,9 +170,9 @@ Compiler prerequisite: Madaros FO trust gate **42/42** (`scripts/ci/madaros_gum_
 1. **In-driver bool acceptance after heavy FO** can SEGV under Madaros; gates therefore **grep printed science tables**, not an in-process `if ok` chain.
 2. **ΣH under multi-site FO load** can print ~7.20 vs solo-path 7.292592 (multidose driver); Var/E₂ freezes remain the primary science claims.
 3. **Runtime (non-const) mutual FO depth** remains residual; not used by these receipts.
-4. **Import↔method residual split (four layers, 2026-07-31):** L0 + L1 +
-   L2-fragment (FO bytecode ops 1–6) CLOSED; L2-full Madaros FO_XFER emit
-   OPEN (R4). Stack: `fo_residual4_stack_gate.sh`. Spec:
+4. **Import↔method residual split (five layers, 2026-07-31):** L0 + L1 +
+   L2-fragment + L2 pure-emit CLOSED; L2 registration OPEN (R4). Stack:
+   `fo_residual4_stack_gate.sh`. Spec:
    `docs/research/fo_css_compiler_residual_half_spec_2026-07-31.md`.
 
 ---

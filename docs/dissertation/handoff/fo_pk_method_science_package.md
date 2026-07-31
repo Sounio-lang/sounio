@@ -286,16 +286,14 @@ paragraph. Numbers must match §3 freezes.
 2. **\(\sum H_{kk}\) under multi-site FO load** may print ~7.20 vs solo-path
    7.292592 (multidose driver). Primary science claims are Var / \(E_2\) freezes.
 3. **Runtime (non-const) mutual FO depth** remains residual; unused by R1–R4.
-4. **Import↔method agreement — residual split (four layers, 2026-07-31):**
-   - **L0 Algebraic CLOSED:** pure surfaces equal; freezes exact ℚ
-     (`SounioFoCssSurfaceParity`; `fo_css_surface_parity_gate` 17/17).
-   - **L1 Semantic CLOSED:** surfaces desugar to one `FoExpr` AST
-     (`SounioFoSurfaceTransfer`; `fo_surface_transfer_gate`).
-   - **L2-fragment CLOSED:** FO bytecode ops 1–6 stack machine; site ≡
-     import-expanded ≡ method RPN interpret to L1 desugar; Var=191/240
-     (`SounioFoBytecodeFragment`; `fo_bytecode_fragment_gate`).
-   - **L2-full OPEN:** Madaros `lower.sio` *emits* that RPN — still
-     **gate-backed numerical parity** (R4), not FO_XFER soundness.
+4. **Import↔method agreement — residual split (five layers, 2026-07-31):**
+   - **L0 Algebraic CLOSED** — pure surfaces + freezes (`SounioFoCssSurfaceParity`).
+   - **L1 Semantic CLOSED** — FoExpr desugar (`SounioFoSurfaceTransfer`).
+   - **L2-fragment CLOSED** — FO ops 1–6 stack machine (`SounioFoBytecodeFragment`).
+   - **L2 pure-emit CLOSED** — `fo_bc_compile_expr` pure fragment emits
+     `cssSiteProg`; fo_css expand = site (`SounioFoEmitPure`).
+   - **L2 registration OPEN** — multipass/multi-mod/method FO_XFER *feed*
+     that pure AST into compile; R4 remains the executable witness.
    Stack: `scripts/ci/fo_residual4_stack_gate.sh`. Spec:
    `docs/research/fo_css_compiler_residual_half_spec_2026-07-31.md`.
 5. **Not a full PBPK28 clinical claim** — oral Css exemplar only.

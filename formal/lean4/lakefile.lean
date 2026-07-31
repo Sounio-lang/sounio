@@ -654,5 +654,8 @@ lean_lib «SounioFoCssSurfaceParity» where
 lean_lib «SounioFoSurfaceTransfer» where
 @[default_target]
 lean_lib «SounioFoBytecodeFragment» where
+@[default_target]
+lean_lib «SounioFoEmitPure» where
+
 
 
