@@ -793,6 +793,137 @@ pub fn simulate_gri30_h2_epistemic(init: &[f64; 10], inits: &[f64; 10], t_k: f64
 }
 
 
+// ---------------- adiabatic (constant-U,V) reactor ----------------
+//
+// Shock-tube regime: the gas is isolated behind the reflected shock, so the
+// mixture internal energy density is conserved while the kinetics run:
+//   u_mix = Σ_i c_i·(h_i(T) − R·T) = const   (ideal-gas species, mol/cm^3)
+// Differentiating with species rates ω_i = dc_i/dt gives the temperature
+// equation coupled to the kinetics:
+//   dT/dt = −T · Σ_i (h_rt_i − 1)·ω_i / Σ_i c_i·(cp_r_i − 1)
+// where R cancels and h_rt = h/(R·T), cp_r = cp/R are the dimensionless
+// NASA-7 quantities. T now evolves, so the equilibrium constants are
+// recomputed on EVERY RHS evaluation from one shared per-species g_rt pass
+// (the isothermal path precomputes kc once per simulation).
+
+// NASA-7 coefficient row for species sp at t (low set for t <= 1000 K,
+// high set above), layout [a1..a7] as stored in g30_nasa_low/high.
+fn g30_nasa7(sp: i64, t: f64) -> [f64; 7] {
+    let lo = g30_nasa_low()
+    let hi = g30_nasa_high()
+    var out: [f64; 7] = [0.0; 7]
+    var i: i64 = 0
+    if t <= 1000.0 {
+        while i < 7 { out[i] = lo[sp * 7 + i]; i = i + 1 }
+    } else {
+        while i < 7 { out[i] = hi[sp * 7 + i]; i = i + 1 }
+    }
+    out
+}
+
+// dimensionless isobaric heat capacity cp/R of species sp at t
+pub fn g30_cp_r(sp: i64, t: f64) -> f64 with Mut, Div, Panic {
+    let a = g30_nasa7(sp, t)
+    a[0] + a[1] * t + a[2] * t * t + a[3] * t * t * t + a[4] * t * t * t * t
+}
+
+// dimensionless molar enthalpy h/(R·T) of species sp at t
+pub fn g30_h_rt(sp: i64, t: f64) -> f64 with Mut, Div, Panic {
+    let a = g30_nasa7(sp, t)
+    a[0] + a[1] * t / 2.0 + a[2] * t * t / 3.0 + a[3] * t * t * t / 4.0 + a[4] * t * t * t * t / 5.0 + a[5] / t
+}
+
+// one adiabatic RHS evaluation at (t, c): returns (dT/dt, dc/dt[10])
+pub fn g30_uv_rhs(t: f64, c: &[f64; 10]) -> (f64, [f64; 10]) with Mut, Div, Panic {
+    // per-species thermo in one pass: g_rt (for Kc), h_rt and cp_r (for dT/dt)
+    var grt: [f64; 10] = [0.0; 10]
+    var hrt: [f64; 10] = [0.0; 10]
+    var cpr: [f64; 10] = [0.0; 10]
+    let tt = t * t
+    let t3 = tt * t
+    let t4 = t3 * t
+    let ln_t = g30_ln(t)
+    var s: i64 = 0
+    while s < 10 {
+        let a = g30_nasa7(s, t)
+        hrt[s] = a[0] + a[1] * t / 2.0 + a[2] * tt / 3.0 + a[3] * t3 / 4.0 + a[4] * t4 / 5.0 + a[5] / t
+        let s_r = a[0] * ln_t + a[1] * t + a[2] * tt / 2.0 + a[3] * t3 / 3.0 + a[4] * t4 / 4.0 + a[6]
+        grt[s] = hrt[s] - s_r
+        cpr[s] = a[0] + a[1] * t + a[2] * tt + a[3] * t3 + a[4] * t4
+        s = s + 1
+    }
+    // Kc(T) from the shared g_rt pass (Kc = exp(-Δg/RT) · c0^Δn, c0 in mol/cm^3)
+    let nu = g30_nu()
+    let dn = g30_dn()
+    let c0cm = 1.0e5 / (8.314462618 * t) * 1.0e-6
+    var kc: [f64; 29] = [0.0; 29]
+    var r: i64 = 0
+    while r < 29 {
+        var dg = 0.0
+        s = 0
+        while s < 10 { dg = dg + nu[r * 10 + s] * grt[s]; s = s + 1 }
+        kc[r] = g30_exp(0.0 - dg) * g30_pow(c0cm, dn[r])
+        r = r + 1
+    }
+    let dc = g30_dc_kc(t, c, &kc)
+    // energy equation: dT/dt = -T · Σ(h_rt-1)·ω / Σ c·(cp_r-1)
+    var num = 0.0
+    var den = 0.0
+    s = 0
+    while s < 10 {
+        num = num + (hrt[s] - 1.0) * dc[s]
+        den = den + c[s] * (cpr[s] - 1.0)
+        s = s + 1
+    }
+    (0.0 - t * num / den, dc)
+}
+
+// Adiabatic ignition delay by fixed-step explicit RK4 on the coupled (T, c)
+// system (house integrator, same step style as the isothermal path).
+// Returns (t_h2o, t_dT) in seconds: mid-step times of max Δ[H2O]/Δt and
+// max ΔT/Δt — the house delay definition shared with the Python replica and
+// the Cantera driver. Returns (-1, -1) when no completed front occurs within
+// max_steps·dt (below-crossover points stay metastable on the horizon).
+pub fn g30_adiabatic_delay(t0: f64, dt: f64, max_steps: i64) -> (f64, f64) with Mut, Div, Panic {
+    var t = t0
+    var y = g30_demo_init(t0)
+    var yt: [f64; 10] = [0.0; 10]
+    var prev_h2o = y[5]
+    var prev_t = t
+    var best_h2o = 0.0
+    var best_h2o_t = 0.0 - 1.0
+    var best_dt = 0.0
+    var best_dt_t = 0.0 - 1.0
+    var s: i64 = 0
+    var i: i64 = 0
+    var done = false
+    while s < max_steps && !done {
+        let (d1t, d1c) = g30_uv_rhs(t, &y)
+        i = 0
+        while i < 10 { yt[i] = y[i] + 0.5 * dt * d1c[i]; i = i + 1 }
+        let (d2t, d2c) = g30_uv_rhs(t + 0.5 * dt * d1t, &yt)
+        i = 0
+        while i < 10 { yt[i] = y[i] + 0.5 * dt * d2c[i]; i = i + 1 }
+        let (d3t, d3c) = g30_uv_rhs(t + 0.5 * dt * d2t, &yt)
+        i = 0
+        while i < 10 { yt[i] = y[i] + dt * d3c[i]; i = i + 1 }
+        let (d4t, d4c) = g30_uv_rhs(t + dt * d3t, &yt)
+        i = 0
+        while i < 10 { y[i] = y[i] + (dt / 6.0) * (d1c[i] + 2.0 * d2c[i] + 2.0 * d3c[i] + d4c[i]); i = i + 1 }
+        t = t + (dt / 6.0) * (d1t + 2.0 * d2t + 2.0 * d3t + d4t)
+        s = s + 1
+        let tnow = (s as f64) * dt
+        let rate_h2o = (y[5] - prev_h2o) / dt
+        let rate_t = (t - prev_t) / dt
+        prev_h2o = y[5]
+        prev_t = t
+        if rate_h2o > best_h2o { best_h2o = rate_h2o; best_h2o_t = tnow - 0.5 * dt }
+        if rate_t > best_dt { best_dt = rate_t; best_dt_t = tnow - 0.5 * dt }
+        if best_h2o_t > 0.0 && rate_h2o < 0.05 * best_h2o && tnow > 2.0 * best_h2o_t { done = true }
+    }
+    if done { (best_h2o_t, best_dt_t) } else { (0.0 - 1.0, 0.0 - 1.0) }
+}
+
 // ---------------- tests (all expectations from the independent Python replica) ----------------
 
 fn g30_check_near(a: f64, b: f64, tol: f64) -> bool { g30_abs(a - b) < tol }
@@ -867,6 +998,88 @@ pub fn test_g30_epistemic() -> bool with Mut, Div, Panic {
     g30_check_near(u[5], 2.2225e-11, 5.0e-12) &&
     g30_check_near(u[4], 9.2001e-12, 2.5e-12) &&
     g30_check_near(u[1], 2.2813e-11, 4.0e-12)
+}
+
+pub fn test_g30_uv_thermo() -> bool with Mut, Div, Panic {
+    // NASA-7 cp/R and h/(RT) spot values (Cantera 3.2.0; the Python replica
+    // matches all 6 printed digits):
+    //   cp_r(H2,1500)=3.882296  h_rt(H2,1500)=2.910147
+    //   cp_r(O2,1500)=4.398994  cp_r(N2,1500)=4.186120
+    //   cp_r(H,1500)=2.5        h_rt(H,1500)=19.482440
+    //   cp_r(H2O,1500)=5.687841 h_rt(H2O,1500)=-15.524087
+    //   cp_r(H2,900)=3.604632   h_rt(H2,900)=2.362294
+    //   cp_r(H2O,900)=4.809240  h_rt(H2O,900)=-29.384606
+    g30_check_near(g30_cp_r(0 as i64, 1500.0), 3.882296, 1.0e-4) &&
+    g30_check_near(g30_h_rt(0 as i64, 1500.0), 2.910147, 1.0e-4) &&
+    g30_check_near(g30_cp_r(3 as i64, 1500.0), 4.398994, 1.0e-4) &&
+    g30_check_near(g30_cp_r(8 as i64, 1500.0), 4.186120, 1.0e-4) &&
+    g30_check_near(g30_cp_r(1 as i64, 1500.0), 2.5, 1.0e-6) &&
+    g30_check_near(g30_h_rt(1 as i64, 1500.0), 19.482440, 1.0e-4) &&
+    g30_check_near(g30_cp_r(5 as i64, 1500.0), 5.687841, 1.0e-4) &&
+    g30_check_near(g30_h_rt(5 as i64, 1500.0), 0.0 - 15.524087, 1.0e-4) &&
+    g30_check_near(g30_cp_r(0 as i64, 900.0), 3.604632, 1.0e-4) &&
+    g30_check_near(g30_h_rt(0 as i64, 900.0), 2.362294, 1.0e-4) &&
+    g30_check_near(g30_cp_r(5 as i64, 900.0), 4.809240, 1.0e-4) &&
+    g30_check_near(g30_h_rt(5 as i64, 900.0), 0.0 - 29.384606, 1.0e-4)
+}
+
+pub fn test_g30_uv_rhs() -> bool with Mut, Div, Panic {
+    // one adiabatic RHS at the T0=1500K demo state (fixed Python replica,
+    // matches Cantera net production rates to ~1e-5 relative):
+    //   dT/dt=-156.1716  dc(H2)=-1.05021e-8  dc(OH)=5.24822e-7
+    //   dc(H2O)=0 (exact: every H2O channel needs an absent radical)
+    //   dc(HO2)=3.05304e-8
+    let c0 = g30_demo_init(1500.0);
+    let (dt_t, dc) = g30_uv_rhs(1500.0, &c0);
+    g30_check_near(dt_t, 0.0 - 156.1716, 2.0e-2) &&
+    g30_check_near(dc[0], 0.0 - 1.05021e-8, 1.0e-11) &&
+    g30_check_near(dc[4], 5.24822e-7, 5.0e-10) &&
+    g30_check_near(dc[5], 0.0, 1.0e-30) &&
+    g30_check_near(dc[6], 3.05304e-8, 3.0e-11)
+}
+
+pub fn test_g30_uv_short() -> bool with Mut, Div, Panic {
+    // 1000-step RK4 pre-front checkpoint at T0=2000K (t=10 us), fixed Python
+    // replica (Cantera agrees to 0.03% on T and H2O at this checkpoint):
+    //   T=1999.9913329  H2O=5.47794e-11  H=6.50884e-11  H2=1.2177546e-7
+    var t = 2000.0;
+    var y = g30_demo_init(2000.0);
+    var yt: [f64; 10] = [0.0; 10];
+    let dt = 1.0e-8;
+    var s: i64 = 0;
+    var i: i64 = 0;
+    while s < 1000 {
+        let (d1t, d1c) = g30_uv_rhs(t, &y);
+        i = 0
+        while i < 10 { yt[i] = y[i] + 0.5 * dt * d1c[i]; i = i + 1 }
+        let (d2t, d2c) = g30_uv_rhs(t + 0.5 * dt * d1t, &yt);
+        i = 0
+        while i < 10 { yt[i] = y[i] + 0.5 * dt * d2c[i]; i = i + 1 }
+        let (d3t, d3c) = g30_uv_rhs(t + 0.5 * dt * d2t, &yt);
+        i = 0
+        while i < 10 { yt[i] = y[i] + dt * d3c[i]; i = i + 1 }
+        let (d4t, d4c) = g30_uv_rhs(t + dt * d3t, &yt);
+        i = 0
+        while i < 10 { y[i] = y[i] + (dt / 6.0) * (d1c[i] + 2.0 * d2c[i] + 2.0 * d3c[i] + d4c[i]); i = i + 1 }
+        t = t + (dt / 6.0) * (d1t + 2.0 * d2t + 2.0 * d3t + d4t);
+        s = s + 1
+    }
+    g30_check_near(t, 1999.9913329, 1.0e-4) &&
+    g30_check_near(y[5], 5.47794e-11, 2.0e-13) &&
+    g30_check_near(y[1], 6.50884e-11, 2.0e-13) &&
+    g30_check_near(y[0], 1.2177546e-7, 5.0e-10)
+}
+
+pub fn test_g30_uv_delay() -> bool with Mut, Div, Panic {
+    // full adiabatic fronts (fixed Python replica / Cantera 3.2.0):
+    //   T0=2000K: t_h2o=46.26 us   T0=1500K: t_h2o=126.3 us
+    // NOTE: exceeds the madaros per-process evaluation limit (rc=182 on
+    // >~4k cumulative g30_uv_rhs calls, pre-existing runtime bug); run under
+    // SOUNIO_SOUC_ENGINE=lean_single.
+    let (th2, _tt2) = g30_adiabatic_delay(2000.0, 1.0e-8, 12000 as i64);
+    let (th15, _tt15) = g30_adiabatic_delay(1500.0, 1.0e-8, 30000 as i64);
+    g30_check_near(th2 * 1.0e6, 46.26, 5.0e-1) &&
+    g30_check_near(th15 * 1.0e6, 126.3, 6.0e-1)
 }
 
 fn main() -> i32 with Mut, Div, Panic, IO {
