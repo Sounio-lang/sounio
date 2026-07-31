@@ -11,6 +11,8 @@ KEEP_WORK="${SOUNIO_MADAROS_IMPORTED_RUNTIME_ACCEPTANCE_KEEP:-0}"
 WORK="${SOUNIO_MADAROS_IMPORTED_RUNTIME_ACCEPTANCE_DIR:-}"
 PASS_SOURCE="$ROOT_DIR/tests/compiler/madaros_imported_runtime_acceptance/issue_901_nested_field_chain_main.sio"
 MISS_SOURCE="$ROOT_DIR/tests/compiler/madaros_imported_runtime_acceptance/issue_901_known_layout_miss_main.sio"
+METHOD_MISS_SOURCE="$ROOT_DIR/tests/compiler/madaros_imported_runtime_acceptance/issue_901_method_result_known_layout_miss_main.sio"
+INDEX_MISS_SOURCE="$ROOT_DIR/tests/compiler/madaros_imported_runtime_acceptance/issue_901_indexed_element_known_layout_miss_main.sio"
 
 fail() { echo "[madaros-imported-runtime-acceptance] FAIL: $*" >&2; exit 1; }
 sha256() { sha256sum "$1" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$1" | awk '{print $1}'; }
@@ -38,7 +40,9 @@ assert_elf "$RAW_MADAROS" 'Madaros input'
 RAW_MADAROS="$(cd "$(dirname "$RAW_MADAROS")" && pwd)/$(basename "$RAW_MADAROS")"
 RAW_SHA="$(sha256 "$RAW_MADAROS")"
 [[ -z "$EXPECTED_SHA" || "$RAW_SHA" == "$EXPECTED_SHA" ]] || fail "compiler SHA mismatch expected=$EXPECTED_SHA actual=$RAW_SHA"
-[[ -f "$PASS_SOURCE" && -f "$MISS_SOURCE" ]] || fail 'acceptance witness missing'
+for source in "$PASS_SOURCE" "$MISS_SOURCE" "$METHOD_MISS_SOURCE" "$INDEX_MISS_SOURCE"; do
+  [[ -f "$source" ]] || fail "acceptance witness missing: $source"
+done
 
 if [[ -n "$WORK" ]]; then
   [[ ! -e "$WORK" ]] || fail "refusing existing gate directory: $WORK"
@@ -46,7 +50,7 @@ if [[ -n "$WORK" ]]; then
 else
   WORK="$(mktemp -d /tmp/sounio-madaros-imported-runtime-acceptance.XXXXXX)"
 fi
-mkdir -p "$WORK/pass" "$WORK/miss"
+mkdir -p "$WORK/pass"
 [[ "$KEEP_WORK" == 1 ]] || trap 'rm -rf "$WORK"' EXIT
 
 run_check() {
@@ -81,20 +85,33 @@ set -e
 [[ "$RUNTIME_RC" -eq 0 ]] || { cat "$WORK/pass/runtime.log" >&2; fail "positive ELF rc=$RUNTIME_RC"; }
 [[ "$(grep -Fxc 520 "$WORK/pass/runtime.log")" -eq 2 ]] || { cat "$WORK/pass/runtime.log" >&2; fail 'direct and materialized values were not both 520'; }
 grep -Fxq 'ISSUE_901_NESTED_FIELD_CHAIN_OK' "$WORK/pass/runtime.log" || fail 'positive marker absent'
+grep -Fxq 'ISSUE_901_NOMINAL_PROJECTION_CONTROLS_OK' "$WORK/pass/runtime.log" || fail 'projection control marker absent'
 
 # This is intentionally a lowering-boundary probe: the invalid program must
 # pass today's checker and demonstrate that lowering itself refuses the miss.
 # A future checker-owned rejection should replace this witness contract rather
 # than being silently counted as the same proof.
-MISS_ELF="$WORK/miss/witness.elf"
-run_check "$MISS_SOURCE" "$WORK/miss/check.log"
-[[ "$CHECK_RC" -eq 0 ]] || { cat "$WORK/miss/check.log" >&2; fail "negative did not reach lowering: checker rc=$CHECK_RC"; }
-run_compile "$MISS_SOURCE" "$MISS_ELF" "$WORK/miss/compile.log"
-[[ "$COMPILE_RC" -ne 0 ]] || { cat "$WORK/miss/compile.log" >&2; fail 'known-layout miss unexpectedly compiled'; }
-[[ ! -e "$MISS_ELF" ]] || fail 'known-layout miss emitted an ELF'
-assert_no_fallback "$WORK/miss/compile.log"
-for marker in 'imported_compile: typecheck ok' 'imported_compile: lower_begin' 'imported_compile: lower_done' 'IR lowering failed during merge:'; do
-  grep -Fq "$marker" "$WORK/miss/compile.log" || { cat "$WORK/miss/compile.log" >&2; fail "negative causality marker absent: $marker"; }
-done
+run_known_layout_miss() {
+  local label="$1" source="$2" type_name="$3" case_dir="$WORK/miss-$1" elf="$WORK/miss-$1/witness.elf"
+  mkdir -p "$case_dir"
+  run_check "$source" "$case_dir/check.log"
+  [[ "$CHECK_RC" -eq 0 ]] || { cat "$case_dir/check.log" >&2; fail "$label negative did not reach lowering: checker rc=$CHECK_RC"; }
+  run_compile "$source" "$elf" "$case_dir/compile.log"
+  [[ "$COMPILE_RC" -ne 0 ]] || { cat "$case_dir/compile.log" >&2; fail "$label known-layout miss unexpectedly compiled"; }
+  [[ ! -e "$elf" ]] || fail "$label known-layout miss emitted an ELF"
+  assert_no_fallback "$case_dir/compile.log"
+  for marker in \
+    'imported_compile: typecheck ok' \
+    'imported_compile: lower_begin' \
+    "LOWER_NOMINAL_LAYOUT_MISS type=$type_name field=family_id" \
+    'imported_compile: lower_done' \
+    'IR lowering failed during merge:'; do
+    grep -Fq "$marker" "$case_dir/compile.log" || { cat "$case_dir/compile.log" >&2; fail "$label negative causality marker absent: $marker"; }
+  done
+}
 
-echo "[madaros-imported-runtime-acceptance] PASS raw_sha256=$RAW_SHA direct=520 materialized=520 known_layout_miss=refused fallback=0"
+run_known_layout_miss materialized "$MISS_SOURCE" InnerState
+run_known_layout_miss method-result "$METHOD_MISS_SOURCE" MethodInnerState
+run_known_layout_miss indexed-element "$INDEX_MISS_SOURCE" IndexedInnerState
+
+echo "[madaros-imported-runtime-acceptance] PASS raw_sha256=$RAW_SHA direct=520 materialized=520 method_field=6102 indexed_field=6102 known_layout_miss=materialized,method-result,indexed-element_refused fallback=0"
