@@ -3437,6 +3437,71 @@ fn lowerer_lower_fn_params_mut(
     }
 }
 
+// Walk a function body without placing another full Lowerer value beneath every
+// statement frame. Rich imported-receipt bodies can otherwise exhaust the raw
+// compiler stack before their first let, even though the same call in isolation
+// lowers successfully.
+fn lowerer_lower_block_mut(
+    lo: &! Lowerer,
+    blk: &Block
+) -> i64 with Mut, Panic, Div, Alloc, IO {
+    if lower_live_diag_enabled() { print("lower_live: block_begin\n") }
+    (*lo).scope_depth = (*lo).scope_depth + 1
+    let saved_local_count = (*(*lo).locals).count
+    var current = &blk.stmts
+    var reg = IR_INVALID_REG
+    var saw_stmt = false
+    while true {
+        match *current {
+            Some(list) => {
+                let stmt_ref = &(*list).head
+                if lower_live_diag_enabled() {
+                    print("lower_live: stmt_kind=")
+                    if stmt_ref.kind == StmtKind::StmtLet { print("let") }
+                    else if stmt_ref.kind == StmtKind::StmtVar { print("var") }
+                    else if stmt_ref.kind == StmtKind::StmtExpr { print("expr") }
+                    else if stmt_ref.kind == StmtKind::StmtAssign { print("assign") }
+                    else { print("other") }
+                    print("\n")
+                }
+                if stmt_ref.kind == StmtKind::StmtExpr {
+                    reg = lowerer_lower_opt_expr_mut(lo, &stmt_ref.expr)
+                } else {
+                    let pair = if stmt_ref.kind == StmtKind::StmtLet {
+                        (*lo).lower_let_stmt_ref(stmt_ref, false)
+                    } else if stmt_ref.kind == StmtKind::StmtVar {
+                        (*lo).lower_let_stmt_ref(stmt_ref, true)
+                    } else {
+                        (*lo).lower_assign_stmt_ref(stmt_ref)
+                    }
+                    (*lo) = pair.0
+                    reg = pair.1
+                }
+                saw_stmt = true
+                current = &(*list).tail
+            }
+            _ => break
+        }
+    }
+    if !saw_stmt {
+        let unit_pair = (*lo).emit_unit()
+        (*lo) = unit_pair.0
+        reg = unit_pair.1
+    }
+    if (*lo).scope_depth > 0 {
+        (*lo).scope_depth = (*lo).scope_depth - 1
+    }
+    var locals_box = (*lo).locals
+    (*locals_box).count = saved_local_count
+    (*lo).locals = locals_box
+    if lower_live_diag_enabled() {
+        print("lower_live: block_end reg=")
+        print_int(reg)
+        print("\n")
+    }
+    reg
+}
+
 fn lowerer_lower_fn_item_mut(
     lo: &! Lowerer,
     name: Name,
@@ -3563,9 +3628,7 @@ fn lowerer_lower_fn_item_mut(
         print("\n")
     }
 
-    let bpair = (*lo).lower_block_ref(&fd.body)
-    (*lo) = bpair.0
-    let result_reg = bpair.1
+    let result_reg = lowerer_lower_block_mut(lo, &fd.body)
     if lower_live_diag_enabled() {
         print("lower_live: fn_after_block name=")
         print(str_from_bytes(name.buf, name.len))
