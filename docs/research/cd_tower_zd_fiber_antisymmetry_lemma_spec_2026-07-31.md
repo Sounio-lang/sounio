@@ -74,6 +74,7 @@ n ≤ 10 (the prior rung's `V3` reached only n ≤ 8).
 | `A7_DEFLATE` | the lemma is not implied by the prior rung's `V2` doubling containment | measured (§5) |
 | `A8_NULL_a` | a perturbed *pairing* `L' ≠ L_lo` always **breaks** the antisymmetry | measured |
 | `A8_NULL_b` | a foreign fiber's *matrix* never satisfies `L_lo`'s antisymmetry | measured |
+| `A9_LEAN` | the Lean file's `cdSigma`/`hi`/`P1`/`P3` are entrywise the ones measured here | measured (§8) |
 
 ---
 
@@ -179,8 +180,7 @@ the `V1` question transfers to `M` without loss.
   fingerprint, and the closed-form-spectrum route is not supported by it. Two data points were
   not enough; the third killed it.
 - **Numerical certificate.** Exact integer sign table, `D3` class — same standing as the prior
-  rung. Nothing here is Lean-proven; §2 is a paper proof whose Mathlib-free formalisation next
-  to `SounioCDCocycle.lean` is a separate rung.
+  rung. For what *is* kernel-checked, see §8; the numerical clauses are not.
 
 ---
 
@@ -219,3 +219,46 @@ and both were re-run to confirm it.
 
 `A0` pins this rung's vectorised builders to the in-tree ones entrywise, so the certificate is
 verified against the lane's own generator rather than a reimplementation.
+
+---
+
+## 8. What is Lean-proven, by tier
+
+`formal/lean4/SounioZDFiberAntisym.lean` — self-contained, Mathlib-free, **no `sorry`, no
+`native_decide`**, axioms `[propext, Quot.sound]` or `[propext, Classical.choice, Quot.sound]`
+(Classical enters via `simp`; a logical axiom, not a computational trust anchor).
+
+| tier | statement | status |
+|---|---|---|
+| **1** | `core_P1` : `P1 (l ⊕ L_lo) y = − P3 l y` | **kernel-checked ∀n** |
+| **1** | `core_P3` : `P3 (l ⊕ L_lo) y = − P1 l y` | **kernel-checked ∀n** |
+| **1** | `P3_symm` : `P3 l y = P3 y l` | **kernel-checked ∀n** |
+| **1** | `hi_eq_xor` : the additive form `(x ⊕ L_lo) + H` *is* the XOR form `x ⊕ L` | **kernel-checked ∀n** |
+| **2** | `P1_symm` ⇒ mask invariance ⇒ **`A1` itself** | **not in this tree** — reduces to `antisym`, proven ∀n on the unmerged branch `lean/cd-seamflip-forall-n` |
+| **3** | `A4`'s sub-lemma `τ(l,L_lo) = −τ(l ⊕ L_lo, L_lo)` | **not formalised** |
+| — | rank, spectra, the factorisation `Jᵀ M J` | numerical only |
+
+So: **`A3` — the algebraic core, the whole substance of §2 — is formalised ∀n.** `A1` as stated
+in §0 is *not*: it needs `P1`-symmetry on top, and that reduces to `antisym`. Do not read this
+rung as "the lemma is Lean-proven"; read it as "the identity that makes the lemma work is."
+
+The side conditions in the Lean statements are exactly §2's: `y ≠ 0` and `y ⊕ L_lo ≠ 0` — the
+latter being `y ≠ L_lo`, §3's excluded column.
+
+**The Lean object is the measured object.** Clause `A9` transcribes the Lean file's `cdSigma`
+into Python and checks it entrywise against the **in-tree** `cd_sigma` — not this rung's
+vectorised rewrite, since `A0` pins that only at n = 6,7 while `A9` also runs at n = 4,5,8 —
+over all pairs, then checks Lean's `hi`/`P1`/`P3` against the builder's over all fibers at
+n = 6,7,8. It carries its own negative control: two **wrong** hi-maps (`l + H`, i.e. forgetting
+the XOR, and `(l ⊕ L_lo ⊕ 1) + H`) must *disagree* with `P1`, so the arm can fail. Without this
+bridge the formalisation could be about a lookalike; without the control, the bridge could not
+fail.
+
+**A provenance note worth recording.** `antisym` and the four branch reductions
+`R_ll/R_lu/R_ul/R_uu` were cited by this lane as "proven ∀n" — they live in
+`SounioSeamFlip.lean` on a branch that has **never been merged**. They were re-verified to
+compile clean here (no `sorryAx`) and the branch reductions are now carried into
+`SounioZDFiberAntisym.lean`, so they exist in the tree for the first time. `antisym` itself is
+still only on that branch. This is the R20 dangling-citation pattern, found again.
+
+---

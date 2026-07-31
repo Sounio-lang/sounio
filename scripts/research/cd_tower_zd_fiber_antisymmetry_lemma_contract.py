@@ -372,6 +372,69 @@ def main():
           f"L_lo's antisymmetry, n=6,7 => the lemma binds the fiber, not the ambient sign "
           f"table  {'OK' if a8b else 'FAIL'}" + (f"  [preserved at {worst_b}]" if worst_b else ""))
 
+    # ---- A9 Lean bridge: the formalised object IS the measured object -------------------
+    def lean_cdSigma(a, b, k):
+        """Exact transcription of formal/lean4/SounioZDFiberAntisym.lean's `cdSigma`."""
+        if k == 0:
+            return -1
+        if k == 1:
+            return 1 if (a == 0 or b == 0) else -1
+        if a == 0 or b == 0:
+            return 1
+        h = 1 << (k - 1)
+        au, bu = a >= h, b >= h
+        am, bm = a % h, b % h
+        if not au and not bu:
+            return lean_cdSigma(am, bm, k - 1)
+        if not au and bu:
+            return lean_cdSigma(bm, am, k - 1)
+        if au and not bu:
+            return lean_cdSigma(am, 0, k - 1) if bm == 0 else -lean_cdSigma(am, bm, k - 1)
+        return -lean_cdSigma(0, am, k - 1) if bm == 0 else lean_cdSigma(bm, am, k - 1)
+
+    a9_sigma = True
+    lean_tab = {}
+    for n in (4, 5, 6, 7, 8):
+        T = np.array([[lean_cdSigma(a, b, n) for b in range(1 << n)] for a in range(1 << n)],
+                     dtype=np.int16)
+        lean_tab[n] = T
+        # compare against the IN-TREE cd_sigma itself, not this file's vectorised rewrite:
+        # A0 pins sign_table_fast only at n=6,7, and A9 also runs at n=4,5,8.
+        ref = np.array([[cd_sigma(a, b, n) for b in range(1 << n)] for a in range(1 << n)],
+                       dtype=np.int16)
+        if not np.array_equal(T, ref):
+            a9_sigma = False
+    # and the fiber products: Lean's `hi x = (x ^ L_lo) + H` must equal the builder's `x ^ L`
+    a9_parts = True
+    for n in (6, 7, 8):
+        T, H = lean_tab[n], 1 << (n - 1)
+        S = tables[n]
+        for Llo in range(1, H):
+            P1, P3 = parts_fast(n, Llo, S)
+            lo = np.arange(1, H)
+            hh = (lo ^ Llo) + H
+            L1 = T[np.ix_(lo, lo)] * T[np.ix_(hh, hh)]
+            L3 = T[np.ix_(lo, hh)] * T[np.ix_(hh, lo)]
+            if not (np.array_equal(L1, P1) and np.array_equal(L3, P3)):
+                a9_parts = False
+    # negative control: a WRONG hi-map must disagree, else the parts arm cannot fail
+    a9_null = True
+    for n in (6, 7):
+        T, H = lean_tab[n], 1 << (n - 1)
+        for Llo in range(1, H):
+            P1, P3 = parts_fast(n, Llo, tables[n])
+            lo = np.arange(1, H)
+            for bad_hi in (lo + H, ((lo ^ Llo) ^ 1) + H):   # forgot the XOR / wrong lo-bit
+                B1 = T[np.ix_(lo, lo)] * T[np.ix_(bad_hi, bad_hi)]
+                if np.array_equal(B1, P1):
+                    a9_null = False
+    ok["A9"] = a9_sigma and a9_parts and a9_null
+    print(f"A9_LEAN     the Lean file's cdSigma == the IN-TREE cd_sigma (n=4..8, all pairs) "
+          f"{'OK' if a9_sigma else 'FAIL'};  Lean's hi/P1/P3 == the builder's, all fibers "
+          f"n=6,7,8 {'OK' if a9_parts else 'FAIL'};  wrong hi-maps DISAGREE "
+          f"{'OK' if a9_null else 'FAIL'} => formal/lean4/SounioZDFiberAntisym.lean proves A3 "
+          f"about THE MEASURED OBJECT, not a lookalike")
+
     print("=" * 78)
     if all(ok.values()):
         print("CD_TOWER_ZDFAN_VERDICT "
@@ -385,8 +448,14 @@ def main():
               "an exact spectral halving to a (2^{n-2}-1)-dim matrix (A6). NOT CLAIMED: ∀n "
               "spectral completeness (#spectra = 3*2^{n-5}) -- A6 reduces that question, it "
               "does not answer it; rank EQUALITY remains measured (n<=10). Two of the three "
-              "clauses of the in-tree resonance predicate are vacuous (A2). Numerical "
-              "certificate over an exact integer sign table; D3 respected")
+              "clauses of the in-tree resonance predicate are vacuous (A2). A3 IS FORMALISED: "
+              "formal/lean4/SounioZDFiberAntisym.lean proves core_P1/core_P3/P3_symm for ALL n, "
+              "Mathlib-free, no sorry, no native_decide, [propext,(Classical.choice),Quot.sound]; "
+              "A9 pins that file's cdSigma/hi/P1/P3 to the ones measured here, so the Lean "
+              "theorem is about THE MEASURED OBJECT. A1 additionally needs P1-symmetry, which "
+              "reduces to `antisym` -- proven forall n on the UNMERGED branch "
+              "lean/cd-seamflip-forall-n, NOT in this tree. Numerical certificate over an exact "
+              "integer sign table; D3 respected")
         return 0
     print("CD_TOWER_ZDFAN_VERDICT INCOMPLETE  failing=" +
           ",".join(k for k, v in ok.items() if not v))
