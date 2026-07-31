@@ -1180,54 +1180,58 @@ theorem Q'red_hi_uu (m W u v : Nat) (hW : W < 2^(m+1)) (hu : u < 2^(m+1)) (hv : 
 
 /-- Swap bits 0 and `j` of `x` (identity when they already agree). Matches the contract's `sw`. -/
 def sw (x j : Nat) : Nat :=
-  let b0 := x % 2
-  let bj := (x / 2^j) % 2
-  if b0 = bj then x else x ^^^ (1 ||| (2^j))
+  if (x % 2) = ((x / 2^j) % 2) then x else x ^^^ (1 ^^^ (2^j))
+  -- Note: for j > 0, bits 0 and j are distinct so 1 ||| 2^j = 1 ^^^ 2^j.
+  -- We use xor form directly to avoid relying on `Nat.or_eq_xor_*`.
 
 /-- Bit 0 of a pure power `2^k` is unset for `k > 0`. -/
 private theorem pow2_bit0 (k : Nat) (hk : k ≠ 0) : (2^k) % 2 = 0 := by
-  have : ∃ k', k = k' + 1 := by
-    cases k with | zero => exact absurd rfl hk | succ k' => exact ⟨k', rfl⟩
-  obtain ⟨k', rfl⟩ := this
-  rw [Nat.pow_succ, Nat.mul_mod, Nat.pow_mod]
-  simp
+  cases k with
+  | zero => exact absurd rfl hk
+  | succ k' =>
+    -- 2^(k'+1) = 2^k' * 2, and anything * 2 is 0 mod 2
+    rw [Nat.pow_succ]
+    omega
 
 /-- Bit `k` of `2^k` is set. -/
 private theorem pow2_bitk (k : Nat) : (2^k / 2^k) % 2 = 1 := by
-  rw [Nat.div_self (Nat.two_pow_pos k)]; decide
+  have : 2^k / 2^k = 1 := Nat.div_self (Nat.two_pow_pos k)
+  rw [this]
 
 /-- `sw (2^k) k = 1` for `k > 0`: bits 0 and k disagree, so the swap yields pure bit 0. -/
 theorem sw_pow2 (k : Nat) (hk : k ≠ 0) : sw (2^k) k = 1 := by
   unfold sw
   have hb0 : (2^k % 2) = 0 := pow2_bit0 k hk
   have hbj : ((2^k / 2^k) % 2) = 1 := pow2_bitk k
-  change (if (2^k % 2) = ((2^k / 2^k) % 2) then 2^k else 2^k ^^^ (1 ||| 2^k)) = 1
   rw [hb0, hbj]
   have : ¬ ((0 : Nat) = 1) := by decide
   simp only [this, ↓reduceIte]
-  -- Goal: 2^k ^^^ (1 ||| 2^k) = 1
-  have hand : (1 : Nat) &&& (2^k) = 0 := by
-    -- 1 &&& even = 0
-    simpa [Nat.and_one_is_mod] using pow2_bit0 k hk
-  -- for disjoint bits, or = xor
-  have hor : (1 : Nat) ||| (2^k) = 1 ^^^ (2^k) := by
-    exact Nat.or_eq_xor_of_and_eq_zero hand
-  rw [hor, Nat.xor_comm 1 (2^k), Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+  -- Goal: 2^k ^^^ (1 ^^^ 2^k) = 1
+  calc
+    2^k ^^^ (1 ^^^ 2^k) = 2^k ^^^ (2^k ^^^ 1) := by rw [Nat.xor_comm 1 (2^k)]
+    _ = (2^k ^^^ 2^k) ^^^ 1 := by rw [← Nat.xor_assoc]
+    _ = 0 ^^^ 1 := by rw [Nat.xor_self]
+    _ = 1 := by rw [Nat.zero_xor]
 
 /-- `sw x 0 = x` — bit 0 swapped with itself is a no-op. -/
 theorem sw_zero (x : Nat) : sw x 0 = x := by
   unfold sw
+  -- (x/1)%2 = x%2, so the bits agree
   simp [Nat.div_one]
 
-/-- `sw` never increases the bit-width when `j < m`. -/
+/-- `sw` never increases the bit-width when `j < m`.
+    Proof: the mask `1 ^^^ 2^j` only touches bits 0 and j, both `< m`. -/
 theorem sw_lt (x j m : Nat) (hx : x < 2^m) (hj : j < m) : sw x j < 2^m := by
   unfold sw
-  split
-  · exact hx
-  · have hj2 : 2^j < 2^m := Nat.pow_lt_pow_right (by decide : 1 < 2) hj
-    have h1 : (1 : Nat) < 2^m := Nat.one_lt_two_pow (by omega)
-    have hmask : (1 : Nat) ||| (2^j) < 2^m :=
-      Nat.or_lt_two_pow (by omega) hj2
+  by_cases h : (x % 2) = ((x / 2^j) % 2)
+  · simpa [h]
+  · simp only [h, ↓reduceIte]
+    -- x ^^^ (1 ^^^ 2^j) < 2^m
+    have hj2 : 2^j < 2^m := Nat.pow_lt_pow_right (by decide : (1:Nat) < 2) hj
+    have h1 : (1 : Nat) < 2^m := by
+      have : m ≠ 0 := by omega
+      exact Nat.one_lt_two_pow this
+    have hmask : (1 : Nat) ^^^ (2^j) < 2^m := Nat.xor_lt_two_pow h1 hj2
     exact Nat.xor_lt_two_pow hx hmask
 
 /-- **(★) for single-bit labels, proven ∀n.** Both sides of the equivariance are the
@@ -1247,11 +1251,91 @@ theorem star_pow2 (m k a b : Nat) (hk : k < m) (ha : a < 2^m) (hb : b < 2^m) :
     have hR : Qgen (2^0) (sw a k) (sw b k) m = -1 :=
       Qgen_pow2 m 0 (sw a k) (sw b k) (by omega)
         (sw_lt a k m ha hk) (sw_lt b k m hb hk)
-    -- 1 = 2^0
-    change Qgen (2^k) a b m = Qgen (2^0) (sw a k) (sw b k) m
+    -- rewrite RHS target 1 as 2^0
+    have hone : (1 : Nat) = 2^0 := rfl
+    rw [hone]
     rw [hL, hR]
 
+/-! ## Tier 8: the degenerate locus -/
+
+/-- **`Q` is identically `-1` on the whole degenerate locus, ∀n.** Every one of the six
+    degeneracies collapses to `deg_left`, `deg_right` or a `sigma_self`/`antisym` pair. This is
+    what closes the degenerate branches of `(*)`: both sides are the same constant, so no
+    induction is needed there. (`W ≠ 0` is required -- at `W = 0` the four factors coincide and
+    `Q = +1`.) -/
+theorem Qgen_degen (m W a b : Nat) (hW : W < 2^m) (ha : a < 2^m) (hb : b < 2^m) (hW0 : W ≠ 0)
+    (hd : a = 0 ∨ b = 0 ∨ a ^^^ W = 0 ∨ b ^^^ W = 0 ∨ a = b ∨ a ^^^ b ^^^ W = 0) :
+    Qgen W a b m = -1 := by
+  have hm : ∃ m', m = m' + 1 := by
+    cases m with
+    | zero => exact absurd (by omega : W = 0) hW0
+    | succ k => exact ⟨k, rfl⟩
+  obtain ⟨m', rfl⟩ := hm
+  by_cases ha0 : a = 0
+  · subst ha0
+    unfold Qgen
+    rw [Nat.zero_xor, cdSig0, cdSig0]
+    have := deg_right (m'+1) W b hW hb hW0
+    rcases cdSigma_pm (m'+1) W (b ^^^ W) with h1 | h1 <;>
+      rcases cdSigma_pm (m'+1) W b with h2 | h2 <;>
+      rw [h1, h2] at this ⊢ <;> revert this <;> decide
+  by_cases hb0 : b = 0
+  · subst hb0
+    unfold Qgen
+    rw [Nat.zero_xor, cdSig0', cdSig0']
+    have := deg_left (m'+1) W a hW ha hW0
+    rcases cdSigma_pm (m'+1) (a ^^^ W) W with h1 | h1 <;>
+      rcases cdSigma_pm (m'+1) a W with h2 | h2 <;>
+      rw [h1, h2] at this ⊢ <;> revert this <;> decide
+  by_cases haW : a ^^^ W = 0
+  · have hea : a = W := xor_zero_eq a W haW
+    subst hea
+    unfold Qgen
+    rw [haW, cdSig0, cdSig0]
+    have := deg_right (m'+1) a b hW hb hW0
+    rcases cdSigma_pm (m'+1) a (b ^^^ a) with h1 | h1 <;>
+      rcases cdSigma_pm (m'+1) a b with h2 | h2 <;>
+      rw [h1, h2] at this ⊢ <;> revert this <;> decide
+  by_cases hbW : b ^^^ W = 0
+  · have heb : b = W := xor_zero_eq b W hbW
+    subst heb
+    unfold Qgen
+    rw [hbW, cdSig0', cdSig0']
+    have := deg_left (m'+1) b a hW ha hW0
+    rcases cdSigma_pm (m'+1) (a ^^^ b) b with h1 | h1 <;>
+      rcases cdSigma_pm (m'+1) a b with h2 | h2 <;>
+      rw [h1, h2] at this ⊢ <;> revert this <;> decide
+  -- the remaining two degeneracies, with all four of a, b, a^W, b^W nonzero
+  have haWne : a ≠ a ^^^ W := by
+    intro h
+    apply hW0
+    have hh : a ^^^ a = a ^^^ (a ^^^ W) := congrArg (fun z => a ^^^ z) h
+    rw [Nat.xor_self, ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor] at hh
+    exact hh.symm
+  rcases hd with h | h | h | h | h | h
+  · exact absurd h ha0
+  · exact absurd h hb0
+  · exact absurd h haW
+  · exact absurd h hbW
+  · subst h
+    unfold Qgen
+    rw [sigma_self (m'+1) a ha ha0, sigma_self (m'+1) (a ^^^ W) (Nat.xor_lt_two_pow ha hW) haW,
+        antisym (m'+1) a (a ^^^ W) ha (Nat.xor_lt_two_pow ha hW) ha0 haW haWne]
+    rcases cdSigma_pm (m'+1) (a ^^^ W) a with h1 | h1 <;> rw [h1] <;> decide
+  · have heb : b = a ^^^ W := by
+      have := xor_zero_eq (a ^^^ b) W (by rwa [Nat.xor_assoc] at h ⊢)
+      rw [← this, Nat.xor_comm a b, Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+    subst heb
+    have hcancel : (a ^^^ W) ^^^ W = a := by rw [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+    unfold Qgen
+    rw [hcancel,
+        sigma_self (m'+1) a ha ha0,
+        sigma_self (m'+1) (a ^^^ W) (Nat.xor_lt_two_pow ha hW) haW,
+        antisym (m'+1) a (a ^^^ W) ha (Nat.xor_lt_two_pow ha hW) ha0 haW haWne]
+    rcases cdSigma_pm (m'+1) (a ^^^ W) a with h1 | h1 <;> rw [h1] <;> decide
+
 end SounioZDFiberAntisym
+
 
 
 

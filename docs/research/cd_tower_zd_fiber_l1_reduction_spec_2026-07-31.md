@@ -54,6 +54,7 @@ No link is assumed.
 | `K1` | `K4` regrouped **is** (★) | 0 violations, levels 5..8 |
 | `K8` | (★) needs no seam hypothesis: it holds for **every** `Y ≠ 0` | 0 violations, levels 5,6,7 |
 | `K9` | base case of (★): `Q` at a single-bit label is identically `−1` | 0 violations, levels 4..7; Lean `Qgen_pow2` ∀n |
+| `K15` | (★) for single-bit labels: `Q_Y(a,b) = Q_{τY}(τa,τb)` when `Y = 2^k` | 0 violations, levels 4..7; Lean `star_pow2` ∀n |
 
 with `D1_Y(a,b) = σ(a,b)σ(a⊕Y,b)`, `D2_Y(c,y) = σ(c,y)σ(c,y⊕Y)`, and
 `e1 = D1_{τY}(τa,τb)·D1_Y(a,b)`, `e2` the same for `D2`.
@@ -94,16 +95,17 @@ makes the target *easier*, not harder.
 - **L1 is not proven, and neither is (★).** This is a reduction, verified at four levels.
 - The `b = Y` boundary is excluded from `K2` and handled nowhere here. L1 itself was verified
   including it by the previous rung, so the gap is in this chain, not in L1's evidence.
-- **(★) is not Lean-proven in full.** The inductive step is still open. What is
-  kernel-checked ∀n in `formal/lean4/SounioZDFiberAntisym.lean`:
-  `A4_sub'` (second-argument form), `Qgen_coset_left`/`_right`, and now the
-  **base case** `Qgen_pow2`.
+- **(★) is not Lean-proven in full for multi-bit labels.** The mutual inductive
+  step (16-case table, all reduction lemmas proven) is still not assembled.
+  What is kernel-checked ∀n in `formal/lean4/SounioZDFiberAntisym.lean`:
+  `A4_sub'`, `Qgen_coset_*`, all 16 `Qred`/`Q'red` rows, **base case**
+  `Qgen_pow2`, and **single-bit equivariance** `star_pow2`.
 - **The base case IS formalised (K9 / `Qgen_pow2`).** `Q` at a *single-bit* label is
-  identically `−1` for all `a,b` and all bit positions `k < m` — proven ∀n, no
-  `sorry`, no `native_decide`. That is exactly the case where `τ` moves the
-  level's top bit (the branch reductions hold that case fixed). Measured at
-  levels 4..7 with zero violations; the theorem is the same object as the
-  measurement (`Qgen` = the measured product entrywise).
+  identically `−1` for all `a,b` and all bit positions `k < m` — proven ∀n.
+- **(★) holds for every single-bit label (K15 / `star_pow2`).** Both sides of
+  `Q_Y(a,b) = Q_{τY}(τa,τb)` are the constant `−1` when `Y = 2^k`, so the
+  equivariance is a corollary of the base case. Multi-bit `Y` is the remaining
+  assembly of the mutual step (all 16 reduction cases already proven as K12–K14).
 - (c) as a whole is untouched: **L2 remains where the previous rung left it**, with its
   triangle route walled.
 

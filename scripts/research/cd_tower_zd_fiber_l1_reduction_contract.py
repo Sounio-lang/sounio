@@ -482,6 +482,28 @@ def main():
           f"=> ALL SIXTEEN cases of the mutual step are now proven forall n; what remains is the "
           f"ASSEMBLY of the induction, not its cases")
 
+    # ---- K15 (★) for single-bit labels — equivariant reading of the base case ----------
+    k15 = True
+    for m in (4, 5, 6, 7):
+        S, M = sign_table_fast(m).astype(np.int64), 1 << m
+
+        def sw_loc(x, j):
+            b0, bj = x & 1, (x >> j) & 1
+            return x if b0 == bj else x ^ (1 | (1 << j))
+
+        def QQ(a, b, Y):
+            return int(S[a, b] * S[a ^ Y, b ^ Y] * S[a, b ^ Y] * S[a ^ Y, b])
+
+        for k in range(m):
+            Y = 1 << k
+            for a in range(M):
+                for b in range(M):
+                    if QQ(a, b, Y) != QQ(sw_loc(a, k), sw_loc(b, k), sw_loc(Y, k)):
+                        k15 = False
+    ok["K15"] = k15
+    print(f"K15_STAR_POW2  (★) holds for every single-bit label Y=2^k "
+          f"(levels 4..7, full a,b range) {'OK' if k15 else 'FAIL'} — Lean: star_pow2")
+
     print("=" * 78)
     if all(ok.values()):
         print("CD_TOWER_ZDL1_VERDICT L1_REDUCED_TO_SEAM_TAU_EQUIVARIANCE_OF_Q__NOT_PROVEN")
@@ -496,7 +518,9 @@ def main():
               "from antisym is recorded as HAVING A GAP -- D2(c,y,Y) = D1(y,c,Y) fails on the "
               "degenerate locus (K6). K7 only shows a MISMATCHED tau breaks it -- its first reading, that (*) is about seam labels, was WRONG -- and K8 shows (*) holds for EVERY Y != 0 with the matching j = lsb(Y), so the seam hypothesis is not needed at all. L1 IS NOT PROVEN and "
               "neither is (*); but the BASE CASE of (*) — Q at a single-bit label = -1 — "
-              "is PROVEN forall n as Qgen_pow2 (K9), and (*) has the same induction shape "
+              "is PROVEN forall n as Qgen_pow2 (K9), and its equivariant reading star_pow2 "
+              "closes (★) for every single-bit label (K15); multi-bit Y still needs the "
+              "mutual-step assembly (all 16 cases proven as K12–K14). (*) has the same induction shape "
               "as A4_sub. Numerical certificate; D3")
         return 0
     print("CD_TOWER_ZDL1_VERDICT INCOMPLETE  failing=" +
