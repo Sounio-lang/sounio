@@ -186,7 +186,14 @@ run_imported_elf imported-d12 "$D12" 'PROOF-CARRYING LINEAR TARGET MONITOR D12 P
 DEFAULT_DIR="$WORK/default-souc"
 DEFAULT_ELF="$DEFAULT_DIR/facade-default.elf"
 mkdir -p "$DEFAULT_DIR"
-MADAROS_RAW_BIN="$M3" SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib" \
+env -u SOUNIO_SOUC_BIN \
+  SOUNIO_SOUC_ENGINE=madaros MADAROS_RAW_BIN="$M3" SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib" \
+  "$ROOT_DIR/bin/souc" info >"$DEFAULT_DIR/info.log" 2>&1 \
+  || { cat "$DEFAULT_DIR/info.log" >&2; fail 'default bin/souc info failed'; }
+grep -Fxq "raw_elf:      $M3" "$DEFAULT_DIR/info.log" \
+  || { cat "$DEFAULT_DIR/info.log" >&2; fail 'default bin/souc did not resolve the source-fresh M3'; }
+env -u SOUNIO_SOUC_BIN \
+  SOUNIO_SOUC_ENGINE=madaros MADAROS_RAW_BIN="$M3" SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib" \
   "$ROOT_DIR/bin/souc" compile "$FACADE" -o "$DEFAULT_ELF" >"$DEFAULT_DIR/compile.log" 2>&1 \
   || { cat "$DEFAULT_DIR/compile.log" >&2; fail 'default bin/souc facade compile failed'; }
 assert_no_fallback "$DEFAULT_DIR/compile.log"
@@ -214,6 +221,7 @@ catalog_layouts\t256,257_external_and_own
 known_layout_miss\trefused_no_elf
 facade_vertical\tprob::lib::{uniform_mean}->closure->ELF->42
 default_souc\tcompile->executable_ELF->42
+default_souc_authority\tM3_sha256=$M3_SHA
 imported_d6\tpass
 imported_d11\tpass
 imported_d12\tpass
