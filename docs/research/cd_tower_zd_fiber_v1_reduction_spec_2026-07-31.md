@@ -85,8 +85,8 @@ separates at every level. If a weaker invariant separated too, `W4` would carry 
 
 ## 3. Where the closed form stops — and it stops early
 
-`W6`. On the stratum where `tr(A²)` is **constant** — the `y = 0` Fano class together with
-**all** seams — it equals
+`W6`. On the stratum where `tr(A²)` is **constant** — the `y = 0` Fano class together with the
+**weight-1 seams only** (`7 + (n−3)` fibers) — it equals
 
 ```
 tr(A²) = (2^{n-1} − 2) · 4(2^{n-3} − 1)
@@ -97,9 +97,14 @@ core law already proven ∀n. Measured: `840, 3720, 15624, 64008` at n = 6,7,8,9
 
 **Off that stratum `tr(A²)` genuinely varies, and no closed form is derived here.** `W6` asserts
 the variation as a clause so the boundary cannot be read as an oversight. Fitting the general
-values appears to need the degree-histogram induction, which this lane records as **open**. An
-earlier draft of this rung called the closed form "evident"; it is evident only on the stratum
-where the quantity does not vary, which is not the same thing.
+values appears to need the degree-histogram induction, which this lane records as **open**. Two corrections, both caught by the clause rather than by inspection:
+
+1. An earlier draft called this closed form "evident". It is evident only on the stratum where
+   the quantity does not vary — not the same thing.
+2. That draft also put **all** seams in the stratum. `W6` failed (`rc=1`). The stratum is
+   `y = 0` Fano plus the **weight-1** seams; the higher-weight seams take other values. The
+   mistake came from reading a table whose top block happened to contain only weight-1 seams
+   and generalising from it.
 
 `tr(A³)` has no closed form here at all.
 
