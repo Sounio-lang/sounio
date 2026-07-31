@@ -286,16 +286,17 @@ paragraph. Numbers must match §3 freezes.
 2. **\(\sum H_{kk}\) under multi-site FO load** may print ~7.20 vs solo-path
    7.292592 (multidose driver). Primary science claims are Var / \(E_2\) freezes.
 3. **Runtime (non-const) mutual FO depth** remains residual; unused by R1–R4.
-4. **Import↔method agreement — residual split (2026-07-31):**
-   - **Algebraic half CLOSED:** pure surfaces `fo_css` ≡ site ≡ method ≡
-     call-result are definitionally equal, and default-seed FO freezes are
-     exact rationals matching R1–R4
-     (`formal/lean4/SounioFoCssSurfaceParity.lean`; executable mirror
-     `scripts/ci/fo_css_surface_parity_gate.sh` →
-     `FO_CSS_SURFACE_PARITY_GATE_OK` 17/17).
-   - **Compiler half OPEN:** Madaros IR / multi-mod import surface
-     commutativity for arbitrary programs remains **gate-backed numerical
-     parity** (R4), not a compiler-metatheory theorem.
+4. **Import↔method agreement — residual split (three layers, 2026-07-31):**
+   - **L0 Algebraic CLOSED:** pure surfaces `fo_css` ≡ site ≡ method ≡
+     call-result are definitionally equal; freezes exact ℚ
+     (`SounioFoCssSurfaceParity.lean`; `fo_css_surface_parity_gate.sh` 17/17).
+   - **L1 Semantic CLOSED:** surfaces desugar to one `FoExpr` AST; FO var is
+     a function of (AST, seeds) — surface independence is AST identity
+     (`SounioFoSurfaceTransfer.lean`; `fo_surface_transfer_gate.sh`;
+     spec `docs/research/fo_css_compiler_residual_half_spec_2026-07-31.md`).
+   - **L2 Compiler OPEN:** Madaros FO_XFER / multi-mod realises L1 for the
+     oral-Css fragment under FO trust ≥42 — still **gate-backed numerical
+     parity** (R4), not a FO_XFER soundness proof.
 5. **Not a full PBPK28 clinical claim** — oral Css exemplar only.
 6. **Not clinical guidance** — dissertation methodology / compiler science.
 

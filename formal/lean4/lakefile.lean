@@ -648,3 +648,8 @@ lean_lib «SounioG2Derivations» where
 -- lake build optional under FO_CSS_LEAN_BUILD=1.
 @[default_target]
 lean_lib «SounioFoCssSurfaceParity» where
+
+-- FO residual §5.4 semantic bridge (compiler half intermediate).
+@[default_target]
+lean_lib «SounioFoSurfaceTransfer» where
+

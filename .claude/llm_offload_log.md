@@ -3320,3 +3320,5 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 | 2026-07-31 | xai/grok-4.3 + zai/GLM-5.2 (dual, prior M1) | math-review | formal/lean4/SounioFoCssSurfaceParity.lean | PASS | residual-4 algebraic FO Css; freezes + surface equality; kel unit cancel uses native_decide not rfl |
 | 2026-07-31 | xai/grok-4.3 + zai/GLM-5.2 (dual, prior M1) | fan-out | docs/dissertation/handoff/fo_pk_method_science_package.md | PASS | chapter prose package; dual math-review already logged |
 | 2026-07-31 | lake build (isolated FoCssIso, lean 4.32.0) | kernel-check | SounioFoCssSurfaceParity.lean | PASS | Build completed successfully after kel_shared_eq_peeled_at_unit: native_decide fix |
+| 2026-07-31 | xai+zai math-review + lake build | math-review | SounioFoSurfaceTransfer.lean | PASS | L1 FoExpr semantic bridge; port from 6a7d998aa |
+| 2026-07-31 | fan-out | fan-out | fo_pk_method_science_package.md | PASS | residual three-layer wording |
