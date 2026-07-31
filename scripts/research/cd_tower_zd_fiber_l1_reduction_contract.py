@@ -55,7 +55,11 @@ L1 itself was verified including it by the previous rung. Nothing here is Lean-p
 in-tree. **THE BASE CASE IS NOW PROVEN**: Q at a single-bit label is identically -1
 (clause K9, and Qgen_pow2 in formal/lean4/SounioZDFiberAntisym.lean, forall n, no sorry, no
 native_decide). That is exactly the case where tau moves the level's TOP bit -- the one the four
-branch reductions hold fixed and the one A4_sub never faced. The INDUCTIVE STEP of (*) remains.
+branch reductions hold fixed and the one A4_sub never faced. The INDUCTIVE STEP of (*) remains, and K10 identifies why it is not a single induction: the
+Y = W+H half of the step lands not on Q but on a SECOND product Q' (two factors with swapped
+arguments). Q' is tau-equivariant in its own right, and Q = Q' EXCEPT on the degenerate locus --
+so the step is a MUTUAL induction on the pair (Q, Q'). Their generic agreement is PROVEN forall n
+in Lean (Qgen_eq_Qgen'); the mutual step itself is not written.
 
 Verdict L1_REDUCED_TO_SEAM_TAU_EQUIVARIANCE_OF_Q__NOT_PROVEN.
 Numerical certificate over an exact integer sign table; D3 respected.
@@ -270,6 +274,50 @@ def main():
     ok["K9"] = k9 and k9_bridge
     print(f"K9_LEAN     formal/lean4/SounioZDFiberAntisym.lean's Qgen is this product entrywise "
           f"{'OK' if k9_bridge else 'FAIL'} => Qgen_pow2 is about THE MEASURED OBJECT")
+
+    # ---- K10 the inductive step is MUTUAL: it lands on a SECOND product Q' -----------------
+    k10_eq = k10_equiv = k10_degen = True
+    for m in (5, 6, 7):
+        S, M = tabs[m], 1 << m
+
+        def Qp(a, b, W):
+            return int(S[a, b] * S[b ^ W, a ^ W] * S[b ^ W, a] * S[a ^ W, b])
+
+        diff = tot = degen = 0
+        for W in range(1, M):
+            for a in range(M):
+                for b in range(M):
+                    tot += 1
+                    if Q(S, a, b, W) != Qp(a, b, W):
+                        diff += 1
+                        if (a == 0 or b == 0 or (a ^ W) == 0 or (b ^ W) == 0
+                                or a == b or (a ^ W) == b):
+                            degen += 1
+        if diff == 0:
+            k10_eq = False                      # they must actually DIFFER somewhere
+        if degen != diff:
+            k10_degen = False                   # ...and only on the degenerate locus
+        bad = t2 = 0
+        for W in range(1, M):
+            j = (W & -W).bit_length() - 1
+            if j == 0:
+                continue
+            tW = sw(W, j)
+            for a in range(M):
+                for b in range(M):
+                    t2 += 1
+                    if Qp(sw(a, j), sw(b, j), tW) != Qp(a, b, W):
+                        bad += 1
+        k10_equiv = k10_equiv and bad == 0
+        print(f"K10_MUTUAL  level {m}: Q != Q' in {diff}/{tot}, and {degen}/{diff} of those are on "
+              f"the DEGENERATE locus ({'all' if degen == diff else 'NOT all'});  Q' is "
+              f"tau-equivariant on its own: violations {bad}/{t2} "
+              f"{'OK' if bad == 0 else 'FAIL'}")
+    ok["K10"] = k10_eq and k10_equiv and k10_degen
+    print("K10_MUTUAL  => the (*) inductive step is a MUTUAL induction on the pair (Q, Q'): the "
+          "Y < H half lands on Q, the Y = W+H half lands on Q'. Their agreement off the "
+          "degenerate locus is PROVEN forall n in Lean (Qgen_eq_Qgen'); the mutual step is not "
+          "written.")
 
     print("=" * 78)
     if all(ok.values()):

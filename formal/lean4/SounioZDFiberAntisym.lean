@@ -847,7 +847,44 @@ theorem Qgen_pow2 : ∀ (m k a b : Nat), k < m → a < 2^m → b < 2^m → Qgen 
         unfold Qgen at h
         exact h
 
+/-! ## Tier 6: the SECOND product the inductive step of (*) lands on -/
+
+/-- `Q'`, the product the `Y = W + H` half of the `(*)` inductive step reduces to. It differs
+    from `Qgen` in two factors, whose arguments are swapped:
+    `Q' W a b = sigma(a,b) sigma(b^W,a^W) sigma(b^W,a) sigma(a^W,b)`.
+    Measured: `Q'` is `tau`-equivariant in its own right, and `Q = Q'` EXCEPT on the degenerate
+    locus -- so the inductive step of `(*)` is a MUTUAL induction on the pair, not a single one. -/
+def Qgen' (W a b m : Nat) : Int :=
+  cdSigma a b m * cdSigma (b ^^^ W) (a ^^^ W) m * cdSigma (b ^^^ W) a m * cdSigma (a ^^^ W) b m
+
+/-- **`Q` and `Q'` agree off the degenerate locus**, by two applications of `antisym` whose sign
+    flips cancel. The hypotheses are exactly the degeneracies: the numerical rung measured that
+    they are not removable (100% of the disagreements sit there). -/
+theorem Qgen_eq_Qgen' (W a b m : Nat)
+    (ha : a < 2^m) (hb : b < 2^m) (hW : W < 2^m)
+    (h1 : a ^^^ W ≠ 0) (h2 : b ^^^ W ≠ 0) (h3 : (a ^^^ W) ^^^ (b ^^^ W) ≠ 0)
+    (h4 : a ≠ 0) (h5 : a ^^^ (b ^^^ W) ≠ 0) :
+    Qgen W a b m = Qgen' W a b m := by
+  have haW : a ^^^ W < 2^m := Nat.xor_lt_two_pow ha hW
+  have hbW : b ^^^ W < 2^m := Nat.xor_lt_two_pow hb hW
+  have hne1 : a ^^^ W ≠ b ^^^ W := by
+    intro h; exact h3 (by rw [h, Nat.xor_self])
+  have hne2 : a ≠ b ^^^ W := by
+    intro h; exact h5 (by rw [h, Nat.xor_self])
+  have e1 : cdSigma (a ^^^ W) (b ^^^ W) m = - cdSigma (b ^^^ W) (a ^^^ W) m :=
+    antisym m (a ^^^ W) (b ^^^ W) haW hbW h1 h2 hne1
+  have e2 : cdSigma a (b ^^^ W) m = - cdSigma (b ^^^ W) a m :=
+    antisym m a (b ^^^ W) ha hbW h4 h2 hne2
+  unfold Qgen Qgen'
+  rw [e1, e2]
+  rcases cdSigma_pm m a b with c1 | c1 <;>
+    rcases cdSigma_pm m (b ^^^ W) (a ^^^ W) with c2 | c2 <;>
+    rcases cdSigma_pm m (b ^^^ W) a with c3 | c3 <;>
+    rcases cdSigma_pm m (a ^^^ W) b with c4 | c4 <;>
+    rw [c1, c2, c3, c4] <;> decide
+
 end SounioZDFiberAntisym
+
 
 
 
