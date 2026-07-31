@@ -56,6 +56,7 @@ No link is assumed.
 | `K9` | base case of (★): `Q` at a single-bit label is identically `−1` | 0 violations, levels 4..7; Lean `Qgen_pow2` ∀n |
 | `K15` | (★) for single-bit labels: `Q_Y(a,b) = Q_{τY}(τa,τb)` when `Y = 2^k` | 0 violations, levels 4..7; Lean `star_pow2` ∀n |
 | `K16` | on the degenerate locus, `Q ≡ −1`; `Q'` is pattern-determined | measured 5..7; Lean `Qgen_degen` ∀n |
+| `K17` | the gap tuples no lemma covers also give `Q = −1` | 116 064 tuples, levels 6 and 7 — the branches are exhaustive |
 
 with `D1_Y(a,b) = σ(a,b)σ(a⊕Y,b)`, `D2_Y(c,y) = σ(c,y)σ(c,y⊕Y)`, and
 `e1 = D1_{τY}(τa,τb)·D1_Y(a,b)`, `e2` the same for `D2`.
@@ -110,8 +111,25 @@ makes the target *easier*, not harder.
   degeneracies, `Q ≡ −1` (proven ∀n). With `τ` preserving the pattern, both
   sides of (★) are that constant (`star_both_degen`). `Q'` pattern lemma not yet
   in Lean.
+- **The mismatch is bridged (K17).** The reduction lemmas' hypotheses are about the
+  **reduced** arguments; `Qgen_degen` is about the **current** ones, and they do not
+  coincide — a tuple can be non-degenerate at level `m+2` and reduce to a degenerate one
+  at `m+1` (e.g. `a = x`, `b = H`, `Y = W`: `b ≠ 0` and `b ⊕ Y ≠ 0` hold above, but the
+  reduced `v = 0`). Every one of those gap tuples gives `Q = −1` — the same constant the
+  degenerate branch gives. `116 064` of them at levels 6 and 7, zero exceptions.
+
+  So the assembly has exactly **three exhaustive branches**, plus the base case:
+
+  | branch | closes by | status |
+  |---|---|---|
+  | degenerate at `m+2` | `Qgen_degen`, both sides `−1` | **proven ∀n** |
+  | reduces to a degenerate tuple | the same constant `−1` | **measured**, no Lean lemma yet |
+  | otherwise | one of the sixteen reduction lemmas + the mutual IH | **proven ∀n** |
+  | base case | `Qgen_pow2` | **proven ∀n** |
+
 - **Multi-bit non-degenerate assembly still open.** All 16 reduction cases are
-  proven (K12–K14); wiring them under the mutual IH remains.
+  proven (K12–K14); what remains is the gap lemma, the `Q'` pattern lemma, and wiring
+  them under the mutual IH.
 - (c) as a whole is untouched: **L2 remains where the previous rung left it**, with its
   triangle route walled.
 
