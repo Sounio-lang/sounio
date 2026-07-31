@@ -137,7 +137,11 @@ Stack map: `docs/audit/MADAROS_FO_GUM_STACK_2026-07-27.md`.
 1. In-driver boolean acceptance after heavy FO can SEGV; gates grep printed tables.  
 2. ΣH under multi-site FO load may print ~7.20 vs solo-path 7.292592; Var/\(E_2\) freezes are the primary claims.  
 3. This annex is oral Css FO infrastructure, not a full PBPK28 clinical claim.  
-4. Import↔method numerical agreement is **executable evidence** (green gates), not a symbolic proof that FO operators commute across all surfaces.
+4. **Import↔method — residual split (2026-07-31):** algebraic surface equality and exact-ℚ FO freezes are machine-checkable in
+   `formal/lean4/SounioFoCssSurfaceParity.lean` (executable mirror
+   `scripts/ci/fo_css_surface_parity_gate.sh`, 17/17 OK). Compiler IR /
+   multi-mod surface commutativity for arbitrary programs remains R4
+   gate-backed numerical parity, not a compiler-metatheory theorem.
 
 ---
 

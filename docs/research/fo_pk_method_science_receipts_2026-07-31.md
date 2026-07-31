@@ -170,6 +170,10 @@ Compiler prerequisite: Madaros FO trust gate **42/42** (`scripts/ci/madaros_gum_
 1. **In-driver bool acceptance after heavy FO** can SEGV under Madaros; gates therefore **grep printed science tables**, not an in-process `if ok` chain.
 2. **ΣH under multi-site FO load** can print ~7.20 vs solo-path 7.292592 (multidose driver); Var/E₂ freezes remain the primary science claims.
 3. **Runtime (non-const) mutual FO depth** remains residual; not used by these receipts.
+4. **Import↔method residual split (2026-07-31):** algebraic surface equality + exact-ℚ FO freezes are certified in
+   `formal/lean4/SounioFoCssSurfaceParity.lean` with executable mirror
+   `scripts/ci/fo_css_surface_parity_gate.sh` (17/17). Compiler IR commutativity
+   for arbitrary programs remains R4 numerical parity only.
 
 ---
 

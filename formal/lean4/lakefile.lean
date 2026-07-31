@@ -660,3 +660,11 @@ lean_lib «SounioG2Derivations» where
 -- octonion alternativity Psi_3, block lemma at n=4 (β=0), and the 168 count. Not built by
 -- CI (heavy GL(4,2) sweeps); build on demand `lake build SounioCDTowerAutomorphism`.
 lean_lib «SounioCDTowerAutomorphism» where
+
+-- FO oral Css algebraic surface parity (residual §5.4 mathematical half of the
+-- FO PK method-science handoff). Import ≡ site ≡ method ≡ call-result by `rfl`;
+-- default-seed FO freezes as exact ℚ via native_decide. Companion executable
+-- certificate: scripts/research/fo_css_surface_parity_cert.py (CI gate always);
+-- lake build optional under FO_CSS_LEAN_BUILD=1.
+@[default_target]
+lean_lib «SounioFoCssSurfaceParity» where

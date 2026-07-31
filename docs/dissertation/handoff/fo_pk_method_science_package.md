@@ -249,10 +249,12 @@ paragraph. Numbers must match §3 freezes.
 > dissertation `Pk` methods, with call-result receivers, and with explicit
 > call-site composition on every frozen column of
 > \(\mathrm{Var}(C_{\mathrm{ss}})\), \(E_2\), \(\mathrm{Var}(\mathrm{CL})\), and
-> \(\mathrm{Var}(\mathrm{rate})=4.784722\). Surface agreement is **executable
-> evidence** under green CI gates (receipt R4), not a symbolic proof that FO
-> operators commute for every program; residual compiler limits are listed in
-> §5 of this package and in the research receipts note.
+> \(\mathrm{Var}(\mathrm{rate})=4.784722\). Algebraically, the four pure
+> surfaces are definitionally equal and the default-seed FO freezes are exact
+> rationals (`SounioFoCssSurfaceParity.lean` / `fo_css_surface_parity_gate.sh`).
+> Compiler IR surface commutativity for arbitrary programs remains
+> **executable evidence** under green CI gates (receipt R4); residual compiler
+> limits are listed in §5 of this package.
 
 ### 4.6 Bridge to PBPK / higher-order work (one paragraph)
 
@@ -284,8 +286,16 @@ paragraph. Numbers must match §3 freezes.
 2. **\(\sum H_{kk}\) under multi-site FO load** may print ~7.20 vs solo-path
    7.292592 (multidose driver). Primary science claims are Var / \(E_2\) freezes.
 3. **Runtime (non-const) mutual FO depth** remains residual; unused by R1–R4.
-4. **Import↔method agreement** is gate-backed numerical parity, not a Lean
-   commutativity theorem.
+4. **Import↔method agreement — residual split (2026-07-31):**
+   - **Algebraic half CLOSED:** pure surfaces `fo_css` ≡ site ≡ method ≡
+     call-result are definitionally equal, and default-seed FO freezes are
+     exact rationals matching R1–R4
+     (`formal/lean4/SounioFoCssSurfaceParity.lean`; executable mirror
+     `scripts/ci/fo_css_surface_parity_gate.sh` →
+     `FO_CSS_SURFACE_PARITY_GATE_OK` 17/17).
+   - **Compiler half OPEN:** Madaros IR / multi-mod import surface
+     commutativity for arbitrary programs remains **gate-backed numerical
+     parity** (R4), not a compiler-metatheory theorem.
 5. **Not a full PBPK28 clinical claim** — oral Css exemplar only.
 6. **Not clinical guidance** — dissertation methodology / compiler science.
 
@@ -312,6 +322,8 @@ paragraph. Numbers must match §3 freezes.
 | `docs/dissertation/results/fo_pk_method_science_v1.md` | Quantitative annex (tables + re-run) |
 | `docs/research/fo_pk_method_science_receipts_2026-07-31.md` | Research receipt index |
 | `docs/audit/MADAROS_FO_GUM_STACK_2026-07-27.md` | Compiler FO stack map |
+| `formal/lean4/SounioFoCssSurfaceParity.lean` | Algebraic surface-parity residual closeout |
+| `scripts/ci/fo_css_surface_parity_gate.sh` | Executable ℚ freeze certificate (17/17) |
 | `docs/dissertation/handoff/chapter_04.md` | PBPK28 clinical chapter handoff |
 | `docs/dissertation/handoff/section_4_10_sobol_hdmr_package.md` | Global SA writing package |
 | `docs/dissertation/results/m5_gum_4th_order_v1.md` | Why FO/Hessian can understate MC |
@@ -326,6 +338,7 @@ paragraph. Numbers must match §3 freezes.
 | 2026-07-31 (annex) | xAI (Grok) | math-review | OK on Css identity, τ-scaling, Var(E)=1575+1250ρ, kel cancel; TIGHTENABLE symbolic commutativity → residual §5.4 |
 | 2026-07-31 (this package) | xAI / grok-4.3 | math-review | OK on all eight freeze families; no leaps |
 | 2026-07-31 (this package) | Z.AI / GLM-5.2 | math-review | Independent re-derivation of Var(Css)=191/240, Var(E)=1575+1250ρ, ΣH_kk=1969/270 (incl. τ diag), kel Var=5.2e-5, σ_τ row, Var(rate)=689/144; truncated at token cap mid wrap-up, **zero [WRONG]** |
+| 2026-07-31 (residual-4 Lean) | xAI + Z.AI | math-review | PASS on SounioFoCssSurfaceParity freezes + surface rfl; cert 17/17 |
 
 Re-run `bin/llm-offload -t math-review -p xai` (and `-p zai`) if freezes change.
 Every offload appends `.claude/llm_offload_log.md`.
