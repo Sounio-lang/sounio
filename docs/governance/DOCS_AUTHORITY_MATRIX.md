@@ -700,6 +700,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.cd-tower-zd-fiber-antisymmetry-lemma-spec-2026-07-31 | historical | docs/research/cd_tower_zd_fiber_antisymmetry_lemma_spec_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.cd-tower-zd-fiber-collapse-l1l2-spec-2026-07-31 | historical | docs/research/cd_tower_zd_fiber_collapse_l1l2_spec_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.cd-tower-zd-fiber-l1-reduction-spec-2026-07-31 | historical | docs/research/cd_tower_zd_fiber_l1_reduction_spec_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.cd-tower-zd-fiber-l2-switching-spec-2026-07-31 | historical | docs/research/cd_tower_zd_fiber_l2_switching_spec_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.cd-tower-zd-fiber-signed-localization-2026-07-26 | historical | docs/research/cd_tower_zd_fiber_signed_localization_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.cd-tower-zd-fiber-spectral-classifier-2026-07-26 | historical | docs/research/cd_tower_zd_fiber_spectral_classifier_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.cd-tower-zd-fiber-spectral-forall-n-progress-2026-07-26 | historical | docs/research/cd_tower_zd_fiber_spectral_forall_n_progress_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
