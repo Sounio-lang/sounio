@@ -1,0 +1,149 @@
+<!-- docs:meta
+topic_id: repo.docs.dissertation.results.fo-pk-method-science-v1
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.dissertation.results.fo-pk-method-science-v1
+-->
+
+---
+docs:meta: true
+topic: dissertation-results
+kind: quantitative-output
+drug: oral-css-exemplar
+model: FO-GUM-oral-Css
+status: implementation-complete
+version: fo-pk-method-science-v1
+date: 2026-07-31
+---
+
+# FO PK method science — quantitative results v1
+
+**Full receipt index (tables + re-run commands):**  
+[`docs/research/fo_pk_method_science_receipts_2026-07-31.md`](../../research/fo_pk_method_science_receipts_2026-07-31.md)
+
+**Compiler stack:** Madaros FO trust ≥42/42  
+**Scope:** Oral steady-state Css under first-order GUM / FO. **Not clinical guidance.**
+
+This results file is the dissertation annex pointer for the four green science receipts R1–R4. Numbers are frozen by CI gates; re-derive before any external claim.
+
+---
+
+## 1. Scientific claim (measured)
+
+Under Madaros, first-order uncertainty propagation for oral average steady-state concentration
+
+\[
+C_{\mathrm{ss}} = \frac{F\cdot\mathrm{Dose}/\tau}{\mathrm{CL}_0\,e^{\eta}}
+\]
+
+is **surface-independent**: multi-mod stdlib helpers (`epistemic::fo`), dissertation-shaped `Pk` methods, call-result receivers (`make_pk(...).css`), and call-site composition produce the same Var / \(E_2\) / CL / rate freezes. Correlated latents, dosing-interval scaling, and τ-uncertainty are measured as separate green companions.
+
+---
+
+## 2. Core freezes (τ = 12 h)
+
+| Quantity | Value | Receipt |
+|----------|------:|---------|
+| \(C_{\mathrm{ss}}\) point | 6.666666 | R1, R4 |
+| \(\mathrm{Var}(C_{\mathrm{ss}})\) | 0.795833 | R1–R4 |
+| \(E_2[C_{\mathrm{ss}}]\) | 6.724 | R1, R3, R4 |
+| bias \(E_2 - C_{\mathrm{ss}}\) | 0.057333 | R1 |
+| \(\mathrm{Var}(\mathrm{CL})\) | 0.340000 | R1, R4 |
+| \(\mathrm{Var}(\mathrm{rate})\) | 4.784722 | R4 |
+
+Seeds: \(F=0.8\pm0.05\), Dose\(=500\pm10\), \(\mathrm{CL}_0=5\pm0.3\), \(\eta=0\pm0.1\).
+
+---
+
+## 3. Correlated latents and τ uncertainty (R2)
+
+Exposure \(E=\mathrm{CL}\cdot V\) with FO on \(\mathrm{CL}_0,V_0,\eta_{\mathrm{cl}},\eta_v\):
+
+\[
+\mathrm{Var}(E) = 1575 + 1250\cdot\rho
+\]
+
+| \(\rho\) | \(\mathrm{Var}(E)\) |
+|---------:|--------------------:|
+| 0 | 1575 |
+| 0.5 | 2200 |
+| 1 | 2825 (= shared peel) |
+
+Css with \(\sigma_\tau=0.5\): \(\mathrm{Var}=0.872993\) (vs 0.795833 at \(\sigma_\tau=0\)); \(E_2=6.735574\).
+
+---
+
+## 4. Dosing-interval series (R3)
+
+| \(\tau\) (h) | \(C_{\mathrm{ss}}\) | \(\mathrm{Var}\) | Scale vs \(\tau=12\) |
+|-------------:|--------------------:|-----------------:|---------------------:|
+| 8 | 10.000000 | 1.790625 | 2.25 |
+| 12 | 6.666666 | 0.795833 | 1 |
+| 24 | 3.333333 | 0.198958 | 0.25 |
+
+Law: \(C_{\mathrm{ss}}\propto 1/\tau\), \(\mathrm{Var}\propto 1/\tau^2\).  
+Elimination rate \(\mathrm{kel}=\mathrm{CL}/V\) with shared \(\eta\): \(\mathrm{kel}=0.1\), \(\mathrm{Var}=5.2\times10^{-5}\) (η cancels).
+
+---
+
+## 5. Import ↔ method parity (R4)
+
+| Surface | \(\mathrm{Var}(C_{\mathrm{ss}})\) | \(E_2\) | \(\mathrm{Var}(\mathrm{CL})\) |
+|---------|----------------------------------:|--------:|------------------------------:|
+| `fo_css` (import) | 0.795833 | 6.724 | 0.340000 |
+| `pk.css` (method) | 0.795833 | 6.724 | 0.340000 |
+| `make_pk(...).css` | 0.795833 | 6.724 | 0.340000 |
+| call-site composition | 0.795833 | — | — |
+
+---
+
+## 6. How to re-run
+
+```bash
+export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
+export MADAROS_RAW_BIN=${MADAROS_RAW_BIN:-artifacts/self-hosted/madaros}
+
+bash scripts/ci/fo_pk_struct_method_driver_gate.sh
+bash scripts/ci/fo_pk_struct_rho_tau_driver_gate.sh
+bash scripts/ci/fo_pk_struct_multidose_driver_gate.sh
+bash scripts/ci/fo_pk_import_method_driver_gate.sh
+```
+
+Expected: four `*_GATE_OK` lines. Re-validated on this workspace 2026-07-31.
+
+---
+
+## 7. Drivers (source of truth)
+
+| ID | Path |
+|----|------|
+| R1 | `examples/epistemic_fo_second_order/fo_pk_struct_method_driver.sio` |
+| R2 | `examples/epistemic_fo_second_order/fo_pk_struct_rho_tau_driver.sio` |
+| R3 | `examples/epistemic_fo_second_order/fo_pk_struct_multidose_driver.sio` |
+| R4 | `examples/epistemic_fo_second_order/fo_pk_import_method_driver.sio` |
+
+Compiler prerequisite: FO trust 42/42 — `scripts/ci/madaros_gum_fo_trust_gate.sh`.  
+Stack map: `docs/audit/MADAROS_FO_GUM_STACK_2026-07-27.md`.
+
+---
+
+## 8. Honest residuals
+
+1. In-driver boolean acceptance after heavy FO can SEGV; gates grep printed tables.  
+2. ΣH under multi-site FO load may print ~7.20 vs solo-path 7.292592; Var/\(E_2\) freezes are the primary claims.  
+3. This annex is oral Css FO infrastructure, not a full PBPK28 clinical claim.  
+4. Import↔method numerical agreement is **executable evidence** (green gates), not a symbolic proof that FO operators commute across all surfaces.
+
+---
+
+## 9. LLM-offload review
+
+| Provider | Task | Outcome |
+|----------|------|---------|
+| xAI (Grok) | math-review | OK on Css identity, τ-scaling, Var(E)=1575+1250ρ, kel cancellation; TIGHTENABLE on symbolic commutativity (addressed in residual 4) |
+
+---
+
+*Annex version fo-pk-method-science-v1. Prefer the research receipts file for full prose tables and citation sketch.*
