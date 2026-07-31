@@ -2997,6 +2997,18 @@ fn lowerer_fresh_reg_mut(lo: &! Lowerer) -> i64 with Mut, Panic, Div {
     reg
 }
 
+fn lowerer_fresh_label_mut(lo: &! Lowerer) -> i64 with Mut, Panic, Div {
+    if (*lo).current_fn < 0 || (*lo).current_fn >= (*(*lo).module).fn_count {
+        lowerer_mark_error(lo)
+        return 0
+    }
+    var current_func_box = (*lo).current_func
+    let label = (*current_func_box).label_count
+    (*current_func_box).label_count = label + 1
+    (*lo).current_func = current_func_box
+    label
+}
+
 // The value-threaded lowering methods are convenient, but Lowerer carries two
 // large inline metadata tables. Keep expression paths that must compose two
 // operands on a single Lowerer allocation rather than stacking several full
@@ -3256,6 +3268,100 @@ fn lowerer_lower_registered_named_call_mut(
     dst
 }
 
+fn lowerer_block_ends_in_print_ref(blk: &Block) -> bool with Mut, Panic, Div, Alloc {
+    var current = &blk.stmts
+    while true {
+        match *current {
+            Some(list) => {
+                match (*list).tail {
+                    Some(_) => current = &(*list).tail,
+                    _ => {
+                        if (*list).head.kind != StmtKind::StmtExpr {
+                            return false
+                        }
+                        match (*list).head.expr {
+                            Some(expr) => {
+                                if (*expr).kind != ExprKind::ExprCall {
+                                    return false
+                                }
+                                match (*expr).left {
+                                    Some(callee) => {
+                                        if (*callee).kind != ExprKind::ExprIdent {
+                                            return false
+                                        }
+                                        return name_eq((*callee).name, make_name("println"))
+                                            || name_eq((*callee).name, make_name("print"))
+                                            || name_eq((*callee).name, make_name("print_int"))
+                                            || name_eq((*callee).name, make_name("print_char"))
+                                    }
+                                    _ => return false,
+                                }
+                            }
+                            _ => return false,
+                        }
+                    }
+                }
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
+fn lowerer_if_has_terminal_print_blocks_ref(e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+    match e.block {
+        Some(then_block) => {
+            if !lowerer_block_ends_in_print_ref(&(*then_block)) {
+                return false
+            }
+        }
+        _ => return false,
+    }
+    match e.else_expr {
+        Some(else_expr) => {
+            if (*else_expr).kind != ExprKind::ExprBlock {
+                return false
+            }
+            match (*else_expr).block {
+                Some(else_block) => lowerer_block_ends_in_print_ref(&(*else_block)),
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+fn lowerer_lower_terminal_print_if_mut(lo: &! Lowerer, e: &Expr) -> i64 with Mut, Panic, Div, Alloc, IO {
+    let cond = lowerer_lower_opt_expr_mut(lo, &e.left)
+    let l_else = lowerer_fresh_label_mut(lo)
+    let l_end = lowerer_fresh_label_mut(lo)
+    let result = lowerer_fresh_reg_mut(lo)
+    lowerer_emit_mut(lo, ir_branch_false(cond, l_else))
+    match e.block {
+        Some(then_block) => {
+            let then_reg = lowerer_lower_block_mut(lo, &(*then_block))
+            lowerer_emit_mut(lo, ir_copy(result, then_reg))
+        }
+        _ => {}
+    }
+    lowerer_emit_mut(lo, ir_jump(l_end))
+    lowerer_emit_mut(lo, ir_label(l_else))
+    match e.else_expr {
+        Some(else_expr) => {
+            match (*else_expr).block {
+                Some(else_block) => {
+                    let else_reg = lowerer_lower_block_mut(lo, &(*else_block))
+                    lowerer_emit_mut(lo, ir_copy(result, else_reg))
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+    lowerer_emit_mut(lo, ir_label(l_end))
+    result
+}
+
 // Keep expression lowering on a single mutable Lowerer path. `Lowerer` has
 // large inline metadata tables, so by-value dispatch can exhaust the raw
 // self-hosted compiler's native stack even for a small binary or named call.
@@ -3284,6 +3390,9 @@ fn lowerer_lower_expr_mut(
         let pair = (*lo).lower_call_expr_ref(e)
         (*lo) = pair.0
         return pair.1
+    }
+    if (*e).kind == ExprKind::ExprIf && lowerer_if_has_terminal_print_blocks_ref(e) {
+        return lowerer_lower_terminal_print_if_mut(lo, e)
     }
     let pair = (*lo).lower_expr_ref(e)
     (*lo) = pair.0
