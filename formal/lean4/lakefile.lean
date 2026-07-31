@@ -640,3 +640,11 @@ lean_lib «SounioCayleyDicksonErasure» where
 -- the sedenion S³-fiber ker=4. Manifold homeomorphism / V₂(ℝ⁷) cited only.
 @[default_target]
 lean_lib «SounioG2Derivations» where
+
+-- FO oral Css algebraic surface parity (residual §5.4 mathematical half of the
+-- FO PK method-science handoff). Import ≡ site ≡ method ≡ call-result by `rfl`;
+-- default-seed FO freezes as exact ℚ via native_decide. Companion executable
+-- certificate: scripts/research/fo_css_surface_parity_cert.py (CI gate always);
+-- lake build optional under FO_CSS_LEAN_BUILD=1.
+@[default_target]
+lean_lib «SounioFoCssSurfaceParity» where

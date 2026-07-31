@@ -1,0 +1,349 @@
+<!-- docs:meta
+topic_id: repo.docs.dissertation.handoff.fo-pk-method-science-package
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.dissertation.handoff.fo-pk-method-science-package
+-->
+
+# FO PK method science — writing package (oral Css, R1–R4)
+
+**For:** Claude Desktop / prose session drafting a methods–results subsection on
+first-order GUM under Madaros FO (oral steady-state Css exemplar).  
+**From:** Grok Build session 2026-07-31, branch `research/zd-fiber-antisymmetry-lemma-20260731`.  
+**Not:** PBPK28 clinical chapter material — that remains `chapter_04.md` and
+`section_4_10_sobol_hdmr_package.md`. This package is the **compiler-backed oral
+Css FO science closeout** that supports Contribution 1 (GUM-through-model) at the
+algebraic / steady-state layer before full ODE/PBPK budgets.  
+**Governing numerical annex:** [`docs/dissertation/results/fo_pk_method_science_v1.md`](../results/fo_pk_method_science_v1.md)  
+**Full receipt index:** [`docs/research/fo_pk_method_science_receipts_2026-07-31.md`](../../research/fo_pk_method_science_receipts_2026-07-31.md)  
+**Compiler stack:** Madaros FO trust ≥42/42 — `scripts/ci/madaros_gum_fo_trust_gate.sh`  
+**Scope disclaimer:** Oral Css FO infrastructure and surface parity. **Not clinical guidance.**
+
+Drafting rules: quote freezes from §3 tables only; cite gate path + pass token;
+EN-UK orthography; do not upgrade residual 8.x items into theorems.
+
+---
+
+## 0. Where this sits in the thesis
+
+| Layer | Role | Primary artefact |
+|-------|------|------------------|
+| Compiler FO stack | Method FO, free-fn fields, call-result, correlate, multi-mod | `docs/audit/MADAROS_FO_GUM_STACK_2026-07-27.md` |
+| Science receipts R1–R4 | Measured oral Css freezes under FO | This package + results annex |
+| PBPK28 GUM-through-ODE | Full clinical chapter (rapa/sema) | `chapter_04.md`, `pbpk28_epistemic_v1.md` |
+| Higher-order / Sobol | Hessian residual, global SA | `m5_gum_4th_order_v1.md`, §4.10 package |
+
+**Suggested placement (prose session decides):** a short subsection under methods
+or results, e.g. **§4.x First-order GUM for oral steady-state Css (compiler
+surfaces)** — immediately *before* or *as a warm-up to* GUM-through-ODE / PBPK28
+epistemic budgets. Frame as: the language executes JCGM 100:2008 first-order
+propagation on dissertation-shaped `Pk` APIs with the same freezes as multi-mod
+stdlib helpers.
+
+---
+
+## 1. Model (quoteable)
+
+Oral average steady-state concentration under a lognormal clearance latent:
+
+\[
+C_{\mathrm{ss}}
+  = \frac{F\cdot \mathrm{Dose}/\tau}{\mathrm{CL}_0\, e^{\eta}},
+\qquad
+\mathrm{CL} = \mathrm{CL}_0 e^{\eta},
+\qquad
+V = V_0 e^{\eta_v}.
+\]
+
+Exposure product (correlated latents):
+
+\[
+E = \mathrm{CL}\cdot V = \mathrm{CL}_0 V_0 \exp(\eta_{\mathrm{cl}}+\eta_v).
+\]
+
+Default seeds (unless a driver overrides \(\tau\) or \(\rho\)):
+
+| Parameter | Mean | \(\sigma\) |
+|-----------|-----:|-----------:|
+| \(F\) | 0.8 | 0.05 |
+| Dose | 500 | 10 |
+| \(\tau\) | 12 h | 0 (0.5 in R2 τ-uncertainty row) |
+| \(\mathrm{CL}_0\) | 5 | 0.3 |
+| \(V_0\) | 50 | 2 |
+| \(\eta\) | 0 | 0.1 |
+
+First-order GUM (JCGM 100:2008): for \(y=f(\mathbf{x})\),
+
+\[
+u_c^2(y) \approx \sum_i \sum_j
+  \frac{\partial f}{\partial x_i}
+  \frac{\partial f}{\partial x_j}
+  u(x_i)u(x_j)r(x_i,x_j).
+\]
+
+Second-order mean correction (when reported):  
+\(E_2[y] \approx f(\boldsymbol{\mu}) + \tfrac12 \sum_k H_{kk}\sigma_k^2\).
+
+---
+
+## 2. Claims → drivers → gates
+
+| ID | Claim (one line) | Driver | Gate | Pass token |
+|----|------------------|--------|------|------------|
+| R1 | Method FO stack: struct-lit, `make_pk(...).css`, free-fn, shared-η exposure, ρ=1 | `examples/epistemic_fo_second_order/fo_pk_struct_method_driver.sio` | `scripts/ci/fo_pk_struct_method_driver_gate.sh` | `FO_PK_STRUCT_METHOD_DRIVER_PASS` / `*_GATE_OK` |
+| R2 | \(\mathrm{Var}(E)=1575+1250\rho\); Css \(\sigma_\tau=0.5\) raises Var | `fo_pk_struct_rho_tau_driver.sio` | `fo_pk_struct_rho_tau_driver_gate.sh` | `FO_PK_STRUCT_RHO_TAU_DRIVER_PASS` |
+| R3 | \(C_{\mathrm{ss}}\propto 1/\tau\), \(\mathrm{Var}\propto 1/\tau^2\); kel shared-η cancels | `fo_pk_struct_multidose_driver.sio` | `fo_pk_struct_multidose_driver_gate.sh` | `FO_PK_STRUCT_MULTIDOSE_DRIVER_PASS` |
+| R4 | Import `epistemic::fo` bit-agrees with method / call-result / site | `fo_pk_import_method_driver.sio` | `fo_pk_import_method_driver_gate.sh` | `FO_PK_IMPORT_METHOD_DRIVER_PASS` |
+
+Re-run all four:
+
+```bash
+export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
+export MADAROS_RAW_BIN=${MADAROS_RAW_BIN:-artifacts/self-hosted/madaros}
+
+bash scripts/ci/fo_pk_struct_method_driver_gate.sh
+bash scripts/ci/fo_pk_struct_rho_tau_driver_gate.sh
+bash scripts/ci/fo_pk_struct_multidose_driver_gate.sh
+bash scripts/ci/fo_pk_import_method_driver_gate.sh
+```
+
+Expected: four `*_GATE_OK` lines. Re-validated 2026-07-31 on this workspace.
+
+Compiler prerequisite (do not claim science freezes without it):
+
+```bash
+bash scripts/ci/madaros_gum_fo_trust_gate.sh   # ≥42/42
+```
+
+---
+
+## 3. Numerical results to quote (verbatim freezes)
+
+### 3.1 Core Css freezes at \(\tau=12\) h (R1, R4)
+
+| Quantity | Value | Receipts |
+|----------|------:|----------|
+| \(C_{\mathrm{ss}}\) point | 6.666666 | R1, R4 |
+| \(\mathrm{Var}(C_{\mathrm{ss}})\) | 0.795833 | R1–R4 |
+| \(E_2[C_{\mathrm{ss}}]\) | 6.724 | R1, R3, R4 |
+| bias \(E_2 - C_{\mathrm{ss}}\) | 0.057333 | R1 |
+| \(\mathrm{Var}(\mathrm{CL})\) | 0.340000 | R1, R4 |
+| \(\mathrm{Var}(\mathrm{rate})\) | 4.784722 | R4 |
+| \(\sum H_{kk}\) (solo path) | 7.292592 | R1 |
+
+### 3.2 Correlated exposure and \(\tau\) uncertainty (R2)
+
+Exposure \(E=\mathrm{CL}\cdot V\) under FO on \(\mathrm{CL}_0,V_0,\eta_{\mathrm{cl}},\eta_v\):
+
+\[
+\mathrm{Var}(E) = 1575 + 1250\cdot\rho.
+\]
+
+| \(\rho\) | \(\mathrm{Var}(E)\) |
+|---------:|--------------------:|
+| 0 | 1575 |
+| 0.5 | 2200 |
+| 1 | 2825 (= shared-η peel) |
+
+Css with dosing-interval uncertainty:
+
+| Setup | \(\mathrm{Var}(C_{\mathrm{ss}})\) | \(E_2\) |
+|-------|----------------------------------:|--------:|
+| \(\sigma_\tau=0\) | 0.795833 | 6.724 |
+| \(\sigma_\tau=0.5\) | 0.872993 | 6.735574 |
+
+### 3.3 Dosing-interval series and kel (R3)
+
+Law: \(C_{\mathrm{ss}}\propto 1/\tau\), \(\mathrm{Var}(C_{\mathrm{ss}})\propto 1/\tau^2\).
+
+| \(\tau\) (h) | \(C_{\mathrm{ss}}\) | \(\mathrm{Var}\) | Scale vs \(\tau=12\) |
+|-------------:|--------------------:|-----------------:|---------------------:|
+| 8 | 10.000000 | 1.790625 | 2.25 \(=(12/8)^2\) |
+| 12 | 6.666666 | 0.795833 | 1 |
+| 24 | 3.333333 | 0.198958 | 0.25 \(=(12/24)^2\) |
+
+Elimination rate \(\mathrm{kel}=\mathrm{CL}/V\) with **shared** \(\eta\): latent cancels →  
+\(\mathrm{kel}=0.1\), \(\mathrm{Var}(\mathrm{kel})=5.2\times 10^{-5}\) (FO from \(\mathrm{CL}_0,V_0\) only).
+
+### 3.4 Surface parity (R4)
+
+| Surface | \(\mathrm{Var}(C_{\mathrm{ss}})\) | \(E_2\) | \(\mathrm{Var}(\mathrm{CL})\) |
+|---------|----------------------------------:|--------:|------------------------------:|
+| import `fo_css` | 0.795833 | 6.724 | 0.340000 |
+| `pk.css` method | 0.795833 | 6.724 | 0.340000 |
+| `make_pk(...).css` | 0.795833 | 6.724 | 0.340000 |
+| call-site composition | 0.795833 | — | — |
+
+---
+
+## 4. Ready-to-paste EN-UK prose
+
+Paste into the thesis chapter; adjust section numbers. Keep the residual
+paragraph. Numbers must match §3 freezes.
+
+### 4.1 Opening (methods or results)
+
+> First-order uncertainty propagation for oral average steady-state
+> concentration was executed under the Madaros compiler’s FO GUM stack
+> (JCGM 100:2008). The algebraic model
+>
+> \[
+> C_{\mathrm{ss}} = \frac{F\cdot\mathrm{Dose}/\tau}{\mathrm{CL}_0\,e^{\eta}}
+> \]
+>
+> uses independent Gaussian seeds on bioavailability \(F\), dose, baseline
+> clearance \(\mathrm{CL}_0\), and a zero-mean lognormal latent \(\eta\) (default
+> \(\tau=12\,\mathrm{h}\)). The endpoint is deliberately simpler than the
+> full PBPK28 GUM-through-ODE budgets of later sections: it isolates whether
+> the language’s first-order shadow propagation is **surface-independent**
+> across multi-module stdlib helpers, dissertation-shaped struct methods,
+> call-result receivers, and call-site composition, before those operators
+> are embedded in adaptive integrators.
+
+### 4.2 Core freezes (R1)
+
+> Under the default seeds \(F=0.8\pm 0.05\), \(\mathrm{Dose}=500\pm 10\),
+> \(\mathrm{CL}_0=5\pm 0.3\), \(\eta=0\pm 0.1\), and fixed \(\tau=12\,\mathrm{h}\),
+> Madaros reports \(C_{\mathrm{ss}}=6.666666\) with combined variance
+> \(\mathrm{Var}(C_{\mathrm{ss}})=0.795833\). The second-order mean correction is
+> \(E_2[C_{\mathrm{ss}}]=6.724\), a positive bias of \(0.057333\) relative to the
+> point evaluation, consistent with convexity of the map in the uncertain
+> inputs. Clearance alone freezes at \(\mathrm{Var}(\mathrm{CL})=0.340000\).
+> These freezes are reproduced on struct-literal methods, on
+> `make_pk(...).css` call-result projections, and on free-function parity
+> paths (receipt R1; gate
+> `scripts/ci/fo_pk_struct_method_driver_gate.sh`).
+
+### 4.3 Correlated latents (R2)
+
+> Exposure \(E=\mathrm{CL}\cdot V\) with independent baseline means and
+> correlated latents \(\eta_{\mathrm{cl}},\eta_v\) yields the linear law
+> \(\mathrm{Var}(E)=1575+1250\cdot\rho\). At \(\rho=0\), \(0.5\), and \(1\),
+> measured variances are \(1575\), \(2200\), and \(2825\) respectively; the
+> unit-correlation case bit-agrees with a shared-latent peel of the same
+> product. Separately, admitting dosing-interval uncertainty
+> \(\sigma_\tau=0.5\,\mathrm{h}\) raises \(\mathrm{Var}(C_{\mathrm{ss}})\) from
+> \(0.795833\) to \(0.872993\) and \(E_2\) from \(6.724\) to \(6.735574\)
+> (receipt R2).
+
+### 4.4 Multi-dose interval series (R3)
+
+> Holding all other seeds fixed, the steady-state mean scales as
+> \(C_{\mathrm{ss}}\propto 1/\tau\) and the FO variance as
+> \(\mathrm{Var}(C_{\mathrm{ss}})\propto 1/\tau^2\). Relative to the \(\tau=12\)
+> reference, the \(\tau=8\) and \(\tau=24\) rows freeze at scale factors
+> \(2.25=(12/8)^2\) and \(0.25=(12/24)^2\), with absolute variances
+> \(1.790625\) and \(0.198958\). The elimination rate
+> \(\mathrm{kel}=\mathrm{CL}/V\) with a **shared** latent \(\eta\) cancels that
+> channel: \(\mathrm{kel}=0.1\) with residual
+> \(\mathrm{Var}(\mathrm{kel})=5.2\times 10^{-5}\) attributable only to
+> \(\mathrm{CL}_0\) and \(V_0\) (receipt R3). This cancellation is a structural
+> check that FO peels shared channels rather than double-counting them.
+
+### 4.5 Import ↔ method parity (R4)
+
+> Multi-module helpers imported from `epistemic::fo`
+> (`fo_css`, `fo_clearance`, `fo_infusion_rate`) bit-agree with the
+> dissertation `Pk` methods, with call-result receivers, and with explicit
+> call-site composition on every frozen column of
+> \(\mathrm{Var}(C_{\mathrm{ss}})\), \(E_2\), \(\mathrm{Var}(\mathrm{CL})\), and
+> \(\mathrm{Var}(\mathrm{rate})=4.784722\). Algebraically, the four pure
+> surfaces are definitionally equal and the default-seed FO freezes are exact
+> rationals (`SounioFoCssSurfaceParity.lean` / `fo_css_surface_parity_gate.sh`).
+> Compiler IR surface commutativity for arbitrary programs remains
+> **executable evidence** under green CI gates (receipt R4); residual compiler
+> limits are listed in §5 of this package.
+
+### 4.6 Bridge to PBPK / higher-order work (one paragraph)
+
+> The oral Css suite does not replace GUM-through-ODE on PBPK14/PBPK28, nor
+> the Sobol/Cut-HDMR global budgets of §4.10. Its role is infrastructural: it
+> shows that first-order combined standard uncertainty, second-order mean
+> bias, correlated latents, and shared-channel cancellation are available on
+> the same API shapes a pharmacologist writes (`pk.css`, multi-dose \(\tau\)
+> sweeps) and that those shapes agree with the multi-mod stdlib. Full organ
+> trajectories, Hessian heatmaps, and Monte Carlo cross-checks remain the
+> clinical-chapter claims; first-order GUM alone can understate uncertainty
+> for strongly non-linear endpoints (see M5 fourth-order residual and MC
+> cross-validation annexes).
+
+### 4.7 Short citation blurb (abstract / related work)
+
+> First-order GUM uncertainty for oral steady-state Css was executed under
+> Madaros FO (trust ≥42). Struct methods, call-result projections, multi-mod
+> `epistemic::fo` helpers, correlated latent \(\eta\), dosing-interval scaling,
+> and \(\tau\)-uncertainty were measured as green CI receipts R1–R4
+> (2026-07-31); tables re-run via `scripts/ci/fo_pk_*_gate.sh`.
+
+---
+
+## 5. Honest residuals (must appear if freezes are quoted)
+
+1. **In-driver boolean acceptance after heavy FO** can SEGV under Madaros;
+   gates **grep printed science tables**, not an in-process `if ok` chain.
+2. **\(\sum H_{kk}\) under multi-site FO load** may print ~7.20 vs solo-path
+   7.292592 (multidose driver). Primary science claims are Var / \(E_2\) freezes.
+3. **Runtime (non-const) mutual FO depth** remains residual; unused by R1–R4.
+4. **Import↔method agreement — residual split (2026-07-31):**
+   - **Algebraic half CLOSED:** pure surfaces `fo_css` ≡ site ≡ method ≡
+     call-result are definitionally equal, and default-seed FO freezes are
+     exact rationals matching R1–R4
+     (`formal/lean4/SounioFoCssSurfaceParity.lean`; executable mirror
+     `scripts/ci/fo_css_surface_parity_gate.sh` →
+     `FO_CSS_SURFACE_PARITY_GATE_OK` 17/17).
+   - **Compiler half OPEN:** Madaros IR / multi-mod import surface
+     commutativity for arbitrary programs remains **gate-backed numerical
+     parity** (R4), not a compiler-metatheory theorem.
+5. **Not a full PBPK28 clinical claim** — oral Css exemplar only.
+6. **Not clinical guidance** — dissertation methodology / compiler science.
+
+---
+
+## 6. FO compiler surfaces exercised
+
+| Surface | R1 | R2 | R3 | R4 |
+|---------|:--:|:--:|:--:|:--:|
+| Struct-lit methods | ✓ | ✓ | ✓ | ✓ |
+| Call-result methods | ✓ | ✓ | ✓ | ✓ |
+| Free-fn / site parity | ✓ | | ✓ | ✓ |
+| `correlate` | ✓ | ✓ | | |
+| Multi-mod import | | | | ✓ |
+| Shared FO channel (peel) | ✓ | ✓ | ✓ (kel) | |
+| \(E_2\) / Hessian | ✓ | ✓ | ✓ | ✓ |
+
+---
+
+## 7. Cross-links
+
+| Document | Role |
+|----------|------|
+| `docs/dissertation/results/fo_pk_method_science_v1.md` | Quantitative annex (tables + re-run) |
+| `docs/research/fo_pk_method_science_receipts_2026-07-31.md` | Research receipt index |
+| `docs/audit/MADAROS_FO_GUM_STACK_2026-07-27.md` | Compiler FO stack map |
+| `formal/lean4/SounioFoCssSurfaceParity.lean` | Algebraic surface-parity residual closeout |
+| `scripts/ci/fo_css_surface_parity_gate.sh` | Executable ℚ freeze certificate (17/17) |
+| `docs/dissertation/handoff/chapter_04.md` | PBPK28 clinical chapter handoff |
+| `docs/dissertation/handoff/section_4_10_sobol_hdmr_package.md` | Global SA writing package |
+| `docs/dissertation/results/m5_gum_4th_order_v1.md` | Why FO/Hessian can understate MC |
+| `docs/dissertation/VISAO_GERAL.md` | Contribution map (GUM-through-ODE) |
+
+---
+
+## 8. LLM-offload / audit trail
+
+| When | Provider | Task | Outcome |
+|------|----------|------|---------|
+| 2026-07-31 (annex) | xAI (Grok) | math-review | OK on Css identity, τ-scaling, Var(E)=1575+1250ρ, kel cancel; TIGHTENABLE symbolic commutativity → residual §5.4 |
+| 2026-07-31 (this package) | xAI / grok-4.3 | math-review | OK on all eight freeze families; no leaps |
+| 2026-07-31 (this package) | Z.AI / GLM-5.2 | math-review | Independent re-derivation of Var(Css)=191/240, Var(E)=1575+1250ρ, ΣH_kk=1969/270 (incl. τ diag), kel Var=5.2e-5, σ_τ row, Var(rate)=689/144; truncated at token cap mid wrap-up, **zero [WRONG]** |
+| 2026-07-31 (residual-4 Lean) | xAI + Z.AI | math-review | PASS on SounioFoCssSurfaceParity freezes + surface rfl; cert 17/17 |
+
+Re-run `bin/llm-offload -t math-review -p xai` (and `-p zai`) if freezes change.
+Every offload appends `.claude/llm_offload_log.md`.
+
+---
+
+*Package version fo-pk-method-science-handoff-v1 (2026-07-31). Re-run the four
+gates before quoting any number outside this repository.*
