@@ -747,6 +747,10 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.functor-f-phi-jets-vanish-spec-2026-07-25 | historical | docs/research/functor_f_phi_jets_vanish_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.furey-charge-g2 | historical | docs/research/furey_charge_g2.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.furey-octonion-generation | historical | docs/research/furey_octonion_generation.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.future-potential-option2-suffering-aware-multi-agent-2026-07-30 | historical | docs/research/future_potential_option2_suffering_aware_multi_agent_2026-07-30.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.future-potential-option4-suffering-aware-robotics-2026-07-30 | historical | docs/research/future_potential_option4_suffering_aware_robotics_2026-07-30.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.future-potential-suffering-aware-agi-2026-07-30 | historical | docs/research/future_potential_suffering_aware_agi_2026-07-30.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.future-potential-suffering-aware-quantum-2026-07-30 | historical | docs/research/future_potential_suffering_aware_quantum_2026-07-30.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.g2-zd-fibers-falsifiers-2026-07-25 | historical | docs/research/g2_zd_fibers_falsifiers_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.g2-zd-fibers-spec-2026-07-25 | historical | docs/research/g2_zd_fibers_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.garden-to-claim-pipeline-spec-2026-07-25 | historical | docs/research/garden_to_claim_pipeline_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -945,6 +949,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.self-falsifying-compilation-line-r21-2026-07-28 | historical | docs/research/self_falsifying_compilation_line_r21_2026-07-28.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.self-falsifying-compilation-line-r22-2026-07-29 | historical | docs/research/self_falsifying_compilation_line_r22_2026-07-29.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.self-falsifying-compilation-line-r23-2026-07-30 | historical | docs/research/self_falsifying_compilation_line_r23_2026-07-30.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.self-falsifying-compilation-line-r24-2026-07-31 | historical | docs/research/self_falsifying_compilation_line_r24_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.self-falsifying-compilation-line-r3-2026-07-26 | historical | docs/research/self_falsifying_compilation_line_r3_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.self-falsifying-compilation-line-r4-2026-07-26 | historical | docs/research/self_falsifying_compilation_line_r4_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.self-falsifying-compilation-line-r6-2026-07-26 | historical | docs/research/self_falsifying_compilation_line_r6_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -969,6 +974,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.subptx-sinkhorn16-2iter | historical | docs/research/subptx_sinkhorn16_2iter.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.suffering-aware-architecture-spec-2026-07-28 | historical | docs/research/suffering_aware_architecture_spec_2026-07-28.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.suffering-aware-deep-architecture-spec-2026-07-28 | historical | docs/research/suffering_aware_deep_architecture_spec_2026-07-28.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.suffering-aware-multi-agent-spec-2026-07-30 | historical | docs/research/suffering_aware_multi_agent_spec_2026-07-30.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.sunflower-168-sounio-note | historical | docs/research/sunflower-168-sounio-note.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.the-reckoning | historical | docs/research/the-reckoning.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.train-and-probe-usage | historical | docs/research/train-and-probe-usage.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
