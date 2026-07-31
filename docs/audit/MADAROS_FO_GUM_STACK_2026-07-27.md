@@ -117,6 +117,7 @@ Oral Css = (F·Dose/τ)/(CL0·exp(η)). Import driver is the multi-mod free-help
 `SounioFoMultimodFragment`.  
 **Oral Css residual §5.4 CLOSED** — closeout
 `docs/research/fo_pk_residual4_oral_css_closeout_2026-07-31.md`.  
+**Science R1–R4 + residual-4 stack** re-validated green 2026-07-31.  
 **L2 full engine** (arbitrary programs) remains OPEN. Stack:
 `scripts/ci/fo_residual4_stack_gate.sh`.  
 **Dissertation index:** [`docs/research/fo_pk_method_science_receipts_2026-07-31.md`](../research/fo_pk_method_science_receipts_2026-07-31.md) — R1–R4 tables, re-run commands, citation sketch.

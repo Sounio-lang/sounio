@@ -26,8 +26,12 @@ date: 2026-07-31
 **Chapter prose handoff (ready-to-paste EN-UK + claim map):**  
 [`docs/dissertation/handoff/fo_pk_method_science_package.md`](../handoff/fo_pk_method_science_package.md)
 
+**Residual §5.4 oral Css closeout (machine-checked surface independence):**  
+[`docs/research/fo_pk_residual4_oral_css_closeout_2026-07-31.md`](../../research/fo_pk_residual4_oral_css_closeout_2026-07-31.md)
+
 **Compiler stack:** Madaros FO trust ≥42/42  
-**Scope:** Oral steady-state Css under first-order GUM / FO. **Not clinical guidance.**
+**Scope:** Oral steady-state Css under first-order GUM / FO. **Not clinical guidance.**  
+**Package status (2026-07-31):** R1–R4 science gates + `fo_residual4_stack_gate.sh` → `ORAL_CSS_RESIDUAL4_CLOSED`.
 
 This results file is the dissertation annex pointer for the four green science receipts R1–R4. Numbers are frozen by CI gates; re-derive before any external claim. Paste-ready methods/results prose lives in the handoff package (§4).
 
@@ -114,7 +118,20 @@ bash scripts/ci/fo_pk_struct_multidose_driver_gate.sh
 bash scripts/ci/fo_pk_import_method_driver_gate.sh
 ```
 
-Expected: four `*_GATE_OK` lines. Re-validated on this workspace 2026-07-31.
+Expected: four `*_GATE_OK` lines. Re-validated on this workspace 2026-07-31
+(including residual-4 stack: `ORAL_CSS_RESIDUAL4_CLOSED`).
+
+Full package re-run:
+
+```bash
+export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
+export MADAROS_RAW_BIN=${MADAROS_RAW_BIN:-artifacts/self-hosted/madaros}
+bash scripts/ci/fo_pk_struct_method_driver_gate.sh
+bash scripts/ci/fo_pk_struct_rho_tau_driver_gate.sh
+bash scripts/ci/fo_pk_struct_multidose_driver_gate.sh
+bash scripts/ci/fo_pk_import_method_driver_gate.sh
+bash scripts/ci/fo_residual4_stack_gate.sh
+```
 
 ---
 
