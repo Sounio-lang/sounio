@@ -60,8 +60,10 @@ Y = W+H half of the step lands not on Q but on a SECOND product Q' (two factors 
 arguments). Q' is tau-equivariant in its own right, and Q = Q' EXCEPT on the degenerate locus --
 so the step is a MUTUAL induction on the pair (Q, Q'). Their generic agreement is PROVEN forall n
 in Lean (Qgen_eq_Qgen'). K11 gives the COMPLETE 16-case reduction table for the mutual step,
-verified off the degenerate locus -- so the step is fully SPECIFIED. It is not written in Lean:
-the degenerate branches, which the table excludes, are where the remaining work is.
+verified off the degenerate locus -- so the step is fully SPECIFIED. SIX of the sixteen cases are now PROVEN forall n in Lean as standalone reduction lemmas
+(Qred_low_ll/_lu/_ul/_uu, Qred_hi_ll/_hi_ul), with minimal hypotheses pinned by K12. The other
+two Q-cases (Y high, b upper) need the FULL non-degeneracy, the eight Q'-cases are not written,
+and the mutual induction is not assembled.
 
 Verdict L1_REDUCED_TO_SEAM_TAU_EQUIVARIANCE_OF_Q__NOT_PROVEN.
 Numerical certificate over an exact integer sign table; D3 respected.
@@ -369,6 +371,45 @@ def main():
           f"tau preserves both the quadrant and the Y position (it moves only bits 0 and j<=m), "
           f"so BOTH sides of (*) and (*') land in the same case with the same product and sign, "
           f"and each case closes by the corresponding induction hypothesis")
+
+    # ---- K12 the six Lean reduction lemmas, verified exactly as stated -------------------
+    k12 = True
+    for m in (4, 5):
+        Sn = sign_table_fast(m + 2).astype(np.int64)
+        Sm = sign_table_fast(m + 1).astype(np.int64)
+        H = 1 << (m + 1)
+
+        def QQ(S, a, b, W):
+            return int(S[a, b] * S[a ^ W, b ^ W] * S[a, b ^ W] * S[a ^ W, b])
+
+        def QP(S, a, b, W):
+            return int(S[a, b] * S[b ^ W, a ^ W] * S[b ^ W, a] * S[a ^ W, b])
+
+        for W in range(0, H):
+            for x in range(0, H, 2):
+                for y in range(0, H, 2):
+                    nd = (y != 0 and (y ^ W) != 0)
+                    # Qred_low_ll / _lu : NO extra hypotheses
+                    if QQ(Sn, x, y, W) != QQ(Sm, x, y, W):
+                        k12 = False
+                    if QQ(Sn, x, y + H, W) != QQ(Sm, y, x, W):
+                        k12 = False
+                    if nd:
+                        # Qred_low_ul / _uu / _hi_ll / _hi_ul : need b != 0 and b^W != 0
+                        if QQ(Sn, x + H, y, W) != QQ(Sm, x, y, W):
+                            k12 = False
+                        if QQ(Sn, x + H, y + H, W) != QQ(Sm, y, x, W):
+                            k12 = False
+                        if QQ(Sn, x, y, W + H) != -QP(Sm, x, y, W):
+                            k12 = False
+                        if QQ(Sn, x + H, y, W + H) != -QP(Sm, x, y, W):
+                            k12 = False
+    ok["K12"] = k12
+    print(f"K12_LEMMAS  the SIX Lean reduction lemmas hold exactly as stated, with their minimal "
+          f"hypotheses (levels 6->5 and 7->6) {'OK' if k12 else 'FAIL'}: Qred_low_ll and _lu need "
+          f"NO extra hypothesis; _ul, _uu, _hi_ll, _hi_ul need only b != 0 and b^W != 0. The "
+          f"other TWO Q-cases (Y high, b upper) need the FULL non-degeneracy and are NOT proven; "
+          f"the eight Q'-cases are not written")
 
     print("=" * 78)
     if all(ok.values()):

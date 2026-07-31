@@ -883,7 +883,96 @@ theorem Qgen_eq_Qgen' (W a b m : Nat)
     rcases cdSigma_pm m (a ^^^ W) b with c4 | c4 <;>
     rw [c1, c2, c3, c4] <;> decide
 
+/-! ## Tier 7: reduction lemmas for the mutual step (the K11 table, one lemma per case)
+
+Six of the eight `Q`-cases hold with MINIMAL hypotheses and are proved here. The two remaining
+`Q`-cases (`Y` high with `b` upper) need the FULL non-degeneracy -- measured, contract K11 -- and
+the eight `Q'`-cases are not written. -/
+
+/-- Table row `Q / Y low / ll`. -/
+theorem Qred_low_ll (m W a b : Nat) (hW : W < 2^(m+1)) (ha : a < 2^(m+1)) (hb : b < 2^(m+1)) :
+    Qgen W a b (m+2) = Qgen W a b (m+1) := by
+  unfold Qgen
+  rw [R_ll a b m ha hb, R_ll (a ^^^ W) (b ^^^ W) m (xorlt ha hW) (xorlt hb hW),
+      R_ll a (b ^^^ W) m ha (xorlt hb hW), R_ll (a ^^^ W) b m (xorlt ha hW) hb]
+
+/-- Table row `Q / Y low / lu`. -/
+theorem Qred_low_lu (m W a v : Nat) (hW : W < 2^(m+1)) (ha : a < 2^(m+1)) (hv : v < 2^(m+1)) :
+    Qgen W a (v + 2^(m+1)) (m+2) = Qgen W v a (m+1) := by
+  have hx : (v + 2^(m+1)) ^^^ W = (v ^^^ W) + 2^(m+1) := seam_xor_left v W m hv hW
+  unfold Qgen
+  rw [hx, R_lu a v m ha hv, R_lu (a ^^^ W) (v ^^^ W) m (xorlt ha hW) (xorlt hv hW),
+      R_lu a (v ^^^ W) m ha (xorlt hv hW), R_lu (a ^^^ W) v m (xorlt ha hW) hv]
+  ac_rfl
+
+/-- Table row `Q / Y low / ul` (needs `b ≠ 0`, `b ⊕ W ≠ 0`). -/
+theorem Qred_low_ul (m W u b : Nat) (hW : W < 2^(m+1)) (hu : u < 2^(m+1)) (hb : b < 2^(m+1))
+    (hb0 : b ≠ 0) (hbW : b ^^^ W ≠ 0) :
+    Qgen W (u + 2^(m+1)) b (m+2) = Qgen W u b (m+1) := by
+  have hx : (u + 2^(m+1)) ^^^ W = (u ^^^ W) + 2^(m+1) := seam_xor_left u W m hu hW
+  unfold Qgen
+  rw [hx, R_ul u b m hu hb, R_ul (u ^^^ W) (b ^^^ W) m (xorlt hu hW) (xorlt hb hW),
+      R_ul u (b ^^^ W) m hu (xorlt hb hW), R_ul (u ^^^ W) b m (xorlt hu hW) hb,
+      if_neg hb0, if_neg hbW, if_neg hbW, if_neg hb0]
+  rcases cdSigma_pm (m+1) u b with h1 | h1 <;>
+    rcases cdSigma_pm (m+1) (u ^^^ W) (b ^^^ W) with h2 | h2 <;>
+    rcases cdSigma_pm (m+1) u (b ^^^ W) with h3 | h3 <;>
+    rcases cdSigma_pm (m+1) (u ^^^ W) b with h4 | h4 <;>
+    rw [h1, h2, h3, h4] <;> decide
+
+/-- Table row `Q / Y low / uu` (needs `v ≠ 0`, `v ⊕ W ≠ 0`). -/
+theorem Qred_low_uu (m W u v : Nat) (hW : W < 2^(m+1)) (hu : u < 2^(m+1)) (hv : v < 2^(m+1))
+    (hv0 : v ≠ 0) (hvW : v ^^^ W ≠ 0) :
+    Qgen W (u + 2^(m+1)) (v + 2^(m+1)) (m+2) = Qgen W v u (m+1) := by
+  have hxu : (u + 2^(m+1)) ^^^ W = (u ^^^ W) + 2^(m+1) := seam_xor_left u W m hu hW
+  have hxv : (v + 2^(m+1)) ^^^ W = (v ^^^ W) + 2^(m+1) := seam_xor_left v W m hv hW
+  unfold Qgen
+  rw [hxu, hxv, R_uu u v m hu hv, R_uu (u ^^^ W) (v ^^^ W) m (xorlt hu hW) (xorlt hv hW),
+      R_uu u (v ^^^ W) m hu (xorlt hv hW), R_uu (u ^^^ W) v m (xorlt hu hW) hv,
+      if_neg hv0, if_neg hvW, if_neg hvW, if_neg hv0]
+  rcases cdSigma_pm (m+1) v u with h1 | h1 <;>
+    rcases cdSigma_pm (m+1) (v ^^^ W) (u ^^^ W) with h2 | h2 <;>
+    rcases cdSigma_pm (m+1) (v ^^^ W) u with h3 | h3 <;>
+    rcases cdSigma_pm (m+1) v (u ^^^ W) with h4 | h4 <;>
+    rw [h1, h2, h3, h4] <;> decide
+
+/-- Table row `Q / Y high / ll` (needs `b ≠ 0`, `b ⊕ W ≠ 0`). The sign flips and the product
+    becomes `Q'` -- this is the row that makes the induction MUTUAL. -/
+theorem Qred_hi_ll (m W a b : Nat) (hW : W < 2^(m+1)) (ha : a < 2^(m+1)) (hb : b < 2^(m+1))
+    (hb0 : b ≠ 0) (hbW : b ^^^ W ≠ 0) :
+    Qgen (W + 2^(m+1)) a b (m+2) = - Qgen' W a b (m+1) := by
+  have hxa : a ^^^ (W + 2^(m+1)) = (a ^^^ W) + 2^(m+1) := xor_seam a W m ha hW
+  have hxb : b ^^^ (W + 2^(m+1)) = (b ^^^ W) + 2^(m+1) := xor_seam b W m hb hW
+  unfold Qgen Qgen'
+  rw [hxa, hxb, R_ll a b m ha hb,
+      R_uu (a ^^^ W) (b ^^^ W) m (xorlt ha hW) (xorlt hb hW), if_neg hbW,
+      R_lu a (b ^^^ W) m ha (xorlt hb hW),
+      R_ul (a ^^^ W) b m (xorlt ha hW) hb, if_neg hb0]
+  rcases cdSigma_pm (m+1) a b with h1 | h1 <;>
+    rcases cdSigma_pm (m+1) (b ^^^ W) (a ^^^ W) with h2 | h2 <;>
+    rcases cdSigma_pm (m+1) (b ^^^ W) a with h3 | h3 <;>
+    rcases cdSigma_pm (m+1) (a ^^^ W) b with h4 | h4 <;>
+    rw [h1, h2, h3, h4] <;> decide
+
+/-- Table row `Q / Y high / ul` (needs `b ≠ 0`, `b ⊕ W ≠ 0`). -/
+theorem Qred_hi_ul (m W u b : Nat) (hW : W < 2^(m+1)) (hu : u < 2^(m+1)) (hb : b < 2^(m+1))
+    (hb0 : b ≠ 0) (hbW : b ^^^ W ≠ 0) :
+    Qgen (W + 2^(m+1)) (u + 2^(m+1)) b (m+2) = - Qgen' W u b (m+1) := by
+  have hxa : (u + 2^(m+1)) ^^^ (W + 2^(m+1)) = u ^^^ W := xor_seam_cancel u W m hu hW
+  have hxb : b ^^^ (W + 2^(m+1)) = (b ^^^ W) + 2^(m+1) := xor_seam b W m hb hW
+  unfold Qgen Qgen'
+  rw [hxa, hxb, R_ul u b m hu hb, if_neg hb0,
+      R_lu (u ^^^ W) (b ^^^ W) m (xorlt hu hW) (xorlt hb hW),
+      R_uu u (b ^^^ W) m hu (xorlt hb hW), if_neg hbW,
+      R_ll (u ^^^ W) b m (xorlt hu hW) hb]
+  rcases cdSigma_pm (m+1) u b with h1 | h1 <;>
+    rcases cdSigma_pm (m+1) (b ^^^ W) (u ^^^ W) with h2 | h2 <;>
+    rcases cdSigma_pm (m+1) (b ^^^ W) u with h3 | h3 <;>
+    rcases cdSigma_pm (m+1) (u ^^^ W) b with h4 | h4 <;>
+    rw [h1, h2, h3, h4] <;> decide
+
 end SounioZDFiberAntisym
+
 
 
 
