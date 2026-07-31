@@ -181,3 +181,144 @@ adiabatic delay curve above (~45 min runtime on lean_single):
 export SOUNIO_STDLIB_PATH=$(pwd)/stdlib SOUNIO_SOUC_ENGINE=lean_single
 ./bin/souc run examples/chemistry/h2_adiabatic_shocktube_demo.sio
 ```
+
+## Laminar flame speed (2026-07-31)
+
+Third leg of the trilogy: a 1-D premixed freely-propagating H2/air flame
+(phi=1, T_u=300 K, p=1 atm) in `stdlib/chemistry/flame1d.sio`, validated
+against a Cantera 3.2.0 free-flame solution computed with MATCHED kinetics
+AND MATCHED transport (`flame1d_cantera.py`, 29-reaction H/O sub-mechanism,
+`transport_model="unity-Lewis-number"`).
+
+### Transport decision (the match target)
+
+Unity Lewis number: one shared diffusivity for heat and all species,
+
+  D(T) = 4.9518e-05 * (T/300)^1.4435  m2/s   (lambda = rho cp D)
+
+fit to Cantera's operative lambda/(rho cp) sampled along its own unity-Lewis
+free-flame solution (fit residuals -6.9%..+8.9% over 300-2300 K). The Cantera
+reference was run with the SAME unity-Lewis transport, so the match target
+uses identical physics:
+
+  S_L = 1.6543 m/s   (Cantera 3.2.0, 29 rxn, unity-Lewis, phi=1; T_ad=2384.7 K)
+
+Mixture-averaged transport gives 2.3345 m/s at phi=1 (preferential H2
+diffusion — real physics) and the phi sweep under unity-Lewis is
+0.6->0.9652, 0.8->1.3810, 1.0->1.6543, 1.2->1.8143, 1.4->1.8848 m/s; both
+are CONTEXT ONLY, never the match target. Implementing mixture-averaged
+multicomponent transport is out of scope for a kinetics-validation
+benchmark.
+
+### Model
+
+Low-Mach planar flame, Godunov operator split per macro-step dt_m=5e-7 s:
+(1) stage-clamped explicit RK4 isobaric chemistry (substeps <= 1e-8 s;
+50 substeps above 2200 K, 12 below) on REACTIVE cells — T > 1200 K or any
+cell carrying a radical pool (H+O+OH+HO2 > 1e-8); (2) explicit FTCS
+transport: central diffusion + first-order upwind advection with the
+enthalpy-flux correction -sum(j_k cp_k) dT/dx, then Y clip/renorm.
+Flame-fixed frame with prescribed uniform mass flux rhou = -rho_u S_L_G
+(S_L_G = 1.6543 m/s): fresh inflow on the right, burned outflow on the
+left. IC: the converged Cantera unity-Lewis profile (301 pts, 20 um),
+anchored with its T=1500 K point at x0=1 mm; domain L=8 mm.
+
+Two honesty notes, both caught by the replica before the Sounio run:
+- Pinned hot-bath zone: cells more than 0.6 mm behind the anchor are frozen
+  at the profile state (Dirichlet burned reservoir). Unpinned, the ~1 mm of
+  burned gas drains out the left boundary at |u| ~ 11 m/s in ~90 us, the
+  plateau cools, and the front is flushed downstream (drift -1.4 m/s).
+- The chemistry mask MUST include the radical-pool clause: a pure T cutoff
+  masks the radical-seeded heat release of the 700-1200 K preheat foot that
+  the Cantera profile carries (the foot's radical cells release
+  +7..+17 K/macro-step, substep-converged) and the flame blows off — foot
+  dies, front collapses, drift -1.5 m/s.
+The exported Cantera profile is truncated on the burned side (its hot end
+is 2102 K, not T_ad = 2384.7 K; the recombination tail burns for ~cm beyond
+the export window). Consequence: the integral estimator is biased low
+(~10%) and T_max of the run is 2102 K by construction. This biases only
+the integral cross-check, not the front eigenvalue.
+
+### Speed extraction
+
+S_L = S_L_G + dx_f/dt: least-squares drift of the front position
+x_f = centroid of (max(-dT/dx,0))^2 over the last 60% of the run. In the
+prescribed-flux frame a consistent eigenvalue gives drift ~ 0; any
+systematic model bias shows up as nonzero drift. Cross-check: mass-flux
+integral S_L = integral(-omega_H2 W_H2) dx / (rho_u Y_H2,u) over the final
+state (exact for a steady flame in any frame; ~10% low here from the
+truncated tail).
+
+### Results
+
+Sounio (lean_single, 800 macro-steps = 0.4 ms, 35 min wall) vs the
+dependency-free Python replica (`flame1d_replica.py`, identical model):
+
+| quantity        | Sounio  | replica | agreement |
+|-----------------|---------|---------|-----------|
+| drift (m/s)     | +0.3388 | +0.3389 | 4 sig fig |
+| S_L(slope) m/s  | 1.9931  | 1.9932  | 4 sig fig |
+| S_L(integral)   | 1.6943  | 1.6944  | 4 sig fig |
+| T_max (K)       | 2102    | 2102.1  | -         |
+
+dx-convergence (replica; Sounio runs the base grid for runtime):
+
+| grid  | dx   | dt_m    | t_end  | drift   | S_L(slope) | S_L(integral) |
+|-------|------|---------|--------|---------|------------|---------------|
+| coarse| 80um | 2.0e-6  | 0.4 ms | +0.6857 | 2.3400     | 2.1984        |
+| base  | 40um | 5.0e-7  | 0.4 ms | +0.3389 | 1.9932     | 1.6944        |
+| fine  | 20um | 1.25e-7 | 0.2 ms | +0.1027 | 1.7570     | 1.5270        |
+
+S_L(slope) decreases monotonically toward the Cantera reference under
+refinement (excess +41% / +20.5% / +6.2% at 80/40/20 um) — the signature of
+the first-order upwind advection, whose numerical diffusivity
+D_num = |u| dx/2 is 20-30% of the physical D at the front on the base grid
+and inflates the discrete eigenvalue. The two estimators bracket the
+reference on the fine grid (1.527 < 1.6543 < 1.757); linear extrapolation
+of the slope estimator through coarse+base lands at 1.646 (-0.5%), through
+base+fine at 1.521 — the trend is convex, so we report the measured grid
+values rather than an extrapolated point estimate. Remaining biases:
+upwind diffusion (above), the D(T) fit band (±9% -> ±4.5% on S_L), and the
+truncated-tail bias on the integral estimator. The mixture-averaged value
+2.3345 m/s and the literature anchors below are preferential-diffusion
+regime numbers — CONTEXT ONLY.
+
+Literature (bibliography verified via Crossref; abstracts carry no phi=1
+300 K point values, so no numeric correlation constants are quoted —
+ILLUSTRATIVE regime context only): Aung K.T., Hassan M.I., Faeth G.M.,
+"Flame stretch interactions of laminar premixed hydrogen/air flames at
+normal temperature and pressure", Combustion and Flame 109:1-24 (1997),
+DOI 10.1016/S0010-2180(96)00151-4; Krejci M.C., Mathieu O., Vissotski A.J.,
+Ravi S., Sikes T.G., Petersen E.L., et al., "Laminar Flame Speed and
+Ignition Delay Time Data for the Kinetic Modeling of Hydrogen and Syngas
+Fuel Blends", ASME Turbo Expo GT2012-69290 (2012), DOI 10.1115/GT2012-69290.
+
+### Engine/parity status
+
+- Suite test `tests/stdlib/chemistry/test_flame1d.sio` (thermo/D pins +
+  clamped-RK4 substep pins vs the replica) PASS on BOTH lean_single and
+  madaros.
+- Byte-parity probe (9 integer-scaled pins: 2 substep states, D(1000),
+  rho(1500), cp(1500)) byte-identical between madaros and lean_single
+  (strip the madaros banner with `awk '/^   Output: /{f=1; next} f'`).
+- `gri30_h2.sio` gained `g30_cp_rhs` (isobaric RHS, pinned vs Cantera at
+  0.036%) and `g30_cp_rhs_out` (out-param sibling): madaros miscompiles
+  tuple-array destructures reached from loop bodies (same engine class as
+  the documented 1000-step UV loop issue), so the flame substepper uses the
+  out-param form on both engines. The full demo runs on lean_single only
+  (madaros rc=182 wall on heavy loops, pre-existing).
+- New engine quirks found this leg: madaros E038 rejects `&y`+`&!y`
+  same-call aliasing that lean accepts (worked around with a separate input
+  array); lean_single aliases two simultaneously-held tuple-array returns
+  (avoided via the out-param substep signature).
+
+### Runs
+
+```
+# Sounio demo (base grid, ~35 min on lean_single)
+SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run examples/chemistry/h2_flame_speed_demo.sio
+# Cantera reference (matched kinetics + transport; ~25 s)
+PYTHONPATH=/tmp/pylibs python3 benchmarks/chemistry/flame1d_cantera.py
+# Python replica: base + fine + coarse grids (~2.5 h)
+python3 benchmarks/chemistry/flame1d_replica.py
+```
