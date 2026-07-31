@@ -73,6 +73,12 @@ lean_lib «SounioHydrogenReceipt» where
 @[default_target]
 lean_lib «SounioHydrogenVanthoff» where
 
+-- Valley-chain composition: corner-exactness of the composed
+-- subsurface·compressor·capacity-factor p-box (explicit premises,
+-- exact-rational receipt for the demo's constants).
+@[default_target]
+lean_lib «SounioHydrogenValleyPbox» where
+
 @[default_target]
 lean_lib «SounioProofObligation» where
 
