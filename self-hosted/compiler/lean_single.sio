@@ -9013,8 +9013,11 @@ fn emit_print_int() with Mut {
     // lea rsi, [rcx+1]; mov rdx, rsp+32-rsi; write(1, rsi, rdx); add rsp, 32
     em(0x48); em(0x83); em(0xec); em(32)  // sub rsp, 32
     em(0x48); em(0x8d); em(0x4c); em(0x24); em(31)  // lea rcx, [rsp+31]
-    em(0xc6); em(0x01); em(10)  // mov byte [rcx], '\n'
-    em(0x48); em(0xff); em(0xc9)  // dec rcx
+    // No baked-in '\n'. It used to be written here, which made print(x) and
+    // print_int(x) emit a newline nobody asked for and made println(x) correct
+    // only by accident. println now appends it explicitly. Same buffer shape as
+    // emit_print_u64_no_nl_x86 below: digits start at [rsp+31], end stays
+    // rsp+32, so the length math is unchanged. (#1573)
     // Handle negative: if rax < 0, negate, set r8=1
     em(0x4d); em(0x31); em(0xc0)  // xor r8, r8
     em(0x48); em(0x85); em(0xc0)  // test rax, rax
@@ -12833,11 +12836,13 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     // (issue #633).
                     if EXPR_IS_F64 == 1 || EXPR_TY == 2 {
                         emit_print_f64()
+                        emit_print_nl()
                     } else if EXPR_TY == 3 || (EXPR_TY == 10 && ref_hash_inner_ty(EXPR_TY_HASH) == 3) {
                         emit_print_cstr()
                         emit_print_nl()
                     } else {
                         emit_print_int()
+                        emit_print_nl()
                     }
                 }
                 if TK[EP as usize] == 7 { EP = EP + 1 }
@@ -30964,11 +30969,9 @@ fn emit_print_int_a64() with Mut {
     // x0 = value to print
     // sub sp, sp, #64 for scratch buffer
     em32(0xD1000000 | (64 << 10) | (31 << 5) | 31)  // sub sp, sp, #64
-    // store '\n' at sp+63
-    em32(0xD2800140 | 10)  // movz x10, #10
-    em32(0x39000000 | (63 << 10) | (31 << 5) | 10)  // strb w10, [sp, #63]
-    // x9 = sp + 62 (current write position)
-    em32(0x91000000 | (62 << 10) | (31 << 5) | 9)   // add x9, sp, #62
+    // No baked-in '\n' -- see the x86-64 twin. x9 starts at sp+63 and the
+    // length stays (sp+64) - x1, exactly as in emit_print_u64_no_nl_a64.
+    em32(0x91000000 | (63 << 10) | (31 << 5) | 9)   // add x9, sp, #63
     // x11 = 0 (negative flag)
     em32(0xD2800000 | 11)  // movz x11, #0
     // Check if negative: cmp x0, #0; b.ge skip_neg
@@ -33263,11 +33266,13 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     // reference for dispatch only (issue #633).
                     if EXPR_IS_F64 == 1 || EXPR_TY == 2 {
                         emit_print_f64_a64()
+                        emit_print_nl_a64()
                     } else if EXPR_TY == 3 || (EXPR_TY == 10 && ref_hash_inner_ty(EXPR_TY_HASH) == 3) {
                         emit_print_cstr_a64()
                         emit_print_nl_a64()
                     } else {
                         emit_print_int_a64()
+                        emit_print_nl_a64()
                     }
                 }
                 if TK[EP as usize] == 7 { EP = EP + 1 }
