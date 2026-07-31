@@ -20,6 +20,7 @@ bin/souc run demos/hydrogen/bayes_pilot.sio                              # value
 bin/souc run demos/hydrogen/hub_chain.sio                                # full chain: delivered EUR/kg
 bin/souc run demos/hydrogen/methanation_logk_gate.sio                   # methanation log-K gate
 SOUNIO_SOUC_ENGINE=lean_single bin/souc run demos/hydrogen/uhs_brine_calcite.sio  # UHS H2-brine-calcite network (lean_single only, see below)
+SOUNIO_SOUC_ENGINE=lean_single bin/souc run demos/hydrogen/site_screening.sio     # epistemic UHS site screening, sourced Greek sites (lean_single only)
 ```
 
 Deterministic (seeded xorshift PRNG): every run prints the same numbers and
@@ -562,6 +563,50 @@ SOUNIO_SOUC_ENGINE=lean_single bin/souc run demos/hydrogen/uhs_brine_calcite.sio
 Suite coverage: `tests/run-pass/uhs_brine_calcite_selftest.sio` pins the
 25 °C trajectory and band against an independent Python delta-method
 replica (`UHS_BRINE_CALCITE_SELFTEST_OK`).
+
+## The site screen (`site_screening.sio`) — real Greek UHS candidates, sourced, through the network and the chain
+
+The epistemic UHS site-screening brief package: three **real, public,
+cited** Greek H₂-storage candidate formations — S1 South Kavala depleted
+gas field (T = 95 °C *measured*, HRADF 2020; 2 TWh H₂ per HyUSPRe D1.3),
+S2 Pentalofos and S3 Eptachori saline-aquifer formations in the
+Mesohellenic Trough (Koukouzas 2021, *Energies* 14:3321; T brackets
+gradient-derived and *labeled* as such) — each run through the
+brine–calcite network at its own temperature bracket, then through the
+TRIERES valley chain. Every geological value carries a citation or an
+explicit label in `site_screening_data.md` (including a NOT-FOUND list:
+no measured formation-water salinity exists for any Greek candidate;
+TRIERES GA 101112056 is Corinth-anchored with no public geological
+deliverables — stated in the data file and the brief).
+
+Headline (deterministic receipt `SITE_SCREENING_OK`): the sourced
+brackets put the three sites in **three different kinetic regimes** —
+S1 entirely above the abstract-level 70 °C interaction cutoff (30-yr
+loss exactly [0, 0] %), S2 entirely below it ([0.085, 2.276] %), S3
+**straddling** it ([0, 1.981] %). At the valley's 1-yr residence all
+sites leave f_s within ~0.1 % of 1 and the composed gate probability is
+~3.6 % for every site — which candidate hosts the store does not move
+the gate; the compressor p-box does. The τ = 10 yr analytic sensitivity
+shows where site choice starts to matter.
+
+Artifacts:
+
+- `site_screening_data.md` — the sourced parameter table (HRADF,
+  Energies, Hystories, HyUSPRe, Sci. Rep., CORDIS; accessed 2026-07-31).
+- `SITE_SCREENING_BRIEF.md` — the 2–3 page brief draft (figures,
+  honest-limitations section, AWAITING-AUTHOR-DATA swap invitation).
+- `figures/` — publication-quality PNGs rendered from the demo's own
+  stdout by `tools/render_site_figures.py` (matplotlib in the repo
+  `.venv`; captions state data provenance; regenerate from a fresh run
+  to byte-verify).
+- `tools/replica_60c_pins.py` — independent Python RK4 replica used for
+  the selftest pins.
+
+Suite coverage: `tests/run-pass/site_screening_selftest.sio` pins the
+60 °C trajectory against the independent replica, the A2 regime switch,
+the k_m corner ordering, the chain analytics, and a small seeded MC
+count (`SITE_SCREENING_SELFTEST_OK`). lean_single only (same Madaros
+chemistry-import blocker as the network demo).
 
 ## The stdlib modules (new, reusable)
 

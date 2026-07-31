@@ -1,0 +1,758 @@
+// demos/hydrogen/site_screening.sio
+//
+// EPISTEMIC UHS SITE SCREENING — three REAL, PUBLIC, CITED Greek
+// H2-storage candidate formations (demos/hydrogen/site_screening_data.md),
+// each run through the validated UHS H2-brine-calcite kinetic network
+// (demos/hydrogen/uhs_brine_calcite.sio, merged #1585 — re-derived here
+// with the same formulas/constants, NOT modified) at its own sourced
+// temperature bracket, then through the TRIERES valley chain
+// (valley_chain_epistemic.sio, merged #1587) to the 6 EUR/kg gate.
+//
+// The composition is BY CONSTRUCTION: both component models are
+// re-derived in-file; the components themselves are untouched.
+//
+// ============================ THE SITES (all sourced) ======================
+//
+//   S1  SOUTH KAVALA depleted gas field (offshore N. Aegean; Greece's
+//       concessioned UGS, H2 conversion reported). Turbiditic sands in
+//       Miocene anhydrite/salt. Depth > 1630 m ss, GWC 1723 m,
+//       T = 95 C MEASURED, porosity 20-22 %, k = 50-100 mD,
+//       p 182 -> 27 bar, NO H2S. Source: HRADF tender Annex B (2020);
+//       H2 potential 2 TWh (HyUSPRe D1.3 p. 31).
+//   S2  PENTALOFOS Fm, Mesohellenic Trough (Grevena sub-basin, W.
+//       Macedonia). Turbiditic sandstone saline aquifer, Tsotyli caprock.
+//       Avg depth 1500 m, porosity 7-25 %. T NOT MEASURED: union bracket
+//       [52.5, 69.0] C from Hystories default 30 +/- 3 C/km and the
+//       Strymon-basin measured 25-36 C/km (Dotsika 2021, Sci. Rep.
+//       11:16291). Sources: Koukouzas 2021 (Energies 14:3321, Table 6),
+//       Hystories D1.4 §12.
+//   S3  EPTACHORI Fm, same trough. Conglomerates/sandstones, shale top.
+//       Avg depth 2000 m, porosity ~12 %. T bracket [65, 87] C, same
+//       construction — STRADDLES the network's abstract-level 70 C
+//       interaction cutoff (A2): the hot corner is interaction-free BY
+//       THE SLOT, so the site p-box spans both regimes. Same sources.
+//
+// Geography honesty: TRIERES (GA 101112056) is anchored at the Motor Oil
+// CORINTH refinery, not Western Macedonia, and has no public geological
+// deliverables (CORDIS, accessed 2026-07-31). These are the Greek UHS
+// candidates the public literature actually documents; the economics are
+// the TRIERES chain. Full citations + NOT-FOUND list:
+// demos/hydrogen/site_screening_data.md.
+//
+// ============================ WHAT IS AND IS NOT SITE-SPECIFIC ============
+//
+// The kinetic network (uhs_brine_calcite.sio header, labels C1-C6) is a
+// closed batch at fixed pH 7, pH2 = 15 atm, fixed brine composition. Of
+// the sourced per-site parameters, ONLY THE TEMPERATURE enters this
+// network (through the PWP rate constants k(T), the K4(T) closure, and
+// the k_m slot's 70 C cutoff). Depth, porosity, permeability, pressure
+// shape the REAL storage project's capacity and injectivity — printed in
+// the brief — but have no slot in this loss machinery; salinity enters
+// only through the already-illustrative salting-out interval [0.70, 1.00]
+// (no measured Greek formation-water salinity exists — site data file,
+// NOT-FOUND list). This is stated, not smoothed over: the screening
+// differentiates sites by their sourced T brackets and reports the rest
+// as documented context with AWAITING-AUTHOR-DATA slots.
+//
+// PINNED INPUTS (re-derived by the component demos, not re-run here):
+//   - compressor availability p-box R in [0.013100, 0.998900] (corner
+//     p-box of mh7_reliability.sio; byte-pinned in
+//     valley_chain_epistemic.sio Section B),
+//   - economic intervals LO8/HI8 (trieres_chain.sio SOURCED/ILLUSTRATIVE
+//     split, verbatim),
+//   - valley subsurface p-box L30 in [0.458073, 2.630814] % (25 C,
+//     uhs_brine_calcite.sio) for the composed-baseline re-derivation.
+// ILLUSTRATIVE couplings (ours, labeled): f_s = 1 - (L30/100)(tau/30),
+// f_c = R, CF_eff = f_s * f_c * CF, tau = 1 yr (seasonal buffer; tau = 10
+// sensitivity printed analytically). Monotonicity: D decreasing in
+// CF_eff, CF_eff increasing in f_s/f_c/CF, f_s decreasing in L30 —
+// corner p-boxes exact, machine-checked in
+// formal/lean4/SounioHydrogenValleyPbox.lean (valley_corner_exact).
+//
+// ENGINE: lean_single ONLY (Madaros cannot compile chemistry::kinetics
+// imports — pre-existing blocker #1584, see uhs_brine_calcite.sio E5).
+// lean_single quirks honored: scalars extracted before the next
+// tuple-return call (E6 aliasing), MatNM built in main (cannot be
+// returned), RNG calls in their own statements, globals zero-init +
+// runtime-assigned, per-site report behind a helper boundary.
+//
+// DETERMINISM: xorshift PRNG re-seeded (314159265, 271828182) before
+// every MC evaluation — the valley-chain seed idiom; MC n = 20000,
+// integer-counted decisions. All floats via integer-digit printers.
+// RUNTIME: 24-40 CRN corner runs per site (~6 s each on this
+// workspace) + 14 MC evaluations — measured wall ~10-13 min total on
+// lean_single.
+// Marker: SITE_SCREENING_OK
+
+use chemistry::kinetics::*
+use epistemic::pbox::new
+use epistemic::pbox::width
+
+// ─── pure-Sounio math (no extern "C") ───
+
+fn ss_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn ss_sqrt(x: f64) -> f64 with Mut {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 30 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn ss_exp(x: f64) -> f64 with Mut, Div {
+    if x > 700.0 { return 1.0e200 }
+    if x < 0.0 - 700.0 { return 0.0 }
+    var kf = x / 0.6931471805599453
+    var k = kf as i64
+    if kf < 0.0 {
+        if kf != (k as f64) { k = k - 1 }
+    }
+    let r = x - (k as f64) * 0.6931471805599453
+    var s = 1.0
+    var term = 1.0
+    var n: i64 = 1
+    while n < 25 { term = term * r / (n as f64); s = s + term; n = n + 1 }
+    var result = s
+    if k >= 0 {
+        var i: i64 = 0
+        while i < k { result = result * 2.0; i = i + 1 }
+    } else {
+        var i: i64 = 0
+        while i < (0 - k) { result = result / 2.0; i = i + 1 }
+    }
+    result
+}
+
+fn ss_pow10(x: f64) -> f64 with Mut, Div {
+    ss_exp(x * 2.302585093)
+}
+
+fn ss_min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+fn ss_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+
+// ─── PRNG (xorshift, deterministic seed; valley-chain idiom verbatim) ───
+
+var RNG_A: i64 = 0
+var RNG_B: i64 = 0
+
+fn rng_seed(a: i64, b: i64) with Mut {
+    RNG_A = a
+    RNG_B = b
+}
+
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A
+    let y = RNG_B
+    RNG_A = y
+    x = x ^ (x << 23)
+    x = x ^ (x >> 17)
+    x = x ^ (y ^ (y >> 26))
+    RNG_B = x
+    let r = x + y
+    if r < 0 { 0 - r } else { r }
+}
+
+fn rand_u() -> f64 with Mut, Div {
+    (rng_next() % 10000) as f64 / 10000.0
+}
+
+fn rand_normal() -> f64 with Mut, Div {
+    var sum = 0.0
+    var j = 0
+    while j < 12 { sum = sum + rand_u(); j = j + 1 }
+    sum - 6.0
+}
+
+// ─── integer digit printers (byte-stable on every engine) ───
+
+fn ss_floor_i64(x: f64) -> i64 with Mut {
+    var n = x as i64
+    if (n as f64) > x { n = n - 1 }
+    return n
+}
+
+fn ss_ceil_i64(x: f64) -> i64 with Mut {
+    let n = ss_floor_i64(x)
+    if (n as f64) < x { return n + 1 }
+    n
+}
+
+fn ss_pd(d: i64) with IO {
+    if d == 0 { print("0") }
+    if d == 1 { print("1") }
+    if d == 2 { print("2") }
+    if d == 3 { print("3") }
+    if d == 4 { print("4") }
+    if d == 5 { print("5") }
+    if d == 6 { print("6") }
+    if d == 7 { print("7") }
+    if d == 8 { print("8") }
+    if d == 9 { print("9") }
+}
+
+fn ss_i2(n: i64) with IO {
+    ss_pd(n / 10)
+    ss_pd(n % 10)
+}
+
+// fixed 6-decimal printer; |x| < 10^6, round-half-up
+fn ss_fix6(x: f64) with IO, Mut {
+    var v = x
+    if v < 0.0 { print("-"); v = 0.0 - v }
+    let n = ss_floor_i64(v * 1000000.0 + 0.5)
+    let ip = n / 1000000
+    let fp = n % 1000000
+    var div: i64 = 100000
+    while div > ip { div = div / 10 }
+    if div < 1 { div = 1 }
+    while div > 0 { ss_pd((ip / div) % 10); div = div / 10 }
+    print(".")
+    var fdiv: i64 = 100000
+    while fdiv > 0 { ss_pd((fp / fdiv) % 10); fdiv = fdiv / 10 }
+}
+
+fn ss_pct(hits: i64, n: i64) -> f64 with Div {
+    100.0 * (hits as f64) / (n as f64)
+}
+
+// ─── [A] the brine-calcite network (verbatim re-derivation) ───
+
+fn ss_spy() -> f64 { 31557600.0 }
+
+fn k1_pwp(t: f64) -> f64 with Mut, Div { ss_pow10(0.198 - 444.0 / t) }
+fn k2_pwp(t: f64) -> f64 with Mut, Div { ss_pow10(2.84 - 2177.0 / t) }
+fn k3_pwp(t: f64) -> f64 with Mut, Div {
+    if t <= 298.15 { return ss_pow10(0.0 - 5.86 - 317.0 / t) }
+    ss_pow10(0.0 - 1.1 - 1737.0 / t)
+}
+
+// phreeqc.dat calcite log_k = -8.45, dH = -3.15 kcal/mol, R.ln10 = 19.14476
+fn logk_calcite(t: f64) -> f64 with Div {
+    0.0 - 8.45 - ((0.0 - 3.15 * 4184.0) / 19.14476) * (1.0 / t - 1.0 / 298.15)
+}
+
+fn k4_eq(t: f64) -> f64 with Mut, Div {
+    ss_pow10(logk_calcite(t) + 10.33) * 1.0e-7
+}
+
+// S2 SLOT (uhs_brine_calcite.sio): pseudo-law k_m, ABSTRACT-LEVEL zero
+// above 70 C (A2). Swap slot for the paper's calibrated kinetic law.
+fn km_at(t: f64, km: f64) -> f64 {
+    if t > 343.15 { return 0.0 }
+    km
+}
+
+fn make_ks(t: f64, a: f64, km: f64) -> [f64; 8] with Mut, Div {
+    [
+        km_at(t, km),
+        a * k1_pwp(t) * 1.0e-7 * ss_spy(),
+        a * k2_pwp(t) * ss_spy(),
+        a * k3_pwp(t) * ss_spy(),
+        (a * k3_pwp(t) * ss_spy()) / k4_eq(t),
+        0.0, 0.0, 0.0
+    ]
+}
+
+// Henry charge (P5) x pH2 = 15 atm (C2) x salting-out factor (S3)
+fn h2_charge(salt: f64) -> f64 {
+    7.8e-4 * 15.0 * salt
+}
+
+// value-only runner (screening carries the corner p-box, not the GUM band)
+fn run_case(nu: MatNM, ks: &[f64; 8], h2init: f64, steps: i64) -> ([f64; 8], [f64; 8]) with Mut, Div, Panic {
+    // species: 0 H2(aq), 1 CH4(aq), 2 Calcite(s), 3 Ca+2, 4 HCO3-, 5 CO2(aq)
+    let iv: [f64; 8] = [h2init, 0.0, 1.0, 1.0e-3, 5.0e-4, 5.0e-2, 0.0, 0.0]
+    let isv: [f64; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let uks: [f64; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    simulate_general_epistemic(&iv, &isv, ks, &uks, nu, 6 as i64, 5 as i64, 0.05, steps)
+}
+
+fn loss_pct(y: &[f64; 8], h2init: f64) -> f64 with Div {
+    100.0 * (1.0 - y[0] / h2init)
+}
+
+// one corner run -> 30-yr H2 loss % (scalar out immediately: E6 aliasing)
+fn corner_loss(nu: MatNM, t: f64, a: f64, km: f64, salt: f64) -> f64 with Mut, Div, Panic {
+    let ks = make_ks(t, a, km)
+    let h2 = h2_charge(salt)
+    let (ov, ou) = run_case(nu, &ks, h2, 600 as i64)
+    loss_pct(&ov, h2)
+}
+
+// the 8 (k_m x A x salt) corners at one temperature -> (lo, hi) loss %
+fn corner_box(nu: MatNM, t: f64) -> (f64, f64) with Mut, Div, Panic {
+    var llo = 1.0e9
+    var lhi = 0.0 - 1.0e9
+    let aa: [f64; 2] = [3.0e-6, 3.0e-5]
+    let ss: [f64; 2] = [0.70, 1.00]
+    var kk: [f64; 2] = [0.0048, 0.0187]
+    var nk: i64 = 2
+    if t > 343.15 {
+        kk = [0.0, 0.0]
+        nk = 1
+    }
+    var ia: i64 = 0
+    while ia < 2 {
+        var ik: i64 = 0
+        while ik < nk {
+            var is: i64 = 0
+            while is < 2 {
+                let l = corner_loss(nu, t, aa[ia], kk[ik], ss[is])
+                llo = ss_min(llo, l)
+                lhi = ss_max(lhi, l)
+                is = is + 1
+            }
+            ik = ik + 1
+        }
+        ia = ia + 1
+    }
+    (llo, lhi)
+}
+
+// ─── [C] the TRIERES valley chain (verbatim re-derivation) ───
+
+fn ss_ln(x: f64) -> f64 with Mut, Div {
+    var m = x
+    var k: i64 = 0
+    while m >= 2.0 { m = m / 2.0; k = k + 1 }
+    while m < 1.0 { m = m * 2.0; k = k - 1 }
+    let y = (m - 1.0) / (m + 1.0)
+    let y2 = y * y
+    var term = y
+    var sum = 0.0
+    var i: i64 = 0
+    while i < 12 {
+        sum = sum + term / (2.0 * (i as f64) + 1.0)
+        term = term * y2
+        i = i + 1
+    }
+    2.0 * sum + (k as f64) * 0.6931471805599453
+}
+
+fn crf(r: f64, n_yr: i64) -> f64 with Mut, Div {
+    let q = ss_exp((n_yr as f64) * ss_ln(1.0 + r))
+    r * q / (q - 1.0)
+}
+
+fn prod_cost(p_elec: f64, capex_m: f64, e_spec: f64, cf: f64) -> f64 with Mut, Div {
+    let a = 1500.0 * capex_m * crf(0.07, 25) + 20.0
+    e_spec * p_elec + a * e_spec / (cf * 8760.0)
+}
+
+fn compr_cost(e_th: f64, p_heat: f64) -> f64 {
+    e_th * p_heat
+}
+
+fn storage_cost(ncyc: f64) -> f64 with Mut, Div {
+    500.0 * crf(0.07, 25) / ncyc
+}
+
+// wellhead -> dispensed [EUR/kg]; couplings enter through cf as CF_eff
+fn delivered(p_elec: f64, capex_m: f64, e_spec: f64, cf: f64,
+             e_th: f64, p_heat: f64, ncyc: f64, disp: f64) -> f64 with Mut, Div {
+    prod_cost(p_elec, capex_m, e_spec, cf)
+        + compr_cost(e_th, p_heat) + storage_cost(ncyc) + disp
+}
+
+// f_s = 1 - (L30/100)*(tau/30): L30 in PERCENT, tau in yr (ILLUSTRATIVE)
+fn fs_of(l30_pct: f64, tau: f64) -> f64 {
+    1.0 - l30_pct * tau / 3000.0
+}
+
+// ─── epistemic intervals (zero-init, runtime-assigned in main) ───
+// cols: 0 p_elec | 1 capex mult | 2 e_spec | 3 CF | 4 compr energy |
+//       5 heat price | 6 tank cycling | 7 dispensing
+
+var LO8: [f64; 8] = [0.0; 8]
+var HI8: [f64; 8] = [0.0; 8]
+
+fn mid(c: i64) -> f64 with Div {
+    0.5 * (LO8[c] + HI8[c])
+}
+
+// ─── Monte Carlo: P(D < 6 EUR/kg), integer micro-EUR decision ───
+
+// aleatory scatter only, epistemic inputs pinned (valley-chain verbatim)
+fn mc_hits_pinned_c(fs: f64, fc: f64, p_elec: f64, capex_m: f64,
+                    e_spec: f64, cf: f64, e_th: f64, p_heat: f64,
+                    ncyc: f64, disp: f64, n: i64) -> i64 with Mut, Div {
+    var hits: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        let e = p_elec + 0.002 * rand_normal()
+        let c = cf + 0.02 * rand_normal()
+        let t = e_th + 5.0 * rand_normal()
+        let d = delivered(e, capex_m, e_spec, fs * fc * c, t, p_heat, ncyc, disp)
+        let k6 = ss_floor_i64(d * 1000000.0 + 0.5)
+        if k6 < 6000000 { hits = hits + 1 }
+        i = i + 1
+    }
+    hits
+}
+
+// CONVENTIONAL no-coupling baseline (trieres_chain.sio verbatim):
+// eight independent uniforms + aleatory. Re-derives 20.765000 %.
+fn mc_hits_indep(n: i64) -> i64 with Mut, Div {
+    var hits: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        var v0 = 0.0
+        var v1 = 0.0
+        var v2 = 0.0
+        var v3 = 0.0
+        var v4 = 0.0
+        var c: i64 = 0
+        while c < 8 {
+            let u = rand_u()
+            let x = LO8[c] + (HI8[c] - LO8[c]) * u
+            if c == 0 { v0 = x }
+            if c == 1 { v1 = x }
+            if c == 2 { v2 = x }
+            if c == 3 { v3 = x }
+            if c == 4 { v4 = x }
+            c = c + 1
+        }
+        let e = v0 + 0.002 * rand_normal()
+        let cc = v3 + 0.02 * rand_normal()
+        let t = v4 + 5.0 * rand_normal()
+        let u5 = rand_u()
+        let ph = LO8[5] + (HI8[5] - LO8[5]) * u5
+        let u6 = rand_u()
+        let ny = LO8[6] + (HI8[6] - LO8[6]) * u6
+        let u7 = rand_u()
+        let dp = LO8[7] + (HI8[7] - LO8[7]) * u7
+        let d = delivered(e, v1, v2, cc, t, ph, ny, dp)
+        let k6 = ss_floor_i64(d * 1000000.0 + 0.5)
+        if k6 < 6000000 { hits = hits + 1 }
+        i = i + 1
+    }
+    hits
+}
+
+// COMPOSED conventional analysis (valley-chain mc_hits_indep10 verbatim):
+// ten independent uniforms — eight economic + L30 on the SITE's loss
+// p-box + R on the pinned compressor corner p-box. pr == 1 prints mean.
+fn mc_hits_indep10(l30_lo: f64, l30_hi: f64, r_lo: f64, r_hi: f64,
+                   tau: f64, n: i64, pr: i64) -> i64 with IO, Mut, Div {
+    var hits: i64 = 0
+    var sum = 0.0
+    var sumsq = 0.0
+    var i: i64 = 0
+    while i < n {
+        var v0 = 0.0
+        var v1 = 0.0
+        var v2 = 0.0
+        var v3 = 0.0
+        var v4 = 0.0
+        var c: i64 = 0
+        while c < 8 {
+            let u = rand_u()
+            let x = LO8[c] + (HI8[c] - LO8[c]) * u
+            if c == 0 { v0 = x }
+            if c == 1 { v1 = x }
+            if c == 2 { v2 = x }
+            if c == 3 { v3 = x }
+            if c == 4 { v4 = x }
+            c = c + 1
+        }
+        let e = v0 + 0.002 * rand_normal()
+        let cc = v3 + 0.02 * rand_normal()
+        let t = v4 + 5.0 * rand_normal()
+        let u5 = rand_u()
+        let ph = LO8[5] + (HI8[5] - LO8[5]) * u5
+        let u6 = rand_u()
+        let ny = LO8[6] + (HI8[6] - LO8[6]) * u6
+        let u7 = rand_u()
+        let dp = LO8[7] + (HI8[7] - LO8[7]) * u7
+        let u8 = rand_u()
+        let l30 = l30_lo + (l30_hi - l30_lo) * u8
+        let u9 = rand_u()
+        let rr = r_lo + (r_hi - r_lo) * u9
+        let d = delivered(e, v1, v2, fs_of(l30, tau) * rr * cc, t, ph, ny, dp)
+        sum = sum + d
+        sumsq = sumsq + d * d
+        let k6 = ss_floor_i64(d * 1000000.0 + 0.5)
+        if k6 < 6000000 { hits = hits + 1 }
+        i = i + 1
+    }
+    if pr == 1 {
+        let mean = sum / (n as f64)
+        print("  mean delivered [EUR/kg] : "); ss_fix6(mean); println("")
+        print("  std  delivered [EUR/kg] : ")
+        ss_fix6(ss_sqrt(sumsq / (n as f64) - mean * mean)); println("")
+    }
+    hits
+}
+
+// ─── per-site report (helper boundary — Madaros codegen shape; the
+// lean_single receipt is authoritative either way) ───
+
+fn report_site(nu: MatNM, code: i64, name1: &str, name2: &str,
+               t_lo: f64, t_hi: f64, cel_lo: i64, cel_hi: i64,
+               src_line: &str, r_lo: f64, r_hi: f64, tau: f64, n: i64) with IO, Mut, Div, Panic {
+    print("=== SITE S"); ss_pd(code); print(" — "); print(name1); println("")
+    print("    "); print(name2); println("")
+    print("    "); print(src_line); println("")
+    print("  T bracket [C]: ["); ss_i2(cel_lo); print(" , ")
+    if cel_hi >= 100 { ss_pd(cel_hi / 100); ss_i2(cel_hi % 100) } else { ss_i2(cel_hi) }
+    print("]  ->  K ["); ss_fix6(t_lo); print(" , "); ss_fix6(t_hi); println("]")
+
+    // fan: corner loss boxes at T lo / mid / hi (T-scan grid evidence;
+    // loss is DECREASING in T at 25 -> 50 C in the component demo —
+    // labeled scan evidence, not a proved monotonicity)
+    let t_mid = 0.5 * (t_lo + t_hi)
+    let (flo, fhi) = corner_box(nu, t_lo)
+    let flo_v = flo
+    let fhi_v = fhi
+    print("FIGDATA FAN S"); ss_pd(code); print(" ")
+    ss_fix6((t_lo - 273.15)); print(" "); ss_fix6(flo_v); print(" "); ss_fix6(fhi_v); println("")
+    let (mlo, mhi) = corner_box(nu, t_mid)
+    let mlo_v = mlo
+    let mhi_v = mhi
+    print("FIGDATA FAN S"); ss_pd(code); print(" ")
+    ss_fix6((t_mid - 273.15)); print(" "); ss_fix6(mlo_v); print(" "); ss_fix6(mhi_v); println("")
+    let (hlo, hhi) = corner_box(nu, t_hi)
+    let hlo_v = hlo
+    let hhi_v = hhi
+    print("FIGDATA FAN S"); ss_pd(code); print(" ")
+    ss_fix6((t_hi - 273.15)); print(" "); ss_fix6(hlo_v); print(" "); ss_fix6(hhi_v); println("")
+
+    // straddling sites: resolve the A2 slot cliff (visual honesty —
+    // the site p-box below still comes from the T corners alone)
+    if t_lo <= 343.15 {
+        if t_hi > 343.15 {
+            let (clo, chi) = corner_box(nu, 343.10)
+            let clo_v = clo
+            let chi_v = chi
+            print("FIGDATA FAN S"); ss_pd(code); print(" ")
+            ss_fix6(69.950000); print(" "); ss_fix6(clo_v); print(" "); ss_fix6(chi_v); println("")
+            let (dlo, dhi) = corner_box(nu, 343.20)
+            let dlo_v = dlo
+            let dhi_v = dhi
+            print("FIGDATA FAN S"); ss_pd(code); print(" ")
+            ss_fix6(70.050000); print(" "); ss_fix6(dlo_v); print(" "); ss_fix6(dhi_v); println("")
+        }
+    }
+
+    // site 30-yr loss p-box: extrema over the T-corner boxes
+    let l30_lo = ss_min(flo_v, hlo_v)
+    let l30_hi = ss_max(fhi_v, hhi_v)
+    let box_l = new(l30_lo, l30_hi)
+    print("  P-BOX 30-yr H2 loss [%]: ["); ss_fix6(box_l.lo)
+    print(" , "); ss_fix6(box_l.hi); print("]  width ")
+    ss_fix6(width(box_l)); println("")
+    print("FIGDATA PBOX S"); ss_pd(code); print(" ")
+    ss_fix6(box_l.lo); print(" "); ss_fix6(box_l.hi); println("")
+    // T-corner extrema are LABELED scan evidence, not a proved
+    // monotonicity (reviewer-noted): the mid-bracket fan box must then
+    // lie inside the corner envelope — checked and printed, not assumed
+    var env_ok: i64 = 1
+    if mlo_v < l30_lo { env_ok = 0 }
+    if mhi_v > l30_hi { env_ok = 0 }
+    print("  T-scan consistency: mid box ["); ss_fix6(mlo_v)
+    print(" , "); ss_fix6(mhi_v); print("] inside corner envelope: ")
+    if env_ok == 1 { println("YES") }
+    if env_ok == 0 { println("NO — grid evidence WEAKENED") }
+    if t_lo > 343.15 {
+        print("    ENTIRE bracket above the A2 70 C cutoff (measured T):")
+        println("")
+        print("    k_m = 0 by the slot, loss EXACTLY 0 across the bracket")
+        println("")
+    }
+    if t_lo <= 343.15 {
+        if t_hi > 343.15 {
+            print("    bracket STRADDLES the A2 70 C cutoff: the hot corner")
+            println("")
+            print("    is interaction-free by the slot — the site p-box")
+            println("")
+            print("    honestly spans both kinetic regimes")
+            println("")
+        }
+    }
+    if t_hi <= 343.15 {
+        print("    ENTIRE bracket below the A2 70 C cutoff — interactions")
+        println("")
+        print("    active at every corner; no regime straddle")
+        println("")
+    }
+    print("  availability f_s at tau = 1 yr : [")
+    ss_fix6(fs_of(l30_hi, tau)); print(" , "); ss_fix6(fs_of(l30_lo, tau))
+    println("]")
+    print("  availability f_s at tau = 10 yr (analytic sensitivity): [")
+    ss_fix6(fs_of(l30_hi, 10.0)); print(" , "); ss_fix6(fs_of(l30_lo, 10.0))
+    println("]")
+    println("")
+
+    // chain: nominal / +subsurface / +compressor at interval mids
+    let l30_mid = 0.5 * (l30_lo + l30_hi)
+    let r_mid = 0.5 * (r_lo + r_hi)
+    let d_nom = delivered(mid(0), mid(1), mid(2), mid(3),
+                          mid(4), mid(5), mid(6), mid(7))
+    let d_sub = delivered(mid(0), mid(1), mid(2),
+                          fs_of(l30_mid, tau) * mid(3),
+                          mid(4), mid(5), mid(6), mid(7))
+    let d_cmp = delivered(mid(0), mid(1), mid(2),
+                          fs_of(l30_mid, tau) * r_mid * mid(3),
+                          mid(4), mid(5), mid(6), mid(7))
+    print("  mids chain [EUR/kg]: nominal "); ss_fix6(d_nom)
+    print(" -> +subsurface "); ss_fix6(d_sub)
+    print(" -> +compressor "); ss_fix6(d_cmp); println("")
+    print("FIGDATA CHAIN S"); ss_pd(code); print(" ")
+    ss_fix6(d_nom); print(" "); ss_fix6(d_sub); print(" "); ss_fix6(d_cmp)
+    println("")
+
+    // gate probabilities (seeded idiom; n = 20000)
+    print("  P(dispensed < 6 EUR/kg) [%], MC n = 20000:")
+    println("")
+    rng_seed(314159265, 271828182)
+    let h_conv = mc_hits_indep10(l30_lo, l30_hi, r_lo, r_hi, tau, n, 1)
+    print("    conventional composed (site L30 + pinned R) : ")
+    ss_fix6(ss_pct(h_conv, n)); println("")
+    rng_seed(314159265, 271828182)
+    let h_sub = mc_hits_indep10(l30_lo, l30_hi, 1.0, 1.0, tau, n, 0)
+    print("    subsurface-only coupling (R = 1)            : ")
+    ss_fix6(ss_pct(h_sub, n)); println("")
+    rng_seed(314159265, 271828182)
+    let h_best = mc_hits_pinned_c(fs_of(l30_lo, tau), r_hi,
+                                  0.046, 0.8, 43.9, 0.80,
+                                  44.0, 0.005, 45.0, 0.50, n)
+    print("    BEST corner  (L30 lo, R hi, econ best)      : ")
+    ss_fix6(ss_pct(h_best, n)); println("")
+    rng_seed(314159265, 271828182)
+    let h_worst = mc_hits_pinned_c(fs_of(l30_hi, tau), r_lo,
+                                   0.052, 1.2, 48.9, 0.55,
+                                   89.0, 0.02, 30.0, 1.50, n)
+    print("    WORST corner (L30 hi, R lo, econ worst)     : ")
+    ss_fix6(ss_pct(h_worst, n)); println("")
+    print("FIGDATA PGATE S"); ss_pd(code); print(" ")
+    ss_fix6(ss_pct(h_conv, n)); print(" ")
+    ss_fix6(ss_pct(h_best, n)); print(" ")
+    ss_fix6(ss_pct(h_worst, n)); print(" ")
+    ss_fix6(ss_pct(h_sub, n)); println("")
+    println("")
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    print("=== EPISTEMIC UHS SITE SCREENING — three sourced Greek")
+    println("")
+    print("    H2-storage candidates through the brine-calcite loss")
+    println("")
+    print("    network and the TRIERES valley chain ===")
+    println("")
+    print("  Sites + citations: demos/hydrogen/site_screening_data.md")
+    println("")
+    print("  Composition by construction: uhs_brine_calcite.sio (#1585)")
+    println("")
+    print("  and valley_chain_epistemic.sio (#1587) re-derived, not")
+    println("")
+    print("  modified. lean_single engine (Madaros blocked on chemistry")
+    println("")
+    print("  imports, #1584). RUNTIME ESTIMATE: ~10-13 min wall (88 CRN")
+    println("")
+    print("  corner runs + 14 seeded MC evaluations, n = 20000).")
+    println("")
+    println("")
+
+    // economic intervals (identical to trieres_chain.sio)
+    LO8[0] = 0.046; HI8[0] = 0.052      // LCOE EUR/kWh (SOURCED)
+    LO8[4] = 44.0; HI8[4] = 89.0        // compr kWh_th/kg (SOURCED)
+    LO8[5] = 0.005; HI8[5] = 0.02       // heat EUR/kWh_th (hub_chain)
+    LO8[6] = 30.0; HI8[6] = 45.0        // tank cycling /yr (hub_chain)
+    LO8[1] = 0.8; HI8[1] = 1.2          // CAPEX multiplier (ILLUSTRATIVE)
+    LO8[2] = 43.9; HI8[2] = 48.9        // e_spec kWh/kg (ILLUSTRATIVE)
+    LO8[3] = 0.55; HI8[3] = 0.80        // CF (the valley claim)
+    LO8[7] = 0.50; HI8[7] = 1.50        // dispensing EUR/kg (ILLUSTRATIVE)
+
+    // pinned compressor availability p-box (mh7_reliability receipt)
+    let r_lo = 0.013100
+    let r_hi = 0.998900
+    let tau = 1.0
+    let n: i64 = 20000
+
+    // ─── baselines (re-derived, seeded idiom) ───
+    print("BASELINES (re-derived in-file):")
+    println("")
+    rng_seed(314159265, 271828182)
+    let h_base = mc_hits_indep(n)
+    print("  conventional P(<6), NO coupling          [%]: ")
+    ss_fix6(ss_pct(h_base, n)); println("")
+    rng_seed(314159265, 271828182)
+    let h_vbl = mc_hits_indep10(0.458073, 2.630814, r_lo, r_hi, tau, n, 0)
+    print("  conventional P(<6), valley composed 25 C [%]: ")
+    ss_fix6(ss_pct(h_vbl, n)); println("")
+    print("FIGDATA BASE "); ss_fix6(ss_pct(h_base, n))
+    print(" "); ss_fix6(ss_pct(h_vbl, n)); println("")
+    println("")
+
+    // stoichiometry (built in main: lean_single cannot return MatNM)
+    var nu = matnm_new(6 as i64, 5 as i64)
+    nu = matnm_set(nu, 0 as i64, 0 as i64, 0.0 - 1.0)   // R0: H2 + CO2 -> CH4
+    nu = matnm_set(nu, 1 as i64, 0 as i64, 1.0)
+    nu = matnm_set(nu, 5 as i64, 0 as i64, 0.0 - 1.0)
+    nu = matnm_set(nu, 2 as i64, 1 as i64, 0.0 - 1.0)   // R1: acid channel
+    nu = matnm_set(nu, 3 as i64, 1 as i64, 1.0)
+    nu = matnm_set(nu, 4 as i64, 1 as i64, 1.0)
+    nu = matnm_set(nu, 2 as i64, 2 as i64, 0.0 - 1.0)   // R2: CO2 channel
+    nu = matnm_set(nu, 5 as i64, 2 as i64, 0.0 - 1.0)
+    nu = matnm_set(nu, 3 as i64, 2 as i64, 1.0)
+    nu = matnm_set(nu, 4 as i64, 2 as i64, 2.0)
+    nu = matnm_set(nu, 2 as i64, 3 as i64, 0.0 - 1.0)   // R3: water channel
+    nu = matnm_set(nu, 3 as i64, 3 as i64, 1.0)
+    nu = matnm_set(nu, 4 as i64, 3 as i64, 1.0)
+    nu = matnm_set(nu, 3 as i64, 4 as i64, 0.0 - 1.0)   // R4: closure
+    nu = matnm_set(nu, 4 as i64, 4 as i64, 0.0 - 1.0)
+    nu = matnm_set(nu, 2 as i64, 4 as i64, 1.0)
+
+    report_site(nu, 1, "SOUTH KAVALA depleted gas field (offshore N. Aegean)",
+        "turbiditic sands in Miocene evaporites; T = 95 C MEASURED (HRADF 2020)",
+        368.15, 368.15, 95, 95,
+        "src: HRADF Annex B 2020; HyUSPRe D1.3 (2 TWh); porosity 20-22 %",
+        r_lo, r_hi, tau, n)
+    report_site(nu, 2, "PENTALOFOS Fm, Mesohellenic Trough (W. Macedonia)",
+        "turbiditic sandstone saline aquifer, 1500 m, porosity 7-25 %",
+        325.65, 342.15, 52, 69,
+        "src: Koukouzas 2021 Energies 14:3321 T6; T via 25-36 C/km (Dotsika 2021) + Hystories 30+/-3 C/km",
+        r_lo, r_hi, tau, n)
+    report_site(nu, 3, "EPTACHORI Fm, Mesohellenic Trough (W. Macedonia)",
+        "conglomerates/sandstones, shale top, 2000 m, porosity ~12 %",
+        338.15, 360.15, 65, 87,
+        "src: Koukouzas 2021 Energies 14:3321 T6; T bracket straddles the 70 C A2 cutoff",
+        r_lo, r_hi, tau, n)
+
+    print("=== READING ===")
+    println("")
+    print("  The sourced T brackets put the three sites in THREE different")
+    println("")
+    print("  kinetic regimes of the same public network: S1 above the A2")
+    println("")
+    print("  cutoff (measured 95 C, interactions negligible by the slot),")
+    println("")
+    print("  S2 entirely below it (bracket 52.5-69 C), S3 straddling it —")
+    println("")
+    print("  its p-box honestly contains the interaction-free regime.")
+    println("")
+    print("  At the valley's 1-yr residence ALL sites leave f_s within")
+    println("")
+    print("  ~0.1 % of 1: the gate probability is set by the compressor")
+    println("")
+    print("  and the economic intervals, not by WHICH candidate hosts the")
+    println("")
+    print("  store. Per-site differences in the subsurface-only row are")
+    println("")
+    print("  WITHIN MC NOISE at n = 20000 (the row uses a different RNG")
+    println("")
+    print("  stream than the baseline — same distribution, noise replica).")
+    println("")
+    print("  The tau = 10 sensitivity shows where site choice starts to")
+    println("")
+    print("  matter. SWAP SLOTS: drop the group's measured site data into")
+    println("")
+    print("  site_screening_data.md's AWAITING-DATA rows and every number")
+    println("")
+    print("  above re-derives itself.")
+    println("")
+    println("")
+    println("SITE_SCREENING_OK")
+    0
+}
