@@ -3340,3 +3340,6 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 | 2026-07-31 | xai/grok-4.3 | math-review | SounioFoRegistrationFragment.lean | PASS | L2 registration fragment multipass FO_XFER expand; local≡import; emit RPN; lake iso green; FO_RESIDUAL4_STACK_GATE_OK |
 | 2026-07-31 | xai/grok-4.3 | math-review | SounioFoEngineInstallFragment.lean | PASS | L2 engine-install fragment multipass register; forward/reverse/4-pass; FO_RESIDUAL4_STACK_GATE_OK |
 | 2026-07-31 | lean-kernel + local measure | math-review | SounioZDFiberAntisym.lean (star_pow2) | PASS_KERNEL | (★) for single-bit labels: star_pow2 corollary of Qgen_pow2. Lean --threads=1 kernel-check 0 errors 0 sorryAx. K15 contract green levels 4..7 zero violations. No multi-bit claim. |
+| 2026-07-31 | xai/grok-4.3 | math-review | SounioFoMethodXferFragment+SounioFoMultimodFragment | PASS | oral Css residual4 closeout; FO_RESIDUAL4_STACK_GATE_OK ORAL_CSS_RESIDUAL4_CLOSED |
+| 2026-07-31 | xai/grok-4.3 | math-review | SounioFoMethodXferFragment.lean | PASS | oral Css method peel; var 191/240; residual4 closeout |
+| 2026-07-31 | xai/grok-4.3 | math-review | SounioFoMultimodFragment.lean | PASS | multi-mod local≡import≡union; residual4 closeout |

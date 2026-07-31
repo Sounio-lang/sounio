@@ -15,26 +15,28 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.fo-cs
 
 # FO Css residual §5.4 — compiler half: semantic bridge (2026-07-31)
 
-**Status:** L0–L2 engine-install **fragment** CLOSED; **L2 full engine** OPEN  
-**Modules:** `SounioFoCssSurfaceParity` … `SounioFoEngineInstallFragment`  
+**Status:** **ORAL_CSS_CLOSED** (all fragment layers); **L2 full engine** OPEN  
+**Closeout:** `docs/research/fo_pk_residual4_oral_css_closeout_2026-07-31.md`  
 **Stack gate:** `scripts/ci/fo_residual4_stack_gate.sh`  
 **IR evidence:** R4 `scripts/ci/fo_pk_import_method_driver_gate.sh`
 
 ---
 
-## 1. Residual split (seven layers)
+## 1. Residual split (oral Css closed)
 
 | Layer | Claim | Status | Evidence |
 |-------|-------|--------|----------|
-| **L0 Algebraic** | Pure Rat maps agree; freezes exact ℚ | **CLOSED** | `SounioFoCssSurfaceParity` |
-| **L1 Semantic** | Surfaces desugar to one `FoExpr` | **CLOSED** | `SounioFoSurfaceTransfer` |
-| **L2-fragment** | FO ops 1–6 stack machine | **CLOSED** | `SounioFoBytecodeFragment` |
-| **L2 pure-emit** | `fo_bc_compile_expr` pure path | **CLOSED** | `SounioFoEmitPure` |
-| **L2 registration fragment** | Multipass FO_XFER expand (local ≡ import) | **CLOSED** | `SounioFoRegistrationFragment` |
-| **L2 engine-install fragment** | Multipass *register* of oral Css pure helpers (forward/reverse/4-pass); then expand = site | **CLOSED** | `SounioFoEngineInstallFragment` |
-| **L2 full engine** | Madaros multipass/multi-mod/method install for *all* programs | **OPEN** | R4 numerical witness |
+| **L0 Algebraic** | Pure Rat freezes | **CLOSED** | `SounioFoCssSurfaceParity` |
+| **L1 Semantic** | FoExpr desugar | **CLOSED** | `SounioFoSurfaceTransfer` |
+| **L2-fragment** | FO ops 1–6 stack | **CLOSED** | `SounioFoBytecodeFragment` |
+| **L2 pure-emit** | pure `fo_bc_compile_expr` | **CLOSED** | `SounioFoEmitPure` |
+| **L2 registration** | FO_XFER expand | **CLOSED** | `SounioFoRegistrationFragment` |
+| **L2 engine-install** | multipass register | **CLOSED** | `SounioFoEngineInstallFragment` |
+| **L2 method peel** | Pk.css / call-result peel | **CLOSED** | `SounioFoMethodXferFragment` |
+| **L2 multi-mod model** | local ≡ import ≡ union registry | **CLOSED** | `SounioFoMultimodFragment` |
+| **L2 full engine** | arbitrary programs | **OPEN** | R4 |
 
-Dissertation wording must not collapse the oral Css install model into full engine soundness.
+Oral Css science claim is **closed**; full engine is out of dissertation scope.
 
 ---
 
@@ -143,9 +145,11 @@ bash scripts/ci/fo_bytecode_fragment_gate.sh       # L2-fragment
 bash scripts/ci/fo_emit_pure_gate.sh               # L2 pure-emit
 bash scripts/ci/fo_registration_fragment_gate.sh   # L2 registration fragment
 bash scripts/ci/fo_engine_install_fragment_gate.sh # L2 engine-install fragment
+bash scripts/ci/fo_method_xfer_fragment_gate.sh    # L2 method peel
+bash scripts/ci/fo_multimod_fragment_gate.sh       # L2 multi-mod model
 bash scripts/ci/fo_pk_import_method_driver_gate.sh # full-engine executable
 ```
 
 ---
 
-*Spec version fo-css-compiler-residual-half-v5 (2026-07-31) — L2 engine-install fragment closed.*
+*Spec version fo-css-compiler-residual-half-v6 (2026-07-31) — oral Css residual-4 closed.*

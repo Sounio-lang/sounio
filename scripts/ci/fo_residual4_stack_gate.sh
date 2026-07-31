@@ -23,6 +23,12 @@ bash scripts/ci/fo_registration_fragment_gate.sh
 echo "=== L2 engine-install fragment (multipass register pure helpers) ==="
 bash scripts/ci/fo_engine_install_fragment_gate.sh
 
+echo "=== L2 method FO_XFER peel fragment ==="
+bash scripts/ci/fo_method_xfer_fragment_gate.sh
+
+echo "=== L2 multi-mod prepass fragment ==="
+bash scripts/ci/fo_multimod_fragment_gate.sh
+
 echo "=== L2-executable R4 (Madaros numerical) ==="
 if [[ -x "${MADAROS_RAW_BIN:-artifacts/self-hosted/madaros}" ]] || [[ -x artifacts/self-hosted/madaros ]]; then
   export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$(pwd)/stdlib}"
@@ -33,4 +39,5 @@ else
 fi
 
 echo "FO_RESIDUAL4_STACK_GATE_OK"
-echo "STATUS L0=CLOSED L1=CLOSED L2_FRAGMENT=CLOSED L2_PURE_EMIT=CLOSED L2_REGISTRATION_FRAGMENT=CLOSED L2_ENGINE_INSTALL_FRAGMENT=CLOSED L2_FULL_ENGINE=OPEN"
+echo "STATUS L0=CLOSED L1=CLOSED L2_FRAGMENT=CLOSED L2_PURE_EMIT=CLOSED L2_REGISTRATION_FRAGMENT=CLOSED L2_ENGINE_INSTALL_FRAGMENT=CLOSED L2_METHOD_XFER=CLOSED L2_MULTIMOD=CLOSED L2_FULL_ENGINE=OPEN"
+echo "ORAL_CSS_RESIDUAL4_CLOSED"

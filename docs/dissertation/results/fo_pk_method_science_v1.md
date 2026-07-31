@@ -137,11 +137,12 @@ Stack map: `docs/audit/MADAROS_FO_GUM_STACK_2026-07-27.md`.
 1. In-driver boolean acceptance after heavy FO can SEGV; gates grep printed tables.  
 2. ΣH under multi-site FO load may print ~7.20 vs solo-path 7.292592; Var/\(E_2\) freezes are the primary claims.  
 3. This annex is oral Css FO infrastructure, not a full PBPK28 clinical claim.  
-4. **Import↔method — residual split (seven layers, 2026-07-31):**
-   L0–L2 engine-install fragment **CLOSED** for oral Css pure helpers
-   (incl. reverse-order multipass register). L2 full engine remains **OPEN**
-   — R4 numerical parity. Stack: `fo_residual4_stack_gate.sh`. Spec:
-   `docs/research/fo_css_compiler_residual_half_spec_2026-07-31.md`.
+4. **Import↔method — residual §5.4 oral Css CLOSED (2026-07-31):**
+   Fragment stack through multipass register, method peel, and multi-mod
+   registry model **CLOSED**; live R4 green. Full engine for arbitrary
+   programs remains open (out of scope). Closeout:
+   `docs/research/fo_pk_residual4_oral_css_closeout_2026-07-31.md`.
+   Stack: `fo_residual4_stack_gate.sh`.
 
 ---
 
