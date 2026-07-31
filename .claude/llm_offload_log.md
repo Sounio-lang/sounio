@@ -3514,3 +3514,9 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 | Date | Provider | Task | Target | Outcome | Note |
 |---|---|---|---|---|---|
 | 2026-07-31 | xai/Grok 4.3 | math-review | demos/hydrogen/valley_chain_epistemic.sio composed twin (CF_eff = f_s*f_c*CF coupling, monotone corner chains, GUM chain-rule extension, headline deltas) | PASS | 5/5 [OK]: derate placement on the 1/CF fixed-cost term scales fixed cost by 1/(f_s f_c) exactly; monotone chain => four-corner p-box exact (distribution-free); chain-rule partials (dD/dCF, dD/dL30, dD/dR) hold by construction; receipt numbers match verbatim (baseline 20.765 % -> composed 3.630 %, delta -17.135 pp, p-boxes [0,100] both, decomposition 20.495/3.635 %, Sobol R ~94 %); GUM-vs-MC gap reasoning sound (symmetric linearization cannot see the 1/R tail). Raw: `/tmp/llm-offload-kwVJtk/`. |
+
+## 2026-07-31 - Hydrogen valley-chain p-box Lean certification
+
+| Date | Provider | Task | Target | Outcome | Note |
+|---|---|---|---|---|---|
+| 2026-07-31 | xai/Grok 4.3 | math-review | formal/lean4/SounioHydrogenValleyPbox.lean (corner-exactness of composed valley-chain p-box: prod3_corner_bounds, fsOf_antitone, valley_corner_exact, native_decide receipts) | PASS | 6/6 audit questions [OK]: best/worst corner assignment and monotonicity directions correct; nonnegativity of lower bounds alone sufficient for prod3 corner bounds, no missing side conditions; hfsnn side condition correctly placed at the antitone worst corner lHi and minimal; all native_decide receipts (fs corners 0.999123062/0.999847309, CF_eff corners 0.79899798156808/0.00719868166171, positivity, ordering, tau=1140/1141 margin) match the printed decimals exactly; D-antitonicity premise explicitly scoped to order attainment, consistent with monotone_event_equiv, no overclaim or circularity; premises section "necessary, sufficient, no hidden assumptions". Raw: `/tmp/llm-offload-PKknVf/`. |
