@@ -15,15 +15,14 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.fo-cs
 
 # FO Css residual §5.4 — compiler half: semantic bridge (2026-07-31)
 
-**Status:** L0–L2 registration **fragment** CLOSED; **L2 engine install** OPEN  
-**Modules:** `SounioFoCssSurfaceParity`, `SounioFoSurfaceTransfer`,
-`SounioFoBytecodeFragment`, `SounioFoEmitPure`, `SounioFoRegistrationFragment`  
+**Status:** L0–L2 engine-install **fragment** CLOSED; **L2 full engine** OPEN  
+**Modules:** `SounioFoCssSurfaceParity` … `SounioFoEngineInstallFragment`  
 **Stack gate:** `scripts/ci/fo_residual4_stack_gate.sh`  
 **IR evidence:** R4 `scripts/ci/fo_pk_import_method_driver_gate.sh`
 
 ---
 
-## 1. Residual split (six layers)
+## 1. Residual split (seven layers)
 
 | Layer | Claim | Status | Evidence |
 |-------|-------|--------|----------|
@@ -31,10 +30,11 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.fo-cs
 | **L1 Semantic** | Surfaces desugar to one `FoExpr` | **CLOSED** | `SounioFoSurfaceTransfer` |
 | **L2-fragment** | FO ops 1–6 stack machine | **CLOSED** | `SounioFoBytecodeFragment` |
 | **L2 pure-emit** | `fo_bc_compile_expr` pure path | **CLOSED** | `SounioFoEmitPure` |
-| **L2 registration fragment** | Multipass FO_XFER expand of fo_css registry (local ≡ import); method peel = site; emit RPN | **CLOSED** | `SounioFoRegistrationFragment` + gate |
-| **L2 engine install** | Madaros multipass *always* installs those registry bodies before call sites | **OPEN** | R4 numerical witness |
+| **L2 registration fragment** | Multipass FO_XFER expand (local ≡ import) | **CLOSED** | `SounioFoRegistrationFragment` |
+| **L2 engine-install fragment** | Multipass *register* of oral Css pure helpers (forward/reverse/4-pass); then expand = site | **CLOSED** | `SounioFoEngineInstallFragment` |
+| **L2 full engine** | Madaros multipass/multi-mod/method install for *all* programs | **OPEN** | R4 numerical witness |
 
-Dissertation wording must not collapse registration *semantics* into engine *install* soundness.
+Dissertation wording must not collapse the oral Css install model into full engine soundness.
 
 ---
 
@@ -101,14 +101,26 @@ compile(expand(...)) = cssSiteProg
 method peel model = cssSite
 ```
 
-## 3d. What would close L2 engine install (remaining)
+## 3d. L2 engine-install fragment (closed 2026-07-31)
 
-1. Madaros multipass *always* installs those bodies as FO_XFER kind-6 before call sites.
-2. Multi-mod frontend prepass is faithful for all loaded modules (not just name-identity of bodies).
-3. Method FO_XFER + op17 field peel in full generality (not just the oral Css peel model).
+Models multipass register of the oral Css pure-helper fragment:
+
+```
+installPass(registry, items)  -- append each pure item body
+multipass(items, k)           -- k sweeps (Madaros uses 4)
+-- reverse definition order still installs all three in one pass
+expand(install(...), fo_css(p0..p4)) = cssSite
+compile(...) = cssSiteProg
+```
+
+## 3e. What would close L2 full engine (remaining)
+
+1. Madaros multipass is sound for arbitrary pure programs (not just this fragment).
+2. Multi-mod module loader + FO prepass for all loaded modules.
+3. Method FO_XFER + op17 field peel in full generality.
 4. Optional: EXP op-20 vs eEta channel.
 
-**Until then:** R4 remains the **executable** engine-install witness.
+**Until then:** R4 remains the **executable** full-engine witness for oral Css.
 
 ---
 
@@ -130,9 +142,10 @@ bash scripts/ci/fo_surface_transfer_gate.sh        # L1
 bash scripts/ci/fo_bytecode_fragment_gate.sh       # L2-fragment
 bash scripts/ci/fo_emit_pure_gate.sh               # L2 pure-emit
 bash scripts/ci/fo_registration_fragment_gate.sh   # L2 registration fragment
-bash scripts/ci/fo_pk_import_method_driver_gate.sh # engine-install executable
+bash scripts/ci/fo_engine_install_fragment_gate.sh # L2 engine-install fragment
+bash scripts/ci/fo_pk_import_method_driver_gate.sh # full-engine executable
 ```
 
 ---
 
-*Spec version fo-css-compiler-residual-half-v4 (2026-07-31) — L2 registration fragment closed.*
+*Spec version fo-css-compiler-residual-half-v5 (2026-07-31) — L2 engine-install fragment closed.*

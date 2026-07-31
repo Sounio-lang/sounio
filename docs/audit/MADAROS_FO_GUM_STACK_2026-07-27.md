@@ -109,10 +109,12 @@ Oral Css = (F·Dose/τ)/(CL0·exp(η)). Import driver is the multi-mod free-help
 **L2-fragment** (2026-07-31): FO bytecode ops 1–6 stack machine — `SounioFoBytecodeFragment`.  
 **L2 pure-emit** (2026-07-31): `fo_bc_compile_expr` pure fragment —
 `SounioFoEmitPure` + `fo_emit_pure_gate.sh`.  
-**L2 registration fragment** (2026-07-31): multipass FO_XFER expand semantics
-for fo_css registry (local ≡ import) — `SounioFoRegistrationFragment` +
-`fo_registration_fragment_gate.sh`.  
-**L2 engine install** remains OPEN (R4). Stack:
+**L2 registration fragment** (2026-07-31): multipass FO_XFER expand —
+`SounioFoRegistrationFragment` + `fo_registration_fragment_gate.sh`.  
+**L2 engine-install fragment** (2026-07-31): multipass register of oral Css
+pure helpers (forward/reverse/4-pass) — `SounioFoEngineInstallFragment` +
+`fo_engine_install_fragment_gate.sh`.  
+**L2 full engine** remains OPEN (R4). Stack:
 `scripts/ci/fo_residual4_stack_gate.sh`. Spec:
 `docs/research/fo_css_compiler_residual_half_spec_2026-07-31.md`.  
 **Dissertation index:** [`docs/research/fo_pk_method_science_receipts_2026-07-31.md`](../research/fo_pk_method_science_receipts_2026-07-31.md) — R1–R4 tables, re-run commands, citation sketch.

@@ -286,13 +286,12 @@ paragraph. Numbers must match §3 freezes.
 2. **\(\sum H_{kk}\) under multi-site FO load** may print ~7.20 vs solo-path
    7.292592 (multidose driver). Primary science claims are Var / \(E_2\) freezes.
 3. **Runtime (non-const) mutual FO depth** remains residual; unused by R1–R4.
-4. **Import↔method agreement — residual split (six layers, 2026-07-31):**
-   - **L0–L2 pure-emit CLOSED** — algebra, FoExpr, FO stack machine, pure compile.
-   - **L2 registration fragment CLOSED** — multipass FO_XFER expand of
-     fo_css registry (local ≡ import); method peel = site
-     (`SounioFoRegistrationFragment`).
-   - **L2 engine install OPEN** — Madaros multipass *always* installs those
-     bodies; R4 remains the executable witness.
+4. **Import↔method agreement — residual split (seven layers, 2026-07-31):**
+   - **L0–L2 engine-install fragment CLOSED** for the oral Css pure-helper
+     model (algebra → FoExpr → FO bytecode → pure compile → FO_XFER expand →
+     multipass register, incl. reverse definition order).
+   - **L2 full engine OPEN** — Madaros multipass/multi-mod/method for arbitrary
+     programs; R4 remains the executable end-to-end witness.
    Stack: `scripts/ci/fo_residual4_stack_gate.sh`. Spec:
    `docs/research/fo_css_compiler_residual_half_spec_2026-07-31.md`.
 5. **Not a full PBPK28 clinical claim** — oral Css exemplar only.
