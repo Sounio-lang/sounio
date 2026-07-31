@@ -18,6 +18,7 @@ bin/souc run demos/hydrogen/mh_cascade_uq.sio                            # casca
 bin/souc run demos/hydrogen/bayes_pilot.sio                              # value of pilot data (IDM)
 bin/souc run demos/hydrogen/hub_chain.sio                                # full chain: delivered EUR/kg
 bin/souc run demos/hydrogen/methanation_logk_gate.sio                   # methanation log-K gate
+SOUNIO_SOUC_ENGINE=lean_single bin/souc run demos/hydrogen/uhs_brine_calcite.sio  # UHS H2-brine-calcite network (lean_single only, see below)
 ```
 
 Deterministic (seeded xorshift PRNG): every run prints the same numbers and
@@ -454,6 +455,67 @@ a borderline Monte Carlo comparison, so every number is emitted by a
 digit-wise integer printer and the MC counts with a pure-integer
 comparison — **byte-identical output on Madaros and lean_single, by
 construction**. Both engines → `METHANATION_LOGK_GATE_OK`.
+
+## The UHS geochemistry network (`uhs_brine_calcite.sio`) — the whole H2–brine–calcite system, with bands
+
+The two gate demos gate *constants*. This one integrates the *network*
+his GHG-2025 paper models — H2(aq) methanation coupled to PWP calcite
+dissolution/precipitation — as a Sounio epistemic CRN
+(`chemistry::kinetics::simulate_general_epistemic`), delivering what a
+point-value PHREEQC run cannot: **a native GUM 1σ band and interval /
+p-box corner bounds carried through the 30-year integration.**
+
+The paper is closed access, so the file is explicit about provenance
+(labels in the header): the **network skeleton** comes from the abstract
+(negligible interactions above ~70 °C; considerable H2 consumption
+possible at 25–50 °C in a limited-H2 model) plus **public anchors** —
+the Plummer-Wigley-Parkhurst calcite rate constants transcribed in
+phreeqc.dat, the phreeqc.dat calcite log K = −8.45 with van't Hoff ΔH,
+a public H2 Henry constant, and Bo et al. 2021's 0.72–2.76 % 30-yr field
+losses. Everything the paper holds that we cannot read is an
+**AWAITING-AUTHOR-DATA slot**: the calibrated log K(T) expression, the
+kinetic methanation rate law (a 2-line slot function, currently an
+ILLUSTRATIVE Bo-anchored pseudo-sink switched off above 70 °C as an
+abstract-level encoding), the brine-solubility tuning, and the published
+trajectories — so parity is abstract-level only and says so.
+
+Headline numbers (central parameters; brine and reactive area labeled
+OUR CHOICE in the file):
+
+| output (30 yr) | 25 °C | 50 °C | 90 °C |
+| --- | --- | --- | --- |
+| H2 loss, central | 1.710 % | 1.172 % | 0.000 % (slot: k_m = 0 > 70 °C) |
+| H2 loss p-box | [0.458, 2.631] % | [0.194, 2.324] % | [0, 0] % |
+| calcite net p-box (mmol/L) | [0.683, 5.383] | [−0.838, 3.683] | [−0.940, −0.670] |
+| native GUM σ(calcite) | 3.33 µmol | 7.32 µmol | UNSTABLE-WITHHELD |
+
+Two findings the file prints instead of hiding. First, the calcite net
+balance is **non-monotone in the reactive area** (fast-dissolution
+corners equilibrate early at *lower* cumulative net loss; the maximum is
+interior — see the A-scan), so pure corner transfer would be unsound and
+the p-box is built from an enumerated corner + interior scan, labeled as
+grid evidence rather than proof; H2-loss monotonicity in k_m is
+comparison-arguable and labeled unproven. Second, the house engine's
+per-step GUM propagator has its own caveats — the band scales with dt
+and does not accumulate, sub-1e-6 σ values hit a sqrt-convergence floor
+(flagged ENGINE-FLOOR), and at 90 °C the J² amplification diverges, so
+the band is **refused** there rather than printed. All of this is
+labeled E1–E6 in the file header (E6: lean_single aliases returned
+arrays across calls, so the demo extracts every run's scalars before the
+next call — do not refactor it to collect-then-print).
+
+Engine coverage: **lean_single only** — on current main, Madaros fails
+"visibility preflight" on *any* `chemistry::kinetics` import (reproduced
+with the repo's own `tests/stdlib/chemistry/test_kinetics_epistemic_ensemble.sio`;
+pre-existing blocker, not from this demo). Run:
+
+```bash
+SOUNIO_SOUC_ENGINE=lean_single bin/souc run demos/hydrogen/uhs_brine_calcite.sio
+```
+
+Suite coverage: `tests/run-pass/uhs_brine_calcite_selftest.sio` pins the
+25 °C trajectory and band against an independent Python delta-method
+replica (`UHS_BRINE_CALCITE_SELFTEST_OK`).
 
 ## The stdlib modules (new, reusable)
 
