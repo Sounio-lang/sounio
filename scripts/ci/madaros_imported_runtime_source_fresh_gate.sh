@@ -4,6 +4,7 @@
 
 set -euo pipefail
 export LC_ALL=C
+export SOUNIO_TARGET_OVERRIDE=x86_64-linux
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORK="${SOUNIO_MADAROS_IMPORTED_RUNTIME_SOURCE_FRESH_DIR:-}"
@@ -216,6 +217,7 @@ m3_sha256\t$M3_SHA
 fixed_point\tM2_equals_M3
 bootstrap_seed\tlean_single_source_tracking
 self_host_chain\tM1_to_M2_to_M3_madaros
+target_authority\tx86_64-linux_explicit
 imported_runtime\tpass
 catalog_layouts\t256,257_external_and_own
 known_layout_miss\trefused_no_elf
