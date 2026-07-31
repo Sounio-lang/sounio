@@ -59,6 +59,7 @@ No link is assumed.
 | `K17` | the gap tuples no lemma covers also give `Q = −1` | 116 064 tuples, levels 6 and 7 — the branches are exhaustive |
 | `K18` | the gap lemma's central case `Q_Y(a, H) = −1`, both `Y` positions | 20 096 checks; **Lean-proven ∀n** (`Qgen_H_right_low/_hi`) |
 | `K19` | the six `= H` gap conditions have only **three roots**; `Qgen` is unconditionally symmetric | measured 5..7; the `b ⊕ Y = H` pair is **Lean-proven ∀n** |
+| `K20` | the other two roots: `Q_Y(H, b) = −1` and `Q_W(a, a⊕H) = −1` | checks at levels 6–7; **Lean-proven ∀n** (`Qgen_H_left_*`, `Qgen_H_diff_low_any`) |
 
 with `D1_Y(a,b) = σ(a,b)σ(a⊕Y,b)`, `D2_Y(c,y) = σ(c,y)σ(c,y⊕Y)`, and
 `e1 = D1_{τY}(τa,τb)·D1_Y(a,b)`, `e2` the same for `D2`.
@@ -125,13 +126,13 @@ makes the target *easier*, not harder.
   | branch | closes by | status |
   |---|---|---|
   | degenerate at `m+2` | `Qgen_degen`, both sides `−1` | **proven ∀n** |
-  | reduces to a degenerate tuple | the same constant `−1` | `b = H` and `b ⊕ Y = H` **proven ∀n**; `a = H` and `a ⊕ b = H` not |
+  | reduces to a degenerate tuple | the same constant `−1` | all three roots **proven ∀n** for `Y` below the seam (`b=H`, `a=H`, `a⊕b=H`) and both positions for the `=H` columns; residual is `a⊕b=H` with `Y` above the seam |
   | otherwise | one of the sixteen reduction lemmas + the mutual IH | **proven ∀n** |
   | base case | `Qgen_pow2` | **proven ∀n** |
 
 - **Multi-bit non-degenerate assembly still open.** All 16 reduction cases are
-  proven (K12–K14); what remains is the gap lemma, the `Q'` pattern lemma, and wiring
-  them under the mutual IH.
+  proven (K12–K14); the gap roots are nearly closed (K18–K20). What remains is
+  `a⊕b=H` with `Y` high, the `Q'` pattern lemma, and wiring them under the mutual IH.
 - (c) as a whole is untouched: **L2 remains where the previous rung left it**, with its
   triangle route walled.
 

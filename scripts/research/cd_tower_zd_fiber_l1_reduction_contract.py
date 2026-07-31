@@ -67,11 +67,12 @@ Q'-rows (K14). What remains is the ASSEMBLY. Its degenerate half is now understo
 on the whole degenerate locus (PROVEN forall n as Qgen_degen) and Q' there is determined by the
 degeneracy pattern, which tau preserves. K17 STITCHES the two halves: the gap tuples -- non-degenerate at m+2 but reducing to a
 degenerate one at m+1 -- all give Q = -1, so the three branches of the assembly are EXHAUSTIVE.
-The gap lemma's central case (b = H) is now PROVEN forall n in Lean (Qgen_H_right_low/_hi, K18);
-and the b^Y = H pair follows from it by Qgen_coset_right (PROVEN: Qgen_H_right_low'/_hi'). K19
-shows the six '= H' conditions have only THREE roots; the two still unproven are a = H (which
-would follow from b = H by the symmetry K19 measures, not yet a Lean lemma) and a^b = H. What is
-NOT done: those two roots, the Q' pattern lemma, and the induction itself.
+The gap lemma's central case (b = H) is PROVEN forall n (Qgen_H_right_low/_hi, K18); the
+b^Y = H pair follows by Qgen_coset_right (Qgen_H_right_low'/_hi'). K19 shows the six '= H'
+conditions have only THREE roots. K20 closes the other two roots in Lean: a = H
+(Qgen_H_left_low/_hi, dual case analysis) and a^b = H for Y below the seam
+(Qgen_H_diff_low_any, via Qred_low_lu/ul to the reduced self-pair). Coset doubles each.
+What remains: a^b = H for Y above the seam, the Q' pattern lemma, and the induction itself.
 
 Verdict L1_REDUCED_TO_SEAM_TAU_EQUIVARIANCE_OF_Q__NOT_PROVEN.
 Numerical certificate over an exact integer sign table; D3 respected.
@@ -612,11 +613,34 @@ def main():
               f"{'OK' if k19_sym else 'FAIL'};  the three gap roots (b=H, a=H, a^b=H) each give "
               f"-1 {'OK' if k19_roots else 'FAIL'}")
     ok["K19"] = k19_sym and k19_roots
-    print("K19_ROOTS   => the six '= H' gap conditions have THREE roots: b=H (PROVEN forall n, "
-          "Qgen_H_right_low/_hi), a=H, and a^b=H. The conditions b^Y=H, a^Y=H and a^b^Y=H follow "
-          "from those by Qgen_coset_right/left (the b^Y=H pair is PROVEN: Qgen_H_right_low'/_hi'). "
-          "a=H would follow from b=H by the symmetry measured here -- that symmetry is NOT proven "
-          "in Lean, and a^b=H has no proof yet either")
+    print("K19_ROOTS   => the six '= H' gap conditions have THREE roots: b=H, a=H, a^b=H. "
+          "Coset doubles each to the six. Symmetry of Qgen is measured (not Lean-proven); "
+          "a=H is proven by dual case analysis instead (K20)")
+
+    # ---- K20 the two remaining roots, as stated in Lean ----------------------------------
+    k20 = True
+    k20_n = 0
+    for m in (4, 5):
+        Sn = sign_table_fast(m + 2).astype(np.int64)
+        H = 1 << (m + 1)
+        N = 1 << (m + 2)
+        for W in range(1, H):
+            for b in range(N):
+                k20_n += 2
+                if Q(Sn, H, b, W) != -1:
+                    k20 = False
+                if Q(Sn, H, b, W + H) != -1:
+                    k20 = False
+            for a in range(N):
+                k20_n += 1
+                if Q(Sn, a, a ^ H, W) != -1:
+                    k20 = False
+    ok["K20"] = k20
+    print(f"K20_GAPROOTS the remaining two gap roots -- Q_Y(H, b) = -1 both Y positions, and "
+          f"Q_W(a, a^H) = -1 (Y below the seam) -- ({k20_n} checks, levels 6 and 7) "
+          f"{'OK' if k20 else 'FAIL'}. Lean: Qgen_H_left_low/_hi (+ coset '), "
+          f"Qgen_H_diff_low_any (+ coset) -- PROVEN forall n. Residual: a^b=H with Y above "
+          f"the seam; then Q' pattern and the induction")
 
     print("=" * 78)
     if all(ok.values()):

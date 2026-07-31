@@ -1462,5 +1462,247 @@ theorem Qgen_H_right_hi' (m W a b : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
   rw [Qgen_coset_right, hbe]
   exact Qgen_H_right_hi m W a hW hW0 ha
 
-end SounioZDFiberAntisym
 
+/-! ## Tier 10: gap roots `a = H` and `a ⊕ b = H`
+
+The six `= H` conditions have three roots (K19). Two were already closed:
+`b = H` and `b ⊕ Y = H`. The remaining roots are `a = H` (proved here by the dual
+case analysis of `Qgen_H_right_*`) and `a ⊕ b = H` (proved by folding to the reduced
+self-pair via `Qred_low_lu` / `Qred_low_ul`). Coset then doubles each. -/
+
+private theorem h2pow_succ_add (m : Nat) : 2^(m+2) = 2^(m+1) + 2^(m+1) := by
+  rw [Nat.pow_succ]; omega
+
+/-- Gap root `a = H`, `Y` below the seam. Dual of `Qgen_H_right_low`. -/
+theorem Qgen_H_left_low (m W b : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) (hb : b < 2^(m+2)) :
+    Qgen W (2^(m+1)) b (m+2) = -1 := by
+  have h2H := h2pow_succ_add m
+  have hWm : W < 2^(m+2) := by omega
+  have hH : (2:Nat)^(m+1) < 2^(m+2) := by omega
+  have hpos : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hHW : (2:Nat)^(m+1) ^^^ W = W + 2^(m+1) := by
+    rw [Nat.xor_comm]; exact (seam_add_xor W m hW).symm
+  -- Edge cases that are already current-degenerate.
+  by_cases hb0 : b = 0
+  · subst hb0
+    exact Qgen_degen (m+2) W (2^(m+1)) 0 hWm hH (by omega) hW0 (Or.inr (Or.inl rfl))
+  by_cases hbH : b = 2^(m+1)
+  · subst hbH
+    exact Qgen_degen (m+2) W (2^(m+1)) (2^(m+1)) hWm hH hH hW0
+      (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl rfl)))))
+  by_cases hbW : b = W
+  · rw [hbW]
+    exact Qgen_degen (m+2) W (2^(m+1)) W hWm hH (by omega) hW0
+      (Or.inr (Or.inr (Or.inr (Or.inl (Nat.xor_self W)))))
+  by_cases hbWH : b = W + 2^(m+1)
+  · have hd : (2:Nat)^(m+1) ^^^ (W + 2^(m+1)) ^^^ W = 0 := by
+      have h1 : (2:Nat)^(m+1) ^^^ (W + 2^(m+1)) = W := by
+        rw [seam_add_xor W m hW, Nat.xor_comm W (2^(m+1)), ← Nat.xor_assoc, Nat.xor_self,
+            Nat.zero_xor]
+      rw [h1, Nat.xor_self]
+    rw [hbWH]
+    exact Qgen_degen (m+2) W (2^(m+1)) (W + 2^(m+1)) hWm hH (by omega) hW0
+      (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr hd)))))
+  -- Residual non-degenerate gap: split on b's half.
+  by_cases hbU : b ≥ 2^(m+1)
+  · obtain ⟨v, hbe, hvl⟩ : ∃ v, b = v + 2^(m+1) ∧ v < 2^(m+1) :=
+      ⟨b - 2^(m+1), by omega, by omega⟩
+    have hv0 : v ≠ 0 := by intro h; apply hbH; rw [hbe, h]; simp
+    have hvW : v ^^^ W ≠ 0 := by
+      intro h; have he := xor_zero_eq v W h; apply hbWH; rw [hbe, he]
+    have hxb : (v + 2^(m+1)) ^^^ W = (v ^^^ W) + 2^(m+1) := seam_xor_left v W m hvl hW
+    have e1 : cdSigma (2^(m+1)) (v + 2^(m+1)) (m+2) = 1 := by
+      have h := R_uu 0 v m hpos hvl
+      rw [Nat.zero_add] at h; rw [h, if_neg hv0, cdSig0']
+    have e4 : cdSigma (W + 2^(m+1)) (v + 2^(m+1)) (m+2) = cdSigma v W (m+1) := by
+      have h := R_uu W v m hW hvl; rw [h, if_neg hv0]
+    have e2 : cdSigma (W + 2^(m+1)) ((v ^^^ W) + 2^(m+1)) (m+2) =
+        cdSigma (v ^^^ W) W (m+1) := by
+      have h := R_uu W (v ^^^ W) m hW (xorlt hvl hW); rw [h, if_neg hvW]
+    have e3 : cdSigma (2^(m+1)) ((v ^^^ W) + 2^(m+1)) (m+2) = 1 := by
+      have h := R_uu 0 (v ^^^ W) m hpos (xorlt hvl hW)
+      rw [Nat.zero_add] at h; rw [h, if_neg hvW, cdSig0']
+    unfold Qgen
+    rw [hbe, hxb, hHW, e1, e2, e3, e4]
+    have hd := deg_left (m+1) W v hW hvl hW0
+    rcases cdSigma_pm (m+1) (v ^^^ W) W with h1 | h1 <;>
+      rcases cdSigma_pm (m+1) v W with h2 | h2 <;>
+      rw [h1, h2] at hd ⊢ <;> revert hd <;> decide
+  · have hbl : b < 2^(m+1) := by omega
+    have hbW' : b ^^^ W ≠ 0 := by intro h; exact hbW (xor_zero_eq b W h)
+    have e1 : cdSigma (2^(m+1)) b (m+2) = -1 := by
+      have h := R_ul 0 b m hpos hbl
+      rw [Nat.zero_add] at h; rw [h, if_neg hb0, cdSig0]
+    have e4 : cdSigma (W + 2^(m+1)) b (m+2) = - cdSigma W b (m+1) := by
+      have h := R_ul W b m hW hbl; rw [h, if_neg hb0]
+    have e2 : cdSigma (W + 2^(m+1)) (b ^^^ W) (m+2) = - cdSigma W (b ^^^ W) (m+1) := by
+      have h := R_ul W (b ^^^ W) m hW (xorlt hbl hW); rw [h, if_neg hbW']
+    have e3 : cdSigma (2^(m+1)) (b ^^^ W) (m+2) = -1 := by
+      have h := R_ul 0 (b ^^^ W) m hpos (xorlt hbl hW)
+      rw [Nat.zero_add] at h; rw [h, if_neg hbW', cdSig0]
+    unfold Qgen
+    rw [hHW, e1, e2, e3, e4]
+    have hd := deg_right (m+1) W b hW hbl hW0
+    rcases cdSigma_pm (m+1) W (b ^^^ W) with h1 | h1 <;>
+      rcases cdSigma_pm (m+1) W b with h2 | h2 <;>
+      rw [h1, h2] at hd ⊢ <;> revert hd <;> decide
+
+/-- Gap root `a = H`, `Y` above the seam. Dual of `Qgen_H_right_hi`. -/
+theorem Qgen_H_left_hi (m W b : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) (hb : b < 2^(m+2)) :
+    Qgen (W + 2^(m+1)) (2^(m+1)) b (m+2) = -1 := by
+  have h2H := h2pow_succ_add m
+  have hYm : W + 2^(m+1) < 2^(m+2) := by omega
+  have hH : (2:Nat)^(m+1) < 2^(m+2) := by omega
+  have hpos : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hY0 : W + 2^(m+1) ≠ 0 := by omega
+  have hHY : (2:Nat)^(m+1) ^^^ (W + 2^(m+1)) = W := by
+    rw [seam_add_xor W m hW, Nat.xor_comm W (2^(m+1)), ← Nat.xor_assoc, Nat.xor_self,
+        Nat.zero_xor]
+  by_cases hb0 : b = 0
+  · subst hb0
+    exact Qgen_degen (m+2) (W + 2^(m+1)) (2^(m+1)) 0 hYm hH (by omega) hY0
+      (Or.inr (Or.inl rfl))
+  by_cases hbH : b = 2^(m+1)
+  · subst hbH
+    exact Qgen_degen (m+2) (W + 2^(m+1)) (2^(m+1)) (2^(m+1)) hYm hH hH hY0
+      (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl rfl)))))
+  by_cases hbW : b = W
+  · have hd : (2:Nat)^(m+1) ^^^ W ^^^ (W + 2^(m+1)) = 0 := by
+      -- H ⊕ W ⊕ Y = (H ⊕ Y) ⊕ W = W ⊕ W = 0
+      calc (2:Nat)^(m+1) ^^^ W ^^^ (W + 2^(m+1))
+          = (2:Nat)^(m+1) ^^^ (W + 2^(m+1)) ^^^ W := by
+              rw [Nat.xor_assoc, Nat.xor_comm W (W + 2^(m+1)), ← Nat.xor_assoc]
+        _ = W ^^^ W := by rw [hHY]
+        _ = 0 := Nat.xor_self W
+    rw [hbW]
+    exact Qgen_degen (m+2) (W + 2^(m+1)) (2^(m+1)) W hYm hH (by omega) hY0
+      (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr hd)))))
+  by_cases hbWH : b = W + 2^(m+1)
+  · rw [hbWH]
+    exact Qgen_degen (m+2) (W + 2^(m+1)) (2^(m+1)) (W + 2^(m+1)) hYm hH hYm hY0
+      (Or.inr (Or.inr (Or.inr (Or.inl (Nat.xor_self _)))))
+  by_cases hbU : b ≥ 2^(m+1)
+  · obtain ⟨v, hbe, hvl⟩ : ∃ v, b = v + 2^(m+1) ∧ v < 2^(m+1) :=
+      ⟨b - 2^(m+1), by omega, by omega⟩
+    have hv0 : v ≠ 0 := by intro h; apply hbH; rw [hbe, h]; simp
+    have hvW : v ^^^ W ≠ 0 := by
+      intro h; have he := xor_zero_eq v W h; apply hbWH; rw [hbe, he]
+    have hne : v ≠ W := by intro he; exact hvW (by rw [he, Nat.xor_self])
+    have hxb : (v + 2^(m+1)) ^^^ (W + 2^(m+1)) = v ^^^ W := xor_seam_cancel v W m hvl hW
+    have e1 : cdSigma (2^(m+1)) (v + 2^(m+1)) (m+2) = 1 := by
+      have h := R_uu 0 v m hpos hvl
+      rw [Nat.zero_add] at h; rw [h, if_neg hv0, cdSig0']
+    have e2 : cdSigma W (v ^^^ W) (m+2) = cdSigma W (v ^^^ W) (m+1) :=
+      R_ll W (v ^^^ W) m hW (xorlt hvl hW)
+    have e3 : cdSigma (2^(m+1)) (v ^^^ W) (m+2) = -1 := by
+      have h := R_ul 0 (v ^^^ W) m hpos (xorlt hvl hW)
+      rw [Nat.zero_add] at h; rw [h, if_neg hvW, cdSig0]
+    have e4 : cdSigma W (v + 2^(m+1)) (m+2) = cdSigma v W (m+1) :=
+      R_lu W v m hW hvl
+    have eA : cdSigma v W (m+1) = - cdSigma W v (m+1) :=
+      antisym (m+1) v W hvl hW hv0 hW0 hne
+    unfold Qgen
+    rw [hbe, hxb, hHY, e1, e2, e3, e4, eA]
+    have hd := deg_right (m+1) W v hW hvl hW0
+    rcases cdSigma_pm (m+1) W (v ^^^ W) with h1 | h1 <;>
+      rcases cdSigma_pm (m+1) W v with h2 | h2 <;>
+      rw [h1, h2] at hd ⊢ <;> revert hd <;> decide
+  · have hbl : b < 2^(m+1) := by omega
+    have hbW' : b ^^^ W ≠ 0 := by intro h; exact hbW (xor_zero_eq b W h)
+    have hne : b ^^^ W ≠ W := by
+      intro he
+      have hb0' : b = 0 := by
+        have hh : (b ^^^ W) ^^^ W = W ^^^ W := congrArg (fun z => z ^^^ W) he
+        -- b ^^^ W ^^^ W = 0
+        have : b = 0 := by
+          simp only [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero] at hh
+          exact hh
+        exact this
+      exact hb0 hb0'
+    have hxb : b ^^^ (W + 2^(m+1)) = (b ^^^ W) + 2^(m+1) := xor_seam b W m hbl hW
+    have e1 : cdSigma (2^(m+1)) b (m+2) = -1 := by
+      have h := R_ul 0 b m hpos hbl
+      rw [Nat.zero_add] at h; rw [h, if_neg hb0, cdSig0]
+    have e2 : cdSigma W ((b ^^^ W) + 2^(m+1)) (m+2) = cdSigma (b ^^^ W) W (m+1) :=
+      R_lu W (b ^^^ W) m hW (xorlt hbl hW)
+    have e3 : cdSigma (2^(m+1)) ((b ^^^ W) + 2^(m+1)) (m+2) = 1 := by
+      have h := R_uu 0 (b ^^^ W) m hpos (xorlt hbl hW)
+      rw [Nat.zero_add] at h; rw [h, if_neg hbW', cdSig0']
+    have e4 : cdSigma W b (m+2) = cdSigma W b (m+1) := R_ll W b m hW hbl
+    have eA : cdSigma (b ^^^ W) W (m+1) = - cdSigma W (b ^^^ W) (m+1) :=
+      antisym (m+1) (b ^^^ W) W (xorlt hbl hW) hW hbW' hW0 hne
+    unfold Qgen
+    rw [hxb, hHY, e1, e2, e3, e4, eA]
+    have hd := deg_right (m+1) W b hW hbl hW0
+    rcases cdSigma_pm (m+1) W (b ^^^ W) with h1 | h1 <;>
+      rcases cdSigma_pm (m+1) W b with h2 | h2 <;>
+      rw [h1, h2] at hd ⊢ <;> revert hd <;> decide
+
+theorem Qgen_H_left_low' (m W a b : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
+    (hb : b < 2^(m+2)) (hae : a ^^^ W = 2^(m+1)) : Qgen W a b (m+2) = -1 := by
+  rw [Qgen_coset_left, hae]
+  exact Qgen_H_left_low m W b hW hW0 hb
+
+theorem Qgen_H_left_hi' (m W a b : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
+    (hb : b < 2^(m+2)) (hae : a ^^^ (W + 2^(m+1)) = 2^(m+1)) :
+    Qgen (W + 2^(m+1)) a b (m+2) = -1 := by
+  rw [Qgen_coset_left, hae]
+  exact Qgen_H_left_hi m W b hW hW0 hb
+
+/-! ### Gap root `a ⊕ b = H` -/
+
+theorem Qgen_H_diff_low (m W a : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) (ha : a < 2^(m+1)) :
+    Qgen W a (a + 2^(m+1)) (m+2) = -1 := by
+  have hred : Qgen W a (a + 2^(m+1)) (m+2) = Qgen W a a (m+1) :=
+    Qred_low_lu m W a a hW ha ha
+  rw [hred]
+  exact Qgen_degen (m+1) W a a hW ha ha hW0 (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl rfl)))))
+
+theorem Qgen_H_diff_low_hi (m W u : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) (hu : u < 2^(m+1)) :
+    Qgen W (u + 2^(m+1)) u (m+2) = -1 := by
+  have h2H := h2pow_succ_add m
+  have hWm : W < 2^(m+2) := by omega
+  have huH : u + 2^(m+1) < 2^(m+2) := by omega
+  have hu' : u < 2^(m+2) := by omega
+  by_cases hu0 : u = 0
+  · subst hu0
+    rw [Nat.zero_add]
+    exact Qgen_degen (m+2) W (2^(m+1)) 0 hWm (by omega) (by omega) hW0
+      (Or.inr (Or.inl rfl))
+  · by_cases huW : u ^^^ W = 0
+    · have heb : u = W := xor_zero_eq u W huW
+      rw [heb]
+      exact Qgen_degen (m+2) W (W + 2^(m+1)) W hWm (by omega) (by omega) hW0
+        (Or.inr (Or.inr (Or.inr (Or.inl (Nat.xor_self W)))))
+    · have hred : Qgen W (u + 2^(m+1)) u (m+2) = Qgen W u u (m+1) :=
+        Qred_low_ul m W u u hW hu hu hu0 huW
+      rw [hred]
+      exact Qgen_degen (m+1) W u u hW hu hu hW0
+        (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl rfl)))))
+
+theorem Qgen_H_diff_low_any (m W a : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) (ha : a < 2^(m+2)) :
+    Qgen W a (a ^^^ 2^(m+1)) (m+2) = -1 := by
+  have h2H := h2pow_succ_add m
+  by_cases haU : a ≥ 2^(m+1)
+  · have hul : a - 2^(m+1) < 2^(m+1) := by omega
+    have hae : a = (a - 2^(m+1)) + 2^(m+1) := by omega
+    have hxor : ((a - 2^(m+1)) + 2^(m+1)) ^^^ 2^(m+1) = a - 2^(m+1) := by
+      have hse : (a - 2^(m+1)) + 2^(m+1) = (a - 2^(m+1)) ^^^ 2^(m+1) :=
+        seam_add_xor (a - 2^(m+1)) m hul
+      calc ((a - 2^(m+1)) + 2^(m+1)) ^^^ 2^(m+1)
+          = ((a - 2^(m+1)) ^^^ 2^(m+1)) ^^^ 2^(m+1) := by rw [hse]
+        _ = a - 2^(m+1) := by rw [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+    rw [hae, hxor]
+    exact Qgen_H_diff_low_hi m W (a - 2^(m+1)) hW hW0 hul
+  · have hal : a < 2^(m+1) := by omega
+    have hxor : a ^^^ 2^(m+1) = a + 2^(m+1) := (seam_add_xor a m hal).symm
+    rw [hxor]
+    exact Qgen_H_diff_low m W a hW hW0 hal
+
+theorem Qgen_H_diff_low_coset (m W a b : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
+    (ha : a < 2^(m+2)) (hbe : b ^^^ W = a ^^^ 2^(m+1)) :
+    Qgen W a b (m+2) = -1 := by
+  rw [Qgen_coset_right, hbe]
+  exact Qgen_H_diff_low_any m W a hW hW0 ha
+
+end SounioZDFiberAntisym
