@@ -366,7 +366,15 @@ fn main() with IO, Panic {
     let feature_ok = op_observation_feature_tag_i64(feature) == 51
     let abstention_ok = op_abstention_protocol_id_i64(abstention) == 10 &&
         op_abstention_reason_tag_i64(abstention) == 9000
+    let equality_control = 101 == 101
+    let route_is_zero = op_recorded_measurement_tag_i64(recorded) == 0
+    let history_source_is_zero = op_observation_history_source_system_tag_i64(history) == 0
+    let feature_is_zero = op_observation_feature_tag_i64(feature) == 0
 
+    if equality_control { println("RECEIPT_EQ_CONTROL_PASS") } else { println("RECEIPT_EQ_CONTROL_FAIL") }
+    if route_is_zero { println("RECEIPT_ROUTE_ZERO") } else { println("RECEIPT_ROUTE_NONZERO") }
+    if history_source_is_zero { println("RECEIPT_HISTORY_SOURCE_ZERO") } else { println("RECEIPT_HISTORY_SOURCE_NONZERO") }
+    if feature_is_zero { println("RECEIPT_FEATURE_ZERO") } else { println("RECEIPT_FEATURE_NONZERO") }
     if route_ok { println("RECEIPT_ROUTE_PASS") } else { println("RECEIPT_ROUTE_FAIL") }
     if history_source_ok { println("RECEIPT_HISTORY_SOURCE_PASS") } else { println("RECEIPT_HISTORY_SOURCE_FAIL") }
     if regularization_ok { println("RECEIPT_REGULARIZATION_PASS") } else { println("RECEIPT_REGULARIZATION_FAIL") }
