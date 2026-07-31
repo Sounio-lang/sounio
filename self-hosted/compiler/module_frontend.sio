@@ -5159,6 +5159,7 @@ fn mf_arebox_apply(module: &! IrModule) with Alloc, Mut, Panic, Div {
 
 fn module_frontend_lower_programs_array_direct_box(
     programs: &! [Program; 256],
+    dep_programs: &! [Program; 256],
     loaded: i64,
     trace: &! LoadMultimoduleIrTrace
 ) -> ModuleFrontendLowerDirectBoxResult with IO, Mut, Panic, Div, Alloc {
@@ -5222,7 +5223,7 @@ fn module_frontend_lower_programs_array_direct_box(
                 // Pass the stable Program reference across the lower boundary.
                 // Borrowing its nested items field directly from the program array
                 // can arrive as None under the bootstrap compiler; copying it crashes.
-                let dep_program_ref: &Program = &(*programs)[i as usize]
+                let dep_program_ref: &Program = &(*dep_programs)[i as usize]
 
                 if into_acc_default {
                     // Wave13: body-lower dep directly into acc (no concurrent dep_box).
@@ -5236,7 +5237,7 @@ fn module_frontend_lower_programs_array_direct_box(
                     } else {
                         lower_dep_program_items_into_acc_with_externs(
                             dep_program_ref,
-                            programs,
+                            dep_programs,
                             loaded,
                             i,
                             acc_box
@@ -5291,7 +5292,7 @@ fn module_frontend_lower_programs_array_direct_box(
                     // Proven path: full dep_box lower + place+remap + section merge.
                     let dep_lower = module_frontend_lower_program_items_box_traced_with_externs(
                         &(*dep_program_ref).items,
-                        programs,
+                        dep_programs,
                         loaded,
                         i,
                         trace
@@ -5498,7 +5499,7 @@ fn module_frontend_lower_programs_array_boxed(
         return module_frontend_lower_box_error("no_modules_loaded")
     }
 
-    let lowered = module_frontend_lower_programs_array_direct_box(programs, loaded, trace)
+    let lowered = module_frontend_lower_programs_array_direct_box(programs, programs, loaded, trace)
     if !lowered.ok {
         return module_frontend_lower_box_error(lowered.error_msg)
     }
@@ -5892,10 +5893,10 @@ fn module_frontend_merge_imported_box(
             print("imported_merge: specialized lower failed (")
             print(lowered.error_msg)
             print(") — multi-mod fallback\n")
-            lowered = module_frontend_lower_programs_array_direct_box(programs, loaded, trace)
+            lowered = module_frontend_lower_programs_array_direct_box(programs, programs, loaded, trace)
         }
     } else {
-        lowered = module_frontend_lower_programs_array_direct_box(programs, loaded, trace)
+        lowered = module_frontend_lower_programs_array_direct_box(programs, programs, loaded, trace)
     }
     if !lowered.ok {
         print("IR lowering failed during merge: ")
@@ -6082,6 +6083,15 @@ pub fn module_frontend_compile_imported_to_file(
 
     trace.last_stage = "lower_merge"
     print("imported_compile: lower_begin\n")
+    // Seed summary preseed consumes Box-bearing external Program values under
+    // the bootstrap compiler. Reparse a dedicated body-lowering view after
+    // typecheck so dependency ASTs remain intact without a second IrModule.
+    var lowering_programs: [Program; 256] = [mf_empty_program(); 256]
+    var reload_i: i64 = 0
+    while reload_i < loaded {
+        lowering_programs[reload_i as usize] = load_module_file(file_paths[reload_i as usize])
+        reload_i = reload_i + 1
+    }
     var used_specialized: bool = false
     var lowered: ModuleFrontendLowerDirectBoxResult = module_frontend_lower_direct_box_error("uninitialized")
     if use_collapse {
@@ -6092,10 +6102,10 @@ pub fn module_frontend_compile_imported_to_file(
             print("imported_compile: specialized lower failed (")
             print(lowered.error_msg)
             print(") — multi-mod fallback\n")
-            lowered = module_frontend_lower_programs_array_direct_box(&! programs, loaded, &! trace)
+            lowered = module_frontend_lower_programs_array_direct_box(&! programs, &! lowering_programs, loaded, &! trace)
         }
     } else {
-        lowered = module_frontend_lower_programs_array_direct_box(&! programs, loaded, &! trace)
+        lowered = module_frontend_lower_programs_array_direct_box(&! programs, &! lowering_programs, loaded, &! trace)
     }
     print("imported_compile: lower_done\n")
     if !lowered.ok {
