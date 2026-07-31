@@ -890,16 +890,16 @@ fn lowerer_preseed_impl_method_summaries_dedup_mut(
     }
 }
 
-// Preseed a dependency's items into the accumulator. Skips names that already
-// have bodies (DEDUP). Skips re-allocating BSS slots that already exist.
+// Preseed a dependency's items into the accumulator. Descent registers every
+// signature/layout before unwind lowers still-bodyless free functions. Keeping
+// both phases in one recursive traversal avoids reopening the one-shot borrowed
+// ItemList under the bootstrap compiler.
 fn lowerer_preseed_dep_items_into_acc_mut(
     lo: &! Lowerer,
     items: &Option<Box<ItemList>>,
     skip_name: Name
-) with Mut, Panic, Div, Alloc {
-    var current = items
-    while true {
-        match *current {
+) with Mut, Panic, Div, Alloc, IO {
+        match *items {
             Some(list) => {
                 let head = &(*list).head
                 let kind = head.kind
@@ -1026,11 +1026,38 @@ fn lowerer_preseed_dep_items_into_acc_mut(
                         _ => {}
                     }
                 }
-                current = &(*list).tail
+                lowerer_preseed_dep_items_into_acc_mut(lo, &(*list).tail, skip_name)
+
+                if kind == ItemKind::ItemFn
+                    && !lowerer_name_is_main(name)
+                    && !ir_name_eq(name, skip_name)
+                {
+                    var body_box = (*lo).module
+                    var has_body: bool = false
+                    var bfi: i64 = 0
+                    while bfi < (*body_box).fn_count {
+                        if ir_name_eq((*body_box).functions[bfi as usize].name, name)
+                            && (*body_box).functions[bfi as usize].instr_count > 0
+                        {
+                            has_body = true
+                        }
+                        bfi = bfi + 1
+                    }
+                    (*lo).module = body_box
+
+                    if !has_body {
+                        let unwind_fn_def_ref: &Option<Box<FnDef>> = &head.fn_def
+                        match *unwind_fn_def_ref {
+                            Some(fd) => {
+                                lowerer_lower_fn_item_mut(lo, name, &(*fd))
+                            }
+                            _ => {}
+                        }
+                    }
+                }
             }
-            _ => break
+            _ => {}
         }
-    }
 }
 
 // Body-lower dep items into acc, skipping names that already have bodies (DEDUP)
@@ -1086,77 +1113,6 @@ fn lowerer_lower_program_bodies_dedup_mut(
                             }
                         }
                         _ => {}
-                    }
-                }
-                current = &(*list).tail
-            }
-            _ => break
-        }
-    }
-}
-
-// Close the free-function counterpart of the impl-method residual below.
-// Under the bootstrap compiler, the primary DEDUP predicate can classify an
-// all-stub symbol as already lowered and skip it. Re-scan the live accumulator
-// inline and lower only names for which no non-empty body exists anywhere.
-fn lowerer_force_fill_free_functions_mut(
-    lo: &! Lowerer,
-    items: &Option<Box<ItemList>>
-) with Mut, Panic, Div, Alloc, IO {
-    var current = items
-    while true {
-        match *current {
-            Some(list) => {
-                let head = &(*list).head
-                if head.kind == ItemKind::ItemFn && !lowerer_name_is_main(head.name) {
-                    var module_box = (*lo).module
-                    var has_body: bool = false
-                    var fi: i64 = 0
-                    while fi < (*module_box).fn_count {
-                        if ir_name_eq((*module_box).functions[fi as usize].name, head.name)
-                            && (*module_box).functions[fi as usize].instr_count > 0
-                        {
-                            has_body = true
-                        }
-                        fi = fi + 1
-                    }
-                    (*lo).module = module_box
-
-                    if !has_body {
-                        let fn_def_opt_ref: &Option<Box<FnDef>> = &head.fn_def
-                        match *fn_def_opt_ref {
-                            Some(fd) => {
-                                lowerer_lower_fn_item_mut(lo, head.name, &(*fd))
-
-                                var verify_box = (*lo).module
-                                var filled: bool = false
-                                var vfi: i64 = 0
-                                while vfi < (*verify_box).fn_count {
-                                    if ir_name_eq((*verify_box).functions[vfi as usize].name, head.name)
-                                        && (*verify_box).functions[vfi as usize].instr_count > 0
-                                    {
-                                        filled = true
-                                    }
-                                    vfi = vfi + 1
-                                }
-                                (*lo).module = verify_box
-
-                                if !filled {
-                                    lo.error_count = lo.error_count + 1
-                                    lo.had_error = true
-                                    if str_eq(read_env("SOUNIO_INTO_ACC_TRACE"), "1") {
-                                        print("into_acc: force_fill_free_failed name=")
-                                        print(str_from_bytes(head.name.buf, head.name.len))
-                                        print("\n")
-                                    }
-                                } else if str_eq(read_env("SOUNIO_INTO_ACC_TRACE"), "1") {
-                                    print("into_acc: force_fill_free_ok name=")
-                                    print(str_from_bytes(head.name.buf, head.name.len))
-                                    print("\n")
-                                }
-                            }
-                            _ => {}
-                        }
                     }
                 }
                 current = &(*list).tail
@@ -13306,9 +13262,6 @@ fn lower_dep_program_items_into_acc_with_externs(
     lowerer_preseed_dep_items_into_acc_mut(&! lo, items, ir_empty_name())
     // DEDUP body lower: skip main + existing bodies; fill stubs and new names.
     lowerer_lower_program_bodies_dedup_mut(&! lo, items)
-    // The primary DEDUP predicate can misclassify free-function stubs under the
-    // bootstrap compiler. Re-scan and force-fill only symbols still bodyless.
-    lowerer_force_fill_free_functions_mut(&! lo, items)
     // Residual closeout: re-attempt any ItemImpl methods still at ic=0.
     lowerer_force_fill_impl_methods_mut(&! lo, items)
     var patch_stats = ir_empty_validated_patch_stats()
