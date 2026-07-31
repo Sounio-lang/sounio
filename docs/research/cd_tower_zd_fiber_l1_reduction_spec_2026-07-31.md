@@ -53,12 +53,14 @@ No link is assumed.
 | `K4` | equivalently, one statement: `e1(a,b,Y) = e1(a, b⊕Y, Y)` | 0 violations |
 | `K1` | `K4` regrouped **is** (★) | 0 violations, levels 5..8 |
 | `K8` | (★) needs no seam hypothesis: it holds for **every** `Y ≠ 0` | 0 violations, levels 5,6,7 |
+| `K9` | the base case: `Q` at a single-bit label is `−1` | 0 violations, levels 4..7; **Lean-proven ∀n** |
+| `K9` | base case of (★): `Q` at a single-bit label is identically `−1` | 0 violations, levels 4..7; Lean `Qgen_pow2` ∀n |
 
 with `D1_Y(a,b) = σ(a,b)σ(a⊕Y,b)`, `D2_Y(c,y) = σ(c,y)σ(c,y⊕Y)`, and
 `e1 = D1_{τY}(τa,τb)·D1_Y(a,b)`, `e2` the same for `D2`.
 
 `D1` is the shape of `A4_sub` from the antisymmetry rung — which is the special case `Y = b`,
-and is Lean-proven ∀n.
+and is Lean-proven ∀n. The single-bit base case is `Qgen_pow2`, also Lean-proven ∀n.
 
 ---
 
@@ -93,15 +95,16 @@ makes the target *easier*, not harder.
 - **L1 is not proven, and neither is (★).** This is a reduction, verified at four levels.
 - The `b = Y` boundary is excluded from `K2` and handled nowhere here. L1 itself was verified
   including it by the previous rung, so the gap is in this chain, not in L1's evidence.
-- **(★) is not Lean-proven.** Attempted; what landed instead, kernel-checked ∀n in
-  `formal/lean4/SounioZDFiberAntisym.lean`, is the machinery its induction needs:
-  `A4_sub'` (the second-argument form `σ(a,b) = −σ(a, a⊕b)`, which two of the four branches
-  require) and `Qgen_coset_left`/`_right` (`Q` depends only on the two cosets, which halves the
-  case analysis). The inductive step itself is not written.
-- **The base case is identified and measured but not formalised**: `Q` at a *single-bit* label is
-  identically `−1` (levels 4..7, all `a,b`, all `k`). That is exactly the case where `τ` moves
-  the level's top bit — the case the four branch reductions hold fixed — so discharging it
-  discharges the hard case. It is a theorem-shaped statement awaiting its own induction.
+- **(★) is not Lean-proven in full.** The inductive step is still open. What is
+  kernel-checked ∀n in `formal/lean4/SounioZDFiberAntisym.lean`:
+  `A4_sub'` (second-argument form), `Qgen_coset_left`/`_right`, and now the
+  **base case** `Qgen_pow2`.
+- **The base case IS formalised (K9 / `Qgen_pow2`).** `Q` at a *single-bit* label is
+  identically `−1` for all `a,b` and all bit positions `k < m` — proven ∀n, no
+  `sorry`, no `native_decide`. That is exactly the case where `τ` moves the
+  level's top bit (the branch reductions hold that case fixed). Measured at
+  levels 4..7 with zero violations; the theorem is the same object as the
+  measurement (`Qgen` = the measured product entrywise).
 - (c) as a whole is untouched: **L2 remains where the previous rung left it**, with its
   triangle route walled.
 

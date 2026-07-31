@@ -623,4 +623,231 @@ theorem Qgen_coset_right (L a b m : Nat) : Qgen L a b m = Qgen L a (b ^^^ L) m :
   rw [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
   ac_rfl
 
+/-- `cdSigma` squared is 1. -/
+theorem cdSq (a b m : Nat) : cdSigma a b m * cdSigma a b m = 1 := by
+  rcases cdSigma_pm m a b with h | h <;> rw [h] <;> decide
+
+/-- Degenerate branch, first-argument form: `sigma(u^L, L) * sigma(u, L) = -1`. -/
+theorem deg_left (m L u : Nat) (hL : L < 2^m) (hu : u < 2^m) (hL0 : L ≠ 0) :
+    cdSigma (u ^^^ L) L m * cdSigma u L m = -1 := by
+  have hm : ∃ m', m = m' + 1 := by
+    cases m with
+    | zero => exact absurd (by omega : L = 0) hL0
+    | succ k => exact ⟨k, rfl⟩
+  obtain ⟨m', rfl⟩ := hm
+  by_cases hu0 : u = 0
+  · subst hu0
+    rw [Nat.zero_xor, cdSig0, sigma_self (m'+1) L hL hL0]
+    decide
+  · by_cases huL : u ^^^ L = 0
+    · have : u = L := xor_zero_eq u L huL
+      subst this
+      rw [huL, cdSig0, sigma_self (m'+1) u hu hu0]
+      decide
+    · rw [A4_sub (m'+1) u L hu hL hu0 hL0 huL, Int.mul_neg, cdSq]
+
+/-- Degenerate branch, second-argument form: `sigma(L, u^L) * sigma(L, u) = -1`. -/
+theorem deg_right (m L u : Nat) (hL : L < 2^m) (hu : u < 2^m) (hL0 : L ≠ 0) :
+    cdSigma L (u ^^^ L) m * cdSigma L u m = -1 := by
+  have hm : ∃ m', m = m' + 1 := by
+    cases m with
+    | zero => exact absurd (by omega : L = 0) hL0
+    | succ k => exact ⟨k, rfl⟩
+  obtain ⟨m', rfl⟩ := hm
+  by_cases hu0 : u = 0
+  · subst hu0
+    rw [Nat.zero_xor, cdSig0', sigma_self (m'+1) L hL hL0]
+    decide
+  · by_cases huL : u ^^^ L = 0
+    · have he : u = L := xor_zero_eq u L huL
+      subst he
+      rw [huL, cdSig0', sigma_self (m'+1) u hu hu0]
+      decide
+    · have hLu : L ^^^ u ≠ 0 := by
+        intro h; exact huL (by rw [Nat.xor_comm]; exact h)
+      have h := A4_sub' (m'+1) L u hL hu hL0 hu0 hLu
+      rw [Nat.xor_comm L u] at h
+      rw [h, Int.mul_neg, cdSq]
+
+/-- `Q` at the level's TOP bit is `-1`, for lower-half arguments. This is the case where `tau`
+    would move the top bit -- exactly what the four branch reductions hold fixed. -/
+theorem Qgen_top (m a b : Nat) (ha : a < 2^(m+1)) (hb : b < 2^(m+1)) :
+    Qgen (2^(m+1)) a b (m+2) = -1 := by
+  have hxa : a ^^^ 2^(m+1) = a + 2^(m+1) := (seam_add_xor a m ha).symm
+  have hxb : b ^^^ 2^(m+1) = b + 2^(m+1) := (seam_add_xor b m hb).symm
+  unfold Qgen
+  rw [hxa, hxb, R_ll a b m ha hb, R_uu a b m ha hb, R_lu a b m ha hb, R_ul a b m ha hb]
+  by_cases hb0 : b = 0
+  · subst hb0
+    rw [if_pos rfl, if_pos rfl, cdSig0' a m, cdSig0 a m]
+    decide
+  · rw [if_neg hb0, if_neg hb0]
+    have hstep : cdSigma a b (m+1) * cdSigma b a (m+1) * cdSigma b a (m+1)
+                   * -cdSigma a b (m+1)
+               = -((cdSigma a b (m+1) * cdSigma a b (m+1))
+                   * (cdSigma b a (m+1) * cdSigma b a (m+1))) := by
+      rw [Int.mul_neg]
+      have : cdSigma a b (m+1) * cdSigma b a (m+1) * cdSigma b a (m+1) * cdSigma a b (m+1)
+           = cdSigma a b (m+1) * cdSigma a b (m+1)
+               * (cdSigma b a (m+1) * cdSigma b a (m+1)) := by ac_rfl
+      rw [this]
+    rw [hstep, cdSq, cdSq]
+    decide
+
+/-- **THE BASE CASE OF (*), PROVEN forall n.** `Q` at a single-bit label is identically `-1`.
+
+    When `Y` is a lone power of two equal to the level's top bit, `j = lsb(Y)` IS that top bit,
+    `tau Y = 1` is again a single bit, and both sides of `(*)` are this constant -- so the case
+    where `tau` moves the top bit, which the four branch reductions hold fixed and which
+    `A4_sub` never faced, is discharged.
+
+    `(*)` itself is still NOT proven: its inductive step is the remaining work. -/
+theorem Qgen_pow2 : ∀ (m k a b : Nat), k < m → a < 2^m → b < 2^m → Qgen (2^k) a b m = -1
+  | 0, _, _, _, hk, _, _ => by omega
+  | 1, k, a, b, hk, ha, hb => by
+      have hk0 : k = 0 := by omega
+      subst hk0
+      have h2 : (2:Nat)^1 = 2 := rfl
+      have hA : a = 0 ∨ a = 1 := by omega
+      have hB : b = 0 ∨ b = 1 := by omega
+      rcases hA with rfl | rfl <;> rcases hB with rfl | rfl <;> decide
+  | (m+2), k, a, b, hk, ha, hb => by
+    have hHpos : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+    have h2H : 2^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+    by_cases hkT : k = m+1
+    · -- Y is the level's TOP bit: fold both arguments into the lower half, then Qgen_top
+      subst hkT
+      by_cases haU : a ≥ 2^(m+1)
+      · obtain ⟨u, hae, hul⟩ : ∃ u, a = u + 2^(m+1) ∧ u < 2^(m+1) :=
+          ⟨a - 2^(m+1), by omega, by omega⟩
+        have hfold : a ^^^ 2^(m+1) = u := by
+          rw [hae, seam_add_xor u m hul, Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+        rw [Qgen_coset_left, hfold]
+        by_cases hbU : b ≥ 2^(m+1)
+        · obtain ⟨v, hbe, hvl⟩ : ∃ v, b = v + 2^(m+1) ∧ v < 2^(m+1) :=
+            ⟨b - 2^(m+1), by omega, by omega⟩
+          have hfb : b ^^^ 2^(m+1) = v := by
+            rw [hbe, seam_add_xor v m hvl, Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+          rw [Qgen_coset_right, hfb]
+          exact Qgen_top m u v hul hvl
+        · exact Qgen_top m u b hul (by omega)
+      · by_cases hbU : b ≥ 2^(m+1)
+        · obtain ⟨v, hbe, hvl⟩ : ∃ v, b = v + 2^(m+1) ∧ v < 2^(m+1) :=
+            ⟨b - 2^(m+1), by omega, by omega⟩
+          have hfb : b ^^^ 2^(m+1) = v := by
+            rw [hbe, seam_add_xor v m hvl, Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+          rw [Qgen_coset_right, hfb]
+          exact Qgen_top m a v (by omega) hvl
+        · exact Qgen_top m a b (by omega) (by omega)
+    · -- Y strictly below the top bit: four quadrants, each dropping a level
+      have hkm : k < m+1 := by omega
+      have hLle : (2:Nat)^k ≤ 2^m := Nat.pow_le_pow_right (by omega) (by omega)
+      have hMpos : (0:Nat) < 2^m := Nat.two_pow_pos m
+      have hLlt : (2:Nat)^k < 2^(m+1) := by
+        have : (2:Nat)^(m+1) = 2^m * 2 := by rw [Nat.pow_succ]
+        omega
+      by_cases haU : a ≥ 2^(m+1) <;> by_cases hbU : b ≥ 2^(m+1)
+      · -- both upper
+        obtain ⟨u, hae, hul⟩ : ∃ u, a = u + 2^(m+1) ∧ u < 2^(m+1) :=
+          ⟨a - 2^(m+1), by omega, by omega⟩
+        obtain ⟨v, hbe, hvl⟩ : ∃ v, b = v + 2^(m+1) ∧ v < 2^(m+1) :=
+          ⟨b - 2^(m+1), by omega, by omega⟩
+        have hxa : (u + 2^(m+1)) ^^^ 2^k = (u ^^^ 2^k) + 2^(m+1) :=
+          seam_xor_left u (2^k) m hul hLlt
+        have hxb : (v + 2^(m+1)) ^^^ 2^k = (v ^^^ 2^k) + 2^(m+1) :=
+          seam_xor_left v (2^k) m hvl hLlt
+        unfold Qgen
+        rw [hae, hbe, hxa, hxb,
+            R_uu u v m hul hvl, R_uu (u ^^^ 2^k) (v ^^^ 2^k) m (xorlt hul hLlt) (xorlt hvl hLlt),
+            R_uu u (v ^^^ 2^k) m hul (xorlt hvl hLlt),
+            R_uu (u ^^^ 2^k) v m (xorlt hul hLlt) hvl]
+        by_cases hv0 : v = 0
+        · subst hv0
+          have hL0 : (2:Nat)^k ≠ 0 := by have := Nat.two_pow_pos k; omega
+          simp only [Nat.zero_xor, if_true, if_neg hL0]
+          have hd := deg_right (m+1) (2^k) u hLlt hul hL0
+          rcases cdSigma_pm (m+1) (2^k) (u ^^^ 2^k) with h1 | h1 <;>
+            rcases cdSigma_pm (m+1) (2^k) u with h2 | h2 <;>
+            rw [h1, h2] at hd ⊢ <;> revert hd <;> decide
+        · by_cases hvL : v ^^^ 2^k = 0
+          · have hev : v = 2^k := xor_zero_eq v (2^k) hvL
+            subst hev
+            have hL0 : (2:Nat)^k ≠ 0 := by have := Nat.two_pow_pos k; omega
+            rw [if_neg hv0, hvL, if_pos rfl, if_pos rfl, if_neg hv0]
+            have hd := deg_right (m+1) (2^k) u hLlt hul hL0
+            rcases cdSigma_pm (m+1) (2^k) (u ^^^ 2^k) with h1 | h1 <;>
+              rcases cdSigma_pm (m+1) (2^k) u with h2 | h2 <;>
+              rw [h1, h2] at hd ⊢ <;> revert hd <;> decide
+          · rw [if_neg hv0, if_neg hvL, if_neg hvL, if_neg hv0]
+            have h := Qgen_pow2 (m+1) k v u hkm hvl hul
+            unfold Qgen at h
+            rcases cdSigma_pm (m+1) v u with h1 | h1 <;>
+              rcases cdSigma_pm (m+1) (v ^^^ 2^k) (u ^^^ 2^k) with h2 | h2 <;>
+              rcases cdSigma_pm (m+1) v (u ^^^ 2^k) with h3 | h3 <;>
+              rcases cdSigma_pm (m+1) (v ^^^ 2^k) u with h4 | h4 <;>
+              rw [h1, h2, h3, h4] at h ⊢ <;> revert h <;> decide
+      · -- a upper, b lower
+        obtain ⟨u, hae, hul⟩ : ∃ u, a = u + 2^(m+1) ∧ u < 2^(m+1) :=
+          ⟨a - 2^(m+1), by omega, by omega⟩
+        have hbl : b < 2^(m+1) := by omega
+        have hxa : (u + 2^(m+1)) ^^^ 2^k = (u ^^^ 2^k) + 2^(m+1) :=
+          seam_xor_left u (2^k) m hul hLlt
+        unfold Qgen
+        rw [hae, hxa,
+            R_ul u b m hul hbl, R_ul (u ^^^ 2^k) (b ^^^ 2^k) m (xorlt hul hLlt) (xorlt hbl hLlt),
+            R_ul u (b ^^^ 2^k) m hul (xorlt hbl hLlt), R_ul (u ^^^ 2^k) b m (xorlt hul hLlt) hbl]
+        have hL0 : (2:Nat)^k ≠ 0 := by have := Nat.two_pow_pos k; omega
+        by_cases hb0 : b = 0
+        · subst hb0
+          simp only [Nat.zero_xor, if_true, if_neg hL0]
+          have hd := deg_left (m+1) (2^k) u hLlt hul hL0
+          rcases cdSigma_pm (m+1) (u ^^^ 2^k) (2^k) with h1 | h1 <;>
+            rcases cdSigma_pm (m+1) u (2^k) with h2 | h2 <;>
+            rw [h1, h2] at hd ⊢ <;> revert hd <;> decide
+        · by_cases hbL : b ^^^ 2^k = 0
+          · have heb : b = 2^k := xor_zero_eq b (2^k) hbL
+            subst heb
+            rw [if_neg hb0, hbL, if_pos rfl, if_pos rfl, if_neg hb0]
+            have hd := deg_left (m+1) (2^k) u hLlt hul hL0
+            rcases cdSigma_pm (m+1) (u ^^^ 2^k) (2^k) with h1 | h1 <;>
+              rcases cdSigma_pm (m+1) u (2^k) with h2 | h2 <;>
+              rw [h1, h2] at hd ⊢ <;> revert hd <;> decide
+          · rw [if_neg hb0, if_neg hbL, if_neg hbL, if_neg hb0]
+            have h := Qgen_pow2 (m+1) k u b hkm hul hbl
+            unfold Qgen at h
+            rcases cdSigma_pm (m+1) u b with h1 | h1 <;>
+              rcases cdSigma_pm (m+1) (u ^^^ 2^k) (b ^^^ 2^k) with h2 | h2 <;>
+              rcases cdSigma_pm (m+1) u (b ^^^ 2^k) with h3 | h3 <;>
+              rcases cdSigma_pm (m+1) (u ^^^ 2^k) b with h4 | h4 <;>
+              rw [h1, h2, h3, h4] at h ⊢ <;> revert h <;> decide
+      · -- a lower, b upper
+        obtain ⟨v, hbe, hvl⟩ : ∃ v, b = v + 2^(m+1) ∧ v < 2^(m+1) :=
+          ⟨b - 2^(m+1), by omega, by omega⟩
+        have hal : a < 2^(m+1) := by omega
+        have hxb : (v + 2^(m+1)) ^^^ 2^k = (v ^^^ 2^k) + 2^(m+1) :=
+          seam_xor_left v (2^k) m hvl hLlt
+        unfold Qgen
+        rw [hbe, hxb,
+            R_lu a v m hal hvl, R_lu (a ^^^ 2^k) (v ^^^ 2^k) m (xorlt hal hLlt) (xorlt hvl hLlt),
+            R_lu a (v ^^^ 2^k) m hal (xorlt hvl hLlt), R_lu (a ^^^ 2^k) v m (xorlt hal hLlt) hvl]
+        have h := Qgen_pow2 (m+1) k v a hkm hvl hal
+        unfold Qgen at h
+        rcases cdSigma_pm (m+1) v a with h1 | h1 <;>
+          rcases cdSigma_pm (m+1) (v ^^^ 2^k) (a ^^^ 2^k) with h2 | h2 <;>
+          rcases cdSigma_pm (m+1) v (a ^^^ 2^k) with h3 | h3 <;>
+          rcases cdSigma_pm (m+1) (v ^^^ 2^k) a with h4 | h4 <;>
+          rw [h1, h2, h3, h4] at h ⊢ <;> revert h <;> decide
+      · -- both lower
+        have hal : a < 2^(m+1) := by omega
+        have hbl : b < 2^(m+1) := by omega
+        unfold Qgen
+        rw [R_ll a b m hal hbl, R_ll (a ^^^ 2^k) (b ^^^ 2^k) m (xorlt hal hLlt) (xorlt hbl hLlt),
+            R_ll a (b ^^^ 2^k) m hal (xorlt hbl hLlt), R_ll (a ^^^ 2^k) b m (xorlt hal hLlt) hbl]
+        have h := Qgen_pow2 (m+1) k a b hkm hal hbl
+        unfold Qgen at h
+        exact h
+
 end SounioZDFiberAntisym
+
+
+

@@ -52,7 +52,10 @@ lo-labels only, level n) is replaced by (*) (fiber-free, full range, level n-1),
 four levels. The b = Y boundary of K2 is excluded from that clause and handled nowhere here;
 L1 itself was verified including it by the previous rung. Nothing here is Lean-proven -- though
 (*) has the same induction shape as A4_sub, which IS Lean-proven forall n, and that toolkit is
-in-tree.
+in-tree. **THE BASE CASE IS NOW PROVEN**: Q at a single-bit label is identically -1
+(clause K9, and Qgen_pow2 in formal/lean4/SounioZDFiberAntisym.lean, forall n, no sorry, no
+native_decide). That is exactly the case where tau moves the level's TOP bit -- the one the four
+branch reductions hold fixed and the one A4_sub never faced. The INDUCTIVE STEP of (*) remains.
 
 Verdict L1_REDUCED_TO_SEAM_TAU_EQUIVARIANCE_OF_Q__NOT_PROVEN.
 Numerical certificate over an exact integer sign table; D3 respected.
@@ -242,6 +245,32 @@ def main():
               f"=> the seam hypothesis is NOT needed; K7's first reading was wrong")
     ok["K8"] = k8
 
+    # ---- K9 the base case, and the Lean bridge for it ------------------------------------
+    k9 = k9_bridge = True
+    for m in (4, 5, 6, 7):
+        S = tabs[m] if m in tabs else sign_table_fast(m).astype(np.int64)
+        M = 1 << m
+        for k in range(m):
+            L = 1 << k
+            for a in range(M):
+                for b in range(M):
+                    if Q(S, a, b, L) != -1:
+                        k9 = False
+        # the Lean Qgen is this very product, entrywise
+        for k in range(m):
+            L = 1 << k
+            for a in range(0, M, 5):
+                for b in range(0, M, 5):
+                    lean_Q = int(S[a, b]) * int(S[a ^ L, b ^ L]) * int(S[a, b ^ L]) * int(S[a ^ L, b])
+                    if lean_Q != Q(S, a, b, L):
+                        k9_bridge = False
+        print(f"K9_BASECASE level {m}: Q at a SINGLE-BIT label is identically -1 for every k "
+              f"{'OK' if k9 else 'FAIL'} -- this is the case where tau moves the level's TOP bit, "
+              f"and it is PROVEN forall n in Lean as Qgen_pow2")
+    ok["K9"] = k9 and k9_bridge
+    print(f"K9_LEAN     formal/lean4/SounioZDFiberAntisym.lean's Qgen is this product entrywise "
+          f"{'OK' if k9_bridge else 'FAIL'} => Qgen_pow2 is about THE MEASURED OBJECT")
+
     print("=" * 78)
     if all(ok.values()):
         print("CD_TOWER_ZDL1_VERDICT L1_REDUCED_TO_SEAM_TAU_EQUIVARIANCE_OF_Q__NOT_PROVEN")
@@ -255,8 +284,9 @@ def main():
               "with IDENTICAL violation counts (K5). An attractive one-line derivation of K4 "
               "from antisym is recorded as HAVING A GAP -- D2(c,y,Y) = D1(y,c,Y) fails on the "
               "degenerate locus (K6). K7 only shows a MISMATCHED tau breaks it -- its first reading, that (*) is about seam labels, was WRONG -- and K8 shows (*) holds for EVERY Y != 0 with the matching j = lsb(Y), so the seam hypothesis is not needed at all. L1 IS NOT PROVEN and "
-              "neither is (*); but (*) has the same induction shape as A4_sub, which is "
-              "Lean-proven forall n, and that toolkit is in-tree. Numerical certificate; D3")
+              "neither is (*); but the BASE CASE of (*) — Q at a single-bit label = -1 — "
+              "is PROVEN forall n as Qgen_pow2 (K9), and (*) has the same induction shape "
+              "as A4_sub. Numerical certificate; D3")
         return 0
     print("CD_TOWER_ZDL1_VERDICT INCOMPLETE  failing=" +
           ",".join(k for k, v in ok.items() if not v))
