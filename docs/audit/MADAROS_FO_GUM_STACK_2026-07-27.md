@@ -91,10 +91,13 @@ Summary JSON lands under `$SOUNIO_FO_TRUST_DIR/summary.json` (or a temp dir prin
 | Gate | `scripts/ci/fo_pk_struct_method_driver_gate.sh` | greps science table; token `FO_PK_STRUCT_METHOD_DRIVER_PASS` |
 | **ρ-sweep + τ FO companion** | `examples/epistemic_fo_second_order/fo_pk_struct_rho_tau_driver.sio` | exposure ρ∈{0,0.5,1} + call-result; Css with σ_τ=0.5 |
 | Gate | `scripts/ci/fo_pk_struct_rho_tau_driver_gate.sh` | 1575 / 2200 / 2825; Css_τ=0.872993 > fixed 0.795833 |
+| **Multi-dose τ-series** | `examples/epistemic_fo_second_order/fo_pk_struct_multidose_driver.sio` | Css(τ∈{8,12,24}); Var∝1/τ²; kel=CL/V (η cancels) |
+| Gate | `scripts/ci/fo_pk_struct_multidose_driver_gate.sh` | 10/6.67/3.33; Var 1.79/0.796/0.199; kel Var=5.2e-5 |
 
 Oral Css = (F·Dose/τ)/(CL0·exp(η)). Import driver is the multi-mod free-helper receipt.  
 **Pk-method driver** (2026-07-31): Var Css=0.795833, E₂=6.724, CL=0.34, exposure shared=2825 / indep=1575 / ρ=1=2825.  
-**ρ-τ companion** (2026-07-31): exposure Var = 1575 + 1250·ρ (ρ=0/0.5/1 → 1575/2200/2825); Css with σ_τ=0.5 → Var=0.872993 (E₂=6.735574).
+**ρ-τ companion** (2026-07-31): exposure Var = 1575 + 1250·ρ (ρ=0/0.5/1 → 1575/2200/2825); Css with σ_τ=0.5 → Var=0.872993 (E₂=6.735574).  
+**Multi-dose** (2026-07-31): Css(8/12/24)=10/6.667/3.333; Var=1.790625/0.795833/0.198958 (∝1/τ²); kel=0.1 with Var=0.000052.
 
 ## Science drivers measured (2026-07-27 / 2026-07-28)
 
