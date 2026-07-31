@@ -333,6 +333,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.dissertation.results.d6-pinn-training-v1 | repo_only | docs/dissertation/results/d6_pinn_training_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.results.determinism-audit-summary-v1 | repo_only | docs/dissertation/results/determinism_audit_summary_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.results.determinism-audit-v1 | repo_only | docs/dissertation/results/determinism_audit_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.dissertation.results.fo-pk-method-science-v1 | repo_only | docs/dissertation/results/fo_pk_method_science_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.results.m1-copula-v1 | repo_only | docs/dissertation/results/m1_copula_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.results.m2-hierarchical-v1 | repo_only | docs/dissertation/results/m2_hierarchical_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.results.m5-gum-4th-order-v1 | repo_only | docs/dissertation/results/m5_gum_4th_order_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
