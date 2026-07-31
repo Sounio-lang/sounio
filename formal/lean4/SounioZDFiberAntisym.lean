@@ -1027,7 +1027,232 @@ theorem Qred_hi_uu (m W u v : Nat) (hW : W < 2^(m+1)) (hu : u < 2^(m+1)) (hv : v
     rcases cdSigma_pm (m+1) (u ^^^ W) v with h5 | h5 <;>
     rw [h1, h2, h4, h5] <;> decide
 
+/-- `a ≠ b` survives xoring both sides. -/
+theorem xorW_ne {a b W : Nat} (h : a ≠ b) : a ^^^ W ≠ b ^^^ W := by
+  intro he
+  apply h
+  have := congrArg (fun z => z ^^^ W) he
+  simpa [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero] using this
+
+/-! ### The eight `Q'` rows of the K11 table.
+
+All eight are stated under one uniform hypothesis set -- `a, b, a ⊕ W, b ⊕ W, a ⊕ b ⊕ W` all
+nonzero and `a ≠ b` -- which is sufficient for every row (contract K14). Individual rows need
+less, but a uniform set keeps the eventual mutual induction's case analysis uniform too. -/
+
+theorem Q'red_low_ll (m W a b : Nat) (hW : W < 2^(m+1)) (ha : a < 2^(m+1)) (hb : b < 2^(m+1)) :
+    Qgen' W a b (m+2) = Qgen' W a b (m+1) := by
+  unfold Qgen'
+  rw [R_ll a b m ha hb, R_ll (b ^^^ W) (a ^^^ W) m (xorlt hb hW) (xorlt ha hW),
+      R_ll (b ^^^ W) a m (xorlt hb hW) ha, R_ll (a ^^^ W) b m (xorlt ha hW) hb]
+
+theorem Q'red_low_lu (m W a v : Nat) (hW : W < 2^(m+1)) (ha : a < 2^(m+1)) (hv : v < 2^(m+1))
+    (ha0 : a ≠ 0) (haW : a ^^^ W ≠ 0) :
+    Qgen' W a (v + 2^(m+1)) (m+2) = Qgen W v a (m+1) := by
+  have hx : (v + 2^(m+1)) ^^^ W = (v ^^^ W) + 2^(m+1) := seam_xor_left v W m hv hW
+  unfold Qgen Qgen'
+  rw [hx, R_lu a v m ha hv,
+      R_ul (v ^^^ W) (a ^^^ W) m (xorlt hv hW) (xorlt ha hW), if_neg haW,
+      R_ul (v ^^^ W) a m (xorlt hv hW) ha, if_neg ha0,
+      R_lu (a ^^^ W) v m (xorlt ha hW) hv]
+  rcases cdSigma_pm (m+1) v a with h1 | h1 <;>
+    rcases cdSigma_pm (m+1) (v ^^^ W) (a ^^^ W) with h2 | h2 <;>
+    rcases cdSigma_pm (m+1) v (a ^^^ W) with h3 | h3 <;>
+    rcases cdSigma_pm (m+1) (v ^^^ W) a with h4 | h4 <;>
+    rw [h1, h2, h3, h4] <;> decide
+
+theorem Q'red_low_ul (m W u b : Nat) (hW : W < 2^(m+1)) (hu : u < 2^(m+1)) (hb : b < 2^(m+1))
+    (hb0 : b ≠ 0) :
+    Qgen' W (u + 2^(m+1)) b (m+2) = Qgen W u b (m+1) := by
+  have hx : (u + 2^(m+1)) ^^^ W = (u ^^^ W) + 2^(m+1) := seam_xor_left u W m hu hW
+  unfold Qgen Qgen'
+  rw [hx, R_ul u b m hu hb, if_neg hb0,
+      R_lu (b ^^^ W) (u ^^^ W) m (xorlt hb hW) (xorlt hu hW),
+      R_lu (b ^^^ W) u m (xorlt hb hW) hu,
+      R_ul (u ^^^ W) b m (xorlt hu hW) hb, if_neg hb0]
+  rcases cdSigma_pm (m+1) u b with h1 | h1 <;>
+    rcases cdSigma_pm (m+1) (u ^^^ W) (b ^^^ W) with h2 | h2 <;>
+    rcases cdSigma_pm (m+1) u (b ^^^ W) with h3 | h3 <;>
+    rcases cdSigma_pm (m+1) (u ^^^ W) b with h4 | h4 <;>
+    rw [h1, h2, h3, h4] <;> decide
+
+theorem Q'red_low_uu (m W u v : Nat) (hW : W < 2^(m+1)) (hu : u < 2^(m+1)) (hv : v < 2^(m+1))
+    (hu0 : u ≠ 0) (hv0 : v ≠ 0) (huW : u ^^^ W ≠ 0) (hvW : v ^^^ W ≠ 0)
+    (h3 : u ^^^ v ^^^ W ≠ 0) :
+    Qgen' W (u + 2^(m+1)) (v + 2^(m+1)) (m+2) = Qgen' W v u (m+1) := by
+  have hxu : (u + 2^(m+1)) ^^^ W = (u ^^^ W) + 2^(m+1) := seam_xor_left u W m hu hW
+  have hxv : (v + 2^(m+1)) ^^^ W = (v ^^^ W) + 2^(m+1) := seam_xor_left v W m hv hW
+  have e1 : cdSigma u (v ^^^ W) (m+1) = - cdSigma (v ^^^ W) u (m+1) :=
+    antisym (m+1) u (v ^^^ W) hu (xorlt hv hW) hu0 hvW (xor3_ne_left h3)
+  have e2 : cdSigma v (u ^^^ W) (m+1) = - cdSigma (u ^^^ W) v (m+1) :=
+    antisym (m+1) v (u ^^^ W) hv (xorlt hu hW) hv0 huW (xor3_ne_right h3)
+  unfold Qgen'
+  rw [hxu, hxv, R_uu u v m hu hv, if_neg hv0,
+      R_uu (v ^^^ W) (u ^^^ W) m (xorlt hv hW) (xorlt hu hW), if_neg huW,
+      R_uu (v ^^^ W) u m (xorlt hv hW) hu, if_neg hu0,
+      R_uu (u ^^^ W) v m (xorlt hu hW) hv, if_neg hv0, e1, e2]
+  rcases cdSigma_pm (m+1) v u with h1 | h1 <;>
+    rcases cdSigma_pm (m+1) (u ^^^ W) (v ^^^ W) with h2 | h2 <;>
+    rcases cdSigma_pm (m+1) (v ^^^ W) u with h4 | h4 <;>
+    rcases cdSigma_pm (m+1) (u ^^^ W) v with h5 | h5 <;>
+    rw [h1, h2, h4, h5] <;> decide
+
+theorem Q'red_hi_ll (m W a b : Nat) (hW : W < 2^(m+1)) (ha : a < 2^(m+1)) (hb : b < 2^(m+1))
+    (ha0 : a ≠ 0) (hb0 : b ≠ 0) (haW : a ^^^ W ≠ 0) (hbW : b ^^^ W ≠ 0) (hab : a ≠ b) :
+    Qgen' (W + 2^(m+1)) a b (m+2) = - Qgen' W a b (m+1) := by
+  have hxa : a ^^^ (W + 2^(m+1)) = (a ^^^ W) + 2^(m+1) := xor_seam a W m ha hW
+  have hxb : b ^^^ (W + 2^(m+1)) = (b ^^^ W) + 2^(m+1) := xor_seam b W m hb hW
+  have e1 : cdSigma (a ^^^ W) (b ^^^ W) (m+1) = - cdSigma (b ^^^ W) (a ^^^ W) (m+1) :=
+    antisym (m+1) (a ^^^ W) (b ^^^ W) (xorlt ha hW) (xorlt hb hW) haW hbW (xorW_ne hab)
+  unfold Qgen'
+  rw [hxa, hxb, R_ll a b m ha hb,
+      R_uu (b ^^^ W) (a ^^^ W) m (xorlt hb hW) (xorlt ha hW), if_neg haW,
+      R_ul (b ^^^ W) a m (xorlt hb hW) ha, if_neg ha0,
+      R_ul (a ^^^ W) b m (xorlt ha hW) hb, if_neg hb0, e1]
+  rcases cdSigma_pm (m+1) a b with h1 | h1 <;>
+    rcases cdSigma_pm (m+1) (b ^^^ W) (a ^^^ W) with h2 | h2 <;>
+    rcases cdSigma_pm (m+1) (b ^^^ W) a with h3 | h3 <;>
+    rcases cdSigma_pm (m+1) (a ^^^ W) b with h4 | h4 <;>
+    rw [h1, h2, h3, h4] <;> decide
+
+theorem Q'red_hi_lu (m W a v : Nat) (hW : W < 2^(m+1)) (ha : a < 2^(m+1)) (hv : v < 2^(m+1))
+    (hv0 : v ≠ 0) (haW : a ^^^ W ≠ 0) (hvW : v ^^^ W ≠ 0) (hav : a ≠ v) :
+    Qgen' (W + 2^(m+1)) a (v + 2^(m+1)) (m+2) = - Qgen W v a (m+1) := by
+  have hxa : a ^^^ (W + 2^(m+1)) = (a ^^^ W) + 2^(m+1) := xor_seam a W m ha hW
+  have hxb : (v + 2^(m+1)) ^^^ (W + 2^(m+1)) = v ^^^ W := xor_seam_cancel v W m hv hW
+  have e1 : cdSigma (a ^^^ W) (v ^^^ W) (m+1) = - cdSigma (v ^^^ W) (a ^^^ W) (m+1) :=
+    antisym (m+1) (a ^^^ W) (v ^^^ W) (xorlt ha hW) (xorlt hv hW) haW hvW (xorW_ne hav)
+  unfold Qgen Qgen'
+  rw [hxa, hxb, R_lu a v m ha hv,
+      R_lu (v ^^^ W) (a ^^^ W) m (xorlt hv hW) (xorlt ha hW),
+      R_ll (v ^^^ W) a m (xorlt hv hW) ha,
+      R_uu (a ^^^ W) v m (xorlt ha hW) hv, if_neg hv0, e1]
+  rcases cdSigma_pm (m+1) v a with h1 | h1 <;>
+    rcases cdSigma_pm (m+1) (v ^^^ W) (a ^^^ W) with h2 | h2 <;>
+    rcases cdSigma_pm (m+1) (v ^^^ W) a with h3 | h3 <;>
+    rcases cdSigma_pm (m+1) v (a ^^^ W) with h4 | h4 <;>
+    rw [h1, h2, h3, h4] <;> decide
+
+theorem Q'red_hi_ul (m W u b : Nat) (hW : W < 2^(m+1)) (hu : u < 2^(m+1)) (hb : b < 2^(m+1))
+    (hu0 : u ≠ 0) (hb0 : b ≠ 0) (huW : u ^^^ W ≠ 0) (hbW : b ^^^ W ≠ 0) (hub : u ≠ b) :
+    Qgen' (W + 2^(m+1)) (u + 2^(m+1)) b (m+2) = - Qgen W u b (m+1) := by
+  have hxa : (u + 2^(m+1)) ^^^ (W + 2^(m+1)) = u ^^^ W := xor_seam_cancel u W m hu hW
+  have hxb : b ^^^ (W + 2^(m+1)) = (b ^^^ W) + 2^(m+1) := xor_seam b W m hb hW
+  have e1 : cdSigma (b ^^^ W) (u ^^^ W) (m+1) = - cdSigma (u ^^^ W) (b ^^^ W) (m+1) :=
+    antisym (m+1) (b ^^^ W) (u ^^^ W) (xorlt hb hW) (xorlt hu hW) hbW huW
+      (fun h => hub (xorW_ne (fun hh => hub hh.symm) h).elim)
+  unfold Qgen Qgen'
+  rw [hxa, hxb, R_ul u b m hu hb, if_neg hb0,
+      R_ul (b ^^^ W) (u ^^^ W) m (xorlt hb hW) (xorlt hu hW), if_neg huW,
+      R_uu (b ^^^ W) u m (xorlt hb hW) hu, if_neg hu0,
+      R_ll (u ^^^ W) b m (xorlt hu hW) hb, e1]
+  rcases cdSigma_pm (m+1) u b with h1 | h1 <;>
+    rcases cdSigma_pm (m+1) (u ^^^ W) (b ^^^ W) with h2 | h2 <;>
+    rcases cdSigma_pm (m+1) u (b ^^^ W) with h3 | h3 <;>
+    rcases cdSigma_pm (m+1) (u ^^^ W) b with h4 | h4 <;>
+    rw [h1, h2, h3, h4] <;> decide
+
+theorem Q'red_hi_uu (m W u v : Nat) (hW : W < 2^(m+1)) (hu : u < 2^(m+1)) (hv : v < 2^(m+1))
+    (hu0 : u ≠ 0) (hv0 : v ≠ 0) (huW : u ^^^ W ≠ 0) (hvW : v ^^^ W ≠ 0)
+    (huv : u ≠ v) (h3 : u ^^^ v ^^^ W ≠ 0) :
+    Qgen' (W + 2^(m+1)) (u + 2^(m+1)) (v + 2^(m+1)) (m+2) = - Qgen' W v u (m+1) := by
+  have hxa : (u + 2^(m+1)) ^^^ (W + 2^(m+1)) = u ^^^ W := xor_seam_cancel u W m hu hW
+  have hxb : (v + 2^(m+1)) ^^^ (W + 2^(m+1)) = v ^^^ W := xor_seam_cancel v W m hv hW
+  have e1 : cdSigma (v ^^^ W) (u ^^^ W) (m+1) = - cdSigma (u ^^^ W) (v ^^^ W) (m+1) :=
+    antisym (m+1) (v ^^^ W) (u ^^^ W) (xorlt hv hW) (xorlt hu hW) hvW huW
+      (xorW_ne (fun h => huv h.symm))
+  have e2 : cdSigma u (v ^^^ W) (m+1) = - cdSigma (v ^^^ W) u (m+1) :=
+    antisym (m+1) u (v ^^^ W) hu (xorlt hv hW) hu0 hvW (xor3_ne_left h3)
+  have e3 : cdSigma v (u ^^^ W) (m+1) = - cdSigma (u ^^^ W) v (m+1) :=
+    antisym (m+1) v (u ^^^ W) hv (xorlt hu hW) hv0 huW (xor3_ne_right h3)
+  unfold Qgen'
+  rw [hxa, hxb, R_uu u v m hu hv, if_neg hv0,
+      R_ll (v ^^^ W) (u ^^^ W) m (xorlt hv hW) (xorlt hu hW),
+      R_lu (v ^^^ W) u m (xorlt hv hW) hu,
+      R_lu (u ^^^ W) v m (xorlt hu hW) hv, e1, e2, e3]
+  rcases cdSigma_pm (m+1) v u with h1 | h1 <;>
+    rcases cdSigma_pm (m+1) (u ^^^ W) (v ^^^ W) with h2 | h2 <;>
+    rcases cdSigma_pm (m+1) (v ^^^ W) u with h4 | h4 <;>
+    rcases cdSigma_pm (m+1) (u ^^^ W) v with h5 | h5 <;>
+    rw [h1, h2, h4, h5] <;> decide
+
+/-! ## Tier 8: (★) for single-bit labels — equivariance from the constant base case -/
+
+/-- Swap bits 0 and `j` of `x` (identity when they already agree). Matches the contract's `sw`. -/
+def sw (x j : Nat) : Nat :=
+  let b0 := x % 2
+  let bj := (x / 2^j) % 2
+  if b0 = bj then x else x ^^^ (1 ||| (2^j))
+
+/-- Bit 0 of a pure power `2^k` is unset for `k > 0`. -/
+private theorem pow2_bit0 (k : Nat) (hk : k ≠ 0) : (2^k) % 2 = 0 := by
+  have : ∃ k', k = k' + 1 := by
+    cases k with | zero => exact absurd rfl hk | succ k' => exact ⟨k', rfl⟩
+  obtain ⟨k', rfl⟩ := this
+  rw [Nat.pow_succ, Nat.mul_mod, Nat.pow_mod]
+  simp
+
+/-- Bit `k` of `2^k` is set. -/
+private theorem pow2_bitk (k : Nat) : (2^k / 2^k) % 2 = 1 := by
+  rw [Nat.div_self (Nat.two_pow_pos k)]; decide
+
+/-- `sw (2^k) k = 1` for `k > 0`: bits 0 and k disagree, so the swap yields pure bit 0. -/
+theorem sw_pow2 (k : Nat) (hk : k ≠ 0) : sw (2^k) k = 1 := by
+  unfold sw
+  have hb0 : (2^k % 2) = 0 := pow2_bit0 k hk
+  have hbj : ((2^k / 2^k) % 2) = 1 := pow2_bitk k
+  change (if (2^k % 2) = ((2^k / 2^k) % 2) then 2^k else 2^k ^^^ (1 ||| 2^k)) = 1
+  rw [hb0, hbj]
+  have : ¬ ((0 : Nat) = 1) := by decide
+  simp only [this, ↓reduceIte]
+  -- Goal: 2^k ^^^ (1 ||| 2^k) = 1
+  have hand : (1 : Nat) &&& (2^k) = 0 := by
+    -- 1 &&& even = 0
+    simpa [Nat.and_one_is_mod] using pow2_bit0 k hk
+  -- for disjoint bits, or = xor
+  have hor : (1 : Nat) ||| (2^k) = 1 ^^^ (2^k) := by
+    exact Nat.or_eq_xor_of_and_eq_zero hand
+  rw [hor, Nat.xor_comm 1 (2^k), Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+
+/-- `sw x 0 = x` — bit 0 swapped with itself is a no-op. -/
+theorem sw_zero (x : Nat) : sw x 0 = x := by
+  unfold sw
+  simp [Nat.div_one]
+
+/-- `sw` never increases the bit-width when `j < m`. -/
+theorem sw_lt (x j m : Nat) (hx : x < 2^m) (hj : j < m) : sw x j < 2^m := by
+  unfold sw
+  split
+  · exact hx
+  · have hj2 : 2^j < 2^m := Nat.pow_lt_pow_right (by decide : 1 < 2) hj
+    have h1 : (1 : Nat) < 2^m := Nat.one_lt_two_pow (by omega)
+    have hmask : (1 : Nat) ||| (2^j) < 2^m :=
+      Nat.or_lt_two_pow (by omega) hj2
+    exact Nat.xor_lt_two_pow hx hmask
+
+/-- **(★) for single-bit labels, proven ∀n.** Both sides of the equivariance are the
+    constant `-1` (`Qgen_pow2`), so (★) holds for every pure power-of-two label.
+    This is the equivariant reading of the base case — not just `Q = -1`, but
+    `Q_Y(a,b) = Q_{τY}(τa,τb)` when `Y = 2^k`. Multi-bit `Y` still needs the mutual step. -/
+theorem star_pow2 (m k a b : Nat) (hk : k < m) (ha : a < 2^m) (hb : b < 2^m) :
+    Qgen (2^k) a b m = Qgen (sw (2^k) k) (sw a k) (sw b k) m := by
+  by_cases hk0 : k = 0
+  · -- j = 0 ⇒ τ = id, (★) is reflexivity
+    subst hk0
+    simp only [sw_zero]
+  · -- j > 0 ⇒ τY = 1, both products are -1 by Qgen_pow2
+    have hY : sw (2^k) k = 1 := sw_pow2 k hk0
+    rw [hY]
+    have hL : Qgen (2^k) a b m = -1 := Qgen_pow2 m k a b hk ha hb
+    have hR : Qgen (2^0) (sw a k) (sw b k) m = -1 :=
+      Qgen_pow2 m 0 (sw a k) (sw b k) (by omega)
+        (sw_lt a k m ha hk) (sw_lt b k m hb hk)
+    -- 1 = 2^0
+    change Qgen (2^k) a b m = Qgen (2^0) (sw a k) (sw b k) m
+    rw [hL, hR]
+
 end SounioZDFiberAntisym
+
 
 
 

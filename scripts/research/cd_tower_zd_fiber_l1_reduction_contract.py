@@ -62,8 +62,8 @@ so the step is a MUTUAL induction on the pair (Q, Q'). Their generic agreement i
 in Lean (Qgen_eq_Qgen'). K11 gives the COMPLETE 16-case reduction table for the mutual step,
 verified off the degenerate locus -- so the step is fully SPECIFIED. SIX of the sixteen cases are now PROVEN forall n in Lean as standalone reduction lemmas
 (Qred_low_ll/_lu/_ul/_uu, Qred_hi_ll/_hi_ul), with minimal hypotheses pinned by K12. ALL EIGHT Q-cases are now PROVEN forall n in Lean (Qred_low_ll/_lu/_ul/_uu,
-Qred_hi_ll/_ul/_lu/_uu), with their exact hypotheses pinned by K12 and K13. The eight Q'-cases
-are not written, and the mutual induction is not assembled.
+Qred_hi_ll/_ul/_lu/_uu), with their exact hypotheses pinned by K12 and K13. ALL SIXTEEN cases are now PROVEN forall n in Lean -- the eight Q-rows (K12, K13) and the eight
+Q'-rows (K14). What remains is the ASSEMBLY of the mutual induction, not its cases.
 
 Verdict L1_REDUCED_TO_SEAM_TAU_EQUIVARIANCE_OF_Q__NOT_PROVEN.
 Numerical certificate over an exact integer sign table; D3 respected.
@@ -442,6 +442,45 @@ def main():
           f"a != v an earlier scan suggested: both antisym transpositions the identification "
           f"needs collapse to that single hypothesis. Lean: Qred_hi_lu, Qred_hi_uu -- ALL EIGHT "
           f"Q-cases are now proven forall n")
+
+    # ---- K14 the eight Q'-cases, under the uniform hypothesis set ------------------------
+    k14 = True
+    k14_n = 0
+    for m in (4, 5):
+        Sn = sign_table_fast(m + 2).astype(np.int64)
+        Sm = sign_table_fast(m + 1).astype(np.int64)
+        H = 1 << (m + 1)
+
+        def QQ(S, a, b, W):
+            return int(S[a, b] * S[a ^ W, b ^ W] * S[a, b ^ W] * S[a ^ W, b])
+
+        def QP(S, a, b, W):
+            return int(S[a, b] * S[b ^ W, a ^ W] * S[b ^ W, a] * S[a ^ W, b])
+
+        for W in range(0, H):
+            for x in range(H):
+                for y in range(H):
+                    if not (x and y and (x ^ W) and (y ^ W) and (x ^ y ^ W) and x != y):
+                        continue
+                    k14_n += 8
+                    checks = (
+                        QP(Sn, x, y, W) == QP(Sm, x, y, W),
+                        QP(Sn, x, y + H, W) == QQ(Sm, y, x, W),
+                        QP(Sn, x + H, y, W) == QQ(Sm, x, y, W),
+                        QP(Sn, x + H, y + H, W) == QP(Sm, y, x, W),
+                        QP(Sn, x, y, W + H) == -QP(Sm, x, y, W),
+                        QP(Sn, x, y + H, W + H) == -QQ(Sm, y, x, W),
+                        QP(Sn, x + H, y, W + H) == -QQ(Sm, x, y, W),
+                        QP(Sn, x + H, y + H, W + H) == -QP(Sm, y, x, W),
+                    )
+                    if not all(checks):
+                        k14 = False
+    ok["K14"] = k14
+    print(f"K14_QPRIME  all EIGHT Q'-cases hold under the uniform hypothesis set -- a, b, a^W, "
+          f"b^W, a^b^W all nonzero and a != b ({k14_n} checks, levels 6->5 and 7->6) "
+          f"{'OK' if k14 else 'FAIL'}. Lean: Q'red_low_ll/_lu/_ul/_uu, Q'red_hi_ll/_lu/_ul/_uu. "
+          f"=> ALL SIXTEEN cases of the mutual step are now proven forall n; what remains is the "
+          f"ASSEMBLY of the induction, not its cases")
 
     print("=" * 78)
     if all(ok.values()):
