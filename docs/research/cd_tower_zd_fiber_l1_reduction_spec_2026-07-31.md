@@ -30,7 +30,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.cd-to
 The previous rung showed L1 is *parity-free* and that its real hypothesis is seam-ness. This one
 strips the rest of the fiber structure away:
 
-> **(★)** For every `Y ≡ 0 (mod 8)`, with `j = lsb(Y)` and `τ = swap(bit 0, bit j)`:
+> **(★)** For every `Y ≠ 0`, with `j = lsb(Y)` and `τ = swap(bit 0, bit j)`:
 > `Q_Y(a,b) = Q_{τY}(τa, τb)` for **all** `a, b`.
 
 where `Q_L(a,b) = σ(a,b)·σ(a⊕L,b⊕L)·σ(a,b⊕L)·σ(a⊕L,b)` is the product of `σ` over the coset
@@ -52,6 +52,7 @@ No link is assumed.
 | `K3` | the τ-discrepancies of the two factors **cancel**: `e1(a,b,Y) = e2(b⊕Y,a,Y)` | 0 violations, levels 5,6,7 |
 | `K4` | equivalently, one statement: `e1(a,b,Y) = e1(a, b⊕Y, Y)` | 0 violations |
 | `K1` | `K4` regrouped **is** (★) | 0 violations, levels 5..8 |
+| `K8` | (★) needs no seam hypothesis: it holds for **every** `Y ≠ 0` | 0 violations, levels 5,6,7 |
 
 with `D1_Y(a,b) = σ(a,b)σ(a⊕Y,b)`, `D2_Y(c,y) = σ(c,y)σ(c,y⊕Y)`, and
 `e1 = D1_{τY}(τa,τb)·D1_Y(a,b)`, `e2` the same for `D2`.
@@ -74,8 +75,16 @@ expects `D2(c,y,Y) = D1(y,c,Y)`, which would yield `K4` from `K3` in one line. T
 *measured directly*, not derived that way. Had the derivation been written without testing it,
 the spec would have carried a false step.
 
-**`K7` — (★) is not a general symmetry.** For non-seam `Y` it fails in bulk (`6912/28672` at
-level 5). The seam hypothesis is load-bearing.
+**`K7` — a control whose first reading was WRONG, corrected here.** With a *mismatched* `τ` —
+`j` frozen at 3 instead of `j = lsb(Y)` — the equivariance fails in bulk (`6912/28672` at level
+5). That is all the measurement shows. The clause originally concluded "(★) is a statement about
+seam labels"; **that was wrong** — the failure comes from using the wrong `τ`, not from `Y` being
+a non-seam.
+
+**`K8` — the seam hypothesis is not needed at all.** With the matching `τ`, (★) holds for
+**every** `Y ≠ 0`, seam or not (levels 5,6,7, zero violations). So (★) is strictly more general
+than L1 requires, and the seam condition can be dropped from its statement. The corrected reading
+makes the target *easier*, not harder.
 
 ---
 
@@ -84,10 +93,15 @@ level 5). The seam hypothesis is load-bearing.
 - **L1 is not proven, and neither is (★).** This is a reduction, verified at four levels.
 - The `b = Y` boundary is excluded from `K2` and handled nowhere here. L1 itself was verified
   including it by the previous rung, so the gap is in this chain, not in L1's evidence.
-- **Nothing here is Lean-proven.** (★) does have the same induction shape as `A4_sub` — four
-  cases through the branch reductions, degenerate sub-cases closing on `cdSig0`/`sigma_self` —
-  and that toolkit is in-tree and kernel-checked ∀n. One case needs extra care that `A4_sub`
-  did not: when `Y` carries the level's top bit, `a` and `a⊕Y` fall in opposite halves.
+- **(★) is not Lean-proven.** Attempted; what landed instead, kernel-checked ∀n in
+  `formal/lean4/SounioZDFiberAntisym.lean`, is the machinery its induction needs:
+  `A4_sub'` (the second-argument form `σ(a,b) = −σ(a, a⊕b)`, which two of the four branches
+  require) and `Qgen_coset_left`/`_right` (`Q` depends only on the two cosets, which halves the
+  case analysis). The inductive step itself is not written.
+- **The base case is identified and measured but not formalised**: `Q` at a *single-bit* label is
+  identically `−1` (levels 4..7, all `a,b`, all `k`). That is exactly the case where `τ` moves
+  the level's top bit — the case the four branch reductions hold fixed — so discharging it
+  discharges the hard case. It is a theorem-shaped statement awaiting its own induction.
 - (c) as a whole is untouched: **L2 remains where the previous rung left it**, with its
   triangle route walled.
 

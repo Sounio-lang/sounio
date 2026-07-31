@@ -37,8 +37,13 @@ WHY THE CANCELLATION IS THE CONTENT (negative controls):
       D2(c,y,Y) = D1(y,c,Y), which would give K4 from K3 in one line. That identity FAILS on the
       degenerate locus (nonzero violation counts). K4 is therefore measured directly, not
       derived that way.
-  K7  NULL CONTROL. (*) FAILS for non-seam Y, in bulk. So it is a statement about seam labels,
-      not a general symmetry of the cocycle.
+  K7  CONTROL, AND A CORRECTED READING. With a MISMATCHED tau -- j frozen at 3 instead of
+      j = lsb(Y) -- the equivariance fails in bulk. That is all this clause measures.
+      **The first version of this clause concluded "(*) is a statement about seam labels".
+      THAT WAS WRONG**: the failure comes from using the wrong tau, not from Y being a non-seam.
+  K8  THE SEAM HYPOTHESIS IS NOT NEEDED. With the matching tau, i.e. j = lsb(Y), (*) holds for
+      EVERY Y != 0, seam or not (levels 5,6,7, zero violations). So (*) is strictly more general
+      than L1 needs, and the seam condition can be dropped from its statement.
 
   K0  PARITY. The builders reproduce the in-tree sign_table entrywise.
 
@@ -212,8 +217,30 @@ def main():
         if bad == 0:
             k7 = False
         print(f"K7_NULL     level {m}: with NON-seam Y, (*) fails {bad}/{tot} => (*) is a "
-              f"statement about seam labels, not a general symmetry {'OK' if bad else 'FAIL'}")
+              f"MISMATCHED tau (j frozen at 3) breaks it -- that is ALL this measures "
+              f"{'OK' if bad else 'FAIL'}")
     ok["K7"] = k7
+
+    # ---- K8 the seam hypothesis is not needed ---------------------------------------------
+    k8 = True
+    for m in (5, 6, 7):
+        S, M = tabs[m], 1 << m
+        bad = tot = 0
+        for Y in range(1, M):
+            j = (Y & -Y).bit_length() - 1
+            if j == 0:
+                continue                      # tau = identity, vacuous
+            tY = sw(Y, j)
+            for a in range(M):
+                for b in range(M):
+                    tot += 1
+                    if Q(S, sw(a, j), sw(b, j), tY) != Q(S, a, b, Y):
+                        bad += 1
+        k8 = k8 and bad == 0
+        print(f"K8_GENERAL  level {m}: (*) with the MATCHING tau (j = lsb(Y)) holds for EVERY "
+              f"Y != 0, seam or not: violations {bad}/{tot} {'OK' if bad == 0 else 'FAIL'} "
+              f"=> the seam hypothesis is NOT needed; K7's first reading was wrong")
+    ok["K8"] = k8
 
     print("=" * 78)
     if all(ok.values()):
@@ -227,7 +254,7 @@ def main():
               "cancellation is the whole content: neither D1 nor D2 is tau-equivariant alone, "
               "with IDENTICAL violation counts (K5). An attractive one-line derivation of K4 "
               "from antisym is recorded as HAVING A GAP -- D2(c,y,Y) = D1(y,c,Y) fails on the "
-              "degenerate locus (K6). (*) fails for non-seam Y (K7). L1 IS NOT PROVEN and "
+              "degenerate locus (K6). K7 only shows a MISMATCHED tau breaks it -- its first reading, that (*) is about seam labels, was WRONG -- and K8 shows (*) holds for EVERY Y != 0 with the matching j = lsb(Y), so the seam hypothesis is not needed at all. L1 IS NOT PROVEN and "
               "neither is (*); but (*) has the same induction shape as A4_sub, which is "
               "Lean-proven forall n, and that toolkit is in-tree. Numerical certificate; D3")
         return 0

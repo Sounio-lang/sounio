@@ -583,4 +583,44 @@ theorem Asig_isolated_row (y Llo n : Nat) (hy : y < 2^(n+1)) (hL : Llo < 2^(n+1)
   unfold Asig resB
   simp [hb]
 
+/-! ## Tier 5: the second-argument form, and the object `(*)` is about -/
+
+/-- The second form of `A4_sub`: shifting the SECOND argument. Derived from `A4_sub` + `antisym`;
+    the derivation genuinely needs both arguments nonzero and distinct, which is why the L1 rung
+    measured the corresponding statement rather than assuming it -- its degenerate locus is
+    nonempty (contract clause K6). Two of the four branches of the `(*)` induction need this. -/
+theorem A4_sub' (m a b : Nat) (ha : a < 2^m) (hb : b < 2^m) (ha0 : a ≠ 0) (hb0 : b ≠ 0)
+    (hab : a ^^^ b ≠ 0) : cdSigma a b m = - cdSigma a (a ^^^ b) m := by
+  have hcl : a ^^^ b < 2^m := Nat.xor_lt_two_pow ha hb
+  have hac : (a ^^^ b) ^^^ a = b := by
+    rw [Nat.xor_comm a b, Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+  have hne : a ≠ b := by intro h; exact hab (by rw [h, Nat.xor_self])
+  have hnec : a ≠ a ^^^ b := by
+    intro h; exact hb0 (by rw [← hac, ← h, Nat.xor_self])
+  have hba : b ^^^ a ≠ 0 := by rw [Nat.xor_comm]; exact hab
+  have i1 : cdSigma b a m = - cdSigma (a ^^^ b) a m := by
+    have h := A4_sub m b a hb ha hb0 ha0 hba
+    rwa [Nat.xor_comm b a] at h
+  have i2 : cdSigma a b m = - cdSigma b a m := antisym m a b ha hb ha0 hb0 hne
+  have i3 : cdSigma a (a ^^^ b) m = - cdSigma (a ^^^ b) a m :=
+    antisym m a (a ^^^ b) ha hcl ha0 hab hnec
+  rw [i2, i1, i3]
+
+/-- The coset-square product `Q L a b = sigma(a,b) sigma(a^L,b^L) sigma(a,b^L) sigma(a^L,b)`.
+    Resonance is `Q = 1`, and `(*)` is the statement that `Q` is `tau`-equivariant. -/
+def Qgen (L a b m : Nat) : Int :=
+  cdSigma a b m * cdSigma (a ^^^ L) (b ^^^ L) m * cdSigma a (b ^^^ L) m * cdSigma (a ^^^ L) b m
+
+/-- `Q` depends only on the two COSETS `{a, a^L}`, `{b, b^L}` -- the four factors are permuted.
+    Used to halve the case analysis in any induction on `Qgen`. -/
+theorem Qgen_coset_left (L a b m : Nat) : Qgen L a b m = Qgen L (a ^^^ L) b m := by
+  unfold Qgen
+  rw [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+  ac_rfl
+
+theorem Qgen_coset_right (L a b m : Nat) : Qgen L a b m = Qgen L a (b ^^^ L) m := by
+  unfold Qgen
+  rw [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+  ac_rfl
+
 end SounioZDFiberAntisym
