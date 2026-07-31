@@ -3437,6 +3437,121 @@ fn lowerer_lower_fn_params_mut(
     }
 }
 
+fn lowerer_registered_direct_call_id_ref(lo: &Lowerer, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+    if e.kind != ExprKind::ExprCall {
+        return -1
+    }
+    match e.left {
+        Some(callee) => {
+            if (*callee).kind != ExprKind::ExprIdent {
+                return -1
+            }
+            let name = (*callee).name
+            if lowerer_named_call_needs_special_dispatch(name) {
+                return -1
+            }
+            if lowerer_lookup_local_reg_ref(lo, name) >= 0 {
+                return -1
+            }
+            if lowerer_first_arg_needs_hof_dispatch_ref(lo, &e.args) {
+                return -1
+            }
+            lowerer_lookup_fn_id_by_name_ref(lo, name)
+        }
+        _ => -1,
+    }
+}
+
+fn lowerer_expr_is_nonfloat_condition_ref(lo: &Lowerer, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+    if e.kind == ExprKind::ExprIntLit || e.kind == ExprKind::ExprBoolTrue || e.kind == ExprKind::ExprBoolFalse {
+        return true
+    }
+    if e.kind == ExprKind::ExprIdent {
+        var i = (*(*lo).locals).count - 1
+        while i >= 0 {
+            if (*(*lo).locals).depths[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*lo).locals).names[i as usize], e.name) {
+                let scalar_kind = (*(*lo).locals).scalar_kind[i as usize]
+                return scalar_kind != 2 && scalar_kind != 3
+            }
+            i = i - 1
+        }
+        return false
+    }
+    if e.kind == ExprKind::ExprCall {
+        let fn_id = lowerer_registered_direct_call_id_ref(lo, e)
+        return fn_id >= 0
+            && fn_id < (*(*lo).module).fn_count
+            && (*(*lo).module).functions[fn_id as usize].returns_float != 1
+    }
+    if e.kind != ExprKind::ExprBinary {
+        return false
+    }
+    let is_condition_op = e.bin_op == BinaryOp::OpEq
+        || e.bin_op == BinaryOp::OpNe
+        || e.bin_op == BinaryOp::OpLt
+        || e.bin_op == BinaryOp::OpLe
+        || e.bin_op == BinaryOp::OpGt
+        || e.bin_op == BinaryOp::OpGe
+        || e.bin_op == BinaryOp::OpAnd
+        || e.bin_op == BinaryOp::OpOr
+    if !is_condition_op {
+        return false
+    }
+    match e.left {
+        Some(lhs) => {
+            if !lowerer_expr_is_nonfloat_condition_ref(lo, &(*lhs)) {
+                return false
+            }
+        }
+        _ => return false,
+    }
+    match e.right {
+        Some(rhs) => lowerer_expr_is_nonfloat_condition_ref(lo, &(*rhs)),
+        _ => false,
+    }
+}
+
+fn lowerer_can_bind_simple_nonfloat_let_ref(lo: &Lowerer, s: &Stmt) -> bool with Mut, Panic, Div, Alloc {
+    match s.ty {
+        Some(_) => return false,
+        _ => {}
+    }
+    match s.expr {
+        Some(expr) => {
+            if (*expr).kind == ExprKind::ExprCall {
+                let fn_id = lowerer_registered_direct_call_id_ref(lo, &(*expr))
+                return fn_id >= 0
+                    && fn_id < (*(*lo).module).fn_count
+                    && (*(*lo).module).functions[fn_id as usize].return_struct_name.len > 0
+            }
+            lowerer_expr_is_nonfloat_condition_ref(lo, &(*expr))
+        }
+        _ => false,
+    }
+}
+
+fn lowerer_bind_simple_nonfloat_let_mut(lo: &! Lowerer, s: &Stmt) -> i64 with Mut, Panic, Div, Alloc, IO {
+    let reg = lowerer_lower_opt_expr_mut(lo, &s.expr)
+    lowerer_bind_local_mut(lo, s.name, reg, false)
+    match s.expr {
+        Some(expr) => {
+            if (*expr).kind == ExprKind::ExprCall {
+                let fn_id = lowerer_registered_direct_call_id_ref(&(*lo), &(*expr))
+                if fn_id >= 0 && fn_id < (*(*lo).module).fn_count {
+                    let return_struct_name = (*(*lo).module).functions[fn_id as usize].return_struct_name
+                    if return_struct_name.len > 0 {
+                        lowerer_bind_local_struct_type_mut(lo, s.name, return_struct_name)
+                    }
+                }
+            } else if (*expr).kind == ExprKind::ExprBinary {
+                lowerer_mark_local_scalar_kind_mut(lo, s.name, 1)
+            }
+        }
+        _ => {}
+    }
+    reg
+}
+
 // Walk a function body without placing another full Lowerer value beneath every
 // statement frame. Rich imported-receipt bodies can otherwise exhaust the raw
 // compiler stack before their first let, even though the same call in isolation
@@ -3464,7 +3579,9 @@ fn lowerer_lower_block_mut(
                     else { print("other") }
                     print("\n")
                 }
-                if stmt_ref.kind == StmtKind::StmtExpr {
+                if stmt_ref.kind == StmtKind::StmtLet && lowerer_can_bind_simple_nonfloat_let_ref(&(*lo), stmt_ref) {
+                    reg = lowerer_bind_simple_nonfloat_let_mut(lo, stmt_ref)
+                } else if stmt_ref.kind == StmtKind::StmtExpr {
                     reg = lowerer_lower_opt_expr_mut(lo, &stmt_ref.expr)
                 } else {
                     let pair = if stmt_ref.kind == StmtKind::StmtLet {
