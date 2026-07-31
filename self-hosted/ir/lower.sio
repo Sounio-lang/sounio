@@ -1467,6 +1467,10 @@ fn lowerer_new_from_program_summary_flat(summary: &IrProgramSummaryFlat, epistem
     lo.module = module_box
     lo.enum_variants = Box::new(summary.enum_variants)
     lo.struct_layouts = Box::new(summary.struct_layouts)
+    if summary.struct_layouts.complete == 0 {
+        lo.error_count = lo.error_count + 1
+        lo.had_error = true
+    }
     lo.global_types = Box::new(summary.global_types)
     lo.probe_mode = summary.probe_mode
     lo
@@ -8770,6 +8774,23 @@ impl Lowerer {
         if (*expr).kind == ExprKind::ExprCall {
             return self.expr_call_return_struct_name_ref(expr)
         }
+        if (*expr).kind == ExprKind::ExprMethodCall {
+            match (*expr).left {
+                Some(receiver) => {
+                    let receiver_type = self.expr_struct_type_name_ref(&(*receiver))
+                    if receiver_type.len > 0 {
+                        let method_name = ir_mangle_method_name(receiver_type, (*expr).name)
+                        let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, method_name)
+                        return self.return_struct_name_for_fn_id(fn_id)
+                    }
+                }
+                _ => {}
+            }
+            return ir_empty_name()
+        }
+        if (*expr).kind == ExprKind::ExprIndex {
+            return self.index_base_elem_struct_type_ref(&(*expr).left)
+        }
         if (*expr).kind == ExprKind::ExprStructLit {
             return ir_path_first_name((*expr).path)
         }
@@ -13538,6 +13559,19 @@ impl Lowerer {
         let base = pair_b.1
         let fidx = lo1.field_idx_for_base_ref(&e.left, e.name)
         if fidx < 0 {
+            match e.left {
+                Some(base_expr) => {
+                    let type_name = lo1.expr_struct_type_name_ref(&(*base_expr))
+                    if type_name.len > 0 {
+                        print("LOWER_NOMINAL_LAYOUT_MISS type=")
+                        print(str_from_bytes(type_name.buf, type_name.len))
+                        print(" field=")
+                        print(str_from_bytes(e.name.buf, e.name.len))
+                        print("\n")
+                    }
+                }
+                _ => {}
+            }
             return (lo1.report_error(), IR_INVALID_REG)
         }
         // Tuple desugar: let __tup = f(); let a = __tup.0 — float-element base
