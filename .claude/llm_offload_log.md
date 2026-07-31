@@ -3326,3 +3326,5 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 | 2026-07-31 | xai+zai | math-review | SounioFoEmitPure.lean | PASS | L2 pure-emit port from f974c9c6a |
 | 2026-07-31 | xai | math-review | SounioFoRegistrationFragment.lean | PASS | port from 1de8c59e1 |
 | 2026-07-31 | xai | math-review | SounioFoEngineInstallFragment.lean | PASS | port from 08dfcf119 |
+| 2026-07-31 | xai | math-review | SounioFoMethodXferFragment.lean | PASS | port ac7fe59cc |
+| 2026-07-31 | xai | math-review | SounioFoMultimodFragment.lean | PASS | port ac7fe59cc |

@@ -111,12 +111,14 @@ Oral Css = (F·Dose/τ)/(CL0·exp(η)). Import driver is the multi-mod free-help
 `SounioFoEmitPure` + `fo_emit_pure_gate.sh`.  
 **L2 registration fragment** (2026-07-31): multipass FO_XFER expand —
 `SounioFoRegistrationFragment` + `fo_registration_fragment_gate.sh`.  
-**L2 engine-install fragment** (2026-07-31): multipass register of oral Css
-pure helpers (forward/reverse/4-pass) — `SounioFoEngineInstallFragment` +
-`fo_engine_install_fragment_gate.sh`.  
-**L2 full engine** remains OPEN (R4). Stack:
-`scripts/ci/fo_residual4_stack_gate.sh`. Spec:
-`docs/research/fo_css_compiler_residual_half_spec_2026-07-31.md`.  
+**L2 engine-install fragment** (2026-07-31): multipass register —
+`SounioFoEngineInstallFragment`.  
+**L2 method peel + multi-mod model** (2026-07-31): `SounioFoMethodXferFragment`,
+`SounioFoMultimodFragment`.  
+**Oral Css residual §5.4 CLOSED** — closeout
+`docs/research/fo_pk_residual4_oral_css_closeout_2026-07-31.md`.  
+**L2 full engine** (arbitrary programs) remains OPEN. Stack:
+`scripts/ci/fo_residual4_stack_gate.sh`.  
 **Dissertation index:** [`docs/research/fo_pk_method_science_receipts_2026-07-31.md`](../research/fo_pk_method_science_receipts_2026-07-31.md) — R1–R4 tables, re-run commands, citation sketch.
 
 ## Science drivers measured (2026-07-27 / 2026-07-28)

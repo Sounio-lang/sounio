@@ -660,8 +660,7 @@ lean_lib «SounioFoEmitPure» where
 lean_lib «SounioFoRegistrationFragment» where
 @[default_target]
 lean_lib «SounioFoEngineInstallFragment» where
-
-
-
-
-
+@[default_target]
+lean_lib «SounioFoMethodXferFragment» where
+@[default_target]
+lean_lib «SounioFoMultimodFragment» where
