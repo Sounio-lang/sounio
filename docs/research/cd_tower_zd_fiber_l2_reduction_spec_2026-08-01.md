@@ -17,7 +17,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.cd-to
 
 **Date:** 2026-08-01
 **Orthography:** EN-UK
-**Status:** `EXECUTABLE` — `DIAMOND_IS_A_BOUNDED_FAMILY_ON_THE_CLEAN_LOCUS__GAP_LOCUS_OPEN`
+**Status:** `EXECUTABLE` — `DIAMOND_IS_A_FINITE_STABLE_FAMILY__GAP_LOCUS_INCLUDED`
 **Parents:** `cd_tower_zd_fiber_l2_switching_spec_2026-07-31.md`, `cd_tower_zd_fiber_l1_reduction_spec_2026-07-31.md`
 **Harness:** `scripts/research/cd_tower_zd_fiber_l2_reduction_contract.py`
 
@@ -195,6 +195,44 @@ priming `Q` is **empty at every `j`** — because `Qgen` at a single-bit label i
 
 ---
 
+## 2d. The gap locus, closed — and a correction to §2c
+
+§2c framed (♦) on the *clean* locus. That framing was **necessary but not sufficient**, and the
+gap locus is what shows it.
+
+First, the clean locus was undercounted. §2c used a blunt proxy — no degeneracy at *any* level.
+Running the descent with the **sixteen lemmas' actual side conditions** recovers a lot of it
+(9 480 → 24 060 clean at `n = 6`), and the descent law is exact on everything that reaches
+bottom (0 violations). But ~57% of hypothesis-satisfying tuples still **block**.
+
+So the right object is not the clean locus. It is the **reachable bottom set**:
+
+```
+REACH_j(Y₀) = { (a mod 2^{j+2}, b mod 2^{j+2}) : Q'_n(Y,a,b) = −1,  Y mod 2^{j+2} = Y₀ }
+```
+
+Because the **conclusion** descends *unconditionally* — `G_descend`, proven ∀n — (♦) is
+**exactly**
+
+> `REACH_j(Y₀) ⊆ { D = +1 }`
+
+and that has no `n` in it **provided `REACH` stabilises**. It does:
+
+| | `j=0` | `j=1` | `j=2` | `j=3` |
+|---|---|---|---|---|
+| `\|REACH\|`, `Y₀ = 2^j` | 16/16 | 40/64 | 88/256 | 184/1024 |
+| `\|REACH\|`, `Y₀ = 3·2^j` | 16/16 | 64/64 | 160/256 | 352/1024 |
+
+stable from `n = j+4` onward (`j ≤ 2` from `n = 6`, `j = 3` from `n = 7`, all unchanged at
+`n = 8`), and **never containing a `D = −1` point**. That closes the gap locus in the only sense
+that matters here: (♦) — blocked tuples included — is a **finite, `n`-free statement per `j`**.
+
+**The correction.** `N15`'s clean-locus predicate does **not** cover `REACH`: for `Y₀ = 2^j` there
+are 8, 16, 32, 64 reachable points outside it at `j = 0,1,2,3`. The blocked tuples land strictly
+outside the family §2c described. `REACH`, not that predicate, is the object.
+
+---
+
 ## 3. Not claimed
 
 - **L2 is not proven, and neither is (♦).** What *is* proven ∀n is the **reduction**
@@ -203,9 +241,9 @@ priming `Q` is **empty at every `j`** — because `Qgen` at a single-bit label i
 - **(♦) is not proven.** What is proven of it: the conclusion is level-bounded (`G_descend`),
   the reduction into it is a theorem (`l2_reduction`), its symmetry ingredient is a theorem
   (`gdisc_symm`), and one of the four bounded cases is vacuous by `Qgen_pow2`. What is not:
-  the bounded family itself (verified `j ≤ 7`, not proven for all `j`), and **the gap locus** —
-  tuples that degenerate at some intermediate level, where the hypothesis does not descend and
-  which (★) needed explicit gap roots to handle. Neither is in Lean.
+  the finite family itself. The gap locus is no longer a separate obstacle — `REACH` absorbs it
+  — but **`REACH`'s stabilisation is measured** (`j ≤ 3`, `n ≤ 8`), not proven, and
+  `REACH_j ⊆ {D = +1}` is checked per `j`, not for all `j`. Nothing of §2d is in Lean.
 - **`N14`'s clean/gap split is measured, not proven.** The one-step laws behind it are the
   sixteen proven reduction lemmas; what is measured is that their composition is exact on the
   clean locus.

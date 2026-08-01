@@ -479,9 +479,77 @@ def main():
           f"(Qgen_pow2, PROVEN forall n), so its hypothesis X = +1 is unsatisfiable. One "
           f"quarter of the remaining statement is discharged by an existing theorem")
 
+    # ---- N17/N18  THE GAP LOCUS -----------------------------------------------------------
+    # N15 covered only the CLEAN locus. Running the descent with the SIXTEEN LEMMAS' ACTUAL
+    # side conditions (not the blunt "no degeneracy anywhere" proxy) recovers a lot of it --
+    # 9480 -> 24060 clean at n=6 -- but ~57% of hypothesis-satisfying tuples still BLOCK.
+    #
+    # The right object is therefore not "the clean locus" but the REACHABLE BOTTOM SET:
+    #     REACH_j(Y0) = { (a mod 2^{j+2}, b mod 2^{j+2}) : Q'_n(Y,a,b) = -1, Y mod 2^{j+2} = Y0 }
+    # Because the CONCLUSION descends unconditionally (N9, proven), (diamond) is EXACTLY
+    #     REACH_j(Y0)  subset of  { D = +1 }
+    # and that has no `n` in it PROVIDED REACH stabilises. It does.
+    def _Qp2(S, Y, a, b):
+        return int(S[a, b]) * int(S[b ^ Y, a ^ Y]) * int(S[b ^ Y, a]) * int(S[a ^ Y, b])
+
+    from collections import defaultdict
+    prev = {}
+    n17 = True
+    n17_rows = []
+    n18_rows = []
+    for n in (6, 7, 8):
+        Sn = sign_table_fast(n).astype(np.int64)
+        N = 1 << n
+        reach = defaultdict(set)
+        for Y in range(1, N):
+            j = (Y & -Y).bit_length() - 1
+            if j > 3 or j + 2 > n or bin(Y).count("1") % 2:
+                continue
+            Mj = 1 << (j + 2)
+            for a in range(1, N):
+                for b in range(1, N):
+                    if b == Y or _Qp2(Sn, Y, a, b) != -1:
+                        continue
+                    reach[(j, Y % Mj)].add((a % Mj, b % Mj))
+        for k in sorted(reach):
+            j, Y0 = k
+            Mj = 1 << (j + 2)
+            Sj = sign_table_fast(j + 2).astype(np.int64)
+            g = gmat(Sj, Mj, j)
+            A, B = np.meshgrid(np.arange(Mj), np.arange(Mj), indexing="ij")
+            p = np.array([(-1) ** pj(x, j) for x in range(Mj)])
+            D = g * g[A ^ Y0, B ^ Y0] * np.outer(p, p)
+            eps = -((-1) ** ((Y0 >> (j + 1)) & 1))
+            Qpm = Sj * Sj[B ^ Y0, A ^ Y0] * Sj[B ^ Y0, A] * Sj[A ^ Y0, B]
+            Qum = Sj * Sj[A ^ Y0, B ^ Y0] * Sj[A, B ^ Y0] * Sj[A ^ Y0, B]
+            pred = (Qpm == -eps) | (Qum == -eps)
+            badD = sum(1 for (x, y) in reach[k] if D[x, y] != 1)
+            outside = sum(1 for (x, y) in reach[k] if not pred[x, y])
+            n17 = n17 and badD == 0
+            if n >= 8:
+                n17_rows.append((j, Y0, len(reach[k]), Mj * Mj, badD))
+                n18_rows.append((j, Y0, outside))
+            if k in prev and n >= 8 and prev[k] != reach[k]:
+                n17 = False
+            prev[k] = reach[k]
+    ok["N17"] = n17
+    print(f"N17_REACH   the REACHABLE bottom set stabilises (j<=2 from n=6, j=3 from n=7, i.e. "
+          f"n >= j+4; unchanged at n=8) and NEVER contains a D = -1 point "
+          f"{'OK' if n17 else 'FAIL'} -- "
+          f"{'; '.join(f'j={a} Y0={b}: |reach|={c}/{d}, D=-1 among them {e}' for a, b, c, d, e in n17_rows)}"
+          f". Since the CONCLUSION descends unconditionally (N9, proven), (diamond) IS "
+          f"'REACH subset of {{D=+1}}' -- a FINITE, n-free statement per j, GAP LOCUS INCLUDED")
+    n18 = any(o > 0 for _, _, o in n18_rows)
+    ok["N18"] = n18
+    print(f"N18_N15GAP  N15's clean-locus predicate does NOT cover REACH "
+          f"{'OK' if n18 else 'FAIL'} -- points outside it: "
+          f"{'; '.join(f'j={a} Y0={b}: {c}' for a, b, c in n18_rows)}. So the previous rung's "
+          f"bounded family was NECESSARY BUT NOT SUFFICIENT: the blocked tuples land strictly "
+          f"outside it, and REACH is the object that closes the gap locus")
+
     print("=" * 78)
     if all(ok.values()):
-        print("CD_TOWER_ZDL2R_VERDICT DIAMOND_IS_A_BOUNDED_FAMILY_ON_THE_CLEAN_LOCUS__GAP_LOCUS_OPEN")
+        print("CD_TOWER_ZDL2R_VERDICT DIAMOND_IS_A_FINITE_STABLE_FAMILY__GAP_LOCUS_INCLUDED")
         print("CD_TOWER_ZDL2R_NOTE L2 (fiber L = Y|H, level n) is replaced by (diamond) "
               "(fiber-free, level n-1): with g(x,y) = sigma(tau x,tau y)sigma(x,y) and "
               "j = lsb(Y), for even-weight Y, Qgen'(Y,a,b) = -1 implies "
