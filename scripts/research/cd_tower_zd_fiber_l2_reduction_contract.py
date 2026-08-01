@@ -533,11 +533,13 @@ def main():
                 n17 = False
             prev[k] = reach[k]
     ok["N17"] = n17
-    print(f"N17_REACH   the REACHABLE bottom set stabilises (j<=2 from n=6, j=3 from n=7, i.e. "
+    print(f"N17_REACH   [the truncation behind it is Lean-proven forall n: G_trunc] "
+          f"the REACHABLE bottom set stabilises (j<=2 from n=6, j=3 from n=7, i.e. "
           f"n >= j+4; unchanged at n=8) and NEVER contains a D = -1 point "
           f"{'OK' if n17 else 'FAIL'} -- "
           f"{'; '.join(f'j={a} Y0={b}: |reach|={c}/{d}, D=-1 among them {e}' for a, b, c, d, e in n17_rows)}"
-          f". Since the CONCLUSION descends unconditionally (N9, proven), (diamond) IS "
+          f". Since the CONCLUSION truncates to level k for EVERY k > j -- `G_trunc`, PROVEN "
+          f"forall n by iterating G_descend -- (diamond) IS "
           f"'REACH subset of {{D=+1}}' -- a FINITE, n-free statement per j, GAP LOCUS INCLUDED")
     n18 = any(o > 0 for _, _, o in n18_rows)
     ok["N18"] = n18

@@ -211,8 +211,8 @@ So the right object is not the clean locus. It is the **reachable bottom set**:
 REACH_j(Y₀) = { (a mod 2^{j+2}, b mod 2^{j+2}) : Q'_n(Y,a,b) = −1,  Y mod 2^{j+2} = Y₀ }
 ```
 
-Because the **conclusion** descends *unconditionally* — `G_descend`, proven ∀n — (♦) is
-**exactly**
+Because the **conclusion** *truncates to level `k` for every `k > j`* — `G_trunc`, **proven ∀n**
+by iterating `G_descend`, with `xor_mod_two_pow` and `gdisc_trunc` — (♦) is **exactly**
 
 > `REACH_j(Y₀) ⊆ { D = +1 }`
 
@@ -242,8 +242,11 @@ outside the family §2c described. `REACH`, not that predicate, is the object.
   the reduction into it is a theorem (`l2_reduction`), its symmetry ingredient is a theorem
   (`gdisc_symm`), and one of the four bounded cases is vacuous by `Qgen_pow2`. What is not:
   the finite family itself. The gap locus is no longer a separate obstacle — `REACH` absorbs it
-  — but **`REACH`'s stabilisation is measured** (`j ≤ 3`, `n ≤ 8`), not proven, and
-  `REACH_j ⊆ {D = +1}` is checked per `j`, not for all `j`. Nothing of §2d is in Lean.
+  — and the step that makes `REACH` *the* content is now a theorem: `G_trunc` (∀n,
+  kernel-checked) says (♦)'s conclusion at any level IS its value at level `k`, for every
+  `k > j`, so nothing above bit `j+1` can matter. What remains measured: **`REACH`'s
+  stabilisation** (`j ≤ 3`, `n ≤ 8`) and **`REACH_j ⊆ {D = +1}`** (checked per `j`, not for all
+  `j`). Those two are the whole of what is left of L2.
 - **`N14`'s clean/gap split is measured, not proven.** The one-step laws behind it are the
   sixteen proven reduction lemmas; what is measured is that their composition is exact on the
   clean locus.

@@ -2696,6 +2696,74 @@ theorem G_descend (m j W u v Y a b : Nat) (hj : j < m+1)
   rw [gdisc_descend m j u v hj hu hv a b ha hb,
       gdisc_descend m j (u ^^^ W) (v ^^^ W) hj huW hvW (a ^^^ Y) (b ^^^ Y) hxa hxb]
 
+/-! ## `REACH`: the truncation is a THEOREM, so (♦) really is a finite statement
+
+`G_descend` drops ONE level. Iterating it is what turns (♦) into "`REACH_j(Y₀) ⊆ {D = +1}`" —
+a statement with no `n` in it. That iteration is proven here.
+
+The point is not the arithmetic. It is that the *conclusion* of (♦) at any level whatsoever is
+literally the value of `G` at level `k`, for every `k > j` — so the only thing (♦) can be about
+is which bottom triples are reachable. `REACH` is not a convenient reformulation; after
+`G_trunc` it is the whole content. -/
+
+theorem xor_mod_two_pow (k x y : Nat) : (x ^^^ y) % 2^k = (x % 2^k) ^^^ (y % 2^k) := by
+  apply Nat.eq_of_testBit_eq
+  intro i
+  simp only [Nat.testBit_mod_two_pow, Nat.testBit_xor]
+  cases Nat.decLt i k with
+  | isTrue h => simp [h]
+  | isFalse h => simp [h]
+
+private theorem split_half (m z : Nat) (hz : z < 2^(m+2)) :
+    z = z % 2^(m+1) ∨ z = z % 2^(m+1) + 2^(m+1) := by
+  have h2H : 2^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  by_cases h : z < 2^(m+1)
+  · exact Or.inl (Nat.mod_eq_of_lt h).symm
+  · refine Or.inr ?_
+    have he : z % 2^(m+1) = z - 2^(m+1) := by
+      rw [Nat.mod_eq_sub_mod (by omega), Nat.mod_eq_of_lt (by omega)]
+    omega
+
+/-- One level, in the `mod` form the iteration needs. -/
+theorem gdisc_descend_mod (m j x y : Nat) (hj : j < m+1) (hx : x < 2^(m+2))
+    (hy : y < 2^(m+2)) :
+    gdisc j x y (m+2) = gdisc j (x % 2^(m+1)) (y % 2^(m+1)) (m+1) :=
+  gdisc_descend m j (x % 2^(m+1)) (y % 2^(m+1)) hj
+    (Nat.mod_lt _ (Nat.two_pow_pos (m+1))) (Nat.mod_lt _ (Nat.two_pow_pos (m+1)))
+    x y (split_half m x hx) (split_half m y hy)
+
+/-- **`gdisc` truncates to ANY level above `j`.** Induction on the number of levels dropped. -/
+theorem gdisc_trunc (j kk : Nat) (hj : j < kk+1) :
+    ∀ (d x y : Nat), x < 2^((kk+1)+d) → y < 2^((kk+1)+d) →
+      gdisc j x y ((kk+1)+d) = gdisc j (x % 2^(kk+1)) (y % 2^(kk+1)) (kk+1) := by
+  intro d
+  induction d with
+  | zero => intro x y hx hy; rw [Nat.mod_eq_of_lt hx, Nat.mod_eq_of_lt hy]
+  | succ d ih =>
+    intro x y hx hy
+    have e1 : (kk+1) + (d+1) = (kk+d)+2 := by omega
+    have e2 : (kk+d)+1 = (kk+1)+d := by omega
+    rw [e1] at hx hy
+    rw [e1, gdisc_descend_mod (kk+d) j x y (by omega) hx hy, e2,
+        ih (x % 2^((kk+1)+d)) (y % 2^((kk+1)+d))
+          (Nat.mod_lt _ (Nat.two_pow_pos ((kk+1)+d))) (Nat.mod_lt _ (Nat.two_pow_pos ((kk+1)+d))),
+        Nat.mod_mod_of_dvd _ (Nat.pow_dvd_pow 2 (Nat.le_add_right (kk+1) d)),
+        Nat.mod_mod_of_dvd _ (Nat.pow_dvd_pow 2 (Nat.le_add_right (kk+1) d))]
+
+/-- **The truncation theorem — this is what makes `REACH` the whole content of (♦).**
+    The conclusion of (♦) at ANY level is literally its value at level `k`, for every `k > j`.
+    So the only thing (♦) can be about is which bottom triples are reachable. -/
+theorem G_trunc (j kk d Y a b : Nat) (hj : j < kk+1) (hY : Y < 2^((kk+1)+d))
+    (ha : a < 2^((kk+1)+d)) (hb : b < 2^((kk+1)+d)) :
+    gdisc j a b ((kk+1)+d) * gdisc j (a ^^^ Y) (b ^^^ Y) ((kk+1)+d)
+      = gdisc j (a % 2^(kk+1)) (b % 2^(kk+1)) (kk+1)
+        * gdisc j ((a % 2^(kk+1)) ^^^ (Y % 2^(kk+1)))
+                  ((b % 2^(kk+1)) ^^^ (Y % 2^(kk+1))) (kk+1) := by
+  rw [gdisc_trunc j kk hj d a b ha hb,
+      gdisc_trunc j kk hj d (a ^^^ Y) (b ^^^ Y) (Nat.xor_lt_two_pow ha hY)
+        (Nat.xor_lt_two_pow hb hY),
+      xor_mod_two_pow (kk+1) a Y, xor_mod_two_pow (kk+1) b Y]
+
 end SounioZDFiberAntisym
 
 
