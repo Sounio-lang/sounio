@@ -1,0 +1,236 @@
+//@ run-pass
+// tests/run-pass/site_screening_selftest.sio
+//
+// Suite coverage for demos/hydrogen/site_screening.sio (epistemic UHS
+// site screening over sourced Greek formations). Pins:
+//   1. the 60 C (Pentalofos bracket interior) central value trajectory
+//      against an INDEPENDENT Python RK4 replica
+//      (demos/hydrogen/tools/replica_60c_pins.py — mirrors the engine's
+//      mass-action RK4 exactly):
+//        H2      = 0.0098556516696
+//        Calcite = 1.0005653105209   (NET PRECIPITATION at 60 C: > 1.0)
+//        CO2     = 0.0073700079502
+//   2. the A2 slot regime switch: at 368.15 K (South Kavala measured
+//      95 C) k_m = 0 and the 30-yr loss is EXACTLY 0.000000 %;
+//   3. the k_m corner ordering at 333.15 K (higher k_m -> less H2 left);
+//   4. the chain functions fs_of / delivered against analytic
+//      recomputation;
+//   5. a small seeded MC count (integer-exact regression pin of the
+//      xorshift stream + gate decision).
+//
+// lean_single engine (Madaros "visibility preflight failed" on any
+// chemistry::kinetics import is a pre-existing blocker, #1584).
+use chemistry::kinetics::*
+
+fn absf(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn run60(nu: MatNM, km: f64) -> ([f64; 8], [f64; 8]) with Mut, Div, Panic {
+    // replica rate literals at T = 333.15 K (replica_60c_pins.py)
+    let ks: [f64; 8] = [km, 2.314040544184e-6, 6.375436733175e-2, 1.531920895068e-4, 3.530296312623e1, 0.0, 0.0, 0.0]
+    let uks: [f64; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let iv: [f64; 8] = [9.945e-3, 0.0, 1.0, 1.0e-3, 5.0e-4, 5.0e-2, 0.0, 0.0]
+    let isv: [f64; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    simulate_general_epistemic(&iv, &isv, &ks, &uks, nu, 6 as i64, 5 as i64, 0.05, 600 as i64)
+}
+
+// zero-kinetics run at the South Kavala corner: km slot zeroed (the
+// demo's make_ks returns km = 0 above 343.15 K) — here literally zero
+fn run95(nu: MatNM) -> ([f64; 8], [f64; 8]) with Mut, Div, Panic {
+    let ks: [f64; 8] = [0.0, 6.5e-6, 3.0e-1, 1.0e-3, 1.0e2, 0.0, 0.0, 0.0]
+    let uks: [f64; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let iv: [f64; 8] = [9.945e-3, 0.0, 1.0, 1.0e-3, 5.0e-4, 5.0e-2, 0.0, 0.0]
+    let isv: [f64; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    simulate_general_epistemic(&iv, &isv, &ks, &uks, nu, 6 as i64, 5 as i64, 0.05, 600 as i64)
+}
+
+fn fs_of(l30_pct: f64, tau: f64) -> f64 {
+    1.0 - l30_pct * tau / 3000.0
+}
+
+fn ss_exp(x: f64) -> f64 with Mut, Div {
+    if x > 700.0 { return 1.0e200 }
+    if x < 0.0 - 700.0 { return 0.0 }
+    var kf = x / 0.6931471805599453
+    var k = kf as i64
+    if kf < 0.0 {
+        if kf != (k as f64) { k = k - 1 }
+    }
+    let r = x - (k as f64) * 0.6931471805599453
+    var s = 1.0
+    var term = 1.0
+    var n: i64 = 1
+    while n < 25 { term = term * r / (n as f64); s = s + term; n = n + 1 }
+    var result = s
+    if k >= 0 {
+        var i: i64 = 0
+        while i < k { result = result * 2.0; i = i + 1 }
+    } else {
+        var i: i64 = 0
+        while i < (0 - k) { result = result / 2.0; i = i + 1 }
+    }
+    result
+}
+
+fn ss_ln(x: f64) -> f64 with Mut, Div {
+    var m = x
+    var k: i64 = 0
+    while m >= 2.0 { m = m / 2.0; k = k + 1 }
+    while m < 1.0 { m = m * 2.0; k = k - 1 }
+    let y = (m - 1.0) / (m + 1.0)
+    let y2 = y * y
+    var term = y
+    var sum = 0.0
+    var i: i64 = 0
+    while i < 12 {
+        sum = sum + term / (2.0 * (i as f64) + 1.0)
+        term = term * y2
+        i = i + 1
+    }
+    2.0 * sum + (k as f64) * 0.6931471805599453
+}
+
+fn crf(r: f64, n_yr: i64) -> f64 with Mut, Div {
+    let q = ss_exp((n_yr as f64) * ss_ln(1.0 + r))
+    r * q / (q - 1.0)
+}
+
+fn prod_cost(p_elec: f64, capex_m: f64, e_spec: f64, cf: f64) -> f64 with Mut, Div {
+    let a = 1500.0 * capex_m * crf(0.07, 25) + 20.0
+    e_spec * p_elec + a * e_spec / (cf * 8760.0)
+}
+
+fn delivered(p_elec: f64, capex_m: f64, e_spec: f64, cf: f64,
+             e_th: f64, p_heat: f64, ncyc: f64, disp: f64) -> f64 with Mut, Div {
+    prod_cost(p_elec, capex_m, e_spec, cf)
+        + e_th * p_heat + 500.0 * crf(0.07, 25) / ncyc + disp
+}
+
+// ─── PRNG (xorshift, valley-chain idiom verbatim) ───
+
+var RNG_A: i64 = 0
+var RNG_B: i64 = 0
+
+fn rng_seed(a: i64, b: i64) with Mut {
+    RNG_A = a
+    RNG_B = b
+}
+
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A
+    let y = RNG_B
+    RNG_A = y
+    x = x ^ (x << 23)
+    x = x ^ (x >> 17)
+    x = x ^ (y ^ (y >> 26))
+    RNG_B = x
+    let r = x + y
+    if r < 0 { 0 - r } else { r }
+}
+
+fn rand_u() -> f64 with Mut, Div {
+    (rng_next() % 10000) as f64 / 10000.0
+}
+
+fn rand_normal() -> f64 with Mut, Div {
+    var sum = 0.0
+    var j = 0
+    while j < 12 { sum = sum + rand_u(); j = j + 1 }
+    sum - 6.0
+}
+
+fn ss_floor_i64(x: f64) -> i64 with Mut {
+    var n = x as i64
+    if (n as f64) > x { n = n - 1 }
+    return n
+}
+
+// small-case pinned MC (regression pin of stream + integer gate decision)
+fn mc_hits_pinned_c(fs: f64, fc: f64, p_elec: f64, capex_m: f64,
+                    e_spec: f64, cf: f64, e_th: f64, p_heat: f64,
+                    ncyc: f64, disp: f64, n: i64) -> i64 with Mut, Div {
+    var hits: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        let e = p_elec + 0.002 * rand_normal()
+        let c = cf + 0.02 * rand_normal()
+        let t = e_th + 5.0 * rand_normal()
+        let d = delivered(e, capex_m, e_spec, fs * fc * c, t, p_heat, ncyc, disp)
+        let k6 = ss_floor_i64(d * 1000000.0 + 0.5)
+        if k6 < 6000000 { hits = hits + 1 }
+        i = i + 1
+    }
+    hits
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fails = 0
+    var nu = matnm_new(6 as i64, 5 as i64)
+    nu = matnm_set(nu, 0 as i64, 0 as i64, 0.0 - 1.0)   // R0: H2 + CO2 -> CH4
+    nu = matnm_set(nu, 1 as i64, 0 as i64, 1.0)
+    nu = matnm_set(nu, 5 as i64, 0 as i64, 0.0 - 1.0)
+    nu = matnm_set(nu, 2 as i64, 1 as i64, 0.0 - 1.0)   // R1: acid channel
+    nu = matnm_set(nu, 3 as i64, 1 as i64, 1.0)
+    nu = matnm_set(nu, 4 as i64, 1 as i64, 1.0)
+    nu = matnm_set(nu, 2 as i64, 2 as i64, 0.0 - 1.0)   // R2: CO2 channel
+    nu = matnm_set(nu, 5 as i64, 2 as i64, 0.0 - 1.0)
+    nu = matnm_set(nu, 3 as i64, 2 as i64, 1.0)
+    nu = matnm_set(nu, 4 as i64, 2 as i64, 2.0)
+    nu = matnm_set(nu, 2 as i64, 3 as i64, 0.0 - 1.0)   // R3: water channel
+    nu = matnm_set(nu, 3 as i64, 3 as i64, 1.0)
+    nu = matnm_set(nu, 4 as i64, 3 as i64, 1.0)
+    nu = matnm_set(nu, 3 as i64, 4 as i64, 0.0 - 1.0)   // R4: closure
+    nu = matnm_set(nu, 4 as i64, 4 as i64, 0.0 - 1.0)
+    nu = matnm_set(nu, 2 as i64, 4 as i64, 1.0)
+
+    // 1. 60 C central trajectory vs the independent replica
+    let (ov, ou) = run60(nu, 1.35e-2)
+    let h2 = ov[0]
+    let cal = ov[2]
+    let co2 = ov[5]
+    if absf(h2 - 0.0098556516696) > 1.0e-7 { fails = fails + 1 }
+    if absf(cal - 1.0005653105209) > 1.0e-7 { fails = fails + 1 }
+    if absf(co2 - 0.0073700079502) > 1.0e-7 { fails = fails + 1 }
+
+    // 2. A2 regime switch: zero k_m -> zero H2 sink -> loss EXACTLY 0
+    let (ov9, ou9) = run95(nu)
+    let h2_95 = ov9[0]
+    if absf(h2_95 - 9.945e-3) > 1.0e-12 { fails = fails + 1 }
+
+    // 3. k_m corner ordering at 333.15 K (extract scalars immediately —
+    //    lean_single aliases simultaneously-held returned arrays, E6)
+    let (ov_lo, ou_lo) = run60(nu, 0.0048)
+    let h2_lo = ov_lo[0]
+    let (ov_hi, ou_hi) = run60(nu, 0.0187)
+    let h2_hi = ov_hi[0]
+    if h2_hi >= h2_lo { fails = fails + 1 }
+
+    // 4. chain analytics
+    //    fs_of: L30 = 1.5 %, tau = 1 -> 1 - 1.5/3000 = 0.9995 exactly
+    if absf(fs_of(1.5, 1.0) - 0.9995) > 1.0e-12 { fails = fails + 1 }
+    //    delivered at the composed nominal mids (valley Section F):
+    //    CF_eff = fs_of(1.5444435, 1) * 0.506 * 0.675 — recompute inline
+    let crf_v = crf(0.07, 25)
+    if absf(crf_v - 0.08581105) > 1.0e-6 { fails = fails + 1 }
+    let d = delivered(0.049, 1.0, 46.4, 0.675, 66.5, 0.0125, 37.5, 1.0)
+    //    analytic recomputation: prod = 46.4*0.049 + a*46.4/(0.675*8760)
+    //    with a = 1500*crf+20; compr = 66.5*0.0125; stor = 500*crf/37.5
+    let a = 1500.0 * crf_v + 20.0
+    let d_ref = 46.4 * 0.049 + a * 46.4 / (0.675 * 8760.0)
+        + 66.5 * 0.0125 + 500.0 * crf_v / 37.5 + 1.0
+    if absf(d - d_ref) > 1.0e-12 { fails = fails + 1 }
+
+    // 5. small seeded MC count (integer-exact regression pin; mids
+    //    with CF at its 0.80 corner so the count is intermediate)
+    rng_seed(314159265, 271828182)
+    let hits = mc_hits_pinned_c(1.0, 1.0, 0.049, 1.0, 46.4, 0.80,
+                                66.5, 0.0125, 37.5, 1.0, 1000 as i64)
+    if hits != 26 { fails = fails + 1 }
+
+    if fails == 0 {
+        println("SITE_SCREENING_SELFTEST_OK")
+        return 0
+    }
+    print("site_screening failures: ")
+    println(fails)
+    1
+}
