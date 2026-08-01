@@ -33,7 +33,7 @@ publicly reported as an H₂-storage conversion candidate.
 | Location / water depth | ~6 km off west Thassos, 52 m water | HRADF, *Invitation for Expression of Interest, UGS South Kavala*, Annex B (2020), pp. 36–40: "located in the south western part of the Prinos-Kavala sub-basin, in 52 meters of water depth" |
 | Depth to top reservoir | below 1630 m subsea | HRADF Annex B: "below 1630m (5363 ft) meters at SK-1" |
 | Gas–water contact | 1723 m below sea level | HRADF Annex B: "The original gas-water contact was reported at 1723m (5654 feet) below sea level" |
-| **Reservoir temperature** | **95 °C (measured)** | HRADF Annex B: "Reservoir Temperature: 95 °C" |
+| **Reservoir temperature** | **95 °C (measured, tender-sourced)** | HRADF Annex B: "Reservoir Temperature: 95 °C". PROVENANCE CAVEAT (added 2026-08-01, reviewer finding): the source is an invitation-for-EOI tender document, not a primary reservoir-engineering report; whether 95 °C is a corrected bottom-hole or an undisturbed formation temperature is not stated. The demo's [0, 0] % loss survives downward revision to 90 °C (the Tₘₐₓ p-box upper edge); below 90 °C S1 enters the thermal-death slide window and the hard zero must be re-read through the law fan. |
 | Porosity | max 20 % (1995); avg 22 % (Energean) | HRADF Annex B: "maximum porosity 20%… (Georgakopoulos, et al., 1995)"; "Average porosity: 22%" |
 | Permeability | 50 mD (1995) → 100 mD (Energean 2011) | HRADF Annex B: "average permeability of 50mD"; "Average permeability: 100 md" |
 | Pressure | 182 bar initial; 27 bar after depletion | HRADF Annex B: "Initial reservoir pressure: 182 bars / Reservoir pressure after 850 million m3: 27 bars" |
@@ -207,6 +207,18 @@ from four independent OA reviews that agree (sources 24, 28, 29, 30).
   site over a time span of seven months" (24; 29: "up to a 17% decrease
   in hydrogen ... over a seven month cycle"); 31.5 = DERIVED: the same
   17 percentage points as a fraction of the injected H₂ (17/54).
+- **STOICHIOMETRIC TRANSLATION (added 2026-08-01, reviewer finding)** —
+  4 H₂ + CO₂ → CH₄ + 2 H₂O over the same source's measured initial
+  (54 % H₂, 22 % CH₄, 12 % CO₂) and final (37 % H₂, 40 % CH₄, 9 % CO₂)
+  compositions. Per 100 initial mol, let x = mol H₂ consumed; CO₂
+  falls by x/4, CH₄ rises by x/4, total gas falls to 100 − x. Then
+  (54 − x)/(100 − x) = 0.37 → x ≈ 27.0 mol, i.e. **≈ 50 % of the
+  injected H₂ consumed** (cross-checks: CH₄ (22 + x/4)/(100 − x) ≈
+  39 % vs measured 40 %; CO₂ (12 − x/4)/(100 − x) ≈ 7 % vs measured
+  9 %). The demo's [17.0, 31.5] % box therefore UNDERSTATES the
+  stoichiometric extent — the inverse-calibrated Lobodice k_eff box is,
+  if anything, LOW; the caprock-leakage caveat (next bullet) cuts the
+  other way, and both are printed.
 - **CAVEAT (isotope attribution)**: "Buzek et al. (1994) showed that
   some hydrogen losses are also linked to cap-rock heterogeneities"
   (28) — the true microbial extent is ≤ the observed drop; the demo
@@ -233,8 +245,18 @@ from four independent OA reviews that agree (sources 24, 28, 29, 30).
   methanogen bloom. The demo's validated slot/law paths are UNCHANGED;
   this is additive evidence pointing at brief limitation §6.1(a).
 - **HEADLINE STRESS TEST (labeled what-if, same seeded chain)**:
-  observed extents annualized LINEARLY (upper bound — loss is concave
-  in time): LEHEN-like → 1-yr loss [3.844737, 4.101053] %, f_s(1) ∈
+  observed extents annualized LINEARLY (upper bound — the network's
+  cumulative loss is concave in time, VERIFIED numerically 2026-08-01
+  by integrating the network to τ = 1…30 at the field-calibrated
+  corners: non-positive second differences everywhere; strictly concave
+  at the LO edge; HI-edge corners saturate ≈100 % in year 1. Convex
+  lag-phase profiles are outside this abiotic batch network's form —
+  labeled model-form limitation). MECHANISM NOTE: this test does NOT
+  apply the linear f_s mapping to the calibrated p-box — it directly
+  annualizes the observed 7-month extents (×365.25/210 — 7 months as
+  210 d); the two answer
+  different questions (screening gates vs bounding bloom what-if):
+  LEHEN-like → 1-yr loss [3.844737, 4.101053] %, f_s(1) ∈
   [0.958989, 0.961553], composed P(<6) = **3.055 %** (vs 3.635 %) —
   the τ=1 headline survives; LOBODICE-like → 1-yr loss [29.567857,
   54.787500] %, f_s(1) ∈ [0.452125, 0.704321], composed P(<6) =
@@ -276,6 +298,9 @@ Method: `field_invert` in the demo — 80 bisection steps of
 constants), bracket [1e-12, 100] chosen inside the RK4-stable monotone
 regime (above ~10³ the 0.05-yr step overshoots the H₂ charge and the
 loss goes non-monotone — caught by the selftest during development).
+Convergence: residual bracket width ≈ 100·2⁻⁸⁰ ≈ 1e-22 — machine-level;
+the practical error floor is the RK4 discretization, pinned
+independently in the selftest.
 Enveloped over (extent edge × horizon-step edge × A × salt) corners:
 k_lo = least k consistent (low extent, LONG horizon), k_hi = most
 (high extent, SHORT horizon).
