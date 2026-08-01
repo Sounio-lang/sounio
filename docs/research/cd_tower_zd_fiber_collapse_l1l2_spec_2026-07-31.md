@@ -19,10 +19,23 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.cd-to
 > `SounioZDFiberAntisym.star_forall` (`256bdbda4`), kernel-checked, no `sorryAx`. Of this rung's
 > two σ-lemmas, **L1's reduction target is closed and L2 is not.** Two cautions that the
 > headline does not carry: (i) L1 itself is *not* proven — the chain from L1 to (★) is
-> `K2`→`K3`→`K4` of the l1_reduction contract and those are measured, not derived; (ii) the
-> `SounioZDCollapse.lean` implication still takes (★) as a *hypothesis* — the files are not
-> wired, because that file carries its own `cdSigma` and its `hres` is unbounded in `a, b`.
-> So (c) is not closed: it is now blocked on **L2 alone, plus one measured chain**.
+> `K2`→`K3`→`K4` of the l1_reduction contract and those are measured, not derived; (ii) `V1`
+> is untouched.
+>
+> **WIRED (same day).** `SounioZDCollapse.lean` now `import`s `SounioZDFiberAntisym` and
+> discharges (★): `cdSigma_eq` bridges the two carried copies of the cocycle by structural
+> induction (identical bodies, different constants — nothing was defeq), and the discharged
+> instances `Phi_preserves_adj_star` / `Phi_reflects_adj_star` carry `p.1, q.1 < 2^m`, the
+> bound `star_forall` needs and the general `hres` lacked. `lake build SounioZDCollapse` is
+> green; the three ZD files are now `lean_lib` targets, so the discharge is checked by a build
+> rather than asserted in prose.
+>
+> The bound is not convenience. `C7` is a null control on it: `cdSigma` is total, so the
+> out-of-range question has an answer, and out of range **(★) is false** — 19 200 violations at
+> levels 4 and 5, against 0 in range. The general `hres`, which quantifies over unbounded
+> `a, b`, is therefore not merely unproven but **wrong**; no theorem could have discharged it,
+> and re-stating the general theorems with it would have been the mistake.
+> **So (c) is blocked on L2 alone** — one measured identity, `hdisc`.
 
 
 **Date:** 2026-07-31

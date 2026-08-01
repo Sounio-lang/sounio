@@ -289,9 +289,72 @@ def main():
           f"cycle space {'OK' if c6_any_gap else 'FAIL'} => 'all triangles +1' is NECESSARY but "
           f"NOT SUFFICIENT; the triangle route does not close L2")
 
+    # ---- C7  WHY THE WIRED DISCHARGE CARRIES BOUNDS -- a null control ----------------------
+    # SounioZDCollapse.lean now imports SounioZDFiberAntisym and discharges its (*) hypothesis
+    # with star_forall. The general `hres` in that file quantifies over UNBOUNDED a, b; the
+    # discharged instances Phi_preserves_adj_star / Phi_reflects_adj_star instead carry
+    # p.1, q.1 < 2^m. That looks like a convenience. It is not: OUT OF RANGE (*) IS FALSE, so
+    # the unbounded hypothesis could never have been discharged by anything.
+    #
+    # cdSigma is total -- for a >= 2^m the recursion still reduces via a % half -- so the
+    # question is meaningful and has a definite answer. Transcribed from the .lean, not from
+    # the sign table, because the sign table is only built in range.
+    import sys as _sys
+    from functools import lru_cache as _lru
+    _sys.setrecursionlimit(100000)
+
+    @_lru(maxsize=None)
+    def _cdSigma(a, b, n):
+        if n == 0:
+            return -1
+        if n == 1:
+            return 1 if (a == 0 or b == 0) else -1
+        if a == 0 or b == 0:
+            return 1
+        h = 1 << (n - 1)
+        if a < h and b < h:
+            return _cdSigma(a % h, b % h, n - 1)
+        if a < h and b >= h:
+            return _cdSigma(b % h, a % h, n - 1)
+        if a >= h and b < h:
+            return _cdSigma(a % h, 0, n - 1) if b % h == 0 else -_cdSigma(a % h, b % h, n - 1)
+        return -_cdSigma(0, a % h, n - 1) if b % h == 0 else _cdSigma(b % h, a % h, n - 1)
+
+    def _tau(j, x):
+        return x if (x & 1) == ((x >> j) & 1) else x ^ (1 | (1 << j))
+
+    def _Qg(L, a, b, m):
+        return (_cdSigma(a, b, m) * _cdSigma(a ^ L, b ^ L, m)
+                * _cdSigma(a, b ^ L, m) * _cdSigma(a ^ L, b, m))
+
+    c7_in = c7_out = c7_bad_in = c7_bad_out = 0
+    for m in (4, 5):
+        for Y in range(1, 1 << m):
+            lsb = (Y & -Y).bit_length() - 1
+            for j in range(lsb + 1):
+                tY = _tau(j, Y)
+                for a in range(1 << (m + 2)):
+                    for b in range(1 << (m + 2)):
+                        good = _Qg(Y, a, b, m) == _Qg(tY, _tau(j, a), _tau(j, b), m)
+                        if a < (1 << m) and b < (1 << m):
+                            c7_in += 1
+                            c7_bad_in += not good
+                        else:
+                            c7_out += 1
+                            c7_bad_out += not good
+    # The clause passes when (*) holds IN range and FAILS OUT of it. A zero out-of-range count
+    # would mean the bound is decorative and the general `hres` was dischargeable after all.
+    c7 = (c7_bad_in == 0) and (c7_bad_out > 0)
+    ok["C7"] = c7
+    print(f"C7_BOUND    (*) in range: {c7_bad_in}/{c7_in} violations; OUT of range "
+          f"(a or b >= 2^m, where cdSigma is still total): {c7_bad_out}/{c7_out} violations "
+          f"{'OK' if c7 else 'FAIL'} -- the bounds on Phi_preserves_adj_star are LOAD-BEARING, "
+          f"not convenience: the unbounded `hres` of the general theorem is FALSE for the "
+          f"fiber pair (Y, tau j Y), so nothing could ever discharge it")
+
     print("=" * 78)
     if all(ok.values()):
-        print("CD_TOWER_ZDC_VERDICT COLLAPSE_L1_IS_PARITY_FREE__L2_TRIANGLE_ROUTE_WALLED")
+        print("CD_TOWER_ZDC_VERDICT STAR_DISCHARGED_IN_LEAN__COLLAPSE_BLOCKED_ON_L2_ALONE")
         print("CD_TOWER_ZDC_NOTE (c)'s two sigma-lemmas are now located. L1 holds for EVERY seam, "
               "odd weight as well as even (C1), and fails for non-seam L (C2) -- so its real "
               "hypothesis is seam-ness and it does NOT see the parity the collapse law turns on. "

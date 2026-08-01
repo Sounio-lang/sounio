@@ -19,13 +19,23 @@
     `hres` needs, so it covers it. The Lean objects are pinned entrywise to the measured ones
     by K21a/b/c of the l1_reduction contract.
 
-    The two files are deliberately NOT wired. Two reasons, both real: this file carries its own
-    copy of `cdSigma` (a different constant, so a bridge lemma by induction is needed), and its
-    `hres` quantifies over UNBOUNDED a, b whereas `star_forall` requires a, b < 2^m -- so
-    discharging it changes the signature of `Phi_preserves_adj`. That is a separate rung.
+    WIRED 2026-08-01. This file now `import`s SounioZDFiberAntisym and DISCHARGES (*). The two
+    obstacles were real and both are paid for explicitly, not waved away:
 
-    So of the two hypotheses below, ONE IS NOW A THEOREM elsewhere in the tree and one is not.
-    Read the header text below with that correction applied.
+      * this file carries its own copy of `cdSigma` -- identical body, DIFFERENT CONSTANT, so
+        nothing is defeq at a symbolic level. `cdSigma_eq` proves the two agree, by the same
+        structural induction the definition uses. (`tau` is not recursive; `tau_eq` is rfl.)
+      * `hres` here quantifies over UNBOUNDED a, b, where (*) says nothing. Rather than weaken
+        another lane's general theorem, the discharged instances are NEW theorems --
+        `Phi_preserves_adj_star` / `Phi_reflects_adj_star` -- carrying `p.1, q.1 < 2^m`. That
+        bound is LOAD-BEARING, not convenience: `cdSigma` is total, so the out-of-range
+        question is meaningful, and out of range (*) IS FALSE -- 19 200 violations at levels
+        4 and 5 (C7 of the collapse contract). The general `hres` is therefore not merely
+        unproven but WRONG, and nothing could ever have discharged it. In context the bound
+        costs nothing: the vertices of a level-m fiber are lo-labels < 2^m by construction.
+
+    So of the two hypotheses below, (*) IS DISCHARGED and L2 (`hdisc`) is not. The collapse law
+    is now blocked on L2 alone. Read the header text below with that correction applied.
 
   What this file does NOT prove: either identity. As written in 2026-07-31, both were measured:
     (*)          `Q Y a b = Q (τY) (τa) (τb)` for seam Y   -- levels 5..8, 0 violations
@@ -47,6 +57,8 @@
   Axioms: [propext, Quot.sound] / [propext, Classical.choice, Quot.sound]. No `sorry`, no
   `native_decide`. Verify with `#print axioms` -- `grep error` is not sufficient.
 -/
+
+import SounioZDFiberAntisym
 
 namespace SounioZDCollapse
 
@@ -177,9 +189,9 @@ theorem sign_build {u v w z es ef : Int} (hes : es * es = 1)
 then `Phi` carries adjacency in the seam fiber to adjacency in the Fano fiber, and back. That
 two-way statement is the content of the parity-collapse law.
 
-NEITHER HYPOTHESIS IS PROVEN HERE. `hdisc` (L2) is measured; `hres` -- which is (*) -- is
-PROVEN forall n as SounioZDFiberAntisym.star_forall, in a sibling file this one does not import.
-See the file header.
+NEITHER HYPOTHESIS IS PROVEN HERE -- this is the GENERAL implication, kept with both free.
+For the instance with (*) DISCHARGED, see `Phi_preserves_adj_star` / `Phi_reflects_adj_star`
+below, where only `hdisc` (L2) remains an assumption.
 -/
 theorem Phi_preserves_adj
     (Ls Lf j m : Nat) (lam : Nat -> Int)
@@ -214,6 +226,91 @@ theorem Phi_reflects_adj
     rw [hsq, Int.mul_one] at e2
     exact e2
   have hs' : lam p.1 * p.2 * (lam q.1 * q.2) = lam p.1 * lam q.1 * eps Ls p.1 q.1 m := by
+    rw [← hf]; exact hs
+  exact sign_cancel hu hv hs'
+
+/-! ## (*) DISCHARGED — the bridge to `SounioZDFiberAntisym`
+
+This file was written with `hres` as a hypothesis because (*) was measured, not proven. It is
+proven now (`SounioZDFiberAntisym.star_forall`, 256bdbda4). Wiring it in costs three bridge
+lemmas, because this file carries its own copies of `cdSigma` and `tau`: identical bodies, but
+DIFFERENT CONSTANTS, so nothing is defeq for a symbolic level and the equality has to be proved
+by the same induction the definition uses.
+
+`tau` is not recursive, so its bridge is `rfl`. `cdSigma` is, so its is not. -/
+
+/-- The two carried copies of the cocycle agree. Structural induction on the level; the only
+    content is that the four branch bodies are the same up to the recursive call. -/
+theorem cdSigma_eq : ∀ (m a b : Nat), cdSigma a b m = SounioZDFiberAntisym.cdSigma a b m
+  | 0, _, _ => rfl
+  | 1, _, _ => rfl
+  | (n+2), a, b => by
+      unfold cdSigma SounioZDFiberAntisym.cdSigma
+      simp only [cdSigma_eq (n+1)]
+
+/-- `tau` is not recursive: the two copies are definitionally the same map. -/
+theorem tau_eq (j x : Nat) : tau j x = SounioZDFiberAntisym.tau j x := rfl
+
+/-- This file's `Q` (as `P1 * P3`) and the sibling's `Qgen` (a flat four-fold product) are the
+    same number -- the association differs, nothing else. -/
+theorem Q_eq_Qgen (L a b m : Nat) : Q L a b m = SounioZDFiberAntisym.Qgen L a b m := by
+  unfold Q P1 P3 SounioZDFiberAntisym.Qgen
+  simp only [cdSigma_eq]
+  ac_rfl
+
+/-- **`hres` discharged.** For the fiber pair `(Y, tau j Y)` this is exactly (*), and (*) is a
+    theorem. The hypothesis `Y % 2^j = 0` is `j <= lsb Y`, which the intended `j = lsb Y`
+    satisfies; `a, b < 2^m` is the bound `star_forall` needs and this file's `hres` lacked. -/
+theorem res_tau_of_star (m j Y a b : Nat) (hY : Y < 2^m) (hY0 : Y ≠ 0) (hj : Y % 2^j = 0)
+    (ha : a < 2^m) (hb : b < 2^m) :
+    res (tau j Y) (tau j a) (tau j b) m ↔ res Y a b m := by
+  rw [res_iff_Q, res_iff_Q, Q_eq_Qgen, Q_eq_Qgen, tau_eq, tau_eq, tau_eq,
+      ← SounioZDFiberAntisym.star_forall m j Y a b hY hY0 hj ha hb]
+
+/-! ### The collapse law with (*) discharged
+
+`Phi_preserves_adj` / `Phi_reflects_adj` above are unchanged -- they are the general
+implication and another lane may want them with both hypotheses free. These two are the
+instance that matters: the seam fiber `Y`, its partner `tau j Y`, and **`hdisc` (L2) as the
+only remaining assumption.**
+
+The bounds `hp`, `hq` are the price of the wiring and are not a weakening in context: the
+vertices of the annihilation graph on a level-`m` fiber are lo-labels `< 2^m` by construction.
+This is why the general theorems could not simply be re-stated -- their `hres` quantifies over
+unbounded `a, b`, where (*) says nothing. -/
+
+theorem Phi_preserves_adj_star (Y j m : Nat) (lam : Nat → Int)
+    (hY : Y < 2^m) (hY0 : Y ≠ 0) (hj : Y % 2^j = 0)
+    (hdisc : ∀ a b, eps (tau j Y) (tau j a) (tau j b) m * eps Y a b m = lam a * lam b)
+    (p q : Vtx) (hp : p.1 < 2^m) (hq : q.1 < 2^m) (h : adj Y m p q) :
+    adj (tau j Y) m (Phi j lam p) (Phi j lam q) := by
+  obtain ⟨hr, hs⟩ := h
+  refine ⟨(res_tau_of_star m j Y p.1 q.1 hY hY0 hj hp hq).mpr hr, ?_⟩
+  exact sign_build (eps_sq Y p.1 q.1 m) hs (hdisc p.1 q.1)
+
+theorem Phi_reflects_adj_star (Y j m : Nat) (lam : Nat → Int)
+    (hlam : ∀ x, lam x = 1 ∨ lam x = -1)
+    (hY : Y < 2^m) (hY0 : Y ≠ 0) (hj : Y % 2^j = 0)
+    (hdisc : ∀ a b, eps (tau j Y) (tau j a) (tau j b) m * eps Y a b m = lam a * lam b)
+    (p q : Vtx) (hp : p.1 < 2^m) (hq : q.1 < 2^m)
+    (h : adj (tau j Y) m (Phi j lam p) (Phi j lam q)) :
+    adj Y m p q := by
+  obtain ⟨hr, hs⟩ := h
+  refine ⟨(res_tau_of_star m j Y p.1 q.1 hY hY0 hj hp hq).mp hr, ?_⟩
+  have hu : lam p.1 * lam p.1 = 1 := by rcases hlam p.1 with h1 | h1 <;> rw [h1] <;> decide
+  have hv : lam q.1 * lam q.1 = 1 := by rcases hlam q.1 with h1 | h1 <;> rw [h1] <;> decide
+  have hsq : eps Y p.1 q.1 m * eps Y p.1 q.1 m = 1 := eps_sq Y p.1 q.1 m
+  have hd := hdisc p.1 q.1
+  have hf : eps (tau j Y) (tau j p.1) (tau j q.1) m = lam p.1 * lam q.1 * eps Y p.1 q.1 m := by
+    have e2 : eps (tau j Y) (tau j p.1) (tau j q.1) m * (eps Y p.1 q.1 m * eps Y p.1 q.1 m)
+            = lam p.1 * lam q.1 * eps Y p.1 q.1 m := by
+      calc eps (tau j Y) (tau j p.1) (tau j q.1) m * (eps Y p.1 q.1 m * eps Y p.1 q.1 m)
+          = (eps (tau j Y) (tau j p.1) (tau j q.1) m * eps Y p.1 q.1 m) * eps Y p.1 q.1 m := by
+            ac_rfl
+        _ = lam p.1 * lam q.1 * eps Y p.1 q.1 m := by rw [hd]
+    rw [hsq, Int.mul_one] at e2
+    exact e2
+  have hs' : lam p.1 * p.2 * (lam q.1 * q.2) = lam p.1 * lam q.1 * eps Y p.1 q.1 m := by
     rw [← hf]; exact hs
   exact sign_cancel hu hv hs'
 

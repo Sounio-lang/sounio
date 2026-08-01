@@ -713,3 +713,17 @@ lean_lib «SounioFoMultimodFragment» where
 
 -- Oral Css residual §5.4 closeout: docs/research/fo_pk_residual4_oral_css_closeout_2026-07-31.md
 -- Stack gate: scripts/ci/fo_residual4_stack_gate.sh → ORAL_CSS_RESIDUAL4_CLOSED
+
+-- CD-tower ZD fibers, the (★) lane (2026-07-31/08-01). SounioZDCollapse IMPORTS
+-- SounioZDFiberAntisym: the collapse law's `hres` hypothesis is discharged by `star_forall`,
+-- so the two must build together or the discharge is not checked.
+-- Companions: scripts/research/cd_tower_zd_fiber_{antisymmetry_lemma,l1_reduction,
+-- l2_switching,v1_reduction,collapse_l1l2}_contract.py
+@[default_target]
+lean_lib «SounioZDFiberAntisym» where
+
+@[default_target]
+lean_lib «SounioZDChi» where
+
+@[default_target]
+lean_lib «SounioZDCollapse» where

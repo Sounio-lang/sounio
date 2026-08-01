@@ -168,9 +168,11 @@ makes the target *easier*, not harder.
 - (c) as a whole is **not** closed: **L2 remains where the previous rung left it**, with its
   triangle route walled. What changed is that `SounioZDCollapse.lean`'s two hypotheses are no
   longer symmetric — one of them, `hres`, IS (★) and is now a theorem in the sibling file; the
-  other, `hdisc` (L2), is still measured. The two files are **not wired together**: the Collapse
-  file carries its own copy of `cdSigma`, and its `hres` quantifies over unbounded `a, b` while
-  `star_forall` needs `a, b < 2^m`. Bridging them is a separate rung, deliberately not done here.
+  other, `hdisc` (L2), is still measured. **The two files are now wired** (`import
+  SounioZDFiberAntisym`; `lake build SounioZDCollapse` green): `cdSigma_eq` bridges the two
+  carried copies of the cocycle by induction, and the discharged instances
+  `Phi_preserves_adj_star` / `Phi_reflects_adj_star` carry the bounds `p.1, q.1 < 2^m` that
+  `star_forall` needs and the general `hres` lacked. **(c) is blocked on L2 alone.**
 - **V1 itself is untouched.** `#spectra = 3·2^{n−5}` still needs (d), and (d) needs both a
   closed form and an ∀n injectivity proof.
 
