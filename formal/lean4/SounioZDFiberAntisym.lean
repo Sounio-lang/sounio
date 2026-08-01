@@ -1995,7 +1995,68 @@ theorem sw_eq_tau (x j : Nat) : sw x j = tau j x := by
     rw [hmask, hc0, hcj]
     by_cases h : (x &&& 1) = ((x >>> j) &&& 1) <;> simp [h]
 
+/-! ## The generic branch: the sixteen reductions under one induction hypothesis
+
+Each case applies its reduction lemma on BOTH sides -- `tau_seam` guarantees the two land in the
+same quadrant, so the same lemma applies -- and then closes on the induction hypothesis. The
+`Y`-high rows land on `Q'`, which `star'_of_star` supplies from the same hypothesis: this is
+where the collapse of the mutual induction pays off. -/
+
+/-- Generic, `Y` below the seam, both arguments lower. No side conditions. -/
+theorem star_gen_low_ll (m j W a b : Nat) (hj : j < m+1) (hW : W < 2^(m+1))
+    (ha : a < 2^(m+1)) (hb : b < 2^(m+1))
+    (IH : Qgen W a b (m+1) = Qgen (tau j W) (tau j a) (tau j b) (m+1)) :
+    Qgen W a b (m+2) = Qgen (tau j W) (tau j a) (tau j b) (m+2) := by
+  rw [Qred_low_ll m W a b hW ha hb,
+      Qred_low_ll m (tau j W) (tau j a) (tau j b)
+        (tau_lt j (m+1) W hj hW) (tau_lt j (m+1) a hj ha) (tau_lt j (m+1) b hj hb)]
+  exact IH
+
+/-- Generic, `Y` below the seam, `b` upper. No side conditions; note the induction hypothesis is
+    needed at the SWAPPED pair `(v, a)`, which is what the reduction delivers. -/
+theorem star_gen_low_lu (m j W a v : Nat) (hj : j < m+1) (hW : W < 2^(m+1))
+    (ha : a < 2^(m+1)) (hv : v < 2^(m+1))
+    (IH : Qgen W v a (m+1) = Qgen (tau j W) (tau j v) (tau j a) (m+1)) :
+    Qgen W a (v + 2^(m+1)) (m+2)
+      = Qgen (tau j W) (tau j a) (tau j (v + 2^(m+1))) (m+2) := by
+  rw [tau_seam j m v hj hv,
+      Qred_low_lu m W a v hW ha hv,
+      Qred_low_lu m (tau j W) (tau j a) (tau j v)
+        (tau_lt j (m+1) W hj hW) (tau_lt j (m+1) a hj ha) (tau_lt j (m+1) v hj hv)]
+  exact IH
+
+/-- Generic, `Y` below the seam, `a` upper. Needs `b ≠ 0`, `b ⊕ W ≠ 0`; `tau` preserves both. -/
+theorem star_gen_low_ul (m j W u b : Nat) (hj : j < m+1) (hW : W < 2^(m+1))
+    (hu : u < 2^(m+1)) (hb : b < 2^(m+1)) (hb0 : b ≠ 0) (hbW : b ^^^ W ≠ 0)
+    (IH : Qgen W u b (m+1) = Qgen (tau j W) (tau j u) (tau j b) (m+1)) :
+    Qgen W (u + 2^(m+1)) b (m+2)
+      = Qgen (tau j W) (tau j (u + 2^(m+1))) (tau j b) (m+2) := by
+  have htb0 : tau j b ≠ 0 := fun h => hb0 (tau_inj j b 0 (by rw [h, tau_zero]))
+  have htbW : tau j b ^^^ tau j W ≠ 0 := by
+    rw [← tau_xor]; exact fun h => hbW (tau_inj j (b ^^^ W) 0 (by rw [h, tau_zero]))
+  rw [tau_seam j m u hj hu,
+      Qred_low_ul m W u b hW hu hb hb0 hbW,
+      Qred_low_ul m (tau j W) (tau j u) (tau j b)
+        (tau_lt j (m+1) W hj hW) (tau_lt j (m+1) u hj hu) (tau_lt j (m+1) b hj hb) htb0 htbW]
+  exact IH
+
+/-- Generic, `Y` below the seam, both arguments upper. -/
+theorem star_gen_low_uu (m j W u v : Nat) (hj : j < m+1) (hW : W < 2^(m+1))
+    (hu : u < 2^(m+1)) (hv : v < 2^(m+1)) (hv0 : v ≠ 0) (hvW : v ^^^ W ≠ 0)
+    (IH : Qgen W v u (m+1) = Qgen (tau j W) (tau j v) (tau j u) (m+1)) :
+    Qgen W (u + 2^(m+1)) (v + 2^(m+1)) (m+2)
+      = Qgen (tau j W) (tau j (u + 2^(m+1))) (tau j (v + 2^(m+1))) (m+2) := by
+  have htv0 : tau j v ≠ 0 := fun h => hv0 (tau_inj j v 0 (by rw [h, tau_zero]))
+  have htvW : tau j v ^^^ tau j W ≠ 0 := by
+    rw [← tau_xor]; exact fun h => hvW (tau_inj j (v ^^^ W) 0 (by rw [h, tau_zero]))
+  rw [tau_seam j m u hj hu, tau_seam j m v hj hv,
+      Qred_low_uu m W u v hW hu hv hv0 hvW,
+      Qred_low_uu m (tau j W) (tau j u) (tau j v)
+        (tau_lt j (m+1) W hj hW) (tau_lt j (m+1) u hj hu) (tau_lt j (m+1) v hj hv) htv0 htvW]
+  exact IH
+
 end SounioZDFiberAntisym
+
 
 
 
