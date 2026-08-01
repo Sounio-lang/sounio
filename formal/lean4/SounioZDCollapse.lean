@@ -8,9 +8,29 @@
   i.e. the two identities the numerical rungs of 2026-07-31 isolated are TOGETHER sufficient for
   the collapse law. They enter as explicit hypotheses; the implication is the theorem.
 
-  What this file does NOT prove: either identity. Both are measured, not derived:
+  UPDATE 2026-08-01 -- (*) IS NO LONGER MEASURED. It is proven, for every level, as
+    `SounioZDFiberAntisym.star_forall` (formal/lean4/SounioZDFiberAntisym.lean, commit
+    256bdbda4), kernel-checked, axioms [propext, Classical.choice, Quot.sound], no sorryAx:
+
+        star_forall : Y < 2^m -> Y != 0 -> Y % 2^j = 0 -> a < 2^m -> b < 2^m ->
+                      Qgen Y a b m = Qgen (tau j Y) (tau j a) (tau j b) m
+
+    and its hypothesis `Y % 2^j = 0` (j <= lsb Y) is WEAKER than the `j = lsb Y` this file's
+    `hres` needs, so it covers it. The Lean objects are pinned entrywise to the measured ones
+    by K21a/b/c of the l1_reduction contract.
+
+    The two files are deliberately NOT wired. Two reasons, both real: this file carries its own
+    copy of `cdSigma` (a different constant, so a bridge lemma by induction is needed), and its
+    `hres` quantifies over UNBOUNDED a, b whereas `star_forall` requires a, b < 2^m -- so
+    discharging it changes the signature of `Phi_preserves_adj`. That is a separate rung.
+
+    So of the two hypotheses below, ONE IS NOW A THEOREM elsewhere in the tree and one is not.
+    Read the header text below with that correction applied.
+
+  What this file does NOT prove: either identity. As written in 2026-07-31, both were measured:
     (*)          `Q Y a b = Q (τY) (τa) (τb)` for seam Y   -- levels 5..8, 0 violations
                  (scripts/research/cd_tower_zd_fiber_l1_reduction_contract.py, K1)
+                 ** SUPERSEDED: now proven forall n, see the UPDATE above **
     (L2-closed)  `disc a b = λ a * λ b` with λ a = ±(-1)^(p j a), p j = parity of bits below j
                  -- all even-weight seams, n = 6..9, 0 violations
                  (scripts/research/cd_tower_zd_fiber_l2_switching_contract.py, M1/M3)
@@ -157,7 +177,9 @@ theorem sign_build {u v w z es ef : Int} (hes : es * es = 1)
 then `Phi` carries adjacency in the seam fiber to adjacency in the Fano fiber, and back. That
 two-way statement is the content of the parity-collapse law.
 
-NEITHER HYPOTHESIS IS PROVEN HERE; both are measured. See the file header.
+NEITHER HYPOTHESIS IS PROVEN HERE. `hdisc` (L2) is measured; `hres` -- which is (*) -- is
+PROVEN forall n as SounioZDFiberAntisym.star_forall, in a sibling file this one does not import.
+See the file header.
 -/
 theorem Phi_preserves_adj
     (Ls Lf j m : Nat) (lam : Nat -> Int)

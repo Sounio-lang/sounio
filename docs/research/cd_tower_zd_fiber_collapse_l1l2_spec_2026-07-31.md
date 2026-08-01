@@ -15,6 +15,16 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.cd-to
 
 # CD-tower ZD fibers — attacking (c): L1 is parity-free, and the L2 triangle route is walled
 
+> **UPDATE 2026-08-01 — L1's replacement (★) is now PROVEN ∀n.**
+> `SounioZDFiberAntisym.star_forall` (`256bdbda4`), kernel-checked, no `sorryAx`. Of this rung's
+> two σ-lemmas, **L1's reduction target is closed and L2 is not.** Two cautions that the
+> headline does not carry: (i) L1 itself is *not* proven — the chain from L1 to (★) is
+> `K2`→`K3`→`K4` of the l1_reduction contract and those are measured, not derived; (ii) the
+> `SounioZDCollapse.lean` implication still takes (★) as a *hypothesis* — the files are not
+> wired, because that file carries its own `cdSigma` and its `hres` is unbounded in `a, b`.
+> So (c) is not closed: it is now blocked on **L2 alone, plus one measured chain**.
+
+
 **Date:** 2026-07-31
 **Orthography:** EN-UK
 **Status:** `EXECUTABLE` — `COLLAPSE_L1_IS_PARITY_FREE__L2_TRIANGLE_ROUTE_WALLED`

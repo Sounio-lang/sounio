@@ -642,24 +642,109 @@ def main():
           f"Qgen_H_diff_low_any (+ coset) -- PROVEN forall n. Residual: a^b=H with Y above "
           f"the seam; then Q' pattern and the induction")
 
+    # ---- K21 PARITY + a NEW prediction of the Lean theorem --------------------------------
+    # (*) is now Lean-proven (star_forall, formal/lean4/SounioZDFiberAntisym.lean, 256bdbda4).
+    # That makes it a claim about a LEAN object; this clause pins that object to the one
+    # measured here, and then tests a prediction the Lean statement makes that was NEVER
+    # measured. K7 is why this clause exists: a mismatched tau in this lane already produced a
+    # wrong conclusion once, and a proof about the wrong tau would be worth nothing.
+
+    def swap_bits_independent(x, j):
+        """swap(bit 0, bit j) written the slow, obvious way -- no xor-mask trick."""
+        bits = [(x >> i) & 1 for i in range(j + 1)]
+        bits[0], bits[j] = bits[j], bits[0]
+        return (x >> (j + 1) << (j + 1)) | sum(b << i for i, b in enumerate(bits))
+
+    def tau_lean(j, x):
+        """Transcribed literally from SounioZDFiberAntisym.lean:
+             def tau (j x : Nat) : Nat :=
+               if (x &&& 1) == ((x >>> j) &&& 1) then x else x ^^^ (1 ||| (1 <<< j))"""
+        return x if (x & 1) == ((x >> j) & 1) else x ^ (1 | (1 << j))
+
+    def Qgen_lean(S, L, a, b):
+        """Transcribed literally from SounioZDFiberAntisym.lean:
+             Qgen L a b m = cdSigma a b * cdSigma (a^^^L) (b^^^L)
+                                        * cdSigma a (b^^^L) * cdSigma (a^^^L) b"""
+        return int(S[a, b] * S[a ^ L, b ^ L] * S[a, b ^ L] * S[a ^ L, b])
+
+    k21a = k21b = k21c = True
+    for m in (5, 6, 7):
+        M = 1 << m
+        for j in range(m):
+            for x in range(M):
+                if sw(x, j) != swap_bits_independent(x, j):
+                    k21a = False
+                if tau_lean(j, x) != sw(x, j):
+                    k21b = False
+    for m in (5, 6):
+        S, M = tabs[m], 1 << m
+        for L in range(M):
+            for a in range(M):
+                for b in range(M):
+                    if Qgen_lean(S, L, a, b) != Q(S, a, b, L):
+                        k21c = False
+    ok["K21a"], ok["K21b"], ok["K21c"] = k21a, k21b, k21c
+    print(f"K21a_SWAP   contract `sw` IS swap(bit 0, bit j) -- checked against an independent "
+          f"bit-permutation, levels 5,6,7, every j: {'OK' if k21a else 'FAIL'}")
+    print(f"K21b_TAU    Lean `tau j x` (transcribed from the .lean) == contract `sw(x,j)` "
+          f"entrywise, levels 5,6,7, every j: {'OK' if k21b else 'FAIL'}")
+    print(f"K21c_Q      Lean `Qgen L a b` (transcribed) == contract `Q(S,a,b,L)` entrywise, "
+          f"levels 5,6, ALL labels: {'OK' if k21c else 'FAIL'}")
+
+    # The NEW prediction. The Lean theorem is
+    #     star_forall : Y < 2^m -> Y != 0 -> Y % 2^j == 0 -> a,b < 2^m ->
+    #                   Qgen Y a b m = Qgen (tau j Y) (tau j a) (tau j b) m
+    # whose hypothesis is `j <= lsb Y`, NOT `j == lsb Y`. Every j strictly BELOW the lowest set
+    # bit is new territory -- there tau FIXES Y (both bits are 0) and the claim becomes a
+    # genuine invariance of Q under a swap that does not move the label. Nothing in K1/K8
+    # measured it. If the Lean object were not the measured object, this is where it shows.
+    k21d = True
+    k21d_tot = k21d_strict = 0
+    for m in (5, 6, 7):
+        S, M = tabs[m], 1 << m
+        for Y in range(1, M):
+            lsb = (Y & -Y).bit_length() - 1
+            for j in range(0, lsb + 1):
+                tY = sw(Y, j)
+                for a in range(M):
+                    for b in range(M):
+                        k21d_tot += 1
+                        if j < lsb:
+                            k21d_strict += 1
+                        if Q(S, sw(a, j), sw(b, j), tY) != Q(S, a, b, Y):
+                            k21d = False
+    ok["K21d"] = k21d
+    print(f"K21d_PRED   the Lean hypothesis `Y % 2^j == 0` (j <= lsb Y, NOT j == lsb Y) holds "
+          f"for EVERY Y != 0: {k21d_tot} checks, {k21d_strict} of them at j < lsb Y and so "
+          f"NEVER measured before: {'OK' if k21d else 'FAIL'}")
+
     print("=" * 78)
     if all(ok.values()):
-        print("CD_TOWER_ZDL1_VERDICT L1_REDUCED_TO_SEAM_TAU_EQUIVARIANCE_OF_Q__NOT_PROVEN")
-        print("CD_TOWER_ZDL1_NOTE L1 (fiber-bound, lo-labels, level n) is replaced by (*) "
-              "(fiber-free, FULL range, level n-1): for seam Y, Q_Y(a,b) = Q_tauY(tau a,tau b). "
-              "The chain is verified link by link -- the four branch reductions split the second "
-              "difference Q into two FIRST differences exactly (K2), whose tau-discrepancies "
-              "cancel (K3), equivalently the discrepancy of D1 is invariant under shifting the "
-              "second argument by Y (K4), which regrouped IS (*) (K1, levels 5..8). The "
-              "cancellation is the whole content: neither D1 nor D2 is tau-equivariant alone, "
-              "with IDENTICAL violation counts (K5). An attractive one-line derivation of K4 "
-              "from antisym is recorded as HAVING A GAP -- D2(c,y,Y) = D1(y,c,Y) fails on the "
-              "degenerate locus (K6). K7 only shows a MISMATCHED tau breaks it -- its first reading, that (*) is about seam labels, was WRONG -- and K8 shows (*) holds for EVERY Y != 0 with the matching j = lsb(Y), so the seam hypothesis is not needed at all. L1 IS NOT PROVEN and "
-              "neither is (*); but the BASE CASE of (*) — Q at a single-bit label = -1 — "
-              "is PROVEN forall n as Qgen_pow2 (K9), and its equivariant reading star_pow2 "
-              "closes (★) for every single-bit label (K15); multi-bit Y still needs the "
-              "mutual-step assembly (all 16 cases proven as K12–K14). (*) has the same induction shape "
-              "as A4_sub. Numerical certificate; D3")
+        print("CD_TOWER_ZDL1_VERDICT STAR_PROVEN_FORALL_N__L1_CHAIN_STILL_MEASURED")
+        print("CD_TOWER_ZDL1_NOTE (*) IS NOW PROVEN FOR EVERY LEVEL: star_forall in "
+              "formal/lean4/SounioZDFiberAntisym.lean, kernel-checked, axioms [propext, "
+              "Classical.choice, Quot.sound], no sorryAx. Its hypothesis is Y % 2^j == 0, i.e. "
+              "j <= lsb Y, so it is STRICTLY STRONGER than (*) as stated here (j == lsb Y); the "
+              "extra range is measured for the first time by K21d. The proof is: the missing "
+              "root Qgen_H_diff_hi_any (a^b = W with Y above the seam, K17's residual), then "
+              "star_step_hi, then a recursion on the level dispatching to star_degen, the gap "
+              "branches, the sixteen reduction lemmas, and Qgen_pow2 at the base. K21a/b/c PIN "
+              "the Lean objects to the measured ones -- `sw` really is swap(bit 0, bit j) "
+              "against an independent permutation, Lean `tau` and `Qgen` agree entrywise -- "
+              "which K7 makes non-optional: a mismatched tau already produced one wrong "
+              "conclusion in this lane. "
+              "WHAT IS *NOT* PROVEN: L1 ITSELF. L1 follows from (*) only through this "
+              "contract's own chain -- the four branch reductions split the second difference "
+              "Q into two FIRST differences (K2), whose tau-discrepancies cancel (K3), "
+              "equivalently K4, which regrouped is (*) (K1). K2/K3/K4 are MEASURED at levels "
+              "5..8, not derived. So the honest reading is: (*) proven forall n; L1 one "
+              "measured chain away. The cancellation is the whole content -- neither D1 nor D2 "
+              "is tau-equivariant alone, with IDENTICAL violation counts (K5). An attractive "
+              "one-line derivation of K4 from antisym is recorded as HAVING A GAP: "
+              "D2(c,y,Y) = D1(y,c,Y) fails on the degenerate locus (K6). K7 only shows a "
+              "MISMATCHED tau breaks it -- its first reading, that (*) is about seam labels, "
+              "was WRONG -- and K8 shows (*) needs no seam hypothesis. Numerical certificate "
+              "for the chain; D3. The (*) leg is Lean, not D3")
         return 0
     print("CD_TOWER_ZDL1_VERDICT INCOMPLETE  failing=" +
           ",".join(k for k, v in ok.items() if not v))

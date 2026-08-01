@@ -17,7 +17,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.cd-to
 
 **Date:** 2026-07-31
 **Orthography:** EN-UK
-**Status:** `EXECUTABLE` — `L1_REDUCED_TO_SEAM_TAU_EQUIVARIANCE_OF_Q__NOT_PROVEN`
+**Status:** `EXECUTABLE` — `STAR_PROVEN_FORALL_N__L1_CHAIN_STILL_MEASURED`
 **Parents:** `cd_tower_zd_fiber_collapse_l1l2_spec_2026-07-31.md`, `cd_tower_zd_fiber_antisymmetry_lemma_spec_2026-07-31.md`
 **Harness:** `scripts/research/cd_tower_zd_fiber_l1_reduction_contract.py`
 
@@ -25,7 +25,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.cd-to
 
 ## 0. The result
 
-**L1 is not proven.** It is replaced by a smaller, cleaner statement.
+**L1 is not proven. (★), the statement it was replaced by, now is — for every level.**
 
 The previous rung showed L1 is *parity-free* and that its real hypothesis is seam-ness. This one
 strips the rest of the fiber structure away:
@@ -39,6 +39,25 @@ square (and `res ⟺ Q = +1`, from the parent rung).
 Compared with L1, **(★)** has no fiber, no top bit, no restriction to lo-labels — and it sits
 **one level down**: L1 at level `n` with label `Y|H` reduces to (★) at level `n−1` with label `Y`.
 Measured at levels 5, 6, 7, 8 (`K1`), zero violations.
+
+**(★) is now a theorem, kernel-checked ∀n** — `star_forall` in
+`formal/lean4/SounioZDFiberAntisym.lean` (`256bdbda4`), axioms
+`[propext, Classical.choice, Quot.sound]`, no `sorryAx`:
+
+```lean
+theorem star_forall : ∀ (m j Y a b : Nat), Y < 2^m → Y ≠ 0 → Y % 2^j = 0 →
+    a < 2^m → b < 2^m → Qgen Y a b m = Qgen (tau j Y) (tau j a) (tau j b) m
+```
+
+Its hypothesis is `Y % 2^j = 0`, i.e. `j ≤ lsb Y` — **weaker than `j = lsb Y`**, so the theorem
+is strictly stronger than (★) as stated above (`j = lsb Y` satisfies it, since every bit below
+the lowest set bit is zero). The extra range is real content, not slack: for `j < lsb Y`, `τ`
+**fixes** `Y`, and the claim becomes an invariance of `Q` under a swap that does not move the
+label. `K21d` measures that range for the first time — 2 226 176 checks at `j < lsb Y`, zero
+violations.
+
+**This does NOT prove L1.** L1 follows from (★) only through this rung's own chain,
+`K2`→`K3`→`K4`→`K1`, and those links are *measured*, not derived. See §3.
 
 ---
 
@@ -60,6 +79,14 @@ No link is assumed.
 | `K18` | the gap lemma's central case `Q_Y(a, H) = −1`, both `Y` positions | 20 096 checks; **Lean-proven ∀n** (`Qgen_H_right_low/_hi`) |
 | `K19` | the six `= H` gap conditions have only **three roots**; `Qgen` is unconditionally symmetric | measured 5..7; the `b ⊕ Y = H` pair is **Lean-proven ∀n** |
 | `K20` | the other two roots: `Q_Y(H, b) = −1` and `Q_W(a, a⊕H) = −1` | checks at levels 6–7; **Lean-proven ∀n** (`Qgen_H_left_*`, `Qgen_H_diff_low_any`) |
+| `K21a` | the contract's `sw` really **is** `swap(bit 0, bit j)` — checked against an independent bit-permutation, not the xor-mask trick | levels 5,6,7, every `j` |
+| `K21b` | Lean's `tau`, transcribed from the `.lean`, equals the contract's `sw` entrywise | levels 5,6,7, every `j` |
+| `K21c` | Lean's `Qgen`, transcribed, equals the contract's `Q` entrywise | levels 5,6, **all** labels |
+| `K21d` | the theorem's own hypothesis `Y % 2^j = 0` holds for every `Y ≠ 0` | 4 596 736 checks, 2 226 176 never measured before |
+
+`K21` exists because of `K7`. (★) is now a claim about a **Lean** object; a mismatched `τ` in
+this lane already produced one wrong conclusion, and a proof about the wrong `τ` would be worth
+nothing. The pinning is entrywise, against the measured object, in both directions.
 
 with `D1_Y(a,b) = σ(a,b)σ(a⊕Y,b)`, `D2_Y(c,y) = σ(c,y)σ(c,y⊕Y)`, and
 `e1 = D1_{τY}(τa,τb)·D1_Y(a,b)`, `e2` the same for `D2`.
@@ -97,14 +124,18 @@ makes the target *easier*, not harder.
 
 ## 3. Not claimed
 
-- **L1 is not proven, and neither is (★).** This is a reduction, verified at four levels.
+- **L1 is not proven.** (★) is — see §0 — but the reduction *from* L1 *to* (★) is this rung's
+  own chain `K2`→`K3`→`K4`→`K1`, and **`K2`, `K3` and `K4` are measured at levels 5–8, not
+  derived.** The honest reading: **(★) proven ∀n; L1 one measured chain away.** Anyone quoting
+  "(★) is proven" as "L1 is proven" is skipping three clauses.
 - The `b = Y` boundary is excluded from `K2` and handled nowhere here. L1 itself was verified
   including it by the previous rung, so the gap is in this chain, not in L1's evidence.
-- **(★) is not Lean-proven in full for multi-bit labels.** The mutual inductive
-  step (16-case table, all reduction lemmas proven) is still not assembled.
-  What is kernel-checked ∀n in `formal/lean4/SounioZDFiberAntisym.lean`:
-  `A4_sub'`, `Qgen_coset_*`, all 16 `Qred`/`Q'red` rows, **base case**
-  `Qgen_pow2`, and **single-bit equivariance** `star_pow2`.
+- **(★) IS Lean-proven, including multi-bit labels.** The assembly closed in three pieces:
+  the last missing root `Qgen_H_diff_hi_any` (`Q = −1` when `a ⊕ b = W` with `Y` above the
+  seam — the residual `K17` named), then `star_step_hi`, then `star_forall`, a recursion on the
+  level dispatching to `star_degen`, the gap branches, the sixteen reduction lemmas, and
+  `Qgen_pow2` at the base. The descent strips `Y`'s top bit one level at a time and bottoms out
+  when only the lowest set bit remains.
 - **The base case IS formalised (K9 / `Qgen_pow2`).** `Q` at a *single-bit* label is
   identically `−1` for all `a,b` and all bit positions `k < m` — proven ∀n.
 - **(★) holds for every single-bit label (K15 / `star_pow2`).** Both sides of
@@ -126,15 +157,22 @@ makes the target *easier*, not harder.
   | branch | closes by | status |
   |---|---|---|
   | degenerate at `m+2` | `Qgen_degen`, both sides `−1` | **proven ∀n** |
-  | reduces to a degenerate tuple | the same constant `−1` | all three roots **proven ∀n** for `Y` below the seam (`b=H`, `a=H`, `a⊕b=H`) and both positions for the `=H` columns; residual is `a⊕b=H` with `Y` above the seam |
+  | reduces to a degenerate tuple | the same constant `−1` | **all roots proven ∀n**, both `Y` positions — the last one, `a⊕b=W` with `Y` above the seam, is `Qgen_H_diff_hi_any` |
   | otherwise | one of the sixteen reduction lemmas + the mutual IH | **proven ∀n** |
   | base case | `Qgen_pow2` | **proven ∀n** |
+  | the assembly | `star_step_low`, `star_step_hi`, `star_forall` | **proven ∀n** |
 
-- **Multi-bit non-degenerate assembly still open.** All 16 reduction cases are
-  proven (K12–K14); the gap roots are nearly closed (K18–K20). What remains is
-  `a⊕b=H` with `Y` high, the `Q'` pattern lemma, and wiring them under the mutual IH.
-- (c) as a whole is untouched: **L2 remains where the previous rung left it**, with its
-  triangle route walled.
+- **Multi-bit non-degenerate assembly CLOSED.** All 16 reduction cases (K12–K14), all gap
+  roots (K18–K21), and the recursion. The `Q'` pattern lemma is still not in Lean — it is not
+  needed, because `star'_of_star` derives the `Q'` half from the `Q` half.
+- (c) as a whole is **not** closed: **L2 remains where the previous rung left it**, with its
+  triangle route walled. What changed is that `SounioZDCollapse.lean`'s two hypotheses are no
+  longer symmetric — one of them, `hres`, IS (★) and is now a theorem in the sibling file; the
+  other, `hdisc` (L2), is still measured. The two files are **not wired together**: the Collapse
+  file carries its own copy of `cdSigma`, and its `hres` quantifies over unbounded `a, b` while
+  `star_forall` needs `a, b < 2^m`. Bridging them is a separate rung, deliberately not done here.
+- **V1 itself is untouched.** `#spectra = 3·2^{n−5}` still needs (d), and (d) needs both a
+  closed form and an ∀n injectivity proof.
 
 ---
 
