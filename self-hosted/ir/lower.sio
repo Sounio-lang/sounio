@@ -3252,6 +3252,37 @@ fn lowerer_mark_reg_array_elem_float_mut(lo: &! Lowerer, reg: i64) with Mut, Pan
     }
 }
 
+fn lowerer_struct_layout_idx_ref(lo: &Lowerer, type_name: Name) -> i64 with Mut, Panic, Div {
+    if type_name.len <= 0 { return -1 }
+    var si: i64 = 0
+    while si < (*(*lo).struct_layouts).count {
+        if ir_name_eq((*(*lo).struct_layouts).entries[si as usize].type_name, type_name) {
+            return si
+        }
+        si = si + 1
+    }
+    -1
+}
+
+fn lowerer_struct_literal_field_idx_ref(
+    lo: &Lowerer,
+    layout_idx: i64,
+    field_name: Name,
+    default_idx: i64
+) -> i64 with Mut, Panic, Div {
+    if layout_idx < 0 || layout_idx >= (*(*lo).struct_layouts).count {
+        return default_idx
+    }
+    var fi: i64 = 0
+    while fi < (*(*lo).struct_layouts).entries[layout_idx as usize].field_count {
+        if ir_name_eq((*(*lo).struct_layouts).entries[layout_idx as usize].fields[fi as usize].name, field_name) {
+            return (*(*lo).struct_layouts).entries[layout_idx as usize].fields[fi as usize].index
+        }
+        fi = fi + 1
+    }
+    default_idx
+}
+
 fn lowerer_first_arg_needs_hof_dispatch_ref(lo: &Lowerer, args: &Option<Box<ExprList>>) -> bool with Mut, Panic, Div, Alloc {
     match *args {
         Some(list) => {
@@ -3493,6 +3524,29 @@ fn lowerer_lower_expr_mut(
     lo: &! Lowerer,
     e: &Expr
 ) -> i64 with Mut, Panic, Div, Alloc, IO {
+    if (*e).kind == ExprKind::ExprIntLit || (*e).kind == ExprKind::ExprCharLit {
+        let reg = lowerer_fresh_reg_mut(lo)
+        lowerer_emit_mut(lo, ir_load_imm(reg, (*e).int_val))
+        return reg
+    }
+    if (*e).kind == ExprKind::ExprFloatLit {
+        let reg = lowerer_fresh_reg_mut(lo)
+        lowerer_emit_mut(lo, ir_load_imm(reg, f64_to_bits((*e).float_val)))
+        lowerer_emit_mut(lo, ir_mark_float_reg(reg))
+        return reg
+    }
+    if (*e).kind == ExprKind::ExprBoolTrue || (*e).kind == ExprKind::ExprBoolFalse {
+        let reg = lowerer_fresh_reg_mut(lo)
+        lowerer_emit_mut(lo, ir_load_bool(reg, (*e).kind == ExprKind::ExprBoolTrue))
+        return reg
+    }
+    if (*e).kind == ExprKind::ExprStringLit {
+        let lit_name = ir_normalize_string_literal_name((*e).name)
+        let idx = lowerer_intern_string_mut(lo, lit_name)
+        let reg = lowerer_fresh_reg_mut(lo)
+        lowerer_emit_mut(lo, ir_load_string(reg, idx, lit_name))
+        return reg
+    }
     if (*e).kind == ExprKind::ExprIdent {
         let local_reg = lowerer_lookup_simple_local_reg_ref(&(*lo), (*e).name)
         if local_reg >= 0 {
@@ -3562,6 +3616,33 @@ fn lowerer_lower_expr_mut(
         }
         if lower_live_diag_enabled() { print("lower_live: field_done\n") }
         return dst
+    }
+    if (*e).kind == ExprKind::ExprStructLit {
+        let struct_name = ir_path_first_name((*e).path)
+        let layout_idx = lowerer_struct_layout_idx_ref(&(*lo), struct_name)
+        if layout_idx >= 0 {
+            if lower_live_diag_enabled() { print("lower_live: struct_lit_begin\n") }
+            let field_count = count_struct_fields_ref(&(*e).fields)
+            let storage_bytes = if field_count <= 0 { 8 } else { field_count * 8 }
+            let dst = lowerer_fresh_reg_mut(lo)
+            lowerer_emit_mut(lo, ir_alloc(dst, storage_bytes))
+            var current = &(*e).fields
+            var default_idx: i64 = 0
+            while true {
+                match *current {
+                    Some(list) => {
+                        let field_idx = lowerer_struct_literal_field_idx_ref(&(*lo), layout_idx, (*list).head.name, default_idx)
+                        let value_reg = lowerer_lower_expr_mut(lo, &(*list).head.value)
+                        lowerer_emit_mut(lo, ir_field_set(dst, field_idx, value_reg, (*list).head.name))
+                        current = &(*list).tail
+                        default_idx = default_idx + 1
+                    }
+                    None => break,
+                }
+            }
+            if lower_live_diag_enabled() { print("lower_live: struct_lit_done\n") }
+            return dst
+        }
     }
     let pair = (*lo).lower_expr_ref(e)
     (*lo) = pair.0
