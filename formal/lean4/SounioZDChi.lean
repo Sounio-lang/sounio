@@ -227,15 +227,196 @@ theorem Qgen_pm (L a b m : Nat) : Qgen L a b m = 1 ∨ Qgen L a b m = -1 := by
     rcases cdSigma_pm m (a ^^^ L) b with h4 | h4 <;>
     rw [h1, h2, h3, h4] <;> decide
 
-/-
-  NEXT STEP, stated but not proven here: `Qgen L a b = Qgen L b a`, unconditionally. Writing
-  both orders out, the ratio is `chi(a,b) * chi(a⊕L,b⊕L) * chi(a,b⊕L) * chi(a⊕L,b)`, and by
-  `chi_char` each factor is `+1` unless its two arguments are distinct and nonzero. In every
-  configuration the `-1`s pair up -- checked by hand for all eight cases (L = 0; a = 0; b = 0;
-  a = L; b = L; a = b; a ⊕ b = L; none) -- so the product is `+1`. What blocks the Lean proof is
-  bookkeeping, not mathematics: the cases are not independent (`a = 0` and `a = L` exclude each
-  other when `L ≠ 0`, `a = b` and `a ⊕ b = L` likewise), and those dependencies are XOR facts
-  that neither `simp` nor `omega` discharges.
--/
+/-! ## The symmetry -/
+
+theorem xor_eq_zero_iff (x y : Nat) : x ^^^ y = 0 ↔ x = y := by
+  constructor
+  · intro h
+    have h2 : (x ^^^ y) ^^^ y = 0 ^^^ y := by rw [h]
+    rwa [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero, Nat.zero_xor] at h2
+  · intro h; rw [h, Nat.xor_self]
+
+theorem xor_right_cancel (x y L : Nat) : x ^^^ L = y ^^^ L ↔ x = y := by
+  constructor
+  · intro h
+    have h2 : (x ^^^ L) ^^^ L = (y ^^^ L) ^^^ L := by rw [h]
+    rwa [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero, Nat.xor_assoc, Nat.xor_self,
+         Nat.xor_zero] at h2
+  · intro h; rw [h]
+
+/-- **`Qgen` is symmetric in its two arguments, unconditionally.**
+
+    The ratio of the two orders is `chi(a,b)·chi(a⊕L,b⊕L)·chi(a,b⊕L)·chi(a⊕L,b)`, and by
+    `chi_char` each factor is `+1` unless its arguments are distinct and nonzero. In EVERY
+    configuration two of the four conditions coincide, so the product is a square. -/
+theorem Qgen_symm (L a b m : Nat) (hL : L < 2^m) (ha : a < 2^m) (hb : b < 2^m) :
+    Qgen L a b m = Qgen L b a m := by
+  have haL : a ^^^ L < 2^m := Nat.xor_lt_two_pow ha hL
+  have hbL : b ^^^ L < 2^m := Nat.xor_lt_two_pow hb hL
+  have key : Qgen L a b m * Qgen L b a m
+      = (cdSigma a b m * cdSigma b a m)
+        * (cdSigma (a ^^^ L) (b ^^^ L) m * cdSigma (b ^^^ L) (a ^^^ L) m)
+        * (cdSigma a (b ^^^ L) m * cdSigma (b ^^^ L) a m)
+        * (cdSigma (a ^^^ L) b m * cdSigma b (a ^^^ L) m) := by
+    unfold Qgen; ac_rfl
+  rw [chi_char m a b ha hb, chi_char m (a ^^^ L) (b ^^^ L) haL hbL,
+      chi_char m a (b ^^^ L) ha hbL, chi_char m (a ^^^ L) b haL hb] at key
+  have hprod : Qgen L a b m * Qgen L b a m = 1 := by
+    rw [key]
+    by_cases hA : a = 0
+    · -- P1, P3 hold by their first disjunct; P2 and P4 both reduce to L=0 ∨ b=0 ∨ b=L
+      subst hA
+      by_cases h : L = 0 ∨ b = 0 ∨ b = L
+      · have p2 : (0:Nat) ^^^ L = 0 ∨ b ^^^ L = 0 ∨ (0:Nat) ^^^ L = b ^^^ L := by
+          rcases h with h | h | h
+          · exact Or.inl (by rw [Nat.zero_xor, h])
+          · exact Or.inr (Or.inr (by rw [h]))
+          · exact Or.inr (Or.inl ((xor_eq_zero_iff b L).mpr h))
+        have p4 : (0:Nat) ^^^ L = 0 ∨ b = 0 ∨ (0:Nat) ^^^ L = b := by
+          rcases h with h | h | h
+          · exact Or.inl (by rw [Nat.zero_xor, h])
+          · exact Or.inr (Or.inl h)
+          · exact Or.inr (Or.inr (by rw [Nat.zero_xor, h]))
+        rw [if_pos (Or.inl rfl), if_pos p2, if_pos (Or.inl rfl), if_pos p4]; decide
+      · have p2 : ¬ ((0:Nat) ^^^ L = 0 ∨ b ^^^ L = 0 ∨ (0:Nat) ^^^ L = b ^^^ L) := by
+          rintro (g | g | g)
+          · exact h (Or.inl (by rwa [Nat.zero_xor] at g))
+          · exact h (Or.inr (Or.inr ((xor_eq_zero_iff b L).mp g)))
+          · exact h (Or.inr (Or.inl ((xor_right_cancel 0 b L).mp g).symm))
+        have p4 : ¬ ((0:Nat) ^^^ L = 0 ∨ b = 0 ∨ (0:Nat) ^^^ L = b) := by
+          rintro (g | g | g)
+          · exact h (Or.inl (by rwa [Nat.zero_xor] at g))
+          · exact h (Or.inr (Or.inl g))
+          · exact h (Or.inr (Or.inr (by rwa [Nat.zero_xor, eq_comm] at g)))
+        rw [if_pos (Or.inl rfl), if_neg p2, if_pos (Or.inl rfl), if_neg p4]; decide
+    · by_cases hB : b = 0
+      · subst hB
+        by_cases h : L = 0 ∨ a = 0 ∨ a = L
+        · have p2 : a ^^^ L = 0 ∨ (0:Nat) ^^^ L = 0 ∨ a ^^^ L = (0:Nat) ^^^ L := by
+            rcases h with h | h | h
+            · exact Or.inr (Or.inl (by rw [Nat.zero_xor, h]))
+            · exact Or.inr (Or.inr (by rw [h]))
+            · exact Or.inl ((xor_eq_zero_iff a L).mpr h)
+          have p3 : a = 0 ∨ (0:Nat) ^^^ L = 0 ∨ a = (0:Nat) ^^^ L := by
+            rcases h with h | h | h
+            · exact Or.inr (Or.inl (by rw [Nat.zero_xor, h]))
+            · exact Or.inl h
+            · exact Or.inr (Or.inr (by rw [Nat.zero_xor, h]))
+          rw [if_pos (Or.inr (Or.inl rfl)), if_pos p2, if_pos p3,
+              if_pos (Or.inr (Or.inl rfl))]; decide
+        · have p2 : ¬ (a ^^^ L = 0 ∨ (0:Nat) ^^^ L = 0 ∨ a ^^^ L = (0:Nat) ^^^ L) := by
+            rintro (g | g | g)
+            · exact h (Or.inr (Or.inr ((xor_eq_zero_iff a L).mp g)))
+            · exact h (Or.inl (by rwa [Nat.zero_xor] at g))
+            · exact h (Or.inr (Or.inl ((xor_right_cancel a 0 L).mp g)))
+          have p3 : ¬ (a = 0 ∨ (0:Nat) ^^^ L = 0 ∨ a = (0:Nat) ^^^ L) := by
+            rintro (g | g | g)
+            · exact h (Or.inr (Or.inl g))
+            · exact h (Or.inl (by rwa [Nat.zero_xor] at g))
+            · exact h (Or.inr (Or.inr (by rwa [Nat.zero_xor] at g)))
+          rw [if_pos (Or.inr (Or.inl rfl)), if_neg p2, if_neg p3,
+              if_pos (Or.inr (Or.inl rfl))]; decide
+      · by_cases hA' : a ^^^ L = 0
+        · -- a = L.  P2, P4 hold by their first disjunct; P1 and P3 both reduce to a = b
+          by_cases h : a = b
+          · have p3 : a = 0 ∨ b ^^^ L = 0 ∨ a = b ^^^ L :=
+              Or.inr (Or.inl (by rw [← h]; exact hA'))
+            rw [if_pos (Or.inr (Or.inr h)), if_pos (Or.inl hA'), if_pos p3,
+                if_pos (Or.inl hA')]; decide
+          · have p1 : ¬ (a = 0 ∨ b = 0 ∨ a = b) := by
+              rintro (g | g | g)
+              · exact hA g
+              · exact hB g
+              · exact h g
+            have p3 : ¬ (a = 0 ∨ b ^^^ L = 0 ∨ a = b ^^^ L) := by
+              rintro (g | g | g)
+              · exact hA g
+              · exact h (((xor_eq_zero_iff b L).mp g).trans ((xor_eq_zero_iff a L).mp hA').symm).symm
+              · exact hB (by
+                  have haL2 : a = L := (xor_eq_zero_iff a L).mp hA'
+                  rw [haL2] at g
+                  have h2 : b ^^^ L = 0 ^^^ L := by rw [Nat.zero_xor]; exact g.symm
+                  exact (xor_right_cancel b 0 L).mp h2)
+            rw [if_neg p1, if_pos (Or.inl hA'), if_neg p3, if_pos (Or.inl hA')]; decide
+        · by_cases hB' : b ^^^ L = 0
+          · -- b = L.  P2, P3 hold; P1 and P4 both reduce to a = b
+            by_cases h : a = b
+            · have p4 : a ^^^ L = 0 ∨ b = 0 ∨ a ^^^ L = b := Or.inl (by rw [h]; exact hB')
+              rw [if_pos (Or.inr (Or.inr h)), if_pos (Or.inr (Or.inl hB')),
+                  if_pos (Or.inr (Or.inl hB')), if_pos p4]; decide
+            · have p1 : ¬ (a = 0 ∨ b = 0 ∨ a = b) := by
+                rintro (g | g | g)
+                · exact hA g
+                · exact hB g
+                · exact h g
+              have p4 : ¬ (a ^^^ L = 0 ∨ b = 0 ∨ a ^^^ L = b) := by
+                rintro (g | g | g)
+                · exact hA' g
+                · exact hB g
+                · exact hA (by
+                    have hbL' : b = L := (xor_eq_zero_iff b L).mp hB'
+                    rw [hbL'] at g
+                    have h2 : a ^^^ L = 0 ^^^ L := by rw [Nat.zero_xor]; exact g
+                    exact (xor_right_cancel a 0 L).mp h2)
+              rw [if_neg p1, if_pos (Or.inr (Or.inl hB')), if_pos (Or.inr (Or.inl hB')),
+                  if_neg p4]; decide
+          · by_cases hE : a = b
+            · -- P1, P2 hold; P3 and P4 both reduce to L = 0
+              have p2 : a ^^^ L = 0 ∨ b ^^^ L = 0 ∨ a ^^^ L = b ^^^ L :=
+                Or.inr (Or.inr (by rw [hE]))
+              by_cases hL0 : L = 0
+              · subst hL0
+                rw [if_pos (Or.inr (Or.inr hE)), if_pos p2,
+                    if_pos (Or.inr (Or.inr (by rw [Nat.xor_zero]; exact hE))),
+                    if_pos (Or.inr (Or.inr (by rw [Nat.xor_zero]; exact hE)))]; decide
+              · have p3 : ¬ (a = 0 ∨ b ^^^ L = 0 ∨ a = b ^^^ L) := by
+                  rintro (g | g | g)
+                  · exact hA g
+                  · exact hB' g
+                  · exact hL0 (by
+                      rw [← hE] at g
+                      have h2 : a ^^^ a = (a ^^^ L) ^^^ a := by rw [← g]
+                      rw [Nat.xor_self, Nat.xor_comm a L, Nat.xor_assoc, Nat.xor_self,
+                          Nat.xor_zero] at h2
+                      exact h2.symm)
+                have p4 : ¬ (a ^^^ L = 0 ∨ b = 0 ∨ a ^^^ L = b) := by
+                  rintro (g | g | g)
+                  · exact hA' g
+                  · exact hB g
+                  · exact hL0 (by
+                      rw [← hE] at g
+                      have h2 : (a ^^^ L) ^^^ a = a ^^^ a := by rw [g]
+                      rw [Nat.xor_self, Nat.xor_comm a L, Nat.xor_assoc, Nat.xor_self,
+                          Nat.xor_zero] at h2
+                      exact h2)
+                rw [if_pos (Or.inr (Or.inr hE)), if_pos p2, if_neg p3, if_neg p4]; decide
+            · -- none of the five; P1 and P2 are both false, P3 and P4 agree
+              have p1 : ¬ (a = 0 ∨ b = 0 ∨ a = b) := by
+                rintro (g | g | g)
+                · exact hA g
+                · exact hB g
+                · exact hE g
+              have p2 : ¬ (a ^^^ L = 0 ∨ b ^^^ L = 0 ∨ a ^^^ L = b ^^^ L) := by
+                rintro (g | g | g)
+                · exact hA' g
+                · exact hB' g
+                · exact hE ((xor_right_cancel a b L).mp g)
+              by_cases hF : a ^^^ L = b
+              · have p3 : a = 0 ∨ b ^^^ L = 0 ∨ a = b ^^^ L :=
+                  Or.inr (Or.inr (by rw [← hF, Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]))
+                rw [if_neg p1, if_neg p2, if_pos p3, if_pos (Or.inr (Or.inr hF))]; decide
+              · have p3 : ¬ (a = 0 ∨ b ^^^ L = 0 ∨ a = b ^^^ L) := by
+                  rintro (g | g | g)
+                  · exact hA g
+                  · exact hB' g
+                  · exact hF (by rw [g, Nat.xor_assoc, Nat.xor_self, Nat.xor_zero])
+                have p4 : ¬ (a ^^^ L = 0 ∨ b = 0 ∨ a ^^^ L = b) := by
+                  rintro (g | g | g)
+                  · exact hA' g
+                  · exact hB g
+                  · exact hF g
+                rw [if_neg p1, if_neg p2, if_neg p3, if_neg p4]; decide
+  rcases Qgen_pm L a b m with h1 | h1 <;> rcases Qgen_pm L b a m with h2 | h2 <;>
+    rw [h1, h2] at hprod ⊢ <;> revert hprod <;> decide
 
 end SounioZDChi
