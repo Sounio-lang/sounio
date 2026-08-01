@@ -419,4 +419,27 @@ theorem Qgen_symm (L a b m : Nat) (hL : L < 2^m) (ha : a < 2^m) (hb : b < 2^m) :
   rcases Qgen_pm L a b m with h1 | h1 <;> rcases Qgen_pm L b a m with h2 | h2 <;>
     rw [h1, h2] at hprod ⊢ <;> revert hprod <;> decide
 
+/-! ## The bit-swap `tau`, and the properties the assembly needs
+
+`tau j` swaps bit 0 with bit `j`. It is used throughout `(*)`, but NO lemma about it exists
+anywhere in the tree -- this is the prerequisite layer the assembly is missing. -/
+
+/-- `tau j` swaps bit `0` and bit `j`: it xors by `1 ||| 2^j` exactly when the two bits differ. -/
+def tau (j x : Nat) : Nat := if (x &&& 1) == ((x >>> j) &&& 1) then x else x ^^^ (1 ||| (1 <<< j))
+
+theorem tau_zero (j : Nat) : tau j 0 = 0 := by
+  unfold tau; simp
+
+/-- `tau` never leaves the level: it only permutes bits below `m`. -/
+theorem tau_lt (j m x : Nat) (hj : j < m) (hx : x < 2^m) : tau j x < 2^m := by
+  have h1 : (1:Nat) < 2^m := by
+    have h := Nat.one_lt_two_pow_iff (n := m); omega
+  have h2 : (1:Nat) <<< j < 2^m := by
+    rw [Nat.shiftLeft_eq, Nat.one_mul]
+    exact Nat.pow_lt_pow_right (by omega) hj
+  unfold tau
+  split
+  · exact hx
+  · exact Nat.xor_lt_two_pow hx (Nat.or_lt_two_pow h1 h2)
+
 end SounioZDChi
