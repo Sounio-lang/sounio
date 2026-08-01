@@ -31,6 +31,13 @@
 //      (15-step horizon vs the independent replica, km_law_predict.py),
 //      and tau-monotonicity across the 15/16-step bracket of the 285 d
 //      field trial.
+//   8. the FIELD CALIBRATION path (2026-08-01, additive): the inverse
+//      bisection (the network itself reproduces the observed Lehen
+//      extent at k = 0.765606450093, (a = 3e-6, salt = 0.70) corner),
+//      the Lobodice-at-40 inverse, the Tyne unit-bridge arithmetic,
+//      the cardinal scan at Tyne's 50.7 C warm edge, and the
+//      field-calibrated k_m ordering + Tyne consistency check
+//      (km_law_predict.py predictions pinned first).
 //
 // lean_single engine (Madaros "visibility preflight failed" on any
 // chemistry::kinetics import is a pre-existing blocker, #1584).
@@ -86,6 +93,39 @@ fn run40_field(nu: MatNM, steps: i64) -> ([f64; 8], [f64; 8]) with Mut, Div, Pan
 
 fn fs_of(l30_pct: f64, tau: f64) -> f64 {
     1.0 - l30_pct * tau / 3000.0
+}
+
+// FIELD-CALIBRATION replica at 313.15 K (40 C) with a FREE ks[0] = km,
+// at the (a = 3.0e-6, salt = 0.70) corner — the corner the demo's
+// inverse-envelope picks for the Lehen k_lo edge (highest network CO2
+// supply -> smallest k needed). Literals: the run40_field a = 1e-5
+// literals x 0.3 (ks[1..4] are linear in a); h2 charge at salt 0.70.
+// Scalar loss out directly (lean_single E6: no tuple held across calls).
+fn loss40_k(nu: MatNM, km: f64, steps: i64) -> f64 with Mut, Div, Panic {
+    let ks: [f64; 8] = [km, 5.706559523328e-7, 7.316194741176e-3, 2.1348270442347e-5, 3.630471258381, 0.0, 0.0, 0.0]
+    let uks: [f64; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let iv: [f64; 8] = [8.19e-3, 0.0, 1.0, 1.0e-3, 5.0e-4, 5.0e-2, 0.0, 0.0]
+    let isv: [f64; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let (ov, ou) = simulate_general_epistemic(&iv, &isv, &ks, &uks, nu, 6 as i64, 5 as i64, 0.05, steps)
+    let h2 = ov[0]
+    100.0 * (1.0 - h2 / 8.19e-3)
+}
+
+// inverse calibration bisection on the replica (mirrors the demo's
+// field_invert exactly): the km that makes the network reproduce
+// `target` % H2 loss over `steps` 0.05-yr steps at 40 C.
+fn field_invert_rep(nu: MatNM, target: f64, steps: i64) -> f64 with Mut, Div, Panic {
+    var klo = 1.0e-12
+    var khi = 100.0
+    var it: i64 = 0
+    while it < 80 {
+        let kmid = 0.5 * (klo + khi)
+        let lm = loss40_k(nu, kmid, steps)
+        if lm < target { klo = kmid }
+        if lm >= target { khi = kmid }
+        it = it + 1
+    }
+    0.5 * (klo + khi)
 }
 
 // ─── CTMI law path (verbatim copies from site_screening.sio) ───
@@ -352,6 +392,35 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     let h2_f16 = ovg[0]
     if absf(h2_f16 - 0.0099422379148) > 1.0e-7 { fails = fails + 1 }
     if h2_f16 >= h2_f15 { fails = fails + 1 }
+
+    // 8. FIELD CALIBRATION path (predictions pinned from
+    //    km_law_predict.py BEFORE the demo run):
+    //    inverse bisection reproduces the observed Lehen extent at the
+    //    (a = 3e-6, salt = 0.70) corner, 3.0 % over 16 steps:
+    let k_inv = field_invert_rep(nu, 3.0, 16 as i64)
+    if absf(k_inv - 0.765606450093) > 1.0e-6 { fails = fails + 1 }
+    let loss_i = loss40_k(nu, k_inv, 16 as i64)
+    if absf(loss_i - 3.0) > 1.0e-6 { fails = fails + 1 }
+    //    Lobodice extent at the same corner (17.0 % over 12 steps):
+    let k_lob = field_invert_rep(nu, 17.0, 12 as i64)
+    if absf(k_lob - 6.315834768561) > 1.0e-5 { fails = fails + 1 }
+    //    Tyne unit-bridge arithmetic (4 H2 : 1 CH4; rate /
+    //    ([H2] x [CO2] x 1e6), salt corners):
+    let tyne_k_lo = 292.0 / (7.8e-4 * 15.0 * 1.00 * 0.05 * 1.0e6)
+    if absf(tyne_k_lo - 0.499145299145) > 1.0e-12 { fails = fails + 1 }
+    let tyne_k_hi = 436.0 / (7.8e-4 * 15.0 * 0.70 * 0.05 * 1.0e6)
+    if absf(tyne_k_hi - 1.064713064713) > 1.0e-12 { fails = fails + 1 }
+    //    cardinal scan at Tyne's 50.7 C warm edge:
+    let (s57_lo, s57_hi) = ctmi_scan(50.7)
+    if absf(s57_lo - 0.173016604478) > 1.0e-9 { fails = fails + 1 }
+    if absf(s57_hi - 0.757212864644) > 1.0e-12 { fails = fails + 1 }
+    //    field-calibrated k_m ordering: LO edge > 100x the falsified
+    //    Bo-2021 hi edge (0.0187), and the Tyne minimal k_m lies at or
+    //    below the LO edge (the two in-situ evidences are consistent):
+    let kmf_lo = k_inv / 0.375
+    if kmf_lo <= 100.0 * 0.0187 { fails = fails + 1 }
+    let tyne_min = tyne_k_lo / s57_hi
+    if tyne_min > kmf_lo { fails = fails + 1 }
 
     if fails == 0 {
         println("SITE_SCREENING_SELFTEST_OK")

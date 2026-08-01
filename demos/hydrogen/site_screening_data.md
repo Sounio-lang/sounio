@@ -259,6 +259,159 @@ from four independent OA reviews that agree (sources 24, 28, 29, 30).
   generated in-situ from oil degradation — a different process; used
   only as the community-floor anchor of the [A2] cardinal p-box.
 
+## FIELD CALIBRATION — the replacement k_m magnitude anchor (added 2026-08-01)
+
+The field validation above falsified the Bo-2021 magnitude anchor. This
+section documents its replacement: a FIELD-CALIBRATED k_m p-box built
+from (1) inverse calibration against the two validated field
+observations and (2) the only measured in-situ methanogenesis rate in
+the peer-reviewed literature (Tyne 2021). Every number below is printed
+by the demo's [A4] section from the network itself (bisection), and
+predicted first by `tools/km_law_predict.py`.
+
+### C1 — Inverse calibration (FIELD-DERIVED; transparent)
+
+Method: `field_invert` in the demo — 80 bisection steps of
+`law_loss_steps` (the network itself; no closed form, no hidden
+constants), bracket [1e-12, 100] chosen inside the RK4-stable monotone
+regime (above ~10³ the 0.05-yr step overshoots the H₂ charge and the
+loss goes non-monotone — caught by the selftest during development).
+Enveloped over (extent edge × horizon-step edge × A × salt) corners:
+k_lo = least k consistent (low extent, LONG horizon), k_hi = most
+(high extent, SHORT horizon).
+
+- LEHEN k_eff box: **[0.765606, 0.894709]** (model units
+  1/(mol/L)/yr at 40 °C; extent [3.0, 3.2] %, steps 15/16).
+- LOBODICE k_eff envelope: **[6.308105, 14.708991]** (T-grid
+  25:5:45 °C × steps 11/12). Buzek caprock-leakage caveat RETAINED —
+  leakage-inflated, used only for the HI edge.
+- Decoupling check printed: the fractional H₂ loss is nearly
+  independent of the A × salt corners (R0 = ks[0]·[H₂]·[CO₂] is the
+  only H₂ sink); the residual ~2 % spread enters through the network's
+  CO₂ supply and is enveloped, not assumed away.
+
+### C2 — Tyne et al. 2021 in-situ rate + unit bridge (IN-SITU-MEASURED)
+
+Primary, open access (CC-BY, PMC8695373; source 14 full text read
+2026-08-01). The ONLY measured in-situ rate in the paper:
+
+> "We calculate an in situ microbial methanogenesis rate from within a
+> natural system of 73–109 millimoles of CH₄ per cubic metre (standard
+> temperature and pressure) per year for the Olla Field." (abstract)
+
+> "By extrapolating our results over the 29 years between the cessation
+> of injection (1986) and sampling (2015), and assuming 13–19% microbial
+> consumption of CO₂ since injection … we calculate that a minimum of
+> 1.15 × 10⁷–1.72 × 10⁷ m³ (STP) of microbial CH₄ has been produced at
+> a minimum rate of 73–109 mmol CH₄ m⁻³ (STP) yr⁻¹." (main text — note
+> "minimum", twice: the rate is a conservative LOWER bound)
+
+Temperature window (verbatim): "the current temperatures (29.2–50.7 °C)
+in the Olla reservoirs". Process: hydrogenotrophic (their eq. 1:
+CO₂ + 4H₂ → CH₄ + 2H₂O), H₂ "sourced from the hydrocarbons and water".
+
+UNIT BRIDGE to the model's ks[0] (labeled assumptions, printed in the
+receipt):
+- stoichiometry 4 H₂ : 1 CH₄ → r_H2 = [292, 436] mmol m⁻³ yr⁻¹;
+- model R0 volumetric rate = ks[0]·[H₂]·[CO₂] mol/L/yr → ×10⁶
+  mmol/m³/yr, with [CO₂] = 0.05 mol/L (the network's charge) and
+  [H₂] = the screening charge 7.8e-4·15·salt mol/L, salt ∈ [0.70, 1.00];
+- "per cubic metre" read as per m³ of reservoir WATER. **The paper
+  never defines the normalization volume** (Methods searched — NOT
+  FOUND; the derivation reads as per remaining injected-CO₂ volume at
+  STP). This is a documented bridge ambiguity of ~1–2 orders of
+  magnitude — LARGER than the width of the bridged box itself; the
+  box is conditional on the per-m³-water reading.
+- Olla's actual dissolved [H₂] is not reported (H₂ is internally
+  generated); using the screening charge is a labeled assumption, and
+  k scales inversely with the true [H₂].
+
+Bridged TYNE k_eff box: **[0.499145, 1.064713]** (29.2–50.7 °C).
+
+### C3 — Overlap analysis (k_eff at field temperature)
+
+- LEHEN [0.765606, 0.894709] ∩ TYNE [0.499145, 1.064713] =
+  **[0.765606, 0.894709] — NONEMPTY**. Two independent in-situ
+  evidences (H₂-storage trial at a measured 40 °C; CO₂-EOR field at
+  29.2–50.7 °C) are mutually consistent on the effective rate at
+  ~40 °C. Read as WEAK corroboration only — a nonempty interval
+  intersection does not address the differing site conditions, and
+  does not explain Lobodice.
+- LOBODICE [6.308105, 14.708991] sits ~5.9× above the Tyne upper edge —
+  consistent with its caveats (leakage + exceptionally favorable bloom
+  conditions); retained as the conservative HI edge only.
+
+### C4 — The field-calibrated k_m p-box at Topt (f = 1)
+
+- LO = LEHEN k_lo / f_hi(40 °C = 0.375) = **2.041617** — caveat-free
+  site, biology at its p-box-BEST shape (the weakest magnitude the
+  Lehen observation allows).
+- HI = LOBODICE k_hi / f_lo(45 °C = 0.038461538462) = **382.433772** —
+  caveated site, biology at its p-box-WORST shape at the warmest
+  reported T. LABELED edge, NOT a strict bound: arbitrarily small f at
+  cooler T is p-box-allowed and would push k_m higher.
+- TYNE minimal k_m = TYNE k_lo / f_hi(50.7 °C = 0.757212864644) =
+  **0.659188 ≤ LO** — the third, independent evidence is consistent.
+- vs the LAB-FALSIFIED Bo-2021 anchor [0.0048, 0.0187]: the field box
+  is **109× (LO) to 20451× (HI)** larger. The magnitude is REPLACED,
+  not adjusted. The calibrated k_m is an EFFECTIVE bulk first-order
+  constant that absorbs local attached-biomass density (see C5).
+
+### C5 — Interpretive layer: why field ≫ the old anchor (sourced; NOT a fudge factor)
+
+- Tyne 2021 itself quotes the lab-vs-field gap (verbatim): "Previous
+  estimates for CO₂ reduction following methanogenic oil degradation by
+  hydrogenotrophic methanogens in lab microcosm incubations at similar
+  temperatures are significantly lower (about 0.01–0.15 mmol CH₄ m⁻³
+  (STP) yr⁻¹) by comparison." (their ref. 38 = source 37, Gray et al.
+  2009) — in-situ 73–109 vs lab 0.01–0.15: ~500–10000×.
+- Thaysen et al. 2021 (source 24; EarthArXiv preprint full text):
+  field bulk-reservoir methanogenesis 0–1185 nM/h vs near-well rates up
+  to 4533 nM/h — "H2 consumption rates by SSR and methanogenesis were
+  up to 2544 and 4533 nM h-1, respectively, which falls within the
+  lower range of the values reported from laboratory studies" — and
+  "the field H2 consumption by SSR is 1.5 times to eight orders of
+  magnitude lower, and 0.7 times to 7 orders of magnitude lower for
+  methanogenesis" (vs lab). The variance across spatial niche (bulk vs
+  colonized near-well) is the documented 2–8-orders effect.
+- Tremosa et al. 2023 (source 28): reproducing Lobodice required
+  "dividing the rate of methanogenesis by about 4" (zero-order model)
+  or "net rates divided by 50 for methanogenesis" (Monod model) —
+  "it could also be that not kmax, but the concentration of bacteria is
+  lower–or both": biomass density is the free parameter that absorbs
+  lab-to-field discrepancies.
+- Haddad et al. 2022 (source 30): with real reservoir rock +
+  autochthonous formation water at 47 °C, "nearly 40% of injected H2
+  transformed" in <90 days and "the rate of H2 decline between days 53
+  and 84 was remarkably greater than before day 52" — conversion
+  ACCELERATES with colonization; methanogenesis switched on when
+  sulfate fell below 0.08 mmol (mcrA transcripts peaking
+  1.8×10⁴ copies/mL).
+- Berta et al. 2018 (source 19): in sediment columns at pH₂ 2–15 bar,
+  H₂ consumed via sulfate reduction at 18 ± 5 µM/h with acetate
+  production at 0.030 ± 0.006 h⁻¹ — but "no methanogenesis took place":
+  active blooms can be ABSENT even under excess H₂ (the demo's seam
+  (d), and the reason the calibrated magnitude must not be read as
+  universal).
+- Honest framing constraint (from the same evidence): the literature
+  does NOT support a universally faster field — bulk-reservoir rates
+  can be far LOWER than lab optima (Thaysen); the calibrated box here
+  is anchored on ACTIVE-BLOOM field sites, which is exactly the
+  conservative screening question.
+
+### C6 — Provenance caveat on the OLD anchor (documentation hygiene)
+
+An independent re-check (2026-08-01, during this calibration work)
+found that Bo, Zeng & Chen 2021 (source 17) is an ABIOTIC PHREEQC
+geochemistry study whose abstract reports no microbial methanogenesis
+rate constants; the [0.0048, 0.0187] interval's provenance inside that
+paper could not be re-verified from accessible text. This weakens the
+"lab anchor" narrative but changes NO number: the interval was already
+labeled ILLUSTRATIVE, is now empirically falsified by two field
+observations, and is replaced by the C4 box. Flagged for a future
+sourcing pass; the validated slot/law numbers that use it are byte-
+identical and untouched.
+
 ## NOT FOUND (searched, not sourced — do not use without new data)
 
 - Formation-water **salinity (TDS)** for every screened site (only the
@@ -315,6 +468,30 @@ from four independent OA reviews that agree (sources 24, 28, 29, 30).
 - **Rubensdorf / Underground Sun Storage 2030 quantitative results** —
   two pure-H₂ cycles completed April 2025; final report pending; the
   peer-reviewed account (source 36) has no accessible text yet.
+- **Tyne 2021's rate normalization volume** — "per cubic metre (STP)"
+  is never defined (per m³ reservoir bulk? pore water? remaining
+  injected-CO₂ gas at STP?): the PMC full text + Methods contain no
+  reservoir/pore-volume normalization (searched 2026-08-01). The unit
+  bridge in C2 carries this ~1–2-order ambiguity explicitly.
+- **Tyne 2021 per-cell rates, absolute cell densities, H₂ consumption
+  rates, doubling/turnover numbers, Monod parameters** — none reported
+  anywhere in the paper or its SI (only 16S relative abundances; "the
+  abundance of methanogens was 100 times higher than ANME").
+- **A controlled biofilm-vs-planktonic hydrogenotrophic-methanogenesis
+  rate ratio** (same inoculum, same chemistry, attached vs suspended) —
+  no peer-reviewed measurement exists (the one "suspended vs biofilm"
+  rate study cited inside Thaysen 2021 is a 1992 PhD thesis, excluded).
+  The interpretive layer in C5 uses volumetric niche contrasts instead.
+- **Heinemann et al. 2021 full text** (source 29) — hybrid OA but the
+  publisher blocks automated retrieval (HTTP 403 HTML + PDF, also via
+  reader proxy, 2026-08-01); only the one-sentence abstract obtainable.
+  Numbers attributed to it here remain via Tremosa 2023/Thaysen 2021.
+- **Dopffel et al. 2021** (source 38) — closed access, no OA copy
+  (OpenAlex/Unpaywall checked); abstract qualitative, no extractable
+  rate numbers. Not used.
+- **Ebigbo, Golfier & Quintard 2013** (pore-scale biofilm
+  methanogenesis model, source 39) — identified as a lead for a
+  mechanistic biomass-density path; not fetched, not used.
 
 ## Source list (all accessed 2026-07-31)
 
@@ -409,3 +586,17 @@ Field-validation sources (all accessed 2026-08-01, DOIs Crossref-verified):
 36. Andiappan et al. 2026, *Int. J. Hydrogen Energy* (Rubensdorf /
     USS-2030 field demonstrator account). DOI 10.1016/j.ijhydene.2026.156784
     (registered; no accessible text yet)
+37. Gray, Sherwood Lollar, Ballentine et al. 2009, *Extremophiles*
+    13:511–519. DOI 10.1007/s00792-009-0237-3 (lab microcosm
+    methanogenesis rates 0.01–0.15 mmol CH₄ m⁻³ (STP) yr⁻¹ for North
+    Sea formation waters — quoted VERBATIM inside Tyne 2021's main
+    text, source 14; primary paywalled, numbers via 14)
+38. Dopffel, Jansen & Gerritse 2021, *Int. J. Hydrogen Energy*
+    46:8591–8606. DOI 10.1016/j.ijhydene.2020.12.058 (UHS microbiology
+    review; closed access — abstract only, NO numbers used)
+39. Ebigbo, Golfier & Quintard 2013, *Adv. Water Resour.* DOI
+    10.1016/j.advwatres.2013.09.004 (pore-scale biofilm methanogenesis
+    model — a LEAD for a mechanistic biomass path; not fetched, not
+    used)
+40. Tyne et al. 2021 open-access full text: PMC8695373 (CC-BY) — the
+    copy actually read for the C2 quotes (same DOI as source 14).

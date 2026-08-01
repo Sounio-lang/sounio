@@ -10,7 +10,10 @@ rendered from the demo's own stdout by
 Revision 2026-08-01: the k_m slot is now printed side-by-side with a
 sourced methanation temperature law (Rosso 1993 CTMI; §3, §6.1), and the
 law is checked against measured field-scale in-situ methanation
-(§4, field validation).*
+(§4, field validation). Same-day second revision: the falsified
+magnitude anchor is REPLACED by a field-calibrated k_m p-box built from
+inverse calibration plus Tyne 2021's measured in-situ rate
+(§4, field calibration; §5, §6.1 re-checked).*
 
 ## 1. Executive summary
 
@@ -50,18 +53,37 @@ receipt's stress test computes what that gap means for the headline:
 at τ = 1 the gate survives a Lehen-class bloom (3.055 % vs 3.635 %)
 but **not** a Lobodice-class one (0.110 %) — the rounding-term
 conclusion is conditional on no Lobodice-class bloom, and we print it
-that way.
+that way. A second, same-day revision then **re-anchors the magnitude
+from the field evidence itself** (§4, field calibration): inverse
+calibration on the network against the two field observations gives
+effective-rate boxes [0.765606, 0.894709] (Lehen, 40 °C) and
+[6.308105, 14.708991] (Lobodice, leakage-caveated), and Tyne et al.
+2021's measured in-situ rate — 73–109 mmol CH₄ m⁻³ (STP) yr⁻¹ at
+29.2–50.7 °C, the only such measurement in the peer-reviewed
+literature — bridges (labeled assumptions) to [0.499145, 1.064713],
+**overlapping the Lehen inverse**. The resulting field-calibrated k_m
+p-box **[2.041617, 382.433772]** (109×–20451× the falsified lab
+anchor) pushed through the same CTMI law moves the 30-yr loss boxes
+from ≤ 2.04 % to **[15.475235, 100] % (S2)** and **[0, 100] % (S3)** —
+yet the τ = 1 composed gate moves only to 3.355 % / 3.370 %, because
+the linear availability mapping is shallow at τ = 1; the
+concavity-honest annualized reading of the same kinetics (the stress
+test) still collapses it to 0.110 %. **The conditional framing stands,
+sharpened: short-horizon economics are robust to the re-anchored
+kinetics under the receipt's mapping; long-horizon recoverability and
+any Lobodice-class bloom are not.** Every old number stands, printed
+beside the new.
 
 **What changes the answer.** Three levers, in order of leverage: (1)
 **compressor reliability evidence** — the gate is set by the R p-box,
 not the rock, so alloy-batch test data moves the headline the most;
-(2) **a calibrated k_m magnitude** — the CTMI law (this revision)
-already replaced the hard 70 °C step with a sourced thermal slide; what
-would still reshape the below-Topt numbers is a calibrated *rate
-magnitude* (Ghaedi 2025's closed-access kinetic law, or reservoir-rate
-measurements — the field validation below quantifies the gap: measured
-in-situ extents exceed the p-box's upper edges by ~10²–10³×) and
-narrower cardinal-temperature brackets; (3)
+(2) **biological site characterization** — the k_m *magnitude* is now
+field-calibrated (§4): the box [2.041617, 382.433772] spans two orders
+on its own because the field evidence bounds the magnitude only
+one-sidedly at each site (the CTMI shape allows f → 0 at field
+temperatures). Ruling a Lobodice-class bloom in or out at the actual
+candidate collapses that spread — and it is the same condition the
+τ = 1 headline already hangs on; (3)
 **measured S2/S3 formation temperatures** — the gradient-derived
 brackets are the widest honest input intervals in the screen.
 
@@ -230,13 +252,73 @@ H₂ consumption [20]), Ketzin town-gas era (61 % H₂ volume lost [18]),
 the salt-cavern pure-H₂ stores (no reactivity loss [18]), and the Olla
 CO₂-EOR (a different process [11]).
 
+**Field calibration — the replacement magnitude anchor** (receipt
+section [A4]; method and quotes in `site_screening_data.md` §C1–C6).
+The falsified magnitude is rebuilt from the field evidence, three ways,
+each labeled by class. (i) **FIELD-DERIVED (inverse)**: bisecting the
+network itself (80 bisection steps per corner, no closed form, no
+hidden constants) until it reproduces each observed extent, enveloped
+over the extent × horizon × A × salt corners — LEHEN k_eff ∈
+**[0.765606, 0.894709]** (40 °C), LOBODICE k_eff ∈
+**[6.308105, 14.708991]** (25–45 °C envelope; leakage-caveated).
+(ii) **IN-SITU-MEASURED**: Tyne et al. 2021 [11] measured "an in situ
+microbial methanogenesis rate from within a natural system of 73–109
+millimoles of CH₄ per cubic metre (standard temperature and pressure)
+per year" at 29.2–50.7 °C in the Olla CO₂-EOR field — the only such
+measurement in the literature, and the authors call it a conservative
+minimum. Bridged to the model's units (4 H₂ : 1 CH₄; rate
+ks[0]·[H₂]·[CO₂]; [H₂] = the screening charge; "per cubic metre" read
+as per m³ water — the paper never defines the normalization volume, a
+documented ~1–2-order bridge ambiguity that EXCEEDS the width of the
+resulting box; the box is conditional on this reading): k_eff ∈
+**[0.499145, 1.064713]**. (iii) **Overlap**: LEHEN ∩ TYNE =
+**[0.765606, 0.894709], NONEMPTY** — two independent in-situ evidences
+are mutually consistent at ~40 °C (weak corroboration only; it does
+not explain Lobodice, which sits ~6× above Tyne's upper edge,
+consistent with its leakage + bloom-condition caveats). The
+**field-calibrated k_m p-box at Topt** is then **[2.041617,
+382.433772]**: LO = Lehen k_lo ÷ f_hi(40 °C) (caveat-free site,
+biology at its p-box-best shape — the weakest magnitude Lehen allows);
+HI = Lobodice k_hi ÷ f_lo(45 °C) (caveated site, biology at its
+p-box-worst shape at the warmest reported T — a **labeled** edge, not
+a strict bound: arbitrarily small f at cooler T would push k_m
+higher); Tyne's minimal k_m = 0.659188 ≤ LO — consistent. This is
+**109×–20451× the LAB-FALSIFIED Bo-2021 anchor** — replaced, not
+adjusted. The interpretive layer (sourced, not a fudge factor): the
+gap is a volumetric-biomass effect — Tyne itself quotes lab microcosm
+rates of 0.01–0.15 vs its in-situ 73–109 mmol m⁻³ yr⁻¹ (Gray et al.
+2009 [21]); Thaysen 2021 documents 0.7×–7-orders bulk-vs-lab spreads
+with near-well rates up to 4533 nM/h; Tremosa had to rescale lab Monod
+k_max by ~1/50 to fit Lobodice ("it could also be that not kmax, but
+the concentration of bacteria is lower — or both"); Haddad 2022
+watched ~40 % of injected H₂ go in <90 days at 47 °C, *accelerating*
+after day 52. The calibrated k_m is therefore an **effective bulk
+constant absorbing local attached-biomass density** — anchored on
+active-bloom sites, which is the conservative screening direction.
+Pushed through the same CTMI machinery (same seeded chain, n = 20000),
+the **FIELD-CALIBRATED LAW PATH** prints beside both older paths:
+30-yr loss p-boxes S1 **[0, 0]** (thermal death unchanged), S2
+**[15.475235, 100.000000]**, S3 **[0, 100.000000]**; f_s(1) ≥
+[0.966667, …]; composed gate **3.635 / 3.355 / 3.370 %** for S1/S2/S3
+(vs 3.635 % on both older paths) — and f_s(10) at S2 drops to
+**[0.666667, 0.948416]**. The τ = 1 headline **survives the
+re-anchoring under the receipt's linear f_s mapping** — but that
+mapping is exactly what the stress test showed to be optimistic for an
+active bloom (annualized reading: 0.110 %), so the conditional claim
+is kept and sharpened (§5).
+
 ## 5. Where site choice starts to matter
 
 The τ = 10 yr analytic sensitivity: f_s intervals drop to
 S2 [0.9924, 0.9997] and S3 [0.9934, 1.0000] (S1 stays [1, 1]) on the
 slot path; the law path is nearly identical — S2 [0.9932, 0.9999],
 S3 [0.9934, 1.0000], S1 [1, 1] — because the outer p-boxes barely move
-at the site level. A seasonal-plus storage mandate (multi-year
+at the site level. The **field-calibrated law path moves this**: with
+the KMF magnitude the S2 τ = 10 availability falls to
+**[0.666667, 0.948416]** (S3 [0.666667, 1.0000]) — multi-year residence
+is exactly where the re-anchored kinetics bite, while S1 stays [1, 1]
+(thermal death is anchor-independent). A seasonal-plus storage mandate
+(multi-year
 residence, or a strategic reserve) is where the warmer onshore
 aquifers' kinetic losses become visible against South Kavala's
 measured-hot, interaction-free regime (slot: a cutoff; law: thermal
@@ -247,16 +329,23 @@ candidate and the characterization euros belong to the compressor
 alloys and the heat/dispensing contracts — same conclusion as the
 valley-chain receipt, now backed by real site temperatures **and** a
 sourced methanation temperature law — **with one condition the field
-validation makes precise.** For the stated k_m interval the claim is
+validation makes precise, and the field calibration now stress-tests
+directly.** For the stated k_m interval the claim is
 closed: the dominant subsurface uncertainty is parameterized, so it
-cannot be overturned by an uncharacterized k_m *shape*. But the field
-validation shows the k_m *magnitude* interval may be ~10²–10³× too
-low, and the receipt's stress test computes the consequence: the
-rounding-term headline survives a Lehen-class bloom (composed gate
-3.055 % vs 3.635 %) but **not** a Lobodice-class one (0.110 %). The
-honest statement is therefore: *at τ = 1 the subsurface is a rounding
-term unless the reservoir hosts a Lobodice-class active methanogen
-bloom* — and ruling that in or out is biological site
+cannot be overturned by an uncharacterized k_m *shape*. The magnitude
+interval is no longer a caveat but a calibrated p-box — and pushing
+the field-calibrated box through the composed chain moves the τ = 1
+gate only to 3.355 % / 3.370 % (from 3.635 %), because the receipt's
+linear f_s mapping is shallow at τ = 1 (f_s ≥ 0.9667 even at the
+caveated HI edge). **But that survival is mapping-limited, not
+kinetics-limited**: the same kinetics read through the
+concavity-honest annualized lens (the stress test) collapse the gate
+to 0.110 % under a Lobodice-class bloom — and the KMF HI edge is
+harsher still at warm corners (30-yr loss saturates at 100 %). The
+honest statement is therefore unchanged and now anchored: *at τ = 1
+the subsurface is a rounding term unless the reservoir hosts a
+Lobodice-class active methanogen bloom* — and ruling that in or out is
+biological site
 characterization, the top subsurface characterization target.
 
 ## 6. Honest limitations
@@ -267,11 +356,20 @@ characterization, the top subsurface characterization target.
    1972's ≤ 5 °C pure-culture cutoff; the 80–90 °C field biosphere
    cutoff). The old slot is kept and printed alongside — the comparison
    is in the receipt, not hidden. Remaining honest seams: (a) the k_m
-   **magnitude** interval is still the ILLUSTRATIVE Bo-2021 field-loss
-   anchor, now read as the value at Topt — the literature gives the
-   temperature *shape*, not a reservoir rate constant, and the field
-   validation (§4) now quantifies the consequence: the anchor
-   under-brackets both measured in-situ extents by ~10²–10³×; (b) the
+   **magnitude** now exists in two printed forms — the Bo-2021 anchor
+   (LAB-FALSIFIED: it under-brackets both measured in-situ extents by
+   ~10²–10³×, and an independent 2026-08-01 re-check found the named
+   paper abiotic, so its provenance as a *microbial* anchor is doubly
+   weak — data file §C6) and the FIELD-CALIBRATED box [2.041617,
+   382.433772] that replaces it (§4). The replacement's own seams: the
+   HI edge is a *labeled* edge, not a strict bound (the field evidence
+   bounds k_m only one-sidedly at each site, because the CTMI shape
+   allows f → 0 at field temperatures); the Tyne bridge carries a
+   ~1–2-order normalization-volume ambiguity the paper never resolves;
+   and the box is an *effective* bulk constant that absorbs local
+   attached-biomass density — calibrated on active-bloom sites, the
+   conservative screening direction, not a universal reservoir rate;
+   (b) the
    CTMI is a microbial *growth* model applied to the pseudo-sink *rate* — a
    labeled form transfer (hydrogenotrophic methanogenesis is the
    biological H₂ sink; the network itself stays abiotic-batch); (c)
@@ -295,7 +393,14 @@ characterization, the top subsurface characterization target.
    CTMI shape or of the network. The stress test (§4) computes the
    headline consequence: the τ=1 rounding-term conclusion survives a
    Lehen-class bloom but not a Lobodice-class one, so it is a
-   conditional claim — printed as such.
+   conditional claim — printed as such; (g) the field-calibrated
+   gates inherit the receipt's linear f_s mapping (f_s = 1 −
+   L30·τ/30), which is optimistic at short horizons when the loss box
+   is wide — the annualized reading of the same kinetics (stress
+   test) is the honest short-horizon lens and is why the conditional
+   framing survives the re-anchoring unchanged; (h) the linear f_s
+   at the KMF HI edge understates true first-year loss (concavity) —
+   flagged, not smoothed.
    AWAITING-AUTHOR-DATA: drop the paper's law into the 2-line `km_at`
    slot (or recalibrate the k_m magnitude) and every number re-derives.
 2. **Two of three temperatures are gradient-derived**, not measured —
@@ -381,3 +486,6 @@ env -u SOUC_BIN -u SOUNIO_STDLIB_PATH SOUNIO_SOUC_ENGINE=lean_single \
     (DOI 10.1039/d0ee03536j) — "no detected hydrogen consumption in
     Beynes ... up to a 17% decrease ... in Lobodice over a seven month
     cycle".
+21. Gray et al. 2009, *Extremophiles* 13:511–519
+    (DOI 10.1007/s00792-009-0237-3) — laboratory microcosm methanogenesis
+    rates 0.01–0.15 mmol m⁻³ yr⁻¹, quoted via [11].

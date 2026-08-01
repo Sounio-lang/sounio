@@ -629,6 +629,37 @@ conditional, printed as such. Tyne 2021 documents no lag phases
 (searched); reservoir Monod parameters exist only as FITTED values —
 both negatives documented in `site_screening_data.md`.
 
+**Field calibration (added 2026-08-01, stacked on the field-validation
+commit).** The field-falsified Bo-2021 magnitude anchor is replaced by a
+FIELD-CALIBRATED p-box, built three ways and printed beside both older
+paths (additive only — every validated slot/law/field-validation number
+is untouched). (i) FIELD-DERIVED inverse calibration: the network is
+bisected (80 steps per corner, no closed form) until it reproduces each
+observed extent — LEHEN k_eff ∈ [0.765606, 0.894709], LOBODICE k_eff ∈
+[6.308105, 14.708991]. (ii) IN-SITU-MEASURED: Tyne et al. 2021
+(*Nature*, DOI 10.1038/s41586-021-04153-3, OA) measured an in-situ
+methanogenesis rate of 73–109 mmol CH₄ m⁻³(STP) yr⁻¹ at 29.2–50.7 °C —
+bridged to model units as k_eff ∈ [0.499145, 1.064713], with the
+normalization-volume ambiguity (never defined in the paper) documented
+as a ~1–2-order bridge caveat — larger than the box width itself; the
+box is conditional on the per-m³-water reading. (iii) Overlap: LEHEN ∩ TYNE =
+[0.765606, 0.894709] is NONEMPTY — two independent in-situ evidences
+are mutually consistent at ~40 °C (weak corroboration only). The
+calibrated k_m p-box at Topt is [2.041617, 382.433772] —
+109×–20451× the falsified lab anchor — with the interpretive layer
+(volumetric biomass: Gray 2009 lab-vs-in-situ, Thaysen 2021 bulk-vs-
+near-well, Tremosa 2023 ÷50 rescale, Haddad 2022 acceleration)
+sourced in `site_screening_data.md` §C1–C6. Effect: 30-yr loss p-boxes
+S1 [0, 0] (thermal death, anchor-independent), S2 [15.475, 100],
+S3 [0, 100]; S2 f_s(10) falls to [0.666667, 0.948416]; composed τ=1
+gate 3.635 / 3.355 / 3.370 % — the headline survives the re-anchoring
+under the receipt's linear f_s mapping, but the conditional claim is
+kept and sharpened (mapping-limited; annualized reading 0.110 %).
+Bo 2021 is additionally documented as an abiotic-isothermal study
+(provenance caveat, changes no numbers). A bisection-bracket bug
+(hi = 1e4 broke RK4 monotonicity; bracket capped at 100) was caught by
+the selftest and fixed in all three files.
+
 Artifacts:
 
 - `site_screening_data.md` — the sourced parameter table (HRADF,
@@ -643,7 +674,7 @@ Artifacts:
   the selftest pins.
 - `tools/km_law_predict.py` — independent CTMI + law-path replica
   (corner-vs-dense scan check, law p-box predictions, field-validation
-  predictions, selftest pins).
+  predictions, field-calibration inverse boxes + KMF, selftest pins).
 
 Suite coverage: `tests/run-pass/site_screening_selftest.sio` pins the
 60 °C trajectory against the independent replica, the A2 regime switch,
@@ -652,7 +683,10 @@ the CTMI law path (f(Topt) = 1, the 11³ scan's f = 1 catch at
 69 °C, a law-scaled trajectory, and the 80 °C law run staying active
 above the slot step), and the field-validation path (cardinal-scan pins
 at 40/45 °C, a 15-step sub-year law trajectory at Lehen's 40 °C vs the
-replica, τ-monotonicity across the 285 d step bracket)
+replica, τ-monotonicity across the 285 d step bracket), and the
+field-calibration path (inverse-calibration pins for Lehen and
+Lobodice, Tyne bridge arithmetic, CTMI scan at Tyne's 50.7 °C, and the
+KMF lower edge above 100× the falsified lab anchor)
 (`SITE_SCREENING_SELFTEST_OK`). lean_single only
 (same Madaros chemistry-import blocker as the network demo).
 
