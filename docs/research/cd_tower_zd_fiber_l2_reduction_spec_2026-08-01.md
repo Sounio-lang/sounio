@@ -17,7 +17,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.cd-to
 
 **Date:** 2026-08-01
 **Orthography:** EN-UK
-**Status:** `EXECUTABLE` — `L2_REDUCED_TO_FIBER_FREE_DIAMOND__NOT_PROVEN`
+**Status:** `EXECUTABLE` — `DIAMOND_IS_LEVEL_BOUNDED__PARITY_MECHANISM_IDENTIFIED`
 **Parents:** `cd_tower_zd_fiber_l2_switching_spec_2026-07-31.md`, `cd_tower_zd_fiber_l1_reduction_spec_2026-07-31.md`
 **Harness:** `scripts/research/cd_tower_zd_fiber_l2_reduction_contract.py`
 
@@ -103,12 +103,66 @@ measured object, in the same discipline `K21` established for τ.
 
 ---
 
+## 2b. How `Qgen'` reduces, and what that buys — the attack on (♦)
+
+**The map, read off sixteen proven theorem statements** (not measured — `N11` parses the
+`.lean`):
+
+| | label low | label high |
+|---|---|---|
+| **sign** | `+1` | `−1` |
+| `Qgen` becomes | `Qgen` | `Qgen'` |
+| `Qgen'` becomes | `Qgen'` if `ll`/`uu`, `Qgen` if `lu`/`ul` | same rule |
+
+> **The sign is `−1` exactly when the LABEL is high, and nothing else touches it.** Priming is
+> governed separately: from `Q` by the label's half, from `Q'` by whether exactly one of `a, b`
+> is upper.
+
+Three consequences.
+
+**(i) `N12` — the even-weight hypothesis IS the parity of the sign flips.** Descending the
+resonance predicate from level `n` to level `j+2` flips sign once per level where `Y` is high,
+so the accumulated sign is `(−1)^{popcount(Y ≫ (j+2))}`, whatever `a` and `b` do. With
+`lsb(Y) = j`, `weight(Y) = 1 + bit_{j+1}(Y) + popcount(Y ≫ (j+2))`, so **even weight is exactly
+the statement that the accumulated sign is `−(−1)^{bit_{j+1}(Y)}`**. L2's parity hypothesis is
+not an extra condition bolted on; it is the descent's own bookkeeping.
+
+**(ii) `N9` — (♦)'s conclusion is LEVEL-BOUNDED.** `G(Y,a,b) = g(a,b)·g(a⊕Y, b⊕Y)` is invariant
+under dropping a level and truncating every argument:
+
+```
+G_n(Y, a, b)  =  G_{j+2}(Y mod 2^{j+2}, a mod 2^{j+2}, b mod 2^{j+2})
+```
+
+0 violations in 1 138 688 checks, **unconditional** — every quadrant, no degeneracy exceptions.
+So (♦) is not a statement about an object that grows with `n`. Its conclusion depends only on
+the bottom `j+2` bits, and its target `(−1)^{p_j(a)+p_j(b)}` only on the bottom `j`. The
+unbounded direction of (♦) is entirely in the *hypothesis*.
+
+**(iii) `N10` — the hypothesis only does work at `j ≥ 3`.** At the bottom level the defect
+`G·T` is **identically `+1` for `j ≤ 2`**: (♦) holds there with no hypothesis at all. From
+`j = 3` it does not (192/1024, 1344/4096, 6720/16384 for `j = 3,4,5`, and the same count for
+both `Y₀`). That boundary is independently where `N3` finds `g` stops being F2-bilinear — two
+different probes landing on the same `j ≤ 2`.
+
+**`N13` — two closed forms tried and refuted.** The defect is neither `−Q'(Y₀,a,b)` nor
+`−Q(Y₀,a,b)`. Recorded so they are not retried.
+
+---
+
 ## 3. Not claimed
 
 - **L2 is not proven, and neither is (♦).** What *is* proven ∀n is the **reduction**
   (`l2_reduction`) and its symmetry ingredient (`gdisc_symm`/`chi_tau`). (♦) itself is measured
   at three levels.
-- **(♦) is not a Lean statement yet.**
+- **(♦) is not a Lean statement yet, and it is not proven.** `N9`, the level-boundedness of its
+  conclusion, is measured, not proven — it is the obvious next Lean target: eight quadrants of
+  the four-σ product, where the two `if v = 0 then −1` branches sit on the *same* condition on
+  the plain and the τ side (`τx = 0 ↔ x = 0`) and cancel in the product. That cancellation is
+  why `N9` has no degeneracy exceptions.
+- **`N12` explains the parity hypothesis; it does not discharge it.** The sign law it rests on
+  is proven; the arithmetic is trivial; but (♦) itself still needs the descent of the *object*,
+  where the priming alternates.
 - **The reduction is weaker than L1's.** (★) dropped the fiber from *both* the hypothesis and
   the conclusion. (♦) drops it from the conclusion, and its hypothesis becomes `Qgen'(Y,a,b) = −1`
   — fiber-free, but a genuine hypothesis, which `N7` shows cannot be discarded.

@@ -257,9 +257,124 @@ def main():
           f"2^(j+-1)-1 breaks it ({mask_bad}/{mask_tot}) {'OK' if n8 else 'FAIL'} -- neither "
           f"the parity hypothesis nor the mask is decorative")
 
+    # ---- N9  THE CONCLUSION OF (diamond) IS LEVEL-BOUNDED ----------------------------------
+    # G(Y,a,b) = g(a,b) g(a^Y,b^Y) is INVARIANT under dropping a level and truncating every
+    # argument. So (diamond)'s conclusion is not a statement about a growing object at all: it
+    # depends only on the bottom j+2 bits, and the target (-1)^{p_j a + p_j b} on the bottom j.
+    n9_bad = n9_tot = 0
+    for n in (6, 7):
+        Sn = sign_table_fast(n).astype(np.int64)
+        N = 1 << n
+        for j in range(1, n - 1):
+            Mj = 1 << (j + 2)
+            Sm = sign_table_fast(j + 2).astype(np.int64)
+            gn = gmat(Sn, N, j)
+            gm = gmat(Sm, Mj, j)
+            for Y in range(1, N):
+                if (Y & -Y).bit_length() - 1 != j:
+                    continue
+                A, B = np.meshgrid(np.arange(N), np.arange(N), indexing="ij")
+                lhs = gn * gn[A ^ Y, B ^ Y]
+                Am, Bm = A % Mj, B % Mj
+                Y0 = Y % Mj
+                rhs = gm[Am, Bm] * gm[Am ^ Y0, Bm ^ Y0]
+                n9_bad += int((lhs != rhs).sum())
+                n9_tot += N * N
+    n9 = n9_bad == 0
+    ok["N9"] = n9
+    print(f"N9_DESCENT  G_n(Y,a,b) == G_(j+2)(Y mod 2^(j+2), a mod 2^(j+2), b mod 2^(j+2)) "
+          f"{n9_bad}/{n9_tot} violations {'OK' if n9 else 'FAIL'} -- UNCONDITIONAL, every "
+          f"quadrant, no degeneracy exceptions. (diamond)'s conclusion collapses to the bottom "
+          f"j+2 bits; it is not an unbounded-level statement")
+
+    # ---- N10  where the hypothesis actually does work --------------------------------------
+    n10_rows = []
+    for j in (1, 2, 3, 4, 5):
+        Mj = 1 << (j + 2)
+        Sm = sign_table_fast(j + 2).astype(np.int64)
+        gm = gmat(Sm, Mj, j)
+        A, B = np.meshgrid(np.arange(Mj), np.arange(Mj), indexing="ij")
+        p = np.array([(-1) ** pj(x, j) for x in range(Mj)])
+        for Y0 in ((1 << j), (1 << j) | (1 << (j + 1))):
+            D = gm * gm[A ^ Y0, B ^ Y0] * np.outer(p, p)
+            n10_rows.append((j, Y0, int((D == -1).sum()), Mj * Mj))
+    n10 = (all(c == 0 for jj, _, c, _ in n10_rows if jj <= 2)
+           and all(c > 0 for jj, _, c, _ in n10_rows if jj >= 3))
+    ok["N10"] = n10
+    print(f"N10_TRIVIAL for j <= 2 the defect G*T is IDENTICALLY +1 -- (diamond) holds with NO "
+          f"hypothesis at all; from j = 3 it does not {'OK' if n10 else 'FAIL'} -- "
+          f"{'; '.join(f'j={a} Y0={b}: {c}/{d}' for a, b, c, d in n10_rows)}. The resonance "
+          f"hypothesis only does work at j >= 3, which is INDEPENDENTLY the same boundary N3 "
+          f"finds for F2-bilinearity of g")
+
+    # ---- N11  the sign law, read off the sixteen PROVEN lemmas -----------------------------
+    lean = os.path.join(HERE, "..", "..", "formal", "lean4", "SounioZDFiberAntisym.lean")
+    txt = open(lean).read()
+    rows = []
+    for base in ("Qred", "Q'red"):
+        for half in ("low", "hi"):
+            for quad in ("ll", "lu", "ul", "uu"):
+                name = f"{base}_{half}_{quad}"
+                i = txt.find(f"theorem {name} ")
+                if i < 0:
+                    rows.append((name, None))
+                    continue
+                body = txt[i:txt.find(":= by", i)]
+                concl = body[body.rindex("=") + 1:].strip()
+                rows.append((name, concl.startswith("-")))
+    n11 = all(neg is not None and neg == (name.split("_")[1] == "hi") for name, neg in rows)
+    ok["N11"] = n11
+    print(f"N11_SIGNLAW across all SIXTEEN proven reduction lemmas the sign is -1 EXACTLY when "
+          f"the LABEL is high, and nothing else changes it {'OK' if n11 else 'FAIL'} -- read "
+          f"off the theorem statements in formal/lean4/SounioZDFiberAntisym.lean, not measured. "
+          f"(Priming is governed separately: from Q by the label's half, from Q' by whether "
+          f"exactly one of a,b is upper.)")
+
+    # ---- N12  hence the parity hypothesis, derived -----------------------------------------
+    # By N11 the sign accumulated descending the resonance predicate from level n to level j+2
+    # is (-1)^popcount(Y >> (j+2)), whatever a and b do. With lsb(Y) = j,
+    #     weight(Y) = 1 + bit_{j+1}(Y) + popcount(Y >> (j+2))
+    # so EVEN WEIGHT is exactly the statement that this accumulated sign equals
+    # -(-1)^{bit_{j+1}(Y)}. The clause checks the arithmetic identity over every label.
+    n12_bad = n12_tot = 0
+    for n in (6, 7, 8):
+        for Y in range(1, 1 << n):
+            j = (Y & -Y).bit_length() - 1
+            acc = (-1) ** (bin(Y >> (j + 2)).count("1"))
+            pred = -((-1) ** ((Y >> (j + 1)) & 1))
+            n12_tot += 1
+            if (bin(Y).count("1") % 2 == 0) != (acc == pred):
+                n12_bad += 1
+    n12 = n12_bad == 0
+    ok["N12"] = n12
+    print(f"N12_PARITY  even weight(Y) <=> the accumulated descent sign (-1)^popcount(Y>>(j+2)) "
+          f"equals -(-1)^bit_(j+1)(Y): {n12_bad}/{n12_tot} violations {'OK' if n12 else 'FAIL'} "
+          f"-- so L2's EVEN-WEIGHT HYPOTHESIS IS THE PARITY OF THE SIGN FLIPS in the descent of "
+          f"the resonance predicate. That is the mechanism, not a coincidence")
+
+    # ---- N13  two closed forms for the defect, both KILLED ---------------------------------
+    n13_rows = []
+    for j in (3, 4):
+        Mj = 1 << (j + 2)
+        Sm = sign_table_fast(j + 2).astype(np.int64)
+        gm = gmat(Sm, Mj, j)
+        A, B = np.meshgrid(np.arange(Mj), np.arange(Mj), indexing="ij")
+        p = np.array([(-1) ** pj(x, j) for x in range(Mj)])
+        Y0 = 1 << j
+        D = gm * gm[A ^ Y0, B ^ Y0] * np.outer(p, p)
+        Qp_ = Sm * Sm[B ^ Y0, A ^ Y0] * Sm[B ^ Y0, A] * Sm[A ^ Y0, B]
+        Qu_ = Sm * Sm[A ^ Y0, B ^ Y0] * Sm[A, B ^ Y0] * Sm[A ^ Y0, B]
+        n13_rows.append((j, int((D != -Qp_).sum()), int((D != -Qu_).sum()), Mj * Mj))
+    n13 = all(a > 0 and b > 0 for _, a, b, _ in n13_rows)
+    ok["N13"] = n13
+    print(f"N13_KILLED  the defect is NOT -Q'(Y0,a,b) and NOT -Q(Y0,a,b) "
+          f"{'OK' if n13 else 'FAIL'} -- "
+          f"{'; '.join(f'j={a}: {b} and {c} mismatches /{d}' for a, b, c, d in n13_rows)}. Two "
+          f"closed forms tried and refuted; recorded so they are not retried")
+
     print("=" * 78)
     if all(ok.values()):
-        print("CD_TOWER_ZDL2R_VERDICT L2_REDUCED_TO_FIBER_FREE_DIAMOND__NOT_PROVEN")
+        print("CD_TOWER_ZDL2R_VERDICT DIAMOND_IS_LEVEL_BOUNDED__PARITY_MECHANISM_IDENTIFIED")
         print("CD_TOWER_ZDL2R_NOTE L2 (fiber L = Y|H, level n) is replaced by (diamond) "
               "(fiber-free, level n-1): with g(x,y) = sigma(tau x,tau y)sigma(x,y) and "
               "j = lsb(Y), for even-weight Y, Qgen'(Y,a,b) = -1 implies "
