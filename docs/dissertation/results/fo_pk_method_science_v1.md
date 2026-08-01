@@ -175,6 +175,20 @@ Method = peel on both Vars; free-fn Rac matches method under FO site budget.
 
 ---
 
+## 5f. Peak–trough ratio + DOF (R9, 2026-08-01)
+
+| Quantity | Value |
+|----------|------:|
+| PTR \(=C_{\max}/C_{\min}\) | 3.320113 |
+| \(\mathrm{Var}(\mathrm{PTR})\) | 0.082541 |
+| \(E_2[\mathrm{PTR}]\) | 3.338918 |
+| DOF \(=\mathrm{PTR}-1\) | 2.320113 |
+| \(\mathrm{Var}(\mathrm{DOF})\) | 0.082541 |
+
+**R9b:** multi-mod `fo_ptr`/`fo_dof` (`FO_PK_IMPORT_PTR_GATE_OK`).
+
+---
+
 ## 6. How to re-run
 
 ```bash
@@ -193,10 +207,12 @@ bash scripts/ci/fo_pk_struct_cmax_driver_gate.sh        # R7
 bash scripts/ci/fo_pk_import_cmax_driver_gate.sh        # R7b
 bash scripts/ci/fo_pk_struct_fss_driver_gate.sh         # R8
 bash scripts/ci/fo_pk_import_fss_driver_gate.sh         # R8b
+bash scripts/ci/fo_pk_struct_ptr_driver_gate.sh         # R9
+bash scripts/ci/fo_pk_import_ptr_driver_gate.sh         # R9b
 ```
 
-Expected: twelve `*_GATE_OK` lines. R1–R4 re-validated 2026-07-31
-(residual-4: `ORAL_CSS_RESIDUAL4_CLOSED`); R5–R8b re-validated 2026-08-01.
+Expected: fourteen `*_GATE_OK` lines. R1–R4 re-validated 2026-07-31
+(residual-4: `ORAL_CSS_RESIDUAL4_CLOSED`); R5–R9b re-validated 2026-08-01.
 
 Full package re-run:
 
@@ -229,6 +245,8 @@ bash scripts/ci/fo_residual4_stack_gate.sh
 | R7b | `examples/epistemic_fo_second_order/fo_pk_import_cmax_driver.sio` |
 | R8 | `examples/epistemic_fo_second_order/fo_pk_struct_fss_driver.sio` |
 | R8b | `examples/epistemic_fo_second_order/fo_pk_import_fss_driver.sio` |
+| R9 | `examples/epistemic_fo_second_order/fo_pk_struct_ptr_driver.sio` |
+| R9b | `examples/epistemic_fo_second_order/fo_pk_import_ptr_driver.sio` |
 
 Compiler prerequisite: FO trust 42/42 — `scripts/ci/madaros_gum_fo_trust_gate.sh`.  
 Stack map: `docs/audit/MADAROS_FO_GUM_STACK_2026-07-27.md`.
