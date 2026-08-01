@@ -101,8 +101,10 @@ Second-order mean correction (when reported):
 | R4 | Import `epistemic::fo` bit-agrees with method / call-result / site | `fo_pk_import_method_driver.sio` | `fo_pk_import_method_driver_gate.sh` | `FO_PK_IMPORT_METHOD_DRIVER_PASS` |
 | R5 | Oral AUC + \(t_{1/2}\) FO; shared-η kel cancel; surface parity | `fo_pk_struct_auc_thalf_driver.sio` | `fo_pk_struct_auc_thalf_driver_gate.sh` | `FO_PK_STRUCT_AUC_THALF_DRIVER_PASS` |
 | R5b | Import `fo_auc`/`fo_thalf` bit-agrees with methods | `fo_pk_import_auc_thalf_driver.sio` | `fo_pk_import_auc_thalf_driver_gate.sh` | `FO_PK_IMPORT_AUC_THALF_DRIVER_PASS` |
+| R6 | \(f_{\mathrm{rem}}\) + Rac FO; shared-η peel; method = peel | `fo_pk_struct_rac_driver.sio` | `fo_pk_struct_rac_driver_gate.sh` | `FO_PK_STRUCT_RAC_DRIVER_PASS` |
+| R6b | Import `fo_rac`/`fo_frac_rem` bit-agrees on freezes | `fo_pk_import_rac_driver.sio` | `fo_pk_import_rac_driver_gate.sh` | `FO_PK_IMPORT_RAC_DRIVER_PASS` |
 
-Re-run all six:
+Re-run all eight:
 
 ```bash
 export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
@@ -114,9 +116,11 @@ bash scripts/ci/fo_pk_struct_multidose_driver_gate.sh
 bash scripts/ci/fo_pk_import_method_driver_gate.sh
 bash scripts/ci/fo_pk_struct_auc_thalf_driver_gate.sh   # R5
 bash scripts/ci/fo_pk_import_auc_thalf_driver_gate.sh   # R5b
+bash scripts/ci/fo_pk_struct_rac_driver_gate.sh         # R6
+bash scripts/ci/fo_pk_import_rac_driver_gate.sh         # R6b
 ```
 
-Expected: six `*_GATE_OK` lines. R1–R4 re-validated 2026-07-31; R5/R5b on 2026-08-01.
+Expected: eight `*_GATE_OK` lines. R1–R4 re-validated 2026-07-31; R5–R6b on 2026-08-01.
 
 Compiler prerequisite (do not claim science freezes without it):
 
@@ -196,6 +200,19 @@ Elimination rate \(\mathrm{kel}=\mathrm{CL}/V\) with **shared** \(\eta\): latent
 | \(\mathrm{Var}(t_{1/2})\) | 0.249835 |
 
 Method = call-result = free-fn = site/peel on all Var freezes. Shared \(\eta\) cancels in kel / \(t_{1/2}\).
+
+### 3.6 Accumulation ratio and residual fraction (R6)
+
+| Quantity | Value |
+|----------|------:|
+| \(f_{\mathrm{rem}}\) | 0.301195 |
+| \(\mathrm{Var}(f_{\mathrm{rem}})\) | 0.000679 |
+| Rac | 1.431014 |
+| \(\mathrm{Var}(\mathrm{Rac})\) | 0.002848 |
+| \(E_2[\mathrm{Rac}]\) | 1.434130 |
+
+Method = peel on both Vars; free-fn matches method. Shared \(\eta\) cancels in kel.
+Multi-mod helpers: `fo_frac_rem`, `fo_rac` (R6b).
 
 ---
 

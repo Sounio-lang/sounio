@@ -103,6 +103,8 @@ Oral Css = (F·Dose/τ)/(CL0·exp(η)). Import driver is the multi-mod free-help
 **Import↔method** (2026-07-31): multi-mod `fo_css`/`fo_clearance`/`fo_infusion_rate` bit-agree with Pk methods, call-result, and call-site composition on Css/CL/rate FO and E₂.  
 **AUC + half-life R5** (2026-08-01): `fo_pk_struct_auc_thalf_driver.sio` — AUC Var=114.6, \(E_2=80.688\); \(t_{1/2}\) Var=0.249835 (= peel); kel Var=5.2e-5; method = call-result = free = site. Gate: `fo_pk_struct_auc_thalf_driver_gate.sh`.  
 **R5b import parity:** `stdlib/epistemic/fo.sio` adds `fo_auc`/`fo_kel`/`fo_thalf`/`fo_volume`; multi-mod bit-agrees with methods (`fo_pk_import_auc_thalf_driver_gate.sh`).  
+**Rac + residual fraction R6** (2026-08-01): `fo_pk_struct_rac_driver.sio` — \(f_{\mathrm{rem}}=0.301195\), Var=0.000679; Rac=1.431014, Var=0.002848, \(E_2=1.434130\); method = peel. Gate: `fo_pk_struct_rac_driver_gate.sh`.  
+**R6b import parity:** `fo_rac`/`fo_frac_rem` multi-mod freezes match method/peel (`fo_pk_import_rac_driver_gate.sh`). Rac FO is heavy — drivers budget ≤5–6 FO sites (multi-site residual silent-exit beyond that).  
 **Algebraic residual-4 closeout** (2026-07-31): pure surfaces definitionally equal + exact-ℚ FO freezes in
 `formal/lean4/SounioFoCssSurfaceParity.lean`; executable certificate
 `scripts/ci/fo_css_surface_parity_gate.sh` (17/17).  

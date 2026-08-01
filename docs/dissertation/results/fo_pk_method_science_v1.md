@@ -127,6 +127,24 @@ Surface parity: method = call-result = free-fn = site/peel on Var freezes.
 
 ---
 
+## 5c. Accumulation ratio + residual fraction (R6, 2026-08-01)
+
+Same \(\mathrm{CL}_0,V_0,\eta\) seeds; fixed \(\tau=12\).  
+\(f_{\mathrm{rem}}=\exp(-\mathrm{kel}\cdot\tau)\), \(\mathrm{Rac}=1/(1-f_{\mathrm{rem}})\).
+
+| Quantity | Value |
+|----------|------:|
+| \(f_{\mathrm{rem}}\) point | 0.301195 |
+| \(\mathrm{Var}(f_{\mathrm{rem}})\) | 0.000679 |
+| Rac point | 1.431014 |
+| \(\mathrm{Var}(\mathrm{Rac})\) | 0.002848 |
+| \(E_2[\mathrm{Rac}]\) | 1.434130 |
+
+Method = peel on both Vars; free-fn Rac matches method under FO site budget.
+**R6b:** multi-mod `fo_rac`/`fo_frac_rem` agree on freezes (`FO_PK_IMPORT_RAC_GATE_OK`).
+
+---
+
 ## 6. How to re-run
 
 ```bash
@@ -139,10 +157,12 @@ bash scripts/ci/fo_pk_struct_multidose_driver_gate.sh
 bash scripts/ci/fo_pk_import_method_driver_gate.sh
 bash scripts/ci/fo_pk_struct_auc_thalf_driver_gate.sh   # R5
 bash scripts/ci/fo_pk_import_auc_thalf_driver_gate.sh   # R5b
+bash scripts/ci/fo_pk_struct_rac_driver_gate.sh         # R6
+bash scripts/ci/fo_pk_import_rac_driver_gate.sh         # R6b
 ```
 
-Expected: six `*_GATE_OK` lines. R1–R4 re-validated 2026-07-31
-(residual-4: `ORAL_CSS_RESIDUAL4_CLOSED`); R5/R5b re-validated 2026-08-01.
+Expected: eight `*_GATE_OK` lines. R1–R4 re-validated 2026-07-31
+(residual-4: `ORAL_CSS_RESIDUAL4_CLOSED`); R5–R6b re-validated 2026-08-01.
 
 Full package re-run:
 
@@ -169,6 +189,8 @@ bash scripts/ci/fo_residual4_stack_gate.sh
 | R4 | `examples/epistemic_fo_second_order/fo_pk_import_method_driver.sio` |
 | R5 | `examples/epistemic_fo_second_order/fo_pk_struct_auc_thalf_driver.sio` |
 | R5b | `examples/epistemic_fo_second_order/fo_pk_import_auc_thalf_driver.sio` |
+| R6 | `examples/epistemic_fo_second_order/fo_pk_struct_rac_driver.sio` |
+| R6b | `examples/epistemic_fo_second_order/fo_pk_import_rac_driver.sio` |
 
 Compiler prerequisite: FO trust 42/42 — `scripts/ci/madaros_gum_fo_trust_gate.sh`.  
 Stack map: `docs/audit/MADAROS_FO_GUM_STACK_2026-07-27.md`.
@@ -186,6 +208,8 @@ Stack map: `docs/audit/MADAROS_FO_GUM_STACK_2026-07-27.md`.
    programs remains open (out of scope). Closeout:
    `docs/research/fo_pk_residual4_oral_css_closeout_2026-07-31.md`.
    Stack: `fo_residual4_stack_gate.sh`.
+5. **R6 multi-site FO budget:** Rac-class FO is heavy; drivers keep ≤5–6 FO
+   sites or silent-exit (rc=0). Nested Rac methods must inline kel.
 
 ---
 
