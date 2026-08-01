@@ -9972,7 +9972,7 @@ impl Checker {
         c
     }
 
-    fn report_error_at(self, span: Span, code: i64, msg_a: i64, msg_b: i64, msg_c: i64) -> Checker with Mut, IO, Panic, Div {
+    fn report_error_at(self, span: Span, code: i64, msg_a: i64, msg_b: i64, msg_c: i64) -> Checker with Mut, IO, Panic, Div, Alloc {
         var c = self
         c.error_count = c.error_count + 1
         c.had_error = true
@@ -9981,6 +9981,12 @@ impl Checker {
         if code < 10 { print("0") }
         print_int(code)
         print("]")
+        // The value-path twin of the naming on checker_report_error_at_inplace.
+        // Both reporters carry the same spans and the same uselessness without it.
+        print(" in ")
+        e035_print_module_path(c.current_module)
+        print("::")
+        e035_print_ident(c.current_fn_name)
         if span.start > 0 || span.end > 0 {
             print(" at ")
             print_int(span.start)
@@ -9993,6 +9999,24 @@ impl Checker {
         // Print help and note if available
         print_error_help(code)
         print_error_note(code)
+        c
+    }
+
+    // Value-path twin of checker_report_private_fn_inplace. Same reason: the
+    // callee is the half that matters, and equal paths with different module ids
+    // are the name-only-lookup false positive rather than a real violation.
+    fn report_private_fn(self, span: Span, sig_id: i64) -> Checker with Mut, IO, Panic, Div, Alloc {
+        var c = self.report_error_at(span, 175, 0, 0, 0)
+        let sig = fn_sig_table_get(c.fn_sigs, sig_id)
+        print("   = callee ")
+        e035_print_module_path(sig.defining_module)
+        print("::")
+        e035_print_ident(sig.name)
+        print("\n   = defining module id ")
+        print_int(sig.defining_module_id)
+        print(", calling from module id ")
+        print_int(c.current_module_id)
+        print("\n")
         c
     }
 
@@ -11784,7 +11808,7 @@ impl Checker {
     // Security hardening: depth and complexity tracking
     // --------------------------------------------------------
 
-    fn check_type_depth(self, span: Span) -> (Checker, bool) with Mut, Panic, Div {
+    fn check_type_depth(self, span: Span) -> (Checker, bool) with Mut, Panic, Div, Alloc {
         var c = self
         if c.type_depth >= MAX_TYPE_DEPTH {
             c = c.report_error_at(span, 60, c.type_depth, MAX_TYPE_DEPTH, 0)
@@ -11802,7 +11826,7 @@ impl Checker {
         c
     }
 
-    fn check_expr_depth(self, span: Span) -> (Checker, bool) with Mut, Panic, Div {
+    fn check_expr_depth(self, span: Span) -> (Checker, bool) with Mut, Panic, Div, Alloc {
         var c = self
         if c.expr_depth >= MAX_EXPR_DEPTH {
             c = c.report_error_at(span, 61, c.expr_depth, MAX_EXPR_DEPTH, 0)
@@ -11820,7 +11844,7 @@ impl Checker {
         c
     }
 
-    fn check_loop_depth(self, span: Span) -> (Checker, bool) with Mut, Panic, Div {
+    fn check_loop_depth(self, span: Span) -> (Checker, bool) with Mut, Panic, Div, Alloc {
         var c = self
         if c.loop_depth >= MAX_LOOP_DEPTH {
             c = c.report_error_at(span, 62, c.loop_depth, MAX_LOOP_DEPTH, 0)
@@ -11829,7 +11853,7 @@ impl Checker {
         (c, true)
     }
 
-    fn check_complexity(self, cost: i64, span: Span) -> (Checker, bool) with Mut, Panic, Div {
+    fn check_complexity(self, cost: i64, span: Span) -> (Checker, bool) with Mut, Panic, Div, Alloc {
         var c = self
         if c.complexity_budget + cost > MAX_TYPE_COMPLEXITY {
             c = c.report_error_at(span, 64, c.complexity_budget, MAX_TYPE_COMPLEXITY, 0)
@@ -18278,6 +18302,10 @@ impl Checker {
         match opt {
             Some(fd) => {
                 var c = self
+                // The in-place checker records this at its two fn entry points;
+                // the value path never did, so every diagnostic reported through
+                // `report_error_at` would have named its caller `<unnamed>`.
+                c.current_fn_name = (*fd).name
                 // Save outer effects context
                 let saved_effects = c.current_effects
                 let saved_effect_count = c.current_effect_count
@@ -18618,7 +18646,7 @@ impl Checker {
         (c, ty_unit())
     }
 
-    fn check_refinement_literal(self, span: Span, ty: TypeEntry) -> Checker with Mut, Panic, Div {
+    fn check_refinement_literal(self, span: Span, ty: TypeEntry) -> Checker with Mut, Panic, Div, Alloc {
         if ty.refinement_id < 0 || ty.refinement_id >= 128 { return self }
         let rt = self.refinements.entries[ty.refinement_id as usize]
         var c = self
@@ -20084,7 +20112,7 @@ impl Checker {
         if callee_ty.kind == TypeKind::TyFn && callee_ty.fn_sig_id >= 0 {
             let sig = fn_sig_table_get(c.fn_sigs, callee_ty.fn_sig_id)
             if c.enforce_visibility && !visibility_allows_access(sig.visibility, sig.defining_module, c.current_module, c.crate_root) {
-                c = c.report_error_at(e.span, 175, 0, 0, 0)
+                c = c.report_private_fn(e.span, callee_ty.fn_sig_id)
             }
             let call_start_borrows = c.borrows
             var effective_params = fn_param_list_clone(&sig.params)
