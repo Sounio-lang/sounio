@@ -13961,7 +13961,46 @@ impl Lowerer {
         }
     }
 
+    // GPU.sync() is a no-op on this backend, and it has to be recognised HERE.
+    //
+    // The checker already accepts it and types it as unit
+    // (checker_expr_is_gpu_sync_call), but nothing lowered it, so it fell
+    // through to the ordinary method-call path: receiver `GPU` is not a local,
+    // and find_or_add_fn_id("sync") then minted a BODY-LESS function. That is
+    // the exact failure the comment below this one warns about, and it took the
+    // compiler down with SIGSEGV -- rc=139, no ELF, on four lines of input:
+    //
+    //     fn main() -> i32 with GPU, IO { perform GPU.sync(); 0 }
+    //
+    // lean_single compiles the same file fine (#1594).
+    //
+    // No-op is the honest semantics, not a stub: the kernel lane loop (#1512)
+    // runs every lane inside the launch before it returns, so by the time sync
+    // is reached there is nothing outstanding to wait for. A device backend
+    // that launches asynchronously would need a real barrier here.
+    fn expr_is_gpu_sync_call_ref(self, e: &Expr) -> bool with Mut, Panic, Div {
+        if (*e).kind != ExprKind::ExprMethodCall {
+            return false
+        }
+        if !ir_name_eq((*e).name, make_name("sync")) {
+            return false
+        }
+        match (*e).left {
+            Some(base) => (*base).kind == ExprKind::ExprIdent && ir_name_eq((*base).name, make_name("GPU")),
+            None => false,
+        }
+    }
+
     fn lower_method_call_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if self.expr_is_gpu_sync_call_ref(e) {
+            // Unit. A plain integer zero -- emit_f64_const would mark the
+            // register as float for a value that is never read.
+            let pair_u = self.fresh_reg()
+            var lo_u = pair_u.0
+            let reg_u = pair_u.1
+            lo_u = lo_u.emit(ir_load_imm(reg_u, 0))
+            return (lo_u, reg_u)
+        }
         // Impl methods are lowered as mangled free functions (ir_mangle_method_name).
         // A `recv.method()` call must resolve to that SAME mangled name; using the bare
         // method name finds/creates a body-less fn -> codegen crash.
