@@ -2055,7 +2055,94 @@ theorem star_gen_low_uu (m j W u v : Nat) (hj : j < m+1) (hW : W < 2^(m+1))
         (tau_lt j (m+1) W hj hW) (tau_lt j (m+1) u hj hu) (tau_lt j (m+1) v hj hv) htv0 htvW]
   exact IH
 
+/-- Generic, `Y` above the seam, both arguments lower. The reduction lands on `Q'`, and
+    `star'_of_star` turns the SAME induction hypothesis into the `Q'` statement it needs -- this
+    is the case that would have forced a mutual induction. -/
+theorem star_gen_hi_ll (m j W a b : Nat) (hj : j < m+1) (hW : W < 2^(m+1))
+    (ha : a < 2^(m+1)) (hb : b < 2^(m+1)) (hb0 : b ≠ 0) (hbW : b ^^^ W ≠ 0)
+    (IH : Qgen W a b (m+1) = Qgen (tau j W) (tau j a) (tau j b) (m+1)) :
+    Qgen (W + 2^(m+1)) a b (m+2)
+      = Qgen (tau j (W + 2^(m+1))) (tau j a) (tau j b) (m+2) := by
+  have htb0 : tau j b ≠ 0 := fun h => hb0 (tau_inj j b 0 (by rw [h, tau_zero]))
+  have htbW : tau j b ^^^ tau j W ≠ 0 := by
+    rw [← tau_xor]; exact fun h => hbW (tau_inj j (b ^^^ W) 0 (by rw [h, tau_zero]))
+  have hQ' : Qgen' W a b (m+1) = Qgen' (tau j W) (tau j a) (tau j b) (m+1) :=
+    star'_of_star (m+1) j W a b hj hW ha hb IH
+  rw [tau_seam j m W hj hW,
+      Qred_hi_ll m W a b hW ha hb hb0 hbW,
+      Qred_hi_ll m (tau j W) (tau j a) (tau j b)
+        (tau_lt j (m+1) W hj hW) (tau_lt j (m+1) a hj ha) (tau_lt j (m+1) b hj hb) htb0 htbW,
+      hQ']
+
+/-- Generic, `Y` above the seam, `a` upper. -/
+theorem star_gen_hi_ul (m j W u b : Nat) (hj : j < m+1) (hW : W < 2^(m+1))
+    (hu : u < 2^(m+1)) (hb : b < 2^(m+1)) (hb0 : b ≠ 0) (hbW : b ^^^ W ≠ 0)
+    (IH : Qgen W u b (m+1) = Qgen (tau j W) (tau j u) (tau j b) (m+1)) :
+    Qgen (W + 2^(m+1)) (u + 2^(m+1)) b (m+2)
+      = Qgen (tau j (W + 2^(m+1))) (tau j (u + 2^(m+1))) (tau j b) (m+2) := by
+  have htb0 : tau j b ≠ 0 := fun h => hb0 (tau_inj j b 0 (by rw [h, tau_zero]))
+  have htbW : tau j b ^^^ tau j W ≠ 0 := by
+    rw [← tau_xor]; exact fun h => hbW (tau_inj j (b ^^^ W) 0 (by rw [h, tau_zero]))
+  have hQ' : Qgen' W u b (m+1) = Qgen' (tau j W) (tau j u) (tau j b) (m+1) :=
+    star'_of_star (m+1) j W u b hj hW hu hb IH
+  rw [tau_seam j m W hj hW, tau_seam j m u hj hu,
+      Qred_hi_ul m W u b hW hu hb hb0 hbW,
+      Qred_hi_ul m (tau j W) (tau j u) (tau j b)
+        (tau_lt j (m+1) W hj hW) (tau_lt j (m+1) u hj hu) (tau_lt j (m+1) b hj hb) htb0 htbW,
+      hQ']
+
+/-- Generic, `Y` above the seam, `b` upper -- one of the two rows where `b ⊕ Y` crosses into the
+    lower half, so the full non-degeneracy is needed. -/
+theorem star_gen_hi_lu (m j W a v : Nat) (hj : j < m+1) (hW : W < 2^(m+1))
+    (ha : a < 2^(m+1)) (hv : v < 2^(m+1))
+    (ha0 : a ≠ 0) (hv0 : v ≠ 0) (haW : a ^^^ W ≠ 0) (hvW : v ^^^ W ≠ 0)
+    (h3 : a ^^^ v ^^^ W ≠ 0)
+    (IH : Qgen W v a (m+1) = Qgen (tau j W) (tau j v) (tau j a) (m+1)) :
+    Qgen (W + 2^(m+1)) a (v + 2^(m+1)) (m+2)
+      = Qgen (tau j (W + 2^(m+1))) (tau j a) (tau j (v + 2^(m+1))) (m+2) := by
+  have hz : ∀ x, x ≠ 0 → tau j x ≠ 0 := fun x hx h => hx (tau_inj j x 0 (by rw [h, tau_zero]))
+  have hta0 := hz a ha0
+  have htv0 := hz v hv0
+  have htaW : tau j a ^^^ tau j W ≠ 0 := by rw [← tau_xor]; exact hz _ haW
+  have htvW : tau j v ^^^ tau j W ≠ 0 := by rw [← tau_xor]; exact hz _ hvW
+  have ht3 : tau j a ^^^ tau j v ^^^ tau j W ≠ 0 := by
+    rw [← tau_xor, ← tau_xor]; exact hz _ h3
+  have hQ' : Qgen' W v a (m+1) = Qgen' (tau j W) (tau j v) (tau j a) (m+1) :=
+    star'_of_star (m+1) j W v a hj hW hv ha IH
+  rw [tau_seam j m W hj hW, tau_seam j m v hj hv,
+      Qred_hi_lu m W a v hW ha hv ha0 hv0 haW hvW h3,
+      Qred_hi_lu m (tau j W) (tau j a) (tau j v)
+        (tau_lt j (m+1) W hj hW) (tau_lt j (m+1) a hj ha) (tau_lt j (m+1) v hj hv)
+        hta0 htv0 htaW htvW ht3,
+      hQ']
+
+/-- Generic, `Y` above the seam, both arguments upper -- the other crossing row. -/
+theorem star_gen_hi_uu (m j W u v : Nat) (hj : j < m+1) (hW : W < 2^(m+1))
+    (hu : u < 2^(m+1)) (hv : v < 2^(m+1))
+    (hu0 : u ≠ 0) (hv0 : v ≠ 0) (huW : u ^^^ W ≠ 0) (hvW : v ^^^ W ≠ 0)
+    (h3 : u ^^^ v ^^^ W ≠ 0)
+    (IH : Qgen W v u (m+1) = Qgen (tau j W) (tau j v) (tau j u) (m+1)) :
+    Qgen (W + 2^(m+1)) (u + 2^(m+1)) (v + 2^(m+1)) (m+2)
+      = Qgen (tau j (W + 2^(m+1))) (tau j (u + 2^(m+1))) (tau j (v + 2^(m+1))) (m+2) := by
+  have hz : ∀ x, x ≠ 0 → tau j x ≠ 0 := fun x hx h => hx (tau_inj j x 0 (by rw [h, tau_zero]))
+  have htu0 := hz u hu0
+  have htv0 := hz v hv0
+  have htuW : tau j u ^^^ tau j W ≠ 0 := by rw [← tau_xor]; exact hz _ huW
+  have htvW : tau j v ^^^ tau j W ≠ 0 := by rw [← tau_xor]; exact hz _ hvW
+  have ht3 : tau j u ^^^ tau j v ^^^ tau j W ≠ 0 := by
+    rw [← tau_xor, ← tau_xor]; exact hz _ h3
+  have hQ' : Qgen' W v u (m+1) = Qgen' (tau j W) (tau j v) (tau j u) (m+1) :=
+    star'_of_star (m+1) j W v u hj hW hv hu IH
+  rw [tau_seam j m W hj hW, tau_seam j m u hj hu, tau_seam j m v hj hv,
+      Qred_hi_uu m W u v hW hu hv hu0 hv0 huW hvW h3,
+      Qred_hi_uu m (tau j W) (tau j u) (tau j v)
+        (tau_lt j (m+1) W hj hW) (tau_lt j (m+1) u hj hu) (tau_lt j (m+1) v hj hv)
+        htu0 htv0 htuW htvW ht3,
+      hQ']
+
 end SounioZDFiberAntisym
+
+
 
 
 
