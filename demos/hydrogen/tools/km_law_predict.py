@@ -37,7 +37,7 @@ def f_scan_dense(tc, n=21):
                 lo, hi = min(lo, v), max(hi, v)
     return lo, hi
 
-def corner_loss(t_k, a, km, salt):
+def corner_loss(t_k, a, km, salt, steps=600):
     t = t_k
     k1 = 10 ** (0.198 - 444.0 / t)
     k2 = 10 ** (2.84 - 2177.0 / t)
@@ -61,7 +61,7 @@ def corner_loss(t_k, a, km, salt):
             r.append(rate)
         return [sum(nu[s][j] * r[j] for j in range(5)) for s in range(6)]
     DT = 0.05
-    for _ in range(600):
+    for _ in range(steps):
         k1v = dc(y)
         y2 = [y[i] + 0.5 * DT * k1v[i] for i in range(6)]
         k2v = dc(y2)
@@ -117,3 +117,43 @@ for name, tlo, thi in sites:
         for tc in [70.0, 75.0, 80.0, 85.0]:
             lo, hi, flo, fhi = law_box(tc + 273.15)
             print(f"    S3 fan extra T={tc:5.1f} C  f=[{flo:.4f},{fhi:.4f}]  law box [{lo:.6f},{hi:.6f}]")
+
+# ─── FIELD VALIDATION predictor (mirrors the additive .sio section) ───
+# field_pred_box: envelope of (k_eff x A x salt) corners at field tc over
+# `steps` 0.05-yr steps; k_eff = k_m x f from the same cardinal p-box.
+def field_pred_box(tc, steps):
+    flo, fhi = f_scan_dense(tc, 11)
+    if fhi == 0.0:
+        kks, nk = (0.0, 0.0), 1
+    else:
+        kks, nk = (KM[0] * flo, KM[1] * fhi), 2
+    lo, hi = 1e9, -1e9
+    for a in AA:
+        for kk in kks[:nk]:
+            for s in SS:
+                l = corner_loss(tc + 273.15, a, kk, s, steps)
+                lo, hi = min(lo, l), max(hi, l)
+    return lo, hi, flo, fhi
+
+print("== FIELD VALIDATION predictions ==")
+# LEHEN (Hellerschmied 2024, DOI 10.1038/s41560-024-01458-1): T=40 C
+# MEASURED, tau 285 d -> steps 15 (273.9 d) / 16 (292.2 d) bracket it.
+for st in (15, 16):
+    lo, hi, flo, fhi = field_pred_box(40.0, st)
+    print(f"  LEHEN tc=40 steps={st} ({st*0.05*365.25:.1f} d)  f=[{flo:.6f},{fhi:.6f}]  pred [{lo:.9f},{hi:.9f}]")
+llo = min(field_pred_box(40.0, 15)[0], field_pred_box(40.0, 16)[0])
+lhi = max(field_pred_box(40.0, 15)[1], field_pred_box(40.0, 16)[1])
+print(f"  LEHEN envelope pred [{llo:.9f},{lhi:.9f}]  obs [3.0,3.2]  ratio obs_lo/pred_hi = {3.0/lhi:.2f}")
+# LOBODICE (Smigan 1990 / Buzek 1994 via Tremosa 2023): T 25-45 C,
+# tau 7 months ~ 210 d -> steps 11 (200.9 d) / 12 (219.2 d).
+blo, bhi = 1e9, -1e9
+for tc in (25.0, 30.0, 35.0, 40.0, 45.0):
+    for st in (11, 12):
+        lo, hi, flo, fhi = field_pred_box(tc, st)
+        blo, bhi = min(blo, lo), max(bhi, hi)
+        print(f"  LOBODICE tc={tc} steps={st} ({st*0.05*365.25:.1f} d)  f=[{flo:.6f},{fhi:.6f}]  pred [{lo:.9f},{hi:.9f}]")
+print(f"  LOBODICE envelope pred [{blo:.9f},{bhi:.9f}]  obs [17.0,31.5]  ratio obs_lo/pred_hi = {17.0/bhi:.2f}")
+print("== f-scan pins ==")
+for tc in (40.0, 45.0):
+    flo, fhi = f_scan_dense(tc, 11)
+    print(f"  ctmi_scan({tc}) = [{flo:.12f}, {fhi:.12f}]")

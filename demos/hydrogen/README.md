@@ -607,6 +607,28 @@ equilibrium-calibration result, not a kinetic law; their rate law is
 closed-access (searched, NOT FOUND). The composed gate probability is
 unchanged (3.635 %, all sites, both paths) — the compressor still gates.
 
+**Field validation (added 2026-08-01).** The sourced law is checked
+against the only field-scale observations with a MEASURED reservoir
+temperature AND measured methanation extent: Lehen (Underground Sun
+Storage, RAG Austria: 40 °C, ~3 % of injected H₂ converted over 285 d —
+Hellerschmied et al. 2024, *Nat. Energy*, DOI
+10.1038/s41560-024-01458-1) and Lobodice (town-gas aquifer: 25–45 °C,
+H₂ 54→37 % over one 7-month season — Šmigáň 1990 / Buzek 1994 via
+Tremosa 2023). The receipt prints per-site observation, source,
+predicted p-box, and a BRACKETED / NOT-BRACKETED verdict. Honest
+result: the CTMI temperature **shape** is consistent (f > 0 exactly in
+the measured 25–45 °C window), but the Bo-2021-anchored ILLUSTRATIVE
+magnitude **under-brackets both field extents** (observed lower edges
+≈ 107× and ≈ 540× the predicted upper edges) — additive evidence for
+recalibrating the magnitude, not the shape; both validated paths are
+untouched. A labeled stress test annualizes the observed extents
+(upper bound) through the same seeded chain: the τ=1 headline survives
+a Lehen-class bloom (gate 3.055 % vs 3.635 %) but moves under a
+Lobodice-class one (0.110 %) — the rounding-term conclusion is
+conditional, printed as such. Tyne 2021 documents no lag phases
+(searched); reservoir Monod parameters exist only as FITTED values —
+both negatives documented in `site_screening_data.md`.
+
 Artifacts:
 
 - `site_screening_data.md` — the sourced parameter table (HRADF,
@@ -620,14 +642,18 @@ Artifacts:
 - `tools/replica_60c_pins.py` — independent Python RK4 replica used for
   the selftest pins.
 - `tools/km_law_predict.py` — independent CTMI + law-path replica
-  (corner-vs-dense scan check, law p-box predictions, selftest pins).
+  (corner-vs-dense scan check, law p-box predictions, field-validation
+  predictions, selftest pins).
 
 Suite coverage: `tests/run-pass/site_screening_selftest.sio` pins the
 60 °C trajectory against the independent replica, the A2 regime switch,
 the k_m corner ordering, the chain analytics, a small seeded MC count,
-and the CTMI law path (f(Topt) = 1, the 11³ scan's f = 1 catch at
+the CTMI law path (f(Topt) = 1, the 11³ scan's f = 1 catch at
 69 °C, a law-scaled trajectory, and the 80 °C law run staying active
-above the slot step) (`SITE_SCREENING_SELFTEST_OK`). lean_single only
+above the slot step), and the field-validation path (cardinal-scan pins
+at 40/45 °C, a 15-step sub-year law trajectory at Lehen's 40 °C vs the
+replica, τ-monotonicity across the 285 d step bracket)
+(`SITE_SCREENING_SELFTEST_OK`). lean_single only
 (same Madaros chemistry-import blocker as the network demo).
 
 ## The stdlib modules (new, reusable)

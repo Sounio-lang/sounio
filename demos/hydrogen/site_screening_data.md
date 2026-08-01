@@ -155,6 +155,110 @@ applies NO temperature correction and has a 2023 corrigendum (DOI
 10.1016/j.rser.2022.113039, closed) touching its estimate equations —
 treated as context, not as a parameter source.
 
+## FIELD VALIDATION of the k_m(T) law — measured in-situ methanation (added 2026-08-01)
+
+The sourced law is checked against the only field-scale underground gas
+storage observations with a MEASURED reservoir temperature AND a measured
+methanation extent. Primaries were hunted down; where paywalled, numbers
+come from multiple independent open reviews that agree (stated per number).
+
+### Field site F1 — Lehen (Underground Sun Storage, RAG Austria, 2016–2017)
+
+Primary: Hellerschmied et al. 2024 (source 18/31; OA, full text quoted).
+
+- **T = 40 °C MEASURED**: "The temperature in the reservoir is 40 °C."
+  Reservoir: 2-m sandstone, Hall formation, Upper Austrian Molasse;
+  1,027 m TVD; initial 107 bar, trial up to 78 bar; brine ~40,000 m³.
+- **Gas**: co-storage of natural gas + "H2 (9.9% (v/v))"; 119,353 m³ H₂
+  injected over 96 d, 112 d shut-in, 76 d withdrawal — 285 d total.
+- **MEASURED H₂ fate**: "We successfully recovered 84.3% of the injected
+  H2" — 15.7 % unrecovered, NOT partitioned (cushion-gas migration ~40 %
+  of the unaccounted, decline-curve estimate; dissolution ≤ 3 % of
+  injected; microbial consumption the remainder).
+- **MEASURED methanation evidence**: "960 m3 of CO2 was consumed
+  throughout the field trial" with "an 87.4% decrease in CO2" during
+  shut-in; δ¹³C_CH4 shift −3.8 ± 0.4 ‰ during shut-in "supports the
+  hypothesis of biological geo-methanation"; methanogenic genera 7.3 →
+  17.0 % relative abundance (61 % of the active community at production;
+  mostly *Methanobacteriaceae*, strictly hydrogenotrophic).
+- **Observed extent used in the demo: [3.0, 3.2] % of injected H₂** —
+  3.0 = "only 3% of the hydrogen converted into methane" (source 28,
+  citing the RAG 2017 project report); 3.2 = DERIVED stoichiometric
+  bound: 960 m³ CO₂ × 4 H₂/CO₂ ÷ 119,353 m³ H₂.
+- Lab mesocosm anchor (reservoir cores+brine, 40 °C, 40 bar): "95% of
+  the CH4 production was completed within 4.9 days", turnover rate
+  0.008 h⁻¹ — LAB, not field.
+
+### Field site F2 — Lobodice town-gas aquifer (Czech Republic, 1965–1991)
+
+Primaries: sources 26/27 — BOTH PAYWALLED; numbers below are verbatim
+from four independent OA reviews that agree (sources 24, 28, 29, 30).
+
+- **T = 25–45 °C seasonal MEASURED** (Thaysen tabulates 20–45 °C):
+  "town gas containing 54% H2 was stored in a sandstone reservoir at a
+  depth of 500 m (pressure of 4 MPa and temperature of 25°C–45°C)"
+  (source 28). Very low salinity 0.03 M, pH 6.7 (source 24).
+- **MEASURED composition shift over one 7-month season**: "The stored
+  gas initially composed of 54% H2, 22% CH4, 12% CO2, 9% CO and 2.5% N2
+  evolved after being stored during 7 months to 40% CH4, 37% H2, 9% CO2,
+  9% N2 and 3% CO", plus "10%–20% of the gas volume was lost" (28).
+- **Observed extent used in the demo: [17.0, 31.5] %** — 17.0 = "A H2
+  consumption of 17 % by methanogens at the Lobodice town gas storage
+  site over a time span of seven months" (24; 29: "up to a 17% decrease
+  in hydrogen ... over a seven month cycle"); 31.5 = DERIVED: the same
+  17 percentage points as a fraction of the injected H₂ (17/54).
+- **CAVEAT (isotope attribution)**: "Buzek et al. (1994) showed that
+  some hydrogen losses are also linked to cap-rock heterogeneities"
+  (28) — the true microbial extent is ≤ the observed drop; the demo
+  brackets the FULL observed drop (conservative for the check).
+- Thaysen's own honesty note: the 17 % "seems exceptional in the light
+  of our calculations and the reported SSR and methanogenesis rates from
+  the field" (24) — the field is FASTER than model expectations, which
+  is exactly what our NOT-BRACKETED verdict reproduces.
+
+### Verdict (printed by the demo, receipt section FIELD VALIDATION)
+
+- LEHEN: predicted law p-box [0, 0.027964] % over 274–292 d vs observed
+  [3.0, 3.2] % → **NOT-BRACKETED**, observed lower edge ≈ 107× the
+  p-box upper edge.
+- LOBODICE: predicted law p-box [0, 0.031462] % over the 25–45 °C ×
+  201–219 d envelope vs observed [17.0, 31.5] % → **NOT-BRACKETED**,
+  observed lower edge ≈ 540× the p-box upper edge.
+- **SHAPE consistent, MAGNITUDE falsified**: the CTMI f p-box is nonzero
+  exactly in the measured 25–45 °C window (f(40 °C) ∈ [0, 0.375]; f up
+  to [0.038, 0.563] at 45 °C) — the temperature shape survives field
+  contact. The Bo-2021-anchored ILLUSTRATIVE magnitude interval
+  [0.0048, 0.0187] does NOT bracket either field extent — it was
+  calibrated on slow (largely abiotic) field loss, not an active
+  methanogen bloom. The demo's validated slot/law paths are UNCHANGED;
+  this is additive evidence pointing at brief limitation §6.1(a).
+- **HEADLINE STRESS TEST (labeled what-if, same seeded chain)**:
+  observed extents annualized LINEARLY (upper bound — loss is concave
+  in time): LEHEN-like → 1-yr loss [3.844737, 4.101053] %, f_s(1) ∈
+  [0.958989, 0.961553], composed P(<6) = **3.055 %** (vs 3.635 %) —
+  the τ=1 headline survives; LOBODICE-like → 1-yr loss [29.567857,
+  54.787500] %, f_s(1) ∈ [0.452125, 0.704321], composed P(<6) =
+  **0.110 %** — the gate moves. Scoping printed in the receipt:
+  Lobodice's conditions are exceptionally favorable (shallow,
+  near-fresh, pH 6.7, 54 % H₂ town gas); the τ=1 rounding-term
+  conclusion is CONDITIONAL on no Lobodice-class bloom.
+
+### Context observations (no verdict — missing T or out of scope)
+
+- BEYNES (France, 1956–1972): "no detected hydrogen consumption in
+  Beynes (France)" (29); H₂S up to 40 ppm (Foh et al. 1979, grey).
+  Reservoir T NOT FOUND → no bracket check possible.
+- KETZIN (Germany, town-gas era): "61% of the volume of hydrogen was
+  lost, corresponding to 8 million m3/year" (source 35, via 28); era
+  reservoir T NOT FOUND → no bracket check possible.
+- SALT CAVERNS (Teesside, Clemens Dome, Moss Bluff, Spindletop, Kiel,
+  Yakshunovskoe): gases "containing up to 95% hydrogen ... since the
+  1970s ... No loss of hydrogen due to its reactivity was observed"
+  (28) — outside this network's scope (no brine-rock loop).
+- OLLA CO₂-EOR (Tyne et al. 2021, source 14): CO₂ injection with H₂
+  generated in-situ from oil degradation — a different process; used
+  only as the community-floor anchor of the [A2] cardinal p-box.
+
 ## NOT FOUND (searched, not sourced — do not use without new data)
 
 - Formation-water **salinity (TDS)** for every screened site (only the
@@ -186,6 +290,31 @@ treated as context, not as a parameter source.
   10.1016/j.ijhydene.2020.12.058) and from the published Thaysen et al.
   2021 + its 2023 corrigendum — all closed; preprint numbers carry the
   corrigendum caveat.
+- **Tyne et al. 2021 "lag phases"** — do not exist: full-text + SI
+  search finds no occurrence of "lag" and no lag times anywhere in the
+  paper (checked 2026-08-01). Closest measured onset data: first
+  detectable CH₄ after 17–254 days in 37 °C bottle incubations of
+  aquifer formation water (source 32) — bottle onset times, not a fitted
+  lag parameter; NOT implemented as a lag path.
+- **MEASURED reservoir-condition Monod parameters** — none: the only
+  reservoir-tuned values are Tremosa 2023's FITTED Lobodice set (28,
+  Table 3: methanogenesis kmax = 7.96e-2 mol/molC/s, K½ = 1.5e-4 mol/L;
+  the lab kmax = 4 mol/molC/s must be divided by ~50 to match the
+  field). Pure-culture measured Ks(H₂)/µmax papers are paywalled with no
+  extractable numbers (21, 33, 20). No separate Monod path implemented —
+  documented negative.
+- **Beynes and Ketzin (town-gas era) reservoir temperatures** — not
+  stated in any accessible source (Foh 1979 and source 35 are offline
+  grey literature), so their observed H₂ fates cannot be bracket-checked.
+- **Underground Sun Conversion (Pilsbach) reservoir temperature + final
+  reports** — USC/USC-FlexStore final reports are gated behind
+  email-request walls; the "USC base" case (20 % H₂ → 11.1 % H₂ after
+  conversion, source 34) is derived from the test series but states no
+  reservoir T. Site is co-located with the USS trial (~40 °C inferred,
+  NOT sourced — not used).
+- **Rubensdorf / Underground Sun Storage 2030 quantitative results** —
+  two pure-H₂ cycles completed April 2025; final report pending; the
+  peer-reviewed account (source 36) has no accessible text yet.
 
 ## Source list (all accessed 2026-07-31)
 
@@ -245,3 +374,38 @@ k_m(T) law-path sources (all accessed 2026-08-01, DOIs Crossref-verified):
 25. Hagemann et al. 2016, *Comput. Geosci.* 20:595–606.
     DOI 10.1007/s10596-015-9515-6 (dimensionless Monod, "very high
     uncertainty" — context only)
+
+Field-validation sources (all accessed 2026-08-01, DOIs Crossref-verified):
+
+26. Šmigáň, Greksák, Kozánková, Buzek, Onderka & Wolf 1990, *FEMS
+    Microbiol. Lett.* 73:221–224. DOI 10.1016/0378-1097(90)90733-7
+    (Lobodice primary; paywalled — numbers via 24/28/29/30)
+27. Buzek, Onderka, Vančura & Wolf 1994, *Fuel* 73:747–752.
+    DOI 10.1016/0016-2361(94)90019-1 (Lobodice isotope attribution,
+    incl. caprock leakage; paywalled)
+28. Tremosa, Jakobsen & Le Gallo 2023, *Front. Energy Res.* 11:1145978.
+    DOI 10.3389/fenrg.2023.1145978 (Lobodice verbatim composition table;
+    Ketzin 61 %; Beynes; salt-cavern negatives; OA)
+29. Heinemann et al. 2021, *Energy Environ. Sci.* 14:853–864.
+    DOI 10.1039/d0ee03536j ("no detected hydrogen consumption in Beynes
+    ... up to a 17% decrease ... in Lobodice over a seven month cycle";
+    OA)
+30. Haddad et al. 2022, *Energy Environ. Sci.* 15:3400–3415.
+    DOI 10.1039/d2ee00765g (Lobodice H₂ 54→37 %, CH₄ 21.9→40 %; OA)
+31. Hellerschmied et al. 2024, *Nature Energy* 9:333–344.
+    DOI 10.1038/s41560-024-01458-1 (Lehen field-trial primary — the
+    same paper as source 18, which cited its mesocosm anchor; OA)
+32. Ranchou-Peyruse et al. 2024, *FEMS Microbiol. Ecol.* 100:fiae066.
+    DOI 10.1093/femsec/fiae066 (first-CH₄ onset 17–254 d at 37 °C in
+    aquifer formation-water incubations; OA)
+33. Kristjansson, Schönheit & Thauer 1982, *Arch. Microbiol.*
+    131:278–282. DOI 10.1007/BF00405893 (canonical Ks(H₂)
+    methanogen-vs-sulfate-reducer comparison; paywalled)
+34. Energies 2022, 15:1021 (Underground Sun Conversion TEA, "USC base"
+    case from the Pilsbach test series). DOI 10.3390/en15031021 (OA)
+35. MARCOGAZ 2017, *Guidance: Injection of hydrogen/natural gas
+    admixtures in underground gas storage (UGS)* (grey literature, no
+    DOI — Ketzin 61 % H₂ loss, quoted via 28)
+36. Andiappan et al. 2026, *Int. J. Hydrogen Energy* (Rubensdorf /
+    USS-2030 field demonstrator account). DOI 10.1016/j.ijhydene.2026.156784
+    (registered; no accessible text yet)

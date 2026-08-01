@@ -8,7 +8,9 @@ per-value citations in `demos/hydrogen/site_screening_data.md`. Figures
 rendered from the demo's own stdout by
 `demos/hydrogen/tools/render_site_figures.py`.
 Revision 2026-08-01: the k_m slot is now printed side-by-side with a
-sourced methanation temperature law (Rosso 1993 CTMI; §3, §6.1).*
+sourced methanation temperature law (Rosso 1993 CTMI; §3, §6.1), and the
+law is checked against measured field-scale in-situ methanation
+(§4, field validation).*
 
 ## 1. Executive summary
 
@@ -20,7 +22,7 @@ H₂-loss p-boxes through the TRIERES wellhead-to-dispensed cost chain to
 the 6 EUR/kg gate.
 
 The headline is a negative result of the useful kind: **at the valley's
-1-year storage residence, which candidate hosts the store barely moves
+1-year storage residence, whichever candidate hosts the store barely moves
 any number that matters** — the availability factor f_s stays within
 ~0.1 % of 1 for every site, the gate probability sits at ~3.6 %
 (composed conventional) for all three, and the distribution-free p-box
@@ -29,13 +31,26 @@ reliability p-box, not the rock, is the gate. Site choice starts to
 matter at longer residence (τ = 10 yr sensitivity, §5) and in the
 kinetic-regime structure the sourced temperatures reveal (§4): the
 three sites sit in three different regimes of the same public network.
+**This conclusion is conditional on the reservoir not hosting a
+Lobodice-class active methanogen bloom (§4, field validation).**
 A 2026-08-01 revision adds a **sourced methanation temperature law**
 (Rosso CTMI with a cardinal-temperature p-box from primary literature)
 printed side-by-side with the original slot: S1's zero is unchanged
 (now from thermal death, not a flag), S3's hard 70 °C cliff becomes a
 smooth physical slide to zero inside [75, 90] °C, and S2's worst-case
 corner flips from cold to warm — while the gate probability stays
-3.635 % on **both** paths for every site.
+3.635 % on **both** paths for every site. The same revision adds a
+**field validation** of that law against the only measured in-situ
+methanation datasets with a sourced temperature (Lehen, 40 °C;
+Lobodice, 25–45 °C): the temperature **shape** survives field contact,
+while the illustrative k_m **magnitude** under-brackets both measured
+field extents by ~2–3 orders of magnitude — an honest, quantified
+pointer at the one piece still awaiting real data (§4, §6.1). The
+receipt's stress test computes what that gap means for the headline:
+at τ = 1 the gate survives a Lehen-class bloom (3.055 % vs 3.635 %)
+but **not** a Lobodice-class one (0.110 %) — the rounding-term
+conclusion is conditional on no Lobodice-class bloom, and we print it
+that way.
 
 **What changes the answer.** Three levers, in order of leverage: (1)
 **compressor reliability evidence** — the gate is set by the R p-box,
@@ -44,7 +59,9 @@ not the rock, so alloy-batch test data moves the headline the most;
 already replaced the hard 70 °C step with a sourced thermal slide; what
 would still reshape the below-Topt numbers is a calibrated *rate
 magnitude* (Ghaedi 2025's closed-access kinetic law, or reservoir-rate
-measurements) and narrower cardinal-temperature brackets; (3)
+measurements — the field validation below quantifies the gap: measured
+in-situ extents exceed the p-box's upper edges by ~10²–10³×) and
+narrower cardinal-temperature brackets; (3)
 **measured S2/S3 formation temperatures** — the gradient-derived
 brackets are the widest honest input intervals in the screen.
 
@@ -167,6 +184,52 @@ sub-cent **on both k_m paths** (law: +0.00000/+0.00040/+0.00039 for
 S1/S2/S3 — plotted as black diamonds); the compressor availability
 (R mid = 0.506) is the cost driver.
 
+**Field validation — the sourced law vs measured in-situ methanation**
+(receipt section FIELD VALIDATION; sources in `site_screening_data.md`).
+Only two field-scale datasets exist with **both** a measured reservoir
+temperature and a measured methanation extent. **Lehen** (Underground
+Sun Storage, RAG Austria 2016–2017 [16]): T = 40 °C measured; ~3 % of
+the injected H₂ converted to CH₄ over 285 days (interval [3.0, 3.2] %:
+the RAG-report figure via [18] and a stoichiometric bound from the
+measured 960 m³ CO₂ consumption). **Lobodice** (Czech town-gas aquifer
+1965–1991 [17, 19]): T = 25–45 °C seasonal; H₂ 54 → 37 % and CH₄
+22 → 40 % over one 7-month season (extent interval [17.0, 31.5] % —
+percentage-points vs fraction-of-injected-H₂ readings; isotope work
+attributes part of the drop to caprock leakage, so the true microbial
+extent is ≤ this, and we still bracket the full drop). For each site
+the law network is re-run at the field temperature over the field
+horizon and the predicted loss p-box is printed against the observed
+extent. Verdicts: **NOT-BRACKETED at both sites** — the Bo-2021-
+anchored magnitude interval's upper prediction (0.028 % and 0.031 %)
+sits ≈ **107×** (Lehen) and ≈ **540×** (Lobodice) below the observed
+lower edges. The **temperature shape, in contrast, is consistent**:
+field methanation is measured exactly in the 25–45 °C window where the
+CTMI f p-box is nonzero-but-suboptimal (f(40 °C) ∈ [0, 0.375]).
+Reading: the shape survives field contact; the illustrative magnitude
+anchor — calibrated on slow, largely abiotic field loss — is now
+**empirically** flagged, not just labeled (§6.1). Nothing is
+recalibrated: both validated paths stand, and the gap is the
+quantified AWAITING-AUTHOR-DATA target. **Headline stress test**
+(labeled what-if, same seeded chain): annualizing the observed extents
+linearly — an upper bound, kinetic loss is concave in time — a
+Lehen-class bloom gives 1-yr loss [3.84, 4.10] %, f_s(1) ∈
+[0.959, 0.962], composed gate **3.055 %** (vs 3.635 %): the τ=1
+headline **survives**; a Lobodice-class bloom gives 1-yr loss
+[29.6, 54.8] %, f_s(1) ∈ [0.452, 0.704], composed gate **0.110 %**:
+the gate **moves** — a Lobodice-class bloom would make the subsurface
+visible at τ = 1. Scoping: Lobodice is a shallow (500 m), near-fresh
+(0.03 M), pH 6.7 aquifer storing 54 % H₂ town gas — Thaysen calls its
+conditions "highly favorable" and its 17 % "exceptional"; S1 is
+measured 95 °C (sterile-hot on both paths) and S2/S3 are deeper,
+warmer, saline, where active blooms can be absent entirely (§6.1(d)).
+The τ=1 rounding-term conclusion is therefore **conditional on no
+Lobodice-class bloom** — and that condition is biological site
+characterization, the identified target. Context rows without verdicts
+(no sourced T, or outside the network's scope): Beynes (no detected
+H₂ consumption [20]), Ketzin town-gas era (61 % H₂ volume lost [18]),
+the salt-cavern pure-H₂ stores (no reactivity loss [18]), and the Olla
+CO₂-EOR (a different process [11]).
+
 ## 5. Where site choice starts to matter
 
 The τ = 10 yr analytic sensitivity: f_s intervals drop to
@@ -183,12 +246,18 @@ ILLUSTRATIVE default), the subsurface is a rounding term at every
 candidate and the characterization euros belong to the compressor
 alloys and the heat/dispensing contracts — same conclusion as the
 valley-chain receipt, now backed by real site temperatures **and** a
-sourced methanation temperature law. That bounding matters precisely
-here: with the methanation sink now enclosed by a sourced temperature
-law (not an open illustrative slot), "the subsurface is a rounding term
-at τ = 1" is a **closed** claim — the dominant uncertainty in the
-subsurface term is parameterized, so the conclusion cannot be overturned
-by an uncharacterized k_m behavior.
+sourced methanation temperature law — **with one condition the field
+validation makes precise.** For the stated k_m interval the claim is
+closed: the dominant subsurface uncertainty is parameterized, so it
+cannot be overturned by an uncharacterized k_m *shape*. But the field
+validation shows the k_m *magnitude* interval may be ~10²–10³× too
+low, and the receipt's stress test computes the consequence: the
+rounding-term headline survives a Lehen-class bloom (composed gate
+3.055 % vs 3.635 %) but **not** a Lobodice-class one (0.110 %). The
+honest statement is therefore: *at τ = 1 the subsurface is a rounding
+term unless the reservoir hosts a Lobodice-class active methanogen
+bloom* — and ruling that in or out is biological site
+characterization, the top subsurface characterization target.
 
 ## 6. Honest limitations
 
@@ -200,8 +269,10 @@ by an uncharacterized k_m behavior.
    is in the receipt, not hidden. Remaining honest seams: (a) the k_m
    **magnitude** interval is still the ILLUSTRATIVE Bo-2021 field-loss
    anchor, now read as the value at Topt — the literature gives the
-   temperature *shape*, not a reservoir rate constant; (b) the CTMI is a
-   microbial *growth* model applied to the pseudo-sink *rate* — a
+   temperature *shape*, not a reservoir rate constant, and the field
+   validation (§4) now quantifies the consequence: the anchor
+   under-brackets both measured in-situ extents by ~10²–10³×; (b) the
+   CTMI is a microbial *growth* model applied to the pseudo-sink *rate* — a
    labeled form transfer (hydrogenotrophic methanogenesis is the
    biological H₂ sink; the network itself stays abiotic-batch); (c)
    Ghaedi 2025's own kinetic law remains closed-access — note their
@@ -215,7 +286,16 @@ by an uncharacterized k_m behavior.
    salting-out interval enters only *physical* H₂ solubility, while the
    k_m sink deliberately models an *active* methanogen community at the
    (unmeasured, Hystories-default) site salinity; (e) Thaysen 2021's compiled rates carry a 2023
-   corrigendum and no T correction — used as context only.
+   corrigendum and no T correction — used as context only; (f) the field
+   validation's NOT-BRACKETED verdicts inherit the network's screening
+   assumptions (batch reactor, fixed pH₂ = 15 atm) and the observations'
+   own caveats (Lobodice's caprock-leakage attribution; Lehen's
+   unpartitioned 15.7 % unrecovered H₂) — the verdict scopes to the
+   *magnitude interval*, stated as such; it is not a refutation of the
+   CTMI shape or of the network. The stress test (§4) computes the
+   headline consequence: the τ=1 rounding-term conclusion survives a
+   Lehen-class bloom but not a Lobodice-class one, so it is a
+   conditional claim — printed as such.
    AWAITING-AUTHOR-DATA: drop the paper's law into the 2-line `km_at`
    slot (or recalibrate the k_m magnitude) and every number re-derives.
 2. **Two of three temperatures are gradient-derived**, not measured —
@@ -285,3 +365,19 @@ env -u SOUC_BIN -u SOUNIO_STDLIB_PATH SOUNIO_SOUC_ENGINE=lean_single \
 15. Berta et al. 2018, *Environ. Sci. Technol.* 52:4937–4949
     (DOI 10.1021/acs.est.7b05467) — negative control (no methanogenesis
     at 2–15 bar H₂).
+16. Hellerschmied et al. 2024, *Nature Energy* 9:333–344
+    (DOI 10.1038/s41560-024-01458-1) — Lehen field-trial primary:
+    T = 40 °C, 84.3 % H₂ recovery, 960 m³ CO₂ consumed.
+17. Šmigáň et al. 1990, *FEMS Microbiol. Lett.* 73:221–224
+    (DOI 10.1016/0378-1097(90)90733-7) — Lobodice primary (paywalled;
+    numbers via [18] and [20]).
+18. Tremosa, Jakobsen & Le Gallo 2023, *Front. Energy Res.* 11:1145978
+    (DOI 10.3389/fenrg.2023.1145978) — Lobodice verbatim composition
+    table; Ketzin, Beynes, salt-cavern context.
+19. Buzek et al. 1994, *Fuel* 73:747–752
+    (DOI 10.1016/0016-2361(94)90019-1) — Lobodice isotope attribution
+    (part of the H₂ loss is caprock leakage).
+20. Heinemann et al. 2021, *Energy Environ. Sci.* 14:853–864
+    (DOI 10.1039/d0ee03536j) — "no detected hydrogen consumption in
+    Beynes ... up to a 17% decrease ... in Lobodice over a seven month
+    cycle".
