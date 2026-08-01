@@ -109,6 +109,12 @@ the prose.
 | C15 | **The limit above C3, and its repair.** C3 binds the build to the *proposition* a check reports. That is still blind to anything preserving the proposition's truth: a flip changing **126 of 128 fiber graphs and every spectrum** leaves `#spectra = 24` intact, so the token holds. A token's resolution is bounded by the **invariance group of its proposition**. Repair, verified: **bind the witness, not the predicate**. | R15 | `TOKEN_RESOLUTION_BOUNDED_BY_PROPOSITION_INVARIANCE` |
 | C16 | **The invariance group, identified.** The blind spot is not "maps preserving the count" but maps acting **within the blocks** of the classification: the flip preserves the *identical set partition* of fibers into spectrum-classes and relabels every block, changing exactly **2 edges per fiber**, because the perturbed pair's home fiber is the one the check never examines. **Any claim whose check tests only the *number* of equivalence classes has this blind spot by construction** — it is a property of predicates that project away the witness. | R16 | `INVARIANCE_GROUP_IS_PARTITION_PRESERVING_NOT_MERELY_COUNT_PRESERVING` |
 
+
+
+The line contains eleven further rungs — R17, R19–R28 — whose results are
+bound to gates but not argued in this paper. They are indexed in Appendix A
+so that a rung is not quietly dropped; none is claimed as a contribution here.
+
 ### Methodological results that generalise
 
 Three by-products of running the line under its own discipline are, we believe,
@@ -1261,6 +1267,32 @@ Every numbered claim is reproducible from the repository:
 - Recorded batteries (too large to regenerate in CI): `scripts/research/r13/`,
   `scripts/research/r14/`, `scripts/research/r15/`, with producing scripts
   alongside.
+
+
+## Appendix A — the rest of the line: bound to gates, not argued here
+
+The rungs below are results of the same line, each with an executable gate and a
+declared verdict token that this paper's contract checks on every run. They are
+**not** claimed as contributions of this paper: their arguments live in their
+rung specs, and a contribution table is a promise about the body. They are listed
+because a rung dropped from the index is a result quietly disappeared — including
+the three (R22, R23, R25) that are findings about this project's own governance
+metadata, which are engineering observations rather than research results and are
+marked as such here rather than promoted by placement.
+
+| Result | Rung | Verdict token |
+|---|---|---|
+| **Witness binding.** A claim may declare a `witness`; the compiler refuses codegen when the gate exits 0 **and** emits exactly the declared token while the evidence establishing it has been replaced — the repair C15 identified. | R17 | `WITNESS_BINDING_IMPLEMENTED__REFUSES_ON_PRESERVED_PROPOSITION` |
+| **Half of C16 derived, two explanations killed.** C16's "two edges per fiber" follows from index arithmetic and the exceptional fiber is predicted rather than observed; two candidate accounts of the remaining half were tested and both failed, leaving one equivariance lemma stated precisely enough to be attacked. | R19 | `LOCALITY_DERIVED__EQUIVARIANCE_REDUCED_TO_ONE_LEMMA` |
+| **Provenance binding.** A claim may declare `provenance = "<path>"`; the compiler refuses codegen when that **path is absent from the tree**, emitting `CLAIM_PROVENANCE_MISSING`. Audit behind it: 2 155 cited artifacts, 93 absent, 8 on an unmerged branch. | R20 | `PROVENANCE_BINDING_IMPLEMENTED__CITED_DERIVATION_MUST_EXIST` |
+| **C16's inference proved, not merely made plausible.** Both relations generating the classification are F₂-linear and fix `h`, so each carries the added edge to the added edge and the partition is preserved; the proof is stated in the rung and completes the lemma R19 isolated. It could not be written until R20 restored the derivation it depends on. | R21 | `EQUIVARIANCE_PROVED__R16_INFERENCE_IS_A_THEOREM` |
+| **A green gate that certifies a constant.** `last_validated` is the string `2026-03-07`, hardcoded at two sites in the registry generator and declared identically by **1 063 of 1 063** governed documents — a date fixed in the generator, not read from any validation event, and earlier than this repository's first commit. CI enforces the constant, so a document recording a real validation date fails the gate. | R22 | `VALIDATION_DATE_IS_A_LITERAL__GATE_REJECTS_THE_TRUE_DATE` |
+| **The sibling field.** `validated_by` is filled from the topic's owner, and every path under `docs/research/` carries the literal `A6` (309/309). The checker enforces equality, so a document naming its real validator fails the gate: the field answers a directory question under a validation name. | R23 | `VALIDATED_BY_IS_PATH_OWNERSHIP__GATE_REJECTS_TRUE_VALIDATOR` |
+| **A binding refused where it would be a rubber stamp.** Of 16 production claims exactly **one** has a derivation its gate does not itself run; for the other 15 a `provenance` field would name a file the gate already fails on if absent. Bound where it carries information and nowhere else, both directions gate-enforced. | R24 | `PROVENANCE_BOUND_WHERE_HONEST__REST_WOULD_BE_HOLLOW` |
+| **The third field in the same header.** `authority` is computed as membership of a **three-literal** whitelist, defaulting everything else to `historical`; **317 of 320** research topics are historical, and claiming to be current without whitelist membership fails the gate. The value records a path property, not an assessment. | R25 | `RESEARCH_AUTHORITY_IS_PATH_DEFAULT_HISTORICAL__GATE_REJECTS_CURRENT` |
+| **The dangling dependency closed by reconstruction.** The oracle R20 found never committed anywhere — loaded with no fallback by the orbit theorem's verifier, which therefore could not run in any checkout — is rebuilt from that verifier's own proof and checked by running it: it reproduces the predicted orbit structure at n = 4, 5, 6, 7. Of the 168 GL(3,2) maps all admit a sign completion and 21 preserve the signed table. | R26 | `ORACLE_RECONSTRUCTED__ORBIT_VERIFIER_RUNS_IN_TREE` |
+| **The literal-field shape found inside the compiler.** By static census of checked-in source: every production claim declares `verdict = Verdict::Alive`, the executor's only read of that field scans the slice for the substring `"archived"`, and the token `Alive` occurs nowhere in the executor. Aliveness is asserted by every claim and tested by none; **1 of 16** binds anything beyond an exit code. | R27 | `CLAIM_LIVENESS_DEFINED__DECLARED_ALIVE_IS_UNCHECKED__1_OF_16_BOUND` |
+| **The question that precedes calibration.** The confidence scalar in `0..1000` with its gate at 950 takes **66 distinct values** over 30.6 M expression tokens — graded, not boolean — while **99.9933 %** of the mass sits at exactly 0 or exactly 1000 and only **891 tokens (0.003 %)** fall strictly between 0 and the gate. Whether 950 is calibrated is a question about a population that barely exists. | R28 | `CONFIDENCE_IS_GRADED_IN_PRINCIPLE__BINARY_IN_PRACTICE` |
 
 ## AI disclosure
 
