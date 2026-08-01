@@ -113,8 +113,10 @@ Second-order mean correction (when reported):
 | R10b | Import `fo_mrt`/`fo_t90` bit-agrees on freezes | `fo_pk_import_mrt_driver.sio` | `fo_pk_import_mrt_driver_gate.sh` | `FO_PK_IMPORT_MRT_DRIVER_PASS` |
 | R11 | LD = Dose·Rac + \(f_e\) FO | `fo_pk_struct_ld_driver.sio` | `fo_pk_struct_ld_driver_gate.sh` | `FO_PK_STRUCT_LD_DRIVER_PASS` |
 | R11b | Import `fo_ld`/`fo_fe` bit-agrees on freezes | `fo_pk_import_ld_driver.sio` | `fo_pk_import_ld_driver_gate.sh` | `FO_PK_IMPORT_LD_DRIVER_PASS` |
+| R12 | \(\mathrm{AUC}_\tau=C_{\mathrm{ss}}\cdot\tau\) FO identity | `fo_pk_struct_auct_driver.sio` | `fo_pk_struct_auct_driver_gate.sh` | `FO_PK_STRUCT_AUCT_DRIVER_PASS` |
+| R12b | Import `fo_auc_tau`/`fo_css_tau` bit-agrees | `fo_pk_import_auct_driver.sio` | `fo_pk_import_auct_driver_gate.sh` | `FO_PK_IMPORT_AUCT_DRIVER_PASS` |
 
-Re-run all eighteen:
+Re-run all twenty:
 
 ```bash
 export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
@@ -138,9 +140,11 @@ bash scripts/ci/fo_pk_struct_mrt_driver_gate.sh         # R10
 bash scripts/ci/fo_pk_import_mrt_driver_gate.sh         # R10b
 bash scripts/ci/fo_pk_struct_ld_driver_gate.sh          # R11
 bash scripts/ci/fo_pk_import_ld_driver_gate.sh          # R11b
+bash scripts/ci/fo_pk_struct_auct_driver_gate.sh        # R12
+bash scripts/ci/fo_pk_import_auct_driver_gate.sh        # R12b
 ```
 
-Expected: eighteen `*_GATE_OK` lines. R1–R4 re-validated 2026-07-31; R5–R11b on 2026-08-01.
+Expected: twenty `*_GATE_OK` lines. R1–R4 re-validated 2026-07-31; R5–R12b on 2026-08-01.
 
 Compiler prerequisite (do not claim science freezes without it):
 
@@ -296,6 +300,17 @@ Multi-mod: `fo_mrt`, `fo_t90` (R10b). Peel MRT Var prints 0.520000 (ULP vs metho
 | \(\mathrm{Var}(f_e)\) | 0.000679 |
 
 Multi-mod: `fo_ld`, `fo_fe` (R11b).
+
+### 3.12 Steady-state \(\mathrm{AUC}_\tau\) (R12)
+
+| Quantity | Value |
+|----------|------:|
+| \(\mathrm{AUC}_\tau\) | 80 |
+| \(\mathrm{Var}(\mathrm{AUC}_\tau)\) | 114.6 |
+| \(E_2[\mathrm{AUC}_\tau]\) | 80.688 |
+| \(\mathrm{Var}(C_{\mathrm{ss}}\cdot\tau)\) | 114.6 |
+
+Multi-mod: `fo_auc_tau`, `fo_css_tau` (R12b). Identity with R5 AUC freezes.
 
 ---
 

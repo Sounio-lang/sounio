@@ -87,6 +87,8 @@ Measured 2026-07-31 on this workspace: **all four `*_GATE_OK`**.
 | R10b | `examples/epistemic_fo_second_order/fo_pk_import_mrt_driver.sio` | `FO_PK_IMPORT_MRT_DRIVER_PASS` |
 | R11 | `examples/epistemic_fo_second_order/fo_pk_struct_ld_driver.sio` | `FO_PK_STRUCT_LD_DRIVER_PASS` |
 | R11b | `examples/epistemic_fo_second_order/fo_pk_import_ld_driver.sio` | `FO_PK_IMPORT_LD_DRIVER_PASS` |
+| R12 | `examples/epistemic_fo_second_order/fo_pk_struct_auct_driver.sio` | `FO_PK_STRUCT_AUCT_DRIVER_PASS` |
+| R12b | `examples/epistemic_fo_second_order/fo_pk_import_auct_driver.sio` | `FO_PK_IMPORT_AUCT_DRIVER_PASS` |
 
 ```bash
 bash scripts/ci/fo_pk_struct_auc_thalf_driver_gate.sh   # R5 AUC + t½ methods
@@ -103,6 +105,8 @@ bash scripts/ci/fo_pk_struct_mrt_driver_gate.sh         # R10 MRT + t90 methods
 bash scripts/ci/fo_pk_import_mrt_driver_gate.sh         # R10b import ↔ method
 bash scripts/ci/fo_pk_struct_ld_driver_gate.sh          # R11 LD + fe methods
 bash scripts/ci/fo_pk_import_ld_driver_gate.sh          # R11b import ↔ method
+bash scripts/ci/fo_pk_struct_auct_driver_gate.sh        # R12 AUC_τ SS methods
+bash scripts/ci/fo_pk_import_auct_driver_gate.sh        # R12b import ↔ method
 ```
 
 ---
@@ -357,14 +361,35 @@ stdlib: `fo_ld`, `fo_fe`.
 
 ---
 
+## 6i. R12 — Steady-state AUC over dosing interval (2026-08-01)
+
+\[
+\mathrm{AUC}_{\tau,\mathrm{ss}}=\frac{F\cdot\mathrm{Dose}}{\mathrm{CL}}=C_{\mathrm{ss}}\cdot\tau.
+\]
+
+Same freezes as R5 oral AUC; Css·τ surface bit-agrees (multi-dose exposure identity).
+
+| Quantity | Value | Surfaces |
+|----------|------:|----------|
+| \(\mathrm{AUC}_\tau\) point | 80 | method |
+| \(\mathrm{Var}(\mathrm{AUC}_\tau)\) | 114.6 | method = Css·τ = fo_auc |
+| \(E_2[\mathrm{AUC}_\tau]\) | 80.688 | method = Css·τ |
+| \(C_{\mathrm{ss}}\) point | 6.666666 | method |
+| \(\mathrm{Var}(C_{\mathrm{ss}})\) | 0.795833 | method (R1) |
+
+Gates: `fo_pk_struct_auct_driver_gate.sh`, `fo_pk_import_auct_driver_gate.sh`.
+stdlib: `fo_auc_tau`, `fo_css_tau` (aliases of `fo_auc` / `fo_css·τ`).
+
+---
+
 ## 7. FO compiler surfaces exercised
 
-| Surface | R1–R4 | R5/b | R6–R10/b | R11/b |
+| Surface | R1–R4 | R5/b | R6–R11/b | R12/b |
 |---------|:-----:|:----:|:--------:|:-----:|
 | Struct-lit methods | ✓ | ✓ | ✓ | ✓ |
-| Multi-mod import | R4 | R5b | R6b–R10b | R11b |
-| Shared FO peel | kel | t½ | f_rem…t90 | LD, fe |
-| \(E_2\) | Css | AUC | Rac…t90 | LD |
+| Multi-mod import | R4 | R5b | R6b–R11b | R12b |
+| Shared FO peel | kel | t½ | f_rem…fe | Css·τ |
+| \(E_2\) | Css | AUC | Rac…LD | AUC_τ |
 
 Compiler prerequisite: Madaros FO trust gate **42/42** (`scripts/ci/madaros_gum_fo_trust_gate.sh`).
 
