@@ -357,6 +357,14 @@ struct Lowerer {
     fo_bind_count: i64,
     fo_bind_names: [Name; 128],
     fo_bind_sens: [i64; 4096],
+    // Second order. H_jk = d2y/dx_j dx_k over the same 8 seed channels, stored
+    // as the upper triangle (36 slots, so_hess_idx below). A slot of -1 means
+    // STRUCTURALLY zero, not "unknown" -- measure() and every projection have
+    // H = 0, so the common case costs no registers at all. Reuses the FO bind
+    // rows so a local carries its Hessian exactly as it carries its gradient.
+    so_enabled: bool,
+    so_expr_hess: [i64; 36],
+    so_bind_hess: [i64; 576],
     // Inter-procedural FO: pure-fn transfer table (survives across function lowers).
     // kind: 0=none 1=id(p0) 2=scale(lit*p0) 3=add(p0+p1) 4=mul(p0*p1) 5=fwd(g)
     fo_xfer_count: i64,
@@ -525,6 +533,9 @@ fn lowerer_new() -> Lowerer with Alloc {
         fo_bind_count: 0,
         fo_bind_names: [ir_empty_name(); 128],
         fo_bind_sens: [-1; 4096],
+        so_enabled: false,
+        so_expr_hess: [-1; 36],
+        so_bind_hess: [-1; 576],
         fo_xfer_count: 0,
         fo_xfer_names: [ir_empty_name(); 64],
         fo_xfer_kind: [0; 64],
@@ -882,6 +893,9 @@ fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEp
         fo_bind_count: 0,
         fo_bind_names: [ir_empty_name(); 128],
         fo_bind_sens: [-1; 4096],
+        so_enabled: false,
+        so_expr_hess: [-1; 36],
+        so_bind_hess: [-1; 576],
         fo_xfer_count: 0,
         fo_xfer_names: [ir_empty_name(); 64],
         fo_xfer_kind: [0; 64],
@@ -937,6 +951,9 @@ fn lowerer_new_from_program_summary_owned(summary: IrProgramSummary, epistemic: 
         fo_bind_count: 0,
         fo_bind_names: [ir_empty_name(); 128],
         fo_bind_sens: [-1; 4096],
+        so_enabled: false,
+        so_expr_hess: [-1; 36],
+        so_bind_hess: [-1; 576],
         fo_xfer_count: 0,
         fo_xfer_names: [ir_empty_name(); 64],
         fo_xfer_kind: [0; 64],
@@ -995,6 +1012,9 @@ fn lowerer_from_acc_module(module: Box<IrModule>) -> Lowerer with Alloc, Mut, Pa
         fo_bind_count: 0,
         fo_bind_names: [ir_empty_name(); 128],
         fo_bind_sens: [-1; 4096],
+        so_enabled: false,
+        so_expr_hess: [-1; 36],
+        so_bind_hess: [-1; 576],
         fo_xfer_count: 0,
         fo_xfer_names: [ir_empty_name(); 64],
         fo_xfer_kind: [0; 64],
@@ -3362,6 +3382,7 @@ fn lowerer_lower_fn_item_mut(
     // rather than appending — so seeding once per function costs three table writes
     // and cannot grow the table beyond its three entries.
     fo_xfer_seed_transcendentals()
+    (*lo).so_enabled = so_block_uses_hessian(&(*fd).body)
     if lower_live_diag_enabled() {
         print("lower_live: fn_before_find_or_add name=")
         print(str_from_bytes(name.buf, name.len))
@@ -4602,6 +4623,109 @@ fn captured_expr_misuses_value(e: &Expr, scan: CapturedClosureValueScan, in_call
                 args2 = &(*node2).tail
             }
             _ => break,
+        }
+    }
+    false
+}
+
+// Does this function ever ask for a Hessian?
+//
+// Second-order propagation is not free: the product rule emits cross terms
+// Sx_j*Sy_k for every float multiply whose operands carry seed channels. And
+// Madaros seeds an FO channel for ANY pure-float `let` (the beta-Madaros
+// behaviour), so fo_nchan is positive throughout an ordinary numeric program
+// -- gating on it filters nothing. dissertation_pbpk28_parity_ref_rapamycin.sio
+// uses no epistemic feature at all and still went from 1714 lines of output to
+// 9 under an ungated build.
+//
+// So the gate has to be the question the emission actually answers: does
+// hessian_of appear in this function. Shape mirrors captured_block_misuses_value
+// below, which walks the same AST.
+fn so_name_is_hessian_of_ident(e: &Expr) -> bool with Mut, Panic, Div {
+    if (*e).kind != ExprKind::ExprIdent { return false }
+    let n = (*e).name
+    n.len == 10
+        && n.buf[0] == 104 as i8 && n.buf[1] == 101 as i8
+        && n.buf[2] == 115 as i8 && n.buf[3] == 115 as i8
+        && n.buf[4] == 105 as i8 && n.buf[5] == 97 as i8
+        && n.buf[6] == 110 as i8 && n.buf[7] == 95 as i8
+        && n.buf[8] == 111 as i8 && n.buf[9] == 102 as i8
+}
+
+fn so_opt_expr_uses_hessian(opt: &Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc {
+    match *opt {
+        Some(e) => so_expr_uses_hessian(&(*e)),
+        None => false,
+    }
+}
+
+fn so_opt_block_uses_hessian(opt: &Option<Box<Block> >) -> bool with Mut, Panic, Div, Alloc {
+    match *opt {
+        Some(b) => so_block_uses_hessian(&(*b)),
+        None => false,
+    }
+}
+
+fn so_expr_list_uses_hessian(opt: &Option<Box<ExprList> >) -> bool with Mut, Panic, Div, Alloc {
+    var cur = opt
+    while true {
+        match *cur {
+            Some(node) => {
+                if so_expr_uses_hessian(&(*node).head) { return true }
+                cur = &(*node).tail
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
+fn so_arms_use_hessian(opt: &Option<Box<MatchArmList> >) -> bool with Mut, Panic, Div, Alloc {
+    var cur = opt
+    while true {
+        match *cur {
+            Some(node) => {
+                if so_expr_uses_hessian(&(*node).head.body) { return true }
+                if so_opt_expr_uses_hessian(&(*node).head.guard) { return true }
+                cur = &(*node).tail
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
+fn so_expr_uses_hessian(e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+    if (*e).kind == ExprKind::ExprCall {
+        match (*e).left {
+            Some(callee) => {
+                if so_name_is_hessian_of_ident(&(*callee)) { return true }
+            }
+            _ => {}
+        }
+    }
+    if so_opt_expr_uses_hessian(&(*e).left) { return true }
+    if so_opt_expr_uses_hessian(&(*e).right) { return true }
+    if so_opt_expr_uses_hessian(&(*e).else_expr) { return true }
+    if so_opt_expr_uses_hessian(&(*e).closure_body) { return true }
+    if so_expr_list_uses_hessian(&(*e).args) { return true }
+    if so_opt_block_uses_hessian(&(*e).block) { return true }
+    if so_opt_block_uses_hessian(&(*e).handler_block) { return true }
+    if so_arms_use_hessian(&(*e).arms) { return true }
+    false
+}
+
+fn so_block_uses_hessian(block: &Block) -> bool with Mut, Panic, Div, Alloc {
+    var cur = &(*block).stmts
+    while true {
+        match *cur {
+            Some(node) => {
+                let stmt = &(*node).head
+                if so_opt_expr_uses_hessian(&(*stmt).expr) { return true }
+                if so_opt_expr_uses_hessian(&(*stmt).target) { return true }
+                cur = &(*node).tail
+            }
+            _ => return false,
         }
     }
     false
@@ -6451,6 +6575,15 @@ impl Lowerer {
         && n.buf[12] == 111 as i8 && n.buf[13] == 102 as i8
     }
 
+    fn name_is_hessian_of(self, n: Name) -> bool with Div {
+        n.len == 10
+        && n.buf[0] == 104 as i8 && n.buf[1] == 101 as i8
+        && n.buf[2] == 115 as i8 && n.buf[3] == 115 as i8
+        && n.buf[4] == 105 as i8 && n.buf[5] == 97 as i8
+        && n.buf[6] == 110 as i8 && n.buf[7] == 95 as i8
+        && n.buf[8] == 111 as i8 && n.buf[9] == 102 as i8
+    }
+
     fn name_is_uncertainty_of(self, n: Name) -> bool with Div {
         n.len == 14
         && n.buf[0] == 117 as i8 && n.buf[1] == 110 as i8
@@ -6482,6 +6615,148 @@ impl Lowerer {
     }
 
     // ─── Multi-channel FO GUM helpers (β-Madaros) ───────────────────────────
+
+    // Upper-triangle index for an 8-channel Hessian, j <= k. Same formula the
+    // test corpus already uses as hess_tri_idx_8, so a slot here and an index
+    // there name the same entry.
+    fn so_hess_idx(self, j: i64, k: i64) -> i64 with Mut, Div {
+        var r = j
+        var c = k
+        if r > c { r = k; c = j }
+        8 * r - (r * (r - 1)) / 2 + (c - r)
+    }
+
+    fn so_clear_expr_hess(self) -> Lowerer with Mut {
+        var lo = self
+        var i: i64 = 0
+        while i < 36 {
+            lo.so_expr_hess[i as usize] = 0 - 1
+            i = i + 1
+        }
+        lo
+    }
+
+    fn so_snapshot_expr_hess(self) -> [i64; 36] with Mut {
+        var snap: [i64; 36] = [-1; 36]
+        var i: i64 = 0
+        while i < 36 {
+            snap[i as usize] = self.so_expr_hess[i as usize]
+            i = i + 1
+        }
+        snap
+    }
+
+    // H(x +- y)_jk = Hx_jk +- Hy_jk. A -1 operand is a structural zero, so the
+    // other side passes through untouched and no register is spent.
+    fn so_combine_hess_addsub(self, hL: [i64; 36], hR: [i64; 36], is_sub: bool) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self.so_clear_expr_hess()
+        var i: i64 = 0
+        while i < 36 {
+            let a = hL[i as usize]
+            let b = hR[i as usize]
+            if a >= 0 && b >= 0 {
+                let d = lo.fresh_reg()
+                lo = d.0
+                let op = if is_sub { BinaryOp::OpSub } else { BinaryOp::OpAdd }
+                lo = lo.emit(ir_binop_typed(d.1, a, op, b, true, true))
+                lo = lo.emit(ir_mark_float_reg(d.1))
+                lo.so_expr_hess[i as usize] = d.1
+            } else if a >= 0 {
+                lo.so_expr_hess[i as usize] = a
+            } else if b >= 0 {
+                if is_sub {
+                    let z = lo.emit_f64_const(0.0)
+                    lo = z.0
+                    lo = lo.emit(ir_mark_float_reg(z.1))
+                    let d = lo.fresh_reg()
+                    lo = d.0
+                    lo = lo.emit(ir_binop_typed(d.1, z.1, BinaryOp::OpSub, b, true, true))
+                    lo = lo.emit(ir_mark_float_reg(d.1))
+                    lo.so_expr_hess[i as usize] = d.1
+                } else {
+                    lo.so_expr_hess[i as usize] = b
+                }
+            }
+            i = i + 1
+        }
+        lo
+    }
+
+    fn so_mul_or_none(self, a: i64, b: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        if a < 0 || b < 0 {
+            return (lo, 0 - 1)
+        }
+        let d = lo.fresh_reg()
+        lo = d.0
+        lo = lo.emit(ir_binop_typed(d.1, a, BinaryOp::OpMul, b, true, true))
+        lo = lo.emit(ir_mark_float_reg(d.1))
+        (lo, d.1)
+    }
+
+    fn so_add_or_take(self, acc: i64, x: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        if x < 0 {
+            return (lo, acc)
+        }
+        if acc < 0 {
+            return (lo, x)
+        }
+        let d = lo.fresh_reg()
+        lo = d.0
+        lo = lo.emit(ir_binop_typed(d.1, acc, BinaryOp::OpAdd, x, true, true))
+        lo = lo.emit(ir_mark_float_reg(d.1))
+        (lo, d.1)
+    }
+
+    // H(x*y)_jk = Hx_jk*y + x*Hy_jk + Sx_j*Sy_k + Sx_k*Sy_j.
+    //
+    // The last two terms are why this cannot be derived from the gradient
+    // alone: for r = c*c*k they are what makes the mixed partial H_ck = 2c
+    // non-zero. A diagonal-only check passes with Sx_j*Sy_k by itself, so
+    // hessian_of(r, 0, 1) is the pin that actually tests this rule.
+    fn so_combine_hess_mul(self, hL: [i64; 36], hR: [i64; 36], sL: [i64; 32], sR: [i64; 32], lhs_v: i64, rhs_v: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self.so_clear_expr_hess()
+        var nch = lo.fo_nchan
+        if nch > 8 { nch = 8 }
+        var j: i64 = 0
+        while j < nch {
+            var k: i64 = j
+            while k < nch {
+                let idx = lo.so_hess_idx(j, k)
+                var acc: i64 = 0 - 1
+
+                let t1 = lo.so_mul_or_none(hL[idx as usize], rhs_v)
+                lo = t1.0
+                let a1 = lo.so_add_or_take(acc, t1.1)
+                lo = a1.0
+                acc = a1.1
+
+                let t2 = lo.so_mul_or_none(lhs_v, hR[idx as usize])
+                lo = t2.0
+                let a2 = lo.so_add_or_take(acc, t2.1)
+                lo = a2.0
+                acc = a2.1
+
+                let c1 = lo.so_mul_or_none(sL[j as usize], sR[k as usize])
+                lo = c1.0
+                let a3 = lo.so_add_or_take(acc, c1.1)
+                lo = a3.0
+                acc = a3.1
+
+                let c2 = lo.so_mul_or_none(sL[k as usize], sR[j as usize])
+                lo = c2.0
+                let a4 = lo.so_add_or_take(acc, c2.1)
+                lo = a4.0
+                acc = a4.1
+
+                lo.so_expr_hess[idx as usize] = acc
+                k = k + 1
+            }
+            j = j + 1
+        }
+        lo
+    }
 
     fn fo_clear_expr_sens(self) -> Lowerer with Mut {
         var lo = self
@@ -6562,6 +6837,69 @@ impl Lowerer {
         while k < 32 {
             lo.fo_expr_sens[k as usize] = snap[k as usize]
             k = k + 1
+        }
+        lo
+    }
+
+    // A local carries its Hessian exactly as it carries its gradient, on the
+    // same bind rows, so `let r = c*c*k` then `hessian_of(r, 0, 1)` reads the
+    // slot the product rule wrote. -1 stays -1: a structurally-zero entry
+    // costs no register and no copy.
+    fn so_expr_has_hess(self) -> bool with Mut {
+        var i: i64 = 0
+        while i < 36 {
+            if self.so_expr_hess[i as usize] >= 0 {
+                return true
+            }
+            i = i + 1
+        }
+        false
+    }
+
+    fn so_bind_local_hess(self, name: Name) -> Lowerer with Mut, Panic, Div {
+        var lo = self
+        // Only claim a bind row when there is actually a Hessian to store.
+        // fo_bind_row_for ALLOCATES, and the table holds 128 rows; calling it
+        // for every `let` filled it on the first few dozen statements of a
+        // 28-state PBPK and starved the first-order bindings that share it.
+        // That is what truncated dissertation_pbpk28_parity_ref_rapamycin from
+        // 1714 lines of output to 9.
+        if !lo.so_expr_has_hess() {
+            return lo
+        }
+        let rp = lo.fo_bind_row_for(name)
+        lo = rp.0
+        let row = rp.1
+        if row < 0 || row >= 16 {
+            return lo
+        }
+        var i: i64 = 0
+        while i < 36 {
+            lo.so_bind_hess[(row * 36 + i) as usize] = lo.so_expr_hess[i as usize]
+            i = i + 1
+        }
+        lo
+    }
+
+    fn so_load_local_hess(self, name: Name) -> Lowerer with Mut, Panic, Div {
+        var lo = self.so_clear_expr_hess()
+        var row: i64 = 0 - 1
+        var i: i64 = 0
+        while i < lo.fo_bind_count {
+            if ir_name_eq(lo.fo_bind_names[i as usize], name) {
+                row = i
+                i = lo.fo_bind_count
+            } else {
+                i = i + 1
+            }
+        }
+        if row < 0 || row >= 16 {
+            return lo
+        }
+        var j: i64 = 0
+        while j < 36 {
+            lo.so_expr_hess[j as usize] = lo.so_bind_hess[(row * 36 + j) as usize]
+            j = j + 1
         }
         lo
     }
@@ -7587,7 +7925,7 @@ impl Lowerer {
                         lo = lo.emit(ir_binop_typed(variance_reg, unc_reg, BinaryOp::OpMul, unc_reg, true, true))
                         lo = lo.emit(ir_mark_float_reg(variance_reg))
                         // Seed FO channel: ∂/∂this = 1 for a fresh measure.
-                        lo = lo.fo_seed_from_variance(variance_reg)
+                        lo = lo.so_clear_expr_hess().fo_seed_from_variance(variance_reg)
                         return (lo, variance_reg)
                     }
                     // Inter-procedural FO via pure-fn transfer table.
@@ -7600,19 +7938,19 @@ impl Lowerer {
                     if lo_x.fo_expr_has_sens() {
                         return lo_x.fo_emit_var_from_sens()
                     }
-                    return (lo_x.fo_clear_expr_sens(), -1)
+                    return (lo_x.fo_clear_expr_sens().so_clear_expr_hess(), -1)
                 }
                 _ => {}
             }
-            return (self.fo_clear_expr_sens(), -1)
+            return (self.fo_clear_expr_sens().so_clear_expr_hess(), -1)
         }
         if (*e).kind == ExprKind::ExprIdent {
             let local_v = self.lookup_local_variance_reg((*e).name)
             if local_v >= 0 {
                 // Prefer bound multi-channel sens; else seed a channel from σ².
-                var lo = self.fo_load_local_sens((*e).name)
+                var lo = self.fo_load_local_sens((*e).name).so_load_local_hess((*e).name)
                 if !lo.fo_expr_has_sens() {
-                    lo = lo.fo_seed_from_variance(local_v)
+                    lo = lo.so_clear_expr_hess().fo_seed_from_variance(local_v)
                 }
                 return (lo, local_v)
             }
@@ -7620,16 +7958,16 @@ impl Lowerer {
             // struct_type was not tagged "Knowledge" (generic Knowledge[f64] path).
             let kn_pair = self.lower_knowledge_variance_for_ident((*e).name)
             if kn_pair.1 >= 0 {
-                var lo2 = kn_pair.0.fo_load_local_sens((*e).name)
+                var lo2 = kn_pair.0.fo_load_local_sens((*e).name).so_load_local_hess((*e).name)
                 if !lo2.fo_expr_has_sens() {
-                    lo2 = lo2.fo_seed_from_variance(kn_pair.1)
+                    lo2 = lo2.so_clear_expr_hess().fo_seed_from_variance(kn_pair.1)
                 }
                 return (lo2, kn_pair.1)
             }
-            return (self.fo_clear_expr_sens(), -1)
+            return (self.fo_clear_expr_sens().so_clear_expr_hess(), -1)
         }
         if (*e).kind == ExprKind::ExprFloatLit || (*e).kind == ExprKind::ExprIntLit {
-            let z = self.fo_clear_expr_sens().emit_zero_variance()
+            let z = self.fo_clear_expr_sens().so_clear_expr_hess().emit_zero_variance()
             return z
         }
         if (*e).kind == ExprKind::ExprFieldAccess {
@@ -7640,7 +7978,7 @@ impl Lowerer {
                             let kn_pair = self.lower_knowledge_variance_for_ident((*base_expr).name)
                             if kn_pair.1 >= 0 {
                                 // Seed/reuse FO channel for this Knowledge seed.
-                                let lo = kn_pair.0.fo_seed_from_variance(kn_pair.1)
+                                let lo = kn_pair.0.so_clear_expr_hess().fo_seed_from_variance(kn_pair.1)
                                 return (lo, kn_pair.1)
                             }
                             return kn_pair
@@ -7649,7 +7987,7 @@ impl Lowerer {
                     _ => {}
                 }
             }
-            return (self.fo_clear_expr_sens(), -1)
+            return (self.fo_clear_expr_sens().so_clear_expr_hess(), -1)
         }
         // Unary negation. Var(-x) = Var(x), but ∂(-x)/∂k = -∂x/∂k, so the variance
         // passes through unchanged while every live channel flips sign. Without this
@@ -7660,10 +7998,25 @@ impl Lowerer {
         if (*e).kind == ExprKind::ExprUnary && (*e).un_op == UnaryOp::OpNeg {
             let pair_in = match (*e).left {
                 Some(inner) => self.lower_expr_variance_ref(&(*inner)),
-                _ => (self.fo_clear_expr_sens(), -1),
+                _ => (self.fo_clear_expr_sens().so_clear_expr_hess(), -1),
             }
             var lo = pair_in.0
             let vin = pair_in.1
+            var hi: i64 = 0
+            while hi < 36 && lo.so_enabled {
+                let hk = lo.so_expr_hess[hi as usize]
+                if hk >= 0 {
+                    let zp2 = lo.emit_f64_const(0.0)
+                    lo = zp2.0
+                    lo = lo.emit(ir_mark_float_reg(zp2.1))
+                    let np2 = lo.fresh_reg()
+                    lo = np2.0
+                    lo = lo.emit(ir_binop_typed(np2.1, zp2.1, BinaryOp::OpSub, hk, true, true))
+                    lo = lo.emit(ir_mark_float_reg(np2.1))
+                    lo.so_expr_hess[hi as usize] = np2.1
+                }
+                hi = hi + 1
+            }
             var k: i64 = 0
             while k < 32 {
                 let sk = lo.fo_expr_sens[k as usize]
@@ -7686,13 +8039,13 @@ impl Lowerer {
         if (*e).kind == ExprKind::ExprBinary {
             let same_ident = self.expr_is_same_ident_ref(&(*e).left, &(*e).right)
             if same_ident && (*e).bin_op == BinaryOp::OpSub {
-                let z = self.fo_clear_expr_sens().emit_zero_variance()
+                let z = self.fo_clear_expr_sens().so_clear_expr_hess().emit_zero_variance()
                 return z
             }
             // Lower left FO (variance + sens), snapshot sens before right overwrites.
             let pair_lv = match (*e).left {
                 Some(l_expr) => self.lower_expr_variance_ref(&(*l_expr)),
-                _ => (self.fo_clear_expr_sens(), -1),
+                _ => (self.fo_clear_expr_sens().so_clear_expr_hess(), -1),
             }
             var lo = pair_lv.0
             let lv0 = pair_lv.1
@@ -7700,11 +8053,12 @@ impl Lowerer {
             lo = lv_pair.0
             let lv = lv_pair.1
             let sL = lo.fo_snapshot_expr_sens()
+            let hL = lo.so_snapshot_expr_hess()
 
             let pair_rv = match (*e).right {
                 Some(r_expr) => lo.lower_expr_variance_ref(&(*r_expr)),
                 _ => {
-                    let lo2 = lo.fo_clear_expr_sens()
+                    let lo2 = lo.fo_clear_expr_sens().so_clear_expr_hess()
                     (lo2, -1)
                 },
             }
@@ -7714,11 +8068,15 @@ impl Lowerer {
             lo = rv_pair.0
             let rv = rv_pair.1
             let sR = lo.fo_snapshot_expr_sens()
+            let hR = lo.so_snapshot_expr_hess()
 
             // Multi-channel FO path when either side carries seed sensitivities.
             if lo.fo_expr_or_snap_has_sens(sL) {
                 if (*e).bin_op == BinaryOp::OpAdd || (*e).bin_op == BinaryOp::OpSub {
                     let is_sub = (*e).bin_op == BinaryOp::OpSub
+                    if lo.so_enabled {
+                        lo = lo.so_combine_hess_addsub(hL, hR, is_sub)
+                    }
                     lo = lo.fo_combine_sens_addsub(sL, sR, is_sub)
                     return lo.fo_emit_var_from_sens()
                 }
@@ -7730,6 +8088,9 @@ impl Lowerer {
                     let rhs_val_pair = lo.lower_opt_expr_ref(&(*e).right)
                     lo = rhs_val_pair.0
                     let rhs_v = rhs_val_pair.1
+                    if lo.so_enabled {
+                        lo = lo.so_combine_hess_mul(hL, hR, sL, sR, lhs_v, rhs_v)
+                    }
                     lo = lo.fo_combine_sens_mul(sL, sR, lhs_v, rhs_v)
                     return lo.fo_emit_var_from_sens()
                 }
@@ -7740,13 +8101,17 @@ impl Lowerer {
                     let rhs_val_pair = lo.lower_opt_expr_ref(&(*e).right)
                     lo = rhs_val_pair.0
                     let rhs_v = rhs_val_pair.1
+                    // No second-order rule for division in this increment. Clear
+                    // rather than leave an operand's Hessian standing in for the
+                    // quotient's -- that would be a wrong number, not a missing one.
+                    lo = lo.so_clear_expr_hess()
                     lo = lo.fo_combine_sens_div(sL, sR, lhs_v, rhs_v)
                     return lo.fo_emit_var_from_sens()
                 }
             }
 
             // ── Legacy scalar-variance algebra (no FO seeds) ──
-            lo = lo.fo_clear_expr_sens()
+            lo = lo.fo_clear_expr_sens().so_clear_expr_hess()
             if (*e).bin_op == BinaryOp::OpAdd || (*e).bin_op == BinaryOp::OpSub {
                 if same_ident && (*e).bin_op == BinaryOp::OpAdd {
                     let two_pair = lo.emit_f64_const(2.0)
@@ -7867,7 +8232,7 @@ impl Lowerer {
                         return self.lower_if_arm_variance_ref(&(*else_e))
                     }
                     _ => {
-                        return (self.fo_clear_expr_sens(), -1)
+                        return (self.fo_clear_expr_sens().so_clear_expr_hess(), -1)
                     }
                 }
             }
@@ -7891,7 +8256,7 @@ impl Lowerer {
         if (*e).kind == ExprKind::ExprBlock {
             return self.lower_block_tail_variance_ref(&(*e).block)
         }
-        (self.fo_clear_expr_sens(), -1)
+        (self.fo_clear_expr_sens().so_clear_expr_hess(), -1)
     }
 
     // if-arm may be a bare expr or an ExprBlock wrapping a block.
@@ -8817,7 +9182,8 @@ impl Lowerer {
                     let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
                     if self.name_is_variance_of(callee_name)
                         || self.name_is_uncertainty_of(callee_name)
-                        || self.name_is_sensitivity_of(callee_name) {
+                        || self.name_is_sensitivity_of(callee_name)
+                        || self.name_is_hessian_of(callee_name) {
                         return true
                     }
                     let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
@@ -10823,6 +11189,7 @@ impl Lowerer {
                         if lo.fo_expr_has_sens() {
                             lo = lo.fo_bind_local_sens(s.name)
                         }
+                        lo = lo.so_bind_local_hess(s.name)
                     }
                 }
                 _ => {}
@@ -10927,6 +11294,7 @@ impl Lowerer {
                         if lo.fo_expr_has_sens() {
                             lo = lo.fo_bind_local_sens(s.name)
                         }
+                        lo = lo.so_bind_local_hess(s.name)
                         // Do NOT force scalar_kind=2 (float) here. A variance reg is
                         // produced for every tracked value, including INT locals
                         // (variance 0); the value's scalar_kind was already set
@@ -12429,6 +12797,60 @@ impl Lowerer {
         }
     }
 
+    // hessian_of(x, j, k): read the upper-triangle slot the second-order rules
+    // left behind. Indices must be LITERALS -- lean_single reads them the same
+    // way, and the corpus itself documents that runtime indices return wrong
+    // values. A non-literal index yields 0.0 rather than a slot chosen from a
+    // register's runtime contents, which would be a wrong number dressed as a
+    // right one. An empty slot is a genuine zero: x is linear in that pair.
+    fn lower_hessian_of_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        match *args {
+            Some(list) => {
+                let pair_v = self.lower_expr_variance_ref(&(*list).head)
+                var lo = pair_v.0
+                var j: i64 = 0 - 1
+                var k: i64 = 0 - 1
+                match (*list).tail {
+                    Some(rest) => {
+                        if (*rest).head.kind == ExprKind::ExprIntLit && (*rest).head.int_val >= 0 {
+                            j = (*rest).head.int_val
+                        }
+                        match (*rest).tail {
+                            Some(rest2) => {
+                                if (*rest2).head.kind == ExprKind::ExprIntLit && (*rest2).head.int_val >= 0 {
+                                    k = (*rest2).head.int_val
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+                if j >= 0 && j < 8 && k >= 0 && k < 8 {
+                    let idx = lo.so_hess_idx(j, k)
+                    let slot = lo.so_expr_hess[idx as usize]
+                    if slot >= 0 {
+                        let cp = lo.fresh_reg()
+                        lo = cp.0
+                        lo = lo.emit(ir_copy(cp.1, slot))
+                        lo = lo.emit(ir_mark_float_reg(cp.1))
+                        return (lo, cp.1)
+                    }
+                }
+                let z = lo.emit_f64_const(0.0)
+                var lo_z = z.0
+                lo_z = lo_z.emit(ir_mark_float_reg(z.1))
+                (lo_z, z.1)
+            }
+            _ => {
+                let z = self.emit_f64_const(0.0)
+                var lo_z = z.0
+                lo_z = lo_z.emit(ir_mark_float_reg(z.1))
+                (lo_z, z.1)
+            }
+        }
+    }
+
     fn lower_uncertainty_of_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let pair_v = self.lower_variance_of_call_ref(args)
         var lo = pair_v.0
@@ -12852,6 +13274,9 @@ impl Lowerer {
         }
         if self.name_is_sensitivity_of(callee_name) {
             return self.lower_sensitivity_of_call_ref(&e.args)
+        }
+        if self.name_is_hessian_of(callee_name) {
+            return self.lower_hessian_of_call_ref(&e.args)
         }
         if self.contest_witness_kind_from_callee(callee_name) >= 0 {
             return self.lower_contest_witness_call(e.span, callee_name)
