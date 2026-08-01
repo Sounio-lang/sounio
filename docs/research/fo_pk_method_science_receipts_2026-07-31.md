@@ -83,6 +83,8 @@ Measured 2026-07-31 on this workspace: **all four `*_GATE_OK`**.
 | R8b | `examples/epistemic_fo_second_order/fo_pk_import_fss_driver.sio` | `FO_PK_IMPORT_FSS_DRIVER_PASS` |
 | R9 | `examples/epistemic_fo_second_order/fo_pk_struct_ptr_driver.sio` | `FO_PK_STRUCT_PTR_DRIVER_PASS` |
 | R9b | `examples/epistemic_fo_second_order/fo_pk_import_ptr_driver.sio` | `FO_PK_IMPORT_PTR_DRIVER_PASS` |
+| R10 | `examples/epistemic_fo_second_order/fo_pk_struct_mrt_driver.sio` | `FO_PK_STRUCT_MRT_DRIVER_PASS` |
+| R10b | `examples/epistemic_fo_second_order/fo_pk_import_mrt_driver.sio` | `FO_PK_IMPORT_MRT_DRIVER_PASS` |
 
 ```bash
 bash scripts/ci/fo_pk_struct_auc_thalf_driver_gate.sh   # R5 AUC + t½ methods
@@ -95,6 +97,8 @@ bash scripts/ci/fo_pk_struct_fss_driver_gate.sh         # R8 f_ss + n90 methods
 bash scripts/ci/fo_pk_import_fss_driver_gate.sh         # R8b import ↔ method
 bash scripts/ci/fo_pk_struct_ptr_driver_gate.sh         # R9 PTR + DOF methods
 bash scripts/ci/fo_pk_import_ptr_driver_gate.sh         # R9b import ↔ method
+bash scripts/ci/fo_pk_struct_mrt_driver_gate.sh         # R10 MRT + t90 methods
+bash scripts/ci/fo_pk_import_mrt_driver_gate.sh         # R10b import ↔ method
 ```
 
 ---
@@ -304,14 +308,37 @@ stdlib: `fo_ptr`, `fo_dof`.
 
 ---
 
+## 6g. R10 — MRT + time to 90% SS (hours) (2026-08-01)
+
+\[
+\mathrm{MRT}=\frac{1}{\mathrm{kel}}=\frac{V}{\mathrm{CL}},\qquad
+t_{90}=\frac{\ln 10}{\mathrm{kel}}=n_{90}\cdot\tau.
+\]
+
+Links R5 \(t_{1/2}=\ln 2\cdot\mathrm{MRT}\) and R8 \(n_{90}=t_{90}/\tau\).
+
+| Quantity | Value | Surfaces |
+|----------|------:|----------|
+| MRT point | 10.000000 | method |
+| \(\mathrm{Var}(\mathrm{MRT})\) | 0.519999 (method/import) / 0.520000 (peel) | ULP on FO path |
+| \(E_2[\mathrm{MRT}]\) | 10.035999 | method |
+| \(t_{90}\) point | 23.025850 | method |
+| \(\mathrm{Var}(t_{90})\) | 2.756987 | method = peel = import |
+| \(E_2[t_{90}]\) | 23.108743 | method |
+
+Gates: `fo_pk_struct_mrt_driver_gate.sh`, `fo_pk_import_mrt_driver_gate.sh`.
+stdlib: `fo_mrt`, `fo_t90`.
+
+---
+
 ## 7. FO compiler surfaces exercised
 
-| Surface | R1–R4 | R5/b | R6/b | R7/b | R8/b | R9/b |
-|---------|:-----:|:----:|:----:|:----:|:----:|:----:|
-| Struct-lit methods | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Multi-mod import | R4 | R5b | R6b | R7b | R8b | R9b |
-| Shared FO peel | kel | t½ | f_rem | PTF | f_ss, n90 | PTR, DOF |
-| \(E_2\) | Css | AUC | Rac | Cmax | f_ss(3) | PTR |
+| Surface | R1–R4 | R5/b | R6–R9/b | R10/b |
+|---------|:-----:|:----:|:-------:|:-----:|
+| Struct-lit methods | ✓ | ✓ | ✓ | ✓ |
+| Multi-mod import | R4 | R5b | R6b–R9b | R10b |
+| Shared FO peel | kel | t½ | f_rem…DOF | MRT, t90 |
+| \(E_2\) | Css | AUC | Rac…PTR | MRT, t90 |
 
 Compiler prerequisite: Madaros FO trust gate **42/42** (`scripts/ci/madaros_gum_fo_trust_gate.sh`).
 
