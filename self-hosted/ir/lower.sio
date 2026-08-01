@@ -890,16 +890,17 @@ fn lowerer_preseed_impl_method_summaries_dedup_mut(
     }
 }
 
-// Preseed a dependency's items into the accumulator. Descent registers every
-// signature/layout before unwind lowers still-bodyless free functions. Keeping
-// both phases in one recursive traversal avoids reopening the one-shot borrowed
-// ItemList under the bootstrap compiler.
+// Preseed a dependency's items into the accumulator. The caller keeps the
+// directly parsed Program alive, so signatures and bodies can use separate
+// constant-stack passes without reopening an array-borrowed AST.
 fn lowerer_preseed_dep_items_into_acc_mut(
     lo: &! Lowerer,
     items: &Option<Box<ItemList>>,
     skip_name: Name
-) with Mut, Panic, Div, Alloc, IO {
-        match *items {
+) with Mut, Panic, Div, Alloc {
+    var current = items
+    while true {
+        match *current {
             Some(list) => {
                 let head = &(*list).head
                 let kind = head.kind
@@ -1026,38 +1027,11 @@ fn lowerer_preseed_dep_items_into_acc_mut(
                         _ => {}
                     }
                 }
-                lowerer_preseed_dep_items_into_acc_mut(lo, &(*list).tail, skip_name)
-
-                if kind == ItemKind::ItemFn
-                    && !lowerer_name_is_main(name)
-                    && !ir_name_eq(name, skip_name)
-                {
-                    var body_box = (*lo).module
-                    var has_body: bool = false
-                    var bfi: i64 = 0
-                    while bfi < (*body_box).fn_count {
-                        if ir_name_eq((*body_box).functions[bfi as usize].name, name)
-                            && (*body_box).functions[bfi as usize].instr_count > 0
-                        {
-                            has_body = true
-                        }
-                        bfi = bfi + 1
-                    }
-                    (*lo).module = body_box
-
-                    if !has_body {
-                        let unwind_fn_def_ref: &Option<Box<FnDef>> = &head.fn_def
-                        match *unwind_fn_def_ref {
-                            Some(fd) => {
-                                lowerer_lower_fn_item_mut(lo, name, &(*fd))
-                            }
-                            _ => {}
-                        }
-                    }
-                }
+                current = &(*list).tail
             }
-            _ => {}
+            _ => break
         }
+    }
 }
 
 // Body-lower dep items into acc, skipping names that already have bodies (DEDUP)
