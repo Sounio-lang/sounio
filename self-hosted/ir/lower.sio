@@ -3214,6 +3214,44 @@ fn lowerer_lookup_local_reg_ref(lo: &Lowerer, name: Name) -> i64 with Mut, Panic
     IR_INVALID_REG
 }
 
+fn lowerer_lookup_simple_local_reg_ref(lo: &Lowerer, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+    var i = (*(*lo).locals).count - 1
+    while i >= 0 {
+        if (*(*lo).locals).depths[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*lo).locals).names[i as usize], name) {
+            if (*(*lo).locals).is_global[i as usize] == 0 && (*(*lo).locals).closure_fn_id[i as usize] < 0 {
+                return (*(*lo).locals).regs[i as usize]
+            }
+            return IR_INVALID_REG
+        }
+        i = i - 1
+    }
+    IR_INVALID_REG
+}
+
+fn lowerer_lookup_local_is_ref_ref(lo: &Lowerer, name: Name) -> bool with Mut, Panic, Div, Alloc {
+    var i = (*(*lo).locals).count - 1
+    while i >= 0 {
+        if (*(*lo).locals).depths[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*lo).locals).names[i as usize], name) {
+            return (*(*lo).locals).is_ref[i as usize] == 1
+        }
+        i = i - 1
+    }
+    false
+}
+
+fn lowerer_mark_reg_array_elem_float_mut(lo: &! Lowerer, reg: i64) with Mut, Panic, Div {
+    if reg < 0 { return }
+    var i: i64 = 0
+    while i < (*lo).array_elem_float_reg_count {
+        if (*lo).array_elem_float_regs[i as usize] == reg { return }
+        i = i + 1
+    }
+    if (*lo).array_elem_float_reg_count < 512 {
+        (*lo).array_elem_float_regs[(*lo).array_elem_float_reg_count as usize] = reg
+        (*lo).array_elem_float_reg_count = (*lo).array_elem_float_reg_count + 1
+    }
+}
+
 fn lowerer_first_arg_needs_hof_dispatch_ref(lo: &Lowerer, args: &Option<Box<ExprList>>) -> bool with Mut, Panic, Div, Alloc {
     match *args {
         Some(list) => {
@@ -3455,6 +3493,12 @@ fn lowerer_lower_expr_mut(
     lo: &! Lowerer,
     e: &Expr
 ) -> i64 with Mut, Panic, Div, Alloc, IO {
+    if (*e).kind == ExprKind::ExprIdent {
+        let local_reg = lowerer_lookup_simple_local_reg_ref(&(*lo), (*e).name)
+        if local_reg >= 0 {
+            return local_reg
+        }
+    }
     if (*e).kind == ExprKind::ExprBinary {
         return lowerer_lower_binary_expr_mut(lo, e)
     }
@@ -3485,6 +3529,39 @@ fn lowerer_lower_expr_mut(
     }
     if (*e).kind == ExprKind::ExprIf && lowerer_if_has_terminal_print_blocks_ref(e) {
         return lowerer_lower_terminal_print_if_mut(lo, e)
+    }
+    if (*e).kind == ExprKind::ExprFieldAccess {
+        if lower_live_diag_enabled() { print("lower_live: field_base_begin\n") }
+        let base = lowerer_lower_opt_expr_mut(lo, &(*e).left)
+        if lower_live_diag_enabled() { print("lower_live: field_base_done\n") }
+        let fidx = (*lo).field_idx_for_base_ref(&(*e).left, (*e).name)
+        if lower_live_diag_enabled() { print("lower_live: field_index_done\n") }
+        let field_is_float = (*lo).field_is_float_for_base_ref(&(*e).left, (*e).name) || (*lo).field_is_float_by_name_simple((*e).name)
+        let field_array_elem_is_float = (*lo).field_array_elem_is_float_for_base_ref(&(*e).left, (*e).name)
+        if lower_live_diag_enabled() { print("lower_live: field_kind_done\n") }
+        let base_is_ref = match (*e).left {
+            Some(base_expr) => {
+                if (*base_expr).kind == ExprKind::ExprIdent {
+                    lowerer_lookup_local_is_ref_ref(&(*lo), (*base_expr).name)
+                } else {
+                    false
+                }
+            }
+            None => false,
+        }
+        let dst = lowerer_fresh_reg_mut(lo)
+        var instr = ir_field_get(dst, base, fidx, (*e).name)
+        if base_is_ref { instr.label_id = 1 }
+        if field_is_float || field_array_elem_is_float { instr.imm_flags = IR_FLOAT_REG_MARKER_FLAG }
+        lowerer_emit_mut(lo, instr)
+        if instr.imm_flags == IR_FLOAT_REG_MARKER_FLAG {
+            lowerer_emit_mut(lo, ir_mark_float_reg(dst))
+        }
+        if field_array_elem_is_float {
+            lowerer_mark_reg_array_elem_float_mut(lo, dst)
+        }
+        if lower_live_diag_enabled() { print("lower_live: field_done\n") }
+        return dst
     }
     let pair = (*lo).lower_expr_ref(e)
     (*lo) = pair.0
