@@ -611,10 +611,19 @@ Each of these is recorded in the rung specs and survives into the paper.
   witness. The mechanism's value at corpus scale is unmeasured, not negative.
 - **Shared misinterpretation stands** (§2.5). A witness binds *which* evidence;
   it cannot say the evidence is well-founded.
-- **The module-closure wall stands.** Claims execute only in the main source
-  file; a library whose scientific premise has been refuted passes silently
-  into every dependent build (rung R1, `MODULE_CLOSURE_BLOCKS` [17, §2]).
-  Witness binding does not widen where claims run.
+- **The module-closure wall is gone, and it was not witness binding that
+  removed it.** At R1 claims executed only in the main source file, so a library
+  whose scientific premise had been refuted passed silently into every dependent
+  build. R29 gave claim verification a walk over the module closure
+  (`MODULE_CLOSURE_PASSES` [17, §2]). Because a witness is checked inside the
+  per-claim loop that walk now wraps, witnesses are checked wherever claims are:
+  under `--verify-claims`, anywhere in a build's transitive import closure. The
+  distinction worth keeping is about *credit*, not scope — nothing in the witness
+  mechanism widened anything; it inherited a wider domain from a change made
+  elsewhere, and would still run only on the main file had that change not
+  landed. The limitation this bullet was really recording therefore stands
+  untouched and is the first one in this list: **one claim of ~295 declares a
+  witness**, so what the wider domain currently reaches is one claim.
 - **The capture path is fixed, and the race is real but degrades fail-closed.**
   The executor captures every gate's output at one container-wide path, so two
   concurrent `--verify-claims` compiles can interleave and a build can read

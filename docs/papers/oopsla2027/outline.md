@@ -78,7 +78,7 @@ derivation of that function already sitting unused in the repository.
 | # | Contribution | Rung | Verdict token |
 |---|---|---|---|
 | C1 | An implementation of claim-gated code generation in a self-hosted compiler. **Not a novel capability** (cf. `build.rs`, §8.1); reported because the rest is measured on it. | R0 | `SUBSTRATE_LIVE__CORPUS_BOUND__HISTORICAL_FAILURES_ARE_INTERPRETIVE` |
-| C2 | What it costs to attach such a guard to a real corpus, and the wall it hits: claims in **imported modules never execute**. | R1 | `BOUND_16__MODULE_CLOSURE_BLOCKS` |
+| C2 | **What it costs to attach such a guard to a real corpus** (R1), and **a limitation of this mechanism removed** (R29). Verification ran on the main source file only, so a refuted claim in an imported module was never checked; it now walks the transitive import closure, so under `--verify-claims` a premise refuted anywhere in that closure blocks the build. Measured past one hop: a claim refuted **two** imports away blocks (`modules=3`), and a diamond visits its shared leaf **once** (`modules=4, pass=4`). Propagation across dependency edges is **not** novel — a failing `build.rs` already fails its dependents (§8.1) — so what is claimed here is the cost measurement and the repair, not the propagation. | R1, R29 | `BOUND_16__MODULE_CLOSURE_PASSES`; `CLOSURE_WALKED__MODULE_CLOSURE_PASSES` |
 | C3 | **Verdict-token binding**: bind the build to the *proposition* a check reports, where prior art binds an exit status or a literal output. | R2 | `TOKEN_BINDING_IMPLEMENTED__CATCHES_DRIFT_NOT_MISINTERPRETATION` |
 | C4 | *Drift* vs *shared misinterpretation*, with an argument that the latter is out of reach, and a test of what does reach it. | R3 | `FALSIFIERS_NONVACUOUS_ONLY_FOR_CLOSED_FORM_CLAIMS` |
 | C5 | A retrospective under a predicate **fixed before the study ran**: a negative result and a degenerate arm, reported as such. | R4 | `RETROSPECTIVE_RUN__SOME_ARM_FIRED` |
@@ -107,6 +107,8 @@ derivation of that function already sitting unused in the repository.
 | C26 | **The dangling dependency closed by reconstruction.** The oracle C20 found never committed to any branch — loaded by the orbit theorem's verifier with no fallback, so that verifier could not run in any checkout — is reconstructed from the verifier's own proof and validated (**all 168 GL(3,2) maps are permutation parts admitting a sign completion, though only 21 preserve the signed table**). The orbit theorem C21 rests on is now machine-checkable in every checkout: orbits 2^(n-4)×[7]+(2^(n-4)-1)×[1], stab 24, n=4..7. | R26 | `ORACLE_RECONSTRUCTED__ORBIT_VERIFIER_RUNS_IN_TREE` |
 | C25 | **Third docs:meta field: path-default historical.** Research `authority` is `ACTIVE_RESEARCH_DOCS.has(path) ? repo_only : historical`, and the whitelist is **three** path literals. Of **320** research topics, **317** are historical with the auto lineage note. Claiming `repo_only` without whitelist membership turns the docs gate red. EXECUTABLE findings of this line are green only as lineage. | R25 | `RESEARCH_AUTHORITY_IS_PATH_DEFAULT_HISTORICAL__GATE_REJECTS_CURRENT` |
 | C23 | **The sibling field: path ownership under a validation name.** `validated_by` is filled from `topic.owner_agent`; every path under `docs/research/` is the literal **A6** (309/309). The checker enforces equality — a document naming a different validator turns the gate red. Variation by directory is not evidence of validation. Sibling of C22 in the same docs:meta block. | R23 | `VALIDATED_BY_IS_PATH_OWNERSHIP__GATE_REJECTS_TRUE_VALIDATOR` |
+| C27 | **The same shape found inside the compiler, not its governance surface.** C22, C23 and C25 each found a document field shaped like a measurement that was a literal. This is the claim ontology's own version: **every claim in the production manifest declares `verdict = Verdict::Alive` and the executor never checks it** — its only read of the field scans the slice for the substring "archived", and the token `Alive` does not occur in the executor at all. Aliveness is asserted by every claim and tested by none; **1 of 16** binds anything beyond an exit code. | R27 | `CLAIM_LIVENESS_DEFINED__DECLARED_ALIVE_IS_UNCHECKED__1_OF_16_BOUND` |
+| C28 | **The prior question to calibration, and why it comes first.** The compiler carries a confidence scalar in `0..1000` with a gate at 950. Before asking whether 950 is calibrated, ask how the scalar is distributed: across **30.6 M expression tokens it takes 66 distinct values** — so not a boolean by construction — yet **99.9933 % of the mass sits at exactly 0 or exactly 1000**. The population strictly between 0 and the gate, the only one whose verdict the threshold's position decides, is **891 tokens (0.003 %)**. Move the gate anywhere in `(0, 950]` and the corpus barely notices. | R28 | `CONFIDENCE_IS_GRADED_IN_PRINCIPLE__BINARY_IN_PRACTICE` |
 
 ### Methodological results that generalise
 
@@ -173,7 +175,12 @@ claims reducing to a closed form, and **not self-starting**.
 
 Corpus binding and its bindability criteria, discovered by trying: per-gate time
 budget, **hermeticity** (a gate that rewrites tracked files makes builds
-non-idempotent), and the existence of a declared token. Module closure. The
+non-idempotent), and the existence of a declared token. Module closure: the
+limitation at R1, its removal at R29, the depth-2 and diamond probes that take
+the claim past one hop, and the arms that bound it — a census showing the reached set
+is today unchanged, the opt-in flag, and a mixed green/red import pair reported
+as a pass and a failure in one run, which is what rules out a compiler that
+simply fails whatever it imports. The
 retrospective, with its buckets and its `UNCLASSIFIABLE` never redistributed.
 The independence sweep over 1 081 pairs. The trusted-base audit.
 

@@ -86,13 +86,44 @@ a line with what follows it.
 | **D1** | red imported claim, `--verify-claims` | build blocked, no ELF | `VERIFY_CLAIMS_SCOPE modules=2`, `CLAIM_PASS mcl_main_claim_that_holds`, `CLAIM_FAIL mcl_library_claim_that_is_false`, `VERIFY_CLAIMS_FALSIFIED fail=1`, rc=1, ELF absent — **PASS** |
 | **D2** | green pair (`mcl_green_main.sio`) | both claims run, build proceeds | `VERIFY_CLAIMS_SCOPE modules=2`, two `CLAIM_PASS`, `VERIFY_CLAIMS_OK pass=2`, rc=0, ELF present — **PASS** |
 | **D3** | same red pair, **no** `--verify-claims` | unaffected | rc=0, ELF present, zero `VERIFY_CLAIMS` lines — **PASS** |
-| **D4** | `rupture_claims_verified.sio` (0 imports) | invariant | `VERIFY_CLAIMS_SCOPE modules=1`, 8 `CLAIM_PASS`, `VERIFY_CLAIMS_FALSIFIED fail=8`, 30 s vs 33 s pre-fix — **PASS** |
+| **D4** | `rupture_claims_verified.sio` (0 imports) | invariant | `VERIFY_CLAIMS_SCOPE modules=1`, 8 `CLAIM_PASS`, `VERIFY_CLAIMS_FALSIFIED fail=8`; three trials each side, 10/11/10 s pre-R29 against 11/11/10 s post — **PASS** |
+| **D5** | chain: refuted claim **two** imports away | blocked | `VERIFY_CLAIMS_SCOPE modules=3`, importer and middle green, `CLAIM_FAIL mcl_chain_leaf_claim_false`, `fail=1`, no ELF — **PASS** |
+| **D6** | diamond: two arms importing one leaf | leaf visited once | `VERIFY_CLAIMS_SCOPE modules=4`, `VERIFY_CLAIMS_OK pass=4` (not 5) — **PASS** |
+| **D7** | one green import **and** one red import | green passes, red blocks, same run | `VERIFY_CLAIMS_SCOPE modules=3`, `CLAIM_PASS mcl_green_library_claim`, `CLAIM_FAIL mcl_library_claim_that_is_false`, `fail=1`, no ELF — **PASS** |
 
 D2 exists because D1 alone cannot distinguish "the closure is verified" from
 "anything imported fails". D4 is the invariance arm: a file with no imports has
 a one-node closure and must behave exactly as before, in verdicts and in
-wall-clock. Widening from one module to the transitive closure cost no measurable
-time on the 16-claim manifest.
+wall-clock.
+
+**D5 and D6 exist because three independent reviewers refused D1–D4.** Put to
+xAI, DeepSeek and Z.AI under the repository's M3 offload policy, all three
+returned the same BLOCKER: a two-module probe cannot tell a *closure* walk from
+a walk over *direct imports*, so "transitively closed" was asserted on one-hop
+evidence. They were right, and the answer was to measure rather than to soften
+the sentence. D5 puts the refuted claim two hops away, where a depth-1 walk
+would have emitted the ELF; D6 checks that a module reachable by two paths is
+verified once. The same review also read D4's original single cold runs (30 s
+against 33 s, taken while a build held the machine) as a 10 % regression. Three
+warm trials each side dissolve it: 10/11/10 against 11/11/10, indistinguishable
+at this resolution, which is the strongest statement three runs support.
+
+**D7 came from the second round, and one reviewer was wrong in a useful way.**
+The objection was that D2 cannot rule out a compiler that fails everything it
+imports, since such a compiler would still report `pass=2` on two green claims —
+which is not so: it would report them as failures. But the suggested control is
+strictly better than the argument against it, so it was measured instead of
+defended. One compilation importing a green-claimed module and a red-claimed
+module reports the green one as a pass and the red one as a failure **in the same
+run**, and blocks. Discrimination is now observed rather than deduced from D1
+and D2 jointly.
+
+The reviewers also asked for evidence behind "the fraction of the corpus under
+obligation is unchanged". It is a census: outside these probe fixtures, claims
+exist in exactly three files of the repository — the manifest and two tests — and
+no library, compiler module or stdlib module carries one. The walk therefore
+changes the reached set by zero today; what it changes is where a claim may be
+put.
 
 **Incidental finding, not caused by this change.** The 16-claim manifest is
 8 green / 8 red at this tip — `ade_wildgen_mckay`, `cd_tower_nullity_histogram`,

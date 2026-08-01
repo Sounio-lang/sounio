@@ -88,7 +88,7 @@ the prose.
 | # | Contribution | Rung | Verdict token |
 |---|---|---|---|
 | C1 | An implementation of claim-gated code generation in a self-hosted compiler. **Not a novel capability** (cf. `build.rs`, §8.1); reported because everything else is measured on it. | R0 | `SUBSTRATE_LIVE__CORPUS_BOUND__HISTORICAL_FAILURES_ARE_INTERPRETIVE` |
-| C2 | What it costs to attach such a guard to a real corpus, and the wall it hits: claims in **imported modules never execute**. | R1 | `BOUND_15__MODULE_CLOSURE_BLOCKS` |
+| C2 | **What it costs to attach such a guard to a real corpus** (R1), and **a limitation of this mechanism removed** (R29). Verification ran on the main source file only, so a refuted claim in an imported module was never checked; it now walks the transitive import closure, so under `--verify-claims` a premise refuted anywhere in that closure blocks the build. Measured past one hop: a claim refuted **two** imports away blocks (`modules=3`), and a diamond visits its shared leaf **once** (`modules=4, pass=4`). Propagation across dependency edges is **not** novel — a failing `build.rs` already fails its dependents (§8.1) — so what is claimed here is the cost measurement and the repair, not the propagation. | R1, R29 | `BOUND_16__MODULE_CLOSURE_PASSES`; `CLOSURE_WALKED__MODULE_CLOSURE_PASSES` |
 | C3 | **Verdict-token binding**: bind the build to the *proposition* a check reports, where prior art binds an exit status or a literal output. | R2 | `TOKEN_BINDING_IMPLEMENTED__CATCHES_DRIFT_NOT_MISINTERPRETATION` |
 | C4 | *Drift* vs *shared misinterpretation*, with an argument that the latter is out of reach, and a test of what does reach it. | R3 | `FALSIFIERS_NONVACUOUS_ONLY_FOR_CLOSED_FORM_CLAIMS` |
 | C5 | A retrospective under a predicate **fixed before the study ran**: a negative result and a degenerate arm, reported as such. | R4 | `RETROSPECTIVE_RUN__SOME_ARM_FIRED` |
@@ -265,13 +265,72 @@ And binding walked into the wall the mechanism spec had already noted as a
 caveat, converting it from a caveat into the line's main engineering obstacle:
 **claims in imported modules never execute.** A module carrying a claim bound
 to an always-failing gate, imported by a main source that calls into it,
-compiles cleanly — `VERIFY_CLAIMS_OK pass=1`, ELF emitted, program runs — and
-the imported false claim is never run. A library whose scientific premise has
-been refuted passes silently into every dependent build. Binding today
-therefore means hoisting claims out of the libraries they describe into a
-manifest that CI compiles; the manifest is R1's deliverable *and* the evidence
-of the limitation's cost. 15 of 295 gates is 5.1 %: the corpus is no longer at
-zero, and it is not bound.
+compiled cleanly — `VERIFY_CLAIMS_OK pass=1`, ELF emitted, the program ran — and
+the imported false claim was never run. A library whose scientific premise had
+been refuted passed silently into every dependent build. Binding therefore
+meant hoisting claims out of the libraries they describe into a manifest that
+CI compiles; that manifest is R1's deliverable *and* the evidence of the
+limitation's cost. 15 of 295 gates is 5.1 % **as measured at R1, 2026-07-26**: the corpus was no longer
+at zero, and it was not bound. Both figures have since moved — the manifest
+carries 16 claims and the tree 423 gate scripts — which is why this rung's token
+counts bindings rather than embedding a denominator (§5), and why the draft's
+citation of `BOUND_15__…` was a drift its own contract caught.
+
+R29 removed that limitation. Verification collects the module closure before it
+verifies anything and walks every node in it, so under `--verify-claims` a premise
+refuted anywhere in the closure blocks the build: the probe that compiled clean at
+R1 reports `CLAIM_FAIL` on the imported claim, `VERIFY_CLAIMS_FALSIFIED fail=1`,
+and emits no ELF.
+
+**Transitivity is measured, not inferred from the one-hop case.** A two-module
+probe cannot distinguish a closure walk from a walk over direct imports, so the
+claim is tested past one hop. A chain in which the refuted claim sits **two**
+imports away — the importer and the middle module both green — reports
+`modules=3` and is blocked by the leaf (`CLAIM_FAIL mcl_chain_leaf_claim_false`,
+no ELF); a depth-1 walk would have emitted that ELF. A diamond whose two arms
+import one shared leaf reports `modules=4, pass=4`, so a module reachable by more
+than one path is verified once rather than counted twice.
+
+**What this is not is a novelty claim, and the related-work position is the
+opposite of what it may look like.** Carrying a build failure across a dependency
+edge is ordinary: a `build.rs` that exits non-zero fails every crate that depends
+on it, and Make and Bazel propagate the same way over their graphs (§8.1). This
+mechanism simply *lacked* that property until R29 and now has it. What C2 reports
+is therefore the cost of binding a real corpus and the removal of a limitation
+peculiar to this implementation — not a capability the prior art is missing. The
+novelty of the line lives in C3, C15 and C20, where the build is bound to the
+*proposition*, the *witness* and the *provenance* rather than to an exit status.
+
+The practical consequence is local and worth stating plainly: a claim can live in
+the module whose science it describes instead of being hoisted into a manifest to
+be seen at all. The manifest is not thereby obsolete — it is the file CI actually
+compiles under `--verify-claims`, so it remains the one place that guarantees a
+claim runs on every push regardless of whether anything imports it.
+
+**Three limits, all measured.** The widening is **scope, not corpus**, and the
+size of that scope today is a census rather than an inference: outside the
+purpose-built probe fixtures, claims exist in exactly three files of this
+repository — the manifest and two tests — and no library, compiler module or
+stdlib module carries one. The manifest itself has no imports. So the walk
+changes the set of claims actually reached by zero at the time of writing; what
+it changes is where a claim *may* be put, and the bindability criteria that
+decide what can be bound at all are untouched.
+
+It is **opt-in**: without `--verify-claims` no claim in any module executes,
+verified as its own arm.
+
+And discrimination is tested directly, because "a refuted import blocks" is also
+satisfied by a compiler that simply fails whatever it imports. A single
+compilation importing one green-claimed module and one red-claimed module
+reports `CLAIM_PASS mcl_green_library_claim` and `CLAIM_FAIL
+mcl_library_claim_that_is_false` in the same run, blocks, and emits no ELF. The
+green claim is not merely tolerated; it is executed and reported as a pass while
+its red neighbour is reported as a failure.
+
+Cost on an import-free source, three trials each against the pre-R29 binary:
+10 s, 11 s, 10 s before and 11 s, 11 s, 10 s after, with verdicts unchanged — the
+two are indistinguishable at this resolution, which is the strongest statement
+three runs support.
 
 ---
 
@@ -634,8 +693,11 @@ budget (30 s; a quarter of a 20-gate sample exceeds it), **hermeticity** (a
 gate that rewrites tracked files makes builds non-idempotent — one of the
 first 16 bound gates did exactly that and was unbound), and the existence of a
 declared verdict token (8.9 % of specs at R1, 9.3 % — 25 of 270 — at R2; the
-convention is days old and the history predates it). Module closure bounds
-where claims can live: main source files only.
+convention is days old and the history predates it). Module closure bounded
+where claims could live — main source files only — until R29 walked it; under
+`--verify-claims` claims now execute anywhere in a build's transitive import
+closure, measured to depth 2 and across a shared leaf. The criteria above are
+unchanged and still bound *which* gates can be bound at all.
 
 ### 7.2 The retrospective
 

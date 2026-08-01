@@ -124,7 +124,7 @@ def clause_w3(paper: str) -> bool:
         ("3·2" , "the count law (unicode or latex form)"),
         ("CLAIM_WITNESS_MISMATCH", "the refusal outcome"),
         ("CLAIM_WITNESS_ABSENT", "the absent-witness outcome"),
-        ("MODULE_CLOSURE_BLOCKS", "the module-closure wall"),
+        ("MODULE_CLOSURE_PASSES", "the module-closure walk that replaced the wall (R29)"),
         ("~295", "the corpus denominator"),
         ("86 s", "the n=8 exclusion reason"),
         ("30 s", "the executor per-gate budget"),
