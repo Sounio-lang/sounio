@@ -111,8 +111,10 @@ Second-order mean correction (when reported):
 | R9b | Import `fo_ptr`/`fo_dof` bit-agrees on freezes | `fo_pk_import_ptr_driver.sio` | `fo_pk_import_ptr_driver_gate.sh` | `FO_PK_IMPORT_PTR_DRIVER_PASS` |
 | R10 | MRT + \(t_{90}\) FO; links t½ and n90 | `fo_pk_struct_mrt_driver.sio` | `fo_pk_struct_mrt_driver_gate.sh` | `FO_PK_STRUCT_MRT_DRIVER_PASS` |
 | R10b | Import `fo_mrt`/`fo_t90` bit-agrees on freezes | `fo_pk_import_mrt_driver.sio` | `fo_pk_import_mrt_driver_gate.sh` | `FO_PK_IMPORT_MRT_DRIVER_PASS` |
+| R11 | LD = Dose·Rac + \(f_e\) FO | `fo_pk_struct_ld_driver.sio` | `fo_pk_struct_ld_driver_gate.sh` | `FO_PK_STRUCT_LD_DRIVER_PASS` |
+| R11b | Import `fo_ld`/`fo_fe` bit-agrees on freezes | `fo_pk_import_ld_driver.sio` | `fo_pk_import_ld_driver_gate.sh` | `FO_PK_IMPORT_LD_DRIVER_PASS` |
 
-Re-run all sixteen:
+Re-run all eighteen:
 
 ```bash
 export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
@@ -134,9 +136,11 @@ bash scripts/ci/fo_pk_struct_ptr_driver_gate.sh         # R9
 bash scripts/ci/fo_pk_import_ptr_driver_gate.sh         # R9b
 bash scripts/ci/fo_pk_struct_mrt_driver_gate.sh         # R10
 bash scripts/ci/fo_pk_import_mrt_driver_gate.sh         # R10b
+bash scripts/ci/fo_pk_struct_ld_driver_gate.sh          # R11
+bash scripts/ci/fo_pk_import_ld_driver_gate.sh          # R11b
 ```
 
-Expected: sixteen `*_GATE_OK` lines. R1–R4 re-validated 2026-07-31; R5–R10b on 2026-08-01.
+Expected: eighteen `*_GATE_OK` lines. R1–R4 re-validated 2026-07-31; R5–R11b on 2026-08-01.
 
 Compiler prerequisite (do not claim science freezes without it):
 
@@ -280,6 +284,18 @@ Multi-mod: `fo_ptr`, `fo_dof` (R9b).
 | \(E_2[t_{90}]\) | 23.108743 |
 
 Multi-mod: `fo_mrt`, `fo_t90` (R10b). Peel MRT Var prints 0.520000 (ULP vs method).
+
+### 3.11 Loading dose and \(f_e\) (R11)
+
+| Quantity | Value |
+|----------|------:|
+| LD | 715.507200 |
+| \(\mathrm{Var}(\mathrm{LD})\) | 916.939959 |
+| \(E_2[\mathrm{LD}]\) | 717.065032 |
+| \(f_e\) | 0.698804 |
+| \(\mathrm{Var}(f_e)\) | 0.000679 |
+
+Multi-mod: `fo_ld`, `fo_fe` (R11b).
 
 ---
 

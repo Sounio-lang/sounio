@@ -113,6 +113,8 @@ Oral Css = (F·Dose/τ)/(CL0·exp(η)). Import driver is the multi-mod free-help
 **R9b:** `fo_ptr`/`fo_dof` multi-mod = method = peel (`fo_pk_import_ptr_driver_gate.sh`).  
 **MRT + t90 R10** (2026-08-01): `fo_pk_struct_mrt_driver.sio` — MRT=10, Var≈0.52, \(E_2=10.036\); \(t_{90}=23.025850\), Var=2.756987, \(E_2=23.108743\). Gate: `fo_pk_struct_mrt_driver_gate.sh`.  
 **R10b:** `fo_mrt`/`fo_t90` multi-mod = method (peel MRT ULP 0.520000 vs 0.519999) (`fo_pk_import_mrt_driver_gate.sh`).  
+**Loading dose R11** (2026-08-01): `fo_pk_struct_ld_driver.sio` — LD=715.507200, Var=916.939959, \(E_2=717.065032\); \(f_e=0.698804\), Var=0.000679 (=R6 f_rem). Gate: `fo_pk_struct_ld_driver_gate.sh`.  
+**R11b:** `fo_ld`/`fo_fe` multi-mod = method = peel (`fo_pk_import_ld_driver_gate.sh`).  
 **Algebraic residual-4 closeout** (2026-07-31): pure surfaces definitionally equal + exact-ℚ FO freezes in
 `formal/lean4/SounioFoCssSurfaceParity.lean`; executable certificate
 `scripts/ci/fo_css_surface_parity_gate.sh` (17/17).  
