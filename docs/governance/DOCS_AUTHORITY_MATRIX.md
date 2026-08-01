@@ -959,6 +959,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.self-falsifying-compilation-line-r26-2026-07-31 | historical | docs/research/self_falsifying_compilation_line_r26_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.self-falsifying-compilation-line-r27-2026-08-01 | historical | docs/research/self_falsifying_compilation_line_r27_2026-08-01.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.self-falsifying-compilation-line-r28-2026-08-01 | historical | docs/research/self_falsifying_compilation_line_r28_2026-08-01.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.self-falsifying-compilation-line-r29-2026-08-01 | historical | docs/research/self_falsifying_compilation_line_r29_2026-08-01.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.self-falsifying-compilation-line-r3-2026-07-26 | historical | docs/research/self_falsifying_compilation_line_r3_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.self-falsifying-compilation-line-r4-2026-07-26 | historical | docs/research/self_falsifying_compilation_line_r4_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.self-falsifying-compilation-line-r6-2026-07-26 | historical | docs/research/self_falsifying_compilation_line_r6_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

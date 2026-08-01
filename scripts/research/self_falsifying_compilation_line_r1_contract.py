@@ -184,9 +184,13 @@ def clause_b3() -> bool:
 
     print(f"B3_MODULE_CLOSURE {'PASS' if ok else 'FAIL'} — probe is decisive: "
           f"importer compiling clean ⇒ imported claim never executed")
-    print(f"B3_MODULE_CLOSURE   recorded outcome: MODULE_CLOSURE_BLOCKS "
-          f"(measured 2026-07-26: VERIFY_CLAIMS_OK pass=1, ELF emitted, "
-          f"imported false claim invisible). Re-measure with the gate's "
+    print(f"B3_MODULE_CLOSURE   recorded outcome: MODULE_CLOSURE_PASSES "
+          f"(measured 2026-08-01, R29: VERIFY_CLAIMS_SCOPE modules=2, "
+          f"CLAIM_FAIL mcl_library_claim_that_is_false, VERIFY_CLAIMS_FALSIFIED "
+          f"fail=1, no ELF). Supersedes MODULE_CLOSURE_BLOCKS (measured "
+          f"2026-07-26: VERIFY_CLAIMS_OK pass=1, ELF emitted, imported false "
+          f"claim invisible) — a true reading of the compiler as it then stood, "
+          f"changed by R29 rather than corrected. Re-measure with the gate's "
           f"compile arm — this clause checks the probe's shape, not the run.")
     return ok
 
@@ -266,9 +270,12 @@ def main() -> int:
     # that denominator moves whenever any gate is added, so the token would
     # have drifted without the claim changing — the very sub-token failure this
     # line documents. Corrected here and in R0's spec §5.
-    token = f"BOUND_{len(bound)}__MODULE_CLOSURE_BLOCKS"
+    # Flipped by R29 (2026-08-01): the closure walk landed, so the wall this
+    # token recorded is gone. The token tracks the measurement; it is never
+    # edited to keep a gate green.
+    token = f"BOUND_{len(bound)}__MODULE_CLOSURE_PASSES"
     print(f"  claims bound to real gates : {len(bound)}")
-    print(f"  module closure             : BLOCKS (imported claims never execute)")
+    print(f"  module closure             : PASSES (imported claims execute — R29)")
     print(f"  gates excluded, over budget: {len(OVER_BUDGET_GATES)}")
     print(f"  gates excluded, non-hermetic: {len(NON_HERMETIC_GATES)}")
     print(f"SELF_FALSIFYING_R1_VERDICT {token}")

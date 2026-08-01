@@ -17,12 +17,27 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.self-
 
 **Date:** 2026-07-26
 **Orthography:** EN-UK
-**Status:** `EXECUTABLE` — `BOUND_16__MODULE_CLOSURE_BLOCKS`
+**Status:** `EXECUTABLE` — `BOUND_16__MODULE_CLOSURE_PASSES` *(was `BOUND_16__MODULE_CLOSURE_BLOCKS` when measured 2026-07-26; the module-closure half was superseded by R29 on 2026-08-01 — see the notice below. The token follows the measurement, which is the only thing that ever moves it.)*
 **Parents:** `self_falsifying_compilation_line_2026-07-26.md` (R0 audit: substrate live, corpus unbound), `self_falsifying_compiler_spec_2026-07-25.md` (the mechanism)
 **Harness:** `scripts/research/self_falsifying_compilation_line_r1_contract.py`
 **Gate:** `scripts/ci/self_falsifying_compilation_line_r1_gate.sh`
 
 ---
+
+> **Supersession notice (2026-08-01).** The module-closure half of this rung no
+> longer describes the compiler. R29 gave `claim_executor_verify` a walk over the
+> module closure, and the same probe that produced `MODULE_CLOSURE_BLOCKS` here
+> now produces `MODULE_CLOSURE_PASSES`: the imported false claim executes,
+> `VERIFY_CLAIMS_FALSIFIED fail=1`, no ELF. R1's reading was correct on
+> 2026-07-26 — it is superseded by a change to the mechanism, not retracted as an
+> error, and nothing below has been rewritten to hide the flip. The binding half
+> (16 claims bound to real gates) stands. See
+> `self_falsifying_compilation_line_r29_2026-08-01.md`.
+>
+> This is the line doing to itself what it was built to do to everything else: a
+> recorded rung was falsified by later work, and the gate that guarded it went
+> red on its own before anyone went looking.
+
 
 ## 0. What this rung did
 
