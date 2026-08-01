@@ -2764,6 +2764,55 @@ theorem G_trunc (j kk d Y a b : Nat) (hj : j < kk+1) (hY : Y < 2^((kk+1)+d))
         (Nat.xor_lt_two_pow hb hY),
       xor_mod_two_pow (kk+1) a Y, xor_mod_two_pow (kk+1) b Y]
 
+/-! ## `REACH` is monotone, so its limit exists
+
+`REACH_j(Y₀)` at level `n` is the set of bottom triples carried by some level-`n` tuple that
+satisfies (♦)'s hypothesis. The rung measured that it stabilises at `n = j+4`. Half of that is
+a theorem and needs no measurement at all:
+
+`Q'red_low_ll` reduces `Qgen'` at a LOW label with BOTH arguments low **with no side conditions
+whatsoever** — it is the one lemma of the sixteen that is unconditional. So a level-`n` witness
+is verbatim a level-`(n+1)` witness: nothing has to be re-established, and `REACH` can only
+grow. Being a monotone family of subsets of the fixed finite set `[0,2^{j+2})²`, it therefore
+has a limit — which is what makes "`REACH_j(Y₀) ⊆ {D = +1}`" a well-posed statement rather than
+one secretly quantified over `n`.
+
+What is NOT proven here is the quantitative part: that the limit is *attained* at `n = j+4`.
+That remains measured (`j ≤ 3`, `n ≤ 8`). -/
+
+/-- A level-`n` witness for (♦)'s hypothesis is verbatim a level-`(n+1)` witness. -/
+theorem reach_step (m W a b : Nat) (hW : W < 2^(m+1)) (ha : a < 2^(m+1)) (hb : b < 2^(m+1))
+    (h : Qgen' W a b (m+1) = -1) : Qgen' W a b (m+2) = -1 := by
+  rw [Q'red_low_ll m W a b hW ha hb]
+  exact h
+
+/-- `REACH j Y₀ n a₀ b₀` — the bottom triple `(Y₀,a₀,b₀)` is carried by some level-`n` tuple
+    satisfying (♦)'s hypothesis. -/
+def Reach (j Y0 n a0 b0 : Nat) : Prop :=
+  ∃ Y a b, Y < 2^n ∧ a < 2^n ∧ b < 2^n ∧
+    Y % 2^(j+2) = Y0 ∧ a % 2^(j+2) = a0 ∧ b % 2^(j+2) = b0 ∧ Qgen' Y a b n = -1
+
+/-- **`REACH` never shrinks.** One level. -/
+theorem Reach_succ (j Y0 n a0 b0 : Nat) (h : Reach j Y0 (n+1) a0 b0) :
+    Reach j Y0 (n+2) a0 b0 := by
+  obtain ⟨Y, a, b, hY, ha, hb, eY, ea, eb, hq⟩ := h
+  have h2 : (2:Nat)^(n+1) ≤ 2^(n+2) := Nat.pow_le_pow_right (by omega) (by omega)
+  exact ⟨Y, a, b, by omega, by omega, by omega, eY, ea, eb,
+    reach_step n Y a b hY ha hb hq⟩
+
+/-- **`REACH` never shrinks.** Any number of levels — so the family is monotone in `n`, sits
+    inside the fixed finite square `[0,2^(j+2))²`, and its limit exists. -/
+theorem Reach_mono (j Y0 a0 b0 : Nat) :
+    ∀ (d n : Nat), Reach j Y0 (n+1) a0 b0 → Reach j Y0 (n+1+d) a0 b0
+  | 0, _, h => h
+  | (d+1), n, h => by
+      have hprev := Reach_mono j Y0 a0 b0 d n h
+      have e : n + 1 + (d + 1) = (n + d + 1) + 1 := by omega
+      have e2 : n + 1 + d = (n + d) + 1 := by omega
+      rw [e]
+      rw [e2] at hprev
+      exact Reach_succ j Y0 (n + d) a0 b0 hprev
+
 end SounioZDFiberAntisym
 
 

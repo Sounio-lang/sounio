@@ -224,7 +224,19 @@ and that has no `n` in it **provided `REACH` stabilises**. It does:
 | `\|REACH\|`, `Y₀ = 3·2^j` | 16/16 | 64/64 | 160/256 | 352/1024 |
 
 stable from `n = j+4` onward (`j ≤ 2` from `n = 6`, `j = 3` from `n = 7`, all unchanged at
-`n = 8`), and **never containing a `D = −1` point**. That closes the gap locus in the only sense
+`n = 8`), and **never containing a `D = −1` point**.
+
+**Half of the stabilisation is a theorem** (`Reach_succ` / `Reach_mono`, ∀n, kernel-checked).
+`Q'red_low_ll` reduces `Qgen'` at a low label with both arguments low **with no side conditions
+at all** — the one unconditional lemma of the sixteen. So a level-`n` witness is *verbatim* a
+level-`(n+1)` witness: nothing has to be re-established, and `REACH` can only grow. A monotone
+family of subsets of the fixed finite square `[0,2^{j+2})²` has a limit, which is what makes
+"`REACH_j(Y₀) ⊆ {D = +1}`" well-posed rather than secretly quantified over `n`.
+
+**The other half is not proven and is not cheap.** That the limit is *attained* at `n = j+4`
+would need every bottom triple reachable at any level to be reachable at `j+4` — i.e. the
+hypothesis to survive truncation, which is exactly what blocks (§2d). Measured only,
+`j ≤ 3`, `n ≤ 8`. That closes the gap locus in the only sense
 that matters here: (♦) — blocked tuples included — is a **finite, `n`-free statement per `j`**.
 
 **The correction.** `N15`'s clean-locus predicate does **not** cover `REACH`: for `Y₀ = 2^j` there
@@ -244,9 +256,10 @@ outside the family §2c described. `REACH`, not that predicate, is the object.
   the finite family itself. The gap locus is no longer a separate obstacle — `REACH` absorbs it
   — and the step that makes `REACH` *the* content is now a theorem: `G_trunc` (∀n,
   kernel-checked) says (♦)'s conclusion at any level IS its value at level `k`, for every
-  `k > j`, so nothing above bit `j+1` can matter. What remains measured: **`REACH`'s
-  stabilisation** (`j ≤ 3`, `n ≤ 8`) and **`REACH_j ⊆ {D = +1}`** (checked per `j`, not for all
-  `j`). Those two are the whole of what is left of L2.
+  `k > j`, so nothing above bit `j+1` can matter. What remains measured: **that `REACH`'s limit is
+  attained at `n = j+4`** (its monotonicity, hence the limit's existence, is now proven) and
+  **`REACH_j ⊆ {D = +1}`** (checked per `j`, not for all `j`). Those two are the whole of what
+  is left of L2.
 - **`N14`'s clean/gap split is measured, not proven.** The one-step laws behind it are the
   sixteen proven reduction lemmas; what is measured is that their composition is exact on the
   clean locus.
