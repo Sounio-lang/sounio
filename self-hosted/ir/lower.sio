@@ -3491,6 +3491,48 @@ fn lowerer_lower_terminal_print_if_mut(lo: &! Lowerer, e: &Expr) -> i64 with Mut
     result
 }
 
+fn lowerer_emit_unit_mut(lo: &! Lowerer) -> i64 with Mut, Panic, Div {
+    let reg = lowerer_fresh_reg_mut(lo)
+    lowerer_emit_mut(lo, ir_load_imm(reg, 0))
+    reg
+}
+
+fn lowerer_lower_if_expr_mut(
+    lo: &! Lowerer,
+    e: &Expr
+) -> i64 with Mut, Panic, Div, Alloc, IO {
+    let cond = lowerer_lower_opt_expr_mut(lo, &e.left)
+    let l_else = lowerer_fresh_label_mut(lo)
+    let l_end = lowerer_fresh_label_mut(lo)
+    let result = lowerer_fresh_reg_mut(lo)
+    lowerer_emit_mut(lo, ir_branch_false(cond, l_else))
+
+    let then_reg = match e.block {
+        Some(then_block) => lowerer_lower_block_mut(lo, &(*then_block)),
+        _ => lowerer_emit_unit_mut(lo),
+    }
+    lowerer_emit_mut(lo, ir_copy(result, then_reg))
+    lowerer_emit_mut(lo, ir_jump(l_end))
+    lowerer_emit_mut(lo, ir_label(l_else))
+
+    let else_reg = match e.else_expr {
+        Some(else_expr) => {
+            if (*else_expr).kind == ExprKind::ExprBlock {
+                match (*else_expr).block {
+                    Some(else_block) => lowerer_lower_block_mut(lo, &(*else_block)),
+                    _ => lowerer_emit_unit_mut(lo),
+                }
+            } else {
+                lowerer_lower_expr_mut(lo, &(*else_expr))
+            }
+        }
+        _ => lowerer_emit_unit_mut(lo),
+    }
+    lowerer_emit_mut(lo, ir_copy(result, else_reg))
+    lowerer_emit_mut(lo, ir_label(l_end))
+    result
+}
+
 // Keep expression lowering on a single mutable Lowerer path. `Lowerer` has
 // large inline metadata tables, so by-value dispatch can exhaust the raw
 // self-hosted compiler's native stack even for a small binary or named call.
@@ -3555,8 +3597,22 @@ fn lowerer_lower_expr_mut(
         (*lo) = pair.0
         return pair.1
     }
-    if (*e).kind == ExprKind::ExprIf && lowerer_if_has_terminal_print_blocks_ref(e) {
-        return lowerer_lower_terminal_print_if_mut(lo, e)
+    if (*e).kind == ExprKind::ExprIf {
+        if lowerer_if_has_terminal_print_blocks_ref(e) {
+            return lowerer_lower_terminal_print_if_mut(lo, e)
+        }
+        return lowerer_lower_if_expr_mut(lo, e)
+    }
+    if (*e).kind == ExprKind::ExprReturn {
+        let reg = lowerer_lower_opt_expr_mut(lo, &(*e).left)
+        lowerer_emit_mut(lo, ir_return(reg))
+        return reg
+    }
+    if (*e).kind == ExprKind::ExprBlock {
+        match (*e).block {
+            Some(block) => return lowerer_lower_block_mut(lo, &(*block)),
+            _ => return lowerer_emit_unit_mut(lo),
+        }
     }
     if (*e).kind == ExprKind::ExprFieldAccess {
         if lower_live_diag_enabled() { print("lower_live: field_base_begin\n") }
@@ -3795,6 +3851,80 @@ fn lowerer_registered_direct_call_id_ref(lo: &Lowerer, e: &Expr) -> i64 with Mut
     }
 }
 
+fn lowerer_local_scalar_kind_ref(lo: &Lowerer, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+    var i = (*(*lo).locals).count - 1
+    while i >= 0 {
+        if (*(*lo).locals).depths[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*lo).locals).names[i as usize], name) {
+            return (*(*lo).locals).scalar_kind[i as usize]
+        }
+        i = i - 1
+    }
+    0
+}
+
+fn lowerer_opt_simple_scalar_kind_ref(lo: &Lowerer, opt: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div, Alloc {
+    match *opt {
+        Some(expr) => lowerer_simple_scalar_kind_ref(lo, &(*expr)),
+        _ => 0,
+    }
+}
+
+fn lowerer_block_simple_scalar_kind_ref(lo: &Lowerer, blk: &Block) -> i64 with Mut, Panic, Div, Alloc {
+    var current = &blk.stmts
+    var kind: i64 = 0
+    while true {
+        match *current {
+            Some(list) => {
+                if (*list).head.kind == StmtKind::StmtExpr {
+                    kind = lowerer_opt_simple_scalar_kind_ref(lo, &(*list).head.expr)
+                } else {
+                    kind = 0
+                }
+                current = &(*list).tail
+            }
+            _ => break,
+        }
+    }
+    kind
+}
+
+fn lowerer_simple_scalar_kind_ref(lo: &Lowerer, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+    if e.kind == ExprKind::ExprFloatLit { return 2 }
+    if e.kind == ExprKind::ExprIntLit || e.kind == ExprKind::ExprCharLit || e.kind == ExprKind::ExprBoolTrue || e.kind == ExprKind::ExprBoolFalse {
+        return 1
+    }
+    if e.kind == ExprKind::ExprIdent {
+        return lowerer_local_scalar_kind_ref(lo, e.name)
+    }
+    if e.kind == ExprKind::ExprCall {
+        let fn_id = lowerer_registered_direct_call_id_ref(lo, e)
+        if fn_id >= 0 && fn_id < (*(*lo).module).fn_count && (*(*lo).module).functions[fn_id as usize].returns_float == 1 {
+            return 2
+        }
+        return 1
+    }
+    if e.kind == ExprKind::ExprBinary {
+        if lower_binary_op_is_compare(e.bin_op) || e.bin_op == BinaryOp::OpAnd || e.bin_op == BinaryOp::OpOr {
+            return 1
+        }
+        let left_kind = lowerer_opt_simple_scalar_kind_ref(lo, &e.left)
+        let right_kind = lowerer_opt_simple_scalar_kind_ref(lo, &e.right)
+        if left_kind == 2 || right_kind == 2 { return 2 }
+        return 1
+    }
+    if e.kind == ExprKind::ExprIf {
+        var then_kind: i64 = 0
+        match e.block {
+            Some(block) => then_kind = lowerer_block_simple_scalar_kind_ref(lo, &(*block)),
+            _ => {}
+        }
+        let else_kind = lowerer_opt_simple_scalar_kind_ref(lo, &e.else_expr)
+        if then_kind == 2 || else_kind == 2 { return 2 }
+        return 1
+    }
+    0
+}
+
 fn lowerer_expr_is_scalar_condition_ref(lo: &Lowerer, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
     if e.kind == ExprKind::ExprIntLit || e.kind == ExprKind::ExprFloatLit || e.kind == ExprKind::ExprBoolTrue || e.kind == ExprKind::ExprBoolFalse {
         return true
@@ -3815,17 +3945,6 @@ fn lowerer_expr_is_scalar_condition_ref(lo: &Lowerer, e: &Expr) -> bool with Mut
         return fn_id >= 0 && fn_id < (*(*lo).module).fn_count
     }
     if e.kind != ExprKind::ExprBinary {
-        return false
-    }
-    let is_condition_op = e.bin_op == BinaryOp::OpEq
-        || e.bin_op == BinaryOp::OpNe
-        || e.bin_op == BinaryOp::OpLt
-        || e.bin_op == BinaryOp::OpLe
-        || e.bin_op == BinaryOp::OpGt
-        || e.bin_op == BinaryOp::OpGe
-        || e.bin_op == BinaryOp::OpAnd
-        || e.bin_op == BinaryOp::OpOr
-    if !is_condition_op {
         return false
     }
     match e.left {
@@ -3851,21 +3970,34 @@ fn lowerer_can_bind_simple_scalar_let_ref(lo: &Lowerer, s: &Stmt) -> bool with M
         Some(expr) => {
             if (*expr).kind == ExprKind::ExprCall {
                 let fn_id = lowerer_registered_direct_call_id_ref(lo, &(*expr))
-                return fn_id >= 0
-                    && fn_id < (*(*lo).module).fn_count
-                    && (*(*lo).module).functions[fn_id as usize].return_struct_name.len > 0
+                return fn_id >= 0 && fn_id < (*(*lo).module).fn_count
             }
+            if (*expr).kind == ExprKind::ExprIf { return true }
             lowerer_expr_is_scalar_condition_ref(lo, &(*expr))
         }
         _ => false,
     }
 }
 
-fn lowerer_bind_simple_scalar_let_mut(lo: &! Lowerer, s: &Stmt) -> i64 with Mut, Panic, Div, Alloc, IO {
+fn lowerer_bind_simple_scalar_let_mut(lo: &! Lowerer, s: &Stmt, is_mut: bool) -> i64 with Mut, Panic, Div, Alloc, IO {
     let reg = lowerer_lower_opt_expr_mut(lo, &s.expr)
-    lowerer_bind_local_mut(lo, s.name, reg, false)
+    var bind_reg = reg
     match s.expr {
         Some(expr) => {
+            if (*expr).kind == ExprKind::ExprIdent {
+                bind_reg = lowerer_fresh_reg_mut(lo)
+                lowerer_emit_mut(lo, ir_copy(bind_reg, reg))
+            }
+        }
+        _ => {}
+    }
+    lowerer_bind_local_mut(lo, s.name, bind_reg, is_mut)
+    match s.expr {
+        Some(expr) => {
+            let scalar_kind = lowerer_simple_scalar_kind_ref(&(*lo), &(*expr))
+            if scalar_kind > 0 {
+                lowerer_mark_local_scalar_kind_mut(lo, s.name, scalar_kind)
+            }
             if (*expr).kind == ExprKind::ExprCall {
                 let fn_id = lowerer_registered_direct_call_id_ref(&(*lo), &(*expr))
                 if fn_id >= 0 && fn_id < (*(*lo).module).fn_count {
@@ -3874,13 +4006,56 @@ fn lowerer_bind_simple_scalar_let_mut(lo: &! Lowerer, s: &Stmt) -> i64 with Mut,
                         lowerer_bind_local_struct_type_mut(lo, s.name, return_struct_name)
                     }
                 }
-            } else if (*expr).kind == ExprKind::ExprBinary {
-                lowerer_mark_local_scalar_kind_mut(lo, s.name, 1)
             }
         }
         _ => {}
     }
-    reg
+    bind_reg
+}
+
+fn lowerer_can_assign_simple_scalar_ref(lo: &Lowerer, s: &Stmt) -> bool with Mut, Panic, Div, Alloc {
+    if s.assign_op != AssignOp::AssignEq && s.assign_op != AssignOp::AssignAdd && s.assign_op != AssignOp::AssignSub {
+        return false
+    }
+    match s.target {
+        Some(target) => {
+            if (*target).kind != ExprKind::ExprIdent || lowerer_lookup_simple_local_reg_ref(lo, (*target).name) < 0 {
+                return false
+            }
+        }
+        _ => return false,
+    }
+    match s.expr {
+        Some(expr) => lowerer_simple_scalar_kind_ref(lo, &(*expr)) > 0,
+        _ => false,
+    }
+}
+
+fn lowerer_assign_simple_scalar_mut(lo: &! Lowerer, s: &Stmt) -> i64 with Mut, Panic, Div, Alloc, IO {
+    let rhs = lowerer_lower_opt_expr_mut(lo, &s.expr)
+    var value = rhs
+    match s.target {
+        Some(target) => {
+            let dst = lowerer_lookup_simple_local_reg_ref(&(*lo), (*target).name)
+            if s.assign_op != AssignOp::AssignEq {
+                value = lowerer_fresh_reg_mut(lo)
+                let op = if s.assign_op == AssignOp::AssignAdd { BinaryOp::OpAdd } else { BinaryOp::OpSub }
+                lowerer_emit_mut(lo, ir_binop(value, dst, op, rhs))
+            }
+            lowerer_emit_mut(lo, ir_copy(dst, value))
+            match s.expr {
+                Some(expr) => {
+                    let scalar_kind = lowerer_simple_scalar_kind_ref(&(*lo), &(*expr))
+                    if scalar_kind > 0 {
+                        lowerer_mark_local_scalar_kind_mut(lo, (*target).name, scalar_kind)
+                    }
+                }
+                _ => {}
+            }
+            dst
+        }
+        _ => rhs,
+    }
 }
 
 // Walk a function body without placing another full Lowerer value beneath every
@@ -3910,10 +4085,14 @@ fn lowerer_lower_block_mut(
                     else { print("other") }
                     print("\n")
                 }
-                if stmt_ref.kind == StmtKind::StmtLet && lowerer_can_bind_simple_scalar_let_ref(&(*lo), stmt_ref) {
-                    reg = lowerer_bind_simple_scalar_let_mut(lo, stmt_ref)
+                if (stmt_ref.kind == StmtKind::StmtLet || stmt_ref.kind == StmtKind::StmtVar)
+                    && lowerer_can_bind_simple_scalar_let_ref(&(*lo), stmt_ref)
+                {
+                    reg = lowerer_bind_simple_scalar_let_mut(lo, stmt_ref, stmt_ref.kind == StmtKind::StmtVar)
                 } else if stmt_ref.kind == StmtKind::StmtExpr {
                     reg = lowerer_lower_opt_expr_mut(lo, &stmt_ref.expr)
+                } else if stmt_ref.kind == StmtKind::StmtAssign && lowerer_can_assign_simple_scalar_ref(&(*lo), stmt_ref) {
+                    reg = lowerer_assign_simple_scalar_mut(lo, stmt_ref)
                 } else {
                     let pair = if stmt_ref.kind == StmtKind::StmtLet {
                         (*lo).lower_let_stmt_ref(stmt_ref, false)
