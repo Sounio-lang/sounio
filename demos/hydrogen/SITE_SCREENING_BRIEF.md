@@ -305,7 +305,11 @@ the **FIELD-CALIBRATED LAW PATH** prints beside both older paths:
 re-anchoring under the receipt's linear f_s mapping** — but that
 mapping is exactly what the stress test showed to be optimistic for an
 active bloom (annualized reading: 0.110 %), so the conditional claim
-is kept and sharpened (§5).
+is kept and sharpened (§5). **Figure D** (`figures/fig_d_field_calibrated.png`)
+plots the field-calibrated band against the sourced-law band per site:
+S1's thermal death is anchor-independent ([0, 0] on every path), while
+S2/S3 widen to the KMF magnitude — the visual statement of what the
+re-anchoring costs at long residence.
 
 ## 5. Where site choice starts to matter
 
