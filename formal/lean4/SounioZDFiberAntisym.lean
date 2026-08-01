@@ -1883,6 +1883,86 @@ theorem star_gap_bH_hi (m j W a : Nat) (hj : j < m+1) (hW : W < 2^(m+1)) (hW0 : 
       Qgen_H_right_hi m W a hW hW0 ha,
       Qgen_H_right_hi m (tau j W) (tau j a) htW htW0 hta]
 
+/-! ## (*) implies (*') — the mutual induction collapses to a single one -/
+
+/-- The commutation sign. -/
+def chi (x y m : Nat) : Int := cdSigma x y m * cdSigma y x m
+
+/-- Closed form for `chi`: `+1` exactly when an argument vanishes or the two coincide.
+    (All four ingredients were already proven: `cdSig0`, `cdSig0'`, `cdSq`, `antisym`.) -/
+theorem chi_char (m x y : Nat) (hx : x < 2^m) (hy : y < 2^m) :
+    chi x y m = (if x = 0 ∨ y = 0 ∨ x = y then 1 else -1) := by
+  unfold chi
+  cases m with
+  | zero =>
+      have : x = 0 := by have : (2:Nat)^0 = 1 := rfl; omega
+      simp [this, cdSigma]
+  | succ m' =>
+      by_cases hx0 : x = 0
+      · subst hx0; rw [cdSig0, cdSig0', if_pos (Or.inl rfl)]; decide
+      by_cases hy0 : y = 0
+      · subst hy0; rw [cdSig0, cdSig0', if_pos (Or.inr (Or.inl rfl))]; decide
+      by_cases hxy : x = y
+      · subst hxy; rw [if_pos (Or.inr (Or.inr rfl))]; exact cdSq x x (m'+1)
+      · have hno : ¬ (x = 0 ∨ y = 0 ∨ x = y) := by
+          rintro (h | h | h)
+          · exact hx0 h
+          · exact hy0 h
+          · exact hxy h
+        rw [if_neg hno, antisym (m'+1) x y hx hy hx0 hy0 hxy]
+        rcases cdSigma_pm (m'+1) y x with h | h <;> rw [h] <;> decide
+
+/-- **`Q'` factors through `Q`**: the two differ by exactly two commutation signs. Pure
+    algebra -- the two transposed factors contribute their `chi`, the rest squares away. -/
+theorem Qgen'_eq_chi (W a b m : Nat) :
+    Qgen' W a b m = Qgen W a b m * chi (a ^^^ W) (b ^^^ W) m * chi a (b ^^^ W) m := by
+  unfold Qgen Qgen' chi
+  have h1 := cdSq (a ^^^ W) (b ^^^ W) m
+  have h2 := cdSq a (b ^^^ W) m
+  calc cdSigma a b m * cdSigma (b ^^^ W) (a ^^^ W) m * cdSigma (b ^^^ W) a m
+          * cdSigma (a ^^^ W) b m
+      = (cdSigma a b m * cdSigma (b ^^^ W) (a ^^^ W) m * cdSigma (b ^^^ W) a m
+          * cdSigma (a ^^^ W) b m)
+        * ((cdSigma (a ^^^ W) (b ^^^ W) m * cdSigma (a ^^^ W) (b ^^^ W) m)
+           * (cdSigma a (b ^^^ W) m * cdSigma a (b ^^^ W) m)) := by
+        rw [h1, h2]; simp
+    _ = cdSigma a b m * cdSigma (a ^^^ W) (b ^^^ W) m * cdSigma a (b ^^^ W) m
+          * cdSigma (a ^^^ W) b m
+        * (cdSigma (a ^^^ W) (b ^^^ W) m * cdSigma (b ^^^ W) (a ^^^ W) m)
+        * (cdSigma a (b ^^^ W) m * cdSigma (b ^^^ W) a m) := by ac_rfl
+
+/-- `chi` is `tau`-invariant: by `chi_char` it depends only on `x = 0`, `y = 0`, `x = y`, and
+    `tau` preserves all three. -/
+theorem chi_tau (m j x y : Nat) (hj : j < m) (hx : x < 2^m) (hy : y < 2^m) :
+    chi (tau j x) (tau j y) m = chi x y m := by
+  rw [chi_char m (tau j x) (tau j y) (tau_lt j m x hj hx) (tau_lt j m y hj hy),
+      chi_char m x y hx hy]
+  have e : (tau j x = 0 ∨ tau j y = 0 ∨ tau j x = tau j y) ↔ (x = 0 ∨ y = 0 ∨ x = y) := by
+    constructor
+    · rintro (h | h | h)
+      · exact Or.inl (tau_inj j x 0 (by rw [h, tau_zero]))
+      · exact Or.inr (Or.inl (tau_inj j y 0 (by rw [h, tau_zero])))
+      · exact Or.inr (Or.inr (tau_inj j x y h))
+    · rintro (h | h | h)
+      · exact Or.inl (by rw [h, tau_zero])
+      · exact Or.inr (Or.inl (by rw [h, tau_zero]))
+      · exact Or.inr (Or.inr (by rw [h]))
+  by_cases h : x = 0 ∨ y = 0 ∨ x = y
+  · rw [if_pos h, if_pos (e.mpr h)]
+  · rw [if_neg h, if_neg (fun g => h (e.mp g))]
+
+/-- **(*) implies (*').** So the "mutual" induction is not mutual: one induction on `Qgen`
+    carries `Qgen'` with it. -/
+theorem star'_of_star (m j W a b : Nat) (hj : j < m) (hW : W < 2^m) (ha : a < 2^m) (hb : b < 2^m)
+    (hstar : Qgen W a b m = Qgen (tau j W) (tau j a) (tau j b) m) :
+    Qgen' W a b m = Qgen' (tau j W) (tau j a) (tau j b) m := by
+  have hxa : tau j a ^^^ tau j W = tau j (a ^^^ W) := (tau_xor j a W).symm
+  have hxb : tau j b ^^^ tau j W = tau j (b ^^^ W) := (tau_xor j b W).symm
+  rw [Qgen'_eq_chi, Qgen'_eq_chi, hstar, hxa, hxb,
+      chi_tau m j (a ^^^ W) (b ^^^ W) hj (Nat.xor_lt_two_pow ha hW) (Nat.xor_lt_two_pow hb hW),
+      chi_tau m j a (b ^^^ W) hj ha (Nat.xor_lt_two_pow hb hW)]
+
 end SounioZDFiberAntisym
+
 
 
