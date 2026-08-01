@@ -218,6 +218,21 @@ Method = peel on both Vars; free-fn Rac matches method under FO site budget.
 
 ---
 
+## 5i. AUC_τ at steady state (R12, 2026-08-01)
+
+| Quantity | Value |
+|----------|------:|
+| \(\mathrm{AUC}_\tau\) | 80 |
+| \(\mathrm{Var}(\mathrm{AUC}_\tau)\) | 114.6 |
+| \(E_2[\mathrm{AUC}_\tau]\) | 80.688 |
+| \(\mathrm{Var}(C_{\mathrm{ss}}\cdot\tau)\) | 114.6 |
+| \(C_{\mathrm{ss}}\) | 6.666666 |
+| \(\mathrm{Var}(C_{\mathrm{ss}})\) | 0.795833 |
+
+**R12b:** multi-mod `fo_auc_tau`/`fo_css_tau`/`fo_auc` (`FO_PK_IMPORT_AUCT_GATE_OK`).
+
+---
+
 ## 6. How to re-run
 
 ```bash
@@ -242,10 +257,12 @@ bash scripts/ci/fo_pk_struct_mrt_driver_gate.sh         # R10
 bash scripts/ci/fo_pk_import_mrt_driver_gate.sh         # R10b
 bash scripts/ci/fo_pk_struct_ld_driver_gate.sh          # R11
 bash scripts/ci/fo_pk_import_ld_driver_gate.sh          # R11b
+bash scripts/ci/fo_pk_struct_auct_driver_gate.sh        # R12
+bash scripts/ci/fo_pk_import_auct_driver_gate.sh        # R12b
 ```
 
-Expected: eighteen `*_GATE_OK` lines. R1–R4 re-validated 2026-07-31
-(residual-4: `ORAL_CSS_RESIDUAL4_CLOSED`); R5–R11b re-validated 2026-08-01.
+Expected: twenty `*_GATE_OK` lines. R1–R4 re-validated 2026-07-31
+(residual-4: `ORAL_CSS_RESIDUAL4_CLOSED`); R5–R12b re-validated 2026-08-01.
 
 Full package re-run:
 
@@ -284,6 +301,8 @@ bash scripts/ci/fo_residual4_stack_gate.sh
 | R10b | `examples/epistemic_fo_second_order/fo_pk_import_mrt_driver.sio` |
 | R11 | `examples/epistemic_fo_second_order/fo_pk_struct_ld_driver.sio` |
 | R11b | `examples/epistemic_fo_second_order/fo_pk_import_ld_driver.sio` |
+| R12 | `examples/epistemic_fo_second_order/fo_pk_struct_auct_driver.sio` |
+| R12b | `examples/epistemic_fo_second_order/fo_pk_import_auct_driver.sio` |
 
 Compiler prerequisite: FO trust 42/42 — `scripts/ci/madaros_gum_fo_trust_gate.sh`.  
 Stack map: `docs/audit/MADAROS_FO_GUM_STACK_2026-07-27.md`.
