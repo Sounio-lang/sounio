@@ -48,7 +48,7 @@
 #   SOUNIO_PARITY_MADAROS  Madaros ELF        (default artifacts/self-hosted/madaros)
 #   SOUNIO_PARITY_LEAN     lean_single ELF    (default bin/souc-lean-single-x86_64)
 #   SOUNIO_PARITY_JOBS     parallelism        (default: cores-2, capped at 8)
-#   SOUNIO_PARITY_TIMEOUT  per-run seconds    (default 30)
+#   SOUNIO_PARITY_TIMEOUT  per-run seconds    (default 120; see #1591)
 
 set -uo pipefail
 
@@ -58,7 +58,15 @@ cd "$ROOT_DIR" || exit 1
 MADAROS="${SOUNIO_PARITY_MADAROS:-$ROOT_DIR/artifacts/self-hosted/madaros}"
 LEAN="${SOUNIO_PARITY_LEAN:-$ROOT_DIR/bin/souc-lean-single-x86_64}"
 BASELINE="$ROOT_DIR/tests/engine_parity_baseline.txt"
-TIMEOUT="${SOUNIO_PARITY_TIMEOUT:-30}"
+# 30s put the imported lorenz/solver_portfolio family right on the boundary, so
+# their verdict flipped between LEAN-ONLY and NEITHER run to run with nothing in
+# either compiler changing. Measured on a quiet machine with the old limit:
+#   lorenz_i256_ball_fixed_bridge_imported   rc=124 at 30189ms
+#   solver_portfolio_v16_coverage_imported   rc=0   at 29198ms  <- 800ms of margin
+#   lorenz_i256_step_certificate_imported    rc=124 at 30192ms
+# The slowest of them finishes in 68499ms when allowed to. They are slow, not
+# hung, so the bound now clears the measured worst case with headroom (#1591).
+TIMEOUT="${SOUNIO_PARITY_TIMEOUT:-120}"
 
 cores=$(nproc 2>/dev/null || echo 4)
 default_jobs=$(( cores - 2 ))
@@ -104,6 +112,9 @@ trap 'rm -rf "$WORK"' EXIT
 #   MADAROS-ONLY   only Madaros produced a running binary
 #   LEAN-ONLY      only lean_single did
 #   NEITHER        neither did
+#   TIMEOUT        at least one engine was killed by the clock -- "too slow to
+#                  measure" is NOT "neither engine builds this", and conflating
+#                  them made a slow program read as a rejected one (#1591)
 cat > "$WORK/parity_one.sh" <<'WORKER'
 #!/usr/bin/env bash
 set -uo pipefail
@@ -117,25 +128,44 @@ run_engine() {
     local elf="$work/${tag}_${kind}.elf"
     local out="$work/${tag}_${kind}.out"
     rm -f "$elf"
+    local crc
     if [ "$kind" = "mad" ]; then
         ( ulimit -v 8000000 2>/dev/null || true; timeout "$to" "$madaros" "$src" -o "$elf" ) >/dev/null 2>&1
+        crc=$?
     else
         ( ulimit -v 8000000 2>/dev/null || true; timeout "$to" "$lean" "$src" "$elf" ) >/dev/null 2>&1
+        crc=$?
     fi
-    [ -s "$elf" ] || return 1
+    if [ ! -s "$elf" ]; then
+        # EXACTLY 124 is timeout(1) reporting that IT killed the compiler.
+        # Anything above that is 128+signal -- a crash, not a clock. Using
+        # -ge here misfiled every SIGSEGV (139) as a timeout, which is the
+        # same conflation this change exists to remove.
+        [ "$crc" -eq 124 ] && return 2
+        return 1
+    fi
     chmod +x "$elf" 2>/dev/null
     timeout "$to" "$elf" >"$out" 2>/dev/null
     local rc=$?
     rm -f "$elf"
-    # A crash or timeout is not an output to compare. Treat it as "did not run"
-    # so it can never be mistaken for agreement.
-    [ "$rc" -ge 124 ] && return 1
+    # A crash or timeout is not an output to compare, so neither can be mistaken
+    # for agreement -- but they are reported differently. Exactly 124 is the
+    # clock; 128+signal (139 = SIGSEGV, 137 = SIGKILL) is the program dying,
+    # and those stay "did not run" exactly as before. A nonzero exit below 124
+    # still counts as "ran": programs that print FAIL and exit 1 are real
+    # observations and were always compared.
+    [ "$rc" -eq 124 ] && return 2
+    [ "$rc" -gt 124 ] && return 1
     return 0
 }
 
-ok_m=0; ok_l=0
-run_engine mad  && ok_m=1
-run_engine lean && ok_l=1
+ok_m=0; ok_l=0; slow_m=0; slow_l=0
+run_engine mad;  m_rc=$?
+[ "$m_rc" -eq 0 ] && ok_m=1
+[ "$m_rc" -eq 2 ] && slow_m=1
+run_engine lean; l_rc=$?
+[ "$l_rc" -eq 0 ] && ok_l=1
+[ "$l_rc" -eq 2 ] && slow_l=1
 
 if [ "$ok_m" = 1 ] && [ "$ok_l" = 1 ]; then
     if cmp -s "$work/${tag}_mad.out" "$work/${tag}_lean.out"; then
@@ -147,6 +177,8 @@ elif [ "$ok_m" = 1 ]; then
     printf 'MADAROS-ONLY\t%s\n' "$src"
 elif [ "$ok_l" = 1 ]; then
     printf 'LEAN-ONLY\t%s\n' "$src"
+elif [ "$slow_m" = 1 ] || [ "$slow_l" = 1 ]; then
+    printf 'TIMEOUT\t%s\n' "$src"
 else
     printf 'NEITHER\t%s\n' "$src"
 fi
@@ -191,8 +223,9 @@ diverge=$(grep -c '^DIVERGE'       "$WORK/results.tsv" || true)
 mad_only=$(grep -c '^MADAROS-ONLY' "$WORK/results.tsv" || true)
 lean_only=$(grep -c '^LEAN-ONLY'   "$WORK/results.tsv" || true)
 neither=$(grep -c '^NEITHER'       "$WORK/results.tsv" || true)
+timedout=$(grep -c '^TIMEOUT'      "$WORK/results.tsv" || true)
 
-echo "[engine-parity] agree=$agree diverge=$diverge madaros-only=$mad_only lean-only=$lean_only neither=$neither"
+echo "[engine-parity] agree=$agree diverge=$diverge madaros-only=$mad_only lean-only=$lean_only neither=$neither timeout=$timedout"
 
 # The baseline records every non-AGREE verdict. AGREE is the goal state and is
 # deliberately not recorded, so the file shrinks as the engines converge.
