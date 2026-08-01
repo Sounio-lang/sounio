@@ -109,6 +109,8 @@ Oral Css = (F·Dose/τ)/(CL0·exp(η)). Import driver is the multi-mod free-help
 **R7b:** `fo_cmax`/`fo_cmin`/`fo_ptf` multi-mod; Cmin Var=0.306096 on import (`fo_pk_import_cmax_driver_gate.sh`). ≤3 FO sites when stacking Cmax-class FO.  
 **Fraction of SS R8** (2026-08-01): `fo_pk_struct_fss_driver.sio` — \(f_{\mathrm{ss}}(3)=0.972676\), Var=0.000050, \(E_2=0.971912\); \(n_{90}=1.918820\), Var=0.019145. Gate: `fo_pk_struct_fss_driver_gate.sh`.  
 **R8b:** `fo_fss`/`fo_n90` multi-mod = method = peel (`fo_pk_import_fss_driver_gate.sh`).  
+**PTR + DOF R9** (2026-08-01): `fo_pk_struct_ptr_driver.sio` — PTR=3.320113, Var=0.082541, \(E_2=3.338918\); DOF=2.320113, Var=0.082541. Gate: `fo_pk_struct_ptr_driver_gate.sh`.  
+**R9b:** `fo_ptr`/`fo_dof` multi-mod = method = peel (`fo_pk_import_ptr_driver_gate.sh`).  
 **Algebraic residual-4 closeout** (2026-07-31): pure surfaces definitionally equal + exact-ℚ FO freezes in
 `formal/lean4/SounioFoCssSurfaceParity.lean`; executable certificate
 `scripts/ci/fo_css_surface_parity_gate.sh` (17/17).  

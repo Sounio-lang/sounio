@@ -3358,3 +3358,4 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 | 2026-08-01 | analytic | math-review | R6 delta-method | PASS | Var f_rem 0.000679; Var Rac 0.002849; bias +0.003116 → E2 1.434128 |
 | 2026-08-01 | xai | math-review | fo_pk_struct_cmax_driver.sio / R7 freezes | PASS | Cmax/Cmin/PTF points, Vars, E2, kel·τ identity |
 | 2026-08-01 | xai | math-review | fo_pk_struct_fss_driver.sio / R8 freezes | PASS | f_ss(3)/n90 points, Vars, E2; shared-η peel |
+| 2026-08-01 | xai | math-review | fo_pk_struct_ptr_driver.sio / R9 freezes | PASS | PTR/DOF points, Vars, E2; PTR=exp(kel·τ); Var(DOF)=Var(PTR) |

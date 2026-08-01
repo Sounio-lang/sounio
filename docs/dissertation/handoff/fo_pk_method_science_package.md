@@ -107,8 +107,10 @@ Second-order mean correction (when reported):
 | R7b | Import `fo_cmax`/`fo_cmin`/`fo_ptf` freezes (Cmin Var) | `fo_pk_import_cmax_driver.sio` | `fo_pk_import_cmax_driver_gate.sh` | `FO_PK_IMPORT_CMAX_DRIVER_PASS` |
 | R8 | \(f_{\mathrm{ss}}(n)\) + \(n_{90}\) FO; shared-η peel | `fo_pk_struct_fss_driver.sio` | `fo_pk_struct_fss_driver_gate.sh` | `FO_PK_STRUCT_FSS_DRIVER_PASS` |
 | R8b | Import `fo_fss`/`fo_n90` bit-agrees on freezes | `fo_pk_import_fss_driver.sio` | `fo_pk_import_fss_driver_gate.sh` | `FO_PK_IMPORT_FSS_DRIVER_PASS` |
+| R9 | PTR + DOF FO; PTR = exp(kel·τ) | `fo_pk_struct_ptr_driver.sio` | `fo_pk_struct_ptr_driver_gate.sh` | `FO_PK_STRUCT_PTR_DRIVER_PASS` |
+| R9b | Import `fo_ptr`/`fo_dof` bit-agrees on freezes | `fo_pk_import_ptr_driver.sio` | `fo_pk_import_ptr_driver_gate.sh` | `FO_PK_IMPORT_PTR_DRIVER_PASS` |
 
-Re-run all twelve:
+Re-run all fourteen:
 
 ```bash
 export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
@@ -126,9 +128,11 @@ bash scripts/ci/fo_pk_struct_cmax_driver_gate.sh        # R7
 bash scripts/ci/fo_pk_import_cmax_driver_gate.sh        # R7b
 bash scripts/ci/fo_pk_struct_fss_driver_gate.sh         # R8
 bash scripts/ci/fo_pk_import_fss_driver_gate.sh         # R8b
+bash scripts/ci/fo_pk_struct_ptr_driver_gate.sh         # R9
+bash scripts/ci/fo_pk_import_ptr_driver_gate.sh         # R9b
 ```
 
-Expected: twelve `*_GATE_OK` lines. R1–R4 re-validated 2026-07-31; R5–R8b on 2026-08-01.
+Expected: fourteen `*_GATE_OK` lines. R1–R4 re-validated 2026-07-31; R5–R9b on 2026-08-01.
 
 Compiler prerequisite (do not claim science freezes without it):
 
@@ -247,6 +251,18 @@ PTF \(=\mathrm{kel}\cdot\tau\) after algebra. Multi-mod: `fo_cmax`, `fo_cmin`, `
 | \(\mathrm{Var}(n_{90})\) | 0.019145 |
 
 Multi-mod: `fo_fss`, `fo_n90` (R8b).
+
+### 3.9 Peak–trough ratio and DOF (R9)
+
+| Quantity | Value |
+|----------|------:|
+| PTR | 3.320113 |
+| \(\mathrm{Var}(\mathrm{PTR})\) | 0.082541 |
+| \(E_2[\mathrm{PTR}]\) | 3.338918 |
+| DOF | 2.320113 |
+| \(\mathrm{Var}(\mathrm{DOF})\) | 0.082541 |
+
+Multi-mod: `fo_ptr`, `fo_dof` (R9b).
 
 ---
 

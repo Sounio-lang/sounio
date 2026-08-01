@@ -81,6 +81,8 @@ Measured 2026-07-31 on this workspace: **all four `*_GATE_OK`**.
 | R7b | `examples/epistemic_fo_second_order/fo_pk_import_cmax_driver.sio` | `FO_PK_IMPORT_CMAX_DRIVER_PASS` |
 | R8 | `examples/epistemic_fo_second_order/fo_pk_struct_fss_driver.sio` | `FO_PK_STRUCT_FSS_DRIVER_PASS` |
 | R8b | `examples/epistemic_fo_second_order/fo_pk_import_fss_driver.sio` | `FO_PK_IMPORT_FSS_DRIVER_PASS` |
+| R9 | `examples/epistemic_fo_second_order/fo_pk_struct_ptr_driver.sio` | `FO_PK_STRUCT_PTR_DRIVER_PASS` |
+| R9b | `examples/epistemic_fo_second_order/fo_pk_import_ptr_driver.sio` | `FO_PK_IMPORT_PTR_DRIVER_PASS` |
 
 ```bash
 bash scripts/ci/fo_pk_struct_auc_thalf_driver_gate.sh   # R5 AUC + t½ methods
@@ -91,6 +93,8 @@ bash scripts/ci/fo_pk_struct_cmax_driver_gate.sh        # R7 Cmax + PTF methods
 bash scripts/ci/fo_pk_import_cmax_driver_gate.sh        # R7b Cmin + multi-mod
 bash scripts/ci/fo_pk_struct_fss_driver_gate.sh         # R8 f_ss + n90 methods
 bash scripts/ci/fo_pk_import_fss_driver_gate.sh         # R8b import ↔ method
+bash scripts/ci/fo_pk_struct_ptr_driver_gate.sh         # R9 PTR + DOF methods
+bash scripts/ci/fo_pk_import_ptr_driver_gate.sh         # R9b import ↔ method
 ```
 
 ---
@@ -280,14 +284,34 @@ stdlib: `fo_fss`, `fo_n90`.
 
 ---
 
+## 6f. R9 — Peak–trough ratio + degree of fluctuation (2026-08-01)
+
+\[
+\mathrm{PTR}=\frac{C_{\max}}{C_{\min}}=\exp(\mathrm{kel}\cdot\tau)=\frac{1}{f_{\mathrm{rem}}},\qquad
+\mathrm{DOF}=\frac{C_{\max}-C_{\min}}{C_{\min}}=\mathrm{PTR}-1.
+\]
+
+| Quantity | Value | Surfaces |
+|----------|------:|----------|
+| PTR point | 3.320113 | method |
+| \(\mathrm{Var}(\mathrm{PTR})\) | 0.082541 | method = peel = import |
+| \(E_2[\mathrm{PTR}]\) | 3.338918 | method |
+| DOF point | 2.320113 | method |
+| \(\mathrm{Var}(\mathrm{DOF})\) | 0.082541 | method = peel (= PTR var) |
+
+Gates: `fo_pk_struct_ptr_driver_gate.sh`, `fo_pk_import_ptr_driver_gate.sh`.
+stdlib: `fo_ptr`, `fo_dof`.
+
+---
+
 ## 7. FO compiler surfaces exercised
 
-| Surface | R1–R4 | R5/b | R6/b | R7/b | R8/b |
-|---------|:-----:|:----:|:----:|:----:|:----:|
-| Struct-lit methods | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Multi-mod import | R4 | R5b | R6b | R7b | R8b |
-| Shared FO peel | kel | t½ | f_rem | PTF | f_ss, n90 |
-| \(E_2\) | Css | AUC | Rac | Cmax | f_ss(3) |
+| Surface | R1–R4 | R5/b | R6/b | R7/b | R8/b | R9/b |
+|---------|:-----:|:----:|:----:|:----:|:----:|:----:|
+| Struct-lit methods | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Multi-mod import | R4 | R5b | R6b | R7b | R8b | R9b |
+| Shared FO peel | kel | t½ | f_rem | PTF | f_ss, n90 | PTR, DOF |
+| \(E_2\) | Css | AUC | Rac | Cmax | f_ss(3) | PTR |
 
 Compiler prerequisite: Madaros FO trust gate **42/42** (`scripts/ci/madaros_gum_fo_trust_gate.sh`).
 
