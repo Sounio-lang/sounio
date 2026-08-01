@@ -2504,6 +2504,94 @@ theorem star_forall : ∀ (m j Y a b : Nat), Y < 2^m → Y ≠ 0 → Y % 2^j = 0
         exact star_step_low k j Y a b hjk hYl hY0 ha hb hd
           (fun a' b' ha' hb' => star_forall (k+1) j Y a' b' hYl hY0 hmod ha' hb')
 
+/-! ## L2's reduction, PROVEN — the fiber comes off the τ-discrepancy of σ
+
+The `l2_reduction` rung (2026-08-01) replaces L2 by a fiber-free statement one level down,
+using the τ-discrepancy of the cocycle
+
+    gdisc j x y = σ(τx, τy) · σ(x, y)
+
+Its clause `N4` — that the fiber-level discrepancy IS the reduced product — was measured at
+three levels. It does not have to be: every ingredient is already proven here, and the whole
+of it is the four branch reductions plus `tau_seam`/`tau_xor`. So the reduction L2 ⟸ (♦) is a
+THEOREM and only (♦) itself is measured. -/
+
+/-- The τ-discrepancy of the cocycle. -/
+def gdisc (j x y m : Nat) : Int := cdSigma (tau j x) (tau j y) m * cdSigma x y m
+
+theorem gdisc_pm (j x y m : Nat) : gdisc j x y m = 1 ∨ gdisc j x y m = -1 := by
+  unfold gdisc
+  rcases cdSigma_pm m (tau j x) (tau j y) with h1 | h1 <;>
+    rcases cdSigma_pm m x y with h2 | h2 <;> rw [h1, h2] <;> simp
+
+/-- **`gdisc` is symmetric, ∀n.** This is `chi_tau` in disguise, and it is what removes the
+    argument swap the raw reduction produces. -/
+theorem gdisc_symm (m j x y : Nat) (hj : j < m) (hx : x < 2^m) (hy : y < 2^m) :
+    gdisc j x y m = gdisc j y x m := by
+  have hchi : chi (tau j x) (tau j y) m * chi x y m = 1 := by
+    rw [chi_tau m j x y hj hx hy]
+    unfold chi
+    rcases cdSigma_pm m x y with h1 | h1 <;> rcases cdSigma_pm m y x with h2 | h2 <;>
+      rw [h1, h2] <;> decide
+  have hprod : gdisc j x y m * gdisc j y x m = 1 := by
+    unfold gdisc
+    unfold chi at hchi
+    calc cdSigma (tau j x) (tau j y) m * cdSigma x y m
+            * (cdSigma (tau j y) (tau j x) m * cdSigma y x m)
+        = cdSigma (tau j x) (tau j y) m * cdSigma (tau j y) (tau j x) m
+            * (cdSigma x y m * cdSigma y x m) := by ac_rfl
+      _ = 1 := hchi
+  rcases gdisc_pm j x y m with h | h <;> rcases gdisc_pm j y x m with h' | h' <;>
+    rw [h, h'] <;> rw [h, h'] at hprod <;> first | rfl | (exfalso; exact absurd hprod (by decide))
+
+/-- **`N4`, proven ∀n.** For a fiber label `L = Y + H` at level `m+2` with `a, b` below the
+    seam, the level-`(m+2)` discrepancy of `P1` under `τ` collapses to a product of two
+    level-`(m+1)` `gdisc`s with no fiber and no top bit. `b ⊕ Y ≠ 0` is the `R_uu` branch
+    condition, and it governs BOTH sides: `τ (b ⊕ Y) = 0 ↔ b ⊕ Y = 0` by `tau_inj`. -/
+theorem l2_reduction (m j Y a b : Nat) (hj : j < m+1) (hY : Y < 2^(m+1))
+    (ha : a < 2^(m+1)) (hb : b < 2^(m+1)) (hbY : b ^^^ Y ≠ 0) :
+    cdSigma (tau j a) (tau j b) (m+2)
+        * cdSigma (tau j (a ^^^ (Y + 2^(m+1)))) (tau j (b ^^^ (Y + 2^(m+1)))) (m+2)
+        * (cdSigma a b (m+2) * cdSigma (a ^^^ (Y + 2^(m+1))) (b ^^^ (Y + 2^(m+1))) (m+2))
+      = gdisc j a b (m+1) * gdisc j (b ^^^ Y) (a ^^^ Y) (m+1) := by
+  have haY : a ^^^ Y < 2^(m+1) := Nat.xor_lt_two_pow ha hY
+  have hbY' : b ^^^ Y < 2^(m+1) := Nat.xor_lt_two_pow hb hY
+  have hta : tau j a < 2^(m+1) := tau_lt j (m+1) a hj ha
+  have htb : tau j b < 2^(m+1) := tau_lt j (m+1) b hj hb
+  have htaY : tau j (a ^^^ Y) < 2^(m+1) := tau_lt j (m+1) (a ^^^ Y) hj haY
+  have htbY : tau j (b ^^^ Y) < 2^(m+1) := tau_lt j (m+1) (b ^^^ Y) hj hbY'
+  -- the seam split, on both the plain and the τ side
+  have ea : a ^^^ (Y + 2^(m+1)) = (a ^^^ Y) + 2^(m+1) := xor_seam a Y m ha hY
+  have eb : b ^^^ (Y + 2^(m+1)) = (b ^^^ Y) + 2^(m+1) := xor_seam b Y m hb hY
+  have eta : tau j ((a ^^^ Y) + 2^(m+1)) = tau j (a ^^^ Y) + 2^(m+1) :=
+    tau_seam j m (a ^^^ Y) hj haY
+  have etb : tau j ((b ^^^ Y) + 2^(m+1)) = tau j (b ^^^ Y) + 2^(m+1) :=
+    tau_seam j m (b ^^^ Y) hj hbY'
+  -- the R_uu branch condition, on both sides
+  have htbY0 : tau j (b ^^^ Y) ≠ 0 :=
+    fun h => hbY (tau_inj j (b ^^^ Y) 0 (by rw [h, tau_zero]))
+  rw [ea, eb, eta, etb,
+      R_ll (tau j a) (tau j b) m hta htb,
+      R_uu (tau j (a ^^^ Y)) (tau j (b ^^^ Y)) m htaY htbY,
+      R_ll a b m ha hb,
+      R_uu (a ^^^ Y) (b ^^^ Y) m haY hbY',
+      if_neg htbY0, if_neg hbY]
+  unfold gdisc
+  ac_rfl
+
+/-- The reduction in the form the rung states it. `R_uu` returns its arguments SWAPPED, so the
+    raw reduction gives `g(b⊕Y, a⊕Y)`; `gdisc_symm` is exactly what turns that into
+    `g(a⊕Y, b⊕Y)`. That is the whole job the symmetry does here. -/
+theorem l2_reduction_symm (m j Y a b : Nat) (hj : j < m+1) (hY : Y < 2^(m+1))
+    (ha : a < 2^(m+1)) (hb : b < 2^(m+1)) (hbY : b ^^^ Y ≠ 0) :
+    cdSigma (tau j a) (tau j b) (m+2)
+        * cdSigma (tau j (a ^^^ (Y + 2^(m+1)))) (tau j (b ^^^ (Y + 2^(m+1)))) (m+2)
+        * (cdSigma a b (m+2) * cdSigma (a ^^^ (Y + 2^(m+1))) (b ^^^ (Y + 2^(m+1))) (m+2))
+      = gdisc j a b (m+1) * gdisc j (a ^^^ Y) (b ^^^ Y) (m+1) := by
+  rw [l2_reduction m j Y a b hj hY ha hb hbY,
+      gdisc_symm (m+1) j (b ^^^ Y) (a ^^^ Y) hj
+        (Nat.xor_lt_two_pow hb hY) (Nat.xor_lt_two_pow ha hY)]
+
 end SounioZDFiberAntisym
 
 

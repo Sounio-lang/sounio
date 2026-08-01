@@ -30,8 +30,13 @@ shape (*) has for L1. Measured at levels 5, 6, 7 (N6), zero violations.
       would have been cheap to be right; it came back negative.
   N3  g is F2-BILINEAR ONLY FOR j <= 2. So the R21-style "find the F2-linear identity" route,
       which closed the ZD locality lemma, is WALLED here for general j.
-  N4  THE REDUCTION IS EXACT. The fiber-level discrepancy equals the reduced product
-      entrywise -- 0 violations at three levels -- via the R_ll / R_uu branch reductions.
+  N4  THE REDUCTION IS A THEOREM, not a measurement. `l2_reduction` / `l2_reduction_symm` in
+      formal/lean4/SounioZDFiberAntisym.lean, kernel-checked forall n: the four branch
+      reductions (R_ll, R_uu) plus tau_seam / tau_xor, with `b ^ Y != 0` as the R_uu branch
+      condition governing BOTH sides (tau (b^Y) = 0 <-> b^Y = 0 by tau_inj). This clause is a
+      PIN of that theorem against the measured object, not the evidence for it. Consequence:
+      L2 <== (diamond) is PROVEN and only (diamond) itself is measured -- strictly better than
+      where L1 sits, whose K2/K3/K4 are genuinely measured.
   N5  PIN, AND IT CAUGHT AN ERROR. The reduced resonance predicate is the PROVEN Lean lemma
       Qred_hi_ll: Qgen(W + 2^(m+1), a, b, m+2) = - Qgen'(W, a, b, m+1). NOTE THE MINUS SIGN.
       The first version of this rung dropped it, and the failure locus then came out
@@ -43,8 +48,9 @@ shape (*) has for L1. Measured at levels 5, 6, 7 (N6), zero violations.
   N8  NULL CONTROLS. Odd-weight Y must fail (it does), and a perturbed mask must fail (it does).
   N0  PARITY. The builder reproduces the in-tree sign_table entrywise.
 
-NOT CLAIMED. L2 is NOT proven, and neither is (diamond). This is a reduction, verified at three
-levels, plus one already-proven ingredient (N1). (c) is unchanged in status: its (*) leg is
+NOT CLAIMED. L2 is NOT proven, and neither is (diamond). What IS proven forall n is the
+REDUCTION itself (N4, `l2_reduction`) and its symmetry ingredient (N1, `gdisc_symm`/`chi_tau`),
+both kernel-checked. So the only measured link left in L2's chain is (diamond). (c) is unchanged in status: its (*) leg is
 discharged in Lean, its L2 leg is this. Numerical certificate; D3.
 
 Verdict L2_REDUCED_TO_FIBER_FREE_DIAMOND__NOT_PROVEN.
@@ -145,7 +151,7 @@ def main():
 
     # ---- N3  bilinearity only for small j -------------------------------------------------
     n3_rows = []
-    for n in (5, 6):
+    for n in (5, 6, 7):
         S = sign_table_fast(n).astype(np.int64)
         N = 1 << n
         I = np.arange(N)
@@ -203,9 +209,10 @@ def main():
             n7_offres += int((bad & (Qfib == 1)).sum())
             n7_tot += int(dom.sum())
     ok["N4"], ok["N5"], ok["N6"] = n4, n5, n6
-    print(f"N4_REDUCE   fiber discrepancy == g(a,b)*g(b^Y,a^Y) == g(a,b)*g(a^Y,b^Y) entrywise "
-          f"({n4_n} checks, levels 5,6,7) {'OK' if n4 else 'FAIL'} -- the fiber and the top bit "
-          f"are GONE; the second equality is N1")
+    print(f"N4_REDUCE   [Lean-proven forall n] fiber discrepancy == g(a,b)*g(b^Y,a^Y) == g(a,b)*g(a^Y,b^Y) entrywise "
+          f"({n4_n} checks, levels 5,6,7) {'OK' if n4 else 'FAIL'} -- PROVEN forall n as "
+          f"`l2_reduction`/`l2_reduction_symm`; this clause PINS that theorem to the measured "
+          f"object. Fiber and top bit GONE; the swap is removed by N1")
     print(f"N5_PIN      Qgen(Y+H,a,b,n+1) == -Qgen'(Y,a,b,n), the Lean lemma Qred_hi_ll, "
           f"({n5_n} checks) {'OK' if n5 else 'FAIL'} -- NOTE THE MINUS SIGN: the first draft of "
           f"this rung dropped it and N7's cross-tab came out self-contradictory")
@@ -263,7 +270,10 @@ def main():
               "CANCELLATION -- g itself does not factor (N2) -- and the F2-linear route that "
               "closed the ZD locality lemma is walled here for j >= 3 (N3). Unlike (*), "
               "(diamond) genuinely NEEDS its resonance hypothesis: unrestricted it fails, and "
-              "every failure is off resonance (N7). L2 IS NOT PROVEN and neither is (diamond). "
+              "every failure is off resonance (N7) -- so an induction on (diamond) must RE-ESTABLISH "
+              "Qgen'(Y,a,b) = -1 at the reduced level in each quadrant, which is where the next "
+              "attempt starts. L2 IS NOT PROVEN and neither is (diamond); the REDUCTION to it "
+              "IS (N4, Lean, forall n). "
               "Numerical certificate; D3")
         return 0
     print("CD_TOWER_ZDL2R_VERDICT INCOMPLETE  failing="
