@@ -16,6 +16,7 @@ D6="$ROOT_DIR/tests/run-pass/clinical_proof_carrying_policy_observation_associat
 D11="$ROOT_DIR/tests/run-pass/clinical_shift_robust_risk_transport_witness.sio"
 D12="$ROOT_DIR/tests/run-pass/clinical_linear_target_monitor_witness.sio"
 MODULE_CONTEXTUAL="$ROOT_DIR/tests/run-pass/module_contextual_keyword_path.sio"
+STUDY_CONTEXTUAL="$ROOT_DIR/tests/compiler/madaros_imported_runtime_acceptance/contextual_study_ident.sio"
 
 fail() { echo "[madaros-imported-runtime-source-fresh] FAIL: $*" >&2; exit 1; }
 sha256() { sha256sum "$1" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$1" | awk '{print $1}'; }
@@ -39,7 +40,8 @@ for path in \
   tests/run-pass/clinical_proof_carrying_policy_observation_associator_witness.sio \
   tests/run-pass/clinical_shift_robust_risk_transport_witness.sio \
   tests/run-pass/clinical_linear_target_monitor_witness.sio \
-  tests/run-pass/module_contextual_keyword_path.sio; do
+  tests/run-pass/module_contextual_keyword_path.sio \
+  tests/compiler/madaros_imported_runtime_acceptance/contextual_study_ident.sio; do
   [[ -f "$ROOT_DIR/$path" ]] || fail "required source missing: $path"
 done
 
@@ -186,6 +188,7 @@ run_imported_elf imported-d6 "$D6" ''
 run_imported_elf imported-d11 "$D11" ''
 run_imported_elf imported-d12 "$D12" 'PROOF-CARRYING LINEAR TARGET MONITOR D12 PASS'
 run_imported_elf module-contextual-keyword "$MODULE_CONTEXTUAL" 'MODULE_CONTEXTUAL_KEYWORD_PATH_OK'
+run_imported_elf study-contextual-keyword "$STUDY_CONTEXTUAL" 'CONTEXTUAL_STUDY_IDENT_OK'
 
 DEFAULT_DIR="$WORK/default-souc"
 DEFAULT_ELF="$DEFAULT_DIR/facade-default.elf"
@@ -231,6 +234,7 @@ imported_d6\tpass
 imported_d11\tpass
 imported_d12\tpass
 module_contextual_keyword_path\tpass
+study_contextual_identifier\tpass
 witness_fallback\t0
 EOF
 
