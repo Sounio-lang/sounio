@@ -103,8 +103,10 @@ Second-order mean correction (when reported):
 | R5b | Import `fo_auc`/`fo_thalf` bit-agrees with methods | `fo_pk_import_auc_thalf_driver.sio` | `fo_pk_import_auc_thalf_driver_gate.sh` | `FO_PK_IMPORT_AUC_THALF_DRIVER_PASS` |
 | R6 | \(f_{\mathrm{rem}}\) + Rac FO; shared-η peel; method = peel | `fo_pk_struct_rac_driver.sio` | `fo_pk_struct_rac_driver_gate.sh` | `FO_PK_STRUCT_RAC_DRIVER_PASS` |
 | R6b | Import `fo_rac`/`fo_frac_rem` bit-agrees on freezes | `fo_pk_import_rac_driver.sio` | `fo_pk_import_rac_driver_gate.sh` | `FO_PK_IMPORT_RAC_DRIVER_PASS` |
+| R7 | \(C_{\max}\)/PTF FO; \(C_{\min}\) point; kel·τ identity | `fo_pk_struct_cmax_driver.sio` | `fo_pk_struct_cmax_driver_gate.sh` | `FO_PK_STRUCT_CMAX_DRIVER_PASS` |
+| R7b | Import `fo_cmax`/`fo_cmin`/`fo_ptf` freezes (Cmin Var) | `fo_pk_import_cmax_driver.sio` | `fo_pk_import_cmax_driver_gate.sh` | `FO_PK_IMPORT_CMAX_DRIVER_PASS` |
 
-Re-run all eight:
+Re-run all ten:
 
 ```bash
 export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
@@ -118,9 +120,11 @@ bash scripts/ci/fo_pk_struct_auc_thalf_driver_gate.sh   # R5
 bash scripts/ci/fo_pk_import_auc_thalf_driver_gate.sh   # R5b
 bash scripts/ci/fo_pk_struct_rac_driver_gate.sh         # R6
 bash scripts/ci/fo_pk_import_rac_driver_gate.sh         # R6b
+bash scripts/ci/fo_pk_struct_cmax_driver_gate.sh        # R7
+bash scripts/ci/fo_pk_import_cmax_driver_gate.sh        # R7b
 ```
 
-Expected: eight `*_GATE_OK` lines. R1–R4 re-validated 2026-07-31; R5–R6b on 2026-08-01.
+Expected: ten `*_GATE_OK` lines. R1–R4 re-validated 2026-07-31; R5–R7b on 2026-08-01.
 
 Compiler prerequisite (do not claim science freezes without it):
 
@@ -213,6 +217,20 @@ Method = call-result = free-fn = site/peel on all Var freezes. Shared \(\eta\) c
 
 Method = peel on both Vars; free-fn matches method. Shared \(\eta\) cancels in kel.
 Multi-mod helpers: `fo_frac_rem`, `fo_rac` (R6b).
+
+### 3.7 Multi-dose Cmax / Cmin / PTF (R7)
+
+| Quantity | Value |
+|----------|------:|
+| \(C_{\max}\) | 11.448115 |
+| \(\mathrm{Var}(C_{\max})\) | 2.050059 |
+| \(E_2[C_{\max}]\) | 11.539124 |
+| \(C_{\min}\) | 3.448115 |
+| \(\mathrm{Var}(C_{\min})\) | 0.306096 |
+| PTF | 1.200000 |
+| \(\mathrm{Var}(\mathrm{PTF})\) | 0.007488 |
+
+PTF \(=\mathrm{kel}\cdot\tau\) after algebra. Multi-mod: `fo_cmax`, `fo_cmin`, `fo_ptf` (R7b).
 
 ---
 

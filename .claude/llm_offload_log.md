@@ -3356,3 +3356,4 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 | 2026-08-01 | xai | math-review | fo_pk_struct_rac_driver.sio / R6 freezes | PASS | f_rem/Rac point, Var, E2; shared-η cancel; FO not zero Var(kel) |
 | 2026-08-01 | zai | math-review | fo_pk_struct_rac_driver.sio / R6 freezes | PASS* | Var(f_rem)=0.000679, Var(Rac)≈0.002849; truncated at E2 Hessian (length) after self-correcting R''>0; analytic E2≈1.434128 matches freeze 1.434130 |
 | 2026-08-01 | analytic | math-review | R6 delta-method | PASS | Var f_rem 0.000679; Var Rac 0.002849; bias +0.003116 → E2 1.434128 |
+| 2026-08-01 | xai | math-review | fo_pk_struct_cmax_driver.sio / R7 freezes | PASS | Cmax/Cmin/PTF points, Vars, E2, kel·τ identity |

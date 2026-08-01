@@ -145,6 +145,22 @@ Method = peel on both Vars; free-fn Rac matches method under FO site budget.
 
 ---
 
+## 5d. Multi-dose Cmax / Cmin / PTF (R7, 2026-08-01)
+
+| Quantity | Value |
+|----------|------:|
+| \(C_{\max}\) | 11.448115 |
+| \(\mathrm{Var}(C_{\max})\) | 2.050059 |
+| \(E_2[C_{\max}]\) | 11.539124 |
+| \(C_{\min}\) | 3.448115 |
+| \(\mathrm{Var}(C_{\min})\) | 0.306096 |
+| PTF \(=\mathrm{kel}\cdot\tau\) | 1.200000 |
+| \(\mathrm{Var}(\mathrm{PTF})\) | 0.007488 |
+
+**R7b:** multi-mod `fo_cmax`/`fo_cmin`/`fo_ptf` (`FO_PK_IMPORT_CMAX_GATE_OK`).
+
+---
+
 ## 6. How to re-run
 
 ```bash
@@ -159,10 +175,12 @@ bash scripts/ci/fo_pk_struct_auc_thalf_driver_gate.sh   # R5
 bash scripts/ci/fo_pk_import_auc_thalf_driver_gate.sh   # R5b
 bash scripts/ci/fo_pk_struct_rac_driver_gate.sh         # R6
 bash scripts/ci/fo_pk_import_rac_driver_gate.sh         # R6b
+bash scripts/ci/fo_pk_struct_cmax_driver_gate.sh        # R7
+bash scripts/ci/fo_pk_import_cmax_driver_gate.sh        # R7b
 ```
 
-Expected: eight `*_GATE_OK` lines. R1–R4 re-validated 2026-07-31
-(residual-4: `ORAL_CSS_RESIDUAL4_CLOSED`); R5–R6b re-validated 2026-08-01.
+Expected: ten `*_GATE_OK` lines. R1–R4 re-validated 2026-07-31
+(residual-4: `ORAL_CSS_RESIDUAL4_CLOSED`); R5–R7b re-validated 2026-08-01.
 
 Full package re-run:
 
@@ -191,6 +209,8 @@ bash scripts/ci/fo_residual4_stack_gate.sh
 | R5b | `examples/epistemic_fo_second_order/fo_pk_import_auc_thalf_driver.sio` |
 | R6 | `examples/epistemic_fo_second_order/fo_pk_struct_rac_driver.sio` |
 | R6b | `examples/epistemic_fo_second_order/fo_pk_import_rac_driver.sio` |
+| R7 | `examples/epistemic_fo_second_order/fo_pk_struct_cmax_driver.sio` |
+| R7b | `examples/epistemic_fo_second_order/fo_pk_import_cmax_driver.sio` |
 
 Compiler prerequisite: FO trust 42/42 — `scripts/ci/madaros_gum_fo_trust_gate.sh`.  
 Stack map: `docs/audit/MADAROS_FO_GUM_STACK_2026-07-27.md`.
