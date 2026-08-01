@@ -383,9 +383,105 @@ def main():
           f"{'; '.join(f'j={a}: {b} and {c} mismatches /{d}' for a, b, c, d in n13_rows)}. Two "
           f"closed forms tried and refuted; recorded so they are not retried")
 
+    # ---- N14  does the HYPOTHESIS descend too? ---------------------------------------------
+    # N9 proved the conclusion is level-bounded. The sign law (N11) and the priming law predict
+    # the hypothesis descends as well:
+    #   Q'_n(Y,a,b) = (-1)^popcount(Y>>(j+2)) * X_(j+2)(Y0,a0,b0),
+    #   X = Q' if popcount((a^b)>>(j+2)) is even, else Q
+    # -- the sign counts levels where the LABEL is high, the priming counts levels where
+    # exactly ONE of a,b is upper. Unrestricted this FAILS in bulk. It holds exactly on the
+    # CLEAN locus: tuples with no degeneracy at ANY level of the descent. That is the K17
+    # phenomenon (*) already met -- a tuple non-degenerate at m+2 can reduce to a degenerate one.
+    def _Qp(S, Y, a, b):
+        return int(S[a, b]) * int(S[b ^ Y, a ^ Y]) * int(S[b ^ Y, a]) * int(S[a ^ Y, b])
+
+    def _Qu(S, Y, a, b):
+        return int(S[a, b]) * int(S[a ^ Y, b ^ Y]) * int(S[a, b ^ Y]) * int(S[a ^ Y, b])
+
+    def _pc(x):
+        return bin(x).count("1")
+
+    def _clean(Y, a, b, j, n):
+        for L in range(j + 2, n + 1):
+            msk = (1 << L) - 1
+            W, A, B = Y & msk, a & msk, b & msk
+            if A == 0 or B == 0 or (A ^ W) == 0 or (B ^ W) == 0 or A == B or (A ^ B ^ W) == 0:
+                return False
+        return True
+
+    n14_all = n14_tot = n14_cl = n14_cltot = 0
+    for n in (6, 7):
+        Sn = sign_table_fast(n).astype(np.int64)
+        N = 1 << n
+        for Y in range(1, N):
+            j = (Y & -Y).bit_length() - 1
+            if j + 2 > n:
+                continue
+            Mj = 1 << (j + 2)
+            Sm = sign_table_fast(j + 2).astype(np.int64)
+            Y0 = Y % Mj
+            eps = (-1) ** _pc(Y >> (j + 2))
+            for a in range(N):
+                for b in range(N):
+                    a0, b0 = a % Mj, b % Mj
+                    X = (_Qp(Sm, Y0, a0, b0) if _pc((a ^ b) >> (j + 2)) % 2 == 0
+                         else _Qu(Sm, Y0, a0, b0))
+                    good = _Qp(Sn, Y, a, b) == eps * X
+                    n14_tot += 1
+                    n14_all += not good
+                    if _clean(Y, a, b, j, n):
+                        n14_cltot += 1
+                        n14_cl += not good
+    n14 = (n14_all > 0) and (n14_cl == 0)
+    ok["N14"] = n14
+    print(f"N14_HYPDESC the hypothesis descends TOO, but only on the CLEAN locus: unrestricted "
+          f"{n14_all}/{n14_tot} violations, on tuples with no degeneracy at ANY level "
+          f"{n14_cl}/{n14_cltot} {'OK' if n14 else 'FAIL'} -- sign counts levels where the LABEL "
+          f"is high, priming counts levels where exactly ONE of a,b is upper. The gap locus is "
+          f"the K17 phenomenon again and is NOT handled")
+
+    # ---- N15  (diamond) as a BOUNDED family ------------------------------------------------
+    # Combining N9 (conclusion descends, PROVEN) and N14 (hypothesis descends on the clean
+    # locus), (diamond) restricted to the clean locus has NO reference to n at all:
+    #   for Y0 in {2^j, 3*2^j}, eps = -(-1)^{bit_{j+1}(Y0)} (this is the even-weight
+    #   hypothesis, N12), and for BOTH primings X:
+    #       X(Y0,a0,b0) = -eps  ==>  D(Y0,a0,b0) = +1        at level j+2.
+    n15_rows = []
+    n15 = True
+    for j in range(1, 8):
+        L = j + 2
+        Mj = 1 << L
+        Sj = sign_table_fast(L).astype(np.int64)
+        g = gmat(Sj, Mj, j)
+        A, B = np.meshgrid(np.arange(Mj), np.arange(Mj), indexing="ij")
+        p = np.array([(-1) ** pj(x, j) for x in range(Mj)])
+        for Y0 in ((1 << j), (1 << j) | (1 << (j + 1))):
+            eps = -((-1) ** ((Y0 >> (j + 1)) & 1))
+            D = g * g[A ^ Y0, B ^ Y0] * np.outer(p, p)
+            for nm, X in (("Q'", Sj * Sj[B ^ Y0, A ^ Y0] * Sj[B ^ Y0, A] * Sj[A ^ Y0, B]),
+                          ("Q", Sj * Sj[A ^ Y0, B ^ Y0] * Sj[A, B ^ Y0] * Sj[A ^ Y0, B])):
+                hyp = X == -eps
+                bad = int((hyp & (D != 1)).sum())
+                n15 = n15 and bad == 0
+                n15_rows.append((j, Y0, nm, bad, int(hyp.sum())))
+    ok["N15"] = n15
+    print(f"N15_BOUNDED (diamond) on the clean locus has NO reference to n: at level j+2, "
+          f"X(Y0,a0,b0) = -eps ==> D = +1. Checked EXHAUSTIVELY for j = 1..7 "
+          f"{'OK' if n15 else 'FAIL'} -- "
+          f"{'; '.join(f'j={a} Y0={b} X={c}: {d}/{e}' for a, b, c, d, e in n15_rows if a <= 3)}"
+          f"; ... (all zero)")
+
+    # ---- N16  one of the four cases is VACUOUS, by a theorem -------------------------------
+    n16 = all(e == 0 for a, b, c, d, e in n15_rows if c == "Q" and b == (1 << a))
+    ok["N16"] = n16
+    print(f"N16_VACUOUS of N15's four cases, `Y0 = 2^j` with priming Q is EMPTY at every j "
+          f"{'OK' if n16 else 'FAIL'} -- because Qgen at a single-bit label is identically -1 "
+          f"(Qgen_pow2, PROVEN forall n), so its hypothesis X = +1 is unsatisfiable. One "
+          f"quarter of the remaining statement is discharged by an existing theorem")
+
     print("=" * 78)
     if all(ok.values()):
-        print("CD_TOWER_ZDL2R_VERDICT DIAMOND_IS_LEVEL_BOUNDED__PARITY_MECHANISM_IDENTIFIED")
+        print("CD_TOWER_ZDL2R_VERDICT DIAMOND_IS_A_BOUNDED_FAMILY_ON_THE_CLEAN_LOCUS__GAP_LOCUS_OPEN")
         print("CD_TOWER_ZDL2R_NOTE L2 (fiber L = Y|H, level n) is replaced by (diamond) "
               "(fiber-free, level n-1): with g(x,y) = sigma(tau x,tau y)sigma(x,y) and "
               "j = lsb(Y), for even-weight Y, Qgen'(Y,a,b) = -1 implies "

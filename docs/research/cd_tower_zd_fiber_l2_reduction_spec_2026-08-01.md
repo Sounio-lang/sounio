@@ -17,7 +17,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.cd-to
 
 **Date:** 2026-08-01
 **Orthography:** EN-UK
-**Status:** `EXECUTABLE` — `DIAMOND_IS_LEVEL_BOUNDED__PARITY_MECHANISM_IDENTIFIED`
+**Status:** `EXECUTABLE` — `DIAMOND_IS_A_BOUNDED_FAMILY_ON_THE_CLEAN_LOCUS__GAP_LOCUS_OPEN`
 **Parents:** `cd_tower_zd_fiber_l2_switching_spec_2026-07-31.md`, `cd_tower_zd_fiber_l1_reduction_spec_2026-07-31.md`
 **Harness:** `scripts/research/cd_tower_zd_fiber_l2_reduction_contract.py`
 
@@ -161,13 +161,54 @@ different probes landing on the same `j ≤ 2`.
 
 ---
 
+## 2c. The attack on (♦): it is a **bounded family**, plus a gap locus
+
+`N9` proved the *conclusion* is level-bounded. The natural next question is whether the
+*hypothesis* is too. The sign and priming laws predict it should be:
+
+```
+Q'_n(Y,a,b) = (−1)^{popcount(Y ≫ (j+2))} · X_{j+2}(Y₀, a₀, b₀)
+X = Q'  if popcount((a⊕b) ≫ (j+2)) is even,  else  Q
+```
+
+— the **sign** counts the levels where the *label* is high, the **priming** counts the levels
+where exactly *one* of `a, b` is upper.
+
+**Unrestricted this fails in bulk (828 192 / 2 318 336). On the CLEAN locus — no degeneracy at
+any level of the descent — it holds exactly: 0 / 633 888.** So the hypothesis descends too, but
+only where nothing degenerates on the way down. That is the `K17` phenomenon (★) already met: a
+tuple non-degenerate at level `m+2` can reduce to a degenerate one at `m+1`.
+
+**Consequence (`N15`): on the clean locus, (♦) has no reference to `n` at all.** With `ε` fixed
+by the even-weight hypothesis (`N12`), it becomes, at level `j+2`:
+
+> for `Y₀ ∈ {2^j, 3·2^j}`, `ε = −(−1)^{bit_{j+1}(Y₀)}`, and for **both** primings `X`:
+> `X(Y₀,a₀,b₀) = −ε` ⟹ `D(Y₀,a₀,b₀) = +1`
+
+Checked **exhaustively for `j = 1 … 7`** — every `(a₀,b₀)` at every level up to 9. Zero
+violations. The two-parameter `∀n, ∀Y` statement has become a one-parameter family of finite
+checks.
+
+**And a quarter of it is already discharged (`N16`).** Of the four cases, `Y₀ = 2^j` with
+priming `Q` is **empty at every `j`** — because `Qgen` at a single-bit label is identically `−1`
+(`Qgen_pow2`, proven ∀n), so its hypothesis `X = +1` is unsatisfiable.
+
+---
+
 ## 3. Not claimed
 
 - **L2 is not proven, and neither is (♦).** What *is* proven ∀n is the **reduction**
   (`l2_reduction`) and its symmetry ingredient (`gdisc_symm`/`chi_tau`). (♦) itself is measured
   at three levels.
-- **(♦) is not a Lean statement yet, and it is not proven.** What is proven of it is that its
-  conclusion is level-bounded (`G_descend`); the implication itself, with its hypothesis, is not.
+- **(♦) is not proven.** What is proven of it: the conclusion is level-bounded (`G_descend`),
+  the reduction into it is a theorem (`l2_reduction`), its symmetry ingredient is a theorem
+  (`gdisc_symm`), and one of the four bounded cases is vacuous by `Qgen_pow2`. What is not:
+  the bounded family itself (verified `j ≤ 7`, not proven for all `j`), and **the gap locus** —
+  tuples that degenerate at some intermediate level, where the hypothesis does not descend and
+  which (★) needed explicit gap roots to handle. Neither is in Lean.
+- **`N14`'s clean/gap split is measured, not proven.** The one-step laws behind it are the
+  sixteen proven reduction lemmas; what is measured is that their composition is exact on the
+  clean locus.
 - **`N12` explains the parity hypothesis; it does not discharge it.** The sign law it rests on
   is proven; the arithmetic is trivial; but (♦) itself still needs the descent of the *object*,
   where the priming alternates.
