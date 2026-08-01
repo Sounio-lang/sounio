@@ -3353,3 +3353,6 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 | 2026-08-01 | xai | fan-out | fo_pk_method_science_v1.md | PASS | R5b annex rows |
 | 2026-08-01 | xai | fan-out | fo_pk_method_science_package.md | PASS | R5b handoff rows |
 | 2026-08-01 | xai+zai | math-review | fo_pk_import_auc_thalf_driver.sio | PASS | same freezes as R5 method; import parity |
+| 2026-08-01 | xai | math-review | fo_pk_struct_rac_driver.sio / R6 freezes | PASS | f_rem/Rac point, Var, E2; shared-η cancel; FO not zero Var(kel) |
+| 2026-08-01 | zai | math-review | fo_pk_struct_rac_driver.sio / R6 freezes | PASS* | Var(f_rem)=0.000679, Var(Rac)≈0.002849; truncated at E2 Hessian (length) after self-correcting R''>0; analytic E2≈1.434128 matches freeze 1.434130 |
+| 2026-08-01 | analytic | math-review | R6 delta-method | PASS | Var f_rem 0.000679; Var Rac 0.002849; bias +0.003116 → E2 1.434128 |

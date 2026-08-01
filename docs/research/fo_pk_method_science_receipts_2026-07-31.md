@@ -75,10 +75,14 @@ Measured 2026-07-31 on this workspace: **all four `*_GATE_OK`**.
 | R4 | `examples/epistemic_fo_second_order/fo_pk_import_method_driver.sio` | `FO_PK_IMPORT_METHOD_DRIVER_PASS` |
 | R5 | `examples/epistemic_fo_second_order/fo_pk_struct_auc_thalf_driver.sio` | `FO_PK_STRUCT_AUC_THALF_DRIVER_PASS` |
 | R5b | `examples/epistemic_fo_second_order/fo_pk_import_auc_thalf_driver.sio` | `FO_PK_IMPORT_AUC_THALF_DRIVER_PASS` |
+| R6 | `examples/epistemic_fo_second_order/fo_pk_struct_rac_driver.sio` | `FO_PK_STRUCT_RAC_DRIVER_PASS` |
+| R6b | `examples/epistemic_fo_second_order/fo_pk_import_rac_driver.sio` | `FO_PK_IMPORT_RAC_DRIVER_PASS` |
 
 ```bash
 bash scripts/ci/fo_pk_struct_auc_thalf_driver_gate.sh   # R5 AUC + t½ methods
 bash scripts/ci/fo_pk_import_auc_thalf_driver_gate.sh   # R5b import ↔ method
+bash scripts/ci/fo_pk_struct_rac_driver_gate.sh         # R6 Rac + f_rem methods
+bash scripts/ci/fo_pk_import_rac_driver_gate.sh         # R6b import ↔ method
 ```
 
 ---
@@ -186,17 +190,50 @@ on all R5 freezes. Gate: `fo_pk_import_auc_thalf_driver_gate.sh`.
 
 ---
 
+## 6c. R6 — Multi-dose accumulation ratio + residual fraction (2026-08-01)
+
+Under the same \(\mathrm{CL}_0,V_0,\eta\) seeds as R3 kel, fixed \(\tau=12\):
+
+\[
+f_{\mathrm{rem}}=\exp(-\mathrm{kel}\cdot\tau),\qquad
+\mathrm{Rac}=\frac{1}{1-f_{\mathrm{rem}}}=\frac{1}{1-\exp(-\mathrm{kel}\cdot\tau)}.
+\]
+
+Shared \(\eta\) cancels in kel, so FO is from \(\mathrm{CL}_0,V_0\) only (same peel class as \(t_{1/2}\)).
+
+| Quantity | Value | Surfaces |
+|----------|------:|----------|
+| \(f_{\mathrm{rem}}\) point | 0.301195 | method |
+| \(\mathrm{Var}(f_{\mathrm{rem}})\) | 0.000679 | method = peel |
+| Rac point | 1.431014 | method |
+| \(\mathrm{Var}(\mathrm{Rac})\) | 0.002848 | method = peel (= free, FO budget) |
+| \(E_2[\mathrm{Rac}]\) | 1.434130 | method |
+
+Gate: `scripts/ci/fo_pk_struct_rac_driver_gate.sh` → `FO_PK_STRUCT_RAC_GATE_OK`.
+
+**R6b import parity:** multi-mod `fo_rac` / `fo_frac_rem` bit-agree with method
+frac and peel on Rac freezes; method Rac Var/\(E_2\) printed from import FO under
+multi-site FO residual budget (≤6 heavy FO sites — more sites silent-exit rc=0).
+Gate: `fo_pk_import_rac_driver_gate.sh` → `FO_PK_IMPORT_RAC_GATE_OK`.
+
+**Compiler residual (honest):** Rac FO expressions are heavy
+\((1/(1-\exp(\cdot)))\). Drivers keep ≤5–6 `variance_of` / `second_order_mean`
+sites; nested method FO for Rac requires **inlined kel** (separate kel method
+call → SEGV). Documented in driver headers; gates still grep science tables.
+
+---
+
 ## 7. FO compiler surfaces exercised
 
-| Surface | R1 | R2 | R3 | R4 | R5 | R5b |
-|---------|:--:|:--:|:--:|:--:|:--:|:---:|
-| Struct-lit methods | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Call-result methods | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Free-fn / site parity | ✓ | | ✓ | ✓ | ✓ | ✓ |
-| `correlate` | ✓ | ✓ | | | | |
-| Multi-mod import | | | | ✓ | | ✓ |
-| Shared FO channel (peel) | ✓ | ✓ | ✓ (kel) | | ✓ (t½) | ✓ |
-| \(E_2\) / Hessian | ✓ | ✓ | ✓ | ✓ | ✓ (AUC) | ✓ |
+| Surface | R1 | R2 | R3 | R4 | R5 | R5b | R6 | R6b |
+|---------|:--:|:--:|:--:|:--:|:--:|:---:|:--:|:---:|
+| Struct-lit methods | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Call-result methods | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | | |
+| Free-fn / site parity | ✓ | | ✓ | ✓ | ✓ | ✓ | ✓ (peel) | ✓ |
+| `correlate` | ✓ | ✓ | | | | | | |
+| Multi-mod import | | | | ✓ | | ✓ | | ✓ |
+| Shared FO channel (peel) | ✓ | ✓ | ✓ (kel) | | ✓ (t½) | ✓ | ✓ (f_rem) | ✓ |
+| \(E_2\) / Hessian | ✓ | ✓ | ✓ | ✓ | ✓ (AUC) | ✓ | ✓ (Rac) | ✓ |
 
 Compiler prerequisite: Madaros FO trust gate **42/42** (`scripts/ci/madaros_gum_fo_trust_gate.sh`).
 
@@ -211,6 +248,9 @@ Compiler prerequisite: Madaros FO trust gate **42/42** (`scripts/ci/madaros_gum_
    stack + R4; L2 full engine OPEN (out of scope). Closeout:
    `docs/research/fo_pk_residual4_oral_css_closeout_2026-07-31.md`.
    Stack: `fo_residual4_stack_gate.sh`.
+5. **Multi-site heavy FO budget (R6):** >~6 nested Rac-class FO sites in one
+   binary can silent-exit (rc=0, no science table). R6 drivers budget FO sites;
+   free-fn Rac surface equals method (probe + peel) without a seventh FO site.
 
 ---
 
