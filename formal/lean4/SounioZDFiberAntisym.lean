@@ -2194,7 +2194,78 @@ theorem star_gap_aY_hi (m j W a b : Nat) (hj : j < m+1) (hW : W < 2^(m+1)) (hW0 
         (tau_lt j (m+1) W hj hW) (fun h => hW0 (tau_inj j W 0 (by rw [h, tau_zero])))
         (tau_lt j (m+2) b hjm hb) htae]
 
+/-! ## The recursion -/
+
+/-- One level, `Y` below the seam. Four quadrants; `uu` is the only one with gap sub-cases. -/
+theorem star_step_low (m j W a b : Nat) (hj : j < m+1) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
+    (ha : a < 2^(m+2)) (hb : b < 2^(m+2))
+    (hnd : ¬ (a = 0 ∨ b = 0 ∨ a ^^^ W = 0 ∨ b ^^^ W = 0 ∨ a = b ∨ a ^^^ b ^^^ W = 0))
+    (IH : ∀ a' b', a' < 2^(m+1) → b' < 2^(m+1) →
+        Qgen W a' b' (m+1) = Qgen (tau j W) (tau j a') (tau j b') (m+1)) :
+    Qgen W a b (m+2) = Qgen (tau j W) (tau j a) (tau j b) (m+2) := by
+  have h2H : 2^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  have hb0 : b ≠ 0 := fun h => hnd (Or.inr (Or.inl h))
+  have hbW : b ^^^ W ≠ 0 := fun h => hnd (Or.inr (Or.inr (Or.inr (Or.inl h))))
+  by_cases haU : a ≥ 2^(m+1) <;> by_cases hbU : b ≥ 2^(m+1)
+  · obtain ⟨u, hae, hul⟩ : ∃ u, a = u + 2^(m+1) ∧ u < 2^(m+1) :=
+      ⟨a - 2^(m+1), by omega, by omega⟩
+    obtain ⟨v, hbe, hvl⟩ : ∃ v, b = v + 2^(m+1) ∧ v < 2^(m+1) :=
+      ⟨b - 2^(m+1), by omega, by omega⟩
+    subst hae; subst hbe
+    by_cases hv0 : v = 0
+    · subst hv0
+      simpa using star_gap_bH m j W (u + 2^(m+1)) hj hW hW0 (by omega)
+    · by_cases hvW : v ^^^ W = 0
+      · refine star_gap_bY_low m j W (u + 2^(m+1)) (v + 2^(m+1)) hj hW hW0 (by omega) ?_
+        rw [seam_xor_left v W m hvl hW, hvW]
+        omega
+      · exact star_gen_low_uu m j W u v hj hW hul hvl hv0 hvW (IH v u hvl hul)
+  · obtain ⟨u, hae, hul⟩ : ∃ u, a = u + 2^(m+1) ∧ u < 2^(m+1) :=
+      ⟨a - 2^(m+1), by omega, by omega⟩
+    subst hae
+    exact star_gen_low_ul m j W u b hj hW hul (by omega) hb0 hbW (IH u b hul (by omega))
+  · obtain ⟨v, hbe, hvl⟩ : ∃ v, b = v + 2^(m+1) ∧ v < 2^(m+1) :=
+      ⟨b - 2^(m+1), by omega, by omega⟩
+    subst hbe
+    exact star_gen_low_lu m j W a v hj hW (by omega) hvl (IH v a hvl (by omega))
+  · exact star_gen_low_ll m j W a b hj hW (by omega) (by omega) (IH a b (by omega) (by omega))
+
+/-- Gap `a = H`, `Y` above the seam -- arises only in the `Y`-high quadrants. -/
+theorem star_gap_aH_hi (m j W b : Nat) (hj : j < m+1) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
+    (hb : b < 2^(m+2)) :
+    Qgen (W + 2^(m+1)) (2^(m+1)) b (m+2)
+      = Qgen (tau j (W + 2^(m+1))) (tau j (2^(m+1))) (tau j b) (m+2) := by
+  have hjm : j < m + 2 := by omega
+  rw [tau_seam j m W hj hW, tau_seam_fixed j m hj,
+      Qgen_H_left_hi m W b hW hW0 hb,
+      Qgen_H_left_hi m (tau j W) (tau j b)
+        (tau_lt j (m+1) W hj hW) (fun h => hW0 (tau_inj j W 0 (by rw [h, tau_zero])))
+        (tau_lt j (m+2) b hjm hb)]
+
+/-
+  ONE LEVEL, `Y` ABOVE THE SEAM — NOT WRITTEN, and the reason is a missing root, not a
+  missing case analysis.
+
+  The four quadrants dispatch exactly as in `star_step_low`, except that the `lu` and `uu`
+  rows have a gap sub-case with no root behind it. Concretely, for `a = u + H`, `b = v + H`,
+  `Y = W + H`:
+
+      a ⊕ b ⊕ Y  =  ((u ⊕ v) ⊕ W) + H
+
+  which is never `0`, so the `m+2` non-degeneracy hypothesis says nothing about
+  `u ⊕ v ⊕ W`. When that vanishes the tuple is a GAP, with `a ⊕ b ⊕ Y = H` — equivalently
+  `a ⊕ b = W`. `Qgen` is `-1` there (contract K17), but the root is proven only for `Y`
+  below the seam: `Qgen_H_diff_low`, `_low_hi`, `_low_any`, `_low_coset` are all `low`.
+  The `Y`-high companion does not exist.
+
+  So `star_step_hi` needs one more root — `Qgen (W + 2^(m+1)) a b (m+2) = -1` when
+  `a ⊕ b = W` — and then it is the same four-quadrant dispatch. Everything else it uses is
+  already proven: `star_gap_aH_hi`, `star_gap_bH_hi`, `star_gap_bY_hi`, `star_gen_hi_*`.
+-/
+
 end SounioZDFiberAntisym
+
+
 
 
 
