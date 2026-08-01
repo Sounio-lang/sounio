@@ -1856,5 +1856,33 @@ theorem star_degen (m j Y a b : Nat) (hj : j < m) (hY : Y < 2^m) (ha : a < 2^m) 
       Qgen_degen m (tau j Y) (tau j a) (tau j b)
         (tau_lt j m Y hj hY) (tau_lt j m a hj ha) (tau_lt j m b hj hb) htY0 hd']
 
+/-- **(*) on the gap, `b = H` case, forall n.** Both sides are `-1`: `tau` fixes the seam bit
+    (`tau_seam_fixed`) so the right-hand side is at the same `b`, and it preserves `Y`'s half
+    (`tau_seam`) so the same root applies to both. -/
+theorem star_gap_bH (m j W a : Nat) (hj : j < m+1) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
+    (ha : a < 2^(m+2)) :
+    Qgen W a (2^(m+1)) (m+2) = Qgen (tau j W) (tau j a) (tau j (2^(m+1))) (m+2) := by
+  have hjm : j < m + 2 := by omega
+  have htW : tau j W < 2^(m+1) := tau_lt j (m+1) W hj hW
+  have htW0 : tau j W ≠ 0 := fun h => hW0 (tau_inj j W 0 (by rw [h, tau_zero]))
+  have hta : tau j a < 2^(m+2) := tau_lt j (m+2) a hjm ha
+  rw [tau_seam_fixed j m hj,
+      Qgen_H_right_low m W a hW hW0 ha,
+      Qgen_H_right_low m (tau j W) (tau j a) htW htW0 hta]
+
+/-- The same, with `Y` above the seam. -/
+theorem star_gap_bH_hi (m j W a : Nat) (hj : j < m+1) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
+    (ha : a < 2^(m+2)) :
+    Qgen (W + 2^(m+1)) a (2^(m+1)) (m+2)
+      = Qgen (tau j (W + 2^(m+1))) (tau j a) (tau j (2^(m+1))) (m+2) := by
+  have hjm : j < m + 2 := by omega
+  have htW : tau j W < 2^(m+1) := tau_lt j (m+1) W hj hW
+  have htW0 : tau j W ≠ 0 := fun h => hW0 (tau_inj j W 0 (by rw [h, tau_zero]))
+  have hta : tau j a < 2^(m+2) := tau_lt j (m+2) a hjm ha
+  rw [tau_seam j m W hj hW, tau_seam_fixed j m hj,
+      Qgen_H_right_hi m W a hW hW0 ha,
+      Qgen_H_right_hi m (tau j W) (tau j a) htW htW0 hta]
+
 end SounioZDFiberAntisym
+
 
