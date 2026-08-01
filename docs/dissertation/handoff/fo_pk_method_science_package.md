@@ -99,8 +99,10 @@ Second-order mean correction (when reported):
 | R2 | \(\mathrm{Var}(E)=1575+1250\rho\); Css \(\sigma_\tau=0.5\) raises Var | `fo_pk_struct_rho_tau_driver.sio` | `fo_pk_struct_rho_tau_driver_gate.sh` | `FO_PK_STRUCT_RHO_TAU_DRIVER_PASS` |
 | R3 | \(C_{\mathrm{ss}}\propto 1/\tau\), \(\mathrm{Var}\propto 1/\tau^2\); kel shared-η cancels | `fo_pk_struct_multidose_driver.sio` | `fo_pk_struct_multidose_driver_gate.sh` | `FO_PK_STRUCT_MULTIDOSE_DRIVER_PASS` |
 | R4 | Import `epistemic::fo` bit-agrees with method / call-result / site | `fo_pk_import_method_driver.sio` | `fo_pk_import_method_driver_gate.sh` | `FO_PK_IMPORT_METHOD_DRIVER_PASS` |
+| R5 | Oral AUC + \(t_{1/2}\) FO; shared-η kel cancel; surface parity | `fo_pk_struct_auc_thalf_driver.sio` | `fo_pk_struct_auc_thalf_driver_gate.sh` | `FO_PK_STRUCT_AUC_THALF_DRIVER_PASS` |
+| R5b | Import `fo_auc`/`fo_thalf` bit-agrees with methods | `fo_pk_import_auc_thalf_driver.sio` | `fo_pk_import_auc_thalf_driver_gate.sh` | `FO_PK_IMPORT_AUC_THALF_DRIVER_PASS` |
 
-Re-run all four:
+Re-run all six:
 
 ```bash
 export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
@@ -110,9 +112,11 @@ bash scripts/ci/fo_pk_struct_method_driver_gate.sh
 bash scripts/ci/fo_pk_struct_rho_tau_driver_gate.sh
 bash scripts/ci/fo_pk_struct_multidose_driver_gate.sh
 bash scripts/ci/fo_pk_import_method_driver_gate.sh
+bash scripts/ci/fo_pk_struct_auc_thalf_driver_gate.sh   # R5
+bash scripts/ci/fo_pk_import_auc_thalf_driver_gate.sh   # R5b
 ```
 
-Expected: four `*_GATE_OK` lines. Re-validated 2026-07-31 on this workspace.
+Expected: six `*_GATE_OK` lines. R1–R4 re-validated 2026-07-31; R5/R5b on 2026-08-01.
 
 Compiler prerequisite (do not claim science freezes without it):
 
@@ -178,6 +182,20 @@ Elimination rate \(\mathrm{kel}=\mathrm{CL}/V\) with **shared** \(\eta\): latent
 | `pk.css` method | 0.795833 | 6.724 | 0.340000 |
 | `make_pk(...).css` | 0.795833 | 6.724 | 0.340000 |
 | call-site composition | 0.795833 | — | — |
+
+### 3.5 Oral AUC and half-life (R5)
+
+| Quantity | Value |
+|----------|------:|
+| AUC | 80 |
+| \(\mathrm{Var}(\mathrm{AUC})\) | 114.6 |
+| \(E_2[\mathrm{AUC}]\) | 80.688 |
+| kel | 0.1 |
+| \(\mathrm{Var}(\mathrm{kel})\) | \(5.2\times 10^{-5}\) |
+| \(t_{1/2}\) | 6.931471 |
+| \(\mathrm{Var}(t_{1/2})\) | 0.249835 |
+
+Method = call-result = free-fn = site/peel on all Var freezes. Shared \(\eta\) cancels in kel / \(t_{1/2}\).
 
 ---
 

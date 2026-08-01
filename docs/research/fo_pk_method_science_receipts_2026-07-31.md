@@ -73,6 +73,13 @@ Measured 2026-07-31 on this workspace: **all four `*_GATE_OK`**.
 | R2 | `examples/epistemic_fo_second_order/fo_pk_struct_rho_tau_driver.sio` | `FO_PK_STRUCT_RHO_TAU_DRIVER_PASS` |
 | R3 | `examples/epistemic_fo_second_order/fo_pk_struct_multidose_driver.sio` | `FO_PK_STRUCT_MULTIDOSE_DRIVER_PASS` |
 | R4 | `examples/epistemic_fo_second_order/fo_pk_import_method_driver.sio` | `FO_PK_IMPORT_METHOD_DRIVER_PASS` |
+| R5 | `examples/epistemic_fo_second_order/fo_pk_struct_auc_thalf_driver.sio` | `FO_PK_STRUCT_AUC_THALF_DRIVER_PASS` |
+| R5b | `examples/epistemic_fo_second_order/fo_pk_import_auc_thalf_driver.sio` | `FO_PK_IMPORT_AUC_THALF_DRIVER_PASS` |
+
+```bash
+bash scripts/ci/fo_pk_struct_auc_thalf_driver_gate.sh   # R5 AUC + t½ methods
+bash scripts/ci/fo_pk_import_auc_thalf_driver_gate.sh   # R5b import ↔ method
+```
 
 ---
 
@@ -149,17 +156,47 @@ This is the multi-mod + method FO science closeout: stdlib helpers and dissertat
 
 ---
 
+## 6b. R5 — Oral AUC + elimination half-life (2026-08-01)
+
+Endpoints under the same seeds as R1 (plus \(V_0=50\pm 2\)):
+
+\[
+\mathrm{AUC}=\frac{F\cdot\mathrm{Dose}}{\mathrm{CL}_0 e^{\eta}},\qquad
+t_{1/2}=\frac{\ln 2}{\mathrm{kel}},\quad
+\mathrm{kel}=\frac{\mathrm{CL}}{V}
+\]
+
+With **shared** \(\eta\), kel cancels the latent; \(t_{1/2}=\ln 2\cdot V_0/\mathrm{CL}_0\).
+
+| Quantity | Value | Surfaces |
+|----------|------:|----------|
+| AUC point | 80 | method / call-result |
+| \(\mathrm{Var}(\mathrm{AUC})\) | 114.6 | method = call = free = site |
+| \(E_2[\mathrm{AUC}]\) | 80.688 | method = call-result |
+| kel point | 0.1 | method |
+| \(\mathrm{Var}(\mathrm{kel})\) | \(5.2\times 10^{-5}\) | method |
+| \(t_{1/2}\) point | 6.931471 | method |
+| \(\mathrm{Var}(t_{1/2})\) | 0.249835 | method = call = free = peel |
+
+Gate: `scripts/ci/fo_pk_struct_auc_thalf_driver_gate.sh` → `FO_PK_STRUCT_AUC_THALF_GATE_OK`.
+
+**R5b import parity:** multi-mod `fo_auc` / `fo_kel` / `fo_thalf` / `fo_clearance`
+(`stdlib/epistemic/fo.sio`) bit-agree with Pk methods, call-result, site, and peel
+on all R5 freezes. Gate: `fo_pk_import_auc_thalf_driver_gate.sh`.
+
+---
+
 ## 7. FO compiler surfaces exercised
 
-| Surface | R1 | R2 | R3 | R4 |
-|---------|:--:|:--:|:--:|:--:|
-| Struct-lit methods | ✓ | ✓ | ✓ | ✓ |
-| Call-result methods | ✓ | ✓ | ✓ | ✓ |
-| Free-fn / site parity | ✓ | | ✓ | ✓ |
-| `correlate` | ✓ | ✓ | | |
-| Multi-mod import | | | | ✓ |
-| Shared FO channel (peel) | ✓ | ✓ | ✓ (kel) | |
-| \(E_2\) / Hessian | ✓ | ✓ | ✓ | ✓ |
+| Surface | R1 | R2 | R3 | R4 | R5 | R5b |
+|---------|:--:|:--:|:--:|:--:|:--:|:---:|
+| Struct-lit methods | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Call-result methods | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Free-fn / site parity | ✓ | | ✓ | ✓ | ✓ | ✓ |
+| `correlate` | ✓ | ✓ | | | | |
+| Multi-mod import | | | | ✓ | | ✓ |
+| Shared FO channel (peel) | ✓ | ✓ | ✓ (kel) | | ✓ (t½) | ✓ |
+| \(E_2\) / Hessian | ✓ | ✓ | ✓ | ✓ | ✓ (AUC) | ✓ |
 
 Compiler prerequisite: Madaros FO trust gate **42/42** (`scripts/ci/madaros_gum_fo_trust_gate.sh`).
 

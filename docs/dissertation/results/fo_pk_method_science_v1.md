@@ -106,6 +106,27 @@ Elimination rate \(\mathrm{kel}=\mathrm{CL}/V\) with shared \(\eta\): \(\mathrm{
 
 ---
 
+## 5b. Oral AUC + half-life (R5, 2026-08-01)
+
+Same seeds as R1 plus \(V_0=50\pm 2\). Shared-\(\eta\) cancel on kel / \(t_{1/2}\).
+
+| Quantity | Value |
+|----------|------:|
+| AUC point | 80 |
+| \(\mathrm{Var}(\mathrm{AUC})\) | 114.6 |
+| \(E_2[\mathrm{AUC}]\) | 80.688 |
+| kel | 0.1 |
+| \(\mathrm{Var}(\mathrm{kel})\) | \(5.2\times 10^{-5}\) |
+| \(t_{1/2}\) | 6.931471 |
+| \(\mathrm{Var}(t_{1/2})\) | 0.249835 |
+
+Surface parity: method = call-result = free-fn = site/peel on Var freezes.
+
+**R5b:** multi-mod `epistemic::fo::{fo_auc, fo_kel, fo_thalf}` bit-agrees with methods
+(`FO_PK_IMPORT_AUC_THALF_GATE_OK`).
+
+---
+
 ## 6. How to re-run
 
 ```bash
@@ -116,10 +137,12 @@ bash scripts/ci/fo_pk_struct_method_driver_gate.sh
 bash scripts/ci/fo_pk_struct_rho_tau_driver_gate.sh
 bash scripts/ci/fo_pk_struct_multidose_driver_gate.sh
 bash scripts/ci/fo_pk_import_method_driver_gate.sh
+bash scripts/ci/fo_pk_struct_auc_thalf_driver_gate.sh   # R5
+bash scripts/ci/fo_pk_import_auc_thalf_driver_gate.sh   # R5b
 ```
 
-Expected: four `*_GATE_OK` lines. Re-validated on this workspace 2026-07-31
-(including residual-4 stack: `ORAL_CSS_RESIDUAL4_CLOSED`).
+Expected: six `*_GATE_OK` lines. R1–R4 re-validated 2026-07-31
+(residual-4: `ORAL_CSS_RESIDUAL4_CLOSED`); R5/R5b re-validated 2026-08-01.
 
 Full package re-run:
 
@@ -130,6 +153,7 @@ bash scripts/ci/fo_pk_struct_method_driver_gate.sh
 bash scripts/ci/fo_pk_struct_rho_tau_driver_gate.sh
 bash scripts/ci/fo_pk_struct_multidose_driver_gate.sh
 bash scripts/ci/fo_pk_import_method_driver_gate.sh
+bash scripts/ci/fo_pk_struct_auc_thalf_driver_gate.sh
 bash scripts/ci/fo_residual4_stack_gate.sh
 ```
 
@@ -143,6 +167,8 @@ bash scripts/ci/fo_residual4_stack_gate.sh
 | R2 | `examples/epistemic_fo_second_order/fo_pk_struct_rho_tau_driver.sio` |
 | R3 | `examples/epistemic_fo_second_order/fo_pk_struct_multidose_driver.sio` |
 | R4 | `examples/epistemic_fo_second_order/fo_pk_import_method_driver.sio` |
+| R5 | `examples/epistemic_fo_second_order/fo_pk_struct_auc_thalf_driver.sio` |
+| R5b | `examples/epistemic_fo_second_order/fo_pk_import_auc_thalf_driver.sio` |
 
 Compiler prerequisite: FO trust 42/42 — `scripts/ci/madaros_gum_fo_trust_gate.sh`.  
 Stack map: `docs/audit/MADAROS_FO_GUM_STACK_2026-07-27.md`.
