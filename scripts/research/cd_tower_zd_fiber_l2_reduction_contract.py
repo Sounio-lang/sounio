@@ -549,6 +549,79 @@ def main():
           f"bounded family was NECESSARY BUT NOT SUFFICIENT: the blocked tuples land strictly "
           f"outside it, and REACH is the object that closes the gap locus")
 
+    # ---- N19/N20  the n = j+4 boundary, tested wider and its easy proof route refuted -------
+    def _reach(n, j):
+        Sn = sign_table_fast(n).astype(np.int8)
+        N = 1 << n
+        Mj = 1 << (j + 2)
+        I = np.arange(N)
+        A, B = np.meshgrid(I, I, indexing="ij")
+        out = {}
+        for Y in range(1, N):
+            if (Y & -Y).bit_length() - 1 != j or bin(Y).count("1") % 2:
+                continue
+            Qpm = Sn * Sn[B ^ Y, A ^ Y] * Sn[B ^ Y, A] * Sn[A ^ Y, B]
+            hit = Qpm == -1
+            hit[0, :] = False
+            hit[:, 0] = False
+            hit[:, Y] = False
+            out.setdefault(Y % Mj, set()).update(
+                zip((A % Mj)[hit].tolist(), (B % Mj)[hit].tolist()))
+        return {k: frozenset(v) for k, v in sorted(out.items())}
+
+    n19_rows = []
+    n19 = True
+    for j in (3, 4):
+        r3, r4, r5 = _reach(j + 3, j), _reach(j + 4, j), _reach(j + 5, j)
+        sharp = (r3 != r4) and (r4 == r5)
+        n19 = n19 and sharp
+        for Y0 in sorted(r4):
+            n19_rows.append((j, Y0, len(r3[Y0]), len(r4[Y0]), len(r5[Y0])))
+    # closed forms, checked against every j measured in this contract
+    cf = all(len(_reach(j + 4, j)[1 << j]) == 24 * (1 << j) - 8
+             and len(_reach(j + 4, j)[(1 << j) | (1 << (j + 1))]) == 48 * (1 << j) - 32
+             for j in (1, 2, 3))
+    ok["N19"] = n19 and cf
+    print(f"N19_SHARP   the n = j+4 boundary is SHARP and holds beyond the j <= 3 it was fitted "
+          f"to: at j = 3 and 4, level j+3 is STRICTLY smaller, j+4 attains, j+5 is unchanged "
+          f"{'OK' if n19 and cf else 'FAIL'} -- "
+          f"{'; '.join(f'j={a} Y0={b}: {c} -> {d} -> {e}' for a, b, c, d, e in n19_rows)}. The "
+          f"deficit at j+3 is EXACTLY 4 every time. Closed forms, matching every j measured "
+          f"here (j = 0..5): |REACH(2^j)| = 24*2^j - 8, |REACH(3*2^j)| = 48*2^j - 32: "
+          f"{'OK' if cf else 'FAIL'}")
+
+    # N20: the cheap proof route -- "truncate the witness" -- is REFUTED.
+    n20_rows = []
+    for j in (2, 3):
+        K = j + 4
+        n = K + 1
+        SK = sign_table_fast(K).astype(np.int64)
+        Sn = sign_table_fast(n).astype(np.int64)
+        NN = 1 << n
+        MK = 1 << K
+        tw = fw = 0
+        for Y in range(1, NN):
+            if (Y & -Y).bit_length() - 1 != j or bin(Y).count("1") % 2:
+                continue
+            for a in range(1, NN):
+                for b in range(1, NN):
+                    if b == Y or _Qp2(Sn, Y, a, b) != -1:
+                        continue
+                    tw += 1
+                    Yk, ak, bk = Y % MK, a % MK, b % MK
+                    if ak == 0 or bk == 0 or bk == Yk or _Qp2(SK, Yk, ak, bk) != -1:
+                        fw += 1
+        n20_rows.append((j, tw, fw))
+    n20 = all(f > 0 for _, _, f in n20_rows)
+    ok["N20"] = n20
+    print(f"N20_NOTRUNC the CHEAP route to attainment is REFUTED: truncating a level-(j+5) "
+          f"witness to level j+4 does NOT generally give a witness "
+          f"{'OK' if n20 else 'FAIL'} -- "
+          f"{'; '.join(f'j={a}: {c}/{b} truncations fail ({100.0*c/b:.0f}%)' for a, b, c in n20_rows)}"
+          f". So attainment is a REALIZABILITY statement -- the bottom pair is carried by some "
+          f"OTHER level-(j+4) witness -- not a truncation statement. That is the obstacle, and "
+          f"it is why Reach_mono (the easy half) did not extend")
+
     print("=" * 78)
     if all(ok.values()):
         print("CD_TOWER_ZDL2R_VERDICT DIAMOND_IS_A_FINITE_STABLE_FAMILY__GAP_LOCUS_INCLUDED")

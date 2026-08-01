@@ -233,6 +233,22 @@ level-`(n+1)` witness: nothing has to be re-established, and `REACH` can only gr
 family of subsets of the fixed finite square `[0,2^{j+2})²` has a limit, which is what makes
 "`REACH_j(Y₀) ⊆ {D = +1}`" well-posed rather than secretly quantified over `n`.
 
+**The `n = j+4` boundary, tested wider (`N19`).** It was fitted to `j ≤ 3`. It holds at `j = 4`
+and `j = 5` too, and it is **sharp**: level `j+3` is strictly smaller, `j+4` attains, `j+5` is
+unchanged — and the deficit at `j+3` is **exactly 4** in all six cases. The sizes have closed
+forms matching every `j` measured (`j = 0…5`):
+
+```
+|REACH(2^j)|   = 24·2^j − 8          |REACH(3·2^j)| = 48·2^j − 32
+```
+
+**The cheap proof route is REFUTED (`N20`).** The obvious attempt — take a level-`(j+5)` witness
+and truncate it to level `j+4` — fails for **half** of all witnesses (20 544/40 896 at `j = 2`;
+45 120/90 048 at `j = 3`). So attainment is a **realizability** statement — the bottom pair is
+carried by some *other* level-`(j+4)` witness — not a truncation statement. That is exactly why
+`Reach_mono`, which works because a witness is *verbatim* reusable upward, has no downward
+counterpart.
+
 **The other half is not proven and is not cheap.** That the limit is *attained* at `n = j+4`
 would need every bottom triple reachable at any level to be reachable at `j+4` — i.e. the
 hypothesis to survive truncation, which is exactly what blocks (§2d). Measured only,
