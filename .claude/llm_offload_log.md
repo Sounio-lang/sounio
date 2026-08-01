@@ -3563,3 +3563,11 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 | 2026-08-01 | xai/Grok 4.3 | raw (external-facing brief) | demos/hydrogen/SITE_SCREENING_BRIEF.md | PASS | Accurate summary; internally consistent with the two public field datasets; no issues raised. Raw: `/tmp/llm-offload-LjUjI6/`. |
 | 2026-08-01 | gemini | raw (external-facing brief) | demos/hydrogen/SITE_SCREENING_BRIEF.md | PROVIDER-DOWN | ERROR: OpenRouter 402 insufficient credits (fourth consecutive outage, same as 2026-07-31 and both 2026-08-01 rounds). Fallback to zai per .claude/AGENT_OFFLOAD_POLICY.md. |
 | 2026-08-01 | zai/GLM-5.2 | raw (external-facing brief, policy fallback) | demos/hydrogen/SITE_SCREENING_BRIEF.md | PASS | Glowing review; math tracking "airtight" (re-derived KMF LO 2.0416 and HI 382.4 edges exactly); Tyne bridge caveat flagged as "a stellar catch". Minor editorial suggestions (CTMI acronym on first use, exec-summary paragraph split, bottom-line quote block) — optional polish, declined as scope. Raw: `/tmp/llm-offload-vsV4w1/`. |
+
+## 2026-08-01 - UHS package refresh: fig_d + brief Figure-D paragraph (post-#1595)
+
+| Date | Provider | Task | Target | Outcome | Note |
+|---|---|---|---|---|---|
+| 2026-08-01 | deepseek | raw (external-facing brief, fig_d addition) | demos/hydrogen/SITE_SCREENING_BRIEF.md | PASS | "Decision-ready screening"; no issues raised; discussion questions only (sampling campaign costing, compressor data acquisition) — out of scope for a figure-refresh commit. Raw: `/tmp/llm-offload-dPRA0C/`. |
+| 2026-08-01 | xai/Grok 4.3 | raw (external-facing brief, fig_d addition) | demos/hydrogen/SITE_SCREENING_BRIEF.md | PASS | Accurate summary of all three k_m treatments and the conditional claim; no issues raised. Raw: `/tmp/llm-offload-dPRA0C/`. |
+| 2026-08-01 | zai/GLM-5.2 | raw (external-facing brief, fig_d addition) | demos/hydrogen/SITE_SCREENING_BRIEF.md | PASS | Glowing; optional presentation nits (inline rounding, salinity-shield emphasis, exec-summary split) declined as scope — the bounding nature and the salinity conservative choice are already stated in the draft. Raw: `/tmp/llm-offload-dPRA0C/`. (gemini skipped this round: OpenRouter 402 in four consecutive prior rounds, logged above.) |

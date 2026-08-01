@@ -11,6 +11,16 @@
 #                             valley baselines, corner p-box whiskers
 #   fig_c_chain_waterfall.png composed-chain waterfall per site
 #                             (nominal -> +subsurface -> +compressor)
+#   fig_d_field_calibrated.png  per-site 30-yr loss: SOURCED LAW band vs
+#                             FIELD-CALIBRATED LAW overlay (KMF p-box)
+#
+# Figs a-c parse only FIGDATA kinds that predate the 2026-08-01 field-
+# calibration section ([A4]); that section is additive-only (verified by
+# receipt diff), so figs a-c regenerate byte-identically from the new
+# stdout. Fig d parses the [A4] FIGDATA kinds (FANF/PBOXF). Field
+# observations (Lehen 3 %/285 d; Lobodice 17 %/7 mo) are SUB-YEAR
+# extents and are deliberately NOT overlaid on the 30-yr fan — their
+# receipt-level comparison lives in the demo's [A3]/[A4] sections.
 #
 # Usage:
 #   python3 render_site_figures.py <demo_stdout.txt> <outdir>
@@ -56,8 +66,10 @@ PROV = ("Provenance: site geology — site_screening_data.md (HRADF 2020; Koukou
 def parse(text):
     fans = {1: [], 2: [], 3: []}
     fanl = {1: [], 2: [], 3: []}
+    fanf = {1: [], 2: [], 3: []}
     pbox, pgate, chain, base = {}, {}, {}, None
     pboxl, pgatel, chainl = {}, {}, {}
+    pboxf = {}
     for line in text.splitlines():
         tok = line.strip().split()
         if len(tok) < 3 or tok[0] != "FIGDATA":
@@ -70,10 +82,15 @@ def parse(text):
             s = int(tok[2][1])
             fanl[s].append((float(tok[3]), float(tok[4]), float(tok[5]),
                             float(tok[6]), float(tok[7])))
+        elif kind == "FANF":
+            s = int(tok[2][1])
+            fanf[s].append((float(tok[3]), float(tok[4]), float(tok[5])))
         elif kind == "PBOX":
             pbox[int(tok[2][1])] = (float(tok[3]), float(tok[4]))
         elif kind == "PBOXL":
             pboxl[int(tok[2][1])] = (float(tok[3]), float(tok[4]))
+        elif kind == "PBOXF":
+            pboxf[int(tok[2][1])] = (float(tok[3]), float(tok[4]))
         elif kind == "PGATE":
             pgate[int(tok[2][1])] = tuple(float(x) for x in tok[3:7])
         elif kind == "PGATEL":
@@ -87,10 +104,12 @@ def parse(text):
     for s in fans:
         fans[s].sort()
         fanl[s].sort()
+        fanf[s].sort()
     if (base is None or len(pbox) != 3 or len(pgate) != 3 or len(chain) != 3
-            or len(pboxl) != 3 or len(pgatel) != 3 or len(chainl) != 3):
+            or len(pboxl) != 3 or len(pgatel) != 3 or len(chainl) != 3
+            or len(pboxf) != 3 or any(len(fanf[s]) == 0 for s in fanf)):
         raise SystemExit("FIGDATA parse incomplete — is this the full demo stdout?")
-    return fans, pbox, pgate, chain, base, fanl, pboxl, pgatel, chainl
+    return fans, pbox, pgate, chain, base, fanl, pboxl, pgatel, chainl, fanf, pboxf
 
 
 def save(fig, path):
@@ -249,16 +268,82 @@ def fig_c(chain, chainl, outdir):
     save(fig, Path(outdir) / "fig_c_chain_waterfall.png")
 
 
+PROVF = ("Provenance: FIELD-CALIBRATED k_m p-box [2.041617, 382.433772] at Topt (f = 1) — inverse calibration\n"
+         "on Lehen (Hellerschmied 2024, 10.1038/s41560-024-01458-1) + Lobodice (Smigan 1990 / Buzek 1994 via\n"
+         "Tremosa 2023, 10.3389/fenrg.2023.1145978), cross-anchored on the only in-situ rate measurement,\n"
+         "Tyne 2021 (10.1038/s41586-021-04153-3; normalization-volume ambiguity documented); CTMI shape and\n"
+         "SOURCED LAW band as in fig A. Field observations are sub-year extents — not overlaid on a 30-yr fan.\n"
+         "Rendered deterministically from site_screening.sio stdout [A4] (lean_single, seeded MC n = 20000).")
+
+
+def fig_d(fanl, pboxl, fanf, pboxf, outdir):
+    fig, axes = plt.subplots(1, 3, figsize=(11.5, 4.2), sharey=True)
+    for ax, s in zip(axes, (1, 2, 3)):
+        lpts = fanl[s]
+        lts = [p[0] for p in lpts]
+        llo = [p[1] for p in lpts]
+        lhi = [p[2] for p in lpts]
+        fpts = fanf[s]
+        fts = [p[0] for p in fpts]
+        flo = [p[1] for p in fpts]
+        fhi = [p[2] for p in fpts]
+        name, sub = SITES[s]
+        ax.axvspan(75.0, 90.0, color="0.92", zorder=0)
+        if lts[0] == lts[-1]:
+            ax.plot([lts[0]], [(llo[0] + lhi[0]) / 2], "D", color=COLORS[s], ms=6)
+        else:
+            ax.fill_between(lts, llo, lhi, color=COLORS[s], alpha=0.20)
+            ax.plot(lts, llo, color=COLORS[s], lw=1.4)
+            ax.plot(lts, lhi, color=COLORS[s], lw=1.4)
+        if fts[0] == fts[-1]:
+            ax.plot([fts[0]], [(flo[0] + fhi[0]) / 2], "s", color="k", ms=6)
+        else:
+            ax.fill_between(fts, flo, fhi, color="none", edgecolor="k",
+                            hatch="\\\\\\\\", lw=0.0, alpha=0.9)
+            ax.plot(fts, flo, color="k", lw=1.6)
+            ax.plot(fts, fhi, color="k", lw=1.6)
+        lbl_lo, lbl_hi = pboxl[s]
+        ax.axhline(lbl_lo, color=COLORS[s], ls="--", lw=0.9)
+        ax.axhline(lbl_hi, color=COLORS[s], ls="--", lw=0.9)
+        fbl_lo, fbl_hi = pboxf[s]
+        ax.axhline(fbl_lo, color="k", ls=":", lw=1.1)
+        ax.axhline(fbl_hi, color="k", ls=":", lw=1.1)
+        ax.set_title(name, fontsize=10)
+        ax.set_xlabel("reservoir temperature [°C]")
+        ax.text(0.02, 0.97, sub, transform=ax.transAxes, fontsize=7.5, va="top",
+                bbox=dict(facecolor="white", alpha=0.8, edgecolor="none", pad=1.5))
+        ax.grid(alpha=0.25)
+    axes[0].set_ylabel("30-yr H₂ loss p-box [%]")
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+    proxies = [
+        Patch(facecolor="0.92", label="Tₘₐₓ bracket [75,90] °C"),
+        Patch(facecolor="0.45", alpha=0.30, label="SOURCED LAW band (CTMI)"),
+        Patch(facecolor="none", edgecolor="k", hatch="\\\\\\\\",
+              label="FIELD-CALIBRATED LAW band (KMF)"),
+        Line2D([0], [0], color="0.25", ls="--", lw=0.9, label="LAW p-box extrema"),
+        Line2D([0], [0], color="k", ls=":", lw=1.1, label="FIELD p-box extrema"),
+    ]
+    axes[0].legend(handles=proxies, loc="center", fontsize=7.5)
+    fig.suptitle("Per-site 30-yr H₂-loss p-boxes: SOURCED LAW (band) vs FIELD-CALIBRATED LAW (hatched, KMF)\n"
+                 "S1 thermal death is anchor-independent [0, 0]; S2/S3 losses widen to the field-calibrated magnitude",
+                 fontsize=10)
+    fig.text(0.01, -0.11, PROVF, fontsize=6, va="top")
+    fig.tight_layout()
+    save(fig, Path(outdir) / "fig_d_field_calibrated.png")
+
+
 def main():
     if len(sys.argv) != 3:
         raise SystemExit("usage: render_site_figures.py <demo_stdout.txt> <outdir>")
     text = Path(sys.argv[1]).read_text()
     outdir = Path(sys.argv[2])
     outdir.mkdir(parents=True, exist_ok=True)
-    fans, pbox, pgate, chain, base, fanl, pboxl, pgatel, chainl = parse(text)
+    fans, pbox, pgate, chain, base, fanl, pboxl, pgatel, chainl, fanf, pboxf = parse(text)
     fig_a(fans, pbox, fanl, pboxl, outdir)
     fig_b(pgate, base, pgatel, outdir)
     fig_c(chain, chainl, outdir)
+    fig_d(fanl, pboxl, fanf, pboxf, outdir)
 
 
 if __name__ == "__main__":

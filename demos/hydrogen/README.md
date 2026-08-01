@@ -669,7 +669,10 @@ Artifacts:
 - `figures/` — publication-quality PNGs rendered from the demo's own
   stdout by `tools/render_site_figures.py` (matplotlib in the repo
   `.venv`; captions state data provenance; regenerate from a fresh run
-  to byte-verify).
+  to byte-verify). Figs a–c parse only pre-[A4] FIGDATA kinds and
+  regenerate byte-identical from the field-calibrated stdout; fig d
+  renders the new FIELD-CALIBRATED band (FANF/PBOXF) against the
+  sourced-law band.
 - `tools/replica_60c_pins.py` — independent Python RK4 replica used for
   the selftest pins.
 - `tools/km_law_predict.py` — independent CTMI + law-path replica
