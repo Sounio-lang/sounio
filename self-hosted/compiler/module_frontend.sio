@@ -11,7 +11,7 @@ use ir::opt_cleanup::{OcpCleanupModuleReceipt, opt_cleanup_module_inplace}
 use io::env::{read_env}
 use io::trace::{io_trace_i64_string}
 use check::mod::{check_items_verdict_boot4, check_items_verdict_boot4_with_ontocache_sidecar, check_modules_verdict_boot4, check_program_epistemic_into, check_program_with_artifacts, checker_to_ir_epistemic_into, checker_apply_ir_metadata, checker_apply_ir_ontology_parameter_links_from_items}
-use ir::lower::{lower_program_to_ir_trace, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_bodies_from_summary_flat_with_epistemic_ref, lower_program_bodies_from_summary_with_epistemic_boxed_owned, lower_single_dep_program_into_acc, lower_dep_program_items_into_acc_with_externs}
+use ir::lower::{lower_program_to_ir_trace, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_bodies_from_summary_flat_with_epistemic_ref, lower_program_bodies_from_summary_with_epistemic_boxed_owned, lower_single_dep_program_into_acc}
 use native::codegen_x86_linux::{compile_native_v2_preview_to_file, native_resolve_target, native_v2_builtin_id_for_name, native_v2_builtin_returns_float}
 use check::knowledge_context::{knowledge_context_validate_items, knowledge_context_validate_items_values_only}
 use resolve::mod::{resolve_modules}
@@ -5159,7 +5159,7 @@ fn mf_arebox_apply(module: &! IrModule) with Alloc, Mut, Panic, Div {
 
 fn module_frontend_lower_programs_array_direct_box(
     programs: &! [Program; 256],
-    dep_programs: &! [Program; 256],
+    dep_paths: &! [string; 256],
     loaded: i64,
     trace: &! LoadMultimoduleIrTrace
 ) -> ModuleFrontendLowerDirectBoxResult with IO, Mut, Panic, Div, Alloc {
@@ -5213,36 +5213,24 @@ fn module_frontend_lower_programs_array_direct_box(
                 print("lower_array: dep_begin ")
                 print_int(i)
                 print("\n")
-                // Mark the Box-arena BEFORE lowering module i. dep_items itself
-                // (programs[i].items) was already parsed earlier in the
-                // load/typecheck phase and must stay live for OTHER modules'
-                // extern resolution, so it is intentionally allocated before
-                // this mark and is untouched by the reset below -- only the
-                // per-module lowering scratch falls inside [mark, reset).
+                // Mark before reparsing module i. Its body AST and lowering
+                // scratch are both dead after the dependency is installed; live
+                // call-arg chains are re-boxed below before this window resets.
                 let dep_arena_mark = __arena_mark()
-                // Move from the dedicated lowering view. The seed/typecheck AST
-                // lives in `programs`, so consuming this Program is intentional
-                // and materializes its Box-bearing items outside the array deref.
-                let dep_program = (*dep_programs)[i as usize]
+                // Parse one body view at a time after the seed is complete. This
+                // keeps the dependency AST stable during lowering without holding
+                // a second [Program; 256] and its Box-bearing trees live at once.
+                let dep_program = load_module_file((*dep_paths)[i as usize])
                 let dep_program_ref: &Program = &dep_program
                 if into_acc_default {
                     // Wave13: body-lower dep directly into acc (no concurrent dep_box).
                     // Fills seed-preseeded stubs (ic=0) and appends new names in place.
                     // Call targets already bind to absolute acc fn_ids by name.
                     let dep_fn_before = (*acc_box).fn_count
-                    let into_result = if loaded == 2 {
-                        // Narrow ABI for the common one-dependency shape. The wide
-                        // extern-aware call can lose the dependency AST in bootstrap.
-                        lower_single_dep_program_into_acc(dep_program_ref, acc_box)
-                    } else {
-                        lower_dep_program_items_into_acc_with_externs(
-                            dep_program_ref,
-                            dep_programs,
-                            loaded,
-                            i,
-                            acc_box
-                        )
-                    }
+                    // The seed already registered every cross-module signature and
+                    // layout in the accumulator, so each dependency can body-lower
+                    // through the narrow ABI regardless of module count.
+                    let into_result = lower_single_dep_program_into_acc(dep_program_ref, acc_box)
                     print("lower_array: into_acc_done ")
                     print_int(i)
                     print("\n")
@@ -5292,7 +5280,7 @@ fn module_frontend_lower_programs_array_direct_box(
                     // Proven path: full dep_box lower + place+remap + section merge.
                     let dep_lower = module_frontend_lower_program_items_box_traced_with_externs(
                         &(*dep_program_ref).items,
-                        dep_programs,
+                        programs,
                         loaded,
                         i,
                         trace
@@ -5492,6 +5480,7 @@ fn module_frontend_lower_programs_array_direct_box(
 
 fn module_frontend_lower_programs_array_boxed(
     programs: &! [Program; 256],
+    dep_paths: &! [string; 256],
     loaded: i64,
     trace: &! LoadMultimoduleIrTrace
 ) -> ModuleFrontendLowerBoxResult with IO, Mut, Panic, Div, Alloc {
@@ -5499,7 +5488,7 @@ fn module_frontend_lower_programs_array_boxed(
         return module_frontend_lower_box_error("no_modules_loaded")
     }
 
-    let lowered = module_frontend_lower_programs_array_direct_box(programs, programs, loaded, trace)
+    let lowered = module_frontend_lower_programs_array_direct_box(programs, dep_paths, loaded, trace)
     if !lowered.ok {
         return module_frontend_lower_box_error(lowered.error_msg)
     }
@@ -5848,6 +5837,7 @@ fn module_frontend_lower_specialized_items_box(
 // stays on the box end-to-end; this helper serves load_* / merge_imported_into.
 fn module_frontend_merge_imported_box(
     programs: &! [Program; 256],
+    file_paths: &! [string; 256],
     loaded: i64,
     trace: &! LoadMultimoduleIrTrace
 ) -> ModuleFrontendLowerDirectBoxResult with IO, Mut, Div, Panic, Alloc {
@@ -5893,10 +5883,10 @@ fn module_frontend_merge_imported_box(
             print("imported_merge: specialized lower failed (")
             print(lowered.error_msg)
             print(") — multi-mod fallback\n")
-            lowered = module_frontend_lower_programs_array_direct_box(programs, programs, loaded, trace)
+            lowered = module_frontend_lower_programs_array_direct_box(programs, file_paths, loaded, trace)
         }
     } else {
-        lowered = module_frontend_lower_programs_array_direct_box(programs, programs, loaded, trace)
+        lowered = module_frontend_lower_programs_array_direct_box(programs, file_paths, loaded, trace)
     }
     if !lowered.ok {
         print("IR lowering failed during merge: ")
@@ -5923,11 +5913,12 @@ fn module_frontend_merge_imported_box(
 
 fn module_frontend_merge_imported_into(
     programs: &! [Program; 256],
+    file_paths: &! [string; 256],
     loaded: i64,
     trace: &! LoadMultimoduleIrTrace,
     out_module: &! IrModule
 ) -> bool with IO, Mut, Div, Panic, Alloc {
-    let merged = module_frontend_merge_imported_box(programs, loaded, trace)
+    let merged = module_frontend_merge_imported_box(programs, file_paths, loaded, trace)
     if !merged.ok {
         return false
     }
@@ -5943,11 +5934,12 @@ fn module_frontend_merge_imported_into(
 // to allocate two full modules at the load_multimodule_ir boundary.
 fn module_frontend_merge_imported_into_box(
     programs: &! [Program; 256],
+    file_paths: &! [string; 256],
     loaded: i64,
     trace: &! LoadMultimoduleIrTrace,
     out_box: &! Box<IrModule>
 ) -> bool with IO, Mut, Div, Panic, Alloc {
-    let merged = module_frontend_merge_imported_box(programs, loaded, trace)
+    let merged = module_frontend_merge_imported_box(programs, file_paths, loaded, trace)
     if !merged.ok {
         return false
     }
@@ -6083,15 +6075,6 @@ pub fn module_frontend_compile_imported_to_file(
 
     trace.last_stage = "lower_merge"
     print("imported_compile: lower_begin\n")
-    // Seed summary preseed consumes Box-bearing external Program values under
-    // the bootstrap compiler. Reparse a dedicated body-lowering view after
-    // typecheck so dependency ASTs remain intact without a second IrModule.
-    var lowering_programs: [Program; 256] = [mf_empty_program(); 256]
-    var reload_i: i64 = 0
-    while reload_i < loaded {
-        lowering_programs[reload_i as usize] = load_module_file(file_paths[reload_i as usize])
-        reload_i = reload_i + 1
-    }
     var used_specialized: bool = false
     var lowered: ModuleFrontendLowerDirectBoxResult = module_frontend_lower_direct_box_error("uninitialized")
     if use_collapse {
@@ -6102,10 +6085,10 @@ pub fn module_frontend_compile_imported_to_file(
             print("imported_compile: specialized lower failed (")
             print(lowered.error_msg)
             print(") — multi-mod fallback\n")
-            lowered = module_frontend_lower_programs_array_direct_box(&! programs, &! lowering_programs, loaded, &! trace)
+            lowered = module_frontend_lower_programs_array_direct_box(&! programs, &! file_paths, loaded, &! trace)
         }
     } else {
-        lowered = module_frontend_lower_programs_array_direct_box(&! programs, &! lowering_programs, loaded, &! trace)
+        lowered = module_frontend_lower_programs_array_direct_box(&! programs, &! file_paths, loaded, &! trace)
     }
     print("imported_compile: lower_done\n")
     if !lowered.ok {
@@ -7228,7 +7211,7 @@ fn load_multimodule_ir_to_box_traced(main_path: string, trace: &! LoadMultimodul
     }
 
     // Multi-mod: Box stays boxed through finalize. No densify here.
-    let merged = module_frontend_merge_imported_box(&! programs, loaded, trace)
+    let merged = module_frontend_merge_imported_box(&! programs, &! file_paths, loaded, trace)
     if !merged.ok {
         module_frontend_global_init_compile_end()
         return module_frontend_lower_direct_box_error("ir_lowering_failed")
