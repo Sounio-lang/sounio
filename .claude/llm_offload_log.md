@@ -3349,3 +3349,7 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 | 2026-08-01 | zai/GLM-5.2 | math-review | fo_pk_struct_auc_thalf_driver.sio | PASS | AUC 80/114.6/E2 80.688; kel 0.1 Var 5.2e-5 from CL0,V0 after η cancel; t½ 6.931471/0.249835; surface parity |
 | 2026-08-01 | xai fan-out | fan-out | fo_pk_method_science_package.md | PASS | R5 freezes tables only; math already dual-reviewed on driver |
 | 2026-08-01 | xai fan-out | fan-out | fo_pk_method_science_v1.md | PASS | R5 annex freezes; math dual-reviewed on driver |
+| 2026-08-01 | xai+zai | math-review | fo.sio | PASS | fo_auc/fo_thalf/fo_kel pure helpers; freezes match R5 dual review |
+| 2026-08-01 | xai | fan-out | fo_pk_method_science_v1.md | PASS | R5b annex rows |
+| 2026-08-01 | xai | fan-out | fo_pk_method_science_package.md | PASS | R5b handoff rows |
+| 2026-08-01 | xai+zai | math-review | fo_pk_import_auc_thalf_driver.sio | PASS | same freezes as R5 method; import parity |

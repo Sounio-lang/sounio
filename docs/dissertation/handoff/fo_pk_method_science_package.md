@@ -100,8 +100,9 @@ Second-order mean correction (when reported):
 | R3 | \(C_{\mathrm{ss}}\propto 1/\tau\), \(\mathrm{Var}\propto 1/\tau^2\); kel shared-η cancels | `fo_pk_struct_multidose_driver.sio` | `fo_pk_struct_multidose_driver_gate.sh` | `FO_PK_STRUCT_MULTIDOSE_DRIVER_PASS` |
 | R4 | Import `epistemic::fo` bit-agrees with method / call-result / site | `fo_pk_import_method_driver.sio` | `fo_pk_import_method_driver_gate.sh` | `FO_PK_IMPORT_METHOD_DRIVER_PASS` |
 | R5 | Oral AUC + \(t_{1/2}\) FO; shared-η kel cancel; surface parity | `fo_pk_struct_auc_thalf_driver.sio` | `fo_pk_struct_auc_thalf_driver_gate.sh` | `FO_PK_STRUCT_AUC_THALF_DRIVER_PASS` |
+| R5b | Import `fo_auc`/`fo_thalf` bit-agrees with methods | `fo_pk_import_auc_thalf_driver.sio` | `fo_pk_import_auc_thalf_driver_gate.sh` | `FO_PK_IMPORT_AUC_THALF_DRIVER_PASS` |
 
-Re-run all five:
+Re-run all six:
 
 ```bash
 export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
@@ -112,9 +113,10 @@ bash scripts/ci/fo_pk_struct_rho_tau_driver_gate.sh
 bash scripts/ci/fo_pk_struct_multidose_driver_gate.sh
 bash scripts/ci/fo_pk_import_method_driver_gate.sh
 bash scripts/ci/fo_pk_struct_auc_thalf_driver_gate.sh   # R5
+bash scripts/ci/fo_pk_import_auc_thalf_driver_gate.sh   # R5b
 ```
 
-Expected: five `*_GATE_OK` lines. R1–R4 re-validated 2026-07-31; R5 on 2026-08-01.
+Expected: six `*_GATE_OK` lines. R1–R4 re-validated 2026-07-31; R5/R5b on 2026-08-01.
 
 Compiler prerequisite (do not claim science freezes without it):
 

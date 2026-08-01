@@ -74,9 +74,11 @@ Measured 2026-07-31 on this workspace: **all four `*_GATE_OK`**.
 | R3 | `examples/epistemic_fo_second_order/fo_pk_struct_multidose_driver.sio` | `FO_PK_STRUCT_MULTIDOSE_DRIVER_PASS` |
 | R4 | `examples/epistemic_fo_second_order/fo_pk_import_method_driver.sio` | `FO_PK_IMPORT_METHOD_DRIVER_PASS` |
 | R5 | `examples/epistemic_fo_second_order/fo_pk_struct_auc_thalf_driver.sio` | `FO_PK_STRUCT_AUC_THALF_DRIVER_PASS` |
+| R5b | `examples/epistemic_fo_second_order/fo_pk_import_auc_thalf_driver.sio` | `FO_PK_IMPORT_AUC_THALF_DRIVER_PASS` |
 
 ```bash
-bash scripts/ci/fo_pk_struct_auc_thalf_driver_gate.sh   # R5 AUC + t½
+bash scripts/ci/fo_pk_struct_auc_thalf_driver_gate.sh   # R5 AUC + t½ methods
+bash scripts/ci/fo_pk_import_auc_thalf_driver_gate.sh   # R5b import ↔ method
 ```
 
 ---
@@ -178,19 +180,23 @@ With **shared** \(\eta\), kel cancels the latent; \(t_{1/2}=\ln 2\cdot V_0/\math
 
 Gate: `scripts/ci/fo_pk_struct_auc_thalf_driver_gate.sh` → `FO_PK_STRUCT_AUC_THALF_GATE_OK`.
 
+**R5b import parity:** multi-mod `fo_auc` / `fo_kel` / `fo_thalf` / `fo_clearance`
+(`stdlib/epistemic/fo.sio`) bit-agree with Pk methods, call-result, site, and peel
+on all R5 freezes. Gate: `fo_pk_import_auc_thalf_driver_gate.sh`.
+
 ---
 
 ## 7. FO compiler surfaces exercised
 
-| Surface | R1 | R2 | R3 | R4 | R5 |
-|---------|:--:|:--:|:--:|:--:|:--:|
-| Struct-lit methods | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Call-result methods | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Free-fn / site parity | ✓ | | ✓ | ✓ | ✓ |
-| `correlate` | ✓ | ✓ | | | |
-| Multi-mod import | | | | ✓ | |
-| Shared FO channel (peel) | ✓ | ✓ | ✓ (kel) | | ✓ (t½) |
-| \(E_2\) / Hessian | ✓ | ✓ | ✓ | ✓ | ✓ (AUC) |
+| Surface | R1 | R2 | R3 | R4 | R5 | R5b |
+|---------|:--:|:--:|:--:|:--:|:--:|:---:|
+| Struct-lit methods | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Call-result methods | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Free-fn / site parity | ✓ | | ✓ | ✓ | ✓ | ✓ |
+| `correlate` | ✓ | ✓ | | | | |
+| Multi-mod import | | | | ✓ | | ✓ |
+| Shared FO channel (peel) | ✓ | ✓ | ✓ (kel) | | ✓ (t½) | ✓ |
+| \(E_2\) / Hessian | ✓ | ✓ | ✓ | ✓ | ✓ (AUC) | ✓ |
 
 Compiler prerequisite: Madaros FO trust gate **42/42** (`scripts/ci/madaros_gum_fo_trust_gate.sh`).
 

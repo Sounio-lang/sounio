@@ -122,6 +122,9 @@ Same seeds as R1 plus \(V_0=50\pm 2\). Shared-\(\eta\) cancel on kel / \(t_{1/2}
 
 Surface parity: method = call-result = free-fn = site/peel on Var freezes.
 
+**R5b:** multi-mod `epistemic::fo::{fo_auc, fo_kel, fo_thalf}` bit-agrees with methods
+(`FO_PK_IMPORT_AUC_THALF_GATE_OK`).
+
 ---
 
 ## 6. How to re-run
@@ -135,10 +138,11 @@ bash scripts/ci/fo_pk_struct_rho_tau_driver_gate.sh
 bash scripts/ci/fo_pk_struct_multidose_driver_gate.sh
 bash scripts/ci/fo_pk_import_method_driver_gate.sh
 bash scripts/ci/fo_pk_struct_auc_thalf_driver_gate.sh   # R5
+bash scripts/ci/fo_pk_import_auc_thalf_driver_gate.sh   # R5b
 ```
 
-Expected: five `*_GATE_OK` lines. R1–R4 re-validated 2026-07-31
-(residual-4: `ORAL_CSS_RESIDUAL4_CLOSED`); R5 re-validated 2026-08-01.
+Expected: six `*_GATE_OK` lines. R1–R4 re-validated 2026-07-31
+(residual-4: `ORAL_CSS_RESIDUAL4_CLOSED`); R5/R5b re-validated 2026-08-01.
 
 Full package re-run:
 
@@ -164,6 +168,7 @@ bash scripts/ci/fo_residual4_stack_gate.sh
 | R3 | `examples/epistemic_fo_second_order/fo_pk_struct_multidose_driver.sio` |
 | R4 | `examples/epistemic_fo_second_order/fo_pk_import_method_driver.sio` |
 | R5 | `examples/epistemic_fo_second_order/fo_pk_struct_auc_thalf_driver.sio` |
+| R5b | `examples/epistemic_fo_second_order/fo_pk_import_auc_thalf_driver.sio` |
 
 Compiler prerequisite: FO trust 42/42 — `scripts/ci/madaros_gum_fo_trust_gate.sh`.  
 Stack map: `docs/audit/MADAROS_FO_GUM_STACK_2026-07-27.md`.
