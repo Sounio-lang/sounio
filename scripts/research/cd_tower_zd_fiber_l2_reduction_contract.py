@@ -41,6 +41,12 @@ shape (*) has for L1. Measured at levels 5, 6, 7 (N6), zero violations.
       Qred_hi_ll: Qgen(W + 2^(m+1), a, b, m+2) = - Qgen'(W, a, b, m+1). NOTE THE MINUS SIGN.
       The first version of this rung dropped it, and the failure locus then came out
       contradicting N7's cross-tab. The clause pins the Lean statement to the measured object.
+  N9  THE CONCLUSION IS LEVEL-BOUNDED, and this is now a THEOREM: `G_descend` in
+      formal/lean4/SounioZDFiberAntisym.lean, from the single lemma `gdisc_descend` --
+      gdisc j x y (m+2) = gdisc j (x mod H) (y mod H) (m+1) in all four quadrants,
+      unconditionally. The degenerate branches never surface because R_ul/R_uu guard on v = 0
+      while the tau factor guards on tau v = 0 -- the SAME condition by tau_inj -- so the two
+      constants (1*1 and (-1)*(-1)) multiply to 1, which is what gdisc is at a zero argument.
   N7  THE RESONANCE HYPOTHESIS IS ESSENTIAL, not an artifact of where the previous rung
       happened to define `disc`. Unrestricted, (diamond) FAILS; and every failure is OFF
       resonance, none on it. So L2 is genuinely a statement on the resonance graph -- unlike
@@ -49,8 +55,10 @@ shape (*) has for L1. Measured at levels 5, 6, 7 (N6), zero violations.
   N0  PARITY. The builder reproduces the in-tree sign_table entrywise.
 
 NOT CLAIMED. L2 is NOT proven, and neither is (diamond). What IS proven forall n is the
-REDUCTION itself (N4, `l2_reduction`) and its symmetry ingredient (N1, `gdisc_symm`/`chi_tau`),
-both kernel-checked. So the only measured link left in L2's chain is (diamond). (c) is unchanged in status: its (*) leg is
+REDUCTION itself (N4, `l2_reduction`), its symmetry ingredient (N1, `gdisc_symm`/`chi_tau`),
+and the LEVEL-BOUNDEDNESS of (diamond)'s conclusion (N9, `G_descend`) -- all kernel-checked.
+So the only measured link left in L2's chain is (diamond) itself, and its conclusion is known
+to depend on nothing above bit j+1. (c) is unchanged in status: its (*) leg is
 discharged in Lean, its L2 leg is this. Numerical certificate; D3.
 
 Verdict L2_REDUCED_TO_FIBER_FREE_DIAMOND__NOT_PROVEN.
@@ -282,10 +290,13 @@ def main():
                 n9_tot += N * N
     n9 = n9_bad == 0
     ok["N9"] = n9
-    print(f"N9_DESCENT  G_n(Y,a,b) == G_(j+2)(Y mod 2^(j+2), a mod 2^(j+2), b mod 2^(j+2)) "
+    print(f"N9_DESCENT  [Lean-proven forall n] G_n(Y,a,b) == G_(j+2)(Y mod 2^(j+2), a mod 2^(j+2), b mod 2^(j+2)) "
           f"{n9_bad}/{n9_tot} violations {'OK' if n9 else 'FAIL'} -- UNCONDITIONAL, every "
-          f"quadrant, no degeneracy exceptions. (diamond)'s conclusion collapses to the bottom "
-          f"j+2 bits; it is not an unbounded-level statement")
+          f"quadrant, no degeneracy exceptions -- PROVEN forall n as `G_descend`, from the single "
+          f"lemma `gdisc_descend`: gdisc drops a level in all four quadrants, because R_ul/R_uu "
+          f"guard on v = 0 while the tau factor guards on tau v = 0, the SAME condition, so the "
+          f"two constants multiply to 1. This clause now PINS that theorem. (diamond)'s "
+          f"conclusion collapses to the bottom j+2 bits; it is not an unbounded-level statement")
 
     # ---- N10  where the hypothesis actually does work --------------------------------------
     n10_rows = []

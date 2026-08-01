@@ -134,7 +134,18 @@ under dropping a level and truncating every argument:
 G_n(Y, a, b)  =  G_{j+2}(Y mod 2^{j+2}, a mod 2^{j+2}, b mod 2^{j+2})
 ```
 
-0 violations in 1 138 688 checks, **unconditional** — every quadrant, no degeneracy exceptions.
+**Proven ∀n** as `G_descend` (0 violations in 1 138 688 checks besides, as a pin). It follows
+from a *single* lemma — `gdisc` itself descends:
+
+```lean
+gdisc_descend : gdisc j x y (m+2) = gdisc j (x mod H) (y mod H) (m+1)
+```
+
+unconditionally, in all four quadrants. The degenerate branches never surface because `R_ul` and
+`R_uu` guard on `v = 0` while the `τ` factor guards on `τv = 0` — the **same** condition, by
+`tau_inj` — so the two guards fire together and their constants (`1·1` and `(−1)·(−1)`) both
+multiply to `1`, which is exactly what `gdisc` is at a zero argument. That is why `N9` has no
+degeneracy exceptions: they cancel in pairs.
 So (♦) is not a statement about an object that grows with `n`. Its conclusion depends only on
 the bottom `j+2` bits, and its target `(−1)^{p_j(a)+p_j(b)}` only on the bottom `j`. The
 unbounded direction of (♦) is entirely in the *hypothesis*.
@@ -155,11 +166,8 @@ different probes landing on the same `j ≤ 2`.
 - **L2 is not proven, and neither is (♦).** What *is* proven ∀n is the **reduction**
   (`l2_reduction`) and its symmetry ingredient (`gdisc_symm`/`chi_tau`). (♦) itself is measured
   at three levels.
-- **(♦) is not a Lean statement yet, and it is not proven.** `N9`, the level-boundedness of its
-  conclusion, is measured, not proven — it is the obvious next Lean target: eight quadrants of
-  the four-σ product, where the two `if v = 0 then −1` branches sit on the *same* condition on
-  the plain and the τ side (`τx = 0 ↔ x = 0`) and cancel in the product. That cancellation is
-  why `N9` has no degeneracy exceptions.
+- **(♦) is not a Lean statement yet, and it is not proven.** What is proven of it is that its
+  conclusion is level-bounded (`G_descend`); the implication itself, with its hypothesis, is not.
 - **`N12` explains the parity hypothesis; it does not discharge it.** The sign law it rests on
   is proven; the arithmetic is trivial; but (♦) itself still needs the descent of the *object*,
   where the priming alternates.

@@ -2592,6 +2592,110 @@ theorem l2_reduction_symm (m j Y a b : Nat) (hj : j < m+1) (hY : Y < 2^(m+1))
       gdisc_symm (m+1) j (b ^^^ Y) (a ^^^ Y) hj
         (Nat.xor_lt_two_pow hb hY) (Nat.xor_lt_two_pow ha hY)]
 
+/-! ## `N9`, proven — the τ-discrepancy DESCENDS, and so does (♦)'s conclusion
+
+The `l2_reduction` rung measured that
+
+    G(Y,a,b) = gdisc j a b * gdisc j (a ⊕ Y) (b ⊕ Y)
+
+is unchanged by dropping a level and truncating every argument — unconditionally, in all eight
+quadrants, with no degeneracy exceptions. That is not a coincidence and it does not need eight
+cases of bookkeeping: it follows from a single fact about `gdisc` itself.
+
+`gdisc j x y (m+2) = gdisc j (x mod H) (y mod H) (m+1)`, always.
+
+The reason the degenerate branches never surface is that `R_ul`/`R_uu` guard on `v = 0`, and
+`gdisc` pairs the plain factor with the `τ` factor — whose guard is `τ v = 0`, the SAME
+condition (`tau_inj`). So the two guards fire together and their constants (`1·1` and
+`(−1)·(−1)`) multiply to `1`, which is exactly what `gdisc` is at a zero argument. -/
+
+private theorem gdisc_zero_right (m j p : Nat) : gdisc j p 0 (m+1) = 1 := by
+  unfold gdisc
+  rw [tau_zero, cdSig0' (tau j p) m, cdSig0' p m]
+  decide
+
+theorem gdisc_descend_ll (m j p q : Nat) (hj : j < m+1) (hp : p < 2^(m+1)) (hq : q < 2^(m+1)) :
+    gdisc j p q (m+2) = gdisc j p q (m+1) := by
+  unfold gdisc
+  rw [R_ll (tau j p) (tau j q) m (tau_lt j (m+1) p hj hp) (tau_lt j (m+1) q hj hq),
+      R_ll p q m hp hq]
+
+theorem gdisc_descend_ul (m j p q : Nat) (hj : j < m+1) (hp : p < 2^(m+1)) (hq : q < 2^(m+1)) :
+    gdisc j (p + 2^(m+1)) q (m+2) = gdisc j p q (m+1) := by
+  have htp := tau_lt j (m+1) p hj hp
+  have htq := tau_lt j (m+1) q hj hq
+  unfold gdisc
+  rw [tau_seam j m p hj hp, R_ul (tau j p) (tau j q) m htp htq, R_ul p q m hp hq]
+  by_cases h : q = 0
+  · rw [if_pos (show tau j q = 0 by rw [h, tau_zero]), if_pos h, h, tau_zero,
+        cdSig0' (tau j p) m, cdSig0' p m]
+  · have htq0 : tau j q ≠ 0 := fun e => h (tau_inj j q 0 (by rw [e, tau_zero]))
+    rw [if_neg htq0, if_neg h, Int.neg_mul_neg]
+
+theorem gdisc_descend_lu (m j p q : Nat) (hj : j < m+1) (hp : p < 2^(m+1)) (hq : q < 2^(m+1)) :
+    gdisc j p (q + 2^(m+1)) (m+2) = gdisc j q p (m+1) := by
+  unfold gdisc
+  rw [tau_seam j m q hj hq,
+      R_lu (tau j p) (tau j q) m (tau_lt j (m+1) p hj hp) (tau_lt j (m+1) q hj hq),
+      R_lu p q m hp hq]
+
+theorem gdisc_descend_uu (m j p q : Nat) (hj : j < m+1) (hp : p < 2^(m+1)) (hq : q < 2^(m+1)) :
+    gdisc j (p + 2^(m+1)) (q + 2^(m+1)) (m+2) = gdisc j q p (m+1) := by
+  have htp := tau_lt j (m+1) p hj hp
+  have htq := tau_lt j (m+1) q hj hq
+  unfold gdisc
+  rw [tau_seam j m p hj hp, tau_seam j m q hj hq,
+      R_uu (tau j p) (tau j q) m htp htq, R_uu p q m hp hq]
+  by_cases h : q = 0
+  · rw [if_pos (show tau j q = 0 by rw [h, tau_zero]), if_pos h, h, tau_zero,
+        cdSig0 (tau j p) m, cdSig0 p m]
+    decide
+  · have htq0 : tau j q ≠ 0 := fun e => h (tau_inj j q 0 (by rw [e, tau_zero]))
+    rw [if_neg htq0, if_neg h]
+
+/-- `gdisc` descends a level, whatever half its arguments are in. The four quadrants land on
+    `gdisc j p q` or on its transpose, and `gdisc_symm` makes those the same. -/
+theorem gdisc_descend (m j p q : Nat) (hj : j < m+1) (hp : p < 2^(m+1)) (hq : q < 2^(m+1))
+    (x y : Nat) (hx : x = p ∨ x = p + 2^(m+1)) (hy : y = q ∨ y = q + 2^(m+1)) :
+    gdisc j x y (m+2) = gdisc j p q (m+1) := by
+  have hsym := gdisc_symm (m+1) j q p hj hq hp
+  rcases hx with hx | hx <;> rcases hy with hy | hy <;> rw [hx, hy]
+  · exact gdisc_descend_ll m j p q hj hp hq
+  · rw [gdisc_descend_lu m j p q hj hp hq]; exact hsym
+  · exact gdisc_descend_ul m j p q hj hp hq
+  · rw [gdisc_descend_uu m j p q hj hp hq]; exact hsym
+
+private theorem seam_xor_lhs (u W n : Nat) (hu : u < 2^(n+1)) (hW : W < 2^(n+1)) :
+    (u + 2^(n+1)) ^^^ W = (u ^^^ W) + 2^(n+1) := by
+  rw [Nat.xor_comm, xor_seam W u n hW hu, Nat.xor_comm W u]
+
+/-- **`N9`, proven ∀n.** (♦)'s conclusion is LEVEL-BOUNDED: the object it constrains is
+    unchanged by dropping a level and truncating `Y`, `a`, `b`. Iterated, this collapses `G` at
+    any level to `G` at level `j+2` — so (♦) is not a statement about an object that grows with
+    the level, and its whole unbounded direction sits in the hypothesis. -/
+theorem G_descend (m j W u v Y a b : Nat) (hj : j < m+1)
+    (hW : W < 2^(m+1)) (hu : u < 2^(m+1)) (hv : v < 2^(m+1))
+    (hY : Y = W ∨ Y = W + 2^(m+1)) (ha : a = u ∨ a = u + 2^(m+1))
+    (hb : b = v ∨ b = v + 2^(m+1)) :
+    gdisc j a b (m+2) * gdisc j (a ^^^ Y) (b ^^^ Y) (m+2)
+      = gdisc j u v (m+1) * gdisc j (u ^^^ W) (v ^^^ W) (m+1) := by
+  have huW : u ^^^ W < 2^(m+1) := Nat.xor_lt_two_pow hu hW
+  have hvW : v ^^^ W < 2^(m+1) := Nat.xor_lt_two_pow hv hW
+  have hxa : a ^^^ Y = u ^^^ W ∨ a ^^^ Y = (u ^^^ W) + 2^(m+1) := by
+    rcases ha with ha | ha <;> rcases hY with hY | hY <;> rw [ha, hY]
+    · exact Or.inl rfl
+    · exact Or.inr (xor_seam u W m hu hW)
+    · exact Or.inr (seam_xor_lhs u W m hu hW)
+    · exact Or.inl (xor_seam_cancel u W m hu hW)
+  have hxb : b ^^^ Y = v ^^^ W ∨ b ^^^ Y = (v ^^^ W) + 2^(m+1) := by
+    rcases hb with hb | hb <;> rcases hY with hY | hY <;> rw [hb, hY]
+    · exact Or.inl rfl
+    · exact Or.inr (xor_seam v W m hv hW)
+    · exact Or.inr (seam_xor_lhs v W m hv hW)
+    · exact Or.inl (xor_seam_cancel v W m hv hW)
+  rw [gdisc_descend m j u v hj hu hv a b ha hb,
+      gdisc_descend m j (u ^^^ W) (v ^^^ W) hj huW hvW (a ^^^ Y) (b ^^^ Y) hxa hxb]
+
 end SounioZDFiberAntisym
 
 
