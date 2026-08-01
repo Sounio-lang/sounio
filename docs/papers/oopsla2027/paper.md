@@ -304,8 +304,10 @@ on it, and Make and Bazel propagate the same way over their graphs (§8.1). This
 mechanism simply *lacked* that property until R29 and now has it. What C2 reports
 is therefore the cost of binding a real corpus and the removal of a limitation
 peculiar to this implementation — not a capability the prior art is missing. The
-novelty of the line lives in C3, C15 and C20, where the build is bound to the
-*proposition*, the *witness* and the *provenance* rather than to an exit status.
+novelty of the line lives in C3 and C15, where the build is bound to the
+*proposition* and to the *witness* rather than to an exit status — and, in work
+this paper indexes but does not argue, in R20's binding of the *provenance*
+(Appendix A).
 
 The practical consequence is local and worth stating plainly: a claim can live in
 the module whose science it describes instead of being hoisted into a manifest to
