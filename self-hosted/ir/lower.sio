@@ -3226,6 +3226,110 @@ fn lowerer_mark_reg_array_elem_float_mut(lo: &! Lowerer, reg: i64) with Mut, Pan
     }
 }
 
+fn lowerer_local_array_elem_float_ref(lo: &Lowerer, name: Name) -> bool with Mut, Panic, Div, Alloc {
+    var i = (*(*lo).locals).count - 1
+    while i >= 0 {
+        if (*(*lo).locals).depths[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*lo).locals).names[i as usize], name) {
+            return (*(*lo).locals).array_elem_float[i as usize] == 1
+        }
+        i = i - 1
+    }
+    false
+}
+
+fn lowerer_reg_array_elem_float_ref(lo: &Lowerer, reg: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < (*lo).array_elem_float_reg_count {
+        if (*lo).array_elem_float_regs[i as usize] == reg { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn lowerer_array_repeat_fill_mut(
+    lo: &! Lowerer,
+    base_reg: i64,
+    value_reg: i64,
+    repeat_count: i64
+) with Mut, Panic, Div {
+    if repeat_count <= 0 { return }
+    let idx_reg = lowerer_fresh_reg_mut(lo)
+    lowerer_emit_mut(lo, ir_load_imm(idx_reg, 0))
+    let limit_reg = lowerer_fresh_reg_mut(lo)
+    lowerer_emit_mut(lo, ir_load_imm(limit_reg, repeat_count))
+    let one_reg = lowerer_fresh_reg_mut(lo)
+    lowerer_emit_mut(lo, ir_load_imm(one_reg, 1))
+    let top_label = lowerer_fresh_label_mut(lo)
+    let end_label = lowerer_fresh_label_mut(lo)
+    lowerer_emit_mut(lo, ir_label(top_label))
+    let cond_reg = lowerer_fresh_reg_mut(lo)
+    lowerer_emit_mut(lo, ir_binop(cond_reg, idx_reg, BinaryOp::OpLt, limit_reg))
+    lowerer_emit_mut(lo, ir_branch_false(cond_reg, end_label))
+    lowerer_emit_mut(lo, ir_index_set(base_reg, idx_reg, value_reg))
+    let next_reg = lowerer_fresh_reg_mut(lo)
+    lowerer_emit_mut(lo, ir_binop(next_reg, idx_reg, BinaryOp::OpAdd, one_reg))
+    lowerer_emit_mut(lo, ir_copy(idx_reg, next_reg))
+    lowerer_emit_mut(lo, ir_jump(top_label))
+    lowerer_emit_mut(lo, ir_label(end_label))
+}
+
+fn lowerer_lower_array_literal_mut(
+    lo: &! Lowerer,
+    e: &Expr
+) -> i64 with Mut, Panic, Div, Alloc, IO {
+    match e.left {
+        Some(value_expr) => {
+            let repeat_count = match e.right {
+                Some(count_expr) => (*count_expr).int_val,
+                _ => 0,
+            }
+            let dst = lowerer_fresh_reg_mut(lo)
+            let storage_bytes = if repeat_count <= 0 { 8 } else { repeat_count * 8 }
+            lowerer_emit_mut(lo, ir_alloc_array(dst, storage_bytes, repeat_count))
+            let value_reg = lowerer_lower_expr_mut(lo, &(*value_expr))
+            let zero_fill = ((*value_expr).kind == ExprKind::ExprIntLit && (*value_expr).int_val == 0)
+                || ((*value_expr).kind == ExprKind::ExprBoolFalse)
+                || ((*value_expr).kind == ExprKind::ExprFloatLit && (*value_expr).float_val == 0.0)
+            if !zero_fill {
+                lowerer_array_repeat_fill_mut(lo, dst, value_reg, repeat_count)
+            }
+            if (*value_expr).kind == ExprKind::ExprFloatLit {
+                lowerer_emit_mut(lo, ir_mark_float_reg(dst))
+                lowerer_mark_reg_array_elem_float_mut(lo, dst)
+            }
+            dst
+        }
+        _ => {
+            let count = count_expr_list_ref(&e.args)
+            let dst = lowerer_fresh_reg_mut(lo)
+            let storage_bytes = if count <= 0 { 8 } else { count * 8 }
+            lowerer_emit_mut(lo, ir_alloc_array(dst, storage_bytes, count))
+            var current = &e.args
+            var index: i64 = 0
+            var elem_is_float = false
+            while true {
+                match *current {
+                    Some(list) => {
+                        let value_reg = lowerer_lower_expr_mut(lo, &(*list).head)
+                        let index_reg = lowerer_fresh_reg_mut(lo)
+                        lowerer_emit_mut(lo, ir_load_imm(index_reg, index))
+                        lowerer_emit_mut(lo, ir_index_set(dst, index_reg, value_reg))
+                        if (*list).head.kind == ExprKind::ExprFloatLit { elem_is_float = true }
+                        current = &(*list).tail
+                        index = index + 1
+                    }
+                    _ => break,
+                }
+            }
+            if elem_is_float {
+                lowerer_emit_mut(lo, ir_mark_float_reg(dst))
+                lowerer_mark_reg_array_elem_float_mut(lo, dst)
+            }
+            dst
+        }
+    }
+}
+
 fn lowerer_struct_layout_idx_ref(lo: &Lowerer, type_name: Name) -> i64 with Mut, Panic, Div {
     if type_name.len <= 0 { return -1 }
     var si: i64 = 0
@@ -3614,6 +3718,78 @@ fn lowerer_lower_expr_mut(
             _ => return lowerer_emit_unit_mut(lo),
         }
     }
+    if (*e).kind == ExprKind::ExprWhile {
+        let top_label = lowerer_fresh_label_mut(lo)
+        let end_label = lowerer_fresh_label_mut(lo)
+        lowerer_emit_mut(lo, ir_label(top_label))
+        let cond = lowerer_lower_opt_expr_mut(lo, &(*e).left)
+        lowerer_emit_mut(lo, ir_branch_false(cond, end_label))
+        match (*e).block {
+            Some(body) => {
+                let _body_reg = lowerer_lower_block_mut(lo, &(*body))
+            }
+            _ => {}
+        }
+        lowerer_emit_mut(lo, ir_jump(top_label))
+        lowerer_emit_mut(lo, ir_label(end_label))
+        return lowerer_emit_unit_mut(lo)
+    }
+    if (*e).kind == ExprKind::ExprArrayLit {
+        return lowerer_lower_array_literal_mut(lo, e)
+    }
+    if (*e).kind == ExprKind::ExprCast {
+        let source_kind = lowerer_opt_simple_scalar_kind_ref(&(*lo), &(*e).left)
+        let src = lowerer_lower_opt_expr_mut(lo, &(*e).left)
+        if lower_opt_type_is_f64(&(*e).cast_type) && source_kind != 2 {
+            let dst = lowerer_fresh_reg_mut(lo)
+            lowerer_emit_mut(lo, ir_int_to_float(dst, src))
+            return dst
+        }
+        if !lower_opt_type_is_f64(&(*e).cast_type) && source_kind == 2 {
+            let dst = lowerer_fresh_reg_mut(lo)
+            lowerer_emit_mut(lo, ir_float_to_int(dst, src))
+            return dst
+        }
+        return src
+    }
+    if (*e).kind == ExprKind::ExprUnary {
+        let src = lowerer_lower_opt_expr_mut(lo, &(*e).left)
+        let dst = lowerer_fresh_reg_mut(lo)
+        lowerer_emit_mut(lo, ir_unaryop(dst, (*e).un_op, src))
+        return dst
+    }
+    if (*e).kind == ExprKind::ExprIndex {
+        let base_is_ref = match (*e).left {
+            Some(base_expr) => {
+                if (*base_expr).kind == ExprKind::ExprIdent {
+                    lowerer_lookup_local_is_ref_ref(&(*lo), (*base_expr).name)
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+        var elem_is_float = match (*e).left {
+            Some(base_expr) => {
+                if (*base_expr).kind == ExprKind::ExprIdent {
+                    lowerer_local_array_elem_float_ref(&(*lo), (*base_expr).name)
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+        let base = lowerer_lower_opt_expr_mut(lo, &(*e).left)
+        if lowerer_reg_array_elem_float_ref(&(*lo), base) { elem_is_float = true }
+        let index = lowerer_lower_opt_expr_mut(lo, &(*e).right)
+        let dst = lowerer_fresh_reg_mut(lo)
+        var instr = ir_index_get(dst, base, index)
+        if base_is_ref { instr.label_id = 1 }
+        if elem_is_float { instr.imm_flags = IR_FLOAT_REG_MARKER_FLAG }
+        lowerer_emit_mut(lo, instr)
+        if elem_is_float { lowerer_emit_mut(lo, ir_mark_float_reg(dst)) }
+        return dst
+    }
     if (*e).kind == ExprKind::ExprFieldAccess {
         if lower_live_diag_enabled() { print("lower_live: field_base_begin\n") }
         let base = lowerer_lower_opt_expr_mut(lo, &(*e).left)
@@ -3922,48 +4098,44 @@ fn lowerer_simple_scalar_kind_ref(lo: &Lowerer, e: &Expr) -> i64 with Mut, Panic
         if then_kind == 2 || else_kind == 2 { return 2 }
         return 1
     }
+    if e.kind == ExprKind::ExprBlock {
+        match e.block {
+            Some(block) => return lowerer_block_simple_scalar_kind_ref(lo, &(*block)),
+            _ => return 0,
+        }
+    }
+    if e.kind == ExprKind::ExprIndex {
+        match e.left {
+            Some(base) => {
+                if (*base).kind == ExprKind::ExprIdent && lowerer_local_array_elem_float_ref(lo, (*base).name) {
+                    return 2
+                }
+            }
+            _ => {}
+        }
+        return 1
+    }
+    if e.kind == ExprKind::ExprUnary {
+        return lowerer_opt_simple_scalar_kind_ref(lo, &e.left)
+    }
+    if e.kind == ExprKind::ExprCast {
+        if lower_opt_type_is_f64(&e.cast_type) { return 2 }
+        return 1
+    }
     0
 }
 
 fn lowerer_expr_is_scalar_condition_ref(lo: &Lowerer, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
-    if e.kind == ExprKind::ExprIntLit || e.kind == ExprKind::ExprFloatLit || e.kind == ExprKind::ExprBoolTrue || e.kind == ExprKind::ExprBoolFalse {
-        return true
-    }
-    if e.kind == ExprKind::ExprIdent {
-        var i = (*(*lo).locals).count - 1
-        while i >= 0 {
-            if (*(*lo).locals).depths[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*lo).locals).names[i as usize], e.name) {
-                let scalar_kind = (*(*lo).locals).scalar_kind[i as usize]
-                return scalar_kind != 3
-            }
-            i = i - 1
-        }
-        return false
-    }
-    if e.kind == ExprKind::ExprCall {
-        let fn_id = lowerer_registered_direct_call_id_ref(lo, e)
-        return fn_id >= 0 && fn_id < (*(*lo).module).fn_count
-    }
-    if e.kind != ExprKind::ExprBinary {
-        return false
-    }
-    match e.left {
-        Some(lhs) => {
-            if !lowerer_expr_is_scalar_condition_ref(lo, &(*lhs)) {
-                return false
-            }
-        }
-        _ => return false,
-    }
-    match e.right {
-        Some(rhs) => lowerer_expr_is_scalar_condition_ref(lo, &(*rhs)),
-        _ => false,
-    }
+    lowerer_simple_scalar_kind_ref(lo, e) > 0
 }
 
 fn lowerer_can_bind_simple_scalar_let_ref(lo: &Lowerer, s: &Stmt) -> bool with Mut, Panic, Div, Alloc {
     match s.ty {
-        Some(_) => return false,
+        Some(_) => {
+            if !lower_opt_type_is_f64(&s.ty) && !lower_opt_type_is_integer(&s.ty) {
+                return false
+            }
+        }
         _ => {}
     }
     match s.expr {
@@ -3977,6 +4149,30 @@ fn lowerer_can_bind_simple_scalar_let_ref(lo: &Lowerer, s: &Stmt) -> bool with M
         }
         _ => false,
     }
+}
+
+fn lowerer_can_bind_fixed_array_literal_ref(s: &Stmt) -> bool with Mut, Panic, Div, Alloc {
+    if lower_opt_type_fixed_array_len(&s.ty) < 0 { return false }
+    match s.expr {
+        Some(expr) => (*expr).kind == ExprKind::ExprArrayLit,
+        _ => false,
+    }
+}
+
+fn lowerer_bind_fixed_array_literal_mut(
+    lo: &! Lowerer,
+    s: &Stmt,
+    is_mut: bool
+) -> i64 with Mut, Panic, Div, Alloc, IO {
+    let reg = lowerer_lower_opt_expr_mut(lo, &s.expr)
+    lowerer_bind_local_mut(lo, s.name, reg, is_mut)
+    let array_len = lower_opt_type_fixed_array_len(&s.ty)
+    lowerer_bind_local_fixed_array_len_mut(lo, s.name, array_len)
+    lowerer_mark_local_array_copy_word_scalar_mut(lo, s.name)
+    if lower_opt_type_is_array_of_f64(&s.ty) {
+        lowerer_mark_local_array_elem_float_mut(lo, s.name)
+    }
+    reg
 }
 
 fn lowerer_bind_simple_scalar_let_mut(lo: &! Lowerer, s: &Stmt, is_mut: bool) -> i64 with Mut, Panic, Div, Alloc, IO {
@@ -3994,7 +4190,9 @@ fn lowerer_bind_simple_scalar_let_mut(lo: &! Lowerer, s: &Stmt, is_mut: bool) ->
     lowerer_bind_local_mut(lo, s.name, bind_reg, is_mut)
     match s.expr {
         Some(expr) => {
-            let scalar_kind = lowerer_simple_scalar_kind_ref(&(*lo), &(*expr))
+            var scalar_kind = lowerer_simple_scalar_kind_ref(&(*lo), &(*expr))
+            if lower_opt_type_is_f64(&s.ty) { scalar_kind = 2 }
+            if lower_opt_type_is_integer(&s.ty) { scalar_kind = 1 }
             if scalar_kind > 0 {
                 lowerer_mark_local_scalar_kind_mut(lo, s.name, scalar_kind)
             }
@@ -4004,6 +4202,9 @@ fn lowerer_bind_simple_scalar_let_mut(lo: &! Lowerer, s: &Stmt, is_mut: bool) ->
                     let return_struct_name = (*(*lo).module).functions[fn_id as usize].return_struct_name
                     if return_struct_name.len > 0 {
                         lowerer_bind_local_struct_type_mut(lo, s.name, return_struct_name)
+                    }
+                    if (*(*lo).module).functions[fn_id as usize].returns_float == 2 {
+                        lowerer_mark_local_array_elem_float_mut(lo, s.name)
                     }
                 }
             }
@@ -4058,6 +4259,40 @@ fn lowerer_assign_simple_scalar_mut(lo: &! Lowerer, s: &Stmt) -> i64 with Mut, P
     }
 }
 
+fn lowerer_assign_index_mut(lo: &! Lowerer, s: &Stmt) -> i64 with Mut, Panic, Div, Alloc, IO {
+    let rhs = lowerer_lower_opt_expr_mut(lo, &s.expr)
+    match s.target {
+        Some(target) => {
+            var base_is_ref = false
+            match (*target).left {
+                Some(base_expr) => {
+                    if (*base_expr).kind == ExprKind::ExprIdent {
+                        base_is_ref = lowerer_lookup_local_is_ref_ref(&(*lo), (*base_expr).name)
+                    }
+                }
+                _ => {}
+            }
+            let base = lowerer_lower_opt_expr_mut(lo, &(*target).left)
+            let index = lowerer_lower_opt_expr_mut(lo, &(*target).right)
+            var value = rhs
+            if s.assign_op != AssignOp::AssignEq {
+                let old_value = lowerer_fresh_reg_mut(lo)
+                var get_instr = ir_index_get(old_value, base, index)
+                if base_is_ref { get_instr.label_id = 1 }
+                lowerer_emit_mut(lo, get_instr)
+                value = lowerer_fresh_reg_mut(lo)
+                let op = if s.assign_op == AssignOp::AssignAdd { BinaryOp::OpAdd } else { BinaryOp::OpSub }
+                lowerer_emit_mut(lo, ir_binop(value, old_value, op, rhs))
+            }
+            var set_instr = ir_index_set(base, index, value)
+            if base_is_ref { set_instr.label_id = 1 }
+            lowerer_emit_mut(lo, set_instr)
+            value
+        }
+        _ => rhs,
+    }
+}
+
 // Walk a function body without placing another full Lowerer value beneath every
 // statement frame. Rich imported-receipt bodies can otherwise exhaust the raw
 // compiler stack before their first let, even though the same call in isolation
@@ -4086,13 +4321,29 @@ fn lowerer_lower_block_mut(
                     print("\n")
                 }
                 if (stmt_ref.kind == StmtKind::StmtLet || stmt_ref.kind == StmtKind::StmtVar)
+                    && lowerer_can_bind_fixed_array_literal_ref(stmt_ref)
+                {
+                    reg = lowerer_bind_fixed_array_literal_mut(lo, stmt_ref, stmt_ref.kind == StmtKind::StmtVar)
+                } else if (stmt_ref.kind == StmtKind::StmtLet || stmt_ref.kind == StmtKind::StmtVar)
                     && lowerer_can_bind_simple_scalar_let_ref(&(*lo), stmt_ref)
                 {
                     reg = lowerer_bind_simple_scalar_let_mut(lo, stmt_ref, stmt_ref.kind == StmtKind::StmtVar)
                 } else if stmt_ref.kind == StmtKind::StmtExpr {
                     reg = lowerer_lower_opt_expr_mut(lo, &stmt_ref.expr)
-                } else if stmt_ref.kind == StmtKind::StmtAssign && lowerer_can_assign_simple_scalar_ref(&(*lo), stmt_ref) {
-                    reg = lowerer_assign_simple_scalar_mut(lo, stmt_ref)
+                } else if stmt_ref.kind == StmtKind::StmtAssign {
+                    let target_is_index = match stmt_ref.target {
+                        Some(target) => (*target).kind == ExprKind::ExprIndex,
+                        _ => false,
+                    }
+                    if target_is_index {
+                        reg = lowerer_assign_index_mut(lo, stmt_ref)
+                    } else if lowerer_can_assign_simple_scalar_ref(&(*lo), stmt_ref) {
+                        reg = lowerer_assign_simple_scalar_mut(lo, stmt_ref)
+                    } else {
+                        let pair = (*lo).lower_assign_stmt_ref(stmt_ref)
+                        (*lo) = pair.0
+                        reg = pair.1
+                    }
                 } else {
                     let pair = if stmt_ref.kind == StmtKind::StmtLet {
                         (*lo).lower_let_stmt_ref(stmt_ref, false)
