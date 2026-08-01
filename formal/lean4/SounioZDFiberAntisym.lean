@@ -1962,7 +1962,41 @@ theorem star'_of_star (m j W a b : Nat) (hj : j < m) (hW : W < 2^m) (ha : a < 2^
       chi_tau m j (a ^^^ W) (b ^^^ W) hj (Nat.xor_lt_two_pow ha hW) (Nat.xor_lt_two_pow hb hW),
       chi_tau m j a (b ^^^ W) hj ha (Nat.xor_lt_two_pow hb hW)]
 
+/-! ## `sw` and `tau` are the same function
+
+Two agents introduced the bit-swap independently on this file, under different names,
+different argument order and different (but equal) definitions. Without this bridge the two
+halves of the assembly do not compose: the gap roots and `star_pow2` are stated in `sw`, the
+degenerate and gap branches and the whole `tau` property layer in `tau`. -/
+
+/-- The two definitions agree. At `j = 0` both are the identity (the `else` branch, where the
+    masks `1 ^^^ 2^j` and `1 ||| 2^j` actually differ, is unreachable there). -/
+theorem testBit_one_eq (k : Nat) : Nat.testBit 1 k = decide (0 = k) := by
+  rw [show (1:Nat) = 2^0 from rfl, Nat.testBit_two_pow]
+
+theorem sw_eq_tau (x j : Nat) : sw x j = tau j x := by
+  by_cases hj : j = 0
+  · subst hj
+    rw [tau_id_zero]
+    unfold sw
+    simp
+  · have hmask : (1:Nat) ^^^ 2^j = 1 ||| (1 <<< j) := by
+      rw [Nat.shiftLeft_eq, Nat.one_mul]
+      refine Nat.eq_of_testBit_eq fun k => ?_
+      rw [Nat.testBit_xor, Nat.testBit_or, Nat.testBit_two_pow]
+      rw [testBit_one_eq]
+      by_cases hk : k = 0
+      · subst hk; simp; omega
+      · by_cases hk2 : j = k <;> simp_all <;> omega
+    have hc0 : x % 2 = x &&& 1 := (Nat.and_one_is_mod x).symm
+    have hcj : (x / 2^j) % 2 = (x >>> j) &&& 1 := by
+      rw [Nat.and_one_is_mod, Nat.shiftRight_eq_div_pow]
+    unfold sw tau
+    rw [hmask, hc0, hcj]
+    by_cases h : (x &&& 1) = ((x >>> j) &&& 1) <;> simp [h]
+
 end SounioZDFiberAntisym
+
 
 
 
