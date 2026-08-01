@@ -109,8 +109,10 @@ Second-order mean correction (when reported):
 | R8b | Import `fo_fss`/`fo_n90` bit-agrees on freezes | `fo_pk_import_fss_driver.sio` | `fo_pk_import_fss_driver_gate.sh` | `FO_PK_IMPORT_FSS_DRIVER_PASS` |
 | R9 | PTR + DOF FO; PTR = exp(kel·τ) | `fo_pk_struct_ptr_driver.sio` | `fo_pk_struct_ptr_driver_gate.sh` | `FO_PK_STRUCT_PTR_DRIVER_PASS` |
 | R9b | Import `fo_ptr`/`fo_dof` bit-agrees on freezes | `fo_pk_import_ptr_driver.sio` | `fo_pk_import_ptr_driver_gate.sh` | `FO_PK_IMPORT_PTR_DRIVER_PASS` |
+| R10 | MRT + \(t_{90}\) FO; links t½ and n90 | `fo_pk_struct_mrt_driver.sio` | `fo_pk_struct_mrt_driver_gate.sh` | `FO_PK_STRUCT_MRT_DRIVER_PASS` |
+| R10b | Import `fo_mrt`/`fo_t90` bit-agrees on freezes | `fo_pk_import_mrt_driver.sio` | `fo_pk_import_mrt_driver_gate.sh` | `FO_PK_IMPORT_MRT_DRIVER_PASS` |
 
-Re-run all fourteen:
+Re-run all sixteen:
 
 ```bash
 export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
@@ -130,9 +132,11 @@ bash scripts/ci/fo_pk_struct_fss_driver_gate.sh         # R8
 bash scripts/ci/fo_pk_import_fss_driver_gate.sh         # R8b
 bash scripts/ci/fo_pk_struct_ptr_driver_gate.sh         # R9
 bash scripts/ci/fo_pk_import_ptr_driver_gate.sh         # R9b
+bash scripts/ci/fo_pk_struct_mrt_driver_gate.sh         # R10
+bash scripts/ci/fo_pk_import_mrt_driver_gate.sh         # R10b
 ```
 
-Expected: fourteen `*_GATE_OK` lines. R1–R4 re-validated 2026-07-31; R5–R9b on 2026-08-01.
+Expected: sixteen `*_GATE_OK` lines. R1–R4 re-validated 2026-07-31; R5–R10b on 2026-08-01.
 
 Compiler prerequisite (do not claim science freezes without it):
 
@@ -263,6 +267,19 @@ Multi-mod: `fo_fss`, `fo_n90` (R8b).
 | \(\mathrm{Var}(\mathrm{DOF})\) | 0.082541 |
 
 Multi-mod: `fo_ptr`, `fo_dof` (R9b).
+
+### 3.10 MRT and \(t_{90}\) (R10)
+
+| Quantity | Value |
+|----------|------:|
+| MRT | 10.000000 |
+| \(\mathrm{Var}(\mathrm{MRT})\) | 0.519999 |
+| \(E_2[\mathrm{MRT}]\) | 10.035999 |
+| \(t_{90}\) (h) | 23.025850 |
+| \(\mathrm{Var}(t_{90})\) | 2.756987 |
+| \(E_2[t_{90}]\) | 23.108743 |
+
+Multi-mod: `fo_mrt`, `fo_t90` (R10b). Peel MRT Var prints 0.520000 (ULP vs method).
 
 ---
 

@@ -189,6 +189,21 @@ Method = peel on both Vars; free-fn Rac matches method under FO site budget.
 
 ---
 
+## 5g. MRT + \(t_{90}\) (R10, 2026-08-01)
+
+| Quantity | Value |
+|----------|------:|
+| MRT | 10.000000 |
+| \(\mathrm{Var}(\mathrm{MRT})\) | 0.519999 |
+| \(E_2[\mathrm{MRT}]\) | 10.035999 |
+| \(t_{90}\) (h) | 23.025850 |
+| \(\mathrm{Var}(t_{90})\) | 2.756987 |
+| \(E_2[t_{90}]\) | 23.108743 |
+
+**R10b:** multi-mod `fo_mrt`/`fo_t90` (`FO_PK_IMPORT_MRT_GATE_OK`).
+
+---
+
 ## 6. How to re-run
 
 ```bash
@@ -209,10 +224,12 @@ bash scripts/ci/fo_pk_struct_fss_driver_gate.sh         # R8
 bash scripts/ci/fo_pk_import_fss_driver_gate.sh         # R8b
 bash scripts/ci/fo_pk_struct_ptr_driver_gate.sh         # R9
 bash scripts/ci/fo_pk_import_ptr_driver_gate.sh         # R9b
+bash scripts/ci/fo_pk_struct_mrt_driver_gate.sh         # R10
+bash scripts/ci/fo_pk_import_mrt_driver_gate.sh         # R10b
 ```
 
-Expected: fourteen `*_GATE_OK` lines. R1–R4 re-validated 2026-07-31
-(residual-4: `ORAL_CSS_RESIDUAL4_CLOSED`); R5–R9b re-validated 2026-08-01.
+Expected: sixteen `*_GATE_OK` lines. R1–R4 re-validated 2026-07-31
+(residual-4: `ORAL_CSS_RESIDUAL4_CLOSED`); R5–R10b re-validated 2026-08-01.
 
 Full package re-run:
 
@@ -247,6 +264,8 @@ bash scripts/ci/fo_residual4_stack_gate.sh
 | R8b | `examples/epistemic_fo_second_order/fo_pk_import_fss_driver.sio` |
 | R9 | `examples/epistemic_fo_second_order/fo_pk_struct_ptr_driver.sio` |
 | R9b | `examples/epistemic_fo_second_order/fo_pk_import_ptr_driver.sio` |
+| R10 | `examples/epistemic_fo_second_order/fo_pk_struct_mrt_driver.sio` |
+| R10b | `examples/epistemic_fo_second_order/fo_pk_import_mrt_driver.sio` |
 
 Compiler prerequisite: FO trust 42/42 — `scripts/ci/madaros_gum_fo_trust_gate.sh`.  
 Stack map: `docs/audit/MADAROS_FO_GUM_STACK_2026-07-27.md`.
