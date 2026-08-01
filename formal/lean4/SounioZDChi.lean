@@ -442,4 +442,110 @@ theorem tau_lt (j m x : Nat) (hj : j < m) (hx : x < 2^m) : tau j x < 2^m := by
   · exact hx
   · exact Nat.xor_lt_two_pow hx (Nat.or_lt_two_pow h1 h2)
 
+
+/-- Bridge: the numeric bit test used in `tau`'s definition is `Nat.testBit`. -/
+theorem and_one_testBit (x i : Nat) : (x >>> i) &&& 1 = if x.testBit i then 1 else 0 := by
+  rw [Nat.and_one_is_mod, Nat.testBit]
+  split <;> simp_all <;> omega
+
+/-- `tau` in `testBit` form: xor by the mask exactly when bits `0` and `j` differ. -/
+theorem tau_spec (j x : Nat) :
+    tau j x = if x.testBit 0 = x.testBit j then x else x ^^^ (1 ||| (1 <<< j)) := by
+  unfold tau
+  have h0 : x &&& 1 = if x.testBit 0 then 1 else 0 := by
+    have := and_one_testBit x 0; rwa [Nat.shiftRight_zero] at this
+  have hj : (x >>> j) &&& 1 = if x.testBit j then 1 else 0 := and_one_testBit x j
+  rw [h0, hj]
+  cases x.testBit 0 <;> cases x.testBit j <;> simp
+
+/-- The mask has exactly bits `0` and `j` set. -/
+theorem mask_testBit_zero (j : Nat) : ((1:Nat) ||| (1 <<< j)).testBit 0 = true := by
+  rw [Nat.testBit_or]; simp
+
+theorem mask_testBit_j (j : Nat) : ((1:Nat) ||| (1 <<< j)).testBit j = true := by
+  rw [Nat.testBit_or, Nat.shiftLeft_eq, Nat.one_mul, Nat.testBit_two_pow]
+  simp
+
+/-- At `j = 0` the swap is the identity. -/
+theorem tau_id_zero (x : Nat) : tau 0 x = x := by
+  rw [tau_spec]; simp
+
+/-- **`tau` is an involution.** -/
+theorem tau_involutive (j x : Nat) : tau j (tau j x) = x := by
+  by_cases hj : j = 0
+  · subst hj; rw [tau_id_zero, tau_id_zero]
+  · rw [tau_spec j x]
+    split
+    · rename_i h; rw [tau_spec j x]; simp [h]
+    · rename_i h
+      have b0 : (x ^^^ ((1:Nat) ||| (1 <<< j))).testBit 0 = !x.testBit 0 := by
+        rw [Nat.testBit_xor, mask_testBit_zero]; cases x.testBit 0 <;> simp
+      have bj : (x ^^^ ((1:Nat) ||| (1 <<< j))).testBit j = !x.testBit j := by
+        rw [Nat.testBit_xor, mask_testBit_j]; cases x.testBit j <;> simp
+      rw [tau_spec j (x ^^^ ((1:Nat) ||| (1 <<< j))), b0, bj]
+      have hne : ¬ ((!x.testBit 0) = (!x.testBit j)) := by
+        intro hh; exact h (by cases hb : x.testBit 0 <;> cases hc : x.testBit j <;>
+          simp_all)
+      rw [if_neg hne, Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+
+/-- `(u ⊕ w) ⊕ (v ⊕ w) = u ⊕ v` — the mask cancels when both sides carry it. -/
+theorem xor_pair_cancel (u v w : Nat) : (u ^^^ w) ^^^ (v ^^^ w) = u ^^^ v := by
+  rw [Nat.xor_assoc, ← Nat.xor_assoc w v w, Nat.xor_comm w v, Nat.xor_assoc, Nat.xor_self,
+      Nat.xor_zero]
+
+theorem xor_pair_cancel' (u v w : Nat) : (u ^^^ w) ^^^ (w ^^^ v) = u ^^^ v := by
+  rw [Nat.xor_assoc, ← Nat.xor_assoc w w v, Nat.xor_self, Nat.zero_xor]
+
+/-- **`tau` is F2-linear.** This is the property the assembly uses in every branch, to move
+    `tau` through `a ⊕ Y`. -/
+theorem tau_xor (j x y : Nat) : tau j (x ^^^ y) = tau j x ^^^ tau j y := by
+  have hb0 : (x ^^^ y).testBit 0 = (x.testBit 0 ^^ y.testBit 0) := Nat.testBit_xor x y 0
+  have hbj : (x ^^^ y).testBit j = (x.testBit j ^^ y.testBit j) := Nat.testBit_xor x y j
+  rw [tau_spec j (x ^^^ y), tau_spec j x, tau_spec j y, hb0, hbj]
+  cases hx0 : x.testBit 0 <;> cases hxj : x.testBit j <;>
+    cases hy0 : y.testBit 0 <;> cases hyj : y.testBit j <;>
+    simp only [Bool.xor_false, Bool.xor_true, Bool.not_true, Bool.not_false,
+               if_true, if_false, if_pos rfl,
+               if_neg (by decide : ¬ (true = false)),
+               if_neg (by decide : ¬ (false = true)), reduceIte] <;>
+    first
+      | rfl
+      | exact Nat.xor_assoc x y _
+      | (rw [Nat.xor_assoc, Nat.xor_comm y _, ← Nat.xor_assoc]; done)
+      | exact (xor_pair_cancel x y _).symm
+      | exact (xor_pair_cancel' x y ((1:Nat) ||| 1 <<< j)).symm
+      | exact (xor_pair_cancel x y ((1:Nat) ||| 1 <<< j)).symm
+      | exact (xor_pair_cancel' x y _).symm
+      | exact xor_pair_cancel' x y _
+      | exact xor_pair_cancel x y _
+      | ac_rfl
+      | (simp [xor_pair_cancel]; done)
+
+
+theorem seam_add_xor (v n : Nat) (hv : v < 2^(n+1)) : v + 2^(n+1) = v ^^^ 2^(n+1) := by
+  have h := Nat.two_pow_add_eq_or_of_lt hv 1
+  rw [Nat.mul_one] at h
+  rw [Nat.add_comm, h]
+  apply Nat.eq_of_testBit_eq; intro k
+  rw [Nat.testBit_or, Nat.testBit_xor, Nat.testBit_two_pow]
+  by_cases hk : n+1 = k
+  · subst hk; rw [Nat.testBit_lt_two_pow hv]; simp
+  · simp [hk]
+
+/-- The seam bit is fixed by `tau`, because both of its bits `0` and `j` are clear. -/
+theorem tau_seam_fixed (j m : Nat) (hj : j < m + 1) : tau j (2^(m+1)) = 2^(m+1) := by
+  rw [tau_spec]
+  have h0 : ((2:Nat)^(m+1)).testBit 0 = false := by
+    rw [Nat.testBit_two_pow]; simp
+  have hjb : ((2:Nat)^(m+1)).testBit j = false := by
+    rw [Nat.testBit_two_pow]; simp; omega
+  rw [h0, hjb, if_pos rfl]
+
+/-- **`tau` preserves the half.** Immediate from linearity plus `tau_seam_fixed`: this is what
+    puts both sides of `(*)` in the SAME quadrant, so they reduce by the same lemma. -/
+theorem tau_seam (j m u : Nat) (hj : j < m + 1) (hu : u < 2^(m+1)) :
+    tau j (u + 2^(m+1)) = tau j u + 2^(m+1) := by
+  rw [seam_add_xor u m hu, tau_xor, tau_seam_fixed j m hj,
+      ← seam_add_xor (tau j u) m (tau_lt j (m+1) u hj hu)]
+
 end SounioZDChi
