@@ -2242,26 +2242,267 @@ theorem star_gap_aH_hi (m j W b : Nat) (hj : j < m+1) (hW : W < 2^(m+1)) (hW0 : 
         (tau_lt j (m+1) W hj hW) (fun h => hW0 (tau_inj j W 0 (by rw [h, tau_zero])))
         (tau_lt j (m+2) b hjm hb)]
 
-/-
-  ONE LEVEL, `Y` ABOVE THE SEAM — NOT WRITTEN, and the reason is a missing root, not a
-  missing case analysis.
+/-! ### Gap root `a ⊕ b = W`, `Y` ABOVE the seam
 
-  The four quadrants dispatch exactly as in `star_step_low`, except that the `lu` and `uu`
-  rows have a gap sub-case with no root behind it. Concretely, for `a = u + H`, `b = v + H`,
-  `Y = W + H`:
+The companion the `Y`-high step needs. For `Y = W + H` the third non-degeneracy
+`a ⊕ b ⊕ Y = 0` is unsatisfiable when both arguments are upper, so the induction meets
+tuples with `a ⊕ b = W` that no hypothesis excludes. `Q` is the constant `-1` on all of
+them, and the proof is a direct four-factor evaluation: with `b = a ⊕ W`,
 
-      a ⊕ b ⊕ Y  =  ((u ⊕ v) ⊕ W) + H
+    a ⊕ Y = b ⊕ H,   b ⊕ Y = a ⊕ H
 
-  which is never `0`, so the `m+2` non-degeneracy hypothesis says nothing about
-  `u ⊕ v ⊕ W`. When that vanishes the tuple is a GAP, with `a ⊕ b ⊕ Y = H` — equivalently
-  `a ⊕ b = W`. `Qgen` is `-1` there (contract K17), but the root is proven only for `Y`
-  below the seam: `Qgen_H_diff_low`, `_low_hi`, `_low_any`, `_low_coset` are all `low`.
-  The `Y`-high companion does not exist.
+so the coset square is `σ(a,b)·σ(b⊕H,a⊕H)·σ(a,a⊕H)·σ(b⊕H,b)`, whose last factor is
+identically `1` and whose third is `σ(a,a)`. -/
 
-  So `star_step_hi` needs one more root — `Qgen (W + 2^(m+1)) a b (m+2) = -1` when
-  `a ⊕ b = W` — and then it is the same four-quadrant dispatch. Everything else it uses is
-  already proven: `star_gap_aH_hi`, `star_gap_bH_hi`, `star_gap_bY_hi`, `star_gen_hi_*`.
--/
+theorem Qgen_H_diff_hi_low (m W a : Nat) (hW : W < 2^(m+1)) (ha : a < 2^(m+1)) :
+    Qgen (W + 2^(m+1)) a (a ^^^ W) (m+2) = -1 := by
+  have hb : a ^^^ W < 2^(m+1) := Nat.xor_lt_two_pow ha hW
+  have e1 : a ^^^ (W + 2^(m+1)) = (a ^^^ W) + 2^(m+1) := xor_seam a W m ha hW
+  have e2 : (a ^^^ W) ^^^ (W + 2^(m+1)) = a + 2^(m+1) := by
+    rw [xor_seam (a ^^^ W) W m hb hW, Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+  have f4 : cdSigma ((a ^^^ W) + 2^(m+1)) (a ^^^ W) (m+2) = 1 := by
+    rw [R_ul (a ^^^ W) (a ^^^ W) m hb hb]
+    by_cases h : a ^^^ W = 0
+    · rw [if_pos h]
+    · rw [if_neg h, sigma_self (m+1) (a ^^^ W) hb h]; decide
+  have f3 : cdSigma a (a + 2^(m+1)) (m+2) = (if a = 0 then 1 else -1) := by
+    rw [R_lu a a m ha ha]
+    by_cases h : a = 0
+    · rw [if_pos h, h, cdSig0]
+    · rw [if_neg h, sigma_self (m+1) a ha h]
+  have f12 : cdSigma a (a ^^^ W) (m+2) * cdSigma ((a ^^^ W) + 2^(m+1)) (a + 2^(m+1)) (m+2)
+      = (if a = 0 then -1 else 1) := by
+    rw [R_ll a (a ^^^ W) m ha hb, R_uu (a ^^^ W) a m hb ha]
+    by_cases h : a = 0
+    · subst h; simp [cdSig0]
+    · rw [if_neg h, if_neg h]; exact cdSq a (a ^^^ W) (m+1)
+  unfold Qgen
+  rw [e1, e2, f12, f3, f4]
+  by_cases h : a = 0 <;> simp [h]
+
+theorem Qgen_H_diff_hi_hi (m W u : Nat) (hW : W < 2^(m+1)) (hu : u < 2^(m+1)) :
+    Qgen (W + 2^(m+1)) (u + 2^(m+1)) ((u ^^^ W) + 2^(m+1)) (m+2) = -1 := by
+  have hv : u ^^^ W < 2^(m+1) := Nat.xor_lt_two_pow hu hW
+  have e1 : (u + 2^(m+1)) ^^^ (W + 2^(m+1)) = u ^^^ W := xor_seam_cancel u W m hu hW
+  have e2 : ((u ^^^ W) + 2^(m+1)) ^^^ (W + 2^(m+1)) = u := by
+    rw [xor_seam_cancel (u ^^^ W) W m hv hW, Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+  have f3 : cdSigma (u + 2^(m+1)) u (m+2) = 1 := by
+    rw [R_ul u u m hu hu]
+    by_cases h : u = 0
+    · rw [if_pos h]
+    · rw [if_neg h, sigma_self (m+1) u hu h]; decide
+  have f4 : cdSigma (u ^^^ W) ((u ^^^ W) + 2^(m+1)) (m+2) = (if u ^^^ W = 0 then 1 else -1) := by
+    rw [R_lu (u ^^^ W) (u ^^^ W) m hv hv]
+    by_cases h : u ^^^ W = 0
+    · rw [if_pos h, h, cdSig0]
+    · rw [if_neg h, sigma_self (m+1) (u ^^^ W) hv h]
+  have f12 : cdSigma (u + 2^(m+1)) ((u ^^^ W) + 2^(m+1)) (m+2) * cdSigma (u ^^^ W) u (m+2)
+      = (if u ^^^ W = 0 then -1 else 1) := by
+    rw [R_uu u (u ^^^ W) m hu hv, R_ll (u ^^^ W) u m hv hu]
+    by_cases h : u ^^^ W = 0
+    · rw [if_pos h, if_pos h, h, cdSig0]; decide
+    · rw [if_neg h, if_neg h]; exact cdSq (u ^^^ W) u (m+1)
+  unfold Qgen
+  rw [e1, e2, f12, f3, f4]
+  by_cases h : u ^^^ W = 0 <;> simp [h]
+
+/-- The root, both halves. -/
+theorem Qgen_H_diff_hi_any (m W a : Nat) (hW : W < 2^(m+1)) (ha : a < 2^(m+2)) :
+    Qgen (W + 2^(m+1)) a (a ^^^ W) (m+2) = -1 := by
+  have h2H := h2pow_succ_add m
+  by_cases haU : a ≥ 2^(m+1)
+  · have hul : a - 2^(m+1) < 2^(m+1) := by omega
+    have hae : a = (a - 2^(m+1)) + 2^(m+1) := by omega
+    have hx : ((a - 2^(m+1)) + 2^(m+1)) ^^^ W = ((a - 2^(m+1)) ^^^ W) + 2^(m+1) := by
+      rw [Nat.xor_comm ((a - 2^(m+1)) + 2^(m+1)) W, xor_seam W (a - 2^(m+1)) m hW hul,
+          Nat.xor_comm W (a - 2^(m+1))]
+    rw [hae, hx]
+    exact Qgen_H_diff_hi_hi m W (a - 2^(m+1)) hW hul
+  · exact Qgen_H_diff_hi_low m W a hW (by omega)
+
+/-- The root in the form the induction meets it: `a ⊕ b = W`. -/
+theorem Qgen_H_diff_hi_coset (m W a b : Nat) (hW : W < 2^(m+1)) (ha : a < 2^(m+2))
+    (hab : a ^^^ b = W) : Qgen (W + 2^(m+1)) a b (m+2) = -1 := by
+  have hbe : b = a ^^^ W := by
+    rw [← hab, ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor]
+  rw [hbe]
+  exact Qgen_H_diff_hi_any m W a hW ha
+
+/-- The gap branch it feeds: `tau` preserves `a ⊕ b = W` because it is a homomorphism. -/
+theorem star_gap_diff_hi (m j W a b : Nat) (hj : j < m+1) (hW : W < 2^(m+1))
+    (ha : a < 2^(m+2)) (hab : a ^^^ b = W) :
+    Qgen (W + 2^(m+1)) a b (m+2)
+      = Qgen (tau j (W + 2^(m+1))) (tau j a) (tau j b) (m+2) := by
+  have hjm : j < m + 2 := by omega
+  have htab : tau j a ^^^ tau j b = tau j W := by rw [← tau_xor, hab]
+  rw [tau_seam j m W hj hW,
+      Qgen_H_diff_hi_coset m W a b hW ha hab,
+      Qgen_H_diff_hi_coset m (tau j W) (tau j a) (tau j b)
+        (tau_lt j (m+1) W hj hW) (tau_lt j (m+2) a hjm ha) htab]
+
+/-- One level, `Y` above the seam. The `uu` quadrant is the one with the extra gap: there
+    `a ⊕ b ⊕ Y` cannot vanish, so `u ⊕ v ⊕ W = 0` is unconstrained and lands on the root. -/
+theorem star_step_hi (m j W a b : Nat) (hj : j < m+1) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
+    (ha : a < 2^(m+2)) (hb : b < 2^(m+2))
+    (hnd : ¬ (a = 0 ∨ b = 0 ∨ a ^^^ (W + 2^(m+1)) = 0 ∨ b ^^^ (W + 2^(m+1)) = 0 ∨ a = b ∨
+              a ^^^ b ^^^ (W + 2^(m+1)) = 0))
+    (IH : ∀ a' b', a' < 2^(m+1) → b' < 2^(m+1) →
+        Qgen W a' b' (m+1) = Qgen (tau j W) (tau j a') (tau j b') (m+1)) :
+    Qgen (W + 2^(m+1)) a b (m+2)
+      = Qgen (tau j (W + 2^(m+1))) (tau j a) (tau j b) (m+2) := by
+  have h2H : 2^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  have ha0 : a ≠ 0 := fun h => hnd (Or.inl h)
+  have hb0 : b ≠ 0 := fun h => hnd (Or.inr (Or.inl h))
+  have haY : a ^^^ (W + 2^(m+1)) ≠ 0 := fun h => hnd (Or.inr (Or.inr (Or.inl h)))
+  have hbY : b ^^^ (W + 2^(m+1)) ≠ 0 := fun h => hnd (Or.inr (Or.inr (Or.inr (Or.inl h))))
+  have h3 : a ^^^ b ^^^ (W + 2^(m+1)) ≠ 0 :=
+    fun h => hnd (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr h)))))
+  by_cases haU : a ≥ 2^(m+1) <;> by_cases hbU : b ≥ 2^(m+1)
+  · obtain ⟨u, hae, hul⟩ : ∃ u, a = u + 2^(m+1) ∧ u < 2^(m+1) :=
+      ⟨a - 2^(m+1), by omega, by omega⟩
+    obtain ⟨v, hbe, hvl⟩ : ∃ v, b = v + 2^(m+1) ∧ v < 2^(m+1) :=
+      ⟨b - 2^(m+1), by omega, by omega⟩
+    subst hae; subst hbe
+    by_cases hu0 : u = 0
+    · subst hu0
+      simpa using star_gap_aH_hi m j W (v + 2^(m+1)) hj hW hW0 (by omega)
+    by_cases hv0 : v = 0
+    · subst hv0
+      simpa using star_gap_bH_hi m j W (u + 2^(m+1)) hj hW hW0 (by omega)
+    have huW : u ^^^ W ≠ 0 := by
+      rw [← xor_seam_cancel u W m hul hW]; exact haY
+    have hvW : v ^^^ W ≠ 0 := by
+      rw [← xor_seam_cancel v W m hvl hW]; exact hbY
+    by_cases hg : u ^^^ v ^^^ W = 0
+    · refine star_gap_diff_hi m j W (u + 2^(m+1)) (v + 2^(m+1)) hj hW (by omega) ?_
+      rw [xor_seam_cancel u v m hul hvl]
+      exact xor_zero_eq (u ^^^ v) W hg
+    · exact star_gen_hi_uu m j W u v hj hW hul hvl hu0 hv0 huW hvW hg (IH v u hvl hul)
+  · obtain ⟨u, hae, hul⟩ : ∃ u, a = u + 2^(m+1) ∧ u < 2^(m+1) :=
+      ⟨a - 2^(m+1), by omega, by omega⟩
+    subst hae
+    by_cases hbW : b ^^^ W = 0
+    · refine star_gap_bY_hi m j W (u + 2^(m+1)) b hj hW hW0 (by omega) ?_
+      rw [xor_seam b W m (by omega) hW, hbW]
+      omega
+    · exact star_gen_hi_ul m j W u b hj hW hul (by omega) hb0 hbW (IH u b hul (by omega))
+  · obtain ⟨v, hbe, hvl⟩ : ∃ v, b = v + 2^(m+1) ∧ v < 2^(m+1) :=
+      ⟨b - 2^(m+1), by omega, by omega⟩
+    subst hbe
+    by_cases haW : a ^^^ W = 0
+    · refine star_gap_aY_hi m j W a (v + 2^(m+1)) hj hW hW0 (by omega) ?_
+      rw [xor_seam a W m (by omega) hW, haW]
+      omega
+    by_cases hv0 : v = 0
+    · subst hv0
+      simpa using star_gap_bH_hi m j W a hj hW hW0 (by omega)
+    have hvW : v ^^^ W ≠ 0 := by
+      rw [← xor_seam_cancel v W m hvl hW]; exact hbY
+    have hg : a ^^^ v ^^^ W ≠ 0 := by
+      rw [← xor_seam_cancel (a ^^^ v) W m (Nat.xor_lt_two_pow (by omega) hvl) hW,
+          ← xor_seam a v m (by omega) hvl]
+      exact h3
+    exact star_gen_hi_lu m j W a v hj hW (by omega) hvl ha0 hv0 haW hvW hg (IH v a hvl (by omega))
+  · by_cases hbW : b ^^^ W = 0
+    · refine star_gap_bY_hi m j W a b hj hW hW0 (by omega) ?_
+      rw [xor_seam b W m (by omega) hW, hbW]
+      omega
+    · exact star_gen_hi_ll m j W a b hj hW (by omega) (by omega) hb0 hbW
+        (IH a b (by omega) (by omega))
+
+/-! ## (*) closed: the recursive theorem
+
+The two steps plus the base assemble by structural recursion on the level. The induction
+carries one arithmetic invariant beyond the obvious bounds:
+
+    Y % 2^j = 0        (equivalently `j <= lsb Y`)
+
+which is what makes `tau j` the RIGHT swap for `Y` at every level of the descent. It is
+exactly the condition `K7` isolated: with a mismatched `j` the equivariance fails in bulk,
+and the failure is visible here as the branch where the invariant cannot be re-established.
+
+The descent strips `Y`'s top bit one level at a time. It bottoms out when only the lowest
+set bit remains -- `Y = 2^(k+1)` at level `k+2` -- where `Qgen_pow2` gives `-1` on both sides,
+`tau` sending the seam either to itself (`j < k+1`, `tau_seam_fixed`) or to `1` (`j = k+1`,
+`sw_pow2`); a single-bit label either way. -/
+
+theorem star_forall : ∀ (m j Y a b : Nat), Y < 2^m → Y ≠ 0 → Y % 2^j = 0 →
+    a < 2^m → b < 2^m → Qgen Y a b m = Qgen (tau j Y) (tau j a) (tau j b) m
+  | 0, _, Y, _, _, hY, hY0, _, _, _ => by
+      have h : (2:Nat)^0 = 1 := rfl
+      omega
+  | 1, j, Y, a, b, hY, hY0, hmod, _, _ => by
+      have h2 : (2:Nat)^1 = 2 := rfl
+      have hY1 : Y = 1 := by omega
+      have hj0 : j = 0 := by
+        rcases Nat.eq_zero_or_pos j with h | h
+        · exact h
+        · exfalso
+          have hle : (2:Nat)^1 ≤ 2^j := Nat.pow_le_pow_right (by omega) h
+          rw [hY1, Nat.mod_eq_of_lt (by omega)] at hmod
+          omega
+      subst hj0
+      simp only [tau_id_zero]
+  | (k+2), j, Y, a, b, hY, hY0, hmod, ha, hb => by
+      have h2H : 2^(k+2) = 2^(k+1) + 2^(k+1) := by rw [Nat.pow_succ]; omega
+      have hjle : 2^j ≤ Y := by
+        by_cases h : 2^j ≤ Y
+        · exact h
+        · exact absurd (by rw [Nat.mod_eq_of_lt (by omega)] at hmod; exact hmod) hY0
+      have hjm : j < k+2 := by
+        by_cases h : j < k+2
+        · exact h
+        · exfalso
+          have hle : (2:Nat)^(k+2) ≤ 2^j := Nat.pow_le_pow_right (by omega) (by omega)
+          omega
+      by_cases hd : a = 0 ∨ b = 0 ∨ a ^^^ Y = 0 ∨ b ^^^ Y = 0 ∨ a = b ∨ a ^^^ b ^^^ Y = 0
+      · exact star_degen (k+2) j Y a b hjm hY ha hb hY0 hd
+      by_cases hYU : Y ≥ 2^(k+1)
+      · obtain ⟨W, hYe, hWl⟩ : ∃ W, Y = W + 2^(k+1) ∧ W < 2^(k+1) :=
+          ⟨Y - 2^(k+1), by omega, by omega⟩
+        subst hYe
+        by_cases hW0 : W = 0
+        · subst hW0
+          rw [Nat.zero_add]
+          have hta : tau j a < 2^(k+2) := tau_lt j (k+2) a hjm ha
+          have htb : tau j b < 2^(k+2) := tau_lt j (k+2) b hjm hb
+          obtain ⟨i, hi, hie⟩ : ∃ i, i < k+2 ∧ tau j (2^(k+1)) = 2^i := by
+            by_cases h : j < k+1
+            · exact ⟨k+1, by omega, tau_seam_fixed j k h⟩
+            · have hje : j = k+1 := by omega
+              subst hje
+              refine ⟨0, by omega, ?_⟩
+              rw [← sw_eq_tau, sw_pow2 (k+1) (by omega)]
+          rw [hie, Qgen_pow2 (k+2) (k+1) a b (by omega) ha hb,
+              Qgen_pow2 (k+2) i (tau j a) (tau j b) hi hta htb]
+        · have hdvd : (2:Nat)^j ∣ W := by
+            have hd1 : (2:Nat)^j ∣ (2^(k+1) + W) := by
+              rw [Nat.add_comm]; exact Nat.dvd_of_mod_eq_zero hmod
+            exact (Nat.dvd_add_right (Nat.pow_dvd_pow 2 (by omega))).mp hd1
+          have hjW : W % 2^j = 0 := by
+            obtain ⟨c, hc⟩ := hdvd
+            rw [hc, Nat.mul_mod_right]
+          have hjW2 : 2^j ≤ W := by
+            by_cases h : 2^j ≤ W
+            · exact h
+            · exact absurd (by rw [Nat.mod_eq_of_lt (by omega)] at hjW; exact hjW) hW0
+          have hjk : j < k+1 := by
+            by_cases h : j < k+1
+            · exact h
+            · exfalso
+              have hle : (2:Nat)^(k+1) ≤ 2^j := Nat.pow_le_pow_right (by omega) (by omega)
+              omega
+          exact star_step_hi k j W a b hjk hWl hW0 ha hb hd
+            (fun a' b' ha' hb' => star_forall (k+1) j W a' b' hWl hW0 hjW ha' hb')
+      · have hYl : Y < 2^(k+1) := by omega
+        have hjk : j < k+1 := by
+          by_cases h : j < k+1
+          · exact h
+          · exfalso
+            have hle : (2:Nat)^(k+1) ≤ 2^j := Nat.pow_le_pow_right (by omega) (by omega)
+            omega
+        exact star_step_low k j Y a b hjk hYl hY0 ha hb hd
+          (fun a' b' ha' hb' => star_forall (k+1) j Y a' b' hYl hY0 hmod ha' hb')
 
 end SounioZDFiberAntisym
 
