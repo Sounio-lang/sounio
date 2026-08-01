@@ -77,12 +77,16 @@ Measured 2026-07-31 on this workspace: **all four `*_GATE_OK`**.
 | R5b | `examples/epistemic_fo_second_order/fo_pk_import_auc_thalf_driver.sio` | `FO_PK_IMPORT_AUC_THALF_DRIVER_PASS` |
 | R6 | `examples/epistemic_fo_second_order/fo_pk_struct_rac_driver.sio` | `FO_PK_STRUCT_RAC_DRIVER_PASS` |
 | R6b | `examples/epistemic_fo_second_order/fo_pk_import_rac_driver.sio` | `FO_PK_IMPORT_RAC_DRIVER_PASS` |
+| R7 | `examples/epistemic_fo_second_order/fo_pk_struct_cmax_driver.sio` | `FO_PK_STRUCT_CMAX_DRIVER_PASS` |
+| R7b | `examples/epistemic_fo_second_order/fo_pk_import_cmax_driver.sio` | `FO_PK_IMPORT_CMAX_DRIVER_PASS` |
 
 ```bash
 bash scripts/ci/fo_pk_struct_auc_thalf_driver_gate.sh   # R5 AUC + t½ methods
 bash scripts/ci/fo_pk_import_auc_thalf_driver_gate.sh   # R5b import ↔ method
 bash scripts/ci/fo_pk_struct_rac_driver_gate.sh         # R6 Rac + f_rem methods
 bash scripts/ci/fo_pk_import_rac_driver_gate.sh         # R6b import ↔ method
+bash scripts/ci/fo_pk_struct_cmax_driver_gate.sh        # R7 Cmax + PTF methods
+bash scripts/ci/fo_pk_import_cmax_driver_gate.sh        # R7b Cmin + multi-mod
 ```
 
 ---
@@ -223,17 +227,44 @@ call → SEGV). Documented in driver headers; gates still grep science tables.
 
 ---
 
+## 6d. R7 — Multi-dose Cmax / Cmin / peak–trough fluctuation (2026-08-01)
+
+1-compartment multi-dose with effective dose \(F\cdot\mathrm{Dose}\), shared \(\eta\):
+
+\[
+C_{\max}=\frac{F\cdot\mathrm{Dose}}{V}\mathrm{Rac},\quad
+C_{\min}=\frac{F\cdot\mathrm{Dose}}{V}\frac{f_{\mathrm{rem}}}{1-f_{\mathrm{rem}}},\quad
+\mathrm{PTF}=\frac{C_{\max}-C_{\min}}{C_{\mathrm{ss,avg}}}=\mathrm{kel}\cdot\tau.
+\]
+
+| Quantity | Value | Where measured |
+|----------|------:|----------------|
+| \(C_{\max}\) point | 11.448115 | R7 method |
+| \(\mathrm{Var}(C_{\max})\) | 2.050059 | R7 method = import |
+| \(E_2[C_{\max}]\) | 11.539124 | R7 method |
+| \(C_{\min}\) point | 3.448115 | R7 method |
+| \(\mathrm{Var}(C_{\min})\) | 0.306096 | R7b import (FO budget) |
+| PTF point | 1.200000 | R7 method (= kel·τ) |
+| \(\mathrm{Var}(\mathrm{PTF})\) | 0.007488 | R7 method peel = import |
+
+Gates: `fo_pk_struct_cmax_driver_gate.sh`, `fo_pk_import_cmax_driver_gate.sh`.
+stdlib: `fo_cmax`, `fo_cmin`, `fo_ptf`.
+
+**FO budget:** ≤3 FO sites when Cmax is Rac-class heavy (4th silent-exits).
+
+---
+
 ## 7. FO compiler surfaces exercised
 
-| Surface | R1 | R2 | R3 | R4 | R5 | R5b | R6 | R6b |
-|---------|:--:|:--:|:--:|:--:|:--:|:---:|:--:|:---:|
-| Struct-lit methods | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Call-result methods | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | | |
-| Free-fn / site parity | ✓ | | ✓ | ✓ | ✓ | ✓ | ✓ (peel) | ✓ |
-| `correlate` | ✓ | ✓ | | | | | | |
-| Multi-mod import | | | | ✓ | | ✓ | | ✓ |
-| Shared FO channel (peel) | ✓ | ✓ | ✓ (kel) | | ✓ (t½) | ✓ | ✓ (f_rem) | ✓ |
-| \(E_2\) / Hessian | ✓ | ✓ | ✓ | ✓ | ✓ (AUC) | ✓ | ✓ (Rac) | ✓ |
+| Surface | R1 | R2 | R3 | R4 | R5 | R5b | R6 | R6b | R7 | R7b |
+|---------|:--:|:--:|:--:|:--:|:--:|:---:|:--:|:---:|:--:|:---:|
+| Struct-lit methods | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
+| Call-result methods | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | | | | |
+| Free-fn / site parity | ✓ | | ✓ | ✓ | ✓ | ✓ | ✓ (peel) | ✓ | ✓ (PTF) | ✓ |
+| `correlate` | ✓ | ✓ | | | | | | | | |
+| Multi-mod import | | | | ✓ | | ✓ | | ✓ | | ✓ |
+| Shared FO channel (peel) | ✓ | ✓ | ✓ (kel) | | ✓ (t½) | ✓ | ✓ (f_rem) | ✓ | ✓ (PTF) | ✓ |
+| \(E_2\) / Hessian | ✓ | ✓ | ✓ | ✓ | ✓ (AUC) | ✓ | ✓ (Rac) | ✓ | ✓ (Cmax) | |
 
 Compiler prerequisite: Madaros FO trust gate **42/42** (`scripts/ci/madaros_gum_fo_trust_gate.sh`).
 
@@ -248,9 +279,9 @@ Compiler prerequisite: Madaros FO trust gate **42/42** (`scripts/ci/madaros_gum_
    stack + R4; L2 full engine OPEN (out of scope). Closeout:
    `docs/research/fo_pk_residual4_oral_css_closeout_2026-07-31.md`.
    Stack: `fo_residual4_stack_gate.sh`.
-5. **Multi-site heavy FO budget (R6):** >~6 nested Rac-class FO sites in one
-   binary can silent-exit (rc=0, no science table). R6 drivers budget FO sites;
-   free-fn Rac surface equals method (probe + peel) without a seventh FO site.
+5. **Multi-site heavy FO budget (R6–R7):** >~6 nested Rac-class FO sites (R6) or
+   >~3 when stacking Cmax var+E₂ (R7) can silent-exit (rc=0). Drivers budget
+   FO sites; Cmin Var lives on R7b import under that budget.
 
 ---
 
