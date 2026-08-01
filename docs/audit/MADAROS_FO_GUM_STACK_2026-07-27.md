@@ -101,6 +101,7 @@ Oral Css = (F·Dose/τ)/(CL0·exp(η)). Import driver is the multi-mod free-help
 **ρ-τ companion** (2026-07-31): exposure Var = 1575 + 1250·ρ (ρ=0/0.5/1 → 1575/2200/2825); Css with σ_τ=0.5 → Var=0.872993 (E₂=6.735574).  
 **Multi-dose** (2026-07-31): Css(8/12/24)=10/6.667/3.333; Var=1.790625/0.795833/0.198958 (∝1/τ²); kel=0.1 with Var=0.000052.  
 **Import↔method** (2026-07-31): multi-mod `fo_css`/`fo_clearance`/`fo_infusion_rate` bit-agree with Pk methods, call-result, and call-site composition on Css/CL/rate FO and E₂.  
+**AUC + half-life R5** (2026-08-01): `fo_pk_struct_auc_thalf_driver.sio` — AUC Var=114.6, \(E_2=80.688\); \(t_{1/2}\) Var=0.249835 (= peel); kel Var=5.2e-5; method = call-result = free = site. Gate: `fo_pk_struct_auc_thalf_driver_gate.sh`.  
 **Algebraic residual-4 closeout** (2026-07-31): pure surfaces definitionally equal + exact-ℚ FO freezes in
 `formal/lean4/SounioFoCssSurfaceParity.lean`; executable certificate
 `scripts/ci/fo_css_surface_parity_gate.sh` (17/17).  

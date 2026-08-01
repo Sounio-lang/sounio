@@ -3345,3 +3345,7 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 | 2026-07-31 | xai/grok-4.3 | math-review | SounioFoMultimodFragment.lean | PASS | multi-mod local≡import≡union; residual4 closeout |
 | 2026-07-31 | lean-kernel + K16 measure | math-review | SounioZDFiberAntisym.lean (Qgen_degen, star_both_degen) | PASS_KERNEL | Q identically -1 on full degenerate locus forall n; star_both_degen for equivariance when both sides degen. Lean 0 errors 0 sorry. K16 green levels 5-7. |
 | 2026-07-31 | lean-kernel + K20 measure | math-review | SounioZDFiberAntisym.lean (Qgen_H_left_*, Qgen_H_diff_*) | PASS_KERNEL | Gap roots a=H (dual of H-right) and a⊕b=H for Y below seam (Qred fold to self-pair). Lean --threads=1 0 errors 0 sorryAx. K20 30144 checks levels 6-7 OK. Residual: a⊕b=H with Y high; Q' pattern; induction. |
+| 2026-08-01 | xai/grok-4.3 | math-review | fo_pk_struct_auc_thalf_driver.sio | ADDRESSED | Grok [WRONG] kel Var must be 0 after η cancel — incorrect: η cancels the latent channel but FO remains on CL0,V0 → Var(kel)=5.2e-5; AUC 80/114.6 OK; t½ 6.931471/0.249835 OK |
+| 2026-08-01 | zai/GLM-5.2 | math-review | fo_pk_struct_auc_thalf_driver.sio | PASS | AUC 80/114.6/E2 80.688; kel 0.1 Var 5.2e-5 from CL0,V0 after η cancel; t½ 6.931471/0.249835; surface parity |
+| 2026-08-01 | xai fan-out | fan-out | fo_pk_method_science_package.md | PASS | R5 freezes tables only; math already dual-reviewed on driver |
+| 2026-08-01 | xai fan-out | fan-out | fo_pk_method_science_v1.md | PASS | R5 annex freezes; math dual-reviewed on driver |
