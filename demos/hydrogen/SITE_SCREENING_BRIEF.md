@@ -53,20 +53,37 @@ receipt's stress test computes what that gap means for the headline:
 at τ = 1 the gate survives a Lehen-class bloom (3.055 % vs 3.635 %)
 but **not** a Lobodice-class one (0.110 %) — the rounding-term
 conclusion is conditional on no Lobodice-class bloom, and we print it
-that way. A second, same-day revision then **re-anchors the magnitude
-from the field evidence itself** (§4, field calibration): inverse
-calibration on the network against the two field observations gives
-effective-rate boxes [0.765606, 0.894709] (Lehen, 40 °C) and
-[6.308105, 14.708991] (Lobodice, leakage-caveated), and Tyne et al.
-2021's measured in-situ rate — 73–109 mmol CH₄ m⁻³ (STP) yr⁻¹ at
+that way. These numbers come from **two different mechanisms answering
+two different questions** — do not conflate them: the screening gates
+(3.635 %, and 3.355/3.370 % below) use the receipt's linear f_s
+mapping applied to the integrated 30-yr loss p-boxes; the 0.110 % is a
+labeled **upper-bound what-if** that directly annualizes the OBSERVED
+7-month Lobodice extent (17–31.5 % → 29.6–54.8 %/yr), bypassing both
+the calibrated p-box and the mapping. It is not the calibrated model's
+τ = 1 prediction; it is the bounding answer to "what if a
+Lobodice-class bloom is active". A second, same-day revision then
+**re-anchors the magnitude from the field evidence itself** (§4, field
+calibration): inverse calibration on the network against the two field
+observations gives effective-rate boxes ≈ **[0.77, 0.89]** (Lehen,
+40 °C) and ≈ **[6.3, 15]** (Lobodice, leakage-caveated), and Tyne et
+al. 2021's measured in-situ rate — 73–109 mmol CH₄ m⁻³ (STP) yr⁻¹ at
 29.2–50.7 °C, the only such measurement in the peer-reviewed
-literature — bridges (labeled assumptions) to [0.499145, 1.064713],
+literature — bridges (labeled assumptions) to ≈ **[0.50, 1.1]**,
 **overlapping the Lehen inverse**. The resulting field-calibrated k_m
-p-box **[2.041617, 382.433772]** (109×–20451× the falsified lab
-anchor) pushed through the same CTMI law moves the 30-yr loss boxes
-from ≤ 2.04 % to **[15.475235, 100] % (S2)** and **[0, 100] % (S3)** —
-yet the τ = 1 composed gate moves only to 3.355 % / 3.370 %, because
-the linear availability mapping is shallow at τ = 1; the
+p-box ≈ **[2.0, 380]** (109×–20451× the falsified lab anchor; values
+rounded to 2 significant figures here — full precision in
+`site_screening_data.md` and the receipt) pushed through the same CTMI
+law moves the 30-yr loss boxes from ≤ 2.04 % to **[15.475235, 100] %
+(S2)** and **[0, 100] % (S3)** — yet the τ = 1 composed gate moves
+only to 3.355 % / 3.370 %, because the linear availability mapping is
+shallow at τ = 1. All τ = 1 gates read ≈ 3.6 % (per-gate SE ≈ 0.1 %
+at n = 20000). The 0.005 pp delta between S1's [0, 0]-loss gate
+(3.635 %) and the valley baseline (3.630 %) is sampling noise; the
+field-path deltas (S2 3.355 %, S3 3.370 % — ≈ 0.3 pp below S1) are
+**systematic, not noise** (they are driven by the wider loss boxes;
+seed-scan: the same-seed difference reproduces at 0.31 ± 0.04 pp) and
+decision-irrelevant at this magnitude — the distribution-free corner
+p-box on the same quantity is [0, 100] %. The
 concavity-honest annualized reading of the same kinetics (the stress
 test) still collapses it to 0.110 %. **The conditional framing stands,
 sharpened: short-horizon economics are robust to the re-anchored
@@ -78,7 +95,7 @@ beside the new.
 **compressor reliability evidence** — the gate is set by the R p-box,
 not the rock, so alloy-batch test data moves the headline the most;
 (2) **biological site characterization** — the k_m *magnitude* is now
-field-calibrated (§4): the box [2.041617, 382.433772] spans two orders
+field-calibrated (§4): the box ≈ [2.0, 380] spans two orders
 on its own because the field evidence bounds the magnitude only
 one-sidedly at each site (the CTMI shape allows f → 0 at field
 temperatures). Ruling a Lobodice-class bloom in or out at the actual
@@ -94,7 +111,7 @@ brackets are the widest honest input intervals in the screen.
 | Type | depleted gas field, turbiditic sands in Miocene anhydrite/salt | turbiditic sandstone saline aquifer, Tsotyli caprock | conglomerates/sandstones, marine shale top |
 | Where | offshore N. Aegean, ~6 km off Thassos | Mesohellenic Trough, Grevena sub-basin (W. Macedonia) | same trough |
 | Depth | top < 1630 m ss; GWC 1723 m | avg 1500 m (deepest −2544 m) | avg 2000 m |
-| **Temperature** | **95 °C, MEASURED** (HRADF 2020) | **[52.5, 69.0] °C** — gradient-derived union bracket (labeled) | **[65, 87] °C** — same construction (labeled) |
+| **Temperature** | **95 °C, MEASURED** (HRADF 2020 tender document — provenance caveat §6.2) | **[52.5, 69.0] °C** — gradient-derived union bracket (labeled) | **[65, 87] °C** — same construction (labeled) |
 | Porosity | 20 % max / 22 % avg | 7–25 % (ftot 0.15) | ~12 % |
 | Permeability | 50→100 mD | not published (Hystories default 100 mD, labeled) | not published (same default) |
 | Salinity | **not published** — Hystories 100 g/L default, labeled | same | same |
@@ -132,15 +149,28 @@ documented in Western Macedonia; the Greek evaporite-cavern candidates
   1 − (L30/100)(τ/30), f_c = R with the pinned compressor p-box
   R ∈ [0.0131, 0.9989], CF_eff = f_s·f_c·CF into the TRIERES cost
   chain; conventional (independent-uniform, seeded MC n = 20000) and
-  distribution-free corner answers. Corner-exactness of this
-  composition is machine-checked in
-  `formal/lean4/SounioHydrogenValleyPbox.lean`.
+  distribution-free corner answers. The min–max composition of the
+  site-loss and compressor p-box intervals at the epistemic corners is
+  mechanically verified in `formal/lean4/SounioHydrogenValleyPbox.lean`
+  — a sanity check of the interval arithmetic only, **not** a proof of
+  correctness of the reaction network, the cost chain, or the Monte
+  Carlo.
   Two stated assumptions: **f_s is linear in τ** — extrapolating the
   30-yr loss to τ ≪ 30 linearly *over*estimates short-residence losses
-  (kinetic loss is concave in time: fastest early), so this choice
-  strengthens, not weakens, the "subsurface is a rounding term at
-  τ = 1" conclusion; and **the R p-box is representative, not
-  measured** — it is a corner p-box on P(P7 ≥ 350 bar) from
+  within this network, because the modeled cumulative loss is concave
+  in time (fastest early, slowing as H₂ depletes). Concavity is
+  **verified numerically, not assumed**: integrating the network itself
+  to τ = 1…30 at the field-calibrated p-box corners (RK4, same code as
+  the demo) gives non-positive second differences everywhere — the
+  LO-edge corner is strictly concave (year-1 increment 6.34 %
+  decreasing to 2.20 % by year 5) and the HI-edge corners saturate
+  (≈100 % in year 1 — itself confirmation that the linear mapping
+  understates bloom-speed loss, which is exactly why the stress test
+  annualizes directly). Convex early-time (lag-phase) profiles are
+  outside this abiotic batch network's form and remain a labeled
+  model-form limitation, not a modeled outcome; and **the R p-box is
+  representative, not measured** — it is a corner p-box on P(P7 ≥
+  350 bar) from
   `mh7_reliability.sio`'s 7-stage compressor ladder under alloy batch
   uncertainty (the source's Table 3 failure data are paywalled), not a
   fitted field-failure distribution.
@@ -185,11 +215,18 @@ dense-grid-vs-corner comparison, for every site.)
 
 **Figure B — gate probability vs baselines**
 (`figures/fig_b_pgate_vs_baselines.png`). Conventional composed
-P(<6 EUR/kg): **3.635 % for all three sites** (valley 25 °C baseline
-3.630 %; no-coupling baseline 20.765 %). The 20.765 → 3.630 %
-baseline-to-baseline drop is entirely the compressor factor f_c = R
-entering CF_eff; the subsurface contributes no visible signal at τ = 1
-given the compressor p-box's width.
+P(<6 EUR/kg): **≈ 3.6 % for all three sites** (3.635 % printed; valley
+25 °C baseline 3.630 %; no-coupling baseline 20.765 %). The 20.765 →
+3.630 % baseline-to-baseline drop is entirely the compressor factor
+f_c = R entering CF_eff; the subsurface contributes no visible signal
+at τ = 1 given the compressor p-box's width. Read all of these as
+**≈ 3.6 % (per-gate SE ≈ 0.1 % at n = 20000)**: on the slot and law
+paths the three sites print the same 3.635 % — per-site separation is
+below the sampling floor, and S1's 0.005 pp delta against the 3.630 %
+baseline is pure sampling noise. (The field-calibrated path's ≈ 0.3 pp
+deltas below S1 are larger than that floor — they are systematic,
+driven by the wider loss boxes, and decision-irrelevant; §4 field
+calibration.)
 The subsurface-only rows
 (20.505–20.530 %) are within MC noise of the no-coupling baseline —
 per-site separation at τ = 1 yr does not survive n = 20000 sampling
@@ -216,7 +253,11 @@ the RAG-report figure via [18] and a stoichiometric bound from the
 measured 960 m³ CO₂ consumption). **Lobodice** (Czech town-gas aquifer
 1965–1991 [17, 19]): T = 25–45 °C seasonal; H₂ 54 → 37 % and CH₄
 22 → 40 % over one 7-month season (extent interval [17.0, 31.5] % —
-percentage-points vs fraction-of-injected-H₂ readings; isotope work
+percentage-points vs fraction-of-injected-H₂ readings; a full
+stoichiometric balance — 4 H₂ + CO₂ → CH₄ + 2 H₂O — over the same
+source's measured initial/final compositions implies ≈ 50 % of the
+injected H₂ consumed, so the demo's box is if anything LOW (data doc,
+Lobodice row); isotope work
 attributes part of the drop to caprock leakage, so the true microbial
 extent is ≤ this, and we still bracket the full drop). For each site
 the law network is re-run at the field temperature over the field
@@ -239,7 +280,18 @@ Lehen-class bloom gives 1-yr loss [3.84, 4.10] %, f_s(1) ∈
 headline **survives**; a Lobodice-class bloom gives 1-yr loss
 [29.6, 54.8] %, f_s(1) ∈ [0.452, 0.704], composed gate **0.110 %**:
 the gate **moves** — a Lobodice-class bloom would make the subsurface
-visible at τ = 1. Scoping: Lobodice is a shallow (500 m), near-fresh
+visible at τ = 1. Mechanism note (read this before comparing numbers):
+the stress test does **not** apply the linear f_s mapping to the
+calibrated p-box — it **directly annualizes the observed 7-month
+extents** (×365.25/210 — the 7-month season taken as 210 d) as a
+labeled upper-bound what-if, bypassing both the
+30-yr integration and the mapping. The screening gates above and the
+stress test therefore answer different questions: "what does the
+calibrated model say at τ = 1 under the receipt's mapping" vs "what if
+an observed Lobodice-class season happens at the candidate". There is
+no contradiction between 3.635 % and 0.110 % — and there is also no
+comfort in it: the mapping-based gate is exactly the quantity the
+stress test probes. Scoping: Lobodice is a shallow (500 m), near-fresh
 (0.03 M), pH 6.7 aquifer storing 54 % H₂ town gas — Thaysen calls its
 conditions "highly favorable" and its 17 % "exceptional"; S1 is
 measured 95 °C (sterile-hot on both paths) and S2/S3 are deeper,
@@ -256,11 +308,16 @@ CO₂-EOR (a different process [11]).
 section [A4]; method and quotes in `site_screening_data.md` §C1–C6).
 The falsified magnitude is rebuilt from the field evidence, three ways,
 each labeled by class. (i) **FIELD-DERIVED (inverse)**: bisecting the
-network itself (80 bisection steps per corner, no closed form, no
+network itself (bracket [1e-12, 100], 80 bisection steps per corner —
+residual bracket width ≈ 100·2⁻⁸⁰ ≈ 1e-22, machine-level; the
+practical error floor is the RK4 discretization, pinned independently
+in the selftest; no closed form, no
 hidden constants) until it reproduces each observed extent, enveloped
-over the extent × horizon × A × salt corners — LEHEN k_eff ∈
-**[0.765606, 0.894709]** (40 °C), LOBODICE k_eff ∈
-**[6.308105, 14.708991]** (25–45 °C envelope; leakage-caveated).
+over the extent × horizon × A × salt corners — LEHEN k_eff ≈
+**[0.77, 0.89]** (40 °C), LOBODICE k_eff ≈
+**[6.3, 15]** (25–45 °C envelope; leakage-caveated). (Calibrated
+values are quoted to 2 significant figures in this brief; full
+precision lives in `site_screening_data.md` and the receipt.)
 (ii) **IN-SITU-MEASURED**: Tyne et al. 2021 [11] measured "an in situ
 microbial methanogenesis rate from within a natural system of 73–109
 millimoles of CH₄ per cubic metre (standard temperature and pressure)
@@ -270,14 +327,14 @@ minimum. Bridged to the model's units (4 H₂ : 1 CH₄; rate
 ks[0]·[H₂]·[CO₂]; [H₂] = the screening charge; "per cubic metre" read
 as per m³ water — the paper never defines the normalization volume, a
 documented ~1–2-order bridge ambiguity that EXCEEDS the width of the
-resulting box; the box is conditional on this reading): k_eff ∈
-**[0.499145, 1.064713]**. (iii) **Overlap**: LEHEN ∩ TYNE =
-**[0.765606, 0.894709], NONEMPTY** — two independent in-situ evidences
+resulting box; the box is conditional on this reading): k_eff ≈
+**[0.50, 1.1]**. (iii) **Overlap**: LEHEN ∩ TYNE =
+**[0.765606, 0.894709], NONEMPTY** (exact edges) — two independent
+in-situ evidences
 are mutually consistent at ~40 °C (weak corroboration only; it does
 not explain Lobodice, which sits ~6× above Tyne's upper edge,
 consistent with its leakage + bloom-condition caveats). The
-**field-calibrated k_m p-box at Topt** is then **[2.041617,
-382.433772]**: LO = Lehen k_lo ÷ f_hi(40 °C) (caveat-free site,
+**field-calibrated k_m p-box at Topt** is then ≈ **[2.0, 380]**: LO = Lehen k_lo ÷ f_hi(40 °C) (caveat-free site,
 biology at its p-box-best shape — the weakest magnitude Lehen allows);
 HI = Lobodice k_hi ÷ f_lo(45 °C) (caveated site, biology at its
 p-box-worst shape at the warmest reported T — a **labeled** edge, not
@@ -298,9 +355,16 @@ active-bloom sites, which is the conservative screening direction.
 Pushed through the same CTMI machinery (same seeded chain, n = 20000),
 the **FIELD-CALIBRATED LAW PATH** prints beside both older paths:
 30-yr loss p-boxes S1 **[0, 0]** (thermal death unchanged), S2
-**[15.475235, 100.000000]**, S3 **[0, 100.000000]**; f_s(1) ≥
+**[15.475235, 100.000000]**, S3 **[0, 100.000000]** — the 100 %
+endpoints are **model-bounds of the constant-pH₂ batch sink, not
+physical predictions**: the network holds pH₂ = 15 atm and brine
+composition fixed, so nothing throttles the sink as H₂ would actually
+deplete in a closed reservoir; read "100 %" as "beyond this model's
+ability to bound" (§6.1(h)); f_s(1) ≥
 [0.966667, …]; composed gate **3.635 / 3.355 / 3.370 %** for S1/S2/S3
-(vs 3.635 % on both older paths) — and f_s(10) at S2 drops to
+(vs 3.635 % on both older paths — the ≈ 0.3 pp deltas are systematic,
+not MC noise, but decision-irrelevant; per-gate SE ≈ 0.1 %) — and
+f_s(10) at S2 drops to
 **[0.666667, 0.948416]**. The τ = 1 headline **survives the
 re-anchoring under the receipt's linear f_s mapping** — but that
 mapping is exactly what the stress test showed to be optimistic for an
@@ -321,7 +385,13 @@ at the site level. The **field-calibrated law path moves this**: with
 the KMF magnitude the S2 τ = 10 availability falls to
 **[0.666667, 0.948416]** (S3 [0.666667, 1.0000]) — multi-year residence
 is exactly where the re-anchored kinetics bite, while S1 stays [1, 1]
-(thermal death is anchor-independent). A seasonal-plus storage mandate
+(thermal death is anchor-independent). Interpretability caveat (same
+one as §4, restated where the numbers are): these τ = 10 intervals
+combine the un-throttled constant-pH₂ batch sink with the linear f_s
+mapping — both known-simplification machinery (§3, §6.1) — so they are
+**model-bound screening intervals, not reservoir predictions**; the
+identified upgrade is direct kinetic integration to the target τ
+(§6.1(i)). A seasonal-plus storage mandate
 (multi-year
 residence, or a strategic reserve) is where the warmer onshore
 aquifers' kinetic losses become visible against South Kavala's
@@ -339,7 +409,9 @@ closed: the dominant subsurface uncertainty is parameterized, so it
 cannot be overturned by an uncharacterized k_m *shape*. The magnitude
 interval is no longer a caveat but a calibrated p-box — and pushing
 the field-calibrated box through the composed chain moves the τ = 1
-gate only to 3.355 % / 3.370 % (from 3.635 %), because the receipt's
+gate only to 3.355 % / 3.370 % (from 3.635 % — a systematic ≈ 0.3 pp
+delta, larger than the per-gate SE ≈ 0.1 % but decision-irrelevant at
+this magnitude), because the receipt's
 linear f_s mapping is shallow at τ = 1 (f_s ≥ 0.9667 even at the
 caveated HI edge). **But that survival is mapping-limited, not
 kinetics-limited**: the same kinetics read through the
@@ -364,8 +436,8 @@ characterization, the top subsurface characterization target.
    (LAB-FALSIFIED: it under-brackets both measured in-situ extents by
    ~10²–10³×, and an independent 2026-08-01 re-check found the named
    paper abiotic, so its provenance as a *microbial* anchor is doubly
-   weak — data file §C6) and the FIELD-CALIBRATED box [2.041617,
-   382.433772] that replaces it (§4). The replacement's own seams: the
+   weak — data file §C6) and the FIELD-CALIBRATED box ≈ [2.0, 380]
+   that replaces it (§4; full precision in the data file). The replacement's own seams: the
    HI edge is a *labeled* edge, not a strict bound (the field evidence
    bounds k_m only one-sidedly at each site, because the CTMI shape
    allows f → 0 at field temperatures); the Tyne bridge carries a
@@ -402,16 +474,36 @@ characterization, the top subsurface characterization target.
    L30·τ/30), which is optimistic at short horizons when the loss box
    is wide — the annualized reading of the same kinetics (stress
    test) is the honest short-horizon lens and is why the conditional
-   framing survives the re-anchoring unchanged; (h) the linear f_s
-   at the KMF HI edge understates true first-year loss (concavity) —
-   flagged, not smoothed.
+   framing survives the re-anchoring unchanged; (h) the 100 % loss
+   endpoints of the field-calibrated p-boxes are **model-bounds of the
+   constant-pH₂ batch sink, not physical predictions** — the network
+   holds pH₂ = 15 atm and brine composition fixed, so nothing throttles
+   the sink as a real closed reservoir would; "100 %" means "beyond
+   this model's ability to bound", and the derived f_s(10) intervals
+   inherit that reading; (i) the identified **methodological upgrade**
+   is direct kinetic integration of the network to the target residence
+   time (τ = 1, τ = 10), bypassing the linear f_s mapping entirely —
+   the mapping-based gates and the direct-annualization stress test
+   answer different questions (§4 mechanism note), and until that
+   integration replaces the mapping, every short-horizon field-
+   calibrated number is read through both lenses.
    AWAITING-AUTHOR-DATA: drop the paper's law into the 2-line `km_at`
    slot (or recalibrate the k_m magnitude) and every number re-derives.
 2. **Two of three temperatures are gradient-derived**, not measured —
    labeled union brackets (Hystories 30 ± 3 °C/km model default ∪
    Strymon-basin measured 25–36 °C/km). The union bracket is a
    deliberate maximum-bounds construction, not a prediction. No
-   measured Mesohellenic gradient exists in the public record.
+   measured Mesohellenic gradient exists in the public record. The
+   third temperature — S1's 95 °C — is **measured but tender-sourced**:
+   it comes from the HRADF 2020 invitation for expression of interest
+   (a tender document, not a primary reservoir-engineering report), and
+   we do not know whether it is a corrected bottom-hole or an
+   undisturbed formation temperature. The [0, 0] % claim survives a few
+   degrees of downward revision — the Tₘₐₓ p-box's upper edge is
+   90 °C, so S1 stays interaction-free down to 90 °C — **but if the
+   true formation temperature is < 90 °C, S1 enters the thermal-death
+   slide window and the hard zero must be re-read through the law fan,
+   not quoted as [0, 0]**. Hedged, not hidden.
 3. **No measured salinity for any site** (Hystories 100 g/L default is
    a screening assumption); salinity enters the network only through
    the illustrative salting-out interval.
@@ -421,8 +513,13 @@ characterization, the top subsurface characterization target.
    availability to the sink. Depth/porosity/
    permeability (the capacity and injectivity drivers) are out of its
    scope and reported as context only.
-5. **MC noise**: per-site conventional differences at τ = 1 are within
-   n = 20000 sampling error; only p-box structure and corner results
+5. **MC noise**: per-gate sampling error is SE ≈ 0.1 % at n = 20000.
+   On the slot and law paths the three sites print the same composed
+   gate (3.635 %) — per-site separation is below that floor. The
+   field-calibrated path's ≈ 0.3 pp deltas below S1 are **systematic**
+   (driven by the wider loss boxes; same-seed difference 0.31 ± 0.04 pp
+   across a seed scan) — stated as such, and decision-irrelevant: only
+   p-box structure and corner results
    should be read quantitatively.
 6. TRIERES itself is Corinth-anchored with above-ground storage scope
    (§2) — this brief screens Greek formations, not TRIERES deliverables.
