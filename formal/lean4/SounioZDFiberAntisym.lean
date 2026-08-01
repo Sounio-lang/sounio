@@ -2140,7 +2140,62 @@ theorem star_gen_hi_uu (m j W u v : Nat) (hj : j < m+1) (hW : W < 2^(m+1))
         htu0 htv0 htuW htvW ht3,
       hQ']
 
+/-! ## The remaining gap branches, wired
+
+Only three of the six `= H` conditions actually arise in the induction's case split: `b = H`
+(done above), `b ⊕ Y = H` and `a ⊕ Y = H`. The other three are already `m+2`-degenerate and go
+to `star_degen`. `tau` preserves each condition because it fixes the seam bit. -/
+
+theorem star_gap_bY_low (m j W a b : Nat) (hj : j < m+1) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
+    (ha : a < 2^(m+2)) (hbe : b ^^^ W = 2^(m+1)) :
+    Qgen W a b (m+2) = Qgen (tau j W) (tau j a) (tau j b) (m+2) := by
+  have hjm : j < m + 2 := by omega
+  have htbe : tau j b ^^^ tau j W = 2^(m+1) := by
+    rw [← tau_xor, hbe, tau_seam_fixed j m hj]
+  rw [Qgen_H_right_low' m W a b hW hW0 ha hbe,
+      Qgen_H_right_low' m (tau j W) (tau j a) (tau j b)
+        (tau_lt j (m+1) W hj hW) (fun h => hW0 (tau_inj j W 0 (by rw [h, tau_zero])))
+        (tau_lt j (m+2) a hjm ha) htbe]
+
+theorem star_gap_bY_hi (m j W a b : Nat) (hj : j < m+1) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
+    (ha : a < 2^(m+2)) (hbe : b ^^^ (W + 2^(m+1)) = 2^(m+1)) :
+    Qgen (W + 2^(m+1)) a b (m+2)
+      = Qgen (tau j (W + 2^(m+1))) (tau j a) (tau j b) (m+2) := by
+  have hjm : j < m + 2 := by omega
+  have htbe : tau j b ^^^ (tau j W + 2^(m+1)) = 2^(m+1) := by
+    rw [← tau_seam j m W hj hW, ← tau_xor, hbe, tau_seam_fixed j m hj]
+  rw [tau_seam j m W hj hW,
+      Qgen_H_right_hi' m W a b hW hW0 ha hbe,
+      Qgen_H_right_hi' m (tau j W) (tau j a) (tau j b)
+        (tau_lt j (m+1) W hj hW) (fun h => hW0 (tau_inj j W 0 (by rw [h, tau_zero])))
+        (tau_lt j (m+2) a hjm ha) htbe]
+
+theorem star_gap_aY_low (m j W a b : Nat) (hj : j < m+1) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
+    (hb : b < 2^(m+2)) (hae : a ^^^ W = 2^(m+1)) :
+    Qgen W a b (m+2) = Qgen (tau j W) (tau j a) (tau j b) (m+2) := by
+  have hjm : j < m + 2 := by omega
+  have htae : tau j a ^^^ tau j W = 2^(m+1) := by
+    rw [← tau_xor, hae, tau_seam_fixed j m hj]
+  rw [Qgen_H_left_low' m W a b hW hW0 hb hae,
+      Qgen_H_left_low' m (tau j W) (tau j a) (tau j b)
+        (tau_lt j (m+1) W hj hW) (fun h => hW0 (tau_inj j W 0 (by rw [h, tau_zero])))
+        (tau_lt j (m+2) b hjm hb) htae]
+
+theorem star_gap_aY_hi (m j W a b : Nat) (hj : j < m+1) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
+    (hb : b < 2^(m+2)) (hae : a ^^^ (W + 2^(m+1)) = 2^(m+1)) :
+    Qgen (W + 2^(m+1)) a b (m+2)
+      = Qgen (tau j (W + 2^(m+1))) (tau j a) (tau j b) (m+2) := by
+  have hjm : j < m + 2 := by omega
+  have htae : tau j a ^^^ (tau j W + 2^(m+1)) = 2^(m+1) := by
+    rw [← tau_seam j m W hj hW, ← tau_xor, hae, tau_seam_fixed j m hj]
+  rw [tau_seam j m W hj hW,
+      Qgen_H_left_hi' m W a b hW hW0 hb hae,
+      Qgen_H_left_hi' m (tau j W) (tau j a) (tau j b)
+        (tau_lt j (m+1) W hj hW) (fun h => hW0 (tau_inj j W 0 (by rw [h, tau_zero])))
+        (tau_lt j (m+2) b hjm hb) htae]
+
 end SounioZDFiberAntisym
+
 
 
 
