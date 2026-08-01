@@ -69,6 +69,48 @@
 // corner p-boxes exact, machine-checked in
 // formal/lean4/SounioHydrogenValleyPbox.lean (valley_corner_exact).
 //
+// ============================ THE k_m(T) LAW PATH =========================
+//
+// The component demo's k_m is a pseudo-sink SLOT (uhs_brine_calcite.sio
+// S2, ABSTRACT-LEVEL zero above 70 C). This demo now ALSO runs a SOURCED
+// temperature law alongside it (BOTH printed; the slot is untouched):
+//
+//   k_m_eff(T) = k_m x f(T), f = Rosso 1993 cardinal-temperature (CTMI)
+//   growth model, normalized f(Topt) = 1, f = 0 outside [Tmin, Tmax]:
+//     Rosso, Lobry & Flandrois 1993, J. Theor. Biol. 162:447-463,
+//     DOI 10.1006/jtbi.1993.1099 (model FORM).
+//   Cardinal-temperature p-box (dense 11^3 grid scan, labeled):
+//     Tmin in [25, 40] C — 40: Zeikus & Wolfe 1972, M. thermautotrophicus
+//       "minimum about 40 C", J. Bacteriol. 109(2):707-713, DOI
+//       10.1128/jb.109.2.707-713.1972; 25: LABELED community floor —
+//       in-situ reservoir methanogenesis measured at 29.2-50.7 C, Tyne
+//       et al. 2021, Nature 600:670-674, DOI 10.1038/s41586-021-04153-3.
+//     Topt in [65, 70] C — Zeikus & Wolfe 1972 ("optimal 65 to 70 C").
+//     Tmax in [75, 90] C — 75: Zeikus & Wolfe 1972 ("nothing occurred
+//       above 75 C"; pure-culture transition width <= 5 C); 90: field-
+//       scale biosphere cutoff 80-90 C (palaeopasteurization), Head et
+//       al. 2014, Front. Microbiol. 5:566, DOI 10.3389/fmicb.2014.00566;
+//       Wilhelms et al. 2001, Nature 411:1034-1037, DOI 10.1038/35082535.
+//   The k_m magnitude interval [0.0048, 0.0187] is UNCHANGED (Bo-2021-
+//   anchored, ILLUSTRATIVE as before) and now reads as the value AT Topt.
+//
+// PHYSICS WATCH (the S3 cliff): the law replaces the hard 70 C step with
+// a smooth but steep thermal-death slide reaching zero inside [75, 90] C.
+// A sharp cutoff is PHYSICAL, not a slot artifact: the sharpest sourced
+// transition is <= 5 C wide in pure culture (Zeikus & Wolfe 1972).
+// Ghaedi 2025's own ~70 C threshold is an EQUILIBRIUM-calibration result
+// (a calibrated log K(T)), NOT a kinetic law; their kinetic rate law is
+// closed-access (searched, NOT FOUND — site_screening_data.md). This law
+// path is independently sourced content, not the paper's.
+//
+// SCAN EVIDENCE (labeled; NO corner-exactness claimed): f's extrema over
+// the cardinal p-box come from a dense 11^3 grid — an 8-corner scan MISSES
+// f = 1 whenever T lies inside the Topt p-box (checked, replica). Each
+// site's LAW loss p-box comes from a dense 2.5 C T grid: the law has an
+// INTERIOR loss maximum near 61 C (biology warming toward Topt vs the
+// network's cold-favored CO2 supply) that T-corner extrema miss — the
+// T-corner envelope is printed against the dense one for every site.
+//
 // ENGINE: lean_single ONLY (Madaros cannot compile chemistry::kinetics
 // imports — pre-existing blocker #1584, see uhs_brine_calcite.sio E5).
 // lean_single quirks honored: scalars extracted before the next
@@ -80,7 +122,8 @@
 // every MC evaluation — the valley-chain seed idiom; MC n = 20000,
 // integer-counted decisions. All floats via integer-digit printers.
 // RUNTIME: 24-40 CRN corner runs per site (~6 s each on this
-// workspace) + 14 MC evaluations — measured wall ~10-13 min total on
+// workspace) + 14 MC evaluations on the slot path, plus ~150 law-path
+// corner runs (dense grids) + 12 MC — measured wall ~6-9 min total on
 // lean_single.
 // Marker: SITE_SCREENING_OK
 
@@ -299,6 +342,110 @@ fn corner_box(nu: MatNM, t: f64) -> (f64, f64) with Mut, Div, Panic {
             var is: i64 = 0
             while is < 2 {
                 let l = corner_loss(nu, t, aa[ia], kk[ik], ss[is])
+                llo = ss_min(llo, l)
+                lhi = ss_max(lhi, l)
+                is = is + 1
+            }
+            ik = ik + 1
+        }
+        ia = ia + 1
+    }
+    (llo, lhi)
+}
+
+// ─── [A2] SOURCED k_m(T) law path (Rosso 1993 CTMI; slot above kept) ───
+
+// Rosso cardinal-temperature model with inflection (CTMI), normalized
+// f(Topt) = 1, f = 0 outside (Tmin, Tmax). Form: DOI 10.1006/jtbi.1993.1099.
+// T in CELSIUS (the model's own convention; cardinal temps are C-scale).
+fn ctmi(tc: f64, tmin: f64, topt: f64, tmax: f64) -> f64 with Div {
+    if tc <= tmin { return 0.0 }
+    if tc >= tmax { return 0.0 }
+    let num = (tc - tmax) * (tc - tmin) * (tc - tmin)
+    let den = (topt - tmin) * ((topt - tmin) * (tc - topt)
+              - (topt - tmax) * (topt + tmin - 2.0 * tc))
+    num / den
+}
+
+// f extrema over the cardinal-temperature p-box: DENSE 11^3 grid scan
+// (labeled grid evidence — an 8-corner scan misses f = 1 when tc lies
+// inside the Topt p-box [65, 70] C; verified against the Python replica).
+// Grid: Tmin 25:1.5:40, Topt 65:0.5:70, Tmax 75:1.5:90 (sources: header).
+fn ctmi_scan(tc: f64) -> (f64, f64) with Mut, Div {
+    var flo = 1.0e9
+    var fhi = 0.0 - 1.0e9
+    var i: i64 = 0
+    while i <= 10 {
+        let tmin = 25.0 + 1.5 * (i as f64)
+        var j: i64 = 0
+        while j <= 10 {
+            let topt = 65.0 + 0.5 * (j as f64)
+            var k: i64 = 0
+            while k <= 10 {
+                let tmax = 75.0 + 1.5 * (k as f64)
+                let v = ctmi(tc, tmin, topt, tmax)
+                flo = ss_min(flo, v)
+                fhi = ss_max(fhi, v)
+                k = k + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    (flo, fhi)
+}
+
+// law-path rate vector: the CTMI f(T) IS the thermal cutoff here, so the
+// slot's hard 343.15 K step (km_at) must NOT also apply — k_m_eff enters
+// raw. Everything else (PWP channels, K4 closure) identical to make_ks.
+fn make_ks_law(t: f64, a: f64, km: f64) -> [f64; 8] with Mut, Div {
+    [
+        km,
+        a * k1_pwp(t) * 1.0e-7 * ss_spy(),
+        a * k2_pwp(t) * ss_spy(),
+        a * k3_pwp(t) * ss_spy(),
+        (a * k3_pwp(t) * ss_spy()) / k4_eq(t),
+        0.0, 0.0, 0.0
+    ]
+}
+
+fn corner_loss_law(nu: MatNM, t: f64, a: f64, km: f64, salt: f64) -> f64 with Mut, Div, Panic {
+    let ks = make_ks_law(t, a, km)
+    let h2 = h2_charge(salt)
+    let (ov, ou) = run_case(nu, &ks, h2, 600 as i64)
+    loss_pct(&ov, h2)
+}
+
+// law-path corner box at temperature t (K): the (k_m_eff x A x salt)
+// corners with k_m_eff = k_m x f; the k_m interval now reads as the
+// Bo-2021-anchored value AT Topt (ILLUSTRATIVE magnitude, unchanged).
+// k_m corners [0.0048 x f_lo, 0.0187 x f_hi] — interval product of
+// positive factors, distribution-free.
+fn corner_box_law(nu: MatNM, t: f64) -> (f64, f64) with Mut, Div, Panic {
+    var llo = 1.0e9
+    var lhi = 0.0 - 1.0e9
+    let aa: [f64; 2] = [3.0e-6, 3.0e-5]
+    let ss: [f64; 2] = [0.70, 1.00]
+    let (f_lo, f_hi) = ctmi_scan(t - 273.15)
+    let flo_v = f_lo
+    let fhi_v = f_hi
+    var kk0 = 0.0048 * flo_v
+    var kk1 = 0.0187 * fhi_v
+    var nk: i64 = 2
+    if fhi_v <= 0.0 {
+        kk0 = 0.0
+        kk1 = 0.0
+        nk = 1
+    }
+    var ia: i64 = 0
+    while ia < 2 {
+        var ik: i64 = 0
+        while ik < nk {
+            var kmv = kk0
+            if ik == 1 { kmv = kk1 }
+            var is: i64 = 0
+            while is < 2 {
+                let l = corner_loss_law(nu, t, aa[ia], kmv, ss[is])
                 llo = ss_min(llo, l)
                 lhi = ss_max(lhi, l)
                 is = is + 1
@@ -630,6 +777,128 @@ fn report_site(nu: MatNM, code: i64, name1: &str, name2: &str,
     ss_fix6(ss_pct(h_best, n)); print(" ")
     ss_fix6(ss_pct(h_worst, n)); print(" ")
     ss_fix6(ss_pct(h_sub, n)); println("")
+
+    // ─── k_m(T) LAW PATH (SOURCED — the slot above is untouched) ───
+    print("  --- k_m(T) LAW PATH (SOURCED: Rosso 1993 CTMI form, DOI")
+    println("")
+    print("      10.1006/jtbi.1993.1099; cardinal p-box Tmin [25,40] /")
+    println("")
+    print("      Topt [65,70] / Tmax [75,90] C — Zeikus & Wolfe 1972,")
+    println("")
+    print("      Tyne 2021, Head 2014 / Wilhelms 2001; see header) ---")
+    println("")
+    let t_lo_c = t_lo - 273.15
+    let t_hi_c = t_hi - 273.15
+    var n_g = ss_ceil_i64((t_hi_c - t_lo_c) / 2.5)
+    if n_g < 1 { n_g = 1 }
+    var law_lo = 1.0e9
+    var law_hi = 0.0 - 1.0e9
+    var cenv_lo = 1.0e9
+    var cenv_hi = 0.0 - 1.0e9
+    var ig: i64 = 0
+    while ig <= n_g {
+        var tcg = t_lo_c + 2.5 * (ig as f64)
+        if tcg > t_hi_c { tcg = t_hi_c }
+        let (glo, ghi) = corner_box_law(nu, tcg + 273.15)
+        let glo_v = glo
+        let ghi_v = ghi
+        let (sfl, sfh) = ctmi_scan(tcg)
+        let sfl_v = sfl
+        let sfh_v = sfh
+        print("FIGDATA FANL S"); ss_pd(code); print(" ")
+        ss_fix6(tcg); print(" "); ss_fix6(glo_v); print(" ")
+        ss_fix6(ghi_v); print(" "); ss_fix6(sfl_v); print(" ")
+        ss_fix6(sfh_v); println("")
+        law_lo = ss_min(law_lo, glo_v)
+        law_hi = ss_max(law_hi, ghi_v)
+        if ig == 0 {
+            cenv_lo = ss_min(cenv_lo, glo_v)
+            cenv_hi = ss_max(cenv_hi, ghi_v)
+        }
+        if ig == n_g {
+            cenv_lo = ss_min(cenv_lo, glo_v)
+            cenv_hi = ss_max(cenv_hi, ghi_v)
+        }
+        ig = ig + 1
+    }
+    print("  LAW P-BOX 30-yr H2 loss [%] (dense T grid 2.5 C): [")
+    ss_fix6(law_lo); print(" , "); ss_fix6(law_hi); println("]")
+    print("FIGDATA PBOXL S"); ss_pd(code); print(" ")
+    ss_fix6(law_lo); print(" "); ss_fix6(law_hi); println("")
+    print("    (slot-path p-box printed above: ["); ss_fix6(box_l.lo)
+    print(" , "); ss_fix6(box_l.hi); println("])")
+    print("  LAW T-scan: T-corner envelope ["); ss_fix6(cenv_lo)
+    print(" , "); ss_fix6(cenv_hi); print("] vs dense grid [")
+    ss_fix6(law_lo); print(" , "); ss_fix6(law_hi); println("]")
+    var interior_note: i64 = 0
+    if law_hi > cenv_hi + 1.0e-9 { interior_note = 1 }
+    if law_lo < cenv_lo - 1.0e-9 { interior_note = 1 }
+    if interior_note == 1 {
+        print("    dense grid EXCEEDS the T-corner envelope: an interior")
+        println("")
+        print("    extremum T corners would have missed (dense grid used)")
+        println("")
+    }
+    if interior_note == 0 {
+        print("    T-corner envelope CONTAINS the dense grid for this site")
+        println("")
+    }
+    if t_lo > 363.15 {
+        print("    95 C is above the whole Tmax bracket [75,90]: law gives")
+        println("")
+        print("    k_m = 0 — the SLOT's zero, now from thermal death")
+        println("")
+    }
+    print("  LAW availability f_s at tau = 1 yr : [")
+    ss_fix6(fs_of(law_hi, tau)); print(" , "); ss_fix6(fs_of(law_lo, tau))
+    println("]")
+    print("  LAW availability f_s at tau = 10 yr (analytic): [")
+    ss_fix6(fs_of(law_hi, 10.0)); print(" , "); ss_fix6(fs_of(law_lo, 10.0))
+    println("]")
+
+    // law chain at interval mids
+    let law_mid = 0.5 * (law_lo + law_hi)
+    let d_sub_l = delivered(mid(0), mid(1), mid(2),
+                            fs_of(law_mid, tau) * mid(3),
+                            mid(4), mid(5), mid(6), mid(7))
+    let d_cmp_l = delivered(mid(0), mid(1), mid(2),
+                            fs_of(law_mid, tau) * r_mid * mid(3),
+                            mid(4), mid(5), mid(6), mid(7))
+    print("  LAW mids chain [EUR/kg]: nominal "); ss_fix6(d_nom)
+    print(" -> +subsurface "); ss_fix6(d_sub_l)
+    print(" -> +compressor "); ss_fix6(d_cmp_l); println("")
+    print("FIGDATA CHAINL S"); ss_pd(code); print(" ")
+    ss_fix6(d_nom); print(" "); ss_fix6(d_sub_l); print(" ")
+    ss_fix6(d_cmp_l); println("")
+
+    // law gate probabilities (seeded idiom; n = 20000)
+    print("  LAW P(dispensed < 6 EUR/kg) [%], MC n = 20000:")
+    println("")
+    rng_seed(314159265, 271828182)
+    let h_conv_l = mc_hits_indep10(law_lo, law_hi, r_lo, r_hi, tau, n, 1)
+    print("    LAW conventional composed (site L30 + pinned R) : ")
+    ss_fix6(ss_pct(h_conv_l, n)); println("")
+    rng_seed(314159265, 271828182)
+    let h_sub_l = mc_hits_indep10(law_lo, law_hi, 1.0, 1.0, tau, n, 0)
+    print("    LAW subsurface-only coupling (R = 1)            : ")
+    ss_fix6(ss_pct(h_sub_l, n)); println("")
+    rng_seed(314159265, 271828182)
+    let h_best_l = mc_hits_pinned_c(fs_of(law_lo, tau), r_hi,
+                                    0.046, 0.8, 43.9, 0.80,
+                                    44.0, 0.005, 45.0, 0.50, n)
+    print("    LAW BEST corner  (L30 lo, R hi, econ best)      : ")
+    ss_fix6(ss_pct(h_best_l, n)); println("")
+    rng_seed(314159265, 271828182)
+    let h_worst_l = mc_hits_pinned_c(fs_of(law_hi, tau), r_lo,
+                                     0.052, 1.2, 48.9, 0.55,
+                                     89.0, 0.02, 30.0, 1.50, n)
+    print("    LAW WORST corner (L30 hi, R lo, econ worst)     : ")
+    ss_fix6(ss_pct(h_worst_l, n)); println("")
+    print("FIGDATA PGATEL S"); ss_pd(code); print(" ")
+    ss_fix6(ss_pct(h_conv_l, n)); print(" ")
+    ss_fix6(ss_pct(h_best_l, n)); print(" ")
+    ss_fix6(ss_pct(h_worst_l, n)); print(" ")
+    ss_fix6(ss_pct(h_sub_l, n)); println("")
     println("")
 }
 
@@ -648,9 +917,11 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     println("")
     print("  modified. lean_single engine (Madaros blocked on chemistry")
     println("")
-    print("  imports, #1584). RUNTIME ESTIMATE: ~10-13 min wall (88 CRN")
+    print("  imports, #1584). RUNTIME ESTIMATE: ~6-9 min wall (88 slot")
     println("")
-    print("  corner runs + 14 seeded MC evaluations, n = 20000).")
+    print("  + ~150 law CRN corner runs on dense grids + 26 seeded MC")
+    println("")
+    print("  evaluations, n = 20000).")
     println("")
     println("")
 
@@ -746,7 +1017,25 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     println("")
     print("  The tau = 10 sensitivity shows where site choice starts to")
     println("")
-    print("  matter. SWAP SLOTS: drop the group's measured site data into")
+    print("  matter. The SOURCED k_m(T) LAW PATH (Rosso CTMI, printed")
+    println("")
+    print("  per site next to the slot) replaces the hard 70 C step with")
+    println("")
+    print("  a physical thermal-death slide to zero inside [75, 90] C:")
+    println("")
+    print("  S1's zero is unchanged (95 C kills methanogenesis outright),")
+    println("")
+    print("  S3's slot cliff becomes a smooth transition, and S2's")
+    println("")
+    print("  worst-case corner FLIPS from cold to warm (biology warming")
+    println("")
+    print("  toward Topt now outweighs the network's cold-favored CO2")
+    println("")
+    print("  supply) with an interior loss maximum the T corners miss —")
+    println("")
+    print("  caught by the dense grid and printed. SWAP SLOTS: drop the")
+    println("")
+    print("  group's measured site data into")
     println("")
     print("  site_screening_data.md's AWAITING-DATA rows and every number")
     println("")

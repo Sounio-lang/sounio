@@ -6,7 +6,9 @@
 (lean_single, seeded, receipt `SITE_SCREENING_OK`); geology table with
 per-value citations in `demos/hydrogen/site_screening_data.md`. Figures
 rendered from the demo's own stdout by
-`demos/hydrogen/tools/render_site_figures.py`.*
+`demos/hydrogen/tools/render_site_figures.py`.
+Revision 2026-08-01: the k_m slot is now printed side-by-side with a
+sourced methanation temperature law (Rosso 1993 CTMI; §3, §6.1).*
 
 ## 1. Executive summary
 
@@ -27,15 +29,24 @@ reliability p-box, not the rock, is the gate. Site choice starts to
 matter at longer residence (τ = 10 yr sensitivity, §5) and in the
 kinetic-regime structure the sourced temperatures reveal (§4): the
 three sites sit in three different regimes of the same public network.
+A 2026-08-01 revision adds a **sourced methanation temperature law**
+(Rosso CTMI with a cardinal-temperature p-box from primary literature)
+printed side-by-side with the original slot: S1's zero is unchanged
+(now from thermal death, not a flag), S3's hard 70 °C cliff becomes a
+smooth physical slide to zero inside [75, 90] °C, and S2's worst-case
+corner flips from cold to warm — while the gate probability stays
+3.635 % on **both** paths for every site.
 
 **What changes the answer.** Three levers, in order of leverage: (1)
 **compressor reliability evidence** — the gate is set by the R p-box,
 not the rock, so alloy-batch test data moves the headline the most;
-(2) **a calibrated k_m(T)** — Ghaedi 2025's T-dependent kinetic law
-(closed-access) would replace the hard 70 °C step and reshape every
-below-cutoff number; (3) **measured S2/S3 formation temperatures** —
-the gradient-derived brackets are the widest honest input intervals in
-the screen.
+(2) **a calibrated k_m magnitude** — the CTMI law (this revision)
+already replaced the hard 70 °C step with a sourced thermal slide; what
+would still reshape the below-Topt numbers is a calibrated *rate
+magnitude* (Ghaedi 2025's closed-access kinetic law, or reservoir-rate
+measurements) and narrower cardinal-temperature brackets; (3)
+**measured S2/S3 formation temperatures** — the gradient-derived
+brackets are the widest honest input intervals in the screen.
 
 ## 2. The sites (every value cited — `site_screening_data.md`)
 
@@ -64,12 +75,20 @@ documented in Western Macedonia; the Greek evaporite-cavern candidates
 - **Loss network**: the H₂–brine–calcite CRN of
   `uhs_brine_calcite.sio` (#1585), re-derived in
   `site_screening.sio` with identical formulas/constants — public PWP
-  calcite kinetics k(T), phreeqc.dat calcite equilibrium, an
-  ILLUSTRATIVE methanation pseudo-sink k_m that is **zero above 70 °C**
-  (abstract-level A2 slot of Ghaedi 2025), 30-yr RK4 integration. Per
-  site, the 8 (k_m × A × salt) epistemic corners are run at the site's
-  T-bracket corners (and mid), giving the site's 30-yr loss **p-box** —
-  no independence assumption anywhere.
+  calcite kinetics k(T), phreeqc.dat calcite equilibrium, and a
+  methanation sink k_m run **two ways, both printed**:
+  (a) the original ILLUSTRATIVE pseudo-sink **slot** (abstract-level A2
+  of Ghaedi 2025: constant below a hard 70 °C step, zero above), and
+  (b) a **sourced temperature law** — k_m_eff(T) = k_m × f(T) with f the
+  Rosso 1993 cardinal-temperature (CTMI) microbial-growth model (DOI
+  10.1006/jtbi.1993.1099) and a cardinal p-box Tmin [25, 40], Topt
+  [65, 70], Tmax [75, 90] °C (Zeikus & Wolfe 1972; Tyne 2021; Head 2014
+  / Wilhelms 2001 — full citations and the hunt's negative results in
+  `site_screening_data.md`). The k_m magnitude interval [0.0048, 0.0187]
+  is unchanged (Bo 2021 anchor, ILLUSTRATIVE, now read as the value at
+  Topt). Per site and path, the 8 (k_m × A × salt) epistemic corners are
+  run across the site's T bracket, giving the site's 30-yr loss
+  **p-box** — no independence assumption anywhere.
 - **Chain**: `valley_chain_epistemic.sio` (#1587) machinery — f_s =
   1 − (L30/100)(τ/30), f_c = R with the pinned compressor p-box
   R ∈ [0.0131, 0.9989], CF_eff = f_s·f_c·CF into the TRIERES cost
@@ -94,77 +113,123 @@ documented in Western Macedonia; the Greek evaporite-cavern candidates
 
 ## 4. Results
 
-**Figure A — per-site loss p-box fan** (`figures/fig_a_loss_pbox_fan.png`).
+**Figure A — per-site loss p-box fan, SLOT vs LAW**
+(`figures/fig_a_loss_pbox_fan.png`).
 The sourced T brackets put the sites in **three different kinetic
-regimes**: S1 (measured 95 °C) lies entirely above the 70 °C
-interaction cutoff — 30-yr kinetic loss **exactly [0, 0] %** by the
-slot; S2 (52.5–69 °C) lies entirely below it — loss p-box
-**[0.0845, 2.2760] %**; S3 (65–87 °C) **straddles** the cutoff, so its
-p-box **[0, 1.9806] %** honestly contains the interaction-free regime.
+regimes**, now shown on both k_m paths. On the **slot** path: S1
+(measured 95 °C) lies entirely above the 70 °C interaction cutoff —
+30-yr kinetic loss **exactly [0, 0] %**; S2 (52.5–69 °C) lies entirely
+below it — loss p-box **[0.0845, 2.2760] %**; S3 (65–87 °C) **straddles**
+the cutoff, so its p-box **[0, 1.9806] %** honestly contains the
+interaction-free regime.
+On the **law** path (Rosso CTMI, dense 2.5 °C grid): S1 is unchanged —
+**[0, 0] %**, but the zero now comes from thermal death (95 °C is above
+the whole Tmax bracket), not from a flag; S3's outer p-box is unchanged
+(**[0, 1.9806] %**) but the hard 70 °C cliff is replaced by a **smooth
+thermal-death slide** — the fan's upper edge runs 1.8392 % at 70 °C →
+1.6081 → 1.2119 → 0.6665 → 0.4125 % at 87 °C through the Tmax bracket,
+reaching zero only at 90 °C; S2's p-box narrows to **[0.0409, 2.0408] %**
+and its worst-case corner **flips from cold to warm**: the slot's maximum
+sat at the cold corner (constant k_m, network CO2 supply favored cold),
+while the law's sits at an **interior maximum at 60 °C** (biology warming
+toward Topt now outweighs the cooling network) — an extremum the
+T-corner grid would have missed; the dense grid catches it and the
+receipt prints the comparison ("dense grid EXCEEDS the T-corner
+envelope").
 Mechanism: the network's sole H₂-consuming pathway is the methanation
-pseudo-sink; the calcite dissolution/precipitation loop shifts brine
-chemistry but is not itself an H₂ sink, which is why the k_m slot's
-70 °C step dominates the fan (the step is a slot artifact; see §6.1).
-Below the cutoff, loss **decreases** with temperature (the pseudo-sink
-kinetics slow as T falls), so S2's colder bracket corner carries the
-higher upper bound.
-(Straddle honesty: the fan resolves the 70 °C cliff with corner runs at
-69.95/70.05 °C. T-corner
-extrema are *labeled scan evidence*, and the mid-bracket fan box the
-demo runs anyway lies inside the corner envelope for every site —
-printed in the receipt.)
+sink; the calcite dissolution/precipitation loop shifts brine chemistry
+but is not itself an H₂ sink, which is why the k_m temperature treatment
+dominates the fan (slot seams and law seams: §6.1).
+(Scan honesty: all fan extrema are *labeled grid evidence* — the slot
+path prints a corner-envelope consistency check, the law path a
+dense-grid-vs-corner comparison, for every site.)
 
 **Figure B — gate probability vs baselines**
 (`figures/fig_b_pgate_vs_baselines.png`). Conventional composed
 P(<6 EUR/kg): **3.635 % for all three sites** (valley 25 °C baseline
 3.630 %; no-coupling baseline 20.765 %). The 20.765 → 3.630 %
 baseline-to-baseline drop is entirely the compressor factor f_c = R
-entering CF_eff; the subsurface contributes nothing visible at τ = 1.
+entering CF_eff; the subsurface contributes no visible signal at τ = 1
+given the compressor p-box's width.
 The subsurface-only rows
 (20.505–20.530 %) are within MC noise of the no-coupling baseline —
 per-site separation at τ = 1 yr does not survive n = 20000 sampling
 error, and we say so in the receipt. The corner p-box on beating the
-gate is **[0, 100] % for every site**.
+gate is **[0, 100] % for every site**. The **law path changes none of
+this**: composed 3.635 % for all three sites on both paths, subonly
+rows identical within noise — the gate does not see the subsurface on
+either k_m treatment.
 
 **Figure C — composed-chain build-up** (`figures/fig_c_chain_waterfall.png`).
 At interval mids: nominal 6.4160 EUR/kg → +subsurface **+0.0000–0.0005
 EUR/kg** → +compressor → ~7.556 EUR/kg. The subsurface step is
-sub-cent; the compressor availability (R mid = 0.506) is the cost
-driver.
+sub-cent **on both k_m paths** (law: +0.00000/+0.00040/+0.00039 for
+S1/S2/S3 — plotted as black diamonds); the compressor availability
+(R mid = 0.506) is the cost driver.
 
 ## 5. Where site choice starts to matter
 
 The τ = 10 yr analytic sensitivity: f_s intervals drop to
-S2 [0.9924, 0.9997] and S3 [0.9934, 1.0000] (S1 stays [1, 1] by the
-slot). A seasonal-plus storage mandate (multi-year residence, or a
-strategic reserve) is where the warmer onshore aquifers' kinetic losses
-become visible against South Kavala's measured-hot, interaction-free
-regime. If the valley's storage residence is closer to τ = 1 (our
+S2 [0.9924, 0.9997] and S3 [0.9934, 1.0000] (S1 stays [1, 1]) on the
+slot path; the law path is nearly identical — S2 [0.9932, 0.9999],
+S3 [0.9934, 1.0000], S1 [1, 1] — because the outer p-boxes barely move
+at the site level. A seasonal-plus storage mandate (multi-year
+residence, or a strategic reserve) is where the warmer onshore
+aquifers' kinetic losses become visible against South Kavala's
+measured-hot, interaction-free regime (slot: a cutoff; law: thermal
+death — same screening conclusion either way). If the valley's storage
+residence is closer to τ = 1 (our
 ILLUSTRATIVE default), the subsurface is a rounding term at every
 candidate and the characterization euros belong to the compressor
 alloys and the heat/dispensing contracts — same conclusion as the
-valley-chain receipt, now backed by real site temperatures.
+valley-chain receipt, now backed by real site temperatures **and** a
+sourced methanation temperature law. That bounding matters precisely
+here: with the methanation sink now enclosed by a sourced temperature
+law (not an open illustrative slot), "the subsurface is a rounding term
+at τ = 1" is a **closed** claim — the dominant uncertainty in the
+subsurface term is parameterized, so the conclusion cannot be overturned
+by an uncharacterized k_m behavior.
 
 ## 6. Honest limitations
 
-1. **k_m is a slot, not a law.** The methanation pseudo-sink is
-   ILLUSTRATIVE (anchored to Bo 2021 field losses) with an
-   abstract-level 70 °C cutoff; Ghaedi 2025's calibrated T-dependent
-   kinetic law is closed-access. Every S1/S3 "interaction-free" number
-   inherits this, and **the hard step itself is a modeling choice, not
-   derived from the underlying kinetics** — the correct epistemic
-   response is exactly what we print: the straddling site's p-box
-   contains both regimes. AWAITING-AUTHOR-DATA: drop the paper's law
-   into the 2-line `km_at` slot and every number re-derives.
+1. **k_m: sourced law now, with labeled seams.** The 2026-08-01
+   revision adds the sourced LAW PATH (§3): a Rosso CTMI temperature
+   shape with a cardinal p-box from primary literature (Zeikus & Wolfe
+   1972's ≤ 5 °C pure-culture cutoff; the 80–90 °C field biosphere
+   cutoff). The old slot is kept and printed alongside — the comparison
+   is in the receipt, not hidden. Remaining honest seams: (a) the k_m
+   **magnitude** interval is still the ILLUSTRATIVE Bo-2021 field-loss
+   anchor, now read as the value at Topt — the literature gives the
+   temperature *shape*, not a reservoir rate constant; (b) the CTMI is a
+   microbial *growth* model applied to the pseudo-sink *rate* — a
+   labeled form transfer (hydrogenotrophic methanogenesis is the
+   biological H₂ sink; the network itself stays abiotic-batch); (c)
+   Ghaedi 2025's own kinetic law remains closed-access — note their
+   ~70 °C threshold is an *equilibrium-calibration* result, not
+   kinetics; (d) microbial H₂ consumption can be **zero** even when
+   thermodynamics smiles (Berta 2018: sulfate reducers outcompete at
+   2–15 bar H₂; salinity > 35 g/L shuts consumption down) — our p-box
+   spans active-methanogen conditions, which is the conservative
+   screening direction. The apparent salinity paradox is likewise a
+   stated conservative choice, not a contradiction: the [0.70, 1.00]
+   salting-out interval enters only *physical* H₂ solubility, while the
+   k_m sink deliberately models an *active* methanogen community at the
+   (unmeasured, Hystories-default) site salinity; (e) Thaysen 2021's compiled rates carry a 2023
+   corrigendum and no T correction — used as context only.
+   AWAITING-AUTHOR-DATA: drop the paper's law into the 2-line `km_at`
+   slot (or recalibrate the k_m magnitude) and every number re-derives.
 2. **Two of three temperatures are gradient-derived**, not measured —
    labeled union brackets (Hystories 30 ± 3 °C/km model default ∪
-   Strymon-basin measured 25–36 °C/km). No measured Mesohellenic
-   gradient exists in the public record.
+   Strymon-basin measured 25–36 °C/km). The union bracket is a
+   deliberate maximum-bounds construction, not a prediction. No
+   measured Mesohellenic gradient exists in the public record.
 3. **No measured salinity for any site** (Hystories 100 g/L default is
    a screening assumption); salinity enters the network only through
    the illustrative salting-out interval.
 4. **Batch network, fixed pH 7, pH₂ = 15 atm, fixed brine** — a
-   screening reactor, not a reservoir model; depth/porosity/
+   screening reactor, not a reservoir model; perfect mixing and the
+   fixed pH₂ = 15 atm are conservative *upper* bounds on H₂
+   availability to the sink. Depth/porosity/
    permeability (the capacity and injectivity drivers) are out of its
    scope and reported as context only.
 5. **MC noise**: per-site conventional differences at τ = 1 are within
@@ -204,3 +269,19 @@ env -u SOUC_BIN -u SOUNIO_STDLIB_PATH SOUNIO_SOUC_ENGINE=lean_single \
    15(6):757–768 (DOI 10.1002/ghg.2368) — closed access; abstract-level use only.
 7. Arvanitis et al. 2020, *Energies* 13:2707 (DOI 10.3390/en13112707).
 8. CORDIS TRIERES GA 101112056 project page (accessed 2026-07-31).
+9. Rosso, Lobry & Flandrois 1993, *J. Theor. Biol.* 162:447–463
+   (DOI 10.1006/jtbi.1993.1099) — CTMI cardinal-temperature model form.
+10. Zeikus & Wolfe 1972, *J. Bacteriol.* 109(2):707–713
+    (DOI 10.1128/jb.109.2.707-713.1972) — methanogen cardinal
+    temperatures 40 / 65–70 / 75 °C; "nothing occurred above 75 C".
+11. Tyne et al. 2021, *Nature* 600:670–674 (DOI 10.1038/s41586-021-04153-3)
+    — in-situ reservoir methanogenesis at 29.2–50.7 °C.
+12. Head, Gray & Larter 2014, *Front. Microbiol.* 5:566
+    (DOI 10.3389/fmicb.2014.00566) — 80–90 °C field biosphere cutoff.
+13. Wilhelms et al. 2001, *Nature* 411:1034–1037 (DOI 10.1038/35082535)
+    — palaeopasteurization primary.
+14. Bo, Zeng & Chen 2021, *Int. J. Hydrogen Energy* 46(38):19998–20009
+    (DOI 10.1016/j.ijhydene.2021.03.116) — 30-yr field-loss k_m anchor.
+15. Berta et al. 2018, *Environ. Sci. Technol.* 52:4937–4949
+    (DOI 10.1021/acs.est.7b05467) — negative control (no methanogenesis
+    at 2–15 bar H₂).

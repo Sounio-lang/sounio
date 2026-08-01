@@ -16,7 +16,15 @@
 //   4. the chain functions fs_of / delivered against analytic
 //      recomputation;
 //   5. a small seeded MC count (integer-exact regression pin of the
-//      xorshift stream + gate decision).
+//      xorshift stream + gate decision);
+//   6. the k_m(T) LAW path (Rosso 1993 CTMI, DOI 10.1006/jtbi.1993.1099):
+//      f(Topt) = 1, zero outside [Tmin, Tmax], a mid-range value, the
+//      dense 11^3 cardinal scan at 69 C (catches f = 1 via the topt = 69
+//      grid point — the case an 8-corner scan misses), a law-scaled
+//      60 C trajectory against the independent replica, and the 80 C
+//      law run (k_m_eff ACTIVE above the slot's 70 C step — regression
+//      pin for the law-through-slot bug caught 2026-08-01)
+//      (demos/hydrogen/tools/km_law_predict.py).
 //
 // lean_single engine (Madaros "visibility preflight failed" on any
 // chemistry::kinetics import is a pre-existing blocker, #1584).
@@ -43,8 +51,56 @@ fn run95(nu: MatNM) -> ([f64; 8], [f64; 8]) with Mut, Div, Panic {
     simulate_general_epistemic(&iv, &isv, &ks, &uks, nu, 6 as i64, 5 as i64, 0.05, 600 as i64)
 }
 
+// LAW-path run at 353.15 K (80 C): the CTMI f(T) is the ONLY cutoff on the
+// law path — k_m_eff = 0.0187 x f_hi(80 C) = 0.0187 x 0.790850 must stay
+// ACTIVE above the slot's 343.15 K step (regression pin: an earlier build
+// routed the law through the slot's step and zeroed the whole S3 slide).
+// Replica literals (km_law_predict.py idiom, T = 353.15 K):
+fn run80_law(nu: MatNM) -> ([f64; 8], [f64; 8]) with Mut, Div, Panic {
+    let ks: [f64; 8] = [1.478889500000e-2, 2.753263920064e-6, 1.494805341302e-1, 3.023528960076e-4, 9.122527833342e1, 0.0, 0.0, 0.0]
+    let uks: [f64; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let iv: [f64; 8] = [9.945e-3, 0.0, 1.0, 1.0e-3, 5.0e-4, 5.0e-2, 0.0, 0.0]
+    let isv: [f64; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    simulate_general_epistemic(&iv, &isv, &ks, &uks, nu, 6 as i64, 5 as i64, 0.05, 600 as i64)
+}
+
 fn fs_of(l30_pct: f64, tau: f64) -> f64 {
     1.0 - l30_pct * tau / 3000.0
+}
+
+// ─── CTMI law path (verbatim copies from site_screening.sio) ───
+
+fn ctmi(tc: f64, tmin: f64, topt: f64, tmax: f64) -> f64 with Div {
+    if tc <= tmin { return 0.0 }
+    if tc >= tmax { return 0.0 }
+    let num = (tc - tmax) * (tc - tmin) * (tc - tmin)
+    let den = (topt - tmin) * ((topt - tmin) * (tc - topt)
+              - (topt - tmax) * (topt + tmin - 2.0 * tc))
+    num / den
+}
+
+fn ctmi_scan(tc: f64) -> (f64, f64) with Mut, Div {
+    var flo = 1.0e9
+    var fhi = 0.0 - 1.0e9
+    var i: i64 = 0
+    while i <= 10 {
+        let tmin = 25.0 + 1.5 * (i as f64)
+        var j: i64 = 0
+        while j <= 10 {
+            let topt = 65.0 + 0.5 * (j as f64)
+            var k: i64 = 0
+            while k <= 10 {
+                let tmax = 75.0 + 1.5 * (k as f64)
+                let v = ctmi(tc, tmin, topt, tmax)
+                if v < flo { flo = v }
+                if v > fhi { fhi = v }
+                k = k + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    (flo, fhi)
 }
 
 fn ss_exp(x: f64) -> f64 with Mut, Div {
@@ -225,6 +281,33 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     let hits = mc_hits_pinned_c(1.0, 1.0, 0.049, 1.0, 46.4, 0.80,
                                 66.5, 0.0125, 37.5, 1.0, 1000 as i64)
     if hits != 26 { fails = fails + 1 }
+
+    // 6. CTMI law path (Rosso 1993; replica km_law_predict.py)
+    //    f(Topt) = 1 exactly; zero outside [Tmin, Tmax]
+    if absf(ctmi(65.0, 25.0, 65.0, 75.0) - 1.0) > 1.0e-12 { fails = fails + 1 }
+    if absf(ctmi(95.0, 25.0, 65.0, 75.0)) > 0.0 { fails = fails + 1 }
+    if absf(ctmi(20.0, 25.0, 65.0, 75.0)) > 0.0 { fails = fails + 1 }
+    //    mid-range value: ctmi(52.5, 40, 67.5, 82.5) = 5/11 = 0.454545...
+    if absf(ctmi(52.5, 40.0, 67.5, 82.5) - 0.454545454545) > 1.0e-9 { fails = fails + 1 }
+    //    dense 11^3 cardinal scan: at 69 C the scan MUST catch f = 1
+    //    (topt = 69 is a grid point — the case an 8-corner scan misses)
+    let (s69_lo, s69_hi) = ctmi_scan(69.0)
+    if absf(s69_lo - 0.877565) > 1.0e-6 { fails = fails + 1 }
+    if absf(s69_hi - 1.0) > 1.0e-12 { fails = fails + 1 }
+    let (s52_lo, s52_hi) = ctmi_scan(52.5)
+    if absf(s52_lo - 0.234375) > 1.0e-9 { fails = fails + 1 }
+    if absf(s52_hi - 0.810268) > 1.0e-6 { fails = fails + 1 }
+    //    law-scaled trajectory vs the independent replica:
+    //    k_m_eff = 0.0187 x f_hi(52.5 C) = 0.0187 x 0.810268
+    let (ovl, oul) = run60(nu, 0.0187 * 0.810268)
+    let h2_law = ovl[0]
+    if absf(h2_law - 0.0098447903160) > 1.0e-7 { fails = fails + 1 }
+    //    80 C law run: k_m_eff ACTIVE above the slot's 70 C step
+    //    (replica H2 = 0.0098964588717, loss 0.488096 % — nonzero)
+    let (ov8, ou8) = run80_law(nu)
+    let h2_80 = ov8[0]
+    if absf(h2_80 - 0.0098964588717) > 1.0e-7 { fails = fails + 1 }
+    if h2_80 >= 9.945e-3 { fails = fails + 1 }
 
     if fails == 0 {
         println("SITE_SCREENING_SELFTEST_OK")

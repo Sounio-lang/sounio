@@ -589,6 +589,24 @@ sites leave f_s within ~0.1 % of 1 and the composed gate probability is
 the gate; the compressor p-box does. The τ = 10 yr analytic sensitivity
 shows where site choice starts to matter.
 
+**The k_m(T) law path (added 2026-08-01).** The original k_m was an
+ILLUSTRATIVE pseudo-sink slot with a hard 70 °C step. A dedicated
+literature hunt (verdict + citations in `site_screening_data.md`)
+supported a sourced temperature law: k_m_eff(T) = k_m × f(T) with f the
+**Rosso 1993 CTMI** cardinal-temperature growth model (DOI
+10.1006/jtbi.1993.1099) and a cardinal p-box — Tmin [25, 40], Topt
+[65, 70], Tmax [75, 90] °C (Zeikus & Wolfe 1972; Tyne 2021; Head 2014 /
+Wilhelms 2001). The demo prints **both** paths side by side: the slot is
+untouched; the law replaces the S3 cliff with a physical thermal-death
+slide to zero inside [75, 90] °C, leaves S1's zero unchanged (95 °C is
+above the whole Tmax bracket), narrows S2's p-box to [0.041, 2.041] %
+and FLIPS its worst-case corner from cold to warm — with an interior
+loss maximum near 60 °C that T-corner extrema miss (caught by the dense
+2.5 °C T grid and printed). Ghaedi 2025's own ~70 °C threshold is an
+equilibrium-calibration result, not a kinetic law; their rate law is
+closed-access (searched, NOT FOUND). The composed gate probability is
+unchanged (3.635 %, all sites, both paths) — the compressor still gates.
+
 Artifacts:
 
 - `site_screening_data.md` — the sourced parameter table (HRADF,
@@ -601,12 +619,16 @@ Artifacts:
   to byte-verify).
 - `tools/replica_60c_pins.py` — independent Python RK4 replica used for
   the selftest pins.
+- `tools/km_law_predict.py` — independent CTMI + law-path replica
+  (corner-vs-dense scan check, law p-box predictions, selftest pins).
 
 Suite coverage: `tests/run-pass/site_screening_selftest.sio` pins the
 60 °C trajectory against the independent replica, the A2 regime switch,
-the k_m corner ordering, the chain analytics, and a small seeded MC
-count (`SITE_SCREENING_SELFTEST_OK`). lean_single only (same Madaros
-chemistry-import blocker as the network demo).
+the k_m corner ordering, the chain analytics, a small seeded MC count,
+and the CTMI law path (f(Topt) = 1, the 11³ scan's f = 1 catch at
+69 °C, a law-scaled trajectory, and the 80 °C law run staying active
+above the slot step) (`SITE_SCREENING_SELFTEST_OK`). lean_single only
+(same Madaros chemistry-import blocker as the network demo).
 
 ## The stdlib modules (new, reusable)
 

@@ -91,6 +91,70 @@ deeper saline-aquifer candidate in the same trough.
 - **Epanomi gas field** (W. Thessaloniki): depleted, 2600 m limestones,
   500 Mm³ total / 250 Mm³ working gas (Energies 2020, Table 4).
 
+## The k_m(T) methanation law — literature verdict (added 2026-08-01)
+
+The demo's original k_m was a pseudo-sink **slot** (constant below a hard
+70 °C step, zero above — an abstract-level encoding of Ghaedi 2025's A2).
+A dedicated literature hunt (scite, Crossref, WebSearch, full texts;
+every DOI below Crossref-verified) asked: does the literature support a
+sourced temperature-dependent methanation rate law with p-box parameters?
+
+**Verdict: YES for the temperature SHAPE, with the magnitude interval
+kept as the labeled Bo-2021 anchor.** Implemented in
+`site_screening.sio` as the LAW PATH alongside the untouched slot:
+
+k_m_eff(T) = k_m × f(T), where f is the **Rosso 1993
+cardinal-temperature (CTMI)** microbial-growth model (normalized
+f(Topt) = 1, f = 0 outside [Tmin, Tmax]):
+
+| Parameter | Bracket | Source |
+|---|---|---|
+| model form | CTMI | Rosso, Lobry & Flandrois 1993, *J. Theor. Biol.* 162:447–463, DOI 10.1006/jtbi.1993.1099 |
+| Tmin | [25, 40] °C | 40: Zeikus & Wolfe 1972 (*M. thermautotrophicus* "minimum about 40 C"), *J. Bacteriol.* 109(2):707–713, DOI 10.1128/jb.109.2.707-713.1972. 25: **LABELED community floor** — in-situ reservoir methanogenesis measured at 29.2–50.7 °C (Tyne et al. 2021, *Nature* 600:670–674, DOI 10.1038/s41586-021-04153-3), so the community Tmin < 29; 25 is a round labeled floor, not a measurement |
+| Topt | [65, 70] °C | Zeikus & Wolfe 1972, abstract verbatim: "The optimal temperature for growth was 65 to 70 C" |
+| Tmax | [75, 90] °C | 75: Zeikus & Wolfe 1972: "nothing occurred above 75 C" — pure-culture transition ≤ 5 °C wide, the sharpest sourced cutoff found. 90: field-scale biosphere cutoff 80–90 °C (palaeopasteurization) — Head, Gray & Larter 2014, *Front. Microbiol.* 5:566, DOI 10.3389/fmicb.2014.00566 ("no reports of methanogenic oil degradation at such high temperatures"); Wilhelms et al. 2001, *Nature* 411:1034–1037, DOI 10.1038/35082535 |
+| k_m magnitude | [0.0048, 0.0187] **unchanged** | Bo et al. 2021 30-yr field-loss anchor (0.72 % Tubridgi / 2.76 % Mondarra, DOI 10.1016/j.ijhydene.2021.03.116) — ILLUSTRATIVE as before, now read as the value AT Topt |
+
+**Physics watch (the S3 cliff):** a sharp high-temperature cutoff is
+PHYSICAL, not a slot artifact — but it is a smooth slide, not a step:
+pure-culture growth goes from full rate at 70 °C to zero above 75 °C
+(≤ 5 °C, Zeikus & Wolfe 1972); the field-scale biosphere cutoff sits at
+80–90 °C (Head 2014 / Wilhelms 2001). The law therefore replaces the
+hard 70 °C step with a steep smooth transition to zero inside [75, 90] °C.
+
+**What Ghaedi 2025 actually says (abstract-level, verified):** their
+~70 °C negligibility threshold is an **equilibrium-calibration** result —
+"a new temperature-dependent analytical expression for the equilibrium
+constant ... calibrated against the experimental observations" — NOT a
+kinetic rate law. Their kinetic methanation rate law exists only in the
+paywalled body (searched: no preprint/repository copy exists; OpenAlex,
+Unpaywall, Semantic Scholar, EarthArXiv, SSRN all negative). The LAW
+PATH here is independently sourced content, not the paper's.
+
+**Supporting kinetic anchors (not needed by the CTMI form, documented):**
+hydrogenotrophic Ks(H₂) 2.5–13 µM across four methanogens (Robinson &
+Tiedje 1984, DOI 10.1007/bf00425803); µmax = 0.69 h⁻¹, Ks(H₂) ≈ 20 % gas
+phase at 65 °C for *M. thermautotrophicum* (Schönheit, Moll & Thauer
+1980, DOI 10.1007/bf00414356); mesocosm hydrogenotrophic rate 0.26 mmol
+L⁻¹ h⁻¹ at 40 °C/40 bar in reservoir sandstone+brine (Hellerschmied et
+al. 2024, *Nat. Energy*, DOI 10.1038/s41560-024-01458-1); in-situ 73–109
+mmol CH₄ m⁻³ yr⁻¹ at 29–51 °C (Tyne 2021); Arrhenius Ea 40–75 kJ/mol
+species / ~110 kJ/mol community (Price & Sowers 2004, DOI
+10.1073/pnas.0400522101); H₂ threshold 6.5–12 Pa (Lovley 1985, DOI
+10.1128/aem.49.6.1530-1531.1985).
+
+**Negative controls / caveats:** no methanogenesis at all at 2–15 bar H₂
+in groundwater columns — sulfate reducers outcompete (Berta et al. 2018,
+DOI 10.1021/acs.est.7b05467); salinity > 35 g/L shuts H₂ consumption
+down. The UHS Monod-modeling school (Hagemann et al. 2016, DOI
+10.1007/s10596-015-9515-6; Eddaoui et al. 2026, DOI 10.2516/stet/2026026)
+publishes only dimensionless parameters "estimated with a very high
+uncertainty" — unusable as sourced numbers. Thaysen et al. 2021 (DOI
+10.1016/j.rser.2021.111481) compiles per-cell consumption rates but
+applies NO temperature correction and has a 2023 corrigendum (DOI
+10.1016/j.rser.2022.113039, closed) touching its estimate equations —
+treated as context, not as a parameter source.
+
 ## NOT FOUND (searched, not sourced — do not use without new data)
 
 - Formation-water **salinity (TDS)** for every screened site (only the
@@ -106,6 +170,22 @@ deeper saline-aquifer candidate in the same trough.
 - Permeability for the Mesohellenic formations; porosity of the
   W. Thessaloniki aquifers; depth/T/salinity beyond the abstract for the
   South Kavala reservoir (BGSG 2001 full text not downloadable).
+- **Ghaedi 2025's kinetic methanation rate law** (functional form,
+  constants, units) — closed-access body text; no preprint, repository,
+  or indexed open copy exists (OpenAlex/Unpaywall/S2/EarthArXiv/SSRN
+  searched 2026-08-01). Only the equilibrium-side log K(T) calibration
+  is abstract-visible.
+- A **Ratkowsky square-root fit or any published Arrhenius fit specific
+  to methanogens** — none exists in Crossref/OpenAlex (Ratkowsky-model
+  literature is food/soil bacteria only); the CTMI cardinal form is the
+  available sourced alternative.
+- **Methanogen thermal-death kinetics** (D-values/decimal reduction
+  times) — not published; the sharpest sourced cutoff statement is
+  Zeikus & Wolfe 1972's "nothing occurred above 75 C" (≤ 5 °C wide).
+- Extractable parameter numbers from Dopffel et al. 2021 (DOI
+  10.1016/j.ijhydene.2020.12.058) and from the published Thaysen et al.
+  2021 + its 2023 corrigendum — all closed; preprint numbers carry the
+  corrigendum caveat.
 
 ## Source list (all accessed 2026-07-31)
 
@@ -131,3 +211,37 @@ deeper saline-aquifer candidate in the same trough.
     DOI 10.1016/j.egypro.2016.01.034
 11. CORDIS TRIERES project page (GA 101112056).
     https://cordis.europa.eu/project/id/101112056
+
+k_m(T) law-path sources (all accessed 2026-08-01, DOIs Crossref-verified):
+
+12. Rosso, Lobry & Flandrois 1993, *J. Theor. Biol.* 162:447–463.
+    DOI 10.1006/jtbi.1993.1099 (CTMI model form)
+13. Zeikus & Wolfe 1972, *J. Bacteriol.* 109(2):707–713.
+    DOI 10.1128/jb.109.2.707-713.1972 (cardinal temps 40 / 65–70 / 75 °C;
+    OA: Europe PMC PMC285196)
+14. Tyne et al. 2021, *Nature* 600:670–674. DOI 10.1038/s41586-021-04153-3
+    (in-situ reservoir methanogenesis 73–109 mmol CH₄ m⁻³ yr⁻¹ at
+    29.2–50.7 °C; OA: PMC8695373)
+15. Head, Gray & Larter 2014, *Front. Microbiol.* 5:566.
+    DOI 10.3389/fmicb.2014.00566 (80–90 °C field biosphere cutoff; OA)
+16. Wilhelms et al. 2001, *Nature* 411:1034–1037. DOI 10.1038/35082535
+    (palaeopasteurization primary; closed)
+17. Bo, Zeng & Chen 2021, *Int. J. Hydrogen Energy* 46(38):19998–20009.
+    DOI 10.1016/j.ijhydene.2021.03.116 (30-yr field-loss k_m anchor)
+18. Hellerschmied et al. 2024, *Nat. Energy*. DOI 10.1038/s41560-024-01458-1
+    (0.26 mmol L⁻¹ h⁻¹ at 40 °C/40 bar mesocosm; OA)
+19. Berta et al. 2018, *Environ. Sci. Technol.* 52:4937–4949.
+    DOI 10.1021/acs.est.7b05467 (negative control; closed)
+20. Robinson & Tiedje 1984, *Arch. Microbiol.* 137:26–32.
+    DOI 10.1007/bf00425803 (Km(H₂) 2.5–13 µM)
+21. Schönheit, Moll & Thauer 1980, *Arch. Microbiol.* 127:59–65.
+    DOI 10.1007/bf00414356 (µmax 0.69 h⁻¹, Ks(H₂) ~20 % gas at 65 °C)
+22. Price & Sowers 2004, *PNAS* 101:4631–4636. DOI 10.1073/pnas.0400522101
+    (Arrhenius Ea 40–75 / ~110 kJ mol⁻¹; OA: PMC384798)
+23. Lovley 1985, *Appl. Environ. Microbiol.* 49:1530–1531.
+    DOI 10.1128/aem.49.6.1530-1531.1985 (H₂ threshold 6.5–12 Pa; OA)
+24. Thaysen et al. 2021, *RSER* 151:111481. DOI 10.1016/j.rser.2021.111481
+    (+ corrigendum 2023, DOI 10.1016/j.rser.2022.113039) — context only
+25. Hagemann et al. 2016, *Comput. Geosci.* 20:595–606.
+    DOI 10.1007/s10596-015-9515-6 (dimensionless Monod, "very high
+    uncertainty" — context only)
