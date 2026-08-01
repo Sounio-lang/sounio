@@ -105,8 +105,10 @@ Second-order mean correction (when reported):
 | R6b | Import `fo_rac`/`fo_frac_rem` bit-agrees on freezes | `fo_pk_import_rac_driver.sio` | `fo_pk_import_rac_driver_gate.sh` | `FO_PK_IMPORT_RAC_DRIVER_PASS` |
 | R7 | \(C_{\max}\)/PTF FO; \(C_{\min}\) point; kel·τ identity | `fo_pk_struct_cmax_driver.sio` | `fo_pk_struct_cmax_driver_gate.sh` | `FO_PK_STRUCT_CMAX_DRIVER_PASS` |
 | R7b | Import `fo_cmax`/`fo_cmin`/`fo_ptf` freezes (Cmin Var) | `fo_pk_import_cmax_driver.sio` | `fo_pk_import_cmax_driver_gate.sh` | `FO_PK_IMPORT_CMAX_DRIVER_PASS` |
+| R8 | \(f_{\mathrm{ss}}(n)\) + \(n_{90}\) FO; shared-η peel | `fo_pk_struct_fss_driver.sio` | `fo_pk_struct_fss_driver_gate.sh` | `FO_PK_STRUCT_FSS_DRIVER_PASS` |
+| R8b | Import `fo_fss`/`fo_n90` bit-agrees on freezes | `fo_pk_import_fss_driver.sio` | `fo_pk_import_fss_driver_gate.sh` | `FO_PK_IMPORT_FSS_DRIVER_PASS` |
 
-Re-run all ten:
+Re-run all twelve:
 
 ```bash
 export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
@@ -122,9 +124,11 @@ bash scripts/ci/fo_pk_struct_rac_driver_gate.sh         # R6
 bash scripts/ci/fo_pk_import_rac_driver_gate.sh         # R6b
 bash scripts/ci/fo_pk_struct_cmax_driver_gate.sh        # R7
 bash scripts/ci/fo_pk_import_cmax_driver_gate.sh        # R7b
+bash scripts/ci/fo_pk_struct_fss_driver_gate.sh         # R8
+bash scripts/ci/fo_pk_import_fss_driver_gate.sh         # R8b
 ```
 
-Expected: ten `*_GATE_OK` lines. R1–R4 re-validated 2026-07-31; R5–R7b on 2026-08-01.
+Expected: twelve `*_GATE_OK` lines. R1–R4 re-validated 2026-07-31; R5–R8b on 2026-08-01.
 
 Compiler prerequisite (do not claim science freezes without it):
 
@@ -231,6 +235,18 @@ Multi-mod helpers: `fo_frac_rem`, `fo_rac` (R6b).
 | \(\mathrm{Var}(\mathrm{PTF})\) | 0.007488 |
 
 PTF \(=\mathrm{kel}\cdot\tau\) after algebra. Multi-mod: `fo_cmax`, `fo_cmin`, `fo_ptf` (R7b).
+
+### 3.8 Fraction of SS and \(n_{90}\) (R8)
+
+| Quantity | Value |
+|----------|------:|
+| \(f_{\mathrm{ss}}(3)\) | 0.972676 |
+| \(\mathrm{Var}(f_{\mathrm{ss}}(3))\) | 0.000050 |
+| \(E_2[f_{\mathrm{ss}}(3)]\) | 0.971912 |
+| \(n_{90}\) | 1.918820 |
+| \(\mathrm{Var}(n_{90})\) | 0.019145 |
+
+Multi-mod: `fo_fss`, `fo_n90` (R8b).
 
 ---
 

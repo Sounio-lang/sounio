@@ -79,6 +79,8 @@ Measured 2026-07-31 on this workspace: **all four `*_GATE_OK`**.
 | R6b | `examples/epistemic_fo_second_order/fo_pk_import_rac_driver.sio` | `FO_PK_IMPORT_RAC_DRIVER_PASS` |
 | R7 | `examples/epistemic_fo_second_order/fo_pk_struct_cmax_driver.sio` | `FO_PK_STRUCT_CMAX_DRIVER_PASS` |
 | R7b | `examples/epistemic_fo_second_order/fo_pk_import_cmax_driver.sio` | `FO_PK_IMPORT_CMAX_DRIVER_PASS` |
+| R8 | `examples/epistemic_fo_second_order/fo_pk_struct_fss_driver.sio` | `FO_PK_STRUCT_FSS_DRIVER_PASS` |
+| R8b | `examples/epistemic_fo_second_order/fo_pk_import_fss_driver.sio` | `FO_PK_IMPORT_FSS_DRIVER_PASS` |
 
 ```bash
 bash scripts/ci/fo_pk_struct_auc_thalf_driver_gate.sh   # R5 AUC + t½ methods
@@ -87,6 +89,8 @@ bash scripts/ci/fo_pk_struct_rac_driver_gate.sh         # R6 Rac + f_rem methods
 bash scripts/ci/fo_pk_import_rac_driver_gate.sh         # R6b import ↔ method
 bash scripts/ci/fo_pk_struct_cmax_driver_gate.sh        # R7 Cmax + PTF methods
 bash scripts/ci/fo_pk_import_cmax_driver_gate.sh        # R7b Cmin + multi-mod
+bash scripts/ci/fo_pk_struct_fss_driver_gate.sh         # R8 f_ss + n90 methods
+bash scripts/ci/fo_pk_import_fss_driver_gate.sh         # R8b import ↔ method
 ```
 
 ---
@@ -254,17 +258,36 @@ stdlib: `fo_cmax`, `fo_cmin`, `fo_ptf`.
 
 ---
 
+## 6e. R8 — Fraction of steady state + doses to 90% SS (2026-08-01)
+
+\[
+f_{\mathrm{ss}}(n)=1-\exp(-n\cdot\mathrm{kel}\cdot\tau),\qquad
+n_{90}=\frac{\ln 10}{\mathrm{kel}\cdot\tau}.
+\]
+
+Shared \(\eta\) cancels; FO from \(\mathrm{CL}_0,V_0\) only (peel class).
+
+| Quantity | Value | Surfaces |
+|----------|------:|----------|
+| \(f_{\mathrm{ss}}(3)\) point | 0.972676 | method |
+| \(\mathrm{Var}(f_{\mathrm{ss}}(3))\) | 0.000050 | method = peel = import |
+| \(E_2[f_{\mathrm{ss}}(3)]\) | 0.971912 | method |
+| \(n_{90}\) point | 1.918820 | method |
+| \(\mathrm{Var}(n_{90})\) | 0.019145 | method = peel = import |
+
+Gates: `fo_pk_struct_fss_driver_gate.sh`, `fo_pk_import_fss_driver_gate.sh`.
+stdlib: `fo_fss`, `fo_n90`.
+
+---
+
 ## 7. FO compiler surfaces exercised
 
-| Surface | R1 | R2 | R3 | R4 | R5 | R5b | R6 | R6b | R7 | R7b |
-|---------|:--:|:--:|:--:|:--:|:--:|:---:|:--:|:---:|:--:|:---:|
-| Struct-lit methods | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | |
-| Call-result methods | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | | | | |
-| Free-fn / site parity | ✓ | | ✓ | ✓ | ✓ | ✓ | ✓ (peel) | ✓ | ✓ (PTF) | ✓ |
-| `correlate` | ✓ | ✓ | | | | | | | | |
-| Multi-mod import | | | | ✓ | | ✓ | | ✓ | | ✓ |
-| Shared FO channel (peel) | ✓ | ✓ | ✓ (kel) | | ✓ (t½) | ✓ | ✓ (f_rem) | ✓ | ✓ (PTF) | ✓ |
-| \(E_2\) / Hessian | ✓ | ✓ | ✓ | ✓ | ✓ (AUC) | ✓ | ✓ (Rac) | ✓ | ✓ (Cmax) | |
+| Surface | R1–R4 | R5/b | R6/b | R7/b | R8/b |
+|---------|:-----:|:----:|:----:|:----:|:----:|
+| Struct-lit methods | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Multi-mod import | R4 | R5b | R6b | R7b | R8b |
+| Shared FO peel | kel | t½ | f_rem | PTF | f_ss, n90 |
+| \(E_2\) | Css | AUC | Rac | Cmax | f_ss(3) |
 
 Compiler prerequisite: Madaros FO trust gate **42/42** (`scripts/ci/madaros_gum_fo_trust_gate.sh`).
 
