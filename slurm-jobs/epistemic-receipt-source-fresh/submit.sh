@@ -416,7 +416,6 @@ fn main() with IO, Mut, Div, Panic, NonAssoc {
     println("ASSOCIATOR_NONFANO_BEGIN")
     let nonfano = assoc_field_basis(1, 2, 4, 0.0)
     println("ASSOCIATOR_NONFANO_RETURNED")
-    println(nonfano.norm_sq)
     if nonfano.norm_sq == 4.0 {
         println("ASSOCIATOR_NONFANO_NORM4_PASS")
     } else {
@@ -426,7 +425,6 @@ fn main() with IO, Mut, Div, Panic, NonAssoc {
     println("ASSOCIATOR_FANO_BEGIN")
     let fano = assoc_field_basis(1, 2, 3, 0.0)
     println("ASSOCIATOR_FANO_RETURNED")
-    println(fano.norm_sq)
     if fano.norm_sq == 0.0 {
         println("ASSOCIATOR_FANO_ZERO_PASS")
     } else {
