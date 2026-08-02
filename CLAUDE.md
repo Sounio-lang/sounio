@@ -343,6 +343,8 @@ Headline limitations (full list in [`docs/compiler/KNOWN_LIMITATIONS.md`](docs/c
 - No REPL / `--show-ast` / `--show-types` in native mode
 - `&![T; N]` bare array mutation broken in JIT — use struct wrapper or `(*arr)[i]`
 - GPU: end-to-end `kernel fn` → PTX path **exists and is reproducible**. The default `bin/souc` **does** emit PTX now — `bin/souc build <file>.sio --backend gpu -o out.ptx` (verified: `examples/kernel_vec_add.sio` → valid PTX). Runtime execution is fixture-bounded (L4-validated profiles). See `docs/audit/GPU_PIPELINE_SOTA_ASSESSMENT_2026-05-30.md` for the measured/projected/source-only breakdown
+- FPGA: an Alveo U250 on `dl380-proxmox` is a spatial-compute target **alongside** PTX, not instead of it. Kubernetes resource `sounio.dev/u250: 1`; host path via `xrt-smi validate` and running an `.xclbin`. Validated capability, the explicit constraints (one card, no network NIC without a CMAC shell, the node becomes heterogeneous with the Radeon), and the `souc → HLS/RTL → Vitis → xclbin` codegen thesis are in [`docs/COMPUTE_TARGET_U250_FPGA.md`](docs/COMPUTE_TARGET_U250_FPGA.md).
+  - **Do not trust `artifacts/fpga/fpga_seed_report.json`.** It publishes `synth_status: pass` for RTL that was deleted in `03d1ae508`, and seven consumers under `scripts/omega/` read those receipts (one with `MERKLE_LANE_RTL_PATH` pointing at a `.v` that does not exist). Lane B — Sounio source → U250 bitstream — **does not exist yet**; there is no HDL/HLS emitter, `bin/kretikos` has no FPGA target, and the L9 census kernel exists only in C (`scripts/research/fpga_census_kernel_model.c`). The hand-written Vitis HLS lane (`hardware/fpga/u250_catastrophe_scan/`, `c101461cb`) never invokes the compiler.
 
 ---
 
