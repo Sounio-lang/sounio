@@ -2787,7 +2787,13 @@ theorem reach_step (m W a b : Nat) (hW : W < 2^(m+1)) (ha : a < 2^(m+1)) (hb : b
   exact h
 
 /-- `REACH j Y₀ n a₀ b₀` — the bottom triple `(Y₀,a₀,b₀)` is carried by some level-`n` tuple
-    satisfying (♦)'s hypothesis. -/
+    satisfying (♦)'s hypothesis.
+
+    ⚠ **DEPRECATED — use `ReachD`.** This definition drops (♦)'s side conditions `a ≠ 0`,
+    `b ≠ 0`, `b ≠ Y`, so it is strictly larger than the set the numerical rung measures:
+    `Q'(Y,0,0) = σ(Y,Y) = −1` for every `Y ≠ 0`, and so the corner `(0,0)` lies in `Reach` at
+    *every* level. No boundary statement about `Reach` can be true. Kept only because
+    `Reach_succ`/`Reach_mono` are stated for it; nothing depends on them. -/
 def Reach (j Y0 n a0 b0 : Nat) : Prop :=
   ∃ Y a b, Y < 2^n ∧ a < 2^n ∧ b < 2^n ∧
     Y % 2^(j+2) = Y0 ∧ a % 2^(j+2) = a0 ∧ b % 2^(j+2) = b0 ∧ Qgen' Y a b n = -1

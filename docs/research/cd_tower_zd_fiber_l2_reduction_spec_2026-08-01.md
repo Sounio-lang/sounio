@@ -340,6 +340,14 @@ not, and those two choices realise `dsgnN = +1` and `−1`.
 **Sharpness is proven too** — `corner_blocked_at_j3`, from `Qgen'_diag`: `Q'(W,a,a) = +1`, so no
 diagonal tuple is ever a witness, and at level `j+3` the corner `(0,0)` forces the diagonal.
 
+**And the corollary lands back inside the family (`N27`).** `attain_nondeg` picks its
+level-`(j+3)` label by matching `dsgnN`, *not* by matching weight parity — so the corollary only
+says something about `REACH` if the picked label is still even-weight. It always is: 0/84 across
+`j = 1…3`, `n = j+4…j+6`, exhaustive over the label classes. The cause is that
+`weight(Y₀) = 1 + bit_{j+1}(Y₀)`, so even weight forces its parity opposite to
+`popcount(Y ≫ (j+2))`'s — and the sign picks exactly the complementary bit. Neither `N12` nor
+`N21` checks this composite on its own.
+
 **What is still measured.** Attainment **on** the six lines — where `Qgen ≠ Qgen'` and the collapse
 does not apply, `REACH` is full, and the witnesses are `N25`'s two explicit families at level
 `j+4`. And that the label `attain_nondeg` produces has **even weight**, i.e. stays inside (♦)'s
@@ -393,4 +401,4 @@ outside the family §2c described. `REACH`, not that predicate, is the object.
 python3 scripts/research/cd_tower_zd_fiber_l2_reduction_contract.py
 ```
 
-Twenty-seven clauses, `N0`–`N26`, single verdict token. Runs in about 17 s.
+Twenty-eight clauses, `N0`–`N27`, single verdict token. Runs in about 17 s.

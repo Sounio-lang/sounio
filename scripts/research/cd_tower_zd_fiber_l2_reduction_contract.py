@@ -54,6 +54,14 @@ shape (*) has for L1. Measured at levels 5, 6, 7 (N6), zero violations.
   N8  NULL CONTROLS. Odd-weight Y must fail (it does), and a perturbed mask must fail (it does).
   N0  PARITY. The builder reproduces the in-tree sign_table entrywise.
 
+  N21 THE COLLAPSE THEOREM -- and it is PROVEN forall n (`collapse`). Off six explicit lines,
+      Qgen'(Y,a,b,n) = -(-1)^bit_{j+1}(Y) * Qgen(Y0,a0,b0,j+2): NO n on the right. N9 bounded
+      (diamond)'s CONCLUSION; this bounds its HYPOTHESIS, which the three preceding rungs had
+      recorded as the obstacle. With it, REACH acquires a CLOSED FORM (N24) and attainment at
+      n = j+4 splits into a proven half and a measured half (N25).
+  N23 THIS CONTRACT'S OWN N20 WAS WRONG and is corrected here: its number stands, the inference
+      it drew from it does not. See the clause.
+
 NOT CLAIMED. L2 is NOT proven, and neither is (diamond). What IS proven forall n is the
 REDUCTION itself (N4, `l2_reduction`), its symmetry ingredient (N1, `gdisc_symm`/`chi_tau`),
 and the LEVEL-BOUNDEDNESS of (diamond)'s conclusion (N9, `G_descend`) -- all kernel-checked.
@@ -675,12 +683,19 @@ def main():
         n21_tot += t_
     n21 = n21_bad == 0
     ok["N21"] = n21
-    print(f"N21_COLLAPSE (diamond)'s HYPOTHESIS is level-bounded too, off six lines: "
-          f"Qgen'(Y,a,b,n) = -(-1)^bit_{{j+1}}(Y) * Qgen(Y0,a0,b0,j+2), NO n on the right "
+    print(f"N21_COLLAPSE [Lean-proven forall n: `collapse`] (diamond)'s HYPOTHESIS is "
+          f"level-bounded too, off six lines: Qgen'(Y,a,b,n) = -(-1)^bit_{{j+1}}(Y) * "
+          f"Qgen(Y0,a0,b0,j+2), NO n on the right "
           f"{'OK' if n21 else 'FAIL'} -- {n21_bad}/{n21_tot} violations over "
           f"{len(N21_SWEEP)} (n,j) pairs, n <= 11, j = 1..7. This is the half N9/G_trunc did "
           f"NOT give: G_trunc bounded the CONCLUSION, this bounds the HYPOTHESIS, and together "
-          f"they make (diamond) an n-free statement per j on the whole non-degenerate locus")
+          f"they make (diamond) an n-free statement per j on the whole non-degenerate locus. "
+          f"PROVEN forall n as `collapse` in formal/lean4/SounioZDFiberAntisym.lean "
+          f"(kernel-checked, no sorryAx): an induction over EIGHT Q'-rows, not sixteen, because "
+          f"off the six lines Qgen = Qgen' and Qgen is symmetric, so the priming and the "
+          f"argument swap the rows carry are invisible at the bottom and only the sign "
+          f"survives. This clause is now a PIN of that theorem, in the N4/N9 discipline, not "
+          f"the evidence for it")
 
     # ---- N22  every one of the six conditions is load-bearing; and the sign is not free ------
     n22_rows = []
@@ -796,15 +811,21 @@ def main():
             n25_rows.append((j, Y0, f1, f2, corner))
     n25 = all(a and b and c for _, _, a, b, c in n25_rows)
     ok["N25"] = n25
-    print(f"N25_ATTAIN  every part of REACH is realised at level j+4, and j+3 is NOT enough "
+    print(f"N25_ATTAIN  [PROVEN forall n off the lines: `attain_nondeg`; PROVEN sharpness: "
+          f"`corner_blocked_at_j3`; the two FAMILIES below are still measured] every part of "
+          f"REACH is realised at level j+4, and j+3 is NOT enough "
           f"{'OK' if n25 else 'FAIL'} -- the two uniform families F1 (a=H, b=2H+b0) and F2 "
           f"(a=2H+a0, b=3H+a0), with Y = Y0 + (weight(Y0) mod 2)*H, cover {{a0=0}} and "
           f"{{a0=b0}} for every j and both Y0 classes tested: "
           f"{'; '.join(f'j={a} Y0={b}: F1={c} F2={d} corners-blocked-at-j+3={e}' for a, b, c, d, e in n25_rows)}"
           f". The other four lines follow by coset invariance and swap-symmetry. SHARPNESS has "
-          f"a one-line cause: at level j+3 a bottom pair (0,0) forces a = b = 2^{{j+2}}, and "
-          f"Q'(Y,a,a) = sigma(a,a)sigma(a^Y,a^Y) is fixed -- you need TWO spare bits to make "
-          f"a != b, which is exactly the n = j+4 boundary and exactly the deficit of 4")
+          f"a one-line cause and is now a THEOREM (`corner_blocked_at_j3`, from `Qgen'_diag`: "
+          f"Q'(W,a,a) = sigma(a,a)sigma(a^W,a^W)sigma(a^W,a)^2 = +1, so NO diagonal tuple is "
+          f"ever a witness): at level j+3 a bottom pair (0,0) forces a = b = 2^{{j+2}} -- you "
+          f"need TWO spare bits to make a != b, which is exactly the n = j+4 boundary and "
+          f"exactly the deficit of 4. OFF the lines attainment is PROVEN forall n "
+          f"(`attain_nondeg`): a level-n tuple is matched value for value at level j+3. What "
+          f"is still measured is only the two families ON the lines")
 
     # ---- N26  N14's per-level "clean locus" IS the n-free bottom condition ------------------
     # N14 defined cleanliness by scanning EVERY level j+2..n. N21's hypothesis only looks at the
@@ -835,6 +856,35 @@ def main():
           f"'gap locus' N14 could not handle was never a level-by-level phenomenon: it is the "
           f"six lines, and N24/N25 show REACH contains ALL of them")
 
+    # ---- N27  the label `attain_nondeg` produces has EVEN WEIGHT -----------------------------
+    # `attain_nondeg` picks the level-(j+3) label by matching dsgnN, NOT by matching weight
+    # parity -- so the corollary only says something about REACH if the picked label lands back
+    # in the even-weight family. It does, and this is the composite check of that, which neither
+    # N12 nor N21 performs on its own.
+    n27_rows = []
+    for j in (1, 2, 3):
+        for n in (j + 4, j + 5, j + 6):
+            M = 1 << (j + 2)
+            bad = tot = 0
+            for Y in range(1, 1 << n):
+                if (Y & -Y).bit_length() - 1 != j or bin(Y).count("1") % 2:
+                    continue
+                Y0 = Y % M
+                Yp = Y0 if bin(Y >> (j + 2)).count("1") % 2 == 0 else Y0 + M
+                tot += 1
+                if bin(Yp).count("1") % 2:
+                    bad += 1
+            n27_rows.append((j, n, bad, tot))
+    n27 = all(b == 0 for _, _, b, _ in n27_rows)
+    ok["N27"] = n27
+    print(f"N27_EVENWT  the label `attain_nondeg` produces is ALWAYS even-weight, so the "
+          f"corollary lands back inside (diamond)'s family {'OK' if n27 else 'FAIL'} -- "
+          f"{'; '.join(f'j={a} n={b}: {c}/{d}' for a, b, c, d in n27_rows)} odd-weight labels. "
+          f"The Lean corollary matches dsgnN, not weight; this is the composite check that the "
+          f"two agree, which neither N12 nor N21 performs alone. Cause: weight(Y0) = "
+          f"1 + bit_{{j+1}}(Y0), so even weight forces its parity opposite to "
+          f"popcount(Y >> (j+2))'s -- and the sign picks exactly the complementary bit")
+
     print("=" * 78)
     if all(ok.values()):
         print("CD_TOWER_ZDL2R_VERDICT DIAMOND_IS_A_FINITE_STABLE_FAMILY__GAP_LOCUS_INCLUDED")
@@ -861,7 +911,7 @@ def main():
               "n = j+4 now decomposes into two constructions rather than a measurement (N25), "
               "and its SHARPNESS has a cause: (0,0) forces a = b at level j+3. N23 CORRECTS "
               "this contract's own N20 -- its number stands, the inference it drew does not. "
-              "Attainment is still NOT proven forall n: N21 and N25 are measured. *** "
+              "N21 IS NOW PROVEN forall n (`collapse`), and with it attainment OFF the six lines (`attain_nondeg`) and the SHARPNESS of the boundary (`corner_blocked_at_j3`). What is still measured: attainment ON the six lines (N25s two families) and REACH subset {D=+1}. *** "
               "Numerical certificate; D3")
         return 0
     print("CD_TOWER_ZDL2R_VERDICT INCOMPLETE  failing="
