@@ -377,17 +377,25 @@ def split_leaf(leaf: Leaf) -> tuple[str, tuple[Leaf, Leaf]]:
 
 def classify_worker_failure(stderr: bytes, prefix: str) -> str | None:
     lowered = stderr.lower()
-    if b"interval error:" in lowered and (
+    if prefix == "H_PG" and b"interval error:" in lowered and (
         b"division by 0" in lowered or b"division by zero" in lowered
     ):
-        return f"{prefix}_INTERVAL_DOMAIN"
-    if b"one-step newton crossing was not available" in lowered:
-        return f"{prefix}_CROSSING"
-    if (
+        return "H_PG_INTERVAL_DOMAIN"
+    if prefix == "H_PG" and (
+        b"one-step newton crossing was not available" in lowered
+        or (
+            lowered.startswith(
+                b"probe error: poincaremap error: possible nontransversal return to the section"
+            )
+            and b"\ninner product of vector field and section gradient: [" in lowered
+        )
+    ):
+        return "H_PG_CROSSING"
+    if prefix == "H_PG" and (
         b"centeredtripletonset::evalaffinefunctional - empty intersection" in lowered
         and b"rq=[-nan, -nan]" in lowered
     ):
-        return f"{prefix}_CAPD_SET"
+        return "H_PG_CAPD_SET"
     if prefix == "H_APG" and any(
         marker in lowered
         for marker in (
@@ -1825,7 +1833,7 @@ def verify_prebuilt_bundle(root: Path) -> dict[str, str]:
     if set(manifest) != expected_keys:
         raise RuntimeError("prebuilt manifest field set mismatch")
     declared_files = {
-        "FROZEN_CONTRACT_SHA256": "cs6_hapg_full_source_cover_contract_v3.txt",
+        "FROZEN_CONTRACT_SHA256": "cs6_hapg_full_source_cover_contract_v4.txt",
         "HPG_WORKER_SOURCE_SHA256": "cs6_plucker_cocycle_probe.cpp",
         "HPG_VERIFIER_SOURCE_SHA256": "cs6_plucker_cocycle_verify.py",
         "HAPG_WORKER_SOURCE_SHA256": "cs6_hapg_full_source_cover_worker.cpp",
@@ -1990,7 +1998,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     repo = Path(__file__).resolve().parents[2]
     research = repo / "scripts/research"
-    frozen_contract = research / "cs6_hapg_full_source_cover_contract_v3.txt"
+    frozen_contract = research / "cs6_hapg_full_source_cover_contract_v4.txt"
+    frozen_v3_contract = research / "cs6_hapg_full_source_cover_contract_v3.txt"
     hpg_source = research / "cs6_plucker_cocycle_probe.cpp"
     hpg_verifier = research / "cs6_plucker_cocycle_verify.py"
     hapg_wrapper = research / "cs6_hapg_full_source_cover_worker.cpp"
@@ -2007,8 +2016,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     v2_abort_sacct = v2_abort / "sacct.txt"
     v2_abort_config = v2_abort / "config.txt"
     v2_abort_stderr = v2_abort / "stderr.txt"
+    v3_abort = research / "receipts/cs6_hapg_full_source_cover_v3_abort_8453_v1"
+    v3_abort_manifest = v3_abort / "manifest.txt"
+    v3_abort_sacct = v3_abort / "sacct.txt"
+    v3_abort_config = v3_abort / "config.txt"
+    v3_abort_slurm_stderr = v3_abort / "slurm-stderr.txt"
+    v3_abort_repro_s0_stdout = v3_abort / "repro-s0-stdout.txt"
+    v3_abort_repro_s0_stderr = v3_abort / "repro-s0-stderr.txt"
+    v3_abort_repro_s1_stdout = v3_abort / "repro-s1-stdout.txt"
+    v3_abort_repro_s1_stderr = v3_abort / "repro-s1-stderr.txt"
+    v3_abort_census = v3_abort / "hpg-full255-census.tsv"
+    v3_abort_census_summary = v3_abort / "hpg-full255-census-summary.txt"
+    v3_abort_stderr_jsonl = v3_abort / "hpg-full255-stderr.jsonl"
+    v3_abort_challenge_spotcheck = v3_abort / "challenge-spotcheck.json"
     required = [
         frozen_contract,
+        frozen_v3_contract,
         hpg_source,
         hpg_verifier,
         hapg_wrapper,
@@ -2024,6 +2047,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         v2_abort_sacct,
         v2_abort_config,
         v2_abort_stderr,
+        v3_abort_manifest,
+        v3_abort_sacct,
+        v3_abort_config,
+        v3_abort_slurm_stderr,
+        v3_abort_repro_s0_stdout,
+        v3_abort_repro_s0_stderr,
+        v3_abort_repro_s1_stdout,
+        v3_abort_repro_s1_stderr,
+        v3_abort_census,
+        v3_abort_census_summary,
+        v3_abort_stderr_jsonl,
+        v3_abort_challenge_spotcheck,
     ]
     for path in required:
         if not path.is_file():
@@ -2134,10 +2169,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             gate: work / gate.name,
             slurm_job_script: work / slurm_job_script.name,
             frozen_contract: work / frozen_contract.name,
+            frozen_v3_contract: work / "v3-executed-contract.txt",
             v2_abort_manifest: work / "v2-abort-manifest.txt",
             v2_abort_sacct: work / "v2-abort-sacct.txt",
             v2_abort_config: work / "v2-abort-config.txt",
             v2_abort_stderr: work / "v2-abort-stderr.txt",
+            v3_abort_manifest: work / "v3-abort-manifest.txt",
+            v3_abort_sacct: work / "v3-abort-sacct.txt",
+            v3_abort_config: work / "v3-abort-config.txt",
+            v3_abort_slurm_stderr: work / "v3-abort-slurm-stderr.txt",
+            v3_abort_repro_s0_stdout: work / "v3-abort-repro-s0-stdout.txt",
+            v3_abort_repro_s0_stderr: work / "v3-abort-repro-s0-stderr.txt",
+            v3_abort_repro_s1_stdout: work / "v3-abort-repro-s1-stdout.txt",
+            v3_abort_repro_s1_stderr: work / "v3-abort-repro-s1-stderr.txt",
+            v3_abort_census: work / "v3-abort-hpg-full255-census.tsv",
+            v3_abort_census_summary: work / "v3-abort-hpg-full255-census-summary.txt",
+            v3_abort_stderr_jsonl: work / "v3-abort-hpg-full255-stderr.jsonl",
+            v3_abort_challenge_spotcheck: work / "v3-abort-challenge-spotcheck.json",
         }
         if args.mode == "kat":
             snapshots[coordinates.resolve()] = work / "kat-coordinates.tsv"
@@ -2184,6 +2232,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             die("in-process verifier bytes differ from frozen source snapshots")
         if args.enforce_frozen_contract:
             source_bindings = {
+                "SUPERSEDES_V3_SHA256": digest(snapshots[frozen_v3_contract]),
                 "PREPASS_WORKER_SHA256": hpg_source_sha,
                 "PREPASS_VERIFIER_SHA256": hpg_verifier_sha,
                 "H_APG_WRAPPER_SHA256": hapg_source_sha,
@@ -2199,23 +2248,35 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "V2_ABORT_SACCT_SHA256": digest(snapshots[v2_abort_sacct]),
                 "V2_ABORT_CONFIG_SHA256": digest(snapshots[v2_abort_config]),
                 "V2_ABORT_STDERR_SHA256": digest(snapshots[v2_abort_stderr]),
+                "V3_ABORT_RECEIPT_MANIFEST_SHA256": digest(snapshots[v3_abort_manifest]),
+                "V3_ABORT_SACCT_SHA256": digest(snapshots[v3_abort_sacct]),
+                "V3_ABORT_CONFIG_SHA256": digest(snapshots[v3_abort_config]),
+                "V3_ABORT_SLURM_STDERR_SHA256": digest(snapshots[v3_abort_slurm_stderr]),
+                "V3_ABORT_REPRO_S0_STDOUT_SHA256": digest(snapshots[v3_abort_repro_s0_stdout]),
+                "V3_ABORT_REPRO_S0_STDERR_SHA256": digest(snapshots[v3_abort_repro_s0_stderr]),
+                "V3_ABORT_REPRO_S1_STDOUT_SHA256": digest(snapshots[v3_abort_repro_s1_stdout]),
+                "V3_ABORT_REPRO_S1_STDERR_SHA256": digest(snapshots[v3_abort_repro_s1_stderr]),
+                "V3_ABORT_HPG_FULL255_CENSUS_SHA256": digest(snapshots[v3_abort_census]),
+                "V3_ABORT_HPG_FULL255_CENSUS_SUMMARY_SHA256": digest(snapshots[v3_abort_census_summary]),
+                "V3_ABORT_HPG_FULL255_STDERR_JSONL_SHA256": digest(snapshots[v3_abort_stderr_jsonl]),
+                "V3_ABORT_HPG_CHALLENGE_SPOTCHECK_SHA256": digest(snapshots[v3_abort_challenge_spotcheck]),
             }
             if (
                 contract.get("SCHEMA")
-                != "sounio.cs6.hapg-full-source-cover-contract.v3"
+                != "sounio.cs6.hapg-full-source-cover-contract.v4"
                 or contract.get("CONTRACT_STATE") != "PRE_RESULT_FROZEN"
                 or contract.get("FRESH_REPLAY_SEMANTICS")
                 != "INDEPENDENT_RECERTIFICATION_SAME_CHARTS_DISTINCT_CHALLENGES_NOT_BITWISE_RECEIPT_REPRODUCTION"
                 or any(contract.get(key) != value for key, value in source_bindings.items())
             ):
-                die("scientific sources differ from the frozen v3 contract")
+                die("scientific sources differ from the frozen v4 contract")
             if args.mode == "kat" and (
                 digest(snapshots[coordinates.resolve()])
                 != contract["KAT_COORDINATE_MANIFEST_SHA256"]
                 or digest(snapshots[expected_results.resolve()])
                 != contract["KAT_EXPECTED_RESULTS_SHA256"]
             ):
-                die("KAT population or expected result bytes differ from the frozen v3 contract")
+                die("KAT population or expected result bytes differ from the frozen v4 contract")
             if args.mode in {"kat", "adaptive"} and (
                 prebuilt_dir is None or not os.environ.get("SLURM_JOB_ID", "").isdigit()
             ):
@@ -2348,7 +2409,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 or prebuilt_manifest["HAPG_WORKER_BINARY_SHA256"]
                 != contract["PREBUILT_HAPG_BINARY_SHA256"]
             ):
-                die("prebuilt binary digest differs from the frozen v3 contract")
+                die("prebuilt binary digest differs from the frozen v4 contract")
             capd_version = (origin / "capd-version.txt").read_text(
                 encoding="ascii"
             ).strip()
@@ -2416,7 +2477,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 digest(hpg_binary) != contract["PREBUILT_HPG_BINARY_SHA256"]
                 or digest(hapg_binary) != contract["PREBUILT_HAPG_BINARY_SHA256"]
             ):
-                die("prepared binary digest differs from the frozen v3 contract")
+                die("prepared binary digest differs from the frozen v4 contract")
             canonicalize_dependency_file(hpg_dep, work)
             canonicalize_dependency_file(hapg_dep, work)
             index = file_index(work)

@@ -133,7 +133,7 @@ git -C "$work/repo" checkout --quiet --detach "${cfg[EXPECTED_GIT_HEAD]}"
 [[ -z $(git -C "$work/repo" status --short --untracked-files=all) ]] || \
   fail "checked-out Git bundle is dirty"
 
-contract="$work/repo/scripts/research/cs6_hapg_full_source_cover_contract_v3.txt"
+contract="$work/repo/scripts/research/cs6_hapg_full_source_cover_contract_v4.txt"
 runner="$work/repo/scripts/research/cs6_hapg_full_source_cover_run.py"
 aggregator="$work/repo/scripts/research/cs6_hapg_full_source_cover_aggregate.py"
 job_script="$work/repo/scripts/research/cs6_hapg_full_source_cover_slurm_job.sh"

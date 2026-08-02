@@ -697,17 +697,25 @@ def split_leaf(leaf: ExpectedLeaf) -> tuple[str, tuple[ExpectedLeaf, ExpectedLea
 
 def classify_failure(stderr: bytes, prefix: str) -> str | None:
     lowered = stderr.lower()
-    if b"interval error:" in lowered and (
+    if prefix == "H_PG" and b"interval error:" in lowered and (
         b"division by 0" in lowered or b"division by zero" in lowered
     ):
-        return f"{prefix}_INTERVAL_DOMAIN"
-    if b"one-step newton crossing was not available" in lowered:
-        return f"{prefix}_CROSSING"
-    if (
+        return "H_PG_INTERVAL_DOMAIN"
+    if prefix == "H_PG" and (
+        b"one-step newton crossing was not available" in lowered
+        or (
+            lowered.startswith(
+                b"probe error: poincaremap error: possible nontransversal return to the section"
+            )
+            and b"\ninner product of vector field and section gradient: [" in lowered
+        )
+    ):
+        return "H_PG_CROSSING"
+    if prefix == "H_PG" and (
         b"centeredtripletonset::evalaffinefunctional - empty intersection" in lowered
         and b"rq=[-nan, -nan]" in lowered
     ):
-        return f"{prefix}_CAPD_SET"
+        return "H_PG_CAPD_SET"
     if prefix == "H_APG" and any(
         marker in lowered
         for marker in (
@@ -999,24 +1007,37 @@ def verify_frozen_sources(
     run_contract: Mapping[str, str],
     expected_contract_sha: str,
 ) -> Mapping[str, str]:
-    frozen_path = safe_file(bundle, "cs6_hapg_full_source_cover_contract_v3.txt")
-    frozen = read_generic_kv(frozen_path, "frozen v3 contract")
+    frozen_path = safe_file(bundle, "cs6_hapg_full_source_cover_contract_v4.txt")
+    frozen = read_generic_kv(frozen_path, "frozen v4 contract")
     if (
-        frozen.get("SCHEMA") != "sounio.cs6.hapg-full-source-cover-contract.v3"
+        frozen.get("SCHEMA") != "sounio.cs6.hapg-full-source-cover-contract.v4"
         or frozen.get("CONTRACT_STATE") != "PRE_RESULT_FROZEN"
-        or frozen.get("SUPERSEDES_V2_SHA256")
-        != "7d4bdcdf740fa67a4cd4cba171aaeb5e2ac56bcdaf034a94d4587c937a9056b5"
+        or frozen.get("SUPERSEDES_V3_SHA256")
+        != "3e5f1c560356771e9d33582cab31b9776cf6f21d4eabcbc6e292523a2e9010e2"
         or frozen.get("V2_ABORTED_SLURM_JOB_ID") != "8451"
         or frozen.get("V2_ABORT_SCIENTIFIC_EVALUATIONS") != "0"
         or digest(frozen_path) != run_contract["FROZEN_CONTRACT_SHA256"]
         or digest(frozen_path) != expected_contract_sha
     ):
-        fail("frozen v3 contract envelope mismatch")
+        fail("frozen v4 contract envelope mismatch")
     abort_bindings = {
+        "SUPERSEDES_V3_SHA256": "v3-executed-contract.txt",
         "V2_ABORT_RECEIPT_MANIFEST_SHA256": "v2-abort-manifest.txt",
         "V2_ABORT_SACCT_SHA256": "v2-abort-sacct.txt",
         "V2_ABORT_CONFIG_SHA256": "v2-abort-config.txt",
         "V2_ABORT_STDERR_SHA256": "v2-abort-stderr.txt",
+        "V3_ABORT_RECEIPT_MANIFEST_SHA256": "v3-abort-manifest.txt",
+        "V3_ABORT_SACCT_SHA256": "v3-abort-sacct.txt",
+        "V3_ABORT_CONFIG_SHA256": "v3-abort-config.txt",
+        "V3_ABORT_SLURM_STDERR_SHA256": "v3-abort-slurm-stderr.txt",
+        "V3_ABORT_REPRO_S0_STDOUT_SHA256": "v3-abort-repro-s0-stdout.txt",
+        "V3_ABORT_REPRO_S0_STDERR_SHA256": "v3-abort-repro-s0-stderr.txt",
+        "V3_ABORT_REPRO_S1_STDOUT_SHA256": "v3-abort-repro-s1-stdout.txt",
+        "V3_ABORT_REPRO_S1_STDERR_SHA256": "v3-abort-repro-s1-stderr.txt",
+        "V3_ABORT_HPG_FULL255_CENSUS_SHA256": "v3-abort-hpg-full255-census.tsv",
+        "V3_ABORT_HPG_FULL255_CENSUS_SUMMARY_SHA256": "v3-abort-hpg-full255-census-summary.txt",
+        "V3_ABORT_HPG_FULL255_STDERR_JSONL_SHA256": "v3-abort-hpg-full255-stderr.jsonl",
+        "V3_ABORT_HPG_CHALLENGE_SPOTCHECK_SHA256": "v3-abort-challenge-spotcheck.json",
     }
     for key, filename in abort_bindings.items():
         if frozen.get(key) != digest(safe_file(bundle, filename)):
@@ -1128,7 +1149,7 @@ def verify_prebuilt_origin(
         fail("prebuilt origin manifest mismatch")
     verify_file_index(origin, manifest)
     bindings = {
-        "FROZEN_CONTRACT_SHA256": "cs6_hapg_full_source_cover_contract_v3.txt",
+        "FROZEN_CONTRACT_SHA256": "cs6_hapg_full_source_cover_contract_v4.txt",
         "HPG_WORKER_SOURCE_SHA256": "cs6_plucker_cocycle_probe.cpp",
         "HPG_VERIFIER_SOURCE_SHA256": "cs6_plucker_cocycle_verify.py",
         "HAPG_WORKER_SOURCE_SHA256": "cs6_hapg_full_source_cover_worker.cpp",
@@ -1147,10 +1168,23 @@ def verify_prebuilt_origin(
         if manifest[key] != digest(safe_file(origin, filename)):
             fail(f"prebuilt origin declaration differs from bytes: {filename}")
     abort_bindings = {
+        "SUPERSEDES_V3_SHA256": "v3-executed-contract.txt",
         "V2_ABORT_RECEIPT_MANIFEST_SHA256": "v2-abort-manifest.txt",
         "V2_ABORT_SACCT_SHA256": "v2-abort-sacct.txt",
         "V2_ABORT_CONFIG_SHA256": "v2-abort-config.txt",
         "V2_ABORT_STDERR_SHA256": "v2-abort-stderr.txt",
+        "V3_ABORT_RECEIPT_MANIFEST_SHA256": "v3-abort-manifest.txt",
+        "V3_ABORT_SACCT_SHA256": "v3-abort-sacct.txt",
+        "V3_ABORT_CONFIG_SHA256": "v3-abort-config.txt",
+        "V3_ABORT_SLURM_STDERR_SHA256": "v3-abort-slurm-stderr.txt",
+        "V3_ABORT_REPRO_S0_STDOUT_SHA256": "v3-abort-repro-s0-stdout.txt",
+        "V3_ABORT_REPRO_S0_STDERR_SHA256": "v3-abort-repro-s0-stderr.txt",
+        "V3_ABORT_REPRO_S1_STDOUT_SHA256": "v3-abort-repro-s1-stdout.txt",
+        "V3_ABORT_REPRO_S1_STDERR_SHA256": "v3-abort-repro-s1-stderr.txt",
+        "V3_ABORT_HPG_FULL255_CENSUS_SHA256": "v3-abort-hpg-full255-census.tsv",
+        "V3_ABORT_HPG_FULL255_CENSUS_SUMMARY_SHA256": "v3-abort-hpg-full255-census-summary.txt",
+        "V3_ABORT_HPG_FULL255_STDERR_JSONL_SHA256": "v3-abort-hpg-full255-stderr.jsonl",
+        "V3_ABORT_HPG_CHALLENGE_SPOTCHECK_SHA256": "v3-abort-challenge-spotcheck.json",
     }
     for key, filename in abort_bindings.items():
         if frozen.get(key) != digest(safe_file(origin, filename)):
