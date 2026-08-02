@@ -18,10 +18,12 @@
 # scripts/dev/souc-build-lock.sh so multiple agents do not stampede the workspace pod.
 #
 # Environment:
-#   SOUC_BIN / SOUNIO_SOUC_BIN — override the bootstrap ELF. If it already points at
-#                                a fresh source-tracking seed (e.g. a gen3.elf from
-#                                `make build`), it is used directly for main.sio with
-#                                no extra lean_single derivation.
+#   SOUC_BIN / SOUNIO_SOUC_BIN — override the bootstrap ELF used only when a
+#                                source-tracking seed must be derived.
+#   SOUNIO_MADAROS_SEED        — pin the exact executable used to compile main.sio.
+#   SOUNIO_MADAROS_REQUIRE_PINNED_SEED=1
+#                              — fail instead of deriving a replacement if the
+#                                explicitly pinned seed cannot build main.sio.
 #   SOUNIO_STDLIB_PATH         — forwarded to the seed compiler
 #   SOUNIO_BUILD_LOCK          — override the global build lock path
 
@@ -70,6 +72,7 @@ fi
 mkdir -p "$(dirname "$OUT")"
 rm -f "$OUT"
 
+BUILD_LOG="$(mktemp "${TMPDIR:-/tmp}/madaros-build.XXXXXX.log")"
 # Derive a source-tracking seed. If SOUC_BIN/SOUNIO_SOUC_BIN was explicitly set we
 # trust it as an already-fresh seed (e.g. a gen3.elf) and use it directly. Otherwise
 # the bootstrap ELF is a committed binary that may lag the source, so we first
@@ -77,6 +80,7 @@ rm -f "$OUT"
 # current source's features (arena/vmem #719 etc.), then compile main.sio with that.
 TMP_SEED_DIR=""
 cleanup() {
+    rm -f "$BUILD_LOG"
     if [[ -n "$TMP_SEED_DIR" && -d "$TMP_SEED_DIR" ]]; then
         rm -rf "$TMP_SEED_DIR"
     fi
@@ -133,6 +137,21 @@ echo "  seed:  $SEED"
 echo "  src:   $SRC"
 echo "  out:   $OUT"
 
+run_seed_build() {
+    local seed="$1"
+    rm -f "$BUILD_LOG"
+    set +e
+    scripts/dev/souc-build-lock.sh "$seed" "$SRC" "$OUT" >"$BUILD_LOG" 2>&1
+    local rc=$?
+    set -e
+    cat "$BUILD_LOG"
+    if grep -Eq '^(error(\[[^]]+\])?:|Error:)' "$BUILD_LOG"; then
+        echo "error: modular compiler emitted an error diagnostic despite exit $rc" >&2
+        return 86
+    fi
+    return "$rc"
+}
+
 # Serialize heavy build via the global workspace lock.
 #
 # `|| true` so a seed that crashes is diagnosed here rather than aborting under
@@ -140,13 +159,17 @@ echo "  out:   $OUT"
 # useful response is to say which seed died and try a good one — not to hand the
 # caller a bare exit 139.
 set +e
-scripts/dev/souc-build-lock.sh "$SEED" "$SRC" "$OUT"
-BUILD_RC=$?
+run_seed_build "$SEED"; BUILD_RC=$?
 set -e
 
 if [[ "$BUILD_RC" -ne 0 || ! -s "$OUT" ]]; then
     echo "warning: seed failed to build the compiler (exit $BUILD_RC, output $([[ -s "$OUT" ]] && echo present || echo absent))" >&2
     echo "warning:   seed was: $SEED" >&2
+    if [[ "${PINNED_SEED:-0}" == "1" &&
+          "${SOUNIO_MADAROS_REQUIRE_PINNED_SEED:-0}" == "1" ]]; then
+        echo "error: pinned seed is required; refusing automatic seed derivation" >&2
+        exit 1
+    fi
     if [[ "${PINNED_SEED:-0}" == "1" && -f "$LEAN_SRC" ]]; then
         # A pinned seed that cannot compile main.sio is stale, not fatal: derive a
         # fresh one from lean_single.sio and retry once. This is the exact recovery
@@ -162,8 +185,7 @@ if [[ "$BUILD_RC" -ne 0 || ! -s "$OUT" ]]; then
         chmod +x "$SEED"
         rm -f "$OUT"
         set +e
-        scripts/dev/souc-build-lock.sh "$SEED" "$SRC" "$OUT"
-        BUILD_RC=$?
+        run_seed_build "$SEED"; BUILD_RC=$?
         set -e
     fi
 fi

@@ -62,12 +62,52 @@ else
 fi
 
 # ── S6: Memory usage < 100MB ────────────────────────────────────────────────
-mem_kb=$(/usr/bin/time -v "$TMPDIR/stage0" bootstrap/boot1.sio "$TMPDIR/boot1_mem.elf" 2>&1 | grep "Maximum resident" | awk '{print $NF}')
-if [ -n "$mem_kb" ] && [ "$mem_kb" -lt 102400 ]; then
-    echo "PASS  S6  stage0 memory ${mem_kb}KB < 100MB"
+# Capture ru_maxrss directly so the gate does not depend on GNU /usr/bin/time.
+cat > "$TMPDIR/maxrss.c" << 'EOF'
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/resource.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+int main(int argc, char **argv) {
+    if (argc < 2) return 2;
+    pid_t pid = fork();
+    if (pid < 0) return 3;
+    if (pid == 0) {
+        execv(argv[1], &argv[1]);
+        _exit(127);
+    }
+    int status = 0;
+    struct rusage usage;
+    if (wait4(pid, &status, 0, &usage) < 0) return 4;
+    long maxrss_kb = usage.ru_maxrss;
+#if defined(__APPLE__)
+    maxrss_kb /= 1024;
+#endif
+    printf("%ld\n", maxrss_kb);
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+    return 5;
+}
+EOF
+
+mem_kb=""
+if cc -O2 -o "$TMPDIR/maxrss" "$TMPDIR/maxrss.c" 2>/dev/null; then
+    set +e
+    mem_kb=$("$TMPDIR/maxrss" "$TMPDIR/stage0" bootstrap/boot1.sio "$TMPDIR/boot1_mem.elf" 2>/dev/null)
+    mem_rc=$?
+    set -e
+else
+    mem_rc=1
+fi
+
+if [ "$mem_rc" -eq 0 ] && [ -n "$mem_kb" ] && [ "$mem_kb" -lt 102400 ]; then
+    echo "PASS  S6  stage0 peak RSS ${mem_kb}KB < 100MB"
     pass=$((pass+1))
 else
-    echo "FAIL  S6  stage0 memory ${mem_kb}KB >= 100MB"
+    echo "FAIL  S6  stage0 peak RSS '${mem_kb}'KB (runner exit $mem_rc)"
     fail=$((fail+1))
 fi
 

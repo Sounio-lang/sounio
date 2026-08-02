@@ -61,6 +61,8 @@ struct WasmLowerCtx {
     loop_labels: [i64; 512],    // loop_labels[label_id] = 1 if backward-jump target
     loop_exit: [i64; 512],      // loop_exit[loop_lid] = exit_lid  (-1 = none found)
     is_loop_exit: [i64; 512],   // is_loop_exit[exit_lid] = loop_lid (-1 = not an exit)
+    forward_labels: [i64; 512], // labels targeted by a forward branch
+    preopened_labels: [i64; 512], // acyclic target blocks opened before lowering
     local_count: i64,
     func_map: [i64; 256],
     func_count: i64,
@@ -86,6 +88,8 @@ fn wasm_lower_ctx_new() -> WasmLowerCtx {
         out.loop_labels[i as usize] = 0
         out.loop_exit[i as usize] = 0 - 1
         out.is_loop_exit[i as usize] = 0 - 1
+        out.forward_labels[i as usize] = 0
+        out.preopened_labels[i as usize] = 0
         out.string_offsets[i as usize] = 0 - 1
         i = i + 1
     }
@@ -109,6 +113,8 @@ fn wasm_lower_ctx_reset_body(ctx: WasmLowerCtx) -> WasmLowerCtx with Mut, Panic,
         out.loop_labels[i as usize] = 0
         out.loop_exit[i as usize] = 0 - 1
         out.is_loop_exit[i as usize] = 0 - 1
+        out.forward_labels[i as usize] = 0
+        out.preopened_labels[i as usize] = 0
         i = i + 1
     }
     out
@@ -243,6 +249,8 @@ fn wasm_lower_detect_loops(ctx: WasmLowerCtx, func: IrFunction) -> WasmLowerCtx 
         out.loop_labels[j as usize] = 0
         out.loop_exit[j as usize] = 0 - 1
         out.is_loop_exit[j as usize] = 0 - 1
+        out.forward_labels[j as usize] = 0
+        out.preopened_labels[j as usize] = 0
         j = j + 1
     }
 
@@ -317,9 +325,51 @@ fn wasm_lower_detect_loops(ctx: WasmLowerCtx, func: IrFunction) -> WasmLowerCtx 
                         k = k + 1
                     }
                 }
+            } else if lpos > i {
+                out.forward_labels[tgt as usize] = 1
             }
         }
         i = i + 1
+    }
+    out
+}
+
+// In an acyclic function, open every forward target block before its first
+// branch. Farthest targets are opened first so nearer targets sit on top of the
+// WASM label stack and close in lexical order.
+fn wasm_lower_preopen_acyclic_forward_blocks(
+    ctx: WasmLowerCtx,
+    func: IrFunction
+) -> WasmLowerCtx with Mut, Panic, Div {
+    var out = ctx
+    var lid: i64 = 0
+    while lid < WASM_LOWER_MAX_LOCALS {
+        if out.loop_labels[lid as usize] == 1 {
+            return out
+        }
+        lid = lid + 1
+    }
+
+    var i: i64 = func.instr_count - 1
+    while i >= 0 && out.error_count == 0 {
+        let instr = func.instrs[i as usize]
+        match instr.op {
+            IrOpcode::IrLabel => {
+                let target = instr.label_id
+                if target >= 0 && target < WASM_LOWER_MAX_LOCALS &&
+                   out.forward_labels[target as usize] == 1 {
+                    if out.label_depth >= WASM_LOWER_MAX_LABELS {
+                        out.error_count = out.error_count + 1
+                    } else {
+                        out.body = wasm_body_emit_block(out.body, WASM_BLOCK_VOID)
+                        out = wasm_lower_push_label(out, target, WASM_LABEL_BLOCK)
+                        out.preopened_labels[target as usize] = 1
+                    }
+                }
+            }
+            _ => {}
+        }
+        i = i - 1
     }
     out
 }
@@ -687,7 +737,7 @@ fn wasm_lower_jump(ctx: WasmLowerCtx, instr: IrInstr) -> WasmLowerCtx with Mut, 
     if depth >= 0 {
         out.body = wasm_body_emit_br(out.body, depth)
     } else {
-        // Label not found on stack; emit unreachable as fallback
+        out.error_count = out.error_count + 1
         out.body = wasm_body_emit_unreachable(out.body)
     }
     out
@@ -705,6 +755,9 @@ fn wasm_lower_branch_true(ctx: WasmLowerCtx, instr: IrInstr) -> WasmLowerCtx wit
     let depth = wasm_lower_find_label_depth(out, instr.label_id)
     if depth >= 0 {
         out.body = wasm_body_emit_br_if(out.body, depth)
+    } else {
+        out.error_count = out.error_count + 1
+        out.body = wasm_body_emit_unreachable(out.body)
     }
     out
 }
@@ -722,6 +775,9 @@ fn wasm_lower_branch_false(ctx: WasmLowerCtx, instr: IrInstr) -> WasmLowerCtx wi
     let depth = wasm_lower_find_label_depth(out, instr.label_id)
     if depth >= 0 {
         out.body = wasm_body_emit_br_if(out.body, depth)
+    } else {
+        out.error_count = out.error_count + 1
+        out.body = wasm_body_emit_unreachable(out.body)
     }
     out
 }
@@ -749,7 +805,17 @@ fn wasm_lower_label(ctx: WasmLowerCtx, instr: IrInstr) -> WasmLowerCtx with Mut,
     let lid = instr.label_id
     if lid >= 0 && lid < 512 {
         let loop_owner = out.is_loop_exit[lid as usize]
-        if loop_owner >= 0 {
+        if out.preopened_labels[lid as usize] == 1 {
+            if out.label_depth > 0 &&
+               out.label_stack[(out.label_depth - 1) as usize].ir_label_id == lid {
+                out.body = wasm_body_emit_end(out.body)
+                out = wasm_lower_pop_label(out)
+                out.preopened_labels[lid as usize] = 0
+            } else {
+                out.error_count = out.error_count + 1
+            }
+
+        } else if loop_owner >= 0 {
             // ── Case A: this label is the exit point of a loop ────────────────
             // Close all open scopes up to and including the loop-owner scope,
             // then close the exit wrapper block that was pre-opened below it.
@@ -784,8 +850,10 @@ fn wasm_lower_label(ctx: WasmLowerCtx, instr: IrInstr) -> WasmLowerCtx with Mut,
             out.body = wasm_body_emit_loop(out.body, WASM_BLOCK_VOID)
             out = wasm_lower_push_label(out, lid, WASM_LABEL_LOOP)
 
-        } else {
+        } else if out.forward_labels[lid as usize] == 1 {
             // ── Case C: forward label ─────────────────────────────────────────
+            // Loop-bearing functions retain the legacy local opener. Acyclic
+            // forward targets were already opened before instruction lowering.
             out.body = wasm_body_emit_block(out.body, WASM_BLOCK_VOID)
             out = wasm_lower_push_label(out, lid, WASM_LABEL_BLOCK)
         }
@@ -1202,14 +1270,26 @@ fn wasm_lower_function(ctx: WasmLowerCtx, func: IrFunction) -> WasmLowerCtx with
     // Pre-scan to allocate WASM locals for all IR registers
     out = wasm_lower_prescan_locals(out, func)
 
-    // Declare extra locals (beyond parameters) one-by-one by type.
-    // This correctly handles mixed i64/f64 extra locals.
+    // WASM encodes locals as (count, type) groups. Coalesce adjacent locals of
+    // the same type so functions with more than 32 locals do not silently hit
+    // WasmFuncBody's 32-group capacity.
     var e: i64 = func.param_count
-    while e < out.local_count {
+    while e < out.local_count && out.error_count == 0 {
         let ltype = out.local_type[e as usize]
-        out.body = wasm_body_add_local(out.body, 1, ltype)
-        e = e + 1
+        var run_count: i64 = 1
+        while e + run_count < out.local_count &&
+              out.local_type[(e + run_count) as usize] == ltype {
+            run_count = run_count + 1
+        }
+        if out.body.local_count >= 32 {
+            out.error_count = out.error_count + 1
+        } else {
+            out.body = wasm_body_add_local(out.body, run_count, ltype)
+            e = e + run_count
+        }
     }
+
+    out = wasm_lower_preopen_acyclic_forward_blocks(out, func)
 
     // Lower all instructions
     out = wasm_lower_basic_block(out, func, 0, func.instr_count)
@@ -1515,6 +1595,46 @@ fn wasm_lower_module(module: IrModule) -> WasmLowerResult with Mut, Panic, Div {
         func_count: module.fn_count,
         error_count: ctx.error_count,
     }
+}
+
+// Keep the lowering representation private while exposing the only supported
+// compiler boundary: validate the result and write an immutable WASM artifact.
+pub fn wasm_lower_module_to_file(
+    module: IrModule,
+    output_path: string
+) -> i32 with IO, Mut, Panic, Div {
+    if module.fn_count <= 0 {
+        print("Error: IR module has no functions (wasm_lowering_empty_module)\n")
+        return 1
+    }
+
+    let result = wasm_lower_module(module)
+    if result.error_count > 0 {
+        print("WASM lowering failed: ")
+        print_int(result.error_count)
+        print(" error(s)\n")
+        return 1
+    }
+    if result.buf.len <= 0 || result.buf.len > 262144 {
+        print("WASM lowering produced invalid byte length: ")
+        print_int(result.buf.len)
+        print("\n")
+        return 1
+    }
+    if write_file(output_path, result.buf.data, result.buf.len) < 0 {
+        print("Error: Failed to write WASM binary to ")
+        print(output_path)
+        print("\n")
+        return 1
+    }
+
+    print("WASM binary size: ")
+    print_int(result.buf.len)
+    print(" bytes\n")
+    print("Written to ")
+    print(output_path)
+    print("\n")
+    0
 }
 
 // ============================================================================
@@ -1892,6 +2012,50 @@ fn test_wasm_lower_prescan() -> bool with Mut, Panic, Div {
         && wasm_lower_get_local(ctx, 2) == 2
 }
 
+// Regression: local declarations are groups, not one entry per IR register.
+fn test_wasm_lower_large_i64_local_set() -> bool with Mut, Panic, Div {
+    var func = ir_empty_function()
+    func.param_count = 0
+    func.reg_count = 40
+
+    var i: i64 = 0
+    while i < 40 {
+        func.instrs[i as usize] = ir_load_imm(i, i)
+        i = i + 1
+    }
+    func.instrs[40 as usize] = ir_return(39)
+    func.instr_count = 41
+
+    var ctx = wasm_lower_ctx_new()
+    ctx = wasm_lower_function(ctx, func)
+    ctx.error_count == 0
+        && ctx.local_count == 40
+        && ctx.body.local_count == 1
+        && ctx.body.locals[0 as usize].count == 40
+        && ctx.body.locals[0 as usize].val_type == WASM_TYPE_I64
+}
+
+fn test_wasm_lower_acyclic_forward_jump() -> bool with Mut, Panic, Div {
+    var func = ir_empty_function()
+    func.reg_count = 1
+    func.instrs[0 as usize] = ir_jump(7)
+    func.instrs[1 as usize] = ir_load_imm(0, 99)
+    func.instrs[2 as usize] = ir_label(7)
+    func.instrs[3 as usize] = ir_load_imm(0, 3)
+    func.instrs[4 as usize] = ir_return(0)
+    func.instr_count = 5
+
+    var ctx = wasm_lower_ctx_new()
+    ctx = wasm_lower_function(ctx, func)
+    ctx.error_count == 0
+        && ctx.label_depth == 0
+        && ctx.body.code_len >= 6
+        && (ctx.body.code[0 as usize] as i64) == 0x02
+        && (ctx.body.code[1 as usize] as i64) == 0x40
+        && (ctx.body.code[2 as usize] as i64) == 0x0C
+        && (ctx.body.code[3 as usize] as i64) == 0
+}
+
 // ============================================================================
 // Test runner
 // ============================================================================
@@ -1916,6 +2080,8 @@ fn wasm_lower_run_tests() -> i64 with Mut, Panic, Div {
     if test_wasm_lower_module_header() { passed = passed + 1 } else { failed = failed + 1 }
     if test_wasm_lower_compare_lt() { passed = passed + 1 } else { failed = failed + 1 }
     if test_wasm_lower_prescan() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_wasm_lower_large_i64_local_set() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_wasm_lower_acyclic_forward_jump() { passed = passed + 1 } else { failed = failed + 1 }
 
     print_int(passed)
     print_int(failed)
