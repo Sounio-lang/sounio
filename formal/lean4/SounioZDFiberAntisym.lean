@@ -2917,7 +2917,14 @@ theorem Qgen_symm (m L a b : Nat) (hL : L < 2^m) (ha : a < 2^m) (hb : b < 2^m)
     numerical rung measures: `Q'(Y,0,0) = σ(Y,Y) = −1` for every `Y ≠ 0`, so the corner `(0,0)`
     sits in `Reach` at *every* level, trivially, and no boundary statement about it could be
     true. `ReachD` is the measured object. Monotonicity survives unchanged, because
-    `reach_step` reuses the very same `(Y,a,b)`. -/
+    `reach_step` reuses the very same `(Y,a,b)`.
+
+    ⚠ `ReachD` does **not** carry (♦)'s even-weight condition on `Y` — expressing it needs a
+    popcount, which nothing here does. So `ReachD` is a slightly *larger* family than the
+    contract's `REACH`, and the theorems below are correspondingly slightly stronger on the
+    existential side: `attain_lines` builds a witness for **either** admissible label, and the
+    caller takes whichever has even weight. Clause `N27` of the contract checks that the label
+    `attain_nondeg` selects is the even-weight one. -/
 def ReachD (j Y0 n a0 b0 : Nat) : Prop :=
   ∃ Y a b, Y < 2^n ∧ a < 2^n ∧ b < 2^n ∧
     Y % 2^(j+2) = Y0 ∧ a % 2^(j+2) = a0 ∧ b % 2^(j+2) = b0 ∧
@@ -3418,6 +3425,65 @@ theorem ReachD_lines (j Y Y0 a0 b0 : Nat) (hY3 : Y < 2^(j+3)) (hYmod : Y % 2^(j+
     attain_lines j Y Y0 a0 b0 hY3 hYmod hY00 ha0b hb0b hline
   have e4 : (2:Nat)^(j+4) = 2^(j+3) * 2 := by rw [Nat.pow_succ]
   exact ⟨Y, a, b, by omega, ha4, hb4, hYmod, hamod, hbmod, ha0, hb0, hbY, hq⟩
+
+/-! ## The two halves assembled: `REACH` is attained at `n = j+4`
+
+`ReachD_mono` gives `REACH_{j+4} ⊆ REACH_n`. This is the other inclusion, and it is exactly the
+dichotomy: a bottom pair is either **on** one of the six lines — then `ReachD_lines` builds a
+level-`(j+4)` witness outright — or it is **off** them, which is precisely `NDeg`, and then
+`collapse`/`attain_nondeg` carry the level-`n` witness down to level `j+3`, whence `ReachD_succ`.
+
+Together with `corner_blocked_at_j3`, which says level `j+3` does **not** suffice, that is the
+`n = j+4` boundary, proven and sharp. -/
+
+/-- **`REACH` IS ATTAINED AT `n = j+4`.** Every level-`n` witness, `n ≥ j+4`, has its bottom pair
+    already carried at level `j+4`. -/
+theorem ReachD_attained (j Y0 a0 b0 n : Nat) (hn : j+4 ≤ n) (hY00 : Y0 ≠ 0)
+    (hY0b : Y0 < 2^(j+2)) (ha0b : a0 < 2^(j+2)) (hb0b : b0 < 2^(j+2))
+    (h : ReachD j Y0 n a0 b0) : ReachD j Y0 (j+4) a0 b0 := by
+  have hp : (0:Nat) < 2^(j+2) := Nat.two_pow_pos (j+2)
+  have e3 : (2:Nat)^(j+3) = 2^(j+2) * 2 := by rw [Nat.pow_succ]
+  by_cases hline : a0 = 0 ∨ a0 = Y0 ∨ b0 = 0 ∨ b0 = Y0 ∨ a0 = b0 ∨ a0 ^^^ b0 = Y0
+  · exact ReachD_lines j Y0 Y0 a0 b0 (by omega) (Nat.mod_eq_of_lt hY0b) hY00 ha0b hb0b hline
+  · -- off the six lines is exactly `NDeg`
+    have f1 : a0 ≠ 0 := fun e => hline (Or.inl e)
+    have f2 : a0 ≠ Y0 := fun e => hline (Or.inr (Or.inl e))
+    have f3 : b0 ≠ 0 := fun e => hline (Or.inr (Or.inr (Or.inl e)))
+    have f4 : b0 ≠ Y0 := fun e => hline (Or.inr (Or.inr (Or.inr (Or.inl e))))
+    have f5 : a0 ≠ b0 := fun e => hline (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl e)))))
+    have f6 : a0 ^^^ b0 ≠ Y0 :=
+      fun e => hline (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr e)))))
+    obtain ⟨Y, a, b, hY, ha, hb, eY, ea, eb, ha0, hb0, hbY, hq⟩ := h
+    have hnd : NDeg j Y a b := by
+      refine ⟨?_, ?_, ?_, ?_, ?_, ?_⟩ <;> simp only [ea, eb, eY] <;> assumption
+    obtain ⟨Y', hY'3, hY'mod, hval⟩ :=
+      attain_nondeg j n Y a b (by omega) hY ha hb hnd
+    rw [hq] at hval
+    -- the level-(j+3) witness, then one step up
+    have hbY' : b0 ≠ Y' := by
+      intro e
+      apply f4
+      have h1 : b0 % 2^(j+2) = Y0 := by rw [e, hY'mod, eY]
+      rw [Nat.mod_eq_of_lt hb0b] at h1
+      exact h1
+    refine ReachD_succ j Y0 (j+2) a0 b0 ⟨Y', a0, b0, hY'3, by omega, by omega, ?_, ?_, ?_,
+      f1, f3, hbY', ?_⟩
+    · rw [hY'mod]; exact eY
+    · exact Nat.mod_eq_of_lt ha0b
+    · exact Nat.mod_eq_of_lt hb0b
+    · rw [ea, eb] at hval; exact hval
+
+/-- **`REACH` STABILISES AT `n = j+4`.** The two inclusions: `ReachD_attained` down,
+    `ReachD_mono` up. With `corner_blocked_at_j3` — which says `j+3` does *not* suffice — the
+    boundary is proven and proven sharp. -/
+theorem ReachD_stable (j Y0 a0 b0 n : Nat) (hn : j+4 ≤ n) (hY00 : Y0 ≠ 0)
+    (hY0b : Y0 < 2^(j+2)) (ha0b : a0 < 2^(j+2)) (hb0b : b0 < 2^(j+2)) :
+    ReachD j Y0 n a0 b0 ↔ ReachD j Y0 (j+4) a0 b0 := by
+  constructor
+  · exact ReachD_attained j Y0 a0 b0 n hn hY00 hY0b ha0b hb0b
+  · intro h
+    obtain ⟨d, rfl⟩ : ∃ d, n = j + 4 + d := ⟨n - (j+4), by omega⟩
+    exact ReachD_mono j Y0 a0 b0 d (j+3) h
 
 end SounioZDFiberAntisym
 
