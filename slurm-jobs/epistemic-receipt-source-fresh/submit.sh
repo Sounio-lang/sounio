@@ -440,6 +440,64 @@ SIO
       SOUNIO_STDLIB_PATH="\$REPO/stdlib" \
       "\$RAW_MADAROS" run "\$PROBE_ROOT/associator_values.sio"
   )
+  cat >"\$PROBE_ROOT/receipt_stages.sio" <<'SIO'
+use epistemic::observation_provenance::*
+use epistemic::parenthesization_receipts::*
+use epistemic::state_aliasing_receipts::*
+
+fn main() with IO, Mut, Div, Panic, NonAssoc {
+    println("PAREN_STAGE_SETUP_BEGIN")
+    let opportunity = op_observation_opportunity_i64(10, 11)
+    let presence = op_encounter_presence_i64(20, 21)
+    let selection = op_measurement_selection_i64(30, 31)
+    let act = op_measurement_act_i64(40, 41)
+    let recorded = op_record_measurement_i64(opportunity, presence, selection, act)
+    let history = op_observation_history_from_recorded_i64(recorded, 1001)
+    println("PAREN_STAGE_HISTORY_PASS")
+
+    let path = pr_ordered_transformation_path_i64(history, 2001)
+    let first_transformation = op_observation_transformation_i64(2101, 2102)
+    let second_transformation = op_observation_transformation_i64(2201, 2202)
+    let pipeline_order = pr_pipeline_order_sensitivity_i64(path, first_transformation, second_transformation, 2301, 2302)
+    println("PAREN_STAGE_PIPELINE_PASS")
+    let boundary = pr_aggregation_boundary_i64(path, 3001, 3002)
+    let design = pr_bracketing_design_i64(boundary, 4001, 4002, 4003)
+    let probe = pr_algebraic_associator_probe_i64(design, 5001, 5002)
+    println("PAREN_STAGE_DESIGN_PASS")
+    let basis_probe = pr_basis_triple_associator_probe_i64(design, 1, 2, 4)
+    println("PAREN_STAGE_BASIS_PASS")
+    let basis_abstention = pr_abstain_zero_basis_triple_associator_i64(design, 1, 2, 3, 5003)
+    println("PAREN_STAGE_BASIS_ABSTENTION_PASS")
+
+    let alternate_history = op_observation_history_from_recorded_i64(recorded, 1002)
+    let left_proxy = sar_observed_proxy_i64(history, 9001)
+    let right_proxy = sar_observed_proxy_i64(alternate_history, 9001)
+    let proxy_collision = sar_observed_proxy_collision_i64(left_proxy, right_proxy)
+    let challenge = sar_predictive_challenge_i64(proxy_collision, 9101, 4003, 9103)
+    let separation = sar_predictive_separation_i64(challenge, 9201, 9202)
+    let refinement = sar_state_refinement_request_i64(challenge, separation, 9301)
+    println("PAREN_STAGE_REFINEMENT_PASS")
+    let refined_contest = pr_refined_state_representation_contest_plan_i64(
+        design, refinement, 9401, 9402, 9403, 9404, 9405, 9406, 9407, 9408
+    )
+    println("PAREN_STAGE_REFINED_CONTEST_PASS")
+    let comparison = pr_associativity_contest_i64(design, 6001, 6002, 6003, 6004)
+    let feature = pr_bracket_discriminating_feature_i64(comparison, 7001, 7002)
+    println("PAREN_STAGE_FEATURE_PASS")
+    let sensitivity = pr_parenthesization_sensitivity_i64(comparison, feature)
+    println("PAREN_STAGE_SENSITIVITY_PASS")
+    let abstention = pr_parenthesization_abstention_i64(comparison, 8001)
+    println("PAREN_STAGE_ALL_CONSTRUCTORS_PASS")
+}
+SIO
+  (
+    cd "\$PROBE_ROOT/cwd"
+    exec env \
+      -u MADAROS_RAW_BIN \
+      -u SOUNIO_MADAROS_BIN \
+      SOUNIO_STDLIB_PATH="\$REPO/stdlib" \
+      "\$RAW_MADAROS" run "\$PROBE_ROOT/receipt_stages.sio"
+  )
   [[ -z "\$(git -C "\$REPO" status --porcelain)" ]] || fail 'source tree changed during associator-values probe'
   echo '[epistemic-receipt-source-fresh] PASS: associator-values diagnostic completed'
 elif [[ "\$WORKER_PROBE" == 'source-to-elf' || "\$WORKER_PROBE" == 'assert-exit' ]]; then
