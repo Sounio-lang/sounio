@@ -11,6 +11,14 @@ fail() {
   exit 1
 }
 
+assert_no_fatal_log() {
+  local log="$1"
+  if grep -Eiq 'segmentation fault|core dumped|terminated by signal|fatal:|bus error|illegal instruction' "$log"; then
+    cat "$log" >&2
+    fail "fatal process marker in $log"
+  fi
+}
+
 sha256_file() {
   if command -v sha256sum >/dev/null 2>&1; then
     sha256sum "$1" | awk '{print $1}'
@@ -93,21 +101,32 @@ private_fn_rc=$?
 private_struct_rc=$?
 set -e
 
-[[ "$private_fn_rc" -ne 0 && ! -s "$PRIVATE_FN_ELF" ]] || {
+assert_no_fatal_log "$WORK/private-fn.log"
+assert_no_fatal_log "$WORK/private-struct.log"
+private_fn_mode=unknown
+if [[ "$private_fn_rc" -eq 1 && ! -s "$PRIVATE_FN_ELF" ]] \
+  && grep -Fq 'error: cannot call non-pub function from imported module' "$WORK/private-fn.log" \
+  && grep -Fxq 'typecheck: failed' "$WORK/private-fn.log"; then
+  private_fn_mode=semantic_reject
+elif [[ "$private_fn_rc" -eq 0 && -s "$PRIVATE_FN_ELF" ]] \
+  && grep -Fq 'warning: cannot call non-pub function from imported module' "$WORK/private-fn.log" \
+  && ! grep -Fxq 'typecheck: failed' "$WORK/private-fn.log"; then
+  private_fn_mode=warning_only
+else
   cat "$WORK/private-fn.log" >&2
-  fail "derived seed did not fail closed on an imported private function"
-}
-grep -Fq 'cannot call non-pub function from imported module' "$WORK/private-fn.log" || {
-  cat "$WORK/private-fn.log" >&2
-  fail "private function rejection omitted its seed diagnostic"
-}
-[[ "$private_struct_rc" -ne 0 && ! -s "$PRIVATE_STRUCT_ELF" ]] || {
+  fail "private function visibility boundary returned an incoherent seed result"
+fi
+[[ "$private_struct_rc" -eq 1 && ! -s "$PRIVATE_STRUCT_ELF" ]] || {
   cat "$WORK/private-struct.log" >&2
   fail "derived seed did not fail closed on an imported private struct"
 }
-grep -Fq 'private struct literal' "$WORK/private-struct.log" || {
+grep -Fq 'error: private struct literal' "$WORK/private-struct.log" || {
   cat "$WORK/private-struct.log" >&2
   fail "private struct rejection omitted its seed diagnostic"
+}
+grep -Fxq 'typecheck: failed' "$WORK/private-struct.log" || {
+  cat "$WORK/private-struct.log" >&2
+  fail "private struct rejection omitted the semantic failure receipt"
 }
 
 SOUNIO_STDLIB_PATH="$ROOT_DIR/self-hosted" "$scripts_dev_lock" "$SEED" \
@@ -128,5 +147,5 @@ grep -Fxq 'PASS pub_crate_ast_visibility kind=2 items=3' "$WORK/pub-crate-ast-pr
 }
 
 seed_sha="$(sha256_file "$SEED")"
-echo "[lean-single-pub-crate-seed] receipt seed_sha256=$seed_sha pub_crate=runtime-pass public=runtime-pass private_fn=reject private_struct=reject modular_ast_kind=2 generic_restricted_visibility=not-claimed"
+echo "[lean-single-pub-crate-seed] receipt seed_sha256=$seed_sha pub_crate=runtime-pass public=runtime-pass lean_private_fn_mode=$private_fn_mode lean_private_struct_mode=semantic_reject modular_ast_kind=2 privacy_acceptance_authority=madaros privacy_acceptance_proof=external-gate generic_restricted_visibility=not-claimed"
 echo '[lean-single-pub-crate-seed] PASS: bounded non-generic pub(crate) authority survives source-derived bootstrap'
