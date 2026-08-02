@@ -1,0 +1,615 @@
+#!/usr/bin/env bash
+# Submit the exact-commit direct-raw epistemic receipt gate to a worker-local
+# Slurm allocation. This is the no-BeagleCockpit-MCP fallback: the worker
+# fetches the published Git commit into its own clone/PVC cache, then builds
+# Madaros from that clean source tree. It never reads or writes OrangeFS.
+
+set -euo pipefail
+
+REPO="${REPO:-$(pwd)}"
+SOURCE_REF="${SOURCE_REF:-HEAD}"
+SOURCE_REMOTE="${SOURCE_REMOTE:-}"
+WORKER_GIT_SSL_VERIFY="${WORKER_GIT_SSL_VERIFY:-true}"
+WORKER_LOWER_TRACE="${WORKER_LOWER_TRACE:-0}"
+WORKER_LAYOUT_TRACE="${WORKER_LAYOUT_TRACE:-0}"
+WORKER_NV2_IR_TRACE="${WORKER_NV2_IR_TRACE:-0}"
+WORKER_PRESERVE_DIAGNOSTICS="${WORKER_PRESERVE_DIAGNOSTICS:-0}"
+WORKER_INTO_ACC_NO_RESET="${WORKER_INTO_ACC_NO_RESET:-0}"
+WORKER_PIN_COMMITTED_SEED="${WORKER_PIN_COMMITTED_SEED:-0}"
+WORKER_PROBE="${WORKER_PROBE:-source-fresh-gate}"
+NS="${NS:-slurm-pilot}"
+KUBECTL="${KUBECTL:-kubectl}"
+PARTITION="${PARTITION:-gpu-orangefs}"
+NODELIST="${NODELIST:-}"
+JOB_MEM="${JOB_MEM:-64G}"
+JOB_CPUS="${JOB_CPUS:-4}"
+JOB_TIME="${JOB_TIME:-01:30:00}"
+RUN_ID="${RUN_ID:-epistemic-receipt-source-fresh-$(date -u +%Y%m%dT%H%M%S)}"
+
+usage() {
+    cat <<'EOF'
+Usage:
+  SOURCE_REF=<commit-or-ref> bash slurm-jobs/epistemic-receipt-source-fresh/submit.sh
+
+Environment:
+  REPO, SOURCE_REF, SOURCE_REMOTE, WORKER_GIT_SSL_VERIFY, WORKER_LOWER_TRACE,
+  WORKER_LAYOUT_TRACE,
+  WORKER_NV2_IR_TRACE, WORKER_PRESERVE_DIAGNOSTICS, WORKER_INTO_ACC_NO_RESET,
+  WORKER_PIN_COMMITTED_SEED,
+  WORKER_PROBE, NS, KUBECTL, PARTITION,
+  NODELIST, JOB_MEM, JOB_CPUS,
+  JOB_TIME, RUN_ID
+
+This is the direct-Slurm fallback for sessions where BeagleCockpit MCP is not
+loaded. It streams the worker's gate output back through srun. The worker
+clones the exact published source commit into worker-local scratch/PVC cache;
+OrangeFS is intentionally not used.
+
+Set WORKER_GIT_SSL_VERIFY=false only for a worker image with a documented
+missing CA bundle. That transport exception is reported in the job output;
+the requested commit and tree are still checked before the source build.
+
+Set WORKER_LOWER_TRACE=1 only for crash localization. It enables the existing
+module-frontend and IR-lowering traces inside the worker's raw ELF.
+
+Set WORKER_LAYOUT_TRACE=1 to print only the resolved base type, field index,
+and visible layout count for field-access lowering.
+
+Set WORKER_NV2_IR_TRACE=1 only for backend crash localization. It enables the
+existing native-v2 IR trace inside the worker's raw ELF.
+
+Set WORKER_PRESERVE_DIAGNOSTICS=1 only for crash localization. It retains a
+compact worker-local log at the printed worker_root after removing the cloned
+source and raw compiler. Fetch that log from the admitted worker pod; OrangeFS
+is never used.
+
+Set WORKER_INTO_ACC_NO_RESET=1 only to classify dependency-arena reboxing. It
+preserves each dependency allocation window instead of resetting it.
+
+Set WORKER_PIN_COMMITTED_SEED=1 only to separate modular-compiler behavior from
+a broken source-tracking seed derivation. This is diagnostic evidence and cannot
+be reported as a source-fresh acceptance pass.
+
+WORKER_PROBE=source-fresh-gate runs the acceptance gate. WORKER_PROBE=block-ladder
+builds the same raw ELF and runs twelve generated worker-local programs to locate
+the first block shape that reproduces a lowering crash. The probe never changes
+the checked-out source tree and is not acceptance evidence.
+
+WORKER_PROBE=source-to-elf builds the same raw ELF, then executes the canonical
+source-to-ELF manifest through that exact compiler, including native assert
+success and failure exit-code behavior.
+
+WORKER_PROBE=assert-exit runs only the four canonical native assert cases. It
+keeps assertion semantics observable even when an unrelated source-to-ELF
+manifest case is already failing.
+
+WORKER_PROBE=receipt-values builds the same raw ELF and prints one marker for
+each observation-receipt predicate. It is diagnostic evidence only and does not
+replace the source-fresh acceptance gate.
+
+WORKER_PROBE=associator-values builds the same raw ELF and prints the raw
+non-Fano and Fano basis-associator norms before receipt assertions wrap them.
+It is diagnostic evidence only.
+EOF
+}
+
+fail() {
+    echo "[epistemic-receipt-source-fresh-submit] FAIL: $*" >&2
+    exit 1
+}
+
+if [[ "${1:-}" == '--help' || "${1:-}" == '-h' ]]; then
+    usage
+    exit 0
+fi
+[[ $# -eq 0 ]] || fail 'usage: submit.sh [--help]'
+[[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]] || fail "unsafe RUN_ID: $RUN_ID"
+[[ "$JOB_CPUS" =~ ^[1-9][0-9]*$ ]] || fail "invalid JOB_CPUS: $JOB_CPUS"
+[[ "$WORKER_GIT_SSL_VERIFY" == 'true' || "$WORKER_GIT_SSL_VERIFY" == 'false' ]] || fail "invalid WORKER_GIT_SSL_VERIFY: $WORKER_GIT_SSL_VERIFY"
+[[ "$WORKER_LOWER_TRACE" == '0' || "$WORKER_LOWER_TRACE" == '1' ]] || fail "invalid WORKER_LOWER_TRACE: $WORKER_LOWER_TRACE"
+[[ "$WORKER_LAYOUT_TRACE" == '0' || "$WORKER_LAYOUT_TRACE" == '1' ]] || fail "invalid WORKER_LAYOUT_TRACE: $WORKER_LAYOUT_TRACE"
+[[ "$WORKER_NV2_IR_TRACE" == '0' || "$WORKER_NV2_IR_TRACE" == '1' ]] || fail "invalid WORKER_NV2_IR_TRACE: $WORKER_NV2_IR_TRACE"
+[[ "$WORKER_PRESERVE_DIAGNOSTICS" == '0' || "$WORKER_PRESERVE_DIAGNOSTICS" == '1' ]] || fail "invalid WORKER_PRESERVE_DIAGNOSTICS: $WORKER_PRESERVE_DIAGNOSTICS"
+[[ "$WORKER_INTO_ACC_NO_RESET" == '0' || "$WORKER_INTO_ACC_NO_RESET" == '1' ]] || fail "invalid WORKER_INTO_ACC_NO_RESET: $WORKER_INTO_ACC_NO_RESET"
+[[ "$WORKER_PIN_COMMITTED_SEED" == '0' || "$WORKER_PIN_COMMITTED_SEED" == '1' ]] || fail "invalid WORKER_PIN_COMMITTED_SEED: $WORKER_PIN_COMMITTED_SEED"
+[[ "$WORKER_PROBE" == 'source-fresh-gate' || "$WORKER_PROBE" == 'block-ladder' || "$WORKER_PROBE" == 'source-to-elf' || "$WORKER_PROBE" == 'assert-exit' || "$WORKER_PROBE" == 'receipt-values' || "$WORKER_PROBE" == 'associator-values' ]] || fail "invalid WORKER_PROBE: $WORKER_PROBE"
+
+SOURCE_COMMIT="$(git -C "$REPO" rev-parse "$SOURCE_REF")"
+SOURCE_TREE="$(git -C "$REPO" rev-parse "$SOURCE_COMMIT^{tree}")"
+[[ -z "$(git -C "$REPO" status --porcelain)" ]] || fail 'source checkout is dirty; commit the candidate first'
+git -C "$REPO" cat-file -e "$SOURCE_COMMIT:bin/souc-linux-x86_64" || fail 'source commit lacks bootstrap ELF bin/souc-linux-x86_64'
+git -C "$REPO" cat-file -e "$SOURCE_COMMIT:scripts/ci/epistemic_receipt_source_fresh_gate.sh" || fail 'source commit lacks epistemic source-fresh gate'
+
+if [[ -z "$SOURCE_REMOTE" ]]; then
+    SOURCE_REMOTE="$(git -C "$REPO" remote get-url origin)"
+fi
+[[ "$SOURCE_REMOTE" =~ ^(https://|http://|git@) ]] || fail "unsupported SOURCE_REMOTE: $SOURCE_REMOTE"
+
+LOGIN_POD="$($KUBECTL -n "$NS" get pods -l app.kubernetes.io/name=login --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')"
+[[ -n "$LOGIN_POD" ]] || fail 'no running Slurm login pod'
+
+LOCAL_ROOT="$(mktemp -d /tmp/epistemic-receipt-source-fresh-submit.XXXXXX)"
+RUNNER="$LOCAL_ROOT/$RUN_ID.runner.sh"
+REMOTE_RUNNER="/tmp/$RUN_ID.runner.sh"
+
+cleanup() {
+    rm -rf "$LOCAL_ROOT"
+}
+trap cleanup EXIT
+
+cat >"$RUNNER" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+unset BASH_ENV ENV CDPATH GLOBIGNORE
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+export PATH=/usr/bin:/bin
+export HOME=/tmp
+
+ROOT="\${TMPDIR:-/tmp}/$RUN_ID-\${SLURM_JOB_ID:-manual}"
+REPO="\$ROOT/repo"
+EXPECTED_COMMIT="$SOURCE_COMMIT"
+EXPECTED_TREE="$SOURCE_TREE"
+SOURCE_REMOTE="$SOURCE_REMOTE"
+WORKER_GIT_SSL_VERIFY="$WORKER_GIT_SSL_VERIFY"
+WORKER_LOWER_TRACE="$WORKER_LOWER_TRACE"
+WORKER_LAYOUT_TRACE="$WORKER_LAYOUT_TRACE"
+WORKER_NV2_IR_TRACE="$WORKER_NV2_IR_TRACE"
+WORKER_PRESERVE_DIAGNOSTICS="$WORKER_PRESERVE_DIAGNOSTICS"
+WORKER_INTO_ACC_NO_RESET="$WORKER_INTO_ACC_NO_RESET"
+WORKER_PIN_COMMITTED_SEED="$WORKER_PIN_COMMITTED_SEED"
+WORKER_PROBE="$WORKER_PROBE"
+
+cleanup() {
+  if [[ "\$WORKER_PRESERVE_DIAGNOSTICS" == '1' ]]; then
+    rm -rf "\$REPO" "\$ROOT/block-ladder" "\$ROOT/probe-madaros" "\$ROOT/source-to-elf-madaros"
+    echo "diagnostic_root_preserved=\$ROOT"
+  else
+    rm -rf "\$ROOT"
+  fi
+}
+trap cleanup EXIT
+
+fail() {
+  echo "[epistemic-receipt-source-fresh-slurm] FAIL: \$*" >&2
+  exit 1
+}
+
+echo "source_fresh_slurm_job_id=\${SLURM_JOB_ID:-manual}"
+echo "source_remote=\$SOURCE_REMOTE"
+echo "worker_git_ssl_verify=\$WORKER_GIT_SSL_VERIFY"
+echo "worker_lower_trace=\$WORKER_LOWER_TRACE"
+echo "worker_layout_trace=\$WORKER_LAYOUT_TRACE"
+echo "worker_nv2_ir_trace=\$WORKER_NV2_IR_TRACE"
+echo "worker_preserve_diagnostics=\$WORKER_PRESERVE_DIAGNOSTICS"
+echo "worker_into_acc_no_reset=\$WORKER_INTO_ACC_NO_RESET"
+echo "worker_pin_committed_seed=\$WORKER_PIN_COMMITTED_SEED"
+echo "worker_probe=\$WORKER_PROBE"
+echo "requested_commit=\$EXPECTED_COMMIT"
+echo "requested_tree=\$EXPECTED_TREE"
+echo "worker_host=\$(hostname)"
+echo "worker_root=\$ROOT"
+
+rm -rf "\$ROOT"
+mkdir -p "\$REPO"
+if [[ "\$WORKER_PRESERVE_DIAGNOSTICS" == '1' ]]; then
+  exec > >(tee "\$ROOT/worker.log") 2>&1
+fi
+git -C "\$REPO" init -q || fail 'git init failed'
+git -C "\$REPO" remote add origin "\$SOURCE_REMOTE" || fail 'git remote setup failed'
+if [[ "\$WORKER_GIT_SSL_VERIFY" == 'false' ]]; then
+  echo 'worker_git_tls_transport=unverified-ca-bundle-missing'
+  git -C "\$REPO" -c http.sslVerify=false fetch --no-tags --depth=1 origin "\$EXPECTED_COMMIT" || fail 'worker could not fetch requested source commit'
+else
+  git -C "\$REPO" fetch --no-tags --depth=1 origin "\$EXPECTED_COMMIT" || fail 'worker could not fetch requested source commit'
+fi
+git -C "\$REPO" checkout -q --detach FETCH_HEAD || fail 'worker could not checkout requested source commit'
+
+[[ "\$(git -C "\$REPO" rev-parse HEAD)" == "\$EXPECTED_COMMIT" ]] || fail 'worker HEAD does not match requested commit'
+[[ "\$(git -C "\$REPO" rev-parse 'HEAD^{tree}')" == "\$EXPECTED_TREE" ]] || fail 'worker tree does not match requested tree'
+[[ -z "\$(git -C "\$REPO" status --porcelain)" ]] || fail 'worker source tree is not clean'
+
+if [[ "\$WORKER_PIN_COMMITTED_SEED" == '1' ]]; then
+  export SOUNIO_MADAROS_SEED="\$REPO/bin/souc-linux-x86_64"
+  echo 'worker_seed_mode=diagnostic-pinned-committed-elf-not-source-fresh'
+fi
+
+if [[ "\$WORKER_LOWER_TRACE" == '1' ]]; then
+  export SOUNIO_MODULE_FRONTEND_LOWER_TRACE=1
+  export SOUNIO_LOWER_SUMMARY_TRACE=1
+  export SOUNIO_LOWER_LIVE_TRACE=1
+  export SOUNIO_LOWER_BODY_TRACE=1
+  export SOUNIO_LOWER_AGG_TRACE=1
+fi
+
+if [[ "\$WORKER_LAYOUT_TRACE" == '1' ]]; then
+  export SOUNIO_LAYOUT_TRACE=1
+fi
+
+if [[ "\$WORKER_NV2_IR_TRACE" == '1' ]]; then
+  export SOUNIO_NV2_IR_TRACE=1
+fi
+
+if [[ "\$WORKER_INTO_ACC_NO_RESET" == '1' ]]; then
+  export SOUNIO_INTO_ACC_NO_RESET=1
+fi
+
+chmod +x "\$REPO/bin/souc-linux-x86_64" \\
+  "\$REPO/scripts/ci/build_modular_madaros.sh" \\
+  "\$REPO/scripts/ci/epistemic_receipt_source_fresh_gate.sh" \\
+  "\$REPO/scripts/dev/souc-build-lock.sh"
+
+cd "\$REPO"
+if [[ "\$WORKER_PROBE" == 'block-ladder' ]]; then
+  RAW_MADAROS="\$ROOT/probe-madaros"
+  PROBE_ROOT="\$ROOT/block-ladder"
+  BUILD_LOG="\$ROOT/probe-build.log"
+  mkdir -p "\$PROBE_ROOT/cwd"
+  if ! bash "\$REPO/scripts/ci/build_modular_madaros.sh" "\$RAW_MADAROS" >"\$BUILD_LOG" 2>&1; then
+    tail -n 120 "\$BUILD_LOG" >&2 || true
+    fail 'block-ladder current-source build failed'
+  fi
+  [[ -x "\$RAW_MADAROS" ]] || fail 'block-ladder build did not emit an executable raw ELF'
+  [[ -z "\$(git -C "\$REPO" status --porcelain)" ]] || fail 'source tree changed during block-ladder build'
+
+  cat >"\$PROBE_ROOT/empty_main.sio" <<'SIO'
+fn main() with IO, Panic {
+}
+SIO
+  cat >"\$PROBE_ROOT/local_assert_helper.sio" <<'SIO'
+fn op_require_nonzero(tag: i64) -> i64 with Panic {
+    assert(tag != 0)
+    tag
+}
+
+fn main() with IO, Panic {
+}
+SIO
+  cat >"\$PROBE_ROOT/local_param_identity.sio" <<'SIO'
+fn local_param_identity(tag: i64) -> i64 {
+    tag
+}
+
+fn main() with IO, Panic {
+}
+SIO
+  cat >"\$PROBE_ROOT/local_literal_let.sio" <<'SIO'
+fn local_literal_let(tag: i64) -> i64 {
+    let marker = 1
+    1
+}
+
+fn main() with IO, Panic {
+}
+SIO
+  cat >"\$PROBE_ROOT/local_literal_comparison_tail.sio" <<'SIO'
+fn local_literal_comparison_tail() -> bool {
+    1 != 0
+}
+
+fn main() with IO, Panic {
+}
+SIO
+  cat >"\$PROBE_ROOT/local_comparison_tail.sio" <<'SIO'
+fn local_comparison_tail(tag: i64) -> bool {
+    tag != 0
+}
+
+fn main() with IO, Panic {
+}
+SIO
+  cat >"\$PROBE_ROOT/local_comparison_let.sio" <<'SIO'
+fn local_comparison_let(tag: i64) -> i64 {
+    let predicate = tag != 0
+    1
+}
+
+fn main() with IO, Panic {
+}
+SIO
+  cat >"\$PROBE_ROOT/local_assert_constant.sio" <<'SIO'
+fn local_assert_constant(tag: i64) -> i64 with Panic {
+    assert(1 != 0)
+    1
+}
+
+fn main() with IO, Panic {
+}
+SIO
+  cat >"\$PROBE_ROOT/local_assert_literal.sio" <<'SIO'
+fn local_assert_literal(tag: i64) -> i64 with Panic {
+    assert(tag != 0)
+    1
+}
+
+fn main() with IO, Panic {
+}
+SIO
+  cat >"\$PROBE_ROOT/import_empty.sio" <<'SIO'
+use epistemic::observation_provenance::*
+
+fn main() with IO, Panic {
+}
+SIO
+  cat >"\$PROBE_ROOT/import_literal_let.sio" <<'SIO'
+use epistemic::observation_provenance::*
+
+fn main() with IO, Panic {
+    let marker = 1
+}
+SIO
+  cat >"\$PROBE_ROOT/import_first_call.sio" <<'SIO'
+use epistemic::observation_provenance::*
+
+fn main() with IO, Panic {
+    let opportunity = op_observation_opportunity_i64(10, 11)
+}
+SIO
+
+  run_probe() {
+    local label="\$1"
+    local source="\$2"
+    echo "block_ladder_begin=\$label"
+    (
+      cd "\$PROBE_ROOT/cwd"
+      exec env \\
+        -u MADAROS_RAW_BIN \\
+        -u SOUNIO_MADAROS_BIN \\
+        SOUNIO_STDLIB_PATH="\$REPO/stdlib" \\
+        "\$RAW_MADAROS" run "\$source"
+    )
+    echo "block_ladder_pass=\$label"
+  }
+
+  run_probe empty_main "\$PROBE_ROOT/empty_main.sio"
+  run_probe local_param_identity "\$PROBE_ROOT/local_param_identity.sio"
+  run_probe local_literal_let "\$PROBE_ROOT/local_literal_let.sio"
+  run_probe local_literal_comparison_tail "\$PROBE_ROOT/local_literal_comparison_tail.sio"
+  run_probe local_comparison_tail "\$PROBE_ROOT/local_comparison_tail.sio"
+  run_probe local_comparison_let "\$PROBE_ROOT/local_comparison_let.sio"
+  run_probe local_assert_constant "\$PROBE_ROOT/local_assert_constant.sio"
+  run_probe local_assert_literal "\$PROBE_ROOT/local_assert_literal.sio"
+  run_probe local_assert_helper "\$PROBE_ROOT/local_assert_helper.sio"
+  run_probe import_empty "\$PROBE_ROOT/import_empty.sio"
+  run_probe import_literal_let "\$PROBE_ROOT/import_literal_let.sio"
+  run_probe import_first_call "\$PROBE_ROOT/import_first_call.sio"
+  [[ -z "\$(git -C "\$REPO" status --porcelain)" ]] || fail 'source tree changed during block-ladder probe'
+  echo '[epistemic-receipt-source-fresh] PASS: block-ladder completed'
+elif [[ "\$WORKER_PROBE" == 'receipt-values' ]]; then
+  RAW_MADAROS="\$ROOT/receipt-values-madaros"
+  PROBE_ROOT="\$ROOT/receipt-values"
+  BUILD_LOG="\$ROOT/receipt-values-build.log"
+  mkdir -p "\$PROBE_ROOT/cwd"
+  if ! bash "\$REPO/scripts/ci/build_modular_madaros.sh" "\$RAW_MADAROS" >"\$BUILD_LOG" 2>&1; then
+    tail -n 120 "\$BUILD_LOG" >&2 || true
+    fail 'receipt-values current-source build failed'
+  fi
+  cat >"\$PROBE_ROOT/receipt_values.sio" <<'SIO'
+use epistemic::observation_provenance::*
+
+fn main() with IO, Panic {
+    let opportunity = op_observation_opportunity_i64(10, 11)
+    let presence = op_encounter_presence_i64(20, 21)
+    let selection = op_measurement_selection_i64(30, 31)
+    let act = op_measurement_act_i64(40, 41)
+    let recorded = op_record_measurement_i64(opportunity, presence, selection, act)
+    let history = op_observation_history_from_recorded_i64(recorded, 1001)
+    let history_source_ok = op_observation_history_source_system_tag_i64(history) == 11
+    let transformation = op_observation_transformation_i64(60, 61)
+    let regularized = op_regularize_observation_i64(history, transformation)
+    let feature_presence = op_encounter_presence_i64(20, 22)
+    let feature_selection = op_measurement_selection_i64(30, 31)
+    let feature = op_observation_feature_i64(feature_presence, feature_selection)
+    let unresolved_opportunity = op_observation_opportunity_i64(10, 11)
+    let abstention = op_abstain_unresolved_route_i64(unresolved_opportunity, 9000)
+    let route_ok = op_recorded_measurement_tag_i64(recorded) == 101
+    let regularization_ok = op_regularized_observation_tag_i64(regularized) == 1122
+    let source_ok = op_recorded_measurement_source_system_tag_i64(recorded) == 11 &&
+        op_regularized_observation_source_system_tag_i64(regularized) == 11
+    let transformation_ok = op_regularized_observation_transformation_method_tag_i64(regularized) == 60 &&
+        op_regularized_observation_transformation_parameterization_tag_i64(regularized) == 61
+    let feature_ok = op_observation_feature_tag_i64(feature) == 51
+    let abstention_ok = op_abstention_protocol_id_i64(abstention) == 10 &&
+        op_abstention_reason_tag_i64(abstention) == 9000
+    let equality_control = 101 == 101
+    let route_is_zero = op_recorded_measurement_tag_i64(recorded) == 0
+    let history_source_is_zero = op_observation_history_source_system_tag_i64(history) == 0
+    let feature_is_zero = op_observation_feature_tag_i64(feature) == 0
+
+    if equality_control { println("RECEIPT_EQ_CONTROL_PASS") } else { println("RECEIPT_EQ_CONTROL_FAIL") }
+    if route_is_zero { println("RECEIPT_ROUTE_ZERO") } else { println("RECEIPT_ROUTE_NONZERO") }
+    if history_source_is_zero { println("RECEIPT_HISTORY_SOURCE_ZERO") } else { println("RECEIPT_HISTORY_SOURCE_NONZERO") }
+    if feature_is_zero { println("RECEIPT_FEATURE_ZERO") } else { println("RECEIPT_FEATURE_NONZERO") }
+    if route_ok { println("RECEIPT_ROUTE_PASS") } else { println("RECEIPT_ROUTE_FAIL") }
+    if history_source_ok { println("RECEIPT_HISTORY_SOURCE_PASS") } else { println("RECEIPT_HISTORY_SOURCE_FAIL") }
+    if regularization_ok { println("RECEIPT_REGULARIZATION_PASS") } else { println("RECEIPT_REGULARIZATION_FAIL") }
+    if source_ok { println("RECEIPT_SOURCE_PASS") } else { println("RECEIPT_SOURCE_FAIL") }
+    if transformation_ok { println("RECEIPT_TRANSFORMATION_PASS") } else { println("RECEIPT_TRANSFORMATION_FAIL") }
+    if feature_ok { println("RECEIPT_FEATURE_PASS") } else { println("RECEIPT_FEATURE_FAIL") }
+    if abstention_ok { println("RECEIPT_ABSTENTION_PASS") } else { println("RECEIPT_ABSTENTION_FAIL") }
+}
+SIO
+  (
+    cd "\$PROBE_ROOT/cwd"
+    exec env \
+      -u MADAROS_RAW_BIN \
+      -u SOUNIO_MADAROS_BIN \
+      SOUNIO_STDLIB_PATH="\$REPO/stdlib" \
+      "\$RAW_MADAROS" run "\$PROBE_ROOT/receipt_values.sio"
+  )
+  [[ -z "\$(git -C "\$REPO" status --porcelain)" ]] || fail 'source tree changed during receipt-values probe'
+  echo '[epistemic-receipt-source-fresh] PASS: receipt-values diagnostic completed'
+elif [[ "\$WORKER_PROBE" == 'associator-values' ]]; then
+  RAW_MADAROS="\$ROOT/associator-values-madaros"
+  PROBE_ROOT="\$ROOT/associator-values"
+  BUILD_LOG="\$ROOT/associator-values-build.log"
+  mkdir -p "\$PROBE_ROOT/cwd"
+  if ! bash "\$REPO/scripts/ci/build_modular_madaros.sh" "\$RAW_MADAROS" >"\$BUILD_LOG" 2>&1; then
+    tail -n 120 "\$BUILD_LOG" >&2 || true
+    fail 'associator-values current-source build failed'
+  fi
+  cat >"\$PROBE_ROOT/associator_values.sio" <<'SIO'
+use algebra::associator_field::{assoc_field_basis}
+
+fn main() with IO, Mut, Div, Panic, NonAssoc {
+    println("ASSOCIATOR_NONFANO_BEGIN")
+    let nonfano = assoc_field_basis(1, 2, 4, 0.0)
+    println("ASSOCIATOR_NONFANO_RETURNED")
+    if nonfano.norm_sq == 4.0 {
+        println("ASSOCIATOR_NONFANO_NORM4_PASS")
+    } else {
+        println("ASSOCIATOR_NONFANO_NORM4_FAIL")
+    }
+
+    println("ASSOCIATOR_FANO_BEGIN")
+    let fano = assoc_field_basis(1, 2, 3, 0.0)
+    println("ASSOCIATOR_FANO_RETURNED")
+    if fano.norm_sq == 0.0 {
+        println("ASSOCIATOR_FANO_ZERO_PASS")
+    } else {
+        println("ASSOCIATOR_FANO_ZERO_FAIL")
+    }
+}
+SIO
+  (
+    cd "\$PROBE_ROOT/cwd"
+    exec env \
+      -u MADAROS_RAW_BIN \
+      -u SOUNIO_MADAROS_BIN \
+      SOUNIO_STDLIB_PATH="\$REPO/stdlib" \
+      "\$RAW_MADAROS" run "\$PROBE_ROOT/associator_values.sio"
+  )
+  cat >"\$PROBE_ROOT/receipt_stages.sio" <<'SIO'
+use epistemic::observation_provenance::*
+use epistemic::parenthesization_receipts::*
+use epistemic::state_aliasing_receipts::*
+
+fn main() with IO, Mut, Div, Panic, NonAssoc {
+    println("PAREN_STAGE_SETUP_BEGIN")
+    let opportunity = op_observation_opportunity_i64(10, 11)
+    let presence = op_encounter_presence_i64(20, 21)
+    let selection = op_measurement_selection_i64(30, 31)
+    let act = op_measurement_act_i64(40, 41)
+    let recorded = op_record_measurement_i64(opportunity, presence, selection, act)
+    let history = op_observation_history_from_recorded_i64(recorded, 1001)
+    println("PAREN_STAGE_HISTORY_PASS")
+
+    let path = pr_ordered_transformation_path_i64(history, 2001)
+    let first_transformation = op_observation_transformation_i64(2101, 2102)
+    let second_transformation = op_observation_transformation_i64(2201, 2202)
+    let pipeline_order = pr_pipeline_order_sensitivity_i64(path, first_transformation, second_transformation, 2301, 2302)
+    println("PAREN_STAGE_PIPELINE_PASS")
+    let boundary = pr_aggregation_boundary_i64(path, 3001, 3002)
+    let design = pr_bracketing_design_i64(boundary, 4001, 4002, 4003)
+    let probe = pr_algebraic_associator_probe_i64(design, 5001, 5002)
+    println("PAREN_STAGE_DESIGN_PASS")
+    let basis_probe = pr_basis_triple_associator_probe_i64(design, 1, 2, 4)
+    println("PAREN_STAGE_BASIS_PASS")
+    let basis_abstention = pr_abstain_zero_basis_triple_associator_i64(design, 1, 2, 3, 5003)
+    println("PAREN_STAGE_BASIS_ABSTENTION_PASS")
+
+    let alternate_history = op_observation_history_from_recorded_i64(recorded, 1002)
+    let left_proxy = sar_observed_proxy_i64(history, 9001)
+    let right_proxy = sar_observed_proxy_i64(alternate_history, 9001)
+    let proxy_collision = sar_observed_proxy_collision_i64(left_proxy, right_proxy)
+    let challenge = sar_predictive_challenge_i64(proxy_collision, 9101, 4003, 9103)
+    let separation = sar_predictive_separation_i64(challenge, 9201, 9202)
+    let refinement = sar_state_refinement_request_i64(challenge, separation, 9301)
+    println("PAREN_STAGE_REFINEMENT_PASS")
+    let refined_contest = pr_refined_state_representation_contest_plan_i64(
+        design, refinement, 9401, 9402, 9403, 9404, 9405, 9406, 9407, 9408
+    )
+    println("PAREN_STAGE_REFINED_CONTEST_PASS")
+    let comparison = pr_associativity_contest_i64(design, 6001, 6002, 6003, 6004)
+    let feature = pr_bracket_discriminating_feature_i64(comparison, 7001, 7002)
+    println("PAREN_STAGE_FEATURE_PASS")
+    let sensitivity = pr_parenthesization_sensitivity_i64(comparison, feature)
+    println("PAREN_STAGE_SENSITIVITY_PASS")
+    let abstention = pr_parenthesization_abstention_i64(comparison, 8001)
+    println("PAREN_STAGE_ALL_CONSTRUCTORS_PASS")
+}
+SIO
+  (
+    cd "\$PROBE_ROOT/cwd"
+    exec env \
+      -u MADAROS_RAW_BIN \
+      -u SOUNIO_MADAROS_BIN \
+      SOUNIO_STDLIB_PATH="\$REPO/stdlib" \
+      "\$RAW_MADAROS" run "\$PROBE_ROOT/receipt_stages.sio"
+  )
+  [[ -z "\$(git -C "\$REPO" status --porcelain)" ]] || fail 'source tree changed during associator-values probe'
+  echo '[epistemic-receipt-source-fresh] PASS: associator-values diagnostic completed'
+elif [[ "\$WORKER_PROBE" == 'source-to-elf' || "\$WORKER_PROBE" == 'assert-exit' ]]; then
+  RAW_MADAROS="\$ROOT/source-to-elf-madaros"
+  BUILD_LOG="\$ROOT/source-to-elf-build.log"
+  if ! bash "\$REPO/scripts/ci/build_modular_madaros.sh" "\$RAW_MADAROS" >"\$BUILD_LOG" 2>&1; then
+    tail -n 120 "\$BUILD_LOG" >&2 || true
+    fail 'source-to-elf current-source build failed'
+  fi
+  [[ -x "\$RAW_MADAROS" ]] || fail 'source-to-elf build did not emit an executable raw ELF'
+  [[ -z "\$(git -C "\$REPO" status --porcelain)" ]] || fail 'source tree changed during source-to-elf build'
+  if [[ "\$WORKER_PROBE" == 'assert-exit' ]]; then
+    ASSERT_MANIFEST="\$ROOT/assert-exit.tsv"
+    cat >"\$ASSERT_MANIFEST" <<'TSV'
+assert_true	tests/madaros/source_to_elf/assert_true_exit0.sio	0	assert_true_builtin
+assert_false	tests/madaros/source_to_elf/assert_false_exit1.sio	1	assert_false_builtin
+assert_literal_true	tests/madaros/source_to_elf/assert_literal_true_exit0.sio	0	assert_literal_true_builtin
+assert_literal_false	tests/madaros/source_to_elf/assert_literal_false_exit1.sio	1	assert_literal_false_builtin
+TSV
+    MADAROS_BIN="\$RAW_MADAROS" SOUNIO_STDLIB_PATH="\$REPO/stdlib" \\
+      SOUNIO_MADAROS_SOURCE_TO_ELF_MANIFEST="\$ASSERT_MANIFEST" \\
+      bash "\$REPO/scripts/ci/madaros_source_to_elf_gate.sh"
+  else
+    MADAROS_BIN="\$RAW_MADAROS" SOUNIO_STDLIB_PATH="\$REPO/stdlib" \\
+      bash "\$REPO/scripts/ci/madaros_source_to_elf_gate.sh"
+  fi
+  [[ -z "\$(git -C "\$REPO" status --porcelain)" ]] || fail 'source tree changed during source-to-elf probe'
+  echo "[epistemic-receipt-source-fresh] PASS: \$WORKER_PROBE completed"
+else
+  SOUNIO_EPISTEMIC_RECEIPT_SOURCE_FRESH_KEEP=0 \\
+    bash "\$REPO/scripts/ci/epistemic_receipt_source_fresh_gate.sh"
+fi
+EOF
+chmod 700 "$RUNNER"
+
+$KUBECTL -n "$NS" exec "$LOGIN_POD" -- /usr/bin/bash -lc '
+  set -euo pipefail
+  test -S /run/slurm/sack.socket
+  scontrol ping >/dev/null
+'
+$KUBECTL -n "$NS" cp "$RUNNER" "$LOGIN_POD:$REMOTE_RUNNER"
+
+SRUN_ARGS=(
+    --label
+    --unbuffered
+    --kill-on-bad-exit=1
+    --partition="$PARTITION"
+    --nodes=1
+    --ntasks=1
+    --cpus-per-task="$JOB_CPUS"
+    --mem="$JOB_MEM"
+    --time="$JOB_TIME"
+    --export=NIL
+    --chdir=/tmp
+)
+if [[ -n "$NODELIST" ]]; then
+    SRUN_ARGS+=(--nodelist="$NODELIST")
+fi
+printf -v SRUN_RENDERED '%q ' "${SRUN_ARGS[@]}"
+
+set +e
+$KUBECTL -n "$NS" exec "$LOGIN_POD" -- /usr/bin/bash -lc "
+  set -uo pipefail
+  base64 -w 0 '$REMOTE_RUNNER' | srun $SRUN_RENDERED /usr/bin/bash -lc 'base64 -d > /tmp/$RUN_ID.runner.sh && chmod 700 /tmp/$RUN_ID.runner.sh && exec /usr/bin/bash /tmp/$RUN_ID.runner.sh'
+  rc=\${PIPESTATUS[1]}
+  rm -f '$REMOTE_RUNNER'
+  exit \$rc
+"
+RC=$?
+set -e
+
+if [[ "$RC" -eq 0 ]]; then
+    echo "[epistemic-receipt-source-fresh-submit] PASS: source_commit=$SOURCE_COMMIT source_tree=$SOURCE_TREE transport=worker-local-git-clone"
+else
+    echo "[epistemic-receipt-source-fresh-submit] FAIL: source_commit=$SOURCE_COMMIT source_tree=$SOURCE_TREE transport=worker-local-git-clone rc=$RC" >&2
+fi
+exit "$RC"
