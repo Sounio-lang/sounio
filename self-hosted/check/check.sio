@@ -2936,6 +2936,17 @@ fn checker_report_no_field_inplace(c: *mut Checker, span: Span, field: Name, own
     print("\n")
 }
 
+// E137 said "use of undeclared variable" and then did not say which one. Both
+// emission sites hold the identifier that failed to resolve, and on a bundle
+// span the name is the only thing that lets a reader find it at all. Same
+// omission as E175, E177 and E012 had, same fix.
+fn checker_report_undeclared_inplace(c: *mut Checker, span: Span, ident: Name) with Mut, IO, Panic, Div, Alloc {
+    checker_report_error_at_inplace(c, span, 137, 0, 0, 0)
+    print("   = name ")
+    e035_print_ident(ident)
+    print("\n")
+}
+
 fn checker_report_mismatch_inplace(c: *mut Checker, span: Span, code: i64, expected: TypeEntry, got: TypeEntry) with Mut, IO, Panic, Div, Alloc {
     (*c).error_count = (*c).error_count + 1
     (*c).had_error = true
@@ -3404,6 +3415,23 @@ fn checker_collect_runtime_builtins_inplace(c: *mut Checker) with Mut, Panic, Di
     // visibility-preflight pass even though the codegen lane would resolve
     // the call correctly. See docs/audit/MADAROS_MULTIMODULE_PRINT_IMPORT_BUGS_2026-07-13.md
     // defect 2 for the original report on print_f64.
+    // Raw syscall + arena/pool/mmap runtime intrinsics. Same defect the print_f64
+    // block above records, one layer down: native codegen resolves these (they
+    // are emitted by codegen_x86_linux.sio, and io/file_write.sio + lsp/server.sio
+    // call syscall6 directly), but the checker never had them bound, so every
+    // multi-module program that reaches them tripped E137 "use of undeclared
+    // variable" on a name that is not a variable at all. Nine of the twenty-nine
+    // errors on native_compile_driver.sio were exactly this, which is what made
+    // the whole driver-self-compile chain — five umbrella gates — unbuildable.
+    checker_bind_import_unknown_inplace(c, make_name("syscall6"))
+    checker_bind_import_unknown_inplace(c, make_name("__arena_mark"))
+    checker_bind_import_unknown_inplace(c, make_name("__arena_reset"))
+    checker_bind_import_unknown_inplace(c, make_name("__arena_refill_bytes"))
+    checker_bind_import_unknown_inplace(c, make_name("__arena_unmap_bytes"))
+    checker_bind_import_unknown_inplace(c, make_name("__pool_mark"))
+    checker_bind_import_unknown_inplace(c, make_name("__pool_refill_bytes"))
+    checker_bind_import_unknown_inplace(c, make_name("__rtmmap_count"))
+    checker_bind_import_unknown_inplace(c, make_name("__rtmmap_bytes"))
     checker_bind_import_unknown_inplace(c, make_name("print_f64"))
     checker_bind_import_unknown_inplace(c, make_name("sqrt"))
     checker_bind_import_unknown_inplace(c, make_name("exp"))
@@ -7435,7 +7463,7 @@ fn checker_check_ident_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
         if fn_sig_id >= 0 {
             return ty_fn(fn_sig_id)
         }
-        checker_report_error_at_inplace(c, e.span, 137, 0, 0, 0)
+        checker_report_undeclared_inplace(c, e.span, e.name)
         return ty_error()
     }
     let ident_ty = (*c).env.lookup(e.name)
@@ -10223,6 +10251,15 @@ impl Checker {
         e035_print_ident(field)
         print(" on type ")
         print_type_name(owner)
+        print("\n")
+        c
+    }
+
+    // Value-path twin of checker_report_undeclared_inplace.
+    fn report_undeclared(self, span: Span, ident: Name) -> Checker with Mut, IO, Panic, Div, Alloc {
+        var c = self.report_error_at(span, 137, 0, 0, 0)
+        print("   = name ")
+        e035_print_ident(ident)
         print("\n")
         c
     }
@@ -19066,7 +19103,7 @@ impl Checker {
                     if fn_sig_id >= 0 {
                         return (c, ty_fn(fn_sig_id))
                     }
-                    let c_err = c.report_error_at(e.span, 137, 0, 0, 0)
+                    let c_err = c.report_undeclared(e.span, e.name)
                     return (c_err, ty_error())
                 }
                 let ident_ty = c.env.lookup(e.name)
