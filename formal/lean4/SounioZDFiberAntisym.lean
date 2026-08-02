@@ -3823,6 +3823,107 @@ theorem D_on_lines
         gdisc_sq j a (a ^^^ Y0) (j+2), Int.one_mul]
     exact psg_sq (a % 2^j)
 
+/-! ## The `ND` half, `Y₀ = 3·2^j`
+
+`Q` at this label has a **complete closed form**, and it is the shape of the whole remaining
+statement:
+
+```
+Qgen (3·2^j) a b (j+2) = −1   ⟺   a % 2^j = 0  ∨  b % 2^j = 0  ∨  a % 2^j = b % 2^j
+```
+
+— the `mod 2^j` shadow of the six lines. (`Q` at this label depends only on the low parts, which
+is what the two-step descent through `Qred_hi_*` then `Q'red_hi_*` says: both steps carry the
+label high, so the two signs cancel, and what is left is `Qgen`/`Qgen'` at label `0`, which is
+`1`. The side conditions of those rows are exactly `a % 2^j, b % 2^j ≠ 0` and `≠` each other.)
+
+On that set `D = +1`, and the reason is that `g` is *bilinear there*:
+`g(x,y) = (−1)^{c(x)p_j(y) + c(y)p_j(x)}` with `c(x) = bit₀(x) ⊕ bit_j(x)`. Since `⊕Y₀` flips
+`c` and fixes `p_j`, the exponents cancel in pairs. This section proves the `g` side. -/
+
+/-- **`σ(x⊕1, x) = (−1)^{popcount x}`**, with `x = 1` the single exception (`σ(0,1) = 1` but
+    `psg 1 = −1`). Same three-line shape as `sigma_one`. -/
+theorem sigma_xor_one : ∀ (m x : Nat), x < 2^(m+1) → x ≠ 1 →
+    cdSigma (x ^^^ 1) x (m+1) = psg x := by
+  intro m
+  induction m with
+  | zero =>
+      intro x hx hx1
+      have hp : (2:Nat)^(0+1) = 2 := rfl
+      have hx0 : x = 0 := by omega
+      subst hx0
+      rw [show (0:Nat) ^^^ 1 = 1 from by decide, cdSig0' 1 0, psg_zero]
+  | succ m ih =>
+      intro x hx hx1
+      have h1 : (1:Nat) < 2^(m+1) := by
+        have := Nat.two_pow_pos m
+        have h := Nat.one_lt_two_pow_iff (n := m+1); omega
+      rcases split_top hx with hl | ⟨v, hv, rfl⟩
+      · rw [R_ll (x ^^^ 1) x m (Nat.xor_lt_two_pow hl h1) hl]
+        exact ih x hl hx1
+      · have hvl : v ^^^ 1 < 2^(m+1) := Nat.xor_lt_two_pow hv h1
+        have hseam : (v + 2^(m+1)) ^^^ 1 = (v ^^^ 1) + 2^(m+1) := by
+          rw [seam_add_xor v m hv, seam_add_xor (v ^^^ 1) m hvl,
+              Nat.xor_assoc, Nat.xor_comm ((2:Nat)^(m+1)) 1, ← Nat.xor_assoc]
+        rw [hseam, R_uu (v ^^^ 1) v m hvl hv, psg_top (m+1) v hv]
+        by_cases hv0 : v = 0
+        · subst hv0; rw [if_pos rfl, psg_zero]
+        · rw [if_neg hv0]
+          by_cases hv1 : v = 1
+          · subst hv1
+            rw [show (1:Nat) ^^^ 1 = 0 from by decide, cdSig0' 1 m, psg_one]
+            decide
+          · have hx0 : v ^^^ 1 ≠ 0 := by
+              intro h; exact hv1 (xor_zero_eq v 1 h)
+            have hne : v ≠ v ^^^ 1 := by
+              intro h
+              have h2 : v ^^^ v = v ^^^ (v ^^^ 1) := by rw [← h]
+              rw [Nat.xor_self, ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor] at h2
+              exact absurd h2.symm (by decide)
+            rw [antisym (m+1) v (v ^^^ 1) hv hvl hv0 hx0 hne, ih v hv hv1]
+
+/-- **The second base case**: `g` across the seam at equal low parts. -/
+theorem gdisc_seam_diag (j t : Nat) (hj : j ≠ 0) (ht : t < 2^j) :
+    gdisc j (t + 2^j) t (j+1) = psg t := by
+  obtain ⟨i, rfl⟩ : ∃ i, j = i + 1 := ⟨j - 1, by omega⟩
+  have h1 : (1:Nat) < 2^(i+1) := by
+    have := Nat.two_pow_pos i
+    have h := Nat.one_lt_two_pow_iff (n := i+1); omega
+  have htp : tau (i+1) (2^(i+1)) = 1 := tau_pow_self (i+1) hj
+  have hR2 : cdSigma (t + 2^(i+1)) t (i+2) = 1 := by
+    rw [R_ul t t i ht ht]
+    by_cases ht0 : t = 0
+    · rw [if_pos ht0]
+    · rw [if_neg ht0, sigma_self (i+1) t ht ht0]; decide
+  have htauy : tau (i+1) (t + 2^(i+1)) = tau (i+1) t ^^^ 1 := by
+    rw [seam_add_xor t i ht, tau_xor, htp]
+  show gdisc (i+1) (t + 2^(i+1)) t (i+2) = psg t
+  unfold gdisc
+  rw [htauy, hR2]
+  by_cases hp : t % 2 = 0
+  · have ht1 : t ≠ 1 := by intro h; rw [h] at hp; exact absurd hp (by decide)
+    have hxl : t ^^^ 1 < 2^(i+1) := Nat.xor_lt_two_pow ht h1
+    rw [tau_low_even (i+1) t ht hp, R_ll (t ^^^ 1) t i hxl ht,
+        sigma_xor_one i t ht ht1, Int.mul_one]
+  · have hxl : t ^^^ 1 < 2^(i+1) := Nat.xor_lt_two_pow ht h1
+    have htl : tau (i+1) t = (t ^^^ 1) + 2^(i+1) := tau_low_odd (i+1) t hj ht (by omega)
+    have hfix : ((t ^^^ 1) + 2^(i+1)) ^^^ 1 = t + 2^(i+1) := by
+      rw [seam_add_xor (t ^^^ 1) i hxl, Nat.xor_assoc, Nat.xor_comm ((2:Nat)^(i+1)) 1,
+          ← Nat.xor_assoc, Nat.xor_assoc t 1 1, Nat.xor_self, Nat.xor_zero,
+          ← seam_add_xor t i ht]
+    rw [htl, hfix, R_uu t (t ^^^ 1) i ht hxl]
+    by_cases ht1 : t = 1
+    · subst ht1
+      rw [show (1:Nat) ^^^ 1 = 0 from by decide, if_pos rfl, psg_one, Int.mul_one]
+    · have hx0 : t ^^^ 1 ≠ 0 := by intro h; exact ht1 (xor_zero_eq t 1 h)
+      rw [if_neg hx0, sigma_xor_one i t ht ht1, Int.mul_one]
+
+/-- A label whose bottom `j+1` bits all vanish makes `gdisc` trivial. -/
+theorem gdisc_block_zero (j d u x : Nat) (hu : u < 2^((j+1)+d)) (hx : x < 2^((j+1)+d))
+    (h0 : u % 2^(j+1) = 0) : gdisc j u x ((j+1)+d) = 1 := by
+  rw [gdisc_trunc j j (by omega) d u x hu hx, h0]
+  exact gdisc_zero_left j j (x % 2^(j+1))
+
 /-! ## (♦) for the label class `Y₀ = 2^j`
 
 Everything above assembles. The base case is discharged, so `gdisc_lsb` and `D_on_lines` hold
@@ -3887,6 +3988,284 @@ theorem diamond_pow2 (j n Y a b : Nat) (hn : j+2 ≤ n)
     have := no_nondeg_witness_pow2 j n Y a b hn hY ha hb hnd hY0 hs
     rw [this] at hw
     exact absurd hw (by decide)
+
+theorem xor_pow_low (j t : Nat) (hj : j ≠ 0) (ht : t < 2^j) : t ^^^ 2^j = t + 2^j := by
+  obtain ⟨i, rfl⟩ : ∃ i, j = i + 1 := ⟨j - 1, by omega⟩
+  exact (seam_add_xor t i ht).symm
+
+theorem low_split (k r : Nat) (hr : r < 2^(k+1)) : r = r % 2^k ∨ r = r % 2^k + 2^k := by
+  have hp : 0 < 2^k := Nat.two_pow_pos k
+  have hpow : (2:Nat)^(k+1) = 2^k * 2 := by rw [Nat.pow_succ]
+  have hsplit := Nat.div_add_mod r (2^k)
+  have hlt : r / 2^k < 2 := by
+    rw [hpow] at hr; exact Nat.div_lt_of_lt_mul (by omega)
+  have hq : r / 2^k = 0 ∨ r / 2^k = 1 := by
+    cases hd : r / 2^k with
+    | zero => exact Or.inl rfl
+    | succ q =>
+        cases q with
+        | zero => exact Or.inr rfl
+        | succ q' => rw [hd] at hlt; omega
+  rcases hq with h | h <;> rw [h] at hsplit
+  · left; omega
+  · right; omega
+
+/-- **`D = +1` on the whole set `{Q = −1}` for the label `3·2^j`.** The three low-part
+    conditions subsume the six lines, whose `mod 2^j` shadow they are. -/
+theorem D_low_cond (j a b : Nat) (hj : j ≠ 0) (ha : a < 2^(j+2)) (hb : b < 2^(j+2))
+    (hcond : a % 2^j = 0 ∨ b % 2^j = 0 ∨ a % 2^j = b % 2^j) :
+    Ddef j (2^j + 2^(j+1)) a b (j+2) = 1 := by
+  have hp : 0 < 2^j := Nat.two_pow_pos j
+  have hpow : (2:Nat)^(j+1) = 2^j * 2 := by rw [Nat.pow_succ]
+  have hpow2 : (2:Nat)^(j+2) = 2^(j+1) * 2 := by rw [Nat.pow_succ]
+  have hlev : (j+1) + 1 = j + 2 := by omega
+  have hYlt : (2:Nat)^j + 2^(j+1) < 2^(j+2) := by omega
+  have hYmod : ((2:Nat)^j + 2^(j+1)) % 2^(j+1) = 2^j := by
+    rw [Nat.add_mod_right]; exact Nat.mod_eq_of_lt (by omega)
+  have hYlow : ((2:Nat)^j + 2^(j+1)) % 2^j = 0 := by
+    rw [← mod_pow_mod j (j+1) _ (by omega), hYmod, Nat.mod_self]
+  have haY : a ^^^ (2^j + 2^(j+1)) < 2^(j+2) := Nat.xor_lt_two_pow ha hYlt
+  have hbY : b ^^^ (2^j + 2^(j+1)) < 2^(j+2) := Nat.xor_lt_two_pow hb hYlt
+  have hxlow : ∀ x : Nat, (x ^^^ (2^j + 2^(j+1))) % 2^j = x % 2^j := by
+    intro x; rw [xor_mod_two_pow, hYlow, Nat.xor_zero]
+  have hxmid : ∀ x : Nat, (x ^^^ (2^j + 2^(j+1))) % 2^(j+1) = (x % 2^(j+1)) ^^^ 2^j := by
+    intro x; rw [xor_mod_two_pow, hYmod]
+  have hsplit : ∀ x : Nat, x % 2^j = 0 → x % 2^(j+1) = 0 ∨ x % 2^(j+1) = 2^j := by
+    intro x hx
+    have h1 : x % 2^(j+1) % 2^j = 0 := by rw [mod_pow_mod j (j+1) x (by omega)]; exact hx
+    rcases low_split j (x % 2^(j+1)) (Nat.mod_lt _ (Nat.two_pow_pos (j+1))) with h | h
+    · left; rw [h, h1]
+    · right; rw [h, h1, Nat.zero_add]
+  have keyA : ∀ x y : Nat, x < 2^(j+2) → y < 2^(j+2) → x % 2^j = 0 →
+      gdisc j x y (j+2) * gdisc j (x ^^^ (2^j + 2^(j+1))) (y ^^^ (2^j + 2^(j+1))) (j+2)
+        = psg (y % 2^j) := by
+    intro x y hx hy hx0
+    have hxY : x ^^^ (2^j + 2^(j+1)) < 2^(j+2) := Nat.xor_lt_two_pow hx hYlt
+    have hyY : y ^^^ (2^j + 2^(j+1)) < 2^(j+2) := Nat.xor_lt_two_pow hy hYlt
+    rw [← hlev] at hx hy hxY hyY
+    rcases hsplit x hx0 with h | h
+    · have e1 : gdisc j x y ((j+1)+1) = 1 := gdisc_block_zero j 1 x y hx hy h
+      have e2 : (x ^^^ (2^j + 2^(j+1))) % 2^(j+1) = 2^j := by
+        rw [hxmid x, h, Nat.zero_xor]
+      have e3 := gdisc_lsb j 1 (x ^^^ (2^j + 2^(j+1))) (y ^^^ (2^j + 2^(j+1))) hxY hyY e2
+      show gdisc j x y ((j+1)+1) * gdisc j _ _ ((j+1)+1) = _
+      rw [e1, e3, hxlow y, Int.one_mul]
+    · have e1 := gdisc_lsb j 1 x y hx hy h
+      have e2 : (x ^^^ (2^j + 2^(j+1))) % 2^(j+1) = 0 := by
+        rw [hxmid x, h, Nat.xor_self]
+      have e3 : gdisc j (x ^^^ (2^j + 2^(j+1))) (y ^^^ (2^j + 2^(j+1))) ((j+1)+1) = 1 :=
+        gdisc_block_zero j 1 _ _ hxY hyY e2
+      show gdisc j x y ((j+1)+1) * gdisc j _ _ ((j+1)+1) = _
+      rw [e1, e3, Int.mul_one]
+  unfold Ddef
+  rcases hcond with h | h | h
+  · rw [keyA a b ha hb h, h, psg_zero, Int.mul_one]
+    exact psg_sq (b % 2^j)
+  · rw [gdisc_symm (j+2) j a b (by omega) ha hb,
+        gdisc_symm (j+2) j (a ^^^ (2^j + 2^(j+1))) (b ^^^ (2^j + 2^(j+1))) (by omega) haY hbY,
+        keyA b a hb ha h, h, psg_zero, Int.mul_one]
+    exact psg_sq (a % 2^j)
+  · have htlt : a % 2^j < 2^j := Nat.mod_lt _ hp
+    have hAm : a % 2^(j+1) % 2^j = a % 2^j := mod_pow_mod j (j+1) a (by omega)
+    have hBm : b % 2^(j+1) % 2^j = b % 2^j := mod_pow_mod j (j+1) b (by omega)
+    have hAeq := low_split j (a % 2^(j+1)) (Nat.mod_lt _ (Nat.two_pow_pos (j+1)))
+    have hBeq := low_split j (b % 2^(j+1)) (Nat.mod_lt _ (Nat.two_pow_pos (j+1)))
+    rw [hAm] at hAeq
+    rw [hBm, ← h] at hBeq
+    have hxA : ∀ z : Nat, z < 2^j → (z + 2^j) ^^^ 2^j = z := by
+      intro z hz
+      rw [← xor_pow_low j z hj hz, Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+    have hjl : j < j + 1 := by omega
+    have hGG : gdisc j a b (j+2)
+        * gdisc j (a ^^^ (2^j + 2^(j+1))) (b ^^^ (2^j + 2^(j+1))) (j+2) = 1 := by
+      have ha' := ha; have hb' := hb; have haY' := haY; have hbY' := hbY
+      rw [← hlev] at ha' hb' haY' hbY'
+      have e1 : gdisc j a b ((j+1)+1)
+          = gdisc j (a % 2^(j+1)) (b % 2^(j+1)) (j+1) :=
+        gdisc_trunc j j hjl 1 a b ha' hb'
+      have e2 : gdisc j (a ^^^ (2^j + 2^(j+1))) (b ^^^ (2^j + 2^(j+1))) ((j+1)+1)
+          = gdisc j ((a % 2^(j+1)) ^^^ 2^j) ((b % 2^(j+1)) ^^^ 2^j) (j+1) := by
+        rw [gdisc_trunc j j hjl 1 _ _ haY' hbY', hxmid a, hxmid b]
+      show gdisc j a b ((j+1)+1) * gdisc j _ _ ((j+1)+1) = 1
+      rw [e1, e2]
+      have hlt1 : a % 2^j < 2^(j+1) := by omega
+      have hlt2 : a % 2^j + 2^j < 2^(j+1) := by omega
+      rcases hAeq with hA' | hA' <;> rcases hBeq with hB' | hB' <;> rw [hA', hB']
+      · rw [xor_pow_low j (a % 2^j) hj htlt,
+            gdisc_diag_one j j (a % 2^j) hjl hlt1, gdisc_diag_one j j (a % 2^j + 2^j) hjl hlt2]
+        decide
+      · rw [xor_pow_low j (a % 2^j) hj htlt, hxA (a % 2^j) htlt,
+            gdisc_symm (j+1) j (a % 2^j) (a % 2^j + 2^j) hjl hlt1 hlt2,
+            gdisc_seam_diag j (a % 2^j) hj htlt]
+        exact psg_sq (a % 2^j)
+      · rw [xor_pow_low j (a % 2^j) hj htlt, hxA (a % 2^j) htlt,
+            gdisc_symm (j+1) j (a % 2^j) (a % 2^j + 2^j) hjl hlt1 hlt2,
+            gdisc_seam_diag j (a % 2^j) hj htlt]
+        exact psg_sq (a % 2^j)
+      · rw [hxA (a % 2^j) htlt, gdisc_diag_one j j (a % 2^j + 2^j) hjl hlt2, gdisc_diag_one j j (a % 2^j) hjl hlt1]
+        decide
+    rw [hGG, Int.one_mul, h]
+    exact psg_sq (b % 2^j)
+
+/-! ### The closed form of `Q` at the label `3·2^j`
+
+Both descent steps carry the label **high**, so the two signs cancel; what is left is `Qgen` or
+`Qgen'` at label `0`, which is `1`. The side conditions of the eight `hi` rows involved are
+exactly `a % 2^j ≠ 0`, `b % 2^j ≠ 0`, `a % 2^j ≠ b % 2^j` — so off that locus `Q = +1`, and the
+locus is precisely where `Q = −1`. -/
+
+theorem Qgen_zero_label (x y m : Nat) : Qgen 0 x y m = 1 := by
+  unfold Qgen
+  rw [Nat.xor_zero, Nat.xor_zero]
+  have h := cdSq x y m
+  rcases cdSigma_pm m x y with e | e <;> rw [e] <;> decide
+
+theorem Qgen'_zero_label (x y m : Nat) : Qgen' 0 x y m = 1 := by
+  unfold Qgen'
+  rw [Nat.xor_zero, Nat.xor_zero]
+  rcases cdSigma_pm m x y with e | e <;> rcases cdSigma_pm m y x with e2 | e2 <;>
+    rw [e, e2] <;> decide
+
+/-- Step 2 of the descent: at the label `2^j`, level `j+1`. -/
+theorem Q'_pow2_level (j x y : Nat) (hj : j ≠ 0) (hx : x < 2^(j+1)) (hy : y < 2^(j+1))
+    (hr : x % 2^j ≠ 0) (hs : y % 2^j ≠ 0) (hrs : x % 2^j ≠ y % 2^j) :
+    Qgen' (2^j) x y (j+1) = -1 := by
+  obtain ⟨i, rfl⟩ : ∃ i, j = i + 1 := ⟨j - 1, by omega⟩
+  have hP : (0:Nat) < 2^(i+1) := Nat.two_pow_pos (i+1)
+  have hupm : ∀ z : Nat, z < 2^(i+1) → (z + 2^(i+1)) % 2^(i+1) = z := by
+    intro z h; rw [Nat.add_mod_right]; exact Nat.mod_eq_of_lt h
+  show Qgen' (2^(i+1)) x y (i+2) = -1
+  rcases split_top hx with hxl | ⟨r, hrl, rfl⟩ <;> rcases split_top hy with hyl | ⟨s, hsl, rfl⟩
+  · rw [Nat.mod_eq_of_lt hxl] at hr hrs
+    rw [Nat.mod_eq_of_lt hyl] at hs hrs
+    have hrow := Q'red_hi_ll i 0 x y hP hxl hyl hr hs
+      (by rwa [Nat.xor_zero]) (by rwa [Nat.xor_zero]) hrs
+    rw [Nat.zero_add] at hrow
+    rw [hrow, Qgen'_zero_label]
+  · rw [Nat.mod_eq_of_lt hxl] at hr hrs
+    rw [hupm s hsl] at hs hrs
+    have hrow := Q'red_hi_lu i 0 x s hP hxl hsl hs
+      (by rwa [Nat.xor_zero]) (by rwa [Nat.xor_zero]) hrs
+    rw [Nat.zero_add] at hrow
+    rw [hrow, Qgen_zero_label]
+  · rw [hupm r hrl] at hr hrs
+    rw [Nat.mod_eq_of_lt hyl] at hs hrs
+    have hrow := Q'red_hi_ul i 0 r y hP hrl hyl hr hs
+      (by rwa [Nat.xor_zero]) (by rwa [Nat.xor_zero]) hrs
+    rw [Nat.zero_add] at hrow
+    rw [hrow, Qgen_zero_label]
+  · rw [hupm r hrl] at hr hrs
+    rw [hupm s hsl] at hs hrs
+    have hrow := Q'red_hi_uu i 0 r s hP hrl hsl hr hs
+      (by rwa [Nat.xor_zero]) (by rwa [Nat.xor_zero]) hrs
+      (by rw [Nat.xor_zero]; intro h; exact hrs (xor_zero_eq r s h))
+    rw [Nat.zero_add] at hrow
+    rw [hrow, Qgen'_zero_label]
+
+/-- **`Q` at the label `3·2^j` is `+1` off the low-part locus.** -/
+theorem Q_three_pow2 (j a b : Nat) (hj : j ≠ 0) (ha : a < 2^(j+2)) (hb : b < 2^(j+2))
+    (hr : a % 2^j ≠ 0) (hs : b % 2^j ≠ 0) (hrs : a % 2^j ≠ b % 2^j) :
+    Qgen (2^j + 2^(j+1)) a b (j+2) = 1 := by
+  have hP : (2:Nat)^j < 2^(j+1) := Nat.pow_lt_pow_right (by omega) (by omega)
+  have hdrop : ∀ z : Nat, (z + 2^(j+1)) % 2^j = z % 2^j :=
+    fun z => add_pow_mod j (j+1) z (by omega)
+  have hne0 : ∀ z : Nat, z % 2^j ≠ 0 → z ≠ 0 := by
+    intro z h e; rw [e, Nat.zero_mod] at h; exact h rfl
+  have hnep : ∀ z : Nat, z % 2^j ≠ 0 → z ^^^ 2^j ≠ 0 := by
+    intro z h e
+    have h2 := xor_zero_eq z (2^j) e
+    rw [h2, Nat.mod_self] at h; exact h rfl
+  have hxor3 : ∀ x y : Nat, x % 2^j ≠ y % 2^j → x ^^^ y ^^^ 2^j ≠ 0 := by
+    intro x y h e
+    apply h
+    have h2 := congrArg (fun z => z % 2^j) (xor_zero_eq (x ^^^ y) (2^j) e)
+    simp only [xor_mod_two_pow, Nat.mod_self] at h2
+    exact xor_zero_eq _ _ h2
+  rcases split_top ha with hal | ⟨u, hu, rfl⟩ <;> rcases split_top hb with hbl | ⟨v, hv, rfl⟩
+  · rw [Qred_hi_ll j (2^j) a b hP hal hbl (hne0 b hs) (hnep b hs),
+        Q'_pow2_level j a b hj hal hbl hr hs hrs]
+    decide
+  · rw [hdrop v] at hs hrs
+    rw [Qred_hi_lu j (2^j) a v hP hal hv (hne0 a hr) (hne0 v hs) (hnep a hr) (hnep v hs)
+          (hxor3 a v hrs),
+        Q'_pow2_level j v a hj hv hal hs hr (fun e => hrs e.symm)]
+    decide
+  · rw [hdrop u] at hr hrs
+    rw [Qred_hi_ul j (2^j) u b hP hu hbl (hne0 b hs) (hnep b hs),
+        Q'_pow2_level j u b hj hu hbl hr hs hrs]
+    decide
+  · rw [hdrop u] at hr hrs
+    rw [hdrop v] at hs hrs
+    rw [Qred_hi_uu j (2^j) u v hP hu hv (hne0 u hr) (hne0 v hs) (hnep u hr) (hnep v hs)
+          (hxor3 u v hrs),
+        Q'_pow2_level j v u hj hv hu hs hr (fun e => hrs e.symm)]
+    decide
+
+/-- **(♦) HOLDS FOR THE LABEL CLASS `Y₀ = 3·2^j`, ∀n.** Off the low-part locus `Q = +1`
+    (`Q_three_pow2`), so `collapse` makes the hypothesis unsatisfiable there; on it, `D = +1`
+    (`D_low_cond`). -/
+theorem diamond_three (j n Y a b : Nat) (hj : j ≠ 0) (hn : j+2 ≤ n)
+    (hY : Y < 2^n) (ha : a < 2^n) (hb : b < 2^n)
+    (hY0 : Y % 2^(j+2) = 2^j + 2^(j+1)) (hsg : dsgnN j n Y = 1) (hw : Qgen' Y a b n = -1) :
+    Ddef j (2^j + 2^(j+1)) (a % 2^(j+2)) (b % 2^(j+2)) (j+2) = 1 := by
+  have hp2 : (0:Nat) < 2^(j+2) := Nat.two_pow_pos (j+2)
+  have hpow : (2:Nat)^(j+1) = 2^j * 2 := by rw [Nat.pow_succ]
+  have hpow2 : (2:Nat)^(j+2) = 2^(j+1) * 2 := by rw [Nat.pow_succ]
+  have hp : 0 < 2^j := Nat.two_pow_pos j
+  have hmm : ∀ x : Nat, x % 2^(j+2) % 2^j = x % 2^j :=
+    fun x => mod_pow_mod j (j+2) x (by omega)
+  have hYlow : ((2:Nat)^j + 2^(j+1)) % 2^j = 0 := by
+    rw [Nat.add_mod, Nat.mod_self, Nat.zero_add]
+    have h : (2:Nat)^(j+1) % 2^j = 0 := by rw [hpow]; exact Nat.mul_mod_right _ _
+    rw [h, Nat.zero_mod]
+  by_cases hcond : a % 2^j = 0 ∨ b % 2^j = 0 ∨ a % 2^j = b % 2^j
+  · refine D_low_cond j (a % 2^(j+2)) (b % 2^(j+2)) hj (Nat.mod_lt _ hp2) (Nat.mod_lt _ hp2) ?_
+    rw [hmm a, hmm b]; exact hcond
+  · exfalso
+    have f1 : a % 2^j ≠ 0 := fun e => hcond (Or.inl e)
+    have f2 : b % 2^j ≠ 0 := fun e => hcond (Or.inr (Or.inl e))
+    have f3 : a % 2^j ≠ b % 2^j := fun e => hcond (Or.inr (Or.inr e))
+    have hYj : Y % 2^j = 0 := by rw [← hmm Y, hY0, hYlow]
+    have hnd : NDeg j Y a b := by
+      refine ⟨?_, ?_, ?_, ?_, ?_, ?_⟩
+      · intro e; exact f1 (by rw [← hmm a, e, Nat.zero_mod])
+      · intro e; exact f2 (by rw [← hmm b, e, Nat.zero_mod])
+      · intro e
+        apply f1
+        have h2 := congrArg (fun z => z % 2^j) e
+        simp only [hmm] at h2
+        rw [h2]; exact hYj
+      · intro e
+        apply f2
+        have h2 := congrArg (fun z => z % 2^j) e
+        simp only [hmm] at h2
+        rw [h2]; exact hYj
+      · intro e; exact f3 (by rw [← hmm a, ← hmm b, e])
+      · intro e
+        apply f3
+        have h2 := congrArg (fun z => z % 2^j) e
+        simp only [xor_mod_two_pow, hmm] at h2
+        rw [hYj] at h2
+        exact xor_zero_eq _ _ h2
+    have hQ := Q_three_pow2 j (a % 2^(j+2)) (b % 2^(j+2)) hj
+      (Nat.mod_lt _ hp2) (Nat.mod_lt _ hp2)
+      (by rw [hmm a]; exact f1) (by rw [hmm b]; exact f2) (by rw [hmm a, hmm b]; exact f3)
+    rw [collapse j n Y a b hn hY ha hb hnd, hY0, hsg, hQ] at hw
+    exact absurd hw (by decide)
+
+/-- **(♦), BOTH LABEL CLASSES, ∀n.** `lsb Y = j` leaves exactly two bottom labels, `2^j` and
+    `3·2^j`; the sign disjunction is what `N12` says even weight is. -/
+theorem diamond_all (j n Y a b : Nat) (hj : j ≠ 0) (hn : j+2 ≤ n)
+    (hY : Y < 2^n) (ha : a < 2^n) (hb : b < 2^n)
+    (hsign : dsgnN j n Y = -1 ∧ Y % 2^(j+2) = 2^j ∨
+             dsgnN j n Y = 1 ∧ Y % 2^(j+2) = 2^j + 2^(j+1))
+    (hw : Qgen' Y a b n = -1) :
+    Ddef j (Y % 2^(j+2)) (a % 2^(j+2)) (b % 2^(j+2)) (j+2) = 1 := by
+  rcases hsign with ⟨hsg, hY0⟩ | ⟨hsg, hY0⟩
+  · rw [hY0]
+    exact diamond_pow2 j n Y a b hn hY ha hb hY0 hsg hw
+  · rw [hY0]
+    exact diamond_three j n Y a b hj hn hY ha hb hY0 hsg hw
 
 end SounioZDFiberAntisym
 

@@ -1075,6 +1075,93 @@ def main():
           f"no hypothesis at all, and it holds precisely for j <= 2. The two boundaries are the "
           f"same boundary, and that is where the next rung starts")
 
+    # ---- N30  the ND half for Y0 = 3*2^j -- PROVEN, and pinned -------------------------------
+    # Q at the label 3*2^j has a COMPLETE closed form, and it is the mod-2^j shadow of the six
+    # lines:  Q = -1  <=>  a%2^j = 0 or b%2^j = 0 or a%2^j = b%2^j.  Off that locus the two-step
+    # descent applies -- both steps carry the label HIGH so the signs cancel, leaving Qgen/Qgen'
+    # at label 0, which is 1 -- and ON it, D = +1 because g is BILINEAR there.
+    n30a_bad = n30a_tot = 0
+    n30b_bad = n30b_tot = 0
+    for j in (1, 2, 3, 4, 5):
+        M = 1 << (j + 2)
+        L = 1 << j
+        Y0 = 3 << j
+        Sm = sign_table_fast(j + 2).astype(np.int64)
+        gm = gmat(Sm, M, j)
+        A, B = np.meshgrid(np.arange(M), np.arange(M), indexing="ij")
+        pl = np.array([_psg(x % L) for x in range(M)])
+        D = gm * gm[A ^ Y0, B ^ Y0] * np.outer(pl, pl)
+        Qu = Sm * Sm[A ^ Y0, B ^ Y0] * Sm[A, B ^ Y0] * Sm[A ^ Y0, B]
+        cond = ((A % L) == 0) | ((B % L) == 0) | ((A % L) == (B % L))
+        n30a_bad += int(((Qu == -1) != cond).sum())
+        n30a_tot += M * M
+        n30b_bad += int(((D != 1) & cond).sum())
+        n30b_tot += int(cond.sum())
+    # (c) the bilinear closed form for g holds exactly on that locus
+    n30c_bad = n30c_tot = 0
+    for m in (4, 5, 6, 7):
+        M = 1 << m
+        Sm = sign_table_fast(m).astype(np.int64)
+        for j in range(1, m):
+            g = gmat(Sm, M, j)
+            L = 1 << j
+            for x in range(M):
+                for y in range(M):
+                    if not (x % L == 0 or y % L == 0 or x % L == y % L):
+                        continue
+                    cx = (x & 1) ^ ((x >> j) & 1)
+                    cy = (y & 1) ^ ((y >> j) & 1)
+                    n30c_tot += 1
+                    if g[x, y] != (-1) ** ((cx * pj(y, j) + cy * pj(x, j)) % 2):
+                        n30c_bad += 1
+    # (d) NON-VACUITY of `diamond_three`
+    n30d_rows = []
+    for j in (1, 2, 3):
+        n = j + 4
+        N = 1 << n
+        M = 1 << (j + 2)
+        L = 1 << j
+        Y0 = 3 << j
+        Sn = sign_table_fast(n).astype(np.int64)
+        Sm = sign_table_fast(j + 2).astype(np.int64)
+        gm = gmat(Sm, M, j)
+        A, B = np.meshgrid(np.arange(M), np.arange(M), indexing="ij")
+        pl = np.array([_psg(x % L) for x in range(M)])
+        D = gm * gm[A ^ Y0, B ^ Y0] * np.outer(pl, pl)
+        cnt = bad = 0
+        for Y in range(1, N):
+            if Y % M != Y0 or bin(Y).count("1") % 2:
+                continue
+            if (-1) ** (bin(Y >> (j + 2)).count("1")) != 1:
+                continue          # dsgnN = +1
+            for a in range(N):
+                for b in range(N):
+                    if _Qp2(Sn, Y, a, b) != -1:
+                        continue
+                    cnt += 1
+                    if D[a % M, b % M] != 1:
+                        bad += 1
+        n30d_rows.append((j, cnt, bad))
+    n30 = (n30a_bad == 0 and n30b_bad == 0 and n30c_bad == 0
+           and all(c > 0 and b == 0 for _, c, b in n30d_rows))
+    ok["N30"] = n30
+    print(f"N30_NDHALF  [Lean-proven forall n: `diamond_three`, and with N29 `diamond_all`] the ND "
+          f"half for Y0 = 3*2^j {'OK' if n30 else 'FAIL'} -- (a) Q(3*2^j,a,b) = -1 IFF "
+          f"a%2^j = 0 or b%2^j = 0 or a%2^j = b%2^j: {n30a_bad}/{n30a_tot} mismatches -- the "
+          f"mod-2^j SHADOW of the six lines; (b) D = +1 on that whole locus: "
+          f"{n30b_bad}/{n30b_tot}; (c) the bilinear closed form "
+          f"g(x,y) = (-1)^(c(x)p_j(y)+c(y)p_j(x)) with c = bit0 xor bit_j holds EXACTLY there: "
+          f"{n30c_bad}/{n30c_tot} (levels 4..7, every j) -- that is why D = +1, the exponents "
+          f"cancel because xor-Y0 flips c and fixes p_j; (d) NON-VACUITY of `diamond_three`: "
+          f"{'; '.join(f'j={a}: {b} witnesses, {c} with D != +1' for a, b, c in n30d_rows)}. "
+          f"*** PROVEN forall n: `Q_three_pow2` (off the locus Q = +1, by a two-step descent "
+          f"whose two HIGH labels cancel their signs, leaving Qgen/Qgen' at label 0 = 1), "
+          f"`D_low_cond` (on the locus D = +1), hence `diamond_three` and, with the Y0 = 2^j "
+          f"class, `diamond_all`: (diamond)'s conclusion holds at the bottom for EVERY witness, "
+          f"BOTH label classes, forall n. REACH subset {{D=+1}} IS PROVEN. What is left in the "
+          f"chain is N12/N27's popcount arithmetic -- that even weight IS the dsgnN sign "
+          f"disjunction `diamond_all` takes as its hypothesis ***")
+
     print("=" * 78)
     if all(ok.values()):
         print("CD_TOWER_ZDL2R_VERDICT DIAMOND_IS_A_FINITE_STABLE_FAMILY__GAP_LOCUS_INCLUDED")

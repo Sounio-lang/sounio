@@ -462,12 +462,41 @@ lines, and `D_lines` finishes. The even-weight condition enters exactly once, as
 
 `N29(f)` pins non-vacuity: 752 / 1648 / 3440 witnesses at `j = 1,2,3`, and `D = +1` on every one.
 
-**What is still open.** Only the `ND` half, for `Y₀ = 3·2^j`. There the `D = −1` locus is
-genuinely non-empty — `N10` puts its onset at `j ≥ 3`, which is *exactly* where `g` stops being
-F2-bilinear (`N3`). The bilinear closed form
-`g(x,y) = (−1)^{c(x)p_j(y) + c(y)p_j(x)}`, `c(x) = bit₀(x) ⊕ bit_j(x)`, gives `D ≡ +1` with **no
-hypothesis at all**, and it holds precisely for `j ≤ 2`. The two boundaries are the same boundary,
-and that is where the next rung should start. Also open: `N27`'s even-weight bookkeeping.
+### ★★★ The `ND` half falls too — `REACH ⊆ {D = +1}` is proven
+
+`Q` at the label `3·2^j` has a **complete closed form**, and it is the `mod 2^j` **shadow** of the
+six lines:
+
+```
+Qgen (3·2^j) a b (j+2) = −1   ⟺   a % 2^j = 0  ∨  b % 2^j = 0  ∨  a % 2^j = b % 2^j
+```
+
+*Off* that locus (`Q_three_pow2`): the two-step descent applies, **both** steps carry the label
+high, so the two signs cancel and what is left is `Qgen`/`Qgen'` at label `0`, which is `1`. The
+side conditions of the eight `hi` rows involved are exactly the three low-part conditions — so
+`Q = +1` there, and `collapse` makes (♦)'s hypothesis unsatisfiable.
+
+*On* it (`D_low_cond`): `D = +1`, because **`g` is bilinear there** —
+`g(x,y) = (−1)^{c(x)p_j(y) + c(y)p_j(x)}` with `c(x) = bit₀(x) ⊕ bit_j(x)`. Since `⊕Y₀` flips `c`
+and fixes `p_j`, the exponents cancel in pairs. `N30(c)` pins that the bilinear form holds
+**exactly** on this locus — which is also why `N10`'s `D = −1` onset at `j ≥ 3` coincides with
+`N3`'s F2-bilinearity boundary: the same boundary, twice.
+
+The two new base computations are `sigma_xor_one` (`σ(x⊕1,x) = (−1)^{popcount x}`, with `x = 1`
+the single exception) and `gdisc_seam_diag` (`g` across the seam at equal low parts).
+
+```lean
+diamond_three : Y % 2^(j+2) = 2^j + 2^(j+1) → dsgnN j n Y = 1 → Qgen' Y a b n = −1 → Ddef … = 1
+diamond_all   : (dsgnN = −1 ∧ Y₀ = 2^j) ∨ (dsgnN = 1 ∧ Y₀ = 3·2^j) → Qgen' Y a b n = −1
+                → Ddef j Y₀ (a % 2^{j+2}) (b % 2^{j+2}) (j+2) = 1
+```
+
+**`lsb Y = j` leaves exactly two bottom labels, and both are done.** `REACH ⊆ {D = +1}` — the last
+measured link of L2 — is proven ∀n, kernel-checked. `N30(d)` pins non-vacuity.
+
+**What is still open.** `N12`/`N27`'s popcount arithmetic: that **even weight is** the sign
+disjunction `diamond_all` takes as its hypothesis. That is the only remaining measured step in the
+chain.
 
 **The correction.** `N15`'s clean-locus predicate does **not** cover `REACH`: for `Y₀ = 2^j` there
 are 8, 16, 32, 64 reachable points outside it at `j = 0,1,2,3`. The blocked tuples land strictly
@@ -517,4 +546,4 @@ outside the family §2c described. `REACH`, not that predicate, is the object.
 python3 scripts/research/cd_tower_zd_fiber_l2_reduction_contract.py
 ```
 
-Thirty clauses, `N0`–`N29`, single verdict token. Runs in about 17 s.
+Thirty-one clauses, `N0`–`N30`, single verdict token. Runs in about 17 s.
