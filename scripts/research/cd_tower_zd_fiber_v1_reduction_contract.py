@@ -768,6 +768,203 @@ def main():
             "in ul and the HIGH-label constant 6e-10, whose reflection structure is the same. "
             "(III) is untouched; (d) IS NOT CLOSED ***")
 
+    # ---- W15  BOTH CONSTANTS, SLICE BY SLICE, WITH COVERAGE --------------------------------
+    # W14 left two things measured: the single +1 boundary term in the low-label `ul`, and the
+    # whole high-label constant 6e-10. Both close the same way. Every failure slice of every
+    # reduction row lies on the TWELVE-CONDITION LOCUS where Qgen = -1 -- the six "= 0"
+    # degeneracies (`Qgen_degen`) and the six "= H" gap roots (`Qgen_H_left_*`, `Qgen_H_right_*`,
+    # `Qgen_H_diff_*`) -- and there `Qgen'_on_neg` (proven forall n today) gives
+    #     Q' = -(chi(a^W, b^W) * chi(a, b^W)),
+    # with `chi_char` explicit. So Q' = +1 exactly when precisely one of
+    #     c1 = (a = W or b = W or a = b),   c2 = (a = 0 or b = W or b = a^W)
+    # holds. That single table prices all 16 high-label and all 15 low-label slices.
+    # This clause asserts, per (m, W'), and for BOTH label parities:
+    #   (1) each slice's value-set is the predicted SINGLETON,
+    #   (2) the row's applies-domain and the slices are disjoint and COVER the quadrant,
+    #   (3) the applies-part equals the level-(m-1) prediction (sign +1 low / -1 high),
+    #   (4) the M = N' bridge that the high-label lu/ul quadrants need,
+    #   (5) the four quadrant totals and the grand total.
+    def _w15(m, Wl, high, S, Sp):
+        e = 1 << (m - 1)
+        W = Wl + e if high else Wl
+        bad = [0]
+
+        def chk(c):
+            if not c:
+                bad[0] += 1
+
+        def sl(pairs, want, f):
+            lst = list(pairs)
+            chk(bool(lst) and {f(a, b) for a, b in lst} == {want})
+            return len(lst), sum(1 for a, b in lst if f(a, b) == -1)
+
+        Np = sum(1 for a in range(1, e) for b in range(1, e)
+                 if a != b and _Qp(Sp, Wl, a, b) == -1)
+        P = (e - 1) * (e - 2)
+        # lemma A at level m-1: first arg = label -> +1 (`Qgen'_label_left`),
+        #                       second arg = label -> -1 (`Qgen'_label_right`)
+        chk({_Qp(Sp, Wl, Wl, b) for b in range(1, e) if b != Wl} == {1})
+        chk({_Qp(Sp, Wl, a, Wl) for a in range(1, e) if a != Wl} == {-1})
+        tot = {}
+
+        # ---- ll : a, b in [1,e), a != b
+        F = lambda a, b: _Qp(S, W, a, b)
+        dom = [(a, b) for a in range(1, e) for b in range(1, e) if a != b]
+        tot["ll"] = sum(1 for a, b in dom if F(a, b) == -1)
+        if high:
+            row = [(a, b) for a, b in dom if a != Wl and b != Wl]
+            app = sum(1 for a, b in row if F(a, b) == -1)
+            chk(app == sum(1 for a, b in row if _Qp(Sp, Wl, a, b) == 1))
+            chk(app == (e - 2) ** 2 - Np)
+            n1, g1 = sl([(Wl, b) for b in range(1, e) if b != Wl], -1, F)
+            n2, g2 = sl([(a, Wl) for a in range(1, e) if a != Wl], -1, F)
+            chk(len(row) + n1 + n2 == len(dom))
+            chk(tot["ll"] == app + g1 + g2 == e * e - 2 * e - Np)
+        else:
+            chk(tot["ll"] == sum(1 for a, b in dom if _Qp(Sp, Wl, a, b) == -1) == Np)
+
+        # ---- ul : a = u+e (u in [0,e)), b in [1,e)
+        F = lambda u, b: _Qp(S, W, u + e, b)
+        dom = [(u, b) for u in range(0, e) for b in range(1, e)]
+        tot["ul"] = sum(1 for u, b in dom if F(u, b) == -1)
+        if high:
+            row = [(u, b) for u, b in dom
+                   if u != 0 and u != Wl and b != Wl and u != b]
+            app = sum(1 for u, b in row if F(u, b) == -1)
+            chk(app == sum(1 for u, b in row if _Qu2(Sp, Wl, u, b) == 1))
+            chk(app == (e - 2) * (e - 3) - Np)
+            n, g = len(row), app
+            for pairs, want in [([(0, Wl)], 1),
+                                ([(0, b) for b in range(1, e) if b != Wl], -1),
+                                ([(Wl, Wl)], 1),
+                                ([(Wl, b) for b in range(1, e) if b != Wl], 1),
+                                ([(u, Wl) for u in range(1, e) if u != Wl], -1),
+                                ([(u, u) for u in range(1, e) if u != Wl], -1)]:
+                dn, dg = sl(pairs, want, F)
+                n, g = n + dn, g + dg
+            chk(n == len(dom))
+            chk(tot["ul"] == g == e * e - 2 * e - Np)
+        else:
+            chk(tot["ul"] == sum(1 for u, b in dom if _Qu2(Sp, Wl, u, b) == -1))
+            chk(tot["ul"] == Np + 4 * e - 6)          # <- the +1 boundary term, priced
+
+        # ---- lu : a in [1,e), b = v+e (v in [0,e))
+        F = lambda a, v: _Qp(S, W, a, v + e)
+        dom = [(a, v) for a in range(1, e) for v in range(0, e)]
+        tot["lu"] = sum(1 for a, v in dom if F(a, v) == -1)
+        if high:
+            row = [(a, v) for a, v in dom
+                   if v != 0 and a != Wl and v != Wl and a != v]
+            app = sum(1 for a, v in row if F(a, v) == -1)
+            chk(app == sum(1 for a, v in row if _Qu2(Sp, Wl, v, a) == 1))
+            chk(app == (e - 2) * (e - 3) - Np)
+            n, g = len(row), app
+            for pairs, want in [([(Wl, 0)], 1),
+                                ([(a, 0) for a in range(1, e) if a != Wl], -1),
+                                ([(Wl, v) for v in range(1, e)], -1),
+                                ([(a, Wl) for a in range(1, e) if a != Wl], -1),
+                                ([(a, a) for a in range(1, e) if a != Wl], -1)]:
+                dn, dg = sl(pairs, want, F)
+                n, g = n + dn, g + dg
+            chk(n == len(dom))
+            chk(tot["lu"] == g == e * e - e - 1 - Np)
+        else:
+            row = [(a, v) for a, v in dom if a != Wl]
+            chk(sum(1 for a, v in row if F(a, v) == -1)
+                == sum(1 for a, v in row if _Qu2(Sp, Wl, v, a) == -1))
+            chk({F(Wl, v) for v in range(0, e)} == {1})   # `Qgen'_label_left`: row-fail = +1
+            chk(tot["lu"] == Np + 3 * e - 6)
+
+        # ---- uu : a = u+e, b = v+e, u != v
+        F = lambda u, v: _Qp(S, W, u + e, v + e)
+        dom = [(u, v) for u in range(0, e) for v in range(0, e) if u != v]
+        tot["uu"] = sum(1 for u, v in dom if F(u, v) == -1)
+        row = [(u, v) for u, v in dom
+               if u != 0 and v != 0 and u != Wl and v != Wl and (u ^ v) != Wl]
+        app = sum(1 for u, v in row if F(u, v) == -1)
+        chk(app == sum(1 for u, v in row
+                       if _Qp(Sp, Wl, v, u) == (1 if high else -1)))
+        slices = ([([(0, v) for v in range(1, e)], -1),
+                   ([(Wl, 0)], 1),
+                   ([(u, 0) for u in range(1, e) if u != Wl], -1),
+                   ([(Wl, v) for v in range(1, e) if v != Wl], 1),
+                   ([(u, Wl) for u in range(1, e) if u != Wl], -1),
+                   ([(u, u ^ Wl) for u in range(1, e) if u != Wl], -1)] if high else
+                  [([(0, Wl)], 1),
+                   ([(0, v) for v in range(1, e) if v != Wl], -1),
+                   ([(Wl, 0)], 1),
+                   ([(u, 0) for u in range(1, e) if u != Wl], -1),
+                   ([(Wl, v) for v in range(1, e) if v != Wl], -1),
+                   ([(u, Wl) for u in range(1, e) if u != Wl], -1),
+                   ([(u, u ^ Wl) for u in range(1, e) if u != Wl], 1)])
+        n, g = len(row), app
+        for pairs, want in slices:
+            dn, dg = sl(pairs, want, F)
+            n, g = n + dn, g + dg
+        chk(n == len(dom))
+        chk(tot["uu"] == g)
+        chk(tot["uu"] == (e * e - e - 1 - Np) if high else tot["uu"] == Np + 3 * e - 6)
+
+        # ---- the M = N' bridge (high-label lu and ul)
+        if high:
+            d = [(a, v) for a in range(1, e) for v in range(1, e)
+                 if a != v and a != Wl and v != Wl]
+            chk(sum(1 for a, v in d if _Qu2(Sp, Wl, v, a) == -1) == Np)
+            chk(all(_Qu2(Sp, Wl, v, a) == _Qp(Sp, Wl, a, v)
+                    for a, v in d if (a ^ v) != Wl))
+            on6 = [(a, v) for a, v in d if (a ^ v) == Wl]
+            chk(len(on6) == e - 2)
+            chk({(_Qu2(Sp, Wl, v, a), _Qp(Sp, Wl, a, v)) for a, v in on6} == {(-1, 1)})
+
+        grand = sum(tot.values())
+        want = (4 * P - 4 * Np + 6 * e - 10) if high else (4 * Np + 10 * e - 18)
+        chk(grand == want)
+        return bad[0]
+
+    # all labels at m = 5, 6; a spread of nine at m = 7 (the m=7 sweep is O(e^2) per label and
+    # per parity -- this cap is DECLARED, not silent)
+    W15_LABELS = {5: list(range(1, 16)), 6: list(range(1, 32)),
+                  7: [1, 3, 6, 9, 17, 22, 31, 45, 63]}
+    w15_rows, w15 = [], True
+    for m in (5, 6, 7):
+        S, Sp = sign_table_fast(m), sign_table_fast(m - 1)
+        bad = sum(_w15(m, Wl, hi, S, Sp)
+                  for Wl in W15_LABELS[m] for hi in (False, True))
+        w15 = w15 and bad == 0
+        w15_rows.append((m, len(W15_LABELS[m]), bad))
+    # NULL CONTROL: the whole ledger rests on W' != 0 (`Qgen_degen` requires it, and Qgen 0 = +1).
+    # At W' = 0 it must FAIL, or the clause would be asserting something vacuously wide.
+    null_bad = sum(_w15(m, 0, hi, sign_table_fast(m), sign_table_fast(m - 1))
+                   for m in (5, 6) for hi in (False, True))
+    ok["W15"] = w15 and null_bad > 0
+    print(f"W15_LEDGER  BOTH LEVEL-CONSTANTS ARE DERIVED SLICE BY SLICE, WITH COVERAGE "
+          f"{'OK' if ok['W15'] else 'FAIL'} -- "
+          + "; ".join(f"m={a}: {b} labels x 2 parities, {c} violations"
+                      for a, b, c in w15_rows)
+          + f"; null control W'=0: {null_bad} violations (must be > 0). "
+            "EVERY failure slice of EVERY reduction row lies on the twelve-condition locus where "
+            "Qgen = -1: the six '= 0' degeneracies (`Qgen_degen`) and the six '= H' gap roots "
+            "(`Qgen_H_left_*`, `Qgen_H_right_*`, `Qgen_H_diff_*`), all proven forall n. There "
+            "`Qgen'_on_neg` -- proven forall n today, one rewrite off `Qgen'_eq_chi` -- gives "
+            "Q' = -(chi(a^W,b^W) * chi(a,b^W)), and `chi_char` makes both explicit: Q' = +1 "
+            "exactly when precisely ONE of c1 = (a=W or b=W or a=b), c2 = (a=0 or b=W or b=a^W) "
+            "holds. That one table prices all 16 high-label and all 15 low-label slices, and the "
+            "clause checks not only each slice's value but that the slices COVER the quadrant. "
+            "*** THE HIGH-LABEL CONSTANT IS DERIVED: ll = ul = e^2-2e-N', lu = uu = e^2-e-1-N', "
+            "summing to 4P' - 4N' + 6e - 10 with P' = (e-1)(e-2). The reflection is the MINUS "
+            "sign every high row carries (N11), which turns 'count the -1s' into 'count the +1s'. "
+            "The bridge it needs is M = N': the level-(m-1) Qgen count over the five-line-free "
+            "box equals the full Q' count, because the (e-2) pairs on the sixth line a^v = W' "
+            "carry Qgen = -1 but Q' = +1 (`Qgen'_coset_partner`), exactly cancelling the (e-2) "
+            "that lemma A's b = W' row (`Qgen'_label_right`) contributes while its a = W' row "
+            "(`Qgen'_label_left`) contributes none. *** AND W14's LEFTOVER IS PRICED: the "
+            "low-label ul = N' + 4e - 6, not lu + e as a fitted offset -- the u = 0 slice is "
+            "fully degenerate (a = H, `Qgen_H_left_low`) over all e-1 values of b, where lu's "
+            "v = 0 sits inside the per-a degenerate set. So BOTH constants, 10e-18 and 6e-10, "
+            "are now sums of Lean-priced pieces with no fitted term. HONEST SCOPE: the pointwise "
+            "closed forms are Lean forall n; the COUNTING (slice sizes, disjointness, coverage) "
+            "is on paper and pinned here at m = 5,6,7. (III) is untouched; (d) IS NOT CLOSED ***")
+
     print("=" * 78)
     if all(ok.values()):
         print("CD_TOWER_ZDV1_VERDICT C_CLOSED__V1_REDUCED_TO_D_ALONE__NOT_CLOSED")

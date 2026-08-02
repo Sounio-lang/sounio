@@ -4448,6 +4448,95 @@ theorem Qgen'_coset_partner (m W a : Nat) (hW : W < 2^m) (ha : a < 2^m)
   rw [hcancel, e1, e2]
   rcases cdSigma_pm m a (a ^^^ W) with h | h <;> rw [h] <;> decide
 
+/-! ## Tier 21: the value of `Q'` on the whole locus where `Q = -1`
+
+`Qgen_degen` (the six `= 0` degeneracies) and the `Qgen_H_*` family (the six `= H` gap roots)
+between them pin `Q = -1` on a twelve-condition locus. `Qgen'_eq_chi` factors `Q'` through `Q`
+and two commutation signs, and `chi_char` makes those explicit -- so ONE theorem prices every
+degenerate slice of the level descent. This is what the level-constants `10e-18` (low label)
+and `6e-10` (high label) are made of: every failure slice of every reduction row lies on that
+locus, and its value is read off here. -/
+
+private theorem chi_neg_of (m x y : Nat) (hx : x < 2^m) (hy : y < 2^m)
+    (h0 : x ≠ 0) (h1 : y ≠ 0) (h2 : x ≠ y) : chi x y m = -1 := by
+  have hc : ¬ (x = 0 ∨ y = 0 ∨ x = y) := by
+    intro hc
+    rcases hc with h | h | h
+    · exact h0 h
+    · exact h1 h
+    · exact h2 h
+  rw [chi_char m x y hx hy, if_neg hc]
+
+private theorem chi_one_left (m y : Nat) (hy : y < 2^m) : chi 0 y m = 1 := by
+  rw [chi_char m 0 y (Nat.two_pow_pos m) hy, if_pos (Or.inl rfl)]
+
+private theorem chi_one_right (m x : Nat) (hx : x < 2^m) : chi x 0 m = 1 := by
+  rw [chi_char m x 0 hx (Nat.two_pow_pos m), if_pos (Or.inr (Or.inl rfl))]
+
+/-- `W = b ⊕ W` forces `b = 0`. -/
+private theorem xor_self_ne (b W : Nat) (hb0 : b ≠ 0) : W ≠ b ^^^ W := by
+  intro h
+  apply hb0
+  have h2 : (b ^^^ W) ^^^ W = W ^^^ W := by rw [← h]
+  rw [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero] at h2
+  exact h2
+
+/-- **Wherever `Q = -1`, `Q'` is minus the product of the two commutation signs.** One
+    rewrite; the content is entirely `Qgen'_eq_chi`. Combined with `chi_char`, `Q' = +1`
+    exactly when precisely one of the two `chi`s is `-1`. -/
+theorem Qgen'_on_neg (m W a b : Nat) (hQ : Qgen W a b m = -1) :
+    Qgen' W a b m = - (chi (a ^^^ W) (b ^^^ W) m * chi a (b ^^^ W) m) := by
+  rw [Qgen'_eq_chi, hQ, Int.neg_one_mul, Int.neg_mul]
+
+/-- Line `a = 0`: `Q' = +1` (while `Q = -1`). -/
+theorem Qgen'_zero_left (m W b : Nat) (hW : W < 2^m) (hb : b < 2^m) (hW0 : W ≠ 0)
+    (hb0 : b ≠ 0) (hbW : b ≠ W) : Qgen' W 0 b m = 1 := by
+  have hbXlt : b ^^^ W < 2^m := Nat.xor_lt_two_pow hb hW
+  have hbX0 : b ^^^ W ≠ 0 := fun h => hbW (xor_zero_eq b W h)
+  have hQ : Qgen W 0 b m = -1 :=
+    Qgen_degen m W 0 b hW (Nat.two_pow_pos m) hb hW0 (Or.inl rfl)
+  rw [Qgen'_on_neg m W 0 b hQ, Nat.zero_xor,
+      chi_neg_of m W (b ^^^ W) hW hbXlt hW0 hbX0 (xor_self_ne b W hb0),
+      chi_one_left m (b ^^^ W) hbXlt]
+  decide
+
+/-- Line `a = W`: `Q' = +1`. This is "lemma A, first half" -- the slice the level descent
+    removes from the ll/uu quadrants contributes nothing to the resonance count. -/
+theorem Qgen'_label_left (m W b : Nat) (hW : W < 2^m) (hb : b < 2^m) (hW0 : W ≠ 0)
+    (hb0 : b ≠ 0) (hbW : b ≠ W) : Qgen' W W b m = 1 := by
+  have hbXlt : b ^^^ W < 2^m := Nat.xor_lt_two_pow hb hW
+  have hbX0 : b ^^^ W ≠ 0 := fun h => hbW (xor_zero_eq b W h)
+  have hQ : Qgen W W b m = -1 :=
+    Qgen_degen m W W b hW hW hb hW0 (Or.inr (Or.inr (Or.inl (Nat.xor_self W))))
+  rw [Qgen'_on_neg m W W b hQ, Nat.xor_self,
+      chi_one_left m (b ^^^ W) hbXlt,
+      chi_neg_of m W (b ^^^ W) hW hbXlt hW0 hbX0 (xor_self_ne b W hb0)]
+  decide
+
+/-- Line `b = 0`: `Q' = -1`. -/
+theorem Qgen'_zero_right (m W a : Nat) (hW : W < 2^m) (ha : a < 2^m) (hW0 : W ≠ 0)
+    (ha0 : a ≠ 0) (haW : a ≠ W) : Qgen' W a 0 m = -1 := by
+  have haXlt : a ^^^ W < 2^m := Nat.xor_lt_two_pow ha hW
+  have haX0 : a ^^^ W ≠ 0 := fun h => haW (xor_zero_eq a W h)
+  have hQ : Qgen W a 0 m = -1 :=
+    Qgen_degen m W a 0 hW ha (Nat.two_pow_pos m) hW0 (Or.inr (Or.inl rfl))
+  rw [Qgen'_on_neg m W a 0 hQ, Nat.zero_xor,
+      chi_neg_of m (a ^^^ W) W haXlt hW haX0 hW0 (fun h => xor_self_ne a W ha0 h.symm),
+      chi_neg_of m a W ha hW ha0 hW0 haW]
+  decide
+
+/-- Line `b = W`: `Q' = -1`. "Lemma A, second half" -- this slice contributes its FULL size
+    to the resonance count, and that asymmetry with `Qgen'_label_left` is exactly the `(e-2)`
+    that the high-label bridge `M = N'` has to absorb. -/
+theorem Qgen'_label_right (m W a : Nat) (hW : W < 2^m) (ha : a < 2^m) (hW0 : W ≠ 0) :
+    Qgen' W a W m = -1 := by
+  have haXlt : a ^^^ W < 2^m := Nat.xor_lt_two_pow ha hW
+  have hQ : Qgen W a W m = -1 :=
+    Qgen_degen m W a W hW ha hW hW0 (Or.inr (Or.inr (Or.inr (Or.inl (Nat.xor_self W)))))
+  rw [Qgen'_on_neg m W a W hQ, Nat.xor_self,
+      chi_one_right m (a ^^^ W) haXlt, chi_one_right m a ha]
+  decide
+
 end SounioZDFiberAntisym
 
 

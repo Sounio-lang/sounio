@@ -295,10 +295,98 @@ Qgen'_coset_partner : a ≠ 0 → a ⊕ W ≠ 0 → Qgen' W a (a ⊕ W) m = 1
 two lines, the same shape as `Qgen'_diag`: two factors square away by `cdSq`, the other two are
 self-pairings pinned by `sigma_self`.
 
-**What remains unpriced** is the single `+1` boundary term in `ul`, and the high-label constant
-`6e − 10`, whose reflection structure is the same.
+**What remained unpriced** — the single `+1` boundary term in `ul` and the high-label constant
+`6e − 10` — is closed in §8. Both fell to the same observation.
 
 **(III) is untouched. (d) is not closed, and V1 is not proven.**
+
+---
+
+## 8. Both constants, derived: one table prices every slice (`W15`, 2026-08-02)
+
+`W14` priced the low-label constant piece by piece but left two things measured: a `+1` boundary
+term in `ul`, and the whole high-label constant `6e − 10`. Both close at once, and the reason they
+resisted is that I had been pricing slices *one at a time*.
+
+### 8.1 The observation
+
+Each of the eight reduction rows carries side conditions, and where they fail the row says nothing.
+Those failure slices are exactly what the constants are made of. The point is:
+
+> **Every failure slice lies on the twelve-condition locus where `Qgen = −1`.**
+
+That locus was already closed ∀n, in two halves this lane proved long ago: the six `= 0`
+degeneracies (`Qgen_degen`) and the six `= H` gap roots (`Qgen_H_left_*`, `Qgen_H_right_*`,
+`Qgen_H_diff_*`, Tiers 9–10). Checking the fifteen low-label and sixteen high-label slices against
+it is mechanical — `a = W′` means `a ⊕ W = H`, `u = 0` means `a = H`, `u = b` means `a ⊕ b = H`,
+`u ⊕ v = W′` means `a ⊕ b ⊕ W = H`, and the rest are plain `= 0` degeneracies.
+
+And on that locus `Q′` has a closed form, because `Qgen'_eq_chi` factors it through `Q` and two
+commutation signs, both of which `chi_char` makes explicit. That is one rewrite:
+
+```lean
+Qgen'_on_neg : Qgen W a b m = -1 → Qgen' W a b m = -(chi (a ^^^ W) (b ^^^ W) m * chi a (b ^^^ W) m)
+```
+
+so, writing `c₁ = (a = W ∨ b = W ∨ a = b)` and `c₂ = (a = 0 ∨ b = W ∨ b = a ⊕ W)`,
+
+> `Q′ = +1` **exactly when precisely one of `c₁`, `c₂` holds.**
+
+One table, thirty-one slices. In particular the six degeneracy lines read `+1, +1, −1, −1, +1, +1`
+for `a = 0`, `a = W`, `b = 0`, `b = W`, `a = b`, `b = a ⊕ W` — four of which are now named
+theorems (`Qgen'_zero_left`, `Qgen'_label_left`, `Qgen'_zero_right`, `Qgen'_label_right`; the other
+two were already `Qgen'_diag` and `Qgen'_coset_partner`).
+
+### 8.2 The high-label ledger
+
+With `e = 2^{m−1}`, `W = W′ + e`, `P′ = (e−1)(e−2)`, `N′ = N(m−1, W′)`, every high row carries a
+**minus** sign (N11: the label is high), so counting `−1`s at level `m` becomes counting `+1`s at
+level `m−1` — that is the reflection.
+
+| quadrant | applies-part | failure `−1`s | total |
+|---|---|---|---|
+| `ll` | `(e−2)² − N′` | `2(e−2)` | `e² − 2e − N′` |
+| `ul` | `(e−2)(e−3) − N′` | `3(e−2)` | `e² − 2e − N′` |
+| `lu` | `(e−2)(e−3) − N′` | `4e − 7` | `e² − e − 1 − N′` |
+| `uu` | `(e−2)(e−3) − N′` | `4e − 7` | `e² − e − 1 − N′` |
+
+Summing: `4e² − 6e − 2 − 4N′ = 4P′ − 4N′ + 6e − 10`. **The high constant is derived.**
+
+The one non-obvious step is the bridge the `lu` and `ul` quadrants need:
+
+> `M = N′`, where `M` counts `Qgen(W′,·,·) = −1` over the five-line-free box.
+
+`M` is counted over `(e−2)(e−3)` pairs and `N′` over `(e−1)(e−2)`, so this is not "same function,
+same box". It holds because two `(e−2)`s cancel: off the sixth line `a ⊕ v = W′` the two agree, but
+**on** it `Qgen = −1` while `Q′ = +1` (`Qgen'_coset_partner`) — and that surplus exactly replaces
+the `(e−2)` that lemma A's `b = W′` row contributes (`Qgen'_label_right`, all `−1`) while its
+`a = W′` row contributes none (`Qgen'_label_left`, all `+1`).
+
+### 8.3 The low-label leftover
+
+The `+1` boundary term was an artifact of writing `ul = lu + e`. The honest form is
+
+```
+ll = N′        lu = uu = N′ + 3e − 6        ul = N′ + 4e − 6        total = 4N′ + 10e − 18
+```
+
+and the gap between `ul` and `lu` is structural, not a fitted offset: `ul`'s `u = 0` slice is
+`a = H`, fully degenerate over all `e−1` values of `b` (`Qgen_H_left_low`), whereas `lu`'s `v = 0`
+sits *inside* the per-`a` degenerate set and so is already counted.
+
+### 8.4 Scope, honestly
+
+The pointwise closed forms are Lean ∀n and kernel-clean. The **counting** — slice sizes,
+disjointness, coverage — is on paper, and `W15` pins it at `m = 5, 6, 7`: 55 labels × 2 parities,
+0 violations, and it checks coverage (`Σ|slice| = |quadrant|`), not just the values. Writing that
+check is what caught a genuine hole in my first pass: the high `ul` failure set was one pair short
+(`(u,b) = (W′,W′)`, a `+1` pair, so the totals had survived the omission).
+
+`W′ = 0` is the null control — `Qgen_degen` needs `W ≠ 0` — and the ledger fails there with 74
+violations, so the clause is not vacuously wide. Even `W′` (6, 22) pass, confirming the derivation
+uses only `W′ ≠ 0` and not the lane's `Llo = 8y+1` oddness.
+
+**(III) is still untouched. (d) is not closed, and V1 is not proven.**
 
 ---
 
