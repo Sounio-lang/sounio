@@ -1503,37 +1503,90 @@ fn lowerer_effect_list_has_name_ref(effects: &Option<Box<EffectList>>, target: s
     false
 }
 
+// SCO Step III — theory-carrying strategy selection.
+// Scientific effect sets install E(τ) by elevating compile_strategy to
+// PRECISION_PRESERVING so mid-end passes that key on strategy (epistemic
+// e-graph, chaotic refusal) see domain theory rather than STANDARD floats.
+// See docs/research/sco_etau_2026-08-02.md.
+// Marker: SCO_ETAU_INSTALL_V1
+fn lowerer_sco_scientific_effects_ref(effects: &Option<Box<EffectList>>) -> bool with Mut, Panic, Div {
+    if lowerer_effect_list_has_name_ref(effects, "NonAssoc") {
+        return true
+    }
+    if lowerer_effect_list_has_name_ref(effects, "Epistemic") {
+        return true
+    }
+    if lowerer_effect_list_has_name_ref(effects, "Observe") {
+        return true
+    }
+    false
+}
+
+// Marker: SCO_ETAU_STRATEGY_TRACE
+fn lowerer_sco_strategy_trace(s: i64) with Mut, Panic, Div {
+    // Optional runtime probe (Step IV non-vacuity). Same env/diag pattern as other lower paths.
+    if str_eq(read_env("SOUNIO_SCO_STRATEGY_TRACE"), "1") {
+        print("SCO_STRATEGY=")
+        print_int(s)
+        print("\n")
+    }
+}
+
 fn lowerer_compute_strategy_from_ast_ref(
     return_type: &Option<Box<TypeExpr>>,
     effects: &Option<Box<EffectList>>
 ) -> i64 with Mut, Panic, Div {
+    var strategy: i64 = IR_STRATEGY_STANDARD
     if lowerer_effect_list_has_name_ref(effects, "GPU") {
-        return IR_STRATEGY_GPU_KERNEL
+        strategy = IR_STRATEGY_GPU_KERNEL
+        lowerer_sco_strategy_trace(strategy)
+        return strategy
     }
     if lowerer_effect_list_has_name_ref(effects, "Prob") {
-        return IR_STRATEGY_PROBABILISTIC
+        strategy = IR_STRATEGY_PROBABILISTIC
+        lowerer_sco_strategy_trace(strategy)
+        return strategy
     }
     // A-layer-2: a `with Chaotic` function integrates a chaotic vector field, so the
     // e-graph must refuse float reassociation on it (dominates the return-type strategy).
     if lowerer_effect_list_has_name_ref(effects, "Chaotic") {
-        return IR_STRATEGY_PRECISION_PRESERVING_CHAOTIC
+        strategy = IR_STRATEGY_PRECISION_PRESERVING_CHAOTIC
+        lowerer_sco_strategy_trace(strategy)
+        return strategy
+    }
+
+    // SCO Step III–IV: NonAssoc / Epistemic / Observe carry E(τ) → precision-preserving.
+    // Ablation: SOUNIO_SCO_ABLATION=1 skips elevation (non-vacuity / adversarial off-switch).
+    // Marker: SCO_ETAU_ELEVATE_SCIENTIFIC_EFFECTS
+    // Marker: SCO_ETAU_ABLATION_ENV
+    // read_env is used on other lower paths without an IO effect row (diag pattern).
+    if !str_eq(read_env("SOUNIO_SCO_ABLATION"), "1") {
+        if lowerer_sco_scientific_effects_ref(effects) {
+            strategy = IR_STRATEGY_PRECISION_PRESERVING
+            lowerer_sco_strategy_trace(strategy)
+            return strategy
+        }
     }
 
     match *return_type {
         Some(type_node) => {
             let rk = (*type_node).kind
             if rk == TypeExprKind::TypeValidated {
-                IR_STRATEGY_AGGRESSIVE
+                strategy = IR_STRATEGY_AGGRESSIVE
             } else if rk == TypeExprKind::TypeKnowledge {
-                IR_STRATEGY_PRECISION_PRESERVING
+                strategy = IR_STRATEGY_PRECISION_PRESERVING
             } else if rk == TypeExprKind::TypeContest || rk == TypeExprKind::TypeRobust {
-                IR_STRATEGY_INSTRUMENTED
+                strategy = IR_STRATEGY_INSTRUMENTED
             } else {
-                IR_STRATEGY_STANDARD
+                strategy = IR_STRATEGY_STANDARD
             }
         }
-        None => IR_STRATEGY_STANDARD,
+        None => {
+            strategy = IR_STRATEGY_STANDARD
+        }
     }
+    lowerer_sco_strategy_trace(strategy)
+    strategy
 }
 
 fn lowerer_find_or_add_fn_id_mut(lo: &! Lowerer, name: Name) -> i64 with Mut, Panic, Div {
