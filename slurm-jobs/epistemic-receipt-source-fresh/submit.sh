@@ -70,6 +70,10 @@ manifest case is already failing.
 WORKER_PROBE=receipt-values builds the same raw ELF and prints one marker for
 each observation-receipt predicate. It is diagnostic evidence only and does not
 replace the source-fresh acceptance gate.
+
+WORKER_PROBE=associator-values builds the same raw ELF and prints the raw
+non-Fano and Fano basis-associator norms before receipt assertions wrap them.
+It is diagnostic evidence only.
 EOF
 }
 
@@ -89,7 +93,7 @@ fi
 [[ "$WORKER_LOWER_TRACE" == '0' || "$WORKER_LOWER_TRACE" == '1' ]] || fail "invalid WORKER_LOWER_TRACE: $WORKER_LOWER_TRACE"
 [[ "$WORKER_NV2_IR_TRACE" == '0' || "$WORKER_NV2_IR_TRACE" == '1' ]] || fail "invalid WORKER_NV2_IR_TRACE: $WORKER_NV2_IR_TRACE"
 [[ "$WORKER_PRESERVE_DIAGNOSTICS" == '0' || "$WORKER_PRESERVE_DIAGNOSTICS" == '1' ]] || fail "invalid WORKER_PRESERVE_DIAGNOSTICS: $WORKER_PRESERVE_DIAGNOSTICS"
-[[ "$WORKER_PROBE" == 'source-fresh-gate' || "$WORKER_PROBE" == 'block-ladder' || "$WORKER_PROBE" == 'source-to-elf' || "$WORKER_PROBE" == 'assert-exit' || "$WORKER_PROBE" == 'receipt-values' ]] || fail "invalid WORKER_PROBE: $WORKER_PROBE"
+[[ "$WORKER_PROBE" == 'source-fresh-gate' || "$WORKER_PROBE" == 'block-ladder' || "$WORKER_PROBE" == 'source-to-elf' || "$WORKER_PROBE" == 'assert-exit' || "$WORKER_PROBE" == 'receipt-values' || "$WORKER_PROBE" == 'associator-values' ]] || fail "invalid WORKER_PROBE: $WORKER_PROBE"
 
 SOURCE_COMMIT="$(git -C "$REPO" rev-parse "$SOURCE_REF")"
 SOURCE_TREE="$(git -C "$REPO" rev-parse "$SOURCE_COMMIT^{tree}")"
@@ -396,6 +400,50 @@ SIO
   )
   [[ -z "\$(git -C "\$REPO" status --porcelain)" ]] || fail 'source tree changed during receipt-values probe'
   echo '[epistemic-receipt-source-fresh] PASS: receipt-values diagnostic completed'
+elif [[ "\$WORKER_PROBE" == 'associator-values' ]]; then
+  RAW_MADAROS="\$ROOT/associator-values-madaros"
+  PROBE_ROOT="\$ROOT/associator-values"
+  BUILD_LOG="\$ROOT/associator-values-build.log"
+  mkdir -p "\$PROBE_ROOT/cwd"
+  if ! bash "\$REPO/scripts/ci/build_modular_madaros.sh" "\$RAW_MADAROS" >"\$BUILD_LOG" 2>&1; then
+    tail -n 120 "\$BUILD_LOG" >&2 || true
+    fail 'associator-values current-source build failed'
+  fi
+  cat >"\$PROBE_ROOT/associator_values.sio" <<'SIO'
+use algebra::associator_field::{assoc_field_basis}
+
+fn main() with IO, Mut, Div, Panic, NonAssoc {
+    println("ASSOCIATOR_NONFANO_BEGIN")
+    let nonfano = assoc_field_basis(1, 2, 4, 0.0)
+    println("ASSOCIATOR_NONFANO_RETURNED")
+    println(nonfano.norm_sq)
+    if nonfano.norm_sq == 4.0 {
+        println("ASSOCIATOR_NONFANO_NORM4_PASS")
+    } else {
+        println("ASSOCIATOR_NONFANO_NORM4_FAIL")
+    }
+
+    println("ASSOCIATOR_FANO_BEGIN")
+    let fano = assoc_field_basis(1, 2, 3, 0.0)
+    println("ASSOCIATOR_FANO_RETURNED")
+    println(fano.norm_sq)
+    if fano.norm_sq == 0.0 {
+        println("ASSOCIATOR_FANO_ZERO_PASS")
+    } else {
+        println("ASSOCIATOR_FANO_ZERO_FAIL")
+    }
+}
+SIO
+  (
+    cd "\$PROBE_ROOT/cwd"
+    exec env \
+      -u MADAROS_RAW_BIN \
+      -u SOUNIO_MADAROS_BIN \
+      SOUNIO_STDLIB_PATH="\$REPO/stdlib" \
+      "\$RAW_MADAROS" run "\$PROBE_ROOT/associator_values.sio"
+  )
+  [[ -z "\$(git -C "\$REPO" status --porcelain)" ]] || fail 'source tree changed during associator-values probe'
+  echo '[epistemic-receipt-source-fresh] PASS: associator-values diagnostic completed'
 elif [[ "\$WORKER_PROBE" == 'source-to-elf' || "\$WORKER_PROBE" == 'assert-exit' ]]; then
   RAW_MADAROS="\$ROOT/source-to-elf-madaros"
   BUILD_LOG="\$ROOT/source-to-elf-build.log"
