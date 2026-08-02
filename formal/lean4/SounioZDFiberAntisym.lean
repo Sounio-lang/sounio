@@ -4267,6 +4267,38 @@ theorem diamond_all (j n Y a b : Nat) (hj : j ≠ 0) (hn : j+2 ≤ n)
   · rw [hY0]
     exact diamond_three j n Y a b hj hn hY ha hb hY0 hsg hw
 
+/-- At `j = 0` the swap is the identity, so the defect is `1` outright. -/
+theorem Ddef_zero (Y a b m : Nat) : Ddef 0 Y a b m = 1 := by
+  unfold Ddef gdisc
+  rw [tau_id_zero, tau_id_zero, tau_id_zero, tau_id_zero, cdSq, cdSq,
+      Nat.pow_zero, Nat.mod_one, Nat.mod_one, psg_zero]
+  decide
+
+/-- `D` at level `n` **is** `D` at the bottom — this is `G_trunc`, plus the fact that `psg` only
+    sees the bottom `j` bits. -/
+theorem Ddef_trunc (j d Y a b : Nat) (hY : Y < 2^((j+1+1)+d))
+    (ha : a < 2^((j+1+1)+d)) (hb : b < 2^((j+1+1)+d)) :
+    Ddef j Y a b ((j+1+1)+d)
+      = Ddef j (Y % 2^(j+1+1)) (a % 2^(j+1+1)) (b % 2^(j+1+1)) (j+1+1) := by
+  unfold Ddef
+  rw [G_trunc j (j+1) d Y a b (by omega) hY ha hb,
+      mod_pow_mod j (j+1+1) a (by omega), mod_pow_mod j (j+1+1) b (by omega)]
+
+/-- **(♦), AT LEVEL `n`, BOTH LABEL CLASSES, EVERY `j`.** The defect of every witness is `+1` —
+    this is `REACH ⊆ {D = +1}`, the last measured link of L2, at the level the statement lives on.
+    The sign disjunction is what `N12` says even weight is. -/
+theorem diamond_at_level (j n Y a b : Nat) (hn : j+2 ≤ n)
+    (hY : Y < 2^n) (ha : a < 2^n) (hb : b < 2^n)
+    (hsign : dsgnN j n Y = -1 ∧ Y % 2^(j+2) = 2^j ∨
+             dsgnN j n Y = 1 ∧ Y % 2^(j+2) = 2^j + 2^(j+1))
+    (hw : Qgen' Y a b n = -1) :
+    Ddef j Y a b n = 1 := by
+  by_cases hj : j = 0
+  · subst hj; exact Ddef_zero Y a b n
+  · obtain ⟨d, rfl⟩ : ∃ d, n = (j+1+1) + d := ⟨n - (j+2), by omega⟩
+    rw [Ddef_trunc j d Y a b hY ha hb]
+    exact diamond_all j ((j+1+1)+d) Y a b hj hn hY ha hb hsign hw
+
 end SounioZDFiberAntisym
 
 

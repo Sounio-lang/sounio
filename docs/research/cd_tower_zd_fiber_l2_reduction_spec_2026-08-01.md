@@ -494,9 +494,26 @@ diamond_all   : (dsgnN = −1 ∧ Y₀ = 2^j) ∨ (dsgnN = 1 ∧ Y₀ = 3·2^j) 
 **`lsb Y = j` leaves exactly two bottom labels, and both are done.** `REACH ⊆ {D = +1}` — the last
 measured link of L2 — is proven ∀n, kernel-checked. `N30(d)` pins non-vacuity.
 
+### At level `n`, and every `j`
+
+```lean
+diamond_at_level : j+2 ≤ n → (dsgnN = −1 ∧ Y₀ = 2^j) ∨ (dsgnN = 1 ∧ Y₀ = 3·2^j)
+                 → Qgen' Y a b n = −1 → Ddef j Y a b n = 1
+```
+
+`diamond_all` concludes at the *bottom* level; `Ddef_trunc` lifts it to level `n` — that is
+`G_trunc` (already proven) plus the fact that `psg` only sees the bottom `j` bits. And `j = 0` is
+not an exception but a triviality: `τ` is the identity there, so `gdisc 0 = 1` and `Ddef_zero`
+gives `D = 1` outright. So the hypothesis `j ≠ 0` the inner lemmas carry does **not** narrow the
+theorem.
+
 **What is still open.** `N12`/`N27`'s popcount arithmetic: that **even weight is** the sign
-disjunction `diamond_all` takes as its hypothesis. That is the only remaining measured step in the
-chain.
+disjunction `diamond_at_level` takes as its hypothesis. That is the only remaining measured step
+in the chain. The route is elementary: either (i) `psg_split : psg x = psg (x % 2^k)·psg (x / 2^k)`
+plus `dsgnN j n Y = psg (Y / 2^{j+2})`, whose crux is the single iff
+`x % 2^{k+1} = x % 2^k + 2^k ↔ (x / 2^k) % 2 = 1`; or (ii) *redefine* `dsgnN j Y := psg (Y / 2^{j+2})`
+— level-independent, which makes `dsgnN_low` trivial and leaves only `dsgnN_hi` to re-prove, with
+`collapse` unchanged.
 
 **The correction.** `N15`'s clean-locus predicate does **not** cover `REACH`: for `Y₀ = 2^j` there
 are 8, 16, 32, 64 reachable points outside it at `j = 0,1,2,3`. The blocked tuples land strictly
