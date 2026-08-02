@@ -2951,6 +2951,298 @@ theorem corner_blocked_at_j3 (j Y0 : Nat) (hY0 : Y0 ≠ 0) : ¬ ReachD j Y0 (j+3
   rw [hbe, ← hae] at hq
   exact diag_not_witness (j+3) Y a hY ha ha0 haY hq
 
+/-! ## The COLLAPSE theorem — (♦)'s **hypothesis** is level-bounded too
+
+`G_descend`/`G_trunc` bounded (♦)'s *conclusion*: nothing above bit `j+1` can affect it. The
+open half was its *hypothesis*, `Qgen'(Y,a,b) = −1`, and the previous rungs recorded that as the
+thing that does not survive truncation. It does — off the six degeneracy lines:
+
+```
+Qgen' Y a b n  =  dsgnN j n Y  *  Qgen (Y % 2^(j+2)) (a % 2^(j+2)) (b % 2^(j+2)) (j+2)
+```
+
+with `dsgnN` the accumulated descent sign — `−1` once per level at which the label's bit is set,
+which is exactly the sign law `N11` reads off the sixteen rows. **No `n` on the right.**
+
+Why the three pieces of state the sixteen rows carry — sign, priming, argument swap — collapse
+to just the sign: off the six lines `Qgen = Qgen'` (`Qgen_eq_Qgen'`) and `Qgen` is symmetric
+(`Qgen_symm`), so the priming and the swap are invisible at the bottom. That is also the reason
+those six conditions, and no others, are the load-bearing ones. -/
+
+/-- The accumulated descent sign: `−1` once per level, above `j+2`, at which the label's bit is
+    set. -/
+def dsgnN (j : Nat) : Nat → Nat → Int
+  | 0, _ => 1
+  | (n+1), Y =>
+      if n+1 ≤ j+2 then 1
+      else (if Y / 2^n % 2 = 1 then (-1 : Int) else 1) * dsgnN j n (Y % 2^n)
+
+/-- The six non-degeneracy conditions, read at the bottom `j+2` bits — the `n`-free form of the
+    "clean locus" the earlier rungs tested level by level. -/
+def NDeg (j Y a b : Nat) : Prop :=
+  a % 2^(j+2) ≠ 0 ∧ b % 2^(j+2) ≠ 0 ∧
+  a % 2^(j+2) ≠ Y % 2^(j+2) ∧ b % 2^(j+2) ≠ Y % 2^(j+2) ∧
+  a % 2^(j+2) ≠ b % 2^(j+2) ∧
+  (a % 2^(j+2)) ^^^ (b % 2^(j+2)) ≠ Y % 2^(j+2)
+
+theorem xor4_cancel (a b Y : Nat) : (a ^^^ Y) ^^^ (b ^^^ Y) = a ^^^ b := by
+  rw [Nat.xor_assoc, ← Nat.xor_assoc Y b Y, Nat.xor_comm Y b, Nat.xor_assoc b Y Y,
+      Nat.xor_self, Nat.xor_zero]
+
+theorem NDeg_symm {j Y a b : Nat} (h : NDeg j Y a b) : NDeg j Y b a := by
+  obtain ⟨h1, h2, h3, h4, h5, h6⟩ := h
+  exact ⟨h2, h1, h4, h3, fun e => h5 e.symm, by rw [Nat.xor_comm]; exact h6⟩
+
+theorem mod_pow_mod (k l x : Nat) (h : k ≤ l) : x % 2^l % 2^k = x % 2^k :=
+  Nat.mod_mod_of_dvd x (Nat.pow_dvd_pow 2 h)
+
+theorem add_pow_mod (k l x : Nat) (h : k ≤ l) : (x + 2^l) % 2^k = x % 2^k := by
+  obtain ⟨c, hc⟩ := Nat.pow_dvd_pow 2 h
+  rw [hc, Nat.add_mul_mod_self_left]
+
+/-- `NDeg` only looks at the bottom `j+2` bits, so anything with the same residues has it. -/
+theorem NDeg_congr {j Y a b Y' a' b' : Nat}
+    (hY : Y' % 2^(j+2) = Y % 2^(j+2)) (ha : a' % 2^(j+2) = a % 2^(j+2))
+    (hb : b' % 2^(j+2) = b % 2^(j+2)) (h : NDeg j Y a b) : NDeg j Y' a' b' := by
+  unfold NDeg at h ⊢
+  rw [hY, ha, hb]
+  exact h
+
+/-- The six conditions, transported from the bottom residues to the values themselves. -/
+theorem NDeg_facts {j Y a b : Nat} (h : NDeg j Y a b) :
+    a ≠ 0 ∧ b ≠ 0 ∧ a ^^^ Y ≠ 0 ∧ b ^^^ Y ≠ 0 ∧ a ≠ b ∧ a ^^^ b ^^^ Y ≠ 0 := by
+  obtain ⟨h1, h2, h3, h4, h5, h6⟩ := h
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_⟩
+  · intro e; rw [e] at h1; exact h1 (Nat.zero_mod _)
+  · intro e; rw [e] at h2; exact h2 (Nat.zero_mod _)
+  · intro e; exact h3 (by rw [xor_zero_eq a Y e])
+  · intro e; exact h4 (by rw [xor_zero_eq b Y e])
+  · intro e; exact h5 (by rw [e])
+  · intro e
+    have h7 := congrArg (fun t => t % 2^(j+2)) (xor_zero_eq (a ^^^ b) Y e)
+    simp only [xor_mod_two_pow] at h7
+    exact h6 h7
+
+/-- Off the six lines, `Qgen` and `Qgen'` agree — at every level. -/
+theorem QQ' (j n W x y : Nat) (hW : W < 2^n) (hx : x < 2^n) (hy : y < 2^n)
+    (h : NDeg j W x y) : Qgen W x y n = Qgen' W x y n := by
+  obtain ⟨f1, f2, f3, f4, f5, f6⟩ := NDeg_facts h
+  refine Qgen_eq_Qgen' W x y n hx hy hW f3 f4 ?_ f1 ?_
+  · rw [xor4_cancel]
+    intro e; exact f5 (xor_zero_eq x y e)
+  · rw [← Nat.xor_assoc]; exact f6
+
+/-- The bottom value is symmetric in its two arguments, off the six lines. -/
+theorem QB_symm (j Y a b : Nat) (h : NDeg j Y a b) :
+    Qgen (Y % 2^(j+2)) (b % 2^(j+2)) (a % 2^(j+2)) (j+2)
+      = Qgen (Y % 2^(j+2)) (a % 2^(j+2)) (b % 2^(j+2)) (j+2) := by
+  have hmm : ∀ x : Nat, x % 2^(j+2) % 2^(j+2) = x % 2^(j+2) :=
+    fun x => mod_pow_mod (j+2) (j+2) x (Nat.le_refl _)
+  have hb : NDeg j (Y % 2^(j+2)) (b % 2^(j+2)) (a % 2^(j+2)) :=
+    NDeg_congr (hmm Y) (hmm b) (hmm a) (NDeg_symm h)
+  obtain ⟨f1, f2, f3, f4, f5, f6⟩ := NDeg_facts hb
+  have hp : (0:Nat) < 2^(j+2) := Nat.two_pow_pos (j+2)
+  exact Qgen_symm (j+2) (Y % 2^(j+2)) (b % 2^(j+2)) (a % 2^(j+2))
+    (Nat.mod_lt _ hp) (Nat.mod_lt _ hp) (Nat.mod_lt _ hp) f1 f2 f3 f4 f5 f6
+
+/-- `x < 2^(k+1)` splits into a low value or a low value plus the top bit. -/
+theorem split_top {k x : Nat} (hx : x < 2^(k+1)) : x < 2^k ∨ ∃ y, y < 2^k ∧ x = y + 2^k := by
+  by_cases h : x < 2^k
+  · exact Or.inl h
+  · have h2 : (2:Nat)^(k+1) = 2^k * 2 := by rw [Nat.pow_succ]
+    exact Or.inr ⟨x - 2^k, by omega, by omega⟩
+
+theorem dsgnN_low (j k Y : Nat) (hk : j+2 ≤ k+1) (hY : Y < 2^(k+1)) :
+    dsgnN j (k+2) Y = dsgnN j (k+1) Y := by
+  have h1 : ¬ (k+2 ≤ j+2) := by omega
+  have h2 : Y / 2^(k+1) = 0 := Nat.div_eq_of_lt hY
+  have h3 : Y % 2^(k+1) = Y := Nat.mod_eq_of_lt hY
+  rw [dsgnN, if_neg h1, h2, h3]
+  simp
+
+theorem dsgnN_hi (j k W : Nat) (hk : j+2 ≤ k+1) (hW : W < 2^(k+1)) :
+    dsgnN j (k+2) (W + 2^(k+1)) = - dsgnN j (k+1) W := by
+  have h1 : ¬ (k+2 ≤ j+2) := by omega
+  have hp : 0 < 2^(k+1) := Nat.two_pow_pos (k+1)
+  have h2 : (W + 2^(k+1)) / 2^(k+1) = 1 := by
+    rw [Nat.add_div_right W hp, Nat.div_eq_of_lt hW]
+  have h3 : (W + 2^(k+1)) % 2^(k+1) = W := by
+    rw [Nat.add_mod_right, Nat.mod_eq_of_lt hW]
+  rw [dsgnN, if_neg h1, h2, h3]
+  simp
+
+/-- **THE COLLAPSE THEOREM.** Off the six degeneracy lines, `Qgen'` at any level is the
+    accumulated descent sign times its value at the bottom level `j+2`. The right-hand side does
+    not mention `n`. This is the hypothesis-side counterpart of `G_trunc`. -/
+theorem collapse (j : Nat) : ∀ (n Y a b : Nat), j+2 ≤ n →
+    Y < 2^n → a < 2^n → b < 2^n → NDeg j Y a b →
+    Qgen' Y a b n
+      = dsgnN j n Y * Qgen (Y % 2^(j+2)) (a % 2^(j+2)) (b % 2^(j+2)) (j+2) := by
+  intro n
+  induction n with
+  | zero => intro Y a b hn; omega
+  | succ n ih =>
+      intro Y a b hn hY ha hb hnd
+      rcases Nat.eq_or_lt_of_le hn with heq | hlt
+      · have hne : n = j + 1 := by omega
+        subst hne
+        obtain ⟨f1, f2, f3, f4, f5, f6⟩ := NDeg_facts hnd
+        have eY : Y % 2^(j+2) = Y := Nat.mod_eq_of_lt hY
+        have ea : a % 2^(j+2) = a := Nat.mod_eq_of_lt ha
+        have eb : b % 2^(j+2) = b := Nat.mod_eq_of_lt hb
+        have hs : dsgnN j (j+1+1) Y = 1 := by
+          rw [dsgnN, if_pos (by omega : j+1+1 ≤ j+2)]
+        rw [eY, ea, eb, hs, Int.one_mul]
+        exact (QQ' j (j+1+1) Y a b hY ha hb hnd).symm
+      · have hjn : j + 2 ≤ n := by omega
+        obtain ⟨k, rfl⟩ : ∃ k, n = k + 1 := ⟨n - 1, by omega⟩
+        have hk : j + 2 ≤ k + 1 := hjn
+        have hp : (0:Nat) < 2^(j+2) := Nat.two_pow_pos (j+2)
+        have hadd : ∀ x : Nat, (x + 2^(k+1)) % 2^(j+2) = x % 2^(j+2) :=
+          fun x => add_pow_mod (j+2) (k+1) x hk
+        rcases split_top hY with hYl | ⟨W, hW, rfl⟩ <;>
+          rcases split_top ha with hal | ⟨u, hu, rfl⟩ <;>
+          rcases split_top hb with hbl | ⟨v, hv, rfl⟩
+        -- 1. label low, a low, b low
+        · rw [Q'red_low_ll k Y a b hYl hal hbl, dsgnN_low j k Y hk hYl]
+          exact ih Y a b hk hYl hal hbl hnd
+        -- 2. label low, a low, b upper  (row returns Qgen, arguments SWAPPED)
+        · have hnd' : NDeg j Y a v := NDeg_congr rfl rfl (hadd v).symm hnd
+          obtain ⟨f1, f2, f3, f4, f5, f6⟩ := NDeg_facts hnd'
+          rw [Q'red_low_lu k Y a v hYl hal hv f1 f3, dsgnN_low j k Y hk hYl,
+              QQ' j (k+1) Y v a hYl hv hal (NDeg_symm hnd'),
+              ih Y v a hk hYl hv hal (NDeg_symm hnd'), hadd v,
+              QB_symm j Y a v hnd']
+        -- 3. label low, a upper, b low
+        · have hnd' : NDeg j Y u b := NDeg_congr rfl (hadd u).symm rfl hnd
+          obtain ⟨f1, f2, f3, f4, f5, f6⟩ := NDeg_facts hnd'
+          rw [Q'red_low_ul k Y u b hYl hu hbl f2, dsgnN_low j k Y hk hYl,
+              QQ' j (k+1) Y u b hYl hu hbl hnd',
+              ih Y u b hk hYl hu hbl hnd', hadd u]
+        -- 4. label low, a upper, b upper  (SWAPPED)
+        · have hnd' : NDeg j Y u v := NDeg_congr rfl (hadd u).symm (hadd v).symm hnd
+          obtain ⟨f1, f2, f3, f4, f5, f6⟩ := NDeg_facts hnd'
+          rw [Q'red_low_uu k Y u v hYl hu hv f1 f2 f3 f4 f6, dsgnN_low j k Y hk hYl,
+              ih Y v u hk hYl hv hu (NDeg_symm hnd'), hadd u, hadd v,
+              QB_symm j Y u v hnd']
+        -- 5. label HIGH, a low, b low
+        · have hnd' : NDeg j W a b := NDeg_congr (hadd W).symm rfl rfl hnd
+          obtain ⟨f1, f2, f3, f4, f5, f6⟩ := NDeg_facts hnd'
+          rw [Q'red_hi_ll k W a b hW hal hbl f1 f2 f3 f4 f5, dsgnN_hi j k W hk hW,
+              ih W a b hk hW hal hbl hnd', hadd W]
+          rw [Int.neg_mul]
+        -- 6. label HIGH, a low, b upper  (SWAPPED)
+        · have hnd' : NDeg j W a v := NDeg_congr (hadd W).symm rfl (hadd v).symm hnd
+          obtain ⟨f1, f2, f3, f4, f5, f6⟩ := NDeg_facts hnd'
+          rw [Q'red_hi_lu k W a v hW hal hv f2 f3 f4 f5, dsgnN_hi j k W hk hW,
+              QQ' j (k+1) W v a hW hv hal (NDeg_symm hnd'),
+              ih W v a hk hW hv hal (NDeg_symm hnd'), hadd W, hadd v,
+              QB_symm j W a v hnd']
+          rw [Int.neg_mul]
+        -- 7. label HIGH, a upper, b low
+        · have hnd' : NDeg j W u b := NDeg_congr (hadd W).symm (hadd u).symm rfl hnd
+          obtain ⟨f1, f2, f3, f4, f5, f6⟩ := NDeg_facts hnd'
+          rw [Q'red_hi_ul k W u b hW hu hbl f1 f2 f3 f4 f5, dsgnN_hi j k W hk hW,
+              QQ' j (k+1) W u b hW hu hbl hnd',
+              ih W u b hk hW hu hbl hnd', hadd W, hadd u]
+          rw [Int.neg_mul]
+        -- 8. label HIGH, a upper, b upper  (SWAPPED)
+        · have hnd' : NDeg j W u v := NDeg_congr (hadd W).symm (hadd u).symm (hadd v).symm hnd
+          obtain ⟨f1, f2, f3, f4, f5, f6⟩ := NDeg_facts hnd'
+          rw [Q'red_hi_uu k W u v hW hu hv f1 f2 f3 f4 f5 f6, dsgnN_hi j k W hk hW,
+              ih W v u hk hW hv hu (NDeg_symm hnd'), hadd W, hadd u, hadd v,
+              QB_symm j W u v hnd']
+          rw [Int.neg_mul]
+
+/-! ## What the collapse theorem buys: attainment, off the six lines
+
+Two tuples at *different* levels with the same bottom residues and the same accumulated sign
+have the **same** `Qgen'` — because both are that sign times the same bottom value. So a witness
+at any level `n` transfers down to a witness at level `j+3`, and the only thing that has to be
+matched is one bit of the label: at level `j+3` the label may carry bit `j+2` or not, and those
+two choices realise `dsgnN = +1` and `dsgnN = −1` respectively. Nothing else about `n` survives.
+
+This is the non-degenerate half of attainment, ∀n. The other half is the six lines themselves,
+where `Qgen ≠ Qgen'` and the collapse does not apply; there `REACH` is full and the witnesses are
+the two explicit families `N25` records, at level `j+4` — which is what makes the boundary `j+4`
+and not `j+3`. -/
+
+theorem dsgnN_pm (j : Nat) : ∀ (n Y : Nat), dsgnN j n Y = 1 ∨ dsgnN j n Y = -1 := by
+  intro n
+  induction n with
+  | zero => intro Y; exact Or.inl rfl
+  | succ n ih =>
+      intro Y
+      by_cases h : n+1 ≤ j+2
+      · rw [dsgnN, if_pos h]; exact Or.inl rfl
+      · rw [dsgnN, if_neg h]
+        by_cases hb : Y / 2^n % 2 = 1
+        · rw [if_pos hb]
+          rcases ih (Y % 2^n) with e | e <;> rw [e]
+          · exact Or.inr (by decide)
+          · exact Or.inl (by decide)
+        · rw [if_neg hb]
+          rcases ih (Y % 2^n) with e | e <;> rw [e]
+          · exact Or.inl (by decide)
+          · exact Or.inr (by decide)
+
+theorem dsgnN_bot (j x : Nat) : dsgnN j (j+2) x = 1 := by
+  rw [dsgnN, if_pos (by omega : j+1+1 ≤ j+2)]
+
+/-- Same bottom residues and same accumulated sign ⟹ same `Qgen'`, across levels. -/
+theorem collapse_transfer (j n m Y a b Y' a' b' : Nat)
+    (hn : j+2 ≤ n) (hm : j+2 ≤ m)
+    (hY : Y < 2^n) (ha : a < 2^n) (hb : b < 2^n) (hnd : NDeg j Y a b)
+    (hY' : Y' < 2^m) (ha' : a' < 2^m) (hb' : b' < 2^m)
+    (eY : Y' % 2^(j+2) = Y % 2^(j+2)) (ea : a' % 2^(j+2) = a % 2^(j+2))
+    (eb : b' % 2^(j+2) = b % 2^(j+2))
+    (es : dsgnN j m Y' = dsgnN j n Y) :
+    Qgen' Y' a' b' m = Qgen' Y a b n := by
+  have hnd' : NDeg j Y' a' b' := NDeg_congr eY ea eb hnd
+  rw [collapse j m Y' a' b' hm hY' ha' hb' hnd', collapse j n Y a b hn hY ha hb hnd,
+      eY, ea, eb, es]
+
+/-- **Attainment off the six lines, ∀n.** Any level-`n` tuple with a non-degenerate bottom is
+    matched, value for value, by a level-`(j+3)` tuple with the same bottom residues. In
+    particular a witness stays a witness. -/
+theorem attain_nondeg (j n Y a b : Nat) (hn : j+2 ≤ n)
+    (hY : Y < 2^n) (ha : a < 2^n) (hb : b < 2^n) (hnd : NDeg j Y a b) :
+    ∃ Y', Y' < 2^(j+3) ∧ Y' % 2^(j+2) = Y % 2^(j+2) ∧
+      Qgen' Y' (a % 2^(j+2)) (b % 2^(j+2)) (j+3) = Qgen' Y a b n := by
+  have hp : (0:Nat) < 2^(j+2) := Nat.two_pow_pos (j+2)
+  have hlt : (2:Nat)^(j+2) < 2^(j+3) := Nat.pow_lt_pow_right (by omega) (by omega)
+  have hmm : ∀ x : Nat, x % 2^(j+2) % 2^(j+2) = x % 2^(j+2) :=
+    fun x => mod_pow_mod (j+2) (j+2) x (Nat.le_refl _)
+  have ha0 : a % 2^(j+2) < 2^(j+3) := Nat.lt_trans (Nat.mod_lt _ hp) hlt
+  have hb0 : b % 2^(j+2) < 2^(j+3) := Nat.lt_trans (Nat.mod_lt _ hp) hlt
+  have hY0 : Y % 2^(j+2) < 2^(j+2) := Nat.mod_lt _ hp
+  -- the two candidate labels at level j+3, and their signs
+  have key : ∀ Y' : Nat, Y' < 2^(j+3) → Y' % 2^(j+2) = Y % 2^(j+2) →
+      dsgnN j (j+3) Y' = dsgnN j n Y →
+      Qgen' Y' (a % 2^(j+2)) (b % 2^(j+2)) (j+3) = Qgen' Y a b n := by
+    intro Y' h1 h2 h3
+    exact collapse_transfer j n (j+3) Y a b Y' (a % 2^(j+2)) (b % 2^(j+2))
+      hn (by omega) hY ha hb hnd h1 ha0 hb0 h2 (hmm a) (hmm b) h3
+  have hsplit : dsgnN j (j+3) (Y % 2^(j+2)) = 1 := by
+    rw [dsgnN, if_neg (by omega : ¬ (j+2+1 ≤ j+2))]
+    rw [Nat.div_eq_of_lt hY0, Nat.mod_eq_of_lt hY0, dsgnN_bot]
+    simp
+  have hsplit' : dsgnN j (j+3) (Y % 2^(j+2) + 2^(j+2)) = -1 := by
+    rw [dsgnN, if_neg (by omega : ¬ (j+2+1 ≤ j+2))]
+    rw [Nat.add_div_right _ hp, Nat.div_eq_of_lt hY0, Nat.add_mod_right,
+        Nat.mod_eq_of_lt hY0, dsgnN_bot]
+    simp
+  rcases dsgnN_pm j n Y with e | e
+  · exact ⟨Y % 2^(j+2), Nat.lt_trans hY0 hlt, hmm Y, key _ (Nat.lt_trans hY0 hlt) (hmm Y)
+      (by rw [hsplit, e])⟩
+  · refine ⟨Y % 2^(j+2) + 2^(j+2), ?_, ?_, key _ ?_ ?_ (by rw [hsplit', e])⟩
+    · have : (2:Nat)^(j+3) = 2^(j+2) * 2 := by rw [Nat.pow_succ]
+      omega
+    · rw [Nat.add_mod_right, hmm Y]
+    · have : (2:Nat)^(j+3) = 2^(j+2) * 2 := by rw [Nat.pow_succ]
+      omega
+    · rw [Nat.add_mod_right, hmm Y]
+
 end SounioZDFiberAntisym
 
 
