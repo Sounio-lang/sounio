@@ -1225,6 +1225,71 @@ def main():
           f"hypothesis psg Y = 1 -- and composing with the long-proven `l2_reduction_symm`, "
           f"`L2_forall`. L2 IS PROVEN forall n ***")
 
+    # ---- N32  CROSS-RUNG PIN: `L2_forall` IS L2 ---------------------------------------------
+    # The theorem was built by rewriting with `l2_reduction_symm` and discharging the rest from
+    # `diamond`. That makes it a correct implication -- it does NOT by itself make it L2. This
+    # clause transcribes the PARENT rung's own objects (`res_edges` / `discrepancy` from
+    # cd_tower_zd_fiber_l2_switching_contract.py, where L2's statement lives) and checks three
+    # things on every L2 edge: that `L2_forall`'s LHS IS that rung's `disc`, that `L2_forall`'s
+    # hypotheses HOLD there (so it does not dodge L2's domain), and that `disc` is the closed
+    # form. Two objects that only look alike is the failure mode this lane has hit repeatedly.
+    def _sw2(x, j):
+        b0, bj = x & 1, (x >> j) & 1
+        return x ^ (1 | (1 << j)) if b0 != bj else x
+
+    def _res_edges(S, H, L):
+        E = {}
+        for a in range(1, H):
+            for b in range(1, H):
+                if a == b:
+                    continue
+                p1 = int(S[a, b] * S[a ^ L, b ^ L])
+                if p1 == int(S[a, b ^ L] * S[a ^ L, b]):
+                    E[(a, b)] = -p1
+        return E
+
+    def _disc(S, H, Y, j):
+        Es, Ef = _res_edges(S, H, Y | H), _res_edges(S, H, _sw2(Y, j) | H)
+        d = {}
+        for (a, b), e in Es.items():
+            k = (_sw2(a, j), _sw2(b, j))
+            if k in Ef:
+                d[(a, b)] = Ef[k] * e
+        return d
+
+    n32_tot = n32_lhs = n32_hyp = n32_val = 0
+    for n in (6, 7):
+        S = sign_table_fast(n).astype(np.int64)
+        Sm = sign_table_fast(n - 1).astype(np.int64)
+        H = 1 << (n - 1)
+        for Y in range(8, H, 8):
+            if bin(Y >> 3).count("1") % 2:
+                continue
+            j = (Y & -Y).bit_length() - 1
+            L = Y | H
+            for (a, b), dv in _disc(S, H, Y, j).items():
+                n32_tot += 1
+                lhs = (int(S[_sw2(a, j), _sw2(b, j)]) * int(S[_sw2(a ^ L, j), _sw2(b ^ L, j)])
+                       * int(S[a, b]) * int(S[a ^ L, b ^ L]))
+                if lhs != dv:
+                    n32_lhs += 1
+                if (b ^ Y) == 0 or _Qp2(Sm, Y, a, b) != -1:
+                    n32_hyp += 1
+                if dv != _psg(a % (1 << j)) * _psg(b % (1 << j)):
+                    n32_val += 1
+    n32 = (n32_lhs == 0 and n32_hyp == 0 and n32_val == 0 and n32_tot > 0)
+    ok["N32"] = n32
+    print(f"N32_ISL2    CROSS-RUNG PIN: `L2_forall` IS L2, not a relabelling "
+          f"{'OK' if n32 else 'FAIL'} -- on all {n32_tot} L2 edges (the PARENT rung's own "
+          f"res_edges/discrepancy, transcribed): (a) L2_forall's LHS != that rung's disc: "
+          f"{n32_lhs}; (b) L2_forall's hypotheses FAIL on an L2 edge: {n32_hyp} -- so it covers "
+          f"L2's domain rather than dodging it; (c) disc != (-1)^(p_j(a)+p_j(b)): {n32_val}. The "
+          f"two minus signs of res_edges cancel, and tau(a^L) = tau a ^ tau L by tau_xor with "
+          f"tau L = tau Y | H, which is why the LHS matches on the nose. The resonance condition "
+          f"of res_edges is Qgen(L,a,b) = +1, which is Qgen'(Y,a,b) = -1 by Qred_hi_ll (N5, "
+          f"minus sign included). L2's global sign is free by M3 and the parameter-free form is "
+          f"exactly what is proven")
+
     print("=" * 78)
     if all(ok.values()):
         print("CD_TOWER_ZDL2R_VERDICT DIAMOND_IS_A_FINITE_STABLE_FAMILY__GAP_LOCUS_INCLUDED")

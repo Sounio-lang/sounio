@@ -552,6 +552,25 @@ violations.
 
 **The chain has no measured step left.**
 
+### `N32` — the cross-rung pin: `L2_forall` *is* L2
+
+`L2_forall` was built by rewriting with `l2_reduction_symm` and discharging the rest from
+`diamond`. That makes it a correct *implication*; it does not by itself make it **L2**. `N32`
+transcribes the **parent rung's own** `res_edges`/`discrepancy` — where L2's statement lives — and
+checks, on all **1 920** L2 edges (`n = 6,7`, every even-weight seam):
+
+| | result |
+|---|---|
+| `L2_forall`'s LHS vs that rung's `disc` | **0** differences |
+| `L2_forall`'s hypotheses failing on an L2 edge | **0** — it covers L2's domain, does not dodge it |
+| `disc` vs `(−1)^{p_j(a)+p_j(b)}` | **0** |
+
+The LHS matches on the nose because `res_edges`' two minus signs cancel and
+`τ(a⊕L) = τa ⊕ τL` with `τL = τY ∣ H` (`tau_xor`, `tau_seam_fixed`). And `res_edges`' resonance
+condition is `Qgen(L,a,b) = +1`, which is `Qgen'(Y,a,b) = −1` by `Qred_hi_ll` — the `N5` lemma,
+minus sign included. L2's global sign is free (`M3` of the parent), and the parameter-free form is
+exactly what is proven.
+
 **The correction.** `N15`'s clean-locus predicate does **not** cover `REACH`: for `Y₀ = 2^j` there
 are 8, 16, 32, 64 reachable points outside it at `j = 0,1,2,3`. The blocked tuples land strictly
 outside the family §2c described. `REACH`, not that predicate, is the object.
@@ -600,4 +619,4 @@ outside the family §2c described. `REACH`, not that predicate, is the object.
 python3 scripts/research/cd_tower_zd_fiber_l2_reduction_contract.py
 ```
 
-Thirty-two clauses, `N0`–`N31`, single verdict token. Runs in about 28 s.
+Thirty-three clauses, `N0`–`N32`, single verdict token. Runs in about 26 s.
