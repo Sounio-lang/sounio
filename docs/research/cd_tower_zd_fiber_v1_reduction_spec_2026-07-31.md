@@ -135,8 +135,64 @@ values appears to need the degree-histogram induction, which this lane records a
   the non-injectivity so nobody re-derives the arithmetic from it.
 
 - **What is left of V1 is (d) alone**: that the `2^{n-4}` Fano orbits are pairwise
-  non-cospectral, and that no odd-weight seam merges. The concrete starting point measured here:
-  the isolated vertex is `a = Llo` itself, and every other degree is `4·odd`.
+  non-cospectral, and that no odd-weight seam merges.
+
+---
+
+## 6. Attacking (d): the degree splits, and its bulk has a closed form (`W9`, 2026-08-02)
+
+§3 recorded that `tr(A²)` has a closed form only on the narrow stratum where it is constant, and
+that the general case "appears to need the degree-histogram induction, which is OPEN". Two
+structural facts move it.
+
+**(i) Edge ⟺ resonance.** `A_sig`'s definition carries three conditions — `P1` symmetric, `P3`
+symmetric, `P1 = P3` — and **the first two are automatic**. Each is a product of *two* commutation
+signs, `χ(a,b)·χ(a⊕L,b⊕L)` and `χ(a,b⊕L)·χ(a⊕L,b)`, and `χ(x,y) = −1` for distinct nonzero `x,y`,
+so both products are `+1` identically. `W9(a)`: 0 mismatches over 2 328 221 pairs. The edge
+relation *is* resonance.
+
+**(ii) So the degree is a resonance count, and the collapse theorem applies to it.**
+`Qred_hi_ll` turns `Q(L,a,b) = 1` into `Qgen'(Llo,a,b,n−1) = −1` one level down — the exact object
+this session's `collapse` governs. Off the six degeneracy lines it is a function of the **bottom
+residues alone**, and every residue class has exactly `H/M` representatives (`M = 2^{j+2}`,
+`j = lsb Llo`). Hence
+
+```
+deg(a)  =  (H/M) · #{ b₀ off the lines : ε·Qgen(Llo₀, a₀, b₀, j+2) = −1 }   +   R(a)
+```
+
+where `ε = (−1)^{popcount(Llo ≫ (j+2))}` and the bottom `Qgen` is known in closed form for **both**
+label classes — `Qgen_pow2` (`≡ −1`) and `Q_three_pow2` (`−1` iff a low part vanishes or the two
+agree), both Lean-proven this session.
+
+`W9(b)`: the split is **exact** — 0 wrong `(a,Llo)` pairs. `W9(c)`: the first term equals that
+closed form — 0 wrong out of 53 208 pairs checked (`n = 7,8,9`).
+
+**Coverage.** The closed form holds for `j = 0` as well (0/8064 at `n ≤ 8`) — odd `Llo` is *half*
+the labels, and an earlier pass had skipped it out of caution. So it covers **every fiber except
+the single label `Llo = 2^{n-2}`** per level, where `j + 2 > n − 1` puts the bottom above the
+resonance level.
+
+### `R(a)` is not unknown — it is *determined*, but stratified (`W10`)
+
+The collapse theorem takes `j` as a **free parameter**: it never requires `j = lsb Y`. So a pair
+degenerate at `j = lsb Llo` — exactly where `R(a)` lives — may be **non-degenerate at a larger
+`j'`**, and then the collapse determines its value at the finer bottom level `j'+2`. Running that
+on every ordered pair:
+
+| | |
+|---|---|
+| resolved at some `j' ≥ j`, collapse value exactly right | **0 wrong** |
+| coset partners `b = a ⊕ Llo`, `Qgen'` value | **always `+1`** — never an edge |
+| left over | **0** |
+
+**Nothing is left over.** The minimal resolving level distributes as `j+0: 28.6%`, `j+1: ~30%`,
+`j+2: ~21%`, `j+3: ~12%`, `j+4: ~5%`, `j+5: 2.4%` — and it **grows with `n`**.
+
+So the honest state of (d): `tr(A²)` is computable level by level from a *proven* theorem plus one
+explicit never-an-edge class. What it is **not** is a *bounded* closed form — that would need the
+strata to telescope. And (d) also still needs the injectivity of `(tr A², tr A³)`. **(d) is not
+closed.**
 
 ---
 

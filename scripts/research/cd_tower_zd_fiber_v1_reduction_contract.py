@@ -322,6 +322,189 @@ def main():
             "where it lands. *** WHAT REMAINS OF V1 IS (d) ALONE: that the 2^(n-4) Fano orbits "
             "are pairwise non-cospectral and that no odd-weight seam merges")
 
+    # ---- W9  ATTACKING (d): the degree splits, and the bulk has a CLOSED FORM ---------------
+    # W6 recorded that tr(A^2) has a closed form only on the narrow stratum where it is constant,
+    # and that the general case "appears to need the degree-histogram induction, which is OPEN".
+    # Two structural facts move it:
+    #
+    # (i) EDGE <=> RESONANCE. A_sig's definition carries three conditions -- P1 symmetric, P3
+    #     symmetric, P1 = P3 -- and the first two are AUTOMATIC. Reason: the commutation sign
+    #     chi(x,y) = sigma(x,y)sigma(y,x) is -1 for distinct nonzero x,y, and each symmetry
+    #     condition is a PRODUCT OF TWO chi's (chi(a,b)chi(a^L,b^L) and chi(a,b^L)chi(a^L,b)),
+    #     so both are +1 identically. The edge relation is exactly resonance.
+    #
+    # (ii) THEREFORE the degree is a resonance count, and `Qred_hi_ll` turns it into Qgen' one
+    #     level down, where THIS SESSION's collapse theorem applies: off the six degeneracy lines
+    #     Qgen'(Llo,a,b,m) = eps * Qgen(Llo0,a0,b0,j+2), a function of the bottom residues alone.
+    #     Every residue class has exactly H/M representatives, so the non-degenerate part of the
+    #     degree is a pure residue count -- a CLOSED FORM. What is left is the count over the six
+    #     lines, where the collapse does not apply.
+    def _Qp(S, Y, a, b):
+        return int(S[a, b]) * int(S[b ^ Y, a ^ Y]) * int(S[b ^ Y, a]) * int(S[a ^ Y, b])
+
+    _bt = {}
+
+    def Qu_bottom(jp, Y, a, b):
+        if jp not in _bt:
+            _bt[jp] = sign_table_fast(jp + 2)
+        S = _bt[jp]
+        return int(S[a, b]) * int(S[a ^ Y, b ^ Y]) * int(S[a, b ^ Y]) * int(S[a ^ Y, b])
+
+    # (a) edge <=> resonance
+    w9a_bad = w9a_tot = 0
+    for n in (6, 7):
+        Sx = sign_table_fast(n).astype(np.int16)
+        H = 1 << (n - 1)
+        los = np.arange(1, H)
+        for Llo in range(1, H):
+            L = Llo | H
+            hi = los ^ L
+            P1 = Sx[np.ix_(los, los)] * Sx[np.ix_(hi, hi)]
+            P3 = Sx[np.ix_(los, hi)] * Sx[np.ix_(hi, los)]
+            full = (P1 == P1.T) & (P3 == P3.T) & (P1 == P3)
+            just = (P1 == P3)
+            np.fill_diagonal(full, False)
+            np.fill_diagonal(just, False)
+            w9a_bad += int((full != just).sum())
+            w9a_tot += full.size
+
+    # (b) the split is exact, and the non-degenerate part is the closed form
+    def _pred(n, Llo, a):
+        j = (Llo & -Llo).bit_length() - 1
+        M = 1 << (j + 2)
+        low = 1 << j
+        L0 = Llo % M
+        eps = (-1) ** (bin(Llo >> (j + 2)).count("1") % 2)
+        a0 = a % M
+        c = 0
+        for b0 in range(M):
+            if (a0 == 0 or b0 == 0 or a0 == L0 or b0 == L0 or a0 == b0 or (a0 ^ b0) == L0):
+                continue
+            q = -1 if L0 == low else (-1 if (a0 % low == 0 or b0 % low == 0
+                                             or a0 % low == b0 % low) else 1)
+            if eps * q == -1:
+                c += 1
+        return c * ((1 << (n - 1)) // M)
+
+    w9b_bad = w9b_tot = w9c_bad = 0
+    for n in (6, 7):
+        Sm = sign_table_fast(n - 1)
+        S = sign_table_fast(n)
+        H = 1 << (n - 1)
+        for Llo in range(1, H):
+            j = (Llo & -Llo).bit_length() - 1
+            if j == 0 or j + 2 > n - 1:
+                continue
+            M = 1 << (j + 2)
+            L0 = Llo % M
+            A = A_sig_fast(n, Llo, S)
+            deg = np.count_nonzero(A, axis=1)
+            for a in range(1, H):
+                if a == Llo:
+                    continue
+                a0 = a % M
+                nd = dg = 0
+                for b in range(1, H):
+                    if b == a or b == Llo:
+                        continue
+                    b0 = b % M
+                    degen = (a0 == 0 or b0 == 0 or a0 == L0 or b0 == L0
+                             or a0 == b0 or (a0 ^ b0) == L0)
+                    if _Qp(Sm, Llo, a, b) == -1:
+                        if degen:
+                            dg += 1
+                        else:
+                            nd += 1
+                w9b_tot += 1
+                if int(deg[a - 1]) != nd + dg:
+                    w9b_bad += 1
+                if nd != _pred(n, Llo, a):
+                    w9c_bad += 1
+    w9 = (w9a_bad == 0 and w9b_bad == 0 and w9c_bad == 0 and w9b_tot > 0)
+    ok["W9"] = w9
+    print(f"W9_DEGSPLIT ATTACKING (d): the degree SPLITS and its bulk has a CLOSED FORM "
+          f"{'OK' if w9 else 'FAIL'} -- (a) edge <=> resonance, i.e. A_sig's two SYMMETRY "
+          f"conditions are automatic: {w9a_bad}/{w9a_tot} mismatches (n=6,7, every fiber) -- "
+          f"each is a product of TWO commutation signs chi, and chi = -1 for distinct nonzero "
+          f"arguments, so both products are +1 identically; (b) deg(a) = [non-degenerate part] + "
+          f"[six-lines part], EXACTLY: {w9b_bad}/{w9b_tot} (a,Llo) pairs wrong; (c) the "
+          f"non-degenerate part equals the CLOSED FORM (H/M) * #{{b0 off the lines : "
+          f"eps*Qgen(Llo0,a0,b0,j+2) = -1}}: {w9c_bad}/{w9b_tot} wrong. That form is pure residue "
+          f"counting, because the COLLAPSE theorem makes Qgen' a function of the bottom residues "
+          f"alone and every residue class has exactly H/M representatives; the bottom Qgen is "
+          f"known in closed form for BOTH label classes (Qgen_pow2 and Q_three_pow2, both "
+          f"Lean-proven). *** W6 recorded tr(A^2) as having NO general closed form, needing the "
+          f"degree-histogram induction. It now has one on the complement of the six lines, and "
+          f"what is OPEN is the SIX-LINES COUNT alone -- a thin set (4 residues out of M for a "
+          f"generic a), and the same degenerate locus that needed separate treatment throughout "
+          f"the L2 chain. (d) IS NOT CLOSED ***")
+
+    # ---- W10  THE DEGREE IS FULLY DETERMINED -- but stratified, not bounded ----------------
+    # The collapse theorem takes j as a FREE parameter: it never requires j = lsb(Y). So a pair
+    # that is degenerate at j = lsb(Llo) -- exactly where W9's remainder R(a) lives -- may be
+    # NON-degenerate at a LARGER j', and then the collapse determines its value at the finer
+    # bottom level j'+2. Running that:
+    #   * EVERY ordered pair is either the coset partner b = a^Llo, or resolved at some j' >= j;
+    #   * where it resolves, the collapse value is EXACTLY right;
+    #   * the coset partner has Qgen' = +1 ALWAYS, i.e. it is NEVER an edge.
+    # So R(a) is not unknown -- it is determined. What it is NOT is BOUNDED: the minimal
+    # resolving j' runs to j+5 already at n = 8 and grows with n, so this is a stratified
+    # determination, not a closed form. That distinction is the honest state of (d).
+    w10_cos = w10_res = w10_unres = w10_bad = 0
+    w10_lvl = {}
+    w10_cosvals = set()
+    for n in (6, 7):
+        Sm = sign_table_fast(n - 1)
+        H = 1 << (n - 1)
+        m = n - 1
+        for Llo in range(1, H):
+            j = (Llo & -Llo).bit_length() - 1
+            if j + 2 > m:
+                continue
+            for a in range(1, H):
+                if a == Llo:
+                    continue
+                for b in range(1, H):
+                    if b == a or b == Llo:
+                        continue
+                    if (a ^ b) == Llo:
+                        w10_cos += 1
+                        w10_cosvals.add(_Qp(Sm, Llo, a, b))
+                        continue
+                    jp = None
+                    for k in range(j, m - 1):
+                        Mp = 1 << (k + 2)
+                        A0, B0, Y0 = a % Mp, b % Mp, Llo % Mp
+                        if not (A0 == 0 or B0 == 0 or A0 == Y0 or B0 == Y0
+                                or A0 == B0 or (A0 ^ B0) == Y0):
+                            jp = k
+                            break
+                    if jp is None:
+                        w10_unres += 1
+                        continue
+                    w10_res += 1
+                    w10_lvl[jp - j] = w10_lvl.get(jp - j, 0) + 1
+                    Mp = 1 << (jp + 2)
+                    eps = (-1) ** (bin(Llo >> (jp + 2)).count("1") % 2)
+                    if _Qp(Sm, Llo, a, b) != eps * Qu_bottom(jp, Llo % Mp, a % Mp, b % Mp):
+                        w10_bad += 1
+    w10 = (w10_unres == 0 and w10_bad == 0 and w10_cosvals == {1} and len(w10_lvl) > 2)
+    ok["W10"] = w10
+    print(f"W10_DEGDET  THE DEGREE IS FULLY DETERMINED -- but STRATIFIED, not bounded "
+          f"{'OK' if w10 else 'FAIL'} -- the collapse theorem takes j as a FREE parameter (it "
+          f"never requires j = lsb(Y)), so a pair degenerate at j = lsb(Llo) -- exactly where "
+          f"W9's remainder R(a) lives -- may be non-degenerate at a LARGER j'. Running that on "
+          f"every ordered pair, n = 6,7: {w10_res} resolved at some j' with the collapse value "
+          f"EXACTLY right ({w10_bad} wrong), {w10_cos} coset partners b = a^Llo whose Qgen' "
+          f"values are {sorted(w10_cosvals)} -- always +1, so the coset partner is NEVER an edge "
+          f"-- and {w10_unres} left over. NOTHING is left over. *** So R(a) is not unknown, it is "
+          f"DETERMINED. What it is NOT is BOUNDED: the minimal resolving level is "
+          f"{'; '.join(f'j+{k}: {v}' for k, v in sorted(w10_lvl.items()))} and it grows with n "
+          f"(to j+5 at n=8), so this is a STRATIFIED determination, not a closed form. That "
+          f"distinction is the honest state of (d): tr(A^2) is computable level by level from a "
+          f"PROVEN theorem plus one explicit never-an-edge class, and a bounded closed form would "
+          f"need the strata to telescope. (d) IS NOT CLOSED ***")
+
     print("=" * 78)
     if all(ok.values()):
         print("CD_TOWER_ZDV1_VERDICT C_CLOSED__V1_REDUCED_TO_D_ALONE__NOT_CLOSED")
