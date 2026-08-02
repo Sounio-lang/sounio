@@ -190,6 +190,10 @@ expect_unresolved_named_import_rejection() {
     cat "$log" >&2
     fail 'unresolved named import did not emit the authority receipt'
   }
+  grep -Fqx "run_check_mode: module authority unresolved owner=$FIXTURES/unresolved_named_import_main.sio target=$FIXTURES/unresolved_named_import_leaf.sio name=missing_symbol" "$log" || {
+    cat "$log" >&2
+    fail 'unresolved named import did not name its owner, target, and symbol'
+  }
 }
 
 expect_ambiguous_named_import_rejection() {
