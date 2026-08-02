@@ -394,8 +394,76 @@ labels; the clause string says so.
 
 **Next step, and it is not a defect in the above.** The slice arithmetic needs `e ≥ 4`
 (`(e−2)(e−4)` and friends), so `W13`–`W15` determine the recursion's *step* but pin no **base
-level**. Turning the recursion into a closed form for `tr(A²)` needs one; the parity argument that
-gives (I) may not.
+level**. §9 supplies it.
+
+---
+
+## 9. The base case, and how far the closed form reaches (`W16`, 2026-08-02)
+
+### 9.1 Where the descent bottoms out
+
+The recursion sends `(m, W) → (m−1, W mod 2^{m−1})`. For an **odd** label — the lane's
+`Llo = 8y+1` — the reduced label is odd at every level (`odd_stays_odd`), hence **never `0`**,
+which is exactly the hypothesis `W15`'s null control violates; and at level 1 the box is empty
+(`base_box_empty`). So every odd chain bottoms out in the **label-`2^k` family**.
+
+### 9.2 The base case, proven ∀n
+
+```lean
+Qgen'_pow2_eq : k < m → 1 ≤ a,b < 2^m → a ≠ b →
+    Qgen' (2^k) a b m = if a = 2^k ∨ b = a ^^^ 2^k then 1 else -1
+```
+
+`Q′` is `+1` on exactly two lines — `a = 2^k` (`Qgen'_label_left`) and `b = a ⊕ 2^k`
+(`Qgen'_coset_partner`) — which are **disjoint** and of size `2^m − 2` each, and `−1` on
+everything else (`Qgen'_off_lines`, new, plus `Qgen_pow2`, long in the tree). Hence
+
+> `N(m, 2^k) = (2^m−1)(2^m−2) − 2(2^m−2) = (2^m−2)(2^m−3)`, **independent of `k`**.
+
+### 9.3 The bridge to the graph — and the isolated vertex, derived
+
+`A_sig`'s edge test is `Qgen(Llo | 2^{n−1}, a, b, n) = +1`. `Qred_hi_ll`, whose only side
+conditions are `b ≠ 0` and `b ≠ Llo`, converts that to `Qgen'(Llo,a,b,m) = −1` — and it covers the
+**whole `a = Llo` row**, where `Qgen'_label_left` gives `+1`. So the isolated vertex is now a
+*consequence*, not measured structure. The one column the row cannot reach, `b = Llo`, is zero by
+`A`'s symmetry while contributing exactly `2^m − 2` to `N` (`Qgen'_label_right`). Therefore
+
+> `tr(A²) = N(m, Llo) − (2^m − 2)`,
+
+checked on **both** label families, `n = 6..9`, 0 violations. At `Llo = 2^k` this is
+`(2^m−2)(2^m−4)` — precisely `W6`'s constant stratum, whose members turn out to be exactly the
+`y = 0` Fano class and the **pure-power-of-two seams** (`n−4` per level). `W6` had that measured;
+it is now derived.
+
+### 9.4 The closed form — Fano only, and the seam half is a declared negative
+
+Unrolling `W15`'s recursion from this base collapses both branches into one homogeneous rule and
+gives a **signed base-4 digit sum**:
+
+> `tr(A²) = (2^m − 2)(2^m − 4) − E(m, Llo)`, `m = n−1`,
+> `E(m,W) = Σ_{i : bit_{i−1}(W)=1} (2^i−4)(2^i−8)·4^{m−i}·(−1)^{popcount(W ≫ i)}`
+
+**Exact on the Fano family** — every label, `n = 6..10` in the clause and `n = 11` in-session,
+1764 fibers, 0 mismatches, against the lane's own `A_sig_fast`/`traces23`. **False on every
+seam**, and `W16` asserts that as a *declared negative* rather than leaving it to be found later.
+
+The reason is structural, not accidental: seams are `Llo = 8y`, **even**, and an even label's
+descent can reach `W′ = 0` — the ledger's own null control. So `W6`'s open general form is closed
+on the **Fano half** and still open on the **seam half**.
+
+### 9.5 Scope
+
+The formula was verified *directly* against raw counts (all odd labels, `m = 2..8`) and against
+`traces23` (`n = 6..11`); those checks do not route through the recursion. The recursion + base is
+the **derivation**: its base is Lean ∀n, its counting step is on paper and pinned by `W15`.
+
+The `n = 6..11` agreement is also the strongest evidence yet for the chain's one measured
+pointwise link — that `A_sig`'s two symmetry conditions `P1 = P1ᵀ`, `P3 = P3ᵀ` are automatic. If
+either ever failed, `res` would be strictly smaller than `{Qgen = +1}` and `tr(A²)` would come in
+*below* the closed form. It does not, at six levels.
+
+**This does not narrow (d).** `tr(A²)` is parity-blind (`W11`), so (d) still needs `tr(A³)`'s form
+**and** the seam family. **(III) is untouched. (d) is not closed, and V1 is not proven.**
 
 **(III) is still untouched. (d) is not closed, and V1 is not proven.**
 

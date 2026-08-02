@@ -4537,6 +4537,86 @@ theorem Qgen'_label_right (m W a : Nat) (hW : W < 2^m) (ha : a < 2^m) (hW0 : W �
       chi_one_right m (a ^^^ W) haXlt, chi_one_right m a ha]
   decide
 
+/-! ## Tier 22: the base of the descent
+
+The level recursion sends `(m, W)` to `(m-1, W % 2^(m-1))`. For an ODD label -- the lane's
+`Llo = 8y+1` -- the reduced label is odd at every level (`odd_stays_odd`), so it is never `0`,
+which is exactly the null control the ledger needs; and at level 1 it is `1`. So every chain
+bottoms out in the label-`2^k` family, and there `Q'` has a complete closed form
+(`Qgen'_pow2_eq`): `+1` on exactly two lines, `-1` on the rest of the box. -/
+
+/-- **Off the two `+1` lines, `Q'` is `-1` wherever `Q` is.** With `a ≠ 0`, `a ≠ W`, `a ≠ b`
+    and `b ≠ a ⊕ W`, the two commutation signs AGREE -- both `+1` when `b = W`, both `-1`
+    otherwise -- so their product is `+1` either way and `Q' = Q = -1`. The companion of the
+    four line-values above: those give `Q'` ON the degeneracy lines, this gives it OFF them. -/
+theorem Qgen'_off_lines (m W a b : Nat) (hW : W < 2^m) (ha : a < 2^m) (hb : b < 2^m)
+    (hQ : Qgen W a b m = -1) (ha0 : a ≠ 0) (haW : a ≠ W) (hab : a ≠ b)
+    (hcos : b ≠ a ^^^ W) : Qgen' W a b m = -1 := by
+  have haXlt : a ^^^ W < 2^m := Nat.xor_lt_two_pow ha hW
+  have hbXlt : b ^^^ W < 2^m := Nat.xor_lt_two_pow hb hW
+  have haX0 : a ^^^ W ≠ 0 := fun h => haW (xor_zero_eq a W h)
+  rw [Qgen'_on_neg m W a b hQ]
+  by_cases hbW : b = W
+  · have hz : b ^^^ W = 0 := by rw [hbW, Nat.xor_self]
+    rw [hz, chi_one_right m (a ^^^ W) haXlt, chi_one_right m a ha]
+    decide
+  · have hbX0 : b ^^^ W ≠ 0 := fun h => hbW (xor_zero_eq b W h)
+    have hne1 : a ^^^ W ≠ b ^^^ W := by
+      intro h
+      apply hab
+      have h2 : (a ^^^ W) ^^^ W = (b ^^^ W) ^^^ W := by rw [h]
+      rw [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero, Nat.xor_assoc, Nat.xor_self,
+          Nat.xor_zero] at h2
+      exact h2
+    have hne2 : a ≠ b ^^^ W := by
+      intro h
+      apply hcos
+      have h2 : a ^^^ W = (b ^^^ W) ^^^ W := by rw [h]
+      rw [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero] at h2
+      exact h2.symm
+    rw [chi_neg_of m (a ^^^ W) (b ^^^ W) haXlt hbXlt haX0 hbX0 hne1,
+        chi_neg_of m a (b ^^^ W) ha hbXlt ha0 hbX0 hne2]
+    decide
+
+/-- **THE BASE CASE, in closed form at every level.** On the box `1 ≤ a, b < 2^m`, `a ≠ b`,
+    the label-`2^k` value of `Q'` is `+1` on exactly two lines -- `a = 2^k` and `b = a ⊕ 2^k`,
+    which are disjoint and of size `2^m - 2` each -- and `-1` on everything else. Hence the
+    resonance count is `(2^m-1)(2^m-2) - 2(2^m-2) = (2^m-2)(2^m-3)`, independent of `k`.
+    Every ingredient is a theorem: `Qgen_pow2` (already in the tree) for `Q = -1`, then
+    `Qgen'_label_left`, `Qgen'_coset_partner` and `Qgen'_off_lines`. -/
+theorem Qgen'_pow2_eq (m k a b : Nat) (hk : k < m) (ha : a < 2^m) (hb : b < 2^m)
+    (ha0 : a ≠ 0) (hb0 : b ≠ 0) (hab : a ≠ b) :
+    Qgen' (2^k) a b m = if a = 2^k ∨ b = a ^^^ 2^k then 1 else -1 := by
+  have hWlt : (2:Nat)^k < 2^m := Nat.pow_lt_pow_right (by omega) hk
+  have hW0 : (2:Nat)^k ≠ 0 := by have := Nat.two_pow_pos k; omega
+  by_cases h1 : a = 2^k
+  · rw [if_pos (Or.inl h1), h1]
+    exact Qgen'_label_left m (2^k) b hWlt hb hW0 hb0 (fun h => hab (h1.trans h.symm))
+  · by_cases h2 : b = a ^^^ 2^k
+    · rw [if_pos (Or.inr h2), h2]
+      exact Qgen'_coset_partner m (2^k) a hWlt ha ha0
+        (fun h => h1 (xor_zero_eq a (2^k) h))
+    · rw [if_neg (fun h => h.elim h1 h2)]
+      exact Qgen'_off_lines m (2^k) a b hWlt ha hb
+        (Qgen_pow2 m k a b hk ha hb) ha0 h1 hab h2
+
+/-- The bottom of the descent: at level 1 the box is EMPTY, so the base count is `0` --
+    which is what `(2^m-2)(2^m-3)` gives at `m = 1`. -/
+theorem base_box_empty (a b : Nat) (ha : a < 2^1) (hb : b < 2^1) (ha0 : a ≠ 0)
+    (hb0 : b ≠ 0) : a = b := by
+  have h : (2:Nat)^1 = 2 := rfl
+  rw [h] at ha hb
+  omega
+
+/-- An odd label stays odd all the way down the descent, so the reduced label is NEVER `0` --
+    the hypothesis the whole ledger rests on, and the one the `W' = 0` null control violates. -/
+theorem odd_stays_odd (W l : Nat) (hl : 1 ≤ l) (hodd : W % 2 = 1) : (W % 2^l) % 2 = 1 := by
+  have h2 : (2:Nat)^1 = 2 := rfl
+  have := mod_pow_mod 1 l W hl
+  rw [h2] at this
+  rw [this]
+  exact hodd
+
 end SounioZDFiberAntisym
 
 

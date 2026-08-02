@@ -970,6 +970,120 @@ def main():
             "closed forms are Lean forall n; the COUNTING (slice sizes, disjointness, coverage) "
             "is on paper and pinned here at m = 5,6,7. (III) is untouched; (d) IS NOT CLOSED ***")
 
+    # ---- W16  THE BASE CASE, AND HOW FAR THE CLOSED FORM REACHES ---------------------------
+    # W15 determined the recursion's STEP but pinned no base level. The descent sends
+    # (m,W) -> (m-1, W % 2^(m-1)); for an ODD label that stays odd (`odd_stays_odd`), never 0,
+    # and at level 1 it is 1. So every odd chain bottoms out in the label-2^k family, where
+    # `Qgen'_pow2_eq` (proven forall n today) gives a COMPLETE closed form: Q' = +1 on exactly
+    # two disjoint lines, a = 2^k and b = a^2^k, of size 2^m-2 each, and -1 elsewhere. Hence
+    #     N(m, 2^k) = (2^m-1)(2^m-2) - 2(2^m-2) = (2^m-2)(2^m-3),  independent of k.
+    # Bridge to the lane's graph: the edge test is Qgen(Llo|2^(n-1), a, b, n) = +1, and
+    # `Qred_hi_ll` (side conditions b != 0, b != Llo ONLY) turns that into Qgen'(Llo,a,b,m)=-1
+    # off the b=Llo column. The a=Llo ROW is covered and is +1 (`Qgen'_label_left`) -- so the
+    # ISOLATED VERTEX IS DERIVED -- while the uncovered b=Llo column contributes exactly
+    # 2^m-2 to N (`Qgen'_label_right`), giving  tr(A^2) = N(m,Llo) - (2^m-2).
+    # Unrolling the W15 recursion from this base gives a signed base-4 digit sum over the bits
+    # of the label. It is EXACT on the Fano family and FALSE on every seam -- reported here as
+    # a declared negative, because seams are EVEN labels (Llo = 8y) whose descent can reach
+    # W' = 0, which is precisely the ledger's null control.
+    def _Qp_mat(S, Y, H):
+        idx = np.arange(1, H)
+        x, y = idx[:, None], idx[None, :]
+        xy, yy = x ^ Y, y ^ Y
+        return (S[x, y].astype(np.int16) * S[yy, xy].astype(np.int16)
+                * S[yy, x].astype(np.int16) * S[xy, y].astype(np.int16))
+
+    def _N(S, Y, H):
+        M = _Qp_mat(S, Y, H)
+        np.fill_diagonal(M, 0)
+        return int(np.count_nonzero(M == -1))
+
+    def _E(m, W):
+        tot = 0
+        for i in range(2, m + 1):
+            if (W >> (i - 1)) & 1:
+                tot += (((1 << i) - 4) * ((1 << i) - 8) * (4 ** (m - i))
+                        * (-1) ** bin(W >> i).count("1"))
+        return tot
+
+    w16 = True
+    # (a) THE BASE CASE: N(m,2^k) = (2^m-2)(2^m-3) for every k < m, and the two +1 lines
+    base_rows = []
+    for m in range(2, 10):
+        S, H = sign_table_fast(m), 1 << m
+        bad = 0
+        for k in range(m):
+            W = 1 << k
+            M = _Qp_mat(S, W, H)
+            np.fill_diagonal(M, 0)
+            N = int(np.count_nonzero(M == -1))
+            L1 = [(W, b) for b in range(1, H) if b != W]                   # a = 2^k
+            L2 = [(a, a ^ W) for a in range(1, H) if a != W and (a ^ W) != 0]
+            if not (N == (H - 2) * (H - 3) and len(L1) == len(L2) == H - 2
+                    and not (set(L1) & set(L2))
+                    and all(_Qp(S, W, a, b) == 1 for a, b in L1)
+                    and all(_Qp(S, W, a, b) == 1 for a, b in L2)):
+                bad += 1
+        w16 = w16 and bad == 0
+        base_rows.append((m, m, bad))
+    # (b) THE BRIDGE and (c) THE CLOSED FORM, both families, against the lane's own builders
+    fano_ok = fano_tot = seam_ok = seam_tot = bridge_bad = pow2_const = 0
+    for n in range(6, 11):
+        m, H = n - 1, 1 << (n - 1)
+        S, Sm = sign_table_fast(n), sign_table_fast(m)
+        for Llo in range(1, H):
+            t2, _ = traces23(A_sig_fast(n, Llo, S))
+            pred = (H - 2) * (H - 4) - _E(m, Llo)
+            if Llo & 7:
+                fano_tot += 1
+                fano_ok += (t2 == pred)
+            else:
+                seam_tot += 1
+                seam_ok += (t2 == pred)
+                if t2 == (H - 2) * (H - 4):
+                    pow2_const += ((Llo & (Llo - 1)) == 0)
+            if n <= 9 and t2 != _N(Sm, Llo, H) - (H - 2):
+                bridge_bad += 1
+    # the closed form must be EXACT on Fano and must FAIL on every seam (declared negative)
+    w16 = w16 and fano_ok == fano_tot and seam_ok == 0 and bridge_bad == 0
+    # (d) NULL CONTROL: at W = 0 the base case is false (Qgen 0 = +1, so Q' = +1 everywhere)
+    S4 = sign_table_fast(4)
+    null_ok = _N(S4, 0, 16) != (16 - 2) * (16 - 3)
+    w16 = w16 and null_ok
+    ok["W16"] = w16
+    print(f"W16_BASE    THE BASE CASE IS PROVEN, AND THE CLOSED FORM REACHES THE FANO FAMILY "
+          f"ONLY {'OK' if w16 else 'FAIL'} -- base: "
+          + "; ".join(f"m={a}: {b} powers of two, {c} failing" for a, b, c in base_rows)
+          + f"; bridge tr(A^2) = N - (2^m-2): {bridge_bad} violations over BOTH families "
+            f"(n=6..9); closed form: Fano {fano_ok}/{fano_tot} match, seams {seam_ok}/{seam_tot} "
+            f"match (n=6..10); null control W=0: {'FAILS as required' if null_ok else 'PASSED'}. "
+            "*** THE BASE CASE IS `Qgen'_pow2_eq`, PROVEN FORALL N TODAY: on the box "
+            "1 <= a,b < 2^m with a != b, Q'(2^k,a,b,m) = +1 on exactly the two DISJOINT lines "
+            "a = 2^k (`Qgen'_label_left`) and b = a^2^k (`Qgen'_coset_partner`), each of size "
+            "2^m-2, and -1 on everything else (`Qgen'_off_lines` + `Qgen_pow2`). So "
+            "N(m,2^k) = (2^m-2)(2^m-3) for EVERY k < m -- k-independent, level-uniform. This is "
+            "the bottom of every odd chain: the reduced label of an odd W is odd at every level "
+            "(`odd_stays_odd`), hence never 0, and at level 1 the box is empty "
+            "(`base_box_empty`). *** AND THE ISOLATED VERTEX IS NOW DERIVED, NOT MEASURED: the "
+            "edge test is Qgen(Llo|2^(n-1),a,b,n) = +1, which `Qred_hi_ll` -- whose only side "
+            "conditions are b != 0 and b != Llo -- converts to Qgen'(Llo,a,b,m) = -1 on the "
+            "whole a = Llo ROW, where `Qgen'_label_left` gives +1: no edges. The one column the "
+            "row cannot reach, b = Llo, is zero by A's symmetry while contributing exactly "
+            "2^m-2 to N (`Qgen'_label_right`) -- which is the bridge tr(A^2) = N - (2^m-2), "
+            "checked here on BOTH families. *** IT ALSO DERIVES W6's CONSTANT STRATUM: the "
+            "seams whose tr(A^2) equals the y=0 value are exactly the PURE POWERS OF TWO "
+            f"({pow2_const} of them found, = n-4 per level), i.e. exactly the base-case family. "
+            "*** CLOSED FORM, AND ITS HONEST BOUNDARY: unrolling W15's recursion from this base "
+            "gives tr(A^2) = (2^m-2)(2^m-4) - E(m,Llo) with E a SIGNED BASE-4 DIGIT SUM, "
+            "E(m,W) = sum over i with bit_{i-1}(W)=1 of (2^i-4)(2^i-8)*4^(m-i)*(-1)^popcount(W>>i). "
+            "It is EXACT on the Fano family (all labels, n=6..10 here, n=11 too in-session) and "
+            "FALSE on EVERY seam -- asserted as a declared negative, not left to be discovered. "
+            "The reason is structural: seams are Llo = 8y, EVEN, and an even label's descent can "
+            "reach W' = 0, which is the ledger's own null control. So W6's open general form is "
+            "closed on the FANO HALF and still open on the SEAM HALF. *** THIS DOES NOT NARROW "
+            "(d): tr(A^2) is parity-blind (W11), so (d) still needs tr(A^3)'s form AND the seam "
+            "family. (III) is untouched; (d) IS NOT CLOSED ***")
+
     print("=" * 78)
     if all(ok.values()):
         print("CD_TOWER_ZDV1_VERDICT C_CLOSED__V1_REDUCED_TO_D_ALONE__NOT_CLOSED")
