@@ -2813,6 +2813,144 @@ theorem Reach_mono (j Y0 a0 b0 : Nat) :
       rw [e2] at hprev
       exact Reach_succ j Y0 (n + d) a0 b0 hprev
 
+/-! ## Why the stabilisation boundary is `n = j+4` and not `n = j+3`
+
+The rung measured that `REACH` gains exactly **four** points between level `j+3` and level
+`j+4`, at every `j` tested, and that those four are always the same four: the corners
+`{0,Y₀} × {0,Y₀}`. This section proves the half of that which is a theorem — that level `j+3`
+**cannot** carry the corner `(0,0)` — and the cause is one line of `σ`-arithmetic.
+
+`Qgen'` on the diagonal has no freedom left. Two of its four factors are literally the same
+factor, so they square away by `cdSq`, and the other two are self-pairings, which `sigma_self`
+pins to `−1`:
+
+```
+Q'(W,a,a) = σ(a,a) · σ(a⊕W,a⊕W) · σ(a⊕W,a)²  =  (−1)(−1)(1)  =  +1
+```
+
+So **no diagonal tuple is ever a witness**. And at level `j+3` a bottom pair `(0,0)` forces the
+diagonal: `a < 2^{j+3}` with `a mod 2^{j+2} = 0` and `a ≠ 0` leaves `a = 2^{j+2}` as the only
+value, and likewise for `b`, so `a = b`. You need **two** spare bits to make `a ≠ b`, which is
+exactly the `n = j+4` boundary and exactly the deficit of four. -/
+
+/-- `x < 2^(k+1)`, `x mod 2^k = 0`, `x ≠ 0` leaves exactly one value: `x = 2^k`. -/
+theorem step_forced (k x : Nat) (hx : x < 2^(k+1)) (hm : x % 2^k = 0) (hx0 : x ≠ 0) :
+    x = 2^k := by
+  have hp : 0 < 2^k := Nat.two_pow_pos k
+  have hsplit := Nat.div_add_mod x (2^k)
+  rw [hm, Nat.add_zero] at hsplit
+  have hlt : x / 2^k < 2 := by
+    have h2 : (2:Nat)^(k+1) = 2^k * 2 := by rw [Nat.pow_succ]
+    rw [h2] at hx
+    exact Nat.div_lt_of_lt_mul (by omega)
+  have hq : x / 2^k = 0 ∨ x / 2^k = 1 := by
+    cases hd : x / 2^k with
+    | zero => exact Or.inl rfl
+    | succ q =>
+        cases q with
+        | zero => exact Or.inr rfl
+        | succ q' => rw [hd] at hlt; omega
+  rcases hq with h | h <;> rw [h] at hsplit
+  · rw [Nat.mul_zero] at hsplit
+    exact absurd hsplit.symm hx0
+  · rw [Nat.mul_one] at hsplit
+    exact hsplit.symm
+
+/-- **`Qgen'` is `+1` on the diagonal.** Two of the four factors coincide and square away
+    (`cdSq`); the other two are self-pairings, which `sigma_self` pins to `−1`. -/
+theorem Qgen'_diag (m W a : Nat) (hW : W < 2^m) (ha : a < 2^m) (ha0 : a ≠ 0)
+    (haW : a ^^^ W ≠ 0) : Qgen' W a a m = 1 := by
+  have haWlt : a ^^^ W < 2^m := Nat.xor_lt_two_pow ha hW
+  have e1 : cdSigma a a m = -1 := sigma_self m a ha ha0
+  have e2 : cdSigma (a ^^^ W) (a ^^^ W) m = -1 := sigma_self m (a ^^^ W) haWlt haW
+  unfold Qgen'
+  rw [e1, e2]
+  rcases cdSigma_pm m (a ^^^ W) a with h | h <;> rw [h] <;> decide
+
+/-- **No diagonal tuple satisfies (♦)'s hypothesis.** -/
+theorem diag_not_witness (m W a : Nat) (hW : W < 2^m) (ha : a < 2^m) (ha0 : a ≠ 0)
+    (haW : a ^^^ W ≠ 0) : Qgen' W a a m ≠ -1 := by
+  rw [Qgen'_diag m W a hW ha ha0 haW]
+  decide
+
+/-- **`Qgen` is symmetric off the degenerate locus.** All four factors flip under `antisym`, and
+    four flips cancel. The hypotheses needed are *exactly* the six non-degeneracy conditions the
+    numerical rung found load-bearing — `a ≠ b` and `a ⊕ b ≠ L` are what make the second and
+    third flips legal. -/
+theorem Qgen_symm (m L a b : Nat) (hL : L < 2^m) (ha : a < 2^m) (hb : b < 2^m)
+    (ha0 : a ≠ 0) (hb0 : b ≠ 0) (haL : a ^^^ L ≠ 0) (hbL : b ^^^ L ≠ 0)
+    (hab : a ≠ b) (habL : a ^^^ b ^^^ L ≠ 0) :
+    Qgen L a b m = Qgen L b a m := by
+  have haLlt : a ^^^ L < 2^m := Nat.xor_lt_two_pow ha hL
+  have hbLlt : b ^^^ L < 2^m := Nat.xor_lt_two_pow hb hL
+  have hne2 : a ^^^ L ≠ b ^^^ L := by
+    intro h
+    exact hab (by
+      have := congrArg (fun t => t ^^^ L) h
+      simpa [Nat.xor_assoc, Nat.xor_self] using this)
+  have hne3 : a ^^^ L ≠ b := (xor3_ne_right habL).symm
+  have hne4 : a ≠ b ^^^ L := xor3_ne_left habL
+  have e1 : cdSigma a b m = - cdSigma b a m := antisym m a b ha hb ha0 hb0 hab
+  have e2 : cdSigma (a ^^^ L) (b ^^^ L) m = - cdSigma (b ^^^ L) (a ^^^ L) m :=
+    antisym m (a ^^^ L) (b ^^^ L) haLlt hbLlt haL hbL hne2
+  have e3 : cdSigma (a ^^^ L) b m = - cdSigma b (a ^^^ L) m :=
+    antisym m (a ^^^ L) b haLlt hb haL hb0 hne3
+  have e4 : cdSigma a (b ^^^ L) m = - cdSigma (b ^^^ L) a m :=
+    antisym m a (b ^^^ L) ha hbLlt ha0 hbL hne4
+  unfold Qgen
+  rw [e1, e2, e3, e4]
+  rcases cdSigma_pm m b a with h1 | h1 <;>
+    rcases cdSigma_pm m (b ^^^ L) (a ^^^ L) with h2 | h2 <;>
+    rcases cdSigma_pm m (b ^^^ L) a with h3 | h3 <;>
+    rcases cdSigma_pm m b (a ^^^ L) with h4 | h4 <;>
+    rw [h1, h2, h3, h4] <;> decide
+
+/-- `REACH` with (♦)'s **actual** side conditions.
+
+    `Reach` above drops `a ≠ 0`, `b ≠ 0`, `b ≠ Y`, and so it is strictly bigger than the set the
+    numerical rung measures: `Q'(Y,0,0) = σ(Y,Y) = −1` for every `Y ≠ 0`, so the corner `(0,0)`
+    sits in `Reach` at *every* level, trivially, and no boundary statement about it could be
+    true. `ReachD` is the measured object. Monotonicity survives unchanged, because
+    `reach_step` reuses the very same `(Y,a,b)`. -/
+def ReachD (j Y0 n a0 b0 : Nat) : Prop :=
+  ∃ Y a b, Y < 2^n ∧ a < 2^n ∧ b < 2^n ∧
+    Y % 2^(j+2) = Y0 ∧ a % 2^(j+2) = a0 ∧ b % 2^(j+2) = b0 ∧
+    a ≠ 0 ∧ b ≠ 0 ∧ b ≠ Y ∧ Qgen' Y a b n = -1
+
+/-- `ReachD` never shrinks either — the guards are carried by the same tuple. -/
+theorem ReachD_succ (j Y0 n a0 b0 : Nat) (h : ReachD j Y0 (n+1) a0 b0) :
+    ReachD j Y0 (n+2) a0 b0 := by
+  obtain ⟨Y, a, b, hY, ha, hb, eY, ea, eb, ha0, hb0, hbY, hq⟩ := h
+  have h2 : (2:Nat)^(n+1) ≤ 2^(n+2) := Nat.pow_le_pow_right (by omega) (by omega)
+  exact ⟨Y, a, b, by omega, by omega, by omega, eY, ea, eb, ha0, hb0, hbY,
+    reach_step n Y a b hY ha hb hq⟩
+
+theorem ReachD_mono (j Y0 a0 b0 : Nat) :
+    ∀ (d n : Nat), ReachD j Y0 (n+1) a0 b0 → ReachD j Y0 (n+1+d) a0 b0
+  | 0, _, h => h
+  | (d+1), n, h => by
+      have hprev := ReachD_mono j Y0 a0 b0 d n h
+      have e : n + 1 + (d + 1) = (n + d + 1) + 1 := by omega
+      have e2 : n + 1 + d = (n + d) + 1 := by omega
+      rw [e]
+      rw [e2] at hprev
+      exact ReachD_succ j Y0 (n + d) a0 b0 hprev
+
+/-- **The corner `(0,0)` is blocked at level `j+3`.** This is the sharpness half of the
+    `n = j+4` boundary, and it needs no measurement: one spare bit forces `a = b = 2^{j+2}`,
+    and the diagonal is never a witness. `Y₀ ≠ 0` is what `lsb(Y) = j` gives. -/
+theorem corner_blocked_at_j3 (j Y0 : Nat) (hY0 : Y0 ≠ 0) : ¬ ReachD j Y0 (j+3) 0 0 := by
+  rintro ⟨Y, a, b, hY, ha, hb, eY, ea, eb, ha0, hb0, _, hq⟩
+  have hae : a = 2^(j+2) := step_forced (j+2) a ha ea ha0
+  have hbe : b = 2^(j+2) := step_forced (j+2) b hb eb hb0
+  have haY : a ^^^ Y ≠ 0 := by
+    intro h
+    have : a = Y := xor_zero_eq a Y h
+    rw [this, eY] at ea
+    exact hY0 ea
+  rw [hbe, ← hae] at hq
+  exact diag_not_witness (j+3) Y a hY ha ha0 haY hq
+
 end SounioZDFiberAntisym
 
 
