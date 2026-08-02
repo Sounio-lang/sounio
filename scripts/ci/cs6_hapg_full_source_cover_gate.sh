@@ -9,10 +9,13 @@ leaf_verifier=scripts/research/cs6_hapg_full_source_cover_verify.py
 aggregator=scripts/research/cs6_hapg_full_source_cover_aggregate.py
 wrapper=scripts/research/cs6_hapg_full_source_cover_worker.cpp
 slurm_job=scripts/research/cs6_hapg_full_source_cover_slurm_job.sh
-contract=scripts/research/cs6_hapg_full_source_cover_contract_v2.txt
+contract=scripts/research/cs6_hapg_full_source_cover_contract_v3.txt
 full53=scripts/research/receipts/cs6_affine_projective_cocycle_full53_retained_53_v1
+v2_abort=scripts/research/receipts/cs6_hapg_full_source_cover_v2_abort_8451_v1
 
-for required in "$runner" "$leaf_verifier" "$aggregator" "$wrapper" "$slurm_job" "$contract"; do
+for required in \
+  "$runner" "$leaf_verifier" "$aggregator" "$wrapper" "$slurm_job" "$contract" \
+  "$v2_abort/manifest.txt" "$v2_abort/sacct.txt" "$v2_abort/config.txt" "$v2_abort/stderr.txt"; do
   [[ -f $required ]] || {
     echo "H-APG cover gate error: missing $required" >&2
     exit 1
@@ -20,7 +23,7 @@ for required in "$runner" "$leaf_verifier" "$aggregator" "$wrapper" "$slurm_job"
 done
 bash -n "$slurm_job"
 
-python3 -B - "$contract" <<'PY'
+python3 -B - "$contract" "$v2_abort" <<'PY'
 from __future__ import annotations
 
 from pathlib import Path
@@ -28,6 +31,7 @@ import re
 import sys
 
 path = Path(sys.argv[1])
+abort_root = Path(sys.argv[2])
 raw = path.read_bytes()
 if not raw.endswith(b"\n") or b"\r" in raw or b"\0" in raw:
     raise SystemExit("H-APG cover gate error: noncanonical frozen contract")
@@ -45,9 +49,19 @@ for line in lines:
     fields[key] = value
 
 exact = {
-    "SCHEMA": "sounio.cs6.hapg-full-source-cover-contract.v2",
+    "SCHEMA": "sounio.cs6.hapg-full-source-cover-contract.v3",
     "CONTRACT_STATE": "PRE_RESULT_FROZEN",
-    "SUPERSEDES_V1_SHA256": "333c00fe31fa61da487666621e3fc5125bfc1a5f0c36a0c4407711f6331a64cc",
+    "SUPERSEDES_V2_SHA256": "7d4bdcdf740fa67a4cd4cba171aaeb5e2ac56bcdaf034a94d4587c937a9056b5",
+    "RECOVERY_SCOPE": "SLURM_LAUNCH_PLUMBING_ONLY",
+    "V2_ABORTED_SLURM_JOB_ID": "8451",
+    "V2_ABORT_STAGE": "PRE_SCIENCE_RUNTIME_PROVENANCE",
+    "V2_ABORT_CLASS": "EMPTY_SYS_EXECUTABLE_UNDER_SLURM_EXPORT_NIL",
+    "V2_ABORT_SCIENTIFIC_EVALUATIONS": "0",
+    "PYTHON_RESOLUTION": "ABSOLUTE_REALPATH_FROM_COMMAND_V_PYTHON3",
+    "GIT_TRANSPORT": "FROZEN_BASE_BUNDLE_PLUS_HASHED_INCREMENTAL_BUNDLE",
+    "GIT_DELTA_REF_POLICY": "EXACT_SINGLE_HEAD_REF",
+    "BASE_REPO_BUNDLE_GIT_HEAD": "6ca2515af28d58d025097f94c73025c0f5bc266d",
+    "BASE_REPO_BUNDLE_SHA256": "cacd77ffa07966499f4614d3f84e03132bf01d765ca4fabc727c0701a9480389",
     "SOURCE": "N0",
     "TERMINAL_METHOD": "H_APG_ONLY",
     "TERMINAL_PREDICATE": "APG_COMPUTATION_VALID_AND_APG_CERTIFICATE_PASS",
@@ -64,6 +78,8 @@ exact = {
     "BOUNDED_PILOT_SLURM_NODES": "1",
     "BOUNDED_PILOT_SLURM_TASKS": "1",
     "BOUNDED_PILOT_SLURM_CPUS_PER_TASK": "32",
+    "BOUNDED_PILOT_SLURM_ALLOCATED_CPUS": "120",
+    "SLURM_ALLOCATION_SEMANTICS": "EXCLUSIVE_PARTITION_ALLOCATES_FULL_EFFECTIVE_NODE_WHILE_CPUS_PER_TASK_REMAINS_REQUESTED_32",
     "SLURM_CONTROL_PLANE_CHECK": "SCONTROL_RUNNING_UID_NODE_PARTITION_ACCOUNT_QOS_AND_RESOURCES",
     "CAPD_VERSION": "5.3.0",
     "INTERVAL_BACKEND": "FILIB",
@@ -104,12 +120,62 @@ sha_keys = (
     "BOUNDED_PILOT_REPLAY_ROOT_CHALLENGE",
     "PREBUILT_HPG_BINARY_SHA256",
     "PREBUILT_HAPG_BINARY_SHA256",
+    "V2_ABORT_RECEIPT_MANIFEST_SHA256",
+    "V2_ABORT_SACCT_SHA256",
+    "V2_ABORT_CONFIG_SHA256",
+    "V2_ABORT_STDERR_SHA256",
 )
 for key in sha_keys:
     if re.fullmatch(r"[0-9a-f]{64}", fields.get(key, "")) is None:
         raise SystemExit(f"H-APG cover gate error: invalid SHA-256 field {key}")
 if re.fullmatch(r"[0-9a-f]{40}", fields.get("IMPLEMENTATION_COMMIT", "")) is None:
     raise SystemExit("H-APG cover gate error: invalid implementation commit")
+
+
+def parse_kv(receipt: Path) -> dict[str, str]:
+    receipt_raw = receipt.read_bytes()
+    if not receipt_raw.endswith(b"\n") or b"\r" in receipt_raw or b"\0" in receipt_raw:
+        raise SystemExit(f"H-APG cover gate error: noncanonical receipt {receipt.name}")
+    result: dict[str, str] = {}
+    for row in receipt_raw.decode("ascii").splitlines():
+        if row.count("=") != 1:
+            raise SystemExit(f"H-APG cover gate error: malformed receipt {receipt.name}")
+        key, value = row.split("=", 1)
+        if not key or not value or key in result:
+            raise SystemExit(f"H-APG cover gate error: duplicate receipt field {receipt.name}")
+        result[key] = value
+    return result
+
+
+abort = parse_kv(abort_root / "manifest.txt")
+abort_exact = {
+    "SCHEMA": "sounio.cs6.hapg-full-source-cover-v2-abort.v1",
+    "EVIDENCE_CLASS": "SLURM_ACCOUNTING_AND_RAW_STAGE_LOG_NO_ATTESTATION",
+    "SLURM_JOB_ID": fields["V2_ABORTED_SLURM_JOB_ID"],
+    "SLURM_STATE": "FAILED",
+    "SLURM_EXIT_CODE": "1:0",
+    "SLURM_ALLOCATED_CPUS": fields["BOUNDED_PILOT_SLURM_ALLOCATED_CPUS"],
+    "SLURM_REQUESTED_CPUS": fields["BOUNDED_PILOT_SLURM_CPUS_PER_TASK"],
+    "SACCT_SHA256": fields["V2_ABORT_SACCT_SHA256"],
+    "CONFIG_SHA256": fields["V2_ABORT_CONFIG_SHA256"],
+    "STDERR_SHA256": fields["V2_ABORT_STDERR_SHA256"],
+    "SCIENTIFIC_POPULATION_PARSED": "false",
+    "SCIENTIFIC_WORKERS_LAUNCHED": "0",
+    "SCIENTIFIC_EVALUATIONS": fields["V2_ABORT_SCIENTIFIC_EVALUATIONS"],
+    "EXECUTION_PROVENANCE_ATTESTED": "false",
+    "PROMOTION_ELIGIBLE": "false",
+}
+for key, value in abort_exact.items():
+    if abort.get(key) != value:
+        raise SystemExit(f"H-APG cover gate error: v2 abort receipt mismatch for {key}")
+sacct = (abort_root / "sacct.txt").read_text(encoding="ascii")
+if not sacct.startswith(fields["V2_ABORTED_SLURM_JOB_ID"] + "|") or "|FAILED|1:0|" not in sacct:
+    raise SystemExit("H-APG cover gate error: v2 abort sacct record mismatch")
+stderr = (abort_root / "stderr.txt").read_text(encoding="ascii")
+if "subprocess.run([python, \"--version\"]" not in stderr or not stderr.endswith(
+    "PermissionError: [Errno 13] Permission denied: PosixPath('/tmp')\n"
+):
+    raise SystemExit("H-APG cover gate error: v2 abort call path mismatch")
 
 false_fields = (
     "ABSTRACT_EXISTENCE_FALSIFIED_BY_BOUNDED_FAILURE",
@@ -168,6 +234,10 @@ check_binding EXACT_TREE_KERNEL_SHA256 scripts/research/cs6_c1_full_source_cover
 check_binding SLURM_JOB_SCRIPT_SHA256 "$slurm_job"
 check_binding KAT_COORDINATE_MANIFEST_SHA256 scripts/research/cs6_affine_projective_cocycle_full53_coordinates_v1.tsv
 check_binding KAT_EXPECTED_RESULTS_SHA256 "$full53/leaves.tsv"
+check_binding V2_ABORT_RECEIPT_MANIFEST_SHA256 "$v2_abort/manifest.txt"
+check_binding V2_ABORT_SACCT_SHA256 "$v2_abort/sacct.txt"
+check_binding V2_ABORT_CONFIG_SHA256 "$v2_abort/config.txt"
+check_binding V2_ABORT_STDERR_SHA256 "$v2_abort/stderr.txt"
 
 python3 -B - "$runner" "$leaf_verifier" "$aggregator" <<'PY'
 from pathlib import Path

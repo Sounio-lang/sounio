@@ -999,17 +999,28 @@ def verify_frozen_sources(
     run_contract: Mapping[str, str],
     expected_contract_sha: str,
 ) -> Mapping[str, str]:
-    frozen_path = safe_file(bundle, "cs6_hapg_full_source_cover_contract_v2.txt")
-    frozen = read_generic_kv(frozen_path, "frozen v2 contract")
+    frozen_path = safe_file(bundle, "cs6_hapg_full_source_cover_contract_v3.txt")
+    frozen = read_generic_kv(frozen_path, "frozen v3 contract")
     if (
-        frozen.get("SCHEMA") != "sounio.cs6.hapg-full-source-cover-contract.v2"
+        frozen.get("SCHEMA") != "sounio.cs6.hapg-full-source-cover-contract.v3"
         or frozen.get("CONTRACT_STATE") != "PRE_RESULT_FROZEN"
-        or frozen.get("SUPERSEDES_V1_SHA256")
-        != "333c00fe31fa61da487666621e3fc5125bfc1a5f0c36a0c4407711f6331a64cc"
+        or frozen.get("SUPERSEDES_V2_SHA256")
+        != "7d4bdcdf740fa67a4cd4cba171aaeb5e2ac56bcdaf034a94d4587c937a9056b5"
+        or frozen.get("V2_ABORTED_SLURM_JOB_ID") != "8451"
+        or frozen.get("V2_ABORT_SCIENTIFIC_EVALUATIONS") != "0"
         or digest(frozen_path) != run_contract["FROZEN_CONTRACT_SHA256"]
         or digest(frozen_path) != expected_contract_sha
     ):
-        fail("frozen v2 contract envelope mismatch")
+        fail("frozen v3 contract envelope mismatch")
+    abort_bindings = {
+        "V2_ABORT_RECEIPT_MANIFEST_SHA256": "v2-abort-manifest.txt",
+        "V2_ABORT_SACCT_SHA256": "v2-abort-sacct.txt",
+        "V2_ABORT_CONFIG_SHA256": "v2-abort-config.txt",
+        "V2_ABORT_STDERR_SHA256": "v2-abort-stderr.txt",
+    }
+    for key, filename in abort_bindings.items():
+        if frozen.get(key) != digest(safe_file(bundle, filename)):
+            fail(f"frozen v2 abort evidence mismatch: {filename}")
     bindings = (
         ("PREPASS_WORKER_SHA256", "cs6_plucker_cocycle_probe.cpp", "HPG_WORKER_SOURCE_SHA256"),
         ("PREPASS_VERIFIER_SHA256", "cs6_plucker_cocycle_verify.py", "HPG_VERIFIER_SOURCE_SHA256"),
@@ -1117,7 +1128,7 @@ def verify_prebuilt_origin(
         fail("prebuilt origin manifest mismatch")
     verify_file_index(origin, manifest)
     bindings = {
-        "FROZEN_CONTRACT_SHA256": "cs6_hapg_full_source_cover_contract_v2.txt",
+        "FROZEN_CONTRACT_SHA256": "cs6_hapg_full_source_cover_contract_v3.txt",
         "HPG_WORKER_SOURCE_SHA256": "cs6_plucker_cocycle_probe.cpp",
         "HPG_VERIFIER_SOURCE_SHA256": "cs6_plucker_cocycle_verify.py",
         "HAPG_WORKER_SOURCE_SHA256": "cs6_hapg_full_source_cover_worker.cpp",
@@ -1135,6 +1146,15 @@ def verify_prebuilt_origin(
     for key, filename in bindings.items():
         if manifest[key] != digest(safe_file(origin, filename)):
             fail(f"prebuilt origin declaration differs from bytes: {filename}")
+    abort_bindings = {
+        "V2_ABORT_RECEIPT_MANIFEST_SHA256": "v2-abort-manifest.txt",
+        "V2_ABORT_SACCT_SHA256": "v2-abort-sacct.txt",
+        "V2_ABORT_CONFIG_SHA256": "v2-abort-config.txt",
+        "V2_ABORT_STDERR_SHA256": "v2-abort-stderr.txt",
+    }
+    for key, filename in abort_bindings.items():
+        if frozen.get(key) != digest(safe_file(origin, filename)):
+            fail(f"prebuilt origin v2 abort evidence mismatch: {filename}")
     run_source_fields = (
         "HPG_WORKER_SOURCE_SHA256",
         "HPG_VERIFIER_SOURCE_SHA256",

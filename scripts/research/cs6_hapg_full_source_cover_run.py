@@ -1106,7 +1106,8 @@ def verify_slurm_allocation(contract: Mapping[str, str]) -> tuple[str, bytes]:
         "NodeList": contract["BOUNDED_PILOT_SLURM_NODE"],
         "NumNodes": contract["BOUNDED_PILOT_SLURM_NODES"],
         "NumTasks": contract["BOUNDED_PILOT_SLURM_TASKS"],
-        "NumCPUs": contract["BOUNDED_PILOT_SLURM_CPUS_PER_TASK"],
+        "NumCPUs": contract["BOUNDED_PILOT_SLURM_ALLOCATED_CPUS"],
+        "CPUs/Task": contract["BOUNDED_PILOT_SLURM_CPUS_PER_TASK"],
     }
     if (
         any(fields.get(key) != value for key, value in expected_fields.items())
@@ -1824,7 +1825,7 @@ def verify_prebuilt_bundle(root: Path) -> dict[str, str]:
     if set(manifest) != expected_keys:
         raise RuntimeError("prebuilt manifest field set mismatch")
     declared_files = {
-        "FROZEN_CONTRACT_SHA256": "cs6_hapg_full_source_cover_contract_v2.txt",
+        "FROZEN_CONTRACT_SHA256": "cs6_hapg_full_source_cover_contract_v3.txt",
         "HPG_WORKER_SOURCE_SHA256": "cs6_plucker_cocycle_probe.cpp",
         "HPG_VERIFIER_SOURCE_SHA256": "cs6_plucker_cocycle_verify.py",
         "HAPG_WORKER_SOURCE_SHA256": "cs6_hapg_full_source_cover_worker.cpp",
@@ -1989,7 +1990,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     repo = Path(__file__).resolve().parents[2]
     research = repo / "scripts/research"
-    frozen_contract = research / "cs6_hapg_full_source_cover_contract_v2.txt"
+    frozen_contract = research / "cs6_hapg_full_source_cover_contract_v3.txt"
     hpg_source = research / "cs6_plucker_cocycle_probe.cpp"
     hpg_verifier = research / "cs6_plucker_cocycle_verify.py"
     hapg_wrapper = research / "cs6_hapg_full_source_cover_worker.cpp"
@@ -2001,6 +2002,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     exact_tree_kernel = research / "cs6_c1_full_source_cover_aggregate.py"
     gate = repo / "scripts/ci/cs6_hapg_full_source_cover_gate.sh"
     slurm_job_script = research / "cs6_hapg_full_source_cover_slurm_job.sh"
+    v2_abort = research / "receipts/cs6_hapg_full_source_cover_v2_abort_8451_v1"
+    v2_abort_manifest = v2_abort / "manifest.txt"
+    v2_abort_sacct = v2_abort / "sacct.txt"
+    v2_abort_config = v2_abort / "config.txt"
+    v2_abort_stderr = v2_abort / "stderr.txt"
     required = [
         frozen_contract,
         hpg_source,
@@ -2014,6 +2020,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         exact_tree_kernel,
         gate,
         slurm_job_script,
+        v2_abort_manifest,
+        v2_abort_sacct,
+        v2_abort_config,
+        v2_abort_stderr,
     ]
     for path in required:
         if not path.is_file():
@@ -2077,7 +2087,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if capd_config is not None and cxx_found is None:
         die(f"C++ compiler not found: {args.cxx}")
     cxx = Path(cxx_found).resolve() if cxx_found is not None else None
-    python = Path(sys.executable).resolve()
+    if not sys.executable or not os.path.isabs(sys.executable):
+        die("Python executable identity is missing or not absolute")
+    python = Path(sys.executable).resolve(strict=True)
+    if not python.is_file() or not os.access(python, os.X_OK):
+        die("Python executable identity is not an executable regular file")
     run_dir = args.run_dir.resolve()
     if re.fullmatch(r"/[A-Za-z0-9._/-]+", str(run_dir)) is None:
         die("run directory contains a character unsafe for canonical build records")
@@ -2120,6 +2134,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             gate: work / gate.name,
             slurm_job_script: work / slurm_job_script.name,
             frozen_contract: work / frozen_contract.name,
+            v2_abort_manifest: work / "v2-abort-manifest.txt",
+            v2_abort_sacct: work / "v2-abort-sacct.txt",
+            v2_abort_config: work / "v2-abort-config.txt",
+            v2_abort_stderr: work / "v2-abort-stderr.txt",
         }
         if args.mode == "kat":
             snapshots[coordinates.resolve()] = work / "kat-coordinates.tsv"
@@ -2177,23 +2195,27 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "EXACT_TREE_KERNEL_SHA256": digest(snapshots[exact_tree_kernel]),
                 "GATE_SHA256": digest(snapshots[gate]),
                 "SLURM_JOB_SCRIPT_SHA256": digest(snapshots[slurm_job_script]),
+                "V2_ABORT_RECEIPT_MANIFEST_SHA256": digest(snapshots[v2_abort_manifest]),
+                "V2_ABORT_SACCT_SHA256": digest(snapshots[v2_abort_sacct]),
+                "V2_ABORT_CONFIG_SHA256": digest(snapshots[v2_abort_config]),
+                "V2_ABORT_STDERR_SHA256": digest(snapshots[v2_abort_stderr]),
             }
             if (
                 contract.get("SCHEMA")
-                != "sounio.cs6.hapg-full-source-cover-contract.v2"
+                != "sounio.cs6.hapg-full-source-cover-contract.v3"
                 or contract.get("CONTRACT_STATE") != "PRE_RESULT_FROZEN"
                 or contract.get("FRESH_REPLAY_SEMANTICS")
                 != "INDEPENDENT_RECERTIFICATION_SAME_CHARTS_DISTINCT_CHALLENGES_NOT_BITWISE_RECEIPT_REPRODUCTION"
                 or any(contract.get(key) != value for key, value in source_bindings.items())
             ):
-                die("scientific sources differ from the frozen v2 contract")
+                die("scientific sources differ from the frozen v3 contract")
             if args.mode == "kat" and (
                 digest(snapshots[coordinates.resolve()])
                 != contract["KAT_COORDINATE_MANIFEST_SHA256"]
                 or digest(snapshots[expected_results.resolve()])
                 != contract["KAT_EXPECTED_RESULTS_SHA256"]
             ):
-                die("KAT population or expected result bytes differ from the frozen v2 contract")
+                die("KAT population or expected result bytes differ from the frozen v3 contract")
             if args.mode in {"kat", "adaptive"} and (
                 prebuilt_dir is None or not os.environ.get("SLURM_JOB_ID", "").isdigit()
             ):
@@ -2326,7 +2348,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 or prebuilt_manifest["HAPG_WORKER_BINARY_SHA256"]
                 != contract["PREBUILT_HAPG_BINARY_SHA256"]
             ):
-                die("prebuilt binary digest differs from the frozen v2 contract")
+                die("prebuilt binary digest differs from the frozen v3 contract")
             capd_version = (origin / "capd-version.txt").read_text(
                 encoding="ascii"
             ).strip()
@@ -2394,7 +2416,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 digest(hpg_binary) != contract["PREBUILT_HPG_BINARY_SHA256"]
                 or digest(hapg_binary) != contract["PREBUILT_HAPG_BINARY_SHA256"]
             ):
-                die("prepared binary digest differs from the frozen v2 contract")
+                die("prepared binary digest differs from the frozen v3 contract")
             canonicalize_dependency_file(hpg_dep, work)
             canonicalize_dependency_file(hapg_dep, work)
             index = file_index(work)
