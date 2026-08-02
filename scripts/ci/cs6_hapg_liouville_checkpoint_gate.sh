@@ -297,7 +297,7 @@ env \
   SLURM_CPUS_ON_NODE=9 \
   SLURM_CPUS_PER_TASK=9 \
   SLURM_RESTART_COUNT=0 \
-  SLURM_EXPORT_ENV=NONE \
+  SLURM_EXPORT_ENV=NIL \
   bash "$slurm_job" "$config" > "$build_dir/wrapper.stdout.txt" \
   2> "$build_dir/wrapper.stderr.txt"
 

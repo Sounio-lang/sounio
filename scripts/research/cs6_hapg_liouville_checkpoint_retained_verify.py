@@ -523,7 +523,7 @@ def validate_execution_provenance(
         or context["SLURM_NTASKS"] != config["SLURM_NTASKS"]
         or context["SLURM_CPUS_PER_TASK"] != config["SLURM_CPUS_PER_TASK"]
         or context["SLURM_RESTART_COUNT"] != "0"
-        or context["SLURM_EXPORT_ENV"] != "NONE"
+        or context["SLURM_EXPORT_ENV"] != "NIL"
         or context["SLURM_PARTITION"] != config["SLURM_PARTITION"]
         or context["SLURM_ACCOUNT"] != config["SLURM_ACCOUNT"]
         or context["SLURM_QOS"] != config["SLURM_QOS"]
@@ -579,7 +579,7 @@ def validate_execution_provenance(
         or run_contract.get("SLURM_MIN_MEMORY_NODE") != config["SLURM_MIN_MEMORY_NODE"]
         or run_contract.get("SLURM_EXCLUSIVE") != config["SLURM_EXCLUSIVE"]
         or run_contract.get("SLURM_COMMAND") != context["SLURM_COMMAND"]
-        or run_contract.get("SLURM_EXPORT_ENV") != "NONE"
+        or run_contract.get("SLURM_EXPORT_ENV") != "NIL"
     ):
         fail("retained Slurm control-plane record differs")
 

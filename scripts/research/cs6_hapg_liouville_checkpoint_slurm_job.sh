@@ -151,7 +151,7 @@ esac
    ${SLURM_JOB_NUM_NODES:-} == ${fields[SLURM_NODES]} &&
    ${SLURM_NTASKS:-} == ${fields[SLURM_NTASKS]} &&
    ${SLURM_CPUS_PER_TASK:-} == ${fields[SLURM_CPUS_PER_TASK]} &&
-   ${SLURM_EXPORT_ENV:-} == NONE &&
+   ${SLURM_EXPORT_ENV:-} == NIL &&
    ${SLURM_RESTART_COUNT:-0} == 0 &&
    ${SLURM_CPUS_ON_NODE:-} =~ ^[1-9][0-9]*$ ]] || {
   echo "V7-A.1 Slurm error: allocation environment differs from config" >&2
