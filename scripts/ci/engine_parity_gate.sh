@@ -187,10 +187,51 @@ WORKER
 chmod +x "$WORK/parity_one.sh"
 
 # --- corpus ----------------------------------------------------------------
+# Skip sources that cannot be programs. The glob used to take every .sio under
+# tests/run-pass and compile+RUN it, including library leaves and fixtures with
+# no `fn main`. Their ELF has no entry point, so it dies with SIGSEGV and the
+# gate recorded that as a parity observation -- "the ELF of a main-less library
+# segfaulted" says nothing about whether two engines agree, and it inflated
+# NEITHER/MADAROS-ONLY counts that get cited as capability measurements (#1593).
+#
+# TWO exclusions only:
+#   //@ ignore    the file says skip me
+#   no `fn main`  there is no program to run
+#
+# `//@ check-only` is deliberately NOT an exclusion, though the issue proposed
+# it. Measured: of the 32 check-only files, 15 also declare //@ run-pass, and
+# clinical_dyadic_non_reduction_witness.sio -- check-only with no run-pass --
+# has a main, executes, and AGREES byte-for-byte across both engines. Its own
+# header explains why: "Madaros typechecks this two-module program and can
+# execute it through the full-IR route after the compact modular emitter
+# declines it." The marker says which harness checks the file, not whether it
+# runs, so excluding on it would have deleted 16 real observations while looking
+# like housekeeping.
+#
+# Header-only match (first 8 lines): `//@` is a file directive, and matching
+# further in would catch prose in comments.
+parity_is_runnable_program() {
+    local f="$1"
+    if head -n 8 "$f" | grep -qE '^//@[[:space:]]*ignore\b'; then
+        return 1
+    fi
+    grep -qE '^[[:space:]]*(pub[[:space:]]+)?fn[[:space:]]+main[[:space:]]*\(' "$f"
+}
+
+collect_sources() {
+    local f
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        if parity_is_runnable_program "$f"; then
+            printf '%s\n' "$f"
+        fi
+    done
+}
+
 if [ -n "$ONLY" ]; then
-    sources=$(find tests/run-pass -name '*.sio' | grep -F "$ONLY" | sort)
+    sources=$(find tests/run-pass -name '*.sio' | grep -F "$ONLY" | sort | collect_sources)
 else
-    sources=$(find tests/run-pass -name '*.sio' | sort)
+    sources=$(find tests/run-pass -name '*.sio' | sort | collect_sources)
 fi
 
 total=$(printf '%s\n' "$sources" | grep -c . || true)
