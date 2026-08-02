@@ -2900,6 +2900,29 @@ fn checker_report_private_fn_inplace(c: *mut Checker, span: Span, sig_id: i64) w
     print("\n")
 }
 
+// E177 is E175 one wall further in: "enum constructor is private in its defining
+// module", 820 of them on lean.sio, and until now none said which enum or whose
+// module. It also has a second ambiguity E175 does not, because a path
+// expression reaches an enum two ways -- by the enum's own name, or by a bare
+// variant name that resolves back to it. Printing what was WRITTEN alongside
+// what it RESOLVED TO separates "you named a private enum" from "you named a
+// variant whose enum happens to be private", which are different fixes.
+fn checker_report_private_enum_inplace(c: *mut Checker, span: Span, enum_idx: i64, referenced: Name) with Mut, IO, Panic, Div, Alloc {
+    checker_report_error_at_inplace(c, span, 177, 0, 0, 0)
+    let ei = enum_table_get((*c).enums, enum_idx)
+    print("   = enum ")
+    e035_print_module_path(ei.defining_module)
+    print("::")
+    e035_print_ident(ei.name)
+    print("\n   = written as ")
+    e035_print_ident(referenced)
+    print("\n   = defining module id ")
+    print_int(ei.defining_module_id)
+    print(", used from module id ")
+    print_int((*c).current_module_id)
+    print("\n")
+}
+
 fn checker_report_mismatch_inplace(c: *mut Checker, span: Span, code: i64, expected: TypeEntry, got: TypeEntry) with Mut, IO, Panic, Div, Alloc {
     (*c).error_count = (*c).error_count + 1
     (*c).had_error = true
@@ -4867,7 +4890,7 @@ fn checker_check_path_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     if enum_idx >= 0 {
         let ei = enum_table_get((*c).enums, enum_idx)
         if (*c).enforce_visibility && !checker_enum_visible_inplace(c, enum_idx) {
-            checker_report_error_at_inplace(c, e.span, 177, 0, 0, 0)
+            checker_report_private_enum_inplace(c, e.span, enum_idx, first_name)
         }
         ty_named(first_name)
     } else {
@@ -4876,7 +4899,7 @@ fn checker_check_path_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         if variant_enum_idx >= 0 {
             let ei = enum_table_get((*c).enums, variant_enum_idx)
             if (*c).enforce_visibility && !checker_enum_visible_inplace(c, variant_enum_idx) {
-                checker_report_error_at_inplace(c, e.span, 177, 0, 0, 0)
+                checker_report_private_enum_inplace(c, e.span, variant_enum_idx, first_name)
             }
             ty_named(ei.name)
         } else {
@@ -10140,6 +10163,24 @@ impl Checker {
         print("\n   = defining module id ")
         print_int(sig.defining_module_id)
         print(", calling from module id ")
+        print_int(c.current_module_id)
+        print("\n")
+        c
+    }
+
+    // Value-path twin of checker_report_private_enum_inplace.
+    fn report_private_enum(self, span: Span, enum_idx: i64, referenced: Name) -> Checker with Mut, IO, Panic, Div, Alloc {
+        var c = self.report_error_at(span, 177, 0, 0, 0)
+        let ei = enum_table_get(c.enums, enum_idx)
+        print("   = enum ")
+        e035_print_module_path(ei.defining_module)
+        print("::")
+        e035_print_ident(ei.name)
+        print("\n   = written as ")
+        e035_print_ident(referenced)
+        print("\n   = defining module id ")
+        print_int(ei.defining_module_id)
+        print(", used from module id ")
         print_int(c.current_module_id)
         print("\n")
         c
@@ -19046,7 +19087,7 @@ impl Checker {
         if enum_idx >= 0 {
             let ei = enum_table_get(self.enums, enum_idx)
             if self.enforce_visibility && !visibility_allows_access(ei.visibility, ei.defining_module, self.current_module, self.crate_root) {
-                let c = self.report_error_at(e.span, 177, 0, 0, 0)
+                let c = self.report_private_enum(e.span, enum_idx, first_name)
                 return (c, ty_named(first_name))
             }
             (self, ty_named(first_name))
@@ -19056,7 +19097,7 @@ impl Checker {
             if variant_enum_idx >= 0 {
                 let ei = enum_table_get(self.enums, variant_enum_idx)
                 if self.enforce_visibility && !visibility_allows_access(ei.visibility, ei.defining_module, self.current_module, self.crate_root) {
-                    let c = self.report_error_at(e.span, 177, 0, 0, 0)
+                    let c = self.report_private_enum(e.span, variant_enum_idx, first_name)
                     return (c, ty_named(ei.name))
                 }
                 (self, ty_named(ei.name))
