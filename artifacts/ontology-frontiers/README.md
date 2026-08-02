@@ -111,6 +111,35 @@ sob hipótese de cluster; repair-then-retry exige parceiro conflitante
 com a fronteira 1); p-box/GUM de segunda ordem completo segue aberto;
 oráculos de conflito continuam abstratos.
 
+## Rodada 3 — remoção minimal + gate CI (2026-08-02)
+
+- `formal/OntologyMinimalRepair.lean`: decisão admitir-vs-rejeitar para
+  candidato conflitando com **múltiplos** parceiros — o conjunto de remoção
+  é forçado (todos os parceiros; unicidade/minimalidade nas duas
+  direções), a decisão por massa epistêmica retida é ótima entre as duas
+  opções, e ambos os ramos preservam consistência. Protótipo
+  `minimal_repair_demo.sio`: `ALL PASS`. Math-review xai: PASS.
+- `scripts/ci/ontology_frontiers_gate.sh` criado (ver "Gate CI").
+
+## Rodada 4 — oráculo fundamentado em semântica EL (2026-08-02)
+
+- `formal/OntologyELReasoner.lean`: mini lógica de descrição (axiomas
+  `sub`/`disj`), semântica de Tarski, fecho transitivo de subsunção como
+  sistema dedutivo indutivo, e o teorema central **`incoherent_empty`**:
+  toda classe marcada incoerente pelo fecho é vazia em todo modelo da
+  TBox. `oracle_sound` conecta isso ao oráculo de conflitos das fronteiras
+  anteriores: pares sinalizados não podem valer simultaneamente em nenhum
+  modelo. Instância `Fin 8` biomédica com 11 checks `decide`/`native_decide`.
+  Math-review xai: PASS. Limitação honesta (registrada no arquivo): o
+  fecho booleano computacional foi validado contra o sistema indutivo só
+  na instância concreta — uma verificação geral do fecho fica para a
+  próxima rodada.
+- `el-grounding/` (nova fronteira): `el_conflict_demo.sio` **deriva** os
+  conflitos de uma TBox em miniatura (fecho de subsunção + disjunção) em
+  vez de hardcodá-los, e confirma que o oráculo derivado coincide com o
+  hardcoded da fronteira 1 na instância compartilhada (mesmos sobreviventes
+  do reparo).
+
 ## Arquivos criados
 
 - `artifacts/ontology-frontiers/{epistemic-alignment-repair,epistemic-claim-status,consistent-ontology-evolution}/FRONTIER.md`
@@ -124,6 +153,10 @@ oráculos de conflito continuam abstratos.
   `formal/OntologyEvolutionRepair.lean`, `formal/ClaimStatusInterval.lean`
 - `scripts/ci/ontology_frontiers_gate.sh` — gate CI standalone (rodada 3,
   lane `frontier-gate`; ver seção "Gate CI").
+- `artifacts/ontology-frontiers/consistent-ontology-evolution/minimal_repair_demo.sio` (rodada 3)
+- `artifacts/ontology-frontiers/el-grounding/{FRONTIER.md,el_conflict_demo.sio}` (rodada 4)
+- `formal/OntologyMinimalRepair.lean` (rodada 3),
+  `formal/OntologyELReasoner.lean` (rodada 4)
 
 ## Gate CI
 
@@ -134,9 +167,10 @@ editar nenhum arquivo existente:
 bash scripts/ci/ontology_frontiers_gate.sh   # funciona a partir de qualquer cwd
 ```
 
-O que ele checa, para cada um dos 5 protótipos (`alignment_repair.sio`,
+O que ele checa, para cada um dos 7 protótipos (`alignment_repair.sio`,
 `claim_status.sio`, `interval_claims.sio`, `version_chain.sio`,
-`version_chain_removal.sio`):
+`version_chain_removal.sio`, `minimal_repair_demo.sio`,
+`el_conflict_demo.sio`):
 
 1. `./bin/souc check <file>` — exige `check: OK` na saída e ausência de
    `parse error`;
@@ -151,11 +185,14 @@ wrapper pode ser trocado via `SOUC_BIN`. Os repros de compilador em
 
 ## Arquivos editados
 
-- `formal/lakefile.lean` — apenas adição das 6 novas roots (permitido pela
+- `formal/lakefile.lean` — apenas adição das 8 novas roots (permitido pela
   meta).
 - `formal/OntologyAlignmentRepair.lean` — apenas o comentário de header
   (correção da lacuna de equivalência após o contraexemplo mecanizado).
+- `scripts/ci/ontology_frontiers_gate.sh` — lista de protótipos (rodadas
+  3-4).
 - `.claude/llm_offload_log.md` — linhas de log das revisões (política do
   repo).
 
-Nada foi commitado; tudo está no worktree.
+Commits na branch: `54cef93d7` (rodadas 1-2), `156858916` (rodada 3);
+rodada 4 aguardando autorização de commit.
