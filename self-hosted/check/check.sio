@@ -1238,7 +1238,30 @@ fn checker_lower_named_type_mut(c: *mut Checker, path: AstPath) -> TypeEntry wit
         ty_wide_int(name_wide_int_bits(name), (name.buf[0] as i64) == 105)
     } else {
         let bound_ty = (*c).env.lookup(name)
-        if bound_ty.kind != TypeKind::TyError || bound_ty.ontology_id >= 0 {
+        // A type-position name resolves against the VALUE environment first so
+        // that type aliases and ontology bindings win. But `use m::{S}` binds
+        // every imported name here as TyUnknown — see
+        // checker_collect_use_item_inplace, whose comment calls binding an
+        // extra name "harmless if unused". It is not harmless: an imported
+        // STRUCT name lands in env carrying no information, and this lookup
+        // then returned that TyUnknown in place of the struct.
+        //
+        // The whole of it: single-module code has no `use`, so nothing shadows
+        // and `ty_named` is reached; the moment the same file is compiled as
+        // part of a closure, every annotation, parameter and return type naming
+        // an imported struct silently became unknown, every field access on one
+        // read `()`, and the constructors written `var out: T` had nothing left
+        // to take a type from. Struct literals kept working because they go to
+        // struct_table_find directly and never come through here, which is why
+        // this looked like a let/var bug for hours.
+        //
+        // A binding that carries no information must not outrank a type that
+        // does.
+        let bound_is_informative = bound_ty.kind != TypeKind::TyError
+            && !(bound_ty.kind == TypeKind::TyUnknown
+                 && (struct_table_find((*c).structs, name) >= 0
+                     || enum_table_find((*c).enums, name) >= 0))
+        if bound_is_informative || bound_ty.ontology_id >= 0 {
             bound_ty
         } else {
             ty_named(name)
