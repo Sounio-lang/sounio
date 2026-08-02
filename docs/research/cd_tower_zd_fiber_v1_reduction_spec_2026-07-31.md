@@ -189,10 +189,33 @@ on every ordered pair:
 **Nothing is left over.** The minimal resolving level distributes as `j+0: 28.6%`, `j+1: ~30%`,
 `j+2: ~21%`, `j+3: ~12%`, `j+4: ~5%`, `j+5: 2.4%` — and it **grows with `n`**.
 
-So the honest state of (d): `tr(A²)` is computable level by level from a *proven* theorem plus one
-explicit never-an-edge class. What it is **not** is a *bounded* closed form — that would need the
-strata to telescope. And (d) also still needs the injectivity of `(tr A², tr A³)`. **(d) is not
-closed.**
+So the honest state of (d)'s first half: `tr(A²)` is computable level by level from a *proven*
+theorem plus one explicit never-an-edge class. What it is **not** is a *bounded* closed form —
+that would need the strata to telescope.
+
+---
+
+## 7. The injectivity decomposes, and `tr(A²)` is parity-blind (`W11`)
+
+(d)'s second half is "the pair is injective on the surviving classes". Its **fibre structure** is
+now known exactly:
+
+| | |
+|---|---|
+| **(I)** `tr(A²)` is **injective on the `2^{n-4}` Fano orbits** | verified `n = 6…9` |
+| **(II)** `tr(A²)(seam y) = tr(A²)(Fano τy)`, `τy = y` with its **lowest set bit cleared** — for **every** seam, even weight and odd alike | 0 exceptions |
+| **(III)** `tr(A³)` then separates the odd-weight seams inside those fibres | 0 exceptions |
+
+So each `tr(A²)`-fibre is one Fano orbit `y` together with the seams `y + 2^i`, `i < lsb(y)`, that
+`τ` maps onto it. The injectivity is therefore **(I) ∧ (III)** — two statements about a *known*
+structure rather than one about an unknown one.
+
+**And the conceptual point.** `τ` **always** preserves `tr(A²)`, but preserves the **spectrum**
+only for even weight. So **`tr(A²)` is parity-blind** — it is an L1-level invariant, and the parity
+the collapse law turns on is carried entirely by `tr(A³)`. That is the trace-side echo of this
+lane's own `C1`/`C2` finding: L1 holds for every seam and does not see the parity; L2 does.
+
+**(I) and (III) are measured, not proven. (d) is not closed, and V1 is not proven.**
 
 ---
 

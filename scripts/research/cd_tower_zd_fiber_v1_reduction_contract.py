@@ -505,6 +505,62 @@ def main():
           f"PROVEN theorem plus one explicit never-an-edge class, and a bounded closed form would "
           f"need the strata to telescope. (d) IS NOT CLOSED ***")
 
+    # ---- W11  THE INJECTIVITY DECOMPOSES, and tr(A^2) is PARITY-BLIND ----------------------
+    # (d)'s second half is "the pair (tr A^2, tr A^3) is injective on the surviving classes".
+    # Its FIBRE STRUCTURE is now known exactly, which splits it into two named statements:
+    #   (I)  tr(A^2) is INJECTIVE on the 2^{n-4} Fano orbits;
+    #   (II) tr(A^2)(seam y) = tr(A^2)(Fano tau y), tau y = y with its LOWEST SET BIT cleared --
+    #        for EVERY seam, even weight and odd alike;
+    #   (III) tr(A^3) then separates the odd-weight seams inside those fibres.
+    # (II) is the conceptual one: tau always preserves tr(A^2) but preserves the SPECTRUM only
+    # for even weight. So tr(A^2) is PARITY-BLIND -- it is an L1-level invariant, and the parity
+    # the collapse law turns on is carried entirely by tr(A^3). That is the trace-side echo of
+    # the lane's own C1/C2 finding that L1 does not see the parity and L2 does.
+    w11_rows = []
+    w11 = True
+    for n in SPEC_N:
+        S = sign_table_fast(n)
+        H = 1 << (n - 1)
+        fano, seam = {}, {}
+        for Llo in range(1, H):
+            y = Llo >> 3
+            (fano if (Llo & 7) else seam).setdefault(y, Llo)
+        F = {y: traces23(A_sig_fast(n, L, S)) for y, L in fano.items()}
+        Sm = {y: traces23(A_sig_fast(n, L, S)) for y, L in seam.items()}
+        inj = len({v[0] for v in F.values()}) == len(F)          # (I)
+        b2 = b3e = b3o = 0
+        for y, c in Sm.items():
+            t = y - (y & -y)
+            if c[0] != F[t][0]:
+                b2 += 1                                          # (II)
+            same3 = (c[1] == F[t][1])
+            if bin(y).count("1") % 2 == 0:
+                if not same3:
+                    b3e += 1
+            elif same3:
+                b3o += 1                                         # (III)
+        allc = list(F.values()) + [Sm[y] for y in Sm if bin(y).count("1") % 2]
+        pair = (len(set(allc)) == len(allc) == 3 * 2 ** (n - 5))
+        w11 = w11 and inj and b2 == 0 and b3e == 0 and b3o == 0 and pair
+        w11_rows.append((n, len(F), inj, b2, b3e, b3o, pair))
+    ok["W11"] = w11
+    print(f"W11_INJDEC  THE INJECTIVITY DECOMPOSES, and tr(A^2) is PARITY-BLIND "
+          f"{'OK' if w11 else 'FAIL'} -- "
+          + "; ".join(f"n={a}: {b} Fano orbits, trA2 injective on them {c}, "
+                      f"trA2(seam y) != trA2(Fano tau y) on {d}, even-wt trA3 differs on {e}, "
+                      f"odd-wt trA3 EQUAL on {f}, pair injective {g}"
+                      for a, b, c, d, e, f, g in w11_rows)
+          + ". So the FIBRES of tr(A^2) are known EXACTLY: each is one Fano orbit y together "
+            "with the seams y + 2^i, i < lsb(y), that tau maps onto it. (d)'s injectivity is "
+            "therefore (I) tr(A^2) injective on the Fano orbits AND (III) tr(A^3) separating "
+            "inside each fibre -- two statements about a KNOWN structure, not one statement "
+            "about an unknown one. *** AND THE CONCEPTUAL POINT: tau ALWAYS preserves tr(A^2) "
+            "but preserves the SPECTRUM only for even weight, so tr(A^2) is PARITY-BLIND. It is "
+            "an L1-level invariant; the parity the collapse law turns on is carried entirely by "
+            "tr(A^3). That is the trace-side echo of C1/C2 -- L1 holds for every seam and does "
+            "not see the parity, L2 does. (I) and (III) are MEASURED, not proven; (d) IS NOT "
+            "CLOSED ***")
+
     print("=" * 78)
     if all(ok.values()):
         print("CD_TOWER_ZDV1_VERDICT C_CLOSED__V1_REDUCED_TO_D_ALONE__NOT_CLOSED")
