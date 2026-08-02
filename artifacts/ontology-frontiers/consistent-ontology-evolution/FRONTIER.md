@@ -68,6 +68,46 @@ ocorrências do axioma. Em `formal/OntologyEvolutionRepair.lean`:
 O protótipo `version_chain_removal.sio` executa o mesmo cenário com
 assertivas em runtime (consistência checada após cada passo).
 
+### Extensão: repair minimal contra MÚLTIPLOS parceiros (2026-08-02)
+
+Fechada a lacuna restante: o teorema `repair_retry` exigia unicidade do
+parceiro conflitante; agora o candidato `a` conflita com **vários**
+parceiros da versão corrente. Como cada parceiro bloqueia `a`
+independentemente, admitir `a` força a remoção de TODOS os parceiros — o
+conjunto de remoção é unicamente determinado. A única escolha real é
+binária, feita por **massa epistêmica** (confianças; convenção de massa:
+SOMA das confianças dos parceiros, não o máximo):
+
+- **ADMIT(a)** — remove todos os parceiros e adiciona `a`; massa
+  contestada retida = `conf a`.
+- **REJECT(a)** — mantém a versão; massa contestada retida = soma das
+  confianças dos parceiros.
+- **decide** — admite sse `conf a > soma`; empate rejeita (o candidato
+  precisa superar estritamente a massa estabelecida que deslocaria).
+
+Em `formal/OntologyMinimalRepair.lean`:
+
+1. **ADMIT funciona** (`admit_succeeds`): após remover todos os
+   parceiros, `a` não conflita com nada e a versão admitida é consistente
+   (via o lema geral de sublista) — sem hipótese de unicidade.
+2. **REJECT é consistente** (`reject_consistent`): rejeitar mantém `v`.
+3. **Otimalidade** (`decide_optimal`): `decide` retém massa ≥ a da outra
+   opção (análise de casos na comparação estrita).
+4. **Necessidade / minimalidade única** (`partner_not_mem_of_admissible` /
+   `admissible_sublist_partnerfree`): nenhum parceiro pode sobreviver em
+   qualquer subconjunto mantido que admita `a`; o restante livre de
+   parceiros é o ÚNICO conjunto mantido admissível maximal — dualmente,
+   o conjunto de parceiros é o ÚNICO conjunto de remoção minimal.
+5. **Instância concreta `Fin 7`**: candidato 4 conflita com DOIS
+   parceiros (1 e 3) de {3,2,1}; perfil ADMIT (`conf 4 = 900 > 400+400`)
+   e perfil REJECT (`conf 4 = 300 < 400+400`), ambos computados por
+   `native_decide`, mais a direção de necessidade (remover apenas UM
+   parceiro ainda bloqueia o candidato).
+
+O protótipo `minimal_repair_demo.sio` executa os dois ramos (admit com
+0.90 > 0.80; reject com 0.30 < 0.80) e a assertiva de necessidade, com
+checagem de consistência por pares (ALL PASS).
+
 ## Artefatos
 
 - `version_chain.sio` — cadeia de versões com guarda de consistência;
@@ -83,6 +123,14 @@ assertivas em runtime (consistência checada após cada passo).
   geral de sublista consistente; invariante a priori para scripts mistos;
   teorema repair-then-retry (remover o único parceiro conflitante
   desbloqueia o edit rejeitado); instância `Fin 6` por `native_decide`.
+- `minimal_repair_demo.sio` — repair minimal contra múltiplos parceiros:
+  candidato 4 conflita com 1 e 3; ramo ADMIT (0.90 > 0.80) remove ambos e
+  adiciona 4; ramo REJECT (0.30 < 0.80) mantém a versão; necessidade
+  (remover um só parceiro ainda bloqueia) verificada (ALL PASS).
+- `formal/OntologyMinimalRepair.lean` — decisão binária admit/reject por
+  massa (soma das confianças dos parceiros); teoremas admit_succeeds,
+  reject_consistent, decide_optimal e minimalidade única do conjunto de
+  remoção; instância `Fin 7` por `native_decide`.
 
 ## Lacunas e riscos
 
@@ -92,8 +140,13 @@ assertivas em runtime (consistência checada após cada passo).
   remoção/cirurgia de axiomas modelada em
   `formal/OntologyEvolutionRepair.lean` + `version_chain_removal.sio`,
   com teorema repair-then-retry que conecta formalmente com a fronteira
-  `epistemic-alignment-repair`. Resta como trabalho futuro: repair
-  *minimal* (escolher qual axioma remover quando há vários parceiros
-  conflitantes — hoje o teorema exige unicidade do parceiro).
+  `epistemic-alignment-repair`.
+- ~~Repair minimal com múltiplos parceiros conflitantes~~ **FECHADA
+  (2026-08-02)**: `formal/OntologyMinimalRepair.lean` +
+  `minimal_repair_demo.sio` — decisão admit/reject por massa epistêmica
+  com otimalidade provada e minimalidade única do conjunto de remoção
+  (todos os parceiros devem sair). Resta como trabalho futuro: empates de
+  massa com mais de duas opções e oráculos de conflito com custo de
+  remoção não uniforme.
 - Compactação de armazenamento multi-versão (o problema de espaço de
   Bayoudhi et al.) não é tratada.

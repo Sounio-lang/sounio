@@ -122,6 +122,32 @@ oráculos de conflito continuam abstratos.
 - `formal/OntologyAlignmentRepair.lean`, `formal/OntologyClaimStatus.lean`,
   `formal/OntologyEvolution.lean`, `formal/OntologyRepairEquivalence.lean`,
   `formal/OntologyEvolutionRepair.lean`, `formal/ClaimStatusInterval.lean`
+- `scripts/ci/ontology_frontiers_gate.sh` — gate CI standalone (rodada 3,
+  lane `frontier-gate`; ver seção "Gate CI").
+
+## Gate CI
+
+Rodada 3 adicionou um gate standalone que re-verifica os protótipos sem
+editar nenhum arquivo existente:
+
+```bash
+bash scripts/ci/ontology_frontiers_gate.sh   # funciona a partir de qualquer cwd
+```
+
+O que ele checa, para cada um dos 5 protótipos (`alignment_repair.sio`,
+`claim_status.sio`, `interval_claims.sio`, `version_chain.sio`,
+`version_chain_removal.sio`):
+
+1. `./bin/souc check <file>` — exige `check: OK` na saída e ausência de
+   `parse error`;
+2. `./bin/souc run <file>` — exige uma linha exata `ALL PASS` na saída.
+
+O exit code do `souc` não é confiável, então todos os vereditos vêm do
+stdout capturado. O gate imprime uma linha OK/FAIL por arquivo e sai com
+código 1 se qualquer protótipo falhar. Cada `souc run` leva ~30–60s; há um
+timeout por arquivo (`ONTOLOGY_FRONTIERS_RUN_TIMEOUT`, default 180s). O
+wrapper pode ser trocado via `SOUC_BIN`. Os repros de compilador em
+`compiler-repros/` são propositalmente excluídos (eles demonstram falhas).
 
 ## Arquivos editados
 
