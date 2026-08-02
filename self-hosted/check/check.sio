@@ -243,6 +243,12 @@ pub struct Checker {
     current_impl_type: TypeEntry,
     current_effects: [i64; 8],
     current_effect_count: i64,
+    // Which function is being checked. current_module was already tracked (it is
+    // what makes E175 fire across modules); the FUNCTION was not, so E035 could
+    // name neither, and in a multi-module check its span -- which starts at 0 and
+    // carries no module identity -- pointed into whichever buffer the reader
+    // guessed. Two of them were attributed to the wrong file that way.
+    current_fn_name: Name,
     multitest_count: i64,
     multitest_corrected: bool,
     last_literal_int: i64,
@@ -936,6 +942,7 @@ fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
         current_impl_type: ty_error(),
         current_effects: [0; 8],
         current_effect_count: 0,
+        current_fn_name: empty_name(),
         multitest_count: 0,
         multitest_corrected: false,
         last_literal_int: 0,
@@ -1036,6 +1043,7 @@ fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     (*raw).current_impl_type = ty_error()
     (*raw).current_effects = [0; 8]
     (*raw).current_effect_count = 0
+    (*raw).current_fn_name = empty_name()
     (*raw).multitest_count = 0
     (*raw).multitest_corrected = false
     (*raw).last_literal_int = 0
@@ -1160,6 +1168,7 @@ fn checker_store_from_value(dst: *mut Checker, src: Checker) with Mut, Panic, Di
     (*dst).current_impl_type = src.current_impl_type
     (*dst).current_effects = src.current_effects
     (*dst).current_effect_count = src.current_effect_count
+    (*dst).current_fn_name = src.current_fn_name
     (*dst).multitest_count = src.multitest_count
     (*dst).multitest_corrected = src.multitest_corrected
     (*dst).last_literal_int = src.last_literal_int
@@ -2878,7 +2887,7 @@ fn checker_prove_robust_names_mut(c: *mut Checker, contest_name: Name, policy_na
 // `checker_check_expr_mut` (a single copy, off the hello.sio path).
 // ============================================================
 
-fn checker_report_error_at_inplace(c: *mut Checker, span: Span, code: i64, msg_a: i64, msg_b: i64, msg_c: i64) with Mut, IO, Panic, Div {
+fn checker_report_error_at_inplace(c: *mut Checker, span: Span, code: i64, msg_a: i64, msg_b: i64, msg_c: i64) with Mut, IO, Panic, Div, Alloc {
     let is_visibility_error = code == 175 || code == 176 || code == 177
     if (*c).visibility_only && !is_visibility_error {
         return
@@ -2894,6 +2903,16 @@ fn checker_report_error_at_inplace(c: *mut Checker, span: Span, code: i64, msg_a
     if code < 10 { print("0") }
     print_int(code)
     print("]")
+    // WHERE, for the third time and the same reason as E035 and E002. This is
+    // the widest reporter in the checker -- E175 among many others -- and it
+    // printed a bare span. On the self-hosted sources that span is a BUNDLE
+    // offset with start pinned at 0, so a reader is handed "at 0..79850" and
+    // cannot open a single one of the 2 269 E175s that lean.sio produces. The
+    // module and the function are already on the Checker; they cost two prints.
+    print(" in ")
+    e035_print_module_path((*c).current_module)
+    print("::")
+    e035_print_ident((*c).current_fn_name)
     if span.start > 0 || span.end > 0 {
         print(" at ")
         print_int(span.start)
@@ -2905,6 +2924,65 @@ fn checker_report_error_at_inplace(c: *mut Checker, span: Span, code: i64, msg_a
     print("\n")
     print_error_help(code)
     print_error_note(code)
+}
+
+// E175 says a function is private in its defining module without saying WHICH
+// function or WHOSE module, which makes it unactionable at scale and, worse,
+// indistinguishable from the known false positive: two modules each owning a
+// private function of the same name, where name-only lookup resolves the call
+// to the wrong table entry (tests/compiler/madaros_visibility_context). The
+// callee's path plus both module ids separate the two cases on sight -- equal
+// paths with different ids is the lookup bug, different paths is a real
+// violation.
+fn checker_report_private_fn_inplace(c: *mut Checker, span: Span, sig_id: i64) with Mut, IO, Panic, Div, Alloc {
+    checker_report_error_at_inplace(c, span, 175, 0, 0, 0)
+    let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
+    print("   = callee ")
+    e035_print_module_path(sig.defining_module)
+    print("::")
+    e035_print_ident(sig.name)
+    print("\n   = defining module id ")
+    print_int(sig.defining_module_id)
+    print(", calling from module id ")
+    print_int((*c).current_module_id)
+    print("\n")
+}
+
+fn checker_report_private_struct_inplace(c: *mut Checker, span: Span, struct_idx: i64) with Mut, IO, Panic, Div, Alloc {
+    checker_report_error_at_inplace(c, span, 176, 0, 0, 0)
+    let si = struct_table_get((*c).structs, struct_idx)
+    print("   = struct ")
+    e035_print_module_path(si.defining_module)
+    print("::")
+    e035_print_ident(si.name)
+    print("\n   = defining module id ")
+    print_int(si.defining_module_id)
+    print(", used from module id ")
+    print_int((*c).current_module_id)
+    print("\n")
+}
+
+// E177 is E175 one wall further in: "enum constructor is private in its defining
+// module", 820 of them on lean.sio, and until now none said which enum or whose
+// module. It also has a second ambiguity E175 does not, because a path
+// expression reaches an enum two ways -- by the enum's own name, or by a bare
+// variant name that resolves back to it. Printing what was WRITTEN alongside
+// what it RESOLVED TO separates "you named a private enum" from "you named a
+// variant whose enum happens to be private", which are different fixes.
+fn checker_report_private_enum_inplace(c: *mut Checker, span: Span, enum_idx: i64, referenced: Name) with Mut, IO, Panic, Div, Alloc {
+    checker_report_error_at_inplace(c, span, 177, 0, 0, 0)
+    let ei = enum_table_get((*c).enums, enum_idx)
+    print("   = enum ")
+    e035_print_module_path(ei.defining_module)
+    print("::")
+    e035_print_ident(ei.name)
+    print("\n   = written as ")
+    e035_print_ident(referenced)
+    print("\n   = defining module id ")
+    print_int(ei.defining_module_id)
+    print(", used from module id ")
+    print_int((*c).current_module_id)
+    print("\n")
 }
 
 fn checker_report_mismatch_inplace(c: *mut Checker, span: Span, code: i64, expected: TypeEntry, got: TypeEntry) with Mut, IO, Panic, Div, Alloc {
@@ -4021,6 +4099,7 @@ fn checker_check_impl_method_inplace(c: *mut Checker, item: Item) with Mut, Pani
             // current_effects empty and firing a spurious E035 on the merged/imported
             // lane. The semantic lookup disambiguates by TypeKind (TyUnknown vs TyI64),
             // so each impl body sees ITS OWN declared effects.
+            (*c).current_fn_name = (*fd).name
             let sig_id = fn_sig_table_find_method_semantic((*c).fn_sigs, (*c).current_impl_type, (*fd).name)
             if sig_id >= 0 {
                 let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
@@ -4320,6 +4399,7 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             // return-type path until the expr spine lands — so the conservative
             // proven path ships. Revisit direct-read with a real return-mismatch
             // gate once `return <expr>` no longer crashes the check spine.
+            (*c).current_fn_name = (*fd).name
             let sig_id = fn_sig_table_find((*c).fn_sigs, (*fd).name)
             if sig_id >= 0 {
                 let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
@@ -4884,7 +4964,7 @@ fn checker_check_path_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     if enum_idx >= 0 {
         let ei = enum_table_get((*c).enums, enum_idx)
         if (*c).enforce_visibility && !checker_enum_visible_inplace(c, enum_idx) {
-            checker_report_error_at_inplace(c, e.span, 177, 0, 0, 0)
+            checker_report_private_enum_inplace(c, e.span, enum_idx, first_name)
         }
         // A direct imported variant resolves to its owning enum through the
         // authority table. Preserve that enum identity instead of spelling
@@ -4896,7 +4976,7 @@ fn checker_check_path_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         if variant_enum_idx >= 0 {
             let ei = enum_table_get((*c).enums, variant_enum_idx)
             if (*c).enforce_visibility && !checker_enum_visible_inplace(c, variant_enum_idx) {
-                checker_report_error_at_inplace(c, e.span, 177, 0, 0, 0)
+                checker_report_private_enum_inplace(c, e.span, variant_enum_idx, first_name)
             }
             ty_named(ei.name)
         } else {
@@ -5778,7 +5858,7 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
     if struct_idx >= 0 {
         let si = struct_table_get((*c).structs, struct_idx)
         if (*c).enforce_visibility && !checker_struct_visible_inplace(c, struct_idx) {
-            checker_report_error_at_inplace(c, e.span, 176, 0, 0, 0)
+            checker_report_private_struct_inplace(c, e.span, struct_idx)
         }
         if si.is_generic_template {
             // ---- Generic struct literal (inlined check_generic_struct_lit 16633) ----
@@ -5955,7 +6035,7 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
             let ei = enum_table_get((*c).enums, enum_idx)
             if variant_info_list_has(ei.variants, variant_name) {
                 if (*c).enforce_visibility && !checker_enum_visible_inplace(c, enum_idx) {
-                    checker_report_error_at_inplace(c, e.span, 177, 0, 0, 0)
+                    checker_report_private_enum_inplace(c, e.span, enum_idx, variant_name)
                 }
                 let vfields = variant_info_list_find_fields(ei.variants, variant_name)
                 // Count check first (E046), mirroring the non-generic struct branch:
@@ -7020,7 +7100,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     }
     if direct_sig_id >= 0 {
         if (*c).enforce_visibility && !checker_fn_sig_visible_inplace(c, direct_sig_id) {
-            checker_report_error_at_inplace(c, e.span, 175, 0, 0, 0)
+            checker_report_private_fn_inplace(c, e.span, direct_sig_id)
         }
         let call_start_borrows = (*c).borrows
         let direct_sig = fn_sig_table_get((*c).fn_sigs, direct_sig_id)
@@ -7100,7 +7180,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     if callee_ty.kind == TypeKind::TyFn && callee_ty.fn_sig_id >= 0 {
         let sig = fn_sig_table_get((*c).fn_sigs, callee_ty.fn_sig_id)
         if (*c).enforce_visibility && !checker_fn_sig_visible_inplace(c, callee_ty.fn_sig_id) {
-            checker_report_error_at_inplace(c, e.span, 175, 0, 0, 0)
+            checker_report_private_fn_inplace(c, e.span, callee_ty.fn_sig_id)
         }
         let call_start_borrows = (*c).borrows
         var effective_params = fn_param_list_clone(&sig.params)
@@ -7509,7 +7589,7 @@ fn checker_check_ident_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
         let fn_sig_id = checker_fn_sigs_find_inplace(c, e.name)
         if fn_sig_id >= 0 {
             if (*c).enforce_visibility && !checker_fn_sig_visible_inplace(c, fn_sig_id) {
-                checker_report_error_at_inplace(c, e.span, 175, 0, 0, 0)
+                checker_report_private_fn_inplace(c, e.span, fn_sig_id)
             }
             return ty_fn(fn_sig_id)
         }
@@ -7810,7 +7890,7 @@ fn checker_lower_opt_type_inplace(c: *mut Checker, opt: Option<Box<TypeExpr> >) 
 // *mut transcription of check_refinement_literal (12312). Reads refinements via
 // (*c); emits E042 through checker_report_error_at_inplace. Replicates the final
 // last_literal_kind = 0 reset (12338) so downstream stmts see clean state.
-fn checker_check_refinement_literal_inplace(c: *mut Checker, span: Span, ty: TypeEntry) with Mut, Panic, Div, IO {
+fn checker_check_refinement_literal_inplace(c: *mut Checker, span: Span, ty: TypeEntry) with Mut, Panic, Div, IO, Alloc {
     if ty.refinement_id < 0 || ty.refinement_id >= 128 {
         return
     }
@@ -10193,6 +10273,41 @@ fn print_contest_model_family(info: ContestInfo) with IO, Mut, Panic, Div {
 // Error reporting with diagnostics
 // ============================================================
 
+fn e035_print_ident(n: Name) with IO, Mut, Panic, Div {
+    if n.len <= 0 {
+        print("<unnamed>")
+        return
+    }
+    var i: i64 = 0
+    while i < n.len && i < 128 {
+        print_char(n.buf[i as usize] as i64)
+        i = i + 1
+    }
+}
+
+fn e035_print_module_path(p: AstPath) with IO, Mut, Panic, Div, Alloc {
+    if p.seg_count <= 0 {
+        print("<main>")
+        return
+    }
+    var seg = p.segments
+    var idx: i64 = 0
+    var more = true
+    while more && idx < p.seg_count && idx < 32 {
+        if idx > 0 { print("::") }
+        var j: i64 = 0
+        while j < seg.head_len && j < 128 {
+            print_char(seg.head_buf[j as usize] as i64)
+            j = j + 1
+        }
+        match seg.tail {
+            Some(t) => { seg = *t }
+            None => { more = false }
+        }
+        idx = idx + 1
+    }
+}
+
 impl Checker {
     fn report_error(self) -> Checker with Mut {
         var c = self
@@ -10201,8 +10316,15 @@ impl Checker {
         c
     }
 
-    fn report_error_at(self, span: Span, code: i64, msg_a: i64, msg_b: i64, msg_c: i64) -> Checker with Mut, IO, Panic, Div {
+    fn report_error_at(self, span: Span, code: i64, msg_a: i64, msg_b: i64, msg_c: i64) -> Checker with Mut, IO, Panic, Div, Alloc {
         var c = self
+        let is_visibility_error = code == 175 || code == 176 || code == 177
+        if c.visibility_only && !is_visibility_error {
+            return c
+        }
+        if is_visibility_error {
+            c.visibility_error_count = c.visibility_error_count + 1
+        }
         c.error_count = c.error_count + 1
         c.had_error = true
         print("error[E")
@@ -10210,6 +10332,12 @@ impl Checker {
         if code < 10 { print("0") }
         print_int(code)
         print("]")
+        // The value-path twin of the naming on checker_report_error_at_inplace.
+        // Both reporters carry the same spans and the same uselessness without it.
+        print(" in ")
+        e035_print_module_path(c.current_module)
+        print("::")
+        e035_print_ident(c.current_fn_name)
         if span.start > 0 || span.end > 0 {
             print(" at ")
             print_int(span.start)
@@ -10222,6 +10350,57 @@ impl Checker {
         // Print help and note if available
         print_error_help(code)
         print_error_note(code)
+        c
+    }
+
+    // Value-path twin of checker_report_private_fn_inplace. Same reason: the
+    // callee is the half that matters, and equal paths with different module ids
+    // are the name-only-lookup false positive rather than a real violation.
+    fn report_private_fn(self, span: Span, sig_id: i64) -> Checker with Mut, IO, Panic, Div, Alloc {
+        var c = self.report_error_at(span, 175, 0, 0, 0)
+        let sig = fn_sig_table_get(c.fn_sigs, sig_id)
+        print("   = callee ")
+        e035_print_module_path(sig.defining_module)
+        print("::")
+        e035_print_ident(sig.name)
+        print("\n   = defining module id ")
+        print_int(sig.defining_module_id)
+        print(", calling from module id ")
+        print_int(c.current_module_id)
+        print("\n")
+        c
+    }
+
+    fn report_private_struct(self, span: Span, struct_idx: i64) -> Checker with Mut, IO, Panic, Div, Alloc {
+        var c = self.report_error_at(span, 176, 0, 0, 0)
+        let si = struct_table_get(c.structs, struct_idx)
+        print("   = struct ")
+        e035_print_module_path(si.defining_module)
+        print("::")
+        e035_print_ident(si.name)
+        print("\n   = defining module id ")
+        print_int(si.defining_module_id)
+        print(", used from module id ")
+        print_int(c.current_module_id)
+        print("\n")
+        c
+    }
+
+    // Value-path twin of checker_report_private_enum_inplace.
+    fn report_private_enum(self, span: Span, enum_idx: i64, referenced: Name) -> Checker with Mut, IO, Panic, Div, Alloc {
+        var c = self.report_error_at(span, 177, 0, 0, 0)
+        let ei = enum_table_get(c.enums, enum_idx)
+        print("   = enum ")
+        e035_print_module_path(ei.defining_module)
+        print("::")
+        e035_print_ident(ei.name)
+        print("\n   = written as ")
+        e035_print_ident(referenced)
+        print("\n   = defining module id ")
+        print_int(ei.defining_module_id)
+        print(", used from module id ")
+        print_int(c.current_module_id)
+        print("\n")
         c
     }
 
@@ -11966,11 +12145,21 @@ impl Checker {
 
 
 
-    fn report_effect_error(self, span: Span, missing: [i64; 8], missing_count: i64) -> Checker with Mut, IO, Panic, Div {
+    fn report_effect_error(self, span: Span, missing: [i64; 8], missing_count: i64) -> Checker with Mut, IO, Panic, Div, Alloc {
         var c = self
         c.error_count = c.error_count + 1
         c.had_error = true
         print("error[E035]")
+        // WHERE, before anything else. This diagnostic used to print only a span
+        // whose start is always 0 and which carries no module identity, so in a
+        // multi-module check the reader had to guess which file the offset
+        // indexed -- and guessing wrong is how two of these were blamed on the
+        // wrong module. current_module was already tracked for E175;
+        // current_fn_name is recorded now for the same reason.
+        print(" in ")
+        e035_print_module_path(c.current_module)
+        print("::")
+        e035_print_ident(c.current_fn_name)
         if span.start > 0 || span.end > 0 {
             print(" at ")
             print_int(span.start)
@@ -11988,7 +12177,7 @@ impl Checker {
         c
     }
 
-    fn check_callee_effects(self, span: Span, callee_effects: [i64; 8], callee_effect_count: i64) -> Checker with Mut, IO, Panic, Div {
+    fn check_callee_effects(self, span: Span, callee_effects: [i64; 8], callee_effect_count: i64) -> Checker with Mut, IO, Panic, Div, Alloc {
         if callee_effect_count == 0 {
             return self
         }
@@ -12003,7 +12192,7 @@ impl Checker {
     // Security hardening: depth and complexity tracking
     // --------------------------------------------------------
 
-    fn check_type_depth(self, span: Span) -> (Checker, bool) with Mut, Panic, Div {
+    fn check_type_depth(self, span: Span) -> (Checker, bool) with Mut, Panic, Div, Alloc {
         var c = self
         if c.type_depth >= MAX_TYPE_DEPTH {
             c = c.report_error_at(span, 60, c.type_depth, MAX_TYPE_DEPTH, 0)
@@ -12021,7 +12210,7 @@ impl Checker {
         c
     }
 
-    fn check_expr_depth(self, span: Span) -> (Checker, bool) with Mut, Panic, Div {
+    fn check_expr_depth(self, span: Span) -> (Checker, bool) with Mut, Panic, Div, Alloc {
         var c = self
         if c.expr_depth >= MAX_EXPR_DEPTH {
             c = c.report_error_at(span, 61, c.expr_depth, MAX_EXPR_DEPTH, 0)
@@ -12039,7 +12228,7 @@ impl Checker {
         c
     }
 
-    fn check_loop_depth(self, span: Span) -> (Checker, bool) with Mut, Panic, Div {
+    fn check_loop_depth(self, span: Span) -> (Checker, bool) with Mut, Panic, Div, Alloc {
         var c = self
         if c.loop_depth >= MAX_LOOP_DEPTH {
             c = c.report_error_at(span, 62, c.loop_depth, MAX_LOOP_DEPTH, 0)
@@ -12048,7 +12237,7 @@ impl Checker {
         (c, true)
     }
 
-    fn check_complexity(self, cost: i64, span: Span) -> (Checker, bool) with Mut, Panic, Div {
+    fn check_complexity(self, cost: i64, span: Span) -> (Checker, bool) with Mut, Panic, Div, Alloc {
         var c = self
         if c.complexity_budget + cost > MAX_TYPE_COMPLEXITY {
             c = c.report_error_at(span, 64, c.complexity_budget, MAX_TYPE_COMPLEXITY, 0)
@@ -18508,6 +18697,10 @@ impl Checker {
         match opt {
             Some(fd) => {
                 var c = self
+                // The in-place checker records this at its two fn entry points;
+                // the value path never did, so every diagnostic reported through
+                // `report_error_at` would have named its caller `<unnamed>`.
+                c.current_fn_name = (*fd).name
                 // Save outer effects context
                 let saved_effects = c.current_effects
                 let saved_effect_count = c.current_effect_count
@@ -18639,6 +18832,7 @@ impl Checker {
         match item.fn_def {
             Some(fd) => {
                 var c = self
+                c.current_fn_name = (*fd).name
                 // Save outer effects context
                 let saved_effects = c.current_effects
                 let saved_effect_count = c.current_effect_count
@@ -18848,7 +19042,7 @@ impl Checker {
         (c, ty_unit())
     }
 
-    fn check_refinement_literal(self, span: Span, ty: TypeEntry) -> Checker with Mut, Panic, Div {
+    fn check_refinement_literal(self, span: Span, ty: TypeEntry) -> Checker with Mut, Panic, Div, Alloc {
         if ty.refinement_id < 0 || ty.refinement_id >= 128 { return self }
         let rt = self.refinements.entries[ty.refinement_id as usize]
         var c = self
@@ -19113,7 +19307,7 @@ impl Checker {
         if enum_idx >= 0 {
             let ei = enum_table_get(self.enums, enum_idx)
             if self.enforce_visibility && !visibility_allows_access(ei.visibility, ei.defining_module, self.current_module, self.crate_root) {
-                let c = self.report_error_at(e.span, 177, 0, 0, 0)
+                let c = self.report_private_enum(e.span, enum_idx, first_name)
                 return (c, ty_named(first_name))
             }
             (self, ty_named(first_name))
@@ -19123,7 +19317,7 @@ impl Checker {
             if variant_enum_idx >= 0 {
                 let ei = enum_table_get(self.enums, variant_enum_idx)
                 if self.enforce_visibility && !visibility_allows_access(ei.visibility, ei.defining_module, self.current_module, self.crate_root) {
-                    let c = self.report_error_at(e.span, 177, 0, 0, 0)
+                    let c = self.report_private_enum(e.span, variant_enum_idx, first_name)
                     return (c, ty_named(ei.name))
                 }
                 (self, ty_named(ei.name))
@@ -20308,7 +20502,7 @@ impl Checker {
         if callee_ty.kind == TypeKind::TyFn && callee_ty.fn_sig_id >= 0 {
             let sig = fn_sig_table_get(c.fn_sigs, callee_ty.fn_sig_id)
             if c.enforce_visibility && !visibility_allows_access(sig.visibility, sig.defining_module, c.current_module, c.crate_root) {
-                c = c.report_error_at(e.span, 175, 0, 0, 0)
+                c = c.report_private_fn(e.span, callee_ty.fn_sig_id)
             }
             let call_start_borrows = c.borrows
             var effective_params = fn_param_list_clone(&sig.params)
@@ -23002,7 +23196,7 @@ impl Checker {
         if struct_idx >= 0 {
             let si = struct_table_get(self.structs, struct_idx)
             if self.enforce_visibility && !visibility_allows_access(si.visibility, si.defining_module, self.current_module, self.crate_root) {
-                let c = self.report_error_at(e.span, 176, 0, 0, 0)
+                let c = self.report_private_struct(e.span, struct_idx)
                 return (c, ty_named(struct_name))
             }
             if si.is_generic_template {

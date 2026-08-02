@@ -229,6 +229,9 @@ expect_private_rejection() {
   local source="$2"
   local code="$3"
   local message="$4"
+  local subject_kind="$5"
+  local subject_name="$6"
+  local written_name="${7:-}"
   local log="$WORK/$label.log"
   local rc=0
 
@@ -257,6 +260,24 @@ expect_private_rejection() {
     cat "$log" >&2
     fail "$label must emit exactly one canonical privacy message"
   }
+  grep -Eq "^error\\[$code\\].* in .*::main( at [0-9]+\\.\\.[0-9]+)?: " "$log" || {
+    cat "$log" >&2
+    fail "$label must name the calling function in its diagnostic header"
+  }
+  grep -Eq "^   = $subject_kind .*::$subject_name$" "$log" || {
+    cat "$log" >&2
+    fail "$label must name its resolved $subject_kind authority"
+  }
+  grep -Eq '^   = defining module id -?[0-9]+, (calling|used) from module id -?[0-9]+$' "$log" || {
+    cat "$log" >&2
+    fail "$label must name both defining and caller module ids"
+  }
+  if [[ -n "$written_name" ]]; then
+    grep -Fxq "   = written as $written_name" "$log" || {
+      cat "$log" >&2
+      fail "$label must preserve the authored enum reference $written_name"
+    }
+  fi
 }
 
 FIXTURES="$ROOT_DIR/tests/compiler/madaros_visibility_context"
@@ -289,22 +310,22 @@ expect_ambiguous_named_import_rejection
 
 expect_private_rejection private-fn \
   "$ROOT_DIR/tests/multimodule/visibility_fn_private_main.sio" E175 \
-  'function is private in its defining module'
+  'function is private in its defining module' callee private_fn
 expect_private_rejection private-struct \
   "$ROOT_DIR/tests/multimodule/visibility_struct_private_main.sio" E176 \
-  'struct constructor is private in its defining module'
+  'struct constructor is private in its defining module' struct PrivateStruct
 expect_private_rejection private-enum \
   "$ROOT_DIR/tests/multimodule/visibility_enum_private_main.sio" E177 \
-  'enum constructor is private in its defining module'
+  'enum constructor is private in its defining module' enum PrivateEnum PrivateEnum
 expect_private_rejection private-generic \
   "$FIXTURES/private_generic_import_main.sio" E175 \
-  'function is private in its defining module'
+  'function is private in its defining module' callee private_identity
 expect_private_rejection private-function-value \
   "$FIXTURES/private_function_value_main.sio" E175 \
-  'function is private in its defining module'
+  'function is private in its defining module' callee private_value
 expect_private_rejection private-enum-struct-variant \
   "$FIXTURES/private_enum_struct_variant_main.sio" E177 \
-  'enum constructor is private in its defining module'
+  'enum constructor is private in its defining module' enum PrivateRecord Payload
 
 echo "[madaros-visibility-context] receipt issue=854 context_state=$single_state runtime_state=$runtime_state single_e175=$([[ "$single_state" == baseline ]] && echo 1 || echo 0) matrix_e175=$([[ "$matrix_state" == baseline ]] && echo 18 || echo 0) unresolved_named_import=authority-reject ambiguous_named_import=authority-reject unsupported_named_import=legacy-used local_shadow=exact-local local_value_shadow=runtime-local true_private_fn=E175 true_private_struct=E176 true_private_enum=E177 private_generic=E175 private_function_value=E175 private_enum_struct_variant=E177"
 
