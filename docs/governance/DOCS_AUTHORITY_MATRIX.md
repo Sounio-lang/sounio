@@ -700,6 +700,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.cd-tower-zd-fiber-antisymmetry-lemma-spec-2026-07-31 | historical | docs/research/cd_tower_zd_fiber_antisymmetry_lemma_spec_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.cd-tower-zd-fiber-collapse-l1l2-spec-2026-07-31 | historical | docs/research/cd_tower_zd_fiber_collapse_l1l2_spec_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.cd-tower-zd-fiber-l1-reduction-spec-2026-07-31 | historical | docs/research/cd_tower_zd_fiber_l1_reduction_spec_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.cd-tower-zd-fiber-l2-reduction-spec-2026-08-01 | historical | docs/research/cd_tower_zd_fiber_l2_reduction_spec_2026-08-01.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.cd-tower-zd-fiber-l2-switching-spec-2026-07-31 | historical | docs/research/cd_tower_zd_fiber_l2_switching_spec_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.cd-tower-zd-fiber-signed-localization-2026-07-26 | historical | docs/research/cd_tower_zd_fiber_signed_localization_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.cd-tower-zd-fiber-spectral-classifier-2026-07-26 | historical | docs/research/cd_tower_zd_fiber_spectral_classifier_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -923,6 +924,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.rupture-r3-fano-phi-2026-07-25 | historical | docs/research/rupture-r3-fano-phi_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.rupture-r4-fano-field-2026-07-25 | historical | docs/research/rupture-r4-fano-field_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.sac-llm-spec-2026-07-28 | historical | docs/research/sac_llm_spec_2026-07-28.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.san-imagenet-fpga-dl380-spec-2026-08-02 | historical | docs/research/san_imagenet_fpga_dl380_spec_2026-08-02.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.san-real-patient-data-spec-2026-07-28 | historical | docs/research/san_real_patient_data_spec_2026-07-28.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.sat-rup-microkernel-2026-06-23 | historical | docs/research/sat-rup-microkernel-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.second-derivative-filter-and-spinoza | historical | docs/research/second-derivative-filter-and-spinoza.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
