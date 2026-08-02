@@ -977,8 +977,11 @@ def main():
     # `Qgen'_pow2_eq` (proven forall n today) gives a COMPLETE closed form: Q' = +1 on exactly
     # two disjoint lines, a = 2^k and b = a^2^k, of size 2^m-2 each, and -1 elsewhere. Hence
     #     N(m, 2^k) = (2^m-1)(2^m-2) - 2(2^m-2) = (2^m-2)(2^m-3),  independent of k.
-    # Bridge to the lane's graph: the edge test is Qgen(Llo|2^(n-1), a, b, n) = +1, and
-    # `Qred_hi_ll` (side conditions b != 0, b != Llo ONLY) turns that into Qgen'(Llo,a,b,m)=-1
+    # Bridge to the lane's graph: the edge test is Qgen(Llo|2^(n-1), a, b, n) = +1. Because
+    # Llo < 2^(n-1) throughout the lane (A_sig_fast ranges Llo over [1,H), H = 2^(n-1)), the OR
+    # IS an addition, Llo|2^(n-1) = Llo + 2^(n-1) -- the hypothesis `Qred_hi_ll` needs, and
+    # without which the conversion below would not be available. `Qred_hi_ll` instantiated at
+    # m-1 (side conditions b != 0, b != Llo ONLY) then turns the test into Qgen'(Llo,a,b,m)=-1
     # off the b=Llo column. The a=Llo ROW is covered and is +1 (`Qgen'_label_left`) -- so the
     # ISOLATED VERTEX IS DERIVED -- while the uncovered b=Llo column contributes exactly
     # 2^m-2 to N (`Qgen'_label_right`), giving  tr(A^2) = N(m,Llo) - (2^m-2).
@@ -1065,8 +1068,10 @@ def main():
             "the bottom of every odd chain: the reduced label of an odd W is odd at every level "
             "(`odd_stays_odd`), hence never 0, and at level 1 the box is empty "
             "(`base_box_empty`). *** AND THE ISOLATED VERTEX IS NOW DERIVED, NOT MEASURED: the "
-            "edge test is Qgen(Llo|2^(n-1),a,b,n) = +1, which `Qred_hi_ll` -- whose only side "
-            "conditions are b != 0 and b != Llo -- converts to Qgen'(Llo,a,b,m) = -1 on the "
+            "edge test is Qgen(Llo|2^(n-1),a,b,n) = +1 -- and since Llo < 2^(n-1) throughout "
+            "the lane the OR IS an addition, which is what lets `Qred_hi_ll` (instantiated at "
+            "m-1) apply at all. Its only side conditions are b != 0 and b != Llo, so it "
+            "converts the test to Qgen'(Llo,a,b,m) = -1 on the "
             "whole a = Llo ROW, where `Qgen'_label_left` gives +1: no edges. The one column the "
             "row cannot reach, b = Llo, is zero by A's symmetry while contributing exactly "
             "2^m-2 to N (`Qgen'_label_right`) -- which is the bridge tr(A^2) = N - (2^m-2), "

@@ -422,8 +422,11 @@ everything else (`Qgen'_off_lines`, new, plus `Qgen_pow2`, long in the tree). He
 
 ### 9.3 The bridge to the graph — and the isolated vertex, derived
 
-`A_sig`'s edge test is `Qgen(Llo | 2^{n−1}, a, b, n) = +1`. `Qred_hi_ll`, whose only side
-conditions are `b ≠ 0` and `b ≠ Llo`, converts that to `Qgen'(Llo,a,b,m) = −1` — and it covers the
+`A_sig`'s edge test is `Qgen(Llo | 2^{n−1}, a, b, n) = +1`. **This needs `Llo < 2^{n−1}`**, which
+holds throughout the lane (`A_sig_fast` ranges `Llo` over `[1, 2^{n−1})`): only then is the `OR`
+an addition, `Llo | 2^{n−1} = Llo + 2^{n−1}`, which is the shape `Qred_hi_ll` requires — without
+it the conversion below is simply unavailable. `Qred_hi_ll` instantiated at `m−1`, whose only side
+conditions are `b ≠ 0` and `b ≠ Llo`, converts the test to `Qgen'(Llo,a,b,m) = −1` — and it covers the
 **whole `a = Llo` row**, where `Qgen'_label_left` gives `+1`. So the isolated vertex is now a
 *consequence*, not measured structure. The one column the row cannot reach, `b = Llo`, is zero by
 `A`'s symmetry while contributing exactly `2^m − 2` to `N` (`Qgen'_label_right`). Therefore

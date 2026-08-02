@@ -4,7 +4,7 @@
 # If no providers specified, fans out to the default 5 (diverse consensus set).
 #
 # Available providers:
-#   deepseek     — DeepSeek Coder (code intuition, different training data)
+#   deepseek     — DeepSeek V4 Pro (code intuition, different training data; DEEPSEEK_MODEL overrides)
 #   xai|grok     — Grok 4.3 (primary adversarial math/review lane)
 #   xai-fast     — Grok 4.1 Fast Reasoning (lower-latency fallback)
 #   zai|glm      — Z.AI GLM-5.2 direct (independent math/review provider)
@@ -57,8 +57,12 @@ call_openai_compat() {
             *) max_tok=8192 ;;
         esac
     fi
-    echo "  -> Sending to $name ($model, max=$max_tok)..."
-    curl -s -m 180 "$url/chat/completions" \
+    # Reasoning models spend their whole budget in reasoning_content; a deep audit at
+    # OFFLOAD_MAX_TOKENS=32000 needs well over 180s, and a curl timeout lands as an EMPTY file
+    # (which reads like a provider error). Scale the deadline with the budget.
+    local deadline="${OFFLOAD_TIMEOUT:-$(( max_tok > 8192 ? 600 : 180 ))}"
+    echo "  -> Sending to $name ($model, max=$max_tok, timeout=${deadline}s)..."
+    curl -s -m "$deadline" "$url/chat/completions" \
         -H "Authorization: Bearer $key" \
         -H "Content-Type: application/json" \
         -d "$(jq -n --arg model "$model" --arg prompt "$PROMPT" --argjson maxtok "$max_tok" '{
@@ -83,7 +87,10 @@ run_provider() {
     case "$p" in
         deepseek)
             [[ -n "${DEEPSEEK_API_KEY:-}" ]] && \
-            call_openai_compat "DeepSeek" "https://api.deepseek.com" "$DEEPSEEK_API_KEY" "deepseek-coder" "$OUTDIR/deepseek.json"
+            # `deepseek-coder` is RETIRED: the API still accepts it but silently serves
+            # deepseek-v4-flash, so every run under the old id was quietly the weaker model.
+            # Pin v4-pro; override with DEEPSEEK_MODEL (e.g. deepseek-v4-flash for cheap runs).
+            call_openai_compat "DeepSeek ${DEEPSEEK_MODEL:-deepseek-v4-pro}" "https://api.deepseek.com" "$DEEPSEEK_API_KEY" "${DEEPSEEK_MODEL:-deepseek-v4-pro}" "$OUTDIR/deepseek.json"
             ;;
         xai|grok)
             [[ -n "${XAI_API_KEY:-}" ]] && \
