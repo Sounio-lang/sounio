@@ -241,8 +241,35 @@ that recursion is now the single thing (I) needs. It is measured at `n = 7…10`
 `A(n)` solves to `T(n,0) = (2^{n-1}−2)(2^{n-3}−1)/6`, i.e. `tr(A²)(n,0) = 4(2^{n-1}−2)(2^{n-3}−1)`
 — exactly §3's `W6` formula, which the recursion therefore reproduces.
 
-**(III) is untouched, and the recursion itself is measured. (d) is not closed, and V1 is not
-proven.**
+### ★★ And the recursion is *derived* — four quadrants, eight rows, one sign law (`W13`)
+
+It is not a coincidence about Fano representatives. It comes from a **raw-count** recursion that
+holds for **every** label. With `N(m,W) = #{(a,b) ∈ [1,2^m)² : a ≠ b, Qgen'(W,a,b,m) = −1}` and
+`e = 2^{m-1}`:
+
+```
+N(m, W)      =  4·N(m-1, W)                +  10e − 18       (W < e, label LOW)
+N(m, W + e)  =  4(e−1)(e−2) − 4·N(m-1, W)  +   6e − 10       (label HIGH)
+```
+
+0 wrong at `m = 5,6,7`, over **all** `2^{m-1}−1` labels each.
+
+**Mechanism.** Split `(a,b)` by the top bit at level `m` — four quadrants. The eight `Q'red` rows
+send each to level `m−1`, and `N11`'s sign law says the sign is `−1` **exactly when the label is
+high**. A `−1` sign turns "count the `−1`s" into "count the `+1`s" `= total − (−1)s` — which **is**
+the reflection in the upper-half formula. The `ll` quadrant is `Q'red_low_ll`, which is
+*unconditional*, so it contributes `N(m−1,W)` on the nose; the other three differ by constants
+that depend **only on the level, never on the label**.
+
+Subtracting the isolated-vertex pairs (`2^m − 2`, since `a = W` and `b = W` are excluded from
+`A_sig`) gives `W12`'s form exactly, including `12(2^{n-2}−2) = 24·c_n` and
+`A(n) = 4(2^{n-2}−1)(2^{n-2}−2)`.
+
+**What is still measured is only the two level-constants** `10e − 18` and `6e − 10` — counts of the
+degenerate `(u,v)` where a row's side condition fails. So (I) now rests on **two integers per
+level**.
+
+**(III) is untouched. (d) is not closed, and V1 is not proven.**
 
 ---
 

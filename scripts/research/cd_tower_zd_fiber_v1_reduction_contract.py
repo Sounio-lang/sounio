@@ -622,6 +622,78 @@ def main():
             "ONE recursion. That recursion is what is now MEASURED (n = 7..10), and it is the "
             "single thing (I) needs. (III) is untouched and (d) IS NOT CLOSED ***")
 
+    # ---- W13  THE RECURSION IS DERIVED: four quadrants, eight rows, one sign law ------------
+    # W12's recursion is not an observed coincidence about Fano representatives. It comes from a
+    # RAW-COUNT recursion that holds for EVERY label. With
+    #     N(m,W) = #{(a,b) in [1,2^m)^2 : a != b, Qgen'(W,a,b,m) = -1}   and  e = 2^(m-1):
+    #
+    #     N(m, W)      = 4*N(m-1, W)                    + 10e - 18       (W < e, label LOW)
+    #     N(m, W + e)  = 4(e-1)(e-2) - 4*N(m-1, W)      +  6e - 10       (label HIGH)
+    #
+    # MECHANISM. Split (a,b) by the top bit at level m -- four quadrants. The eight Q'red rows
+    # send each quadrant to level m-1, and N11's sign law says the sign is -1 EXACTLY when the
+    # LABEL is high. A -1 sign turns "count the -1s" into "count the +1s" = (total) - (-1s),
+    # which IS the reflection in the upper-half formula. The `ll` quadrant is `Q'red_low_ll`,
+    # which is UNCONDITIONAL, so it contributes N(m-1,W) on the nose; the other three differ by
+    # constants that depend ONLY on the level, never on the label -- they are the finitely many
+    # degenerate (u,v) where a row's side condition fails, plus the Qgen-vs-Qgen' swap.
+    #
+    # Subtracting the isolated-vertex pairs (2^m - 2, since a = W and b = W are excluded from
+    # A_sig) turns these into W12's recursion EXACTLY:
+    #     trA2(n,y)   = 4 trA2(n-1,y) + 12(2^(n-2) - 2) = 4 trA2(n-1,y) + 24 c_n
+    #     trA2(n,y+h) = 4(2^(n-2)-1)(2^(n-2)-2) - 4 trA2(n-1,y) = A(n) - 4 trA2(n-1,y)
+    def _N(m, W, S):
+        H = 1 << m
+        return sum(1 for a in range(1, H) for b in range(1, H)
+                   if a != b and _Qp(S, W, a, b) == -1)
+
+    w13_bl = w13_bh = w13_t = w13_q = 0
+    w13_rows = []
+    for m in (5, 6, 7):
+        S = sign_table_fast(m)
+        Sp = sign_table_fast(m - 1)
+        e = 1 << (m - 1)
+        bl = bh = 0
+        for W in range(1, e):
+            p = _N(m - 1, W, Sp)
+            if _N(m, W, S) != 4 * p + 10 * e - 18:
+                bl += 1
+            if _N(m, W + e, S) != 4 * (e - 1) * (e - 2) - 4 * p + 6 * e - 10:
+                bh += 1
+            w13_t += 2
+        # and the ll quadrant is EXACTLY N(m-1,W), unconditionally
+        for W in (1, 9, 17):
+            if W >= e:
+                continue
+            H, Hp = 1 << m, e
+            ll = sum(1 for a in range(1, Hp) for b in range(1, Hp)
+                     if a != b and _Qp(S, W, a, b) == -1)
+            if ll != _N(m - 1, W, Sp):
+                w13_q += 1
+        w13_bl += bl
+        w13_bh += bh
+        w13_rows.append((m, e - 1, bl, bh))
+    # the conversion back to W12's constants
+    w13_conv = all(12 * (2 ** (nn - 2) - 2) == 24 * (2 ** (nn - 3) - 1) for nn in range(5, 13))
+    w13 = (w13_bl == 0 and w13_bh == 0 and w13_q == 0 and w13_conv and w13_t > 0)
+    ok["W13"] = w13
+    print(f"W13_RECDER  THE RECURSION IS DERIVED -- four quadrants, eight rows, one sign law "
+          f"{'OK' if w13 else 'FAIL'} -- with N(m,W) the raw resonance count and e = 2^(m-1): "
+          f"N(m,W) = 4N(m-1,W) + 10e - 18 for a LOW label, and "
+          f"N(m,W+e) = 4(e-1)(e-2) - 4N(m-1,W) + 6e - 10 for a HIGH one. "
+          + "; ".join(f"m={a}: {b} labels, low-form wrong {c}, high-form wrong {d}"
+                      for a, b, c, d in w13_rows)
+          + f"; the `ll` quadrant equals N(m-1,W) on the nose in {w13_q} failures (it is "
+            f"`Q'red_low_ll`, UNCONDITIONAL); the constant conversion 12(2^(n-2)-2) = 24 c_n "
+            f"holds {w13_conv}. *** SO W12's RECURSION IS NOT A COINCIDENCE ABOUT FANO "
+            "REPRESENTATIVES: it holds for EVERY label, and it is the four-quadrant split under "
+            "the eight Q'red rows. N11's sign law -- the sign is -1 exactly when the LABEL is "
+            "high -- is what turns 'count the -1s' into 'count the +1s' = total minus, i.e. the "
+            "REFLECTION in the upper half. Subtracting the isolated-vertex pairs (2^m - 2) gives "
+            "W12's form exactly. WHAT IS STILL MEASURED is only the two level-constants 10e-18 "
+            "and 6e-10 -- counts of the degenerate (u,v) where a row's side condition fails. "
+            "So (I) now rests on TWO INTEGERS PER LEVEL. (III) is untouched; (d) IS NOT CLOSED ***")
+
     print("=" * 78)
     if all(ok.values()):
         print("CD_TOWER_ZDV1_VERDICT C_CLOSED__V1_REDUCED_TO_D_ALONE__NOT_CLOSED")
