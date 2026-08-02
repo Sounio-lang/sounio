@@ -92,6 +92,12 @@ fn capture_list_add(caps: CaptureList, name: Name, reg: i64) -> CaptureList with
 
 struct ClosureCapEntry {
     fn_id: i64,
+    // Function the captured regs BELONG TO. A capturing closure's caps are the
+    // enclosing frame's vregs, injected at the call site -- valid only while the
+    // call happens in that same frame. Called from anywhere else they reference
+    // registers that do not exist there, which segfaults (measured rc=139).
+    // Recorded so the call site can refuse instead (#1542).
+    def_fn: i64,
     cap_count: i64,
     caps: [i64; 8],
 }
@@ -101,7 +107,7 @@ struct ClosureCapTable {
 }
 fn empty_closure_cap_table() -> ClosureCapTable {
     ClosureCapTable {
-        entries: [ClosureCapEntry { fn_id: -1, cap_count: 0, caps: [IR_INVALID_REG; 8] }; 256],
+        entries: [ClosureCapEntry { fn_id: -1, def_fn: -1, cap_count: 0, caps: [IR_INVALID_REG; 8] }; 256],
         count: 0,
     }
 }
@@ -11850,6 +11856,17 @@ impl Lowerer {
                 var arglist: Option<Box<IrRegList>> = if pair_tail.count <= 0 { None } else { Some(Box::new(pair_tail.regs)) }
                 var total = pair_tail.count
                 let cidx = lo.find_closure_cap_idx(closure_fn_id)
+                if cidx >= 0 && (*lo.closure_caps).entries[cidx as usize].def_fn != lo.current_fn {
+                    // Capture regs from another frame. Emitting the call would
+                    // reference registers that do not exist here. Escaping
+                    // capturing closures are the "captures are TBD (Phase 2)"
+                    // case; refuse loudly rather than emit a crashing binary or
+                    // silently read 0 (#1542).
+                    print("error: capturing closure called outside the function that defined it")
+                    print(" -- escaping closures with captures are unsupported; inline it or pass the captured values as parameters\\n")
+                    let lo_cerr = lo.report_error()
+                    return lo_cerr.emit_unit()
+                }
                 if cidx >= 0 {
                     let ccount = (*lo.closure_caps).entries[cidx as usize].cap_count
                     var jc = ccount - 1
@@ -11893,6 +11910,17 @@ impl Lowerer {
                 var arglist: Option<Box<IrRegList>> = if pair_tail.count <= 0 { None } else { Some(Box::new(pair_tail.regs)) }
                 var total = pair_tail.count
                 let cidx = lo.find_closure_cap_idx(closure_fn_id)
+                if cidx >= 0 && (*lo.closure_caps).entries[cidx as usize].def_fn != lo.current_fn {
+                    // Capture regs from another frame. Emitting the call would
+                    // reference registers that do not exist here. Escaping
+                    // capturing closures are the "captures are TBD (Phase 2)"
+                    // case; refuse loudly rather than emit a crashing binary or
+                    // silently read 0 (#1542).
+                    print("error: capturing closure called outside the function that defined it")
+                    print(" -- escaping closures with captures are unsupported; inline it or pass the captured values as parameters\\n")
+                    let lo_cerr = lo.report_error()
+                    return lo_cerr.emit_unit()
+                }
                 if cidx >= 0 {
                     let ccount = (*lo.closure_caps).entries[cidx as usize].cap_count
                     var jc = ccount - 1
@@ -13388,6 +13416,17 @@ impl Lowerer {
                 var arglist_c: Option<Box<IrRegList>> = if pair_args_c.count <= 0 { None } else { Some(Box::new(pair_args_c.regs)) }
                 var total_c = pair_args_c.count
                 let cidx = lo_c.find_closure_cap_idx(ccap_fn)
+                if cidx >= 0 && (*lo_c.closure_caps).entries[cidx as usize].def_fn != lo_c.current_fn {
+                    // Capture regs from another frame. Emitting the call would
+                    // reference registers that do not exist here. Escaping
+                    // capturing closures are the "captures are TBD (Phase 2)"
+                    // case; refuse loudly rather than emit a crashing binary or
+                    // silently read 0 (#1542).
+                    print("error: capturing closure called outside the function that defined it")
+                    print(" -- escaping closures with captures are unsupported; inline it or pass the captured values as parameters\\n")
+                    let lo_cerr = lo_c.report_error()
+                    return lo_cerr.emit_unit()
+                }
                 if cidx >= 0 {
                     let ccount = (*lo_c.closure_caps).entries[cidx as usize].cap_count
                     var jc = ccount - 1
@@ -14978,8 +15017,67 @@ impl Lowerer {
                 _ => break
             }
         }
+        // A closure body IS a block, so skipping `.block` meant the scanner never
+        // saw the body at all: `let a = 3; let f = |x: i64| -> i64 { a }; f(99)`
+        // recorded ZERO captures, the synthetic fn got no capture param, and the
+        // free `a` read 0. Measured 0 against a truth of 3, silently -- the tests
+        // that caught it (closure_arity_2 #1542, closure_returned,
+        // type_hash_3level_nesting) fail an assert and exit 1 printing nothing.
+        //
+        // if/while/loop bodies and match arms are the same omission, reached by
+        // any closure whose body branches.
+        match (*body).block {
+            Some(b) => { c = self.scan_captures_block(&(*b), params, c) }
+            _ => {}
+        }
+        match (*body).handler_block {
+            Some(hb) => { c = self.scan_captures_block(&(*hb), params, c) }
+            _ => {}
+        }
+        var arm_cur = &(*body).arms
+        while true {
+            match *arm_cur {
+                Some(al) => {
+                    c = self.scan_captures_expr(&(*al).head.body, params, c)
+                    match (*al).head.guard {
+                        Some(g) => { c = self.scan_captures_expr(&(*g), params, c) }
+                        _ => {}
+                    }
+                    arm_cur = &(*al).tail
+                }
+                _ => break
+            }
+        }
         c
     }
+
+    // Statement walker for the above. A nested closure's body is deliberately NOT
+    // scanned: its own parameters would be misread as captures of the outer one,
+    // and getting that right needs the inner param list threaded through. Nested
+    // capturing closures therefore remain unsupported rather than silently wrong.
+    fn scan_captures_block(self, block: &Block, params: &Option<Box<ClosureParamList>>, caps: CaptureList) -> CaptureList with Mut, Panic, Div, Alloc {
+        var c = caps
+        var cur = &(*block).stmts
+        while true {
+            match *cur {
+                Some(node) => {
+                    let stmt = &(*node).head
+                    match (*stmt).expr {
+                        Some(ex) => { c = self.scan_captures_expr(&(*ex), params, c) }
+                        _ => {}
+                    }
+                    match (*stmt).target {
+                        Some(tg) => { c = self.scan_captures_expr(&(*tg), params, c) }
+                        _ => {}
+                    }
+                    cur = &(*node).tail
+                }
+                _ => break
+            }
+        }
+        c
+    }
+
     fn scan_captures_opt(self, body: &Option<Box<Expr>>, params: &Option<Box<ClosureParamList>>, caps: CaptureList) -> CaptureList with Mut, Panic, Div, Alloc {
         match *body {
             Some(b) => { self.scan_captures_expr(&(*b), params, caps) }
@@ -15007,7 +15105,7 @@ impl Lowerer {
         var tbl = *lo.closure_caps
         if tbl.count < 256 {
             let idx = tbl.count
-            var e = ClosureCapEntry { fn_id: fn_id, cap_count: caps.count, caps: [IR_INVALID_REG; 8] }
+            var e = ClosureCapEntry { fn_id: fn_id, def_fn: lo.current_fn, cap_count: caps.count, caps: [IR_INVALID_REG; 8] }
             var i: i64 = 0
             while i < caps.count {
                 e.caps[i as usize] = caps.regs[i as usize]
@@ -15045,8 +15143,23 @@ impl Lowerer {
         // 2b. Scan the closure body for captured free variables (idents bound in the
         // enclosing scope, not lambda params) BEFORE wiping locals. Captures become LEADING
         // params on the synthetic fn and are injected at the (direct) call site.
+        // Only look for captures when the CONSUMER will inject them. A capturing
+        // closure has no environment: its captures become leading params of the
+        // synthetic fn and are prepended by the caller, which only happens where
+        // allow_direct_capturing_closure_literal is set (`let f = <literal>` and
+        // the HOF path).
+        //
+        // Elsewhere the closure escapes as a bare fn-ref. Detecting captures there
+        // would make the synthetic fn expect parameters nobody passes -- measured
+        // rc=139 on `fn mk(a) -> fn(i64)->i64 { |x| x * a }`, where main today
+        // returns a wrong 0 instead. A crash is worse than the wrong answer that
+        // is already recorded, so the unsupported case keeps its existing shape
+        // rather than acquiring a new failure mode. Escaping captures need a real
+        // environment -- the "captures are TBD (Phase 2)" case (#1542).
         var captures = empty_capture_list()
-        captures = lo.scan_captures_opt(&e.closure_body, &e.closure_params, captures)
+        if saved_allow_direct_capture {
+            captures = lo.scan_captures_opt(&e.closure_body, &e.closure_params, captures)
+        }
         if captures.count > 0 {
             if !lo.allow_direct_capturing_closure_literal {
                 print("error: native-v2 capturing closure literals are not yet supported as values; bind and call directly, use a named function, or use a noncapturing closure\n")
