@@ -352,9 +352,64 @@ def main():
           f"not convenience: the unbounded `hres` of the general theorem is FALSE for the "
           f"fiber pair (Y, tau j Y), so nothing could ever discharge it")
 
+    # ---- C8  (c) IS CLOSED: both legs discharged in Lean, and the instance is real ----------
+    # `SounioZDCollapse.parity_collapse` proves Phi is an isomorphism of the signed annihilation
+    # graph between the seam fiber and its Fano partner, with BOTH sign identities discharged:
+    # (*) = SounioZDFiberAntisym.star_forall, L2 = SounioZDFiberAntisym.L2_forall. This clause
+    # checks the theorem is about something -- that its hypotheses are satisfiable, that its two
+    # side conditions (q != 0, q != W, inherited from l2_reduction's branch condition) exclude NO
+    # edge of the graph, and that the iff it asserts holds on every edge.
+    def _psgp(x):
+        return -1 if bin(x).count("1") % 2 else 1
+
+    c8_edges = c8_excl = c8_bad = 0
+    c8_rows = []
+    for n in (6, 7):
+        S = sign_table_fast(n).astype(np.int64)
+        H = 1 << (n - 1)
+        for W in range(8, H, 8):
+            if bin(W >> 3).count("1") % 2:
+                continue                      # even weight: psg W = 1
+            j = (W & -W).bit_length() - 1
+            L = W | H
+            Lt = swap0j(W, j) | H
+            for a in range(1, H):
+                for b in range(1, H):
+                    if a == b:
+                        continue
+                    p1 = int(S[a, b] * S[a ^ L, b ^ L])
+                    if p1 != int(S[a, b ^ L] * S[a ^ L, b]):
+                        continue              # not an edge
+                    c8_edges += 1
+                    if b == 0 or b == W:
+                        c8_excl += 1          # would fall outside the theorem
+                    # the iff, on the signed graph: eps transported by lambda
+                    lam = lambda x: -_psgp(x % (1 << j))
+                    ta, tb = swap0j(a, j), swap0j(b, j)
+                    q1t = int(S[ta, tb] * S[ta ^ Lt, tb ^ Lt])
+                    if q1t != int(S[ta, tb ^ Lt] * S[ta ^ Lt, tb]):
+                        c8_bad += 1           # image not resonant -> iff fails
+                        continue
+                    if (-q1t) != lam(a) * lam(b) * (-p1):
+                        c8_bad += 1
+        c8_rows.append((n, c8_edges, c8_excl, c8_bad))
+    c8 = c8_edges > 0 and c8_excl == 0 and c8_bad == 0
+    ok["C8"] = c8
+    print(f"C8_CCLOSED  (c) IS CLOSED -- both legs discharged in Lean, and the instance is real "
+          f"{'OK' if c8 else 'FAIL'} -- on even-weight seam fibers, n = 6,7: {c8_edges} edges; "
+          f"{c8_excl} of them fall outside the theorem's two side conditions (q != 0, q != W, "
+          f"inherited from l2_reduction's branch condition) -- so those conditions exclude NO "
+          f"edge; {c8_bad} edges where the asserted iff fails. `parity_collapse` in "
+          f"formal/lean4/SounioZDCollapse.lean, kernel-checked, no sorryAx: (*) discharged by "
+          f"`star_forall` (2026-08-01), L2 by `L2_forall` (this rung), lambda by `lamClosed_psg`. "
+          f"The `hdisc` of the general theorems quantifies over ALL a,b and is FALSE off "
+          f"resonance -- the same over-strong shape the `hres` correction found -- so the "
+          f"discharged instances take it POINTWISE, at the pair the proof actually uses, where "
+          f"`adj` already supplies the resonance")
+
     print("=" * 78)
     if all(ok.values()):
-        print("CD_TOWER_ZDC_VERDICT STAR_DISCHARGED_IN_LEAN__COLLAPSE_BLOCKED_ON_L2_ALONE")
+        print("CD_TOWER_ZDC_VERDICT COLLAPSE_LAW_CLOSED__BOTH_LEGS_DISCHARGED_IN_LEAN")
         print("CD_TOWER_ZDC_NOTE (c)'s two sigma-lemmas are now located. L1 holds for EVERY seam, "
               "odd weight as well as even (C1), and fails for non-seam L (C2) -- so its real "
               "hypothesis is seam-ness and it does NOT see the parity the collapse law turns on. "
@@ -364,7 +419,12 @@ def main():
               "about the obstruction, NOT a proof of L2. Two routes recorded dead: Q is not "
               "bilinear (C3, so the second-difference-of-a-quadratic argument fails) and Q is "
               "globally tau-equivariant only for the octonion bits j=1,2, not for the seam bits "
-              "j>=3 where the collapse lives (C4). (c) IS NOT PROVEN; L1 is reduced, not proven. "
+              "j>=3 where the collapse lives (C4). *** SUPERSEDED 2026-08-02: (c) IS NOW PROVEN. "
+              "Both sign identities are theorems -- (*) = star_forall, L2 = L2_forall -- and "
+              "`SounioZDCollapse.parity_collapse` discharges both, so Phi is an isomorphism of "
+              "the signed annihilation graph, forall n, nothing assumed (C8). The triangle "
+              "obstruction of C5/C6 was BYPASSED, not climbed: L2 fell through the explicit "
+              "closed form, not through the cycle space. *** "
               "Numerical certificate; D3 respected")
         return 0
     print("CD_TOWER_ZDC_VERDICT INCOMPLETE  failing=" +

@@ -45,8 +45,19 @@
                  -- all even-weight seams, n = 6..9, 0 violations
                  (scripts/research/cd_tower_zd_fiber_l2_switching_contract.py, M1/M3)
 
-  So the honest reading is: **(c) is now one machine-checked implication away from two explicit
-  sign identities**, neither of which is proven. Before this file the sufficiency was prose.
+  UPDATE 2026-08-02 -- (c) IS CLOSED. The other leg, L2, is proven too:
+    `SounioZDFiberAntisym.L2_forall`, kernel-checked, no sorryAx. So `hdisc` need not be
+    assumed either, and `parity_collapse` below discharges BOTH. One adjustment was needed and
+    is the same correction `hres` needed: `hdisc` as written quantifies over ALL a, b, and L2
+    holds ON THE RESONANCE GRAPH -- off it the identity is false, so nothing could discharge
+    the universal form. The resonance is already in hand: `adj Y m p q` carries
+    `res Y p.1 q.1 m`, which IS L2's hypothesis, so the discharged instances take `hdisc`
+    POINTWISE at the pair the proof uses. The two remaining side conditions (`q.1 != 0`,
+    `q.1 ^^^ W != 0`, inherited from `l2_reduction`'s branch condition) exclude NO edge of the
+    graph -- 0 of 1920 at n = 6,7 (C8 of the collapse contract).
+
+  So the honest reading, before 2026-08-02, was: **(c) is one machine-checked implication away
+  from two explicit sign identities**, neither of which was proven. Both are now proven.
 
   Why bother formalising the implication and not the identities: the identities are genuine
   inductions -- (*) has a case A4_sub never faced (when Y is a lone power of two, j is the level's
@@ -332,5 +343,159 @@ theorem lamClosed_pm (j a : Nat) : lamClosed j a = 1 ∨ lamClosed j a = -1 := b
   split
   · exact Or.inl rfl
   · exact Or.inr rfl
+
+/-! ## ★★★ (c) WITH BOTH LEGS DISCHARGED
+
+`(*)` was wired in on 2026-08-01 (`star_forall`). The other leg, L2, is now proven too —
+`SounioZDFiberAntisym.L2_forall` — so `hdisc` need not be assumed: it can be *derived*, at the
+pair where the proof actually uses it.
+
+The one adjustment: `hdisc` as written quantifies over all `a, b`, and L2 holds **on the
+resonance graph**. That is the same shape as the `hres` correction — an over-strong hypothesis
+that nothing could discharge. Here the resonance is already in hand: `adj Y m p q` carries
+`res Y p.1 q.1 m`, which is exactly L2's hypothesis. So the discharged instances take it
+pointwise. -/
+
+/-- `psg` and `bitParity` are the same recursion, read into `Int` and `Bool`. -/
+theorem psg_bitParity : ∀ (x : Nat),
+    SounioZDFiberAntisym.psg x = if bitParity x then -1 else 1
+  | 0 => by rw [SounioZDFiberAntisym.psg_zero]; unfold bitParity; simp
+  | (n+1) => by
+      rw [SounioZDFiberAntisym.psg_step]
+      rw [bitParity, dif_neg (by omega : ¬ (n+1 = 0))]
+      rw [psg_bitParity ((n+1)/2)]
+      by_cases hm : (n+1) % 2 = 1
+      · have hd : decide ((n+1) % 2 = 1) = true := by simp [hm]
+        rw [if_pos hm, hd]
+        cases hb : bitParity ((n+1)/2) <;> decide
+      · have hd : decide ((n+1) % 2 = 1) = false := by simp [hm]
+        rw [if_neg hm, hd]
+        cases hb : bitParity ((n+1)/2) <;> decide
+  decreasing_by exact Nat.div_lt_self (by omega) (by decide)
+
+/-- The closed-form `λ` of the L2 rung, in the sibling's `psg` language. -/
+theorem lamClosed_psg (j a : Nat) :
+    lamClosed j a = - SounioZDFiberAntisym.psg (a % 2^j) := by
+  unfold lamClosed
+  rw [Nat.shiftLeft_eq, Nat.one_mul, Nat.and_two_pow_sub_one_eq_mod,
+      psg_bitParity (a % 2^j)]
+  cases bitParity (a % 2^j) <;> simp
+
+/-- **The L2 leg, discharged.** `hdisc` at a resonant pair, from `L2_forall`. -/
+theorem disc_of_L2 (m j W a b : Nat) (hj : j + 2 ≤ m + 1)
+    (hW : W < 2^(m+1)) (ha : a < 2^(m+1)) (hb : b < 2^(m+1))
+    (hb0 : b ≠ 0) (hbW : b ^^^ W ≠ 0)
+    (hlsb : W % 2^(j+1) = 2^j) (heven : SounioZDFiberAntisym.psg W = 1)
+    (hr : res (W + 2^(m+1)) a b (m+2)) :
+    eps (tau j (W + 2^(m+1))) (tau j a) (tau j b) (m+2)
+        * eps (W + 2^(m+1)) a b (m+2)
+      = lamClosed j a * lamClosed j b := by
+  -- the resonance hypothesis, in the sibling's form
+  have hQ : SounioZDFiberAntisym.Qgen (W + 2^(m+1)) a b (m+2) = 1 := by
+    rw [← Q_eq_Qgen]; exact (res_iff_Q _ _ _ _).mp hr
+  have hQ' : SounioZDFiberAntisym.Qgen' W a b (m+1) = -1 := by
+    rw [SounioZDFiberAntisym.Qred_hi_ll m W a b hW ha hb hb0 hbW] at hQ
+    omega
+  have hL2 := SounioZDFiberAntisym.L2_forall m j W a b hj hW ha hb hbW hlsb heven hQ'
+  -- unfold this file's `eps`/`P1` and match
+  unfold eps P1
+  rw [tau_eq, tau_eq, tau_eq, ← SounioZDFiberAntisym.tau_xor,
+      ← SounioZDFiberAntisym.tau_xor, cdSigma_eq, cdSigma_eq, cdSigma_eq, cdSigma_eq,
+      Int.neg_mul_neg]
+  rw [hL2, lamClosed_psg, lamClosed_psg, Int.neg_mul_neg]
+
+/-- Bounds and the label's shape, shared by both directions. -/
+theorem seam_facts (m j W : Nat) (hj : j + 2 ≤ m + 1) (hW : W < 2^(m+1)) (hjW : W % 2^j = 0) :
+    W + 2^(m+1) < 2^(m+2) ∧ W + 2^(m+1) ≠ 0 ∧ (W + 2^(m+1)) % 2^j = 0 := by
+  have h2 : (2:Nat)^(m+2) = 2^(m+1) * 2 := by rw [Nat.pow_succ]
+  have hpos := Nat.two_pow_pos (m+1)
+  refine ⟨by omega, by omega, ?_⟩
+  have h1 : (2:Nat)^(m+1) % 2^j = 0 := by
+    obtain ⟨c, hc⟩ := Nat.pow_dvd_pow 2 (show j ≤ m+1 by omega)
+    rw [hc]; exact Nat.mul_mod_right _ _
+  rw [Nat.add_mod, hjW, h1]
+  simp
+
+/-- **★★★ (c), BOTH LEGS DISCHARGED — forward.** `Φ` carries adjacency in the seam fiber to
+    adjacency in the Fano fiber. `(*)` via `star_forall`, L2 via `L2_forall`; nothing assumed. -/
+theorem Phi_preserves_adj_L2 (m j W : Nat) (hj : j + 2 ≤ m + 1)
+    (hW : W < 2^(m+1))
+    (hlsb : W % 2^(j+1) = 2^j) (heven : SounioZDFiberAntisym.psg W = 1)
+    (p q : Vtx) (hp : p.1 < 2^(m+1)) (hq : q.1 < 2^(m+1))
+    (hq0 : q.1 ≠ 0) (hqW : q.1 ^^^ W ≠ 0)
+    (h : adj (W + 2^(m+1)) (m+2) p q) :
+    adj (tau j (W + 2^(m+1))) (m+2) (Phi j (lamClosed j) p) (Phi j (lamClosed j) q) := by
+  have hjW : W % 2^j = 0 := by
+    rw [← SounioZDFiberAntisym.mod_pow_mod j (j+1) W (by omega), hlsb, Nat.mod_self]
+  obtain ⟨hL, hL0, hLj⟩ := seam_facts m j W hj hW hjW
+  obtain ⟨hr, hs⟩ := h
+  have hpl : p.1 < 2^(m+2) := by
+    have h2 : (2:Nat)^(m+2) = 2^(m+1) * 2 := by rw [Nat.pow_succ]
+    have := Nat.two_pow_pos (m+1); omega
+  have hql : q.1 < 2^(m+2) := by
+    have h2 : (2:Nat)^(m+2) = 2^(m+1) * 2 := by rw [Nat.pow_succ]
+    have := Nat.two_pow_pos (m+1); omega
+  refine ⟨(res_tau_of_star (m+2) j (W + 2^(m+1)) p.1 q.1 hL hL0 hLj hpl hql).mpr hr, ?_⟩
+  exact sign_build (eps_sq (W + 2^(m+1)) p.1 q.1 (m+2)) hs
+    (disc_of_L2 m j W p.1 q.1 hj hW hp hq hq0 hqW hlsb heven hr)
+
+/-- **★★★ (c), BOTH LEGS DISCHARGED — backward.** Mirrors `Phi_reflects_adj_star`, with
+    `hdisc` taken pointwise from `disc_of_L2` instead of assumed. -/
+theorem Phi_reflects_adj_L2 (m j W : Nat) (hj : j + 2 ≤ m + 1)
+    (hW : W < 2^(m+1))
+    (hlsb : W % 2^(j+1) = 2^j) (heven : SounioZDFiberAntisym.psg W = 1)
+    (p q : Vtx) (hp : p.1 < 2^(m+1)) (hq : q.1 < 2^(m+1))
+    (hq0 : q.1 ≠ 0) (hqW : q.1 ^^^ W ≠ 0)
+    (h : adj (tau j (W + 2^(m+1))) (m+2) (Phi j (lamClosed j) p) (Phi j (lamClosed j) q)) :
+    adj (W + 2^(m+1)) (m+2) p q := by
+  have hjW : W % 2^j = 0 := by
+    rw [← SounioZDFiberAntisym.mod_pow_mod j (j+1) W (by omega), hlsb, Nat.mod_self]
+  obtain ⟨hL, hL0, hLj⟩ := seam_facts m j W hj hW hjW
+  have hpl : p.1 < 2^(m+2) := by
+    have h2 : (2:Nat)^(m+2) = 2^(m+1) * 2 := by rw [Nat.pow_succ]
+    have := Nat.two_pow_pos (m+1); omega
+  have hql : q.1 < 2^(m+2) := by
+    have h2 : (2:Nat)^(m+2) = 2^(m+1) * 2 := by rw [Nat.pow_succ]
+    have := Nat.two_pow_pos (m+1); omega
+  obtain ⟨hr, hs⟩ := h
+  have hr' : res (W + 2^(m+1)) p.1 q.1 (m+2) :=
+    (res_tau_of_star (m+2) j (W + 2^(m+1)) p.1 q.1 hL hL0 hLj hpl hql).mp hr
+  refine ⟨hr', ?_⟩
+  have hu : lamClosed j p.1 * lamClosed j p.1 = 1 := by
+    rcases lamClosed_pm j p.1 with h1 | h1 <;> rw [h1] <;> decide
+  have hv : lamClosed j q.1 * lamClosed j q.1 = 1 := by
+    rcases lamClosed_pm j q.1 with h1 | h1 <;> rw [h1] <;> decide
+  have hsq : eps (W + 2^(m+1)) p.1 q.1 (m+2) * eps (W + 2^(m+1)) p.1 q.1 (m+2) = 1 :=
+    eps_sq (W + 2^(m+1)) p.1 q.1 (m+2)
+  have hd := disc_of_L2 m j W p.1 q.1 hj hW hp hq hq0 hqW hlsb heven hr'
+  have hf : eps (tau j (W + 2^(m+1))) (tau j p.1) (tau j q.1) (m+2)
+          = lamClosed j p.1 * lamClosed j q.1 * eps (W + 2^(m+1)) p.1 q.1 (m+2) := by
+    have e2 : eps (tau j (W + 2^(m+1))) (tau j p.1) (tau j q.1) (m+2)
+              * (eps (W + 2^(m+1)) p.1 q.1 (m+2) * eps (W + 2^(m+1)) p.1 q.1 (m+2))
+            = lamClosed j p.1 * lamClosed j q.1 * eps (W + 2^(m+1)) p.1 q.1 (m+2) := by
+      calc eps (tau j (W + 2^(m+1))) (tau j p.1) (tau j q.1) (m+2)
+              * (eps (W + 2^(m+1)) p.1 q.1 (m+2) * eps (W + 2^(m+1)) p.1 q.1 (m+2))
+          = (eps (tau j (W + 2^(m+1))) (tau j p.1) (tau j q.1) (m+2)
+              * eps (W + 2^(m+1)) p.1 q.1 (m+2)) * eps (W + 2^(m+1)) p.1 q.1 (m+2) := by ac_rfl
+        _ = lamClosed j p.1 * lamClosed j q.1 * eps (W + 2^(m+1)) p.1 q.1 (m+2) := by rw [hd]
+    rw [hsq, Int.mul_one] at e2
+    exact e2
+  have hs' : lamClosed j p.1 * p.2 * (lamClosed j q.1 * q.2)
+           = lamClosed j p.1 * lamClosed j q.1 * eps (W + 2^(m+1)) p.1 q.1 (m+2) := by
+    rw [← hf]; exact hs
+  exact sign_cancel hu hv hs'
+
+/-- **★★★ (c): THE PARITY-COLLAPSE LAW, ∀n, nothing assumed.** `Φ` is an isomorphism of the
+    signed annihilation graph between the seam fiber and its Fano partner. Both legs are
+    theorems: `(*)` = `star_forall`, L2 = `L2_forall`. -/
+theorem parity_collapse (m j W : Nat) (hj : j + 2 ≤ m + 1)
+    (hW : W < 2^(m+1))
+    (hlsb : W % 2^(j+1) = 2^j) (heven : SounioZDFiberAntisym.psg W = 1)
+    (p q : Vtx) (hp : p.1 < 2^(m+1)) (hq : q.1 < 2^(m+1))
+    (hq0 : q.1 ≠ 0) (hqW : q.1 ^^^ W ≠ 0) :
+    adj (W + 2^(m+1)) (m+2) p q ↔
+      adj (tau j (W + 2^(m+1))) (m+2) (Phi j (lamClosed j) p) (Phi j (lamClosed j) q) :=
+  ⟨Phi_preserves_adj_L2 m j W hj hW hlsb heven p q hp hq hq0 hqW,
+   Phi_reflects_adj_L2 m j W hj hW hlsb heven p q hp hq hq0 hqW⟩
 
 end SounioZDCollapse
