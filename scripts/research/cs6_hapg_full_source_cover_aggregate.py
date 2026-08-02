@@ -788,6 +788,8 @@ def verify_leaf_artifacts(
     hpg_rc = parse_int(row["HPG_RC"], "HPG_RC")
     counts = ReplayCounts()
     if hpg_rc == 0:
+        if digest(hpg_stderr) != EMPTY_SHA256:
+            fail(f"successful H-PG attempt emitted stderr: {identity}")
         if row["HPG_VERIFICATION_SHA256"] == ZERO_SHA256:
             fail(f"successful H-PG attempt lacks verification: {identity}")
         hpg_verification = safe_file(root, f"hpg-verifications/{identity}.txt")
@@ -808,6 +810,12 @@ def verify_leaf_artifacts(
         if mutation_audit:
             command.append("--self-test-mutations")
         values = run_exact_verifier(command, hpg_verification, timeout, "H-PG verifier")
+        if (
+            values["VERIFICATION_SCHEMA"]
+            != "sounio.cs6.plucker-cocycle-leaf-verification.v1"
+            or values["RECEIPT_SHA256"] != row["HPG_RECEIPT_SHA256"]
+        ):
+            fail(f"H-PG verification binding mismatch: {identity}")
         counts.hpg += 1
         counts.hpg_mutations += parse_int(values["MUTATION_TESTS"], "HPG mutations")
         counts.hpg_rejected += parse_int(values["MUTATIONS_REJECTED"], "HPG rejected")
@@ -815,6 +823,39 @@ def verify_leaf_artifacts(
             counts.hpg_mutations == 0 or counts.hpg_mutations != counts.hpg_rejected
         ):
             fail(f"H-PG mutation audit mismatch: {identity}")
+        ledger = LEAF_VERIFY.HPG_CORE.parse_ledger(hpg_receipt)
+        chart_signs: list[tuple[str, int]] = []
+        signed = True
+        for marker in LEAF_VERIFY.CHART_MARKERS:
+            record = ledger.records[marker]
+            chart = LEAF_VERIFY.HPG_CORE.string_value(record, "CHART")
+            pivot = LEAF_VERIFY.HPG_CORE.interval(record, "PIVOT")
+            sign = -1 if pivot.upper < 0 else 1 if pivot.lower > 0 else 0
+            if chart not in LEAF_VERIFY.HAPG_CORE.FULL53_CHARTS or sign == 0:
+                signed = False
+            chart_signs.append((chart, sign))
+        probe = parse_bool(values["PROBE_PASS"], "HPG PROBE_PASS")
+        eligible = probe and signed
+        if not eligible:
+            chart_signs = [("NONE", 0)] * 4
+        expected_hpg = {
+            "HPG_STATUS": (
+                LEAF_VERIFY.SIGNED_CHART_STATUS
+                if eligible
+                else "H_PG_INVALID_NO_SIGNED_CHART"
+            ),
+            "HPG_PHYSICAL_SHA256": values["PHYSICAL_SHA256"],
+            "HPG_PROBE_PASS": values["PROBE_PASS"],
+            "HPG_CERTIFICATE_PASS": values["CERTIFICATE_PASS"],
+            "HAPG_ELIGIBLE": "true" if eligible else "false",
+        }
+        for (event, ray), (chart, sign) in zip(
+            ((1, 0), (1, 1), (2, 0), (2, 1)), chart_signs, strict=True
+        ):
+            expected_hpg[f"E{event}_R{ray}_CHART"] = chart
+            expected_hpg[f"E{event}_R{ray}_SIGN"] = str(sign)
+        if any(row[key] != value for key, value in expected_hpg.items()):
+            fail(f"wave contract differs from H-PG recomputation: {identity}")
     else:
         failure_class = (
             "H_PG_TIMEOUT"
@@ -1007,11 +1048,13 @@ def verify_frozen_sources(
     run_contract: Mapping[str, str],
     expected_contract_sha: str,
 ) -> Mapping[str, str]:
-    frozen_path = safe_file(bundle, "cs6_hapg_full_source_cover_contract_v4.txt")
-    frozen = read_generic_kv(frozen_path, "frozen v4 contract")
+    frozen_path = safe_file(bundle, "cs6_hapg_full_source_cover_contract_v5.txt")
+    frozen = read_generic_kv(frozen_path, "frozen v5 contract")
     if (
-        frozen.get("SCHEMA") != "sounio.cs6.hapg-full-source-cover-contract.v4"
+        frozen.get("SCHEMA") != "sounio.cs6.hapg-full-source-cover-contract.v5"
         or frozen.get("CONTRACT_STATE") != "PRE_RESULT_FROZEN"
+        or frozen.get("SUPERSEDES_V4_SHA256")
+        != "a308b4f0d32b4179ed17f1ffd7bbd4827fa81d9cb66162318ddecbc926a43293"
         or frozen.get("SUPERSEDES_V3_SHA256")
         != "3e5f1c560356771e9d33582cab31b9776cf6f21d4eabcbc6e292523a2e9010e2"
         or frozen.get("V2_ABORTED_SLURM_JOB_ID") != "8451"
@@ -1019,8 +1062,9 @@ def verify_frozen_sources(
         or digest(frozen_path) != run_contract["FROZEN_CONTRACT_SHA256"]
         or digest(frozen_path) != expected_contract_sha
     ):
-        fail("frozen v4 contract envelope mismatch")
+        fail("frozen v5 contract envelope mismatch")
     abort_bindings = {
+        "SUPERSEDES_V4_SHA256": "v4-executed-contract.txt",
         "SUPERSEDES_V3_SHA256": "v3-executed-contract.txt",
         "V2_ABORT_RECEIPT_MANIFEST_SHA256": "v2-abort-manifest.txt",
         "V2_ABORT_SACCT_SHA256": "v2-abort-sacct.txt",
@@ -1038,10 +1082,25 @@ def verify_frozen_sources(
         "V3_ABORT_HPG_FULL255_CENSUS_SUMMARY_SHA256": "v3-abort-hpg-full255-census-summary.txt",
         "V3_ABORT_HPG_FULL255_STDERR_JSONL_SHA256": "v3-abort-hpg-full255-stderr.jsonl",
         "V3_ABORT_HPG_CHALLENGE_SPOTCHECK_SHA256": "v3-abort-challenge-spotcheck.json",
+        "V4_ABORT_RECEIPT_MANIFEST_SHA256": "v4-abort-manifest.txt",
+        "V4_ABORT_FILES_INDEX_SHA256": "v4-abort-files.sha256",
+        "V4_ABORT_SACCT_SHA256": "v4-abort-sacct.txt",
+        "V4_ABORT_CONFIG_SHA256": "v4-abort-config.txt",
+        "V4_ABORT_SLURM_STDOUT_SHA256": "v4-abort-slurm-stdout.txt",
+        "V4_ABORT_HPG_RC0_CORPUS_SHA256": "v4-abort-hpg-rc0-corpus.tar",
+        "V4_ABORT_HPG_RC0_CORPUS_FILES_SHA256": "v4-abort-corpus-files.sha256",
+        "V4_ABORT_HPG_RC0_CENSUS_SHA256": "v4-abort-hpg-rc0-verifier-census.tsv",
+        "V4_ABORT_HPG_RC0_CENSUS_SUMMARY_SHA256": "v4-abort-hpg-rc0-verifier-census-summary.txt",
+        "V4_ABORT_HPG_V5_KAT_COMPAT_SHA256": "v4-abort-hpg-v5-kat-compat.tsv",
+        "V4_ABORT_HPG_V4_KAT_CORPUS_SHA256": "v4-abort-hpg-v4-kat-corpus.tar",
+        "V4_ABORT_HPG_V4_KAT_CORPUS_FILES_SHA256": "v4-abort-hpg-v4-kat-corpus-files.sha256",
+        "V4_ABORT_MIDPOINT_DISCRETE_TEST_SHA256": "v4-abort-midpoint-discrete-negative-test.txt",
+        "V4_ABORT_LOCAL_REPRO_SHA256": "v4-abort-local-repro.tar",
+        "V4_ABORT_EXECUTED_HPG_VERIFIER_SHA256": "v4-abort-v4-hpg-verifier.py",
     }
     for key, filename in abort_bindings.items():
         if frozen.get(key) != digest(safe_file(bundle, filename)):
-            fail(f"frozen v2 abort evidence mismatch: {filename}")
+            fail(f"frozen abort evidence mismatch: {filename}")
     bindings = (
         ("PREPASS_WORKER_SHA256", "cs6_plucker_cocycle_probe.cpp", "HPG_WORKER_SOURCE_SHA256"),
         ("PREPASS_VERIFIER_SHA256", "cs6_plucker_cocycle_verify.py", "HPG_VERIFIER_SOURCE_SHA256"),
@@ -1149,7 +1208,7 @@ def verify_prebuilt_origin(
         fail("prebuilt origin manifest mismatch")
     verify_file_index(origin, manifest)
     bindings = {
-        "FROZEN_CONTRACT_SHA256": "cs6_hapg_full_source_cover_contract_v4.txt",
+        "FROZEN_CONTRACT_SHA256": "cs6_hapg_full_source_cover_contract_v5.txt",
         "HPG_WORKER_SOURCE_SHA256": "cs6_plucker_cocycle_probe.cpp",
         "HPG_VERIFIER_SOURCE_SHA256": "cs6_plucker_cocycle_verify.py",
         "HAPG_WORKER_SOURCE_SHA256": "cs6_hapg_full_source_cover_worker.cpp",
@@ -1168,6 +1227,7 @@ def verify_prebuilt_origin(
         if manifest[key] != digest(safe_file(origin, filename)):
             fail(f"prebuilt origin declaration differs from bytes: {filename}")
     abort_bindings = {
+        "SUPERSEDES_V4_SHA256": "v4-executed-contract.txt",
         "SUPERSEDES_V3_SHA256": "v3-executed-contract.txt",
         "V2_ABORT_RECEIPT_MANIFEST_SHA256": "v2-abort-manifest.txt",
         "V2_ABORT_SACCT_SHA256": "v2-abort-sacct.txt",
@@ -1185,10 +1245,25 @@ def verify_prebuilt_origin(
         "V3_ABORT_HPG_FULL255_CENSUS_SUMMARY_SHA256": "v3-abort-hpg-full255-census-summary.txt",
         "V3_ABORT_HPG_FULL255_STDERR_JSONL_SHA256": "v3-abort-hpg-full255-stderr.jsonl",
         "V3_ABORT_HPG_CHALLENGE_SPOTCHECK_SHA256": "v3-abort-challenge-spotcheck.json",
+        "V4_ABORT_RECEIPT_MANIFEST_SHA256": "v4-abort-manifest.txt",
+        "V4_ABORT_FILES_INDEX_SHA256": "v4-abort-files.sha256",
+        "V4_ABORT_SACCT_SHA256": "v4-abort-sacct.txt",
+        "V4_ABORT_CONFIG_SHA256": "v4-abort-config.txt",
+        "V4_ABORT_SLURM_STDOUT_SHA256": "v4-abort-slurm-stdout.txt",
+        "V4_ABORT_HPG_RC0_CORPUS_SHA256": "v4-abort-hpg-rc0-corpus.tar",
+        "V4_ABORT_HPG_RC0_CORPUS_FILES_SHA256": "v4-abort-corpus-files.sha256",
+        "V4_ABORT_HPG_RC0_CENSUS_SHA256": "v4-abort-hpg-rc0-verifier-census.tsv",
+        "V4_ABORT_HPG_RC0_CENSUS_SUMMARY_SHA256": "v4-abort-hpg-rc0-verifier-census-summary.txt",
+        "V4_ABORT_HPG_V5_KAT_COMPAT_SHA256": "v4-abort-hpg-v5-kat-compat.tsv",
+        "V4_ABORT_HPG_V4_KAT_CORPUS_SHA256": "v4-abort-hpg-v4-kat-corpus.tar",
+        "V4_ABORT_HPG_V4_KAT_CORPUS_FILES_SHA256": "v4-abort-hpg-v4-kat-corpus-files.sha256",
+        "V4_ABORT_MIDPOINT_DISCRETE_TEST_SHA256": "v4-abort-midpoint-discrete-negative-test.txt",
+        "V4_ABORT_LOCAL_REPRO_SHA256": "v4-abort-local-repro.tar",
+        "V4_ABORT_EXECUTED_HPG_VERIFIER_SHA256": "v4-abort-v4-hpg-verifier.py",
     }
     for key, filename in abort_bindings.items():
         if frozen.get(key) != digest(safe_file(origin, filename)):
-            fail(f"prebuilt origin v2 abort evidence mismatch: {filename}")
+            fail(f"prebuilt origin abort evidence mismatch: {filename}")
     run_source_fields = (
         "HPG_WORKER_SOURCE_SHA256",
         "HPG_VERIFIER_SOURCE_SHA256",

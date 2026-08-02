@@ -26,6 +26,7 @@ def fail(message: str) -> None:
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 INT_RE = re.compile(r"^(?:0|[1-9][0-9]*)$")
 ZERO_SHA256 = "0" * 64
+EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 WAVE_SCHEMA = "sounio.cs6.hapg-full-source-cover-wave-contract.v1"
 HAPG_SCHEMA = "sounio.cs6.hapg-full-source-cover-leaf.v1"
 HAPG_EXECUTION_SCOPE = "ARBITRARY_MANIFEST_BOUND_DYADIC_LEAF_HAPG_CAPD_CPU"
@@ -327,14 +328,28 @@ def parse_wave_contract(path: Path) -> WaveContract:
         ):
             if SHA_RE.fullmatch(values[key]) is None:
                 fail(f"wave row digest is malformed: {key}")
-        parse_int(values["HPG_RC"], "HPG_RC")
+        if (
+            values["HPG_RECEIPT_SHA256"] == ZERO_SHA256
+            or values["HPG_STDERR_SHA256"] == ZERO_SHA256
+        ):
+            fail("materialized H-PG artifact uses an absence sentinel")
+        hpg_rc = parse_int(values["HPG_RC"], "HPG_RC")
         probe = parse_bool(values["HPG_PROBE_PASS"], "HPG_PROBE_PASS")
-        parse_bool(values["HPG_CERTIFICATE_PASS"], "HPG_CERTIFICATE_PASS")
+        certificate = parse_bool(
+            values["HPG_CERTIFICATE_PASS"], "HPG_CERTIFICATE_PASS"
+        )
         eligible = parse_bool(values["HAPG_ELIGIBLE"], "HAPG_ELIGIBLE")
         chart_signs = tuple(
             (values[f"E{event}_R{ray}_CHART"], values[f"E{event}_R{ray}_SIGN"])
             for event, ray in ((1, 0), (1, 1), (2, 0), (2, 1))
         )
+        if hpg_rc == 0 and (
+            values["HPG_RECEIPT_SHA256"] == EMPTY_SHA256
+            or values["HPG_STDERR_SHA256"] != EMPTY_SHA256
+            or values["HPG_VERIFICATION_SHA256"] in {ZERO_SHA256, EMPTY_SHA256}
+            or values["HPG_PHYSICAL_SHA256"] == ZERO_SHA256
+        ):
+            fail("successful H-PG row has inconsistent artifact sentinels")
         if eligible:
             if (
                 values["HPG_STATUS"] != SIGNED_CHART_STATUS
@@ -348,8 +363,35 @@ def parse_wave_contract(path: Path) -> WaveContract:
                 )
             ):
                 fail("H-APG eligible row lacks a verified signed-chart prepass")
-        elif any(chart != "NONE" or sign != "0" for chart, sign in chart_signs):
-            fail("ineligible wave row carries a chart/sign tuple")
+        else:
+            if any(chart != "NONE" or sign != "0" for chart, sign in chart_signs):
+                fail("ineligible wave row carries a chart/sign tuple")
+            if hpg_rc == 0:
+                if (
+                    values["HPG_STATUS"] != "H_PG_INVALID_NO_SIGNED_CHART"
+                    or probe
+                ):
+                    fail("successful ineligible H-PG row has inconsistent sentinels")
+            else:
+                declared_failures = {
+                    "H_PG_TIMEOUT",
+                    "H_PG_INTERVAL_DOMAIN",
+                    "H_PG_CROSSING",
+                    "H_PG_CAPD_SET",
+                }
+                if (
+                    values["HPG_STATUS"] not in declared_failures
+                    or (hpg_rc == 124) != (values["HPG_STATUS"] == "H_PG_TIMEOUT")
+                    or (
+                        values["HPG_STATUS"] != "H_PG_TIMEOUT"
+                        and values["HPG_STDERR_SHA256"] == EMPTY_SHA256
+                    )
+                    or values["HPG_VERIFICATION_SHA256"] != ZERO_SHA256
+                    or values["HPG_PHYSICAL_SHA256"] != ZERO_SHA256
+                    or probe
+                    or certificate
+                ):
+                    fail("failed H-PG row has inconsistent failure fields")
         rows[identity] = WaveRow(values)
     if list(rows) != sorted(rows):
         fail("wave contract rows are not sorted by node ID")
