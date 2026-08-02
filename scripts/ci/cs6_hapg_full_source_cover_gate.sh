@@ -12,18 +12,21 @@ cd "$repo_root"
 runner=scripts/research/cs6_hapg_full_source_cover_run.py
 leaf_verifier=scripts/research/cs6_hapg_full_source_cover_verify.py
 aggregator=scripts/research/cs6_hapg_full_source_cover_aggregate.py
+kat_anchor=scripts/research/cs6_hapg_full_source_cover_kat_anchor.py
 wrapper=scripts/research/cs6_hapg_full_source_cover_worker.cpp
 slurm_job=scripts/research/cs6_hapg_full_source_cover_slurm_job.sh
-contract=scripts/research/cs6_hapg_full_source_cover_contract_v5.txt
+contract=scripts/research/cs6_hapg_full_source_cover_contract_v6.txt
+v5_contract=scripts/research/cs6_hapg_full_source_cover_contract_v5.txt
 v4_contract=scripts/research/cs6_hapg_full_source_cover_contract_v4.txt
 v3_contract=scripts/research/cs6_hapg_full_source_cover_contract_v3.txt
 full53=scripts/research/receipts/cs6_affine_projective_cocycle_full53_retained_53_v1
 v2_abort=scripts/research/receipts/cs6_hapg_full_source_cover_v2_abort_8451_v1
 v3_abort=scripts/research/receipts/cs6_hapg_full_source_cover_v3_abort_8453_v1
 v4_abort=scripts/research/receipts/cs6_hapg_full_source_cover_v4_abort_8455_v1
+v5_abort=scripts/research/receipts/cs6_hapg_full_source_cover_v5_abort_8463_v1
 
 for required in \
-  "$runner" "$leaf_verifier" "$aggregator" "$wrapper" "$slurm_job" "$contract" "$v4_contract" "$v3_contract" \
+  "$runner" "$leaf_verifier" "$aggregator" "$kat_anchor" "$wrapper" "$slurm_job" "$contract" "$v5_contract" "$v4_contract" "$v3_contract" \
   "$v2_abort/manifest.txt" "$v2_abort/sacct.txt" "$v2_abort/config.txt" "$v2_abort/stderr.txt" \
   "$v3_abort/manifest.txt" "$v3_abort/sacct.txt" "$v3_abort/config.txt" \
   "$v3_abort/slurm-stderr.txt" "$v3_abort/repro-s0-stdout.txt" \
@@ -39,7 +42,10 @@ for required in \
   "$v4_abort/hpg-v5-kat-compat.tsv" "$v4_abort/hpg-v4-kat-corpus.tar" \
   "$v4_abort/hpg-v4-kat-corpus-files.sha256" \
   "$v4_abort/midpoint-discrete-negative-test.txt" \
-  "$v4_abort/local-repro.tar" "$v4_abort/v4-hpg-verifier.py"; do
+  "$v4_abort/local-repro.tar" "$v4_abort/v4-hpg-verifier.py" \
+  "$v5_abort/manifest.txt" "$v5_abort/files.sha256" "$v5_abort/jobs-8458-8463.sacct.psv" \
+  "$v5_abort/logs/adaptive-8463.out" "$v5_abort/logs/adaptive-8463.err" \
+  "$v5_abort/file-index-order-repro.txt"; do
   [[ -f $required ]] || {
     echo "H-APG cover gate error: missing $required" >&2
     exit 1
@@ -47,11 +53,11 @@ for required in \
 done
 bash -n "$slurm_job"
 
-python3 -B - "$contract" "$v2_abort" "$v3_abort" "$v3_contract" "$v4_abort" "$v4_contract" <<'PY'
+python3 -B - "$contract" "$v2_abort" "$v3_abort" "$v3_contract" "$v4_abort" "$v4_contract" "$v5_abort" "$v5_contract" <<'PY'
 from __future__ import annotations
 
 import hashlib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import sys
@@ -62,6 +68,8 @@ v3_abort_root = Path(sys.argv[3])
 v3_contract_path = Path(sys.argv[4])
 v4_abort_root = Path(sys.argv[5])
 v4_contract_path = Path(sys.argv[6])
+v5_abort_root = Path(sys.argv[7])
+v5_contract_path = Path(sys.argv[8])
 raw = path.read_bytes()
 if not raw.endswith(b"\n") or b"\r" in raw or b"\0" in raw:
     raise SystemExit("H-APG cover gate error: noncanonical frozen contract")
@@ -79,11 +87,60 @@ for line in lines:
     fields[key] = value
 
 exact = {
-    "SCHEMA": "sounio.cs6.hapg-full-source-cover-contract.v5",
+    "SCHEMA": "sounio.cs6.hapg-full-source-cover-contract.v6",
     "CONTRACT_STATE": "PRE_RESULT_FROZEN",
     "SUPERSEDES_V4_SHA256": "a308b4f0d32b4179ed17f1ffd7bbd4827fa81d9cb66162318ddecbc926a43293",
     "SUPERSEDES_V3_SHA256": "3e5f1c560356771e9d33582cab31b9776cf6f21d4eabcbc6e292523a2e9010e2",
-    "RECOVERY_SCOPE": "STRUCTURED_EVENT_ORDER_OR_PLUS_SIDE_H_PG_NEGATIVE_AND_DISCRETE_BINARY64_MIDPOINT_RECONSTRUCTION",
+    "RECOVERY_SCOPE": "V5_FILE_INDEX_ORDER_AND_STRONG_FRESH_KAT_PREREQUISITE",
+    "SUPERSEDES_V5_SHA256": "5fe8436fe3384663d9046e754f1a27b4ac537e5a51ccc1d90469bd96f7ba3dab",
+    "IMPLEMENTATION_PARENT_COMMIT": "7e09b89b94a773c6f5609dbc4b98f16dc22a9d5f",
+    "V5_ABORT_RECEIPT_MANIFEST_SHA256": "17dcf5980db78f727e4428aad8763488809ef8c3bce2e301ad62384de97facd7",
+    "V5_ABORT_FILES_INDEX_SHA256": "a6f9dd55cc2aff2d03adf3d73f52b67f2a673ed56e43221ccbd753c2a2aef4ba",
+    "V5_ABORT_JOBS_SACCT_SHA256": "fdb6fd9b347ce5fb2c40965ca87391698aab2c940dd64549cd9ec97fbff622de",
+    "V5_KAT_SLURM_JOB_ID": "8458",
+    "V5_KAT_SLURM_STATE": "COMPLETED",
+    "V5_KAT_SLURM_EXIT_CODE": "0:0",
+    "V5_KAT_ARCHIVE_SHA256": "f288918070c73636458a61687ae1abf0199038b99801e1392ec4774b26ae7c7f",
+    "V5_KAT_CONFIG_SHA256": "0cf799ebf131502cfd30347bc50060bc51a4c5853380ca58baf7dcbcdb1423f0",
+    "V5_ADAPTIVE_SLURM_JOB_ID": "8463",
+    "V5_ADAPTIVE_SLURM_STATE": "FAILED",
+    "V5_ADAPTIVE_SLURM_EXIT_CODE": "1:0",
+    "V5_ADAPTIVE_FAILURE_STAGE": "POST_RUN_INDEPENDENT_AGGREGATION_FILE_INDEX_GATE",
+    "V5_ADAPTIVE_FAILURE_SIGNATURE": "aggregation_error_files_index_is_not_sorted",
+    "V5_ADAPTIVE_RUNNER_REPORTED_EVALUATED_NODE_COUNT": "255",
+    "V5_ADAPTIVE_RUNNER_REPORTED_WAVE_COUNT": "8",
+    "V5_ADAPTIVE_ARCHIVE_PUBLISHED": "false",
+    "V5_ADAPTIVE_RESULT_AVAILABLE": "false",
+    "V5_ADAPTIVE_RUNNER_CANDIDATE_FIELD_IS_SCIENTIFIC_RESULT": "false",
+    "V6_FILE_INDEX_ORDER": "ASCII_LEXICOGRAPHIC_POSIX_RELATIVE_TOKEN",
+    "V6_KAT_PREREQUISITE_REQUIRED_FOR_ADAPTIVE": "true",
+    "V6_KAT_ARCHIVE_SAFE_FULL_INDEX_REPLAY_REQUIRED": "true",
+    "V6_KAT_LEAF_BY_LEAF_VERIFIER_REPLAY_REQUIRED": "true",
+    "V6_KAT_SAME_GIT_HEAD_REQUIRED": "true",
+    "V6_KAT_SAME_FROZEN_CONTRACT_REQUIRED": "true",
+    "V6_KAT_SAME_BASE_DELTA_PREBUILT_AND_JOB_SCRIPT_REQUIRED": "true",
+    "V6_KAT_SLURM_COMPLETED_ZERO_EXIT_REQUIRED": "true",
+    "V6_KAT_END_NOT_AFTER_ADAPTIVE_SUBMIT_REQUIRED": "true",
+    "V6_KAT_CERTIFICATE_INCLUDED_IN_ADAPTIVE_BUNDLE": "true",
+    "V6_KAT_CERTIFICATE_SHA256_BOUND_IN_ADAPTIVE_RUN_CONTRACT": "true",
+    "V6_AGGREGATOR_REVALIDATES_KAT_ARCHIVE_AND_CERTIFICATE": "true",
+    "V6_POST_RUN_FAILURE_DIAGNOSTIC_ARCHIVE_REQUIRED": "true",
+    "V6_FRESH_SLURM_KAT_EXECUTED": "false",
+    "V6_AUTHORITATIVE_ADAPTIVE_EXECUTED": "false",
+    "V6_AUTHORITATIVE_RESULT_AVAILABLE": "false",
+    "SLURM_CONFIG_SCHEMA": "sounio.cs6.hapg-full-source-cover-slurm-config.v3",
+    "PREBUILT_MANIFEST_SCHEMA": "sounio.cs6.hapg-full-source-cover-prebuilt.v2",
+    "RUN_CONTRACT_SCHEMA": "sounio.cs6.hapg-full-source-cover-run-contract.v2",
+    "TRANSPORT_MANIFEST_SCHEMA": "sounio.cs6.hapg-full-source-cover-transport.v3",
+    "AGGREGATION_SCHEMA": "sounio.cs6.hapg-full-source-cover-aggregation.v2",
+    "KAT_PREREQUISITE_CERTIFICATE_SCHEMA": "sounio.cs6.hapg-full-source-cover-kat-prerequisite.v2",
+    "KAT_PREREQUISITE_SACCT_ARTIFACT": "kat-prerequisite-sacct.txt",
+    "KAT_PREREQUISITE_CERTIFICATE_ARTIFACT": "kat-prerequisite-certificate.txt",
+    "KAT_PREREQUISITE_TRANSPORT_CONFIG_ARTIFACT": "transport-config.txt",
+    "ADAPTIVE_RUN_CONTRACT_KAT_FIELDS": "KAT_PREREQUISITE_REQUIRED,KAT_PREREQUISITE_CERTIFICATE_SCHEMA,KAT_PREREQUISITE_CERTIFICATE_SHA256,KAT_PREREQUISITE_SACCT_SHA256,KAT_JOB_ID,KAT_ARCHIVE_SHA256,KAT_GIT_HEAD,KAT_FROZEN_CONTRACT_SHA256,KAT_BASE_REPO_BUNDLE_SHA256,KAT_BASE_GIT_HEAD,KAT_REPO_DELTA_BUNDLE_SHA256,KAT_PREBUILT_ARCHIVE_SHA256,KAT_PREBUILT_RUN_MANIFEST_SHA256,KAT_SLURM_JOB_SCRIPT_SHA256,KAT_END_UTC,KAT_COORDINATE_MANIFEST_SHA256,KAT_EXPECTED_RESULTS_SHA256,KAT_WAVE_CONTRACT_SHA256,KAT_WAVE_RESULT_SHA256,KAT_LEAF_EVIDENCE_VALID,KAT_HPG_VERIFIER_REPLAY_COUNT,KAT_HAPG_VERIFIER_REPLAY_COUNT,KAT_EVALUATED_NODE_COUNT,KAT_HPG_SIGNED_CHART_COUNT,KAT_HAPG_ATTEMPTED_COUNT,KAT_HAPG_CERTIFIED_COUNT,KAT_HAPG_UNCERTIFIED_COUNT,KAT_HAPG_RESCUE_COUNT,KAT_HPG_MUTATION_TESTS,KAT_HPG_MUTATIONS_REJECTED,KAT_HAPG_MUTATION_TESTS,KAT_HAPG_MUTATIONS_REJECTED,ADAPTIVE_SUBMIT_UTC,KAT_PREREQUISITE_VALID",
+    "KAT_ANCHOR": "scripts/research/cs6_hapg_full_source_cover_kat_anchor.py",
+    "ADAPTIVE_CONFIG_KAT_FIELDS": "KAT_ARCHIVE_PATH_KAT_ARCHIVE_SHA256_AND_KAT_JOB_ID",
+    "POST_RUN_FAILURE_TRANSPORT_POLICY": "INDEPENDENT_AGGREGATOR_NONZERO_HASHED_NONPROMOTABLE_DIAGNOSTIC_ARCHIVE_REQUIRED",
     "V4_ADAPTIVE_ABORTED_SLURM_JOB_ID": "8455",
     "V4_ADAPTIVE_ABORT_STAGE": "H_PG_VERIFIER_WAVE_4",
     "V4_ADAPTIVE_ABORT_REPORTED_NODE_ID": "U02-0000000000_S02-0000000000",
@@ -119,7 +176,7 @@ exact = {
     "V5_HPG_DIAGNOSTIC_SCOPE": "LOCAL_REPLAY_OF_EXACT_V3_FULL255_RC0_SELECTION",
     "V5_HPG_DIAGNOSTIC_IS_SCIENTIFIC_RESULT": "false",
     "V5_KAT_COMPATIBILITY_SCOPE": "LOCAL_REPLAY_OF_V4_JOB_8454_HPG_RC0_RECEIPTS",
-    "V5_FRESH_SLURM_KAT_EXECUTED": "false",
+    "V5_FRESH_SLURM_KAT_EXECUTED": "true",
     "V5_AUTHORITATIVE_ADAPTIVE_EXECUTED": "false",
     "V5_AUTHORITATIVE_RESULT_AVAILABLE": "false",
     "V3_ADAPTIVE_ABORTED_SLURM_JOB_ID": "8453",
@@ -163,6 +220,7 @@ exact = {
     "WORKING_FILESYSTEM_POLICY": "NODE_LOCAL_TMP_THEN_HASHED_ARCHIVE_TRANSPORT",
     "BOUNDED_PILOT_EXECUTION_PATH": "SLURM_CPU_PREBUILT_NODE_LOCAL_TMP",
     "BOUNDED_PILOT_TRANSPORT_ROOT": "/orangefs/training",
+    "BOUNDED_PILOT_SLURM_CLUSTER": "beagle-slurm-pilot",
     "BOUNDED_PILOT_SLURM_PARTITION": "gpu-orangefs",
     "BOUNDED_PILOT_SLURM_ACCOUNT": "lab",
     "BOUNDED_PILOT_SLURM_QOS": "normal",
@@ -182,6 +240,10 @@ exact = {
     "KAT_EXPECTED_H_APG_CERTIFIED": "48",
     "KAT_EXPECTED_H_APG_UNCERTIFIED": "4",
     "KAT_EXPECTED_H_APG_RESCUES": "20",
+    "KAT_EXPECTED_HPG_MUTATION_TESTS": "4108",
+    "KAT_EXPECTED_HPG_MUTATIONS_REJECTED": "4108",
+    "KAT_EXPECTED_HAPG_MUTATION_TESTS": "5824",
+    "KAT_EXPECTED_HAPG_MUTATIONS_REJECTED": "5824",
     "BOUNDED_PILOT_MAX_NODES": "255",
     "BOUNDED_PILOT_MAX_WAVES": "8",
     "BOUNDED_PILOT_MAX_U_DEPTH": "30",
@@ -194,6 +256,7 @@ for key, value in exact.items():
         raise SystemExit(f"H-APG cover gate error: frozen contract mismatch for {key}")
 
 sha_keys = (
+    "SUPERSEDES_V5_SHA256",
     "SUPERSEDES_V4_SHA256",
     "SUPERSEDES_V3_SHA256",
     "PREPASS_WORKER_SHA256",
@@ -204,6 +267,7 @@ sha_keys = (
     "H_APG_NUMERIC_VERIFIER_SHA256",
     "RUNNER_SHA256",
     "AGGREGATOR_SHA256",
+    "KAT_ANCHOR_SHA256",
     "EXACT_TREE_KERNEL_SHA256",
     "GATE_SHA256",
     "SLURM_JOB_SCRIPT_SHA256",
@@ -245,6 +309,11 @@ sha_keys = (
     "V4_ABORT_MIDPOINT_DISCRETE_TEST_SHA256",
     "V4_ABORT_LOCAL_REPRO_SHA256",
     "V4_ABORT_EXECUTED_HPG_VERIFIER_SHA256",
+    "V5_ABORT_RECEIPT_MANIFEST_SHA256",
+    "V5_ABORT_FILES_INDEX_SHA256",
+    "V5_ABORT_JOBS_SACCT_SHA256",
+    "V5_KAT_ARCHIVE_SHA256",
+    "V5_KAT_CONFIG_SHA256",
 )
 for key in sha_keys:
     if re.fullmatch(r"[0-9a-f]{64}", fields.get(key, "")) is None:
@@ -288,6 +357,7 @@ implementation_bindings = {
     "H_APG_NUMERIC_VERIFIER_SHA256": "scripts/research/cs6_affine_projective_cocycle_full53_verify.py",
     "RUNNER_SHA256": "scripts/research/cs6_hapg_full_source_cover_run.py",
     "AGGREGATOR_SHA256": "scripts/research/cs6_hapg_full_source_cover_aggregate.py",
+    "KAT_ANCHOR_SHA256": "scripts/research/cs6_hapg_full_source_cover_kat_anchor.py",
     "EXACT_TREE_KERNEL_SHA256": "scripts/research/cs6_c1_full_source_cover_aggregate.py",
     "GATE_SHA256": "scripts/ci/cs6_hapg_full_source_cover_gate.sh",
     "SLURM_JOB_SCRIPT_SHA256": "scripts/research/cs6_hapg_full_source_cover_slurm_job.sh",
@@ -306,6 +376,9 @@ implementation_bindings = {
     "V4_ABORT_SACCT_SHA256": "scripts/research/receipts/cs6_hapg_full_source_cover_v4_abort_8455_v1/sacct.txt",
     "V4_ABORT_SLURM_STDOUT_SHA256": "scripts/research/receipts/cs6_hapg_full_source_cover_v4_abort_8455_v1/slurm-stdout.txt",
     "V4_ABORT_EXECUTED_HPG_VERIFIER_SHA256": "scripts/research/receipts/cs6_hapg_full_source_cover_v4_abort_8455_v1/v4-hpg-verifier.py",
+    "V5_ABORT_RECEIPT_MANIFEST_SHA256": "scripts/research/receipts/cs6_hapg_full_source_cover_v5_abort_8463_v1/manifest.txt",
+    "V5_ABORT_FILES_INDEX_SHA256": "scripts/research/receipts/cs6_hapg_full_source_cover_v5_abort_8463_v1/files.sha256",
+    "V5_ABORT_JOBS_SACCT_SHA256": "scripts/research/receipts/cs6_hapg_full_source_cover_v5_abort_8463_v1/jobs-8458-8463.sacct.psv",
 }
 for key, relative in implementation_bindings.items():
     try:
@@ -448,6 +521,12 @@ if hashlib.sha256(v4_contract_raw).hexdigest() != fields["SUPERSEDES_V4_SHA256"]
 v4_contract = parse_kv(v4_contract_path)
 if v4_contract.get("SCHEMA") != "sounio.cs6.hapg-full-source-cover-contract.v4":
     raise SystemExit("H-APG cover gate error: superseded v4 contract schema mismatch")
+v5_contract_raw = v5_contract_path.read_bytes()
+if hashlib.sha256(v5_contract_raw).hexdigest() != fields["SUPERSEDES_V5_SHA256"]:
+    raise SystemExit("H-APG cover gate error: superseded v5 contract bytes mismatch")
+v5_contract = parse_kv(v5_contract_path)
+if v5_contract.get("SCHEMA") != "sounio.cs6.hapg-full-source-cover-contract.v5":
+    raise SystemExit("H-APG cover gate error: superseded v5 contract schema mismatch")
 v5_only_keys = {
     "IMPLEMENTATION_PARENT_COMMIT",
     "SUPERSEDES_V4_SHA256",
@@ -517,19 +596,101 @@ changed_v4_keys = {
     "SLURM_JOB_SCRIPT_SHA256",
 }
 expected_v5_keys = set(v4_contract) | v5_only_keys
-if set(fields) != expected_v5_keys:
-    missing = sorted(expected_v5_keys - set(fields))
-    extra = sorted(set(fields) - expected_v5_keys)
+if set(v5_contract) != expected_v5_keys:
+    missing = sorted(expected_v5_keys - set(v5_contract))
+    extra = sorted(set(v5_contract) - expected_v5_keys)
     raise SystemExit(
         f"H-APG cover gate error: v5 contract key-set mismatch: missing={missing} extra={extra}"
     )
 actual_changed_v4_keys = {
-    key for key in v4_contract if fields[key] != v4_contract[key]
+    key for key in v4_contract if v5_contract[key] != v4_contract[key]
 }
 if actual_changed_v4_keys != changed_v4_keys:
     raise SystemExit(
         "H-APG cover gate error: v5 changed-key set mismatch: "
         f"expected={sorted(changed_v4_keys)} actual={sorted(actual_changed_v4_keys)}"
+    )
+v6_only_keys = {
+    "SUPERSEDES_V5_SHA256",
+    "V5_ABORT_RECEIPT_MANIFEST_SHA256",
+    "V5_ABORT_FILES_INDEX_SHA256",
+    "V5_ABORT_JOBS_SACCT_SHA256",
+    "V5_KAT_SLURM_JOB_ID",
+    "V5_KAT_SLURM_STATE",
+    "V5_KAT_SLURM_EXIT_CODE",
+    "V5_KAT_ARCHIVE_SHA256",
+    "V5_KAT_CONFIG_SHA256",
+    "V5_ADAPTIVE_SLURM_JOB_ID",
+    "V5_ADAPTIVE_SLURM_STATE",
+    "V5_ADAPTIVE_SLURM_EXIT_CODE",
+    "V5_ADAPTIVE_FAILURE_STAGE",
+    "V5_ADAPTIVE_FAILURE_SIGNATURE",
+    "V5_ADAPTIVE_RUNNER_REPORTED_EVALUATED_NODE_COUNT",
+    "V5_ADAPTIVE_RUNNER_REPORTED_WAVE_COUNT",
+    "V5_ADAPTIVE_ARCHIVE_PUBLISHED",
+    "V5_ADAPTIVE_RESULT_AVAILABLE",
+    "V5_ADAPTIVE_RUNNER_CANDIDATE_FIELD_IS_SCIENTIFIC_RESULT",
+    "V6_FILE_INDEX_ORDER",
+    "V6_KAT_PREREQUISITE_REQUIRED_FOR_ADAPTIVE",
+    "V6_KAT_ARCHIVE_SAFE_FULL_INDEX_REPLAY_REQUIRED",
+    "V6_KAT_LEAF_BY_LEAF_VERIFIER_REPLAY_REQUIRED",
+    "V6_KAT_SAME_GIT_HEAD_REQUIRED",
+    "V6_KAT_SAME_FROZEN_CONTRACT_REQUIRED",
+    "V6_KAT_SAME_BASE_DELTA_PREBUILT_AND_JOB_SCRIPT_REQUIRED",
+    "V6_KAT_SLURM_COMPLETED_ZERO_EXIT_REQUIRED",
+    "V6_KAT_END_NOT_AFTER_ADAPTIVE_SUBMIT_REQUIRED",
+    "V6_KAT_CERTIFICATE_INCLUDED_IN_ADAPTIVE_BUNDLE",
+    "V6_KAT_CERTIFICATE_SHA256_BOUND_IN_ADAPTIVE_RUN_CONTRACT",
+    "V6_AGGREGATOR_REVALIDATES_KAT_ARCHIVE_AND_CERTIFICATE",
+    "V6_POST_RUN_FAILURE_DIAGNOSTIC_ARCHIVE_REQUIRED",
+    "V6_FRESH_SLURM_KAT_EXECUTED",
+    "V6_AUTHORITATIVE_ADAPTIVE_EXECUTED",
+    "V6_AUTHORITATIVE_RESULT_AVAILABLE",
+    "KAT_ANCHOR",
+    "KAT_ANCHOR_SHA256",
+    "SLURM_CONFIG_SCHEMA",
+    "PREBUILT_MANIFEST_SCHEMA",
+    "RUN_CONTRACT_SCHEMA",
+    "TRANSPORT_MANIFEST_SCHEMA",
+    "AGGREGATION_SCHEMA",
+    "KAT_PREREQUISITE_CERTIFICATE_SCHEMA",
+    "KAT_PREREQUISITE_SACCT_ARTIFACT",
+    "KAT_PREREQUISITE_CERTIFICATE_ARTIFACT",
+    "KAT_PREREQUISITE_TRANSPORT_CONFIG_ARTIFACT",
+    "ADAPTIVE_RUN_CONTRACT_KAT_FIELDS",
+    "ADAPTIVE_CONFIG_KAT_FIELDS",
+    "POST_RUN_FAILURE_TRANSPORT_POLICY",
+    "BOUNDED_PILOT_SLURM_CLUSTER",
+    "KAT_EXPECTED_HPG_MUTATION_TESTS",
+    "KAT_EXPECTED_HPG_MUTATIONS_REJECTED",
+    "KAT_EXPECTED_HAPG_MUTATION_TESTS",
+    "KAT_EXPECTED_HAPG_MUTATIONS_REJECTED",
+}
+changed_v5_keys = {
+    "AGGREGATOR_SHA256",
+    "GATE_SHA256",
+    "IMPLEMENTATION_COMMIT",
+    "IMPLEMENTATION_PARENT_COMMIT",
+    "RECOVERY_SCOPE",
+    "RUNNER_SHA256",
+    "SCHEMA",
+    "SLURM_JOB_SCRIPT_SHA256",
+    "V5_FRESH_SLURM_KAT_EXECUTED",
+}
+expected_v6_keys = set(v5_contract) | v6_only_keys
+if set(fields) != expected_v6_keys:
+    missing = sorted(expected_v6_keys - set(fields))
+    extra = sorted(set(fields) - expected_v6_keys)
+    raise SystemExit(
+        f"H-APG cover gate error: v6 contract key-set mismatch: missing={missing} extra={extra}"
+    )
+actual_changed_v5_keys = {
+    key for key in v5_contract if fields[key] != v5_contract[key]
+}
+if actual_changed_v5_keys != changed_v5_keys:
+    raise SystemExit(
+        "H-APG cover gate error: v6 changed-key set mismatch: "
+        f"expected={sorted(changed_v5_keys)} actual={sorted(actual_changed_v5_keys)}"
     )
 v4_abort = parse_kv(v4_abort_root / "manifest.txt")
 v4_abort_exact = {
@@ -672,6 +833,252 @@ for key, value in summary_expected.items():
     if audit_summary.get(key) != value:
         raise SystemExit(f"H-APG cover gate error: v5 diagnostic summary mismatch for {key}")
 
+v5_abort = parse_kv(v5_abort_root / "manifest.txt")
+v5_abort_exact = {
+    "SCHEMA": "sounio.cs6.hapg-full-source-cover-v5-adaptive-abort.v1",
+    "EVIDENCE_CLASS": "FRESH_KAT_PASS_AND_ADAPTIVE_POST_RUN_INDEX_GATE_FAILURE_NO_ADAPTIVE_ARCHIVE",
+    "FROZEN_CONTRACT_SHA256": fields["SUPERSEDES_V5_SHA256"],
+    "EXECUTED_GIT_HEAD": fields["IMPLEMENTATION_PARENT_COMMIT"],
+    "BASE_REPO_BUNDLE_SHA256": fields["BASE_REPO_BUNDLE_SHA256"],
+    "REPO_DELTA_BUNDLE_SHA256": "f18eca876a0dca56f3ba01ac32cac04f54e04dcc8df243cd49ef0f598f98de52",
+    "PREBUILT_ARCHIVE_SHA256": "3f78b0d2e94534e7da4dd483c922aed54fbe2a3cb598a57b0ad862e7625c1688",
+    "JOBS_SACCT_SHA256": fields["V5_ABORT_JOBS_SACCT_SHA256"],
+    "KAT_JOB_ID": fields["V5_KAT_SLURM_JOB_ID"],
+    "KAT_STATE": fields["V5_KAT_SLURM_STATE"],
+    "KAT_EXIT_CODE": fields["V5_KAT_SLURM_EXIT_CODE"],
+    "KAT_CONFIG_SHA256": fields["V5_KAT_CONFIG_SHA256"],
+    "KAT_ARCHIVE_SHA256": fields["V5_KAT_ARCHIVE_SHA256"],
+    "KAT_ARCHIVE_SIDECAR_SHA256": "15989fe6eece93c4da4054f23590a739521a1ed46ecd932a5e0ec770e1ba566c",
+    "KAT_ARCHIVE_BYTES_RETAINED": "false",
+    "KAT_ARCHIVE_SAFE_MEMBER_COUNT": "525",
+    "KAT_RESULT_INDEXED_FILE_COUNT": "501",
+    "KAT_TRANSPORT_MANIFEST_SHA256": "b71b75280451e2688792821a97d468aae4340464f344b77ebc6764fa49dabcb2",
+    "KAT_RESULT_RUN_MANIFEST_SHA256": "0fbd95e37ea71bcd3fd8ff8b8eca29588ab1700c6f30aea3ca031cd16886a901",
+    "KAT_RESULT_RUN_CONTRACT_SHA256": "13443e69e36104259e355f726e65365be6328b537a7d4f6db90806699a63f469",
+    "KAT_RESULT_FILES_INDEX_SHA256": "6703897e2a23efb0633cf32c966a93680ba26bafe6b346b7992545ffa91a971e",
+    "KAT_RESULT_SUMMARY_SHA256": "750d4400b8da0c755cd6627692ff561d8bea941fc7d205801704ebf178c87d55",
+    "KAT_EVALUATED_NODE_COUNT": "53",
+    "KAT_HPG_SIGNED_CHART_COUNT": "52",
+    "KAT_HAPG_ATTEMPTED_COUNT": "52",
+    "KAT_HAPG_CERTIFIED_COUNT": "48",
+    "KAT_HAPG_RESCUE_COUNT": "20",
+    "KAT_HPG_MUTATIONS": "4108/4108",
+    "KAT_HAPG_MUTATIONS": "5824/5824",
+    "KAT_AUTHORIZATION_SHA256": "7073311d87709fc0d583ca2b037280b374308371c8e2301c4fe0a1d4fe1fb61d",
+    "FIRST_BARRIER_JOB_ID": "8460",
+    "FIRST_BARRIER_STATE": "FAILED",
+    "FIRST_BARRIER_FAILURE_CLASS": "SUBMISSION_MARKER_VISIBLE_BEFORE_BARRIER_GUARD",
+    "FIRST_ADAPTIVE_JOB_ID": "8461",
+    "FIRST_ADAPTIVE_STATE": "CANCELLED",
+    "FIRST_ADAPTIVE_STARTED": "false",
+    "SUCCESSFUL_BARRIER_JOB_ID": "8462",
+    "SUCCESSFUL_BARRIER_STATE": "COMPLETED",
+    "SUCCESSFUL_BARRIER_EXIT_CODE": "0:0",
+    "SUCCESSFUL_BARRIER_ATTESTATION_SHA256": "d593a8153b00b6a9a26dbaa17ad4dfb086549d521b7829c59686b31cae24b1b0",
+    "ADAPTIVE_JOB_ID": fields["V5_ADAPTIVE_SLURM_JOB_ID"],
+    "ADAPTIVE_STATE": fields["V5_ADAPTIVE_SLURM_STATE"],
+    "ADAPTIVE_EXIT_CODE": fields["V5_ADAPTIVE_SLURM_EXIT_CODE"],
+    "ADAPTIVE_CONFIG_SHA256": "2154027e1fcea4e5e21375427355fce045a20da4975008f9f710291c310f94ce",
+    "ADAPTIVE_SUBMISSION_SHA256": "a8c7ef8681ddecb1e073a3fc4f6ed921f1a6ff53b0fa82d026020e02b89c444c",
+    "ADAPTIVE_SUBMIT_UTC": "2026-08-02T06:46:14",
+    "ADAPTIVE_START_UTC": "2026-08-02T06:46:35",
+    "ADAPTIVE_END_UTC": "2026-08-02T06:48:08",
+    "ADAPTIVE_ALLOCATED_CPUS": "120",
+    "ADAPTIVE_REQUESTED_CPUS": "32",
+    "ADAPTIVE_RUNNER_REPORTED_EVALUATED_NODE_COUNT": fields[
+        "V5_ADAPTIVE_RUNNER_REPORTED_EVALUATED_NODE_COUNT"
+    ],
+    "ADAPTIVE_RUNNER_REPORTED_WAVE_COUNT": fields[
+        "V5_ADAPTIVE_RUNNER_REPORTED_WAVE_COUNT"
+    ],
+    "FAILURE_STAGE": fields["V5_ADAPTIVE_FAILURE_STAGE"],
+    "FAILURE_SIGNATURE": fields["V5_ADAPTIVE_FAILURE_SIGNATURE"],
+    "ROOT_CAUSE": "PATH_COMPONENT_ORDER_DIFFERS_FROM_POSIX_RELATIVE_TOKEN_ORDER_FOR_FRESH_REPLAY_SIBLINGS",
+    "LOCALE_DEPENDENT": "false",
+    "ADAPTIVE_RUNNER_RESULT_SCRATCH_RETAINED": "false",
+    "ADAPTIVE_AGGREGATION_PUBLISHED": "false",
+    "ADAPTIVE_TRANSPORT_ARCHIVE_PUBLISHED": fields["V5_ADAPTIVE_ARCHIVE_PUBLISHED"],
+    "ADAPTIVE_RESULT_AVAILABLE": fields["V5_ADAPTIVE_RESULT_AVAILABLE"],
+    "ADAPTIVE_RUNNER_CANDIDATE_FIELD_IS_SCIENTIFIC_RESULT": fields[
+        "V5_ADAPTIVE_RUNNER_CANDIDATE_FIELD_IS_SCIENTIFIC_RESULT"
+    ],
+    "FILE_INDEX_ORDER_FIX": fields["V6_FILE_INDEX_ORDER"],
+    "FILE_INDEX_REPRO_SHA256": "e22e20457c82088d9f49e5dd8a0019676299020589ec7e704ecb106db4af0165",
+    "FILES_INDEX_SHA256": fields["V5_ABORT_FILES_INDEX_SHA256"],
+    "FILE_COUNT": "33",
+    "EXECUTION_PROVENANCE_ATTESTED": "false",
+    "OPEN_PROBLEM_SOLVED": "false",
+    "PROMOTION_ELIGIBLE": "false",
+}
+if set(v5_abort) != set(v5_abort_exact):
+    missing = sorted(set(v5_abort_exact) - set(v5_abort))
+    extra = sorted(set(v5_abort) - set(v5_abort_exact))
+    raise SystemExit(
+        f"H-APG cover gate error: v5 abort manifest key-set mismatch: missing={missing} extra={extra}"
+    )
+for key, value in v5_abort_exact.items():
+    if v5_abort.get(key) != value:
+        raise SystemExit(f"H-APG cover gate error: v5 abort receipt mismatch for {key}")
+
+v5_payload_names = {
+    "adaptive-config.txt",
+    "adaptive-submission-attempt-8461-dependency-failed.txt",
+    "adaptive-submission.txt",
+    "adaptive-submit-guard.py",
+    "file-index-order-repro.txt",
+    "jobs-8458-8463.sacct.psv",
+    "kat-archive.sha256",
+    "kat-auth-barrier-job.sh",
+    "kat-auth-barrier-job8462.txt",
+    "kat-authorization.txt",
+    "kat-config.txt",
+    "kat-release-guard.py",
+    "kat-result-files.sha256",
+    "kat-run-contract.txt",
+    "kat-run-manifest.txt",
+    "kat-summary.txt",
+    "kat-transport-manifest.txt",
+    "kat-transport-slurm-job-record.txt",
+    "logs/adaptive-8461.pre-cancel-scontrol.txt",
+    "logs/adaptive-8463.err",
+    "logs/adaptive-8463.final-scontrol.txt",
+    "logs/adaptive-8463.out",
+    "logs/kat-8458.err",
+    "logs/kat-8458.out",
+    "logs/kat-auth-barrier-8460.err",
+    "logs/kat-auth-barrier-8460.final-scontrol.txt",
+    "logs/kat-auth-barrier-8460.out",
+    "logs/kat-auth-barrier-8462.err",
+    "logs/kat-auth-barrier-8462.final-scontrol.txt",
+    "logs/kat-auth-barrier-8462.guard.txt",
+    "logs/kat-auth-barrier-8462.out",
+    "logs/kat-auth-barrier-8462.scontrol.txt",
+    "submit-adaptive-once.sh",
+}
+v5_index_raw = (v5_abort_root / "files.sha256").read_bytes()
+if (
+    not v5_index_raw.endswith(b"\n")
+    or b"\r" in v5_index_raw
+    or b"\0" in v5_index_raw
+    or hashlib.sha256(v5_index_raw).hexdigest() != fields["V5_ABORT_FILES_INDEX_SHA256"]
+):
+    raise SystemExit("H-APG cover gate error: v5 abort file index envelope mismatch")
+v5_indexed: dict[str, str] = {}
+for line in v5_index_raw.decode("ascii").splitlines():
+    if line.count("  ") != 1:
+        raise SystemExit("H-APG cover gate error: malformed v5 abort file index")
+    digest_token, name = line.split("  ", 1)
+    pure = PurePosixPath(name)
+    if (
+        re.fullmatch(r"[0-9a-f]{64}", digest_token) is None
+        or pure.is_absolute()
+        or not pure.parts
+        or ".." in pure.parts
+        or name != pure.as_posix()
+        or name in v5_indexed
+    ):
+        raise SystemExit("H-APG cover gate error: unsafe v5 abort file-index row")
+    v5_indexed[name] = digest_token
+if list(v5_indexed) != sorted(v5_indexed) or set(v5_indexed) != v5_payload_names:
+    raise SystemExit("H-APG cover gate error: v5 abort file-index order or set mismatch")
+v5_tree = list(v5_abort_root.rglob("*"))
+if any(path.is_symlink() for path in v5_tree):
+    raise SystemExit("H-APG cover gate error: symlink in v5 abort receipt")
+actual_v5_payloads = {
+    relative
+    for file in v5_tree
+    if file.is_file()
+    for relative in (file.relative_to(v5_abort_root).as_posix(),)
+    if relative not in {"manifest.txt", "files.sha256"}
+}
+if actual_v5_payloads != v5_payload_names:
+    raise SystemExit("H-APG cover gate error: v5 abort unindexed payload set mismatch")
+for name, expected_sha in v5_indexed.items():
+    payload = v5_abort_root.joinpath(*PurePosixPath(name).parts)
+    if payload.is_symlink() or hashlib.sha256(payload.read_bytes()).hexdigest() != expected_sha:
+        raise SystemExit(f"H-APG cover gate error: v5 abort payload mismatch: {name}")
+
+v5_jobs = {}
+for row in (v5_abort_root / "jobs-8458-8463.sacct.psv").read_text(
+    encoding="ascii"
+).splitlines():
+    columns = row.split("|")
+    if len(columns) != 13 or columns[-1] != "" or columns[0] in v5_jobs:
+        raise SystemExit("H-APG cover gate error: malformed v5 abort sacct row")
+    v5_jobs[columns[0]] = columns
+expected_job_states = {
+    "8458": ("COMPLETED", "0:0"),
+    "8460": ("FAILED", "1:0"),
+    "8461": ("CANCELLED by 0", "0:0"),
+    "8462": ("COMPLETED", "0:0"),
+    "8463": ("FAILED", "1:0"),
+}
+expected_job_names = {
+    "8458": "cs6-hapg-kat-v5",
+    "8460": "cs6-hapg-kat-auth-v5",
+    "8461": "cs6-hapg-adaptive-v5",
+    "8462": "cs6-hapg-kat-auth-v5",
+    "8463": "cs6-hapg-adaptive-v5",
+}
+if set(v5_jobs) != set(expected_job_states) or any(
+    (v5_jobs[job_id][3], v5_jobs[job_id][4]) != state_exit
+    for job_id, state_exit in expected_job_states.items()
+) or any(
+    v5_jobs[job_id][1] != expected_job_names[job_id]
+    or v5_jobs[job_id][2] != "gpu-orangefs"
+    for job_id in expected_job_names
+):
+    raise SystemExit("H-APG cover gate error: v5 abort Slurm state mismatch")
+if (
+    v5_jobs["8461"][6] != "None"
+    or v5_jobs["8458"][5:8]
+    != ["2026-08-02T06:28:07", "2026-08-02T06:28:07", "2026-08-02T06:29:38"]
+    or v5_jobs["8463"][5:8]
+    != [
+        v5_abort["ADAPTIVE_SUBMIT_UTC"],
+        v5_abort["ADAPTIVE_START_UTC"],
+        v5_abort["ADAPTIVE_END_UTC"],
+    ]
+    or v5_jobs["8458"][9:12] != ["gpuorangefs-r770-proxmox", "120", "32"]
+    or v5_jobs["8463"][9:12]
+    != ["gpuorangefs-r770-proxmox", v5_abort["ADAPTIVE_ALLOCATED_CPUS"], v5_abort["ADAPTIVE_REQUESTED_CPUS"]]
+    or any(
+        not row[5] <= row[6] <= row[7]
+        for job_id, row in v5_jobs.items()
+        if job_id != "8461"
+    )
+    or not v5_jobs["8458"][7] <= v5_abort["ADAPTIVE_SUBMIT_UTC"]
+    or not v5_jobs["8462"][7] <= v5_abort["ADAPTIVE_START_UTC"]
+):
+    raise SystemExit("H-APG cover gate error: v5 abort chronology mismatch")
+v5_stdout = (v5_abort_root / "logs/adaptive-8463.out").read_text(encoding="ascii")
+v5_stderr = (v5_abort_root / "logs/adaptive-8463.err").read_text(encoding="ascii")
+if (
+    "EVALUATED_NODE_COUNT=255\n" not in v5_stdout
+    or "WAVE_COUNT=8\n" not in v5_stdout
+    or "HAPG_FULL_SOURCE_COVER_CANDIDATE=false\n" not in v5_stdout
+    or not v5_stderr.endswith("aggregation error: files index is not sorted\n")
+):
+    raise SystemExit("H-APG cover gate error: v5 adaptive failure signature mismatch")
+repro = parse_kv(v5_abort_root / "file-index-order-repro.txt")
+repro_exact = {
+    "SCHEMA": "sounio.cs6.hapg-full-source-cover-file-index-order-repro.v1",
+    "FAILED_JOB_ID": fields["V5_ADAPTIVE_SLURM_JOB_ID"],
+    "PRODUCER_ORDER_1": "fresh-replay/evaluations.tsv",
+    "PRODUCER_ORDER_2": "fresh-replay-contract.txt",
+    "PRODUCER_ORDER_3": "fresh-replay-terminals.tsv",
+    "REQUIRED_ORDER_1": "fresh-replay-contract.txt",
+    "REQUIRED_ORDER_2": "fresh-replay-terminals.tsv",
+    "REQUIRED_ORDER_3": "fresh-replay/evaluations.tsv",
+    "ROOT_CAUSE": "PATH_COMPONENT_ORDER_DIFFERS_FROM_POSIX_RELATIVE_TOKEN_ORDER",
+    "LOCALE_DEPENDENT": "false",
+    "MINIMAL_PRODUCER_CONSUMER_REPRO_PASS_AFTER_FIX": "true",
+    "SCIENTIFIC_RESULT": "false",
+    "PROMOTION_ELIGIBLE": "false",
+}
+if repro != repro_exact:
+    raise SystemExit("H-APG cover gate error: v5 file-index repro mismatch")
+
 false_fields = (
     "ABSTRACT_EXISTENCE_FALSIFIED_BY_BOUNDED_FAILURE",
     "GENERIC_CERTIFICATE_PASS_TERMINAL_ALLOWED",
@@ -725,6 +1132,7 @@ check_binding H_APG_ADAPTER_SHA256 "$leaf_verifier"
 check_binding H_APG_NUMERIC_VERIFIER_SHA256 scripts/research/cs6_affine_projective_cocycle_full53_verify.py
 check_binding RUNNER_SHA256 "$runner"
 check_binding AGGREGATOR_SHA256 "$aggregator"
+check_binding KAT_ANCHOR_SHA256 "$kat_anchor"
 check_binding EXACT_TREE_KERNEL_SHA256 scripts/research/cs6_c1_full_source_cover_aggregate.py
 check_binding SLURM_JOB_SCRIPT_SHA256 "$slurm_job"
 check_binding KAT_COORDINATE_MANIFEST_SHA256 scripts/research/cs6_affine_projective_cocycle_full53_coordinates_v1.tsv
@@ -760,10 +1168,14 @@ check_binding V4_ABORT_HPG_V4_KAT_CORPUS_FILES_SHA256 "$v4_abort/hpg-v4-kat-corp
 check_binding V4_ABORT_MIDPOINT_DISCRETE_TEST_SHA256 "$v4_abort/midpoint-discrete-negative-test.txt"
 check_binding V4_ABORT_LOCAL_REPRO_SHA256 "$v4_abort/local-repro.tar"
 check_binding V4_ABORT_EXECUTED_HPG_VERIFIER_SHA256 "$v4_abort/v4-hpg-verifier.py"
+check_binding V5_ABORT_RECEIPT_MANIFEST_SHA256 "$v5_abort/manifest.txt"
+check_binding V5_ABORT_FILES_INDEX_SHA256 "$v5_abort/files.sha256"
+check_binding V5_ABORT_JOBS_SACCT_SHA256 "$v5_abort/jobs-8458-8463.sacct.psv"
+check_binding SUPERSEDES_V5_SHA256 "$v5_contract"
 check_binding SUPERSEDES_V4_SHA256 "$v4_contract"
 check_binding SUPERSEDES_V3_SHA256 "$v3_contract"
 
-python3 -B - "$runner" "$leaf_verifier" "$aggregator" <<'PY'
+python3 -B - "$runner" "$leaf_verifier" "$aggregator" "$kat_anchor" <<'PY'
 from pathlib import Path
 import sys
 
@@ -1672,6 +2084,12 @@ def hapg(leaf: object, **updates: object):
 
 checks = 0
 
+assert run.KAT_ANCHOR.run_self_test() == 2
+checks += 2
+kat_anchor_tests, kat_anchor_rejected = run.KAT_ANCHOR.run_mutation_self_test()
+assert kat_anchor_tests == kat_anchor_rejected == 22
+checks += kat_anchor_tests
+
 # Wave parsing rejects forged H-PG outcomes before the artifact aggregator runs.
 negative_leaf = run.Leaf(2, 0, 2, 0, "-", 4)
 run_contract_sha = "1" * 64
@@ -2013,11 +2431,72 @@ with tempfile.TemporaryDirectory(prefix="cs6-hapg-cover-race.") as directory:
     assert destination.read_bytes() == b"concurrent-owner\n"
 checks += 1
 
+# Path-component ordering must match the canonical POSIX-token ordering.
+with tempfile.TemporaryDirectory(prefix="cs6-hapg-cover-index-order.") as directory:
+    index_root = Path(directory)
+    (index_root / "fresh-replay").mkdir()
+    (index_root / "fresh-replay/evaluations.tsv").write_bytes(b"nested\n")
+    (index_root / "fresh-replay-contract.txt").write_bytes(b"contract\n")
+    (index_root / "fresh-replay-terminals.tsv").write_bytes(b"terminals\n")
+    raw_index = run.file_index(index_root)
+    index_tokens = [
+        line.split("  ", 1)[1] for line in raw_index.decode("ascii").splitlines()
+    ]
+    assert index_tokens == sorted(index_tokens) == [
+        "fresh-replay-contract.txt",
+        "fresh-replay-terminals.tsv",
+        "fresh-replay/evaluations.tsv",
+    ]
+    (index_root / "files.sha256").write_bytes(raw_index)
+    assert aggregate.verify_file_index(
+        index_root,
+        {
+            "FILES_INDEX_SHA256": hashlib.sha256(raw_index).hexdigest(),
+            "FILE_COUNT": "3",
+        },
+    ) == 3
+checks += 1
+
+# The exact historical path-component order remains rejected by the consumer.
+with tempfile.TemporaryDirectory(prefix="cs6-hapg-cover-index-reject.") as directory:
+    index_root = Path(directory)
+    (index_root / "fresh-replay").mkdir()
+    payloads = {
+        "fresh-replay/evaluations.tsv": b"nested\n",
+        "fresh-replay-contract.txt": b"contract\n",
+        "fresh-replay-terminals.tsv": b"terminals\n",
+    }
+    for token, raw in payloads.items():
+        (index_root / token).write_bytes(raw)
+    old_order = (
+        "fresh-replay/evaluations.tsv",
+        "fresh-replay-contract.txt",
+        "fresh-replay-terminals.tsv",
+    )
+    bad_index = "".join(
+        f"{hashlib.sha256(payloads[token]).hexdigest()}  {token}\n"
+        for token in old_order
+    ).encode("ascii")
+    (index_root / "files.sha256").write_bytes(bad_index)
+    try:
+        aggregate.verify_file_index(
+            index_root,
+            {
+                "FILES_INDEX_SHA256": hashlib.sha256(bad_index).hexdigest(),
+                "FILE_COUNT": "3",
+            },
+        )
+    except aggregate.AggregateError as error:
+        assert str(error) == "files index is not sorted"
+    else:
+        raise AssertionError("historical path-component file order was accepted")
+checks += 1
+
 mutation_total, mutation_rejected = aggregate.self_test_mutations()
 assert mutation_total == mutation_rejected == 17
 checks += mutation_total
-assert checks == 313
-print("HAPG_COVER_GATE_TESTS=313/313")
+assert checks == 339
+print("HAPG_COVER_GATE_TESTS=339/339")
 PY
 
 [[ -f $full53/run-manifest.txt && -f $full53/files.sha256 ]] || {
@@ -2035,10 +2514,34 @@ if [[ ${CS6_HAPG_DEEP_BASELINE_REPLAY:-0} == 1 ]]; then
 fi
 
 if [[ -n ${CS6_HAPG_COVER_BUNDLE:-} ]]; then
-  python3 -B "$aggregator" "$CS6_HAPG_COVER_BUNDLE" \
-    --expected-contract-sha "$(sha256sum "$contract" | awk '{print $1}')" \
-    --expected-git-head "$(git rev-parse HEAD)" \
+  retained_required=(
+    CS6_HAPG_COVER_KAT_ARCHIVE
+    CS6_HAPG_COVER_KAT_ARCHIVE_SHA256
+    CS6_HAPG_COVER_KAT_JOB_ID
+    CS6_HAPG_COVER_REPO_DELTA_SHA256
+    CS6_HAPG_COVER_PREBUILT_ARCHIVE_SHA256
+  )
+  for key in "${retained_required[@]}"; do
+    [[ -n ${!key:-} ]] || {
+      echo "H-APG cover gate error: missing retained verification input: $key" >&2
+      exit 1
+    }
+  done
+  retained_aggregate=(
+    python3 -B "$aggregator" "$CS6_HAPG_COVER_BUNDLE"
+    --expected-contract-sha "$(sha256sum "$contract" | awk '{print $1}')"
+    --expected-git-head "$(git rev-parse HEAD)"
+    --kat-archive "$CS6_HAPG_COVER_KAT_ARCHIVE"
+    --kat-archive-sha256 "$CS6_HAPG_COVER_KAT_ARCHIVE_SHA256"
+    --kat-job-id "$CS6_HAPG_COVER_KAT_JOB_ID"
+    --transport-repo-delta-sha256 "$CS6_HAPG_COVER_REPO_DELTA_SHA256"
+    --transport-prebuilt-archive-sha256 "$CS6_HAPG_COVER_PREBUILT_ARCHIVE_SHA256"
     --self-test-mutations
+  )
+  if [[ -n ${CS6_HAPG_COVER_KAT_SACCT_FILE:-} ]]; then
+    retained_aggregate+=(--kat-sacct-file "$CS6_HAPG_COVER_KAT_SACCT_FILE")
+  fi
+  "${retained_aggregate[@]}"
 fi
 
 echo "HAPG_FULL_SOURCE_COVER_GATE_PASS=true"

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -24,6 +25,26 @@ INT_RE = re.compile(r"^(?:0|[1-9][0-9]*)$")
 ZERO_SHA256 = "0" * 64
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 ROOT_ID = "U00-0000000000_S00-0000000000"
+KAT_CERTIFICATE_SCHEMA = "sounio.cs6.hapg-full-source-cover-kat-prerequisite.v2"
+KAT_RUN_CONTRACT_EVIDENCE_KEYS = (
+    "KAT_COORDINATE_MANIFEST_SHA256",
+    "KAT_EXPECTED_RESULTS_SHA256",
+    "KAT_WAVE_CONTRACT_SHA256",
+    "KAT_WAVE_RESULT_SHA256",
+    "KAT_LEAF_EVIDENCE_VALID",
+    "KAT_HPG_VERIFIER_REPLAY_COUNT",
+    "KAT_HAPG_VERIFIER_REPLAY_COUNT",
+    "KAT_EVALUATED_NODE_COUNT",
+    "KAT_HPG_SIGNED_CHART_COUNT",
+    "KAT_HAPG_ATTEMPTED_COUNT",
+    "KAT_HAPG_CERTIFIED_COUNT",
+    "KAT_HAPG_UNCERTIFIED_COUNT",
+    "KAT_HAPG_RESCUE_COUNT",
+    "KAT_HPG_MUTATION_TESTS",
+    "KAT_HPG_MUTATIONS_REJECTED",
+    "KAT_HAPG_MUTATION_TESTS",
+    "KAT_HAPG_MUTATIONS_REJECTED",
+)
 RUN_MANIFEST_KEYS = (
     "SCHEMA",
     "RUN_COMPLETE",
@@ -56,6 +77,7 @@ RUN_CONTRACT_KEYS = (
     "HAPG_KERNEL_SOURCE_SHA256",
     "HAPG_VERIFIER_ADAPTER_SHA256",
     "HAPG_NUMERIC_VERIFIER_SHA256",
+    "KAT_ANCHOR_SHA256",
     "SLURM_JOB_SCRIPT_SHA256",
     "BUILD_MODE",
     "PREBUILT_RUN_MANIFEST_SHA256",
@@ -76,6 +98,24 @@ RUN_CONTRACT_KEYS = (
     "MAX_S_DEPTH",
     "ALL_OR_NONE_WAVE_ADMISSION",
     "FRESH_REPLAY_ROOT_CHALLENGE",
+    "KAT_PREREQUISITE_REQUIRED",
+    "KAT_PREREQUISITE_CERTIFICATE_SCHEMA",
+    "KAT_PREREQUISITE_CERTIFICATE_SHA256",
+    "KAT_PREREQUISITE_SACCT_SHA256",
+    "KAT_JOB_ID",
+    "KAT_ARCHIVE_SHA256",
+    "KAT_GIT_HEAD",
+    "KAT_FROZEN_CONTRACT_SHA256",
+    "KAT_BASE_REPO_BUNDLE_SHA256",
+    "KAT_BASE_GIT_HEAD",
+    "KAT_REPO_DELTA_BUNDLE_SHA256",
+    "KAT_PREBUILT_ARCHIVE_SHA256",
+    "KAT_PREBUILT_RUN_MANIFEST_SHA256",
+    "KAT_SLURM_JOB_SCRIPT_SHA256",
+    "KAT_END_UTC",
+    *KAT_RUN_CONTRACT_EVIDENCE_KEYS,
+    "ADAPTIVE_SUBMIT_UTC",
+    "KAT_PREREQUISITE_VALID",
 )
 SUMMARY_KEYS = (
     "SCHEMA",
@@ -225,6 +265,7 @@ PREBUILT_MANIFEST_KEYS = (
     "HAPG_NUMERIC_VERIFIER_SHA256",
     "RUNNER_SHA256",
     "AGGREGATOR_SHA256",
+    "KAT_ANCHOR_SHA256",
     "EXACT_TREE_KERNEL_SHA256",
     "GATE_SHA256",
     "SLURM_JOB_SCRIPT_SHA256",
@@ -264,6 +305,10 @@ LEAF_VERIFY = load_adjacent(
 C1 = load_adjacent(
     "cs6_hapg_cover_exact_tree_kernel",
     "cs6_c1_full_source_cover_aggregate.py",
+)
+KAT_ANCHOR = load_adjacent(
+    "cs6_hapg_cover_aggregate_kat_anchor",
+    "cs6_hapg_full_source_cover_kat_anchor.py",
 )
 
 
@@ -308,6 +353,56 @@ def parse_bool(token: str, label: str) -> bool:
     if token == "false":
         return False
     fail(f"noncanonical boolean: {label}")
+
+
+def validate_kat_prerequisite_certificate(
+    fields: Mapping[str, str], frozen: Mapping[str, str]
+) -> None:
+    expected = {
+        "SCHEMA": KAT_CERTIFICATE_SCHEMA,
+        "CERTIFICATE_SCOPE": "AUTHORITATIVE_V6_ADAPTIVE_PREREQUISITE",
+        "KAT_SCHEMA_PROFILE": "v6",
+        "KAT_PREREQUISITE_VALID": "true",
+        "KAT_ROOT_CHALLENGE": frozen.get("KAT_ROOT_CHALLENGE"),
+        "KAT_COORDINATE_MANIFEST_SHA256": frozen.get(
+            "KAT_COORDINATE_MANIFEST_SHA256"
+        ),
+        "KAT_EXPECTED_RESULTS_SHA256": frozen.get("KAT_EXPECTED_RESULTS_SHA256"),
+        "KAT_LEAF_EVIDENCE_VALID": "true",
+        "KAT_HPG_VERIFIER_REPLAY_COUNT": "52",
+        "KAT_HAPG_VERIFIER_REPLAY_COUNT": "52",
+        "KAT_EVALUATED_NODE_COUNT": frozen.get("KAT_EXPECTED_ATTEMPTED"),
+        "KAT_HPG_SIGNED_CHART_COUNT": frozen.get("KAT_EXPECTED_H_PG_VALID"),
+        "KAT_HAPG_ATTEMPTED_COUNT": frozen.get("KAT_EXPECTED_H_APG_VALID"),
+        "KAT_HAPG_CERTIFIED_COUNT": frozen.get("KAT_EXPECTED_H_APG_CERTIFIED"),
+        "KAT_HAPG_UNCERTIFIED_COUNT": frozen.get(
+            "KAT_EXPECTED_H_APG_UNCERTIFIED"
+        ),
+        "KAT_HAPG_RESCUE_COUNT": frozen.get("KAT_EXPECTED_H_APG_RESCUES"),
+        "KAT_HPG_MUTATION_TESTS": frozen.get("KAT_EXPECTED_HPG_MUTATION_TESTS"),
+        "KAT_HPG_MUTATIONS_REJECTED": frozen.get(
+            "KAT_EXPECTED_HPG_MUTATIONS_REJECTED"
+        ),
+        "KAT_HAPG_MUTATION_TESTS": frozen.get(
+            "KAT_EXPECTED_HAPG_MUTATION_TESTS"
+        ),
+        "KAT_HAPG_MUTATIONS_REJECTED": frozen.get(
+            "KAT_EXPECTED_HAPG_MUTATIONS_REJECTED"
+        ),
+        "KAT_ANCHOR_SOURCE_SHA256": frozen.get("KAT_ANCHOR_SHA256"),
+        "KAT_END_NOT_AFTER_ADAPTIVE_SUBMIT": "true",
+    }
+    if (
+        frozen.get("KAT_PREREQUISITE_CERTIFICATE_SCHEMA")
+        != KAT_CERTIFICATE_SCHEMA
+        or any(fields.get(key) != value for key, value in expected.items())
+        or any(
+            SHA_RE.fullmatch(fields.get(key, "")) is None
+            or fields.get(key) == ZERO_SHA256
+            for key in ("KAT_WAVE_CONTRACT_SHA256", "KAT_WAVE_RESULT_SHA256")
+        )
+    ):
+        fail("KAT prerequisite lacks the frozen v6 leaf-evidence bindings")
 
 
 def parse_kv(raw: bytes, keys: Sequence[str], label: str) -> dict[str, str]:
@@ -1048,10 +1143,10 @@ def verify_frozen_sources(
     run_contract: Mapping[str, str],
     expected_contract_sha: str,
 ) -> Mapping[str, str]:
-    frozen_path = safe_file(bundle, "cs6_hapg_full_source_cover_contract_v5.txt")
-    frozen = read_generic_kv(frozen_path, "frozen v5 contract")
+    frozen_path = safe_file(bundle, "cs6_hapg_full_source_cover_contract_v6.txt")
+    frozen = read_generic_kv(frozen_path, "frozen v6 contract")
     if (
-        frozen.get("SCHEMA") != "sounio.cs6.hapg-full-source-cover-contract.v5"
+        frozen.get("SCHEMA") != "sounio.cs6.hapg-full-source-cover-contract.v6"
         or frozen.get("CONTRACT_STATE") != "PRE_RESULT_FROZEN"
         or frozen.get("SUPERSEDES_V4_SHA256")
         != "a308b4f0d32b4179ed17f1ffd7bbd4827fa81d9cb66162318ddecbc926a43293"
@@ -1062,8 +1157,9 @@ def verify_frozen_sources(
         or digest(frozen_path) != run_contract["FROZEN_CONTRACT_SHA256"]
         or digest(frozen_path) != expected_contract_sha
     ):
-        fail("frozen v5 contract envelope mismatch")
+        fail("frozen v6 contract envelope mismatch")
     abort_bindings = {
+        "SUPERSEDES_V5_SHA256": "v5-executed-contract.txt",
         "SUPERSEDES_V4_SHA256": "v4-executed-contract.txt",
         "SUPERSEDES_V3_SHA256": "v3-executed-contract.txt",
         "V2_ABORT_RECEIPT_MANIFEST_SHA256": "v2-abort-manifest.txt",
@@ -1097,6 +1193,9 @@ def verify_frozen_sources(
         "V4_ABORT_MIDPOINT_DISCRETE_TEST_SHA256": "v4-abort-midpoint-discrete-negative-test.txt",
         "V4_ABORT_LOCAL_REPRO_SHA256": "v4-abort-local-repro.tar",
         "V4_ABORT_EXECUTED_HPG_VERIFIER_SHA256": "v4-abort-v4-hpg-verifier.py",
+        "V5_ABORT_RECEIPT_MANIFEST_SHA256": "v5-abort-manifest.txt",
+        "V5_ABORT_FILES_INDEX_SHA256": "v5-abort-files.sha256",
+        "V5_ABORT_JOBS_SACCT_SHA256": "v5-abort-sacct.psv",
     }
     for key, filename in abort_bindings.items():
         if frozen.get(key) != digest(safe_file(bundle, filename)):
@@ -1155,6 +1254,14 @@ def verify_frozen_sources(
         or globals().get("__source_sha256__") not in {None, digest(bundled_aggregator)}
     ):
         fail("executed aggregator differs from the frozen contract")
+    bundled_kat_anchor = safe_file(bundle, "cs6_hapg_full_source_cover_kat_anchor.py")
+    if (
+        frozen.get("KAT_ANCHOR_SHA256") != digest(bundled_kat_anchor)
+        or run_contract["KAT_ANCHOR_SHA256"] != digest(bundled_kat_anchor)
+        or digest(bundled_kat_anchor) != digest(Path(KAT_ANCHOR.__file__).resolve())
+        or getattr(KAT_ANCHOR, "__source_sha256__", None) != digest(bundled_kat_anchor)
+    ):
+        fail("executed KAT anchor validator differs from the frozen contract")
     bundled_tree = safe_file(bundle, "cs6_c1_full_source_cover_aggregate.py")
     if (
         frozen.get("EXACT_TREE_KERNEL_SHA256") != digest(bundled_tree)
@@ -1196,7 +1303,7 @@ def verify_prebuilt_origin(
     manifest_path = safe_file(origin, "run-manifest.txt")
     manifest = read_kv(manifest_path, PREBUILT_MANIFEST_KEYS, "prebuilt manifest")
     if (
-        manifest["SCHEMA"] != "sounio.cs6.hapg-full-source-cover-prebuilt.v1"
+        manifest["SCHEMA"] != "sounio.cs6.hapg-full-source-cover-prebuilt.v2"
         or manifest["RUN_COMPLETE"] != "true"
         or manifest["MODE"] != "prepare"
         or manifest["CAPD_VERSION"] != "5.3.0"
@@ -1208,7 +1315,7 @@ def verify_prebuilt_origin(
         fail("prebuilt origin manifest mismatch")
     verify_file_index(origin, manifest)
     bindings = {
-        "FROZEN_CONTRACT_SHA256": "cs6_hapg_full_source_cover_contract_v5.txt",
+        "FROZEN_CONTRACT_SHA256": "cs6_hapg_full_source_cover_contract_v6.txt",
         "HPG_WORKER_SOURCE_SHA256": "cs6_plucker_cocycle_probe.cpp",
         "HPG_VERIFIER_SOURCE_SHA256": "cs6_plucker_cocycle_verify.py",
         "HAPG_WORKER_SOURCE_SHA256": "cs6_hapg_full_source_cover_worker.cpp",
@@ -1217,6 +1324,7 @@ def verify_prebuilt_origin(
         "HAPG_NUMERIC_VERIFIER_SHA256": "cs6_affine_projective_cocycle_full53_verify.py",
         "RUNNER_SHA256": "cs6_hapg_full_source_cover_run.py",
         "AGGREGATOR_SHA256": "cs6_hapg_full_source_cover_aggregate.py",
+        "KAT_ANCHOR_SHA256": "cs6_hapg_full_source_cover_kat_anchor.py",
         "EXACT_TREE_KERNEL_SHA256": "cs6_c1_full_source_cover_aggregate.py",
         "GATE_SHA256": "cs6_hapg_full_source_cover_gate.sh",
         "SLURM_JOB_SCRIPT_SHA256": "cs6_hapg_full_source_cover_slurm_job.sh",
@@ -1227,6 +1335,7 @@ def verify_prebuilt_origin(
         if manifest[key] != digest(safe_file(origin, filename)):
             fail(f"prebuilt origin declaration differs from bytes: {filename}")
     abort_bindings = {
+        "SUPERSEDES_V5_SHA256": "v5-executed-contract.txt",
         "SUPERSEDES_V4_SHA256": "v4-executed-contract.txt",
         "SUPERSEDES_V3_SHA256": "v3-executed-contract.txt",
         "V2_ABORT_RECEIPT_MANIFEST_SHA256": "v2-abort-manifest.txt",
@@ -1260,6 +1369,9 @@ def verify_prebuilt_origin(
         "V4_ABORT_MIDPOINT_DISCRETE_TEST_SHA256": "v4-abort-midpoint-discrete-negative-test.txt",
         "V4_ABORT_LOCAL_REPRO_SHA256": "v4-abort-local-repro.tar",
         "V4_ABORT_EXECUTED_HPG_VERIFIER_SHA256": "v4-abort-v4-hpg-verifier.py",
+        "V5_ABORT_RECEIPT_MANIFEST_SHA256": "v5-abort-manifest.txt",
+        "V5_ABORT_FILES_INDEX_SHA256": "v5-abort-files.sha256",
+        "V5_ABORT_JOBS_SACCT_SHA256": "v5-abort-sacct.psv",
     }
     for key, filename in abort_bindings.items():
         if frozen.get(key) != digest(safe_file(origin, filename)):
@@ -1271,6 +1383,7 @@ def verify_prebuilt_origin(
         "HAPG_KERNEL_SOURCE_SHA256",
         "HAPG_VERIFIER_ADAPTER_SHA256",
         "HAPG_NUMERIC_VERIFIER_SHA256",
+        "KAT_ANCHOR_SHA256",
         "SLURM_JOB_SCRIPT_SHA256",
     )
     if any(manifest[key] != run_contract[key] for key in run_source_fields):
@@ -1278,6 +1391,7 @@ def verify_prebuilt_origin(
     frozen_control_fields = (
         "RUNNER_SHA256",
         "AGGREGATOR_SHA256",
+        "KAT_ANCHOR_SHA256",
         "EXACT_TREE_KERNEL_SHA256",
         "GATE_SHA256",
         "SLURM_JOB_SCRIPT_SHA256",
@@ -1906,6 +2020,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("bundle", type=Path)
     parser.add_argument("--expected-contract-sha", required=True)
     parser.add_argument("--expected-git-head", required=True)
+    parser.add_argument("--kat-archive", required=True, type=Path)
+    parser.add_argument("--kat-archive-sha256", required=True)
+    parser.add_argument("--kat-job-id", required=True)
+    parser.add_argument("--transport-repo-delta-sha256", required=True)
+    parser.add_argument("--transport-prebuilt-archive-sha256", required=True)
+    parser.add_argument("--kat-sacct-file", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--self-test-mutations", action="store_true")
     parser.add_argument("--require-local-cover", action="store_true")
@@ -1915,6 +2035,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         fail("expected contract anchor must be lowercase SHA-256")
     if re.fullmatch(r"[0-9a-f]{40}", args.expected_git_head) is None:
         fail("expected Git head anchor must be a lowercase 40-hex commit")
+    if (
+        SHA_RE.fullmatch(args.kat_archive_sha256) is None
+        or re.fullmatch(r"[1-9][0-9]*", args.kat_job_id) is None
+        or SHA_RE.fullmatch(args.transport_repo_delta_sha256) is None
+        or SHA_RE.fullmatch(args.transport_prebuilt_archive_sha256) is None
+    ):
+        fail("KAT prerequisite arguments are noncanonical")
+    kat_archive = args.kat_archive.resolve()
+    if args.kat_archive.is_symlink() or not kat_archive.is_file():
+        fail("KAT prerequisite archive must be a regular non-symlink file")
     bundle = args.bundle.resolve()
     if args.bundle.is_symlink() or not bundle.is_dir():
         fail("run bundle must be a regular non-symlink directory")
@@ -1944,7 +2074,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     run_contract_path = safe_file(bundle, "run-contract.txt")
     run_contract = read_kv(run_contract_path, RUN_CONTRACT_KEYS, "run contract")
     if (
-        run_contract["SCHEMA"] != "sounio.cs6.hapg-full-source-cover-run-contract.v1"
+        run_contract["SCHEMA"] != "sounio.cs6.hapg-full-source-cover-run-contract.v2"
         or run_contract["MODE"] != "adaptive"
         or run_contract["SOURCE"] != "N0"
         or run_contract["ROOT_CHALLENGE"] != manifest["ROOT_CHALLENGE"]
@@ -1970,7 +2100,108 @@ def main(argv: Sequence[str] | None = None) -> int:
     ):
         fail("run contract policy or manifest binding mismatch")
     frozen = verify_frozen_sources(bundle, run_contract, args.expected_contract_sha)
+    if (
+        frozen.get("KAT_PREREQUISITE_CERTIFICATE_SCHEMA")
+        != KAT_CERTIFICATE_SCHEMA
+        or run_contract["KAT_PREREQUISITE_CERTIFICATE_SCHEMA"]
+        != KAT_CERTIFICATE_SCHEMA
+    ):
+        fail("frozen or executed contract does not require KAT certificate v2")
     verify_prebuilt_origin(bundle, run_contract, frozen)
+    slurm_record_raw = stable_bytes(
+        safe_file(bundle, "slurm-job-record.txt"), "Slurm job record"
+    )
+    try:
+        slurm_record_text = slurm_record_raw.decode("ascii").strip()
+    except UnicodeError as error:
+        raise AggregateError("Slurm job record must be ASCII") from error
+    slurm_fields = {
+        key: value
+        for token in shlex.split(slurm_record_text)
+        if "=" in token
+        for key, value in (token.split("=", 1),)
+    }
+    adaptive_submit_utc = slurm_fields.get("SubmitTime", "")
+    if (
+        slurm_fields.get("JobId") != run_contract["SLURM_JOB_ID"]
+        or not adaptive_submit_utc
+        or adaptive_submit_utc == "Unknown"
+        or adaptive_submit_utc != run_contract["ADAPTIVE_SUBMIT_UTC"]
+    ):
+        fail("adaptive Slurm submission anchor mismatch")
+    bundled_kat_sacct = stable_bytes(
+        safe_file(bundle, "kat-prerequisite-sacct.txt"),
+        "bundled KAT sacct record",
+    )
+    if args.kat_sacct_file is None:
+        independent_kat_sacct = KAT_ANCHOR.query_live_sacct(args.kat_job_id)
+    else:
+        independent_kat_sacct = stable_bytes(
+            args.kat_sacct_file, "independent KAT sacct record"
+        )
+    if independent_kat_sacct != bundled_kat_sacct:
+        fail("independent KAT sacct record differs from bundled bytes")
+    kat_expectations = KAT_ANCHOR.KatAnchorExpectations(
+        kat_job_id=args.kat_job_id,
+        kat_archive_sha256=args.kat_archive_sha256,
+        expected_git_head=args.expected_git_head,
+        expected_contract_sha256=args.expected_contract_sha,
+        expected_base_repo_bundle_sha256=frozen["BASE_REPO_BUNDLE_SHA256"],
+        expected_base_git_head=frozen["BASE_REPO_BUNDLE_GIT_HEAD"],
+        expected_repo_delta_bundle_sha256=args.transport_repo_delta_sha256,
+        expected_prebuilt_archive_sha256=args.transport_prebuilt_archive_sha256,
+        expected_prebuilt_run_manifest_sha256=run_contract[
+            "PREBUILT_RUN_MANIFEST_SHA256"
+        ],
+        expected_slurm_job_script_sha256=frozen["SLURM_JOB_SCRIPT_SHA256"],
+        schema_profile="v6",
+    )
+    try:
+        kat_certificate = KAT_ANCHOR.certify_kat_anchor(
+            archive_path=kat_archive,
+            sidecar_path=Path(f"{kat_archive}.sha256"),
+            sacct_bytes=independent_kat_sacct,
+            adaptive_job_id=run_contract["SLURM_JOB_ID"],
+            adaptive_submit_utc=adaptive_submit_utc,
+            expectations=kat_expectations,
+        )
+    except KAT_ANCHOR.VerificationError as error:
+        raise AggregateError(f"KAT prerequisite verification failed: {error}") from error
+    kat_fields = kat_certificate.as_dict()
+    validate_kat_prerequisite_certificate(kat_fields, frozen)
+    bundled_kat_certificate = stable_bytes(
+        safe_file(bundle, "kat-prerequisite-certificate.txt"),
+        "bundled KAT prerequisite certificate",
+    )
+    run_kat_bindings = {
+        "KAT_PREREQUISITE_CERTIFICATE_SCHEMA": kat_fields["SCHEMA"],
+        "KAT_PREREQUISITE_CERTIFICATE_SHA256": kat_certificate.sha256,
+        "KAT_PREREQUISITE_SACCT_SHA256": kat_fields["KAT_SACCT_SHA256"],
+        "KAT_JOB_ID": kat_fields["KAT_JOB_ID"],
+        "KAT_ARCHIVE_SHA256": kat_fields["KAT_ARCHIVE_SHA256"],
+        "KAT_GIT_HEAD": kat_fields["KAT_EXPECTED_GIT_HEAD"],
+        "KAT_FROZEN_CONTRACT_SHA256": kat_fields["KAT_FROZEN_CONTRACT_SHA256"],
+        "KAT_BASE_REPO_BUNDLE_SHA256": kat_fields["KAT_BASE_REPO_BUNDLE_SHA256"],
+        "KAT_BASE_GIT_HEAD": kat_fields["KAT_BASE_GIT_HEAD"],
+        "KAT_REPO_DELTA_BUNDLE_SHA256": kat_fields["KAT_REPO_DELTA_BUNDLE_SHA256"],
+        "KAT_PREBUILT_ARCHIVE_SHA256": kat_fields["KAT_PREBUILT_ARCHIVE_SHA256"],
+        "KAT_PREBUILT_RUN_MANIFEST_SHA256": kat_fields[
+            "KAT_PREBUILT_RUN_MANIFEST_SHA256"
+        ],
+        "KAT_SLURM_JOB_SCRIPT_SHA256": kat_fields["KAT_SLURM_JOB_SCRIPT_SHA256"],
+        "KAT_END_UTC": kat_fields["KAT_END_UTC"],
+        **{key: kat_fields[key] for key in KAT_RUN_CONTRACT_EVIDENCE_KEYS},
+        "ADAPTIVE_SUBMIT_UTC": kat_fields["ADAPTIVE_SUBMIT_UTC"],
+        "KAT_PREREQUISITE_VALID": kat_fields["KAT_PREREQUISITE_VALID"],
+    }
+    if (
+        run_contract["KAT_PREREQUISITE_REQUIRED"] != "true"
+        or run_contract["KAT_PREREQUISITE_VALID"] != "true"
+        or kat_fields["KAT_END_NOT_AFTER_ADAPTIVE_SUBMIT"] != "true"
+        or bundled_kat_certificate != kat_certificate.as_bytes()
+        or any(run_contract[key] != value for key, value in run_kat_bindings.items())
+    ):
+        fail("KAT prerequisite certificate or run-contract binding mismatch")
     if (
         run_contract["ROOT_CHALLENGE"] != frozen.get("BOUNDED_PILOT_ROOT_CHALLENGE")
         or run_contract["MAX_NODES"] != frozen.get("BOUNDED_PILOT_MAX_NODES")
@@ -1996,7 +2227,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.self_test_mutations:
         mutation_tests, mutation_rejected = self_test_mutations()
     fields = (
-        ("SCHEMA", "sounio.cs6.hapg-full-source-cover-aggregation.v1"),
+        ("SCHEMA", "sounio.cs6.hapg-full-source-cover-aggregation.v2"),
         ("RUN_MANIFEST_SHA256", digest(safe_file(bundle, "run-manifest.txt"))),
         ("FILES_INDEX_SHA256", manifest["FILES_INDEX_SHA256"]),
         ("FILE_COUNT", str(file_count)),
@@ -2004,6 +2235,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         ("FROZEN_CONTRACT_SHA256", run_contract["FROZEN_CONTRACT_SHA256"]),
         ("EXECUTION_GIT_HEAD", args.expected_git_head),
         ("EXACT_TREE_KERNEL_SHA256", str(frozen["EXACT_TREE_KERNEL_SHA256"])),
+        ("KAT_PREREQUISITE_VALID", "true"),
+        ("KAT_JOB_ID", run_contract["KAT_JOB_ID"]),
+        ("KAT_ARCHIVE_SHA256", run_contract["KAT_ARCHIVE_SHA256"]),
+        (
+            "KAT_PREREQUISITE_CERTIFICATE_SHA256",
+            run_contract["KAT_PREREQUISITE_CERTIFICATE_SHA256"],
+        ),
+        (
+            "KAT_PREREQUISITE_SACCT_SHA256",
+            run_contract["KAT_PREREQUISITE_SACCT_SHA256"],
+        ),
         ("NODES_SHA256", digest(safe_file(bundle, "nodes.tsv"))),
         ("EVALUATIONS_SHA256", digest(safe_file(bundle, "evaluations.tsv"))),
         ("NEGATIVE_OUTCOMES_SHA256", digest(safe_file(bundle, "negative-outcomes.tsv"))),
@@ -2061,6 +2303,7 @@ if __name__ == "__main__":
         LEAF_VERIFY.CoverVerificationError,
         LEAF_VERIFY.HPG_CORE.VerificationError,
         LEAF_VERIFY.HAPG_CORE.VerificationError,
+        KAT_ANCHOR.VerificationError,
     ) as error:
         print(f"aggregation error: {error}", file=sys.stderr)
         raise SystemExit(1)
