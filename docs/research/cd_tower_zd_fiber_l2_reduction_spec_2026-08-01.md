@@ -439,9 +439,35 @@ psg_top   : psg (u + 2^k) = − psg u              -- peeling a bit flips the si
 `N29` pins the whole split: `D = +1` on the lines 0/2896; the base lemma 0/10664 (levels 3…7,
 every `j`, every such `L`); `Qgen(2^j,·,·) = −1` identically; `σ(w,1) = (−1)^{popcount}` 0/254.
 
-**What is still open.** The base lemma itself (measured, levels ≤ 7), and the `ND` half for
-`Y₀ = 3·2^j` — where the `D = −1` locus is genuinely non-empty (`N10`: it appears at `j ≥ 3`,
-exactly where `g` stops being F2-bilinear, `N3`). And `N27`'s even-weight bookkeeping.
+### ★★ The base lemma falls — so (♦) holds for the label class `Y₀ = 2^j`, ∀n
+
+`gdisc_base` is proven (kernel-checked, `sorry`-free), so `gdisc_lsb` and `D_lines` hold
+outright. The proof is four sub-cases — `y` low/upper × `y` even/odd — each one `R_ll`/`R_lu`/
+`R_ul`/`R_uu` once, and each landing on `sigma_one` or a degenerate `σ`. What made it tractable:
+`tau_xor` + `seam_add_xor` give `τ(w + 2^j) = τw ⊕ 1`, so the only `τ` computation needed is for
+`w < 2^j`, which is a single `tau_spec` split on `w.testBit 0`.
+
+And then:
+
+```lean
+diamond_pow2 : j+2 ≤ n → Y % 2^(j+2) = 2^j → dsgnN j n Y = −1 → Qgen' Y a b n = −1 →
+               Ddef j (2^j) (a % 2^(j+2)) (b % 2^(j+2)) (j+2) = 1
+```
+
+**(♦) holds for the label class `Y₀ = 2^j`, for all `n`.** A non-degenerate bottom can never
+satisfy the hypothesis there — `collapse` turns it into `dsgnN · Qgen (2^j) a₀ b₀` and
+`Qgen_pow2` makes the second factor `−1` unconditionally — so every witness sits on one of the six
+lines, and `D_lines` finishes. The even-weight condition enters exactly once, as
+`dsgnN j n Y = −1`, which is what `N12` says even weight *is* for this class.
+
+`N29(f)` pins non-vacuity: 752 / 1648 / 3440 witnesses at `j = 1,2,3`, and `D = +1` on every one.
+
+**What is still open.** Only the `ND` half, for `Y₀ = 3·2^j`. There the `D = −1` locus is
+genuinely non-empty — `N10` puts its onset at `j ≥ 3`, which is *exactly* where `g` stops being
+F2-bilinear (`N3`). The bilinear closed form
+`g(x,y) = (−1)^{c(x)p_j(y) + c(y)p_j(x)}`, `c(x) = bit₀(x) ⊕ bit_j(x)`, gives `D ≡ +1` with **no
+hypothesis at all**, and it holds precisely for `j ≤ 2`. The two boundaries are the same boundary,
+and that is where the next rung should start. Also open: `N27`'s even-weight bookkeeping.
 
 **The correction.** `N15`'s clean-locus predicate does **not** cover `REACH`: for `Y₀ = 2^j` there
 are 8, 16, 32, 64 reachable points outside it at `j = 0,1,2,3`. The blocked tuples land strictly

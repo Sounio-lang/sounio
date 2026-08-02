@@ -1000,7 +1000,56 @@ def main():
         Sm = sign_table_fast(m).astype(np.int64)
         n29d_bad += sum(1 for w in range(1 << m) if int(Sm[w, 1]) != _psg(w))
         n29d_tot += 1 << m
-    n29 = (n29a_bad == 0 and n29b_bad == 0 and n29c_bad == 0 and n29d_bad == 0)
+    # (e) PIN Lean's `Ddef` against THIS contract's D. They are defined differently -- the
+    # contract uses (-1)^pj(x,j), Lean uses psg (x mod 2^j) -- so the theorem and the clause
+    # would otherwise be about two objects that only look alike.
+    n29e_bad = n29e_tot = 0
+    for j in (1, 2, 3, 4, 5):
+        M = 1 << (j + 2)
+        Sm = sign_table_fast(j + 2).astype(np.int64)
+        gm = gmat(Sm, M, j)
+        A, B = np.meshgrid(np.arange(M), np.arange(M), indexing="ij")
+        p = np.array([(-1) ** pj(x, j) for x in range(M)])
+        pl = np.array([_psg(x % (1 << j)) for x in range(M)])
+        for Y0 in ((1 << j), (3 << j)):
+            D = gm * gm[A ^ Y0, B ^ Y0] * np.outer(p, p)
+            Ddef = gm * gm[A ^ Y0, B ^ Y0] * np.outer(pl, pl)
+            n29e_bad += int((D != Ddef).sum())
+            n29e_tot += M * M
+
+    # (f) NON-VACUITY of `diamond_pow2`. Its hypotheses are Y mod 2^(j+2) = 2^j, dsgnN = -1
+    # (which N12 says IS even weight for this class) and Qgen' = -1. If nothing satisfied them
+    # the theorem would be empty. Count the witnesses, and check its conclusion on every one.
+    n29f_rows = []
+    for j in (1, 2, 3):
+        n = j + 4
+        N = 1 << n
+        M = 1 << (j + 2)
+        Sn = sign_table_fast(n).astype(np.int64)
+        Sm = sign_table_fast(j + 2).astype(np.int64)
+        gm = gmat(Sm, M, j)
+        A, B = np.meshgrid(np.arange(M), np.arange(M), indexing="ij")
+        pl = np.array([_psg(x % (1 << j)) for x in range(M)])
+        Y0 = 1 << j
+        D = gm * gm[A ^ Y0, B ^ Y0] * np.outer(pl, pl)
+        cnt = bad = 0
+        for Y in range(1, N):
+            if Y % M != Y0 or bin(Y).count("1") % 2:
+                continue
+            if (-1) ** (bin(Y >> (j + 2)).count("1")) != -1:
+                continue          # dsgnN = -1
+            for a in range(N):
+                for b in range(N):
+                    if _Qp2(Sn, Y, a, b) != -1:
+                        continue
+                    cnt += 1
+                    if D[a % M, b % M] != 1:
+                        bad += 1
+        n29f_rows.append((j, cnt, bad))
+    n29f = all(c > 0 and b == 0 for _, c, b in n29f_rows)
+
+    n29 = (n29a_bad == 0 and n29b_bad == 0 and n29c_bad == 0 and n29d_bad == 0
+           and n29e_bad == 0 and n29f)
     ok["N29"] = n29
     print(f"N29_DPLUS   REACH subset {{D=+1}} SPLITS, and one half is discharged "
           f"{'OK' if n29 else 'FAIL'} -- (a) D = +1 on the six lines: {n29a_bad}/{n29a_tot}; "
@@ -1010,10 +1059,21 @@ def main():
           f"PROVEN forall n, and it makes ND EMPTY for the label class Y0 = 2^j, so THERE "
           f"(diamond) IS the lines identity; (d) sigma(w,1) = (-1)^popcount(w): "
           f"{n29d_bad}/{n29d_tot} -- PROVEN forall n as `sigma_one`, and it is what the one "
-          f"remaining base case rests on. Lean: `D_on_lines` derives the whole six-line identity "
+          f"remaining base case rests on; (e) Lean's `Ddef` (which uses psg(x mod 2^j)) equals "
+          f"THIS contract's D (which uses (-1)^pj(x,j)) entrywise: {n29e_bad}/{n29e_tot} -- "
+          f"without this the theorem and the clause would be about two objects that only look "
+          f"alike; (f) NON-VACUITY of the theorem `diamond_pow2`: "
+          f"{'; '.join(f'j={a}: {b} witnesses, {c} with D != +1' for a, b, c in n29f_rows)} -- "
+          f"its hypotheses ARE satisfiable and its conclusion holds on every witness. "
+          f"*** (b) IS NOW PROVEN forall n (`gdisc_base`), so `gdisc_lsb` and `D_lines` hold "
+          f"outright, and with (c) that gives `diamond_pow2`: (diamond) HOLDS FOR THE LABEL "
+          f"CLASS Y0 = 2^j, forall n, kernel-checked. *** Lean: `D_on_lines` derives the whole six-line identity "
           f"from that single base lemma, and `gdisc_lsb_of_base` gets the forall-n half FREE from "
-          f"the already-proven `gdisc_trunc`. STILL OPEN: the base lemma itself, and the ND half "
-          f"for Y0 = 3*2^j")
+          f"the already-proven `gdisc_trunc`. STILL OPEN: only the ND half for Y0 = 3*2^j, where the "
+          f"D = -1 locus is genuinely non-empty -- it appears at j >= 3 (N10), exactly where g "
+          f"stops being F2-bilinear (N3); the bilinear closed form for g would give D = +1 with "
+          f"no hypothesis at all, and it holds precisely for j <= 2. The two boundaries are the "
+          f"same boundary, and that is where the next rung starts")
 
     print("=" * 78)
     if all(ok.values()):

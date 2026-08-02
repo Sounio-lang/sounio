@@ -3617,6 +3617,150 @@ theorem gdisc_lsb_of_base
   rw [hbase j (x % 2^(j+1)) (Nat.mod_lt _ (Nat.two_pow_pos (j+1)))]
   rw [mod_pow_mod j (j+1) x (by omega)]
 
+theorem psg_step (z : Nat) : psg z = (if z % 2 = 1 then (-1 : Int) else 1) * psg (z / 2) := by
+  cases z with
+  | zero => rw [psg_zero]; decide
+  | succ n => rw [psg]
+
+theorem xor_one_div (w : Nat) : (w ^^^ 1) / 2 = w / 2 := by
+  apply Nat.eq_of_testBit_eq
+  intro i
+  rw [Nat.testBit_div_two, Nat.testBit_div_two, Nat.testBit_xor,
+      Nat.testBit_lt_two_pow (show (1:Nat) < 2^(i+1) by
+        have := Nat.one_lt_two_pow_iff (n := i+1); omega)]
+  cases w.testBit (i+1) <;> decide
+
+theorem xor_one_mod (w : Nat) : ((w ^^^ 1) % 2 = 1) ↔ ¬ (w % 2 = 1) := by
+  have h := Nat.testBit_zero (w ^^^ 1)
+  have h2 := Nat.testBit_zero w
+  rw [Nat.testBit_xor] at h
+  have h1 : (1:Nat).testBit 0 = true := by decide
+  rw [h1, h2] at h
+  by_cases hw : w % 2 = 1 <;> simp [hw] at h ⊢ <;> simp [h]
+
+/-- Flipping bit `0` flips the popcount parity. -/
+theorem psg_xor_one (w : Nat) : psg (w ^^^ 1) = - psg w := by
+  rw [psg_step (w ^^^ 1), psg_step w, xor_one_div]
+  by_cases hw : w % 2 = 1
+  · rw [if_pos hw, if_neg (fun h => ((xor_one_mod w).mp h) hw)]
+    simp
+  · rw [if_neg hw, if_pos ((xor_one_mod w).mpr hw)]
+    simp
+
+/-- The mask `1 ||| 2^j` is `1 ⊕ 2^j` — the two bits are disjoint when `j ≠ 0`. -/
+theorem mask_xor (j : Nat) (hj : j ≠ 0) : ((1:Nat) ||| (1 <<< j)) = 1 ^^^ (1 <<< j) := by
+  apply Nat.eq_of_testBit_eq
+  intro i
+  rw [Nat.testBit_or, Nat.testBit_xor, Nat.shiftLeft_eq, Nat.one_mul, Nat.testBit_two_pow]
+  have h1 : (1:Nat) = 2^0 := rfl
+  rw [h1, Nat.testBit_two_pow]
+  by_cases h0 : 0 = i <;> by_cases hji : j = i <;> simp_all
+
+/-- **`τ` sends the top bit `2^j` to `1`.** -/
+theorem tau_pow_self (j : Nat) (hj : j ≠ 0) : tau j (2^j) = 1 := by
+  have h0 : ((2:Nat)^j).testBit 0 = false := by
+    rw [Nat.testBit_two_pow]; simp [hj]
+  have hjj : ((2:Nat)^j).testBit j = true := by rw [Nat.testBit_two_pow]; simp
+  rw [tau_spec, h0, hjj, if_neg (by decide : ¬ ((false : Bool) = true)),
+      mask_xor j hj, Nat.shiftLeft_eq, Nat.one_mul, ← Nat.xor_assoc,
+      Nat.xor_comm ((2:Nat)^j) 1, Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+
+/-- Below `2^j`, `τ` fixes the even numbers. -/
+theorem tau_low_even (j w : Nat) (hw : w < 2^j) (hp : w % 2 = 0) : tau j w = w := by
+  have hbj : w.testBit j = false := Nat.testBit_lt_two_pow hw
+  have hb0 : w.testBit 0 = false := by rw [Nat.testBit_zero]; simp [hp]
+  rw [tau_spec, hb0, hbj, if_pos rfl]
+
+/-- Below `2^j`, `τ` sends an odd `w` to `(w ⊕ 1) + 2^j`. -/
+theorem tau_low_odd (j w : Nat) (hj : j ≠ 0) (hw : w < 2^j) (hp : w % 2 = 1) :
+    tau j w = (w ^^^ 1) + 2^j := by
+  have hbj : w.testBit j = false := Nat.testBit_lt_two_pow hw
+  have hb0 : w.testBit 0 = true := by rw [Nat.testBit_zero]; simp [hp]
+  have h1 : (1:Nat) < 2^j := by
+    have := Nat.two_pow_pos j
+    have h := Nat.one_lt_two_pow_iff (n := j); omega
+  have hxlt : w ^^^ 1 < 2^j := Nat.xor_lt_two_pow hw h1
+  obtain ⟨i, rfl⟩ : ∃ i, j = i + 1 := ⟨j - 1, by omega⟩
+  rw [tau_spec, hb0, hbj, if_neg (by decide : ¬ ((true : Bool) = false)),
+      mask_xor (i+1) hj, Nat.shiftLeft_eq, Nat.one_mul, ← Nat.xor_assoc,
+      seam_add_xor (w ^^^ 1) i hxlt]
+
+/-- **THE BASE CASE**, and with it the whole six-line identity. -/
+theorem gdisc_base (j y : Nat) (hy : y < 2^(j+1)) : gdisc j (2^j) y (j+1) = psg (y % 2^j) := by
+  by_cases hj : j = 0
+  · subst hj
+    unfold gdisc
+    rw [tau_id_zero, tau_id_zero, cdSq, Nat.pow_zero, Nat.mod_one, psg_zero]
+  · obtain ⟨i, rfl⟩ : ∃ i, j = i + 1 := ⟨j - 1, by omega⟩
+    have h1 : (1:Nat) < 2^(i+1) := by
+      have := Nat.two_pow_pos i
+      have h := Nat.one_lt_two_pow_iff (n := i+1); omega
+    have htp : tau (i+1) (2^(i+1)) = 1 := tau_pow_self (i+1) hj
+    show gdisc (i+1) (2^(i+1)) y (i+2) = psg (y % 2^(i+1))
+    rcases split_top hy with hlow | ⟨w, hw, rfl⟩
+    · -- y low
+      have hR2 := R_ul 0 y i (Nat.two_pow_pos (i+1)) hlow
+      rw [Nat.zero_add] at hR2
+      by_cases hp : y % 2 = 0
+      · unfold gdisc
+        rw [htp, tau_low_even (i+1) y hlow hp, R_ll 1 y i h1 hlow, hR2,
+            Nat.mod_eq_of_lt hlow]
+        by_cases hy0 : y = 0
+        · subst hy0
+          rw [cdSig0' 1 i, if_pos rfl, psg_zero]
+          decide
+        · have hy1 : y ≠ 1 := by intro h; rw [h] at hp; exact absurd hp (by decide)
+          rw [if_neg hy0, cdSig0 y i,
+              antisym (i+1) 1 y h1 hlow (by decide) hy0 (fun h => hy1 h.symm),
+              sigma_one i y hlow]
+          rcases psg_pm y with h | h <;> rw [h] <;> decide
+      · have hy0 : y ≠ 0 := by intro h; rw [h] at hp; exact hp (by decide)
+        have hxlt : y ^^^ 1 < 2^(i+1) := Nat.xor_lt_two_pow hlow h1
+        unfold gdisc
+        rw [htp, tau_low_odd (i+1) y hj hlow (by omega),
+            R_lu 1 (y ^^^ 1) i h1 hxlt, hR2, if_neg hy0, cdSig0 y i,
+            sigma_one i (y ^^^ 1) hxlt, psg_xor_one y, Nat.mod_eq_of_lt hlow]
+        rcases psg_pm y with h | h <;> rw [h] <;> decide
+    · -- y = w + 2^(i+1)
+      have hR2 := R_uu 0 w i (Nat.two_pow_pos (i+1)) hw
+      rw [Nat.zero_add] at hR2
+      have hmod : (w + 2^(i+1)) % 2^(i+1) = w := by
+        rw [Nat.add_mod_right]; exact Nat.mod_eq_of_lt hw
+      have htauy : tau (i+1) (w + 2^(i+1)) = tau (i+1) w ^^^ 1 := by
+        rw [seam_add_xor w i hw, tau_xor, htp]
+      by_cases hp : w % 2 = 0
+      · have hxlt : w ^^^ 1 < 2^(i+1) := Nat.xor_lt_two_pow hw h1
+        unfold gdisc
+        rw [htp, htauy, tau_low_even (i+1) w hw hp, R_ll 1 (w ^^^ 1) i h1 hxlt, hR2, hmod]
+        by_cases hw0 : w = 0
+        · subst hw0
+          rw [if_pos rfl, show (0:Nat) ^^^ 1 = 1 from by decide,
+              sigma_self (i+1) 1 h1 (by decide), psg_zero]
+          decide
+        · have hx0 : w ^^^ 1 ≠ 0 := by
+            intro h
+            have h2 := xor_zero_eq w 1 h
+            rw [h2] at hp; exact absurd hp (by decide)
+          have hx1 : w ^^^ 1 ≠ 1 := by
+            intro h
+            apply hw0
+            have h2 : (w ^^^ 1) ^^^ 1 = 1 ^^^ 1 := by rw [h]
+            rwa [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero] at h2
+          rw [if_neg hw0, cdSig0' w i,
+              antisym (i+1) 1 (w ^^^ 1) h1 hxlt (by decide) hx0 (fun h => hx1 h.symm),
+              sigma_one i (w ^^^ 1) hxlt, psg_xor_one w]
+          rcases psg_pm w with h | h <;> rw [h] <;> decide
+      · have hw0 : w ≠ 0 := by intro h; rw [h] at hp; exact hp (by decide)
+        have hxlt : w ^^^ 1 < 2^(i+1) := Nat.xor_lt_two_pow hw h1
+        have hfix : tau (i+1) w ^^^ 1 = w + 2^(i+1) := by
+          rw [tau_low_odd (i+1) w hj hw (by omega), seam_add_xor (w ^^^ 1) i hxlt,
+              Nat.xor_assoc, Nat.xor_comm ((2:Nat)^(i+1)) 1, ← Nat.xor_assoc,
+              Nat.xor_assoc w 1 1, Nat.xor_self, Nat.xor_zero, ← seam_add_xor w i hw]
+        unfold gdisc
+        rw [htp, htauy, hfix, R_lu 1 w i h1 hw, hR2, if_neg hw0, cdSig0' w i, hmod,
+            sigma_one i w hw]
+        rcases psg_pm w with h | h <;> rw [h] <;> decide
+
 /-- The defect (♦) asks to be `+1`. -/
 def Ddef (j Y0 a b m : Nat) : Int :=
   gdisc j a b m * gdisc j (a ^^^ Y0) (b ^^^ Y0) m * psg (a % 2^j) * psg (b % 2^j)
@@ -3630,7 +3774,7 @@ theorem D_on_lines
     (hbase : ∀ (j y : Nat), y < 2^(j+1) → gdisc j (2^j) y (j+1) = psg (y % 2^j))
     (j Y0 a b : Nat) (hY0 : Y0 < 2^(j+2)) (hlsb : Y0 % 2^(j+1) = 2^j)
     (ha : a < 2^(j+2)) (hb : b < 2^(j+2))
-    (hline : a = 0 ∨ a = Y0 ∨ b = 0 ∨ b = Y0 ∨ a = b ∨ a ^^^ Y0 = b) :
+    (hline : a = 0 ∨ a = Y0 ∨ b = 0 ∨ b = Y0 ∨ a = b ∨ a ^^^ b = Y0) :
     Ddef j Y0 a b (j+2) = 1 := by
   have hj : j < j+2 := by omega
   have hpz : (0:Nat) < 2^(j+2) := Nat.two_pow_pos (j+2)
@@ -3672,11 +3816,77 @@ theorem D_on_lines
     rw [h, gdisc_diag_one j (j+1) b hj hb, gdisc_diag_one j (j+1) (b ^^^ Y0) hj hbY,
         Int.one_mul, Int.one_mul]
     exact psg_sq (b % 2^j)
-  · -- a ^^^ Y0 = b
-    rw [← h, Nat.xor_assoc, Nat.xor_self, Nat.xor_zero,
+  · -- a ^^^ b = Y0, i.e. a ^^^ Y0 = b  (the form the rest of the lane uses)
+    have h' : a ^^^ Y0 = b := by rw [← h, ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor]
+    rw [← h', Nat.xor_assoc, Nat.xor_self, Nat.xor_zero,
         gdisc_symm (j+2) j (a ^^^ Y0) a hj haY ha, hxY0 a,
         gdisc_sq j a (a ^^^ Y0) (j+2), Int.one_mul]
     exact psg_sq (a % 2^j)
+
+/-! ## (♦) for the label class `Y₀ = 2^j`
+
+Everything above assembles. The base case is discharged, so `gdisc_lsb` and `D_on_lines` hold
+outright; and for `Y₀ = 2^j` the `ND` half is *empty*, because `collapse` turns the hypothesis
+into `dsgnN · Qgen (2^j) a₀ b₀`, and `Qgen_pow2` makes the second factor `−1` unconditionally.
+So a non-degenerate bottom can never satisfy (♦)'s hypothesis there, every witness sits on one
+of the six lines, and `D_on_lines` finishes.
+
+The even-weight condition enters exactly once, as `dsgnN j n Y = −1` — which is what `N12` says
+even weight is, for this label class. -/
+
+theorem gdisc_lsb (j d L x : Nat) (hL : L < 2^((j+1)+d)) (hx : x < 2^((j+1)+d))
+    (hlsb : L % 2^(j+1) = 2^j) : gdisc j L x ((j+1)+d) = psg (x % 2^j) :=
+  gdisc_lsb_of_base gdisc_base j d L x hL hx hlsb
+
+/-- **`D = +1` on the six lines, unconditionally.** -/
+theorem D_lines (j Y0 a b : Nat) (hY0 : Y0 < 2^(j+2)) (hlsb : Y0 % 2^(j+1) = 2^j)
+    (ha : a < 2^(j+2)) (hb : b < 2^(j+2))
+    (hline : a = 0 ∨ a = Y0 ∨ b = 0 ∨ b = Y0 ∨ a = b ∨ a ^^^ b = Y0) :
+    Ddef j Y0 a b (j+2) = 1 :=
+  D_on_lines gdisc_base j Y0 a b hY0 hlsb ha hb hline
+
+/-- For the label class `Y₀ = 2^j` there is **no non-degenerate witness**: `collapse` plus
+    `Qgen_pow2` force the value to `+1`. -/
+theorem no_nondeg_witness_pow2 (j n Y a b : Nat) (hn : j+2 ≤ n)
+    (hY : Y < 2^n) (ha : a < 2^n) (hb : b < 2^n) (hnd : NDeg j Y a b)
+    (hY0 : Y % 2^(j+2) = 2^j) (hs : dsgnN j n Y = -1) :
+    Qgen' Y a b n = 1 := by
+  have hp : (0:Nat) < 2^(j+2) := Nat.two_pow_pos (j+2)
+  rw [collapse j n Y a b hn hY ha hb hnd, hY0, hs,
+      Qgen_pow2 (j+2) j (a % 2^(j+2)) (b % 2^(j+2)) (by omega)
+        (Nat.mod_lt _ hp) (Nat.mod_lt _ hp)]
+  decide
+
+/-- **(♦) HOLDS FOR THE LABEL CLASS `Y₀ = 2^j`.** Every level-`n` witness has `D = +1` at the
+    bottom — and by `G_trunc` the bottom is where `D` lives. -/
+theorem diamond_pow2 (j n Y a b : Nat) (hn : j+2 ≤ n)
+    (hY : Y < 2^n) (ha : a < 2^n) (hb : b < 2^n)
+    (hY0 : Y % 2^(j+2) = 2^j) (hs : dsgnN j n Y = -1) (hw : Qgen' Y a b n = -1) :
+    Ddef j (2^j) (a % 2^(j+2)) (b % 2^(j+2)) (j+2) = 1 := by
+  have hp : (0:Nat) < 2^(j+2) := Nat.two_pow_pos (j+2)
+  have hpj : (0:Nat) < 2^j := Nat.two_pow_pos j
+  have hlt : (2:Nat)^j < 2^(j+2) := Nat.pow_lt_pow_right (by omega) (by omega)
+  have hlsb : (2:Nat)^j % 2^(j+1) = 2^j :=
+    Nat.mod_eq_of_lt (Nat.pow_lt_pow_right (by omega) (by omega))
+  by_cases hline : a % 2^(j+2) = 0 ∨ a % 2^(j+2) = 2^j ∨ b % 2^(j+2) = 0 ∨
+      b % 2^(j+2) = 2^j ∨ a % 2^(j+2) = b % 2^(j+2) ∨
+      (a % 2^(j+2)) ^^^ (b % 2^(j+2)) = 2^j
+  · exact D_lines j (2^j) (a % 2^(j+2)) (b % 2^(j+2)) hlt hlsb
+      (Nat.mod_lt _ hp) (Nat.mod_lt _ hp) hline
+  · exfalso
+    have f1 : a % 2^(j+2) ≠ 0 := fun e => hline (Or.inl e)
+    have f2 : a % 2^(j+2) ≠ 2^j := fun e => hline (Or.inr (Or.inl e))
+    have f3 : b % 2^(j+2) ≠ 0 := fun e => hline (Or.inr (Or.inr (Or.inl e)))
+    have f4 : b % 2^(j+2) ≠ 2^j := fun e => hline (Or.inr (Or.inr (Or.inr (Or.inl e))))
+    have f5 : a % 2^(j+2) ≠ b % 2^(j+2) :=
+      fun e => hline (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl e)))))
+    have f6 : (a % 2^(j+2)) ^^^ (b % 2^(j+2)) ≠ 2^j :=
+      fun e => hline (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr e)))))
+    have hnd : NDeg j Y a b := by
+      refine ⟨f1, f3, ?_, ?_, f5, ?_⟩ <;> rw [hY0] <;> assumption
+    have := no_nondeg_witness_pow2 j n Y a b hn hY ha hb hnd hY0 hs
+    rw [this] at hw
+    exact absurd hw (by decide)
 
 end SounioZDFiberAntisym
 
