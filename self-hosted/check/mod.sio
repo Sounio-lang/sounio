@@ -12,6 +12,7 @@ use ir::ir::*
 use parser::ast::*
 use check::check::*
 use check::defs::*
+use resolve::imports::ModuleAuthority
 use check::types::{TypeEntry, TypeEntryList, TypeKind}
 use check::ontology_side_table_cache::{
     ontology_side_table_cache_disjoint_verdict,
@@ -595,18 +596,29 @@ pub fn check_modules_verdict_boot4(programs: &! [Program; 256], count: i64) -> i
 }
 
 pub fn check_modules_verdict_boot4_with_visibility(programs: &! [Program; 256], count: i64, enforce_visibility: bool) -> i64 with Mut, Panic, Div, Alloc, IO {
+    check_modules_verdict_boot4_with_authority(
+        programs,
+        count,
+        0 as *mut ModuleAuthority,
+        enforce_visibility
+    )
+}
+
+pub fn check_modules_verdict_boot4_with_authority(
+    programs: &! [Program; 256],
+    count: i64,
+    authority: *mut ModuleAuthority,
+    enforce_visibility: bool
+) -> i64 with Mut, Panic, Div, Alloc, IO {
     if count <= 0 {
         return 0
     }
     let checker_ptr = check_mod_alloc_checker()
     checker_init_in_place(checker_ptr)
+    checker_set_module_authority_inplace(checker_ptr, authority)
     (*checker_ptr).crate_root = (*programs)[0].module_path
-    // Visibility is authoritatively enforced by the per-module frontend pass
-    // (load_multimodule_ir), which has each module's `use`-import context and grants
-    // access to imported items. This all-modules-merged pass lacks that per-module
-    // import context, so re-enforcing definition-visibility here produces false E175/
-    // E176/E177 on the (legitimately imported) cross-module private functions that the
-    // single-crate compiler relies on. Defer visibility to the frontend.
+    // The optional authority selects an exact candidate definition for each
+    // declared import. Visibility still belongs to the existing predicates.
     (*checker_ptr).enforce_visibility = enforce_visibility
 
     // Pass 1: collect signatures/definitions from every module into one shared
@@ -646,6 +658,47 @@ pub fn check_modules_verdict_boot4_with_visibility(programs: &! [Program; 256], 
         k = k + 1
     }
     0
+}
+
+// Generic specialization flattens AST items and therefore cannot retain the
+// caller module on its own. This bounded probe walks the original modules
+// first, emits only real E175/E176/E177 diagnostics, and deliberately ignores
+// unrelated generic type noise which the specializer is responsible for
+// resolving afterwards.
+pub fn check_modules_visibility_verdict_boot4_with_authority(
+    programs: &! [Program; 256],
+    count: i64,
+    authority: *mut ModuleAuthority
+) -> i64 with Mut, Panic, Div, Alloc, IO {
+    if count <= 0 {
+        return 0
+    }
+    let checker_ptr = check_mod_alloc_checker()
+    checker_init_in_place(checker_ptr)
+    checker_set_module_authority_inplace(checker_ptr, authority)
+    checker_set_visibility_only_inplace(checker_ptr, true)
+    (*checker_ptr).crate_root = (*programs)[0].module_path
+    (*checker_ptr).enforce_visibility = true
+
+    var i: i64 = 0
+    while i < count && i < 256 {
+        (*checker_ptr).current_module = (*programs)[i as usize].module_path
+        (*checker_ptr).current_module_id = i
+        checker_collect_items_inplace(checker_ptr, (*programs)[i as usize].items)
+        i = i + 1
+    }
+
+    i = 0
+    while i < count && i < 256 {
+        (*checker_ptr).current_module = (*programs)[i as usize].module_path
+        (*checker_ptr).current_module_id = i
+        checker_check_items_mut(checker_ptr, (*programs)[i as usize].items)
+        i = i + 1
+    }
+
+    let visibility_error_count = checker_visibility_error_count_inplace(checker_ptr)
+    heap_free(checker_ptr as i64)
+    if visibility_error_count > 0 { 1 } else { 0 }
 }
 
 pub fn check_ontology_side_table_cache_subclass_verdict_probe(source_path: string, child_id: i64, parent_id: i64) -> i64 with IO, Mut, Panic, Div {
