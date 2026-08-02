@@ -357,10 +357,15 @@ The one non-obvious step is the bridge the `lu` and `ul` quadrants need:
 > `M = N′`, where `M` counts `Qgen(W′,·,·) = −1` over the five-line-free box.
 
 `M` is counted over `(e−2)(e−3)` pairs and `N′` over `(e−1)(e−2)`, so this is not "same function,
-same box". It holds because two `(e−2)`s cancel: off the sixth line `a ⊕ v = W′` the two agree, but
-**on** it `Qgen = −1` while `Q′ = +1` (`Qgen'_coset_partner`) — and that surplus exactly replaces
-the `(e−2)` that lemma A's `b = W′` row contributes (`Qgen'_label_right`, all `−1`) while its
-`a = W′` row contributes none (`Qgen'_label_left`, all `+1`).
+same box". It holds because two `(e−2)`s cancel.
+
+*Off* the sixth line `a ⊕ v = W′` the two functions agree, and that is a **theorem ∀n**, not a
+measurement: `Qgen_symm` then `Qgen_eq_Qgen'`, whose five hypotheses — `a ≠ 0`, `a ≠ W`, `v ≠ W`,
+`a ≠ v`, `a ⊕ v ≠ W` — are *exactly* the box, plus `Qgen_symm`'s `v ≠ 0`. *On* the sixth line they
+differ: `Qgen = −1` while `Q′ = +1` (`Qgen'_coset_partner`) — and that surplus of `(e−2)` exactly
+replaces the `(e−2)` that lemma A's `b = W′` row contributes (`Qgen'_label_right`, all `−1`) while
+its `a = W′` row contributes none (`Qgen'_label_left`, all `+1`). So the bridge has **no measured
+pointwise ingredient** — only the counting `|on6| = e−2`.
 
 ### 8.3 The low-label leftover
 
@@ -384,7 +389,13 @@ check is what caught a genuine hole in my first pass: the high `ul` failure set 
 
 `W′ = 0` is the null control — `Qgen_degen` needs `W ≠ 0` — and the ledger fails there with 74
 violations, so the clause is not vacuously wide. Even `W′` (6, 22) pass, confirming the derivation
-uses only `W′ ≠ 0` and not the lane's `Llo = 8y+1` oddness.
+uses only `W′ ≠ 0` and not the lane's `Llo = 8y+1` oddness. The `m = 7` sweep covers 9 of 63
+labels; the clause string says so.
+
+**Next step, and it is not a defect in the above.** The slice arithmetic needs `e ≥ 4`
+(`(e−2)(e−4)` and friends), so `W13`–`W15` determine the recursion's *step* but pin no **base
+level**. Turning the recursion into a closed form for `tr(A²)` needs one; the parity argument that
+gives (I) may not.
 
 **(III) is still untouched. (d) is not closed, and V1 is not proven.**
 

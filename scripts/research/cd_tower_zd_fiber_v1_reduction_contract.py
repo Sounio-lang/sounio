@@ -910,6 +910,9 @@ def main():
             d = [(a, v) for a in range(1, e) for v in range(1, e)
                  if a != v and a != Wl and v != Wl]
             chk(sum(1 for a, v in d if _Qu2(Sp, Wl, v, a) == -1) == Np)
+            # off the sixth line this is a THEOREM, not a measurement: `Qgen_symm` then
+            # `Qgen_eq_Qgen'`, whose five hypotheses (a!=0, a!=W, v!=W, a!=v, a^v!=W) are
+            # exactly what `d` minus the sixth line gives, plus `Qgen_symm`'s v!=0.
             chk(all(_Qu2(Sp, Wl, v, a) == _Qp(Sp, Wl, a, v)
                     for a, v in d if (a ^ v) != Wl))
             on6 = [(a, v) for a, v in d if (a ^ v) == Wl]
@@ -931,7 +934,7 @@ def main():
         bad = sum(_w15(m, Wl, hi, S, Sp)
                   for Wl in W15_LABELS[m] for hi in (False, True))
         w15 = w15 and bad == 0
-        w15_rows.append((m, len(W15_LABELS[m]), bad))
+        w15_rows.append((m, len(W15_LABELS[m]), (1 << (m - 1)) - 1, bad))
     # NULL CONTROL: the whole ledger rests on W' != 0 (`Qgen_degen` requires it, and Qgen 0 = +1).
     # At W' = 0 it must FAIL, or the clause would be asserting something vacuously wide.
     null_bad = sum(_w15(m, 0, hi, sign_table_fast(m), sign_table_fast(m - 1))
@@ -939,8 +942,8 @@ def main():
     ok["W15"] = w15 and null_bad > 0
     print(f"W15_LEDGER  BOTH LEVEL-CONSTANTS ARE DERIVED SLICE BY SLICE, WITH COVERAGE "
           f"{'OK' if ok['W15'] else 'FAIL'} -- "
-          + "; ".join(f"m={a}: {b} labels x 2 parities, {c} violations"
-                      for a, b, c in w15_rows)
+          + "; ".join(f"m={a}: {b} of {t} labels x 2 parities, {c} violations"
+                      for a, b, t, c in w15_rows)
           + f"; null control W'=0: {null_bad} violations (must be > 0). "
             "EVERY failure slice of EVERY reduction row lies on the twelve-condition locus where "
             "Qgen = -1: the six '= 0' degeneracies (`Qgen_degen`) and the six '= H' gap roots "
@@ -954,7 +957,9 @@ def main():
             "summing to 4P' - 4N' + 6e - 10 with P' = (e-1)(e-2). The reflection is the MINUS "
             "sign every high row carries (N11), which turns 'count the -1s' into 'count the +1s'. "
             "The bridge it needs is M = N': the level-(m-1) Qgen count over the five-line-free "
-            "box equals the full Q' count, because the (e-2) pairs on the sixth line a^v = W' "
+            "box equals the full Q' count -- OFF the sixth line the two are equal by "
+            "`Qgen_symm` + `Qgen_eq_Qgen'` (a THEOREM forall n: the five hypotheses are exactly "
+            "the box), and ON it they differ, because the (e-2) pairs on the sixth line a^v = W' "
             "carry Qgen = -1 but Q' = +1 (`Qgen'_coset_partner`), exactly cancelling the (e-2) "
             "that lemma A's b = W' row (`Qgen'_label_right`) contributes while its a = W' row "
             "(`Qgen'_label_left`) contributes none. *** AND W14's LEFTOVER IS PRICED: the "
