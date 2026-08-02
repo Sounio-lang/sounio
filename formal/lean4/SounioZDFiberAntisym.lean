@@ -3485,6 +3485,199 @@ theorem ReachD_stable (j Y0 a0 b0 n : Nat) (hn : j+4 ≤ n) (hY00 : Y0 ≠ 0)
     obtain ⟨d, rfl⟩ : ∃ d, n = j + 4 + d := ⟨n - (j+4), by omega⟩
     exact ReachD_mono j Y0 a0 b0 d (j+3) h
 
+/-! ## `REACH ⊆ {D = +1}` — the last measured link of L2
+
+`REACH = DEG ∪ ND` is now explicit, so (♦) splits in two:
+
+* **on `DEG`** (the six lines) — an *identity*, no hypothesis;
+* **on `ND`** — off the lines, `Qgen Y₀ a₀ b₀ = −ε` ⟹ `D = +1`.
+
+For the label class `Y₀ = 2^j` the second half is **vacuous**: `Qgen_pow2` (already in this file)
+says `Qgen (2^j) a b m = −1` always, while `ND`'s condition there is `Qgen = +1`. So for that
+class (♦) *is* the identity on the lines.
+
+And the identity on the lines collapses to **one** lemma. Writing `D(a,b) =
+gdisc j a b · gdisc j (a⊕Y₀) (b⊕Y₀) · psg(a % 2^j) · psg(b % 2^j)`:
+
+| line | reduces to |
+|---|---|
+| `a₀ = 0`, `a₀ = Y₀` | `gdisc j Y₀ x = psg (x % 2^j)` |
+| `b₀ = 0`, `b₀ = Y₀` | the same, by `gdisc_symm` |
+| `a₀ = b₀`           | `gdisc j t t = 1` |
+| `a₀ ⊕ b₀ = Y₀`      | `gdisc j a b` squared, by `gdisc_symm` |
+
+so everything rests on `gdisc j L x m = psg (x % 2^j)` for `lsb L = j`. This section proves the
+pieces, bottom up. -/
+
+/-- `(−1)^{popcount x}`. -/
+def psg : Nat → Int
+  | 0 => 1
+  | (n+1) => (if (n+1) % 2 = 1 then (-1 : Int) else 1) * psg ((n+1) / 2)
+decreasing_by exact Nat.div_lt_self (by omega) (by omega)
+
+theorem psg_zero : psg 0 = 1 := by rw [psg]
+
+theorem psg_one : psg 1 = -1 := by
+  rw [psg]
+  simp [psg_zero]
+
+/-- Peeling the top bit flips the sign. -/
+theorem psg_top : ∀ (k u : Nat), u < 2^k → psg (u + 2^k) = - psg u := by
+  intro k
+  induction k with
+  | zero =>
+      intro u hu
+      have : u = 0 := by simpa using hu
+      subst this
+      simp [psg_one, psg_zero]
+  | succ k ih =>
+      intro u hu
+      have hpow : (2:Nat)^(k+1) = 2^k * 2 := by rw [Nat.pow_succ]
+      have hpos : 0 < 2^k := Nat.two_pow_pos k
+      have h1 : (u + 2^(k+1)) % 2 = u % 2 := by omega
+      have h2 : (u + 2^(k+1)) / 2 = u / 2 + 2^k := by omega
+      have hne : u + 2^(k+1) ≠ 0 := by omega
+      obtain ⟨t, ht⟩ : ∃ t, u + 2^(k+1) = t + 1 := ⟨u + 2^(k+1) - 1, by omega⟩
+      rw [ht, psg, ← ht, h1, h2, ih (u/2) (by omega)]
+      cases u with
+      | zero => simp [psg_zero]
+      | succ v =>
+          rw [psg, Int.mul_neg]
+
+/-- **`σ(w,1) = (−1)^{popcount w}`.** A three-line induction: `R_ll` keeps the value, `R_ul`
+    negates it, and that is exactly what adding a bit does to the popcount. -/
+theorem sigma_one : ∀ (m w : Nat), w < 2^(m+1) → cdSigma w 1 (m+1) = psg w := by
+  intro m
+  induction m with
+  | zero =>
+      intro w hw
+      have hp : (2:Nat)^(0+1) = 2 := rfl
+      have hw2 : w = 0 ∨ w = 1 := by omega
+      rcases hw2 with rfl | rfl
+      · rw [cdSig0 1 0, psg_zero]
+      · rw [sigma_self 1 1 (by decide) (by decide), psg_one]
+  | succ m ih =>
+      intro w hw
+      have h1 : (1:Nat) < 2^(m+1) := by
+        have := Nat.two_pow_pos m; have h := Nat.one_lt_two_pow_iff (n := m+1); omega
+      rcases split_top hw with hl | ⟨u, hu, rfl⟩
+      · rw [R_ll w 1 m hl h1]; exact ih w hl
+      · rw [R_ul u 1 m hu h1, if_neg (by omega), ih u hu, psg_top (m+1) u hu]
+
+theorem psg_pm : ∀ (x : Nat), psg x = 1 ∨ psg x = -1
+  | 0 => Or.inl psg_zero
+  | (n+1) => by
+      rw [psg]
+      rcases psg_pm ((n+1)/2) with h | h <;> rw [h] <;>
+        by_cases hb : (n+1) % 2 = 1
+      · rw [if_pos hb]; exact Or.inr (by decide)
+      · rw [if_neg hb]; exact Or.inl (by decide)
+      · rw [if_pos hb]; exact Or.inl (by decide)
+      · rw [if_neg hb]; exact Or.inr (by decide)
+  decreasing_by exact Nat.div_lt_self (by omega) (by omega)
+
+theorem psg_sq (x : Nat) : psg x * psg x = 1 := by
+  rcases psg_pm x with h | h <;> rw [h] <;> decide
+
+/-- `gdisc` is `1` when either argument is `0`: `τ0 = 0` and `σ(0,·) = 1`. -/
+theorem gdisc_zero_left (j m y : Nat) : gdisc j 0 y (m+1) = 1 := by
+  unfold gdisc
+  rw [tau_zero j, cdSig0 (tau j y) m, cdSig0 y m]
+  decide
+
+/-- `gdisc` is `1` on the diagonal: both factors are self-pairings, and `τt = 0 ↔ t = 0`. -/
+theorem gdisc_diag_one (j m t : Nat) (hj : j < m+1) (ht : t < 2^(m+1)) :
+    gdisc j t t (m+1) = 1 := by
+  unfold gdisc
+  by_cases h0 : t = 0
+  · subst h0
+    rw [tau_zero j, cdSig0 0 m]
+    decide
+  · have htau : tau j t ≠ 0 := by
+      intro h
+      exact h0 (tau_inj j t 0 (by rw [h, tau_zero]))
+    rw [sigma_self (m+1) t ht h0,
+        sigma_self (m+1) (tau j t) (tau_lt j (m+1) t hj ht) htau]
+    decide
+
+/-- `Y₀`'s bits below `j` vanish, so `⊕ Y₀` does not move `psg (· % 2^j)`. -/
+theorem psg_xor_lsb (j Y0 x : Nat) (hY0 : Y0 % 2^j = 0) :
+    psg ((x ^^^ Y0) % 2^j) = psg (x % 2^j) := by
+  rw [xor_mod_two_pow, hY0, Nat.xor_zero]
+
+/-- **The `∀m` half of the line identity is free**: `gdisc_trunc` already collapses every level to
+    `j+1`, and the `lsb` hypothesis pins the truncated label to `2^j`. Only the level-`(j+1)`
+    base is left, and it is taken here as an explicit hypothesis. -/
+theorem gdisc_lsb_of_base
+    (hbase : ∀ (j y : Nat), y < 2^(j+1) → gdisc j (2^j) y (j+1) = psg (y % 2^j))
+    (j d L x : Nat) (hL : L < 2^((j+1)+d)) (hx : x < 2^((j+1)+d))
+    (hlsb : L % 2^(j+1) = 2^j) :
+    gdisc j L x ((j+1)+d) = psg (x % 2^j) := by
+  rw [gdisc_trunc j j (by omega) d L x hL hx, hlsb]
+  rw [hbase j (x % 2^(j+1)) (Nat.mod_lt _ (Nat.two_pow_pos (j+1)))]
+  rw [mod_pow_mod j (j+1) x (by omega)]
+
+/-- The defect (♦) asks to be `+1`. -/
+def Ddef (j Y0 a b m : Nat) : Int :=
+  gdisc j a b m * gdisc j (a ^^^ Y0) (b ^^^ Y0) m * psg (a % 2^j) * psg (b % 2^j)
+
+theorem gdisc_sq (j x y m : Nat) : gdisc j x y m * gdisc j x y m = 1 := by
+  rcases gdisc_pm j x y m with h | h <;> rw [h] <;> decide
+
+/-- **`D = +1` ON THE SIX LINES**, given the one base lemma. Every case reduces to
+    `gdisc_lsb_of_base`, `gdisc_zero_left`, `gdisc_diag_one` and `gdisc_symm`. -/
+theorem D_on_lines
+    (hbase : ∀ (j y : Nat), y < 2^(j+1) → gdisc j (2^j) y (j+1) = psg (y % 2^j))
+    (j Y0 a b : Nat) (hY0 : Y0 < 2^(j+2)) (hlsb : Y0 % 2^(j+1) = 2^j)
+    (ha : a < 2^(j+2)) (hb : b < 2^(j+2))
+    (hline : a = 0 ∨ a = Y0 ∨ b = 0 ∨ b = Y0 ∨ a = b ∨ a ^^^ Y0 = b) :
+    Ddef j Y0 a b (j+2) = 1 := by
+  have hj : j < j+2 := by omega
+  have hpz : (0:Nat) < 2^(j+2) := Nat.two_pow_pos (j+2)
+  have hY0j : Y0 % 2^j = 0 := by
+    rw [← mod_pow_mod j (j+1) Y0 (by omega), hlsb, Nat.mod_self]
+  have hpsgY0 : psg (Y0 % 2^j) = 1 := by rw [hY0j]; exact psg_zero
+  have hxY0 : ∀ x : Nat, psg ((x ^^^ Y0) % 2^j) = psg (x % 2^j) :=
+    fun x => psg_xor_lsb j Y0 x hY0j
+  have haY : a ^^^ Y0 < 2^(j+2) := Nat.xor_lt_two_pow ha hY0
+  have hbY : b ^^^ Y0 < 2^(j+2) := Nat.xor_lt_two_pow hb hY0
+  have key : ∀ x : Nat, x < 2^(j+2) → gdisc j Y0 x (j+2) = psg (x % 2^j) := by
+    intro x hx
+    have e : j + 2 = (j+1) + 1 := by omega
+    rw [e] at hx hY0 ⊢
+    exact gdisc_lsb_of_base hbase j 1 Y0 x hY0 hx hlsb
+  unfold Ddef
+  rcases hline with h | h | h | h | h | h
+  · -- a = 0
+    subst h
+    rw [gdisc_zero_left j (j+1) b, Nat.zero_xor, key (b ^^^ Y0) hbY, hxY0 b,
+        Nat.zero_mod, psg_zero, Int.one_mul, Int.mul_one]
+    exact psg_sq (b % 2^j)
+  · -- a = Y0
+    rw [h, key b hb, Nat.xor_self, gdisc_zero_left j (j+1) (b ^^^ Y0), hpsgY0,
+        Int.mul_one, Int.mul_one]
+    exact psg_sq (b % 2^j)
+  · -- b = 0
+    subst h
+    rw [gdisc_symm (j+2) j a 0 hj ha hpz, gdisc_zero_left j (j+1) a, Nat.zero_xor,
+        gdisc_symm (j+2) j (a ^^^ Y0) Y0 hj haY hY0, key (a ^^^ Y0) haY, hxY0 a,
+        Nat.zero_mod, psg_zero, Int.one_mul, Int.mul_one]
+    exact psg_sq (a % 2^j)
+  · -- b = Y0
+    rw [h, gdisc_symm (j+2) j a Y0 hj ha hY0, key a ha, Nat.xor_self,
+        gdisc_symm (j+2) j (a ^^^ Y0) 0 hj haY hpz,
+        gdisc_zero_left j (j+1) (a ^^^ Y0), hpsgY0, Int.mul_one, Int.mul_one]
+    exact psg_sq (a % 2^j)
+  · -- a = b
+    rw [h, gdisc_diag_one j (j+1) b hj hb, gdisc_diag_one j (j+1) (b ^^^ Y0) hj hbY,
+        Int.one_mul, Int.one_mul]
+    exact psg_sq (b % 2^j)
+  · -- a ^^^ Y0 = b
+    rw [← h, Nat.xor_assoc, Nat.xor_self, Nat.xor_zero,
+        gdisc_symm (j+2) j (a ^^^ Y0) a hj haY ha, hxY0 a,
+        gdisc_sq j a (a ^^^ Y0) (j+2), Int.one_mul]
+    exact psg_sq (a % 2^j)
+
 end SounioZDFiberAntisym
 
 

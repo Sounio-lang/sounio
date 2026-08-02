@@ -947,6 +947,74 @@ def main():
           f"is -1 -- that single disagreement is what makes the boundary j+4 and not j+3. With "
           f"N21/`attain_nondeg`, attainment at n = j+4 is PROVEN on BOTH halves of REACH")
 
+    # ---- N29  REACH subset {D=+1}: the split, and what it leaves ---------------------------
+    # With REACH = DEG u ND explicit, (diamond) splits in two:
+    #   * on DEG (the six lines): an IDENTITY, no hypothesis;
+    #   * on ND: off the lines, Qgen(Y0,a0,b0) = -eps  ==>  D = +1.
+    # For Y0 = 2^j the second half is VACUOUS -- Qgen_pow2 (PROVEN forall n) says
+    # Qgen(2^j,a,b) = -1 always, while ND's condition there is Qgen = +1. So for that label
+    # class (diamond) IS the identity on the lines.
+    # And the identity on the lines collapses to ONE lemma, `D_on_lines` being Lean-proven from
+    # it: gdisc j L x m = psg(x mod 2^j) whenever lsb(L) = j, where psg = (-1)^popcount.
+    def _psg(x):
+        return -1 if bin(x).count("1") % 2 else 1
+
+    # (a) D = +1 on the six lines
+    n29a_bad = n29a_tot = 0
+    for j in (1, 2, 3, 4, 5):
+        M = 1 << (j + 2)
+        Sm = sign_table_fast(j + 2).astype(np.int64)
+        gm = gmat(Sm, M, j)
+        A, B = np.meshgrid(np.arange(M), np.arange(M), indexing="ij")
+        p = np.array([(-1) ** pj(x, j) for x in range(M)])
+        for Y0 in ((1 << j), (3 << j)):
+            D = gm * gm[A ^ Y0, B ^ Y0] * np.outer(p, p)
+            deg = (A == 0) | (A == Y0) | (B == 0) | (B == Y0) | (A == B) | ((A ^ B) == Y0)
+            n29a_bad += int(((D != 1) & deg).sum())
+            n29a_tot += int(deg.sum())
+    # (b) the ONE remaining lemma: gdisc j L x = psg(x mod 2^j) for lsb(L) = j
+    n29b_bad = n29b_tot = 0
+    for m in (3, 4, 5, 6, 7):
+        Sm = sign_table_fast(m).astype(np.int64)
+        M = 1 << m
+        for j in range(1, m):
+            g = gmat(Sm, M, j)
+            for L in range(1, M):
+                if (L & -L).bit_length() - 1 != j:
+                    continue
+                n29b_bad += sum(1 for x in range(M) if g[L, x] != _psg(x % (1 << j)))
+                n29b_tot += M
+    # (c) Qgen(2^j,a,b) = -1 identically, so ND is empty for that class (Qgen_pow2, PROVEN)
+    n29c_bad = n29c_tot = 0
+    for j in (1, 2, 3, 4, 5):
+        M = 1 << (j + 2)
+        Sm = sign_table_fast(j + 2).astype(np.int64)
+        A, B = np.meshgrid(np.arange(M), np.arange(M), indexing="ij")
+        Y0 = 1 << j
+        Qu = Sm * Sm[A ^ Y0, B ^ Y0] * Sm[A, B ^ Y0] * Sm[A ^ Y0, B]
+        n29c_bad += int((Qu != -1).sum())
+        n29c_tot += M * M
+    # (d) the closed form the base case rests on: sigma(w,1) = (-1)^popcount(w)  [Lean: sigma_one]
+    n29d_bad = n29d_tot = 0
+    for m in (1, 2, 3, 4, 5, 6, 7):
+        Sm = sign_table_fast(m).astype(np.int64)
+        n29d_bad += sum(1 for w in range(1 << m) if int(Sm[w, 1]) != _psg(w))
+        n29d_tot += 1 << m
+    n29 = (n29a_bad == 0 and n29b_bad == 0 and n29c_bad == 0 and n29d_bad == 0)
+    ok["N29"] = n29
+    print(f"N29_DPLUS   REACH subset {{D=+1}} SPLITS, and one half is discharged "
+          f"{'OK' if n29 else 'FAIL'} -- (a) D = +1 on the six lines: {n29a_bad}/{n29a_tot}; "
+          f"(b) the ONE lemma it reduces to, gdisc(j,L,x) = (-1)^p_j(x) for lsb(L) = j: "
+          f"{n29b_bad}/{n29b_tot} (levels 3..7, every j, every such L); "
+          f"(c) Qgen(2^j,a,b) = -1 identically: {n29c_bad}/{n29c_tot} -- this is `Qgen_pow2`, "
+          f"PROVEN forall n, and it makes ND EMPTY for the label class Y0 = 2^j, so THERE "
+          f"(diamond) IS the lines identity; (d) sigma(w,1) = (-1)^popcount(w): "
+          f"{n29d_bad}/{n29d_tot} -- PROVEN forall n as `sigma_one`, and it is what the one "
+          f"remaining base case rests on. Lean: `D_on_lines` derives the whole six-line identity "
+          f"from that single base lemma, and `gdisc_lsb_of_base` gets the forall-n half FREE from "
+          f"the already-proven `gdisc_trunc`. STILL OPEN: the base lemma itself, and the ND half "
+          f"for Y0 = 3*2^j")
+
     print("=" * 78)
     if all(ok.values()):
         print("CD_TOWER_ZDL2R_VERDICT DIAMOND_IS_A_FINITE_STABLE_FAMILY__GAP_LOCUS_INCLUDED")

@@ -396,10 +396,52 @@ slightly *larger* family than the contract's `REACH`; `attain_lines` correspondi
 witness for **either** admissible label and the caller takes the even-weight one. This is noted in
 the `ReachD` docstring, next to the `Reach` deprecation.
 
-**What is still measured.** That the label `attain_nondeg` produces has **even weight**, i.e.
-stays inside (♦)'s family — `N12`'s popcount arithmetic, checked composite in `N27`. And
-`REACH ⊆ {D = +1}`, untouched throughout: it was always `n`-free via `G_trunc`, and it is now
-explicit via `N24`, but it is a different rung.
+---
+
+## 2f. `REACH ⊆ {D = +1}` — the split, and what is left
+
+With `REACH = DEG ∪ ND` explicit, (♦) splits in two:
+
+* **on `DEG`** (the six lines) — an *identity*, no hypothesis;
+* **on `ND`** — off the lines, `Qgen Y₀ a₀ b₀ = −ε` ⟹ `D = +1`.
+
+**For the label class `Y₀ = 2^j` the second half is vacuous.** `Qgen_pow2` — already in the tree,
+proven ∀n — says `Qgen (2^j) a b m = −1` always, while `ND`'s condition there is `Qgen = +1`. So
+`ND = ∅`, which is exactly the `|ND| = 0` of `N24`, and for that class **(♦) *is* the identity on
+the lines**.
+
+**And the identity on the lines collapses to one lemma.** `D_on_lines` (Lean-proven) derives all
+six cases from a single base:
+
+```
+gdisc j L x m = psg (x % 2^j)          whenever lsb(L) = j        (psg = (−1)^popcount)
+```
+
+| line | reduces to |
+|---|---|
+| `a₀ = 0`, `a₀ = Y₀` | the base lemma |
+| `b₀ = 0`, `b₀ = Y₀` | the same, via `gdisc_symm` |
+| `a₀ = b₀`           | `gdisc_diag_one : gdisc j t t = 1` |
+| `a₀ ⊕ b₀ = Y₀`      | `gdisc_sq`, via `gdisc_symm` |
+
+and the **∀n half of the base lemma is free**: `gdisc_lsb_of_base` gets it from the already-proven
+`gdisc_trunc`, which collapses every level to `j+1` while the `lsb` hypothesis pins the truncated
+label to `2^j`. So the whole of `REACH ⊆ {D=+1}` for `Y₀ = 2^j` rests on **one σ-identity at one
+level**: `gdisc j (2^j) y (j+1) = psg (y % 2^j)`.
+
+Two ingredients of that base case are now proven ∀n in their own right:
+
+```lean
+sigma_one : cdSigma w 1 (m+1) = psg w            -- σ(w,1) = (−1)^{popcount w}
+psg_top   : psg (u + 2^k) = − psg u              -- peeling a bit flips the sign
+```
+
+`N29` pins the whole split: `D = +1` on the lines 0/2896; the base lemma 0/10664 (levels 3…7,
+every `j`, every such `L`); `Qgen(2^j,·,·) = −1` identically; `σ(w,1) = (−1)^{popcount}` 0/254.
+
+**What is still open.** The base lemma itself (measured, levels ≤ 7), and the `ND` half for
+`Y₀ = 3·2^j` — where the `D = −1` locus is genuinely non-empty (`N10`: it appears at `j ≥ 3`,
+exactly where `g` stops being F2-bilinear, `N3`). And `N27`'s even-weight bookkeeping.
 
 **The correction.** `N15`'s clean-locus predicate does **not** cover `REACH`: for `Y₀ = 2^j` there
 are 8, 16, 32, 64 reachable points outside it at `j = 0,1,2,3`. The blocked tuples land strictly
@@ -449,4 +491,4 @@ outside the family §2c described. `REACH`, not that predicate, is the object.
 python3 scripts/research/cd_tower_zd_fiber_l2_reduction_contract.py
 ```
 
-Twenty-nine clauses, `N0`–`N28`, single verdict token. Runs in about 17 s.
+Thirty clauses, `N0`–`N29`, single verdict token. Runs in about 17 s.
