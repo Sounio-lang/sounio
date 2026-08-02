@@ -140,6 +140,27 @@ oráculos de conflito continuam abstratos.
   hardcoded da fronteira 1 na instância compartilhada (mesmos sobreviventes
   do reparo).
 
+## Rodada 5 — fecho verificado + empates determinísticos (2026-08-02)
+
+- `formal/OntologyELClosureVerified.lean` (~700 linhas): a ponte
+  computacional↔dedutiva fechada em **generalidade total** —
+  `subB_iff_subDer` (o fecho booleano coincide com o sistema indutivo,
+  soundness via invariante de iteração e completeness via linearização de
+  derivações em walks + corte de laços com cota n+1 iterações) e
+  `conflictB_iff` (o oráculo booleano É o `DerivedConflict` semântico, nas
+  duas direções). A limitação honesta da rodada 4 está fechada.
+  Math-review xai: PASS.
+- `formal/OntologyRepairTies.lean`: a equivalência greedy≡fold estendida
+  de confianças distintas para **arbitrárias**, via prioridade
+  lexicográfica (conf desc, id asc) codificada injetivamente em Nat —
+  `repair_iff_greedy` da rodada 2 aplicado verbatim com `conf := prio`;
+  `greedyStep_prio_eq_sio` prova que o passo do greedy com prioridade é
+  definicionalmente o tie-break do protótipo `.sio`; determinismo do
+  greedy provado; instância `Fin 6` com empate real (m0/m1 a 0.50)
+  computada pelos dois algoritmos com resultado igual. Protótipo
+  `tie_repair_demo.sio`: `ALL PASS` (determinismo em duas execuções,
+  sobreviventes livres de conflito, testemunhas). Math-review xai: PASS.
+
 ## Arquivos criados
 
 - `artifacts/ontology-frontiers/{epistemic-alignment-repair,epistemic-claim-status,consistent-ontology-evolution}/FRONTIER.md`
@@ -157,6 +178,9 @@ oráculos de conflito continuam abstratos.
 - `artifacts/ontology-frontiers/el-grounding/{FRONTIER.md,el_conflict_demo.sio}` (rodada 4)
 - `formal/OntologyMinimalRepair.lean` (rodada 3),
   `formal/OntologyELReasoner.lean` (rodada 4)
+- `formal/OntologyELClosureVerified.lean`,
+  `formal/OntologyRepairTies.lean` (rodada 5)
+- `artifacts/ontology-frontiers/epistemic-alignment-repair/tie_repair_demo.sio` (rodada 5)
 
 ## Gate CI
 
@@ -167,10 +191,10 @@ editar nenhum arquivo existente:
 bash scripts/ci/ontology_frontiers_gate.sh   # funciona a partir de qualquer cwd
 ```
 
-O que ele checa, para cada um dos 7 protótipos (`alignment_repair.sio`,
+O que ele checa, para cada um dos 8 protótipos (`alignment_repair.sio`,
 `claim_status.sio`, `interval_claims.sio`, `version_chain.sio`,
 `version_chain_removal.sio`, `minimal_repair_demo.sio`,
-`el_conflict_demo.sio`):
+`el_conflict_demo.sio`, `tie_repair_demo.sio`):
 
 1. `./bin/souc check <file>` — exige `check: OK` na saída e ausência de
    `parse error`;

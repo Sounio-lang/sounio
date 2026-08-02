@@ -68,6 +68,13 @@ entailments é monotônica na confiança dos mappings.
 - `formal/OntologyRepairEquivalence.lean` — equivalência mecanizada entre o
   guloso pairwise drop-weaker do protótipo e a dobra prioritária `repair`
   (ver "Lacunas e riscos").
+- `tie_repair_demo.sio` — protótipo do desempate determinístico: m0 (0.50) e
+  m1 (0.50) empatam, ambos conflitam com m2 (0.30), e o próprio par empatado
+  conflita; o empate é resolvido pelo id menor. Verifica determinismo (duas
+  execuções idênticas), ausência de conflitos e testemunhas de maximalidade.
+- `formal/OntologyRepairTies.lean` — extensão da equivalência para confianças
+  ARBITRÁRIAS com desempate lexicográfico (confiança, id) (ver "Lacunas e
+  riscos").
 
 ## Lacunas e riscos
 
@@ -83,9 +90,26 @@ entailments é monotônica na confiança dos mappings.
   contraexemplo num caminho de conflito de 3 vértices, onde o guloso remove
   um mapping cuja testemunha mais forte é depois removida por um terceiro
   mapping que não conflita com ele. Escopo residual: conflitos dados por
-  oráculo (não derivados de OWL/EL++), empates de confiança excluídos, e a
-  equivalência cobre uma única passada sobre a lista de pares (como no
-  protótipo).
+  oráculo (não derivados de OWL/EL++) e a equivalência cobre uma única
+  passada sobre a lista de pares (como no protótipo).
+- ~~Empates de confiança excluídos da equivalência guloso≡dobra.~~
+  **Fechada (2026-08-02)** em `formal/OntologyRepairTies.lean`: a prioridade
+  passa a ser a ordem lexicográfica em (confiança, id) — em empate de
+  confiança vence o mapping de id **menor**, exatamente a regra
+  `conf[i] >= conf[j]` do protótipo sobre pares ordenados por id
+  (`greedyStep_prio_eq_sio`). A hipótese "confianças distintas" de
+  `repair_iff_greedy` é substituída por "prioridades distintas", que vale
+  sempre para ids distintos (`prio_injective_on`): `repair_iff_greedy_ties`
+  prova a mesma equivalência para confianças ARBITRÁRIAS sob a hipótese de
+  cluster, instanciando o teorema da rodada 2 com o encoding injetivo
+  `prio m = conf m * (I + 1) + (I - id m)` (nenhum lema da rodada 2 precisou
+  de cópia generalizada — as hipóteses de distinção são derivadas). Também
+  provados: totalidade/antisimetria da prioridade lexicográfica
+  (`outranks_total`, `outranks_antisymm`), determinismo do guloso
+  (`greedyDrop_deterministic`) e uma instância `Fin 6` COM EMPATE (m0 e m1 a
+  0.50 em clique com m2 a 0.30) computada por `native_decide` pelos dois
+  algoritmos com o mesmo resultado {m0, m3, m5}. Protótipo executável:
+  `tie_repair_demo.sio` (ALL PASS).
 - A escala real (SNOMED CT com 300k+ entidades) está fora do escopo do
   protótipo; a formalização cobre o núcleo combinatório do reparo.
 - A noção de "conflito" aqui é dada por um oráculo (relação simétrica);

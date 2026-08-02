@@ -24,4 +24,6 @@ lean_lib Sounio where
              `OntologyEvolutionRepair,
              `ClaimStatusInterval,
              `OntologyMinimalRepair,
-             `OntologyELReasoner]
+             `OntologyELReasoner,
+             `OntologyELClosureVerified,
+             `OntologyRepairTies]

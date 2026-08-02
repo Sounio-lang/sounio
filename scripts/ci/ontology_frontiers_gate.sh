@@ -38,6 +38,7 @@ PROTOTYPES=(
     "artifacts/ontology-frontiers/consistent-ontology-evolution/version_chain_removal.sio"
     "artifacts/ontology-frontiers/consistent-ontology-evolution/minimal_repair_demo.sio"
     "artifacts/ontology-frontiers/el-grounding/el_conflict_demo.sio"
+    "artifacts/ontology-frontiers/epistemic-alignment-repair/tie_repair_demo.sio"
 )
 
 TMP_DIR="$(mktemp -d /tmp/ontology-frontiers-gate.XXXXXX)"
