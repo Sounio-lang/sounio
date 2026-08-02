@@ -11,6 +11,43 @@
 // written, and every field access on such a binding is reported as
 // "no field <x> on type ()".
 
+// ------------------------------------------------------------------
+// WHERE IT IS NOT, established by measurement rather than by reading:
+//
+//   * Not specific to imported modules. A `var q: ST = 7` written in the MAIN
+//     file of a two-module program loses its annotation exactly the same way.
+//     The loss is a property of the multimodule check path, not of being
+//     imported.
+//   * Not specific to `var`. `let m: ST = 7` behaves identically.
+//   * Not the bodies going unchecked. E012 still fires from inside this file,
+//     so statements are walked; only the annotation is absent.
+//   * Not the parser. parse_optional_type returns Some(Box::new(ty)) and every
+//     StmtLet/StmtVar construction in parser/stmts.sio passes it through as
+//     `ty: ty_opt` (the two that pass None are destructuring sub-bindings).
+//   * Not the statement checkers. All four — checker_check_let_stmt_inplace,
+//     checker_check_var_stmt_inplace, check_let_stmt, check_var_stmt — set
+//     bind_ty = ann_ty whenever ann_ty is not TyUnknown.
+//   * Not the checker entry point. check_items_verdict_boot4 is literally
+//     check_items_verdict_boot4_with_module_path(items, empty_path()); the
+//     single-module and specialized-multimodule paths run the same function.
+//
+// WHERE IT MUST BE. run_check_mode forks on closure size (compiler/main.sio):
+// one node goes to module_frontend_check_items_with_source_context and keeps
+// the annotation; more than one goes to either the merged branch
+// (spec_append_item_lists -> specialize_generics -> check_items_verdict_boot4)
+// or, when no generic was instantiated, to
+// check_modules_verdict_boot4_with_visibility. Both lose it, and they share no
+// item surgery, so there are two suspects and one each:
+//
+//   merged branch : specialize_generics rebuilding statements without `ty`
+//   plain branch  : checker_check_items_mut, a different walker from the
+//                   ..._store_return_had_error_mut one the single path uses
+//
+// Forcing the merged branch with a turbofish (SOUNIO_MM_SPEC_TRACE=1 confirms
+// "specialized-typecheck over merged 2") still loses the annotation, so the
+// merged branch is confirmed affected; the plain branch is confirmed by the
+// no-generics form of this very probe.
+
 pub struct ST {
     len: i64,
     last: i64,
