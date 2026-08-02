@@ -2544,43 +2544,32 @@ fn ir_fast_summary_register_struct_fields_owned(
     }
 }
 
-// Build the compact cross-module layout context once, before streamed
-// dependency lowering starts. The returned Box is frontend-owned and remains
-// outside each dependency's arena-reset window.
-pub fn lower_struct_layouts_from_programs_ref(
-    programs: &! [Program; 256],
-    program_count: i64
-) -> Box<StructLayoutTable> with Mut, Panic, Div, Alloc {
-    var layouts = ir_register_knowledge_layout(empty_struct_layout_table())
-    var program_idx: i64 = 0
-    while program_idx < program_count && program_idx < 256 {
-        let program_ref: &Program = &(*programs)[program_idx as usize]
-        var current = &(*program_ref).items
-        while true {
-            match *current {
-                Some(list) => {
-                    let item = &(*list).head
-                    if item.kind == ItemKind::ItemStruct {
-                        match item.struct_def {
-                            Some(sd) => {
-                                layouts = ir_fast_summary_register_struct_fields_owned(
-                                    layouts,
-                                    item.name,
-                                    (*sd).fields,
-                                    0
-                                )
-                            }
-                            _ => {}
-                        }
-                    }
-                    current = &(*list).tail
-                }
-                _ => break,
-            }
+pub fn lower_empty_struct_layouts_box() -> Box<StructLayoutTable> with Alloc {
+    Box::new(empty_struct_layout_table())
+}
+
+// Copy through local entries: lean_single can drop nested aggregate stores.
+// The frontend uses this to retain the authoritative extern-aware seed table
+// before the owned summary is consumed by body lowering.
+pub fn lower_copy_struct_layouts_into_ref(
+    source: &StructLayoutTable,
+    dest: &! StructLayoutTable
+) with Mut, Panic, Div {
+    (*dest).count = 0
+    var layout_idx: i64 = 0
+    while layout_idx < (*source).count && layout_idx < 256 {
+        var entry = empty_struct_layout_entry()
+        entry.type_name = (*source).entries[layout_idx as usize].type_name
+        entry.field_count = (*source).entries[layout_idx as usize].field_count
+        var field_idx: i64 = 0
+        while field_idx < entry.field_count && field_idx < 64 {
+            entry.fields[field_idx as usize] = (*source).entries[layout_idx as usize].fields[field_idx as usize]
+            field_idx = field_idx + 1
         }
-        program_idx = program_idx + 1
+        (*dest).entries[layout_idx as usize] = entry
+        layout_idx = layout_idx + 1
     }
-    Box::new(layouts)
+    (*dest).count = layout_idx
 }
 
 fn ir_fast_summary_preseed_impl_methods_seed_owned(
