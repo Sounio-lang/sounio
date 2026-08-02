@@ -12,41 +12,36 @@
 // "no field <x> on type ()".
 
 // ------------------------------------------------------------------
-// WHERE IT IS NOT, established by measurement rather than by reading:
+// INSTRUMENTED RESULT (2026-08-02). A throwaway build printed, at every
+// StmtLet/StmtVar site in the parser and in all four statement checkers,
+// whether the type annotation was present. It refutes the heading above this
+// block as originally written:
 //
-//   * Not specific to imported modules. A `var q: ST = 7` written in the MAIN
-//     file of a two-module program loses its annotation exactly the same way.
-//     The loss is a property of the multimodule check path, not of being
-//     imported.
-//   * Not specific to `var`. `let m: ST = 7` behaves identically.
-//   * Not the bodies going unchecked. E012 still fires from inside this file,
-//     so statements are walked; only the annotation is absent.
-//   * Not the parser. parse_optional_type returns Some(Box::new(ty)) and every
-//     StmtLet/StmtVar construction in parser/stmts.sio passes it through as
-//     `ty: ty_opt` (the two that pass None are destructuring sub-bindings).
-//   * Not the statement checkers. All four — checker_check_let_stmt_inplace,
-//     checker_check_var_stmt_inplace, check_let_stmt, check_var_stmt — set
-//     bind_ty = ann_ty whenever ann_ty is not TyUnknown.
-//   * Not the checker entry point. check_items_verdict_boot4 is literally
-//     check_items_verdict_boot4_with_module_path(items, empty_path()); the
-//     single-module and specialized-multimodule paths run the same function.
+//   Stmt.ty ARRIVES. Both the single-module and the multimodule run print
+//   "check-inplace var SOME". The annotation is not lost in transit, and only
+//   the in-place checker runs in either case — no value-path checker fires at
+//   all. What differs is what LOWERING that annotation returns.
 //
-// WHERE IT MUST BE. run_check_mode forks on closure size (compiler/main.sio):
-// one node goes to module_frontend_check_items_with_source_context and keeps
-// the annotation; more than one goes to either the merged branch
-// (spec_append_item_lists -> specialize_generics -> check_items_verdict_boot4)
-// or, when no generic was instantiated, to
-// check_modules_verdict_boot4_with_visibility. Both lose it, and they share no
-// item surgery, so there are two suspects and one each:
+// Follow-up probes, same binary, no rebuild:
 //
-//   merged branch : specialize_generics rebuilding statements without `ty`
-//   plain branch  : checker_check_items_mut, a different walker from the
-//                   ..._store_return_had_error_mut one the single path uses
+//   var k: i64      -> "no field len on type i64"     in BOTH runs
+//   var w: ST       -> "on type ST" single, "on type ()" multimodule
+//   var v: ST = ST{..} -> "on type ST" in BOTH  (the literal supplies the type)
+//   let r = mk()    -> "on type ST" single, NO DIAGNOSTIC AT ALL multimodule
 //
-// Forcing the merged branch with a turbofish (SOUNIO_MM_SPEC_TRACE=1 confirms
-// "specialized-typecheck over merged 2") still loses the annotation, so the
-// merged branch is confirmed affected; the plain branch is confirmed by the
-// no-generics form of this very probe.
+// So it is not statement annotations. Built-in type names lower fine
+// everywhere; NAMED type names do not lower in the multimodule path at all —
+// the fourth line shows a function's declared return type failing the same way.
+// The struct table itself is populated, which the third line proves: a struct
+// literal resolves ST in exactly the run where the annotation cannot.
+//
+// The two suspects named in the previous commit are BOTH eliminated, and by
+// the same observation: checker_collect_items_mut is a one-line delegation to
+// checker_collect_items_inplace, and check_items_verdict_boot4 is a one-line
+// delegation to check_items_verdict_boot4_with_module_path. Single and
+// multimodule run the same collector and the same checker over the same AST.
+// The divergence is therefore checker STATE at the moment
+// checker_lower_named_type_with_args_mut runs, not a different code path.
 
 pub struct ST {
     len: i64,
