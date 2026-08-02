@@ -11,6 +11,7 @@ SOURCE_REF="${SOURCE_REF:-HEAD}"
 SOURCE_REMOTE="${SOURCE_REMOTE:-}"
 WORKER_GIT_SSL_VERIFY="${WORKER_GIT_SSL_VERIFY:-true}"
 WORKER_LOWER_TRACE="${WORKER_LOWER_TRACE:-0}"
+WORKER_LAYOUT_TRACE="${WORKER_LAYOUT_TRACE:-0}"
 WORKER_NV2_IR_TRACE="${WORKER_NV2_IR_TRACE:-0}"
 WORKER_PRESERVE_DIAGNOSTICS="${WORKER_PRESERVE_DIAGNOSTICS:-0}"
 WORKER_INTO_ACC_NO_RESET="${WORKER_INTO_ACC_NO_RESET:-0}"
@@ -31,6 +32,7 @@ Usage:
 
 Environment:
   REPO, SOURCE_REF, SOURCE_REMOTE, WORKER_GIT_SSL_VERIFY, WORKER_LOWER_TRACE,
+  WORKER_LAYOUT_TRACE,
   WORKER_NV2_IR_TRACE, WORKER_PRESERVE_DIAGNOSTICS, WORKER_INTO_ACC_NO_RESET,
   WORKER_PROBE, NS, KUBECTL, PARTITION,
   NODELIST, JOB_MEM, JOB_CPUS,
@@ -47,6 +49,9 @@ the requested commit and tree are still checked before the source build.
 
 Set WORKER_LOWER_TRACE=1 only for crash localization. It enables the existing
 module-frontend and IR-lowering traces inside the worker's raw ELF.
+
+Set WORKER_LAYOUT_TRACE=1 to print only the resolved base type, field index,
+and visible layout count for field-access lowering.
 
 Set WORKER_NV2_IR_TRACE=1 only for backend crash localization. It enables the
 existing native-v2 IR trace inside the worker's raw ELF.
@@ -96,6 +101,7 @@ fi
 [[ "$JOB_CPUS" =~ ^[1-9][0-9]*$ ]] || fail "invalid JOB_CPUS: $JOB_CPUS"
 [[ "$WORKER_GIT_SSL_VERIFY" == 'true' || "$WORKER_GIT_SSL_VERIFY" == 'false' ]] || fail "invalid WORKER_GIT_SSL_VERIFY: $WORKER_GIT_SSL_VERIFY"
 [[ "$WORKER_LOWER_TRACE" == '0' || "$WORKER_LOWER_TRACE" == '1' ]] || fail "invalid WORKER_LOWER_TRACE: $WORKER_LOWER_TRACE"
+[[ "$WORKER_LAYOUT_TRACE" == '0' || "$WORKER_LAYOUT_TRACE" == '1' ]] || fail "invalid WORKER_LAYOUT_TRACE: $WORKER_LAYOUT_TRACE"
 [[ "$WORKER_NV2_IR_TRACE" == '0' || "$WORKER_NV2_IR_TRACE" == '1' ]] || fail "invalid WORKER_NV2_IR_TRACE: $WORKER_NV2_IR_TRACE"
 [[ "$WORKER_PRESERVE_DIAGNOSTICS" == '0' || "$WORKER_PRESERVE_DIAGNOSTICS" == '1' ]] || fail "invalid WORKER_PRESERVE_DIAGNOSTICS: $WORKER_PRESERVE_DIAGNOSTICS"
 [[ "$WORKER_INTO_ACC_NO_RESET" == '0' || "$WORKER_INTO_ACC_NO_RESET" == '1' ]] || fail "invalid WORKER_INTO_ACC_NO_RESET: $WORKER_INTO_ACC_NO_RESET"
@@ -139,6 +145,7 @@ EXPECTED_TREE="$SOURCE_TREE"
 SOURCE_REMOTE="$SOURCE_REMOTE"
 WORKER_GIT_SSL_VERIFY="$WORKER_GIT_SSL_VERIFY"
 WORKER_LOWER_TRACE="$WORKER_LOWER_TRACE"
+WORKER_LAYOUT_TRACE="$WORKER_LAYOUT_TRACE"
 WORKER_NV2_IR_TRACE="$WORKER_NV2_IR_TRACE"
 WORKER_PRESERVE_DIAGNOSTICS="$WORKER_PRESERVE_DIAGNOSTICS"
 WORKER_INTO_ACC_NO_RESET="$WORKER_INTO_ACC_NO_RESET"
@@ -163,6 +170,7 @@ echo "source_fresh_slurm_job_id=\${SLURM_JOB_ID:-manual}"
 echo "source_remote=\$SOURCE_REMOTE"
 echo "worker_git_ssl_verify=\$WORKER_GIT_SSL_VERIFY"
 echo "worker_lower_trace=\$WORKER_LOWER_TRACE"
+echo "worker_layout_trace=\$WORKER_LAYOUT_TRACE"
 echo "worker_nv2_ir_trace=\$WORKER_NV2_IR_TRACE"
 echo "worker_preserve_diagnostics=\$WORKER_PRESERVE_DIAGNOSTICS"
 echo "worker_into_acc_no_reset=\$WORKER_INTO_ACC_NO_RESET"
@@ -197,6 +205,10 @@ if [[ "\$WORKER_LOWER_TRACE" == '1' ]]; then
   export SOUNIO_LOWER_LIVE_TRACE=1
   export SOUNIO_LOWER_BODY_TRACE=1
   export SOUNIO_LOWER_AGG_TRACE=1
+fi
+
+if [[ "\$WORKER_LAYOUT_TRACE" == '1' ]]; then
+  export SOUNIO_LAYOUT_TRACE=1
 fi
 
 if [[ "\$WORKER_NV2_IR_TRACE" == '1' ]]; then
