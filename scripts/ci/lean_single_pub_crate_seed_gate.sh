@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# Prove bounded pub(crate) compatibility in a source-derived lean_single seed.
+
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+BOOTSTRAP_BIN="${SOUNIO_LEAN_SINGLE_BOOTSTRAP_BIN:-}"
+
+fail() {
+  echo "[lean-single-pub-crate-seed] FAIL: $*" >&2
+  exit 1
+}
+
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
+[[ -n "$BOOTSTRAP_BIN" ]] || fail "SOUNIO_LEAN_SINGLE_BOOTSTRAP_BIN must name an explicit bootstrap ELF"
+[[ -x "$BOOTSTRAP_BIN" ]] || fail "bootstrap ELF is missing or not executable: $BOOTSTRAP_BIN"
+[[ "$(head -c2 "$BOOTSTRAP_BIN" 2>/dev/null)" != '#!' ]] || fail "bootstrap input must be an ELF, not a wrapper"
+
+WORK="${SOUNIO_LEAN_SINGLE_PUB_CRATE_SEED_DIR:-}"
+if [[ -n "$WORK" ]]; then
+  [[ ! -e "$WORK" ]] || fail "refusing existing gate directory: $WORK"
+  mkdir -p "$WORK"
+else
+  WORK="$(mktemp -d /tmp/sounio-lean-single-pub-crate.XXXXXX)"
+fi
+KEEP="${SOUNIO_LEAN_SINGLE_PUB_CRATE_SEED_KEEP:-0}"
+[[ "$KEEP" == 1 ]] || trap 'rm -rf "$WORK"' EXIT
+
+SEED="$WORK/lean-current.elf"
+POSITIVE_ELF="$WORK/pub-crate.elf"
+PUBLIC_ELF="$WORK/public.elf"
+PRIVATE_FN_ELF="$WORK/private-fn.elf"
+PRIVATE_STRUCT_ELF="$WORK/private-struct.elf"
+
+scripts_dev_lock="$ROOT_DIR/scripts/dev/souc-build-lock.sh"
+"$scripts_dev_lock" "$BOOTSTRAP_BIN" \
+  "$ROOT_DIR/self-hosted/compiler/lean_single.sio" "$SEED" \
+  >"$WORK/seed-build.log" 2>&1 || {
+    cat "$WORK/seed-build.log" >&2
+    fail "current lean_single source did not derive a seed"
+  }
+[[ -s "$SEED" ]] || fail "derived seed is empty"
+chmod +x "$SEED"
+
+"$scripts_dev_lock" "$SEED" \
+  "$ROOT_DIR/tests/compiler/madaros_visibility_context/pub_crate_facade_main.sio" "$POSITIVE_ELF" \
+  >"$WORK/pub-crate-build.log" 2>&1 || {
+    cat "$WORK/pub-crate-build.log" >&2
+    fail "derived seed rejected the non-generic pub(crate) facade"
+  }
+chmod +x "$POSITIVE_ELF"
+"$POSITIVE_ELF" >"$WORK/pub-crate-run.log" 2>&1 || {
+  cat "$WORK/pub-crate-run.log" >&2
+  fail "pub(crate) facade ELF failed at runtime"
+}
+grep -Fxq 'PASS pub_crate_facade_module_authority' "$WORK/pub-crate-run.log" || {
+  cat "$WORK/pub-crate-run.log" >&2
+  fail "pub(crate) facade ELF omitted its exact marker"
+}
+
+"$scripts_dev_lock" "$SEED" \
+  "$ROOT_DIR/tests/compiler/madaros_visibility_context/public_facade_main.sio" "$PUBLIC_ELF" \
+  >"$WORK/public-build.log" 2>&1 || {
+    cat "$WORK/public-build.log" >&2
+    fail "derived seed regressed plain pub visibility"
+  }
+chmod +x "$PUBLIC_ELF"
+"$PUBLIC_ELF" >"$WORK/public-run.log" 2>&1 || {
+  cat "$WORK/public-run.log" >&2
+  fail "plain pub facade ELF failed at runtime"
+}
+grep -Fxq 'PASS public_facade_module_authority' "$WORK/public-run.log" || {
+  cat "$WORK/public-run.log" >&2
+  fail "plain pub facade ELF omitted its exact marker"
+}
+
+set +e
+"$scripts_dev_lock" "$SEED" \
+  "$ROOT_DIR/tests/multimodule/visibility_fn_private_main.sio" "$PRIVATE_FN_ELF" \
+  >"$WORK/private-fn.log" 2>&1
+private_fn_rc=$?
+"$scripts_dev_lock" "$SEED" \
+  "$ROOT_DIR/tests/multimodule/visibility_struct_private_main.sio" "$PRIVATE_STRUCT_ELF" \
+  >"$WORK/private-struct.log" 2>&1
+private_struct_rc=$?
+set -e
+
+[[ "$private_fn_rc" -ne 0 && ! -s "$PRIVATE_FN_ELF" ]] || {
+  cat "$WORK/private-fn.log" >&2
+  fail "derived seed did not fail closed on an imported private function"
+}
+grep -Fq 'cannot call non-pub function from imported module' "$WORK/private-fn.log" || {
+  cat "$WORK/private-fn.log" >&2
+  fail "private function rejection omitted its seed diagnostic"
+}
+[[ "$private_struct_rc" -ne 0 && ! -s "$PRIVATE_STRUCT_ELF" ]] || {
+  cat "$WORK/private-struct.log" >&2
+  fail "derived seed did not fail closed on an imported private struct"
+}
+grep -Fq 'private struct literal' "$WORK/private-struct.log" || {
+  cat "$WORK/private-struct.log" >&2
+  fail "private struct rejection omitted its seed diagnostic"
+}
+
+seed_sha="$(sha256_file "$SEED")"
+echo "[lean-single-pub-crate-seed] receipt seed_sha256=$seed_sha pub_crate=runtime-pass public=runtime-pass private_fn=reject private_struct=reject generic_restricted_visibility=not-claimed"
+echo '[lean-single-pub-crate-seed] PASS: bounded non-generic pub(crate) authority survives source-derived bootstrap'

@@ -2765,6 +2765,22 @@ fn token_is_ident_text(ti: i64, text: string) -> bool with Panic, Mut {
     return src_match(TS[ti as usize], TE[ti as usize] - TS[ti as usize], text)
 }
 
+// The bootstrap seed models every loaded module as one crate, matching the
+// modular checker's current VISIBILITY_PUB_CRATE rule. Keep the restricted
+// modifier visible when its token sequence separates `pub` from the item.
+fn token_starts_pub_crate(ti: i64) -> bool with Panic, Mut {
+    if ti < 0 || ti + 3 >= TC { return false }
+    TK[ti as usize] == 49
+        && TK[(ti + 1) as usize] == 6
+        && token_is_ident_text(ti + 2, "crate")
+        && TK[(ti + 3) as usize] == 7
+}
+
+fn decl_token_is_crate_visible(ti: i64) -> bool with Panic, Mut {
+    if ti > 0 && TK[(ti - 1) as usize] == 49 { return true }
+    ti >= 4 && token_starts_pub_crate(ti - 4)
+}
+
 fn token_is_gpu_builtin_name(ti: i64) -> bool with Panic, Mut {
     if ti < 0 || ti >= TC { return false }
     if TK[ti as usize] != 3 { return false }
@@ -27989,8 +28005,12 @@ fn mono_pass() with IO, Mut, Panic, Div {
         while p < TC {
             if TK[p as usize] == 46 || TK[p as usize] == 49 || TK[p as usize] == 62 || TK[p as usize] == 73 {
                 var ris_public: i64 = 0
-                if TK[p as usize] == 49 { ris_public = 1 }
-                if TK[p as usize] == 49 || TK[p as usize] == 62 || TK[p as usize] == 73 { p = p + 1 }
+                if TK[p as usize] == 49 {
+                    ris_public = 1
+                    if token_starts_pub_crate(p) { p = p + 4 } else { p = p + 1 }
+                } else if TK[p as usize] == 62 || TK[p as usize] == 73 {
+                    p = p + 1
+                }
                 if TK[p as usize] == 46 {
                     p = p + 1
                     let rsn_ns = TS[p as usize]
@@ -28607,7 +28627,11 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             if TK[p as usize] == 49 { is_pub_decl = 1 }
             if TK[p as usize] == 62 { is_linear_decl = 1 }
             if TK[p as usize] == 73 { is_affine_decl = 1 }
-            if TK[p as usize] == 49 || TK[p as usize] == 62 || TK[p as usize] == 73 { p = p + 1 }
+            if TK[p as usize] == 49 {
+                if token_starts_pub_crate(p) { p = p + 4 } else { p = p + 1 }
+            } else if TK[p as usize] == 62 || TK[p as usize] == 73 {
+                p = p + 1
+            }
             if TK[p as usize] == 46 {
                 p = p + 1  // skip 'struct'
                 let sn_ns = TS[p as usize]
@@ -29015,8 +29039,8 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             }
         }
         if TK[p as usize] == 1 && TK[(p + 1) as usize] == 3 {
-            // Detect pub visibility (previous token == 49) and import origin
-            let fn_is_pub = p > 0 && TK[(p - 1) as usize] == 49
+            // Detect both `pub fn` and `pub(crate) fn` in the bootstrap closure.
+            let fn_is_pub = decl_token_is_crate_visible(p)
             let fn_from_import = TS[p as usize] >= MAIN_SRC_END && MAIN_SRC_END > 0
             p = p + 1
             // Skip generic function templates — must match Pass 2 logic exactly
