@@ -265,9 +265,38 @@ Subtracting the isolated-vertex pairs (`2^m − 2`, since `a = W` and `b = W` ar
 `A_sig`) gives `W12`'s form exactly, including `12(2^{n-2}−2) = 24·c_n` and
 `A(n) = 4(2^{n-2}−1)(2^{n-2}−2)`.
 
-**What is still measured is only the two level-constants** `10e − 18` and `6e − 10` — counts of the
-degenerate `(u,v)` where a row's side condition fails. So (I) now rests on **two integers per
-level**.
+### ★★★ And the low-label constant is derived too, from four closed forms (`W14`)
+
+`10e − 18` is not a fitted integer. Quadrant by quadrant:
+
+| quadrant | value | priced by |
+|---|---|---|
+| `ll` | `N(m-1,W)` **exactly** | `Q'red_low_ll` is *unconditional* |
+| `lu`, `uu` | `N(m-1,W) + 3(e−2)` | three pieces, below |
+| `ul` | `lu + e` | the `u = 0` slice (`e−1` terms, all `−1`) plus one boundary term |
+
+and the three `(e−2)`s of `lu` are:
+
+1. `v = 0` → `Qgen(W,0,u) = −1` — **`Qgen_zero_left`**
+2. `v = u` → `Qgen(W,u,u) = −1` — **`Qgen_diag_neg`**
+3. `v = u ⊕ W` → the **asymmetry**: unprimed `−1` (`Qgen_coset_left` + `Qgen_diag_neg`) but
+   **primed `+1`** — **`Qgen'_coset_partner`**
+
+with the `u = W` row-failure contributing **zero**. Summing: `4N(m-1,W) + 9(e−2) + e = 4N + 10e −
+18`.
+
+All four are Lean-proven ∀n, and the last one — *the coset partner is never an edge* — was `W10`'s
+measured fact until today:
+
+```lean
+Qgen'_coset_partner : a ≠ 0 → a ⊕ W ≠ 0 → Qgen' W a (a ⊕ W) m = 1
+```
+
+two lines, the same shape as `Qgen'_diag`: two factors square away by `cdSq`, the other two are
+self-pairings pinned by `sigma_self`.
+
+**What remains unpriced** is the single `+1` boundary term in `ul`, and the high-label constant
+`6e − 10`, whose reflection structure is the same.
 
 **(III) is untouched. (d) is not closed, and V1 is not proven.**
 

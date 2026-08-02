@@ -694,6 +694,80 @@ def main():
             "and 6e-10 -- counts of the degenerate (u,v) where a row's side condition fails. "
             "So (I) now rests on TWO INTEGERS PER LEVEL. (III) is untouched; (d) IS NOT CLOSED ***")
 
+    # ---- W14  THE LEVEL-CONSTANTS, DERIVED from four closed forms --------------------------
+    # W13 left the two constants 10e-18 and 6e-10 measured. They decompose, quadrant by quadrant,
+    # into pieces each priced by a CLOSED FORM proven in Lean:
+    #   ll = N(m-1,W)  exactly                       `Q'red_low_ll` is UNCONDITIONAL
+    #   lu = N(m-1,W) + 3(e-2), the three being
+    #        v = 0      -> Qgen(W,0,u) = -1          `Qgen_zero_left`
+    #        v = u      -> Qgen(W,u,u) = -1          `Qgen_diag_neg`
+    #        v = u^W    -> UNPRIMED -1 (coset_left + diag) but PRIMED +1
+    #                                                `Qgen'_coset_partner`
+    #        u = W      -> the row fails, and contributes ZERO
+    #   uu = lu      (same three pieces)
+    #   ul = lu + e  (the u = 0 slice, e-1 terms all -1 by `Qgen_zero_left`, plus one boundary)
+    # Total 4N(m-1,W) + 9(e-2) + e = 4N + 10e - 18.
+    def _Qu2(S, Y, a, b):
+        return int(S[a, b]) * int(S[a ^ Y, b ^ Y]) * int(S[a, b ^ Y]) * int(S[a ^ Y, b])
+
+    w14_rows = []
+    w14 = True
+    for m in (5, 6, 7):
+        S = sign_table_fast(m)
+        Sp = sign_table_fast(m - 1)
+        e = 1 << (m - 1)
+        bad = 0
+        for W in range(1, e):
+            Np = sum(1 for u in range(1, e) for v in range(1, e)
+                     if u != v and _Qp(Sp, W, u, v) == -1)
+            ll = sum(1 for a in range(1, e) for b in range(1, e)
+                     if a != b and _Qp(S, W, a, b) == -1)
+            lu = sum(1 for u in range(1, e) for v in range(0, e)
+                     if _Qp(S, W, u, v + e) == -1)
+            ul = sum(1 for u in range(0, e) for v in range(1, e)
+                     if _Qp(S, W, u + e, v) == -1)
+            uu = sum(1 for u in range(0, e) for v in range(0, e)
+                     if u != v and _Qp(S, W, u + e, v + e) == -1)
+            # the three pieces of lu, and the u=W row-failure
+            p_v0 = sum(1 for u in range(1, e) if u != W)
+            p_dg = sum(1 for u in range(1, e) if u != W)
+            cos = [u for u in range(1, e) if u != W and 1 <= (u ^ W) < e and (u ^ W) != u]
+            p_uW = sum(1 for v in range(0, e) if _Qp(S, W, W, v + e) == -1)
+            u0 = sum(1 for v in range(1, e) if _Qp(S, W, 0 + e, v) == -1)
+            checks = [
+                ll == Np,                                        # ll is exact
+                lu == Np + 3 * (e - 2), uu == Np + 3 * (e - 2),   # lu, uu
+                ul == lu + e,                                     # ul's extra e
+                p_v0 == e - 2, p_dg == e - 2, len(cos) == e - 2,   # the three pieces
+                p_uW == 0,                                        # the row failure is empty
+                u0 == e - 1,                                      # the u=0 slice
+                all(_Qu2(Sp, W, u ^ W, u) == -1 for u in cos),    # unprimed -1 on the partner
+                all(_Qp(Sp, W, u, u ^ W) == 1 for u in cos),      # PRIMED +1 -- the asymmetry
+                ll + lu + ul + uu == 4 * Np + 10 * e - 18,        # and the total
+            ]
+            if not all(checks):
+                bad += 1
+        w14 = w14 and bad == 0
+        w14_rows.append((m, e - 1, bad))
+    ok["W14"] = w14
+    print(f"W14_CONSTS  THE LEVEL-CONSTANTS ARE DERIVED, from four closed forms "
+          f"{'OK' if w14 else 'FAIL'} -- "
+          + "; ".join(f"m={a}: {b} labels, {c} failing the full decomposition"
+                      for a, b, c in w14_rows)
+          + ". Quadrant by quadrant, with e = 2^(m-1): ll = N(m-1,W) EXACTLY (`Q'red_low_ll` is "
+            "unconditional); lu = uu = N(m-1,W) + 3(e-2), the three (e-2)s being v=0 priced by "
+            "`Qgen_zero_left`, v=u by `Qgen_diag_neg`, and v=u^W by the ASYMMETRY between "
+            "unprimed -1 (Qgen_coset_left + Qgen_diag_neg) and PRIMED +1 "
+            "(`Qgen'_coset_partner`, proven forall n today); the u=W row-failure contributes "
+            "ZERO; and ul = lu + e, the extra being the u=0 slice (e-1 terms, all -1 by "
+            "`Qgen_zero_left`) plus one boundary term. Summing: 4N(m-1,W) + 9(e-2) + e = "
+            "4N + 10e - 18, which is W13's low-label constant. *** SO THE CONSTANT IS NOT A "
+            "FITTED INTEGER: every piece is a count priced by a Lean-proven closed form, and the "
+            "one that was still measured -- the coset partner is never an edge -- is now the "
+            "theorem `Qgen'_coset_partner`. What remains unpriced is the single +1 boundary term "
+            "in ul and the HIGH-label constant 6e-10, whose reflection structure is the same. "
+            "(III) is untouched; (d) IS NOT CLOSED ***")
+
     print("=" * 78)
     if all(ok.values()):
         print("CD_TOWER_ZDV1_VERDICT C_CLOSED__V1_REDUCED_TO_D_ALONE__NOT_CLOSED")

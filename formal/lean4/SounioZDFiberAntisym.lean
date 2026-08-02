@@ -4433,6 +4433,21 @@ theorem L2_forall (m j Y a b : Nat) (hj : j+2 ≤ m+1) (hY : Y < 2^(m+1))
   rcases psg_pm (a % 2^j) with hA | hA <;> rcases psg_pm (b % 2^j) with hB | hB <;>
     rw [hA, hB] at hd ⊢ <;> simp at hd ⊢ <;> omega
 
+/-- **`Qgen'` is `+1` on the coset partner**, `b = a ⊕ W`. Same two-line shape as `Qgen'_diag`:
+    two of the four factors coincide and square away by `cdSq`, and the other two are
+    self-pairings, pinned to `−1` by `sigma_self`. This is the "never an edge" fact the degree
+    count needs: the pair `(a, a⊕W)` is resonance-free for every `a`. -/
+theorem Qgen'_coset_partner (m W a : Nat) (hW : W < 2^m) (ha : a < 2^m)
+    (ha0 : a ≠ 0) (haW : a ^^^ W ≠ 0) : Qgen' W a (a ^^^ W) m = 1 := by
+  have haWlt : a ^^^ W < 2^m := Nat.xor_lt_two_pow ha hW
+  have hcancel : (a ^^^ W) ^^^ W = a := by
+    rw [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+  have e1 : cdSigma a a m = -1 := sigma_self m a ha ha0
+  have e2 : cdSigma (a ^^^ W) (a ^^^ W) m = -1 := sigma_self m (a ^^^ W) haWlt haW
+  unfold Qgen'
+  rw [hcancel, e1, e2]
+  rcases cdSigma_pm m a (a ^^^ W) with h | h <;> rw [h] <;> decide
+
 end SounioZDFiberAntisym
 
 
