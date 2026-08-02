@@ -396,6 +396,14 @@ It is not push — nothing interrupts another agent's loop. You hear others when
 you read, so the whole protocol is: **`brief` before you start, `post` when your
 state changes.** Leases expire, so a crashed agent never parks a resource.
 
+For BeagleCockpit and anything else that has to know as things happen, the same
+bus is served over MCP (`scripts/mcp/agent_bus_mcp.py`, merge `scripts/mcp/agent-bus.mcp.json` into your gitignored `.mcp.json`).
+Subscribe to `bus://events` or `bus://hazards` and the server sends
+`notifications/resources/updated` the moment another agent posts — that is real
+push, not polling. Tools: `bus_post`, `bus_claim`, `bus_release`, `bus_hazard`,
+`bus_brief`. Both doors write the same storage, so an agent on the shell CLI and
+an agent on MCP are on one channel.
+
 Post a `hazard` for anything that makes a measurement lie rather than fail:
 a poisoned environment variable, a stale artifact, a checkout parked on another
 branch. Those cost hours precisely because the run still exits and prints a
