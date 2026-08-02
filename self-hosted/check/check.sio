@@ -5662,9 +5662,26 @@ fn checker_check_field_access_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
         // name.buf[0] (TypeEntry byte 8 — within the *mut SRET window) holds the struct_idx
         // encoded by ty_ref_with_idx / ty_ref_mut_with_idx at signature-lowering time.
         // -1 means "not a struct ref" (primitive, slice, etc.) → return ty_error() silently.
-        let dec_lo = (base_ty.name.buf[0] as i64 + 256) % 256
-        let dec_hi = (base_ty.name.buf[1] as i64 + 256) % 256
-        let struct_idx = dec_lo + dec_hi * 256 - 1
+        //
+        // The packed index is a CACHE of a lookup done when the signature was
+        // lowered, and it is only as good as the struct table was at that
+        // moment. Resolve by the pointee's own name first, exactly as the
+        // by-value twin at check_field_access has always done, and keep the
+        // packed index only as the fallback for a pointee that is not named.
+        // Trusting the index alone is what produced "no field guard on type
+        // &MatchArm" against a MatchArm that has a guard: the printed type came
+        // from `inner`, the fields came from whatever struct the stale index
+        // happened to address.
+        let ref_inner = call_ref_inner_or_self(base_ty)
+        var struct_idx: i64 = -1
+        if ref_inner.kind == TypeKind::TyNamed {
+            struct_idx = struct_table_find((*c).structs, ref_inner.name)
+        }
+        if struct_idx < 0 {
+            let dec_lo = (base_ty.name.buf[0] as i64 + 256) % 256
+            let dec_hi = (base_ty.name.buf[1] as i64 + 256) % 256
+            struct_idx = dec_lo + dec_hi * 256 - 1
+        }
         if struct_idx >= 0 && struct_idx < (*(*c).structs).count {
             let si = struct_table_get((*c).structs, struct_idx)
             let field_ty = field_info_list_find(si.fields, e.name)
