@@ -315,9 +315,35 @@ Both measured closed forms drop out. The gap locus is no longer a measurement; i
 spare bits to make `a ≠ b` — which is exactly the `n = j+4` boundary, and exactly the deficit of
 **4**: the four corners.
 
-**Still not proven ∀n.** `N21` and `N25` are measured. What they change is the *shape* of what is
-left: attainment is no longer an opaque realizability question but two named statements, one an
-induction over the sixteen existing reduction lemmas and one an explicit witness computation.
+### ★ The collapse theorem is now **Lean-proven ∀n**
+
+`collapse` in `formal/lean4/SounioZDFiberAntisym.lean`, kernel-checked, Mathlib-free, no
+`sorryAx`:
+
+```lean
+collapse : ∀ (j n Y a b : Nat), j+2 ≤ n → Y < 2^n → a < 2^n → b < 2^n → NDeg j Y a b →
+  Qgen' Y a b n = dsgnN j n Y * Qgen (Y % 2^(j+2)) (a % 2^(j+2)) (b % 2^(j+2)) (j+2)
+```
+
+The proof is an induction over the **eight** `Q'`-rows — eight and not sixteen precisely because
+of the collapse: whenever a row lands on `Qgen`, `QQ'` converts it back, and `QB_symm` absorbs
+the swap. `dsgnN` is **pinned** against `(−1)^{popcount(Y ≫ (j+2))}` over the full range at
+`j = 0,1,2`, and the identity is evaluated in Lean at `j=1, n=5`: 0 violations over 13 440
+non-degenerate triples.
+
+**Attainment off the six lines is a corollary, ∀n** — `attain_nondeg`: any level-`n` tuple with a
+non-degenerate bottom is matched *value for value* by a level-`(j+3)` tuple with the same bottom
+residues. Via `collapse_transfer` (same residues + same accumulated sign ⟹ same `Qgen'`), and the
+sign needs no parity bookkeeping to match: at level `j+3` the label either carries bit `j+2` or
+not, and those two choices realise `dsgnN = +1` and `−1`.
+
+**Sharpness is proven too** — `corner_blocked_at_j3`, from `Qgen'_diag`: `Q'(W,a,a) = +1`, so no
+diagonal tuple is ever a witness, and at level `j+3` the corner `(0,0)` forces the diagonal.
+
+**What is still measured.** Attainment **on** the six lines — where `Qgen ≠ Qgen'` and the collapse
+does not apply, `REACH` is full, and the witnesses are `N25`'s two explicit families at level
+`j+4`. And that the label `attain_nondeg` produces has **even weight**, i.e. stays inside (♦)'s
+family — `N12`'s popcount arithmetic. Those two are what is left of attainment.
 
 **The correction.** `N15`'s clean-locus predicate does **not** cover `REACH`: for `Y₀ = 2^j` there
 are 8, 16, 32, 64 reachable points outside it at `j = 0,1,2,3`. The blocked tuples land strictly
