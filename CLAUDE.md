@@ -358,3 +358,29 @@ Prefer proven wrappers from `ops/lab-ops.sh` over ad hoc `sbatch` or `kubectl`.
 ---
 
 *This file is the AI-assistant entry-point. For the Codex-facing execution contract, see [`AGENTS.md`](AGENTS.md). For governance authority matrix, see [`docs/governance/DOCS_AUTHORITY_MATRIX.md`](docs/governance/DOCS_AUTHORITY_MATRIX.md). Last revised 17 May 2026; check `git log -1 CLAUDE.md` for current state.*
+
+## Agent coordination — read the bus before you start
+
+Ten agent slots share this pod (`claude-1..3`, `codex-1..3`, `grok-cli1..2`,
+`kimi-cli1..2`) and one filesystem. Coordination used to be a document that
+nobody wrote to. It is now a channel:
+
+```bash
+scripts/dev/agent-bus.sh brief          # FIRST THING. hazards, leases, recent events
+scripts/dev/agent-bus.sh claim <res>    # before a build lock, a shared file, a lane
+scripts/dev/agent-bus.sh post finding 'what you learned'
+scripts/dev/agent-bus.sh hazard add <slug> 'what will silently ruin others' measurements'
+```
+
+For real-time, the same bus is served over MCP (`scripts/mcp/agent_bus_mcp.py`;
+merge `scripts/mcp/agent-bus.mcp.json` into your gitignored `.mcp.json`).
+Subscribe to `bus://events` or `bus://hazards` and the server pushes
+`notifications/resources/updated` the moment another agent posts. Tools:
+`bus_post`, `bus_claim`, `bus_release`, `bus_hazard`, `bus_brief`. Both doors
+write the same storage, so an agent on the shell CLI and an agent on MCP are on
+one channel.
+
+Post a `hazard` for anything that makes a measurement lie rather than fail: a
+poisoned environment variable, a stale artifact, a checkout parked on another
+branch. Those cost hours precisely because the run still exits and prints a
+number. Storage is `/workspace/.agents/bus`, outside every checkout.
