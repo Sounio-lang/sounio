@@ -18,6 +18,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.cd-to
 **Date:** 2026-08-01
 **Orthography:** EN-UK
 **Status:** `EXECUTABLE` — `DIAMOND_IS_A_FINITE_STABLE_FAMILY__GAP_LOCUS_INCLUDED`
+**Outcome:** (♦) and **L2 are proven ∀n** (`diamond`, `L2_forall`), kernel-checked, no `sorryAx`.
 **Parents:** `cd_tower_zd_fiber_l2_switching_spec_2026-07-31.md`, `cd_tower_zd_fiber_l1_reduction_spec_2026-07-31.md`
 **Harness:** `scripts/research/cd_tower_zd_fiber_l2_reduction_contract.py`
 
@@ -507,13 +508,49 @@ not an exception but a triviality: `τ` is the identity there, so `gdisc 0 = 1` 
 gives `D = 1` outright. So the hypothesis `j ≠ 0` the inner lemmas carry does **not** narrow the
 theorem.
 
-**What is still open.** `N12`/`N27`'s popcount arithmetic: that **even weight is** the sign
-disjunction `diamond_at_level` takes as its hypothesis. That is the only remaining measured step
-in the chain. The route is elementary: either (i) `psg_split : psg x = psg (x % 2^k)·psg (x / 2^k)`
-plus `dsgnN j n Y = psg (Y / 2^{j+2})`, whose crux is the single iff
-`x % 2^{k+1} = x % 2^k + 2^k ↔ (x / 2^k) % 2 = 1`; or (ii) *redefine* `dsgnN j Y := psg (Y / 2^{j+2})`
-— level-independent, which makes `dsgnN_low` trivial and leaves only `dsgnN_hi` to re-prove, with
-`collapse` unchanged.
+---
+
+## 2g. `N12` closed — (♦) and L2, proven ∀n
+
+The last measured step. Route (i), and the crux turned out to be one fact about a single bit:
+
+```lean
+div_mod_two : (x / 2^k) % 2 = (x % 2^{k+1}) / 2^k
+psg_split   : psg x = psg (x % 2^k) * psg (x / 2^k)
+dsgnN_eq    : j+2 ≤ n → Y < 2^n → dsgnN j n Y = psg Y * psg (Y % 2^{j+2})
+```
+
+`dsgnN_eq` is the clean form — the accumulated descent sign is `psg Y` corrected by the bottom
+label — and its induction needs nothing but `psg_split` at `k = n`. Then, with
+`psg (2^j) = −1` and `psg (3·2^j) = +1`:
+
+> **`even_weight_sign`** — for `lsb Y = j` and `psg Y = 1`, the sign disjunction holds. **Even
+> weight *is* the disjunction.** `N12` is a theorem.
+
+### ★★★ (♦), proven ∀n
+
+```lean
+diamond : j+2 ≤ n → Y % 2^{j+1} = 2^j → psg Y = 1 → Qgen' Y a b n = −1 → Ddef j Y a b n = 1
+```
+
+Even weight as `psg Y = 1`, i.e. `(−1)^{popcount Y} = 1`. No hypothesis on `j`, none on `a`, `b`.
+
+### ★★★ L2, proven ∀n
+
+Composing with `l2_reduction_symm` (in the tree since the reduction rung):
+
+```lean
+L2_forall : … → σ(τa,τb)·σ(τ(a⊕L),τ(b⊕L))·σ(a,b)·σ(a⊕L,b⊕L) = psg(a % 2^j) · psg(b % 2^j)
+```
+
+on the fiber `L = Y + 2^{m+1}`: the **τ-discrepancy of `σ` is the coboundary `λ(a)·λ(b)`** with
+`λ(x) = (−1)^{p_j(x)}` — L2's statement, with every link in its chain a theorem.
+
+`N31` pins all three: the `N12` statement 0/53; `psg = (−1)^{popcount}` 0/1024; and `L2_forall`'s
+own statement on the fiber, checked on **every** witness — 3 032 at `n=5`, 24 120 at `n=6`, zero
+violations.
+
+**The chain has no measured step left.**
 
 **The correction.** `N15`'s clean-locus predicate does **not** cover `REACH`: for `Y₀ = 2^j` there
 are 8, 16, 32, 64 reachable points outside it at `j = 0,1,2,3`. The blocked tuples land strictly
@@ -563,4 +600,4 @@ outside the family §2c described. `REACH`, not that predicate, is the object.
 python3 scripts/research/cd_tower_zd_fiber_l2_reduction_contract.py
 ```
 
-Thirty-one clauses, `N0`–`N30`, single verdict token. Runs in about 17 s.
+Thirty-two clauses, `N0`–`N31`, single verdict token. Runs in about 28 s.

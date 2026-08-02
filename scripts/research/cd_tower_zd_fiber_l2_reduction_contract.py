@@ -1162,6 +1162,69 @@ def main():
           f"chain is N12/N27's popcount arithmetic -- that even weight IS the dsgnN sign "
           f"disjunction `diamond_all` takes as its hypothesis ***")
 
+    # ---- N31  N12 PROVEN, and with it (diamond) and L2 --------------------------------------
+    # `even_weight_sign`: even weight IS the dsgnN sign disjunction. `diamond`: (diamond) with the
+    # honest hypothesis psg Y = 1. `L2_forall`: composing with l2_reduction_symm, the fiber-level
+    # tau-discrepancy of sigma IS the coboundary lambda(a)lambda(b), lambda(x) = (-1)^p_j(x).
+    # (a) the N12 statement itself, measured
+    n31a_bad = n31a_tot = 0
+    for n in (5, 6, 7):
+        for Y in range(1, 1 << n):
+            j = (Y & -Y).bit_length() - 1
+            if not j or bin(Y).count("1") % 2 or j + 2 > n:
+                continue
+            n31a_tot += 1
+            acc = (-1) ** (bin(Y >> (j + 2)).count("1") % 2)
+            Y0 = Y % (1 << (j + 2))
+            want = -1 if Y0 == (1 << j) else 1
+            if acc != want:
+                n31a_bad += 1
+    # (b) psg = (-1)^popcount
+    n31b_bad = sum(1 for x in range(1 << 10) if _psg(x) != (-1) ** (bin(x).count("1") % 2))
+    # (c) L2_forall's own statement, on the fiber, measured -- and NON-VACUOUS
+    n31c_rows = []
+    for n in (5, 6):
+        Sn1 = sign_table_fast(n + 1).astype(np.int64)
+        N1 = 1 << (n + 1)
+        t_ = {}
+        cnt = bad = 0
+        for Y in range(1, 1 << n):
+            j = (Y & -Y).bit_length() - 1
+            if not j or bin(Y).count("1") % 2 or j + 2 > n:
+                continue
+            if j not in t_:
+                t_[j] = np.array([sw(x, j) for x in range(N1)])
+            tj = t_[j]
+            L = Y + (1 << n)
+            S = sign_table_fast(n).astype(np.int64)
+            for a in range(1 << n):
+                for b in range(1 << n):
+                    if (b ^ Y) == 0:
+                        continue
+                    if _Qp2(S, Y, a, b) != -1:
+                        continue
+                    cnt += 1
+                    P = (int(Sn1[tj[a], tj[b]]) * int(Sn1[tj[a ^ L], tj[b ^ L]])
+                         * int(Sn1[a, b]) * int(Sn1[a ^ L, b ^ L]))
+                    if P != _psg(a % (1 << j)) * _psg(b % (1 << j)):
+                        bad += 1
+        n31c_rows.append((n, cnt, bad))
+    n31 = (n31a_bad == 0 and n31b_bad == 0
+           and all(c > 0 and b == 0 for _, c, b in n31c_rows))
+    ok["N31"] = n31
+    print(f"N31_L2      [Lean-proven forall n: `even_weight_sign`, `diamond`, `L2_forall`] N12 is "
+          f"PROVEN, and the chain closes {'OK' if n31 else 'FAIL'} -- (a) even weight IS the "
+          f"dsgnN sign disjunction: {n31a_bad}/{n31a_tot} (levels 5,6,7, every even-weight Y with "
+          f"lsb j); (b) psg = (-1)^popcount: {n31b_bad}/1024; (c) L2_forall's OWN statement on "
+          f"the fiber -- the tau-discrepancy of sigma equals lambda(a)lambda(b) with "
+          f"lambda(x) = (-1)^p_j(x) -- checked on every witness: "
+          f"{'; '.join(f'n={a}: {b} witnesses, {c} violations' for a, b, c in n31c_rows)}. "
+          f"*** THE CHAIN HAS NO MEASURED STEP LEFT. `psg_split` (psg splits at any level, crux "
+          f"`(x/2^k)%2 = (x%2^(k+1))/2^k`) gives `dsgnN_eq` (dsgnN j n Y = psg Y * psg(Y0)), "
+          f"hence `even_weight_sign`, hence `diamond` -- (diamond) forall n with the honest "
+          f"hypothesis psg Y = 1 -- and composing with the long-proven `l2_reduction_symm`, "
+          f"`L2_forall`. L2 IS PROVEN forall n ***")
+
     print("=" * 78)
     if all(ok.values()):
         print("CD_TOWER_ZDL2R_VERDICT DIAMOND_IS_A_FINITE_STABLE_FAMILY__GAP_LOCUS_INCLUDED")

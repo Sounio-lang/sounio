@@ -4299,6 +4299,140 @@ theorem diamond_at_level (j n Y a b : Nat) (hn : j+2 ≤ n)
     rw [Ddef_trunc j d Y a b hY ha hb]
     exact diamond_all j ((j+1+1)+d) Y a b hj hn hY ha hb hsign hw
 
+/-! ## `N12`: even weight **is** the sign disjunction
+
+The last measured step. `dsgnN` is the accumulated descent sign; even weight is `psg Y = 1`. The
+bridge is `psg_split`, and its crux is one fact about a single bit:
+`(x / 2^k) % 2 = (x % 2^{k+1}) / 2^k`. -/
+
+/-- The bit that `x % 2^{k+1}` carries above `2^k` is `(x / 2^k) % 2`. -/
+theorem div_mod_two (k x : Nat) : (x / 2^k) % 2 = (x % 2^(k+1)) / 2^k := by
+  have hp : 0 < 2^k := Nat.two_pow_pos k
+  have hpow : (2:Nat)^(k+1) = 2^k * 2 := by rw [Nat.pow_succ]
+  have hd : 2^k * (2 * (x / 2^(k+1))) + x % 2^(k+1) = x := by
+    rw [← Nat.mul_assoc, ← hpow]
+    exact Nat.div_add_mod x (2^(k+1))
+  have h1 : x / 2^k = 2 * (x / 2^(k+1)) + (x % 2^(k+1)) / 2^k := by
+    have hh := Nat.mul_add_div hp (2 * (x / 2^(k+1))) (x % 2^(k+1))
+    rw [hd] at hh
+    exact hh
+  have hrl : x % 2^(k+1) < 2^k * 2 := by
+    rw [← hpow]; exact Nat.mod_lt _ (Nat.two_pow_pos (k+1))
+  have h2 : (x % 2^(k+1)) / 2^k < 2 := Nat.div_lt_of_lt_mul (by omega)
+  rw [h1, Nat.mul_add_mod]
+  exact Nat.mod_eq_of_lt h2
+
+/-- **`psg` splits at any level**: `(−1)^{popcount x}` is the product over the low and high parts. -/
+theorem psg_split : ∀ (k x : Nat), psg x = psg (x % 2^k) * psg (x / 2^k) := by
+  intro k
+  induction k with
+  | zero =>
+      intro x
+      rw [Nat.pow_zero, Nat.mod_one, Nat.div_one, psg_zero, Int.one_mul]
+  | succ k ih =>
+      intro x
+      have hp : 0 < 2^k := Nat.two_pow_pos k
+      have hmm : x % 2^(k+1) % 2^k = x % 2^k := mod_pow_mod k (k+1) x (by omega)
+      have hlt : x % 2^k < 2^k := Nat.mod_lt _ hp
+      have hdd : x / 2^(k+1) = (x / 2^k) / 2 := by
+        rw [Nat.div_div_eq_div_mul, ← Nat.pow_succ]
+      rcases low_split k (x % 2^(k+1)) (Nat.mod_lt _ (Nat.two_pow_pos (k+1))) with h | h <;>
+        rw [hmm] at h
+      · have hbit : (x / 2^k) % 2 = 0 := by
+          rw [div_mod_two k x, h]; exact Nat.div_eq_of_lt hlt
+        rw [h, hdd, ih x, psg_step (x / 2^k), hbit, if_neg (by decide), Int.one_mul]
+      · have hbit : (x / 2^k) % 2 = 1 := by
+          rw [div_mod_two k x, h, Nat.add_div_right _ hp, Nat.div_eq_of_lt hlt]
+        rw [h, psg_top k (x % 2^k) hlt, hdd, ih x, psg_step (x / 2^k), hbit,
+            if_pos rfl, ← hdd, Int.neg_mul, Int.one_mul, Int.mul_neg, Int.neg_mul]
+
+/-- **The accumulated descent sign is `psg Y` corrected by the bottom label.** -/
+theorem dsgnN_eq (j : Nat) : ∀ (n Y : Nat), j+2 ≤ n → Y < 2^n →
+    dsgnN j n Y = psg Y * psg (Y % 2^(j+2)) := by
+  intro n
+  induction n with
+  | zero => intro Y hn; omega
+  | succ n ih =>
+      intro Y hn hY
+      rcases Nat.eq_or_lt_of_le hn with heq | hlt
+      · have hne : n = j + 1 := by omega
+        subst hne
+        show dsgnN j (j+2) Y = psg Y * psg (Y % 2^(j+2))
+        rw [dsgnN_bot j Y, Nat.mod_eq_of_lt hY]
+        exact (psg_sq Y).symm
+      · have hjn : j + 2 ≤ n := by omega
+        have hbb : ¬ (n+1 ≤ j+2) := by omega
+        have hYn : Y % 2^n < 2^n := Nat.mod_lt _ (Nat.two_pow_pos n)
+        have hpow : (2:Nat)^(n+1) = 2^n * 2 := by rw [Nat.pow_succ]
+        have hq : Y / 2^n < 2 := by
+          have h2 : Y < 2^n * 2 := by omega
+          exact Nat.div_lt_of_lt_mul h2
+        have hq2 : Y / 2^n = 0 ∨ Y / 2^n = 1 := by
+          cases hqv : Y / 2^n with
+          | zero => exact Or.inl rfl
+          | succ q =>
+              cases q with
+              | zero => exact Or.inr rfl
+              | succ q' => rw [hqv] at hq; omega
+        have hif : (if Y / 2^n % 2 = 1 then (-1:Int) else 1) = psg (Y / 2^n) := by
+          rcases hq2 with h | h <;> rw [h]
+          · rw [if_neg (by decide), psg_zero]
+          · rw [if_pos (by decide), psg_one]
+        rw [dsgnN, if_neg hbb, ih (Y % 2^n) hjn hYn, mod_pow_mod (j+2) n Y hjn, hif,
+            psg_split n Y, Int.mul_comm (psg (Y % 2^n)) (psg (Y / 2^n)), Int.mul_assoc]
+
+theorem psg_pow2 (j : Nat) : psg (2^j) = -1 := by
+  have h := psg_top j 0 (Nat.two_pow_pos j)
+  rw [Nat.zero_add, psg_zero] at h
+  exact h
+
+theorem psg_three (j : Nat) : psg (2^j + 2^(j+1)) = 1 := by
+  have h := psg_top (j+1) (2^j) (Nat.pow_lt_pow_right (by omega) (by omega))
+  rw [h, psg_pow2]
+  decide
+
+/-- **`N12`, proven: even weight IS the sign disjunction.** -/
+theorem even_weight_sign (j n Y : Nat) (hn : j+2 ≤ n) (hY : Y < 2^n)
+    (hlsb : Y % 2^(j+1) = 2^j) (heven : psg Y = 1) :
+    dsgnN j n Y = -1 ∧ Y % 2^(j+2) = 2^j ∨
+    dsgnN j n Y = 1 ∧ Y % 2^(j+2) = 2^j + 2^(j+1) := by
+  have hd := dsgnN_eq j n Y hn hY
+  rw [heven, Int.one_mul] at hd
+  have hmm : Y % 2^(j+2) % 2^(j+1) = Y % 2^(j+1) := mod_pow_mod (j+1) (j+2) Y (by omega)
+  rcases low_split (j+1) (Y % 2^(j+2)) (Nat.mod_lt _ (Nat.two_pow_pos (j+2))) with h | h <;>
+    rw [hmm, hlsb] at h
+  · exact Or.inl ⟨by rw [hd, h, psg_pow2], h⟩
+  · exact Or.inr ⟨by rw [hd, h, psg_three], h⟩
+
+/-- ## ★★★ (♦), PROVEN ∀n
+    For even-weight `Y` with `lsb Y = j`, every witness of the resonance predicate has defect
+    `+1`. Even weight is `psg Y = 1`, i.e. `(−1)^{popcount Y} = 1`. No hypothesis on `j`, none on
+    `a` and `b`. With `l2_reduction` (`L2 ⟸ (♦)`, proven ∀n), **L2 follows**. -/
+theorem diamond (j n Y a b : Nat) (hn : j+2 ≤ n)
+    (hY : Y < 2^n) (ha : a < 2^n) (hb : b < 2^n)
+    (hlsb : Y % 2^(j+1) = 2^j) (heven : psg Y = 1) (hw : Qgen' Y a b n = -1) :
+    Ddef j Y a b n = 1 :=
+  diamond_at_level j n Y a b hn hY ha hb (even_weight_sign j n Y hn hY hlsb heven) hw
+
+/-- ## ★★★ L2, ∀n
+    Composing `diamond` with `l2_reduction_symm`: on the fiber `L = Y + 2^(m+1)`, the
+    τ-discrepancy of `σ` **is** the coboundary `λ(a)·λ(b)` with `λ(x) = (−1)^{p_j(x)}`, for every
+    even-weight `Y` with `lsb Y = j` on the resonance locus. This is L2's statement, and every
+    link in its chain is now a theorem. -/
+theorem L2_forall (m j Y a b : Nat) (hj : j+2 ≤ m+1) (hY : Y < 2^(m+1))
+    (ha : a < 2^(m+1)) (hb : b < 2^(m+1)) (hbY : b ^^^ Y ≠ 0)
+    (hlsb : Y % 2^(j+1) = 2^j) (heven : psg Y = 1)
+    (hres : Qgen' Y a b (m+1) = -1) :
+    cdSigma (tau j a) (tau j b) (m+2)
+        * cdSigma (tau j (a ^^^ (Y + 2^(m+1)))) (tau j (b ^^^ (Y + 2^(m+1)))) (m+2)
+        * (cdSigma a b (m+2) * cdSigma (a ^^^ (Y + 2^(m+1))) (b ^^^ (Y + 2^(m+1))) (m+2))
+      = psg (a % 2^j) * psg (b % 2^j) := by
+  rw [l2_reduction_symm m j Y a b (by omega) hY ha hb hbY]
+  have hd := diamond j (m+1) Y a b hj hY ha hb hlsb heven hres
+  unfold Ddef at hd
+  rcases psg_pm (a % 2^j) with hA | hA <;> rcases psg_pm (b % 2^j) with hB | hB <;>
+    rw [hA, hB] at hd ⊢ <;> simp at hd ⊢ <;> omega
+
 end SounioZDFiberAntisym
 
 
