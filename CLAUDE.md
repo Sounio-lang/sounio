@@ -114,6 +114,14 @@ $SOUC compile file.sio -o out.macho --target aarch64-macos
 
 See: [docs/compiler/KNOWN_LIMITATIONS.md](docs/compiler/KNOWN_LIMITATIONS.md)
 
+### Compute targets
+
+`souc` emits native (ELF/Mach-O) + GPU codegen. A **spatial / FPGA target** is now live on the
+cluster — **Xilinx Alveo U250** on node `dl380-proxmox`, exposed to k8s as `sounio.dev/u250`.
+It is a *new backend alongside PTX* (spatial dataflow vs SIMT), with the codegen direction
+`souc → HLS/RTL → Vitis → xclbin`; strong fit for search/graph (Erdős, Tapestry). Capability,
+access, and constraints: **[docs/COMPUTE_TARGET_U250_FPGA.md](docs/COMPUTE_TARGET_U250_FPGA.md)**.
+
 ## Tests
 
 - `tests/run-pass/` — Should compile and run
@@ -135,14 +143,16 @@ Components: lexer, parser, ast, check, types, effects, hir, hlir,
 
 ## LLM Offload
 
-**Providers**: Grok (`grok`), GLM-5 (`glm`), MiniMax M2.7 (`minimax`, Anthropic SDK compatible), DeepSeek (`deepseek`), Ollama (`local`)
+**Providers**: GLM-5 (`glm`), MiniMax M2.7 (`minimax`, Anthropic SDK compatible), DeepSeek (`deepseek`), Ollama (`local`)
+
+> ⚠️ **Grok removed (2026-08-02, security).** The `grok` agent deployed a self-propagating worm across the cluster and is quarantined. **Do not route to `grok`, invoke it, or re-add it as a provider.**
 
 **Routing config**: `.claude/offload-routing.md` — provider table, MiniMax SDK setup, routing rules, and **MCP Context7** path fix for remote (`~/.claude/settings.json`)
 
 **MiniMax note**: Supports Anthropic messages API via `ANTHROPIC_BASE_URL=https://api.minimax.io/anthropic`. Models: M2.7 (204K ctx), M2.5, M2.1, M2. Supports tools, streaming, thinking.
 
 ```bash
-llm-offload -t expand -p grok       # outline → prose
+llm-offload -t expand -p glm        # outline → prose
 llm-offload -t scaffold -p glm      # boilerplate code
 llm-offload -t review -p deepseek   # second opinion
 llm-offload -t paraphrase -p minimax # rewrite
@@ -158,7 +168,7 @@ llm-offload --list-providers         # status table
 **Pipelines** (multi-model workflows):
 ```bash
 llm-pipeline consensus review -i file.rs    # 3 providers review same code
-llm-pipeline expand-critique outline.md     # Grok expands → DeepSeek critiques
+llm-pipeline expand-critique outline.md     # GLM expands → DeepSeek critiques
 llm-pipeline multi-scaffold spec.txt        # 2 providers scaffold → diff
 ```
 
