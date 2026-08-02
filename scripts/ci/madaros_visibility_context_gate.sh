@@ -260,22 +260,22 @@ expect_private_rejection() {
     cat "$log" >&2
     fail "$label must emit exactly one canonical privacy message"
   }
-  grep -Eq "^error\\[$code\\].* in .*::main( at [0-9]+\\.\\.[0-9]+)?: " "$log" || {
+  [[ "$(grep -Ecx "error\\[$code\\].* in .*::main( at [0-9]+\\.\\.[0-9]+)?: .*" "$log" || true)" -eq 1 ]] || {
     cat "$log" >&2
-    fail "$label must name the calling function in its diagnostic header"
+    fail "$label must name the calling function in exactly one diagnostic header"
   }
-  grep -Eq "^   = $subject_kind .*::$subject_name$" "$log" || {
+  [[ "$(grep -Ecx "   = $subject_kind .*::$subject_name" "$log" || true)" -eq 1 ]] || {
     cat "$log" >&2
-    fail "$label must name its resolved $subject_kind authority"
+    fail "$label must name its resolved $subject_kind authority exactly once"
   }
-  grep -Eq '^   = defining module id -?[0-9]+, (calling|used) from module id -?[0-9]+$' "$log" || {
+  [[ "$(grep -Ecx '   = defining module id -?[0-9]+, (calling|used) from module id -?[0-9]+' "$log" || true)" -eq 1 ]] || {
     cat "$log" >&2
-    fail "$label must name both defining and caller module ids"
+    fail "$label must name both defining and caller module ids exactly once"
   }
   if [[ -n "$written_name" ]]; then
-    grep -Fxq "   = written as $written_name" "$log" || {
+    [[ "$(grep -Fxc "   = written as $written_name" "$log" || true)" -eq 1 ]] || {
       cat "$log" >&2
-      fail "$label must preserve the authored enum reference $written_name"
+      fail "$label must preserve the authored enum reference $written_name exactly once"
     }
   fi
 }
@@ -323,11 +323,14 @@ expect_private_rejection private-generic \
 expect_private_rejection private-function-value \
   "$FIXTURES/private_function_value_main.sio" E175 \
   'function is private in its defining module' callee private_value
+expect_private_rejection private-function-value-bridge \
+  "$FIXTURES/private_function_value_loop_main.sio" E175 \
+  'function is private in its defining module' callee private_value
 expect_private_rejection private-enum-struct-variant \
   "$FIXTURES/private_enum_struct_variant_main.sio" E177 \
   'enum constructor is private in its defining module' enum PrivateRecord Payload
 
-echo "[madaros-visibility-context] receipt issue=854 context_state=$single_state runtime_state=$runtime_state single_e175=$([[ "$single_state" == baseline ]] && echo 1 || echo 0) matrix_e175=$([[ "$matrix_state" == baseline ]] && echo 18 || echo 0) unresolved_named_import=authority-reject ambiguous_named_import=authority-reject unsupported_named_import=legacy-used local_shadow=exact-local local_value_shadow=runtime-local true_private_fn=E175 true_private_struct=E176 true_private_enum=E177 private_generic=E175 private_function_value=E175 private_enum_struct_variant=E177"
+echo "[madaros-visibility-context] receipt issue=854 context_state=$single_state runtime_state=$runtime_state single_e175=$([[ "$single_state" == baseline ]] && echo 1 || echo 0) matrix_e175=$([[ "$matrix_state" == baseline ]] && echo 18 || echo 0) unresolved_named_import=authority-reject ambiguous_named_import=authority-reject unsupported_named_import=legacy-used local_shadow=exact-local local_value_shadow=runtime-local true_private_fn=E175 true_private_struct=E176 true_private_enum=E177 private_generic=E175 private_function_value=E175 private_function_value_bridge=E175 private_enum_struct_variant=E177"
 
 if [[ "$EXPECT" == baseline && "$single_state" != baseline ]]; then
   fail "expected the pinned baseline, got $single_state"
