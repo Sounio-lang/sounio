@@ -2540,6 +2540,45 @@ fn ir_fast_summary_register_struct_fields_owned(
     }
 }
 
+// Build the compact cross-module layout context once, before streamed
+// dependency lowering starts. The returned Box is frontend-owned and remains
+// outside each dependency's arena-reset window.
+pub fn lower_struct_layouts_from_programs_ref(
+    programs: &! [Program; 256],
+    program_count: i64
+) -> Box<StructLayoutTable> with Mut, Panic, Div, Alloc {
+    var layouts = ir_register_knowledge_layout(empty_struct_layout_table())
+    var program_idx: i64 = 0
+    while program_idx < program_count && program_idx < 256 {
+        let program_ref: &Program = &(*programs)[program_idx as usize]
+        var current = &(*program_ref).items
+        while true {
+            match *current {
+                Some(list) => {
+                    let item = &(*list).head
+                    if item.kind == ItemKind::ItemStruct {
+                        match item.struct_def {
+                            Some(sd) => {
+                                layouts = ir_fast_summary_register_struct_fields_owned(
+                                    layouts,
+                                    item.name,
+                                    (*sd).fields,
+                                    0
+                                )
+                            }
+                            _ => {}
+                        }
+                    }
+                    current = &(*list).tail
+                }
+                _ => break,
+            }
+        }
+        program_idx = program_idx + 1
+    }
+    Box::new(layouts)
+}
+
 fn ir_fast_summary_preseed_impl_methods_seed_owned(
     seed: IrFastSummaryOwnedSeed,
     type_name: Name,
@@ -4074,8 +4113,13 @@ fn lowerer_simple_scalar_kind_ref(lo: &Lowerer, e: &Expr) -> i64 with Mut, Panic
     }
     if e.kind == ExprKind::ExprCall {
         let fn_id = lowerer_registered_direct_call_id_ref(lo, e)
-        if fn_id >= 0 && fn_id < (*(*lo).module).fn_count && (*(*lo).module).functions[fn_id as usize].returns_float == 1 {
-            return 2
+        if fn_id >= 0 && fn_id < (*(*lo).module).fn_count {
+            let callee = &(*(*lo).module).functions[fn_id as usize]
+            if callee.returns_float == 1 { return 2 }
+            if callee.return_struct_name.len > 0 {
+                if lower_name_is_direct_word_scalar_type(callee.return_struct_name) { return 1 }
+                return 0
+            }
         }
         return 1
     }
@@ -13804,10 +13848,31 @@ fn lower_program_bodies_from_summary_with_epistemic_boxed_owned(
 // re-box for functions written in this pass (including filled stubs).
 fn lower_single_dep_program_into_acc(
     dep_program: &Program,
+    global_struct_layouts: &StructLayoutTable,
     acc: Box<IrModule>
 ) -> IrLowerBoxResult with Mut, Panic, Div, Alloc, IO {
     let items: &Option<Box<ItemList>> = &(*dep_program).items
     var lo = lowerer_from_acc_module(acc)
+    // Struct layouts are compiler metadata and are intentionally absent from
+    // IrModule. Rehydrate the dependency lowerer from the frontend-owned global
+    // table before its local declarations and bodies are visited.
+    var layouts_box = lo.struct_layouts
+    (*layouts_box).count = 0
+    var layout_idx: i64 = 0
+    while layout_idx < (*global_struct_layouts).count && layout_idx < 256 {
+        var entry = empty_struct_layout_entry()
+        entry.type_name = (*global_struct_layouts).entries[layout_idx as usize].type_name
+        entry.field_count = (*global_struct_layouts).entries[layout_idx as usize].field_count
+        var field_idx: i64 = 0
+        while field_idx < entry.field_count && field_idx < 64 {
+            entry.fields[field_idx as usize] = (*global_struct_layouts).entries[layout_idx as usize].fields[field_idx as usize]
+            field_idx = field_idx + 1
+        }
+        (*layouts_box).entries[layout_idx as usize] = entry
+        layout_idx = layout_idx + 1
+    }
+    (*layouts_box).count = layout_idx
+    lo.struct_layouts = layouts_box
     lowerer_preseed_dep_items_into_acc_mut(&! lo, items, ir_empty_name())
     lowerer_lower_program_bodies_dedup_mut(&! lo, items)
     lowerer_force_fill_impl_methods_mut(&! lo, items)
