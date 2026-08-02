@@ -379,9 +379,27 @@ every `Y₀` with `lsb j`, both labels, every point of every line.
 (`Qgen'_diag`). That single disagreement is why level `j+3` — where a corner forces `a = b` — has
 no witness, and why level `j+4`, which has room for `a ≠ b`, does.
 
+### The two halves, assembled
+
+```lean
+ReachD_attained : j+4 ≤ n → ReachD j Y₀ n a₀ b₀ → ReachD j Y₀ (j+4) a₀ b₀
+ReachD_stable   : j+4 ≤ n → (ReachD j Y₀ n a₀ b₀ ↔ ReachD j Y₀ (j+4) a₀ b₀)
+```
+
+The proof **is** the dichotomy, and the dichotomy is exact by construction: `NDeg` is literally
+the negation of the six-line disjunction. On a line, `ReachD_lines`; off it, `attain_nondeg` plus
+`ReachD_succ`. The `↑` direction is `ReachD_mono`. With `corner_blocked_at_j3` — level `j+3` does
+*not* suffice — the `n = j+4` boundary is **proven and proven sharp**.
+
+`ReachD` carries no even-weight condition on `Y` (expressing it needs a popcount), so it is a
+slightly *larger* family than the contract's `REACH`; `attain_lines` correspondingly builds a
+witness for **either** admissible label and the caller takes the even-weight one. This is noted in
+the `ReachD` docstring, next to the `Reach` deprecation.
+
 **What is still measured.** That the label `attain_nondeg` produces has **even weight**, i.e.
 stays inside (♦)'s family — `N12`'s popcount arithmetic, checked composite in `N27`. And
-`REACH ⊆ {D = +1}`, untouched throughout.
+`REACH ⊆ {D = +1}`, untouched throughout: it was always `n`-free via `G_trunc`, and it is now
+explicit via `N24`, but it is a different rung.
 
 **The correction.** `N15`'s clean-locus predicate does **not** cover `REACH`: for `Y₀ = 2^j` there
 are 8, 16, 32, 64 reachable points outside it at `j = 0,1,2,3`. The blocked tuples land strictly
