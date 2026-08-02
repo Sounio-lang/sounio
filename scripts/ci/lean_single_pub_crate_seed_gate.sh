@@ -141,11 +141,13 @@ chmod +x "$AST_PROBE_ELF"
     cat "$WORK/pub-crate-ast-probe-run.log" >&2
     fail "modular parser did not preserve pub(crate) visibility"
   }
-grep -Fxq 'PASS pub_crate_ast_visibility kind=2 items=3' "$WORK/pub-crate-ast-probe-run.log" || {
+grep -Fxq 'PASS pub_crate_ast_visibility kind=2 items=3 parse_errors=0' "$WORK/pub-crate-ast-probe-run.log" || {
   cat "$WORK/pub-crate-ast-probe-run.log" >&2
   fail "modular pub(crate) AST probe omitted its exact marker"
 }
 
 seed_sha="$(sha256_file "$SEED")"
-echo "[lean-single-pub-crate-seed] receipt seed_sha256=$seed_sha pub_crate=runtime-pass public=runtime-pass lean_private_fn_mode=$private_fn_mode lean_private_struct_mode=semantic_reject modular_ast_kind=2 privacy_acceptance_authority=madaros privacy_acceptance_proof=external-gate generic_restricted_visibility=not-claimed"
+bootstrap_sha="$(sha256_file "$BOOTSTRAP_BIN")"
+lean_source_sha="$(sha256_file "$ROOT_DIR/self-hosted/compiler/lean_single.sio")"
+echo "[lean-single-pub-crate-seed] receipt bootstrap_sha256=$bootstrap_sha lean_source_sha256=$lean_source_sha seed_sha256=$seed_sha pub_crate=runtime-pass public=runtime-pass lean_private_fn_mode=$private_fn_mode lean_private_struct_mode=semantic_reject modular_ast_kind=2 modular_ast_parse_errors=0 privacy_acceptance_dependency=madaros_external_gate privacy_acceptance_status=not_run pub_super=not-claimed generic_restricted_visibility=not-claimed"
 echo '[lean-single-pub-crate-seed] PASS: bounded non-generic pub(crate) authority survives source-derived bootstrap'
