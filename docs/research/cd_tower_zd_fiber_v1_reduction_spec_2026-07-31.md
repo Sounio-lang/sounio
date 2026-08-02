@@ -215,7 +215,34 @@ only for even weight. So **`tr(A²)` is parity-blind** — it is an L1-level inv
 the collapse law turns on is carried entirely by `tr(A³)`. That is the trace-side echo of this
 lane's own `C1`/`C2` finding: L1 holds for every seam and does not see the parity; L2 does.
 
-**(I) and (III) are measured, not proven. (d) is not closed, and V1 is not proven.**
+### ★ (I) is no longer a measurement — it *follows* from a recursion, by parity (`W12`)
+
+With `T(n,y) = tr(A²)(n, Fano orbit y)/24`, `h = 2^{n-5}`, `c_n = 2^{n-3}−1`, `A(n) = T(n,0)`:
+
+```
+T(n, y)      =  4·T(n-1, y) + c_n          (y < h)      ← 0 wrong, n = 7…10
+T(n, y + h)  =  A(n) − 4·T(n-1, y)         (y < h)      ← 0 wrong, n = 7…10
+```
+
+Given that, **injectivity is an induction**, and the only interesting case dies by parity:
+
+- lower half — `y ↦ 4·T(n-1,y) + c_n` is affine, hence injective whenever `T(n-1,·)` is;
+- upper half — `y ↦ A(n) − 4·T(n-1,y)` likewise;
+- **cross** — a lower value equals an upper one iff `4T(n-1,y) + c_n = A(n) − 4T(n-1,y'')`, and
+  `A(n) = 4A(n-1) + c_n`, so that is `T(n-1,y) + T(n-1,y'') = A(n-1)`. **Every `T` is odd**, so the
+  left side is **even** and the right side is **odd**. Impossible.
+- base `n = 6`: `T = [35, 19, 7, 23]`, distinct.
+
+Oddness propagates: `4·odd + odd = odd`, `odd − 4·odd = odd`, and `c_n` is odd for `n ≥ 4`.
+
+So (I) is not a coincidence checked at four levels — it is a **consequence of one recursion**, and
+that recursion is now the single thing (I) needs. It is measured at `n = 7…10`.
+
+`A(n)` solves to `T(n,0) = (2^{n-1}−2)(2^{n-3}−1)/6`, i.e. `tr(A²)(n,0) = 4(2^{n-1}−2)(2^{n-3}−1)`
+— exactly §3's `W6` formula, which the recursion therefore reproduces.
+
+**(III) is untouched, and the recursion itself is measured. (d) is not closed, and V1 is not
+proven.**
 
 ---
 

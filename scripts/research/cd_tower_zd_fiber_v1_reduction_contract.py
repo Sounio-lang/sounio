@@ -561,6 +561,67 @@ def main():
             "not see the parity, L2 does. (I) and (III) are MEASURED, not proven; (d) IS NOT "
             "CLOSED ***")
 
+    # ---- W12  (I) IS NO LONGER A MEASUREMENT: it FOLLOWS from a recursion, by PARITY --------
+    # With T(n,y) = trA2(n, Fano orbit y)/24, h = 2^{n-5}, c_n = 2^{n-3}-1, A(n) = T(n,0):
+    #
+    #     T(n, y)     = 4*T(n-1, y) + c_n          (y < h)
+    #     T(n, y + h) = A(n) - 4*T(n-1, y)         (y < h)
+    #
+    # Given that, injectivity is an INDUCTION and the only interesting case dies by parity:
+    #   * lower half  y -> 4*T(n-1,y) + c_n   is injective whenever T(n-1,.) is  [affine]
+    #   * upper half  y -> A(n) - 4*T(n-1,y)  likewise
+    #   * CROSS: a lower value equals an upper one iff 4T(n-1,y) + c_n = A(n) - 4T(n-1,y''),
+    #     and A(n) = 4A(n-1) + c_n, so that is T(n-1,y) + T(n-1,y'') = A(n-1).
+    #     EVERY T IS ODD, so the left side is EVEN and the right side is ODD. Impossible.
+    #   * base n=6: T = [35,19,7,23], distinct.
+    # Oddness propagates: 4*odd + odd = odd and odd - 4*odd = odd, with c_n odd for n >= 4.
+    def _T(n):
+        S = sign_table_fast(n)
+        H = 1 << (n - 1)
+        reps = {}
+        for Llo in range(1, H):
+            if Llo & 7:
+                reps.setdefault(Llo >> 3, Llo)
+        return {y: traces23(A_sig_fast(n, L, S))[0] // 24 for y, L in sorted(reps.items())}
+
+    _Tc = {n: _T(n) for n in (6, 7, 8, 9, 10)}
+    w12_rec = w12_odd = w12_A = w12_cross = w12_inj = 0
+    w12_rows = []
+    for n in (7, 8, 9, 10):
+        t, tp = _Tc[n], _Tc[n - 1]
+        h = 1 << (n - 5)
+        c = 2 ** (n - 3) - 1
+        ra = sum(1 for y in range(h) if t[y] != 4 * tp[y] + c)
+        rb = sum(1 for y in range(h) if t[y + h] != t[0] - 4 * tp[y])
+        od = sum(1 for y in t if t[y] % 2 == 0)
+        aa = 0 if t[0] == 4 * tp[0] + c else 1
+        cr = sum(1 for y in tp for z in tp if tp[y] + tp[z] == tp[0])
+        ij = 0 if len(set(t.values())) == len(t) else 1
+        w12_rec += ra + rb
+        w12_odd += od
+        w12_A += aa
+        w12_cross += cr
+        w12_inj += ij
+        w12_rows.append((n, len(t), ra, rb, od, cr, ij))
+    w12_base = (sorted(_Tc[6].values()) == [7, 19, 23, 35])
+    w12 = (w12_rec == 0 and w12_odd == 0 and w12_A == 0 and w12_cross == 0
+           and w12_inj == 0 and w12_base)
+    ok["W12"] = w12
+    print(f"W12_TRECUR  (I) IS NO LONGER A MEASUREMENT -- it FOLLOWS from a recursion, by PARITY "
+          f"{'OK' if w12 else 'FAIL'} -- with T = trA2/24 on the Fano orbits, h = 2^(n-5), "
+          f"c_n = 2^(n-3)-1: T(n,y) = 4T(n-1,y) + c_n on the lower half and "
+          f"T(n,y+h) = T(n,0) - 4T(n-1,y) on the upper. "
+          + "; ".join(f"n={a}: {b} orbits, lower-half wrong {c}, upper-half wrong {d}, "
+                      f"EVEN T values {e}, pairs summing to A(n-1) {f}, non-injective {g}"
+                      for a, b, c, d, e, f, g in w12_rows)
+          + f"; base n=6 T = [7,19,23,35] {w12_base}. *** GIVEN THE RECURSION, INJECTIVITY IS AN "
+            "INDUCTION: both halves are AFFINE in T(n-1,.) hence injective, and the only cross "
+            "case reduces to T(n-1,y) + T(n-1,y'') = A(n-1) -- EVEN = ODD, impossible, because "
+            "every T is odd and oddness propagates (4*odd + odd = odd, odd - 4*odd = odd, c_n "
+            "odd). So (I) is not a coincidence checked at four levels: it is a consequence of "
+            "ONE recursion. That recursion is what is now MEASURED (n = 7..10), and it is the "
+            "single thing (I) needs. (III) is untouched and (d) IS NOT CLOSED ***")
+
     print("=" * 78)
     if all(ok.values()):
         print("CD_TOWER_ZDV1_VERDICT C_CLOSED__V1_REDUCED_TO_D_ALONE__NOT_CLOSED")
