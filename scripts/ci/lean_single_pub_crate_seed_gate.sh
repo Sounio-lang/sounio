@@ -38,6 +38,7 @@ POSITIVE_ELF="$WORK/pub-crate.elf"
 PUBLIC_ELF="$WORK/public.elf"
 PRIVATE_FN_ELF="$WORK/private-fn.elf"
 PRIVATE_STRUCT_ELF="$WORK/private-struct.elf"
+AST_PROBE_ELF="$WORK/pub-crate-ast-probe.elf"
 
 scripts_dev_lock="$ROOT_DIR/scripts/dev/souc-build-lock.sh"
 "$scripts_dev_lock" "$BOOTSTRAP_BIN" \
@@ -109,6 +110,23 @@ grep -Fq 'private struct literal' "$WORK/private-struct.log" || {
   fail "private struct rejection omitted its seed diagnostic"
 }
 
+SOUNIO_STDLIB_PATH="$ROOT_DIR/self-hosted" "$scripts_dev_lock" "$SEED" \
+  "$ROOT_DIR/tests/compiler/madaros_visibility_context/pub_crate_ast_probe.sio" "$AST_PROBE_ELF" \
+  >"$WORK/pub-crate-ast-probe-build.log" 2>&1 || {
+    cat "$WORK/pub-crate-ast-probe-build.log" >&2
+    fail "derived seed could not build the modular pub(crate) AST probe"
+  }
+chmod +x "$AST_PROBE_ELF"
+"$AST_PROBE_ELF" "$ROOT_DIR/tests/compiler/madaros_visibility_context/pub_crate_facade_leaf.sio" \
+  >"$WORK/pub-crate-ast-probe-run.log" 2>&1 || {
+    cat "$WORK/pub-crate-ast-probe-run.log" >&2
+    fail "modular parser did not preserve pub(crate) visibility"
+  }
+grep -Fxq 'PASS pub_crate_ast_visibility kind=2 items=3' "$WORK/pub-crate-ast-probe-run.log" || {
+  cat "$WORK/pub-crate-ast-probe-run.log" >&2
+  fail "modular pub(crate) AST probe omitted its exact marker"
+}
+
 seed_sha="$(sha256_file "$SEED")"
-echo "[lean-single-pub-crate-seed] receipt seed_sha256=$seed_sha pub_crate=runtime-pass public=runtime-pass private_fn=reject private_struct=reject generic_restricted_visibility=not-claimed"
+echo "[lean-single-pub-crate-seed] receipt seed_sha256=$seed_sha pub_crate=runtime-pass public=runtime-pass private_fn=reject private_struct=reject modular_ast_kind=2 generic_restricted_visibility=not-claimed"
 echo '[lean-single-pub-crate-seed] PASS: bounded non-generic pub(crate) authority survives source-derived bootstrap'
