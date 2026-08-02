@@ -1,0 +1,173 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+// Epistemic ontology alignment repair — miniature UMLS-style scenario.
+//
+// Frontier: epistemic-alignment-repair (see FRONTIER.md)
+//
+// Literature anchor: Jimenez-Ruiz, Cuenca Grau, Horrocks 2011
+// (doi:10.1186/2041-1480-2-s1-s2) — UMLS integration errors repaired by
+// removing low-confidence mappings (e.g. confidence 0.06, 0.30). Here the
+// confidence stops being a heuristic removal cost and becomes an explicit
+// epistemic quantity whose repair invariants are checked at runtime and
+// proved formally in formal/OntologyAlignmentRepair.lean.
+//
+// NOTE 1: the aspirational `where result.confidence >= ...` refinement
+// syntax used in some examples is not yet accepted by the current Madaros
+// parser, so the contracts below are enforced as runtime assertions.
+// NOTE 2: arrays of structs segfault in the current runtime, so the
+// alignment is modelled with parallel primitive arrays (mapping k has id
+// k+1, confidence conf[k], retention keep[k]).
+//
+// Scenario: candidate mappings between two biomedical ontologies, with
+// explicit logical conflicts. Repair retains, per conflict, the mapping
+// with higher confidence, then verifies:
+//   (1) the retained set is conflict-free (consistency);
+//   (2) every dropped mapping conflicts with a retained mapping of at
+//       least equal confidence (maximality witness);
+//   (3) a derived subsumption gets weakest-link confidence;
+//   (4) Dempster-Shafer fusion of independent matchers never drops below
+//       the best single source.
+
+fn fmin(a: f64, b: f64) -> f64 {
+    if a <= b { return a }
+    return b
+}
+
+fn fmax(a: f64, b: f64) -> f64 {
+    if a >= b { return a }
+    return b
+}
+
+fn fabs(a: f64) -> f64 {
+    if a < 0.0 { return 0.0 - a }
+    return a
+}
+
+// Conflict oracle over mapping indices (0-based): pairs whose joint
+// assertion is logically inconsistent (cf. the consistency principle of
+// Jimenez-Ruiz et al. 2011).
+//   C1: m0 (lymphokine is-a protein, 0.30) vs m1 (lymphokine not-is-a
+//       protein, 0.06)
+//   C2: m2 (heart is-a organ, 0.95) vs m3 (heart is-a muscle-only, 0.40)
+fn conflicts(a: i64, b: i64) -> bool {
+    if a == 0 && b == 1 { return true }
+    if a == 1 && b == 0 { return true }
+    if a == 2 && b == 3 { return true }
+    if a == 3 && b == 2 { return true }
+    return false
+}
+
+// Dempster-Shafer combination of two independent matcher confidences.
+fn ds_combine(a: f64, b: f64) -> f64 {
+    return 1.0 - (1.0 - a) * (1.0 - b)
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var n_fail = 0
+
+    var conf: [f64; 5] = [0.0; 5]
+    conf[0] = 0.30
+    conf[1] = 0.06
+    conf[2] = 0.95
+    conf[3] = 0.40
+    conf[4] = 0.80
+
+    var keep: [bool; 5] = [true; 5]
+
+    // ── Greedy epistemic repair ─────────────────────────────────────────
+    // For each conflict with both endpoints retained, drop the weaker one.
+    var i: i64 = 0
+    while i < 5 {
+        var j: i64 = i + 1
+        while j < 5 {
+            if keep[i] && keep[j] {
+                if conflicts(i, j) {
+                    if conf[i] >= conf[j] {
+                        keep[j] = false
+                    } else {
+                        keep[i] = false
+                    }
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // ── Check (1): retained set is conflict-free ────────────────────────
+    i = 0
+    while i < 5 {
+        var j: i64 = i + 1
+        while j < 5 {
+            if keep[i] && keep[j] {
+                if conflicts(i, j) {
+                    println("FAIL: retained set still has a conflict")
+                    n_fail = n_fail + 1
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // ── Check (2): every dropped mapping has a maximality witness ───────
+    i = 0
+    while i < 5 {
+        if !keep[i] {
+            var witnessed = false
+            var j: i64 = 0
+            while j < 5 {
+                if keep[j] {
+                    if conflicts(i, j) {
+                        if conf[j] >= conf[i] {
+                            witnessed = true
+                        }
+                    }
+                }
+                j = j + 1
+            }
+            if !witnessed {
+                println("FAIL: dropped mapping lacks witness")
+                n_fail = n_fail + 1
+            }
+        }
+        i = i + 1
+    }
+
+    // Expected survivors: m0 (0.30 > 0.06), m2 (0.95 > 0.40), m4 (no conflict)
+    if !keep[0] { println("FAIL: m0 should survive"); n_fail = n_fail + 1 }
+    if keep[1]  { println("FAIL: m1 should be dropped"); n_fail = n_fail + 1 }
+    if !keep[2] { println("FAIL: m2 should survive"); n_fail = n_fail + 1 }
+    if keep[3]  { println("FAIL: m3 should be dropped"); n_fail = n_fail + 1 }
+    if !keep[4] { println("FAIL: m4 should survive"); n_fail = n_fail + 1 }
+
+    // ── Check (3): weakest-link derived subsumption ─────────────────────
+    // lymphokine -m0-> protein (0.30), protein -m4-> molecule (0.80)
+    // derived: lymphokine -> molecule with weakest-link confidence 0.30
+    let derived = fmin(conf[0], conf[4])
+    if fabs(derived - 0.30) > 0.0001 {
+        println("FAIL: weakest-link confidence wrong")
+        n_fail = n_fail + 1
+    }
+
+    // ── Check (4): DS fusion never below best single source ─────────────
+    let lex = 0.60
+    let stru = 0.70
+    let fused = ds_combine(lex, stru)
+    if fabs(fused - 0.88) > 0.0001 {
+        println("FAIL: DS value wrong")
+        n_fail = n_fail + 1
+    }
+    if fused < fmax(lex, stru) {
+        println("FAIL: DS dropped below best source")
+        n_fail = n_fail + 1
+    }
+
+    if n_fail == 0 {
+        println("ALL PASS")
+        return 0
+    }
+    println("FAILURES:")
+    println(n_fail)
+    return 1
+}

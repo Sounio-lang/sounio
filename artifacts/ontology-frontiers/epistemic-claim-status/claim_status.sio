@@ -1,0 +1,131 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+// Epistemic claim status for knowledge graphs — miniature claim store.
+//
+// Frontier: epistemic-claim-status (see FRONTIER.md)
+//
+// Literature anchor: 2025-2026 preprints on epistemic infrastructure for
+// knowledge graphs (arXiv:2602.15353, arXiv:2601.21116, arXiv:2604.11759,
+// arXiv:2603.28444) call for machine-checkable epistemic status without
+// providing a verified propagation semantics. Here the two propagation
+// rules are explicit and checked at runtime; they are proved formally in
+// formal/OntologyClaimStatus.lean.
+//
+// Model: claims carry a per-mille confidence (0-1000) and a provenance tag.
+//   - derivation (weakest link): a claim derived from premises gets the
+//     minimum premise confidence;
+//   - fusion (Dempster-Shafer): independent derivations of the same claim
+//     combine as ds(a,b) = 1 - (1-a)(1-b), never below the best source.
+//
+// NOTE: arrays need splat initialisation in the current runtime; refinements
+// `where` are not yet parsed by Madaros, so contracts are runtime assertions.
+
+fn fabs(a: f64) -> f64 {
+    if a < 0.0 { return 0.0 - a }
+    return a
+}
+
+fn fmin(a: f64, b: f64) -> f64 {
+    if a <= b { return a }
+    return b
+}
+
+fn fmax(a: f64, b: f64) -> f64 {
+    if a >= b { return a }
+    return b
+}
+
+// Weakest-link derivation: the derived claim inherits the minimum
+// confidence of its premises.
+fn derive(prem1: f64, prem2: f64) -> f64 {
+    return fmin(prem1, prem2)
+}
+
+// Dempster-Shafer fusion of two independent confidences for the same claim.
+fn ds_combine(a: f64, b: f64) -> f64 {
+    return 1.0 - (1.0 - a) * (1.0 - b)
+}
+
+// Status label: 2 = high (>= 0.80), 1 = medium (>= 0.50), 0 = low.
+fn status_of(conf: f64) -> i64 {
+    if conf >= 0.80 { return 2 }
+    if conf >= 0.50 { return 1 }
+    return 0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var n_fail = 0
+
+    // Claim store: per-mille confidences with provenance tags (as comments).
+    //   c0: "insulin binds insulin receptor"      (curated DB,      0.95)
+    //   c1: "insulin receptor is-a kinase"        (ontology axiom,  0.90)
+    //   c2: "drug X inhibits kinase K"            (single assay,    0.60)
+    //   c3: "drug X inhibits kinase K"            (docking model,   0.55)
+    var conf: [f64; 4] = [0.0; 4]
+    conf[0] = 0.95
+    conf[1] = 0.90
+    conf[2] = 0.60
+    conf[3] = 0.55
+
+    // ── Derivation: insulin affects kinase activity ─────────────────────
+    // Chain: c0 (0.95) -> c1 (0.90) => derived d01 with weakest link 0.90.
+    let d01 = derive(conf[0], conf[1])
+    if fabs(d01 - 0.90) > 0.0001 {
+        println("FAIL: weakest-link derivation wrong")
+        n_fail = n_fail + 1
+    }
+    // Derived confidence never exceeds any premise.
+    if d01 > conf[0] { println("FAIL: derived > prem1"); n_fail = n_fail + 1 }
+    if d01 > conf[1] { println("FAIL: derived > prem2"); n_fail = n_fail + 1 }
+
+    // ── Threshold preservation through a chain of three ─────────────────
+    // All premises >= 0.85 implies the twice-derived claim >= 0.85.
+    var chain: [f64; 3] = [0.0; 3]
+    chain[0] = 0.95
+    chain[1] = 0.90
+    chain[2] = 0.88
+    var acc = chain[0]
+    var i: i64 = 1
+    while i < 3 {
+        acc = derive(acc, chain[i])
+        i = i + 1
+    }
+    if acc < 0.85 {
+        println("FAIL: threshold not preserved along chain")
+        n_fail = n_fail + 1
+    }
+    if fabs(acc - 0.88) > 0.0001 {
+        println("FAIL: chain weakest link wrong")
+        n_fail = n_fail + 1
+    }
+
+    // ── Fusion: two independent sources for the same claim ──────────────
+    // assay (0.60) + docking (0.55) => ds = 1 - 0.40*0.45 = 0.82
+    let fused = ds_combine(conf[2], conf[3])
+    if fabs(fused - 0.82) > 0.0001 {
+        println("FAIL: DS fusion value wrong")
+        n_fail = n_fail + 1
+    }
+    if fused < fmax(conf[2], conf[3]) {
+        println("FAIL: DS below best single source")
+        n_fail = n_fail + 1
+    }
+
+    // ── Status labels ───────────────────────────────────────────────────
+    // d01 = 0.90 -> high (2); single assay 0.60 -> medium (1);
+    // fused 0.82 -> high (2): fusion lifted the claim a status level.
+    if status_of(d01) != 2 { println("FAIL: status d01"); n_fail = n_fail + 1 }
+    if status_of(conf[2]) != 1 { println("FAIL: status assay"); n_fail = n_fail + 1 }
+    if status_of(fused) != 2 {
+        println("FAIL: fusion should lift status to high")
+        n_fail = n_fail + 1
+    }
+
+    if n_fail == 0 {
+        println("ALL PASS")
+        return 0
+    }
+    println("FAILURES:")
+    println(n_fail)
+    return 1
+}

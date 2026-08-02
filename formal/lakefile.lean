@@ -16,4 +16,10 @@ lean_lib Sounio where
              `Scheduler.PortMatchingSound,
              `Scheduler.ClarkFoldDeterminism,
              `Scheduler.MicroarchInvarianceWeak,
-             `Scheduler.IntegerFixedPointClark]
+             `Scheduler.IntegerFixedPointClark,
+             `OntologyAlignmentRepair,
+             `OntologyClaimStatus,
+             `OntologyEvolution,
+             `OntologyRepairEquivalence,
+             `OntologyEvolutionRepair,
+             `ClaimStatusInterval]
