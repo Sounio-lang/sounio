@@ -885,6 +885,68 @@ def main():
           f"1 + bit_{{j+1}}(Y0), so even weight forces its parity opposite to "
           f"popcount(Y >> (j+2))'s -- and the sign picks exactly the complementary bit")
 
+    # ---- N28  PIN of the Lean proof `attain_lines`: its six explicit witnesses -------------
+    # Attainment ON the six lines is now PROVEN (`attain_lines`/`ReachD_lines`). The proof is
+    # constructive, and this clause transcribes the SIX witnesses it builds and checks them
+    # against the measured object -- the N4/N5/N9/N21 discipline. With H = 2^(j+2) and ANY label
+    # Y < 2H with Y mod H = Y0 (so either parity of weight is available to the caller):
+    #     a0 = 0        a = 0 + 2H          b = b*
+    #     a0 = Y0       a = Y + 2H          b = b*
+    #     b0 = 0        a = a*              b = 0 + 2H
+    #     b0 = Y0       a = a*              b = Y + 2H
+    #     a0 = b0       a = a*              b = a* + 2H
+    #     a0^b0 = Y0    a = a*              b = (a* ^ Y) + 2H
+    # where x* = x0 + H unless that equals Y, in which case x* = x0 (`pick_low`). Each uses ONE
+    # row -- Q'red_low_ul or Q'red_low_lu -- and STOPS at level j+3, where Qgen_zero_left or
+    # Qgen_diag_neg pins the value; Qgen_coset_left (already in the tree, unconditional) does the
+    # two rewrites. No Qgen'-coset lemma is needed.
+    def _pick(x0, Y, H):
+        cand = x0 + H
+        return cand if cand != Y else x0
+
+    n28_bad = n28_tot = 0
+    for j in (1, 2, 3, 4):
+        H = 1 << (j + 2)
+        S4 = sign_table_fast(j + 4).astype(np.int64)
+        for Y0 in range(1, H):
+            if (Y0 & -Y0).bit_length() - 1 != j:
+                continue
+            for c in (0, 1):
+                Y = Y0 + c * H
+                for a0 in range(H):
+                    for b0 in range(H):
+                        A, B = _pick(a0, Y, H), _pick(b0, Y, H)
+                        if a0 == 0:
+                            a, b = 2 * H, B
+                        elif a0 == Y0:
+                            a, b = 2 * H + Y, B
+                        elif b0 == 0:
+                            a, b = A, 2 * H
+                        elif b0 == Y0:
+                            a, b = A, 2 * H + Y
+                        elif a0 == b0:
+                            a, b = A, 2 * H + A
+                        elif (a0 ^ b0) == Y0:
+                            a, b = A, 2 * H + (A ^ Y)
+                        else:
+                            continue
+                        n28_tot += 1
+                        if not (a < 4 * H and b < 4 * H and a % H == a0 and b % H == b0
+                                and a != 0 and b != 0 and b != Y
+                                and _Qp2(S4, Y, a, b) == -1):
+                            n28_bad += 1
+    n28 = n28_bad == 0
+    ok["N28"] = n28
+    print(f"N28_LINESPIN [Lean-proven: `attain_lines` / `ReachD_lines`] the SIX explicit "
+          f"witnesses the Lean proof builds, checked against the measured object "
+          f"{'OK' if n28 else 'FAIL'} -- {n28_bad}/{n28_tot} failures over j = 1..4, every Y0 "
+          f"with lsb j, BOTH labels Y0 and Y0+H, and every point of all six lines. Each witness "
+          f"uses ONE row (Q'red_low_ul or Q'red_low_lu) and STOPS at level j+3, where the value "
+          f"is pinned by Qgen_zero_left (Qgen L 0 t = -1) or Qgen_diag_neg (Qgen L t t = -1); "
+          f"Qgen_coset_left does the two rewrites. Note Qgen' on the diagonal is +1 while Qgen "
+          f"is -1 -- that single disagreement is what makes the boundary j+4 and not j+3. With "
+          f"N21/`attain_nondeg`, attainment at n = j+4 is PROVEN on BOTH halves of REACH")
+
     print("=" * 78)
     if all(ok.values()):
         print("CD_TOWER_ZDL2R_VERDICT DIAMOND_IS_A_FINITE_STABLE_FAMILY__GAP_LOCUS_INCLUDED")
@@ -911,7 +973,7 @@ def main():
               "n = j+4 now decomposes into two constructions rather than a measurement (N25), "
               "and its SHARPNESS has a cause: (0,0) forces a = b at level j+3. N23 CORRECTS "
               "this contract's own N20 -- its number stands, the inference it drew does not. "
-              "N21 IS NOW PROVEN forall n (`collapse`), and with it attainment OFF the six lines (`attain_nondeg`) and the SHARPNESS of the boundary (`corner_blocked_at_j3`). What is still measured: attainment ON the six lines (N25s two families) and REACH subset {D=+1}. *** "
+              "N21 IS NOW PROVEN forall n (`collapse`), and with it attainment OFF the six lines (`attain_nondeg`) and the SHARPNESS of the boundary (`corner_blocked_at_j3`). ATTAINMENT ON the six lines is PROVEN TOO (N28, `attain_lines`/`ReachD_lines`), so attainment at n = j+4 now holds on BOTH halves of REACH and the boundary is proven SHARP. What is still measured: REACH subset {D=+1}, and that the even-weight label is the one the caller must pick (N27). *** "
               "Numerical certificate; D3")
         return 0
     print("CD_TOWER_ZDL2R_VERDICT INCOMPLETE  failing="

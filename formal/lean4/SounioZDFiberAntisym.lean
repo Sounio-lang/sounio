@@ -3249,6 +3249,176 @@ theorem attain_nondeg (j n Y a b : Nat) (hn : j+2 ≤ n)
       omega
     · rw [Nat.add_mod_right, hmm Y]
 
+/-! ## Attainment ON the six lines — the other half
+
+Off the six lines `collapse` does everything. **On** them `Qgen ≠ Qgen'`, the collapse does not
+apply, and `REACH` is *full* — every point of every line is reachable. This section proves that,
+by exhibiting the witnesses.
+
+The construction is short for two reasons. First, two of the sixteen rows — `Q'red_low_ul` and
+`Q'red_low_lu` — have almost no side conditions, so one step suffices and the descent **stops** at
+level `j+3` instead of reaching the bottom. Second, what it stops on has a closed form:
+
+```
+Qgen_zero_left : Qgen L 0 t m = −1        Qgen_diag_neg : Qgen L t t m = −1      (L ≠ 0)
+```
+
+Contrast `Qgen'_diag = +1`: `Qgen` and `Qgen'` disagree exactly on the diagonal, and that
+disagreement is what makes the boundary `j+4` rather than `j+3`.
+
+With `H = 2^{j+2}`, `Y = Y₀ + c·H` (`c ∈ {0,1}` — the caller takes whichever has even weight),
+`a*`/`b*` the values `pick_low` supplies, and every second argument written as `v + 2^{j+3}`:
+
+| line | `a` | `b` | lands on |
+|---|---|---|---|
+| `a₀ = 0`      | `0 + 2^{j+3}`  | `b*`                | `Qgen Y 0 b*` |
+| `a₀ = Y₀`     | `Y + 2^{j+3}`  | `b*`                | `Qgen Y Y b*` → `Qgen Y 0 b*` |
+| `b₀ = 0`      | `a*`           | `0 + 2^{j+3}`       | `Qgen Y 0 a*` |
+| `b₀ = Y₀`     | `a*`           | `Y + 2^{j+3}`       | `Qgen Y Y a*` → `Qgen Y 0 a*` |
+| `a₀ = b₀`     | `a*`           | `a* + 2^{j+3}`      | `Qgen Y a* a*` |
+| `a₀⊕b₀ = Y₀`  | `a*`           | `(a*⊕Y) + 2^{j+3}`  | `Qgen Y (a*⊕Y) a*` → `Qgen Y a* a*` |
+
+The two `→` steps are `Qgen_coset_left`, which is already in this file and unconditional. No
+coset lemma for `Qgen'` is needed. -/
+
+/-- **`Qgen` is `−1` when its first argument is `0`.** -/
+theorem Qgen_zero_left (m L t : Nat) (hL : L < 2^m) (ht : t < 2^m) (hL0 : L ≠ 0) :
+    Qgen L 0 t m = -1 := by
+  have hm : ∃ m', m = m' + 1 := by
+    cases m with
+    | zero => exact absurd (by omega : L = 0) hL0
+    | succ k => exact ⟨k, rfl⟩
+  obtain ⟨m', rfl⟩ := hm
+  have h := deg_right (m'+1) L t hL ht hL0
+  unfold Qgen
+  rw [Nat.zero_xor, cdSig0 t m', cdSig0 (t ^^^ L) m']
+  simpa using h
+
+/-- **`Qgen` is `−1` on the diagonal** — where `Qgen'` is `+1` (`Qgen'_diag`). That disagreement
+    is the whole reason the boundary is `j+4`. -/
+theorem Qgen_diag_neg (m L t : Nat) (hL : L < 2^m) (ht : t < 2^m) (hL0 : L ≠ 0) :
+    Qgen L t t m = -1 := by
+  have hm : ∃ m', m = m' + 1 := by
+    cases m with
+    | zero => exact absurd (by omega : L = 0) hL0
+    | succ k => exact ⟨k, rfl⟩
+  obtain ⟨m', rfl⟩ := hm
+  have htL : t ^^^ L < 2^(m'+1) := Nat.xor_lt_two_pow ht hL
+  by_cases ht0 : t = 0
+  · subst ht0; exact Qgen_zero_left (m'+1) L 0 hL ht hL0
+  by_cases htl : t = L
+  · rw [Qgen_coset_left L t t, htl, Nat.xor_self]
+    exact Qgen_zero_left (m'+1) L L hL hL hL0
+  · have hxL : t ^^^ L ≠ 0 := by intro h; exact htl (xor_zero_eq t L h)
+    have hne : t ≠ t ^^^ L := by
+      intro h
+      have h2 : t ^^^ t = t ^^^ (t ^^^ L) := by rw [← h]
+      rw [Nat.xor_self, ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor] at h2
+      exact hL0 h2.symm
+    have e1 : cdSigma t t (m'+1) = -1 := sigma_self (m'+1) t ht ht0
+    have e2 : cdSigma (t ^^^ L) (t ^^^ L) (m'+1) = -1 := sigma_self (m'+1) (t ^^^ L) htL hxL
+    have e3 : cdSigma t (t ^^^ L) (m'+1) = - cdSigma (t ^^^ L) t (m'+1) :=
+      antisym (m'+1) t (t ^^^ L) ht htL ht0 hxL hne
+    unfold Qgen
+    rw [e1, e2, e3]
+    rcases cdSigma_pm (m'+1) (t ^^^ L) t with h | h <;> rw [h] <;> decide
+
+/-- One `Q'red_low_ul` step, landing on a first argument `Qgen_coset_left` sends to `0`. -/
+theorem fam_ul (m W u b : Nat) (hW : W < 2^(m+1)) (hu : u < 2^(m+1)) (hb : b < 2^(m+1))
+    (hb0 : b ≠ 0) (hW0 : W ≠ 0) (hpin : u = 0 ∨ u = W) :
+    Qgen' W (u + 2^(m+1)) b (m+2) = -1 := by
+  rw [Q'red_low_ul m W u b hW hu hb hb0]
+  rcases hpin with h | h
+  · rw [h]; exact Qgen_zero_left (m+1) W b hW hb hW0
+  · rw [h, Qgen_coset_left W W b, Nat.xor_self]
+    exact Qgen_zero_left (m+1) W b hW hb hW0
+
+/-- One `Q'red_low_lu` step, landing on `Qgen W 0 a`. -/
+theorem fam_lu_zero (m W a v : Nat) (hW : W < 2^(m+1)) (ha : a < 2^(m+1)) (hv : v < 2^(m+1))
+    (ha0 : a ≠ 0) (haW : a ^^^ W ≠ 0) (hW0 : W ≠ 0) (hpin : v = 0 ∨ v = W) :
+    Qgen' W a (v + 2^(m+1)) (m+2) = -1 := by
+  rw [Q'red_low_lu m W a v hW ha hv ha0 haW]
+  rcases hpin with h | h
+  · rw [h]; exact Qgen_zero_left (m+1) W a hW ha hW0
+  · rw [h, Qgen_coset_left W W a, Nat.xor_self]
+    exact Qgen_zero_left (m+1) W a hW ha hW0
+
+/-- One `Q'red_low_lu` step, landing on the diagonal. -/
+theorem fam_lu_diag (m W a v : Nat) (hW : W < 2^(m+1)) (ha : a < 2^(m+1)) (hv : v < 2^(m+1))
+    (ha0 : a ≠ 0) (haW : a ^^^ W ≠ 0) (hW0 : W ≠ 0) (hpin : v = a ∨ v = a ^^^ W) :
+    Qgen' W a (v + 2^(m+1)) (m+2) = -1 := by
+  rw [Q'red_low_lu m W a v hW ha hv ha0 haW]
+  rcases hpin with h | h
+  · rw [h]; exact Qgen_diag_neg (m+1) W a hW ha hW0
+  · rw [h, Qgen_coset_left W (a ^^^ W) a, Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+    exact Qgen_diag_neg (m+1) W a hW ha hW0
+
+/-- The value each family needs: same residue, nonzero, and distinct from the label. -/
+theorem pick_low (j Y Y0 x0 : Nat) (hY : Y < 2^(j+3)) (hYmod : Y % 2^(j+2) = Y0)
+    (hY00 : Y0 ≠ 0) (hx0 : x0 < 2^(j+2)) :
+    ∃ x, x < 2^(j+3) ∧ x % 2^(j+2) = x0 ∧ x ≠ 0 ∧ x ≠ Y := by
+  have hpow : (2:Nat)^(j+3) = 2^(j+2) * 2 := by rw [Nat.pow_succ]
+  have hp : 0 < 2^(j+2) := Nat.two_pow_pos (j+2)
+  by_cases h : x0 + 2^(j+2) = Y
+  · refine ⟨x0, by omega, Nat.mod_eq_of_lt hx0, ?_, by omega⟩
+    intro hx
+    rw [hx, Nat.zero_add] at h
+    rw [← h, Nat.mod_self] at hYmod
+    exact hY00 hYmod.symm
+  · refine ⟨x0 + 2^(j+2), by omega, ?_, by omega, h⟩
+    rw [Nat.add_mod_right]; exact Nat.mod_eq_of_lt hx0
+
+/-- **ATTAINMENT ON THE SIX LINES.** Every bottom pair on any of the six degeneracy lines is
+    carried by an explicit level-`(j+4)` witness, for **any** label `Y` below `2^{j+3}` with the
+    right residue — in particular for whichever of `Y₀`, `Y₀ + 2^{j+2}` has even weight. -/
+theorem attain_lines (j Y Y0 a0 b0 : Nat) (hY3 : Y < 2^(j+3)) (hYmod : Y % 2^(j+2) = Y0)
+    (hY00 : Y0 ≠ 0) (ha0b : a0 < 2^(j+2)) (hb0b : b0 < 2^(j+2))
+    (hline : a0 = 0 ∨ a0 = Y0 ∨ b0 = 0 ∨ b0 = Y0 ∨ a0 = b0 ∨ a0 ^^^ b0 = Y0) :
+    ∃ a b, a < 2^(j+4) ∧ b < 2^(j+4) ∧ a % 2^(j+2) = a0 ∧ b % 2^(j+2) = b0 ∧
+      a ≠ 0 ∧ b ≠ 0 ∧ b ≠ Y ∧ Qgen' Y a b (j+4) = -1 := by
+  have hp : 0 < 2^(j+2) := Nat.two_pow_pos (j+2)
+  have e3 : (2:Nat)^(j+3) = 2^(j+2) * 2 := by rw [Nat.pow_succ]
+  have e4 : (2:Nat)^(j+4) = 2^(j+3) * 2 := by rw [Nat.pow_succ]
+  have hY0' : Y ≠ 0 := by
+    intro h; rw [h, Nat.zero_mod] at hYmod; exact hY00 hYmod.symm
+  have hp3 : (0:Nat) < 2^(j+3) := Nat.two_pow_pos (j+3)
+  have hzmod : ((0:Nat) + 2^(j+3)) % 2^(j+2) = 0 := by
+    rw [add_pow_mod (j+2) (j+3) 0 (by omega)]
+    exact Nat.zero_mod _
+  have hYmod3 : (Y + 2^(j+3)) % 2^(j+2) = Y0 := by
+    rw [add_pow_mod (j+2) (j+3) Y (by omega)]; exact hYmod
+  obtain ⟨A, hA3, hAmod, hA0, hAY⟩ := pick_low j Y Y0 a0 hY3 hYmod hY00 ha0b
+  obtain ⟨B, hB3, hBmod, hB0, hBY⟩ := pick_low j Y Y0 b0 hY3 hYmod hY00 hb0b
+  have hAW : A ^^^ Y ≠ 0 := fun h => hAY (xor_zero_eq A Y h)
+  rcases hline with h | h | h | h | h | h
+  · exact ⟨0 + 2^(j+3), B, by omega, by omega, by rw [hzmod, h], hBmod, by omega, hB0, hBY,
+      fam_ul (j+2) Y 0 B hY3 hp3 hB3 hB0 hY0' (Or.inl rfl)⟩
+  · exact ⟨Y + 2^(j+3), B, by omega, by omega, by rw [hYmod3, h], hBmod, by omega, hB0, hBY,
+      fam_ul (j+2) Y Y B hY3 hY3 hB3 hB0 hY0' (Or.inr rfl)⟩
+  · exact ⟨A, 0 + 2^(j+3), by omega, by omega, hAmod, by rw [hzmod, h], hA0, by omega, by omega,
+      fam_lu_zero (j+2) Y A 0 hY3 hA3 hp3 hA0 hAW hY0' (Or.inl rfl)⟩
+  · exact ⟨A, Y + 2^(j+3), by omega, by omega, hAmod, by rw [hYmod3, h], hA0, by omega, by omega,
+      fam_lu_zero (j+2) Y A Y hY3 hA3 hY3 hA0 hAW hY0' (Or.inr rfl)⟩
+  · refine ⟨A, A + 2^(j+3), by omega, by omega, hAmod, ?_, hA0, by omega, by omega,
+      fam_lu_diag (j+2) Y A A hY3 hA3 hA3 hA0 hAW hY0' (Or.inl rfl)⟩
+    rw [add_pow_mod (j+2) (j+3) A (by omega), hAmod, h]
+  · have hAYlt : A ^^^ Y < 2^(j+3) := Nat.xor_lt_two_pow hA3 hY3
+    refine ⟨A, (A ^^^ Y) + 2^(j+3), by omega, by omega, hAmod, ?_, hA0, by omega, by omega,
+      fam_lu_diag (j+2) Y A (A ^^^ Y) hY3 hA3 hAYlt hA0 hAW hY0' (Or.inr rfl)⟩
+    rw [add_pow_mod (j+2) (j+3) (A ^^^ Y) (by omega), xor_mod_two_pow, hAmod, hYmod, ← h,
+        ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor]
+
+/-- **`REACH` contains every degeneracy line at level `j+4`** — the half `attain_nondeg` does not
+    cover. Together they give `DEG ∪ ND ⊆ REACH_{j+4}`. -/
+theorem ReachD_lines (j Y Y0 a0 b0 : Nat) (hY3 : Y < 2^(j+3)) (hYmod : Y % 2^(j+2) = Y0)
+    (hY00 : Y0 ≠ 0) (ha0b : a0 < 2^(j+2)) (hb0b : b0 < 2^(j+2))
+    (hline : a0 = 0 ∨ a0 = Y0 ∨ b0 = 0 ∨ b0 = Y0 ∨ a0 = b0 ∨ a0 ^^^ b0 = Y0) :
+    ReachD j Y0 (j+4) a0 b0 := by
+  obtain ⟨a, b, ha4, hb4, hamod, hbmod, ha0, hb0, hbY, hq⟩ :=
+    attain_lines j Y Y0 a0 b0 hY3 hYmod hY00 ha0b hb0b hline
+  have e4 : (2:Nat)^(j+4) = 2^(j+3) * 2 := by rw [Nat.pow_succ]
+  exact ⟨Y, a, b, by omega, ha4, hb4, hYmod, hamod, hbmod, ha0, hb0, hbY, hq⟩
+
 end SounioZDFiberAntisym
 
 

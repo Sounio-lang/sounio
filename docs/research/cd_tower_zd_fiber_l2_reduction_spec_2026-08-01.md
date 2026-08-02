@@ -348,10 +348,40 @@ says something about `REACH` if the picked label is still even-weight. It always
 `popcount(Y ≫ (j+2))`'s — and the sign picks exactly the complementary bit. Neither `N12` nor
 `N21` checks this composite on its own.
 
-**What is still measured.** Attainment **on** the six lines — where `Qgen ≠ Qgen'` and the collapse
-does not apply, `REACH` is full, and the witnesses are `N25`'s two explicit families at level
-`j+4`. And that the label `attain_nondeg` produces has **even weight**, i.e. stays inside (♦)'s
-family — `N12`'s popcount arithmetic. Those two are what is left of attainment.
+### ★ Attainment **on** the six lines is Lean-proven too
+
+`attain_lines` / `ReachD_lines`, kernel-checked, no `sorryAx`. There `Qgen ≠ Qgen'` and the
+collapse does not apply, but two of the sixteen rows — `Q'red_low_ul`, `Q'red_low_lu` — have
+almost no side conditions, so **one step suffices** and the descent *stops* at level `j+3`, where
+the value has a closed form:
+
+```lean
+Qgen_zero_left : Qgen L 0 t m = −1        Qgen_diag_neg : Qgen L t t m = −1        (L ≠ 0)
+```
+
+With `H = 2^{j+2}` and **any** label `Y < 2H` with `Y mod H = Y₀` (so the caller takes whichever
+of `Y₀`, `Y₀+H` has even weight), and `x*` from `pick_low`:
+
+| line | `a` | `b` | lands on |
+|---|---|---|---|
+| `a₀ = 0`      | `0 + 2H` | `b*`             | `Qgen Y 0 b*` |
+| `a₀ = Y₀`     | `Y + 2H` | `b*`             | `Qgen Y Y b*` → `Qgen Y 0 b*` |
+| `b₀ = 0`      | `a*`     | `0 + 2H`         | `Qgen Y 0 a*` |
+| `b₀ = Y₀`     | `a*`     | `Y + 2H`         | `Qgen Y Y a*` → `Qgen Y 0 a*` |
+| `a₀ = b₀`     | `a*`     | `a* + 2H`        | `Qgen Y a* a*` |
+| `a₀⊕b₀ = Y₀`  | `a*`     | `(a*⊕Y) + 2H`    | `Qgen Y (a*⊕Y) a*` → `Qgen Y a* a*` |
+
+The `→` steps are `Qgen_coset_left`, already in the tree and unconditional — **no `Qgen'` coset
+lemma is needed**. `N28` pins all six against the measured object: 0/2752 failures, `j = 1…4`,
+every `Y₀` with `lsb j`, both labels, every point of every line.
+
+**And this is where the boundary comes from.** `Qgen` is `−1` on the diagonal; `Qgen'` is `+1`
+(`Qgen'_diag`). That single disagreement is why level `j+3` — where a corner forces `a = b` — has
+no witness, and why level `j+4`, which has room for `a ≠ b`, does.
+
+**What is still measured.** That the label `attain_nondeg` produces has **even weight**, i.e.
+stays inside (♦)'s family — `N12`'s popcount arithmetic, checked composite in `N27`. And
+`REACH ⊆ {D = +1}`, untouched throughout.
 
 **The correction.** `N15`'s clean-locus predicate does **not** cover `REACH`: for `Y₀ = 2^j` there
 are 8, 16, 32, 64 reachable points outside it at `j = 0,1,2,3`. The blocked tuples land strictly
@@ -401,4 +431,4 @@ outside the family §2c described. `REACH`, not that predicate, is the object.
 python3 scripts/research/cd_tower_zd_fiber_l2_reduction_contract.py
 ```
 
-Twenty-eight clauses, `N0`–`N27`, single verdict token. Runs in about 17 s.
+Twenty-nine clauses, `N0`–`N28`, single verdict token. Runs in about 17 s.
