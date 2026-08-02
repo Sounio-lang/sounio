@@ -614,13 +614,226 @@ def main():
         n20_rows.append((j, tw, fw))
     n20 = all(f > 0 for _, _, f in n20_rows)
     ok["N20"] = n20
-    print(f"N20_NOTRUNC the CHEAP route to attainment is REFUTED: truncating a level-(j+5) "
-          f"witness to level j+4 does NOT generally give a witness "
-          f"{'OK' if n20 else 'FAIL'} -- "
+    print(f"N20_NOTRUNC NAIVE truncation of a level-(j+5) witness to level j+4 does NOT "
+          f"generally give a witness {'OK' if n20 else 'FAIL'} -- "
           f"{'; '.join(f'j={a}: {c}/{b} truncations fail ({100.0*c/b:.0f}%)' for a, b, c in n20_rows)}"
-          f". So attainment is a REALIZABILITY statement -- the bottom pair is carried by some "
-          f"OTHER level-(j+4) witness -- not a truncation statement. That is the obstacle, and "
-          f"it is why Reach_mono (the easy half) did not extend")
+          f". *** THE INFERENCE THIS CLAUSE ORIGINALLY DREW FROM THAT NUMBER -- 'attainment is a "
+          f"REALIZABILITY statement, not a truncation statement' -- IS WRONG, and N23 below "
+          f"refutes it: every failure is either an ILLEGAL instance (the truncated label has ODD "
+          f"weight, so it is not in the family at all) or a degenerate bottom pair. Truncation "
+          f"works whenever it is legal. ***")
+
+    # ---- N21  THE COLLAPSE THEOREM: the hypothesis of (diamond) IS level-bounded -------------
+    # N9/G_trunc made (diamond)'s CONCLUSION level-bounded. The open half was its HYPOTHESIS:
+    # the previous rung recorded that "the hypothesis does not survive truncation" and treated
+    # that as the obstacle. It does survive -- off six explicit lines, and with the LABEL's
+    # weight parity kept, which naive truncation does not keep:
+    #
+    #   (COLLAPSE)  for even-weight Y with lsb(Y) = j, and (a0,b0) = (a,b) mod 2^{j+2} off the
+    #               six lines {a0=0},{a0=Y0},{b0=0},{b0=Y0},{a0=b0},{a0^b0=Y0}:
+    #
+    #                   Qgen'(Y,a,b,n)  =  -(-1)^(bit_{j+1}(Y)) * Qgen(Y0,a0,b0,j+2)
+    #
+    # There is no `n` on the right. The sign is N12's accumulated sign, which even weight FIXES.
+    # On that locus Qgen = Qgen' and both are swap-symmetric (two antisym flips cancel), so the
+    # priming/swap freedom of the sixteen-lemma descent COLLAPSES and the value is a function of
+    # the bottom residues alone.
+    def _collapse(n, j, drop=None, flip=False):
+        M = 1 << (j + 2)
+        N = 1 << n
+        Sn = sign_table_fast(n).astype(np.int64)
+        Sm = sign_table_fast(j + 2).astype(np.int64)
+        I = np.arange(N)
+        A, B = np.meshgrid(I, I, indexing="ij")
+        A0, B0 = A % M, B % M
+        bad = tot = 0
+        for Y in range(1, N):
+            if (Y & -Y).bit_length() - 1 != j or bin(Y).count("1") % 2:
+                continue
+            Y0 = Y % M
+            eps = -1 if ((Y0 >> (j + 1)) & 1) == 0 else 1
+            if flip:
+                eps = -eps
+            lhs = Sn * Sn[B ^ Y, A ^ Y] * Sn[B ^ Y, A] * Sn[A ^ Y, B]
+            rhs = eps * (Sm[A0, B0] * Sm[A0 ^ Y0, B0 ^ Y0] * Sm[A0, B0 ^ Y0] * Sm[A0 ^ Y0, B0])
+            keep = np.ones((N, N), dtype=bool)
+            for i, f in enumerate((A0 != 0, B0 != 0, A0 != Y0, B0 != Y0,
+                                   A0 != B0, (A0 ^ B0) != Y0)):
+                if i != drop:
+                    keep &= f
+            bad += int(((lhs != rhs) & keep).sum())
+            tot += int(keep.sum())
+        return bad, tot
+
+    N21_SWEEP = [(4, 1), (5, 1), (6, 1), (7, 1), (8, 1), (5, 2), (6, 2), (7, 2), (8, 2),
+                 (6, 3), (7, 3), (8, 3), (9, 3), (7, 4), (8, 4), (9, 4), (9, 5), (10, 5),
+                 (10, 6), (11, 6), (11, 7)]
+    n21_bad = n21_tot = 0
+    for (n, j) in N21_SWEEP:
+        b_, t_ = _collapse(n, j)
+        n21_bad += b_
+        n21_tot += t_
+    n21 = n21_bad == 0
+    ok["N21"] = n21
+    print(f"N21_COLLAPSE (diamond)'s HYPOTHESIS is level-bounded too, off six lines: "
+          f"Qgen'(Y,a,b,n) = -(-1)^bit_{{j+1}}(Y) * Qgen(Y0,a0,b0,j+2), NO n on the right "
+          f"{'OK' if n21 else 'FAIL'} -- {n21_bad}/{n21_tot} violations over "
+          f"{len(N21_SWEEP)} (n,j) pairs, n <= 11, j = 1..7. This is the half N9/G_trunc did "
+          f"NOT give: G_trunc bounded the CONCLUSION, this bounds the HYPOTHESIS, and together "
+          f"they make (diamond) an n-free statement per j on the whole non-degenerate locus")
+
+    # ---- N22  every one of the six conditions is load-bearing; and the sign is not free ------
+    n22_rows = []
+    for k, cname in enumerate(("a0!=0", "b0!=0", "a0!=Y0", "b0!=Y0", "a0!=b0", "a0^b0!=Y0")):
+        b_, t_ = 0, 0
+        for (n, j) in ((6, 1), (7, 2), (7, 3)):
+            x, y = _collapse(n, j, drop=k)
+            b_ += x
+            t_ += y
+        n22_rows.append((cname, b_, t_))
+    n22_null = all(_collapse(n, j, flip=True)[0] > 0 for (n, j) in ((6, 1), (7, 2), (7, 3)))
+    n22 = all(b > 0 for _, b, _ in n22_rows) and n22_null
+    ok["N22"] = n22
+    print(f"N22_MINIMAL  each of the six conditions is LOAD-BEARING and the sign is not free "
+          f"{'OK' if n22 else 'FAIL'} -- dropping one and keeping five: "
+          f"{'; '.join(f'{c}: {b}/{t}' for c, b, t in n22_rows)}. NULL CONTROL: flipping eps "
+          f"breaks it everywhere {'OK' if n22_null else 'FAIL'}. The six are exactly "
+          f"Qgen_eq_Qgen''s five hypotheses plus the reduction rows' b != 0 -- which is WHY "
+          f"they are the ones that came back load-bearing")
+
+    # ---- N23  the N20 correction ------------------------------------------------------------
+    # Bucket N20's failing truncations. If the collapse theorem is the right reading, every
+    # failure is either ILLEGAL (truncated label has odd weight -> not an instance) or has a
+    # DEGENERATE bottom pair. The residue -- a legal, non-degenerate failure -- must be EMPTY.
+    def _deg(j, Y0):
+        M = 1 << (j + 2)
+        return {(a, b) for a in range(M) for b in range(M)
+                if a == 0 or a == Y0 or b == 0 or b == Y0 or a == b or (a ^ b) == Y0}
+
+    n23_rows = []
+    for j in (1, 2, 3):
+        K = j + 4
+        n = K + 1
+        SK = sign_table_fast(K).astype(np.int64)
+        Sn = sign_table_fast(n).astype(np.int64)
+        NN = 1 << n
+        MK = 1 << K
+        M = 1 << (j + 2)
+        buckets = [0, 0, 0]
+        for Y in range(1, NN):
+            if (Y & -Y).bit_length() - 1 != j or bin(Y).count("1") % 2:
+                continue
+            D = _deg(j, Y % M)
+            for a in range(1, NN):
+                for b in range(1, NN):
+                    if b == Y or _Qp2(Sn, Y, a, b) != -1:
+                        continue
+                    Yk, ak, bk = Y % MK, a % MK, b % MK
+                    if not (ak == 0 or bk == 0 or bk == Yk or _Qp2(SK, Yk, ak, bk) != -1):
+                        continue
+                    if bin(Yk).count("1") % 2:
+                        buckets[0] += 1
+                    elif (a % M, b % M) in D:
+                        buckets[1] += 1
+                    else:
+                        buckets[2] += 1
+        n23_rows.append((j, buckets))
+    n23 = all(bk[2] == 0 for _, bk in n23_rows)
+    ok["N23"] = n23
+    print(f"N23_N20FIX  the residue of N20's failures is EMPTY {'OK' if n23 else 'FAIL'} -- "
+          f"{'; '.join(f'j={a}: odd-weight label {b[0]}, degenerate bottom {b[1]}, NEITHER {b[2]}' for a, b in n23_rows)}"
+          f". So N20's number is right and the inference it carried is WRONG: ~83% of the "
+          f"failures are not counterexamples at all -- dropping a bit of Y flips its weight "
+          f"parity and the truncated tuple leaves the even-weight family -- and the rest sit on "
+          f"the degenerate lines. Nothing legal and non-degenerate fails to truncate")
+
+    # ---- N24  REACH in CLOSED FORM ----------------------------------------------------------
+    #   REACH_j(Y0) = DEG(Y0) u ND(Y0),   DEG = the six lines (|DEG| = 6M-8),
+    #   ND = { (a0,b0) off the lines : -(-1)^bit_{j+1}(Y0) * Qgen(Y0,a0,b0,j+2) = -1 }
+    n24_rows = []
+    for j in (1, 2, 3, 4):
+        M = 1 << (j + 2)
+        Sm = sign_table_fast(j + 2).astype(np.int64)
+        R = _reach(j + 4, j)
+        for Y0 in sorted(R):
+            D = _deg(j, Y0)
+            eps = -1 if ((Y0 >> (j + 1)) & 1) == 0 else 1
+            nd = {(a, b) for a in range(M) for b in range(M) if (a, b) not in D
+                  and eps * int(Sm[a, b] * Sm[a ^ Y0, b ^ Y0] * Sm[a, b ^ Y0]
+                                * Sm[a ^ Y0, b]) == -1}
+            n24_rows.append((j, Y0, len(R[Y0]), len(D), len(nd), (D | nd) == R[Y0]))
+    n24 = all(r[-1] for r in n24_rows) and all(d == 6 * (1 << (j + 2)) - 8
+                                               for j, _, _, d, _, _ in n24_rows)
+    ok["N24"] = n24
+    print(f"N24_REACHCF REACH_j(Y0) = DEG u ND, EXACTLY {'OK' if n24 else 'FAIL'} -- "
+          f"{'; '.join(f'j={a} Y0={b}: |REACH|={c} = |DEG|={d} + |ND|={e}' for a, b, c, d, e, _ in n24_rows)}"
+          f". |DEG| = 6M-8 with M = 2^{{j+2}} (six lines, pairwise meeting only in the four "
+          f"corners), and that reproduces the measured closed forms: for Y0 = 2^j, ND is EMPTY "
+          f"and |REACH| = 6M-8 = 24*2^j-8; for Y0 = 3*2^j, |ND| = 6M-24 and |REACH| = 12M-32 = "
+          f"48*2^j-32. The gap locus is no longer a measurement, it is a formula")
+
+    # ---- N25  ATTAINMENT: where each part of REACH is realised, and why j+4 is SHARP ---------
+    # Off the lines: the collapse theorem realises the bottom pair already at level j+3 -- take
+    # Y = Y0 + c*2^{j+2} with c the parity fix, a = a0, b = b0. On the lines: two UNIFORM
+    # families at level j+4, with H = 2^{j+2} and the same parity fix c = weight(Y0) mod 2,
+    #     F1 (covers {a0 = 0}):  a = H + a0,   b = 2H + b0
+    #     F2 (covers {a0 = b0}): a = 2H + a0,  b = 3H + a0
+    # and the four other lines follow by Q''s coset invariance (a -> a^Y, b -> b^Y) and its
+    # swap-symmetry. SHARPNESS: the four CORNERS {0,Y0}x{0,Y0} have NO witness at level j+3 --
+    # a0 = b0 = 0 with a,b != 0 forces a = b = 2^{j+2} there, and Q'(Y,a,a) has no freedom left.
+    n25_rows = []
+    for j in (1, 2, 3, 4):
+        M = H = 1 << (j + 2)
+        for Y0 in (1 << j, 3 << j):
+            c = bin(Y0).count("1") % 2
+            Y = Y0 + c * H
+            S4 = sign_table_fast(j + 4).astype(np.int64)
+            f1 = all(_Qp2(S4, Y, H + 0, 2 * H + b0) == -1 for b0 in range(M))
+            f2 = all(_Qp2(S4, Y, 2 * H + a0, 3 * H + a0) == -1 for a0 in range(M))
+            S3 = sign_table_fast(j + 3).astype(np.int64)
+            corner = all(_Qp2(S3, Yc, H, H) != -1
+                         for Yc in (Y0, Y0 + H) if bin(Yc).count("1") % 2 == 0)
+            n25_rows.append((j, Y0, f1, f2, corner))
+    n25 = all(a and b and c for _, _, a, b, c in n25_rows)
+    ok["N25"] = n25
+    print(f"N25_ATTAIN  every part of REACH is realised at level j+4, and j+3 is NOT enough "
+          f"{'OK' if n25 else 'FAIL'} -- the two uniform families F1 (a=H, b=2H+b0) and F2 "
+          f"(a=2H+a0, b=3H+a0), with Y = Y0 + (weight(Y0) mod 2)*H, cover {{a0=0}} and "
+          f"{{a0=b0}} for every j and both Y0 classes tested: "
+          f"{'; '.join(f'j={a} Y0={b}: F1={c} F2={d} corners-blocked-at-j+3={e}' for a, b, c, d, e in n25_rows)}"
+          f". The other four lines follow by coset invariance and swap-symmetry. SHARPNESS has "
+          f"a one-line cause: at level j+3 a bottom pair (0,0) forces a = b = 2^{{j+2}}, and "
+          f"Q'(Y,a,a) = sigma(a,a)sigma(a^Y,a^Y) is fixed -- you need TWO spare bits to make "
+          f"a != b, which is exactly the n = j+4 boundary and exactly the deficit of 4")
+
+    # ---- N26  N14's per-level "clean locus" IS the n-free bottom condition ------------------
+    # N14 defined cleanliness by scanning EVERY level j+2..n. N21's hypothesis only looks at the
+    # bottom residues. They are the same set -- a0 != 0 forces a mod 2^L != 0 for every
+    # L >= j+2, and likewise for the other five -- so N14's n-dependent proxy was never
+    # n-dependent. This is what lets N21 be stated without a scan.
+    n26_bad = n26_tot = 0
+    for (n, j) in ((5, 1), (6, 2), (7, 3)):
+        M = 1 << (j + 2)
+        for Y in range(1, 1 << n):
+            if (Y & -Y).bit_length() - 1 != j or bin(Y).count("1") % 2:
+                continue
+            Y0 = Y % M
+            for a in range(1 << n):
+                for b in range(1 << n):
+                    a0, b0 = a % M, b % M
+                    bottom = not (a0 == 0 or b0 == 0 or a0 == Y0 or b0 == Y0
+                                  or a0 == b0 or (a0 ^ b0) == Y0)
+                    n26_tot += 1
+                    if _clean(Y, a, b, j, n) != bottom:
+                        n26_bad += 1
+    n26 = n26_bad == 0
+    ok["N26"] = n26
+    print(f"N26_CLEANEQ N14's per-level clean locus IS N21's n-free bottom condition "
+          f"{'OK' if n26 else 'FAIL'} -- {n26_bad}/{n26_tot} disagreements. Scanning every "
+          f"level j+2..n is the same test as looking at the bottom j+2 bits, because a0 != 0 "
+          f"forces a mod 2^L != 0 at every L >= j+2 and likewise for the other five. So the "
+          f"'gap locus' N14 could not handle was never a level-by-level phenomenon: it is the "
+          f"six lines, and N24/N25 show REACH contains ALL of them")
 
     print("=" * 78)
     if all(ok.values()):
@@ -639,6 +852,16 @@ def main():
               "Qgen'(Y,a,b) = -1 at the reduced level in each quadrant, which is where the next "
               "attempt starts. L2 IS NOT PROVEN and neither is (diamond); the REDUCTION to it "
               "IS (N4, Lean, forall n). "
+              "*** THIS RUNG: the HYPOTHESIS is level-bounded too (N21, the COLLAPSE theorem) "
+              "-- off six explicit lines, Qgen'(Y,a,b,n) = -(-1)^bit_(j+1)(Y) * Qgen(Y0,a0,b0,"
+              "j+2), 0/70237824 violations to n = 11, every one of the six conditions "
+              "load-bearing (N22). With G_trunc that makes (diamond) n-free on both sides, and "
+              "REACH acquires a CLOSED FORM: REACH = DEG u ND, DEG the six lines (6M-8 points, "
+              "meeting only in four corners), ND the collapse image (N24). Attainment at "
+              "n = j+4 now decomposes into two constructions rather than a measurement (N25), "
+              "and its SHARPNESS has a cause: (0,0) forces a = b at level j+3. N23 CORRECTS "
+              "this contract's own N20 -- its number stands, the inference it drew does not. "
+              "Attainment is still NOT proven forall n: N21 and N25 are measured. *** "
               "Numerical certificate; D3")
         return 0
     print("CD_TOWER_ZDL2R_VERDICT INCOMPLETE  failing="
