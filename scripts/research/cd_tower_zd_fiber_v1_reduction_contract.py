@@ -258,13 +258,77 @@ def main():
               f"vacuous {'OK' if w7 else 'FAIL'}")
     ok["W7"] = w7
 
+    # ---- W8  (c) IS CLOSED, so V1 = (d) ALONE ----------------------------------------------
+    # `SounioZDCollapse.parity_collapse` (2026-08-02) proves Phi is an isomorphism of the SIGNED
+    # annihilation graph between an even-weight seam fiber and its Fano partner, forall n, with
+    # BOTH sign identities discharged ((*) = star_forall, L2 = L2_forall). An isomorphism of the
+    # signed graph forces equal spectra, which IS the merge.
+    #
+    # FOUR things the orbit arithmetic silently assumes, checked here:
+    #   (i)   the theorem's hypotheses hold on EVERY even-weight seam (no stratum left out);
+    #   (ii)  the merge it forces really happens (spectra coincide);
+    #   (iii) tau W lands in a FANO orbit, not another seam -- otherwise the merge would be
+    #         seam<->seam and the arithmetic would be different;
+    #   (iv)  the even-weight seams number 2^{n-5}-1.
+    # And one thing the arithmetic does NOT need, recorded because assuming it would be WRONG:
+    #   (v)   the map (even-weight seam) -> (its Fano orbit) is NOT injective. It collapses
+    #         2^{n-5}-1 seams onto 2^{n-6} orbits, because tau clears the lowest set bit of
+    #         y = W>>3, so y = 5 and y = 6 both land on y = 4. The subtraction is still right:
+    #         each merged seam is removed ONCE regardless of where it lands.
+    def _tau(x, j):
+        b0, bj = x & 1, (x >> j) & 1
+        return x ^ (1 | (1 << j)) if b0 != bj else x
+
+    w8_rows = []
+    w8 = True
+    for n in SPEC_N:
+        S = sign_table_fast(n)
+        H = 1 << (n - 1)
+        even = [W for W in range(8, H, 8) if bin(W >> 3).count("1") % 2 == 0]
+        hyp_bad = fano_bad = merge_bad = 0
+        imgs = []
+        for W in even:
+            j = (W & -W).bit_length() - 1
+            if not (W < H and W % 2 ** (j + 1) == 2 ** j
+                    and bin(W).count("1") % 2 == 0 and j + 2 <= n - 1):
+                hyp_bad += 1
+            Wt = _tau(W, j)
+            if (Wt & 7) == 0:
+                fano_bad += 1
+            imgs.append(Wt >> 3)
+            e1 = np.round(np.linalg.eigvalsh(A_sig_fast(n, W, S).astype(np.float64)), 6)
+            e2 = np.round(np.linalg.eigvalsh(A_sig_fast(n, Wt, S).astype(np.float64)), 6)
+            if not np.allclose(e1, e2, atol=1e-6):
+                merge_bad += 1
+        cnt_ok = (len(even) == 2 ** (n - 5) - 1)
+        noninj = (len(set(imgs)) < len(even)) if len(even) > 1 else True
+        w8 = w8 and hyp_bad == 0 and fano_bad == 0 and merge_bad == 0 and cnt_ok and noninj
+        w8_rows.append((n, len(even), hyp_bad, fano_bad, merge_bad, cnt_ok, len(set(imgs))))
+    ok["W8"] = w8
+    print(f"W8_CCLOSED  (c) IS CLOSED forall n -- so V1 = (d) ALONE {'OK' if w8 else 'FAIL'} -- "
+          + "; ".join(f"n={a}: {b} even-weight seams, hyp-fail {c}, tauW-not-Fano {d}, "
+                      f"merge-fail {e}, count=2^(n-5)-1 {f}, distinct Fano images {g}"
+                      for a, b, c, d, e, f, g in w8_rows)
+          + ". `SounioZDCollapse.parity_collapse` (kernel-checked, no sorryAx) makes Phi an "
+            "isomorphism of the SIGNED annihilation graph between an even-weight seam fiber and "
+            "its Fano partner, forall n, with BOTH sign identities discharged: (*) = "
+            "`star_forall`, L2 = `L2_forall`. j = lsb(W) >= 3 for a seam and j <= n-3 is "
+            "automatic (j = n-2 forces W = 2^(n-2), which has ODD weight), so the theorem covers "
+            "EVERY even-weight seam. *** AND ONE THING THE ARITHMETIC DOES NOT NEED, recorded "
+            "because assuming it would be WRONG: the map (even-weight seam) -> (its Fano orbit) "
+            "is NOT injective -- tau clears the LOWEST SET BIT of y = W>>3, so y = 5 and y = 6 "
+            "both land on y = 4, and 2^(n-5)-1 seams collapse onto 2^(n-6) orbits. The "
+            "subtraction is still right because each merged seam is removed ONCE regardless of "
+            "where it lands. *** WHAT REMAINS OF V1 IS (d) ALONE: that the 2^(n-4) Fano orbits "
+            "are pairwise non-cospectral and that no odd-weight seam merges")
+
     print("=" * 78)
     if all(ok.values()):
-        print("CD_TOWER_ZDV1_VERDICT V1_REDUCED_TO_TWO_INTEGERS__NOT_CLOSED")
+        print("CD_TOWER_ZDV1_VERDICT C_CLOSED__V1_REDUCED_TO_D_ALONE__NOT_CLOSED")
         print("CD_TOWER_ZDV1_NOTE V1 decomposes as orbit arithmetic (W1): 2^{n-4} Fano orbits "
               "(PROVEN forall n) + 2^{n-4}-1 seams, spectrum constant per orbit (W2, PROVEN "
               "forall n), minus 2^{n-5}-1 even-weight seam merges = 3*2^{n-5}. So V1 forall n = "
-              "(c) the parity-collapse law forall n [still n<=8] AND (d) no further collapse. "
+              "(c) the parity-collapse law forall n [*** CLOSED 2026-08-02, W8: `SounioZDCollapse.parity_collapse`, kernel-checked ***] AND (d) no further collapse. "
               "THIS RUNG REDUCES (d): the pair (tr A^2, tr A^3) -- edge count and signed "
               "triangle count -- induces EXACTLY the spectral partition block-for-block (W3, "
               "n<=9) and yields 3*2^{n-5} classes at n=6..11 (W4, six levels). So (d) turns from "
@@ -272,8 +336,10 @@ def main():
               "alone suffices (W5: tr A^1 = 0, tr A^2 alone gives only 2^{n-4}). tr(A^2) has a "
               "closed form ONLY on the narrow stratum where it is constant -- y=0 Fano plus the WEIGHT-1 seams, 7+(n-3) fibers (W6) -- the general form is "
               "NOT derived and appears to need the degree-histogram induction, which is OPEN. "
-              "V1 IS NOT CLOSED: (d) still needs a closed form PLUS a forall-n injectivity "
-              "proof, and (c) is untouched. Numerical certificate; D3 respected")
+              "V1 IS NOT CLOSED, but it is now (d) ALONE: (d) still needs a closed form PLUS a "
+              "forall-n injectivity proof. Measured structure to start from: the isolated vertex "
+              "is a = Llo itself, every other degree is 4*odd, and the degree histogram is "
+              "governed by the binary structure of y = Llo>>3. Numerical certificate; D3 respected")
         return 0
     print("CD_TOWER_ZDV1_VERDICT INCOMPLETE  failing=" +
           ",".join(k for k, v in ok.items() if not v))

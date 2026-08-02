@@ -17,7 +17,8 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.cd-to
 
 **Date:** 2026-07-31
 **Orthography:** EN-UK
-**Status:** `EXECUTABLE` — `V1_REDUCED_TO_TWO_INTEGERS__NOT_CLOSED`
+**Status:** `EXECUTABLE` — `C_CLOSED__V1_REDUCED_TO_D_ALONE__NOT_CLOSED`
+**Update 2026-08-02:** **(c) is CLOSED** — `SounioZDCollapse.parity_collapse`, kernel-checked ∀n. **V1 is now (d) alone.**
 **Parents:** `cd_tower_zd_fiber_antisymmetry_lemma_spec_2026-07-31.md`, `cd_tower_zd_fiber_spectral_forall_n_progress_2026-07-26.md`, `cd_tower_zd_fiber_spectral_classifier_2026-07-26.md`
 **Harness:** `scripts/research/cd_tower_zd_fiber_v1_reduction_contract.py`
 
@@ -50,7 +51,7 @@ Two things come out:
 |---|---|
 | (a) the orbit split `2^{n-4}` Fano + `2^{n-4}−1` fixed seams | **proven ∀n** — the orbit theorem |
 | (b) the spectrum is constant on each orbit | **proven ∀n** — the automorphism is an algebra map, hence a graph isomorphism |
-| (c) the even-weight seams merge, exactly `2^{n-5}−1` of them | parity-collapse law; explicit `Φ` verified `n ≤ 8`, ∀n reduces to two σ-lemmas — **OPEN** |
+| (c) the even-weight seams merge, exactly `2^{n-5}−1` of them | parity-collapse law — **PROVEN ∀n 2026-08-02** (`SounioZDCollapse.parity_collapse`; both σ-lemmas discharged: (★) = `star_forall`, L2 = `L2_forall`) |
 | (d) **nothing else merges** | **OPEN** — this rung reduces it |
 
 The arithmetic between them is trivial. So **V1 ∀n = (c) ∀n and (d) ∀n**, and nothing else.
@@ -112,17 +113,30 @@ values appears to need the degree-histogram induction, which this lane records a
 
 ## 4. Not claimed
 
-- **V1 is not closed.** Neither (c) nor (d) is proven ∀n.
+- **V1 is not closed** — but as of 2026-08-02 it is **(d) alone**. (c) is proven ∀n
+  (`W8`: the theorem's hypotheses hold on *every* even-weight seam, the merge it forces
+  really happens, and the count is `2^{n-5}−1`). (d) is untouched.
 - **(d) is reduced, not proven.** Closing it needs **two** things, and both are open: a closed
   form for `(tr A², tr A³)` in terms of the fiber label, *and* a proof that that form is
   injective on the `3·2^{n-5}` classes for all `n`. Six levels of agreement is evidence, not a
   proof — a form that collides at some larger `n` would leave (d) exactly where it was.
-- **(c) is untouched** by this rung and remains `n ≤ 8`. It is plausibly the cheaper of the two:
-  its two σ-lemmas (`τ` preserves resonance; the discrepancy is a coboundary) have the same
-  shape as `A4_sub` in the parent rung — an F₂ sign identity provable by induction through the
-  four branch reductions — and that toolkit is now in-tree.
-- **Numerical certificate**, exact integer sign table, `D3` class. Nothing here is Lean-proven;
-  the parent rung's Lean file covers the antisymmetry lemma, not this decomposition.
+- **(c) is CLOSED** (2026-08-02). `Φ` is an isomorphism of the *signed* annihilation
+  graph between an even-weight seam fiber and its Fano partner, ∀n, with both sign
+  identities discharged. An isomorphism of the signed graph forces equal spectra, which
+  is the merge; the count `2^{n-5}−1` is the elementary fact that half of `y ∈ [1,2^{n-4})`
+  have even popcount. `j = lsb W ≥ 3` for a seam and `j ≤ n−3` is automatic, since
+  `j = n−2` forces `W = 2^{n-2}`, which has **odd** weight — so no stratum is left out.
+
+- ⚠ **The merge map is NOT injective, and assuming it were would be wrong.** `τ` clears the
+  **lowest set bit** of `y = W ≫ 3`, so `y = 5` and `y = 6` both land on `y = 4`: the
+  `2^{n-5}−1` even-weight seams collapse onto only `2^{n-6}` Fano orbits. The subtraction is
+  still right — each merged seam is removed *once*, regardless of where it lands — but the
+  natural reading "each even-weight seam merges into its own Fano orbit" is false. `W8` asserts
+  the non-injectivity so nobody re-derives the arithmetic from it.
+
+- **What is left of V1 is (d) alone**: that the `2^{n-4}` Fano orbits are pairwise
+  non-cospectral, and that no odd-weight seam merges. The concrete starting point measured here:
+  the isolated vertex is `a = Llo` itself, and every other degree is `4·odd`.
 
 ---
 
