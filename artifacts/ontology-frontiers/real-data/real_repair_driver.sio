@@ -1,0 +1,332 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+// Real-data validation of the verified ontology pipeline
+// (subsumption closure fixpoint -> derived conflicts -> greedy epistemic
+// repair) on the OAEI 2016 Anatomy track: adult mouse anatomy (MA,
+// mouse.owl) vs NCI Thesaurus human anatomy (human.owl), with candidate
+// mappings from a lexical label matcher (see lexical_match.py).
+//
+// Data lives in the generated sibling module tbox_data.sio
+// (gen_sounio_data.py): parallel primitive arrays with splat init, exactly
+// as in the miniature prototypes el-grounding/el_conflict_demo.sio and
+// epistemic-alignment-repair/alignment_repair.sio — same algorithms, real
+// ontologies.  Id pairs are packed as a*10000+b (all ids < 10000) to keep
+// the generated module under the Madaros multimodule thin-link statement
+// budget (see REAL_RESULTS.md).  tbox_data.sio also embeds the outputs of
+// an independent python mirror of the pipeline as expected_*() functions;
+// the checks below verify (a) the internal sanity conditions and (b)
+// exact agreement with the mirror:
+//
+//   (1) closure is reflexive on the diagonal;
+//   (2) derived conflict relation is symmetric and has the mirror's size;
+//   (3) greedy repair is conflict-free, matches the mirror's kept/dropped
+//       counts, and every dropped mapping has a maximality witness;
+//   (4) the five dropped mappings with lowest confidence match the mirror.
+//
+// NOTE: arrays of structs and `where` refinement clauses are unsupported,
+// so everything uses parallel primitive arrays and runtime assertions.
+// Confidences are exact integers per-10000 (0.3333 -> 3333): Madaros
+// silently drops f64 array-element assignments inside non-main functions,
+// and integer comparison keeps the repair epistemics exact.
+
+import tbox_data::*
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var n_fail = 0
+
+    init_data()
+
+    let H = expected_h()        // human classes kept (cap 2000)
+    let N_SUB = expected_sub()  // subsumption axioms kept
+    let M = expected_mappings() // candidate mappings
+
+    // ── Subsumption closure fixpoint over the human TBox ────────────────
+    var c: i64 = 0
+    while c < H {
+        clos[c * H + c] = true
+        c = c + 1
+    }
+    var e: i64 = 0
+    var pk: i64 = 0
+    var lo: i64 = 0
+    while e < N_SUB {
+        pk = h_sub[e]
+        lo = pk - (pk / 10000) * 10000
+        clos[(pk / 10000) * H + lo] = true
+        e = e + 1
+    }
+    var changed = true
+    while changed {
+        changed = false
+        var a: i64 = 0
+        while a < H {
+            var b: i64 = 0
+            while b < H {
+                if clos[a * H + b] {
+                    var d: i64 = 0
+                    while d < H {
+                        if clos[b * H + d] {
+                            if !clos[a * H + d] {
+                                clos[a * H + d] = true
+                                changed = true
+                            }
+                        }
+                        d = d + 1
+                    }
+                }
+                b = b + 1
+            }
+            a = a + 1
+        }
+    }
+
+    // ── Check (1): closure reflexive on the diagonal ────────────────────
+    c = 0
+    while c < H {
+        if !clos[c * H + c] {
+            println("FAIL: closure not reflexive on diagonal")
+            n_fail = n_fail + 1
+        }
+        c = c + 1
+    }
+
+    // ── Disjointness expanded through the closure ───────────────────────
+    // disj_c[c1][c2] iff c1, c2 reach a disjoint pair through the closure.
+    var d1: i64 = 0
+    while d1 < H {
+        var d2: i64 = 0
+        while d2 < H {
+            if h_disj[d1 * H + d2] {
+                var c1: i64 = 0
+                while c1 < H {
+                    if clos[c1 * H + d1] {
+                        var c2: i64 = 0
+                        while c2 < H {
+                            if clos[c2 * H + d2] {
+                                disj_c[c1 * H + c2] = true
+                                disj_c[c2 * H + c1] = true
+                            }
+                            c2 = c2 + 1
+                        }
+                    }
+                    c1 = c1 + 1
+                }
+            }
+            d2 = d2 + 1
+        }
+        d1 = d1 + 1
+    }
+
+    // ── Derived conflicts: same mouse entity, disjoint human targets ────
+    var ei: i64 = 0
+    var ci2: i64 = 0
+    var ej: i64 = 0
+    var cj2: i64 = 0
+    var n_conf: i64 = 0
+    var i: i64 = 0
+    while i < M {
+        ei = m_pack[i] / 10000
+        ci2 = m_pack[i] - ei * 10000
+        var j: i64 = 0
+        while j < M {
+            if i != j {
+                ej = m_pack[j] / 10000
+                if ei == ej {
+                    cj2 = m_pack[j] - ej * 10000
+                    if disj_c[ci2 * H + cj2] {
+                        n_conf = n_conf + 1
+                    }
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    if n_conf != expected_derived_conflicts() {
+        println("FAIL: derived conflict count disagrees with python mirror")
+        n_fail = n_fail + 1
+    }
+
+    // ── Check (2): derived conflict relation is symmetric ───────────────
+    var cij = false
+    var cji = false
+    i = 0
+    while i < M {
+        ei = m_pack[i] / 10000
+        ci2 = m_pack[i] - ei * 10000
+        var j: i64 = i + 1
+        while j < M {
+            ej = m_pack[j] / 10000
+            cj2 = m_pack[j] - ej * 10000
+            cij = ei == ej && disj_c[ci2 * H + cj2]
+            cji = ei == ej && disj_c[cj2 * H + ci2]
+            if (cij && !cji) || (!cij && cji) {
+                println("FAIL: derived conflict relation not symmetric")
+                n_fail = n_fail + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // ── Greedy epistemic repair (drop weaker of each live conflict) ─────
+    i = 0
+    while i < M {
+        ei = m_pack[i] / 10000
+        ci2 = m_pack[i] - ei * 10000
+        var j: i64 = i + 1
+        while j < M {
+            if m_keep[i] && m_keep[j] {
+                ej = m_pack[j] / 10000
+                if ei == ej {
+                    cj2 = m_pack[j] - ej * 10000
+                    if disj_c[ci2 * H + cj2] {
+                        if m_conf[i] >= m_conf[j] {
+                            m_keep[j] = false
+                        } else {
+                            m_keep[i] = false
+                        }
+                    }
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    var n_kept: i64 = 0
+    i = 0
+    while i < M {
+        if m_keep[i] {
+            n_kept = n_kept + 1
+        }
+        i = i + 1
+    }
+    let n_dropped = M - n_kept
+    if n_kept != expected_kept() {
+        println("FAIL: kept count disagrees with python mirror")
+        n_fail = n_fail + 1
+    }
+    if n_dropped != expected_dropped() {
+        println("FAIL: dropped count disagrees with python mirror")
+        n_fail = n_fail + 1
+    }
+
+    // ── Check (3a): retained set is conflict-free ───────────────────────
+    i = 0
+    while i < M {
+        ei = m_pack[i] / 10000
+        ci2 = m_pack[i] - ei * 10000
+        var j: i64 = i + 1
+        while j < M {
+            if m_keep[i] && m_keep[j] {
+                ej = m_pack[j] / 10000
+                if ei == ej {
+                    cj2 = m_pack[j] - ej * 10000
+                    if disj_c[ci2 * H + cj2] {
+                        println("FAIL: retained set still has a conflict")
+                        n_fail = n_fail + 1
+                    }
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // ── Check (3b): every dropped mapping has a maximality witness ──────
+    i = 0
+    while i < M {
+        if !m_keep[i] {
+            ei = m_pack[i] / 10000
+            ci2 = m_pack[i] - ei * 10000
+            var witnessed = false
+            var j: i64 = 0
+            while j < M {
+                if m_keep[j] {
+                    ej = m_pack[j] / 10000
+                    if ei == ej {
+                        cj2 = m_pack[j] - ej * 10000
+                        if disj_c[ci2 * H + cj2] {
+                            if m_conf[j] >= m_conf[i] {
+                                witnessed = true
+                            }
+                        }
+                    }
+                }
+                j = j + 1
+            }
+            if !witnessed {
+                println("FAIL: dropped mapping lacks witness")
+                n_fail = n_fail + 1
+            }
+        }
+        i = i + 1
+    }
+
+    // ── Check (4): top-5 dropped by confidence (lowest first) ───────────
+    var chosen: [i64; 5] = [0 - 1; 5]
+    var k: i64 = 0
+    while k < 5 {
+        var best_id: i64 = 0 - 1
+        var best_conf: i64 = 20000
+        i = 0
+        while i < M {
+            if !m_keep[i] {
+                var already = false
+                var t: i64 = 0
+                while t < k {
+                    if chosen[t] == i {
+                        already = true
+                    }
+                    t = t + 1
+                }
+                if !already {
+                    if m_conf[i] < best_conf || (m_conf[i] == best_conf && (best_id < 0 || i < best_id)) {
+                        best_conf = m_conf[i]
+                        best_id = i
+                    }
+                }
+            }
+            i = i + 1
+        }
+        chosen[k] = best_id
+        if best_id != expected_drop5(k) {
+            println("FAIL: top-5 dropped disagrees with python mirror")
+            n_fail = n_fail + 1
+        }
+        k = k + 1
+    }
+
+    // ── Summary ─────────────────────────────────────────────────────────
+    println("=== OAEI 2016 Anatomy: real-data pipeline validation ===")
+    println("human classes (H):")
+    println(H)
+    println("sub axioms:")
+    println(N_SUB)
+    println("disjoint pairs:")
+    println(expected_disj())
+    println("candidate mappings (M):")
+    println(M)
+    println("derived conflicts (ordered pairs):")
+    println(n_conf)
+    println("kept:")
+    println(n_kept)
+    println("dropped:")
+    println(n_dropped)
+    println("top-5 dropped by confidence (lowest first; conf per-10000):")
+    k = 0
+    while k < 5 {
+        println(chosen[k])
+        println(m_conf[chosen[k]])
+        k = k + 1
+    }
+
+    if n_fail == 0 {
+        println("ALL PASS")
+        return 0
+    }
+    println("FAILURES:")
+    println(n_fail)
+    return 1
+}

@@ -161,6 +161,34 @@ oráculos de conflito continuam abstratos.
   `tie_repair_demo.sio`: `ALL PASS` (determinismo em duas execuções,
   sobreviventes livres de conflito, testemunhas). Math-review xai: PASS.
 
+## Rodada 6 — dados reais + empacotamento (2026-08-02)
+
+- **`real-data/` — validação no OAEI 2016 Anatomy track real**
+  (human.owl 3.304 classes / mouse.owl 2.744, reference.rdf oficial):
+  1.961 classes (cap fechado por ancestrais), 2.266 axiomas sub, 17
+  disjunções, 6.638 mappings candidatos (matcher lexical Jaccard;
+  P=0.187/R=0.817 contra a referência oficial), **368 conflitos derivados
+  (0 entre mappings de referência)**, reparo descarta 246 (conf média
+  0.41 vs 0.55 dos retidos) e **apenas 3 dos 1.238 mappings de
+  referência** — o reparo epistêmico remove preferencialmente
+  não-referências. Driver `real_repair_driver.sio` com espelho python
+  cruzado: `ALL PASS` (~17s). Reprodução completa (URLs, sha256,
+  comandos) em `real-data/REAL_RESULTS.md`.
+- **`stdlib/ontology/` — empacotamento**: `closure.sio`, `repair.sio`,
+  `evolve.sio` (módulos reutilizáveis, convenção `stdlib/algo`) +
+  `examples/ontology_pipeline_demo.sio` end-to-end (`ALL PASS`).
+- **`TECHNICAL_NOTE.md`** — nota técnica externa (5 rodadas, teoremas,
+  limitações); revisão externa `llm-offload --raw`: deepseek PASS 9/10,
+  xai PASS (gemini indisponível — fallback de 2 providers, conforme
+  política).
+- **Novos pitfalls de compilador encontrados** (a propagar para
+  `compiler-repros/` numa próxima rodada): >682 statements por função
+  silenciosamente descartados; arrays splat em nível de módulo com
+  elementos iniciais sujos; atribuição a elemento de array f64 fora de
+  `main` é no-op silencioso; thin-link multimódulo falha além de ~24k
+  assignments; **forma qualificada de import (`mod::f`) miscompila**
+  (mutações `&!` perdidas) — a forma nomeada funciona.
+
 ## Arquivos criados
 
 - `artifacts/ontology-frontiers/{epistemic-alignment-repair,epistemic-claim-status,consistent-ontology-evolution}/FRONTIER.md`
