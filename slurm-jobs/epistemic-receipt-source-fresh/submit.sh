@@ -13,6 +13,7 @@ WORKER_GIT_SSL_VERIFY="${WORKER_GIT_SSL_VERIFY:-true}"
 WORKER_LOWER_TRACE="${WORKER_LOWER_TRACE:-0}"
 WORKER_NV2_IR_TRACE="${WORKER_NV2_IR_TRACE:-0}"
 WORKER_PRESERVE_DIAGNOSTICS="${WORKER_PRESERVE_DIAGNOSTICS:-0}"
+WORKER_INTO_ACC_NO_RESET="${WORKER_INTO_ACC_NO_RESET:-0}"
 WORKER_PROBE="${WORKER_PROBE:-source-fresh-gate}"
 NS="${NS:-slurm-pilot}"
 KUBECTL="${KUBECTL:-kubectl}"
@@ -30,7 +31,8 @@ Usage:
 
 Environment:
   REPO, SOURCE_REF, SOURCE_REMOTE, WORKER_GIT_SSL_VERIFY, WORKER_LOWER_TRACE,
-  WORKER_NV2_IR_TRACE, WORKER_PRESERVE_DIAGNOSTICS, WORKER_PROBE, NS, KUBECTL, PARTITION,
+  WORKER_NV2_IR_TRACE, WORKER_PRESERVE_DIAGNOSTICS, WORKER_INTO_ACC_NO_RESET,
+  WORKER_PROBE, NS, KUBECTL, PARTITION,
   NODELIST, JOB_MEM, JOB_CPUS,
   JOB_TIME, RUN_ID
 
@@ -53,6 +55,9 @@ Set WORKER_PRESERVE_DIAGNOSTICS=1 only for crash localization. It retains a
 compact worker-local log at the printed worker_root after removing the cloned
 source and raw compiler. Fetch that log from the admitted worker pod; OrangeFS
 is never used.
+
+Set WORKER_INTO_ACC_NO_RESET=1 only to classify dependency-arena reboxing. It
+preserves each dependency allocation window instead of resetting it.
 
 WORKER_PROBE=source-fresh-gate runs the acceptance gate. WORKER_PROBE=block-ladder
 builds the same raw ELF and runs twelve generated worker-local programs to locate
@@ -93,6 +98,7 @@ fi
 [[ "$WORKER_LOWER_TRACE" == '0' || "$WORKER_LOWER_TRACE" == '1' ]] || fail "invalid WORKER_LOWER_TRACE: $WORKER_LOWER_TRACE"
 [[ "$WORKER_NV2_IR_TRACE" == '0' || "$WORKER_NV2_IR_TRACE" == '1' ]] || fail "invalid WORKER_NV2_IR_TRACE: $WORKER_NV2_IR_TRACE"
 [[ "$WORKER_PRESERVE_DIAGNOSTICS" == '0' || "$WORKER_PRESERVE_DIAGNOSTICS" == '1' ]] || fail "invalid WORKER_PRESERVE_DIAGNOSTICS: $WORKER_PRESERVE_DIAGNOSTICS"
+[[ "$WORKER_INTO_ACC_NO_RESET" == '0' || "$WORKER_INTO_ACC_NO_RESET" == '1' ]] || fail "invalid WORKER_INTO_ACC_NO_RESET: $WORKER_INTO_ACC_NO_RESET"
 [[ "$WORKER_PROBE" == 'source-fresh-gate' || "$WORKER_PROBE" == 'block-ladder' || "$WORKER_PROBE" == 'source-to-elf' || "$WORKER_PROBE" == 'assert-exit' || "$WORKER_PROBE" == 'receipt-values' || "$WORKER_PROBE" == 'associator-values' ]] || fail "invalid WORKER_PROBE: $WORKER_PROBE"
 
 SOURCE_COMMIT="$(git -C "$REPO" rev-parse "$SOURCE_REF")"
@@ -135,6 +141,7 @@ WORKER_GIT_SSL_VERIFY="$WORKER_GIT_SSL_VERIFY"
 WORKER_LOWER_TRACE="$WORKER_LOWER_TRACE"
 WORKER_NV2_IR_TRACE="$WORKER_NV2_IR_TRACE"
 WORKER_PRESERVE_DIAGNOSTICS="$WORKER_PRESERVE_DIAGNOSTICS"
+WORKER_INTO_ACC_NO_RESET="$WORKER_INTO_ACC_NO_RESET"
 WORKER_PROBE="$WORKER_PROBE"
 
 cleanup() {
@@ -158,6 +165,7 @@ echo "worker_git_ssl_verify=\$WORKER_GIT_SSL_VERIFY"
 echo "worker_lower_trace=\$WORKER_LOWER_TRACE"
 echo "worker_nv2_ir_trace=\$WORKER_NV2_IR_TRACE"
 echo "worker_preserve_diagnostics=\$WORKER_PRESERVE_DIAGNOSTICS"
+echo "worker_into_acc_no_reset=\$WORKER_INTO_ACC_NO_RESET"
 echo "worker_probe=\$WORKER_PROBE"
 echo "requested_commit=\$EXPECTED_COMMIT"
 echo "requested_tree=\$EXPECTED_TREE"
@@ -193,6 +201,10 @@ fi
 
 if [[ "\$WORKER_NV2_IR_TRACE" == '1' ]]; then
   export SOUNIO_NV2_IR_TRACE=1
+fi
+
+if [[ "\$WORKER_INTO_ACC_NO_RESET" == '1' ]]; then
+  export SOUNIO_INTO_ACC_NO_RESET=1
 fi
 
 chmod +x "\$REPO/bin/souc-linux-x86_64" \\
