@@ -324,6 +324,24 @@ fn empty_lower_derivative_binding_state() -> LowerDerivativeBindingState {
     }
 }
 
+struct LowerRegisterMetadataState {
+    array_elem_float_regs: [i64; 512],
+    array_elem_float_reg_count: i64,
+    variance_base_regs: [i64; 1024],
+    variance_value_regs: [i64; 1024],
+    variance_base_reg_count: i64,
+}
+
+fn empty_lower_register_metadata_state() -> LowerRegisterMetadataState {
+    LowerRegisterMetadataState {
+        array_elem_float_regs: [IR_INVALID_REG; 512],
+        array_elem_float_reg_count: 0,
+        variance_base_regs: [IR_INVALID_REG; 1024],
+        variance_value_regs: [IR_INVALID_REG; 1024],
+        variance_base_reg_count: 0,
+    }
+}
+
 struct Lowerer {
     module: Box<IrModule>,
     epistemic_contests: Box<LowerEpistemicContestIndex>,
@@ -344,11 +362,7 @@ struct Lowerer {
     // Frontend-owned global element types. BSS byte size cannot distinguish
     // `[f64; N]` from `[i64; N]`, so this survives summary -> body lowering.
     global_types: Box<LowerGlobalTypeTable>,
-    array_elem_float_regs: [i64; 512],
-    array_elem_float_reg_count: i64,
-    variance_base_regs: [i64; 1024],
-    variance_value_regs: [i64; 1024],
-    variance_base_reg_count: i64,
+    register_metadata: Box<LowerRegisterMetadataState>,
     // Sprint 28: Debug-mode witness enforcement
     debug_mode: bool,
     // Sprint 44: probe-mode lowering skips heavyweight epistemic metadata lookup.
@@ -560,11 +574,7 @@ fn lowerer_new() -> Lowerer with Alloc {
         enum_variants: Box::new(empty_enum_variant_table()),
         struct_layouts: Box::new(empty_struct_layout_table()),
         global_types: Box::new(empty_lower_global_type_table()),
-        array_elem_float_regs: [IR_INVALID_REG; 512],
-        array_elem_float_reg_count: 0,
-        variance_base_regs: [IR_INVALID_REG; 1024],
-        variance_value_regs: [IR_INVALID_REG; 1024],
-        variance_base_reg_count: 0,
+        register_metadata: Box::new(empty_lower_register_metadata_state()),
         debug_mode: false,
         probe_mode: false,
         closure_caps: Box::new(empty_closure_cap_table()),
@@ -907,11 +917,7 @@ fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEp
         enum_variants: Box::new(*(*summary).enum_variants),
         struct_layouts: Box::new(*(*summary).struct_layouts),
         global_types: Box::new(*(*summary).global_types),
-        array_elem_float_regs: [IR_INVALID_REG; 512],
-        array_elem_float_reg_count: 0,
-        variance_base_regs: [IR_INVALID_REG; 1024],
-        variance_value_regs: [IR_INVALID_REG; 1024],
-        variance_base_reg_count: 0,
+        register_metadata: Box::new(empty_lower_register_metadata_state()),
         debug_mode: false,
         probe_mode: summary.probe_mode,
         closure_caps: Box::new(empty_closure_cap_table()),
@@ -964,11 +970,7 @@ fn lowerer_new_from_program_summary_owned(summary: IrProgramSummary, epistemic: 
         enum_variants: summary.enum_variants,
         struct_layouts: summary.struct_layouts,
         global_types: summary.global_types,
-        array_elem_float_regs: [IR_INVALID_REG; 512],
-        array_elem_float_reg_count: 0,
-        variance_base_regs: [IR_INVALID_REG; 1024],
-        variance_value_regs: [IR_INVALID_REG; 1024],
-        variance_base_reg_count: 0,
+        register_metadata: Box::new(empty_lower_register_metadata_state()),
         debug_mode: false,
         probe_mode: summary.probe_mode,
         closure_caps: Box::new(empty_closure_cap_table()),
@@ -1023,11 +1025,7 @@ fn lowerer_from_acc_module(module: Box<IrModule>) -> Lowerer with Alloc, Mut, Pa
         enum_variants: Box::new(empty_enum_variant_table()),
         struct_layouts: Box::new(empty_struct_layout_table()),
         global_types: Box::new(empty_lower_global_type_table()),
-        array_elem_float_regs: [IR_INVALID_REG; 512],
-        array_elem_float_reg_count: 0,
-        variance_base_regs: [IR_INVALID_REG; 1024],
-        variance_value_regs: [IR_INVALID_REG; 1024],
-        variance_base_reg_count: 0,
+        register_metadata: Box::new(empty_lower_register_metadata_state()),
         debug_mode: false,
         probe_mode: false,
         closure_caps: Box::new(empty_closure_cap_table()),
@@ -3480,8 +3478,8 @@ fn lowerer_lower_fn_item_mut(
     // from an earlier f64-param function (param reg 0, etc.) leak into later
     // functions and make `var i = 0 as i64; i = i + 1` lower as float-add
     // (IEEE 1.0 bits) once f64 params correctly carry scalar_kind=2.
-    (*lo).array_elem_float_reg_count = 0
-    (*lo).variance_base_reg_count = 0
+    (*(*lo).register_metadata).array_elem_float_reg_count = 0
+    (*(*lo).register_metadata).variance_base_reg_count = 0
     (*lo).pending_variance_reg = -1
     (*lo).pending_closure_fn_id = -1
     // Inter-procedural FO: register pure-fn transfer before body lower so later
@@ -5012,8 +5010,8 @@ impl Lowerer {
         lo.scope_depth = 0
         lo.loop_depth = 0
         // D5 (#986): per-function reset of vreg-keyed float/variance tables.
-        lo.array_elem_float_reg_count = 0
-        lo.variance_base_reg_count = 0
+        (*lo.register_metadata).array_elem_float_reg_count = 0
+        (*lo.register_metadata).variance_base_reg_count = 0
         lo.pending_variance_reg = -1
         lo.pending_closure_fn_id = -1
         // Multi-channel FO seeds are per-function.
@@ -6580,27 +6578,27 @@ impl Lowerer {
             return lo
         }
         var i: i64 = 0
-        while i < lo.variance_base_reg_count {
-            if lo.variance_base_regs[i as usize] == base_reg {
-                lo.variance_value_regs[i as usize] = variance_reg
+        while i < (*lo.register_metadata).variance_base_reg_count {
+            if (*lo.register_metadata).variance_base_regs[i as usize] == base_reg {
+                (*lo.register_metadata).variance_value_regs[i as usize] = variance_reg
                 return lo
             }
             i = i + 1
         }
-        if lo.variance_base_reg_count < 1024 {
-            let idx = lo.variance_base_reg_count
-            lo.variance_base_regs[idx as usize] = base_reg
-            lo.variance_value_regs[idx as usize] = variance_reg
-            lo.variance_base_reg_count = idx + 1
+        if (*lo.register_metadata).variance_base_reg_count < 1024 {
+            let idx = (*lo.register_metadata).variance_base_reg_count
+            (*lo.register_metadata).variance_base_regs[idx as usize] = base_reg
+            (*lo.register_metadata).variance_value_regs[idx as usize] = variance_reg
+            (*lo.register_metadata).variance_base_reg_count = idx + 1
         }
         lo
     }
 
     fn lookup_variance_for_base_reg(self, base_reg: i64) -> i64 with Mut, Panic, Div {
         var i: i64 = 0
-        while i < self.variance_base_reg_count {
-            if self.variance_base_regs[i as usize] == base_reg {
-                return self.variance_value_regs[i as usize]
+        while i < (*self.register_metadata).variance_base_reg_count {
+            if (*self.register_metadata).variance_base_regs[i as usize] == base_reg {
+                return (*self.register_metadata).variance_value_regs[i as usize]
             }
             i = i + 1
         }
@@ -8391,15 +8389,16 @@ impl Lowerer {
             return lo
         }
         var i: i64 = 0
-        while i < lo.array_elem_float_reg_count {
-            if lo.array_elem_float_regs[i as usize] == reg {
+        while i < (*lo.register_metadata).array_elem_float_reg_count {
+            if (*lo.register_metadata).array_elem_float_regs[i as usize] == reg {
                 return lo
             }
             i = i + 1
         }
-        if lo.array_elem_float_reg_count < 512 {
-            lo.array_elem_float_regs[lo.array_elem_float_reg_count as usize] = reg
-            lo.array_elem_float_reg_count = lo.array_elem_float_reg_count + 1
+        if (*lo.register_metadata).array_elem_float_reg_count < 512 {
+            let idx = (*lo.register_metadata).array_elem_float_reg_count
+            (*lo.register_metadata).array_elem_float_regs[idx as usize] = reg
+            (*lo.register_metadata).array_elem_float_reg_count = idx + 1
         }
         lo
     }
@@ -8409,8 +8408,8 @@ impl Lowerer {
             return false
         }
         var i: i64 = 0
-        while i < self.array_elem_float_reg_count {
-            if self.array_elem_float_regs[i as usize] == reg {
+        while i < (*self.register_metadata).array_elem_float_reg_count {
+            if (*self.register_metadata).array_elem_float_regs[i as usize] == reg {
                 return true
             }
             i = i + 1
@@ -10503,8 +10502,8 @@ impl Lowerer {
         lo.scope_depth = 0
         lo.loop_depth = 0
         // D5 (#986): per-function reset of vreg-keyed float/variance tables.
-        lo.array_elem_float_reg_count = 0
-        lo.variance_base_reg_count = 0
+        (*lo.register_metadata).array_elem_float_reg_count = 0
+        (*lo.register_metadata).variance_base_reg_count = 0
         lo.pending_variance_reg = -1
         lo.pending_closure_fn_id = -1
         if lower_live_diag_enabled() {
@@ -10699,8 +10698,8 @@ impl Lowerer {
         lo.scope_depth = 0
         lo.loop_depth = 0
         // D5 (#986): per-function reset of vreg-keyed float/variance tables.
-        lo.array_elem_float_reg_count = 0
-        lo.variance_base_reg_count = 0
+        (*lo.register_metadata).array_elem_float_reg_count = 0
+        (*lo.register_metadata).variance_base_reg_count = 0
         lo.pending_variance_reg = -1
         lo.pending_closure_fn_id = -1
         if lower_body_diag_enabled() {
@@ -14952,8 +14951,8 @@ impl Lowerer {
         lo.scope_depth = 0
         lo.loop_depth = 0
         // D5 (#986): per-function reset of vreg-keyed float/variance tables.
-        lo.array_elem_float_reg_count = 0
-        lo.variance_base_reg_count = 0
+        (*lo.register_metadata).array_elem_float_reg_count = 0
+        (*lo.register_metadata).variance_base_reg_count = 0
         lo.pending_variance_reg = -1
         lo.pending_closure_fn_id = -1
         lo.allow_direct_capturing_closure_literal = false
