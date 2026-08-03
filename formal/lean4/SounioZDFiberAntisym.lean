@@ -6471,6 +6471,109 @@ theorem luInd_split (W M v a : Nat) (hW : W < 2^M) (hW0 : W ≠ 0)
       if_neg (fun hc => hg ⟨hc.2.2.1, hc.2.2.2.1⟩)
     rw [hL, hD, hO]
 
+/-! ### Stage 3c: counting the boundary sets -/
+
+theorem sumLt_scale (n c : Nat) (p : Nat → Prop) [DecidablePred p] :
+    sumLt n (fun i => if p i then c else 0)
+      = c * sumLt n (fun i => if p i then 1 else 0) := by
+  induction n with
+  | zero => simp [sumLt]
+  | succ n ih =>
+      rw [sumLt, sumLt, ih]
+      by_cases h : p n
+      · rw [if_pos h, if_pos h, Nat.mul_add, Nat.mul_one]
+      · rw [if_neg h, if_neg h, Nat.mul_add]; simp
+
+/-- Four distinct values below `n` contribute exactly `4`. -/
+theorem sumLt_four (n W a : Nat) (hW : W < n) (ha : a < n) (haW : a ^^^ W < n)
+    (hW0 : W ≠ 0) (ha0 : a ≠ 0) (haWne : a ≠ W) :
+    sumLt n (fun i => if i = 0 ∨ i = W ∨ i = a ∨ i = a ^^^ W then 1 else 0) = 4 := by
+  have hax : a ^^^ W ≠ 0 := fun h => haWne (xor_zero_eq a W h)
+  have haxW : a ^^^ W ≠ W := by
+    intro h
+    apply ha0
+    have e : (a ^^^ W) ^^^ W = W ^^^ W := by rw [h]
+    rw [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero] at e
+    exact e
+  have haxa : a ^^^ W ≠ a := by
+    intro h
+    apply hW0
+    have e : a ^^^ (a ^^^ W) = a ^^^ a := by rw [h]
+    rw [xorCancelL, Nat.xor_self] at e
+    exact e
+  have hn0 : 0 < n := by omega
+  rw [sumLt_cons n 0 (fun i => i = W ∨ i = a ∨ i = a ^^^ W) hn0
+        (by rintro (h | h | h)
+            · exact hW0 h.symm
+            · exact ha0 h.symm
+            · exact hax h.symm),
+      sumLt_cons n W (fun i => i = a ∨ i = a ^^^ W) hW
+        (by rintro (h | h)
+            · exact haWne h.symm
+            · exact haxW h.symm),
+      sumLt_cons n a (fun i => i = a ^^^ W) ha (fun h => haxa h.symm),
+      sumLt_single n (a ^^^ W) 1 haW]
+
+/-- The two-lines-removed count, extracted for reuse. -/
+theorem count_off2 (W M : Nat) (hW : W < 2^M) (hW0 : W ≠ 0) :
+    sumLt (2^M) (fun a => if a ≠ 0 ∧ a ≠ W then 1 else 0) + 2 = 2^M := by
+  have hp : (0:Nat) < 2^M := Nat.two_pow_pos M
+  have hc := sumLt_compl (2^M) (fun i => i = 0 ∨ i = W)
+  have h2 := sumLt_two (2^M) W hW hW0 hp
+  have he : sumLt (2^M) (fun i => if i = 0 ∨ i = W then 0 else 1)
+      = sumLt (2^M) (fun a => if a ≠ 0 ∧ a ≠ W then 1 else 0) := by
+    apply sumLt_congr
+    intro i _
+    by_cases h : i = 0 ∨ i = W
+    · rw [if_pos h, if_neg (fun hc2 => h.elim hc2.1 hc2.2)]
+    · rw [if_neg h, if_pos ⟨fun hh => h (Or.inl hh), fun hh => h (Or.inr hh)⟩]
+  rw [he] at hc
+  omega
+
+/-- **The `lu` boundary count.** Four distinct values per surviving row, `2^M - 2` rows. -/
+theorem lu_boundary (W M : Nat) (hW : W < 2^M) (hW0 : W ≠ 0) :
+    sumLt (2^M) (fun a => sumLt (2^M) (fun v =>
+      if a ≠ 0 ∧ a ≠ W ∧ (v = 0 ∨ v = W ∨ v = a ∨ a = v ^^^ W) then 1 else 0)) + 8
+      = 4 * 2^M := by
+  have hinner : ∀ a, a < 2^M →
+      sumLt (2^M) (fun v =>
+        if a ≠ 0 ∧ a ≠ W ∧ (v = 0 ∨ v = W ∨ v = a ∨ a = v ^^^ W) then 1 else 0)
+        = if a ≠ 0 ∧ a ≠ W then 4 else 0 := by
+    intro a hA
+    by_cases hg : a ≠ 0 ∧ a ≠ W
+    · rw [if_pos hg]
+      have hxlt : a ^^^ W < 2^M := Nat.xor_lt_two_pow hA hW
+      rw [sumLt_congr (2^M) _
+            (fun v => if v = 0 ∨ v = W ∨ v = a ∨ v = a ^^^ W then 1 else 0)
+            (fun v _ => by
+              have hiff : (a = v ^^^ W) ↔ (v = a ^^^ W) := by
+                constructor
+                · intro hh; rw [hh, Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+                · intro hh; rw [hh, Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+              by_cases hd : v = 0 ∨ v = W ∨ v = a ∨ v = a ^^^ W
+              · have hd' : v = 0 ∨ v = W ∨ v = a ∨ a = v ^^^ W := by
+                  rcases hd with h | h | h | h
+                  · exact Or.inl h
+                  · exact Or.inr (Or.inl h)
+                  · exact Or.inr (Or.inr (Or.inl h))
+                  · exact Or.inr (Or.inr (Or.inr (hiff.mpr h)))
+                rw [if_pos ⟨hg.1, hg.2, hd'⟩, if_pos hd]
+              · rw [if_neg hd, if_neg (fun hc => by
+                    rcases hc.2.2 with h | h | h | h
+                    · exact hd (Or.inl h)
+                    · exact hd (Or.inr (Or.inl h))
+                    · exact hd (Or.inr (Or.inr (Or.inl h)))
+                    · exact hd (Or.inr (Or.inr (Or.inr (hiff.mp h)))))])]
+      exact sumLt_four (2^M) W a hW hA hxlt hW0 hg.1 hg.2
+    · rw [if_neg hg,
+          sumLt_congr (2^M) _ (fun _ => 0)
+            (fun v _ => if_neg (fun hc => hg ⟨hc.1, hc.2.1⟩))]
+      exact sumLt_zero _
+  rw [sumLt_congr (2^M) _ (fun a => if a ≠ 0 ∧ a ≠ W then 4 else 0) hinner,
+      sumLt_scale]
+  have := count_off2 W M hW hW0
+  omega
+
 end SounioZDFiberAntisym
 
 
