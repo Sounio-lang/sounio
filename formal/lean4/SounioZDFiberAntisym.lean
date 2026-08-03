@@ -7994,6 +7994,48 @@ theorem Ncnt_hi (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
 theorem Ncnt_hi_bottom : Ncnt 3 2 + 6 * 2 + 2 + 4 * Ncnt 1 1 = 4 * (2 * 2) :=
   Ncnt_hi 0 1 (by decide) (by decide)
 
+/-! ## Tier 32: unrolling the two recursions
+
+`Ncnt_low` and `Ncnt_hi` determine `Ncnt` completely once the descent has a floor. This tier
+supplies the floor and then removes `Qgen'` from the picture entirely. -/
+
+/-- **The positive core is EMPTY at a power-of-two label.** `OffCntP` already excludes `a = W`
+    and `b = a ^^^ W`, and by `Qgen'_pow2_eq` those two lines are *exactly* where `Q' = +1` when
+    `W = 2^k`. So nothing is left to count -- the power-of-two labels are the SATURATED case, and
+    every other label is that value minus a deficit. -/
+theorem OffCntP_pow2 (m k : Nat) (hk : k < m) : OffCntP (2^k) m = 0 := by
+  have hinner : ∀ a, a < 2^m →
+      sumLt (2^m) (fun b =>
+        if a ≠ 0 ∧ a ≠ 2^k ∧ b ≠ 0 ∧ b ≠ 2^k ∧ a ≠ b ∧ b ≠ a ^^^ 2^k
+           ∧ Qgen' (2^k) a b m = 1 then 1 else 0) = 0 := by
+    intro a hA
+    have h2 : ∀ b, b < 2^m →
+        (if a ≠ 0 ∧ a ≠ 2^k ∧ b ≠ 0 ∧ b ≠ 2^k ∧ a ≠ b ∧ b ≠ a ^^^ 2^k
+            ∧ Qgen' (2^k) a b m = 1 then (1:Nat) else 0) = 0 := by
+      intro b hB
+      refine if_neg ?_
+      rintro ⟨ha0, haW, hb0, hbW, hab, hcos, hq⟩
+      rw [Qgen'_pow2_eq m k a b hk hA hB ha0 hb0 hab,
+          if_neg (fun hc => hc.elim haW hcos)] at hq
+      exact absurd hq (by decide)
+    rw [sumLt_congr (2^m) _ (fun _ => 0) h2]
+    exact sumLt_zero _
+  unfold OffCntP
+  rw [sumLt_congr (2^m) _ (fun _ => 0) hinner]
+  exact sumLt_zero _
+
+/-- **The floor of the descent.** `Ncnt (2^k) m = (2^m - 2)(2^m - 3)`, independent of `k`.
+    `Qgen'_pow2_eq` was pointwise only; this is the COUNT, and it is what every chain bottoms
+    out on. Stated additively to keep `omega` linear with `2^m * 2^m` as one atom. -/
+theorem Ncnt_pow2 (m k : Nat) (hk : k < m) :
+    Ncnt (2^k) m + 5 * 2^m = 2^m * 2^m + 6 := by
+  have hWlt : (2:Nat)^k < 2^m := Nat.pow_lt_pow_right (by omega) hk
+  have hW0 : (2:Nat)^k ≠ 0 := by have := Nat.two_pow_pos k; omega
+  have h1 := OffCnt_add_OffCntP (2^k) m hWlt hW0
+  have h2 := Ncnt_eq_OffCnt (2^k) m hWlt hW0
+  have h3 := OffCntP_pow2 m k hk
+  omega
+
 end SounioZDFiberAntisym
 
 
