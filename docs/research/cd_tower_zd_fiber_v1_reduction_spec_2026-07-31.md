@@ -967,3 +967,36 @@ misses by `1e5`–`1e6`, against exact zero on the low branch.
 use, and that no fourth trace would help.
 
 **(III) is untouched. (d) is not closed, and V1 is not proven.**
+
+---
+
+## 20. No closed form from the triple yet — and why (`W27`, 2026-08-03)
+
+I went looking for the closed form using `(t2, t3, lsb)` and **did not find it**. Three things are
+recorded so the next rung does not repeat the search.
+
+### 20.1 The high branch is not a low-degree polynomial in the pair
+
+Even **stratified by `lsb′`**, adding the quadratic terms `t2′²` and `t2′t3′` improves the relative
+residual from ≈ 0.46 to ≈ 0.06 but does **not** close it — against **exact zero** on the low
+branch.
+
+### 20.2 `W26`'s "determines" is real but modest — measured
+
+The triple is **not** injective on the high labels: ≈ 2 labels per key, at most 4, carrying
+127 labels → 63 keys → 23 distinct `t3` values at `n = 9`. So the agreement is not an artefact of
+a fine partition.
+
+**But determining a value on a finite set is not evidence that a formula exists**, and §19 should
+not be read as if it were. That caveat belongs with the claim.
+
+### 20.3 The structural reason — the useful part
+
+> A triangle at level `n` whose vertices **straddle** the level split does not reduce to a
+> level-(n−1) **triangle**. It reduces to a **path** — and path counts are not traces.
+
+That is why no additional trace helps (§19.3) and why no polynomial in the traces closes it
+(§20.1). **The next rung should carry a path-count alongside the traces, not another spectral
+invariant.**
+
+**`tr(A³)` is not closed. (III) is untouched. (d) is not closed, and V1 is not proven.**

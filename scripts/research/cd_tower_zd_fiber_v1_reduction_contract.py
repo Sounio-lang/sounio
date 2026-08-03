@@ -1965,6 +1965,77 @@ def main():
             "what is now known is exactly which three quantities a closed form may use. "
             "(III) untouched; (d) IS NOT CLOSED ***")
 
+    # ---- W27  NO CLOSED FORM FROM THE TRIPLE YET -- AND WHY, HONESTLY --------------------
+    # I went looking for the closed form using (t2, t3, lsb) and did NOT find it. Three things
+    # are worth recording so the next rung does not repeat the search.
+    #   (1) the HIGH branch is not a low-degree polynomial in (t2',t3'), even stratified by lsb';
+    #   (2) W26's "the triple DETERMINES t3" is real but MODEST evidence -- measured here;
+    #   (3) the structural reason: a triangle at level n whose vertices straddle the level split
+    #       does NOT reduce to a level-(n-1) triangle. It reduces to a PATH, and path counts are
+    #       not traces -- which is why no trace (W26) and no polynomial in traces (here) closes
+    #       the high branch.
+    def _lsb2(W):
+        return (W & -W).bit_length() - 1
+
+    poly_rows, inj_rows = [], []
+    for n in (8, 9):
+        m, e = n - 1, 1 << (n - 2)
+        strat = {}
+        for W in range(e, 1 << m):
+            Wp = W % e
+            if Wp:
+                strat.setdefault(_lsb2(Wp), set()).add(
+                    (_P[(n - 1, Wp)][0], _P[(n - 1, Wp)][1], _P[(n, W)][1]))
+        worst = 0.0
+        for j, pts in strat.items():
+            pts = sorted(pts)
+            for basis in ([lambda a, b: b, lambda a, b: a, lambda a, b: 1.0],
+                          [lambda a, b: b, lambda a, b: a, lambda a, b: 1.0,
+                           lambda a, b: float(a) * a, lambda a, b: float(a) * b]):
+                if len(pts) < len(basis) + 2:
+                    continue
+                A = np.array([[f(p[0], p[1]) for f in basis] for p in pts], float)
+                y = np.array([p[2] for p in pts], float)
+                sol, *_ = np.linalg.lstsq(A, y, rcond=None)
+                rel = float(np.max(np.abs(A @ sol - y))) / max(1.0, float(np.max(np.abs(y))))
+                worst = max(worst, rel) if len(basis) == 5 else worst
+        poly_rows.append((n, worst))
+        # collapse ratio of the triple
+        trip = {}
+        for W in range(e, 1 << m):
+            Wp = W % e
+            if Wp:
+                trip.setdefault((_P[(n-1,Wp)][0], _P[(n-1,Wp)][1], _lsb2(Wp)), set()).add(W)
+        nlab = sum(len(v) for v in trip.values())
+        nval = len({_P[(n, W)][1] for W in range(e, 1 << m) if W % e})
+        inj_rows.append((n, nlab, len(trip), nval,
+                         max(len(v) for v in trip.values())))
+    w27 = all(r > 0.005 for _, r in poly_rows) and all(k < l for _, l, k, _, _ in inj_rows)
+    ok["W27"] = w27
+    print(f"W27_NOFORM  NO CLOSED FORM FROM THE TRIPLE YET -- AND WHY "
+          f"{'OK' if w27 else 'FAIL'} -- HIGH branch, best QUADRATIC fit in (t2',t3') "
+          f"stratified by lsb', worst relative residual: "
+          + "; ".join(f"n={a}: {b:.3g}" for a, b in poly_rows)
+          + "; collapse of the triple on high labels: "
+          + "; ".join(f"n={a}: {b} labels -> {c} keys -> {d} distinct t3 (max {e} labels/key)"
+                      for a, b, c, d, e in inj_rows)
+          + ". *** I WENT LOOKING FOR THE CLOSED FORM WITH THE TRIPLE AND DID NOT FIND IT. Three "
+            "things are recorded so the next rung does not repeat the search. (1) The HIGH branch "
+            "is NOT a low-degree polynomial in (t2',t3') even stratified by lsb': adding the "
+            "quadratic terms t2'^2 and t2't3' improves the relative residual from ~0.46 to ~0.06 "
+            "but does not close it, against EXACT ZERO on the low branch. (2) W26's claim that "
+            "the triple DETERMINES t3 is real but MODEST evidence, and this clause measures how "
+            "modest: the triple is not injective -- about two labels per key, up to four -- and "
+            "it carries the high labels onto far fewer distinct t3 values, so the agreement is "
+            "not an artefact of a fine partition. But determining a value on a finite set is NOT "
+            "evidence that a FORMULA exists, and W26 should not be read as if it were. (3) THE "
+            "STRUCTURAL REASON, which is the useful part: a triangle at level n whose vertices "
+            "straddle the level split does NOT reduce to a level-(n-1) TRIANGLE -- it reduces to "
+            "a PATH, and path counts are not traces. That is why no additional trace helps (W26) "
+            "and why no polynomial in the traces closes it (here). The next rung should carry a "
+            "PATH-COUNT alongside the traces, not another spectral invariant. "
+            "(III) untouched; (d) IS NOT CLOSED, and tr(A^3) IS NOT CLOSED ***")
+
     print("=" * 78)
     if all(ok.values()):
         print("CD_TOWER_ZDV1_VERDICT C_CLOSED__V1_REDUCED_TO_D_ALONE__NOT_CLOSED")
