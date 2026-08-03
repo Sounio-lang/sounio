@@ -6877,7 +6877,7 @@ def OffCntP (W m : Nat) : Nat :=
     then 1 else 0))
 
 /-- `OffCnt` and `OffCntP` exhaust the off-lines domain, which has `(2^M-2)(2^M-4)` points. -/
-theorem OffCnt_add_OffCntP (W M : Nat) (hW : W < 2^M) (hW0 : W ≠ 0) (h4 : 4 ≤ 2^M) :
+theorem OffCnt_add_OffCntP (W M : Nat) (hW : W < 2^M) (hW0 : W ≠ 0) :
     OffCnt W M + OffCntP W M + 6 * 2^M = 2^M * 2^M + 8 := by
   have hp : (0:Nat) < 2^M := Nat.two_pow_pos M
   have hdom : OffCnt W M + OffCntP W M
@@ -6941,14 +6941,31 @@ theorem OffCnt_add_OffCntP (W M : Nat) (hW : W < 2^M) (hW0 : W ≠ 0) (h4 : 4 �
   rw [hdom, sumLt_congr (2^M) _ (fun a => if a ≠ 0 ∧ a ≠ W then 2^M - 4 else 0) hinner,
       sumLt_scale]
   have hco := count_off2 W M hW hW0
-  obtain ⟨k, hk4⟩ : ∃ k, 2^M = k + 4 := ⟨2^M - 4, by omega⟩
-  have hcnt : sumLt (2^M) (fun a => if a ≠ 0 ∧ a ≠ W then 1 else 0) = k + 2 := by omega
-  rw [hcnt, hk4]
-  have hsub : k + 4 - 4 = k := by omega
-  have e1 : (k + 4 - 4) * (k + 2) = k * k + k * 2 := by rw [hsub, Nat.mul_add]
-  have e2 : (k + 4) * (k + 4) = k * k + k * 4 + (4 * k + 4 * 4) := by
-    rw [Nat.add_mul, Nat.mul_add, Nat.mul_add]
-  omega
+  -- A nonempty label forces `2 <= 2^M`, and a power of two that is not `2` is at least `4`.
+  -- The `2^M = 2` box is the `m = 0` bottom: it holds, but by Nat truncation rather than by
+  -- the `(e-2)(e-4)` expansion, so it needs its own line.
+  have hcase : 2^M = 2 ∨ 4 ≤ 2^M := by
+    cases M with
+    | zero => exact absurd (by have h1 : (2:Nat)^0 = 1 := rfl; omega) hW0
+    | succ j =>
+        cases j with
+        | zero => exact Or.inl rfl
+        | succ i =>
+            refine Or.inr ?_
+            have hle : (2:Nat)^2 ≤ 2^(i+1+1) := Nat.pow_le_pow_right (by omega) (by omega)
+            have he : (2:Nat)^2 = 4 := rfl
+            omega
+  rcases hcase with h2 | h4
+  · have hs : sumLt (2^M) (fun a => if a ≠ 0 ∧ a ≠ W then 1 else 0) = 0 := by omega
+    rw [hs, Nat.mul_zero, h2]
+  · obtain ⟨k, hk4⟩ : ∃ k, 2^M = k + 4 := ⟨2^M - 4, by omega⟩
+    have hcnt : sumLt (2^M) (fun a => if a ≠ 0 ∧ a ≠ W then 1 else 0) = k + 2 := by omega
+    rw [hcnt, hk4]
+    have hsub : k + 4 - 4 = k := by omega
+    have e1 : (k + 4 - 4) * (k + 2) = k * k + k * 2 := by rw [hsub, Nat.mul_add]
+    have e2 : (k + 4) * (k + 4) = k * k + k * 4 + (4 * k + 4 * 4) := by
+      rw [Nat.add_mul, Nat.mul_add, Nat.mul_add]
+    omega
 
 /-- **ll boundary, `a = W`.** The `Q'red_hi_ll` row needs `a ^^^ W ≠ 0`; on the excluded
     locus the same reduction still runs, but the `R_uu` branch flips and the level-`(m+1)` value
@@ -7950,29 +7967,32 @@ The four quadrants are now theorems. What remains is bookkeeping, and it is stat
 subtraction anywhere so that `omega` stays linear with `2^(m+1) * 2^(m+1)` as a single atom. -/
 
 /-- The positive core, priced against the level-`(m+1)` count. -/
-theorem OffCntP_eq (m W : Nat) (hm : 1 ≤ m) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+theorem OffCntP_eq (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
     OffCntP W (m+1) + 5 * 2^(m+1) + Ncnt W (m+1) = 2^(m+1) * 2^(m+1) + 6 := by
-  have h4 : 4 ≤ 2^(m+1) := by
-    have hle : (2:Nat)^2 ≤ 2^(m+1) := Nat.pow_le_pow_right (by omega) (by omega)
-    have he : (2:Nat)^2 = 4 := rfl
-    omega
-  have h1 := OffCnt_add_OffCntP W (m+1) hW hW0 h4
+  have h1 := OffCnt_add_OffCntP W (m+1) hW hW0
   have h2 := Ncnt_eq_OffCnt W (m+1) hW hW0
   omega
 
 /-- **THE HIGH RECURSION, forall n.** With `e = 2^(m+1)`, this is
     `N(m+2, W+e) = 4e^2 - 6e - 2 - 4*N(m+1, W)`, i.e. the paper's
     `4P' - 4N' + 6e - 10` with `P' = (e-1)(e-2)` -- stated additively to stay in `Nat`. -/
-theorem Ncnt_hi (m W : Nat) (hm : 1 ≤ m) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+theorem Ncnt_hi (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
     Ncnt (W + 2^(m+1)) (m+2) + 6 * 2^(m+1) + 2 + 4 * Ncnt W (m+1)
       = 4 * (2^(m+1) * 2^(m+1)) := by
   have hll := Ncnt_ll_hi m W hW hW0
   have hul := Ncnt_ul_hi m W hW hW0
   have hlu := Ncnt_lu_hi m W hW hW0
   have huu := Ncnt_uu_hi m W hW hW0
-  have hP := OffCntP_eq m W hm hW hW0
+  have hP := OffCntP_eq m W hW hW0
   rw [Ncnt_quad (W + 2^(m+1)) m]
   omega
+
+/-- **The `m = 0` bottom**, which the old `1 ≤ m` hypothesis excluded. This is the smallest box
+    (`e = 2`, so the only label is `W = 1`), and it is exactly the step an odd non-power-of-two
+    label's descent lands on: `W = 3` uses LOW down to level 2 and then needs HIGH here. Stated
+    as a closed instance so that the removal of the hypothesis is CHECKED, not just asserted. -/
+theorem Ncnt_hi_bottom : Ncnt 3 2 + 6 * 2 + 2 + 4 * Ncnt 1 1 = 4 * (2 * 2) :=
+  Ncnt_hi 0 1 (by decide) (by decide)
 
 end SounioZDFiberAntisym
 
