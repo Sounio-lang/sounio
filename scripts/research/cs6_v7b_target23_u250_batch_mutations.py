@@ -16,7 +16,7 @@ MUTATIONS = {
     "leaf_shortfall": ("LEAVES=331", "LEAVES=330"),
     "fake_fpga": ("FPGA_EXECUTION=true", "FPGA_EXECUTION=false"),
     "baseline_replay": ("EXECUTED_XCLBIN_UUID=", "EXECUTED_XCLBIN_UUID=13259b30-d0d2-d4db-deba-bfc0153a26d2#"),
-    "arb_shortfall": ("ARB_RECHECK_PASSES=3", "ARB_RECHECK_PASSES=2"),
+    "arb_shortfall": ("ARB_CENTER_SIGN_CERTIFICATES=3", "ARB_CENTER_SIGN_CERTIFICATES=2"),
     "claim_escalation": ("GLOBAL_HPG_CERTIFICATE=false", "GLOBAL_HPG_CERTIFICATE=true"),
 }
 

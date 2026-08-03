@@ -83,7 +83,8 @@ def verify(receipt: Path) -> dict[str, str]:
         "BASELINE_XCLBIN_UUID": BASELINE_UUID,
         "PCIE_LINK": "Gen3x16",
         "ARB_RECHECKS": "3",
-        "ARB_RECHECK_PASSES": "3",
+        "ARB_CENTER_SIGN_CERTIFICATES": "3",
+        "FPGA_INSIDE_ARB_RECHECKS": "0",
         "TARGET23_U250_BATCH_PASS": "true",
     }.items():
         require(summary, key, value)
@@ -142,8 +143,8 @@ def verify(receipt: Path) -> dict[str, str]:
     arb_rows = list(csv.DictReader((receipt / "arb-rechecks.tsv").read_text(encoding="ascii").splitlines(), delimiter="\t"))
     if len(arb_rows) != 3 or any(row["CERTIFICATE"] != "true" for row in arb_rows):
         fail("Arb recheck evidence mismatch")
-    if any(row["FPGA_DETERMINANT_INSIDE_ARB"] != "true" for row in arb_rows):
-        fail("FPGA determinant escaped an Arb recheck interval")
+    if any(row["FPGA_DETERMINANT_INSIDE_ARB"] != "false" for row in arb_rows):
+        fail("receipt overstates FPGA containment in the narrow Arb intervals")
     expected_indices = ["319", "331", "329"]
     if [row["LEAF_INDEX"] for row in arb_rows] != expected_indices:
         fail("Arb recheck leaf selection drifted")
@@ -157,9 +158,14 @@ def verify(receipt: Path) -> dict[str, str]:
         upper = Fraction(worker["DETERMINANT_UPPER_Q"])
         if row["ARB_LOWER_Q"] != str(lower) or row["ARB_UPPER_Q"] != str(upper):
             fail(f"Arb endpoint transcript mismatch at leaf {index}")
+        if not lower < upper < 0:
+            fail(f"Arb interval does not certify a negative determinant at leaf {index}")
         card_det = Fraction.from_float(float(card[index - 1]["DETERMINANT"]))
-        if not lower < card_det < upper:
-            fail(f"card determinant outside Arb interval at leaf {index}")
+        if lower < card_det < upper:
+            fail(f"receipt says FPGA is outside Arb, but it is inside at leaf {index}")
+        distance = lower - card_det if card_det < lower else card_det - upper
+        if row["FPGA_TO_ARB_INTERVAL_DISTANCE_Q"] != str(distance):
+            fail(f"FPGA/Arb separation mismatch at leaf {index}")
         if row["FPGA_DETERMINANT"] != card[index - 1]["DETERMINANT"]:
             fail(f"Arb/card determinant binding mismatch at leaf {index}")
 
