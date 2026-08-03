@@ -189,6 +189,38 @@ oráculos de conflito continuam abstratos.
   assignments; **forma qualificada de import (`mod::f`) miscompila**
   (mutações `&!` perdidas) — a forma nomeada funciona.
 
+## Rodada 7 — EL+, escala sem cap, miscompile (2026-08-02)
+
+- **`formal/OntologyELPlus.lean`** (~530 linhas): o fragmento EL⁺ que a
+  SNOMED CT realmente usa — conceitos `atom | ⊤ | ⊓ | ∃r.C`, axiomas
+  `sub | disj | roleSub`, semântica de Tarski com interpretação de papéis,
+  sistema dedutivo de 9 regras (**nenhuma descartada**) com `der_sound`
+  por indução, `incoherentP_empty`, ponte de oráculo `oracle_sound_P`, e
+  projeção atômica reutilizando o fecho verificado (`subBP_sound`,
+  `conflictBP_sound`). Instância `Fin 8 × Fin 2` estilo SNOMED
+  (Pneumonia ⊑ ∃RoleGroup.(Lung ⊓ Inflammation) ⊑ ∃RoleGroup.Organ).
+  Composição de papéis `r∘s⊑t` declarada como próxima fronteira.
+  Math-review xai: PASS.
+- **Escala sem cap** (`real-data/scale/`): a TBox Anatomy **completa**
+  (3.304 classes, sem cap) roda até `ALL PASS` — 21.859 arestas de fecho,
+  368 conflitos, kept 6.392 / dropped 246, **byte-idêntico** à rodada 6
+  (confirmando que o cap ancestral era lossless). Estratégia esparsa
+  (BFS por classe, sem matriz N²): **nenhum teto encontrado** (estrela de
+  10M classes em 3.5s; cadeia de 30k classes com 450M arestas em 8.9s).
+  Tetos reais medidos: muro de ~24k statements por compilação (single e
+  multimódulo); denso N² OK até N=50.000 (7.5GB); N=100k → handoff Slurm
+  documentado (não executado, conforme regra do repo).
+- **Miscompile caçado** (`compiler-repros/` + `docs/audit/`): os 5
+  pitfalls reproduzidos com limiares refinados (P1 é uma família
+  dependente de forma — 256 a 682; P3 = P1 com f64 RMW; P4 = 10.2k/10.4k
+  statements). **Causa-raiz do P5 (import qualificado)**:
+  `self-hosted/ir/lower.sio:15698-15717` mangles `m::f` → `m_f`; funções
+  importadas registradas como `f`, então o linker fabrica um stub sem
+  corpo e a chamada cai nele silenciosamente — confirmado empiricamente
+  no compilador não modificado. Patch candidato (não aplicado, dry-run
+  OK) em `compiler-repros/qualified_import_fix_candidate.diff`; auditoria
+  completa em `docs/audit/QUALIFIED_IMPORT_MISCOMPILE_2026-08-02.md`.
+
 ## Arquivos criados
 
 - `artifacts/ontology-frontiers/{epistemic-alignment-repair,epistemic-claim-status,consistent-ontology-evolution}/FRONTIER.md`
