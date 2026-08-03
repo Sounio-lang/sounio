@@ -8036,6 +8036,107 @@ theorem Ncnt_pow2 (m k : Nat) (hk : k < m) :
   have h3 := OffCntP_pow2 m k hk
   omega
 
+/-- The two smallest boxes are empty: at level 0 the only index is `0`, at level 1 the only two
+    admissible indices coincide (`base_box_empty`). -/
+theorem Ncnt_zero_level (W : Nat) : Ncnt W 0 = 0 := by
+  unfold Ncnt
+  rw [show (2:Nat)^0 = 1 from rfl,
+      sumLt_congr 1 _ (fun _ => 0) (fun a ha => by
+        rw [sumLt_congr 1 _ (fun _ => 0)
+              (fun b _ => if_neg (fun hc => hc.1 (by omega)))]
+        exact sumLt_zero _)]
+  exact sumLt_zero _
+
+theorem Ncnt_one_level (W : Nat) : Ncnt W 1 = 0 := by
+  unfold Ncnt
+  rw [sumLt_congr (2^1) _ (fun _ => 0) (fun a ha => by
+        rw [sumLt_congr (2^1) _ (fun _ => 0)
+              (fun b hb => if_neg (fun hc => hc.2.2.1 (base_box_empty a b ha hb hc.1 hc.2.1)))]
+        exact sumLt_zero _)]
+  exact sumLt_zero _
+
+/-- **The unrolled count.** A self-contained evaluator: structural recursion on the LEVEL, with
+    no reference to `Qgen'`, `cdSigma`, or any sum. The three branches are exactly `Ncnt_low`,
+    `Ncnt_pow2` and `Ncnt_hi`.
+
+    There is deliberately NO power-of-two test. A label `2^k` with `k < n+1` is already below the
+    seam, so the LOW branch handles it, and the two agree because
+    `(2e-2)(2e-3) = 4(e-2)(e-3) + 10e - 18` identically. Only `W = 2^(n+1)` needs its own branch,
+    and that is decidable `Nat` equality -- which is what lets this file avoid characterising
+    powers of two by bit arithmetic.
+
+    `Int` codomain (the HIGH branch subtracts), but every product and power is formed on the
+    `Nat` side and cast, so `omega` only ever sees atoms it shares with `Ncnt_hi`. -/
+def Nclosed : Nat → Nat → Int
+  | 0, _ => 0
+  | 1, _ => 0
+  | (n+2), W =>
+      if W < 2^(n+1) then
+        4 * Nclosed (n+1) W + 10 * ((2^(n+1) : Nat) : Int) - 18
+      else if W = 2^(n+1) then
+        ((2^(n+2) * 2^(n+2) : Nat) : Int) + 6 - 5 * ((2^(n+2) : Nat) : Int)
+      else
+        4 * ((2^(n+1) * 2^(n+1) : Nat) : Int) - 6 * ((2^(n+1) : Nat) : Int) - 2
+          - 4 * Nclosed (n+1) (W - 2^(n+1))
+
+theorem Nclosed_zero (W : Nat) : Nclosed 0 W = 0 := rfl
+theorem Nclosed_one (W : Nat) : Nclosed 1 W = 0 := rfl
+theorem Nclosed_step (n W : Nat) :
+    Nclosed (n+2) W =
+      if W < 2^(n+1) then
+        4 * Nclosed (n+1) W + 10 * ((2^(n+1) : Nat) : Int) - 18
+      else if W = 2^(n+1) then
+        ((2^(n+2) * 2^(n+2) : Nat) : Int) + 6 - 5 * ((2^(n+2) : Nat) : Int)
+      else
+        4 * ((2^(n+1) * 2^(n+1) : Nat) : Int) - 6 * ((2^(n+1) : Nat) : Int) - 2
+          - 4 * Nclosed (n+1) (W - 2^(n+1)) := rfl
+
+/-- **THE UNROLLING, forall n.** The counting recursion is now solved: `Ncnt` equals a closed
+    evaluator that never mentions `Qgen'`. Every step is one of the three theorems
+    `Ncnt_low` / `Ncnt_pow2` / `Ncnt_hi`. -/
+theorem Ncnt_eq_Nclosed : ∀ (m W : Nat), W < 2^m → W ≠ 0 → (Ncnt W m : Int) = Nclosed m W := by
+  intro m
+  induction m with
+  | zero =>
+      intro W hW hW0
+      have h : (2:Nat)^0 = 1 := rfl
+      omega
+  | succ n ih =>
+      cases n with
+      | zero =>
+          intro W hW hW0
+          rw [Ncnt_one_level, Nclosed_one]
+          rfl
+      | succ k =>
+          intro W hW hW0
+          -- Normalise the level index: the induction leaves `k+1+1`, but every recursion
+          -- theorem is stated with `k+2`, and `omega` treats those as DIFFERENT atoms even
+          -- though they are definitionally equal.
+          show (Ncnt W (k+2) : Int) = Nclosed (k+2) W
+          replace hW : W < 2^(k+2) := hW
+          have hpow : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by rw [Nat.pow_succ]; omega
+          have hp : (0:Nat) < 2^(k+1) := Nat.two_pow_pos (k+1)
+          rw [Nclosed_step]
+          by_cases hlt : W < 2^(k+1)
+          · rw [if_pos hlt]
+            have hrec := Ncnt_low W k hlt hW0
+            have hih := ih W hlt hW0
+            omega
+          · rw [if_neg hlt]
+            by_cases heq : W = 2^(k+1)
+            · rw [if_pos heq, heq]
+              have hb := Ncnt_pow2 (k+2) (k+1) (by omega)
+              omega
+            · rw [if_neg heq]
+              obtain ⟨W', hWe, hW'lt⟩ : ∃ W', W = W' + 2^(k+1) ∧ W' < 2^(k+1) :=
+                ⟨W - 2^(k+1), by omega, by omega⟩
+              have hW'0 : W' ≠ 0 := by omega
+              subst hWe
+              rw [Nat.add_sub_cancel]
+              have hrec := Ncnt_hi k W' hW'lt hW'0
+              have hih := ih W' hW'lt hW'0
+              omega
+
 end SounioZDFiberAntisym
 
 
