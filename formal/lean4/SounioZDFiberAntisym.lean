@@ -6856,6 +6856,122 @@ theorem Ncnt_low (W m : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
   have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
   omega
 
+/-! ## Tier 30: the HIGH branch
+
+Every `hi` row carries a MINUS sign, so "count the `-1`s at level `m+2`" becomes "count the
+`+1`s at level `m+1`". That reflection is the only structural difference from the LOW branch,
+and it needs one new object: the POSITIVE core `OffCntP`. -/
+
+theorem Qgen'_pm (W a b m : Nat) : Qgen' W a b m = 1 ∨ Qgen' W a b m = -1 := by
+  unfold Qgen'
+  rcases cdSigma_pm m a b with h1 | h1 <;>
+    rcases cdSigma_pm m (b ^^^ W) (a ^^^ W) with h2 | h2 <;>
+    rcases cdSigma_pm m (b ^^^ W) a with h3 | h3 <;>
+    rcases cdSigma_pm m (a ^^^ W) b with h4 | h4 <;>
+    rw [h1, h2, h3, h4] <;> decide
+
+/-- The positive core: the count OFF all six lines where `Q'` is `+1`. -/
+def OffCntP (W m : Nat) : Nat :=
+  sumLt (2^m) (fun a => sumLt (2^m) (fun b =>
+    if a ≠ 0 ∧ a ≠ W ∧ b ≠ 0 ∧ b ≠ W ∧ a ≠ b ∧ b ≠ a ^^^ W ∧ Qgen' W a b m = 1
+    then 1 else 0))
+
+/-- `OffCnt` and `OffCntP` exhaust the off-lines domain, which has `(2^M-2)(2^M-4)` points. -/
+theorem OffCnt_add_OffCntP (W M : Nat) (hW : W < 2^M) (hW0 : W ≠ 0) (h4 : 4 ≤ 2^M) :
+    OffCnt W M + OffCntP W M + 6 * 2^M = 2^M * 2^M + 8 := by
+  have hp : (0:Nat) < 2^M := Nat.two_pow_pos M
+  have hdom : OffCnt W M + OffCntP W M
+      = sumLt (2^M) (fun a => sumLt (2^M) (fun b =>
+          if a ≠ 0 ∧ a ≠ W ∧ b ≠ 0 ∧ b ≠ W ∧ a ≠ b ∧ b ≠ a ^^^ W then 1 else 0)) := by
+    unfold OffCnt OffCntP
+    rw [← sumLt_pair]
+    apply sumLt_congr
+    intro a _
+    rw [← sumLt_pair]
+    apply sumLt_congr
+    intro b _
+    by_cases hc : a ≠ 0 ∧ a ≠ W ∧ b ≠ 0 ∧ b ≠ W ∧ a ≠ b ∧ b ≠ a ^^^ W
+    · rw [if_pos hc]
+      rcases Qgen'_pm W a b M with h | h
+      · rw [if_neg (fun hh => by rw [h] at hh; exact absurd hh.2.2.2.2.2.2 (by decide)),
+            if_pos ⟨hc.1, hc.2.1, hc.2.2.1, hc.2.2.2.1, hc.2.2.2.2.1, hc.2.2.2.2.2, h⟩]
+      · rw [if_pos ⟨hc.1, hc.2.1, hc.2.2.1, hc.2.2.2.1, hc.2.2.2.2.1, hc.2.2.2.2.2, h⟩,
+            if_neg (fun hh => by rw [h] at hh; exact absurd hh.2.2.2.2.2.2 (by decide))]
+    · rw [if_neg hc,
+          if_neg (fun hh => hc ⟨hh.1, hh.2.1, hh.2.2.1, hh.2.2.2.1, hh.2.2.2.2.1,
+                                hh.2.2.2.2.2.1⟩),
+          if_neg (fun hh => hc ⟨hh.1, hh.2.1, hh.2.2.1, hh.2.2.2.1, hh.2.2.2.2.1,
+                                hh.2.2.2.2.2.1⟩)]
+  have hinner : ∀ a, a < 2^M →
+      sumLt (2^M) (fun b =>
+        if a ≠ 0 ∧ a ≠ W ∧ b ≠ 0 ∧ b ≠ W ∧ a ≠ b ∧ b ≠ a ^^^ W then 1 else 0)
+        = if a ≠ 0 ∧ a ≠ W then 2^M - 4 else 0 := by
+    intro a hA
+    by_cases hg : a ≠ 0 ∧ a ≠ W
+    · rw [if_pos hg]
+      have hxlt : a ^^^ W < 2^M := Nat.xor_lt_two_pow hA hW
+      have hf := sumLt_four (2^M) W a hW hA hxlt hW0 hg.1 hg.2
+      have hc := sumLt_compl (2^M) (fun i => i = 0 ∨ i = W ∨ i = a ∨ i = a ^^^ W)
+      have he : sumLt (2^M) (fun i => if i = 0 ∨ i = W ∨ i = a ∨ i = a ^^^ W then 0 else 1)
+          = sumLt (2^M) (fun b =>
+              if a ≠ 0 ∧ a ≠ W ∧ b ≠ 0 ∧ b ≠ W ∧ a ≠ b ∧ b ≠ a ^^^ W then 1 else 0) := by
+        apply sumLt_congr
+        intro b _
+        by_cases hd : b = 0 ∨ b = W ∨ b = a ∨ b = a ^^^ W
+        · rw [if_pos hd]
+          refine (if_neg ?_).symm
+          intro hh
+          rcases hd with h | h | h | h
+          · exact hh.2.2.1 h
+          · exact hh.2.2.2.1 h
+          · exact hh.2.2.2.2.1 h.symm
+          · exact hh.2.2.2.2.2 h
+        · rw [if_neg hd]
+          refine (if_pos ⟨hg.1, hg.2, ?_, ?_, ?_, ?_⟩).symm
+          · exact fun h => hd (Or.inl h)
+          · exact fun h => hd (Or.inr (Or.inl h))
+          · exact fun h => hd (Or.inr (Or.inr (Or.inl h.symm)))
+          · exact fun h => hd (Or.inr (Or.inr (Or.inr h)))
+      rw [he] at hc
+      omega
+    · rw [if_neg hg,
+          sumLt_congr (2^M) _ (fun _ => 0)
+            (fun b _ => if_neg (fun hh => hg ⟨hh.1, hh.2.1⟩))]
+      exact sumLt_zero _
+  rw [hdom, sumLt_congr (2^M) _ (fun a => if a ≠ 0 ∧ a ≠ W then 2^M - 4 else 0) hinner,
+      sumLt_scale]
+  have hco := count_off2 W M hW hW0
+  obtain ⟨k, hk4⟩ : ∃ k, 2^M = k + 4 := ⟨2^M - 4, by omega⟩
+  have hcnt : sumLt (2^M) (fun a => if a ≠ 0 ∧ a ≠ W then 1 else 0) = k + 2 := by omega
+  rw [hcnt, hk4]
+  have hsub : k + 4 - 4 = k := by omega
+  have e1 : (k + 4 - 4) * (k + 2) = k * k + k * 2 := by rw [hsub, Nat.mul_add]
+  have e2 : (k + 4) * (k + 4) = k * k + k * 4 + (4 * k + 4 * 4) := by
+    rw [Nat.add_mul, Nat.mul_add, Nat.mul_add]
+  omega
+
+/-- **ll boundary, `a = W`.** The `Q'red_hi_ll` row needs `a ^^^ W ≠ 0`; on the excluded
+    locus the same reduction still runs, but the `R_uu` branch flips and the level-`(m+1)` value
+    is the LABEL value, which `Qgen'_label_left` already pins at `+1`. -/
+theorem Qgen'_hi_ll_aW (m W b : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
+    (hb : b < 2^(m+1)) (hb0 : b ≠ 0) (hbW : b ≠ W) :
+    Qgen' (W + 2^(m+1)) W b (m+2) = -1 := by
+  have hpos : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hself : W ^^^ W = 0 := Nat.xor_self W
+  have hlab : Qgen' W W b (m+1) = 1 := Qgen'_label_left (m+1) W b hW hb hW0 hb0 hbW
+  unfold Qgen' at hlab
+  rw [hself, cdSig0' (b ^^^ W) m, cdSig0 b m] at hlab
+  have hxa : W ^^^ (W + 2^(m+1)) = (W ^^^ W) + 2^(m+1) := xor_seam W W m hW hW
+  have hxb : b ^^^ (W + 2^(m+1)) = (b ^^^ W) + 2^(m+1) := xor_seam b W m hb hW
+  unfold Qgen'
+  rw [hxa, hxb, hself, R_ll W b m hW hb,
+      R_uu (b ^^^ W) 0 m (xorlt hb hW) hpos, if_pos rfl,
+      R_ul (b ^^^ W) W m (xorlt hb hW) hW, if_neg hW0,
+      R_ul 0 b m hpos hb, if_neg hb0, cdSig0 b m]
+  rcases cdSigma_pm (m+1) W b with h1 | h1 <;>
+    rcases cdSigma_pm (m+1) (b ^^^ W) W with h2 | h2 <;>
+    rw [h1, h2] at hlab ⊢ <;> revert hlab <;> decide
+
 end SounioZDFiberAntisym
 
 
