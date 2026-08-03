@@ -310,6 +310,38 @@ fn lower_epistemic_contest_index_from_ref(epistemic: &IrEpistemicSection) -> Box
     index
 }
 
+struct LowerDerivativeBindingState {
+    fo_bind_names: [Name; 128],
+    fo_bind_sens: [i64; 4096],
+    so_bind_hess: [i64; 576],
+}
+
+fn empty_lower_derivative_binding_state() -> LowerDerivativeBindingState {
+    LowerDerivativeBindingState {
+        fo_bind_names: [ir_empty_name(); 128],
+        fo_bind_sens: [-1; 4096],
+        so_bind_hess: [-1; 576],
+    }
+}
+
+struct LowerRegisterMetadataState {
+    array_elem_float_regs: [i64; 512],
+    array_elem_float_reg_count: i64,
+    variance_base_regs: [i64; 1024],
+    variance_value_regs: [i64; 1024],
+    variance_base_reg_count: i64,
+}
+
+fn empty_lower_register_metadata_state() -> LowerRegisterMetadataState {
+    LowerRegisterMetadataState {
+        array_elem_float_regs: [IR_INVALID_REG; 512],
+        array_elem_float_reg_count: 0,
+        variance_base_regs: [IR_INVALID_REG; 1024],
+        variance_value_regs: [IR_INVALID_REG; 1024],
+        variance_base_reg_count: 0,
+    }
+}
+
 struct Lowerer {
     module: Box<IrModule>,
     epistemic_contests: Box<LowerEpistemicContestIndex>,
@@ -330,11 +362,7 @@ struct Lowerer {
     // Frontend-owned global element types. BSS byte size cannot distinguish
     // `[f64; N]` from `[i64; N]`, so this survives summary -> body lowering.
     global_types: Box<LowerGlobalTypeTable>,
-    array_elem_float_regs: [i64; 512],
-    array_elem_float_reg_count: i64,
-    variance_base_regs: [i64; 1024],
-    variance_value_regs: [i64; 1024],
-    variance_base_reg_count: i64,
+    register_metadata: Box<LowerRegisterMetadataState>,
     // Sprint 28: Debug-mode witness enforcement
     debug_mode: bool,
     // Sprint 44: probe-mode lowering skips heavyweight epistemic metadata lookup.
@@ -355,8 +383,7 @@ struct Lowerer {
     fo_expr_sens: [i64; 32],
     fo_pending_sens: [i64; 32],
     fo_bind_count: i64,
-    fo_bind_names: [Name; 128],
-    fo_bind_sens: [i64; 4096],
+    derivative_bindings: Box<LowerDerivativeBindingState>,
     // Second order. H_jk = d2y/dx_j dx_k over the same 8 seed channels, stored
     // as the upper triangle (36 slots, so_hess_idx below). A slot of -1 means
     // STRUCTURALLY zero, not "unknown" -- measure() and every projection have
@@ -364,14 +391,6 @@ struct Lowerer {
     // rows so a local carries its Hessian exactly as it carries its gradient.
     so_enabled: bool,
     so_expr_hess: [i64; 36],
-    so_bind_hess: [i64; 576],
-    // Inter-procedural FO: pure-fn transfer table (survives across function lowers).
-    // kind: 0=none 1=id(p0) 2=scale(lit*p0) 3=add(p0+p1) 4=mul(p0*p1) 5=fwd(g)
-    fo_xfer_count: i64,
-    fo_xfer_names: [Name; 64],
-    fo_xfer_kind: [i64; 64],
-    fo_xfer_lit: [f64; 64],
-    fo_xfer_fwd: [Name; 64],
 }
 
 struct IrPreparedCallArgs {
@@ -548,11 +567,7 @@ fn lowerer_new() -> Lowerer with Alloc {
         enum_variants: Box::new(empty_enum_variant_table()),
         struct_layouts: Box::new(empty_struct_layout_table()),
         global_types: Box::new(empty_lower_global_type_table()),
-        array_elem_float_regs: [IR_INVALID_REG; 512],
-        array_elem_float_reg_count: 0,
-        variance_base_regs: [IR_INVALID_REG; 1024],
-        variance_value_regs: [IR_INVALID_REG; 1024],
-        variance_base_reg_count: 0,
+        register_metadata: Box::new(empty_lower_register_metadata_state()),
         debug_mode: false,
         probe_mode: false,
         closure_caps: Box::new(empty_closure_cap_table()),
@@ -564,16 +579,9 @@ fn lowerer_new() -> Lowerer with Alloc {
         fo_expr_sens: [-1; 32],
         fo_pending_sens: [-1; 32],
         fo_bind_count: 0,
-        fo_bind_names: [ir_empty_name(); 128],
-        fo_bind_sens: [-1; 4096],
+        derivative_bindings: Box::new(empty_lower_derivative_binding_state()),
         so_enabled: false,
         so_expr_hess: [-1; 36],
-        so_bind_hess: [-1; 576],
-        fo_xfer_count: 0,
-        fo_xfer_names: [ir_empty_name(); 64],
-        fo_xfer_kind: [0; 64],
-        fo_xfer_lit: [0.0; 64],
-        fo_xfer_fwd: [ir_empty_name(); 64],
     }
 }
 
@@ -897,11 +905,7 @@ fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEp
         enum_variants: Box::new(*(*summary).enum_variants),
         struct_layouts: Box::new(*(*summary).struct_layouts),
         global_types: Box::new(*(*summary).global_types),
-        array_elem_float_regs: [IR_INVALID_REG; 512],
-        array_elem_float_reg_count: 0,
-        variance_base_regs: [IR_INVALID_REG; 1024],
-        variance_value_regs: [IR_INVALID_REG; 1024],
-        variance_base_reg_count: 0,
+        register_metadata: Box::new(empty_lower_register_metadata_state()),
         debug_mode: false,
         probe_mode: summary.probe_mode,
         closure_caps: Box::new(empty_closure_cap_table()),
@@ -913,16 +917,9 @@ fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEp
         fo_expr_sens: [-1; 32],
         fo_pending_sens: [-1; 32],
         fo_bind_count: 0,
-        fo_bind_names: [ir_empty_name(); 128],
-        fo_bind_sens: [-1; 4096],
+        derivative_bindings: Box::new(empty_lower_derivative_binding_state()),
         so_enabled: false,
         so_expr_hess: [-1; 36],
-        so_bind_hess: [-1; 576],
-        fo_xfer_count: 0,
-        fo_xfer_names: [ir_empty_name(); 64],
-        fo_xfer_kind: [0; 64],
-        fo_xfer_lit: [0.0; 64],
-        fo_xfer_fwd: [ir_empty_name(); 64],
     }
     lo.epistemic_contests = lower_epistemic_contest_index_from_ref(epistemic)
     if lower_live_diag_enabled() {
@@ -956,11 +953,7 @@ fn lowerer_new_from_program_summary_owned(summary: IrProgramSummary, epistemic: 
         enum_variants: summary.enum_variants,
         struct_layouts: summary.struct_layouts,
         global_types: summary.global_types,
-        array_elem_float_regs: [IR_INVALID_REG; 512],
-        array_elem_float_reg_count: 0,
-        variance_base_regs: [IR_INVALID_REG; 1024],
-        variance_value_regs: [IR_INVALID_REG; 1024],
-        variance_base_reg_count: 0,
+        register_metadata: Box::new(empty_lower_register_metadata_state()),
         debug_mode: false,
         probe_mode: summary.probe_mode,
         closure_caps: Box::new(empty_closure_cap_table()),
@@ -972,16 +965,9 @@ fn lowerer_new_from_program_summary_owned(summary: IrProgramSummary, epistemic: 
         fo_expr_sens: [-1; 32],
         fo_pending_sens: [-1; 32],
         fo_bind_count: 0,
-        fo_bind_names: [ir_empty_name(); 128],
-        fo_bind_sens: [-1; 4096],
+        derivative_bindings: Box::new(empty_lower_derivative_binding_state()),
         so_enabled: false,
         so_expr_hess: [-1; 36],
-        so_bind_hess: [-1; 576],
-        fo_xfer_count: 0,
-        fo_xfer_names: [ir_empty_name(); 64],
-        fo_xfer_kind: [0; 64],
-        fo_xfer_lit: [0.0; 64],
-        fo_xfer_fwd: [ir_empty_name(); 64],
     }
     (*lo.module).epistemic = (*epistemic)
     lo.epistemic_contests = lower_epistemic_contest_index_from_ref(epistemic)
@@ -1017,11 +1003,7 @@ fn lowerer_from_acc_module(module: Box<IrModule>) -> Lowerer with Alloc, Mut, Pa
         enum_variants: Box::new(empty_enum_variant_table()),
         struct_layouts: Box::new(empty_struct_layout_table()),
         global_types: Box::new(empty_lower_global_type_table()),
-        array_elem_float_regs: [IR_INVALID_REG; 512],
-        array_elem_float_reg_count: 0,
-        variance_base_regs: [IR_INVALID_REG; 1024],
-        variance_value_regs: [IR_INVALID_REG; 1024],
-        variance_base_reg_count: 0,
+        register_metadata: Box::new(empty_lower_register_metadata_state()),
         debug_mode: false,
         probe_mode: false,
         closure_caps: Box::new(empty_closure_cap_table()),
@@ -1033,16 +1015,9 @@ fn lowerer_from_acc_module(module: Box<IrModule>) -> Lowerer with Alloc, Mut, Pa
         fo_expr_sens: [-1; 32],
         fo_pending_sens: [-1; 32],
         fo_bind_count: 0,
-        fo_bind_names: [ir_empty_name(); 128],
-        fo_bind_sens: [-1; 4096],
+        derivative_bindings: Box::new(empty_lower_derivative_binding_state()),
         so_enabled: false,
         so_expr_hess: [-1; 36],
-        so_bind_hess: [-1; 576],
-        fo_xfer_count: 0,
-        fo_xfer_names: [ir_empty_name(); 64],
-        fo_xfer_kind: [0; 64],
-        fo_xfer_lit: [0.0; 64],
-        fo_xfer_fwd: [ir_empty_name(); 64],
     }
     // Knowledge layout is required for epistemic field lowering; match
     // lowerer_new_with_epistemic. Do NOT wipe module.epistemic / strings.
@@ -3476,8 +3451,8 @@ fn lowerer_lower_fn_item_mut(
     // from an earlier f64-param function (param reg 0, etc.) leak into later
     // functions and make `var i = 0 as i64; i = i + 1` lower as float-add
     // (IEEE 1.0 bits) once f64 params correctly carry scalar_kind=2.
-    (*lo).array_elem_float_reg_count = 0
-    (*lo).variance_base_reg_count = 0
+    (*(*lo).register_metadata).array_elem_float_reg_count = 0
+    (*(*lo).register_metadata).variance_base_reg_count = 0
     (*lo).pending_variance_reg = -1
     (*lo).pending_closure_fn_id = -1
     // Inter-procedural FO: register pure-fn transfer before body lower so later
@@ -5008,8 +4983,8 @@ impl Lowerer {
         lo.scope_depth = 0
         lo.loop_depth = 0
         // D5 (#986): per-function reset of vreg-keyed float/variance tables.
-        lo.array_elem_float_reg_count = 0
-        lo.variance_base_reg_count = 0
+        (*lo.register_metadata).array_elem_float_reg_count = 0
+        (*lo.register_metadata).variance_base_reg_count = 0
         lo.pending_variance_reg = -1
         lo.pending_closure_fn_id = -1
         // Multi-channel FO seeds are per-function.
@@ -6477,7 +6452,7 @@ impl Lowerer {
         var lo = self
         var i: i64 = 0
         while i < lo.fo_bind_count {
-            if ir_name_eq(lo.fo_bind_names[i as usize], name) {
+            if ir_name_eq((*lo.derivative_bindings).fo_bind_names[i as usize], name) {
                 return (lo, i)
             }
             i = i + 1
@@ -6486,10 +6461,10 @@ impl Lowerer {
             return (lo, 0 - 1)
         }
         let idx = lo.fo_bind_count
-        lo.fo_bind_names[idx as usize] = name
+        (*lo.derivative_bindings).fo_bind_names[idx as usize] = name
         var c: i64 = 0
         while c < 32 {
-            lo.fo_bind_sens[(idx * 32 + c) as usize] = 0 - 1
+            (*lo.derivative_bindings).fo_bind_sens[(idx * 32 + c) as usize] = 0 - 1
             c = c + 1
         }
         lo.fo_bind_count = idx + 1
@@ -6516,13 +6491,13 @@ impl Lowerer {
             // Same aliasing rule as alloc_variance_slot_for_local: a channel already
             // bound points at the RHS's vreg, so copy its value into a private reg
             // rather than reusing it as this local's slot.
-            let existing = lo.fo_bind_sens[(row * 32 + k) as usize]
+            let existing = (*lo.derivative_bindings).fo_bind_sens[(row * 32 + k) as usize]
             let z = lo.emit_f64_const(0.0)
             lo = z.0
             if existing >= 0 {
                 lo = lo.emit(ir_copy(z.1, existing))
             }
-            lo.fo_bind_sens[(row * 32 + k) as usize] = z.1
+            (*lo.derivative_bindings).fo_bind_sens[(row * 32 + k) as usize] = z.1
             k = k + 1
         }
         lo
@@ -6538,7 +6513,7 @@ impl Lowerer {
         var row: i64 = 0 - 1
         var i: i64 = 0
         while i < lo.fo_bind_count {
-            if ir_name_eq(lo.fo_bind_names[i as usize], name) {
+            if ir_name_eq((*lo.derivative_bindings).fo_bind_names[i as usize], name) {
                 row = i
                 i = lo.fo_bind_count
             } else {
@@ -6551,7 +6526,7 @@ impl Lowerer {
         var any: bool = false
         var k: i64 = 0
         while k < 32 {
-            let slot = lo.fo_bind_sens[(row * 32 + k) as usize]
+            let slot = (*lo.derivative_bindings).fo_bind_sens[(row * 32 + k) as usize]
             if slot >= 0 {
                 any = true
                 let src = lo.fo_expr_sens[k as usize]
@@ -6576,27 +6551,27 @@ impl Lowerer {
             return lo
         }
         var i: i64 = 0
-        while i < lo.variance_base_reg_count {
-            if lo.variance_base_regs[i as usize] == base_reg {
-                lo.variance_value_regs[i as usize] = variance_reg
+        while i < (*lo.register_metadata).variance_base_reg_count {
+            if (*lo.register_metadata).variance_base_regs[i as usize] == base_reg {
+                (*lo.register_metadata).variance_value_regs[i as usize] = variance_reg
                 return lo
             }
             i = i + 1
         }
-        if lo.variance_base_reg_count < 1024 {
-            let idx = lo.variance_base_reg_count
-            lo.variance_base_regs[idx as usize] = base_reg
-            lo.variance_value_regs[idx as usize] = variance_reg
-            lo.variance_base_reg_count = idx + 1
+        if (*lo.register_metadata).variance_base_reg_count < 1024 {
+            let idx = (*lo.register_metadata).variance_base_reg_count
+            (*lo.register_metadata).variance_base_regs[idx as usize] = base_reg
+            (*lo.register_metadata).variance_value_regs[idx as usize] = variance_reg
+            (*lo.register_metadata).variance_base_reg_count = idx + 1
         }
         lo
     }
 
     fn lookup_variance_for_base_reg(self, base_reg: i64) -> i64 with Mut, Panic, Div {
         var i: i64 = 0
-        while i < self.variance_base_reg_count {
-            if self.variance_base_regs[i as usize] == base_reg {
-                return self.variance_value_regs[i as usize]
+        while i < (*self.register_metadata).variance_base_reg_count {
+            if (*self.register_metadata).variance_base_regs[i as usize] == base_reg {
+                return (*self.register_metadata).variance_value_regs[i as usize]
             }
             i = i + 1
         }
@@ -6928,7 +6903,7 @@ impl Lowerer {
         }
         var i: i64 = 0
         while i < 36 {
-            lo.so_bind_hess[(row * 36 + i) as usize] = lo.so_expr_hess[i as usize]
+            (*lo.derivative_bindings).so_bind_hess[(row * 36 + i) as usize] = lo.so_expr_hess[i as usize]
             i = i + 1
         }
         lo
@@ -6939,7 +6914,7 @@ impl Lowerer {
         var row: i64 = 0 - 1
         var i: i64 = 0
         while i < lo.fo_bind_count {
-            if ir_name_eq(lo.fo_bind_names[i as usize], name) {
+            if ir_name_eq((*lo.derivative_bindings).fo_bind_names[i as usize], name) {
                 row = i
                 i = lo.fo_bind_count
             } else {
@@ -6951,7 +6926,7 @@ impl Lowerer {
         }
         var j: i64 = 0
         while j < 36 {
-            lo.so_expr_hess[j as usize] = lo.so_bind_hess[(row * 36 + j) as usize]
+            lo.so_expr_hess[j as usize] = (*lo.derivative_bindings).so_bind_hess[(row * 36 + j) as usize]
             j = j + 1
         }
         lo
@@ -6962,10 +6937,10 @@ impl Lowerer {
         // Update existing bind if present.
         var i: i64 = 0
         while i < lo.fo_bind_count {
-            if ir_name_eq(lo.fo_bind_names[i as usize], name) {
+            if ir_name_eq((*lo.derivative_bindings).fo_bind_names[i as usize], name) {
                 var k: i64 = 0
                 while k < 32 {
-                    lo.fo_bind_sens[(i * 32 + k) as usize] = lo.fo_expr_sens[k as usize]
+                    (*lo.derivative_bindings).fo_bind_sens[(i * 32 + k) as usize] = lo.fo_expr_sens[k as usize]
                     k = k + 1
                 }
                 return lo
@@ -6976,10 +6951,10 @@ impl Lowerer {
             return lo
         }
         let idx = lo.fo_bind_count
-        lo.fo_bind_names[idx as usize] = name
+        (*lo.derivative_bindings).fo_bind_names[idx as usize] = name
         var k2: i64 = 0
         while k2 < 32 {
-            lo.fo_bind_sens[(idx * 32 + k2) as usize] = lo.fo_expr_sens[k2 as usize]
+            (*lo.derivative_bindings).fo_bind_sens[(idx * 32 + k2) as usize] = lo.fo_expr_sens[k2 as usize]
             k2 = k2 + 1
         }
         lo.fo_bind_count = idx + 1
@@ -7009,10 +6984,10 @@ impl Lowerer {
         var lo = self
         var i: i64 = 0
         while i < lo.fo_bind_count {
-            if ir_name_eq(lo.fo_bind_names[i as usize], name) {
+            if ir_name_eq((*lo.derivative_bindings).fo_bind_names[i as usize], name) {
                 var k: i64 = 0
                 while k < 32 {
-                    lo.fo_expr_sens[k as usize] = lo.fo_bind_sens[(i * 32 + k) as usize]
+                    lo.fo_expr_sens[k as usize] = (*lo.derivative_bindings).fo_bind_sens[(i * 32 + k) as usize]
                     k = k + 1
                 }
                 return lo
@@ -8387,15 +8362,16 @@ impl Lowerer {
             return lo
         }
         var i: i64 = 0
-        while i < lo.array_elem_float_reg_count {
-            if lo.array_elem_float_regs[i as usize] == reg {
+        while i < (*lo.register_metadata).array_elem_float_reg_count {
+            if (*lo.register_metadata).array_elem_float_regs[i as usize] == reg {
                 return lo
             }
             i = i + 1
         }
-        if lo.array_elem_float_reg_count < 512 {
-            lo.array_elem_float_regs[lo.array_elem_float_reg_count as usize] = reg
-            lo.array_elem_float_reg_count = lo.array_elem_float_reg_count + 1
+        if (*lo.register_metadata).array_elem_float_reg_count < 512 {
+            let idx = (*lo.register_metadata).array_elem_float_reg_count
+            (*lo.register_metadata).array_elem_float_regs[idx as usize] = reg
+            (*lo.register_metadata).array_elem_float_reg_count = idx + 1
         }
         lo
     }
@@ -8405,8 +8381,8 @@ impl Lowerer {
             return false
         }
         var i: i64 = 0
-        while i < self.array_elem_float_reg_count {
-            if self.array_elem_float_regs[i as usize] == reg {
+        while i < (*self.register_metadata).array_elem_float_reg_count {
+            if (*self.register_metadata).array_elem_float_regs[i as usize] == reg {
                 return true
             }
             i = i + 1
@@ -10499,8 +10475,8 @@ impl Lowerer {
         lo.scope_depth = 0
         lo.loop_depth = 0
         // D5 (#986): per-function reset of vreg-keyed float/variance tables.
-        lo.array_elem_float_reg_count = 0
-        lo.variance_base_reg_count = 0
+        (*lo.register_metadata).array_elem_float_reg_count = 0
+        (*lo.register_metadata).variance_base_reg_count = 0
         lo.pending_variance_reg = -1
         lo.pending_closure_fn_id = -1
         if lower_live_diag_enabled() {
@@ -10695,8 +10671,8 @@ impl Lowerer {
         lo.scope_depth = 0
         lo.loop_depth = 0
         // D5 (#986): per-function reset of vreg-keyed float/variance tables.
-        lo.array_elem_float_reg_count = 0
-        lo.variance_base_reg_count = 0
+        (*lo.register_metadata).array_elem_float_reg_count = 0
+        (*lo.register_metadata).variance_base_reg_count = 0
         lo.pending_variance_reg = -1
         lo.pending_closure_fn_id = -1
         if lower_body_diag_enabled() {
@@ -14948,8 +14924,8 @@ impl Lowerer {
         lo.scope_depth = 0
         lo.loop_depth = 0
         // D5 (#986): per-function reset of vreg-keyed float/variance tables.
-        lo.array_elem_float_reg_count = 0
-        lo.variance_base_reg_count = 0
+        (*lo.register_metadata).array_elem_float_reg_count = 0
+        (*lo.register_metadata).variance_base_reg_count = 0
         lo.pending_variance_reg = -1
         lo.pending_closure_fn_id = -1
         lo.allow_direct_capturing_closure_literal = false
