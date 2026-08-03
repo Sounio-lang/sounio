@@ -2294,9 +2294,38 @@ def main():
                       and (u == 0 or v == 0 or u == W or v == W)) == 4 * (H - 2)
                   for W in range(1, H))
         uu_const.append((M, okc))
+    bad_ul = bad_lu = 0
+    ulc, luc = [], []
+    for M in (3, 4, 5):
+        S, H = sign_table_fast(M), 1 << M
+        for W in range(1, H):
+            for u in range(H):
+                for b in range(H):
+                    lhs = _qInd(S, W, u, b)
+                    rhs = ((1 if (b != 0 and (u == 0 or u == W or b == W or u == b
+                                              or b == (u ^ W))) else 0)
+                           + _offInd(S, W, M, u, b))
+                    if lhs != rhs:
+                        bad_ul += 1
+                    lhs2 = 1 if (b != 0 and b != W and _Qu2(S, W, u, b) == -1) else 0
+                    rhs2 = ((1 if (b != 0 and b != W and (u == 0 or u == W or u == b
+                                                          or b == (u ^ W))) else 0)
+                            + _offInd(S, W, M, u, b))
+                    if lhs2 != rhs2:
+                        bad_lu += 1
+        ulc.append((M, all(sum(1 for u in range(H) for b in range(H)
+                               if b != 0 and (u == 0 or u == W or b == W or u == b
+                                              or b == (u ^ W))) == 5 * H - 8
+                           for W in range(1, H))))
+        luc.append((M, all(sum(1 for a in range(H) for v in range(H)
+                               if a != 0 and a != W and (v == 0 or v == W or v == a
+                                                         or a == (v ^ W))) == 4 * H - 8
+                           for W in range(1, H))))
     w30 = (all(c == d == 0 for _, _, c, d in w30_rows)
            and null30 > 0 and null30_vac == null30_tot
-           and bad_uus == 0 and all(c for _, c in uu_const))
+           and bad_uus == 0 and all(c for _, c in uu_const)
+           and bad_ul == 0 and bad_lu == 0
+           and all(c for _, c in ulc) and all(c for _, c in luc))
     ok["W30"] = w30
     print(f"W30_BRIDGE  THE BRIDGE'S CORE -- Ncnt = OffCnt + (2^M - 2) "
           f"{'OK' if w30 else 'FAIL'} -- "
@@ -2306,7 +2335,7 @@ def main():
             f"; and the HONEST VACUITY CHECK -- dropping b != a^W instead leaves the bridge "
             f"INTACT at {null30_vac} of {H-1} labels, so that guard does NOT carry the value. "
             f"; uuInd_split pointwise at M=3,4,5: {bad_uus} failures, and its boundary constant is "
-            f"4(2^M - 2) at every label: {all(c for _, c in uu_const)}. *** THE FACTORING: all four quadrants differ from `Ncnt` only ON THE SIX "
+            f"4(2^M - 2) at every label: {all(c for _, c in uu_const)}. *** qInd_split (ul) pointwise: 0 failures with boundary 5*2^M - 8; luInd_split (lu) pointwise: 0 failures with boundary 4*2^M - 8. *** THE FACTORING: all four quadrants differ from `Ncnt` only ON THE SIX "
             "LINES, so they all go through ONE quantity, `OffCnt` -- the count OFF the lines. "
             "`Ncnt_eq_OffCnt` is the first of those factorings. *** AND IT NEEDS NO "
             "INCLUSION-EXCLUSION, which is what made the six OVERLAPPING lines look painful: "
@@ -2317,7 +2346,7 @@ def main():
             "b = a^W is +1 throughout (`Qgen'_coset_partner`) and contributes NOTHING; only the "
             "b = W column is -1 throughout (`Qgen'_label_right`), and its size is exactly "
             "2^M - 2. *** AND A CAUGHT VACUITY, the third time a null control has done this in this lane: my first control dropped the `b != a^W` guard expecting a break and got none, because on the coset diagonal Q' = +1 so those pairs contribute 0 either way. Same for the `a != W` row. Both guards are load-bearing for the PROOF's case analysis and NOT for the value; only `b != W` carries the count. *** WHAT IS NOT DONE: the same factoring for the three UNPRIMED quadrant "
-            "counts (ul, lu), then the arithmetic assembly. `uu` IS DONE -- `uuInd_split` factors it as OffCnt (arguments swapped, which is why `sumLt_swap` was needed) plus four boundary lines contributing exactly 4(2^M - 2). Until those land the LOW "
+            "counts (ul, lu) IS NOW DONE TOO -- `qInd_split` (five lines, boundary 5*2^M - 8) and `luInd_split` (four lines, boundary 4*2^M - 8; only four, because Qgen's b^W = 0 degeneracy is a = W and that quadrant's own guard already excludes it). ALL FOUR POINTWISE FACTORINGS ARE PROVEN. What remains is COUNTING those boundary sets in Lean, and the arithmetic assembly. `uu` IS DONE -- `uuInd_split` factors it as OffCnt (arguments swapped, which is why `sumLt_swap` was needed) plus four boundary lines contributing exactly 4(2^M - 2). Until those land the LOW "
             "recursion is NOT yet a Lean theorem. (III) untouched; tr(A^3) NOT closed; (d) IS "
             "NOT CLOSED ***")
 

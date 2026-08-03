@@ -1149,21 +1149,30 @@ The clause now asserts both: dropping `b ≠ W` breaks it, dropping `b ≠ a⊕W
 `uuInd_split` factors the `uu` summand as `OffCnt`'s — **with the arguments swapped**, which is
 why `sumLt_swap` was needed — plus four boundary lines contributing exactly `4(2^M − 2)`.
 
-### 23.5 What is not done
+### 23.5 `ul` and `lu` factor too — all four are proven
 
-The same factoring for the **unprimed** quadrant counts (`ul`, `lu`), which additionally need
-`Qgen_eq_Qgen'` off the lines, and then the arithmetic assembly. The target constants are known
-and the arithmetic already closes on paper:
+Both land on the **unprimed** `Qgen`, so besides the line values they need `Qgen_eq_Qgen'` off the
+lines. Every line value was already in the tree (`Qgen_zero_left`, `Qgen_diag_neg`,
+`Qgen_coset_left`/`_right`, `Qgen_degen`).
 
-| quadrant | factoring |
-|---|---|
-| `ll` | `OffCnt + (e−2)` |
-| `ul` | `OffCnt + 5e − 8` |
-| `lu` | `OffCnt + 4e − 8` |
-| `uu` | `OffCnt + 4e − 8` |
+* `qInd_split` — `ul`, **five** boundary lines, contributing `5·2^M − 8`
+* `luInd_split` — `lu`, **four** lines, contributing `4·2^M − 8`. Only four: `Qgen`'s
+  `b ⊕ W = 0` degeneracy is `a = W`, which that quadrant's own guard already excludes.
+
+### 23.6 What is not done
+
+**Counting** those boundary sets in Lean, and the arithmetic assembly. All four *pointwise*
+factorings are proven; the constants below are verified by `W30` but not yet derived in Lean:
+
+| quadrant | factoring | theorem |
+|---|---|---|
+| `ll` | `OffCnt + (e−2)` | `nInd_split` |
+| `ul` | `OffCnt + 5e − 8` | `qInd_split` |
+| `lu` | `OffCnt + 4e − 8` | `luInd_split` |
+| `uu` | `OffCnt + 4e − 8` | `uuInd_split` |
 
 summing to `4·OffCnt + 14e − 26 = 4·Ncnt + 10e − 18` ✓ — the LOW recursion.
 
-Until `ul` and `lu` land, **the LOW recursion is not yet a Lean theorem**.
+Until the counting lands, **the LOW recursion is not yet a Lean theorem**.
 
 **(III) is untouched. `tr(A³)` is not closed. (d) is not closed, and V1 is not proven.**

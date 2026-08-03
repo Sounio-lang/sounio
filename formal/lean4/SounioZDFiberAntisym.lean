@@ -6308,6 +6308,169 @@ theorem uuInd_split (W m u v : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
             · exact hq hh
           rw [if_neg hno, if_neg (fun h => hq h.2.2.2.2.2.2)]
 
+/-! ### Stage 3b: `ul` and `lu` factor too
+
+Both land on the UNPRIMED `Qgen`, so besides the line values they need `Qgen_eq_Qgen'` OFF the
+lines. Every line value is already in the tree: `Qgen_zero_left`, `Qgen_diag_neg`,
+`Qgen_coset_left`/`_right` and `Qgen_degen`. -/
+
+/-- Adding one fresh value to a disjunction adds exactly one to the count. -/
+theorem sumLt_cons (n j : Nat) (p : Nat → Prop) [DecidablePred p] (hj : j < n) (hnp : ¬ p j) :
+    sumLt n (fun i => if i = j ∨ p i then 1 else 0)
+      = 1 + sumLt n (fun i => if p i then 1 else 0) := by
+  have e1 : sumLt n (fun i => if i = j ∨ p i then 1 else 0)
+      = sumLt n (fun i => if i = j then 1 else 0)
+        + sumLt n (fun i => if i = j then 0 else if p i then 1 else 0) := by
+    rw [← sumLt_split_if]
+    apply sumLt_congr
+    intro i _
+    by_cases h : i = j
+    · rw [if_pos h, if_pos (Or.inl h)]
+    · rw [if_neg h]
+      by_cases h2 : p i
+      · rw [if_pos h2, if_pos (Or.inr h2)]
+      · rw [if_neg h2, if_neg (fun hc => hc.elim h h2)]
+  have e2 : sumLt n (fun i => if p i then 1 else 0)
+      = sumLt n (fun i => if i = j then 0 else if p i then 1 else 0) := by
+    apply sumLt_congr
+    intro i _
+    by_cases h : i = j
+    · rw [if_pos h, h, if_neg hnp]
+    · rw [if_neg h]
+  rw [e1, e2, sumLt_single n j 1 hj]
+
+/-- Pointwise: the `ul` (unprimed) summand is `OffCnt`'s plus FIVE boundary lines. -/
+theorem qInd_split (W M u b : Nat) (hW : W < 2^M) (hW0 : W ≠ 0)
+    (hu : u < 2^M) (hb : b < 2^M) :
+    qInd W M u b
+      = (if b ≠ 0 ∧ (u = 0 ∨ u = W ∨ b = W ∨ u = b ∨ b = u ^^^ W) then 1 else 0)
+        + (if u ≠ 0 ∧ u ≠ W ∧ b ≠ 0 ∧ b ≠ W ∧ u ≠ b ∧ b ≠ u ^^^ W
+              ∧ Qgen' W u b M = -1 then 1 else 0) := by
+  unfold qInd
+  by_cases hb0 : b = 0
+  · have hL : (if b ≠ 0 ∧ Qgen W u b M = -1 then (1:Nat) else 0) = 0 :=
+      if_neg (fun hc => hc.1 hb0)
+    have hD : (if b ≠ 0 ∧ (u = 0 ∨ u = W ∨ b = W ∨ u = b ∨ b = u ^^^ W)
+               then (1:Nat) else 0) = 0 := if_neg (fun hc => hc.1 hb0)
+    have hO : (if u ≠ 0 ∧ u ≠ W ∧ b ≠ 0 ∧ b ≠ W ∧ u ≠ b ∧ b ≠ u ^^^ W
+                  ∧ Qgen' W u b M = -1 then (1:Nat) else 0) = 0 :=
+      if_neg (fun hc => hc.2.2.1 hb0)
+    rw [hL, hD, hO]
+  · by_cases hline : u = 0 ∨ u = W ∨ b = W ∨ u = b ∨ b = u ^^^ W
+    · have hq : Qgen W u b M = -1 := by
+        rcases hline with h | h | h | h | h
+        · rw [h]; exact Qgen_zero_left M W b hW hb hW0
+        · rw [h, Qgen_coset_left, Nat.xor_self]
+          exact Qgen_zero_left M W b hW hb hW0
+        · exact Qgen_degen M W u b hW hu hb hW0
+            (Or.inr (Or.inr (Or.inr (Or.inl (by rw [h, Nat.xor_self])))))
+        · rw [h]; exact Qgen_diag_neg M W b hW hb hW0
+        · rw [h, ← Qgen_coset_right]
+          exact Qgen_diag_neg M W u hW hu hW0
+      have hO : (if u ≠ 0 ∧ u ≠ W ∧ b ≠ 0 ∧ b ≠ W ∧ u ≠ b ∧ b ≠ u ^^^ W
+                    ∧ Qgen' W u b M = -1 then (1:Nat) else 0) = 0 := by
+        apply if_neg
+        intro hc
+        rcases hline with h | h | h | h | h
+        · exact hc.1 h
+        · exact hc.2.1 h
+        · exact hc.2.2.2.1 h
+        · exact hc.2.2.2.2.1 h
+        · exact hc.2.2.2.2.2.1 h
+      rw [if_pos ⟨hb0, hq⟩, if_pos ⟨hb0, hline⟩, hO]
+    · have h0 : u ≠ 0 := fun h => hline (Or.inl h)
+      have h1 : u ≠ W := fun h => hline (Or.inr (Or.inl h))
+      have h2 : b ≠ W := fun h => hline (Or.inr (Or.inr (Or.inl h)))
+      have h3 : u ≠ b := fun h => hline (Or.inr (Or.inr (Or.inr (Or.inl h))))
+      have h4 : b ≠ u ^^^ W := fun h => hline (Or.inr (Or.inr (Or.inr (Or.inr h))))
+      have heq : Qgen W u b M = Qgen' W u b M :=
+        Qgen_eq_Qgen' W u b M hu hb hW
+          (fun h => h1 (xor_zero_eq u W h))
+          (fun h => h2 (xor_zero_eq b W h))
+          (by intro h
+              apply h3
+              have e1 : (u ^^^ W) = (b ^^^ W) := xor_zero_eq (u ^^^ W) (b ^^^ W) h
+              have e2 : (u ^^^ W) ^^^ W = (b ^^^ W) ^^^ W := by rw [e1]
+              rw [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero, Nat.xor_assoc, Nat.xor_self,
+                  Nat.xor_zero] at e2
+              exact e2)
+          h0
+          (by intro h
+              apply h4
+              have e1 : u = b ^^^ W := xor_zero_eq u (b ^^^ W) h
+              rw [e1, Nat.xor_assoc, Nat.xor_self, Nat.xor_zero])
+      have hD : (if b ≠ 0 ∧ (u = 0 ∨ u = W ∨ b = W ∨ u = b ∨ b = u ^^^ W)
+                 then (1:Nat) else 0) = 0 := if_neg (fun hc => hline hc.2)
+      rw [hD, Nat.zero_add, heq]
+      by_cases hq : Qgen' W u b M = -1
+      · rw [if_pos ⟨hb0, hq⟩, if_pos ⟨h0, h1, hb0, h2, h3, h4, hq⟩]
+      · rw [if_neg (fun hc => hq hc.2), if_neg (fun hc => hq hc.2.2.2.2.2.2)]
+
+/-- Pointwise: the `lu` (unprimed, transposed) summand is `OffCnt`'s plus FOUR boundary lines.
+    Only four, because the fifth -- `Qgen`'s `b ⊕ W = 0` degeneracy -- is `a = W`, which the
+    quadrant's own guard already excludes. -/
+theorem luInd_split (W M v a : Nat) (hW : W < 2^M) (hW0 : W ≠ 0)
+    (hv : v < 2^M) (ha : a < 2^M) :
+    (if a ≠ 0 ∧ a ≠ W ∧ Qgen W v a M = -1 then 1 else 0)
+      = (if a ≠ 0 ∧ a ≠ W ∧ (v = 0 ∨ v = W ∨ v = a ∨ a = v ^^^ W) then 1 else 0)
+        + (if v ≠ 0 ∧ v ≠ W ∧ a ≠ 0 ∧ a ≠ W ∧ v ≠ a ∧ a ≠ v ^^^ W
+              ∧ Qgen' W v a M = -1 then 1 else 0) := by
+  by_cases hg : a ≠ 0 ∧ a ≠ W
+  · obtain ⟨ha0, haW⟩ := hg
+    by_cases hline : v = 0 ∨ v = W ∨ v = a ∨ a = v ^^^ W
+    · have hq : Qgen W v a M = -1 := by
+        rcases hline with h | h | h | h
+        · rw [h]; exact Qgen_zero_left M W a hW ha hW0
+        · rw [h, Qgen_coset_left, Nat.xor_self]
+          exact Qgen_zero_left M W a hW ha hW0
+        · rw [h]; exact Qgen_diag_neg M W a hW ha hW0
+        · rw [h, ← Qgen_coset_right]
+          exact Qgen_diag_neg M W v hW hv hW0
+      have hO : (if v ≠ 0 ∧ v ≠ W ∧ a ≠ 0 ∧ a ≠ W ∧ v ≠ a ∧ a ≠ v ^^^ W
+                    ∧ Qgen' W v a M = -1 then (1:Nat) else 0) = 0 := by
+        apply if_neg
+        intro hc
+        rcases hline with h | h | h | h
+        · exact hc.1 h
+        · exact hc.2.1 h
+        · exact hc.2.2.2.2.1 h
+        · exact hc.2.2.2.2.2.1 h
+      rw [if_pos ⟨ha0, haW, hq⟩, if_pos ⟨ha0, haW, hline⟩, hO]
+    · have h0 : v ≠ 0 := fun h => hline (Or.inl h)
+      have h1 : v ≠ W := fun h => hline (Or.inr (Or.inl h))
+      have h2 : v ≠ a := fun h => hline (Or.inr (Or.inr (Or.inl h)))
+      have h3 : a ≠ v ^^^ W := fun h => hline (Or.inr (Or.inr (Or.inr h)))
+      have heq : Qgen W v a M = Qgen' W v a M :=
+        Qgen_eq_Qgen' W v a M hv ha hW
+          (fun h => h1 (xor_zero_eq v W h))
+          (fun h => haW (xor_zero_eq a W h))
+          (by intro h
+              apply h2
+              have e1 : (v ^^^ W) = (a ^^^ W) := xor_zero_eq (v ^^^ W) (a ^^^ W) h
+              have e2 : (v ^^^ W) ^^^ W = (a ^^^ W) ^^^ W := by rw [e1]
+              rw [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero, Nat.xor_assoc, Nat.xor_self,
+                  Nat.xor_zero] at e2
+              exact e2)
+          h0
+          (by intro h
+              apply h3
+              have e1 : v = a ^^^ W := xor_zero_eq v (a ^^^ W) h
+              rw [e1, Nat.xor_assoc, Nat.xor_self, Nat.xor_zero])
+      have hD : (if a ≠ 0 ∧ a ≠ W ∧ (v = 0 ∨ v = W ∨ v = a ∨ a = v ^^^ W)
+                 then (1:Nat) else 0) = 0 := if_neg (fun hc => hline hc.2.2)
+      rw [hD, Nat.zero_add, heq]
+      by_cases hq : Qgen' W v a M = -1
+      · rw [if_pos ⟨ha0, haW, hq⟩, if_pos ⟨h0, h1, ha0, haW, h2, h3, hq⟩]
+      · rw [if_neg (fun hc => hq hc.2.2), if_neg (fun hc => hq hc.2.2.2.2.2.2)]
+  · have hL : (if a ≠ 0 ∧ a ≠ W ∧ Qgen W v a M = -1 then (1:Nat) else 0) = 0 :=
+      if_neg (fun hc => hg ⟨hc.1, hc.2.1⟩)
+    have hD : (if a ≠ 0 ∧ a ≠ W ∧ (v = 0 ∨ v = W ∨ v = a ∨ a = v ^^^ W)
+               then (1:Nat) else 0) = 0 := if_neg (fun hc => hg ⟨hc.1, hc.2.1⟩)
+    have hO : (if v ≠ 0 ∧ v ≠ W ∧ a ≠ 0 ∧ a ≠ W ∧ v ≠ a ∧ a ≠ v ^^^ W
+                  ∧ Qgen' W v a M = -1 then (1:Nat) else 0) = 0 :=
+      if_neg (fun hc => hg ⟨hc.2.2.1, hc.2.2.2.1⟩)
+    rw [hL, hD, hO]
+
 end SounioZDFiberAntisym
 
 
