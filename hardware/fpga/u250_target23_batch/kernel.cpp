@@ -76,6 +76,7 @@ static void localize_event(const State &left, q_t &event_step, State &event_stat
     State high_state = rk4(left, high);
 event_bisection:
     for (int iteration = 0; iteration < EVENT_BISECTIONS; ++iteration) {
+#pragma HLS UNROLL factor=1
 #pragma HLS LOOP_TRIPCOUNT min=24 max=24
         q_t middle = (low + high) >> 1;
         State middle_state = rk4(left, middle);
