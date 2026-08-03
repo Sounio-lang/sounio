@@ -737,6 +737,8 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.fano-arcs-blocking-sounio-note | historical | docs/research/fano-arcs-blocking-sounio-note.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.fisher-matrix-fix | historical | docs/research/FISHER_MATRIX_FIX.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.functor-f-e6-albert-shadow-spec-2026-07-25 | historical | docs/research/functor_f_e6_albert_shadow_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.functor-f-e8-capstone-spec-2026-07-26 | historical | docs/research/functor_f_e8_capstone_spec_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.functor-f-e9-affine-boundary-spec-2026-07-26 | historical | docs/research/functor_f_e9_affine_boundary_spec_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.functor-f-exceptional-frontier-note-2026-07-25 | historical | docs/research/functor_f_exceptional_frontier_note_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.functor-f-fano-psl27-thread-spec-2026-07-25 | historical | docs/research/functor_f_fano_psl27_thread_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.functor-f-field-functoriality-spec-2026-07-25 | historical | docs/research/functor_f_field_functoriality_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -749,6 +751,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.functor-f-ord3-quotient-fill-spec-2026-07-25 | historical | docs/research/functor_f_ord3_quotient_fill_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.functor-f-ord3-secondary-ternary-spec-2026-07-25 | historical | docs/research/functor_f_ord3_secondary_ternary_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.functor-f-ord3-symmetry-fill-spec-2026-07-25 | historical | docs/research/functor_f_ord3_symmetry_fill_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.functor-f-ord3-ternary-anatomy-spec-2026-07-26 | historical | docs/research/functor_f_ord3_ternary_anatomy_spec_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.functor-f-paper-skeleton-2026-07-25 | historical | docs/research/functor_f_paper_skeleton_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.functor-f-petitot-bridge-spec-2026-07-25 | historical | docs/research/functor_f_petitot_bridge_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.functor-f-phi-fp-equivariant-spec-2026-07-25 | historical | docs/research/functor_f_phi_fp_equivariant_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
