@@ -736,6 +736,9 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.falsification-ledger-spec-2026-07-25 | historical | docs/research/falsification_ledger_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.fano-arcs-blocking-sounio-note | historical | docs/research/fano-arcs-blocking-sounio-note.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.fisher-matrix-fix | historical | docs/research/FISHER_MATRIX_FIX.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.fo-css-compiler-residual-half-spec-2026-07-31 | historical | docs/research/fo_css_compiler_residual_half_spec_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.fo-pk-method-science-receipts-2026-07-31 | historical | docs/research/fo_pk_method_science_receipts_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.fo-pk-residual4-oral-css-closeout-2026-07-31 | historical | docs/research/fo_pk_residual4_oral_css_closeout_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.functor-f-e6-albert-shadow-spec-2026-07-25 | historical | docs/research/functor_f_e6_albert_shadow_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.functor-f-exceptional-frontier-note-2026-07-25 | historical | docs/research/functor_f_exceptional_frontier_note_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.functor-f-fano-psl27-thread-spec-2026-07-25 | historical | docs/research/functor_f_fano_psl27_thread_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
