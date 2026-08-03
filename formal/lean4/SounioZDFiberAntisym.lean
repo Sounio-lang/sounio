@@ -4617,6 +4617,70 @@ theorem odd_stays_odd (W l : Nat) (hl : 1 ≤ l) (hodd : W % 2 = 1) : (W % 2^l) 
   rw [this]
   exact hodd
 
+/-! ## Tier 23: the label invariant `g`
+
+The resonance count `N(m,W)` depends on `W` only through `g(W) = (W &&& (W-1)) >>> 3`. Half of
+that is a theorem, and it is this tier: **`Q'` is `tau`-equivariant**, so the count is unchanged
+when `tau j` (`j ≤ lsb W`) is applied to the label and to both arguments. At `j = lsb W` the
+label-level action is exactly "move the lowest set bit to position 0" (`tau_lsb`), which
+NORMALISES every label to an odd one (`tau_lsb_odd`) -- and `g W = (tau (lsb W) W) >>> 3`.
+
+What is NOT proven here: (i) the step from the pointwise equivariance to the equality of
+COUNTS -- that needs the bijection-to-cardinality argument, which is Finset territory this
+Mathlib-free file does not have; and (ii) the residual collapse, that bits 1 and 2 of an
+already-odd label do not matter. `tau` alone is SOUND but not complete: measurement (`W18`)
+puts exactly four `tau`-orbits in each block. -/
+
+/-- **`Q'` is `tau`-equivariant.** Three theorems already in the tree do all the work:
+    `star_forall` gives it for `Q`, `tau_xor` moves `tau` through the `xor`s, and `chi_tau`
+    says the two commutation signs cannot see `tau` at all. -/
+theorem Qgen'_tau (m j Y a b : Nat) (hj : j < m) (hY : Y < 2^m) (hY0 : Y ≠ 0)
+    (hmod : Y % 2^j = 0) (ha : a < 2^m) (hb : b < 2^m) :
+    Qgen' Y a b m = Qgen' (tau j Y) (tau j a) (tau j b) m := by
+  have haY : a ^^^ Y < 2^m := Nat.xor_lt_two_pow ha hY
+  have hbY : b ^^^ Y < 2^m := Nat.xor_lt_two_pow hb hY
+  rw [Qgen'_eq_chi, Qgen'_eq_chi, ← tau_xor j a Y, ← tau_xor j b Y,
+      chi_tau m j (a ^^^ Y) (b ^^^ Y) hj haY hbY,
+      chi_tau m j a (b ^^^ Y) hj ha hbY,
+      ← star_forall m j Y a b hY hY0 hmod ha hb]
+
+/-- At `j = lsb W`, `tau` normalises the label: the result is ODD. Concretely `tau` moves the
+    lowest set bit down to position 0, and `g W = (tau (lsb W) W) >>> 3` -- the additive form
+    `tau t W + 2^t = W + 1`, hence `tau t W = (W &&& (W-1)) + 1`, is pure bit arithmetic and is
+    pinned in `W18` rather than proven here. Oddness is the part the ledger actually needs: it
+    is what makes `odd_stays_odd` -- and so `W' ≠ 0` -- available at every level below. -/
+theorem tau_lsb_odd (t W : Nat) (ht : 1 ≤ t) (hlsb : W % 2^(t+1) = 2^t) :
+    tau t W % 2 = 1 := by
+  have hz : (2:Nat)^t % 2 = 0 := by
+    obtain ⟨s, rfl⟩ : ∃ s, t = s + 1 := ⟨t - 1, by omega⟩
+    rw [Nat.pow_succ]; omega
+  have h21 : (2:Nat)^1 = 2 := rfl
+  have hw2 : W % 2 = 0 := by
+    have hm : W % 2^(t+1) % 2^1 = W % 2^1 := mod_pow_mod 1 (t+1) W (by omega)
+    rw [hlsb, h21, hz] at hm
+    rw [← h21]; omega
+  have hb0 : W.testBit 0 = false := by
+    rw [Nat.testBit_zero]; simp [hw2]
+  have hbt : W.testBit t = true := by
+    have hsplit : (2:Nat)^(t+1) = 2^t * 2 := by rw [Nat.pow_succ]
+    have h2 : W % (2^t * 2) / 2^t = W / 2^t % 2 := Nat.mod_mul_right_div_self W (2^t) 2
+    have h1 : W % 2^(t+1) / 2^t = 1 := by
+      rw [hlsb]; exact Nat.div_self (Nat.two_pow_pos t)
+    rw [hsplit] at h1
+    have hd : W / 2^t % 2 = 1 := by omega
+    have hb := and_one_testBit W t
+    rw [Nat.shiftRight_eq_div_pow, Nat.and_one_is_mod, hd] at hb
+    cases h : W.testBit t
+    · rw [h] at hb; simp at hb
+    · rfl
+  rw [tau_spec, if_neg (by rw [hb0, hbt]; simp)]
+  have hone : ((1:Nat) ||| 1 <<< t).testBit 0 = true := by
+    rw [Nat.testBit_or]; simp
+  have hres : (W ^^^ (1 ||| 1 <<< t)).testBit 0 = true := by
+    rw [Nat.testBit_xor, hb0, hone]; simp
+  rw [Nat.testBit_zero] at hres
+  simpa using hres
+
 end SounioZDFiberAntisym
 
 

@@ -1152,6 +1152,111 @@ def main():
           "of the closed form remains base (Lean forall n) + recursion (paper, W15-pinned); what "
           "is verified directly here is the FORMULA. (III) untouched; (d) IS NOT CLOSED ***")
 
+    # ---- W18  HALF OF THE INVARIANT g IS NOW A THEOREM: Q' IS tau-EQUIVARIANT --------------
+    # W17 found g(W) = (W & (W-1)) >> 3 empirically. Half of it is `Qgen'_tau`, proven forall n
+    # today off three theorems already in the tree (`star_forall` for Q, `tau_xor`, `chi_tau`):
+    #     Q'(Y,a,b,m) = Q'(tau j Y, tau j a, tau j b, m)   for every j <= lsb(Y).
+    # `tau j` swaps bits 0 and j, so at j = lsb(W) it MOVES THE LOWEST SET BIT TO POSITION 0 --
+    # exactly what g does before the >>3 -- and normalises the label to an ODD one
+    # (`tau_lsb_odd`, also proven today), which is what keeps W' != 0 available all the way down.
+    # This clause pins BOTH directions honestly: tau is SOUND (it never merges two labels with
+    # different N) but NOT COMPLETE (each N-block is exactly FOUR tau-orbits; the residual is
+    # that bits 1 and 2 of an already-odd label do not matter -- NOT proven anywhere yet).
+    def _tau18(j, x):
+        return x if ((x >> 0) & 1) == ((x >> j) & 1) else x ^ (1 | (1 << j))
+
+    def _Qmat18(S, Y, H):
+        idx = np.arange(H)
+        x, y = idx[:, None], idx[None, :]
+        xy, yy = x ^ Y, y ^ Y
+        return (S[x, y].astype(np.int16) * S[yy, xy].astype(np.int16)
+                * S[yy, x].astype(np.int16) * S[xy, y].astype(np.int16))
+
+    # (i) the Lean `tau` definition, transcribed and compared to this clause's -- K7 in this
+    #     lane once drew a WRONG conclusion from a mismatched tau, so pin it before using it.
+    def _tau_lean(j, x):
+        return x if (x & 1) == ((x >> j) & 1) else x ^ (1 | (1 << j))
+    w18_def = all(_tau18(j, x) == _tau_lean(j, x)
+                  for j in range(0, 8) for x in range(0, 256))
+    # (ii) the theorem, pointwise, over its exact hypotheses (j <= lsb Y, ALL a,b including 0)
+    w18_pt_bad = w18_pt_tot = 0
+    for m in (5, 6):
+        S, H = sign_table_fast(m), 1 << m
+        for Y in range(1, H):
+            t = (Y & -Y).bit_length() - 1
+            for j in range(0, min(t, m - 1) + 1):
+                tp = np.array([_tau18(j, x) for x in range(H)])
+                A = _Qmat18(S, Y, H)
+                B = _Qmat18(S, _tau18(j, Y), H)[np.ix_(tp, tp)]
+                w18_pt_tot += H * H
+                w18_pt_bad += int(np.count_nonzero(A != B))
+    # (iii) the label action is exactly "move the lowest set bit to 0" = (W & (W-1)) + 1
+    w18_arith = all(_tau18((W & -W).bit_length() - 1, W) == (W & (W - 1)) + 1
+                    for W in range(1, 4096))
+    w18_odd = all(_tau18((W & -W).bit_length() - 1, W) % 2 == 1 for W in range(1, 4096))
+    # (iv) the COUNT consequence, and tau's soundness-but-incompleteness
+    w18_cnt_bad = 0
+    orbit_rows = []
+    for m in (5, 6, 7):
+        S, H = sign_table_fast(m), 1 << m
+        Nv = {W: _N(sign_table_fast(m), W, H) for W in range(1, H)}
+        w18_cnt_bad += sum(1 for W in range(1, H) if Nv[W] != Nv[(W & (W - 1)) + 1])
+        # tau-orbits (undirected: tau is an involution, so the RELATION is symmetric)
+        par = list(range(H))
+        def find(x):
+            while par[x] != x:
+                par[x] = par[par[x]]
+                x = par[x]
+            return x
+        for W in range(1, H):
+            a, b = find(W), find((W & (W - 1)) + 1)
+            if a != b:
+                par[max(a, b)] = min(a, b)
+        orb = {W: find(W) for W in range(1, H)}
+        sound = all(Nv[a] == Nv[b] for a in range(1, H) for b in range(1, H)
+                    if orb[a] == orb[b])
+        n_orb, n_blk = len(set(orb.values())), len(set(Nv.values()))
+        orbit_rows.append((m, n_orb, n_blk, sound, n_orb == 4 * n_blk))
+    # (v) KEPT NEGATIVE: the naive reading of the Fano/168 action -- "the low 3 bits of ANY
+    #     label may be changed freely" -- is FALSE: adding it collapses everything into ONE
+    #     orbit, merging labels with different N. It is NOT the residual mechanism.
+    S5, H5 = sign_table_fast(5), 32
+    N5 = {W: _N(S5, W, H5) for W in range(1, H5)}
+    naive_bad = sum(1 for W in range(1, H5) for r in range(1, 8)
+                    if 1 <= ((W & ~7) | r) < H5 and N5[W] != N5[(W & ~7) | r])
+    w18 = (w18_def and w18_pt_bad == 0 and w18_arith and w18_odd
+           and w18_cnt_bad == 0 and all(r[3] and r[4] for r in orbit_rows)
+           and naive_bad > 0)
+    ok["W18"] = w18
+    print(f"W18_TAU     HALF OF g IS A THEOREM: Q' IS tau-EQUIVARIANT forall n "
+          f"{'OK' if w18 else 'FAIL'} -- Lean `tau` definition matches this clause's: "
+          f"{w18_def}; pointwise Q'(Y,a,b) == Q'(tau Y, tau a, tau b) over the theorem's exact "
+          f"hypotheses (j <= lsb Y, ALL a,b incl. 0): {w18_pt_bad}/{w18_pt_tot} failures at "
+          f"m=5,6; label action tau_lsb W == (W & (W-1)) + 1: {w18_arith}, and the result is "
+          f"odd: {w18_odd} (W < 4096); count consequence N(m,W) == N(m, tau_lsb W): "
+          f"{w18_cnt_bad} violations at m=5,6,7; "
+          + "; ".join(f"m={a}: {b} tau-orbits vs {c} N-blocks (sound={d}, exactly 4x={e})"
+                      for a, b, c, d, e in orbit_rows)
+          + f"; NAIVE-FANO null control: {naive_bad} label pairs refute it (must be > 0). "
+            "*** `Qgen'_tau` IS THE THEOREM, and it cost three lines because the tree already "
+            "had every ingredient: `star_forall` gives tau-equivariance for Q, `tau_xor` moves "
+            "tau through the xors, and `chi_tau` says the two commutation signs cannot see tau "
+            "at all. `tau j` swaps bits 0 and j, so at j = lsb(W) it MOVES THE LOWEST SET BIT TO "
+            "POSITION 0 -- precisely what g does before the >>3 -- and normalises the label to an "
+            "ODD one (`tau_lsb_odd`), which is what makes `odd_stays_odd`, hence W' != 0, "
+            "available at every level below. *** WHAT IS NOT PROVEN, STATED PLAINLY: (1) the step "
+            "from the pointwise identity to the equality of COUNTS needs a bijection-to-"
+            "cardinality argument, which is Finset territory this Mathlib-free file does not "
+            "have; (2) tau is SOUND but NOT COMPLETE -- each N-block is EXACTLY FOUR tau-orbits, "
+            "and the residual (bits 1 and 2 of an already-odd label are irrelevant) has no proof "
+            "here; (3) the additive identity tau_lsb W = (W & (W-1)) + 1 is pure bit arithmetic, "
+            "pinned above rather than proven in Lean. *** AND A KEPT NEGATIVE: my first guess at "
+            "the residual -- that the Fano/168 action lets the low 3 bits of ANY label vary "
+            "freely -- is REFUTED. Adding that relation collapses ALL labels into a single "
+            "orbit, merging labels with demonstrably different N. So the factor of four is NOT "
+            "the naive Fano action, and the second half of g remains OPEN. "
+            "(III) untouched; (d) IS NOT CLOSED ***")
+
     print("=" * 78)
     if all(ok.values()):
         print("CD_TOWER_ZDV1_VERDICT C_CLOSED__V1_REDUCED_TO_D_ALONE__NOT_CLOSED")

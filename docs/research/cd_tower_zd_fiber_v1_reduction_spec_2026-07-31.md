@@ -512,6 +512,54 @@ directly is the *formula*; the *derivation* is still base (Lean ∀n) + recursio
 **Still not (d):** `tr(A²)` is parity-blind (`W11`), so (d) needs `tr(A³)`. **(III) is untouched.
 (d) is not closed, and V1 is not proven.**
 
+---
+
+## 11. Half of `g` is now a theorem: `Q′` is τ-equivariant (`W18`, 2026-08-03)
+
+§10 found `g` empirically. Half of it is now proven ∀n, and the half that is *not* is stated
+sharply rather than left implicit.
+
+### 11.1 The theorem
+
+```lean
+Qgen'_tau : j < m → Y < 2^m → Y ≠ 0 → Y % 2^j = 0 → a,b < 2^m →
+    Qgen' Y a b m = Qgen' (tau j Y) (tau j a) (tau j b) m
+```
+
+Three lines, because the tree already had every ingredient: **`star_forall`** gives
+τ-equivariance for `Q`, **`tau_xor`** moves `τ` through the xors, and **`chi_tau`** says the two
+commutation signs cannot see `τ` at all. The hypothesis `Y % 2^j = 0` is exactly *`j` at or below
+the lowest set bit*.
+
+`tau j` swaps bits `0` and `j`, so at `j = lsb(W)` it **moves the lowest set bit to position 0** —
+precisely what `g` does before the `≫3` — and normalises the label to an **odd** one
+(`tau_lsb_odd`, also proven), which is what keeps `odd_stays_odd`, hence `W′ ≠ 0`, available at
+every level below. So
+
+> `g W = (tau (lsb W) W) ≫ 3`, and `tau (lsb W) W = (W & (W−1)) + 1`.
+
+### 11.2 What is *not* proven, plainly
+
+1. **The counting step.** From the pointwise identity to `N(m,W) = N(m, τ_j W)` needs a
+   bijection-to-cardinality argument — Finset territory this Mathlib-free file does not have.
+2. **τ is sound but not complete.** Each `N`-block is **exactly four** τ-orbits (`m = 5,6,7`:
+   16/4, 32/8, 64/16). The residual — that bits 1 and 2 of an *already odd* label are irrelevant
+   — has no proof anywhere yet. That factor of four is the open half of `g`.
+3. **The additive identity** `τ_lsb W = (W & (W−1)) + 1` is pure bit arithmetic, pinned in `W18`
+   rather than proven in Lean.
+
+### 11.3 A kept negative
+
+My first guess at the residual — that the Fano/168 action lets the low 3 bits of *any* label vary
+freely — is **refuted**. Adding that relation collapses **all** labels into a single orbit, merging
+labels with demonstrably different `N` (21 witnessing pairs at `m = 5`). The factor of four is
+*not* the naive Fano action.
+
+`W18` also pins the Lean `tau` definition against the clause's own, because `K7` in this lane once
+drew a wrong conclusion from a mismatched τ.
+
+**(III) is untouched. (d) is not closed, and V1 is not proven.**
+
 **(III) is still untouched. (d) is not closed, and V1 is not proven.**
 
 ---
