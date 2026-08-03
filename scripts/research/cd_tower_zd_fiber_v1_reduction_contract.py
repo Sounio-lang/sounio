@@ -2429,7 +2429,7 @@ def main():
                    and _qp(S, Y, a, b) == 1)
 
     w32_rows, w32_quad = [], []
-    for m in (1, 2, 3, 4):
+    for m in (0, 1, 2, 3, 4):
         e, M = 1 << (m + 1), m + 2
         Slo, Shi = sign_table_fast(m + 1), sign_table_fast(M)
         bad = 0
@@ -2477,7 +2477,12 @@ def main():
             "it everywhere, as required. *** `Ncnt_hi : Ncnt (W+e) (m+2) + 6e + 2 + 4*Ncnt W "
             "(m+1) = 4*e*e` with e = 2^(m+1), the paper's 4P' - 4N' + 6e - 10. WITH W31 THE W15 "
             "LEDGER IS FULLY DERIVED -- BOTH HALVES ARE LEAN THEOREMS forall n, kernel-clean, no "
-            "sorryAx and no native_decide. *** THE CONTENT IS THE ASYMMETRY: the four quadrants "
+            "sorryAx and no native_decide, and with NO lower bound on m -- the m = 0 bottom "
+            "(box size 2, the only label W = 1) is included, and is pinned here as its own row. "
+            "That case is not decoration: descending an odd non-power-of-two label uses LOW while "
+            "W < 2^(m+1) and then lands on HIGH at m = 0, so W = 3 bottoms out on exactly it. "
+            "`Ncnt_hi_bottom` states the closed instance so the kernel checks it. *** THE "
+            "CONTENT IS THE ASYMMETRY: the four quadrants "
             "do NOT share a core. ll and ul reach the same total from DIFFERENT slices (ll's "
             "coset diagonal COUNTS, because the reflected row makes the remainder count Q'=+1; "
             "ul's does NOT, because that row lands on the unprimed Qgen where the diagonal is "

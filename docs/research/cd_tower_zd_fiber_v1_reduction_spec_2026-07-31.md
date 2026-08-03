@@ -1268,16 +1268,28 @@ non-partitioning probe had missed. Relaxing the four `hi` rows' hypotheses was t
 **refuted** (only `hi_ll`'s `a ≠ W` and `hi_ul`'s `u ≠ W` are individually removable), so the
 boundary lemmas are genuinely needed.
 
-### The `m ≥ 1` hypothesis is a proof artifact, not a boundary
+### `m = 0` is CLOSED — `Ncnt_hi` is unconditional
 
-`Ncnt_hi` carries `hm : 1 ≤ m`. This comes from `OffCnt_add_OffCntP`, whose proof needs
-`4 ≤ 2^(m+1)` to run its `∃ k, 2^M = k + 4` step — it is **not** a failure of the recursion.
-The identity and both intermediates were measured true at `m = 0` (`e = 2`, all `W`) before the
-Lean was written. This matters for the next step: descending an odd non-power-of-two label such
-as `W = 3` uses LOW down to level 2 and then needs HIGH at `m = 0`, i.e. exactly the excluded
-case. Closing it is either a `by_cases` on `2^(m+1) = 2` (where `W = 1` forces `OffCnt` and
-`OffCntP` both to `0` and the identity is `12 = 12`) or a direct evaluation of `Ncnt 3 2`. A
-later reader should not infer that the recursion fails at `m = 0`.
+An earlier version of `Ncnt_hi` carried `hm : 1 ≤ m`. That hypothesis was a proof artifact, not
+mathematics: it came from `OffCnt_add_OffCntP` needing `4 ≤ 2^M` for its `∃ k, 2^M = k + 4` step.
+**It has been removed.**
+
+The box has only two possible sizes. A nonempty label forces `2 ≤ 2^M` (from `W < 2^M`, `W ≠ 0`),
+and a power of two that is not `2` is at least `4` — and `M = 0` is impossible, since `W < 2^0 = 1`
+contradicts `W ≠ 0`. So:
+
+- **`2^M = 2`** — the `m = 0` bottom. `count_off2` makes the off-lines count `0`, the product
+  vanishes (`Nat.mul_zero`), and the identity reads `12 = 12`. It holds by `Nat` truncation rather
+  than by the `(e−2)(e−4)` expansion, which is exactly why it needs its own line.
+- **`4 ≤ 2^M`** — the original argument, unchanged.
+
+`OffCntP_eq` and `Ncnt_hi` drop the hypothesis as a consequence. `Ncnt_hi_bottom` records the
+closed instance `Ncnt 3 2 + 12 + 2 + 4·Ncnt 1 1 = 16`, elaborated as `Ncnt_hi 0 1`, so that the
+removal is **checked by the kernel** rather than asserted in a signature.
+
+This was load-bearing for the unrolling, not cosmetic: descending an odd non-power-of-two label
+uses LOW while `W < 2^(m+1)` and then lands on HIGH at `m = 0`. `W = 3` bottoms out on exactly
+the case the old hypothesis excluded.
 
 **Still open:** unrolling the two recursions into the closed form for `tr(A²)`; (III); `tr(A³)`'s
 general closed form; (d); V1.
