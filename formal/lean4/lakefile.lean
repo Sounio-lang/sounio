@@ -652,3 +652,31 @@ lean_lib «SounioCayleyDicksonErasure» where
 -- the sedenion S³-fiber ker=4. Manifold homeomorphism / V₂(ℝ⁷) cited only.
 @[default_target]
 lean_lib «SounioG2Derivations» where
+
+@[default_target]
+lean_lib «SounioMercyfulScheduler» where
+
+@[default_target]
+lean_lib «SounioFoCssSurfaceParity» where
+
+@[default_target]
+lean_lib «SounioFoSurfaceTransfer» where
+
+@[default_target]
+lean_lib «SounioFoBytecodeFragment» where
+
+@[default_target]
+lean_lib «SounioFoEmitPure» where
+
+@[default_target]
+lean_lib «SounioFoRegistrationFragment» where
+
+@[default_target]
+lean_lib «SounioFoEngineInstallFragment» where
+
+@[default_target]
+lean_lib «SounioFoMethodXferFragment» where
+
+@[default_target]
+lean_lib «SounioFoMultimodFragment» where
+
