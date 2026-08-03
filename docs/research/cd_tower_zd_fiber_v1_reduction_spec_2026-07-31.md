@@ -558,6 +558,59 @@ labels with demonstrably different `N` (21 witnessing pairs at `m = 5`). The fac
 `W18` also pins the Lean `tau` definition against the clause's own, because `K7` in this lane once
 drew a wrong conclusion from a mismatched τ.
 
+**§12 closes this factor of four.**
+
+---
+
+## 12. The factor of four is `GL(3,2)`, and a coboundary kills it (`W19`, 2026-08-03)
+
+### 12.1 The group
+
+The missing mechanism is **`GL(3,2)` acting on bits 0,1,2, identity above** — order 168, the
+lane's own group, and **transitive on the seven nonzero low patterns**, so it merges the four odd
+residues `1,3,5,7` that τ could not reach. Unlike §11.3's refuted guess it acts on the **label and
+both points at once**, exactly as τ does.
+
+> `⟨GL(3,2), τ_lsb⟩` is **sound and complete** against the `N`-block partition at `m = 5,6,7`
+> (4/4, 8/8, 16/16 orbits vs blocks).
+
+So `g` is now fully explained: `GL(3,2)` merges the odd residues, τ normalises every even label to
+an odd one.
+
+### 12.2 Why it costs no hypothesis — and this part is a theorem
+
+`σ` itself is **not** invariant under these maps. It moves by a **coboundary**:
+
+> `σ(p x, p y) = σ(x,y) · λ(x) · λ(y) · λ(x ⊕ y)`
+
+`Q` and `Q′` are each a product of **four** σ's over a coset square in which the six λ values occur
+exactly **twice** — so every λ squares away:
+
+```lean
+Qgen_of_coboundary  : (∀ x y, p (x ⊕ y) = p x ⊕ p y) → (∀ x, lam x = 1 ∨ lam x = -1) →
+                      (∀ x y, cdSigma (p x) (p y) m = cdSigma x y m * lam x * lam y * lam (x ⊕ y)) →
+                      Qgen  (p W) (p a) (p b) m = Qgen  W a b m
+Qgen'_of_coboundary : … → Qgen' (p W) (p a) (p b) m = Qgen' W a b m
+```
+
+Both ∀n, kernel-clean, for an **arbitrary** F2-linear `p` and an **arbitrary** sign `λ` — they do
+not even need `Classical.choice`. That is the cancellation, proven.
+
+### 12.3 What is still measured
+
+That `σ` **does** move by a coboundary under `GL(3,2)`. That is now the single open statement
+behind `g` — one clean σ-level fact rather than a vague factor of four — verified **168/168** at
+`m = 4,5` by solving the F2 system for λ, with a **non-linear null control** that fails both the
+equivariance test and the coboundary test.
+
+The counting step (§11.2 item 1) is also still outside Lean.
+
+### 12.4 By-catch: `star_forall`'s hypothesis is not tight
+
+The bit-swap `(0↔1)` **is** `tau_1`, and it is equivariant for **odd** `Y` too — which
+`star_forall`'s `Y % 2^j = 0` excludes. 0 mismatches at `m = 5,6`. The theorem is true more widely
+than it is stated; nothing downstream depends on the gap, but it is worth knowing.
+
 **(III) is untouched. (d) is not closed, and V1 is not proven.**
 
 **(III) is still untouched. (d) is not closed, and V1 is not proven.**

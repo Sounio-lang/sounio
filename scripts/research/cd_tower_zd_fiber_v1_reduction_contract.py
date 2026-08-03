@@ -1257,6 +1257,154 @@ def main():
             "the naive Fano action, and the second half of g remains OPEN. "
             "(III) untouched; (d) IS NOT CLOSED ***")
 
+    # ---- W19  THE RESIDUAL FACTOR OF FOUR: GL(3,2), AND WHY IT COSTS NOTHING ---------------
+    # W18 left tau sound but not complete -- each N-block is exactly four tau-orbits. The
+    # missing mechanism is GL(3,2) acting on bits 0,1,2 and identity above: order 168 (the
+    # lane's own group), TRANSITIVE on the seven nonzero low patterns, so it merges the four
+    # odd residues 1,3,5,7 and closes g. Unlike my refuted guess in W18, it acts on the LABEL
+    # AND BOTH POINTS at once, exactly as tau does.
+    # WHY it needs no hypothesis on W while sigma itself is not invariant: sigma moves by a
+    # COBOUNDARY, sigma(px,py) = sigma(x,y)*lam(x)*lam(y)*lam(x^y). Q and Q' are each a product
+    # of FOUR sigmas over a coset square in which the six lam values each occur TWICE, so every
+    # lam squares away. That cancellation is `Qgen_of_coboundary` / `Qgen'_of_coboundary`,
+    # proven forall n today for an ARBITRARY linear p and ARBITRARY sign lam. So the whole
+    # factor of four is reduced to the single sigma-level statement checked here.
+    import itertools as _it
+    import functools as _ft
+
+    def _gl32():
+        out = []
+        for cols in _it.product(range(1, 8), repeat=3):
+            span = {0}
+            for c in cols:
+                span |= {s ^ c for s in span}
+            if len(span) != 8:
+                continue
+            out.append(tuple(_ft.reduce(
+                lambda A, i: A ^ (cols[i] if (v >> i) & 1 else 0), range(3), 0)
+                for v in range(8)))
+        return out
+
+    def _Qm(S, Y, H, primed=True):
+        idx = np.arange(H)
+        x, y = idx[:, None], idx[None, :]
+        xy, yy = x ^ Y, y ^ Y
+        if primed:
+            return (S[x, y].astype(np.int16) * S[yy, xy].astype(np.int16)
+                    * S[yy, x].astype(np.int16) * S[xy, y].astype(np.int16))
+        return (S[x, y].astype(np.int16) * S[xy, yy].astype(np.int16)
+                * S[x, yy].astype(np.int16) * S[xy, y].astype(np.int16))
+
+    def _is_coboundary(S, pm, H):
+        """solve  rho(x,y) = lam(x)lam(y)lam(x^y)  over F2; True iff consistent"""
+        piv = {}
+        for x in range(H):
+            for y in range(H):
+                r = (1 << x) ^ (1 << y) ^ (1 << (x ^ y))
+                b = 0 if int(S[pm[x], pm[y]]) * int(S[x, y]) == 1 else 1
+                while r:
+                    h = r.bit_length() - 1
+                    if h in piv:
+                        r ^= piv[h][0]
+                        b ^= piv[h][1]
+                    else:
+                        piv[h] = (r, b)
+                        break
+                else:
+                    if b:
+                        return False
+        return True
+
+    G32 = _gl32()
+    NONLIN = (0, 2, 1, 3, 4, 5, 6, 7)          # fixes 0, permutes low bits, NOT F2-linear
+    w19_rows = []
+    for m in (4, 5):
+        S, H = sign_table_fast(m), 1 << m
+        QP = {Y: _Qm(S, Y, H) for Y in range(H)}
+        QU = {Y: _Qm(S, Y, H, False) for Y in range(H)}
+        eq_p = eq_u = cob = 0
+        for tbl in G32:
+            pm = np.array([(x & ~7) | tbl[x & 7] for x in range(H)])
+            if all(np.array_equal(QP[Y], QP[pm[Y]][np.ix_(pm, pm)]) for Y in range(1, H)):
+                eq_p += 1
+            if all(np.array_equal(QU[Y], QU[pm[Y]][np.ix_(pm, pm)]) for Y in range(1, H)):
+                eq_u += 1
+            if _is_coboundary(S, pm, H):
+                cob += 1
+        pmn = np.array([(x & ~7) | NONLIN[x & 7] for x in range(H)])
+        null_eq = sum(int(np.count_nonzero(QP[Y] != QP[pmn[Y]][np.ix_(pmn, pmn)]))
+                      for Y in range(1, H))
+        null_cob = _is_coboundary(S, pmn, H)
+        w19_rows.append((m, eq_p, eq_u, cob, null_eq, null_cob))
+    # star_forall's hypothesis Y % 2^j = 0 is NOT TIGHT inside the low block: the bit-swap
+    # (0<->1) IS tau_1, and it is equivariant for ODD Y as well, which star_forall excludes.
+    tight_bad = 0
+    for m in (5, 6):
+        S, H = sign_table_fast(m), 1 << m
+        pm = np.array([(x & ~7) | ((0, 2, 1, 3, 4, 6, 5, 7)[x & 7]) for x in range(H)])
+        tight_bad += sum(int(np.count_nonzero(
+            _Qm(S, Y, H) != _Qm(S, pm[Y], H)[np.ix_(pm, pm)])) for Y in range(1, H, 2))
+    # COMPLETENESS: <GL(3,2), tau_lsb> must equal the N-block partition exactly
+    comp_rows = []
+    for m in (5, 6, 7):
+        S, H = sign_table_fast(m), 1 << m
+        Nv = {W: _N(S, W, H) for W in range(1, H)}
+        par = list(range(H))
+        def _find(x):
+            while par[x] != x:
+                par[x] = par[par[x]]
+                x = par[x]
+            return x
+        def _uni(a, b):
+            ra, rb = _find(a), _find(b)
+            if ra != rb:
+                par[max(ra, rb)] = min(ra, rb)
+        for W in range(1, H):
+            _uni(W, (W & (W - 1)) + 1)
+            for tbl in G32:
+                v = (W & ~7) | tbl[W & 7]
+                if 1 <= v < H:
+                    _uni(W, v)
+        orb = {W: _find(W) for W in range(1, H)}
+        sound = all(Nv[a] == Nv[b] for a in range(1, H) for b in range(1, H)
+                    if orb[a] == orb[b])
+        complete = all(orb[a] == orb[b] for a in range(1, H) for b in range(1, H)
+                       if Nv[a] == Nv[b])
+        comp_rows.append((m, len(set(orb.values())), len(set(Nv.values())), sound, complete))
+    w19 = (all(r[1] == 168 and r[2] == 168 and r[3] == 168 and r[4] > 0 and not r[5]
+               for r in w19_rows)
+           and tight_bad == 0
+           and all(b == c and d and e for _, b, c, d, e in comp_rows))
+    ok["W19"] = w19
+    print(f"W19_GL32    THE RESIDUAL FACTOR OF FOUR IS GL(3,2), AND A COBOUNDARY KILLS IT "
+          f"{'OK' if w19 else 'FAIL'} -- "
+          + "; ".join(f"m={a}: Q'-equivariant {b}/168, Q-equivariant {c}/168, sigma moves by a "
+                      f"coboundary {d}/168 | NONLINEAR null: {e} Q' mismatches (must be > 0), "
+                      f"coboundary={f} (must be False)"
+                      for a, b, c, d, e, f in w19_rows)
+          + f"; star_forall tightness probe (tau_1 on ODD Y, which its hypothesis EXCLUDES): "
+            f"{tight_bad} mismatches; "
+          + "; ".join(f"m={a}: <GL(3,2),tau_lsb> {b} orbits vs {c} N-blocks "
+                      f"(sound={d}, complete={e})" for a, b, c, d, e in comp_rows)
+          + ". *** THE MECHANISM, AND IT IS NOW A THEOREM: sigma is NOT invariant under these "
+            "maps, but it moves by a COBOUNDARY, sigma(px,py) = sigma(x,y) lam(x) lam(y) "
+            "lam(x^y). Q and Q' are each a product of FOUR sigmas over a coset square in which "
+            "the six lam values occur exactly TWICE, so every lam squares away. That is "
+            "`Qgen_of_coboundary` and `Qgen'_of_coboundary`, proven forall n today for an "
+            "ARBITRARY F2-linear p and an ARBITRARY sign function lam -- kernel-clean, and they "
+            "do not even need Classical.choice. *** SO g IS FULLY EXPLAINED: <GL(3,2), tau_lsb> "
+            "is SOUND AND COMPLETE against the N-block partition at m=5,6,7 -- GL(3,2) is "
+            "transitive on the seven nonzero low patterns, which merges the four odd residues "
+            "(the factor of four W18 could not reach), and tau_lsb normalises every even label "
+            "to an odd one. *** WHAT REMAINS MEASURED: that sigma DOES move by a coboundary "
+            "under GL(3,2). That is now the single open statement behind g -- one clean "
+            "sigma-level fact, not a vague factor of four -- verified 168/168 at m=4,5 with a "
+            "non-linear null control that fails both the equivariance and the coboundary test. "
+            "*** A BY-CATCH: `star_forall`'s hypothesis Y % 2^j = 0 is NOT TIGHT. The bit-swap "
+            "(0<->1) IS tau_1, and it is equivariant for ODD Y too, which that hypothesis "
+            "excludes -- 0 mismatches at m=5,6. The theorem is true more widely than it is "
+            "stated. (III) untouched; (d) IS NOT CLOSED ***")
+
     print("=" * 78)
     if all(ok.values()):
         print("CD_TOWER_ZDV1_VERDICT C_CLOSED__V1_REDUCED_TO_D_ALONE__NOT_CLOSED")

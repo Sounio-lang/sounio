@@ -4681,6 +4681,90 @@ theorem tau_lsb_odd (t W : Nat) (ht : 1 ≤ t) (hlsb : W % 2^(t+1) = 2^t) :
   rw [Nat.testBit_zero] at hres
   simpa using hres
 
+/-! ## Tier 24: the residual factor of four -- a coboundary kills it
+
+`W18` left `tau` SOUND but not complete: each `N`-block is exactly four `tau`-orbits. The
+missing mechanism is `GL(3,2)` acting on bits 0,1,2 (identity above) -- order 168, transitive
+on the seven nonzero low patterns, so it merges the four odd residues and closes `g`.
+
+Why does it work with NO hypothesis on `W`, when `sigma` itself is not invariant? Because
+`sigma` moves by a **coboundary**: `sigma (p x) (p y) = sigma x y * lam x * lam y * lam (x^^^y)`.
+`Q` and `Q'` are each a product of FOUR `sigma`s over a coset square, and the six `lam` values
+each occur exactly TWICE there, so every one of them squares away. That cancellation is what
+this tier proves, `forall n` and for an arbitrary linear `p` and arbitrary sign `lam` -- so the
+whole factor of four is reduced to the single `sigma`-level statement `hcob`, which `W19`
+verifies (168/168, with a non-linear null control) but which is NOT proven here. -/
+
+/-- `Nat.xor_left_comm` does not exist in this toolchain; supply it so `simp` can
+    AC-normalise the xor arguments. -/
+private theorem xorLcomm (x y z : Nat) : x ^^^ (y ^^^ z) = y ^^^ (x ^^^ z) := by
+  rw [← Nat.xor_assoc, ← Nat.xor_assoc, Nat.xor_comm x y]
+
+private theorem xorCancelL (x y : Nat) : x ^^^ (x ^^^ y) = y := by
+  rw [← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor]
+
+/-- **A coboundary in `sigma` is invisible to `Q`.** The six `lam` values occur twice each. -/
+theorem Qgen_of_coboundary (m W a b : Nat) (p : Nat → Nat) (lam : Nat → Int)
+    (hlin : ∀ x y, p (x ^^^ y) = p x ^^^ p y)
+    (hpm : ∀ x, lam x = 1 ∨ lam x = -1)
+    (hcob : ∀ x y, cdSigma (p x) (p y) m
+              = cdSigma x y m * lam x * lam y * lam (x ^^^ y)) :
+    Qgen (p W) (p a) (p b) m = Qgen W a b m := by
+  have sq : ∀ x : Nat, lam x * lam x = 1 := by
+    intro x; rcases hpm x with h | h <;> rw [h] <;> decide
+  have h1 : (a ^^^ W) ^^^ (b ^^^ W) = a ^^^ b := by
+    simp [Nat.xor_assoc, Nat.xor_comm, xorLcomm, xorCancelL]
+  have h2 : a ^^^ (b ^^^ W) = (a ^^^ b) ^^^ W := by
+    simp [Nat.xor_assoc, Nat.xor_comm, xorLcomm, xorCancelL]
+  have h3 : (a ^^^ W) ^^^ b = (a ^^^ b) ^^^ W := by
+    simp [Nat.xor_assoc, Nat.xor_comm, xorLcomm, xorCancelL]
+  unfold Qgen
+  rw [← hlin a W, ← hlin b W, hcob a b, hcob (a ^^^ W) (b ^^^ W), hcob a (b ^^^ W),
+      hcob (a ^^^ W) b, h1, h2, h3]
+  calc cdSigma a b m * lam a * lam b * lam (a ^^^ b)
+        * (cdSigma (a ^^^ W) (b ^^^ W) m * lam (a ^^^ W) * lam (b ^^^ W) * lam (a ^^^ b))
+        * (cdSigma a (b ^^^ W) m * lam a * lam (b ^^^ W) * lam ((a ^^^ b) ^^^ W))
+        * (cdSigma (a ^^^ W) b m * lam (a ^^^ W) * lam b * lam ((a ^^^ b) ^^^ W))
+      = cdSigma a b m * cdSigma (a ^^^ W) (b ^^^ W) m * cdSigma a (b ^^^ W) m
+          * cdSigma (a ^^^ W) b m
+        * ((lam a * lam a) * (lam b * lam b) * (lam (a ^^^ b) * lam (a ^^^ b))
+           * (lam (a ^^^ W) * lam (a ^^^ W)) * (lam (b ^^^ W) * lam (b ^^^ W))
+           * (lam ((a ^^^ b) ^^^ W) * lam ((a ^^^ b) ^^^ W))) := by ac_rfl
+    _ = cdSigma a b m * cdSigma (a ^^^ W) (b ^^^ W) m * cdSigma a (b ^^^ W) m
+          * cdSigma (a ^^^ W) b m := by
+        rw [sq, sq, sq, sq, sq, sq]; simp
+
+/-- The same for `Q'` -- the four factors are transposed but the `lam` multiset is identical. -/
+theorem Qgen'_of_coboundary (m W a b : Nat) (p : Nat → Nat) (lam : Nat → Int)
+    (hlin : ∀ x y, p (x ^^^ y) = p x ^^^ p y)
+    (hpm : ∀ x, lam x = 1 ∨ lam x = -1)
+    (hcob : ∀ x y, cdSigma (p x) (p y) m
+              = cdSigma x y m * lam x * lam y * lam (x ^^^ y)) :
+    Qgen' (p W) (p a) (p b) m = Qgen' W a b m := by
+  have sq : ∀ x : Nat, lam x * lam x = 1 := by
+    intro x; rcases hpm x with h | h <;> rw [h] <;> decide
+  have h1 : (b ^^^ W) ^^^ (a ^^^ W) = a ^^^ b := by
+    simp [Nat.xor_assoc, Nat.xor_comm, xorLcomm, xorCancelL]
+  have h2 : (b ^^^ W) ^^^ a = (a ^^^ b) ^^^ W := by
+    simp [Nat.xor_assoc, Nat.xor_comm, xorLcomm, xorCancelL]
+  have h3 : (a ^^^ W) ^^^ b = (a ^^^ b) ^^^ W := by
+    simp [Nat.xor_assoc, Nat.xor_comm, xorLcomm, xorCancelL]
+  unfold Qgen'
+  rw [← hlin a W, ← hlin b W, hcob a b, hcob (b ^^^ W) (a ^^^ W), hcob (b ^^^ W) a,
+      hcob (a ^^^ W) b, h1, h2, h3]
+  calc cdSigma a b m * lam a * lam b * lam (a ^^^ b)
+        * (cdSigma (b ^^^ W) (a ^^^ W) m * lam (b ^^^ W) * lam (a ^^^ W) * lam (a ^^^ b))
+        * (cdSigma (b ^^^ W) a m * lam (b ^^^ W) * lam a * lam ((a ^^^ b) ^^^ W))
+        * (cdSigma (a ^^^ W) b m * lam (a ^^^ W) * lam b * lam ((a ^^^ b) ^^^ W))
+      = cdSigma a b m * cdSigma (b ^^^ W) (a ^^^ W) m * cdSigma (b ^^^ W) a m
+          * cdSigma (a ^^^ W) b m
+        * ((lam a * lam a) * (lam b * lam b) * (lam (a ^^^ b) * lam (a ^^^ b))
+           * (lam (a ^^^ W) * lam (a ^^^ W)) * (lam (b ^^^ W) * lam (b ^^^ W))
+           * (lam ((a ^^^ b) ^^^ W) * lam ((a ^^^ b) ^^^ W))) := by ac_rfl
+    _ = cdSigma a b m * cdSigma (b ^^^ W) (a ^^^ W) m * cdSigma (b ^^^ W) a m
+          * cdSigma (a ^^^ W) b m := by
+        rw [sq, sq, sq, sq, sq, sq]; simp
+
 end SounioZDFiberAntisym
 
 
