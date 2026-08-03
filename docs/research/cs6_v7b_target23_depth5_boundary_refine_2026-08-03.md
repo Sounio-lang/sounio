@@ -1,6 +1,7 @@
 # CS6 V7-B target-23 depth-5 boundary refinement
 
-**Status:** pre-execution frozen protocol.
+**Status:** executed and independently verified. The adaptive parent probe cover
+passes; certificate cover and V7-B eligibility remain false.
 
 ## Plain question
 
@@ -41,3 +42,47 @@ FPGA_EXECUTION=false
 Heavy execution uses the proven r740 Slurm batch path with 32 CPU workers and
 hash-bound worker-local staging. The result returns through one framed TCP
 stream carrying its byte count and SHA-256.
+
+## Result
+
+Slurm job `8523` completed on `gpuorangefs-multi-r740-proxmox` in `00:02:06`.
+All 200 attempts passed the probe and no attempt timed out or failed:
+
+```text
+SOURCE_DEPTH4_PASS_CELLS=231
+SOURCE_REJECTED_PARENT_CELLS=25
+GRANDCHILD_CELLS_EVALUATED=100
+ATTEMPTS_COMPLETED=200
+PROBE_PASS_ATTEMPTS=200
+PROBE_REJECTED_ATTEMPTS=0
+UNKNOWN_FAILURE=0
+BOTH_CARRIERS_PROBE_PASS_CELLS=100
+REFINED_PARENTS_FULL_PROBE_COVER=25
+REFINED_PARENTS_WITH_REJECTION=0
+ADAPTIVE_PARENT_PROBE_COVER_EVALUATED=true
+ADAPTIVE_PARENT_PROBE_COVER_PASS=true
+ADAPTIVE_COVER_LEAF_CELLS=331
+ADAPTIVE_PARENT_CERTIFICATE_COVER_PASS=false
+V7_B_ELIGIBILITY=false
+OPEN_PROBLEM_SOLVED=false
+```
+
+This closes the depth-localization question at probe level: the 25 rejected
+depth-4 cells are each partitioned into four passing depth-5 cells. Together
+with the unchanged 231 passing depth-4 cells, they form a disjoint adaptive
+probe cover of the original target parent.
+
+The remaining obstruction is not spatial coverage. Every one of the 200 new
+attempts reports certified event charts and a valid homogeneous computation,
+but also `C1_ORIENTATION_UNRESOLVED=true`,
+`C2_HULL_ORIENTATION_UNRESOLVED=true`, and `CERTIFICATE_PASS=false`. The next
+scientific target is therefore the orientation/determinant enclosure, not
+further blind spatial refinement.
+
+## Evidence binding
+
+The cluster and local verification outputs are byte-identical. The returned raw
+tar has 8,017,920 bytes and SHA-256
+`a20da8b62a53ce61c2310d557f8859674942637cfc8a01f1cda269e30646cd97`.
+The complete archive and compact ledgers are retained under
+`scripts/research/receipts/cs6_v7b_target23_depth5_boundary_refine_v1/`.
