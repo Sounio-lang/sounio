@@ -248,7 +248,9 @@ def verify(receipt: Path, source_commit: str) -> dict[str, str]:
         fail("independent runtime attestation invalid")
     if runtime_versions != {runtime.get("PYTHON_VERSION")}:
         fail("runtime version attestation mismatch")
-    if command_executables != {runtime.get("PYTHON_EXECUTABLE")}:
+    resolved_commands = {str(Path(executable).resolve()) for executable in command_executables}
+    recorded_executable = runtime.get("PYTHON_EXECUTABLE", "")
+    if not recorded_executable or resolved_commands != {str(Path(recorded_executable).resolve())}:
         fail("runtime executable attestation mismatch")
     return {
         "SLURM_JOB_ID": slurm["SLURM_JOB_ID"], "LEAVES_VERIFIED": str(passed),
