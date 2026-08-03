@@ -4951,6 +4951,220 @@ theorem sigma_coboundary_cyc :
     (fun k u => lowSign_seam lCyc k u)
     (fun x y hx hy => baseCyc x hx y hy)
 
+/-! ### `lowMap` is F2-linear, and the coboundary closes under composition
+
+The last structural gap: `lowMap`'s linearity, which is what lets two coboundaries compose.
+It follows from four core bit facts (`shiftRight_xor_distrib`, `shiftLeft_xor_distrib`,
+`testBit_mod_two_pow`, `two_pow_add_eq_or_of_lt`) once `8 * a + b` with `b < 8` is recognised
+as a disjoint `xor`. -/
+
+private theorem xor_mod8 (x y : Nat) : (x ^^^ y) % 8 = (x % 8) ^^^ (y % 8) := by
+  have h8 : (8:Nat) = 2^3 := rfl
+  apply Nat.eq_of_testBit_eq
+  intro i
+  rw [h8, Nat.testBit_mod_two_pow, Nat.testBit_xor, Nat.testBit_xor,
+      Nat.testBit_mod_two_pow, Nat.testBit_mod_two_pow]
+  by_cases hi : i < 3 <;> simp [hi]
+
+private theorem xor_div8 (x y : Nat) : (x ^^^ y) / 8 = (x / 8) ^^^ (y / 8) := by
+  have h : ∀ z : Nat, z / 8 = z >>> 3 := fun z => (Nat.shiftRight_eq_div_pow z 3).symm
+  rw [h, h, h, Nat.shiftRight_xor_distrib]
+
+private theorem mul8_xor (a b : Nat) : 8 * (a ^^^ b) = 8 * a ^^^ 8 * b := by
+  have h : ∀ z : Nat, 8 * z = z <<< 3 := by
+    intro z
+    have h2 : (2:Nat)^3 = 8 := rfl
+    rw [Nat.shiftLeft_eq, h2]; omega
+  rw [h, h, h, Nat.shiftLeft_xor_distrib]
+
+private theorem add8_xor (a b : Nat) (hb : b < 8) : 8 * a + b = 8 * a ^^^ b := by
+  have h8 : (2:Nat)^3 = 8 := rfl
+  have hor : 2^3 * a + b = 2^3 * a ||| b :=
+    Nat.two_pow_add_eq_or_of_lt (by rw [h8]; exact hb) a
+  rw [← h8, hor]
+  apply Nat.eq_of_testBit_eq
+  intro i
+  rw [Nat.testBit_or, Nat.testBit_xor]
+  by_cases hi : i < 3
+  · have hz : (2^3 * a).testBit i = false := by
+      have : (2:Nat)^3 * a = a <<< 3 := by rw [Nat.shiftLeft_eq]; omega
+      rw [this, Nat.testBit_shiftLeft]
+      simp [Nat.not_le.mpr hi]
+    rw [hz]; simp
+  · have hz : b.testBit i = false := by
+      apply Nat.testBit_lt_two_pow
+      have : (2:Nat)^3 ≤ 2^i := Nat.pow_le_pow_right (by omega) (by omega)
+      omega
+    rw [hz]; simp
+
+/-- **`lowMap t` is F2-linear when `t` is.** -/
+theorem lowMap_lin (t : Nat → Nat) (ht8 : ∀ v, v < 8 → t v < 8)
+    (htlin : ∀ u v, u < 8 → v < 8 → t (u ^^^ v) = t u ^^^ t v) (x y : Nat) :
+    lowMap t (x ^^^ y) = lowMap t x ^^^ lowMap t y := by
+  have hx8 : x % 8 < 8 := Nat.mod_lt _ (by omega)
+  have hy8 : y % 8 < 8 := Nat.mod_lt _ (by omega)
+  have h8 : (2:Nat)^3 = 8 := rfl
+  have hxy : t (x % 8) ^^^ t (y % 8) < 8 := by
+    have := Nat.xor_lt_two_pow (n := 3) (by rw [h8]; exact ht8 _ hx8) (by rw [h8]; exact ht8 _ hy8)
+    omega
+  unfold lowMap
+  rw [xor_div8, xor_mod8, htlin _ _ hx8 hy8,
+      add8_xor _ _ hxy, add8_xor _ _ (ht8 _ hx8), add8_xor _ _ (ht8 _ hy8), mul8_xor]
+  simp [Nat.xor_assoc, Nat.xor_comm, xorLcomm]
+
+/-- `lowMap` composes on the tables. -/
+theorem lowMap_comp (t1 t2 : Nat → Nat) (h2 : ∀ v, v < 8 → t2 v < 8) (x : Nat) :
+    lowMap t1 (lowMap t2 x) = lowMap (fun v => t1 (t2 v)) x := by
+  have hx8 : x % 8 < 8 := Nat.mod_lt _ (by omega)
+  have hlt : t2 (x % 8) < 8 := h2 _ hx8
+  have hd : (8 * (x / 8) + t2 (x % 8)) / 8 = x / 8 := by omega
+  have hm : (8 * (x / 8) + t2 (x % 8)) % 8 = t2 (x % 8) := by omega
+  unfold lowMap
+  rw [hd, hm]
+
+/-- `lowSign` reads the composite through `lowMap`. -/
+theorem lowSign_comp (l1 : Nat → Int) (t2 : Nat → Nat) (h2 : ∀ v, v < 8 → t2 v < 8) (x : Nat) :
+    lowSign l1 (lowMap t2 x) = l1 (t2 (x % 8)) := by
+  have hx8 : x % 8 < 8 := Nat.mod_lt _ (by omega)
+  have hlt : t2 (x % 8) < 8 := h2 _ hx8
+  have hm : (8 * (x / 8) + t2 (x % 8)) % 8 = t2 (x % 8) := by omega
+  unfold lowSign lowMap
+  rw [hm]
+
+/-- **The coboundary is closed under composition**: `lam_{p∘q} x = lam_q x * lam_p (q x)`. -/
+theorem sigma_coboundary_comp (t1 t2 : Nat → Nat) (l1 l2 : Nat → Int)
+    (h2 : ∀ v, v < 8 → t2 v < 8)
+    (h2lin : ∀ u v, u < 8 → v < 8 → t2 (u ^^^ v) = t2 u ^^^ t2 v)
+    (H1 : ∀ k x y, x < 2^(k+3) → y < 2^(k+3) →
+        cdSigma (lowMap t1 x) (lowMap t1 y) (k+3)
+          = cdSigma x y (k+3) * lowSign l1 x * lowSign l1 y * lowSign l1 (x ^^^ y))
+    (H2 : ∀ k x y, x < 2^(k+3) → y < 2^(k+3) →
+        cdSigma (lowMap t2 x) (lowMap t2 y) (k+3)
+          = cdSigma x y (k+3) * lowSign l2 x * lowSign l2 y * lowSign l2 (x ^^^ y)) :
+    ∀ k x y, x < 2^(k+3) → y < 2^(k+3) →
+      cdSigma (lowMap (fun v => t1 (t2 v)) x) (lowMap (fun v => t1 (t2 v)) y) (k+3)
+        = cdSigma x y (k+3)
+            * lowSign (fun v => l2 v * l1 (t2 v)) x
+            * lowSign (fun v => l2 v * l1 (t2 v)) y
+            * lowSign (fun v => l2 v * l1 (t2 v)) (x ^^^ y) := by
+  intro k x y hx hy
+  rw [← lowMap_comp t1 t2 h2 x, ← lowMap_comp t1 t2 h2 y,
+      H1 k (lowMap t2 x) (lowMap t2 y) (lowMap_lt t2 h2 k x hx) (lowMap_lt t2 h2 k y hy),
+      ← lowMap_lin t2 h2 h2lin x y,
+      lowSign_comp l1 t2 h2 x, lowSign_comp l1 t2 h2 y, lowSign_comp l1 t2 h2 (x ^^^ y),
+      H2 k x y hx hy]
+  simp only [lowSign]
+  ac_rfl
+
+/-- The class of low-block maps whose coboundary is a THEOREM: the two `GL(3,2)` generators,
+    closed under composition. `W20` checks that this class is exactly `GL(3,2)` -- closure of
+    the two tables gives 168 elements. -/
+inductive LowCob : (Nat → Nat) → (Nat → Int) → Prop where
+  | trans : LowCob tTrans lTrans
+  | cyc : LowCob tCyc lCyc
+  | comp {t1 t2 : Nat → Nat} {l1 l2 : Nat → Int} :
+      LowCob t1 l1 → LowCob t2 l2 →
+      LowCob (fun v => t1 (t2 v)) (fun v => l2 v * l1 (t2 v))
+
+private theorem tTrans_lin : ∀ u < 8, ∀ v < 8, tTrans (u ^^^ v) = tTrans u ^^^ tTrans v := by
+  decide
+
+private theorem tCyc_lin : ∀ u < 8, ∀ v < 8, tCyc (u ^^^ v) = tCyc u ^^^ tCyc v := by
+  decide
+
+theorem lowCob_lt {t l} (h : LowCob t l) : ∀ v, v < 8 → t v < 8 := by
+  induction h with
+  | trans => decide
+  | cyc => decide
+  | comp _ _ ih1 ih2 => exact fun v hv => ih1 _ (ih2 v hv)
+
+theorem lowCob_lin {t l} (h : LowCob t l) :
+    ∀ u v, u < 8 → v < 8 → t (u ^^^ v) = t u ^^^ t v := by
+  induction h with
+  | trans => exact fun u v hu hv => tTrans_lin u hu v hv
+  | cyc => exact fun u v hu hv => tCyc_lin u hu v hv
+  | comp h1 h2 ih1 ih2 =>
+      intro u v hu hv
+      show _ = _
+      simp only []
+      rw [ih2 u v hu hv, ih1 _ _ (lowCob_lt h2 u hu) (lowCob_lt h2 v hv)]
+
+theorem lowCob_pm {t l} (h : LowCob t l) : ∀ v, l v = 1 ∨ l v = -1 := by
+  induction h with
+  | trans =>
+      intro v
+      unfold lTrans
+      by_cases hv : v = 5 ∨ v = 7
+      · rw [if_pos hv]; exact Or.inr rfl
+      · rw [if_neg hv]; exact Or.inl rfl
+  | cyc =>
+      intro v
+      unfold lCyc
+      by_cases hv : v = 6 ∨ v = 7
+      · rw [if_pos hv]; exact Or.inr rfl
+      · rw [if_neg hv]; exact Or.inl rfl
+  | comp _ _ ih1 ih2 =>
+      intro v
+      show _ = _ ∨ _ = _
+      simp only []
+      rcases ih2 v with h2 | h2 <;> rcases ih1 (_) with h1 | h1 <;>
+        rw [h1, h2] <;> decide
+
+/-- **Every map in the generated class carries the coboundary, at every level.** -/
+theorem lowCob_sigma {t l} (h : LowCob t l) :
+    ∀ k x y, x < 2^(k+3) → y < 2^(k+3) →
+      cdSigma (lowMap t x) (lowMap t y) (k+3)
+        = cdSigma x y (k+3) * lowSign l x * lowSign l y * lowSign l (x ^^^ y) := by
+  induction h with
+  | trans => exact sigma_coboundary_trans
+  | cyc => exact sigma_coboundary_cyc
+  | comp h1 h2 ih1 ih2 =>
+      exact sigma_coboundary_comp _ _ _ _ (lowCob_lt h2) (lowCob_lin h2) ih1 ih2
+
+/-- Bounded form of `Qgen'_of_coboundary` -- the coboundary is only available on the box. -/
+theorem Qgen'_of_coboundary_lt (m W a b : Nat) (p : Nat → Nat) (lam : Nat → Int)
+    (hW : W < 2^m) (ha : a < 2^m) (hb : b < 2^m)
+    (hlin : ∀ x y, p (x ^^^ y) = p x ^^^ p y)
+    (hpm : ∀ x, lam x = 1 ∨ lam x = -1)
+    (hcob : ∀ x y, x < 2^m → y < 2^m →
+        cdSigma (p x) (p y) m = cdSigma x y m * lam x * lam y * lam (x ^^^ y)) :
+    Qgen' (p W) (p a) (p b) m = Qgen' W a b m := by
+  have sq : ∀ x : Nat, lam x * lam x = 1 := by
+    intro x; rcases hpm x with h | h <;> rw [h] <;> decide
+  have haW : a ^^^ W < 2^m := Nat.xor_lt_two_pow ha hW
+  have hbW : b ^^^ W < 2^m := Nat.xor_lt_two_pow hb hW
+  have h1 : (b ^^^ W) ^^^ (a ^^^ W) = a ^^^ b := by
+    simp [Nat.xor_assoc, Nat.xor_comm, xorLcomm, xorCancelL]
+  have h2 : (b ^^^ W) ^^^ a = (a ^^^ b) ^^^ W := by
+    simp [Nat.xor_assoc, Nat.xor_comm, xorLcomm, xorCancelL]
+  have h3 : (a ^^^ W) ^^^ b = (a ^^^ b) ^^^ W := by
+    simp [Nat.xor_assoc, Nat.xor_comm, xorLcomm, xorCancelL]
+  unfold Qgen'
+  rw [← hlin a W, ← hlin b W, hcob a b ha hb, hcob (b ^^^ W) (a ^^^ W) hbW haW,
+      hcob (b ^^^ W) a hbW ha, hcob (a ^^^ W) b haW hb, h1, h2, h3]
+  calc cdSigma a b m * lam a * lam b * lam (a ^^^ b)
+        * (cdSigma (b ^^^ W) (a ^^^ W) m * lam (b ^^^ W) * lam (a ^^^ W) * lam (a ^^^ b))
+        * (cdSigma (b ^^^ W) a m * lam (b ^^^ W) * lam a * lam ((a ^^^ b) ^^^ W))
+        * (cdSigma (a ^^^ W) b m * lam (a ^^^ W) * lam b * lam ((a ^^^ b) ^^^ W))
+      = cdSigma a b m * cdSigma (b ^^^ W) (a ^^^ W) m * cdSigma (b ^^^ W) a m
+          * cdSigma (a ^^^ W) b m
+        * ((lam a * lam a) * (lam b * lam b) * (lam (a ^^^ b) * lam (a ^^^ b))
+           * (lam (a ^^^ W) * lam (a ^^^ W)) * (lam (b ^^^ W) * lam (b ^^^ W))
+           * (lam ((a ^^^ b) ^^^ W) * lam ((a ^^^ b) ^^^ W))) := by ac_rfl
+    _ = cdSigma a b m * cdSigma (b ^^^ W) (a ^^^ W) m * cdSigma (b ^^^ W) a m
+          * cdSigma (a ^^^ W) b m := by
+        rw [sq, sq, sq, sq, sq, sq]; simp
+
+/-- **THE PAYOFF, ∀n: `Q'` is invariant under every map in the class.** With `W20`'s check
+    that the class IS `GL(3,2)`, this is the whole residual factor of four. -/
+theorem Qgen'_lowCob {t l} (h : LowCob t l) (k W a b : Nat)
+    (hW : W < 2^(k+3)) (ha : a < 2^(k+3)) (hb : b < 2^(k+3)) :
+    Qgen' (lowMap t W) (lowMap t a) (lowMap t b) (k+3) = Qgen' W a b (k+3) :=
+  Qgen'_of_coboundary_lt (k+3) W a b (lowMap t) (lowSign l) hW ha hb
+    (lowMap_lin t (lowCob_lt h) (lowCob_lin h))
+    (fun x => lowCob_pm h (x % 8))
+    (lowCob_sigma h k)
+
 end SounioZDFiberAntisym
 
 

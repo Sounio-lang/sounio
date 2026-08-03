@@ -684,3 +684,52 @@ statement**, even though every piece of it is either proven or checked.
 The counting step (§11.2 item 1) also remains outside Lean.
 
 **(III) is untouched. (d) is not closed, and V1 is not proven.**
+
+---
+
+## 14. All 168, closed in Lean (`W21`, 2026-08-03)
+
+§13 proved the coboundary ∀n for the two generators and left "all 168" outside Lean, because
+composing two coboundaries needs `lowMap`'s F2-linearity. That is now proven, and the chain closes.
+
+### 14.1 `lowMap` is linear
+
+```lean
+lowMap_lin : (∀ v < 8, t v < 8) → (∀ u v < 8, t (u ⊕ v) = t u ⊕ t v) →
+             lowMap t (x ⊕ y) = lowMap t x ⊕ lowMap t y
+```
+
+It follows from four core bit facts — `shiftRight_xor_distrib`, `shiftLeft_xor_distrib`,
+`testBit_mod_two_pow`, `two_pow_add_eq_or_of_lt` — once `8·a + b` with `b < 8` is recognised as a
+**disjoint xor**. That last step (`add8_xor`) is the one that makes the whole thing go.
+
+### 14.2 The class, and the payoff
+
+| theorem | content |
+|---|---|
+| `sigma_coboundary_comp` | the coboundary composes: `λ_{p∘q}(v) = l₂ v · l₁ (t₂ v)` |
+| `LowCob` | inductive class: the two generators, closed under composition |
+| `lowCob_sigma` | **every** member carries the coboundary, at every level |
+| `Qgen'_lowCob` | **`Q′` is invariant under every member, ∀n** |
+
+`Qgen'_of_coboundary_lt` is the bounded restatement the last step needs — the coboundary is only
+available on the box, so the unbounded form of §12.2 could not be applied directly.
+
+All kernel-clean. So the chain is complete:
+
+> σ moves by a coboundary (∀n) → the four σ's of `Q′` cancel it (∀n) → `Q′` is invariant under the
+> class (∀n) → the seven nonzero low residues merge, which **contains** §11's residual factor of
+> four.
+
+`W21` verifies the merge itself: `N(m, 8y+r)` is **constant in `r = 1..7`** for every `y`, at
+`m = 5,6,7`; and it pins the Lean `lowMap` against `W19`'s index permutation, checks linearity for
+all 168 tables, checks `lowMap t₁ ∘ lowMap t₂ = lowMap (t₁∘t₂)`, and fails on a non-linear control.
+
+### 14.3 What is still not Lean
+
+* that `LowCob` is **exactly** `GL(3,2)` — a finite closure computation, done in `W20`
+  (168 elements, equal to the enumerated group);
+* the **counting step**, from pointwise `Q′`-invariance to equality of `N` — Finset cardinality,
+  which this Mathlib-free file does not have.
+
+**(III) is untouched. (d) is not closed, and V1 is not proven.**

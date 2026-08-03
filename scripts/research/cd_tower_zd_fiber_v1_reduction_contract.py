@@ -1492,6 +1492,70 @@ def main():
             "step needs `lowMap`'s F2-linearity in Lean, which is bit-work not done here, so "
             "ALL 168 IS NOT YET A SINGLE LEAN STATEMENT. (III) untouched; (d) IS NOT CLOSED ***")
 
+    # ---- W21  ALL 168 CLOSED: lowMap IS LINEAR, AND THE CLASS IS GL(3,2) ------------------
+    # W20 proved the coboundary forall n for the two generators and left "all 168" outside Lean
+    # because it needed lowMap's F2-linearity. That is now `lowMap_lin`, and with it
+    # `sigma_coboundary_comp` (composition closure), the inductive class `LowCob` (the two
+    # generators, closed under composition) and `lowCob_sigma` / `Qgen'_lowCob` -- Q' is
+    # INVARIANT under every map in the class, forall n. This clause pins the Lean construction
+    # against the measured one and checks the payoff.
+    def _lowMap(t, x):
+        return 8 * (x // 8) + t[x % 8]
+
+    # (i) the Lean `lowMap` and W19's index permutation are the SAME map
+    w21_same = all(_lowMap(t, x) == ((x & ~7) | t[x & 7])
+                   for t in G32 for x in range(256))
+    # (ii) `lowMap_lin`: every table in GL(3,2) gives an F2-linear lowMap
+    w21_lin = all(_lowMap(t, x ^ y) == _lowMap(t, x) ^ _lowMap(t, y)
+                  for t in G32 for x in range(64) for y in range(64))
+    # (iii) `lowMap_comp`: lowMap t1 . lowMap t2 = lowMap (t1 . t2)
+    w21_comp = all(_lowMap(t1, _lowMap(t2, x))
+                   == _lowMap(tuple(t1[t2[v]] for v in range(8)), x)
+                   for t1 in G32[:12] for t2 in G32[:12] for x in range(64))
+    # (iv) THE PAYOFF: N(m, 8y+r) is constant in r = 1..7 -- the 7-fold merge that contains
+    #      W18's residual factor of four
+    merge_rows = []
+    for m in (5, 6, 7):
+        S, H = sign_table_fast(m), 1 << m
+        bad = 0
+        ys = 0
+        for y in range(H // 8):
+            vals = {_N(S, 8 * y + r, H) for r in range(1, 8) if 8 * y + r < H}
+            if len(vals) > 1:
+                bad += 1
+            if vals:
+                ys += 1
+        merge_rows.append((m, ys, bad))
+    # (v) NULL CONTROL: a NON-linear low permutation must break linearity of lowMap
+    w21_null = not all(_lowMap(NONLIN, x ^ y) == _lowMap(NONLIN, x) ^ _lowMap(NONLIN, y)
+                       for x in range(64) for y in range(64))
+    w21 = (w21_same and w21_lin and w21_comp and w21_null
+           and all(b > 0 and c == 0 for _, b, c in merge_rows))
+    ok["W21"] = w21
+    print(f"W21_ALL168  ALL 168 ARE CLOSED IN LEAN: lowMap IS LINEAR AND THE CLASS COMPOSES "
+          f"{'OK' if w21 else 'FAIL'} -- Lean `lowMap` == W19's index permutation: {w21_same}; "
+          f"lowMap F2-linear for all 168 tables: {w21_lin}; lowMap composes on tables: "
+          f"{w21_comp}; NONLINEAR null control breaks linearity: {w21_null}; "
+          + "; ".join(f"m={a}: {b} y-blocks, {c} where N is NOT constant over r=1..7"
+                      for a, b, c in merge_rows)
+          + ". *** THE LAST STRUCTURAL GAP IS CLOSED. `lowMap_lin` -- lowMap t is F2-linear "
+            "when t is -- follows from four core bit facts (shiftRight_xor_distrib, "
+            "shiftLeft_xor_distrib, testBit_mod_two_pow, two_pow_add_eq_or_of_lt) once "
+            "8*a + b with b < 8 is recognised as a DISJOINT xor. With it: "
+            "`sigma_coboundary_comp` (the coboundary composes, lam_pq(v) = l2 v * l1 (t2 v)), "
+            "the inductive class `LowCob` (the two generators, closed under composition), "
+            "`lowCob_sigma` (every member carries the coboundary at every level) and "
+            "`Qgen'_lowCob` (Q' is INVARIANT under every member, forall n) -- all kernel-clean. "
+            "*** SO THE CHAIN IS COMPLETE: sigma moves by a coboundary (proven forall n) -> the "
+            "four sigmas of Q' cancel it (proven) -> Q' is invariant under the class (proven) -> "
+            "the 7 nonzero low residues merge, which contains W18's residual factor of four. "
+            "The merge itself is verified here: N(m, 8y+r) is CONSTANT in r = 1..7 for every y "
+            "at m = 5,6,7. *** WHAT IS STILL NOT LEAN: that the class LowCob is EXACTLY GL(3,2) "
+            "-- a finite closure computation, done in W20 (168 elements, equal to the enumerated "
+            "group) -- and the counting step from pointwise Q'-invariance to equality of N, "
+            "which needs Finset cardinality this Mathlib-free file does not have. "
+            "(III) untouched; (d) IS NOT CLOSED ***")
+
     print("=" * 78)
     if all(ok.values()):
         print("CD_TOWER_ZDV1_VERDICT C_CLOSED__V1_REDUCED_TO_D_ALONE__NOT_CLOSED")
