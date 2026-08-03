@@ -6972,6 +6972,352 @@ theorem Qgen'_hi_ll_aW (m W b : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
     rcases cdSigma_pm (m+1) (b ^^^ W) W with h2 | h2 <;>
     rw [h1, h2] at hlab ⊢ <;> revert hlab <;> decide
 
+/-- The `chi` value on a coset pair `(u, u ^^^ W)`: `-1` whenever `u` avoids `0` and `W`. -/
+private theorem chi_uW (m W u : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) (hu : u < 2^(m+1))
+    (hu0 : u ≠ 0) (huW : u ≠ W) :
+    cdSigma u (u ^^^ W) (m+1) * cdSigma (u ^^^ W) u (m+1) = -1 := by
+  have huX : u ^^^ W ≠ 0 := fun h => huW (xor_zero_eq u W h)
+  have hne : u ≠ u ^^^ W := by
+    intro h
+    apply hW0
+    have h2 : u ^^^ u = u ^^^ (u ^^^ W) := by rw [← h]
+    rw [Nat.xor_self, xorCancelL] at h2
+    exact h2.symm
+  have h := chi_char (m+1) u (u ^^^ W) hu (xorlt hu hW)
+  unfold chi at h
+  rw [if_neg (fun hc => hc.elim hu0 (fun hc2 => hc2.elim huX hne))] at h
+  exact h
+
+/-- **ll boundary, `b = W`.** -/
+theorem Qgen'_hi_ll_bW (m W a : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
+    (ha : a < 2^(m+1)) (ha0 : a ≠ 0) (haW : a ≠ W) :
+    Qgen' (W + 2^(m+1)) a W (m+2) = -1 := by
+  have hpos : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have haX : a ^^^ W ≠ 0 := fun h => haW (xor_zero_eq a W h)
+  have hlab : Qgen' W a W (m+1) = -1 := Qgen'_label_right (m+1) W a hW ha hW0
+  unfold Qgen' at hlab
+  rw [Nat.xor_self, cdSig0 (a ^^^ W) m, cdSig0 a m] at hlab
+  have hxa : a ^^^ (W + 2^(m+1)) = (a ^^^ W) + 2^(m+1) := xor_seam a W m ha hW
+  have hxb : W ^^^ (W + 2^(m+1)) = (W ^^^ W) + 2^(m+1) := xor_seam W W m hW hW
+  unfold Qgen'
+  rw [hxa, hxb, Nat.xor_self, R_ll a W m ha hW,
+      R_uu 0 (a ^^^ W) m hpos (xorlt ha hW), if_neg haX, cdSig0' (a ^^^ W) m,
+      R_ul 0 a m hpos ha, if_neg ha0, cdSig0 a m,
+      R_ul (a ^^^ W) W m (xorlt ha hW) hW, if_neg hW0]
+  rcases cdSigma_pm (m+1) a W with h1 | h1 <;>
+    rcases cdSigma_pm (m+1) (a ^^^ W) W with h2 | h2 <;>
+    rw [h1, h2] at hlab ⊢ <;> revert hlab <;> decide
+
+/-- **ul boundary, `u = 0`, `b ∉ {0, W}`.** -/
+theorem Qgen'_hi_ul_u0 (m W b : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
+    (hb : b < 2^(m+1)) (hb0 : b ≠ 0) (hbW : b ≠ W) :
+    Qgen' (W + 2^(m+1)) (0 + 2^(m+1)) b (m+2) = -1 := by
+  have hpos : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hlab : Qgen' W W b (m+1) = 1 := Qgen'_label_left (m+1) W b hW hb hW0 hb0 hbW
+  unfold Qgen' at hlab
+  rw [Nat.xor_self, cdSig0' (b ^^^ W) m, cdSig0 b m] at hlab
+  have hxa : (0 + 2^(m+1)) ^^^ (W + 2^(m+1)) = 0 ^^^ W := xor_seam_cancel 0 W m hpos hW
+  have hxb : b ^^^ (W + 2^(m+1)) = (b ^^^ W) + 2^(m+1) := xor_seam b W m hb hW
+  unfold Qgen'
+  rw [hxa, hxb, Nat.zero_xor, R_ul 0 b m hpos hb, if_neg hb0, cdSig0 b m,
+      R_ul (b ^^^ W) W m (xorlt hb hW) hW, if_neg hW0,
+      R_uu (b ^^^ W) 0 m (xorlt hb hW) hpos, if_pos rfl,
+      R_ll W b m hW hb]
+  rcases cdSigma_pm (m+1) W b with h1 | h1 <;>
+    rcases cdSigma_pm (m+1) (b ^^^ W) W with h2 | h2 <;>
+    rw [h1, h2] at hlab ⊢ <;> revert hlab <;> decide
+
+/-- **ul boundary, `u = 0`, `b = W`** -- the one point of that slice that does NOT count. -/
+theorem Qgen'_hi_ul_u0W (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    Qgen' (W + 2^(m+1)) (0 + 2^(m+1)) W (m+2) = 1 := by
+  have hpos : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hxa : (0 + 2^(m+1)) ^^^ (W + 2^(m+1)) = 0 ^^^ W := xor_seam_cancel 0 W m hpos hW
+  have hxb : W ^^^ (W + 2^(m+1)) = (W ^^^ W) + 2^(m+1) := xor_seam W W m hW hW
+  unfold Qgen'
+  rw [hxa, hxb, Nat.zero_xor, Nat.xor_self,
+      R_ul 0 W m hpos hW, if_neg hW0, cdSig0 W m,
+      R_uu 0 0 m hpos hpos, if_pos rfl,
+      R_ll W W m hW hW, sigma_self (m+1) W hW hW0]
+  decide
+
+/-- **ul boundary, `b = W`, `u ∉ {0, W}`.** -/
+theorem Qgen'_hi_ul_bW (m W u : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
+    (hu : u < 2^(m+1)) (hu0 : u ≠ 0) (huW : u ≠ W) :
+    Qgen' (W + 2^(m+1)) (u + 2^(m+1)) W (m+2) = -1 := by
+  have hpos : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have huX : u ^^^ W ≠ 0 := fun h => huW (xor_zero_eq u W h)
+  have hlab : Qgen' W u W (m+1) = -1 := Qgen'_label_right (m+1) W u hW hu hW0
+  unfold Qgen' at hlab
+  rw [Nat.xor_self, cdSig0 (u ^^^ W) m, cdSig0 u m] at hlab
+  have hxa : (u + 2^(m+1)) ^^^ (W + 2^(m+1)) = u ^^^ W := xor_seam_cancel u W m hu hW
+  have hxb : W ^^^ (W + 2^(m+1)) = (W ^^^ W) + 2^(m+1) := xor_seam W W m hW hW
+  unfold Qgen'
+  rw [hxa, hxb, Nat.xor_self, R_ul u W m hu hW, if_neg hW0,
+      R_ul 0 (u ^^^ W) m hpos (xorlt hu hW), if_neg huX, cdSig0 (u ^^^ W) m,
+      R_uu 0 u m hpos hu, if_neg hu0, cdSig0' u m,
+      R_ll (u ^^^ W) W m (xorlt hu hW) hW]
+  rcases cdSigma_pm (m+1) u W with h1 | h1 <;>
+    rcases cdSigma_pm (m+1) (u ^^^ W) W with h2 | h2 <;>
+    rw [h1, h2] at hlab ⊢ <;> revert hlab <;> decide
+
+/-- **ul boundary, the diagonal `b = u`, `u ∉ {0, W}`.** -/
+theorem Qgen'_hi_ul_ub (m W u : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
+    (hu : u < 2^(m+1)) (hu0 : u ≠ 0) (huW : u ≠ W) :
+    Qgen' (W + 2^(m+1)) (u + 2^(m+1)) u (m+2) = -1 := by
+  have huX : u ^^^ W ≠ 0 := fun h => huW (xor_zero_eq u W h)
+  have hchi := chi_uW m W u hW hW0 hu hu0 huW
+  have hxa : (u + 2^(m+1)) ^^^ (W + 2^(m+1)) = u ^^^ W := xor_seam_cancel u W m hu hW
+  have hxb : u ^^^ (W + 2^(m+1)) = (u ^^^ W) + 2^(m+1) := xor_seam u W m hu hW
+  unfold Qgen'
+  rw [hxa, hxb, R_ul u u m hu hu, if_neg hu0, sigma_self (m+1) u hu hu0,
+      R_ul (u ^^^ W) (u ^^^ W) m (xorlt hu hW) (xorlt hu hW), if_neg huX,
+      sigma_self (m+1) (u ^^^ W) (xorlt hu hW) huX,
+      R_uu (u ^^^ W) u m (xorlt hu hW) hu, if_neg hu0,
+      R_ll (u ^^^ W) u m (xorlt hu hW) hu]
+  rcases cdSigma_pm (m+1) u (u ^^^ W) with h1 | h1 <;>
+    rcases cdSigma_pm (m+1) (u ^^^ W) u with h2 | h2 <;>
+    rw [h1, h2] at hchi ⊢ <;> revert hchi <;> decide
+
+/-- **lu boundary, `v = 0`, `a ∉ {0, W}`.** -/
+theorem Qgen'_hi_lu_v0 (m W a : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
+    (ha : a < 2^(m+1)) (ha0 : a ≠ 0) (haW : a ≠ W) :
+    Qgen' (W + 2^(m+1)) a (0 + 2^(m+1)) (m+2) = -1 := by
+  have hpos : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hlab : Qgen' W W a (m+1) = 1 := Qgen'_label_left (m+1) W a hW ha hW0 ha0 haW
+  unfold Qgen' at hlab
+  rw [Nat.xor_self, cdSig0' (a ^^^ W) m, cdSig0 a m] at hlab
+  have hxa : a ^^^ (W + 2^(m+1)) = (a ^^^ W) + 2^(m+1) := xor_seam a W m ha hW
+  have hxb : (0 + 2^(m+1)) ^^^ (W + 2^(m+1)) = 0 ^^^ W := xor_seam_cancel 0 W m hpos hW
+  unfold Qgen'
+  rw [hxa, hxb, Nat.zero_xor, R_lu a 0 m ha hpos, cdSig0 a m,
+      R_lu W (a ^^^ W) m hW (xorlt ha hW),
+      R_ll W a m hW ha,
+      R_uu (a ^^^ W) 0 m (xorlt ha hW) hpos, if_pos rfl]
+  rcases cdSigma_pm (m+1) W a with h1 | h1 <;>
+    rcases cdSigma_pm (m+1) (a ^^^ W) W with h2 | h2 <;>
+    rw [h1, h2] at hlab ⊢ <;> revert hlab <;> decide
+
+/-- **lu boundary, `v = 0`, `a = W`** -- the one point of that slice that does NOT count. -/
+theorem Qgen'_hi_lu_v0W (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    Qgen' (W + 2^(m+1)) W (0 + 2^(m+1)) (m+2) = 1 := by
+  have hpos : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hxa : W ^^^ (W + 2^(m+1)) = (W ^^^ W) + 2^(m+1) := xor_seam W W m hW hW
+  have hxb : (0 + 2^(m+1)) ^^^ (W + 2^(m+1)) = 0 ^^^ W := xor_seam_cancel 0 W m hpos hW
+  unfold Qgen'
+  rw [hxa, hxb, Nat.zero_xor, Nat.xor_self,
+      R_lu W 0 m hW hpos, cdSig0 W m,
+      R_ll W W m hW hW, sigma_self (m+1) W hW hW0,
+      R_uu 0 0 m hpos hpos, if_pos rfl]
+  decide
+
+/-- **lu boundary, `a = W`, `v ≠ 0`.** -/
+theorem Qgen'_hi_lu_aW (m W v : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
+    (hv : v < 2^(m+1)) (hv0 : v ≠ 0) :
+    Qgen' (W + 2^(m+1)) W (v + 2^(m+1)) (m+2) = -1 := by
+  have hpos : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hlab : Qgen' W v W (m+1) = -1 := Qgen'_label_right (m+1) W v hW hv hW0
+  unfold Qgen' at hlab
+  rw [Nat.xor_self, cdSig0 (v ^^^ W) m, cdSig0 v m] at hlab
+  have hxa : W ^^^ (W + 2^(m+1)) = (W ^^^ W) + 2^(m+1) := xor_seam W W m hW hW
+  have hxb : (v + 2^(m+1)) ^^^ (W + 2^(m+1)) = v ^^^ W := xor_seam_cancel v W m hv hW
+  unfold Qgen'
+  rw [hxa, hxb, Nat.xor_self, R_lu W v m hW hv,
+      R_lu (v ^^^ W) 0 m (xorlt hv hW) hpos, cdSig0 (v ^^^ W) m,
+      R_ll (v ^^^ W) W m (xorlt hv hW) hW,
+      R_uu 0 v m hpos hv, if_neg hv0, cdSig0' v m]
+  rcases cdSigma_pm (m+1) v W with h1 | h1 <;>
+    rcases cdSigma_pm (m+1) (v ^^^ W) W with h2 | h2 <;>
+    rw [h1, h2] at hlab ⊢ <;> revert hlab <;> decide
+
+/-- **lu boundary, the diagonal `a = v`, `v ∉ {0, W}`.** -/
+theorem Qgen'_hi_lu_av (m W v : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
+    (hv : v < 2^(m+1)) (hv0 : v ≠ 0) (hvW : v ≠ W) :
+    Qgen' (W + 2^(m+1)) v (v + 2^(m+1)) (m+2) = -1 := by
+  have hvX : v ^^^ W ≠ 0 := fun h => hvW (xor_zero_eq v W h)
+  have hchi := chi_uW m W v hW hW0 hv hv0 hvW
+  have hxa : v ^^^ (W + 2^(m+1)) = (v ^^^ W) + 2^(m+1) := xor_seam v W m hv hW
+  have hxb : (v + 2^(m+1)) ^^^ (W + 2^(m+1)) = v ^^^ W := xor_seam_cancel v W m hv hW
+  unfold Qgen'
+  rw [hxa, hxb, R_lu v v m hv hv, sigma_self (m+1) v hv hv0,
+      R_lu (v ^^^ W) (v ^^^ W) m (xorlt hv hW) (xorlt hv hW),
+      sigma_self (m+1) (v ^^^ W) (xorlt hv hW) hvX,
+      R_ll (v ^^^ W) v m (xorlt hv hW) hv,
+      R_uu (v ^^^ W) v m (xorlt hv hW) hv, if_neg hv0]
+  rcases cdSigma_pm (m+1) v (v ^^^ W) with h1 | h1 <;>
+    rcases cdSigma_pm (m+1) (v ^^^ W) v with h2 | h2 <;>
+    rw [h1, h2] at hchi ⊢ <;> revert hchi <;> decide
+
+/-- **uu boundary, `u = 0`, `v ≠ 0`.** -/
+theorem Qgen'_hi_uu_u0 (m W v : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
+    (hv : v < 2^(m+1)) (hv0 : v ≠ 0) :
+    Qgen' (W + 2^(m+1)) (0 + 2^(m+1)) (v + 2^(m+1)) (m+2) = -1 := by
+  have hpos : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hlab : Qgen' W v W (m+1) = -1 := Qgen'_label_right (m+1) W v hW hv hW0
+  unfold Qgen' at hlab
+  rw [Nat.xor_self, cdSig0 (v ^^^ W) m, cdSig0 v m] at hlab
+  have hxa : (0 + 2^(m+1)) ^^^ (W + 2^(m+1)) = 0 ^^^ W := xor_seam_cancel 0 W m hpos hW
+  have hxb : (v + 2^(m+1)) ^^^ (W + 2^(m+1)) = v ^^^ W := xor_seam_cancel v W m hv hW
+  unfold Qgen'
+  rw [hxa, hxb, Nat.zero_xor, R_uu 0 v m hpos hv, if_neg hv0, cdSig0' v m,
+      R_ll (v ^^^ W) W m (xorlt hv hW) hW,
+      R_lu (v ^^^ W) 0 m (xorlt hv hW) hpos, cdSig0 (v ^^^ W) m,
+      R_lu W v m hW hv]
+  rcases cdSigma_pm (m+1) v W with h1 | h1 <;>
+    rcases cdSigma_pm (m+1) (v ^^^ W) W with h2 | h2 <;>
+    rw [h1, h2] at hlab ⊢ <;> revert hlab <;> decide
+
+/-- **uu boundary, `v = 0`, `u ∉ {0, W}`.** -/
+theorem Qgen'_hi_uu_v0 (m W u : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
+    (hu : u < 2^(m+1)) (hu0 : u ≠ 0) (huW : u ≠ W) :
+    Qgen' (W + 2^(m+1)) (u + 2^(m+1)) (0 + 2^(m+1)) (m+2) = -1 := by
+  have hpos : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have huX : u ^^^ W ≠ 0 := fun h => huW (xor_zero_eq u W h)
+  have hbW : u ^^^ W ≠ W := by
+    intro h
+    apply hu0
+    have h2 : (u ^^^ W) ^^^ W = W ^^^ W := by rw [h]
+    rw [xor_cancel u W, Nat.xor_self] at h2
+    exact h2
+  have hlab : Qgen' W W (u ^^^ W) (m+1) = 1 :=
+    Qgen'_label_left (m+1) W (u ^^^ W) hW (xorlt hu hW) hW0 huX hbW
+  unfold Qgen' at hlab
+  rw [Nat.xor_self, xor_cancel u W, cdSig0' u m, cdSig0 (u ^^^ W) m] at hlab
+  have hxa : (u + 2^(m+1)) ^^^ (W + 2^(m+1)) = u ^^^ W := xor_seam_cancel u W m hu hW
+  have hxb : (0 + 2^(m+1)) ^^^ (W + 2^(m+1)) = 0 ^^^ W := xor_seam_cancel 0 W m hpos hW
+  unfold Qgen'
+  rw [hxa, hxb, Nat.zero_xor, R_uu u 0 m hu hpos, if_pos rfl,
+      R_ll W (u ^^^ W) m hW (xorlt hu hW),
+      R_lu W u m hW hu,
+      R_lu (u ^^^ W) 0 m (xorlt hu hW) hpos, cdSig0 (u ^^^ W) m]
+  rcases cdSigma_pm (m+1) W (u ^^^ W) with h1 | h1 <;>
+    rcases cdSigma_pm (m+1) u W with h2 | h2 <;>
+    rw [h1, h2] at hlab ⊢ <;> revert hlab <;> decide
+
+/-- **uu boundary, the coset diagonal `v = u ^^^ W`, `u ∉ {0, W}`.** -/
+theorem Qgen'_hi_uu_cos (m W u : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
+    (hu : u < 2^(m+1)) (hu0 : u ≠ 0) (huW : u ≠ W) :
+    Qgen' (W + 2^(m+1)) (u + 2^(m+1)) ((u ^^^ W) + 2^(m+1)) (m+2) = -1 := by
+  have huX : u ^^^ W ≠ 0 := fun h => huW (xor_zero_eq u W h)
+  have hchi := chi_uW m W u hW hW0 hu hu0 huW
+  have hxa : (u + 2^(m+1)) ^^^ (W + 2^(m+1)) = u ^^^ W := xor_seam_cancel u W m hu hW
+  have hxb : ((u ^^^ W) + 2^(m+1)) ^^^ (W + 2^(m+1)) = (u ^^^ W) ^^^ W :=
+    xor_seam_cancel (u ^^^ W) W m (xorlt hu hW) hW
+  unfold Qgen'
+  rw [hxa, hxb, xor_cancel u W,
+      R_uu u (u ^^^ W) m hu (xorlt hu hW), if_neg huX,
+      R_ll u (u ^^^ W) m hu (xorlt hu hW),
+      R_lu u u m hu hu, sigma_self (m+1) u hu hu0,
+      R_lu (u ^^^ W) (u ^^^ W) m (xorlt hu hW) (xorlt hu hW),
+      sigma_self (m+1) (u ^^^ W) (xorlt hu hW) huX]
+  rcases cdSigma_pm (m+1) u (u ^^^ W) with h1 | h1 <;>
+    rcases cdSigma_pm (m+1) (u ^^^ W) u with h2 | h2 <;>
+    rw [h1, h2] at hchi ⊢ <;> revert hchi <;> decide
+
+/-! ### The four HIGH quadrants -/
+
+/-- Pointwise split of the HIGH `ll` quadrant: the `a = W` row, the `b = W` column, and the
+    row-domain remainder, on which `Q'red_hi_ll` REFLECTS the level-`(m+1)` sign -- so the
+    remainder counts `Q' = +1`, not `-1`. -/
+theorem hi_ll_split (m W a b : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
+    (ha : a < 2^(m+1)) (hb : b < 2^(m+1)) :
+    nInd (W + 2^(m+1)) (m+2) a b
+      = (if a = W ∧ b ≠ 0 ∧ b ≠ W then 1 else 0)
+        + ((if b = W ∧ a ≠ 0 ∧ a ≠ W then 1 else 0)
+           + (if a ≠ 0 ∧ a ≠ W ∧ b ≠ 0 ∧ b ≠ W ∧ a ≠ b ∧ Qgen' W a b (m+1) = 1
+              then 1 else 0)) := by
+  unfold nInd
+  by_cases haW : a = W
+  · have ha0 : a ≠ 0 := by rw [haW]; exact hW0
+    have h2 : (if b = W ∧ a ≠ 0 ∧ a ≠ W then (1:Nat) else 0) = 0 :=
+      if_neg (fun hc => hc.2.2 haW)
+    have h3 : (if a ≠ 0 ∧ a ≠ W ∧ b ≠ 0 ∧ b ≠ W ∧ a ≠ b ∧ Qgen' W a b (m+1) = 1
+                then (1:Nat) else 0) = 0 := if_neg (fun hc => hc.2.1 haW)
+    rw [h2, h3]
+    by_cases hb0 : b = 0
+    · rw [if_neg (fun hc => hc.2.1 hb0), if_neg (fun hc => hc.2.1 hb0)]
+    · by_cases hbW : b = W
+      · have hab : a = b := by rw [haW, hbW]
+        rw [if_neg (fun hc => hc.2.2.1 hab), if_neg (fun hc => hc.2.2 hbW)]
+      · have hq : Qgen' (W + 2^(m+1)) a b (m+2) = -1 := by
+          rw [haW]; exact Qgen'_hi_ll_aW m W b hW hW0 hb hb0 hbW
+        have hab : a ≠ b := by rw [haW]; exact fun h => hbW h.symm
+        rw [if_pos ⟨ha0, hb0, hab, hq⟩, if_pos ⟨haW, hb0, hbW⟩]
+  · have h1 : (if a = W ∧ b ≠ 0 ∧ b ≠ W then (1:Nat) else 0) = 0 :=
+      if_neg (fun hc => haW hc.1)
+    rw [h1, Nat.zero_add]
+    by_cases ha0 : a = 0
+    · rw [if_neg (fun hc => hc.1 ha0), if_neg (fun hc => hc.2.1 ha0),
+          if_neg (fun hc => hc.1 ha0)]
+    · by_cases hbW : b = W
+      · have hb0 : b ≠ 0 := by rw [hbW]; exact hW0
+        have hab : a ≠ b := by rw [hbW]; exact haW
+        have hq : Qgen' (W + 2^(m+1)) a b (m+2) = -1 := by
+          rw [hbW]; exact Qgen'_hi_ll_bW m W a hW hW0 ha ha0 haW
+        rw [if_pos ⟨ha0, hb0, hab, hq⟩, if_pos ⟨hbW, ha0, haW⟩,
+            if_neg (fun hc => hc.2.2.2.1 hbW)]
+      · have h2 : (if b = W ∧ a ≠ 0 ∧ a ≠ W then (1:Nat) else 0) = 0 :=
+          if_neg (fun hc => hbW hc.1)
+        rw [h2, Nat.zero_add]
+        by_cases hb0 : b = 0
+        · rw [if_neg (fun hc => hc.2.1 hb0), if_neg (fun hc => hc.2.2.1 hb0)]
+        · by_cases hab : a = b
+          · rw [if_neg (fun hc => hc.2.2.1 hab), if_neg (fun hc => hc.2.2.2.2.1 hab)]
+          · have haX : a ^^^ W ≠ 0 := fun h => haW (xor_zero_eq a W h)
+            have hbX : b ^^^ W ≠ 0 := fun h => hbW (xor_zero_eq b W h)
+            have hrow : Qgen' (W + 2^(m+1)) a b (m+2) = - Qgen' W a b (m+1) :=
+              Q'red_hi_ll m W a b hW ha hb ha0 hb0 haX hbX hab
+            by_cases hq : Qgen' W a b (m+1) = 1
+            · have hq2 : Qgen' (W + 2^(m+1)) a b (m+2) = -1 := by rw [hrow, hq]
+              rw [if_pos ⟨ha0, hb0, hab, hq2⟩, if_pos ⟨ha0, haW, hb0, hbW, hab, hq⟩]
+            · have hq2 : Qgen' (W + 2^(m+1)) a b (m+2) ≠ -1 := by
+                rw [hrow]
+                rcases Qgen'_pm W a b (m+1) with h | h
+                · exact absurd h hq
+                · rw [h]; decide
+              rw [if_neg (fun hc => hq2 hc.2.2.2), if_neg (fun hc => hq hc.2.2.2.2.2)]
+
+/-- The coset diagonal `b = a ^^^ W` splits off the `ll` remainder, and there `Q' = +1`
+    (`Qgen'_coset_partner`) -- so it COUNTS, which is why the `ll` quadrant carries `3(e-2)`
+    rather than `2(e-2)`. -/
+theorem hi_ll_cos_split (m W a b : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
+    (ha : a < 2^(m+1)) :
+    (if a ≠ 0 ∧ a ≠ W ∧ b ≠ 0 ∧ b ≠ W ∧ a ≠ b ∧ Qgen' W a b (m+1) = 1 then (1:Nat) else 0)
+      = (if a ≠ 0 ∧ a ≠ W ∧ b = a ^^^ W then 1 else 0)
+        + (if a ≠ 0 ∧ a ≠ W ∧ b ≠ 0 ∧ b ≠ W ∧ a ≠ b ∧ b ≠ a ^^^ W ∧ Qgen' W a b (m+1) = 1
+           then 1 else 0) := by
+  by_cases hg : a ≠ 0 ∧ a ≠ W
+  · have haX : a ^^^ W ≠ 0 := fun h => hg.2 (xor_zero_eq a W h)
+    by_cases hcos : b = a ^^^ W
+    · have hb0 : b ≠ 0 := by rw [hcos]; exact haX
+      have hbW : b ≠ W := by
+        rw [hcos]
+        intro h
+        apply hg.1
+        have h2 : (a ^^^ W) ^^^ W = W ^^^ W := by rw [h]
+        rw [xor_cancel a W, Nat.xor_self] at h2
+        exact h2
+      have hab : a ≠ b := by
+        rw [hcos]
+        intro h
+        apply hW0
+        have h2 : a ^^^ a = a ^^^ (a ^^^ W) := by rw [← h]
+        rw [Nat.xor_self, xorCancelL] at h2
+        exact h2.symm
+      have hq : Qgen' W a b (m+1) = 1 := by
+        rw [hcos]; exact Qgen'_coset_partner (m+1) W a hW ha hg.1 haX
+      rw [if_pos ⟨hg.1, hg.2, hb0, hbW, hab, hq⟩, if_pos ⟨hg.1, hg.2, hcos⟩,
+          if_neg (fun hc => hc.2.2.2.2.2.1 hcos)]
+    · have hz : (if a ≠ 0 ∧ a ≠ W ∧ b = a ^^^ W then (1:Nat) else 0) = 0 :=
+        if_neg (fun hc => hcos hc.2.2)
+      rw [hz, Nat.zero_add]
+      by_cases hc2 : b ≠ 0 ∧ b ≠ W ∧ a ≠ b ∧ Qgen' W a b (m+1) = 1
+      · rw [if_pos ⟨hg.1, hg.2, hc2.1, hc2.2.1, hc2.2.2.1, hc2.2.2.2⟩,
+            if_pos ⟨hg.1, hg.2, hc2.1, hc2.2.1, hc2.2.2.1, hcos, hc2.2.2.2⟩]
+      · rw [if_neg (fun hc => hc2 ⟨hc.2.2.1, hc.2.2.2.1, hc.2.2.2.2.1, hc.2.2.2.2.2⟩),
+            if_neg (fun hc => hc2 ⟨hc.2.2.1, hc.2.2.2.1, hc.2.2.2.2.1, hc.2.2.2.2.2.2⟩)]
+  · rw [if_neg (fun hc => hg ⟨hc.1, hc.2.1⟩), if_neg (fun hc => hg ⟨hc.1, hc.2.1⟩),
+        if_neg (fun hc => hg ⟨hc.1, hc.2.1⟩)]
+
 end SounioZDFiberAntisym
 
 
