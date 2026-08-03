@@ -2036,6 +2036,85 @@ def main():
             "PATH-COUNT alongside the traces, not another spectral invariant. "
             "(III) untouched; (d) IS NOT CLOSED, and tr(A^3) IS NOT CLOSED ***")
 
+    # ---- W28  THE PATH COUNTS FAIL -- AND W27's RECOMMENDATION IS RETRACTED ---------------
+    # W27 concluded that straddling triangles become PATHS and recommended the next rung carry a
+    # path-count. I counted them. They give NOTHING, and the reason retracts the recommendation:
+    # the colliding level-(n-1) labels have IDENTICAL FULL SPECTRA, and agree on the non-spectral
+    # invariants too. No invariant OF THE FIBER can supply the missing datum -- it is not a graph
+    # recursion at all, it is a LABEL recursion, and lsb(W) is the label datum that closes it.
+    def _inv(n, W, S):
+        A = A_sig_fast(n, W, S).astype(np.float64)
+        A2 = A @ A
+        deg = np.count_nonzero(A, axis=1).astype(np.float64)
+        return dict(t2=int(round(np.trace(A2))), t3=int(round(np.trace(A2 @ A))),
+                    p2=int(round(np.sum(deg ** 2))), p3=int(round(np.sum(deg ** 3))),
+                    q1=int(round(np.sum(A * A2))),
+                    spec=tuple(np.round(np.linalg.eigvalsh(A), 6)))
+
+    _I = {}
+    for _n in range(6, 10):
+        _S = sign_table_fast(_n)
+        for _W in range(1, 1 << (_n - 1)):
+            _I[(_n, _W)] = _inv(_n, _W, _S)
+
+    def _coll(n, key):
+        e = 1 << (n - 2)
+        mp = {}
+        for W in range(e, 1 << (n - 1)):
+            Wp = W % e
+            if Wp:
+                mp.setdefault(key(n - 1, Wp), set()).add(_I[(n, W)]['t3'])
+        return sum(1 for v in mp.values() if len(v) > 1)
+
+    kpair = lambda n, W: (_I[(n, W)]['t2'], _I[(n, W)]['t3'])
+    kp2 = lambda n, W: (_I[(n, W)]['t2'], _I[(n, W)]['t3'], _I[(n, W)]['p2'])
+    kq1 = lambda n, W: (_I[(n, W)]['t2'], _I[(n, W)]['t3'], _I[(n, W)]['q1'])
+    kall = lambda n, W: (_I[(n, W)]['t2'], _I[(n, W)]['t3'], _I[(n, W)]['p2'],
+                         _I[(n, W)]['p3'], _I[(n, W)]['q1'], _I[(n, W)]['spec'])
+    path_rows, cosp_rows = [], []
+    for n in (7, 8, 9):
+        path_rows.append((n, _coll(n, kpair), _coll(n, kp2), _coll(n, kq1), _coll(n, kall)))
+        # the colliding labels: how many DISTINCT full spectra among them?
+        e = 1 << (n - 2)
+        mp = {}
+        for W in range(e, 1 << (n - 1)):
+            Wp = W % e
+            if Wp:
+                mp.setdefault(kpair(n - 1, Wp), set()).add((Wp, _I[(n, W)]['t3']))
+        worst = 0
+        for key, v in mp.items():
+            if len({x[1] for x in v}) > 1:
+                sp = {_I[(n - 1, x[0])]['spec'] for x in v}
+                worst = max(worst, len(sp))
+        cosp_rows.append((n, worst))
+    w28 = (all(a == b == c == d and a > 0 for _, a, b, c, d in path_rows)
+           and all(x == 1 for _, x in cosp_rows))
+    ok["W28"] = w28
+    print(f"W28_PATHS   THE PATH COUNTS FAIL, AND W27's RECOMMENDATION IS RETRACTED "
+          f"{'OK' if w28 else 'FAIL'} -- HIGH-branch collisions: "
+          + "; ".join(f"n={a}: pair {b}, +sum(deg^2) {c}, +sum A.(A^2) {d}, "
+                      f"+ALL of them AND the full spectrum {e}"
+                      for a, b, c, d, e in path_rows)
+          + "; distinct FULL SPECTRA among the colliding level-(n-1) labels: "
+          + "; ".join(f"n={a}: {b}" for a, b in cosp_rows)
+          + ". *** I COUNTED THE PATHS AND THEY GIVE NOTHING. sum_a deg_a^2 (2-paths through a "
+            "vertex), sum_a deg_a^3, and the Hadamard contraction sum_{a,b} A_ab (A^2)_ab -- all "
+            "chosen because they are invariant under the class action A' = D A D with D^2 = I "
+            "(so |A|, hence the DEGREE SEQUENCE, is untouched) and none of them is a trace -- "
+            "leave the collision count EXACTLY unchanged. Adding all of them TOGETHER WITH the "
+            "full spectrum still changes nothing. *** AND THE REASON RETRACTS W27: the colliding "
+            "level-(n-1) labels have IDENTICAL FULL SPECTRA -- one distinct spectrum among the "
+            "eight labels {17..24} at every level tested. So NO invariant of the level-(n-1) "
+            "fiber, spectral or not, can supply the missing datum. W27 concluded that straddling "
+            "triangles become paths and recommended carrying a path-count; that recommendation "
+            "is WRONG and is withdrawn here. The straddling observation is still true, but it "
+            "does not follow that a fiber invariant can express the correction. *** THE CORRECT "
+            "STATEMENT: the level-(n-1) fiber's isomorphism class does NOT determine tr(A^3) at "
+            "level n. The missing datum is LABEL ARITHMETIC, not graph structure -- which is "
+            "exactly what W26 found when every spectral candidate failed and lsb(W) worked. So "
+            "this is not a graph recursion with a richer invariant; it is a LABEL recursion. "
+            "(III) untouched; tr(A^3) IS NOT CLOSED; (d) IS NOT CLOSED ***")
+
     print("=" * 78)
     if all(ok.values()):
         print("CD_TOWER_ZDV1_VERDICT C_CLOSED__V1_REDUCED_TO_D_ALONE__NOT_CLOSED")

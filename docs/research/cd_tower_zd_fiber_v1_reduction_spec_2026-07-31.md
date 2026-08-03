@@ -996,7 +996,51 @@ not be read as if it were. That caveat belongs with the claim.
 > level-(n−1) **triangle**. It reduces to a **path** — and path counts are not traces.
 
 That is why no additional trace helps (§19.3) and why no polynomial in the traces closes it
-(§20.1). **The next rung should carry a path-count alongside the traces, not another spectral
-invariant.**
+(§20.1).
+
+> ⚠ **§21 RETRACTS the recommendation I drew from this.** I concluded "carry a path-count" and
+> then counted them: they give nothing, because the colliding fibers are **cospectral and agree on
+> the non-spectral invariants too**. The straddling observation is still true; the inference from
+> it was not.
+
+**`tr(A³)` is not closed. (III) is untouched. (d) is not closed, and V1 is not proven.**
+
+---
+
+## 21. I counted the paths. They give nothing — and §20.3 is retracted (`W28`, 2026-08-03)
+
+### 21.1 The count
+
+I took the path-counts that are invariant under the class action `A′ = D A D` (`D² = I`, so `|A|`
+and hence the **degree sequence** is untouched) and are **not** traces:
+
+* `Σ_a deg_a²` — 2-paths through a vertex
+* `Σ_a deg_a³`
+* `Σ_{a,b} A_ab·(A²)_ab` — the Hadamard edge/2-path contraction
+
+Every one leaves the high-branch collision count **exactly unchanged**: 1, 2, 4 at `n = 7,8,9` —
+identical to the pair alone. Adding **all of them together with the full spectrum** still changes
+nothing.
+
+### 21.2 Why — and the retraction
+
+The colliding level-(n−1) labels have **identical full spectra**: one distinct spectrum among the
+eight labels `{17..24}` at every level tested.
+
+> So **no invariant of the level-(n−1) fiber, spectral or not, can supply the missing datum.**
+
+§20.3 concluded that straddling triangles become paths and recommended the next rung carry a
+path-count. **That recommendation is wrong and is withdrawn.** The straddling observation is still
+true; the inference — that a fiber invariant could therefore express the correction — does not
+follow, and the measurement refutes it.
+
+### 21.3 The correct statement
+
+> The level-(n−1) fiber's **isomorphism class does not determine** `tr(A³)` at level `n`. The
+> missing datum is **label arithmetic, not graph structure**.
+
+Which is exactly what §19 found the hard way, when every spectral candidate failed and `lsb(W)`
+worked. So this is **not** a graph recursion awaiting a richer invariant — it is a **label
+recursion**.
 
 **`tr(A³)` is not closed. (III) is untouched. (d) is not closed, and V1 is not proven.**
