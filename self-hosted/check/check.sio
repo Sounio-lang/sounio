@@ -128,6 +128,14 @@ const ROBUST_SCOPE_IDENTIFIED_FAMILY: i64 = 3
 const ROBUST_SCOPE_TRANSPORTED_DOMAIN: i64 = 4
 const CONTEST_WITNESS_SIGN_CONSENSUS: i64 = 0
 const CONTEST_WITNESS_RELATIVE_BAND: i64 = 1
+
+// Diagnostic only: set once by the modular checker entry point so tracing does
+// not repeatedly scan the process environment while walking every function.
+var CHECK_TRACE_ENABLED: bool = false
+
+pub(crate) fn checker_set_trace_enabled(enabled: bool) with Mut {
+    CHECK_TRACE_ENABLED = enabled
+}
 const CONTEST_WITNESS_MAX_TAIL_RISK: i64 = 2
 const CONTEST_WITNESS_MECHANISTIC_DIVERGENCE: i64 = 3
 const CONTEST_WITNESS_IDENTIFIABILITY_FLOOR: i64 = 4
@@ -288,6 +296,17 @@ pub struct Checker {
     // both the un-writable kernel and threading the list through the call chain.
     // Placed at struct end to keep all existing field offsets unchanged.
     ontology_items: Option<Box<ItemList> >,
+}
+
+fn checker_trace_fn_phase(c: *mut Checker, phase: string, fn_name: Name) with IO, Mut, Panic, Div {
+    if !CHECK_TRACE_ENABLED { return }
+    print("check_trace module=")
+    print_int((*c).current_module_id)
+    print(" fn=")
+    print_name_value(fn_name)
+    print(" phase=")
+    print(phase)
+    print("\n")
 }
 
 // Wrapper for inferred type arguments (avoids &![T;N] JIT bug)
@@ -4084,6 +4103,7 @@ fn checker_report_multitest_correction_required_inplace(c: *mut Checker, span: S
 fn checker_check_impl_method_inplace(c: *mut Checker, item: Item) with Mut, Panic, Div, Alloc, IO {
     match item.fn_def {
         Some(fd) => {
+            checker_trace_fn_phase(c, "method_enter", (*fd).name)
             let saved_effects = (*c).current_effects
             let saved_effect_count = (*c).current_effect_count
             let saved_multitest_count = (*c).multitest_count
@@ -4101,6 +4121,7 @@ fn checker_check_impl_method_inplace(c: *mut Checker, item: Item) with Mut, Pani
             // so each impl body sees ITS OWN declared effects.
             (*c).current_fn_name = (*fd).name
             let sig_id = fn_sig_table_find_method_semantic((*c).fn_sigs, (*c).current_impl_type, (*fd).name)
+            checker_trace_fn_phase(c, "method_signature_found", (*fd).name)
             if sig_id >= 0 {
                 let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
                 (*c).current_return_type = sig.return_type
@@ -4113,7 +4134,9 @@ fn checker_check_impl_method_inplace(c: *mut Checker, item: Item) with Mut, Pani
             (*c).borrows = (*c).borrows.push_scope()
             checker_push_const_scope_inplace(c)
             checker_bind_fn_params_inplace(c, (*fd).params)
+            checker_trace_fn_phase(c, "method_body_begin", (*fd).name)
             let body_ty = checker_check_block_inplace(c, (*fd).body)
+            checker_trace_fn_phase(c, "method_body_done", (*fd).name)
             if sig_id >= 0 {
                 let sig2 = fn_sig_table_get((*c).fn_sigs, sig_id)
                 if !checker_fn_body_return_compatible_inplace(c, body_ty, sig2.return_type) {
@@ -4131,6 +4154,7 @@ fn checker_check_impl_method_inplace(c: *mut Checker, item: Item) with Mut, Pani
             (*c).current_effect_count = saved_effect_count
             (*c).multitest_count = saved_multitest_count
             (*c).multitest_corrected = saved_multitest_corrected
+            checker_trace_fn_phase(c, "method_exit", (*fd).name)
         }
         None => {}
     }
@@ -4388,6 +4412,7 @@ fn checker_bind_fn_params_inplace(c: *mut Checker, opt: Option<Box<ParamList> >)
 fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(fd) => {
+            checker_trace_fn_phase(c, "enter", (*fd).name)
             let saved_effects = (*c).current_effects
             let saved_effect_count = (*c).current_effect_count
             let saved_multitest_count = (*c).multitest_count
@@ -4401,6 +4426,7 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             // gate once `return <expr>` no longer crashes the check spine.
             (*c).current_fn_name = (*fd).name
             let sig_id = fn_sig_table_find((*c).fn_sigs, (*fd).name)
+            checker_trace_fn_phase(c, "signature_found", (*fd).name)
             if sig_id >= 0 {
                 let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
                 (*c).current_return_type = sig.return_type
@@ -4409,17 +4435,22 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
                 // Per-call-site recording: note a `with Chaotic` (effect id 22) function.
                 if has_effect_id(sig.effects, sig.effect_count, 22) { equiv_set_chaotic() }
                 // Loud-failure guard (#187): warn on oversized by-value return.
+                checker_trace_fn_phase(c, "return_size_begin", (*fd).name)
                 let ret_sz = checker_type_byte_size_inplace(c, sig.return_type, 0)
+                checker_trace_fn_phase(c, "return_size_done", (*fd).name)
                 if ret_sz > large_frame_warn_bytes() {
                     checker_warn_large_by_value_inplace(c, (*fd).name, 0, ret_sz)
                 }
             }
             // Loud-failure guard (#187): warn on oversized by-value parameters.
+            checker_trace_fn_phase(c, "params_begin", (*fd).name)
             checker_warn_large_params_inplace(c, (*fd).name, (*fd).params)
+            checker_trace_fn_phase(c, "params_done", (*fd).name)
             (*c).multitest_count = 0
             (*c).multitest_corrected = false
             match (*fd).body.stmts {
                 None => {
+                    checker_trace_fn_phase(c, "declaration_exit", (*fd).name)
                     (*c).current_return_type = ty_unit()
                     (*c).current_effects = saved_effects
                     (*c).current_effect_count = saved_effect_count
@@ -4434,7 +4465,9 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             checker_push_const_scope_inplace(c)
             checker_bind_fn_params_inplace(c, (*fd).params)
             (*c).escape_provenance = 0
+            checker_trace_fn_phase(c, "body_begin", (*fd).name)
             let body_ty = checker_check_block_inplace(c, (*fd).body)
+            checker_trace_fn_phase(c, "body_done", (*fd).name)
             if sig_id >= 0 {
                 let sig2 = fn_sig_table_get((*c).fn_sigs, sig_id)
                 if !checker_fn_body_return_compatible_inplace(c, body_ty, sig2.return_type) {
@@ -4457,6 +4490,7 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             (*c).current_effect_count = saved_effect_count
             (*c).multitest_count = saved_multitest_count
             (*c).multitest_corrected = saved_multitest_corrected
+            checker_trace_fn_phase(c, "exit", (*fd).name)
         }
         None => {}
     }
