@@ -2115,6 +2115,85 @@ def main():
             "this is not a graph recursion with a richer invariant; it is a LABEL recursion. "
             "(III) untouched; tr(A^3) IS NOT CLOSED; (d) IS NOT CLOSED ***")
 
+    # ---- W29  THE COUNTING RECURSION ENTERS LEAN: THREE OF FOUR LOW QUADRANTS -------------
+    # The W15 ledger has been carried on paper and pinned by clause. Tier 29 starts formalising
+    # it. The mechanism is split-by-predicate / extract-singleton / evaluate-constant -- no
+    # Finset, exactly as Tier 27 avoided cardinality. This clause transcribes each new Lean
+    # statement and checks it against the measured sums.
+    def _nInd(S, W, a, b):
+        return 1 if (a != 0 and b != 0 and a != b and _Qp(S, W, a, b) == -1) else 0
+
+    def _qInd(S, W, u, b):
+        return 1 if (b != 0 and _Qu2(S, W, u, b) == -1) else 0
+
+    def _Ncnt(S, W, m):
+        H = 1 << m
+        return sum(_nInd(S, W, a, b) for a in range(H) for b in range(H))
+
+    def _Mcnt(S, W, m):
+        H = 1 << m
+        return sum(_qInd(S, W, u, b) for u in range(H) for b in range(H))
+
+    w29_rows = []
+    for m in (3, 4, 5):                       # level m+2 = 5,6,7
+        e = 1 << (m + 1)
+        S2, S1 = sign_table_fast(m + 2), sign_table_fast(m + 1)
+        bad_quad = bad_ll = bad_ul = bad_lu = 0
+        for W in range(1, e):
+            # Ncnt_quad: the four quadrants sum to the whole box
+            ll = sum(_nInd(S2, W, a, b) for a in range(e) for b in range(e))
+            lu = sum(_nInd(S2, W, a, e + v) for a in range(e) for v in range(e))
+            ul = sum(_nInd(S2, W, e + u, b) for u in range(e) for b in range(e))
+            uu = sum(_nInd(S2, W, e + u, e + v) for u in range(e) for v in range(e))
+            if ll + lu + ul + uu != _Ncnt(S2, W, m + 2):
+                bad_quad += 1
+            # Ncnt_ll_low : ll == Ncnt W (m+1)
+            if ll != _Ncnt(S1, W, m + 1):
+                bad_ll += 1
+            # Ncnt_ul_low : ul == Mcnt W (m+1)
+            if ul != _Mcnt(S1, W, m + 1):
+                bad_ul += 1
+            # Ncnt_lu_low : lu == sum over a!=0, a!=W of [Qgen(W,v,a,m+1) = -1]
+            pred = sum(1 for a in range(e) for v in range(e)
+                       if a != 0 and a != W and _Qu2(S1, W, v, a) == -1)
+            if lu != pred:
+                bad_lu += 1
+        w29_rows.append((m + 2, e - 1, bad_quad, bad_ll, bad_ul, bad_lu))
+    # NULL CONTROL: drop the `a != W` guard from the lu statement and it must BREAK
+    m = 4
+    e = 1 << (m + 1)
+    S2, S1 = sign_table_fast(m + 2), sign_table_fast(m + 1)
+    null29 = 0
+    for W in range(1, e):
+        lu = sum(_nInd(S2, W, a, e + v) for a in range(e) for v in range(e))
+        naive = sum(1 for a in range(e) for v in range(e)
+                    if a != 0 and _Qu2(S1, W, v, a) == -1)
+        if lu != naive:
+            null29 += 1
+    w29 = (all(b == c == d == f == 0 for _, _, b, c, d, f in w29_rows) and null29 > 0)
+    ok["W29"] = w29
+    print(f"W29_LEDGER  THE COUNTING RECURSION ENTERS LEAN -- THREE OF FOUR LOW QUADRANTS "
+          f"{'OK' if w29 else 'FAIL'} -- "
+          + "; ".join(f"level {a}: {b} labels, quad-split {c}, ll {d}, ul {e}, lu {f} failing"
+                      for a, b, c, d, e, f in w29_rows)
+          + f"; NULL CONTROL (drop the a != W guard from lu): {null29} labels break, as required."
+            " *** `Ncnt_quad` splits the level-(m+2) box into its four quadrants at the seam "
+            "2^(m+1) -- two applications of `sumLt_add` plus `sumLt_pair`. *** `Ncnt_ll_low` is "
+            "the clean one: `Q'red_low_ll` is UNCONDITIONAL, so that quadrant IS the level-(m+1) "
+            "count, with no slices at all. *** `Ncnt_ul_low` and `Ncnt_lu_low` reduce their "
+            "quadrants to counts of the UNPRIMED `Qgen`, because those two low rows land on "
+            "`Qgen` rather than `Qgen'`. `lu`'s single row-failure, a = W, contributes NOTHING: "
+            "`Qgen'_label_left` makes the value +1 there, so the indicator is 0 -- the null "
+            "control confirms that dropping the guard genuinely changes the count. *** NEW "
+            "TOOLKIT, all by induction and all kernel-clean: `sumLt_zero`, `sumLt_const`, "
+            "`sumLt_pair`, `sumLt_split_if`, `sumLt_single`, `sumLt_single'`. Split by "
+            "predicate, extract singletons, evaluate constants -- no Finset, exactly as Tier 27 "
+            "avoided cardinality. *** WHAT IS NOT DONE: the `uu` quadrant (five side conditions) "
+            "and the bridge from the UNPRIMED counts back to `Ncnt`, which is the six-line slice "
+            "arithmetic. Until both land, the LOW recursion is NOT yet a Lean theorem and the "
+            "closed form's derivation still rests on this clause. (III) untouched; tr(A^3) NOT "
+            "closed; (d) IS NOT CLOSED ***")
+
     print("=" * 78)
     if all(ok.values()):
         print("CD_TOWER_ZDV1_VERDICT C_CLOSED__V1_REDUCED_TO_D_ALONE__NOT_CLOSED")

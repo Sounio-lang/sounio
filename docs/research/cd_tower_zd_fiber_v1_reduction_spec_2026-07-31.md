@@ -1044,3 +1044,43 @@ worked. So this is **not** a graph recursion awaiting a richer invariant — it 
 recursion**.
 
 **`tr(A³)` is not closed. (III) is untouched. (d) is not closed, and V1 is not proven.**
+
+---
+
+## 22. The counting recursion enters Lean (`W29`, Tier 29, 2026-08-03)
+
+The `W15` ledger — the step that turns `Ncnt` at level `m+2` into `Ncnt` at level `m+1` — has been
+carried **on paper and pinned by clause** since it was found. Every commit had to say so. Tier 29
+starts formalising it.
+
+### 22.1 The toolkit
+
+All by induction on `n`, all kernel-clean: `sumLt_zero`, `sumLt_const`, `sumLt_pair`,
+`sumLt_split_if`, `sumLt_single`, `sumLt_single'`.
+
+> **Split by predicate, extract singletons, evaluate constants** — no `Finset`, exactly as Tier 27
+> avoided cardinality for the counting step.
+
+### 22.2 Three of the four LOW quadrants
+
+| theorem | content |
+|---|---|
+| `Ncnt_quad` | the level-`m+2` box splits into its four quadrants at the seam `2^{m+1}` |
+| `Ncnt_ll_low` | **`ll` IS the level-`m+1` count** — `Q'red_low_ll` is unconditional, no slices |
+| `Ncnt_ul_low` | `ul` reduces to the **unprimed** count `Mcnt` |
+| `Ncnt_lu_low` | `lu` reduces to the transposed unprimed count, `a ≠ 0`, `a ≠ W` |
+
+`ul` and `lu` land on `Qgen`, not `Qgen'`, because those two low rows do. `lu`'s single
+row-failure `a = W` contributes **nothing**: `Qgen'_label_left` makes the value `+1` there, so the
+indicator is `0`. `W29`'s null control confirms that dropping the `a ≠ W` guard genuinely changes
+the count.
+
+### 22.3 What is not done
+
+* the **`uu`** quadrant — five side conditions;
+* the **bridge from the unprimed counts back to `Ncnt`** — the six-line slice arithmetic.
+
+Until both land, **the LOW recursion is not yet a Lean theorem** and the closed form's derivation
+still rests on the contract clause. The caveat stays in place.
+
+**(III) is untouched. `tr(A³)` is not closed. (d) is not closed, and V1 is not proven.**

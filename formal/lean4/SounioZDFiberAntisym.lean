@@ -5778,6 +5778,184 @@ theorem P1_lowCob {t l} (h : LowCob t l) (k L a b : Nat)
     (fun x => lowCob_pm h (x % 8))
     (lowCob_sigma h k)
 
+/-! ## Tier 29: the counting recursion, in Lean
+
+`W15`'s ledger -- the step that turns `Ncnt` at level `m+1` into `Ncnt` at level `m` -- has been
+carried on paper and pinned by contract. This tier formalises it. The whole mechanism is
+**split by predicate, extract singletons, evaluate constants**; no `Finset`, exactly as Tier 27
+avoided cardinality.
+
+Stage 1 is the toolkit. -/
+
+theorem sumLt_zero (n : Nat) : sumLt n (fun _ => 0) = 0 := by
+  induction n with
+  | zero => rfl
+  | succ n ih => rw [sumLt, ih]
+
+theorem sumLt_const (n c : Nat) : sumLt n (fun _ => c) = n * c := by
+  induction n with
+  | zero => simp [sumLt]
+  | succ n ih => rw [sumLt, ih, Nat.succ_mul]
+
+/-- A bounded sum is additive in the summand. -/
+theorem sumLt_pair (n : Nat) (f g : Nat → Nat) :
+    sumLt n (fun i => f i + g i) = sumLt n f + sumLt n g := by
+  induction n with
+  | zero => rfl
+  | succ n ih => rw [sumLt, sumLt, sumLt, ih]; omega
+
+/-- Split a bounded sum along a decidable predicate. -/
+theorem sumLt_split_if (n : Nat) (p : Nat → Prop) [DecidablePred p] (f g : Nat → Nat) :
+    sumLt n (fun i => if p i then f i else g i)
+      = sumLt n (fun i => if p i then f i else 0)
+        + sumLt n (fun i => if p i then 0 else g i) := by
+  induction n with
+  | zero => rfl
+  | succ n ih =>
+      rw [sumLt, sumLt, sumLt, ih]
+      by_cases h : p n
+      · rw [if_pos h, if_pos h, if_pos h]; omega
+      · rw [if_neg h, if_neg h, if_neg h]; omega
+
+/-- A single index contributes its own value. -/
+theorem sumLt_single (n j c : Nat) (hj : j < n) :
+    sumLt n (fun i => if i = j then c else 0) = c := by
+  induction n with
+  | zero => omega
+  | succ n ih =>
+      rw [sumLt]
+      by_cases h : n = j
+      · subst h
+        rw [if_pos rfl]
+        have : sumLt n (fun i => if i = n then c else 0) = sumLt n (fun _ => 0) :=
+          sumLt_congr n _ _ (fun i hi => by rw [if_neg (by omega)])
+        rw [this, sumLt_zero, Nat.zero_add]
+      · rw [if_neg h, ih (by omega), Nat.add_zero]
+
+/-- A single index, with the guard written the other way round. -/
+theorem sumLt_single' (n j c : Nat) (hj : j < n) :
+    sumLt n (fun i => if j = i then c else 0) = c := by
+  rw [sumLt_congr n _ (fun i => if i = j then c else 0)
+        (fun i _ => by by_cases h : j = i
+                       · rw [if_pos h, if_pos h.symm]
+                       · rw [if_neg h, if_neg (fun hh => h hh.symm)]),
+      sumLt_single n j c hj]
+
+/-! ### Stage 2: the quadrant split, and the `ll` quadrant
+
+Everything is stated at level `m+2` so the seam is `2^(m+1)` and the reduction rows apply
+verbatim. -/
+
+/-- The summand of `Ncnt`, named so the quadrant proofs stay readable. -/
+def nInd (W m a b : Nat) : Nat :=
+  if a ≠ 0 ∧ b ≠ 0 ∧ a ≠ b ∧ Qgen' W a b m = -1 then 1 else 0
+
+theorem Ncnt_eq (W m : Nat) :
+    Ncnt W m = sumLt (2^m) (fun a => sumLt (2^m) (fun b => nInd W m a b)) := rfl
+
+/-- The four quadrants of the level-`m+2` box, split at the seam `2^(m+1)`. -/
+theorem Ncnt_quad (W m : Nat) :
+    Ncnt W (m+2)
+      = (sumLt (2^(m+1)) (fun a => sumLt (2^(m+1)) (fun b => nInd W (m+2) a b))
+          + sumLt (2^(m+1)) (fun a =>
+              sumLt (2^(m+1)) (fun v => nInd W (m+2) a (2^(m+1) + v))))
+        + (sumLt (2^(m+1)) (fun u =>
+              sumLt (2^(m+1)) (fun b => nInd W (m+2) (2^(m+1) + u) b))
+          + sumLt (2^(m+1)) (fun u =>
+              sumLt (2^(m+1)) (fun v => nInd W (m+2) (2^(m+1) + u) (2^(m+1) + v)))) := by
+  have hsplit : (2:Nat)^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  rw [Ncnt_eq, hsplit, sumLt_add]
+  rw [sumLt_congr (2^(m+1)) (fun a => sumLt (2^(m+1) + 2^(m+1)) (fun b => nInd W (m+2) a b))
+        (fun a => sumLt (2^(m+1)) (fun b => nInd W (m+2) a b)
+                  + sumLt (2^(m+1)) (fun v => nInd W (m+2) a (2^(m+1) + v)))
+        (fun a _ => sumLt_add _ _ _)]
+  rw [sumLt_congr (2^(m+1))
+        (fun i => sumLt (2^(m+1) + 2^(m+1)) (fun b => nInd W (m+2) (2^(m+1) + i) b))
+        (fun i => sumLt (2^(m+1)) (fun b => nInd W (m+2) (2^(m+1) + i) b)
+                  + sumLt (2^(m+1)) (fun v => nInd W (m+2) (2^(m+1) + i) (2^(m+1) + v)))
+        (fun i _ => sumLt_add _ _ _)]
+  rw [sumLt_pair, sumLt_pair]
+
+/-- `ll`: `Q'red_low_ll` is UNCONDITIONAL, so this quadrant is the level-`m+1` count outright. -/
+theorem Ncnt_ll_low (W m : Nat) (hW : W < 2^(m+1)) :
+    sumLt (2^(m+1)) (fun a => sumLt (2^(m+1)) (fun b => nInd W (m+2) a b))
+      = Ncnt W (m+1) := by
+  rw [Ncnt_eq]
+  apply sumLt_congr
+  intro a ha
+  apply sumLt_congr
+  intro b hb
+  unfold nInd
+  rw [Q'red_low_ll m W a b hW ha hb]
+
+/-! ### Stage 2b: `ul` and `lu` reduce to the UNPRIMED count
+
+The low `ul` and `lu` rows land on `Qgen`, not `Qgen'`, so both quadrants reduce to a count of
+the unprimed form. `lu`'s one row-failure, `a = W`, contributes NOTHING: `Qgen'_label_left`
+makes it `+1` there. -/
+
+/-- The unprimed summand, in the shape the `ul` row produces. -/
+def qInd (W m u b : Nat) : Nat := if b ≠ 0 ∧ Qgen W u b m = -1 then 1 else 0
+
+/-- The unprimed count over `u ∈ [0,2^m)`, `b ∈ [1,2^m)`. -/
+def Mcnt (W m : Nat) : Nat :=
+  sumLt (2^m) (fun u => sumLt (2^m) (fun b => qInd W m u b))
+
+theorem Ncnt_ul_low (W m : Nat) (hW : W < 2^(m+1)) :
+    sumLt (2^(m+1)) (fun u => sumLt (2^(m+1)) (fun b => nInd W (m+2) (2^(m+1) + u) b))
+      = Mcnt W (m+1) := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  unfold Mcnt
+  apply sumLt_congr
+  intro u hu
+  apply sumLt_congr
+  intro b hb
+  unfold nInd qInd
+  have hne0 : (2:Nat)^(m+1) + u ≠ 0 := by omega
+  have hneb : (2:Nat)^(m+1) + u ≠ b := by omega
+  have hcomm : (2:Nat)^(m+1) + u = u + 2^(m+1) := by omega
+  by_cases hb0 : b = 0
+  · rw [if_neg (by rintro ⟨-, h, -⟩; exact h hb0), if_neg (by rintro ⟨h, -⟩; exact h hb0)]
+  · rw [hcomm, Q'red_low_ul m W u b hW hu hb hb0]
+    by_cases hq : Qgen W u b (m+1) = -1
+    · rw [if_pos ⟨by omega, hb0, by omega, hq⟩, if_pos ⟨hb0, hq⟩]
+    · rw [if_neg (by rintro ⟨-, -, -, h⟩; exact hq h), if_neg (by rintro ⟨-, h⟩; exact hq h)]
+
+theorem Ncnt_lu_low (W m : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLt (2^(m+1)) (fun a => sumLt (2^(m+1)) (fun v => nInd W (m+2) a (2^(m+1) + v)))
+      = sumLt (2^(m+1)) (fun a =>
+          sumLt (2^(m+1)) (fun v =>
+            if a ≠ 0 ∧ a ≠ W ∧ Qgen W v a (m+1) = -1 then 1 else 0)) := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  apply sumLt_congr
+  intro a ha
+  apply sumLt_congr
+  intro v hv
+  unfold nInd
+  have hcomm : (2:Nat)^(m+1) + v = v + 2^(m+1) := by omega
+  have hne0 : v + (2:Nat)^(m+1) ≠ 0 := by omega
+  have hnea : a ≠ v + (2:Nat)^(m+1) := by omega
+  by_cases ha0 : a = 0
+  · rw [if_neg (by rintro ⟨h, -⟩; exact h ha0), if_neg (by rintro ⟨h, -⟩; exact h ha0)]
+  · by_cases haW : a = W
+    · -- the row fails here, and `Qgen'_label_left` makes the value +1: contributes nothing
+      have hv0 : v + (2:Nat)^(m+1) ≠ 0 := hne0
+      have hvW : v + (2:Nat)^(m+1) ≠ W := by omega
+      have hlt : v + (2:Nat)^(m+1) < 2^(m+2) := by
+        have : (2:Nat)^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+        omega
+      have hWlt : W < 2^(m+2) := by
+        have : (2:Nat)^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+        omega
+      rw [hcomm, haW, Qgen'_label_left (m+2) W (v + 2^(m+1)) hWlt hlt hW0 hv0 hvW]
+      rw [if_neg (by rintro ⟨-, -, -, h⟩; exact absurd h (by decide)),
+          if_neg (by rintro ⟨-, h, -⟩; exact h rfl)]
+    · rw [hcomm, Q'red_low_lu m W a v hW ha hv ha0 (fun h => haW (xor_zero_eq a W h))]
+      by_cases hq : Qgen W v a (m+1) = -1
+      · rw [if_pos ⟨ha0, hne0, hnea, hq⟩, if_pos ⟨ha0, haW, hq⟩]
+      · rw [if_neg (by rintro ⟨-, -, -, h⟩; exact hq h),
+            if_neg (by rintro ⟨-, -, h⟩; exact hq h)]
+
 end SounioZDFiberAntisym
 
 
