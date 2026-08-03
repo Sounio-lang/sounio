@@ -1556,6 +1556,86 @@ def main():
             "which needs Finset cardinality this Mathlib-free file does not have. "
             "(III) untouched; (d) IS NOT CLOSED ***")
 
+    # ---- W22  THE COUNTING STEP IS PROVEN -- g IS CLOSED END TO END ------------------------
+    # The last gap. `Qgen'_lowCob` is POINTWISE; g is about the COUNT. Bridging them normally
+    # means Finset cardinality, which this Mathlib-free file does not have -- and does not need:
+    # a plain recursive `sumLt`, the fact that `lowMap t` permutes each block of eight
+    # (`sum8_perm`), and the seam split (`sumLt_add`) do it. `Ncnt_lowCob` is the result:
+    #     Ncnt (lowMap t W) (k+3) = Ncnt W (k+3)   for every t in the class, forall n.
+    # THIS CLAUSE PINS `Ncnt` TO THE MEASURED N FIRST -- K7 in this lane once drew a wrong
+    # conclusion from a mismatched tau, and `Reach` was once the wrong set entirely.
+    def _Ncnt(S, W, m):
+        """transcription of the Lean `Ncnt`: a double sum with the same guard"""
+        H = 1 << m
+        tot = 0
+        for a in range(H):
+            for b in range(H):
+                if a != 0 and b != 0 and a != b and _Qp(S, W, a, b) == -1:
+                    tot += 1
+        return tot
+
+    # (i) the Lean Ncnt IS the lane's N
+    w22_same = True
+    for m in (4, 5, 6):
+        S, H = sign_table_fast(m), 1 << m
+        for W in range(1, H):
+            if _Ncnt(S, W, m) != _N(S, W, H):
+                w22_same = False
+                break
+    # (ii) the theorem itself: N(lowMap t W) == N(W) for EVERY t in the class, every W
+    w22_rows = []
+    for m in (5, 6):
+        S, H = sign_table_fast(m), 1 << m
+        Nv = {W: _N(S, W, H) for W in range(1, H)}
+        bad = sum(1 for t in G32 for W in range(1, H)
+                  if Nv[_lowMap(t, W)] != Nv[W])
+        w22_rows.append((m, 168 * (H - 1), bad))
+    # (iii) NULL CONTROL. My FIRST attempt here was vacuous and this clause caught it: I used
+    #     the non-linear low permutation, expecting it to break count-invariance. It does not --
+    #     count-invariance is WEAKER than the pointwise Q'-invariance, and holds for ALL 5040
+    #     permutations of the low block that fix 0, not merely the 168 linear ones. So `LowCob`
+    #     is SUFFICIENT but not NECESSARY for this conclusion (it IS necessary pointwise: W19
+    #     pins that exactly 168 of them are Q'-equivariant). What IS load-bearing is CONFINEMENT
+    #     TO THE LOW BLOCK -- a map that touches bit 3 breaks the count at every label.
+    S6n, H6n = sign_table_fast(6), 64
+    Nv6 = {W: _N(S6n, W, H6n) for W in range(1, H6n)}
+    w22_nonlin_ok = all(Nv6[_lowMap(NONLIN, W)] == Nv6[W] for W in range(1, H6n))
+    _flip3 = [W for W in range(1, H6n) if 1 <= (W ^ 8) < H6n]
+    w22_null = all(Nv6[W ^ 8] != Nv6[W] for W in _flip3)
+    w22 = w22_same and w22_null and w22_nonlin_ok and all(c == 0 for _, _, c in w22_rows)
+    ok["W22"] = w22
+    print(f"W22_COUNT   THE COUNTING STEP IS PROVEN -- g IS CLOSED END TO END "
+          f"{'OK' if w22 else 'FAIL'} -- Lean `Ncnt` == the lane's N entrywise (m=4,5,6, every "
+          f"label): {w22_same}; "
+          + "; ".join(f"m={a}: {b} (t,W) pairs, {c} where N(lowMap t W) != N(W)"
+                      for a, b, c in w22_rows)
+          + f"; NULL CONTROL -- leaving the low block (flip bit 3) breaks the count at "
+            f"{len(_flip3)}/{len(_flip3)} labels: {w22_null}; and the HONEST negative, the "
+            f"non-linear low permutation still PRESERVES the count: {w22_nonlin_ok}. "
+            "*** THE LAST GAP IS CLOSED. Going from the POINTWISE `Qgen'_lowCob` to the COUNT "
+            "normally needs Finset cardinality, which this Mathlib-free file does not have. It "
+            "does not need it: a plain recursive `sumLt`, the 8-block permutation `sum8_perm` "
+            "(proven by induction over the class -- the two generators are concrete, so each "
+            "base case is eight terms reordered and closes by `omega`), and the seam split "
+            "`sumLt_add` give `sumLt_lowMap`: REINDEXING A BOUNDED SUM BY `lowMap t` CHANGES "
+            "NOTHING, forall n. Applying it twice (once per argument) plus injectivity "
+            "(`lowMap_inj`, from linearity and trivial kernel) gives `Ncnt_lowCob`. *** SO g IS "
+            "NOW PROVEN END TO END: sigma moves by a coboundary (Tier 25) -> the four sigmas of "
+            "Q' cancel it (Tier 24) -> Q' is invariant under the class (Tier 26) -> THE COUNT is "
+            "invariant (Tier 27). Together with `Qgen'_tau` (W18) for the even labels, both "
+            "halves of g = (W & (W-1)) >> 3 are theorems. *** ONE FINITE FACT REMAINS OUTSIDE "
+            "LEAN, and it is not an analytic gap: that the class `LowCob` is EXACTLY GL(3,2). "
+            "That is a closure computation over 8-element tables, done in W20 (168 elements, "
+            "equal to the enumerated group). *** AND ONE HONEST WEAKENING, caught by this "
+            "clause's own null control: `LowCob` is SUFFICIENT for count-invariance but NOT "
+            "NECESSARY -- ALL 5040 permutations of the low block fixing 0 preserve N, not just "
+            "the 168 linear ones. The hypothesis IS necessary for the POINTWISE statement (W19: "
+            "exactly 168 are Q'-equivariant, and the non-linear ones fail pointwise), which is "
+            "what the proof actually uses. My first null control asserted the opposite and was "
+            "vacuous; the load-bearing hypothesis is CONFINEMENT TO THE LOW BLOCK, and a map "
+            "touching bit 3 breaks the count at every label. (III) untouched; (d) IS NOT "
+            "CLOSED ***")
+
     print("=" * 78)
     if all(ok.values()):
         print("CD_TOWER_ZDV1_VERDICT C_CLOSED__V1_REDUCED_TO_D_ALONE__NOT_CLOSED")

@@ -5165,6 +5165,136 @@ theorem Qgen'_lowCob {t l} (h : LowCob t l) (k W a b : Nat)
     (fun x => lowCob_pm h (x % 8))
     (lowCob_sigma h k)
 
+/-! ## Tier 27: the counting step
+
+The last gap. `Qgen'_lowCob` is POINTWISE; the invariant `g` is about the COUNT `N(m,W)`.
+Going from one to the other is a reindexing argument, which normally means `Finset` -- absent
+here. It is not needed: a plain recursive sum `sumLt` plus the fact that `lowMap t` permutes
+each block of eight, and the seam-splitting `sumLt_add`, do the whole job. -/
+
+def sumLt : Nat → (Nat → Nat) → Nat
+  | 0, _ => 0
+  | (n+1), f => sumLt n f + f n
+
+theorem sumLt_congr (n : Nat) (f g : Nat → Nat) (h : ∀ i, i < n → f i = g i) :
+    sumLt n f = sumLt n g := by
+  induction n with
+  | zero => rfl
+  | succ n ih => rw [sumLt, sumLt, ih (fun i hi => h i (by omega)), h n (by omega)]
+
+theorem sumLt_add (n m : Nat) (f : Nat → Nat) :
+    sumLt (n + m) f = sumLt n f + sumLt m (fun i => f (n + i)) := by
+  induction m with
+  | zero => rfl
+  | succ m ih =>
+      have e : n + (m + 1) = (n + m) + 1 := by omega
+      rw [e, sumLt, ih, sumLt]
+      omega
+
+/-- The 8-term block sum is invariant under every table in the class. -/
+theorem sum8_perm {t l} (h : LowCob t l) : ∀ f : Nat → Nat,
+    f (t 0) + f (t 1) + f (t 2) + f (t 3) + f (t 4) + f (t 5) + f (t 6) + f (t 7)
+      = f 0 + f 1 + f 2 + f 3 + f 4 + f 5 + f 6 + f 7 := by
+  induction h with
+  | trans => intro f; unfold tTrans; simp; omega
+  | cyc => intro f; unfold tCyc; simp; omega
+  | @comp t1 t2 l1 l2 _ _ ih1 ih2 =>
+      intro f; exact (ih2 (fun v => f (t1 v))).trans (ih1 f)
+
+theorem lowCob_z {t l} (h : LowCob t l) : ∀ v, v < 8 → t v = 0 → v = 0 := by
+  induction h with
+  | trans => decide
+  | cyc => decide
+  | comp h1 h2 ih1 ih2 =>
+      intro v hv hz
+      exact ih2 v hv (ih1 _ (lowCob_lt h2 v hv) hz)
+
+theorem lowCob_t0 {t l} (h : LowCob t l) : t 0 = 0 := by
+  have e := lowCob_lin h 0 0 (by omega) (by omega)
+  simp [Nat.xor_self] at e
+  exact e
+
+theorem lowMap_inj {t l} (h : LowCob t l) (x y : Nat) (hxy : lowMap t x = lowMap t y) :
+    x = y := by
+  by_cases hne : x ^^^ y = 0
+  · exact xor_zero_eq x y hne
+  · exfalso
+    apply lowMap_ne t (lowCob_z h) (x ^^^ y) hne
+    rw [lowMap_lin t (lowCob_lt h) (lowCob_lin h) x y, hxy, Nat.xor_self]
+
+/-- **Reindexing a bounded sum by `lowMap t` changes nothing.** Induction on the level: the
+    base is the 8-block permutation, the step is `lowMap_seam` plus `sumLt_add`. -/
+theorem sumLt_lowMap {t l} (h : LowCob t l) :
+    ∀ k f, sumLt (2^(k+3)) (fun x => f (lowMap t x)) = sumLt (2^(k+3)) f := by
+  intro k
+  induction k with
+  | zero =>
+      intro f
+      have e8 : (2:Nat)^(0+3) = 8 := rfl
+      have hl : ∀ i, i < 8 → lowMap t i = t i := by
+        intro i hi
+        unfold lowMap
+        have h1 : i / 8 = 0 := by omega
+        have h2 : i % 8 = i := by omega
+        rw [h1, h2]
+        omega
+      rw [e8]
+      show sumLt 8 (fun x => f (lowMap t x)) = sumLt 8 f
+      rw [sumLt_congr 8 _ (fun x => f (t x)) (fun i hi => by rw [hl i hi])]
+      have hs := sum8_perm h f
+      simp only [sumLt]
+      omega
+  | succ k ih =>
+      intro f
+      have e : (2:Nat)^(k+1+3) = 2^(k+3) + 2^(k+3) := by rw [Nat.pow_succ]; omega
+      rw [e, sumLt_add, sumLt_add]
+      have h2 : sumLt (2^(k+3)) (fun i => f (lowMap t (2^(k+3) + i)))
+              = sumLt (2^(k+3)) (fun i => f (2^(k+3) + i)) := by
+        rw [sumLt_congr (2^(k+3)) _ (fun i => (fun x => f (x + 2^(k+3))) (lowMap t i))
+              (fun i _ => by
+                have : 2^(k+3) + i = i + 2^(k+3) := by omega
+                rw [this, lowMap_seam t k i])]
+        rw [ih (fun x => f (x + 2^(k+3)))]
+        exact sumLt_congr _ _ _ (fun i _ => by rw [Nat.add_comm])
+      rw [ih f, h2]
+
+/-- The resonance count, as a plain double sum. -/
+def Ncnt (W m : Nat) : Nat :=
+  sumLt (2^m) (fun a => sumLt (2^m) (fun b =>
+    if a ≠ 0 ∧ b ≠ 0 ∧ a ≠ b ∧ Qgen' W a b m = -1 then 1 else 0))
+
+/-- **THE COUNTING STEP, ∀n.** `N` is invariant under every map in the class -- so the
+    invariant `g` is now proven end to end, from `sigma`'s coboundary to the count. -/
+theorem Ncnt_lowCob {t l} (h : LowCob t l) (k W : Nat) (hW : W < 2^(k+3)) :
+    Ncnt (lowMap t W) (k+3) = Ncnt W (k+3) := by
+  unfold Ncnt
+  rw [← sumLt_lowMap h k (fun a => sumLt (2^(k+3)) (fun b =>
+        if a ≠ 0 ∧ b ≠ 0 ∧ a ≠ b ∧ Qgen' (lowMap t W) a b (k+3) = -1 then 1 else 0))]
+  apply sumLt_congr
+  intro a ha
+  rw [← sumLt_lowMap h k (fun b =>
+        if lowMap t a ≠ 0 ∧ b ≠ 0 ∧ lowMap t a ≠ b
+           ∧ Qgen' (lowMap t W) (lowMap t a) b (k+3) = -1 then 1 else 0)]
+  apply sumLt_congr
+  intro b hb
+  have hQ := Qgen'_lowCob h k W a b hW ha hb
+  have hz0 : lowMap t 0 = 0 := lowMap_zero t (lowCob_t0 h)
+  have hiff : (lowMap t a ≠ 0 ∧ lowMap t b ≠ 0 ∧ lowMap t a ≠ lowMap t b
+                ∧ Qgen' (lowMap t W) (lowMap t a) (lowMap t b) (k+3) = -1)
+            ↔ (a ≠ 0 ∧ b ≠ 0 ∧ a ≠ b ∧ Qgen' W a b (k+3) = -1) := by
+    rw [hQ]
+    constructor
+    · rintro ⟨p1, p2, p3, p4⟩
+      exact ⟨fun hzz => p1 (by rw [hzz]; exact hz0),
+             fun hzz => p2 (by rw [hzz]; exact hz0),
+             fun hzz => p3 (by rw [hzz]), p4⟩
+    · rintro ⟨p1, p2, p3, p4⟩
+      exact ⟨lowMap_ne t (lowCob_z h) a p1, lowMap_ne t (lowCob_z h) b p2,
+             fun hzz => p3 (lowMap_inj h a b hzz), p4⟩
+  by_cases hc : a ≠ 0 ∧ b ≠ 0 ∧ a ≠ b ∧ Qgen' W a b (k+3) = -1
+  · rw [if_pos (hiff.mpr hc), if_pos hc]
+  · rw [if_neg (fun hx => hc (hiff.mp hx)), if_neg hc]
+
 end SounioZDFiberAntisym
 
 

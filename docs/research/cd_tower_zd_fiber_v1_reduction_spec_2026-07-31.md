@@ -733,3 +733,55 @@ all 168 tables, checks `lowMap t₁ ∘ lowMap t₂ = lowMap (t₁∘t₂)`, and
   which this Mathlib-free file does not have.
 
 **(III) is untouched. (d) is not closed, and V1 is not proven.**
+
+---
+
+## 15. The counting step, proven — `g` closes end to end (`W22`, 2026-08-03)
+
+`Qgen'_lowCob` is **pointwise**; `g` is about the **count**. Bridging them normally means
+`Finset` cardinality, which this Mathlib-free file does not have. It does not need it.
+
+### 15.1 The machinery
+
+```lean
+sumLt : Nat → (Nat → Nat) → Nat          -- plain recursive bounded sum
+sumLt_add     : sumLt (n+m) f = sumLt n f + sumLt m (fun i => f (n+i))
+sum8_perm     : the 8-term block sum is invariant under every table in the class
+sumLt_lowMap  : reindexing a bounded sum by `lowMap t` changes nothing, ∀n
+lowMap_inj    : `lowMap t` is injective (linearity + trivial kernel)
+Ncnt_lowCob   : Ncnt (lowMap t W) (k+3) = Ncnt W (k+3)
+```
+
+`sum8_perm` is proven by induction over the class: the two generators are **concrete**, so each
+base case is eight terms reordered and closes by `omega`. `sumLt_lowMap` is then an induction on
+the level — base is the 8-block permutation, step is `lowMap_seam` plus `sumLt_add`. Applying it
+once per argument, with injectivity and `lowMap t 0 = 0` to transport the guards, gives the result.
+
+### 15.2 `g` is now proven end to end
+
+> σ moves by a coboundary (§13) → the four σ's of `Q′` cancel it (§12) → `Q′` is invariant under
+> the class (§14) → **the count is invariant** (here).
+
+With `Qgen'_tau` (§11) handling the even labels, **both halves of
+`g(W) = (W & (W−1)) ≫ 3` are theorems.**
+
+### 15.3 An honest weakening, caught by this clause's own null control
+
+My first null control here was **vacuous**: I asserted that the non-linear low permutation would
+break count-invariance. It does not. Count-invariance is *weaker* than pointwise `Q′`-invariance
+and holds for **all 5040** permutations of the low block fixing 0, not merely the 168 linear ones.
+
+So `LowCob` is **sufficient but not necessary** for this conclusion. It *is* necessary for the
+pointwise statement — `W19` pins that exactly 168 of the low maps are `Q′`-equivariant, and the
+non-linear ones fail pointwise — and the pointwise statement is what the proof actually uses.
+
+The load-bearing hypothesis is **confinement to the low block**: a map touching bit 3 breaks the
+count at *every* label (62/62 at `m = 6`). That is now the null control.
+
+### 15.4 What remains outside Lean
+
+Only that the class `LowCob` is **exactly** `GL(3,2)` — a closure computation over 8-element
+tables, done in `W20` (168 elements, equal to the enumerated group). It is a finite check, not an
+analytic gap.
+
+**(III) is untouched. (d) is not closed, and V1 is not proven.**
