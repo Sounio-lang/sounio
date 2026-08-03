@@ -986,9 +986,9 @@ def main():
     # ISOLATED VERTEX IS DERIVED -- while the uncovered b=Llo column contributes exactly
     # 2^m-2 to N (`Qgen'_label_right`), giving  tr(A^2) = N(m,Llo) - (2^m-2).
     # Unrolling the W15 recursion from this base gives a signed base-4 digit sum over the bits
-    # of the label. It is EXACT on the Fano family and FALSE on every seam -- reported here as
-    # a declared negative, because seams are EVEN labels (Llo = 8y) whose descent can reach
-    # W' = 0, which is precisely the ledger's null control.
+    # of the label. Fed the RAW label it is EXACT on the Fano family and FALSE on every seam --
+    # reported here as a declared negative. W17 then shows the formula was right and the ARGUMENT
+    # wrong: the correct argument is 8*g(W)+1 with g(W) = (W & (W-1)) >> 3, seams included.
     def _Qp_mat(S, Y, H):
         idx = np.arange(1, H)
         x, y = idx[:, None], idx[None, :]
@@ -1083,11 +1083,74 @@ def main():
             "E(m,W) = sum over i with bit_{i-1}(W)=1 of (2^i-4)(2^i-8)*4^(m-i)*(-1)^popcount(W>>i). "
             "It is EXACT on the Fano family (all labels, n=6..10 here, n=11 too in-session) and "
             "FALSE on EVERY seam -- asserted as a declared negative, not left to be discovered. "
-            "The reason is structural: seams are Llo = 8y, EVEN, and an even label's descent can "
-            "reach W' = 0, which is the ledger's own null control. So W6's open general form is "
-            "closed on the FANO HALF and still open on the SEAM HALF. *** THIS DOES NOT NARROW "
+            "The reason the RAW label fails there is structural: an even label's descent hits "
+            "W' = 0 at an INTERMEDIATE step (24 % 16 = 8, then 8 % 8 = 0), where the recursion is "
+            "simply inapplicable -- not at the bottom, and not only for pure powers of two. "
+            "*** SUPERSEDED IN PART BY W17: the formula was right and the ARGUMENT was wrong. Fed "
+            "8*g(W)+1 with g(W) = (W & (W-1)) >> 3 it covers the seams too, so W6's general form "
+            "is closed on the WHOLE label set. This clause's negative is kept because it is what "
+            "forced the invariant to be found. *** THIS DOES NOT NARROW "
             "(d): tr(A^2) is parity-blind (W11), so (d) still needs tr(A^3)'s form AND the seam "
             "family. (III) is untouched; (d) IS NOT CLOSED ***")
+
+    # ---- W17  THE SEAM HALF CLOSES: ONE INVARIANT COVERS EVERY LABEL -----------------------
+    # W16 left the seam family open and recorded the closed form as FALSE there. It is not the
+    # formula that was wrong, it was the ARGUMENT it was being fed. N(m,W) turns out to depend
+    # on W only through
+    #       g(W) = (W & (W-1)) >> 3       -- clear the LOWEST SET BIT, then take bits >= 3
+    # For ODD W, W & (W-1) = W-1, so g(8y+1) = y: g GENERALISES the lane's y. Every label,
+    # seam included, therefore reduces to a Fano label 8*g(W)+1, and W16's closed form applies
+    # verbatim:
+    #       tr(A^2)(n,W) = (2^m-2)(2^m-4) - E(m, 8*g(W)+1),   m = n-1.
+    # This is read off the BLOCK STRUCTURE of N, not fitted: N is constant exactly on the sets
+    # {8y+1..8y+7} together with the even labels whose lowest set bit, once cleared, leaves 8y
+    # -- e.g. at m=7 the block of 65 is {65..72, 80, 96}, and 72=64+8, 80=64+16, 96=64+32 all
+    # clear to 64. The pure powers of two all clear to 0 and so join the y=0 block, which is
+    # exactly `Qgen'_pow2_eq`.
+    def _g(W):
+        return (W & (W - 1)) >> 3
+
+    uni_ok = uni_tot = 0
+    uni_f = uni_s = 0
+    for n in range(6, 10):                      # n=10 also verified in-session; cap DECLARED
+        m, H = n - 1, 1 << (n - 1)
+        S = sign_table_fast(n)
+        for Llo in range(1, H):
+            t2, _ = traces23(A_sig_fast(n, Llo, S))
+            uni_tot += 1
+            if t2 == (H - 2) * (H - 4) - _E(m, 8 * _g(Llo) + 1):
+                uni_ok += 1
+                if Llo & 7:
+                    uni_f += 1
+                else:
+                    uni_s += 1
+    # NULL CONTROL: the plain y = Llo>>3 must FAIL on seams, else `g` is doing no work
+    S6 = sign_table_fast(6)
+    null17 = sum(1 for Llo in range(8, 32, 8)
+                 if traces23(A_sig_fast(6, Llo, S6))[0]
+                 != (30 * 28) - _E(5, 8 * (Llo >> 3) + 1))
+    w17 = (uni_ok == uni_tot) and null17 > 0
+    ok["W17"] = w17
+    print(f"W17_UNIFORM THE SEAM HALF CLOSES -- ONE INVARIANT COVERS EVERY LABEL "
+          f"{'OK' if w17 else 'FAIL'} -- {uni_ok}/{uni_tot} labels match at n=6..9 "
+          f"({uni_f} Fano, {uni_s} seam; n=10 also verified in-session, cap declared); "
+          f"null control (plain y=Llo>>3 on the n=6 seams): {null17}/3 fail, as required. "
+          "*** W16 REPORTED THE SEAM HALF OPEN AND THE CLOSED FORM FALSE THERE. THAT WAS "
+          "WRONG -- not the formula, but the ARGUMENT it was given. N(m,W) depends on W only "
+          "through g(W) = (W & (W-1)) >> 3: CLEAR THE LOWEST SET BIT, THEN TAKE BITS >= 3. For "
+          "odd W, W & (W-1) = W-1, so g(8y+1) = y and g GENERALISES the lane's y. Every label, "
+          "seam included, reduces to the Fano label 8*g(W)+1, and W16's closed form applies "
+          "verbatim: tr(A^2)(n,W) = (2^m-2)(2^m-4) - E(m, 8*g(W)+1). *** THE INVARIANT WAS READ "
+          "OFF THE BLOCK STRUCTURE, NOT FITTED: N is constant exactly on {8y+1..8y+7} together "
+          "with the even labels that clear to 8y -- at m=7 the block of 65 is {65..72,80,96}, "
+          "and 72=64+8, 80=64+16, 96=64+32 all clear to 64. The pure powers of two clear to 0 "
+          "and join the y=0 block, which is precisely `Qgen'_pow2_eq`, the Lean base case. *** "
+          "SO W6's OPEN GENERAL FORM FOR tr(A^2) IS NOW CLOSED ON THE WHOLE LABEL SET. Two "
+          "measured negatives were needed to get here and both are kept: the naive scaling law "
+          "N(m,2^t V) = N(m-t,V) is REFUTED (0 of 31 at m=6), and plain y fails on every seam. "
+          "*** STILL NOT (d): tr(A^2) is parity-blind (W11), so (d) needs tr(A^3). The DERIVATION "
+          "of the closed form remains base (Lean forall n) + recursion (paper, W15-pinned); what "
+          "is verified directly here is the FORMULA. (III) untouched; (d) IS NOT CLOSED ***")
 
     print("=" * 78)
     if all(ok.values()):

@@ -447,12 +447,15 @@ gives a **signed base-4 digit sum**:
 > `E(m,W) = Σ_{i : bit_{i−1}(W)=1} (2^i−4)(2^i−8)·4^{m−i}·(−1)^{popcount(W ≫ i)}`
 
 **Exact on the Fano family** — every label, `n = 6..10` in the clause and `n = 11` in-session,
-1764 fibers, 0 mismatches, against the lane's own `A_sig_fast`/`traces23`. **False on every
-seam**, and `W16` asserts that as a *declared negative* rather than leaving it to be found later.
+1764 fibers, 0 mismatches, against the lane's own `A_sig_fast`/`traces23`. Fed the **raw** label
+it is **false on every seam**, and `W16` asserts that as a *declared negative* rather than leaving
+it to be found later.
 
-The reason is structural, not accidental: seams are `Llo = 8y`, **even**, and an even label's
-descent can reach `W′ = 0` — the ledger's own null control. So `W6`'s open general form is closed
-on the **Fano half** and still open on the **seam half**.
+The reason the raw label fails is structural: an even label's descent hits `W′ = 0` at an
+**intermediate** step — `24 % 16 = 8`, then `8 % 8 = 0` — where the recursion is simply
+inapplicable. Not at the bottom, and not only for pure powers of two.
+
+**§10 supersedes the conclusion I drew from this.** It was the *argument*, not the formula.
 
 ### 9.5 Scope
 
@@ -467,6 +470,47 @@ either ever failed, `res` would be strictly smaller than `{Qgen = +1}` and `tr(A
 
 **This does not narrow (d).** `tr(A²)` is parity-blind (`W11`), so (d) still needs `tr(A³)`'s form
 **and** the seam family. **(III) is untouched. (d) is not closed, and V1 is not proven.**
+
+---
+
+## 10. The seam half closes: one invariant covers every label (`W17`, 2026-08-03)
+
+§9 reported the seam family open. That conclusion was wrong, and instructively so: **the formula
+was right and the argument I fed it was wrong.**
+
+### 10.1 The invariant
+
+`N(m,W)` depends on `W` only through
+
+> `g(W) = (W & (W−1)) ≫ 3` — **clear the lowest set bit, then take bits ≥ 3.**
+
+For odd `W`, `W & (W−1) = W − 1`, so `g(8y+1) = y`: **`g` generalises the lane's `y`.** Every
+label — seam included — therefore reduces to a Fano label `8·g(W)+1`, and §9.4's closed form
+applies verbatim:
+
+> `tr(A²)(n,W) = (2^m − 2)(2^m − 4) − E(m, 8·g(W)+1)`, `m = n−1`.
+
+**987/987 labels, both families, `n = 6..10`, 0 mismatches** against `A_sig_fast`/`traces23`.
+
+### 10.2 It was read off the block structure, not fitted
+
+`N` is constant on explicit blocks, and printing them shows the rule directly. At `m = 7` the
+block of `65` is `{65..72, 80, 96}` — and `72 = 64+8`, `80 = 64+16`, `96 = 64+32` all clear to
+`64`, exactly as `65` does. The pure powers of two all clear to `0` and so join the `y = 0` block,
+which is precisely `Qgen'_pow2_eq`, the Lean base case of §9.2.
+
+Two measured **negatives** got me here and both are kept in the clause:
+
+* the natural scaling law `N(m, 2^t·V) = N(m−t, V)` is **refuted**, 0 of 31 at `m = 6`;
+* plain `y = Llo ≫ 3` fails on **every** seam — so `g` is doing real work, not decoration.
+
+### 10.3 Status
+
+**`W6`'s open general form for `tr(A²)` is now closed on the whole label set.** What is verified
+directly is the *formula*; the *derivation* is still base (Lean ∀n) + recursion (paper, `W15`).
+
+**Still not (d):** `tr(A²)` is parity-blind (`W11`), so (d) needs `tr(A³)`. **(III) is untouched.
+(d) is not closed, and V1 is not proven.**
 
 **(III) is still untouched. (d) is not closed, and V1 is not proven.**
 

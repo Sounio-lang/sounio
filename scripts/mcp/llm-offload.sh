@@ -5,7 +5,7 @@
 #
 # Available providers:
 #   deepseek     — DeepSeek V4 Pro (code intuition, different training data; DEEPSEEK_MODEL overrides)
-#   xai|grok     — Grok 4.3 (primary adversarial math/review lane)
+#   xai|grok     — Grok 4.5 (primary adversarial math/review lane; XAI_MODEL overrides)
 #   xai-fast     — Grok 4.1 Fast Reasoning (lower-latency fallback)
 #   zai|glm      — Z.AI GLM-5.2 direct (independent math/review provider)
 #   grok-code    — Grok Code Fast 1 (fast code tasks)
@@ -94,7 +94,8 @@ run_provider() {
             ;;
         xai|grok)
             [[ -n "${XAI_API_KEY:-}" ]] && \
-            call_openai_compat "Grok 4.3" "https://api.x.ai/v1" "$XAI_API_KEY" "grok-4.3" "$OUTDIR/grok.json"
+            # grok-4.5 is the current flagship; 4.3 stays reachable via XAI_MODEL=grok-4.3.
+            call_openai_compat "Grok ${XAI_MODEL:-grok-4.5}" "https://api.x.ai/v1" "$XAI_API_KEY" "${XAI_MODEL:-grok-4.5}" "$OUTDIR/grok.json"
             ;;
         xai-fast)
             [[ -n "${XAI_API_KEY:-}" ]] && \
