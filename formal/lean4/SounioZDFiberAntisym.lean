@@ -4765,6 +4765,192 @@ theorem Qgen'_of_coboundary (m W a b : Nat) (p : Nat → Nat) (lam : Nat → Int
           * cdSigma (a ^^^ W) b m := by
         rw [sq, sq, sq, sq, sq, sq]; simp
 
+/-! ## Tier 25: the coboundary itself LIFTS -- level 3 decides every level
+
+`W19` left one measured statement behind `g`: that `sigma` moves by a coboundary under the
+low-block maps. This tier proves the ∀n half of it. `cdSigma`'s recursion strips the TOP bit
+and recurses on the residues, while a map `p` confined to bits 0,1,2 commutes with that split
+entirely -- it preserves the `≥ half` tests, the `= 0` tests, and the residues. So the
+coboundary property is INHERITED from one level to the next, and the whole ∀n statement
+collapses to a check at **level 3**, where everything is finite.
+
+The four branches are exactly `R_ll`, `R_lu`, `R_ul`, `R_uu`, already in the tree. -/
+
+theorem sigma_coboundary_up (p : Nat → Nat) (lam : Nat → Int)
+    (hp0 : p 0 = 0) (hpne : ∀ x, x ≠ 0 → p x ≠ 0)
+    (hlam0 : lam 0 = 1) (hpm : ∀ x, lam x = 1 ∨ lam x = -1)
+    (hplt : ∀ k u, u < 2^(k+3) → p u < 2^(k+3))
+    (hpseam : ∀ k u, u < 2^(k+3) → p (u + 2^(k+3)) = p u + 2^(k+3))
+    (hlamseam : ∀ k u, lam (u + 2^(k+3)) = lam u)
+    (hbase : ∀ x y, x < 2^3 → y < 2^3 →
+        cdSigma (p x) (p y) 3 = cdSigma x y 3 * lam x * lam y * lam (x ^^^ y)) :
+    ∀ k x y, x < 2^(k+3) → y < 2^(k+3) →
+      cdSigma (p x) (p y) (k+3) = cdSigma x y (k+3) * lam x * lam y * lam (x ^^^ y) := by
+  intro k
+  induction k with
+  | zero => exact hbase
+  | succ k ih =>
+    have sq : ∀ z : Nat, lam z * lam z = 1 := by
+      intro z; rcases hpm z with h | h <;> rw [h] <;> decide
+    have hhalf : (2:Nat)^(k+1+3) = 2^(k+3) + 2^(k+3) := by rw [Nat.pow_succ]; omega
+    intro x y hx hy
+    by_cases hxu : x < 2^(k+3)
+    · by_cases hyu : y < 2^(k+3)
+      · -- both low
+        rw [R_ll (p x) (p y) (k+2) (hplt k x hxu) (hplt k y hyu), R_ll x y (k+2) hxu hyu]
+        exact ih x y hxu hyu
+      · -- x low, y high
+        obtain ⟨v, rfl, hv⟩ : ∃ v, y = v + 2^(k+3) ∧ v < 2^(k+3) :=
+          ⟨y - 2^(k+3), by omega, by omega⟩
+        rw [hpseam k v hv, R_lu (p x) (p v) (k+2) (hplt k x hxu) (hplt k v hv),
+            R_lu x v (k+2) hxu hv, xor_seam x v (k+2) hxu hv,
+            hlamseam k v, hlamseam k (x ^^^ v), ih v x hv hxu,
+            Nat.xor_comm v x]
+        ac_rfl
+    · obtain ⟨u, rfl, hu⟩ : ∃ u, x = u + 2^(k+3) ∧ u < 2^(k+3) :=
+        ⟨x - 2^(k+3), by omega, by omega⟩
+      by_cases hyu : y < 2^(k+3)
+      · -- x high, y low
+        rw [hpseam k u hu, R_ul (p u) (p y) (k+2) (hplt k u hu) (hplt k y hyu),
+            R_ul u y (k+2) hu hyu, seam_xor_left u y (k+2) hu hyu,
+            hlamseam k u, hlamseam k (u ^^^ y)]
+        by_cases hy0 : y = 0
+        · subst hy0
+          rw [hp0, if_pos rfl, if_pos rfl, Nat.xor_zero, hlam0]
+          simp [sq u]
+        · rw [if_neg (hpne y hy0), if_neg hy0, ih u y hu hyu]
+          simp only [Int.neg_mul]
+      · -- both high
+        obtain ⟨v, rfl, hv⟩ : ∃ v, y = v + 2^(k+3) ∧ v < 2^(k+3) :=
+          ⟨y - 2^(k+3), by omega, by omega⟩
+        rw [hpseam k u hu, hpseam k v hv,
+            R_uu (p u) (p v) (k+2) (hplt k u hu) (hplt k v hv),
+            R_uu u v (k+2) hu hv, xor_seam_cancel u v (k+2) hu hv,
+            hlamseam k u, hlamseam k v]
+        by_cases hv0 : v = 0
+        · subst hv0
+          rw [hp0, if_pos rfl, if_pos rfl, Nat.xor_zero, hlam0, Int.mul_one,
+              Int.mul_assoc, sq u, Int.mul_one]
+        · rw [if_neg (hpne v hv0), if_neg hv0, ih v u hv hu, Nat.xor_comm v u]
+          ac_rfl
+
+/-! ### The low-block maps, concretely -- and one generator fully closed
+
+A map confined to bits 0,1,2 is `lowMap t x = 8 * (x / 8) + t (x % 8)`, and a sign confined
+to them is `lowSign l x = l (x % 8)`. In that form every hypothesis of `sigma_coboundary_up`
+is `omega`-arithmetic rather than bit-fiddling. Instantiating with the TRANSVECTION
+`e₂ ↦ e₂ ⊕ e₀` (table `(0,1,2,3,5,4,7,6)`, `lam = -1` exactly on `{5,7}`) closes the
+coboundary for that generator at EVERY level -- the level-3 base falls to `decide`. -/
+
+def lowMap (t : Nat → Nat) (x : Nat) : Nat := 8 * (x / 8) + t (x % 8)
+def lowSign (l : Nat → Int) (x : Nat) : Int := l (x % 8)
+
+private theorem pow_k3 (k : Nat) : ∃ n, (2:Nat)^(k+3) = 8 * n :=
+  ⟨2^k, by rw [Nat.pow_add]; simp [Nat.mul_comm]⟩
+
+theorem lowMap_seam (t : Nat → Nat) (k u : Nat) :
+    lowMap t (u + 2^(k+3)) = lowMap t u + 2^(k+3) := by
+  obtain ⟨n, hn⟩ := pow_k3 k
+  unfold lowMap
+  rw [hn, Nat.add_mul_mod_self_left, Nat.add_mul_div_left _ _ (by omega : 0 < 8)]
+  omega
+
+theorem lowMap_lt (t : Nat → Nat) (ht : ∀ v, v < 8 → t v < 8) (k u : Nat)
+    (hu : u < 2^(k+3)) : lowMap t u < 2^(k+3) := by
+  obtain ⟨n, hn⟩ := pow_k3 k
+  have h1 : t (u % 8) < 8 := ht _ (Nat.mod_lt _ (by omega))
+  rw [hn] at hu ⊢
+  unfold lowMap
+  omega
+
+theorem lowMap_zero (t : Nat → Nat) (h : t 0 = 0) : lowMap t 0 = 0 := by
+  unfold lowMap; simp [h]
+
+theorem lowMap_ne (t : Nat → Nat) (hz : ∀ v, v < 8 → t v = 0 → v = 0) (x : Nat)
+    (hx : x ≠ 0) : lowMap t x ≠ 0 := by
+  intro h
+  unfold lowMap at h
+  have h2 : t (x % 8) = 0 := by omega
+  have := hz (x % 8) (Nat.mod_lt _ (by omega)) h2
+  omega
+
+theorem lowSign_seam (l : Nat → Int) (k u : Nat) :
+    lowSign l (u + 2^(k+3)) = lowSign l u := by
+  obtain ⟨n, hn⟩ := pow_k3 k
+  unfold lowSign
+  rw [hn, Nat.add_mul_mod_self_left]
+
+/-- The transvection `e₂ ↦ e₂ ⊕ e₀` on the low block. -/
+def tTrans : Nat → Nat := fun v => if v = 4 then 5 else if v = 5 then 4
+  else if v = 6 then 7 else if v = 7 then 6 else v
+
+/-- Its coboundary sign: `-1` exactly on `{5,7}`. -/
+def lTrans : Nat → Int := fun v => if v = 5 ∨ v = 7 then -1 else 1
+
+private theorem baseTrans : ∀ x < 8, ∀ y < 8,
+    cdSigma (lowMap tTrans x) (lowMap tTrans y) 3
+      = cdSigma x y 3 * lowSign lTrans x * lowSign lTrans y * lowSign lTrans (x ^^^ y) := by
+  decide
+
+/-- **The coboundary, PROVEN ∀n for a generator of `GL(3,2)`.** The level-3 base is `decide`;
+    `sigma_coboundary_up` lifts it to every level. -/
+theorem sigma_coboundary_trans :
+    ∀ k x y, x < 2^(k+3) → y < 2^(k+3) →
+      cdSigma (lowMap tTrans x) (lowMap tTrans y) (k+3)
+        = cdSigma x y (k+3) * lowSign lTrans x * lowSign lTrans y
+            * lowSign lTrans (x ^^^ y) :=
+  sigma_coboundary_up (lowMap tTrans) (lowSign lTrans)
+    (lowMap_zero tTrans (by decide))
+    (lowMap_ne tTrans (by decide))
+    (by unfold lowSign lTrans; decide)
+    (by
+      intro x
+      unfold lowSign lTrans
+      by_cases h : x % 8 = 5 ∨ x % 8 = 7
+      · rw [if_pos h]; exact Or.inr rfl
+      · rw [if_neg h]; exact Or.inl rfl)
+    (lowMap_lt tTrans (by decide))
+    (fun k u _ => lowMap_seam tTrans k u)
+    (fun k u => lowSign_seam lTrans k u)
+    (fun x y hx hy => baseTrans x hx y hy)
+
+/-- The 7-cycle `e₀↦e₁, e₁↦e₂, e₂↦e₀⊕e₁` on the low block: table `(0,2,4,6,3,1,7,5)`. -/
+def tCyc : Nat → Nat := fun v =>
+  if v = 1 then 2 else if v = 2 then 4 else if v = 3 then 6
+  else if v = 4 then 3 else if v = 5 then 1 else if v = 6 then 7
+  else if v = 7 then 5 else 0
+
+/-- Its coboundary sign: `-1` exactly on `{6,7}`. -/
+def lCyc : Nat → Int := fun v => if v = 6 ∨ v = 7 then -1 else 1
+
+private theorem baseCyc : ∀ x < 8, ∀ y < 8,
+    cdSigma (lowMap tCyc x) (lowMap tCyc y) 3
+      = cdSigma x y 3 * lowSign lCyc x * lowSign lCyc y * lowSign lCyc (x ^^^ y) := by
+  decide
+
+/-- **The coboundary for the OTHER generator of `GL(3,2)`, also ∀n.** With `tTrans` these two
+    generate the whole group, and the coboundary property is closed under composition:
+    if `sigma∘p` and `sigma∘q` each move by `lp`, `lq`, then `sigma∘(p∘q)` moves by
+    `x ↦ lq x * lp (q x)`, because `q` is linear so `q (x ⊕ y) = q x ⊕ q y`. -/
+theorem sigma_coboundary_cyc :
+    ∀ k x y, x < 2^(k+3) → y < 2^(k+3) →
+      cdSigma (lowMap tCyc x) (lowMap tCyc y) (k+3)
+        = cdSigma x y (k+3) * lowSign lCyc x * lowSign lCyc y * lowSign lCyc (x ^^^ y) :=
+  sigma_coboundary_up (lowMap tCyc) (lowSign lCyc)
+    (lowMap_zero tCyc (by decide))
+    (lowMap_ne tCyc (by decide))
+    (by unfold lowSign lCyc; decide)
+    (by
+      intro x
+      unfold lowSign lCyc
+      by_cases h : x % 8 = 6 ∨ x % 8 = 7
+      · rw [if_pos h]; exact Or.inr rfl
+      · rw [if_neg h]; exact Or.inl rfl)
+    (lowMap_lt tCyc (by decide))
+    (fun k u _ => lowMap_seam tCyc k u)
+    (fun k u => lowSign_seam lCyc k u)
+    (fun x y hx hy => baseCyc x hx y hy)
+
 end SounioZDFiberAntisym
 
 

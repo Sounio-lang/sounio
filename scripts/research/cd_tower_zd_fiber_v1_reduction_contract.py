@@ -1405,6 +1405,93 @@ def main():
             "excludes -- 0 mismatches at m=5,6. The theorem is true more widely than it is "
             "stated. (III) untouched; (d) IS NOT CLOSED ***")
 
+    # ---- W20  THE COBOUNDARY ITSELF, PROVEN forall n FOR BOTH GENERATORS -------------------
+    # W19 left one measured statement: that sigma moves by a coboundary under the low-block
+    # maps. The forall-n content of that is now a theorem. cdSigma's recursion strips the TOP
+    # bit and recurses on the residues; a map confined to bits 0,1,2 commutes with that split
+    # entirely, so the coboundary property is INHERITED level to level and the whole forall-n
+    # statement collapses to a check at LEVEL 3 (`sigma_coboundary_up`, proven today). The
+    # level-3 base is finite and falls to `decide`, so for a CONCRETE map the whole thing
+    # closes: `sigma_coboundary_trans` and `sigma_coboundary_cyc` are the two generators.
+    # This clause pins the Lean tables against the measured lambdas, and checks the one link
+    # the Lean does not cover: that these two generators really do generate GL(3,2).
+    _tTrans = (0, 1, 2, 3, 5, 4, 7, 6)          # e2 -> e2 ^ e0
+    _lTrans = tuple(-1 if v in (5, 7) else 1 for v in range(8))
+    _tCyc = (0, 2, 4, 6, 3, 1, 7, 5)            # e0->e1, e1->e2, e2->e0^e1
+    _lCyc = tuple(-1 if v in (6, 7) else 1 for v in range(8))
+
+    def _lowmap(t, x):
+        return 8 * (x // 8) + t[x % 8]
+
+    def _cob_holds(S, t, l, H):
+        """the exact identity the Lean theorems state"""
+        for x in range(H):
+            for y in range(H):
+                lhs = int(S[_lowmap(t, x), _lowmap(t, y)])
+                rhs = (int(S[x, y]) * l[x % 8] * l[y % 8] * l[(x ^ y) % 8])
+                if lhs != rhs:
+                    return False
+        return True
+
+    # (i) the two Lean tables are F2-LINEAR and lie in GL(3,2)
+    def _is_lin(t):
+        return all(t[u ^ v] == t[u] ^ t[v] for u in range(8) for v in range(8))
+    w20_lin = _is_lin(_tTrans) and _is_lin(_tCyc)
+    w20_bij = sorted(_tTrans) == list(range(8)) and sorted(_tCyc) == list(range(8))
+    # (ii) they GENERATE GL(3,2) -- the link the Lean does not cover
+    gen, frontier = {tuple(range(8))}, [tuple(range(8))]
+    while frontier:
+        cur = frontier.pop()
+        for g in (_tTrans, _tCyc):
+            nxt = tuple(g[cur[v]] for v in range(8))
+            if nxt not in gen:
+                gen.add(nxt)
+                frontier.append(nxt)
+    w20_gen = len(gen) == 168 and set(gen) == set(G32)
+    # (iii) the identity itself, at several levels, exactly as the Lean states it
+    w20_rows = []
+    for m in (3, 4, 5, 6):
+        S, H = sign_table_fast(m), 1 << m
+        a = _cob_holds(S, _tTrans, _lTrans, H)
+        b = _cob_holds(S, _tCyc, _lCyc, H)
+        w20_rows.append((m, a, b))
+    # (iv) NULL CONTROL: perturb one lambda entry -- the identity must break
+    _lBad = list(_lTrans)
+    _lBad[5] = 1
+    S5b, H5b = sign_table_fast(5), 32
+    w20_null = not _cob_holds(S5b, _tTrans, tuple(_lBad), H5b)
+    # (v) composition closure: lam_{p.q}(x) = lam_q(x) * lam_p(q x), which is what makes the
+    #     two generators suffice for all 168
+    comp_t = tuple(_tTrans[_tCyc[v]] for v in range(8))
+    comp_l = tuple(_lCyc[v] * _lTrans[_tCyc[v]] for v in range(8))
+    w20_comp = _cob_holds(sign_table_fast(5), comp_t, comp_l, 32)
+    w20 = (w20_lin and w20_bij and w20_gen and w20_null and w20_comp
+           and all(a and b for _, a, b in w20_rows))
+    ok["W20"] = w20
+    print(f"W20_COBND   THE COBOUNDARY IS PROVEN forall n FOR BOTH GENERATORS "
+          f"{'OK' if w20 else 'FAIL'} -- Lean tables linear: {w20_lin}, bijective: {w20_bij}; "
+          f"<tTrans,tCyc> generates {len(gen)}/168 of GL(3,2) and equals it: {w20_gen}; "
+          + "; ".join(f"m={a}: trans={b} cyc={c}" for a, b, c in w20_rows)
+          + f"; NULL CONTROL (one lambda entry flipped): identity breaks = {w20_null}; "
+            f"composition closure lam_pq(x) = lam_q(x)*lam_p(q x): {w20_comp}. "
+            "*** THE forall-n CONTENT IS NOW A THEOREM. `cdSigma`'s recursion strips the TOP "
+            "bit and recurses on the residues, while a map confined to bits 0,1,2 commutes with "
+            "that split entirely -- it preserves the >= half tests, the = 0 tests and the "
+            "residues -- so the coboundary is INHERITED from each level to the next and the "
+            "whole forall-n statement COLLAPSES TO LEVEL 3. That is `sigma_coboundary_up`, "
+            "proven today; its four branches are exactly `R_ll`, `R_lu`, `R_ul`, `R_uu`, which "
+            "were already in the tree. *** AND FOR CONCRETE MAPS IT CLOSES COMPLETELY: the "
+            "level-3 base is finite and falls to `decide`, so `sigma_coboundary_trans` (the "
+            "transvection e2 -> e2^e0, lam = -1 on {5,7}) and `sigma_coboundary_cyc` (the "
+            "7-cycle, lam = -1 on {6,7}) are THEOREMS AT EVERY LEVEL -- kernel-clean, plain "
+            "`decide`, no native_decide. *** WHAT THE LEAN DOES NOT COVER, AND THIS CLAUSE DOES: "
+            "that these two generators generate GL(3,2) (checked here by closure: exactly 168, "
+            "and equal to the group W19 enumerates), and that the coboundary property is closed "
+            "under composition with lam_pq(x) = lam_q(x)*lam_p(q x) (checked on the product of "
+            "the two). Those two facts plus the two theorems give all 168 -- but the composition "
+            "step needs `lowMap`'s F2-linearity in Lean, which is bit-work not done here, so "
+            "ALL 168 IS NOT YET A SINGLE LEAN STATEMENT. (III) untouched; (d) IS NOT CLOSED ***")
+
     print("=" * 78)
     if all(ok.values()):
         print("CD_TOWER_ZDV1_VERDICT C_CLOSED__V1_REDUCED_TO_D_ALONE__NOT_CLOSED")

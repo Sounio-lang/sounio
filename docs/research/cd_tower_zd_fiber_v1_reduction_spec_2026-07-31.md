@@ -605,6 +605,8 @@ equivariance test and the coboundary test.
 
 The counting step (§11.2 item 1) is also still outside Lean.
 
+### 12.5 The coboundary itself is now proven ∀n — see §13.
+
 ### 12.4 By-catch: `star_forall`'s hypothesis is not tight
 
 The bit-swap `(0↔1)` **is** `tau_1`, and it is equivariant for **odd** `Y` too — which
@@ -627,3 +629,58 @@ python3 scripts/research/cd_tower_zd_fiber_v1_reduction_contract.py
 measured against the lane's own generator. `W4` at n = 11 dominates the runtime (~4 min solo);
 the spectral clauses stop at n = 9 because they need eigendecompositions and the traces do not —
 which is precisely the point of the reduction.
+
+---
+
+## 13. The coboundary, proven ∀n (`W20`, 2026-08-03)
+
+§12 left exactly one measured statement behind `g`: that σ **does** move by a coboundary. The
+∀n content of that is now a theorem, and for concrete maps it closes completely.
+
+### 13.1 Level 3 decides every level
+
+`cdSigma`'s recursion strips the **top** bit and recurses on the residues. A map confined to bits
+0,1,2 commutes with that split *entirely* — it preserves the `≥ half` tests, the `= 0` tests and
+the residues. So the coboundary property is **inherited** from each level to the next, and the
+whole ∀n statement collapses to a check at **level 3**:
+
+```lean
+sigma_coboundary_up :
+  (p 0 = 0) → (∀ x ≠ 0, p x ≠ 0) → (lam 0 = 1) → (∀ x, lam x = ±1) →
+  (p preserves levels) → (p commutes with the seam) → (lam ignores the seam) →
+  (level-3 base) →
+  ∀ k x y, x,y < 2^(k+3) → cdSigma (p x) (p y) (k+3)
+                         = cdSigma x y (k+3) * lam x * lam y * lam (x ⊕ y)
+```
+
+Its four branches are exactly `R_ll`, `R_lu`, `R_ul`, `R_uu` — already in the tree.
+
+### 13.2 Two generators, closed completely
+
+The level-3 base is **finite**, so for a concrete map it falls to `decide`. Writing a low-block
+map as `lowMap t x = 8·(x/8) + t (x % 8)` and a low-block sign as `lowSign l x = l (x % 8)` makes
+every structural hypothesis `omega`-arithmetic instead of bit-fiddling. Both generators close:
+
+| generator | table | λ |
+|---|---|---|
+| `sigma_coboundary_trans` — transvection `e₂ ↦ e₂ ⊕ e₀` | `(0,1,2,3,5,4,7,6)` | `−1` on `{5,7}` |
+| `sigma_coboundary_cyc` — 7-cycle `e₀↦e₁, e₁↦e₂, e₂↦e₀⊕e₁` | `(0,2,4,6,3,1,7,5)` | `−1` on `{6,7}` |
+
+Both ∀n, kernel-clean, plain `decide` (no `native_decide`).
+
+### 13.3 What is still not a single Lean statement
+
+`W20` checks the two links the Lean does not:
+
+* these two generators **generate `GL(3,2)`** — closure gives exactly 168, equal to the group
+  `W19` enumerates;
+* the coboundary property is **closed under composition**, `λ_{p∘q}(x) = λ_q(x)·λ_p(q x)`,
+  verified on the product of the two.
+
+Those two facts plus the two theorems give all 168. But the composition step needs `lowMap`'s
+F2-linearity inside Lean, which is bit-work not done here — so **"all 168" is not yet one Lean
+statement**, even though every piece of it is either proven or checked.
+
+The counting step (§11.2 item 1) also remains outside Lean.
+
+**(III) is untouched. (d) is not closed, and V1 is not proven.**
