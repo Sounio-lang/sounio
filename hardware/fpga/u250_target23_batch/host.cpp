@@ -78,6 +78,12 @@ int main(int argc, char **argv) {
     auto h2d_start = std::chrono::steady_clock::now();
     input_bo.sync(XCL_BO_SYNC_BO_TO_DEVICE);
     auto h2d_end = std::chrono::steady_clock::now();
+    const std::string kernel_marker = std::string(argv[6]) + ".kernel-running";
+    {
+        std::ofstream marker(kernel_marker);
+        marker << "kernel\n";
+        if (!marker) { std::fprintf(stderr, "cannot write kernel marker\n"); return 2; }
+    }
     double kernel_seconds = 0.0;
     for (int iteration = 0; iteration < repeats; ++iteration) {
         auto start = std::chrono::steady_clock::now();
@@ -85,6 +91,9 @@ int main(int argc, char **argv) {
         run.wait();
         auto end = std::chrono::steady_clock::now();
         kernel_seconds += std::chrono::duration<double>(end - start).count();
+    }
+    if (std::remove(kernel_marker.c_str()) != 0) {
+        std::fprintf(stderr, "cannot remove kernel marker\n"); return 2;
     }
     auto d2h_start = std::chrono::steady_clock::now();
     output_bo.sync(XCL_BO_SYNC_BO_FROM_DEVICE);
@@ -98,6 +107,9 @@ int main(int argc, char **argv) {
             ++mismatches;
         }
     }
+    std::ofstream raw(std::string(argv[6]) + ".bin", std::ios::binary);
+    raw.write(reinterpret_cast<const char *>(actual), expected.size() * sizeof(int64_t));
+    if (!raw) { std::fprintf(stderr, "cannot write raw card output\n"); return 2; }
 
     auto decimal = read_tsv(argv[4]);
     if (decimal.size() != 332) { std::fprintf(stderr, "Decimal row count mismatch\n"); return 2; }
