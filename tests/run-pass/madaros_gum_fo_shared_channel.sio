@@ -1,0 +1,94 @@
+//@ run-pass
+//@ expect-stdout: MADAROS_GUM_FO_SHARED_CHANNEL_PASS
+
+// Shared FO channel identity — same peel / same σ² reg reuses one channel.
+//
+// Science rule: one random effect used twice is *one* uncertainty, not two.
+//   Var(η+η) = 4 σ²  (not 2 σ²)
+//   CL·V with shared η: f = cl0·v0·exp(2η) → Var = (2 cl0 v0)² σ² at η=0
+// Independent measures stay independent (two channels).
+//
+// Engine: fo_seed_from_variance reuses channel by variance_reg identity;
+// fo_bind_local_sens / fo_load_local_sens propagate through peels and lets.
+
+fn abs_f(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn double_eta(eta: f64) -> f64 {
+    eta + eta
+}
+
+fn cl_v_prod(cl0: f64, v0: f64, eta: f64) -> f64 {
+    (cl0 * exp(eta)) * (v0 * exp(eta))
+}
+
+fn main() with IO, Mut, Div, Epistemic {
+    let kEta: Knowledge<f64> = measure(0.0, uncertainty: 0.1)
+    let eta = kEta.value
+    let sig2 = 0.01
+
+    // 1. Same peel twice: η+η → 4σ²
+    let v_twice = variance_of(eta + eta)
+    let v_one = variance_of(eta)
+
+    // 2. Double .value on same Knowledge local
+    let v_dbl_val = variance_of(kEta.value + kEta.value)
+
+    // 3. Alias let: eta2 = eta still one channel
+    let eta2 = eta
+    let v_alias = variance_of(eta + eta2)
+
+    // 4. Knowledge alias (k1 = kEta; k2 = kEta)
+    let k1 = kEta
+    let k2 = kEta
+    let v_k_alias = variance_of(k1.value + k2.value)
+
+    // 5. Interproc: helper uses param twice
+    let v_helper = variance_of(double_eta(eta))
+
+    // 6. PK-shaped: CL and V share one η
+    let v_prod = variance_of(cl_v_prod(5.0, 50.0, eta))
+    let expect_prod = 2500.0
+
+    // 7. Independent measures: two channels → Var(e1+e2)=2σ²
+    let kA: Knowledge<f64> = measure(0.0, uncertainty: 0.1)
+    let kB: Knowledge<f64> = measure(0.0, uncertainty: 0.1)
+    let v_ind = variance_of(kA.value + kB.value)
+
+    // 8. Square of peel: a*a shares channel (FO s=2a)
+    let kX: Knowledge<f64> = measure(2.0, uncertainty: 0.1)
+    let x = kX.value
+    let v_sq = variance_of(x * x)
+
+    // 9. Second-order mean of η² at 0: E₂ = ½·2·σ² = σ²
+    let m2 = second_order_mean(eta * eta)
+
+    print("v_one="); print_f64(v_one); print("\n")
+    print("v_twice="); print_f64(v_twice); print("\n")
+    print("v_dbl_val="); print_f64(v_dbl_val); print("\n")
+    print("v_alias="); print_f64(v_alias); print("\n")
+    print("v_k_alias="); print_f64(v_k_alias); print("\n")
+    print("v_helper="); print_f64(v_helper); print("\n")
+    print("v_prod="); print_f64(v_prod); print("\n")
+    print("v_ind="); print_f64(v_ind); print("\n")
+    print("v_sq="); print_f64(v_sq); print("\n")
+    print("m2="); print_f64(m2); print("\n")
+
+    let ok = abs_f(v_one - sig2) < 1.0e-9
+        && abs_f(v_twice - 4.0 * sig2) < 1.0e-9
+        && abs_f(v_dbl_val - 4.0 * sig2) < 1.0e-9
+        && abs_f(v_alias - 4.0 * sig2) < 1.0e-9
+        && abs_f(v_k_alias - 4.0 * sig2) < 1.0e-9
+        && abs_f(v_helper - 4.0 * sig2) < 1.0e-9
+        && abs_f(v_prod - expect_prod) < 1.0e-6
+        && abs_f(v_ind - 2.0 * sig2) < 1.0e-9
+        && abs_f(v_sq - 0.16) < 1.0e-9
+        && abs_f(m2 - sig2) < 1.0e-9
+    if ok {
+        print("MADAROS_GUM_FO_SHARED_CHANNEL_PASS\n")
+    } else {
+        print("MADAROS_GUM_FO_SHARED_CHANNEL_FAIL\n")
+    }
+}
