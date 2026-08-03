@@ -10,7 +10,7 @@
 #SBATCH --mem=8G
 #SBATCH --exclusive
 #SBATCH --time=00:15:00
-#SBATCH --export=NIL
+#SBATCH --export=ALL
 
 set -euo pipefail
 
