@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 #SBATCH --job-name=cs6-v7b-t23-arb
 #SBATCH --partition=gpu-orangefs
 #SBATCH --account=lab
