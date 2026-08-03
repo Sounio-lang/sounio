@@ -1,0 +1,260 @@
+The user wants a mathematical and semantic review of an FPGA fixed-point implementation contract for solving a system of ODEs using RK4 with bisection for event detection.
+I need to return exactly:
+1. VERDICT (PASS or FAIL)
+2. Numbered findings with severity and specific corrections.
+
+Let's break down the math and the fixed-point semantics.
+
+Fixed-point arithmetic:
+- Q24.40, signed 64-bit (qint). Max value: 2^63 - 1.
+- `qmul(a,b)`: 128-bit signed product, shifted right by 40. Wait, in C++/SystemC, right shift of a signed integer `ap_int<128>` is arithmetic. So `p >> 40` for negative `p` preserves the sign and divides by 2^40, rounding towards negative infinity (floor).
+- `qdiv(a,d)`: `a / (qint)d`. C++ integer division for signed integers truncates towards zero (C++11 and later).
+
+RK4 step:
+- `h = 2^-10 = 1/1024`.
+- `k1=rhs(s); k2=rhs(s + k1/2048); k3=rhs(s + k2/2048); k4=rhs(s + k3/1024);`
+- `s_{n+1} = s_n + (k1 + 2*k2 + 2*k3 + k4) / 6144`
+- Let's check the math:
+  - `k1 = f(s_n)`
+  - `k2 = f(s_n + h/2 * k1)`. Here `h/2 = 1/2048`. So `k1/2048` corresponds to `s_n + h/2 * k1`. Correct.
+  - `k3 = f(s_n + h/2 * k2)`. `k2/2048`. Correct.
+  - `k4 = f(s_n + h * k3)`. `h = 1/1024`. So `k3/1024`. Correct.
+  - Update: `s_n + h/6 * (k1 + 2*k2 + 2*k3 + k4)`.
+  - `h/6 = 1/6144`. So `(...) / 6144`. Correct.
+  - BUT, wait! Look at the operations:
+    - `k1/2048`: Wait, `k1` is the result of `rhs()`. If `rhs` returns scaled derivatives (i.e., Q24.40 derivative), then `k1` is `dx/dt`.
+    - Then `k1/2048` should be `dx/dt * h/2 = dx/dt / 2048`.
+    - C++ truncates towards zero for division. So `k1/2048` truncates towards zero.
+    - The contract says "Division by small positive integers truncates toward zero". 2048 is positive.
+    - Wait, is `h/6 * (...)` computed as `(...) / 6144`? Yes, division by 6144 truncates towards zero.
+    - BUT what about `k1 + 2*k2 + 2*k3 + k4`? The sum could be negative or positive. The division by 6144 truncates towards zero.
+
+Bisection:
+- `mid=(lo+hi)/2`. Since `lo` and `hi` might be positive or negative, C++ truncates towards zero. Wait! If `lo` and `hi` are positive, `mid` is floor. If `lo` is negative and `hi` is positive, `(lo+hi)/2` truncates towards zero, which means it rounds towards positive infinity (ceil) if `lo+hi` is negative.
+- Wait, `lo` and `hi` are indices/counts of steps, right? "mid=(lo+hi)/2". If `lo` and `hi` are non-negative integers representing step counts, then `(lo+hi)/2` is a non-negative division, so it truncates towards zero (which is floor). This is fine.
+- "Refine each crossing with 24 fixed-point bisections by recomputing RK4 from the left state."
+- `mid` is the number of RK4 steps taken from `left` to reach `smid`.
+- `smid=rk4(left, mid)`
+- `choose half by smid.w >= 0`
+- Event state is `hi_state`, event time is `t+hi`.
+- If `smid.w < 0`, the crossing hasn't happened yet, so `lo = mid`.
+- If `smid.w >= 0`, the crossing has happened, so `hi = mid`.
+- Eventually, `lo` and `hi` differ by 1 step. The loop runs 24 times.
+- BUT wait: the contract says "refine each crossing with 24 fixed-point bisections". The step size is `2^-10`. If we refine the step index, we are finding the exact step `k` where `w` crosses zero?
+- Ah! The contract says "24 fixed-point bisections by recomputing RK4". Does this mean we refine the time interval `[0, 1]` *within* an RK4 step? Or do we refine the number of steps?
+- Wait. If we bisect on the number of steps, say between `lo` and `hi`, and we take 24 bisections, we need `hi - lo` to be at least `2^24`. But RK4 steps are size `2^-10`. So 1 step is 1024 substeps? No, the contract says "bisection: mid=(lo+hi)/2; smid=rk4(left,mid); choose half by smid.w>=0".
+- Wait, if `rk4(left, mid)` computes `mid` steps of RK4, then `mid` must be an integer.
+- If `mid` is an integer, bisecting the number of integer steps makes no sense for 24 bisections. Unless the initial step count is huge (e.g., 2^24).
+- Let's reread: "recomputing RK4 from the left state". "event state is hi_state, event time is t+hi". Wait, time is `t+hi`? If `hi` is the number of steps, then the event time would be `t + hi * h`. But it says `event time is t+hi`. This implies `lo` and `hi` are actually fractional times?
+- Wait, if `hi` is the time, then `smid=rk4(left,mid)` implies `rk4(left, mid)` takes `mid / h` steps? No, `rk4(state, steps)` takes `steps` steps.
+- If `hi` and `lo` are scaled times (in Q24.40), then `mid = (lo+hi)/2` is correct for non-negative times. But `rk4(left, mid)` taking a Q24.40 `mid` doesn't make sense unless `rk4` multiplies by `2^40` internally to get the number of steps? No, RK4 has a fixed step size `h = 2^-10`.
+- Ah! The time step is `h = 2^-10`. If we are bisecting, we can't do `mid` fractional steps.
+- Wait, what if `rk4` does fractional step size? No, RK4 step `h=2^-10` is fixed.
+- What if `rk4` takes an integer `mid` number of steps, but `hi` is the *time*, which is `mid * 2^-10`. If `hi` is the time, then `event time is t+hi`. If `hi` is an integer step count, then `event time is t+hi` would mean `hi` is already a time, which means it's not an integer step count but a scaled time.
+- Let's re-read carefully: "event state is hi_state, event time is t+hi".
+- If `hi` is the step index, then time is `t + hi * 2^-10`. So if the output says `event time is t+hi`, and `hi` is a Q-format value... wait.
+- Maybe `lo` and `hi` are the *fractional step multiplier*? No.
+- Let's consider the alternative: `lo` and `hi` are times in fixed-point (Q24.40). But `rk4(left, mid)` computes RK4 up to time `mid`. Since the step size is `2^-10`, if `mid` is a Q24.40 time, RK4 can't step exactly to `mid` unless `mid` is a multiple of `2^-10`. But `mid = (lo+hi)/2` will quickly become a fraction that is not a multiple of `2^-10`.
+- Wait! Maybe `rk4` does a single RK4 step of size `mid`? But the contract says "RK4 step h=2^-10". This means the fixed step size is `h = 2^-10`.
+- If `mid` is an integer, `lo` and `hi` are integers. What integers?
+- "Detect the first two w crossings from negative to nonnegative. Refine each crossing with 24 fixed-point bisections by recomputing RK4 from the left state."
+- If we bisect the interval `[lo, hi]` which are step counts, say between step `L` and `R`. We run 24 bisections, so `R-L` must be around 2^24.
+- But wait! If `mid=(lo+hi)/2` and `lo, hi` are integers, it takes `O(log)` time. If we do 24 bisections, we are reducing the uncertainty in the step count by 2^24. But the step size is `2^-10`.
+- Let's rethink: Does `mid=(lo+hi)/2` refer to the state `mid`, or the step count `mid`?
+- "bisection: mid=(lo+hi)/2; smid=rk4(left,mid); choose half by smid.w>=0; event state is hi_state, event time is t+hi;"
+- If `mid` is the *state*? No, `rk4(left, mid)` takes a state `left` and an integer number of steps `mid`?
+- If `mid` is the number of steps, `event time is t+hi` implies `hi` is the time. So `hi` is `number_of_steps * h`. But then `mid = (lo+hi)/2` makes no sense if `lo` and `hi` are times, because `rk4` takes an integer number of steps!
+- Could `lo` and `hi` be in Q-format, and `rk4` does an interpolation or a fractional step? The contract says "recomputing RK4 from the left state". If `rk4` integrates from `left` up to time `mid`, it can only take steps of `h`.
+- Wait. Is `mid` the *fractional remainder* of the step? No.
+- Let's reconsider the wording: "Refine each crossing with 24 fixed-point bisections by recomputing RK4 from the left state."
+- Maybe `rk4` evaluates the state at `mid` by doing a single RK4 step with step size `mid`? But contract says "RK4 step h=2^-10".
+- Wait. If the RK4 step is `2^-10`, maybe the loop finds the exact step `k` where the crossing happens. Then to refine the crossing, we bisect *within* the interval `[t_k, t_{k+1}]`. If we bisect within this interval, how do we compute `rk4(left, mid)`?
+- Perhaps `rk4` means evaluating the RHS? No, "RK4 from the left state" implies integration.
+- Let's look at `mid=(lo+hi)/2; smid=rk4(left,mid);`
+- If `lo` and `hi` are step counts, `mid` is a step count. `hi` is a step count. But then `event time is t+hi` means time is `t + hi * h`. If the code says `event time is t+hi`, then `hi` is a time. This is a contradiction if `mid` is used as step count.
+- Let's assume `lo` and `hi` are times in Q24.40. Then `mid` is a time in Q24.40. But `rk4` cannot take arbitrary Q24.40 times as a step count! Unless `rk4` takes `mid` as a *step size multiplier*, e.g., step size is `mid * 2^-10`? No, contract says "RK4 step h=2^-10".
+- What if `rk4(state, steps)` takes `steps` as a Q24.40 number, and converts it to an integer by rounding or truncating? But we do 24 bisections. The difference `hi - lo` is halved 24 times. If the initial difference is `h = 2^-10` (one RK4 step), then after 10 bisections, `hi - lo < 2^-20`. After 24 bisections, `hi - lo < 2^-34`.
+- If `mid` is a Q24.40 number, and we do `rk4(left, mid)`, and `rk4` takes an integer number of steps... wait! "Refine each crossing with 24 fixed-point bisections by recomputing RK4 from the left state."
+- Ah! "recomputing RK4 from the left state" could mean recomputing the *whole* trajectory from the left state (which is at some known time `T_left`) up to time `mid`?
+- If `lo` and `hi` are step counts, `rk4(left, mid)` makes sense. But why 24 bisections?
+- If the total simulation time is `1.0`, and step size is `2^-10`, there are `1024` steps. Bisection over `1024` steps takes at most 10 bisections. What are the remaining 14 bisections for?
+- Ah! "Refine each crossing with 24 fixed-point bisections". If `lo` and `hi` are the step counts, and we refine *within* a step? You can't bisect step counts 24 times if the range is only 1024.
+- What if `lo` and `hi` are Q24.40 states? No, `smid=rk4(left,mid)`.
+- Let's reconsider `qmul` rounding.
+- `qmul(a,b) = (int128)(a*b) >> 40`.
+- For `ap_int<128>`, `>>` is an arithmetic right shift. This means it divides by `2^40` and floors (rounds towards -infinity).
+- But wait! The Python model: "FPGA raw outputs must match an independently written Python integer model ... bit for bit."
+- If Python integer model uses `>> 40`, Python's `>>` on negative integers also floors.
+- Let's check the contract: "Multiplication is signed int128 product followed by arithmetic right shift 40." This means negative products are rounded towards -infinity.
+- But wait. What about `qdiv`? "Division by small positive integers truncates toward zero."
+- In C++, `a / d` truncates towards zero.
+- Let's check `k1/2048`. `k1` is a state derivative. If `k1` is negative, `k1/2048` truncates towards zero (i.e. ceil).
+- So `qmul` floors (rounds to -inf), but `qdiv` truncates towards zero.
+- This is a mixed rounding mode.
+- Let's check `s + k1/2048`. Since `k1` is Q24.40, `k1` can be negative. `k1/2048` in C++ will truncate towards zero.
+- Is this intended? "Division by small positive integers truncates toward zero." The contract explicitly states this.
+- Wait. What about `mid=(lo+hi)/2`? If `lo+hi` is negative, C++ truncates towards zero. But `lo` and `hi` are times or step counts. Step counts are non-negative. So `(lo+hi)/2` is non-negative division, which truncates towards zero, which is the same as floor.
+- Wait! Look at the RK4 step size `h=2^-10`.
+- In `k4=rhs(s+k3/1024); return s+(k1+2*k2+2*k3+k4)/6144;`
+- `k3/1024` is truncated towards zero.
+- `(k1+2*k2+2*k3+k4)/6144` is truncated towards zero.
+- But wait! `k1`, `k2`, `k3`, `k4` are Q24.40 values.
+- Let's check `2*k2`. `2*k2` is just `k2 << 1`. This doesn't lose any precision, it's exact in Q24.40 as long as it doesn't overflow.
+- What about `qmul`? The RHS of the ODE uses `qmul`.
+- `rhs(s)` computes `dx = 2*y^2 - x*y; dy = x*y - y*(w+zs)/2; dw = x*y - w - zs; dell = x - y - (w+zs)/2 - 1;`
+- Look at the division by 2: `y*(w+zs)/2`.
+- Is this `qmul(y, w+zs) / 2` or `qmul(y, (w+zs)/2)`?
+- The contract writes: `y*(w+zs)/2`. This implies `(y * (w+zs)) / 2`.
+- In C++, if `y*(w+zs)` is computed using `qmul`, it does `qmul(y, w+zs) / 2`.
+- Wait, the contract says: "Division by small positive integers truncates toward zero".
+- What if `y*(w+zs)` is odd? `qmul` returns an integer (Q24.40). `qmul(y, w+zs)` is the exact product shifted right by 40 (flooring).
+- Then `/2` divides this integer by 2, truncating towards zero.
+- Is there any ambiguity here? Yes, if it's `y * qmul(w+zs, 1/2)` it would be different. But standard evaluation order is left-to-right. So it's `qmul(y, w+zs) / 2`.
+- Let's check the time `mid=(lo+hi)/2`. If `lo` and `hi` are Q24.40 times, `(lo+hi)/2` is truncated towards zero. Since time is usually positive, this is floor.
+- But wait! We have `smid=rk4(left,mid)`. If `mid` is a time, how does `rk4` take it?
+- If `mid` is a step count, it's an integer. 24 bisections of an integer.
+- Let's reconsider the bisection of step counts.
+- Suppose we want to find the exact step where `w` crosses zero.
+- The total steps might be very large. For instance, if `h=2^-10`, and we simulate for `t=2.5`, we have `2560` steps. 24 bisections would need a range of `2^24 = 16,777,216` steps.
+- Is it possible that `lo` and `hi` are *fractions* of a step?
+- If `lo` and `hi` are fractions of a step, `mid = (lo+hi)/2` is a fraction. But then `smid=rk4(left,mid)` doesn't make sense because `rk4` takes an integer number of steps!
+- Wait. Could `rk4` do a *fractional* RK4 step? No, the contract says "RK4 step h=2^-10".
+- Ah! "RK4 step h=2^-10, every multiply/divide rounded by the operations above."
+- What if `lo` and `hi` are Q24.40 time values, and `rk4` integrates using a modified step size? No, the step size is fixed.
+- Wait, look at this: "recomputing RK4 from the left state".
+- Maybe it recomputes RK4 from the left state up to `mid` steps? Yes, `mid` is the number of steps.
+- If `mid` is the number of steps, it's an integer.
+- How can there be 24 bisections?
+- "Refine each crossing with 24 fixed-point bisections"
+- If `mid` is an integer, bisection can only go down to `hi - lo = 1`. That's at most `log_2(N)` bisections.
+- So `mid` CANNOT be an integer step count if we do 24 bisections!
+- Therefore, `mid` MUST be a fractional quantity.
+- What fractional quantity? Time! Or a fractional state?
+- Wait, the event time is `t+hi`. This strongly implies `hi` is a time offset, or `hi` is the time.
+- If `hi` is a time in Q24.40, then `mid` is a time in Q24.40.
+- But if `mid` is a time, how can we do `rk4(left, mid)`?
+- Ah! `rk4` could compute the state at time `mid` by taking `floor(mid / h)` steps of size `h`? No, if we do that, `smid` would be exactly the state at the end of a step.
+- Wait! What if the event detection is done *during* the RK4 step?
+- "Detect the first two w crossings from negative to nonnegative. Refine each crossing with 24 fixed-point bisections by recomputing RK4 from the left state."
+- If we detect a crossing between step `k` and `k+1`, the left state is `s_k`. The time interval is `[k*h, (k+1)*h]`.
+- To refine the crossing, we bisect the time interval.
+- If we bisect the time interval, `mid` is a time.
+- But how do we compute `rk4(left, mid)`?
+- Could `rk4` be a function that takes a *fractional* step size?
+- Wait, `RK4 step h=2^-10`. This means the *global* step size is `2^-10`.
+- But wait. If you want to find the exact crossing time within `[k*h, (k+1)*h]`, you can use a bisection method that doesn't change the step size, but instead searches the *fractional* part? No, if the step size is fixed, the state is only defined at multiples of `h`.
+- Unless... the event detection is NOT on the ODE trajectory, but on the RK4 *update step*?
+- Let's read carefully: "event state is hi_state, event time is t+hi;"
+- Could `lo` and `hi` be the *fractional remainder* of the step? No.
+- Could `lo` and `hi` be Q24.40 numbers representing the time, and `rk4` is evaluated with a modified `h`? The contract says "RK4 step h=2^-10".
+- Wait. Is it possible that `mid` is NOT the time, but the index of a *sub-step*?
+- What if the FPGA actually computes RK4 at a much smaller step internally for event refinement?
+- No, "recomputing RK4 from the left state".
+- Let's look at the contract wording: "Refine each crossing with 24 fixed-point bisections by recomputing RK4 from the left state."
+- Maybe `lo` and `hi` are the *states*? No, `smid = rk4(left, mid)`. If `mid` is a state, `rk4(left, mid)` doesn't make sense.
+- Could `mid` be the step size? If `mid` is the step size `h`, and we are bisecting `h`?
+- "bisection: mid=(lo+hi)/2; smid=rk4(left,mid); choose half by smid.w>=0; event state is hi_state, event time is t+hi;"
+- If `mid` is the step size `h`, then `rk4(left, mid)` takes ONE step of size `mid`.
+- Let's check this hypothesis.
+- Suppose a crossing is detected between step `k` and `k+1` using standard step size `h_0 = 2^-10`.
+- To find the exact time, we set `lo = 0`, `hi = h_0`? No, `hi` is used as event time `t+hi`. If `hi` is the time offset from `t`, then `hi` is exactly the step size we took!
+- If we bisect the step size: `mid = (lo + hi)/2`. Then `smid = rk4(left, mid)` means we take ONE RK4 step of size `mid` from `left`!
+- Wait! If we take one RK4 step of size `mid`, then the step size is changing!
+- But the contract says "RK4 step h=2^-10". Does it mean the standard step is `2^-10`, but for refinement we use different step sizes?
+- If `mid` is the step size, then `(lo+hi)/2` computes the midpoint of the step sizes.
+- Then `smid` is the state after taking ONE step of size `mid`.
+- Then we check `smid.w >= 0`.
+- If so, the crossing happened before `mid`, so `hi = mid`.
+- Else `lo = mid`.
+- After 24 bisections, `hi - lo` is very small.
+- The event time is `t + hi`. This perfectly matches `hi` being the step size (which is the time offset from the current step `t`)!
+- YES! `lo` and `hi` are the time offsets (or step sizes) for the final RK4 step.
+- Let's verify this. "event state is hi_state, event time is t+hi;"
+- If `t` is the time of the `left` state, then `hi` is the step size taken from `left`. So the event time is `t + hi`.
+- But wait! If `lo` and `hi` are step sizes in Q24.40, does `rk4(left, mid)` mean "take one step of size `mid`"?
+- But the contract says `k1=rhs(s); k2=rhs(s+k1/2048); ...`
+- Wait! Look at the `rk4` function in the contract:
+  `State rk4(...) { k1=rhs(s); k2=rhs(s+k1/2048); k3=rhs(s+k2/2048); k4=rhs(s+k3/1024); return s+(k1+2*k2+2*k3+k4)/6144; }`
+- The constants `2048` and `1024` are HARDCODED in the `rk4` function!
+- This means the step size `h` is HARDCODED to `2^-10` inside `rk4`!
+- If `h` is hardcoded to `2^-10`, then `rk4` ALWAYS takes a step of size `2^-10`.
+- So `rk4(left, mid)` CANNOT mean "take one step of size `mid`". It must mean "take `mid` steps of size `2^-10`".
+- But if `rk4` takes `mid` steps of size `2^-10`, then `mid` must be an integer!
+- If `mid` is an integer, how can we do 24 bisections?
+- If the total number of steps is `2^24` or more?
+- Let's check the ODE and the total time.
+- `dx=2*y^2-x*y; dy=x*y-y*(w+zs)/2; dw=x*y-w-zs; dell=x-y-(w+zs)/2-1;`
+- Is this a chaotic system or something that runs for a very long time?
+- The problem doesn't specify the total time. Maybe it simulates for 10,000 seconds, which is `10,000 * 1024 = 10,240,000` steps, which is more than `2^23 = 8,388,608` but less than `2^24`.
+- Wait. "Detect the first two w crossings from negative to nonnegative."
+- If we do bisection on the step count `mid`, `mid=(lo+hi)/2` computes the midpoint step.
+- BUT if `mid` is an integer, `(lo+hi)/2` in C++ truncates towards zero.
+- If `lo` and `hi` are positive integers, `(lo+hi)/2` is exact division by 2 if `lo+hi` is even, or floors if odd.
+- Is there any problem with this?
+- If `lo` and `hi` are integers, bisecting the step count. What happens to the event time? "event time is t+hi". If `hi` is an integer step count, then event time should be `t + hi * h`.
+- But the contract explicitly says "event time is t+hi". This means `hi` is a time, not a step count!
+- Wait, could `hi` be a Q24.40 time?
+- If `hi` is a Q24.40 time, and `rk4` takes an integer number of steps, how does `rk4(left, mid)` work?
+- Ah! What if `rk4` takes a Q24.40 time `mid`, and internally does `floor(mid / h)` steps? No, then `smid` would only be evaluated at multiples of `h`.
+- Wait... "Refine each crossing with 24 fixed-point bisections by recomputing RK4 from the left state."
+- Could `mid` be a Q24.40 number, but `rk4` does a fixed number of steps to reach `mid`? No, if `mid` is bisected 24 times, it will eventually fall between multiples of `h`.
+- Unless... `rk4` is NOT `rhs(s)` with fixed `2048` and `1024`.
+- Let me re-read the `rk4` code excerpt.
+  `State rk4(...) { k1=rhs(s); k2=rhs(s+k1/2048); k3=rhs(s+k2/2048); k4=rhs(s+k3/1024); return s+(k1+2*k2+2*k3+k4)/6144; }`
+- Is it possible that `lo` and `hi` are step counts, and `event time is t+hi` is just a typo in my understanding, and `hi` actually means `hi * h`?
+- "event time is t+hi" could mean `t` is the current step count? No, `t` usually means time.
+- Let's reconsider the rounding of `mid = (lo+hi)/2`.
+- If `lo` and `hi` are Q24.40 times, they can be negative. C++ division `a/b` truncates towards zero. For `lo+hi < 0`, `(lo+hi)/2` would round UP (towards positive infinity). This breaks the bisection invariant if `lo` and `hi` are negative!
+- But `lo` and `hi` are usually positive.
+- Let's look at `qmul` rounding again.
+- `qmul(a,b)`: 128-bit product, shifted right by 40. This rounds towards -infinity (floor).
+- But wait! C++ standard says right shift of signed negative integer is implementation-defined before C++20, and arithmetic (floor) in C++20.
+- In Vivado HLS / Vitis HLS (typical for FPGA `ap_int`), `ap_int<128>` right shift is ALWAYS arithmetic, meaning it shifts in the sign bit. This is floor.
+- Is this a synthesis-vs-Python semantic risk?
+- Yes! If Python's `>>` operator is used, Python also floors.
+- BUT look at `qdiv(a,d)`: `a / (qint)d`.
+- In C++ integer division, `a / d` truncates towards zero.
+- If the Python model uses `a // d` for division by small integers, `a // d` in Python floors (towards -infinity)!
+- So if `a` is negative, `a / d` in C++ goes towards 0, but `a // d` in Python goes towards -inf!
+- This is a MASSIVE synthesis-vs-Python semantic risk!
+- Let's check `qdiv`. The contract says: "Division by small positive integers truncates toward zero." This matches C++.
+- If the Python model is written with `//`, it will fail bit-for-bit for negative numerators!
+- Python code must use `int(a / d)` or `math.trunc(a / d)` or `int(operator.truediv)` or bit-twiddling to match C++ truncation towards zero.
+- So "WRONG" or "OVERREACH": The contract explicitly states C++ semantics ("truncates toward zero"). If the Python model uses `//` (which is standard for integer math in Python), it will NOT match because Python `//` floors. This is a semantic risk.
+- Let's check `mid = (lo+hi)/2`. If `mid` is a C++ integer division, it truncates towards zero. If it's Q24.40 and negative, it truncates towards zero. If Python uses `//`, it floors.
+
+Let's check another thing.
+- `k1=rhs(s); k2=rhs(s+k1/2048); k3=rhs(s+k2/2048); k4=rhs(s+k3/1024);`
+- Look at `s+k1/2048`.
+- `k1` is in Q24.40. `k1 / 2048` in C++ truncates towards zero.
+- Is there a precision issue here?
+- Yes, `k1/2048` loses up to 1 unit of precision (1 ulp). This is standard fixed-point truncation.
+- But wait! Look at `2*k2` in `k1+2*k2+2*k3+k4`.
+- `k2` is a Q24.40 state derivative. `2*k2` is `k2 << 1`.
+- What if `k2` is very large, and `2*k2` overflows?
+- Q24.40 in signed 64-bit: Max value is `2^63 - 1`.
+- `k1 + 2*k2 + 2*k3 + k4`.
+- If `k2` is near `2^62`, `2*k2` will overflow!
+- Let's check the ODE: `dx=2*y^2-x*y; ...`
+- If `x` and `y` are around 1.0 (which is `2^40` in Q24.40), `2*y^2` is `2 * 2^80 / 2^40 = 2^41` in Q24.40.
+- So the derivatives are around `2^41` or `2^42`.
+- Adding them up: `k1 + 2*k2 + 2*k3 + k4` is about `6 * 2^42 = 2^45`.
+- This easily fits in 64-bit signed integer (`2^63`).
+- So overflow is unlikely unless the system blows up.
+- Wait, is `2*k2` evaluated as `(qint)2 * k2`? Yes. No overflow if values are reasonable.
+
+Let's look at the bisection again.
+- "event state is hi_state, event time is t+hi"
+- If `hi` is the step count, the time is `t + hi * h`. If the code says `event time is t+hi`, then `hi` must be a time.
+- If `hi` is a time in Q24.40, how does `rk4(left, mid)` work?
+- Ah! Could `mid` be the *fractional part of the step multiplier*?
+- If the step size `h = 2^-10`, and `rk4` takes a fractional number of steps?
+- Wait. If `rk4` takes a Q24.40 number `mid` as a step size multiplier?
+- No, `rk4` uses `2048` and `1024` hardcoded.
+- Let's re-read the `rk4` definition.
+  `State rk4(...) { k1=rhs(s); k2=rhs(s+k1/2048); k3=rhs(s+k2/2048); k4=rhs(s+k3/1024); return s+(k1+2*k2+2*k3+k4)/6144; }`
+- If `rk4` uses `mid`, where is `mid` used?
+- The contract says: `smid=rk4(left,mid);`
+- This means `rk4` takes `left` as the state, and `mid` as the number of steps!
+- Because if `mid` was the step size, `rk4` would need to use `mid` to compute the step size. But `rk4` uses hardcoded `2048` and `1024`.
+- Therefore, `mid`
