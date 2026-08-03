@@ -1099,3 +1099,54 @@ Until it lands, **the LOW recursion is not yet a Lean theorem** and the closed f
 still rests on the contract clause. The caveat stays in place.
 
 **(III) is untouched. `tr(A³)` is not closed. (d) is not closed, and V1 is not proven.**
+
+---
+
+## 23. The bridge's core: `Ncnt = OffCnt + (2^M − 2)` (`W30`, 2026-08-03)
+
+§22.4 named the remaining obstacle as "the six-line slice arithmetic over **six overlapping**
+lines". The overlaps turn out never to arise.
+
+### 23.1 The factoring
+
+All four quadrants differ from `Ncnt` only **on the six lines**, so they all factor through one
+quantity — `OffCnt`, the count **off** the lines. `Ncnt_eq_OffCnt` is the first of those
+factorings:
+
+> `Ncnt W M + 2 = OffCnt W M + 2^M`
+
+### 23.2 No inclusion–exclusion is needed
+
+`nInd_split` is a **pointwise** identity —
+
+> `nInd = [the b = W column] + [off-lines]`
+
+— and summing a pointwise identity keeps the pieces disjoint for free. The overlapping-lines
+problem was an artifact of thinking in sets rather than in summands.
+
+The three lines `Ncnt` sees and `OffCnt` does not:
+
+| line | value | contributes |
+|---|---|---|
+| `a = W` row | `+1` (`Qgen'_label_left`) | **nothing** |
+| coset diagonal `b = a ⊕ W` | `+1` (`Qgen'_coset_partner`) | **nothing** |
+| `b = W` column | `−1` (`Qgen'_label_right`) | exactly `2^M − 2` |
+
+### 23.3 A caught vacuity — the third in this lane
+
+`W30`'s first null control dropped the `b ≠ a⊕W` guard expecting the bridge to break. It **did
+not**: on the coset diagonal `Q′ = +1`, so those pairs contribute `0` with or without the guard.
+Same for the `a ≠ W` row. Both guards are load-bearing for the **proof's case analysis** and not
+for the **value**; only `b ≠ W` carries the count.
+
+The clause now asserts both: dropping `b ≠ W` breaks it, dropping `b ≠ a⊕W` does not.
+
+> A guard needed by a proof is not automatically load-bearing for the quantity the proof computes.
+> That is now three separate rungs where a null control caught exactly this.
+
+### 23.4 What is not done
+
+The same factoring for the **unprimed** quadrant counts (`ul`, `lu`) and for `uu`, then the
+arithmetic assembly. Until those land, **the LOW recursion is not yet a Lean theorem**.
+
+**(III) is untouched. `tr(A³)` is not closed. (d) is not closed, and V1 is not proven.**

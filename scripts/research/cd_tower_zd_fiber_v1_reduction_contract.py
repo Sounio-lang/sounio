@@ -2221,6 +2221,77 @@ def main():
             "closed form's derivation still rests on this clause. (III) untouched; tr(A^3) NOT "
             "closed; (d) IS NOT CLOSED ***")
 
+    # ---- W30  THE BRIDGE'S CORE: Ncnt = OffCnt + (2^M - 2) --------------------------------
+    # All four quadrants differ from Ncnt only ON THE SIX LINES, so they all factor through ONE
+    # quantity: the count OFF the lines. `Ncnt_eq_OffCnt` is the first of those factorings, and
+    # it needs NO inclusion-exclusion -- `nInd_split` is a POINTWISE identity, and summing a
+    # pointwise identity keeps the pieces disjoint for free.
+    def _offInd(S, W, M, a, b):
+        return 1 if (a != 0 and a != W and b != 0 and b != W and a != b
+                     and b != (a ^ W) and _Qp(S, W, a, b) == -1) else 0
+
+    def _OffCnt(S, W, M):
+        H = 1 << M
+        return sum(_offInd(S, W, M, a, b) for a in range(H) for b in range(H))
+
+    w30_rows = []
+    for M in (3, 4, 5, 6):
+        S, H = sign_table_fast(M), 1 << M
+        bad_pt = bad_br = 0
+        for W in range(1, H):
+            for a in range(H):
+                for b in range(H):
+                    lhs = _nInd(S, W, a, b)
+                    rhs = ((1 if (b == W and a != 0 and a != W) else 0)
+                           + _offInd(S, W, M, a, b))
+                    if lhs != rhs:
+                        bad_pt += 1
+            if _Ncnt(S, W, M) + 2 != _OffCnt(S, W, M) + H:
+                bad_br += 1
+        w30_rows.append((M, H - 1, bad_pt, bad_br))
+    # NULL CONTROL. My FIRST choice was VACUOUS and this clause caught it: dropping the
+    #   `b != a^W` guard does NOT break the bridge -- on the coset diagonal Q' = +1, so those
+    #   pairs contribute 0 with or without it. Same for `a != W`. Both are load-bearing for the
+    #   PROOF's case analysis, not for the VALUE. Only `b != W` carries the count.
+    null30 = null30_vac = 0
+    M = 4
+    S, H = sign_table_fast(M), 1 << M
+    for W in range(1, H):
+        drop_bW = sum(1 for a in range(H) for b in range(H)
+                      if a != 0 and a != W and b != 0 and a != b
+                      and b != (a ^ W) and _Qp(S, W, a, b) == -1)
+        if _Ncnt(S, W, M) + 2 != drop_bW + H:
+            null30 += 1
+        drop_cos = sum(1 for a in range(H) for b in range(H)
+                       if a != 0 and a != W and b != 0 and b != W and a != b
+                       and _Qp(S, W, a, b) == -1)
+        if _Ncnt(S, W, M) + 2 == drop_cos + H:
+            null30_vac += 1
+    w30 = (all(c == d == 0 for _, _, c, d in w30_rows)
+           and null30 > 0 and null30_vac == H - 1)
+    ok["W30"] = w30
+    print(f"W30_BRIDGE  THE BRIDGE'S CORE -- Ncnt = OffCnt + (2^M - 2) "
+          f"{'OK' if w30 else 'FAIL'} -- "
+          + "; ".join(f"M={a}: {b} labels, pointwise nInd_split {c} failures, bridge {d}"
+                      for a, b, c, d in w30_rows)
+          + f"; NULL CONTROL (drop the b != W guard from OffCnt): {null30} labels break, as required"
+            f"; and the HONEST VACUITY CHECK -- dropping b != a^W instead leaves the bridge "
+            f"INTACT at {null30_vac} of {H-1} labels, so that guard does NOT carry the value. "
+            "*** THE FACTORING: all four quadrants differ from `Ncnt` only ON THE SIX "
+            "LINES, so they all go through ONE quantity, `OffCnt` -- the count OFF the lines. "
+            "`Ncnt_eq_OffCnt` is the first of those factorings. *** AND IT NEEDS NO "
+            "INCLUSION-EXCLUSION, which is what made the six OVERLAPPING lines look painful: "
+            "`nInd_split` is a POINTWISE identity, nInd = [b = W column] + [off-lines], and "
+            "summing a pointwise identity keeps the pieces disjoint for free. The overlaps never "
+            "arise. *** THE THREE LINES THAT `Ncnt` SEES AND `OffCnt` DOES NOT: the a = W row is "
+            "+1 throughout (`Qgen'_label_left`) and contributes NOTHING; the coset diagonal "
+            "b = a^W is +1 throughout (`Qgen'_coset_partner`) and contributes NOTHING; only the "
+            "b = W column is -1 throughout (`Qgen'_label_right`), and its size is exactly "
+            "2^M - 2. *** AND A CAUGHT VACUITY, the third time a null control has done this in this lane: my first control dropped the `b != a^W` guard expecting a break and got none, because on the coset diagonal Q' = +1 so those pairs contribute 0 either way. Same for the `a != W` row. Both guards are load-bearing for the PROOF's case analysis and NOT for the value; only `b != W` carries the count. *** WHAT IS NOT DONE: the same factoring for the three UNPRIMED quadrant "
+            "counts (ul, lu) and for uu, then the arithmetic assembly. Until those land the LOW "
+            "recursion is NOT yet a Lean theorem. (III) untouched; tr(A^3) NOT closed; (d) IS "
+            "NOT CLOSED ***")
+
     print("=" * 78)
     if all(ok.values()):
         print("CD_TOWER_ZDV1_VERDICT C_CLOSED__V1_REDUCED_TO_D_ALONE__NOT_CLOSED")

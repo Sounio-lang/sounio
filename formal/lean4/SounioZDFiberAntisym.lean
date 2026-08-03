@@ -6057,6 +6057,169 @@ theorem Ncnt_uu_low (W m u v : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
         · rw [if_pos ⟨huv, hcos, Or.inr (Or.inr (Or.inl h))⟩]
         · rw [if_pos ⟨huv, hcos, Or.inr (Or.inr (Or.inr (Or.inl h)))⟩]
 
+/-! ### Stage 3: the bridge, via a shared core
+
+All four quadrants differ from `Ncnt` only on the six lines, so they all factor through ONE
+quantity: the count OFF the lines. Proving `Ncnt` and each quadrant equal that core plus an
+explicit constant avoids inclusion-exclusion entirely -- the sequential
+`sumLt_split_if` chains keep the pieces disjoint by construction. -/
+
+/-- Counting a predicate and its complement exhausts the range. -/
+theorem sumLt_compl (n : Nat) (p : Nat → Prop) [DecidablePred p] :
+    sumLt n (fun i => if p i then 1 else 0) + sumLt n (fun i => if p i then 0 else 1) = n := by
+  induction n with
+  | zero => rfl
+  | succ n ih =>
+      rw [sumLt, sumLt]
+      by_cases h : p n
+      · rw [if_pos h, if_pos h]; omega
+      · rw [if_neg h, if_neg h]; omega
+
+/-- Two distinct indices below `n` contribute exactly `2`. -/
+theorem sumLt_two (n W : Nat) (hW : W < n) (hW0 : W ≠ 0) (hn : 0 < n) :
+    sumLt n (fun i => if i = 0 ∨ i = W then 1 else 0) = 2 := by
+  have hsplit := sumLt_split_if n (fun i => i = 0) (fun _ => 1)
+      (fun i => if i = 0 ∨ i = W then 1 else 0)
+  have e1 : sumLt n (fun i => if i = 0 ∨ i = W then 1 else 0)
+      = sumLt n (fun i => if i = 0 then 1 else if i = 0 ∨ i = W then 1 else 0) := by
+    apply sumLt_congr
+    intro i _
+    by_cases h : i = 0
+    · rw [if_pos h, if_pos (Or.inl h)]
+    · rw [if_neg h]
+  rw [e1, hsplit]
+  have e2 : sumLt n (fun i => if i = 0 then 1 else 0) = 1 := by
+    rw [sumLt_congr n _ (fun i => if i = 0 then 1 else 0) (fun i _ => rfl)]
+    exact sumLt_single n 0 1 hn
+  have e3 : sumLt n (fun i => if i = 0 then 0 else if i = 0 ∨ i = W then 1 else 0)
+      = sumLt n (fun i => if i = W then 1 else 0) := by
+    apply sumLt_congr
+    intro i _
+    by_cases h : i = 0
+    · rw [if_pos h, if_neg (by omega : ¬ i = W)]
+    · rw [if_neg h]
+      by_cases h2 : i = W
+      · rw [if_pos (Or.inr h2), if_pos h2]
+      · rw [if_neg (fun hc => hc.elim h h2), if_neg h2]
+  rw [e2, e3, sumLt_single n W 1 hW]
+
+/-- The core: the count OFF all six lines. -/
+def OffCnt (W m : Nat) : Nat :=
+  sumLt (2^m) (fun a => sumLt (2^m) (fun b =>
+    if a ≠ 0 ∧ a ≠ W ∧ b ≠ 0 ∧ b ≠ W ∧ a ≠ b ∧ b ≠ a ^^^ W ∧ Qgen' W a b m = -1
+    then 1 else 0))
+
+/-- Pointwise: `Ncnt`'s summand is `OffCnt`'s plus the `b = W` column. The `a = W` row and the
+    coset diagonal `b = a ⊕ W` contribute NOTHING -- `Qgen'_label_left` and
+    `Qgen'_coset_partner` are `+1` there -- while `Qgen'_label_right` makes the `b = W` column
+    `-1` throughout. -/
+theorem nInd_split (W M a b : Nat) (hW : W < 2^M) (hW0 : W ≠ 0)
+    (ha : a < 2^M) (hb : b < 2^M) :
+    nInd W M a b
+      = (if b = W ∧ a ≠ 0 ∧ a ≠ W then 1 else 0)
+        + (if a ≠ 0 ∧ a ≠ W ∧ b ≠ 0 ∧ b ≠ W ∧ a ≠ b ∧ b ≠ a ^^^ W ∧ Qgen' W a b M = -1
+           then 1 else 0) := by
+  unfold nInd
+  by_cases hbW : b = W
+  · have hb0 : b ≠ 0 := by rw [hbW]; exact hW0
+    have hO : (if a ≠ 0 ∧ a ≠ W ∧ b ≠ 0 ∧ b ≠ W ∧ a ≠ b ∧ b ≠ a ^^^ W
+                  ∧ Qgen' W a b M = -1 then (1:Nat) else 0) = 0 :=
+      if_neg (fun hc => hc.2.2.2.1 hbW)
+    by_cases ha0 : a = 0
+    · have hL : (if a ≠ 0 ∧ b ≠ 0 ∧ a ≠ b ∧ Qgen' W a b M = -1 then (1:Nat) else 0) = 0 :=
+        if_neg (fun hc => hc.1 ha0)
+      have hD : (if b = W ∧ a ≠ 0 ∧ a ≠ W then (1:Nat) else 0) = 0 :=
+        if_neg (fun hc => hc.2.1 ha0)
+      rw [hL, hD, hO]
+    · by_cases haW : a = W
+      · have hab : a = b := by rw [haW, hbW]
+        have hL : (if a ≠ 0 ∧ b ≠ 0 ∧ a ≠ b ∧ Qgen' W a b M = -1 then (1:Nat) else 0) = 0 :=
+          if_neg (fun hc => hc.2.2.1 hab)
+        have hD : (if b = W ∧ a ≠ 0 ∧ a ≠ W then (1:Nat) else 0) = 0 :=
+          if_neg (fun hc => hc.2.2 haW)
+        rw [hL, hD, hO]
+      · have hab : a ≠ b := by rw [hbW]; exact haW
+        have hq : Qgen' W a b M = -1 := by
+          rw [hbW]; exact Qgen'_label_right M W a hW ha hW0
+        have hL : (if a ≠ 0 ∧ b ≠ 0 ∧ a ≠ b ∧ Qgen' W a b M = -1 then (1:Nat) else 0) = 1 :=
+          if_pos ⟨ha0, hb0, hab, hq⟩
+        have hD : (if b = W ∧ a ≠ 0 ∧ a ≠ W then (1:Nat) else 0) = 1 :=
+          if_pos ⟨hbW, ha0, haW⟩
+        rw [hL, hD, hO]
+  · have hD : (if b = W ∧ a ≠ 0 ∧ a ≠ W then (1:Nat) else 0) = 0 :=
+      if_neg (fun hc => hbW hc.1)
+    rw [hD, Nat.zero_add]
+    by_cases ha0 : a = 0
+    · rw [if_neg (fun hc => hc.1 ha0), if_neg (fun hc => hc.1 ha0)]
+    · by_cases hb0 : b = 0
+      · rw [if_neg (fun hc => hc.2.1 hb0), if_neg (fun hc => hc.2.2.1 hb0)]
+      · by_cases haW : a = W
+        · have hq : Qgen' W a b M = 1 := by
+            rw [haW]; exact Qgen'_label_left M W b hW hb hW0 hb0 hbW
+          rw [if_neg (fun hc => by rw [hq] at hc; exact absurd hc.2.2.2 (by decide)),
+              if_neg (fun hc => hc.2.1 haW)]
+        · by_cases hcos : b = a ^^^ W
+          · have haX : a ^^^ W ≠ 0 := fun h => haW (xor_zero_eq a W h)
+            have hq : Qgen' W a b M = 1 := by
+              rw [hcos]; exact Qgen'_coset_partner M W a hW ha ha0 haX
+            rw [if_neg (fun hc => by rw [hq] at hc; exact absurd hc.2.2.2 (by decide)),
+                if_neg (fun hc => hc.2.2.2.2.2.1 hcos)]
+          · by_cases hab : a = b
+            · rw [if_neg (fun hc => hc.2.2.1 hab), if_neg (fun hc => hc.2.2.2.2.1 hab)]
+            · by_cases hq : Qgen' W a b M = -1
+              · rw [if_pos ⟨ha0, hb0, hab, hq⟩, if_pos ⟨ha0, haW, hb0, hbW, hab, hcos, hq⟩]
+              · rw [if_neg (fun hc => hq hc.2.2.2),
+                    if_neg (fun hc => hq hc.2.2.2.2.2.2)]
+
+/-- The `b = W` column contributes exactly one, and only when `a` is off the two lines. -/
+private theorem col_W (W M a : Nat) (hW : W < 2^M) :
+    sumLt (2^M) (fun b => if b = W ∧ a ≠ 0 ∧ a ≠ W then 1 else 0)
+      = if a ≠ 0 ∧ a ≠ W then 1 else 0 := by
+  by_cases h : a ≠ 0 ∧ a ≠ W
+  · rw [if_pos h,
+        sumLt_congr (2^M) _ (fun b => if b = W then 1 else 0)
+          (fun b _ => by
+            by_cases hb : b = W
+            · rw [if_pos ⟨hb, h.1, h.2⟩, if_pos hb]
+            · rw [if_neg (fun hc => hb hc.1), if_neg hb])]
+    exact sumLt_single (2^M) W 1 hW
+  · rw [if_neg h,
+        sumLt_congr (2^M) _ (fun _ => 0)
+          (fun b _ => if_neg (fun hc => h ⟨hc.2.1, hc.2.2⟩))]
+    exact sumLt_zero _
+
+/-- **The bridge.** `Ncnt` is the off-lines core plus the `b = W` column, whose size is
+    `2^M - 2`. Stated additively to stay in `Nat`. -/
+theorem Ncnt_eq_OffCnt (W M : Nat) (hW : W < 2^M) (hW0 : W ≠ 0) :
+    Ncnt W M + 2 = OffCnt W M + 2^M := by
+  have hp : (0:Nat) < 2^M := Nat.two_pow_pos M
+  have hstep : Ncnt W M
+      = sumLt (2^M) (fun a => if a ≠ 0 ∧ a ≠ W then 1 else 0) + OffCnt W M := by
+    rw [Ncnt_eq]
+    unfold OffCnt
+    rw [← sumLt_pair]
+    apply sumLt_congr
+    intro a hA
+    rw [sumLt_congr (2^M) _
+          (fun b => (if b = W ∧ a ≠ 0 ∧ a ≠ W then 1 else 0)
+            + (if a ≠ 0 ∧ a ≠ W ∧ b ≠ 0 ∧ b ≠ W ∧ a ≠ b ∧ b ≠ a ^^^ W
+                 ∧ Qgen' W a b M = -1 then 1 else 0))
+          (fun b hB => nInd_split W M a b hW hW0 hA hB),
+        sumLt_pair, col_W W M a hW]
+  have hcount : sumLt (2^M) (fun a => if a ≠ 0 ∧ a ≠ W then 1 else 0) + 2 = 2^M := by
+    have hc := sumLt_compl (2^M) (fun i => i = 0 ∨ i = W)
+    have h2 := sumLt_two (2^M) W hW hW0 hp
+    have he : sumLt (2^M) (fun i => if i = 0 ∨ i = W then 0 else 1)
+        = sumLt (2^M) (fun a => if a ≠ 0 ∧ a ≠ W then 1 else 0) := by
+      apply sumLt_congr
+      intro i _
+      by_cases h : i = 0 ∨ i = W
+      · rw [if_pos h, if_neg (fun hc2 => h.elim hc2.1 hc2.2)]
+      · rw [if_neg h, if_pos ⟨fun hh => h (Or.inl hh), fun hh => h (Or.inr hh)⟩]
+    rw [he] at hc
+    omega
+  omega
+
 end SounioZDFiberAntisym
 
 
