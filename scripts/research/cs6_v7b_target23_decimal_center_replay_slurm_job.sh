@@ -94,7 +94,7 @@ printf 'SLURM_JOB_ID=%s\nSLURM_JOB_NODELIST=%s\nSLURM_CPUS_PER_TASK=%s\n' \
   "$SLURM_JOB_ID" "$SLURM_JOB_NODELIST" "$SLURM_CPUS_PER_TASK" > "$result/provenance/slurm-context.txt"
 printf 'PYTHON_VERSION=%s\nPYTHON_EXECUTABLE=%s\nPYTHON_DECIMAL_IMPLEMENTATION=stdlib-decimal\nCAPD_IMPORTED=false\n' \
   "$(python3 -c 'import platform; print(platform.python_version())')" \
-  "$(python3 -c 'import sys; print(sys.executable)')" > "$result/provenance/python-runtime.txt"
+  "$(command -v python3)" > "$result/provenance/python-runtime.txt"
 
 cd "$repo"
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/research/cs6_v7b_target23_decimal_center_replay_run.py \

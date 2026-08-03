@@ -7,6 +7,7 @@ import argparse
 import csv
 import hashlib
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -124,8 +125,11 @@ def build_plan(root: Path, source_commit: str) -> list[Plan]:
 
 def execute(root: Path, out_dir: Path, plan: Plan, timeout: float) -> dict[str, str]:
     leaf = plan.leaf
+    interpreter = sys.executable or shutil.which("python3")
+    if not interpreter:
+        fail("could not resolve the Python interpreter")
     command = [
-        sys.executable, "-B", str((root / WORKER_REL).resolve()),
+        str(Path(interpreter).resolve()), "-B", str((root / WORKER_REL).resolve()),
         str(leaf.u_depth), str(leaf.u_index), str(leaf.s_depth), str(leaf.s_index),
         plan.challenge, plan.binding,
     ]
