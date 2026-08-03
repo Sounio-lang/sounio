@@ -1268,5 +1268,16 @@ non-partitioning probe had missed. Relaxing the four `hi` rows' hypotheses was t
 **refuted** (only `hi_ll`'s `a ≠ W` and `hi_ul`'s `u ≠ W` are individually removable), so the
 boundary lemmas are genuinely needed.
 
+### The `m ≥ 1` hypothesis is a proof artifact, not a boundary
+
+`Ncnt_hi` carries `hm : 1 ≤ m`. This comes from `OffCnt_add_OffCntP`, whose proof needs
+`4 ≤ 2^(m+1)` to run its `∃ k, 2^M = k + 4` step — it is **not** a failure of the recursion.
+The identity and both intermediates were measured true at `m = 0` (`e = 2`, all `W`) before the
+Lean was written. This matters for the next step: descending an odd non-power-of-two label such
+as `W = 3` uses LOW down to level 2 and then needs HIGH at `m = 0`, i.e. exactly the excluded
+case. Closing it is either a `by_cases` on `2^(m+1) = 2` (where `W = 1` forces `OffCnt` and
+`OffCntP` both to `0` and the identity is `12 = 12`) or a direct evaluation of `Ncnt 3 2`. A
+later reader should not infer that the recursion fails at `m = 0`.
+
 **Still open:** unrolling the two recursions into the closed form for `tr(A²)`; (III); `tr(A³)`'s
 general closed form; (d); V1.
