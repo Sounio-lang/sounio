@@ -132,9 +132,20 @@ const CONTEST_WITNESS_RELATIVE_BAND: i64 = 1
 // Diagnostic only: set once by the modular checker entry point so tracing does
 // not repeatedly scan the process environment while walking every function.
 var CHECK_TRACE_ENABLED: bool = false
+var CHECK_STMT_TRACE_TARGET_HASH: i64 = 0
+var CHECK_STMT_TRACE_ACTIVE: bool = false
+var CHECK_STMT_TRACE_SEQ: i64 = 0
+var CHECK_STMT_TRACE_BLOCK_DEPTH: i64 = 0
 
 pub(crate) fn checker_set_trace_enabled(enabled: bool) with Mut {
     CHECK_TRACE_ENABLED = enabled
+}
+
+pub(crate) fn checker_set_stmt_trace_target_hash(target_hash: i64) with Mut {
+    CHECK_STMT_TRACE_TARGET_HASH = target_hash
+    CHECK_STMT_TRACE_ACTIVE = false
+    CHECK_STMT_TRACE_SEQ = 0
+    CHECK_STMT_TRACE_BLOCK_DEPTH = 0
 }
 const CONTEST_WITNESS_MAX_TAIL_RISK: i64 = 2
 const CONTEST_WITNESS_MECHANISTIC_DIVERGENCE: i64 = 3
@@ -306,6 +317,62 @@ fn checker_trace_fn_phase(c: *mut Checker, phase: string, fn_name: Name) with IO
     print_name_value(fn_name)
     print(" phase=")
     print(phase)
+    print("\n")
+}
+
+fn checker_stmt_trace_target_begin(c: *mut Checker, fn_name: Name) with IO, Mut, Panic, Div {
+    CHECK_STMT_TRACE_ACTIVE = CHECK_STMT_TRACE_TARGET_HASH != 0 && ast_name_hash(fn_name) == CHECK_STMT_TRACE_TARGET_HASH
+    if !CHECK_STMT_TRACE_ACTIVE { return }
+    CHECK_STMT_TRACE_SEQ = 0
+    CHECK_STMT_TRACE_BLOCK_DEPTH = 0
+    print("check_stmt_trace module=")
+    print_int((*c).current_module_id)
+    print(" fn=")
+    print_name_value(fn_name)
+    print(" phase=target_enter\n")
+}
+
+fn checker_stmt_trace_target_end(c: *mut Checker, fn_name: Name) with IO, Mut, Panic, Div {
+    if !CHECK_STMT_TRACE_ACTIVE { return }
+    print("check_stmt_trace module=")
+    print_int((*c).current_module_id)
+    print(" fn=")
+    print_name_value(fn_name)
+    print(" phase=target_exit seq=")
+    print_int(CHECK_STMT_TRACE_SEQ)
+    print("\n")
+    CHECK_STMT_TRACE_ACTIVE = false
+}
+
+fn checker_stmt_trace_block_marker(c: *mut Checker, phase: string) with IO, Mut, Panic, Div {
+    if !CHECK_STMT_TRACE_ACTIVE { return }
+    print("check_stmt_trace module=")
+    print_int((*c).current_module_id)
+    print(" phase=")
+    print(phase)
+    print(" seq=")
+    print_int(CHECK_STMT_TRACE_SEQ)
+    print(" depth=")
+    print_int(CHECK_STMT_TRACE_BLOCK_DEPTH)
+    print("\n")
+}
+
+fn checker_stmt_trace_stmt_marker(c: *mut Checker, phase: string, seq: i64, kind: i64, span_start: i64, span_end: i64) with IO, Mut, Panic, Div {
+    if !CHECK_STMT_TRACE_ACTIVE { return }
+    print("check_stmt_trace module=")
+    print_int((*c).current_module_id)
+    print(" phase=")
+    print(phase)
+    print(" seq=")
+    print_int(seq)
+    print(" depth=")
+    print_int(CHECK_STMT_TRACE_BLOCK_DEPTH)
+    print(" kind=")
+    print_int(kind)
+    print(" span=")
+    print_int(span_start)
+    print("..")
+    print_int(span_end)
     print("\n")
 }
 
@@ -4103,6 +4170,7 @@ fn checker_report_multitest_correction_required_inplace(c: *mut Checker, span: S
 fn checker_check_impl_method_inplace(c: *mut Checker, item: Item) with Mut, Panic, Div, Alloc, IO {
     match item.fn_def {
         Some(fd) => {
+            checker_stmt_trace_target_begin(c, (*fd).name)
             checker_trace_fn_phase(c, "method_enter", (*fd).name)
             let saved_effects = (*c).current_effects
             let saved_effect_count = (*c).current_effect_count
@@ -4155,6 +4223,7 @@ fn checker_check_impl_method_inplace(c: *mut Checker, item: Item) with Mut, Pani
             (*c).multitest_count = saved_multitest_count
             (*c).multitest_corrected = saved_multitest_corrected
             checker_trace_fn_phase(c, "method_exit", (*fd).name)
+            checker_stmt_trace_target_end(c, (*fd).name)
         }
         None => {}
     }
@@ -4412,6 +4481,7 @@ fn checker_bind_fn_params_inplace(c: *mut Checker, opt: Option<Box<ParamList> >)
 fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(fd) => {
+            checker_stmt_trace_target_begin(c, (*fd).name)
             checker_trace_fn_phase(c, "enter", (*fd).name)
             let saved_effects = (*c).current_effects
             let saved_effect_count = (*c).current_effect_count
@@ -4451,6 +4521,7 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             match (*fd).body.stmts {
                 None => {
                     checker_trace_fn_phase(c, "declaration_exit", (*fd).name)
+                    checker_stmt_trace_target_end(c, (*fd).name)
                     (*c).current_return_type = ty_unit()
                     (*c).current_effects = saved_effects
                     (*c).current_effect_count = saved_effect_count
@@ -4491,17 +4562,25 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             (*c).multitest_count = saved_multitest_count
             (*c).multitest_corrected = saved_multitest_corrected
             checker_trace_fn_phase(c, "exit", (*fd).name)
+            checker_stmt_trace_target_end(c, (*fd).name)
         }
         None => {}
     }
 }
 
 fn checker_check_block_inplace(c: *mut Checker, blk: Block) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    checker_stmt_trace_block_marker(c, "block_enter")
+    if CHECK_STMT_TRACE_ACTIVE { CHECK_STMT_TRACE_BLOCK_DEPTH = CHECK_STMT_TRACE_BLOCK_DEPTH + 1 }
     (*c).env = (*c).env.push_scope()
     (*c).borrows = (*c).borrows.push_scope()
     checker_push_const_scope_inplace(c)
+    checker_stmt_trace_block_marker(c, "scope_ready")
+    checker_stmt_trace_block_marker(c, "stmts_begin")
     let result_ty = checker_check_stmts_inplace(c, blk.stmts)
+    checker_stmt_trace_block_marker(c, "stmts_done")
+    checker_stmt_trace_block_marker(c, "linear_begin")
     let linear_check = (*c).borrows.check_linear_consumed()
+    checker_stmt_trace_block_marker(c, "linear_done")
     (*c).borrows = linear_check.0
     if linear_check.1 > 0 {
         (*c).had_error = true
@@ -4514,6 +4593,8 @@ fn checker_check_block_inplace(c: *mut Checker, blk: Block) -> TypeEntry with Mu
     checker_pop_const_scope_inplace(c)
     (*c).borrows = (*c).borrows.pop_scope()
     (*c).env = (*c).env.pop_scope()
+    if CHECK_STMT_TRACE_ACTIVE { CHECK_STMT_TRACE_BLOCK_DEPTH = CHECK_STMT_TRACE_BLOCK_DEPTH - 1 }
+    checker_stmt_trace_block_marker(c, "block_exit")
     result_ty
 }
 
@@ -4730,6 +4811,22 @@ fn checker_check_stmts_inplace(c: *mut Checker, opt: Option<Box<StmtList> >) -> 
     while true {
         match cursor {
             Some(list) => {
+                var stmt_trace_seq: i64 = 0
+                var stmt_trace_kind: i64 = 4
+                if CHECK_STMT_TRACE_ACTIVE {
+                    CHECK_STMT_TRACE_SEQ = CHECK_STMT_TRACE_SEQ + 1
+                    stmt_trace_seq = CHECK_STMT_TRACE_SEQ
+                    if (*list).head.kind == StmtKind::StmtLet {
+                        stmt_trace_kind = 0
+                    } else if (*list).head.kind == StmtKind::StmtVar {
+                        stmt_trace_kind = 1
+                    } else if (*list).head.kind == StmtKind::StmtExpr {
+                        stmt_trace_kind = 2
+                    } else if (*list).head.kind == StmtKind::StmtAssign {
+                        stmt_trace_kind = 3
+                    }
+                    checker_stmt_trace_stmt_marker(c, "stmt_begin", stmt_trace_seq, stmt_trace_kind, (*list).head.span.start, (*list).head.span.end)
+                }
                 // Reset the int-literal flag before each stmt so that after the
                 // loop (*c).last_literal_kind reflects ONLY the block's tail
                 // statement — a bare `0` leaves it set, a non-literal tail (call,
@@ -4738,6 +4835,9 @@ fn checker_check_stmts_inplace(c: *mut Checker, opt: Option<Box<StmtList> >) -> 
                 // def_inplace) depends on this being the tail's literalness.
                 (*c).last_literal_kind = 0
                 last_ty = checker_check_stmt_inplace(c, (*list).head)
+                if CHECK_STMT_TRACE_ACTIVE {
+                    checker_stmt_trace_stmt_marker(c, "stmt_check_done", stmt_trace_seq, stmt_trace_kind, (*list).head.span.start, (*list).head.span.end)
+                }
                 // Capture the escape provenance of the block's TAIL expression
                 // (the value the block/function yields) while the AST is still live;
                 // the return-compatibility site only sees the TypeEntry.
@@ -4750,6 +4850,9 @@ fn checker_check_stmts_inplace(c: *mut Checker, opt: Option<Box<StmtList> >) -> 
                         }
                     }
                     Some(_) => {}
+                }
+                if CHECK_STMT_TRACE_ACTIVE {
+                    checker_stmt_trace_stmt_marker(c, "stmt_done", stmt_trace_seq, stmt_trace_kind, (*list).head.span.start, (*list).head.span.end)
                 }
                 cursor = (*list).tail
             }
