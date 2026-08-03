@@ -1,0 +1,512 @@
+=== Task: math-review | Provider(s): xai zai ===
+=== LLM Offload Fan-Out ===
+Output dir: /tmp/llm-offload-ZXIz5Q
+Providers: xai zai
+
+  -> Sending to Grok 4.3 (grok-4.3, max=8192)...
+  -> Sending to Z.AI GLM-5.2 (coding plan) (glm-5.2, max=8192)...
+  <- Grok 4.3: DONE (514 bytes)
+  <- Z.AI GLM-5.2 (coding plan): DONE (25304 bytes)
+
+=== Results ===
+
+━━━ grok ━━━
+**PASS**
+
+All seven proof obligations hold in the supplied implementation. The Taylor recursion, Picard enclosure, order-41 remainder, log-norm global error propagation, event bisection + validated bracket, and Poincaré determinant formula are algebraically correct and match the stated vector field and section. The certificate is explicitly restricted to the single center leaf trajectory; no overclaim to the full leaf exists. No interval-dependency, off-by-one, or missing-hypothesis defects were identified.
+
+
+━━━ zai ━━━
+The user wants me to act as a mathematical referee and audit the provided Python/Arb code for a validated ODE center-orbit enclosure.
+Specifically, I need to check:
+1. polynomial flow coefficient recursion
+2. Picard box as trajectory enclosure
+3. Taylor theorem remainder (a_41 * h^41)
+4. max-norm global error recurrence
+5. event bracketing
+6. Poincare determinant
+7. claim restriction to center vs. whole leaf
+
+Let's look at the vector field:
+x' = 2y^2 - xy
+y' = xy - y(w+zs)/2
+w' = xy - w - zs
+ell' = x - y - (w+zs)/2 - 1
+State: [x, y, w, ell]
+
+**1. Polynomial flow coefficient recursion (Taylor coefficients)**
+Wait, let's carefully check `flow_coefficients`:
+For order n, a_n = f^{(n)} / n! (but implemented as a_{n+1} = (...) / (n+1)? No, typically x(t) = sum a_k t^k. Then a_0 = initial. x'(t) = sum (k+1) a_{k+1} t^k.
+So f(x(t)) = sum a'_n t^n. The derivative is sum (n+1) a_{n+1} t^n.
+So (n+1) a_{n+1} = coefficient of t^n in f(x(t)).
+
+Let's trace:
+`xy = sum( coefficients[0][j] * coefficients[1][n - j] for j in range(n + 1) )` -> matches Cauchy product for a_x * a_y, giving the coefficient of t^n.
+`yy = sum( coefficients[1][j] * coefficients[1][n - j] )`
+`yw = sum( coefficients[1][j] * coefficients[2][n - j] )`
+divisor = n + 1
+
+For x':
+f_x = 2y^2 - xy
+Coefficient of t^n is `2*yy - xy`.
+So `coefficients[0][n+1] = (2*yy - xy) / divisor` -> Correct.
+
+For y':
+f_y = xy - y(w+zs)/2 = xy - yw/2 - zs * y / 2
+Coefficient of t^n is `xy - yw/2 - zs * coefficients[1][n] / 2`
+`coefficients[1][n+1] = (xy - (yw + ZS * coefficients[1][n]) / 2) / divisor` -> Correct.
+
+For w':
+f_w = xy - w - zs
+Coefficient of t^n is `xy - coefficients[2][n] - (zs if n==0 else 0)`
+`coefficients[2][n+1] = (xy - coefficients[2][n] - (ZS if n == 0 else 0)) / divisor` -> Correct.
+
+For ell':
+f_ell = x - y - (w+zs)/2 - 1 = x - y - w/2 - zs/2 - 1
+Coefficient of t^n is `coefficients[0][n] - coefficients[1][n] - coefficients[2][n]/2 - (zs/2 + 1 if n==0 else 0)`
+`coefficients[3][n+1] = (coefficients[0][n] - coefficients[1][n] - coefficients[2][n] / 2 - ((ZS / 2 + 1) if n == 0 else 0)) / divisor` -> Correct.
+
+Wait, is it `n+1` in the loop?
+The loop is `for n in range(degree):` where `degree = TAYLOR_ORDER = 40`.
+It computes up to index `degree`. Since list initialized with `initial` + `[0]*degree`, indices go up to `degree` (which is 40). Wait!
+TAYLOR_ORDER = 40. So `degree = 40`.
+List length is 41. Indices 0 to 40.
+Loop `for n in range(40):` computes `coefficients[...][n+1]`.
+For `n=39`, it computes index `40`.
+The polynomial evaluation:
+`polynomial = sum(coefficients[index][power] * step**power for power in range(TAYLOR_ORDER + 1))`
+TAYLOR_ORDER = 40. `power` goes up to 40.
+Wait, Taylor's theorem: x(t) = sum_{k=0}^{N} a_k t^k + R_N.
+The remainder requires the derivative of order N+1.
+If polynomial goes up to degree 40, the remainder involves the 41st derivative.
+In `advance`:
+`remainder_coefficients = flow_coefficients(box, TAYLOR_ORDER + 1)`
+Wait, TAYLOR_ORDER + 1 = 41.
+So `degree = 41`.
+It calls `flow_coefficients` with degree 41. It computes indices up to 41.
+`local_remainder = ... remainder_coefficients[index][TAYLOR_ORDER + 1] ... * step ** (TAYLOR_ORDER + 1)`
+Wait, Taylor remainder for `sum_{k=0}^{40} a_k t^k` is `a_{41} t^{41}` if `a_k` are the exact Taylor coefficients.
+Since `flow_coefficients` computes exact Taylor coefficients `a_k = f^{(k)} / k!`, the remainder term is indeed `a_{41} t^{41}`.
+BUT wait! `flow_coefficients(box, TAYLOR_ORDER + 1)` is called with a BOX (interval).
+When interval arithmetic is used in the Cauchy product, does `a_{41}` correctly bound the 41st Taylor coefficient evaluated over the box?
+Wait! Taylor coefficients are computed recursively.
+If the inputs are intervals, then the interval evaluation of `a_{41}` overestimates the exact range of `a_{41}` over the box.
+Since `a_k` are polynomials in the initial conditions, interval evaluation over the box `B` bounds the maximum of `a_{41}` over `B`.
+So `local_remainder` correctly bounds the remainder. This is standard.
+
+Let's check Picard box:
+`picard_box(center, radius, step)`
+`initial = [arb(component, radius) for component in center]`
+`time_interval = arb(step / 2, step / 2)` -> this is `[0, step]` interval.
+Wait, `arb(step / 2, step / 2)` is the interval [0, step] ?
+Let's check Arb: `arb(mid, rad)` creates interval [mid - rad, mid + rad].
+mid = step / 2, rad = step / 2. So interval is `[0, step]`. This is correct, as time ranges from 0 to step.
+`box = [inflate(component.union(component + time_interval * derivative)) for component, derivative in zip(initial, field(initial), strict=True)]`
+Wait, is `component + time_interval * derivative` the right Picard iteration?
+The Picard operator is `x_0 + \int_0^h f(x) dt`.
+If `x` is a box, and `t` is in `[0, h]`, then `\int_0^h f(x) dt` is bounded by `h * f(x)` assuming `f(x)` is evaluated over `x`.
+Wait, `time_interval` is `[0, h]`. So `time_interval * derivative` is `[0, h] * f(x)`.
+Is `x_0 + [0, h] * f(x)` a conservative bound for `x_0 + \int_0^t f(x) ds` for `t \in [0, h]`?
+Yes, `\int_0^t f(x) ds` is bounded by `t * f(x)` if `f(x)` doesn't change sign, or strictly speaking, `\int_0^t f(x) ds \subseteq [0, t] * f(x) \subseteq [0, h] * f(x)`.
+BUT wait!
+The Picard iteration requires evaluating `f(x)` over the box. If `x` is a box, then `x(t) \in B` for all `t \in [0, h]`.
+The integral is `\int_0^t f(x(s)) ds`. Since `x(s) \in B`, `f(x(s)) \in f(B)`.
+So `\int_0^t f(x(s)) ds \in \int_0^t f(B) ds \subseteq [0, t] * f(B) \subseteq [0, h] * f(B)`.
+So yes, `[0, h] * f(B)` bounds the integral.
+Wait, the Picard box iteration here is:
+`image = [component + time_interval * derivative for component, derivative in zip(initial, field(box), strict=True)]`
+Wait, `time_interval` is `[0, h]`.
+So `image = initial + [0, h] * f(box)`.
+This is correct for validating the enclosure `B \supseteq x_0 + [0, h] f(B)`.
+
+Let's check the `logarithmic_norm_bound`:
+The Jacobian of the system is:
+J =
+[ -y,   4y - x,  0,   0 ]
+[ y,    x - (w+zs)/2, -y/2, 0 ]
+[ y,    x,   -1,  0 ]
+[ 1,   -1, -1/2,  0 ]
+
+Wait, w' = xy - w - zs.
+Partial derivatives:
+dx/dx = -y
+dx/dy = 4y - x
+dx/dw = 0
+dx/dell = 0
+
+dy/dx = y
+dy/dy = x - (w+zs)/2
+dy/dw = -y/2
+dy/dell = 0
+
+dw/dx = y
+dw/dy = x
+dw/dw = -1
+dw/dell = 0
+
+dell/dx = 1
+dell/dy = -1
+dell/dw = -1/2
+dell/dell = 0
+
+Max norm (infinity norm) of a matrix J is the maximum absolute row sum.
+Row 1: | -y | + | 4y - x | + 0 + 0 = |-y| + |4y - x|. Since y is positive (as it's > 0), |-y| = -y. Wait, is y strictly positive?
+Yes, y starts at 10.9, and y' is roughly xy > 0, so y is positive.
+Wait, the code has:
+`rows[0] = -y + abs(4 * y - x)` -> if y > 0, |-y| = -y. But wait, `box` contains intervals!
+So `abs(-y)` is `abs(y)`. Wait!
+`-y` when `y` is an interval `[y_min, y_max]` could be positive if `y_min > 0`. But wait, `abs(-y)` is NOT necessarily `-y`!
+If `y > 0`, then `-y` evaluated as an interval might have `lower() < 0`? No, if `y` interval is `[10.8, 11.0]`, then `-y` is `[-11.0, -10.8]`.
+The absolute value of `[-11.0, -10.8]` is `[10.8, 11.0]`.
+But the code has:
+`-y + abs(4 * y - x)`. This evaluates `-y` as the interval `[-11.0, -10.8]`, and then ADDS `abs(4y - x)`.
+Wait, the infinity norm of J is `sup_{x \in B} \sum |J_{ij}(x)|`.
+If we just use interval arithmetic: `abs(-y) + abs(4y - x)`, that gives an upper bound.
+But the code does `-y + abs(4y - x)`. If `y > 0`, `-y` interval will have `upper() < 0`.
+But for the upper bound of the sum, we need `upper(abs(-y) + abs(4y-x))`.
+If the code uses `-y`, it's computing the interval `-y`, which is `[-y_max, -y_min]`. Its upper bound is `-y_min`.
+Since `y_min > 0`, `-y_min` is negative!
+Wait! `logarithmic_norm_bound(box)` is supposed to return an UPPER bound of the max row sum.
+If `y_min > 0`, then `abs(-y)` is `[y_min, y_max]`.
+The interval `-y` is `[-y_max, -y_min]`. Its `upper()` is `-y_min`.
+Then `upper(-y + abs(4y-x)) = upper(-y) + upper(abs(4y-x)) = -y_min + upper(abs(4y-x))`.
+But the true max row sum is `y_max + upper(abs(4y-x))`.
+Because `y_max > -y_min`, `upper(-y)` is LESS than `upper(abs(-y))`!
+Ah!!! Let's check the code.
+```python
+def logarithmic_norm_bound(box: list[arb]) -> arb:
+    x, y, w, _ell = box
+    rows = [
+        -y + abs(4 * y - x),
+        x - (w + ZS) / 2 + abs(y) + abs(y) / 2,
+        -1 + abs(y) + abs(x),
+        arb(5) / 2,
+    ]
+    return max_upper(rows)
+```
+Row 1: `-y + abs(4 * y - x)`.
+If `y` is `arb(10.9, 0.1)`, then `y` is `[10.8, 11.0]`.
+`-y` is `[-11.0, -10.8]`. Its `upper()` is `-10.8`.
+But `abs(-y)` would be `[10.8, 11.0]`. Its `upper()` is `11.0`.
+If the code uses `-y`, its upper bound is `-10.8`. This is NEGATIVE.
+But the logarithmic norm row sum must be an upper bound on `|-y| + |4y-x|`.
+By replacing `|-y|` with `-y`, the code assumes `|-y| = -y`, which is FALSE for intervals!
+If `y` is a positive interval, `|-y|` is positive, but `-y` is negative!
+Wait, if you want `|-y|`, and you know `y` is positive, you should just use `y`, not `-y`.
+Wait, the code is `-y + ...`. This means `upper(-y)` is used.
+This is mathematically WRONG.
+The upper bound of the row sum will be `max_upper(-y + ...)` which is `upper(-y) + ... = -y_min + ...`.
+But the true maximum of `|-y|` over the box is `y_max`.
+So `y_max + abs(4y-x)` is the true maximum.
+By computing `-y + abs(4y-x)` and taking `upper()`, the code gets `-y_min + upper(abs(4y-x))`.
+Since `y_min > 0`, `-y_min < y_max`.
+Thus the code UNDERESTIMATES the max row sum!
+If it underestimates the log norm, the `mu` is too small.
+The global error bound uses `exp(mu * h)`. If `mu` is too small, `exp(mu * h)` is too small.
+This completely breaks the validated global error bound!
+
+Let's check Row 2: `x - (w + ZS) / 2 + abs(y) + abs(y) / 2`
+Wait. Jacobian row 2:
+dy/dx = y
+dy/dy = x - (w + zs)/2
+dy/dw = -y/2
+dy/dell = 0
+Sum of absolute values: `abs(y) + abs(x - (w + zs)/2) + abs(-y/2)`.
+But the code has:
+`x - (w + ZS) / 2 + abs(y) + abs(y) / 2`
+Wait! `abs(x - (w + ZS)/2)` is NOT `x - (w + ZS)/2`.
+Are we sure `x - (w + ZS)/2` is strictly positive or strictly negative?
+`x` is around 15.1. `w` is around 0 initially, but `w' = xy - w - zs`.
+If `xy = 15.1 * 10.9 = 164`, and `zs = 22`, then `w` grows towards 142.
+Then `x - (w + zs)/2` will become `15 - (142 + 22)/2 = 15 - 82 = -67` (negative).
+So `x - (w + ZS)/2` changes sign!
+Taking `x - (w + ZS) / 2` WITHOUT `abs()` means the interval arithmetic gives its natural range, and `upper()` is used.
+BUT the true sum of absolute values requires `abs(x - (w + ZS)/2)`.
+If `x - (w + ZS)/2` crosses 0, then `abs()` would make it positive, so `upper()` would be the maximum absolute value.
+If the code drops `abs()`, and the interval contains 0, `upper()` will just be the upper bound of the interval!
+For example, if the interval is `[-67, -60]`, `upper()` is `-60`.
+But `abs([-67, -60])` is `[60, 67]`, its `upper()` is `67`.
+If `upper()` is used for the row sum, dropping `abs()` drastically UNDERESTIMATES the log norm!
+Let me double check the exact line:
+`x - (w + ZS) / 2 + abs(y) + abs(y) / 2`
+Yes! `abs(y)` is correctly used for `|y|`.
+`abs(y) / 2` is correctly used for `|-y/2|`.
+BUT `abs(x - (w + ZS) / 2)` is written as `x - (w + ZS) / 2` !!!
+This is a MASSIVE BUG. It causes the logarithmic norm to be severely underestimated.
+
+Let's check Row 3: `-1 + abs(y) + abs(x)`
+Jacobian row 3:
+dw/dx = y
+dw/dy = x
+dw/dw = -1
+dw/dell = 0
+Sum of absolute values: `abs(y) + abs(x) + abs(-1) = abs(y) + abs(x) + 1`.
+But the code has `-1 + abs(y) + abs(x)`.
+Wait! `abs(-1)` is `1`. The code has `-1`!
+If the code computes `-1 + ...`, its `upper()` will be `upper(-1) + upper(abs(y)) + upper(abs(x))`.
+Wait, `-1` as a constant. `upper(-1)` is `-1`.
+So `max_upper(-1 + ...)` gives `-1 + max_upper(abs(y)) + max_upper(abs(x))`.
+BUT the true sum is `1 + ...`!
+The code uses `-1` instead of `1`! This underestimates the log norm by 2!
+Let's re-read the code carefully:
+```python
+        -1 + abs(y) + abs(x),
+```
+Yes! This is definitely wrong. The absolute value of `-1` is `1`, not `-1`.
+If `abs(y) + abs(x)` is, say, 200, then `-1 + 200` is `199`. The true value is `1 + 200` is `201`.
+This is an underestimation.
+
+Let's check Row 4: `arb(5) / 2`
+Jacobian row 4:
+dell/dx = 1
+dell/dy = -1
+dell/dw = -1/2
+dell/dell = 0
+Sum of absolute values: `abs(1) + abs(-1) + abs(-1/2) = 1 + 1 + 1/2 = 5/2 = 2.5`.
+The code has `arb(5) / 2`. This is exactly correct!
+
+So Row 1, 2, 3 are all wrong in computing the infinity norm.
+Row 1: `-y` instead of `abs(-y)` or `y`. (Assuming y > 0).
+Row 2: `x - (w + ZS)/2` instead of `abs(x - (w + ZS)/2)`.
+Row 3: `-1` instead of `1` (since it's `abs(-1)`).
+
+Let me confirm this is indeed what the code does:
+```python
+def logarithmic_norm_bound(box: list[arb]) -> arb:
+    x, y, w, _ell = box
+    rows = [
+        -y + abs(4 * y - x),
+        x - (w + ZS) / 2 + abs(y) + abs(y) / 2,
+        -1 + abs(y) + abs(x),
+        arb(5) / 2,
+    ]
+    return max_upper(rows)
+```
+Wait, `max_upper` takes `upper()` of each element in `rows` and returns the maximum.
+If `rows` has `-y`, its `upper()` is `-y_lower`.
+If `rows` has `x - (w+zs)/2`, its `upper()` is the upper bound of the interval.
+This means `logarithmic_norm_bound` returns a completely invalid (and severely underestimated) upper bound for the logarithmic norm!
+If `mu` is underestimated, `exp(mu * h)` is underestimated.
+Then `next_radius` is too small.
+The certificate claims to bound the global error, but it uses an incorrect `mu`!
+
+Let's check if there are any other errors.
+Event bracketing:
+```python
+def locate_event(center: list[arb], radius: arb) -> tuple[arb, arb, list[arb]]:
+    low, high = arb(0), STEP
+    low_center, low_radius = center, radius
+    for _ in range(EVENT_BISECTIONS):
+        middle = (low + high) / 2
+        middle_center, middle_radius = advance(center, radius, middle)
+        middle_sign = sign(middle_center[2], middle_radius)
+        if middle_sign < 0:
+            low, low_center, low_radius = middle, middle_center, middle_radius
+        elif middle_sign > 0:
+            high = middle
+        else:
+            STATS.ambiguous_event_stops += 1
+            break
+```
+Wait! `locate_event` uses `advance(center, radius, middle)`.
+But `advance` advances the state from `center` by time `middle` (which is up to `STEP`).
+This is correct, it's evaluating the solution at `t = middle`.
+BUT wait! The bisection logic:
+If `middle_sign < 0`, it sets `low = middle`, and sets `low_center, low_radius = middle_center, middle_radius`.
+Then if it breaks, it checks `if sign(low_center[2], low_radius) >= 0: fail("event lower endpoint is not strictly negative")`.
+Then `high_center, high_radius = advance(center, radius, high)`.
+Then checks `if sign(high_center[2], high_radius) <= 0: fail("event upper endpoint is not strictly positive")`.
+Then it returns `low, high, event_box`.
+Wait, `event_box = picard_box(low_center, low_radius, high - low)`.
+But `low_center` is the state at time `low`!
+Wait! `advance(center, radius, middle)` computes the state at `t = middle` starting from `t = 0` (which is `center`).
+If we use `picard_box(low_center, low_radius, high - low)`, this integrates `low_center` from `t = 0` to `t = high - low`.
+This correctly encloses the trajectory from `low` to `high`! Because the system is autonomous!
+Since the system is autonomous, the state at `t = high` is just the integral from `t = low` for duration `high - low`.
+So `picard_box(low_center, low_radius, high - low)` is a valid enclosure of the trajectory segment.
+This is correct for autonomous systems.
+BUT wait, what about the `ell` variable?
+The vector field for `ell` is:
+`ell' = x - y - (w + zs)/2 - 1`.
+Since `ell` does not appear in the equations for `x', y', w'`, the system is autonomous, and `ell` is just the time integral of `x - y - (w+zs)/2 - 1`.
+So shifting time by `low` is perfectly fine, as `ell` just accumulates!
+So `picard_box` logic is correct.
+
+Wait, let's look at the determinant calculation:
+```python
+    second_event = events[1][2]
+    final_normal = second_event[0] * second_event[1] - ZS
+    determinant = second_event[3].exp() * initial_normal / final_normal * q0_area
+```
+`second_event` is `(base_time + low, base_time + high, event_box)`.
+Wait! `events[1][2]` is `event_box`!
+So `second_event = event_box` (which is a list of 4 `arb`s representing the state box at the event).
+Then `final_normal = event_box[0] * event_box[1] - ZS`.
+And `second_event[3]` is `event_box[3]`, which is the `ell` component!
+Wait! The determinant formula for the Poincare map:
+`det(DP) = exp(ell(T)) * <normal_velocity(0)> / <normal_velocity(T)> * det(DQ_0)`
+Wait, `ell(T)` is the value of `ell` at time `T`? No!
+The divergence of the flow is `trace(J)`.
+J =
+[ -y,   4y - x,  0,   0 ]
+[ y,    x - (w+zs)/2, -y/2, 0 ]
+[ y,    x,   -1,  0 ]
+[ 1,   -1, -1/2,  0 ]
+Trace = `-y + x - (w+zs)/2 - 1 + 0` ?
+Wait!
+`f_ell` is defined as `x - y - (w+zs)/2 - 1`.
+Let's check the trace:
+dx/dx = -y
+dy/dy = x - (w+zs)/2
+dw/dw = -1
+dell/dell = 0
+Sum = -y + x - (w+zs)/2 - 1.
+But `f_ell` in the code is exactly `x - y - (w+zs)/2 - 1`.
+This is correct! The `ell` coordinate is added as a 4th dimension to track the accumulated divergence.
+At time `T`, `ell` is `\int_0^T \nabla \cdot f(x(t)) dt`.
+So `exp(ell(T))` is the determinant of the flow map in the full 4D space.
+Then `det(DP) = exp(ell(T)) * nu_0 / nu_T * det(DQ_0)`.
+This is the standard formula for the Poincare map determinant (or area change).
+Wait, `initial_normal` is `initial_box[0] * initial_box[1] - ZS`.
+This is `x*y - zs`, which is exactly `w'` (since `w' = xy - w - zs` and at section `w=0`, `w' = xy - zs`).
+So `initial_normal` is `nu_0`.
+`final_normal` is `event_box[0] * event_box[1] - ZS`, which is `nu_T`.
+And `det(DQ_0)` is `q0_area`, which is computed as:
+`q0_area = (UNSTABLE_X * STABLE_Y - STABLE_X * UNSTABLE_Y) * RADIUS_U * RADIUS_S`
+This is the area of the parallelogram spanned by the unstable and stable directions, scaled by the box side lengths. This is indeed the Jacobian determinant of the map from (u, s) to (x, y) at the origin!
+So the Poincare determinant formula `det(DP) = exp(ell) * nu_0 / nu_T * det(DQ_0)` is mathematically CORRECT.
+
+Let's check the determinant formula carefully.
+Is `exp(ell)` supposed to be evaluated as a point or an interval?
+In `advance`:
+```python
+    polynomial = [
+        sum(
+            (coefficients[index][power] * step**power for power in range(TAYLOR_ORDER + 1)),
+            arb(0),
+        )
+        for index in range(4)
+    ]
+    ...
+    return [component.mid() for component in polynomial], next_radius
+```
+Wait! `advance` returns `[component.mid() for component in polynomial]` as the next center!
+But it does NOT add the global error radius to the components!
+Wait, `polynomial` is the center evaluation.
+The true state is enclosed by `arb(center, radius)`.
+But in `advance`, the center returned is just the midpoint of the polynomial evaluated at `center`.
+It completely discards the interval enclosure for the center!
+Wait, `polynomial` is computed using `flow_coefficients(center, TAYLOR_ORDER)`.
+The inputs `center` are exact `arb` midpoints.
+So `polynomial` are exact interval evaluations of the polynomial at the center.
+Its midpoint is the exact center evaluation.
+Then `next_radius` is computed: `amplification * radius + local_remainder + rounding_radius`.
+Then `advance` returns the new center and the new radius.
+But wait! The Taylor remainder is `local_remainder`. It bounds the error between the exact solution and the infinite Taylor series.
+The difference between the exact solution and the 40-degree Taylor polynomial is bounded by `local_remainder`.
+The difference between the 40-degree Taylor polynomial evaluated at the true initial state (which is in `[center, radius]`) and evaluated at the center is bounded by `amplification * radius`.
+So `next_radius` correctly bounds the distance between the exact solution at `t = h` and the polynomial evaluated at the center!
+This is mathematically sound!
+BUT wait! What about `ell`?
+The determinant uses `event_box[3]`, which is `ell`.
+`event_box` is produced by `picard_box(low_center, low_radius, high - low)`.
+So `event_box[3]` is an interval bounding `ell` at the event!
+This is correct, we want an interval enclosure for `ell(T)` to compute the interval enclosure for the determinant.
+BUT wait. `ell` in the full system is defined as `ell' = trace(J)`.
+The determinant formula requires `exp(ell(T))`, where `ell(T)` is the integral of the divergence along the TRUE trajectory.
+Since `event_box[3]` bounds `ell(T)` at the event, `event_box[3].exp()` bounds `exp(ell(T))`.
+This is correct!
+
+Wait! Is `second_event[3]` `ell`?
+Yes, `second_event` is `event_box`, which is `[x_box, y_box, w_box, ell_box]`.
+`second_event[3]` is `ell_box`.
+So `determinant = ell_box.exp() * initial_normal / final_normal * q0_area`.
+This is perfectly correct.
+
+Let's look at `locate_event` again.
+```python
+def locate_event(center: list[arb], radius: arb) -> tuple[arb, arb, list[arb]]:
+    low, high = arb(0), STEP
+    low_center, low_radius = center, radius
+    for _ in range(EVENT_BISECTIONS):
+        middle = (low + high) / 2
+        middle_center, middle_radius = advance(center, radius, middle)
+        middle_sign = sign(middle_center[2], middle_radius)
+        if middle_sign < 0:
+            low, low_center, low_radius = middle, middle_center, middle_radius
+        elif middle_sign > 0:
+            high = middle
+        else:
+            ...
+```
+If `middle_sign < 0`, it sets `low = middle`. But wait!
+`low_center` becomes `middle_center`, which is the state at `t = middle` from `t = 0`.
+If it later does `advance(low_center, low_radius, ...)` it would be correct.
+BUT at the end of `locate_event`, it does:
+```python
+    high_center, high_radius = advance(center, radius, high)
+```
+Wait, it computes `high_center` from `center`, NOT from `low_center`.
+So `high_center` is the state at `t = high` from `t = 0`. This is correct!
+But what about the event box?
+```python
+    event_box = picard_box(low_center, low_radius, high - low)
+```
+`low_center` is the state at `t = low` (computed from `center`).
+So `picard_box(low_center, low_radius, high - low)` integrates the state at `t = low` to `t = high`.
+This is correct, because the ODE is autonomous, so integrating from `low` with duration `high - low` gives the exact same trajectory as integrating from `0` with duration `high`.
+Wait! Is `ell` an autonomous variable?
+Yes, `ell' = f(x, y, w)`. Since `x, y, w` are autonomous, `ell` is autonomous.
+The ODE system is completely autonomous. Time shift invariance holds perfectly.
+So `event_box` correctly bounds the trajectory from `t = low` to `t = high`.
+
+Wait! If `locate_event` is called, it starts with `low = 0`, `high = STEP`.
+It uses `center` and `radius` which are the state at `t = 0` of this step.
+But wait! `locate_event` advances from `center` with times up to `STEP`.
+But `advance(center, radius, middle)` inside `locate_event` uses `middle` as the step!
+Wait, `advance` in the main loop is called with `STEP`.
+```python
+    while steps < MAX_STEPS and len(events) < 2:
+        next_center, next_radius = advance(center, radius, STEP)
+        before_sign = sign(center[2], radius)
+        after_sign = sign(next_center[2], next_radius)
+        if after_sign < 0:
+            armed = True
+        if armed and before_sign < 0 and after_sign > 0:
+            low, high, event_box = locate_event(center, radius)
+```
+Wait! `locate_event` returns `low` and `high` as times!
+But in `main`:
+```python
+            base_time = arb(steps) * STEP
+            events.append((base_time + low, base_time + high, event_box))
+```
+But wait! `event_box` is `picard_box(low_center, low_radius, high - low)`.
+This Picard box bounds the state from `low` to `high`.
+But `event_box` is stored in `events`.
+Then for the determinant, it uses `second_event = events[1][2]`, which is `event_box`.
+This correctly represents the state interval AT the event!
+Wait! `event_box` is the union of states over `t \in [low, high]`.
+Because `picard_box` integrates over `[0, high - low]`, the returned box encloses the trajectory for all `t` in that interval!
+Yes, the Picard iteration is `x_0 + [0, h] f(B)`. So `B` encloses the trajectory for ALL `t \in [0, h]`.
+So `event_box` encloses the trajectory from `low` to `high`.
+This means `event_box[0]` is an interval enclosing `x(t)` for `t \in [low, high]`.
+So `final_normal = event_box[0] * event_box[1] - ZS` encloses `x(t)y(t) - ZS` for `t \in [low, high]`.
+And `event_box[3]` encloses `ell(t)` for `t \in [low, high]`.
+Is it valid to use the bounding box over `[low, high]` for the determinant?
+The determinant formula `exp(ell(T)) * ...` requires `ell(T)` AT the crossing `T`.
+Since `event_box` encloses the trajectory over `[low, high]`, it certainly encloses the value at `T`!
+Because `T \in [low, high]`, the value at `T` is contained in the bounding box over `[low, high]`.
+So using `event_box` for the determinant is a valid over-estimation! This is standard in validated numerics.
+
+BUT, is there any flaw in `picard_box` returning the box over the whole interval?
+Let's check `picard_box`:
+```python
+    time_interval = arb(step / 2, step / 2)
+    box = [...]
+    for iteration in range(1, 51):
+        image = [
+            component + time_interval * derivative
+
+
+Raw JSON: /tmp/llm-offload-ZXIz5Q/
