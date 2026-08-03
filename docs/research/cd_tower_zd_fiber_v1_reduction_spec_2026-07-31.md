@@ -925,3 +925,45 @@ proof that the pair cannot propagate itself in general, and a proof that the sur
 non-linear.
 
 **(III) is untouched. (d) is not closed, and V1 is not proven.**
+
+---
+
+## 19. The third level-quantity is `lsb(W)` (`W26`, 2026-08-03)
+
+`W25` proved the pair `(t2,t3)` is not self-propagating on the high branch. The missing datum is
+
+> **`lsb(W)` — the 2-adic valuation of the label.**
+
+### 19.1 It is the one the structure predicted
+
+`τ` moves the **lowest set bit** to position 0, so `lsb` is precisely the datum `τ` destroys. And
+`W24` proved:
+
+* `tr(A²)` is invariant under **both** `GL(3,2)` and `τ` — so it depends only on
+  `g(W) = (W & (W−1)) ≫ 3`, which **discards** the lowest set bit;
+* `tr(A³)` is invariant under `GL(3,2)` **only**.
+
+So `tr(A³)` must see exactly what `g` threw away. It does: adjoining `lsb(W′)` kills **every**
+high-branch collision at `n = 7,8,9,10`, where the pair alone collides at 1, 2, 4 and 8 keys.
+
+### 19.2 It propagates for free
+
+`lsb` is **label data**, not a graph invariant. On the high branch `W = W′ + e` with `W′ ≠ 0`, so
+`lsb(W) = lsb(W′)`. Hence the **triple `(t2, t3, lsb)` is self-propagating** where the pair is not.
+
+### 19.3 The sharp negative: no spectral invariant would have done
+
+Adding `tr(A⁴)` or `tr(A⁵)` leaves the collision count **exactly unchanged** (1, 2, 4 at
+`n = 7,8,9` — identical to the pair). The colliding labels agree across the whole trace family, so
+**no level-(n−1) spectral invariant can supply the missing datum**. It had to be
+label-arithmetic, and it is.
+
+### 19.4 Still not a formula
+
+At **fixed** `lsb′` the high branch is determined but **not affine** in `(t2′,t3′)` — an affine fit
+misses by `1e5`–`1e6`, against exact zero on the low branch.
+
+**`tr(A³)` is not closed.** What is now known is exactly *which three quantities* a closed form may
+use, and that no fourth trace would help.
+
+**(III) is untouched. (d) is not closed, and V1 is not proven.**

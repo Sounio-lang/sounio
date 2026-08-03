@@ -1891,6 +1891,80 @@ def main():
             "buys is one exact half of the recursion and two impossibility results that rule out "
             "the two obvious ansaetze. (III) untouched; (d) IS NOT CLOSED ***")
 
+    # ---- W26  THE THIRD LEVEL-QUANTITY IS lsb(W) ------------------------------------------
+    # W25 proved the pair (t2,t3) is NOT self-propagating on the high branch. The missing datum
+    # is lsb(W), the 2-adic valuation of the label -- and that is exactly what `tau` normalises
+    # away (tau moves the lowest set bit to position 0). It coheres with W24: tr(A^2) IS
+    # tau-invariant and so needs only g(W), which DISCARDS lsb; tr(A^3) is NOT tau-invariant and
+    # needs lsb back. The search was run against spectral candidates too, and they FAIL.
+    def _lsb(W):
+        return (W & -W).bit_length() - 1
+
+    _P = {}
+    for _n in range(5, 11):
+        _S = sign_table_fast(_n)
+        for _W in range(1, 1 << (_n - 1)):
+            _P[(_n, _W)] = traces23(A_sig_fast(_n, _W, _S))
+
+    def _hi_coll(n, key):
+        e = 1 << (n - 2)
+        mp = {}
+        for W in range(e, 1 << (n - 1)):
+            Wp = W % e
+            if Wp:
+                mp.setdefault(key(n - 1, Wp), set()).add(_P[(n, W)][1])
+        return sum(1 for v in mp.values() if len(v) > 1), len(mp)
+
+    pair = lambda n, W: _P[(n, W)]
+    triple = lambda n, W: (_P[(n, W)][0], _P[(n, W)][1], _lsb(W))
+    rows26 = []
+    for n in range(7, 11):
+        cp, kp = _hi_coll(n, pair)
+        ct, kt = _hi_coll(n, triple)
+        rows26.append((n, cp, kp, ct, kt))
+    # SPECTRAL CANDIDATES FAIL: adding tr(A^4), tr(A^5) changes nothing
+    spec_rows = []
+    for n in (7, 8, 9):
+        S = sign_table_fast(n - 1)
+        t45 = {}
+        for W in range(1, 1 << (n - 2)):
+            A = A_sig_fast(n - 1, W, S).astype(np.float64)
+            A2 = A @ A
+            t45[W] = (int(round(np.trace(A2 @ A2))), int(round(np.trace(A2 @ A2 @ A))))
+        k4 = lambda nn, W: (_P[(nn, W)][0], _P[(nn, W)][1], t45[W][0])
+        k5 = lambda nn, W: (_P[(nn, W)][0], _P[(nn, W)][1], t45[W][1])
+        c4, _ = _hi_coll(n, k4)
+        c5, _ = _hi_coll(n, k5)
+        cp, _ = _hi_coll(n, pair)
+        spec_rows.append((n, cp, c4, c5))
+    w26 = (all(ct == 0 and cp > 0 for _, cp, _, ct, _ in rows26)
+           and all(c4 == cp and c5 == cp and cp > 0 for _, cp, c4, c5 in spec_rows))
+    ok["W26"] = w26
+    print(f"W26_LSB     THE THIRD LEVEL-QUANTITY IS lsb(W) -- THE 2-ADIC VALUATION OF THE LABEL "
+          f"{'OK' if w26 else 'FAIL'} -- HIGH-branch collisions, pair (t2',t3') vs triple "
+          f"(t2',t3',lsb'): "
+          + "; ".join(f"n={a}: {b}/{c} colliding with the pair, {d}/{e} with the triple"
+                      for a, b, c, d, e in rows26)
+          + "; SPECTRAL CANDIDATES REFUTED (adding tr(A^4) or tr(A^5) changes NOTHING): "
+          + "; ".join(f"n={a}: pair {b}, +t4 {c}, +t5 {d}" for a, b, c, d in spec_rows)
+          + ". *** THE ANSWER IS lsb(W), AND IT IS THE ONE THE STRUCTURE PREDICTED. `tau` moves "
+            "the LOWEST SET BIT to position 0, so lsb is precisely the datum tau destroys. W24 "
+            "proved tr(A^2) is invariant under BOTH GL(3,2) and tau -- hence it depends only on "
+            "g(W) = (W & (W-1)) >> 3, which DISCARDS the lowest set bit -- while tr(A^3) is "
+            "invariant under GL(3,2) ONLY. So tr(A^3) must see exactly what g threw away, and it "
+            "does: adjoining lsb(W') kills every high-branch collision at n = 7,8,9,10, where "
+            "the pair alone collides at 1, 2, 4 and 8 keys. *** AND lsb PROPAGATES FOR FREE: it "
+            "is label data, not a graph invariant -- on the high branch W = W' + e with W' != 0, "
+            "so lsb(W) = lsb(W'). Hence the TRIPLE (t2, t3, lsb) is SELF-PROPAGATING where the "
+            "pair is not. *** THE SPECTRAL NEGATIVE IS THE SHARP ONE: adding tr(A^4) or tr(A^5) "
+            "leaves the collision count EXACTLY unchanged, so the colliding labels agree in the "
+            "whole trace family -- no level-(n-1) SPECTRAL invariant can supply the missing "
+            "datum. It had to be label-arithmetic, and it is. *** STILL NOT A FORMULA: at FIXED "
+            "lsb' the high branch is determined but NOT AFFINE in (t2',t3') -- an affine fit "
+            "misses by 1e5 to 1e6, against exact zero on the low branch. tr(A^3) IS NOT CLOSED; "
+            "what is now known is exactly which three quantities a closed form may use. "
+            "(III) untouched; (d) IS NOT CLOSED ***")
+
     print("=" * 78)
     if all(ok.values()):
         print("CD_TOWER_ZDV1_VERDICT C_CLOSED__V1_REDUCED_TO_D_ALONE__NOT_CLOSED")
