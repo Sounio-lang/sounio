@@ -1069,18 +1069,33 @@ All by induction on `n`, all kernel-clean: `sumLt_zero`, `sumLt_const`, `sumLt_p
 | `Ncnt_ll_low` | **`ll` IS the level-`m+1` count** — `Q'red_low_ll` is unconditional, no slices |
 | `Ncnt_ul_low` | `ul` reduces to the **unprimed** count `Mcnt` |
 | `Ncnt_lu_low` | `lu` reduces to the transposed unprimed count, `a ≠ 0`, `a ≠ W` |
+| `Ncnt_uu_low` | **`uu`** — five side conditions, and they collapse (below) |
 
 `ul` and `lu` land on `Qgen`, not `Qgen'`, because those two low rows do. `lu`'s single
 row-failure `a = W` contributes **nothing**: `Qgen'_label_left` makes the value `+1` there, so the
 indicator is `0`. `W29`'s null control confirms that dropping the `a ≠ W` guard genuinely changes
 the count.
 
-### 22.3 What is not done
+### 22.3 `uu` closes the set
 
-* the **`uu`** quadrant — five side conditions;
-* the **bridge from the unprimed counts back to `Ncnt`** — the six-line slice arithmetic.
+Its five side conditions **collapse**. On **every** failure slice `Qgen = −1`:
 
-Until both land, **the LOW recursion is not yet a Lean theorem** and the closed form's derivation
+* `u = 0` and `v = 0` are the gap roots `a = H` and `b = H`;
+* `u = W` and `v = W` are `a ⊕ W = H` and `b ⊕ W = H`.
+
+So `Qgen'_off_lines` converts all four at once. The fifth, `v = u ⊕ W`, is exactly
+`Qgen'_coset_partner` — value `+1`, contributing **nothing**. **All four LOW quadrants are now
+Lean theorems.**
+
+(`by_contra` bit here, as it always does: it does not exist Mathlib-free and silently becomes
+`sorryAx`. Two uses were caught by the `unknown tactic` error and replaced with `by_cases`.)
+
+### 22.4 What is not done
+
+The **bridge from the unprimed counts back to `Ncnt`** — the six-line slice arithmetic, over
+**six overlapping lines**, which is the part that needs care.
+
+Until it lands, **the LOW recursion is not yet a Lean theorem** and the closed form's derivation
 still rests on the contract clause. The caveat stays in place.
 
 **(III) is untouched. `tr(A³)` is not closed. (d) is not closed, and V1 is not proven.**

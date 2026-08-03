@@ -2170,13 +2170,40 @@ def main():
                     if a != 0 and _Qu2(S1, W, v, a) == -1)
         if lu != naive:
             null29 += 1
-    w29 = (all(b == c == d == f == 0 for _, _, b, c, d, f in w29_rows) and null29 > 0)
+    def _uuInd(S1, W, u, v):
+        return 1 if (u != v and v != (u ^ W)
+                     and (u == 0 or v == 0 or u == W or v == W
+                          or _Qp(S1, W, v, u) == -1)) else 0
+
+    bad_uu = 0
+    for m in (3, 4):
+        e = 1 << (m + 1)
+        S2, S1 = sign_table_fast(m + 2), sign_table_fast(m + 1)
+        for W in range(1, e):
+            for u in range(e):
+                for v in range(e):
+                    if _nInd(S2, W, e + u, e + v) != _uuInd(S1, W, u, v):
+                        bad_uu += 1
+    null_uu = 0
+    e = 1 << 4
+    S2, S1 = sign_table_fast(5), sign_table_fast(4)
+    for W in range(1, e):
+        for u in range(e):
+            for v in range(e):
+                naive = 1 if (u != v and (u == 0 or v == 0 or u == W or v == W
+                                          or _Qp(S1, W, v, u) == -1)) else 0
+                if _nInd(S2, W, e + u, e + v) != naive:
+                    null_uu += 1
+    w29 = (all(b == c == d == f == 0 for _, _, b, c, d, f in w29_rows) and null29 > 0
+           and bad_uu == 0 and null_uu > 0)
     ok["W29"] = w29
-    print(f"W29_LEDGER  THE COUNTING RECURSION ENTERS LEAN -- THREE OF FOUR LOW QUADRANTS "
+    print(f"W29_LEDGER  THE COUNTING RECURSION ENTERS LEAN -- ALL FOUR LOW QUADRANTS "
           f"{'OK' if w29 else 'FAIL'} -- "
           + "; ".join(f"level {a}: {b} labels, quad-split {c}, ll {d}, ul {e}, lu {f} failing"
                       for a, b, c, d, e, f in w29_rows)
-          + f"; NULL CONTROL (drop the a != W guard from lu): {null29} labels break, as required."
+          + f"; NULL CONTROL (drop the a != W guard from lu): {null29} labels break, as required"
+            f"; uu pointwise (Ncnt_uu_low) at levels 5,6: {bad_uu} failures; its NULL "
+            f"CONTROL (drop the v != u^W guard): {null_uu} pairs break, as required."
             " *** `Ncnt_quad` splits the level-(m+2) box into its four quadrants at the seam "
             "2^(m+1) -- two applications of `sumLt_add` plus `sumLt_pair`. *** `Ncnt_ll_low` is "
             "the clean one: `Q'red_low_ll` is UNCONDITIONAL, so that quadrant IS the level-(m+1) "
@@ -2188,9 +2215,9 @@ def main():
             "TOOLKIT, all by induction and all kernel-clean: `sumLt_zero`, `sumLt_const`, "
             "`sumLt_pair`, `sumLt_split_if`, `sumLt_single`, `sumLt_single'`. Split by "
             "predicate, extract singletons, evaluate constants -- no Finset, exactly as Tier 27 "
-            "avoided cardinality. *** WHAT IS NOT DONE: the `uu` quadrant (five side conditions) "
-            "and the bridge from the UNPRIMED counts back to `Ncnt`, which is the six-line slice "
-            "arithmetic. Until both land, the LOW recursion is NOT yet a Lean theorem and the "
+            "avoided cardinality. *** AND `uu` CLOSES THE SET: its five side conditions COLLAPSE, because on EVERY failure slice Qgen = -1 (u=0 and v=0 are the gap roots a=H and b=H; u=W and v=W are a^W=H and b^W=H), so `Qgen'_off_lines` converts all four at once, while the fifth, v = u^W, is exactly `Qgen'_coset_partner` and gives +1, contributing NOTHING. ALL FOUR LOW QUADRANTS ARE NOW LEAN THEOREMS. *** WHAT IS NOT DONE: "
+            "the bridge from the UNPRIMED counts back to `Ncnt`, the six-line slice "
+            "arithmetic over SIX OVERLAPPING lines. Until it lands the LOW recursion is NOT yet a Lean theorem and the "
             "closed form's derivation still rests on this clause. (III) untouched; tr(A^3) NOT "
             "closed; (d) IS NOT CLOSED ***")
 

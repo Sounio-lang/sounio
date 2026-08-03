@@ -5956,6 +5956,107 @@ theorem Ncnt_lu_low (W m : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
       · rw [if_neg (by rintro ⟨-, -, -, h⟩; exact hq h),
             if_neg (by rintro ⟨-, -, h⟩; exact hq h)]
 
+/-! ### Stage 2c: the `uu` quadrant
+
+Five side conditions, but they collapse. On EVERY failure slice `Qgen = -1` -- `u = 0` and
+`v = 0` are the gap roots `a = H` and `b = H`, `u = W` and `v = W` are `a ⊕ W = H` and
+`b ⊕ W = H` -- so `Qgen'_off_lines` converts all four at once. The fifth, `v = u ⊕ W`, is
+exactly `Qgen'_coset_partner`, which gives `+1` and so contributes nothing. -/
+
+/-- The level-`m+1` summand the `uu` quadrant reduces to. -/
+def uuInd (W m u v : Nat) : Nat :=
+  if u ≠ v ∧ v ≠ u ^^^ W ∧
+     (u = 0 ∨ v = 0 ∨ u = W ∨ v = W ∨ Qgen' W v u (m+1) = -1) then 1 else 0
+
+theorem Ncnt_uu_low (W m u v : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
+    (hu : u < 2^(m+1)) (hv : v < 2^(m+1)) :
+    nInd W (m+2) (2^(m+1) + u) (2^(m+1) + v) = uuInd W m u v := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have h2 : (2:Nat)^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  have hcu : (2:Nat)^(m+1) + u = u + 2^(m+1) := by omega
+  have hcv : (2:Nat)^(m+1) + v = v + 2^(m+1) := by omega
+  have halt : u + (2:Nat)^(m+1) < 2^(m+2) := by omega
+  have hblt : v + (2:Nat)^(m+1) < 2^(m+2) := by omega
+  have hWlt : W < (2:Nat)^(m+2) := by omega
+  have hxa : (u + 2^(m+1)) ^^^ W = (u ^^^ W) + 2^(m+1) := seam_xor_left u W m hu hW
+  have ha0 : u + (2:Nat)^(m+1) ≠ 0 := by omega
+  have haW : u + (2:Nat)^(m+1) ≠ W := by omega
+  have hb0 : v + (2:Nat)^(m+1) ≠ 0 := by omega
+  unfold nInd uuInd
+  rw [hcu, hcv]
+  by_cases huv : u = v
+  · rw [if_neg (by rintro ⟨-, -, h, -⟩; exact h (by rw [huv])),
+        if_neg (by rintro ⟨h, -⟩; exact h huv)]
+  · have hab : u + (2:Nat)^(m+1) ≠ v + 2^(m+1) := by omega
+    have hcosEq : (u + 2^(m+1)) ^^^ W = (u ^^^ W) + 2^(m+1) := hxa
+    by_cases hcos : v = u ^^^ W
+    · -- b = a ⊕ W : the coset partner, value +1, contributes nothing
+      have hbe : v + (2:Nat)^(m+1) = (u + 2^(m+1)) ^^^ W := by rw [hcosEq, hcos]
+      rw [hbe, Qgen'_coset_partner (m+2) W (u + 2^(m+1)) hWlt halt ha0
+            (by rw [hcosEq]; omega)]
+      rw [if_neg (by rintro ⟨-, -, -, h⟩; exact absurd h (by decide)),
+          if_neg (by rintro ⟨-, h, -⟩; exact h hcos)]
+    · have hcosNe : v + (2:Nat)^(m+1) ≠ (u + 2^(m+1)) ^^^ W := by
+        rw [hcosEq]; omega
+      by_cases hrow : u ≠ 0 ∧ v ≠ 0 ∧ u ≠ W ∧ v ≠ W
+      · obtain ⟨hu0, hv0, huW, hvW⟩ := hrow
+        rw [Q'red_low_uu m W u v hW hu hv hu0 hv0
+              (fun h => huW (xor_zero_eq u W h)) (fun h => hvW (xor_zero_eq v W h))
+              (by
+                intro h
+                apply hcos
+                have e1 : u ^^^ v = W := xor_zero_eq (u ^^^ v) W h
+                have e2 : u ^^^ (u ^^^ v) = u ^^^ W := by rw [e1]
+                rw [xorCancelL] at e2
+                exact e2)]
+        by_cases hq : Qgen' W v u (m+1) = -1
+        · rw [if_pos ⟨ha0, hb0, hab, hq⟩,
+              if_pos ⟨huv, hcos, Or.inr (Or.inr (Or.inr (Or.inr hq)))⟩]
+        · have hno : ¬ (u = 0 ∨ v = 0 ∨ u = W ∨ v = W ∨ Qgen' W v u (m+1) = -1) := by
+            rintro (h | h | h | h | h)
+            · exact hu0 h
+            · exact hv0 h
+            · exact huW h
+            · exact hvW h
+            · exact hq h
+          rw [if_neg (by rintro ⟨-, -, -, h⟩; exact hq h),
+              if_neg (by rintro ⟨-, -, h⟩; exact hno h)]
+      · -- a row failure: Qgen = -1 on every one of them, so `Qgen'_off_lines` applies
+        have hQ : Qgen W (u + 2^(m+1)) (v + 2^(m+1)) (m+2) = -1 := by
+          by_cases hu0 : u = 0
+          · rw [hu0, Nat.zero_add]
+            exact Qgen_H_left_low m W (v + 2^(m+1)) hW hW0 hblt
+          · by_cases hv0 : v = 0
+            · rw [hv0, Nat.zero_add]
+              exact Qgen_H_right_low m W (u + 2^(m+1)) hW hW0 halt
+            · by_cases huW : u = W
+              · exact Qgen_H_left_low' m W (u + 2^(m+1)) (v + 2^(m+1)) hW hW0 hblt
+                  (by rw [hxa, huW, Nat.xor_self, Nat.zero_add])
+              · have hvW : v = W := by
+                  by_cases hvW : v = W
+                  · exact hvW
+                  · exact absurd ⟨hu0, hv0, huW, hvW⟩ hrow
+                exact Qgen_H_right_low' m W (u + 2^(m+1)) (v + 2^(m+1)) hW hW0 halt
+                  (by rw [seam_xor_left v W m hv hW, hvW, Nat.xor_self, Nat.zero_add])
+        rw [Qgen'_off_lines (m+2) W (u + 2^(m+1)) (v + 2^(m+1)) hWlt halt hblt hQ
+              ha0 haW hab hcosNe]
+        rw [if_pos ⟨ha0, hb0, hab, rfl⟩]
+        have hdis : u = 0 ∨ v = 0 ∨ u = W ∨ v = W := by
+          by_cases h1 : u = 0
+          · exact Or.inl h1
+          · by_cases h2 : v = 0
+            · exact Or.inr (Or.inl h2)
+            · by_cases h3 : u = W
+              · exact Or.inr (Or.inr (Or.inl h3))
+              · by_cases h4 : v = W
+                · exact Or.inr (Or.inr (Or.inr h4))
+                · exact absurd ⟨h1, h2, h3, h4⟩ hrow
+        rcases hdis with h | h | h | h
+        · rw [if_pos ⟨huv, hcos, Or.inl h⟩]
+        · rw [if_pos ⟨huv, hcos, Or.inr (Or.inl h)⟩]
+        · rw [if_pos ⟨huv, hcos, Or.inr (Or.inr (Or.inl h))⟩]
+        · rw [if_pos ⟨huv, hcos, Or.inr (Or.inr (Or.inr (Or.inl h)))⟩]
+
 end SounioZDFiberAntisym
 
 
