@@ -5305,6 +5305,8 @@ theorem Ncnt_lowCob {t l} (h : LowCob t l) (k W : Nat) (hW : W < 2^(k+3)) :
   · rw [if_pos (hiff.mpr hc), if_pos hc]
   · rw [if_neg (fun hx => hc (hiff.mp hx)), if_neg hc]
 
+section GLClosure
+-- scoped so the raised limit does not leak past this block
 set_option maxRecDepth 100000
 
 /-! ### `LowCob` IS `GL(3,2)`, both directions
@@ -5723,6 +5725,8 @@ theorem lowCob_eq_GL (a b c : Nat) (ha : a < 8) (hb : b < 8) (hc : c < 8)
   obtain ⟨e1, e2, e3⟩ := glIdx_eq a ha b hb c hc h
   rw [e1, e2, e3] at hv
   exact ⟨t, l, hL, hv⟩
+
+end GLClosure
 
 
 end SounioZDFiberAntisym
