@@ -6574,6 +6574,288 @@ theorem lu_boundary (W M : Nat) (hW : W < 2^M) (hW0 : W ≠ 0) :
   have := count_off2 W M hW hW0
   omega
 
+/-- Three distinct values below `n` contribute exactly `3`. -/
+theorem sumLt_three (n x y z : Nat) (hx : x < n) (hy : y < n) (hz : z < n)
+    (hxy : x ≠ y) (hxz : x ≠ z) (hyz : y ≠ z) :
+    sumLt n (fun i => if i = x ∨ i = y ∨ i = z then 1 else 0) = 3 := by
+  rw [sumLt_cons n x (fun i => i = y ∨ i = z) hx
+        (by rintro (h | h)
+            · exact hxy h
+            · exact hxz h),
+      sumLt_cons n y (fun i => i = z) hy (fun h => hyz h),
+      sumLt_single n z 1 hz]
+
+/-- One line removed. -/
+theorem count_off1 (M : Nat) :
+    sumLt (2^M) (fun b => if b ≠ 0 then 1 else 0) + 1 = 2^M := by
+  have hp : (0:Nat) < 2^M := Nat.two_pow_pos M
+  have hc := sumLt_compl (2^M) (fun i => i = 0)
+  have h1 : sumLt (2^M) (fun i => if i = 0 then 1 else 0) = 1 :=
+    sumLt_single (2^M) 0 1 hp
+  have he : sumLt (2^M) (fun i => if i = 0 then 0 else 1)
+      = sumLt (2^M) (fun b => if b ≠ 0 then 1 else 0) := by
+    apply sumLt_congr
+    intro i _
+    by_cases h : i = 0
+    · rw [if_pos h, if_neg (fun hc2 => hc2 h)]
+    · rw [if_neg h, if_pos h]
+  rw [he, h1] at hc
+  omega
+
+/-- **The `ul` boundary count.** Two full rows of `2^M - 1`, then three values on each of the
+    remaining `2^M - 2` rows. -/
+theorem ul_boundary (W M : Nat) (hW : W < 2^M) (hW0 : W ≠ 0) :
+    sumLt (2^M) (fun u => sumLt (2^M) (fun b =>
+      if b ≠ 0 ∧ (u = 0 ∨ u = W ∨ b = W ∨ u = b ∨ b = u ^^^ W) then 1 else 0)) + 8
+      = 5 * 2^M := by
+  have hp : (0:Nat) < 2^M := Nat.two_pow_pos M
+  have hinner : ∀ u, u < 2^M →
+      sumLt (2^M) (fun b =>
+        if b ≠ 0 ∧ (u = 0 ∨ u = W ∨ b = W ∨ u = b ∨ b = u ^^^ W) then 1 else 0)
+        = if u = 0 ∨ u = W then 2^M - 1 else 3 := by
+    intro u hU
+    by_cases hg : u = 0 ∨ u = W
+    · rw [if_pos hg,
+          sumLt_congr (2^M) _ (fun b => if b ≠ 0 then 1 else 0)
+            (fun b _ => by
+              by_cases hb : b ≠ 0
+              · rw [if_pos ⟨hb, hg.elim (fun h => Or.inl h) (fun h => Or.inr (Or.inl h))⟩,
+                    if_pos hb]
+              · rw [if_neg (fun hc => hb hc.1), if_neg hb])]
+      have := count_off1 M
+      omega
+    · have h0 : u ≠ 0 := fun h => hg (Or.inl h)
+      have h1 : u ≠ W := fun h => hg (Or.inr h)
+      have hxlt : u ^^^ W < 2^M := Nat.xor_lt_two_pow hU hW
+      have hx0 : u ^^^ W ≠ 0 := fun h => h1 (xor_zero_eq u W h)
+      have hxW : u ^^^ W ≠ W := by
+        intro h
+        apply h0
+        have e : (u ^^^ W) ^^^ W = W ^^^ W := by rw [h]
+        rw [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero] at e
+        exact e
+      have hxu : u ^^^ W ≠ u := by
+        intro h
+        apply hW0
+        have e : u ^^^ (u ^^^ W) = u ^^^ u := by rw [h]
+        rw [xorCancelL, Nat.xor_self] at e
+        exact e
+      rw [if_neg hg,
+          sumLt_congr (2^M) _ (fun b => if b = W ∨ b = u ∨ b = u ^^^ W then 1 else 0)
+            (fun b _ => by
+              by_cases hd : b = W ∨ b = u ∨ b = u ^^^ W
+              · have hb0 : b ≠ 0 := by
+                  rcases hd with h | h | h
+                  · rw [h]; exact hW0
+                  · rw [h]; exact h0
+                  · rw [h]; exact hx0
+                have hd' : u = 0 ∨ u = W ∨ b = W ∨ u = b ∨ b = u ^^^ W := by
+                  rcases hd with h | h | h
+                  · exact Or.inr (Or.inr (Or.inl h))
+                  · exact Or.inr (Or.inr (Or.inr (Or.inl h.symm)))
+                  · exact Or.inr (Or.inr (Or.inr (Or.inr h)))
+                rw [if_pos ⟨hb0, hd'⟩, if_pos hd]
+              · rw [if_neg hd, if_neg (fun hc => by
+                    rcases hc.2 with h | h | h | h | h
+                    · exact h0 h
+                    · exact h1 h
+                    · exact hd (Or.inl h)
+                    · exact hd (Or.inr (Or.inl h.symm))
+                    · exact hd (Or.inr (Or.inr h)))])]
+      exact sumLt_three (2^M) W u (u ^^^ W) hW hU hxlt (fun h => h1 h.symm)
+        (fun h => hxW h.symm) (fun h => hxu h.symm)
+  rw [sumLt_congr (2^M) _ (fun u => if u = 0 ∨ u = W then 2^M - 1 else 3) hinner,
+      sumLt_split_if]
+  have e1 : sumLt (2^M) (fun u => if u = 0 ∨ u = W then 2^M - 1 else 0)
+      = (2^M - 1) * 2 := by
+    rw [sumLt_scale, sumLt_two (2^M) W hW hW0 hp]
+  have e2 : sumLt (2^M) (fun u => if u = 0 ∨ u = W then 0 else 3)
+      = 3 * sumLt (2^M) (fun a => if a ≠ 0 ∧ a ≠ W then 1 else 0) := by
+    rw [← sumLt_scale]
+    apply sumLt_congr
+    intro i _
+    by_cases h : i = 0 ∨ i = W
+    · rw [if_pos h, if_neg (fun hc => h.elim hc.1 hc.2)]
+    · rw [if_neg h, if_pos ⟨fun hh => h (Or.inl hh), fun hh => h (Or.inr hh)⟩]
+  rw [e1, e2]
+  have := count_off2 W M hW hW0
+  omega
+
+/-- **The `uu` boundary count.** Two rows of `2^M - 2`, then two values on each of the
+    remaining `2^M - 2` rows. -/
+theorem uu_boundary (W M : Nat) (hW : W < 2^M) (hW0 : W ≠ 0) :
+    sumLt (2^M) (fun u => sumLt (2^M) (fun v =>
+      if u ≠ v ∧ v ≠ u ^^^ W ∧ (u = 0 ∨ v = 0 ∨ u = W ∨ v = W) then 1 else 0)) + 8
+      = 4 * 2^M := by
+  have hp : (0:Nat) < 2^M := Nat.two_pow_pos M
+  have hinner : ∀ u, u < 2^M →
+      sumLt (2^M) (fun v =>
+        if u ≠ v ∧ v ≠ u ^^^ W ∧ (u = 0 ∨ v = 0 ∨ u = W ∨ v = W) then 1 else 0)
+        = if u = 0 ∨ u = W then 2^M - 2 else 2 := by
+    intro u hU
+    by_cases hg : u = 0 ∨ u = W
+    · rw [if_pos hg,
+          sumLt_congr (2^M) _ (fun v => if v ≠ 0 ∧ v ≠ W then 1 else 0)
+            (fun v _ => by
+              rcases hg with h | h
+              · have hx : u ^^^ W = W := by rw [h, Nat.zero_xor]
+                by_cases hd : v ≠ 0 ∧ v ≠ W
+                · rw [if_pos ⟨fun hh => hd.1 (by rw [← hh, h]), by rw [hx]; exact hd.2,
+                        Or.inl h⟩, if_pos hd]
+                · rw [if_neg hd, if_neg (fun hc => by
+                      apply hd
+                      exact ⟨fun hh => hc.1 (by rw [h, hh]), by
+                        have := hc.2.1; rw [hx] at this; exact this⟩)]
+              · have hx : u ^^^ W = 0 := by rw [h, Nat.xor_self]
+                by_cases hd : v ≠ 0 ∧ v ≠ W
+                · rw [if_pos ⟨fun hh => hd.2 (by rw [← hh, h]), by rw [hx]; exact hd.1,
+                        Or.inr (Or.inr (Or.inl h))⟩, if_pos hd]
+                · rw [if_neg hd, if_neg (fun hc => by
+                      apply hd
+                      refine ⟨?_, fun hh => hc.1 (by rw [h, hh])⟩
+                      have := hc.2.1; rw [hx] at this; exact this)])]
+      have := count_off2 W M hW hW0
+      omega
+    · have h0 : u ≠ 0 := fun h => hg (Or.inl h)
+      have h1 : u ≠ W := fun h => hg (Or.inr h)
+      have hx0 : u ^^^ W ≠ 0 := fun h => h1 (xor_zero_eq u W h)
+      have hxW : u ^^^ W ≠ W := by
+        intro h
+        apply h0
+        have e : (u ^^^ W) ^^^ W = W ^^^ W := by rw [h]
+        rw [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero] at e
+        exact e
+      rw [if_neg hg,
+          sumLt_congr (2^M) _ (fun v => if v = 0 ∨ v = W then 1 else 0)
+            (fun v _ => by
+              by_cases hd : v = 0 ∨ v = W
+              · have hne : u ≠ v := by
+                  rcases hd with h | h
+                  · rw [h]; exact h0
+                  · rw [h]; exact h1
+                have hnx : v ≠ u ^^^ W := by
+                  rcases hd with h | h
+                  · rw [h]; exact fun hh => hx0 hh.symm
+                  · rw [h]; exact fun hh => hxW hh.symm
+                have hdis : u = 0 ∨ v = 0 ∨ u = W ∨ v = W := by
+                  rcases hd with h | h
+                  · exact Or.inr (Or.inl h)
+                  · exact Or.inr (Or.inr (Or.inr h))
+                rw [if_pos ⟨hne, hnx, hdis⟩, if_pos hd]
+              · rw [if_neg hd, if_neg (fun hc => by
+                    rcases hc.2.2 with h | h | h | h
+                    · exact h0 h
+                    · exact hd (Or.inl h)
+                    · exact h1 h
+                    · exact hd (Or.inr h))])]
+      exact sumLt_two (2^M) W hW hW0 hp
+  rw [sumLt_congr (2^M) _ (fun u => if u = 0 ∨ u = W then 2^M - 2 else 2) hinner,
+      sumLt_split_if]
+  have e1 : sumLt (2^M) (fun u => if u = 0 ∨ u = W then 2^M - 2 else 0)
+      = (2^M - 2) * 2 := by
+    rw [sumLt_scale, sumLt_two (2^M) W hW hW0 hp]
+  have e2 : sumLt (2^M) (fun u => if u = 0 ∨ u = W then 0 else 2)
+      = 2 * sumLt (2^M) (fun a => if a ≠ 0 ∧ a ≠ W then 1 else 0) := by
+    rw [← sumLt_scale]
+    apply sumLt_congr
+    intro i _
+    by_cases h : i = 0 ∨ i = W
+    · rw [if_pos h, if_neg (fun hc => h.elim hc.1 hc.2)]
+    · rw [if_neg h, if_pos ⟨fun hh => h (Or.inl hh), fun hh => h (Or.inr hh)⟩]
+  rw [e1, e2]
+  have := count_off2 W M hW hW0
+  omega
+
+/-! ### Stage 3d: the assembly -/
+
+theorem Mcnt_eq (W M : Nat) (hW : W < 2^M) (hW0 : W ≠ 0) :
+    Mcnt W M + 8 = OffCnt W M + 5 * 2^M := by
+  have hstep : Mcnt W M
+      = sumLt (2^M) (fun u => sumLt (2^M) (fun b =>
+          if b ≠ 0 ∧ (u = 0 ∨ u = W ∨ b = W ∨ u = b ∨ b = u ^^^ W) then 1 else 0))
+        + OffCnt W M := by
+    unfold Mcnt OffCnt
+    rw [← sumLt_pair]
+    apply sumLt_congr
+    intro u hU
+    rw [sumLt_congr (2^M) _
+          (fun b => (if b ≠ 0 ∧ (u = 0 ∨ u = W ∨ b = W ∨ u = b ∨ b = u ^^^ W)
+                     then 1 else 0)
+            + (if u ≠ 0 ∧ u ≠ W ∧ b ≠ 0 ∧ b ≠ W ∧ u ≠ b ∧ b ≠ u ^^^ W
+                 ∧ Qgen' W u b M = -1 then 1 else 0))
+          (fun b hB => qInd_split W M u b hW hW0 hU hB),
+        sumLt_pair]
+  have := ul_boundary W M hW hW0
+  omega
+
+theorem LuSum_eq (W M : Nat) (hW : W < 2^M) (hW0 : W ≠ 0) :
+    sumLt (2^M) (fun a => sumLt (2^M) (fun v =>
+        if a ≠ 0 ∧ a ≠ W ∧ Qgen W v a M = -1 then 1 else 0)) + 8
+      = OffCnt W M + 4 * 2^M := by
+  have hstep : sumLt (2^M) (fun a => sumLt (2^M) (fun v =>
+        if a ≠ 0 ∧ a ≠ W ∧ Qgen W v a M = -1 then 1 else 0))
+      = sumLt (2^M) (fun a => sumLt (2^M) (fun v =>
+          if a ≠ 0 ∧ a ≠ W ∧ (v = 0 ∨ v = W ∨ v = a ∨ a = v ^^^ W) then 1 else 0))
+        + OffCnt W M := by
+    unfold OffCnt
+    rw [sumLt_swap (2^M) (fun x y => if x ≠ 0 ∧ x ≠ W ∧ y ≠ 0 ∧ y ≠ W ∧ x ≠ y
+                                       ∧ y ≠ x ^^^ W ∧ Qgen' W x y M = -1 then 1 else 0)]
+    rw [← sumLt_pair]
+    apply sumLt_congr
+    intro a hA
+    rw [sumLt_congr (2^M) _
+          (fun v => (if a ≠ 0 ∧ a ≠ W ∧ (v = 0 ∨ v = W ∨ v = a ∨ a = v ^^^ W)
+                     then 1 else 0)
+            + (if v ≠ 0 ∧ v ≠ W ∧ a ≠ 0 ∧ a ≠ W ∧ v ≠ a ∧ a ≠ v ^^^ W
+                 ∧ Qgen' W v a M = -1 then 1 else 0))
+          (fun v hV => luInd_split W M v a hW hW0 hV hA),
+        sumLt_pair]
+  have := lu_boundary W M hW hW0
+  omega
+
+theorem UuSum_eq (W m : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLt (2^(m+1)) (fun u => sumLt (2^(m+1)) (fun v => uuInd W m u v)) + 8
+      = OffCnt W (m+1) + 4 * 2^(m+1) := by
+  have hstep : sumLt (2^(m+1)) (fun u => sumLt (2^(m+1)) (fun v => uuInd W m u v))
+      = sumLt (2^(m+1)) (fun u => sumLt (2^(m+1)) (fun v =>
+          if u ≠ v ∧ v ≠ u ^^^ W ∧ (u = 0 ∨ v = 0 ∨ u = W ∨ v = W) then 1 else 0))
+        + OffCnt W (m+1) := by
+    unfold OffCnt
+    rw [sumLt_swap (2^(m+1)) (fun x y => if x ≠ 0 ∧ x ≠ W ∧ y ≠ 0 ∧ y ≠ W ∧ x ≠ y
+                                           ∧ y ≠ x ^^^ W ∧ Qgen' W x y (m+1) = -1
+                                         then 1 else 0)]
+    rw [← sumLt_pair]
+    apply sumLt_congr
+    intro u hU
+    rw [sumLt_congr (2^(m+1)) _
+          (fun v => (if u ≠ v ∧ v ≠ u ^^^ W ∧ (u = 0 ∨ v = 0 ∨ u = W ∨ v = W)
+                     then 1 else 0)
+            + (if v ≠ 0 ∧ v ≠ W ∧ u ≠ 0 ∧ u ≠ W ∧ v ≠ u ∧ u ≠ v ^^^ W
+                 ∧ Qgen' W v u (m+1) = -1 then 1 else 0))
+          (fun v hV => uuInd_split W m u v hW hW0 hU hV),
+        sumLt_pair]
+  have := uu_boundary W (m+1) hW hW0
+  omega
+
+/-- **THE LOW RECURSION, ∀n.** The `W15` ledger is now a Lean theorem. -/
+theorem Ncnt_low (W m : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    Ncnt W (m+2) + 18 = 4 * Ncnt W (m+1) + 10 * 2^(m+1) := by
+  have huu : sumLt (2^(m+1)) (fun u =>
+        sumLt (2^(m+1)) (fun v => nInd W (m+2) (2^(m+1) + u) (2^(m+1) + v)))
+      = sumLt (2^(m+1)) (fun u => sumLt (2^(m+1)) (fun v => uuInd W m u v)) := by
+    apply sumLt_congr
+    intro u hU
+    apply sumLt_congr
+    intro v hV
+    exact Ncnt_uu_low W m u v hW hW0 hU hV
+  rw [Ncnt_quad, Ncnt_ll_low W m hW, Ncnt_ul_low W m hW, Ncnt_lu_low W m hW hW0, huu]
+  have h1 := Ncnt_eq_OffCnt W (m+1) hW hW0
+  have h2 := Mcnt_eq W (m+1) hW hW0
+  have h3 := LuSum_eq W (m+1) hW hW0
+  have h4 := UuSum_eq W m hW hW0
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  omega
+
 end SounioZDFiberAntisym
 
 

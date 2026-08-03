@@ -1176,3 +1176,46 @@ summing to `4·OffCnt + 14e − 26 = 4·Ncnt + 10e − 18` ✓ — the LOW recur
 Until the counting lands, **the LOW recursion is not yet a Lean theorem**.
 
 **(III) is untouched. `tr(A³)` is not closed. (d) is not closed, and V1 is not proven.**
+
+---
+
+## 24. The LOW recursion is a Lean theorem (`W31`, 2026-08-03)
+
+> `Ncnt_low : Ncnt W (m+2) + 18 = 4 · Ncnt W (m+1) + 10 · 2^{m+1}`
+
+The `W15` ledger's LOW half is **no longer paper — it is derived**. Kernel-clean, no `sorryAx`,
+no `native_decide`.
+
+### 24.1 The route
+
+1. **Split** — the box splits into four quadrants at the seam (`Ncnt_quad`).
+2. **Reduce** — each quadrant drops a level through its reduction row (`Ncnt_ll_low`,
+   `Ncnt_ul_low`, `Ncnt_lu_low`, `Ncnt_uu_low`).
+3. **Factor** — each reduces *pointwise* to a boundary term plus the shared off-lines core
+   `OffCnt` (`nInd_split`, `qInd_split`, `luInd_split`, `uuInd_split`).
+4. **Count** — the boundary terms, via `sumLt_cons`, `sumLt_two`/`_three`/`_four`,
+   `sumLt_scale`, `count_off1`/`_off2`:
+
+   | quadrant | boundary |
+   |---|---|
+   | `ll` | `2^M − 2` |
+   | `ul` | `5·2^M − 8` |
+   | `lu` | `4·2^M − 8` |
+   | `uu` | `4·2^M − 8` |
+
+5. **Tie back** — `Ncnt_eq_OffCnt` returns the core to `Ncnt`.
+
+### 24.2 The obstacle that dissolved
+
+The "six **overlapping** lines" that looked like the hard part never arose. **Summing a pointwise
+identity keeps the pieces disjoint for free**, so no inclusion–exclusion was needed anywhere. The
+difficulty was in the set-theoretic framing, not the mathematics.
+
+None of it needed `Finset` — the same route Tier 27 took for the counting step.
+
+### 24.3 What is still paper
+
+The **HIGH branch** — the reflection `4P′ − 4N′ + 6e − 10`. Until it lands, the closed form for
+`tr(A²)` is still not fully derived in Lean.
+
+**(III) is untouched. `tr(A³)` is not closed. (d) is not closed, and V1 is not proven.**

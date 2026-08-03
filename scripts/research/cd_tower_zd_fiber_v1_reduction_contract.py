@@ -2350,6 +2350,63 @@ def main():
             "recursion is NOT yet a Lean theorem. (III) untouched; tr(A^3) NOT closed; (d) IS "
             "NOT CLOSED ***")
 
+    # ---- W31  THE LOW RECURSION IS A LEAN THEOREM -----------------------------------------
+    # `Ncnt_low : Ncnt W (m+2) + 18 = 4 * Ncnt W (m+1) + 10 * 2^(m+1)`. The W15 ledger's LOW
+    # half is no longer paper -- it is derived. This clause pins the statement and the four
+    # boundary constants it is assembled from.
+    w31_rows = []
+    for M in (3, 4, 5, 6):
+        S1, H = sign_table_fast(M), 1 << M
+        S2 = sign_table_fast(M + 1)
+        bad = 0
+        for W in range(1, H):
+            if _Ncnt(S2, W, M + 1) + 18 != 4 * _Ncnt(S1, W, M) + 10 * H:
+                bad += 1
+        w31_rows.append((M + 1, H - 1, bad))
+    # the four boundary constants, independently
+    bnd = []
+    for M in (3, 4, 5):
+        S, H = sign_table_fast(M), 1 << M
+        ok_ll = all(sum(1 for a in range(H) for b in range(H)
+                        if b == W and a != 0 and a != W) == H - 2 for W in range(1, H))
+        ok_ul = all(sum(1 for u in range(H) for b in range(H)
+                        if b != 0 and (u == 0 or u == W or b == W or u == b
+                                       or b == (u ^ W))) == 5 * H - 8 for W in range(1, H))
+        ok_lu = all(sum(1 for a in range(H) for v in range(H)
+                        if a != 0 and a != W and (v == 0 or v == W or v == a
+                                                  or a == (v ^ W))) == 4 * H - 8
+                    for W in range(1, H))
+        ok_uu = all(sum(1 for u in range(H) for v in range(H)
+                        if u != v and v != (u ^ W)
+                        and (u == 0 or v == 0 or u == W or v == W)) == 4 * H - 8
+                    for W in range(1, H))
+        bnd.append((M, ok_ll, ok_ul, ok_lu, ok_uu))
+    # NULL CONTROL: the recursion must FAIL for W = 0 (Qgen 0 = +1, so Ncnt 0 = 0)
+    S1n, S2n, Hn = sign_table_fast(4), sign_table_fast(5), 16
+    null31 = (_Ncnt(S2n, 0, 5) + 18 != 4 * _Ncnt(S1n, 0, 4) + 10 * Hn)
+    w31 = all(c == 0 for _, _, c in w31_rows) and all(all(r[1:]) for r in bnd) and null31
+    ok["W31"] = w31
+    print(f"W31_LOWREC  THE LOW RECURSION IS A LEAN THEOREM {'OK' if w31 else 'FAIL'} -- "
+          + "; ".join(f"level {a}: {b} labels, {c} failing" for a, b, c in w31_rows)
+          + "; boundary constants (ll=2^M-2, ul=5*2^M-8, lu=4*2^M-8, uu=4*2^M-8): "
+          + "; ".join(f"M={a}: {b},{c},{d},{e}" for a, b, c, d, e in bnd)
+          + f"; NULL CONTROL (W = 0, where Qgen is identically +1): recursion fails = {null31}, "
+            "as required. *** `Ncnt_low : Ncnt W (m+2) + 18 = 4 * Ncnt W (m+1) + 10 * 2^(m+1)`. "
+            "THE W15 LEDGER'S LOW HALF IS NO LONGER PAPER -- IT IS DERIVED, kernel-clean, no "
+            "sorryAx and no native_decide. *** THE ROUTE, and none of it needed Finset: the box "
+            "splits into four quadrants at the seam (`Ncnt_quad`); each quadrant reduces to a "
+            "level-below count through its reduction row (`Ncnt_ll_low`, `Ncnt_ul_low`, "
+            "`Ncnt_lu_low`, `Ncnt_uu_low`); each of those factors POINTWISE into a boundary term "
+            "plus the shared off-lines core `OffCnt` (`nInd_split`, `qInd_split`, `luInd_split`, "
+            "`uuInd_split`); the boundary terms are counted by a small toolkit (`sumLt_cons`, "
+            "`sumLt_two`/`_three`/`_four`, `sumLt_scale`, `count_off1`/`_off2`) giving 2^M-2, "
+            "5*2^M-8, 4*2^M-8 and 4*2^M-8; and `Ncnt_eq_OffCnt` ties the core back to `Ncnt`. "
+            "*** THE OVERLAPPING-LINES PROBLEM NEVER AROSE: summing a POINTWISE identity keeps "
+            "the pieces disjoint for free, so no inclusion-exclusion was needed anywhere. *** "
+            "STILL PAPER: the HIGH branch (the reflection, 4P' - 4N' + 6e - 10). Until it lands "
+            "the closed form for tr(A^2) is still not fully derived in Lean. (III) untouched; "
+            "tr(A^3) NOT closed; (d) IS NOT CLOSED ***")
+
     print("=" * 78)
     if all(ok.values()):
         print("CD_TOWER_ZDV1_VERDICT C_CLOSED__V1_REDUCED_TO_D_ALONE__NOT_CLOSED")
