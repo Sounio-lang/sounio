@@ -117,7 +117,8 @@ Loop-initialised probes:
 
 | probe | N | closure edges | result |
 |---|---|---|---|
-| star | 100,000 | 199,999 | ALL PASS, 10.8 s |
+| star | 100,000 | 199,999 | ALL PASS, 10.8 s (workspace) |
+| star | 100,000 | 199,999 | ALL PASS, ~13 s (Slurm `cpu-ops`, job 8563+) |
 | star | 1,000,000 | 1,999,999 | ALL PASS, 1.0 s |
 | star | 10,000,000 | 19,999,999 | ALL PASS, 3.5 s |
 | chain | 10,000 | 50,005,000 | ALL PASS, 1.8 s |
@@ -167,7 +168,12 @@ committed `probe_dense_arr_*.sio` / `probe_sparse_loop_*.sio` files.
 Workspace-safe envelopes are established above; do NOT rerun these in
 the workspace:
 
-1. **Dense array wall bisection, N = 50k → 100k+** (loop-init star):
+1. ✅ **Sparse star N = 100k Slurm confirmation** (loop-init):
+   Submitted to `cpu-ops` via the Slurm login pod; result:
+   `closure edges: 199999`, `ALL PASS`.  The workspace timing (10.8 s)
+   and the Slurm timing (~13 s) agree; no new ceiling found.
+
+2. **Dense array wall bisection, N = 50k → 100k+** (loop-init star):
    N=100,000 needs 3×10¹⁰ bools ≈ 30 GB and a ~10¹¹-op fixpoint
    (multi-minute).  Gate: `probe_dense_arr_100000.sio` (generate with
    the 3b template) on a Foundry node; record pass/OOM/timeout.

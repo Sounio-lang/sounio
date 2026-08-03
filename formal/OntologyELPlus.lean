@@ -19,18 +19,19 @@ written in**:
   **role inclusions** `r ⊑ s` (role hierarchy — the feature that separates
   EL⁺ from plain EL).
 
-**Deliberately out of scope**: general role *composition* `r ∘ s ⊑ t`
-(right-hand role chains). SNOMED CT's stated form uses the role hierarchy and
-existential restrictions heavily but its classifier semantics (the EL⁺
-profile of OWL 2) adds composition on top; proving soundness for composition
-chains is left as the **next frontier** and is stated nowhere in this file.
-What is proved here is complete for the fragment above:
+**Now in scope**: general role *composition* `r ∘ s ⊑ t` (right-hand role
+chains), the feature that completes the EL⁺ profile of OWL 2 beyond the
+SNOMED-fragment treated in round 7. The file now proves soundness for the
+full EL⁺ constructor system including role-composition chaining.
+
+What is proved here is complete for the fragment below:
 
 1. `der_sound` — every subsumption derivable in the constructor system `Der`
    (axiom membership, reflexivity, transitivity, ⊓-intro, ⊓-elim-left/right,
-   ∃-monotonicity, ∃-roleSub chaining, ⊤-rule) holds in every model of the
-   TBox. The `exRoleSub` case chains existential witnesses through role
-   satisfaction — the genuinely new semantic content versus round 3.
+   ∃-monotonicity, ∃-roleSub chaining, ∃-roleComp chaining, ⊤-rule) holds in
+   every model of the TBox. The `exRoleSub`/`exComp` cases chain existential
+   witnesses through role inclusion and role-composition satisfaction — the
+   genuinely new semantic content versus round 3.
 2. `IncoherentP` / `incoherentP_empty` — an incoherent concept (one derivably
    subsumed by both sides of a disjointness) is empty in every model.
 3. `DerivedConflictP` / `oracle_sound_P` — the oracle bridge of round 4,
@@ -43,7 +44,7 @@ What is proved here is complete for the fragment above:
    `conflictBP_sound` lift the computed answers back into `Der` /
    `DerivedConflictP`, so the cheap boolean engine is proved sound for the
    atomic shadow of an EL⁺ TBox.
-5. A concrete SNOMED-flavoured `Fin 8` × `Fin 2` instance: Pneumonia ⊑
+5. A concrete SNOMED-flavoured `Fin 8` × `Fin 3` instance: Pneumonia ⊑
    Inflammation ⊑ Disorder, Lung ⊑ Organ, Pneumonia ⊑ ∃DirectSite.(Lung ⊓
    Inflammation), DirectSite ⊑ RoleGroup, Disorder ⊥ Drug, and an incoherent
    DrugInducedDisorder — with constructor-built `Der` derivations (including
@@ -51,8 +52,9 @@ What is proved here is complete for the fragment above:
    `exRoleSub`, `conjElimLeft`, `exMono`, and `trans` together) and
    `native_decide` boolean checks.
 
-Self-contained. No Mathlib. Zero sorry. No new axioms. No rule was dropped:
-every rule listed above is proved sound.
+Self-contained modulo the two ontology-frontiers imports below. No Mathlib.
+Zero sorry. No new axioms. No rule was dropped: every rule listed above is
+proved sound. Role composition is the new frontier closed in this round.
 -/
 
 
@@ -76,11 +78,13 @@ inductive Concept (α ρ : Type) : Type
   deriving DecidableEq, Repr
 
 /-- EL⁺ TBox axioms: concept inclusion `sub c d` (`c ⊑ d`), disjointness
-    `disj c d` (`c ⊥ d`), and role inclusion `roleSub r s` (`r ⊑ s`). -/
+    `disj c d` (`c ⊥ d`), role inclusion `roleSub r s` (`r ⊑ s`), and role
+    composition `roleComp r s t` (`r ∘ s ⊑ t`). -/
 inductive AxiomP (α ρ : Type) : Type
   | sub (c d : Concept α ρ)
   | disj (c d : Concept α ρ)
   | roleSub (r s : ρ)
+  | roleComp (r s t : ρ)
   deriving DecidableEq, Repr
 
 -- ---------------------------------------------------------------------------
@@ -97,11 +101,14 @@ def meaning (I : α → ι → Prop) (IR : ρ → ι → ι → Prop) : Concept 
   | .ex r c => fun x => ∃ y, IR r x y ∧ meaning I IR c y
 
 /-- Satisfaction of a single axiom. A role inclusion `r ⊑ s` holds when the
-    `r`-relation is contained in the `s`-relation. -/
+    `r`-relation is contained in the `s`-relation; a role composition
+    `r ∘ s ⊑ t` holds when the relational composition of `IR r` and `IR s` is
+    contained in `IR t`. -/
 def SatisfiesAxiomP (I : α → ι → Prop) (IR : ρ → ι → ι → Prop) : AxiomP α ρ → Prop
   | .sub c d => ∀ x, meaning I IR c x → meaning I IR d x
   | .disj c d => ∀ x, ¬ (meaning I IR c x ∧ meaning I IR d x)
   | .roleSub r s => ∀ x y, IR r x y → IR s x y
+  | .roleComp r s t => ∀ x y z, IR r x y → IR s y z → IR t x z
 
 /-- Satisfaction of a whole TBox: every axiom holds. -/
 def SatisfiesP (I : α → ι → Prop) (IR : ρ → ι → ι → Prop) (t : List (AxiomP α ρ)) : Prop :=
@@ -114,7 +121,8 @@ def SatisfiesP (I : α → ι → Prop) (IR : ρ → ι → ι → Prop) (t : Li
 /-- The deductive system: `Der t c d` reads "`t` derives `c ⊑* d`".
     Beyond round 3's `ofAxiom`/`refl`/`trans`, this adds the EL⁺ constructors:
     conjunction introduction and elimination, existential monotonicity,
-    existential role chaining through a role inclusion, and the ⊤-rule. -/
+    existential role chaining through a role inclusion, existential
+    role-composition chaining (exComp), and the ⊤-rule. -/
 inductive Der (t : List (AxiomP α ρ)) : Concept α ρ → Concept α ρ → Prop
   | ofAxiom {c d : Concept α ρ} : AxiomP.sub c d ∈ t → Der t c d
   | refl {c : Concept α ρ} : Der t c c
@@ -126,12 +134,16 @@ inductive Der (t : List (AxiomP α ρ)) : Concept α ρ → Concept α ρ → Pr
   | exMono {c d : Concept α ρ} {r : ρ} : Der t c d → Der t (.ex r c) (.ex r d)
   | exRoleSub {c d : Concept α ρ} {r s : ρ} : Der t c (.ex r d) →
       AxiomP.roleSub r s ∈ t → Der t c (.ex s d)
+  | exComp {c d : Concept α ρ} {r s u : ρ} :
+      Der t c (.ex r (.ex s d)) → AxiomP.roleComp r s u ∈ t →
+      Der t c (.ex u d)
   | topRule {c : Concept α ρ} : Der t c .top
 
 /-- **(1) Semantic soundness of the EL⁺ closure**: every derivable
-    subsumption holds in every model of the TBox. The `exRoleSub` case is the
-    new semantic content: an `r`-witness yielded by the premise is promoted
-    to an `s`-witness by role-inclusion satisfaction. -/
+    subsumption holds in every model of the TBox. The `exRoleSub` and `exComp`
+    cases are the new semantic content: an `r`-witness yielded by the premise
+    is promoted to an `s`-witness by role-inclusion satisfaction, or composed
+    through a role-composition axiom into a `t`-witness. -/
 theorem der_sound {I : α → ι → Prop} {IR : ρ → ι → ι → Prop}
     {t : List (AxiomP α ρ)} {c d : Concept α ρ}
     (h : Der t c d) (hI : SatisfiesP I IR t) :
@@ -163,6 +175,11 @@ theorem der_sound {I : α → ι → Prop} {IR : ρ → ι → ι → Prop}
       intro x hx
       obtain ⟨y, hr, hy⟩ := ih x hx
       exact ⟨y, hI _ hmem x y hr, hy⟩
+  | exComp _ hmem ih =>
+      intro x hx
+      obtain ⟨y, hr, hy⟩ := ih x hx
+      obtain ⟨z, hs, hz⟩ := hy
+      exact ⟨z, hI _ hmem x y z hr hs, hz⟩
   | topRule =>
       intro x _
       exact True.intro
@@ -254,6 +271,7 @@ def projectAxiom : AxiomP (Fin n) ρ → Option (Axiom (Fin n))
   | .disj (.atom a) (.atom b) => some (.disj a b)
   | .disj _ _ => none
   | .roleSub _ _ => none
+  | .roleComp _ _ _ => none
 
 /-- The atomic shadow of an EL⁺ TBox. -/
 def project (t : List (AxiomP (Fin n) ρ)) : List (Axiom (Fin n)) :=
@@ -304,6 +322,7 @@ theorem projectAxiom_some_sub {a : AxiomP (Fin n) ρ} {c d : Fin n}
       | conj c₁ c₂ => simp [projectAxiom] at h
       | ex r c₁ => simp [projectAxiom] at h
   | roleSub r s => simp [projectAxiom] at h
+  | roleComp r s t => simp [projectAxiom] at h
 
 /-- If the projection yields an atomic `disj` axiom, the preimage is exactly
     that axiom over `atom`s. -/
@@ -338,6 +357,7 @@ theorem projectAxiom_some_disj {a : AxiomP (Fin n) ρ} {c d : Fin n}
       | conj c₁ c₂ => simp [projectAxiom] at h
       | ex r c₁ => simp [projectAxiom] at h
   | roleSub r s => simp [projectAxiom] at h
+  | roleComp r s t => simp [projectAxiom] at h
 
 /-- A projected `sub` edge comes from a genuine atomic inclusion of the
     original TBox. -/
@@ -387,7 +407,7 @@ theorem conflictBP_sound {t : List (AxiomP (Fin n) ρ)} {c c' : Fin n}
 end AtomProjection
 
 -- ---------------------------------------------------------------------------
--- §7. Concrete instance: a SNOMED-flavoured TBox over `Fin 8` × `Fin 2`
+-- §7. Concrete instance: a SNOMED-flavoured TBox over `Fin 8` × `Fin 3`
 -- ---------------------------------------------------------------------------
 
 section SnomedInstance
@@ -404,22 +424,25 @@ Class ids (`Fin 8`):
 - `6` InflammatoryLesion
 - `7` DrugInducedDisorder
 
-Role ids (`Fin 2`):
+Role ids (`Fin 3`):
 
 - `0` RoleGroup
 - `1` DirectSite
+- `2` PartOf
 -/
 
 /-- The instance TBox. Pneumonia is an inflammation located (via a direct
     site, which is a sub-role of the role group) in the lung; a drug-induced
     disorder is asserted to be both a disorder and a drug, which are
     disjoint — the incoherence witness. -/
-def snomedTBox : List (AxiomP (Fin 8) (Fin 2)) :=
+def snomedTBox : List (AxiomP (Fin 8) (Fin 3)) :=
   [ .sub (.atom 4) (.atom 0)                           -- Pneumonia ⊑ Inflammation
   , .sub (.atom 0) (.atom 1)                           -- Inflammation ⊑ Disorder
   , .sub (.atom 2) (.atom 3)                           -- Lung ⊑ Organ
   , .sub (.atom 4) (.ex 1 (.conj (.atom 2) (.atom 0))) -- Pneumonia ⊑ ∃DirectSite.(Lung ⊓ Inflammation)
   , .roleSub 1 0                                       -- DirectSite ⊑ RoleGroup
+  , .roleComp 1 2 0                                    -- DirectSite ∘ PartOf ⊑ RoleGroup
+  , .sub (.atom 2) (.ex 2 (.atom 3))                    -- Lung ⊑ ∃PartOf.Organ
   , .disj (.atom 1) (.atom 5)                          -- Disorder ⊥ Drug
   , .sub (.atom 7) (.atom 1)                           -- DrugInducedDisorder ⊑ Disorder
   , .sub (.atom 7) (.atom 5)                           -- DrugInducedDisorder ⊑ Drug
@@ -460,6 +483,38 @@ theorem der_pneumonia_rg_organ : Der snomedTBox (.atom 4) (.ex 0 (.atom 3)) :=
   .trans der_pneumonia_rg_lung
          (.exMono (.ofAxiom (c := .atom 2) (d := .atom 3) (by decide)))
 
+/-- Lung ⊑* ∃PartOf.Organ (stated axiom). -/
+theorem der_lung_partof_organ :
+    Der snomedTBox (.atom 2) (.ex 2 (.atom 3)) :=
+  .ofAxiom (c := .atom 2) (d := .ex 2 (.atom 3)) (by decide)
+
+/-- Pneumonia ⊑* ∃DirectSite.Lung: from the stated axiom by ⊓-elimination
+    and existential monotonicity. -/
+theorem der_pneumonia_directsite_lung :
+    Der snomedTBox (.atom 4) (.ex 1 (.atom 2)) :=
+  .trans (.ofAxiom (c := .atom 4) (d := .ex 1 (.conj (.atom 2) (.atom 0)))
+           (by decide))
+         (.exMono (.conjElimLeft .refl))
+
+/-- ∃DirectSite.Lung ⊑* ∃DirectSite.(∃PartOf.Organ) by existential
+    monotonicity over `Lung ⊑ ∃PartOf.Organ`. -/
+theorem der_ex_directsite_partof_organ :
+    Der snomedTBox (.ex 1 (.atom 2)) (.ex 1 (.ex 2 (.atom 3))) :=
+  .exMono der_lung_partof_organ
+
+/-- Pneumonia ⊑* ∃DirectSite.(∃PartOf.Organ): chain the direct-site
+    restriction through the part-of restriction. -/
+theorem der_pneumonia_directsite_partof_organ :
+    Der snomedTBox (.atom 4) (.ex 1 (.ex 2 (.atom 3))) :=
+  .trans der_pneumonia_directsite_lung der_ex_directsite_partof_organ
+
+/-- Pneumonia ⊑* ∃RoleGroup.Organ via role composition
+    (`DirectSite ∘ PartOf ⊑ RoleGroup`). This is the EL⁺ composition
+    chain SNOMED CT uses for multi-step location relations. -/
+theorem der_pneumonia_rg_organ_via_comp :
+    Der snomedTBox (.atom 4) (.ex 0 (.atom 3)) :=
+  .exComp der_pneumonia_directsite_partof_organ (by decide)
+
 /-- ⊓-introduction: Pneumonia ⊑* Disorder ⊓ Inflammation. -/
 theorem der_pneumonia_conj :
     Der snomedTBox (.atom 4) (.conj (.atom 1) (.atom 0)) :=
@@ -485,21 +540,21 @@ theorem conflictP_pneumonia_drug : DerivedConflictP snomedTBox (.atom 4) (.atom 
 -- §7.2 Semantic consequences in arbitrary models
 
 /-- No model of the TBox has any drug-induced disorder. -/
-theorem no_did_in_models {I : Fin 8 → ι → Prop} {IR : Fin 2 → ι → ι → Prop}
+theorem no_did_in_models {I : Fin 8 → ι → Prop} {IR : Fin 3 → ι → ι → Prop}
     (hI : SatisfiesP I IR snomedTBox) : ∀ x, ¬ meaning I IR (.atom 7) x :=
   incoherentP_empty incoherentP_did hI
 
 /-- Oracle soundness, instantiated: no model can assert of one and the same
     entity that it is a pneumonia and that it is a drug — the licence for a
     repair operator to drop one of the two corresponding mappings. -/
-theorem oracle_sound_P_instance {I : Fin 8 → ι → Prop} {IR : Fin 2 → ι → ι → Prop}
+theorem oracle_sound_P_instance {I : Fin 8 → ι → Prop} {IR : Fin 3 → ι → ι → Prop}
     (hI : SatisfiesP I IR snomedTBox) :
     ∀ x, ¬ (meaning I IR (.atom 4) x ∧ meaning I IR (.atom 5) x) :=
   oracle_sound_P conflictP_pneumonia_drug hI
 
 -- §7.3 Decidable checks over the atom-only projection
 
-/-- The projection keeps exactly the six atomic axioms. -/
+/-- The projection keeps exactly the seven atomic axioms. -/
 theorem check_project : project snomedTBox =
     [ .sub 4 0, .sub 0 1, .sub 2 3, .disj 1 5, .sub 7 1, .sub 7 5, .sub 6 0 ] := rfl
 
