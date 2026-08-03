@@ -112,6 +112,10 @@ trap 'rm -rf "$WORK"' EXIT
 #   MADAROS-ONLY   only Madaros produced a running binary
 #   LEAN-ONLY      only lean_single did
 #   NEITHER        neither did
+#   NONDETERMINISTIC  the program does not agree with ITSELF across two runs of
+#                  the same engine, so no byte comparison between engines can
+#                  mean anything (typically `println` of a struct, which prints
+#                  an address)
 #   TIMEOUT        at least one engine was killed by the clock -- "too slow to
 #                  measure" is NOT "neither engine builds this", and conflating
 #                  them made a slow program read as a rejected one (#1591)
@@ -171,7 +175,25 @@ if [ "$ok_m" = 1 ] && [ "$ok_l" = 1 ]; then
     if cmp -s "$work/${tag}_mad.out" "$work/${tag}_lean.out"; then
         printf 'AGREE\t%s\n' "$src"
     else
-        printf 'DIVERGE\t%s\n' "$src"
+        # Before calling it a divergence, check the program is comparable at all.
+        # `println` of a struct prints its ADDRESS, so such a program prints
+        # something different on every run under EITHER engine -- three in the
+        # corpus do (covid_2020_kernel, epsilon_comparison_valid,
+        # knightian_syntax, all `println(<Knowledge struct>)`). Byte-comparing
+        # those says nothing about the engines, and pinning three filenames would
+        # go stale, so the property is MEASURED: run each engine a second time and
+        # see whether it still agrees with itself.
+        cp "$work/${tag}_mad.out" "$work/${tag}_mad.out1" 2>/dev/null
+        cp "$work/${tag}_lean.out" "$work/${tag}_lean.out1" 2>/dev/null
+        nondet=0
+        run_engine mad  && { cmp -s "$work/${tag}_mad.out"  "$work/${tag}_mad.out1"  || nondet=1; }
+        run_engine lean && { cmp -s "$work/${tag}_lean.out" "$work/${tag}_lean.out1" || nondet=1; }
+        rm -f "$work/${tag}_mad.out1" "$work/${tag}_lean.out1"
+        if [ "$nondet" = 1 ]; then
+            printf 'NONDETERMINISTIC\t%s\n' "$src"
+        else
+            printf 'DIVERGE\t%s\n' "$src"
+        fi
     fi
 elif [ "$ok_m" = 1 ]; then
     printf 'MADAROS-ONLY\t%s\n' "$src"
@@ -265,8 +287,9 @@ mad_only=$(grep -c '^MADAROS-ONLY' "$WORK/results.tsv" || true)
 lean_only=$(grep -c '^LEAN-ONLY'   "$WORK/results.tsv" || true)
 neither=$(grep -c '^NEITHER'       "$WORK/results.tsv" || true)
 timedout=$(grep -c '^TIMEOUT'      "$WORK/results.tsv" || true)
+nondet_n=$(grep -c '^NONDETERMINISTIC' "$WORK/results.tsv" || true)
 
-echo "[engine-parity] agree=$agree diverge=$diverge madaros-only=$mad_only lean-only=$lean_only neither=$neither timeout=$timedout"
+echo "[engine-parity] agree=$agree diverge=$diverge madaros-only=$mad_only lean-only=$lean_only neither=$neither timeout=$timedout nondet=$nondet_n"
 
 # The baseline records every non-AGREE verdict. AGREE is the goal state and is
 # deliberately not recorded, so the file shrinks as the engines converge.
