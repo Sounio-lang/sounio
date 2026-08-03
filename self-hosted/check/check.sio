@@ -136,6 +136,7 @@ var CHECK_STMT_TRACE_TARGET_HASH: i64 = 0
 var CHECK_STMT_TRACE_ACTIVE: bool = false
 var CHECK_STMT_TRACE_SEQ: i64 = 0
 var CHECK_STMT_TRACE_BLOCK_DEPTH: i64 = 0
+var CHECK_STMT_TRACE_EXPR_SEQ: i64 = 0
 
 pub(crate) fn checker_set_trace_enabled(enabled: bool) with Mut {
     CHECK_TRACE_ENABLED = enabled
@@ -146,6 +147,7 @@ pub(crate) fn checker_set_stmt_trace_target_hash(target_hash: i64) with Mut {
     CHECK_STMT_TRACE_ACTIVE = false
     CHECK_STMT_TRACE_SEQ = 0
     CHECK_STMT_TRACE_BLOCK_DEPTH = 0
+    CHECK_STMT_TRACE_EXPR_SEQ = 0
 }
 const CONTEST_WITNESS_MAX_TAIL_RISK: i64 = 2
 const CONTEST_WITNESS_MECHANISTIC_DIVERGENCE: i64 = 3
@@ -325,6 +327,7 @@ fn checker_stmt_trace_target_begin(c: *mut Checker, fn_name: Name) with IO, Mut,
     if !CHECK_STMT_TRACE_ACTIVE { return }
     CHECK_STMT_TRACE_SEQ = 0
     CHECK_STMT_TRACE_BLOCK_DEPTH = 0
+    CHECK_STMT_TRACE_EXPR_SEQ = 0
     print("check_stmt_trace module=")
     print_int((*c).current_module_id)
     print(" fn=")
@@ -369,6 +372,42 @@ fn checker_stmt_trace_stmt_marker(c: *mut Checker, phase: string, seq: i64, kind
     print_int(CHECK_STMT_TRACE_BLOCK_DEPTH)
     print(" kind=")
     print_int(kind)
+    print(" span=")
+    print_int(span_start)
+    print("..")
+    print_int(span_end)
+    print("\n")
+}
+
+fn checker_stmt_trace_expr_marker(c: *mut Checker, phase: string, seq: i64, kind: i64, span_start: i64, span_end: i64) with IO, Mut, Panic, Div {
+    if !CHECK_STMT_TRACE_ACTIVE { return }
+    print("check_expr_trace module=")
+    print_int((*c).current_module_id)
+    print(" phase=")
+    print(phase)
+    print(" seq=")
+    print_int(seq)
+    print(" depth=")
+    print_int((*c).expr_depth)
+    print(" kind=")
+    print_int(kind)
+    print(" span=")
+    print_int(span_start)
+    print("..")
+    print_int(span_end)
+    print("\n")
+}
+
+fn checker_stmt_trace_call_marker(c: *mut Checker, phase: string, seq: i64, span_start: i64, span_end: i64) with IO, Mut, Panic, Div {
+    if !CHECK_STMT_TRACE_ACTIVE { return }
+    print("check_call_trace module=")
+    print_int((*c).current_module_id)
+    print(" phase=")
+    print(phase)
+    print(" seq=")
+    print_int(seq)
+    print(" depth=")
+    print_int((*c).expr_depth)
     print(" span=")
     print_int(span_start)
     print("..")
@@ -4933,6 +4972,22 @@ fn checker_check_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, P
         return ty_error()
     }
     (*c).expr_depth = (*c).expr_depth + 1
+    var expr_trace_seq: i64 = 0
+    var expr_trace_kind: i64 = 0
+    if CHECK_STMT_TRACE_ACTIVE {
+        CHECK_STMT_TRACE_EXPR_SEQ = CHECK_STMT_TRACE_EXPR_SEQ + 1
+        expr_trace_seq = CHECK_STMT_TRACE_EXPR_SEQ
+        if e.kind == ExprKind::ExprCall {
+            expr_trace_kind = 1
+        } else if e.kind == ExprKind::ExprIdent {
+            expr_trace_kind = 2
+        } else if e.kind == ExprKind::ExprIntLit {
+            expr_trace_kind = 3
+        } else if e.kind == ExprKind::ExprPath {
+            expr_trace_kind = 4
+        }
+        checker_stmt_trace_expr_marker(c, "expr_enter", expr_trace_seq, expr_trace_kind, e.span.start, e.span.end)
+    }
     // Dispatch via explicit if-equality, NOT `match e.kind`. bin/souc miscompiles
     // a `match <enum-field>` inside a *mut function: ExprIntLit (discriminant 0)
     // silently fell through to the `_` wildcard → by-value check_expr → runaway
@@ -4982,7 +5037,7 @@ fn checker_check_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, P
     } else if e.kind == ExprKind::ExprMethodCall {
         result = checker_check_method_call_inplace(c, e)
     } else if e.kind == ExprKind::ExprCall {
-        result = checker_check_call_expr_inplace(c, e)
+        result = checker_check_call_expr_inplace(c, e, expr_trace_seq)
     } else if e.kind == ExprKind::ExprIdent {
         result = checker_check_ident_expr_inplace(c, e)
     } else if e.kind == ExprKind::ExprCast {
@@ -5001,6 +5056,9 @@ fn checker_check_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, P
         result = checker_check_continue_expr_inplace(c, e)
     } else {
         result = checker_check_expr_mut(c, e)
+    }
+    if CHECK_STMT_TRACE_ACTIVE {
+        checker_stmt_trace_expr_marker(c, "expr_exit", expr_trace_seq, expr_trace_kind, e.span.start, e.span.end)
     }
     if (*c).expr_depth > 0 {
         (*c).expr_depth = (*c).expr_depth - 1
@@ -7095,7 +7153,8 @@ fn checker_enum_visible_inplace(c: *mut Checker, enum_idx: i64) -> bool with Mut
     )
 }
 
-fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr, trace_seq: i64) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    checker_stmt_trace_call_marker(c, "call_enter", trace_seq, e.span.start, e.span.end)
     if checker_expr_is_gpu_launch_invocation_call(e) {
         match e.left {
             Some(desc) => {
@@ -7187,9 +7246,11 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         return ty_i64()
     }
     if call_expr_is_box_new(e.left) {
+        checker_stmt_trace_call_marker(c, "route_box_new", trace_seq, e.span.start, e.span.end)
         return checker_check_box_new_expr_inplace(c, e)
     }
     if call_expr_should_bridge_by_value(e) {
+        checker_stmt_trace_call_marker(c, "route_by_value", trace_seq, e.span.start, e.span.end)
         return checker_check_expr_mut(c, e)
     }
     // Preamble: multitest then hypothesis effects (shallow state, no sub-expr check).
@@ -7212,6 +7273,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         }
     }
     var direct_sig_id: i64 = -1
+    checker_stmt_trace_call_marker(c, "direct_lookup_begin", trace_seq, e.span.start, e.span.end)
     // Type::method associated-function path (e.g. E::of / Epistemic::measured).
     // When the method is registered, resolve it so the return type is known and
     // subsequent instance methods typecheck. When lookup misses (multi-module
@@ -7235,7 +7297,9 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         }
         None => {}
     }
+    checker_stmt_trace_call_marker(c, "direct_lookup_done", trace_seq, e.span.start, e.span.end)
     if direct_sig_id >= 0 {
+        checker_stmt_trace_call_marker(c, "route_direct", trace_seq, e.span.start, e.span.end)
         if (*c).enforce_visibility && !checker_fn_sig_visible_inplace(c, direct_sig_id) {
             checker_report_private_fn_inplace(c, e.span, direct_sig_id)
         }
@@ -7259,6 +7323,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             }
             None => {}
         }
+        checker_stmt_trace_call_marker(c, "call_args_begin", trace_seq, e.span.start, e.span.end)
         checker_check_call_args_inplace(
             c,
             expr_list_handle(e.args),
@@ -7266,17 +7331,23 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             direct_sig.param_count,
             e.span,
         )
+        checker_stmt_trace_call_marker(c, "call_args_done", trace_seq, e.span.start, e.span.end)
         checker_check_callee_effects_inplace(c, e.span, direct_sig.effects, direct_sig.effect_count)
+        checker_stmt_trace_call_marker(c, "effects_done", trace_seq, e.span.start, e.span.end)
         checker_release_call_arg_borrows_inplace(c, e.args, effective_params, call_start_borrows)
+        checker_stmt_trace_call_marker(c, "release_done", trace_seq, e.span.start, e.span.end)
+        checker_stmt_trace_call_marker(c, "call_return", trace_seq, e.span.start, e.span.end)
         return effective_return_type
     }
     // Callee via the *mut spine, matched locally so the call path does not pass
     // Option<Box<Expr>> through another *mut helper boundary.
+    checker_stmt_trace_call_marker(c, "indirect_callee_begin", trace_seq, e.span.start, e.span.end)
     let callee_ty =
         match e.left {
             Some(callee_expr) => checker_check_expr_inplace(c, *callee_expr)
             None => ty_error()
         }
+    checker_stmt_trace_call_marker(c, "indirect_callee_done", trace_seq, e.span.start, e.span.end)
     let array_like_ty =
         if callee_ty.kind == TypeKind::TyArray {
             callee_ty
@@ -7315,6 +7386,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         }
     }
     if callee_ty.kind == TypeKind::TyFn && callee_ty.fn_sig_id >= 0 {
+        checker_stmt_trace_call_marker(c, "route_indirect_fn", trace_seq, e.span.start, e.span.end)
         let sig = fn_sig_table_get((*c).fn_sigs, callee_ty.fn_sig_id)
         if (*c).enforce_visibility && !checker_fn_sig_visible_inplace(c, callee_ty.fn_sig_id) {
             checker_report_private_fn_inplace(c, e.span, callee_ty.fn_sig_id)
@@ -7338,11 +7410,17 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             }
             None => {}
         }
+        checker_stmt_trace_call_marker(c, "call_args_begin", trace_seq, e.span.start, e.span.end)
         checker_check_call_args_inplace(c, expr_list_handle(e.args), fn_param_list_handle(effective_params), sig.param_count, e.span)
+        checker_stmt_trace_call_marker(c, "call_args_done", trace_seq, e.span.start, e.span.end)
         checker_check_callee_effects_inplace(c, e.span, sig.effects, sig.effect_count)
+        checker_stmt_trace_call_marker(c, "effects_done", trace_seq, e.span.start, e.span.end)
         checker_release_call_arg_borrows_inplace(c, e.args, effective_params, call_start_borrows)
+        checker_stmt_trace_call_marker(c, "release_done", trace_seq, e.span.start, e.span.end)
+        checker_stmt_trace_call_marker(c, "call_return", trace_seq, e.span.start, e.span.end)
         effective_return_type
     } else if is_error_or_unknown(callee_ty) {
+        checker_stmt_trace_call_marker(c, "route_unknown", trace_seq, e.span.start, e.span.end)
         let call_start_borrows = (*c).borrows
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
         checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
@@ -7354,12 +7432,15 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         // `match b { Event::B(n) => .. }` resolves via enum_table_find((*c).enums, scrut_ty.name).
         let variant_enum_idx = call_expr_enum_variant_ctor_enum_idx(c, e.left)
         if variant_enum_idx >= 0 {
+            checker_stmt_trace_call_marker(c, "route_enum_ctor", trace_seq, e.span.start, e.span.end)
             let ei = enum_table_get((*c).enums, variant_enum_idx)
             let call_start_borrows = (*c).borrows
             checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
             checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            checker_stmt_trace_call_marker(c, "call_return", trace_seq, e.span.start, e.span.end)
             return ty_named(ei.name)
         }
+        checker_stmt_trace_call_marker(c, "route_error", trace_seq, e.span.start, e.span.end)
         checker_report_error_at_inplace(c, e.span, 17, 0, 0, 0)
         let call_start_borrows = (*c).borrows
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
