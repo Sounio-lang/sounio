@@ -1144,9 +1144,26 @@ The clause now asserts both: dropping `b ≠ W` breaks it, dropping `b ≠ a⊕W
 > A guard needed by a proof is not automatically load-bearing for the quantity the proof computes.
 > That is now three separate rungs where a null control caught exactly this.
 
-### 23.4 What is not done
+### 23.4 `uu` is factored too
 
-The same factoring for the **unprimed** quadrant counts (`ul`, `lu`) and for `uu`, then the
-arithmetic assembly. Until those land, **the LOW recursion is not yet a Lean theorem**.
+`uuInd_split` factors the `uu` summand as `OffCnt`'s — **with the arguments swapped**, which is
+why `sumLt_swap` was needed — plus four boundary lines contributing exactly `4(2^M − 2)`.
+
+### 23.5 What is not done
+
+The same factoring for the **unprimed** quadrant counts (`ul`, `lu`), which additionally need
+`Qgen_eq_Qgen'` off the lines, and then the arithmetic assembly. The target constants are known
+and the arithmetic already closes on paper:
+
+| quadrant | factoring |
+|---|---|
+| `ll` | `OffCnt + (e−2)` |
+| `ul` | `OffCnt + 5e − 8` |
+| `lu` | `OffCnt + 4e − 8` |
+| `uu` | `OffCnt + 4e − 8` |
+
+summing to `4·OffCnt + 14e − 26 = 4·Ncnt + 10e − 18` ✓ — the LOW recursion.
+
+Until `ul` and `lu` land, **the LOW recursion is not yet a Lean theorem**.
 
 **(III) is untouched. `tr(A³)` is not closed. (d) is not closed, and V1 is not proven.**

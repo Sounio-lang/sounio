@@ -6220,6 +6220,94 @@ theorem Ncnt_eq_OffCnt (W M : Nat) (hW : W < 2^M) (hW0 : W ≠ 0) :
     omega
   omega
 
+/-- Swapping the order of a square double sum. -/
+theorem sumLt_swap (n : Nat) (f : Nat → Nat → Nat) :
+    sumLt n (fun i => sumLt n (fun j => f i j))
+      = sumLt n (fun j => sumLt n (fun i => f i j)) := by
+  induction n with
+  | zero => rfl
+  | succ n ih =>
+      have hL : sumLt (n+1) (fun i => sumLt (n+1) (fun j => f i j))
+          = (sumLt n (fun i => sumLt n (fun j => f i j)) + sumLt n (fun i => f i n))
+            + (sumLt n (fun j => f n j) + f n n) := by
+        rw [sumLt]
+        rw [sumLt_congr n (fun i => sumLt (n+1) (fun j => f i j))
+              (fun i => sumLt n (fun j => f i j) + f i n) (fun i _ => by rw [sumLt]),
+            sumLt_pair, sumLt]
+      have hR : sumLt (n+1) (fun j => sumLt (n+1) (fun i => f i j))
+          = (sumLt n (fun j => sumLt n (fun i => f i j)) + sumLt n (fun j => f n j))
+            + (sumLt n (fun i => f i n) + f n n) := by
+        rw [sumLt]
+        rw [sumLt_congr n (fun j => sumLt (n+1) (fun i => f i j))
+              (fun j => sumLt n (fun i => f i j) + f n j) (fun j _ => by rw [sumLt]),
+            sumLt_pair, sumLt]
+      rw [hL, hR, ih]
+      omega
+
+/-- Pointwise: `uuInd` is `OffCnt`'s summand (with the arguments swapped, as the `uu` row
+    produces them) plus the four boundary lines. -/
+theorem uuInd_split (W m u v : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
+    (hu : u < 2^(m+1)) (hv : v < 2^(m+1)) :
+    uuInd W m u v
+      = (if u ≠ v ∧ v ≠ u ^^^ W ∧ (u = 0 ∨ v = 0 ∨ u = W ∨ v = W) then 1 else 0)
+        + (if v ≠ 0 ∧ v ≠ W ∧ u ≠ 0 ∧ u ≠ W ∧ v ≠ u ∧ u ≠ v ^^^ W
+              ∧ Qgen' W v u (m+1) = -1 then 1 else 0) := by
+  have hxc : (v = u ^^^ W) ↔ (u = v ^^^ W) := by
+    constructor
+    · intro hh; rw [hh, Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+    · intro hh; rw [hh, Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+  unfold uuInd
+  by_cases hd : u = v
+  · rw [if_neg (fun hc => hc.1 hd), if_neg (fun hc => hc.1 hd),
+        if_neg (fun hc => hc.2.2.2.2.1 hd.symm), Nat.add_zero]
+  · by_cases hc : v = u ^^^ W
+    · rw [if_neg (fun h => h.2.1 hc), if_neg (fun h => h.2.1 hc),
+          if_neg (fun h => h.2.2.2.2.2.1 (hxc.mp hc)), Nat.add_zero]
+    · by_cases hline : u = 0 ∨ v = 0 ∨ u = W ∨ v = W
+      · have hline5 : u = 0 ∨ v = 0 ∨ u = W ∨ v = W ∨ Qgen' W v u (m+1) = -1 := by
+          rcases hline with h | h | h | h
+          · exact Or.inl h
+          · exact Or.inr (Or.inl h)
+          · exact Or.inr (Or.inr (Or.inl h))
+          · exact Or.inr (Or.inr (Or.inr (Or.inl h)))
+        have hoff : ¬ (v ≠ 0 ∧ v ≠ W ∧ u ≠ 0 ∧ u ≠ W ∧ v ≠ u ∧ u ≠ v ^^^ W
+                        ∧ Qgen' W v u (m+1) = -1) := by
+          intro h
+          rcases hline with hh | hh | hh | hh
+          · exact h.2.2.1 hh
+          · exact h.1 hh
+          · exact h.2.2.2.1 hh
+          · exact h.2.1 hh
+        have hLv : (if u ≠ v ∧ v ≠ u ^^^ W ∧
+                      (u = 0 ∨ v = 0 ∨ u = W ∨ v = W ∨ Qgen' W v u (m+1) = -1)
+                    then (1:Nat) else 0) = 1 := if_pos ⟨hd, hc, hline5⟩
+        have hDv : (if u ≠ v ∧ v ≠ u ^^^ W ∧ (u = 0 ∨ v = 0 ∨ u = W ∨ v = W)
+                    then (1:Nat) else 0) = 1 := if_pos ⟨hd, hc, hline⟩
+        have hOv : (if v ≠ 0 ∧ v ≠ W ∧ u ≠ 0 ∧ u ≠ W ∧ v ≠ u ∧ u ≠ v ^^^ W
+                      ∧ Qgen' W v u (m+1) = -1 then (1:Nat) else 0) = 0 := if_neg hoff
+        rw [hLv, hDv, hOv]
+      · have h0 : u ≠ 0 := fun hh => hline (Or.inl hh)
+        have h1 : v ≠ 0 := fun hh => hline (Or.inr (Or.inl hh))
+        have h2 : u ≠ W := fun hh => hline (Or.inr (Or.inr (Or.inl hh)))
+        have h3 : v ≠ W := fun hh => hline (Or.inr (Or.inr (Or.inr hh)))
+        have hDv : (if u ≠ v ∧ v ≠ u ^^^ W ∧ (u = 0 ∨ v = 0 ∨ u = W ∨ v = W)
+                    then (1:Nat) else 0) = 0 := if_neg (fun h => hline h.2.2)
+        rw [hDv, Nat.zero_add]
+        by_cases hq : Qgen' W v u (m+1) = -1
+        · rw [if_pos ⟨hd, hc, Or.inr (Or.inr (Or.inr (Or.inr hq)))⟩,
+              if_pos ⟨h1, h3, h0, h2, fun hh => hd hh.symm,
+                      fun hh => hc (hxc.mpr hh), hq⟩]
+        · have hno : ¬ (u ≠ v ∧ v ≠ u ^^^ W ∧
+                        (u = 0 ∨ v = 0 ∨ u = W ∨ v = W ∨ Qgen' W v u (m+1) = -1)) := by
+            intro h
+            rcases h.2.2 with hh | hh | hh | hh | hh
+            · exact h0 hh
+            · exact h1 hh
+            · exact h2 hh
+            · exact h3 hh
+            · exact hq hh
+          rw [if_neg hno, if_neg (fun h => hq h.2.2.2.2.2.2)]
+
 end SounioZDFiberAntisym
 
 
