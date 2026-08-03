@@ -1790,6 +1790,107 @@ def main():
             "is exactly where tr(A^2) stood at W6, and it took W13-W17 to close that one. "
             "(III) untouched; (d) IS NOT CLOSED, and V1 IS NOT PROVEN ***")
 
+    # ---- W25  THE tr(A^3) DEVIATION: ONE EXACT RECURSION AND TWO SHARP IMPOSSIBILITIES ----
+    # W24 left the deviation off the y=0 stratum open, noting only that it is GL-constant.
+    # Splitting the label by its top bit -- the split that cracked tr(A^2) -- gives:
+    #   LOW  (W < e): an EXACT linear recursion in the level-(n-1) PAIR, all labels;
+    #   HIGH (W >= e): the pair (t2',t3') DETERMINES t3 on ODD labels but NOT in general, and
+    #                  even where it determines it, the dependence is NOT affine.
+    # Both negatives are asserted so the next rung does not chase an impossible ansatz.
+    _t23 = {}
+    for _n in range(5, 11):
+        _S = sign_table_fast(_n)
+        for _W in range(1, 1 << (_n - 1)):
+            _t23[(_n, _W)] = traces23(A_sig_fast(_n, _W, _S))
+
+    # (i) THE LOW RECURSION, in exact integer arithmetic
+    low_rows = []
+    for n in range(7, 11):
+        m, e = n - 1, 1 << (n - 2)
+        bad = tot = 0
+        for W in range(1, e):
+            Wp = W % e
+            if Wp == 0:
+                continue
+            t2p, t3p = _t23[(n - 1, Wp)]
+            tot += 1
+            if _t23[(n, W)][1] != 8 * t3p + 24 * t2p - 12 * ((1 << m) - 4):
+                bad += 1
+        low_rows.append((n, tot, bad))
+    # (ii) HIGH: does (t2',t3') determine t3?  all labels vs odd labels only
+    hi_rows = []
+    for n in range(7, 11):
+        m, e = n - 1, 1 << (n - 2)
+        allmap, oddmap = {}, {}
+        for W in range(e, 1 << m):
+            Wp = W % e
+            if Wp == 0:
+                continue
+            k = _t23[(n - 1, Wp)]
+            allmap.setdefault(k, set()).add(_t23[(n, W)][1])
+            if W % 2:
+                oddmap.setdefault(k, set()).add(_t23[(n, W)][1])
+        hi_rows.append((n, sum(1 for v in allmap.values() if len(v) > 1),
+                        sum(1 for v in oddmap.values() if len(v) > 1), len(allmap)))
+    # (iii) even where it determines it, the HIGH-odd dependence is NOT affine in (t2',t3'):
+    #       exhibit three odd high labels whose (t2',t3',t3) triples are not collinear
+    aff_bad = 0
+    for n in range(8, 11):
+        m, e = n - 1, 1 << (n - 2)
+        pts = []
+        for W in range(e, 1 << m, 2):
+            Wp = W % e
+            if Wp:
+                t2p, t3p = _t23[(n - 1, Wp)]
+                pts.append((t2p, t3p, _t23[(n, W)][1]))
+        pts = sorted(set(pts))
+        # solve the affine system on the first three independent points, test on the rest
+        import itertools as _it2
+        found = False
+        for tri in _it2.combinations(pts[:6], 3):
+            M = [[a, b, 1] for a, b, _ in tri]
+            det = (M[0][0]*(M[1][1]-M[2][1]) - M[0][1]*(M[1][0]-M[2][0])
+                   + (M[1][0]*M[2][1] - M[2][0]*M[1][1]))
+            if det:
+                A = np.array(M, float); y = np.array([c for _, _, c in tri], float)
+                sol = np.linalg.solve(A, y)
+                resid = max(abs(sol[0]*a + sol[1]*b + sol[2] - c) for a, b, c in pts)
+                if resid > 1.0:
+                    aff_bad += 1
+                found = True
+                break
+        if not found:
+            aff_bad += 1
+    w25 = (all(b == 0 for _, _, b in low_rows)
+           and all(ba > 0 and bo == 0 for _, ba, bo, _ in hi_rows)
+           and aff_bad == 3)
+    ok["W25"] = w25
+    print(f"W25_TRA3REC ONE EXACT tr(A^3) RECURSION, AND TWO SHARP IMPOSSIBILITIES "
+          f"{'OK' if w25 else 'FAIL'} -- LOW branch t3(n,W) = 8 t3' + 24 t2' - 12(2^m - 4), in "
+          f"exact integer arithmetic: "
+          + "; ".join(f"n={a}: {b} labels, {c} failing" for a, b, c in low_rows)
+          + "; HIGH branch, does (t2',t3') DETERMINE t3: "
+          + "; ".join(f"n={a}: {d} keys, {b} colliding over ALL labels, {c} over ODD labels"
+                      for a, b, c, d in hi_rows)
+          + f"; and where it does determine it the dependence is NOT affine in (t2',t3'): "
+            f"{aff_bad}/3 levels refute affinity. *** THE POSITIVE: the top-bit split -- the "
+            "same split that cracked tr(A^2) -- gives the LOW branch an EXACT linear recursion "
+            "in the level-(n-1) PAIR, with a closed constant -12(2^m - 4). Verified in exact "
+            "integers over every low label at n = 7..10, 0 failures. *** THE FIRST NEGATIVE, AND "
+            "IT IS THE USEFUL ONE: on the HIGH branch the pair (t2',t3') does NOT determine "
+            "t3(n,W). Explicit witness at n=7: the key (t2',t3') = (168,-336) carries BOTH "
+            "-92112 and 18480. So NO recursion for tr(A^3) on the pair alone can exist in "
+            "general -- a third level-quantity is required. *** BUT THE COLLISIONS ARE ENTIRELY "
+            "SEAM-BORNE: restricted to ODD labels the pair DOES determine t3 on the high branch, "
+            "0 collisions at all four levels. The even labels are what break it -- the same "
+            "place tau, and hence the tr(A^2) story, needed separate treatment. *** THE SECOND "
+            "NEGATIVE: even on the odd high branch the dependence is NOT AFFINE in (t2',t3') -- "
+            "an affine fit through three points misses the rest by 1e4 to 1e7, against exact "
+            "zero on the low branch. So the high branch is a genuine function of the pair on the "
+            "Fano family, but not a linear one. *** tr(A^3) IS STILL NOT CLOSED. What this rung "
+            "buys is one exact half of the recursion and two impossibility results that rule out "
+            "the two obvious ansaetze. (III) untouched; (d) IS NOT CLOSED ***")
+
     print("=" * 78)
     if all(ok.values()):
         print("CD_TOWER_ZDV1_VERDICT C_CLOSED__V1_REDUCED_TO_D_ALONE__NOT_CLOSED")

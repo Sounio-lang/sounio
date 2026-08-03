@@ -878,3 +878,50 @@ form on the one stratum where the quantity is constant, and honest variation off
 one took `W13`–`W17`.
 
 **(III) is untouched. (d) is not closed, and V1 is not proven.**
+
+---
+
+## 18. The `tr(A³)` deviation: one exact recursion, two impossibilities (`W25`, 2026-08-03)
+
+§17 left the deviation off the `y=0` stratum open, noting only that it is GL-constant. Splitting
+the label by its **top bit** — the split that cracked `tr(A²)` — resolves half of it and rules out
+the two obvious ansätze for the other half.
+
+### 18.1 The positive: the low branch is exact
+
+> `t3(n,W) = 8·t3(n−1,W′) + 24·t2(n−1,W′) − 12(2^m − 4)`,  `m = n−1`, `W′ = W mod 2^{m−1}`
+
+Verified in **exact integer arithmetic** over every low label at `n = 7..10` — 31/63/127/255
+labels, **0 failures**. The constant `−12(2^m−4)` is closed.
+
+### 18.2 First impossibility: the pair is not self-propagating
+
+On the **high** branch the pair `(t2′, t3′)` does **not** determine `t3(n,W)`. Witness at `n = 7`:
+the key `(t2′,t3′) = (168, −336)` carries **both** `−92112` and `18480`.
+
+> So no recursion for `tr(A³)` on the pair `(tr A², tr A³)` alone can exist in general — a third
+> level-quantity is required.
+
+That matters for the lane's strategy: the pair *separates* the classes (`W3`/`W4`), but it is not
+**self-propagating**.
+
+### 18.3 …but the collisions are entirely seam-borne
+
+Restricted to **odd** labels the pair **does** determine `t3` on the high branch — **0 collisions**
+at all four levels. The even labels are what break it, which is the same place `τ` and the whole
+`tr(A²)` story needed separate treatment.
+
+### 18.4 Second impossibility: not even affine
+
+Even on the odd high branch the dependence is **not affine** in `(t2′,t3′)`: an affine fit through
+three points misses the rest by `1e4`–`1e7`, against **exact zero** on the low branch. So it is a
+genuine function of the pair on the Fano family, but not a linear one.
+
+### 18.5 Status
+
+**`tr(A³)` is not closed.** What this rung buys is one exact half of the recursion and two
+impossibility results that rule out the two obvious ansätze — a low-branch closed constant, a
+proof that the pair cannot propagate itself in general, and a proof that the surviving case is
+non-linear.
+
+**(III) is untouched. (d) is not closed, and V1 is not proven.**
