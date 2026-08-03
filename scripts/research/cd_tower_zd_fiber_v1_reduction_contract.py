@@ -2403,9 +2403,89 @@ def main():
             "5*2^M-8, 4*2^M-8 and 4*2^M-8; and `Ncnt_eq_OffCnt` ties the core back to `Ncnt`. "
             "*** THE OVERLAPPING-LINES PROBLEM NEVER AROSE: summing a POINTWISE identity keeps "
             "the pieces disjoint for free, so no inclusion-exclusion was needed anywhere. *** "
-            "STILL PAPER: the HIGH branch (the reflection, 4P' - 4N' + 6e - 10). Until it lands "
-            "the closed form for tr(A^2) is still not fully derived in Lean. (III) untouched; "
-            "tr(A^3) NOT closed; (d) IS NOT CLOSED ***")
+            "THE HIGH BRANCH IS NO LONGER PAPER EITHER -- see W32 (`Ncnt_hi`), landed the same "
+            "day. What is still NOT derived in Lean is the UNROLLING of the two recursions into "
+            "the closed form for tr(A^2). (III) untouched; tr(A^3) NOT closed; (d) IS NOT "
+            "CLOSED ***")
+
+    # ---- W32  THE HIGH RECURSION IS A LEAN THEOREM ----------------------------------------
+    # `Ncnt_hi : Ncnt (W+e) (m+2) + 6e + 2 + 4*Ncnt W (m+1) = 4*e*e`, e = 2^(m+1). With W31 this
+    # closes BOTH halves of the W15 ledger. Pins the recursion, the four quadrant totals (which
+    # are NOT all equal -- that asymmetry is the content), and a slice-level null control.
+    def _sig(S, a, b):
+        return int(S[a, b])
+
+    def _qp(S, Y, a, b):
+        return (_sig(S, a, b) * _sig(S, b ^ Y, a ^ Y)
+                * _sig(S, b ^ Y, a) * _sig(S, a ^ Y, b))
+
+    def _ncnt(S, Y, H):
+        return sum(1 for a in range(H) for b in range(H)
+                   if a and b and a != b and _qp(S, Y, a, b) == -1)
+
+    def _offp(S, Y, H):
+        return sum(1 for a in range(H) for b in range(H)
+                   if a and a != Y and b and b != Y and a != b and b != (a ^ Y)
+                   and _qp(S, Y, a, b) == 1)
+
+    w32_rows, w32_quad = [], []
+    for m in (1, 2, 3, 4):
+        e, M = 1 << (m + 1), m + 2
+        Slo, Shi = sign_table_fast(m + 1), sign_table_fast(M)
+        bad = 0
+        for W in range(1, e):
+            if (_ncnt(Shi, W + e, 1 << M) + 6 * e + 2 + 4 * _ncnt(Slo, W, e)
+                    != 4 * e * e):
+                bad += 1
+        w32_rows.append((M, e - 1, bad))
+        # the four quadrant totals, independently: ll = ul = P + 3(e-2), lu = uu = P + 4e - 7
+        qbad = 0
+        for W in range(1, e):
+            Y, P = W + e, _offp(Slo, W, e)
+            ll = sum(1 for a in range(e) for b in range(e)
+                     if a and b and a != b and _qp(Shi, Y, a, b) == -1)
+            ul = sum(1 for u in range(e) for b in range(e)
+                     if b and _qp(Shi, Y, u + e, b) == -1)
+            lu = sum(1 for a in range(e) for v in range(e)
+                     if a and _qp(Shi, Y, a, v + e) == -1)
+            uu = sum(1 for u in range(e) for v in range(e)
+                     if u != v and _qp(Shi, Y, u + e, v + e) == -1)
+            if not (ll == ul == P + 3 * (e - 2) and lu == uu == P + 4 * e - 7):
+                qbad += 1
+        w32_quad.append((M, qbad))
+    # NULL CONTROL (slice-level, NOT a whole-claim negation): give `lu` the SAME constant as
+    # `ul`. If the clause passed under that swap it would be pinning nothing but a total.
+    null32_bad = 0
+    for m in (1, 2, 3):
+        e = 1 << (m + 1)
+        Slo, Shi = sign_table_fast(m + 1), sign_table_fast(m + 2)
+        for W in range(1, e):
+            Y, P = W + e, _offp(Slo, W, e)
+            lu = sum(1 for a in range(e) for v in range(e)
+                     if a and _qp(Shi, Y, a, v + e) == -1)
+            if lu == P + 3 * (e - 2):     # the WRONG constant (ul's)
+                null32_bad += 1
+    w32 = (all(c == 0 for _, _, c in w32_rows) and all(c == 0 for _, c in w32_quad)
+           and null32_bad == 0)
+    ok["W32"] = w32
+    print(f"W32_HIGHREC  THE HIGH RECURSION IS A LEAN THEOREM {'OK' if w32 else 'FAIL'} -- "
+          + "; ".join(f"level {a}: {b} labels, {c} failing" for a, b, c in w32_rows)
+          + "; quadrant totals ll=ul=OffCntP+3(e-2), lu=uu=OffCntP+4e-7: "
+          + "; ".join(f"M={a}: {b} failing" for a, b in w32_quad)
+          + f"; NULL CONTROL (give lu the SAME constant as ul -- a slice-level perturbation, not "
+            f"a whole-claim negation): {null32_bad} labels would still pass, i.e. the swap breaks "
+            "it everywhere, as required. *** `Ncnt_hi : Ncnt (W+e) (m+2) + 6e + 2 + 4*Ncnt W "
+            "(m+1) = 4*e*e` with e = 2^(m+1), the paper's 4P' - 4N' + 6e - 10. WITH W31 THE W15 "
+            "LEDGER IS FULLY DERIVED -- BOTH HALVES ARE LEAN THEOREMS forall n, kernel-clean, no "
+            "sorryAx and no native_decide. *** THE CONTENT IS THE ASYMMETRY: the four quadrants "
+            "do NOT share a core. ll and ul reach the same total from DIFFERENT slices (ll's "
+            "coset diagonal COUNTS, because the reflected row makes the remainder count Q'=+1; "
+            "ul's does NOT, because that row lands on the unprimed Qgen where the diagonal is "
+            "-1). lu and uu each carry one point MORE, and the source is exact: "
+            "`Qgen'_label_right` has no hypothesis on its other argument, so the v=W column is "
+            "-1 on all e-1 of its points while every other slice loses two to the lines. *** "
+            "STILL OPEN: unrolling the two recursions into the closed form for tr(A^2) is NOT "
+            "done. (III) untouched; tr(A^3) NOT closed; (d) IS NOT CLOSED ***")
 
     print("=" * 78)
     if all(ok.values()):

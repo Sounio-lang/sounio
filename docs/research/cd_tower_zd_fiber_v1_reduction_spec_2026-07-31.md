@@ -1219,3 +1219,54 @@ The **HIGH branch** — the reflection `4P′ − 4N′ + 6e − 10`. Until it l
 `tr(A²)` is still not fully derived in Lean.
 
 **(III) is untouched. `tr(A³)` is not closed. (d) is not closed, and V1 is not proven.**
+
+
+## §25 — The HIGH recursion is a Lean theorem (both halves of W15 now derived)
+
+`Ncnt_hi` (Tier 31, `formal/lean4/SounioZDFiberAntisym.lean`), for `W < e`, `W ≠ 0`, `m ≥ 1`,
+`e = 2^(m+1)`:
+
+```
+Ncnt (W + e) (m+2) + 6e + 2 + 4 * Ncnt W (m+1) = 4 * e * e
+```
+
+which is the paper's `N = 4P' − 4N' + 6e − 10` with `P' = (e−1)(e−2)`. Stated additively so that
+no `Nat` subtraction enters and `omega` stays linear with `e*e` as a single atom. With §24's
+`Ncnt_low`, **both halves of the W15 ledger are now theorems ∀n**, kernel-clean (`propext`,
+`Classical.choice`, `Quot.sound` only — no `sorryAx`, no `native_decide`).
+
+### The content is the asymmetry, not the total
+
+The four quadrants do **not** factor through a common core. Writing `P = OffCntP W (m+1)` for the
+positive core (the count of `Q' = +1` off all six lines — new here, because each `hi` row carries
+a global minus sign, so counting `−1` at level `m+2` means counting `+1` at level `m+1`):
+
+| quadrant | total | slices |
+|---|---|---|
+| `ll` | `P + 3(e−2)` | `a=W` row, `b=W` column, **coset diagonal** |
+| `ul` | `P + 3(e−2)` | `u=0` row, `b=W` column, diagonal `b=u` |
+| `lu` | `P + 4e − 7` | `v=0`, **`v=W` column (e−1 points)**, `a=W`, diagonal `a=v` |
+| `uu` | `P + 4e − 7` | **`u=0` row (e−1 points)**, `v=0`, `v=W`, coset diagonal |
+
+Two facts do the work, and both were errors in the first attempt at this branch:
+
+1. **`ll`'s coset diagonal counts; `ul`'s does not.** `Q'red_hi_ll` does not exclude `b = a^W`, and
+   the reflected remainder counts `Q' = +1`, which is exactly the coset-partner value. `Q'red_hi_ul`
+   lands on the **unprimed** `Qgen`, where the same diagonal is `−1` (`Qgen_degen`). Same total,
+   different anatomy.
+2. **`lu` and `uu` each carry one extra point.** `Qgen'_label_right` holds with *no hypothesis on
+   its other argument* (unlike `label_left`), so the `v = W` column is `−1` on all `e−1` of its
+   points while every other slice loses two to the lines.
+
+### Method note
+
+The 15 pointwise boundary values were each verified numerically (m = 1..4, all W, ~1200 points
+each) **before** any Lean was written. Two of the fifteen needed no new lemma: `a = Wh` is the
+whole `label_left` row and `b = Wh` the whole `label_right` column — but only once the split order
+puts `a = Wh` **before** `v = 0`, which is what removes the two exceptional cells that an earlier,
+non-partitioning probe had missed. Relaxing the four `hi` rows' hypotheses was tested and
+**refuted** (only `hi_ll`'s `a ≠ W` and `hi_ul`'s `u ≠ W` are individually removable), so the
+boundary lemmas are genuinely needed.
+
+**Still open:** unrolling the two recursions into the closed form for `tr(A²)`; (III); `tr(A³)`'s
+general closed form; (d); V1.
