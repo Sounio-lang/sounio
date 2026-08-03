@@ -14,6 +14,15 @@
 # A research branch went the other way and inlined the list into each caller.
 # Three copies later they had drifted, and the drift is what this gate exists to
 # make impossible: with one list there is nothing to diverge.
+#
+# parse_module_item is the fourth caller, and it was found the expensive way:
+# by building Madaros from this tree and discovering it could not parse three
+# files of its OWN source — self-hosted/resolve/{scope,mod,resolve}.sio. Its
+# path loop tested `== TokenKind::Ident` and nothing else, so `module
+# resolve::scope` stopped at `scope`, handed the keyword to the item dispatcher
+# and died. `module x::study` was worse: `study` HAS a dispatcher branch, so it
+# began parsing a study item from inside a module header. The shipped binary
+# predates the loop, which is why no gate and no test had ever seen it.
 set -uo pipefail
 
 cd "$(git rev-parse --show-toplevel)" || exit 9
@@ -23,6 +32,7 @@ CALLERS=(
     "self-hosted/parser/exprs.sio:parse_prefix"
     "self-hosted/parser/patterns.sio:parse_pattern_atom"
     "self-hosted/parser/parser.sio:at_expr_start"
+    "self-hosted/parser/items.sio:parse_module_item"
 )
 
 fail() { echo "PARSER_CONTEXTUAL_IDENT_ROUTING_GATE_FAIL: $*" >&2; exit 1; }
