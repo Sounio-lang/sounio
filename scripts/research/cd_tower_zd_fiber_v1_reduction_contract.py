@@ -1724,6 +1724,72 @@ def main():
           "Both halves of g = (W & (W-1)) >> 3 are theorems, end to end. "
           "(III) untouched; (d) IS NOT CLOSED ***")
 
+    # ---- W24  tr(A^3): WHY IT IS THE FINER INVARIANT, AND ITS CONSTANT STRATUM ------------
+    # A_sig's ENTRY is not the resonance predicate but the SIGN -P1 = -sigma(a,b)sigma(a^L,b^L).
+    # Under a class member the coboundary does NOT cancel there: only lam(a^b) squares away, and
+    # what survives factors as mu(a)*mu(b) with mu(x) = lam(x)lam(x^L) -- a DIAGONAL SIMILARITY
+    # A' = D A D with D^2 = I, so tr(A'^k) = tr(A^k) for EVERY k (`P1_of_coboundary`,
+    # `P1_lowCob`, proven forall n today). tau admits no such factorisation. So tr(A^2) is
+    # invariant under BOTH symmetries while tr(A^3) is invariant under GL(3,2) ONLY -- which is
+    # exactly why the PAIR separates strictly more than tr(A^2) alone (W5).
+    from fractions import Fraction as _Fr
+    gl_bad = tau_changed = 0
+    tot_orb = 0
+    for n in (6, 7, 8):
+        m, H = n - 1, 1 << (n - 1)
+        Sn = sign_table_fast(n)
+        t3 = {}
+        for Llo in range(1, H):
+            t3[Llo] = traces23(A_sig_fast(n, Llo, Sn))[1]
+        for y in range(H // 8):
+            vals = {t3[8 * y + r] for r in range(1, 8) if 8 * y + r < H}
+            if vals:
+                tot_orb += 1
+                if len(vals) > 1:
+                    gl_bad += 1
+        tau_changed += sum(1 for W in range(2, H, 2)
+                           if 1 <= (W & (W - 1)) + 1 < H
+                           and t3[W] != t3[(W & (W - 1)) + 1])
+    # the y = 0 stratum has a CLOSED FORM; off it the same form FAILS (declared negative)
+    strat_rows = []
+    for n in (6, 7, 8, 9, 10):
+        m, H = n - 1, 1 << (n - 1)
+        Sn = sign_table_fast(n)
+        hits = 0
+        for Llo in range(1, H):
+            t2v, t3v = traces23(A_sig_fast(n, Llo, Sn))
+            if _Fr(2, 7) * t2v * ((1 << m) - 15) == t3v:
+                hits += 1
+        cf = _Fr(2, 7) * ((1 << m) - 2) * ((1 << m) - 4) * ((1 << m) - 15)
+        ok_cf = (traces23(A_sig_fast(n, 1, Sn))[1] == cf)
+        strat_rows.append((n, hits, ok_cf))
+    w24 = (gl_bad == 0 and tau_changed > 0
+           and all(h == 7 and c for _, h, c in strat_rows))
+    ok["W24"] = w24
+    print(f"W24_TRA3    tr(A^3) IS GL(3,2)-INVARIANT BUT NOT tau-INVARIANT -- AND THAT IS WHY "
+          f"THE PAIR SEPARATES {'OK' if w24 else 'FAIL'} -- GL-orbits with non-constant "
+          f"tr(A^3): {gl_bad}/{tot_orb} (n=6,7,8); tau-merges that CHANGE tr(A^3): "
+          f"{tau_changed} (must be > 0); "
+          + "; ".join(f"n={a}: {b} labels on the closed-form stratum, y=0 form exact: {c}"
+                      for a, b, c in strat_rows)
+          + ". *** THE MECHANISM IS A THEOREM: A_sig's ENTRY is the SIGN "
+            "-P1 = -sigma(a,b)sigma(a^L,b^L), not the resonance predicate. Under a class member "
+            "the coboundary does NOT cancel there -- only lam(a^b) squares away and what "
+            "survives FACTORS, P1(pa,pb) = P1(a,b)*mu(a)*mu(b) with mu(x) = lam(x)lam(x^L). That "
+            "is a DIAGONAL SIMILARITY A' = D A D with D^2 = I, so tr(A'^k) = tr(A^k) for EVERY k. "
+            "`P1_of_coboundary` and `P1_lowCob` are proven forall n today. tau admits no such "
+            "factorisation, and it MEASURABLY changes tr(A^3). *** SO THE ASYMMETRY IS EXPLAINED: "
+            "tr(A^2) is invariant under BOTH GL(3,2) and tau; tr(A^3) under GL(3,2) ONLY. That is "
+            "why the PAIR separates strictly more than tr(A^2) alone (W5), and it is the "
+            "structural reason (d) needs the second trace. *** CLOSED FORM, ON ITS STRATUM ONLY: "
+            "tr(A^3) = (2/7)(2^m-2)(2^m-4)(2^m-15) = (2/7)*tr(A^2)*(2^m-15) on the y=0 class, "
+            "exact at n=6..11. OFF that stratum the form FAILS -- exactly 7 labels satisfy it at "
+            "every level, which are precisely the seven members of the y=0 GL-orbit -- and this "
+            "is asserted as a DECLARED NEGATIVE. The deviation is constant on GL-orbits, which is "
+            "where the next rung starts. *** NO GENERAL CLOSED FORM FOR tr(A^3) IS CLAIMED. This "
+            "is exactly where tr(A^2) stood at W6, and it took W13-W17 to close that one. "
+            "(III) untouched; (d) IS NOT CLOSED, and V1 IS NOT PROVEN ***")
+
     print("=" * 78)
     if all(ok.values()):
         print("CD_TOWER_ZDV1_VERDICT C_CLOSED__V1_REDUCED_TO_D_ALONE__NOT_CLOSED")

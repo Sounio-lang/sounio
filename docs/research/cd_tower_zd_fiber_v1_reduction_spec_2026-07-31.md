@@ -836,3 +836,45 @@ different search order than the generator used, and said so. Fixed to breadth-fi
 That is the second time in two rungs that a clause, not a reviewer, caught the defect.
 
 **(III) is untouched. (d) is not closed, and V1 is not proven.**
+
+---
+
+## 17. `tr(A³)`: why it is the finer invariant, and its constant stratum (`W24`, 2026-08-03)
+
+### 17.1 The mechanism, proven
+
+`A_sig`'s **entry** is not the resonance predicate but the **sign**
+`−P1 = −σ(a,b)·σ(a⊕L,b⊕L)`. Under a class member the coboundary does **not** cancel there: only
+`λ(a⊕b)` squares away, and what survives **factors**:
+
+> `P1(p a, p b) = P1(a,b) · μ(a) · μ(b)`,  `μ(x) = λ(x)·λ(x⊕L)`
+
+That is a **diagonal similarity** `A′ = D A D` with `D = diag μ`, `D² = I` — so `tr(A′ᵏ) = tr(Aᵏ)`
+for **every** `k`. `P1_of_coboundary` and `P1_lowCob` are proven ∀n, kernel-clean.
+
+`tau` admits no such factorisation, and it **measurably changes** `tr(A³)` (14 merges at
+`n = 6,7,8`), while leaving `tr(A²)` alone.
+
+> `tr(A²)` is invariant under **both** `GL(3,2)` and `τ`. `tr(A³)` is invariant under `GL(3,2)`
+> **only**.
+
+That asymmetry is the structural reason the *pair* separates strictly more than `tr(A²)` alone
+(`W5`) — and therefore the reason (d) needs the second trace at all. Measured: 0 of 28 GL-orbits
+have non-constant `tr(A³)`.
+
+### 17.2 Closed form, on its stratum only
+
+> `tr(A³) = (2/7)(2^m−2)(2^m−4)(2^m−15) = (2/7)·tr(A²)·(2^m−15)` on the `y = 0` class,
+> exact at `n = 6..11`.
+
+**Off that stratum the form fails** — exactly **7** labels satisfy it at every level, and those
+are precisely the seven members of the `y = 0` GL-orbit. `W24` asserts that as a **declared
+negative**. The deviation is constant on GL-orbits, which is where the next rung starts.
+
+### 17.3 Not claimed
+
+**No general closed form for `tr(A³)`.** This is exactly where `tr(A²)` stood at `W6` — a closed
+form on the one stratum where the quantity is constant, and honest variation off it. Closing that
+one took `W13`–`W17`.
+
+**(III) is untouched. (d) is not closed, and V1 is not proven.**

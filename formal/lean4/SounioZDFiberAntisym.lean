@@ -5729,6 +5729,55 @@ theorem lowCob_eq_GL (a b c : Nat) (ha : a < 8) (hb : b < 8) (hc : c < 8)
 end GLClosure
 
 
+/-! ## Tier 28: why `tr(A³)` is the FINER invariant
+
+`A_sig`'s entry is not the resonance predicate but the SIGN `-P1 = -σ(a,b)·σ(a⊕L,b⊕L)`.
+Under a class member the coboundary does NOT cancel there -- only `λ(a⊕b)` squares away, and
+what survives is a factor depending on `a` alone times one depending on `b` alone:
+
+    P1 (p a) (p b) = P1 a b * μ a * μ b,        μ x = λ x * λ (x ⊕ L).
+
+That is a DIAGONAL SIMILARITY `A' = D A D` with `D = diag μ` and `D² = I`, so `tr(A'^k) =
+tr(A^k)` for every `k` -- `tr(A³)` is `GL(3,2)`-invariant. `tau` has no such factorisation, and
+measurement (`W24`) confirms it genuinely CHANGES `tr(A³)`. That asymmetry is exactly why the
+pair `(tr A², tr A³)` separates strictly more than `tr A²` alone: `tr(A²)` is invariant under
+BOTH symmetries, `tr(A³)` only under one. -/
+
+theorem P1_of_coboundary (m L a b : Nat) (p : Nat → Nat) (lam : Nat → Int)
+    (hL : L < 2^m) (ha : a < 2^m) (hb : b < 2^m)
+    (hlin : ∀ x y, p (x ^^^ y) = p x ^^^ p y)
+    (hpm : ∀ x, lam x = 1 ∨ lam x = -1)
+    (hcob : ∀ x y, x < 2^m → y < 2^m →
+        cdSigma (p x) (p y) m = cdSigma x y m * lam x * lam y * lam (x ^^^ y)) :
+    cdSigma (p a) (p b) m * cdSigma (p a ^^^ p L) (p b ^^^ p L) m
+      = cdSigma a b m * cdSigma (a ^^^ L) (b ^^^ L) m
+          * (lam a * lam (a ^^^ L)) * (lam b * lam (b ^^^ L)) := by
+  have sq : ∀ x : Nat, lam x * lam x = 1 := by
+    intro x; rcases hpm x with h | h <;> rw [h] <;> decide
+  have haL : a ^^^ L < 2^m := Nat.xor_lt_two_pow ha hL
+  have hbL : b ^^^ L < 2^m := Nat.xor_lt_two_pow hb hL
+  have hx : (a ^^^ L) ^^^ (b ^^^ L) = a ^^^ b := by
+    simp [Nat.xor_assoc, Nat.xor_comm, xorLcomm, xorCancelL]
+  rw [← hlin a L, ← hlin b L, hcob a b ha hb, hcob (a ^^^ L) (b ^^^ L) haL hbL, hx]
+  calc cdSigma a b m * lam a * lam b * lam (a ^^^ b)
+        * (cdSigma (a ^^^ L) (b ^^^ L) m * lam (a ^^^ L) * lam (b ^^^ L) * lam (a ^^^ b))
+      = cdSigma a b m * cdSigma (a ^^^ L) (b ^^^ L) m
+          * (lam a * lam (a ^^^ L)) * (lam b * lam (b ^^^ L))
+          * (lam (a ^^^ b) * lam (a ^^^ b)) := by ac_rfl
+    _ = _ := by rw [sq]; simp
+
+/-- The class-member form: the `A_sig` entry sign transforms by a diagonal similarity. -/
+theorem P1_lowCob {t l} (h : LowCob t l) (k L a b : Nat)
+    (hL : L < 2^(k+3)) (ha : a < 2^(k+3)) (hb : b < 2^(k+3)) :
+    cdSigma (lowMap t a) (lowMap t b) (k+3)
+        * cdSigma (lowMap t a ^^^ lowMap t L) (lowMap t b ^^^ lowMap t L) (k+3)
+      = cdSigma a b (k+3) * cdSigma (a ^^^ L) (b ^^^ L) (k+3)
+          * (lowSign l a * lowSign l (a ^^^ L)) * (lowSign l b * lowSign l (b ^^^ L)) :=
+  P1_of_coboundary (k+3) L a b (lowMap t) (lowSign l) hL ha hb
+    (lowMap_lin t (lowCob_lt h) (lowCob_lin h))
+    (fun x => lowCob_pm h (x % 8))
+    (lowCob_sigma h k)
+
 end SounioZDFiberAntisym
 
 
