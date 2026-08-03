@@ -7318,6 +7318,78 @@ theorem hi_ll_cos_split (m W a b : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
   · rw [if_neg (fun hc => hg ⟨hc.1, hc.2.1⟩), if_neg (fun hc => hg ⟨hc.1, hc.2.1⟩),
         if_neg (fun hc => hg ⟨hc.1, hc.2.1⟩)]
 
+/-- The `a = W` row of the `ll` quadrant: `2^(m+1) - 2` points, all counting. -/
+private theorem hi_ll_row_a (m W a : Nat) (hW : W < 2^(m+1)) :
+    sumLt (2^(m+1)) (fun b => if a = W ∧ b ≠ 0 ∧ b ≠ W then 1 else 0)
+      = if a = W then sumLt (2^(m+1)) (fun b => if b ≠ 0 ∧ b ≠ W then 1 else 0) else 0 := by
+  by_cases hg : a = W
+  · rw [if_pos hg]
+    apply sumLt_congr
+    intro b _
+    by_cases hc : b ≠ 0 ∧ b ≠ W
+    · rw [if_pos ⟨hg, hc.1, hc.2⟩, if_pos hc]
+    · rw [if_neg (fun hh => hc ⟨hh.2.1, hh.2.2⟩), if_neg hc]
+  · rw [if_neg hg,
+        sumLt_congr (2^(m+1)) _ (fun _ => 0) (fun b _ => if_neg (fun hh => hg hh.1))]
+    exact sumLt_zero _
+
+/-- The coset diagonal of the `ll` remainder: one point per `a` off the two lines. -/
+private theorem hi_ll_cos_row (m W a : Nat) (hW : W < 2^(m+1)) (ha : a < 2^(m+1)) :
+    sumLt (2^(m+1)) (fun b => if a ≠ 0 ∧ a ≠ W ∧ b = a ^^^ W then 1 else 0)
+      = if a ≠ 0 ∧ a ≠ W then 1 else 0 := by
+  by_cases hg : a ≠ 0 ∧ a ≠ W
+  · rw [if_pos hg,
+        sumLt_congr (2^(m+1)) _ (fun b => if b = a ^^^ W then 1 else 0)
+          (fun b _ => by
+            by_cases hc : b = a ^^^ W
+            · rw [if_pos ⟨hg.1, hg.2, hc⟩, if_pos hc]
+            · rw [if_neg (fun hh => hc hh.2.2), if_neg hc])]
+    exact sumLt_single (2^(m+1)) (a ^^^ W) 1 (xorlt ha hW)
+  · rw [if_neg hg,
+        sumLt_congr (2^(m+1)) _ (fun _ => 0)
+          (fun b _ => if_neg (fun hh => hg ⟨hh.1, hh.2.1⟩))]
+    exact sumLt_zero _
+
+/-- **The `ll` quadrant of the HIGH box.** Three copies of the off-lines count `2^(m+1) - 2`
+    -- the `a = W` row, the `b = W` column, and the coset diagonal -- on top of the positive
+    core. -/
+theorem Ncnt_ll_hi (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLt (2^(m+1)) (fun a => sumLt (2^(m+1)) (fun b => nInd (W + 2^(m+1)) (m+2) a b)) + 6
+      = OffCntP W (m+1) + 3 * 2^(m+1) := by
+  have hsplit : sumLt (2^(m+1)) (fun a =>
+        sumLt (2^(m+1)) (fun b => nInd (W + 2^(m+1)) (m+2) a b))
+      = sumLt (2^(m+1)) (fun a =>
+            sumLt (2^(m+1)) (fun b => if a = W ∧ b ≠ 0 ∧ b ≠ W then 1 else 0))
+        + (sumLt (2^(m+1)) (fun a =>
+              sumLt (2^(m+1)) (fun b => if b = W ∧ a ≠ 0 ∧ a ≠ W then 1 else 0))
+           + (sumLt (2^(m+1)) (fun a =>
+                 sumLt (2^(m+1)) (fun b => if a ≠ 0 ∧ a ≠ W ∧ b = a ^^^ W then 1 else 0))
+              + sumLt (2^(m+1)) (fun a =>
+                  sumLt (2^(m+1)) (fun b =>
+                    if a ≠ 0 ∧ a ≠ W ∧ b ≠ 0 ∧ b ≠ W ∧ a ≠ b ∧ b ≠ a ^^^ W
+                       ∧ Qgen' W a b (m+1) = 1 then 1 else 0)))) := by
+    rw [sumLt_congr (2^(m+1)) _ (fun a =>
+          sumLt (2^(m+1)) (fun b => if a = W ∧ b ≠ 0 ∧ b ≠ W then 1 else 0)
+          + (sumLt (2^(m+1)) (fun b => if b = W ∧ a ≠ 0 ∧ a ≠ W then 1 else 0)
+             + (sumLt (2^(m+1)) (fun b => if a ≠ 0 ∧ a ≠ W ∧ b = a ^^^ W then 1 else 0)
+                + sumLt (2^(m+1)) (fun b =>
+                    if a ≠ 0 ∧ a ≠ W ∧ b ≠ 0 ∧ b ≠ W ∧ a ≠ b ∧ b ≠ a ^^^ W
+                       ∧ Qgen' W a b (m+1) = 1 then 1 else 0))))
+        (fun a hA => by
+          rw [sumLt_congr (2^(m+1)) _ _ (fun b hB => by
+                rw [hi_ll_split m W a b hW hW0 hA hB, hi_ll_cos_split m W a b hW hW0 hA]),
+              sumLt_pair, sumLt_pair, sumLt_pair]),
+        sumLt_pair, sumLt_pair, sumLt_pair]
+  rw [hsplit,
+      sumLt_congr (2^(m+1)) _ _ (fun a hA => hi_ll_row_a m W a hW),
+      sumLt_congr (2^(m+1)) _ _ (fun a hA => col_W W (m+1) a hW),
+      sumLt_congr (2^(m+1)) _ _ (fun a hA => hi_ll_cos_row m W a hW hA),
+      sumLt_single (2^(m+1)) W
+        (sumLt (2^(m+1)) (fun b => if b ≠ 0 ∧ b ≠ W then 1 else 0)) hW]
+  unfold OffCntP
+  have hc2 := count_off2 W (m+1) hW hW0
+  omega
+
 end SounioZDFiberAntisym
 
 
