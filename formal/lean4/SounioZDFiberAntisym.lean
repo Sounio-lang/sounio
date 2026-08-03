@@ -7784,6 +7784,196 @@ theorem Ncnt_lu_hi (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
   have hc1 := count_off1 (m+1)
   omega
 
+/-- Pointwise split of the HIGH `uu` quadrant. Like `lu` it carries one asymmetric slice --
+    here the `u = 0` row, which has `2^(m+1) - 1` points because `u = 0` already forces `u ≠ v`
+    for every `v ≠ 0`. -/
+theorem hi_uu_split (m W u v : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
+    (hu : u < 2^(m+1)) (hv : v < 2^(m+1)) :
+    nInd (W + 2^(m+1)) (m+2) (2^(m+1) + u) (2^(m+1) + v)
+      = (if u = 0 ∧ v ≠ 0 then 1 else 0)
+        + ((if (u ≠ 0 ∧ u ≠ W) ∧ v = 0 then 1 else 0)
+           + ((if (u ≠ 0 ∧ u ≠ W) ∧ v = W then 1 else 0)
+              + ((if (u ≠ 0 ∧ u ≠ W) ∧ v = u ^^^ W then 1 else 0)
+                 + (if u ≠ 0 ∧ u ≠ W ∧ v ≠ 0 ∧ v ≠ W ∧ u ≠ v ∧ u ≠ v ^^^ W
+                       ∧ Qgen' W v u (m+1) = 1 then 1 else 0)))) := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hcu : (2:Nat)^(m+1) + u = u + 2^(m+1) := by omega
+  have hcv : (2:Nat)^(m+1) + v = v + 2^(m+1) := by omega
+  have hpow : (2:Nat)^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  unfold nInd
+  rw [hcu, hcv]
+  have ha0 : u + 2^(m+1) ≠ 0 := by omega
+  have hb0 : v + 2^(m+1) ≠ 0 := by omega
+  by_cases huv : u = v
+  · have hab : ¬ (u + 2^(m+1) ≠ v + 2^(m+1)) := by omega
+    rw [if_neg (fun hc => hab hc.2.2.1),
+        if_neg (fun hc => hc.2 (by rw [← huv]; exact hc.1)),
+        if_neg (fun hc => hc.1.1 (by rw [huv]; exact hc.2)),
+        if_neg (fun hc => hc.1.2 (by rw [huv]; exact hc.2)),
+        if_neg (fun hc => hW0 (by
+          have h2 : u ^^^ u = u ^^^ (u ^^^ W) := by rw [huv] at hc ⊢; rw [← hc.2]
+          rw [Nat.xor_self, xorCancelL] at h2
+          exact h2.symm)),
+        if_neg (fun hc => hc.2.2.2.2.1 huv)]
+  · have hab : u + 2^(m+1) ≠ v + 2^(m+1) := by omega
+    by_cases hu0 : u = 0
+    · have hv0 : v ≠ 0 := by rw [← hu0]; exact fun h => huv h.symm
+      have hq : Qgen' (W + 2^(m+1)) (u + 2^(m+1)) (v + 2^(m+1)) (m+2) = -1 := by
+        rw [hu0]; exact Qgen'_hi_uu_u0 m W v hW hW0 hv hv0
+      rw [if_pos ⟨ha0, hb0, hab, hq⟩, if_pos ⟨hu0, hv0⟩,
+          if_neg (fun hc => hc.1.1 hu0), if_neg (fun hc => hc.1.1 hu0),
+          if_neg (fun hc => hc.1.1 hu0), if_neg (fun hc => hc.1 hu0)]
+    · have h1 : (if u = 0 ∧ v ≠ 0 then (1:Nat) else 0) = 0 := if_neg (fun hc => hu0 hc.1)
+      rw [h1, Nat.zero_add]
+      by_cases huW : u = W
+      · have hvW : v ≠ W := by rw [← huW]; exact fun h => huv h.symm
+        have hlt : W + 2^(m+1) < 2^(m+2) := by omega
+        have hblt : v + 2^(m+1) < 2^(m+2) := by omega
+        have hq : Qgen' (W + 2^(m+1)) (u + 2^(m+1)) (v + 2^(m+1)) (m+2) = 1 := by
+          rw [huW]
+          exact Qgen'_label_left (m+2) (W + 2^(m+1)) (v + 2^(m+1)) hlt hblt (by omega) hb0
+            (by omega)
+        rw [if_neg (fun hc => by rw [hq] at hc; exact absurd hc.2.2.2 (by decide)),
+            if_neg (fun hc => hc.1.2 huW), if_neg (fun hc => hc.1.2 huW),
+            if_neg (fun hc => hc.1.2 huW), if_neg (fun hc => hc.2.1 huW)]
+      · have huX : u ^^^ W ≠ 0 := fun h => huW (xor_zero_eq u W h)
+        by_cases hv0 : v = 0
+        · have hq : Qgen' (W + 2^(m+1)) (u + 2^(m+1)) (v + 2^(m+1)) (m+2) = -1 := by
+            rw [hv0]; exact Qgen'_hi_uu_v0 m W u hW hW0 hu hu0 huW
+          rw [if_pos ⟨ha0, hb0, hab, hq⟩, if_pos ⟨⟨hu0, huW⟩, hv0⟩,
+              if_neg (fun hc => hW0 (by rw [← hc.2]; exact hv0)),
+              if_neg (fun hc => huX (by rw [← hc.2]; exact hv0)),
+              if_neg (fun hc => hc.2.2.1 hv0)]
+        · have h2 : (if (u ≠ 0 ∧ u ≠ W) ∧ v = 0 then (1:Nat) else 0) = 0 :=
+            if_neg (fun hc => hv0 hc.2)
+          rw [h2, Nat.zero_add]
+          by_cases hvW : v = W
+          · have hlt : W + 2^(m+1) < 2^(m+2) := by omega
+            have halt : u + 2^(m+1) < 2^(m+2) := by omega
+            have hq : Qgen' (W + 2^(m+1)) (u + 2^(m+1)) (v + 2^(m+1)) (m+2) = -1 := by
+              rw [hvW]
+              exact Qgen'_label_right (m+2) (W + 2^(m+1)) (u + 2^(m+1)) hlt halt (by omega)
+            rw [if_pos ⟨ha0, hb0, hab, hq⟩, if_pos ⟨⟨hu0, huW⟩, hvW⟩,
+                if_neg (fun hc => hu0 (by
+                  have h3 : (u ^^^ W) ^^^ W = W ^^^ W := by rw [← hc.2, hvW]
+                  rw [xor_cancel u W, Nat.xor_self] at h3
+                  exact h3)),
+                if_neg (fun hc => hc.2.2.2.1 hvW)]
+          · have h3 : (if (u ≠ 0 ∧ u ≠ W) ∧ v = W then (1:Nat) else 0) = 0 :=
+              if_neg (fun hc => hvW hc.2)
+            rw [h3, Nat.zero_add]
+            have hvX : v ^^^ W ≠ 0 := fun h => hvW (xor_zero_eq v W h)
+            by_cases hcos : v = u ^^^ W
+            · have hcos' : u = v ^^^ W := by rw [hcos, xor_cancel u W]
+              have hq : Qgen' (W + 2^(m+1)) (u + 2^(m+1)) (v + 2^(m+1)) (m+2) = -1 := by
+                rw [hcos]; exact Qgen'_hi_uu_cos m W u hW hW0 hu hu0 huW
+              rw [if_pos ⟨ha0, hb0, hab, hq⟩, if_pos ⟨⟨hu0, huW⟩, hcos⟩,
+                  if_neg (fun hc => hc.2.2.2.2.2.1 hcos')]
+            · have h4 : (if (u ≠ 0 ∧ u ≠ W) ∧ v = u ^^^ W then (1:Nat) else 0) = 0 :=
+                if_neg (fun hc => hcos hc.2)
+              rw [h4, Nat.zero_add]
+              have hcos2 : u ≠ v ^^^ W := by
+                intro h
+                apply hcos
+                rw [h, xor_cancel v W]
+              have hxor3 : u ^^^ v ^^^ W ≠ 0 := by
+                intro h
+                apply hcos
+                have h2 : u ^^^ v = W := xor_zero_eq (u ^^^ v) W h
+                rw [← h2, xorCancelL]
+              have hrow : Qgen' (W + 2^(m+1)) (u + 2^(m+1)) (v + 2^(m+1)) (m+2)
+                  = - Qgen' W v u (m+1) :=
+                Q'red_hi_uu m W u v hW hu hv hu0 hv0 huX hvX huv hxor3
+              by_cases hq1 : Qgen' W v u (m+1) = 1
+              · have hq : Qgen' (W + 2^(m+1)) (u + 2^(m+1)) (v + 2^(m+1)) (m+2) = -1 := by
+                  rw [hrow, hq1]
+                rw [if_pos ⟨ha0, hb0, hab, hq⟩,
+                    if_pos ⟨hu0, huW, hv0, hvW, huv, hcos2, hq1⟩]
+              · have hq : Qgen' (W + 2^(m+1)) (u + 2^(m+1)) (v + 2^(m+1)) (m+2) ≠ -1 := by
+                  rw [hrow]
+                  rcases Qgen'_pm W v u (m+1) with h | h
+                  · exact absurd h hq1
+                  · rw [h]; decide
+                rw [if_neg (fun hc => hq hc.2.2.2),
+                    if_neg (fun hc => hq1 hc.2.2.2.2.2.2)]
+
+/-- **The `uu` quadrant of the HIGH box.** -/
+theorem Ncnt_uu_hi (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLt (2^(m+1)) (fun u =>
+        sumLt (2^(m+1)) (fun v =>
+          nInd (W + 2^(m+1)) (m+2) (2^(m+1) + u) (2^(m+1) + v))) + 7
+      = OffCntP W (m+1) + 4 * 2^(m+1) := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hsplit : sumLt (2^(m+1)) (fun u =>
+        sumLt (2^(m+1)) (fun v => nInd (W + 2^(m+1)) (m+2) (2^(m+1) + u) (2^(m+1) + v)))
+      = sumLt (2^(m+1)) (fun u =>
+            sumLt (2^(m+1)) (fun v => if u = 0 ∧ v ≠ 0 then 1 else 0))
+        + (sumLt (2^(m+1)) (fun u =>
+              sumLt (2^(m+1)) (fun v => if (u ≠ 0 ∧ u ≠ W) ∧ v = 0 then 1 else 0))
+           + (sumLt (2^(m+1)) (fun u =>
+                 sumLt (2^(m+1)) (fun v => if (u ≠ 0 ∧ u ≠ W) ∧ v = W then 1 else 0))
+              + (sumLt (2^(m+1)) (fun u =>
+                    sumLt (2^(m+1)) (fun v =>
+                      if (u ≠ 0 ∧ u ≠ W) ∧ v = u ^^^ W then 1 else 0))
+                 + sumLt (2^(m+1)) (fun u =>
+                     sumLt (2^(m+1)) (fun v =>
+                       if u ≠ 0 ∧ u ≠ W ∧ v ≠ 0 ∧ v ≠ W ∧ u ≠ v ∧ u ≠ v ^^^ W
+                          ∧ Qgen' W v u (m+1) = 1 then 1 else 0))))) := by
+    rw [sumLt_congr (2^(m+1)) _ (fun u =>
+          sumLt (2^(m+1)) (fun v => if u = 0 ∧ v ≠ 0 then 1 else 0)
+          + (sumLt (2^(m+1)) (fun v => if (u ≠ 0 ∧ u ≠ W) ∧ v = 0 then 1 else 0)
+             + (sumLt (2^(m+1)) (fun v => if (u ≠ 0 ∧ u ≠ W) ∧ v = W then 1 else 0)
+                + (sumLt (2^(m+1)) (fun v => if (u ≠ 0 ∧ u ≠ W) ∧ v = u ^^^ W then 1 else 0)
+                   + sumLt (2^(m+1)) (fun v =>
+                       if u ≠ 0 ∧ u ≠ W ∧ v ≠ 0 ∧ v ≠ W ∧ u ≠ v ∧ u ≠ v ^^^ W
+                          ∧ Qgen' W v u (m+1) = 1 then 1 else 0)))))
+        (fun u hU => by
+          rw [sumLt_congr (2^(m+1)) _ _ (fun v hV => hi_uu_split m W u v hW hW0 hU hV),
+              sumLt_pair, sumLt_pair, sumLt_pair, sumLt_pair]),
+        sumLt_pair, sumLt_pair, sumLt_pair, sumLt_pair]
+  rw [hsplit,
+      sumLt_congr (2^(m+1)) _ _ (fun u _ => row_nz (2^(m+1)) (u = 0)),
+      sumLt_congr (2^(m+1)) _ _ (fun u _ => row_at (2^(m+1)) 0 hp (u ≠ 0 ∧ u ≠ W)),
+      sumLt_congr (2^(m+1)) _ _ (fun u _ => row_at (2^(m+1)) W hW (u ≠ 0 ∧ u ≠ W)),
+      sumLt_congr (2^(m+1)) _ _ (fun u hU =>
+        row_at (2^(m+1)) (u ^^^ W) (xorlt hU hW) (u ≠ 0 ∧ u ≠ W)),
+      swapped_core m W,
+      sumLt_single (2^(m+1)) 0
+        (sumLt (2^(m+1)) (fun v => if v ≠ 0 then 1 else 0)) hp]
+  have hc2 := count_off2 W (m+1) hW hW0
+  have hc1 := count_off1 (m+1)
+  omega
+
+/-! ### Tier 31: THE HIGH RECURSION
+
+The four quadrants are now theorems. What remains is bookkeeping, and it is stated with NO Nat
+subtraction anywhere so that `omega` stays linear with `2^(m+1) * 2^(m+1)` as a single atom. -/
+
+/-- The positive core, priced against the level-`(m+1)` count. -/
+theorem OffCntP_eq (m W : Nat) (hm : 1 ≤ m) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    OffCntP W (m+1) + 5 * 2^(m+1) + Ncnt W (m+1) = 2^(m+1) * 2^(m+1) + 6 := by
+  have h4 : 4 ≤ 2^(m+1) := by
+    have hle : (2:Nat)^2 ≤ 2^(m+1) := Nat.pow_le_pow_right (by omega) (by omega)
+    have he : (2:Nat)^2 = 4 := rfl
+    omega
+  have h1 := OffCnt_add_OffCntP W (m+1) hW hW0 h4
+  have h2 := Ncnt_eq_OffCnt W (m+1) hW hW0
+  omega
+
+/-- **THE HIGH RECURSION, forall n.** With `e = 2^(m+1)`, this is
+    `N(m+2, W+e) = 4e^2 - 6e - 2 - 4*N(m+1, W)`, i.e. the paper's
+    `4P' - 4N' + 6e - 10` with `P' = (e-1)(e-2)` -- stated additively to stay in `Nat`. -/
+theorem Ncnt_hi (m W : Nat) (hm : 1 ≤ m) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    Ncnt (W + 2^(m+1)) (m+2) + 6 * 2^(m+1) + 2 + 4 * Ncnt W (m+1)
+      = 4 * (2^(m+1) * 2^(m+1)) := by
+  have hll := Ncnt_ll_hi m W hW hW0
+  have hul := Ncnt_ul_hi m W hW hW0
+  have hlu := Ncnt_lu_hi m W hW hW0
+  have huu := Ncnt_uu_hi m W hW hW0
+  have hP := OffCntP_eq m W hm hW hW0
+  rw [Ncnt_quad (W + 2^(m+1)) m]
+  omega
+
 end SounioZDFiberAntisym
 
 
