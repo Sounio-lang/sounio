@@ -44,6 +44,11 @@ ATTEMPT_COUNT=512
 ```
 
 Heavy execution is routed through Slurm with 32 CPU workers. No FPGA is used.
+The preferred r770 worker currently fails before launching even a trivial batch
+command (`RaisedSignal:53`). The frozen job therefore permits the r740 worker as
+an explicit fallback. Payloads remain hash-bound in worker-local staging, and
+the result archive returns as one framed TCP stream carrying its byte count and
+SHA-256; the receiver must independently check both before accepting evidence.
 
 ## Local protocol gate
 

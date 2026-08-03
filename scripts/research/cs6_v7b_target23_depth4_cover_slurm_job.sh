@@ -23,11 +23,10 @@ fail() {
 config_source=$1
 expected_config_sha=$2
 [[ $expected_config_sha =~ ^[0-9a-f]{64}$ ]] || fail "invalid config digest"
-[[ $config_source == /orangefs/training/* && -f $config_source && ! -L $config_source ]] || \
-  fail "config must be a regular OrangeFS file"
+[[ $config_source == /tmp/cs6-v7b-t23-cover-stage-* && -f $config_source && ! -L $config_source ]] || \
+  fail "config must be a regular worker-local staging file"
 [[ ${SLURM_JOB_ID:-} =~ ^[1-9][0-9]*$ ]] || fail "missing Slurm job id"
 [[ ${SLURM_JOB_NAME:-} == cs6-v7b-t23-cover ]] || fail "job name drifted"
-[[ ${SLURM_JOB_NODELIST:-} == gpuorangefs-r770-proxmox ]] || fail "node drifted"
 [[ ${SLURM_CPUS_PER_TASK:-} == 32 ]] || fail "CPU request drifted"
 
 work=$(mktemp -d "/tmp/cs6-v7b-t23-cover-${SLURM_JOB_ID}.XXXXXXXX")
@@ -55,13 +54,14 @@ done < "$config"
 
 required=(
   SCHEMA PAYLOAD_ARCHIVE PAYLOAD_SHA256 EXPECTED_GIT_HEAD EXPECTED_CONTRACT_SHA256
-  EXPECTED_JOB_SCRIPT_SHA256 EXPECTED_WORKER_SHA256 OUTPUT_ARCHIVE JOBS TIMEOUT_SECONDS
+  EXPECTED_JOB_SCRIPT_SHA256 EXPECTED_WORKER_SHA256 EXPECTED_NODE OUTPUT_ARCHIVE
+  RETURN_HOST RETURN_PORT JOBS TIMEOUT_SECONDS
 )
 [[ ${#cfg[@]} -eq ${#required[@]} ]] || fail "config field count mismatch"
 for key in "${required[@]}"; do
   [[ -n ${cfg[$key]+present} ]] || fail "missing config field: $key"
 done
-[[ ${cfg[SCHEMA]} == sounio.cs6.v7b-target23-depth4-cover-slurm-config.v1 ]] || \
+[[ ${cfg[SCHEMA]} == sounio.cs6.v7b-target23-depth4-cover-slurm-config.v2 ]] || \
   fail "config schema mismatch"
 for key in PAYLOAD_SHA256 EXPECTED_GIT_HEAD EXPECTED_CONTRACT_SHA256 EXPECTED_JOB_SCRIPT_SHA256 EXPECTED_WORKER_SHA256; do
   if [[ $key == EXPECTED_GIT_HEAD ]]; then
@@ -71,8 +71,14 @@ for key in PAYLOAD_SHA256 EXPECTED_GIT_HEAD EXPECTED_CONTRACT_SHA256 EXPECTED_JO
   fi
 done
 [[ ${cfg[JOBS]} == 32 && ${cfg[TIMEOUT_SECONDS]} == 120 ]] || fail "runtime options drifted"
+[[ ${cfg[EXPECTED_NODE]} == gpuorangefs-r770-proxmox || \
+   ${cfg[EXPECTED_NODE]} == gpuorangefs-multi-r740-proxmox ]] || fail "unsupported execution node"
+[[ ${SLURM_JOB_NODELIST:-} == ${cfg[EXPECTED_NODE]} ]] || fail "node drifted"
+[[ ${cfg[RETURN_HOST]} =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || fail "invalid return host"
+[[ ${cfg[RETURN_PORT]} =~ ^[1-9][0-9]{3,4}$ && ${cfg[RETURN_PORT]} -le 65535 ]] || \
+  fail "invalid return port"
 for key in PAYLOAD_ARCHIVE OUTPUT_ARCHIVE; do
-  [[ ${cfg[$key]} == /orangefs/training/* ]] || fail "$key escapes OrangeFS"
+  [[ ${cfg[$key]} == /tmp/cs6-v7b-t23-cover-stage-* ]] || fail "$key escapes worker-local staging"
 done
 [[ -f ${cfg[PAYLOAD_ARCHIVE]} && ! -L ${cfg[PAYLOAD_ARCHIVE]} ]] || fail "payload missing"
 [[ $(sha256sum "${cfg[PAYLOAD_ARCHIVE]}" | awk '{print $1}') == ${cfg[PAYLOAD_SHA256]} ]] || \
@@ -121,3 +127,15 @@ mv "$output.tmp-$SLURM_JOB_ID" "$output"
 printf '%s  %s\n' "$archive_sha" "$(basename "$output")" > "$output.sha256.tmp-$SLURM_JOB_ID"
 mv "$output.sha256.tmp-$SLURM_JOB_ID" "$output.sha256"
 printf 'RESULT_ARCHIVE=%s\nRESULT_SHA256=%s\n' "$output" "$archive_sha"
+
+# The workspace is not mounted on every worker. Return the immutable archive
+# over one framed TCP stream; the receiver independently checks size and hash.
+archive_bytes=$(stat -c '%s' "$output")
+timeout 120 bash -c '
+  set -euo pipefail
+  exec 3<>"/dev/tcp/$1/$2"
+  printf "SOUNIO_CS6_V7B_RESULT_V1 %s %s\\n" "$4" "$5" >&3
+  cat "$3" >&3
+  exec 3>&-
+' _ "${cfg[RETURN_HOST]}" "${cfg[RETURN_PORT]}" "$output" "$archive_bytes" "$archive_sha" || \
+  fail "result return stream failed"
