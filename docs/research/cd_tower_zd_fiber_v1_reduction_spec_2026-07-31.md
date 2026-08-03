@@ -785,3 +785,54 @@ tables, done in `W20` (168 elements, equal to the enumerated group). It is a fin
 analytic gap.
 
 **(III) is untouched. (d) is not closed, and V1 is not proven.**
+
+---
+
+## 16. `LowCob` is exactly `GL(3,2)` — nothing about `g` is outside Lean (`W23`, 2026-08-03)
+
+§15 left one item: that the inductive class is exactly `GL(3,2)`. Both directions are now proven.
+
+### 16.1 Soundness
+
+```lean
+lowCob_isGL : LowCob t l →
+  (∀ v < 8, t v < 8) ∧ t 0 = 0 ∧ (linear on the low block) ∧ (injective on the low block)
+```
+
+Assembled from `lowCob_lt`, `lowCob_t0`, `lowCob_lin` and the new `lowCob_inj8` (injectivity from
+linearity plus trivial kernel). An injective linear endomorphism of `F2³` **is** an element of
+`GL(3,2)`.
+
+### 16.2 Completeness
+
+For each of the 168 elements, an **explicit word** in the two generators, found by breadth-first
+search — longest word **12**. Emitted as `LowCob.comp` terms:
+
+```lean
+lowCob_covers : ∀ i < 168, ∃ t l, LowCob t l ∧ ∀ v < 8, t v = linMap (glTable i)… v
+lowCob_eq_GL  : glIndep a b c → ∃ t l, LowCob t l ∧ ∀ v < 8, t v = linMap a b c v
+```
+
+The dispatch is a 168-way match on the index; each case closes by `decide` on the eight low
+values. `glIdx_lt`/`glIdx_eq` compute the index, `glList_indep` checks every listed triple is a
+basis. **All plain `decide`, no `native_decide`** — so no extra trust axiom.
+
+### 16.3 The chain, complete
+
+> σ moves by a coboundary (§13) → the four σ's of `Q′` cancel it (§12) → `Q′` is invariant under
+> the class (§14) → **the count is invariant** (§15) → **and the class is `GL(3,2)`** (here),
+> whose transitivity on the seven nonzero low patterns is what merges the residues.
+
+With `Qgen'_tau` (§11) for the even labels, **both halves of `g(W) = (W & (W−1)) ≫ 3` are
+theorems, end to end.**
+
+### 16.4 A second null-control catch
+
+`W23`'s first run **failed**: it re-derived the generated group with a *stack* rather than a
+*queue*, so it reported a longest word of 72 against the claimed 12. The reachable set was right
+either way — only the word-length bound differed. The clause was re-deriving a quantity by a
+different search order than the generator used, and said so. Fixed to breadth-first.
+
+That is the second time in two rungs that a clause, not a reviewer, caught the defect.
+
+**(III) is untouched. (d) is not closed, and V1 is not proven.**

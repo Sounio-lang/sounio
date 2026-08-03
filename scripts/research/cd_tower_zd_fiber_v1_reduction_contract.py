@@ -1636,6 +1636,94 @@ def main():
             "touching bit 3 breaks the count at every label. (III) untouched; (d) IS NOT "
             "CLOSED ***")
 
+    # ---- W23  LowCob IS EXACTLY GL(3,2) -- THE LAST FINITE FACT IS NOW IN LEAN -------------
+    # W20-W22 carried one item outside Lean: that the inductive class `LowCob` (the two
+    # generators, closed under composition) is exactly GL(3,2). It is now `lowCob_eq_GL`, with
+    # SOUNDNESS from `lowCob_isGL` and COMPLETENESS from `lowCob_covers` -- for each of the 168
+    # elements an explicit WORD in the two generators, found by BFS (longest: 12).
+    # This clause TRANSCRIBES the Lean `glList` and re-derives everything independently.
+    _GLLIST = eval("[" + (
+        "(1,2,4),(1,2,5),(1,2,6),(1,2,7),(1,3,4),(1,3,5),(1,3,6),(1,3,7),(1,4,2),(1,4,3),(1,4,6"
+        "),(1,4,7),(1,5,2),(1,5,3),(1,5,6),(1,5,7),(1,6,2),(1,6,3),(1,6,4),(1,6,5),(1,7,2),(1,7"
+        ",3),(1,7,4),(1,7,5),(2,1,4),(2,1,5),(2,1,6),(2,1,7),(2,3,4),(2,3,5),(2,3,6),(2,3,7),(2"
+        ",4,1),(2,4,3),(2,4,5),(2,4,7),(2,5,1),(2,5,3),(2,5,4),(2,5,6),(2,6,1),(2,6,3),(2,6,5),"
+        "(2,6,7),(2,7,1),(2,7,3),(2,7,4),(2,7,6),(3,1,4),(3,1,5),(3,1,6),(3,1,7),(3,2,4),(3,2,5"
+        "),(3,2,6),(3,2,7),(3,4,1),(3,4,2),(3,4,5),(3,4,6),(3,5,1),(3,5,2),(3,5,4),(3,5,7),(3,6"
+        ",1),(3,6,2),(3,6,4),(3,6,7),(3,7,1),(3,7,2),(3,7,5),(3,7,6),(4,1,2),(4,1,3),(4,1,6),(4"
+        ",1,7),(4,2,1),(4,2,3),(4,2,5),(4,2,7),(4,3,1),(4,3,2),(4,3,5),(4,3,6),(4,5,2),(4,5,3),"
+        "(4,5,6),(4,5,7),(4,6,1),(4,6,3),(4,6,5),(4,6,7),(4,7,1),(4,7,2),(4,7,5),(4,7,6),(5,1,2"
+        "),(5,1,3),(5,1,6),(5,1,7),(5,2,1),(5,2,3),(5,2,4),(5,2,6),(5,3,1),(5,3,2),(5,3,4),(5,3"
+        ",7),(5,4,2),(5,4,3),(5,4,6),(5,4,7),(5,6,1),(5,6,2),(5,6,4),(5,6,7),(5,7,1),(5,7,3),(5"
+        ",7,4),(5,7,6),(6,1,2),(6,1,3),(6,1,4),(6,1,5),(6,2,1),(6,2,3),(6,2,5),(6,2,7),(6,3,1),"
+        "(6,3,2),(6,3,4),(6,3,7),(6,4,1),(6,4,3),(6,4,5),(6,4,7),(6,5,1),(6,5,2),(6,5,4),(6,5,7"
+        "),(6,7,2),(6,7,3),(6,7,4),(6,7,5),(7,1,2),(7,1,3),(7,1,4),(7,1,5),(7,2,1),(7,2,3),(7,2"
+        ",4),(7,2,6),(7,3,1),(7,3,2),(7,3,5),(7,3,6),(7,4,1),(7,4,2),(7,4,5),(7,4,6),(7,5,1),(7"
+        ",5,3),(7,5,4),(7,5,6),(7,6,2),(7,6,3),(7,6,4),(7,6,5)"
+    ) + "]")
+
+    def _mk(a, b, c):
+        return tuple((a if v & 1 else 0) ^ (b if v & 2 else 0) ^ (c if v & 4 else 0)
+                     for v in range(8))
+
+    _indep = [(a, b, c) for a in range(1, 8) for b in range(1, 8) for c in range(1, 8)
+              if len({0, a, b, a ^ b, c, a ^ c, b ^ c, a ^ b ^ c}) == 8]
+    w23_len = len(_GLLIST) == 168 and len(set(_GLLIST)) == 168
+    w23_set = set(_GLLIST) == set(_indep)
+
+    def _glIndep(a, b, c):
+        return (a < 8 and b < 8 and c < 8 and a != 0 and b != 0 and c != 0
+                and a != b and a != c and b != c and (a ^ b) != c)
+    w23_pred = all(_glIndep(a, b, c) == ((a, b, c) in set(_indep))
+                   for a in range(8) for b in range(8) for c in range(8))
+    _tT, _tC = (0, 1, 2, 3, 5, 4, 7, 6), (0, 2, 4, 6, 3, 1, 7, 5)
+    _cmp = lambda t1, t2: tuple(t1[t2[v]] for v in range(8))
+    # BREADTH-first (a FIFO queue): the word-length bound below is about SHORTEST words, and
+    # a stack here would explore depth-first and report 72 instead of 12 -- which is exactly
+    # what this clause caught on its first run.
+    words, frontier, head = {}, [], 0
+    for g in (_tT, _tC):
+        if g not in words:
+            words[g] = 1
+            frontier.append(g)
+    while head < len(frontier):
+        cur = frontier[head]
+        head += 1
+        for g in (_tT, _tC):
+            nx = _cmp(g, cur)
+            if nx not in words:
+                words[nx] = words[cur] + 1
+                frontier.append(nx)
+    w23_gen = len(words) == 168 and set(words) == {_mk(*t) for t in _indep}
+    w23_word = max(words.values()) <= 12
+    w23_sound = all(t[0] == 0 and sorted(t) == list(range(8))
+                    and all(t[u ^ v] == t[u] ^ t[v] for u in range(8) for v in range(8))
+                    for t in words)
+    w23_null = ((1, 2, 3) not in set(_GLLIST)) and (NONLIN not in words)
+    w23 = (w23_len and w23_set and w23_pred and w23_gen and w23_word and w23_sound
+           and w23_null)
+    ok["W23"] = w23
+    print(f"W23_ISGL    `LowCob` IS EXACTLY GL(3,2) -- THE LAST FINITE FACT IS NOW IN LEAN "
+          f"{'OK' if w23 else 'FAIL'} -- transcribed glList: 168 distinct: {w23_len}, equals "
+          f"the independently enumerated GL(3,2): {w23_set}; Lean `glIndep` agrees with "
+          f"independence on all 512 triples: {w23_pred}; BFS from the two generators reaches "
+          f"exactly those 168: {w23_gen} (longest word {max(words.values())} <= 12: {w23_word}); "
+          f"every generated table is an injective linear self-map fixing 0: {w23_sound}; "
+          f"null control (a DEPENDENT triple absent, the NON-LINEAR table not generated): "
+          f"{w23_null}. *** NOTHING ABOUT THE INVARIANT g IS OUTSIDE LEAN ANY MORE. "
+          "SOUNDNESS is `lowCob_isGL`: every member restricts to an injective linear "
+          "endomorphism of F2^3, which IS a GL(3,2) element -- assembled from `lowCob_lt`, "
+          "`lowCob_t0`, `lowCob_lin` and `lowCob_inj8` (injectivity from linearity plus trivial "
+          "kernel). COMPLETENESS is `lowCob_covers`: for each of the 168 an EXPLICIT WORD in the "
+          "two generators, found by BFS and emitted as a `LowCob.comp` term; the dispatch is a "
+          "168-way match on the index and each case closes by `decide` on the eight low values. "
+          "`glIdx_lt`/`glIdx_eq` compute the index, `glList_indep`/`lowCob_eq_GL` tie it "
+          "together -- all plain `decide`, NO `native_decide`, so no extra trust axiom. *** THE "
+          "WHOLE CHAIN IS NOW LEAN: sigma moves by a coboundary -> the four sigmas of Q' cancel "
+          "it -> Q' is invariant under the class -> the COUNT is invariant -> and the class IS "
+          "GL(3,2), whose transitivity on the seven nonzero low patterns merges the residues. "
+          "Both halves of g = (W & (W-1)) >> 3 are theorems, end to end. "
+          "(III) untouched; (d) IS NOT CLOSED ***")
+
     print("=" * 78)
     if all(ok.values()):
         print("CD_TOWER_ZDV1_VERDICT C_CLOSED__V1_REDUCED_TO_D_ALONE__NOT_CLOSED")

@@ -5214,6 +5214,16 @@ theorem lowCob_t0 {t l} (h : LowCob t l) : t 0 = 0 := by
   simp [Nat.xor_self] at e
   exact e
 
+theorem lowCob_inj8 {t l} (h : LowCob t l) :
+    ∀ u v, u < 8 → v < 8 → t u = t v → u = v := by
+  intro u v hu hv he
+  have h8 : (2:Nat)^3 = 8 := rfl
+  have hlt : u ^^^ v < 8 := by
+    have := Nat.xor_lt_two_pow (n := 3) (by rw [h8]; exact hu) (by rw [h8]; exact hv)
+    omega
+  have hz : t (u ^^^ v) = 0 := by rw [lowCob_lin h u v hu hv, he, Nat.xor_self]
+  exact xor_zero_eq u v (lowCob_z h (u ^^^ v) hlt hz)
+
 theorem lowMap_inj {t l} (h : LowCob t l) (x y : Nat) (hxy : lowMap t x = lowMap t y) :
     x = y := by
   by_cases hne : x ^^^ y = 0
@@ -5294,6 +5304,426 @@ theorem Ncnt_lowCob {t l} (h : LowCob t l) (k W : Nat) (hW : W < 2^(k+3)) :
   by_cases hc : a ≠ 0 ∧ b ≠ 0 ∧ a ≠ b ∧ Qgen' W a b (k+3) = -1
   · rw [if_pos (hiff.mpr hc), if_pos hc]
   · rw [if_neg (fun hx => hc (hiff.mp hx)), if_neg hc]
+
+set_option maxRecDepth 100000
+
+/-! ### `LowCob` IS `GL(3,2)`, both directions
+
+Soundness is the easy half and is already assembled (`lowCob_lt`, `lowCob_lin`, `lowCob_t0`,
+`lowCob_inj8`): every member restricts to an injective linear endomorphism of `F2^3`, which is
+exactly an element of `GL(3,2)`. Completeness is the finite half `W20` had been carrying: for
+each of the 168 elements, an explicit WORD in the two generators, found by breadth-first search
+(longest word: 12). -/
+
+/-- A linear map on the low block, from the images of `e0, e1, e2`. -/
+def linMap (a b c : Nat) : Nat → Nat := fun v =>
+  (if v % 2 = 1 then a else 0) ^^^ (if v / 2 % 2 = 1 then b else 0)
+    ^^^ (if v / 4 % 2 = 1 then c else 0)
+
+/-- `(a,b,c)` are an `F2`-basis of the low block: exactly the `GL(3,2)` condition. -/
+def glIndep (a b c : Nat) : Bool :=
+  decide (a < 8) && decide (b < 8) && decide (c < 8) &&
+  decide (a ≠ 0) && decide (b ≠ 0) && decide (c ≠ 0) &&
+  decide (a ≠ b) && decide (a ≠ c) && decide (b ≠ c) && decide (a ^^^ b ≠ c)
+
+/-- SOUNDNESS: every member of the class is an element of `GL(3,2)`. -/
+theorem lowCob_isGL {t l} (h : LowCob t l) :
+    (∀ v, v < 8 → t v < 8) ∧ t 0 = 0
+      ∧ (∀ u v, u < 8 → v < 8 → t (u ^^^ v) = t u ^^^ t v)
+      ∧ (∀ u v, u < 8 → v < 8 → t u = t v → u = v) :=
+  ⟨lowCob_lt h, lowCob_t0 h, lowCob_lin h, lowCob_inj8 h⟩
+
+def glList : List (Nat × Nat × Nat) :=
+  [(1,2,4), (1,2,5), (1,2,6), (1,2,7), (1,3,4), (1,3,5), (1,3,6), (1,3,7), (1,4,2), (1,4,3), (1
+   ,4,6), (1,4,7), (1,5,2), (1,5,3), (1,5,6), (1,5,7), (1,6,2), (1,6,3), (1,6,4), (1,6,5), (1,7
+   ,2), (1,7,3), (1,7,4), (1,7,5), (2,1,4), (2,1,5), (2,1,6), (2,1,7), (2,3,4), (2,3,5), (2,3,6
+   ), (2,3,7), (2,4,1), (2,4,3), (2,4,5), (2,4,7), (2,5,1), (2,5,3), (2,5,4), (2,5,6), (2,6,1),
+    (2,6,3), (2,6,5), (2,6,7), (2,7,1), (2,7,3), (2,7,4), (2,7,6), (3,1,4), (3,1,5), (3,1,6), (
+   3,1,7), (3,2,4), (3,2,5), (3,2,6), (3,2,7), (3,4,1), (3,4,2), (3,4,5), (3,4,6), (3,5,1), (3,
+   5,2), (3,5,4), (3,5,7), (3,6,1), (3,6,2), (3,6,4), (3,6,7), (3,7,1), (3,7,2), (3,7,5), (3,7,
+   6), (4,1,2), (4,1,3), (4,1,6), (4,1,7), (4,2,1), (4,2,3), (4,2,5), (4,2,7), (4,3,1), (4,3,2)
+   , (4,3,5), (4,3,6), (4,5,2), (4,5,3), (4,5,6), (4,5,7), (4,6,1), (4,6,3), (4,6,5), (4,6,7), 
+   (4,7,1), (4,7,2), (4,7,5), (4,7,6), (5,1,2), (5,1,3), (5,1,6), (5,1,7), (5,2,1), (5,2,3), (5
+   ,2,4), (5,2,6), (5,3,1), (5,3,2), (5,3,4), (5,3,7), (5,4,2), (5,4,3), (5,4,6), (5,4,7), (5,6
+   ,1), (5,6,2), (5,6,4), (5,6,7), (5,7,1), (5,7,3), (5,7,4), (5,7,6), (6,1,2), (6,1,3), (6,1,4
+   ), (6,1,5), (6,2,1), (6,2,3), (6,2,5), (6,2,7), (6,3,1), (6,3,2), (6,3,4), (6,3,7), (6,4,1),
+    (6,4,3), (6,4,5), (6,4,7), (6,5,1), (6,5,2), (6,5,4), (6,5,7), (6,7,2), (6,7,3), (6,7,4), (
+   6,7,5), (7,1,2), (7,1,3), (7,1,4), (7,1,5), (7,2,1), (7,2,3), (7,2,4), (7,2,6), (7,3,1), (7,
+   3,2), (7,3,5), (7,3,6), (7,4,1), (7,4,2), (7,4,5), (7,4,6), (7,5,1), (7,5,3), (7,5,4), (7,5,
+   6), (7,6,2), (7,6,3), (7,6,4), (7,6,5)]
+
+def glTable (i : Nat) : Nat × Nat × Nat := glList.getD i (0, 0, 0)
+
+/-- The 168 listed triples are EXACTLY the `GL(3,2)` bases: each is independent, ... -/
+theorem glList_indep : ∀ i, i < 168 →
+    glIndep (glTable i).1 (glTable i).2.1 (glTable i).2.2 = true := by decide
+
+/-- ... and every independent triple is listed, at a computable index. -/
+def glIdx (a b c : Nat) : Nat := glList.findIdx (fun p => p == (a, b, c))
+
+theorem glIdx_lt : ∀ a < 8, ∀ b < 8, ∀ c < 8,
+    glIndep a b c = true → glIdx a b c < 168 := by decide
+
+theorem glIdx_eq : ∀ a < 8, ∀ b < 8, ∀ c < 8, glIndep a b c = true →
+    (glTable (glIdx a b c)).1 = a ∧ (glTable (glIdx a b c)).2.1 = b
+      ∧ (glTable (glIdx a b c)).2.2 = c := by decide
+
+/-- COMPLETENESS: every element of `GL(3,2)` is realised by a word in the two generators.
+    The words were found by breadth-first search; the longest has length 12. -/
+theorem lowCob_covers : ∀ i, i < 168 →
+    ∃ t l, LowCob t l ∧ ∀ v, v < 8 →
+      t v = linMap (glTable i).1 (glTable i).2.1 (glTable i).2.2 v := by
+  intro i hi
+  match i, hi with
+  | 0, _ => exact ⟨_, _, (LowCob.comp LowCob.trans LowCob.trans)
+, by decide⟩
+  | 1, _ => exact ⟨_, _, LowCob.trans
+, by decide⟩
+  | 2, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans LowCob.cyc)))))))
+, by decide⟩
+  | 3, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.trans))))))))
+, by decide⟩
+  | 4, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.cyc)))))))
+, by decide⟩
+  | 5, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans))))))))
+, by decide⟩
+  | 6, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans))))))))))
+, by decide⟩
+  | 7, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.cyc)))))))))
+, by decide⟩
+  | 8, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.cyc)))))))
+, by decide⟩
+  | 9, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans))))))))
+, by decide⟩
+  | 10, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans))))))))
+, by decide⟩
+  | 11, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.cyc)))))))
+, by decide⟩
+  | 12, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.cyc))))))))
+, by decide⟩
+  | 13, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans)))))))))
+, by decide⟩
+  | 14, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.cyc))))))
+, by decide⟩
+  | 15, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans)))))))
+, by decide⟩
+  | 16, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans LowCob.cyc)))))))))
+, by decide⟩
+  | 17, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.cyc)))))))))
+, by decide⟩
+  | 18, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans))))
+, by decide⟩
+  | 19, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.cyc)))
+, by decide⟩
+  | 20, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans LowCob.cyc))))))))
+, by decide⟩
+  | 21, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.cyc))))))))
+, by decide⟩
+  | 22, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.cyc))))
+, by decide⟩
+  | 23, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans)))))
+, by decide⟩
+  | 24, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans)))))))))
+, by decide⟩
+  | 25, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans))))))))
+, by decide⟩
+  | 26, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.cyc))))))))
+, by decide⟩
+  | 27, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.cyc)))))))
+, by decide⟩
+  | 28, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.cyc))))))))
+, by decide⟩
+  | 29, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.cyc))))))))
+, by decide⟩
+  | 30, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans)))))))))
+, by decide⟩
+  | 31, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans)))))))))
+, by decide⟩
+  | 32, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc LowCob.trans)
+, by decide⟩
+  | 33, _ => exact ⟨_, _, LowCob.cyc
+, by decide⟩
+  | 34, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.trans)))))))))
+, by decide⟩
+  | 35, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans LowCob.cyc))))))))
+, by decide⟩
+  | 36, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.trans))
+, by decide⟩
+  | 37, _ => exact ⟨_, _, (LowCob.comp LowCob.trans LowCob.cyc)
+, by decide⟩
+  | 38, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans LowCob.cyc)))))))))
+, by decide⟩
+  | 39, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans LowCob.cyc)))))))))
+, by decide⟩
+  | 40, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.cyc)))))
+, by decide⟩
+  | 41, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans))))))
+, by decide⟩
+  | 42, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.cyc))))))))))
+, by decide⟩
+  | 43, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans)))))))))))
+, by decide⟩
+  | 44, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.cyc))))
+, by decide⟩
+  | 45, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans)))))
+, by decide⟩
+  | 46, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans LowCob.cyc))))))))))
+, by decide⟩
+  | 47, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.cyc))))))))))
+, by decide⟩
+  | 48, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.cyc))))))
+, by decide⟩
+  | 49, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.cyc)))))))
+, by decide⟩
+  | 50, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans))))))))
+, by decide⟩
+  | 51, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans)))))))
+, by decide⟩
+  | 52, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.trans))))
+, by decide⟩
+  | 53, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.trans)))))
+, by decide⟩
+  | 54, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans LowCob.cyc))))
+, by decide⟩
+  | 55, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans LowCob.cyc)))
+, by decide⟩
+  | 56, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans)))))))))
+, by decide⟩
+  | 57, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.cyc))))))))
+, by decide⟩
+  | 58, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.cyc))))))))
+, by decide⟩
+  | 59, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans)))))))))
+, by decide⟩
+  | 60, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.cyc)))))))))
+, by decide⟩
+  | 61, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans LowCob.cyc)))))))))
+, by decide⟩
+  | 62, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.cyc)))))))
+, by decide⟩
+  | 63, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans))))))))
+, by decide⟩
+  | 64, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans LowCob.cyc))))))))))
+, by decide⟩
+  | 65, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.trans)))))))))))
+, by decide⟩
+  | 66, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans)))
+, by decide⟩
+  | 67, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.cyc))
+, by decide⟩
+  | 68, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans LowCob.cyc))))))))))
+, by decide⟩
+  | 69, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.cyc))))))))))
+, by decide⟩
+  | 70, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans))))
+, by decide⟩
+  | 71, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.cyc)))
+, by decide⟩
+  | 72, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.trans)))
+, by decide⟩
+  | 73, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans LowCob.cyc)))))))
+, by decide⟩
+  | 74, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans LowCob.cyc))
+, by decide⟩
+  | 75, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.trans))))))))
+, by decide⟩
+  | 76, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.cyc)))))))
+, by decide⟩
+  | 77, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans))))))))))
+, by decide⟩
+  | 78, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans))))))))
+, by decide⟩
+  | 79, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.cyc)))))))))
+, by decide⟩
+  | 80, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.trans))))))))))
+, by decide⟩
+  | 81, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans))
+, by decide⟩
+  | 82, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans LowCob.cyc)))))))))
+, by decide⟩
+  | 83, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc LowCob.cyc)
+, by decide⟩
+  | 84, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.cyc)))))
+, by decide⟩
+  | 85, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans))))))))))
+, by decide⟩
+  | 86, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans))))))
+, by decide⟩
+  | 87, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.cyc)))))))))
+, by decide⟩
+  | 88, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.cyc)))))))))
+, by decide⟩
+  | 89, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.cyc))))))
+, by decide⟩
+  | 90, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans LowCob.cyc)))))))))
+, by decide⟩
+  | 91, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans)))))))
+, by decide⟩
+  | 92, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans LowCob.cyc))))))))
+, by decide⟩
+  | 93, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.cyc))))))
+, by decide⟩
+  | 94, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.cyc))))))))
+, by decide⟩
+  | 95, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans)))))))
+, by decide⟩
+  | 96, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.trans))))
+, by decide⟩
+  | 97, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans LowCob.cyc))))))
+, by decide⟩
+  | 98, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.trans)))))))
+, by decide⟩
+  | 99, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans LowCob.cyc)))
+, by decide⟩
+  | 100, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.cyc))))))
+, by decide⟩
+  | 101, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans)))))))))))
+, by decide⟩
+  | 102, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans)))))))
+, by decide⟩
+  | 103, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.cyc))))))))))
+, by decide⟩
+  | 104, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.trans)))))))))))
+, by decide⟩
+  | 105, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans)))
+, by decide⟩
+  | 106, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans LowCob.cyc))))))))))
+, by decide⟩
+  | 107, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.cyc))
+, by decide⟩
+  | 108, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.cyc))))))
+, by decide⟩
+  | 109, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans)))))))))
+, by decide⟩
+  | 110, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.cyc))))))))
+, by decide⟩
+  | 111, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans)))))))
+, by decide⟩
+  | 112, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans LowCob.cyc)))))))
+, by decide⟩
+  | 113, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans LowCob.cyc))))))
+, by decide⟩
+  | 114, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.cyc)))))))
+, by decide⟩
+  | 115, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.trans)))))))
+, by decide⟩
+  | 116, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.trans)))))))))
+, by decide⟩
+  | 117, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.cyc)))))
+, by decide⟩
+  | 118, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans LowCob.cyc))))))))
+, by decide⟩
+  | 119, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans))))))
+, by decide⟩
+  | 120, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans)))))))
+, by decide⟩
+  | 121, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.cyc))))))))
+, by decide⟩
+  | 122, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.cyc))))))
+, by decide⟩
+  | 123, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans)))))))))
+, by decide⟩
+  | 124, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.cyc))))))))
+, by decide⟩
+  | 125, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.cyc)))))))
+, by decide⟩
+  | 126, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans))))))))
+, by decide⟩
+  | 127, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans)))))))))
+, by decide⟩
+  | 128, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans LowCob.cyc))))))
+, by decide⟩
+  | 129, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.cyc)))))))
+, by decide⟩
+  | 130, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans LowCob.cyc)))))))
+, by decide⟩
+  | 131, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.trans)))))))
+, by decide⟩
+  | 132, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.cyc)))))
+, by decide⟩
+  | 133, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.trans)))))
+, by decide⟩
+  | 134, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans LowCob.cyc))))
+, by decide⟩
+  | 135, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans LowCob.cyc)))))
+, by decide⟩
+  | 136, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans)))))
+, by decide⟩
+  | 137, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.cyc))))))))))
+, by decide⟩
+  | 138, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans)))))))))))
+, by decide⟩
+  | 139, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.cyc))))
+, by decide⟩
+  | 140, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans LowCob.cyc))))))))
+, by decide⟩
+  | 141, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans))))
+, by decide⟩
+  | 142, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.trans)))))))))
+, by decide⟩
+  | 143, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.cyc)))
+, by decide⟩
+  | 144, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans))))))
+, by decide⟩
+  | 145, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.cyc)))))))))
+, by decide⟩
+  | 146, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans))))))))))
+, by decide⟩
+  | 147, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.cyc)))))
+, by decide⟩
+  | 148, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.cyc)))))))))
+, by decide⟩
+  | 149, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.cyc)))))))
+, by decide⟩
+  | 150, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans))))))))
+, by decide⟩
+  | 151, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.cyc)))))))))
+, by decide⟩
+  | 152, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans LowCob.cyc)))))
+, by decide⟩
+  | 153, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.cyc))))))
+, by decide⟩
+  | 154, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans LowCob.cyc))))))
+, by decide⟩
+  | 155, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.trans))))))
+, by decide⟩
+  | 156, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans))))))
+, by decide⟩
+  | 157, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.cyc)))))))))
+, by decide⟩
+  | 158, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans))))))))))
+, by decide⟩
+  | 159, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.cyc)))))
+, by decide⟩
+  | 160, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.cyc))))
+, by decide⟩
+  | 161, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.trans))))))
+, by decide⟩
+  | 162, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans LowCob.cyc)))))
+, by decide⟩
+  | 163, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans)))))
+, by decide⟩
+  | 164, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans LowCob.cyc)))))))
+, by decide⟩
+  | 165, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.trans)))))
+, by decide⟩
+  | 166, _ => exact ⟨_, _, (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc LowCob.cyc))))
+, by decide⟩
+  | 167, _ => exact ⟨_, _, (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.cyc (LowCob.comp LowCob.trans (LowCob.comp LowCob.cyc LowCob.trans)))))))), by decide⟩
+  | (n+168), h => omega
+
+
+/-- **`LowCob` IS `GL(3,2)`.** Soundness by `lowCob_isGL`, completeness by `lowCob_covers`
+    together with `glList_indep` / `glList_onto`. Nothing about the invariant `g` is left
+    outside Lean. -/
+theorem lowCob_eq_GL (a b c : Nat) (ha : a < 8) (hb : b < 8) (hc : c < 8)
+    (h : glIndep a b c = true) :
+    ∃ t l, LowCob t l ∧ ∀ v, v < 8 → t v = linMap a b c v := by
+  obtain ⟨t, l, hL, hv⟩ := lowCob_covers (glIdx a b c) (glIdx_lt a ha b hb c hc h)
+  obtain ⟨e1, e2, e3⟩ := glIdx_eq a ha b hb c hc h
+  rw [e1, e2, e3] at hv
+  exact ⟨t, l, hL, hv⟩
+
 
 end SounioZDFiberAntisym
 
