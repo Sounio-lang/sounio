@@ -524,11 +524,13 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.internal.coordination.compiler-lane-contract | repo_only | docs/internal/coordination/COMPILER_LANE_CONTRACT.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.coordination.enir-semantic-interface-contract-2026-07-12 | repo_only | docs/internal/coordination/enir-semantic-interface-contract-2026-07-12.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.coordination.semantic-hotspot-triage-2026-07-12 | repo_only | docs/internal/coordination/semantic-hotspot-triage-2026-07-12.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.internal.e175-triage-2026-08-02 | repo_only | docs/internal/E175_TRIAGE_2026-08-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.garden.readme | repo_only | docs/internal/garden/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.garden.seeds.2026-05-09-above-the-stars | repo_only | docs/internal/garden/seeds/2026-05-09-above-the-stars.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.garden.seeds.2026-05-09-novelty-weather-map | repo_only | docs/internal/garden/seeds/2026-05-09-novelty-weather-map.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.garden.seeds.2026-05-10-epistemic-fermentation | repo_only | docs/internal/garden/seeds/2026-05-10-epistemic-fermentation.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.garden.seeds.2026-07-11-the-zero-of-encounter | repo_only | docs/internal/garden/seeds/2026-07-11-the-zero-of-encounter.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.internal.garden.seeds.2026-07-26-fpga-acceleration-opportunity | repo_only | docs/internal/garden/seeds/2026-07-26-fpga-acceleration-opportunity.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.garden.templates.seed | repo_only | docs/internal/garden/templates/seed.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.implementation.bootstrap-seed-policy | repo_only | docs/internal/implementation/BOOTSTRAP_SEED_POLICY.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.implementation.codex-claude-parallel-contract | repo_only | docs/internal/implementation/CODEX_CLAUDE_PARALLEL_CONTRACT.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
