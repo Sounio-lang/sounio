@@ -325,6 +325,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.dissertation.cross-drug-iso-budget-findings | repo_only | docs/dissertation/cross_drug_iso_budget_findings.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.dossier-template | repo_only | docs/dissertation/dossier_template.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.handoff.chapter-04 | repo_only | docs/dissertation/handoff/chapter_04.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.dissertation.handoff.fo-pk-method-science-package | repo_only | docs/dissertation/handoff/fo_pk_method_science_package.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.handoff.psychiatric-pgx-mtor-168-pop-package | repo_only | docs/dissertation/handoff/psychiatric_pgx_mtor_168_pop_package.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.handoff.section-4-10-sobol-hdmr-package | repo_only | docs/dissertation/handoff/section_4_10_sobol_hdmr_package.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.pbpk-claim-truth-table | repo_only | docs/dissertation/pbpk_claim_truth_table.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -342,6 +343,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.dissertation.results.d6-pinn-training-v1 | repo_only | docs/dissertation/results/d6_pinn_training_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.results.determinism-audit-summary-v1 | repo_only | docs/dissertation/results/determinism_audit_summary_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.results.determinism-audit-v1 | repo_only | docs/dissertation/results/determinism_audit_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.dissertation.results.fo-pk-method-science-v1 | repo_only | docs/dissertation/results/fo_pk_method_science_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.results.m1-copula-v1 | repo_only | docs/dissertation/results/m1_copula_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.results.m2-hierarchical-v1 | repo_only | docs/dissertation/results/m2_hierarchical_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.dissertation.results.m5-gum-4th-order-v1 | repo_only | docs/dissertation/results/m5_gum_4th_order_v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -977,6 +979,16 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.zero-provenance-claims-spec-2026-07-25 | historical | docs/research/zero_provenance_claims_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.zeta-variance-deep-investigation | historical | docs/research/zeta_variance_deep_investigation.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.zeta-variance-fix-plan | historical | docs/research/zeta_variance_fix_plan.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.reviews.witness-paper-reviewer-1 | repo_only | docs/reviews/witness_paper_reviewer_1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.reviews.witness-paper-reviewer-1-rereview | repo_only | docs/reviews/witness_paper_reviewer_1_rereview.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.reviews.witness-paper-reviewer-2 | repo_only | docs/reviews/witness_paper_reviewer_2.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.reviews.witness-paper-reviewer-2-rereview | repo_only | docs/reviews/witness_paper_reviewer_2_rereview.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.reviews.witness-paper-reviewer-3 | repo_only | docs/reviews/witness_paper_reviewer_3.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.reviews.witness-paper-reviewer-3-rereview | repo_only | docs/reviews/witness_paper_reviewer_3_rereview.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.reviews.witness-paper-reviewer-4 | repo_only | docs/reviews/witness_paper_reviewer_4.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.reviews.witness-paper-reviewer-4-rereview | repo_only | docs/reviews/witness_paper_reviewer_4_rereview.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.reviews.witness-paper-reviewer-5 | repo_only | docs/reviews/witness_paper_reviewer_5.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.reviews.witness-paper-reviewer-5-rereview | repo_only | docs/reviews/witness_paper_reviewer_5_rereview.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.roadmap.2026-ontology-units-knowledge-plan | repo_only | docs/roadmap/2026_ontology_units_knowledge_plan.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.roadmap.2026-ontology-units-knowledge-status | repo_only | docs/roadmap/2026_ontology_units_knowledge_status.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.roadmap.2026-q2-research-milestones | repo_only | docs/roadmap/2026_Q2_research_milestones.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
