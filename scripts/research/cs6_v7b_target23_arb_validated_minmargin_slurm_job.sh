@@ -90,8 +90,11 @@ verifier="$repo/scripts/research/cs6_v7b_target23_arb_validated_minmargin_verify
 
 deps="$work/deps"
 mkdir -p "$deps"
+wheel="$work/python_flint-0.8.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl"
+cp --no-preserve=mode,ownership,timestamps "${cfg[PYTHON_FLINT_WHEEL]}" "$wheel"
+[[ $(sha256sum "$wheel" | awk '{print $1}') == ${cfg[PYTHON_FLINT_WHEEL_SHA256]} ]] || fail "private wheel digest mismatch"
 PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --no-index --no-deps \
-  --target "$deps" "${cfg[PYTHON_FLINT_WHEEL]}" > "$work/pip-install.txt" 2>&1
+  --target "$deps" "$wheel" > "$work/pip-install.txt" 2>&1
 python_exec=$(command -v python3)
 flint_version=$(PYTHONPATH="$deps" "$python_exec" -c 'import flint; print(flint.__version__)')
 [[ $flint_version == 0.8.0 ]] || fail "installed python-flint version drifted"
