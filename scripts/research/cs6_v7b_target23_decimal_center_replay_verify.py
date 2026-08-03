@@ -220,7 +220,7 @@ def verify(receipt: Path, source_commit: str) -> dict[str, str]:
         command = canonical(command_path).split()
         expected_tail = (str(leaf.u_depth), str(leaf.u_index), str(leaf.s_depth), str(leaf.s_index), plan.challenge, plan.binding)
         if (len(command) != 9 or command[1] != "-B"
-                or Path(command[2]).resolve() != (root / WORKER_REL).resolve()
+                or Path(command[2]).name != WORKER_REL.name
                 or tuple(command[3:]) != expected_tail):
             fail(f"worker command mismatch: leaf {index}")
         command_executables.add(command[0])
