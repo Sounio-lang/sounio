@@ -649,6 +649,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.papers.main.sounio-arxiv-draft | repo_only | docs/papers/main/sounio_arxiv_draft.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.medrxiv-abstract | repo_only | docs/papers/medrxiv_abstract.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.oopsla2027.outline | repo_only | docs/papers/oopsla2027/outline.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.papers.oopsla2027.paper | repo_only | docs/papers/oopsla2027/paper.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.paper | repo_only | docs/papers/paper.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.peer-review-simulation | repo_only | docs/papers/peer_review_simulation.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.preprint | repo_only | docs/papers/preprint.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -658,6 +659,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.papers.preregistrations.deviations | repo_only | docs/papers/preregistrations/DEVIATIONS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.readme | repo_only | docs/papers/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.rupture-functor-f-synthesis-2026-07-25 | repo_only | docs/papers/rupture_functor_f_synthesis_2026-07-25.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.papers.rupture-journal-submission-2026-07-26 | repo_only | docs/papers/rupture_journal_submission_2026-07-26.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.sedenion-fano-geometry | repo_only | docs/papers/sedenion-fano-geometry.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.sounio-arxiv-draft | repo_only | docs/papers/sounio_arxiv_draft.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.submission-checklist | repo_only | docs/papers/submission_checklist.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -694,6 +696,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.2026-07-19-linalg-parity | historical | docs/research/2026-07-19-linalg-parity.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.2026-07-19-special-scipy-parity | historical | docs/research/2026-07-19-special-scipy-parity.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.2026-07-19-stats-dist-parity | historical | docs/research/2026-07-19-stats-dist-parity.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.ade-wildgen-mckay-spec-2026-07-26 | historical | docs/research/ade_wildgen_mckay_spec_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.align-curve-and-target | historical | docs/research/align-curve-and-target.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.associator-spectral-bound-status | historical | docs/research/associator_spectral_bound_status.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.ast-native-claims-falsifiers-2026-07-25 | historical | docs/research/ast_native_claims_falsifiers_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -712,6 +715,10 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.categorical-knowledge-monad | historical | docs/research/categorical_knowledge_monad.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.cd-tower-nullity-histogram-law-spec-2026-07-26 | historical | docs/research/cd_tower_nullity_histogram_law_spec_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.cd-tower-seam | historical | docs/research/cd_tower_seam.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.cd-tower-zd-fiber-signed-localization-2026-07-26 | historical | docs/research/cd_tower_zd_fiber_signed_localization_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.cd-tower-zd-fiber-spectral-classifier-2026-07-26 | historical | docs/research/cd_tower_zd_fiber_spectral_classifier_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.cd-tower-zd-fiber-spectral-forall-n-progress-2026-07-26 | historical | docs/research/cd_tower_zd_fiber_spectral_forall_n_progress_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.cd-tower-zd-graph-invariants-spec-2026-07-26 | historical | docs/research/cd_tower_zd_graph_invariants_spec_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.chi5-mathlib-free-novelty-2026-05-30 | historical | docs/research/chi5-mathlib-free-novelty-2026-05-30.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.chingon-zd-falsifiers-2026-07-25 | historical | docs/research/chingon_zd_falsifiers_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.chingon-zd-spec-2026-07-25 | historical | docs/research/chingon_zd_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -723,6 +730,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.delta-epistemic-gradual-compilation-paper | historical | docs/research/delta_epistemic_gradual_compilation_paper.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.dyadic-non-reduction-spec-2026-07-14 | historical | docs/research/dyadic_non_reduction_spec_2026-07-14.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.dyadic-relational-associator-ontology-spec-2026-07-14 | historical | docs/research/dyadic_relational_associator_ontology_spec_2026-07-14.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.e-series-semantic-germ-spec-2026-07-26 | historical | docs/research/e_series_semantic_germ_spec_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.epistemic-algebra-review | repo_only | docs/research/epistemic_algebra_review.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.epistemic-calculus-value-carrying-redesign | historical | docs/research/epistemic_calculus_value_carrying_redesign.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.epistemic-self-reference-design | historical | docs/research/epistemic_self_reference_design.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -771,6 +779,10 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.kernel-replay-evidence-router-2026-06-23 | historical | docs/research/kernel-replay-evidence-router-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.knightian-operator-choice | historical | docs/research/knightian_operator_choice.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.knightian-operator-consensus-2026-04-30 | historical | docs/research/knightian_operator_consensus_2026-04-30.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.l8-zd-census-benchmark-spec-2026-07-26 | historical | docs/research/l8_zd_census_benchmark_spec_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.l9-nullity-histogram-law-spec-2026-07-26 | historical | docs/research/l9_nullity_histogram_law_spec_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.l9-zd-census-falsifiers-2026-07-26 | historical | docs/research/l9_zd_census_falsifiers_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.l9-zd-census-spec-2026-07-26 | historical | docs/research/l9_zd_census_spec_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.lean-falsification-ledger-spec-2026-07-25 | historical | docs/research/lean_falsification_ledger_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.lean-float-real-roadmap | historical | docs/research/lean_float_real_roadmap.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.llm-collaboration-brief | historical | docs/research/llm_collaboration_brief.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -854,6 +866,8 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.neurodyn-algebra-c-continuous-associator-prereg-2026-07-07 | historical | docs/research/neurodyn_algebra_c_continuous_associator_prereg_2026-07-07.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.neurodyn-ossm-adhd-dimensional-prereg-2026-07-07 | historical | docs/research/neurodyn_ossm_adhd_dimensional_prereg_2026-07-07.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.neurodyn-ossm-sota-deep-research-2026-07-05 | historical | docs/research/neurodyn_ossm_sota_deep_research_2026-07-05.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.nullity-histogram-law-falsifiers-2026-07-26 | historical | docs/research/nullity_histogram_law_falsifiers_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.nullity-histogram-law-spec-2026-07-26 | historical | docs/research/nullity_histogram_law_spec_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.ocssm-annotation-manual-v0 | historical | docs/research/ocssm_annotation_manual_v0.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.ocssm-functoriality-check-toy | historical | docs/research/ocssm_functoriality_check_toy.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.ocssm-g2-invariance-proof | historical | docs/research/ocssm_g2_invariance_proof.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
