@@ -9407,6 +9407,119 @@ theorem Asig_hubL (hy : y < 2^(k+1)) (hL : Llo < 2^(k+1))
 
 end Hub
 
+/-! ### S1 — the hub rows are FULL
+
+§46's remaining measured clause: both hubs are adjacent to every vertex except `L_lo` and each
+other. For a LOW vertex the resonance reduces to one identity, `A4_sub'` — the swapped form
+`σ(a,b) = −σ(a, a⊕b)` — with `a = L_lo`, `b = y`. For a HIGH vertex it follows from the hub relation
+(Tier 38), since `P1` and `P3` both flip and `resB` compares them. And the two hubs miss each other
+because there `P1 = 1` while `P3 = −1`, both by `sigma_self`. -/
+
+section HubAdj
+variable (k y Llo : Nat)
+
+private theorem P1_hub0_val (hy : y < 2^(k+1)) (hL : Llo < 2^(k+1))
+    (hy0 : y ≠ 0) (hne : y ≠ Llo) :
+    P1 (2^(k+1)) y Llo (k+1) = - cdSigma Llo (y ^^^ Llo) (k+1) := by
+  obtain ⟨hylt, hy'lt, hLlt, hXlt, hXLlt, hxy⟩ := hub_facts k y Llo hy hL
+  have hyL : y ^^^ Llo ≠ 0 := fun h => hne (xor_zero_eq _ _ h)
+  rw [P1_red (2^(k+1)) y Llo (k+1) hXlt hylt hLlt hyL, hub_xorL k Llo hL,
+      hubA k y hy hy0, R_lu (y ^^^ Llo) Llo k hxy hL]
+  omega
+
+private theorem P3_hub0_val (hy : y < 2^(k+1)) (hL : Llo < 2^(k+1))
+    (hy0 : y ≠ 0) (hne : y ≠ Llo) :
+    P3 (2^(k+1)) y Llo (k+1) = cdSigma Llo y (k+1) := by
+  obtain ⟨hylt, hy'lt, hLlt, hXlt, hXLlt, hxy⟩ := hub_facts k y Llo hy hL
+  rw [P3_red (2^(k+1)) y Llo (k+1) hXlt hylt hLlt hy0, hub_xorL k Llo hL,
+      hubC k (y ^^^ Llo) hxy, R_ul Llo y k hL hy, if_neg hy0]
+  omega
+
+private theorem P1_hubL_val (hy : y < 2^(k+1)) (hL : Llo < 2^(k+1))
+    (hy0 : y ≠ 0) (hne : y ≠ Llo) :
+    P1 (Llo + 2^(k+1)) y Llo (k+1) = - cdSigma Llo y (k+1) := by
+  obtain ⟨hylt, hy'lt, hLlt, hXlt, hXLlt, hxy⟩ := hub_facts k y Llo hy hL
+  have hyL : y ^^^ Llo ≠ 0 := fun h => hne (xor_zero_eq _ _ h)
+  rw [P1_red (Llo + 2^(k+1)) y Llo (k+1) hXLlt hylt hLlt hyL, hubL_xorL k Llo hL,
+      R_ul Llo y k hL hy, if_neg hy0, hubC k (y ^^^ Llo) hxy]
+  omega
+
+private theorem P3_hubL_val (hy : y < 2^(k+1)) (hL : Llo < 2^(k+1))
+    (hy0 : y ≠ 0) (hne : y ≠ Llo) :
+    P3 (Llo + 2^(k+1)) y Llo (k+1) = cdSigma Llo (y ^^^ Llo) (k+1) := by
+  obtain ⟨hylt, hy'lt, hLlt, hXlt, hXLlt, hxy⟩ := hub_facts k y Llo hy hL
+  rw [P3_red (Llo + 2^(k+1)) y Llo (k+1) hXLlt hylt hLlt hy0, hubL_xorL k Llo hL,
+      R_lu (y ^^^ Llo) Llo k hxy hL, hubA k y hy hy0]
+  omega
+
+/-- The identity that makes the hub rows resonate: `A4_sub'` with the arguments in place. -/
+private theorem hub_key (hy : y < 2^(k+1)) (hL : Llo < 2^(k+1))
+    (hy0 : y ≠ 0) (hL0 : Llo ≠ 0) (hne : y ≠ Llo) :
+    cdSigma Llo y (k+1) = - cdSigma Llo (y ^^^ Llo) (k+1) := by
+  have hyL : Llo ^^^ y ≠ 0 := by
+    intro h; exact hne (xor_zero_eq _ _ (by rw [Nat.xor_comm]; exact h))
+  rw [A4_sub' (k+1) Llo y hL hy hL0 hy0 hyL, Nat.xor_comm Llo y]
+
+/-- **S1, low half.** Both hubs are adjacent to every low vertex except `0` and `L_lo`. -/
+theorem resB_hub0_low (hy : y < 2^(k+1)) (hL : Llo < 2^(k+1))
+    (hy0 : y ≠ 0) (hL0 : Llo ≠ 0) (hne : y ≠ Llo) :
+    resB (2^(k+1)) y Llo (k+1) = true := by
+  obtain ⟨hylt, hy'lt, hLlt, hXlt, hXLlt, hxy⟩ := hub_facts k y Llo hy hL
+  have hp := Nat.two_pow_pos (k+1)
+  have hyL : y ^^^ Llo ≠ 0 := fun h => hne (xor_zero_eq _ _ h)
+  have s1 : (P1 (2^(k+1)) y Llo (k+1) == P1 y (2^(k+1)) Llo (k+1)) = true := by
+    rw [P1_symm (2^(k+1)) y Llo (k+1) hXlt hylt hLlt (by omega) hy0
+          (by rw [hub_xorL k Llo hL]; omega) hyL]; simp
+  have s2 : (P3 (2^(k+1)) y Llo (k+1) == P3 y (2^(k+1)) Llo (k+1)) = true := by
+    rw [P3_symm (2^(k+1)) y Llo (k+1) hXlt hylt hLlt (by omega) hy0]; simp
+  have s3 : (P1 (2^(k+1)) y Llo (k+1) == P3 (2^(k+1)) y Llo (k+1)) = true := by
+    rw [P1_hub0_val k y Llo hy hL hy0 hne, P3_hub0_val k y Llo hy hL hy0 hne,
+        hub_key k y Llo hy hL hy0 hL0 hne]; simp
+  unfold resB; rw [s1, s2, s3]; rfl
+
+theorem resB_hubL_low (hy : y < 2^(k+1)) (hL : Llo < 2^(k+1))
+    (hy0 : y ≠ 0) (hL0 : Llo ≠ 0) (hne : y ≠ Llo) :
+    resB (Llo + 2^(k+1)) y Llo (k+1) = true := by
+  obtain ⟨hylt, hy'lt, hLlt, hXlt, hXLlt, hxy⟩ := hub_facts k y Llo hy hL
+  have hp := Nat.two_pow_pos (k+1)
+  have hyL : y ^^^ Llo ≠ 0 := fun h => hne (xor_zero_eq _ _ h)
+  have s1 : (P1 (Llo + 2^(k+1)) y Llo (k+1) == P1 y (Llo + 2^(k+1)) Llo (k+1)) = true := by
+    rw [P1_symm (Llo + 2^(k+1)) y Llo (k+1) hXLlt hylt hLlt (by omega) hy0
+          (by rw [hubL_xorL k Llo hL]; omega) hyL]; simp
+  have s2 : (P3 (Llo + 2^(k+1)) y Llo (k+1) == P3 y (Llo + 2^(k+1)) Llo (k+1)) = true := by
+    rw [P3_symm (Llo + 2^(k+1)) y Llo (k+1) hXLlt hylt hLlt (by omega) hy0]; simp
+  have s3 : (P1 (Llo + 2^(k+1)) y Llo (k+1) == P3 (Llo + 2^(k+1)) y Llo (k+1)) = true := by
+    rw [P1_hubL_val k y Llo hy hL hy0 hne, P3_hubL_val k y Llo hy hL hy0 hne,
+        hub_key k y Llo hy hL hy0 hL0 hne]; simp
+  unfold resB; rw [s1, s2, s3]; rfl
+
+/-- **The two hubs are NOT adjacent to each other**: `P1 = 1` but `P3 = -1`. -/
+theorem resB_hub_hub (hL : Llo < 2^(k+1)) (hL0 : Llo ≠ 0) :
+    resB (2^(k+1)) (Llo + 2^(k+1)) Llo (k+1) = false := by
+  obtain ⟨_, _, hLlt, hXlt, hXLlt, _⟩ := hub_facts k Llo Llo hL hL
+  have hp := Nat.two_pow_pos (k+1)
+  have hLL : (Llo + 2^(k+1)) ^^^ Llo = 2^(k+1) := hubL_xorL k Llo hL
+  have hA : cdSigma (2^(k+1)) (Llo + 2^(k+1)) (k+2) = 1 := by
+    have h := R_uu 0 Llo k hp hL
+    rw [Nat.zero_add] at h
+    rw [h, if_neg hL0, cdSig0' Llo k]
+  have h1 : P1 (2^(k+1)) (Llo + 2^(k+1)) Llo (k+1) = 1 := by
+    rw [P1_red (2^(k+1)) (Llo + 2^(k+1)) Llo (k+1) hXlt hXLlt hLlt (by rw [hLL]; omega),
+        hLL, hub_xorL k Llo hL, hA]
+    decide
+  have h3 : P3 (2^(k+1)) (Llo + 2^(k+1)) Llo (k+1) = -1 := by
+    rw [P3_red (2^(k+1)) (Llo + 2^(k+1)) Llo (k+1) hXlt hXLlt hLlt (by omega),
+        hLL, hub_xorL k Llo hL,
+        sigma_self (k+2) (2^(k+1)) hXlt (by omega),
+        sigma_self (k+2) (Llo + 2^(k+1)) hXLlt (by omega)]
+    decide
+  have hb : (P1 (2^(k+1)) (Llo + 2^(k+1)) Llo (k+1)
+             == P3 (2^(k+1)) (Llo + 2^(k+1)) Llo (k+1)) = false := by
+    rw [h1, h3]; decide
+  unfold resB; simp [hb]
+
+end HubAdj
+
 end SounioZDFiberAntisym
 
 
