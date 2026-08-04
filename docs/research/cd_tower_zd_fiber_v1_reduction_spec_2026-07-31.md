@@ -2175,10 +2175,10 @@ Neither is proven. But (2) is no longer a statement about an unbounded family: i
 
 Reproduce: `python3 scripts/research/zd_v1_III_sign_defect_probe.py 7 8 9`.
 
-## §38 — The curvature sum, computed for `j = 3…7`: `K_j` is a level-independent tensor and `Σ K_j = −1728·[j,3]₂` (`W41`, 2026-08-04)
+## §38 — The curvature sum, computed for `j = 3…8`: `K_j` is a level-independent tensor and `Σ K_j = −1728·[j,3]₂` (`W41`, 2026-08-04)
 
 §37.4 left (III)'s open content as **one number per `j`**. That number is now computed for
-`j = 3, 4, 5, 6, 7`, and it comes with more structure than was asked for.
+`j = 3 … 8`, and it comes with more structure than was asked for.
 
 Partition the vertices by their low `j+1` bits — `M = 2^(j+1)` classes, each of size
 `cls = 2^(n−j−2)` — and with `A` the seam's graph and `Bp = Φ*A_(τW)` the transported reference:
@@ -2194,8 +2194,9 @@ K_j(u,v,w) := [ tr(A_uv A_vw A_wu) − tr(Bp_uv Bp_vw Bp_wu) ] / cls³
 | 5 | `−267840` | `−1728·155` | `133920` | `{0, −2}` |
 | 6 | `−2410560` | `−1728·1395` | `1205280` | `{0, −2}` |
 | 7 | `−20409408` | `−1728·11811` | `10204704` | `{0, −2}` |
+| 8 | `−167883840` | `−1728·97155` | `83941920` | `{0, −2}` |
 
-Four facts, all measured, `n = 7…10` (each `j` at every level where it exists):
+Four facts, all measured, `n = 7…11` (each `j` at every level where it exists):
 
 1. **`K_j` is level-independent — the whole tensor, entry by entry**, not merely its sum
    (`np.array_equal` across consecutive levels, exact, `n = 7…10`). This is the factorisation
@@ -2227,14 +2228,18 @@ verified against the measured `δ` at every `(j, n)` in the table.
 The `n`-dependence of `δ` is now **structural**: it is `cls³`, the cube of the class size, and it is
 forced by `K_j` being level-independent. What remains open is one clause:
 
-> `Σ K_j = −1728·[j,3]₂` for **all** `j` — computed here for `j = 3, 4, 5, 6, 7`, not proven.
+> `Σ K_j = −1728·[j,3]₂` for **all** `j` — computed here for `j = 3 … 8`, not proven.
 
 `j = 6` needed a different implementation: `M = 2^7 = 128` makes the `M³` triple loop unworkable,
 so the probe blocks the matrices by residue and contracts over the block indices (`M³·cls³` work,
 vertex `0` added as isolated so the reshape is uniform). The fast path reproduces the
 `j = 3, 4, 5` numbers of the slow one exactly, which is the cross-check that makes `j = 6` and
 `j = 7` trustworthy. `j = 7` (`M = 256`, a 16.8M-entry tensor) additionally needs the contraction
-accumulated one block-triple at a time so only one `M³` temporary is live.
+accumulated one block-triple at a time so only one `M³` temporary is live. `j = 8` (`M = 512`,
+**134M entries**) cannot hold the tensor at all: the probe's `stream` path walks `u` and keeps only
+one `M×M` slice, accumulating the sum, the value histogram, the support check and a weighted linear
+**checksum**. Equal checksums plus equal histograms pin the tensor across levels without ever
+holding it — `n = 10` and `n = 11` both give `2294549568037756351`.
 
 `864 = 27·32` flips per 3-subspace is the shape to explain; the linear-independence of the support
 (fact 4) is the visible half of it. Note this is a statement about a **finite** object at each `j`,
