@@ -393,6 +393,44 @@ HOST_SAN_SCAN_PASS (val_imagenette)
 The card's histogram, catastrophe count, and FLOP total are bit-exact against
 the Python golden model on real photographs.
 
+### 4.6 End-to-end deployment loop
+
+Table 1 showed the scan kernel in isolation. We now report the first measured
+pass through the full inference pipeline: a SAN-ResNet-18 trunk running on the
+DL380 host CPU, exit confidences quantized to Q0.15, packed into the same
+512-bit beats used by `host_san_scan`, and streamed to the U250 via the new
+`host_san_scan_e2e` XRT host. The orchestration script
+`scripts/research/san_fpga_endtoend.py` measures every phase and validates the
+card output bit-exactly against an independent Python golden scan.
+
+**Table 5: End-to-end phase decomposition (ImageNette2-160, n=3 925).**
+
+| phase | time | note |
+|---|---|---|
+| PyTorch forward (CPU) | ~18.4 s | SAN-ResNet-18, 3 925 real images, DL380 CPU |
+| quantize + pack | ~40 ms | Q0.15 floor + 512-bit beat packing |
+| xclbin setup | ~135 ms | paid once per process |
+| DMA H2D | ~0.12 ms | 62 848 bytes of packed cohort |
+| kernel | ~0.66 ms | ~24 Msamples/s single-shot |
+| DMA D2H | ~0.15 ms | histogram + catastrophe count + MAC total |
+| **end-to-end total** | **~136 ms** | dominated by one-time xclbin setup |
+
+The forward pass is CPU-only because the DL380 has no GPU fitted; a GPU would
+reduce it proportionally. The 135 ms setup is the one-time `xclbin` load only
+(no partial reconfiguration); once loaded, the same host binary can enqueue
+multiple cohorts without reloading. The kernel itself is <1 ms, and even with
+the one-time load the full host-to-card round trip is <150 ms for the entire
+validation cohort. The packed cohort is 62 848 bytes = 982 beats × 64 bytes,
+so the DMA times correspond to ~470 MB/s effective PCIe bandwidth for the
+small transfer. The script supports `--mock-host` for CI or environments
+without the U250; the mock run reproduces the same histogram, catastrophe
+count, and FLOP total and confirms the Python packing matches the C++
+unpacking bit-exactly.
+
+This closes the loop between training (§4.2), confidence extraction, and FPGA
+audit: the trunk runs on the host, the card decides and meters, and the
+orchestration script verifies that the two agree exactly.
+
 ---
 
 ## 5 Discussion
