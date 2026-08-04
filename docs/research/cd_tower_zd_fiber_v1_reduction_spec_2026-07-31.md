@@ -2674,8 +2674,71 @@ rather than as a table. §38 established the table (values `{0,−2}`, support i
 non-degenerate triples, `864·[j,3]₂` of them) but never extracted the rule.
 
 **Next target, concrete:** extract the explicit local rule for `ε_T` as a function on
-`(𝔽₂^(j+1))³`, then count. That is the only route on the board that both (a) has a bounded window
-and (b) reduces to a statement with no algebra in it.
+`(𝔽₂^(j+1))³`, then count.
+
+> ⚠ **WITHDRAWN by §44.** The rule was extracted, and it is `K = −1 − Bp_T`: the curvature is
+> *minus the base-level triangle sign*. So "extract the rule, then count" is the same statement as
+> §17.2, not a route to it. §44 replaces this recommendation.
 
 **§17.2 is not proven, and this rung does not attempt it.** (III) is still reduced; (d) and V1
 untouched.
+
+
+## §44 — The local rule, extracted: `K = −1 − Bp_T`, and the chain closes on itself (`W47`, 2026-08-04)
+
+§43.3 proposed extracting the curvature's local rule and then counting. The rule is now extracted,
+and it withdraws that recommendation.
+
+### 44.1 The rule
+
+At the base level `n = j+2` — the only level where `K_j` is defined as the raw per-triple table
+(`cls = 1`) — the label `W = 2^j` *is* the top bit, so §42 applies: `A_σ = −μ(l)μ(y)`. Hence, per
+triangle,
+
+```
+ε_T = ∏ (−μ(a)μ(b)) · ∏ Bp = (−1)³ · μ(a)²μ(b)²μ(c)² · Bp_T = − Bp_T
+```
+
+and therefore, since `A_T = ε_T·Bp_T`,
+
+> **`K = A_T − Bp_T = −1 − Bp_T`** — the curvature class is `−2` **exactly on the POSITIVE triangles
+> of the base-level `y = 0` graph**, and `0` on the negative ones.
+
+Measured at the base level `j = 3, 4, 5, 6`: **0 exceptions** on both identities.
+
+⚠ The derivation needs `W` to be the *top bit*. A first pass tested `(n,W) = (7,8), (8,8), (8,16)`,
+none of which is the top-bit case, and the identity failed on 20–40% of triangles there — correctly,
+because §42 does not apply. The identity is a base-level statement.
+
+### 44.2 What this derives — §38's structure was not independent
+
+Three of §38's four measured facts follow immediately:
+
+| §38 fact | now |
+|---|---|
+| `K_j` takes only the values `{0, −2}` | **DERIVED**: `K = −1 − Bp_T` with `Bp_T = ±1` |
+| the support sits in the non-degenerate triples | **DERIVED**: those are exactly the edge-triples |
+| `K_j` is fully symmetric (cyclic + swap) | **DERIVED**: triangle signs are |
+| level-independence of the whole tensor | still measured |
+
+### 44.3 What this costs — the chain is circular
+
+`K = −2` on positive triangles means
+
+> `#flipped classes = #positive triangles of the base-level graph = (T + tr(A³)(1))/2`.
+
+Verified as an exact arithmetic identity at `j = 3…9`: `(T + t3(1))/2 = 864·[j,3]₂` at every one.
+So the finite clause is *literally* "the base-level `y = 0` graph has `864·[j,3]₂` positive
+triangles" — which is §17.2 rearranged.
+
+> **The chain closes on itself:** §17.2 ⟺ the finite clause ⟺ the base-level positive-triangle count
+> ⟺ §17.2. There is no reduction left inside it.
+
+That is a better description of the open state than the four-item list §42.2 gave: **the chain is one
+statement, not four**, and it is a single signed-triangle count for which §43 measured that no
+bounded window exists. Anything that closes it has to come from outside this chain — the `σ`
+recursion itself, or the classical `q`-analogue reading of `[j,3]₂`, not from further rearrangement.
+
+**Three self-deflations today, and this is the third:** §31's route (false target), §38's ladder
+(one cubic, not eleven confirmations), and now §43.3's recommendation (circular). All three were
+rearrangements of something already in the file.
