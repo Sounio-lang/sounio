@@ -1465,3 +1465,20 @@ rejects nonlinear terms. Parity extracted via `mod_pow_mod 1 (j+1)`.
 
 **Still open:** (III); `tr(A³)`'s general closed form; (d); V1. `tr(A²)` is parity-blind (W11), so
 none of this narrows (d).
+
+
+## §29 — Tier 35 review: both hypotheses are sharp
+
+`math-review` (policy M3) on Tier 35 returned PASS on all six declarations, and volunteered two
+sharpness results not in the statements. Both independently re-verified against the Python oracle
+before being accepted:
+
+- **`2 ≤ i` in `dcoef_spec` is sharp.** At `i = 1` the `Nat` coefficient truncates to `0` while the
+  true value is `(2−4)(2−8) = 12`, and the subtraction-free identity would read
+  `24·4^(m−1) = 36·4^(m−1)`. Measured: 24 vs 36 at `m=1`, 96 vs 144 at `m=2`, 384 vs 576 at `m=3`.
+- **Oddness in `Ddig_eq_Edig` is sharp.** For **even** `V` with `lsb(V) = i−1 ≥ 1`, `testBit (i−1)`
+  holds but `V % 2^(i−1) = 0`, so `Edig` includes a term `dterm` drops. Measured: 31 even labels
+  differ at `m = 8`; at `V = 16`, `Ddig = 0` while `Edig = 43008`.
+
+So neither hypothesis is convenience — each is necessary, and the second is the precise reason the
+contract states `E` on the **normalised** (hence odd) label rather than on `W`.
