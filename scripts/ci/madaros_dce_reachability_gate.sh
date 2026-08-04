@@ -98,10 +98,10 @@ run_case chain dce_chain_main.sio 99 602 602
 run_case prune dce_prune_main.sio 7 303 3
 
 # ARM 3 — the capacity boundary, which is a different limit and fails in a
-# different way. 3000 live functions: over the old IR_MAX_FUNCS = 2048, under
-# the current 4096. Two backend guards read the literal 2048 while the arrays
-# they guard grew with the constant, so from exactly 2046 functions the produced
-# binary exited 0 and printed nothing. This arm is deliberately in the same gate
+# different way. 6000 live functions: over IR_MAX_FUNCS at both 2048 and 4096,
+# under the current 8192. Two backend guards read the literal 2048 while the
+# arrays they guard were sized from the constant, so from exactly 2046 functions
+# the produced binary exited 0 and printed nothing. This arm is deliberately in the same gate
 # as the DCE arms because both are the same failure shape — a table that stops
 # accepting entries without saying so — and because a compiler that passes the
 # first two and drops symbols past 2046 is not a working compiler.
@@ -112,18 +112,18 @@ if [[ -f "$CAP/ir_capacity_main.sio" ]]; then
     "$MADAROS" build ir_capacity_main.sio "$CAP_ELF" ) >"$WORK/capacity.log" 2>&1
   cap_rc=$?
   [[ "$cap_rc" -eq 0 && -s "$CAP_ELF" ]] \
-    || gate_fail "capacity: 3000 functions failed to compile (rc=$cap_rc)
+    || gate_fail "capacity: 6000 functions failed to compile (rc=$cap_rc)
 $(tail -n 12 "$WORK/capacity.log")"
   merged="$(grep -oE 'Merged IR: *[0-9]+' "$WORK/capacity.log" | grep -oE '[0-9]+' | tail -1)"
   require_nonempty "$merged" "capacity: no 'Merged IR:' line — cannot tell how many functions were kept"
-  [[ "$merged" -ge 3000 ]] \
-    || gate_fail "capacity: only $merged functions reached the merged IrModule, expected at least 3000 — something truncated silently"
+  [[ "$merged" -ge 6000 ]] \
+    || gate_fail "capacity: only $merged functions reached the merged IrModule, expected at least 6000 — something truncated silently"
   chmod +x "$CAP_ELF"
   "$CAP_ELF" >"$WORK/capacity.out" 2>&1
   cap_exit=$?
-  [[ "$cap_exit" -eq 240 ]] \
-    || gate_fail "capacity: the 3000-function binary exited $cap_exit, expected 240. It compiled and merged $merged functions, so this is a symbol or code-offset table dropping entries past its own bound — the exact failure the literal 2048 guards in native/elf.sio and native/codegen_x86_linux.sio used to produce."
+  [[ "$cap_exit" -eq 228 ]] \
+    || gate_fail "capacity: the 6000-function binary exited $cap_exit, expected 228. It compiled and merged $merged functions, so this is a symbol or code-offset table dropping entries past its own bound — the exact failure the literal 2048 guards in native/elf.sio and native/codegen_x86_linux.sio used to produce."
   echo "  capacity  merged=$merged  exit=$cap_exit"
 fi
 
-gate_pass "keeps 602 live functions, drops 300 of 303 dead, and carries 3000 functions through to a correct binary"
+gate_pass "keeps 602 live functions, drops 300 of 303 dead, and carries 6000 functions through to a correct binary"
