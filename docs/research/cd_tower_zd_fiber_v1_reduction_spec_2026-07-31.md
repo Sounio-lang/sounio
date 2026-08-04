@@ -1520,3 +1520,58 @@ collapse two distinct `g`-values, which reading A would require.
 
 **Step 0 of any attack on (III) is therefore closed.** What remains open is unchanged: (III)
 itself, `tr(A³)`'s general closed form, (d), V1.
+
+
+## §31 — (I) reduced: `F` splits into three recursive pieces (MEASURED, not proven)
+
+Everything in this section is **measurement**, recorded so it is not lost. Nothing here is a Lean
+theorem. The Lean targets are written out as signatures so a later session starts from types.
+
+With `F(m,y) = Ddig m (8y+1)` — i.e. §30's fibre-coordinate form of the closed form — write
+`s_j = (−1)^popcount(y ≫ (j+1))` and
+
+```
+S(y)    = Σ_{j ∈ bits(y)} s_j
+P(m,y)  = Σ_{j ∈ bits(y)} s_j · 2^(2m−j−4)
+Q(m,y)  = Σ_{j ∈ bits(y)} s_j · 2^(2m−2j−8)
+```
+
+**The decomposition** (0 mismatches, m = 5..10), from `dcoef(m,i) = 4^m − 12·2^(2m−i) + 32·2^(2m−2i)`:
+
+```
+F(m,y) = 4^m · S(y) − 12 · P(m,y) + 32 · Q(m,y)
+```
+
+**The six identities** (0 mismatches; even branch m = 8..11, odd branch m = 8..11). `psg` is the
+file's existing `(−1)^popcount`:
+
+| | even | odd |
+|---|---|---|
+| `S` | `S(2t) = S(t)` | `S(2t+1) = psg t + S(t)` |
+| `P` | `P(m,2t) = 2·P(m−1,t)` | `P(m,2t+1) = psg t · 2^(2m−4) + 2·P(m−1,t)` |
+| `Q` | `Q(m,2t) = Q(m−1,t)` | `Q(m,2t+1) = psg t · 2^(2m−8) + Q(m−1,t)` |
+
+They were **derived from the bit shift before being measured**: for `y = 2t+1` bit 0 contributes
+`psg t` at top weight, and the remaining bits are those of `t` shifted with the *same* signs, which
+is why the residual is exactly the level-below value.
+
+**Why this reduces (I).** `S` takes only two values (`S(y) ∈ {0,1}`, checked m = 4..14) so it is
+not injective, but **`P` and `Q` are each injective** (32/32 at m=8, 128/128 at m=10, 512/512 at
+m=12). So (I) does not need `F`: it needs `P`.
+
+And `P`'s weights are **pure powers of two**, so `2^k > Σ_{j<k} 2^j` — the dominance that the raw
+`dcoef` weights do *not* admit (their ratio `c_{j+1}/c_j → 1`). (I) therefore reduces to
+**uniqueness of a signed binary representation**, provable by induction on `t/2` in the style of
+`psg` (`:3513`, well-founded, `decreasing_by`), recovering the leading bit by dominance at the odd
+step and the rest by the induction hypothesis. That is a genuinely different proof shape from the
+magnitude comparison I had wrongly assumed was required.
+
+### Known obstacle before any of this becomes Lean
+
+`S`, `P`, `Q` are sums over the bits of `y`, and each identity **reindexes a bounded sum under a
+bit shift**. This file has no `Finset`; the precedent is `sumLt_lowMap` (`:5240`), built by
+induction on the level specifically to do one reindexing. Expect that cost per identity, not
+lemma-sized effort.
+
+**Status: all of §31 is MEASURED.** Open, unchanged: (I), (III), `tr(A³)`'s general closed form,
+(d), V1.
