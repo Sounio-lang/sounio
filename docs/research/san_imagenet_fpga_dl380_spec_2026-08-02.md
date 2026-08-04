@@ -246,3 +246,54 @@ requires Vitis HLS (installation pending on the DL380); flow files:
 `run_hls_san_scan.tcl`, `build_san_scan_xclbin.sh`, `tb_san_scan.cpp`,
 `host_san_scan.cpp` (complete XRT-native host, verifies the card against
 the control VM bit-exactly and reports measured throughput).
+
+### 13.2 On-card benchmark — EXECUTED on the DL380 (2026-08-03, measured)
+
+The `krnl_san_scan.hw.xclbin` was built on the `vitis-u250-builder` VM
+(Vitis 2025.1, Ubuntu 22.04) and run on the DL380 U250. The requested
+kernel frequency was 250 MHz; Vivado closed timing at **135.2 MHz**
+(auto-frequency scaling), which is the honest clock for the throughput
+numbers below.
+
+Build host:
+
+- VM: `vitis-u250-builder` (Proxmox VM 100) on `t560-proxmox`.
+- Toolchain: Vitis 2025.1 / Vivado 2025.1.
+- Platform: `xilinx_u250_gen3x16_xdma_4_1_202210_1`.
+- Elapsed build time: 0h 58m 18s.
+- Kernel clock: requested 250 MHz, achieved **135.2 MHz**.
+- Interface: all kernel memory ports share `bundle=gmem1` (reverted from
+  an intermediate split-bundle experiment that was only needed to work
+  around Vitis 2025.1 cosimulation limitations).
+
+On-target acceptance (`host_san_scan` compiled on DL380 with XRT 2.23,
+run against the bitstream above; all three datasets bit-exact vs the
+control-VM gated outputs):
+
+```
+host_san_scan: dataset=val_resnet n=5000 points=5 q_delta=18022 family=resnet
+CARD_RESULT n=5000 catastrophes=2854 flops_macs=14544894803968 wall=0.181ms (27.7 Msamples/s kernel-only)
+HOST_SAN_SCAN_PASS (val_resnet)
+
+host_san_scan: dataset=val_vit n=5000 points=7 q_delta=31130 family=vit
+CARD_RESULT n=5000 catastrophes=4080 flops_macs=294969551192064 wall=0.118ms (42.5 Msamples/s kernel-only)
+HOST_SAN_SCAN_PASS (val_vit)
+
+host_san_scan: dataset=stress_1p2M n=1200000 points=5 q_delta=18022 family=resnet
+CARD_RESULT n=1200000 catastrophes=685178 flops_macs=3491391421956096 wall=2.551ms (470.3 Msamples/s kernel-only)
+HOST_SAN_SCAN_PASS (stress_1p2M)
+```
+
+Throughput interpretation: the kernel is bus-limited (512 bits/beat =
+4 samples/beat at II=1). At 135.2 MHz the theoretical peak is
+`135.2e6 × 4 = 540.8 Msamples/s`. The measured 470.3 Msamples/s on the
+1.2M cohort is **87% of theoretical peak**; the remaining gap is the
+tail beat (n_samples is not a multiple of 4) plus host-side enqueue/sync
+overhead is excluded from the reported kernel-only wall time. The smaller
+cohorts report lower Msamples/s because the fixed setup cost dominates at
+n=5000.
+
+Status: T3 on-target (§13.1) is now extended to the actual bitstream:
+`HOST_SAN_SCAN_PASS` on all three datasets confirms the card reproduces
+the control-VM golden model bit-exactly. The only remaining `ESTIMATE`
+is real ImageNet images (unchanged — credentialed download).
