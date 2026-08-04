@@ -8680,6 +8680,418 @@ theorem Ncnt_closed_E (m W : Nat) (hW : W < 2^m) (hW0 : W ≠ 0) :
   rw [← Ddig_eq_Edig m (gnorm W) (gnorm_odd_one W)]
   exact Ncnt_closed_gnorm m W hW hW0
 
+
+/-! ## Tier 36: (I) is a theorem — `Ddig` is injective in the fibre coordinate `g`
+
+§31 recorded (I) as MEASURED and proposed reducing it to injectivity of the signed BINARY sum
+`P`. That reduction does not close — `F` is not recoverable from `P` — and its stated target,
+uniqueness of a signed binary representation, is FALSE (`2^k - 2^(k-1) = 2^(k-1)`). What carries
+(I) is not magnitude at all but the **2-adic valuation**, and it needs no `Finset`, no reindexing
+of a sum under a bit shift, and no `m`-index shift.
+
+Factor the coefficient instead of expanding it: with `i = p+1` (so `2^i >= 16`),
+
+  `dcoef m (p+1) = 2^(2m-2p+3) * (2^(p-1) - 1) * (2^(p-2) - 1)`,
+
+and the cofactor is ODD. So `v2(dcoef m (p+1)) = 2m - 2p + 3` — strictly decreasing in the bit
+position `p`, with gap exactly 2. Two consequences, proved together in one induction:
+
+* **the peel** — `Ddig m (2^p + W) = dcoef m (p+1) - Ddig m W` for `0 < W < 2^p`, because
+  `psg` of the top bit is `psg 0 = 1` while every lower digit keeps its guard and flips its sign
+  (`psg_top`, already proven at `:3525`);
+* **the valuation** — for `W = 1 (mod 8)` with top bit `p`, `Ddig m W = 2^(2m-2p+3) * odd`. The
+  peeled remainder's valuation is at least two higher, so it cannot cancel the odd cofactor.
+
+Injectivity then falls out: equal digit sums force equal valuations, hence equal top bits; the
+peel reduces to the same statement one bit lower. `Ddig m W != 0` for `W != 1` handles the base.
+
+This is the same termwise move that made Tier 34 reachable — the descent never looks below the
+lowest set bit, so nothing has to be reindexed. -/
+
+theorem sumLtI_sub (n : Nat) (f g : Nat → Int) :
+    sumLtI n (fun i => f i - g i) = sumLtI n f - sumLtI n g := by
+  induction n with
+  | zero => rfl
+  | succ n ih => rw [sumLtI, sumLtI, sumLtI, ih]; omega
+
+theorem sumLtI_single (n k : Nat) (c : Int) (h : k < n) :
+    sumLtI n (fun i => if i = k then c else 0) = c := by
+  induction n with
+  | zero => omega
+  | succ n ih =>
+      rw [sumLtI]
+      by_cases hk : n = k
+      · subst hk
+        have hz : sumLtI n (fun i => if i = n then c else 0) = 0 := by
+          rw [sumLtI_congr n _ (fun _ => 0) (fun i hi => if_neg (by omega))]
+          exact sumLtI_zero n
+        rw [hz, if_pos rfl]
+        omega
+      · rw [if_neg hk, ih (by omega)]
+        omega
+
+/-- A digit whose level sits strictly above the whole label is zero. -/
+theorem dterm_of_lt (m W i : Nat) (h : W < 2^(i-1)) : dterm m W i = 0 := by
+  unfold dterm
+  apply if_neg
+  intro hc
+  obtain ⟨h1, _⟩ := hc
+  have hle : (2:Nat)^(i-1) ≤ 2^i := Nat.pow_le_pow_right (by omega) (by omega)
+  have hmod : W % 2^i = W := Nat.mod_eq_of_lt (by omega)
+  omega
+
+private theorem pow_split (b i : Nat) (h : i ≤ b) : (2:Nat)^b = 2^i * 2^(b-i) := by
+  rw [← Nat.pow_add]
+  congr 1
+  omega
+
+private theorem mod_add_pow (a b i : Nat) (h : i ≤ b) : (2^b + a) % 2^i = a % 2^i := by
+  rw [pow_split b i h, Nat.mul_add_mod]
+
+private theorem div_add_pow (a b i : Nat) (h : i ≤ b) :
+    (2^b + a) >>> i = 2^(b-i) + a >>> i := by
+  rw [Nat.shiftRight_eq_div_pow, Nat.shiftRight_eq_div_pow, pow_split b i h,
+      Nat.mul_add_div (Nat.two_pow_pos i)]
+
+private theorem shift_lt (W p i : Nat) (h : i ≤ p) (hW : W < 2^p) : W >>> i < 2^(p-i) := by
+  rw [Nat.shiftRight_eq_div_pow]
+  apply Nat.div_lt_of_lt_mul
+  rw [← pow_split p i h]
+  exact hW
+
+/-- Below the peeled bit every digit keeps its guard and flips its sign. -/
+theorem dterm_peel_low (m p W i : Nat) (hi : i ≤ p) (hW : W < 2^p) :
+    dterm m (2^p + W) i = - dterm m W i := by
+  have h1 : (2^p + W) % 2^i = W % 2^i := mod_add_pow W p i hi
+  have h2 : (2^p + W) % 2^(i-1) = W % 2^(i-1) := mod_add_pow W p (i-1) (by omega)
+  have h3 : (2^p + W) >>> i = 2^(p-i) + W >>> i := div_add_pow W p i hi
+  have h4 : psg ((2^p + W) >>> i) = - psg (W >>> i) := by
+    rw [h3, Nat.add_comm]
+    exact psg_top (p-i) (W >>> i) (shift_lt W p i hi hW)
+  unfold dterm
+  rw [h1, h2, h4]
+  by_cases hg : 2^(i-1) ≤ W % 2^i ∧ W % 2^(i-1) ≠ 0
+  · rw [if_pos hg, if_pos hg, Int.mul_neg]
+  · rw [if_neg hg, if_neg hg]
+    decide
+
+/-- At the peeled bit itself the digit is the bare coefficient: the sign is `psg 0 = 1`. -/
+theorem dterm_peel_at (m p W : Nat) (hW0 : W ≠ 0) (hW : W < 2^p) :
+    dterm m (2^p + W) (p+1) = (dcoef m (p+1) : Int) := by
+  have hpow : (2:Nat)^(p+1) = 2^p + 2^p := by rw [Nat.pow_succ]; omega
+  have hlt : 2^p + W < 2^(p+1) := by omega
+  have h1 : (2^p + W) % 2^(p+1) = 2^p + W := Nat.mod_eq_of_lt hlt
+  have h2 : (2^p + W) % 2^p = W := by
+    rw [mod_add_pow W p p (Nat.le_refl p), Nat.mod_eq_of_lt hW]
+  have h3 : (2^p + W) >>> (p+1) = 0 := by
+    rw [Nat.shiftRight_eq_div_pow]
+    exact Nat.div_eq_of_lt hlt
+  unfold dterm
+  have hidx : p + 1 - 1 = p := by omega
+  rw [hidx, h1, h2, h3, psg_zero, if_pos ⟨by omega, hW0⟩, Int.mul_one]
+
+/-- The termwise peel. -/
+theorem dterm_peel (m p W i : Nat) (hW0 : W ≠ 0) (hW : W < 2^p) :
+    dterm m (2^p + W) i
+      = (if i = p+1 then (dcoef m (p+1) : Int) else 0) - dterm m W i := by
+  rcases Nat.lt_or_ge i (p+1) with hi | hi
+  · rw [if_neg (by omega), dterm_peel_low m p W i (by omega) hW]
+    omega
+  · rcases Nat.eq_or_lt_of_le hi with hi' | hi'
+    · have hi'' : i = p + 1 := hi'.symm
+      subst hi''
+      rw [if_pos rfl, dterm_peel_at m p W hW0 hW,
+          dterm_of_lt m W (p+1) (by rw [show p + 1 - 1 = p from rfl]; exact hW)]
+      omega
+    · have hpow : (2:Nat)^(p+1) = 2^p + 2^p := by rw [Nat.pow_succ]; omega
+      have hle : (2:Nat)^(p+1) ≤ 2^(i-1) := Nat.pow_le_pow_right (by omega) (by omega)
+      rw [if_neg (by omega), dterm_of_lt m (2^p + W) i (by omega),
+          dterm_of_lt m W i (by omega)]
+      omega
+
+/-- **The peel, ∀ m.** Removing the top set bit negates the digit sum and adds its coefficient. -/
+theorem Ddig_peel (m p W : Nat) (hp : p + 1 ≤ m) (hW0 : W ≠ 0) (hW : W < 2^p) :
+    Ddig m (2^p + W) = (dcoef m (p+1) : Int) - Ddig m W := by
+  unfold Ddig
+  rw [sumLtI_congr (m+1) _
+        (fun i => (if i = p+1 then (dcoef m (p+1) : Int) else 0) - dterm m W i)
+        (fun i _ => dterm_peel m p W i hW0 hW),
+      sumLtI_sub, sumLtI_single (m+1) (p+1) _ (by omega)]
+
+/-! ### The coefficient's 2-adic factorisation -/
+
+private theorem pow_eight (p : Nat) (h : 3 ≤ p) : (2:Nat)^p = 8 * 2^(p-3) := by
+  rw [pow_split p 3 h]
+
+private theorem pow_four (p : Nat) (h : 1 ≤ p) : (2:Nat)^(p+1) = 4 * 2^(p-1) := by
+  rw [pow_split (p+1) 2 (by omega), show p + 1 - 2 = p - 1 from by omega]
+
+private theorem pow_eight' (p : Nat) (h : 2 ≤ p) : (2:Nat)^(p+1) = 8 * 2^(p-2) := by
+  rw [pow_split (p+1) 3 (by omega), show p + 1 - 3 = p - 2 from by omega]
+
+/-- `dcoef m (p+1) = 2^(2m−2p+3) · odd`. The cofactor `(2^(p−1)−1)(2^(p−2)−1)` is odd, so this
+    IS the 2-adic valuation: `v₂ = 2m − 2p + 3`, strictly decreasing in `p` with gap exactly 2. -/
+theorem dcoef_factor (m p : Nat) (hp3 : 3 ≤ p) (hpm : p + 1 ≤ m) :
+    dcoef m (p+1) = 2^(2*m - 2*p + 3) * ((2^(p-1) - 1) * (2^(p-2) - 1)) := by
+  have e1 := pow_four p (by omega)
+  have e2 := pow_eight' p (by omega)
+  have hA : (1:Nat) ≤ 2^(p-1) := Nat.one_le_two_pow
+  have hB : (1:Nat) ≤ 2^(p-2) := Nat.one_le_two_pow
+  have h4 : (2:Nat)^(p+1) - 4 = 4 * (2^(p-1) - 1) := by omega
+  have h8 : (2:Nat)^(p+1) - 8 = 8 * (2^(p-2) - 1) := by omega
+  have hp4 : (4:Nat)^(m - (p+1)) = 2^(2*(m - (p+1))) := by
+    rw [Nat.pow_mul]
+  have hexp : 2*m - 2*p + 3 = 5 + 2*(m - (p+1)) := by omega
+  unfold dcoef
+  rw [h4, h8, hp4, hexp, Nat.pow_add, show (2:Nat)^5 = 32 from rfl]
+  simp [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm]
+
+theorem dcoef_cofactor_odd (p : Nat) (hp3 : 3 ≤ p) :
+    ((2^(p-1) - 1) * (2^(p-2) - 1)) % 2 = 1 := by
+  have hA : (2:Nat)^(p-1) = 2 * 2^(p-2) := by
+    rw [pow_split (p-1) 1 (by omega), show p - 1 - 1 = p - 2 from by omega]
+  have hB : (2:Nat)^(p-2) = 2 * 2^(p-3) := by
+    rw [pow_split (p-2) 1 (by omega), show p - 2 - 1 = p - 3 from by omega]
+  have h1 : (2:Nat)^(p-3) ≥ 1 := Nat.one_le_two_pow
+  have ha : (2^(p-1) - 1) % 2 = 1 := by omega
+  have hb : (2^(p-2) - 1) % 2 = 1 := by omega
+  rw [Nat.mul_mod, ha, hb]
+
+/-! ### The base of the descent, and where the top bit sits -/
+
+theorem dterm_one (m i : Nat) : dterm m 1 i = 0 := by
+  match i with
+  | 0 =>
+      unfold dterm
+      apply if_neg
+      intro hc
+      obtain ⟨h1, _⟩ := hc
+      have : (1:Nat) % 2^0 = 0 := rfl
+      have : (2:Nat)^(0-1) = 1 := rfl
+      omega
+  | 1 =>
+      unfold dterm
+      apply if_neg
+      intro hc
+      obtain ⟨_, h2⟩ := hc
+      exact h2 rfl
+  | (j+2) =>
+      refine dterm_of_lt m 1 (j+2) ?_
+      have h : (2:Nat)^(j+2-1) = 2 * 2^j := by
+        rw [show j + 2 - 1 = 1 + j from by omega, Nat.pow_add]
+      have := Nat.one_le_two_pow (n := j)
+      omega
+
+theorem Ddig_at_one (m : Nat) : Ddig m 1 = 0 := by
+  unfold Ddig
+  rw [sumLtI_congr (m+1) _ (fun _ => 0) (fun i _ => dterm_one m i)]
+  exact sumLtI_zero (m+1)
+
+theorem exists_topbit : ∀ (b W : Nat), W ≠ 0 → W < 2^b →
+    ∃ p, p < b ∧ 2^p ≤ W ∧ W < 2^(p+1) := by
+  intro b
+  induction b with
+  | zero =>
+      intro W h0 hW
+      have : (2:Nat)^0 = 1 := rfl
+      omega
+  | succ b ih =>
+      intro W h0 hW
+      rcases Nat.lt_or_ge W (2^b) with h | h
+      · obtain ⟨p, hp1, hp2, hp3⟩ := ih W h0 h
+        exact ⟨p, by omega, hp2, hp3⟩
+      · exact ⟨b, by omega, h, hW⟩
+
+/-! ### The valuation -/
+
+private theorem pow_two_split (n : Nat) (h : 1 ≤ n) : (2:Nat)^n = 2 * 2^(n-1) := by
+  rw [pow_split n 1 h]
+
+/-- **The 2-adic valuation of the digit sum.** For a label `W ≡ 1 (mod 8)` whose top set bit is
+    `p`, `Ddig m W = 2^(2m−2p+3) · (odd)`. In particular `Ddig m W ≠ 0`, and the valuation
+    determines `p`. Proof: peel the top bit, and the peeled remainder's valuation is at least two
+    higher, so it cannot cancel the coefficient's odd cofactor. -/
+theorem Ddig_val : ∀ (p m W : Nat), 3 ≤ p → p + 1 ≤ m → W % 8 = 1 → 2^p ≤ W → W < 2^(p+1) →
+    ∃ q : Int, q % 2 = 1 ∧ Ddig m W = ((2^(2*m - 2*p + 3) : Nat) : Int) * q := by
+  intro p
+  induction p using Nat.strongRecOn with
+  | _ p ih =>
+    intro m W hp3 hpm h8 hlo hhi
+    have hpow : (2:Nat)^(p+1) = 2^p + 2^p := by rw [Nat.pow_succ]; omega
+    have hW'lt : W - 2^p < 2^p := by omega
+    have hWeq : W = 2^p + (W - 2^p) := by omega
+    have h2p8 : (2:Nat)^p % 8 = 0 := by have := pow_eight p hp3; omega
+    have hW'8 : (W - 2^p) % 8 = 1 := by omega
+    have hW'0 : W - 2^p ≠ 0 := by omega
+    have hpeel := Ddig_peel m p (W - 2^p) hpm hW'0 hW'lt
+    rw [← hWeq] at hpeel
+    have hAB := dcoef_cofactor_odd p hp3
+    rw [dcoef_factor m p hp3 hpm, Int.natCast_mul] at hpeel
+    by_cases hone : W - 2^p = 1
+    · refine ⟨(((2^(p-1) - 1) * (2^(p-2) - 1) : Nat) : Int), by omega, ?_⟩
+      rw [hpeel, hone, Ddig_at_one]
+      omega
+    · obtain ⟨p', hp'lt, hp'lo, hp'hi⟩ := exists_topbit p (W - 2^p) hW'0 hW'lt
+      have hp'3 : 3 ≤ p' := by
+        rcases Nat.lt_or_ge p' 3 with hc | hc
+        · exfalso
+          have hle : (2:Nat)^(p'+1) ≤ 2^3 := Nat.pow_le_pow_right (by omega) (by omega)
+          have h8' : (2:Nat)^3 = 8 := rfl
+          omega
+        · exact hc
+      obtain ⟨q', hq'odd, hq'⟩ := ih p' hp'lt m (W - 2^p) hp'3 (by omega) hW'8 hp'lo hp'hi
+      have hNat : (2:Nat)^(2*m - 2*p' + 3)
+          = 2^(2*m - 2*p + 3) * (2 * 2^(2*(p - p') - 1)) := by
+        rw [← pow_two_split (2*(p - p')) (by omega), ← Nat.pow_add]
+        congr 1
+        omega
+      have hE' : ((2^(2*m - 2*p' + 3) : Nat) : Int)
+          = ((2^(2*m - 2*p + 3) : Nat) : Int) * (2 * ((2^(2*(p - p') - 1) : Nat) : Int)) := by
+        rw [hNat]
+        simp [Int.natCast_mul]
+      obtain ⟨r, hr⟩ : ∃ r : Int, ((2^(2*(p - p') - 1) : Nat) : Int) * q' = r := ⟨_, rfl⟩
+      refine ⟨(((2^(p-1) - 1) * (2^(p-2) - 1) : Nat) : Int) - 2 * r, by omega, ?_⟩
+      rw [hpeel, hq', hE', ← hr]
+      grind
+
+/-! ### Injectivity -/
+
+private theorem pow_odd_absurd (e1 e2 : Nat) (q1 q2 : Int) (h1 : q1 % 2 = 1)
+    (h : ((2^e1 : Nat) : Int) * q1 = ((2^e2 : Nat) : Int) * q2) (hlt : e1 < e2) : False := by
+  have hsplit : (2:Nat)^e2 = 2^e1 * (2 * 2^(e2 - e1 - 1)) := by
+    rw [← pow_two_split (e2 - e1) (by omega), ← Nat.pow_add]
+    congr 1
+    omega
+  have hc : ((2^e2 : Nat) : Int)
+      = ((2^e1 : Nat) : Int) * (2 * ((2^(e2 - e1 - 1) : Nat) : Int)) := by
+    rw [hsplit]
+    simp [Int.natCast_mul]
+  rw [hc] at h
+  have hpos : 0 < (2:Nat)^e1 := Nat.two_pow_pos e1
+  have hne : ((2^e1 : Nat) : Int) ≠ 0 := by omega
+  have h' : ((2^e1 : Nat) : Int) * q1
+      = ((2^e1 : Nat) : Int) * (2 * (((2^(e2 - e1 - 1) : Nat) : Int) * q2)) := by grind
+  have hq := Int.eq_of_mul_eq_mul_left hne h'
+  obtain ⟨r, hr⟩ : ∃ r : Int, ((2^(e2 - e1 - 1) : Nat) : Int) * q2 = r := ⟨_, rfl⟩
+  rw [hr] at hq
+  omega
+
+/-- Equal values of `2^e · odd` force equal exponents: this is what makes the valuation an
+    invariant of the label rather than of the representation. -/
+theorem pow_mul_odd_inj (e1 e2 : Nat) (q1 q2 : Int) (h1 : q1 % 2 = 1) (h2 : q2 % 2 = 1)
+    (h : ((2^e1 : Nat) : Int) * q1 = ((2^e2 : Nat) : Int) * q2) : e1 = e2 := by
+  rcases Nat.lt_trichotomy e1 e2 with hlt | heq | hgt
+  · exact absurd (pow_odd_absurd e1 e2 q1 q2 h1 h hlt) (fun x => x)
+  · exact heq
+  · exact absurd (pow_odd_absurd e2 e1 q2 q1 h2 h.symm hgt) (fun x => x)
+
+/-- The packaged valuation: top bit, exponent, odd cofactor. -/
+theorem Ddig_val_pack (m W b : Nat) (hbm : b ≤ m) (h8 : W % 8 = 1) (hne : W ≠ 1)
+    (hW : W < 2^b) :
+    ∃ p q, 3 ≤ p ∧ p < b ∧ 2^p ≤ W ∧ W < 2^(p+1) ∧ q % 2 = 1 ∧
+      Ddig m W = ((2^(2*m - 2*p + 3) : Nat) : Int) * q := by
+  have hW0 : W ≠ 0 := by omega
+  obtain ⟨p, hpb, hlo, hhi⟩ := exists_topbit b W hW0 hW
+  have hp3 : 3 ≤ p := by
+    rcases Nat.lt_or_ge p 3 with hc | hc
+    · exfalso
+      have hle : (2:Nat)^(p+1) ≤ 2^3 := Nat.pow_le_pow_right (by omega) (by omega)
+      have h8' : (2:Nat)^3 = 8 := rfl
+      omega
+    · exact hc
+  obtain ⟨q, hq, hval⟩ := Ddig_val p m W hp3 (by omega) h8 hlo hhi
+  exact ⟨p, q, hp3, hpb, hlo, hhi, hq, hval⟩
+
+theorem Ddig_ne_zero (m W b : Nat) (hbm : b ≤ m) (h8 : W % 8 = 1) (hne : W ≠ 1)
+    (hW : W < 2^b) : Ddig m W ≠ 0 := by
+  obtain ⟨p, q, _, _, _, _, hq, hval⟩ := Ddig_val_pack m W b hbm h8 hne hW
+  rw [hval]
+  have hpos : 0 < (2:Nat)^(2*m - 2*p + 3) := Nat.two_pow_pos _
+  exact Int.mul_ne_zero (by omega) (by omega)
+
+/-- **(I), in the form the closed form needs.** `Ddig m` is injective on labels `≡ 1 (mod 8)`.
+    Peel-and-descend: equal digit sums force equal 2-adic valuations, hence equal top bits;
+    the peel then reduces to the same statement one bit lower. -/
+theorem Ddig_inj : ∀ (b m W1 W2 : Nat), b ≤ m → W1 % 8 = 1 → W2 % 8 = 1 →
+    W1 < 2^b → W2 < 2^b → Ddig m W1 = Ddig m W2 → W1 = W2 := by
+  intro b
+  induction b using Nat.strongRecOn with
+  | _ b ih =>
+    intro m W1 W2 hbm h81 h82 hW1 hW2 heq
+    by_cases h1 : W1 = 1
+    · by_cases h2 : W2 = 1
+      · rw [h1, h2]
+      · exfalso
+        rw [h1, Ddig_at_one] at heq
+        exact Ddig_ne_zero m W2 b hbm h82 h2 hW2 heq.symm
+    · by_cases h2 : W2 = 1
+      · exfalso
+        rw [h2, Ddig_at_one] at heq
+        exact Ddig_ne_zero m W1 b hbm h81 h1 hW1 heq
+      · obtain ⟨p1, q1, hp13, hp1b, hlo1, hhi1, hq1, hval1⟩ :=
+          Ddig_val_pack m W1 b hbm h81 h1 hW1
+        obtain ⟨p2, q2, hp23, hp2b, hlo2, hhi2, hq2, hval2⟩ :=
+          Ddig_val_pack m W2 b hbm h82 h2 hW2
+        have hee : 2*m - 2*p1 + 3 = 2*m - 2*p2 + 3 := by
+          refine pow_mul_odd_inj _ _ q1 q2 hq1 hq2 ?_
+          rw [← hval1, ← hval2]
+          exact heq
+        have hpp : p1 = p2 := by omega
+        subst hpp
+        have hpow : (2:Nat)^(p1+1) = 2^p1 + 2^p1 := by rw [Nat.pow_succ]; omega
+        have h2p8 : (2:Nat)^p1 % 8 = 0 := by have := pow_eight p1 hp13; omega
+        have hpeel1 := Ddig_peel m p1 (W1 - 2^p1) (by omega) (by omega) (by omega)
+        have hpeel2 := Ddig_peel m p1 (W2 - 2^p1) (by omega) (by omega) (by omega)
+        rw [show 2^p1 + (W1 - 2^p1) = W1 from by omega] at hpeel1
+        rw [show 2^p1 + (W2 - 2^p1) = W2 from by omega] at hpeel2
+        have hsub : Ddig m (W1 - 2^p1) = Ddig m (W2 - 2^p1) := by omega
+        have hrec := ih p1 hp1b m (W1 - 2^p1) (W2 - 2^p1) (by omega) (by omega) (by omega)
+          (by omega) (by omega) hsub
+        omega
+
+/-! ### (I) on the fibre coordinate -/
+
+theorem gnorm_le (W : Nat) (hW : W ≠ 0) : gnorm W ≤ W := by
+  have h1 : W &&& (W - 1) ≤ W - 1 := Nat.and_le_right
+  have h2 : 8 * ((W &&& (W - 1)) >>> 3) ≤ W &&& (W - 1) := by
+    rw [Nat.shiftRight_eq_div_pow, show (2:Nat)^3 = 8 from rfl, Nat.mul_comm]
+    exact Nat.div_mul_le_self _ 8
+  unfold gnorm
+  omega
+
+theorem gnorm_mod8 (W : Nat) : gnorm W % 8 = 1 := by
+  unfold gnorm
+  omega
+
+/-- **(I) on labels, via the normalised representative.** -/
+theorem Ddig_inj_gnorm (m W1 W2 : Nat) (h1 : W1 ≠ 0) (h2 : W2 ≠ 0)
+    (hlt1 : W1 < 2^m) (hlt2 : W2 < 2^m)
+    (heq : Ddig m (gnorm W1) = Ddig m (gnorm W2)) : gnorm W1 = gnorm W2 := by
+  exact Ddig_inj m m (gnorm W1) (gnorm W2) (Nat.le_refl m) (gnorm_mod8 W1) (gnorm_mod8 W2)
+    (by have := gnorm_le W1 h1; omega) (by have := gnorm_le W2 h2; omega) heq
+
+/-! ### (I) on `Ncnt` itself -/
+
+/-- **(I), PROVEN forall n.** `tr(A^2)` — equivalently `Ncnt` — is injective in the fibre
+    coordinate `g`. §30 reduced (I) to exactly this: a statement about the closed form alone,
+    with no `Qgen'`. -/
+theorem Ncnt_inj_gnorm (m W1 W2 : Nat) (hW1 : W1 < 2^m) (hW2 : W2 < 2^m)
+    (h1 : W1 ≠ 0) (h2 : W2 ≠ 0) (heq : Ncnt W1 m = Ncnt W2 m) : gnorm W1 = gnorm W2 := by
+  have c1 := Ncnt_closed m W1 hW1 h1
+  have c2 := Ncnt_closed m W2 hW2 h2
+  rw [heq] at c1
+  have hd : Ddig m W1 = Ddig m W2 := by omega
+  rw [Ddig_gnorm m W1 h1, Ddig_gnorm m W2 h2] at hd
+  exact Ddig_inj_gnorm m W1 W2 h1 h2 hW1 hW2 hd
+
+/-- The same, stated on `g` itself. -/
+theorem Ncnt_inj_g (m W1 W2 : Nat) (hW1 : W1 < 2^m) (hW2 : W2 < 2^m)
+    (h1 : W1 ≠ 0) (h2 : W2 ≠ 0) (heq : Ncnt W1 m = Ncnt W2 m) :
+    (W1 &&& (W1 - 1)) >>> 3 = (W2 &&& (W2 - 1)) >>> 3 := by
+  have hg := Ncnt_inj_gnorm m W1 W2 hW1 hW2 h1 h2 heq
+  unfold gnorm at hg
+  omega
+
 end SounioZDFiberAntisym
 
 

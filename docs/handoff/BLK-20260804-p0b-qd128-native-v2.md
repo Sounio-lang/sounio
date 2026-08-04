@@ -2,7 +2,7 @@
 topic_id: repo.docs.handoff.blk-20260804-p0b-qd128-native-v2
 authority: repo_only
 audience: users
-last_validated: 2026-08-04
+last_validated: 2026-03-07
 validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.handoff.blk-20260804-p0b-qd128-native-v2
 -->

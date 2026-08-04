@@ -28,7 +28,7 @@ fi
 
 PAYLOAD_DIR="/orangefs/training/sounio/san-large-source"
 OUT_ROOT="/orangefs/training/sounio/kimi-runs/san-large-gpu"
-RUN_ID="$(date +%Y%m%d-%H%M%S)"
+RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 OUT_DIR="${OUT_ROOT}/${RUN_ID}"
 JOB_SCRIPT="${PAYLOAD_DIR}/job_${RUN_ID}_${LEG}.sh"
 
@@ -56,8 +56,15 @@ cat > /tmp/san_large_job_script.sh <<EOF
 #SBATCH --time=${JOB_TIME}
 #SBATCH --mem=${JOB_MEM}
 export SAN_LARGE_ONLY=${LEG}
+export SAN_LARGE_DATASET=${SAN_LARGE_DATASET:-cifar10}
 export SAN_LARGE_OUT=${OUT_ROOT}
 export RUN_ID=${RUN_ID}
+export SAN_LARGE_DELTA_RESNET=${SAN_LARGE_DELTA_RESNET:-0.55}
+export SAN_LARGE_DELTA_VIT=${SAN_LARGE_DELTA_VIT:-0.45}
+export SAN_LARGE_DELTA_GPT=${SAN_LARGE_DELTA_GPT:-0.31}
+export SAN_LARGE_TAU_RESNET=${SAN_LARGE_TAU_RESNET:-0.34}
+export SAN_LARGE_TAU_VIT=${SAN_LARGE_TAU_VIT:-0.251}
+export SAN_LARGE_TAU_GPT=${SAN_LARGE_TAU_GPT:-0.165}
 bash ${PAYLOAD_DIR}/run_gpu_worker.sh
 EOF
 

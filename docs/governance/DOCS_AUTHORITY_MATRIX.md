@@ -643,6 +643,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.papers.readme | repo_only | docs/papers/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.rupture-functor-f-synthesis-2026-07-25 | repo_only | docs/papers/rupture_functor_f_synthesis_2026-07-25.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.rupture-journal-submission-2026-07-26 | repo_only | docs/papers/rupture_journal_submission_2026-07-26.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.papers.san-fpga-deployment-2026-08-04 | repo_only | docs/papers/san_fpga_deployment_2026-08-04.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.sedenion-fano-geometry | repo_only | docs/papers/sedenion-fano-geometry.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.sounio-arxiv-draft | repo_only | docs/papers/sounio_arxiv_draft.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.submission-checklist | repo_only | docs/papers/submission_checklist.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

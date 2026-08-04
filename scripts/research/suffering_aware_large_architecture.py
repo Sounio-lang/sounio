@@ -134,7 +134,10 @@ DEVICE = torch.device(
     os.environ.get("SAN_LARGE_DEVICE",
                    "cuda" if torch.cuda.is_available() else "cpu"))
 
-N_CLASS = 10
+DATASET = os.environ.get("SAN_LARGE_DATASET", "cifar10").strip().lower()
+if DATASET not in ("cifar10", "cifar100"):
+    raise ValueError(f"SAN_LARGE_DATASET must be cifar10 or cifar100, got {DATASET!r}")
+N_CLASS = 100 if DATASET == "cifar100" else 10
 # Gates-closed warmup, per family (declared in spec section 6.2): heads
 # train (as detached probes, or from epoch 1 for trunk-coupled aux heads)
 # while the gates stay closed; SAN feasibility counts only gates-active
@@ -204,12 +207,20 @@ else:
     EPOCHS_RESNET, EPOCHS_VIT, EPOCHS_GPT = 8, 10, 10
     # Declared anti-Goodhart targets and per-family exit thresholds — declared
     # architecture constants, per family, exactly as in the parent line.
-    TAU_RESNET = float(os.environ.get("SAN_LARGE_TAU_RESNET", "0.34"))
-    TAU_VIT = float(os.environ.get("SAN_LARGE_TAU_VIT", "0.251"))
-    TAU_GPT = float(os.environ.get("SAN_LARGE_TAU_GPT", "0.165"))
-    DELTA_RESNET = float(os.environ.get("SAN_LARGE_DELTA_RESNET", "0.55"))
-    DELTA_VIT = float(os.environ.get("SAN_LARGE_DELTA_VIT", "0.45"))
-    DELTA_GPT = float(os.environ.get("SAN_LARGE_DELTA_GPT", "0.31"))
+    # CIFAR-100 is a harder classification problem; default feasibility targets
+    # are lower unless the caller overrides them.
+    if DATASET == "cifar100":
+        _DEF_TAU_RESNET, _DEF_TAU_VIT, _DEF_TAU_GPT = "0.20", "0.15", "0.10"
+        _DEF_DELTA_RESNET, _DEF_DELTA_VIT, _DEF_DELTA_GPT = "0.55", "0.45", "0.31"
+    else:
+        _DEF_TAU_RESNET, _DEF_TAU_VIT, _DEF_TAU_GPT = "0.34", "0.251", "0.165"
+        _DEF_DELTA_RESNET, _DEF_DELTA_VIT, _DEF_DELTA_GPT = "0.55", "0.45", "0.31"
+    TAU_RESNET = float(os.environ.get("SAN_LARGE_TAU_RESNET", _DEF_TAU_RESNET))
+    TAU_VIT = float(os.environ.get("SAN_LARGE_TAU_VIT", _DEF_TAU_VIT))
+    TAU_GPT = float(os.environ.get("SAN_LARGE_TAU_GPT", _DEF_TAU_GPT))
+    DELTA_RESNET = float(os.environ.get("SAN_LARGE_DELTA_RESNET", _DEF_DELTA_RESNET))
+    DELTA_VIT = float(os.environ.get("SAN_LARGE_DELTA_VIT", _DEF_DELTA_VIT))
+    DELTA_GPT = float(os.environ.get("SAN_LARGE_DELTA_GPT", _DEF_DELTA_GPT))
     RESNET_BLOCKS, RESNET_WIDTH = (3, 4, 6, 3), 64   # CIFAR ResNet-50 (bottleneck)
     VIT_DEPTH, VIT_DIM, VIT_HEADS = 12, 384, 6       # ViT-large (contract scale)
     GPT_N_TRAIN, GPT_N_VAL = 3072, 768
@@ -217,16 +228,17 @@ else:
 CIFAR_MEAN = np.array([0.4914, 0.4822, 0.4465], dtype=np.float32)
 CIFAR_STD = np.array([0.2470, 0.2435, 0.2616], dtype=np.float32)
 
-# Asymmetric harm matrix over the 10 CIFAR-10 classes (synthetic cost
-# structure over real labels): class 9 ("truck") is the hazard class of a
-# screening pipeline. A missed hazard (true 9, predicted other) costs 5 —
-# the expensive error the gate exists to block; a false hazard costs 2
+# Asymmetric harm matrix over the CIFAR classes (synthetic cost structure
+# over real labels): the last class is the hazard class of a screening
+# pipeline. A missed hazard (true hazard, predicted other) costs 5 — the
+# expensive error the gate exists to block; a false hazard costs 2
 # (unnecessary intervention); any other confusion costs 1.
 def build_harm():
+    hazard = N_CLASS - 1
     h = torch.ones(N_CLASS, N_CLASS)
     h.fill_diagonal_(0.0)
-    h[9, :9] = 5.0     # missed hazard
-    h[:9, 9] = 2.0     # false hazard -> unnecessary intervention
+    h[hazard, :hazard] = 5.0     # missed hazard
+    h[:hazard, hazard] = 2.0     # false hazard -> unnecessary intervention
     return h
 
 HARM = build_harm()
@@ -256,6 +268,36 @@ def load_cifar10():
         ys.append(y)
     xtr_all, ytr_all = np.concatenate(xs), np.concatenate(ys)
     xte_all, yte_all = read_batch("test_batch")
+
+    per_train, per_val = N_TRAIN // N_CLASS, N_VAL // N_CLASS
+    tr_idx = np.concatenate([
+        np.where(ytr_all == c)[0][:per_train] for c in range(N_CLASS)])
+    va_idx = np.concatenate([
+        np.where(yte_all == c)[0][:per_val] for c in range(N_CLASS)])
+    rng = np.random.RandomState(SEED)
+    rng.shuffle(tr_idx)
+    rng.shuffle(va_idx)
+    xtr = (xtr_all[tr_idx] - CIFAR_MEAN[None, :, None, None]) / CIFAR_STD[None, :, None, None]
+    xva = (xte_all[va_idx] - CIFAR_MEAN[None, :, None, None]) / CIFAR_STD[None, :, None, None]
+    return (torch.from_numpy(xtr).to(DEVICE),
+            torch.from_numpy(ytr_all[tr_idx]).to(DEVICE),
+            torch.from_numpy(xva).to(DEVICE),
+            torch.from_numpy(yte_all[va_idx]).to(DEVICE))
+
+
+def load_cifar100():
+    """Stratified deterministic subsets of CIFAR-100 fine labels.
+    N_TRAIN and N_VAL are divided evenly across the 100 fine classes.
+    Normalized with the standard CIFAR channel statistics."""
+    def read_batch(name):
+        with open(os.path.join(DATA_DIR, name), "rb") as f:
+            d = pickle.load(f, encoding="latin1")
+        x = d[b"data"].reshape(-1, 3, 32, 32).astype(np.float32) / 255.0
+        y = np.array(d[b"fine_labels"], dtype=np.int64)
+        return x, y
+
+    xtr_all, ytr_all = read_batch("train")
+    xte_all, yte_all = read_batch("test")
 
     per_train, per_val = N_TRAIN // N_CLASS, N_VAL // N_CLASS
     tr_idx = np.concatenate([
@@ -1186,14 +1228,20 @@ def main():
     # Move harm matrices to the active device once it is known.
     HARM = HARM.to(DEVICE)
     if not os.path.isdir(DATA_DIR):
-        print(f"FATAL: CIFAR-10 not found at {DATA_DIR}; fetch with: curl -L "
-              "https://www.cs.toronto.edu/~kriz/cifar-10-python.tar.gz | "
-              "tar xz -C datasets", file=sys.stderr)
+        if DATASET == "cifar100":
+            print(f"FATAL: CIFAR-100 not found at {DATA_DIR}; fetch with: curl -L "
+                  "https://www.cs.toronto.edu/~kriz/cifar-100-python.tar.gz | "
+                  "tar xz -C datasets/cifar-100-python --strip-components=1",
+                  file=sys.stderr)
+        else:
+            print(f"FATAL: CIFAR-10 not found at {DATA_DIR}; fetch with: curl -L "
+                  "https://www.cs.toronto.edu/~kriz/cifar-10-python.tar.gz | "
+                  "tar xz -C datasets", file=sys.stderr)
         return 2
 
     results = {}
     print("SUFFERING_AWARE_LARGE_ARCHITECTURE contract (L1..L9)")
-    print("CIFAR-10 + real repository-docs text corpus; "
+    print(f"{DATASET.upper()} + real repository-docs text corpus; "
           "SAN-ResNet-50 + SAN-ViT-large + SAN-GPT (larger architectures)")
     print("harm structures = synthetic cost structures over real labels; "
           "no clinical claim; not medical guidance")
@@ -1215,7 +1263,10 @@ def main():
     x_tr = y_tr = x_va = y_va = None
     lm_data = None
     if run_resnet or run_vit or run_sweep:
-        x_tr, y_tr, x_va, y_va = load_cifar10()
+        if DATASET == "cifar100":
+            x_tr, y_tr, x_va, y_va = load_cifar100()
+        else:
+            x_tr, y_tr, x_va, y_va = load_cifar10()
     if run_gpt or run_sweep:
         lm_data = load_corpus()
         gx_tr, gy_tr, gx_va, gy_va, hazard_ids, vocab, stoi, itos = lm_data

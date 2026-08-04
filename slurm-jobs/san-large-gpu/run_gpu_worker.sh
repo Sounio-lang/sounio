@@ -4,7 +4,14 @@
 set -euo pipefail
 
 PAYLOAD_DIR="${SAN_LARGE_PAYLOAD_DIR:-/orangefs/training/sounio/san-large-source}"
-DATA_SRC="${SAN_LARGE_DATA_SRC:-/orangefs/training/sounio/datasets/cifar-10-batches-py}"
+DATASET="${SAN_LARGE_DATASET:-cifar10}"
+if [[ "$DATASET" == "cifar100" ]]; then
+  DATA_SRC="${SAN_LARGE_DATA_SRC:-/orangefs/training/sounio/datasets/cifar-100-python}"
+  DATA_DIR_NAME="cifar-100-python"
+else
+  DATA_SRC="${SAN_LARGE_DATA_SRC:-/orangefs/training/sounio/datasets/cifar-10-batches-py}"
+  DATA_DIR_NAME="cifar-10-batches-py"
+fi
 OUT_ROOT="${SAN_LARGE_OUT:-/orangefs/training/sounio/kimi-runs/san-large-gpu}"
 LEG="${SAN_LARGE_ONLY:-resnet50}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)-$(hostname)}"
@@ -16,7 +23,7 @@ trap 'rm -rf "$TMPDIR"' EXIT
 
 mkdir -p "$TMPDIR/work"
 cp "$PAYLOAD_DIR/suffering_aware_large_architecture.py" "$TMPDIR/work/"
-cp -r "$DATA_SRC" "$TMPDIR/work/cifar-10-batches-py"
+cp -r "$DATA_SRC" "$TMPDIR/work/$DATA_DIR_NAME"
 if [[ -f "$PAYLOAD_DIR/corpus_snapshot_v2000.npz" ]]; then
   cp "$PAYLOAD_DIR/corpus_snapshot_v2000.npz" "$TMPDIR/work/"
   export SAN_LARGE_CORPUS="$TMPDIR/work/corpus_snapshot_v2000.npz"
@@ -65,8 +72,15 @@ fi
 
 export SAN_LARGE_DEVICE=cuda
 export SAN_LARGE_ONLY="$LEG"
-export SAN_LARGE_DATA="$TMPDIR/work/cifar-10-batches-py"
+export SAN_LARGE_DATASET="$DATASET"
+export SAN_LARGE_DATA="$TMPDIR/work/$DATA_DIR_NAME"
 export SAN_LARGE_THREADS="${SAN_LARGE_THREADS:-8}"
+export SAN_LARGE_DELTA_RESNET="${SAN_LARGE_DELTA_RESNET:-0.55}"
+export SAN_LARGE_DELTA_VIT="${SAN_LARGE_DELTA_VIT:-0.45}"
+export SAN_LARGE_DELTA_GPT="${SAN_LARGE_DELTA_GPT:-0.31}"
+export SAN_LARGE_TAU_RESNET="${SAN_LARGE_TAU_RESNET:-0.34}"
+export SAN_LARGE_TAU_VIT="${SAN_LARGE_TAU_VIT:-0.251}"
+export SAN_LARGE_TAU_GPT="${SAN_LARGE_TAU_GPT:-0.165}"
 
 LOG="$OUT_DIR/${LEG}.log"
 python3 suffering_aware_large_architecture.py 2>&1 | tee "$LOG"
