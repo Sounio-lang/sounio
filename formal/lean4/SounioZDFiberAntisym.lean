@@ -9808,6 +9808,68 @@ theorem Asig_coset_step (l y Llo n : Nat) (hl : l < 2^(n+1)) (hy : y < 2^(n+1))
       A1 l y Llo n hl hy hL hl0 hy0 hlL hyL]
 
 
+/-! ## Tier 42: carrying the sum — §34's coset 2-path identity, as a SUM
+
+Tier 41 proved the pointwise content. This tier carries it through the two summations, so §34's
+clause `Σ_a (A²)[a, a⊕W] = −tr(A²)` is a Lean theorem and not an assembly left to the reader.
+
+The guards `b ≠ 0 ∧ b ⊕ L_lo ≠ 0` are the file's own convention (`OffCnt` and friends carry the same
+ones): they are exactly the side conditions `Asig_coset_step` needs, and they excise the two indices
+that are not vertices of the fiber.
+
+Only this one of §34's four terms is carried here. The other three (`tr(B³)`, `tr(B²E)`, `tr(BE²)`)
+are sums over the BLOW-UP indexing, which this file does not define; carrying them is the remaining
+step for §18.1 and it is bookkeeping of the same kind, at more volume. -/
+
+/-- One term of the 2-path sum: `A(a,b)·A(b, a⊕W)`, guarded. -/
+def cosetTerm (a b Llo n : Nat) : Int :=
+  if b ≠ 0 ∧ b ^^^ Llo ≠ 0 then Asig a b Llo n * Asig b (a ^^^ Llo) Llo n else 0
+
+/-- One term of the degree sum: `A(a,b)²`, guarded. Summed twice this is `tr(A²)`. -/
+def degTerm (a b Llo n : Nat) : Int :=
+  if b ≠ 0 ∧ b ^^^ Llo ≠ 0 then Asig a b Llo n * Asig a b Llo n else 0
+
+theorem cosetTerm_eq (a b Llo n : Nat) (ha : a < 2^(n+1)) (hb : b < 2^(n+1))
+    (hL : Llo < 2^(n+1)) (ha0 : a ≠ 0) (haL : a ^^^ Llo ≠ 0) :
+    cosetTerm a b Llo n = (-1) * degTerm a b Llo n := by
+  unfold cosetTerm degTerm
+  by_cases h : b ≠ 0 ∧ b ^^^ Llo ≠ 0
+  · rw [if_pos h, if_pos h, Asig_coset_step a b Llo n ha hb hL ha0 h.1 haL h.2]
+    grind
+  · rw [if_neg h, if_neg h]
+    omega
+
+/-- The inner sum, over `b`. -/
+def cosetRow (a Llo n : Nat) : Int := sumLtI (2^(n+1)) (fun b => cosetTerm a b Llo n)
+def degRow (a Llo n : Nat) : Int := sumLtI (2^(n+1)) (fun b => degTerm a b Llo n)
+
+theorem cosetRow_eq (a Llo n : Nat) (ha : a < 2^(n+1)) (hL : Llo < 2^(n+1))
+    (ha0 : a ≠ 0) (haL : a ^^^ Llo ≠ 0) :
+    cosetRow a Llo n = (-1) * degRow a Llo n := by
+  unfold cosetRow degRow
+  rw [sumLtI_congr (2^(n+1)) _ (fun b => (-1) * degTerm a b Llo n)
+        (fun b hb => cosetTerm_eq a b Llo n ha hb hL ha0 haL),
+      sumLtI_mul]
+
+/-- The outer sum, over `a`: `Σ_a (A²)[a, a⊕W]` and `tr(A²)`, both guarded. -/
+def cosetSum (Llo n : Nat) : Int :=
+  sumLtI (2^(n+1)) (fun a => if a ≠ 0 ∧ a ^^^ Llo ≠ 0 then cosetRow a Llo n else 0)
+def degSum (Llo n : Nat) : Int :=
+  sumLtI (2^(n+1)) (fun a => if a ≠ 0 ∧ a ^^^ Llo ≠ 0 then degRow a Llo n else 0)
+
+/-- **§34's coset 2-path identity, carried through both sums:** `Σ_a (A²)[a, a⊕W] = − tr(A²)`. -/
+theorem cosetSum_eq (Llo n : Nat) (hL : Llo < 2^(n+1)) :
+    cosetSum Llo n = (-1) * degSum Llo n := by
+  unfold cosetSum degSum
+  rw [sumLtI_congr (2^(n+1)) _
+        (fun a => (-1) * (if a ≠ 0 ∧ a ^^^ Llo ≠ 0 then degRow a Llo n else 0))
+        (fun a ha => by
+          by_cases h : a ≠ 0 ∧ a ^^^ Llo ≠ 0
+          · rw [if_pos h, if_pos h, cosetRow_eq a Llo n ha hL h.1 h.2]
+          · rw [if_neg h, if_neg h]; omega),
+      sumLtI_mul]
+
+
 end SounioZDFiberAntisym
 
 
