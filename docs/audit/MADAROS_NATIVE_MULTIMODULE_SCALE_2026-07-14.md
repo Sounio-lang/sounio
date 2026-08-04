@@ -85,8 +85,13 @@ bash scripts/madaros_native_multimodule_scale_901_gate.sh
 Closeout audit: [`MADAROS_WAVE15C_ISSUE901_SCALE_CLOSEOUT_2026-07-22.md`](MADAROS_WAVE15C_ISSUE901_SCALE_CLOSEOUT_2026-07-22.md).
 Related: #921 thin-link pairing closed Wave14D; compact opt-in residual classified there.
 
-**Remaining (orthogonal to this fail class):** stats OLS multi-mod still red with `E019`
-(method calls), not thin-link/scale; exclusive-ref / memory-wall fragile chains elsewhere.
+**Remaining (orthogonal to this fail class):** ~~stats OLS multi-mod still red with `E019`
+(method calls)~~ — **narrowed 2026-08-04 (Attention P0=A):** fixed-array OLS path
+(`stats::ols_fixed` + `cooks_distance` + `shapiro_wilk`) is green under default Madaros
+(`scripts/ci/madaros_ols_fixed_e2e_gate.sh` → `MADAROS_OLS_FIXED_E2E_GATE_OK`). Residual
+E019 remains on `stats::validation` slice `.len()`/`.push()` forms — see
+`docs/handoff/BLK-20260804-p0a-d3-validation-e019.md`. Exclusive-ref / memory-wall
+fragile chains elsewhere remain open.
 
 ## Next-Action
 
