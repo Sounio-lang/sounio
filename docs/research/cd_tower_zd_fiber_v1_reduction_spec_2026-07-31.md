@@ -1735,3 +1735,60 @@ check is not cosmetic.
 (d) is now exactly **(I) ∧ the deviation law**, and (I) is a theorem.
 
 Reproduce: `python3 scripts/research/zd_v1_III_deviation_probe.py 6 7 8 9 10 11`.
+
+### 33.5 The law decomposes — and one third of it is a *derivation*, not a fit
+
+The fitted cubic of §33.3 is not the irreducible content. Three pieces, with different status:
+
+**(A) The `popcount(g)` odd half is already a theorem.** `D = 0` there is exactly (c): the seam has
+even weight, `Φ` is an isomorphism of the *signed* graph onto its Fano partner, so the spectra —
+hence `tr(A³)` — agree. Nothing to prove.
+
+**(B) The `8^(n−j)` scaling follows from facts already on the books.** §18.1's low-branch
+recursion, applied to `W` and to its own reference `8·g(W)+1` (also low) and subtracted:
+
+```
+D(n, W) = 8·D(n−1, W) + 24·[t2(n−1,W) − t2(n−1, 8g+1)]  − (the constant, which cancels)
+        = 8·D(n−1, W)
+```
+
+because the bracket is **zero by the proven fibre-constancy of `tr(A²)`** (§30 + Tier 36). So the
+whole `n`-dependence is one line, given §18.1 (itself MEASURED, `n = 7..10`). The descent bottoms
+out when `W` stops being low — at level `t+2`, where `t` is `W`'s **top** bit.
+
+**(C) For the `y = 0` fibre the base case is DERIVED.** There the seams are `W = 2^j`, top bit =
+lowest bit, so the base is the single family `W = 2^(n−2)`, and its graph is completely explicit:
+
+- one isolated vertex, `a = W` (the known isolated vertex);
+- on the remaining `N = 2^(n−1) − 2` vertices, **`K_N` minus the perfect matching `a ↔ a ⊕ W`** —
+  every vertex has exactly one non-neighbour, and `t2 = N(N−2)` confirms the regularity;
+- **every triangle has sign product `−1`** — measured, and pinned by `tr(A³) = −tr(|A|³)` exactly.
+
+Counting ordered triangles in `K_N` minus a perfect matching is elementary — no triple of distinct
+vertices can contain two matched pairs, so
+
+```
+#ordered triangles = N(N−1)(N−2) − 3N(N−2) = N(N−2)(N−4)
+```
+
+and with `N = 2(q−1)`, `q = 2^(n−2)`, that is `8(q−1)(q−2)(q−3)`. Hence
+
+```
+tr(A³)(n, 2^(n−2)) = −8(2^(n−2)−1)(2^(n−2)−2)(2^(n−2)−3)
+```
+
+— exact at `n = 6..11`, and **the factor 8 is the doubling `N = 2(q−1)`, not a fitted constant.**
+Subtracting §17.2's `y = 0` value gives `δ(n, n−2) = −(72/7)(2^(n−2)−1)(2^(n−2)−2)(2^(n−2)−4)`,
+which is §33.3's form at `j = n−2`; the identity collapses by `(2/7)(2q−2)(2q−4)(2q−15) −
+8(q−1)(q−2)(q−3) = (8/7)(q−1)(q−2)[(2q−15) − 9(q−4)] = −8(q−1)(q−2)(q−3)`, with the `7`
+cancelling. That is why both §17.2 and `δ` carry a `/7` and the answer does not.
+
+**So what is genuinely open is narrower than §33.3 suggests:** not the cubic, but
+
+> the base case for a **general** seam at its own top-bit level — equivalently, the statement that
+> `D` does not depend on `g` at all.
+
+For `y = 0` that base is derived; for general `y` it is measured. A failed lead, recorded: `P1` is
+**not** a coboundary `μ(a)μ(b)` for `W = 2^(n−2)` — that ansatz misses on `2(N−2)` support entries
+at every level — even though the graph *is* triangle-balanced. Balance here is a statement about
+triangles, not about a global switching function of this form.
