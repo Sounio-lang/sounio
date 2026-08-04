@@ -944,10 +944,44 @@ pub fn parser_advance(p_in: Parser) -> Parser with Mut, Panic, Div {
     p
 }
 
-// Decimal -> binary64 (#1626). Exact integer significand, scaled once:
-// correctly rounded for |dexp| <= 22. The old `frac = frac * 0.1` accumulation
-// got 32 of 91 realistic literals wrong. Kept terse -- the module closure this
-// file lands in sits a few hundred bytes under boot4's 2 MiB source cap.
+// Exact powers of ten, built by multiplication rather than written out:
+// lean_single, which compiles this file, parses 10^19 as a NEGATIVE number, so
+// a literal table arrives poisoned. 10^k is exactly representable for k <= 22
+// and each 10^(k-1)*10 is an exact product, so this loop is exact. Clamped at
+// 22 because past that the result is no longer exact and callers rely on it.
+fn parser_pow10_exact(k: i64) -> f64 with Mut, Panic, Div {
+    var n = k
+    if n > 22 { n = 22 }
+    if n < 0 { n = 0 }
+    var v: f64 = 1.0
+    while n > 0 {
+        v = v * 10.0
+        n = n - 1
+    }
+    v
+}
+
+// Decimal -> binary64 (#1626). Exact significand + decimal exponent, scaled in
+// as few roundings as possible.
+//
+// The old code accumulated `frac = frac * 0.1`; 0.1 is not representable, so
+// every digit compounded a rounding and 32 of 91 realistic literals were wrong.
+// `0.99999999` came out one ULP high, which made the rebuilt log (#1626) look
+// as though it had a 2^-53 residual -- ulp(1.0)/1.0 IS 2^-53.
+//
+// `sig * 10 + digit` in f64 is exact while sig < 2^53, and 10^k is exact for
+// k <= 22, so within that window the single multiply or divide below is
+// CORRECTLY ROUNDED (Clinger 1990). Outside it, the two paths after the window
+// exist to keep the number of roundings small rather than let them accumulate:
+// a plain 10^|dexp| built by repeated multiplication costs up to 308 roundings
+// and is what put 1e-300 one ULP out.
+//
+// The significand is accumulated in i64, not f64. An f64 accumulator has to
+// stop at 2^53 and DISCARD the remaining digits, which costs up to 4 ULP on
+// ordinary 16-digit literals like 944.6810951079374. i64 absorbs 18 digits and
+// pays a single rounding at `as f64`. (I had this in f64 for a while on the
+// theory that the i64 cast was miscompiled -- that was the stray-brace
+// misdiagnosis, not a real defect.)
 fn parser_parse_float_token(start: i64, end: i64) -> f64 with Mut, Panic, Div {
     var sig: i64 = 0
     var dexp: i64 = 0
@@ -968,6 +1002,7 @@ fn parser_parse_float_token(start: i64, end: i64) -> f64 with Mut, Panic, Div {
             continue
         }
         if ch >= (48 as i8) && ch <= (57 as i8) {
+            // 922337203685477580 is i64 max / 10: room for one more digit.
             if sig < 922337203685477580 {
                 sig = sig * 10 + ((ch - (48 as i8)) as i64)
                 if seen_dot {
@@ -1006,27 +1041,70 @@ fn parser_parse_float_token(start: i64, end: i64) -> f64 with Mut, Panic, Div {
             }
             i = i + 1
         }
-        dexp = dexp + exp_sign * exp_value
+        if exp_sign < 0 {
+            dexp = dexp - exp_value
+        } else {
+            dexp = dexp + exp_value
+        }
     }
     if sig == 0 {
         return 0.0
     }
-    var n = dexp
-    if n < 0 {
-        n = 0 - n
+    let sf = sig as f64
+    // Past +-400 the answer is infinity or zero either way; clamping keeps a
+    // pathological literal from spinning the loops below.
+    if dexp > 400 { dexp = 400 }
+    if dexp < 0 - 400 { dexp = 0 - 400 }
+
+    // Correctly rounded window: one exact scale, one rounding.
+    if dexp >= 0 && dexp <= 22 {
+        return sf * parser_pow10_exact(dexp)
     }
-    if n > 308 {
-        n = 308
+    if dexp < 0 && dexp >= 0 - 22 {
+        return sf / parser_pow10_exact(0 - dexp)
     }
-    var scale: f64 = 1.0
-    while n > 0 {
-        scale = scale * 10.0
-        n = n - 1
+
+    // Extended: walk the exponent DOWN into the exact window by growing the
+    // significand. Growing sig by 10 multiplies the value, so dexp drops by 1 to
+    // compensate -- every step exact while sig stays under 2^53, and one
+    // rounding overall once the window is reached.
+    //
+    // There is deliberately no mirror of this for dexp < -22. The same move
+    // there would need dexp to RISE toward the window while sig grows, and the
+    // algebra runs the other way: growing sig forces dexp down, i.e. further
+    // from the window. I wrote that mirror, measured it, and it turned
+    // 1.602176634e-19 from one ULP out into six orders of magnitude out.
+    if dexp > 22 && sig <= 9007199254740992 {
+        var s2 = sf
+        var e2 = dexp
+        while e2 > 22 && s2 <= 900719925474099.0 {
+            s2 = s2 * 10.0
+            e2 = e2 - 1
+        }
+        if e2 <= 22 {
+            return s2 * parser_pow10_exact(e2)
+        }
     }
-    if dexp < 0 {
-        return (sig as f64) / scale
+
+    // Fallback: 10^22 at a time. Not correctly rounded, but ~14 roundings for
+    // 1e300 instead of ~300.
+    var v = sf
+    var e3 = dexp
+    while e3 >= 22 {
+        v = v * parser_pow10_exact(22)
+        e3 = e3 - 22
     }
-    (sig as f64) * scale
+    while e3 <= 0 - 22 {
+        v = v / parser_pow10_exact(22)
+        e3 = e3 + 22
+    }
+    if e3 > 0 {
+        v = v * parser_pow10_exact(e3)
+    }
+    if e3 < 0 {
+        v = v / parser_pow10_exact(0 - e3)
+    }
+    v
 }
 
 pub fn parser_peek_ahead(p: Parser, offset: i64) -> TokenKind with Mut, Panic, Div {
