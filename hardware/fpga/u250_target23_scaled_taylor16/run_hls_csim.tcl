@@ -1,0 +1,9 @@
+open_project -reset target23_scaled_taylor16
+set_top target23_scaled_taylor16
+add_files kernel.cpp
+add_files -tb testbench.cpp
+open_solution -reset solution -flow_target vitis
+set_part {xcu250-figd2104-2L-e}
+create_clock -period 4.0 -name default
+csim_design -argv "$::env(KAT_INPUTS) $::env(KAT_EXPECTED)"
+exit
