@@ -2788,7 +2788,7 @@ Everything in the (III) chain rests on **§18.1**, and §34 already took §18.1 
 | `tr(B³) = 8·t3′` | **ALGEBRA** (`tr(J₂³) = 8`) |
 | `3·tr(B²E) = 24·t2′` | **DERIVED** from the block identity, the two sign lemmas and `Σ_a (A²)[a,a⊕W] = −tr(A²)` |
 | the block identity `A = J₂⊗A′ + E`, and `E`'s four families | ✅ **THEOREM ∀n** — `Asig_block` (§47) |
-| the two constant signs `+1` (matching), `−1` (coset) | MEASURED |
+| the two constant signs `+1` (matching), `−1` (coset) | ✅ **THEOREMS ∀n** — Tier 40 |
 | `Σ_a (A²)[a, a⊕W] = −tr(A²)` | MEASURED (every label, `n = 6…9`) |
 | `tr(BE²) = 0`, `tr(E³) = −24(h−2)` | MEASURED (`n = 6…11`) |
 | the `y = 0` base case `t3(4,1) = −48` | finite check on the sedenions |
@@ -2927,11 +2927,12 @@ one block §34 measured as exact.
 | the block identity | ✅ **THEOREM** (§47) |
 | the hub row and hub adjacency | ✅ **THEOREMS** (Tier 38) |
 | `tr(E³) = −24(h−2)` | ✅ **DERIVED** (§46) from the above + the matching/coset signs |
-| the matching sign `+1` and the coset sign `−1` | MEASURED |
+| the matching sign `+1` and the coset sign `−1` | ✅ **THEOREMS ∀n** — `Asig_matching` / `Asig_coset` (Tier 40) |
 | `Σ_a (A²)[a, a⊕W] = −tr(A²)` | MEASURED |
 | `3·tr(B²E) = 24·t2′`, `tr(BE²) = 0` | the first DERIVED from the above; the second MEASURED |
 
-**Two measured lines are left in §18.1**: the two `E` signs, and the coset 2-path identity. Both are
-single-entry or single-row statements about `σ`, of the shape this file has now closed four times.
+**One measured line is left in §18.1**: the coset 2-path identity `Σ_a (A²)[a, a⊕W] = −tr(A²)`. The
+two `E` signs are now `Asig_matching` and `Asig_coset` (Tier 40), so **§46's derivation of
+`tr(E³) = −24(h−2)` rests entirely on theorems** — the constant of §18.1 is closed.
 
 **§18.1 is not yet proven, so (III) is still reduced, not proven.** (d) and V1 untouched.
