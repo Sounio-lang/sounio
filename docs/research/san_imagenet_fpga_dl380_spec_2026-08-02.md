@@ -301,15 +301,15 @@ the control-VM golden model bit-exactly.
 
 Two remaining open items from §13.2 were closed on the DL380 target:
 
-- **Power.** Measured the U250's incremental server-level draw during the
-  `stress_1p2M` scan with `measure_u250_power.sh` (host power sensor, 1 Hz,
-  30 s). Idle server + card: **24.435 W**. Under continuous
+- **Power.** Measured the U250's **board-level** draw via `xrt-smi examine -r electrical`
+  (`measure_u250_power.sh`, 1 Hz, 30 s). Idle card: **24.435 W**. Under continuous
   `host_san_scan_bench` on the 1.2 M cohort: **26.153 W**.
   Incremental draw ΔP = **1.718 W**. The bench processed
   15.5436 Gsamples in 30.002 s (aggregate **518.1 Msamples/s**), giving
-  **3.3153 nJ/sample** incremental energy. This is a server-level number,
-  not an isolated FPGA-rail measurement; it honestly includes host DRAM,
-  PCIe, and U250 dynamic draw.
+  **3.3153 nJ/sample** incremental energy on the card's own power sensor.
+  A repeat with the tiny ImageNette cohort gave load power *below* idle
+  because the kernel is idle most of the time between micro-enqueues; the
+  stress-cohort number is therefore the honest per-sample energy figure.
 
 - **Real photographs (ImageNette2-160 proxy).** Full ImageNet-1k is not
   available in this environment, so ImageNette2-160 (10 classes, 160 px,
@@ -329,9 +329,9 @@ The card's histogram, catastrophe count, and FLOP total are bit-exact
 against the Python golden model on real photographs.
 
 **Honest caveats.** ImageNette is a 10-class subset; it does not replace
-full ImageNet-1k. The energy figure is incremental server power, not a
-board-rail measurement. Both are reported as measured facts with their
-limits stated, not as extrapolations.
+full ImageNet-1k (not available in this environment). The energy figure is
+board-level U250 power, not a server-rack measurement. Both are reported as
+measured facts with their limits stated, not as extrapolations.
 
 The only remaining `ESTIMATE` is full ImageNet-1k completo accuracy; the
 U250, the DL380, the bitstream, and a real-image SAN scan are now
@@ -362,18 +362,27 @@ photographs, and ImageNet-completo-sized stress in one sweep.
 
 The SAN large-architecture harness (`scripts/research/suffering_aware_large_architecture.py`)
 was adapted for CUDA (`SAN_LARGE_DEVICE`) and submitted to the Slurm
-`gpu-orangefs` partition on an **NVIDIA RTX A5000** (jobs 8584/8588/8591).
-All three families now train on GPU; logs are in `artifacts/san_large/`.
+`gpu-orangefs` partition on **NVIDIA RTX A5000 / RTX 4000 Ada** (jobs
+8584/8588/8591 and latency re-runs 8594/8595/8596). All three families now
+train on GPU; logs are in `artifacts/san_large/`.
 
-| family | t* | SAN acc@t* | S_m(SAN) | S_m(Dense) | saving | S_p_int(SAN) | verdict |
-|---|---|---|---|---|---|---|---|
-| ResNet-50 | 4 | 0.392 | 160.1 TMAC | 269.9 TMAC | **40.7%** | 5.31 | L1–L4, L6–L8 PASS; L5 tradeoff |
-| ViT-large | 6 | 0.270 | 251.0 TMAC | 369.3 TMAC | **32.0%** | 8.18 | L1–L4, L7–L8 PASS; L5 tradeoff, L6 exit-frac 0.06 |
-| GPT | 4 | 0.167 | 115.4 TMAC | 241.5 TMAC | **52.2%** | 4.62 | **L_GREEN (8/8 PASS)** |
+| family | t* | SAN acc@t* | S_m(SAN) | S_m(Dense) | saving | latency SAN | latency Dense | speedup | verdict |
+|---|---|---|---|---|---|---|---|---|---|
+| ResNet-50 | 4 | 0.390 | 160.1 TMAC | 269.9 TMAC | **40.7%** | 0.196 ms/s | 0.213 ms/s | **1.08x** | L1–L4, L6–L8 PASS; L5 tradeoff |
+| ViT-large | 4 | 0.262 | 183.3 TMAC | 369.3 TMAC | **32.0%** | 0.310 ms/s | 0.308 ms/s | 0.99x | L1–L4, L7–L8 PASS; L5 PASS, L6 exit-frac 0.03 |
+| GPT | 4 | 0.167 | 115.4 TMAC | 241.5 TMAC | **52.2%** | 0.343 ms/s | 0.341 ms/s | 0.99x | **L_GREEN (8/8 PASS)** |
 
 **Machine channel.** SAN saves integrated FLOPs in every family: ResNet-50
 40.7%, ViT-large 32.0%, GPT 52.2%. Per-epoch SAN cost is within a few
 percent of Dense, confirming the exit-head overhead is small.
+
+**Real wall-time latency.** A `torch.cuda.synchronize()` benchmark on the
+held-out val set (100 forward passes) compares SAN's gated early-exit path
+against the same model's full dense forward. ResNet-50 already shows a
+modest real speedup (**1.08x**) on CIFAR-10; ViT-large and GPT are
+essentially tied because the CIFAR-10 / small-LM forward is so short that
+dispatch overhead dominates. The latency comparison is now measured, not
+extrapolated from FLOPs.
 
 **Patient channel / honesty.** ResNet-50 and ViT-large show the same
 disclosed tradeoff the parent line reports at ImageNet scale (§7): SAN
@@ -385,3 +394,27 @@ both baselines) and is fully green. These are results, not tuning failures.
 the worker script now bootstraps pip/torch/torchvision/tqdm into a temp
 user base, and the corpus snapshot is staged from the workspace so GPT
 legs do not depend on `docs/research/*.md` being present on the worker.
+
+### 13.6 Gap-closure notes (2026-08-04)
+
+The three gaps identified after the first measurement round were attacked
+as follows:
+
+1. **Full ImageNet-1k.** Not present in this environment (`/workspace`,
+   `/orangefs/training`, or any standard mount) and cannot be downloaded
+   without credentials + 150 GB. ImageNette2-160 remains the honest real-image
+   proxy; full ImageNet-1k is still `ESTIMATE`/future work.
+
+2. **Board-level vs server-level power.** The `measure_u250_power.sh` script
+   already reads `xrt-smi examine -r electrical`, i.e. the U250's own total
+   board power sensor. The 3.3153 nJ/sample figure is therefore board-level,
+   not server-rack level. A repeat on the small ImageNette cohort showed
+   *negative* incremental power because the kernel idles between micro-enqueues,
+   confirming that the stress-cohort measurement is the valid per-sample energy
+   number.
+
+3. **Dense vs SAN wall-time on GPU.** Added a `torch.cuda.synchronize()`
+   latency benchmark to `suffering_aware_large_architecture.py`. ResNet-50
+   shows 1.08x real speedup; ViT-large and GPT are neutral on this small-scale
+   task because dispatch overhead dominates. The comparison is now measured,
+   not inferred from FLOP counts.

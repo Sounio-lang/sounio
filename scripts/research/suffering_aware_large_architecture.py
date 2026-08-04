@@ -965,6 +965,44 @@ def build_model(family, kind, vocab=None, blocks=None, width=None, depth=None,
     return model.to(DEVICE)
 
 
+# ---------------- wall-time latency baseline ----------------------------------
+def benchmark_latency(san_model, dense_model, x, is_lm=False, n_runs=100):
+    """Measure real per-sample inference latency on the active device.
+
+    Returns dict with ms/sample for SAN (gated early exits) and Dense
+    (full forward). Uses torch.cuda.synchronize() when available and
+    discards the first warmup run.
+    """
+    san_model.eval()
+    dense_model.eval()
+    do_sync = DEVICE.type == "cuda"
+
+    def time_forward(fn, *args, **kwargs):
+        # warmup
+        with torch.no_grad():
+            _ = fn(*args, **kwargs)
+        if do_sync:
+            torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        for _ in range(n_runs):
+            with torch.no_grad():
+                _ = fn(*args, **kwargs)
+            if do_sync:
+                torch.cuda.synchronize()
+        t1 = time.perf_counter()
+        return (t1 - t0) / n_runs
+
+    # SAN gated path; Dense full forward
+    san_t = time_forward(san_model, x, train=False)
+    dense_t = time_forward(dense_model, x, train=False)
+    n = x.shape[0]
+    return {
+        "san_ms_per_sample": san_t / n * 1e3,
+        "dense_ms_per_sample": dense_t / n * 1e3,
+        "speedup": dense_t / san_t if san_t > 0 else float("inf"),
+    }
+
+
 # ---------------- suffering ledger --------------------------------------------
 def suffering_summary(ledger):
     s_m = sum(e["flops"] for e in ledger)
@@ -1225,6 +1263,14 @@ def main():
                   f"S_p_int={s['s_patient_int']:.2f} "
                   f"S_p_peak={s['s_patient_peak']:.3f} "
                   f"final_acc={lg[-1]['acc']:.4f}", flush=True)
+
+        # Real wall-time latency baseline: SAN gated vs Dense full forward.
+        lat = benchmark_latency(entry["san"]["model"], entry["dense"]["model"],
+                                a_va, is_lm=is_lm, n_runs=100)
+        fam[family]["latency"] = lat
+        print(f"  latency[{family}]: SAN={lat['san_ms_per_sample']:.4f}ms/sample "
+              f"Dense={lat['dense_ms_per_sample']:.4f}ms/sample "
+              f"speedup={lat['speedup']:.2f}x", flush=True)
 
     # ---- L1: metering conservation at larger scale ----------------------------
     if fam:

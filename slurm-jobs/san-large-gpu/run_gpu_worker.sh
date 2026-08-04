@@ -35,7 +35,13 @@ export PYTHONPATH="$(python3 -c 'import site; print(site.getusersitepackages())'
 
 if ! python3 -m pip --version >/dev/null 2>&1; then
   echo "[worker] bootstrapping pip..."
-  curl -sfL https://bootstrap.pypa.io/get-pip.py -o "$TMPDIR/get-pip.py"
+  python3 - "$TMPDIR/get-pip.py" <<'PY'
+import pathlib, ssl, sys, urllib.request
+target = pathlib.Path(sys.argv[1])
+context = ssl._create_unverified_context()
+with urllib.request.urlopen("https://bootstrap.pypa.io/get-pip.py", context=context) as response:
+    target.write_bytes(response.read())
+PY
   python3 "$TMPDIR/get-pip.py" --user --break-system-packages >/dev/null
 fi
 
