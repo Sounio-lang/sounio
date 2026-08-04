@@ -2789,7 +2789,7 @@ Everything in the (III) chain rests on **§18.1**, and §34 already took §18.1 
 | `3·tr(B²E) = 24·t2′` | **DERIVED** from the block identity, the two sign lemmas and `Σ_a (A²)[a,a⊕W] = −tr(A²)` |
 | the block identity `A = J₂⊗A′ + E`, and `E`'s four families | ✅ **THEOREM ∀n** — `Asig_block` (§47) |
 | the two constant signs `+1` (matching), `−1` (coset) | ✅ **THEOREMS ∀n** — Tier 40 |
-| `Σ_a (A²)[a, a⊕W] = −tr(A²)` | MEASURED (every label, `n = 6…9`) |
+| `Σ_a (A²)[a, a⊕W] = −tr(A²)` | ✅ **content PROVEN ∀n** — `Asig_coset_step` (Tier 41); the two summations are termwise congruences, not formalised |
 | `tr(BE²) = 0`, `tr(E³) = −24(h−2)` | MEASURED (`n = 6…11`) |
 | the `y = 0` base case `t3(4,1) = −48` | finite check on the sedenions |
 | `Qgen'_pow2_eq`; `Asig_pow2_top` | **THEOREMS ∀n** |
@@ -2928,11 +2928,18 @@ one block §34 measured as exact.
 | the hub row and hub adjacency | ✅ **THEOREMS** (Tier 38) |
 | `tr(E³) = −24(h−2)` | ✅ **DERIVED** (§46) from the above + the matching/coset signs |
 | the matching sign `+1` and the coset sign `−1` | ✅ **THEOREMS ∀n** — `Asig_matching` / `Asig_coset` (Tier 40) |
-| `Σ_a (A²)[a, a⊕W] = −tr(A²)` | MEASURED |
+| `Σ_a (A²)[a, a⊕W] = −tr(A²)` | ✅ **content PROVEN ∀n** — `Asig_coset_step` (Tier 41) |
 | `3·tr(B²E) = 24·t2′`, `tr(BE²) = 0` | the first DERIVED from the above; the second MEASURED |
 
-**One measured line is left in §18.1**: the coset 2-path identity `Σ_a (A²)[a, a⊕W] = −tr(A²)`. The
-two `E` signs are now `Asig_matching` and `Asig_coset` (Tier 40), so **§46's derivation of
-`tr(E³) = −24(h−2)` rests entirely on theorems** — the constant of §18.1 is closed.
+**No measured line is left in §18.1's structural inputs.** The two `E` signs are `Asig_matching` and
+`Asig_coset` (Tier 40); the coset 2-path identity's content is `Asig_coset_step` (Tier 41), which is
+`A1` composed with `Asig_symm`. So §46's derivation of `tr(E³) = −24(h−2)` rests entirely on theorems,
+and each of §34's four terms now has a proven structural basis.
+
+⚠ **What is still NOT formalised, and it is bookkeeping rather than content:** the summations. §34's
+terms are *sums* — `tr(B³)`, `tr(B²E)`, `tr(BE²)`, `tr(E³)`, and `Σ_a (A²)[a,a⊕W]` — and this file
+proves the pointwise/structural facts they are assembled from, not the assembly. Closing §18.1 in
+Lean means carrying those sums, which is `Finset`-free but real work, of the kind `sumLt`/`sumLtI`
+already support elsewhere in this file.
 
 **§18.1 is not yet proven, so (III) is still reduced, not proven.** (d) and V1 untouched.
