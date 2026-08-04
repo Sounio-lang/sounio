@@ -2698,14 +2698,26 @@ def main():
             "label 8*g(W)+1. Writing the DEFICIT base - Ncnt on W's OWN bits gives a digit sum "
             "that matches directly, because the descent stops at the LOWEST SET BIT and the term "
             "there is simply omitted. W16's declared negative -- 'the raw label FAILS on every "
-            "seam' -- is exactly that missing EXCLUSION, not a missing normalisation. Both forms "
-            "agree label-for-label, pinned above. *** STILL OPEN: (III); tr(A^3) has NO general "
+            "seam' -- is exactly that missing EXCLUSION, not a missing normalisation. *** BOTH FORMS "
+            "AGREE, AND THAT IS NOW A THEOREM, NOT A MEASUREMENT: `Ddig_gnorm` proves the "
+            "g-invariance forall n and `Ddig_eq_Edig` identifies the two sums on an odd label, so "
+            "`Ncnt_closed_E` states the contract's literal form. W17's residual is CLOSED. The "
+            "entrywise agreement pinned above is now a cross-check on the Lean, not the evidence "
+            "for the claim. *** STILL OPEN: (III); tr(A^3) has NO general "
             "closed form; (d) IS NOT CLOSED -- tr(A^2) is parity-blind (W11), so deriving its "
             "closed form does not narrow (d) at all ***")
 
     print("=" * 78)
     if all(ok.values()):
         print("CD_TOWER_ZDV1_VERDICT C_CLOSED__V1_REDUCED_TO_D_ALONE__NOT_CLOSED")
+        print("CD_TOWER_ZDV1_TAGSCOPE The verdict tag names the STATE OF THE REDUCTION, not the "
+              "contract's deliverable. 'C_CLOSED' refers to clause (c), the parity-collapse law. "
+              "'V1_REDUCED_TO_D_ALONE' means V1 has been reduced to (d) and NOTHING MORE -- (d) "
+              "is open, so V1 is open, so the tag must never be read as closure. What this "
+              "contract delivers is the reduction plus the tr(A^2) chain (W31-W34: both recursion "
+              "halves, the unrolling, the closed form, the bridge, all Lean forall n). What it "
+              "does NOT deliver is (d), (III), or any general closed form for tr(A^3). tr(A^2) is "
+              "parity-blind (W11), so none of the tr(A^2) work contributes to (d) at all.")
         print("CD_TOWER_ZDV1_NOTE V1 decomposes as orbit arithmetic (W1): 2^{n-4} Fano orbits "
               "(PROVEN forall n) + 2^{n-4}-1 seams, spectrum constant per orbit (W2, PROVEN "
               "forall n), minus 2^{n-5}-1 even-weight seam merges = 3*2^{n-5}. So V1 forall n = "
