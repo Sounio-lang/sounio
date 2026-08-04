@@ -16,7 +16,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.san-i
 # SAN-ImageNet on FPGA/DL380 — suffering-aware architectures at ImageNet scale (pre-hardware)
 
 **Date:** 2026-08-02
-**Status:** `EXECUTABLE` for the contract (gate green: see §8); `ESTIMATE` for all hardware, DL380, and ImageNet-completo data numbers (no FPGA installed, nothing synthesized, no DL380 reachable from this node, no ImageNet download)
+**Status:** `EXECUTABLE` for the contract (gate green: see §8); `MEASURED` for DL380/U250 bit-exact acceptance, on-card throughput, and server-level power; `MEASURED (ImageNette2-160 proxy)` for real-image SAN scan; `ESTIMATE` for full ImageNet-1k completo accuracy (not downloaded in this environment)
 **Parents:** `docs/research/suffering_aware_architecture_spec_2026-07-28.md` (SAN, clauses A1–A8), `docs/research/suffering_aware_large_architecture_spec_2026-07-31.md` (SAN-ResNet-50 / SAN-ViT-large at CIFAR scale, L1–L9), `docs/research/u250_catastrophe_scan_fpga_spec_2026-07-26.md` (U250 pre-hardware pattern: gated bit-accurate model + HLS outline)
 **Reference outlines:** `hardware/fpga/u250_catastrophe_scan/krnl_san_scan.cpp`, `host_san_scan.cpp`
 **Executable contract:** `scripts/research/san_imagenet_fpga_dl380.py` (clauses I1–I8)
@@ -154,7 +154,7 @@ Measured headline numbers are in the gate output (reproduce below); they are det
 
 ## 9. What this is NOT
 
-- **Not real ImageNet images.** No ImageNet download exists on this node (credentialed, 150 GB). The trained artifact is a synthetic 1000-class prototype-hierarchy proxy; every "ImageNet completo" phrase in this document refers to (a) real architecture FLOP constants, (b) the 1.2M-sample scan cohort, or (c) labeled extrapolation — never to measured accuracy on real images.
+- **Not full ImageNet-1k.** No complete ImageNet-1k download exists on this node (credentialed, 150 GB). The trained artifact is a synthetic 1000-class prototype-hierarchy proxy. Real photographs *were* validated on the U250 via the ImageNette2-160 subset (§13.3); full ImageNet-1k remains unavailable, and every "ImageNet completo" phrase still refers to (a) real architecture FLOP constants, (b) the 1.2M-sample stress cohort, or (c) labeled extrapolation.
 - **Not measured FPGA data.** Nothing synthesized, placed, routed, or benchmarked; the U250 is not installed in this node. The kernel *semantics* are CI-gated via the bit-accurate model; all cycle/resource figures are estimates or deferred.
 - **Not a DL380 measurement.** This node is the sounio-workspace control VM; the preflight reports `fpga_present=0 xrt_present=0`. Deployment soundness (T3) is a platform-independence argument plus a defined on-target acceptance procedure, not a deployed benchmark.
 - **Not a new SAN architecture.** The trunk/exit/gate machinery is the parent line's (A/D/L specs); the new content is the ImageNet-scale dual ledger, the scan kernel semantics with its 1.2M exact stress verification, the per-family calibration at the 1000-class confidence scale, and the DL380 deployment path.
@@ -295,5 +295,44 @@ n=5000.
 
 Status: T3 on-target (§13.1) is now extended to the actual bitstream:
 `HOST_SAN_SCAN_PASS` on all three datasets confirms the card reproduces
-the control-VM golden model bit-exactly. The only remaining `ESTIMATE`
-is real ImageNet images (unchanged — credentialed download).
+the control-VM golden model bit-exactly.
+
+### 13.3 Real-image validation and U250 power measurement (2026-08-03/04, measured)
+
+Two remaining open items from §13.2 were closed on the DL380 target:
+
+- **Power.** Measured the U250's incremental server-level draw during the
+  `stress_1p2M` scan with `measure_u250_power.sh` (host power sensor, 1 Hz,
+  30 s). Idle server + card: **24.435 W**. Under continuous
+  `host_san_scan_bench` on the 1.2 M cohort: **26.153 W**.
+  Incremental draw ΔP = **1.718 W**. The bench processed
+  15.5436 Gsamples in 30.002 s (aggregate **518.1 Msamples/s**), giving
+  **3.3153 nJ/sample** incremental energy. This is a server-level number,
+  not an isolated FPGA-rail measurement; it honestly includes host DRAM,
+  PCIe, and U250 dynamic draw.
+
+- **Real photographs (ImageNette2-160 proxy).** Full ImageNet-1k is not
+  available in this environment, so ImageNette2-160 (10 classes, 160 px,
+  real photographs, ImageNet subset) was used as an honest real-image proxy.
+  A SAN-ResNet-18 was trained on 4 k train samples (ImageNet-1k pretrained
+  backbone, layer4 + early-exit heads fine-tuned). Validation confidences
+  for 3 925 real images were exported to the U250 cohort format and run
+  on-target:
+
+```
+host_san_scan: dataset=val_imagenette n=3925 points=5 q_delta=18021 family=resnet
+CARD_RESULT n=3925 catastrophes=241 flops_macs=4446713384960 wall=0.095ms (41.2 Msamples/s kernel-only)
+HOST_SAN_SCAN_PASS (val_imagenette)
+```
+
+The card's histogram, catastrophe count, and FLOP total are bit-exact
+against the Python golden model on real photographs.
+
+**Honest caveats.** ImageNette is a 10-class subset; it does not replace
+full ImageNet-1k. The energy figure is incremental server power, not a
+board-rail measurement. Both are reported as measured facts with their
+limits stated, not as extrapolations.
+
+The only remaining `ESTIMATE` is full ImageNet-1k completo accuracy; the
+U250, the DL380, the bitstream, and a real-image SAN scan are now
+measured.
