@@ -1286,6 +1286,11 @@ pub struct FnSig {
     effect_count: i64,
     is_kernel: bool,
     is_epistemic_kernel: bool,
+    // #1622: true for a body-less `extern "C"` declaration. The native backend
+    // has no dynamic linker — an extern name it does not implement as a builtin
+    // compiles to an empty stub and every call reads whatever is in rax (0).
+    // Carried here so check_call_expr can refuse the call instead.
+    is_extern: bool,
     // Sprint 231: Unified closure type theory
     is_linear_closure: bool,      // true if captures linear resources => call exactly once
     linear_capture_count: i64,    // number of linear captures
@@ -1310,6 +1315,7 @@ fn empty_fn_sig() -> FnSig {
         effect_count: 0,
         is_kernel: false,
         is_epistemic_kernel: false,
+        is_extern: false,
         is_linear_closure: false,
         linear_capture_count: 0,
         epistemic_epsilon: 0.0 - 1.0,
@@ -1346,9 +1352,21 @@ pub struct FnSigTable {
 }
 
 // One zeroed chunk via heap_alloc (calloc): entries start empty, next == 0.
-// 512 * <=1.5KB/FnSig ~= 0.75MB; over-provisioned, mmap-lazy.
+//
+// THIS NUMBER IS NOT CHECKED AGAINST sizeof(FnSigChunk) BY ANYTHING. It was
+// 786432 = 512 * 1536, sized against an FnSig that the comment above called
+// "<=1.5KB" -- and #1622 added a field to FnSig without touching it. That is a
+// silent overflow waiting on one more field, so the budget is raised here to
+// 4 MB = 512 * 8192 B/entry. The pages are mmap-lazy: an oversized chunk costs
+// address space, not memory.
+//
+// Honest note on provenance: this was written while chasing spurious E219
+// diagnostics, on the theory that tail-entry writes were corrupting neighbouring
+// FnSigs. That theory was WRONG -- the diagnostics came from the compiler
+// reading a different stdlib via SOUNIO_STDLIB_PATH. The headroom is kept
+// because the hazard is real, not because it fixed anything.
 fn fn_sig_chunk_alloc() -> *mut FnSigChunk with Alloc {
-    heap_alloc(786432) as *mut FnSigChunk
+    heap_alloc(4194304) as *mut FnSigChunk
 }
 
 // Small table header (head ptr + count); calloc zeroes head to 0 and count to 0.

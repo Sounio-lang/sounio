@@ -1762,6 +1762,7 @@ fn checker_lower_fn_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry wi
         effect_count: eff_pair.count,
         is_kernel: false,
         is_epistemic_kernel: false,
+        is_extern: false,
         is_linear_closure: false,
         linear_capture_count: 0,
         epistemic_epsilon: 0.0 - 1.0,
@@ -3243,6 +3244,7 @@ fn checker_collect_fn_def_inplace(c: *mut Checker, opt: Option<Box<FnDef> >, vis
                 effect_count: kernel_effect_count,
                 is_kernel: is_kernel_fn,
                 is_epistemic_kernel: has_epistemic_param,
+                is_extern: (*fd).is_extern,
                 is_linear_closure: false,
                 linear_capture_count: 0,
                 epistemic_epsilon: 0.0 - 1.0,
@@ -4199,6 +4201,7 @@ fn checker_collect_impl_method_inplace(c: *mut Checker, item: Item, type_name: N
                 effect_count: fn_effect_count,
                 is_kernel: false,
                 is_epistemic_kernel: false,
+                is_extern: false,
                 is_linear_closure: false,
                 linear_capture_count: 0,
                 epistemic_epsilon: 0.0 - 1.0,
@@ -6240,6 +6243,7 @@ fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
         effect_count: inferred_effect_count,
         is_kernel: false,
         is_epistemic_kernel: false,
+        is_extern: false,
         is_linear_closure: capture_linear,
         linear_capture_count: capture_linear_count,
         epistemic_epsilon: capture_epsilon,
@@ -7033,6 +7037,12 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         }
         let call_start_borrows = (*c).borrows
         let direct_sig = fn_sig_table_get((*c).fn_sigs, direct_sig_id)
+        // #1622: calling an `extern "C"` name the native backend does not
+        // implement. This is the live arm -- a plain ident callee resolves via
+        // direct_sig_id and returns below, never reaching the TyFn fallback.
+        if direct_sig.is_extern && !name_is_native_backend_builtin(direct_sig.name) {
+            checker_report_error_at_inplace(c, e.span, 219, 0, 0, 0)
+        }
         var effective_params = fn_param_list_clone(&direct_sig.params)
         var effective_return_type = direct_sig.return_type
         match call_expr_type_args(e) {
@@ -7110,6 +7120,16 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         let sig = fn_sig_table_get((*c).fn_sigs, callee_ty.fn_sig_id)
         if (*c).enforce_visibility && !checker_fn_sig_visible_inplace(c, callee_ty.fn_sig_id) {
             checker_report_private_fn_inplace(c, e.span, callee_ty.fn_sig_id)
+        }
+        // #1622: calling an `extern "C"` name the native backend does not
+        // implement. Refuse here rather than emit a call that reads 0.
+        // Checked at the CALL, not at the declaration: ffi_libm_call.sio
+        // declares tgamma/pow/floor/ceil and calls only sqrt, and
+        // parser_card_a_raw_pointer_types.sio declares malloc and never calls
+        // it -- both compile and pass today, and a declaration-site refusal
+        // would break them for no gain.
+        if sig.is_extern && !name_is_native_backend_builtin(sig.name) {
+            checker_report_error_at_inplace(c, e.span, 219, 0, 0, 0)
         }
         let call_start_borrows = (*c).borrows
         var effective_params = fn_param_list_clone(&sig.params)
@@ -12370,6 +12390,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 216 { print("infinite recursive type") }
     else if code == 217 { print("f128/f256 value conversion is not implemented; wide-float casts fail closed") }
     else if code == 218 { print("f128/f256 is reserved for compiler-owned format identity; source values are unavailable in V0-A") }
+    else if code == 219 { print("call to an `extern \"C\"` function the native backend does not implement") }
     else { print("unknown error") }
 }
 
@@ -12653,6 +12674,9 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
     }
     else if code == 218 {
         print("   |\n   = help: V0-A exposes binary128/binary256 descriptors internally but rejects every source-level use before IR\n")
+    }
+    else if code == 219 {
+        print("   |\n   = help: only these body-less names are implemented: print, print_int, print_char, print_f64, get_arg, get_arg_count, str_len, str_char_at, str_eq, str_slice, starts_with, str_concat, str_from_bytes, read_file, write_file, file_size, sqrt, exp, log, sin, cos, assert, heap_alloc, heap_free, f64_to_bits, bits_to_f64, syscall6\n")
     }
     else {
         // No help available for unknown errors
@@ -12974,6 +12998,9 @@ fn print_error_note(code: i64) with IO, Mut, Panic, Div {
     }
     else if code == 218 {
         print("   = note: no literal, field, alias, binding, signature, conversion, ABI, or native carrier is implemented\n")
+    }
+    else if code == 219 {
+        print("   = note: there is no dynamic linker in this backend; an unimplemented extern compiles to an empty stub whose calls read 0\n")
     }
     else {
         // No note available for unknown errors
@@ -13321,6 +13348,52 @@ fn call_expr_is_syscall6(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, 
         }
         None => false
     }
+}
+
+// #1622: the names the native backend implements for a body-less function.
+//
+// MIRROR of native_v2_builtin_id_for_func_ref in
+// self-hosted/native/codegen_x86_linux.sio (~:1116), which is the authority:
+// it maps an instr_count == 0 IrFunction to a builtin id 1..27, and returns 0 —
+// "emit nothing" — for every other name. An `extern "C"` declaration reaches
+// codegen as exactly such a stub (ir/lower.sio:3498 flushes it that way), so a
+// name absent from this list compiles to an empty function and every call to it
+// silently reads 0. That is what this list exists to refuse.
+//
+// Kept in sync by scripts/ci/extern_builtin_mirror_gate.sh, which diffs the two
+// lists and fails if they drift. Verified empirically as well: of 19 non-listed
+// extern names probed under Madaros (fabs, pow, floor, ceil, malloc, getpid,
+// tgamma, ...) all 19 returned 0, and heap_alloc — listed but dispatched
+// elsewhere — returned a real pointer.
+fn name_is_native_backend_builtin(n: Name) -> bool with Mut, Panic, Div, Alloc, IO {
+    if name_eq(n, make_name("print_int")) { return true }        // id 1
+    if name_eq(n, make_name("print_char")) { return true }       // id 2
+    if name_eq(n, make_name("print")) { return true }            // id 3
+    if name_eq(n, make_name("get_arg_count")) { return true }    // id 4
+    if name_eq(n, make_name("get_arg")) { return true }          // id 5
+    if name_eq(n, make_name("str_len")) { return true }          // id 6
+    if name_eq(n, make_name("str_eq")) { return true }           // id 7
+    if name_eq(n, make_name("str_slice")) { return true }        // id 8
+    if name_eq(n, make_name("starts_with")) { return true }      // id 9
+    if name_eq(n, make_name("str_concat")) { return true }       // id 10
+    if name_eq(n, make_name("read_file")) { return true }        // id 11
+    if name_eq(n, make_name("write_file")) { return true }       // id 12
+    if name_eq(n, make_name("file_size")) { return true }        // id 13
+    if name_eq(n, make_name("sqrt")) { return true }             // id 14
+    if name_eq(n, make_name("print_f64")) { return true }        // id 15
+    if name_eq(n, make_name("exp")) { return true }              // id 16
+    if name_eq(n, make_name("log")) { return true }              // id 17
+    if name_eq(n, make_name("sin")) { return true }              // id 18
+    if name_eq(n, make_name("cos")) { return true }              // id 19
+    if name_eq(n, make_name("str_char_at")) { return true }      // id 20
+    if name_eq(n, make_name("assert")) { return true }           // id 21
+    if name_eq(n, make_name("str_from_bytes")) { return true }   // id 22
+    if name_eq(n, make_name("heap_alloc")) { return true }       // id 23
+    if name_eq(n, make_name("heap_free")) { return true }        // id 24
+    if name_eq(n, make_name("f64_to_bits")) { return true }      // id 25
+    if name_eq(n, make_name("bits_to_f64")) { return true }      // id 26
+    if name_eq(n, make_name("syscall6")) { return true }         // id 27
+    false
 }
 
 fn call_expr_is_gpu_builtin(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
@@ -15366,6 +15439,7 @@ impl Checker {
             effect_count: effect_count,
             is_kernel: false,
             is_epistemic_kernel: false,
+            is_extern: false,
             is_linear_closure: false,
             linear_capture_count: 0,
             epistemic_epsilon: 0.0 - 1.0,
@@ -17494,6 +17568,7 @@ impl Checker {
                     effect_count: kernel_effect_count,
                     is_kernel: is_kernel_fn,
                     is_epistemic_kernel: has_epistemic_param,
+                    is_extern: (*fd).is_extern,
                     is_linear_closure: false,
                     linear_capture_count: 0,
                     epistemic_epsilon: 0.0 - 1.0,
@@ -18487,6 +18562,7 @@ impl Checker {
                     effect_count: fn_effect_count,
                     is_kernel: false,
                     is_epistemic_kernel: false,
+                    is_extern: false,
                     is_linear_closure: false,
                     linear_capture_count: 0,
                     epistemic_epsilon: 0.0 - 1.0,
@@ -20384,6 +20460,16 @@ impl Checker {
             let sig = fn_sig_table_get(c.fn_sigs, callee_ty.fn_sig_id)
             if c.enforce_visibility && !visibility_allows_access(sig.visibility, sig.defining_module, c.current_module, c.crate_root) {
                 c = c.report_private_fn(e.span, callee_ty.fn_sig_id)
+            }
+            // #1622: calling an `extern "C"` name the native backend does not
+            // implement. Refuse here rather than emit a call that reads 0.
+            // Checked at the CALL, not at the declaration: ffi_libm_call.sio
+            // declares tgamma/pow/floor/ceil and calls only sqrt, and
+            // parser_card_a_raw_pointer_types.sio declares malloc and never
+            // calls it — both compile and pass today, and a declaration-site
+            // refusal would break them for no gain.
+            if sig.is_extern && !name_is_native_backend_builtin(sig.name) {
+                c = c.report_error_at(e.span, 219, 0, 0, 0)
             }
             let call_start_borrows = c.borrows
             var effective_params = fn_param_list_clone(&sig.params)
@@ -23592,6 +23678,7 @@ impl Checker {
             effect_count: inferred_effect_count,
             is_kernel: false,
             is_epistemic_kernel: false,
+            is_extern: false,
             is_linear_closure: capture_linear,
             linear_capture_count: capture_linear_count,
             epistemic_epsilon: capture_epsilon,
