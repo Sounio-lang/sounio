@@ -400,6 +400,116 @@ roleSub/roleComp) é fechada com dados reais role-ricos: **GO
   `agent_logs/go_elplus_offload_2026-08-04.md` (o log canônico
   `.claude/llm_offload_log.md` estava sob claim ativa de outra lane).
 
+## Rodada 12 — escala TOTAL: GO go-plus completo (38.245 classes, 92 papéis) (2026-08-04)
+
+A limitação de escala da rodada 11 (slice de 204 classes, cap pela
+viabilidade densa U ≤ 2.048) é fechada: o fecho EL+ role-aware roda sobre
+**todo o GO go-plus** sob a política GO-only da rodada 11 (classes, pais,
+fillers e parceiros de disjunção restritos ao namespace GO; classes
+obsoletas `owl:deprecated` excluídas — 13.736).
+
+### Análise de estratégia (por que nenhuma variante existente comporta o GO)
+
+- **Variante densa do stdlib** (64 conceitos) e **driver denso da rodada
+  11**: inviáveis — U = (H+1)×(NR+1) = 3.556.878 conceitos internados; as
+  matrizes U×B teriam ~1,8×10¹⁰ células e o cubo de papéis ~146 GB.
+- **Variante esparsa do stdlib** (`ELPLUS_SC = 4096`): capacidade ~9×
+  menor que H e restrita ao perfil Anatomy (papel único, sem hierarquia) —
+  o GO tem NR = 92 papéis com 107 roleSub e 60 roleComp.
+- **Dados embutidos como statements**: 58k sub + 19k exsub + axiomas de
+  papel ≫ o muro de ~24k statements por compilação.
+- **Sharding**: rejeitado — o fecho é global (transitividade e cadeias
+  cruzam qualquer particionamento).
+- **Slurm**: não necessário — a representação bitmask cabe na máquina
+  (~35 GB disponíveis).
+
+**Estratégia escolhida (nova variante esparsa multi-papel bitmask + carga
+em runtime)**: (i) a TBox é lida em RUNTIME via `read_file` +
+`str_char_at` (padrão de `stdlib/data/csv_reader.sio`; builtin 1-arg,
+fix #1078) de um arquivo packed emitido pelo espelho — o muro de
+statements não é engatilhado (zero data statements); (ii) as matrizes
+booleanas O(U²) viram bitmasks i64 (WC = 598 palavras por linha):
+ancestrais `anc[c]` (187 MB) e fillers `F[(r,c)]` (92 × 38.245 × 598 ×
+8 B = 17,9 GB BSS — sondado antes: aloca e roda em <1 s).
+
+### Extração (`extract_tbox.py --go --go-full`)
+
+Sem slice: todas as 38.245 classes GO ativas, 57.824 sub, 18.791 exsub
+C ⊑ ∃r.F com filler GO (as ~85k restrições com fillers CHEBI/CL/UBERON
+ficam fora pela política GO-only), 55 disj, e o conjunto de papéis
+**RO-fechado sem cap**: 55 papéis usados + 37 alvos de derivação =
+**NR = 92** (107 roleSub, 60 roleComp). Interseções (definições lógicas)
+seguem descartadas e contadas (91 restr_shape + 14.898 anon).
+
+### Bug encontrado e corrigido (rodada 12b) — worklist incompleto para roleComp
+
+A primeira versão do fixpoint usava um worklist de células dirty por
+componente-fonte. Esse worklist é **incompleto para roleComp**: quando
+F[r2][f] ganha uma aresta, a cadeia r1∘r2 ⊑ r3 deve disparar para todo c
+com f ∈ F[r1][c] — e essas células (r1, c) não estão no dirty set
+("direção 2"). Duas ordens de iteração corretas (por fases vs por
+varredura) convergiram para totais **7.200 arestas diferentes**
+(2.135.093 vs 2.127.893), expondo o vazamento — iteração caótica monótona
+deveria convergir para o mesmo menor fixpoint. Correção: **roleSub via
+worklist** (completo — regra de entrada única, semi-naive) + **roleComp
+via varredura completa por rodada** (fixpoint ingênuo); a rodada híbrida
+é iteração caótica Gauss-Seidel e atinge o mesmo menor fixpoint. Um
+segundo vazamento, desta vez de implementação (12c): os produtos da
+composição eram marcados no dirty-set errado no fim da rodada, e a
+cascata roleSub do último round se perdia (21 arestas) — corrigido com um
+swap de dirty-sets ao fim de cada rodada externa. O espelho python foi
+revalidado contra o fixpoint geral no slice da rodada 11 após a correção
+(exato nas 3 configurações).
+
+### Resultados (espelho python bitmask == driver Sounio, todos os números)
+
+- **395.939** arestas de fecho atômico (subsunção GO-only, reflexiva,
+  sem a coluna top);
+- **2.135.207** arestas de papel com fonte atômica = alvos existenciais
+  revelados por papéis (bijeção stoR/RtoS) — 5,4× o fecho atômico;
+- **792.814.846** conflitos atômicos (pares ordenados) — conferidos por
+  contagem independente: as 3 grandes disjunções de GO
+  (molecular_function × biological_process × cellular_component, cones de
+  10.041/24.129/4.075 descendentes) explicam ~763M dos pares;
+- fixpoint híbrido em **4 rodadas** (espelho);
+- ablações: sem roleComp → **1.883.813** (roleComp contribui 251.394);
+  sem roleSub → **597.305** (**roleSub contribui 1.537.902 — 72% das
+  arestas; no slice da rodada 11 o dominante era roleComp** — a
+  hierarquia RO profunda (107 roleSub sobre 92 papéis) domina no GO
+  completo). Os worklists vazados reportavam 597.284 (déficit de 21) e
+  2.135.093/2.127.893 (déficits de 114/7.314) — todos estritamente abaixo
+  do menor fixpoint, como previsto pela teoria.
+- Driver `go_full_elplus_driver.sio`: compila + roda em ~3,5 min
+  (3 fixpoints: completo + 2 ablações), `ALL PASS`.
+
+### Validação
+
+1. Redução bitmask == fixpoint geral de conjuntos no slice da rodada 11
+   (3 configurações: completo, sem-roleComp, sem-roleSub — exato, antes e
+   depois da correção 12b);
+2. driver Sounio == espelho python no GO completo (todos os contadores:
+  arestas atômicas, arestas de papel, alvos existenciais, conflitos,
+  ablações);
+3. conflitos conferidos por contagem independente por par de disjunções
+   (cones de descendentes);
+4. math-review xai obrigatória (política do repo), 2 revisões: redução
+   bitmask (12) e diagnóstico+correção do vazamento (12b) → **PASS**,
+   todos [OK]. Log em `agent_logs/go_full_elplus_offload_2026-08-04.md`.
+
+### Limitações honestas
+
+- Estatísticas em NÍVEL ATÔMICO: arestas com fonte existencial (∃r.f) e
+  totais de células S sobre U não são computados (exigiriam um fixpoint
+  de composição por conceito existencial; o conteúdo científico —
+  subsunções atômicas, alvos existenciais, conflitos — é atom-level).
+- Política GO-only exclui fillers externos (CHEBI/CL/UBERON);
+  interseções não extraídas (contadas).
+
+Gate `scripts/ci/ontology_frontiers_gate.sh`: **14/14 OK** (driver
+full-GO adicionado; o timeout default por arquivo subiu de 180 s para
+300 s para cobrir o run de ~3,5 min — override via
+`ONTOLOGY_FRONTIERS_RUN_TIMEOUT`).
+
 
 ## Arquivos criados
 
@@ -436,6 +546,17 @@ roleSub/roleComp) é fechada com dados reais role-ricos: **GO
   (rodada 11, gerados pelo modo `--go` do extract_tbox.py)
 - `artifacts/ontology-frontiers/real-data/scale/{go_elplus_data.sio,go_elplus_driver.sio}`
   (rodada 11, gerados pelo modo `--go` do gen_elplus_data.py)
+- `artifacts/ontology-frontiers/real-data/{go_full_elplus_tbox.txt,go_full_roles.tsv,go_full_classes.tsv}`
+  (rodada 12, gerados pelo modo `--go --go-full` do extract_tbox.py —
+  GO completo, GO-only, deprecated excluídas, papéis RO-fechados sem cap)
+- `artifacts/ontology-frontiers/real-data/scale/gen_go_full_data.py`
+  (rodada 12 — espelho python bitmask do fecho multi-papel + validação no
+  slice + emissão de go_full_packed.txt / go_full_expected.sio)
+- `artifacts/ontology-frontiers/real-data/scale/{go_full_packed.txt,go_full_expected.sio,go_full_elplus_driver.sio}`
+  (rodada 12 — dados runtime, valores do espelho, driver com carga via
+  read_file e fixpoint híbrido bitmask)
+- `agent_logs/go_full_elplus_offload_2026-08-04.md` (rodada 12 — log das
+  duas math-reviews xai)
 
 ## Gate CI
 
@@ -446,13 +567,13 @@ editar nenhum arquivo existente:
 bash scripts/ci/ontology_frontiers_gate.sh   # funciona a partir de qualquer cwd
 ```
 
-O que ele checa, para cada um dos 13 protótipos (`alignment_repair.sio`,
+O que ele checa, para cada um dos 14 protótipos (`alignment_repair.sio`,
 `claim_status.sio`, `interval_claims.sio`, `version_chain.sio`,
 `version_chain_removal.sio`, `minimal_repair_demo.sio`,
 `el_conflict_demo.sio`, `tie_repair_demo.sio`, `real_repair_driver.sio`,
 `full_scale_driver.sio`, `elplus_scale_driver.sio` — rodada 9,
-`go_elplus_driver.sio` — rodada 11 — e
-`examples/ontology_pipeline_demo.sio`):
+`go_elplus_driver.sio` — rodada 11, `go_full_elplus_driver.sio` —
+rodada 12 — e `examples/ontology_pipeline_demo.sio`):
 
 1. `./bin/souc check <file>` — exige `check: OK` na saída e ausência de
    `parse error`;
@@ -461,7 +582,7 @@ O que ele checa, para cada um dos 13 protótipos (`alignment_repair.sio`,
 O exit code do `souc` não é confiável, então todos os vereditos vêm do
 stdout capturado. O gate imprime uma linha OK/FAIL por arquivo e sai com
 código 1 se qualquer protótipo falhar. Cada `souc run` leva ~30–60s; há um
-timeout por arquivo (`ONTOLOGY_FRONTIERS_RUN_TIMEOUT`, default 180s). O
+timeout por arquivo (`ONTOLOGY_FRONTIERS_RUN_TIMEOUT`, default 300s desde a rodada 12). O
 wrapper pode ser trocado via `SOUC_BIN`. Os repros de compilador em
 `compiler-repros/` são propositalmente excluídos (eles demonstram falhas).
 
@@ -503,6 +624,10 @@ wrapper pode ser trocado via `SOUC_BIN`. Os repros de compilador em
     projeção atômica, ablações roleComp/roleSub, asserção do teorema de
     perfil; emite `go_elplus_data.sio` + `go_elplus_driver.sio`.
   - `scripts/ci/ontology_frontiers_gate.sh` — 13 protótipos (driver GO).
+- Rodada 12 (GO completo):
+  - `artifacts/ontology-frontiers/real-data/extract_tbox.py` — modo
+    `--go-full`: GO completo sem slice (política GO-only), classes
+    `owl:deprecated` excluídas, conjunto de papéis RO-fechado sem cap.
 
 Commits na branch: `54cef93d7` (rodadas 1-2), `156858916` (rodada 3);
 rodada 4 aguardando autorização de commit.

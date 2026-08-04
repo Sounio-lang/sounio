@@ -18,7 +18,7 @@
 # Env overrides:
 #   SOUC_BIN                          compiler wrapper (default: bin/souc)
 #   ONTOLOGY_FRONTIERS_RUN_TIMEOUT    per-file `souc run` timeout, seconds
-#                                     (default: 180)
+#                                     (default: 300)
 #
 # Exit 0 = all prototypes pass. Exit 1 = at least one prototype failed.
 
@@ -28,7 +28,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 SOUC_BIN="${SOUC_BIN:-$ROOT_DIR/bin/souc}"
-RUN_TIMEOUT="${ONTOLOGY_FRONTIERS_RUN_TIMEOUT:-180}"
+RUN_TIMEOUT="${ONTOLOGY_FRONTIERS_RUN_TIMEOUT:-300}"
 
 PROTOTYPES=(
     "artifacts/ontology-frontiers/epistemic-alignment-repair/alignment_repair.sio"
@@ -43,6 +43,7 @@ PROTOTYPES=(
     "artifacts/ontology-frontiers/real-data/scale/full_scale_driver.sio"
     "artifacts/ontology-frontiers/real-data/scale/elplus_scale_driver.sio"
     "artifacts/ontology-frontiers/real-data/scale/go_elplus_driver.sio"
+    "artifacts/ontology-frontiers/real-data/scale/go_full_elplus_driver.sio"
     "examples/ontology_pipeline_demo.sio"
 )
 

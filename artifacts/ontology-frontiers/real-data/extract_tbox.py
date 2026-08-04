@@ -271,7 +271,7 @@ def _restriction_fields(restr_el):
     return None, None
 
 
-def parse_go(path):
+def parse_go(path, skip_deprecated=False):
     """Parse go-plus.owl.  Returns (order, labels, sub, exsub, disj,
     role_labels, stats):
       order:  class IRIs in document order
@@ -280,17 +280,22 @@ def parse_go(path):
       exsub:  (class_iri, prop_iri, filler_iri)  C ⊑ ∃r.F, F named
       disj:   set of (a_iri, b_iri) with a < b (string order)
       role_labels: prop iri -> label (declared ObjectProperties)
+    skip_deprecated (round 12, --go-full): classes carrying
+    <owl:deprecated ...>true</owl:deprecated> are excluded from
+    order/labels and from the axiom pass (they are obsolete terms kept
+    in go-plus only for bookkeeping).
     """
     tree = ET.parse(path)
     root = tree.getroot()
 
     order = []
     labels = {}
+    deprecated = set()
     sub = []
     exsub = []
     disj = set()
     stats = {"skipped_restr_shape": 0, "skipped_anon_subclassof": 0,
-             "skipped_dup_class": 0}
+             "skipped_dup_class": 0, "skipped_deprecated_class": 0}
     for el in root.iter(OWL + "Class"):
         iri = el.get(RDF + "about")
         if iri is None:
@@ -299,16 +304,24 @@ def parse_go(path):
             stats["skipped_dup_class"] += 1
             continue
         label = ""
+        dep = False
         for ch in el:
             if ch.tag == RDFS + "label" and ch.text:
                 label = " ".join(ch.text.split())
-                break
+            elif ch.tag == OWL + "deprecated" and \
+                    (ch.text or "").strip() == "true":
+                dep = True
+        if skip_deprecated and dep:
+            stats["skipped_deprecated_class"] += 1
+            deprecated.add(iri)
+            labels[iri] = label  # mark seen; excluded from order
+            continue
         labels[iri] = label
         order.append(iri)
     declared = set(order)
     for el in root.iter(OWL + "Class"):
         iri = el.get(RDF + "about")
-        if iri is None:
+        if iri is None or iri not in declared:
             continue
         for ch in el:
             res = ch.get(RDF + "resource")
@@ -603,6 +616,126 @@ def main_go(args):
     return 0
 
 
+# ── Round 12: FULL GO extraction (no slice) ──────────────────────────────
+
+
+def main_go_full(args):
+    """Round 12: extract the FULL go-plus TBox under the round-11 GO-only
+    policy (classes/parents/fillers/disjoint partners restricted to the GO
+    namespace), with deprecated (obsolete) classes excluded, ALL roles used
+    in the kept restrictions retained (no role cap), and the role set
+    RO-closed (superproperties + composition targets, iterated).  Emits
+    go_full_elplus_tbox.txt / go_full_roles.tsv / go_full_classes.tsv in
+    the round-11 line format so the round-11 mirror/driver tooling reads
+    it unchanged."""
+    print(f"parsing {args.go} ...")
+    order, labels, sub, exsub, disj, go_role_labels, gstats = \
+        parse_go(args.go, skip_deprecated=True)
+    print(f"go: {len(order)} declared classes (deprecated skipped: "
+          f"{gstats['skipped_deprecated_class']}), {len(sub)} sub, "
+          f"{len(exsub)} exsub, {len(disj)} disj "
+          f"(skipped restr_shape={gstats['skipped_restr_shape']}, "
+          f"anon_subclassof={gstats['skipped_anon_subclassof']})")
+
+    # GO-only policy (round 11): keep only /GO_ classes; drop axioms with
+    # a non-GO endpoint.
+    keep_iris = [iri for iri in order if "/GO_" in iri]
+    inset = set(keep_iris)
+    id_of = {iri: i for i, iri in enumerate(keep_iris)}
+    H = len(keep_iris)
+    sub2 = sorted({(id_of[c], id_of[p]) for c, p in sub
+                   if c in inset and p in inset})
+    disj2 = sorted({(id_of[a], id_of[b]) for a, b in disj
+                    if a in inset and b in inset})
+    exsub2 = sorted({(id_of[c], r, id_of[f]) for c, r, f in exsub
+                     if c in inset and f in inset})
+    print(f"go full: H={H} GO classes, sub={len(sub2)}, "
+          f"exsub={len(exsub2)}, disj={len(disj2)}")
+
+    print(f"parsing {args.ro} ...")
+    rsub, chains, ro_role_labels, rstats = parse_ro(args.ro)
+    print(f"ro: {len(rsub)} subPropertyOf, {len(chains)} chains (incl. "
+          f"transitive), skipped chain_shape="
+          f"{rstats['skipped_chain_shape']}")
+
+    # roles actually used by the kept restrictions
+    use = {}
+    for _c, r, _f in exsub2:
+        use[r] = use.get(r, 0) + 1
+    keep = sorted(use)
+    # RO-closure (round 11 policy, uncapped): superproperties of kept
+    # roles and composition targets of chains whose members are kept are
+    # ADDED (roles that only ever receive derived edges), iterated.
+    added_closure = []
+    changed = True
+    while changed:
+        changed = False
+        for r, s in rsub:
+            if r in keep and s not in keep:
+                keep.append(s)
+                added_closure.append(s)
+                changed = True
+        for r1, r2, t in chains:
+            if r1 in keep and r2 in keep and t not in keep:
+                keep.append(t)
+                added_closure.append(t)
+                changed = True
+    if added_closure:
+        print(f"go full: RO-closure added roles (derived-edge targets): "
+              f"{[r.split('/')[-1] for r in added_closure]}")
+    rid_of = {r: i for i, r in enumerate(sorted(keep))}
+    NR = len(rid_of)
+    if NR == 0:
+        sys.exit("GO FULL FAILED: no roles used; extraction bug")
+
+    exsub3 = sorted({(c, rid_of[r], f) for c, r, f in exsub2})
+    rsub3 = sorted({(rid_of[r], rid_of[s]) for r, s in rsub
+                    if r in rid_of and s in rid_of})
+    chains3 = sorted({(rid_of[r1], rid_of[r2], rid_of[t])
+                      for r1, r2, t in chains
+                      if r1 in rid_of and r2 in rid_of and t in rid_of})
+    print(f"go full: H={H} NR={NR} sub={len(sub2)} exsub={len(exsub3)} "
+          f"disj={len(disj2)} roleSub={len(rsub3)} roleComp={len(chains3)}"
+          f" U={(H + 1) * (NR + 1)}")
+    print(f"roles kept: {[(rid_of[r], r.split('/')[-1], use.get(r, 0))
+                          for r in sorted(rid_of)]}")
+
+    pfx = args.go_out_prefix
+    with open(f"{args.out}/{pfx}_classes.tsv", "w") as f:
+        f.write("id\tiri\tlabel\n")
+        for i, iri in enumerate(keep_iris):
+            f.write(f"{i}\t{iri}\t{labels.get(iri, '')}\n")
+    with open(f"{args.out}/{pfx}_roles.tsv", "w") as f:
+        f.write("id\tiri\tlabel\n")
+        for r, i in sorted(rid_of.items(), key=lambda kv: kv[1]):
+            f.write(f"{i}\t{r}\t"
+                    f"{ro_role_labels.get(r) or go_role_labels.get(r, '')}"
+                    f"\n")
+    with open(f"{args.out}/{pfx}_elplus_tbox.txt", "w") as f:
+        f.write(f"# classes_go {H}\n")
+        f.write(f"# roles_go {NR}\n")
+        f.write(f"# sub_go {len(sub2)}\n")
+        f.write(f"# exsub_go {len(exsub3)}\n")
+        f.write(f"# disj_go {len(disj2)}\n")
+        f.write(f"# rolesub_go {len(rsub3)}\n")
+        f.write(f"# rolecomp_go {len(chains3)}\n")
+        f.write("# root FULL (round 12: no slice)\n")
+        f.write("# dropped_roles 0\n")
+        for c, p in sub2:
+            f.write(f"sub go {c} {p}\n")
+        for c, r, fl in exsub3:
+            f.write(f"exsub go {c} {r} {fl}\n")
+        for a, b in disj2:
+            f.write(f"disj go {a} {b}\n")
+        for r, s in rsub3:
+            f.write(f"roleSub go {r} {s}\n")
+        for r1, r2, t in chains3:
+            f.write(f"roleComp go {r1} {r2} {t}\n")
+    print(f"wrote {pfx}_elplus_tbox.txt, {pfx}_roles.tsv, "
+          f"{pfx}_classes.tsv to {args.out}")
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--mouse", default="downloads/mouse.owl")
@@ -611,6 +744,10 @@ def main(argv=None):
     ap.add_argument("--go", default=None,
                     help="go-plus.owl path; enables the GO/RO role-rich "
                          "slice mode (round 11)")
+    ap.add_argument("--go-full", action="store_true",
+                    help="round 12: with --go, extract the FULL GO TBox "
+                         "(GO-only policy, deprecated classes excluded, "
+                         "no slice, no role cap) instead of a slice")
     ap.add_argument("--ro", default="downloads/ro.owl")
     ap.add_argument("--go-root", default=None,
                     help="root GO id for the slice, e.g. GO:0006915")
@@ -623,6 +760,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     if args.go is not None:
+        if args.go_full:
+            return main_go_full(args)
         if args.go_root is None:
             ap.error("--go requires --go-root (e.g. GO:0006915)")
         return main_go(args)
