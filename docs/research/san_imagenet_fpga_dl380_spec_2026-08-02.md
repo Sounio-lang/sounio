@@ -370,16 +370,16 @@ train on GPU; logs are in `artifacts/san_large/`.
 |---|---|---|---|---|---|---|---|---|---|
 | ResNet-50 | 4 | 0.390 | 160.1 TMAC | 269.9 TMAC | **40.7%** | 0.196 ms/s | 0.213 ms/s | **1.08x** | L1–L4, L6–L8 PASS; L5 tradeoff |
 | ViT-small/d384 | 4 | 0.262 | 183.3 TMAC | 369.3 TMAC | **32.0%** | 0.310 ms/s | 0.308 ms/s | 0.99x | L1–L4, L7–L8 PASS; L5 PASS, L6 exit-frac 0.03 |
-| GPT | 4 | 0.167 | 115.4 TMAC | 241.5 TMAC | **52.2%** | 0.343 ms/s | 0.341 ms/s | 0.99x | **L_GREEN (8/8 PASS)** |
+| SAN-GPT-small | 4 | 0.167 | 115.4 TMAC | 241.5 TMAC | **52.2%** | 0.343 ms/s | 0.341 ms/s | 0.99x | **L_GREEN (8/8 PASS)** |
 
 **Machine channel.** SAN saves integrated FLOPs in every family: ResNet-50
-40.7%, ViT-small/d384 32.0%, GPT 52.2%. Per-epoch SAN cost is within a few
+40.7%, ViT-small/d384 32.0%, SAN-GPT-small 52.2%. Per-epoch SAN cost is within a few
 percent of Dense, confirming the exit-head overhead is small.
 
 **Real wall-time latency.** A `torch.cuda.synchronize()` benchmark on the
 held-out val set (100 forward passes) compares SAN's gated early-exit path
 against the same model's full dense forward. ResNet-50 already shows a
-modest real speedup (**1.08x**) on CIFAR-10; ViT-small/d384 and GPT are
+modest real speedup (**1.08x**) on CIFAR-10; ViT-small/d384 and SAN-GPT-small are
 essentially tied because the CIFAR-10 / small-LM forward is so short that
 dispatch overhead dominates. The latency comparison is now measured, not
 extrapolated from FLOPs.
@@ -387,12 +387,12 @@ extrapolated from FLOPs.
 **Patient channel / honesty.** ResNet-50 and ViT-small/d384 show the same
 disclosed tradeoff the parent line reports at ImageNet scale (§7): SAN
 patient harm is higher than EarlyStop's because early stopping alone can
-freeze on a luckier epoch. GPT satisfies the stricter L5 clause (SAN ≤
+freeze on a luckier epoch. SAN-GPT-small satisfies the stricter L5 clause (SAN ≤
 both baselines) and is fully green. These are results, not tuning failures.
 
-**Infra note.** The first GPT submission failed on a node without `pip`;
+**Infra note.** The first SAN-GPT-small submission failed on a node without `pip`;
 the worker script now bootstraps pip/torch/torchvision/tqdm into a temp
-user base, and the corpus snapshot is staged from the workspace so GPT
+user base, and the corpus snapshot is staged from the workspace so SAN-GPT-small
 legs do not depend on `docs/research/*.md` being present on the worker.
 
 ### 13.6 Threshold ablation + CIFAR-100 proxy (2026-08-04)
@@ -408,18 +408,28 @@ small subset because the patient-channel clauses (L5/L7) are not fully
 satisfied, so the ablation is reported as a sensitivity knob, not a green
 recipe.  The driver is `slurm-jobs/san-large-gpu/ablation_delta.sh`.
 
-**CIFAR-100 proxy (submitted, awaiting results).** The harness supports
+**CIFAR-100 proxy (complete — negative result).** The harness supports
 `SAN_LARGE_DATASET=cifar100` (100 fine labels, generalized harm matrix,
 default τ lower than CIFAR-10).  The dataset was staged on
 `/orangefs/training/sounio/datasets/cifar-100-python` and two Slurm jobs were
 submitted via `slurm-jobs/san-large-gpu/submit_cifar100.sh`:
 
-- job 8609: SAN-ResNet-50, Δ = 0.45, τ = 0.20
-- job 8610: SAN-ViT-small/d384, Δ = 0.55, τ = 0.15
+- job 8611: SAN-ResNet-50, Δ = 0.45, τ = 0.20
+- job 8612: SAN-ViT-small/d384, Δ = 0.55, τ = 0.15
 
 The τ values were forced through the environment because `submit.sh` and
-`run_gpu_worker.sh` still default to the CIFAR-10 τ; this is a known harness
-gap to be closed before the next campaign.
+`run_gpu_worker.sh` still default to the CIFAR-10 τ.
+
+The first submission (8609/8610) failed with a CIFAR-100 loader bug
+(`pickle.load(..., encoding="latin1")` produced string keys, but the code
+expected byte keys `b"data"`/`b"fine_labels"`).  The loader was fixed to
+`encoding="bytes"` and the jobs were resubmitted.
+
+On 4,000 train / 1,000 val, neither family reached its lowered τ:
+ResNet-50 final acc 0.126 (τ = 0.20), ViT-small/d384 final acc 0.117
+(τ = 0.15).  `t* = None`, freeze-on-green never fired, and SAN savings were
+near zero because almost no sample exited early.  This is reported as a
+negative result, not omitted.
 
 **Paper draft.** A systems paper draft is at
 `docs/papers/san_fpga_deployment_2026-08-04.md`. It was reviewed by hostile
@@ -450,6 +460,6 @@ as follows:
 
 3. **Dense vs SAN wall-time on GPU.** Added a `torch.cuda.synchronize()`
    latency benchmark to `suffering_aware_large_architecture.py`. ResNet-50
-   shows 1.08x real speedup; ViT-small/d384 and GPT are neutral on this small-scale
+   shows 1.08x real speedup; ViT-small/d384 and SAN-GPT-small are neutral on this small-scale
    task because dispatch overhead dominates. The comparison is now measured,
    not inferred from FLOP counts.

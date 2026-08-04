@@ -11,13 +11,13 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.papers.san-fpg
 
 **Status:** `DRAFT` — every empirical claim marked `MEASURED` below is backed
 by a measured artifact in the Sounio repository; claims marked `ESTIMATE` or
-`(in progress)` are explicitly noted as such. This draft was reviewed by
-hostile LLM-offload (Grok 4.5) and revised to address the blockers it raised.
+`(in progress)` are explicitly noted as such. Human measurement audit is the
+authority; LLM reviews are recorded in §7 only as an AI-assist disclosure.
 **Date:** 2026-08-04
 **Orthography:** EN-US
 **Companion spec:** `docs/research/san_imagenet_fpga_dl380_spec_2026-08-02.md`
 **Companion contract:** `scripts/research/san_imagenet_fpga_dl380.py`
-**Target venue:** arXiv `cs.LG` / `cs.AR`; then IEEE TPDS, FPL, or MLSys
+**Target venue:** arXiv `cs.LG` / `cs.AR`; then IEEE FPL or a systems note
 
 ---
 
@@ -25,7 +25,7 @@ hostile LLM-offload (Grok 4.5) and revised to address the blockers it raised.
 
 We report the first measured deployment of the SAN exit-audit / FLOP-metering
 kernel on an AMD Alveo U250 FPGA, together with a GPU training study of
-SAN-ResNet-50, SAN-ViT-small/d384, and SAN-GPT. Suffering-aware neural networks
+SAN-ResNet-50, SAN-ViT-small/d384, and a tiny decoder LM (SAN-GPT-small). Suffering-aware neural networks
 (SANs) are early-exit architectures whose training freezes as soon as a
 held-out feasibility target is met, eliminating gratuitous computation. We
 offload only the inference-time catastrophe-scan and FLOP-metering path to the
@@ -39,7 +39,7 @@ cohort, and real photographs from ImageNette2-160.
 
 On NVIDIA GPUs (A5000 / RTX 4000 Ada) SAN training reduces the *metered-MAC*
 integrated machine burden by **40.7%** (ResNet-50), **32.0%** (ViT-small/d384), and
-**52.2%** (GPT) relative to dense training in a small-subset, fast-convergence
+**52.2%** (SAN-GPT-small) relative to dense training in a small-subset, fast-convergence
 regime (validation accuracies 0.39, 0.26, 0.17, chosen to demonstrate the
 freeze-on-green mechanism, not to claim competitive task accuracy). ResNet-50
 also shows a measured 1.08x wall-time latency speedup on CIFAR-10, though this
@@ -86,10 +86,10 @@ measured end to end.
 
 | # | Contribution | Evidence | Status |
 |---|---|---|---|
-| 1 | A SAN training harness for ResNet-50, ViT-small/d384, and GPT on real data, with metered-MAC accounting and freeze-on-green | `scripts/research/suffering_aware_large_architecture.py` | `MEASURED` on GPU (small subset) |
+| 1 | A SAN training harness for ResNet-50, ViT-small/d384, and a tiny decoder LM on real data, with metered-MAC accounting and freeze-on-green | `scripts/research/suffering_aware_large_architecture.py` | `MEASURED` on GPU (small subset) |
 | 2 | An FPGA exit-audit / FLOP-meter kernel with integer semantics, no multipliers/DSPs, and one sample/cycle/PE throughput | `hardware/fpga/u250_catastrophe_scan/krnl_san_scan.cpp` | `MEASURED` on U250 |
 | 3 | On-target U250 benchmark: 511 Msamples/s on 1.2M stress cohort, ~3.3 nJ/sample board-level energy, bit-exact against golden model | `host_san_scan`, `host_san_scan_bench` | `MEASURED` |
-| 4 | GPU training study: 32–52% metered-MAC savings across three families in a fast-convergence regime | Slurm jobs 8584/8588/8591 and latency reruns 8594/8595/8596 | `MEASURED` |
+| 4 | GPU training study: 32–52% metered-MAC savings in a fast-convergence, small-subset regime; CIFAR-100 is infeasible under the same budget | Slurm jobs 8584/8588/8591, 8599–8607, 8611–8612 | `MEASURED / MIXED` |
 | 5 | Real-image kernel validation on ImageNette2-160, bit-exact on the U250 | `train_san_imagenette.py` + `host_san_scan` | `MEASURED` |
 | 6 | Honest accounting of limits: small-subset accuracy, partial meter convention, ImageNet-1k unavailable, board-level power, attention-family patient-channel tradeoff | §5, §6 | `DECLARED` |
 
@@ -142,7 +142,7 @@ A SAN is defined by:
 matrix C, where C[y, ŷ] encodes the cost of predicting ŷ when the true label is
 y. For CIFAR-10 we use the parent line's hazard structure: class 9 (truck) is
 the hazard class; missing the hazard costs 5, a false hazard alarm costs 2, any
-other confusion costs 1. For GPT the hazard tokens are corpus negation tokens.
+other confusion costs 1. For SAN-GPT-small the hazard tokens are corpus negation tokens.
 
 **Machine suffering** is the *metered-MAC* count of executed operations. We
 follow the convention used throughout the SAN line: MACs × 2 = FLOPs; training
@@ -189,10 +189,11 @@ ratio 4. One CLS exit head per block. This is a small attention proxy for the
 CIFAR pilot, not ViT-Large. The FPGA kernel's stage-cost LUT can be reloaded
 with the published ViT-L/16 constants (61.55 GMAC) for a real-scale deployment.
 
-**SAN-GPT.** Decoder-only transformer (d=384, 10 blocks, 6 heads, causal mask,
-vocab 2000) trained on next-token prediction over the repository's own research
-documentation corpus. Exit heads score the last G=4 positions; the gate
-confidence is the mean max-probability over those positions.
+**SAN-GPT-small.** A tiny decoder-only transformer (d=384, 10 blocks, 6 heads,
+causal mask, vocab 2000) trained on next-token prediction over the repository's
+own research documentation corpus. Exit heads score the last G=4 positions;
+the gate confidence is the mean max-probability over those positions. This is
+an internal-corpus pilot, not a general language-modeling result.
 
 All three families are compared against two baselines:
 
@@ -216,7 +217,7 @@ does:
 The kernel contains **no floating-point, no softmax, no multipliers, no DSPs**.
 It is bus-limited: 512 bits/cycle × 4 samples/beat × 135.2 MHz = 540.8
 Msamples/s theoretical peak. The LUT is loaded by the host, so the same
-bitstream serves ResNet-50, ViT, and GPT by reloading the LUT and threshold.
+bitstream serves ResNet-50, ViT-small/d384, and SAN-GPT-small by reloading the LUT and threshold.
 
 **Correctness criterion (T3).** The kernel is correct iff it reproduces the
 golden integer function. We verify this bit-exactly on three cohorts: the
@@ -259,7 +260,7 @@ the DL380 U250. Table 1 reports the on-target campaign.
 | val_resnet | 5,000 | 5 | 24.2 | 146.7 | `HOST_SAN_SCAN_PASS` |
 | val_vit | 5,000 | 7 | 43.0 | 146.9 | `HOST_SAN_SCAN_PASS` |
 | stress_1p2M | 1,200,000 | 5 | 481.9 | **511.0** | `HOST_SAN_SCAN_PASS` |
-| val_imagenette | 3 925 | 5 | 24.1 | 122.2 | `HOST_SAN_SCAN_PASS` |
+| val_imagenette | 3,925 | 5 | 24.1 | 122.2 | `HOST_SAN_SCAN_PASS` |
 
 The 1.2M stress cohort reaches **511 Msamples/s sustained**, **95%** of the
 540.8 Msamples/s theoretical peak at the achieved 135.2 MHz clock. This is a
@@ -281,7 +282,7 @@ sensor is sampled at 1 Hz.
 
 Table 2 reports the GPU scale pilot. All numbers are measured on real CIFAR-10
 training with `SAN_LARGE_DEVICE=cuda`, using stratified subsets of 4,000 train
-/ 1,000 val images and a small epoch budget (8 for ResNet-50, 10 for ViT/GPT).
+/ 1,000 val images and a small epoch budget (8 for ResNet-50, 10 for ViT-small/d384/SAN-GPT-small).
 The feasibility targets τ (0.34, 0.251, 0.165) are intentionally low so the
 freeze-on-green rule can be demonstrated quickly; the achieved accuracies are
 not competitive with full-dataset CIFAR-10 baselines. The point of the table is
@@ -295,7 +296,7 @@ accuracy result.
 |---|---|---|---|---|---|---|---|---|---|
 | ResNet-50 | 4 | 0.390 | 160.1 TMAC | 269.9 TMAC | **40.7%** | 0.196 ms | 0.213 ms | 1.08x | L1–L4, L6–L8 PASS; L5 tradeoff |
 | ViT-small/d384 | 4 | 0.262 | 183.3 TMAC | 369.3 TMAC | **32.0%** | 0.310 ms | 0.308 ms | 0.99x | L1–L4, L7–L8 PASS; L5 PASS, L6 exit-frac 0.03 |
-| GPT | 4 | 0.167 | 115.4 TMAC | 241.5 TMAC | **52.2%** | 0.343 ms | 0.341 ms | 0.99x | L1–L8 PASS |
+| SAN-GPT-small | 4 | 0.167 | 115.4 TMAC | 241.5 TMAC | **52.2%** | 0.343 ms | 0.341 ms | 0.99x | L1–L8 PASS |
 
 *S_m is the metered-MAC burden (MAC×2, backward = 2× forward, biases/norms/etc.
 unmetered). Verdicts refer to the companion contract clauses L1–L8; see
@@ -305,13 +306,13 @@ Appendix B for clause definitions.*
 with its early-exit-friendly residual stages, also translates the MAC savings
 into a small real wall-time speedup on CIFAR-10 (0.196 ms vs 0.213 ms), though
 the margin is within the noise regime of CUDA synchronize microbenchmarks.
-ViT-small/d384 and GPT are essentially tied with Dense in wall time because the
+ViT-small/d384 and SAN-GPT-small are essentially tied with Dense in wall time because the
 forward is short enough that dispatch overhead dominates; at larger scale the
 MAC savings would likely translate to latency savings as well.
 
 **Patient channel.** ResNet-50 and ViT-small/d384 show the disclosed tradeoff the
 parent line reports at ImageNet scale: SAN patient harm is slightly higher than
-EarlyStop's because early stopping alone can freeze on a luckier epoch. GPT
+EarlyStop's because early stopping alone can freeze on a luckier epoch. SAN-GPT-small
 satisfies the stricter L5 clause (SAN ≤ both baselines) and is fully green.
 These are results, not tuning failures. The cost matrix C is synthetic; no
 clinical claim is made.
@@ -352,20 +353,35 @@ heads.  These values are used as the starting points for the CIFAR-100 runs in
 
 CIFAR-100 was staged on OrangeFS (`/orangefs/training/sounio/datasets/cifar-100-python`)
 and two Slurm jobs were submitted with thresholds adjusted to the harder,
-100-class task:
+100-class task.  The first submission (jobs 8609/8610) failed because the
+harness's CIFAR-100 loader used `encoding="latin1"`, under which the pickle
+keys are strings rather than bytes; this was fixed to `encoding="bytes"` and
+the runs were resubmitted as jobs 8611 (ResNet-50) and 8612
+(ViT-small/d384).
 
-- job 8609: SAN-ResNet-50, Δ = 0.45, τ = 0.20
-- job 8610: SAN-ViT-small/d384, Δ = 0.55, τ = 0.15
+On the same 4,000 train / 1,000 val split, CIFAR-100 is too hard for the
+small epoch budget: neither family reaches its lowered τ, so `t* = None` and
+the freeze-on-green rule never fires.  The result is reported as a negative
+result, not hidden.
 
-Results are pending; this section will be updated when the jobs complete.
-ImageNette-320/full remains a candidate real-image proxy if bandwidth and
-storage permit.
+**Table 4: CIFAR-100 small-subset pilot.**
+
+| family | τ | epochs | final acc | S_m(SAN) | S_m(Dense) | saving | verdict |
+|---|---|---|---|---|---|---|---|
+| ResNet-50 | 0.20 | 8 | 0.126 | 266.9 TMAC | 270.0 TMAC | 1.2% | L_RED (1/8) |
+| ViT-small/d384 | 0.15 | 10 | 0.117 | 369.1 TMAC | 369.3 TMAC | <0.1% | L_RED (infeasible) |
+
+The near-zero savings show that early exits are almost irrelevant when the
+model is underfit: almost no sample becomes confident enough to exit, so SAN
+runs essentially the full trunk.  A usable CIFAR-100 result would require a
+larger train split, more epochs, or a smaller model.  ImageNette-320/full
+remains a candidate real-image proxy if bandwidth and storage permit.
 
 ### 4.5 Real-image validation on ImageNette2-160
 
 A SAN-ResNet-18 was trained on 4,000 ImageNette2-160 real photographs (frozen
 ImageNet-1k backbone, layer4 + heads fine-tuned). Validation confidences for
-3 925 real images were exported to the U250 cohort format and run on-target:
+3,925 real images were exported to the U250 cohort format and run on-target:
 
 ```
 host_san_scan: dataset=val_imagenette n=3925 points=5 q_delta=18021 family=resnet
