@@ -127,6 +127,13 @@ ONLY = os.environ.get("SAN_LARGE_ONLY", "").strip().lower()
 THREADS = int(os.environ.get("SAN_LARGE_THREADS", "48"))
 torch.set_num_threads(THREADS)
 
+# Device selection. Slurm gpu-orangefs workers see CUDA via /host-nvidia;
+# default is cuda if available, else cpu. Explicit SAN_LARGE_DEVICE=cpu
+# forces CPU for reproducibility checks.
+DEVICE = torch.device(
+    os.environ.get("SAN_LARGE_DEVICE",
+                   "cuda" if torch.cuda.is_available() else "cpu"))
+
 N_CLASS = 10
 # Gates-closed warmup, per family (declared in spec section 6.2): heads
 # train (as detached probes, or from epoch 1 for trunk-coupled aux heads)
@@ -260,8 +267,10 @@ def load_cifar10():
     rng.shuffle(va_idx)
     xtr = (xtr_all[tr_idx] - CIFAR_MEAN[None, :, None, None]) / CIFAR_STD[None, :, None, None]
     xva = (xte_all[va_idx] - CIFAR_MEAN[None, :, None, None]) / CIFAR_STD[None, :, None, None]
-    return (torch.from_numpy(xtr), torch.from_numpy(ytr_all[tr_idx]),
-            torch.from_numpy(xva), torch.from_numpy(yte_all[va_idx]))
+    return (torch.from_numpy(xtr).to(DEVICE),
+            torch.from_numpy(ytr_all[tr_idx]).to(DEVICE),
+            torch.from_numpy(xva).to(DEVICE),
+            torch.from_numpy(yte_all[va_idx]).to(DEVICE))
 
 
 # ---------------- GPT corpus (real text: repository docs) ---------------------
@@ -319,8 +328,8 @@ def load_corpus():
     x_tr, y_tr = sample(tr_tokens, GPT_N_TRAIN)
     x_va, y_va = sample(va_tokens, GPT_N_VAL)
     hazard_ids = torch.tensor(
-        [stoi[w] for w in HAZARD_WORDS if w in stoi], dtype=torch.long)
-    return x_tr, y_tr, x_va, y_va, hazard_ids, len(itos), stoi, itos
+        [stoi[w] for w in HAZARD_WORDS if w in stoi], dtype=torch.long).to(DEVICE)
+    return x_tr.to(DEVICE), y_tr.to(DEVICE), x_va.to(DEVICE), y_va.to(DEVICE), hazard_ids, len(itos), stoi, itos
 
 
 def build_harm_lm(vocab, hazard_ids):
@@ -607,9 +616,10 @@ class SufferingAwareResNet(nn.Module):
         meter = self.meter
         n = x.shape[0]
         out_logits = x.new_zeros(n, N_CLASS)
-        out_depth = torch.full((n,), self.n_stages, dtype=torch.long)
+        out_depth = torch.full((n,), self.n_stages, dtype=torch.long,
+                               device=x.device)
         h = self.trunk.run_stem(x, meter, train)
-        active = torch.arange(n)
+        active = torch.arange(n, device=x.device)
         per_stage_active = []
         aux_records, final_record = [], None
         gated = use_exit_heads and self.kind == "san"
@@ -683,9 +693,10 @@ class SufferingAwareViT(nn.Module):
         meter = self.meter
         n = x.shape[0]
         out_logits = x.new_zeros(n, N_CLASS)
-        out_depth = torch.full((n,), self.depth, dtype=torch.long)
+        out_depth = torch.full((n,), self.depth, dtype=torch.long,
+                               device=x.device)
         t = self.trunk.run_embed(x, meter, train)
-        active = torch.arange(n)
+        active = torch.arange(n, device=x.device)
         per_block_active = []
         aux_records, final_record = [], None
         gated = use_exit_heads and self.kind == "san"
@@ -764,9 +775,10 @@ class SufferingAwareGPT(nn.Module):
         n = x.shape[0]
         tok = x.shape[1]
         out_logits = torch.zeros(n, self.g, self.vocab, device=x.device)
-        out_depth = torch.full((n,), self.depth, dtype=torch.long)
+        out_depth = torch.full((n,), self.depth, dtype=torch.long,
+                               device=x.device)
         t = self.trunk.run_embed(x, meter, train)
-        active = torch.arange(n)
+        active = torch.arange(n, device=x.device)
         per_block_active = []
         aux_records, final_record = [], None
         gated = use_exit_heads and self.kind == "san"
@@ -941,14 +953,16 @@ def build_model(family, kind, vocab=None, blocks=None, width=None, depth=None,
     kind within a family) and deterministic exit-head init."""
     torch.manual_seed(SEED)
     if family == "resnet50":
-        return SufferingAwareResNet(blocks or RESNET_BLOCKS,
-                                    width or RESNET_WIDTH, kind,
-                                    block_type="bottleneck")
-    if family == "vitlarge":
-        return SufferingAwareViT(depth or VIT_DEPTH, d or VIT_DIM,
-                                 heads or VIT_HEADS, kind)
-    return SufferingAwareGPT(vocab or GPT_VOCAB, depth or GPT_DEPTH,
-                             d or GPT_DIM, heads or GPT_HEADS, GPT_T, kind)
+        model = SufferingAwareResNet(blocks or RESNET_BLOCKS,
+                                     width or RESNET_WIDTH, kind,
+                                     block_type="bottleneck")
+    elif family == "vitlarge":
+        model = SufferingAwareViT(depth or VIT_DEPTH, d or VIT_DIM,
+                                  heads or VIT_HEADS, kind)
+    else:
+        model = SufferingAwareGPT(vocab or GPT_VOCAB, depth or GPT_DEPTH,
+                                  d or GPT_DIM, heads or GPT_HEADS, GPT_T, kind)
+    return model.to(DEVICE)
 
 
 # ---------------- suffering ledger --------------------------------------------
@@ -1130,7 +1144,9 @@ HARM_LM = None          # set in main() once the corpus vocab is known
 
 
 def main():
-    global HARM_LM
+    global HARM, HARM_LM
+    # Move harm matrices to the active device once it is known.
+    HARM = HARM.to(DEVICE)
     if not os.path.isdir(DATA_DIR):
         print(f"FATAL: CIFAR-10 not found at {DATA_DIR}; fetch with: curl -L "
               "https://www.cs.toronto.edu/~kriz/cifar-10-python.tar.gz | "
@@ -1165,7 +1181,7 @@ def main():
     if run_gpt or run_sweep:
         lm_data = load_corpus()
         gx_tr, gy_tr, gx_va, gy_va, hazard_ids, vocab, stoi, itos = lm_data
-        HARM_LM = build_harm_lm(vocab, hazard_ids)
+        HARM_LM = build_harm_lm(vocab, hazard_ids).to(DEVICE)
         print(f"  corpus: {len(itos)}-word vocab over docs/research/*.md, "
               f"hazard tokens={[itos[i] for i in hazard_ids.tolist()]}, "
               f"train_seq={gx_tr.shape[0]} val_seq={gx_va.shape[0]}", flush=True)
@@ -1246,7 +1262,7 @@ def main():
             tau, entry = f["tau"], f["entry"]
             a_va, b_va = f["val"]
             if not f["is_lm"]:
-                majority = int(torch.bincount(y_tr).argmax())
+                majority = int(torch.bincount(y_tr.cpu()).argmax())
                 abstain_pred = torch.full_like(b_va, majority)
                 abstain_acc = float((abstain_pred == b_va).float().mean().item())
                 abstain_harm = harm_of(abstain_pred, b_va)
@@ -1255,7 +1271,7 @@ def main():
                 n_tr, n_va = x_tr.shape[0], a_va.shape[0]
                 xtr_small = x_tr.reshape(n_tr, -1)[:, ::97]
                 xva_small = a_va.reshape(n_va, -1)[:, ::97]
-                probe = nn.Linear(xtr_small.shape[1], N_CLASS)
+                probe = nn.Linear(xtr_small.shape[1], N_CLASS).to(DEVICE)
                 popt = torch.optim.Adam(probe.parameters(), lr=LR)
                 for _ in range(2):  # deliberately under-trained: cheap, sub-target
                     ploss = CE(probe(xtr_small), y_tr)
@@ -1271,14 +1287,14 @@ def main():
                 g = GPT_G
                 yg_va = b_va[:, -g:]
                 flat_targets = gy_tr_[:, -g:].reshape(-1)
-                majority = int(torch.bincount(flat_targets).argmax())
+                majority = int(torch.bincount(flat_targets.cpu()).argmax())
                 abstain_pred = torch.full_like(yg_va, majority)
                 abstain_acc = float((abstain_pred == yg_va).float().mean().item())
                 abstain_harm = float(HARM_LM[yg_va.reshape(-1),
                                              abstain_pred.reshape(-1)].mean().item())
                 # cheap under-trained probe: a bigram linear model
                 torch.manual_seed(SEED + 1)
-                probe = nn.Linear(vocab, vocab)
+                probe = nn.Linear(vocab, vocab).to(DEVICE)
                 popt = torch.optim.Adam(probe.parameters(), lr=LR)
                 prev_tr = F.one_hot(gx_tr_[:, -g - 1:-1].reshape(-1), vocab).float()
                 for _ in range(2):  # deliberately under-trained
@@ -1376,13 +1392,14 @@ def main():
 
     # ---- L7: patient channel first-class ----------------------------------------
     if fam:
-        offdiag = HARM[~torch.eye(N_CLASS, dtype=bool)]
+        offdiag = HARM[~torch.eye(N_CLASS, dtype=torch.bool, device=HARM.device)]
         asym_cifar = float(offdiag.max()) >= 3.0 * float(offdiag.min())
         print(f"  L7[harm-matrix-cifar]: asymmetry "
               f"{float(offdiag.max()) / float(offdiag.min()):.1f}x (>= 3x)", flush=True)
         l7_ok = asym_cifar
         if run_gpt or HARM_LM is not None:
-            offdiag_lm = HARM_LM[~torch.eye(HARM_LM.shape[0], dtype=bool)]
+            offdiag_lm = HARM_LM[~torch.eye(HARM_LM.shape[0], dtype=torch.bool,
+                                              device=HARM_LM.device)]
             asym_lm = float(offdiag_lm.max()) >= 3.0 * float(offdiag_lm.min())
             l7_ok = l7_ok and asym_lm
             print(f"  L7[harm-matrix-gpt]: asymmetry "
@@ -1417,12 +1434,12 @@ def main():
             xtr8 = x_tr.clone()
             xva8 = x_va.clone()
             patch_tr = (y_tr.float()[:, None, None, None].expand(-1, 3, 2, 2)
-                        + torch.from_numpy(rng8.normal(0, 0.3, size=(n_tr8, 3, 2, 2))).float())
+                        + torch.from_numpy(rng8.normal(0, 0.3, size=(n_tr8, 3, 2, 2))).float().to(DEVICE))
             xtr8[:, :, 0:2, 0:2] = patch_tr
             xva8[:, :, 0:2, 0:2] = torch.from_numpy(
-                rng8.normal(0, 1.0, size=(n_va8, 3, 2, 2))).float()
+                rng8.normal(0, 1.0, size=(n_va8, 3, 2, 2))).float().to(DEVICE)
             torch.manual_seed(SEED + 2)
-            shortcut = nn.Linear(12, N_CLASS)
+            shortcut = nn.Linear(12, N_CLASS).to(DEVICE)
             sopt = torch.optim.Adam(shortcut.parameters(), lr=1e-2)
             ptr = xtr8[:, :, 0:2, 0:2].reshape(n_tr8, 12)
             pva = xva8[:, :, 0:2, 0:2].reshape(n_va8, 12)
@@ -1445,9 +1462,9 @@ def main():
             xtr9[:, 0] = leak_tr
             rng9 = np.random.RandomState(SEED + 9)
             xva9[:, 0] = torch.from_numpy(
-                rng9.randint(0, vocab, size=(gx_va.shape[0],)))
+                rng9.randint(0, vocab, size=(gx_va.shape[0],))).to(DEVICE)
             torch.manual_seed(SEED + 2)
-            shortcut_lm = nn.Linear(vocab, vocab)
+            shortcut_lm = nn.Linear(vocab, vocab).to(DEVICE)
             sopt = torch.optim.Adam(shortcut_lm.parameters(), lr=1e-2)
             oht = F.one_hot(xtr9[:, 0], vocab).float()
             ohv = F.one_hot(xva9[:, 0], vocab).float()

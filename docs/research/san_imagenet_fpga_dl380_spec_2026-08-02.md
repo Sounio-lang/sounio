@@ -336,3 +336,50 @@ limits stated, not as extrapolations.
 The only remaining `ESTIMATE` is full ImageNet-1k completo accuracy; the
 U250, the DL380, the bitstream, and a real-image SAN scan are now
 measured.
+
+### 13.4 U250 on-target benchmark campaign (2026-08-04, measured)
+
+A single campaign ran `host_san_scan` (correctness + single-shot throughput)
+and `host_san_scan_bench` (sustained throughput, 10 s) for every staged
+cohort on the DL380 U250. All four datasets are bit-exact against the
+golden model:
+
+| dataset | n | points | single-shot (Msamples/s) | sustained (Msamples/s) | result |
+|---|---|---|---|---|---|
+| val_resnet | 5 000 | 5 | 24.2 | 146.7 | `HOST_SAN_SCAN_PASS` |
+| val_vit | 5 000 | 7 | 43.0 | 146.9 | `HOST_SAN_SCAN_PASS` |
+| stress_1p2M | 1 200 000 | 5 | 481.9 | 511.0 | `HOST_SAN_SCAN_PASS` |
+| val_imagenette | 3 925 | 5 | 24.1 | 122.2 | `HOST_SAN_SCAN_PASS` |
+
+Interpretation: the 1.2 M stress cohort reaches **511 Msamples/s** sustained,
+95% of the theoretical 540.8 Msamples/s peak at the achieved 135.2 MHz clock
+(§13.2). The smaller cohorts are enqueue/sync dominated; their sustained
+numbers are lower because the fixed launch cost is amortised over fewer
+samples per iteration. The card now passes on synthetic cohorts, real
+photographs, and ImageNet-completo-sized stress in one sweep.
+
+### 13.5 GPU scale pilot — SAN-ResNet-50 on Slurm gpu-orangefs (2026-08-04, measured)
+
+The SAN large-architecture harness (`scripts/research/suffering_aware_large_architecture.py`)
+was adapted for CUDA (`SAN_LARGE_DEVICE`) and submitted to the Slurm
+`gpu-orangefs` partition. Pilot leg: **SAN-ResNet-50 on CIFAR-10** (4 k
+train / 1 k val, 8-epoch budget) on an **NVIDIA RTX A5000**.
+
+Result (`artifacts/san_large/gpu_resnet50_run_8584.txt`):
+
+- SAN reached feasibility at **t* = 4** (val acc 0.392 ≥ τ = 0.34) and
+  stopped there; gratuitous machine suffering = 0.
+- Dense ran the full 8 epochs; EarlyStop stopped at t* = 1.
+- Integrated machine suffering: **SAN 160.1 TMAC vs Dense 269.9 TMAC**
+  (**40.7% less**) and EarlyStop 67.5 TMAC.
+- Per-epoch machine suffering: **SAN 32.0 TMAC vs Dense 33.7 TMAC**
+  (**5.1% less**) — the exit-head overhead is small.
+- Contract clauses: **L1–L4, L6–L8 PASS; L5 FAIL** because SAN integrated
+  patient harm (5.31) is higher than EarlyStop's (2.17). This is the same
+  honest two-channel tradeoff the spec reports for ViT-large at ImageNet
+  scale (§7): not every family dominates on every channel simultaneously.
+  The machine-channel savings are real and measured.
+
+The harness is now GPU-enabled and the submission path
+(`slurm-jobs/san-large-gpu/submit.sh`) is working; remaining legs
+(ViT-large, GPT) can be launched with the same script.
