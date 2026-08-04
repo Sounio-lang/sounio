@@ -4,7 +4,8 @@
 # If no providers specified, fans out to the default 5 (diverse consensus set).
 #
 # Available providers:
-#   deepseek     — DeepSeek Coder (code intuition, different training data)
+#   deepseek     — DeepSeek V4 Pro (reasoning; 'deepseek-coder' silently
+#                  resolved to the weaker v4-flash and is no longer a listed model)
 #   xai|grok     — Grok 4.3 (primary adversarial math/review lane)
 #   xai-fast     — Grok 4.1 Fast Reasoning (lower-latency fallback)
 #   zai|glm      — Z.AI GLM-5.2 direct (independent math/review provider)
@@ -83,7 +84,7 @@ run_provider() {
     case "$p" in
         deepseek)
             [[ -n "${DEEPSEEK_API_KEY:-}" ]] && \
-            call_openai_compat "DeepSeek" "https://api.deepseek.com" "$DEEPSEEK_API_KEY" "deepseek-coder" "$OUTDIR/deepseek.json"
+            call_openai_compat "DeepSeek" "https://api.deepseek.com" "$DEEPSEEK_API_KEY" "deepseek-v4-pro" "$OUTDIR/deepseek.json"
             ;;
         xai|grok)
             [[ -n "${XAI_API_KEY:-}" ]] && \
