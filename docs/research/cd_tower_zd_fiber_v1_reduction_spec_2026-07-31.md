@@ -1818,7 +1818,9 @@ lowest bit, so the base is the single family `W = 2^(n−2)`, and its graph is c
 
 - one isolated vertex, `a = W` (the known isolated vertex);
 - on the remaining `N = 2^(n−1) − 2` vertices, **`K_N` minus the perfect matching `a ↔ a ⊕ W`** —
-  every vertex has exactly one non-neighbour, and `t2 = N(N−2)` confirms the regularity;
+  every vertex has exactly one non-neighbour, and `t2 = N(N−2)` confirms the regularity.
+  ⚠ **This is a THEOREM, not a measurement** — `Qgen'_pow2_eq` (`:4587`), see §39.2; this section
+  originally mislabelled it;
 - **every triangle has sign product `−1`** — measured, and pinned by `tr(A³) = −tr(|A|³)` exactly.
   (Note the sign: all triangles `−1` is the OPPOSITE of *balanced*; a balanced signed graph has
   every cycle `+1`.)
@@ -2299,3 +2301,81 @@ rather than by a family of measurements.
 **(III) is still reduced, not proven.** `tr(A³)`'s absolute closed form, (d) and V1 untouched.
 
 Reproduce: `python3 scripts/research/zd_v1_III_curvature_sum_probe.py`.
+
+## §39 — The finite clause is not new content, and half of it was already a theorem (`W42`, 2026-08-04)
+
+§38 left `Σ K_j = −1728·[j,3]₂` as the open clause. Attacking it directly collapses it.
+
+### 39.1 The clause IS §17.2
+
+At `n = j+2` the class size is `1`, so by definition
+
+```
+Σ K_j = δ(j+2, j) = tr(A³)(j+2, 2^j) − tr(A³)(j+2, 1)
+```
+
+— the seam label `2^j = 2^(n−2)` against the `y = 0` Fano representative, at the same level. §33.5(C)
+gives the first term as `−N(N−2)(N−4)`, `N = 2^(n−1) − 2 = 2q − 2`, `q = 2^j`. Substituting and
+comparing coefficients in `q` (exact, over ℚ):
+
+```
+−1728·[j,3]₂           has q-coefficients ( 576/7, −144,  72, −72/7 )
+tr(A³)(2^j) − tr(A³)(1) has the same, iff  tr(A³)(1) = (2/7)(2q−2)(2q−4)(2q−15)
+```
+
+and that right-hand side **is §17.2**, the `y = 0` closed form, measured since `W24`. So:
+
+> **Given §33.5(C), the finite clause and §17.2 are the same statement**, an identity of cubics in
+> `q = 2^j`. Checked as a polynomial identity and numerically at `j = 3…13`.
+
+The clause was never independent open content. What §38's ladder measured, eleven times, was §17.2
+in another coordinate.
+
+### 39.2 §33.5(C)'s first half is a THEOREM, already in the file
+
+§33.5(C) listed the graph structure of `W = 2^(n−2)` as measured. It is not — it is
+`Qgen'_pow2_eq` (`:4587`), proven ∀n:
+
+```lean
+Qgen'_pow2_eq : a ≠ 0 → b ≠ 0 → a ≠ b →
+    Qgen' (2^k) a b m = if a = 2^k ∨ b = a ^^^ 2^k then 1 else -1
+```
+
+`+1` on exactly two lines — `a = W` (the isolated vertex) and `b = a ⊕ W` (the perfect matching) —
+and `−1`, i.e. an edge, everywhere else. That is precisely "`K_N` minus the coset matching, plus one
+isolated vertex", with no counting argument needed. The edge count it forces,
+`(H−2)(H−4) = N(N−2)`, is `Ncnt_pow2`'s value, which is the consistency check.
+
+**Correction to §33.5(C):** that bullet is proven, not measured, and this spec said otherwise.
+
+### 39.3 The second half reduces to one explicit entry formula
+
+What remained was "every triangle has sign product `−1`" — a global statement. It is a coboundary,
+and the coboundary is **trivial**:
+
+> **`A_σ(a,b) = −μ(a)·μ(b)` on every edge, with `μ(a) = −1 iff a ∧ W ≠ 0`.**
+> In words: the entry is `−1` when `a` and `b` lie on the **same side of the label's bit** and `+1`
+> when they **straddle** it.
+
+Measured at `n = 6…12` — **5.5M edges, 0 exceptions**. (Found by building `μ` along a spanning tree
+and reading it off; the earlier failed coboundary test in §33.5 used a base vertex whose one
+non-neighbour poisoned the propagation.)
+
+Given that formula, `tr(A³) = Σ_T (−μμ)³ = −Σ_T μ(a)²μ(b)²μ(c)² = −#T` in one line, which is
+§33.5(C)'s value.
+
+### 39.4 The ledger, after this rung
+
+| statement | status |
+|---|---|
+| the graph of `W = 2^(n−2)` is `K_N` minus the coset matching, plus one isolated vertex | **THEOREM ∀n** (`Qgen'_pow2_eq`) |
+| `A_σ(a,b) = −μ(a)μ(b)`, `μ(a) = −1 iff a ∧ W ≠ 0` | MEASURED, `n = 6…12`, 5.5M edges |
+| ⟹ `tr(A³)(2^(n−2)) = −N(N−2)(N−4)` | one line from the two above |
+| §17.2: `tr(A³)(y=0) = (2/7)(2^m−2)(2^m−4)(2^m−15)` | MEASURED |
+| **`Σ K_j = −1728·[j,3]₂`** | **⟺ §17.2**, given the two above — proven equivalence, this rung |
+
+So the finite clause is not proven, but it is no longer a separate target: it is §17.2, and the
+route to it is one explicit sign identity plus a closed form the lane has carried since `W24`.
+The `j`-ladder can stop; extending it re-measures §17.2.
+
+**(III) is still reduced, not proven.** (d) and V1 untouched.
