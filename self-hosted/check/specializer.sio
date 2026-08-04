@@ -1254,36 +1254,92 @@ pub fn spec_append_item_lists(a: Option<Box<ItemList>>, b: Option<Box<ItemList>>
 //
 // Seed-safe: local i64 hash tables only (no Name/Option globals).
 
-let SPEC_DCE_MAX: i64 = 512
+// WHY THIS TABLE IS A HASH SET AND NOT A LIST.
+//
+// It used to be `[i64; 512]` scanned linearly, and both halves of that were
+// load-bearing in the wrong direction.
+//
+// The FATAL half: when the list was full, spec_dce_hash_insert returned false
+// and inserted nothing — silently. A callee whose mark could not be recorded is
+// then not found by spec_dce_filter_items, and filter_items DELETES every
+// top-level ItemFn it cannot find. So past 512 distinct reachable names this
+// pass did not merely stop optimising, it started removing live functions from
+// the program. Measured on 2026-08-04: a name-based reachability census over
+// main.sio's own 120-module closure marks 5889 names. The compiler was 11x past
+// the point where its own dead-code pass begins deleting reachable code.
+//
+// It compounded: spec_dce_scan_item_if_marked reports "changed" as
+// `*count > before`, and once the table is full nothing can be inserted, so
+// `changed` is false and the fixed-point loop EXITS SATISFIED with the mark set
+// incomplete. A saturated table looked exactly like convergence.
+//
+// The LINEAR half is why the cap could not simply be raised: find is O(count),
+// run for every item on every round, so at 16k marks over ~10k items the pass
+// would be quadratic and the build would not finish. Open addressing makes the
+// cap affordable, which is what makes the refusal below affordable too.
+//
+// The table is a power of two so the probe wraps by mask, and 0 stays the empty
+// sentinel — ast_name_hash returns |hash| and insert rejects 0, so no live name
+// can be confused with an empty slot.
+let SPEC_DCE_SLOTS: i64 = 16384
+let SPEC_DCE_SLOT_MASK: i64 = 16383
+// 50% load. Past this the probe lengths stop being constant and, more to the
+// point, the pass must refuse rather than guess.
+let SPEC_DCE_MAX: i64 = 8192
+// Fixed-point rounds. Was the same constant as the table size, which meant
+// nothing in particular; reachability over this graph converges in far fewer.
+let SPEC_DCE_MAX_ROUNDS: i64 = 64
 
-fn spec_dce_hash_find(marks: &[i64; 512], count: i64, h: i64) -> bool {
-    var i: i64 = 0
-    while i < count {
-        if marks[i as usize] == h {
+fn spec_dce_hash_find(marks: &[i64; 16384], count: i64, h: i64) -> bool with Mut, Panic, Div {
+    if h == 0 {
+        return false
+    }
+    var slot = h % SPEC_DCE_SLOTS
+    var probes: i64 = 0
+    while probes < SPEC_DCE_SLOTS {
+        let cur = marks[slot as usize]
+        if cur == 0 {
+            return false
+        }
+        if cur == h {
             return true
         }
-        i = i + 1
+        slot = (slot + 1) % SPEC_DCE_SLOTS
+        probes = probes + 1
     }
     false
 }
 
-fn spec_dce_hash_insert(marks: &! [i64; 512], count: &! i64, h: i64) -> bool with Mut {
+fn spec_dce_hash_insert(marks: &! [i64; 16384], count: &! i64, h: i64) -> bool with Mut, Panic, Div {
     if h == 0 {
         return false
     }
-    if spec_dce_hash_find(marks, *count, h) {
-        return false
-    }
     if *count >= SPEC_DCE_MAX {
+        // Do NOT insert and do NOT pretend this was a no-op: the caller reads
+        // *count against SPEC_DCE_MAX and abandons filtering entirely. Silence
+        // here is what deleted live code before.
         return false
     }
-    marks[(*count) as usize] = h
-    *count = *count + 1
-    true
+    var slot = h % SPEC_DCE_SLOTS
+    var probes: i64 = 0
+    while probes < SPEC_DCE_SLOTS {
+        let cur = marks[slot as usize]
+        if cur == h {
+            return false
+        }
+        if cur == 0 {
+            marks[slot as usize] = h
+            *count = *count + 1
+            return true
+        }
+        slot = (slot + 1) % SPEC_DCE_SLOTS
+        probes = probes + 1
+    }
+    false
 }
 
 // Walk an expression tree; insert callee / method name hashes into `marks`.
-fn spec_dce_scan_expr(e: Expr, marks: &! [i64; 512], count: &! i64) with Mut, Panic, Div {
+fn spec_dce_scan_expr(e: Expr, marks: &! [i64; 16384], count: &! i64) with Mut, Panic, Div {
     if e.kind == ExprKind::ExprCall {
         let callee = spec_call_expr_callee_name(e)
         if !name_is_empty(callee) {
@@ -1379,7 +1435,7 @@ fn spec_dce_scan_expr(e: Expr, marks: &! [i64; 512], count: &! i64) with Mut, Pa
     }
 }
 
-fn spec_dce_scan_block(b: Block, marks: &! [i64; 512], count: &! i64) with Mut, Panic, Div {
+fn spec_dce_scan_block(b: Block, marks: &! [i64; 16384], count: &! i64) with Mut, Panic, Div {
     var cur = b.stmts
     var going = true
     while going {
@@ -1405,7 +1461,7 @@ fn spec_dce_scan_block(b: Block, marks: &! [i64; 512], count: &! i64) with Mut, 
 // was inserted.
 fn spec_dce_scan_item_if_marked(
     it: Item,
-    marks: &! [i64; 512],
+    marks: &! [i64; 16384],
     count: &! i64
 ) -> bool with Mut, Panic, Div {
     let before = *count
@@ -1475,7 +1531,7 @@ fn spec_dce_scan_item_if_marked(
 
 fn spec_dce_scan_list_if_marked(
     items: Option<Box<ItemList>>,
-    marks: &! [i64; 512],
+    marks: &! [i64; 16384],
     count: &! i64
 ) -> bool with Mut, Panic, Div {
     var changed = false
@@ -1538,7 +1594,7 @@ fn spec_dce_count_item_fns(items: Option<Box<ItemList>>) -> i64 with Mut, Panic,
 // non-fn item (and keep order of survivors).
 fn spec_dce_filter_items(
     items: Option<Box<ItemList>>,
-    marks: &[i64; 512],
+    marks: &[i64; 16384],
     mark_count: i64
 ) -> Option<Box<ItemList>> with Mut, Alloc, Panic, Div {
     match items {
@@ -1567,20 +1623,49 @@ pub fn spec_dce_unreachable_item_fns(
     if !spec_dce_has_main(items) {
         return items
     }
-    var marks: [i64; 512] = [0; 512]
+    var marks: [i64; 16384] = [0; 16384]
     var mark_count: i64 = 0
     let main_h = ast_name_hash(make_name("main"))
     var _seeded = spec_dce_hash_insert(&! marks, &! mark_count, main_h)
 
     // Fixed-point: scan bodies of marked callables, extend mark set.
+    //
+    // `changed` is only trustworthy while the table can still accept marks.
+    // When it cannot, `changed` is false for a reason that has nothing to do
+    // with convergence, so the round count alone must not be read as "done" —
+    // that is checked separately below, against mark_count, not against this
+    // loop's exit.
     var fuel: i64 = 0
     var going = true
     while going {
         let changed = spec_dce_scan_list_if_marked(items, &! marks, &! mark_count)
         fuel = fuel + 1
-        if !changed || fuel > SPEC_DCE_MAX {
+        if !changed || fuel > SPEC_DCE_MAX_ROUNDS {
             going = false
         }
+    }
+
+    // REFUSE RATHER THAN DELETE. Filtering is only sound if the mark set is
+    // complete, and it is complete only if nothing was ever turned away. A
+    // saturated table and a converged one are indistinguishable from the loop
+    // above, so the test is on capacity: at the limit, hand back the input
+    // untouched. The cost of refusing is a larger IrModule; the cost of
+    // filtering against a truncated mark set is a compiler with live functions
+    // missing, which is what this pass did before.
+    //
+    // Rounds are checked too, for the same reason: exhausting them means the
+    // reachable set was still growing when the loop stopped.
+    if mark_count >= SPEC_DCE_MAX || fuel > SPEC_DCE_MAX_ROUNDS {
+        print("spec_dce: REFUSING to filter — the mark set is not complete (marks ")
+        print_int(mark_count)
+        print(" of ")
+        print_int(SPEC_DCE_MAX)
+        print(", rounds ")
+        print_int(fuel)
+        print(" of ")
+        print_int(SPEC_DCE_MAX_ROUNDS)
+        print("). Every top-level fn is kept; the module will be larger than it needs to be.\n")
+        return items
     }
 
     let before_fns = spec_dce_count_item_fns(items)

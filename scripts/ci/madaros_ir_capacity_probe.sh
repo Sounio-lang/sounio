@@ -146,11 +146,23 @@ fi
 
 if [[ "$TOTAL" -gt "$IR_MAX_FUNCS" ]]; then
   gate_fail "$ENTRY's import closure declares $TOTAL functions against IR_MAX_FUNCS=$IR_MAX_FUNCS.
-Every one that survives to lowering needs a slot in a single merged IrModule, and
-ir_merge_modules_into stops copying at the cap without a diagnostic. This is the
-codegen wall for self-compilation, and it is a capacity constraint, not a bug list.
-Do not close this by raising IR_MAX_FUNCS: IrFunction.instrs is [IrInstr; 4096],
-roughly 1 MB per function, against an RW segment already carrying 3.40 GB of BSS."
+Every one that survives to lowering needs a slot in a single merged IrModule.
+
+This limit is REPORTED, not silent — verified 2026-08-04 with a 9002-function
+witness: 'too many functions: shared IR module capacity exceeded (max 2048
+slots)', rc=1, no ELF. So the wall is honest; it is just a wall.
+
+Cross-module DCE (spec_dce_unreachable_item_fns) does not clear it either. A
+name-based reachability census from main over this closure leaves 5997
+declarations live, and 3988 even with the whole test suite cut out of the graph.
+Both are over 2048.
+
+The memory arithmetic behind the constant: IrInstr is ~248 bytes, of which 136
+is an inline Name that most instructions never use; IrFunction.instrs is
+[IrInstr; 4096] ~= 0.97 MB; IrModule.functions is [IrFunction; 2048] ~= 2.1 GB
+of the shipped ELF's 3.40 GB BSS. Interning IrInstr.name would halve the
+instruction and buy 4096 slots at today's memory — that is the change this
+number is asking for, not a bigger constant on the same layout."
 fi
 
 gate_pass "$TOTAL fn declarations across $NODES closure nodes fit IR_MAX_FUNCS=$IR_MAX_FUNCS"
