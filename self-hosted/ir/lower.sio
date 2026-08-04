@@ -158,6 +158,38 @@ let LOWER_GLOBAL_ARRAY: i64 = 4
 // else-branch of Lowerer::emit.
 var IR_INSTR_WALL_LAST_FN: i64 = -1
 
+// #1645: a DURABLE record that lowering hit a hard capacity wall.
+//
+// Lowerer is threaded by VALUE. `emit` writes the instruction through
+// `lo.current_func`, which is a Box -- so a dropped instruction is permanent and
+// visible in the finished module -- but `had_error` and `error_count` are plain
+// scalar fields of the Lowerer value. Any link in the lowering chain that
+// discards the Lowerer it was returned loses the flag while KEEPING the
+// truncation. Measured: a `main` past IR_MAX_INSTRS reaches
+// module_frontend with instr_count pinned at 4096 and had_error FALSE, so every
+// one of the six `if body_result.had_error` checks passes and the driver writes
+// a truncated binary and exits 0.
+//
+// Rather than hunt every discard site in an expression-lowering chain that is
+// thousands of lines wide -- and re-hunt them after the next edit -- the signal
+// is recorded somewhere value semantics cannot reach. It is OR-ed into every
+// IrLowerResult/IrLowerBoxResult at construction, so all existing consumers of
+// had_error start working without changing any of them.
+//
+// Reset per COMPILE (lower_hard_error_reset, called from
+// module_frontend_global_init_compile_begin), never per pass: a single compile
+// runs several lowering passes and an intermediate one may be discarded, but a
+// program that exceeded a hard limit in ANY non-probe pass has exceeded it.
+var IR_LOWER_HARD_ERROR: i64 = 0
+
+pub fn lower_hard_error_pending() -> bool { IR_LOWER_HARD_ERROR != 0 }
+
+pub fn lower_hard_error_reset() with Mut { IR_LOWER_HARD_ERROR = 0 }
+
+// OR the durable flag into a value-threaded had_error. Used at every
+// IrLowerResult/IrLowerBoxResult construction site.
+pub fn lower_had_error_with_hard(v: bool) -> bool { v || IR_LOWER_HARD_ERROR != 0 }
+
 var FO_XFER_COUNT: i64 = 0
 var FO_XFER_KIND: [i64; 64] = [0; 64]
 var FO_XFER_LIT: [f64; 64] = [0.0; 64]
@@ -8590,17 +8622,20 @@ impl Lowerer {
             // the #1586 failure: the tail of a function is simply not lowered, so
             // the program compiles, exits 0, and prints nothing after the cut.
             //
-            // report_error() below is NOT enough on its own, and that is the point
-            // of printing here. Measured: a 160-comparison main trips this wall,
-            // report_error() runs, and the driver still exits 0 with a truncated
-            // binary -- the had_error flag does not reach the exit code. Making
-            // THAT propagate is a separate change; until it does, a build log that
-            // says nothing is the worst of the available options.
+            // report_error() below is NOT enough on its own: the Lowerer is
+            // threaded by value and the flag gets discarded somewhere in the
+            // chain while the truncation -- written through a Box -- survives.
+            // IR_LOWER_HARD_ERROR is the durable channel that fixes that (#1645);
+            // see its declaration. probe passes are excluded because they lower
+            // speculatively and their result is meant to be thrown away.
             //
             // Printed once per FUNCTION, not once per dropped instruction, and
             // deliberately NOT gated on error_count: a function that already had
             // an unrelated lowering error would then hit this wall in silence,
             // which is the exact property this diagnostic exists to remove.
+            if !lo.probe_mode {
+                IR_LOWER_HARD_ERROR = 1
+            }
             if IR_INSTR_WALL_LAST_FN != lo.current_fn {
                 IR_INSTR_WALL_LAST_FN = lo.current_fn
                 print("error: function `")
@@ -15545,7 +15580,7 @@ fn lower_program_to_ir_staged_with_lowerer_box_trace_ref(
     IrLowerBoxResult {
         module: lo2.module,
         error_count: lo2.error_count,
-        had_error: lo2.had_error,
+        had_error: lower_had_error_with_hard(lo2.had_error),
         patch_stats: (*patch_stats),
     }
 }
@@ -15739,7 +15774,7 @@ fn lower_program_to_ir_summary_flat_with_epistemic_ref(prog: &Program, epistemic
             probe_mode: lo2.probe_mode,
         },
         error_count: lo2.error_count,
-        had_error: lo2.had_error,
+        had_error: lower_had_error_with_hard(lo2.had_error),
     }
 }
 
@@ -15765,7 +15800,7 @@ fn lower_program_to_ir_probe_ref(prog: &Program) -> IrLowerResult with Mut, Pani
     IrLowerResult {
         module: *lo2.module,
         error_count: lo2.error_count,
-        had_error: lo2.had_error,
+        had_error: lower_had_error_with_hard(lo2.had_error),
         patch_stats: patch_stats,
     }
 }
@@ -15780,7 +15815,7 @@ fn lower_program_to_ir_probe_summary_ref(prog: &Program) -> IrLowerResult with M
     IrLowerResult {
         module: *lo2.module,
         error_count: lo2.error_count,
-        had_error: lo2.had_error,
+        had_error: lower_had_error_with_hard(lo2.had_error),
         patch_stats: ir_empty_validated_patch_stats(),
     }
 }
@@ -15826,7 +15861,7 @@ fn lower_program_function_body_from_summary_with_epistemic_ref(
     IrFunctionBodyResult {
         func: func,
         error_count: lo2.error_count,
-        had_error: lo2.had_error,
+        had_error: lower_had_error_with_hard(lo2.had_error),
         patch_stats: patch_stats,
     }
 }
@@ -15886,7 +15921,7 @@ fn lower_program_function_body_from_program_with_epistemic_ref(
     IrFunctionBodyResult {
         func: func,
         error_count: lo2.error_count,
-        had_error: lo2.had_error,
+        had_error: lower_had_error_with_hard(lo2.had_error),
         patch_stats: patch_stats,
     }
 }
@@ -15907,7 +15942,7 @@ fn lower_program_bodies_from_summary_with_epistemic_boxed_ref(
     IrLowerBoxResult {
         module: lo2.module,
         error_count: lo2.error_count,
-        had_error: lo2.had_error,
+        had_error: lower_had_error_with_hard(lo2.had_error),
         patch_stats: patch_stats,
     }
 }
@@ -15930,7 +15965,7 @@ pub fn lower_program_bodies_from_summary_with_epistemic_boxed_owned(
     IrLowerBoxResult {
         module: lo2.module,
         error_count: lo2.error_count,
-        had_error: lo2.had_error,
+        had_error: lower_had_error_with_hard(lo2.had_error),
         patch_stats: patch_stats,
     }
 }
@@ -16012,7 +16047,7 @@ pub fn lower_dep_program_items_into_acc_with_externs(
     IrLowerBoxResult {
         module: lo.module,
         error_count: lo.error_count,
-        had_error: lo.had_error,
+        had_error: lower_had_error_with_hard(lo.had_error),
         patch_stats: patch_stats,
     }
 }
@@ -16028,7 +16063,7 @@ pub fn lower_program_bodies_from_summary_flat_with_epistemic_ref(
     IrLowerBoxResult {
         module: lo2.module,
         error_count: lo2.error_count,
-        had_error: lo2.had_error,
+        had_error: lower_had_error_with_hard(lo2.had_error),
         patch_stats: patch_stats,
     }
 }
@@ -16069,7 +16104,7 @@ fn lower_program_to_ir_probe_callsite_ref(prog: &Program, caller_name: Name) -> 
     IrLowerResult {
         module: *lo2.module,
         error_count: lo2.error_count,
-        had_error: lo2.had_error,
+        had_error: lower_had_error_with_hard(lo2.had_error),
         patch_stats: patch_stats,
     }
 }
@@ -16112,7 +16147,7 @@ fn lower_program_to_ir_ordered_boxed_trace_ref(
     IrLowerBoxResult {
         module: lo2.module,
         error_count: lo2.error_count,
-        had_error: lo2.had_error,
+        had_error: lower_had_error_with_hard(lo2.had_error),
         patch_stats: (*patch_stats),
     }
 }
@@ -16133,7 +16168,7 @@ fn lower_program_to_ir_ordered_boxed_trace(
     IrLowerBoxResult {
         module: lo.module,
         error_count: lo.error_count,
-        had_error: lo.had_error,
+        had_error: lower_had_error_with_hard(lo.had_error),
         patch_stats: (*patch_stats),
     }
 }
@@ -16167,7 +16202,7 @@ pub fn lower_program_to_ir_ordered_with_epistemic_boxed_trace_ref(
     IrLowerBoxResult {
         module: lo2.module,
         error_count: lo2.error_count,
-        had_error: lo2.had_error,
+        had_error: lower_had_error_with_hard(lo2.had_error),
         patch_stats: (*patch_stats),
     }
 }
