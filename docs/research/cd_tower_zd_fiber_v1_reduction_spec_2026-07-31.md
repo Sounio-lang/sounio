@@ -2856,9 +2856,14 @@ statements about `A_σ` itself:
 
 > **`A_σ(X, y + h) = − A_σ(X, y)` for `X ∈ {h, W+h}`** — the hub rows are antisymmetric under adding
 > the top bit of the vertex range.
+>
+> ✅ **PROVEN ∀n** — `Asig_hub0` / `Asig_hubL` (Tier 38), kernel-clean. Four `cdSigma` evaluations
+> through `P1_red`/`P3_red`: `P1` **and** `P3` both flip, `antisym` supplies the sign where the
+> arguments swap, and `resB` cannot see the flip because `P1_symm`/`P3_symm` kill its first two
+> clauses and the third compares `−P1` with `−P3`.
 
-Plus S1's adjacency for the two hubs. Both are single-row statements about `σ`, of the same shape as
-§42's four-branch computation — not a global triangle sum.
+Plus S1's adjacency for the two hubs. **The relation is now a theorem; S1's hub adjacency is the last
+measured piece of `tr(E³)`**, and it is again a single-row statement about `σ`.
 
 > **Net effect on §45's ledger:** `tr(E³) = −24(h−2)` and `tr(BE²) = 0` are no longer independent
 > measured lines; the first reduces to S1 + one hub relation, with the matching/coset signs already
