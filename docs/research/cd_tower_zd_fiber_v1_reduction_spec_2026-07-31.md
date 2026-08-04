@@ -1482,3 +1482,41 @@ before being accepted:
 
 So neither hypothesis is convenience — each is necessary, and the second is the precise reason the
 contract states `E` on the **normalised** (hence odd) label rather than on `W`.
+
+
+## §30 — §7's indexing reconciled with `Ncnt`, and (II) is now a theorem
+
+§7 is written in **fibre coordinates**; `Ncnt` is written in **raw labels**. The dictionary:
+
+| §7 | `Ncnt` side |
+|---|---|
+| level `n` | `Ncnt` runs at `m = n − 1`; the level-`n` label is `Llo \| 2^(n−1)` and `Llo` is the raw label |
+| `tr(A²)` | `tr(A²) = Ncnt W m − (2^m − 2)` (the W16 bridge) |
+| fibre coordinate `y` | `g(W) = (W &&& (W−1)) >>> 3` — for odd `W`, `g(8y+1) = y` |
+| Fano orbit `y` | the representative label `8y + 1` |
+| the fibre of `y` | `{8y+1 … 8y+7}` ∪ the even labels clearing to `8y` |
+
+**`τ` lands on the Fano representative, not on `W &&& (W−1)`.** Measured, decisively:
+
+- reading A, `Ncnt W = Ncnt (W &&& (W−1))` — **1972/4012 FAIL**;
+- reading B, `Ncnt W = Ncnt (8·g(W)+1)` — **0/4072**, and this *is* `Ddig_gnorm`.
+
+So **(II) is not a measurement any more: it is `Ddig_gnorm`, proven ∀n today.** The earlier
+"0 exceptions" in §7's table can be replaced by a citation.
+
+A structural check rules reading A out independently of the counts: `tr(A²)` is **injective in
+`g`** — 8→8 fibres/values at `m=6`, 64→64 at `m=9`, 256→256 at `m=11` — so no reading of (II) may
+collapse two distinct `g`-values, which reading A would require.
+
+### What this does to (I) and (III)
+
+- **(I)** ("`tr(A²)` injective on the Fano orbits") is *weaker* than what is measured: `tr(A²)` is
+  injective in `g` on **all** labels, Fano and seam alike. It is now a statement purely about the
+  closed form `Ddig` — no `Qgen'` — hence attackable by the same machinery. Still measured.
+- **(III)** is sharpened, not helped. Inside one fibre every label has the **same** `tr(A²)` — at
+  `m=9`, `g=5`, labels 41…47 all give `142344`, and that is now a *theorem*, not an observation.
+  So `tr(A²)` provably contributes nothing inside a fibre, and (III)'s separation must come
+  entirely from `tr(A³)`. This is the trace-side restatement of the parity-blindness (W11).
+
+**Step 0 of any attack on (III) is therefore closed.** What remains open is unchanged: (III)
+itself, `tr(A³)`'s general closed form, (d), V1.
