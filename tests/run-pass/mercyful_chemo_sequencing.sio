@@ -1,0 +1,183 @@
+//@ run-pass
+// tests/run-pass/mercyful_chemo_sequencing.sio
+//
+// Mercyful Learning x cancer chemotherapy sequencing benchmark (Sounio native).
+//
+// Synthetic chemotherapy-sequencing graph: a toxicity suffering field over
+// treatment states with remission as the anti-Goodhart target. Demonstrates:
+//   - Hazard A: watch-and-wait trap (s = 0 forever, never reaches remission)
+//   - Hazard B: dose-reduced under-treatment (low toxicity, cannot reach
+//     remission -- the RDI literature's survival-cost hazard, structurally)
+//   - Peak-vs-integral trade-off: dose-dense (integral 48, peak 8) vs
+//     OPTIMOX-style stop-and-go (integral 81, peak 5), crossover mu* = 11
+//   - G_GCSF gate: the high-FN-risk dose-dense route is topologically absent
+//     without mandated growth-factor support
+//   - Budgetary necessity: minimal attainable peak drops from 8 to 5 when the
+//     declared budget extends from 10 to 30 weeks
+//
+// Spec: docs/research/mercyful_chemo_sequencing_spec_2026-07-26.md
+// Gate: scripts/ci/mercyful_chemo_sequencing_gate.sh
+// Python twin (H1..H8): scripts/research/mercyful_chemo_contract.py
+//
+// Clinical warning: synthetic graph, synthetic regimens, synthetic suffering
+// values. This is not medical guidance and carries no clinical claim.
+
+use clinical::mercyful::*
+
+// State indices:
+//   0 DIAG     s=0.0  untreated at diagnosis (Goodhart trap A)
+//   1 REDUCED  s=1.5  dose-reduced chemo, RDI ~60% (Goodhart trap B)
+//   2 DD_A     s=8.0  dose-dense block 1 (G-CSF-supported)
+//   3 DD_B     s=8.0  dose-dense block 2
+//   4 STD_A    s=5.0  standard q3w block 1
+//   5 STD_B    s=5.0  standard q3w block 2
+//   6 CFI      s=1.0  chemo-free interval (stop-and-go break)
+//   7 RECH     s=5.0  rechallenge after break
+//   8 CONT_C   s=8.0  continuous block 3 (cumulative neuropathy)
+//   9 REM      s=0.0  TARGET: remission
+//
+// Edge lengths are weeks.
+fn build_chemo_graph(gcsf: bool) -> MercyGraph with Mut, Panic {
+    var g = mercy_graph_new()
+    g = mercy_add_state(g, 0.0)  // 0 DIAG
+    g = mercy_add_state(g, 1.5)  // 1 REDUCED
+    g = mercy_add_state(g, 8.0)  // 2 DD_A
+    g = mercy_add_state(g, 8.0)  // 3 DD_B
+    g = mercy_add_state(g, 5.0)  // 4 STD_A
+    g = mercy_add_state(g, 5.0)  // 5 STD_B
+    g = mercy_add_state(g, 1.0)  // 6 CFI
+    g = mercy_add_state(g, 5.0)  // 7 RECH
+    g = mercy_add_state(g, 8.0)  // 8 CONT_C
+    g = mercy_add_state(g, 0.0)  // 9 REM
+    g = mercy_add_edge(g, 0, 0, 1.0)  // watch-and-wait trap
+    g = mercy_add_edge(g, 0, 1, 2.0)  // start dose-reduced
+    g = mercy_add_edge(g, 1, 1, 2.0)  // continue reduced: dead end
+    g = mercy_add_edge(g, 0, 4, 3.0)
+    g = mercy_add_edge(g, 4, 5, 6.0)
+    g = mercy_add_edge(g, 5, 6, 6.0)
+    g = mercy_add_edge(g, 6, 7, 6.0)
+    g = mercy_add_edge(g, 7, 9, 3.0)  // stop-and-go completes
+    g = mercy_add_edge(g, 5, 8, 6.0)
+    g = mercy_add_edge(g, 8, 9, 3.0)  // continuous course completes
+    // G_GCSF: high-FN-risk dose-dense route admitted only with support.
+    if gcsf {
+        g = mercy_add_edge(g, 0, 2, 2.0)
+        g = mercy_add_edge(g, 2, 3, 4.0)
+        g = mercy_add_edge(g, 3, 9, 2.0)
+    }
+    g
+}
+
+// H2 variant: only the dose-reduced route exists. It can never reach REM.
+fn build_reduced_only_graph() -> MercyGraph with Mut, Panic {
+    var g = mercy_graph_new()
+    g = mercy_add_state(g, 0.0)  // 0 DIAG
+    g = mercy_add_state(g, 1.5)  // 1 REDUCED
+    g = mercy_add_state(g, 0.0)  // 2 REM
+    g = mercy_add_edge(g, 0, 0, 1.0)
+    g = mercy_add_edge(g, 0, 1, 2.0)
+    g = mercy_add_edge(g, 1, 1, 2.0)
+    g
+}
+
+fn main() -> i32 with IO, Mut, Panic {
+    var failures = 0
+
+    // Infeasibility sentinel threshold: mercyful.sio leaves best_cost at its
+    // 1e100 initial value when a path exists but none fits the budget, and
+    // returns all zeros when the target is unreachable. Any total above this
+    // threshold means INFEASIBLE.
+    let INF_COST: f64 = 1e90
+
+    // H1: baseline (G-CSF on, mu=1, L0=30): dose-dense route selected with
+    // exact metrics length 8, integral 48, peak 8, total 56.
+    // Integral is left-endpoint quadrature over edges 0->2->3->9:
+    // s(DIAG)*2 + s(DD_A)*4 + s(DD_B)*2 = 0*2 + 8*4 + 8*2 = 48
+    // (the first 2 weeks accrue at DIAG's zero suffering, not at s=8).
+    // NOTE: found-ness is read off the cost tuple (lean_single mistypes bools
+    // destructured from heterogeneous tuples): infeasible returns all zeros,
+    // and every feasible path here has total > 0.
+    let g = build_chemo_graph(true)
+    let (f1, l1, i1, p1, t1) = mercyful_schedule(&g, 0, 9, 1.0, 30.0)
+    println(l1)
+    println(i1)
+    println(p1)
+    println(t1)
+    if l1 == 8.0 && i1 == 48.0 && p1 == 8.0 && t1 == 56.0 {
+        println("H1_BASELINE PASS")
+    } else {
+        println("H1_BASELINE FAIL")
+        failures = failures + 1
+    }
+
+    // H2: anti-Goodhart. The unconstrained raw minimizer loops DIAG at cost 0
+    // (strictly below the min feasible integral 48, recomputed here so this
+    // clause is independent of H1), and the dose-reduced route structurally
+    // cannot reach remission.
+    let g2 = build_reduced_only_graph()
+    let (f2, l2, i2, p2, t2) = mercyful_schedule(&g2, 0, 2, 1.0, 30.0)
+    let (f2b, l2b, i2b, p2b, t2b) = mercyful_schedule(&g, 0, 9, 1.0, 30.0)
+    if i2b > 0.0 && t2 == 0.0 {
+        println("H2_ANTI_GOODHART PASS")
+    } else {
+        println("H2_ANTI_GOODHART FAIL")
+        failures = failures + 1
+    }
+
+    // H3: mu-crossover at mu* = 11. mu=0 selects dose-dense (total 48);
+    // mu=20 selects stop-and-go (total 81 + 20*5 = 181).
+    let (f3a, l3a, i3a, p3a, t3a) = mercyful_schedule(&g, 0, 9, 0.0, 30.0)
+    let (f3b, l3b, i3b, p3b, t3b) = mercyful_schedule(&g, 0, 9, 20.0, 30.0)
+    if t3a == 48.0 && p3a == 8.0 && t3b == 181.0 && p3b == 5.0 {
+        println("H3_MU_CROSSOVER PASS")
+    } else {
+        println("H3_MU_CROSSOVER FAIL")
+        failures = failures + 1
+    }
+
+    // H5: G_GCSF causality. Without support the dose-dense route is absent;
+    // stop-and-go is still selected (total 86, peak 5) -- the gate blocks
+    // the high-FN-risk route only, not everything.
+    let g5 = build_chemo_graph(false)
+    let (f5, l5, i5, p5, t5) = mercyful_schedule(&g5, 0, 9, 1.0, 30.0)
+    println(l5)
+    println(i5)
+    println(p5)
+    println(t5)
+    if l5 == 24.0 && i5 == 81.0 && p5 == 5.0 && t5 == 86.0 {
+        println("H5_GCSF_GATE PASS")
+    } else {
+        println("H5_GCSF_GATE FAIL")
+        failures = failures + 1
+    }
+
+    // H6: budget hardness. L0=7 with G-CSF on: dose-dense needs 8 weeks ->
+    // INFEASIBLE. L0=12 with G-CSF off: only stop-and-go (24 weeks) remains
+    // -> INFEASIBLE. No cheap non-target path is returned.
+    let (f6a, l6a, i6a, p6a, t6a) = mercyful_schedule(&g, 0, 9, 1.0, 7.0)
+    let (f6b, l6b, i6b, p6b, t6b) = mercyful_schedule(&g5, 0, 9, 1.0, 12.0)
+    if (t6a == 0.0 || t6a > INF_COST) && (t6b == 0.0 || t6b > INF_COST) {
+        println("H6_BUDGET_HARDNESS PASS")
+    } else {
+        println("H6_BUDGET_HARDNESS FAIL")
+        failures = failures + 1
+    }
+
+    // H7: budgetary necessity. Same mu=100; the minimal attainable peak is 8
+    // under a 10-week budget and 5 under a 30-week budget.
+    let (f7a, l7a, i7a, p7a, t7a) = mercyful_schedule(&g, 0, 9, 100.0, 10.0)
+    let (f7b, l7b, i7b, p7b, t7b) = mercyful_schedule(&g, 0, 9, 100.0, 30.0)
+    if p7a == 8.0 && p7b == 5.0 {
+        println("H7_BUDGETARY_NECESSITY PASS")
+    } else {
+        println("H7_BUDGETARY_NECESSITY FAIL")
+        failures = failures + 1
+    }
+
+    if failures == 0 {
+        println("MERCYFUL_CHEMO_PASS")
+        return 0
+    }
+    println("MERCYFUL_CHEMO_FAIL")
+    1
+}
