@@ -1069,6 +1069,81 @@ fn compile_scan_incomplete_assignment(path: string) -> (i64, i64) with IO, Mut, 
     var col: i64 = 1
     while i < size {
         let ch = bytes[i as usize]
+        // Comments and literals are skipped, because this scan is over RAW BYTES and an '=' inside
+        // one is not an assignment. Without this it rejected any file whose last non-whitespace
+        // byte is '=' — which the `// ====...` banner at end of file makes common: 5 versioned
+        // .sio files, among them self-hosted/hlir/lower.sio, a module compiler/main.sio imports.
+        // The module then contributed nothing to the symbol table and its exports surfaced as
+        // E137 "use of undeclared variable" at every call site, blamed on the caller.
+        if ch == (47 as i8) && i + 1 < size && bytes[(i + 1) as usize] == (47 as i8) {
+            while i < size && bytes[i as usize] != (10 as i8) {
+                i = i + 1
+                col = col + 1
+            }
+            continue
+        }
+        if ch == (47 as i8) && i + 1 < size && bytes[(i + 1) as usize] == (42 as i8) {
+            i = i + 2
+            col = col + 2
+            var closed = false
+            while i < size && !closed {
+                if bytes[i as usize] == (42 as i8) && i + 1 < size && bytes[(i + 1) as usize] == (47 as i8) {
+                    i = i + 2
+                    col = col + 2
+                    closed = true
+                } else {
+                    if bytes[i as usize] == (10 as i8) {
+                        line = line + 1
+                        col = 1
+                    } else {
+                        col = col + 1
+                    }
+                    i = i + 1
+                }
+            }
+            continue
+        }
+        if ch == (34 as i8) {
+            i = i + 1
+            col = col + 1
+            var done = false
+            while i < size && !done {
+                let q = bytes[i as usize]
+                if q == (92 as i8) {
+                    i = i + 2
+                    col = col + 2
+                } else {
+                    if q == (34 as i8) {
+                        done = true
+                    }
+                    if q == (10 as i8) {
+                        line = line + 1
+                        col = 1
+                    } else {
+                        col = col + 1
+                    }
+                    i = i + 1
+                }
+            }
+            continue
+        }
+        // A quote is a char literal ONLY in the shapes 'x' and '\x'. An apostrophe also opens a
+        // LIFETIME in this language (`&'static str`, `most_uncertain<'a>` — both live in stdlib),
+        // and skipping from there to the next apostrophe would swallow real code.
+        if ch == (39 as i8) {
+            var char_lit_len: i64 = 0
+            if i + 2 < size && bytes[(i + 1) as usize] != (92 as i8) && bytes[(i + 2) as usize] == (39 as i8) {
+                char_lit_len = 3
+            }
+            if i + 3 < size && bytes[(i + 1) as usize] == (92 as i8) && bytes[(i + 3) as usize] == (39 as i8) {
+                char_lit_len = 4
+            }
+            if char_lit_len > 0 {
+                i = i + char_lit_len
+                col = col + char_lit_len
+                continue
+            }
+        }
         if ch == (61 as i8) { // '='
             var j = i + 1
             while j < size {

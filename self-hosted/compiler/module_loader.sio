@@ -414,6 +414,30 @@ pub fn load_module_file(path: string) -> Program with IO, Mut, Div, Panic, Alloc
     prog
 }
 
+// Module identity. This is what `visibility_allows_access` compares (check/check.sio:90 via
+// ast_path_eq, its ONLY call site), so it decides which accesses count as "same module".
+//
+// It used to be the file BASENAME alone, which made every same-named file in a different
+// directory THE SAME MODULE. In compiler/main.sio's 105-file closure that merged 20 files
+// across 8 basenames — encode, env, ir, layout, lower, mod, opt_strategy, types — so
+// visibility was really "basename-private", and on those pairs the predicate either no-op'd
+// or reached a live crash: with a colliding basename and a private callee, ast_path_eq falls
+// through to string_list_eq_sl (check/check.sio:42-52), whose tail walk reads
+// Option<Box<StringList>> — the Box-typed-field read Madaros miscompiles — and the compiler
+// SIGSEGVs with zero diagnostics. The comment at check/check.sio:49 is a warning left by
+// whoever hit it.
+//
+// Identity is now the PARENT DIRECTORY plus the basename, which distinguishes all 8 colliding
+// groups. Two properties are deliberate:
+//  - It stays a SINGLE segment (seg_count 1, tail None). Uniqueness is all this needs, and a
+//    multi-segment path would make string_list_eq_sl walk `tail` on EVERY comparison instead
+//    of only on collisions — i.e. it would turn a rare crash into a universal one. Widening
+//    identity therefore does NOT depend on the Box-field read being fixed first.
+//  - It uses the last two components rather than the whole path, so the same file reached by
+//    different spellings (absolute vs relative, different cwd) still gets one identity. An
+//    absolute prefix in the key would split one module in two.
+// The in-file `module a::b` declaration is still not consulted; 42 of those 105 files, including
+// the two largest, carry none, so it cannot serve as identity without authoring them first.
 fn file_path_to_module_path(path: string) -> AstPath with Mut, Panic, Div {
     var seg_buf: [i8; 128] = [0; 128]
     var seg_len: i64 = 0
@@ -422,10 +446,12 @@ fn file_path_to_module_path(path: string) -> AstPath with Mut, Panic, Div {
     var path_len = str_len(path)
     var i: i64 = 0
     var last_slash: i64 = 0 - 1
+    var prev_slash: i64 = 0 - 1
     var dot_pos: i64 = path_len
     while i < path_len {
         let ch = str_char_at(path, i)
         if ch == 47 {
+            prev_slash = last_slash
             last_slash = i
         }
         if ch == 46 {
@@ -433,7 +459,12 @@ fn file_path_to_module_path(path: string) -> AstPath with Mut, Panic, Div {
         }
         i = i + 1
     }
-    var start = last_slash + 1
+    // Start one byte after the SECOND-to-last slash so the parent directory is included;
+    // fall back to the old basename-only behaviour when the path has fewer components.
+    var start = prev_slash + 1
+    if prev_slash < 0 {
+        start = last_slash + 1
+    }
     var end = dot_pos
     if end <= start {
         end = path_len
