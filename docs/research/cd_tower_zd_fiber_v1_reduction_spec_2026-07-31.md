@@ -2804,3 +2804,64 @@ obstruction §43 found does not apply to them.
 > four families are named, and two of their signs are already pinned.
 
 **§18.1 is still not proven, so (III) is still reduced, not proven.** (d) and V1 untouched.
+
+## §46 — `tr(E³) = −24(h−2)` is DERIVED: `E` is two hubs, a matching and a coset (`W49`, 2026-08-04)
+
+§45 named `tr(E³)` the cheapest of the six lines §18.1 rests on. It is no longer a measured line: it
+follows from `E`'s structure by counting.
+
+### 46.1 What `E` is
+
+Measured over **every** low label at `n = 6, 7, 8` (109 labels), **0 exceptions on each clause**:
+
+| | |
+|---|---|
+| **S1** | `W` is **isolated** in `E`; the two **hubs** `h` and `W+h` are each adjacent to everything except `W` and the other hub |
+| **S2** | the only other edges are the **matching** `{a, a+h}` with sign `+1` and the **coset** `{a, (a⊕W)+h}` with sign `−1`, for `a ∉ {0, W}` |
+| **S3** | the hub signs satisfy `s(X, a+h) = − s(X, a)` and `s(X, (a⊕W)+h) = + s(X, a)`, for both hubs `X` |
+
+So `E` has exactly `6(h−2)` edges in six families of `h−2` each — matching, coset, and two families
+per hub — which is §34's count, now with the families identified rather than merely counted.
+
+### 46.2 The count, and it is elementary
+
+There are no low–low and no high–high edges, and the two hubs are **not** adjacent to each other.
+So every triangle has exactly one hub, one low vertex and one high vertex, and the low–high edge must
+be a matching or a coset edge. Hence
+
+```
+#triangles = (2 hubs) × (h−2 low vertices a ∉ {0,W}) × (matching or coset) = 4(h−2)
+```
+
+and each is negative, by **S3** against **S2**:
+
+```
+matching:  s(X, a+h)·s(X, a)·s(a, a+h)      = (−s)·s·(+1) = −1
+coset:     s(X, (a⊕W)+h)·s(X, a)·s(a, ·)    = ( s)·s·(−1) = −1
+```
+
+Therefore `tr(E³) = 6 · 4(h−2) · (−1) = **−24(h−2)**`, which is §34's constant — **derived, not
+fitted**, and it explains why the constant is label-independent: `E`'s *shape* is.
+
+### 46.3 What is left, and it is one relation
+
+The hub rows are not really about `E`: the blow-up `B` has **zero rows** at `h` (outside its index
+range) and at `W+h` (`A′`'s row at `W` is zero), so on those rows `E = A`. Hence S1 and S3 are
+statements about `A_σ` itself:
+
+- `A_σ`'s row at `W` vanishes — that is **`Asig_isolated`, a theorem ∀n**;
+- S3's second relation follows from the first plus **`A1`** (`Asig (l ⊕ L_lo) y = − Asig l y`,
+  a theorem ∀n), because `(a+h) ⊕ W = (a⊕W)+h` when `W < h`;
+- what remains genuinely new is **one relation**:
+
+> **`A_σ(X, y + h) = − A_σ(X, y)` for `X ∈ {h, W+h}`** — the hub rows are antisymmetric under adding
+> the top bit of the vertex range.
+
+Plus S1's adjacency for the two hubs. Both are single-row statements about `σ`, of the same shape as
+§42's four-branch computation — not a global triangle sum.
+
+> **Net effect on §45's ledger:** `tr(E³) = −24(h−2)` and `tr(BE²) = 0` are no longer independent
+> measured lines; the first reduces to S1 + one hub relation, with the matching/coset signs already
+> on the list. The open content of §18.1 is now the **block identity** and **the hub row**.
+
+**Not proven in Lean yet.** §18.1, and with it (III), is still reduced, not proven.
