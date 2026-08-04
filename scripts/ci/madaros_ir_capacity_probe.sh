@@ -149,8 +149,16 @@ if [[ "$TOTAL" -gt "$IR_MAX_FUNCS" ]]; then
 Every one that survives to lowering needs a slot in a single merged IrModule.
 
 This limit is REPORTED, not silent — verified 2026-08-04 with a 9002-function
-witness: 'too many functions: shared IR module capacity exceeded (max 2048
-slots)', rc=1, no ELF. So the wall is honest; it is just a wall.
+witness: 'too many functions: shared IR module capacity exceeded', rc=1, no ELF.
+So the wall is honest; it is just a wall.
+
+IR_MAX_FUNCS went 2048 -> 4096 on 2026-08-04, after interning IrInstr.name and
+after fixing two backend guards that read the literal 2048 while the arrays they
+guarded grew with the constant. Raising it alone had made a compiler that
+silently dropped symbols from exactly 2046 functions upward. The boundary is
+pinned by tests/multimodule/ir_capacity, run from
+scripts/ci/madaros_dce_reachability_gate.sh. Anyone raising it again must check
+for more literals first.
 
 Cross-module DCE (spec_dce_unreachable_item_fns) does not clear it either. A
 name-based reachability census from main over this closure leaves 5997
