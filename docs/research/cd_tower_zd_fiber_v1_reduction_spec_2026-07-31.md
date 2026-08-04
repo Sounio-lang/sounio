@@ -2171,6 +2171,8 @@ whole label:
 1. `ε` is balanced ⟺ `popcount(g)` odd (the (c)/¬(c) dichotomy, from the sign side);
 2. the curvature's triangle sum over the low classes is `−1728·[j choose 3]₂` — a **fixed finite
    computation for each `j`**, independent of `n`.
+   ⚠ **§39: (2) is not a separate item.** It is `δ(j+2,j)`, hence §17.2 — §33.5's collapse identity
+   already contained it. Stating it here as newly-open was the error that produced §38's ladder.
 
 Neither is proven. But (2) is no longer a statement about an unbounded family: it is one number per
 `j`. **(III) is still reduced, not proven.** `tr(A³)`'s absolute closed form, (d) and V1 untouched.
@@ -2178,6 +2180,19 @@ Neither is proven. But (2) is no longer a statement about an unbounded family: i
 Reproduce: `python3 scripts/research/zd_v1_III_sign_defect_probe.py 7 8 9`.
 
 ## §38 — The curvature sum, computed for `j = 3…13`: `K_j` is a level-independent tensor and `Σ K_j = −1728·[j,3]₂` (`W41`, 2026-08-04)
+
+> ⚠⚠ **DEFLATED BY §39 — read this first.** The clause this section computes eleven times is not
+> independent content: at `cls = 1` it is `δ(j+2, j)` **by definition**, and §33.5's own collapse
+> identity already gave `δ(j+2, j) = −(72/7)(q−1)(q−2)(q−4)`, which *is* `−1728·[j,3]₂`. So the
+> `j`-ladder below is **eleven evaluations of one cubic identity, not eleven independent
+> confirmations**, and its evidential weight is that of a single item. §37.4 introduced it as "the
+> open content, finite per `j`" when the line had already been written in §33.5. The engineering
+> the ladder forced (four implementations, a 550-billion-entry tensor at 1873 s) was spent
+> recomputing a quantity that has a closed form and costs two traces.
+>
+> What survives as **new** in this section: the tensor's *structure* — values exactly `{0, −2}`,
+> the flipped count `864·[j,3]₂`, the support-independence condition, and level-independence entry
+> by entry. Those are not implied by the sum. The *sum* was never open.
 
 §37.4 left (III)'s open content as **one number per `j`**. That number is now computed for
 `j = 3 … 13`, and it comes with more structure than was asked for.
