@@ -9784,6 +9784,30 @@ theorem Asig_coset : Asig a ((a ^^^ W) + 2^(k+1)) W (k+1) = -1 := by
 
 end ESigns
 
+/-! ## Tier 41: the coset 2-path identity — it is `A1` composed with symmetry
+
+§34's last measured line was `Σ_a (A²)[a, a⊕W] = −tr(A²)`, the identity that makes `3·tr(B²E)` come
+out to `24·t2′`. Its content is pointwise and needs nothing new:
+
+    A_σ(y, l ⊕ W) = A_σ(l ⊕ W, y)   (Asig_symm)   = − A_σ(l, y)   (A1)
+
+Both are theorems ∀n in this file. Summing over `b` gives
+`(A²)[a, a⊕W] = Σ_b A(a,b)·A(b,a⊕W) = −Σ_b A(a,b)² = −deg(a)`, and summing over `a` gives
+`−tr(A²)`; those two steps are termwise congruences over the index range and are **not** formalised
+here — the identity's content is the single line below. -/
+
+/-- **The coset 2-path step.** Moving the second argument along the coset negates the entry. This is
+    `A1` seen through `Asig_symm`, and it is what makes every 2-path from `a` to its coset partner
+    cancel against the corresponding edge. -/
+theorem Asig_coset_step (l y Llo n : Nat) (hl : l < 2^(n+1)) (hy : y < 2^(n+1))
+    (hL : Llo < 2^(n+1)) (hl0 : l ≠ 0) (hy0 : y ≠ 0)
+    (hlL : l ^^^ Llo ≠ 0) (hyL : y ^^^ Llo ≠ 0) :
+    Asig y (l ^^^ Llo) Llo n = - Asig l y Llo n := by
+  rw [Asig_symm y (l ^^^ Llo) Llo n hy (xorlt hl hL) hL hy0 hlL hyL
+        (by rw [xor_cancel]; exact hl0),
+      A1 l y Llo n hl hy hL hl0 hy0 hlL hyL]
+
+
 end SounioZDFiberAntisym
 
 
