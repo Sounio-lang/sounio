@@ -2625,3 +2625,57 @@ and by §39.1 the finite clause `Σ K_j = −1728·[j,3]₂` is *equivalent* to 
 So **§17.2 is now the only measured statement left in that chain**, and it is the next target.
 
 **(III) is still reduced, not proven.** (d) and V1 untouched.
+
+## §43 — Why §17.2 does NOT yield to the §42 technique: the absolute triangle sign has no bounded window (`W46`, 2026-08-04)
+
+§42 left §17.2 as the only measured statement in the chain. It does not fall to the same method, and
+the obstruction is measurable rather than a matter of effort.
+
+### 43.1 What carries over, and what does not
+
+Carries over: the **unsigned** graph of the `y = 0` Fano label `Llo = 1` is again `K_N` minus a
+perfect matching — its unsigned triangle count is exactly `N(N−2)(N−4)` at `n = 6…10` — which is
+§37's `τ`-isomorphism, already known.
+
+Does **not** carry over: `A_σ(1)` is **not antibalanced** (its negative-triangle count is not `T`,
+else `δ` would vanish), and its signature is **not bilinear** — the multiplicativity test
+`s(l⊕l′,y) = s(l,y)·s(l′,y)` fails on **half** the triples tested. So there is no coboundary and no
+`(−1)^{B(l,y)}` form to exploit; §42's whole route is unavailable.
+
+### 43.2 The measured obstruction
+
+The technique behind §38 and §42 is *locality*: §37.3 found the **curvature** `ε_T` determined by the
+low `j+1` bits of `(a,b,c)` — a window fixed by the label, which is what makes `K_j` a finite object
+and the whole `n`-dependence a `cls³` blow-up. The same question for the **absolute** triangle sign
+of `A_σ(1)`:
+
+| level | smallest `k` such that the triangle sign is determined by the low `k` bits |
+|---|---|
+| `n = 7` | **5** = `n − 2` |
+| `n = 8` | **6** = `n − 2` |
+
+> **The window is `n − 2` — it grows with the level, i.e. the absolute triangle sign needs
+> essentially every bit of the label.** There is no bounded local rule, so there is no finite object
+> per level to enumerate, and the §38/§42 method has nothing to bite on.
+
+This is the sharpest statement yet of a pattern the lane has been living with since `W24`:
+**relative quantities here are local; absolute ones are not.** §33's headline (the deviation forgets
+`g`) and this negative are two faces of the same fact, and it is now measured on both sides.
+
+### 43.3 The route that remains, and it is well-defined
+
+By §39.1, §17.2 ⟺ `Σ K_j = −1728·[j,3]₂`, and by §38 that is equivalent to
+
+> the number of curvature-flipped classes in `(𝔽₂^(j+1))³` is exactly `864·[j,3]₂`.
+
+That **is** a bounded-window statement — §37.3 guarantees the window — so it is finite combinatorics
+on `𝔽₂^(j+1)`, with no Cayley–Dickson algebra left in it, once one has the curvature as a **formula**
+rather than as a table. §38 established the table (values `{0,−2}`, support inside the
+non-degenerate triples, `864·[j,3]₂` of them) but never extracted the rule.
+
+**Next target, concrete:** extract the explicit local rule for `ε_T` as a function on
+`(𝔽₂^(j+1))³`, then count. That is the only route on the board that both (a) has a bounded window
+and (b) reduces to a statement with no algebra in it.
+
+**§17.2 is not proven, and this rung does not attempt it.** (III) is still reduced; (d) and V1
+untouched.
