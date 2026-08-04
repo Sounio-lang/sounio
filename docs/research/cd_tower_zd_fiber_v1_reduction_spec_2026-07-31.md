@@ -1651,3 +1651,87 @@ across the fibre `41…47`.
 
 **Still open, unchanged:** (III); `tr(A³)`'s general closed form; (d); V1. §30 already showed
 `tr(A²)` contributes nothing inside a fibre, so (III) is untouched by this.
+
+## §33 — (III) reduced to ONE arithmetic identity: the within-fibre deviation of `tr(A³)` (`W36`, 2026-08-04)
+
+**Everything in this section is MEASURED.** Nothing here is a Lean theorem and nothing here is
+derived. (III) is **not** proven; it is reduced.
+
+### 33.1 The reformulation: inside a fibre the class is indexed by `lsb(W)`
+
+Tier 36 proved `tr(A²)` injective in `g(W) = (W ∧ (W−1)) ≫ 3`, so the `tr(A²)`-fibre of `y` is
+*exactly* `{W : g(W) = y}`, and §30's dictionary makes its members explicit:
+
+| member | labels | `lsb(W)` |
+|---|---|---|
+| the Fano orbit `y` | `W = 8y + r`, `r = 1…7` | `0, 1, 2` — one `GL(3,2)` orbit |
+| the seams | `W = 8(y + 2^i)`, `i < lsb(y)` | `i + 3` |
+
+So **a class inside a fibre is indexed by `lsb(W)`** — which is precisely §19's third
+level-quantity, arrived at from the other side. Every seam in the fibre of `y` has popcount
+`popcount(y) + 1`, so **a whole fibre carries one parity**:
+
+- `popcount(y)` **odd** → every seam in the fibre merges with the Fano class — this is (c), PROVEN;
+- `popcount(y)` **even** → (III) must separate them.
+
+Consistency check, independent of any trace: counting `1 + lsb(y)` classes on even-popcount fibres
+and `1` on odd ones reproduces `3·2^(n−5)` exactly at `n = 6…12`.
+
+Hence (III) is a statement about the **deviation**
+
+```
+D(W) = tr(A³)(W) − tr(A³)(8·g(W) + 1)
+```
+
+and nothing else. The lane spent `W24`–`W28` chasing a closed form for `tr(A³)` *absolutely* and
+did not find one. (III) never needed it.
+
+### 33.2 The measurement: the deviation does not depend on `g`
+
+> **`D(W) = 0` when `popcount(g(W))` is odd, and `D(W) = δ(n, lsb W)` — a function of the LEVEL
+> and the LOWEST SET BIT ALONE — when it is even.**
+
+That the correction is **independent of `y`** is the surprising part and the load-bearing claim.
+Checked at `n = 6…11`, **all 2010 labels, 0 mismatches**, together with `D = 0` on every Fano
+label (`GL(3,2)`-constancy) and 0 collisions of `D` in `lsb` on every even-popcount fibre.
+
+### 33.3 The closed form for `δ`
+
+```
+δ(n, j) = −(9/56) · u³ · (2^j − 1)(2^j − 2)(2^j − 4),        u = 2^(n−j)
+        = −(9/56) · (2^n − u)(2^n − 2u)(2^n − 4u)
+```
+
+**(III) follows from it immediately.** `|δ(n,j)| = (9/56)·2^(3n)·(1−2^(−j))(1−2^(1−j))(1−2^(2−j))`
+is **strictly increasing in `j`** — every factor is — and nonzero for `j ≥ 3`. So `δ` is nonzero
+(Fano vs seam) and injective in `j` (seam vs seam), which is exactly what (III) asserts.
+
+Status of the form: **fitted**, on `n = 6…9`, `j = 3…7`, in the four-parameter family
+`α·8^j + β·4^j + γ·2^j + ε`, then checked at `n = 10` (new `j = 8`) and `n = 11` (new `j = 9`) —
+0 mismatches. `j` ranges `3 … n−2`, and `j = n−2` is the maximum possible (labels are
+`< 2^(n−1)`), so the boundary is exercised at every level, not extrapolated.
+
+`tr(A³)` was computed in float64 and **verified against exact `int64`** at `n = 11` on 13 labels
+including every `j`: 0 disagreements. The law is an exact integer identity with a `/56`, so this
+check is not cosmetic.
+
+### 33.4 What this does and does not settle
+
+- **(III) is reduced to one arithmetic identity**, the deviation law of §33.2. It is not proven.
+- **`δ`'s closed form is a fitted cubic in `2^j` that factors nicely.** That it factors as
+  `(x−1)(x−2)(x−4)` — the same shape as `dcoef`'s `(2^i−4)(2^i−8)` and §17.2's
+  `(2^m−2)(2^m−4)(2^m−15)` — is suggestive, not evidence. A fitted cubic that factors is still a
+  fitted cubic.
+- **A derivation lead, recorded and not pursued:** `(2^j−2)(2^j−4)` is exactly `tr(A²)` of the
+  `y = 0` class at level `j+1` (§3's `W6` form), and `(2^j−1)` is the number of nonzero elements of
+  a block of size `2^j`. So `δ(n,j) = −(9/56)·2^(3(n−j))·(2^j−1)·tr(A²)(j+1, 0)`. The `7` in the
+  denominator echoes §17.2's `2/7`. The competing reading — that `δ` is the level-`j` `y = 0`
+  *`tr(A³)`* rescaled — is **refuted**: that form carries a `−15` and `δ` does not.
+- **Why `W24`–`W28` stalled is now explained.** They asked for `tr(A³)` as a function of the label.
+  The fibre-*relative* quantity is the simple one, and it is simple precisely because it forgets
+  `g` — the same locality that made `Ddig_peel` termwise in Tier 36.
+
+**Still open:** (III) itself (= the deviation law), `tr(A³)`'s absolute closed form, (d), V1.
+(d) is now exactly **(I) ∧ the deviation law**, and (I) is a theorem.
+
+Reproduce: `python3 scripts/research/zd_v1_III_deviation_probe.py 6 7 8 9 10 11`.
