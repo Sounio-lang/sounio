@@ -56,6 +56,27 @@ var PARSER_FAST_SKIP_BLOCKS: bool = false
 var PARSER_LAST_HAD_ERROR: bool = false
 var PARSER_LAST_ERROR_COUNT: i64 = 0
 
+// String literals longer than Name's 128-byte buffer are CUT at current_name(),
+// and until now nothing said so. Measured 2026-08-04: the boundary is exactly
+// 128 — a 127-char literal prints whole, a 128-char one prints 127 and the
+// program carries on as if nothing happened. 324 literals in 14 files under
+// self-hosted/ and stdlib/ are over it, the longest 335 chars in
+// self-hosted/check/check.sio, so the compiler's own diagnostics are among the
+// text being silently shortened.
+//
+// The cut cannot simply be removed: Name is embedded in 88 fixed-size arrays,
+// some [Name; 4096], so widening the buffer to 512 would take Name storage from
+// 6.5 MB to 26 MB in a build that already emits 152 "stack frame too large"
+// warnings. So the cut stays and the SILENCE goes.
+//
+// Recorded in globals rather than printed on the spot because current_name()
+// carries only Mut/Panic/Div; giving it IO would push that effect onto every
+// caller. Same shape as PARSER_LAST_ERROR_COUNT above, reported once where IO
+// already exists.
+var PARSER_TRUNCATED_LITERALS: i64 = 0
+var PARSER_TRUNCATED_FIRST_LINE: i64 = 0
+var PARSER_TRUNCATED_LONGEST: i64 = 0
+
 pub struct Parser {
     token_count: i64,
     pos: i64,
@@ -292,6 +313,25 @@ pub fn parser_last_had_error() -> bool {
 
 pub fn parser_last_error_count() -> i64 {
     PARSER_LAST_ERROR_COUNT
+}
+
+pub fn parser_reset_truncated_literals() with Mut {
+    PARSER_TRUNCATED_LITERALS = 0
+    PARSER_TRUNCATED_FIRST_LINE = 0
+    PARSER_TRUNCATED_LONGEST = 0
+}
+
+
+pub fn parser_truncated_literal_count() -> i64 {
+    PARSER_TRUNCATED_LITERALS
+}
+
+pub fn parser_truncated_literal_first_line() -> i64 {
+    PARSER_TRUNCATED_FIRST_LINE
+}
+
+pub fn parser_truncated_literal_longest() -> i64 {
+    PARSER_TRUNCATED_LONGEST
 }
 
 // ============================================================
@@ -1254,7 +1294,39 @@ impl Parser {
             let s = PT_START[self.pos as usize]
             let e = PT_END[self.pos as usize]
             var nlen = e - s
-            if nlen > 128 { nlen = 128 }
+            if nlen > 128 {
+                // Ask pt_read_kind, do NOT compare PT_KIND_CODE against a
+                // TokenKind cast. They are two different numberings: the enum's
+                // source order (StringLit is the 134th variant) and the flat
+                // scalar code the token tables actually store (a string literal
+                // carries 126, which in the code scheme means something else
+                // entirely — pt_read_kind:509-516 decodes 132..139 as
+                // Plus/Minus/Star/... and the header there records why the raw
+                // enum array cannot be trusted for high variants).
+                //
+                // A first attempt compared the raw code against
+                // `TokenKind::StringLit as i64` and therefore never matched, in
+                // silence. A probe that counted every truncation and PRINTED the
+                // kind is what found it: calls=5 trunc=1 firstkind=126 with
+                // longest=n+2, i.e. the site was reached, the condition was true,
+                // and only the comparison was wrong.
+                // nlen counts both quotes. Name holds 128 bytes, the opening
+                // quote takes one, and the closing quote is dropped at no cost —
+                // so 126 characters of text survive whole, 127 survive whole
+                // (the lost byte is the closing quote), and only from 128 does
+                // real text disappear. Measured, not reasoned: content 127 both
+                // prints 127 and loses nothing; content 128 prints 127.
+                // Warning at nlen > 128 fired one character early.
+                if nlen > 129 && pt_read_kind(self.pos) == TokenKind::StringLit {
+                    PARSER_TRUNCATED_LITERALS = PARSER_TRUNCATED_LITERALS + 1
+                    if PARSER_TRUNCATED_FIRST_LINE == 0 {
+                        PARSER_TRUNCATED_FIRST_LINE = PT_LINE[self.pos as usize]
+                    }
+                    // nlen counts the quotes; the text lost is nlen - 2 - 126.
+                    if nlen > PARSER_TRUNCATED_LONGEST { PARSER_TRUNCATED_LONGEST = nlen }
+                }
+                nlen = 128
+            }
             if nlen < 0 { nlen = 0 }
             var name = Name { buf: [0; 128], len: nlen }
             var i: i64 = 0
