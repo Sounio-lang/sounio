@@ -2445,6 +2445,12 @@ The first bracket vanishes iff `ε_l ε_y = −P1(l,y)`; the second iff `ε_l ε
 **proven ∀n in this file**. Hence `supp(A_σ) = {P1 = P3} =` the annihilation relation, by lemmas
 already in the tree.
 
+> ⚠ **Corrected in §41 after reading their Definition 2.3.** The symmetry clauses are not "extra":
+> Guterman–Zhilina's adjacency is **two-sided** (`ab = ba = 0`), and reversing the product turns the
+> two conditions into `ε_l ε_y = −P1(y,l)` and `= −P3(y,l)`. So `resB` — `P1` symmetric, `P3`
+> symmetric, `P1 = P3` — **is exactly the two-sided condition**, and it collapses to the one-sided one
+> only because `P1_symm`/`P3_symm` are theorems.
+
 Two consequences, and the second is the one that changes how the object should be read:
 
 1. **The support is an induced subgraph of the Cayley–Dickson zero-divisor graph** — of the
@@ -2484,3 +2490,61 @@ full, which is still owed.
   class, `tr(A²)`/`tr(A³)`, the fibre/seam classification, the ∀`n` results, and the deviation law.
 
 Reproduce: `python3 scripts/research/zd_annihilation_is_orthogonality_probe.py`.
+
+
+## §41 — Their Definition 2.3, read: `Γ_O` restricted to a pencil is the DOUBLE COVER of `A_σ` (`W44`, 2026-08-04)
+
+Definition 2.3 of Guterman & Zhilina (Zap. Nauchn. Sem. POMI **496** (2020) 61–86), verbatim from
+the Russian original:
+
+> **Граф ортогональности `Γ_O(A)`** определяется следующим образом: его вершины — прямые в
+> `Z_LR(A)`, то есть `V(Γ_O(A)) = P(Z_LR(A))`, причём различные вершины `[a]` и `[b]` соединены
+> ребром, если и только если **`ab = ba = 0`**.
+
+Two features that §40 did not have right.
+
+### 41.1 The adjacency is TWO-SIDED, and `resB` is exactly that
+
+Reversing the product gives `ε_l ε_y = −P1(y,l)` and `ε_l ε_y = −P3(y,l)`. So two-sided annihilation
+with one relative sign is `P1 = P3 = P1ᵀ = P3ᵀ` — **precisely `resB`**. The lane's resonance
+predicate is not "`P1 = P3` plus two convenience clauses"; it *is* `ab = ba = 0`. The clauses
+collapse only because `P1_symm`/`P3_symm` are proven. Measured at `n = 4` with real CD
+multiplication: `A_σ` vs the two-sided relation, **0 mismatches**, and one-sided ≡ two-sided, **0**.
+
+### 41.2 Their vertices are LINES — so their graph is our double cover
+
+`[a] = ℝa`, so each pencil pair `{l, l⊕L}` contributes **two** vertices, `[e_l + e_(l⊕L)]` and
+`[e_l − e_(l⊕L)]`, where the lane has **one** vertex carrying a sign. That is the classical
+signed-graph ↔ double-cover correspondence, and it holds on the nose:
+
+> **`Γ_O` restricted to a fixed-XOR-label pencil is the canonical double cover of `A_σ`.**
+> Verified at `n = 4`, all 7 labels: 12 zero-divisor lines of the 14 candidates, **24 edges**, and
+> the edge set is **identical** to the double cover `(l,ε) ∼ (y, ε·A_σ(l,y))` — 7 of 7, exact.
+
+This also identifies the point of contact by name. Our per-label graph at `n = 4` is the octahedron
+(6 vertices, 12 edges); its double cover is 4-regular on **12** vertices, which is the shape of their
+**double hexagon**.
+
+### 41.3 The consequence, and it cuts
+
+A double cover determines its signature **up to switching**, and switching class is exactly the
+spectrally meaningful datum (§35, §37). Therefore:
+
+> **The lane's switching class is equivalent data to their (published) unsigned line-graph.** The
+> signature is a choice of representative in it, not independent content.
+
+So §40.4's split — "the graph is theirs, the signature is ours" — is too generous to us. The honest
+version:
+
+- **theirs:** the underlying graph *and*, up to switching, the signature too, wherever their results
+  reach — which at `n = 4` is everything;
+- **not located in their work, on present evidence:** the ∀`n` statements; the **spectral** layer
+  (`спектр`/`spectr` appears **0 times** in either paper — they compute components, diameters,
+  cliques, hexagons, never a spectrum); `tr(A²)`/`tr(A³)` as invariants; the fibre/seam
+  classification; the deviation law.
+
+The `n = 4` base case of this lane should be cited to Guterman–Zhilina 2020, not presented as found
+here.
+
+Reproduce: `python3 scripts/research/zd_annihilation_is_orthogonality_probe.py` (clauses A and B
+added).

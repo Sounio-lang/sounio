@@ -19,8 +19,21 @@ theorem given lemmas already in the tree, and the clauses below are its numerica
   C2a n=4 (sedenions): x_l x_y = 0 tested with REAL CD multiplication, against A_sig
   C2b n=5..8: annihilation <=> P1 = P3, and A_sig = -P1 on the support
   C3  n=4 shape: every label gives K_6 minus a perfect matching (the octahedron), whose
-      non-adjacency is exactly the coset pairing l <-> l ^ Llo -- the shape of the "double
-      hexagon" of Guterman & Zhilina, Zap. Nauchn. Sem. POMI 496 (2020) 61-86.
+      non-adjacency is exactly the coset pairing l <-> l ^ Llo.
+
+Their Definition 2.3 (Zap. Nauchn. Sem. POMI 496 (2020) 61-86) has TWO features that matter:
+
+  * adjacency is TWO-SIDED, ab = ba = 0. Reversing the product gives eps_l eps_y = -P1(y,l) and
+    = -P3(y,l), so the two-sided condition is P1 = P3 = P1^T = P3^T -- which IS resB. The lane's
+    resonance predicate is the two-sided annihilation, not a one-sided one plus conveniences.
+  * vertices are LINES [a] = R a, so each pencil pair {l, l^L} gives TWO vertices, where the lane
+    has one vertex carrying a sign. Hence
+
+        Gamma_O restricted to a fixed-label pencil IS the double cover of A_sig,
+
+    which clause D verifies exactly at n = 4 (12 zero-divisor lines, 24 edges, 7 of 7 labels).
+    A double cover determines its signature up to switching, so their unsigned line-graph and the
+    lane's switching class are equivalent data.
 """
 import sys
 import numpy as np
