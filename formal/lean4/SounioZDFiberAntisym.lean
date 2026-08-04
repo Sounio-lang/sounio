@@ -8187,6 +8187,112 @@ def dterm (m W i : Nat) : Int :=
 /-- **The signed base-4 digit sum `E`.** Finite, non-recursive, determined by `W`'s set bits. -/
 def Ddig (m W : Nat) : Int := sumLtI (m+1) (fun i => dterm m W i)
 
+/-! ### The descent step for the digit sum -/
+
+private theorem two_mul_mul (a b : Nat) : (2 * a) * (2 * b) = 4 * (a * b) := by
+  rw [Nat.mul_assoc, ← Nat.mul_assoc a 2 b, Nat.mul_comm a 2, Nat.mul_assoc 2 a b,
+      ← Nat.mul_assoc]
+
+/-- `(e-2)(e-4) = e^2 - 6e + 8`, stated additively. Truncated subtraction is fine: at `e = 2`
+    both sides are `12`, and `e` is a power of two so `e = 3` never arises. -/
+private theorem sub_prod_pow (k : Nat) :
+    (2^(k+1) - 2) * (2^(k+1) - 4) + 6 * 2^(k+1) = 2^(k+1) * 2^(k+1) + 8 := by
+  cases k with
+  | zero => decide
+  | succ j =>
+      have hle : (2:Nat)^2 ≤ 2^(j+2) := Nat.pow_le_pow_right (by omega) (by omega)
+      have h4 : (2:Nat)^2 = 4 := rfl
+      obtain ⟨f, hf⟩ : ∃ f, (2:Nat)^(j+2) = f + 4 := ⟨2^(j+2) - 4, by omega⟩
+      rw [hf]
+      have h1 : f + 4 - 2 = f + 2 := by omega
+      have h2 : f + 4 - 4 = f := by omega
+      rw [h1, h2]
+      have e1 : (f + 2) * f = f * f + 2 * f := by rw [Nat.add_mul]
+      have e2 : (f + 4) * (f + 4) = f * f + f * 4 + (4 * f + 4 * 4) := by
+        rw [Nat.add_mul, Nat.mul_add, Nat.mul_add]
+      omega
+
+/-- The top digit of level `m+2`. This is the HIGH branch's injected constant, and the identity
+    `(2e-4)(2e-8) = 4(e-2)(e-4)` is what makes the bookkeeping close. -/
+private theorem dcoef_top (k : Nat) :
+    dcoef (k+2) (k+2) = 4 * ((2^(k+1) - 2) * (2^(k+1) - 4)) := by
+  unfold dcoef
+  have h2e : (2:Nat)^(k+2) = 2 * 2^(k+1) := by rw [Nat.pow_succ]; omega
+  have hz : (k+2) - (k+2) = 0 := by omega
+  rw [hz, h2e]
+  have hp : (0:Nat) < 2^(k+1) := Nat.two_pow_pos (k+1)
+  have ha : 2 * 2^(k+1) - 4 = 2 * (2^(k+1) - 2) := by omega
+  have hb : 2 * 2^(k+1) - 8 = 2 * (2^(k+1) - 4) := by omega
+  rw [ha, hb, Nat.pow_zero, Nat.mul_one, two_mul_mul]
+
+private theorem shift_mod_pow (n i W : Nat) (h : i ≤ n+1) :
+    (W % 2^(n+1)) >>> i = (W >>> i) % 2^(n+1-i) := by
+  rw [Nat.shiftRight_eq_div_pow, Nat.shiftRight_eq_div_pow]
+  have he : (2:Nat)^i * 2^(n+1-i) = 2^(n+1) := by
+    have h2 : i + (n+1-i) = n+1 := by omega
+    rw [← Nat.pow_add, h2]
+  rw [← he, Nat.mod_mul_right_div_self]
+
+private theorem shift_div_pow (n i W : Nat) (h : i ≤ n+1) :
+    (W >>> i) / 2^(n+1-i) = W >>> (n+1) := by
+  have he : i + (n+1-i) = n+1 := by omega
+  rw [Nat.shiftRight_eq_div_pow, Nat.shiftRight_eq_div_pow, Nat.div_div_eq_div_mul,
+      ← Nat.pow_add, he]
+
+/-- The sign of the level-`i` digit factors: the bits above `i` split into those below the seam
+    and the seam bit itself. `psg_split` is exactly this. -/
+private theorem psg_shift_split (n i W : Nat) (h : i ≤ n+1) :
+    psg (W >>> i) = psg ((W % 2^(n+1)) >>> i) * psg (W >>> (n+1)) := by
+  rw [shift_mod_pow n i W h, ← shift_div_pow n i W h]
+  exact psg_split (n+1-i) (W >>> i)
+
+private theorem dcoef_step (n i : Nat) (h : i ≤ n+1) : dcoef (n+2) i = 4 * dcoef (n+1) i := by
+  unfold dcoef
+  have he : (n+2) - i = ((n+1) - i) + 1 := by omega
+  rw [he, Nat.pow_succ]
+  ac_rfl
+
+private theorem dcoef_stepI (n i : Nat) (h : i ≤ n+1) :
+    ((dcoef (n+2) i : Nat) : Int) = 4 * ((dcoef (n+1) i : Nat) : Int) := by
+  have hd := dcoef_step n i h
+  omega
+
+/-- **Every digit below the seam scales by `4` and picks up the seam bit's sign.** -/
+theorem dterm_step (n W i : Nat) (h : i ≤ n+1) :
+    dterm (n+2) W i = (4 * psg (W >>> (n+1))) * dterm (n+1) (W % 2^(n+1)) i := by
+  unfold dterm
+  have hg1 : (W % 2^(n+1)) % 2^i = W % 2^i := mod_pow_mod i (n+1) W h
+  have hg2 : (W % 2^(n+1)) % 2^(i-1) = W % 2^(i-1) := mod_pow_mod (i-1) (n+1) W (by omega)
+  rw [hg1, hg2]
+  by_cases hc : 2^(i-1) ≤ W % 2^i ∧ W % 2^(i-1) ≠ 0
+  · rw [if_pos hc, if_pos hc, dcoef_stepI n i h, psg_shift_split n i W h]
+    ac_rfl
+  · rw [if_neg hc, if_neg hc, Int.mul_zero]
+
+/-- **The digit sum obeys the descent.** -/
+theorem Ddig_step (n W : Nat) :
+    Ddig (n+2) W
+      = (4 * psg (W >>> (n+1))) * Ddig (n+1) (W % 2^(n+1)) + dterm (n+2) W (n+2) := by
+  have hL : Ddig (n+2) W
+      = sumLtI (n+2) (fun i => dterm (n+2) W i) + dterm (n+2) W (n+2) := rfl
+  have hR : Ddig (n+1) (W % 2^(n+1))
+      = sumLtI (n+2) (fun i => dterm (n+1) (W % 2^(n+1)) i) := rfl
+  rw [hL, hR,
+      sumLtI_congr (n+2) _ (fun i => (4 * psg (W >>> (n+1))) * dterm (n+1) (W % 2^(n+1)) i)
+        (fun i hi => dterm_step n W i (by omega)),
+      sumLtI_mul]
+
+private theorem dterm_lowIdx (m W i : Nat) (h : i ≤ 1) : dterm m W i = 0 := by
+  have hi : i - 1 = 0 := by omega
+  have hm : W % 2^(i-1) = 0 := by rw [hi]; exact Nat.mod_one W
+  unfold dterm
+  exact if_neg (fun hc => hc.2 hm)
+
+theorem Ddig_one (W : Nat) : Ddig 1 W = 0 := by
+  have h : Ddig 1 W = sumLtI 2 (fun i => dterm 1 W i) := rfl
+  rw [h, sumLtI_congr 2 _ (fun _ => 0) (fun i hi => dterm_lowIdx 1 W i (by omega))]
+  exact sumLtI_zero 2
+
 end SounioZDFiberAntisym
 
 
