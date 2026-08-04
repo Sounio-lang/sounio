@@ -28,4 +28,5 @@ lean_lib Sounio where
              `OntologyELClosureVerified,
              `OntologyRepairTies,
              `OntologyELPlus,
-             `OntologyELPlusClosureVerified]
+             `OntologyELPlusClosureVerified,
+             `OntologyELPlusClosureComplete]
