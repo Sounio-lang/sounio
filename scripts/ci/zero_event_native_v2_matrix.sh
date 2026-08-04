@@ -61,7 +61,12 @@ require_marker sedenion 'Compilation successful!'
 require_marker sedenion 'SEDENION_IMPORT_NATIVE_V2 PASS'
 reject_marker sedenion 'Segmentation fault'
 
-# Fail-closed residuals: imported lowering completes; ELF write returns rc=12
+run_capture qd128_core tests/run-pass/qd128_core_import_native_v2_smoke.sio
+require_rc qd128_core 0
+require_marker qd128_core 'QD128_CORE_IMPORT_NATIVE_V2 PASS'
+reject_marker qd128_core 'Segmentation fault'
+
+# Fail-closed residuals: full math::qd128 still pulls qd_mul → ELF write rc=12
 run_capture qd128 tests/known_failures/qd128_import_native_v2_probe.sio
 require_rc qd128 1
 require_marker qd128 'lower_array: into_acc_done 2'
@@ -83,4 +88,4 @@ require_marker receipt 'Failed to write native binary'
 reject_marker receipt 'Segmentation fault'
 reject_marker receipt 'ZERO_EVENT_STDLIB PASS'
 
-echo '[zero-native-matrix] PASS: dd64+sedenion green; qd128/combined/receipt fail closed (rc=12) without segfault'
+echo '[zero-native-matrix] PASS: dd64+sedenion+qd128_core green; full qd128/combined/receipt fail closed (rc=12) without segfault'

@@ -456,7 +456,8 @@ Madaros native-v2:
 |---|---|---|
 | `dd64` import smoke | green | `tests/run-pass/dd64_import_native_v2_smoke.sio` |
 | **sedenion** import smoke | **green** (closed 2026-08-04) | `tests/run-pass/sedenion_import_native_v2_smoke.sio`; gate `scripts/ci/madaros_sedenion_native_v2_gate.sh` — stdlib rewrite of `sed_vv`/`oct_p`/`oct_q` to array refs (native-v2 could not emit 16/32-scalar f64 param lists) |
-| `qd128` import | fail-closed `rc=12` | `qd_mul` unsupported in native emit; BLK `docs/handoff/BLK-20260804-p0b-qd128-native-v2.md` |
+| **`qd128_core` import smoke** | **green** (closed 2026-08-04) | `math::qd128_core` constructors only; gate `scripts/ci/madaros_qd128_core_native_v2_gate.sh` |
+| full `math::qd128` import | fail-closed `rc=12` | module pulls `qd_mul` unsupported in native emit; BLK `docs/handoff/BLK-20260804-p0b-qd128-native-v2.md` |
 | combined zero-provenance (sedenion+eisa) | fail-closed `rc=12` | still blocked on `qd_mul` via eisa |
 | `zero_event` stdlib probe (Madaros native) | fail-closed `rc=12` | `ze_*_f64` constructors unsupported; lean_single oracle remains green |
 
@@ -468,11 +469,12 @@ Reproduce the classified matrix with:
 
 ```bash
 bash scripts/ci/madaros_sedenion_native_v2_gate.sh
+bash scripts/ci/madaros_qd128_core_native_v2_gate.sh
 bash scripts/ci/zero_event_native_v2_matrix.sh
 bash scripts/ci/zero_event_gate.sh
 ```
 
-Do not promote remaining known-failure probes (`qd128`, combined, receipt) to
+Do not promote remaining known-failure probes (full `qd128`, combined, receipt) to
 `run-pass` until default Madaros prints their PASS markers. Do not alter the
 semantic oracles while repairing `qd_mul` / aggregate-return emission.
 
