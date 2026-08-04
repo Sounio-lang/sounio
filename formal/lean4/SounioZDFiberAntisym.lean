@@ -8390,6 +8390,64 @@ theorem Ncnt_closed (m W : Nat) (hW : W < 2^m) (hW0 : W ≠ 0) :
   rw [Ncnt_eq_Nclosed m W hW hW0]
   exact Nclosed_add_Ddig m W hW hW0
 
+/-! ## Tier 34: the bridge to the normalised label
+
+`Ddig` is stated on `W`'s own bits; the contract's `E` is stated on the NORMALISED label
+`8*g(W)+1` with `g W = (W &&& (W-1)) >>> 3`. W34 pins them equal numerically. This tier proves it,
+which is W17's residual -- the statement the lane has carried as unproven.
+
+The crux is one bit fact: subtracting one flips bit `j` exactly when nothing lies below it. -/
+
+/-- **Subtracting one flips bit `j` iff nothing lies below `j`.** -/
+theorem testBit_pred : ∀ (j W : Nat), W ≠ 0 →
+    (W - 1).testBit j = (if W % 2^j = 0 then !(W.testBit j) else W.testBit j) := by
+  intro j
+  induction j with
+  | zero =>
+      intro W hW
+      have h1 : W % 2^0 = 0 := by
+        have : (2:Nat)^0 = 1 := rfl
+        omega
+      rw [if_pos h1, Nat.testBit_zero, Nat.testBit_zero]
+      have : (W - 1) % 2 = 1 ↔ ¬ (W % 2 = 1) := by omega
+      by_cases h : W % 2 = 1
+      · simp [h, this]
+      · simp [h, this]
+  | succ j ih =>
+      intro W hW
+      by_cases hpar : W % 2 = 0
+      · obtain ⟨t, rfl⟩ : ∃ t, W = 2 * t := ⟨W / 2, by omega⟩
+        have ht0 : t ≠ 0 := by omega
+        have hd : (2 * t - 1) / 2 = t - 1 := by omega
+        have hd2 : (2 * t) / 2 = t := by omega
+        have hmod : 2 * t % 2^(j+1) = 2 * (t % 2^j) := by
+          rw [Nat.pow_succ, Nat.mul_comm (2^j) 2, Nat.mul_mod_mul_left]
+        rw [Nat.testBit_succ, Nat.testBit_succ, hd, hd2, hmod, ih t ht0]
+        by_cases hz : t % 2^j = 0
+        · rw [if_pos hz, if_pos (by omega)]
+        · rw [if_neg hz, if_neg (by omega)]
+      · obtain ⟨t, rfl⟩ : ∃ t, W = 2 * t + 1 := ⟨W / 2, by omega⟩
+        have hd : (2 * t + 1 - 1) / 2 = t := by omega
+        have hd2 : (2 * t + 1) / 2 = t := by omega
+        have hmod : (2 * t + 1) % 2^(j+1) ≠ 0 := by
+          -- the residue is ODD, so nonzero; omega cannot see this directly because `2^j * q`
+          -- is nonlinear, so extract the parity with `mod_pow_mod` instead
+          have h := mod_pow_mod 1 (j+1) (2*t+1) (by omega)
+          have h2 : (2:Nat)^1 = 2 := rfl
+          omega
+        rw [Nat.testBit_succ, Nat.testBit_succ, hd, hd2, if_neg hmod]
+
+/-- **Clearing the lowest set bit, bit by bit.** `W &&& (W-1)` keeps bit `j` exactly when `W` has
+    it AND something lies below it -- which is precisely `dterm`'s guard. -/
+theorem and_pred_testBit (W j : Nat) (hW : W ≠ 0) :
+    (W &&& (W - 1)).testBit j = (W.testBit j && !(decide (W % 2^j = 0))) := by
+  rw [Nat.testBit_and, testBit_pred j W hW]
+  by_cases hz : W % 2^j = 0
+  · rw [if_pos hz]
+    simp [hz]
+  · rw [if_neg hz]
+    simp [hz]
+
 end SounioZDFiberAntisym
 
 
