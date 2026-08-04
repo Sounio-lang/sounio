@@ -1821,9 +1821,10 @@ lowest bit, so the base is the single family `W = 2^(n−2)`, and its graph is c
   every vertex has exactly one non-neighbour, and `t2 = N(N−2)` confirms the regularity.
   ⚠ **This is a THEOREM, not a measurement** — `Qgen'_pow2_eq` (`:4587`), see §39.2; this section
   originally mislabelled it;
-- **every triangle has sign product `−1`** — measured, and pinned by `tr(A³) = −tr(|A|³)` exactly.
-  (Note the sign: all triangles `−1` is the OPPOSITE of *balanced*; a balanced signed graph has
-  every cycle `+1`.)
+- **every triangle has sign product `−1`** — ✅ **now a THEOREM ∀n**, `Asig_pow2_top` (§42): the
+  entry is `−μ(l)μ(y)` with `μ(a) = −1 ⟺ a` carries the label's bit, i.e. `A_σ` is **antibalanced**,
+  and every triangle is negative in one line. (Note the sign: all triangles `−1` is the OPPOSITE of
+  *balanced*; a balanced signed graph has every cycle `+1`.)
 
 Counting ordered triangles in `K_N` minus a perfect matching is elementary — no triple of distinct
 vertices can contain two matched pairs, so
@@ -2403,7 +2404,7 @@ Given that formula, `tr(A³) = Σ_T (−μμ)³ = −Σ_T μ(a)²μ(b)²μ(c)² 
 | statement | status |
 |---|---|
 | the graph of `W = 2^(n−2)` is `K_N` minus the coset matching, plus one isolated vertex | **THEOREM ∀n** (`Qgen'_pow2_eq`) |
-| `A_σ(a,b) = −μ(a)μ(b)`, `μ(a) = −1 iff a ∧ W ≠ 0` | MEASURED, `n = 6…12`, 5.5M edges |
+| `A_σ(a,b) = −μ(a)μ(b)`, `μ(a) = −1 iff a ∧ W ≠ 0` | ✅ **THEOREM ∀n** — `Asig_pow2_top` (§42) |
 | ⟹ `tr(A³)(2^(n−2)) = −N(N−2)(N−4)` | one line from the two above |
 | §17.2: `tr(A³)(y=0) = (2/7)(2^m−2)(2^m−4)(2^m−15)` | MEASURED |
 | **`Σ K_j = −1728·[j,3]₂`** | **⟺ §17.2**, given the two above — proven equivalence, this rung |
@@ -2570,3 +2571,57 @@ here.
 
 Reproduce: `python3 scripts/research/zd_annihilation_is_orthogonality_probe.py` (clauses A and B
 added).
+
+
+## §42 — The sign formula is a theorem ∀n: `A_σ` is antibalanced on the top-bit label (`W45`, 2026-08-04)
+
+`Asig_pow2_top`, kernel-clean `[propext, Classical.choice, Quot.sound]`:
+
+```lean
+Asig_pow2_top (n l y : Nat) : l < 2^(n+1) → y < 2^(n+1) → l ≠ 0 → y ≠ 0 →
+    l ≠ 2^n → y ≠ 2^n → resB l y (2^n) n = true →
+    Asig l y (2^n) n = - (muTop l n * muTop y n)
+```
+
+with `muTop a n = if a < 2^n then 1 else -1`. In words: **the entry is `−1` when `l` and `y` lie on
+the same side of the label's bit and `+1` when they straddle it.** §39.3 had this measured over 5.5M
+edges at `n = 6…12`; it is now proven.
+
+In signed-graph language `muTop` is Zaslavsky's **switching function** (arXiv:1303.3083 §I.G) and the
+statement is that **`A_σ` is antibalanced** — `−A_σ` switches to all-positive. Every triangle is then
+negative immediately.
+
+### 42.1 The proof, and why the coset line had to be handled
+
+`P1_red` drops the level; then four cases on which side of the bit `l` and `y` lie, through the
+existing branch reductions:
+
+| case | `cdSigma l y` | `cdSigma (y⊕2^n) (l⊕2^n)` | product |
+|---|---|---|---|
+| both below | `R_ll` → `σ(l,y)` | `R_uu` → `σ(l,y)` | `σ² = +1` |
+| `l` below, `y` above | `R_lu` → `σ(y′,l)` | `R_lu` → `σ(l,y′)` | `−1` by `antisym` |
+| `l` above, `y` below | `R_ul` → `−σ(l′,y)` | `R_ul` → `−σ(y,l′)` | `−1` by `antisym` |
+| both above | `R_uu` → `σ(y′,l′)` | `R_ll` → `σ(y′,l′)` | `σ² = +1` |
+
+and `μ(l)μ(y)` is `+1`, `−1`, `−1`, `+1` in those four cases. The mixed cases need `antisym`, which
+requires `u ≠ v` — and `u = v` is **exactly** `y = l ⊕ 2^n`, the coset line.
+
+That line is excluded by proof, not by hypothesis: `P1_coset` gives `P1 = 1` (it is a square,
+`cdSq`) and `P3_coset` gives `P3 = −1` (two applications of `sigma_self`), so `resB_coset` shows the
+line is not in the support. Hence `Asig_pow2_top` assumes only that `(l,y)` is an edge.
+
+### 42.2 Where this leaves the chain
+
+§33.5(C)'s value `tr(A³)(2^(n−2)) = −N(N−2)(N−4)` now rests on **two theorems**:
+
+| ingredient | status |
+|---|---|
+| the graph is `K_N` minus the coset matching, plus one isolated vertex | **THEOREM** — `Qgen'_pow2_eq` (§39.2) |
+| every entry is `−μ(l)μ(y)`, hence every triangle is `−1` | **THEOREM** — `Asig_pow2_top` (this rung) |
+| antibalance ⟹ `tr(A³) = −#triangles`, and `#triangles = N(N−2)(N−4)` | elementary counting, **not yet in Lean** |
+| §17.2: `tr(A³)(y = 0) = (2/7)(2^m−2)(2^m−4)(2^m−15)` | **MEASURED** |
+
+and by §39.1 the finite clause `Σ K_j = −1728·[j,3]₂` is *equivalent* to §17.2 given the first three.
+So **§17.2 is now the only measured statement left in that chain**, and it is the next target.
+
+**(III) is still reduced, not proven.** (d) and V1 untouched.
