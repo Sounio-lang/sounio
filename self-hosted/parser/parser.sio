@@ -984,6 +984,194 @@ pub fn parser_advance(p_in: Parser) -> Parser with Mut, Panic, Div {
     p
 }
 
+// ---------------------------------------------------------------------------
+// Correctly-rounded decimal -> binary64, slow path (#1626).
+//
+// The fast paths below are exact only while the significand fits 53 bits and
+// |dexp| <= 22. Outside that window they cost one to two roundings, which left
+// four of 91 realistic literals one ULP out: two with 17 significant digits,
+// 1.602176634e-19, and 1e+300. Getting those right needs the exact quotient,
+// which needs integers wider than i64 -- so this is Clinger's AlgorithmM on a
+// small bignum.
+//
+// Base 2^31 limbs so that limb*10 + carry stays far inside i64. 64 limbs is
+// 1984 bits, against 1329 for 10^400, which is the clamp applied to dexp.
+//
+// Module-level rather than local arrays on purpose: boot4 corrupts
+// struct-by-value and large local aggregates, and the rest of this file
+// already uses the scalar-globals idiom for the same reason.
+var PFL_N: [i64; 64] = [0; 64]
+var PFL_NL: i64 = 0
+var PFL_D: [i64; 64] = [0; 64]
+var PFL_DL: i64 = 0
+
+fn pfl_set(is_num: bool, v: i64) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < 64 {
+        if is_num { PFL_N[i as usize] = 0 } else { PFL_D[i as usize] = 0 }
+        i = i + 1
+    }
+    var x = v
+    var n: i64 = 0
+    while x > 0 {
+        if is_num { PFL_N[n as usize] = x % 2147483648 } else { PFL_D[n as usize] = x % 2147483648 }
+        x = x / 2147483648
+        n = n + 1
+    }
+    if is_num { PFL_NL = n } else { PFL_DL = n }
+}
+
+fn pfl_mul_small(is_num: bool, m: i64) with Mut, Panic, Div {
+    var len = if is_num { PFL_NL } else { PFL_DL }
+    var carry: i64 = 0
+    var i: i64 = 0
+    while i < len {
+        let cur = if is_num { PFL_N[i as usize] } else { PFL_D[i as usize] }
+        let prod = cur * m + carry
+        if is_num { PFL_N[i as usize] = prod % 2147483648 } else { PFL_D[i as usize] = prod % 2147483648 }
+        carry = prod / 2147483648
+        i = i + 1
+    }
+    while carry > 0 && len < 64 {
+        if is_num { PFL_N[len as usize] = carry % 2147483648 } else { PFL_D[len as usize] = carry % 2147483648 }
+        carry = carry / 2147483648
+        len = len + 1
+    }
+    if is_num { PFL_NL = len } else { PFL_DL = len }
+}
+
+fn pfl_bits(is_num: bool) -> i64 with Mut, Panic, Div {
+    let len = if is_num { PFL_NL } else { PFL_DL }
+    if len == 0 { return 0 }
+    let top = if is_num { PFL_N[(len - 1) as usize] } else { PFL_D[(len - 1) as usize] }
+    var b: i64 = 0
+    var t = top
+    while t > 0 { b = b + 1  t = t / 2 }
+    (len - 1) * 31 + b
+}
+
+fn pfl_cmp() -> i64 with Mut, Panic, Div {
+    if PFL_NL != PFL_DL {
+        if PFL_NL > PFL_DL { return 1 }
+        return 0 - 1
+    }
+    var i = PFL_NL - 1
+    while i >= 0 {
+        let a = PFL_N[i as usize]
+        let b = PFL_D[i as usize]
+        if a != b {
+            if a > b { return 1 }
+            return 0 - 1
+        }
+        i = i - 1
+    }
+    0
+}
+
+// PFL_N -= PFL_D, assuming PFL_N >= PFL_D
+fn pfl_sub() with Mut, Panic, Div {
+    var borrow: i64 = 0
+    var i: i64 = 0
+    while i < PFL_NL {
+        var d = PFL_N[i as usize] - borrow
+        if i < PFL_DL { d = d - PFL_D[i as usize] }
+        if d < 0 { d = d + 2147483648  borrow = 1 } else { borrow = 0 }
+        PFL_N[i as usize] = d
+        i = i + 1
+    }
+    while PFL_NL > 0 && PFL_N[(PFL_NL - 1) as usize] == 0 { PFL_NL = PFL_NL - 1 }
+}
+
+fn pfl_shl(is_num: bool, k: i64) with Mut, Panic, Div {
+    var j: i64 = 0
+    while j < k {
+        pfl_mul_small(is_num, 2)
+        j = j + 1
+    }
+}
+
+fn pfl_is_zero(is_num: bool) -> bool with Mut, Panic, Div {
+    if is_num { return PFL_NL == 0 }
+    PFL_DL == 0
+}
+
+// Multiply x by 2^k exactly, in two halves so a large negative k does not
+// underflow an intermediate on the way to a representable result.
+fn pfl_scale2(x: f64, k: i64) -> f64 with Mut, Panic, Div {
+    var v = x
+    var a = k / 2
+    var b = k - a
+    var n = a
+    while n > 0 { v = v * 2.0  n = n - 1 }
+    while n < 0 { v = v / 2.0  n = n + 1 }
+    n = b
+    while n > 0 { v = v * 2.0  n = n - 1 }
+    while n < 0 { v = v / 2.0  n = n + 1 }
+    v
+}
+
+// sig * 10^dexp, correctly rounded. Only called when the exact fast paths
+// cannot answer.
+fn pfl_slow(sig: i64, dexp: i64) -> f64 with Mut, Panic, Div {
+    pfl_set(true, sig)
+    pfl_set(false, 1)
+    var k: i64 = 0
+    if dexp > 0 {
+        while k < dexp { pfl_mul_small(true, 10)  k = k + 1 }
+    } else {
+        while k < 0 - dexp { pfl_mul_small(false, 10)  k = k + 1 }
+    }
+
+    // Normalise to 1 <= N/D < 2, tracking the binary exponent.
+    var e: i64 = 0
+    let diff = pfl_bits(true) - pfl_bits(false)
+    if diff > 0 { pfl_shl(false, diff)  e = e + diff }
+    if diff < 0 { pfl_shl(true, 0 - diff)  e = e + diff }
+    if pfl_cmp() < 0 { pfl_shl(true, 1)  e = e - 1 }
+
+    // How many significand bits this exponent can actually hold. 53 when the
+    // result is normal; fewer in the subnormal range, where binary64 loses
+    // precision gradually. Extracting 53 and then scaling down would round
+    // twice -- which is what left 610e-315 (6.1e-313, subnormal) one ULP out
+    // while every normal value was already exact.
+    var want: i64 = 53
+    if e < 0 - 1022 { want = e + 1075 }
+    if want < 1 { return 0.0 }
+    if want > 53 { want = 53 }
+
+    var q: i64 = 1
+    pfl_sub()
+    var i: i64 = 1
+    while i < want {
+        pfl_shl(true, 1)
+        q = q * 2
+        if pfl_cmp() >= 0 { pfl_sub()  q = q + 1 }
+        i = i + 1
+    }
+
+    // Round to nearest, ties to even.
+    pfl_shl(true, 1)
+    var round_up = false
+    if pfl_cmp() >= 0 {
+        pfl_sub()
+        if !pfl_is_zero(true) { round_up = true }
+        else { if q % 2 == 1 { round_up = true } }
+    }
+    if round_up { q = q + 1 }
+
+    // A carry out of the top bit renormalises; the extra bit comes for free
+    // from the exponent.
+    var qmax: i64 = 1
+    var z: i64 = 0
+    while z < want { qmax = qmax * 2  z = z + 1 }
+    if q >= qmax { q = q / 2  e = e + 1 }
+
+    // Every intermediate on the way down is representable because the target
+    // is, so the halving chain in pfl_scale2 is exact rather than repeatedly
+    // rounding.
+    pfl_scale2(q as f64, e - (want - 1))
+}
+
 // Exact powers of ten, built by multiplication rather than written out:
 // lean_single, which compiles this file, parses 10^19 as a NEGATIVE number, so
 // a literal table arrives poisoned. 10^k is exactly representable for k <= 22
@@ -1096,12 +1284,15 @@ fn parser_parse_float_token(start: i64, end: i64) -> f64 with Mut, Panic, Div {
     if dexp > 400 { dexp = 400 }
     if dexp < 0 - 400 { dexp = 0 - 400 }
 
-    // Correctly rounded window: one exact scale, one rounding.
-    if dexp >= 0 && dexp <= 22 {
-        return sf * parser_pow10_exact(dexp)
-    }
-    if dexp < 0 && dexp >= 0 - 22 {
-        return sf / parser_pow10_exact(0 - dexp)
+    // Correctly rounded window: significand exact in f64 AND an exact power of
+    // ten, so the single operation below is the only rounding.
+    if sig <= 9007199254740992 {
+        if dexp >= 0 && dexp <= 22 {
+            return sf * parser_pow10_exact(dexp)
+        }
+        if dexp < 0 && dexp >= 0 - 22 {
+            return sf / parser_pow10_exact(0 - dexp)
+        }
     }
 
     // Extended: walk the exponent DOWN into the exact window by growing the
@@ -1126,25 +1317,11 @@ fn parser_parse_float_token(start: i64, end: i64) -> f64 with Mut, Panic, Div {
         }
     }
 
-    // Fallback: 10^22 at a time. Not correctly rounded, but ~14 roundings for
-    // 1e300 instead of ~300.
-    var v = sf
-    var e3 = dexp
-    while e3 >= 22 {
-        v = v * parser_pow10_exact(22)
-        e3 = e3 - 22
-    }
-    while e3 <= 0 - 22 {
-        v = v / parser_pow10_exact(22)
-        e3 = e3 + 22
-    }
-    if e3 > 0 {
-        v = v * parser_pow10_exact(e3)
-    }
-    if e3 < 0 {
-        v = v / parser_pow10_exact(0 - e3)
-    }
-    v
+    // Everything the exact windows cannot answer goes to the bignum path, which
+    // is correctly rounded by construction. It replaces a chunked 10^22 scaling
+    // that cost one rounding per chunk and left 1e300 and 1.602176634e-19 an ULP
+    // out.
+    pfl_slow(sig, dexp)
 }
 
 pub fn parser_peek_ahead(p: Parser, offset: i64) -> TokenKind with Mut, Panic, Div {
