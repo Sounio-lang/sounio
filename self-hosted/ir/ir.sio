@@ -674,7 +674,8 @@ pub struct IrInstr {
     pub imm_flags: i64,    // Bit 0: z (zeroing-mask, sets EVEX P3[7]). Future: SAE, broadcast.
     pub bin_op: BinaryOp,
     pub un_op: UnaryOp,
-    pub name: Name,
+    // Interned: index into IR_NAME_POOL, 0 = unnamed. See ir_intern_name.
+    pub name_id: i64,
     pub call_args: Option<Box<IrRegList>>,
     pub arg_count: i64,
 }
@@ -2285,6 +2286,170 @@ fn ir_empty_prof_counter_info() -> IrProfCounterInfo {
     IrProfCounterInfo { fn_id: -1, fn_name: ir_empty_name(), counter_id: -1 }
 }
 
+// ============================================================================
+// Interned instruction names
+// ============================================================================
+//
+// WHY IrInstr DOES NOT CARRY A Name.
+//
+// `Name` is `{ buf: [i8; 128], len: i64 }` = 136 bytes, and IrInstr used to
+// hold one inline. That made the instruction ~248 bytes, of which 55% was a
+// buffer that MOST INSTRUCTIONS NEVER USE — an add, a jump, a label, a return
+// all carried 128 zero bytes each. Multiplied out through
+// `IrFunction.instrs: [IrInstr; 4096]` and `IrModule.functions:
+// [IrFunction; 2048]`, that was 2.1 GB of the shipped compiler's 3.40 GB BSS,
+// and it is why IR_MAX_FUNCS could not be raised.
+//
+// Measured 2026-08-04: main.sio's own 120-module import closure declares 10697
+// functions against IR_MAX_FUNCS = 2048, and a name-based reachability census
+// from `main` leaves 5997 of them live — 3988 even with the entire test suite
+// cut out of the call graph. Cross-module DCE, working perfectly, does not fit
+// the compiler into its own IrModule. Halving the instruction does.
+//
+// The pool is GLOBAL rather than per-module on purpose: ir_merge_modules_into
+// copies functions between modules, and per-module ids would have to be
+// remapped at every merge — a silent-miscompile shape if one site were missed.
+// Global ids are stable across merges by construction.
+//
+// Id 0 is always the empty name, so a zero-initialised IrInstr (BSS, ir_nop,
+// any `[ir_nop(); N]` fill) already reads as unnamed without touching the pool.
+pub let IR_NAME_POOL_MAX: i64 = 65536
+
+// PARALLEL FLAT ARRAYS, NOT `[Name; N]`. A global whose element is a struct
+// containing an inline array is miscompiled — measured 2026-08-04 with a
+// minimal probe (a 4096-entry global of `struct { buf: [i8;128], len: i64 }`,
+// two writes then two reads) which SIGSEGVs, while the identical program over
+// parallel `[i8; N*128]` + `[i64; N]` round-trips exactly. The first shape is
+// what this pool was written as, and it turned every string literal in every
+// compiled program into nothing at all — the compiler still exited 0.
+//
+// No initialisers, for two more reasons. The seed (lean_single) rejects a
+// `Name { buf: [0; 128], len: 0 }` fill literal in a global, and this compiler
+// BSS-zeroes `var` initialisers anyway, so a non-zero one would be a lie that
+// holds on one engine and not the other. Every invariant here is therefore
+// stated so that ALL-ZERO IS THE CORRECT INITIAL STATE: ids are 1-based,
+// IR_NAME_POOL_COUNT counts what is stored, and an all-zero index means empty.
+var IR_NAME_POOL_BUF: [i8; 8388608]
+var IR_NAME_POOL_LEN: [i64; 65536]
+var IR_NAME_POOL_COUNT: i64 = 0
+// Set when the pool fills. Interning then returns 0 (the empty name), which is
+// wrong but VISIBLE — ir_name_pool_overflowed() lets a driver refuse rather
+// than emit code with silently blanked symbol names.
+var IR_NAME_POOL_OVERFLOW: bool = false
+
+pub fn ir_name_pool_count() -> i64 {
+    IR_NAME_POOL_COUNT
+}
+
+pub fn ir_name_pool_overflowed() -> bool {
+    IR_NAME_POOL_OVERFLOW
+}
+
+// Open-addressed index over the pool: slot -> id, 0 meaning empty. Interning
+// runs once per INSTRUCTION CONSTRUCTED, which is millions of times on a
+// self-compile, while the pool holds one entry per DISTINCT name — a few
+// thousand. A linear scan would be the product of those two numbers, so the
+// index is not an optimisation, it is what makes interning affordable at all.
+// Twice the pool size keeps the load factor at 50%.
+let IR_NAME_SLOTS: i64 = 131072
+
+var IR_NAME_INDEX: [i64; 131072]
+
+fn ir_name_hash(n: Name) -> i64 with Mut, Panic, Div {
+    var h: i64 = 5381
+    var i: i64 = 0
+    while i < n.len && i < 128 {
+        h = h * 33 + (n.buf[i as usize] as i64)
+        i = i + 1
+    }
+    if h < 0 { 0 - h } else { h }
+}
+
+// Ids are 1-BASED: id k holds IR_NAME_POOL[k - 1]. 0 means "no name", which is
+// what a zero-filled IrInstr already reads as, so nothing has to be seeded.
+pub fn ir_intern_name(n: Name) -> i64 with Mut, Panic, Div {
+    if n.len <= 0 {
+        return 0
+    }
+    var slot = ir_name_hash(n) % IR_NAME_SLOTS
+    var probes: i64 = 0
+    while probes < IR_NAME_SLOTS {
+        let id = IR_NAME_INDEX[slot as usize]
+        if id == 0 {
+            if IR_NAME_POOL_COUNT >= IR_NAME_POOL_MAX {
+                IR_NAME_POOL_OVERFLOW = true
+                return 0
+            }
+            let fresh = IR_NAME_POOL_COUNT + 1
+            ir_name_pool_store(fresh, n)
+            IR_NAME_POOL_COUNT = fresh
+            IR_NAME_INDEX[slot as usize] = fresh
+            return fresh
+        }
+        // Compare the NAME, not the hash: a collision must probe on, not alias
+        // two different symbols onto one id.
+        if ir_name_pool_eq(id, n) {
+            return id
+        }
+        slot = (slot + 1) % IR_NAME_SLOTS
+        probes = probes + 1
+    }
+    IR_NAME_POOL_OVERFLOW = true
+    0
+}
+
+// id -> Name. Out of range reads as the empty name rather than trapping: an id
+// that escaped its pool is a bug, but blanking one symbol is survivable where a
+// panic in the middle of codegen is not.
+fn ir_name_pool_store(id: i64, n: Name) with Mut, Panic, Div {
+    let base = (id - 1) * 128
+    var i: i64 = 0
+    while i < n.len && i < 128 {
+        IR_NAME_POOL_BUF[(base + i) as usize] = n.buf[i as usize]
+        i = i + 1
+    }
+    IR_NAME_POOL_LEN[(id - 1) as usize] = n.len
+}
+
+// Compare without materialising the pooled Name: this runs on every probe of
+// every intern, which is the hot path of the whole pass.
+fn ir_name_pool_eq(id: i64, n: Name) -> bool with Mut, Panic, Div {
+    if IR_NAME_POOL_LEN[(id - 1) as usize] != n.len {
+        return false
+    }
+    let base = (id - 1) * 128
+    var i: i64 = 0
+    while i < n.len && i < 128 {
+        if IR_NAME_POOL_BUF[(base + i) as usize] != n.buf[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+pub fn ir_name_at(id: i64) -> Name with Mut, Panic, Div {
+    if id <= 0 || id > IR_NAME_POOL_COUNT || id > IR_NAME_POOL_MAX {
+        return ir_empty_name()
+    }
+    var out = ir_empty_name()
+    let base = (id - 1) * 128
+    let n = IR_NAME_POOL_LEN[(id - 1) as usize]
+    var i: i64 = 0
+    while i < n && i < 128 {
+        out.buf[i as usize] = IR_NAME_POOL_BUF[(base + i) as usize]
+        i = i + 1
+    }
+    out.len = n
+    out
+}
+
+// Compare an interned id against a Name without materialising the pool entry
+// when the ids happen to match.
+pub fn ir_name_id_eq(id: i64, n: Name) -> bool with Mut, Panic, Div {
+    ir_name_eq(ir_name_at(id), n)
+}
+
 pub fn ir_name_eq(a: Name, b: Name) -> bool with Mut, Panic, Div {
     if a.len != b.len {
         return false
@@ -2433,7 +2598,7 @@ pub fn ir_instr_new(op: IrOpcode) -> IrInstr {
         imm_flags: 0,
         bin_op: BinaryOp::OpAdd,
         un_op: UnaryOp::OpNeg,
-        name: ir_empty_name(),
+        name_id: 0,
         call_args: ir_empty_reg_list(),
         arg_count: 0,
     }
@@ -2458,7 +2623,7 @@ pub fn ir_mark_float_reg(reg: i64) -> IrInstr {
         imm_flags: IR_FLOAT_REG_MARKER_FLAG,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -2483,7 +2648,7 @@ pub fn ir_label(label_id: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -2504,7 +2669,7 @@ pub fn ir_jump(label_id: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -2525,7 +2690,7 @@ pub fn ir_branch_true(cond: i64, label_id: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -2546,7 +2711,7 @@ pub fn ir_branch_false(cond: i64, label_id: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -2567,7 +2732,7 @@ pub fn ir_load_imm(dst: i64, value: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -2588,7 +2753,7 @@ pub fn ir_load_float(dst: i64, value: f64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -2609,7 +2774,7 @@ pub fn ir_int_to_float(dst: i64, src: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -2630,7 +2795,7 @@ pub fn ir_float_to_int(dst: i64, src: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -2651,13 +2816,13 @@ pub fn ir_load_bool(dst: i64, value: bool) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
 }
 
-pub fn ir_load_string(dst: i64, string_idx: i64, n: Name) -> IrInstr {
+pub fn ir_load_string(dst: i64, string_idx: i64, n: Name) -> IrInstr with Div, Mut, Panic {
     let base = ir_instr_new(IrOpcode::IrLoadString)
     IrInstr {
         op: base.op,
@@ -2672,7 +2837,7 @@ pub fn ir_load_string(dst: i64, string_idx: i64, n: Name) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: n,
+        name_id: ir_intern_name(n),
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -2693,7 +2858,7 @@ pub fn ir_copy(dst: i64, src: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -2716,7 +2881,7 @@ pub fn ir_contest(dst: i64, subject: i64, model_count: i64, contest_id: i64) -> 
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -2739,7 +2904,7 @@ pub fn ir_prove_robust(dst: i64, contest_reg: i64, policy_reg: i64, proof_id: i6
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -2774,7 +2939,7 @@ pub fn ir_validated(dst: i64, robust_reg: i64, validation_reg: i64, manifest_id:
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -2795,7 +2960,7 @@ pub fn ir_admit_action(dst: i64, value_reg: i64, robust_reg: i64, decision_polic
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -2816,7 +2981,7 @@ pub fn ir_defer_action(dst: i64, value_reg: i64, evidence_reg: i64, deferral_pol
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -2837,7 +3002,7 @@ pub fn ir_plan_acquisition(dst: i64, value_reg: i64, deferred_reg: i64, acquisit
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -2858,7 +3023,7 @@ pub fn ir_plan_recourse(dst: i64, value_reg: i64, deferred_reg: i64, recourse_po
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -2879,7 +3044,7 @@ pub fn ir_propose_alternatives(dst: i64, value_reg: i64, evidence_reg: i64, fron
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -2900,7 +3065,7 @@ pub fn ir_commit_alternative(dst: i64, value_reg: i64, option_reg: i64, protocol
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -3113,7 +3278,7 @@ pub fn ir_lift_knowledge(dst: i64, knowledge_reg: i64, contest_id: i64) -> IrIns
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -3150,14 +3315,14 @@ fn ir_measure(dst: i64, value_reg: i64, knowledge_meta_id: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
 }
 
 // IrDebugGuard: debug-mode policy guard — conditional trap (Sprint 28)
-pub fn ir_debug_guard(metric_reg: i64, threshold: f64, cmp_op: i64, req_idx: i64, policy_name: Name) -> IrInstr {
+pub fn ir_debug_guard(metric_reg: i64, threshold: f64, cmp_op: i64, req_idx: i64, policy_name: Name) -> IrInstr with Div, Mut, Panic {
     let base = ir_instr_new(IrOpcode::IrDebugGuard)
     IrInstr {
         op: base.op,
@@ -3172,7 +3337,7 @@ pub fn ir_debug_guard(metric_reg: i64, threshold: f64, cmp_op: i64, req_idx: i64
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: policy_name,
+        name_id: ir_intern_name(policy_name),
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -3194,7 +3359,7 @@ pub fn ir_prof_counter(counter_id: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -3225,7 +3390,7 @@ pub fn ir_binop(dst: i64, lhs: i64, op: BinaryOp, rhs: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -3257,7 +3422,7 @@ pub fn ir_hyper_mul_o(dst: i64, lhs: i64, rhs: i64) -> IrInstr {
         imm_flags: 0,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -3278,7 +3443,7 @@ fn ir_hyper_mul_s(dst: i64, lhs: i64, rhs: i64) -> IrInstr {
         imm_flags: 0,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -3299,7 +3464,7 @@ pub fn ir_unaryop(dst: i64, op: UnaryOp, src: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -3314,7 +3479,7 @@ pub fn ir_wide_add(dst: i64, src1: i64, src2: i64, limb_count: i64) -> IrInstr {
         op: base.op, dst: dst, src1: src1, src2: src2,
         imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
         fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
-        bin_op: base.bin_op, un_op: base.un_op, name: base.name,
+        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id,
         call_args: base.call_args, arg_count: base.arg_count,
     }
 }
@@ -3324,7 +3489,7 @@ pub fn ir_wide_sub(dst: i64, src1: i64, src2: i64, limb_count: i64) -> IrInstr {
         op: base.op, dst: dst, src1: src1, src2: src2,
         imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
         fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
-        bin_op: base.bin_op, un_op: base.un_op, name: base.name,
+        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id,
         call_args: base.call_args, arg_count: base.arg_count,
     }
 }
@@ -3334,7 +3499,7 @@ pub fn ir_wide_mul(dst: i64, src1: i64, src2: i64, limb_count: i64) -> IrInstr {
         op: base.op, dst: dst, src1: src1, src2: src2,
         imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
         fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
-        bin_op: base.bin_op, un_op: base.un_op, name: base.name,
+        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id,
         call_args: base.call_args, arg_count: base.arg_count,
     }
 }
@@ -3344,7 +3509,7 @@ pub fn ir_wide_div(dst: i64, src1: i64, src2: i64, limb_count: i64) -> IrInstr {
         op: base.op, dst: dst, src1: src1, src2: src2,
         imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
         fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
-        bin_op: base.bin_op, un_op: base.un_op, name: base.name,
+        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id,
         call_args: base.call_args, arg_count: base.arg_count,
     }
 }
@@ -3354,7 +3519,7 @@ pub fn ir_wide_shr_limb(dst: i64, src: i64, limb_count: i64, shift_limbs: i64) -
         op: base.op, dst: dst, src1: src, src2: shift_limbs,
         imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
         fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
-        bin_op: base.bin_op, un_op: base.un_op, name: base.name,
+        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id,
         call_args: base.call_args, arg_count: base.arg_count,
     }
 }
@@ -3364,7 +3529,7 @@ pub fn ir_wide_mod(dst: i64, src1: i64, src2: i64, limb_count: i64) -> IrInstr {
         op: base.op, dst: dst, src1: src1, src2: src2,
         imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
         fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
-        bin_op: base.bin_op, un_op: base.un_op, name: base.name,
+        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id,
         call_args: base.call_args, arg_count: base.arg_count,
     }
 }
@@ -3374,7 +3539,7 @@ pub fn ir_wide_cmp(dst: i64, src1: i64, src2: i64, limb_count: i64, cmp_op: i64)
         op: base.op, dst: dst, src1: src1, src2: src2,
         imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
         fn_id: base.fn_id, field_idx: cmp_op, imm_flags: base.imm_flags,
-        bin_op: base.bin_op, un_op: base.un_op, name: base.name,
+        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id,
         call_args: base.call_args, arg_count: base.arg_count,
     }
 }
@@ -3384,7 +3549,7 @@ pub fn ir_wide_shr(dst: i64, src: i64, limb_count: i64, shift_bits: i64) -> IrIn
         op: base.op, dst: dst, src1: src, src2: shift_bits,
         imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
         fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
-        bin_op: base.bin_op, un_op: base.un_op, name: base.name,
+        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id,
         call_args: base.call_args, arg_count: base.arg_count,
     }
 }
@@ -3394,7 +3559,7 @@ pub fn ir_wide_div_full(dst: i64, src1: i64, src2: i64, limb_count: i64) -> IrIn
         op: base.op, dst: dst, src1: src1, src2: src2,
         imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
         fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
-        bin_op: base.bin_op, un_op: base.un_op, name: base.name,
+        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id,
         call_args: base.call_args, arg_count: base.arg_count,
     }
 }
@@ -3404,7 +3569,7 @@ pub fn ir_wide_mod_full(dst: i64, src1: i64, src2: i64, limb_count: i64) -> IrIn
         op: base.op, dst: dst, src1: src1, src2: src2,
         imm_i64: limb_count, imm_f64: base.imm_f64, label_id: base.label_id,
         fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
-        bin_op: base.bin_op, un_op: base.un_op, name: base.name,
+        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id,
         call_args: base.call_args, arg_count: base.arg_count,
     }
 }
@@ -3414,12 +3579,12 @@ pub fn ir_wide_reject(dst: i64) -> IrInstr {
         op: base.op, dst: dst, src1: base.src1, src2: base.src2,
         imm_i64: base.imm_i64, imm_f64: base.imm_f64, label_id: base.label_id,
         fn_id: base.fn_id, field_idx: base.field_idx, imm_flags: base.imm_flags,
-        bin_op: base.bin_op, un_op: base.un_op, name: base.name,
+        bin_op: base.bin_op, un_op: base.un_op, name_id: base.name_id,
         call_args: base.call_args, arg_count: base.arg_count,
     }
 }
 
-pub fn ir_call(dst: i64, fn_id: i64, fn_name: Name, args: Option<Box<IrRegList>>, arg_count: i64) -> IrInstr {
+pub fn ir_call(dst: i64, fn_id: i64, fn_name: Name, args: Option<Box<IrRegList>>, arg_count: i64) -> IrInstr with Div, Mut, Panic {
     let pair_regs = ir_reg_list_first_two(args)
     let arg0 = pair_regs.0
     let arg1 = pair_regs.1
@@ -3437,7 +3602,7 @@ pub fn ir_call(dst: i64, fn_id: i64, fn_name: Name, args: Option<Box<IrRegList>>
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: fn_name,
+        name_id: ir_intern_name(fn_name),
         // Keep the full argument list. src1/src2 cache the first two for compatibility.
         call_args: args,
         arg_count: arg_count,
@@ -3447,7 +3612,7 @@ pub fn ir_call(dst: i64, fn_id: i64, fn_name: Name, args: Option<Box<IrRegList>>
 // Caller-side sret call. dest_reg = pre-allocated destination handle vreg (goes in rdi,
 // NOT counted in arg_count). first_arg = vreg of the first EXPLICIT arg (goes in rsi);
 // explicit args are dest contiguous vregs first_arg..first_arg+arg_count.
-pub fn ir_call_sret(dst: i64, fn_id: i64, fn_name: Name, dest_reg: i64, first_arg: i64, arg_count: i64) -> IrInstr {
+pub fn ir_call_sret(dst: i64, fn_id: i64, fn_name: Name, dest_reg: i64, first_arg: i64, arg_count: i64) -> IrInstr with Div, Mut, Panic {
     let base = ir_instr_new(IrOpcode::IrCallSret)
     IrInstr {
         op: base.op,
@@ -3462,7 +3627,7 @@ pub fn ir_call_sret(dst: i64, fn_id: i64, fn_name: Name, dest_reg: i64, first_ar
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: fn_name,
+        name_id: ir_intern_name(fn_name),
         call_args: base.call_args,
         arg_count: arg_count,
     }
@@ -3485,7 +3650,7 @@ pub fn ir_return_sret(src: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -3519,7 +3684,7 @@ pub fn ir_return(src: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -3542,13 +3707,13 @@ pub fn ir_wide_add(dst: i64, src1: i64, src2: i64, limb_count: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
 }
 
-pub fn ir_field_get(dst: i64, base_reg: i64, field_idx: i64, field_name: Name) -> IrInstr {
+pub fn ir_field_get(dst: i64, base_reg: i64, field_idx: i64, field_name: Name) -> IrInstr with Div, Mut, Panic {
     let base = ir_instr_new(IrOpcode::IrFieldGet)
     IrInstr {
         op: base.op,
@@ -3563,13 +3728,13 @@ pub fn ir_field_get(dst: i64, base_reg: i64, field_idx: i64, field_name: Name) -
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: field_name,
+        name_id: ir_intern_name(field_name),
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
 }
 
-pub fn ir_field_set(base_reg: i64, field_idx: i64, src: i64, field_name: Name) -> IrInstr {
+pub fn ir_field_set(base_reg: i64, field_idx: i64, src: i64, field_name: Name) -> IrInstr with Div, Mut, Panic {
     let base = ir_instr_new(IrOpcode::IrFieldSet)
     IrInstr {
         op: base.op,
@@ -3584,7 +3749,7 @@ pub fn ir_field_set(base_reg: i64, field_idx: i64, src: i64, field_name: Name) -
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: field_name,
+        name_id: ir_intern_name(field_name),
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -3605,7 +3770,7 @@ pub fn ir_index_get(dst: i64, base_reg: i64, idx_reg: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -3626,7 +3791,7 @@ pub fn ir_index_set(base_reg: i64, idx_reg: i64, src_reg: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -3653,7 +3818,7 @@ pub fn ir_array_len(dst: i64, base_reg: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -3674,7 +3839,7 @@ pub fn ir_alloc(dst: i64, type_id: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -3703,7 +3868,7 @@ pub fn ir_alloc_array(dst: i64, type_id: i64, elem_count: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -3724,7 +3889,7 @@ pub fn ir_phi(dst: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
@@ -3801,19 +3966,19 @@ pub fn bss_name_hash(n: Name) -> i64 with Div {
     if hash < 0 { 0 - hash } else { hash }
 }
 
-pub fn ir_load_global(dst: i64, bss_offset: i64, name: Name) -> IrInstr with Mut, Panic {
+pub fn ir_load_global(dst: i64, bss_offset: i64, name: Name) -> IrInstr with Mut, Panic, Div {
     var instr = ir_instr_new(IrOpcode::IrLoadGlobal)
     instr.dst = dst
     instr.imm_i64 = bss_offset
-    instr.name = name
+    instr.name_id = ir_intern_name(name)
     instr
 }
 
-pub fn ir_store_global(src: i64, bss_offset: i64, name: Name) -> IrInstr with Mut, Panic {
+pub fn ir_store_global(src: i64, bss_offset: i64, name: Name) -> IrInstr with Mut, Panic, Div {
     var instr = ir_instr_new(IrOpcode::IrStoreGlobal)
     instr.src1 = src
     instr.imm_i64 = bss_offset
-    instr.name = name
+    instr.name_id = ir_intern_name(name)
     instr
 }
 
@@ -3825,10 +3990,10 @@ pub fn ir_store_ptr(ptr: i64, val: i64) -> IrInstr with Mut, Panic {
     instr
 }
 
-pub fn ir_call_extern(dst: i64, symbol: Name, args: Option<Box<IrRegList>>, arg_count: i64) -> IrInstr with Mut, Panic {
+pub fn ir_call_extern(dst: i64, symbol: Name, args: Option<Box<IrRegList>>, arg_count: i64) -> IrInstr with Mut, Panic, Div {
     var instr = ir_instr_new(IrOpcode::IrCallExtern)
     instr.dst = dst
-    instr.name = symbol
+    instr.name_id = ir_intern_name(symbol)
     instr.call_args = args
     instr.arg_count = arg_count
     instr
