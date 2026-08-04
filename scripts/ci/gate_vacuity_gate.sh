@@ -32,7 +32,13 @@ require_min_count "${#GATES[@]}" 300 "gate scripts"
 # emptiness guard anywhere. Both halves matter: extraction without a guard is
 # the defect; a script that extracts nothing has nothing to guard.
 EXTRACTS='\$\((grep|awk|sed|cut|jq|python3|wc|head|tail|tr|rg)[^)]*\)|\$\([^)]*\|[^)]*(grep|awk|sed|jq|wc)[^)]*\)'
-GUARDS='\[\[? *-[nz] *"?\$|\$\{#[A-Za-z_]+\[@\]\} *-(gt|ge)|-s +"?\$|require_nonempty|require_min_count|gate_fail|nothing to measure|vacuous'
+# A numeric FLOOR on an extracted count is a guard too — `[[ "$n" -ge 8 ]] || fail`
+# refuses an empty extraction just as surely as `[[ -n "$n" ]]` does, and it
+# refuses a partial one as well. Omitting it made this gate reject a guard that
+# was genuinely there, which is its own kind of wrong answer: a checker that
+# only recognises one spelling of correctness pushes people toward the spelling
+# rather than the property.
+GUARDS='\[\[? *-[nz] *"?\$|\$\{#[A-Za-z_]+\[@\]\} *-(gt|ge)|-s +"?\$|-(ge|gt|eq|lt|le) +[0-9]|require_nonempty|require_min_count|gate_fail|nothing to measure|vacuous'
 
 : >"${TMPDIR:-/tmp}/gate_vacuity_flagged.$$"
 trap 'rm -f "${TMPDIR:-/tmp}/gate_vacuity_flagged.$$"' EXIT

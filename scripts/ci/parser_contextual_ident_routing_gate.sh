@@ -27,11 +27,24 @@ CALLERS=(
 
 fail() { echo "PARSER_CONTEXTUAL_IDENT_ROUTING_GATE_FAIL: $*" >&2; exit 1; }
 
-grep -q "fn tk_is_contextual_ident" "$HELPER" \
+# Anchored on a word boundary, NOT a bare substring: `fn tk_is_contextual_identX`
+# contains `fn tk_is_contextual_ident`, so a plain grep -q would happily confirm
+# the presence of a helper that had been renamed out from under it.
+grep -qE "fn tk_is_contextual_ident[^A-Za-z0-9_]" "$HELPER" \
     || fail "the single list is gone from $HELPER — this gate is no longer reading what it claims to"
 
 kinds=$(sed -n '/fn tk_is_contextual_ident/,/^}/p' "$HELPER" | grep -oE "TokenKind::\w+" | sort -u)
 n=$(printf '%s\n' "$kinds" | grep -c .)
+
+# The extraction above is a sed range piped into a grep. If the helper is ever
+# reshaped — renamed, split, reformatted so the range stops matching — `kinds`
+# comes back EMPTY, `n` is 0, and without this the gate would announce
+# "admits 0 kinds" and go on to pass, because the caller checks below only look
+# for the helper's NAME. An empty extraction read as a real measurement is the
+# exact failure gate_vacuity_gate.sh exists to catch, and this gate was the one
+# it caught.
+[[ "$n" -ge 8 ]] \
+    || fail "extracted only $n kinds from tk_is_contextual_ident in $HELPER — the list has at least 12 today, so this gate is no longer reading what it claims to"
 echo "  tk_is_contextual_ident admits $n kinds"
 
 bad=0
