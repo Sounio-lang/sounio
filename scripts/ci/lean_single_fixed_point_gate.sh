@@ -29,6 +29,19 @@ case "$(uname -m 2>/dev/null || echo unknown)" in
     ;;
 esac
 
+# SUPERSEDED — do not wire this into CI. Measured 2026-08-04 from a worktree:
+# it resolved `souc=/workspace/sounio/bin/souc`, i.e. the wrapper from ANOTHER
+# CHECKOUT, and then reported `FAIL: stage1 != stage2` about a compiler that has
+# nothing to do with the tree under test. resolve_souc.sh honours SOUC_BIN and
+# the bin/souc shim, so this gate's subject is whatever happens to be installed,
+# which makes its verdict unattributable.
+#
+# scripts/ci/canonical_compiler_gate.sh asserts the same property — that the
+# shipped lean_single ELF IS the byte-identical fixed point of current
+# lean_single.sio — against an explicit binary, passes in ~2 s, and is wired.
+# Use that one. This file is kept as a diagnostic, not deleted, because its
+# staging output is occasionally useful when a bootstrap is being debugged by
+# hand.
 source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
 sounio_require_souc
 
