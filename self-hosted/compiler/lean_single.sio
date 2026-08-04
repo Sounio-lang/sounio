@@ -3857,6 +3857,29 @@ fn tc_error(tok: i64, msg: string) -> i64 with IO, Mut, Panic {
     return 0
 }
 
+// Unbalanced braces in a module (#1634).
+//
+// Sets TYPECHECK_FAILED DIRECTLY rather than going through tc_mark_failed or
+// note_limit_error. Both of those early-return for functions carrying
+// FN_EFFECTS & 2048 (imported), which is how an unbalanced brace in an imported
+// module used to fail the build while printing no `error:` line at all -- the
+// only symptom was a scatter of E200s hundreds of tokens later, in a different
+// file, naming a parameter that had nothing to do with it.
+fn tc_unbalanced_braces(tok: i64, d: i64) with IO, Mut, Panic {
+    print("error: unbalanced braces in module (")
+    if d > 0 {
+        print_int(d)
+        print(" unclosed `{`")
+    } else {
+        print_int(0 - d)
+        print(" extra `}`")
+    }
+    print(") near ")
+    print_src_loc_for_tok(tok)
+    print("\n")
+    TYPECHECK_FAILED = 1
+}
+
 fn tc_error_hard(tok: i64, msg: string) -> i64 with IO, Mut, Panic {
     print("error: ")
     print(msg)
@@ -7963,7 +7986,20 @@ fn emit_global_inits_x86() with IO, Mut, Panic, Div {
     while p < TC {
         let tk = TK[p as usize]
         if tk == 8 { depth = depth + 1; p = p + 1; continue }
-        if tk == 9 { depth = depth - 1; p = p + 1; continue }
+        if tk == 9 {
+            // Clamped, matching Pass 0a. Unclamped, one stray `}` pins depth
+            // negative for the whole remaining token stream, and every later
+            // function-body `var` is treated as a global (#1634).
+            if depth > 0 { depth = depth - 1 }
+            p = p + 1
+            continue
+        }
+        // File boundary (TK==77). Modules are independently balanced, so depth
+        // must not carry across one. Pass 0a already resets here; these three
+        // scanners did not, which is what let one file's imbalance poison the
+        // rest of the bundle -- and made the three disagree about which `var`s
+        // are global, between registration and initializer emission.
+        if tk == 77 { depth = 0; p = p + 1; continue }
         if depth > 0 { p = p + 1; continue }
         if tk == 12 {
             p = p + 1
@@ -8045,7 +8081,20 @@ fn emit_global_inits_a64() with IO, Mut, Panic, Div {
     while p < TC {
         let tk = TK[p as usize]
         if tk == 8 { depth = depth + 1; p = p + 1; continue }
-        if tk == 9 { depth = depth - 1; p = p + 1; continue }
+        if tk == 9 {
+            // Clamped, matching Pass 0a. Unclamped, one stray `}` pins depth
+            // negative for the whole remaining token stream, and every later
+            // function-body `var` is treated as a global (#1634).
+            if depth > 0 { depth = depth - 1 }
+            p = p + 1
+            continue
+        }
+        // File boundary (TK==77). Modules are independently balanced, so depth
+        // must not carry across one. Pass 0a already resets here; these three
+        // scanners did not, which is what let one file's imbalance poison the
+        // rest of the bundle -- and made the three disagree about which `var`s
+        // are global, between registration and initializer emission.
+        if tk == 77 { depth = 0; p = p + 1; continue }
         if depth > 0 { p = p + 1; continue }
         if tk == 12 {
             p = p + 1
@@ -15828,11 +15877,14 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         return
                     }
                     // True undefined variable: not local, not global, not fn, not const
-                    print("E200 `")
+                    // #1634: was `E200 \`x\` at line N` -- no `error:` prefix, so
+                    // grep '^error' missed it, and a bare bundle line number with
+                    // no file to resolve it against.
+                    print("error[E200]: undefined identifier `")
                     var e200_i: i64 = ns
                     while e200_i < ne { print_char(SRC[e200_i as usize] as i64); e200_i = e200_i + 1 }
-                    print("` at line ")
-                    print_int(TL[name_tok as usize])
+                    print("` at ")
+                    print_src_loc_for_tok(name_tok)
                     print("\n")
                     tc_mark_failed()
                     em(0x31); em(0xc0)
@@ -28769,10 +28821,44 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     p = 0
     // Pass 0b: register global variables
     var depth: i64 = 0
+    var open_tok: i64 = 0       // the `{` that took depth 0 -> 1 in this module
+    var reported: i64 = 0       // at most one brace diagnostic per module
     while p < TC {
         let tk = TK[p as usize]
-        if tk == 8 { depth = depth + 1; p = p + 1; continue }
-        if tk == 9 { depth = depth - 1; p = p + 1; continue }
+        if tk == 8 {
+            if depth == 0 { open_tok = p }
+            depth = depth + 1
+            p = p + 1
+            continue
+        }
+        if tk == 9 {
+            // Clamped, matching Pass 0a. Unclamped, one stray `}` pins depth
+            // negative for the whole remaining token stream, and every later
+            // function-body `var` is treated as a global (#1634). Clamping
+            // alone would make the stray `}` invisible, so it is reported here
+            // -- at the offending token, which is the useful place.
+            if depth > 0 {
+                depth = depth - 1
+            } else {
+                if reported == 0 { tc_unbalanced_braces(p, 0 - 1)  reported = 1 }
+            }
+            p = p + 1
+            continue
+        }
+        // File boundary (TK==77). Modules are independently balanced, so depth
+        // must not carry across one. Pass 0a already resets here; these three
+        // scanners did not, which is what let one file's imbalance poison the
+        // rest of the bundle -- and made the three disagree about which `var`s
+        // are global, between registration and initializer emission.
+        if tk == 77 {
+            if depth > 0 {
+                if reported == 0 { tc_unbalanced_braces(open_tok, depth) }
+            }
+            depth = 0
+            reported = 0
+            p = p + 1
+            continue
+        }
         if depth > 0 { p = p + 1; continue }
         // Top-level var
         if tk == 12 {
@@ -28826,11 +28912,27 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                     p = SCAN_TY_NEXT
                 }
             }
-            // Skip = initializer until next var or fn or EOF
-            while p < TC && TK[p as usize] != 12 && TK[p as usize] != 1 && TK[p as usize] != 0 { p = p + 1 }
+            // Skip = initializer until next var or fn or file boundary or EOF. This
+            // walks past arbitrary tokens INCLUDING braces, so it has to carry the
+            // depth with it -- otherwise a top-level `var` followed by an
+            // `impl Foo { ... }` swallows the opening brace and stops at the `fn`
+            // inside the impl with depth still 0 (#1634).
+            while p < TC && TK[p as usize] != 12 && TK[p as usize] != 1 && TK[p as usize] != 0 && TK[p as usize] != 77 {
+                if TK[p as usize] == 8 { depth = depth + 1 }
+                if TK[p as usize] == 9 {
+                    if depth > 0 { depth = depth - 1 }
+                }
+                p = p + 1
+            }
             continue
         }
         p = p + 1
+    }
+    // The last module has no trailing boundary marker. Report at the unmatched
+    // `{` rather than at the end of the stream: the tail of the bundle is the
+    // appended native prelude, whose line numbers mean nothing to the author.
+    if depth > 0 {
+        if reported == 0 { tc_unbalanced_braces(open_tok, depth) }
     }
     p = 0
 
