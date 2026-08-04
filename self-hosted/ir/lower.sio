@@ -153,6 +153,11 @@ let LOWER_GLOBAL_ARRAY: i64 = 4
 // kind: 0=none 1=id 2=scale 3=add 4=mul 5=fwd
 // Keys are polynomial hashes of Name bytes (Name aggregates do not survive
 // global array stores — same family as ClaimDecl name truncation).
+// Last function id that announced the IR_MAX_INSTRS wall, so the message is
+// printed once per function rather than once per dropped instruction. See the
+// else-branch of Lowerer::emit.
+var IR_INSTR_WALL_LAST_FN: i64 = -1
+
 var FO_XFER_COUNT: i64 = 0
 var FO_XFER_KIND: [i64; 64] = [0; 64]
 var FO_XFER_LIT: [f64; 64] = [0.0; 64]
@@ -8581,12 +8586,28 @@ impl Lowerer {
             lo.current_func = current_func_box
             lo
         } else {
-            if lo.probe_mode {
-                print("lower_probe: emit_overflow instr_count=")
-                print_int(instr_count)
-                print(" fn=")
+            // Unconditional, not probe_mode-gated. Dropping instructions here is
+            // the #1586 failure: the tail of a function is simply not lowered, so
+            // the program compiles, exits 0, and prints nothing after the cut.
+            //
+            // report_error() below is NOT enough on its own, and that is the point
+            // of printing here. Measured: a 160-comparison main trips this wall,
+            // report_error() runs, and the driver still exits 0 with a truncated
+            // binary -- the had_error flag does not reach the exit code. Making
+            // THAT propagate is a separate change; until it does, a build log that
+            // says nothing is the worst of the available options.
+            //
+            // Printed once per FUNCTION, not once per dropped instruction, and
+            // deliberately NOT gated on error_count: a function that already had
+            // an unrelated lowering error would then hit this wall in silence,
+            // which is the exact property this diagnostic exists to remove.
+            if IR_INSTR_WALL_LAST_FN != lo.current_fn {
+                IR_INSTR_WALL_LAST_FN = lo.current_fn
+                print("error: function `")
                 print(str_from_bytes(lo.current_func.name.buf, lo.current_func.name.len))
-                print("\n")
+                print("` exceeds IR_MAX_INSTRS (")
+                print_int(IR_MAX_INSTRS)
+                print(" IR instructions); split it into smaller functions\n")
             }
             lo.report_error()
         }
