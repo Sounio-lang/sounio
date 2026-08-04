@@ -2041,3 +2041,73 @@ level to its value at the label's own top-bit level, where the label is high.
 **(III) is still reduced, not proven. `tr(A³)`'s absolute closed form, (d) and V1 are untouched.**
 
 Reproduce: `python3 scripts/research/zd_v1_III_mechanism_probe.py 7 8 9`.
+
+## §36 — §34 on the HIGH branch: the deviation is created there, and it is a pure SIGN defect (`W39`, 2026-08-04)
+
+§35 ruled out every isomorphism/spectral route and left "a counting identity for closed 3-walks",
+with the instruction to carry §34's block decomposition to the high branch — which is where
+§33.5(B)'s descent bottoms out. Three findings, all MEASURED (`n = 7, 8, 9`).
+
+### 36.1 The high branch is the COMPLEMENT, not a blow-up
+
+For a high label `W = W′ + h` (`h = 2^(n−2)`), the level-`n` resonance on the doubled vertices is
+the **complement** of the level-`(n−1)` one: exact on the `(0,0)` block (0 mismatches) and off by
+exactly `2(h−2)` entries on each of the other three — the same correction size as `E` in §34. This
+is the graph-level content of the reflection in the proven `t2` high recursion ("counting `−1`s
+becomes counting `+1`s").
+
+> **Consequence, and it is structural rather than statistical:** the level-`n` edges sit exactly
+> where level `n−1` had **no** edge, so their signs are **not determined by `A′` at all**. The
+> level-`(n−1)` signed graph therefore cannot determine `tr(A³)` at level `n`.
+
+That is §21.3's conclusion — reached there by exhausting invariants, and now visible directly in
+the block structure. Two ansätze died on the way and are recorded: the per-block sign law is not a
+constant (both signs occur in every block), and the ratio `P1ₙ·P1ₙ₋₁` is **not** a coboundary
+`μ(a)μ(b)` — mismatches ≈ the whole block, so this is not the `GL(3,2)` situation of §17.1.
+
+### 36.2 The top bit flips the parity — the high step CREATES the deviation
+
+`g(W′+h) = g(W′) + 2^(n−5)`, so `popcount(g)` changes by exactly one, and the reference lifts the
+same way (`8·g(W′+h)+1 = (8·g(W′)+1) + h`). Hence, measured with 0 violations:
+
+> `D(n−1, W′) ≠ 0 ⟺ D(n, W′+h) = 0`, and when `D(n, W′+h) ≠ 0` it equals `δ(n, lsb W′)`.
+
+So the high step is **not** a scaling recursion. The pair `(W′, 8g(W′)+1)` that lifts to a nonzero
+deviation is precisely the pair whose level-`(n−1)` deviation is **zero** — i.e. a pair that (c)
+has *merged*, cospectral by the proven isomorphism `Φ`. The whole of `δ` is generated in one step
+from an isomorphic pair.
+
+> **The clean restatement of (III)'s open core:** `δ(n,j)` is the **obstruction to lifting `Φ`
+> through the high step**. `Φ` is explicit and proven ∀n; what is open is the defect of its lift.
+
+That is also why §21.2 found the colliding level-`(n−1)` labels to have identical full spectra —
+they are (c)-merged by construction. §21's negative and this rung are the same phenomenon.
+
+### 36.3 The deviation is a PURE SIGN defect
+
+A seam and its Fano reference have the same edge count `t2` (that is (I), a theorem) — and also:
+
+> the **unsigned** graphs `|A|` are **cospectral at every power** `k = 1…6` and share degree
+> sequences, for **every** seam at `n = 7, 8, 9` (7/7, 15/15, 31/31), while the **signed**
+> `tr(A³)` differs by `δ` on exactly the even-`popcount(g)` ones.
+
+(The unsigned graphs are not entrywise equal — 0/53 — so this is cospectrality, not identity.)
+
+**So the entire deviation lives in the signs.** The unsigned graph is blind to it at every order;
+the signed graph sees it only at `k = 3` (§35). Together:
+
+| | seam vs its Fano reference |
+|---|---|
+| unsigned `tr(\|A\|^k)`, all `k` | **equal** |
+| signed `tr(A^k)`, `k = 1, 2` | equal (`k=2` is (I), a theorem) |
+| signed `tr(A³)` | differs by `δ(n, lsb)` — universal in `g` |
+| signed `tr(A^k)`, `k ≥ 4` | differs, and `g`-dependently (§35) |
+
+`δ` is therefore a **signature invariant, not a graph invariant**, and the sign difference is not a
+switching (a switching would preserve every `k`). The next object to study is that sign difference
+itself: a `±1` perturbation on a cospectral pair whose only `g`-universal footprint is its
+closed-3-walk sum.
+
+**(III) is still reduced, not proven.** `tr(A³)`'s absolute closed form, (d) and V1 are untouched.
+
+Reproduce: `python3 scripts/research/zd_v1_III_high_branch_probe.py 7 8 9`.
