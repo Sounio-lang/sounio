@@ -9,7 +9,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.epistemi
 
 # Epistemic trust map — which stdlib/epistemic results a real program can trust today
 
-**Date:** 2026-07-14 (Wave10 k95 closeout 2026-07-21)
+**Date:** 2026-07-14 (Wave10 k95 closeout 2026-07-21; uncertain_eq P0=C 2026-08-04)
 **Toolchain:** `./bin/souc` → Madaros v0.80.0 (default **native** engine)
 **Scope:** core uncertainty primitives (GUM, uncertainty propagation, Knowledge<T>,
 correlation/covariance, imprecise probability). Bounded, not exhaustive.
@@ -55,6 +55,7 @@ A result is usable under native import iff **both** hold:
 | `propagate` (delta-method + MC) | product `6`/`0.25`; `exp_delta(1,σ²=0.01)` → `e` / `e²·0.01`; MC identity mean≈`1` var≈`0.01`; MC square E[X²]≈`4.01` var≈`0.16` | **2026-07-20 multi-module green** for free-function `Epistemic` + `exp_delta`/`product`/`ln`/`sin`/`cos_delta` and value-style LCG MC kernels (`monte_carlo_identity`, `monte_carlo_square`). Gate: `scripts/madaros_propagate_native_gate.sh` + Section A `PROPAGATE_TRUST_OK`. Caveats (pre-Wave6-C): literal `exp`/`cos` SEGV — **fixed** (empty-stub builtins only); remaining: exclusive-ref xoshiro inside imported bodies untrustworthy (MC uses Knuth LCG+CLT); generic `monte_carlo(x,f,n)` fn-ptr still fragile. |
 | `algebra::associator_field` | non-Fano ‖α‖²=`4`, g2=`2`, aug var=`4.25`; pentagon (e1,e2,e4,e1) var=`0.96` | **2026-07-20 multi-module green** after #1274 oct_mul lo/hi split + pub API surface (`assoc_field_*`, `pentagon_*`, `af_*`). Gate: `scripts/madaros_associator_field_native_gate.sh`. L0: `associator_field_octonion` + `associator_field_pentagon`. |
 | `algebra::octonion` (`oct_mul`, `oct_associator`, …) | e1·e2→e3; non-Fano ‖[e1,e2,e4]‖²=`4` | **2026-07-20** lo/hi frame split. Gate: `scripts/madaros_algebra_octonion_import_gate.sh`. |
+| `uncertain_eq` | `ep_eq_prob` / `ep_decide` / `ep_eq_field` (Bernoulli P(|a−b|<ε), named threshold, EqField windows) | **2026-08-04 Attention P0=C** — multi-module Madaros native import green. Historical "blocked" row was an `IO`-missing run-pass driver (E035), not a lowering defect. Gate: `scripts/ci/madaros_uncertain_eq_trust_gate.sh` + Section A `UNCERTAIN_EQ_TRUST_OK`. |
 
 Heuristic: **self-contained modules (no stdlib `use` deps) import cleanly and
 return correct numbers** under default Madaros. Method-call form on `Epistemic`
@@ -97,7 +98,6 @@ converge to k≈1.96).
 |---|---|---|
 | `propagate` **export names** `exp` / `cos` (call site) | **FIXED Wave6 C** — empty-stub builtins only (`instr_count==0`); user-bodied `exp`/`cos` keep IR | call `exp`/`cos` freely under multi-module Madaros; `exp_delta`/`cos_delta` remain aliases |
 | `propagate::monte_carlo` (generic fn-ptr form) | fragile / NaN under multi-module when combined with exclusive-ref RNG | use `monte_carlo_identity` / `monte_carlo_square` (value-style LCG) |
-| `uncertain_eq` | method / multi-module path | equality-under-uncertainty native-import-blocked |
 
 Stdlib `Epistemic` method form is TRUSTWORTHY under multi-module Madaros (Wave9).
 Language generic `Knowledge<T>` method form is a separate surface — do not
@@ -124,7 +124,8 @@ Historical failures reduce to filed compiler dispatches (status as of Wave10):
 ## Living boundary
 
 `scripts/epistemic_trust_gate.sh` gates the trustworthy set (Section A), including
-finite-dof gum k95 (`witness_gum_k95` → `2776`). Section B (k95 trip-wire) is
+finite-dof gum k95 (`witness_gum_k95` → `2776`) and `uncertain_eq`
+(`UNCERTAIN_EQ_TRUST_OK`, 2026-08-04). Section B (k95 trip-wire) is
 **retired**. Update this map when a residual Section C / fragile form graduates.
 
 ## AI disclosure
