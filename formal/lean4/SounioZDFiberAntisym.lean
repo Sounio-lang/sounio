@@ -9520,6 +9520,168 @@ theorem resB_hub_hub (hL : Llo < 2^(k+1)) (hL0 : Llo ≠ 0) :
 
 end HubAdj
 
+/-! ## Tier 39: THE BLOCK IDENTITY — level `n` restricted to the four blocks IS level `n−1`
+
+§34's `C1`, the foundation the whole of §18.1 rests on, measured there over 38M entries. For a LOW
+label `W` and low `a, b` off the excluded lines, every one of the four blocks of level `k+1` carries
+the level-`k` entry:
+
+    Asig (a + e·2^(k+1)) (b + f·2^(k+1)) W (k+1) = Asig a b W k,   e, f ∈ {0,1}
+
+The `(0,0)` block is `R_ll` twice — nothing else. The other three need `antisym`, and **the
+hypotheses `antisym` demands are exactly the lines `E` keeps**: `a ≠ b` is the matching family and
+`a ≠ b ⊕ W` the coset family. So the block identity and `E`'s four families are one computation seen
+from two sides, which is why §34 found `E` supported precisely there. -/
+
+section Block
+variable (k a b W : Nat)
+
+/-- the standing hypotheses: `a`, `b` low, off `0`, off the label, off the matching and coset lines -/
+structure BlkStd : Prop where
+  ha : a < 2^(k+1)
+  hb : b < 2^(k+1)
+  hW : W < 2^(k+1)
+  ha0 : a ≠ 0
+  hb0 : b ≠ 0
+  haW : a ≠ W
+  hbW : b ≠ W
+  hab : a ≠ b
+  hcos : a ≠ b ^^^ W
+
+namespace BlkStd
+variable {k a b W}
+theorem aWx (h : BlkStd k a b W) : a ^^^ W ≠ 0 := fun e => h.haW (xor_zero_eq _ _ e)
+theorem bWx (h : BlkStd k a b W) : b ^^^ W ≠ 0 := fun e => h.hbW (xor_zero_eq _ _ e)
+theorem aWlt (h : BlkStd k a b W) : a ^^^ W < 2^(k+1) := xorlt (n := k) h.ha h.hW
+theorem bWlt (h : BlkStd k a b W) : b ^^^ W < 2^(k+1) := xorlt (n := k) h.hb h.hW
+theorem bcos (h : BlkStd k a b W) : b ≠ a ^^^ W := by
+  intro e
+  exact h.hcos (by rw [e, Nat.xor_assoc, Nat.xor_self, Nat.xor_zero])
+theorem swap (h : BlkStd k a b W) : BlkStd k b a W :=
+  ⟨h.hb, h.ha, h.hW, h.hb0, h.ha0, h.hbW, h.haW, fun e => h.hab e.symm, h.bcos⟩
+end BlkStd
+
+private theorem blk_lift {x : Nat} (h : x < 2^(k+1)) : x < 2^(k+2) := by
+  have : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by rw [Nat.pow_succ]; omega
+  omega
+private theorem blk_lift2 {x : Nat} (h : x < 2^(k+1)) : x + 2^(k+1) < 2^(k+2) := by
+  have : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by rw [Nat.pow_succ]; omega
+  omega
+
+/-! ### `P1` on the four blocks -/
+
+theorem P1_b00 (h : BlkStd k a b W) : P1 a b W (k+1) = P1 a b W k := by
+  rw [P1_red a b W (k+1) (blk_lift k h.ha) (blk_lift k h.hb) (blk_lift k h.hW)
+        (by have := h.bWx; omega),
+      R_ll a b k h.ha h.hb, R_ll (b ^^^ W) (a ^^^ W) k h.bWlt h.aWlt,
+      P1_red a b W k h.ha h.hb h.hW h.bWx]
+
+theorem P1_b01 (h : BlkStd k a b W) : P1 a (b + 2^(k+1)) W (k+1) = P1 a b W k := by
+  rw [P1_red a (b + 2^(k+1)) W (k+1) (blk_lift k h.ha) (blk_lift2 k h.hb) (blk_lift k h.hW)
+        (by rw [shift_xorL k b W h.hb h.hW]; have := Nat.two_pow_pos (k+1); omega),
+      shift_xorL k b W h.hb h.hW,
+      R_lu a b k h.ha h.hb, R_ul (b ^^^ W) (a ^^^ W) k h.bWlt h.aWlt, if_neg h.aWx,
+      P1_red a b W k h.ha h.hb h.hW h.bWx,
+      antisym (k+1) b a h.hb h.ha h.hb0 h.ha0 (fun e => h.hab e.symm)]
+  grind
+
+theorem P1_b11 (h : BlkStd k a b W) :
+    P1 (a + 2^(k+1)) (b + 2^(k+1)) W (k+1) = P1 a b W k := by
+  rw [P1_red (a + 2^(k+1)) (b + 2^(k+1)) W (k+1) (blk_lift2 k h.ha) (blk_lift2 k h.hb) (blk_lift k h.hW)
+        (by rw [shift_xorL k b W h.hb h.hW]; have := Nat.two_pow_pos (k+1); omega),
+      shift_xorL k b W h.hb h.hW, shift_xorL k a W h.ha h.hW,
+      R_uu a b k h.ha h.hb, if_neg h.hb0,
+      R_uu (b ^^^ W) (a ^^^ W) k h.bWlt h.aWlt, if_neg h.aWx,
+      P1_red a b W k h.ha h.hb h.hW h.bWx,
+      antisym (k+1) b a h.hb h.ha h.hb0 h.ha0 (fun e => h.hab e.symm),
+      antisym (k+1) (a ^^^ W) (b ^^^ W) h.aWlt h.bWlt h.aWx h.bWx (xorW_ne h.hab)]
+  grind
+
+/-! ### `P3` on the four blocks -/
+
+theorem P3_b00 (h : BlkStd k a b W) : P3 a b W (k+1) = P3 a b W k := by
+  rw [P3_red a b W (k+1) (blk_lift k h.ha) (blk_lift k h.hb) (blk_lift k h.hW) h.hb0,
+      R_ll (b ^^^ W) a k h.bWlt h.ha, R_ll (a ^^^ W) b k h.aWlt h.hb,
+      P3_red a b W k h.ha h.hb h.hW h.hb0]
+
+theorem P3_b01 (h : BlkStd k a b W) : P3 a (b + 2^(k+1)) W (k+1) = P3 a b W k := by
+  rw [P3_red a (b + 2^(k+1)) W (k+1) (blk_lift k h.ha) (blk_lift2 k h.hb) (blk_lift k h.hW)
+        (by have := Nat.two_pow_pos (k+1); omega),
+      shift_xorL k b W h.hb h.hW,
+      R_ul (b ^^^ W) a k h.bWlt h.ha, if_neg h.ha0,
+      R_lu (a ^^^ W) b k h.aWlt h.hb,
+      P3_red a b W k h.ha h.hb h.hW h.hb0,
+      antisym (k+1) b (a ^^^ W) h.hb h.aWlt h.hb0 h.aWx h.bcos]
+  grind
+
+theorem P3_b11 (h : BlkStd k a b W) :
+    P3 (a + 2^(k+1)) (b + 2^(k+1)) W (k+1) = P3 a b W k := by
+  rw [P3_red (a + 2^(k+1)) (b + 2^(k+1)) W (k+1) (blk_lift2 k h.ha) (blk_lift2 k h.hb) (blk_lift k h.hW)
+        (by have := Nat.two_pow_pos (k+1); omega),
+      shift_xorL k b W h.hb h.hW, shift_xorL k a W h.ha h.hW,
+      R_uu (b ^^^ W) a k h.bWlt h.ha, if_neg h.ha0,
+      R_uu (a ^^^ W) b k h.aWlt h.hb, if_neg h.hb0,
+      P3_red a b W k h.ha h.hb h.hW h.hb0,
+      antisym (k+1) a (b ^^^ W) h.ha h.bWlt h.ha0 h.bWx h.hcos,
+      antisym (k+1) b (a ^^^ W) h.hb h.aWlt h.hb0 h.aWx h.bcos]
+  grind
+
+/-! ### the `(1,0)` block, by symmetry -/
+
+theorem P1_b10 (h : BlkStd k a b W) : P1 (a + 2^(k+1)) b W (k+1) = P1 a b W k := by
+  rw [P1_symm (a + 2^(k+1)) b W (k+1) (blk_lift2 k h.ha) (blk_lift k h.hb) (blk_lift k h.hW)
+        (by have := Nat.two_pow_pos (k+1); omega) h.hb0
+        (by rw [shift_xorL k a W h.ha h.hW]; have := Nat.two_pow_pos (k+1); omega) h.bWx,
+      P1_b01 k b a W h.swap,
+      P1_symm b a W k h.hb h.ha h.hW h.hb0 h.ha0 h.bWx h.aWx]
+
+theorem P3_b10 (h : BlkStd k a b W) : P3 (a + 2^(k+1)) b W (k+1) = P3 a b W k := by
+  rw [P3_symm (a + 2^(k+1)) b W (k+1) (blk_lift2 k h.ha) (blk_lift k h.hb) (blk_lift k h.hW)
+        (by have := Nat.two_pow_pos (k+1); omega) h.hb0,
+      P3_b01 k b a W h.swap, P3_symm b a W k h.hb h.ha h.hW h.hb0 h.ha0]
+
+/-! ### from `P1`/`P3` to `Asig` -/
+
+private theorem asig_of (X Y : Nat)
+    (hX : X < 2^(k+2)) (hY : Y < 2^(k+2)) (hX0 : X ≠ 0) (hY0 : Y ≠ 0)
+    (hXW : X ^^^ W ≠ 0) (hYW : Y ^^^ W ≠ 0) (h : BlkStd k a b W)
+    (h1 : P1 X Y W (k+1) = P1 a b W k) (h3 : P3 X Y W (k+1) = P3 a b W k) :
+    Asig X Y W (k+1) = Asig a b W k := by
+  have hWlt : W < 2^(k+2) := blk_lift k h.hW
+  have e1 : (P1 X Y W (k+1) == P1 Y X W (k+1)) = true := by
+    rw [P1_symm X Y W (k+1) hX hY hWlt hX0 hY0 hXW hYW]; simp
+  have e2 : (P3 X Y W (k+1) == P3 Y X W (k+1)) = true := by
+    rw [P3_symm X Y W (k+1) hX hY hWlt hX0 hY0]; simp
+  have e3 : (P1 a b W k == P1 b a W k) = true := by
+    rw [P1_symm a b W k h.ha h.hb h.hW h.ha0 h.hb0 h.aWx h.bWx]; simp
+  have e4 : (P3 a b W k == P3 b a W k) = true := by
+    rw [P3_symm a b W k h.ha h.hb h.hW h.ha0 h.hb0]; simp
+  have hres : resB X Y W (k+1) = resB a b W k := by
+    unfold resB; rw [e1, e2, e3, e4, h1, h3]
+  unfold Asig; rw [hres, h1]
+
+/-- **THE BLOCK IDENTITY, forall n.** Off the matching line `a = b`, the coset line `a = b ⊕ W`
+    and the isolated vertex, all four blocks of level `k+1` carry the level-`k` entry. -/
+theorem Asig_block (e f : Nat) (he : e = 0 ∨ e = 1) (hf : f = 0 ∨ f = 1) (h : BlkStd k a b W) :
+    Asig (a + e * 2^(k+1)) (b + f * 2^(k+1)) W (k+1) = Asig a b W k := by
+  have hp := Nat.two_pow_pos (k+1)
+  have hXW0 : ∀ x, x < 2^(k+1) → x ^^^ W ≠ 0 → (x + 2^(k+1)) ^^^ W ≠ 0 := by
+    intro x hx _
+    rw [shift_xorL k x W hx h.hW]; omega
+  rcases he with rfl | rfl <;> rcases hf with rfl | rfl <;> simp only [Nat.zero_mul,
+    Nat.one_mul, Nat.add_zero]
+  · exact asig_of k a b W a b (blk_lift k h.ha) (blk_lift k h.hb) h.ha0 h.hb0 h.aWx h.bWx h
+      (P1_b00 k a b W h) (P3_b00 k a b W h)
+  · exact asig_of k a b W a (b + 2^(k+1)) (blk_lift k h.ha) (blk_lift2 k h.hb) h.ha0 (by omega)
+      h.aWx (hXW0 b h.hb h.bWx) h (P1_b01 k a b W h) (P3_b01 k a b W h)
+  · exact asig_of k a b W (a + 2^(k+1)) b (blk_lift2 k h.ha) (blk_lift k h.hb) (by omega) h.hb0
+      (hXW0 a h.ha h.aWx) h.bWx h (P1_b10 k a b W h) (P3_b10 k a b W h)
+  · exact asig_of k a b W (a + 2^(k+1)) (b + 2^(k+1)) (blk_lift2 k h.ha) (blk_lift2 k h.hb)
+      (by omega) (by omega) (hXW0 a h.ha h.aWx) (hXW0 b h.hb h.bWx) h
+      (P1_b11 k a b W h) (P3_b11 k a b W h)
+
+end Block
+
 end SounioZDFiberAntisym
 
 
