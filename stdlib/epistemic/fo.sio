@@ -1,0 +1,192 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/epistemic/fo.sio — First-order GUM / FO helpers for Madaros science code
+//
+// The FO engine is compiler-injected:
+//   variance_of(expr), uncertainty_of(expr), second_order_mean(expr),
+//   hessian_diag_of(expr), correlate(a, b, rho)
+//
+// These builtins walk the *expression AST* for multi-channel FO. Wrapping them
+// as `fn wrap(x: f64) { variance_of(x) }` would only see the parameter and
+// destroy FO structure — so they are NOT re-exported as ordinary functions.
+//
+// This module provides:
+//   1. Pure helpers with FO-transferable bodies (interproc FO / nested expand)
+//   2. Documentation of the preferred peel + measure style
+//
+// USAGE: `use epistemic::fo::*`
+// Prefer peel: `let x = k.value; variance_of(x * y)` or Knowledge ops:
+// `variance_of((kA * kB).value)`.
+//
+// Madaros FO stack (measured 2026-07-27): multi-channel, interproc unary/nested,
+// Knowledge⊗Knowledge, multi-pass reverse-order, correlate + off-diag H.
+
+// ── PK-style pure helpers (FO-transfer when callees registered / multipass) ──
+
+/// Oral infusion rate F·Dose/τ (arithmetic FO).
+pub fn fo_infusion_rate(f: f64, dose: f64, tau: f64) -> f64 {
+    (f * dose) / tau
+}
+
+/// Clearance CL0·exp(η) — interproc FO through exp (unary bytecode).
+pub fn fo_clearance(cl0: f64, eta: f64) -> f64 {
+    cl0 * exp(eta)
+}
+
+/// Steady-state Css = rate / CL via nested pure helpers.
+pub fn fo_css(f: f64, dose: f64, tau: f64, cl0: f64, eta: f64) -> f64 {
+    fo_infusion_rate(f, dose, tau) / fo_clearance(cl0, eta)
+}
+
+/// Oral AUC = F·Dose/CL (single-dose / total exposure FO).
+pub fn fo_auc(f: f64, dose: f64, cl0: f64, eta: f64) -> f64 {
+    (f * dose) / fo_clearance(cl0, eta)
+}
+
+/// Volume of distribution V0·exp(η).
+pub fn fo_volume(v0: f64, eta: f64) -> f64 {
+    v0 * exp(eta)
+}
+
+/// Elimination rate kel = CL/V (shared η cancels when eta_cl = eta_v).
+pub fn fo_kel(cl0: f64, v0: f64, eta: f64) -> f64 {
+    fo_clearance(cl0, eta) / fo_volume(v0, eta)
+}
+
+/// Half-life t½ = ln(2)/kel (FO after shared-η cancel uses CL0, V0 only).
+pub fn fo_thalf(cl0: f64, v0: f64, eta: f64) -> f64 {
+    0.6931471805599453 / fo_kel(cl0, v0, eta)
+}
+
+/// Residual fraction after interval τ: exp(-kel·τ) (shared η cancels in kel).
+pub fn fo_frac_rem(cl0: f64, v0: f64, tau: f64, eta: f64) -> f64 {
+    exp(0.0 - fo_kel(cl0, v0, eta) * tau)
+}
+
+/// Accumulation ratio Rac = 1/(1 - exp(-kel·τ)).
+pub fn fo_rac(cl0: f64, v0: f64, tau: f64, eta: f64) -> f64 {
+    1.0 / (1.0 - fo_frac_rem(cl0, v0, tau, eta))
+}
+
+/// Multi-dose peak Css: Cmax_ss = (F·Dose/V)·Rac.
+pub fn fo_cmax(f: f64, dose: f64, cl0: f64, v0: f64, tau: f64, eta: f64) -> f64 {
+    (f * dose) / fo_volume(v0, eta) * fo_rac(cl0, v0, tau, eta)
+}
+
+/// Multi-dose trough Css: Cmin_ss = (F·Dose/V)·f_rem/(1-f_rem).
+pub fn fo_cmin(f: f64, dose: f64, cl0: f64, v0: f64, tau: f64, eta: f64) -> f64 {
+    let frem = fo_frac_rem(cl0, v0, tau, eta)
+    (f * dose) / fo_volume(v0, eta) * (frem / (1.0 - frem))
+}
+
+/// Peak–trough fluctuation index (Cmax−Cmin)/Css_avg = kel·τ (shared η cancels).
+pub fn fo_ptf(cl0: f64, v0: f64, tau: f64, eta: f64) -> f64 {
+    fo_kel(cl0, v0, eta) * tau
+}
+
+/// Fraction of steady state after n dosing intervals: 1 − exp(−n·kel·τ).
+pub fn fo_fss(cl0: f64, v0: f64, n: f64, tau: f64, eta: f64) -> f64 {
+    1.0 - exp(0.0 - n * fo_kel(cl0, v0, eta) * tau)
+}
+
+/// Doses (intervals) to 90% of steady state: ln(10)/(kel·τ).
+pub fn fo_n90(cl0: f64, v0: f64, tau: f64, eta: f64) -> f64 {
+    2.302585092994046 / (fo_kel(cl0, v0, eta) * tau)
+}
+
+/// Peak–trough ratio PTR = Cmax/Cmin = exp(kel·τ) = 1/f_rem.
+pub fn fo_ptr(cl0: f64, v0: f64, tau: f64, eta: f64) -> f64 {
+    exp(fo_kel(cl0, v0, eta) * tau)
+}
+
+/// Degree of fluctuation DOF = (Cmax−Cmin)/Cmin = PTR − 1.
+pub fn fo_dof(cl0: f64, v0: f64, tau: f64, eta: f64) -> f64 {
+    fo_ptr(cl0, v0, tau, eta) - 1.0
+}
+
+/// Mean residence time MRT = 1/kel = V/CL (shared η cancels).
+pub fn fo_mrt(cl0: f64, v0: f64, eta: f64) -> f64 {
+    1.0 / fo_kel(cl0, v0, eta)
+}
+
+/// Time to 90% of steady state (hours): t90 = ln(10)/kel = n90·τ.
+pub fn fo_t90(cl0: f64, v0: f64, eta: f64) -> f64 {
+    2.302585092994046 / fo_kel(cl0, v0, eta)
+}
+
+/// Loading dose LD = Dose·Rac for multi-dose initiation.
+pub fn fo_ld(dose: f64, cl0: f64, v0: f64, tau: f64, eta: f64) -> f64 {
+    dose * fo_rac(cl0, v0, tau, eta)
+}
+
+/// Fraction eliminated per dosing interval: fe = 1 − f_rem = 1 − exp(−kel·τ).
+pub fn fo_fe(cl0: f64, v0: f64, tau: f64, eta: f64) -> f64 {
+    1.0 - fo_frac_rem(cl0, v0, tau, eta)
+}
+
+/// Steady-state AUC over dosing interval: AUC_τ = F·Dose/CL (= Css·τ).
+pub fn fo_auc_tau(f: f64, dose: f64, cl0: f64, eta: f64) -> f64 {
+    fo_auc(f, dose, cl0, eta)
+}
+
+/// Css·τ surface for AUC_τ identity (τ fixed arithmetic scale).
+pub fn fo_css_tau(f: f64, dose: f64, tau: f64, cl0: f64, eta: f64) -> f64 {
+    fo_css(f, dose, tau, cl0, eta) * tau
+}
+
+/// Linear scale c·x (FO identity-scaled).
+pub fn fo_scale(x: f64, c: f64) -> f64 {
+    c * x
+}
+
+/// Sum of two peeled seeds (FO add).
+pub fn fo_add2(a: f64, b: f64) -> f64 {
+    a + b
+}
+
+/// Product of two peeled seeds (FO mul / Hessian).
+pub fn fo_mul2(a: f64, b: f64) -> f64 {
+    a * b
+}
+
+/// Quotient of two peeled seeds (FO div / off-diag Hessian).
+pub fn fo_div2(a: f64, b: f64) -> f64 {
+    a / b
+}
+
+// ── Selftest (stdlib style; peels + builtins, not imports of builtins as fns) ──
+
+fn fo_mod_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+pub fn main() with IO, Mut, Div, Epistemic {
+    let kF: Knowledge<f64> = measure(0.8, uncertainty: 0.05)
+    let kDose: Knowledge<f64> = measure(500.0, uncertainty: 10.0)
+    let kTau: Knowledge<f64> = measure(12.0, uncertainty: 0.0)
+    let kCL0: Knowledge<f64> = measure(5.0, uncertainty: 0.3)
+    let kEta: Knowledge<f64> = measure(0.0, uncertainty: 0.1)
+    let f = kF.value
+    let dose = kDose.value
+    let tau = kTau.value
+    let cl0 = kCL0.value
+    let eta = kEta.value
+
+    let kV0: Knowledge<f64> = measure(50.0, uncertainty: 2.0)
+    let v0 = kV0.value
+
+    // FO site budget: keep ≤4 variance_of sites.
+    // Full surface parity lives in fo_pk_* driver gates.
+    let v_auct = variance_of(fo_auc_tau(f, dose, cl0, eta))
+    let v_css_tau = variance_of(fo_css_tau(f, dose, tau, cl0, eta))
+    let v_css = variance_of(fo_css(f, dose, tau, cl0, eta))
+    let v_site = variance_of(fo_infusion_rate(f, dose, tau) / fo_clearance(cl0, eta))
+    let ok = fo_mod_abs(v_auct - v_css_tau) < 1.0e-9 && v_auct > 1.0
+        && fo_mod_abs(v_css - v_site) < 1.0e-9 && v_css > 0.1
+    if ok {
+        print("ALL PASS\n")
+    } else {
+        print("FAIL\n")
+    }
+}

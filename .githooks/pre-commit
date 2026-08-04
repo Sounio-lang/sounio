@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# .githooks/pre-commit — two independent checks, both run, both reported.
+#
+#   1. offload policy    scripts/dev/check_offload_policy.sh (~12 ms)
+#   2. docs registry     the registry entry that makes CI green
+#
+# Git runs exactly one pre-commit, so installing a second check means chaining
+# it here. BOTH run even when the first fails: stopping at the first would send
+# you round the commit loop once per problem, and these two have nothing to do
+# with each other.
+#
+# WHY THE DOCS-REGISTRY CHECK EXISTS. docs/governance/topic-registry.v1.json is
+# derived from the FILESYSTEM, so a document committed ahead of its registry
+# entry leaves the checked-in registry stale, and .github/workflows/ci.yml runs
+# scripts/dev/check_docs_registry.sh on every push. Between 2026-07-29 and
+# 2026-07-30 that happened five times in twelve hours across three agents --
+# four repaired by hand, one (1f3cdb484) sitting red on a branch with an open PR
+# for four hours. The ordering that avoids it (commit the doc, THEN sync, THEN
+# commit the sync) is not discoverable from the tooling. So it is enforced here
+# instead of being remembered.
+#
+# IT CHECKS THE STAGED TREE, NOT THE WORKING TREE. A hook that reads the working
+# tree answers a question nobody asked: it passes on a dirty tree that would
+# commit broken, and fails on a clean commit whose fix is merely unstaged. The
+# staged tree is materialised from `git write-tree` into a temporary farm.
+#
+# WHY THE OFFLOAD CHECK IS HERE AND NOT WHERE ITS OWN --install PUTS IT.
+# `check_offload_policy.sh --install` writes to .git/hooks/pre-commit, which
+# core.hooksPath overrides — which is how it spent weeks looking installed
+# without ever running.
+#
+# Escape hatches, in order of preference:
+#   git commit --no-verify              once, deliberately, for everything
+#   SOUNIO_SKIP_DOCS_REGISTRY_HOOK=1    the registry check only
+#   SOUNIO_SKIP_OFFLOAD_HOOK=1          the offload check only
+# The offload policy also has its own documented bypass: a WAIVED row in
+# .claude/llm_offload_log.md with the reason. Prefer that one — it leaves a
+# record, which is the entire point of the policy.
+#
+# Install (per clone): git config core.hooksPath .githooks
+
+set -uo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+rc=0
+
+# --- 1. offload policy -----------------------------------------------------
+if [[ "${SOUNIO_SKIP_OFFLOAD_HOOK:-0}" != "1" \
+      && -x scripts/dev/check_offload_policy.sh ]]; then
+    if ! bash scripts/dev/check_offload_policy.sh; then
+        rc=1
+    fi
+fi
+
+# --- 2. docs registry ------------------------------------------------------
+check_docs_registry() {
+    [[ "${SOUNIO_SKIP_DOCS_REGISTRY_HOOK:-0}" == "1" ]] && return 0
+
+    # FAST PATH. The overwhelming majority of commits touch no governed
+    # document, and they must cost nothing. Governed paths mirror
+    # scanRepoTopics() in scripts/docs/governance_registry.mjs.
+    local staged
+    staged="$(git diff --cached --name-only --diff-filter=ACR || true)"
+    [[ -n "$staged" ]] || return 0
+    grep -qE '^(docs/.*\.md|README\.md|spec/LANGUAGE_SPECIFICATION\.md|examples/.*/README\.md|paper/.*\.md|website/src/content/.*)$' \
+        <<<"$staged" || return 0
+
+    # The instrument. If it cannot run, say so and get out of the way: CI is the
+    # enforcing layer, this is only the early warning, and a hook that blocks a
+    # commit over its own missing dependency is a hook that gets disabled.
+    if ! command -v node >/dev/null 2>&1; then
+        echo "[docs-registry] node absent — skipping (CI still enforces this)" >&2
+        return 0
+    fi
+    [[ -f scripts/docs/check_docs_registry.mjs ]] || return 0
+
+    local farm tree out
+    farm="$(mktemp -d "${TMPDIR:-/tmp}/sounio-precommit-docs.XXXXXX")"
+    trap 'rm -rf "$farm"' RETURN
+
+    # Materialise exactly what is about to be committed. `git write-tree` turns
+    # the index into a tree; archiving that tree gives the staged content with
+    # no working-tree contamination in either direction.
+    tree="$(git write-tree)"
+    git archive "$tree" -- docs examples paper spec README.md website 2>/dev/null \
+        | tar -x -C "$farm" 2>/dev/null || true
+
+    # The checker also RESOLVES paths outside those trees (link targets, related
+    # artifacts). Those are read, never written, so symlinks are enough.
+    local entry
+    for entry in $(ls -A "$ROOT"); do
+        [[ "$entry" == ".git" ]] && continue
+        [[ -e "$farm/$entry" ]] && continue
+        ln -s "$ROOT/$entry" "$farm/$entry" 2>/dev/null || true
+    done
+
+    out="$(cd "$farm" && node "$ROOT/scripts/docs/check_docs_registry.mjs" 2>&1 || true)"
+    grep -qE 'is stale|metadata mismatch|Missing repo doc path' <<<"$out" || return 0
+
+    cat >&2 <<EOF
+
+  ✗ docs registry is out of sync with the documents you are committing.
+
+$(grep -E '^- ' <<<"$out" | head -8 | sed 's/^/      /')
+
+  This is a CI-blocking gate (.github/workflows/ci.yml -> check_docs_registry.sh).
+  Fix it in the commit that causes it:
+
+      node scripts/docs/sync_governance_metadata.mjs
+      git add docs/governance/ \$(git diff --name-only docs/)
+      git commit --amend --no-edit     # or fold into your commit however you like
+
+  Deliberate exception:  git commit --no-verify
+
+EOF
+    return 1
+}
+
+check_docs_registry || rc=1
+
+exit "$rc"
