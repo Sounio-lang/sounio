@@ -527,11 +527,13 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.internal.coordination.compiler-lane-contract | repo_only | docs/internal/coordination/COMPILER_LANE_CONTRACT.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.coordination.enir-semantic-interface-contract-2026-07-12 | repo_only | docs/internal/coordination/enir-semantic-interface-contract-2026-07-12.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.coordination.semantic-hotspot-triage-2026-07-12 | repo_only | docs/internal/coordination/semantic-hotspot-triage-2026-07-12.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.internal.e175-triage-2026-08-02 | repo_only | docs/internal/E175_TRIAGE_2026-08-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.garden.readme | repo_only | docs/internal/garden/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.garden.seeds.2026-05-09-above-the-stars | repo_only | docs/internal/garden/seeds/2026-05-09-above-the-stars.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.garden.seeds.2026-05-09-novelty-weather-map | repo_only | docs/internal/garden/seeds/2026-05-09-novelty-weather-map.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.garden.seeds.2026-05-10-epistemic-fermentation | repo_only | docs/internal/garden/seeds/2026-05-10-epistemic-fermentation.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.garden.seeds.2026-07-11-the-zero-of-encounter | repo_only | docs/internal/garden/seeds/2026-07-11-the-zero-of-encounter.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.internal.garden.seeds.2026-07-26-fpga-acceleration-opportunity | repo_only | docs/internal/garden/seeds/2026-07-26-fpga-acceleration-opportunity.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.garden.templates.seed | repo_only | docs/internal/garden/templates/seed.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.implementation.bootstrap-seed-policy | repo_only | docs/internal/implementation/BOOTSTRAP_SEED_POLICY.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.implementation.codex-claude-parallel-contract | repo_only | docs/internal/implementation/CODEX_CLAUDE_PARALLEL_CONTRACT.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -754,6 +756,9 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.fano-arcs-blocking-sounio-note | historical | docs/research/fano-arcs-blocking-sounio-note.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.federated-san-spec-2026-07-30 | historical | docs/research/federated_san_spec_2026-07-30.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.fisher-matrix-fix | historical | docs/research/FISHER_MATRIX_FIX.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.fo-css-compiler-residual-half-spec-2026-07-31 | historical | docs/research/fo_css_compiler_residual_half_spec_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.fo-pk-method-science-receipts-2026-07-31 | historical | docs/research/fo_pk_method_science_receipts_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.fo-pk-residual4-oral-css-closeout-2026-07-31 | historical | docs/research/fo_pk_residual4_oral_css_closeout_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.functor-f-e6-albert-shadow-spec-2026-07-25 | historical | docs/research/functor_f_e6_albert_shadow_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.functor-f-e8-capstone-spec-2026-07-26 | historical | docs/research/functor_f_e8_capstone_spec_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.functor-f-e9-affine-boundary-spec-2026-07-26 | historical | docs/research/functor_f_e9_affine_boundary_spec_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -777,6 +782,10 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.functor-f-phi-jets-vanish-spec-2026-07-25 | historical | docs/research/functor_f_phi_jets_vanish_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.furey-charge-g2 | historical | docs/research/furey_charge_g2.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.furey-octonion-generation | historical | docs/research/furey_octonion_generation.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.future-potential-option2-suffering-aware-multi-agent-2026-07-30 | historical | docs/research/future_potential_option2_suffering_aware_multi_agent_2026-07-30.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.future-potential-option4-suffering-aware-robotics-2026-07-30 | historical | docs/research/future_potential_option4_suffering_aware_robotics_2026-07-30.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.future-potential-suffering-aware-agi-2026-07-30 | historical | docs/research/future_potential_suffering_aware_agi_2026-07-30.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.future-potential-suffering-aware-quantum-2026-07-30 | historical | docs/research/future_potential_suffering_aware_quantum_2026-07-30.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.g2-zd-fibers-falsifiers-2026-07-25 | historical | docs/research/g2_zd_fibers_falsifiers_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.g2-zd-fibers-spec-2026-07-25 | historical | docs/research/g2_zd_fibers_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.garden-to-claim-pipeline-spec-2026-07-25 | historical | docs/research/garden_to_claim_pipeline_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -1021,6 +1030,12 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.subptx-fmad-invariance | historical | docs/research/subptx_fmad_invariance.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.subptx-phase-h-complete | historical | docs/research/subptx_phase_h_complete.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.subptx-sinkhorn16-2iter | historical | docs/research/subptx_sinkhorn16_2iter.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.suffering-aware-architecture-spec-2026-07-28 | historical | docs/research/suffering_aware_architecture_spec_2026-07-28.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.suffering-aware-deep-architecture-spec-2026-07-28 | historical | docs/research/suffering_aware_deep_architecture_spec_2026-07-28.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.suffering-aware-game-theory-spec-2026-07-31 | historical | docs/research/suffering_aware_game_theory_spec_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.suffering-aware-multi-agent-scale-spec-2026-07-31 | historical | docs/research/suffering_aware_multi_agent_scale_spec_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.suffering-aware-multi-agent-sophisticated-spec-2026-07-31 | historical | docs/research/suffering_aware_multi_agent_sophisticated_spec_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.suffering-aware-multi-agent-spec-2026-07-30 | historical | docs/research/suffering_aware_multi_agent_spec_2026-07-30.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.sunflower-168-sounio-note | historical | docs/research/sunflower-168-sounio-note.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.the-reckoning | historical | docs/research/the-reckoning.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.train-and-probe-usage | historical | docs/research/train-and-probe-usage.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
