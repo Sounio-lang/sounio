@@ -8448,6 +8448,143 @@ theorem and_pred_testBit (W j : Nat) (hW : W ≠ 0) :
   · rw [if_neg hz]
     simp [hz]
 
+private theorem testBit_mod (W j : Nat) : (W / 2^j) % 2 = if W.testBit j then 1 else 0 := by
+  have h := and_one_testBit W j
+  rwa [Nat.and_one_is_mod, Nat.shiftRight_eq_div_pow] at h
+
+/-- `dterm`'s first guard conjunct is exactly "bit `j` is set". -/
+private theorem guard_iff (W j : Nat) : (2^j ≤ W % 2^(j+1)) ↔ W.testBit j = true := by
+  have hp : (0:Nat) < 2^j := Nat.two_pow_pos j
+  have hd : (W / 2^j) % 2 = (W % 2^(j+1)) / 2^j := div_mod_two j W
+  have ht := testBit_mod W j
+  have hkey : 1 ≤ (W % 2^(j+1)) / 2^j ↔ 2^j ≤ W % 2^(j+1) := by
+    rw [Nat.le_div_iff_mul_le hp, Nat.one_mul]
+  by_cases hb : W.testBit j = true
+  · have h1 : (W % 2^(j+1)) / 2^j = 1 := by rw [← hd, ht, if_pos hb]
+    exact ⟨fun _ => hb, fun _ => hkey.mp (by omega)⟩
+  · have hb' : W.testBit j = false := by
+      cases hbb : W.testBit j with
+      | true => exact absurd hbb hb
+      | false => rfl
+    have h1 : (W % 2^(j+1)) / 2^j = 0 := by
+      rw [← hd, ht, hb']
+      simp
+    refine ⟨fun h => ?_, fun h => absurd h hb⟩
+    exact absurd (hkey.mpr h) (by omega)
+
+private theorem mod_ne_zero_mono (W a b : Nat) (h : a ≤ b) (hne : W % 2^a ≠ 0) :
+    W % 2^b ≠ 0 := by
+  intro hz
+  apply hne
+  have hm := mod_pow_mod a b W h
+  rw [hz, Nat.zero_mod] at hm
+  exact hm.symm
+
+/-- Above the guard's reach, clearing the lowest set bit changes nothing. -/
+private theorem shift_and_pred (W i : Nat) (hW : W ≠ 0) (hne : W % 2^(i-1) ≠ 0) :
+    W >>> i = (W &&& (W-1)) >>> i := by
+  apply Nat.eq_of_testBit_eq
+  intro k
+  rw [Nat.testBit_shiftRight, Nat.testBit_shiftRight, and_pred_testBit W (i+k) hW]
+  have hz : W % 2^(i+k) ≠ 0 := mod_ne_zero_mono W (i-1) (i+k) (by omega) hne
+  simp [hz]
+
+/-- The normalised label: clear the lowest set bit, drop bits below 3, put a bit at 0. -/
+def gnorm (W : Nat) : Nat := 8 * ((W &&& (W - 1)) >>> 3) + 1
+
+private theorem gnorm_shift (W i : Nat) (h : 3 ≤ i) :
+    gnorm W >>> i = (W &&& (W-1)) >>> i := by
+  have h3 : gnorm W >>> 3 = (W &&& (W-1)) >>> 3 := by
+    unfold gnorm
+    rw [Nat.shiftRight_eq_div_pow, Nat.shiftRight_eq_div_pow]
+    have h8 : (2:Nat)^3 = 8 := rfl
+    rw [h8]
+    omega
+  have he : i = 3 + (i - 3) := by omega
+  rw [he, Nat.shiftRight_add, Nat.shiftRight_add, h3]
+
+private theorem gnorm_testBit (W j : Nat) (h : 3 ≤ j) :
+    (gnorm W).testBit j = (W &&& (W-1)).testBit j := by
+  have e1 : ((gnorm W) >>> j).testBit 0 = (gnorm W).testBit (j + 0) :=
+    Nat.testBit_shiftRight (gnorm W)
+  have e2 : ((W &&& (W-1)) >>> j).testBit 0 = (W &&& (W-1)).testBit (j + 0) :=
+    Nat.testBit_shiftRight (W &&& (W-1))
+  rw [Nat.add_zero] at e1 e2
+  rw [← e1, ← e2, gnorm_shift W j h]
+
+private theorem gnorm_odd (W j : Nat) (h : 1 ≤ j) : gnorm W % 2^j ≠ 0 := by
+  have hm := mod_pow_mod 1 j (gnorm W) h
+  have h2 : (2:Nat)^1 = 2 := rfl
+  unfold gnorm at hm ⊢
+  omega
+
+private theorem dcoef_low (m i : Nat) (h : i ≤ 3) : dcoef m i = 0 := by
+  unfold dcoef
+  have hle : (2:Nat)^i ≤ 2^3 := Nat.pow_le_pow_right (by omega) h
+  have h8 : (2:Nat)^3 = 8 := rfl
+  have hz : (2:Nat)^i - 8 = 0 := by omega
+  rw [hz, Nat.mul_zero, Nat.zero_mul]
+
+/-- **Termwise: the digit is unchanged by normalising the label.** Below index 4 the coefficient
+    vanishes; at and above it, the guard is `(W &&& (W-1)).testBit (i-1)` on both sides and the
+    sign is `psg` of the same shifted value. -/
+theorem dterm_gnorm (m W i : Nat) (hW : W ≠ 0) : dterm m W i = dterm m (gnorm W) i := by
+  by_cases hi : i ≤ 3
+  · have hc : dcoef m i = 0 := dcoef_low m i hi
+    unfold dterm
+    rw [hc]
+    simp
+  · have hii : (i-1) + 1 = i := by omega
+    have hU := and_pred_testBit W (i-1) hW
+    have hgW : (2^(i-1) ≤ W % 2^i) ↔ W.testBit (i-1) = true := by
+      have h := guard_iff W (i-1); rwa [hii] at h
+    have hgV : (2^(i-1) ≤ gnorm W % 2^i) ↔ (gnorm W).testBit (i-1) = true := by
+      have h := guard_iff (gnorm W) (i-1); rwa [hii] at h
+    have hVb : (gnorm W).testBit (i-1) = (W &&& (W-1)).testBit (i-1) :=
+      gnorm_testBit W (i-1) (by omega)
+    have hVo : gnorm W % 2^(i-1) ≠ 0 := gnorm_odd W (i-1) (by omega)
+    have hiff : (2^(i-1) ≤ W % 2^i ∧ W % 2^(i-1) ≠ 0)
+        ↔ (2^(i-1) ≤ gnorm W % 2^i ∧ gnorm W % 2^(i-1) ≠ 0) := by
+      rw [hgV, hVb, hU]
+      constructor
+      · rintro ⟨h1, h2⟩
+        refine ⟨?_, hVo⟩
+        rw [hgW.mp h1]
+        simp [h2]
+      · intro h
+        have h1 : W.testBit (i-1) = true ∧ ¬ (W % 2^(i-1) = 0) := by
+          by_cases hb : W.testBit (i-1) = true
+          · refine ⟨hb, ?_⟩
+            intro hz
+            rw [hb, hz] at h
+            simp at h
+          · rw [Bool.not_eq_true] at hb
+            rw [hb] at h
+            simp at h
+        exact ⟨hgW.mpr h1.1, h1.2⟩
+    unfold dterm
+    by_cases hg : 2^(i-1) ≤ W % 2^i ∧ W % 2^(i-1) ≠ 0
+    · rw [if_pos hg, if_pos (hiff.mp hg), shift_and_pred W i hW hg.2,
+          gnorm_shift W i (by omega)]
+    · rw [if_neg hg, if_neg (fun h => hg (hiff.mpr h))]
+
+/-- **THE BRIDGE, forall n.** The digit sum is unchanged by normalising the label to
+    `8*g(W)+1`, `g W = (W &&& (W-1)) >>> 3`. This is W17's residual, and it is now a theorem.
+
+    It is provable at all because the digit sum EXCLUDES the lowest set bit: an included digit
+    sits strictly above it, so neither its guard nor its sign can see the bit that normalisation
+    moves. -/
+theorem Ddig_gnorm (m W : Nat) (hW : W ≠ 0) : Ddig m W = Ddig m (gnorm W) := by
+  unfold Ddig
+  exact sumLtI_congr (m+1) _ _ (fun i _ => dterm_gnorm m W i hW)
+
+/-- The closed form on the NORMALISED label -- the contract's own statement of `E`. -/
+theorem Ncnt_closed_gnorm (m W : Nat) (hW : W < 2^m) (hW0 : W ≠ 0) :
+    ((Ncnt W m : Nat) : Int) + Ddig m (gnorm W) + 5 * ((2^m : Nat) : Int)
+      = ((2^m * 2^m : Nat) : Int) + 6 := by
+  rw [← Ddig_gnorm m W hW0]
+  exact Ncnt_closed m W hW hW0
+
 end SounioZDFiberAntisym
 
 
