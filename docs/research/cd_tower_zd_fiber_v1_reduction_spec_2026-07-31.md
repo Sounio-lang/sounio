@@ -1991,3 +1991,53 @@ depends on 1–4 rather than on an unexplained integer identity. (III) is still 
 (d) is not closed; V1 is not proven.
 
 Reproduce: `python3 scripts/research/zd_v1_18_1_decomposition_probe.py 7 8 9`.
+
+## §35 — The `g`-independence is a `k = 3` fact, and that kills every isomorphism route (`W38`, 2026-08-04)
+
+§33.3 proposed closing (III) by a sign-preserving bijection `a ↦ a ⊕ 8y` between the deficit
+triangles of `8(y+2^i)` and those of `2^(i+3)`, and recorded that its **edge-level** form is
+refuted. This rung tests the repaired forms and finds a sharper obstruction underneath all of them.
+
+### 35.1 The contrast that frames it
+
+(c) — the `popcount(g)` **odd** regime — is proven by `Φ`, an **isomorphism of the signed graph**.
+An isomorphism preserves *every* trace, so (c)'s deviation must vanish at every power. Measured:
+`tr(A_W^k) = tr(A_(8g+1)^k)` for `k = 1…7`, **0 deviations**, `n = 7, 8, 9`. That is the shape of
+a proof by isomorphism, and it is what one would hope to imitate in the even regime.
+
+### 35.2 The even regime has no such object — three refutations, one cause
+
+| candidate mechanism | verdict |
+|---|---|
+| edge-level transport `a ↦ a⊕8y` (§33.3) | **REFUTED** — 0/41 pairs, deficits not even the same size |
+| **triple-level** transport of the per-triple deficit tensor | **REFUTED** — e.g. `n = 8, y = 6, i = 0`: `\|supp F_y\| = 1001304` vs `\|supp F_0\| = 915864` |
+| `A(8(y+2^i)) ⊕ A(1)` trace-equal to `A(8·2^i) ⊕ A(8y+1)` at every `k` | **holds at `k = 1,2,3`, FAILS at `k = 4,5,6,7`** — every tested pair, `n = 7, 8` |
+
+And the sharp statement behind all three. With `D_k(W) = tr(A_W^k) − tr(A_(8g+1)^k)` on the seams
+of even-`popcount(g)` fibres:
+
+> **`D_k` is determined by `lsb(W)` alone for `k = 2` and `k = 3`, and NOT for `k ≥ 4`.**
+
+`k = 2` is (I), a theorem. `k = 3` is the deviation law. At `k = 4` the number of distinct values
+per `lsb` is `2, 4, 8` at `n = 7, 8, 9` — i.e. `2^(n−6)`, growing with the fibre count, so the
+failure is **complete, not marginal**.
+
+### 35.3 What this kills, and what survives
+
+> **No proof of the deviation law can go through a graph isomorphism, a switching equivalence, or
+> any spectral identity.** Every such argument delivers all powers `k` at once, and `k = 4` is
+> false.
+
+In particular **(c)'s technique is not adaptable to (III)**, and that is now a measured fact rather
+than a suspicion. The two halves of the fibre are structurally *unlike*: the odd half merges by an
+isomorphism, the even half separates by a quantity that exists only in the closed-3-walk register.
+
+What survives is the register §34 already works in: **a counting identity for closed 3-walks**.
+That is what produced the `n`-scaling (`tr(B³) = 8t3′` and the term-by-term split of §18.1), and it
+is the only style of argument the `k = 4` failure does not veto. Concretely, the next rung should
+carry the §34 block decomposition to the **HIGH** branch, since §33.5(B) already reduces `D` at any
+level to its value at the label's own top-bit level, where the label is high.
+
+**(III) is still reduced, not proven. `tr(A³)`'s absolute closed form, (d) and V1 are untouched.**
+
+Reproduce: `python3 scripts/research/zd_v1_III_mechanism_probe.py 7 8 9`.
