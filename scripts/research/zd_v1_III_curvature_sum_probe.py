@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The level-independent curvature tensor K_j, and its sum, computed for j = 3..10 (j >= 8 via the streaming path, `... curvature_sum_probe.py stream`).
+"""The level-independent curvature tensor K_j, and its sum, computed for j = 3..11 (j >= 8 via the streaming path, `... curvature_sum_probe.py stream`).
 
 At n = j+2 the class size is 1, so K_j IS the raw per-triangle defect table at that level; the
 level-independence then says every higher level is a uniform cls-fold blow-up of it.
@@ -14,7 +14,7 @@ Measured:
   * K_j is LEVEL-INDEPENDENT -- the whole tensor, not just its sum (max abs diff 0 across n);
   * K_j takes only the values 0 and -2, i.e. every contributing class is a single sign flip;
   * sum(K_j) = -1728 * [j choose 3]_2  exactly, i.e. 864*[j,3]_2 flipped classes;
-    j = 3..10 -> [j,3]_2 = 1, 15, 155, 1395, 11811, 97155, 788035, 6347715;
+    j = 3..11 -> [j,3]_2 = 1, 15, 155, 1395, 11811, 97155, 788035, 6347715, 50955971;
   * every nonzero entry has (u^v, v^w) linearly independent.
 
 Hence delta(n,j) = cls^3 * sum(K_j) = (2^(n-j-2))^3 * (-1728) * [j choose 3]_2, which is the
@@ -139,7 +139,7 @@ def main_stream(js):
 
 def main():
     if sys.argv[1:] == ["stream"]:
-        main_stream([(8, 256), (9, 512), (10, 1024)])
+        main_stream([(8, 256), (9, 512), (10, 1024), (11, 2048)])
         return
     for j, W in ((3, 8), (4, 16), (5, 32), (6, 64), (7, 128)):
         prev = None
