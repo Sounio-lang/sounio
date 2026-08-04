@@ -9072,9 +9072,13 @@ theorem Ddig_inj_gnorm (m W1 W2 : Nat) (h1 : W1 ≠ 0) (h2 : W2 ≠ 0)
 
 /-! ### (I) on `Ncnt` itself -/
 
-/-- **(I), PROVEN forall n.** `tr(A^2)` — equivalently `Ncnt` — is injective in the fibre
-    coordinate `g`. §30 reduced (I) to exactly this: a statement about the closed form alone,
-    with no `Qgen'`. -/
+/-- **(I), PROVEN forall n.** `Ncnt` is injective in the fibre coordinate `g`. §30 reduced (I)
+    to exactly this: a statement about the closed form alone, with no `Qgen'`.
+
+    Stated on `Ncnt`, NOT on `tr(A^2)`. `tr(A^2) = Ncnt W m - (2^m - 2)` is §7's dictionary (the
+    W16 bridge) and `tr(A^2)` is not a Lean object in this file; the offset depends only on `m`,
+    so the two injectivity statements are equivalent, but that equivalence is DOCUMENTATION here,
+    not a theorem. -/
 theorem Ncnt_inj_gnorm (m W1 W2 : Nat) (hW1 : W1 < 2^m) (hW2 : W2 < 2^m)
     (h1 : W1 ≠ 0) (h2 : W2 ≠ 0) (heq : Ncnt W1 m = Ncnt W2 m) : gnorm W1 = gnorm W2 := by
   have c1 := Ncnt_closed m W1 hW1 h1

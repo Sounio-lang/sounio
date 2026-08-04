@@ -68,10 +68,11 @@ def main() -> int:
                         print(f"B FAIL m={m} k={k} y'={yp}")
     print(f"B: top-bit peel F(m,2^k+y')=c_k-F(m,y'), {nB} checks, {badB} mismatches")
 
-    # C
+    # C -- from m = 4 so the boundary where injectivity is still vacuous (only W = 1 is
+    # 1 mod 8 below 2^m) is exercised too, not just the range where labels exist.
     badC = 0
     nC = 0
-    for m in range(6, 15):
+    for m in range(4, 15):
         seen = {}
         for y in range(2 ** (m - 3)):
             v = F(m, y)

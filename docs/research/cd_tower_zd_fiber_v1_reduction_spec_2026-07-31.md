@@ -1578,10 +1578,14 @@ lemma-sized effort.
 
 ## §32 — (I) is a theorem: the 2-adic valuation, not magnitude (`W35`, Tier 36, 2026-08-04)
 
-**(I) is PROVEN ∀n.** `Ncnt_inj_g` / `Ncnt_inj_gnorm` in `SounioZDFiberAntisym.lean`: `tr(A²)` —
-equivalently `Ncnt` — is injective in the fibre coordinate `g`. Kernel-clean
-`[propext, Classical.choice, Quot.sound]`. §30 had reduced (I) to a statement about the closed
-form alone (no `Qgen'`); it is now closed.
+**(I) is PROVEN ∀n.** `Ncnt_inj_g` / `Ncnt_inj_gnorm` in `SounioZDFiberAntisym.lean`: `Ncnt` is
+injective in the fibre coordinate `g`. Kernel-clean `[propext, Classical.choice, Quot.sound]`.
+§30 had reduced (I) to a statement about the closed form alone (no `Qgen'`); it is now closed.
+
+**Stated on `Ncnt`, not on `tr(A²)`.** `tr(A²) = Ncnt W m − (2^m − 2)` is §7's dictionary (the W16
+bridge), and `tr(A²)` is **not a Lean object** in that file. The offset depends only on `m`, so
+the two injectivity statements are equivalent — but that equivalence is documentation, not a
+theorem.
 
 ### §31's reduction does not close, and its target was false
 
@@ -1637,8 +1641,10 @@ looking at the object in the wrong form (§31 lists the other two).
 
 - factorisation: `m = 6..14`, 63 checks, **0 mismatches**;
 - peel: `m = 6..12`, 1009 checks, **0 mismatches**;
-- valuation `v₂(F(m,y)) = 2m − 2k − 3` and injectivity: `m = 6..14`, 4088 labels,
-  **0 mismatches, 0 collisions**.
+- valuation `v₂(F(m,y)) = 2m − 2k − 3` and injectivity: `m = 4..14`, 4094 labels,
+  **0 mismatches, 0 collisions** — `m = 4, 5` included deliberately, where the only label
+  `≡ 1 (mod 8)` below `2^m` is `W = 1` and injectivity is vacuous, to confirm there is no silent
+  gap between the vacuous and the measured range.
 
 The oracle is pinned to §30's independently recorded number — `Ddig(9,41) = 116736`, constant
 across the fibre `41…47`.
