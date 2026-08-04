@@ -2111,3 +2111,66 @@ closed-3-walk sum.
 **(III) is still reduced, not proven.** `tr(A³)`'s absolute closed form, (d) and V1 are untouched.
 
 Reproduce: `python3 scripts/research/zd_v1_III_high_branch_probe.py 7 8 9`.
+
+## §37 — The sign defect named: `Φ = τ_j`, and its curvature lives BELOW the seam (`W40`, 2026-08-04)
+
+§36 showed the deviation is a pure sign phenomenon on a cospectral pair but did not name the map.
+It is the lane's own `τ` — `tau j x = x` if `bit₀(x) = bit_j(x)`, else `x ⊕ (1 ∣ 2^j)`, the same
+`τ` as `Qgen'_tau` (`:1714`) — with `j = lsb(W)`, and note `τ_j(W) = 8·g(W)+1` is *exactly* the
+Fano representative. All MEASURED, `n = 7, 8, 9`.
+
+### 37.1 `Φ = τ_j` is an unsigned isomorphism — always
+
+> `|A_W|(a,b) = |A_(τ_j W)|(τ_j a, τ_j b)` for **every** seam, **both parities**. 0 violations.
+
+That is §36.3's cospectrality upgraded to an explicit map, and it means the seam and its Fano
+reference differ **only** in signs, on a common support:
+
+```
+ε(a,b) = A_W(a,b) · A_(τW)(τa, τb)   ∈ {±1} on the support
+```
+
+### 37.2 The dichotomy: `ε` is balanced exactly in the merging regime
+
+> **`ε` is balanced (every triangle `+1`) ⟺ `popcount(g(W))` is ODD.** 0 violations.
+
+Balanced means `ε` is a coboundary, i.e. `A_W = D·(Φ*A_f)·D` with `D = diag(±1)` — a **switching**,
+which preserves every trace. So this *is* (c), rederived from the sign side, and it explains §35's
+`C1` exactly: (c) holds at every power `k` because a switching is a similarity, while the even
+regime differs only at `k = 3` because there the failure is a **curvature**, and curvature is a
+3-cycle invariant.
+
+Measured curvature counts (ordered triangles with `ε_T = −1`), `n = 7`: `0` for every
+odd-`popcount(g)` seam; `69120, 111744, 133920, 59904` for the even ones. The dichotomy is total,
+not statistical.
+
+### 37.3 The mechanism: the curvature is determined BELOW the seam
+
+> **`ε_T = ε(a,b)ε(b,c)ε(c,a)` is determined by the low `j+1` bits of `(a,b,c)` alone.**
+> `n = 7`: `W = 8` (`j = 3`) → 4096 classes, **0 ambiguous**; `W = 16` (`j = 4`) → 24410 classes,
+> 0 ambiguous. `n = 8`: same, 0 ambiguous over 317688 sampled triangles.
+
+This is the mechanism the lane has been looking for since §33:
+
+- **why `δ` does not depend on `g`** — `g` is the bits **above** the seam, and the curvature cannot
+  see them. The `g`-independence stops being a brute fact;
+- **why `[j choose 3]₂`** — the curvature is a function on the `j+1` coordinates at and below the
+  seam, so its triangle sum is a count over that space, and `δ`'s closed form is
+  `δ(n,j) = (2^(n−j−2))³ · (−1728 · [j choose 3]₂)`: the cube of the class size times a
+  **level-independent** constant. That is exactly the shape a low-determined curvature forces;
+- **why `k = 3`** — curvature is defined on 3-cycles. At `k ≥ 4` the sum is not a curvature sum and
+  §35 measured that it is `g`-dependent.
+
+### 37.4 What is now open, and it is finite per `j`
+
+(III) reduces to two statements about `ε`, both about an object on `j+1` bits rather than on the
+whole label:
+
+1. `ε` is balanced ⟺ `popcount(g)` odd (the (c)/¬(c) dichotomy, from the sign side);
+2. the curvature's triangle sum over the low classes is `−1728·[j choose 3]₂` — a **fixed finite
+   computation for each `j`**, independent of `n`.
+
+Neither is proven. But (2) is no longer a statement about an unbounded family: it is one number per
+`j`. **(III) is still reduced, not proven.** `tr(A³)`'s absolute closed form, (d) and V1 untouched.
+
+Reproduce: `python3 scripts/research/zd_v1_III_sign_defect_probe.py 7 8 9`.
