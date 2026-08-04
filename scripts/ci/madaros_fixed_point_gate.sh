@@ -85,6 +85,13 @@ require_file "$SRC"
 
 WORK="${SOUNIO_MADAROS_FP_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/madaros-fp.XXXXXX")}"
 mkdir -p "$WORK"
+
+# module_frontend.sio:334 prefers $SOUNIO_STDLIB_PATH over the tree's own
+# stdlib/. An inherited value compiles PARTS OF ANOTHER CHECKOUT into gen2,
+# which would make a gen2/gen3 comparison say nothing about this tree.
+if [[ -d "$ROOT_DIR/stdlib" ]]; then
+  export SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib"
+fi
 GEN2="$WORK/madaros.gen2"
 GEN3="$WORK/madaros.gen3"
 

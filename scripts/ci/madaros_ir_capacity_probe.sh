@@ -63,6 +63,16 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/madaros-ir-capacity.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 CLOSURE="$WORK/closure.txt"
 
+# module_frontend.sio:334 prefers $SOUNIO_STDLIB_PATH over the tree's own
+# stdlib/, so an inherited value silently pulls closure nodes out of ANOTHER
+# CHECKOUT — measured on 2026-08-04: seven of 120 nodes came from
+# /workspace/sounio/stdlib while the tree under test was a worktree on a
+# different branch. The two agreed that day. Nothing in the report says which
+# tree a node came from, so a disagreement would have been invisible.
+if [[ -d "$ROOT_DIR/stdlib" ]]; then
+  export SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib"
+fi
+
 # Madaros recurses in the parser; CI's default 16 MiB soft stack is not enough.
 ( ulimit -s 524288 2>/dev/null || true
   "$MADAROS" --science-boundary-closure "$ENTRY" ) >"$CLOSURE" 2>&1 || true
@@ -105,6 +115,15 @@ done < <(grep '^node' "$CLOSURE")
 
 if [[ "$MISSING" -gt 0 ]]; then
   gate_fail "$MISSING of $NODES closure nodes are not files on disk — the census is not over the closure it claims"
+fi
+
+# The other half of the same guard: even with SOUNIO_STDLIB_PATH pinned above, a
+# node resolving outside this tree means the count is partly about a different
+# checkout, and the gate must say so rather than average the two.
+FOREIGN="$(grep '^node' "$CLOSURE" | awk '{print $2}' | grep '^/' | grep -v "^$ROOT_DIR/" || true)"
+if [[ -n "$FOREIGN" ]]; then
+  gate_fail "closure nodes resolve outside the tree under test ($ROOT_DIR); this census would be partly about another checkout:
+$(printf '%s' "$FOREIGN" | head -5)"
 fi
 
 # A census that finds almost no functions is broken, not empty. main.sio alone
