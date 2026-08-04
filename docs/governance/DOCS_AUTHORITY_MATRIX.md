@@ -668,6 +668,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.papers.readme | repo_only | docs/papers/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.rupture-functor-f-synthesis-2026-07-25 | repo_only | docs/papers/rupture_functor_f_synthesis_2026-07-25.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.rupture-journal-submission-2026-07-26 | repo_only | docs/papers/rupture_journal_submission_2026-07-26.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.papers.san-fpga-deployment-2026-08-04 | repo_only | docs/papers/san_fpga_deployment_2026-08-04.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.sedenion-fano-geometry | repo_only | docs/papers/sedenion-fano-geometry.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.sounio-arxiv-draft | repo_only | docs/papers/sounio_arxiv_draft.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.submission-checklist | repo_only | docs/papers/submission_checklist.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -965,6 +966,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.rupture-r3-fano-phi-2026-07-25 | historical | docs/research/rupture-r3-fano-phi_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.rupture-r4-fano-field-2026-07-25 | historical | docs/research/rupture-r4-fano-field_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.sac-llm-spec-2026-07-28 | historical | docs/research/sac_llm_spec_2026-07-28.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.san-imagenet-fpga-dl380-spec-2026-08-02 | historical | docs/research/san_imagenet_fpga_dl380_spec_2026-08-02.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.san-real-patient-data-spec-2026-07-28 | historical | docs/research/san_real_patient_data_spec_2026-07-28.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.sat-rup-microkernel-2026-06-23 | historical | docs/research/sat-rup-microkernel-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.second-derivative-filter-and-spinoza | historical | docs/research/second-derivative-filter-and-spinoza.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
