@@ -2175,10 +2175,10 @@ Neither is proven. But (2) is no longer a statement about an unbounded family: i
 
 Reproduce: `python3 scripts/research/zd_v1_III_sign_defect_probe.py 7 8 9`.
 
-## §38 — The curvature sum, computed: `K_j` is a level-independent tensor and `Σ K_j = −1728·[j,3]₂` (`W41`, 2026-08-04)
+## §38 — The curvature sum, computed for `j = 3…6`: `K_j` is a level-independent tensor and `Σ K_j = −1728·[j,3]₂` (`W41`, 2026-08-04)
 
 §37.4 left (III)'s open content as **one number per `j`**. That number is now computed for
-`j = 3, 4, 5`, and it comes with more structure than was asked for.
+`j = 3, 4, 5, 6`, and it comes with more structure than was asked for.
 
 Partition the vertices by their low `j+1` bits — `M = 2^(j+1)` classes, each of size
 `cls = 2^(n−j−2)` — and with `A` the seam's graph and `Bp = Φ*A_(τW)` the transported reference:
@@ -2187,17 +2187,20 @@ Partition the vertices by their low `j+1` bits — `M = 2^(j+1)` classes, each o
 K_j(u,v,w) := [ tr(A_uv A_vw A_wu) − tr(Bp_uv Bp_vw Bp_wu) ] / cls³
 ```
 
-| `j` | `Σ K_j` | `−1728·[j,3]₂` | flipped classes | values taken |
+| `j` | `Σ K_j` | `−1728·[j,3]₂` | flipped classes = `864·[j,3]₂` | values taken |
 |---|---|---|---|---|
 | 3 | `−1728` | `−1728·1` | `864` | `{0, −2}` |
 | 4 | `−25920` | `−1728·15` | `12960` | `{0, −2}` |
 | 5 | `−267840` | `−1728·155` | `133920` | `{0, −2}` |
+| 6 | `−2410560` | `−1728·1395` | `1205280` | `{0, −2}` |
 
-Four facts, all measured, `n = 7, 8, 9` (each `j` at every level where it exists):
+Four facts, all measured, `n = 7…10` (each `j` at every level where it exists):
 
 1. **`K_j` is level-independent — the whole tensor, entry by entry**, not merely its sum
-   (`np.array_equal` across consecutive levels, exact). This is the factorisation §37.3 predicted
-   and did not verify: `δ` really is `cls³ × (a fixed object on `(𝔽₂^(j+1))³`)`.
+   (`np.array_equal` across consecutive levels, exact, `n = 7…10`). This is the factorisation
+   §37.3 predicted and did not verify: `δ` really is `cls³ × (a fixed object on `(𝔽₂^(j+1))³`)`.
+   It holds at levels where the label is **high** as well as low (`j = 6` at `n = 8`, where
+   `W = 2^6 = 2^(n−2)`), so `K_j` does not depend on the branch either.
 2. **`K_j` takes only the values `0` and `−2`.** Every contributing class is a *single sign flip* —
    there is no cancellation and no higher multiplicity to explain.
 3. **The number of flipped classes is exactly `864·[j choose 3]₂`.** The `q`-binomial is not an
@@ -2218,7 +2221,13 @@ verified against the measured `δ` at every `(j, n)` in the table.
 The `n`-dependence of `δ` is now **structural**: it is `cls³`, the cube of the class size, and it is
 forced by `K_j` being level-independent. What remains open is one clause:
 
-> `Σ K_j = −1728·[j,3]₂` for **all** `j` — computed here for `j = 3, 4, 5`, not proven.
+> `Σ K_j = −1728·[j,3]₂` for **all** `j` — computed here for `j = 3, 4, 5, 6`, not proven.
+
+`j = 6` needed a different implementation: `M = 2^7 = 128` makes the `M³` triple loop unworkable,
+so the probe blocks the matrices by residue and contracts with one `einsum` over the block indices
+(`M³·cls³` work, vertex `0` added as isolated so the reshape is uniform). The fast path reproduces
+the `j = 3, 4, 5` numbers of the slow one exactly, which is the cross-check that makes `j = 6`
+trustworthy.
 
 `864 = 27·32` flips per 3-subspace is the shape to explain; the linear-independence of the support
 (fact 4) is the visible half of it. Note this is a statement about a **finite** object at each `j`,
