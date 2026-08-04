@@ -221,6 +221,24 @@ oráculos de conflito continuam abstratos.
   OK) em `compiler-repros/qualified_import_fix_candidate.diff`; auditoria
   completa em `docs/audit/QUALIFIED_IMPORT_MISCOMPILE_2026-08-02.md`.
 
+## Demo executável — fecho EL⁺ completo (rodada 8)
+
+- **`examples/ontology_elplus_closure_demo.sio`**: espelho executável do
+  motor de saturação role-aware de `formal/OntologyELPlusClosureComplete.lean`
+  (o fecho `closeSatF` completo, com `subBPlusC_iff` / `conflictBPlusC_iff`),
+  instanciado na TBox SNOMED de `formal/OntologyELPlus.lean` (`Fin 8 × Fin 3`).
+  Conceitos internados em tabela (átomos 0..7, ⊤, `Lung ⊓ Inflammation` e as
+  restrições existenciais necessárias), relações `S` (subsunção), `R`
+  (arestas de papel com filler base) e `rclos` (fecho da hierarquia de
+  papéis) como arrays primitivos paralelos; a rodada de fixpoint reproduz
+  o `crStep` (transitividade, ⊓-elim/intro, stoR/RtoS, Rmono, roleSub via
+  `rclos`, composição `DirectSite ∘ PartOf ⊑ RoleGroup`) e itera até
+  estabilidade (3 rodadas). Checks: `Pneumonia ⊑ ∃RoleGroup.Organ` = true,
+  `conflict(Pneumonia, Drug)` = true, `conflict(DrugInducedDisorder, ele
+  mesmo)` = true (testemunha de incoerência), `Organ ⊑ Disorder` = false.
+  `souc check` OK; `souc run` → `ALL PASS` (marcadores `//@ run-pass` /
+  `//@ expect-stdout: ALL PASS`).
+
 ## Arquivos criados
 
 - `artifacts/ontology-frontiers/{epistemic-alignment-repair,epistemic-claim-status,consistent-ontology-evolution}/FRONTIER.md`
@@ -241,6 +259,8 @@ oráculos de conflito continuam abstratos.
 - `formal/OntologyELClosureVerified.lean`,
   `formal/OntologyRepairTies.lean` (rodada 5)
 - `artifacts/ontology-frontiers/epistemic-alignment-repair/tie_repair_demo.sio` (rodada 5)
+- `examples/ontology_elplus_closure_demo.sio` (demo executável do fecho EL⁺
+  completo — ver seção acima)
 
 ## Gate CI
 
