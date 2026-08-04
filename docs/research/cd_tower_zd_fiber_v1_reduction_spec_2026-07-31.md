@@ -1436,3 +1436,32 @@ by `subst` + `Nat.add_sub_cancel`.
 
 **Still open:** (III); `tr(A³)` has no general closed form; (d) is not closed. `tr(A²)` is
 parity-blind (W11), so deriving its closed form does **not** narrow (d).
+
+
+## §28 — The bridge is proven: W17's residual is a theorem
+
+`Ddig_gnorm (m W) (hW : W ≠ 0) : Ddig m W = Ddig m (gnorm W)`, with
+`gnorm W = 8 * ((W &&& (W−1)) >>> 3) + 1` — exactly the contract's `8·g(W)+1`. Plus
+`Ncnt_closed_gnorm`, the closed form on the **normalised** label, i.e. the contract's own form
+of `E`.
+
+§27 proved the closed form on `W`'s own bits and left `Ddig m W = E(m, 8·g(W)+1)` **measured**
+(W34 pins it at m = 1..8). It is now **proven ∀n**. This is the residual W17 has carried unproven
+— "bits 1 and 2 of an already-odd label do not matter" — which the Lean file calls `Finset`
+territory at `:4626`.
+
+**Why it was reachable, and it was not by attacking the invariance head-on.** The digit sum
+**excludes the lowest set bit**, so every included digit sits strictly above it — therefore
+neither its guard nor its sign can see the bit that normalisation moves. The invariance is
+**termwise**: no bijection, no cardinality, no `Finset`. The same exclusion that made §27 provable
+on `W`'s own bits is what makes the bridge provable.
+
+The crux is one bit fact — `testBit_pred`: subtracting one flips bit `j` exactly when nothing lies
+below it. Its consequence `and_pred_testBit` says `(W &&& (W−1)).testBit j` **is** `dterm`'s
+guard. The rest is bookkeeping: `guard_iff`, `shift_and_pred`, `gnorm_shift`/`_testBit`/`_odd`.
+
+Note `(2t+1) % 2^(j+1) ≠ 0` is **not** omega-provable — the witness needs `2^j · q` and omega
+rejects nonlinear terms. Parity extracted via `mod_pow_mod 1 (j+1)`.
+
+**Still open:** (III); `tr(A³)`'s general closed form; (d); V1. `tr(A²)` is parity-blind (W11), so
+none of this narrows (d).
