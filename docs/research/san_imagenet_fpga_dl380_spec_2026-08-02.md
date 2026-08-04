@@ -463,3 +463,35 @@ as follows:
    shows 1.08x real speedup; ViT-small/d384 and SAN-GPT-small are neutral on this small-scale
    task because dispatch overhead dominates. The comparison is now measured,
    not inferred from FLOP counts.
+
+### 13.8 End-to-end host↔card loop (2026-08-04, measured)
+
+The isolated kernel benchmark of §13.2/§13.4 is now extended to a complete
+inference pipeline driven by `scripts/research/san_fpga_endtoend.py`:
+
+- Load or train SAN-ResNet-18 on ImageNette2-160 (real photographs).
+- Run PyTorch forward on the host CPU/GPU.
+- Quantize exit confidences to Q0.15 and pack into 512-bit beats.
+- Stream the packed cohort to `host_san_scan_e2e.cpp` over stdin.
+- Run `krnl_san_scan` on the U250.
+- Read back histogram, catastrophe count, and MAC total.
+- Validate bit-exactly against a Python golden scan.
+
+Measured on the DL380 (CPU forward, no GPU):
+
+```
+SAN_FPGA_ENDTOEND_PASS bit_exact=True
+forward_ms=18373.49 pack_ms=40.631 host_total_ms=136.528
+host_kernel_ms=0.658 host_dma_h2d_ms=0.120 host_dma_d2h_ms=0.145
+```
+
+The host↔card timing (setup + DMA + kernel) is ~136 ms for the full 3 925-image
+cohort, dominated by the one-time `xclbin` load only (no partial
+reconfiguration); the same host process can enqueue further cohorts without
+reloading. The kernel itself is <1 ms. The packed cohort is 62 848 bytes =
+982 beats × 64 bytes.
+
+The Python script supports `--mock-host` for CI environments without an FPGA.
+Deployment note: in the privileged DL380 pod the XRT runtime expects
+`/opt/xilinx/xrt`; the working configuration symlinks `/opt/xilinx` to the
+host installation at `/host/opt/xilinx`.
