@@ -2619,7 +2619,7 @@ line is not in the support. Hence `Asig_pow2_top` assumes only that `(l,y)` is a
 | the graph is `K_N` minus the coset matching, plus one isolated vertex | **THEOREM** — `Qgen'_pow2_eq` (§39.2) |
 | every entry is `−μ(l)μ(y)`, hence every triangle is `−1` | **THEOREM** — `Asig_pow2_top` (this rung) |
 | antibalance ⟹ `tr(A³) = −#triangles`, and `#triangles = N(N−2)(N−4)` | elementary counting, **not yet in Lean** |
-| §17.2: `tr(A³)(y = 0) = (2/7)(2^m−2)(2^m−4)(2^m−15)` | **MEASURED** |
+| §17.2: `tr(A³)(y = 0) = (2/7)(2^m−2)(2^m−4)(2^m−15)` | ✅ **DERIVED from §18.1** — see §45 |
 
 and by §39.1 the finite clause `Σ K_j = −1728·[j,3]₂` is *equivalent* to §17.2 given the first three.
 So **§17.2 is now the only measured statement left in that chain**, and it is the next target.
@@ -2739,6 +2739,68 @@ statement, not four**, and it is a single signed-triangle count for which §43 m
 bounded window exists. Anything that closes it has to come from outside this chain — the `σ`
 recursion itself, or the classical `q`-analogue reading of `[j,3]₂`, not from further rearrangement.
 
+> ✅ **§45 did exactly that.** The `σ` recursion is §18.1, `Llo = 1` is low at every level, and
+> §17.2 is the *solution* of that recursion with the proven `t2` closed form as inhomogeneity. The
+> single statement of this section is therefore not open on its own — it inherits from §18.1.
+
 **Three self-deflations today, and this is the third:** §31's route (false target), §38's ladder
 (one cubic, not eleven confirmations), and now §43.3's recommendation (circular). All three were
 rearrangements of something already in the file.
+
+## §45 — §17.2 dissolves: it is the SOLUTION of §18.1's recursion (`W48`, 2026-08-04)
+
+§44 left the chain closed on itself, with §17.2 as its single open statement, and said anything
+that moves it must come from outside — "the `σ` recursion itself". The `σ` recursion *is* §18.1, and
+it dissolves §17.2 in one step. The connection was available since `W25` and nobody made it.
+
+### 45.1 The observation
+
+> **`Llo = 1` is a LOW label at every level** (`1 < 2^(n−2)` for `n ≥ 3`), so §18.1's low-branch
+> recursion applies to the `y = 0` class **directly**:
+>
+> `t3(n,1) = 8·t3(n−1,1) + 24·t2(n−1,1) − 12(2^(n−1) − 4)`
+>
+> and `t2(n,1) = (2^(n−1)−2)(2^(n−1)−4)` is the **proven** closed form (§3/§9, `Ncnt_closed`).
+
+That is a first-order linear recursion with a known inhomogeneity. Solving it:
+
+```
+with q = 2^(n−1) and f(q) = (2/7)(q−2)(q−4)(q−15),
+  8·f(q/2) + 24·(q/2−2)(q/2−4) − 12(q−4)
+    = (q−4)·[ (2/7)(q−8)(q−30) + 6(q−8) − 12 ]
+    = (q−4)·(2q² − 34q + 60)/7
+    = (2/7)(q−4)(q−2)(q−15)  =  f(q)
+```
+
+Verified as an exact identity of polynomials in `q` (coefficients `−240/7, 28, −6, 2/7` on both
+sides) and numerically: the recursion reproduces `t3(n,1)` at `n = 5…11`, and the closed form matches
+the measured value at `n = 4…11` including the base `t3(4,1) = −48`.
+
+> **So §17.2 is not an independent measured statement.** It is §18.1 + the proven `t2` closed form +
+> one finite base case at `n = 4`.
+
+### 45.2 What the ledger looks like now
+
+Everything in the (III) chain rests on **§18.1**, and §34 already took §18.1 apart:
+
+| ingredient | status |
+|---|---|
+| `tr(B³) = 8·t3′` | **ALGEBRA** (`tr(J₂³) = 8`) |
+| `3·tr(B²E) = 24·t2′` | **DERIVED** from the block identity, the two sign lemmas and `Σ_a (A²)[a,a⊕W] = −tr(A²)` |
+| the block identity `A = J₂⊗A′ + E`, and `E`'s four families | MEASURED (`n = 7…10`, 38M entries) |
+| the two constant signs `+1` (matching), `−1` (coset) | MEASURED |
+| `Σ_a (A²)[a, a⊕W] = −tr(A²)` | MEASURED (every label, `n = 6…9`) |
+| `tr(BE²) = 0`, `tr(E³) = −24(h−2)` | MEASURED (`n = 6…11`) |
+| the `y = 0` base case `t3(4,1) = −48` | finite check on the sedenions |
+| `Qgen'_pow2_eq`; `Asig_pow2_top` | **THEOREMS ∀n** |
+
+**This is a strictly better position than §44's.** §43 measured that the absolute triangle sign has
+no bounded window — but none of the items above is that. They are statements about the block
+decomposition and about `E`, a graph whose **shape is label-independent** with `12(h−2)` edges. The
+obstruction §43 found does not apply to them.
+
+> **(III)'s entire chain now reduces to §18.1, and §18.1 to the six measured lines above.** The next
+> target is the cheapest of them, and `tr(E³) = −24(h−2)` is the natural one: `E` is explicit, its
+> four families are named, and two of their signs are already pinned.
+
+**§18.1 is still not proven, so (III) is still reduced, not proven.** (d) and V1 untouched.
