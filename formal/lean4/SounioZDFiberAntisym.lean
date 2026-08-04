@@ -8293,6 +8293,103 @@ theorem Ddig_one (W : Nat) : Ddig 1 W = 0 := by
   rw [h, sumLtI_congr 2 _ (fun _ => 0) (fun i hi => dterm_lowIdx 1 W i (by omega))]
   exact sumLtI_zero 2
 
+theorem Ddig_zero (m : Nat) : Ddig m 0 = 0 := by
+  have h : Ddig m 0 = sumLtI (m+1) (fun i => dterm m 0 i) := rfl
+  rw [h, sumLtI_congr (m+1) _ (fun _ => 0) (fun i _ => by
+        unfold dterm
+        exact if_neg (fun hc => hc.2 (Nat.zero_mod _)))]
+  exact sumLtI_zero (m+1)
+
+/-- **THE CLOSED FORM, forall n.** `Ncnt W m = (2^m-2)(2^m-3) - E(m,W)` with `E = Ddig` a FINITE,
+    NON-RECURSIVE signed base-4 digit sum over the set bits of `W` above its lowest one. Stated
+    additively so no `Nat` subtraction enters. -/
+theorem Nclosed_add_Ddig : ∀ (m W : Nat), W < 2^m → W ≠ 0 →
+    Nclosed m W + Ddig m W + 5 * ((2^m : Nat) : Int)
+      = ((2^m * 2^m : Nat) : Int) + 6 := by
+  intro m
+  induction m with
+  | zero =>
+      intro W hW hW0
+      have h : (2:Nat)^0 = 1 := rfl
+      omega
+  | succ n ih =>
+      cases n with
+      | zero =>
+          intro W hW hW0
+          show Nclosed 1 W + Ddig 1 W + 5 * (((2:Nat)^1 : Nat) : Int)
+                = (((2:Nat)^1 * 2^1 : Nat) : Int) + 6
+          rw [Nclosed_one, Ddig_one]
+          have h1 : (2:Nat)^1 = 2 := rfl
+          have h2 : (2:Nat)^1 * 2^1 = 4 := rfl
+          omega
+      | succ k =>
+          intro W hW hW0
+          show Nclosed (k+2) W + Ddig (k+2) W + 5 * (((2:Nat)^(k+2) : Nat) : Int)
+                = (((2:Nat)^(k+2) * 2^(k+2) : Nat) : Int) + 6
+          replace hW : W < 2^(k+2) := hW
+          have hp : (0:Nat) < 2^(k+1) := Nat.two_pow_pos (k+1)
+          have h2e : (2:Nat)^(k+2) = 2 * 2^(k+1) := by rw [Nat.pow_succ]; omega
+          have hsq : (2:Nat)^(k+2) * 2^(k+2) = 4 * (2^(k+1) * 2^(k+1)) := by
+            rw [h2e, two_mul_mul]
+          have hidx : (k+2) - 1 = k+1 := rfl
+          rw [Nclosed_step, Ddig_step]
+          by_cases hlt : W < 2^(k+1)
+          · have hmod : W % 2^(k+1) = W := Nat.mod_eq_of_lt hlt
+            have hsh : W >>> (k+1) = 0 := by
+              rw [Nat.shiftRight_eq_div_pow]; exact Nat.div_eq_of_lt hlt
+            have htop : dterm (k+2) W (k+2) = 0 := by
+              unfold dterm
+              refine if_neg ?_
+              rintro ⟨h1, _⟩
+              rw [hidx, Nat.mod_eq_of_lt hW] at h1
+              omega
+            rw [if_pos hlt, hmod, hsh, psg_zero, htop]
+            have hih := ih W hlt hW0
+            omega
+          · by_cases heq : W = 2^(k+1)
+            · have hmod : W % 2^(k+1) = 0 := by rw [heq]; exact Nat.mod_self _
+              have htop : dterm (k+2) W (k+2) = 0 := by
+                unfold dterm
+                refine if_neg ?_
+                rintro ⟨_, h2⟩
+                rw [hidx, hmod] at h2
+                exact h2 rfl
+              rw [if_neg hlt, if_pos heq, hmod, htop, Ddig_zero, Int.mul_zero]
+              omega
+            · rw [if_neg hlt, if_neg heq]
+              obtain ⟨W', hWe, hW'lt⟩ : ∃ W', W = W' + 2^(k+1) ∧ W' < 2^(k+1) :=
+                ⟨W - 2^(k+1), by omega, by omega⟩
+              have hW'0 : W' ≠ 0 := by omega
+              subst hWe
+              -- `Nclosed_step` left the argument as `W - 2^(k+1)`; the IH speaks of `W'`, and
+              -- omega treats those as different atoms.
+              rw [Nat.add_sub_cancel]
+              have hmod : (W' + 2^(k+1)) % 2^(k+1) = W' := by
+                rw [Nat.add_mod_right]; exact Nat.mod_eq_of_lt hW'lt
+              have hsh : (W' + 2^(k+1)) >>> (k+1) = 1 := by
+                rw [Nat.shiftRight_eq_div_pow, Nat.add_div_right _ hp,
+                    Nat.div_eq_of_lt hW'lt]
+              have htop : dterm (k+2) (W' + 2^(k+1)) (k+2)
+                  = ((dcoef (k+2) (k+2) : Nat) : Int) := by
+                unfold dterm
+                have h1 : (W' + 2^(k+1)) % 2^(k+2) = W' + 2^(k+1) := Nat.mod_eq_of_lt hW
+                have hsh2 : (W' + 2^(k+1)) >>> (k+2) = 0 := by
+                  rw [Nat.shiftRight_eq_div_pow]; exact Nat.div_eq_of_lt hW
+                rw [hidx, if_pos ⟨by rw [h1]; omega, by rw [hmod]; exact hW'0⟩,
+                    hsh2, psg_zero, Int.mul_one]
+              rw [hmod, hsh, psg_one, htop]
+              have hih := ih W' hW'lt hW'0
+              have hdc := dcoef_top k
+              have hsp := sub_prod_pow k
+              omega
+
+/-- **The closed form on `Ncnt` itself.** -/
+theorem Ncnt_closed (m W : Nat) (hW : W < 2^m) (hW0 : W ≠ 0) :
+    ((Ncnt W m : Nat) : Int) + Ddig m W + 5 * ((2^m : Nat) : Int)
+      = ((2^m * 2^m : Nat) : Int) + 6 := by
+  rw [Ncnt_eq_Nclosed m W hW hW0]
+  exact Nclosed_add_Ddig m W hW hW0
+
 end SounioZDFiberAntisym
 
 
