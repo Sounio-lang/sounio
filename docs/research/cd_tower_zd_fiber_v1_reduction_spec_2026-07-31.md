@@ -444,7 +444,16 @@ Unrolling `W15`'s recursion from this base collapses both branches into one homo
 gives a **signed base-4 digit sum**:
 
 > `tr(A²) = (2^m − 2)(2^m − 4) − E(m, Llo)`, `m = n−1`,
-> `E(m,W) = Σ_{i : bit_{i−1}(W)=1} (2^i−4)(2^i−8)·4^{m−i}·(−1)^{popcount(W ≫ i)}`
+> `E(m,W) = Σ_{i = 2..m, bit_{i−1}(W)=1} (2^i−4)(2^i−8)·4^{m−i}·(−1)^{popcount(W ≫ i)}`
+>
+> **The lower bound `i ≥ 2` is part of the definition** (`contract.py:1006`,
+> `range(2, m+1)`). This line previously omitted it. It is not cosmetic: an `i = 1` term
+> for odd `W` would contribute `(2−4)(2−8)·4^{m−1} = 12·4^{m−1} ≠ 0`, and a reader
+> reconstructing `E` from this line alone gets a formula that fails on every label —
+> which is exactly what happened to me on 2026-08-03 while planning §26.
+>
+> Note also that the `i = 2` and `i = 3` terms vanish identically (`2^i−4` and `2^i−8`
+> respectively), so **`E` depends only on bits ≥ 3 of `W`**, and `E(m, 8g+1) = E(m, 8g)`.
 
 **Exact on the Fano family** — every label, `n = 6..10` in the clause and `n = 11` in-session,
 1764 fibers, 0 mismatches, against the lane's own `A_sig_fast`/`traces23`. Fed the **raw** label
@@ -490,7 +499,11 @@ applies verbatim:
 
 > `tr(A²)(n,W) = (2^m − 2)(2^m − 4) − E(m, 8·g(W)+1)`, `m = n−1`.
 
-**987/987 labels, both families, `n = 6..10`, 0 mismatches** against `A_sig_fast`/`traces23`.
+**487/487 labels, both families, `n = 6..9`, 0 mismatches** against `A_sig_fast`/`traces23`.
+(This line previously read `987/987 … n = 6..10`. The clause loops `range(6, 10)`
+(`contract.py:1115`), i.e. `n = 6..9`; 987 is the `n = 6..10` label total. `n = 10` was
+verified in-session and the cap is declared in the clause text, but it is not what the
+gate executes.)
 
 ### 10.2 It was read off the block structure, not fitted
 
@@ -1291,5 +1304,78 @@ This was load-bearing for the unrolling, not cosmetic: descending an odd non-pow
 uses LOW while `W < 2^(m+1)` and then lands on HIGH at `m = 0`. `W = 3` bottoms out on exactly
 the case the old hypothesis excluded.
 
-**Still open:** unrolling the two recursions into the closed form for `tr(A²)`; (III); `tr(A³)`'s
-general closed form; (d); V1.
+**Unrolled in §26** (`Ncnt_eq_Nclosed`, same day). **Still open:** the explicit digit-sum form
+`E` and its dependence on `g(W)` alone; (III); `tr(A³)`'s general closed form; (d); V1.
+
+
+## §26 — The unrolling: `Ncnt` is a closed evaluator
+
+`Ncnt_eq_Nclosed` (Tier 32, `formal/lean4/SounioZDFiberAntisym.lean`):
+
+```lean
+theorem Ncnt_eq_Nclosed : ∀ (m W : Nat), W < 2^m → W ≠ 0 → (Ncnt W m : Int) = Nclosed m W
+```
+
+where `Nclosed` recurses on the **level** and mentions **no `Qgen'`, no `cdSigma`, no sum**:
+
+```lean
+def Nclosed : Nat → Nat → Int
+  | 0, _ => 0
+  | 1, _ => 0
+  | (n+2), W =>
+      if W < 2^(n+1) then 4 * Nclosed (n+1) W + 10 * ((2^(n+1) : Nat) : Int) - 18
+      else if W = 2^(n+1) then ((2^(n+2) * 2^(n+2) : Nat) : Int) + 6 - 5 * ((2^(n+2) : Nat) : Int)
+      else 4 * ((2^(n+1) * 2^(n+1) : Nat) : Int) - 6 * ((2^(n+1) : Nat) : Int) - 2
+             - 4 * Nclosed (n+1) (W - 2^(n+1))
+```
+
+This discharges the caveat W31, W32 and §25 all carried: *"what is still NOT derived in Lean is
+the UNROLLING of the two recursions into the closed form."* Kernel-clean; the three equation
+lemmas for `Nclosed` depend on **no axioms at all** (`rfl`), so the recursor is definitional.
+
+### The floor, and why it is four lines
+
+The descent needed a floor, and `Qgen'_pow2_eq` is pointwise — its docstring asserted the count
+`(2^m−2)(2^m−3)` without proving it. `Ncnt_pow2` proves it, via:
+
+> **`OffCntP_pow2 : OffCntP (2^k) m = 0`** — `OffCntP` already excludes `a = W` and `b = a^W`, and
+> by `Qgen'_pow2_eq` those two lines are *exactly* where `Q' = +1` at a power-of-two label. So
+> nothing is left to count.
+
+Feeding that to `OffCnt_add_OffCntP` and `Ncnt_eq_OffCnt` (both proven 2026-08-03) leaves a linear
+`omega`. **The power-of-two labels are the saturated case**, and every other label's count is that
+value minus a deficit — which is the structural reason the closed form
+`Ncnt W m = (2^m−2)(2^m−3) − E(m, 8·g(W)+1)` has the base value as its leading term.
+
+I had planned this as a ~200-line two-disjoint-lines counting argument. It needed none of
+`sumLt_scale`, `count_off1`/`count_off2`, or any disjointness lemma.
+
+### No power-of-two test
+
+`Nclosed` has no `isPow2` branch. A label `2^k` with `k < n+1` is already below the seam, so the
+LOW branch handles it — and the two agree, because
+
+```
+(2e − 2)(2e − 3) = 4(e − 2)(e − 3) + 10e − 18
+```
+
+identically. Only `W = 2^(n+1)` needs its own branch, and that is decidable `Nat` equality. This
+deletes the `W &&& (W−1) = 0 → ∃k, W = 2^k` characterisation, 60–150 lines of bit induction in a
+Mathlib-free file. Verified before writing any Lean: the descent *without* any `isPow2` test
+reproduces `Ncnt` with **0 failures over 1013 pairs, m = 1..9**.
+
+### The failure that actually cost time
+
+Not `Int`-vs-`Nat`, which was anticipated and handled by forming every product and power on the
+`Nat` side and casting (so `omega` sees the same atoms it already sees inside `Ncnt_hi`). The real
+one: **the induction leaves the level as `k+1+1` while every recursion theorem states it as
+`k+2`, and `omega` treats those as different atoms although they are definitionally equal.** It
+does not error — it silently has no equation relating them, and reports an unprovable goal with a
+missing atom. Fixed by a `show` that normalises the index.
+
+**Still open:** the explicit digit-sum `E` as a Lean definition, and its dependence on `g(W)`
+alone — W17's residual, which the Lean file itself flags as unproven at `:4626`. Unrolling moves
+that residual from something this file cannot express (bijection/cardinality, `Finset` territory)
+to something it can (arithmetic induction on `Nclosed`), but does **not** make it small: the
+descent reads `W` from the top bit down while `g` perturbs the bottom bits. (III), (d), V1 and
+`tr(A³)`'s general form are all unchanged.

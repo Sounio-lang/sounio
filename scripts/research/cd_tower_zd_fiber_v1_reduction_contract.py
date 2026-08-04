@@ -2404,8 +2404,9 @@ def main():
             "*** THE OVERLAPPING-LINES PROBLEM NEVER AROSE: summing a POINTWISE identity keeps "
             "the pieces disjoint for free, so no inclusion-exclusion was needed anywhere. *** "
             "THE HIGH BRANCH IS NO LONGER PAPER EITHER -- see W32 (`Ncnt_hi`), landed the same "
-            "day. What is still NOT derived in Lean is the UNROLLING of the two recursions into "
-            "the closed form for tr(A^2). (III) untouched; tr(A^3) NOT closed; (d) IS NOT "
+            "day; and the UNROLLING of the two recursions is now a Lean theorem too -- see W33 "
+            "(`Ncnt_eq_Nclosed`). What is still NOT derived is the EXPLICIT digit-sum form E and "
+            "its dependence on g(W) alone. (III) untouched; tr(A^3) NOT closed; (d) IS NOT "
             "CLOSED ***")
 
     # ---- W32  THE HIGH RECURSION IS A LEAN THEOREM ----------------------------------------
@@ -2489,8 +2490,116 @@ def main():
             "-1). lu and uu each carry one point MORE, and the source is exact: "
             "`Qgen'_label_right` has no hypothesis on its other argument, so the v=W column is "
             "-1 on all e-1 of its points while every other slice loses two to the lines. *** "
-            "STILL OPEN: unrolling the two recursions into the closed form for tr(A^2) is NOT "
-            "done. (III) untouched; tr(A^3) NOT closed; (d) IS NOT CLOSED ***")
+            "UNROLLED BY W33 (`Ncnt_eq_Nclosed`), same day -- Ncnt now equals an evaluator "
+            "that mentions no Qgen'. STILL OPEN: the EXPLICIT digit-sum form E and its dependence "
+            "on g(W) alone. (III) untouched; tr(A^3) NOT closed; (d) IS NOT CLOSED ***")
+
+    # ---- W33  THE UNROLLING: Ncnt IS A CLOSED EVALUATOR --------------------------------------
+    # `Ncnt_eq_Nclosed : (Ncnt W m : Int) = Nclosed m W`, where `Nclosed` recurses on the LEVEL
+    # and mentions no Qgen'. Pins the evaluator entrywise, the floor `Ncnt_pow2`, the collapse
+    # `OffCntP(2^k,m) = 0` that makes the floor cheap, and a slice-level null control.
+    def _sg(S, a, b):
+        return int(S[a, b])
+
+    def _qp33(S, Y, a, b):
+        return (_sg(S, a, b) * _sg(S, b ^ Y, a ^ Y)
+                * _sg(S, b ^ Y, a) * _sg(S, a ^ Y, b))
+
+    def _ncnt33(S, Y, H):
+        return sum(1 for a in range(H) for b in range(H)
+                   if a and b and a != b and _qp33(S, Y, a, b) == -1)
+
+    def _offp33(S, Y, H):
+        return sum(1 for a in range(H) for b in range(H)
+                   if a and a != Y and b and b != Y and a != b and b != (a ^ Y)
+                   and _qp33(S, Y, a, b) == 1)
+
+    # EXACT transcription of the Lean `Nclosed` (level first, no isPow2 test).
+    from functools import lru_cache as _lru33
+
+    @_lru33(maxsize=None)
+    def _Nclosed(n, W, lowc=-18, hic=-2):
+        if n <= 1:
+            return 0
+        e = 1 << (n - 1)
+        if W < e:
+            return 4 * _Nclosed(n - 1, W, lowc, hic) + 10 * e + lowc
+        if W == e:
+            return (1 << n) * (1 << n) + 6 - 5 * (1 << n)
+        return 4 * e * e - 6 * e + hic - 4 * _Nclosed(n - 1, W - e, lowc, hic)
+
+    w33_rows, w33_pow2 = [], []
+    for m in range(1, 9):
+        S, H = sign_table_fast(m), 1 << m
+        bad = sum(1 for W in range(1, H) if _ncnt33(S, W, H) != _Nclosed(m, W))
+        w33_rows.append((m, H - 1, bad))
+        # the floor, and the OffCntP collapse that proves it cheaply
+        pbad = sum(1 for k in range(m)
+                   if _ncnt33(S, 1 << k, H) + 5 * H != H * H + 6 or _offp33(S, 1 << k, H) != 0)
+        w33_pow2.append((m, m, pbad))
+    # The power-of-two branch is redundant below the seam -- this is what lets the Lean
+    # definition omit an isPow2 test entirely.
+    ident33 = all((2 * e - 2) * (2 * e - 3) == 4 * (e - 2) * (e - 3) + 10 * e - 18
+                  for e in [1 << j for j in range(1, 14)])
+    # NULL CONTROL (slice-level): perturb ONE branch constant of the evaluator -- the LOW
+    # branch's -18 -> -17 -- and require that NO label still matches at any level where the
+    # LOW branch is reachable. Pinning the evaluator against Ncnt alone would survive
+    # compensating errors between branches.
+    # A label whose descent NEVER reaches the LOW branch (W = 2^m - 2^j: top bit set at every
+    # level, ending on the pow2 branch) is untouched by that constant and must be EXCLUDED --
+    # counting it as a survivor would make the control unsatisfiable rather than sharp.
+    def _takes_low(n, W):
+        while n > 1:
+            e = 1 << (n - 1)
+            if W < e:
+                return True
+            if W == e:
+                return False
+            W -= e
+            n -= 1
+        return False
+
+    null33_survivors = null33_tested = null33_excluded = 0
+    for m in range(2, 8):
+        S, H = sign_table_fast(m), 1 << m
+        _Nclosed.cache_clear()
+        for W in range(1, H):
+            if not _takes_low(m, W):
+                null33_excluded += 1
+                continue
+            null33_tested += 1
+            if _ncnt33(S, W, H) == _Nclosed(m, W, lowc=-17):
+                null33_survivors += 1
+    _Nclosed.cache_clear()
+    w33 = (all(c == 0 for _, _, c in w33_rows) and all(c == 0 for _, _, c in w33_pow2)
+           and ident33 and null33_survivors == 0)
+    ok["W33"] = w33
+    print(f"W33_UNROLL  THE UNROLLING IS A LEAN THEOREM {'OK' if w33 else 'FAIL'} -- "
+          + "; ".join(f"level {a}: {b} labels, {c} failing" for a, b, c in w33_rows)
+          + "; floor Ncnt(2^k,m)+5*2^m = 2^m*2^m+6 AND OffCntP(2^k,m)=0: "
+          + "; ".join(f"m={a}: {b} exponents, {c} failing" for a, b, c in w33_pow2)
+          + f"; pow2-branch redundancy identity (2e-2)(2e-3) == 4(e-2)(e-3)+10e-18: {ident33}"
+          + f"; NULL CONTROL (perturb ONE branch constant, LOW's -18 -> -17): "
+            f"{null33_survivors}/{null33_tested} labels still match, i.e. the perturbation breaks "
+            f"it everywhere it can apply, as required; {null33_excluded} labels DECLARED excluded "
+            "because their descent never reaches the LOW branch at all (W = 2^m - 2^j keeps the "
+            "top bit set at every level and ends on the pow2 branch), so that constant cannot "
+            "affect them. My first version of this control demanded 0 survivors WITHOUT the "
+            "exclusion and the gate correctly failed it. *** `Ncnt_eq_Nclosed : (Ncnt W m : Int) = Nclosed m W`. THE COUNTING "
+            "RECURSION IS SOLVED: Ncnt now equals an evaluator that recurses on the LEVEL and "
+            "mentions NO Qgen', NO cdSigma and NO sum. The caveat W31/W32 both carried -- 'the "
+            "UNROLLING of the two recursions into the closed form is NOT done' -- is discharged. "
+            "*** THREE BRANCHES, ONE PER THEOREM: `Ncnt_low` below the seam, `Ncnt_pow2` at "
+            "W = 2^(n+1), `Ncnt_hi` above it. The floor `Ncnt_pow2` is the count that "
+            "`Qgen'_pow2_eq`'s docstring had asserted without proving; it is four lines because "
+            "the POSITIVE CORE IS EMPTY at a power-of-two label (`OffCntP_pow2`) -- those labels "
+            "are the SATURATED case and every other label is that value minus a deficit, which "
+            "is why the closed form's leading term IS the base value. *** NO isPow2 TEST is "
+            "needed: a label 2^k with k < n+1 is already below the seam and the LOW branch "
+            "agrees, by the identity pinned above. That deletes a 60-150 line bit-arithmetic "
+            "characterisation of powers of two. *** STILL OPEN: the EXPLICIT digit-sum form E "
+            "and its dependence on g(W) alone (W17's residual, still unproven). (III) untouched; "
+            "tr(A^3) NOT closed; (d) IS NOT CLOSED ***")
 
     print("=" * 78)
     if all(ok.values()):
