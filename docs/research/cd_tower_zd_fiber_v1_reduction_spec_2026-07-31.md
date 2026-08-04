@@ -2862,8 +2862,18 @@ statements about `A_σ` itself:
 > arguments swap, and `resB` cannot see the flip because `P1_symm`/`P3_symm` kill its first two
 > clauses and the third compares `−P1` with `−P3`.
 
-Plus S1's adjacency for the two hubs. **The relation is now a theorem; S1's hub adjacency is the last
-measured piece of `tr(E³)`**, and it is again a single-row statement about `σ`.
+Plus S1's adjacency for the two hubs.
+
+> ✅ **BOTH ARE NOW THEOREMS ∀n.** The relation is `Asig_hub0`/`Asig_hubL` (Tier 38); S1 is
+> `resB_hub0_low`, `resB_hubL_low` and `resB_hub_hub`. For a **low** vertex the resonance reduces to
+> a single identity — the four value lemmas give
+> `P1(2^n,y) = −σ(L,y⊕L)`, `P3(2^n,y) = σ(L,y)`, `P1(L+2^n,y) = −σ(L,y)`, `P3(L+2^n,y) = σ(L,y⊕L)`,
+> so `P1 = P3` on both hub rows **iff** `σ(L,y) = −σ(L, y⊕L)`, which is **`A4_sub'`**, the swapped
+> form already proven in the file. For a **high** vertex it follows from the hub relation. And the
+> two hubs miss each other because there `P1 = 1` while `P3 = −1`, both by `sigma_self`.
+
+**So §46's derivation of `tr(E³) = −24(h−2)` now rests only on theorems plus §34's matching/coset
+signs.** The `E`-internal content of §18.1 is closed.
 
 > **Net effect on §45's ledger:** `tr(E³) = −24(h−2)` and `tr(BE²) = 0` are no longer independent
 > measured lines; the first reduces to S1 + one hub relation, with the matching/coset signs already
