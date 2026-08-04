@@ -9223,6 +9223,190 @@ theorem Asig_pow2_top (n l y : Nat) (hl : l < 2^(n+1)) (hy : y < 2^(n+1))
   unfold Asig
   rw [if_pos hres, P1_pow2_top n l y hl hy hl0 hy0 hlL hyL hcos]
 
+/-! ## Tier 38: the HUB ROW — `A_σ` flips under adding the top bit of the vertex range
+
+§46 reduced `tr(E³) = −24(h−2)` (the constant of §18.1/§34) to the structure of `E`: `W` isolated,
+two HUBS `h = 2^n` and `L_lo + 2^n` adjacent to everything else, plus the matching and the coset.
+Everything there was already a theorem or an existing measured sign, except **one relation on the
+two hub rows**, which is what this tier proves:
+
+    Asig X (y + 2^n) L_lo n = − Asig X y L_lo n      for X ∈ {2^n, L_lo + 2^n}
+
+The hub rows are really about `A_σ`, not about `E`: the blow-up has ZERO rows at both hubs (`2^n` is
+outside its index range, and `A′`'s row at `L_lo` vanishes), so there `E = A_σ`.
+
+The proof is four `cdSigma` evaluations — `hubA`–`hubD`, each one application of `R_ul`/`R_lu`/`R_uu`
+against `cdSig0`/`cdSig0'` — fed through `P1_red`/`P3_red`. `P1` **and** `P3` both flip on both hub
+rows, `antisym` supplying the sign in the two places where the two arguments swap. The mask then
+cannot see the flip (`P1_symm`/`P3_symm` kill the first two clauses of `resB`, and the third compares
+`−P1` with `−P3`), so `resB` is invariant and `Asig` flips. -/
+
+/-! ### bit bookkeeping for the top bit of the vertex range -/
+
+private theorem hub_xorL (k Llo : Nat) (hL : Llo < 2^(k+1)) :
+    (2:Nat)^(k+1) ^^^ Llo = Llo + 2^(k+1) := by
+  rw [Nat.xor_comm]
+  exact xor_pow_low (k+1) Llo (by omega) hL
+
+private theorem hubL_xorL (k Llo : Nat) (hL : Llo < 2^(k+1)) :
+    (Llo + 2^(k+1)) ^^^ Llo = 2^(k+1) := by
+  rw [← xor_pow_low (k+1) Llo (by omega) hL, Nat.xor_comm Llo (2^(k+1)),
+      Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+
+private theorem shift_xorL (k y Llo : Nat) (hy : y < 2^(k+1)) (hL : Llo < 2^(k+1)) :
+    (y + 2^(k+1)) ^^^ Llo = (y ^^^ Llo) + 2^(k+1) := by
+  rw [← xor_pow_low (k+1) y (by omega) hy,
+      ← xor_pow_low (k+1) (y ^^^ Llo) (by omega) (xorlt (n := k) hy hL),
+      Nat.xor_assoc, Nat.xor_comm (2^(k+1)) Llo, ← Nat.xor_assoc]
+
+/-! ### the four `cdSigma` values the hub rows need -/
+
+private theorem hubA (k y : Nat) (hy : y < 2^(k+1)) (hy0 : y ≠ 0) :
+    cdSigma (2^(k+1)) y (k+2) = -1 := by
+  have h := R_ul 0 y k (Nat.two_pow_pos (k+1)) hy
+  rw [Nat.zero_add] at h
+  rw [h, if_neg hy0, cdSig0 y k]
+
+private theorem hubB (k y : Nat) (hy : y < 2^(k+1)) (hy0 : y ≠ 0) :
+    cdSigma (2^(k+1)) (y + 2^(k+1)) (k+2) = 1 := by
+  have h := R_uu 0 y k (Nat.two_pow_pos (k+1)) hy
+  rw [Nat.zero_add] at h
+  rw [h, if_neg hy0, cdSig0' y k]
+
+private theorem hubC (k y : Nat) (hy : y < 2^(k+1)) :
+    cdSigma y (2^(k+1)) (k+2) = 1 := by
+  have h := R_lu y 0 k hy (Nat.two_pow_pos (k+1))
+  rw [Nat.zero_add] at h
+  rw [h, cdSig0 y k]
+
+private theorem hubD (k y : Nat) (hy : y < 2^(k+1)) :
+    cdSigma (y + 2^(k+1)) (2^(k+1)) (k+2) = -1 := by
+  have h := R_uu y 0 k hy (Nat.two_pow_pos (k+1))
+  rw [Nat.zero_add] at h
+  rw [h, if_pos rfl]
+
+/-! ### `P1` and `P3` both flip on both hub rows -/
+
+section Hub
+variable (k y Llo : Nat)
+
+private theorem hub_facts (hy : y < 2^(k+1)) (hL : Llo < 2^(k+1)) :
+    y < 2^(k+2) ∧ y + 2^(k+1) < 2^(k+2) ∧ Llo < 2^(k+2) ∧ (2:Nat)^(k+1) < 2^(k+2)
+      ∧ Llo + 2^(k+1) < 2^(k+2) ∧ (y ^^^ Llo) < 2^(k+1) := by
+  have hpow : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by rw [Nat.pow_succ]; omega
+  have hp := Nat.two_pow_pos (k+1)
+  exact ⟨by omega, by omega, by omega, by omega, by omega, xorlt (n := k) hy hL⟩
+
+theorem P1_hub0 (hy : y < 2^(k+1)) (hL : Llo < 2^(k+1))
+    (hy0 : y ≠ 0) (hL0 : Llo ≠ 0) (hne : y ≠ Llo) :
+    P1 (2^(k+1)) (y + 2^(k+1)) Llo (k+1) = - P1 (2^(k+1)) y Llo (k+1) := by
+  obtain ⟨hylt, hy'lt, hLlt, hXlt, hXLlt, hxy⟩ := hub_facts k y Llo hy hL
+  have hyL : y ^^^ Llo ≠ 0 := fun h => hne (xor_zero_eq _ _ h)
+  rw [P1_red (2^(k+1)) (y + 2^(k+1)) Llo (k+1) hXlt hy'lt hLlt
+        (by rw [shift_xorL k y Llo hy hL]; have := Nat.two_pow_pos (k+1); omega),
+      shift_xorL k y Llo hy hL, hub_xorL k Llo hL,
+      hubB k y hy hy0, R_uu (y ^^^ Llo) Llo k hxy hL, if_neg hL0,
+      P1_red (2^(k+1)) y Llo (k+1) hXlt hylt hLlt hyL, hub_xorL k Llo hL,
+      hubA k y hy hy0, R_lu (y ^^^ Llo) Llo k hxy hL]
+  omega
+
+theorem P3_hub0 (hy : y < 2^(k+1)) (hL : Llo < 2^(k+1))
+    (hy0 : y ≠ 0) (hL0 : Llo ≠ 0) (hne : y ≠ Llo) :
+    P3 (2^(k+1)) (y + 2^(k+1)) Llo (k+1) = - P3 (2^(k+1)) y Llo (k+1) := by
+  obtain ⟨hylt, hy'lt, hLlt, hXlt, hXLlt, hxy⟩ := hub_facts k y Llo hy hL
+  have hp := Nat.two_pow_pos (k+1)
+  rw [P3_red (2^(k+1)) (y + 2^(k+1)) Llo (k+1) hXlt hy'lt hLlt (by omega),
+      shift_xorL k y Llo hy hL, hub_xorL k Llo hL,
+      hubD k (y ^^^ Llo) hxy, R_uu Llo y k hL hy, if_neg hy0,
+      P3_red (2^(k+1)) y Llo (k+1) hXlt hylt hLlt hy0, hub_xorL k Llo hL,
+      hubC k (y ^^^ Llo) hxy, R_ul Llo y k hL hy, if_neg hy0,
+      antisym (k+1) y Llo hy hL hy0 hL0 hne]
+  omega
+
+theorem P1_hubL (hy : y < 2^(k+1)) (hL : Llo < 2^(k+1))
+    (hy0 : y ≠ 0) (hL0 : Llo ≠ 0) (hne : y ≠ Llo) :
+    P1 (Llo + 2^(k+1)) (y + 2^(k+1)) Llo (k+1) = - P1 (Llo + 2^(k+1)) y Llo (k+1) := by
+  obtain ⟨hylt, hy'lt, hLlt, hXlt, hXLlt, hxy⟩ := hub_facts k y Llo hy hL
+  have hp := Nat.two_pow_pos (k+1)
+  have hyL : y ^^^ Llo ≠ 0 := fun h => hne (xor_zero_eq _ _ h)
+  rw [P1_red (Llo + 2^(k+1)) (y + 2^(k+1)) Llo (k+1) hXLlt hy'lt hLlt
+        (by rw [shift_xorL k y Llo hy hL]; omega),
+      shift_xorL k y Llo hy hL, hubL_xorL k Llo hL,
+      R_uu Llo y k hL hy, if_neg hy0, hubD k (y ^^^ Llo) hxy,
+      P1_red (Llo + 2^(k+1)) y Llo (k+1) hXLlt hylt hLlt hyL, hubL_xorL k Llo hL,
+      R_ul Llo y k hL hy, if_neg hy0, hubC k (y ^^^ Llo) hxy,
+      antisym (k+1) y Llo hy hL hy0 hL0 hne]
+  omega
+
+theorem P3_hubL (hy : y < 2^(k+1)) (hL : Llo < 2^(k+1))
+    (hy0 : y ≠ 0) (hL0 : Llo ≠ 0) :
+    P3 (Llo + 2^(k+1)) (y + 2^(k+1)) Llo (k+1) = - P3 (Llo + 2^(k+1)) y Llo (k+1) := by
+  obtain ⟨hylt, hy'lt, hLlt, hXlt, hXLlt, hxy⟩ := hub_facts k y Llo hy hL
+  have hp := Nat.two_pow_pos (k+1)
+  rw [P3_red (Llo + 2^(k+1)) (y + 2^(k+1)) Llo (k+1) hXLlt hy'lt hLlt (by omega),
+      shift_xorL k y Llo hy hL, hubL_xorL k Llo hL,
+      R_uu (y ^^^ Llo) Llo k hxy hL, if_neg hL0, hubB k y hy hy0,
+      P3_red (Llo + 2^(k+1)) y Llo (k+1) hXLlt hylt hLlt hy0, hubL_xorL k Llo hL,
+      R_lu (y ^^^ Llo) Llo k hxy hL, hubA k y hy hy0]
+  omega
+
+/-! ### from the two flips to `Asig` -/
+
+private theorem neg_beq (a b : Int) : ((-a) == (-b)) = (a == b) := by
+  by_cases h : a = b
+  · subst h; simp
+  · have h2 : ¬((-a) = (-b)) := fun hh => h (by omega)
+    rw [show ((-a) == (-b)) = false from by simp [h2],
+        show (a == b) = false from by simp [h]]
+
+private theorem asig_flip (X : Nat)
+    (hXlt : X < 2^(k+2)) (hylt : y < 2^(k+2)) (hy'lt : y + 2^(k+1) < 2^(k+2))
+    (hLlt : Llo < 2^(k+2)) (hX0 : X ≠ 0) (hy0 : y ≠ 0) (hy'0 : y + 2^(k+1) ≠ 0)
+    (hXL : X ^^^ Llo ≠ 0) (hyL : y ^^^ Llo ≠ 0) (hy'L : (y + 2^(k+1)) ^^^ Llo ≠ 0)
+    (h1 : P1 X (y + 2^(k+1)) Llo (k+1) = - P1 X y Llo (k+1))
+    (h3 : P3 X (y + 2^(k+1)) Llo (k+1) = - P3 X y Llo (k+1)) :
+    Asig X (y + 2^(k+1)) Llo (k+1) = - Asig X y Llo (k+1) := by
+  have s1 : (P1 X (y+2^(k+1)) Llo (k+1) == P1 (y+2^(k+1)) X Llo (k+1)) = true := by
+    rw [P1_symm X (y+2^(k+1)) Llo (k+1) hXlt hy'lt hLlt hX0 hy'0 hXL hy'L]; simp
+  have s2 : (P3 X (y+2^(k+1)) Llo (k+1) == P3 (y+2^(k+1)) X Llo (k+1)) = true := by
+    rw [P3_symm X (y+2^(k+1)) Llo (k+1) hXlt hy'lt hLlt hX0 hy'0]; simp
+  have s3 : (P1 X y Llo (k+1) == P1 y X Llo (k+1)) = true := by
+    rw [P1_symm X y Llo (k+1) hXlt hylt hLlt hX0 hy0 hXL hyL]; simp
+  have s4 : (P3 X y Llo (k+1) == P3 y X Llo (k+1)) = true := by
+    rw [P3_symm X y Llo (k+1) hXlt hylt hLlt hX0 hy0]; simp
+  have hres : resB X (y + 2^(k+1)) Llo (k+1) = resB X y Llo (k+1) := by
+    unfold resB
+    rw [s1, s2, s3, s4, h1, h3, neg_beq]
+  unfold Asig
+  rw [hres, h1]
+  cases hb : resB X y Llo (k+1) <;> simp
+
+/-- **THE HUB RELATION at `X = 2^n`.** -/
+theorem Asig_hub0 (hy : y < 2^(k+1)) (hL : Llo < 2^(k+1))
+    (hy0 : y ≠ 0) (hL0 : Llo ≠ 0) (hne : y ≠ Llo) :
+    Asig (2^(k+1)) (y + 2^(k+1)) Llo (k+1) = - Asig (2^(k+1)) y Llo (k+1) := by
+  obtain ⟨hylt, hy'lt, hLlt, hXlt, hXLlt, hxy⟩ := hub_facts k y Llo hy hL
+  have hp := Nat.two_pow_pos (k+1)
+  refine asig_flip k y Llo (2^(k+1)) hXlt hylt hy'lt hLlt (by omega) hy0 (by omega)
+    (by rw [hub_xorL k Llo hL]; omega)
+    (fun h => hne (xor_zero_eq _ _ h))
+    (by rw [shift_xorL k y Llo hy hL]; omega)
+    (P1_hub0 k y Llo hy hL hy0 hL0 hne) (P3_hub0 k y Llo hy hL hy0 hL0 hne)
+
+/-- **THE HUB RELATION at `X = L_lo + 2^n`.** -/
+theorem Asig_hubL (hy : y < 2^(k+1)) (hL : Llo < 2^(k+1))
+    (hy0 : y ≠ 0) (hL0 : Llo ≠ 0) (hne : y ≠ Llo) :
+    Asig (Llo + 2^(k+1)) (y + 2^(k+1)) Llo (k+1) = - Asig (Llo + 2^(k+1)) y Llo (k+1) := by
+  obtain ⟨hylt, hy'lt, hLlt, hXlt, hXLlt, hxy⟩ := hub_facts k y Llo hy hL
+  have hp := Nat.two_pow_pos (k+1)
+  refine asig_flip k y Llo (Llo + 2^(k+1)) hXLlt hylt hy'lt hLlt (by omega) hy0 (by omega)
+    (by rw [hubL_xorL k Llo hL]; omega)
+    (fun h => hne (xor_zero_eq _ _ h))
+    (by rw [shift_xorL k y Llo hy hL]; omega)
+    (P1_hubL k y Llo hy hL hy0 hL0 hne) (P3_hubL k y Llo hy hL hy0 hL0)
+
+end Hub
+
 end SounioZDFiberAntisym
 
 
