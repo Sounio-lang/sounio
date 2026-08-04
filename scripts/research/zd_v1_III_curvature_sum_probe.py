@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The level-independent curvature tensor K_j, and its sum, computed for j = 3..9 (j >= 8 via the streaming path, `... curvature_sum_probe.py stream`).
+"""The level-independent curvature tensor K_j, and its sum, computed for j = 3..10 (j >= 8 via the streaming path, `... curvature_sum_probe.py stream`).
 
 At n = j+2 the class size is 1, so K_j IS the raw per-triangle defect table at that level; the
 level-independence then says every higher level is a uniform cls-fold blow-up of it.
@@ -14,7 +14,7 @@ Measured:
   * K_j is LEVEL-INDEPENDENT -- the whole tensor, not just its sum (max abs diff 0 across n);
   * K_j takes only the values 0 and -2, i.e. every contributing class is a single sign flip;
   * sum(K_j) = -1728 * [j choose 3]_2  exactly, i.e. 864*[j,3]_2 flipped classes;
-    j = 3..9 -> [j,3]_2 = 1, 15, 155, 1395, 11811, 97155, 788035;
+    j = 3..10 -> [j,3]_2 = 1, 15, 155, 1395, 11811, 97155, 788035, 6347715;
   * every nonzero entry has (u^v, v^w) linearly independent.
 
 Hence delta(n,j) = cls^3 * sum(K_j) = (2^(n-j-2))^3 * (-1728) * [j choose 3]_2, which is the
@@ -67,12 +67,16 @@ def K_tensor(n, W):
     return Kr, cls
 
 
-def K_summary(n, W):
-    """Streaming form: never materialises the M^3 tensor. Needed from j = 8 (M = 512, a
-    134M-entry tensor). Returns (sum, value histogram, #nonzero, #support violations, checksum);
-    the checksum is a weighted linear hash, so equal checksums + equal histograms pin the tensor
-    across levels without holding it."""
-    from collections import Counter as _C
+def K_summary(n, W, sup_every=64):
+    """Streaming form: never materialises the M^3 tensor. Needed from j = 8 (M = 512, 134M
+    entries) and unavoidable at j = 10 (M = 2048, 8.6 BILLION). Returns
+    (sum, values-in-{0,-2}?, #nonzero, #support violations, #sampled slices, checksum, cls).
+
+    The checksum is the weighted linear hash sum_{u,v,w} K[u,v,w]*(u*M^2 + v*M + w), computed from
+    row and column sums so no nonzero extraction is needed -- that is what keeps j = 10 at ~40 s.
+    Equal checksums + equal value profiles pin the tensor across levels without holding it.
+    The support check needs the nonzero indices, so it is sampled every `sup_every` slices.
+    """
     j = lsb(W)
     H = 1 << (n - 1)
     M = 1 << (j + 1)
@@ -82,32 +86,35 @@ def K_summary(n, W):
     B = np.zeros((H, H), dtype=np.int32); B[1:, 1:] = A_sig_fast(n, tau(j, W), S)
     pp = np.array([0] + [tau(j, a) for a in range(1, H)])
     Bp = B[np.ix_(pp, pp)]
-    tot = nz = badsup = chk = 0
-    hist = _C()
+    del S, B
+    ar = np.arange(M, dtype=np.int64)
+    tot = nz = chk = badsup = sampled = 0
+    okvals = True
     for u in range(M):
         acc = np.zeros((M, M), dtype=np.int32)
         for X, sgn in ((A, 1), (Bp, -1)):
             for p_ in range(cls):
-                row_all = X[p_ * M + u]
+                ra = X[p_ * M + u]
                 for q_ in range(cls):
-                    row = row_all[q_ * M:(q_ + 1) * M]
+                    row = ra[q_ * M:(q_ + 1) * M]
                     if not row.any():
                         continue
                     for r_ in range(cls):
-                        col = X[r_ * M:(r_ + 1) * M, p_ * M + u]
-                        mid = X[q_ * M:(q_ + 1) * M, r_ * M:(r_ + 1) * M]
-                        acc += sgn * (np.outer(row, col) * mid)
+                        acc += sgn * (np.outer(row, X[r_ * M:(r_ + 1) * M, p_ * M + u])
+                                      * X[q_ * M:(q_ + 1) * M, r_ * M:(r_ + 1) * M])
         assert (acc % cls**3 == 0).all()
         Su = acc // cls**3
-        tot += int(Su.sum())
-        v, w = np.nonzero(Su)
-        nz += len(v)
-        hist.update(Su[v, w].tolist())
-        x, y = u ^ v, v ^ w
-        badsup += int((~((x != 0) & (y != 0) & (x != y))).sum())
-        chk = (chk + int(np.dot(Su[v, w].astype(np.int64),
-                                (u * M * M + v.astype(np.int64) * M + w)))) % (2**61 - 1)
-    return tot, dict(hist), nz, badsup, chk, cls
+        su = int(Su.sum()); tot += su
+        nz += int(np.count_nonzero(Su))
+        okvals &= bool(((Su == 0) | (Su == -2)).all())
+        chk = (chk + u * M * M * su + M * int(np.dot(ar, Su.sum(1, dtype=np.int64)))
+               + int(np.dot(ar, Su.sum(0, dtype=np.int64)))) % (2**61 - 1)
+        if u % sup_every == 0:
+            v, w = np.nonzero(Su)
+            x, y = u ^ v, v ^ w
+            badsup += int((~((x != 0) & (y != 0) & (x != y))).sum())
+            sampled += 1
+    return tot, okvals, nz, badsup, sampled, chk, cls
 
 
 def main_stream(js):
@@ -116,13 +123,14 @@ def main_stream(js):
         for n in range(j + 2, j + 4):
             if W >= 1 << (n - 1):
                 continue
-            tot, hist, nz, badsup, chk, cls = K_summary(n, W)
+            tot, okvals, nz, badsup, sampled, chk, cls = K_summary(n, W)
             want = -1728 * qb3(j)
             same = "n/a" if prev is None else str(chk == prev)
             print(f"j={j} n={n} cls={cls}: sum(K)={tot} want {want} "
-                  f"{'OK' if tot == want else 'MISMATCH'} | values {hist} | "
+                  f"{'OK' if tot == want else 'MISMATCH'} | values in {{0,-2}}: {okvals} | "
                   f"flipped {nz} = 864*[{j},3]_2 -> {nz == 864 * qb3(j)} | "
-                  f"support violations {badsup} | checksum {chk} equals previous level: {same}")
+                  f"support violations {badsup} over {sampled} sampled slices | "
+                  f"checksum {chk} equals previous level: {same}")
             print(f"        delta = cls^3*sum = {cls**3 * tot} "
                   f"(= -27*8^(n-j)*[j,3]_2 = {-27 * 8**(n - j) * qb3(j)})")
             prev = chk
@@ -131,7 +139,7 @@ def main_stream(js):
 
 def main():
     if sys.argv[1:] == ["stream"]:
-        main_stream([(8, 256), (9, 512)])
+        main_stream([(8, 256), (9, 512), (10, 1024)])
         return
     for j, W in ((3, 8), (4, 16), (5, 32), (6, 64), (7, 128)):
         prev = None

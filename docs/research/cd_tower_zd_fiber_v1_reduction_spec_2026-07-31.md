@@ -2175,10 +2175,10 @@ Neither is proven. But (2) is no longer a statement about an unbounded family: i
 
 Reproduce: `python3 scripts/research/zd_v1_III_sign_defect_probe.py 7 8 9`.
 
-## §38 — The curvature sum, computed for `j = 3…9`: `K_j` is a level-independent tensor and `Σ K_j = −1728·[j,3]₂` (`W41`, 2026-08-04)
+## §38 — The curvature sum, computed for `j = 3…10`: `K_j` is a level-independent tensor and `Σ K_j = −1728·[j,3]₂` (`W41`, 2026-08-04)
 
 §37.4 left (III)'s open content as **one number per `j`**. That number is now computed for
-`j = 3 … 9`, and it comes with more structure than was asked for.
+`j = 3 … 10`, and it comes with more structure than was asked for.
 
 Partition the vertices by their low `j+1` bits — `M = 2^(j+1)` classes, each of size
 `cls = 2^(n−j−2)` — and with `A` the seam's graph and `Bp = Φ*A_(τW)` the transported reference:
@@ -2196,8 +2196,10 @@ K_j(u,v,w) := [ tr(A_uv A_vw A_wu) − tr(Bp_uv Bp_vw Bp_wu) ] / cls³
 | 7 | `−20409408` | `−1728·11811` | `10204704` | `{0, −2}` |
 | 8 | `−167883840` | `−1728·97155` | `83941920` | `{0, −2}` |
 | 9 | `−1361724480` | `−1728·788035` | `680862240` | `{0, −2}` |
+| 10 | `−10968851520` | `−1728·6347715` | `5484425760` | `{0, −2}` |
 
-Four facts, all measured, `n = 7…12` (each `j` at every level where it exists):
+Four facts, all measured, `n = 7…13` (each `j` at two levels: `n = j+2`, where `cls = 1`, and
+`n = j+3`):
 
 1. **`K_j` is level-independent — the whole tensor, entry by entry**, not merely its sum
    (`np.array_equal` across consecutive levels, exact, `n = 7…10`). This is the factorisation
@@ -2229,7 +2231,7 @@ verified against the measured `δ` at every `(j, n)` in the table.
 The `n`-dependence of `δ` is now **structural**: it is `cls³`, the cube of the class size, and it is
 forced by `K_j` being level-independent. What remains open is one clause:
 
-> `Σ K_j = −1728·[j,3]₂` for **all** `j` — computed here for `j = 3 … 9`, not proven.
+> `Σ K_j = −1728·[j,3]₂` for **all** `j` — computed here for `j = 3 … 10`, not proven.
 
 `j = 6` needed a different implementation: `M = 2^7 = 128` makes the `M³` triple loop unworkable,
 so the probe blocks the matrices by residue and contracts over the block indices (`M³·cls³` work,
@@ -2242,7 +2244,16 @@ one `M×M` slice, accumulating the sum, the value histogram, the support check a
 **checksum**. Equal checksums plus equal histograms pin the tensor across levels without ever
 holding it — `n = 10` and `n = 11` both give `2294549568037756351`. `j = 9` (`M = 1024`,
 **1.07 BILLION** entries) runs the same way in 43 s at `n = 11` and 68 s at `n = 12`, both
-`1573899305250049471`. `n = 12` is a level the lane's trace measurements had not reached at all.
+`1573899305250049471`. `j = 10` is **8.6 billion** entries and needed one more idea: the checksum
+is computed from row and column sums rather than by extracting nonzeros
+(`Σ K·(uM²+vM+w) = uM²·ΣK + M·⟨v, rowsums⟩ + ⟨w, colsums⟩`), which drops it to ~40 s per level;
+the support check, which does need indices, is then sampled every 64 slices. `n = 12` and `n = 13`
+are levels the lane's trace measurements had never reached — this needs one label and its
+reference, not a sweep or an eigendecomposition.
+
+Independently, `δ` itself was computed straight from the traces at those levels:
+`δ(12,10) = −10968851520` and `δ(13,10) = −87750812160`, both matching `−27·8^(n−j)·[j,3]₂` — a
+four-second check that confirms the `cls³` blow-up without touching the tensor.
 
 `864 = 27·32` flips per 3-subspace is the shape to explain; the linear-independence of the support
 (fact 4) is the visible half of it. Note this is a statement about a **finite** object at each `j`,
