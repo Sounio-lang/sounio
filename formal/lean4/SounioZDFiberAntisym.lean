@@ -8137,6 +8137,56 @@ theorem Ncnt_eq_Nclosed : ∀ (m W : Nat), W < 2^m → W ≠ 0 → (Ncnt W m : I
               have hih := ih W' hW'lt hW'0
               omega
 
+/-! ## Tier 33: the explicit digit sum
+
+`Nclosed` solved the recursion but is still recursive. What the paper calls the CLOSED FORM is a
+finite, non-recursive sum over the set bits of `W`. This tier builds it and proves it.
+
+The form proved here is stated on `W`'s OWN bits, not on the normalised label `8*g(W)+1`. That is
+the whole trick: the descent stops at the LOWEST SET BIT of `W`, so the term at that bit must be
+omitted -- and omitting it is exactly what the normalisation was compensating for. W16's negative
+("the raw label FAILS on every seam") is precisely the missing exclusion, not a missing
+normalisation. So this route never meets W17's unproven residual. -/
+
+def sumLtI : Nat → (Nat → Int) → Int
+  | 0, _ => 0
+  | (n+1), f => sumLtI n f + f n
+
+theorem sumLtI_congr (n : Nat) (f g : Nat → Int) (h : ∀ i, i < n → f i = g i) :
+    sumLtI n f = sumLtI n g := by
+  induction n with
+  | zero => rfl
+  | succ n ih => rw [sumLtI, sumLtI, ih (fun i hi => h i (by omega)), h n (by omega)]
+
+theorem sumLtI_zero (n : Nat) : sumLtI n (fun _ => 0) = 0 := by
+  induction n with
+  | zero => rfl
+  | succ n ih => rw [sumLtI, ih]; decide
+
+theorem sumLtI_mul (n : Nat) (c : Int) (f : Nat → Int) :
+    sumLtI n (fun i => c * f i) = c * sumLtI n f := by
+  induction n with
+  | zero => simp [sumLtI]
+  | succ n ih => rw [sumLtI, sumLtI, ih, Int.mul_add]
+
+/-- The magnitude of the level-`i` digit, `(2^i-4)(2^i-8)*4^(m-i)`, in `Nat`.
+
+    Truncated subtraction is EXACTLY right here, which is what keeps every product on the `Nat`
+    side: at `i = 2` and `i = 3` the true coefficient is genuinely `0` and truncation gives `0`;
+    at `i = 0, 1` truncation gives the wrong value but those indices are always EXCLUDED by
+    `dterm`'s guard. So no index is both included and mis-valued. -/
+def dcoef (m i : Nat) : Nat := (2^i - 4) * (2^i - 8) * 4^(m - i)
+
+/-- The level-`i` digit. The guard says a HIGH step happens at level `i`: bit `i-1` of `W` is set
+    (`2^(i-1) ≤ W % 2^i`) AND something remains below it (`W % 2^(i-1) ≠ 0`), the second
+    conjunct being where the descent stops. The sign is `(-1)^popcount` of the bits above,
+    which is `psg`. -/
+def dterm (m W i : Nat) : Int :=
+  if 2^(i-1) ≤ W % 2^i ∧ W % 2^(i-1) ≠ 0 then (dcoef m i : Int) * psg (W >>> i) else 0
+
+/-- **The signed base-4 digit sum `E`.** Finite, non-recursive, determined by `W`'s set bits. -/
+def Ddig (m W : Nat) : Int := sumLtI (m+1) (fun i => dterm m W i)
+
 end SounioZDFiberAntisym
 
 
