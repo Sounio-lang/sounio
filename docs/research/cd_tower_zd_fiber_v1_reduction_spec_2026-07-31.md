@@ -1850,10 +1850,11 @@ i.e. `t3(n,1) + δ(n,n−2) = t3(n,2^(n−2))`, with the `7` cancelling against 
 why both §17.2 and `δ` carry a `/7` and the answer does not. (Checked as an exact rational
 identity at `n = 6..11`.)
 
-⚠ **(B) is conditional.** §18.1's low-branch recursion is itself MEASURED, at `n = 7..10` only —
-a *narrower* range than the deviation law it is being used to explain (`n = 6..11`). So (B) does
-not make the scaling a theorem; it makes it a consequence of an earlier unproven identity. Proving
-§18.1 is now a load-bearing target, not a nicety.
+⚠ **(B) is conditional.** §18.1's low-branch recursion is itself MEASURED, so (B) does not make
+the scaling a theorem; it makes it a consequence of an earlier unproven identity. Proving §18.1 is
+a load-bearing target, not a nicety. **The range gap is closed** (§34): §18.1 was measured at
+`n = 7…10` when this was written and is now measured at `n = 6…11`, the same range as the law it
+explains. §34 also decomposes it into four smaller statements, one of them pure algebra.
 
 **So what is genuinely open is narrower than §33.3 suggests:** not the cubic, but
 
@@ -1960,14 +1961,26 @@ That gives `−4·S(W) = +4·t2′`, hence `tr(B²E) = 8·t2′` and `3·tr(B²E
 1. the block identity `A = J₂⊗A′ + E` and `E`'s four families — MEASURED, all low labels `n = 7…10`;
 2. the two constant signs `+1` (matching) and `−1` (coset) — MEASURED, same coverage;
 3. `Σ_a (A²)[a, a⊕W] = −tr(A²)` — MEASURED, all labels `n = 6…9`;
-4. `tr(BE²) = 0` and `tr(E³) = −24(h−2)` — MEASURED, all low labels `n = 6…9`.
+4. `tr(BE²) = 0` and `tr(E³) = −24(h−2)` — MEASURED, all low labels `n = 6…11`.
 
-**Edge coverage.** §18.1 and all four terms were re-measured at `n = 6` (from level 5): 15 low
-labels, 0 violations on every line. That closes the low edge — §33.5(B) previously leaned on §18.1
-over `n = 7…10` while the (III) deviation law is measured over `n = 6…11`, so the derivation did
-not reach the boundary levels. `n = 11` is running under the same script; until it reports, the
-high edge remains covered by the law's own measurement only, and §33.5(B)'s epistemic support at
-`n = 11` is exactly that of §18.1, not more.
+**Edge coverage — both edges now closed.** §18.1 and all four terms were re-measured at `n = 6`
+(from level 5; 15 low labels) and at `n = 10` (255) and `n = 11` (511): **0 violations on every
+line at every level**. §33.5(B) previously leaned on §18.1 over `n = 7…10` while the (III)
+deviation law is measured over `n = 6…11`, so the derivation did not reach the boundary levels and
+its epistemic support there was strictly that of §18.1, not more. It now spans the same range as
+the law it explains:
+
+| level | low labels | §18.1 | `tr(B³)` | `3tr(B²E)` | `tr(BE²)` | `tr(E³)` |
+|---|---|---|---|---|---|---|
+| 6 | 15 | ✓ | ✓ | ✓ | ✓ | ✓ |
+| 7 | 31 | ✓ | ✓ | ✓ | ✓ | ✓ |
+| 8 | 63 | ✓ | ✓ | ✓ | ✓ | ✓ |
+| 9 | 127 | ✓ | ✓ | ✓ | ✓ | ✓ |
+| 10 | 255 | ✓ | ✓ | ✓ | ✓ | ✓ |
+| 11 | 511 | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+(`n = 10, 11` were run in float64, which is exact at these magnitudes — pinned by the float64
+vs `int64` agreement recorded in §33.3.)
 
 Given 1–3 the `8·t3′` and `24·t2′` terms are *derived*; only the two `E`-internal facts in 4 remain
 purely measured, and they are statements about a label-independent graph on `12(h−2)` edges — the
