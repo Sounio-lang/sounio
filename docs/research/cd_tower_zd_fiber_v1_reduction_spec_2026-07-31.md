@@ -2175,10 +2175,10 @@ Neither is proven. But (2) is no longer a statement about an unbounded family: i
 
 Reproduce: `python3 scripts/research/zd_v1_III_sign_defect_probe.py 7 8 9`.
 
-## §38 — The curvature sum, computed for `j = 3…11`: `K_j` is a level-independent tensor and `Σ K_j = −1728·[j,3]₂` (`W41`, 2026-08-04)
+## §38 — The curvature sum, computed for `j = 3…12`: `K_j` is a level-independent tensor and `Σ K_j = −1728·[j,3]₂` (`W41`, 2026-08-04)
 
 §37.4 left (III)'s open content as **one number per `j`**. That number is now computed for
-`j = 3 … 11`, and it comes with more structure than was asked for.
+`j = 3 … 12`, and it comes with more structure than was asked for.
 
 Partition the vertices by their low `j+1` bits — `M = 2^(j+1)` classes, each of size
 `cls = 2^(n−j−2)` — and with `A` the seam's graph and `Bp = Φ*A_(τW)` the transported reference:
@@ -2198,9 +2198,10 @@ K_j(u,v,w) := [ tr(A_uv A_vw A_wu) − tr(Bp_uv Bp_vw Bp_wu) ] / cls³
 | 9 | `−1361724480` | `−1728·788035` | `680862240` | `{0, −2}` |
 | 10 | `−10968851520` | `−1728·6347715` | `5484425760` | `{0, −2}` |
 | 11 | `−88051917888` | `−1728·50955971` | `44025958944` | `{0, −2}` |
+| 12 | `−705621533760` | `−1728·408345795` | `352810766880` | `{0, −2}` |
 
-Four facts, all measured, `n = 7…14` (each `j` at `n = j+2`, where `cls = 1`, and at `n = j+3`;
-at `j = 11` the second level is covered by the `δ` cross-check rather than by the tensor):
+Four facts, all measured, `n = 7…15` (each `j` at `n = j+2`, where `cls = 1`, and at `n = j+3`;
+from `j = 11` the second level is covered by the `δ` cross-check rather than by the tensor):
 
 1. **`K_j` is level-independent — the whole tensor, entry by entry**, not merely its sum
    (`np.array_equal` across consecutive levels, exact, `n = 7…10`). This is the factorisation
@@ -2232,7 +2233,7 @@ verified against the measured `δ` at every `(j, n)` in the table.
 The `n`-dependence of `δ` is now **structural**: it is `cls³`, the cube of the class size, and it is
 forced by `K_j` being level-independent. What remains open is one clause:
 
-> `Σ K_j = −1728·[j,3]₂` for **all** `j` — computed here for `j = 3 … 11`, not proven.
+> `Σ K_j = −1728·[j,3]₂` for **all** `j` — computed here for `j = 3 … 12`, not proven.
 
 `j = 6` needed a different implementation: `M = 2^7 = 128` makes the `M³` triple loop unworkable,
 so the probe blocks the matrices by residue and contracts over the block indices (`M³·cls³` work,
@@ -2252,8 +2253,15 @@ the support check, which does need indices, is then sampled every 64 slices. `n 
 are levels the lane's trace measurements had never reached — this needs one label and its
 reference, not a sweep or an eigendecomposition.
 
-`j = 11` is **68.7 billion** entries and takes 458 s at `n = 13`; the `n = 14` tensor (`cls = 2`,
-8× the work) was not run.
+`j = 11` is 68.7 billion entries and takes 458 s at `n = 13`; `j = 12` is **550 billion** and takes
+1873 s at `n = 14` (`int8` slices — the values never leave `{−2…2}`). The `cls = 2` tensors above
+`j = 10` were not run.
+
+**Cost note, and it is the useful one.** At `cls = 1` — i.e. at `n = j+2`, the canonical level —
+`Σ K_j` is *by definition* `δ(j+2, j)`, which is a **two-trace computation**: 25 s at `j = 12`
+against 1873 s for the tensor. So the *sum* never needs the tensor at all. What the tensor buys is
+the **structure** — that the values are exactly `{0, −2}`, that the flipped count is
+`864·[j,3]₂`, and that the support satisfies the independence condition.
 
 Independently, `δ` itself was computed straight from the traces, which is *much* cheaper and
 confirms the `cls³` blow-up without touching the tensor:
@@ -2264,10 +2272,11 @@ confirms the `cls³` blow-up without touching the tensor:
 | `δ(13,10)` | `−87750812160` | ✓ | 4 s |
 | `δ(13,11)` | `−88051917888` | ✓ | 4 s |
 | `δ(14,11)` | `−704415343104` | ✓ | 21 s |
+| `δ(14,12)` | `−705621533760` | ✓ | 25 s |
+| `δ(15,12)` | `−5644972270080` | ✓ | 147 s |
 
-That is the useful asymmetry: the *tensor* is what carries the structure (values `{0,−2}`, the
-`864·[j,3]₂` count, the support condition) and costs minutes; the *sum* is a two-trace computation
-and costs seconds. Level-independence only needs the sum.
+`n = 15` needs a chunked `float32` product for `tr(A³)` (entries of `A²` stay below `2^24`, so the
+matmul is exact; the outer accumulation is `float64`).
 
 `864 = 27·32` flips per 3-subspace is the shape to explain; the linear-independence of the support
 (fact 4) is the visible half of it. Note this is a statement about a **finite** object at each `j`,
