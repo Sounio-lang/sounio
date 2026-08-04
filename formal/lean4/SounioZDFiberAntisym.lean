@@ -8585,6 +8585,101 @@ theorem Ncnt_closed_gnorm (m W : Nat) (hW : W < 2^m) (hW0 : W ≠ 0) :
   rw [← Ddig_gnorm m W hW0]
   exact Ncnt_closed m W hW hW0
 
+/-! ## Tier 35: the guard made explicit, and `E` as a definition -/
+
+/-- **The guard forces `2 ≤ i`.** Below that, `W % 2^(i-1)` is `W % 1 = 0`. This is the link
+    that `dcoef`'s truncation silently relied on; it is now a hypothesis one can cite. -/
+theorem dterm_guard_le (W i : Nat) (h : 2^(i-1) ≤ W % 2^i ∧ W % 2^(i-1) ≠ 0) : 2 ≤ i := by
+  by_cases hc : 2 ≤ i
+  · exact hc
+  · exact absurd (by
+      have hi : i - 1 = 0 := by omega
+      rw [hi]; exact Nat.mod_one W) h.2
+
+/-- **`dcoef` is EXACT wherever the guard can reach it.** Stated subtraction-free, so the claim
+    is about the true coefficient `(2^i-4)(2^i-8)·4^(m-i) = (4^i - 12·2^i + 32)·4^(m-i)` and not
+    about `Nat` truncation. Together with `dcoef_low` (zero for `i ≤ 3`) and `dterm_guard_le`
+    this makes the guard-dependence explicit rather than an invariant of the proof text. -/
+theorem dcoef_spec (m i : Nat) (h : 2 ≤ i) :
+    dcoef m i + 12 * (2^i * 4^(m-i)) = 2^i * 2^i * 4^(m-i) + 32 * 4^(m-i) := by
+  by_cases h4 : 4 ≤ i
+  · have hle : (2:Nat)^4 ≤ 2^i := Nat.pow_le_pow_right (by omega) h4
+    have h16 : (2:Nat)^4 = 16 := rfl
+    obtain ⟨f, hf⟩ : ∃ f, (2:Nat)^i = f + 16 := ⟨2^i - 16, by omega⟩
+    unfold dcoef
+    rw [hf]
+    have ha : f + 16 - 4 = f + 12 := by omega
+    have hb : f + 16 - 8 = f + 8 := by omega
+    rw [ha, hb]
+    have e1 : (f+12)*(f+8) = f*f + f*8 + (12*f + 12*8) := by
+      rw [Nat.add_mul, Nat.mul_add, Nat.mul_add]
+    have e2 : (f+16)*(f+16) = f*f + f*16 + (16*f + 16*16) := by
+      rw [Nat.add_mul, Nat.mul_add, Nat.mul_add]
+    have hsc : (f+12)*(f+8) + 12*(f+16) = (f+16)*(f+16) + 32 := by omega
+    have hmul : ((f+12)*(f+8) + 12*(f+16)) * 4^(m-i)
+        = ((f+16)*(f+16) + 32) * 4^(m-i) := by rw [hsc]
+    rw [Nat.add_mul ((f+12)*(f+8)) (12*(f+16)) (4^(m-i)),
+        Nat.add_mul ((f+16)*(f+16)) 32 (4^(m-i))] at hmul
+    have hass : 12 * ((f+16) * 4^(m-i)) = 12 * (f+16) * 4^(m-i) :=
+      (Nat.mul_assoc 12 (f+16) (4^(m-i))).symm
+    omega
+  · have hc : dcoef m i = 0 := dcoef_low m i (by omega)
+    have hi : i = 2 ∨ i = 3 := by omega
+    rcases hi with h2 | h3
+    · subst h2
+      have hp : (2:Nat)^2 = 4 := rfl
+      rw [hc, hp]
+      omega
+    · subst h3
+      have hp : (2:Nat)^3 = 8 := rfl
+      rw [hc, hp]
+      omega
+
+/-- **`E` as the contract states it**: indices `2..m`, guard `bit_{i-1}(V)`, no lowest-bit
+    exclusion -- correct precisely because the label it is applied to is ODD. -/
+def Edig (m V : Nat) : Int :=
+  sumLtI (m+1) (fun i =>
+    if 2 ≤ i ∧ V.testBit (i-1) = true then ((dcoef m i : Nat) : Int) * psg (V >>> i) else 0)
+
+private theorem dterm_eq_eterm (m V i : Nat) (hodd : V % 2 = 1) :
+    dterm m V i
+      = (if 2 ≤ i ∧ V.testBit (i-1) = true then ((dcoef m i : Nat) : Int) * psg (V >>> i)
+         else 0) := by
+  unfold dterm
+  by_cases hi : 2 ≤ i
+  · have hii : (i-1)+1 = i := by omega
+    have hgV : (2^(i-1) ≤ V % 2^i) ↔ V.testBit (i-1) = true := by
+      have h := guard_iff V (i-1); rwa [hii] at h
+    have hne : V % 2^(i-1) ≠ 0 := by
+      have hm := mod_pow_mod 1 (i-1) V (by omega)
+      have h2 : (2:Nat)^1 = 2 := rfl
+      omega
+    by_cases hb : V.testBit (i-1) = true
+    · rw [if_pos ⟨hgV.mpr hb, hne⟩, if_pos ⟨hi, hb⟩]
+    · rw [if_neg (fun h => hb (hgV.mp h.1)), if_neg (fun h => hb h.2)]
+  · have hlow : V % 2^(i-1) = 0 := by
+      have hz : i - 1 = 0 := by omega
+      rw [hz]
+      exact Nat.mod_one V
+    rw [if_neg (fun h => h.2 hlow), if_neg (fun h => hi h.1)]
+
+/-- **On an ODD label the two forms coincide.** The lowest-bit exclusion is vacuous there, which
+    is exactly why the contract's `E` is stated on the normalised label. -/
+theorem Ddig_eq_Edig (m V : Nat) (hodd : V % 2 = 1) : Ddig m V = Edig m V := by
+  unfold Ddig Edig
+  exact sumLtI_congr (m+1) _ _ (fun i _ => dterm_eq_eterm m V i hodd)
+
+theorem gnorm_odd_one (W : Nat) : gnorm W % 2 = 1 := by
+  unfold gnorm
+  omega
+
+/-- **THE CONTRACT'S OWN STATEMENT, PROVEN.** `Ncnt W m = (2^m-2)(2^m-3) - E(m, 8*g(W)+1)`. -/
+theorem Ncnt_closed_E (m W : Nat) (hW : W < 2^m) (hW0 : W ≠ 0) :
+    ((Ncnt W m : Nat) : Int) + Edig m (gnorm W) + 5 * ((2^m : Nat) : Int)
+      = ((2^m * 2^m : Nat) : Int) + 6 := by
+  rw [← Ddig_eq_Edig m (gnorm W) (gnorm_odd_one W)]
+  exact Ncnt_closed_gnorm m W hW hW0
+
 end SounioZDFiberAntisym
 
 
