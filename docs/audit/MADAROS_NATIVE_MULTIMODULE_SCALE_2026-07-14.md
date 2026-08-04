@@ -97,4 +97,5 @@ fragile chains elsewhere remain open.
 
 ~~Fix the imported/native codegen so large merged IR graphs thin-link successfully~~ — **done**
 for the filed `prob::distributions` scale class (gate above). Residual work is non-scale D3
-(OLS E019, exclusive-ref chains) and optional compact-emitter rewrite (not fail-open).
+(exclusive-ref chains; `stats::validation` E019 only — fixed-array OLS is green) and optional
+compact-emitter rewrite (not fail-open).
