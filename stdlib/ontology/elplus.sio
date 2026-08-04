@@ -76,6 +76,9 @@
 //! `elplus_edge_sparse` are O(1) read-only accessors over the sparse
 //! workspace matrices so repair drivers can query the role-aware closure
 //! without crossing a `&!` boundary with the module-level arrays.
+//! `elplus_subsumes_dense` / `elplus_edge_dense` are the O(1) dense
+//! counterparts over the `elplus_fixpoint` output matrices, used by the
+//! SNOMED mini-closure adapter (ontology::biomedical::snomed).
 
 // ── Dense variant capacities ─────────────────────────────────────────────
 // Maximum number of interned concepts (atoms + top + conjs + existentials).
@@ -210,6 +213,94 @@ pub fn elplus_fixpoint(
     nb: i64,
     nr: i64
 ) -> i64 with Mut, Div, Panic {
+    var pack: [i64; 704] = [0; 704]
+    var chains: [i64; 24] = [0; 24]
+    var dims: [i64; 4] = [0; 4]
+    var i: i64 = 0
+    while i < 64 {
+        pack[i] = ckind[i]
+        pack[64 + i] = carg1[i]
+        pack[128 + i] = carg2[i]
+        i = i + 1
+    }
+    i = 0
+    while i < 512 {
+        pack[192 + i] = exid[i]
+        i = i + 1
+    }
+    i = 0
+    while i < 8 {
+        chains[i] = ch1[i]
+        chains[8 + i] = ch2[i]
+        chains[16 + i] = ch3[i]
+        i = i + 1
+    }
+    dims[0] = nchain
+    dims[1] = nc
+    dims[2] = nb
+    dims[3] = nr
+    return elplus_fixpoint_packed(s, r, &pack, rclos, &chains, &dims)
+}
+
+/// Cross-module packaging of `elplus_fixpoint` and the PRIMARY home of
+/// the 8-rule loop: identical semantics, but 6 parameters instead of
+/// 14.  Imported calls with more than 8 parameters fail native codegen
+/// on the current Madaros lane (thin-link produces no ELF for
+/// 9+-parameter callees unless the caller is the main module's `main`;
+/// probe 2026-08), so the public 14-parameter `elplus_fixpoint` above
+/// is now a thin pack-and-delegate wrapper around this function, and
+/// importers that run the dense fixpoint outside their own `main`
+/// (e.g. the SNOMED adapter in ontology::biomedical::snomed) call this
+/// wrapper directly.
+///
+/// # Parameters
+/// - `s`, `r`: as in `elplus_fixpoint` (mutated in place).
+/// - `pack`: concept tables concatenated — ckind[0..64) then
+///   carg1[0..64) then carg2[0..64) then exid[0..512).
+/// - `rclos`: role-hierarchy closure (from `elplus_role_closure`).
+/// - `chains`: ch1[0..8) then ch2[0..8) then ch3[0..8).
+/// - `dims`: [nchain, nc, nb, nr].
+///
+/// # Complexity
+/// Same as `elplus_fixpoint`, plus one O(704) unpack.
+pub fn elplus_fixpoint_packed(
+    s: &![bool; 4096],
+    r: &![bool; 32768],
+    pack: &[i64; 704],
+    rclos: &[bool; 64],
+    chains: &[i64; 24],
+    dims: &[i64; 4]
+) -> i64 with Mut, Div, Panic {
+    var ckind: [i64; 64] = [0; 64]
+    var carg1: [i64; 64] = [0; 64]
+    var carg2: [i64; 64] = [0; 64]
+    var exid: [i64; 512] = [0; 512]
+    var ch1: [i64; 8] = [0; 8]
+    var ch2: [i64; 8] = [0; 8]
+    var ch3: [i64; 8] = [0; 8]
+    var i: i64 = 0
+    while i < 64 {
+        ckind[i] = pack[i]
+        carg1[i] = pack[64 + i]
+        carg2[i] = pack[128 + i]
+        i = i + 1
+    }
+    i = 0
+    while i < 512 {
+        exid[i] = pack[192 + i]
+        i = i + 1
+    }
+    i = 0
+    while i < 8 {
+        ch1[i] = chains[i]
+        ch2[i] = chains[8 + i]
+        ch3[i] = chains[16 + i]
+        i = i + 1
+    }
+    var nchain: i64 = dims[0]
+    var nc: i64 = dims[1]
+    var nb: i64 = dims[2]
+    var nr: i64 = dims[3]
     var changed = true
     var rounds: i64 = 0
     var a: i64 = 0
@@ -448,6 +539,28 @@ pub fn elplus_r_count(r: &[bool; 32768], nr: i64, nc: i64, nb: i64) -> i64 with 
         rr = rr + 1
     }
     return n
+}
+
+/// Dense closure query: does concept `a` subsume to concept `b` in a
+/// CLOSED dense subsumption matrix (output of `elplus_fixpoint`)?
+/// Dense counterpart of `elplus_subsumes_sparse`; read-only accessor so
+/// adapters (e.g. ontology::biomedical::snomed) never reimplement the
+/// row-major indexing.
+///
+/// # Complexity
+/// O(1)
+pub fn elplus_subsumes_dense(s: &[bool; 4096], a: i64, b: i64) -> bool with Div, Panic {
+    return s[a * ELPLUS_MAXC + b]
+}
+
+/// Dense role-edge query: does concept `c` have a derived role edge
+/// (role, c, f) in the CLOSED dense role-edge cube (output of
+/// `elplus_fixpoint`)?  Dense counterpart of `elplus_edge_sparse`.
+///
+/// # Complexity
+/// O(1)
+pub fn elplus_edge_dense(r: &[bool; 32768], role: i64, c: i64, f: i64) -> bool with Div, Panic {
+    return r[(role * ELPLUS_MAXC + c) * ELPLUS_MAXC + f]
 }
 
 /// DERIVE conflict between two concepts from a closed subsumption matrix

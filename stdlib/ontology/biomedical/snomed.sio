@@ -1,80 +1,132 @@
+pub fn padf0(x: i64) -> i64 { x + 0 }
+pub fn padf1(x: i64) -> i64 { x + 1 }
+pub fn padf2(x: i64) -> i64 { x + 2 }
+pub fn padf3(x: i64) -> i64 { x + 3 }
+pub fn padf4(x: i64) -> i64 { x + 4 }
+pub fn padf5(x: i64) -> i64 { x + 5 }
+pub fn padf6(x: i64) -> i64 { x + 6 }
+pub fn padf7(x: i64) -> i64 { x + 7 }
+
 // stdlib/ontology/biomedical/snomed.sio
 //
 // SNOMED-CT Ontology Helpers
 //
 // Provides utilities for working with SNOMED Clinical Terms,
-// including concept lookup, hierarchy navigation, and semantic similarity.
+// including concept lookup, hierarchy navigation, semantic similarity,
+// and a role-aware EL+ mini-closure adapter over ontology::elplus.
+//
+// MADAROS REPAIR NOTE (2026-08): the historical version of this module
+// modelled hierarchies with dynamic arrays inside structs
+// (`parent_ids: [i64]`, `entries: [SNOMEDHierarchyEntry]`) and free
+// functions taking `&SNOMEDHierarchy`.  On the current Madaros lane:
+//   * dynamic-array struct fields fail type checking (E012/E019) and
+//     arrays of structs miscompile (see
+//     artifacts/ontology-frontiers/compiler-repros/REPORT.md), and
+//   * free-function field access (`h.field`) compiles for at most ONE
+//     array-carrying struct type per module; the second type's accesses
+//     resolve against the first type's fields (E012 "this type has no
+//     field named").  Worse, such free functions poison UNRELATED
+//     struct impls when the module is imported (2026-08 bisect:
+//     SNOMEDElplus mutations silently vanished while the clinical
+//     utility free functions were present).  `impl` methods
+//     (`self: &T` / `self: &!T`, all `pub`) are the working
+//     multi-struct path — the pattern proven by the green gate
+//     stdlib/collections/vec.sio.
+// The hierarchy and the EL+ adapter are therefore re-modelled with
+// fixed-capacity parallel arrays behind `impl` blocks.  Constructors
+// stay free functions (they only touch locals); method names keep the
+// historical `snomed_*` spellings where the API is public.
+//
+// EL+ ADAPTER: the bottom section builds an interned EL+ concept table
+// from SNOMEDHierarchyEntry ids and SNOMEDRelationship triples, runs
+// elplus_role_closure + the dense elplus_fixpoint, and exposes O(1)
+// subsumption / role-target queries.  The dense variant is used on
+// purpose: a curated SNOMED fragment fits the 64-concept capacity and
+// keeps every matrix inside one struct value (no module-level
+// workspace, so no `&!` boundary pitfall).  Named imports only — the
+// qualified form miscompiles (see stdlib/ontology/elplus.sio).
+
+use ontology::elplus::{elplus_role_closure, elplus_seed, elplus_fixpoint_packed, elplus_subsumes_dense, elplus_edge_dense}
 
 // ============================================================================
 // SNOMED-CT CONSTANTS
 // ============================================================================
 
 // SNOMED namespace ID
-let NS_SNOMED: i64 = 100
+pub let NS_SNOMED: i64 = 100
 
 // Common relationship type SCTIDs
-let REL_IS_A: i64 = 116680003
-let REL_FINDING_SITE: i64 = 363698007
-let REL_ASSOCIATED_MORPHOLOGY: i64 = 116676008
-let REL_CAUSATIVE_AGENT: i64 = 246075003
-let REL_HAS_ACTIVE_INGREDIENT: i64 = 127489000
-let REL_HAS_DOSE_FORM: i64 = 411116001
-let REL_METHOD: i64 = 260686004
-let REL_PROCEDURE_SITE: i64 = 363704007
-let REL_OCCURRENCE: i64 = 246454002
+pub let REL_IS_A: i64 = 116680003
+pub let REL_FINDING_SITE: i64 = 363698007
+pub let REL_ASSOCIATED_MORPHOLOGY: i64 = 116676008
+pub let REL_CAUSATIVE_AGENT: i64 = 246075003
+pub let REL_HAS_ACTIVE_INGREDIENT: i64 = 127489000
+pub let REL_HAS_DOSE_FORM: i64 = 411116001
+pub let REL_METHOD: i64 = 260686004
+pub let REL_PROCEDURE_SITE: i64 = 363704007
+pub let REL_OCCURRENCE: i64 = 246454002
+
+// Curated part-of attribute id for the EL+ mini-closure demos.  The
+// international SNOMED CT release does not distribute part-of as a
+// defining attribute, but the classic EL+ literature (Baader et al.,
+// finding-site o part-of <= finding-site) relies on it, so this
+// module-local id reserves a role for it.  It is not a real SCTID.
+pub let REL_PART_OF: i64 = 900000000000001
 
 // Root concepts
-let CONCEPT_ROOT: i64 = 138875005
-let CONCEPT_CLINICAL_FINDING: i64 = 404684003
-let CONCEPT_PROCEDURE: i64 = 71388002
-let CONCEPT_BODY_STRUCTURE: i64 = 123037004
-let CONCEPT_ORGANISM: i64 = 410607006
-let CONCEPT_SUBSTANCE: i64 = 105590001
-let CONCEPT_PHARMACEUTICAL_PRODUCT: i64 = 373873005
-let CONCEPT_OBSERVABLE_ENTITY: i64 = 363787002
-let CONCEPT_EVENT: i64 = 272379006
-let CONCEPT_QUALIFIER_VALUE: i64 = 362981000
+pub let CONCEPT_ROOT: i64 = 138875005
+pub let CONCEPT_CLINICAL_FINDING: i64 = 404684003
+pub let CONCEPT_PROCEDURE: i64 = 71388002
+pub let CONCEPT_BODY_STRUCTURE: i64 = 123037004
+pub let CONCEPT_ORGANISM: i64 = 410607006
+pub let CONCEPT_SUBSTANCE: i64 = 105590001
+pub let CONCEPT_PHARMACEUTICAL_PRODUCT: i64 = 373873005
+pub let CONCEPT_OBSERVABLE_ENTITY: i64 = 363787002
+pub let CONCEPT_EVENT: i64 = 272379006
+pub let CONCEPT_QUALIFIER_VALUE: i64 = 362981000
 
 // Semantic tags
-let TAG_DISORDER: i64 = 1
-let TAG_FINDING: i64 = 2
-let TAG_PROCEDURE: i64 = 3
-let TAG_BODY_STRUCTURE: i64 = 4
-let TAG_SUBSTANCE: i64 = 5
-let TAG_PRODUCT: i64 = 6
-let TAG_ORGANISM: i64 = 7
-let TAG_OBSERVABLE: i64 = 8
+pub let TAG_DISORDER: i64 = 1
+pub let TAG_FINDING: i64 = 2
+pub let TAG_PROCEDURE: i64 = 3
+pub let TAG_BODY_STRUCTURE: i64 = 4
+pub let TAG_SUBSTANCE: i64 = 5
+pub let TAG_PRODUCT: i64 = 6
+pub let TAG_ORGANISM: i64 = 7
+pub let TAG_OBSERVABLE: i64 = 8
 
 // ============================================================================
 // SNOMED CONCEPT ID
 // ============================================================================
 
 // SNOMED CT Identifier
-struct SCTID {
+pub struct SCTID {
     id: i64,
     namespace_id: i64,
 }
 
-fn sctid_new(id: i64) -> SCTID {
+pub fn sctid_new(id: i64) -> SCTID {
     SCTID {
         id: id,
         namespace_id: NS_SNOMED,
     }
 }
 
-fn sctid_equals(a: &SCTID, b: &SCTID) -> bool {
-    a.id == b.id
-}
+impl SCTID {
+    pub fn equals(self: &SCTID, other: &SCTID) -> bool {
+        self.id == other.id
+    }
 
-fn sctid_clone(s: &SCTID) -> SCTID {
-    SCTID {
-        id: s.id,
-        namespace_id: s.namespace_id,
+    pub fn clone(self: &SCTID) -> SCTID {
+        SCTID {
+            id: self.id,
+            namespace_id: self.namespace_id,
+        }
     }
 }
 
 // Check if valid SNOMED CT ID (basic validation)
-fn sctid_is_valid(id: i64) -> bool {
+pub fn sctid_is_valid(id: i64) -> bool {
     // SCTID must be positive and have appropriate length
     id > 0 && id < 10000000000000000
 }
@@ -84,7 +136,7 @@ fn sctid_is_valid(id: i64) -> bool {
 // ============================================================================
 
 // SNOMED concept wrapper
-struct SNOMEDConcept {
+pub struct SNOMEDConcept {
     sctid: SCTID,
     fsn_id: i64,  // Fully Specified Name string ID
     preferred_term_id: i64,
@@ -93,7 +145,7 @@ struct SNOMEDConcept {
     is_active: bool,
 }
 
-fn snomed_concept_new(id: i64) -> SNOMEDConcept {
+pub fn snomed_concept_new(id: i64) -> SNOMEDConcept {
     SNOMEDConcept {
         sctid: sctid_new(id),
         fsn_id: 0,
@@ -104,7 +156,7 @@ fn snomed_concept_new(id: i64) -> SNOMEDConcept {
     }
 }
 
-fn snomed_concept_with_tag(id: i64, tag: i64) -> SNOMEDConcept {
+pub fn snomed_concept_with_tag(id: i64, tag: i64) -> SNOMEDConcept {
     SNOMEDConcept {
         sctid: sctid_new(id),
         fsn_id: 0,
@@ -120,7 +172,7 @@ fn snomed_concept_with_tag(id: i64, tag: i64) -> SNOMEDConcept {
 // ============================================================================
 
 // SNOMED relationship between concepts
-struct SNOMEDRelationship {
+pub struct SNOMEDRelationship {
     source_id: i64,
     type_id: i64,
     destination_id: i64,
@@ -128,7 +180,7 @@ struct SNOMEDRelationship {
     is_active: bool,
 }
 
-fn snomed_relationship_new(source: i64, rel_type: i64, dest: i64) -> SNOMEDRelationship {
+pub fn snomed_relationship_new(source: i64, rel_type: i64, dest: i64) -> SNOMEDRelationship {
     SNOMEDRelationship {
         source_id: source,
         type_id: rel_type,
@@ -138,283 +190,649 @@ fn snomed_relationship_new(source: i64, rel_type: i64, dest: i64) -> SNOMEDRelat
     }
 }
 
-fn snomed_relationship_isa(source: i64, dest: i64) -> SNOMEDRelationship {
+pub fn snomed_relationship_isa(source: i64, dest: i64) -> SNOMEDRelationship {
     snomed_relationship_new(source, REL_IS_A, dest)
 }
 
-// Check if this is an IS-A relationship
-fn is_isa_relationship(rel: &SNOMEDRelationship) -> bool {
-    rel.type_id == REL_IS_A
+impl SNOMEDRelationship {
+    // Check if this is an IS-A relationship
+    pub fn is_isa(self: &SNOMEDRelationship) -> bool {
+        self.type_id == REL_IS_A
+    }
 }
 
 // ============================================================================
 // SNOMED HIERARCHY
 // ============================================================================
 
-// Entry in SNOMED hierarchy
-struct SNOMEDHierarchyEntry {
+// Maximum number of parents / children stored per hierarchy entry.
+pub let SNOMED_MAX_PARENTS: i64 = 8
+// Maximum number of entries in a SNOMEDHierarchy.
+pub let SNOMED_MAXH: i64 = 64
+
+// Entry in SNOMED hierarchy (fixed-capacity: dynamic-array struct fields
+// do not compile on the current Madaros lane — see the repair note at
+// the top of this file).
+pub struct SNOMEDHierarchyEntry {
     concept_id: i64,
-    parent_ids: [i64],
-    child_ids: [i64],
+    parent_ids: [i64; 8],
+    n_parents: i64,
+    child_ids: [i64; 8],
+    n_children: i64,
     depth: i64,
 }
 
-fn snomed_hierarchy_entry_new(id: i64) -> SNOMEDHierarchyEntry {
+pub fn snomed_hierarchy_entry_new(id: i64) -> SNOMEDHierarchyEntry {
     SNOMEDHierarchyEntry {
         concept_id: id,
-        parent_ids: [],
-        child_ids: [],
+        parent_ids: [0; 8],
+        n_parents: 0,
+        child_ids: [0; 8],
+        n_children: 0,
         depth: 0,
     }
 }
 
-// Simple SNOMED subsumption checker
-struct SNOMEDHierarchy {
-    entries: [SNOMEDHierarchyEntry],
-}
-
-fn snomed_hierarchy_new() -> SNOMEDHierarchy {
-    SNOMEDHierarchy {
-        entries: [],
-    }
-}
-
-fn snomed_hierarchy_add(h: &SNOMEDHierarchy, entry: SNOMEDHierarchyEntry) {
-    h.entries.push(entry)
-}
-
-fn snomed_hierarchy_find(h: &SNOMEDHierarchy, concept_id: i64) -> i64 {
-    let n = h.entries.len()
-    for i in 0..n {
-        if h.entries[i].concept_id == concept_id {
-            return i as i64
+impl SNOMEDHierarchyEntry {
+    // Append a parent id (no-op when full).
+    pub fn add_parent(self: &!SNOMEDHierarchyEntry, parent: i64) with Mut {
+        if self.n_parents < SNOMED_MAX_PARENTS {
+            self.parent_ids[self.n_parents] = parent
+            self.n_parents = self.n_parents + 1
         }
     }
-    0 - 1
+
+    // Append a child id (no-op when full).
+    pub fn add_child(self: &!SNOMEDHierarchyEntry, child: i64) with Mut {
+        if self.n_children < SNOMED_MAX_PARENTS {
+            self.child_ids[self.n_children] = child
+            self.n_children = self.n_children + 1
+        }
+    }
 }
 
-// Check if concept A is ancestor of concept B
-fn snomed_is_ancestor(h: &SNOMEDHierarchy, ancestor_id: i64, descendant_id: i64) -> bool {
-    let desc_idx = snomed_hierarchy_find(h, descendant_id)
-    if desc_idx < 0 {
-        return false
-    }
+// Simple SNOMED subsumption checker.  Parallel arrays instead of an
+// array of entries: arrays of structs miscompile on the current lane.
+// Row `i` stores entry ids[i] with parents parents[i*8 .. i*8+n-1].
+pub struct SNOMEDHierarchy {
+    ids: [i64; 64],
+    depths: [i64; 64],
+    n_parents: [i64; 64],
+    parents: [i64; 512],
+    n: i64,
+}
 
-    // Check parents recursively (BFS-style with limited depth)
-    var to_check: [i64] = []
-    let n_parents = h.entries[desc_idx as i64].parent_ids.len()
-    for i in 0..n_parents {
-        to_check.push(h.entries[desc_idx as i64].parent_ids[i])
+pub fn snomed_hierarchy_new() -> SNOMEDHierarchy {
+    SNOMEDHierarchy {
+        ids: [0; 64],
+        depths: [0; 64],
+        n_parents: [0; 64],
+        parents: [0; 512],
+        n: 0,
     }
+}
 
-    var checked = 0
-    while checked < to_check.len() && checked < 1000 {
-        let current = to_check[checked]
-        if current == ancestor_id {
+// Membership test over a fixed array prefix (local arrays only).
+fn snomed_i64_contains(xs: &[i64; 64], n: i64, x: i64) -> bool {
+    var i: i64 = 0
+    while i < n {
+        if xs[i] == x {
             return true
         }
-
-        let current_idx = snomed_hierarchy_find(h, current)
-        if current_idx >= 0 {
-            let n_p = h.entries[current_idx as i64].parent_ids.len()
-            for i in 0..n_p {
-                to_check.push(h.entries[current_idx as i64].parent_ids[i])
-            }
-        }
-
-        checked = checked + 1
+        i = i + 1
     }
-
     false
 }
 
-// ============================================================================
-// CLINICAL UTILITIES
-// ============================================================================
-
-// Check if concept is a disorder (disease/condition)
-fn is_disorder(concept: &SNOMEDConcept) -> bool {
-    concept.semantic_tag == TAG_DISORDER
-}
-
-// Check if concept is a finding
-fn is_finding(concept: &SNOMEDConcept) -> bool {
-    concept.semantic_tag == TAG_FINDING || concept.semantic_tag == TAG_DISORDER
-}
-
-// Check if concept is a procedure
-fn is_procedure(concept: &SNOMEDConcept) -> bool {
-    concept.semantic_tag == TAG_PROCEDURE
-}
-
-// Check if concept is a body structure
-fn is_body_structure(concept: &SNOMEDConcept) -> bool {
-    concept.semantic_tag == TAG_BODY_STRUCTURE
-}
-
-// Check if concept is a substance
-fn is_substance(concept: &SNOMEDConcept) -> bool {
-    concept.semantic_tag == TAG_SUBSTANCE
-}
-
-// Check if concept is a product
-fn is_product(concept: &SNOMEDConcept) -> bool {
-    concept.semantic_tag == TAG_PRODUCT
-}
-
-// ============================================================================
-// SEMANTIC SIMILARITY
-// ============================================================================
-
-// Find lowest common ancestor depth
-fn find_lca_depth(h: &SNOMEDHierarchy, id1: i64, id2: i64) -> i64 {
-    // Get ancestors of both
-    var ancestors1: [i64] = []
-    var ancestors2: [i64] = []
-
-    // Collect ancestors of id1
-    let idx1 = snomed_hierarchy_find(h, id1)
-    if idx1 >= 0 {
-        var queue: [i64] = []
-        queue.push(id1)
-        var processed = 0
-        while processed < queue.len() && processed < 100 {
-            ancestors1.push(queue[processed])
-            let curr_idx = snomed_hierarchy_find(h, queue[processed])
-            if curr_idx >= 0 {
-                let n_p = h.entries[curr_idx as i64].parent_ids.len()
-                for i in 0..n_p {
-                    queue.push(h.entries[curr_idx as i64].parent_ids[i])
-                }
+impl SNOMEDHierarchy {
+    // Copy an entry into the hierarchy (no-op when full).
+    pub fn add(self: &!SNOMEDHierarchy, entry: &SNOMEDHierarchyEntry) with Mut {
+        if self.n < SNOMED_MAXH {
+            let i = self.n
+            self.ids[i] = entry.concept_id
+            self.depths[i] = entry.depth
+            self.n_parents[i] = entry.n_parents
+            var k: i64 = 0
+            while k < entry.n_parents {
+                self.parents[i * SNOMED_MAX_PARENTS + k] = entry.parent_ids[k]
+                k = k + 1
             }
-            processed = processed + 1
+            self.n = self.n + 1
         }
     }
 
-    // Collect ancestors of id2
-    let idx2 = snomed_hierarchy_find(h, id2)
-    if idx2 >= 0 {
-        var queue: [i64] = []
-        queue.push(id2)
-        var processed = 0
-        while processed < queue.len() && processed < 100 {
-            ancestors2.push(queue[processed])
-            let curr_idx = snomed_hierarchy_find(h, queue[processed])
-            if curr_idx >= 0 {
-                let n_p = h.entries[curr_idx as i64].parent_ids.len()
-                for i in 0..n_p {
-                    queue.push(h.entries[curr_idx as i64].parent_ids[i])
-                }
+    // Row index of a concept id; -1 if absent.
+    pub fn find(self: &SNOMEDHierarchy, concept_id: i64) -> i64 {
+        var i: i64 = 0
+        while i < self.n {
+            if self.ids[i] == concept_id {
+                return i
             }
-            processed = processed + 1
+            i = i + 1
         }
+        0 - 1
     }
 
-    // Find common ancestor with maximum depth
-    var max_depth: i64 = 0
-    let n1 = ancestors1.len()
-    let n2 = ancestors2.len()
-    for i in 0..n1 {
-        for j in 0..n2 {
-            if ancestors1[i] == ancestors2[j] {
-                let anc_idx = snomed_hierarchy_find(h, ancestors1[i])
-                if anc_idx >= 0 {
-                    let depth = h.entries[anc_idx as i64].depth
-                    if depth > max_depth {
-                        max_depth = depth
+    // Check if concept A is an ancestor of concept B (non-reflexive:
+    // the descendant's stated parents and their ancestors are searched).
+    pub fn is_ancestor(self: &SNOMEDHierarchy, ancestor_id: i64, descendant_id: i64) -> bool with Mut {
+        let desc_idx = self.find(descendant_id)
+        if desc_idx < 0 {
+            return false
+        }
+
+        // BFS over parents with a fixed queue
+        var queue: [i64; 64] = [0; 64]
+        var head: i64 = 0
+        var tail: i64 = 0
+        var k: i64 = 0
+        while k < self.n_parents[desc_idx] {
+            queue[tail] = self.parents[desc_idx * SNOMED_MAX_PARENTS + k]
+            tail = tail + 1
+            k = k + 1
+        }
+
+        while head < tail {
+            let current = queue[head]
+            head = head + 1
+            if current == ancestor_id {
+                return true
+            }
+
+            let current_idx = self.find(current)
+            if current_idx >= 0 {
+                k = 0
+                while k < self.n_parents[current_idx] {
+                    let p = self.parents[current_idx * SNOMED_MAX_PARENTS + k]
+                    if !snomed_i64_contains(&queue, tail, p) && tail < 64 {
+                        queue[tail] = p
+                        tail = tail + 1
+                    }
+                    k = k + 1
+                }
+            }
+        }
+
+        false
+    }
+
+    // Collect the ancestor ids of `id` (including `id` itself) by BFS
+    // over parents; writes up to 64 ids into `out`, returns the count.
+    pub fn collect_ancestors(self: &SNOMEDHierarchy, id: i64, out: &![i64; 64]) -> i64 with Mut {
+        var n: i64 = 0
+        var queue: [i64; 64] = [0; 64]
+        var head: i64 = 0
+        var tail: i64 = 0
+        queue[tail] = id
+        tail = tail + 1
+        while head < tail && n < 64 {
+            let cur = queue[head]
+            head = head + 1
+            if !snomed_i64_contains(out, n, cur) {
+                out[n] = cur
+                n = n + 1
+            }
+            let ci = self.find(cur)
+            if ci >= 0 {
+                var k: i64 = 0
+                while k < self.n_parents[ci] {
+                    let p = self.parents[ci * SNOMED_MAX_PARENTS + k]
+                    if !snomed_i64_contains(&queue, tail, p) && tail < 64 {
+                        queue[tail] = p
+                        tail = tail + 1
+                    }
+                    k = k + 1
+                }
+            }
+        }
+        n
+    }
+
+    // Lowest common ancestor depth (max stored depth over common
+    // ancestors, self included).
+    pub fn lca_depth(self: &SNOMEDHierarchy, id1: i64, id2: i64) -> i64 with Mut {
+        var ancestors1: [i64; 64] = [0; 64]
+        var ancestors2: [i64; 64] = [0; 64]
+
+        let n1 = self.collect_ancestors(id1, &!ancestors1)
+        let n2 = self.collect_ancestors(id2, &!ancestors2)
+
+        var max_depth: i64 = 0
+        var i: i64 = 0
+        while i < n1 {
+            var j: i64 = 0
+            while j < n2 {
+                if ancestors1[i] == ancestors2[j] {
+                    let anc_idx = self.find(ancestors1[i])
+                    if anc_idx >= 0 {
+                        if self.depths[anc_idx] > max_depth {
+                            max_depth = self.depths[anc_idx]
+                        }
                     }
                 }
+                j = j + 1
             }
+            i = i + 1
+        }
+
+        max_depth
+    }
+
+    // Wu-Palmer similarity between two SNOMED concepts.
+    pub fn similarity(self: &SNOMEDHierarchy, id1: i64, id2: i64) -> f64 with Mut, Div {
+        if id1 == id2 {
+            return 1.0
+        }
+
+        let idx1 = self.find(id1)
+        let idx2 = self.find(id2)
+
+        if idx1 < 0 || idx2 < 0 {
+            return 0.0
+        }
+
+        let depth1 = self.depths[idx1] as f64
+        let depth2 = self.depths[idx2] as f64
+        let lca = self.lca_depth(id1, id2) as f64
+
+        if depth1 + depth2 <= 0.0 {
+            return 0.0
+        }
+
+        (2.0 * lca) / (depth1 + depth2)
+    }
+}
+
+// ============================================================================
+// EL+ MINI-CLOSURE ADAPTER (dense variant of ontology::elplus)
+// ============================================================================
+//
+// Bridges the SNOMED structures above onto the verified role-aware EL+
+// closure: SNOMEDHierarchyEntry ids and SNOMEDRelationship triples are
+// interned into the elplus dense concept table, is-a relationships seed
+// the subsumption matrix, attribute relationships seed existential
+// restrictions, and role hierarchy / composition axioms configure the
+// role layer.  `close` runs elplus_role_closure and the dense
+// elplus_fixpoint; the query methods are O(1) accessors over the closed
+// matrices via elplus_subsumes_dense / elplus_edge_dense.
+//
+// Concept universe layout (ids):
+//   0        top (ckind 1), sctid_of[0] = top SCTID
+//   1..32    atoms (ckind 0), sctid_of[id] = concept SCTID
+//   33..63   existentials (ckind 3), interned on demand
+// Atoms and existentials occupy SEPARATE id ranges so atom ids stay
+// contiguous (1..na) no matter how additions interleave — find_atom and
+// the role-target scan rely on that contiguity.
+// Fillers range over the whole interned universe (nb = nc at close
+// time): the round-8 demo (examples/ontology_elplus_closure_demo.sio)
+// treats TBox-mentioned compounds as base concepts, and existential
+// monotonicity is sound for compound fillers, so this prunes nothing
+// that the stated axioms can derive.
+
+// Maximum stated subsumption edges the adapter stages before closing.
+pub let SNOMED_ELPLUS_MAX_STATED: i64 = 64
+// First existential concept id (atoms live below it).
+pub let SNOMED_ELPLUS_EX_BASE: i64 = 33
+
+// Role-aware EL+ closure over a curated SNOMED fragment.
+pub struct SNOMEDElplus {
+    // concept table (elplus dense layout)
+    ckind: [i64; 64],
+    carg1: [i64; 64],
+    carg2: [i64; 64],
+    exid: [i64; 512],
+    // interning side tables
+    sctid_of: [i64; 64],
+    role_type: [i64; 8],
+    // stated subsumption edges, replayed onto s after elplus_seed
+    stated_a: [i64; 64],
+    stated_b: [i64; 64],
+    // composition chains ch1[k] o ch2[k] <= ch3[k]
+    ch1: [i64; 8],
+    ch2: [i64; 8],
+    ch3: [i64; 8],
+    // closure matrices
+    s: [bool; 4096],
+    r: [bool; 32768],
+    rclos: [bool; 64],
+    nc: i64,
+    na: i64,
+    nex: i64,
+    nr: i64,
+    n_stated: i64,
+    nchain: i64,
+    top: i64,
+    rounds: i64,
+}
+
+impl SNOMEDElplus {
+    // New adapter state: top interned as concept 0, everything else empty.
+    pub fn snomed_elplus_new(top_sctid: i64) -> SNOMEDElplus with Mut {
+        var c = SNOMEDElplus {
+            ckind: [0; 64],
+            carg1: [0; 64],
+            carg2: [0; 64],
+            exid: [0; 512],
+            sctid_of: [0; 64],
+            role_type: [0; 8],
+            stated_a: [0; 64],
+            stated_b: [0; 64],
+            ch1: [0; 8],
+            ch2: [0; 8],
+            ch3: [0; 8],
+            s: [false; 4096],
+            r: [false; 32768],
+            rclos: [false; 64],
+            nc: 1,
+            na: 0,
+            nex: 0,
+            nr: 0,
+            n_stated: 0,
+            nchain: 0,
+            top: 0,
+            rounds: 0,
+        }
+        c.ckind[0] = 1
+        c.sctid_of[0] = top_sctid
+        var i: i64 = 0
+        while i < 512 {
+            c.exid[i] = 0 - 1
+            i = i + 1
+        }
+        c
+    }
+
+    // Look up an interned atom by SCTID; -1 if absent.  (The top
+    // concept is id 0 and is matched separately where accepted.)
+    pub fn find_atom(self: &SNOMEDElplus, sctid: i64) -> i64 {
+        var i: i64 = 1
+        while i <= self.na {
+            if self.sctid_of[i] == sctid {
+                return i
+            }
+            i = i + 1
+        }
+        0 - 1
+    }
+
+    // Intern an atom SCTID; returns its concept id (existing or new, or
+    // -1 when the 32-atom capacity is exhausted).  Atom ids are always
+    // 1 + na (contiguous; see the section header).
+    pub fn intern_atom(self: &!SNOMEDElplus, sctid: i64) -> i64 with Mut {
+        let found = self.find_atom(sctid)
+        if found >= 0 {
+            return found
+        }
+        if sctid == self.sctid_of[0] {
+            return self.top
+        }
+        let id = self.na + 1
+        if id >= SNOMED_ELPLUS_EX_BASE {
+            return 0 - 1
+        }
+        self.ckind[id] = 0
+        self.carg1[id] = id
+        self.sctid_of[id] = sctid
+        self.na = self.na + 1
+        if self.nc < id + 1 {
+            self.nc = id + 1
+        }
+        id
+    }
+
+    // Look up an interned role by relationship type SCTID; -1 if absent.
+    pub fn find_role(self: &SNOMEDElplus, type_sctid: i64) -> i64 {
+        var i: i64 = 0
+        while i < self.nr {
+            if self.role_type[i] == type_sctid {
+                return i
+            }
+            i = i + 1
+        }
+        0 - 1
+    }
+
+    // Intern a relationship type as a role; returns its role index.
+    pub fn intern_role(self: &!SNOMEDElplus, type_sctid: i64) -> i64 with Mut {
+        let found = self.find_role(type_sctid)
+        if found >= 0 {
+            return found
+        }
+        if self.nr >= 8 {
+            return 0 - 1
+        }
+        let id = self.nr
+        self.role_type[id] = type_sctid
+        self.nr = self.nr + 1
+        id
+    }
+
+    // Intern the existential (type_sctid, filler_sctid); returns its
+    // concept id.  The filler is interned as an atom first.
+    // Existential ids are SNOMED_ELPLUS_EX_BASE + nex (see the section
+    // header).
+    pub fn snomed_elplus_intern_ex(self: &!SNOMEDElplus, type_sctid: i64, filler_sctid: i64) -> i64 with Mut {
+        let role = self.intern_role(type_sctid)
+        let f = self.intern_atom(filler_sctid)
+        if role < 0 || f < 0 {
+            return 0 - 1
+        }
+        let existing = self.exid[role * 64 + f]
+        if existing >= 0 {
+            return existing
+        }
+        let id = SNOMED_ELPLUS_EX_BASE + self.nex
+        if id >= 64 {
+            return 0 - 1
+        }
+        self.ckind[id] = 3
+        self.carg1[id] = role
+        self.carg2[id] = f
+        self.exid[role * 64 + f] = id
+        self.nex = self.nex + 1
+        if self.nc < id + 1 {
+            self.nc = id + 1
+        }
+        id
+    }
+
+    // Stage a stated subsumption edge (replayed onto s by close()).
+    pub fn stage(self: &!SNOMEDElplus, a: i64, b: i64) with Mut {
+        if a >= 0 && b >= 0 && self.n_stated < SNOMED_ELPLUS_MAX_STATED {
+            self.stated_a[self.n_stated] = a
+            self.stated_b[self.n_stated] = b
+            self.n_stated = self.n_stated + 1
         }
     }
 
-    max_depth
-}
-
-// Wu-Palmer similarity between two SNOMED concepts
-fn snomed_similarity(h: &SNOMEDHierarchy, id1: i64, id2: i64) -> f64 {
-    if id1 == id2 {
-        return 1.0
+    // Add an is-a inclusion child <= parent (SCTIDs; interned on
+    // demand).
+    pub fn snomed_elplus_add_isa(self: &!SNOMEDElplus, child_sctid: i64, parent_sctid: i64) with Mut {
+        let a = self.intern_atom(child_sctid)
+        let b = self.intern_atom(parent_sctid)
+        self.stage(a, b)
     }
 
-    let idx1 = snomed_hierarchy_find(h, id1)
-    let idx2 = snomed_hierarchy_find(h, id2)
-
-    if idx1 < 0 || idx2 < 0 {
-        return 0.0
+    // Add a SNOMED relationship: is-a seeds a subsumption edge, any
+    // other attribute type seeds source <= ex type.destination.
+    pub fn snomed_elplus_add_rel(self: &!SNOMEDElplus, rel: &SNOMEDRelationship) with Mut {
+        if rel.type_id == REL_IS_A {
+            self.snomed_elplus_add_isa(rel.source_id, rel.destination_id)
+        } else {
+            let a = self.intern_atom(rel.source_id)
+            let x = self.snomed_elplus_intern_ex(rel.type_id, rel.destination_id)
+            self.stage(a, x)
+        }
     }
 
-    let depth1 = h.entries[idx1 as i64].depth as f64
-    let depth2 = h.entries[idx2 as i64].depth as f64
-    let lca_depth = find_lca_depth(h, id1, id2) as f64
-
-    if depth1 + depth2 <= 0.0 {
-        return 0.0
+    // Add a hierarchy entry: interns its concept id and stages an is-a
+    // edge to every stored parent.
+    pub fn snomed_elplus_add_entry(self: &!SNOMEDElplus, entry: &SNOMEDHierarchyEntry) with Mut {
+        self.intern_atom(entry.concept_id)
+        var k: i64 = 0
+        while k < entry.n_parents {
+            self.snomed_elplus_add_isa(entry.concept_id, entry.parent_ids[k])
+            k = k + 1
+        }
     }
 
-    (2.0 * lca_depth) / (depth1 + depth2)
-}
+    // State a role-hierarchy inclusion sub <= sup (relationship type
+    // SCTIDs); seeded into rclos and saturated by close().
+    pub fn snomed_elplus_add_role_sub(self: &!SNOMEDElplus, sub_type: i64, sup_type: i64) with Mut {
+        let r1 = self.intern_role(sub_type)
+        let r2 = self.intern_role(sup_type)
+        if r1 >= 0 && r2 >= 0 {
+            self.rclos[r1 * 8 + r2] = true
+        }
+    }
 
-// ============================================================================
-// TESTS
-// ============================================================================
+    // State a composition chain t1 o t2 <= t3 (relationship type
+    // SCTIDs).
+    pub fn snomed_elplus_add_role_chain(self: &!SNOMEDElplus, t1: i64, t2: i64, t3: i64) with Mut {
+        if self.nchain < 8 {
+            let r1 = self.intern_role(t1)
+            let r2 = self.intern_role(t2)
+            let r3 = self.intern_role(t3)
+            self.ch1[self.nchain] = r1
+            self.ch2[self.nchain] = r2
+            self.ch3[self.nchain] = r3
+            self.nchain = self.nchain + 1
+        }
+    }
 
-fn test_sctid() -> bool {
-    let id = sctid_new(44054006)  // Type 2 diabetes mellitus
-    sctid_is_valid(id.id) && id.namespace_id == NS_SNOMED
-}
+    // Close the adapter: saturate the role hierarchy, seed the
+    // subsumption matrix (reflexivity + top), replay the stated edges,
+    // and iterate the dense 8-rule fixpoint.  Returns the number of
+    // rounds taken.  nb = nc (see the section header).
+    //
+    // The fixpoint runs on LOCAL arrays copied out of self and written
+    // back cell by cell: passing struct fields as `&!` arguments
+    // miscompiles on the current Madaros lane (the z16/z17 probes,
+    // 2026-08), while the same call on locals is exact (z24).  Goes
+    // through elplus_fixpoint_packed because imported calls with more
+    // than 8 parameters fail native codegen from non-main callers.
+    pub fn snomed_elplus_close(self: &!SNOMEDElplus) -> i64 with Mut, Div, Panic {
+        var s: [bool; 4096] = [false; 4096]
+        var r: [bool; 32768] = [false; 32768]
+        var rclos: [bool; 64] = [false; 64]
+        var pack: [i64; 704] = [0; 704]
+        var chains: [i64; 24] = [0; 24]
+        var dims: [i64; 4] = [0; 4]
+        var k: i64 = 0
+        while k < 64 {
+            pack[k] = self.ckind[k]
+            pack[64 + k] = self.carg1[k]
+            pack[128 + k] = self.carg2[k]
+            rclos[k] = self.rclos[k]
+            k = k + 1
+        }
+        k = 0
+        while k < 512 {
+            pack[192 + k] = self.exid[k]
+            k = k + 1
+        }
+        k = 0
+        while k < 8 {
+            chains[k] = self.ch1[k]
+            chains[8 + k] = self.ch2[k]
+            chains[16 + k] = self.ch3[k]
+            k = k + 1
+        }
+        dims[0] = self.nchain
+        dims[1] = self.nc
+        dims[2] = self.nc
+        dims[3] = self.nr
+        elplus_role_closure(&!rclos, self.nr)
+        elplus_seed(&!s, self.nc, self.top)
+        k = 0
+        while k < self.n_stated {
+            s[self.stated_a[k] * 64 + self.stated_b[k]] = true
+            k = k + 1
+        }
+        let rounds = elplus_fixpoint_packed(&!s, &!r, &pack, &rclos, &chains, &dims)
+        k = 0
+        while k < 4096 {
+            self.s[k] = s[k]
+            k = k + 1
+        }
+        k = 0
+        while k < 32768 {
+            self.r[k] = r[k]
+            k = k + 1
+        }
+        k = 0
+        while k < 64 {
+            self.rclos[k] = rclos[k]
+            k = k + 1
+        }
+        self.rounds = rounds
+        rounds
+    }
 
-fn test_snomed_concept() -> bool {
-    let concept = snomed_concept_with_tag(44054006, TAG_DISORDER)
-    is_disorder(&concept) && concept.is_active
-}
+    // Number of interned concepts (atoms + top + existentials).
+    pub fn snomed_elplus_nc(self: &SNOMEDElplus) -> i64 {
+        self.nc
+    }
 
-fn test_relationship() -> bool {
-    let rel = snomed_relationship_isa(44054006, 73211009)  // T2DM is-a Diabetes
-    is_isa_relationship(&rel) && rel.destination_id == 73211009
-}
+    // Number of fixpoint rounds taken by the last close().
+    pub fn snomed_elplus_rounds(self: &SNOMEDElplus) -> i64 {
+        self.rounds
+    }
 
-fn test_hierarchy() -> bool {
-    var h = snomed_hierarchy_new()
+    // Role-aware subsumption query over the closed matrix: does the
+    // concept with SCTID `sub_sctid` subsume to the concept with SCTID
+    // `sup_sctid`?  (Both must be interned atoms, or the top SCTID.)
+    pub fn snomed_subsumes_elplus(self: &SNOMEDElplus, sub_sctid: i64, sup_sctid: i64) -> bool with Div, Panic {
+        var a = self.find_atom(sub_sctid)
+        var b = self.find_atom(sup_sctid)
+        if sub_sctid == self.sctid_of[0] {
+            a = self.top
+        }
+        if sup_sctid == self.sctid_of[0] {
+            b = self.top
+        }
+        if a < 0 || b < 0 {
+            return false
+        }
+        elplus_subsumes_dense(&self.s, a, b)
+    }
 
-    // Create simple hierarchy: DM (73211009) <- T2DM (44054006)
-    var dm_entry = snomed_hierarchy_entry_new(73211009)
-    dm_entry.depth = 1
-    snomed_hierarchy_add(&h, dm_entry)
+    // Existential-target subsumption query: does the concept with SCTID
+    // `sub_sctid` subsume to ex type_sctid.filler_sctid in the closed
+    // matrix?  (The existential must have been interned; see
+    // snomed_elplus_intern_ex.)
+    pub fn snomed_subsumes_ex_elplus(self: &SNOMEDElplus, sub_sctid: i64, type_sctid: i64, filler_sctid: i64) -> bool with Div, Panic {
+        let a = self.find_atom(sub_sctid)
+        let role = self.find_role(type_sctid)
+        let f = self.find_atom(filler_sctid)
+        if a < 0 || role < 0 || f < 0 {
+            return false
+        }
+        let x = self.exid[role * 64 + f]
+        if x < 0 {
+            return false
+        }
+        elplus_subsumes_dense(&self.s, a, x)
+    }
 
-    var t2dm_entry = snomed_hierarchy_entry_new(44054006)
-    t2dm_entry.parent_ids.push(73211009)
-    t2dm_entry.depth = 2
-    snomed_hierarchy_add(&h, t2dm_entry)
-
-    // Check ancestry
-    snomed_is_ancestor(&h, 73211009, 44054006)
-}
-
-fn test_similarity() -> bool {
-    var h = snomed_hierarchy_new()
-
-    // Create hierarchy
-    var root = snomed_hierarchy_entry_new(138875005)
-    root.depth = 0
-    snomed_hierarchy_add(&h, root)
-
-    var dm = snomed_hierarchy_entry_new(73211009)
-    dm.parent_ids.push(138875005)
-    dm.depth = 1
-    snomed_hierarchy_add(&h, dm)
-
-    var t1dm = snomed_hierarchy_entry_new(46635009)
-    t1dm.parent_ids.push(73211009)
-    t1dm.depth = 2
-    snomed_hierarchy_add(&h, t1dm)
-
-    var t2dm = snomed_hierarchy_entry_new(44054006)
-    t2dm.parent_ids.push(73211009)
-    t2dm.depth = 2
-    snomed_hierarchy_add(&h, t2dm)
-
-    // T1DM and T2DM should have high similarity (both under DM)
-    let sim = snomed_similarity(&h, 46635009, 44054006)
-    sim > 0.5
+    // Derived role targets: writes the SCTIDs of every atom filler f
+    // with a derived edge (type_sctid, source, f) in the closed
+    // role-edge cube into `out` and returns their count.
+    pub fn snomed_role_targets_elplus(self: &SNOMEDElplus, source_sctid: i64, type_sctid: i64, out: &![i64; 64]) -> i64 with Mut, Div, Panic {
+        var n: i64 = 0
+        let a = self.find_atom(source_sctid)
+        let role = self.find_role(type_sctid)
+        if a < 0 || role < 0 {
+            return 0
+        }
+        var f: i64 = 1
+        while f <= self.na {
+            if elplus_edge_dense(&self.r, role, a, f) {
+                out[n] = self.sctid_of[f]
+                n = n + 1
+            }
+            f = f + 1
+        }
+        n
+    }
 }
