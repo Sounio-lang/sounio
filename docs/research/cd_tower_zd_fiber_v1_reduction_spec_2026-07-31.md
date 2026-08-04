@@ -2413,3 +2413,74 @@ route to it is one explicit sign identity plus a closed form the lane has carrie
 The `j`-ladder can stop; extending it re-measures §17.2.
 
 **(III) is still reduced, not proven.** (d) and V1 untouched.
+
+## §40 — The annihilation graph IS the zero-divisor graph, and `A_σ`'s sign is the annihilating sign (`W43`, 2026-08-04)
+
+The prior-art scan (§3A.4 of `prior_art_k3_signed_switching_2026-08-04.md`) left the lane owing a
+definitional check: Zhilina (IJAC 31(4), 2021) states that for the **main sequence** the zero-divisor
+graph coincides with the orthogonality graph, so if the lane's object is that graph, its *support*
+is a named, studied thing. It is — and the check also gives the signature an algebraic meaning it
+did not have before.
+
+### 40.1 What a vertex is
+
+`A_σ` is indexed by `l ∈ [1, 2^(n−1))` with `hi(l) = l ⊕ L`, `L = Llo | 2^(n−1)`. So a vertex is a
+**pencil element** `x_l = e_l + ε_l·e_(l⊕L)` — a two-term element whose two indices XOR to the label.
+(Moreno's opening example is of exactly this shape: `x = e₁ + e₁₀`, `y = e₁₅ − e₄`, and
+`1⊕10 = 15⊕4 = 11`.)
+
+### 40.2 The identification is a theorem, not a measurement
+
+```
+x_l x_y = [ σ(l,y)   + ε_l ε_y σ(l⊕L, y⊕L) ] · e_(l⊕y)
+        + [ ε_y σ(l, y⊕L) + ε_l σ(l⊕L, y) ] · e_(l⊕y⊕L)
+```
+
+The first bracket vanishes iff `ε_l ε_y = −P1(l,y)`; the second iff `ε_l ε_y = −P3(l,y)`. So
+
+> **`x_l x_y = 0` for some choice of relative sign ⟺ `P1 = P3`, and then the relative sign is
+> `ε_l ε_y = −P1(l,y) = A_σ(l,y)`.**
+
+`A_σ` demands `P1 = P3` **plus** the two symmetry clauses — and those are `P1_symm` and `P3_symm`,
+**proven ∀n in this file**. Hence `supp(A_σ) = {P1 = P3} =` the annihilation relation, by lemmas
+already in the tree.
+
+Two consequences, and the second is the one that changes how the object should be read:
+
+1. **The support is an induced subgraph of the Cayley–Dickson zero-divisor graph** — of the
+   orthogonality graph too, by Zhilina's coincidence for the main sequence — induced on the pencil
+   of two-term zero divisors with a **fixed XOR label**. It is not a new graph and must be cited as
+   theirs.
+2. **`A_σ`'s sign is not decoration: it is the relative sign that makes the product vanish.** So the
+   *signed* graph is the natural object here, and its **balance** has an algebraic reading:
+
+   > `A_σ` is balanced ⟺ the signs `ε_l` can be chosen **globally** so that every one of these
+   > products vanishes simultaneously. The frustration of `A_σ` is exactly the obstruction to a
+   > coherent choice.
+
+   §39.3's `A_σ(a,b) = −μ(a)μ(b)` for `W = 2^(n−2)` says the obstruction there is *total*: over ℝ a
+   global `ε` would need `ε_l = c·μ(l)` with `c² = −1`.
+
+### 40.3 Verification
+
+| clause | result |
+|---|---|
+| `C1` `sign_table_fast` really is CD basis multiplication, vs an **independent** doubling recursion | `n = 4,5,6` — **0 mismatches** |
+| `C2a` `x_l x_y = 0` by **real CD multiplication** vs `A_σ`, sedenions | 294 ordered pairs, 7 labels — **0 support, 0 sign mismatches**, and no pair annihilates for both relative signs |
+| `C2b` annihilation `⟺ P1 = P3` and `A_σ = −P1` on the support | `n = 5…8`, 2.33M entries over 236 labels — **0** |
+| `C3` at `n = 4` every label gives `K₆` minus the coset matching plus the isolated vertex `l = Llo` — the **octahedron** | **7 of 7** |
+
+`C3` is the point of contact with the published `n = 4` theory: 6 vertices, 4-regular, 12 edges, and
+non-adjacency exactly the coset pairing is the shape of the **double hexagon** that Guterman &
+Zhilina obtain from any pair of sedenion zero divisors (Zap. Nauchn. Sem. POMI **496** (2020) 61–86).
+Their theorem plausibly *is* our `n = 4` base case; asserting identity needs their definition read in
+full, which is still owed.
+
+### 40.4 What this does to the novelty ledger
+
+- **Not ours:** the underlying graph, at every level — it is the CD zero-divisor/orthogonality graph;
+  and its `n = 4` structure (double hexagons, components ↔ Fano lines) is Guterman–Zhilina 2020.
+- **Ours, on present evidence:** the **signature** `A_σ` and everything built on it — the switching
+  class, `tr(A²)`/`tr(A³)`, the fibre/seam classification, the ∀`n` results, and the deviation law.
+
+Reproduce: `python3 scripts/research/zd_annihilation_is_orthogonality_probe.py`.
