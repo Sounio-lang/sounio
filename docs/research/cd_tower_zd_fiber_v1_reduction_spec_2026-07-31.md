@@ -2174,3 +2174,57 @@ Neither is proven. But (2) is no longer a statement about an unbounded family: i
 `j`. **(III) is still reduced, not proven.** `tr(A³)`'s absolute closed form, (d) and V1 untouched.
 
 Reproduce: `python3 scripts/research/zd_v1_III_sign_defect_probe.py 7 8 9`.
+
+## §38 — The curvature sum, computed: `K_j` is a level-independent tensor and `Σ K_j = −1728·[j,3]₂` (`W41`, 2026-08-04)
+
+§37.4 left (III)'s open content as **one number per `j`**. That number is now computed for
+`j = 3, 4, 5`, and it comes with more structure than was asked for.
+
+Partition the vertices by their low `j+1` bits — `M = 2^(j+1)` classes, each of size
+`cls = 2^(n−j−2)` — and with `A` the seam's graph and `Bp = Φ*A_(τW)` the transported reference:
+
+```
+K_j(u,v,w) := [ tr(A_uv A_vw A_wu) − tr(Bp_uv Bp_vw Bp_wu) ] / cls³
+```
+
+| `j` | `Σ K_j` | `−1728·[j,3]₂` | flipped classes | values taken |
+|---|---|---|---|---|
+| 3 | `−1728` | `−1728·1` | `864` | `{0, −2}` |
+| 4 | `−25920` | `−1728·15` | `12960` | `{0, −2}` |
+| 5 | `−267840` | `−1728·155` | `133920` | `{0, −2}` |
+
+Four facts, all measured, `n = 7, 8, 9` (each `j` at every level where it exists):
+
+1. **`K_j` is level-independent — the whole tensor, entry by entry**, not merely its sum
+   (`np.array_equal` across consecutive levels, exact). This is the factorisation §37.3 predicted
+   and did not verify: `δ` really is `cls³ × (a fixed object on `(𝔽₂^(j+1))³`)`.
+2. **`K_j` takes only the values `0` and `−2`.** Every contributing class is a *single sign flip* —
+   there is no cancellation and no higher multiplicity to explain.
+3. **The number of flipped classes is exactly `864·[j choose 3]₂`.** The `q`-binomial is not an
+   artefact of the closed form; it counts them.
+4. **Every nonzero entry has `(u⊕v, v⊕w)` linearly independent** — the support sits inside the
+   non-degenerate triples, as the `Inj(𝔽₂³, ·)` reading of §33.3 predicted.
+
+Hence, assembled rather than fitted:
+
+```
+δ(n,j) = cls³ · Σ K_j = (2^(n−j−2))³ · (−1728) · [j choose 3]₂ = −27 · 8^(n−j) · [j choose 3]₂
+```
+
+verified against the measured `δ` at every `(j, n)` in the table.
+
+### 38.1 What is left
+
+The `n`-dependence of `δ` is now **structural**: it is `cls³`, the cube of the class size, and it is
+forced by `K_j` being level-independent. What remains open is one clause:
+
+> `Σ K_j = −1728·[j,3]₂` for **all** `j` — computed here for `j = 3, 4, 5`, not proven.
+
+`864 = 27·32` flips per 3-subspace is the shape to explain; the linear-independence of the support
+(fact 4) is the visible half of it. Note this is a statement about a **finite** object at each `j`,
+with no level parameter, so it is the first piece of (III) that is checkable by direct enumeration
+rather than by a family of measurements.
+
+**(III) is still reduced, not proven.** `tr(A³)`'s absolute closed form, (d) and V1 untouched.
+
+Reproduce: `python3 scripts/research/zd_v1_III_curvature_sum_probe.py`.
