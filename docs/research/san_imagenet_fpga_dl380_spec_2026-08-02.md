@@ -395,7 +395,27 @@ the worker script now bootstraps pip/torch/torchvision/tqdm into a temp
 user base, and the corpus snapshot is staged from the workspace so GPT
 legs do not depend on `docs/research/*.md` being present on the worker.
 
-### 13.6 Gap-closure notes (2026-08-04)
+### 13.6 Ongoing work: threshold ablation + CIFAR-100 proxy (2026-08-04)
+
+**Threshold ablation.** A Δ ablation is running on Slurm `gpu-orangefs`
+(jobs 8599–8607): Δ ∈ {0.35, 0.45, 0.55, 0.65, 0.75} for ResNet-50 and Δ ∈
+{0.25, 0.35, 0.45, 0.55} for ViT-large on CIFAR-10. The worker script and
+`submit.sh` were extended to forward `SAN_LARGE_DELTA_*`; the driver is
+`slurm-jobs/san-large-gpu/ablation_delta.sh`.
+
+**CIFAR-100 proxy.** The SAN large-architecture harness now supports
+`SAN_LARGE_DATASET=cifar100` (100 fine labels, generalized harm matrix, default
+τ lower than CIFAR-10). CIFAR-100 is being downloaded; once staged on
+`/orangefs/training/sounio/datasets/cifar-100-python` it will be submitted via
+`slurm-jobs/san-large-gpu/submit_cifar100.sh`.
+
+**Paper draft.** A systems paper draft is at
+`docs/papers/san_fpga_deployment_2026-08-04.md`. It was reviewed by hostile
+LLM-offload (Grok 4.5) and revised to frame the contribution as the measured
+SAN exit-audit / FLOP-metering kernel, to report the partial meter convention
+honestly, and to avoid overstating the small-subset GPU training accuracies.
+
+### 13.7 Gap-closure notes (2026-08-04)
 
 The three gaps identified after the first measurement round were attacked
 as follows:
@@ -407,9 +427,10 @@ as follows:
 
 2. **Board-level vs server-level power.** The `measure_u250_power.sh` script
    already reads `xrt-smi examine -r electrical`, i.e. the U250's own total
-   board power sensor. The 3.3153 nJ/sample figure is therefore board-level,
-   not server-rack level. A repeat on the small ImageNette cohort showed
-   *negative* incremental power because the kernel idles between micro-enqueues,
+   board power sensor. The ~3.3 nJ/sample figure is therefore board-level,
+   not server-rack level, and is rounded to the precision the 1 Hz sensor
+   supports. A repeat on the small ImageNette cohort showed *negative*
+   incremental power because the kernel idles between micro-enqueues,
    confirming that the stress-cohort measurement is the valid per-sample energy
    number.
 
