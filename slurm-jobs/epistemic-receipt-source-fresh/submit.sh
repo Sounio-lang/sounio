@@ -75,6 +75,9 @@ builds the same raw ELF and runs twelve generated worker-local programs to locat
 the first block shape that reproduces a lowering crash. The probe never changes
 the checked-out source tree and is not acceptance evidence.
 
+WORKER_PROBE=imported-runtime-source-fresh runs the canonical M1/M2/M3 fixed-point
+and imported-runtime acceptance gate entirely in worker-local scratch.
+
 WORKER_PROBE=source-to-elf builds the same raw ELF, then executes the canonical
 source-to-ELF manifest through that exact compiler, including native assert
 success and failure exit-code behavior.
@@ -112,13 +115,17 @@ fi
 [[ "$WORKER_PRESERVE_DIAGNOSTICS" == '0' || "$WORKER_PRESERVE_DIAGNOSTICS" == '1' ]] || fail "invalid WORKER_PRESERVE_DIAGNOSTICS: $WORKER_PRESERVE_DIAGNOSTICS"
 [[ "$WORKER_INTO_ACC_NO_RESET" == '0' || "$WORKER_INTO_ACC_NO_RESET" == '1' ]] || fail "invalid WORKER_INTO_ACC_NO_RESET: $WORKER_INTO_ACC_NO_RESET"
 [[ "$WORKER_PIN_COMMITTED_SEED" == '0' || "$WORKER_PIN_COMMITTED_SEED" == '1' ]] || fail "invalid WORKER_PIN_COMMITTED_SEED: $WORKER_PIN_COMMITTED_SEED"
-[[ "$WORKER_PROBE" == 'source-fresh-gate' || "$WORKER_PROBE" == 'block-ladder' || "$WORKER_PROBE" == 'source-to-elf' || "$WORKER_PROBE" == 'assert-exit' || "$WORKER_PROBE" == 'receipt-values' || "$WORKER_PROBE" == 'associator-values' ]] || fail "invalid WORKER_PROBE: $WORKER_PROBE"
+[[ "$WORKER_PROBE" == 'source-fresh-gate' || "$WORKER_PROBE" == 'imported-runtime-source-fresh' || "$WORKER_PROBE" == 'block-ladder' || "$WORKER_PROBE" == 'source-to-elf' || "$WORKER_PROBE" == 'assert-exit' || "$WORKER_PROBE" == 'receipt-values' || "$WORKER_PROBE" == 'associator-values' ]] || fail "invalid WORKER_PROBE: $WORKER_PROBE"
 
 SOURCE_COMMIT="$(git -C "$REPO" rev-parse "$SOURCE_REF")"
 SOURCE_TREE="$(git -C "$REPO" rev-parse "$SOURCE_COMMIT^{tree}")"
 [[ -z "$(git -C "$REPO" status --porcelain)" ]] || fail 'source checkout is dirty; commit the candidate first'
 git -C "$REPO" cat-file -e "$SOURCE_COMMIT:bin/souc-linux-x86_64" || fail 'source commit lacks bootstrap ELF bin/souc-linux-x86_64'
-git -C "$REPO" cat-file -e "$SOURCE_COMMIT:scripts/ci/epistemic_receipt_source_fresh_gate.sh" || fail 'source commit lacks epistemic source-fresh gate'
+if [[ "$WORKER_PROBE" == 'imported-runtime-source-fresh' ]]; then
+    git -C "$REPO" cat-file -e "$SOURCE_COMMIT:scripts/ci/madaros_imported_runtime_source_fresh_gate.sh" || fail 'source commit lacks imported-runtime source-fresh gate'
+else
+    git -C "$REPO" cat-file -e "$SOURCE_COMMIT:scripts/ci/epistemic_receipt_source_fresh_gate.sh" || fail 'source commit lacks epistemic source-fresh gate'
+fi
 
 if [[ -z "$SOURCE_REMOTE" ]]; then
     SOURCE_REMOTE="$(git -C "$REPO" remote get-url origin)"
@@ -235,8 +242,12 @@ fi
 
 chmod +x "\$REPO/bin/souc-linux-x86_64" \\
   "\$REPO/scripts/ci/build_modular_madaros.sh" \\
-  "\$REPO/scripts/ci/epistemic_receipt_source_fresh_gate.sh" \\
   "\$REPO/scripts/dev/souc-build-lock.sh"
+if [[ "\$WORKER_PROBE" == 'imported-runtime-source-fresh' ]]; then
+  chmod +x "\$REPO/scripts/ci/madaros_imported_runtime_source_fresh_gate.sh"
+else
+  chmod +x "\$REPO/scripts/ci/epistemic_receipt_source_fresh_gate.sh"
+fi
 
 cd "\$REPO"
 if [[ "\$WORKER_PROBE" == 'block-ladder' ]]; then
@@ -564,6 +575,10 @@ TSV
   fi
   [[ -z "\$(git -C "\$REPO" status --porcelain)" ]] || fail 'source tree changed during source-to-elf probe'
   echo "[epistemic-receipt-source-fresh] PASS: \$WORKER_PROBE completed"
+elif [[ "\$WORKER_PROBE" == 'imported-runtime-source-fresh' ]]; then
+  SOUNIO_MADAROS_IMPORTED_RUNTIME_SOURCE_FRESH_DIR="\$ROOT/imported-runtime-source-fresh" \\
+  SOUNIO_MADAROS_IMPORTED_RUNTIME_SOURCE_FRESH_KEEP=1 \\
+    bash "\$REPO/scripts/ci/madaros_imported_runtime_source_fresh_gate.sh"
 else
   SOUNIO_EPISTEMIC_RECEIPT_SOURCE_FRESH_KEEP=0 \\
     bash "\$REPO/scripts/ci/epistemic_receipt_source_fresh_gate.sh"
