@@ -3,87 +3,157 @@
 // End-to-end ontology pipeline demo — exercises the reusable stdlib
 //! modules packaged from the verified ontology-frontiers research line:
 //!
-//!   use ontology::closure  — reflexive-transitive subsumption closure +
-//!                            EL-derived conflict oracle
+//!   use ontology::elplus   — role-aware EL+ closure (dense 8-rule
+//!                            fixpoint) + EL+-derived conflict oracle
 //!   use ontology::repair   — greedy drop-weaker epistemic repair with
 //!                            (conf, id) tie-break + witness checks
 //!   use ontology::evolve   — guarded version-chain edits (add/remove)
 //!
-//! Pipeline: build a mini-EL TBox (8 classes) -> compute the subsumption
-//! closure -> DERIVE mapping conflicts from the TBox -> repair a
-//! 5-mapping alignment with confidences -> run a guarded version chain
-//! with one rejected edit and one repair-then-retry.
+//! Pipeline: build a mini-EL+ TBox (8 atoms + top + one existential,
+//! with a part_of role layer) -> compute the role-aware EL+ closure ->
+//! DERIVE mapping conflicts from the TBox -> repair a 5-mapping
+//! alignment with confidences -> run a guarded version chain with one
+//! rejected edit and one repair-then-retry.
+//!
+//! ROUND 10: the closure + conflict phases moved from the atomic-only
+//! ontology::closure to the role-aware ontology::elplus (dense variant;
+//! executable mirror of crStep / closeSatF of
+//! formal/OntologyELPlusClosureComplete.lean, conflictBPlusC_iff).  The
+//! TBox extends the original mini-EL instance with:
+//!   heart <= ex part_of.organ ("organ-part", concept 9)
+//!   ex part_of.organ ⊥ drugclass   (non-atomic disjointness endpoint)
+//! The role layer yields a genuinely role-derived CONCEPT conflict —
+//! conflict(heart, drugclass) holds only through the interned
+//! existential (stoR + RtoS) and is invisible to the atomic closure —
+//! while the MAPPING-level derived conflicts stay exactly {m0-m1, m2-m3}
+//! (no asserted class reaches the existential), so the repair and
+//! evolution stages are unchanged.
 //!
 //! Formal companions (Lean 4, all verified): formal/OntologyELReasoner.lean,
-//! formal/OntologyELClosureVerified.lean, formal/OntologyAlignmentRepair.lean,
+//! formal/OntologyELClosureVerified.lean, formal/OntologyELPlus.lean,
+//! formal/OntologyELPlusClosureComplete.lean,
+//! formal/OntologyAlignmentRepair.lean,
 //! formal/OntologyRepairEquivalence.lean, formal/OntologyRepairTies.lean,
 //! formal/OntologyEvolution.lean, formal/OntologyEvolutionRepair.lean,
 //! formal/OntologyMinimalRepair.lean.
 //!
 //! See artifacts/ontology-frontiers/TECHNICAL_NOTE.md for the full write-up.
 
-// NOTE: NAMED imports — the qualified form (`use ontology::closure;
+// NOTE: NAMED imports — the qualified form (`use ontology::elplus;
 // f(...)`) miscompiles on the current Madaros imported-module
 // native lane (see docs/compiler/KNOWN_LIMITATIONS.md).
-use ontology::closure::{closure_init, closure_add_edge, subsumption_closure, closure_reaches, derive_conflicts}
+use ontology::elplus::{elplus_role_closure, elplus_seed, elplus_fixpoint, elplus_conflict, elplus_derive_conflicts}
 use ontology::repair::{greedy_repair, repair_is_conflict_free, repair_all_witnessed, repair_count_kept}
 use ontology::evolve::{version_consistent, guarded_add, remove_axiom}
 
 fn main() -> i32 with IO, Mut, Div, Panic {
     var n_fail = 0
 
-    // ── Stage 1: mini-EL TBox (8 classes) ─────────────────────────────
-    // Classes: 0 lymphokine, 1 protein, 2 molecule, 3 heart,
-    //          4 organ, 5 muscleonly, 6 drugclass, 7 (unused)
-    // Subsumptions: 0<=1, 1<=2, 3<=4.  Disjointness: (4,5), (1,6).
-    var clos: [bool; 4096] = [false; 4096]
-    closure_init(&!clos, 8)
-    closure_add_edge(&!clos, 8, 0, 1)
-    closure_add_edge(&!clos, 8, 1, 2)
-    closure_add_edge(&!clos, 8, 3, 4)
-    subsumption_closure(&!clos, 8)
+    // ── Stage 1: mini-EL+ TBox (8 atoms + top + 1 existential) ─────────
+    // Atoms: 0 lymphokine, 1 protein, 2 molecule, 3 heart,
+    //        4 organ, 5 muscleonly, 6 drugclass, 7 gland
+    // 8 = top, 9 = ex part_of.organ.  Role 0 = part_of.
+    // Subsumptions: 0<=1, 1<=2, 3<=4.  Existential: 3 <= 9.
+    // Disjointness: (4,5), (1,6), (9,6) — the last has a non-atomic
+    // endpoint, only expressible over the interned EL+ universe.
+    var ckind: [i64; 64] = [0; 64]
+    var carg1: [i64; 64] = [0; 64]
+    var carg2: [i64; 64] = [0; 64]
+    var ci: i64 = 0
+    while ci < 8 {
+        ckind[ci] = 0
+        carg1[ci] = ci
+        ci = ci + 1
+    }
+    ckind[8] = 1
+    ckind[9] = 3
+    carg1[9] = 0
+    carg2[9] = 4
+
+    // exid[r*64+f] = interned id of ex r.(base f), or -1
+    var exid: [i64; 512] = [0; 512]
+    ci = 0
+    while ci < 512 {
+        exid[ci] = 0 - 1
+        ci = ci + 1
+    }
+    exid[0 * 64 + 4] = 9
+
+    // role-hierarchy closure (single role: reflexive only)
+    var rclos: [bool; 64] = [false; 64]
+    elplus_role_closure(&!rclos, 1)
+
+    // seed S: reflexivity + top + stated subsumptions + stated existential
+    var s: [bool; 4096] = [false; 4096]
+    elplus_seed(&!s, 10, 8)
+    s[0 * 64 + 1] = true
+    s[1 * 64 + 2] = true
+    s[3 * 64 + 4] = true
+    s[3 * 64 + 9] = true
+
+    // no composition chains on this instance
+    var ch1: [i64; 8] = [0; 8]
+    var ch2: [i64; 8] = [0; 8]
+    var ch3: [i64; 8] = [0; 8]
+
+    // dense 8-rule EL+ fixpoint (crStep mirror, iterated to stability)
+    var redges: [bool; 32768] = [false; 32768]
+    let rounds = elplus_fixpoint(&!s, &!redges, &ckind, &carg1, &carg2, &exid, &rclos, &ch1, &ch2, &ch3, 0, 10, 9, 1)
+
+    // Disjointness matrix (symmetric), incl. the non-atomic pair (9,6).
+    var disj: [bool; 4096] = [false; 4096]
+    disj[4 * 64 + 5] = true
+    disj[5 * 64 + 4] = true
+    disj[1 * 64 + 6] = true
+    disj[6 * 64 + 1] = true
+    disj[9 * 64 + 6] = true
+    disj[6 * 64 + 9] = true
 
     // lymphokine reaches molecule transitively; heart does NOT reach drugclass.
-    if !closure_reaches(&clos, 8, 0, 2) {
+    if !s[0 * 64 + 2] {
         println("FAIL: closure missing lymphokine <=* molecule")
         n_fail = n_fail + 1
     }
-    if closure_reaches(&clos, 8, 3, 6) {
+    if s[3 * 64 + 6] {
         println("FAIL: closure wrongly has heart <=* drugclass")
         n_fail = n_fail + 1
     }
     // Reflexivity out of the box.
-    if !closure_reaches(&clos, 8, 5, 5) {
+    if !s[5 * 64 + 5] {
         println("FAIL: closure not reflexive")
         n_fail = n_fail + 1
     }
+    // Role layer: heart subsumes the interned existential (RtoS), and the
+    // heart-vs-drugclass conflict is role-derived (atomic closure blind).
+    if !s[3 * 64 + 9] {
+        println("FAIL: role layer missing heart <= ex part_of.organ")
+        n_fail = n_fail + 1
+    }
+    if !elplus_conflict(&s, &disj, 10, 3, 6) {
+        println("FAIL: role-derived conflict(heart, drugclass) missing")
+        n_fail = n_fail + 1
+    }
 
-    // Count derived closure edges for the summary (8 diagonal + 4 derived).
+    // Count derived closure cells for the summary (10x10 universe):
+    // rows 4+3+2+4+2+2+2+2+1+2 = 24.
     var n_edges: i64 = 0
     var a: i64 = 0
-    while a < 8 {
+    while a < 10 {
         var b: i64 = 0
-        while b < 8 {
-            if clos[a * 64 + b] {
+        while b < 10 {
+            if s[a * 64 + b] {
                 n_edges = n_edges + 1
             }
             b = b + 1
         }
         a = a + 1
     }
-    if n_edges != 12 {
-        println("FAIL: expected 12 closure edges (8 reflexive + 4 derived)")
+    if n_edges != 24 {
+        println("FAIL: expected 24 closure cells over the interned universe")
         n_fail = n_fail + 1
     }
 
-    // Disjointness matrix (symmetric).
-    var disj: [bool; 4096] = [false; 4096]
-    disj[4 * 64 + 5] = true
-    disj[5 * 64 + 4] = true
-    disj[1 * 64 + 6] = true
-    disj[6 * 64 + 1] = true
-
-    // ── Stage 2: DERIVE the conflict oracle from the TBox ─────────────
+    // ── Stage 2: DERIVE the conflict oracle from the EL+ TBox ──────────
     // 5 mappings (the shared instance of the research line):
     //   m0: lymphokine under protein(1),    0.30
     //   m1: lymphokine under drugclass(6),  0.06
@@ -112,9 +182,10 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     conf[4] = 0.80
 
     var conf_pair: [bool; 65536] = [false; 65536]
-    derive_conflicts(&!conf_pair, 5, &ent, &cls, &clos, &disj, 8)
+    elplus_derive_conflicts(&!conf_pair, 5, &ent, &cls, &s, &disj, 10)
 
-    // Expected derived conflicts: exactly {0-1} and {2-3} (symmetric).
+    // Expected derived conflicts: exactly {0-1} and {2-3} (symmetric) —
+    // the role layer adds no MAPPING-level conflicts on this instance.
     if !conf_pair[0 * 256 + 1] { println("FAIL: derived oracle misses 0-1"); n_fail = n_fail + 1 }
     if !conf_pair[1 * 256 + 0] { println("FAIL: derived oracle misses 1-0"); n_fail = n_fail + 1 }
     if !conf_pair[2 * 256 + 3] { println("FAIL: derived oracle misses 2-3"); n_fail = n_fail + 1 }
@@ -214,7 +285,8 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     if n_versions != 7 { println("FAIL: expected 7 versions"); n_fail = n_fail + 1 }
 
     // ── Summary ───────────────────────────────────────────────────────
-    println("closure: 8 classes, 3 subsumptions -> 12 closure edges")
+    println("closure: EL+ role-aware (10 concepts, 1 role) -> 24 closure cells")
+    println("role layer: heart <= ex part_of.organ; conflict(heart, drugclass) role-derived")
     println("derived conflicts: 2 pairs {m0-m1, m2-m3} from TBox (not hardcoded)")
     println("repair: kept 3 of 5 mappings {m0, m2, m4}, conflict-free + witnessed")
     println("evolution: 7 versions, 1 edit rejected, 1 removal, final {1,3,4} consistent")

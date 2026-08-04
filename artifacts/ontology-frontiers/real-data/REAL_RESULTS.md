@@ -148,8 +148,15 @@ top-5 dropped by confidence (lowest first; conf per-10000):
 3333
 77
 3333
+existential restrictions (exsub):
+862
+atom-source role edges:
+10801
 ALL PASS
 ```
+
+(round 10: the last two lines are the appended role layer; every number
+above them is byte-identical to rounds 6-7 — see §10.)
 
 Wall time ~25 s total (compile + run; closure fixpoint dominates).
 `ALL PASS` certifies, on the real data: closure reflexive on the diagonal;
@@ -237,3 +244,46 @@ python3 gen_sounio_data.py                 # -> tbox_data.sio (+ mirror)
 - The lexical matcher is a deliberately simple baseline (top-1
   P=0.456/R=0.764); the pipeline numbers, not the matcher quality, are
   the result.
+
+## 10. Round 10 addendum — EL+ role-aware closure in the repair driver (2026-08-04)
+
+The driver no longer computes its own atomic fixpoint: the closure and
+all conflict computation now go through the **role-aware EL+ engine** of
+`stdlib/ontology/elplus.sio` (sparse variant — per-class BFS
+`elplus_sparse_bfs`, stated-filler seeding `elplus_sparse_seed_edges`,
+in-place ancestor expansion `elplus_sparse_expand`; queries via the new
+O(1) accessor `elplus_subsumes_sparse`), the executable mirror of the
+verified saturation engine `formal/OntologyELPlusClosureComplete.lean`
+(`subBPlusC_iff` / `conflictBPlusC_iff`).
+
+- `gen_sounio_data.py` now also loads the `exsub` lines of `tbox.txt`
+  (round-9 extraction): **862 of 1,662** existential restrictions
+  `C ⊑ ∃part_of.F` survive the cap (both endpoints kept; single active
+  role asserted). They are emitted as `ex_c`/`ex_f` arrays padded to the
+  4096 sparse-module capacity; `h_sub` is padded likewise to match the
+  stdlib signatures. New embedded mirror values: `expected_exsub()=862`,
+  `expected_closure_edges()=12669` (unchanged — same atomic closure),
+  `expected_role_edges_atom()=10801`.
+- **Byte-identical output (documented, intended):** the Anatomy profile
+  has no conjunctions, a single active role, no roleSub/roleComp, and
+  atomic-only disjointness endpoints, and no EL+ rule adds atomic
+  subsumption targets beyond the atomic closure (stoR/RtoS/Rmono only
+  reach existential targets). The role-aware derived conflicts are
+  therefore EXACTLY the round-7 atomic ones — 736 ordered pairs, kept
+  6,392 / dropped 246, same top-5 — and the two role-layer lines are the
+  only addition to the output (see §5). The mirror enforces the profile
+  assumptions (aborts on a non-atomic disjointness endpoint or a second
+  active role), so any future extraction that WOULD introduce
+  role-derived conflicts trips the generator instead of silently
+  changing the repair.
+- The full-TBox instance of the same reduction is machine-checked in
+  round 9 (`scale/gen_elplus_data.py` runs the general 8-rule fixpoint
+  over U = 9,915 interned concepts and aborts unless it agrees with the
+  packed reduction; 736 == 736 there too).
+- The miniature drivers moved to the same engine (dense variant):
+  `../epistemic-alignment-repair/alignment_repair.sio` (hardcoded oracle
+  replaced by `elplus_derive_conflicts`) and
+  `examples/ontology_pipeline_demo.sio` (conflict phase). Both carry a
+  small role layer (`heart ⊑ ∃part_of.Organ`, `∃part_of.Organ ⊥
+  DrugClass`) exhibiting a genuinely role-derived concept-level conflict
+  while leaving the shared 5-mapping repair instance unchanged.

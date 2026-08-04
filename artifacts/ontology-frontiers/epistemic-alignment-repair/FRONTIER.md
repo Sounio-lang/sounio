@@ -114,3 +114,12 @@ entailments é monotônica na confiança dos mappings.
   protótipo; a formalização cobre o núcleo combinatório do reparo.
 - A noção de "conflito" aqui é dada por um oráculo (relação simétrica);
   derivá-la de semântica OWL/EL++ completa é trabalho futuro.
+  **Atualização (rodada 10, 2026-08-04):** o oráculo hardcoded do
+  protótipo foi substituído pelo fecho EL+ role-aware verificado
+  (`stdlib/ontology/elplus.sio`, variante densa; `elplus_fixpoint` +
+  `elplus_derive_conflicts`), com uma camada de papel
+  (`heart ⊑ ∃part_of.Organ`, `∃part_of.Organ ⊥ DrugClass`) que torna o
+  conflito conceitual `conflict(heart, drugclass)` genuinamente
+  role-derivado; os conflitos de mapping na instância compartilhada
+  permanecem `{m0-m1, m2-m3}`. A derivação a partir de OWL completo (fora
+  do fragmento EL+) continua fora de escopo.

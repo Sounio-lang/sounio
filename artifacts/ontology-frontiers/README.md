@@ -282,6 +282,58 @@ Integração do fecho booleano EL⁺ com papéis (o motor verificado de
   roleSub/roleComp — essas regras são exercidas apenas na instância
   sintética da Parte A.
 
+## Rodada 10 — EL+ role-aware nos drivers de repair (2026-08-04)
+
+Integração do `stdlib/ontology/elplus.sio` nos três drivers de repair,
+que passam a computar conflitos com o fecho role-aware (o motor
+verificado de `formal/OntologyELPlusClosureComplete.lean`) em vez do
+fecho atômico/oráculo hardcoded:
+
+- **`stdlib/ontology/elplus.sio`** — 3 novos exports de integração (API
+  existente intacta): `elplus_derive_conflicts` (deriva a relação de
+  conflito entre mappings a partir da matriz EL+ densa fechada; saída no
+  mesmo stride 256 de `ontology::closure::derive_conflicts`, então
+  `ontology::repair` pluga sem mudança), `elplus_subsumes_sparse` e
+  `elplus_edge_sparse` (acessores O(1) de leitura sobre as matrizes de
+  trabalho esparsas, para drivers consultarem o fecho role-aware sem
+  cruzar fronteira `&!` com arrays de módulo).
+- **`real-data/real_repair_driver.sio`** — o fixpoint atômico próprio
+  foi substituído pela variante esparsa do elplus (BFS por classe +
+  seeding dos fillers + expansão de ancestrais); todas as consultas de
+  fecho passam pelo motor EL+. `gen_sounio_data.py` agora carrega as
+  linhas `exsub` do `tbox.txt` (extração da rodada 9): **862 de 1.662**
+  restrições existenciais `C ⊑ ∃part_of.F` sobrevivem ao cap (ambos os
+  endpoints mantidos; papel ativo único afirmado), emitidas como
+  `ex_c`/`ex_f` (e `h_sub` paddado a 4096 para casar com as assinaturas
+  do stdlib). Novos valores de espelho: `expected_exsub()=862`,
+  `expected_closure_edges()=12669`, `expected_role_edges_atom()=10801`.
+  **Saída byte-idêntica às rodadas 6-7/9, documentada e intencional**:
+  o perfil Anatomy não tem conjunções, tem um único papel ativo, zero
+  roleSub/roleComp e endpoints de disjunção todos atômicos, e nenhuma
+  regra EL+ adiciona alvos atômicos de subsunção além do fecho atômico
+  (stoR/RtoS/Rmono só alcançam alvos existenciais) — logo os conflitos
+  derivados role-aware são EXATAMENTE os atômicos: 736 pares ordenados,
+  kept 6.392 / dropped 246, mesmo top-5; as duas linhas da camada de
+  papéis (exsub, role edges) são o único acréscimo à saída. O espelho
+  python aborta se as premissas do perfil forem violadas (endpoint
+  não-atômico de disjunção ou segundo papel ativo), então uma extração
+  futura que introduzisse conflitos role-derivados dispara o gerador em
+  vez de mudar o repair silenciosamente.
+- **`epistemic-alignment-repair/alignment_repair.sio`** — o oráculo
+  hardcoded `fn conflicts` foi substituído pela variante densa do elplus
+  (`elplus_fixpoint` + `elplus_derive_conflicts`). A mini TBox ganha uma
+  camada de papel (`heart ⊑ ∃part_of.Organ`, `∃part_of.Organ ⊥
+  DrugClass`): o conflito CONCEITO `conflict(heart, drugclass)` é
+  genuinamente role-derivado (invisível ao fecho atômico), enquanto os
+  conflitos de MAPPING permanecem exatamente `{m0-m1, m2-m3}` — a
+  instância compartilhada de 5 mappings e os sobreviventes
+  `{m0, m2, m4}` não mudam.
+- **`examples/ontology_pipeline_demo.sio`** — as fases de fecho +
+  derivação de conflitos migraram de `ontology::closure` para
+  `ontology::elplus` (variante densa, mesma TBox estendida); as fases de
+  repair (`ontology::repair`) e evolução (`ontology::evolve`) não mudam.
+- Gate `scripts/ci/ontology_frontiers_gate.sh`: **12/12 OK**.
+
 ## Arquivos criados
 
 - `artifacts/ontology-frontiers/{epistemic-alignment-repair,epistemic-claim-status,consistent-ontology-evolution}/FRONTIER.md`
@@ -349,6 +401,23 @@ wrapper pode ser trocado via `SOUC_BIN`. Os repros de compilador em
   3-4, 9).
 - `.claude/llm_offload_log.md` — linhas de log das revisões (política do
   repo).
+- Rodada 10 (integração EL+ nos drivers de repair):
+  - `stdlib/ontology/elplus.sio` — 3 novos exports
+    (`elplus_derive_conflicts`, `elplus_subsumes_sparse`,
+    `elplus_edge_sparse`); API existente intacta.
+  - `artifacts/ontology-frontiers/epistemic-alignment-repair/alignment_repair.sio`
+    — oráculo hardcoded → variante densa do elplus (+ camada de papel).
+  - `artifacts/ontology-frontiers/real-data/real_repair_driver.sio` —
+    fixpoint atômico próprio → variante esparsa do elplus.
+  - `artifacts/ontology-frontiers/real-data/gen_sounio_data.py` — carrega
+    `exsub`, espelha a camada de papéis, emite `ex_c`/`ex_f` +
+    `expected_exsub/closure_edges/role_edges_atom`.
+  - `artifacts/ontology-frontiers/real-data/tbox_data.sio` — regenerado
+    (números das rodadas 6-7 preservados; role layer adicionada).
+  - `examples/ontology_pipeline_demo.sio` — fases de fecho/conflito via
+    elplus denso.
+  - `artifacts/ontology-frontiers/real-data/REAL_RESULTS.md` — adendo da
+    rodada 10 (§10) + saída atualizada (§5).
 
 Commits na branch: `54cef93d7` (rodadas 1-2), `156858916` (rodada 3);
 rodada 4 aguardando autorização de commit.

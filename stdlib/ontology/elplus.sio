@@ -68,6 +68,14 @@
 //! form (`use ontology::elplus; elplus::f(...)`) miscompiles on the
 //! current Madaros imported-module native lane (see
 //! docs/compiler/KNOWN_LIMITATIONS.md).
+//!
+//! Repair integration (round 10): `elplus_derive_conflicts` derives the
+//! mapping-pair conflict relation from a closed dense EL+ matrix (same
+//! 256-stride output shape as ontology::closure::derive_conflicts, so
+//! ontology::repair plugs in unchanged), and `elplus_subsumes_sparse` /
+//! `elplus_edge_sparse` are O(1) read-only accessors over the sparse
+//! workspace matrices so repair drivers can query the role-aware closure
+//! without crossing a `&!` boundary with the module-level arrays.
 
 // ── Dense variant capacities ─────────────────────────────────────────────
 // Maximum number of interned concepts (atoms + top + conjs + existentials).
@@ -471,6 +479,72 @@ pub fn elplus_conflict(s: &[bool; 4096], disj: &[bool; 4096], nc: i64, a: i64, b
     return hit
 }
 
+// ── Repair-integration exports ─────────────────────────────────────────
+// Mapping-pair matrices use the same 256 stride as
+// ontology::closure::derive_conflicts, so the repair module
+// (ontology::repair) plugs into the EL+-derived oracle unchanged.
+
+// Maximum number of candidate mappings for conflict derivation.
+const ELPLUS_MAXM: i64 = 256
+
+/// DERIVE the conflict relation between candidate mappings from a CLOSED
+/// EL+ subsumption matrix (output of `elplus_fixpoint`) and a
+/// disjointness matrix over the interned concept universe — the
+/// role-aware counterpart of ontology::closure::derive_conflicts.
+///
+/// Mapping k asserts entity `ent[k]` under concept `cls[k]`.  Mappings
+/// a, b conflict iff they assert the SAME entity and
+/// `elplus_conflict(s, disj, nc, cls[a], cls[b])`, i.e. their asserted
+/// concepts reach a disjoint pair through the EL+ closure (roles
+/// included: existential targets produced by stoR/RtoS/Rmono/roleSub/
+/// roleComp participate via the interned concept rows of `s`).
+///
+/// The result is symmetric: `conf_pair[a * 256 + b]` and
+/// `conf_pair[b * 256 + a]` are both set (diagonal excluded).
+///
+/// # Parameters
+/// - `conf_pair`: flattened m x m output matrix (fully overwritten).
+/// - `m`: number of mappings (0 <= m <= 256).
+/// - `ent`: entity id asserted by each mapping (index < m used).
+/// - `cls`: concept id under which each mapping asserts its entity.
+/// - `s`: closed EL+ subsumption matrix (from `elplus_fixpoint`).
+/// - `disj`: disjointness matrix over the interned universe (symmetric).
+/// - `nc`: number of interned concepts (0 <= nc <= 64).
+///
+/// # Complexity
+/// O(m^2 * nc^2)
+///
+/// # References
+/// - formal/OntologyELPlusClosureComplete.lean, theorem
+///   `conflictBPlusC_iff`: the boolean conflict oracle IS the deductive
+///   conflict relation over conceptUniv.
+pub fn elplus_derive_conflicts(
+    conf_pair: &![bool; 65536],
+    m: i64,
+    ent: &[i64; 256],
+    cls: &[i64; 256],
+    s: &[bool; 4096],
+    disj: &[bool; 4096],
+    nc: i64
+) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < m {
+        var j: i64 = 0
+        while j < m {
+            conf_pair[i * ELPLUS_MAXM + j] = false
+            if i != j {
+                if ent[i] == ent[j] {
+                    if elplus_conflict(s, disj, nc, cls[i], cls[j]) {
+                        conf_pair[i * ELPLUS_MAXM + j] = true
+                    }
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
 // ── Sparse variant (scale; Anatomy profile: no conjunctions, single
 //    active role, no role hierarchy/composition) ────────────────────────
 //
@@ -674,6 +748,28 @@ pub fn elplus_sparse_expand(h: i64, w: i64) with Mut, Div, Panic {
             c = c + 1
         }
     }
+}
+
+/// Sparse closure query: does class `c` subsume to `d` (columns
+/// 0..w-1 of the workspace closure matrix; column w-1 is the top slot)?
+/// Read-only accessor so importers never pass the module-level matrices
+/// through a `&!` boundary (see the sparse section header); repair
+/// drivers use this in place of direct closure-matrix indexing.
+///
+/// # Complexity
+/// O(1)
+pub fn elplus_subsumes_sparse(c: i64, d: i64) -> bool with Div, Panic {
+    return elplus_clos[c * ELPLUS_SC + d]
+}
+
+/// Sparse role-edge query: does class `c` have a derived role edge with
+/// filler `f` (after `elplus_sparse_seed_edges` + `elplus_sparse_expand`)?
+/// Column w-1 means an existential onto top.
+///
+/// # Complexity
+/// O(1)
+pub fn elplus_edge_sparse(c: i64, f: i64) -> bool with Div, Panic {
+    return elplus_emat[c * ELPLUS_SC + f]
 }
 
 /// Count the set cells of one workspace matrix row (columns 0..w-1).

@@ -1,10 +1,10 @@
 //@ run-pass
 //@ expect-stdout: ALL PASS
 // Real-data validation of the verified ontology pipeline
-// (subsumption closure fixpoint -> derived conflicts -> greedy epistemic
-// repair) on the OAEI 2016 Anatomy track: adult mouse anatomy (MA,
-// mouse.owl) vs NCI Thesaurus human anatomy (human.owl), with candidate
-// mappings from a lexical label matcher (see lexical_match.py).
+// (EL+ role-aware subsumption closure -> derived conflicts -> greedy
+// epistemic repair) on the OAEI 2016 Anatomy track: adult mouse anatomy
+// (MA, mouse.owl) vs NCI Thesaurus human anatomy (human.owl), with
+// candidate mappings from a lexical label matcher (see lexical_match.py).
 //
 // Data lives in the generated sibling module tbox_data.sio
 // (gen_sounio_data.py): parallel primitive arrays with splat init, exactly
@@ -23,6 +23,31 @@
 //       counts, and every dropped mapping has a maximality witness;
 //   (4) the five dropped mappings with lowest confidence match the mirror.
 //
+// ROUND 10 — EL+ ROLE-AWARE CLOSURE (stdlib/ontology/elplus.sio, sparse
+// variant).  The hand-rolled atomic fixpoint of rounds 6-7 is replaced by
+// the verified EL+ engine: per-class BFS subsumption closure
+// (elplus_sparse_bfs), stated-filler seeding of the 862 existential
+// restrictions C <= ex part_of.F (elplus_sparse_seed_edges) and
+// ancestor expansion to the least fixpoint (elplus_sparse_expand).  All
+// closure queries downstream go through the role-aware engine
+// (elplus_subsumes_sparse).
+//
+// BYTE-IDENTICAL OUTPUT (documented behavior, mirrored in
+// gen_sounio_data.py): the Anatomy profile has NO conjunctions, a single
+// active role (part_of), and NO roleSub/roleComp axioms, and every
+// disjointness endpoint is an atom.  No EL+ rule adds atomic subsumption
+// targets beyond the atomic closure (stoR/RtoS/Rmono only reach
+// existential targets), so the role-aware derived conflicts are EXACTLY
+// the round-7 atomic ones: 736 ordered pairs, kept 6392 / dropped 246,
+// same top-5 — the summary numbers below are unchanged, with only the
+// two role-layer lines appended.  The full-TBox instance of this
+// argument is machine-checked by round 9 (scale/gen_elplus_data.py runs
+// the general 8-rule fixpoint and aborts unless it agrees).  If a future
+// extraction introduces role-derived conflicts (e.g. disjointness over
+// existential concepts, conjunctions, or role hierarchy/composition),
+// the counts will diverge from round 7 ON PURPOSE — and the mirror will
+// have to be regenerated, which is the tripwire.
+//
 // NOTE: arrays of structs and `where` refinement clauses are unsupported,
 // so everything uses parallel primitive arrays and runtime assertions.
 // Confidences are exact integers per-10000 (0.3333 -> 3333): Madaros
@@ -30,6 +55,7 @@
 // and integer comparison keeps the repair epistemics exact.
 
 import tbox_data::*
+use ontology::elplus::{elplus_sparse_init_mats, elplus_sparse_build_adj, elplus_sparse_bfs, elplus_sparse_seed_edges, elplus_sparse_expand, elplus_sparse_row_count, elplus_subsumes_sparse}
 
 fn main() -> i32 with IO, Mut, Div, Panic {
     var n_fail = 0
@@ -37,61 +63,60 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     init_data()
 
     let H = expected_h()        // human classes kept (cap 2000)
+    let W = H + 1               // sparse matrix width (top slot at W-1)
     let N_SUB = expected_sub()  // subsumption axioms kept
+    let N_EX = expected_exsub() // existential restrictions kept
     let M = expected_mappings() // candidate mappings
 
-    // ── Subsumption closure fixpoint over the human TBox ────────────────
+    // ── EL+ role-aware closure (sparse variant of stdlib elplus) ────────
+    // packed parent adjacency (counting sort) + per-class BFS closure
+    // (the workspace matrices live in stdlib elplus.sio: module-level
+    // arrays must not cross a &! boundary on the current compiler lane)
+    elplus_sparse_init_mats()
+    var poff: [i64; 4097] = [0; 4097]
+    var pcount: [i64; 4096] = [0; 4096]
+    var plist: [i64; 4096] = [0; 4096]
+    var vis: [i64; 4096] = [0; 4096]
+    var queue: [i64; 4096] = [0; 4096]
+    elplus_sparse_build_adj(&h_sub, N_SUB, &!poff, &!pcount, &!plist, H)
+    let edges = elplus_sparse_bfs(&poff, &plist, &!vis, &!queue, H, W)
+    if edges != expected_closure_edges() {
+        println("FAIL: atom closure edge count disagrees with python mirror")
+        n_fail = n_fail + 1
+    }
+
+    // role layer: seed e[c] with the ancestor rows of the stated fillers
+    // of c, then expand in place over ancestors (stoR + RtoS + Rmono for
+    // the Anatomy profile; see stdlib module docs)
+    elplus_sparse_seed_edges(&ex_c, &ex_f, N_EX, W)
+    elplus_sparse_expand(H, W)
+    var nre: i64 = 0
     var c: i64 = 0
     while c < H {
-        clos[c * H + c] = true
+        nre = nre + elplus_sparse_row_count(1, c, W)
         c = c + 1
     }
-    var e: i64 = 0
-    var pk: i64 = 0
-    var lo: i64 = 0
-    while e < N_SUB {
-        pk = h_sub[e]
-        lo = pk - (pk / 10000) * 10000
-        clos[(pk / 10000) * H + lo] = true
-        e = e + 1
-    }
-    var changed = true
-    while changed {
-        changed = false
-        var a: i64 = 0
-        while a < H {
-            var b: i64 = 0
-            while b < H {
-                if clos[a * H + b] {
-                    var d: i64 = 0
-                    while d < H {
-                        if clos[b * H + d] {
-                            if !clos[a * H + d] {
-                                clos[a * H + d] = true
-                                changed = true
-                            }
-                        }
-                        d = d + 1
-                    }
-                }
-                b = b + 1
-            }
-            a = a + 1
-        }
+    if nre != expected_role_edges_atom() {
+        println("FAIL: atom-source role edge count disagrees with python mirror")
+        n_fail = n_fail + 1
     }
 
     // ── Check (1): closure reflexive on the diagonal ────────────────────
     c = 0
     while c < H {
-        if !clos[c * H + c] {
+        if !elplus_subsumes_sparse(c, c) {
             println("FAIL: closure not reflexive on diagonal")
             n_fail = n_fail + 1
         }
         c = c + 1
     }
 
-    // ── Disjointness expanded through the closure ───────────────────────
+    // ── Disjointness expanded through the EL+ closure ───────────────────
     // disj_c[c1][c2] iff c1, c2 reach a disjoint pair through the closure.
+    // All disjointness endpoints are atomic, and roles add no atomic
+    // subsumption targets (see header), so this is byte-identical to the
+    // round-7 atomic expansion — closure queries now answered by the
+    // role-aware engine.
     var d1: i64 = 0
     while d1 < H {
         var d2: i64 = 0
@@ -99,10 +124,10 @@ fn main() -> i32 with IO, Mut, Div, Panic {
             if h_disj[d1 * H + d2] {
                 var c1: i64 = 0
                 while c1 < H {
-                    if clos[c1 * H + d1] {
+                    if elplus_subsumes_sparse(c1, d1) {
                         var c2: i64 = 0
                         while c2 < H {
-                            if clos[c2 * H + d2] {
+                            if elplus_subsumes_sparse(c2, d2) {
                                 disj_c[c1 * H + c2] = true
                                 disj_c[c2 * H + c1] = true
                             }
@@ -321,6 +346,12 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         println(m_conf[chosen[k]])
         k = k + 1
     }
+    // role-layer lines appended in round 10 (all round-7 numbers above
+    // are byte-identical; see the header for the reduction argument)
+    println("existential restrictions (exsub):")
+    println(N_EX)
+    println("atom-source role edges:")
+    println(nre)
 
     if n_fail == 0 {
         println("ALL PASS")
