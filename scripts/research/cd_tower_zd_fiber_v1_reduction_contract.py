@@ -2405,9 +2405,9 @@ def main():
             "the pieces disjoint for free, so no inclusion-exclusion was needed anywhere. *** "
             "THE HIGH BRANCH IS NO LONGER PAPER EITHER -- see W32 (`Ncnt_hi`), landed the same "
             "day; and the UNROLLING of the two recursions is now a Lean theorem too -- see W33 "
-            "(`Ncnt_eq_Nclosed`). What is still NOT derived is the EXPLICIT digit-sum form E and "
-            "its dependence on g(W) alone. (III) untouched; tr(A^3) NOT closed; (d) IS NOT "
-            "CLOSED ***")
+            "(`Ncnt_eq_Nclosed`), and the EXPLICIT digit-sum form E by W34 (`Ncnt_closed`), also "
+            "the same day -- which turned out NOT to need the g(W) residual at all. (III) "
+            "untouched; tr(A^3) NOT closed; (d) IS NOT CLOSED ***")
 
     # ---- W32  THE HIGH RECURSION IS A LEAN THEOREM ----------------------------------------
     # `Ncnt_hi : Ncnt (W+e) (m+2) + 6e + 2 + 4*Ncnt W (m+1) = 4*e*e`, e = 2^(m+1). With W31 this
@@ -2490,9 +2490,9 @@ def main():
             "-1). lu and uu each carry one point MORE, and the source is exact: "
             "`Qgen'_label_right` has no hypothesis on its other argument, so the v=W column is "
             "-1 on all e-1 of its points while every other slice loses two to the lines. *** "
-            "UNROLLED BY W33 (`Ncnt_eq_Nclosed`), same day -- Ncnt now equals an evaluator "
-            "that mentions no Qgen'. STILL OPEN: the EXPLICIT digit-sum form E and its dependence "
-            "on g(W) alone. (III) untouched; tr(A^3) NOT closed; (d) IS NOT CLOSED ***")
+            "UNROLLED BY W33 (`Ncnt_eq_Nclosed`) and CLOSED BY W34 (`Ncnt_closed`), same "
+            "day -- Ncnt equals an evaluator that mentions no Qgen', and equals a finite "
+            "non-recursive digit sum. (III) untouched; tr(A^3) NOT closed; (d) IS NOT CLOSED ***")
 
     # ---- W33  THE UNROLLING: Ncnt IS A CLOSED EVALUATOR --------------------------------------
     # `Ncnt_eq_Nclosed : (Ncnt W m : Int) = Nclosed m W`, where `Nclosed` recurses on the LEVEL
@@ -2597,9 +2597,111 @@ def main():
             "is why the closed form's leading term IS the base value. *** NO isPow2 TEST is "
             "needed: a label 2^k with k < n+1 is already below the seam and the LOW branch "
             "agrees, by the identity pinned above. That deletes a 60-150 line bit-arithmetic "
-            "characterisation of powers of two. *** STILL OPEN: the EXPLICIT digit-sum form E "
-            "and its dependence on g(W) alone (W17's residual, still unproven). (III) untouched; "
-            "tr(A^3) NOT closed; (d) IS NOT CLOSED ***")
+            "characterisation of powers of two. *** THE DIGIT SUM IS DERIVED TOO -- see W34 "
+            "(`Ncnt_closed`), same day. It does NOT go through W17's residual: stating the "
+            "deficit on W's OWN bits (excluding the lowest set bit, where the descent stops) "
+            "matches directly. (III) untouched; tr(A^3) NOT closed; (d) IS NOT CLOSED ***")
+
+    # ---- W34  THE CLOSED FORM IS DERIVED --------------------------------------------------
+    # `Ncnt_closed : (Ncnt W m : Int) + Ddig m W + 5*2^m = 2^m*2^m + 6`, i.e.
+    # Ncnt W m = (2^m-2)(2^m-3) - E(m,W) with E = Ddig a FINITE, NON-RECURSIVE signed base-4
+    # digit sum over W's own set bits. Pins Ddig entrywise against the Lean definition, against
+    # the contract's own E on the normalised label, and against Ncnt itself.
+    def _psg34(x):
+        return -1 if bin(x).count("1") % 2 else 1
+
+    def _dcoef34(m, i):
+        a = (1 << i) - 4 if (1 << i) > 4 else 0
+        b = (1 << i) - 8 if (1 << i) > 8 else 0
+        return a * b * (4 ** (m - i) if m >= i else 0)
+
+    def _dterm34(m, W, i, coefpert=0):
+        if i == 0:
+            lo = 1
+        else:
+            lo = 1 << (i - 1)
+        if lo <= W % (1 << i) and W % (1 << max(i - 1, 0)) != 0:
+            return (_dcoef34(m, i) + coefpert) * _psg34(W >> i)
+        return 0
+
+    def _Ddig34(m, W, coefpert=0):
+        return sum(_dterm34(m, W, i, coefpert) for i in range(0, m + 1))
+
+    def _sg34(S, a, b):
+        return int(S[a, b])
+
+    def _qp34(S, Y, a, b):
+        return (_sg34(S, a, b) * _sg34(S, b ^ Y, a ^ Y)
+                * _sg34(S, b ^ Y, a) * _sg34(S, a ^ Y, b))
+
+    def _ncnt34(S, Y, H):
+        return sum(1 for a in range(H) for b in range(H)
+                   if a and b and a != b and _qp34(S, Y, a, b) == -1)
+
+    w34_rows, w34_agree = [], []
+    for m in range(1, 9):
+        S, H = sign_table_fast(m), 1 << m
+        bad = sum(1 for W in range(1, H)
+                  if _ncnt34(S, W, H) + _Ddig34(m, W) + 5 * H != H * H + 6)
+        w34_rows.append((m, H - 1, bad))
+        # the digit sum IS the contract's E, restated on W instead of on 8*g(W)+1
+        agree = sum(1 for W in range(1, H) if _Ddig34(m, W) != _E(m, 8 * _g(W) + 1))
+        w34_agree.append((m, H - 1, agree))
+    # NULL CONTROL (targets the FINDING, not the claim): drop the guard's second conjunct --
+    # the `W % 2^(i-1) != 0` that EXCLUDES the lowest set bit. That single exclusion is the
+    # entire difference between this form and W16's raw-label form, so if the identity survived
+    # without it the finding would be vacuous. It can only bite where the omitted term is
+    # non-zero, i.e. lsb(W) >= 3 (the coefficient vanishes at i = 2, 3); every other label is
+    # DECLARED excluded, the trap W33's first null control fell into.
+    #
+    # An earlier version perturbed every coefficient by +1 and demanded 0 survivors. That is
+    # NOT sharp: digits carry opposite psg signs, so a uniform shift can cancel between them.
+    # The gate caught it.
+    def _Ddig34_noexcl(m, W):
+        t = 0
+        for i in range(1, m + 1):
+            if (1 << (i - 1)) <= W % (1 << i):
+                t += _dcoef34(m, i) * _psg34(W >> i)
+        return t
+
+    null34_survivors = null34_tested = null34_excluded = 0
+    for m in range(2, 9):
+        S, H = sign_table_fast(m), 1 << m
+        for W in range(1, H):
+            lsb = (W & -W).bit_length() - 1
+            if lsb < 3 or lsb + 1 > m:
+                null34_excluded += 1
+                continue
+            null34_tested += 1
+            if _ncnt34(S, W, H) + _Ddig34_noexcl(m, W) + 5 * H == H * H + 6:
+                null34_survivors += 1
+    w34 = (all(c == 0 for _, _, c in w34_rows) and all(c == 0 for _, _, c in w34_agree)
+           and null34_survivors == 0)
+    ok["W34"] = w34
+    print(f"W34_CLOSEDFORM  THE CLOSED FORM IS DERIVED {'OK' if w34 else 'FAIL'} -- "
+          + "; ".join(f"level {a}: {b} labels, {c} failing" for a, b, c in w34_rows)
+          + "; Ddig(m,W) == E(m, 8*g(W)+1): "
+          + "; ".join(f"m={a}: {b} labels, {c} differing" for a, b, c in w34_agree)
+          + f"; NULL CONTROL (DROP the lowest-set-bit exclusion, which is the whole finding): "
+            f"{null34_survivors}/{null34_tested} labels still match, i.e. removing it breaks the "
+            f"identity everywhere it can bite; {null34_excluded} labels DECLARED excluded because "
+            "the omitted term is zero there anyway (lsb < 3, where the coefficient vanishes). An "
+            "earlier version of this control perturbed every coefficient by +1 and demanded 0 "
+            "survivors -- NOT sharp, since digits carry opposite psg signs and a uniform shift "
+            "can cancel between them. The gate caught it. *** "
+            "`Ncnt_closed : (Ncnt W m : Int) + Ddig m W + 5*2^m = 2^m*2^m + 6`. THE CLOSED FORM "
+            "FOR tr(A^2) IS NO LONGER FORMULA-VERIFIED -- IT IS DERIVED, forall n, kernel-clean. "
+            "W17 had carried it as 'the DERIVATION remains base + recursion (paper); what is "
+            "verified directly here is the FORMULA'. That caveat is discharged. *** THE ROUTE "
+            "AVOIDS W17's RESIDUAL ENTIRELY, and that was the surprise: the residual (bits 1 and "
+            "2 of an already-odd label do not matter) is only needed if you target the NORMALISED "
+            "label 8*g(W)+1. Writing the DEFICIT base - Ncnt on W's OWN bits gives a digit sum "
+            "that matches directly, because the descent stops at the LOWEST SET BIT and the term "
+            "there is simply omitted. W16's declared negative -- 'the raw label FAILS on every "
+            "seam' -- is exactly that missing EXCLUSION, not a missing normalisation. Both forms "
+            "agree label-for-label, pinned above. *** STILL OPEN: (III); tr(A^3) has NO general "
+            "closed form; (d) IS NOT CLOSED -- tr(A^2) is parity-blind (W11), so deriving its "
+            "closed form does not narrow (d) at all ***")
 
     print("=" * 78)
     if all(ok.values()):

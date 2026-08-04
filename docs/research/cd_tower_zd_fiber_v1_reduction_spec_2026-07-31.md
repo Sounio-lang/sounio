@@ -1373,9 +1373,66 @@ one: **the induction leaves the level as `k+1+1` while every recursion theorem s
 does not error — it silently has no equation relating them, and reports an unprovable goal with a
 missing atom. Fixed by a `show` that normalises the index.
 
-**Still open:** the explicit digit-sum `E` as a Lean definition, and its dependence on `g(W)`
-alone — W17's residual, which the Lean file itself flags as unproven at `:4626`. Unrolling moves
-that residual from something this file cannot express (bijection/cardinality, `Finset` territory)
-to something it can (arithmetic induction on `Nclosed`), but does **not** make it small: the
-descent reads `W` from the top bit down while `g` perturbs the bottom bits. (III), (d), V1 and
-`tr(A³)`'s general form are all unchanged.
+**Closed in §27.** The digit sum is now a Lean theorem — and it did **not** need W17's residual.
+(III), (d), V1 and `tr(A³)`'s general form are all unchanged.
+
+
+## §27 — The closed form is derived
+
+`Ncnt_closed` (Tier 33, `formal/lean4/SounioZDFiberAntisym.lean`):
+
+```lean
+theorem Ncnt_closed (m W : Nat) (hW : W < 2^m) (hW0 : W ≠ 0) :
+    ((Ncnt W m : Nat) : Int) + Ddig m W + 5 * ((2^m : Nat) : Int)
+      = ((2^m * 2^m : Nat) : Int) + 6
+```
+
+i.e. **`Ncnt W m = (2^m−2)(2^m−3) − E(m,W)`** with `E = Ddig` a **finite, non-recursive** signed
+base-4 digit sum over the set bits of `W`. Stated additively so no `Nat` subtraction enters.
+Kernel-clean.
+
+W17 has carried this since it was written as *"the DERIVATION remains base (Lean ∀n) + recursion
+(paper); what is verified directly here is the FORMULA."* That caveat is discharged.
+
+### The route avoids W17's residual entirely — and that was the surprise
+
+§26 predicted the hard obstacle would be the dependence on `g(W)` alone: W17's residual, which the
+Lean file itself calls `Finset` territory (`:4626`). **It is not needed.** That obstacle only
+exists if you target the contract's form, which is stated on the *normalised* label `8·g(W)+1`.
+
+Writing the **deficit** `base − Ncnt` on `W`'s **own** bits gives a digit sum that matches
+directly:
+
+```
+Ddig m W = Σ_{i : bit_{i−1}(W)=1 and W mod 2^(i−1) ≠ 0}  (2^i−4)(2^i−8) · 4^(m−i) · (−1)^popcount(W ≫ i)
+```
+
+The second guard conjunct is the whole point: the descent **stops at the lowest set bit**, so the
+term there is omitted. **W16's declared negative — "the raw label FAILS on every seam" — is
+exactly that missing exclusion, not a missing normalisation.** Both forms agree label-for-label
+(`Ddig m W = E(m, 8·g(W)+1)`, pinned in W34 at m = 1..8, and measured at m = 1..12 before any Lean
+was written).
+
+### Proof structure
+
+- `dterm_step` — every digit below the seam scales by `4` and picks up the seam bit's sign. The
+  `4` is the LOW multiplier; the sign is `psg (W >>> (n+1))`, `+1` when the seam bit is clear and
+  `−1` when set. Sign factorisation is `psg_split` via `shift_mod_pow`/`shift_div_pow`; the guard
+  is unchanged below the seam by `mod_pow_mod`.
+- `Ddig_step` — hence the digit sum obeys the same descent as `Nclosed`.
+- `Nclosed_add_Ddig` — induction on the level, three branches, with every nonlinear fact supplied
+  explicitly (`two_mul_mul`, `sub_prod_pow`, `dcoef_top`), since `omega` derives none of them.
+
+`dcoef` uses **truncated** `Nat` subtraction and that is exactly right: at `i = 2, 3` the true
+coefficient is genuinely `0` and truncation gives `0`; at `i = 0, 1` truncation is wrong but the
+guard always excludes those. No index is both included and mis-valued.
+
+### Two traps, both silent
+
+`omega` treats `k+1+1` and `k+2` as **different atoms** although they are definitionally equal, and
+likewise `Nclosed (k+1) (W − 2^(k+1))` and the IH's `Nclosed (k+1) W'`. Neither errors — omega
+simply loses the equation and reports an unprovable goal with a missing atom. Fixed by `show` and
+by `subst` + `Nat.add_sub_cancel`.
+
+**Still open:** (III); `tr(A³)` has no general closed form; (d) is not closed. `tr(A²)` is
+parity-blind (W11), so deriving its closed form does **not** narrow (d).
