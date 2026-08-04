@@ -1575,3 +1575,73 @@ lemma-sized effort.
 
 **Status: all of §31 is MEASURED.** Open, unchanged: (I), (III), `tr(A³)`'s general closed form,
 (d), V1.
+
+## §32 — (I) is a theorem: the 2-adic valuation, not magnitude (`W35`, Tier 36, 2026-08-04)
+
+**(I) is PROVEN ∀n.** `Ncnt_inj_g` / `Ncnt_inj_gnorm` in `SounioZDFiberAntisym.lean`: `tr(A²)` —
+equivalently `Ncnt` — is injective in the fibre coordinate `g`. Kernel-clean
+`[propext, Classical.choice, Quot.sound]`. §30 had reduced (I) to a statement about the closed
+form alone (no `Qgen'`); it is now closed.
+
+### §31's reduction does not close, and its target was false
+
+Recorded because §31 asks the next session to distrust its own diagnosis, and it was right to:
+
+- **"`P` injective ⟹ (I)" is a non-sequitur.** (I) is about `F`, and nothing in §31 recovers `P`
+  from `F = 4^m·S − 12P + 32Q`.
+- **"uniqueness of a signed binary representation" is FALSE.** Signed sums of distinct powers of
+  two are not unique: `2^k − 2^(k−1) = 2^(k−1)`. What makes `P` injective is the **sign
+  structure** (`s_j` is determined by the higher bits), which §31's framing discards.
+
+The measurement (`P` injective, 512/512) is real; it was attached to the wrong object.
+
+### What carries it
+
+**Factor the coefficient instead of expanding it.** With `i = p+1` (so `2^i ≥ 16`, no
+truncated-subtraction trap):
+
+```
+2^(p+1) − 4 = 4(2^(p−1) − 1),  2^(p+1) − 8 = 8(2^(p−2) − 1),  4^(m−p−1) = 2^(2m−2p−2)
+⟹  dcoef m (p+1) = 2^(2m−2p+3) · (2^(p−1) − 1)(2^(p−2) − 1),  the cofactor ODD
+```
+
+So `v₂(dcoef m (p+1)) = 2m − 2p + 3`: **strictly decreasing in the bit position, gap exactly 2.**
+That gap is the whole proof. (`dcoef_factor`, `dcoef_cofactor_odd`.)
+
+Two theorems then prove each other in one induction:
+
+| | statement |
+|---|---|
+| `Ddig_peel` | `Ddig m (2^p + W) = dcoef m (p+1) − Ddig m W` for `0 < W < 2^p`, `p+1 ≤ m` |
+| `Ddig_val` | `W ≡ 1 (mod 8)` with top bit `p` ⟹ `Ddig m W = 2^(2m−2p+3) · odd` |
+
+`Ddig_peel` is **termwise**: at the peeled bit the sign is `psg 0 = 1`, and every lower digit
+keeps its guard (`2^p` is divisible by `2^i`) and flips its sign by `psg_top` (`:3525`, already
+proven). `Ddig_val` follows because the peeled remainder's valuation is at least **two** higher,
+so it cannot cancel the odd cofactor.
+
+Injectivity then falls out: equal digit sums force equal valuations (`pow_mul_odd_inj`), hence
+equal top bits; the peel descends one bit; `Ddig_ne_zero` handles the base. `Ddig_inj_gnorm`
+lifts it to arbitrary labels via `Ddig_gnorm` (§28) and `gnorm W ≤ W`.
+
+**§31's stated obstacle is dodged entirely** — no `Finset`, no sum reindexed under a bit shift,
+no `m`-index shift; `m` stays fixed throughout. This is the same termwise move that made §28
+reachable: the descent never looks below the lowest set bit, so nothing has to be reindexed.
+Two whole sessions' worth of predicted cost evaporated because the object was factored rather
+than expanded. That is now the third time in this lane that a "no route" diagnosis came from
+looking at the object in the wrong form (§31 lists the other two).
+
+### Measured before any Lean was written
+
+`scripts/research/zd_v1_I_valuation_probe.py`, against the same definitions the Lean file uses:
+
+- factorisation: `m = 6..14`, 63 checks, **0 mismatches**;
+- peel: `m = 6..12`, 1009 checks, **0 mismatches**;
+- valuation `v₂(F(m,y)) = 2m − 2k − 3` and injectivity: `m = 6..14`, 4088 labels,
+  **0 mismatches, 0 collisions**.
+
+The oracle is pinned to §30's independently recorded number — `Ddig(9,41) = 116736`, constant
+across the fibre `41…47`.
+
+**Still open, unchanged:** (III); `tr(A³)`'s general closed form; (d); V1. §30 already showed
+`tr(A²)` contributes nothing inside a fibre, so (III) is untouched by this.

@@ -201,7 +201,9 @@ curl -sSL -o downloads/anatomy-dataset.zip \
 cd downloads && python3 -m zipfile -e anatomy-dataset.zip . && cd ..
 sha256sum downloads/*   # must match the table in §1
 # 2. pipeline
-python3 extract_tbox.py                    # -> classes.tsv, tbox.txt
+python3 extract_tbox.py                    # -> classes.tsv, tbox.txt, roles.tsv
+                                           #    (round 9: exsub/roleSub/roleComp
+                                           #     lines + role table added)
 python3 lexical_match.py                   # -> mappings.tsv (+ P/R)
 python3 gen_sounio_data.py                 # -> tbox_data.sio (+ mirror)
 # 3. verified pipeline on the real data
@@ -215,7 +217,8 @@ python3 gen_sounio_data.py                 # -> tbox_data.sio (+ mirror)
 |---|---|
 | `downloads/` | OAEI 2016 anatomy zip + extracted OWL/RDF (see §1) |
 | `extract_tbox.py` | syntactic RDF/XML → TBox extractor (stdlib only) |
-| `classes.tsv`, `tbox.txt` | extracted classes/axioms |
+| `classes.tsv`, `tbox.txt` | extracted classes/axioms (round 9: tbox.txt also carries `exsub`/`roleSub`/`roleComp` lines) |
+| `roles.tsv` | extracted object properties (round 9) |
 | `lexical_match.py` | Jaccard lexical matcher + P/R vs reference |
 | `mappings.tsv` | 6,638 candidate mappings |
 | `gen_sounio_data.py` | cap/selection, packing, python mirror, emitter |

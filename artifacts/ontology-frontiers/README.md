@@ -239,6 +239,49 @@ oráculos de conflito continuam abstratos.
   `souc check` OK; `souc run` → `ALL PASS` (marcadores `//@ run-pass` /
   `//@ expect-stdout: ALL PASS`).
 
+## Rodada 9 — fecho EL⁺ role-aware no pipeline de dados reais (2026-08-04)
+
+Integração do fecho booleano EL⁺ com papéis (o motor verificado de
+`formal/OntologyELPlusClosureComplete.lean`) no pipeline OAEI Anatomy:
+
+- **`real-data/extract_tbox.py`** não descarta mais as restrições
+  anônimas: `owl:Restriction`/`someValuesFrom` viram linhas
+  `exsub <ont> <child> <role> <filler>` (1.637 mouse / 1.662 human),
+  `owl:ObjectProperty` + `rdfs:subPropertyOf` viram `roleSub`,
+  `owl:propertyChainAxiom` vira `roleComp`, e uma nova `roles.tsv`
+  tabela os papéis. Classes/sub/disj extraídos são byte-idênticos às
+  rodadas anteriores.
+- **`real-data/scale/gen_elplus_data.py`** — espelho python do fixpoint
+  de 8 regras (transitividade, ⊓-elim/intro, stoR/RtoS, Rmono, roleSub,
+  roleComp) sobre o universo internado completo (átomos + ⊤ + ∃r.f para
+  todo papel r e filler base; U = 9.915 conceitos), com cross-check
+  packed (máscaras de bits de ancestrais + fórmulas reduzidas) — o script
+  aborta se as duas representações divergirem.
+- **`stdlib/ontology/elplus.sio`** — módulo reutilizável: variante densa
+  (fixpoint de 8 regras, ≤64 conceitos / 8 papéis / 8 cadeias) e
+  variante esparsa (BFS por classe + expansão in-place de ancestrais,
+  ≤4.096 classes). As matrizes de trabalho da variante esparsa são
+  globais do próprio módulo: **arrays em nível de módulo passados por
+  `&!` miscompilam** (mutações caem num stub do linker; spreads grandes
+  de índice → SIGSEGV) — novo pitfall encontrado nesta rodada, variante
+  da família P5 documentada em `compiler-repros/`.
+- **`real-data/scale/elplus_scale_driver.sio`** — Parte A: instância
+  sintética estilo SNOMED (40 conceitos) via variante densa, exercitando
+  ⊓/roleSub/roleComp (as 6 queries da demo da rodada 8 + contagens do
+  espelho: 201 células S, 140 arestas de papel). Parte B: TBox Anatomy
+  humana completa com papéis via variante esparsa — 21.859 arestas de
+  fecho atômico (= rodada 7), **21.761 arestas de papel com fonte
+  atômica / 72.089 totais**, 103.863 células S no universo internado,
+  **736 conflitos derivados — byte-idêntico à rodada 7**: os papéis
+  estendem a subsunção (alvos existenciais) sem alterar a disjunção
+  atômica, logo o reparo da rodada 7 carrega-se sem alteração (m_keep /
+  m_conf não re-emitidos). `ALL PASS`.
+- **Limitação honesta** (afirmada no driver): a track Anatomy tem UM
+  papel ativo (`part_of`; a segunda propriedade declarada,
+  `ObsoleteProperty`, nunca aparece em restrições) e ZERO axiomas
+  roleSub/roleComp — essas regras são exercidas apenas na instância
+  sintética da Parte A.
+
 ## Arquivos criados
 
 - `artifacts/ontology-frontiers/{epistemic-alignment-repair,epistemic-claim-status,consistent-ontology-evolution}/FRONTIER.md`
@@ -261,6 +304,13 @@ oráculos de conflito continuam abstratos.
 - `artifacts/ontology-frontiers/epistemic-alignment-repair/tie_repair_demo.sio` (rodada 5)
 - `examples/ontology_elplus_closure_demo.sio` (demo executável do fecho EL⁺
   completo — ver seção acima)
+- `stdlib/ontology/elplus.sio` (rodada 9 — fecho EL⁺ role-aware: variante
+  densa + variante esparsa)
+- `artifacts/ontology-frontiers/real-data/scale/gen_elplus_data.py`
+  (rodada 9 — espelho python do fixpoint de 8 regras + cross-check packed)
+- `artifacts/ontology-frontiers/real-data/scale/{elplus_data.sio,elplus_synth_data.sio,elplus_scale_driver.sio}`
+  (rodada 9, gerados)
+- `artifacts/ontology-frontiers/real-data/roles.tsv` (rodada 9, gerado)
 
 ## Gate CI
 
@@ -271,10 +321,12 @@ editar nenhum arquivo existente:
 bash scripts/ci/ontology_frontiers_gate.sh   # funciona a partir de qualquer cwd
 ```
 
-O que ele checa, para cada um dos 8 protótipos (`alignment_repair.sio`,
+O que ele checa, para cada um dos 12 protótipos (`alignment_repair.sio`,
 `claim_status.sio`, `interval_claims.sio`, `version_chain.sio`,
 `version_chain_removal.sio`, `minimal_repair_demo.sio`,
-`el_conflict_demo.sio`, `tie_repair_demo.sio`):
+`el_conflict_demo.sio`, `tie_repair_demo.sio`, `real_repair_driver.sio`,
+`full_scale_driver.sio`, `elplus_scale_driver.sio` — rodada 9 — e
+`examples/ontology_pipeline_demo.sio`):
 
 1. `./bin/souc check <file>` — exige `check: OK` na saída e ausência de
    `parse error`;
@@ -294,7 +346,7 @@ wrapper pode ser trocado via `SOUC_BIN`. Os repros de compilador em
 - `formal/OntologyAlignmentRepair.lean` — apenas o comentário de header
   (correção da lacuna de equivalência após o contraexemplo mecanizado).
 - `scripts/ci/ontology_frontiers_gate.sh` — lista de protótipos (rodadas
-  3-4).
+  3-4, 9).
 - `.claude/llm_offload_log.md` — linhas de log das revisões (política do
   repo).
 

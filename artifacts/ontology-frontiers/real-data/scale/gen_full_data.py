@@ -57,7 +57,7 @@ def load():
                 continue
             if p[0] == "sub":
                 sub.append((int(p[2]), int(p[3])))
-            else:
+            elif p[0] == "disj":
                 a, b = int(p[2]), int(p[3])
                 disj.add((min(a, b), max(a, b)))
     maps = []
