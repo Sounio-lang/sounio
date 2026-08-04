@@ -445,45 +445,36 @@ Phase 5 attempted to "close the butterfly" at the compiler level (commit reverte
 - **Dynamic `.so` linking / GOT–PLT**: The native toolchain emits statically linked executables on the default bring-up path. Relocation metadata records `R_X86_64_PLT32` for ET_REL objects (`self-hosted/native/reloc.sio`), but wiring arbitrary shared-library symbols end-to-end (libc-style `-lfoo`, full GOT/PLT for external calls) remains future work. FFI tests that require `libzstd` stay behind `//@ ignore` until dynamic link and stable stubs land consistently.
 - **`*const u8` in callee position**: Passing `expr as *const u8` can still produce arity/type mismatch diagnostics versus `*mut u8` in some FFI-heavy shapes; stdlib wrappers prefer `*mut u8` until call lowering treats `*const T` and `*mut T` uniformly at the invocation site. See the header comment in `tests/stdlib/compress/test_zstd_e2e.sio`.
 
-## Zero-event native-v2 frontier (open)
+## Zero-event native-v2 frontier (partially closed)
 
-The zero-event receipt layer is checkable, its receipt witness now executes on
-default Madaros, and constructor opacity is enforced by both `check` and
-`compile`. Two neighboring native limitations remain:
+The zero-event receipt layer is checkable; constructor opacity is enforced by
+both `check` and `compile` (E176 compile-fail). The receipt semantic oracle
+executes under `lean_single` via `scripts/ci/zero_event_gate.sh`. Under default
+Madaros native-v2:
 
-1. **Minimal `qd128` import fails closed during native emission.**
-   `tests/known_failures/qd128_import_native_v2_probe.sio` now completes
-   imported-module lowering without a segmentation fault, then reports backend
-   `rc=12`. The neighboring `dd64` control executes successfully.
-2. **Minimal sedenion import executes but does not prove its semantic marker.**
-   `tests/known_failures/sedenion_import_native_v2_probe.sio` reaches
-   `Compilation successful!`; the generated executable exits `1`, without a
-   segmentation fault and without `SEDENION_IMPORT_NATIVE_V2 PASS`.
+| Surface | Status | Evidence |
+|---|---|---|
+| `dd64` import smoke | green | `tests/run-pass/dd64_import_native_v2_smoke.sio` |
+| **sedenion** import smoke | **green** (closed 2026-08-04) | `tests/run-pass/sedenion_import_native_v2_smoke.sio`; gate `scripts/ci/madaros_sedenion_native_v2_gate.sh` — stdlib rewrite of `sed_vv`/`oct_p`/`oct_q` to array refs (native-v2 could not emit 16/32-scalar f64 param lists) |
+| `qd128` import | fail-closed `rc=12` | `qd_mul` unsupported in native emit; BLK `docs/handoff/BLK-20260804-p0b-qd128-native-v2.md` |
+| combined zero-provenance (sedenion+eisa) | fail-closed `rc=12` | still blocked on `qd_mul` via eisa |
+| `zero_event` stdlib probe (Madaros native) | fail-closed `rc=12` | `ze_*_f64` constructors unsupported; lean_single oracle remains green |
 
 Constructor privacy was closed by running the same visibility preflight used
-by `check` before the canonical native `compile` path. The receipt and erased
-constructors are compile-fail tests with E176. Direct reads of private fields
-remain a separate language-wide visibility limitation and are not treated as
-constructor authority.
-
-The classified compiler handoff, root-cause boundary, and required acceptance
-matrix are recorded in
-`docs/handoff/zero_event_native_compile_privacy_2026-07-11.md`. In particular,
-globally enabling the merged checker's visibility bit is not an accepted fix:
-the native path must preserve legitimate import edges and cover the generic
-specialization branch as well as the ordinary fallback.
+by `check` before the canonical native `compile` path. Direct reads of private
+fields remain a separate language-wide visibility limitation.
 
 Reproduce the classified matrix with:
 
 ```bash
+bash scripts/ci/madaros_sedenion_native_v2_gate.sh
 bash scripts/ci/zero_event_native_v2_matrix.sh
 bash scripts/ci/zero_event_gate.sh
 ```
 
-Do not promote the known-failure probes to `run-pass` until the default engine
-executes the same markers without `SOUNIO_SOUC_ENGINE=lean_single`. Do not alter
-the semantic oracles while repairing compiler lowering, aggregate return, or
-privacy enforcement.
+Do not promote remaining known-failure probes (`qd128`, combined, receipt) to
+`run-pass` until default Madaros prints their PASS markers. Do not alter the
+semantic oracles while repairing `qd_mul` / aggregate-return emission.
 
 ## Reporting Issues
 

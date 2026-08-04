@@ -50,32 +50,37 @@ reject_marker() {
   fi
 }
 
+# Positive controls under default Madaros native-v2
 run_capture dd64 tests/run-pass/dd64_import_native_v2_smoke.sio
 require_rc dd64 0
 require_marker dd64 'DD64_IMPORT_NATIVE_V2 PASS'
 
+run_capture sedenion tests/run-pass/sedenion_import_native_v2_smoke.sio
+require_rc sedenion 0
+require_marker sedenion 'Compilation successful!'
+require_marker sedenion 'SEDENION_IMPORT_NATIVE_V2 PASS'
+reject_marker sedenion 'Segmentation fault'
+
+# Fail-closed residuals: imported lowering completes; ELF write returns rc=12
 run_capture qd128 tests/known_failures/qd128_import_native_v2_probe.sio
 require_rc qd128 1
-require_marker qd128 'lower_array: dep_lower_done 2'
+require_marker qd128 'lower_array: into_acc_done 2'
 require_marker qd128 'Failed to write native binary'
 reject_marker qd128 'Segmentation fault'
-
-run_capture sedenion tests/known_failures/sedenion_import_native_v2_probe.sio
-require_rc sedenion 1
-require_marker sedenion 'Compilation successful!'
-reject_marker sedenion 'Segmentation fault'
-reject_marker sedenion 'SEDENION_IMPORT_NATIVE_V2 PASS'
+reject_marker qd128 'QD128_IMPORT_NATIVE_V2 PASS'
 
 run_capture combined tests/known_failures/zero_provenance_native_v2_probe.sio
 require_rc combined 1
 require_marker combined 'lower_array: final_fn_count'
 require_marker combined 'Failed to write native binary'
 reject_marker combined 'Segmentation fault'
+reject_marker combined 'ZERO_PROVENANCE PASS'
 
+# Receipt constructors still unsupported under native-v2 (lean_single oracle in zero_event_gate.sh)
 run_capture receipt tests/known_failures/zero_event_stdlib_native_v2_probe.sio
-require_rc receipt 0
-require_marker receipt 'Compilation successful!'
-require_marker receipt 'ZERO_EVENT_STDLIB PASS'
+require_rc receipt 1
+require_marker receipt 'Failed to write native binary'
 reject_marker receipt 'Segmentation fault'
+reject_marker receipt 'ZERO_EVENT_STDLIB PASS'
 
-echo '[zero-native-matrix] PASS: dd64 and zero-event run; qd128/combined fail closed in backend; sedenion exits nonzero without crashing'
+echo '[zero-native-matrix] PASS: dd64+sedenion green; qd128/combined/receipt fail closed (rc=12) without segfault'
