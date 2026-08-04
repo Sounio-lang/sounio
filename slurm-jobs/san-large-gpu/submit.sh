@@ -38,6 +38,10 @@ kubectl cp "${ROOT_DIR}/scripts/research/suffering_aware_large_architecture.py" 
   "${NS}/${LOGIN_POD}:${PAYLOAD_DIR}/suffering_aware_large_architecture.py"
 kubectl cp "${ROOT_DIR}/slurm-jobs/san-large-gpu/run_gpu_worker.sh" \
   "${NS}/${LOGIN_POD}:${PAYLOAD_DIR}/run_gpu_worker.sh"
+if [[ -f "${ROOT_DIR}/artifacts/san_large/corpus_snapshot_v2000.npz" ]]; then
+  kubectl cp "${ROOT_DIR}/artifacts/san_large/corpus_snapshot_v2000.npz" \
+    "${NS}/${LOGIN_POD}:${PAYLOAD_DIR}/corpus_snapshot_v2000.npz"
+fi
 kubectl -n "${NS}" exec "${LOGIN_POD}" -- chmod +x "${PAYLOAD_DIR}/run_gpu_worker.sh"
 
 cat > /tmp/san_large_job_script.sh <<EOF

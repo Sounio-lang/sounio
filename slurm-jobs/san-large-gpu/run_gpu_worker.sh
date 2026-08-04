@@ -17,13 +17,28 @@ trap 'rm -rf "$TMPDIR"' EXIT
 mkdir -p "$TMPDIR/work"
 cp "$PAYLOAD_DIR/suffering_aware_large_architecture.py" "$TMPDIR/work/"
 cp -r "$DATA_SRC" "$TMPDIR/work/cifar-10-batches-py"
+if [[ -f "$PAYLOAD_DIR/corpus_snapshot_v2000.npz" ]]; then
+  cp "$PAYLOAD_DIR/corpus_snapshot_v2000.npz" "$TMPDIR/work/"
+  export SAN_LARGE_CORPUS="$TMPDIR/work/corpus_snapshot_v2000.npz"
+fi
 cd "$TMPDIR/work"
 
 export PYTHONUNBUFFERED=1
 export LD_LIBRARY_PATH="/host-nvidia:${LD_LIBRARY_PATH:-}"
 
-# Ensure torch + vision + tqdm are available. The worker image may already
-# have them; if not, install into a temp user base.
+# Ensure torch + vision + tqdm are available. Some worker images lack pip or
+# a CUDA torch; bootstrap into a temp user base when needed.
+PYUSR_TMP="$(mktemp -d /tmp/san-large-gpu-pyusr.XXXXXX)"
+export PYTHONUSERBASE="$PYUSR_TMP"
+export PATH="$PYUSR_TMP/bin:${PATH:-}"
+export PYTHONPATH="$(python3 -c 'import site; print(site.getusersitepackages())' 2>/dev/null):${PYTHONPATH:-}"
+
+if ! python3 -m pip --version >/dev/null 2>&1; then
+  echo "[worker] bootstrapping pip..."
+  curl -sfL https://bootstrap.pypa.io/get-pip.py -o "$TMPDIR/get-pip.py"
+  python3 "$TMPDIR/get-pip.py" --user --break-system-packages >/dev/null
+fi
+
 if ! python3 -c "import torch" >/dev/null 2>&1; then
   echo "[worker] installing torch..."
   python3 -m pip install --user --no-cache-dir --break-system-packages \

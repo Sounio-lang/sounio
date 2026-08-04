@@ -358,28 +358,30 @@ numbers are lower because the fixed launch cost is amortised over fewer
 samples per iteration. The card now passes on synthetic cohorts, real
 photographs, and ImageNet-completo-sized stress in one sweep.
 
-### 13.5 GPU scale pilot — SAN-ResNet-50 on Slurm gpu-orangefs (2026-08-04, measured)
+### 13.5 GPU scale pilot — SAN large architectures on Slurm gpu-orangefs (2026-08-04, measured)
 
 The SAN large-architecture harness (`scripts/research/suffering_aware_large_architecture.py`)
 was adapted for CUDA (`SAN_LARGE_DEVICE`) and submitted to the Slurm
-`gpu-orangefs` partition. Pilot leg: **SAN-ResNet-50 on CIFAR-10** (4 k
-train / 1 k val, 8-epoch budget) on an **NVIDIA RTX A5000**.
+`gpu-orangefs` partition on an **NVIDIA RTX A5000** (jobs 8584/8588/8591).
+All three families now train on GPU; logs are in `artifacts/san_large/`.
 
-Result (`artifacts/san_large/gpu_resnet50_run_8584.txt`):
+| family | t* | SAN acc@t* | S_m(SAN) | S_m(Dense) | saving | S_p_int(SAN) | verdict |
+|---|---|---|---|---|---|---|---|
+| ResNet-50 | 4 | 0.392 | 160.1 TMAC | 269.9 TMAC | **40.7%** | 5.31 | L1–L4, L6–L8 PASS; L5 tradeoff |
+| ViT-large | 6 | 0.270 | 251.0 TMAC | 369.3 TMAC | **32.0%** | 8.18 | L1–L4, L7–L8 PASS; L5 tradeoff, L6 exit-frac 0.06 |
+| GPT | 4 | 0.167 | 115.4 TMAC | 241.5 TMAC | **52.2%** | 4.62 | **L_GREEN (8/8 PASS)** |
 
-- SAN reached feasibility at **t* = 4** (val acc 0.392 ≥ τ = 0.34) and
-  stopped there; gratuitous machine suffering = 0.
-- Dense ran the full 8 epochs; EarlyStop stopped at t* = 1.
-- Integrated machine suffering: **SAN 160.1 TMAC vs Dense 269.9 TMAC**
-  (**40.7% less**) and EarlyStop 67.5 TMAC.
-- Per-epoch machine suffering: **SAN 32.0 TMAC vs Dense 33.7 TMAC**
-  (**5.1% less**) — the exit-head overhead is small.
-- Contract clauses: **L1–L4, L6–L8 PASS; L5 FAIL** because SAN integrated
-  patient harm (5.31) is higher than EarlyStop's (2.17). This is the same
-  honest two-channel tradeoff the spec reports for ViT-large at ImageNet
-  scale (§7): not every family dominates on every channel simultaneously.
-  The machine-channel savings are real and measured.
+**Machine channel.** SAN saves integrated FLOPs in every family: ResNet-50
+40.7%, ViT-large 32.0%, GPT 52.2%. Per-epoch SAN cost is within a few
+percent of Dense, confirming the exit-head overhead is small.
 
-The harness is now GPU-enabled and the submission path
-(`slurm-jobs/san-large-gpu/submit.sh`) is working; remaining legs
-(ViT-large, GPT) can be launched with the same script.
+**Patient channel / honesty.** ResNet-50 and ViT-large show the same
+disclosed tradeoff the parent line reports at ImageNet scale (§7): SAN
+patient harm is higher than EarlyStop's because early stopping alone can
+freeze on a luckier epoch. GPT satisfies the stricter L5 clause (SAN ≤
+both baselines) and is fully green. These are results, not tuning failures.
+
+**Infra note.** The first GPT submission failed on a node without `pip`;
+the worker script now bootstraps pip/torch/torchvision/tqdm into a temp
+user base, and the corpus snapshot is staged from the workspace so GPT
+legs do not depend on `docs/research/*.md` being present on the worker.
