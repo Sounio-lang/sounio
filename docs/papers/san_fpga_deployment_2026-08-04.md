@@ -30,7 +30,7 @@ SAN-ResNet-50, SAN-ViT-small/d384, and a tiny decoder LM (SAN-GPT-small). Suffer
 held-out feasibility target is met, eliminating gratuitous computation. We
 offload only the inference-time catastrophe-scan and FLOP-metering path to the
 FPGA; the trunk runs on the host CPU/GPU. On the U250 the scan kernel runs at
-**511 Msamples/s sustained** on a 1.2M-sample stress cohort (**95%** of the
+**511 Msamples/s sustained** on a 1.2M-sample stress cohort (**94.5%** of the
 540.8 Msamples/s bus-limited theoretical peak at the achieved 135.2 MHz clock)
 and consumes approximately **3.3 nJ/sample** incremental board-level energy
 (rounded to the precision the on-card power sensor supports). The kernel is
@@ -38,15 +38,16 @@ bit-exact against the control-VM golden model on synthetic cohorts, the stress
 cohort, and real photographs from ImageNette2-160.
 
 On NVIDIA GPUs (A5000 / RTX 4000 Ada) SAN training reduces the *metered-MAC*
-integrated machine burden by **40.7%** (ResNet-50), **32.0%** (ViT-small/d384), and
+integrated machine burden by **40.7%** (ResNet-50), **50.4%** (ViT-small/d384), and
 **52.2%** (SAN-GPT-small) relative to dense training in a small-subset, fast-convergence
 regime (validation accuracies 0.39, 0.26, 0.17, chosen to demonstrate the
 freeze-on-green mechanism, not to claim competitive task accuracy). ResNet-50
 also shows a measured 1.08x wall-time latency speedup on CIFAR-10, though this
 margin is small and task-dependent. We disclose the limits honestly: the energy
 number is board-level, not rack-level; full ImageNet-1k is unavailable, so
-ImageNette2-160 is the real-image proxy; and the attention-family SAN shows a
-disclosed patient-channel tradeoff. All artifacts, measurements, and
+ImageNette2-160 is the real-image proxy; and ResNet-50 shows a disclosed
+patient-channel tradeoff while the other families satisfy the stricter L5 clause
+in this run. All artifacts, measurements, and
 reproduction scripts are in the repository.
 
 ---
@@ -89,9 +90,9 @@ measured end to end.
 | 1 | A SAN training harness for ResNet-50, ViT-small/d384, and a tiny decoder LM on real data, with metered-MAC accounting and freeze-on-green | `scripts/research/suffering_aware_large_architecture.py` | `MEASURED` on GPU (small subset) |
 | 2 | An FPGA exit-audit / FLOP-meter kernel with integer semantics, no multipliers/DSPs, and one sample/cycle/PE throughput | `hardware/fpga/u250_catastrophe_scan/krnl_san_scan.cpp` | `MEASURED` on U250 |
 | 3 | On-target U250 benchmark: 511 Msamples/s on 1.2M stress cohort, ~3.3 nJ/sample board-level energy, bit-exact against golden model | `host_san_scan`, `host_san_scan_bench` | `MEASURED` |
-| 4 | GPU training study: 32–52% metered-MAC savings in a fast-convergence, small-subset regime; CIFAR-100 is infeasible under the same budget | Slurm jobs 8584/8588/8591, 8599–8607, 8611–8612 | `MEASURED / MIXED` |
+| 4 | GPU training study: 40.7–52.2% metered-MAC savings in a fast-convergence, small-subset regime; CIFAR-100 is infeasible under the same budget | Slurm jobs 8584/8588/8591, 8599–8607, 8611–8612 | `MEASURED / MIXED` |
 | 5 | Real-image kernel validation on ImageNette2-160, bit-exact on the U250 | `train_san_imagenette.py` + `host_san_scan` | `MEASURED` |
-| 6 | Honest accounting of limits: small-subset accuracy, partial meter convention, ImageNet-1k unavailable, board-level power, attention-family patient-channel tradeoff | §5, §6 | `DECLARED` |
+| 6 | Honest accounting of limits: small-subset accuracy, partial meter convention, ImageNet-1k unavailable, board-level power, ResNet-50 patient-channel tradeoff | §5, §6 | `DECLARED` |
 
 The primary systems contribution is the measured bridge between the SAN
 learning rule and FPGA deployment: the kernel is not an approximate accelerator
@@ -262,7 +263,7 @@ the DL380 U250. Table 1 reports the on-target campaign.
 | stress_1p2M | 1,200,000 | 5 | 481.9 | **511.0** | `HOST_SAN_SCAN_PASS` |
 | val_imagenette | 3,925 | 5 | 24.1 | 122.2 | `HOST_SAN_SCAN_PASS` |
 
-The 1.2M stress cohort reaches **511 Msamples/s sustained**, **95%** of the
+The 1.2M stress cohort reaches **511 Msamples/s sustained**, **94.5%** of the
 540.8 Msamples/s theoretical peak at the achieved 135.2 MHz clock. This is a
 best-case stress microbenchmark; smaller cohorts are enqueue/sync dominated and
 report lower sustained rates (Table 1). We report both numbers honestly rather
@@ -295,7 +296,7 @@ accuracy result.
 | family | t* | SAN acc@t* | S_m(SAN) | S_m(Dense) | saving | latency SAN | latency Dense | speedup | verdict |
 |---|---|---|---|---|---|---|---|---|---|
 | ResNet-50 | 4 | 0.390 | 160.1 TMAC | 269.9 TMAC | **40.7%** | 0.196 ms | 0.213 ms | 1.08x | L1–L4, L6–L8 PASS; L5 tradeoff |
-| ViT-small/d384 | 4 | 0.262 | 183.3 TMAC | 369.3 TMAC | **32.0%** | 0.310 ms | 0.308 ms | 0.99x | L1–L4, L7–L8 PASS; L5 PASS, L6 exit-frac 0.03 |
+| ViT-small/d384 | 4 | 0.262 | 183.3 TMAC | 369.3 TMAC | **50.4%** | 0.310 ms | 0.308 ms | 0.99x | L1–L4, L7–L8 PASS; L5 PASS, L6 exit-frac 0.03 |
 | SAN-GPT-small | 4 | 0.167 | 115.4 TMAC | 241.5 TMAC | **52.2%** | 0.343 ms | 0.341 ms | 0.99x | L1–L8 PASS |
 
 *S_m is the metered-MAC burden (MAC×2, backward = 2× forward, biases/norms/etc.
@@ -310,10 +311,10 @@ ViT-small/d384 and SAN-GPT-small are essentially tied with Dense in wall time be
 forward is short enough that dispatch overhead dominates; at larger scale the
 MAC savings would likely translate to latency savings as well.
 
-**Patient channel.** ResNet-50 and ViT-small/d384 show the disclosed tradeoff the
-parent line reports at ImageNet scale: SAN patient harm is slightly higher than
-EarlyStop's because early stopping alone can freeze on a luckier epoch. SAN-GPT-small
-satisfies the stricter L5 clause (SAN ≤ both baselines) and is fully green.
+**Patient channel.** ResNet-50 shows the disclosed tradeoff the parent line
+reports at ImageNet scale: SAN patient harm is slightly higher than EarlyStop's
+because early stopping alone can freeze on a luckier epoch. ViT-small/d384 and
+SAN-GPT-small satisfy the stricter L5 clause (SAN ≤ both baselines) in this run.
 These are results, not tuning failures. The cost matrix C is synthetic; no
 clinical claim is made.
 
@@ -434,9 +435,12 @@ explicit extrapolation.
 significant figures; three-decimal-nJ precision would require a higher-rate
 external meter.
 
-**Attention family shows a patient-channel tradeoff.** SAN-ViT-small/d384's
-integrated patient harm is slightly above the Dense baseline on this task. This
-is a disclosed Pareto point, not a hidden failure.
+**Patient channel is mixed.** ResNet-50 shows the disclosed patient-channel
+tradeoff on this task: its integrated patient harm is slightly above EarlyStop's
+because early stopping alone can freeze on a luckier epoch. ViT-small/d384 and
+SAN-GPT-small satisfy the stricter L5 clause (SAN ≤ both baselines) in this run.
+The parent line still reports an attention-family tradeoff at ImageNet scale, so
+the small-proxy result should not be read as a general claim.
 
 **Single bitstream, no DSE.** The work did not include placement/routing
 exploration, multi-bitstream campaigns, or comparison with HLS alternatives. The
@@ -461,10 +465,10 @@ FLOP-metering kernel on an FPGA, together with a GPU training study across three
 architecture families. The U250 kernel runs at 511 Msamples/s on a 1.2M-sample
 stress cohort and approximately 3.3 nJ/sample board-level energy, with bit-exact
 correctness verified against a golden model on synthetic, stress, and real-image
-cohorts. GPU training saves 32–52% of metered-MAC burden in a small-subset,
+cohorts. GPU training saves 40.7–52.2% of metered-MAC burden in a small-subset,
 fast-convergence regime. We have stated the limitations plainly — small-subset
 accuracy, partial meter convention, no full ImageNet-1k, board-level power only,
-attention-family tradeoff — because the honesty of the evidence is itself a
+ResNet-50 patient-channel tradeoff — because the honesty of the evidence is itself a
 contribution. The artifacts are available for reproduction.
 
 ---

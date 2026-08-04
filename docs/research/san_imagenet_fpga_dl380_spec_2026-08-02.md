@@ -352,7 +352,7 @@ golden model:
 | val_imagenette | 3 925 | 5 | 24.1 | 122.2 | `HOST_SAN_SCAN_PASS` |
 
 Interpretation: the 1.2 M stress cohort reaches **511 Msamples/s** sustained,
-95% of the theoretical 540.8 Msamples/s peak at the achieved 135.2 MHz clock
+94.5% of the theoretical 540.8 Msamples/s peak at the achieved 135.2 MHz clock
 (§13.2). The smaller cohorts are enqueue/sync dominated; their sustained
 numbers are lower because the fixed launch cost is amortised over fewer
 samples per iteration. The card now passes on synthetic cohorts, real
@@ -369,11 +369,11 @@ train on GPU; logs are in `artifacts/san_large/`.
 | family | t* | SAN acc@t* | S_m(SAN) | S_m(Dense) | saving | latency SAN | latency Dense | speedup | verdict |
 |---|---|---|---|---|---|---|---|---|---|
 | ResNet-50 | 4 | 0.390 | 160.1 TMAC | 269.9 TMAC | **40.7%** | 0.196 ms/s | 0.213 ms/s | **1.08x** | L1–L4, L6–L8 PASS; L5 tradeoff |
-| ViT-small/d384 | 4 | 0.262 | 183.3 TMAC | 369.3 TMAC | **32.0%** | 0.310 ms/s | 0.308 ms/s | 0.99x | L1–L4, L7–L8 PASS; L5 PASS, L6 exit-frac 0.03 |
+| ViT-small/d384 | 4 | 0.262 | 183.3 TMAC | 369.3 TMAC | **50.4%** | 0.310 ms/s | 0.308 ms/s | 0.99x | L1–L4, L7–L8 PASS; L5 PASS, L6 exit-frac 0.03 |
 | SAN-GPT-small | 4 | 0.167 | 115.4 TMAC | 241.5 TMAC | **52.2%** | 0.343 ms/s | 0.341 ms/s | 0.99x | **L_GREEN (8/8 PASS)** |
 
 **Machine channel.** SAN saves integrated FLOPs in every family: ResNet-50
-40.7%, ViT-small/d384 32.0%, SAN-GPT-small 52.2%. Per-epoch SAN cost is within a few
+40.7%, ViT-small/d384 50.4%, SAN-GPT-small 52.2%. Per-epoch SAN cost is within a few
 percent of Dense, confirming the exit-head overhead is small.
 
 **Real wall-time latency.** A `torch.cuda.synchronize()` benchmark on the
@@ -384,11 +384,11 @@ essentially tied because the CIFAR-10 / small-LM forward is so short that
 dispatch overhead dominates. The latency comparison is now measured, not
 extrapolated from FLOPs.
 
-**Patient channel / honesty.** ResNet-50 and ViT-small/d384 show the same
-disclosed tradeoff the parent line reports at ImageNet scale (§7): SAN
-patient harm is higher than EarlyStop's because early stopping alone can
-freeze on a luckier epoch. SAN-GPT-small satisfies the stricter L5 clause (SAN ≤
-both baselines) and is fully green. These are results, not tuning failures.
+**Patient channel / honesty.** ResNet-50 shows the same disclosed tradeoff the
+parent line reports at ImageNet scale (§7): SAN patient harm is higher than
+EarlyStop's because early stopping alone can freeze on a luckier epoch.
+ViT-small/d384 and SAN-GPT-small satisfy the stricter L5 clause (SAN ≤ both
+baselines) in this run. These are results, not tuning failures.
 
 **Infra note.** The first SAN-GPT-small submission failed on a node without `pip`;
 the worker script now bootstraps pip/torch/torchvision/tqdm into a temp
