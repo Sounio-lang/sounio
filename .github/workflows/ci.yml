@@ -175,6 +175,30 @@ jobs:
         run: bash scripts/ci/madaros_changed_tests_selftest.sh
       - name: Executable payload comparator self-test
         run: bash scripts/ci/executable_payload_compare_selftest.sh
+      # Arms 1-2 need no compiler and cost <1 s, so they run on every PR
+      # including docs-only ones. That is what stops the self-parse gate rotting
+      # into a no-op: `--science-boundary-closure` exits 0 even on `status
+      # incomplete`, so a gate written against its exit code would pass forever
+      # and look exactly like a working gate.
+      - name: Madaros self-parse verdict self-test
+        run: bash scripts/ci/madaros_self_parse_selftest.sh
+      # The tracked receipt asserts a sha256 for a binary. On 2026-08-04 it
+      # named an absolute host path, claimed a digest that did not match the file
+      # on disk, cited a commit 1515 behind HEAD, and was read by zero lines of
+      # code — while ~82 scripts resolved that binary as an oracle and
+      # scripts/install.sh preferred it over the committed one.
+      - name: Madaros prebuilt receipt matches its binary
+        run: bash scripts/ci/madaros_receipt_gate.sh
+      # 67% of gates carry no emptiness guard. This one is ratcheted: the known
+      # set may only shrink, and a NEW gate without a guard is red.
+      - name: Gates must not pass on no data
+        run: bash scripts/ci/gate_vacuity_gate.sh
+      # The shipped lean_single ELF must BE the byte-identical fixed point of
+      # current lean_single.sio. This gate existed, passed, and was wired to no
+      # workflow — so the one thing that would notice the shipped binary drifting
+      # from source was never run. ~2 s.
+      - name: Canonical lean_single fixed point
+        run: bash scripts/ci/canonical_compiler_gate.sh
       - name: Output-path invariants
         run: bash scripts/dev/check_outpath_invariant.sh
       - name: Output-path leading-dash guard
@@ -361,9 +385,15 @@ jobs:
   madaros-current-source-deref-f64:
     name: Madaros Current-Source f64 Lowering
     needs: impact
-    if: needs.impact.outputs.compiler == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true'
+    # `stdlib` is here for a measured reason: 7 files in main.sio's own import
+    # closure live under stdlib/compiler/ontology/ and classify as stdlib, not
+    # compiler. A PR that makes stdlib/compiler/ontology/store.sio unparseable
+    # breaks the compiler's closure and, without this, runs none of these gates.
+    if: needs.impact.outputs.compiler == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # 15 held a full Madaros build plus four sub-gates; the self-parse sweep adds
+    # ~20 s. The extra headroom is so a slow run reads as slow, not as a hang.
+    timeout-minutes: 18
     env:
       SOUNIO_MADAROS_F64_LOWERING_GATE_DIR: /tmp/sounio-madaros-current-source-f64-lowering
       SOUNIO_MADAROS_F64_LOWERING_GATE_KEEP: 1
@@ -373,6 +403,16 @@ jobs:
           fetch-depth: 0
       - name: Build Madaros once and run current-source f64 lowering gates
         run: bash scripts/ci/madaros_current_source_f64_lowering_gate.sh
+      # The compiler must be able to read its own source tree. On 2026-08-03 one
+      # built from main could not parse self-hosted/resolve/scope.sio; 417 gates
+      # missed it and it was found by accident. Re-measured afterwards: 118 of
+      # 559 files under self-hosted/ failed. This step reuses the ELF the step
+      # above already built and kept (KEEP=1) — it adds no build.
+      - name: Madaros parses its own source tree
+        env:
+          SOUNIO_MADAROS_SELF_PARSE_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+          SOUNIO_MADAROS_SELF_PARSE_REPORT_DIR: /tmp/sounio-madaros-current-source-f64-lowering/self-parse
+        run: bash scripts/ci/madaros_self_parse_gate.sh
       - name: Run changed Madaros tests with the current-source compiler
         env:
           SOUNIO_MADAROS_CHANGED_TESTS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
