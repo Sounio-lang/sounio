@@ -334,6 +334,73 @@ fecho atômico/oráculo hardcoded:
   repair (`ontology::repair`) e evolução (`ontology::evolve`) não mudam.
 - Gate `scripts/ci/ontology_frontiers_gate.sh`: **12/12 OK**.
 
+## Rodada 11 — fecho EL+ role-aware em ontologia real ROLE-RICA (GO/RO) (2026-08-04)
+
+A limitação honesta da rodada 9 (Anatomy: UM papel ativo, ZERO axiomas
+roleSub/roleComp) é fechada com dados reais role-ricos: **GO
+(`go-plus.owl`, 237 MB) + RO (`ro.owl`)**, baixados de
+`purl.obolibrary.org` para `real-data/downloads/`. O fallback sintético
+(Track A) não foi necessário.
+
+- **`real-data/extract_tbox.py --go`** — novo modo GO/RO:
+  `owl:TransitiveProperty` (elemento ou `rdf:type`) vira a cadeia
+  `r ∘ r ⊑ r`; `rdfs:subPropertyOf` vira `roleSub`;
+  `owl:propertyChainAxiom` (2 membros; RO usa `rdf:Description
+  rdf:about=`, não `owl:ObjectProperty rdf:resource=`) vira `roleComp`.
+  Slice **ancestor-closed** de go-plus com raiz `GO:0051301` ("cell
+  division", cone de 50 descendentes): a política é fillers/pais/parceiros
+  de disjunção **somente GO** (sem isso o fecho ancestral explode:
+  2.263 classes para GO:0006915; medido) + parceiros de disjunção. O
+  conjunto de papéis é **RO-fechado** (superpropriedades e alvos de
+  cadeias cujos membros são usados), o que adiciona `overlaps`
+  (RO:0002131) — papel que só recebe arestas derivadas. Restrições no
+  lado superclasse (`∃r.F ⊑ C`) foram sondadas: **0 ocorrências** em
+  go-plus. Resultado: **H=204 classes, NR=8 papéis, 253 sub, 93 exsub,
+  43 disj, 2 roleSub (part_of/has_part ⊑ overlaps), 9 roleComp**
+  (transitividade de part_of/has_part/overlaps/regulates + cadeias
+  cruzadas como `has_part ∘ part_of ⊑ overlaps`), universo internado
+  U = 1.845 conceitos (cap U ≤ 2.048 para viabilidade densa).
+- **`real-data/scale/gen_elplus_data.py --go`** — o mesmo espelho python
+  do fixpoint geral de 8 regras da rodada 9, agora sobre o slice GO,
+  mais: projeção atômica (bitmask de ancestrais só do sub estatuído),
+  **ablações** (fixpoint sem roleComp / sem roleSub) e a **asserção do
+  teorema de perfil**: sem conjunções e sem restrições superclasse,
+  papéis não adicionam subsunções/conflitos ATÔMICOS (o script aborta se
+  violado). Emite `go_elplus_data.sio` (400 assignments; packing
+  `child*1024+parent`, `(child*32+role)*1024+filler`) e
+  `go_elplus_driver.sio` com os valores do espelho em `go_expected_*()`.
+- **`real-data/scale/go_elplus_driver.sio`** — driver auto-contido: a
+  capacidade densa do stdlib (64 conceitos) não comporta U=1.845 e
+  matrizes de módulo não cruzam fronteira `&!`, então as matrizes de
+  trabalho são globais do próprio driver (sb/sx separadas + cubo de
+  papéis; stor/rtos como helpers guardados). Três fixpoints: completo,
+  sem roleComp, sem roleSub — mais a projeção atômica própria.
+  **`ALL PASS` em ~6 s** (compilação + run), todos os 16 números iguais
+  ao espelho.
+- **Resultados**: 24.524 células S / 21.628 arestas de papel (3.380 com
+  fonte atômica = 3.380 alvos existenciais revelados por papéis);
+  1.051 arestas atômicas role-aware **= projeção atômica**; 8.436
+  conflitos ordenados **= projeção atômica** (teorema de perfil verificado
+  computacionalmente nos dois lados). Ablações: sem roleComp → 18.006
+  células S / 15.110 arestas (**roleComp contribui 6.518 arestas — a
+  família dominante neste dado**); sem roleSub → 21.834 / 18.938
+  (roleSub contribui 2.690). Comparação com a rodada 9: em Anatomy
+  roleSub/roleComp eram ZERO; aqui respondem por 42% das arestas de papel.
+- **Limitações honestas**: slice de 204 classes (cap por viabilidade
+  densa; GO completo tem ~52k classes GO / 85k declaradas); fillers
+  externos (CHEBI/CL/UBERON) excluídos; como go-plus não tem restrições
+  superclasse nem conjunções extraídas, os conflitos atômicos não mudam
+  com papéis — **medido**, não assumido.
+- Gate `scripts/ci/ontology_frontiers_gate.sh`: **13/13 OK** (driver GO
+  adicionado).
+- Revisão matemática obrigatória (política do repo):
+  `bin/llm-offload -t math-review -p xai` sobre as 4 claims (teorema de
+  perfil, bijeção stoR/RtoS, equivalência do fixpoint, framing das
+  ablações) → **PASS**, todos [OK]. Log em
+  `agent_logs/go_elplus_offload_2026-08-04.md` (o log canônico
+  `.claude/llm_offload_log.md` estava sob claim ativa de outra lane).
+
+
 ## Arquivos criados
 
 - `artifacts/ontology-frontiers/{epistemic-alignment-repair,epistemic-claim-status,consistent-ontology-evolution}/FRONTIER.md`
@@ -363,6 +430,12 @@ fecho atômico/oráculo hardcoded:
 - `artifacts/ontology-frontiers/real-data/scale/{elplus_data.sio,elplus_synth_data.sio,elplus_scale_driver.sio}`
   (rodada 9, gerados)
 - `artifacts/ontology-frontiers/real-data/roles.tsv` (rodada 9, gerado)
+- `artifacts/ontology-frontiers/real-data/downloads/{go-plus.owl,ro.owl}`
+  (rodada 11 — GO + RO, 237 MB + 1,2 MB)
+- `artifacts/ontology-frontiers/real-data/{go_elplus_tbox.txt,go_roles.tsv,go_classes.tsv}`
+  (rodada 11, gerados pelo modo `--go` do extract_tbox.py)
+- `artifacts/ontology-frontiers/real-data/scale/{go_elplus_data.sio,go_elplus_driver.sio}`
+  (rodada 11, gerados pelo modo `--go` do gen_elplus_data.py)
 
 ## Gate CI
 
@@ -373,11 +446,12 @@ editar nenhum arquivo existente:
 bash scripts/ci/ontology_frontiers_gate.sh   # funciona a partir de qualquer cwd
 ```
 
-O que ele checa, para cada um dos 12 protótipos (`alignment_repair.sio`,
+O que ele checa, para cada um dos 13 protótipos (`alignment_repair.sio`,
 `claim_status.sio`, `interval_claims.sio`, `version_chain.sio`,
 `version_chain_removal.sio`, `minimal_repair_demo.sio`,
 `el_conflict_demo.sio`, `tie_repair_demo.sio`, `real_repair_driver.sio`,
-`full_scale_driver.sio`, `elplus_scale_driver.sio` — rodada 9 — e
+`full_scale_driver.sio`, `elplus_scale_driver.sio` — rodada 9,
+`go_elplus_driver.sio` — rodada 11 — e
 `examples/ontology_pipeline_demo.sio`):
 
 1. `./bin/souc check <file>` — exige `check: OK` na saída e ausência de
@@ -418,6 +492,17 @@ wrapper pode ser trocado via `SOUC_BIN`. Os repros de compilador em
     elplus denso.
   - `artifacts/ontology-frontiers/real-data/REAL_RESULTS.md` — adendo da
     rodada 10 (§10) + saída atualizada (§5).
+- Rodada 11 (GO/RO role-rich):
+  - `artifacts/ontology-frontiers/real-data/extract_tbox.py` — modo
+    `--go/--ro/--go-root`: slice ancestor-closed de GO (GO-only) +
+    axiomas de papel de RO (TransitiveProperty → cadeia, subPropertyOf,
+    propertyChainAxiom com membros `rdf:Description`), RO-fecho do
+    conjunto de papéis, caps de papel/universo.
+  - `artifacts/ontology-frontiers/real-data/scale/gen_elplus_data.py` —
+    modo `--go`: espelho do fixpoint de 8 regras sobre o slice GO,
+    projeção atômica, ablações roleComp/roleSub, asserção do teorema de
+    perfil; emite `go_elplus_data.sio` + `go_elplus_driver.sio`.
+  - `scripts/ci/ontology_frontiers_gate.sh` — 13 protótipos (driver GO).
 
 Commits na branch: `54cef93d7` (rodadas 1-2), `156858916` (rodada 3);
 rodada 4 aguardando autorização de commit.

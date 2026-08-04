@@ -70,7 +70,893 @@ Known compiler workarounds applied (verified rounds 6-7, REAL_RESULTS.md):
     over byte-identically; see the driver header).
 """
 
+import argparse
 import sys
+
+# ── round 11: GO/RO role-rich pipeline (--go) ────────────────────────────
+# Reads ../go_elplus_tbox.txt (written by extract_tbox.py --go, an
+# ancestor-closed GO slice + the applicable RO role axioms), runs the
+# general 8-rule fixpoint on the interned universe (atoms 0..H-1, top = H,
+# no conjunctions, exid[(r,f)] = B + r*B + f with B = H+1, U = B + NR*B),
+# and emits:
+#
+#   go_elplus_data.sio    packed axioms + go_expected_*() mirror values
+#   go_elplus_driver.sio  self-contained dense fixpoint driver (sb/sx split
+#                         matrices + role cube over the interned universe;
+#                         compares against the mirror AND against the
+#                         atomic projection, and re-runs the closure with
+#                         roleComp / roleSub disabled to attribute the
+#                         derived edges to each rule family)
+#
+# The mirror also computes the two ablations (no roleComp, no roleSub)
+# and the atomic projection (stated-sub-only ancestor sets), and asserts
+# the profile theorem for this data shape (no conjunctions, no
+# superclass-side restrictions): roles add existential targets but no new
+# ATOMIC subsumptions or conflicts.
+
+
+def load_go(path="../go_elplus_tbox.txt"):
+    sub, exsub, disj, rsub, rcomp = [], [], set(), [], []
+    H = NR = 0
+    with open(path) as f:
+        for line in f:
+            if line.startswith("# classes_go"):
+                H = int(line.split()[2])
+            elif line.startswith("# roles_go"):
+                NR = int(line.split()[2])
+            elif line.startswith("#") or not line.strip():
+                continue
+            else:
+                p = line.split()
+                if p[0] == "sub":
+                    sub.append((int(p[2]), int(p[3])))
+                elif p[0] == "exsub":
+                    exsub.append((int(p[2]), int(p[3]), int(p[4])))
+                elif p[0] == "disj":
+                    a, b = int(p[2]), int(p[3])
+                    disj.add((min(a, b), max(a, b)))
+                elif p[0] == "roleSub":
+                    rsub.append((int(p[2]), int(p[3])))
+                elif p[0] == "roleComp":
+                    rcomp.append((int(p[2]), int(p[3]), int(p[4])))
+    return H, NR, sub, exsub, sorted(disj), rsub, rcomp
+
+
+def _conflict_pairs(H, S_atoms, disj):
+    """Ordered atom pairs (c1, c2), c1 != c2, such that some atom
+    ancestor of c1 is disjoint with some atom ancestor of c2.
+    S_atoms[c] = bitmask of atom ancestors (no top bit)."""
+    pb = [0] * H
+    for a, b in disj:
+        pb[a] |= 1 << b
+        pb[b] |= 1 << a
+    pm = [0] * H
+    for c in range(H):
+        m, p, k = S_atoms[c], 0, 0
+        while m:
+            if m & 1:
+                p |= pb[k]
+            m >>= 1
+            k += 1
+        pm[c] = p
+    n = 0
+    for c1 in range(H):
+        for c2 in range(H):
+            if c1 != c2 and (pm[c1] & S_atoms[c2]) != 0:
+                n += 1
+    return n
+
+
+def mirror_go(H, NR, sub, exsub, disj, rsub, rcomp):
+    B = H + 1
+    S, R, U, base, top, ckind, carg1, carg2, exid, rclos, rounds = \
+        fixpoint(H, NR, [], sub, exsub, rsub, rcomp)
+    atoms = set(range(H))
+
+    def stats(S_, R_):
+        s_cells = sum(len(s) for s in S_)
+        r_edges = len(R_)
+        r_atom = sum(1 for (_r, c, _f) in R_ if c < H)
+        atom_edges = sum(1 for c in range(H) for d in S_[c] if d in atoms)
+        ex_targets = sum(1 for c in range(H) for d in S_[c]
+                         if ckind[d] == 3)
+        return s_cells, r_edges, r_atom, atom_edges, ex_targets
+
+    s_cells, r_edges, r_atom, atom_edges, ex_targets = stats(S, R)
+    S2, R2, _, _, _, _, _, _, _, _, _ = \
+        fixpoint(H, NR, [], sub, exsub, rsub, [])
+    S3, R3, _, _, _, _, _, _, _, _, _ = \
+        fixpoint(H, NR, [], sub, exsub, [], rcomp)
+    sc_norc, re_norc, _, _, _ = stats(S2, R2)
+    sc_nors, re_nors, _, _, _ = stats(S3, R3)
+
+    # atomic projection: stated-sub ancestor sets only (bitmask)
+    TOPBIT = 1 << H
+    AM = TOPBIT - 1
+    anc = [(1 << c) | TOPBIT for c in range(H)] + [TOPBIT]
+    changed = True
+    while changed:
+        changed = False
+        for c, p in sub:
+            new = anc[c] | anc[p]
+            if new != anc[c]:
+                anc[c] = new
+                changed = True
+    atomic_edges = sum(bin(anc[c] & AM).count("1") for c in range(H))
+    conf_atomic = _conflict_pairs(H, [anc[c] & AM for c in range(H)],
+                                  disj)
+
+    # full-closure conflicts (set-based over the role-aware S)
+    satoms = [0] * H
+    for c in range(H):
+        m = 0
+        for d in S[c]:
+            if d in atoms:
+                m |= 1 << d
+        satoms[c] = m
+    conf_full = _conflict_pairs(H, satoms, disj)
+
+    # profile theorem for this data shape (no conjs, no exsuper):
+    # roles must not add atomic subsumptions or conflicts
+    if atom_edges != atomic_edges:
+        sys.exit(f"GO MIRROR FAILED: role-aware atom edges {atom_edges} "
+                 f"!= atomic projection {atomic_edges}")
+    if conf_full != conf_atomic:
+        sys.exit(f"GO MIRROR FAILED: role-aware conflicts {conf_full} "
+                 f"!= atomic projection {conf_atomic}")
+
+    return {
+        "H": H, "B": B, "NR": NR, "NB": NR * B, "U": U,
+        "NSUB": len(sub), "NEX": len(exsub), "NDJ": len(disj),
+        "NRS": len(rsub), "NCH": len(rcomp),
+        "s_cells": s_cells, "r_edges": r_edges, "r_atom": r_atom,
+        "atom_edges": atom_edges, "ex_targets": ex_targets,
+        "atomic_edges": atomic_edges,
+        "conf_full": conf_full, "conf_atomic": conf_atomic,
+        "sc_norc": sc_norc, "re_norc": re_norc,
+        "sc_nors": sc_nors, "re_nors": re_nors,
+        "rounds": rounds,
+    }
+
+
+def emit_go_data(path, ex, sub, exsub, disj, rsub, rcomp):
+    with open(path, "w") as f:
+        f.write("// GENERATED by gen_elplus_data.py --go — do not edit by "
+                "hand.\n")
+        f.write("// Round 11: GO/RO role-rich slice (see go_elplus_tbox."
+                "txt) with\n// mirror values embedded as go_expected_*()"
+                ".\n")
+        for k_, v in ex.items():
+            f.write(f"// {k_} = {v}\n")
+        f.write("\n")
+        for name, key in (("h", "H"), ("roles", "NR"), ("sub", "NSUB"),
+                          ("exsub", "NEX"), ("disj", "NDJ"),
+                          ("rolesub", "NRS"), ("rolecomp", "NCH"),
+                          ("s_cells", "s_cells"), ("r_edges", "r_edges"),
+                          ("r_atom", "r_atom"),
+                          ("atom_edges", "atom_edges"),
+                          ("ex_targets", "ex_targets"),
+                          ("atomic_edges", "atomic_edges"),
+                          ("conf_full", "conf_full"),
+                          ("conf_atomic", "conf_atomic"),
+                          ("s_cells_no_rc", "sc_norc"),
+                          ("r_edges_no_rc", "re_norc"),
+                          ("s_cells_no_rs", "sc_nors"),
+                          ("r_edges_no_rs", "re_nors")):
+            f.write(f"pub fn go_expected_{name}() -> i64 {{ return "
+                    f"{ex[key]} }}\n")
+        f.write("\n")
+        nsub = max(1, ex["NSUB"])
+        nex = max(1, ex["NEX"])
+        ndj = max(1, ex["NDJ"])
+        nrs = max(1, ex["NRS"])
+        nch = max(1, ex["NCH"])
+        f.write(f"pub var go_sub: [i64; {nsub}] = [0; {nsub}]  "
+                f"// child*1024+parent\n")
+        f.write(f"pub var go_exsub: [i64; {nex}] = [0; {nex}]  "
+                f"// (child*32+role)*1024+filler\n")
+        f.write(f"pub var go_disj: [i64; {ndj}] = [0; {ndj}]  "
+                f"// a*1024+b\n")
+        f.write(f"pub var go_rsub: [i64; {nrs}] = [0; {nrs}]  "
+                f"// sub*32+super\n")
+        f.write(f"pub var go_chain: [i64; {nch}] = [0; {nch}]  "
+                f"// (r1*32+r2)*32+r3\n\n")
+        assigns = []
+        for k_, (c, p) in enumerate(sub):
+            assigns.append(f"go_sub[{k_}] = {c * 1024 + p}")
+        for k_, (c, r, fl) in enumerate(exsub):
+            assigns.append(f"go_exsub[{k_}] = {(c * 32 + r) * 1024 + fl}")
+        for k_, (a, b) in enumerate(disj):
+            assigns.append(f"go_disj[{k_}] = {a * 1024 + b}")
+        for k_, (r, s) in enumerate(rsub):
+            assigns.append(f"go_rsub[{k_}] = {r * 32 + s}")
+        for k_, (r1, r2, r3) in enumerate(rcomp):
+            assigns.append(f"go_chain[{k_}] = {(r1 * 32 + r2) * 32 + r3}")
+        if not assigns:
+            assigns.append("go_sub[0] = 0")
+        emit_init(f, assigns)
+    return len(assigns)
+
+
+GO_DRIVER = '''//@ run-pass
+//@ expect-stdout: ALL PASS
+// Round 11: EL+ role-aware closure on a ROLE-RICH real ontology — an
+// ancestor-closed slice of GO (go-plus.owl, root GO:0051301 "cell
+// division") enriched with the applicable RO (ro.owl) role axioms.
+// Executable mirror of the verified saturation engine of
+// formal/OntologyELPlusClosureComplete.lean (crStep iterated to a
+// fixpoint like closeSatF; subBPlusC_iff / conflictBPlusC_iff).
+//
+// Data profile (extract_tbox.py --go): H = @H@ classes, @NSUB@ sub
+// axioms, @NEX@ existential restrictions C <= ex r.F, @NDJ@ disjoint
+// pairs, NR = @NR@ roles with @NRS@ roleSub and @NCH@ roleComp axioms
+// (incl. transitivity of part_of/has_part/overlaps and cross chains
+// such as has_part o part_of <= overlaps).  Unlike the Anatomy track
+// (round 9: one role, no role axioms), the roleSub and roleComp rules
+// fire on REAL data here.
+//
+// Interned universe (no conjunctions; go-plus has no superclass-side
+// restrictions): atoms 0..H-1, top = H, B = H+1 base concepts,
+// exid(r,f) = B + r*B + f, U = B + NR*B = @U@ concepts.
+//
+// Structure (self-contained; the stdlib dense variant's 64-concept
+// capacity does not fit U, and module-level arrays must not cross a &!
+// boundary on this lane, so the workspace matrices are module-level in
+// THIS file and mutated by the helper fns directly):
+//   sb[c*B+d]      base targets of concept c
+//   sx[c*NB+x]     existential targets of concept c (x = r*B+f)
+//   cube[(r*U+c)*B+f]  role edge (r, c, f)
+//   stor/rtos      the stoR / RtoS rule pair as guard-checked helpers
+//   run_fixpoint(with_rsub, with_rcomp)  the 8-rule loop: full-row
+//   transitivity merge + a cube sweep (Rmono, roleSub?, roleComp?)
+//
+// Checks (mirror values embedded as go_expected_*()):
+//   1. atomic projection (stated-sub-only closure): edges + conflicts
+//   2. full role-aware closure: S cells, role edges, atom edges,
+//      existential targets, conflicts — all must equal the mirror
+//   3. profile theorem: role-aware atom edges == atomic edges and
+//      role-aware conflicts == atomic conflicts (roles reveal
+//      existential subsumptions, no new atomic ones)
+//   4. ablations: closure with roleComp disabled / roleSub disabled —
+//      attributes the derived edges to each rule family
+//
+// Data: go_elplus_data.sio (generated by gen_elplus_data.py --go).
+
+import go_elplus_data::*
+
+const H: i64 = @H@
+const B: i64 = @B@
+const NR: i64 = @NR@
+const NB: i64 = @NB@
+const U: i64 = @U@
+
+pub var sb: [bool; @UB@] = [false; @UB@]
+pub var sx: [bool; @UNB@] = [false; @UNB@]
+pub var cube: [bool; @CUBE@] = [false; @CUBE@]
+pub var aclos: [bool; @HB@] = [false; @HB@]
+pub var disjm: [bool; @BB@] = [false; @BB@]
+pub var pm: [bool; @HB@] = [false; @HB@]
+pub var rclos: [bool; 1024] = [false; 1024]
+pub var fx_changed: bool = false
+
+// stoR: concept a has existential target x = ex r.f  =>  edge (r, a, f)
+fn stor(a: i64, x: i64) with Mut, Div, Panic {
+    let r = x / B
+    let f = x - r * B
+    let idx = (r * U + a) * B + f
+    if !cube[idx] {
+        cube[idx] = true
+        fx_changed = true
+    }
+}
+
+// RtoS: edge (r, c, f)  =>  c <= ex r.f (and stoR of that cell, guarded)
+fn rtos(c: i64, r: i64, f: i64) with Mut, Div, Panic {
+    let x = r * B + f
+    if !sx[c * NB + x] {
+        sx[c * NB + x] = true
+        fx_changed = true
+        stor(c, x)
+    }
+}
+
+fn reinit_mats() with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < @UB@ {
+        sb[i] = false
+        i = i + 1
+    }
+    i = 0
+    while i < @UNB@ {
+        sx[i] = false
+        i = i + 1
+    }
+    i = 0
+    while i < @CUBE@ {
+        cube[i] = false
+        i = i + 1
+    }
+    fx_changed = false
+}
+
+fn seed_closure(nsub: i64, nex: i64) with Mut, Div, Panic {
+    var c: i64 = 0
+    while c < U {
+        if c < B {
+            sb[c * B + c] = true
+        } else {
+            sx[c * NB + (c - B)] = true
+            stor(c, c - B)
+        }
+        sb[c * B + H] = true
+        c = c + 1
+    }
+    var k: i64 = 0
+    var p: i64 = 0
+    while k < nsub {
+        c = go_sub[k] / 1024
+        p = go_sub[k] - c * 1024
+        sb[c * B + p] = true
+        k = k + 1
+    }
+    k = 0
+    var pk: i64 = 0
+    var r: i64 = 0
+    var f: i64 = 0
+    while k < nex {
+        pk = go_exsub[k]
+        f = pk - (pk / 1024) * 1024
+        pk = pk / 1024
+        r = pk - (pk / 32) * 32
+        c = pk / 32
+        rtos(c, r, f)
+        k = k + 1
+    }
+}
+
+// The 8-rule completion loop (transitivity, stoR, Rmono, roleSub,
+// roleComp, RtoS; conjElim/conjIntro are vacuous — no conjunctions).
+// Returns the number of rounds taken.
+fn run_fixpoint(with_rsub: i64, with_rcomp: i64, nch: i64) -> i64 with Mut, Div, Panic {
+    var rounds: i64 = 0
+    var a: i64 = 0
+    var k: i64 = 0
+    var d: i64 = 0
+    var x: i64 = 0
+    var has = false
+    var r: i64 = 0
+    var c: i64 = 0
+    var f: i64 = 0
+    var d2: i64 = 0
+    var s: i64 = 0
+    var k2: i64 = 0
+    var pk: i64 = 0
+    var r1: i64 = 0
+    var r2: i64 = 0
+    var r3: i64 = 0
+    var e2: i64 = 0
+    fx_changed = true
+    while fx_changed {
+        fx_changed = false
+        rounds = rounds + 1
+
+        // (T) transitivity: merge row k into row a for every a <= k
+        a = 0
+        while a < U {
+            k = 0
+            while k < U {
+                if k < B {
+                    has = sb[a * B + k]
+                } else {
+                    has = sx[a * NB + k - B]
+                }
+                if has {
+                    d = 0
+                    while d < B {
+                        if sb[k * B + d] && !sb[a * B + d] {
+                            sb[a * B + d] = true
+                            fx_changed = true
+                        }
+                        d = d + 1
+                    }
+                    x = 0
+                    while x < NB {
+                        if sx[k * NB + x] && !sx[a * NB + x] {
+                            sx[a * NB + x] = true
+                            fx_changed = true
+                            stor(a, x)
+                        }
+                        x = x + 1
+                    }
+                }
+                k = k + 1
+            }
+            a = a + 1
+        }
+
+        // cube sweep: Rmono, roleSub, roleComp over set edges
+        r = 0
+        while r < NR {
+            c = 0
+            while c < U {
+                f = 0
+                while f < B {
+                    if cube[(r * U + c) * B + f] {
+                        // (RM) Rmono: D <= D' (base) gives (r, c, D')
+                        d2 = 0
+                        while d2 < B {
+                            if sb[f * B + d2] && !cube[(r * U + c) * B + d2] {
+                                cube[(r * U + c) * B + d2] = true
+                                fx_changed = true
+                                rtos(c, r, d2)
+                            }
+                            d2 = d2 + 1
+                        }
+                        // (RS) roleSub: r <=* s gives (s, c, f)
+                        if with_rsub == 1 {
+                            s = 0
+                            while s < NR {
+                                if rclos[r * 32 + s] && !cube[(s * U + c) * B + f] {
+                                    cube[(s * U + c) * B + f] = true
+                                    fx_changed = true
+                                    rtos(c, s, f)
+                                }
+                                s = s + 1
+                            }
+                        }
+                        // (RC) roleComp: (r1,c,f) and (r2,f,e) give (r3,c,e)
+                        if with_rcomp == 1 {
+                            k2 = 0
+                            while k2 < nch {
+                                pk = go_chain[k2]
+                                r3 = pk - (pk / 32) * 32
+                                pk = pk / 32
+                                r2 = pk - (pk / 32) * 32
+                                r1 = pk / 32
+                                if r1 == r {
+                                    e2 = 0
+                                    while e2 < B {
+                                        if cube[(r2 * U + f) * B + e2] && !cube[(r3 * U + c) * B + e2] {
+                                            cube[(r3 * U + c) * B + e2] = true
+                                            fx_changed = true
+                                            rtos(c, r3, e2)
+                                        }
+                                        e2 = e2 + 1
+                                    }
+                                }
+                                k2 = k2 + 1
+                            }
+                        }
+                    }
+                    f = f + 1
+                }
+                c = c + 1
+            }
+            r = r + 1
+        }
+    }
+    return rounds
+}
+
+fn count_s_cells() -> i64 with Div, Panic {
+    var n: i64 = 0
+    var i: i64 = 0
+    while i < @UB@ {
+        if sb[i] {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < @UNB@ {
+        if sx[i] {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// role edges; atoms_only == 1 restricts to atom sources
+fn count_r_edges(atoms_only: i64) -> i64 with Div, Panic {
+    var n: i64 = 0
+    var r: i64 = 0
+    var c: i64 = 0
+    var f: i64 = 0
+    var cmax: i64 = U
+    if atoms_only == 1 {
+        cmax = H
+    }
+    while r < NR {
+        c = 0
+        while c < cmax {
+            f = 0
+            while f < B {
+                if cube[(r * U + c) * B + f] {
+                    n = n + 1
+                }
+                f = f + 1
+            }
+            c = c + 1
+        }
+        r = r + 1
+    }
+    return n
+}
+
+// atom-atom subsumptions over the role-aware closure
+fn count_atom_edges() -> i64 with Div, Panic {
+    var n: i64 = 0
+    var c: i64 = 0
+    var d: i64 = 0
+    while c < H {
+        d = 0
+        while d < H {
+            if sb[c * B + d] {
+                n = n + 1
+            }
+            d = d + 1
+        }
+        c = c + 1
+    }
+    return n
+}
+
+// existential targets of atom rows (subsumptions revealed by roles)
+fn count_ex_targets() -> i64 with Div, Panic {
+    var n: i64 = 0
+    var c: i64 = 0
+    var x: i64 = 0
+    while c < H {
+        x = 0
+        while x < NB {
+            if sx[c * NB + x] {
+                n = n + 1
+            }
+            x = x + 1
+        }
+        c = c + 1
+    }
+    return n
+}
+
+// derived conflicts over a base-projection matrix (sel: 0 = role-aware
+// sb, anything else = atomic aclos): ordered atom pairs (c1, c2),
+// c1 != c2, with some atom ancestor of c1 disjoint with some atom
+// ancestor of c2.  Rebuilds the partner-mask matrix pm in place.
+fn count_conflicts(sel: i64) -> i64 with Div, Panic {
+    var c: i64 = 0
+    var d1: i64 = 0
+    var d2: i64 = 0
+    var any = false
+    var base_cell = false
+    while c < H {
+        d2 = 0
+        while d2 < B {
+            any = false
+            d1 = 0
+            while d1 < H {
+                if sel == 0 {
+                    base_cell = sb[c * B + d1]
+                } else {
+                    base_cell = aclos[c * B + d1]
+                }
+                if base_cell && disjm[d1 * B + d2] {
+                    any = true
+                }
+                d1 = d1 + 1
+            }
+            pm[c * B + d2] = any
+            d2 = d2 + 1
+        }
+        c = c + 1
+    }
+    var n: i64 = 0
+    var c1: i64 = 0
+    var c2: i64 = 0
+    var hit = false
+    while c1 < H {
+        c2 = 0
+        while c2 < H {
+            if c1 != c2 {
+                hit = false
+                d2 = 0
+                while d2 < H {
+                    if sel == 0 {
+                        base_cell = sb[c2 * B + d2]
+                    } else {
+                        base_cell = aclos[c2 * B + d2]
+                    }
+                    if base_cell && pm[c1 * B + d2] {
+                        hit = true
+                    }
+                    d2 = d2 + 1
+                }
+                if hit {
+                    n = n + 1
+                }
+            }
+            c2 = c2 + 1
+        }
+        c1 = c1 + 1
+    }
+    return n
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var n_fail = 0
+    init_data()
+
+    // fixup writes for the garbage leading cells of module-level splat
+    // bool arrays (known compiler pitfall, rounds 6-9)
+    sb[0] = false
+    sb[1] = false
+    sb[2] = false
+    sx[0] = false
+    sx[1] = false
+    sx[2] = false
+    cube[0] = false
+    cube[1] = false
+    cube[2] = false
+    aclos[0] = false
+    aclos[1] = false
+    aclos[2] = false
+    disjm[0] = false
+    disjm[1] = false
+    disjm[2] = false
+    pm[0] = false
+    pm[1] = false
+    pm[2] = false
+    rclos[0] = false
+    rclos[1] = false
+    rclos[2] = false
+    fx_changed = false
+
+    let NSUB = go_expected_sub()
+    let NEX = go_expected_exsub()
+    let NDJ = go_expected_disj()
+    let NRS = go_expected_rolesub()
+    let NCH = go_expected_rolecomp()
+
+    // role-hierarchy closure (reflexive + transitive over stated roleSub)
+    var r: i64 = 0
+    while r < NR {
+        rclos[r * 32 + r] = true
+        r = r + 1
+    }
+    var k: i64 = 0
+    var rr: i64 = 0
+    var ss: i64 = 0
+    while k < NRS {
+        rr = go_rsub[k] / 32
+        ss = go_rsub[k] - rr * 32
+        rclos[rr * 32 + ss] = true
+        k = k + 1
+    }
+    var changed2 = true
+    var a: i64 = 0
+    var b: i64 = 0
+    var d: i64 = 0
+    while changed2 {
+        changed2 = false
+        a = 0
+        while a < NR {
+            b = 0
+            while b < NR {
+                if rclos[a * 32 + b] {
+                    d = 0
+                    while d < NR {
+                        if rclos[b * 32 + d] && !rclos[a * 32 + d] {
+                            rclos[a * 32 + d] = true
+                            changed2 = true
+                        }
+                        d = d + 1
+                    }
+                }
+                b = b + 1
+            }
+            a = a + 1
+        }
+    }
+
+    // atomic disjointness matrix (symmetric)
+    k = 0
+    while k < NDJ {
+        a = go_disj[k] / 1024
+        b = go_disj[k] - a * 1024
+        disjm[a * B + b] = true
+        disjm[b * B + a] = true
+        k = k + 1
+    }
+
+    // ── 1. atomic projection: stated-sub-only closure ──────────────────
+    var c: i64 = 0
+    while c < H {
+        aclos[c * B + c] = true
+        c = c + 1
+    }
+    k = 0
+    var p: i64 = 0
+    while k < NSUB {
+        c = go_sub[k] / 1024
+        p = go_sub[k] - c * 1024
+        aclos[c * B + p] = true
+        k = k + 1
+    }
+    changed2 = true
+    var k2: i64 = 0
+    while changed2 {
+        changed2 = false
+        a = 0
+        while a < H {
+            k2 = 0
+            while k2 < B {
+                if aclos[a * B + k2] {
+                    d = 0
+                    while d < B {
+                        if aclos[k2 * B + d] && !aclos[a * B + d] {
+                            aclos[a * B + d] = true
+                            changed2 = true
+                        }
+                        d = d + 1
+                    }
+                }
+                k2 = k2 + 1
+            }
+            a = a + 1
+        }
+    }
+    var atomic_edges: i64 = 0
+    c = 0
+    while c < H {
+        d = 0
+        while d < H {
+            if aclos[c * B + d] {
+                atomic_edges = atomic_edges + 1
+            }
+            d = d + 1
+        }
+        c = c + 1
+    }
+    if atomic_edges != go_expected_atomic_edges() {
+        println("FAIL: atomic closure edges disagree with mirror")
+        n_fail = n_fail + 1
+    }
+    let conf_atomic = count_conflicts(1)
+    if conf_atomic != go_expected_conf_atomic() {
+        println("FAIL: atomic conflicts disagree with mirror")
+        n_fail = n_fail + 1
+    }
+
+    // ── 2. full role-aware closure ─────────────────────────────────────
+    reinit_mats()
+    seed_closure(NSUB, NEX)
+    let rounds = run_fixpoint(1, 1, NCH)
+    println("role-aware closure rounds:")
+    println(rounds)
+
+    let s_cells = count_s_cells()
+    if s_cells != go_expected_s_cells() {
+        println("FAIL: S cell count disagrees with mirror")
+        n_fail = n_fail + 1
+    }
+    let r_edges = count_r_edges(0)
+    if r_edges != go_expected_r_edges() {
+        println("FAIL: role edge count disagrees with mirror")
+        n_fail = n_fail + 1
+    }
+    let r_atom = count_r_edges(1)
+    if r_atom != go_expected_r_atom() {
+        println("FAIL: atom-source role edge count disagrees with mirror")
+        n_fail = n_fail + 1
+    }
+    let atom_edges = count_atom_edges()
+    if atom_edges != go_expected_atom_edges() {
+        println("FAIL: role-aware atom edges disagree with mirror")
+        n_fail = n_fail + 1
+    }
+    let ex_targets = count_ex_targets()
+    if ex_targets != go_expected_ex_targets() {
+        println("FAIL: existential target count disagrees with mirror")
+        n_fail = n_fail + 1
+    }
+    let conf_full = count_conflicts(0)
+    if conf_full != go_expected_conf_full() {
+        println("FAIL: role-aware conflicts disagree with mirror")
+        n_fail = n_fail + 1
+    }
+
+    // ── 3. profile theorem: roles reveal existential subsumptions but
+    //    no new ATOMIC subsumptions or conflicts on this data shape ────
+    if atom_edges != atomic_edges {
+        println("FAIL: roles changed the atomic subsumption projection")
+        n_fail = n_fail + 1
+    }
+    if conf_full != conf_atomic {
+        println("FAIL: roles changed the atomic conflict count")
+        n_fail = n_fail + 1
+    }
+
+    // ── 4. ablations: attribute derived content to the rule families ──
+    reinit_mats()
+    seed_closure(NSUB, NEX)
+    let rounds_norc = run_fixpoint(1, 0, NCH)
+    let sc_norc = count_s_cells()
+    if sc_norc != go_expected_s_cells_no_rc() {
+        println("FAIL: no-roleComp S cells disagree with mirror")
+        n_fail = n_fail + 1
+    }
+    let re_norc = count_r_edges(0)
+    if re_norc != go_expected_r_edges_no_rc() {
+        println("FAIL: no-roleComp role edges disagree with mirror")
+        n_fail = n_fail + 1
+    }
+    reinit_mats()
+    seed_closure(NSUB, NEX)
+    let rounds_nors = run_fixpoint(0, 1, NCH)
+    let sc_nors = count_s_cells()
+    if sc_nors != go_expected_s_cells_no_rs() {
+        println("FAIL: no-roleSub S cells disagree with mirror")
+        n_fail = n_fail + 1
+    }
+    let re_nors = count_r_edges(0)
+    if re_nors != go_expected_r_edges_no_rs() {
+        println("FAIL: no-roleSub role edges disagree with mirror")
+        n_fail = n_fail + 1
+    }
+
+    // ── Summary ─────────────────────────────────────────────────────────
+    println("=== GO/RO role-rich slice: EL+ role-aware closure (round 11) ===")
+    println("classes (H):")
+    println(H)
+    println("roles (NR):")
+    println(NR)
+    println("sub axioms:")
+    println(NSUB)
+    println("existential restrictions (exsub):")
+    println(NEX)
+    println("disjoint pairs:")
+    println(NDJ)
+    println("roleSub axioms:")
+    println(NRS)
+    println("roleComp chains:")
+    println(NCH)
+    println("atomic projection closure edges:")
+    println(atomic_edges)
+    println("role-aware atom edges (= atomic, profile theorem):")
+    println(atom_edges)
+    println("existential targets revealed by roles (atom rows):")
+    println(ex_targets)
+    println("atom-source role edges:")
+    println(r_atom)
+    println("total role edges (incl existential sources):")
+    println(r_edges)
+    println("total S cells over interned universe:")
+    println(s_cells)
+    println("atomic conflicts (ordered pairs):")
+    println(conf_atomic)
+    println("role-aware conflicts (= atomic, profile theorem):")
+    println(conf_full)
+    println("role edges without roleComp (ablation):")
+    println(re_norc)
+    println("role edges without roleSub (ablation):")
+    println(re_nors)
+    println("S cells without roleComp (ablation):")
+    println(sc_norc)
+    println("S cells without roleSub (ablation):")
+    println(sc_nors)
+
+    if n_fail == 0 {
+        println("ALL PASS")
+        return 0
+    }
+    println("FAILURES:")
+    println(n_fail)
+    return 1
+}
+'''
+
+
 
 # ── loading ──────────────────────────────────────────────────────────────
 
@@ -1003,6 +1889,43 @@ fn main() -> i32 with IO, Mut, Div, Panic {
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--go", action="store_true",
+                    help="round 11: GO/RO role-rich slice pipeline "
+                         "(reads ../go_elplus_tbox.txt)")
+    args = ap.parse_args()
+    if args.go:
+        H, NR, sub, exsub, disj, rsub, rcomp = load_go()
+        ex = mirror_go(H, NR, sub, exsub, disj, rsub, rcomp)
+        n = emit_go_data("go_elplus_data.sio", ex, sub, exsub, disj,
+                         rsub, rcomp)
+        drv = GO_DRIVER
+        for tok, val in (("@NSUB@", ex["NSUB"]), ("@NEX@", ex["NEX"]),
+                         ("@NDJ@", ex["NDJ"]), ("@NRS@", ex["NRS"]),
+                         ("@NCH@", ex["NCH"]), ("@UNB@", ex["U"] * ex["NB"]),
+                         ("@CUBE@", ex["NR"] * ex["U"] * ex["B"]),
+                         ("@UB@", ex["U"] * ex["B"]),
+                         ("@HB@", ex["H"] * ex["B"]),
+                         ("@BB@", ex["B"] * ex["B"]),
+                         ("@NB@", ex["NB"]), ("@NR@", ex["NR"]),
+                         ("@B@", ex["B"]), ("@U@", ex["U"]),
+                         ("@H@", ex["H"])):
+            drv = drv.replace(tok, str(val))
+        with open("go_elplus_driver.sio", "w") as f:
+            f.write(drv)
+        print(f"go: H={ex['H']} NR={ex['NR']} U={ex['U']} sub={ex['NSUB']} "
+              f"exsub={ex['NEX']} disj={ex['NDJ']} rsub={ex['NRS']} "
+              f"chains={ex['NCH']}")
+        print(f"go: s_cells={ex['s_cells']} r_edges={ex['r_edges']} "
+              f"r_atom={ex['r_atom']} atom_edges={ex['atom_edges']} "
+              f"ex_targets={ex['ex_targets']} rounds={ex['rounds']}")
+        print(f"go: atomic_edges={ex['atomic_edges']} "
+              f"conf={ex['conf_full']} (atomic {ex['conf_atomic']})")
+        print(f"go: ablations noRC s/r={ex['sc_norc']}/{ex['re_norc']} "
+              f"noRS s/r={ex['sc_nors']}/{ex['re_nors']}")
+        print(f"emitted go_elplus_data.sio ({n} assignments), "
+              f"go_elplus_driver.sio")
+        return
     sub, disj, exsub, rsub, rcomp, n_roles, maps, n_human = load()
     ex = mirror_real(n_human, n_roles, sub, disj, exsub, rsub, rcomp, maps)
     sy = mirror_synth()

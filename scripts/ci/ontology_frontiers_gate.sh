@@ -42,6 +42,7 @@ PROTOTYPES=(
     "artifacts/ontology-frontiers/real-data/real_repair_driver.sio"
     "artifacts/ontology-frontiers/real-data/scale/full_scale_driver.sio"
     "artifacts/ontology-frontiers/real-data/scale/elplus_scale_driver.sio"
+    "artifacts/ontology-frontiers/real-data/scale/go_elplus_driver.sio"
     "examples/ontology_pipeline_demo.sio"
 )
 
