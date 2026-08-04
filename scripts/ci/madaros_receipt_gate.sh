@@ -56,16 +56,27 @@ require_nonempty "$claimed_result" "receipt has no gate_result= line"
 gate_path="$ROOT_DIR/scripts/ci/$claimed_gate"
 require_file "$gate_path" "receipt names gate '$claimed_gate' which does not exist at scripts/ci/"
 
-# The commit it was built from must be an ancestor of HEAD, or the receipt
-# describes a tree this checkout is not on.
+# The commit it was built from should be an ancestor of HEAD. But CI checks out
+# shallow (actions/checkout@v4 with no fetch-depth, ci.yml Contracts job), so an
+# older commit is genuinely ABSENT from the clone. "I cannot see that commit" and
+# "that commit is not an ancestor" are different facts and must not collapse into
+# one verdict — collapsing an unknown into a failure is the same error as
+# collapsing it into a pass, just in the safe-looking direction.
+#
+# The sha256 check below is the load-bearing one and works on any clone.
 if ! git rev-parse --verify -q "${claimed_commit}^{commit}" >/dev/null 2>&1; then
-  gate_fail "receipt source_commit=$claimed_commit is not a commit in this repository"
+  if [[ -f "$(git rev-parse --git-dir)/shallow" ]]; then
+    echo "  receipt: source=$claimed_commit NOT VERIFIED — shallow clone, the commit is not in this checkout"
+  else
+    gate_fail "receipt source_commit=$claimed_commit is not a commit in this repository, and this is a full clone"
+  fi
+else
+  if ! git merge-base --is-ancestor "$claimed_commit" HEAD 2>/dev/null; then
+    gate_fail "receipt source_commit=$claimed_commit is not an ancestor of HEAD — the receipt describes a tree this branch is not on"
+  fi
+  behind="$(git rev-list --count "${claimed_commit}..HEAD" 2>/dev/null || echo '?')"
+  echo "  receipt: gate=$claimed_gate result=$claimed_result source=$claimed_commit (${behind} commits behind HEAD)"
 fi
-if ! git merge-base --is-ancestor "$claimed_commit" HEAD 2>/dev/null; then
-  gate_fail "receipt source_commit=$claimed_commit is not an ancestor of HEAD — the receipt describes a tree this branch is not on"
-fi
-behind="$(git rev-list --count "${claimed_commit}..HEAD" 2>/dev/null || echo '?')"
-echo "  receipt: gate=$claimed_gate result=$claimed_result source=$claimed_commit (${behind} commits behind HEAD)"
 
 # Verify the artifact the receipt NAMES, whatever that is. A receipt that points
 # at an absolute host path, or at a gitignored local build, is unverifiable on
