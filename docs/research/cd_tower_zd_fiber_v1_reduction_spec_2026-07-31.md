@@ -1779,9 +1779,22 @@ tr(A³)(n, 2^(n−2)) = −8(2^(n−2)−1)(2^(n−2)−2)(2^(n−2)−3)
 
 — exact at `n = 6..11`, and **the factor 8 is the doubling `N = 2(q−1)`, not a fitted constant.**
 Subtracting §17.2's `y = 0` value gives `δ(n, n−2) = −(72/7)(2^(n−2)−1)(2^(n−2)−2)(2^(n−2)−4)`,
-which is §33.3's form at `j = n−2`; the identity collapses by `(2/7)(2q−2)(2q−4)(2q−15) −
-8(q−1)(q−2)(q−3) = (8/7)(q−1)(q−2)[(2q−15) − 9(q−4)] = −8(q−1)(q−2)(q−3)`, with the `7`
-cancelling. That is why both §17.2 and `δ` carry a `/7` and the answer does not.
+which is §33.3's form at `j = n−2`. The two sides agree because
+
+```
+(2/7)(2q−2)(2q−4)(2q−15)  −  (72/7)(q−1)(q−2)(q−4)
+    = (8/7)(q−1)(q−2)·[(2q−15) − 9(q−4)]
+    = (8/7)(q−1)(q−2)(21 − 7q)  =  −8(q−1)(q−2)(q−3)
+```
+
+i.e. `t3(n,1) + δ(n,n−2) = t3(n,2^(n−2))`, with the `7` cancelling against the `21 − 7q`. That is
+why both §17.2 and `δ` carry a `/7` and the answer does not. (Checked as an exact rational
+identity at `n = 6..11`.)
+
+⚠ **(B) is conditional.** §18.1's low-branch recursion is itself MEASURED, at `n = 7..10` only —
+a *narrower* range than the deviation law it is being used to explain (`n = 6..11`). So (B) does
+not make the scaling a theorem; it makes it a consequence of an earlier unproven identity. Proving
+§18.1 is now a load-bearing target, not a nicety.
 
 **So what is genuinely open is narrower than §33.3 suggests:** not the cubic, but
 
