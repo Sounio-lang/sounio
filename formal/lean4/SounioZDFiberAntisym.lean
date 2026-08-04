@@ -9096,6 +9096,133 @@ theorem Ncnt_inj_g (m W1 W2 : Nat) (hW1 : W1 < 2^m) (hW2 : W2 < 2^m)
   unfold gnorm at hg
   omega
 
+
+/-! ## Tier 37: the sign formula on the top-bit label — `A_σ` is antibalanced, explicitly
+
+For the label `L_lo = 2^n` the signed matrix is a COBOUNDARY up to sign: off the coset line,
+`A_σ(l,y) = − μ(l)·μ(y)` with `μ(a) = −1` exactly when `a` carries the label's bit. In signed-graph
+language (Zaslavsky, arXiv:1303.3083 §I.G) `μ` is a *switching function* and the statement is that
+`A_σ` is **antibalanced**; every triangle is then negative and `tr(A³) = −#triangles` follows in one
+line, which is the step §33.5(C) had measured.
+
+The proof is four cases on which side of the bit `l` and `y` lie, through the four branch
+reductions `R_ll/R_lu/R_ul/R_uu`; the two mixed cases close by `antisym`, and `antisym` needs
+`u ≠ v` — which is exactly the exclusion of the coset line `y = l ⊕ 2^n`. That line is not in the
+support (`P1 = 1`, `P3 = -1`, so `resB` fails), which is what `Asig_pow2_top` uses to drop the
+hypothesis. -/
+
+/-- **The switching function.** `μ(a) = −1` exactly when `a` carries the label's bit; for
+    `a < 2^(n+1)` that is `2^n ≤ a`. -/
+def muTop (a n : Nat) : Int := if a < 2^n then 1 else -1
+
+/-- Adding the top bit and XOR-ing it off again. -/
+private theorem xor_top_add (n u : Nat) (hn : n ≠ 0) (hu : u < 2^n) :
+    (u + 2^n) ^^^ 2^n = u := by
+  rw [← xor_pow_low n u hn hu]
+  exact xor_cancel u (2^n)
+
+/-- The sign formula at `n = k+1`, where the statement is not vacuous. -/
+private theorem P1_pow2_succ (k l y : Nat) (hl : l < 2^(k+2)) (hy : y < 2^(k+2))
+    (hl0 : l ≠ 0) (hy0 : y ≠ 0) (hlL : l ≠ 2^(k+1)) (hyL : y ≠ 2^(k+1))
+    (hcos : y ≠ l ^^^ 2^(k+1)) :
+    P1 l y (2^(k+1)) (k+1) = muTop l (k+1) * muTop y (k+1) := by
+  have hnz : k + 1 ≠ 0 := by omega
+  have hpow : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by rw [Nat.pow_succ]; omega
+  have hLlt : (2:Nat)^(k+1) < 2^(k+2) := by have := Nat.two_pow_pos (k+1); omega
+  have hyLx : y ^^^ 2^(k+1) ≠ 0 := fun h => hyL (xor_zero_eq _ _ h)
+  rw [P1_red l y (2^(k+1)) (k+1) hl hy hLlt hyLx]
+  unfold muTop
+  rcases Nat.lt_or_ge l (2^(k+1)) with hlo | hhi
+  · rcases Nat.lt_or_ge y (2^(k+1)) with hylo | hyhi
+    · rw [xor_pow_low (k+1) y hnz hylo, xor_pow_low (k+1) l hnz hlo,
+          R_ll l y k hlo hylo, R_uu y l k hylo hlo, if_neg hl0,
+          if_pos hlo, if_pos hylo]
+      rcases cdSigma_pm (k+1) l y with h | h <;> rw [h] <;> decide
+    · obtain ⟨y', hy'lt, rfl⟩ : ∃ y', y' < 2^(k+1) ∧ y = y' + 2^(k+1) :=
+        ⟨y - 2^(k+1), by omega, by omega⟩
+      have hy'0 : y' ≠ 0 := by intro h; exact hyL (by omega)
+      have hne : y' ≠ l := by
+        intro h
+        exact hcos (by rw [xor_pow_low (k+1) l hnz hlo]; omega)
+      rw [xor_top_add (k+1) y' hnz hy'lt, xor_pow_low (k+1) l hnz hlo,
+          R_lu l y' k hlo hy'lt, R_lu y' l k hy'lt hlo,
+          if_pos hlo, if_neg (by omega : ¬ y' + 2^(k+1) < 2^(k+1)),
+          antisym (k+1) y' l hy'lt hlo hy'0 hl0 hne]
+      rcases cdSigma_pm (k+1) l y' with h | h <;> rw [h] <;> decide
+  · obtain ⟨l', hl'lt, rfl⟩ : ∃ l', l' < 2^(k+1) ∧ l = l' + 2^(k+1) :=
+      ⟨l - 2^(k+1), by omega, by omega⟩
+    have hl'0 : l' ≠ 0 := by intro h; exact hlL (by omega)
+    rcases Nat.lt_or_ge y (2^(k+1)) with hylo | hyhi
+    · have hne : l' ≠ y := by
+        intro h
+        exact hcos (by rw [xor_top_add (k+1) l' hnz hl'lt]; omega)
+      rw [xor_pow_low (k+1) y hnz hylo, xor_top_add (k+1) l' hnz hl'lt,
+          R_ul l' y k hl'lt hylo, R_ul y l' k hylo hl'lt, if_neg hy0, if_neg hl'0,
+          if_neg (by omega : ¬ l' + 2^(k+1) < 2^(k+1)), if_pos hylo,
+          antisym (k+1) l' y hl'lt hylo hl'0 hy0 hne]
+      rcases cdSigma_pm (k+1) y l' with h | h <;> rw [h] <;> decide
+    · obtain ⟨y', hy'lt, rfl⟩ : ∃ y', y' < 2^(k+1) ∧ y = y' + 2^(k+1) :=
+        ⟨y - 2^(k+1), by omega, by omega⟩
+      have hy'0 : y' ≠ 0 := by intro h; exact hyL (by omega)
+      rw [xor_top_add (k+1) y' hnz hy'lt, xor_top_add (k+1) l' hnz hl'lt,
+          R_uu l' y' k hl'lt hy'lt, if_neg hy'0, R_ll y' l' k hy'lt hl'lt,
+          if_neg (by omega : ¬ l' + 2^(k+1) < 2^(k+1)),
+          if_neg (by omega : ¬ y' + 2^(k+1) < 2^(k+1))]
+      rcases cdSigma_pm (k+1) y' l' with h | h <;> rw [h] <;> decide
+
+/-- **THE SIGN FORMULA, forall n.** With the label equal to the top bit, `P1` is the coboundary
+    `μ(l)·μ(y)` off the coset line. -/
+theorem P1_pow2_top (n l y : Nat) (hl : l < 2^(n+1)) (hy : y < 2^(n+1))
+    (hl0 : l ≠ 0) (hy0 : y ≠ 0) (hlL : l ≠ 2^n) (hyL : y ≠ 2^n) (hcos : y ≠ l ^^^ 2^n) :
+    P1 l y (2^n) n = muTop l n * muTop y n := by
+  cases n with
+  | zero =>
+      exfalso
+      have h1 : (2:Nat)^1 = 2 := rfl
+      have h0 : (2:Nat)^0 = 1 := rfl
+      omega
+  | succ k => exact P1_pow2_succ k l y hl hy hl0 hy0 hlL hyL hcos
+
+/-! ### The coset line is not in the support -/
+
+theorem P1_coset (l Llo n : Nat) (hl : l < 2^(n+1)) (hL : Llo < 2^(n+1)) (hl0 : l ≠ 0) :
+    P1 l (l ^^^ Llo) Llo n = 1 := by
+  rw [P1_red l (l ^^^ Llo) Llo n hl (xorlt hl hL) hL (by rw [xor_cancel]; exact hl0),
+      xor_cancel]
+  exact cdSq l (l ^^^ Llo) (n+1)
+
+theorem P3_coset (l Llo n : Nat) (hl : l < 2^(n+1)) (hL : Llo < 2^(n+1)) (hl0 : l ≠ 0)
+    (hlL : l ^^^ Llo ≠ 0) : P3 l (l ^^^ Llo) Llo n = -1 := by
+  rw [P3_red l (l ^^^ Llo) Llo n hl (xorlt hl hL) hL hlL, xor_cancel,
+      sigma_self (n+1) l hl hl0, sigma_self (n+1) (l ^^^ Llo) (xorlt hl hL) hlL]
+  decide
+
+/-- The coset partner is never an edge: `P1 = 1`, `P3 = -1`, so `resB` fails. -/
+theorem resB_coset (l Llo n : Nat) (hl : l < 2^(n+1)) (hL : Llo < 2^(n+1)) (hl0 : l ≠ 0)
+    (hlL : l ^^^ Llo ≠ 0) : resB l (l ^^^ Llo) Llo n = false := by
+  have hb : (P1 l (l ^^^ Llo) Llo n == P3 l (l ^^^ Llo) Llo n) = false := by
+    rw [P1_coset l Llo n hl hL hl0, P3_coset l Llo n hl hL hl0 hlL]; decide
+  unfold resB
+  simp [hb]
+
+/-- **`A_σ` is ANTIBALANCED on the top-bit label**: on every edge its entry is `−μ(l)·μ(y)`.
+    No hypothesis about the coset line is needed — that line is not in the support. -/
+theorem Asig_pow2_top (n l y : Nat) (hl : l < 2^(n+1)) (hy : y < 2^(n+1))
+    (hl0 : l ≠ 0) (hy0 : y ≠ 0) (hlL : l ≠ 2^n) (hyL : y ≠ 2^n)
+    (hres : resB l y (2^n) n = true) :
+    Asig l y (2^n) n = - (muTop l n * muTop y n) := by
+  have hLlt : (2:Nat)^n < 2^(n+1) := by
+    have h1 := Nat.two_pow_pos n
+    have h2 : (2:Nat)^(n+1) = 2^n + 2^n := by rw [Nat.pow_succ]; omega
+    omega
+  have hlLx : l ^^^ 2^n ≠ 0 := fun h => hlL (xor_zero_eq _ _ h)
+  have hcos : y ≠ l ^^^ 2^n := by
+    intro h
+    rw [h, resB_coset l (2^n) n hl hLlt hl0 hlLx] at hres
+    exact absurd hres (by decide)
+  unfold Asig
+  rw [if_pos hres, P1_pow2_top n l y hl hy hl0 hy0 hlL hyL hcos]
+
 end SounioZDFiberAntisym
 
 
