@@ -2482,12 +2482,34 @@ Zhilina obtain from any pair of sedenion zero divisors (Zap. Nauchn. Sem. POMI *
 Their theorem plausibly *is* our `n = 4` base case; asserting identity needs their definition read in
 full, which is still owed.
 
-### 40.4 What this does to the novelty ledger
+### 40.4 The novelty ledger
 
-- **Not ours:** the underlying graph, at every level — it is the CD zero-divisor/orthogonality graph;
-  and its `n = 4` structure (double hexagons, components ↔ Fano lines) is Guterman–Zhilina 2020.
-- **Ours, on present evidence:** the **signature** `A_σ` and everything built on it — the switching
-  class, `tr(A²)`/`tr(A³)`, the fibre/seam classification, the ∀`n` results, and the deviation law.
+*Rewritten 2026-08-04 after §41. The first version of this subsection read "the graph is theirs, the
+signature is ours"; §41.3 shows that is too generous, because a double cover determines its signature
+up to switching. This is the single place to check before any write-up.*
+
+| item | status | who to cite | confidence |
+|---|---|---|---|
+| the underlying graph — `supp(A_σ)` | **not ours.** It is the CD zero-divisor graph (= orthogonality graph on the main sequence, Zhilina IJAC 2021), induced on the fixed-XOR-label pencil of two-term zero divisors | Guterman–Zhilina; Zhilina | **high** — proved in §40.2, verified against real CD multiplication |
+| the two-sided adjacency `ab = ba = 0` ≡ `resB` | **not ours** — it is their Definition 2.3 | Guterman & Zhilina (2020), Def. 2.3 | **high** — §41.1 |
+| the **signature** `A_σ`, as data | **not independent.** `Γ_O` on a pencil is its double cover (§41.2), and a double cover fixes the signature up to switching — so the *switching class* is equivalent to their unsigned line-graph wherever their results reach | as above | **high** — verified edge-for-edge at `n = 4` |
+| `n = 4`: double hexagons, components ↔ Fano lines, diameters | **not ours** | Guterman & Zhilina, Zap. Nauchn. Sem. POMI **496** (2020) 61–86 | **high** — their abstract, verbatim |
+| the `k = 3` register; "balanced", "switching", "two-graph", "antibalanced" | **not ours** — classical | Seidel (1968, 1976); Zaslavsky; Harary; Belardo et al. Thm 2.2 | **high** — see the prior-art report |
+| the **spectral** layer: `tr(A²)`, `tr(A³)` as invariants of the label, their closed forms | **not located** in the CD graph literature — `спектр`/`spectr` appears **0 times** in either Guterman–Zhilina paper; they compute components, diameters, cliques, hexagons, never a spectrum | — | **medium** — keyword sweep over full texts, bodies not read in detail |
+| the fibre/seam classification, `g`, `τ`-equivariance, the counting recursions, the deviation law, `δ = −27·8^(n−j)[j,3]₂` | **not located** | — | **medium-low**, see the risk below |
+
+> ⚠ **The top novelty risk is not `n = 4`, it is ∀n.** Zhilina, *Orthogonality graphs of real
+> Cayley–Dickson algebras. Part I: doubly alternative zero divisors and their hexagons* (IJAC
+> **31**(4), 2021) is about **arbitrary real Cayley–Dickson algebras**, not just sedenions, and it is
+> **unread** — I could not obtain it. Its abstract already asserts, for the main sequence, that the
+> zero-divisor graph coincides with the orthogonality graph and that hexagons extend to double
+> hexagons *in an arbitrary real CD algebra*. Until it is read, **no ∀n structural claim in this lane
+> should be presented as new.**
+
+**Owed before any write-up, in order:** (1) obtain and read Zhilina's IJAC Part I; (2) read the
+Russian bodies of both Guterman–Zhilina papers in detail, not just their abstracts; (3) MathSciNet /
+zbMATH on the `g`-universality and on `[j,3]₂` as a signed-triangle count. Only item (3) is a search;
+(1) and (2) are readings, and (1) is the one that can move the ledger.
 
 Reproduce: `python3 scripts/research/zd_annihilation_is_orthogonality_probe.py`.
 
