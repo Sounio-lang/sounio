@@ -2787,7 +2787,7 @@ Everything in the (III) chain rests on **§18.1**, and §34 already took §18.1 
 |---|---|
 | `tr(B³) = 8·t3′` | **ALGEBRA** (`tr(J₂³) = 8`) |
 | `3·tr(B²E) = 24·t2′` | **DERIVED** from the block identity, the two sign lemmas and `Σ_a (A²)[a,a⊕W] = −tr(A²)` |
-| the block identity `A = J₂⊗A′ + E`, and `E`'s four families | MEASURED (`n = 7…10`, 38M entries) |
+| the block identity `A = J₂⊗A′ + E`, and `E`'s four families | ✅ **THEOREM ∀n** — `Asig_block` (§47) |
 | the two constant signs `+1` (matching), `−1` (coset) | MEASURED |
 | `Σ_a (A²)[a, a⊕W] = −tr(A²)` | MEASURED (every label, `n = 6…9`) |
 | `tr(BE²) = 0`, `tr(E³) = −24(h−2)` | MEASURED (`n = 6…11`) |
@@ -2880,3 +2880,58 @@ signs.** The `E`-internal content of §18.1 is closed.
 > on the list. The open content of §18.1 is now the **block identity** and **the hub row**.
 
 **Not proven in Lean yet.** §18.1, and with it (III), is still reduced, not proven.
+
+
+## §47 — The block identity is a theorem, and it IS `E`'s family list (`W50`, 2026-08-04)
+
+`Asig_block`, kernel-clean, ∀n:
+
+```lean
+Asig_block (k a b W e f : Nat) : e = 0 ∨ e = 1 → f = 0 ∨ f = 1 → BlkStd k a b W →
+    Asig (a + e·2^(k+1)) (b + f·2^(k+1)) W (k+1) = Asig a b W k
+```
+
+with `BlkStd`: `a, b, W < 2^(k+1)`; `a, b ≠ 0`; `a ≠ W`, `b ≠ W`; **`a ≠ b`**; **`a ≠ b ⊕ W`**.
+
+This is §34's `C1`, the foundation everything in §18.1 rests on, measured there over 38M entries.
+
+### 47.1 The proof
+
+`P1` and `P3` are computed on each block through `P1_red`/`P3_red` and the branch reductions:
+
+| block | `P1` and `P3` via | closed by |
+|---|---|---|
+| `(0,0)` | `R_ll` twice | nothing — no side condition beyond the ranges |
+| `(0,1)` | `R_lu` + `R_ul` | `antisym` on `(b,a)` |
+| `(1,1)` | `R_uu` twice | `antisym` twice |
+| `(1,0)` | — | `P1_symm`/`P3_symm` from `(0,1)` |
+
+`resB` then agrees because its first two clauses are the symmetry lemmas at each level and the third
+compares the two values just shown equal.
+
+### 47.2 The observation worth keeping
+
+> **The hypotheses `antisym` demands are exactly the lines `E` keeps.** `a ≠ b` is §34's *matching*
+> family and `a ≠ b ⊕ W` its *coset* family.
+
+So the block identity and `E`'s four families are **one computation seen from two sides** — which is
+why §34's measurement found `E` supported precisely there, and why the matching and coset signs were
+the two constants it could pin. The `(0,0)` block needs no exclusion at all, which is why it was the
+one block §34 measured as exact.
+
+### 47.3 The ledger for §18.1
+
+| ingredient | status |
+|---|---|
+| `tr(B³) = 8·t3′` | ALGEBRA |
+| the block identity | ✅ **THEOREM** (§47) |
+| the hub row and hub adjacency | ✅ **THEOREMS** (Tier 38) |
+| `tr(E³) = −24(h−2)` | ✅ **DERIVED** (§46) from the above + the matching/coset signs |
+| the matching sign `+1` and the coset sign `−1` | MEASURED |
+| `Σ_a (A²)[a, a⊕W] = −tr(A²)` | MEASURED |
+| `3·tr(B²E) = 24·t2′`, `tr(BE²) = 0` | the first DERIVED from the above; the second MEASURED |
+
+**Two measured lines are left in §18.1**: the two `E` signs, and the coset 2-path identity. Both are
+single-entry or single-row statements about `σ`, of the shape this file has now closed four times.
+
+**§18.1 is not yet proven, so (III) is still reduced, not proven.** (d) and V1 untouched.
