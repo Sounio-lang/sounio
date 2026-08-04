@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""The level-independent curvature tensor K_j, and its sum, computed for j = 3,4,5,6.
+"""The level-independent curvature tensor K_j, and its sum, computed for j = 3..7.
+
+At n = j+2 the class size is 1, so K_j IS the raw per-triangle defect table at that level; the
+level-independence then says every higher level is a uniform cls-fold blow-up of it.
 
 §37 reduced (III)'s open content to one number per j: the curvature sum over the classes at and
 below the seam. This computes it. Partition the vertices by their low j+1 bits (M = 2^(j+1)
@@ -11,7 +14,7 @@ Measured:
   * K_j is LEVEL-INDEPENDENT -- the whole tensor, not just its sum (max abs diff 0 across n);
   * K_j takes only the values 0 and -2, i.e. every contributing class is a single sign flip;
   * sum(K_j) = -1728 * [j choose 3]_2  exactly, i.e. 864*[j,3]_2 flipped classes;
-    j = 3,4,5,6 -> [j,3]_2 = 1, 15, 155, 1395;
+    j = 3..7 -> [j,3]_2 = 1, 15, 155, 1395, 11811;
   * every nonzero entry has (u^v, v^w) linearly independent.
 
 Hence delta(n,j) = cls^3 * sum(K_j) = (2^(n-j-2))^3 * (-1728) * [j choose 3]_2, which is the
@@ -47,8 +50,16 @@ def K_tensor(n, W):
     Bp = B[np.ix_(p, p)]
 
     def cube(X):
+        # accumulate block-triple by block-triple: one M^3 temporary at a time, so j = 7
+        # (M = 256, a 16.8M-entry tensor) stays inside memory.
         Y = X.reshape(cls, M, cls, M)
-        return np.einsum('puqv,qvrw,rwpu->uvw', Y, Y, Y, optimize=True)
+        out = np.zeros((M, M, M))
+        for p_ in range(cls):
+            for q_ in range(cls):
+                Xpq = Y[p_, :, q_, :]
+                for r_ in range(cls):
+                    out += np.einsum('uv,vw,wu->uvw', Xpq, Y[q_, :, r_, :], Y[r_, :, p_, :])
+        return out
 
     K = (cube(A) - cube(Bp)) / cls**3
     Kr = np.round(K)
@@ -57,7 +68,7 @@ def K_tensor(n, W):
 
 
 def main():
-    for j, W in ((3, 8), (4, 16), (5, 32), (6, 64)):
+    for j, W in ((3, 8), (4, 16), (5, 32), (6, 64), (7, 128)):
         prev = None
         for n in (7, 8, 9, 10):
             if W >= 1 << (n - 1):
