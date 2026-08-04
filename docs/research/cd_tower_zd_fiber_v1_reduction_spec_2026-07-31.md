@@ -1657,7 +1657,7 @@ across the fibre `41…47`.
 **Everything in this section is MEASURED.** Nothing here is a Lean theorem and nothing here is
 derived. (III) is **not** proven; it is reduced.
 
-### 33.1 The reformulation: inside a fibre the class is indexed by `lsb(W)`
+### 33.1 The reformulation: inside a fibre, `lsb(W)` indexes the classes — with `{0,1,2}` collapsed
 
 Tier 36 proved `tr(A²)` injective in `g(W) = (W ∧ (W−1)) ≫ 3`, so the `tr(A²)`-fibre of `y` is
 *exactly* `{W : g(W) = y}`, and §30's dictionary makes its members explicit:
@@ -1667,15 +1667,34 @@ Tier 36 proved `tr(A²)` injective in `g(W) = (W ∧ (W−1)) ≫ 3`, so the `tr
 | the Fano orbit `y` | `W = 8y + r`, `r = 1…7` | `0, 1, 2` — one `GL(3,2)` orbit |
 | the seams | `W = 8(y + 2^i)`, `i < lsb(y)` | `i + 3` |
 
-So **a class inside a fibre is indexed by `lsb(W)`** — which is precisely §19's third
-level-quantity, arrived at from the other side. Every seam in the fibre of `y` has popcount
-`popcount(y) + 1`, so **a whole fibre carries one parity**:
+⚠ **`lsb` indexes classes only after collapsing `{0,1,2}`.** The seven Fano labels realise three
+different `lsb` values and are ONE class (`GL(3,2)`-constancy of `tr(A³)`, §17.1). So a fibre holds
+`1 + lsb(y)` classes, **not** `3 + lsb(y)`. §19's third level-quantity is `lsb(W)` on the nose; the
+class index is `lsb` post-collapse. The two are not the same object and this section had run them
+together.
 
-- `popcount(y)` **odd** → every seam in the fibre merges with the Fano class — this is (c), PROVEN;
-- `popcount(y)` **even** → (III) must separate them.
+The class count below was computed with the collapsed reading (`1 + lsb(y)`), so it is unaffected;
+`3·2^(n−5)` would fail immediately under the naive one.
 
-Consistency check, independent of any trace: counting `1 + lsb(y)` classes on even-popcount fibres
-and `1` on odd ones reproduces `3·2^(n−5)` exactly at `n = 6…12`.
+⚠ **The parity variable is `popcount(g)`, not `popcount(y_seam)` and not `popcount(W)`.** The
+earlier phrasing — "every seam has popcount `popcount(y)+1`, so the fibre carries one parity" —
+is a non-sequitur: the Fano members `8y+r` carry popcounts `popcount(y) + {1,2,3}`, i.e. three
+parities. The correct statement is trivial and in the other variable: `popcount(g)` is constant on
+a fibre **by definition of the fibre**. The translation to (c)'s variable, verified for
+`y' = 1…4095`:
+
+> for a seam `W = 8y'`, `g = y' ∧ (y'−1)`, so `popcount(g) = popcount(y') − 1`, hence
+> **`popcount(g)` ODD ⟺ the seam's own weight `popcount(y')` is EVEN** — which is exactly the
+> class (c) quantifies (§1, §4: "the even-weight seams merge, exactly `2^(n−5)−1` of them").
+
+With that pinned:
+
+- `popcount(g)` **odd** (= even-weight seam) → every seam in the fibre merges with the Fano class —
+  this is (c), PROVEN;
+- `popcount(g)` **even** (= odd-weight seam) → (III) must separate them.
+
+Consistency check, independent of any trace: counting `1 + lsb(y)` classes on even-`popcount(g)`
+fibres and `1` on odd ones reproduces `3·2^(n−5)` exactly at `n = 6…12`.
 
 Hence (III) is a statement about the **deviation**
 
@@ -1695,16 +1714,54 @@ That the correction is **independent of `y`** is the surprising part and the loa
 Checked at `n = 6…11`, **all 2010 labels, 0 mismatches**, together with `D = 0` on every Fano
 label (`GL(3,2)`-constancy) and 0 collisions of `D` in `lsb` on every even-popcount fibre.
 
-### 33.3 The closed form for `δ`
+### 33.3 The closed form for `δ` — it is not a cubic, it is a subspace count
 
 ```
 δ(n, j) = −(9/56) · u³ · (2^j − 1)(2^j − 2)(2^j − 4),        u = 2^(n−j)
         = −(9/56) · (2^n − u)(2^n − 2u)(2^n − 4u)
 ```
 
-**(III) follows from it immediately.** `|δ(n,j)| = (9/56)·2^(3n)·(1−2^(−j))(1−2^(1−j))(1−2^(2−j))`
-is **strictly increasing in `j`** — every factor is — and nonzero for `j ≥ 3`. So `δ` is nonzero
-(Fano vs seam) and injective in `j` (seam vs seam), which is exactly what (III) asserts.
+**Regrouped, the cubic disappears.** `(2^j−1)(2^j−2)(2^j−4) = |Inj(𝔽₂³, 𝔽₂^j)|` — the number of
+ordered linearly independent triples in `𝔽₂^j` — which is `168 · [j choose 3]₂` with
+`168 = |GL(3,2)|`. Since `(9/56)·168 = 27`:
+
+```
+δ(n, j) = − 27 · 8^(n−j) · [j choose 3]₂
+```
+
+Verified identical to the first form at `(n,j) = (6,3), (6,4), (7,5), (8,6), (9,7), (10,8), (11,9)`.
+
+Three things this buys, none of which the cubic form showed:
+
+- **The vanishing below `j = 3` stops being a coincidence.** It is not "a cubic that happens to
+  have roots at `1, 2, 4`" — it is that `𝔽₂^j` has no 3-dimensional subspace when `j < 3`. **The
+  Fano orbit merges because there is no Fano plane below the seam.** (c) and the `j ≥ 3` case
+  become one statement evaluated in two regimes, which is strictly stronger than two coordinated
+  lemmas.
+- **Monotonicity becomes trivial, and the margin becomes explicit.**
+  `|δ(n,j)| = (9/7)·2^(3n−3)·(1−2^(−j))(1−2^(1−j))(1−2^(2−j))` is strictly increasing in `j` ✓ but
+  **asymptotically constant**: it converges from below to `(9/7)·2^(3n−3)`, with consecutive gaps
+  `O(2^(3n−3−j))`. In exact arithmetic the separation is real; it is not numerically comfortable,
+  and any float route would lose it.
+- **A candidate mechanism for the open residual.** `[j choose 3]₂` counts subspaces of the `j` bit
+  positions **below** the seam — precisely the coordinates `g` forgets. So "`D` does not depend on
+  `g`" stops being a brute fact and becomes: the triangle deficit is a count over independent
+  triples strictly below the seam, and translation by `8y` is an `𝔽₂`-affine map fixing those `j`
+  coordinates. **The proof to build is a sign-preserving bijection between the deficit triangles of
+  `8y + 2^j` and those of `2^j`, given by `a ↦ a ⊕ 8y`** — the only real burden being that the sign,
+  restricted to the deficit set, depends on the low part alone. That is much smaller than deriving
+  a cubic.
+
+⚠ **The naive edge-level form of that bijection is REFUTED, measured.** `a ↦ a ⊕ 8y` does **not**
+carry the edge deficit `A(n, 8(y+2^i)) − A(n, 8y+1)` onto `A(n, 2^(i+3)) − A(n, 1)`: 0 of 41
+`(y,i)` pairs at `n = 7,8,9`, and the deficits are not even the same *size* — at `n = 7`,
+`|D_W| ∈ {424, 1152, 2296}` against a fixed `|D_0| = 2160`. So whatever preserves `D` is **not** a
+relabelling of the deficit edge set. A bijection at the level of deficit *triangles* is not
+excluded by this test, but it cannot be induced by one on edges, which makes the `g`-independence
+harder to explain, not easier. Recorded so the next rung does not start from the edge-level form.
+
+**(III) follows from either form immediately**: `δ` is nonzero (Fano vs seam) and injective in `j`
+(seam vs seam), which is exactly what (III) asserts.
 
 Status of the form: **fitted**, on `n = 6…9`, `j = 3…7`, in the four-parameter family
 `α·8^j + β·4^j + γ·2^j + ε`, then checked at `n = 10` (new `j = 8`) and `n = 11` (new `j = 9`) —
@@ -1763,6 +1820,8 @@ lowest bit, so the base is the single family `W = 2^(n−2)`, and its graph is c
 - on the remaining `N = 2^(n−1) − 2` vertices, **`K_N` minus the perfect matching `a ↔ a ⊕ W`** —
   every vertex has exactly one non-neighbour, and `t2 = N(N−2)` confirms the regularity;
 - **every triangle has sign product `−1`** — measured, and pinned by `tr(A³) = −tr(|A|³)` exactly.
+  (Note the sign: all triangles `−1` is the OPPOSITE of *balanced*; a balanced signed graph has
+  every cycle `+1`.)
 
 Counting ordered triangles in `K_N` minus a perfect matching is elementary — no triple of distinct
 vertices can contain two matched pairs, so
@@ -1801,7 +1860,121 @@ not make the scaling a theorem; it makes it a consequence of an earlier unproven
 > the base case for a **general** seam at its own top-bit level — equivalently, the statement that
 > `D` does not depend on `g` at all.
 
-For `y = 0` that base is derived; for general `y` it is measured. A failed lead, recorded: `P1` is
-**not** a coboundary `μ(a)μ(b)` for `W = 2^(n−2)` — that ansatz misses on `2(N−2)` support entries
-at every level — even though the graph *is* triangle-balanced. Balance here is a statement about
-triangles, not about a global switching function of this form.
+For `y = 0` that base is derived; for general `y` it is measured.
+
+**The derived base and the measured law are coupled — and the coupling checks out.** At `y = 0` the
+base label `W = 2^(n−2)` has `j = lsb(W) = n−2`, the MAXIMUM `j`, so §33.5(C) and §33.3 meet at a
+single point and the meeting is a closed prediction for `t3(1)` — the normalising label, which is
+the *subtrahend* of `D` and never its subject, hence not implied by the 2010 measurements:
+
+```
+t3(1)|ₙ = t3(2^(n−2)) − δ(n, n−2) = (16/7)·(2^(n−2) − 1)(2^(n−3) − 1)(2^(n−1) − 15)
+```
+
+Measured `4080, 52080, 504432, 4407408, 36789360, 300520560` at `n = 6…11` — **exact at every
+level**. (Integrality is itself non-trivial: `7` divides the product through the `2^k − 1` factors.)
+This is the closest thing to a derivation available before the §33.3 bijection.
+
+**Dependency, stated so it lands in the graph and not only in the prose:** step (B) works *because*
+the `24·t2` term dies, and it dies by the constancy of `tr(A²)` on the fibre — which is **(I)**,
+`Ncnt_inj_gnorm`, a theorem as of Tier 36. (B) is not available without (I). A failed lead, recorded — **and it was refutable a priori, from data already in hand**: `P1` is
+not a coboundary `μ(a)μ(b)` for `W = 2^(n−2)`. The measurement (misses on `2(N−2)` support entries
+at every level) was unnecessary: if `σ(a,b) = μ(a)μ(b)` then every triangle is
+`μ(a)²μ(b)²μ(c)² = +1`, and "every triangle is `−1`" was already established. **All-triangles-`−1`
+IMPLIES not-a-coboundary, in one line.** The earlier write-up called the graph
+"triangle-balanced", which is the inverted descriptor, and that inversion is what let a
+one-line-refutable ansatz be spent on.
+
+⚠ **Method note — this is the second instance of the `W16` pathology in this lane:** a negative
+archived under the wrong descriptor, then a lead pursued that the existing record already refuted.
+The standing amendment (negatives carry their residual; the descriptor enters as a hypothesis) now
+gains a step: **check the descriptor against the record's own data before spending a rung.**
+
+## §34 — §18.1 is a four-term trace expansion, not a fitted identity (`W37`, 2026-08-04)
+
+§33.5(B) leaned on §18.1's low-branch recursion and flagged it as MEASURED and load-bearing. It is
+**not proven here either** — but it stops being an opaque integer identity. Every one of its three
+summands is now a separate, much smaller statement, and the leading one is pure algebra.
+
+### 34.1 The level map is a 2-fold blow-up
+
+With `h = 2^(n−2)`, the level-`n` vertex set `[1, 2^(n−1))` is the level-`(n−1)` vertex set `[1,h)`
+**doubled** (`a₀` and `a₀+h`) plus the single extra vertex `h`. Measured, over **every** low label
+at `n = 7…10` (38M entry comparisons, **0 violations**):
+
+> **Wherever `A′(a₀,b₀) ≠ 0`, all four blocks of `A(n,W)` carry exactly `A′(a₀,b₀)`** — same sign,
+> all four. I.e. `A = B + E` with `B = J₂ ⊗ A′` and `E` supported where `A′` vanishes.
+
+`E`'s support is exactly four families, `12(h−2)` ordered pairs in total, and its shape does not
+depend on the label:
+
+| family | pairs | sign |
+|---|---|---|
+| (i) the matching `a₀ ↔ a₀+h` | `2(h−2)` | **`+1`**, always |
+| (ii) the coset `a₀ ↔ (a₀⊕W)+h`, cross blocks only | `2(h−2)` | **`−1`**, always |
+| (iii) the two copies of the isolated vertex `a₀ = W` | `4(h−2)` | mixed |
+| (iv) the extra vertex `h` itself | `4(h−2)` | mixed |
+
+Both sign functions are **constant** — measured over every low label at `n = 7…10`.
+
+### 34.2 The recursion is the expansion of `tr((B+E)³)`, term for term
+
+`B` and `E` are symmetric, so `tr(A³) = tr(B³) + 3tr(B²E) + 3tr(BE²) + tr(E³)`. Measured over
+**every** low label at `n = 7, 8, 9` — 0 violations on each line:
+
+| term | value | status |
+|---|---|---|
+| `tr(B³)` | `8·t3′` | **ALGEBRA**: `tr((J₂⊗A′)³) = tr(J₂³)·tr(A′³)` and `tr(J₂³) = 8` |
+| `3·tr(B²E)` | `24·t2′` | **DERIVED** — see §34.3 |
+| `3·tr(BE²)` | `0` | MEASURED |
+| `tr(E³)` | `−24(h−2) = −12(2^(n−1)−4)` | MEASURED — **this is the constant** |
+
+So the `8` is the Kronecker factor `tr(J₂³)`, and the constant `−12(2^m−4)` is nothing but the
+signed triangle sum of `E` — a `12(h−2)`-edge graph whose shape is label-independent. Neither is
+fitted.
+
+### 34.3 The `24·t2′` term, derived
+
+`B² = J₂²⊗A′² = 2J₂⊗A′²`, so
+`tr(B²E) = 2·Σ_{ε,ε'} Σ_{a₀,b₀} (A′²)_{a₀b₀} · E_{(b₀,ε'),(a₀,ε)}`.
+
+- families **(iii)** and **(iv)** contribute **zero**, and this is an *argument*, not a
+  measurement: row `W` of `A′` is zero (the isolated vertex), hence so is row `W` of `A′²`; and the
+  vertex `h` lies outside `B`'s index range entirely;
+- family **(i)**: `b₀ = a₀`, two `(ε,ε')` orders, sign `+1` → `4·tr(A′²) = 4·t2′`;
+- family **(ii)**: `b₀ = a₀⊕W`, two orders, sign `−1` → `−4·S(W)` with `S(W) = Σ_a (A′²)[a, a⊕W]`.
+
+and the missing ingredient is one new identity, measured over **every** label (not just low ones)
+at `n = 6…9`, **0 violations**:
+
+> **`Σ_a (A²)[a, a⊕W] = −tr(A²)`** — the signed count of 2-paths from a vertex to its coset
+> partner is minus the edge count.
+
+That gives `−4·S(W) = +4·t2′`, hence `tr(B²E) = 8·t2′` and `3·tr(B²E) = 24·t2′`. The `24` is
+`3 × (4 + 4)`: three positions in the trace, one `4·t2′` from the matching and one from the coset.
+
+### 34.4 Status
+
+**§18.1 is not proven.** What it now rests on is four statements, each far smaller than itself:
+
+1. the block identity `A = J₂⊗A′ + E` and `E`'s four families — MEASURED, all low labels `n = 7…10`;
+2. the two constant signs `+1` (matching) and `−1` (coset) — MEASURED, same coverage;
+3. `Σ_a (A²)[a, a⊕W] = −tr(A²)` — MEASURED, all labels `n = 6…9`;
+4. `tr(BE²) = 0` and `tr(E³) = −24(h−2)` — MEASURED, all low labels `n = 6…9`.
+
+**Edge coverage.** §18.1 and all four terms were re-measured at `n = 6` (from level 5): 15 low
+labels, 0 violations on every line. That closes the low edge — §33.5(B) previously leaned on §18.1
+over `n = 7…10` while the (III) deviation law is measured over `n = 6…11`, so the derivation did
+not reach the boundary levels. `n = 11` is running under the same script; until it reports, the
+high edge remains covered by the law's own measurement only, and §33.5(B)'s epistemic support at
+`n = 11` is exactly that of §18.1, not more.
+
+Given 1–3 the `8·t3′` and `24·t2′` terms are *derived*; only the two `E`-internal facts in 4 remain
+purely measured, and they are statements about a label-independent graph on `12(h−2)` edges — the
+kind of object the lane has closed before.
+
+**Consequence for the chain.** §33.5(B) — the `8^(n−j)` scaling of the (III) deviation — now
+depends on 1–4 rather than on an unexplained integer identity. (III) is still reduced, not proven;
+(d) is not closed; V1 is not proven.
+
+Reproduce: `python3 scripts/research/zd_v1_18_1_decomposition_probe.py 7 8 9`.
