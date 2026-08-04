@@ -9682,6 +9682,108 @@ theorem Asig_block (e f : Nat) (he : e = 0 ∨ e = 1) (hf : f = 0 ∨ f = 1) (h 
 
 end Block
 
+/-! ## Tier 40: the two `E` signs — the matching is `+1`, the coset is `−1`
+
+§34 measured these two constants and §46's triangle count uses them against the hub relation. Both
+fall out of `sigma_self` and `antisym`:
+
+* **matching** `(a, a + 2^n)`: `P1 = P3 = −1`, so `Asig = +1`. `P1` is `σ(a,a)·(−σ(a⊕W,a⊕W))` — two
+  diagonal values — and `P3` is a square after `antisym`.
+* **coset** `(a, (a⊕W) + 2^n)`: `P1 = P3 = +1`, so `Asig = −1`. Now it is `P1` that is a square after
+  `antisym` and `P3` that is two diagonal values — the two computations trade places.
+
+`antisym` needs `a ≠ a ⊕ W`, which is exactly `W ≠ 0`. -/
+
+section ESigns
+variable (k a W : Nat)
+
+private theorem elift {x : Nat} (h : x < 2^(k+1)) : x < 2^(k+2) := by
+  have : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by rw [Nat.pow_succ]; omega
+  omega
+private theorem elift2 {x : Nat} (h : x < 2^(k+1)) : x + 2^(k+1) < 2^(k+2) := by
+  have : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by rw [Nat.pow_succ]; omega
+  omega
+
+variable (ha : a < 2^(k+1)) (hW : W < 2^(k+1)) (ha0 : a ≠ 0) (hW0 : W ≠ 0) (haW : a ≠ W)
+
+include ha hW ha0 hW0 haW in
+private theorem aWne : a ≠ a ^^^ W := by
+  intro e
+  apply hW0
+  have h : a ^^^ a = a ^^^ (a ^^^ W) := by rw [← e]
+  rw [Nat.xor_self, ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor] at h
+  omega
+
+include ha hW ha0 hW0 haW in
+/-- **The MATCHING sign is `+1`.** -/
+theorem Asig_matching : Asig a (a + 2^(k+1)) W (k+1) = 1 := by
+  have hp := Nat.two_pow_pos (k+1)
+  have haWx : a ^^^ W ≠ 0 := fun e => haW (xor_zero_eq _ _ e)
+  have haWlt : a ^^^ W < 2^(k+1) := xorlt (n := k) ha hW
+  have hne := aWne k a W ha hW ha0 hW0 haW
+  have hsh : (a + 2^(k+1)) ^^^ W = (a ^^^ W) + 2^(k+1) := shift_xorL k a W ha hW
+  have h1 : P1 a (a + 2^(k+1)) W (k+1) = -1 := by
+    rw [P1_red a (a + 2^(k+1)) W (k+1) (elift k ha) (elift2 k ha) (elift k hW)
+          (by rw [hsh]; omega),
+        hsh, R_lu a a k ha ha, R_ul (a ^^^ W) (a ^^^ W) k haWlt haWlt, if_neg haWx,
+        sigma_self (k+1) a ha ha0, sigma_self (k+1) (a ^^^ W) haWlt haWx]
+    decide
+  have h3 : P3 a (a + 2^(k+1)) W (k+1) = -1 := by
+    rw [P3_red a (a + 2^(k+1)) W (k+1) (elift k ha) (elift2 k ha) (elift k hW) (by omega),
+        hsh, R_ul (a ^^^ W) a k haWlt ha, if_neg ha0, R_lu (a ^^^ W) a k haWlt ha,
+        antisym (k+1) a (a ^^^ W) ha haWlt ha0 haWx hne]
+    have := cdSq (a ^^^ W) a (k+1)
+    grind
+  have s1 : (P1 a (a + 2^(k+1)) W (k+1) == P1 (a + 2^(k+1)) a W (k+1)) = true := by
+    rw [P1_symm a (a + 2^(k+1)) W (k+1) (elift k ha) (elift2 k ha) (elift k hW) ha0
+          (by omega) haWx (by rw [hsh]; omega)]; simp
+  have s2 : (P3 a (a + 2^(k+1)) W (k+1) == P3 (a + 2^(k+1)) a W (k+1)) = true := by
+    rw [P3_symm a (a + 2^(k+1)) W (k+1) (elift k ha) (elift2 k ha) (elift k hW) ha0
+          (by omega)]; simp
+  have s3 : (P1 a (a + 2^(k+1)) W (k+1) == P3 a (a + 2^(k+1)) W (k+1)) = true := by
+    rw [h1, h3]; decide
+  unfold Asig resB
+  rw [s1, s2, s3, h1]
+  decide
+
+include ha hW ha0 hW0 haW in
+/-- **The COSET sign is `−1`.** -/
+theorem Asig_coset : Asig a ((a ^^^ W) + 2^(k+1)) W (k+1) = -1 := by
+  have hp := Nat.two_pow_pos (k+1)
+  have haWx : a ^^^ W ≠ 0 := fun e => haW (xor_zero_eq _ _ e)
+  have haWlt : a ^^^ W < 2^(k+1) := xorlt (n := k) ha hW
+  have hne := aWne k a W ha hW ha0 hW0 haW
+  have hcc : (a ^^^ W) ^^^ W = a := by
+    rw [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+  have hsh : ((a ^^^ W) + 2^(k+1)) ^^^ W = a + 2^(k+1) := by
+    rw [shift_xorL k (a ^^^ W) W haWlt hW, hcc]
+  have h1 : P1 a ((a ^^^ W) + 2^(k+1)) W (k+1) = 1 := by
+    rw [P1_red a ((a ^^^ W) + 2^(k+1)) W (k+1) (elift k ha) (elift2 k haWlt) (elift k hW)
+          (by rw [hsh]; omega),
+        hsh, R_lu a (a ^^^ W) k ha haWlt, R_ul a (a ^^^ W) k ha haWlt, if_neg haWx,
+        antisym (k+1) a (a ^^^ W) ha haWlt ha0 haWx hne]
+    have := cdSq (a ^^^ W) a (k+1)
+    grind
+  have h3 : P3 a ((a ^^^ W) + 2^(k+1)) W (k+1) = 1 := by
+    rw [P3_red a ((a ^^^ W) + 2^(k+1)) W (k+1) (elift k ha) (elift2 k haWlt) (elift k hW)
+          (by omega),
+        hsh, R_ul a a k ha ha, if_neg ha0, R_lu (a ^^^ W) (a ^^^ W) k haWlt haWlt,
+        sigma_self (k+1) a ha ha0, sigma_self (k+1) (a ^^^ W) haWlt haWx]
+    decide
+  have s1 : (P1 a ((a ^^^ W) + 2^(k+1)) W (k+1) == P1 ((a ^^^ W) + 2^(k+1)) a W (k+1)) = true := by
+    rw [P1_symm a ((a ^^^ W) + 2^(k+1)) W (k+1) (elift k ha) (elift2 k haWlt) (elift k hW) ha0
+          (by omega) haWx (by rw [hsh]; omega)]; simp
+  have s2 : (P3 a ((a ^^^ W) + 2^(k+1)) W (k+1) == P3 ((a ^^^ W) + 2^(k+1)) a W (k+1)) = true := by
+    rw [P3_symm a ((a ^^^ W) + 2^(k+1)) W (k+1) (elift k ha) (elift2 k haWlt) (elift k hW) ha0
+          (by omega)]; simp
+  have s3 : (P1 a ((a ^^^ W) + 2^(k+1)) W (k+1) == P3 a ((a ^^^ W) + 2^(k+1)) W (k+1)) = true := by
+    rw [h1, h3]; decide
+  unfold Asig resB
+  rw [s1, s2, s3, h1]
+  decide
+
+end ESigns
+
 end SounioZDFiberAntisym
 
 
