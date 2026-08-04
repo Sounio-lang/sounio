@@ -1996,6 +1996,16 @@ Reproduce: `python3 scripts/research/zd_v1_18_1_decomposition_probe.py 7 8 9`.
 
 ## §35 — The `g`-independence is a `k = 3` fact, and that kills every isomorphism route (`W38`, 2026-08-04)
 
+> ⚠ **PARTLY DEFLATED by the prior-art scan** (`docs/research/prior_art_k3_signed_switching_2026-08-04.md`).
+> The conclusion stands; two of its framings do not. (1) `tr(A^k)` of a signed graph is the signed
+> closed-`k`-walk count (Belardo–Cioabă–Koolen–Wang, arXiv:1907.04349, Thm 2.2), so `k = 2` is
+> `2·|E|` — it depends **only on the underlying graph** and is forced by §37's unsigned isomorphism.
+> The table below over-reads it as a datum about the signature. (2) `k = 3` is not a razor-thin
+> coincidence: it is the **first** moment that can see a signature at all, and by Seidel's
+> two-graph correspondence the triangle signs are the **complete** invariant of the switching class
+> (Brouwer, *Two-graphs*; Seidel 1968, 1976). So "the register is `k = 3`" is 1968–76 theory. What
+> stays candidate-novel is the **universality in `g`**, not the register.
+
 §33.3 proposed closing (III) by a sign-preserving bijection `a ↦ a ⊕ 8y` between the deficit
 triangles of `8(y+2^i)` and those of `2^(i+3)`, and recorded that its **edge-level** form is
 refuted. This rung tests the repaired forms and finds a sharper obstruction underneath all of them.
@@ -2003,7 +2013,10 @@ refuted. This rung tests the repaired forms and finds a sharper obstruction unde
 ### 35.1 The contrast that frames it
 
 (c) — the `popcount(g)` **odd** regime — is proven by `Φ`, an **isomorphism of the signed graph**.
-An isomorphism preserves *every* trace, so (c)'s deviation must vanish at every power. Measured:
+An isomorphism preserves *every* trace, so (c)'s deviation must vanish at every power. (In the
+standard vocabulary: the two signatures are **switching-equivalent**, and "switching isomorphic
+signed graphs are cospectral" — Belardo et al., §2. §37.2's dichotomy is exactly the statement that
+switching-equivalence holds iff `popcount(g)` is odd.) Measured:
 `tr(A_W^k) = tr(A_(8g+1)^k)` for `k = 1…7`, **0 deviations**, `n = 7, 8, 9`. That is the shape of
 a proof by isomorphism, and it is what one would hope to imitate in the even regime.
 
@@ -2133,6 +2146,12 @@ reference differ **only** in signs, on a common support:
 ```
 
 ### 37.2 The dichotomy: `ε` is balanced exactly in the merging regime
+
+> **Vocabulary, from the prior-art scan.** `ε(a,b) = μ(a)μ(b)` is Zaslavsky's **switching function**
+> (`σ^θ(vw) = θ(v)σ(vw)θ(w)`, arXiv:1303.3083 §I.G) verbatim; "balanced" is Harary's Balance Theorem
+> (ibid., Thm I.2); and §39.3's `A_σ(a,b) = −μ(a)μ(b)` says `A_σ` is **antibalanced**, from which
+> `tr(A³) = −#triangles` is routine. These are not new objects — state them with the standard names
+> and the 1968–76 attributions.
 
 > **`ε` is balanced (every triangle `+1`) ⟺ `popcount(g(W))` is ODD.** 0 violations.
 
