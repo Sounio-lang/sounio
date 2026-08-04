@@ -29,6 +29,13 @@ Source of truth:
 - `artifacts/omega/selfhost_compiler_progress.v1.json`
 - `artifacts/omega/parallel_cutover_status.v1.json`
 
+Attention governance (`5 = 1 + 2`):
+
+- `.claude/ATTENTION_CHARTER.md` — binding P0 ranking (compiler + epistemic honesty)
+- `.claude/attention_p0.v1.json` — machine P0 snapshot
+- `bash scripts/dev/attention_brief.sh` — shepherd daily ritual
+- MCP `sounio-coord` (`scripts/mcp/sounio_coord_mcp.py`) — claims + agent inbox over MCP
+
 Parallel blocker discipline:
 
 - `.claude/PARALLEL_BLOCKER_CONTRACT.md`
