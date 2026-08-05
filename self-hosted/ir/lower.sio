@@ -4,6 +4,7 @@ module ir::lower
 
 use parser::ast::*
 use ir::ir::*
+use check::specializer::{spec_dce_filter_with_global_marks}
 use io::trace::*
 use io::env::{read_env}
 
@@ -16079,14 +16080,21 @@ pub fn lower_program_to_ir_summary_box_with_externs_ref(
         if i != self_index {
             let ext_prog = (*programs)[i as usize]
             // Structs + free-fn signatures only — no BSS allocation here.
-            lowerer_preseed_external_struct_items_mut(&! lo, &ext_prog.items)
+            // FILTERED: module_frontend filters at its own two read sites, but
+            // this builder reads `programs` directly and bypassed them, so the
+            // preseed still saw every declared function and filled the fn-id
+            // table at lower.sio:1927. Returns the input unchanged unless a
+            // complete mark set is ready.
+            let ext_items = spec_dce_filter_with_global_marks(ext_prog.items)
+            lowerer_preseed_external_struct_items_mut(&! lo, &ext_items)
             lower_note_stage(1, i, lo.had_error)
         }
         i = i + 1
     }
     // Own items first so seed BSS layout is: [own globals | dep1 | dep2 | ...],
     // matching multi-mod merge order (seed, then deps 1..n).
-    lowerer_preseed_program_items_mut(&! lo, &prog.items, ir_empty_name())
+    let own_items = spec_dce_filter_with_global_marks((*prog).items)
+    lowerer_preseed_program_items_mut(&! lo, &own_items, ir_empty_name())
     lower_note_stage(2, self_index, lo.had_error)
     // Wave13 bare cross-mod f64 Ident: only the seed module needs external BSS
     // slots at body-lower time (deps resolve their own globals locally). Walk
@@ -16095,7 +16103,8 @@ pub fn lower_program_to_ir_summary_box_with_externs_ref(
         var di: i64 = 1
         while di < program_count {
             let dep_prog = (*programs)[di as usize]
-            lowerer_preseed_external_bss_globals_mut(&! lo, &dep_prog.items)
+            let dep_items = spec_dce_filter_with_global_marks(dep_prog.items)
+            lowerer_preseed_external_bss_globals_mut(&! lo, &dep_items)
             lower_note_stage(3, di, lo.had_error)
             di = di + 1
         }
