@@ -2951,10 +2951,28 @@ rotations of a triple matrix product have the same triple sum. With `f = g = B`,
 identifies the three `BBE` terms of `tr((B+E)³)`; with `f = B`, `g = h = E`, the three `BEE` terms.
 **The `8 → 4` collapse is therefore available.**
 
-**Two of §34's four sums remain uncarried:** `3·tr(B²E) = 24·t2′` and `tr(BE²) = 0`. What is still
-missing for them is *not* infrastructure any more — it is the evaluation of a mixed sum against `E`'s
-support: a case analysis over the four families inside a triple sum, using the block identity (§47)
-to kill the generic part and Tiers 38/40 to value the rest. Every ingredient is a theorem; the
-assembly is the work.
+**Two of §34's four sums remain uncarried:** `3·tr(B²E) = 24·t2′` and `tr(BE²) = 0`. Tier 45 supplies
+their first move — `Esig_vanishes`, which discards the generic part (`BlkStd → E = 0`, one direction
+only; the values on the families are Tiers 38/40 and are *not* assembled into a characterisation).
+
+> ⚠ **Why the assembly did not close, and it is a finding rather than an excuse.** `E`'s **hub rows
+> are dense** — each hub touches ≈ `2(h−2)` vertices — so `tr(BE²)` has `O(h²)` nonzero terms and its
+> vanishing is a **cancellation, not a sparsity argument**. Every earlier tier closed by restricting
+> to a handful of indices and finishing with `sumLtI_single`; that move does not bite here. The two
+> missing mechanical steps are splitting a `sumLtI` range by a **predicate** rather than an interval,
+> and reparameterising a sparse family as a sum over its index — neither hard alone — but `tr(BE²)`
+> needs the cancellation on top of both.
+>
+> ✅ **Both mechanics are now proven** (Tiers 46–47): `sumLtI_split_pred` / `sumLtI_of_support` /
+> `sumLtI_of_cosupport` cut a range by membership, and `sumLtI_eq_at` / `sumLtI_eq_at2` collapse a
+> sum onto one or two support points — the shape the matching and coset families give, since for a
+> fixed low vertex both partners are determined. **The general injective reindexing is still not
+> proven**, and more to the point **neither mechanic reaches the dense hub rows.** The blocker for
+> `tr(BE²)` is unchanged and is not a missing tool.
+
+So the honest position: every *pointwise* and *structural* fact §18.1 rests on is a theorem, the
+infrastructure (`sumLtI_shift`/`_double`/`_swap`/`_add`, `tri3_cyc`) is in place, one of the four sums
+is carried and a second has its gate — and the last two need an argument of a kind this file has not
+yet had to make.
 
 **§18.1 is not yet proven, so (III) is still reduced, not proven.** (d) and V1 untouched.
