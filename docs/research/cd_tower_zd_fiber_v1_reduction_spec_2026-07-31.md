@@ -3282,3 +3282,77 @@ machinery applies to it. That is the next target, and it is the last one before 
 
 **§18.1 is still not proven** — three of its four terms are, the fourth is measured. (III) is still
 reduced; (d) and V1 untouched.
+
+---
+
+## §51 — `tr(E³) = −24(h−2)`: the constant is a TRIANGLE COUNT, and the sign is `A1` (`W44`, 2026-08-05)
+
+§34's fourth term, and the only one with no `B` in it — so none of the blow-up machinery that
+carried the other three applies. Measured over every low label at `n = 5,6,7`, **0 violations on
+every line** (`scripts/research/zd_v1_trE3_probe.py`):
+
+### 51.1 The generic subgraph has no triangles
+
+On the generic vertices `(a,δ)`, `a ∈ [1,h)∖{W}`, `E` has **exactly two** edges: the matching
+partner `(a,1−δ)` with sign `+1`, and the coset partner `(a⊕W,1−δ)` with sign `−1`. That is
+2-regular, and the component of `a` is the 4-cycle
+
+```
+(a,0) — (a,1) — (a⊕W,0) — (a⊕W,1) — (a,0)
+```
+
+so it contains no triangle.
+
+### 51.2 There is no 2-hub or 3-hub triangle either
+
+Row `W` of `E` is identically zero, and the three special vertices `W`, `W+h`, `h` are **pairwise
+non-adjacent** (`resB_hub_hub`, Tier 38, is exactly `E(h, W+h) = 0`). So there are only **two** real
+hubs, and **every triangle of `E` uses exactly one of them.** Measured: the `0`-hub, `2`-hub and
+`3`-hub parts of `tr(E³)` are each exactly `0` at every level and label.
+
+### 51.3 Each hub sees every generic, and every hub-edge triangle has sign `−1`
+
+Each hub has degree exactly `2(h−2)` — it is adjacent to **all** generic vertices (the S1 section,
+"the hub rows are FULL"). So each of the `2(h−2)` generic edges closes a triangle with each of the
+two hubs: `4(h−2)` triangles.
+
+Every one of them has sign product `−1`, and **for two different reasons**. Writing `s = E(H,·)`:
+
+| edge | product | why |
+|---|---|---|
+| matching | `s(a)·(+1)·(−s(a)) = −1` | the hub row flips under the **block flip** — `Asig_hub0`/`Asig_hubL` (Tier 38) |
+| coset | `s(a)·(−1)·(−s(a⊕W)) = −1` | the hub row also flips under **`a ↦ a⊕W`** — **`A1`** |
+
+> **★ `A1` is this file's own headline lemma** — `Asig (l ⊕ L_lo) y = − Asig l y`, the fiber
+> antisymmetry the file is named after — **and none of §34's other three terms had needed it.**
+> `tr(B³)` is pure blow-up algebra, and `tr(BE²)`/`tr(B²E)` run on the collapsed row. The last term
+> is the one that reaches for the lemma the whole file was built to prove.
+
+### 51.4 The count
+
+`2` hubs × `2(h−2)` generic edges = `4(h−2)` triangles, each contributing `6` ordered terms (three
+rotations × two orientations, `E` symmetric) of `−1`:
+
+> **`tr(E³) = 6 · 4(h−2) · (−1) = −24(h−2)`** — so the `24` is `6 × 4`, not a fitted constant.
+
+### 51.5 Route to Lean, and the one new ingredient
+
+The clean formal route is not the raw triangle enumeration but a two-point collapse. For a hub `H`
+and a generic `b`, the only `c` with both `E(b,c) ≠ 0` and `E(c,H) ≠ 0` are `b`'s two generic
+neighbours (the hubs are excluded because they are non-adjacent to `H` and to themselves), so
+
+> **`(E²)(b,H) = E(b,mat b)·E(mat b,H) + E(b,cos b)·E(cos b,H) = (+1)(−s(b)) + (−1)(+s(b)) = −2·E(H,b)`**
+
+— a `sumLtI_eq_at2` collapse, the tool that is already in the file. Then
+
+`Σ_{b,c} E(H,b)E(b,c)E(c,H) = Σ_b E(H,b)·(−2·E(H,b)) = −2·Σ_b E(H,b)² = −2·2(h−2) = −4(h−2)`,
+
+and the two hubs plus the three cyclic positions give `3 × 2 × (−4(h−2)) = −24(h−2)`.
+
+**The one genuinely new ingredient is a DEGREE COUNT:** `Σ_{b<2h} E(H,b)² = 2(h−2)`. Every earlier
+tier evaluated sums whose summands vanished or collapsed onto named points; this one has to *count*
+a support. It is `sumLtI_peel` twice (Tier 48 — the lemma §47 nearly skipped) against
+`Σ_{i<m} 1 = m`, on each half of the range.
+
+**`tr(E³)` is NOT yet proven in Lean.** §34's other three terms are. (III) is still reduced; (d) and
+V1 untouched.
