@@ -46,7 +46,7 @@ pub fn padf7(x: i64) -> i64 { x + 7 }
 // workspace, so no `&!` boundary pitfall).  Named imports only — the
 // qualified form miscompiles (see stdlib/ontology/elplus.sio).
 
-use ontology::elplus::{elplus_role_closure, elplus_seed, elplus_fixpoint_packed, elplus_subsumes_dense, elplus_edge_dense}
+use ontology::elplus::{elplus_role_closure, elplus_seed, elplus_fixpoint_packed}
 
 // ============================================================================
 // SNOMED-CT CONSTANTS
@@ -729,6 +729,12 @@ impl SNOMEDElplus {
     // Role-aware subsumption query over the closed matrix: does the
     // concept with SCTID `sub_sctid` subsume to the concept with SCTID
     // `sup_sctid`?  (Both must be interned atoms, or the top SCTID.)
+    //
+    // The dense accessor is inlined (not called as
+    // elplus_subsumes_dense(&self.s, a, b)) because passing a struct
+    // field as a cross-module `&` argument miscompiles on the current
+    // Madaros lane (z16/z17 probes, 2026-08); element reads on self are
+    // exact.  Equivalent to elplus_subsumes_dense(s, a, b) = s[a*64+b].
     pub fn snomed_subsumes_elplus(self: &SNOMEDElplus, sub_sctid: i64, sup_sctid: i64) -> bool with Div, Panic {
         var a = self.find_atom(sub_sctid)
         var b = self.find_atom(sup_sctid)
@@ -741,13 +747,14 @@ impl SNOMEDElplus {
         if a < 0 || b < 0 {
             return false
         }
-        elplus_subsumes_dense(&self.s, a, b)
+        self.s[a * 64 + b]
     }
 
     // Existential-target subsumption query: does the concept with SCTID
     // `sub_sctid` subsume to ex type_sctid.filler_sctid in the closed
     // matrix?  (The existential must have been interned; see
-    // snomed_elplus_intern_ex.)
+    // snomed_elplus_intern_ex.)  Accessor inlined (z16/z17 workaround,
+    // see snomed_subsumes_elplus).
     pub fn snomed_subsumes_ex_elplus(self: &SNOMEDElplus, sub_sctid: i64, type_sctid: i64, filler_sctid: i64) -> bool with Div, Panic {
         let a = self.find_atom(sub_sctid)
         let role = self.find_role(type_sctid)
@@ -759,12 +766,15 @@ impl SNOMEDElplus {
         if x < 0 {
             return false
         }
-        elplus_subsumes_dense(&self.s, a, x)
+        self.s[a * 64 + x]
     }
 
     // Derived role targets: writes the SCTIDs of every atom filler f
     // with a derived edge (type_sctid, source, f) in the closed
-    // role-edge cube into `out` and returns their count.
+    // role-edge cube into `out` and returns their count.  Accessor
+    // inlined (z16/z17 workaround, see snomed_subsumes_elplus);
+    // equivalent to elplus_edge_dense(r, role, c, f) =
+    // r[(role*64+c)*64+f].
     pub fn snomed_role_targets_elplus(self: &SNOMEDElplus, source_sctid: i64, type_sctid: i64, out: &![i64; 64]) -> i64 with Mut, Div, Panic {
         var n: i64 = 0
         let a = self.find_atom(source_sctid)
@@ -774,7 +784,7 @@ impl SNOMEDElplus {
         }
         var f: i64 = 1
         while f <= self.na {
-            if elplus_edge_dense(&self.r, role, a, f) {
+            if self.r[(role * 64 + a) * 64 + f] {
                 out[n] = self.sctid_of[f]
                 n = n + 1
             }
