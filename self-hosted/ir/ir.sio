@@ -868,9 +868,42 @@ pub fn ir_reg_list_len(l: Option<Box<IrRegList>>) -> i64 with Mut, Panic, Div {
     n
 }
 
-// Whole-instruction store. Flattens the Name into the byte pool and the call-arg
-// list into the register pool; both are append-only within a compile.
-pub fn ir_arena_store(at: i64, instr: IrInstr) with Mut, Panic, Div {
+// Copy just the argument binding. The pool is append-only within a compile, so
+// two slots may share a range: nothing rewrites it under them.
+pub fn ir_arena_copy_args(dst: i64, src: i64) with Mut, Panic, Div {
+    if dst < 0 || dst >= ir_instr_arena_capacity() { return }
+    if src < 0 || src >= ir_instr_arena_capacity() { return }
+    IR_A_ARG_BASE[dst as usize] = IR_A_ARG_BASE[src as usize]
+    IR_A_ARG_COUNT[dst as usize] = IR_A_ARG_COUNT[src as usize]
+}
+
+// Exchange two slots whole. A swap written as two stores cannot carry arguments
+// correctly -- the first store overwrites the very slot the second must take its
+// arguments from -- so the exchange has to be a single primitive.
+pub fn ir_arena_swap_slots(a: i64, b: i64) with Mut, Panic, Div {
+    if a == b { return }
+    if a < 0 || a >= ir_instr_arena_capacity() { return }
+    if b < 0 || b >= ir_instr_arena_capacity() { return }
+    let t_op = IR_A_OP[a as usize]                IR_A_OP[a as usize] = IR_A_OP[b as usize]                IR_A_OP[b as usize] = t_op
+    let t_dst = IR_A_DST[a as usize]              IR_A_DST[a as usize] = IR_A_DST[b as usize]              IR_A_DST[b as usize] = t_dst
+    let t_s1 = IR_A_SRC1[a as usize]              IR_A_SRC1[a as usize] = IR_A_SRC1[b as usize]            IR_A_SRC1[b as usize] = t_s1
+    let t_s2 = IR_A_SRC2[a as usize]              IR_A_SRC2[a as usize] = IR_A_SRC2[b as usize]            IR_A_SRC2[b as usize] = t_s2
+    let t_ii = IR_A_IMM_I64[a as usize]           IR_A_IMM_I64[a as usize] = IR_A_IMM_I64[b as usize]      IR_A_IMM_I64[b as usize] = t_ii
+    let t_if = IR_A_IMM_F64[a as usize]           IR_A_IMM_F64[a as usize] = IR_A_IMM_F64[b as usize]      IR_A_IMM_F64[b as usize] = t_if
+    let t_lb = IR_A_LABEL_ID[a as usize]          IR_A_LABEL_ID[a as usize] = IR_A_LABEL_ID[b as usize]    IR_A_LABEL_ID[b as usize] = t_lb
+    let t_fn = IR_A_FN_ID[a as usize]             IR_A_FN_ID[a as usize] = IR_A_FN_ID[b as usize]          IR_A_FN_ID[b as usize] = t_fn
+    let t_fi = IR_A_FIELD_IDX[a as usize]         IR_A_FIELD_IDX[a as usize] = IR_A_FIELD_IDX[b as usize]  IR_A_FIELD_IDX[b as usize] = t_fi
+    let t_fl = IR_A_IMM_FLAGS[a as usize]         IR_A_IMM_FLAGS[a as usize] = IR_A_IMM_FLAGS[b as usize]  IR_A_IMM_FLAGS[b as usize] = t_fl
+    let t_bo = IR_A_BIN_OP[a as usize]            IR_A_BIN_OP[a as usize] = IR_A_BIN_OP[b as usize]        IR_A_BIN_OP[b as usize] = t_bo
+    let t_uo = IR_A_UN_OP[a as usize]             IR_A_UN_OP[a as usize] = IR_A_UN_OP[b as usize]          IR_A_UN_OP[b as usize] = t_uo
+    let t_no = IR_A_NAME_OFF[a as usize]          IR_A_NAME_OFF[a as usize] = IR_A_NAME_OFF[b as usize]    IR_A_NAME_OFF[b as usize] = t_no
+    let t_nl = IR_A_NAME_LEN[a as usize]          IR_A_NAME_LEN[a as usize] = IR_A_NAME_LEN[b as usize]    IR_A_NAME_LEN[b as usize] = t_nl
+    let t_ab = IR_A_ARG_BASE[a as usize]          IR_A_ARG_BASE[a as usize] = IR_A_ARG_BASE[b as usize]    IR_A_ARG_BASE[b as usize] = t_ab
+    let t_ac = IR_A_ARG_COUNT[a as usize]         IR_A_ARG_COUNT[a as usize] = IR_A_ARG_COUNT[b as usize]  IR_A_ARG_COUNT[b as usize] = t_ac
+}
+
+// Everything except the name and the call arguments.
+fn ir_arena_store_scalars(at: i64, instr: IrInstr) with Mut, Panic, Div {
     if at < 0 || at >= ir_instr_arena_capacity() { return }
     IR_A_OP[at as usize] = instr.op as i64
     IR_A_DST[at as usize] = instr.dst
@@ -884,9 +917,54 @@ pub fn ir_arena_store(at: i64, instr: IrInstr) with Mut, Panic, Div {
     IR_A_IMM_FLAGS[at as usize] = instr.imm_flags
     IR_A_BIN_OP[at as usize] = instr.bin_op as i64
     IR_A_UN_OP[at as usize] = instr.un_op as i64
-    IR_A_ARG_COUNT[at as usize] = instr.arg_count
+}
+
+// Whole-instruction store. Flattens the Name into the byte pool and the call-arg
+// list into the register pool; both are append-only within a compile.
+pub fn ir_arena_store(at: i64, instr: IrInstr) with Mut, Panic, Div {
+    if at < 0 || at >= ir_instr_arena_capacity() { return }
+    ir_arena_store_scalars(at, instr)
     ir_arena_put_name(at, instr.name)
-    ir_arena_put_args(at, instr.call_args, instr.arg_count)
+    ir_arena_store_args(at, instr.call_args, instr.arg_count)
+}
+
+// Store an instruction whose argument list did not survive ir_arena_load, taking
+// the arguments from the slot it was loaded FROM. This is the honest form for
+// the shuffles that move an instruction between slots.
+pub fn ir_arena_store_from(at: i64, instr: IrInstr, args_from: i64) with Mut, Panic, Div {
+    if at < 0 || at >= ir_instr_arena_capacity() { return }
+    ir_arena_store_scalars(at, instr)
+    ir_arena_put_name(at, instr.name)
+    ir_arena_copy_args(at, args_from)
+}
+
+// ir_arena_load deliberately does NOT rebuild the argument list -- doing so needs
+// Alloc, and forcing Alloc onto ~431 call sites is what desynchronised the
+// checker into six figures of nonsense diagnostics. So a stored instruction may
+// legitimately arrive with arg_count > 0 and no list, and the old code walked
+// that empty list and wrote IR_INVALID_REG once per argument. That is the whole
+// rc=12: every call WITH arguments lost them, so codegen reported the function
+// unsupported. A call with no arguments was unaffected, which is why
+// single-function programs compiled and anything calling a helper did not.
+fn ir_arena_store_args(at: i64, args: Option<Box<IrRegList>>, count: i64) with Mut, Panic, Div {
+    if count <= 0 {
+        IR_A_ARG_COUNT[at as usize] = 0
+        IR_A_ARG_BASE[at as usize] = 0
+        return
+    }
+    if ir_reg_list_len(args) > 0 {
+        IR_A_ARG_COUNT[at as usize] = count
+        ir_arena_put_args(at, args, count)
+        return
+    }
+    // No list and a positive count. Sound ONLY when the destination already
+    // holds exactly these arguments -- a read-modify-write on the same slot.
+    // Anything else would hand the call another instruction's registers, so
+    // fail loud rather than preserve: a silently wrong call is the failure this
+    // arena exists to make impossible. Use ir_arena_store_from for real moves.
+    if IR_A_ARG_COUNT[at as usize] == count && IR_A_ARG_BASE[at as usize] > 0 { return }
+    ir_arena_latch(IR_ARENA_VIOLATION_INVALID, ir_region_invalid())
+    IR_A_ARG_COUNT[at as usize] = 0
 }
 
 pub fn ir_arena_put_name(at: i64, nm: Name) with Mut, Panic, Div {

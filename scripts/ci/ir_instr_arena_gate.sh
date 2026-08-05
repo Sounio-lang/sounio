@@ -162,8 +162,21 @@ done
 # --- static contract: the guards must be present and the tiers coherent ------
 grep -q 'pub fn ir_instr_arena_capacity() -> i64 { 1048576 }' "$ARENA" \
   || fail "arena_capacity_accessor_drift"
-grep -q 'pub var IR_INSTR_ARENA: \[IrInstr; 1048576\]' "$ARENA" \
-  || fail "arena_declaration_accessor_incoherent"
+# The storage is struct-of-arrays, not one array of IrInstr. That is forced, not
+# stylistic: #1655 measured that the bootstrap seed turns a store into a GLOBAL
+# array of AGGREGATES into a silent no-op, so `[IrInstr; N]` as a global is
+# exactly the shape that must NOT come back. Assert its absence, then hold every
+# scalar lane to the capacity the accessor reports.
+grep -q 'pub var IR_INSTR_ARENA: \[IrInstr; ' "$ARENA" \
+  && fail "aggregate_arena_reintroduced_see_1655"
+for lane in IR_A_OP IR_A_DST IR_A_SRC1 IR_A_SRC2 IR_A_IMM_I64 IR_A_LABEL_ID \
+            IR_A_FN_ID IR_A_FIELD_IDX IR_A_IMM_FLAGS IR_A_BIN_OP IR_A_UN_OP \
+            IR_A_ARG_COUNT IR_A_NAME_OFF IR_A_NAME_LEN IR_A_ARG_BASE; do
+  grep -q "pub var $lane: \[i64; 1048576\]" "$ARENA" \
+    || fail "arena_lane_${lane}_incoherent"
+done
+grep -q 'pub var IR_A_IMM_F64: \[f64; 1048576\]' "$ARENA" \
+  || fail "arena_lane_IR_A_IMM_F64_incoherent"
 grep -q 'pub fn ir_region_table_capacity() -> i64 { 8192 }' "$ARENA" \
   || fail "region_table_accessor_drift"
 grep -cq . /dev/null
@@ -171,7 +184,10 @@ for arr in IR_REGION_BASE IR_REGION_CAP IR_REGION_LEN IR_REGION_GEN IR_REGION_ST
   grep -q "pub var $arr: \[i64; 8192\]" "$ARENA" || fail "region_array_${arr}_incoherent"
 done
 # The two guards this gate exists for.
-grep -q 'IR_REGION_GEN\[s as usize\] != (\*r).generation' "$ARENA" \
+# ir_region_status_v takes the handle BY VALUE, so the guard reads `r.generation`
+# rather than `(*r).generation`. Same guard, same strength -- only the binding
+# form moved.
+grep -q 'IR_REGION_GEN\[s as usize\] != r\.generation' "$ARENA" \
   || fail "generation_check_missing"
 grep -q 'IR_REGION_STATE\[(\*r).slot as usize\] == IR_REGION_SEALED' "$ARENA" \
   || fail "sealed_check_missing"
@@ -181,13 +197,13 @@ awk '/^pub fn ir_region_base_write/,/^}/' "$ARENA" | grep -q 'IR_REGION_SEALED' 
 
 # --- optional vacuity re-check ----------------------------------------------
 if [ "$VACUITY" = "1" ]; then
-  sed 's/IR_REGION_GEN\[s as usize\] != (\*r).generation/false/' "$ARENA" >"$TMP/no_gen.sio"
+  sed 's/IR_REGION_GEN\[s as usize\] != r\.generation/false/' "$ARENA" >"$TMP/no_gen.sio"
   run_one ir_instr_arena_stale_witness IR_INSTR_ARENA_STALE_PASS "$TMP/no_gen.sio" fail
   sed 's/IR_REGION_STATE\[(\*r).slot as usize\] == IR_REGION_SEALED/false/g' "$ARENA" >"$TMP/no_seal.sio"
   run_one ir_instr_arena_seal_witness IR_INSTR_ARENA_SEAL_PASS "$TMP/no_seal.sio" fail
 fi
 
 head_sha="$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || printf not_available)"
-printf 'IR_INSTR_ARENA_BOUNDARY generation_guard=proved sealing_guard=proved fail_closed_capacity=proved conversion=not_started\n'
+printf 'IR_INSTR_ARENA_BOUNDARY generation_guard=proved sealing_guard=proved fail_closed_capacity=proved conversion=complete\n'
 printf 'IR_INSTR_ARENA_PASS witnesses=%d arena_capacity=1048576 region_table=8192 head=%s\n' \
   "${#WITNESSES[@]}" "$head_sha"
