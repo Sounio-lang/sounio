@@ -45,7 +45,13 @@ bash scripts/ci/madaros_sedenion_native_v2_gate.sh
 # eisa-only minimal: ereg2_exact/eadd2/esub2 → EISA_ONLY PASS under Madaros
 ```
 
-## Honest claim boundary
+## Context (updated 2026-08-05 thinlink lane)
 
-Do **not** claim combined sedenion+eisa zero-provenance under default Madaros.
-Do claim: fail-closed without crash; semantic oracle under lean_single; component imports green.
+A **compact** Madaros-green smoke now exists:
+`tests/run-pass/zero_provenance_native_v2_smoke.sio` (sedenion + local f64
+kinds, ~41 fn; gate `madaros_zero_provenance_native_v2_gate.sh`). That smoke
+does **not** import `eisa::core_v2` and must not be cited as closing this BLK.
+
+This BLK remains open as the **eisa::core_v2 + sedenion** combined-import
+thin-link residual until Madaros emits that larger CU (`~111` fn) without
+`rc=12`.

@@ -458,7 +458,8 @@ Madaros native-v2 (shepherd-merge 2026-08-05 onto `origin/main`):
 | **sedenion** import smoke | **green** (closed 2026-08-04) | `tests/run-pass/sedenion_import_native_v2_smoke.sio`; gate `scripts/ci/madaros_sedenion_native_v2_gate.sh` |
 | **`qd128_core` import smoke** | **green** (closed 2026-08-04) | `math::qd128_core` constructors only; gate `scripts/ci/madaros_qd128_core_native_v2_gate.sh` |
 | **full `math::qd128` / `qd_mul`** | **green** (closed 2026-08-04) | `qd_nine_*` take `[f64;9]`; gates `madaros_qd128_mul_native_v2_gate.sh`, `qd128_import_native_v2_smoke.sio` |
-| **combined zero-provenance (sedenion+eisa)** | **fail-closed / waived-E3** (2026-08-05) | ~5 modules / ~111 fn after lower → thin-link `rc=12` (no segfault). Alone: sedenion ~41 fn green; eisa-only ~65 fn green. lean_single combined `ZERO_PROVENANCE PASS`. Probe + gate: `tests/known_failures/zero_provenance_native_v2_probe.sio`, `scripts/ci/madaros_zero_provenance_failclosed_gate.sh`. BLK: `docs/handoff/BLK-20260805-p0b-zero-provenance.md` |
+| **compact zero-provenance** (sedenion + local f64 kinds) | **green** (closed 2026-08-05) | `tests/run-pass/zero_provenance_native_v2_smoke.sio` (~41 fn); gate `scripts/ci/madaros_zero_provenance_native_v2_gate.sh`. Does **not** import `eisa::core_v2`. |
+| **combined zero-provenance (sedenion+eisa::core_v2)** | **fail-closed / waived-E3** (2026-08-05) | ~5 modules / ~111 fn → thin-link `rc=12`. Probe + gate: `tests/known_failures/zero_provenance_native_v2_probe.sio`, `madaros_zero_provenance_failclosed_gate.sh`. BLK: `docs/handoff/BLK-20260805-p0b-zero-provenance.md` |
 | `zero_event` stdlib probe (Madaros native) | green | `tests/known_failures/zero_event_stdlib_native_v2_probe.sio` prints `ZERO_EVENT_STDLIB PASS` under stock Madaros |
 
 Constructor privacy was closed by running the same visibility preflight used
@@ -471,13 +472,14 @@ Reproduce the classified matrix with:
 bash scripts/ci/madaros_sedenion_native_v2_gate.sh
 bash scripts/ci/madaros_qd128_core_native_v2_gate.sh
 bash scripts/ci/madaros_qd128_mul_native_v2_gate.sh
+bash scripts/ci/madaros_zero_provenance_native_v2_gate.sh
 bash scripts/ci/madaros_zero_provenance_failclosed_gate.sh
 bash scripts/ci/zero_event_native_v2_matrix.sh
 bash scripts/ci/zero_event_gate.sh
 ```
 
-Do not promote combined zero-provenance to Madaros `run-pass` / TRUSTWORTHY
-until default Madaros prints `ZERO_PROVENANCE PASS` without `SOUNIO_SOUC_ENGINE=lean_single`.
+Do not claim `eisa::core_v2`+sedenion combined import Madaros-green; the compact
+smoke is a distinct, smaller CU.
 
 ## Reporting Issues
 
