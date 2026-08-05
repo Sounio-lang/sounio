@@ -3726,3 +3726,73 @@ took `j` up to `n−2` instead of `j < lsb(8g)`, which silently compares labels 
 like structure. Caught by recomputing `g(W)` from the label rather than trusting the loop bound.
 
 **(III) is still reduced, not proven.**
+
+## §55 — the SPECTRAL route: an exact halving valid for EVERY label
+
+§54.6 said the remaining reading is spectral. It is, and the first thing it gives is a factorisation
+better than §18.1's, because it does not care whether the label is low.
+
+### 55.1 — the fold
+
+`A1` — this file's headline lemma, `A_σ(l ⊕ W, y) = −A_σ(l, y)` — pairs the vertices `{l, l⊕W}`; the
+isolated vertex is `W` itself. Choosing the representative with `W`'s **top** bit clear and deleting
+that bit maps the representatives onto `[1, 2^(n−2))`, and the matrix becomes a Kronecker product:
+
+```
+A  =  M ⊗ K   (plus the isolated row/column),        K = [[1,−1],[−1,1]]
+```
+
+`K² = 2K`, so `tr(K²) = 4` and `tr(K³) = 8`, and therefore
+
+> **`tr(A²) = 4·tr(M²)` and `tr(A³) = 8·tr(M³)` — for EVERY label.**
+
+Measured: **0 violations at `n = 6,7,8`, all `2^(n−1)−1` labels each.** §18.1 is the low branch only;
+this holds on the high branch too, which is exactly where the deviation's base case lives.
+
+**So the ubiquitous `8` is `tr(K³)`, once.** It is *not* iterated folding: `M` is **nonsingular**
+(rank `2^(n−2)−1`, full) and admits no second signed antisymmetry, so the fold is exactly one level
+deep. The `8^(n−j)` in `δ` still comes from the §18.1 descent, which is a separate mechanism.
+
+### 55.2 — what the spectra show
+
+Along the one-parameter family `W_j = 8g + 2^j` of §54.5:
+
+| `n` | `g` | `(j, #distinct eigenvalues of M, tr(M³))` |
+|---|---|---|
+| 7 | 0 | `(0,8,6510) (1,8,6510) (2,8,6510) (3,7,−7314) (4,5,−19410) (5,2,−26970)` |
+| 7 | 6 | `(0,8,2310) (1,8,2310) (2,8,2310) (3,5,−11514)` |
+
+- **`j = 0,1,2` are COSPECTRAL** — the Fano orbit, seen spectrally. That is §33.5(A) as a statement
+  about eigenvalues rather than about `Φ`.
+- **The spectrum simplifies monotonically as `j` grows**, collapsing to two distinct eigenvalues at
+  the maximal seam.
+
+### 55.3 — the maximal seam is `I − J`, and §33.5(C) falls out in one line
+
+At `W = 2^(n−2)` (the maximal seam, `j = n−2`), **`M = I − J` exactly** — the complete graph with
+every edge `−1` — verified at `n = 5,6,7,8,9`. Its spectrum is `1` with multiplicity `s−1` and
+`1−s` once, `s = 2^(n−2)−1`, so `tr(M³) = (s−1) − (s−1)³` and
+
+```
+tr(A³)(n, 2^(n−2)) = 8·[(s−1) − (s−1)³] = −8(q−1)(q−2)(q−3),      q = 2^(n−2)
+```
+
+which is **§33.5(C) exactly**, obtained here in one line instead of via the `K_N`-minus-a-matching
+count plus the antibalance theorem. The `8` that §33.5(C) attributed to "the doubling `N = 2(q−1)`"
+is the same `tr(K³)`.
+
+### 55.4 — status
+
+**This does not prove the deviation law.** What it changes:
+
+- the base case, which lives on the high branch where §18.1 says nothing, now has an exact
+  factorisation of its own — `tr(A³) = 8·tr(M³)` on a matrix of half the size that is nonsingular;
+- `δ`'s endpoint `j = n−2` is now completely explicit (`M = I − J`), and the previously derived base
+  case is a one-line corollary rather than a separate argument;
+- §33.5(A)'s `D = 0` half restates as *cospectrality* of `j = 0,1,2`.
+
+What is open is unchanged in substance: the value at a general seam. But it is now a question about
+the spectrum of an explicit nonsingular half-size matrix, and the two endpoints of the `j`-family
+(`j ≤ 2` cospectral, `j = n−2` equal to `I − J`) are both settled.
+
+**(III) is still reduced, not proven.**
