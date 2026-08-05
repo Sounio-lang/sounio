@@ -2955,6 +2955,13 @@ identifies the three `BBE` terms of `tr((B+E)³)`; with `f = B`, `g = h = E`, th
 their first move — `Esig_vanishes`, which discards the generic part (`BlkStd → E = 0`, one direction
 only; the values on the families are Tiers 38/40 and are *not* assembled into a characterisation).
 
+> ⚠⚠ **WITHDRAWN — see §49.** The paragraph below reasons from the density of `E`'s hub rows to the
+> shape of the argument, without checking whether those rows can reach the OUTER indices of
+> `tr(BE²)`. They cannot: `B` is zero on the rows *and* columns of all three special vertices, so a
+> hub can only ever be the MIDDLE index, where the hub relation makes its collapsed contribution
+> vanish outright. `tr(BE²) = 0` is a support argument after all. Kept in place, uncorrected, as the
+> record of the misdiagnosis.
+>
 > ⚠ **Why the assembly did not close, and it is a finding rather than an excuse.** `E`'s **hub rows
 > are dense** — each hub touches ≈ `2(h−2)` vertices — so `tr(BE²)` has `O(h²)` nonzero terms and its
 > vanishing is a **cancellation, not a sparsity argument**. Every earlier tier closed by restricting
@@ -3019,5 +3026,80 @@ is the *tool gap the earlier tier claimed*, not the mathematical one.
 
 Reviewed per M1 before commit: grok-4.5 `[OK]` on both statements; Z.AI truncated at 81 diff lines,
 consistent with the measured ~50-line threshold for that provider.
+
+**§18.1 is still not proven, so (III) is still reduced, not proven.** (d) and V1 untouched.
+
+
+---
+
+## §49 — `tr(BE²) = 0`: §47's diagnosis was about the wrong index (`W43`, 2026-08-05)
+
+§47 filed the blocker like this:
+
+> `E`'s **hub rows are dense** — each hub touches ≈ `2(h−2)` vertices — so `tr(BE²)` has `O(h²)`
+> nonzero terms and its vanishing is a **cancellation, not a sparsity argument**.
+
+The premise is true. The conclusion does not follow, and the reason is an index the diagnosis never
+looked at.
+
+### 49.1 The collapse
+
+`B = J₂⊗A′` is zero on the **rows and the columns** of all three special vertices: row `W` of `A′` is
+the isolated vertex (`Asig_isolated_row`), and `h` lies outside `B`'s index range entirely. So in
+
+```
+tr(BE²) = Σ_{u,v,w} B[u,v] · E[v,w] · E[w,u]
+```
+
+`u` and `v` are both non-special and only the **middle** index `w` is free. Summing over `u` and `v`
+first, and using that `B` acts on its two arguments through the `2×2` block, the whole trace becomes
+one quadratic form per vertex:
+
+> **`tr(BE²) = Σ_w yᵂ_w ᵀ A′ yᵂ_w`, where `y_w(a) = E[w,a] + E[w,a+h]` for `a ∈ [1,h)`.**
+
+A dense hub row never appears as an outer index; as a middle index it contributes exactly **one**
+vector `y_w`. Density is irrelevant to the count.
+
+### 49.2 Every form vanishes, and each for a theorem already in the file
+
+| `w` | `y_w` | reason |
+|---|---|---|
+| `W` | `0` | row `W` of `A` is zero — `Asig_isolated_row` |
+| `h` | `0` | `A[h, y+h] = −A[h, y]` — **`Asig_hub0`** (Tier 38) |
+| `W+h` | `0` | `A[W+h, y+h] = −A[W+h, y]` — **`Asig_hubL`** (Tier 38) |
+| `b + δh`, generic | `e_b − e_{b⊕W}` off the index `W` | `Asig_matching` (`+1`), `Asig_coset` (`−1`), `Asig_block` (the rest cancels against `B`), `resB_coset` (the within-block coset entry is `0`) |
+
+**The hub case is the punchline.** The hub relation is precisely a *block-flip antisymmetry* of the
+hub row, so collapsing the block adds a number to its own negative: `y_hub = 0` **outright**, not
+after a cancellation between distinct terms. The two theorems that kill the dense rows were proven in
+Tier 38, before the obstruction was even written down.
+
+For a generic `w` the form is
+`A′(b,b) − 2A′(b, b⊕W) + A′(b⊕W, b⊕W) = 0` — zero diagonal (`Asig_diag`) and the fact that a vertex is
+never adjacent to its coset partner (`resB_coset`), which is exactly *why* `E` has a coset family in
+the first place.
+
+So `tr(BE²) = 0` **is** a support argument — at the collapsed index, not the ambient one.
+
+### 49.3 Measured
+
+`scripts/research/zd_v1_trBE2_probe.py 6 7 8 9 10`, every low label at each level (15/31/63/127/255):
+**0 violations** on all four checks — the collapse identity, `y = 0` on the three special vertices
+together with the three separate reasons, the `e_b − e_{b⊕W}` shape on all `129540` generic rows at
+`n = 10`, and `A′`'s zero diagonal plus coset non-adjacency.
+
+### 49.4 Status — honest
+
+**`tr(BE²) = 0` is NOT yet proven in Lean.** What §49 changes is the *kind* of gap: every pointwise
+ingredient is already a kernel-clean `∀n` theorem, and what remains is the **sum bookkeeping** — the
+collapse of §49.1 — for which Tiers 43–48 supply the tools (`sumLtI_swap`, `sumLtI_add`,
+`sumLtI_split_pred`, `sumLtI_reindex`). It is no longer "an argument of a kind this file has not yet
+had to make".
+
+**Correction to §47, stated plainly:** the sentence quoted at the top is withdrawn. It reasoned from
+the density of a row to the shape of the argument without checking whether that row could reach the
+outer indices — it cannot, because `B` kills it on both sides. This is the same failure shape as
+Tier 47's "awkward without `Finset`" (§48.1): a property of the object was read off as a property of
+the proof, without attempting the proof.
 
 **§18.1 is still not proven, so (III) is still reduced, not proven.** (d) and V1 untouched.
