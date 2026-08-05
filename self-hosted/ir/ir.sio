@@ -776,7 +776,212 @@ pub fn ir_strategy_name(s: i64) -> string {
 // nc_flat_reloc_capacity() in self-hosted/native/frame.sio. Sized for this
 // module's own witnesses; the conversion change sizes it from measurement.
 
-pub var IR_INSTR_ARENA: [IrInstr; 1048576] = [ir_nop(); 1048576]
+// STRUCT-OF-ARRAYS storage (#1649, #1655).
+//
+// This cannot be `[IrInstr; N]`. Under the bootstrap seed -- which builds this
+// compiler -- storing a STRUCT into a GLOBAL array is a silent no-op: lean_single
+// represents a global aggregate array as pointer-per-slot, so the store writes the
+// address of a temporary and the load returns that pointer as the first field.
+// Measured, isolated, and kept as a reproduction in
+// tests/known_failures/lean_single_global_aggregate_store.sio.
+//
+// Global arrays of SCALARS are fine, so every field gets its own. Measured under
+// the seed: i64 OK, f64 OK, i8 OK, enum BROKEN, Option<Box<_>> segfaults --
+// so enums are held as i64 (the `as i64` / `as IrOpcode` round-trip is exact),
+// the Name goes to a byte pool, and call args go to a flat i64 pool.
+//
+// It is also much cheaper than the array it replaces: ~112 MB of scalars for a
+// million instructions, against 2 GB of reserved [IrInstr; 4096] per module.
+pub var IR_A_OP: [i64; 1048576] = [0; 1048576]
+pub var IR_A_DST: [i64; 1048576] = [0; 1048576]
+pub var IR_A_SRC1: [i64; 1048576] = [0; 1048576]
+pub var IR_A_SRC2: [i64; 1048576] = [0; 1048576]
+pub var IR_A_IMM_I64: [i64; 1048576] = [0; 1048576]
+pub var IR_A_IMM_F64: [f64; 1048576] = [0.0; 1048576]
+pub var IR_A_LABEL_ID: [i64; 1048576] = [0; 1048576]
+pub var IR_A_FN_ID: [i64; 1048576] = [0; 1048576]
+pub var IR_A_FIELD_IDX: [i64; 1048576] = [0; 1048576]
+pub var IR_A_IMM_FLAGS: [i64; 1048576] = [0; 1048576]
+pub var IR_A_BIN_OP: [i64; 1048576] = [0; 1048576]
+pub var IR_A_UN_OP: [i64; 1048576] = [0; 1048576]
+pub var IR_A_ARG_COUNT: [i64; 1048576] = [0; 1048576]
+pub var IR_A_NAME_OFF: [i64; 1048576] = [0; 1048576]
+pub var IR_A_NAME_LEN: [i64; 1048576] = [0; 1048576]
+pub var IR_A_ARG_BASE: [i64; 1048576] = [0; 1048576]
+
+// Byte pool for instruction names, and a flat pool for call-argument registers.
+pub var IR_NAME_POOL: [i8; 4194304] = [0; 4194304]
+pub var IR_NAME_POOL_LEN: i64 = 0
+pub fn ir_name_pool_capacity() -> i64 { 4194304 }
+
+pub var IR_ARG_POOL: [i64; 262144] = [0; 262144]
+pub var IR_ARG_POOL_LEN: i64 = 0
+pub fn ir_arg_pool_capacity() -> i64 { 262144 }
+
+// Copy one arena slot to another, field by field. Replaces what used to be a
+// single aggregate array-element copy -- which the seed silently drops.
+pub fn ir_arena_copy_slot(dst: i64, src: i64) with Mut, Panic, Div {
+    if dst < 0 || dst >= ir_instr_arena_capacity() { return }
+    if src < 0 || src >= ir_instr_arena_capacity() { return }
+    IR_A_OP[dst as usize] = IR_A_OP[src as usize]
+    IR_A_DST[dst as usize] = IR_A_DST[src as usize]
+    IR_A_SRC1[dst as usize] = IR_A_SRC1[src as usize]
+    IR_A_SRC2[dst as usize] = IR_A_SRC2[src as usize]
+    IR_A_IMM_I64[dst as usize] = IR_A_IMM_I64[src as usize]
+    IR_A_IMM_F64[dst as usize] = IR_A_IMM_F64[src as usize]
+    IR_A_LABEL_ID[dst as usize] = IR_A_LABEL_ID[src as usize]
+    IR_A_FN_ID[dst as usize] = IR_A_FN_ID[src as usize]
+    IR_A_FIELD_IDX[dst as usize] = IR_A_FIELD_IDX[src as usize]
+    IR_A_IMM_FLAGS[dst as usize] = IR_A_IMM_FLAGS[src as usize]
+    IR_A_BIN_OP[dst as usize] = IR_A_BIN_OP[src as usize]
+    IR_A_UN_OP[dst as usize] = IR_A_UN_OP[src as usize]
+    IR_A_ARG_COUNT[dst as usize] = IR_A_ARG_COUNT[src as usize]
+    IR_A_NAME_OFF[dst as usize] = IR_A_NAME_OFF[src as usize]
+    IR_A_NAME_LEN[dst as usize] = IR_A_NAME_LEN[src as usize]
+    IR_A_ARG_BASE[dst as usize] = IR_A_ARG_BASE[src as usize]
+}
+
+// Args move/clear, used by the peephole that shuffles instructions between slots.
+pub fn ir_arena_move_args(dst: i64, src: i64) with Mut, Panic, Div {
+    if dst < 0 || dst >= ir_instr_arena_capacity() { return }
+    if src < 0 || src >= ir_instr_arena_capacity() { return }
+    IR_A_ARG_BASE[dst as usize] = IR_A_ARG_BASE[src as usize]
+    IR_A_ARG_COUNT[dst as usize] = IR_A_ARG_COUNT[src as usize]
+    IR_A_ARG_COUNT[src as usize] = 0
+}
+
+pub fn ir_arena_clear_args(at: i64) with Mut, Panic, Div {
+    if at < 0 || at >= ir_instr_arena_capacity() { return }
+    IR_A_ARG_COUNT[at as usize] = 0
+    IR_A_ARG_BASE[at as usize] = 0
+}
+
+pub fn ir_reg_list_len(l: Option<Box<IrRegList>>) -> i64 with Mut, Panic, Div {
+    var n: i64 = 0
+    var cur = l
+    while true {
+        match cur {
+            Some(node) => { n = n + 1  cur = (*node).tail }
+            _ => { break }
+        }
+    }
+    n
+}
+
+// Whole-instruction store. Flattens the Name into the byte pool and the call-arg
+// list into the register pool; both are append-only within a compile.
+pub fn ir_arena_store(at: i64, instr: IrInstr) with Mut, Panic, Div {
+    if at < 0 || at >= ir_instr_arena_capacity() { return }
+    IR_A_OP[at as usize] = instr.op as i64
+    IR_A_DST[at as usize] = instr.dst
+    IR_A_SRC1[at as usize] = instr.src1
+    IR_A_SRC2[at as usize] = instr.src2
+    IR_A_IMM_I64[at as usize] = instr.imm_i64
+    IR_A_IMM_F64[at as usize] = instr.imm_f64
+    IR_A_LABEL_ID[at as usize] = instr.label_id
+    IR_A_FN_ID[at as usize] = instr.fn_id
+    IR_A_FIELD_IDX[at as usize] = instr.field_idx
+    IR_A_IMM_FLAGS[at as usize] = instr.imm_flags
+    IR_A_BIN_OP[at as usize] = instr.bin_op as i64
+    IR_A_UN_OP[at as usize] = instr.un_op as i64
+    IR_A_ARG_COUNT[at as usize] = instr.arg_count
+    ir_arena_put_name(at, instr.name)
+    ir_arena_put_args(at, instr.call_args, instr.arg_count)
+}
+
+pub fn ir_arena_put_name(at: i64, nm: Name) with Mut, Panic, Div {
+    if at < 0 || at >= ir_instr_arena_capacity() { return }
+    var len = nm.len
+    if len < 0 { len = 0 }
+    if len > 128 { len = 128 }
+    if IR_NAME_POOL_LEN + len > ir_name_pool_capacity() {
+        IR_A_NAME_LEN[at as usize] = 0
+        return
+    }
+    let off = IR_NAME_POOL_LEN
+    var i: i64 = 0
+    while i < len {
+        IR_NAME_POOL[(off + i) as usize] = nm.buf[i as usize]
+        i = i + 1
+    }
+    IR_NAME_POOL_LEN = off + len
+    IR_A_NAME_OFF[at as usize] = off
+    IR_A_NAME_LEN[at as usize] = len
+}
+
+pub fn ir_arena_name(at: i64) -> Name with Mut, Panic, Div {
+    var nm = ir_empty_name()
+    if at < 0 || at >= ir_instr_arena_capacity() { return nm }
+    let off = IR_A_NAME_OFF[at as usize]
+    let len = IR_A_NAME_LEN[at as usize]
+    if len <= 0 { return nm }
+    var i: i64 = 0
+    while i < len {
+        nm.buf[i as usize] = IR_NAME_POOL[(off + i) as usize]
+        i = i + 1
+    }
+    nm.len = len
+    nm
+}
+
+pub fn ir_arena_put_args(at: i64, args: Option<Box<IrRegList>>, count: i64) with Mut, Panic, Div {
+    if at < 0 || at >= ir_instr_arena_capacity() { return }
+    if count <= 0 { IR_A_ARG_BASE[at as usize] = 0  return }
+    if IR_ARG_POOL_LEN + count > ir_arg_pool_capacity() {
+        IR_A_ARG_COUNT[at as usize] = 0
+        return
+    }
+    let base = IR_ARG_POOL_LEN
+    var cur = args
+    var k: i64 = 0
+    while k < count {
+        match cur {
+            Some(node) => {
+                IR_ARG_POOL[(base + k) as usize] = (*node).reg
+                cur = (*node).tail
+            }
+            _ => { IR_ARG_POOL[(base + k) as usize] = IR_INVALID_REG }
+        }
+        k = k + 1
+    }
+    IR_ARG_POOL_LEN = base + count
+    IR_A_ARG_BASE[at as usize] = base
+}
+
+// The k-th call argument register, straight out of the flat pool. This is what
+// the arena-resident call sites use instead of walking a Box'd list.
+pub fn ir_arena_arg_at(at: i64, k: i64) -> i64 with Mut, Panic, Div {
+    if at < 0 || at >= ir_instr_arena_capacity() { return IR_INVALID_REG }
+    if k < 0 || k >= IR_A_ARG_COUNT[at as usize] { return IR_INVALID_REG }
+    IR_ARG_POOL[(IR_A_ARG_BASE[at as usize] + k) as usize]
+}
+
+// Whole-instruction load. The arg list is rebuilt only when there are arguments,
+// so the common no-arg instruction costs no allocation.
+// NO Alloc effect, deliberately. This is called at ~431 sites; requiring Alloc
+// forced the effect onto every caller and cascaded (the first such error
+// desynchronised the checker into 334k nonsense diagnostics). The call-argument
+// list is therefore NOT rebuilt here -- every arena-resident argument access goes
+// through ir_arena_arg_at and the flat pool instead.
+pub fn ir_arena_load(at: i64) -> IrInstr with Mut, Panic, Div {
+    var out = ir_nop()
+    if at < 0 || at >= ir_instr_arena_capacity() { return out }
+    out.op = IR_A_OP[at as usize] as IrOpcode
+    out.dst = IR_A_DST[at as usize]
+    out.src1 = IR_A_SRC1[at as usize]
+    out.src2 = IR_A_SRC2[at as usize]
+    out.imm_i64 = IR_A_IMM_I64[at as usize]
+    out.imm_f64 = IR_A_IMM_F64[at as usize]
+    out.label_id = IR_A_LABEL_ID[at as usize]
+    out.fn_id = IR_A_FN_ID[at as usize]
+    out.field_idx = IR_A_FIELD_IDX[at as usize]
+    out.imm_flags = IR_A_IMM_FLAGS[at as usize]
+    out.bin_op = IR_A_BIN_OP[at as usize] as BinaryOp
+    out.un_op = IR_A_UN_OP[at as usize] as UnaryOp
+    out.arg_count = IR_A_ARG_COUNT[at as usize]
+    out.name = ir_arena_name(at)
+    out
+}
 pub fn ir_instr_arena_capacity() -> i64 { 1048576 }
 
 pub var IR_REGION_BASE: [i64; 8192] = [0; 8192]
@@ -1063,7 +1268,7 @@ fn ir_region_grow_slot(slot: i64, want: i64) -> i64 with Mut, Panic, Div {
     let new_base = IR_ARENA_TOP
     var i: i64 = 0
     while i < len {
-        IR_INSTR_ARENA[(new_base + i) as usize] = IR_INSTR_ARENA[(old_base + i) as usize]
+        ir_arena_copy_slot(new_base + i, old_base + i)
         i = i + 1
     }
     IR_ARENA_TOP = new_base + grown
@@ -1122,7 +1327,7 @@ pub fn ir_region_get(r: &IrInstrRegion, idx: i64, out: &! IrInstr) -> i64 with M
     let st = ir_region_status(r)
     if st != IR_ARENA_OK { return st }
     if idx < 0 || idx >= IR_REGION_LEN[(*r).slot as usize] { return IR_ARENA_ERR_RANGE }
-    (*out) = IR_INSTR_ARENA[(IR_REGION_BASE[(*r).slot as usize] + idx) as usize]
+    (*out) = ir_arena_load(IR_REGION_BASE[(*r).slot as usize] + idx)
     IR_ARENA_OK
 }
 
@@ -1131,7 +1336,7 @@ pub fn ir_region_set(r: &IrInstrRegion, idx: i64, instr: IrInstr) -> i64 with Mu
     if st != IR_ARENA_OK { return st }
     if IR_REGION_STATE[(*r).slot as usize] == IR_REGION_SEALED { return IR_ARENA_ERR_SEALED }
     if idx < 0 || idx >= IR_REGION_LEN[(*r).slot as usize] { return IR_ARENA_ERR_RANGE }
-    IR_INSTR_ARENA[(IR_REGION_BASE[(*r).slot as usize] + idx) as usize] = instr
+    ir_arena_store(IR_REGION_BASE[(*r).slot as usize] + idx, instr)
     IR_ARENA_OK
 }
 
@@ -1147,7 +1352,7 @@ pub fn ir_region_push(r: &! IrInstrRegion, instr: IrInstr) -> i64 with Mut, Pani
     }
     let s2 = (*r).slot
     let l2 = IR_REGION_LEN[s2 as usize]
-    IR_INSTR_ARENA[(IR_REGION_BASE[s2 as usize] + l2) as usize] = instr
+    ir_arena_store(IR_REGION_BASE[s2 as usize] + l2, instr)
     IR_REGION_LEN[s2 as usize] = l2 + 1
     IR_ARENA_OK
 }
@@ -1175,7 +1380,7 @@ pub fn ir_region_reserve(r: &! IrInstrRegion, want: i64) -> i64 with Mut, Panic,
     let new_base = IR_ARENA_TOP
     var i: i64 = 0
     while i < len {
-        IR_INSTR_ARENA[(new_base + i) as usize] = IR_INSTR_ARENA[(old_base + i) as usize]
+        ir_arena_copy_slot(new_base + i, old_base + i)
         i = i + 1
     }
     IR_ARENA_TOP = new_base + grown
@@ -1224,7 +1429,7 @@ pub fn ir_region_clone(src: &IrInstrRegion, out: &! IrInstrRegion) -> i64 with M
     let dst_base = IR_REGION_BASE[(*out).slot as usize]
     var i: i64 = 0
     while i < len {
-        IR_INSTR_ARENA[(dst_base + i) as usize] = IR_INSTR_ARENA[(src_base + i) as usize]
+        ir_arena_copy_slot(dst_base + i, src_base + i)
         i = i + 1
     }
     IR_REGION_LEN[(*out).slot as usize] = len
