@@ -460,6 +460,7 @@ Madaros native-v2 (shepherd-merge 2026-08-05 onto `origin/main`):
 | **full `math::qd128` / `qd_mul`** | **green** (closed 2026-08-04) | `qd_nine_*` take `[f64;9]`; gates `madaros_qd128_mul_native_v2_gate.sh`, `qd128_import_native_v2_smoke.sio` |
 | **compact zero-provenance** (sedenion + local f64 kinds) | **green** (closed 2026-08-05) | `tests/run-pass/zero_provenance_native_v2_smoke.sio` (~41 fn); gate `scripts/ci/madaros_zero_provenance_native_v2_gate.sh`. Does **not** import `eisa::core_v2`. |
 | **combined zero-provenance (sedenion+eisa::core_v2)** | **fail-closed / waived-E3** (2026-08-05) | ~5 modules / ~111 fn → thin-link `rc=12`. Probe + gate: `tests/known_failures/zero_provenance_native_v2_probe.sio`, `madaros_zero_provenance_failclosed_gate.sh`. BLK: `docs/handoff/BLK-20260805-p0b-zero-provenance.md` |
+| **≥2 f64 comparisons in `bool` struct fields** | **fail-closed** (classified 2026-08-05) | Minimal CU `Pair { a: 2.0 > 0.0, b: 3.0 > 0.0 }` → thin-link `rc=12` (~3 fn). Precomp locals green. **Not** an IR fn-count ceiling (pad-to-49 still emits). Probe/gate: `thinlink_bool_cmp_field_probe.sio`, `madaros_thinlink_bool_cmp_field_gate.sh`. BLK: `docs/handoff/BLK-20260805-thinlink-ir-threshold.md` |
 | `zero_event` stdlib probe (Madaros native) | green | `tests/known_failures/zero_event_stdlib_native_v2_probe.sio` prints `ZERO_EVENT_STDLIB PASS` under stock Madaros |
 
 Constructor privacy was closed by running the same visibility preflight used
@@ -474,12 +475,14 @@ bash scripts/ci/madaros_qd128_core_native_v2_gate.sh
 bash scripts/ci/madaros_qd128_mul_native_v2_gate.sh
 bash scripts/ci/madaros_zero_provenance_native_v2_gate.sh
 bash scripts/ci/madaros_zero_provenance_failclosed_gate.sh
+bash scripts/ci/madaros_thinlink_bool_cmp_field_gate.sh
 bash scripts/ci/zero_event_native_v2_matrix.sh
 bash scripts/ci/zero_event_gate.sh
 ```
 
 Do not claim `eisa::core_v2`+sedenion combined import Madaros-green; the compact
-smoke is a distinct, smaller CU.
+smoke is a distinct, smaller CU. Do not cite a raw `final_fn_count` ceiling for
+the fat `ZeroWitness` fail — prefer the bool-cmp-in-field classification.
 
 ## Reporting Issues
 
