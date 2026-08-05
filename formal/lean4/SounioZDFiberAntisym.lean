@@ -11768,6 +11768,110 @@ theorem trE3 (W k : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0) :
   rw [cyc2, cyc1, s4]
   omega
 
+
+/-! ### Tier 54 — §18.1 ITSELF
+
+    `A = B + E`, so `tr(A³)` expands into eight words.  `tri3m_add1/2/3` are the three linearities
+    of the mixed triple sum, `tri3_expand` peels them into the eight, and every group is a theorem:
+
+      B B B                      = 8·t3′        `tri3_Asig_blow`   (Tier 43)
+      B B E + B E B + E B B      = 24·t2′       `trB2E_three`      (Tier 51b)
+      B E E + E B E + E E B      = 0            `trBE2_three`      (this tier, over Tier 50)
+      E E E                      = −24(h−2)     `trE3`             (Tier 53)
+
+    giving `tr(A³) = 8·t3′ + 24·t2′ − 24(h−2)` — **§18.1**. -/
+
+theorem tri3_eq (N : Nat) (f : Nat → Nat → Int) :
+    tri3 N f
+      = sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c => f a b * (f b c * f c a)))) :=
+  rfl
+
+/-! ## The multinomial expansion -/
+
+
+/-- The mixed triple sum. -/
+noncomputable def tri3m (N : Nat) (f g h : Nat → Nat → Int) : Int :=
+  sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c => f a b * (g b c * h c a))))
+
+theorem tri3m_add1 (N : Nat) (f1 f2 g h : Nat → Nat → Int) :
+    tri3m N (fun x y => f1 x y + f2 x y) g h = tri3m N f1 g h + tri3m N f2 g h := by
+  unfold tri3m
+  rw [← sumLtI3_add]
+  exact sumLtI_congr _ _ _ (fun a _ => sumLtI_congr _ _ _ (fun b _ =>
+    sumLtI_congr _ _ _ (fun c _ => Int.add_mul _ _ _)))
+
+theorem tri3m_add2 (N : Nat) (f g1 g2 h : Nat → Nat → Int) :
+    tri3m N f (fun x y => g1 x y + g2 x y) h = tri3m N f g1 h + tri3m N f g2 h := by
+  unfold tri3m
+  rw [← sumLtI3_add]
+  exact sumLtI_congr _ _ _ (fun a _ => sumLtI_congr _ _ _ (fun b _ =>
+    sumLtI_congr _ _ _ (fun c _ => by rw [Int.add_mul, Int.mul_add])))
+
+theorem tri3m_add3 (N : Nat) (f g h1 h2 : Nat → Nat → Int) :
+    tri3m N f g (fun x y => h1 x y + h2 x y) = tri3m N f g h1 + tri3m N f g h2 := by
+  unfold tri3m
+  rw [← sumLtI3_add]
+  exact sumLtI_congr _ _ _ (fun a _ => sumLtI_congr _ _ _ (fun b _ =>
+    sumLtI_congr _ _ _ (fun c _ => by rw [Int.mul_add, Int.mul_add])))
+
+/-- **`tr((B+E)³)` expands into eight words.** -/
+theorem tri3_expand (N : Nat) (f g : Nat → Nat → Int) :
+    tri3m N (fun x y => f x y + g x y) (fun x y => f x y + g x y)
+      (fun x y => f x y + g x y)
+      = ((((((tri3m N f f f + tri3m N f f g) + tri3m N f g f) + tri3m N f g g)
+          + tri3m N g f f) + tri3m N g f g) + tri3m N g g f) + tri3m N g g g := by
+  rw [tri3m_add1, tri3m_add2, tri3m_add2, tri3m_add3, tri3m_add3, tri3m_add3, tri3m_add3]
+  omega
+
+
+/-- The three `BEE` words all vanish: `trBE2_zero` plus two cyclic rotations. -/
+theorem trBE2_three (W k : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0) :
+    tri3m (2^(k+1)+2^(k+1)) (blow (2^(k+1)) (fun u v => Asig u v W k)) (Esig W k) (Esig W k)
+  + tri3m (2^(k+1)+2^(k+1)) (Esig W k) (blow (2^(k+1)) (fun u v => Asig u v W k)) (Esig W k)
+  + tri3m (2^(k+1)+2^(k+1)) (Esig W k) (Esig W k)
+      (blow (2^(k+1)) (fun u v => Asig u v W k)) = 0 := by
+  have h0 := trBE2_zero W k hW hW0
+  have c1 := tri3_cyc (2^(k+1)+2^(k+1))
+    (blow (2^(k+1)) (fun u v => Asig u v W k)) (Esig W k) (Esig W k)
+  have c2 := tri3_cyc (2^(k+1)+2^(k+1))
+    (Esig W k) (Esig W k) (blow (2^(k+1)) (fun u v => Asig u v W k))
+  unfold tri3m
+  omega
+
+/-- **§18.1, the recursion itself.**  `A = B + E`, the cube expands into eight words, and each of
+    §34's four groups is now a theorem. -/
+theorem section_18_1 (W k : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0) :
+    tri3 (2^(k+1)+2^(k+1)) (fun x y => Asig x y W (k+1))
+      = 8 * tri3 (2^(k+1)) (fun x y => Asig x y W k)
+        + 24 * degSum W k
+        - 24 * (((2^(k+1) : Nat) : Int) - 2) := by
+  have hpow : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by
+    rw [Nat.pow_succ]; have := Nat.two_pow_pos (k+1); omega
+  have hAE : ∀ x y, Asig x y W (k+1)
+      = blow (2^(k+1)) (fun u v => Asig u v W k) x y + Esig W k x y := by
+    intro x y; simp only [Esig]; omega
+  rw [tri3_eq (2^(k+1)+2^(k+1)) (fun x y => Asig x y W (k+1))]
+  rw [sumLtI_congr _ _ _ (fun a _ => sumLtI_congr _ _ _ (fun b _ =>
+        sumLtI_congr _ _ _ (fun c _ => by rw [hAE a b, hAE b c, hAE c a])))]
+  have hex := tri3_expand (2^(k+1)+2^(k+1))
+    (blow (2^(k+1)) (fun u v => Asig u v W k)) (Esig W k)
+  unfold tri3m at hex
+  rw [hex]
+  have hBBB : sumLtI (2^(k+1)+2^(k+1)) (fun a => sumLtI (2^(k+1)+2^(k+1)) (fun b =>
+      sumLtI (2^(k+1)+2^(k+1)) (fun c =>
+        blow (2^(k+1)) (fun u v => Asig u v W k) a b
+          * (blow (2^(k+1)) (fun u v => Asig u v W k) b c
+             * blow (2^(k+1)) (fun u v => Asig u v W k) c a))))
+      = 8 * tri3 (2^(k+1)) (fun x y => Asig x y W k) := by
+    have := tri3_Asig_blow W k
+    rw [tri3_eq (2^(k+2)) (blow (2^(k+1)) (fun x y => Asig x y W k)), hpow] at this
+    exact this
+  have hB2E := trB2E_three W k hW hW0
+  have hBE2 := trBE2_three W k hW hW0
+  have hE3 := trE3 W k hW hW0
+  unfold tri3m at hBE2
+  omega
+
 end SounioZDFiberAntisym
 
 

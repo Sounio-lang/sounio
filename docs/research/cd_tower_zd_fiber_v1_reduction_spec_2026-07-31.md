@@ -3451,3 +3451,56 @@ constant in §34's own form.
 is the *expansion itself* — that `tr(A³) = tr(B³) + 3tr(B²E) + 3tr(BE²) + tr(E³)` for `A = B + E` at
 the level of the file's `sumLtI`, which is the multinomial expansion of a triple sum and has not been
 written. Everything it would multiply out into is proven. (III) is still reduced; (d) and V1 untouched.
+
+---
+
+## §53 — §18.1 IS A THEOREM ∀n (Tier 54)
+
+```lean
+theorem section_18_1 (W k : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0) :
+    tri3 (2^(k+1)+2^(k+1)) (fun x y => Asig x y W (k+1))
+      = 8 * tri3 (2^(k+1)) (fun x y => Asig x y W k)
+        + 24 * degSum W k
+        - 24 * (((2^(k+1) : Nat) : Int) - 2)
+```
+
+Build green, no `sorry`, **no `axiom` anywhere in the file**; axioms
+`[propext, Classical.choice, Quot.sound]` (`tri3_expand` alone is choice-free).
+
+That is §18.1's low-branch recursion, in §18.1's own form: `h = 2^(k+1)` and
+`−24(h−2) = −12(2^(n−1)−4)` under `n = k+3`.
+
+### 53.1 — the last step was the smallest
+
+`A = B + E` is *definitional* (`Esig := Asig − blow`), the cube expands into eight words by three
+linearities of the mixed triple sum (`tri3m_add1/2/3`), and the four groups are the four theorems:
+
+| group | value | tier |
+|---|---|---|
+| `BBB` | `8·t3′` | 43 |
+| `BBE + BEB + EBB` | `24·t2′` | 51b |
+| `BEE + EBE + EEB` | `0` | 54, over 50 |
+| `EEE` | `−24(h−2)` | 53 |
+
+No property of `A_σ` enters the expansion itself — it is `Int` algebra, and would hold for any
+`A = B + E`. All the content is in the four values.
+
+**Not circular.** Substituting `Asig = blow + Esig` is rewriting by the definition of `Esig`; the
+four values were established without reference to the expansion.
+
+### 53.2 — denotation, measured against the CONTRACT
+
+At `k = 1,2,3`, every label: the theorem's own `t3`, `t3′` and `degSum` (computed from the
+Lean-faithful transcription over `[0,·)`) each equal the builder's, **and** the recursion
+`t3 = 8·t3′ + 24·t2′ − 24(h−2)` holds. So the Lean statement is §18.1 about the contract's matrices,
+not about a paraphrase.
+
+### 53.3 — what this closes, and what it does not
+
+**§18.1 was the load-bearing MEASURED premise of §33.5(B)** — the `8^(n−j)` scaling of the (III)
+deviation. It is now a theorem ∀n, so §33.5(B) no longer rests on an unexplained integer identity at
+any point.
+
+**(III) is still reduced, not proven.** §32–§33 reduce it to the deviation law, and §33.5(B) explains
+the scaling; what remains open is the law's own base content, plus (d) and V1. What changed here is
+that the recursion underneath is no longer measured.
