@@ -3845,3 +3845,35 @@ available at **every** label. The **general seam's** base case — the actual op
 deviation law — is untouched.
 
 **(III) is still reduced, not proven.**
+
+### 56.4 — the general seam: two facts, and a stop
+
+Attacking the general seam's base case with the fold. **I did not crack it.** Two things are worth
+keeping, and then a deliberate stop.
+
+**(1) A seam and its Fano reference fold onto the SAME box.** The representative predicate
+`a < a ⊕ W` is decided by the highest bit where `a` and `a ⊕ W` differ, which is `W`'s top bit. So
+for **every** label with top bit `n` the representatives are `[0, 2^n)` — independent of the label's
+low part. At the base level both the seam `W` and its fibre reference `8g+1` are high with the same
+top bit, so
+
+> `D(W) = 8 · ( t3(box_W) − t3(box_{W₀}) )` — **a difference of two triangle sums on one index set.**
+
+That is a real simplification of the base case: before, the seam and the reference lived on
+different vertex sets and the comparison was between objects of different shape. (Measured; the
+Lean `rep_iff` is currently stated for `W = 2^n` only, and generalising it needs a
+highest-differing-bit lemma about `Nat.xor` that the file does not have.)
+
+**(2) The general high box is `I − J` plus a sparse correction.** Entries lie in `{−1, 0, +1}`, and
+the `+1` entries number exactly `2(2^n − 2)` at `n = 3,4,5` for every low part tested — which is
+§34's matching/coset family size. The correction is *not* supported on the coset line `l ⊕ y = W_lo`
+(tested: mixed), so the obvious identification is wrong.
+
+**Stopping here on purpose.** Six angles have now been tried on this base case — edge bijection,
+triangle bijection, high-branch two-term recursion, complementation third invariant, perturbative
+split, spectral fold — five closed and one (the fold) turned into the `y = 0` proof. What is
+accumulating now is measurements without a proof plan, which is how this lane has previously spent
+rungs for nothing. The next rung should start from (1) — the same-box reformulation — and should
+have a target statement before it starts measuring.
+
+**(III) is still reduced, not proven.** (d) and V1 untouched.
