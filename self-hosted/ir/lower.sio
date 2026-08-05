@@ -153,6 +153,47 @@ let LOWER_GLOBAL_ARRAY: i64 = 4
 // kind: 0=none 1=id 2=scale 3=add 4=mul 5=fwd
 // Keys are polynomial hashes of Name bytes (Name aggregates do not survive
 // global array stores — same family as ClaimDecl name truncation).
+
+// #1645: a DURABLE record that lowering hit a hard capacity wall.
+//
+// Lowerer is threaded by VALUE. `emit` writes the instruction through
+// `lo.current_func`, which is a Box -- so a dropped instruction is permanent and
+// visible in the finished module -- but `had_error` and `error_count` are plain
+// scalar fields of the Lowerer value. Any link in the lowering chain that
+// discards the Lowerer it was returned loses the flag while KEEPING the
+// truncation. Measured: a `main` past IR_MAX_INSTRS reaches
+// module_frontend with instr_count pinned at 4096 and had_error FALSE, so every
+// one of the six `if body_result.had_error` checks passes and the driver writes
+// a truncated binary and exits 0.
+//
+// Rather than hunt every discard site in an expression-lowering chain that is
+// thousands of lines wide -- and re-hunt them after the next edit -- the signal
+// is recorded somewhere value semantics cannot reach. It is OR-ed into every
+// IrLowerResult/IrLowerBoxResult at construction, so all existing consumers of
+// had_error start working without changing any of them.
+//
+// Reset per COMPILE (lower_hard_error_reset, called from
+// module_frontend_global_init_compile_begin), never per pass: a single compile
+// runs several lowering passes and an intermediate one may be discarded, but a
+// program that exceeded a hard limit in ANY non-probe pass has exceeded it.
+var IR_LOWER_HARD_ERROR: i64 = 0
+
+// How many instructions were DROPPED for the function currently being lowered.
+// Reset at the top of each function body (ir_instr_overflow_begin_fn), so the
+// diagnostic can report what the function actually needed rather than only that
+// it did not fit -- "exceeds the limit" is not actionable, "needs 4096 + 912" is.
+var IR_INSTR_OVERFLOW_COUNT: i64 = 0
+
+pub fn ir_instr_overflow_begin_fn() with Mut { IR_INSTR_OVERFLOW_COUNT = 0 }
+
+pub fn lower_hard_error_pending() -> bool { IR_LOWER_HARD_ERROR != 0 }
+
+pub fn lower_hard_error_reset() with Mut { IR_LOWER_HARD_ERROR = 0 }
+
+// OR the durable flag into a value-threaded had_error. Used at every
+// IrLowerResult/IrLowerBoxResult construction site.
+pub fn lower_had_error_with_hard(v: bool) -> bool { v || IR_LOWER_HARD_ERROR != 0 }
+
 var FO_XFER_COUNT: i64 = 0
 var FO_XFER_KIND: [i64; 64] = [0; 64]
 var FO_XFER_LIT: [f64; 64] = [0.0; 64]
@@ -3388,6 +3429,7 @@ fn lowerer_lower_fn_item_mut(
     // rather than appending — so seeding once per function costs three table writes
     // and cannot grow the table beyond its three entries.
     fo_xfer_seed_transcendentals()
+    ir_instr_overflow_begin_fn()
     (*lo).so_enabled = so_block_uses_hessian(&(*fd).body)
     if lower_live_diag_enabled() {
         print("lower_live: fn_before_find_or_add name=")
@@ -3635,6 +3677,19 @@ fn lowerer_lower_fn_item_mut(
     }
     lowerer_flush_current_func_mut(lo)
     (*lo).current_fn = IR_INVALID_FN
+    // #1586/#1645: the body did not fit. Report at the END of the function, so
+    // the message carries what it actually needed rather than only that it
+    // overflowed -- that number is what decides whether the limit is off by a
+    // factor of two or a factor of ten (#1649).
+    if IR_INSTR_OVERFLOW_COUNT > 0 && !(*lo).probe_mode {
+        print("error: function `")
+        print(str_from_bytes(name.buf, name.len))
+        print("` needs ")
+        print_int(IR_MAX_INSTRS + IR_INSTR_OVERFLOW_COUNT)
+        print(" IR instructions but IR_MAX_INSTRS is ")
+        print_int(IR_MAX_INSTRS)
+        print("; split it into smaller functions\n")
+    }
     if lower_live_diag_enabled() {
         print("lower_live: fn_done name=")
         print(str_from_bytes(name.buf, name.len))
@@ -8581,13 +8636,26 @@ impl Lowerer {
             lo.current_func = current_func_box
             lo
         } else {
-            if lo.probe_mode {
-                print("lower_probe: emit_overflow instr_count=")
-                print_int(instr_count)
-                print(" fn=")
-                print(str_from_bytes(lo.current_func.name.buf, lo.current_func.name.len))
-                print("\n")
+            // Unconditional, not probe_mode-gated. Dropping instructions here is
+            // the #1586 failure: the tail of a function is simply not lowered, so
+            // the program compiles, exits 0, and prints nothing after the cut.
+            //
+            // report_error() below is NOT enough on its own: the Lowerer is
+            // threaded by value and the flag gets discarded somewhere in the
+            // chain while the truncation -- written through a Box -- survives.
+            // IR_LOWER_HARD_ERROR is the durable channel that fixes that (#1645);
+            // see its declaration. probe passes are excluded because they lower
+            // speculatively and their result is meant to be thrown away.
+            //
+            // Counted here, REPORTED at the end of the function body (see
+            // lowerer_lower_fn_item_mut). Reporting on the first drop could only
+            // say "does not fit"; counting to the end says what the function
+            // actually needed, which is the number anyone deciding the limit
+            // needs to have.
+            if !lo.probe_mode {
+                IR_LOWER_HARD_ERROR = 1
             }
+            IR_INSTR_OVERFLOW_COUNT = IR_INSTR_OVERFLOW_COUNT + 1
             lo.report_error()
         }
     }
@@ -15524,7 +15592,7 @@ fn lower_program_to_ir_staged_with_lowerer_box_trace_ref(
     IrLowerBoxResult {
         module: lo2.module,
         error_count: lo2.error_count,
-        had_error: lo2.had_error,
+        had_error: lower_had_error_with_hard(lo2.had_error),
         patch_stats: (*patch_stats),
     }
 }
@@ -15718,7 +15786,7 @@ fn lower_program_to_ir_summary_flat_with_epistemic_ref(prog: &Program, epistemic
             probe_mode: lo2.probe_mode,
         },
         error_count: lo2.error_count,
-        had_error: lo2.had_error,
+        had_error: lower_had_error_with_hard(lo2.had_error),
     }
 }
 
@@ -15744,7 +15812,7 @@ fn lower_program_to_ir_probe_ref(prog: &Program) -> IrLowerResult with Mut, Pani
     IrLowerResult {
         module: *lo2.module,
         error_count: lo2.error_count,
-        had_error: lo2.had_error,
+        had_error: lower_had_error_with_hard(lo2.had_error),
         patch_stats: patch_stats,
     }
 }
@@ -15759,7 +15827,7 @@ fn lower_program_to_ir_probe_summary_ref(prog: &Program) -> IrLowerResult with M
     IrLowerResult {
         module: *lo2.module,
         error_count: lo2.error_count,
-        had_error: lo2.had_error,
+        had_error: lower_had_error_with_hard(lo2.had_error),
         patch_stats: ir_empty_validated_patch_stats(),
     }
 }
@@ -15805,7 +15873,7 @@ fn lower_program_function_body_from_summary_with_epistemic_ref(
     IrFunctionBodyResult {
         func: func,
         error_count: lo2.error_count,
-        had_error: lo2.had_error,
+        had_error: lower_had_error_with_hard(lo2.had_error),
         patch_stats: patch_stats,
     }
 }
@@ -15865,7 +15933,7 @@ fn lower_program_function_body_from_program_with_epistemic_ref(
     IrFunctionBodyResult {
         func: func,
         error_count: lo2.error_count,
-        had_error: lo2.had_error,
+        had_error: lower_had_error_with_hard(lo2.had_error),
         patch_stats: patch_stats,
     }
 }
@@ -15886,7 +15954,7 @@ fn lower_program_bodies_from_summary_with_epistemic_boxed_ref(
     IrLowerBoxResult {
         module: lo2.module,
         error_count: lo2.error_count,
-        had_error: lo2.had_error,
+        had_error: lower_had_error_with_hard(lo2.had_error),
         patch_stats: patch_stats,
     }
 }
@@ -15909,7 +15977,7 @@ pub fn lower_program_bodies_from_summary_with_epistemic_boxed_owned(
     IrLowerBoxResult {
         module: lo2.module,
         error_count: lo2.error_count,
-        had_error: lo2.had_error,
+        had_error: lower_had_error_with_hard(lo2.had_error),
         patch_stats: patch_stats,
     }
 }
@@ -15991,7 +16059,7 @@ pub fn lower_dep_program_items_into_acc_with_externs(
     IrLowerBoxResult {
         module: lo.module,
         error_count: lo.error_count,
-        had_error: lo.had_error,
+        had_error: lower_had_error_with_hard(lo.had_error),
         patch_stats: patch_stats,
     }
 }
@@ -16007,7 +16075,7 @@ pub fn lower_program_bodies_from_summary_flat_with_epistemic_ref(
     IrLowerBoxResult {
         module: lo2.module,
         error_count: lo2.error_count,
-        had_error: lo2.had_error,
+        had_error: lower_had_error_with_hard(lo2.had_error),
         patch_stats: patch_stats,
     }
 }
@@ -16048,7 +16116,7 @@ fn lower_program_to_ir_probe_callsite_ref(prog: &Program, caller_name: Name) -> 
     IrLowerResult {
         module: *lo2.module,
         error_count: lo2.error_count,
-        had_error: lo2.had_error,
+        had_error: lower_had_error_with_hard(lo2.had_error),
         patch_stats: patch_stats,
     }
 }
@@ -16091,7 +16159,7 @@ fn lower_program_to_ir_ordered_boxed_trace_ref(
     IrLowerBoxResult {
         module: lo2.module,
         error_count: lo2.error_count,
-        had_error: lo2.had_error,
+        had_error: lower_had_error_with_hard(lo2.had_error),
         patch_stats: (*patch_stats),
     }
 }
@@ -16112,7 +16180,7 @@ fn lower_program_to_ir_ordered_boxed_trace(
     IrLowerBoxResult {
         module: lo.module,
         error_count: lo.error_count,
-        had_error: lo.had_error,
+        had_error: lower_had_error_with_hard(lo.had_error),
         patch_stats: (*patch_stats),
     }
 }
@@ -16146,7 +16214,7 @@ pub fn lower_program_to_ir_ordered_with_epistemic_boxed_trace_ref(
     IrLowerBoxResult {
         module: lo2.module,
         error_count: lo2.error_count,
-        had_error: lo2.had_error,
+        had_error: lower_had_error_with_hard(lo2.had_error),
         patch_stats: (*patch_stats),
     }
 }
