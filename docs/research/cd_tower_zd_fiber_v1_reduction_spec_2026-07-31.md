@@ -3921,3 +3921,32 @@ record a difficulty you have not attempted.**
 
 The decision to stop the measurement sweep was still right; what was wrong was bundling a
 un-attempted-proof claim into it.
+
+### 57.2 — the general box: a pattern that died at the next level
+
+With `tri3_fold_high` the base case is a difference of two triangle sums on the box `[0, 2^n)`, so
+the question is what the box of a general high label `W = 2^n + W_lo` looks like. Measured:
+
+- entries lie in `{−1, 0, +1}`; relative to `I − J` the correction takes values `{0,1,2}`;
+- grouping the off-diagonal entries by `x = l ⊕ y`, each `x` carries values from exactly one of
+  three sets: `{1}` when `x = W_lo` (the coset line), or `{0,1}`, or `{−1,0}`.
+
+**At `n = 3` the involution `x ↦ x ⊕ W_lo` swaps the `{0,1}` and `{−1,0}` classes — perfectly, for
+every `W_lo`.** That is a clean coset structure and it is exactly the shape a proof would want.
+
+**It is false at `n = 4` (84 of 210 pairs) and `n = 5` (588 of 930).** The pattern is an artefact of
+the smallest level. The entry is also not a function of `(l ⊕ y, ⟨l, W_lo⟩)` at any level tested.
+
+⚠ **I was one measurement away from recording this as a finding.** The `n = 3` table is small enough
+to read by eye and the swap is exact there; the check that killed it was running the same test at
+`n = 4,5`. This is the mirror of the parity-keying mistakes earlier in this session — those were
+mis-specified checks that FAILED and looked like refutations; this is a correctly-specified check
+that PASSED at one level and looked like a discovery. **Both failure modes are cured by the same
+discipline: never conclude from a single level.**
+
+So the general box has no characterisation by the two natural candidates, and the base case remains
+open. What is now solid, and is the place to start from: the base case is
+`D(W) = 8·(t3(box_W) − t3(box_{W₀}))` on one index set (`tri3_fold_high`, Tier 59), with `box` known
+exactly at `W_lo = 0` (`I − J`, Tier 57) and unclassified otherwise.
+
+**(III) is still reduced, not proven.**
