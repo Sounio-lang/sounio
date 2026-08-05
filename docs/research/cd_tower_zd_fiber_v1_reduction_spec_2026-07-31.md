@@ -3148,4 +3148,52 @@ collapse) is still not formalised; the route is per-`w`: split the `u,v` range i
 `sumLtI_reindex` (Tier 48) is **not** needed here; §49.4's tool list named it, and that was the long
 way round.
 
+### 49.8 — the assembly is DONE: `tr(BE²) = 0` is a theorem ∀n (Tier 50)
+
+`0bd1e19121`. `trBE2_zero`, build green, no `sorry`, axioms `[propext, Classical.choice, Quot.sound]`
+(the lane's `Asig`-level baseline; `quad_vanish` alone is `[propext, Quot.sound]`).
+
+```lean
+theorem trBE2_zero (W k : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(k+1) + 2^(k+1)) (fun a => sumLtI (2^(k+1) + 2^(k+1)) (fun b =>
+      sumLtI (2^(k+1) + 2^(k+1)) (fun c =>
+        blow (2^(k+1)) (fun u v => Asig u v W k) a b
+          * (Esig W k b c * Esig W k c a)))) = 0
+```
+
+Route: `sumLtI3_cyc` puts the free vertex outermost → `Esig_symm` (new, via a new `Asig_symm_full`
+extending `Asig_symm` to the boundary `0`/`L_lo`, where both entries vanish) puts `w` first in both
+`E` factors → `blowsum_r`/`sumLtI_shift_inv` collapse both of `B`'s indices onto the low half →
+`quad_vanish`. `yr_support` does the case split on `w`.
+
+**Two corrections to what §49 predicted.**
+
+1. **§49.7 named `sumLtI_eq_at2` as the assembly's tool. It was not needed.** The summand vanishes
+   *termwise* — `sumLtI_congr` + `sumLtI_zero` suffice. A two-point collapse would have worked but
+   was strictly more work.
+2. **A pointwise input was missing and neither §49 nor its review saw it: `Asig_isolated_diag`.**
+   `Asig_isolated` and `Asig_isolated_row` both require `l ⊕ L_lo ≠ 0`, so neither reaches the corner
+   `(L_lo, L_lo)`; there `P1 = 1` but `P3 = −1`, so `resB` fails and the entry is `0`. The assembly
+   needs the isolated row null on the *whole* low range, corner included.
+
+**The denotation was CHECKED, not assumed.** Lean's ranges are `[0, 2^(k+2))`, one element wider than
+the contract's vertex set. Using the Lean-faithful `Asig` transcription in
+`scripts/research/zd_v1_yrow_probe.py`, the theorem's own sum over `[0,N)` and the contract's over
+`[1,N)` were compared at `k = 1,2,3`, every label: equal, and both `0`. This is the check §49.6's
+hazard demanded, run against the theorem as stated rather than against a paraphrase of it.
+
+⚠ **The M1 review DEGRADED on this tier** — grok-4.5 returned unterminated chain-of-thought with no
+verdict on both the 424-line diff and a 45-line statements-only extract; what it emitted flagged no
+defect and independently re-derived the `p, q` choice. The denotation measurement is the substitute
+evidence. Single provider, disclosed here and in the commit.
+
+### 49.9 — what §34 still owes
+
+| term | status |
+|---|---|
+| `tr(B³) = 8·t3′` | ✅ PROVEN ∀n (`tri3_Asig_blow`, Tier 43) |
+| `3·tr(B²E) = 24·t2′` | **DERIVED from `yrow_gen` (§49.5), not yet assembled in Lean** |
+| `3·tr(BE²) = 0` | ✅ **PROVEN ∀n (`trBE2_zero`, Tier 50)** |
+| `tr(E³) = −24(h−2)` | MEASURED |
+
 **§18.1 is still not proven, so (III) is still reduced, not proven.** (d) and V1 untouched.
