@@ -97,44 +97,66 @@ the intended fix when it bites.
 | + shape B and `(*node).head` | 5,051 |
 | + shape C | **6 — the baseline set. exit 0, artifact produced.** |
 
-## STOP: the branch compiler cannot compile a two-function program
+## rc=12 — FIXED. It was never about function count.
 
-Found 2026-08-05, and it is the top blocker.
+The branch could not compile any program containing a call **with arguments**.
+Calls with none were fine, which is why single-function programs worked and
+anything calling a helper did not, and why only 7 of 61 sampled `tests/run-pass`
+files compiled. "Cannot compile two functions" was the symptom; the trigger was
+the argument list.
+
+**Diagnosis cost one command, not one build** — the diagnostic was already in the
+binary:
 
 ```
-fn s0(x: i64) -> i64 { x * 2 + 1 }
-fn main() -> i64 { var t: i64 = 1  t = (t + s0(t)) % 1009  t % 251 }
+SOUNIO_NV2_IR_TRACE=1 ./mad --native-v2-compile prog.sio -O -o /tmp/x.elf
+    NV2_IR missing_call_arg fn=main i=1 arg_index=0 arg_count=1
+    NV2_IR unsupported fn=1 name=main
 ```
 
-| compiler | result |
-|---|---|
-| `origin/main` | rc=0, binary runs, exits 4 |
-| this branch, before Sweep 1 | `Failed to write native binary ... rc=12` |
-| this branch, after Sweep 1 | same |
+`ir_arena_load` deliberately does not rebuild the argument list (that needs
+`Alloc`, and forcing `Alloc` onto ~431 call sites is what desynchronised the
+checker in the first place). So a loaded instruction has `arg_count > 0` with
+`call_args = None`, and `ir_arena_store` walked that empty list and wrote
+`IR_INVALID_REG` once per argument. **Every round trip through the arena
+destroyed the call's arguments.**
 
-Bisected to **one helper function**. Single-function programs compile and run
-correctly, which is why it stayed hidden — and it explains why only 7 of 61
-sampled `tests/run-pass` files compiled at all.
+Repaired by how the instruction actually travels:
 
-`rc=12` is `!compile_ok` (`native/codegen_x86_linux.sio:10839`), a generic
-backend failure with no diagnostic. Lowering succeeds first (`final_fn_count 2`),
-so the defect is in native codegen, downstream of the conversion. It predates
-Sweep 1. The same `rc=12` blocks `ir_instr_arena_gate.sh`, so it is also what
-stops the arena's runtime contract from being verified.
+| shape | count | repair |
+|---|---|---|
+| pure slot→slot copy | 11 | `ir_arena_copy_slot` (already carries `ARG_BASE`/`ARG_COUNT`) |
+| same-slot read-modify-write | 11 | `ir_arena_store_args` recognises it, preserves the binding |
+| genuine cross-slot move | 1 | `ir_arena_store_from`, naming the source slot |
+| **swap** | 2 | `ir_arena_swap_slots` |
 
-**The green self-compile is a FALSE GREEN.** The branch builds because the *seed*
-(lean_single) compiles it, and lean_single does not carry this defect. `exit 0`
+A swap cannot be repaired by naming the source: the first store overwrites the
+very slot the second must read its arguments from. It has to be one primitive.
+
+Fail-closed rather than preserve-quietly: a store with no list and a positive
+count is accepted **only** when the destination already holds exactly those
+arguments; anything else latches a violation. Preserving silently would hand a
+call another instruction's registers — the failure this arena exists to prevent.
+
+Two sites the scanner proposed were **rejected after reading them**: it had
+crossed a function boundary and matched a load from a different function, where
+the value stored is a parameter. One would not have compiled; the other resolved
+to outer names and would have silently taken arguments from an unrelated slot.
+
+Verified against `origin/main`'s compiler — identical run results:
+
+```
+noargs 7 | 1 helper 4 | 2 helpers 8 | 3 helpers 13 | 4 helpers 19
+6 helpers 34 | 19-function 904-line stress 225
+```
+
+and on a 24-file `tests/run-pass` sample: **18 match, 0 mismatch**, 6 not
+compiled by either.
+
+**Lesson worth keeping.** The self-compile was green through all of this. It is
+built by the *seed* (lean_single), which does not carry the defect, so `exit 0`
 on the build says nothing about the compiler it produces. Repro kept at
 `tests/known_failures/soa_arena_two_function_codegen.sio`.
-
-**Un-bisected across commits.** "Predates Sweep 1" is not "located". The next
-step is to build `6c32908852` (`refactor/ir-arena-step2`, the **AoS** arena, one
-commit before the SoA explosion) and run the repro — one ~10 min build with the
-cached seed plus a 2-second test. If it fails there too, the defect belongs to
-the region-handle conversion generally and the fix is in a different place than
-if it arrived with the field explosion.
-
-Fix this before raising `IR_MAX_INSTRS` or trusting any parity measurement.
 
 ## What the green build does NOT yet buy
 
@@ -155,13 +177,18 @@ Measured, not assumed:
   IR instructions* on **both** compilers. Storage is no longer the blocker — the
   arena holds 1,048,576 slots, 256× the cap — so raising it is a separate and now
   unblocked change.
-- **The arena's runtime contract is still unverified.**
-  `SOUNIO_IR_ARENA_SOUC=<compiler> bash scripts/ci/ir_instr_arena_gate.sh` FAILS
-  at `build_ir_instr_arena_witness`: the composed 9,670-line translation unit
-  does not compile, `rc=12` = `!compile_ok`
-  (`native/codegen_x86_linux.sio:10839`), a generic codegen failure rather than
-  an arena diagnostic. So a green self-compile is **not** evidence that the arena
-  stores and loads correctly, and per `BOOTSTRAP.md:22` the exit code lies. Get
-  the witnesses building before trusting any of this.
+- **The arena's runtime contract is now VERIFIED.** With rc=12 fixed,
+  `SOUNIO_IR_ARENA_SOUC=<compiler> bash scripts/ci/ir_instr_arena_gate.sh`
+  passes: all three witnesses green, generation / sealing / fail-closed capacity
+  proved. Vacuity re-checked with `SOUNIO_IR_ARENA_VACUITY=1` — deleting the
+  generation guard fails the stale witness (rc=30), deleting the sealing guard
+  fails the seal witness (rc=20), so the gate can still fail.
+
+  Its static contract had gone stale and was updated: it demanded the AoS
+  `pub var IR_INSTR_ARENA: [IrInstr; 1048576]`, which under #1655 is precisely
+  the shape that must never return. It now asserts that array's **absence** and
+  holds all 16 scalar lanes to the accessor's capacity. The generation-guard
+  pattern also moved from `(*r).generation` to `r.generation` — `ir_region_status_v`
+  takes the handle by value now. Same guard, same strength.
 
 Refs #1649, #1655.
