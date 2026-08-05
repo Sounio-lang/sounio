@@ -762,10 +762,12 @@ fn g30_sens_rhs(t: f64, c: &[f64; 10], kc: &[f64; 29], sens: &[f64; 310]) -> [f6
     out
 }
 
-// epistemic simulation: values + 1-sigma uncertainties per species
-pub fn simulate_gri30_h2_epistemic(init: &[f64; 10], inits: &[f64; 10], t_k: f64, dt: f64, steps: i64) -> ([f64; 10], [f64; 10]) with Mut, Div, Panic {
+// Integrate the state and the 31 independent sensitivity columns. Columns 0..28
+// are d c / d ln(k_r); 29 and 30 carry the already-scaled H2/O2 initial-state
+// standard uncertainties. Keeping this internal representation separate lets the
+// public APIs report either sigma alone or an auditable variance budget.
+fn g30_epistemic_sensitivities(init: &[f64; 10], inits: &[f64; 10], t_k: f64, dt: f64, steps: i64) -> ([f64; 10], [f64; 310]) with Mut, Div, Panic {
     let kc = g30_kc_all(t_k);
-    let urel = g30_urel();
     var y: [f64; 10] = [init[0], init[1], init[2], init[3], init[4], init[5], init[6], init[7], init[8], init[9]];
     var sens: [f64; 310] = [0.0; 310];
     sens[0*31+29] = inits[0];
@@ -794,15 +796,99 @@ pub fn simulate_gri30_h2_epistemic(init: &[f64; 10], inits: &[f64; 10], t_k: f64
         i = 0; while i < 310 { sens[i] = sens[i] + 0.5 * dt * (srhs1[i] + srhs2[i]); i = i + 1; }
         s = s + 1;
     }
+    (y, sens)
+}
+
+// Stable names for the 31 independent uncertainty sources in the H/O mechanism.
+// Sources 0..28 are rate constants; 29 and 30 are initial-condition errors.
+pub fn g30_h2_uq_source_label(source: i64) -> string {
+    if source == 0 { "R00 2 O + M <=> O2 + M" }
+    else if source == 1 { "R01 O + H + M <=> OH + M" }
+    else if source == 2 { "R02 O + H2 <=> H + OH" }
+    else if source == 3 { "R03 O + HO2 <=> OH + O2" }
+    else if source == 4 { "R04 O + H2O2 <=> OH + HO2" }
+    else if source == 5 { "R05 H + O2 + M <=> HO2 + M" }
+    else if source == 6 { "R06 H + 2 O2 <=> HO2 + O2" }
+    else if source == 7 { "R07 H + O2 + H2O <=> HO2 + H2O" }
+    else if source == 8 { "R08 H + O2 + N2 <=> HO2 + N2" }
+    else if source == 9 { "R09 H + O2 + AR <=> HO2 + AR" }
+    else if source == 10 { "R10 H + O2 <=> O + OH" }
+    else if source == 11 { "R11 2 H + M <=> H2 + M" }
+    else if source == 12 { "R12 2 H + H2 <=> 2 H2" }
+    else if source == 13 { "R13 2 H + H2O <=> H2 + H2O" }
+    else if source == 14 { "R14 H + OH + M <=> H2O + M" }
+    else if source == 15 { "R15 H + HO2 <=> O + H2O" }
+    else if source == 16 { "R16 H + HO2 <=> O2 + H2" }
+    else if source == 17 { "R17 H + HO2 <=> 2 OH" }
+    else if source == 18 { "R18 H + H2O2 <=> HO2 + H2" }
+    else if source == 19 { "R19 H + H2O2 <=> OH + H2O" }
+    else if source == 20 { "R20 OH + H2 <=> H + H2O" }
+    else if source == 21 { "R21 2 OH (+M) <=> H2O2 (+M)" }
+    else if source == 22 { "R22 2 OH <=> O + H2O" }
+    else if source == 23 { "R23 OH + HO2 <=> O2 + H2O" }
+    else if source == 24 { "R24 OH + H2O2 <=> HO2 + H2O" }
+    else if source == 25 { "R25 OH + H2O2 <=> HO2 + H2O" }
+    else if source == 26 { "R26 2 HO2 <=> O2 + H2O2" }
+    else if source == 27 { "R27 2 HO2 <=> O2 + H2O2" }
+    else if source == 28 { "R28 OH + HO2 <=> O2 + H2O" }
+    else if source == 29 { "initial H2" }
+    else if source == 30 { "initial O2" }
+    else { "invalid GRI30 H2 UQ source" }
+}
+
+// Epistemic simulation with a variance budget. contribution[i*31+p] is the
+// independent contribution of source p to Var(c_i), in (mol/cm3)^2. The 31
+// entries for a species sum to u[i]^2, modulo floating-point roundoff. These
+// are first-order GUM contributions, not a replacement for skew-aware quantiles.
+pub fn simulate_gri30_h2_epistemic_attributed(init: &[f64; 10], inits: &[f64; 10], t_k: f64, dt: f64, steps: i64) -> ([f64; 10], [f64; 10], [f64; 310]) with Mut, Div, Panic {
+    let (y, sens) = g30_epistemic_sensitivities(init, inits, t_k, dt, steps);
+    let urel = g30_urel();
     var u: [f64; 10] = [0.0; 10];
+    var contribution: [f64; 310] = [0.0; 310];
     var i: i64 = 0;
     while i < 10 {
-        var v = sens[i*31+29] * sens[i*31+29] + sens[i*31+30] * sens[i*31+30];
+        var v = 0.0;
         var r: i64 = 0;
-        while r < 29 { let z = sens[i*31+r] * urel[r]; v = v + z * z; r = r + 1; }
+        while r < 29 {
+            let z = sens[i*31+r] * urel[r];
+            contribution[i*31+r] = z * z;
+            v = v + contribution[i*31+r];
+            r = r + 1;
+        }
+        contribution[i*31+29] = sens[i*31+29] * sens[i*31+29];
+        contribution[i*31+30] = sens[i*31+30] * sens[i*31+30];
+        v = v + contribution[i*31+29] + contribution[i*31+30];
         u[i] = g30_sqrt(v);
         i = i + 1;
     }
+    (y, u, contribution)
+}
+
+// Return source indices in descending contribution order for one species.
+pub fn g30_h2_uq_top3(contribution: &[f64; 310], species: i64) -> [i64; 3] with Mut, Panic {
+    var top: [i64; 3] = [0 as i64, 0 as i64, 0 as i64];
+    var val: [f64; 3] = [0.0, 0.0, 0.0];
+    var p: i64 = 0;
+    while p < 31 {
+        let x = contribution[species*31+p];
+        if x > val[0] {
+            val[2] = val[1]; top[2] = top[1];
+            val[1] = val[0]; top[1] = top[0];
+            val[0] = x; top[0] = p;
+        } else if x > val[1] {
+            val[2] = val[1]; top[2] = top[1];
+            val[1] = x; top[1] = p;
+        } else if x > val[2] {
+            val[2] = x; top[2] = p;
+        }
+        p = p + 1;
+    }
+    top
+}
+
+// Backward-compatible epistemic simulation: values + 1-sigma per species.
+pub fn simulate_gri30_h2_epistemic(init: &[f64; 10], inits: &[f64; 10], t_k: f64, dt: f64, steps: i64) -> ([f64; 10], [f64; 10]) with Mut, Div, Panic {
+    let (y, u, _) = simulate_gri30_h2_epistemic_attributed(init, inits, t_k, dt, steps);
     (y, u)
 }
 
@@ -1183,7 +1269,9 @@ pub fn test_g30_uv_delay() -> bool with Mut, Div, Panic {
     g30_check_near(th15 * 1.0e6, 126.3, 6.0e-1)
 }
 
-fn main() -> i32 with Mut, Div, Panic, IO {
+// Kept callable for standalone smoke checks without colliding with an importing
+// test or application entrypoint.
+pub fn g30_h2_module_main() -> i32 with Mut, Div, Panic, IO {
     var f: i32 = 0;
     if test_g30_rates() { println("PASS g30 rates") } else { f = f + 1; println("FAIL g30 rates") }
     if test_g30_thermo() { println("PASS g30 thermo") } else { f = f + 1; println("FAIL g30 thermo") }
