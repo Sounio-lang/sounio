@@ -2945,9 +2945,16 @@ Tier 43 then **defines the blow-up indexing** (`blow m A x y = A (x % m) (y % m)
 `Finset`-free infrastructure (`sumLtI_shift`, `sumLtI_double`). No property of `A_σ` enters — the
 `8 = 2³` is the blow-up's, which is exactly why §34 called this term ALGEBRA.
 
-**Two of §34's four sums remain uncarried:** `3·tr(B²E) = 24·t2′` and `tr(BE²) = 0`. They are mixed
-sums over `E`'s families and additionally need the cyclic collapse of the eight terms of
-`tr((B+E)³)` — a sum-exchange lemma this file does not have. Every *structural* fact they would
-consume is now a theorem (Tiers 38–40); what is missing is the assembly.
+Tier 44 then supplies the lemma Tier 43 named as missing: `sumLtI_swap` (`Σ_a Σ_b = Σ_b Σ_a`, plain
+induction), `sumLtI3_cyc` (`Σ F a b c = Σ F b c a`, two swaps) and `tri3_cyc` — the three cyclic
+rotations of a triple matrix product have the same triple sum. With `f = g = B`, `h = E` that
+identifies the three `BBE` terms of `tr((B+E)³)`; with `f = B`, `g = h = E`, the three `BEE` terms.
+**The `8 → 4` collapse is therefore available.**
+
+**Two of §34's four sums remain uncarried:** `3·tr(B²E) = 24·t2′` and `tr(BE²) = 0`. What is still
+missing for them is *not* infrastructure any more — it is the evaluation of a mixed sum against `E`'s
+support: a case analysis over the four families inside a triple sum, using the block identity (§47)
+to kill the generic part and Tiers 38/40 to value the rest. Every ingredient is a theorem; the
+assembly is the work.
 
 **§18.1 is not yet proven, so (III) is still reduced, not proven.** (d) and V1 untouched.
