@@ -753,32 +753,197 @@ impl SNOMEDElplus {
         }
         // The cross-module elplus_fixpoint_packed call miscompiles
         // ELPLUS_MAXC (resolves to 8 instead of 64 in this context),
-        // so the full 8-rule fixpoint is no-op.  Run CR2 (transitivity)
-        // inline on the global scratch buffer instead.  This handles
-        // the basic is-a hierarchy; the role/existential rules
-        // (CR3-CR8) are not computed.
+        // so we run the full 8-rule fixpoint inline on the global
+        // scratch buffers, with the constants written out explicitly.
         var changed = true
         var rounds: i64 = 0
+        var a: i64 = 0
+        var k: i64 = 0
+        var d: i64 = 0
+        var c: i64 = 0
+        var rr: i64 = 0
+        var ss: i64 = 0
+        var f: i64 = 0
+        var d2: i64 = 0
+        var f2: i64 = 0
+        var x: i64 = 0
+        var idx: i64 = 0
+        var r1: i64 = 0
+        var r2: i64 = 0
+        var r3: i64 = 0
         while changed {
             changed = false
             rounds = rounds + 1
-            var a: i64 = 0
+
+            // (T) transitivity on S
+            a = 0
             while a < self.nc {
-                var b: i64 = 0
-                while b < self.nc {
-                    if CLOSE_S[a * 64 + b] {
-                        var c2: i64 = 0
-                        while c2 < self.nc {
-                            if CLOSE_S[b * 64 + c2] && !CLOSE_S[a * 64 + c2] {
-                                CLOSE_S[a * 64 + c2] = true
+                k = 0
+                while k < self.nc {
+                    if CLOSE_S[a * 64 + k] {
+                        d = 0
+                        while d < self.nc {
+                            if CLOSE_S[k * 64 + d] && !CLOSE_S[a * 64 + d] {
+                                CLOSE_S[a * 64 + d] = true
                                 changed = true
                             }
-                            c2 = c2 + 1
+                            d = d + 1
                         }
                     }
-                    b = b + 1
+                    k = k + 1
                 }
                 a = a + 1
+            }
+
+            // (CE) conjunction elimination and (CI) introduction (kind 2)
+            a = 0
+            while a < self.nc {
+                d = 0
+                while d < self.nc {
+                    if self.ckind[d] == 2 {
+                        if CLOSE_S[a * 64 + d] {
+                            if !CLOSE_S[a * 64 + self.carg1[d]] {
+                                CLOSE_S[a * 64 + self.carg1[d]] = true
+                                changed = true
+                            }
+                            if !CLOSE_S[a * 64 + self.carg2[d]] {
+                                CLOSE_S[a * 64 + self.carg2[d]] = true
+                                changed = true
+                            }
+                        }
+                        if CLOSE_S[a * 64 + self.carg1[d]] && CLOSE_S[a * 64 + self.carg2[d]] {
+                            if !CLOSE_S[a * 64 + d] {
+                                CLOSE_S[a * 64 + d] = true
+                                changed = true
+                            }
+                        }
+                    }
+                    d = d + 1
+                }
+                a = a + 1
+            }
+
+            // (S2R) stoR: C <= ex r.D becomes edge (r, C, D)
+            a = 0
+            while a < self.nc {
+                d = 0
+                while d < self.nc {
+                    if self.ckind[d] == 3 && CLOSE_S[a * 64 + d] {
+                        idx = (self.carg1[d] * 64 + a) * 64 + self.carg2[d]
+                        if !CLOSE_R[idx] {
+                            CLOSE_R[idx] = true
+                            changed = true
+                        }
+                    }
+                    d = d + 1
+                }
+                a = a + 1
+            }
+
+            // (RM) Rmono: edge (r,C,D) and D <= D' give (r,C,D'), D' base
+            rr = 0
+            while rr < self.nr {
+                c = 0
+                while c < self.nc {
+                    f = 0
+                    while f < self.nc {
+                        if CLOSE_R[(rr * 64 + c) * 64 + f] {
+                            d2 = 0
+                            while d2 < self.nc {
+                                if CLOSE_S[f * 64 + d2] && self.exid[rr * 64 + d2] >= 0 {
+                                    idx = (rr * 64 + c) * 64 + d2
+                                    if !CLOSE_R[idx] {
+                                        CLOSE_R[idx] = true
+                                        changed = true
+                                    }
+                                }
+                                d2 = d2 + 1
+                            }
+                        }
+                        f = f + 1
+                    }
+                    c = c + 1
+                }
+                rr = rr + 1
+            }
+
+            // (RS) roleSub: edge (r,C,D) and r <=* s (rclos) give (s,C,D)
+            rr = 0
+            while rr < self.nr {
+                ss = 0
+                while ss < self.nr {
+                    if rclos[rr * 8 + ss] {
+                        c = 0
+                        while c < self.nc {
+                            f = 0
+                            while f < self.nc {
+                                if CLOSE_R[(rr * 64 + c) * 64 + f] && self.exid[ss * 64 + f] >= 0 {
+                                    idx = (ss * 64 + c) * 64 + f
+                                    if !CLOSE_R[idx] {
+                                        CLOSE_R[idx] = true
+                                        changed = true
+                                    }
+                                }
+                                f = f + 1
+                            }
+                            c = c + 1
+                        }
+                    }
+                    ss = ss + 1
+                }
+                rr = rr + 1
+            }
+
+            // (RC) roleComp: edges (r1,C,D) and (r2,D,E) with chain
+            // r1 o r2 <= r3 give (r3,C,E)
+            k = 0
+            while k < self.nchain {
+                r1 = self.ch1[k]
+                r2 = self.ch2[k]
+                r3 = self.ch3[k]
+                c = 0
+                while c < self.nc {
+                    f = 0
+                    while f < self.nc {
+                        if CLOSE_R[(r1 * 64 + c) * 64 + f] {
+                            f2 = 0
+                            while f2 < self.nc {
+                                if CLOSE_R[(r2 * 64 + f) * 64 + f2] && self.exid[r3 * 64 + f2] >= 0 {
+                                    idx = (r3 * 64 + c) * 64 + f2
+                                    if !CLOSE_R[idx] {
+                                        CLOSE_R[idx] = true
+                                        changed = true
+                                    }
+                                }
+                                f2 = f2 + 1
+                            }
+                        }
+                        f = f + 1
+                    }
+                    c = c + 1
+                }
+                k = k + 1
+            }
+
+            // (R2S) RtoS: edge (r,C,D) gives C <= ex r.D
+            rr = 0
+            while rr < self.nr {
+                c = 0
+                while c < self.nc {
+                    f = 0
+                    while f < self.nc {
+                        if CLOSE_R[(rr * 64 + c) * 64 + f] {
+                            x = self.exid[rr * 64 + f]
+                            if x >= 0 && !CLOSE_S[c * 64 + x] {
+                                CLOSE_S[c * 64 + x] = true
+                                changed = true
+                            }
+                        }
+                        f = f + 1
+                    }
+                    c = c + 1
+                }
+                rr = rr + 1
             }
         }
         k = 0
