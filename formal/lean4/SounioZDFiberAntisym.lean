@@ -10155,6 +10155,76 @@ theorem sumLtI_eq_at2 (n j k : Nat) (f : Nat → Int) (hj : j < n) (hk : k < n) 
       sumLtI_add, sumLtI_single n j (f j) hj, sumLtI_single n k (f k) hk]
 
 
+/-! ## Tier 48: reindexing along an injection — the general form
+
+Tier 47 proved only the one- and two-point collapses and recorded the general reindexing as "not
+proven, awkward without `Finset`". That was too quick: with the right peel it is an induction on the
+index range. `sumLtI_peel` removes one index from a sum; `sumLtI_reindex` then strips the injection's
+image one point at a time.
+
+This does not change the `tr(BE²)` position — the hub rows are dense, so there is no sparse family to
+reindex there — but it removes the tool gap the earlier tier claimed. -/
+
+/-- Peel one index out of a sum. -/
+theorem sumLtI_peel : ∀ (n k : Nat) (f : Nat → Int), k < n →
+    sumLtI n f = f k + sumLtI n (fun i => if i = k then 0 else f i) := by
+  intro n
+  induction n with
+  | zero => intro k f hk; omega
+  | succ n ih =>
+      intro k f hk
+      rcases Nat.lt_or_ge k n with h | h
+      · rw [sumLtI, ih k f h, sumLtI]
+        show _ = f k + (sumLtI n (fun i => if i = k then 0 else f i)
+                        + (if n = k then 0 else f n))
+        rw [if_neg (by omega)]
+        omega
+      · have hkn : k = n := by omega
+        subst hkn
+        rw [sumLtI, sumLtI, if_pos rfl,
+            sumLtI_congr k (fun i => if i = k then 0 else f i) f (fun i hi => if_neg (by omega))]
+        omega
+
+/-- **Reindexing along an injection.** A sum supported on the image of an injective `ι` is the sum
+    over the index. -/
+theorem sumLtI_reindex : ∀ (m n : Nat) (i : Nat → Nat) (f : Nat → Int),
+    (∀ a, a < m → i a < n) →
+    (∀ a b, a < m → b < m → i a = i b → a = b) →
+    (∀ x, x < n → (∀ a, a < m → i a ≠ x) → f x = 0) →
+    sumLtI n f = sumLtI m (fun a => f (i a)) := by
+  intro m
+  induction m with
+  | zero =>
+      intro n i f _ _ h0
+      show sumLtI n f = 0
+      rw [sumLtI_congr n f (fun _ => 0) (fun x hx => h0 x hx (fun a ha => by omega))]
+      exact sumLtI_zero n
+  | succ m ih =>
+      intro n i f hlt hinj h0
+      have hk : i m < n := hlt m (by omega)
+      rw [sumLtI_peel n (i m) f hk]
+      show _ = sumLtI m (fun a => f (i a)) + f (i m)
+      have hrest : sumLtI n (fun x => if x = i m then 0 else f x)
+          = sumLtI m (fun a => f (i a)) := by
+        rw [ih n i (fun x => if x = i m then 0 else f x)
+              (fun a ha => hlt a (by omega))
+              (fun a b ha hb e => hinj a b (by omega) (by omega) e)
+              (fun x hx hno => by
+                by_cases hxk : x = i m
+                · rw [if_pos hxk]
+                · rw [if_neg hxk]
+                  refine h0 x hx (fun a ha => ?_)
+                  rcases Nat.lt_or_ge a m with h | h
+                  · exact hno a h
+                  · have : a = m := by omega
+                    subst this
+                    exact fun e => hxk e.symm)]
+        refine sumLtI_congr m _ _ (fun a ha => ?_)
+        refine if_neg (fun e => ?_)
+        exact absurd (hinj a m (by omega) (by omega) e) (by omega)
+      rw [hrest]
+      omega
+
 end SounioZDFiberAntisym
 
 
