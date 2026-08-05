@@ -181,8 +181,19 @@ and not stored in the executable. The claim that '2.1 GB of the 3.40 GB BSS is
 the functions array', which is why this constant went untouched for so long, was
 never true.
 
-IR_MAX_INSTRS = 4096 is now the dominant term: every function reserves 4096
-instruction slots whether it uses them or not."
+AND THE ARENA IS NOT THE ANSWER — this was tested, not assumed. Shrinking
+IrFunction.instrs from 3072 entries to 64, i.e. making IrFunction 48x smaller
+(504 KB -> 11 KB), moved the per-function cost of a compile by 93 KB:
+
+    IrFunction.instrs = 3072   895.4 KB per function
+    IrFunction.instrs =   64   801.8 KB per function
+
+So an arena over IrFunction.instrs — 4518 `.instrs[` call sites, in the file
+where a wrong edit is a silent miscompile — buys 10%, and 802 KB per function is
+not IrFunction at all. Do not build it. The per-function cost that remains has
+not been identified; find it the way the others were found (smaps for the
+mapping, lower_live fn_begin/fn_done for the phase, then read the live path),
+not by reasoning about struct sizes."
 fi
 
 gate_pass "$TOTAL fn declarations across $NODES closure nodes fit IR_MAX_FUNCS=$IR_MAX_FUNCS"
