@@ -3124,7 +3124,8 @@ every denotation claim in this arc — "this `sumLtI` **is** `t3′`", `blow = B
 column `0` of `A_σ` to be zero. **`Asig_isolated` does not cover it: that theorem requires `l ≠ 0`.**
 This is the "true theorem about the wrong sum" hazard, and it was live.
 
-It is closed, in the good direction: the resonance predicate **fails at `l = 0` for every column**.
+It is closed, in the good direction: the resonance predicate **fails at `l = 0` for every column, and
+at `y = 0` for every row**.
 Verified first against a Lean-faithful re-implementation of `cdSigma`/`P1`/`P3`/`resB`/`Asig` (not the
 fast builder, which never constructs the index at all) over every label at `n = 2…5`, then proven —
 `resB_zero_row` / `Asig_zero_row`, Tier 49. My own first hand-derivation of the diagonal entry got it
@@ -3133,7 +3134,14 @@ measurement caught it, which is the reason to run one.
 
 ### 49.7 — what Tier 49 puts in Lean, and what it does not
 
-`resB_zero_row`, `Asig_zero_row`, `yrow_gen` — the **pointwise** inputs. The assembly (§49.1's
+`resB_zero_row`, `resB_zero_col`, `Asig_zero_row`, `Asig_zero_col`, `yrow_gen` — the **pointwise**
+inputs.  (The row alone is not enough: index `0` occurs in all three positions `u,v,w` of the
+collapse, and `E = A − blow` at index `0` needs the column too.  `Asig_symm` cannot supply it — it
+requires both indices nonzero, which is exactly the excluded boundary — so both come from the same
+fact, that the two orders of `P1` disagree at index `0`, which is `resB`'s FIRST clause and therefore
+reads the same in either order.)  The assembly's tool is `sumLtI_eq_at2`, whose hypothesis is
+summand-vanishing rather than vector-support: at the index `W` the zero comes from `A′`'s null
+column, not from `y_w`.  `sumLtI_of_cosupport` is not needed either. The assembly (§49.1's
 collapse) is still not formalised; the route is per-`w`: split the `u,v` range into four blocks with
 `sumLtI_shift`/`_double` (Tier 43), then collapse the inner sum onto `{b, b⊕W}` with `sumLtI_eq_at2`
 (Tier 47) — the summand vanishes at the index `W` through `A′`'s null column, not through `y`.
