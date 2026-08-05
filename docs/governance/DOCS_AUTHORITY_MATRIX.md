@@ -920,6 +920,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.particle-exp11-scheme-approx-product-2026-07-26 | historical | docs/research/particle_exp11_scheme_approx_product_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.particle-exp123-vertical-2026-07-25 | historical | docs/research/particle_exp123_vertical_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.particle-exp14-amp-to-xsec-2026-08-05 | historical | docs/research/particle_exp14_amp_to_xsec_2026-08-05.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.particle-exp15-w-amp-to-xsec-2026-08-05 | historical | docs/research/particle_exp15_w_amp_to_xsec_2026-08-05.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.particle-exp6-universal-xi-2026-07-26 | historical | docs/research/particle_exp6_universal_xi_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.particle-exp7-gum-transfer-2026-07-26 | historical | docs/research/particle_exp7_gum_transfer_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.particle-exp8-collapse-failure-2026-07-26 | historical | docs/research/particle_exp8_collapse_failure_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
