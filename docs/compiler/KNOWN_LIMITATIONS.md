@@ -495,6 +495,17 @@ Surfaced by the round-13 EL+ closure optimization
   segfaults. Workaround: guard the index with a flag variable; never put
   a potentially out-of-range subscript on the RHS of `&&`/`||`.
 
+## Lexer pitfall: `<=` inside doc comments
+
+Surfaced while writing `stdlib/ontology/temporal.sio` (probe
+2026-08-05, Madaros v0.80.0): a `<=` token IMMEDIATELY followed by `,`
+or `}` inside a `//!` / `///` doc comment aborts parsing with
+`syntax appears incomplete after assignment` at the token position
+(e.g. `//! relations {<, <=}` or `//! a <=, b` both fail, while
+`//! a <= b` is fine). Workaround: reword so `<=` in prose is never
+directly followed by a punctuation character — write `x <= y` with
+operands on both sides, or spell the ordering out in words.
+
 ## Reporting Issues
 
 If you encounter any new issues, please report them at:

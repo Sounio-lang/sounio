@@ -442,7 +442,7 @@ Documented in `artifacts/ontology-frontiers/compiler-repros/`,
 cd /workspace/sounio
 bash scripts/ci/ontology_frontiers_gate.sh          # 14 prototypes, ALL PASS
 bash scripts/ci/ontology_multi_ontology_gate.sh     # GO cones + CL + UBERON
-./bin/souc run artifacts/ontology-frontiers/real-data/scale/go_full_elplus_driver.sio   # ~4.7 s
+./bin/souc run artifacts/ontology-frontiers/real-data/scale/go_full_elplus_driver.sio   # ~3.6 s (round 14)
 ./bin/souc run examples/epistemic/traceability_elplus_demo.sio
 ./bin/souc run examples/clinical/ddi_elplus_demo.sio        # lean_single lane
 cd formal && lake build                                     # 14 verified ontology roots
