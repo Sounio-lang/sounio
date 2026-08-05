@@ -84,6 +84,38 @@ constructs closing cleanly.
 | + shape B and `(*node).head` | 5,051 |
 | + shape C | **6 — the baseline set. exit 0, artifact produced.** |
 
+## STOP: the branch compiler cannot compile a two-function program
+
+Found 2026-08-05, and it is the top blocker.
+
+```
+fn s0(x: i64) -> i64 { x * 2 + 1 }
+fn main() -> i64 { var t: i64 = 1  t = (t + s0(t)) % 1009  t % 251 }
+```
+
+| compiler | result |
+|---|---|
+| `origin/main` | rc=0, binary runs, exits 4 |
+| this branch, before Sweep 1 | `Failed to write native binary ... rc=12` |
+| this branch, after Sweep 1 | same |
+
+Bisected to **one helper function**. Single-function programs compile and run
+correctly, which is why it stayed hidden — and it explains why only 7 of 61
+sampled `tests/run-pass` files compiled at all.
+
+`rc=12` is `!compile_ok` (`native/codegen_x86_linux.sio:10839`), a generic
+backend failure with no diagnostic. Lowering succeeds first (`final_fn_count 2`),
+so the defect is in native codegen, downstream of the conversion. It predates
+Sweep 1. The same `rc=12` blocks `ir_instr_arena_gate.sh`, so it is also what
+stops the arena's runtime contract from being verified.
+
+**The green self-compile is a FALSE GREEN.** The branch builds because the *seed*
+(lean_single) compiles it, and lean_single does not carry this defect. `exit 0`
+on the build says nothing about the compiler it produces. Repro kept at
+`tests/known_failures/soa_arena_two_function_codegen.sio`.
+
+Fix this before raising `IR_MAX_INSTRS` or trusting any parity measurement.
+
 ## What the green build does NOT yet buy
 
 Measured, not assumed:
