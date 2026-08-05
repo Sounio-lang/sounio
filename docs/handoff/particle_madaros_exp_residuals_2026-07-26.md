@@ -37,7 +37,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.handoff.partic
 | `ep_gate` field-if | stdlib `ep_i64_ge` (still needs native fix) |
 | `pb_is_credible` / `ck_is_credible` | same call-arg pattern |
 | Thin EXP10 physics vertical | remains (IR size) |
-| Vertex/amplitude on full EXP123 | **partial close** EXP13 — `eemm_z_amplitude_nu` Madaros-safe via ep_square on vertex f64 (raw f64*f64 of imported negatives was 0) |
+| Vertex/amplitude on full EXP123 | **closed** EXP13 dual-engine (2026-08-05) — drop private `extern "C" sqrt/sinh/cosh` in `lorentz`/`vertex` (false E175 vs `complex` builtins); see `docs/research/particle_e175_amp_import_2026-08-05.md` |
 
 
 Compiler residual: i64 field-if mis-branch in imported native codegen.
