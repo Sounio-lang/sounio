@@ -511,7 +511,57 @@ full-GO adicionado; o timeout default por arquivo subiu de 180 s para
 `ONTOLOGY_FRONTIERS_RUN_TIMEOUT`).
 
 
-## Rodada 13 — rastreabilidade metrológica como composição de papéis EL+ (2026-08-05)
+## Rodada 13 — otimização (3,3× mais rápido que ELK), DDI, multi-ontologia, adaptador SNOMED (2026-08-05)
+
+Quatro frentes (commit `56ea5df30b`; demo/adaptador SNOMED em `3e4441051f`,
+`2e67714f0a`):
+
+- **Otimização do fecho full-GO** — reescrita do motor de fixpoint de
+  `go_full_elplus_driver.sio`: linhas esparsas ordenadas em arena (o cubo
+  bitmask de 17,9 GB BSS vira ~0,9 GB), lista de células não-vazias,
+  worklist single-queue para roleSub, roleComp semi-naive com salto por
+  versão (forma semi-naive completa da regra 12b), e contagem de conflitos
+  agrupada por máscara de endpoints (218 máscaras distintas; 1,46G → 8,3M
+  iterações). Resultado: **3m43s → 4,7s wall (2,2s run) — 3,3× mais rápido
+  que ELK 0.6.0 (15,4s)**, com todos os números **byte-idênticos** à
+  rodada 12 (arestas atômicas, arestas de papel, conflitos, ablações,
+  rodadas 4/2/4). Documento completo:
+  `real-data/scale/OPTIMIZATION_RESULTS.md`. Novos pitfalls documentados:
+  inicializadores de escalares em nível de módulo; `&&`/`||` sem
+  curto-circuito na leitura de array do RHS.
+- **DDI role-aware** — `examples/clinical/ddi_elplus_demo.sio`: ponte entre
+  o grounding ChEBI de `stdlib/chemistry/ontology.sio` e
+  `elplus_fixpoint` + `elplus_derive_conflicts`; flags de interação
+  derivadas de uma mini TBox farmacológica (não de tabela hardcoded).
+  Claims split registrado no arquivo: fidelidade lógica PROVADA
+  (`subBPlusC_iff`/`conflictBPlusC_iff`); adequação farmacológica NÃO
+  estabelecida. Roda na lane lean_single (módulo chemistry); gate
+  `scripts/clinical_ddi_elplus_gate.sh`.
+- **Multi-ontologia** — `multi-ontology/`: três cones raiz do GO
+  (BP/CC/MF) + **CL** (3.335 classes, 29 papéis, 146.188 arestas de papel)
+  e **UBERON** (14.975 classes, 128 papéis, 2.343.535 arestas de papel).
+  Os cones **particionam** o GO completo: arestas atômicas somam
+  exatamente 395.939 (= rodada 12) e o contador agrupado reproduz
+  792.814.846 conflitos por um segundo algoritmo; o déficit de arestas de
+  papel (503.092) são as 3.603 restrições cross-cone (medido). roleSub
+  domina em todos os alvos (46–77%). Gate próprio
+  `scripts/ci/ontology_multi_ontology_gate.sh` (2/2 OK). Resultados:
+  `multi-ontology/RESULTS.md`.
+- **Adaptador SNOMED** — `stdlib/ontology/biomedical/snomed.sio`
+  (`SNOMEDElplus`): o `close()` chamava `elplus_fixpoint_packed`
+  cross-module, que **miscompilava `ELPLUS_MAXC`** (resolvia para 8 em vez
+  de 64) no frame de impl-method, tornando o fixpoint um no-op — corrigido
+  com o fixpoint de 8 regras totalmente inline sobre buffers globais; o
+  teste de aceitação `tests/stdlib/ontology/test_snomed_elplus_adapter.sio`
+  agora passa (era known-failure). Demo executável
+  `examples/ontology/biomedical/snomed_elplus_demo.sio` (Pericarditis/
+  Endocardium ⇒ "heart finding" via `finding_site ⊑ part_of` e
+  `part_of ∘ part_of ⊑ part_of`).
+
+Math-review xai das três frentes: PASS (log
+`agent_logs/multi_ontology_offload_2026-08-05.md`).
+
+## Rodada 14 — rastreabilidade metrológica como composição de papéis EL+ (2026-08-05)
 
 Aplicação nova do fecho EL+ denso fora do eixo biomédico: a "cadeia
 ininterrupta de calibrações" da VIM3 (JCGM 200:2012, 2.41) expressa como
@@ -535,6 +585,32 @@ TBox EL+ role-aware, substituindo a caminhada imperativa de 4 elos de
   `ReferenceStandard` genérico NÃO é rastreável ao SI; `contributesUncertainty`
   NÃO compõe para `traceableTo`. `souc check` OK; `souc run` → `ALL PASS`
   (marcadores `//@ run-pass` / `//@ expect-stdout: ALL PASS`).
+
+## Rodada 14 — fecho de derivação de proveniência PROV-DM/SLSA (2026-08-05)
+
+Segunda aplicação fora do eixo biomédico: as regras de inferência do
+PROV-CONSTRAINTS são literalmente axiomas de papel EL+, e a hierarquia de
+relações do PROV mapeia sobre o fecho de hierarquia de papéis — o storage
+em structs planas de `stdlib/epistemic/prov.sio` (sem raciocínio
+transitivo) é substituído por uma TBox declarativa.
+
+- **`examples/epistemic/prov_elplus_demo.sio`** — conceitos `Entity` com
+  `Measured`/`Literature`/`Computed` (⊑ `Entity`), `Undocumented`,
+  `SLSAL3Claim` e `UnsignedArtifact`; papéis `derivedFrom`, `generatedBy`,
+  `used`, `influencedBy`; axiomas `derivedFrom ∘ derivedFrom ⊑
+  derivedFrom` (transitividade PROV), `influencedBy ∘ influencedBy ⊑
+  influencedBy` (cadeias de N elos) e a hierarquia `derivedFrom`/
+  `generatedBy`/`used ⊑ influencedBy`. A consulta
+  `prov_ultimate_sources(e)` conta os fillers `Literature`/`Measured`
+  alcançáveis pelas arestas `influencedBy` FECHADAS (O(nb) sobre o cubo
+  de papéis após UM fixpoint, 2 rodadas). O gate SLSA-L3 é a disjunção
+  `SLSAL3Claim ⊥ ∃derivedFrom.Undocumented`: `UnsignedArtifact` (que
+  clama SLSA-L3 E tem derivação indocumentada) dispara `HARD ERROR` via
+  `elplus_conflict` (teorema `conflictBPlusC_iff`); o conceito `Computed`
+  limpo passa o gate. Checks negativos: `Computed` sem derivação
+  indocumentada; nenhuma aresta `influencedBy` sai de `Literature`
+  (fontes não influenciam seus usuários). `souc check` OK; `souc run` →
+  `ALL PASS` (marcadores `//@ run-pass` / `//@ expect-stdout: ALL PASS`).
 
 ## Arquivos criados
 
@@ -560,6 +636,8 @@ TBox EL+ role-aware, substituindo a caminhada imperativa de 4 elos de
   completo — ver seção acima)
 - `examples/epistemic/traceability_elplus_demo.sio` (rodada 13 —
   rastreabilidade metrológica VIM3 como composição de papéis EL+)
+- `examples/epistemic/prov_elplus_demo.sio` (rodada 14 — fecho de
+  derivação de proveniência PROV-DM/SLSA como axiomas de papel EL+)
 - `stdlib/ontology/elplus.sio` (rodada 9 — fecho EL⁺ role-aware: variante
   densa + variante esparsa)
 - `artifacts/ontology-frontiers/real-data/scale/gen_elplus_data.py`
@@ -658,3 +736,14 @@ wrapper pode ser trocado via `SOUC_BIN`. Os repros de compilador em
 
 Commits na branch: `54cef93d7` (rodadas 1-2), `156858916` (rodada 3);
 rodada 4 aguardando autorização de commit.
+
+## Nota técnica consolidada (rodadas 1–14)
+
+A linha inteira está consolidada em
+`docs/papers/ontology_frontiers_technical_note_2026-08-05.md` — abstract,
+resultados formais (soundness/completeness/normalização+conservatividade,
+com os teoremas-chave de cada arquivo Lean), resultados executáveis com os
+números exatos (Anatomy, probes de escala + Slurm N=100k, GO completo,
+otimização vs ELK, multi-ontologia), aplicações (repair, DDI, SNOMED,
+rastreabilidade), baseline ELK, pesquisa aberta e referências
+(commits/arquivos/benchmarks).

@@ -631,6 +631,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.papers.mercyful-learning-medical-paper-2026-07-26 | repo_only | docs/papers/mercyful_learning_medical_paper_2026-07-26.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.mercyful-learning-paradigm-2026-07-26 | repo_only | docs/papers/mercyful_learning_paradigm_2026-07-26.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.mercyful-learning-preprint-2026-07-26 | repo_only | docs/papers/mercyful_learning_preprint_2026-07-26.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.papers.ontology-frontiers-technical-note-2026-08-05 | repo_only | docs/papers/ontology_frontiers_technical_note_2026-08-05.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.oopsla2027.outline | repo_only | docs/papers/oopsla2027/outline.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.oopsla2027.paper | repo_only | docs/papers/oopsla2027/paper.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.paper | repo_only | docs/papers/paper.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
