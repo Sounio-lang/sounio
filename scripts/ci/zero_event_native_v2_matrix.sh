@@ -76,7 +76,13 @@ require_rc qd128_mul 0
 require_marker qd128_mul 'QD128_MUL_NATIVE_V2 PASS'
 reject_marker qd128_mul 'Segmentation fault'
 
-# Combined sedenion+eisa still thin-link fail-closed on stock Madaros (2026-08-05)
+# Compact zero-provenance (sedenion + local f64 kinds) — Madaros-green
+run_capture zp_compact tests/run-pass/zero_provenance_native_v2_smoke.sio
+require_rc zp_compact 0
+require_marker zp_compact 'ZERO_PROVENANCE PASS'
+reject_marker zp_compact 'Segmentation fault'
+
+# Full eisa::core_v2 + sedenion combined import still thin-link fail-closed
 run_capture combined tests/known_failures/zero_provenance_native_v2_probe.sio
 require_rc combined 1
 require_marker combined 'Failed to write native binary'
@@ -90,4 +96,4 @@ require_marker receipt 'Compilation successful!'
 require_marker receipt 'ZERO_EVENT_STDLIB PASS'
 reject_marker receipt 'Segmentation fault'
 
-echo '[zero-native-matrix] PASS: dd64+sedenion+qd128(+core,+mul)+receipt green; combined fail-closed without segfault'
+echo '[zero-native-matrix] PASS: dd64+sedenion+qd128(+core,+mul)+zp_compact+receipt green; eisa+sedenion combined fail-closed'
