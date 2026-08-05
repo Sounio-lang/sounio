@@ -13,18 +13,19 @@
 // Rates: forward modified Arrhenius k = A T^b exp(-Ea/(R_cal T)) exactly as in
 // grimech30.dat (cm^3/mol/s units, Ea in cal/mol, R_cal = 1.9872041).
 // Reverse rates are NOT hardcoded: k_rev = k_fwd / Kc(T), with Kc from the
-// NASA7 Gibbs free energies (Kp -> Kc with standard-state 1e5 Pa). This makes
+// NASA7 Gibbs free energies (Kp -> Kc with CHEMKIN standard-state 1 atm). This makes
 // the mechanism satisfy detailed balance by construction.
 //
 // Epistemic layer ("ligada"): each reaction carries a representative 1-sigma
 // relative uncertainty on its rate (order-of-magnitude fidelity to the
 // evaluated-data compilations: Baulch et al. 2005, Konnov 2008, Hong et al.
-// 2011). Uncertainty propagates through integration via the first-order GUM
-// delta method: per RK4 step,
-//   v+_i = v_i + 2 J_ii v_i dt + sum_k (J_ik dt)^2 v_k
-//        + sum_r (nu_ir * net_rate_r * dt * u_rel_r)^2
-// (diagonal first-order covariance step; cross-covariances dropped)
-// with J the central-difference Jacobian of the RHS wrt concentrations.
+// 2011). Uncertainty propagates through persistent forward sensitivities
+// S'_r = J S_r + nu_r * net_rate_r, with V = sum_r S_r^2 u_r^2 plus
+// initial-condition sensitivities. This treats rate uncertainty as systematic
+// over the trajectory rather than independent per-step noise. The resulting
+// symmetric +/- sigma band is only a second-moment summary: Cantera sampling
+// at this checkpoint is skewed (H +1.05, H2O +1.08, H2O2 +2.24, H -1.02),
+// so quantiles are preferable when sampling is available.
 // (d(net)/dk_r = nu*net/k_r exactly for Arrhenius/three-body — reverse scales
 // with k_fwd through Kc; linearization is approximate for the falloff rxn.)
 //
@@ -90,11 +91,16 @@ fn g30_sqrt(x: f64) -> f64 with Mut, Div {
     if x <= 0.0 { return 0.0 }
     var g = x
     if g > 1.0 { g = x * 0.5 } 
-    // 90 iterations: from g0=x<=1 the first step overshoots to ~0.5 and Newton
-    // then halves per step until g^2 ~ x; 40 iterations floor at ~9.09e-13,
-    // which silently corrupted u(HO2)/u(H2O2) in the epistemic runs.
+    // Stop on relative convergence so the iteration remains valid as the
+    // uncertainty scale changes; the cap is only a runaway guard.
     var i = 0
-    while i < 90 { g = 0.5 * (g + x / g); i = i + 1 }
+    var done = false
+    while i < 120 && !done {
+        let next = 0.5 * (g + x / g)
+        done = g30_abs(next - g) <= 1.0e-14 * next
+        g = next
+        i = i + 1
+    }
     g
 }
 
@@ -576,10 +582,11 @@ pub fn g30_kp(r: i64, t: f64) -> f64 with Mut, Div, Panic {
     g30_exp(0.0 - dg)
 }
 
-// Kc in (mol/cm^3)^dn units: Kc = Kp * (c0 * 1e-6)^dn, c0 = P0/(R T) mol/m^3
+// Kc in (mol/cm^3)^dn units: CHEMKIN/GRI standard state is 1 atm.
+// Kc = Kp * (c0 * 1e-6)^dn, c0 = P0/(R T) mol/m^3.
 pub fn g30_kc(r: i64, t: f64) -> f64 with Mut, Div, Panic {
     let dn = g30_dn();
-    let c0cm = 1.0e5 / (8.314462618 * t) * 1.0e-6;
+    let c0cm = 101325.0 / (8.314462618 * t) * 1.0e-6;
     g30_kp(r, t) * g30_pow(c0cm, dn[r])
 }
 
@@ -629,7 +636,7 @@ pub fn g30_kc_all(t: f64) -> [f64; 29] with Mut, Div, Panic {
 }
 
 // forward and reverse rates for every reaction; returns (fwd[29], rev[29]) flattened
-fn g30_rates_fb(t: f64, c: &[f64; 10], kc: &[f64; 29], fwd: &![f64; 29], rev: &![f64; 29]) with Mut, Div, Panic {
+pub fn g30_rates_fb(t: f64, c: &[f64; 10], kc: &[f64; 29], fwd: &![f64; 29], rev: &![f64; 29]) with Mut, Div, Panic {
     let reac = g30_reac(); let prod = g30_prod();
     var r: i64 = 0;
     while r < 29 {
@@ -728,51 +735,50 @@ fn g30_jacobian(t: f64, c: &[f64; 10], kc: &[f64; 29], eps: f64, jac: &![f64; 10
     }
 }
 
-fn g30_propagate_unc(t: f64, c: &[f64; 10], kc: &[f64; 29], varc: &[f64; 10], dt: f64) -> [f64; 10] with Mut, Div, Panic {
+// Forward sensitivities for persistent relative rate errors and initial state
+// errors. Columns 0..28 are d c / d ln(k_r); columns 29 and 30 are the H2/O2
+// initial-condition sensitivities, already scaled by their 1% standard errors.
+fn g30_sens_rhs(t: f64, c: &[f64; 10], kc: &[f64; 29], sens: &[f64; 310]) -> [f64; 310] with Mut, Div, Panic {
     let nu = g30_nu();
-    let urel = g30_urel();
     var jac: [f64; 100] = [0.0; 100];
     g30_jacobian(t, c, kc, 1.0e-12, &!jac);
     var fwd: [f64; 29] = [0.0; 29];
     var rev: [f64; 29] = [0.0; 29];
     g30_rates_fb(t, c, kc, &!fwd, &!rev);
-    var newv: [f64; 10] = [0.0; 10];
-    var i: i64 = 0;
-    while i < 10 {
-        var sumv = 0.0;
-        var k: i64 = 0;
-        while k < 10 {
-            let jdt = jac[i*10+k] * dt;
-            sumv = sumv + jdt * jdt * varc[k];
-            k = k + 1;
+    var out: [f64; 310] = [0.0; 310];
+    var p: i64 = 0;
+    while p < 31 {
+        var i: i64 = 0;
+        while i < 10 {
+            var acc = 0.0;
+            var j: i64 = 0;
+            while j < 10 { acc = acc + jac[i*10+j] * sens[j*31+p]; j = j + 1; }
+            if p < 29 { acc = acc + nu[p*10+i] * (fwd[p] - rev[p]); }
+            out[i*31+p] = acc;
+            i = i + 1;
         }
-        // diagonal first-order covariance step: v + 2 J_ii v dt + (J dt)^2 v + rate-unc terms
-        sumv = varc[i] + 2.0 * jac[i*10+i] * varc[i] * dt + sumv;
-        var sumk = 0.0;
-        var r: i64 = 0;
-        while r < 29 {
-            let sens = nu[r*10+i] * (fwd[r] - rev[r]) * dt * urel[r];
-            sumk = sumk + sens * sens;
-            r = r + 1;
-        }
-        newv[i] = sumv + sumk;
-        i = i + 1;
+        p = p + 1;
     }
-    newv
+    out
 }
 
 // epistemic simulation: values + 1-sigma uncertainties per species
 pub fn simulate_gri30_h2_epistemic(init: &[f64; 10], inits: &[f64; 10], t_k: f64, dt: f64, steps: i64) -> ([f64; 10], [f64; 10]) with Mut, Div, Panic {
     let kc = g30_kc_all(t_k);
+    let urel = g30_urel();
     var y: [f64; 10] = [init[0], init[1], init[2], init[3], init[4], init[5], init[6], init[7], init[8], init[9]];
-    var v: [f64; 10] = [0.0; 10];
-    var i: i64 = 0;
-    while i < 10 { v[i] = inits[i] * inits[i]; i = i + 1; }
+    var sens: [f64; 310] = [0.0; 310];
+    sens[0*31+29] = inits[0];
+    sens[3*31+30] = inits[3];
     var yt: [f64; 10] = [0.0; 10];
+    var srhs1: [f64; 310] = [0.0; 310];
+    var srhs2: [f64; 310] = [0.0; 310];
+    var spred: [f64; 310] = [0.0; 310];
     var s: i64 = 0;
     while s < steps {
+        srhs1 = g30_sens_rhs(t_k, &y, &kc, &sens);
         let k1 = g30_dc_kc(t_k, &y, &kc);
-        i = 0;
+        var i: i64 = 0;
         while i < 10 { yt[i] = y[i] + 0.5 * dt * k1[i]; i = i + 1; }
         let k2 = g30_dc_kc(t_k, &yt, &kc);
         i = 0;
@@ -783,12 +789,20 @@ pub fn simulate_gri30_h2_epistemic(init: &[f64; 10], inits: &[f64; 10], t_k: f64
         let k4 = g30_dc_kc(t_k, &yt, &kc);
         i = 0;
         while i < 10 { y[i] = y[i] + (dt / 6.0) * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i]); i = i + 1; }
-        v = g30_propagate_unc(t_k, &y, &kc, &v, dt);
+        i = 0; while i < 310 { spred[i] = sens[i] + dt * srhs1[i]; i = i + 1; }
+        srhs2 = g30_sens_rhs(t_k, &y, &kc, &spred);
+        i = 0; while i < 310 { sens[i] = sens[i] + 0.5 * dt * (srhs1[i] + srhs2[i]); i = i + 1; }
         s = s + 1;
     }
     var u: [f64; 10] = [0.0; 10];
-    i = 0;
-    while i < 10 { u[i] = g30_sqrt(v[i]); i = i + 1; }
+    var i: i64 = 0;
+    while i < 10 {
+        var v = sens[i*31+29] * sens[i*31+29] + sens[i*31+30] * sens[i*31+30];
+        var r: i64 = 0;
+        while r < 29 { let z = sens[i*31+r] * urel[r]; v = v + z * z; r = r + 1; }
+        u[i] = g30_sqrt(v);
+        i = i + 1;
+    }
     (y, u)
 }
 
@@ -987,6 +1001,7 @@ pub fn g30_adiabatic_delay(t0: f64, dt: f64, max_steps: i64) -> (f64, f64) with 
 // ---------------- tests (all expectations from the independent Python replica) ----------------
 
 fn g30_check_near(a: f64, b: f64, tol: f64) -> bool { g30_abs(a - b) < tol }
+fn g30_check_rel(a: f64, b: f64, rel: f64) -> bool { g30_abs(a - b) < rel * g30_abs(b) }
 
 pub fn test_g30_rates() -> bool with Mut, Div, Panic {
     // Python cross-check at T=1200K, [M]=1/(82.057*1200) mol/cm^3:
@@ -1028,36 +1043,62 @@ fn g30_demo_init(t: f64) -> [f64; 10] with Mut, Div, Panic {
 }
 
 pub fn test_g30_sim() -> bool with Mut, Div, Panic {
-    // isothermal ignition at 1500 K; Python replica checkpoint at t=1e-4 s
-    // (dt=1e-8, 10000 steps, pre-front; the ignition front itself is
-    // exponentially sensitive, so fixed-time post-front states are not
-    // suitable for cross-language parity):
-    //   H2=1.44897e-7  OH=1.2667e-9  H2O=1.1978e-8  H=9.9532e-9  O2=7.3868e-8
+    // Cantera 3.2.0 / gri30.yaml reference: filtered 10-species/29-reaction
+    // mechanism, IdealGasReactor, energy="off", constant density, T=1500 K,
+    // 2% H2 / 1% O2 / 97% N2 at 1 atm, [H]=1e-11 mol/cm3, rtol=1e-12,
+    // atol=1e-22, advanced to t=1e-4 s. H2O2 gets 1e-2 relative tolerance;
+    // all other species get 1e-4.
     let t = 1500.0;
     let c0 = g30_demo_init(t);
     let y = simulate_gri30_h2(&c0, t, 1.0e-8, 10000 as i64);
-    g30_check_near(y[0], 1.44897e-7, 7.0e-9) &&
-    g30_check_near(y[4], 1.2667e-9, 3.0e-10) &&
-    g30_check_near(y[5], 1.1978e-8, 1.2e-9) &&
-    g30_check_near(y[1], 9.9532e-9, 1.0e-9) &&
-    g30_check_near(y[3], 7.3868e-8, 4.0e-9)
+    g30_check_rel(y[0], 1.452024295e-7, 1.0e-4) &&
+    g30_check_rel(y[1], 9.781064265e-9, 1.0e-4) &&
+    g30_check_rel(y[2], 1.452338735e-9, 1.0e-4) &&
+    g30_check_rel(y[3], 7.399880451e-8, 1.0e-4) &&
+    g30_check_rel(y[4], 1.224549824e-9, 1.0e-4) &&
+    g30_check_rel(y[5], 1.177882705e-8, 1.0e-4) &&
+    g30_check_rel(y[6], 1.705105973e-11, 1.0e-4) &&
+    g30_check_rel(y[7], 1.624616679e-13, 1.0e-2)
 }
 
 pub fn test_g30_epistemic() -> bool with Mut, Div, Panic {
     // same ignition + 1% standard uncertainty on initial H2/O2 and the
-    // per-reaction rate uncertainties; Python replica at t=1e-4 s:
-    //   u(H2)=1.4484e-9  u(H2O)=2.2225e-11  u(OH)=9.2001e-12  u(H)=2.2813e-11
+    // per-reaction rate uncertainties; coherent forward-sensitivity checkpoint:
+    //   H2=8.8648e-9 H=4.9112e-9 O=8.2198e-10 O2=3.7442e-9
+    //   OH=6.9688e-10 H2O=5.9736e-9 HO2=6.0112e-12 H2O2=7.8519e-14
     let t = 1500.0;
     let c0 = g30_demo_init(t);
     var u0: [f64; 10] = [0.0; 10];
     u0[0] = 0.01 * c0[0];
     u0[3] = 0.01 * c0[3];
     let (y, u) = simulate_gri30_h2_epistemic(&c0, &u0, t, 1.0e-8, 10000 as i64);
-    g30_check_near(y[0], 1.44897e-7, 7.0e-9) &&
-    g30_check_near(u[0], 1.4484e-9, 8.0e-11) &&
-    g30_check_near(u[5], 2.2225e-11, 5.0e-12) &&
-    g30_check_near(u[4], 9.2001e-12, 2.5e-12) &&
-    g30_check_near(u[1], 2.2813e-11, 4.0e-12)
+    g30_check_rel(y[0], 1.452024295e-7, 1.0e-4) &&
+    g30_check_rel(u[0], 8.8648e-9, 1.0e-4) &&
+    g30_check_rel(u[1], 4.9112e-9, 1.0e-4) &&
+    g30_check_rel(u[2], 8.2198e-10, 1.0e-4) &&
+    g30_check_rel(u[3], 3.7442e-9, 1.0e-4) &&
+    g30_check_rel(u[4], 6.9688e-10, 1.0e-4) &&
+    g30_check_rel(u[5], 5.9736e-9, 1.0e-4) &&
+    g30_check_rel(u[6], 6.0112e-12, 1.0e-4) &&
+    g30_check_rel(u[7], 7.8519e-14, 1.0e-4)
+}
+
+// Permanent diagnostic for step-size-dependent uncertainty propagation.
+pub fn test_g30_epistemic_step_invariance() -> bool with Mut, Div, Panic {
+    let t = 1500.0;
+    let c0 = g30_demo_init(t);
+    var u0: [f64; 10] = [0.0; 10];
+    u0[0] = 0.01 * c0[0];
+    u0[3] = 0.01 * c0[3];
+    let (_, u) = simulate_gri30_h2_epistemic(&c0, &u0, t, 5.0e-9, 20000 as i64);
+    g30_check_rel(u[0], 8.8648e-9, 1.0e-2) &&
+    g30_check_rel(u[1], 4.9112e-9, 1.0e-2) &&
+    g30_check_rel(u[2], 8.2198e-10, 1.0e-2) &&
+    g30_check_rel(u[3], 3.7442e-9, 1.0e-2) &&
+    g30_check_rel(u[4], 6.9688e-10, 1.0e-2) &&
+    g30_check_rel(u[5], 5.9736e-9, 1.0e-2) &&
+    g30_check_rel(u[6], 6.0112e-12, 1.0e-2) &&
+    g30_check_rel(u[7], 7.8519e-14, 1.0e-2)
 }
 
 pub fn test_g30_uv_thermo() -> bool with Mut, Div, Panic {
