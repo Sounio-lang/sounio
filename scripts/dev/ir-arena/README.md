@@ -182,11 +182,26 @@ Measured, not assumed:
   (4096 × 248 × 2048, matching the figure in #1649/#1650). Peak RSS on a *small*
   compile is 458 MB vs 466 MB — near parity, because the old inline array was
   only ever faulted in on the pages actually touched.
-- **The 4096 cap still stands.** `IR_MAX_INSTRS: i64 = 4096` (`ir.sio:20`) is
-  unchanged, so `knowledge_octonion_structure.sio` still fails with *needs 14389
-  IR instructions* on **both** compilers. Storage is no longer the blocker — the
-  arena holds 1,048,576 slots, 256× the cap — so raising it is a separate and now
-  unblocked change.
+- **The cap is raised and #1649's blocker is gone.** `IR_MAX_INSTRS` is 16384;
+  `knowledge_octonion_structure.sio` compiles, runs and prints `PASS`. It lowers
+  to 7057 instructions. `bss` is unchanged at 3,559,050,480 — a 4× raise costing
+  nothing is exactly what the arena is for.
+
+  Raising it needed guards, not just a literal: `dce_run_impl` and `cp_run_impl`
+  hold 8192-wide contexts and used to **truncate**, and a truncated liveness
+  analysis is wrong rather than weak — a use past the cap is unseen, so its
+  definition looks dead. Both now refuse. Pinned by the repurposed
+  `irfunction_instr_capacity_coherence_gate.sh`, which is non-vacuous.
+
+- **Open, pre-existing, now reachable: `-O` deletes `print()` above 256
+  registers.** `opt_cleanup` carries ~90 register-indexed `[_; 256]` arrays; the
+  octonion test uses **7088** registers, so the analysis runs on a prefix of the
+  register file. Without `-O` it prints `PASS`; with `-O` its own PASS/FAIL block
+  disappears. **Do not fix this by refusing the function** — both refusals were
+  measured worse than the bug: skipping all of `opt_cleanup_function_mfi`
+  SIGSEGVs, and skipping only the register-indexed peels returns 95 where every
+  other compiler returns 56, because the peels are a pipeline, not a menu.
+  Recorded in `tests/known_failures/opt_cleanup_wide_register_file.sio`.
 - **The arena's runtime contract is now VERIFIED.** With rc=12 fixed,
   `SOUNIO_IR_ARENA_SOUC=<compiler> bash scripts/ci/ir_instr_arena_gate.sh`
   passes: all three witnesses green, generation / sealing / fail-closed capacity
