@@ -511,6 +511,31 @@ full-GO adicionado; o timeout default por arquivo subiu de 180 s para
 `ONTOLOGY_FRONTIERS_RUN_TIMEOUT`).
 
 
+## Rodada 13 — rastreabilidade metrológica como composição de papéis EL+ (2026-08-05)
+
+Aplicação nova do fecho EL+ denso fora do eixo biomédico: a "cadeia
+ininterrupta de calibrações" da VIM3 (JCGM 200:2012, 2.41) expressa como
+TBox EL+ role-aware, substituindo a caminhada imperativa de 4 elos de
+`stdlib/epistemic/traceability.sio` por derivação declarativa via roleComp.
+
+- **`examples/epistemic/traceability_elplus_demo.sio`** — conceitos
+  `Measurement`, `WorkingStandard`, `AccreditedLabStandard`,
+  `NationalStandard`, `SIPrimary` (⊑ `ReferenceStandard`) e `FieldDevice`;
+  papéis `calibratedAgainst`, `traceableTo`, `contributesUncertainty`;
+  axiomas de papel `calibratedAgainst ∘ calibratedAgainst ⊑ traceableTo`,
+  `calibratedAgainst ⊑ traceableTo` e `traceableTo ∘ traceableTo ⊑
+  traceableTo` (transitividade — necessária para cadeias de N elos; os dois
+  primeiros sozinhos só compõem 2 elos). A consulta "o resultado R é
+  rastreável ao SI?" vira `Measurement ⊑ ∃traceableTo.SIPrimary`, respondida
+  por `elplus_subsumes_dense` em O(1) após UM fixpoint (3 rodadas). A
+  extensão N-elos é demonstrada com `FieldDevice` (caminho de 5 arestas,
+  sem cap de 4 elos — o limite é só o budget de 64 conceitos da variante
+  densa). Checks positivos: cadeias de 4/5/3 elos, Rmono via `SIPrimary ⊑
+  ReferenceStandard`, aresta composta no cubo de papéis. Checks negativos:
+  `ReferenceStandard` genérico NÃO é rastreável ao SI; `contributesUncertainty`
+  NÃO compõe para `traceableTo`. `souc check` OK; `souc run` → `ALL PASS`
+  (marcadores `//@ run-pass` / `//@ expect-stdout: ALL PASS`).
+
 ## Arquivos criados
 
 - `artifacts/ontology-frontiers/{epistemic-alignment-repair,epistemic-claim-status,consistent-ontology-evolution}/FRONTIER.md`
@@ -533,6 +558,8 @@ full-GO adicionado; o timeout default por arquivo subiu de 180 s para
 - `artifacts/ontology-frontiers/epistemic-alignment-repair/tie_repair_demo.sio` (rodada 5)
 - `examples/ontology_elplus_closure_demo.sio` (demo executável do fecho EL⁺
   completo — ver seção acima)
+- `examples/epistemic/traceability_elplus_demo.sio` (rodada 13 —
+  rastreabilidade metrológica VIM3 como composição de papéis EL+)
 - `stdlib/ontology/elplus.sio` (rodada 9 — fecho EL⁺ role-aware: variante
   densa + variante esparsa)
 - `artifacts/ontology-frontiers/real-data/scale/gen_elplus_data.py`
