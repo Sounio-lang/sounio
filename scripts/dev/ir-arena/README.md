@@ -88,16 +88,28 @@ constructs closing cleanly.
 
 Measured, not assumed:
 
-- **bss went up, not down.** 3,559,050,480 vs main's 3,418,213,544 — exactly
-  +140,836,936, which is the arena arrays + pools + region tables (140,836,864
-  computed). Dropping `[IrInstr; 4096]` from `IrFunction` moved bss by **zero**,
-  so `IrModule` does not live in bss and #1649's "doubling `IR_MAX_INSTRS` roughly
-  doubles bss" does not follow. Peak RSS on a small compile is 458 MB against
-  466 MB — parity.
+- **The memory win is real but it is NOT in bss.** bss went *up*:
+  3,559,050,480 vs main's 3,418,213,544, exactly +140,836,936 = the arena arrays
+  + pools + region tables (140,836,864 computed). Dropping `[IrInstr; 4096]`
+  moved bss by **zero**, so #1649's "doubling `IR_MAX_INSTRS` roughly doubles
+  bss" does not follow. The reduction is in **by-value / stack** storage: the
+  compiler's own diagnostic during the gate run reports `ir_empty_module`
+  returning **4,275,944 bytes**, against the ~2.08 GB that main's layout implies
+  (4096 × 248 × 2048, matching the figure in #1649/#1650). Peak RSS on a *small*
+  compile is 458 MB vs 466 MB — near parity, because the old inline array was
+  only ever faulted in on the pages actually touched.
 - **The 4096 cap still stands.** `IR_MAX_INSTRS: i64 = 4096` (`ir.sio:20`) is
   unchanged, so `knowledge_octonion_structure.sio` still fails with *needs 14389
   IR instructions* on **both** compilers. Storage is no longer the blocker — the
   arena holds 1,048,576 slots, 256× the cap — so raising it is a separate and now
   unblocked change.
+- **The arena's runtime contract is still unverified.**
+  `SOUNIO_IR_ARENA_SOUC=<compiler> bash scripts/ci/ir_instr_arena_gate.sh` FAILS
+  at `build_ir_instr_arena_witness`: the composed 9,670-line translation unit
+  does not compile, `rc=12` = `!compile_ok`
+  (`native/codegen_x86_linux.sio:10839`), a generic codegen failure rather than
+  an arena diagnostic. So a green self-compile is **not** evidence that the arena
+  stores and loads correctly, and per `BOOTSTRAP.md:22` the exit code lies. Get
+  the witnesses building before trusting any of this.
 
 Refs #1649, #1655.
