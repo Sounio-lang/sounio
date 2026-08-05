@@ -3212,7 +3212,7 @@ rests on is therefore no longer prose at any point.
 | `tr(B³) = 8·t3′` | ✅ PROVEN ∀n (`tri3_Asig_blow`, Tier 43) |
 | `3·tr(B²E) = 24·t2′` | ✅ **PROVEN ∀n, in exactly this form** — `trB2E_three` (Tier 51b), over `trB2E_eq` (Tier 51) |
 | `3·tr(BE²) = 0` | ✅ **PROVEN ∀n (`trBE2_zero`, Tier 50)** |
-| `tr(E³) = −24(h−2)` | **MEASURED — the only one left** |
+| `tr(E³) = −24(h−2)` | ✅ **PROVEN ∀n (`trE3`, Tier 53)** |
 
 **§18.1 is still not proven, so (III) is still reduced, not proven.** (d) and V1 untouched.
 
@@ -3387,3 +3387,67 @@ columns" — the matching partner, the coset partner, the two hubs, and `0` and 
 support is the first four; `0` and `W` are *excluded by the lemma* rather than covered by it, and are
 discharged directly inside `E2_hub`. The docstring originally said "exactly four nonzeros", which is
 true of the object but not of the theorem; fixed.
+
+---
+
+## §52 — `tr(E³) = −24(h−2)` (Tier 53): §34's LAST term, and §18.1's four summands are ALL theorems
+
+`trE3`, build green, no `sorry`, axioms `[propext, Classical.choice, Quot.sound]` (`sumLtI3_add`
+alone is choice-free).
+
+```lean
+theorem trE3 (W k : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0) :
+    Σ_{a,b,c < 2^(k+2)} Esig W k a b * (Esig W k b c * Esig W k c a)
+      = -24 * (((2^(k+1) : Nat) : Int) - 2)
+```
+
+### 52.1 — the classification is SHORTER than §51.5 predicted, and the prediction erred the other way
+
+§51.5 said the `0 hubs` half would be "§51.1's 4-cycle argument and needs `Esig_gen_supp` twice". It
+needs neither. A nonzero entry between two **generic** vertices forces **different blocks** — within
+a block `E` is either the diagonal or the within-block coset entry, both zero, which is a one-line
+corollary of `Esig_gen_gen` (`Esig_same_block`). So walking `a → b → c` flips the block **twice** and
+lands back in `a`'s block, whence `E(c,a) = 0`. **Two flips are the whole contradiction**; the
+4-cycle never has to be spelled out, and no low-index arithmetic appears.
+
+> This is the first prediction in this arc that erred on the side of **too hard**. §47 and §49.7 both
+> erred the other way — a property of the object read as a property of the proof. Worth noting that
+> the failure mode is not one-directional: what they share is that I recorded a guess about a proof I
+> had not attempted.
+
+`≥ 2` hubs is immediate: two hub indices among `a,b,c` are adjacent in the cycle, and hub–hub entries
+vanish. (The argument does need the vertices to avoid `0` and `W` as well — derived inside
+`tri_one_hub` from the null rows, not assumed.)
+
+### 52.2 — the chain
+
+```
+tr(E³) = Σ (χa+χb+χc)·T                        tri_one_hub
+       = 3 · Σ χa·T                             sumLtI3_add ×2, sumLtI3_cyc ×2
+       = 3 · (F(2^(k+1)) + F(W+2^(k+1)))        sumLtI_eq_at2 on the two hubs
+       = 3 · (−8(h−2)) = −24(h−2)               trE3_hub (Tier 52c)
+```
+
+The `24` is `3 × 8` and the `8` is `2 hubs × 4` — matching §51.4's `6 × 4` count from the other
+direction (`6` ordered terms per triangle × `4(h−2)` triangles).
+
+### 52.3 — denotation, measured against the CONTRACT
+
+The theorem's own sum over `[0,N)`, the contract's over `[1,N)`, and `tr(E³)` computed from the
+builder `A_sig_fast` all agree with `−24(h−2)` at `k = 1,2,3`, every label. `h = 2^(k+1)` because the
+Lean level `k+1` is the builder's level `n = k+3`; and `−12(2^(n−1)−4) = −24(h−2)`, so this is §34's
+constant in §34's own form.
+
+### 52.4 — §18.1's ledger is CLOSED
+
+| term | status |
+|---|---|
+| `tr(B³) = 8·t3′` | ✅ Tier 43 |
+| `3·tr(B²E) = 24·t2′` | ✅ Tiers 51 / 51b |
+| `3·tr(BE²) = 0` | ✅ Tier 50 |
+| `tr(E³) = −24(h−2)` | ✅ **Tier 53** |
+
+**All four summands of §34's expansion are now theorems ∀n.** What §18.1 still needs to be a theorem
+is the *expansion itself* — that `tr(A³) = tr(B³) + 3tr(B²E) + 3tr(BE²) + tr(E³)` for `A = B + E` at
+the level of the file's `sumLtI`, which is the multinomial expansion of a triple sum and has not been
+written. Everything it would multiply out into is proven. (III) is still reduced; (d) and V1 untouched.

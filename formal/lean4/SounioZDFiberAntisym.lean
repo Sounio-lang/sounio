@@ -11515,6 +11515,259 @@ theorem trE3_hub (W k H : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0) (hH : HubOf k 
   rw [sumLtI_congr _ _ _ key, sumLtI_mul, hub_deg W k H hW hW0 hH hHl hH0 hHW]
   omega
 
+
+/-! ### Tier 53 — `tr(E³) = −24(h−2)`: §34's LAST term
+
+    The classification is the whole content, and it is shorter than the measurement suggested.
+
+    **`≥ 2` hubs is impossible**: any two hub indices among `a, b, c` are adjacent in the cycle, and
+    hub–hub entries vanish (`resB_hub_hub`, Tier 38, plus the diagonal).
+
+    **`0` hubs is impossible**, and the reason needs no index arithmetic at all: a nonzero entry
+    between two GENERIC vertices forces DIFFERENT BLOCKS — within a block `E` is either the diagonal
+    or the within-block coset entry, both zero (`Esig_same_block`).  So walking `a → b → c` flips the
+    block twice and returns to `a`'s block, whence `E(c,a) = 0`.  **Two flips make a contradiction;
+    the 4-cycle structure of §51.1 never has to be spelled out.**
+
+    So every nonzero term has EXACTLY ONE hub, `sumLtI_add` splits the trace into three, `sumLtI3_cyc`
+    identifies them, and each is `trE3_hub(2^(k+1)) + trE3_hub(W + 2^(k+1)) = −8(h−2)`.  Total:
+    `3 × (−8(h−2)) = −24(h−2)` — the `24` is `3 × 8`, and the `8` is `2 hubs × 4`. -/
+
+/-! ## The classification: every nonzero term has exactly one hub -/
+
+/-- A nonzero generic-generic entry forces DIFFERENT blocks: within a block `E` vanishes
+    (diagonal, or the within-block coset entry). -/
+theorem Esig_same_block (W k a e b f : Nat) (he : e = 0 ∨ e = 1) (hf : f = 0 ∨ f = 1)
+    (ha : a < 2^(k+1)) (hb : b < 2^(k+1)) (hW : W < 2^(k+1))
+    (ha0 : a ≠ 0) (hb0 : b ≠ 0) (haW : a ≠ W) (hbW : b ≠ W) (hW0 : W ≠ 0) (hfe : f = e) :
+    Esig W k (a + e * 2^(k+1)) (b + f * 2^(k+1)) = 0 :=
+  Esig_gen_gen W k a e b f he hf ha hb hW ha0 hb0 haW hbW hW0 (fun hh => hh.2 hfe)
+
+theorem Esig_row0 (W k y : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0)
+    (hy : y < 2^(k+1) + 2^(k+1)) : Esig W k 0 y = 0 := by
+  have hp := Nat.two_pow_pos (k+1)
+  have hpow : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by rw [Nat.pow_succ]; omega
+  simp only [Esig, blow, Nat.zero_mod,
+    Asig_zero_row y W (k+1) (by omega) (by omega) hW0,
+    Asig_zero_row (y % 2^(k+1)) W k (Nat.mod_lt _ hp) hW hW0]
+  omega
+
+theorem Esig_rowW (W k y : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0)
+    (hy : y < 2^(k+1) + 2^(k+1)) : Esig W k W y = 0 := by
+  have hp := Nat.two_pow_pos (k+1)
+  have hpow : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by rw [Nat.pow_succ]; omega
+  have hWW : W ^^^ W = 0 := Nat.xor_self W
+  by_cases hy0 : y = 0
+  · rw [hy0]
+    simp only [Esig, blow, Nat.zero_mod, Nat.mod_eq_of_lt hW,
+      Asig_zero_col W W (k+1) (by omega) (by omega) hW0,
+      Asig_zero_col W W k hW hW hW0]
+    omega
+  by_cases hyW : y = W
+  · rw [hyW]
+    simp only [Esig, blow, Nat.mod_eq_of_lt hW,
+      Asig_isolated_diag W (k+1) (by omega) hW0, Asig_isolated_diag W k hW hW0]
+    omega
+  · simp only [Esig, blow, Nat.mod_eq_of_lt hW,
+      Asig_isolated_row y W (k+1) (by omega) (by omega) hy0 hW0
+        (fun e => hyW (xor_zero_eq _ _ e)),
+      isoW_row W k hW hW0 _ (Nat.mod_lt _ hp)]
+    omega
+
+theorem Esig_hubhub (W k x y : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0)
+    (hx : x = 2^(k+1) ∨ x = W + 2^(k+1)) (hy : y = 2^(k+1) ∨ y = W + 2^(k+1)) :
+    Esig W k x y = 0 := by
+  rcases hy with rfl | rfl
+  · exact (hubOf_hub0 W k hW hW0).hdead x hx
+  · exact (hubOf_hubL W k hW hW0).hdead x hx
+
+/-- A nonzero entry between two GENERIC vertices forces different halves. -/
+theorem Esig_diff_half (W k x y : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0)
+    (hx : x < 2^(k+1) + 2^(k+1)) (hy : y < 2^(k+1) + 2^(k+1))
+    (hx0 : x ≠ 0) (hxW : x ≠ W) (hxm : x ≠ 2^(k+1)) (hxWm : x ≠ W + 2^(k+1))
+    (hy0 : y ≠ 0) (hyW : y ≠ W) (hym : y ≠ 2^(k+1)) (hyWm : y ≠ W + 2^(k+1))
+    (h : Esig W k x y ≠ 0) :
+    (x < 2^(k+1) ∧ 2^(k+1) ≤ y) ∨ (2^(k+1) ≤ x ∧ y < 2^(k+1)) := by
+  have hp := Nat.two_pow_pos (k+1)
+  obtain ⟨x0, e, hx0lt, he, rfl⟩ :
+      ∃ x0 e, x0 < 2^(k+1) ∧ (e = 0 ∨ e = 1) ∧ x = x0 + e * 2^(k+1) := by
+    rcases Nat.lt_or_ge x (2^(k+1)) with hh | hh
+    · exact ⟨x, 0, hh, Or.inl rfl, by omega⟩
+    · exact ⟨x - 2^(k+1), 1, by omega, Or.inr rfl, by omega⟩
+  obtain ⟨y0, f, hy0lt, hf, rfl⟩ :
+      ∃ y0 f, y0 < 2^(k+1) ∧ (f = 0 ∨ f = 1) ∧ y = y0 + f * 2^(k+1) := by
+    rcases Nat.lt_or_ge y (2^(k+1)) with hh | hh
+    · exact ⟨y, 0, hh, Or.inl rfl, by omega⟩
+    · exact ⟨y - 2^(k+1), 1, by omega, Or.inr rfl, by omega⟩
+  have hx00 : x0 ≠ 0 := by rcases he with rfl | rfl <;> omega
+  have hx0W : x0 ≠ W := by rcases he with rfl | rfl <;> omega
+  have hy00 : y0 ≠ 0 := by rcases hf with rfl | rfl <;> omega
+  have hy0W : y0 ≠ W := by rcases hf with rfl | rfl <;> omega
+  have hfe : f ≠ e := by
+    intro ee
+    exact h (Esig_same_block W k x0 e y0 f he hf hx0lt hy0lt hW hx00 hy00 hx0W hy0W hW0 ee)
+  rcases he with rfl | rfl <;> rcases hf with rfl | rfl <;> simp_all <;> omega
+
+/-- **THE CLASSIFICATION: every nonzero term of `tr(E³)` has EXACTLY ONE hub index.**
+    `≥ 2` is hub–hub non-adjacency.  `0` is the block argument: a nonzero generic entry flips the
+    block, so two steps return to the starting block — and within a block `E` vanishes. -/
+theorem tri_one_hub (W k a b c : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0)
+    (ha : a < 2^(k+1) + 2^(k+1)) (hb : b < 2^(k+1) + 2^(k+1))
+    (hc : c < 2^(k+1) + 2^(k+1)) :
+    Esig W k a b * (Esig W k b c * Esig W k c a)
+      = ((if a = 2^(k+1) ∨ a = W + 2^(k+1) then (1:Int) else 0)
+        + (if b = 2^(k+1) ∨ b = W + 2^(k+1) then (1:Int) else 0)
+        + (if c = 2^(k+1) ∨ c = W + 2^(k+1) then (1:Int) else 0))
+        * (Esig W k a b * (Esig W k b c * Esig W k c a)) := by
+  by_cases hT : Esig W k a b * (Esig W k b c * Esig W k c a) = 0
+  · rw [hT]; omega
+  have hab : Esig W k a b ≠ 0 := fun e => hT (by rw [e, Int.zero_mul])
+  have hbc : Esig W k b c ≠ 0 := fun e => hT (by rw [e, Int.zero_mul, Int.mul_zero])
+  have hca : Esig W k c a ≠ 0 := fun e => hT (by rw [e, Int.mul_zero, Int.mul_zero])
+  -- the six "row is null" facts
+  have gen : ∀ x y, x < 2^(k+1)+2^(k+1) → y < 2^(k+1)+2^(k+1) → Esig W k x y ≠ 0 →
+      x ≠ 0 ∧ x ≠ W := by
+    intro x y hx hy hxy
+    constructor
+    · intro e; exact hxy (by rw [e]; exact Esig_row0 W k y hW hW0 hy)
+    · intro e; exact hxy (by rw [e]; exact Esig_rowW W k y hW hW0 hy)
+  obtain ⟨ha0, haW⟩ := gen a b ha hb hab
+  obtain ⟨hb0, hbW⟩ := gen b c hb hc hbc
+  obtain ⟨hc0, hcW⟩ := gen c a hc ha hca
+  -- AT MOST ONE hub
+  have nab : ¬((a = 2^(k+1) ∨ a = W + 2^(k+1)) ∧ (b = 2^(k+1) ∨ b = W + 2^(k+1))) :=
+    fun hh => hab (Esig_hubhub W k a b hW hW0 hh.1 hh.2)
+  have nbc : ¬((b = 2^(k+1) ∨ b = W + 2^(k+1)) ∧ (c = 2^(k+1) ∨ c = W + 2^(k+1))) :=
+    fun hh => hbc (Esig_hubhub W k b c hW hW0 hh.1 hh.2)
+  have nca : ¬((c = 2^(k+1) ∨ c = W + 2^(k+1)) ∧ (a = 2^(k+1) ∨ a = W + 2^(k+1))) :=
+    fun hh => hca (Esig_hubhub W k c a hW hW0 hh.1 hh.2)
+  -- AT LEAST ONE hub
+  have some : (a = 2^(k+1) ∨ a = W + 2^(k+1)) ∨ (b = 2^(k+1) ∨ b = W + 2^(k+1))
+      ∨ (c = 2^(k+1) ∨ c = W + 2^(k+1)) := by
+    by_cases hA : a = 2^(k+1) ∨ a = W + 2^(k+1)
+    · exact Or.inl hA
+    by_cases hB : b = 2^(k+1) ∨ b = W + 2^(k+1)
+    · exact Or.inr (Or.inl hB)
+    by_cases hC : c = 2^(k+1) ∨ c = W + 2^(k+1)
+    · exact Or.inr (Or.inr hC)
+    · exfalso
+      have d1 := Esig_diff_half W k a b hW hW0 ha hb ha0 haW
+        (fun e => hA (Or.inl e)) (fun e => hA (Or.inr e))
+        hb0 hbW (fun e => hB (Or.inl e)) (fun e => hB (Or.inr e)) hab
+      have d2 := Esig_diff_half W k b c hW hW0 hb hc hb0 hbW
+        (fun e => hB (Or.inl e)) (fun e => hB (Or.inr e))
+        hc0 hcW (fun e => hC (Or.inl e)) (fun e => hC (Or.inr e)) hbc
+      have d3 := Esig_diff_half W k c a hW hW0 hc ha hc0 hcW
+        (fun e => hC (Or.inl e)) (fun e => hC (Or.inr e))
+        ha0 haW (fun e => hA (Or.inl e)) (fun e => hA (Or.inr e)) hca
+      omega
+  -- exactly one: evaluate the three indicators
+  rcases some with hA | hB | hC
+  · rw [if_pos hA, if_neg (fun hh => nab ⟨hA, hh⟩), if_neg (fun hh => nca ⟨hh, hA⟩)]; omega
+  · rw [if_pos hB, if_neg (fun hh => nab ⟨hh, hB⟩), if_neg (fun hh => nbc ⟨hB, hh⟩)]; omega
+  · rw [if_pos hC, if_neg (fun hh => nca ⟨hC, hh⟩), if_neg (fun hh => nbc ⟨hh, hC⟩)]; omega
+
+theorem sumLtI3_add (N : Nat) (F G : Nat → Nat → Nat → Int) :
+    sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c => F a b c + G a b c)))
+      = sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c => F a b c)))
+      + sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c => G a b c))) := by
+  rw [sumLtI_congr N _
+        (fun a => sumLtI N (fun b => sumLtI N (fun c => F a b c))
+                + sumLtI N (fun b => sumLtI N (fun c => G a b c)))
+        (fun a _ => by
+          rw [sumLtI_congr N _
+                (fun b => sumLtI N (fun c => F a b c) + sumLtI N (fun c => G a b c))
+                (fun b _ => sumLtI_add N _ _),
+              sumLtI_add]),
+      sumLtI_add]
+
+noncomputable def chiHub (W k x : Nat) : Int :=
+  if x = 2^(k+1) ∨ x = W + 2^(k+1) then 1 else 0
+
+theorem tri_one_hub' (W k a b c : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0)
+    (ha : a < 2^(k+1) + 2^(k+1)) (hb : b < 2^(k+1) + 2^(k+1))
+    (hc : c < 2^(k+1) + 2^(k+1)) :
+    Esig W k a b * (Esig W k b c * Esig W k c a)
+      = (chiHub W k a + chiHub W k b + chiHub W k c)
+        * (Esig W k a b * (Esig W k b c * Esig W k c a)) := by
+  simp only [chiHub]
+  exact tri_one_hub W k a b c hW hW0 ha hb hc
+
+/-- **`tr(E³) = −24(h−2)`, ∀n.**  §34's last term. -/
+theorem trE3 (W k : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(k+1)+2^(k+1)) (fun a => sumLtI (2^(k+1)+2^(k+1)) (fun b =>
+      sumLtI (2^(k+1)+2^(k+1)) (fun c => Esig W k a b * (Esig W k b c * Esig W k c a))))
+      = -24 * (((2^(k+1) : Nat) : Int) - 2) := by
+  have hp := Nat.two_pow_pos (k+1)
+  have hpow : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by rw [Nat.pow_succ]; omega
+  -- Step 1/2: the classification splits the trace into three
+  rw [sumLtI_congr (2^(k+1)+2^(k+1)) _
+        (fun a => sumLtI (2^(k+1)+2^(k+1)) (fun b => sumLtI (2^(k+1)+2^(k+1)) (fun c =>
+          (chiHub W k a * (Esig W k a b * (Esig W k b c * Esig W k c a))
+           + chiHub W k b * (Esig W k a b * (Esig W k b c * Esig W k c a)))
+          + chiHub W k c * (Esig W k a b * (Esig W k b c * Esig W k c a)))))
+        (fun a ha => sumLtI_congr _ _ _ (fun b hb => sumLtI_congr _ _ _ (fun c hc => by
+          rw [← Int.add_mul, ← Int.add_mul]
+          exact tri_one_hub' W k a b c hW hW0 ha hb hc))),
+      sumLtI3_add (2^(k+1)+2^(k+1))
+        (fun a b c => chiHub W k a * (Esig W k a b * (Esig W k b c * Esig W k c a))
+                    + chiHub W k b * (Esig W k a b * (Esig W k b c * Esig W k c a)))
+        (fun a b c => chiHub W k c * (Esig W k a b * (Esig W k b c * Esig W k c a))),
+      sumLtI3_add (2^(k+1)+2^(k+1))
+        (fun a b c => chiHub W k a * (Esig W k a b * (Esig W k b c * Esig W k c a)))
+        (fun a b c => chiHub W k b * (Esig W k a b * (Esig W k b c * Esig W k c a)))]
+  -- Step 3: the three pieces are equal, by the cyclic rotation
+  have cyc1 : sumLtI (2^(k+1)+2^(k+1)) (fun a => sumLtI (2^(k+1)+2^(k+1)) (fun b =>
+        sumLtI (2^(k+1)+2^(k+1)) (fun c =>
+          chiHub W k b * (Esig W k a b * (Esig W k b c * Esig W k c a)))))
+      = sumLtI (2^(k+1)+2^(k+1)) (fun a => sumLtI (2^(k+1)+2^(k+1)) (fun b =>
+        sumLtI (2^(k+1)+2^(k+1)) (fun c =>
+          chiHub W k a * (Esig W k a b * (Esig W k b c * Esig W k c a))))) := by
+    rw [sumLtI3_cyc (2^(k+1)+2^(k+1))
+      (fun a b c => chiHub W k a * (Esig W k a b * (Esig W k b c * Esig W k c a)))]
+    exact (sumLtI_congr _ _ _ (fun a _ => sumLtI_congr _ _ _ (fun b _ =>
+      sumLtI_congr _ _ _ (fun c _ => by grind)))).symm
+  have cyc2 : sumLtI (2^(k+1)+2^(k+1)) (fun a => sumLtI (2^(k+1)+2^(k+1)) (fun b =>
+        sumLtI (2^(k+1)+2^(k+1)) (fun c =>
+          chiHub W k c * (Esig W k a b * (Esig W k b c * Esig W k c a)))))
+      = sumLtI (2^(k+1)+2^(k+1)) (fun a => sumLtI (2^(k+1)+2^(k+1)) (fun b =>
+        sumLtI (2^(k+1)+2^(k+1)) (fun c =>
+          chiHub W k b * (Esig W k a b * (Esig W k b c * Esig W k c a))))) := by
+    rw [sumLtI3_cyc (2^(k+1)+2^(k+1))
+      (fun a b c => chiHub W k b * (Esig W k a b * (Esig W k b c * Esig W k c a)))]
+    exact (sumLtI_congr _ _ _ (fun a _ => sumLtI_congr _ _ _ (fun b _ =>
+      sumLtI_congr _ _ _ (fun c _ => by grind)))).symm
+  -- Step 4/5: pull the indicator out and collapse onto the two hubs
+  have s4 : sumLtI (2^(k+1)+2^(k+1)) (fun a => sumLtI (2^(k+1)+2^(k+1)) (fun b =>
+        sumLtI (2^(k+1)+2^(k+1)) (fun c =>
+          chiHub W k a * (Esig W k a b * (Esig W k b c * Esig W k c a)))))
+      = -8 * (((2^(k+1) : Nat) : Int) - 2) := by
+    rw [sumLtI_congr (2^(k+1)+2^(k+1)) _
+          (fun a => chiHub W k a * sumLtI (2^(k+1)+2^(k+1)) (fun b =>
+            sumLtI (2^(k+1)+2^(k+1)) (fun c =>
+              Esig W k a b * (Esig W k b c * Esig W k c a))))
+          (fun a _ => by
+            rw [sumLtI_congr _ _ (fun b => chiHub W k a * sumLtI (2^(k+1)+2^(k+1)) (fun c =>
+                  Esig W k a b * (Esig W k b c * Esig W k c a)))
+                  (fun b _ => sumLtI_mul _ (chiHub W k a) _),
+                sumLtI_mul]),
+        sumLtI_eq_at2 (2^(k+1)+2^(k+1)) (2^(k+1)) (W + 2^(k+1)) _
+          (by omega) (by omega) (by omega)
+          (fun i _ h1 h2 => by
+            simp only [chiHub]
+            rw [if_neg (fun hh => hh.elim h1 h2)]
+            omega)]
+    have e1 : chiHub W k (2^(k+1)) = 1 := by simp [chiHub]
+    have e2 : chiHub W k (W + 2^(k+1)) = 1 := by simp [chiHub]
+    rw [e1, e2, Int.one_mul, Int.one_mul,
+        trE3_hub W k (2^(k+1)) hW hW0 (hubOf_hub0 W k hW hW0) (by omega) (by omega)
+          (by intro e; have := xor_zero_eq _ _ e; omega),
+        trE3_hub W k (W + 2^(k+1)) hW hW0 (hubOf_hubL W k hW hW0) (by omega) (by omega)
+          (by rw [shift_xorL k W W hW hW, Nat.xor_self]; omega)]
+    omega
+  rw [cyc2, cyc1, s4]
+  omega
+
 end SounioZDFiberAntisym
 
 
