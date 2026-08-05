@@ -1436,6 +1436,33 @@ pub fn ir_region_clone(src: &IrInstrRegion, out: &! IrInstrRegion) -> i64 with M
     IR_ARENA_OK
 }
 
+// #1649 Sweep 1. An IrFunction value copy USED to be a deep copy, because the
+// instructions were inline. With a region handle it is an ALIAS, and the
+// optimizer depends on the old semantics:
+//
+//     var result = func                    // was: full deep copy
+//     ...write through result...           // must NOT touch func
+//     if !changed { return func }          // early-outs return the pristine original
+//
+// Under a shared region those writes land in func's storage while result's
+// scalar fields (instr_count above all) stay separate, so the caller gets
+// shifted instructions with an unchanged count. Nothing about that is visible
+// to the type checker -- the copy site reads identically in both worlds.
+//
+// Fails CLOSED. If the region cannot be cloned the result carries an invalid
+// handle, so the first write is routed to quarantine and latches a violation,
+// rather than silently degrading into the alias this exists to prevent.
+pub fn ir_function_clone(src: &IrFunction) -> IrFunction with Mut, Panic, Div {
+    var out = *src
+    var r = ir_region_invalid()
+    if ir_region_clone(&(*src).region, &! r) != IR_ARENA_OK {
+        out.region = ir_region_invalid()
+        return out
+    }
+    out.region = r
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Mark / release
 // ---------------------------------------------------------------------------
