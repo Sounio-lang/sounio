@@ -9102,8 +9102,10 @@ theorem Ncnt_inj_g (m W1 W2 : Nat) (hW1 : W1 < 2^m) (hW2 : W2 < 2^m)
 For the label `L_lo = 2^n` the signed matrix is a COBOUNDARY up to sign: off the coset line,
 `A_σ(l,y) = − μ(l)·μ(y)` with `μ(a) = −1` exactly when `a` carries the label's bit. In signed-graph
 language (Zaslavsky, arXiv:1303.3083 §I.G) `μ` is a *switching function* and the statement is that
-`A_σ` is **antibalanced**; every triangle is then negative and `tr(A³) = −#triangles` follows in one
-line, which is the step §33.5(C) had measured.
+`A_σ` is **antibalanced**, so every triangle of it is negative. ⚠ The consequence
+`tr(A³) = −#triangles` is NOT proven here — it needs the triangle sum, which this file carries only
+for the blow-up term (Tier 43). What this tier gives is the ENTRY formula, not the count; §33.5(C)'s
+value remains un-formalised.
 
 The proof is four cases on which side of the bit `l` and `y` lie, through the four branch
 reductions `R_ll/R_lu/R_ul/R_uu`; the two mixed cases close by `antisym`, and `antisym` needs
@@ -9868,6 +9870,128 @@ theorem cosetSum_eq (Llo n : Nat) (hL : Llo < 2^(n+1)) :
           · rw [if_pos h, if_pos h, cosetRow_eq a Llo n ha hL h.1 h.2]
           · rw [if_neg h, if_neg h]; omega),
       sumLtI_mul]
+
+
+/-! ## Tier 43: the blow-up indexing, and the first of §34's three remaining sums
+
+§34's four terms are sums; Tier 42 carried one of them. This tier defines the indexing the other
+three live on — the 2-fold blow-up `blow m A x y = A (x % m) (y % m)`, which is §34's `J₂ ⊗ A′` —
+and carries the algebraic one:
+
+    tri3 (m + m) (blow m A) = 8 * tri3 m A
+
+i.e. `tr(B³) = 8·t3′`. The proof is the periodicity of `blow` in each argument, applied at the three
+nesting levels of the triple sum, against a new `sumLtI_double`; that in turn comes from
+`sumLtI_shift`, which splits a sum at an arbitrary point. No property of `Asig` is used — the factor
+`8 = 2³` is the blow-up's, and nothing else.
+
+**Not carried here:** `3·tr(B²E) = 24·t2′` and `tr(BE²) = 0`. Those are mixed sums over `E`'s four
+families, and they additionally need the cyclic collapse of the eight terms of `tr((B+E)³)`, i.e. a
+sum-exchange lemma this file does not have. -/
+
+/-- Split a sum at an arbitrary point. -/
+theorem sumLtI_shift (m : Nat) : ∀ (j : Nat) (f : Nat → Int),
+    sumLtI (m + j) f = sumLtI m f + sumLtI j (fun i => f (m + i)) := by
+  intro j
+  induction j with
+  | zero => intro f; show sumLtI m f = sumLtI m f + 0; omega
+  | succ j ih =>
+      intro f
+      show sumLtI ((m + j) + 1) f = _
+      rw [sumLtI, ih f]
+      show _ = sumLtI m f + (sumLtI j (fun i => f (m + i)) + f (m + j))
+      omega
+
+/-- A sum whose summand is periodic with period `m` doubles. -/
+theorem sumLtI_double (m : Nat) (g : Nat → Int) (hg : ∀ i, i < m → g (m + i) = g i) :
+    sumLtI (m + m) g = 2 * sumLtI m g := by
+  rw [sumLtI_shift m m g, sumLtI_congr m (fun i => g (m + i)) g hg]
+  omega
+
+/-- The signed triangle sum of a matrix presented as a function. -/
+def tri3 (N : Nat) (f : Nat → Nat → Int) : Int :=
+  sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c => f a b * (f b c * f c a))))
+
+section Blow
+variable (m : Nat) (A : Nat → Nat → Int)
+
+/-- The 2-fold blow-up: `x` and `x + m` carry the same row. -/
+def blow (x y : Nat) : Int := A (x % m) (y % m)
+
+private theorem blow_l (x y : Nat) : blow m A (m + x) y = blow m A x y := by
+  unfold blow; rw [Nat.add_mod_left]
+
+private theorem blow_r (x y : Nat) : blow m A x (m + y) = blow m A x y := by
+  unfold blow; rw [Nat.add_mod_left]
+
+/-- **`tr(B³) = 8·tr(A³)`** — the blow-up multiplies the triangle sum by `2³`. -/
+theorem tri3_blow : tri3 (m + m) (blow m A) = 8 * tri3 m (blow m A) := by
+  have inner : ∀ a b, sumLtI (m + m) (fun c => blow m A a b * (blow m A b c * blow m A c a))
+      = 2 * sumLtI m (fun c => blow m A a b * (blow m A b c * blow m A c a)) := by
+    intro a b
+    refine sumLtI_double m _ (fun c hc => ?_)
+    rw [blow_r m A b c, blow_l m A c a]
+  have mid : ∀ a, sumLtI (m + m) (fun b =>
+        sumLtI (m + m) (fun c => blow m A a b * (blow m A b c * blow m A c a)))
+      = 2 * (2 * sumLtI m (fun b =>
+          sumLtI m (fun c => blow m A a b * (blow m A b c * blow m A c a)))) := by
+    intro a
+    rw [sumLtI_congr (m + m) _ (fun b =>
+          2 * sumLtI m (fun c => blow m A a b * (blow m A b c * blow m A c a)))
+          (fun b _ => inner a b)]
+    have h2 : ∀ i, i < m →
+        (fun b => 2 * sumLtI m (fun c => blow m A a b * (blow m A b c * blow m A c a))) (m + i)
+        = (fun b => 2 * sumLtI m (fun c => blow m A a b * (blow m A b c * blow m A c a))) i := by
+      intro i hi
+      simp only
+      rw [sumLtI_congr m _ (fun c => blow m A a i * (blow m A i c * blow m A c a))
+            (fun c hc => by rw [blow_r m A a i, blow_l m A i c])]
+    rw [sumLtI_double m _ h2,
+        sumLtI_mul m 2 (fun b => sumLtI m (fun c =>
+          blow m A a b * (blow m A b c * blow m A c a)))]
+  unfold tri3
+  rw [sumLtI_congr (m + m) _ (fun a =>
+        2 * (2 * sumLtI m (fun b => sumLtI m (fun c =>
+          blow m A a b * (blow m A b c * blow m A c a))))) (fun a _ => mid a)]
+  have h3 : ∀ i, i < m →
+      (fun a => 2 * (2 * sumLtI m (fun b => sumLtI m (fun c =>
+        blow m A a b * (blow m A b c * blow m A c a))))) (m + i)
+      = (fun a => 2 * (2 * sumLtI m (fun b => sumLtI m (fun c =>
+        blow m A a b * (blow m A b c * blow m A c a))))) i := by
+    intro i hi
+    simp only
+    rw [sumLtI_congr m _ (fun b => sumLtI m (fun c =>
+          blow m A i b * (blow m A b c * blow m A c i)))
+          (fun b hb => by
+            rw [sumLtI_congr m _ (fun c => blow m A i b * (blow m A b c * blow m A c i))
+                  (fun c hc => by rw [blow_l m A i b, blow_r m A c i])])]
+  rw [sumLtI_double m _ h3,
+      sumLtI_mul m 2 (fun a => 2 * sumLtI m (fun b => sumLtI m (fun c =>
+        blow m A a b * (blow m A b c * blow m A c a)))),
+      sumLtI_mul m 2 (fun a => sumLtI m (fun b => sumLtI m (fun c =>
+        blow m A a b * (blow m A b c * blow m A c a))))]
+  omega
+
+/-- The blow-up agrees with `A` on the low range, so the count is `8·tr(A³)` outright. -/
+theorem tri3_blow' : tri3 (m + m) (blow m A) = 8 * tri3 m A := by
+  rw [tri3_blow m A]
+  congr 1
+  unfold tri3
+  refine sumLtI_congr m _ _ (fun a ha => sumLtI_congr m _ _ (fun b hb =>
+    sumLtI_congr m _ _ (fun c hc => ?_)))
+  unfold blow
+  rw [Nat.mod_eq_of_lt ha, Nat.mod_eq_of_lt hb, Nat.mod_eq_of_lt hc]
+
+end Blow
+
+/-- **`tr(B³) = 8·t3′` for the lane's matrix**: the level-`(k+1)` blow-up of `Asig · · W k` has
+    eight times its signed triangle sum. This is §34's first term, carried. -/
+theorem tri3_Asig_blow (W k : Nat) :
+    tri3 (2^(k+2)) (blow (2^(k+1)) (fun x y => Asig x y W k))
+      = 8 * tri3 (2^(k+1)) (fun x y => Asig x y W k) := by
+  have hp : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by rw [Nat.pow_succ]; omega
+  rw [hp]
+  exact tri3_blow' (2^(k+1)) (fun x y => Asig x y W k)
 
 
 end SounioZDFiberAntisym

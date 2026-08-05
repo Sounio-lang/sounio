@@ -1928,7 +1928,7 @@ Both sign functions are **constant** — measured over every low label at `n = 7
 
 | term | value | status |
 |---|---|---|
-| `tr(B³)` | `8·t3′` | **ALGEBRA**: `tr((J₂⊗A′)³) = tr(J₂³)·tr(A′³)` and `tr(J₂³) = 8` |
+| `tr(B³)` | `8·t3′` | ✅ **PROVEN ∀n as a SUM** — `tri3_Asig_blow` (Tier 43); axioms `[propext, Quot.sound]`, no `Classical.choice` |
 | `3·tr(B²E)` | `24·t2′` | **DERIVED** — see §34.3 |
 | `3·tr(BE²)` | `0` | MEASURED |
 | `tr(E³)` | `−24(h−2) = −12(2^(n−1)−4)` | MEASURED — **this is the constant** |
@@ -2940,8 +2940,14 @@ and each of §34's four terms now has a proven structural basis.
 summations.** Tier 42 carries `Σ_a (A²)[a, a⊕W] = −tr(A²)` all the way (`cosetSum_eq`), with the
 denotation cross-checked against the builder — a true theorem about the wrong sum would be worthless,
 so `degSum == tr(A²)` and `cosetSum == §34's S(W)` were verified at `n = 5…9` over all 491 labels.
-The other three terms — `tr(B³)`, `tr(B²E)`, `tr(BE²)` — are sums over the **blow-up indexing**,
-which this file does not define. Defining it and carrying them is the remaining step for §18.1: the
-same kind of work, at more volume, and with no new mathematical content in it.
+Tier 43 then **defines the blow-up indexing** (`blow m A x y = A (x % m) (y % m)`, which is §34's
+`J₂⊗A′`) and carries the algebraic term: `tri3 (m+m) (blow m A) = 8·tri3 m A`, with new
+`Finset`-free infrastructure (`sumLtI_shift`, `sumLtI_double`). No property of `A_σ` enters — the
+`8 = 2³` is the blow-up's, which is exactly why §34 called this term ALGEBRA.
+
+**Two of §34's four sums remain uncarried:** `3·tr(B²E) = 24·t2′` and `tr(BE²) = 0`. They are mixed
+sums over `E`'s families and additionally need the cyclic collapse of the eight terms of
+`tr((B+E)³)` — a sum-exchange lemma this file does not have. Every *structural* fact they would
+consume is now a theorem (Tiers 38–40); what is missing is the assembly.
 
 **§18.1 is not yet proven, so (III) is still reduced, not proven.** (d) and V1 untouched.
