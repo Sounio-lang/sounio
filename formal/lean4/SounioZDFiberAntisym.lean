@@ -10265,52 +10265,70 @@ private theorem yr_selfxor {a W : Nat} (hW0 : W ≠ 0) : a ≠ a ^^^ W := by
     ("this `sumLtI` IS `t3'`") needs the index `0` to carry no weight.  It does not: the
     resonance predicate FAILS at `l = 0` for every column. -/
 
-theorem resB_zero_row (y Llo n : Nat) (hy : y < 2^(n+1)) (hL : Llo < 2^(n+1)) (hL0 : Llo ≠ 0) :
-    resB 0 y Llo n = false := by
-  have hp := Nat.two_pow_pos (n+1)
+/-- For `y ≠ 0` the two orders of `P1` at the index `0` DISAGREE.  That one fact kills the ROW and
+    the COLUMN at once: it is the FIRST clause of `resB`, and that clause is the same proposition
+    read in either order. -/
+private theorem p1_zero_ne (y Llo n : Nat) (hy : y < 2^(n+1)) (hL : Llo < 2^(n+1))
+    (hL0 : Llo ≠ 0) (hy0 : y ≠ 0) : P1 0 y Llo n ≠ P1 y 0 Llo n := by
   have hyL : y ^^^ Llo < 2^(n+1) := xorlt hy hL
   have h0L : (0:Nat) ^^^ Llo = Llo := by rw [Nat.zero_xor]
-  -- P1 0 y and P1 y 0, both through the upper-upper branch
   have e1 : P1 0 y Llo n = (if y ^^^ Llo = 0 then -1 else cdSigma (y ^^^ Llo) Llo (n+1)) := by
     unfold P1 hi
     rw [h0L, cdSig0, R_uu Llo (y ^^^ Llo) n hL hyL, Int.one_mul]
-  have e2 : P1 y 0 Llo n = (if Llo = 0 then -1 else cdSigma Llo (y ^^^ Llo) (n+1)) := by
+  have e2 : P1 y 0 Llo n = cdSigma Llo (y ^^^ Llo) (n+1) := by
     unfold P1 hi
-    rw [h0L, cdSig0', R_uu (y ^^^ Llo) Llo n hyL hL, Int.one_mul]
-  rw [if_neg hL0] at e2
+    rw [h0L, cdSig0', R_uu (y ^^^ Llo) Llo n hyL hL, Int.one_mul, if_neg hL0]
+  by_cases hyx : y ^^^ Llo = 0
+  · -- the excluded column `y = L_lo`
+    rw [e1, if_pos hyx, e2, hyx, cdSig0']
+    decide
+  · -- generic: the two orders are negatives of each other
+    have hne : y ^^^ Llo ≠ Llo := by
+      intro e
+      exact hy0 (by have := congrArg (· ^^^ Llo) e; rwa [xor_cancel, Nat.xor_self] at this)
+    rw [e1, if_neg hyx, e2,
+        antisym (n+1) Llo (y ^^^ Llo) hL hyL hL0 hyx (fun e => hne e.symm)]
+    rcases cdSigma_pm (n+1) (y ^^^ Llo) Llo with h | h <;> rw [h] <;> decide
+
+/-- At the corner `(0,0)` the first two clauses of `resB` hold trivially, so the third does the
+    work: `P1 = -1` but `P3 = 1`. -/
+private theorem resB_zero_diag (Llo n : Nat) (hL : Llo < 2^(n+1)) (hL0 : Llo ≠ 0) :
+    resB 0 0 Llo n = false := by
+  have hp := Nat.two_pow_pos (n+1)
+  have h0L : (0:Nat) ^^^ Llo = Llo := by rw [Nat.zero_xor]
+  have hP1 : P1 0 0 Llo n = -1 := by
+    unfold P1 hi
+    rw [h0L, cdSig0, R_uu Llo Llo n hL hL, if_neg hL0, sigma_self (n+1) Llo hL hL0, Int.one_mul]
+  have hP3 : P3 0 0 Llo n = 1 := by
+    unfold P3 hi
+    rw [h0L, cdSig0, R_ul Llo 0 n hL hp, if_pos rfl, Int.one_mul]
+  unfold resB
+  rw [hP1, hP3]
+  simp
+
+theorem resB_zero_row (y Llo n : Nat) (hy : y < 2^(n+1)) (hL : Llo < 2^(n+1)) (hL0 : Llo ≠ 0) :
+    resB 0 y Llo n = false := by
   by_cases hy0 : y = 0
-  · -- diagonal at 0: P1 = -1, P3 = 1
-    subst hy0
-    have hP1 : P1 0 0 Llo n = -1 := by
-      rw [e1, Nat.zero_xor, if_neg hL0, sigma_self (n+1) Llo hL hL0]
-    have hP3 : P3 0 0 Llo n = 1 := by
-      unfold P3 hi
-      rw [h0L, cdSig0, R_ul Llo 0 n hL hp, if_pos rfl, Int.one_mul]
-    unfold resB
-    rw [hP1, hP3]
-    simp
-  · by_cases hyx : y ^^^ Llo = 0
-    · -- the excluded column y = Llo
-      have hP1a : P1 0 y Llo n = -1 := by rw [e1, if_pos hyx]
-      have hP1b : P1 y 0 Llo n = 1 := by
-        rw [e2, hyx, cdSig0']
-      unfold resB
-      rw [hP1a, hP1b]
-      simp
-    · -- generic column: P1 0 y = - P1 y 0 by the antisymmetry of cdSigma
-      have hne : y ^^^ Llo ≠ Llo := by
-        intro e
-        exact hy0 (by have := congrArg (· ^^^ Llo) e; rwa [xor_cancel, Nat.xor_self] at this)
-      have hP1a : P1 0 y Llo n = cdSigma (y ^^^ Llo) Llo (n+1) := by rw [e1, if_neg hyx]
-      have hP1b : P1 y 0 Llo n = - cdSigma (y ^^^ Llo) Llo (n+1) := by
-        rw [e2, antisym (n+1) Llo (y ^^^ Llo) hL hyL hL0 hyx (fun e => hne e.symm)]
-      unfold resB
-      rw [hP1a, hP1b]
-      rcases cdSigma_pm (n+1) (y ^^^ Llo) Llo with h | h <;> rw [h] <;> simp
+  · subst hy0; exact resB_zero_diag Llo n hL hL0
+  · unfold resB
+    simp [p1_zero_ne y Llo n hy hL hL0 hy0]
+
+theorem resB_zero_col (x Llo n : Nat) (hx : x < 2^(n+1)) (hL : Llo < 2^(n+1)) (hL0 : Llo ≠ 0) :
+    resB x 0 Llo n = false := by
+  by_cases hx0 : x = 0
+  · subst hx0; exact resB_zero_diag Llo n hL hL0
+  · unfold resB
+    simp [(p1_zero_ne x Llo n hx hL hL0 hx0).symm]
 
 theorem Asig_zero_row (y Llo n : Nat) (hy : y < 2^(n+1)) (hL : Llo < 2^(n+1)) (hL0 : Llo ≠ 0) :
     Asig 0 y Llo n = 0 :=
   asig_zero_of (resB_zero_row y Llo n hy hL hL0)
+
+/-- The COLUMN too.  `Asig_symm` cannot supply this — it requires both indices nonzero, which is
+    exactly what fails here — so it is proved from the same `P1` disagreement. -/
+theorem Asig_zero_col (x Llo n : Nat) (hx : x < 2^(n+1)) (hL : Llo < 2^(n+1)) (hL0 : Llo ≠ 0) :
+    Asig x 0 Llo n = 0 :=
+  asig_zero_of (resB_zero_col x Llo n hx hL hL0)
 
 /-! ## (B) The collapsed row.
 
@@ -10403,6 +10421,312 @@ theorem yrow_gen (k b d a W : Nat) (hb : b < 2^(k+1)) (ha : a < 2^(k+1)) (hW : W
           simpa using this
         simp only [yrow, Nat.one_mul, e1, e2, if_neg hab, if_neg hcs]
         omega
+
+
+/-! ## Tier 50 — THE ASSEMBLY: `tr(B E²) = 0`, proven ∀n
+
+    §34's third summand.  §47 filed it as needing "an argument of a kind this file has not yet had
+    to make", on the grounds that `E`'s hub rows are dense; §49 withdrew that (the dense rows are
+    killed on BOTH sides by `B`, so they can only ever be the MIDDLE index).  This tier carries the
+    argument out.
+
+    The shape is: cyclic-rotate so the free vertex `w` is outermost, collapse the two `B`-indices
+    onto the low half (that is what `B = J₂⊗A′` is FOR), and observe that the resulting quadratic
+    form on the level-`k` index has a summand that is IDENTICALLY zero — no two-point collapse, no
+    cancellation between distinct terms.  For each `w` the collapsed row of `E` is supported in
+    `{p, q, 0, W}`, `A′` is null on the rows and columns `0` and `W`, and `A′` is zero on all four
+    `{p,q}²` entries (diagonal by `Asig_diag`, off-diagonal by `resB_coset`).
+
+    `Asig_isolated_diag` is the one genuinely new pointwise input: `Asig_isolated`/`_row` both
+    exclude the corner `(L_lo, L_lo)`, and the assembly needs the isolated row to be zero there
+    too. -/
+
+/-- The corner of the isolated vertex.  `Asig_isolated` and `Asig_isolated_row` both require
+    `l ⊕ L_lo ≠ 0`, so neither reaches `l = y = L_lo`; there `P1 = 1` but `P3 = -1`. -/
+theorem Asig_isolated_diag (Llo n : Nat) (hL : Llo < 2^(n+1)) (hL0 : Llo ≠ 0) :
+    Asig Llo Llo Llo n = 0 := by
+  have hp := Nat.two_pow_pos (n+1)
+  have hLl : Llo < 2^(n+2) := by
+    have : (2:Nat)^(n+2) = 2^(n+1) + 2^(n+1) := by rw [Nat.pow_succ]; omega
+    omega
+  have hxs : Llo ^^^ Llo = 0 := Nat.xor_self Llo
+  have hP1 : P1 Llo Llo Llo n = 1 := by
+    unfold P1 hi
+    rw [hxs, sigma_self (n+2) Llo hLl hL0, R_uu 0 0 n hp hp, if_pos rfl]
+    decide
+  have hP3 : P3 Llo Llo Llo n = -1 := by
+    unfold P3 hi
+    rw [hxs, R_lu Llo 0 n hL hp, cdSig0, R_ul 0 Llo n hp hL, if_neg hL0, cdSig0]
+    decide
+  unfold Asig resB
+  rw [hP1, hP3]
+  simp
+
+/-- Right multiplication by a constant pulls out of a sum. -/
+theorem sumLtI_mul_r (n : Nat) (f : Nat → Int) (c : Int) :
+    sumLtI n (fun i => f i * c) = sumLtI n f * c := by
+  induction n with
+  | zero => show (0:Int) = 0 * c; omega
+  | succ n ih => rw [sumLtI, sumLtI, ih, Int.add_mul]
+
+/-! ## The two collapses -/
+
+theorem blowsum_r (m : Nat) (A : Nat → Nat → Int) (b : Nat) (Q : Nat → Int) :
+    sumLtI (m + m) (fun c => blow m A b c * Q c)
+      = sumLtI m (fun c => blow m A b c * (Q c + Q (m + c))) := by
+  rw [sumLtI_shift m m (fun c => blow m A b c * Q c),
+      sumLtI_congr m (fun i => blow m A b (m + i) * Q (m + i))
+        (fun i => blow m A b i * Q (m + i)) (fun i _ => by rw [blow_r]),
+      ← sumLtI_add m (fun c => blow m A b c * Q c) (fun c => blow m A b c * Q (m + c))]
+  exact sumLtI_congr m _ _ (fun c _ => (Int.mul_add _ _ _).symm)
+
+theorem sumLtI_shift_inv (m : Nat) (P : Nat → Int) (S : Nat → Int)
+    (hS : ∀ b, S (m + b) = S b) :
+    sumLtI (m + m) (fun b => S b * P b) = sumLtI m (fun b => S b * (P b + P (m + b))) := by
+  rw [sumLtI_shift m m (fun b => S b * P b),
+      sumLtI_congr m (fun i => S (m + i) * P (m + i)) (fun i => S i * P (m + i))
+        (fun i _ => by rw [hS]),
+      ← sumLtI_add m (fun b => S b * P b) (fun b => S b * P (m + b))]
+  exact sumLtI_congr m _ _ (fun b _ => (Int.mul_add _ _ _).symm)
+
+/-! ## The quadratic form vanishes TERMWISE
+
+    No two-point collapse is needed: with `A` null on two indices `z`, `w`, both collapsed vectors
+    supported in `{p,q,z,w}`, and `A` zero on the four `{p,q}²` entries, EVERY summand is zero. -/
+
+theorem quad_vanish (m : Nat) (A : Nat → Nat → Int) (Y Z : Nat → Int) (z w p q : Nat)
+    (hz : ∀ i, i < m → A z i = 0) (hz' : ∀ i, i < m → A i z = 0)
+    (hw : ∀ i, i < m → A w i = 0) (hw' : ∀ i, i < m → A i w = 0)
+    (hY : ∀ i, i < m → i ≠ p → i ≠ q → i ≠ z → i ≠ w → Y i = 0)
+    (hZ : ∀ i, i < m → i ≠ p → i ≠ q → i ≠ z → i ≠ w → Z i = 0)
+    (hpp : A p p = 0) (hpq : A p q = 0) (hqp : A q p = 0) (hqq : A q q = 0) :
+    sumLtI m (fun b => sumLtI m (fun c => A b c * (Y c * Z b))) = 0 := by
+  have key : ∀ b c, b < m → c < m → A b c * (Y c * Z b) = 0 := by
+    intro b c hb hc
+    by_cases hbz : b = z
+    · rw [hbz, hz c hc]; omega
+    by_cases hbw : b = w
+    · rw [hbw, hw c hc]; omega
+    by_cases hcz : c = z
+    · rw [hcz, hz' b hb]; omega
+    by_cases hcw : c = w
+    · rw [hcw, hw' b hb]; omega
+    by_cases hbp : b = p
+    · by_cases hcp : c = p
+      · rw [hbp, hcp, hpp]; omega
+      by_cases hcq : c = q
+      · rw [hbp, hcq, hpq]; omega
+      · rw [hY c hc hcp hcq hcz hcw]; omega
+    by_cases hbq : b = q
+    · by_cases hcp : c = p
+      · rw [hbq, hcp, hqp]; omega
+      by_cases hcq : c = q
+      · rw [hbq, hcq, hqq]; omega
+      · rw [hY c hc hcp hcq hcz hcw]; omega
+    · rw [hZ b hb hbp hbq hbz hbw]; omega
+  rw [sumLtI_congr m _ (fun _ => 0) (fun b hb =>
+        (sumLtI_congr m _ (fun _ => 0) (fun c hc => key b c hb hc)).trans (sumLtI_zero m)),
+      sumLtI_zero]
+
+/-- Symmetry of `A_σ` on the FULL index range `[0, 2^(n+1))`, boundary included.  `Asig_symm`
+    itself excludes `0` and `L_lo`; there both entries are zero, so symmetry still holds. -/
+theorem Asig_symm_full (l y Llo n : Nat) (hl : l < 2^(n+1)) (hy : y < 2^(n+1))
+    (hL : Llo < 2^(n+1)) (hL0 : Llo ≠ 0) : Asig l y Llo n = Asig y l Llo n := by
+  by_cases hl0 : l = 0
+  · rw [hl0, Asig_zero_row y Llo n hy hL hL0, Asig_zero_col y Llo n hy hL hL0]
+  by_cases hy0 : y = 0
+  · rw [hy0, Asig_zero_col l Llo n hl hL hL0, Asig_zero_row l Llo n hl hL hL0]
+  by_cases hlL : l ^^^ Llo = 0
+  · have hlq : l = Llo := xor_zero_eq _ _ hlL
+    by_cases hyL : y ^^^ Llo = 0
+    · rw [hlq, xor_zero_eq _ _ hyL]
+    · rw [hlq, Asig_isolated_row y Llo n hy hL hy0 hL0 hyL,
+          Asig_isolated y Llo n hy hL hy0 hL0 hyL]
+  by_cases hyL : y ^^^ Llo = 0
+  · have hyq : y = Llo := xor_zero_eq _ _ hyL
+    rw [hyq, Asig_isolated l Llo n hl hL hl0 hL0 hlL,
+        Asig_isolated_row l Llo n hl hL hl0 hL0 hlL]
+  · exact Asig_symm l y Llo n hl hy hL hl0 hy0 hlL hyL
+
+theorem Esig_symm (W k x y : Nat) (hx : x < 2^(k+2)) (hy : y < 2^(k+2)) (hW : W < 2^(k+1))
+    (hW0 : W ≠ 0) : Esig W k x y = Esig W k y x := by
+  have hp := Nat.two_pow_pos (k+1)
+  have hWl : W < 2^(k+2) := by
+    have : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by rw [Nat.pow_succ]; omega
+    omega
+  unfold Esig blow
+  simp only []
+  rw [Asig_symm_full x y W (k+1) hx hy hWl hW0,
+      Asig_symm_full (x % 2^(k+1)) (y % 2^(k+1)) W k (Nat.mod_lt _ hp) (Nat.mod_lt _ hp) hW hW0]
+
+/-- **For every middle vertex `w`, the collapsed row of `E` is supported in `{p, q, 0, W}`,
+    and `A′` is zero on all four `{p,q}²` entries.**  Those are exactly `quad_vanish`'s
+    hypotheses. -/
+theorem yr_support (W k w : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0)
+    (hw : w < 2^(k+1) + 2^(k+1)) :
+    ∃ p q, Asig p q W k = 0 ∧ Asig q p W k = 0 ∧ Asig p p W k = 0 ∧ Asig q q W k = 0 ∧
+      (∀ i, i < 2^(k+1) → i ≠ p → i ≠ q → i ≠ 0 → i ≠ W →
+        Esig W k w i + Esig W k w (2^(k+1) + i) = 0) := by
+  have hp := Nat.two_pow_pos (k+1)
+  have hpow : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by rw [Nat.pow_succ]; omega
+  have hWl : W < 2^(k+2) := by omega
+  have hz : Asig 0 0 W k = 0 := Asig_zero_row 0 W k hp hW hW0
+  -- b0 = w % 2^(k+1), d = 0 or 1
+  obtain ⟨b0, d, hb0, hd, rfl⟩ : ∃ b0 d, b0 < 2^(k+1) ∧ (d = 0 ∨ d = 1) ∧ w = b0 + d * 2^(k+1) := by
+    rcases Nat.lt_or_ge w (2^(k+1)) with h | h
+    · exact ⟨w, 0, h, Or.inl rfl, by omega⟩
+    · exact ⟨w - 2^(k+1), 1, by omega, Or.inr rfl, by omega⟩
+  have hbl : b0 + d * 2^(k+1) < 2^(k+2) := by rcases hd with rfl | rfl <;> omega
+  by_cases hb00 : b0 = 0
+  · -- w = 0 or w = 2^(k+1)
+    refine ⟨0, 0, hz, hz, hz, hz, fun i hi _ _ hi0 hiW => ?_⟩
+    have hil : i < 2^(k+2) := by omega
+    have hiW' : i ^^^ W ≠ 0 := fun e => hiW (xor_zero_eq _ _ e)
+    have hmi : 2^(k+1) + i = i + 2^(k+1) := by omega
+    have hmod : (2^(k+1) + i) % 2^(k+1) = i := by
+      rw [Nat.add_mod_left]; exact Nat.mod_eq_of_lt hi
+    unfold Esig blow
+    simp only [hb00, Nat.zero_add, hmod, Nat.mod_eq_of_lt hi]
+    rcases hd with rfl | rfl
+    · -- w = 0 : both rows are the zero row
+      simp only [Nat.zero_mul, Nat.add_zero, Nat.zero_mod]
+      rw [Asig_zero_row i W (k+1) hil hWl hW0, Asig_zero_row i W k hi hW hW0,
+          Asig_zero_row (2^(k+1) + i) W (k+1) (by omega) hWl hW0]
+      omega
+    · -- w = 2^(k+1) : the hub relation
+      simp only [Nat.one_mul, Nat.zero_add, Nat.mod_self]
+      rw [Asig_zero_row i W k hi hW hW0, hmi,
+          Asig_hub0 k i W hi hW hi0 hW0 (fun e => hiW e)]
+      omega
+  · by_cases hb0W : b0 = W
+    · -- w = W or w = W + 2^(k+1)
+      refine ⟨0, 0, hz, hz, hz, hz, fun i hi _ _ hi0 hiW => ?_⟩
+      have hil : i < 2^(k+2) := by omega
+      have hiW' : i ^^^ W ≠ 0 := fun e => hiW (xor_zero_eq _ _ e)
+      have hmi : 2^(k+1) + i = i + 2^(k+1) := by omega
+      have hmod : (2^(k+1) + i) % 2^(k+1) = i := by
+        rw [Nat.add_mod_left]; exact Nat.mod_eq_of_lt hi
+      have hshx : (i + 2^(k+1)) ^^^ W = (i ^^^ W) + 2^(k+1) := shift_xorL k i W hi hW
+      unfold Esig blow
+      simp only [hb0W, hmod, Nat.mod_eq_of_lt hi]
+      rcases hd with rfl | rfl
+      · -- w = W : the isolated row at BOTH levels
+        simp only [Nat.zero_mul, Nat.add_zero, Nat.mod_eq_of_lt hW]
+        rw [Asig_isolated_row i W (k+1) hil hWl hi0 hW0 hiW',
+            Asig_isolated_row i W k hi hW hi0 hW0 hiW', hmi,
+            Asig_isolated_row (i + 2^(k+1)) W (k+1) (by omega) hWl (by omega) hW0
+              (by rw [hshx]; omega)]
+        omega
+      · -- w = W + 2^(k+1) : the other hub relation
+        simp only [Nat.one_mul, Nat.add_mod_right, Nat.mod_eq_of_lt hW]
+        rw [Asig_isolated_row i W k hi hW hi0 hW0 hiW', hmi,
+            Asig_hubL k i W hi hW hi0 hW0 (fun e => hiW e)]
+        omega
+    · -- generic: p = b0, q = b0 ⊕ W
+      have hbW' : b0 ^^^ W ≠ 0 := fun e => hb0W (xor_zero_eq _ _ e)
+      have hbWlt : b0 ^^^ W < 2^(k+1) := xorlt hb0 hW
+      have hqW : (b0 ^^^ W) ^^^ W ≠ 0 := by rw [xor_cancel]; exact hb00
+      refine ⟨b0, b0 ^^^ W,
+        asig_zero_of (resB_coset b0 W k hb0 hW hb00 hbW'),
+        (by have := asig_zero_of (resB_coset (b0 ^^^ W) W k hbWlt hW hbW' hqW); rwa [xor_cancel] at this),
+        Asig_diag b0 W k hb0 hW hb00 hbW',
+        Asig_diag (b0 ^^^ W) W k hbWlt hW hbW' hqW,
+        fun i hi hip hiq hi0 hiW => ?_⟩
+      have hmod : (2^(k+1) + i) % 2^(k+1) = i := by
+        rw [Nat.add_mod_left]; exact Nat.mod_eq_of_lt hi
+      have hbmod : (b0 + d * 2^(k+1)) % 2^(k+1) = b0 := by
+        rcases hd with rfl | rfl
+        · simpa using Nat.mod_eq_of_lt hb0
+        · rw [Nat.one_mul, Nat.add_mod_right]; exact Nat.mod_eq_of_lt hb0
+      have hgen := yrow_gen k b0 d i W hb0 hi hW hb00 hi0 hW0 hb0W hiW hd
+      rw [if_neg (fun e => hip e), if_neg (fun e => hiq e)] at hgen
+      unfold yrow at hgen   -- the file states `yrow_gen` about the DEFINED `yrow`; omega needs
+                            -- the three `Asig` atoms, not one opaque `yrow` atom
+      have hcomm : 2^(k+1) + i = i + 2^(k+1) := by omega
+      have hmod2 : (i + 2^(k+1)) % 2^(k+1) = i := by
+        rw [Nat.add_mod_right]; exact Nat.mod_eq_of_lt hi
+      unfold Esig blow
+      rw [hbmod, Nat.mod_eq_of_lt hi, hcomm, hmod2]
+      simp only []          -- beta-reduce `blow`'s matrix argument, else `omega` sees two atoms
+      omega
+
+
+/-! ## THE ASSEMBLY -/
+
+theorem trBE2_zero (W k : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(k+1) + 2^(k+1)) (fun a => sumLtI (2^(k+1) + 2^(k+1)) (fun b =>
+      sumLtI (2^(k+1) + 2^(k+1)) (fun c =>
+        blow (2^(k+1)) (fun u v => Asig u v W k) a b
+          * (Esig W k b c * Esig W k c a)))) = 0 := by
+  have hp := Nat.two_pow_pos (k+1)
+  have hpow : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by rw [Nat.pow_succ]; omega
+  -- the isolated row and column of `A'`, on the whole low range
+  have hWrow : ∀ i, i < 2^(k+1) → Asig W i W k = 0 := by
+    intro i hi
+    by_cases hi0 : i = 0
+    · rw [hi0]; exact Asig_zero_col W W k hW hW hW0
+    by_cases hiW : i = W
+    · rw [hiW]; exact Asig_isolated_diag W k hW hW0
+    · exact Asig_isolated_row i W k hi hW hi0 hW0 (fun e => hiW (xor_zero_eq _ _ e))
+  have hWcol : ∀ i, i < 2^(k+1) → Asig i W W k = 0 := by
+    intro i hi
+    by_cases hi0 : i = 0
+    · rw [hi0]; exact Asig_zero_row W W k hW hW hW0
+    by_cases hiW : i = W
+    · rw [hiW]; exact Asig_isolated_diag W k hW hW0
+    · exact Asig_isolated i W k hi hW hi0 hW0 (fun e => hiW (xor_zero_eq _ _ e))
+  -- Step 1: cyclic rotation puts the FREE (middle) vertex outermost
+  rw [sumLtI3_cyc (2^(k+1) + 2^(k+1))
+        (fun a b c => blow (2^(k+1)) (fun u v => Asig u v W k) a b
+          * (Esig W k b c * Esig W k c a))]
+  refine (sumLtI_congr (2^(k+1) + 2^(k+1)) _ (fun _ => 0) (fun w hw => ?_)).trans
+    (sumLtI_zero (2^(k+1) + 2^(k+1)))
+  obtain ⟨p, q, hpq, hqp, hpp, hqq, hsupp⟩ := yr_support W k w hW hW0 hw
+  have hwl : w < 2^(k+2) := by omega
+  -- Step 2: both `E` factors get `w` in the FIRST slot (E is symmetric)
+  rw [sumLtI_congr (2^(k+1) + 2^(k+1)) _
+        (fun b => sumLtI (2^(k+1) + 2^(k+1)) (fun c =>
+          blow (2^(k+1)) (fun u v => Asig u v W k) b c * (Esig W k w c * Esig W k w b)))
+        (fun b _ => sumLtI_congr (2^(k+1) + 2^(k+1)) _ _ (fun c hc => by
+          rw [Esig_symm W k c w (by omega) hwl hW hW0]))]
+  -- Step 3: collapse the inner (`c`) index onto the low half
+  have hc1 : ∀ b, sumLtI (2^(k+1) + 2^(k+1)) (fun c =>
+        blow (2^(k+1)) (fun u v => Asig u v W k) b c * (Esig W k w c * Esig W k w b))
+      = sumLtI (2^(k+1)) (fun c => blow (2^(k+1)) (fun u v => Asig u v W k) b c
+          * (Esig W k w c + Esig W k w (2^(k+1) + c))) * Esig W k w b := by
+    intro b
+    rw [sumLtI_congr (2^(k+1) + 2^(k+1)) _
+          (fun c => (blow (2^(k+1)) (fun u v => Asig u v W k) b c * Esig W k w c) * Esig W k w b)
+          (fun c _ => (Int.mul_assoc _ _ _).symm),
+        sumLtI_mul_r (2^(k+1) + 2^(k+1))
+          (fun c => blow (2^(k+1)) (fun u v => Asig u v W k) b c * Esig W k w c) (Esig W k w b),
+        blowsum_r (2^(k+1)) (fun u v => Asig u v W k) b (fun c => Esig W k w c)]
+  rw [sumLtI_congr (2^(k+1) + 2^(k+1)) _ _ (fun b _ => hc1 b)]
+  -- Step 4: collapse the outer (`b`) index
+  rw [sumLtI_shift_inv (2^(k+1)) (fun b => Esig W k w b)
+        (fun b => sumLtI (2^(k+1)) (fun c => blow (2^(k+1)) (fun u v => Asig u v W k) b c
+          * (Esig W k w c + Esig W k w (2^(k+1) + c))))
+        (fun b => sumLtI_congr (2^(k+1)) _ _ (fun c _ => by rw [blow_l]))]
+  -- Step 5: ONE quadratic form on the collapsed index
+  rw [sumLtI_congr (2^(k+1)) _
+        (fun b => sumLtI (2^(k+1)) (fun c => Asig b c W k *
+          ((Esig W k w c + Esig W k w (2^(k+1) + c))
+            * (Esig W k w b + Esig W k w (2^(k+1) + b)))))
+        (fun b hb => by
+          rw [← sumLtI_mul_r (2^(k+1))
+                (fun c => blow (2^(k+1)) (fun u v => Asig u v W k) b c
+                  * (Esig W k w c + Esig W k w (2^(k+1) + c)))
+                (Esig W k w b + Esig W k w (2^(k+1) + b))]
+          exact sumLtI_congr (2^(k+1)) _ _ (fun c hc => by
+            rw [Int.mul_assoc]
+            unfold blow
+            rw [Nat.mod_eq_of_lt hb, Nat.mod_eq_of_lt hc]))]
+  exact quad_vanish (2^(k+1)) (fun u v => Asig u v W k)
+    (fun c => Esig W k w c + Esig W k w (2^(k+1) + c))
+    (fun b => Esig W k w b + Esig W k w (2^(k+1) + b)) 0 W p q
+    (fun i hi => Asig_zero_row i W k hi hW hW0)
+    (fun i hi => Asig_zero_col i W k hi hW hW0)
+    hWrow hWcol hsupp hsupp hpp hpq hqp hqq
 
 end SounioZDFiberAntisym
 
