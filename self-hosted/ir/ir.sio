@@ -710,9 +710,454 @@ pub fn ir_strategy_name(s: i64) -> string {
     else { "unknown" }
 }
 
+// ==========================================================================
+// IR instruction arena (#1649)
+// ==========================================================================
+// Lives here rather than in its own module because IrFunction must hold a
+// region handle and the arena must hold IrInstr, and Sounio has no import
+// cycles anywhere in this tree -- an arena module importing ir::ir while
+// ir::ir imports it back would be the first, and untested.
+//
+// Variable-size region allocator for IR instructions, with generation-checked
+// handles and region sealing.
+//
+// WHY THIS EXISTS (#1649)
+// ----------------------
+// IrFunction currently embeds `instrs: [IrInstr; 4096]` inline, and IrModule
+// embeds `functions: [IrFunction; 2048]`, so a module reserves ~2 GB whether it
+// uses it or not, and no function may exceed 4096 IR instructions. Measured, a
+// 136-line test needs 14389. The limit cannot be raised: a 4x bump takes RSS for
+// a small compile from 753 MB to ~2-3 GB.
+//
+// Fixed-size regions would reproduce exactly that arithmetic, so regions here are
+// VARIABLE size, sized to a function's actual instruction count.
+//
+// WHAT MAKES VARIABLE REGIONS DANGEROUS, AND WHAT THIS MODULE DOES ABOUT IT
+// ------------------------------------------------------------------------
+// Two hazards, both of which would otherwise produce SILENT cross-function
+// miscompiles -- the exact defect class #1586/#1645/#1647 closed:
+//
+//   1. GROWTH. A function that outgrows its region must be reallocated and
+//      copied, which moves its base. Any copy of that handle still holding the
+//      old base would then read or write another function's instructions.
+//      Handled by: every handle carries a GENERATION, bumped on reallocation.
+//      A stale handle is detected on use rather than silently followed.
+//
+//   2. ALIASING. IrFunction is passed by value 163 times, returned 110 times and
+//      explicitly copied 53 times across 34 files, and the optimizer depends on
+//      those copies being deep:
+//
+//          var result = func                  // today: full deep copy
+//          IR_INSTR_ARENA[(ir_region_base_write(&result.region) + (i)) as usize] = ir_copy(...)    // does not touch func
+//          return (false, func)               // rollback returns the original
+//
+//      With a shared region a value copy aliases, so the write corrupts `func`
+//      and the rollback returns corrupted data. Sounio has no copy constructor,
+//      so the clone must be written by hand at each boundary -- and a missed one
+//      compiles cleanly. Handled by: SEALING. A region is sealed when its
+//      function is published (stored into a module, returned across a pass).
+//      Writing through a sealed handle is refused, loudly.
+//
+// Neither check is advisory. A violation prints, sets the durable hard-error flag
+// so the compile cannot exit 0 (the #1645 channel), and routes the write to a
+// quarantine region so nothing else is corrupted in the meantime.
+//
+// This module is standalone: it owns no IrFunction and nothing imports it yet.
+// Converting IrFunction.instrs to a region handle is a separate change (~4282
+// access sites, all of them caught by the type checker once the field is gone).
+
+
+
+// ---------------------------------------------------------------------------
+// Capacity tiers
+// ---------------------------------------------------------------------------
+// Declarations must stay literals (Sounio array sizes are not expressions);
+// every bound CHECK calls the accessor, the same contract as
+// nc_flat_reloc_capacity() in self-hosted/native/frame.sio. Sized for this
+// module's own witnesses; the conversion change sizes it from measurement.
+
+pub var IR_INSTR_ARENA: [IrInstr; 65536] = [ir_nop(); 65536]
+pub fn ir_instr_arena_capacity() -> i64 { 65536 }
+
+pub var IR_REGION_BASE: [i64; 8192] = [0; 8192]
+pub var IR_REGION_CAP: [i64; 8192] = [0; 8192]
+pub var IR_REGION_LEN: [i64; 8192] = [0; 8192]
+pub var IR_REGION_GEN: [i64; 8192] = [0; 8192]
+pub var IR_REGION_STATE: [i64; 8192] = [0; 8192]
+pub fn ir_region_table_capacity() -> i64 { 8192 }
+
+pub var IR_ARENA_TOP: i64 = 0
+pub var IR_REGION_COUNT: i64 = 0
+
+// Every out-of-contract write lands here instead of in someone else's region.
+// Allocated by init as region slot 0 so a zeroed handle cannot address real data.
+pub var IR_QUARANTINE_BASE: i64 = 0
+pub fn ir_quarantine_slots() -> i64 { 256 }
+
+// Set when any handle contract is violated. Read by the compile driver, which
+// must refuse to emit -- same role as IR_LOWER_HARD_ERROR for the lowering walls.
+pub var IR_ARENA_VIOLATION: i64 = 0
+
+pub let IR_REGION_FREE: i64 = 0
+pub let IR_REGION_LIVE: i64 = 1
+pub let IR_REGION_SEALED: i64 = 2
+
+pub let IR_ARENA_OK: i64 = 0
+pub let IR_ARENA_ERR_CAPACITY: i64 = -1        // arena is full
+pub let IR_ARENA_ERR_REGIONS: i64 = -2         // region table is full
+pub let IR_ARENA_ERR_STALE: i64 = -3           // generation mismatch (post-realloc)
+pub let IR_ARENA_ERR_INVALID: i64 = -4         // slot out of range / freed
+pub let IR_ARENA_ERR_SEALED: i64 = -5          // write through a published handle
+pub let IR_ARENA_ERR_RANGE: i64 = -6           // index outside the region
+pub let IR_ARENA_ERR_NEGATIVE: i64 = -7        // negative size asked for
+
+// A handle. Carrying the generation is what makes a post-reallocation stale copy
+// detectable instead of silently pointing at whatever now occupies the old base.
+pub struct IrInstrRegion {
+    pub slot: i64,
+    pub generation: i64,
+}
+
+pub fn ir_region_invalid() -> IrInstrRegion {
+    IrInstrRegion { slot: -1, generation: -1 }
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle
+// ---------------------------------------------------------------------------
+
+pub fn ir_instr_arena_init() -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < ir_region_table_capacity() {
+        IR_REGION_BASE[i as usize] = 0
+        IR_REGION_CAP[i as usize] = 0
+        IR_REGION_LEN[i as usize] = 0
+        IR_REGION_STATE[i as usize] = IR_REGION_FREE
+        // Generations deliberately NOT reset: a handle held across an init must
+        // not start matching again. They only ever increase.
+        i = i + 1
+    }
+    IR_ARENA_TOP = 0
+    IR_REGION_COUNT = 0
+    IR_ARENA_VIOLATION = 0
+    // Slot 0 is the quarantine, so a zero-initialised handle addresses scratch.
+    IR_QUARANTINE_BASE = 0
+    IR_REGION_BASE[0] = 0
+    IR_REGION_CAP[0] = ir_quarantine_slots()
+    IR_REGION_LEN[0] = 0
+    IR_REGION_GEN[0] = IR_REGION_GEN[0] + 1
+    IR_REGION_STATE[0] = IR_REGION_LIVE
+    IR_ARENA_TOP = ir_quarantine_slots()
+    IR_REGION_COUNT = 1
+    IR_ARENA_OK
+}
+
+pub fn ir_instr_arena_violation() -> bool { IR_ARENA_VIOLATION != 0 }
+
+pub fn ir_instr_arena_used() -> i64 { IR_ARENA_TOP }
+
+pub fn ir_instr_arena_region_count() -> i64 { IR_REGION_COUNT }
+
+// ---------------------------------------------------------------------------
+// Allocation
+// ---------------------------------------------------------------------------
+
+pub fn ir_instr_arena_alloc(cap: i64, out: &! IrInstrRegion) -> i64 with Mut, Panic, Div {
+    if cap < 0 { return IR_ARENA_ERR_NEGATIVE }
+    if IR_REGION_COUNT >= ir_region_table_capacity() { return IR_ARENA_ERR_REGIONS }
+    if IR_ARENA_TOP + cap > ir_instr_arena_capacity() { return IR_ARENA_ERR_CAPACITY }
+    let slot = IR_REGION_COUNT
+    IR_REGION_BASE[slot as usize] = IR_ARENA_TOP
+    IR_REGION_CAP[slot as usize] = cap
+    IR_REGION_LEN[slot as usize] = 0
+    IR_REGION_GEN[slot as usize] = IR_REGION_GEN[slot as usize] + 1
+    IR_REGION_STATE[slot as usize] = IR_REGION_LIVE
+    IR_ARENA_TOP = IR_ARENA_TOP + cap
+    IR_REGION_COUNT = slot + 1
+    (*out).slot = slot
+    (*out).generation = IR_REGION_GEN[slot as usize]
+    IR_ARENA_OK
+}
+
+// ---------------------------------------------------------------------------
+// Handle validation
+// ---------------------------------------------------------------------------
+
+pub fn ir_region_status(r: &IrInstrRegion) -> i64 with Panic, Div {
+    let s = (*r).slot
+    if s < 0 || s >= IR_REGION_COUNT { return IR_ARENA_ERR_INVALID }
+    if IR_REGION_STATE[s as usize] == IR_REGION_FREE { return IR_ARENA_ERR_INVALID }
+    if IR_REGION_GEN[s as usize] != (*r).generation { return IR_ARENA_ERR_STALE }
+    IR_ARENA_OK
+}
+
+pub fn ir_region_is_valid(r: &IrInstrRegion) -> bool with Panic, Div {
+    ir_region_status(r) == IR_ARENA_OK
+}
+
+pub fn ir_region_is_sealed(r: &IrInstrRegion) -> bool with Panic, Div {
+    let s = (*r).slot
+    if s < 0 || s >= IR_REGION_COUNT { return false }
+    IR_REGION_STATE[s as usize] == IR_REGION_SEALED
+}
+
+pub fn ir_region_len(r: &IrInstrRegion) -> i64 with Panic, Div {
+    if ir_region_status(r) != IR_ARENA_OK { return 0 }
+    IR_REGION_LEN[(*r).slot as usize]
+}
+
+pub fn ir_region_cap(r: &IrInstrRegion) -> i64 with Panic, Div {
+    if ir_region_status(r) != IR_ARENA_OK { return 0 }
+    IR_REGION_CAP[(*r).slot as usize]
+}
+
+// ---------------------------------------------------------------------------
+// Raw base accessors -- the hot path for the eventual textual rewrite of
+// `IR_INSTR_ARENA[(ir_region_base_read(&f.region) + (i)) as usize]` into `IR_INSTR_ARENA[(ir_region_base_read(&f.region) + i) as usize]`.
+//
+// Two of them on purpose. A single accessor could not tell a read from a write,
+// and sealing only means anything if writes are the ones refused. The rewrite
+// picks by the shape of the site: assignments, nested field assignments and `&!`
+// take the _write form, everything else takes _read.
+//
+// Both are total: on violation they report once, raise IR_ARENA_VIOLATION so the
+// compile cannot succeed, and return the quarantine base so the access is
+// memory-safe rather than landing in another function's instructions.
+// ---------------------------------------------------------------------------
+
+// Latch only -- deliberately NO IO effect. These accessors are inserted at ~4282
+// call sites by the IrFunction.instrs conversion; giving them IO would force the
+// effect onto every containing function and cascade across the whole backend.
+// The violation is reported by ir_arena_report_violation(), called from the
+// compile driver's barrier where IO already exists.
+pub var IR_ARENA_VIOLATION_KIND: i64 = 0
+pub var IR_ARENA_VIOLATION_SLOT: i64 = -1
+pub var IR_ARENA_VIOLATION_GEN: i64 = -1
+
+pub let IR_ARENA_VIOLATION_STALE: i64 = 1
+pub let IR_ARENA_VIOLATION_INVALID: i64 = 2
+pub let IR_ARENA_VIOLATION_SEALED: i64 = 3
+
+fn ir_arena_latch(kind: i64, r: &IrInstrRegion) with Mut, Panic, Div {
+    if IR_ARENA_VIOLATION == 0 {
+        IR_ARENA_VIOLATION_KIND = kind
+        IR_ARENA_VIOLATION_SLOT = (*r).slot
+        IR_ARENA_VIOLATION_GEN = (*r).generation
+    }
+    IR_ARENA_VIOLATION = 1
+}
+
+// Prints the FIRST violation. Returns true when there was one, so the driver can
+// refuse to emit -- an arena contract breach means some function's instructions
+// were written through a stale or published handle, which is a miscompile.
+pub fn ir_arena_report_violation() -> bool with IO, Mut, Panic, Div {
+    if IR_ARENA_VIOLATION == 0 { return false }
+    print("error: IR instruction arena contract violated (")
+    if IR_ARENA_VIOLATION_KIND == IR_ARENA_VIOLATION_STALE {
+        print("stale handle -- a region was reallocated and this copy was not updated")
+    } else if IR_ARENA_VIOLATION_KIND == IR_ARENA_VIOLATION_SEALED {
+        print("write through a sealed handle -- a value copy was made without cloning the region")
+    } else {
+        print("invalid handle")
+    }
+    print(") on region slot ")
+    print_int(IR_ARENA_VIOLATION_SLOT)
+    print(" generation ")
+    print_int(IR_ARENA_VIOLATION_GEN)
+    print("\n")
+    true
+}
+
+pub fn ir_region_base_read(r: &IrInstrRegion) -> i64 with Mut, Panic, Div {
+    let st = ir_region_status(r)
+    if st == IR_ARENA_ERR_STALE {
+        ir_arena_latch(IR_ARENA_VIOLATION_STALE, r)
+        return IR_QUARANTINE_BASE
+    }
+    if st != IR_ARENA_OK {
+        ir_arena_latch(IR_ARENA_VIOLATION_INVALID, r)
+        return IR_QUARANTINE_BASE
+    }
+    IR_REGION_BASE[(*r).slot as usize]
+}
+
+pub fn ir_region_base_write(r: &IrInstrRegion) -> i64 with Mut, Panic, Div {
+    let st = ir_region_status(r)
+    if st == IR_ARENA_ERR_STALE {
+        ir_arena_latch(IR_ARENA_VIOLATION_STALE, r)
+        return IR_QUARANTINE_BASE
+    }
+    if st != IR_ARENA_OK {
+        ir_arena_latch(IR_ARENA_VIOLATION_INVALID, r)
+        return IR_QUARANTINE_BASE
+    }
+    if IR_REGION_STATE[(*r).slot as usize] == IR_REGION_SEALED {
+        ir_arena_latch(IR_ARENA_VIOLATION_SEALED, r)
+        return IR_QUARANTINE_BASE
+    }
+    IR_REGION_BASE[(*r).slot as usize]
+}
+
+// ---------------------------------------------------------------------------
+// Checked element access (used by the witnesses and by anything not on the
+// rewritten hot path)
+// ---------------------------------------------------------------------------
+
+pub fn ir_region_get(r: &IrInstrRegion, idx: i64, out: &! IrInstr) -> i64 with Mut, Panic, Div {
+    let st = ir_region_status(r)
+    if st != IR_ARENA_OK { return st }
+    if idx < 0 || idx >= IR_REGION_LEN[(*r).slot as usize] { return IR_ARENA_ERR_RANGE }
+    (*out) = IR_INSTR_ARENA[(IR_REGION_BASE[(*r).slot as usize] + idx) as usize]
+    IR_ARENA_OK
+}
+
+pub fn ir_region_set(r: &IrInstrRegion, idx: i64, instr: IrInstr) -> i64 with Mut, Panic, Div {
+    let st = ir_region_status(r)
+    if st != IR_ARENA_OK { return st }
+    if IR_REGION_STATE[(*r).slot as usize] == IR_REGION_SEALED { return IR_ARENA_ERR_SEALED }
+    if idx < 0 || idx >= IR_REGION_LEN[(*r).slot as usize] { return IR_ARENA_ERR_RANGE }
+    IR_INSTR_ARENA[(IR_REGION_BASE[(*r).slot as usize] + idx) as usize] = instr
+    IR_ARENA_OK
+}
+
+pub fn ir_region_push(r: &! IrInstrRegion, instr: IrInstr) -> i64 with Mut, Panic, Div {
+    let st = ir_region_status(&(*r))
+    if st != IR_ARENA_OK { return st }
+    let slot = (*r).slot
+    if IR_REGION_STATE[slot as usize] == IR_REGION_SEALED { return IR_ARENA_ERR_SEALED }
+    let len = IR_REGION_LEN[slot as usize]
+    if len >= IR_REGION_CAP[slot as usize] {
+        let rc = ir_region_reserve(r, len + 1)
+        if rc != IR_ARENA_OK { return rc }
+    }
+    let s2 = (*r).slot
+    let l2 = IR_REGION_LEN[s2 as usize]
+    IR_INSTR_ARENA[(IR_REGION_BASE[s2 as usize] + l2) as usize] = instr
+    IR_REGION_LEN[s2 as usize] = l2 + 1
+    IR_ARENA_OK
+}
+
+// ---------------------------------------------------------------------------
+// Growth
+// ---------------------------------------------------------------------------
+// Reallocation MOVES the region, so it bumps the generation: the handle passed
+// in is updated, and every OTHER copy of that handle becomes detectably stale
+// rather than silently pointing at the old bytes. That is the whole reason the
+// generation exists.
+
+pub fn ir_region_reserve(r: &! IrInstrRegion, want: i64) -> i64 with Mut, Panic, Div {
+    if want < 0 { return IR_ARENA_ERR_NEGATIVE }
+    let st = ir_region_status(&(*r))
+    if st != IR_ARENA_OK { return st }
+    let slot = (*r).slot
+    if IR_REGION_STATE[slot as usize] == IR_REGION_SEALED { return IR_ARENA_ERR_SEALED }
+    if want <= IR_REGION_CAP[slot as usize] { return IR_ARENA_OK }
+    var grown = IR_REGION_CAP[slot as usize] * 2
+    if grown < want { grown = want }
+    if IR_ARENA_TOP + grown > ir_instr_arena_capacity() { return IR_ARENA_ERR_CAPACITY }
+    let old_base = IR_REGION_BASE[slot as usize]
+    let len = IR_REGION_LEN[slot as usize]
+    let new_base = IR_ARENA_TOP
+    var i: i64 = 0
+    while i < len {
+        IR_INSTR_ARENA[(new_base + i) as usize] = IR_INSTR_ARENA[(old_base + i) as usize]
+        i = i + 1
+    }
+    IR_ARENA_TOP = new_base + grown
+    IR_REGION_BASE[slot as usize] = new_base
+    IR_REGION_CAP[slot as usize] = grown
+    IR_REGION_GEN[slot as usize] = IR_REGION_GEN[slot as usize] + 1
+    (*r).generation = IR_REGION_GEN[slot as usize]
+    IR_ARENA_OK
+}
+
+pub fn ir_region_set_len(r: &IrInstrRegion, len: i64) -> i64 with Mut, Panic, Div {
+    let st = ir_region_status(r)
+    if st != IR_ARENA_OK { return st }
+    if IR_REGION_STATE[(*r).slot as usize] == IR_REGION_SEALED { return IR_ARENA_ERR_SEALED }
+    if len < 0 || len > IR_REGION_CAP[(*r).slot as usize] { return IR_ARENA_ERR_RANGE }
+    IR_REGION_LEN[(*r).slot as usize] = len
+    IR_ARENA_OK
+}
+
+// ---------------------------------------------------------------------------
+// Sealing and cloning
+// ---------------------------------------------------------------------------
+// Seal on publication: once a function's instructions have been stored into a
+// module or handed across a pass boundary, any further write through a handle to
+// them is a missed clone. Cloning is the supported way to get a writable copy,
+// and it is what the by-value boundaries must call.
+
+pub fn ir_region_seal(r: &IrInstrRegion) -> i64 with Mut, Panic, Div {
+    let st = ir_region_status(r)
+    if st != IR_ARENA_OK { return st }
+    IR_REGION_STATE[(*r).slot as usize] = IR_REGION_SEALED
+    IR_ARENA_OK
+}
+
+pub fn ir_region_clone(src: &IrInstrRegion, out: &! IrInstrRegion) -> i64 with Mut, Panic, Div {
+    let st = ir_region_status(src)
+    if st != IR_ARENA_OK { return st }
+    let slot = (*src).slot
+    let len = IR_REGION_LEN[slot as usize]
+    // Sized to the actual length, not the source capacity: sizing clones by
+    // worst case is what makes fixed-size regions cost as much as the inline
+    // array this replaces.
+    let rc = ir_instr_arena_alloc(len, out)
+    if rc != IR_ARENA_OK { return rc }
+    let src_base = IR_REGION_BASE[slot as usize]
+    let dst_base = IR_REGION_BASE[(*out).slot as usize]
+    var i: i64 = 0
+    while i < len {
+        IR_INSTR_ARENA[(dst_base + i) as usize] = IR_INSTR_ARENA[(src_base + i) as usize]
+        i = i + 1
+    }
+    IR_REGION_LEN[(*out).slot as usize] = len
+    IR_ARENA_OK
+}
+
+// ---------------------------------------------------------------------------
+// Mark / release
+// ---------------------------------------------------------------------------
+// Pass-scoped reclamation: a pass records the mark on entry and releases back to
+// it once the surviving result has been copied out. Regions allocated after the
+// mark are invalidated -- their generation is bumped, so any handle to them that
+// escaped the pass is caught by ir_region_status rather than silently reading
+// whatever is allocated there next.
+
+pub struct IrArenaMark {
+    pub top: i64,
+    pub region_count: i64,
+}
+
+pub fn ir_arena_mark() -> IrArenaMark {
+    IrArenaMark { top: IR_ARENA_TOP, region_count: IR_REGION_COUNT }
+}
+
+pub fn ir_arena_release(m: &IrArenaMark) -> i64 with Mut, Panic, Div {
+    if (*m).region_count < 0 || (*m).region_count > IR_REGION_COUNT { return IR_ARENA_ERR_RANGE }
+    if (*m).top < 0 || (*m).top > IR_ARENA_TOP { return IR_ARENA_ERR_RANGE }
+    var i = (*m).region_count
+    while i < IR_REGION_COUNT {
+        IR_REGION_STATE[i as usize] = IR_REGION_FREE
+        IR_REGION_LEN[i as usize] = 0
+        IR_REGION_CAP[i as usize] = 0
+        IR_REGION_GEN[i as usize] = IR_REGION_GEN[i as usize] + 1
+        i = i + 1
+    }
+    IR_ARENA_TOP = (*m).top
+    IR_REGION_COUNT = (*m).region_count
+    IR_ARENA_OK
+}
+
+
 pub struct IrFunction {
     pub name: Name,
-    pub instrs: [IrInstr; 4096],
+    // #1649: the instruction storage moved to a variable-size arena region.
+    // This used to be [IrInstr; 4096] inline, which made every IrFunction ~1 MB
+    // and every IrModule ~2 GB regardless of use, and capped a function at 4096
+    // IR instructions -- a 136-line test needs 14389.
+    pub region: IrInstrRegion,
     pub instr_count: i64,
     pub reg_count: i64,
     pub label_count: i64,
@@ -3733,7 +4178,7 @@ pub fn ir_phi(dst: i64) -> IrInstr {
 pub fn ir_empty_function() -> IrFunction {
     IrFunction {
         name: ir_empty_name(),
-        instrs: [ir_nop(); 4096],
+        region: ir_region_invalid(),
         instr_count: 0,
         reg_count: 0,
         label_count: 0,

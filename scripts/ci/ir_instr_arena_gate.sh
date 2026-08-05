@@ -54,7 +54,7 @@ cd "$ROOT_DIR"
 # SOUNIO_IR_ARENA_SOUC or an in-repo raw ELF is accepted, and it must identify
 # itself as Madaros before anything is compiled with it.
 SOUC="${SOUNIO_IR_ARENA_SOUC:-}"
-ARENA="self-hosted/ir/instr_arena.sio"
+ARENA="self-hosted/ir/ir.sio"   # the arena now lives beside IrInstr/IrFunction
 VACUITY="${SOUNIO_IR_ARENA_VACUITY:-0}"
 RUN_TIMEOUT="${SOUNIO_IR_ARENA_TIMEOUT:-60}"
 
@@ -101,7 +101,6 @@ DEPS=(
   "self-hosted/check/numeric_format.sio:check::numeric_format"
   "self-hosted/parser/ast.sio:parser::ast"
   "self-hosted/check/types.sio:check::types"
-  "self-hosted/ir/ir.sio:ir::ir"
 )
 
 compose() {
@@ -113,7 +112,7 @@ compose() {
       [ -f "$path" ] || fail "dep_missing_${path//\//_}"
       sed -e "/^module ${mod//::/\\:\\:}\$/d" -e '/^use /d' "$path"
     done
-    sed -e '/^module ir::instr_arena$/d' -e '/^use /d' "$arena_src"
+    sed -e '/^module ir::ir$/d' -e '/^use /d' "$arena_src"
     sed -e '/^use /d' "$witness"
   } >"$out"
 }
