@@ -50,32 +50,44 @@ reject_marker() {
   fi
 }
 
+# Positive controls under default Madaros native-v2
 run_capture dd64 tests/run-pass/dd64_import_native_v2_smoke.sio
 require_rc dd64 0
 require_marker dd64 'DD64_IMPORT_NATIVE_V2 PASS'
 
-run_capture qd128 tests/known_failures/qd128_import_native_v2_probe.sio
-require_rc qd128 1
-require_marker qd128 'lower_array: dep_lower_done 2'
-require_marker qd128 'Failed to write native binary'
+run_capture sedenion tests/run-pass/sedenion_import_native_v2_smoke.sio
+require_rc sedenion 0
+require_marker sedenion 'Compilation successful!'
+require_marker sedenion 'SEDENION_IMPORT_NATIVE_V2 PASS'
+reject_marker sedenion 'Segmentation fault'
+
+run_capture qd128_core tests/run-pass/qd128_core_import_native_v2_smoke.sio
+require_rc qd128_core 0
+require_marker qd128_core 'QD128_CORE_IMPORT_NATIVE_V2 PASS'
+reject_marker qd128_core 'Segmentation fault'
+
+run_capture qd128 tests/run-pass/qd128_import_native_v2_smoke.sio
+require_rc qd128 0
+require_marker qd128 'QD128_IMPORT_NATIVE_V2 PASS'
 reject_marker qd128 'Segmentation fault'
 
-run_capture sedenion tests/known_failures/sedenion_import_native_v2_probe.sio
-require_rc sedenion 1
-require_marker sedenion 'Compilation successful!'
-reject_marker sedenion 'Segmentation fault'
-reject_marker sedenion 'SEDENION_IMPORT_NATIVE_V2 PASS'
+run_capture qd128_mul tests/run-pass/qd128_mul_native_v2_smoke.sio
+require_rc qd128_mul 0
+require_marker qd128_mul 'QD128_MUL_NATIVE_V2 PASS'
+reject_marker qd128_mul 'Segmentation fault'
 
+# Combined sedenion+eisa still thin-link fail-closed on stock Madaros (2026-08-05)
 run_capture combined tests/known_failures/zero_provenance_native_v2_probe.sio
 require_rc combined 1
-require_marker combined 'lower_array: final_fn_count'
 require_marker combined 'Failed to write native binary'
 reject_marker combined 'Segmentation fault'
+reject_marker combined 'ZERO_PROVENANCE PASS'
 
+# Receipt stdlib probe is green on stock Madaros (main already closed this surface)
 run_capture receipt tests/known_failures/zero_event_stdlib_native_v2_probe.sio
 require_rc receipt 0
 require_marker receipt 'Compilation successful!'
 require_marker receipt 'ZERO_EVENT_STDLIB PASS'
 reject_marker receipt 'Segmentation fault'
 
-echo '[zero-native-matrix] PASS: dd64 and zero-event run; qd128/combined fail closed in backend; sedenion exits nonzero without crashing'
+echo '[zero-native-matrix] PASS: dd64+sedenion+qd128(+core,+mul)+receipt green; combined fail-closed without segfault'
