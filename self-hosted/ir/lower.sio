@@ -186,6 +186,72 @@ var IR_INSTR_OVERFLOW_COUNT: i64 = 0
 
 pub fn ir_instr_overflow_begin_fn() with Mut { IR_INSTR_OVERFLOW_COUNT = 0 }
 
+// ---------------------------------------------------------------------------
+// Instruction-count census, behind SOUNIO_IR_INSTR_CENSUS=1.
+//
+// IrFunction.instrs is [IrInstr; IR_MAX_INSTRS] — a FIXED array per function,
+// so every function reserves the full budget whether it emits five
+// instructions or four thousand. Measured 2026-08-05 on generated modules of
+// one-line functions, peak RSS grows at a flat 1417.5 KB PER FUNCTION and does
+// not care how many instructions those functions contain: 200 fns -> 1.1 GB,
+// 1000 -> 2.2 GB, 3000 -> 5.0 GB, 6000 -> 9.1 GB. That is the wall in front of
+// self-compilation, since main.sio's closure has ~6000 reachable functions.
+//
+// Two ways out, and they differ by three orders of magnitude in cost: lower
+// IR_MAX_INSTRS (one line) or give instructions a shared arena (4518 `.instrs[`
+// sites). Which one is right depends entirely on the DISTRIBUTION of
+// instr_count over real functions — if the 99th percentile is 300, the constant
+// is simply mis-set; if it is 3000, only an arena helps.
+//
+// So this prints the distribution rather than arguing about it. Buckets are
+// powers of two; `over` counts functions that did not fit at all.
+var IR_INSTR_CENSUS_BUCKET: [i64; 16] = [0; 16]
+var IR_INSTR_CENSUS_FNS: i64 = 0
+var IR_INSTR_CENSUS_TOTAL: i64 = 0
+var IR_INSTR_CENSUS_MAX: i64 = 0
+var IR_INSTR_CENSUS_OVER: i64 = 0
+
+fn ir_instr_census_enabled() -> bool with IO, Mut, Panic, Div {
+    str_eq(read_env("SOUNIO_IR_INSTR_CENSUS"), "1")
+}
+
+pub fn ir_instr_census_record(n: i64, overflowed: bool) with Mut, Panic, Div {
+    IR_INSTR_CENSUS_FNS = IR_INSTR_CENSUS_FNS + 1
+    IR_INSTR_CENSUS_TOTAL = IR_INSTR_CENSUS_TOTAL + n
+    if n > IR_INSTR_CENSUS_MAX { IR_INSTR_CENSUS_MAX = n }
+    if overflowed { IR_INSTR_CENSUS_OVER = IR_INSTR_CENSUS_OVER + 1 }
+    var b: i64 = 0
+    var lim: i64 = 1
+    while b < 15 && n > lim {
+        lim = lim * 2
+        b = b + 1
+    }
+    IR_INSTR_CENSUS_BUCKET[b as usize] = IR_INSTR_CENSUS_BUCKET[b as usize] + 1
+}
+
+pub fn ir_instr_census_report() with IO, Mut, Panic, Div {
+    if !ir_instr_census_enabled() { return }
+    if IR_INSTR_CENSUS_FNS <= 0 { return }
+    print("SOUNIO_IR_INSTR_CENSUS_V1\n")
+    print("functions\t") print_int(IR_INSTR_CENSUS_FNS) print("\n")
+    print("instructions\t") print_int(IR_INSTR_CENSUS_TOTAL) print("\n")
+    print("mean\t") print_int(IR_INSTR_CENSUS_TOTAL / IR_INSTR_CENSUS_FNS) print("\n")
+    print("max\t") print_int(IR_INSTR_CENSUS_MAX) print("\n")
+    print("over_limit\t") print_int(IR_INSTR_CENSUS_OVER) print("\n")
+    print("reserved\t") print_int(IR_INSTR_CENSUS_FNS * IR_MAX_INSTRS) print("\n")
+    var b: i64 = 0
+    var lim: i64 = 1
+    while b < 16 {
+        if IR_INSTR_CENSUS_BUCKET[b as usize] > 0 {
+            print("le_") print_int(lim) print("\t")
+            print_int(IR_INSTR_CENSUS_BUCKET[b as usize]) print("\n")
+        }
+        lim = lim * 2
+        b = b + 1
+    }
+}
+
+
 pub fn lower_hard_error_pending() -> bool { IR_LOWER_HARD_ERROR != 0 }
 
 pub fn lower_hard_error_reset() with Mut { IR_LOWER_HARD_ERROR = 0 }
@@ -3681,6 +3747,12 @@ fn lowerer_lower_fn_item_mut(
     // the message carries what it actually needed rather than only that it
     // overflowed -- that number is what decides whether the limit is off by a
     // factor of two or a factor of ten (#1649).
+    // Census AFTER the flush, so instr_count is the settled value. On overflow
+    // instr_count is pinned at the cap and the true need is cap + dropped.
+    if !(*lo).probe_mode && fn_id >= 0 && fn_id < IR_MAX_FUNCS {
+        let settled = (*(*lo).module).functions[fn_id as usize].instr_count
+        ir_instr_census_record(settled + IR_INSTR_OVERFLOW_COUNT, IR_INSTR_OVERFLOW_COUNT > 0)
+    }
     if IR_INSTR_OVERFLOW_COUNT > 0 && !(*lo).probe_mode {
         print("error: function `")
         print(str_from_bytes(name.buf, name.len))
