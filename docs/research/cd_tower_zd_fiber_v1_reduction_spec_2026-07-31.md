@@ -3210,8 +3210,61 @@ rests on is therefore no longer prose at any point.
 | term | status |
 |---|---|
 | `tr(B³) = 8·t3′` | ✅ PROVEN ∀n (`tri3_Asig_blow`, Tier 43) |
-| `3·tr(B²E) = 24·t2′` | **DERIVED from `yrow_gen` (§49.5), not yet assembled in Lean** |
+| `3·tr(B²E) = 24·t2′` | ✅ **PROVEN ∀n (`trB2E_eq`, Tier 51)** — `tr(B²E) = 8·degSum` |
 | `3·tr(BE²) = 0` | ✅ **PROVEN ∀n (`trBE2_zero`, Tier 50)** |
-| `tr(E³) = −24(h−2)` | MEASURED |
+| `tr(E³) = −24(h−2)` | **MEASURED — the only one left** |
 
 **§18.1 is still not proven, so (III) is still reduced, not proven.** (d) and V1 untouched.
+
+---
+
+## §50 — `tr(B²E) = 8·t2′` (Tier 51): three of §34's four terms are now theorems
+
+`e1eac7c886`. Build green **first try** in the real file; no `sorry`; axioms
+`[propext, Classical.choice, Quot.sound]` (`yrow_esig` alone is `[propext, Quot.sound]`).
+
+```lean
+theorem trB2E_split : Σ_{a,b,c < 2^(k+2)} B a b * (B b c * Esig c a) = 4 * (t2′ − S(W))
+theorem trB2E_eq    : ...                                            = 8 * degSum W k
+```
+
+Same shape as Tier 50, but with a **value** rather than a zero, so it has to *land on* Tier 42's
+guarded sums instead of merely vanishing.
+
+- `P2s_full` — summing `B²`'s middle index over the full range **doubles** the low-half two-path
+  matrix. That `2` is the blow-up's, like Tier 43's `8`.
+- `blk_eq` — after both outer indices collapse, what is left is `E`'s `2×2` block sum, and it is
+  `2·(e_a − e_{a⊕W})`: **the same collapsed row as Tier 50, doubled by the two blocks.** This is
+  §49.5's prediction, now a theorem: one lemma settles both mixed sums.
+- `c_step` — here the two support points are **not** discarded. `sumLtI_eq_at2` reads them off, and
+  they are the diagonal and the coset entry of `P2s`. **That is the tool §49.7 wrongly predicted for
+  `tr(BE²)`; it is the right tool here.** So §49.7's error was not "the tool is useless" but "the
+  tool belongs to the other term".
+- `T2_eq`/`S_eq` — the bridge. Tier 42's sums carry the guards `a ≠ 0 ∧ a ⊕ W ≠ 0`; dropping them is
+  legitimate exactly because those rows and columns of `A′` are null. **`Asig_zero_row`/`_col`
+  (Tier 49b) and `Asig_isolated_diag` (Tier 50) are what make this step legal** — both were added
+  because an earlier tier needed them for something else, and both pay for themselves here.
+- `cosetSum_eq` (`S(W) = −t2′`, Tier 42) turns `4·(t2′ − S)` into `8·t2′`.
+
+**Denotation measured against the CONTRACT's builder, not just the transcription:** the theorem's sum
+over `[0,N)`, the contract's over `[1,N)`, and `8·tr(A′²)` computed from `A_sig_fast` all agree at
+`k = 1,2,3`, every label.
+
+**Method note that paid off immediately.** Tier 50 cost three build cycles because the scratch
+axiomatized `yrow_gen` with its LHS *expanded* while the file states it about the **defined** `yrow`
+— so `omega` saw an opaque atom and silently ignored the hypothesis. Tier 51's scratch copied every
+imported statement **verbatim**, and the port compiled first try.
+
+⚠ The M1 review was again **partial** (grok-4.5, no terminating verdict). What it produced derived
+`B² = [[2A², 2A²], [2A², 2A²]]` independently and concluded "`trB2E_split` is perfectly correct"; its
+single doubt — can row `0` of `A′` really be null? — came from context I failed to give it: index `0`
+is not a vertex of the fiber graph, and `W` is the isolated vertex.
+
+### §50.1 — what is left of §18.1
+
+**Only `tr(E³) = −24(h−2)`.** It is a statement about a label-independent graph on `12(h−2)` edges,
+and unlike the three carried terms it involves no `B` at all — so none of the blow-up collapse
+machinery applies to it. That is the next target, and it is the last one before §18.1 itself.
+
+**§18.1 is still not proven** — three of its four terms are, the fourth is measured. (III) is still
+reduced; (d) and V1 untouched.
