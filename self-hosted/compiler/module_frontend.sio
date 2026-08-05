@@ -31,10 +31,11 @@ fn module_frontend_global_init_compile_begin() with Mut {
     // intermediate one may be discarded, which is precisely how the flag used to
     // get lost.
     lower_hard_error_reset()
-    // #1649: the instruction arena is per-COMPILE state. Init here, beside the
-    // lowering error channel, so regions from a previous compile in the same
-    // process cannot be reached by a handle that outlived them.
-    ir_instr_arena_init()
+    // #1649: the arena is NOT reset here. This barrier runs more than once per
+    // compile (once per module load path), and resetting mid-compile wiped every
+    // region that lowering had already filled -- the functions still had valid
+    // handles, and read back nops. The arena self-arms once from
+    // ir_instr_arena_alloc instead.
 }
 
 fn module_frontend_global_init_compile_end() with Mut {
@@ -1314,7 +1315,6 @@ fn ir_merge_modules_into(dst: &! IrModule, src: &IrModule) with Mut, Panic, Div 
             }
         }
         let dst_idx = (*dst).fn_count
-        if func.region.slot < 0 { ir_function_alloc_region(&! func) }
         (*dst).functions[dst_idx as usize] = func
         (*dst).fn_count = dst_idx + 1
         fi = fi + 1
@@ -1624,11 +1624,9 @@ fn ir_merge_place_and_remap_function(
     }
     // Index-bind before whole-element store (lean_single proven pattern).
     if dst_fi < (*dst).fn_count {
-        if func.region.slot < 0 { ir_function_alloc_region(&! func) }
         (*dst).functions[dst_fi as usize] = func
     } else if dst_fi == (*dst).fn_count && (*dst).fn_count < IR_MAX_FUNCS {
         let idx = (*dst).fn_count
-        if func.region.slot < 0 { ir_function_alloc_region(&! func) }
         (*dst).functions[idx as usize] = func
         (*dst).fn_count = idx + 1
     }
@@ -1683,7 +1681,6 @@ fn ir_merge_append_function_into_box(dst: &! IrModule, src: &IrModule, src_fi: i
         ii = ii + 1
     }
     let dst_idx = (*dst).fn_count
-    if func.region.slot < 0 { ir_function_alloc_region(&! func) }
     (*dst).functions[dst_idx as usize] = func
     (*dst).fn_count = (*dst).fn_count + 1
 }
@@ -2111,7 +2108,6 @@ fn ir_module_compact_duplicate_fn_refs(module: &! IrModule) with Mut, Div, Panic
                 ii = ii + 1
             }
             if changed {
-                if f.region.slot < 0 { ir_function_alloc_region(&! f) }
                 (*module).functions[fi as usize] = f
             }
             fi = fi + 1
@@ -2192,7 +2188,6 @@ fn ir_module_ensure_builtin_call_targets(module: &! IrModule) with Mut, Div, Pan
                             if native_v2_builtin_returns_float(bid) {
                                 stub.returns_float = 1
                             }
-                            if stub.region.slot < 0 { ir_function_alloc_region(&! stub) }
                             (*module).functions[(*module).fn_count as usize] = stub
                             target = (*module).fn_count
                             (*module).fn_count = (*module).fn_count + 1
@@ -2210,7 +2205,6 @@ fn ir_module_ensure_builtin_call_targets(module: &! IrModule) with Mut, Div, Pan
                             if (*module).functions[target as usize].returns_float != 1 {
                                 var tf = (*module).functions[target as usize]
                                 tf.returns_float = 1
-                                if tf.region.slot < 0 { ir_function_alloc_region(&! tf) }
                                 (*module).functions[target as usize] = tf
                             }
                             if IR_INSTR_ARENA[ir_region_slot_r(f.region, (ii)) as usize].imm_flags != IR_FLOAT_REG_MARKER_FLAG {
@@ -2271,7 +2265,6 @@ fn ir_module_finalize_merged_calls(module: &! IrModule) with Mut, Div, Panic {
                 ii = ii + 1
             }
             if changed {
-                if f.region.slot < 0 { ir_function_alloc_region(&! f) }
                 (*module).functions[fi as usize] = f
             }
             fi = fi + 1
@@ -2318,7 +2311,6 @@ fn ir_module_restore_user_main_calls(module: &! IrModule, user_main: IrFunction)
         IR_INSTR_ARENA[ir_region_slot_w(slot.region, (ii)) as usize] = ins
         ii = ii + 1
     }
-    if slot.region.slot < 0 { ir_function_alloc_region(&! slot) }
     (*module).functions[0 as usize] = slot
 }
 
@@ -4323,7 +4315,6 @@ fn module_frontend_lower_source_file_summary(path: string, module_index: i64, tr
             var func = ir_empty_function()
             func.name = module_frontend_source_fn_name(data, module_frontend_source_fn_name_start(data, i, size), size)
             func = module_frontend_lower_source_fn_body(path, data, i, size, func)
-            if func.region.slot < 0 { ir_function_alloc_region(&! func) }
             module.functions[module.fn_count as usize] = func
             module.fn_count = module.fn_count + 1
         }
@@ -4572,7 +4563,6 @@ fn module_frontend_lower_fn_item_into(item: Item, module: Box<IrModule>) -> Box<
     IR_INSTR_ARENA[ir_region_slot_w(func.region, (0)) as usize] = ir_load_imm(0, 0)
     IR_INSTR_ARENA[ir_region_slot_w(func.region, (1)) as usize] = ir_return(0)
     func.instr_count = 2
-    if func.region.slot < 0 { ir_function_alloc_region(&! func) }
     (*m).functions[idx as usize] = func
     (*m).fn_count = idx + 1
     m
@@ -5186,7 +5176,6 @@ fn mf_arebox_apply(module: &! IrModule) with Alloc, Mut, Panic, Div {
             var f = (*module).functions[fi as usize]
             if ii >= 0 && ii < f.instr_count {
                 IR_INSTR_ARENA[ir_region_slot_w(f.region, (ii)) as usize].call_args = rebuilt
-                if f.region.slot < 0 { ir_function_alloc_region(&! f) }
                 (*module).functions[fi as usize] = f
             }
         }
@@ -5491,7 +5480,6 @@ fn module_frontend_lower_programs_array_direct_box(
 
             // Restore user main at its seed index (not fn_id=0).
             if seed_main_idx >= 0 && seed_main_idx < (*acc_box).fn_count {
-                if seed_user_main.region.slot < 0 { ir_function_alloc_region(&! seed_user_main) }
                 (*acc_box).functions[seed_main_idx as usize] = seed_user_main
             }
 
