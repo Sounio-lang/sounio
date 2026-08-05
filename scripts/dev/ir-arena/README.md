@@ -76,6 +76,19 @@ constructs closing cleanly.
 
 ## Measured, one compile each, seed pre-derived
 
+Parity caveat: all 7 programs that compiled are **single-function**, forced by
+the regression above, and their receipts show `transactions=0 applications=0` —
+the cloning passes had almost nothing to do. It is a no-regression signal, not
+evidence the clone is meaningfully exercised. The first parity run was worse than
+that: it ran **without `-O`**, so `opt_cleanup` was skipped entirely and the
+comparison was vacuous. Always confirm `optimize=1` via
+`SOUNIO_REBRACKET_TRACE=1` before reading a parity number.
+
+The arena capacity risk — functions × passes × length against 1,048,576 slots
+with no reclamation — is still **untested**, because codegen walls out first.
+`ir_arena_mark` / `ir_arena_release` exist and are called from nowhere; they are
+the intended fix when it bites.
+
 | tree | errors |
 |---|---|
 | `origin/main` and merge-base `40116b661d` (baseline, ~101.6 MB artifact) | **6** |
@@ -113,6 +126,13 @@ stops the arena's runtime contract from being verified.
 (lean_single) compiles it, and lean_single does not carry this defect. `exit 0`
 on the build says nothing about the compiler it produces. Repro kept at
 `tests/known_failures/soa_arena_two_function_codegen.sio`.
+
+**Un-bisected across commits.** "Predates Sweep 1" is not "located". The next
+step is to build `6c32908852` (`refactor/ir-arena-step2`, the **AoS** arena, one
+commit before the SoA explosion) and run the repro — one ~10 min build with the
+cached seed plus a 2-second test. If it fails there too, the defect belongs to
+the region-handle conversion generally and the fix is in a different place than
+if it arrived with the field explosion.
 
 Fix this before raising `IR_MAX_INSTRS` or trusting any parity measurement.
 
