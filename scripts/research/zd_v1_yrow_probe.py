@@ -71,7 +71,51 @@ def Asig(l, y, L, n):
     return -_P1(l, y, L, n) if ok else 0
 
 
+def bridge():
+    """C-1  The Lean `Asig` IS the contract's builder matrix.
+
+    Everything else in this file, and every Lean theorem about `Asig`, is only about §34's ledger
+    if the transcription and the builder agree.  `Asig x y W m` has x,y in [0, 2^(m+1)); the
+    builder's level-n matrix has vertices [1, 2^(n-1)) at index vertex-1.  So n = m + 2.
+    """
+    print("C-1 Lean `Asig` vs the contract's builder A_sig_fast")
+    for m in (2, 3, 4):
+        n = m + 2
+        S = sign_table_fast(n)
+        V = 1 << (m + 1)
+        bad = tot = 0
+        for W in range(1, V):
+            A = A_sig_fast(n, W, S).astype(np.int64)
+            for x in range(1, V):
+                for y in range(1, V):
+                    tot += 1
+                    if int(A[x - 1, y - 1]) != Asig(x, y, W, m):
+                        bad += 1
+        print(f"    m={m} <-> n={n}: {tot} entries over {V-1} labels, {bad} mismatches")
+
+
+def denotation():
+    """C-2  The theorem's own sum over [0,N) equals the contract's over [1,N), and both are 0."""
+    print("C-2 index-0 padding is inert in tr(B E^2)")
+    for k in (1, 2, 3):
+        m = 1 << (k + 1)
+        N = m + m
+        for W in range(1, m):
+            A1 = [[Asig(x, y, W, k + 1) for y in range(N)] for x in range(N)]
+            A0 = [[Asig(x, y, W, k) for y in range(m)] for x in range(m)]
+            B = [[A0[x % m][y % m] for y in range(N)] for x in range(N)]
+            E = [[A1[x][y] - B[x][y] for y in range(N)] for x in range(N)]
+            s0 = sum(B[a][b] * E[b][c] * E[c][a]
+                     for a in range(N) for b in range(N) for c in range(N))
+            s1 = sum(B[a][b] * E[b][c] * E[c][a]
+                     for a in range(1, N) for b in range(1, N) for c in range(1, N))
+            assert s0 == s1 == 0, (k, W, s0, s1)
+        print(f"    k={k} (N={N}, {m-1} labels): sum[0,N) == sum[1,N) == 0")
+
+
 def main():
+    bridge()
+    denotation()
     print("C0  row and column 0 of A_sig, from the Lean definitions")
     for n in (2, 3, 4, 5):
         H = 1 << (n + 1)

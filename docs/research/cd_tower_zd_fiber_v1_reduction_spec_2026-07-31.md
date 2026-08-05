@@ -3176,16 +3176,34 @@ extending `Asig_symm` to the boundary `0`/`L_lo`, where both entries vanish) put
    `(L_lo, L_lo)`; there `P1 = 1` but `P3 = −1`, so `resB` fails and the entry is `0`. The assembly
    needs the isolated row null on the *whole* low range, corner included.
 
-**The denotation was CHECKED, not assumed.** Lean's ranges are `[0, 2^(k+2))`, one element wider than
-the contract's vertex set. Using the Lean-faithful `Asig` transcription in
-`scripts/research/zd_v1_yrow_probe.py`, the theorem's own sum over `[0,N)` and the contract's over
-`[1,N)` were compared at `k = 1,2,3`, every label: equal, and both `0`. This is the check §49.6's
-hazard demanded, run against the theorem as stated rather than against a paraphrase of it.
+**The denotation was CHECKED, not assumed — in TWO steps, and the first was nearly skipped.**
+
+- **C-1, the bridge.** The Lean `Asig` is a *transcription*; §34's whole ledger is stated about the
+  builder `A_sig_fast`. Comparing the theorem's sum to another sum computed from the *same*
+  transcription would have proved only that the padding is inert, not that either object is the
+  contract's matrix. So: `Asig x y W m` vs `A_sig_fast(m+2, W)[x−1, y−1]` — **283 606 entries over
+  `m = 2,3,4,5`, every label, 0 mismatches.** (`n = m+2` because the Lean index range is
+  `[0, 2^(m+1))` and the builder's vertex set is `[1, 2^(n−1))`.) This is the
+  `zd_annihilation_is_orthogonality_probe.py` pattern — cross-check the transcription before
+  building on it.
+- **C-2, the padding.** Lean's ranges are `[0, 2^(k+2))`, one element wider than the vertex set. The
+  theorem's own sum over `[0,N)` vs the contract's over `[1,N)`, `k = 1,2,3`, every label: equal, and
+  both `0`.
+
+Both are `scripts/research/zd_v1_yrow_probe.py`, run before anything else in that file.
 
 ⚠ **The M1 review DEGRADED on this tier** — grok-4.5 returned unterminated chain-of-thought with no
 verdict on both the 424-line diff and a 45-line statements-only extract; what it emitted flagged no
 defect and independently re-derived the `p, q` choice. The denotation measurement is the substitute
 evidence. Single provider, disclosed here and in the commit.
+
+### 49.8b — a free strengthening of §34.2
+
+§34.2 wrote `tr(A³) = tr(B³) + 3tr(B²E) + 3tr(BE²) + tr(E³)` and justified the `3×` coefficients with
+"`B` and `E` are symmetric" — in prose. Both halves of that are now theorems: `Esig_symm` (Tier 50)
+gives `E`'s symmetry ∀n, `B`'s follows from `Asig_symm_full` through `blow`, and `tri3_cyc` (Tier 44)
+is what turns symmetry into the collapse of the six mixed terms into `3 + 3`. The expansion §18.1
+rests on is therefore no longer prose at any point.
 
 ### 49.9 — what §34 still owes
 
