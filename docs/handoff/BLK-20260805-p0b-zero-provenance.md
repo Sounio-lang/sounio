@@ -55,3 +55,10 @@ does **not** import `eisa::core_v2` and must not be cited as closing this BLK.
 This BLK remains open as the **eisa::core_v2 + sedenion** combined-import
 thin-link residual until Madaros emits that larger CU (`~111` fn) without
 `rc=12`.
+
+**Related shape residual (not this BLK):** a fat local `ZeroWitness` helper
+form near ~49 fn was previously read as an IR-count ceiling. Isolation shows
+that is a misattribution — Madaros fails on ≥2 **f64 comparisons in bool
+struct fields** even at `final_fn_count` 3. See
+`docs/handoff/BLK-20260805-thinlink-ir-threshold.md` and
+`scripts/ci/madaros_thinlink_bool_cmp_field_gate.sh`.
