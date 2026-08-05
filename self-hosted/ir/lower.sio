@@ -341,9 +341,87 @@ pub fn ir_instr_census_report() with IO, Mut, Panic, Div {
 }
 
 
+// THE FLAG CARRIES ITS REASON. #1645 made IR_LOWER_HARD_ERROR durable against
+// the Lowerer's by-value threading, which is what makes the failure visible at
+// all — but a bare flag told the caller only THAT lowering failed. Measured
+// 2026-08-05 compiling self-hosted/compiler/main.sio: the merge reported
+// "ir_summary_failed: lowering reported an error" and NOTHING anywhere named
+// the cause, because the message that would name it lives at the end of
+// lowerer_lower_fn_item_mut and this path does not go through that function.
+// Exactly one site in the compiler raises the flag, so recording its reason
+// there costs two stores and removes the anonymity for good.
+// No initialiser: the seed (lean_single) rejects a `Name { … }` fill literal in
+// a global, and this compiler BSS-zeroes `var` initialisers anyway. len 0 IS the
+// empty name, so all-zero is the correct initial state — the same reasoning as
+// IR_NAME_POOL in ir.sio, which hit this exact rejection first.
+var IR_LOWER_HARD_ERROR_FN: Name
+var IR_LOWER_HARD_ERROR_NEEDED: i64 = 0
+// Same reasoning as IR_LOWER_HARD_ERROR_FN: no initialiser, because the seed
+// rejects a `Name { … }` literal in a global and zero IS the empty name.
+var IR_LOWER_ERROR_FIRST_FN: Name
+var IR_LOWER_ERROR_TOTAL: i64 = 0
+
+// report_error() is not the only way lowering fails: TEN sites in this file set
+// `lo.had_error = true` directly and never pass through it. That is why the
+// first attempt at naming the error came back empty — the counters were in
+// report_error and the failure was not. Both channels record here now.
+pub fn lower_note_error(n: Name) with Mut {
+    IR_LOWER_ERROR_TOTAL = IR_LOWER_ERROR_TOTAL + 1
+    if IR_LOWER_ERROR_TOTAL == 1 {
+        IR_LOWER_ERROR_FIRST_FN = n
+    }
+}
+var IR_LOWER_HARD_ERROR_LIMIT: i64 = 0
+
 pub fn lower_hard_error_pending() -> bool { IR_LOWER_HARD_ERROR != 0 }
 
-pub fn lower_hard_error_reset() with Mut { IR_LOWER_HARD_ERROR = 0 }
+// Print what the flag knows, or say plainly that it knows nothing — never
+// silence. Called by the consumers that used to print a bare "ir_summary_failed".
+pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
+    // Reported even when the durable flag is clear: had_error can be true from
+    // any of report_error's 54 call sites while only the IR_MAX_INSTRS overflow
+    // raises IR_LOWER_HARD_ERROR. Returning early on a clear flag is exactly how
+    // this stayed anonymous.
+    if IR_LOWER_ERROR_TOTAL > 0 {
+        print("  lowering errors: ")
+        print_int(IR_LOWER_ERROR_TOTAL)
+        print(", first while lowering function `")
+        var f: i64 = 0
+        while f < IR_LOWER_ERROR_FIRST_FN.len && f < 128 {
+            print_char(IR_LOWER_ERROR_FIRST_FN.buf[f as usize] as i64)
+            f = f + 1
+        }
+        print("`\n")
+    }
+    if IR_LOWER_HARD_ERROR == 0 {
+        return
+    }
+    if IR_LOWER_HARD_ERROR_NEEDED > 0 {
+        print("  cause: function `")
+        var i: i64 = 0
+        while i < IR_LOWER_HARD_ERROR_FN.len && i < 128 {
+            print_char(IR_LOWER_HARD_ERROR_FN.buf[i as usize] as i64)
+            i = i + 1
+        }
+        print("` needs at least ")
+        print_int(IR_LOWER_HARD_ERROR_NEEDED)
+        print(" IR instructions but IR_MAX_INSTRS is ")
+        print_int(IR_LOWER_HARD_ERROR_LIMIT)
+        print("\n")
+    } else {
+        print("  cause: lowering raised a hard error and recorded no detail — if this\n")
+        print("         prints, a NEW raise site was added without recording its reason.\n")
+    }
+}
+
+pub fn lower_hard_error_reset() with Mut {
+    IR_LOWER_HARD_ERROR = 0
+    IR_LOWER_HARD_ERROR_NEEDED = 0
+    IR_LOWER_HARD_ERROR_LIMIT = 0
+    IR_LOWER_HARD_ERROR_FN.len = 0
+    IR_LOWER_ERROR_TOTAL = 0
+    IR_LOWER_ERROR_FIRST_FN.len = 0
+}
 
 // OR the durable flag into a value-threaded had_error. Used at every
 // IrLowerResult/IrLowerBoxResult construction site.
@@ -1428,6 +1506,7 @@ fn lowerer_preseed_dep_items_into_acc_mut(
                                                 } else {
                                                     lo.error_count = lo.error_count + 1
                                                     lo.had_error = true
+                                                    lower_note_error((*lo.current_func).name)
                                                 }
                                             }
                                         }
@@ -1631,6 +1710,7 @@ fn lowerer_force_fill_impl_methods_mut(
                                                             // module_frontend can fall back to place+remap for this dep.
                                                             lo.error_count = lo.error_count + 1
                                                             lo.had_error = true
+                                                            lower_note_error((*lo.current_func).name)
                                                             if str_eq(read_env("SOUNIO_INTO_ACC_TRACE"), "1") {
                                                                 print("into_acc: force_fill_failed name=")
                                                                 print(str_from_bytes(mangled.buf, mangled.len))
@@ -1733,6 +1813,7 @@ fn ir_param_list_count(params: Option<Box<ParamList>>) -> i64 with Alloc, Mut, D
 fn lowerer_mark_error(lo: &! Lowerer) with Mut {
     lo.error_count = lo.error_count + 1
     lo.had_error = true
+    lower_note_error((*lo.current_func).name)
 }
 
 fn lowerer_effect_list_has_name_ref(effects: &Option<Box<EffectList>>, target: string) -> bool with Mut, Panic, Div {
@@ -1881,6 +1962,7 @@ fn lowerer_preseed_fn_signature_mut(
             } else {
                 lo.error_count = lo.error_count + 1
                 lo.had_error = true
+                lower_note_error((*lo.current_func).name)
             }
         }
     }
@@ -1921,6 +2003,7 @@ fn lowerer_register_enum_variants_mut(
                 } else {
                     lo.error_count = lo.error_count + 1
                     lo.had_error = true
+                    lower_note_error((*lo.current_func).name)
                 }
                 current = &(*list).tail
                 disc = disc + 1
@@ -2199,6 +2282,7 @@ fn lowerer_register_struct_fields_direct_mut(
         if pre_count >= 256 {
             lo.error_count = lo.error_count + 1
             lo.had_error = true
+            lower_note_error((*lo.current_func).name)
             return
         }
         layout_idx = pre_count
@@ -2266,6 +2350,7 @@ fn lowerer_register_struct_fields_mut(
                     } else {
                         lo.error_count = lo.error_count + 1
                         lo.had_error = true
+                        lower_note_error((*lo.current_func).name)
                         return
                     }
                 }
@@ -2282,6 +2367,7 @@ fn lowerer_register_struct_fields_mut(
                 } else {
                     lo.error_count = lo.error_count + 1
                     lo.had_error = true
+                    lower_note_error((*lo.current_func).name)
                 }
                 current = &(*list).tail
                 field_idx = field_idx + 1
@@ -2661,6 +2747,7 @@ fn lowerer_preseed_program_items_mut(
                                             } else {
                                                 lo.error_count = lo.error_count + 1
                                                 lo.had_error = true
+                                                lower_note_error((*lo.current_func).name)
                                             }
                                         }
                                     }
@@ -6348,10 +6435,24 @@ impl Lowerer {
         (lo, dst)
     }
 
+    // Every lowering error passes through here — 54 call sites — and until now
+    // it recorded nothing beyond a count on a value-threaded Lowerer. Measured
+    // 2026-08-05 compiling self-hosted/compiler/main.sio: the merge reported
+    // "lowering reported an error" while IR_LOWER_HARD_ERROR was 0, i.e. the
+    // failure was one of these 54 and not the IR_MAX_INSTRS overflow that is
+    // the only site raising the durable flag. Nothing anywhere could say which.
+    //
+    // So record, durably, WHICH FUNCTION was being lowered when the first error
+    // fired. That does not give the reason — the reason lives at the call site
+    // and there are 54 of them — but a name plus a count turns "somewhere in
+    // lowering" into one function to read, which is the difference between a
+    // bisect and a guess.
     fn report_error(self) -> Lowerer with Mut {
         var lo = self
         lo.error_count = lo.error_count + 1
         lo.had_error = true
+        lower_note_error((*lo.current_func).name)
+        lower_note_error((*lo.current_func).name)
         lo
     }
 
@@ -8894,6 +8995,13 @@ impl Lowerer {
             // needs to have.
             if !lo.probe_mode {
                 IR_LOWER_HARD_ERROR = 1
+                // Record WHICH function and HOW MANY, here, at the only site
+                // that raises the flag. The end-of-body report in
+                // lowerer_lower_fn_item_mut is richer but only runs on the path
+                // that goes through it; this runs on every path.
+                IR_LOWER_HARD_ERROR_FN = (*current_func_box).name
+                IR_LOWER_HARD_ERROR_LIMIT = IR_MAX_INSTRS
+                IR_LOWER_HARD_ERROR_NEEDED = IR_MAX_INSTRS + IR_INSTR_OVERFLOW_COUNT + 1
             }
             IR_INSTR_OVERFLOW_COUNT = IR_INSTR_OVERFLOW_COUNT + 1
             lo.report_error()
