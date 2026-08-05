@@ -187,6 +187,83 @@ var IR_INSTR_OVERFLOW_COUNT: i64 = 0
 pub fn ir_instr_overflow_begin_fn() with Mut { IR_INSTR_OVERFLOW_COUNT = 0 }
 
 // ---------------------------------------------------------------------------
+// Resident-memory probes, behind SOUNIO_LOWER_RSS_TRACE=1.
+//
+// Five structural hypotheses about the ~895 KB per function have now been
+// refuted BY MEASUREMENT — the machine IR, the instruction array (IrFunction
+// shrunk 48x: 10%), the by-value copies on the _ref paths (0%), the arena, and
+// the Lowerer's 92.5 KB of inline arrays (shrunk 19x: 0%). Every one of them
+// was a structure that looked the right size. So stop sizing structures and
+// read the number at labelled points instead.
+//
+// /proc/self/statm field 2 is resident pages. NOTE the trap this was checked
+// against first: procfs reports file_size 0, so any read path that stats and
+// trusts the size gets nothing — read_file returns the real bytes and that was
+// verified with a standalone program before this was written.
+//
+// What is being localised: a call costs 705 KB on the FIRST call in a body and
+// ~8 KB on each one after, while pure arithmetic costs 7 KB and arguments cost
+// ~12 KB each. So one big thing is allocated once per body, triggered by the
+// presence of any call at all.
+var LOWER_RSS_TRACE_ON: i64 = 0
+var LOWER_RSS_TRACE_CHECKED: i64 = 0
+var LOWER_RSS_LAST: i64 = 0
+
+fn lower_rss_enabled() -> bool with IO, Mut, Panic, Div, Alloc {
+    if LOWER_RSS_TRACE_CHECKED == 0 {
+        LOWER_RSS_TRACE_CHECKED = 1
+        if str_eq(read_env("SOUNIO_LOWER_RSS_TRACE"), "1") {
+            LOWER_RSS_TRACE_ON = 1
+        }
+    }
+    LOWER_RSS_TRACE_ON == 1
+}
+
+// Resident pages: the second whitespace-separated field of /proc/self/statm.
+fn lower_rss_pages() -> i64 with IO, Mut, Panic, Div, Alloc {
+    let d = read_file("/proc/self/statm")
+    let n = str_len(d)
+    var i: i64 = 0
+    var field: i64 = 0
+    var acc: i64 = 0
+    var seen = false
+    while i < n {
+        let c = str_char_at(d, i)
+        if c >= 48 && c <= 57 {
+            acc = acc * 10 + (c - 48)
+            seen = true
+        } else {
+            if seen {
+                if field == 1 { return acc }
+                field = field + 1
+                acc = 0
+                seen = false
+            }
+        }
+        i = i + 1
+    }
+    if seen && field == 1 { return acc }
+    0
+}
+
+// Print resident KB and the DELTA since the previous mark. The delta is what
+// localises an allocation; the absolute is only there to catch a probe that
+// stopped reading.
+pub fn lower_rss_mark(label: string) with IO, Mut, Panic, Div, Alloc {
+    if !lower_rss_enabled() { return }
+    let kb = lower_rss_pages() * 4
+    print("rss ")
+    print(label)
+    print(" ")
+    print_int(kb)
+    print(" d=")
+    print_int(kb - LOWER_RSS_LAST)
+    print("\n")
+    LOWER_RSS_LAST = kb
+}
+
+
+// ---------------------------------------------------------------------------
 // Instruction-count census, behind SOUNIO_IR_INSTR_CENSUS=1.
 //
 // IrFunction.instrs is [IrInstr; IR_MAX_INSTRS] — a FIXED array per function,
@@ -3496,6 +3573,7 @@ fn lowerer_lower_fn_item_mut(
     // and cannot grow the table beyond its three entries.
     fo_xfer_seed_transcendentals()
     ir_instr_overflow_begin_fn()
+    lower_rss_mark("fn_enter")
     (*lo).so_enabled = so_block_uses_hessian(&(*fd).body)
     if lower_live_diag_enabled() {
         print("lower_live: fn_before_find_or_add name=")
@@ -10558,6 +10636,7 @@ impl Lowerer {
         args: Option<Box<IrRegList>>,
         argc: i64
     ) -> IrPreparedCallArgs with Mut, Panic, Div, Alloc, IO {
+    lower_rss_mark("prepargs_enter")
         let callee_strategy: i64 = if fn_id >= 0 && fn_id < self.module.fn_count {
             self.module.functions[fn_id as usize].compile_strategy
         } else {
@@ -10580,6 +10659,7 @@ impl Lowerer {
             }
             final_argc = final_argc + 1
         }
+        lower_rss_mark("prepargs_done")
         IrPreparedCallArgs { lo: lo, args: final_args, argc: final_argc }
     }
 
