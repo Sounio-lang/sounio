@@ -3865,9 +3865,11 @@ highest-differing-bit lemma about `Nat.xor` that the file does not have.)~~ — 
 ESTIMATE, corrected in §57: the missing fact is two lines of `xor_pow_low` plus associativity, and
 both this and the same-box fold are now theorems (`rep_iff_gen`, `tri3_fold_high`).**
 
-**(2) The general high box is `I − J` plus a sparse correction.** Entries lie in `{−1, 0, +1}`, and
-the `+1` entries number exactly `2(2^n − 2)` at `n = 3,4,5` for every low part tested — which is
-§34's matching/coset family size. The correction is *not* supported on the coset line `l ⊕ y = W_lo`
+**(2) The general high box is `I − J` plus a sparse correction.** Entries lie in `{−1, 0, +1}`.
+~~and the `+1` entries number exactly `2(2^n − 2)` at `n = 3,4,5` for every low part tested — which
+is §34's matching/coset family size.~~ **⚠ FALSE, corrected in §57.3: I had sampled only
+`W_lo ∈ {1,2,3,5}`, which all sit in the `g = 0` fibre. Sweeping every `W_lo` gives 2 values at
+`n = 4` and 8 at `n = 6`; `2(2^n−2)` is only the minimum.** The correction is *not* supported on the coset line `l ⊕ y = W_lo`
 (tested: mixed), so the obvious identification is wrong.
 
 ⚠ **And the "stop" below was called one lemma too early** — see §57. The reason to stop was sound
@@ -3929,7 +3931,8 @@ the question is what the box of a general high label `W = 2^n + W_lo` looks like
 
 - entries lie in `{−1, 0, +1}`; relative to `I − J` the correction takes values `{0,1,2}`;
 - grouping the off-diagonal entries by `x = l ⊕ y`, each `x` carries values from exactly one of
-  three sets: `{1}` when `x = W_lo` (the coset line), or `{0,1}`, or `{−1,0}`.
+  three sets: `{1}` when `x = W_lo` (the coset line), or `{0,1}`, or `{−1,0}`. ~~— **⚠ the second
+  and third classes are an `n = 3` artefact; see §57.3.** Only the coset-line half survives.~~
 
 **At `n = 3` the involution `x ↦ x ⊕ W_lo` swaps the `{0,1}` and `{−1,0}` classes — perfectly, for
 every `W_lo`.** That is a clean coset structure and it is exactly the shape a proof would want.
@@ -3948,5 +3951,43 @@ So the general box has no characterisation by the two natural candidates, and th
 open. What is now solid, and is the place to start from: the base case is
 `D(W) = 8·(t3(box_W) − t3(box_{W₀}))` on one index set (`tri3_fold_high`, Tier 59), with `box` known
 exactly at `W_lo = 0` (`I − J`, Tier 57) and unclassified otherwise.
+
+**(III) is still reduced, not proven.**
+
+### 57.3 — the box at `n = 6`: two of my claims die, and the survivor is the whole problem
+
+Swept every high label at `n = 3,4,5,6` (`scripts/research/zd_v1_general_box_probe.py`).
+
+**Two earlier claims are FALSE and are struck above.**
+
+1. §56.4(2): "the `+1` entries number exactly `2(2^n−2)` … for every low part tested". I had sampled
+   `W_lo ∈ {1,2,3,5}` — all in the `g = 0` fibre. Sweeping everything: **2 values at `n = 4`, 4 at
+   `n = 5`, 8 at `n = 6`.** `2(2^n−2)` is the minimum, attained on `g = 0`.
+2. §57.2's class shape ("every other `x` carries `{0,1}` or `{−1,0}`") — 0 violations at `n = 3`,
+   then **42 / 336 / 1938** at `n = 4,5,6`. The `x ↦ x ⊕ W_lo` swap I had already retracted; the
+   *class shape itself* is equally an `n = 3` artefact. My retraction in §57.2 did not go far enough.
+
+**What survives every level.** Entry values are exactly `{−1,0,+1}`, and **the coset line
+`l ⊕ y = W_lo` carries exactly `{1}`** — `7/7`, `15/15`, `31/31`, `63/63` labels at `n = 3,4,5,6`.
+
+**★ And the real finding: the box reproduces the whole phenomenon one level down.** Grouping the high
+labels by their fibre (`g(2^n + W_lo) = 8 + g(W_lo)`, so the fibres of `W` are the fibres of `W_lo`):
+
+| box invariant | constant on the fibre? |
+|---|---|
+| `#(+1)`, `#0`, `t2(box)` | **yes** — 0 splits at `n = 4,5,6` |
+| **`t3(box)`** | **NO** — 1 of 4 fibres at `n = 5`, **2 of 8 at `n = 6`** |
+
+That is exactly the lane's own signature — `tr(A²)` a fibre invariant, `tr(A³)` not — now visible on
+an object of **half the size**. And the split is the law itself: **`8·(t3(box_W) − t3(box_ref))`
+equals the deviation `δ`, 0 violations over all 31 labels at `n = 5` and all 63 at `n = 6`.**
+
+**Status.** The base case is unchanged in substance, but it now lives on the box: prove that
+`t3(box)`'s variation within a fibre is `δ/8`, on a `(2^n−1)`-square matrix whose entry values are
+`{−1,0,+1}` and whose coset line is uniformly `+1`. Nothing smaller has been available before.
+
+⚠ **Method note, third occurrence in two rungs.** §57.2's lesson was "never conclude from a single
+level"; this rung shows the sampling version of the same error — §56.4(2) concluded from four values
+of `W_lo` that happened to share a fibre. **Sweep the parameter, not a sample of it.**
 
 **(III) is still reduced, not proven.**
