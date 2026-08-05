@@ -10084,6 +10084,41 @@ theorem Esig_vanishes (k a b W e f : Nat) (he : e = 0 ∨ e = 1) (hf : f = 0 ∨
   omega
 
 
+/-! ## Tier 46: splitting a sum by a PREDICATE
+
+Tier 45 named two missing mechanics; this is the first. `sumLtI_shift` splits a range at an index —
+an interval cut. What the mixed sums need is a cut by membership: separate the part of a sum where a
+family predicate holds from the part where it does not. `Bool`-valued predicates keep this free of
+`Classical.choice`. -/
+
+/-- **Split a sum by a predicate.** -/
+theorem sumLtI_split_pred (n : Nat) (P : Nat → Bool) (f : Nat → Int) :
+    sumLtI n f = sumLtI n (fun i => if P i then f i else 0)
+               + sumLtI n (fun i => if P i then 0 else f i) := by
+  rw [← sumLtI_add n (fun i => if P i then f i else 0) (fun i => if P i then 0 else f i)]
+  refine sumLtI_congr n _ _ (fun i _ => ?_)
+  cases h : P i <;> simp [h]
+
+/-- **A sum supported inside a predicate** may be restricted to it. This is the form the mixed sums
+    use: `Esig_vanishes` supplies the hypothesis, and the generic part drops out. -/
+theorem sumLtI_of_support (n : Nat) (P : Nat → Bool) (f : Nat → Int)
+    (h0 : ∀ i, i < n → P i = false → f i = 0) :
+    sumLtI n f = sumLtI n (fun i => if P i then f i else 0) := by
+  refine sumLtI_congr n _ _ (fun i hi => ?_)
+  cases h : P i
+  · rw [if_neg (by simp [h]), h0 i hi h]
+  · rw [if_pos (by simp [h])]
+
+/-- The complementary form: a sum that vanishes ON the predicate keeps only the complement. -/
+theorem sumLtI_of_cosupport (n : Nat) (P : Nat → Bool) (f : Nat → Int)
+    (h0 : ∀ i, i < n → P i = true → f i = 0) :
+    sumLtI n f = sumLtI n (fun i => if P i then 0 else f i) := by
+  refine sumLtI_congr n _ _ (fun i hi => ?_)
+  cases h : P i
+  · rw [if_neg (by simp [h])]
+  · rw [if_pos (by simp [h]), h0 i hi h]
+
+
 end SounioZDFiberAntisym
 
 
