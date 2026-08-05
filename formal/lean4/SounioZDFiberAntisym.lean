@@ -10042,6 +10042,48 @@ theorem tri3_cyc (N : Nat) (f g h : Nat → Nat → Int) :
   grind
 
 
+/-! ## Tier 45: `E` vanishes off its four families — the gate the mixed sums consume
+
+`E := A_σ − B` with `B` the blow-up. The block identity (§47) says the four blocks of level `k+1`
+carry the level-`k` entry off the matching and coset lines, so on that region `E = 0`. Both
+remaining terms of §34 (`3·tr(B²E) = 24·t2′` and `tr(BE²) = 0`) are mixed sums whose first move is to
+discard the generic part; this is that discard, stated once.
+
+⚠ One direction only. This says `BlkStd → E = 0`; it does **not** say `E ≠ 0` on the four families,
+which would make it a characterisation of the support. The values there are Tiers 38 and 40
+(`Asig_hub0`/`Asig_hubL`, `Asig_matching`/`Asig_coset`) — separate statements, not assembled into an
+iff anywhere in this file.
+
+What is NOT here: the evaluation of those two sums. That needs a case analysis over the four
+families INSIDE a triple sum — split the range by the excluded lines, kill the generic part with the
+lemma below, and value the rest with Tiers 38 (hubs) and 40 (matching/coset signs). Every ingredient
+is a theorem; the assembly is what remains. -/
+
+/-- `E`'s entry, with `B` the 2-fold blow-up of the level-`k` matrix. -/
+def Esig (W k x y : Nat) : Int :=
+  Asig x y W (k+1) - blow (2^(k+1)) (fun u v => Asig u v W k) x y
+
+/-- The blow-up reads off the low part. -/
+private theorem blow_low (W k a e : Nat) (ha : a < 2^(k+1)) (he : e = 0 ∨ e = 1) (b f : Nat)
+    (hb : b < 2^(k+1)) (hf : f = 0 ∨ f = 1) :
+    blow (2^(k+1)) (fun u v => Asig u v W k) (a + e * 2^(k+1)) (b + f * 2^(k+1))
+      = Asig a b W k := by
+  unfold blow
+  rcases he with rfl | rfl <;> rcases hf with rfl | rfl <;>
+    simp only [Nat.zero_mul, Nat.one_mul, Nat.add_zero] <;>
+    simp only [Nat.add_mod_right, Nat.mod_eq_of_lt ha, Nat.mod_eq_of_lt hb]
+
+/-- **The gate.** Off the matching line `a = b`, the coset line `a = b ⊕ W` and the isolated vertex,
+    `E` vanishes on every one of the four blocks — this is `Asig_block` restated for `E`. -/
+theorem Esig_vanishes (k a b W e f : Nat) (he : e = 0 ∨ e = 1) (hf : f = 0 ∨ f = 1)
+    (h : BlkStd k a b W) :
+    Esig W k (a + e * 2^(k+1)) (b + f * 2^(k+1)) = 0 := by
+  unfold Esig
+  rw [Asig_block k a b W e f he hf h,
+      blow_low W k a e h.ha he b f h.hb hf]
+  omega
+
+
 end SounioZDFiberAntisym
 
 
