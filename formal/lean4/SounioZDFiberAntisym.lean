@@ -10728,6 +10728,295 @@ theorem trBE2_zero (W k : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0) :
     (fun i hi => Asig_zero_col i W k hi hW hW0)
     hWrow hWcol hsupp hsupp hpp hpq hqp hqq
 
+
+/-! ## Tier 51 — `tr(B²E) = 8·t2′`, the LAST of §34's mixed sums
+
+    Same shape as Tier 50, but this one has a VALUE rather than a zero, so it has to land on
+    Tier 42's guarded `degSum`/`cosetSum` rather than merely vanish.
+
+    `B²`'s middle index is summed over the full range against two `blow` factors, which doubles the
+    low-half two-path matrix `P2s`.  The two outer indices then collapse onto the low half exactly as
+    in Tier 50, leaving `E`'s `2×2` block sum `blk`.  `blk_eq` identifies it with `2·(e_a − e_{a⊕W})`
+    — the SAME collapsed row as Tier 50, doubled by the two blocks, which is why one lemma settles
+    both sums.  Here the two support points are not discarded: `c_step` reads them off with
+    `sumLtI_eq_at2` (the tool §49.7 wrongly predicted for `tr(BE²)` — it is the right tool HERE), and
+    they are the diagonal and the coset entry of `P2s`.  So
+
+        tr(B²E) = 4·(t2′ − S(W))   and then   = 8·t2′   by `cosetSum_eq` (`S(W) = −t2′`).
+
+    `T2_eq`/`S_eq` are the bridge: Tier 42's sums carry guards `a ≠ 0 ∧ a ⊕ W ≠ 0`, and dropping
+    them is legitimate exactly because those rows and columns of `A′` are null — `Asig_zero_row/col`
+    (Tier 49b) and `Asig_isolated*` + `Asig_isolated_diag` (Tier 50). -/
+
+/-! ## tr(B²E): the helper layer -/
+
+/-- The collapsed row of `E` at `w = a + δ·2^(k+1)` IS the file's `yrow`. -/
+theorem yrow_esig (W k a d c : Nat) (ha : a < 2^(k+1)) (hc : c < 2^(k+1)) (hd : d = 0 ∨ d = 1) :
+    Esig W k (a + d * 2^(k+1)) c + Esig W k (a + d * 2^(k+1)) (2^(k+1) + c)
+      = yrow k a d c W := by
+  have hp := Nat.two_pow_pos (k+1)
+  have hbmod : (a + d * 2^(k+1)) % 2^(k+1) = a := by
+    rcases hd with rfl | rfl
+    · simpa using Nat.mod_eq_of_lt ha
+    · rw [Nat.one_mul, Nat.add_mod_right]; exact Nat.mod_eq_of_lt ha
+  have hcomm : 2^(k+1) + c = c + 2^(k+1) := by omega
+  have hmod2 : (c + 2^(k+1)) % 2^(k+1) = c := by
+    rw [Nat.add_mod_right]; exact Nat.mod_eq_of_lt hc
+  unfold Esig blow yrow
+  rw [hbmod, Nat.mod_eq_of_lt hc, hcomm, hmod2]
+  simp only []
+  omega
+
+/-- The two-path matrix on the low half. -/
+def P2s (W k a c : Nat) : Int :=
+  sumLtI (2^(k+1)) (fun b => blow (2^(k+1)) (fun u v => Asig u v W k) a b
+                           * blow (2^(k+1)) (fun u v => Asig u v W k) b c)
+
+theorem P2s_l (W k a c : Nat) : P2s W k (2^(k+1) + a) c = P2s W k a c :=
+  sumLtI_congr _ _ _ (fun b _ => by rw [blow_l])
+
+theorem P2s_r (W k a c : Nat) : P2s W k a (2^(k+1) + c) = P2s W k a c :=
+  sumLtI_congr _ _ _ (fun b _ => by rw [blow_r])
+
+/-- Summing the middle index over the FULL range doubles the low-half two-path matrix. -/
+theorem P2s_full (W k a c : Nat) :
+    sumLtI (2^(k+1) + 2^(k+1)) (fun b => blow (2^(k+1)) (fun u v => Asig u v W k) a b
+                                       * blow (2^(k+1)) (fun u v => Asig u v W k) b c)
+      = 2 * P2s W k a c :=
+  sumLtI_double _ _ (fun i _ => by rw [blow_r, blow_l])
+
+theorem P2s_row_zero (W k a c : Nat) (ha : a < 2^(k+1))
+    (h : ∀ b, b < 2^(k+1) → Asig a b W k = 0) : P2s W k a c = 0 := by
+  unfold P2s
+  rw [sumLtI_congr _ _ (fun _ => 0) (fun b hb => by
+        simp only [blow, Nat.mod_eq_of_lt ha, Nat.mod_eq_of_lt hb, h b hb]
+        omega), sumLtI_zero]
+
+theorem P2s_col_zero (W k a c : Nat) (hc : c < 2^(k+1))
+    (h : ∀ b, b < 2^(k+1) → Asig b c W k = 0) : P2s W k a c = 0 := by
+  unfold P2s
+  rw [sumLtI_congr _ _ (fun _ => 0) (fun b hb => by
+        simp only [blow, Nat.mod_eq_of_lt hc, Nat.mod_eq_of_lt hb, h b hb]
+        omega), sumLtI_zero]
+
+/-- The `2×2` block sum of `E` over the pair `(c, a)`. -/
+def blk (W k c a : Nat) : Int :=
+  (Esig W k c a + Esig W k (2^(k+1)+c) a)
+    + (Esig W k c (2^(k+1)+a) + Esig W k (2^(k+1)+c) (2^(k+1)+a))
+
+/-- **The block sum is `2·(e_a − e_{a⊕W})`** — the collapsed row, doubled by the two blocks. -/
+theorem blk_eq (W k a c : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0)
+    (ha : a < 2^(k+1)) (hc : c < 2^(k+1)) (ha0 : a ≠ 0) (haW : a ≠ W)
+    (hc0 : c ≠ 0) (hcW : c ≠ W) :
+    blk W k c a = 2 * ((if c = a then 1 else 0) - (if c = a ^^^ W then 1 else 0)) := by
+  have hp := Nat.two_pow_pos (k+1)
+  have hpow : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by rw [Nat.pow_succ]; omega
+  have hal : a < 2^(k+2) := by omega
+  have hcl : c < 2^(k+2) := by omega
+  have hal2 : 2^(k+1) + a < 2^(k+2) := by omega
+  have hcl2 : 2^(k+1) + c < 2^(k+2) := by omega
+  have g1 : Esig W k a c + Esig W k a (2^(k+1)+c) = yrow k a 0 c W := by
+    have := yrow_esig W k a 0 c ha hc (Or.inl rfl); simpa using this
+  have g2 : Esig W k (2^(k+1)+a) c + Esig W k (2^(k+1)+a) (2^(k+1)+c) = yrow k a 1 c W := by
+    have := yrow_esig W k a 1 c ha hc (Or.inr rfl)
+    rw [Nat.one_mul] at this
+    rw [(by omega : 2^(k+1) + a = a + 2^(k+1))]
+    exact this
+  unfold blk
+  rw [Esig_symm W k c a hcl hal hW hW0,
+      Esig_symm W k (2^(k+1)+c) a hcl2 hal hW hW0,
+      Esig_symm W k c (2^(k+1)+a) hcl hal2 hW hW0,
+      Esig_symm W k (2^(k+1)+c) (2^(k+1)+a) hcl2 hal2 hW hW0,
+      g1, g2,
+      yrow_gen k a 0 c W ha hc hW ha0 hc0 hW0 haW hcW (Or.inl rfl),
+      yrow_gen k a 1 c W ha hc hW ha0 hc0 hW0 haW hcW (Or.inr rfl)]
+  omega
+
+theorem isoW_row (W k : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0) :
+    ∀ i, i < 2^(k+1) → Asig W i W k = 0 := by
+  intro i hi
+  by_cases hi0 : i = 0
+  · rw [hi0]; exact Asig_zero_col W W k hW hW hW0
+  by_cases hiW : i = W
+  · rw [hiW]; exact Asig_isolated_diag W k hW hW0
+  · exact Asig_isolated_row i W k hi hW hi0 hW0 (fun e => hiW (xor_zero_eq _ _ e))
+
+theorem isoW_col (W k : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0) :
+    ∀ i, i < 2^(k+1) → Asig i W W k = 0 := by
+  intro i hi
+  by_cases hi0 : i = 0
+  · rw [hi0]; exact Asig_zero_row W W k hW hW hW0
+  by_cases hiW : i = W
+  · rw [hiW]; exact Asig_isolated_diag W k hW hW0
+  · exact Asig_isolated i W k hi hW hi0 hW0 (fun e => hiW (xor_zero_eq _ _ e))
+
+/-- The `a`-sum, for one fixed `c`: the block sum's two support points pick out exactly the
+    diagonal and the coset entry of the two-path matrix. -/
+theorem c_step (W k c : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0) (hc : c < 2^(k+1)) :
+    sumLtI (2^(k+1)) (fun a => (2 * P2s W k a c) * blk W k c a)
+      = 4 * P2s W k c c - 4 * P2s W k (c ^^^ W) c := by
+  have hp := Nat.two_pow_pos (k+1)
+  have hcWlt : c ^^^ W < 2^(k+1) := xorlt hc hW
+  by_cases hc0 : c = 0
+  · have hz : ∀ a, P2s W k a c = 0 := fun a =>
+      P2s_col_zero W k a c hc (by rw [hc0]; exact fun b hb => Asig_zero_col b W k hb hW hW0)
+    rw [sumLtI_congr _ _ (fun _ => 0) (fun a _ => by rw [hz a]; omega), sumLtI_zero,
+        hz c, hz (c ^^^ W)]
+    omega
+  by_cases hcW : c = W
+  · have hz : ∀ a, P2s W k a c = 0 := fun a =>
+      P2s_col_zero W k a c hc (by rw [hcW]; exact isoW_col W k hW hW0)
+    rw [sumLtI_congr _ _ (fun _ => 0) (fun a _ => by rw [hz a]; omega), sumLtI_zero,
+        hz c, hz (c ^^^ W)]
+    omega
+  have hcx : c ^^^ W ≠ 0 := fun e => hcW (xor_zero_eq _ _ e)
+  have hne : c ≠ c ^^^ W := by
+    intro e; apply hW0
+    have h : c ^^^ c = c ^^^ (c ^^^ W) := by rw [← e]
+    rw [Nat.xor_self, ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor] at h
+    omega
+  have hcWW : c ^^^ W ≠ W := by
+    intro e; exact hc0 (by have := congrArg (· ^^^ W) e; rwa [xor_cancel, Nat.xor_self] at this)
+  rw [sumLtI_eq_at2 (2^(k+1)) c (c ^^^ W) _ hc hcWlt hne (fun a ha hac hacW => ?_)]
+  · rw [blk_eq W k c c hW hW0 hc hc hc0 hcW hc0 hcW,
+        blk_eq W k (c ^^^ W) c hW hW0 hcWlt hc hcx hcWW hc0 hcW,
+        xor_cancel c W, if_pos (rfl : c = c), if_neg hne]
+    omega
+  · by_cases ha0 : a = 0
+    · rw [ha0, P2s_row_zero W k 0 c hp (fun b hb => Asig_zero_row b W k hb hW hW0)]; omega
+    by_cases haW : a = W
+    · rw [haW, P2s_row_zero W k W c hW (isoW_row W k hW hW0)]; omega
+    · rw [blk_eq W k a c hW hW0 ha hc ha0 haW hc0 hcW,
+          if_neg (fun e => hac e.symm),
+          if_neg (fun e => hacW (by rw [e, xor_cancel]))]
+      omega
+
+/-! ## tr(B²E) = 4(t2′ − S(W)) -/
+
+theorem trB2E_split (W k : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(k+1)+2^(k+1)) (fun a => sumLtI (2^(k+1)+2^(k+1)) (fun b =>
+      sumLtI (2^(k+1)+2^(k+1)) (fun c =>
+        blow (2^(k+1)) (fun u v => Asig u v W k) a b
+          * (blow (2^(k+1)) (fun u v => Asig u v W k) b c * Esig W k c a))))
+      = 4 * sumLtI (2^(k+1)) (fun a => sumLtI (2^(k+1)) (fun b => Asig a b W k * Asig b a W k))
+      - 4 * sumLtI (2^(k+1)) (fun a =>
+              sumLtI (2^(k+1)) (fun b => Asig a b W k * Asig b (a ^^^ W) W k)) := by
+  have hp := Nat.two_pow_pos (k+1)
+  -- 1: the middle index is summed innermost
+  rw [sumLtI_congr (2^(k+1)+2^(k+1)) _
+        (fun a => sumLtI (2^(k+1)+2^(k+1)) (fun c => sumLtI (2^(k+1)+2^(k+1)) (fun b =>
+           blow (2^(k+1)) (fun u v => Asig u v W k) a b
+             * (blow (2^(k+1)) (fun u v => Asig u v W k) b c * Esig W k c a))))
+        (fun a _ => sumLtI_swap _ _ _)]
+  -- 2: it doubles the low-half two-path matrix
+  rw [sumLtI_congr (2^(k+1)+2^(k+1)) _
+        (fun a => sumLtI (2^(k+1)+2^(k+1)) (fun c => (2 * P2s W k a c) * Esig W k c a))
+        (fun a _ => sumLtI_congr _ _ _ (fun c _ => by
+          rw [sumLtI_congr (2^(k+1)+2^(k+1)) _
+                (fun b => (blow (2^(k+1)) (fun u v => Asig u v W k) a b
+                          * blow (2^(k+1)) (fun u v => Asig u v W k) b c) * Esig W k c a)
+                (fun b _ => (Int.mul_assoc _ _ _).symm),
+              sumLtI_mul_r, P2s_full]))]
+  -- 3: collapse the column index
+  rw [sumLtI_congr (2^(k+1)+2^(k+1)) _
+        (fun a => sumLtI (2^(k+1)) (fun c => (2 * P2s W k a c)
+                     * (Esig W k c a + Esig W k (2^(k+1)+c) a)))
+        (fun a _ => sumLtI_shift_inv (2^(k+1)) (fun c => Esig W k c a)
+                      (fun c => 2 * P2s W k a c) (fun c => by rw [P2s_r]))]
+  -- 4/5: collapse the row index; what is left is the 2x2 block sum
+  rw [sumLtI_swap (2^(k+1)+2^(k+1)) (2^(k+1)) _,
+      sumLtI_congr (2^(k+1)) _
+        (fun c => sumLtI (2^(k+1)) (fun a => (2 * P2s W k a c) * blk W k c a))
+        (fun c _ => by
+          rw [sumLtI_shift_inv (2^(k+1)) (fun a => Esig W k c a + Esig W k (2^(k+1)+c) a)
+                (fun a => 2 * P2s W k a c) (fun a => by rw [P2s_l])]
+          exact sumLtI_congr _ _ _ (fun a _ => rfl)),
+  -- 6: two support points per row
+      sumLtI_congr (2^(k+1)) _ (fun c => 4 * P2s W k c c - 4 * P2s W k (c ^^^ W) c)
+        (fun c hc => c_step W k c hW hW0 hc),
+  -- 7: split
+      sumLtI_congr (2^(k+1)) _ (fun c => 4 * P2s W k c c + (-4) * P2s W k (c ^^^ W) c)
+        (fun c _ => by omega),
+      sumLtI_add, sumLtI_mul, sumLtI_mul]
+  -- 8: the two sums ARE t2' and S(W)
+  have e1 : sumLtI (2^(k+1)) (fun c => P2s W k c c)
+      = sumLtI (2^(k+1)) (fun a => sumLtI (2^(k+1)) (fun b => Asig a b W k * Asig b a W k)) :=
+    sumLtI_congr _ _ _ (fun c hc => sumLtI_congr _ _ _ (fun b hb => by
+      simp only [blow, Nat.mod_eq_of_lt hc, Nat.mod_eq_of_lt hb]))
+  have e2 : sumLtI (2^(k+1)) (fun c => P2s W k (c ^^^ W) c)
+      = sumLtI (2^(k+1)) (fun a =>
+          sumLtI (2^(k+1)) (fun b => Asig a b W k * Asig b (a ^^^ W) W k)) :=
+    sumLtI_congr _ _ _ (fun c hc => sumLtI_congr _ _ _ (fun b hb => by
+      simp only [blow, Nat.mod_eq_of_lt (xorlt hc hW), Nat.mod_eq_of_lt hb,
+        Nat.mod_eq_of_lt hc]
+      rw [Asig_symm_full (c ^^^ W) b W k (xorlt hc hW) hb hW hW0,
+          Asig_symm_full b c W k hb hc hW hW0]
+      exact Int.mul_comm _ _))
+  rw [e1, e2]
+  omega
+
+/-! ## Bridge to Tier 42's guarded sums, and the value -/
+
+private theorem row_null (W k a : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0)
+    (h : ¬(a ≠ 0 ∧ a ^^^ W ≠ 0)) : ∀ b, b < 2^(k+1) → Asig a b W k = 0 := by
+  intro b hb
+  by_cases ha0 : a = 0
+  · rw [ha0]; exact Asig_zero_row b W k hb hW hW0
+  · have : a ^^^ W = 0 := by
+      by_cases hx : a ^^^ W = 0
+      · exact hx
+      · exact absurd ⟨ha0, hx⟩ h
+    rw [xor_zero_eq _ _ this]; exact isoW_row W k hW hW0 b hb
+
+private theorem col_null (W k b : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0)
+    (h : ¬(b ≠ 0 ∧ b ^^^ W ≠ 0)) : ∀ a, a < 2^(k+1) → Asig a b W k = 0 := by
+  intro a ha
+  by_cases hb0 : b = 0
+  · rw [hb0]; exact Asig_zero_col a W k ha hW hW0
+  · have : b ^^^ W = 0 := by
+      by_cases hx : b ^^^ W = 0
+      · exact hx
+      · exact absurd ⟨hb0, hx⟩ h
+    rw [xor_zero_eq _ _ this]; exact isoW_col W k hW hW0 a ha
+
+theorem T2_eq (W k : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(k+1)) (fun a => sumLtI (2^(k+1)) (fun b => Asig a b W k * Asig b a W k))
+      = degSum W k := by
+  refine sumLtI_congr _ _ _ (fun a ha => ?_)
+  by_cases hga : a ≠ 0 ∧ a ^^^ W ≠ 0
+  · rw [if_pos hga]
+    refine sumLtI_congr _ _ _ (fun b hb => ?_)
+    by_cases hgb : b ≠ 0 ∧ b ^^^ W ≠ 0
+    · rw [degTerm, if_pos hgb, Asig_symm_full b a W k hb ha hW hW0]
+    · rw [degTerm, if_neg hgb, col_null W k b hW hW0 hgb a ha]; omega
+  · rw [if_neg hga,
+        sumLtI_congr _ _ (fun _ => 0)
+          (fun b hb => by rw [row_null W k a hW hW0 hga b hb]; omega), sumLtI_zero]
+
+theorem S_eq (W k : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(k+1)) (fun a => sumLtI (2^(k+1)) (fun b => Asig a b W k * Asig b (a ^^^ W) W k))
+      = cosetSum W k := by
+  refine sumLtI_congr _ _ _ (fun a ha => ?_)
+  by_cases hga : a ≠ 0 ∧ a ^^^ W ≠ 0
+  · rw [if_pos hga]
+    refine sumLtI_congr _ _ _ (fun b hb => ?_)
+    by_cases hgb : b ≠ 0 ∧ b ^^^ W ≠ 0
+    · rw [cosetTerm, if_pos hgb]
+    · rw [cosetTerm, if_neg hgb, col_null W k b hW hW0 hgb a ha]; omega
+  · rw [if_neg hga,
+        sumLtI_congr _ _ (fun _ => 0)
+          (fun b hb => by rw [row_null W k a hW hW0 hga b hb]; omega), sumLtI_zero]
+
+/-- **`tr(B²E) = 8·t2′`, ∀n.**  §34's second summand. -/
+theorem trB2E_eq (W k : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(k+1)+2^(k+1)) (fun a => sumLtI (2^(k+1)+2^(k+1)) (fun b =>
+      sumLtI (2^(k+1)+2^(k+1)) (fun c =>
+        blow (2^(k+1)) (fun u v => Asig u v W k) a b
+          * (blow (2^(k+1)) (fun u v => Asig u v W k) b c * Esig W k c a))))
+      = 8 * degSum W k := by
+  rw [trB2E_split W k hW hW0, T2_eq W k hW hW0, S_eq W k hW hW0, cosetSum_eq W k hW]
+  omega
+
 end SounioZDFiberAntisym
 
 
