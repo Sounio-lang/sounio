@@ -11226,6 +11226,295 @@ theorem hub_deg (W k H : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0) (hH : HubOf k W
       exact Int.neg_mul_neg _ _
   rw [sumLtI_double (2^(k+1)) _ hper, hub_deg_low W k H hW hW0 hH hHl hH0 hHW]
 
+
+/-! ### Tier 52c — the support discharge, and the hub-position part of `tr(E³)`
+
+    `Esig_gen_gen` / `Esig_gen_supp`: a generic row of `E` vanishes outside six named columns — the
+    matching partner, the coset partner, the two hubs, and `0` and `W`.  (The row's true support is
+    the first four; `0` and `W` are excluded by the lemma rather than covered by it, and are
+    discharged directly inside `E2_hub`.)  Everything else is `Esig_vanishes` (Tier 45), the
+    diagonal, or the within-block coset entry (`resB_coset`).
+
+    With that, `E2_hub_gen` instantiates to `E2_hub`, and `trE3_hub` evaluates the hub-position part
+    of the trace: `−4(h−2)` per hub, `−2` times the degree count.
+
+    ⚠ **Still NOT proven: `tr(E³)` itself.**  What remains is the CLASSIFICATION — every nonzero
+    term of `Σ E(a,b)E(b,c)E(c,a)` has exactly one hub index — plus the cyclic identification that
+    turns it into `3 × (F(hub₀) + F(hub_L)) = 3 × (−8(h−2)) = −24(h−2)`.  The `≥ 2 hubs` half of the
+    classification is immediate from hub–hub non-adjacency; the `0 hubs` half is the 4-cycle
+    argument of §51.1 and needs `Esig_gen_supp` twice. -/
+
+/-! ## The support of a generic row -/
+
+theorem Esig_gen_gen (W k a e b f : Nat) (he : e = 0 ∨ e = 1) (hf : f = 0 ∨ f = 1)
+    (ha : a < 2^(k+1)) (hb : b < 2^(k+1)) (hW : W < 2^(k+1))
+    (ha0 : a ≠ 0) (hb0 : b ≠ 0) (haW : a ≠ W) (hbW : b ≠ W) (hW0 : W ≠ 0)
+    (h : ¬((b = a ∨ b = a ^^^ W) ∧ f ≠ e)) :
+    Esig W k (a + e * 2^(k+1)) (b + f * 2^(k+1)) = 0 := by
+  have hp := Nat.two_pow_pos (k+1)
+  have hpow : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by rw [Nat.pow_succ]; omega
+  have haWx : a ^^^ W ≠ 0 := fun ee => haW (xor_zero_eq _ _ ee)
+  have hbWx : b ^^^ W ≠ 0 := fun ee => hbW (xor_zero_eq _ _ ee)
+  have hWl : W < 2^(k+2) := by omega
+  by_cases hba : b = a
+  · by_cases hfe : f = e
+    · -- the diagonal
+      rw [hba, hfe]
+      have hXl : a + e * 2^(k+1) < 2^(k+2) := by rcases he with rfl | rfl <;> omega
+      have hX0 : a + e * 2^(k+1) ≠ 0 := by rcases he with rfl | rfl <;> omega
+      have hXW : (a + e * 2^(k+1)) ^^^ W ≠ 0 := by
+        rcases he with rfl | rfl
+        · simpa using haWx
+        · rw [Nat.one_mul, shift_xorL k a W ha hW]; omega
+      have hbm : (a + e * 2^(k+1)) % 2^(k+1) = a := by
+        rcases he with rfl | rfl
+        · simpa using Nat.mod_eq_of_lt ha
+        · rw [Nat.one_mul, Nat.add_mod_right]; exact Nat.mod_eq_of_lt ha
+      simp only [Esig, blow, hbm,
+        Asig_diag (a + e * 2^(k+1)) W (k+1) hXl hWl hX0 hXW,
+        Asig_diag a W k ha hW ha0 haWx]
+      omega
+    · exact absurd ⟨Or.inl hba, hfe⟩ h
+  by_cases hbc : b = a ^^^ W
+  · by_cases hfe : f = e
+    · -- the WITHIN-block coset entry
+      rw [hbc, hfe]
+      have hXl : a + e * 2^(k+1) < 2^(k+2) := by rcases he with rfl | rfl <;> omega
+      have hX0 : a + e * 2^(k+1) ≠ 0 := by rcases he with rfl | rfl <;> omega
+      have hXW : (a + e * 2^(k+1)) ^^^ W ≠ 0 := by
+        rcases he with rfl | rfl
+        · simpa using haWx
+        · rw [Nat.one_mul, shift_xorL k a W ha hW]; omega
+      have hxr : (a ^^^ W) + e * 2^(k+1) = (a + e * 2^(k+1)) ^^^ W := by
+        rcases he with rfl | rfl
+        · simp
+        · rw [Nat.one_mul, shift_xorL k a W ha hW]
+      have hbm : (a + e * 2^(k+1)) % 2^(k+1) = a := by
+        rcases he with rfl | rfl
+        · simpa using Nat.mod_eq_of_lt ha
+        · rw [Nat.one_mul, Nat.add_mod_right]; exact Nat.mod_eq_of_lt ha
+      have hcm : ((a ^^^ W) + e * 2^(k+1)) % 2^(k+1) = a ^^^ W := by
+        rcases he with rfl | rfl
+        · simpa using Nat.mod_eq_of_lt (xorlt ha hW)
+        · rw [Nat.one_mul, Nat.add_mod_right]; exact Nat.mod_eq_of_lt (xorlt ha hW)
+      simp only [Esig, blow, hbm, hcm]
+      rw [hxr, asig_zero_of (resB_coset (a + e * 2^(k+1)) W (k+1) hXl hWl hX0 hXW),
+          asig_zero_of (resB_coset a W k ha hW ha0 haWx)]
+      omega
+    · exact absurd ⟨Or.inr hbc, hfe⟩ h
+  · exact Esig_vanishes k a b W e f he hf
+      ⟨ha, hb, hW, ha0, hb0, haW, hbW, fun ee => hba ee.symm, fun ee => hbc (by rw [ee, xor_cancel])⟩
+
+/-- **A generic row of `E` vanishes outside six named columns** — the matching partner, the coset
+    partner, the two hubs, and `0` and `W`.
+
+    ⚠ Read the statement, not the slogan: the row really has only FOUR nonzeros (measured — the
+    columns `0` and `W` are null too), but this lemma EXCLUDES those two rather than covering them.
+    They are discharged separately, and directly, inside `E2_hub`: `Asig_zero_col` at `0` and
+    `Asig_isolated` / `isoW_col` at `W`.  Listing them here is redundancy, not a gap — but the
+    lemma as stated is weaker than the sentence "exactly four nonzeros". -/
+theorem Esig_gen_supp (W k b0 d c : Nat) (hd : d = 0 ∨ d = 1)
+    (hb0 : b0 < 2^(k+1)) (hW : W < 2^(k+1)) (hb00 : b0 ≠ 0) (hb0W : b0 ≠ W) (hW0 : W ≠ 0)
+    (hc : c < 2^(k+1) + 2^(k+1))
+    (hcm : c ≠ b0 + (1 - d) * 2^(k+1)) (hcc : c ≠ (b0 ^^^ W) + (1 - d) * 2^(k+1))
+    (hc0 : c ≠ 0) (hcW : c ≠ W)
+    (hcH1 : c ≠ 2^(k+1)) (hcH2 : c ≠ W + 2^(k+1)) :
+    Esig W k (b0 + d * 2^(k+1)) c = 0 := by
+  have hp := Nat.two_pow_pos (k+1)
+  have hpow : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by rw [Nat.pow_succ]; omega
+  have hb0Wx : b0 ^^^ W ≠ 0 := fun e => hb0W (xor_zero_eq _ _ e)
+  have hXl : b0 + d * 2^(k+1) < 2^(k+2) := by rcases hd with rfl | rfl <;> omega
+  have hX0 : b0 + d * 2^(k+1) ≠ 0 := by rcases hd with rfl | rfl <;> omega
+  have hXW : (b0 + d * 2^(k+1)) ^^^ W ≠ 0 := by
+    rcases hd with rfl | rfl
+    · simpa using hb0Wx
+    · rw [Nat.one_mul, shift_xorL k b0 W hb0 hW]; omega
+  have hbm : (b0 + d * 2^(k+1)) % 2^(k+1) = b0 := by
+    rcases hd with rfl | rfl
+    · simpa using Nat.mod_eq_of_lt hb0
+    · rw [Nat.one_mul, Nat.add_mod_right]; exact Nat.mod_eq_of_lt hb0
+  have hWl : W < 2^(k+2) := by omega
+  -- decompose c
+  obtain ⟨c0, e, hc0lt, he, rfl⟩ :
+      ∃ c0 e, c0 < 2^(k+1) ∧ (e = 0 ∨ e = 1) ∧ c = c0 + e * 2^(k+1) := by
+    rcases Nat.lt_or_ge c (2^(k+1)) with h | h
+    · exact ⟨c, 0, h, Or.inl rfl, by omega⟩
+    · exact ⟨c - 2^(k+1), 1, by omega, Or.inr rfl, by omega⟩
+  have hc00 : c0 ≠ 0 := by
+    intro e0
+    rcases he with rfl | rfl
+    · exact hc0 (by omega)
+    · exact hcH1 (by omega)
+  have hc0W : c0 ≠ W := by
+    intro e0
+    rcases he with rfl | rfl
+    · exact hcW (by omega)
+    · exact hcH2 (by omega)
+  refine Esig_gen_gen W k b0 d c0 e hd he hb0 hc0lt hW hb00 hc00 hb0W hc0W hW0 ?_
+  rintro ⟨hor, hne⟩
+  have hed : e = 1 - d := by rcases hd with rfl | rfl <;> rcases he with rfl | rfl <;> omega
+  rcases hor with rfl | rfl
+  · exact hcm (by rw [hed])
+  · exact hcc (by rw [hed])
+
+/-- The two-path identity at a hub, instantiated at a generic vertex. -/
+theorem E2_hub (W k H b0 d : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0) (hH : HubOf k W H)
+    (hHl : H < 2^(k+1) + 2^(k+1)) (hH0 : H ≠ 0) (hHW : H ^^^ W ≠ 0)
+    (hb0 : b0 < 2^(k+1)) (hb00 : b0 ≠ 0) (hb0W : b0 ≠ W) (hd : d = 0 ∨ d = 1) :
+    sumLtI (2^(k+1)+2^(k+1))
+        (fun c => Esig W k (b0 + d * 2^(k+1)) c * Esig W k c H)
+      = -2 * Esig W k H (b0 + d * 2^(k+1)) := by
+  have hp := Nat.two_pow_pos (k+1)
+  have hpow : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by rw [Nat.pow_succ]; omega
+  have hb0Wx : b0 ^^^ W ≠ 0 := fun e => hb0W (xor_zero_eq _ _ e)
+  have hb0Wlt : b0 ^^^ W < 2^(k+1) := xorlt hb0 hW
+  have hb0WW : b0 ^^^ W ≠ W := by
+    intro e; exact hb00 (by have := congrArg (· ^^^ W) e; rwa [xor_cancel, Nat.xor_self] at this)
+  have hne : b0 ≠ b0 ^^^ W := by
+    intro e; apply hW0
+    have h2 : b0 ^^^ b0 = b0 ^^^ (b0 ^^^ W) := by rw [← e]
+    rw [Nat.xor_self, ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor] at h2
+    omega
+  have hWl : W < 2^(k+2) := by omega
+  have hHl2 : H < 2^(k+2) := by omega
+  have hb0l : b0 < 2^(k+2) := by omega
+  have hb0Wl : b0 ^^^ W < 2^(k+2) := by omega
+  have flip1 : Asig H (b0 + 2^(k+1)) W (k+1) = - Asig H b0 W (k+1) :=
+    hH.hflip b0 hb0 hb00 hb0W
+  have flip2 : Asig H ((b0 ^^^ W) + 2^(k+1)) W (k+1) = - Asig H (b0 ^^^ W) W (k+1) :=
+    hH.hflip (b0 ^^^ W) hb0Wlt hb0Wx hb0WW
+  have a1 : Asig H (b0 ^^^ W) W (k+1) = - Asig H b0 W (k+1) := by
+    rw [Asig_symm_full H (b0 ^^^ W) W (k+1) hHl2 hb0Wl hWl hW0,
+        A1 b0 H W (k+1) hb0l hHl2 hWl hb00 hH0 hb0Wx hHW,
+        Asig_symm_full b0 H W (k+1) hb0l hHl2 hWl hW0]
+  -- the four data of `E2_hub_gen`, per block
+  rcases hd with rfl | rfl
+  · -- b in the LOW block; matching partner b0 + h, coset partner (b0^W) + h
+    simp only [Nat.zero_mul, Nat.add_zero]
+    refine E2_hub_gen W k H b0 (b0 + 2^(k+1)) ((b0 ^^^ W) + 2^(k+1))
+      (by omega) (by omega) (by omega) ?_ ?_ ?_ ?_ ?_
+    · simp only [Esig, blow, Nat.mod_eq_of_lt hb0, Nat.add_mod_right,
+        Asig_matching k b0 W hb0 hW hb00 hW0 hb0W, Asig_diag b0 W k hb0 hW hb00 hb0Wx]
+      omega
+    · simp only [Esig, blow, Nat.mod_eq_of_lt hb0, Nat.add_mod_right,
+        Nat.mod_eq_of_lt hb0Wlt,
+        Asig_coset k b0 W hb0 hW hb00 hW0 hb0W,
+        asig_zero_of (resB_coset b0 W k hb0 hW hb00 hb0Wx)]
+      omega
+    · rw [Esig_symm W k (b0 + 2^(k+1)) H (by omega) hHl2 hW hW0, hH.hblow, hH.hblow, flip1]
+    · rw [Esig_symm W k ((b0 ^^^ W) + 2^(k+1)) H (by omega) hHl2 hW hW0,
+          hH.hblow, hH.hblow, flip2, a1]
+      omega
+    · intro c hc hcm hcc
+      by_cases h1 : c = 2^(k+1)
+      · rw [h1, hH.hdead (2^(k+1)) (Or.inl rfl)]; omega
+      by_cases h2 : c = W + 2^(k+1)
+      · rw [h2, hH.hdead (W + 2^(k+1)) (Or.inr rfl)]; omega
+      by_cases h3 : c = 0
+      · rw [h3]
+        simp only [Esig, blow, Nat.mod_eq_of_lt hb0, Nat.zero_mod,
+          Asig_zero_col b0 W (k+1) hb0l hWl hW0, Asig_zero_col b0 W k hb0 hW hW0]
+        omega
+      by_cases h4 : c = W
+      · rw [h4]
+        simp only [Esig, blow, Nat.mod_eq_of_lt hb0, Nat.mod_eq_of_lt hW,
+          Asig_isolated b0 W (k+1) hb0l hWl hb00 hW0 hb0Wx, isoW_col W k hW hW0 b0 hb0]
+        omega
+      · rw [show Esig W k b0 c = 0 from by
+              have := Esig_gen_supp W k b0 0 c (Or.inl rfl) hb0 hW hb00 hb0W hW0 hc
+                (by simpa using hcm) (by simpa using hcc) h3 h4 h1 h2
+              simpa using this]
+        omega
+  · -- b in the HIGH block; matching partner b0, coset partner b0^W
+    simp only [Nat.one_mul]
+    refine E2_hub_gen W k H (b0 + 2^(k+1)) b0 (b0 ^^^ W)
+      (by omega) (by omega) hne ?_ ?_ ?_ ?_ ?_
+    · rw [Esig_symm W k (b0 + 2^(k+1)) b0 (by omega) hb0l hW hW0]
+      simp only [Esig, blow, Nat.mod_eq_of_lt hb0, Nat.add_mod_right,
+        Asig_matching k b0 W hb0 hW hb00 hW0 hb0W, Asig_diag b0 W k hb0 hW hb00 hb0Wx]
+      omega
+    · rw [Esig_symm W k (b0 + 2^(k+1)) (b0 ^^^ W) (by omega) hb0Wl hW hW0]
+      simp only [Esig, blow, Nat.mod_eq_of_lt hb0, Nat.add_mod_right,
+        Nat.mod_eq_of_lt hb0Wlt]
+      rw [show Asig (b0 ^^^ W) (b0 + 2^(k+1)) W (k+1)
+            = Asig (b0 ^^^ W) (((b0 ^^^ W) ^^^ W) + 2^(k+1)) W (k+1) from by rw [xor_cancel],
+          Asig_coset k (b0 ^^^ W) W hb0Wlt hW hb0Wx hW0 hb0WW,
+          show Asig (b0 ^^^ W) b0 W k = 0 from by
+            have := asig_zero_of (resB_coset (b0 ^^^ W) W k hb0Wlt hW hb0Wx
+              (by rw [xor_cancel]; exact hb00))
+            rwa [xor_cancel] at this]
+      omega
+    · rw [Esig_symm W k b0 H hb0l hHl2 hW hW0, hH.hblow, hH.hblow, flip1]
+      omega
+    · rw [Esig_symm W k (b0 ^^^ W) H hb0Wl hHl2 hW hW0, hH.hblow, hH.hblow, flip1, a1]
+    · intro c hc hcm hcc
+      by_cases h1 : c = 2^(k+1)
+      · rw [h1, hH.hdead (2^(k+1)) (Or.inl rfl)]; omega
+      by_cases h2 : c = W + 2^(k+1)
+      · rw [h2, hH.hdead (W + 2^(k+1)) (Or.inr rfl)]; omega
+      by_cases h3 : c = 0
+      · rw [h3]
+        simp only [Esig, blow, Nat.add_mod_right, Nat.mod_eq_of_lt hb0, Nat.zero_mod,
+          Asig_zero_col (b0 + 2^(k+1)) W (k+1) (by omega) hWl hW0,
+          Asig_zero_col b0 W k hb0 hW hW0]
+        omega
+      by_cases h4 : c = W
+      · rw [h4]
+        simp only [Esig, blow, Nat.add_mod_right, Nat.mod_eq_of_lt hb0, Nat.mod_eq_of_lt hW,
+          Asig_isolated (b0 + 2^(k+1)) W (k+1) (by omega) hWl (by omega)
+            hW0 (by rw [shift_xorL k b0 W hb0 hW]; omega),
+          isoW_col W k hW hW0 b0 hb0]
+        omega
+      · rw [show Esig W k (b0 + 2^(k+1)) c = 0 from by
+              have := Esig_gen_supp W k b0 1 c (Or.inr rfl) hb0 hW hb00 hb0W hW0 hc
+                (by simpa using hcm) (by simpa using hcc) h3 h4 h1 h2
+              simpa using this]
+        omega
+
+/-- **The hub-position part of `tr(E³)`: `−4(h−2)` per hub.**  Every generic `b` contributes
+    `E(H,b)·(−2·E(H,b))`, and the four non-generic `b` contribute nothing because the hub row
+    vanishes there; so the whole thing is `−2` times the degree count. -/
+theorem trE3_hub (W k H : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0) (hH : HubOf k W H)
+    (hHl : H < 2^(k+1) + 2^(k+1)) (hH0 : H ≠ 0) (hHW : H ^^^ W ≠ 0) :
+    sumLtI (2^(k+1)+2^(k+1)) (fun b =>
+      sumLtI (2^(k+1)+2^(k+1)) (fun c => Esig W k H b * (Esig W k b c * Esig W k c H)))
+      = -4 * (((2^(k+1) : Nat) : Int) - 2) := by
+  have hp := Nat.two_pow_pos (k+1)
+  have hpow : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by rw [Nat.pow_succ]; omega
+  have hWl : W < 2^(k+2) := by omega
+  have hHl2 : H < 2^(k+2) := by omega
+  have key : ∀ b, b < 2^(k+1) + 2^(k+1) →
+      sumLtI (2^(k+1)+2^(k+1)) (fun c => Esig W k H b * (Esig W k b c * Esig W k c H))
+        = -2 * (Esig W k H b * Esig W k H b) := by
+    intro b hb
+    rw [sumLtI_mul]
+    obtain ⟨b0, d, hb0, hd, rfl⟩ :
+        ∃ b0 d, b0 < 2^(k+1) ∧ (d = 0 ∨ d = 1) ∧ b = b0 + d * 2^(k+1) := by
+      rcases Nat.lt_or_ge b (2^(k+1)) with h | h
+      · exact ⟨b, 0, h, Or.inl rfl, by omega⟩
+      · exact ⟨b - 2^(k+1), 1, by omega, Or.inr rfl, by omega⟩
+    by_cases hb00 : b0 = 0
+    · have e0 : Esig W k H (b0 + d * 2^(k+1)) = 0 := by
+        rcases hd with rfl | rfl
+        · rw [hb00]; simpa using hH.hblow 0 ▸ Asig_zero_col H W (k+1) hHl2 hWl hW0
+        · rw [hb00, Nat.zero_add, Nat.one_mul,
+              Esig_symm W k H (2^(k+1)) hHl2 (by omega) hW hW0,
+              hH.hdead (2^(k+1)) (Or.inl rfl)]
+      rw [e0]; omega
+    by_cases hb0W : b0 = W
+    · have e0 : Esig W k H (b0 + d * 2^(k+1)) = 0 := by
+        rcases hd with rfl | rfl
+        · rw [hb0W]
+          simpa using hH.hblow W ▸ Asig_isolated H W (k+1) hHl2 hWl hH0 hW0 hHW
+        · rw [hb0W, Nat.one_mul,
+              Esig_symm W k H (W + 2^(k+1)) hHl2 (by omega) hW hW0,
+              hH.hdead (W + 2^(k+1)) (Or.inr rfl)]
+      rw [e0]; omega
+    · rw [E2_hub W k H b0 d hW hW0 hH hHl hH0 hHW hb0 hb00 hb0W hd]
+      grind
+  rw [sumLtI_congr _ _ _ key, sumLtI_mul, hub_deg W k H hW hW0 hH hHl hH0 hHW]
+  omega
+
 end SounioZDFiberAntisym
 
 

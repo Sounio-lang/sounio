@@ -3356,3 +3356,34 @@ a support. It is `sumLtI_peel` twice (Tier 48 — the lemma §47 nearly skipped)
 
 **`tr(E³)` is NOT yet proven in Lean.** §34's other three terms are. (III) is still reduced; (d) and
 V1 untouched.
+
+### §51.6 — what is in Lean (Tiers 52, 52b, 52c) and what is not
+
+| piece | status |
+|---|---|
+| `HubOf` + `hubOf_hub0` / `hubOf_hubL` — the two hubs | ✅ Tier 52 |
+| `E2_hub_gen`, `E2_hub` — `(E²)(b,H) = −2·E(H,b)` | ✅ Tier 52 / 52c |
+| `hub_deg` — the degree count `Σ_b E(H,b)² = 2(h−2)` | ✅ Tier 52b |
+| `Esig_gen_gen`, `Esig_gen_supp` — the support discharge | ✅ Tier 52c |
+| `trE3_hub` — the hub-position part, `−4(h−2)` per hub | ✅ Tier 52c |
+| **the classification + cyclic split → `tr(E³)`** | ❌ **NOT PROVEN** |
+
+**What is left, precisely.** Write `T(a,b,c) = E(a,b)E(b,c)E(c,a)` and `χ(x) = [x is a hub]`. The
+missing step is the pointwise identity
+
+```
+T(a,b,c) = (χ a + χ b + χ c) · T(a,b,c)
+```
+
+— i.e. **every nonzero term has exactly one hub index.** Its `≥ 2 hubs` half is immediate: any two
+hub indices among `a,b,c` are adjacent in the cycle, and hub–hub entries vanish. Its `0 hubs` half is
+§51.1's 4-cycle argument and needs `Esig_gen_supp` twice, which now exists. With that identity,
+`sumLtI_add` splits the trace into three pieces, `sumLtI3_cyc` identifies them, a two-point collapse
+evaluates the first as `trE3_hub(2^(k+1)) + trE3_hub(W+2^(k+1)) = −8(h−2)`, and the total is
+`3 × (−8(h−2)) = −24(h−2)`.
+
+⚠ **A wording correction inside Tier 52c.** Its lemma is stated as "vanishes outside SIX named
+columns" — the matching partner, the coset partner, the two hubs, and `0` and `W`. The row's true
+support is the first four; `0` and `W` are *excluded by the lemma* rather than covered by it, and are
+discharged directly inside `E2_hub`. The docstring originally said "exactly four nonzeros", which is
+true of the object but not of the theorem; fixed.
