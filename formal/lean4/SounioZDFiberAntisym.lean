@@ -9994,6 +9994,54 @@ theorem tri3_Asig_blow (W k : Nat) :
   exact tri3_blow' (2^(k+1)) (fun x y => Asig x y W k)
 
 
+/-! ## Tier 44: exchange of summation order, and the cyclic collapse
+
+Tier 43 named the lemma the remaining two terms of §34 need and did not have: a sum-exchange, so that
+the eight terms of `tr((B+E)³)` collapse into four. Here it is, together with the cyclic reindexing
+of a triple sum that it gives. Both are plain induction — no `Finset`, no reindexing bijections. -/
+
+/-- Sums add termwise. -/
+theorem sumLtI_add (n : Nat) (f g : Nat → Int) :
+    sumLtI n (fun i => f i + g i) = sumLtI n f + sumLtI n g := by
+  induction n with
+  | zero => show (0:Int) = 0 + 0; omega
+  | succ n ih => rw [sumLtI, sumLtI, sumLtI, ih]; omega
+
+/-- **Exchange of summation order.** -/
+theorem sumLtI_swap (m n : Nat) (f : Nat → Nat → Int) :
+    sumLtI m (fun a => sumLtI n (fun b => f a b))
+      = sumLtI n (fun b => sumLtI m (fun a => f a b)) := by
+  induction m with
+  | zero =>
+      show (0:Int) = sumLtI n (fun b => sumLtI 0 (fun a => f a b))
+      rw [sumLtI_congr n (fun b => sumLtI 0 (fun a => f a b)) (fun _ => 0) (fun b _ => rfl),
+          sumLtI_zero n]
+  | succ m ih =>
+      show sumLtI m (fun a => sumLtI n (fun b => f a b)) + sumLtI n (fun b => f m b)
+           = sumLtI n (fun b => sumLtI (m+1) (fun a => f a b))
+      rw [ih, sumLtI_congr n (fun b => sumLtI (m+1) (fun a => f a b))
+            (fun b => sumLtI m (fun a => f a b) + f m b) (fun b _ => rfl),
+          sumLtI_add n]
+
+/-- **Cyclic reindexing of a triple sum**: `Σ F a b c = Σ F b c a`. Two swaps. -/
+theorem sumLtI3_cyc (N : Nat) (F : Nat → Nat → Nat → Int) :
+    sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c => F a b c)))
+      = sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c => F b c a))) := by
+  rw [sumLtI_swap N N (fun a b => sumLtI N (fun c => F b c a))]
+  exact sumLtI_congr N _ _ (fun b _ => (sumLtI_swap N N (fun a c => F b c a)).symm)
+
+/-- **The form the `tr((B+E)³)` expansion needs**: the three cyclic rotations of a product of three
+    matrices have the same triple sum. With `f = g = B`, `h = E` this identifies the three `BBE`
+    terms, and with `f = B`, `g = h = E` the three `BEE` terms — the collapse `8 → 4`. -/
+theorem tri3_cyc (N : Nat) (f g h : Nat → Nat → Int) :
+    sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c => f a b * (g b c * h c a))))
+      = sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c => g a b * (h b c * f c a)))) := by
+  rw [sumLtI3_cyc N (fun a b c => g a b * (h b c * f c a))]
+  refine sumLtI_congr N _ _ (fun a _ => sumLtI_congr N _ _ (fun b _ =>
+    sumLtI_congr N _ _ (fun c _ => ?_)))
+  grind
+
+
 end SounioZDFiberAntisym
 
 
