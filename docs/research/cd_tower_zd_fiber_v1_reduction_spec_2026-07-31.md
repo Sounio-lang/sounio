@@ -4056,4 +4056,116 @@ asking, at the Lean levels `m = 2,3,4`: `P1_hi_lo` 0 violations in 36032 instanc
 pair of graphs without determining either triangle count. `Ncnt_hi`'s `−4` is now a theorem at the
 level of the support; the moment is still open.
 
+### 57.6 — ⚠ CORRECTION to §57.4, and what the disjointness actually buys
+
+§57.4 wrote, of the two graphs, that "they miss the diagonal and, off it, the pairs where both masks
+are false". **The second clause is FALSE.** Measured at `m = 2,3,4` over every label and every
+off-diagonal pair of nonzero indices: the number of pairs where both masks are false is **0**. The
+two graphs do not merely avoid each other, they **PARTITION** the edges.
+
+The reason, now a theorem (Tier 61 `resB_hi_or_lo`): `resB`'s first two clauses are the A2_VACUITY
+pair, and at level `m+1` they are unconditional — `P1_symm` needs `x ⊕ L ≠ 0`, and the high label's
+`⊕` on a low index is `(x ⊕ W) + 2^(m+1)`, never `0`. So the high mask **is** its third clause,
+which Tier 60 turns into `−P1_low = P3_low`, the exact negation of the low third clause (both are
+`±1`). The single place the low mask fails for another reason is the low label's ISOLATED vertex
+`l = W` — precisely where `P1_symm`'s hypothesis fails — and there `P1 = −P3` outright, so the high
+mask carries that row and that column. That identity was already inside `Asig_isolated_row` and
+`Asig_isolated`, used only to conclude the mask fails; Tier 61 extracts it as `P1_iso_row` /
+`P1_iso_col`.
+
+**The object §57.4 wanted.** Subtracting kills the mask:
+
+| | |
+|---|---|
+| `Asig_hi_lo_diff` | `Asig l y W m − Asig l y (W+2^(m+1)) (m+1) = − P1 l y W m` |
+
+`−P1` is symmetric (`P1_symm`), `±1` (`P1_pm`), zero on the diagonal — **a Seidel matrix**, of which
+the two `Asig` are the two edge classes. That is the lane's own vocabulary: writing `P = −P1`,
+
+    tr(P³) = 6·( C(2^(m+1)−1, 3) − 2·|Ω_W| )      0 violations at m = 2,3,4
+
+where `Ω_W` is the **two-graph** of the label (the triples with `P_ij P_jk P_ki = −1`), so the
+`P`-term is a switching-class invariant and the mask-dependence of the deviation lives entirely in
+the mixed traces.
+
+*Measured and unexplained, recorded so it is not mistaken later for a finding:* the within-fibre
+deviations of `|Ω_W|` itself are `+168` at `m = 3` (`j = 3`) and `+1152 / +2328 / −1152` at `m = 4`
+(`j = 3, 4, 3`). The `168` is the same integer as `|GL(3,2)|`, which is all over this lane; at
+`m = 4` the `j = 3` values are `±1152`, not multiples of `168`, so the coincidence does **not**
+extend. No claim is attached to these numbers.
+
+**The four-term high-branch descent.** With `P = Alo − Ahi`, trilinearity gives, exactly,
+
+    t3(box) = t3(Alo) − 3·tr(Alo² P) + 3·tr(Alo P²) − t3(P)
+
+0 violations at `m = 2,3,4`. **This does not overturn §54.3.** What §54.3 refuted was a *two-term
+affine* recursion in `(t3′, t2′)`; the extra terms here are mixed traces, not multiples of those two.
+
+**Where the box sits.** Measured at `m = 3,4,5`, over every high label:
+
+| | |
+|---|---|
+| `t3(box_W) − t3(box_{8g+1})` | `= −27·8^(n−j)·[j,3]₂` with `n = m+2`, `j = lsb W`, parity on `g(W+2^(m+1))` — 0 viol |
+| `D(full level-(m+1) matrix)` | `= 8 · D(box)` — 0 viol / 63 at `m = 5`, with 3 nonzero instances |
+
+So the box **is** the level-`n` object and the `8` is `tri3_kron`'s, now checked on general labels
+and not only on the maximal seam. Before this, the factor was a theorem for the `2^n` label alone.
+
+**The parity corollary — and why it is NOT a finding.** `g(W + 2^(m+1)) = g(W) + 2^(m−2)`
+(0 violations), so `popcount`'s parity FLIPS: a low label and its box sit in fibres of opposite
+parity, and therefore exactly one of the two deviations is zero (0 violations). Hence
+
+    D_low + D_box = −27·8^(n−j)·[j,3]₂     with no parity case split
+
+which looks like a cleaner law than either half. It is not new content: it is (A) — the parity half,
+already a theorem — composed with the `g`-shift. Recorded as a corollary, per the lane's rule about
+checking whether a pattern is forced by cheaper structure before calling it a fingerprint.
+
+### 57.7 — Tier 62: the mask is an ARTEFACT
+
+The partition has a consequence stronger than the difference identity. The mask holds exactly where
+`P1 = P3` and fails exactly where `P1 = −P3` — the two are exhaustive because both products are
+`±1`, and the isolated row/column (the only place the first clause can fail on its own) is a
+`P1 = −P3` locus. Both cases are then the same formula:
+
+| | |
+|---|---|
+| `Asig_no_mask` | `2 · Asig l y Llo n = − (P1 l y Llo n + P3 l y Llo n)` |
+
+with hypotheses `l, y, Llo < 2^(n+1)`, `l ≠ 0`, `y ≠ 0`, `l ≠ y` — **`Llo ≠ 0` is not assumed**; it
+is derived in the two branches that use it. (The M1 reviewer found that same hypothesis superfluous
+in Tier 61's `resB_hi_or_lo`/`Asig_hi_lo_diff`, where the two providers disagreed; the argument that
+it is derivable — `l ⊕ W = 0` gives `l = W`, and `l ≠ 0` gives `W ≠ 0` — is correct, so both were
+tightened before committing.) Measured over every index including `0` and the diagonal: 0 failures
+at `m = 2,3,4`.
+
+`A_σ` is therefore a **polynomial in two `±1` matrices**, and `tri3` of it expands by trilinearity
+into eight words in `(P1, P3)` with no `resB` anywhere:
+
+    8 · tri3(A_σ) = − tri3(P1 + P3)        0 violations, m = 2,3, every label
+
+**⚠ A corollary I wrote down and then refuted.** Substituting Tier 60's `P1_hi = −P1_lo`,
+`P3_hi = P3_lo` into the box's copy gives `8·t3(box) = tri3(P1 − P3)` and hence the clean-looking
+`4·(t3(Alo) + t3(box)) = −tri3(P3) − 3·tri3m(P3,P1,P1)`. **This is FALSE at every label of
+`m = 2,3,4`.** Both substitutions carry hypotheses — `l ≠ y` for `P1_hi_lo`, `l,y ≠ 0` for both —
+and measuring `(P1_hi + P3_hi) − (P3_lo − P1_lo)` locates the damage exactly there:
+
+| level | off-diagonal | diagonal | touching index 0 |
+|---|---|---|---|
+| `m = 2` | **0** | 49 | 105 |
+| `m = 3` | **0** | 225 | 465 |
+| `m = 4` | **0** | 961 | 1953 |
+
+`tri3` sums over both of those loci. The per-level identity is right; the level LINK needs that
+correction, not computed here. Recorded because it was written into the Lean docstring before being
+measured, and the measurement is what caught it. **A first version of this paragraph said the
+damage was "exactly the diagonal"** — that was measured about `P1` alone; the index-0 row and column
+differ too, because both `hi_lo` lemmas exclude the index 0.
+
+**Status of (III).** Still reduced, not proven. What moved: the box's variation is no longer an
+unrelated unknown but the level-below's variation plus three `P`-terms; `P` is a Seidel matrix whose
+cubic trace is a two-graph count; and the mask is gone from the object entirely. What has not been
+attempted: the fibre variation of `tr(Alo² P)` and `tr(Alo P²)`, and the diagonal correction that
+would link the two levels' polynomial forms. No difficulty is recorded for either.
+
 **(III) is still reduced, not proven.**

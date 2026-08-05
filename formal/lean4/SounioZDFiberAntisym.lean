@@ -12587,6 +12587,255 @@ theorem resB_hi_lo_disjoint (m l y W : Nat) (hl : l < 2^(m+1)) (hy : y < 2^(m+1)
   have hP3 := P3_hi_lo m l y W hl hy hW hl0 hy0
   rcases P1_pm l y W m with h | h <;> rw [h] at e2 <;> omega
 
+
+/-! ### Tier 61 — the two graphs PARTITION the off-diagonal, and their DIFFERENCE is mask-free
+
+    Tier 60 gave one half of the picture: the low label's graph at level `m` and the high label's
+    box at level `m+1` are edge-DISJOINT.  They also COVER: off the diagonal, at nonzero indices,
+    exactly one of the two masks holds.  §57.4 said the opposite ("the pairs where both masks are
+    false" were listed as a third class); that sentence is wrong and this tier is its correction.
+
+    Why they cover.  `resB`'s first two clauses are the A2_VACUITY pair, and at level `m+1` they are
+    unconditional: `P1_symm` needs `x ⊕ Llo ≠ 0`, and the high label's `⊕` on a low index is
+    `(x ⊕ W) + 2^(m+1)`, never `0`.  So the HIGH mask is exactly its third clause `P1 = P3`, which
+    Tier 60 turns into `−P1_low = P3_low` — the negation of the LOW third clause, both being `±1`.
+    The one place the low mask can fail for another reason is the low label's ISOLATED vertex
+    `l = W` (where `P1_symm`'s hypothesis is exactly what fails), and there `P1 = −P3` outright —
+    the identity inside `Asig_isolated_row`/`Asig_isolated`, extracted here as `P1_iso_row`/
+    `P1_iso_col` — so the HIGH mask carries that row and that column.
+
+    The consequence is the object §57.4 was after:
+
+      `Asig l y W m − Asig l y (W + 2^(m+1)) (m+1) = − P1 l y W m`
+
+    with no mask on the right.  `−P1` is symmetric (`P1_symm`), `±1` (`P1_pm`) and zero on the
+    diagonal only by convention — a SEIDEL matrix — and the two `Asig` are its two edge classes.
+    Expanding `tri3` of the box as `tri3` of (level below − that matrix) is then an exact four-term
+    identity, which is the high-branch descent §54.3 looked for and refuted **as a two-term affine
+    recursion in `(t3', t2')`**.  It is not a contradiction of that negative: the extra terms are
+    two mixed traces, not multiples of `t3'` and `t2'`. -/
+
+/-- `P3` is `±1`, like `P1`. -/
+theorem P3_pm (l y Llo n : Nat) : P3 l y Llo n = 1 ∨ P3 l y Llo n = -1 := by
+  unfold P3
+  rcases cdSigma_pm (n+2) l (hi y Llo n) with h1 | h1 <;>
+    rcases cdSigma_pm (n+2) (hi l Llo n) y with h2 | h2 <;>
+      rw [h1, h2] <;> decide
+
+/-- **On the isolated ROW the two products are exact opposites.**  This is the identity inside
+    `Asig_isolated_row`, which used it only to conclude that the mask fails; Tier 61 needs the
+    identity itself, because it is what puts that row into the OTHER graph. -/
+theorem P1_iso_row (y Llo n : Nat) (hy : y < 2^(n+1)) (hL : Llo < 2^(n+1))
+    (hy0 : y ≠ 0) (hL0 : Llo ≠ 0) (hyL : y ^^^ Llo ≠ 0) :
+    P1 Llo y Llo n = - P3 Llo y Llo n := by
+  have hml : y ^^^ Llo < 2^(n+1) := xorlt hy hL
+  have hP1 : P1 Llo y Llo n = cdSigma Llo y (n+1) := by
+    unfold P1 hi
+    rw [Nat.xor_self, R_ll Llo y n hL hy,
+        R_uu 0 (y ^^^ Llo) n (Nat.two_pow_pos (n+1)) hml, if_neg hyL, cdSig0']
+    exact (Int.mul_one _)
+  have hP3 : P3 Llo y Llo n = - cdSigma (y ^^^ Llo) Llo (n+1) := by
+    unfold P3 hi
+    rw [Nat.xor_self, R_lu Llo (y ^^^ Llo) n hL hml,
+        R_ul 0 y n (Nat.two_pow_pos (n+1)) hy, if_neg hy0, cdSig0]
+    exact (Int.mul_neg_one _)
+  have hA : cdSigma y Llo (n+1) = - cdSigma (y ^^^ Llo) Llo (n+1) :=
+    A4_sub (n+1) y Llo hy hL hy0 hL0 hyL
+  have hLy : Llo ≠ y := by intro h; exact hyL (by rw [← h, Nat.xor_self])
+  have hanti : cdSigma Llo y (n+1) = - cdSigma y Llo (n+1) :=
+    antisym (n+1) Llo y hL hy hL0 hy0 hLy
+  rw [hP1, hP3, hanti, hA]
+
+/-- The same on the isolated COLUMN (the identity inside `Asig_isolated`). -/
+theorem P1_iso_col (l Llo n : Nat) (hl : l < 2^(n+1)) (hL : Llo < 2^(n+1))
+    (hl0 : l ≠ 0) (hL0 : Llo ≠ 0) (hlL : l ^^^ Llo ≠ 0) :
+    P1 l Llo Llo n = - P3 l Llo Llo n := by
+  have hml : l ^^^ Llo < 2^(n+1) := xorlt hl hL
+  have hP1 : P1 l Llo Llo n = - cdSigma l Llo (n+1) := by
+    unfold P1 hi
+    rw [Nat.xor_self, R_ll l Llo n hl hL, R_uu (l ^^^ Llo) 0 n hml (Nat.two_pow_pos (n+1)),
+        if_pos rfl]
+    exact (Int.mul_neg_one _)
+  have hP3 : P3 l Llo Llo n = - cdSigma (l ^^^ Llo) Llo (n+1) := by
+    unfold P3 hi
+    rw [Nat.xor_self, R_lu l 0 n hl (Nat.two_pow_pos (n+1)), cdSig0,
+        R_ul (l ^^^ Llo) Llo n hml hL, if_neg hL0]
+    exact (Int.one_mul _)
+  have hA : cdSigma l Llo (n+1) = - cdSigma (l ^^^ Llo) Llo (n+1) :=
+    A4_sub (n+1) l Llo hl hL hl0 hL0 hlL
+  rw [hP1, hP3, hA]
+
+/-- **THE GRAPHS COVER.**  Off the diagonal, at nonzero indices, at least one of the two masks
+    holds — and with `resB_hi_lo_disjoint`, exactly one.  Together they PARTITION the edges. -/
+theorem resB_hi_or_lo (m l y W : Nat) (hl : l < 2^(m+1)) (hy : y < 2^(m+1)) (hW : W < 2^(m+1))
+    (hl0 : l ≠ 0) (hy0 : y ≠ 0) (hly : l ≠ y) :
+    resB l y (W + 2^(m+1)) (m+1) = true ∨ resB l y W m = true := by
+  have hp : 0 < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hpow : (2:Nat)^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  have hLlt : W + 2^(m+1) < 2^(m+2) := by omega
+  have hllt : l < 2^(m+2) := by omega
+  have hylt : y < 2^(m+2) := by omega
+  have hxl : l ^^^ (W + 2^(m+1)) = (l ^^^ W) + 2^(m+1) :=
+    xor_lo_hi (m+1) l W (by omega) hl hW
+  have hxy : y ^^^ (W + 2^(m+1)) = (y ^^^ W) + 2^(m+1) :=
+    xor_lo_hi (m+1) y W (by omega) hy hW
+  have hxl0 : l ^^^ (W + 2^(m+1)) ≠ 0 := by rw [hxl]; omega
+  have hxy0 : y ^^^ (W + 2^(m+1)) ≠ 0 := by rw [hxy]; omega
+  have hP1 := P1_hi_lo m l y W hl hy hW hly
+  have hP3 := P3_hi_lo m l y W hl hy hW hl0 hy0
+  by_cases hc : P1 l y W m = - P3 l y W m
+  · -- the HIGH mask: its first two clauses are unconditional, and the third is exactly `hc`
+    left
+    have c1 : P1 l y (W + 2^(m+1)) (m+1) = P1 y l (W + 2^(m+1)) (m+1) :=
+      P1_symm l y (W + 2^(m+1)) (m+1) hllt hylt hLlt hl0 hy0 hxl0 hxy0
+    have c2 : P3 l y (W + 2^(m+1)) (m+1) = P3 y l (W + 2^(m+1)) (m+1) :=
+      P3_symm l y (W + 2^(m+1)) (m+1) hllt hylt hLlt hl0 hy0
+    have c3 : P1 l y (W + 2^(m+1)) (m+1) = P3 l y (W + 2^(m+1)) (m+1) := by
+      rw [hP1, hP3, hc, Int.neg_neg]
+    unfold resB
+    simp only [Bool.and_eq_true, beq_iff_eq]
+    exact ⟨⟨c1, c2⟩, c3⟩
+  · -- the LOW mask: both products are `±1`, so failing `P1 = −P3` means `P1 = P3`
+    right
+    have c3 : P1 l y W m = P3 l y W m := by
+      rcases P1_pm l y W m with h1 | h1 <;> rcases P3_pm l y W m with h3 | h3
+      · rw [h1, h3]
+      · exact absurd (by simp [h1, h3]) hc
+      · exact absurd (by simp [h1, h3]) hc
+      · rw [h1, h3]
+    -- the isolated row and column are the only obstruction to the first clause, and they are
+    -- exactly where `P1 = −P3`, which `hc` excludes
+    have hlW : l ^^^ W ≠ 0 := by
+      intro h
+      have hlWeq : l = W := xor_zero_eq l W h
+      have hW0 : W ≠ 0 := by rw [← hlWeq]; exact hl0
+      have hyW : y ^^^ W ≠ 0 := by
+        intro h2
+        exact hly (by rw [hlWeq, xor_zero_eq y W h2])
+      exact hc (by rw [hlWeq]; exact P1_iso_row y W m hy hW hy0 hW0 hyW)
+    have hyW : y ^^^ W ≠ 0 := by
+      intro h
+      have hyWeq : y = W := xor_zero_eq y W h
+      have hW0 : W ≠ 0 := by rw [← hyWeq]; exact hy0
+      exact hc (by rw [hyWeq]; exact P1_iso_col l W m hl hW hl0 hW0 hlW)
+    have c1 : P1 l y W m = P1 y l W m := P1_symm l y W m hl hy hW hl0 hy0 hlW hyW
+    have c2 : P3 l y W m = P3 y l W m := P3_symm l y W m hl hy hW hl0 hy0
+    unfold resB
+    simp only [Bool.and_eq_true, beq_iff_eq]
+    exact ⟨⟨c1, c2⟩, c3⟩
+
+/-- **THE DIFFERENCE IS MASK-FREE.**  Subtracting the box from the level below leaves `−P1` — the
+    Seidel matrix of which the two graphs are the two edge classes. -/
+theorem Asig_hi_lo_diff (m l y W : Nat) (hl : l < 2^(m+1)) (hy : y < 2^(m+1)) (hW : W < 2^(m+1))
+    (hl0 : l ≠ 0) (hy0 : y ≠ 0) (hly : l ≠ y) :
+    Asig l y W m - Asig l y (W + 2^(m+1)) (m+1) = - P1 l y W m := by
+  have hdis := resB_hi_lo_disjoint m l y W hl hy hW hl0 hy0 hly
+  have htot := resB_hi_or_lo m l y W hl hy hW hl0 hy0 hly
+  have hP1 := P1_hi_lo m l y W hl hy hW hly
+  rcases htot with h | h
+  · have hlo : resB l y W m = false := by
+      cases hb : resB l y W m
+      · rfl
+      · exact absurd ⟨h, hb⟩ hdis
+    simp [Asig, h, hlo, hP1]
+  · have hhi : resB l y (W + 2^(m+1)) (m+1) = false := by
+      cases hb : resB l y (W + 2^(m+1)) (m+1)
+      · rfl
+      · exact absurd ⟨hb, h⟩ hdis
+    simp [Asig, h, hhi]
+
+
+/-! ### Tier 62 — the MASK IS AN ARTEFACT: `2·A_σ = −(P1 + P3)`, with no `if`
+
+    Tier 61's partition says the mask holds exactly where `P1 = P3` and fails exactly where
+    `P1 = −P3` (the two are exhaustive because both products are `±1`, and the isolated row and
+    column — the only place the first clause can fail on its own — are exactly a `P1 = −P3` locus).
+    Written as a formula that is the statement that the `if` can be REMOVED:
+
+      `P1 = P3`  ⇒  `−(P1+P3)/2 = −P1 = A_σ`      the mask holds and `A_σ` is `−P1`
+      `P1 = −P3` ⇒  `−(P1+P3)/2 = 0   = A_σ`      the mask fails and `A_σ` is `0`
+
+    so off the diagonal, at nonzero indices and for a nonzero label,
+
+      `2 · Asig l y Llo n = − (P1 l y Llo n + P3 l y Llo n)`.
+
+    This removes the case analysis from every downstream trace computation: `A_σ` is now a
+    POLYNOMIAL in the two `±1` matrices, and `tri3` of it expands by trilinearity into eight words
+    in `(P1, P3)` with no `resB` anywhere — at EACH level separately,
+
+      `8 · t3(A) = − tri3(P1 + P3)`      (measured, 0 violations at `m = 2,3`)
+
+    ⚠ It does NOT immediately link the two levels.  Substituting Tier 60's `P1_hi = −P1_lo` and
+    `P3_hi = P3_lo` into the box's copy would give `8·t3(A_box) = tri3(P1 − P3)` and hence
+    `4·(t3(A_lo) + t3(A_box)) = −tri3(P3) − 3·tri3m(P3,P1,P1)`.  **That is FALSE**, at every label
+    of `m = 2,3,4`.  Both substitutions carry hypotheses (`l ≠ y` for `P1_hi_lo`, `l,y ≠ 0` for
+    both), and measuring `(P1_hi + P3_hi) − (P3_lo − P1_lo)` locates the damage exactly there:
+    0 nonzero entries OFF the diagonal, all of it on the DIAGONAL and on the INDEX-0 row and column
+    — both of which `tri3` sums over.  Linking the levels needs that correction; it is not computed
+    here. -/
+
+/-- **THE MASK IS AN ARTEFACT.**  Off the diagonal, at nonzero indices, `A_σ` is `−(P1+P3)/2` —
+    no `if`, no `resB`.  Both branches are visible in the formula: where the mask holds the two
+    products agree and the mean is `−P1`; where it fails they are opposite and the mean is `0`. -/
+theorem Asig_no_mask (l y Llo n : Nat) (hl : l < 2^(n+1)) (hy : y < 2^(n+1)) (hL : Llo < 2^(n+1))
+    (hl0 : l ≠ 0) (hy0 : y ≠ 0) :
+    2 * Asig l y Llo n = - (P1 l y Llo n + P3 l y Llo n) := by
+  by_cases hly : l = y
+  · -- ON THE DIAGONAL the first two clauses are tautologies, so `resB` IS its third clause and the
+    -- identity needs nothing but `P1_pm`/`P3_pm`.  (The M1 reviewer found this; it also matches the
+    -- measurement, which reported 0 failures on the diagonal.)
+    subst hly
+    by_cases hres : resB l l Llo n = true
+    · have c3 : P1 l l Llo n = P3 l l Llo n := by
+        unfold resB at hres
+        simp only [Bool.and_eq_true, beq_iff_eq] at hres
+        exact hres.2
+      unfold Asig
+      rw [if_pos hres]
+      omega
+    · have c3 : P1 l l Llo n ≠ P3 l l Llo n := by
+        intro h
+        apply hres
+        unfold resB
+        simp [h]
+      have key : P1 l l Llo n = - P3 l l Llo n := by
+        rcases P1_pm l l Llo n with h1 | h1 <;> rcases P3_pm l l Llo n with h3 | h3 <;> omega
+      unfold Asig
+      rw [if_neg hres]
+      omega
+  by_cases hres : resB l y Llo n = true
+  · have c3 : P1 l y Llo n = P3 l y Llo n := by
+      unfold resB at hres
+      simp only [Bool.and_eq_true, beq_iff_eq] at hres
+      exact hres.2
+    unfold Asig
+    rw [if_pos hres]
+    omega
+  · have key : P1 l y Llo n = - P3 l y Llo n := by
+      by_cases hlL : l ^^^ Llo = 0
+      · have hlq : l = Llo := xor_zero_eq l Llo hlL
+        have hL0 : Llo ≠ 0 := by rw [← hlq]; exact hl0
+        have hyL : y ^^^ Llo ≠ 0 := fun h => hly (by rw [hlq, xor_zero_eq y Llo h])
+        rw [hlq]
+        exact P1_iso_row y Llo n hy hL hy0 hL0 hyL
+      · by_cases hyL : y ^^^ Llo = 0
+        · have hyq : y = Llo := xor_zero_eq y Llo hyL
+          have hL0 : Llo ≠ 0 := by rw [← hyq]; exact hy0
+          rw [hyq]
+          exact P1_iso_col l Llo n hl hL hl0 hL0 hlL
+        · have c1 := P1_symm l y Llo n hl hy hL hl0 hy0 hlL hyL
+          have c2 := P3_symm l y Llo n hl hy hL hl0 hy0
+          have c3 : P1 l y Llo n ≠ P3 l y Llo n := by
+            intro h
+            apply hres
+            unfold resB
+            simp only [Bool.and_eq_true, beq_iff_eq]
+            exact ⟨⟨c1, c2⟩, h⟩
+          rcases P1_pm l y Llo n with h1 | h1 <;> rcases P3_pm l y Llo n with h3 | h3 <;> omega
+    unfold Asig
+    rw [if_neg hres]
+    omega
+
 end SounioZDFiberAntisym
 
 
