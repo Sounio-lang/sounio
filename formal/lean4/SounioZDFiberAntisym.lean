@@ -11017,6 +11017,30 @@ theorem trB2E_eq (W k : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0) :
   rw [trB2E_split W k hW hW0, T2_eq W k hW hW0, S_eq W k hW hW0, cosetSum_eq W k hW]
   omega
 
+/-- **`3·tr(B²E) = 24·t2′` verbatim as §34 states it.**  The three mixed `BBE` positions of
+    `tr((B+E)³)` have the same triple sum (`tri3_cyc`), so the coefficient `3` is a theorem too. -/
+theorem trB2E_three (W k : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(k+1)+2^(k+1)) (fun a => sumLtI (2^(k+1)+2^(k+1)) (fun b =>
+      sumLtI (2^(k+1)+2^(k+1)) (fun c =>
+        blow (2^(k+1)) (fun u v => Asig u v W k) a b
+          * (blow (2^(k+1)) (fun u v => Asig u v W k) b c * Esig W k c a))))
+  + sumLtI (2^(k+1)+2^(k+1)) (fun a => sumLtI (2^(k+1)+2^(k+1)) (fun b =>
+      sumLtI (2^(k+1)+2^(k+1)) (fun c =>
+        blow (2^(k+1)) (fun u v => Asig u v W k) a b
+          * (Esig W k b c * blow (2^(k+1)) (fun u v => Asig u v W k) c a))))
+  + sumLtI (2^(k+1)+2^(k+1)) (fun a => sumLtI (2^(k+1)+2^(k+1)) (fun b =>
+      sumLtI (2^(k+1)+2^(k+1)) (fun c =>
+        Esig W k a b
+          * (blow (2^(k+1)) (fun u v => Asig u v W k) b c
+             * blow (2^(k+1)) (fun u v => Asig u v W k) c a))))
+      = 24 * degSum W k := by
+  have c1 := tri3_cyc (2^(k+1)+2^(k+1)) (blow (2^(k+1)) (fun u v => Asig u v W k))
+      (blow (2^(k+1)) (fun u v => Asig u v W k)) (Esig W k)
+  have c2 := tri3_cyc (2^(k+1)+2^(k+1)) (blow (2^(k+1)) (fun u v => Asig u v W k))
+      (Esig W k) (blow (2^(k+1)) (fun u v => Asig u v W k))
+  rw [← c2, ← c1, trB2E_eq W k hW hW0]
+  omega
+
 end SounioZDFiberAntisym
 
 
