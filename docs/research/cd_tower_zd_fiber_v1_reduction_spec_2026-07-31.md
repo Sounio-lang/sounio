@@ -3504,3 +3504,73 @@ any point.
 **(III) is still reduced, not proven.** §32–§33 reduce it to the deviation law, and §33.5(B) explains
 the scaling; what remains open is the law's own base content, plus (d) and V1. What changed here is
 that the recursion underneath is no longer measured.
+
+---
+
+## §54 — the deviation law: (B) is now UNCONDITIONAL, and the obvious route to the base is REFUTED
+
+### 54.1 — cashing in §18.1
+
+§33.5(B) flagged itself: *"(B) is conditional. §18.1's low-branch recursion is itself MEASURED, so
+(B) does not make the scaling a theorem... Proving §18.1 is a load-bearing target, not a nicety."*
+§18.1 is now `section_18_1` (Tier 54), so the flag comes down. Tier 55:
+
+```lean
+theorem deviation_descent (W V k : Nat) (hW hW0 hV hV0)
+    (hfib : degSum W k = degSum V k) :
+    tri3 (2^(k+1)+2^(k+1)) A_W − tri3 (2^(k+1)+2^(k+1)) A_V
+      = 8 * (tri3 (2^(k+1)) A′_W − tri3 (2^(k+1)) A′_V)
+```
+
+Two instances of §18.1 subtracted: the constant `−24(h−2)` cancels because it does not depend on the
+label, and the `24·t2′` terms cancel against each other exactly when the two labels share their
+level-`k` `tr(A²)`. Nothing is left over. **The `8^(n−j)` scaling is a theorem.**
+
+**★ VACUITY CHECKED — the reviewer's question, and it needed answering.** If `degSum` were
+injective in the LABEL, `hfib` would force `W = V` and `deviation_descent` would be the empty
+statement `0 = 0`. It is not: at levels `k = 2,3,4,5` the `2^(k+1)−1` labels fall into
+`1, 2, 4, 8` fibres of sizes `7 … 10`, **every one of them with more than one label**. So the
+hypothesis is satisfiable everywhere it is used, and the theorem has content. (Tier 36 proved
+`tr(A²)` injective in **`g`**, not in `W` — precisely the distinction that makes this non-vacuous.)
+
+⚠ `hfib` is a **hypothesis**, not discharged. `degSum` fibre-constancy — that `tr(A²)` depends only
+on `g` — is §30's, and Tier 36 proved the *other* direction (injectivity, `Ncnt_inj_g`) about a
+different counting object. Measured here at `n = 6,7,8`, 0 violations, but not proven.
+
+### 54.2 — the base case, and a route CLOSED
+
+What the law still needs is the value at the level where `W` stops being low, `n = top(W) + 2` —
+where `W` is **high**. Measured (`scripts/research/zd_v1_deviation_base_probe.py`, `n = 6,7,8`,
+every label): the base value matches `−27·8^(n−j)·[j,3]₂` (or `0` on odd parity) with **0
+violations**, and depends only on `(lsb, top, popcount(g) mod 2)` — 0 violations.
+
+> ⚠ **My first version of that last check keyed on `(lsb, top)` ALONE and reported violations.** The
+> check was wrong, not the law: the parity half is §33.5(A), already a theorem. Recorded because a
+> mis-specified check that *fails* is more dangerous than one that passes.
+
+**★ REFUTED: the naive high-branch twin of §18.1.** The base lives on the high branch, where no
+recursion is on the books, so the obvious move is to look for one of the same shape. There is none:
+for `W` with top bit `2^(n−2)` and `W_lo = W − 2^(n−2)`,
+
+```
+t3(n,W) − 8·t3(n−1,W_lo) − 24·t2(n−1,W_lo)
+```
+
+takes **7 distinct values at `n = 7` and 15 at `n = 8`**, not one. And the residual is **not** a
+function of `g(W)` either (2 of 4 `g`-classes at `n = 7` carry two values), nor of `g(W_lo)` (same
+counts). So the base case will not come from a `§18.1`-shaped high-branch recursion, and it will not
+come from one repaired by a `g`-dependent correction of that shape.
+
+**The reviewer sharpened this further, and the sharpening is right.** The refutation is not limited
+to the coefficients `(8, 24)`: the number of residual values follows `2^(n−4)−1`, i.e. it **grows
+with `n`**, so no *constant* pair `(a,b)` can absorb it either — a two-term constant-coefficient
+recurrence of any coefficients is dead, not just this one. What is not excluded is a **third
+invariant** alongside `t3′` and `t2′`, or coefficients indexed by a fibre parameter; the Mersenne
+shape `2^(n−4)−1` suggests the residual classes are indexed by something like `𝔽₂^(n−4)∖{0}`, which
+is where a third term would have to be keyed. Recorded as the live lead, not as a result.
+
+This is the second route closed on the base case, after §33.3's edge-level bijection. Both are
+recorded so the next rung does not restart from them.
+
+**(III) is still reduced, not proven.** What is open is now exactly: **the base value for a general
+seam at its own top-bit level**. Its `n`-dependence is a theorem; its `g`-independence is not.

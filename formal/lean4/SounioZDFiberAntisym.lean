@@ -11872,6 +11872,31 @@ theorem section_18_1 (W k : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0) :
   unfold tri3m at hBE2
   omega
 
+
+/-! ### Tier 55 — the deviation DESCENDS by exactly 8
+
+    §33.5(B) derived the `8^(n−j)` scaling of the (III) deviation from §18.1, and flagged itself as
+    CONDITIONAL: "§18.1's low-branch recursion is itself MEASURED, so (B) does not make the scaling
+    a theorem".  §18.1 is now `section_18_1`, so the conditional is discharged.
+
+    Subtracting two instances of §18.1 — one at `W`, one at its fibre reference `V` — the constant
+    `−24(h−2)` cancels because it does not depend on the label, and the `24·t2′` terms cancel
+    against each other exactly when the two labels share their level-`k` `tr(A²)`, which is what
+    "same fibre" means.  What is left is the descent, with no remainder.
+
+    ⚠ The `tr(A²)`-agreement is a HYPOTHESIS here, not a theorem: `degSum` is this file's guarded
+    `tr(A²)` and its fibre-constancy (that it depends only on `g`) is §30's, not proven here.  Tier
+    36 proved the OTHER direction, injectivity (`Ncnt_inj_g`), about a different counting object. -/
+
+theorem deviation_descent (W V k : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0)
+    (hV : V < 2^(k+1)) (hV0 : V ≠ 0) (hfib : degSum W k = degSum V k) :
+    tri3 (2^(k+1)+2^(k+1)) (fun x y => Asig x y W (k+1))
+      - tri3 (2^(k+1)+2^(k+1)) (fun x y => Asig x y V (k+1))
+      = 8 * (tri3 (2^(k+1)) (fun x y => Asig x y W k)
+             - tri3 (2^(k+1)) (fun x y => Asig x y V k)) := by
+  rw [section_18_1 W k hW hW0, section_18_1 V k hV hV0, hfib]
+  omega
+
 end SounioZDFiberAntisym
 
 
