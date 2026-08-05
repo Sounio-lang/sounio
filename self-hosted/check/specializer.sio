@@ -1629,6 +1629,122 @@ fn spec_dce_filter_items(
 // Public entry: reachability-DCE unused top-level ItemFns from a specialized
 // (or otherwise merged) item list, rooted at `main`. No-op when main is
 // missing (caller keeps the list for hollow-main fallback paths).
+// ---------------------------------------------------------------------------
+// Cross-module reachability DCE for the ORDINARY multi-module path.
+//
+// spec_dce_unreachable_item_fns below only runs on the specialized-collapse
+// path (module_frontend_specialized_prepare returns early when there are no
+// monomorphisation markers), so a program with no generics gets no pruning at
+// all. Measured 2026-08-05: compiling self-hosted/compiler/main.sio loads 120
+// modules, typechecks clean, lowers, and then dies in the merge —
+// "too many functions: shared IR module capacity exceeded (max 8191 slots)" —
+// with 10705 declared functions, of which a reachability census from `main`
+// says 5997 are live. The pruning that would have fitted it already exists and
+// was simply never asked to run here.
+//
+// MARKS LIVE IN GLOBALS, and that is not a style choice. Filtering in place
+// would mean `(*programs)[k].items = filtered`, a nested field-in-array store
+// through `&!` — the shape module_frontend.sio's own comments record as
+// dropped by lean_single ("Handoff MUST NOT rely on nested field-in-array
+// store"). So the marks are computed once into globals and the caller filters
+// at its two READ sites, where the result is an ordinary local.
+var SPEC_DCE_G_MARKS: [i64; 16384]
+var SPEC_DCE_G_COUNT: i64 = 0
+var SPEC_DCE_G_READY: i64 = 0
+
+// Compute the live set across every loaded program. Returns the mark count, 0
+// if there is no `main` to root from, or -1 if the mark set could not be
+// completed — in which case the caller must NOT filter.
+pub fn spec_dce_mark_across_programs(
+    programs: &! [Program; 256],
+    loaded: i64
+) -> i64 with IO, Mut, Panic, Div, Alloc {
+    SPEC_DCE_G_READY = 0
+    SPEC_DCE_G_COUNT = 0
+    var z: i64 = 0
+    while z < SPEC_DCE_SLOTS {
+        SPEC_DCE_G_MARKS[z as usize] = 0
+        z = z + 1
+    }
+
+    var has_main = false
+    var i: i64 = 0
+    while i < loaded && i < 256 {
+        if spec_dce_has_main((*programs)[i as usize].items) {
+            has_main = true
+        }
+        i = i + 1
+    }
+    if !has_main {
+        return 0
+    }
+
+    var count: i64 = 0
+    let main_h = ast_name_hash(make_name("main"))
+    var _seeded = spec_dce_hash_insert(&! SPEC_DCE_G_MARKS, &! count, main_h)
+
+    // Fixed point over ALL programs at once: a callee in module B reached from
+    // a body in module A must extend the same mark set, which is the whole
+    // reason this cannot be done per module.
+    var fuel: i64 = 0
+    var going = true
+    while going {
+        var changed = false
+        var m: i64 = 0
+        while m < loaded && m < 256 {
+            if spec_dce_scan_list_if_marked((*programs)[m as usize].items, &! SPEC_DCE_G_MARKS, &! count) {
+                changed = true
+            }
+            m = m + 1
+        }
+        fuel = fuel + 1
+        if !changed || fuel > SPEC_DCE_MAX_ROUNDS {
+            going = false
+        }
+    }
+
+    // Same refusal as the single-list entry point, and for the same reason: a
+    // saturated table and a converged one look identical from inside the loop,
+    // so the test is on capacity. Filtering against an incomplete mark set
+    // deletes reachable code.
+    if count >= SPEC_DCE_MAX || fuel > SPEC_DCE_MAX_ROUNDS {
+        print("spec_dce_mm: REFUSING to filter — mark set incomplete (marks ")
+        print_int(count)
+        print(" of ")
+        print_int(SPEC_DCE_MAX)
+        print(", rounds ")
+        print_int(fuel)
+        print(")\n")
+        return 0 - 1
+    }
+
+    SPEC_DCE_G_COUNT = count
+    SPEC_DCE_G_READY = 1
+    count
+}
+
+// Filter one module's items against the marks computed above. Returns the input
+// unchanged unless a complete mark set is ready, so a refusal upstream cannot
+// silently become a deletion here.
+pub fn spec_dce_filter_with_global_marks(
+    items: Option<Box<ItemList>>
+) -> Option<Box<ItemList>> with IO, Mut, Panic, Div, Alloc {
+    if SPEC_DCE_G_READY != 1 {
+        return items
+    }
+    spec_dce_filter_items(items, &SPEC_DCE_G_MARKS, SPEC_DCE_G_COUNT)
+}
+
+// How many top-level fns survive in `items` under the current marks. Lets the
+// caller's capacity preflight count what will ACTUALLY be lowered rather than
+// what was parsed.
+pub fn spec_dce_live_item_fns(items: Option<Box<ItemList>>) -> i64 with IO, Mut, Panic, Div, Alloc {
+    if SPEC_DCE_G_READY != 1 {
+        return spec_dce_count_item_fns(items)
+    }
+    spec_dce_count_item_fns(spec_dce_filter_items(items, &SPEC_DCE_G_MARKS, SPEC_DCE_G_COUNT))
+}
+
 pub fn spec_dce_unreachable_item_fns(
     items: Option<Box<ItemList>>
 ) -> Option<Box<ItemList>> with IO, Mut, Panic, Div, Alloc {

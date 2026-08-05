@@ -16,7 +16,7 @@ use native::codegen_x86_linux::{compile_native_v2_preview_to_file, native_resolv
 use check::knowledge_context::{knowledge_context_validate_items, knowledge_context_validate_items_values_only}
 use resolve::mod::{resolve_modules}
 use module_parse::{extract_imports_from_ast, file_exists, file_path_to_module_path, load_module_file}
-use check::specializer::{specialize_generics, spec_last_instantiated, spec_mono_marker_count, spec_append_item_lists, spec_dce_unreachable_item_fns}
+use check::specializer::{specialize_generics, spec_last_instantiated, spec_mono_marker_count, spec_append_item_lists, spec_dce_unreachable_item_fns, spec_dce_mark_across_programs, spec_dce_filter_with_global_marks, spec_dce_live_item_fns}
 
 // Multi-module parse accumulates every module's GLOBAL_VAR_INIT_* side-table
 // entries so imported f64/i64 BSS constants survive to lower time. Without
@@ -4710,11 +4710,32 @@ fn module_frontend_count_bss_global_slots(items: &Option<Box<ItemList>>) -> i64 
     count
 }
 
-fn module_frontend_count_loaded_ir_slots(programs: &! [Program; 256], loaded: i64) -> i64 with Alloc {
+// Counts what will ACTUALLY be lowered. Before cross-module DCE ran on this
+// path the count was of everything parsed, which is why a 10705-declaration
+// closure failed a preflight that 5997 live declarations would have passed.
+var MF_DCE_TRACE_ON: i64 = 0
+var MF_DCE_TRACE_CHECKED: i64 = 0
+
+fn module_frontend_dce_trace_enabled() -> bool with IO, Mut, Panic, Div {
+    if MF_DCE_TRACE_CHECKED == 0 {
+        MF_DCE_TRACE_CHECKED = 1
+        if str_eq(read_env("SOUNIO_MM_SPEC_TRACE"), "1") {
+            MF_DCE_TRACE_ON = 1
+        }
+    }
+    MF_DCE_TRACE_ON == 1
+}
+
+fn module_frontend_count_loaded_ir_slots(programs: &! [Program; 256], loaded: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
     var count: i64 = 0
     var i: i64 = 0
     while i < loaded && i < 256 {
-        let items = (*programs)[i as usize].items
+        // Filtered, not raw: the two lowering read sites below filter too, so
+        // counting the unfiltered list would reject a program that fits.
+        // spec_dce_filter_with_global_marks returns its input unchanged unless
+        // a COMPLETE mark set is ready, so this stays conservative when the DCE
+        // refused.
+        let items = spec_dce_filter_with_global_marks((*programs)[i as usize].items)
         count = count + module_frontend_count_lowered_ir_slots(&items)
         i = i + 1
     }
@@ -4765,13 +4786,13 @@ fn module_frontend_loaded_ir_slot_limit(loaded: i64) -> i64 {
     IR_MAX_FUNCS
 }
 
-fn module_frontend_loaded_ir_slot_capacity_exceeded(programs: &! [Program; 256], loaded: i64) -> bool with Alloc {
+fn module_frontend_loaded_ir_slot_capacity_exceeded(programs: &! [Program; 256], loaded: i64) -> bool with Alloc, Div, IO, Mut, Panic {
     let total_slots = module_frontend_count_loaded_ir_slots(programs, loaded)
     let bss_slots = module_frontend_count_loaded_bss_global_slots(programs, loaded)
     bss_slots > BSS_MAX_GLOBALS || total_slots > module_frontend_loaded_ir_slot_limit(loaded)
 }
 
-fn module_frontend_loaded_ir_slot_capacity_error(programs: &! [Program; 256], loaded: i64) -> string with Mut, Panic, Div, Alloc {
+fn module_frontend_loaded_ir_slot_capacity_error(programs: &! [Program; 256], loaded: i64) -> string with Mut, Panic, Div, Alloc, IO {
     module_frontend_ir_slot_capacity_error_from_counts(
         module_frontend_count_loaded_ir_slots(programs, loaded),
         module_frontend_count_loaded_bss_global_slots(programs, loaded),
@@ -4821,9 +4842,17 @@ fn module_frontend_lower_program_box_traced_with_epistemic(
     }
     let summary_result = lower_program_to_ir_summary_box_with_epistemic_ref(program, epistemic)
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_done\n") }
-    if summary_result.had_error || (*(*summary_result.summary).module).fn_count <= 0 {
+    // "ir_summary_failed" conflated TWO different failures — the lowering
+    // reported an error, or it produced an empty module — and said which
+    // neither. Separated, because the first thing anyone asks on seeing it
+    // is which one happened.
+    if summary_result.had_error {
         trace.last_stage = "lower_summary_error"
-        return module_frontend_lower_box_error("ir_summary_failed")
+        return module_frontend_lower_box_error("ir_summary_failed: lowering reported an error")
+    }
+    if (*(*summary_result.summary).module).fn_count <= 0 {
+        trace.last_stage = "lower_summary_error"
+        return module_frontend_lower_box_error("ir_summary_failed: lowering produced an empty module (fn_count 0)")
     }
 
     trace.summary_seeded_modules = trace.summary_seeded_modules + 1
@@ -4884,9 +4913,17 @@ fn module_frontend_lower_program_items_box_traced(
     let program = mf_program_from_items(items)
     let summary_result = lower_program_to_ir_summary_box_with_epistemic_ref(&program, &epistemic)
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_done\n") }
-    if summary_result.had_error || (*(*summary_result.summary).module).fn_count <= 0 {
+    // "ir_summary_failed" conflated TWO different failures — the lowering
+    // reported an error, or it produced an empty module — and said which
+    // neither. Separated, because the first thing anyone asks on seeing it
+    // is which one happened.
+    if summary_result.had_error {
         trace.last_stage = "lower_summary_error"
-        return module_frontend_lower_box_error("ir_summary_failed")
+        return module_frontend_lower_box_error("ir_summary_failed: lowering reported an error")
+    }
+    if (*(*summary_result.summary).module).fn_count <= 0 {
+        trace.last_stage = "lower_summary_error"
+        return module_frontend_lower_box_error("ir_summary_failed: lowering produced an empty module (fn_count 0)")
     }
 
     trace.summary_seeded_modules = trace.summary_seeded_modules + 1
@@ -4935,9 +4972,17 @@ fn module_frontend_lower_program_box_traced_with_externs(
     var epistemic = ir_empty_epistemic_section()
     let summary_result = lower_program_to_ir_summary_box_with_externs_ref(program, programs, program_count, module_index, &epistemic)
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_done\n") }
-    if summary_result.had_error || (*(*summary_result.summary).module).fn_count <= 0 {
+    // "ir_summary_failed" conflated TWO different failures — the lowering
+    // reported an error, or it produced an empty module — and said which
+    // neither. Separated, because the first thing anyone asks on seeing it
+    // is which one happened.
+    if summary_result.had_error {
         trace.last_stage = "lower_summary_error"
-        return module_frontend_lower_box_error("ir_summary_failed")
+        return module_frontend_lower_box_error("ir_summary_failed: lowering reported an error")
+    }
+    if (*(*summary_result.summary).module).fn_count <= 0 {
+        trace.last_stage = "lower_summary_error"
+        return module_frontend_lower_box_error("ir_summary_failed: lowering produced an empty module (fn_count 0)")
     }
 
     trace.summary_seeded_modules = trace.summary_seeded_modules + 1
@@ -4987,9 +5032,17 @@ fn module_frontend_lower_program_items_box_traced_with_externs(
     let program = mf_program_from_items(items)
     let summary_result = lower_program_to_ir_summary_box_with_externs_ref(&program, programs, program_count, module_index, &epistemic)
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_done\n") }
-    if summary_result.had_error || (*(*summary_result.summary).module).fn_count <= 0 {
+    // "ir_summary_failed" conflated TWO different failures — the lowering
+    // reported an error, or it produced an empty module — and said which
+    // neither. Separated, because the first thing anyone asks on seeing it
+    // is which one happened.
+    if summary_result.had_error {
         trace.last_stage = "lower_summary_error"
-        return module_frontend_lower_box_error("ir_summary_failed")
+        return module_frontend_lower_box_error("ir_summary_failed: lowering reported an error")
+    }
+    if (*(*summary_result.summary).module).fn_count <= 0 {
+        trace.last_stage = "lower_summary_error"
+        return module_frontend_lower_box_error("ir_summary_failed: lowering produced an empty module (fn_count 0)")
     }
 
     trace.summary_seeded_modules = trace.summary_seeded_modules + 1
@@ -5242,12 +5295,26 @@ fn module_frontend_lower_programs_array_direct_box(
 
     trace.last_stage = "lower_summary"
     trace.last_module_index = 0
+    // Cross-module DCE BEFORE the capacity preflight, so the preflight counts
+    // what will be lowered rather than what was parsed. spec_dce_unreachable_item_fns
+    // only runs on the specialized-collapse path, so this path had no pruning at
+    // all: main.sio's 120-module closure declares 10705 functions against a
+    // limit of IR_MAX_FUNCS - 1, while only 5997 are reachable from `main`.
+    // Returns -1 when the mark set could not be completed, and the filter
+    // helpers then hand back their input unchanged — a refusal upstream cannot
+    // become a deletion downstream.
+    let dce_marks = spec_dce_mark_across_programs(programs, loaded)
+    if dce_marks > 0 && module_frontend_dce_trace_enabled() {
+        print("lower_array: dce marks=")
+        print_int(dce_marks)
+        print("\n")
+    }
     if module_frontend_loaded_ir_slot_capacity_exceeded(programs, loaded) {
         trace.last_stage = "lower_summary_error"
         return module_frontend_lower_direct_box_error(module_frontend_loaded_ir_slot_capacity_error(programs, loaded))
     }
     print("lower_array: seed_begin\n")
-    let seed_items = (*programs)[0].items
+    let seed_items = spec_dce_filter_with_global_marks((*programs)[0].items)
     let seed_lower = module_frontend_lower_program_items_box_traced_with_externs(&seed_items, programs, loaded, 0, trace)
     print("lower_array: seed_done\n")
     if !seed_lower.ok {
@@ -5293,7 +5360,7 @@ fn module_frontend_lower_programs_array_direct_box(
                 // this mark and is untouched by the reset below -- only the
                 // per-module lowering scratch falls inside [mark, reset).
                 let dep_arena_mark = __arena_mark()
-                let dep_items = (*programs)[i as usize].items
+                let dep_items = spec_dce_filter_with_global_marks((*programs)[i as usize].items)
 
                 if into_acc_default {
                     // Wave13: body-lower dep directly into acc (no concurrent dep_box).
