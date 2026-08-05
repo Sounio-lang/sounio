@@ -31,9 +31,15 @@ var CNT: [i64; 2] = [0; 2]
 // =============================================================================
 // Octonion product helpers (Cayley-Dickson k=3, used by sedenion product)
 // =============================================================================
+// native-v2 cannot emit functions with huge scalar f64 param lists (oct_p/oct_q
+// had 16 params; sed_vv had 32). Array-ref form matches octonion.sio / science
+// leaves and keeps the public sed_mul(&[f64;16], ...) API unchanged.
 
-fn oct_p(a0:f64,a1:f64,a2:f64,a3:f64,a4:f64,a5:f64,a6:f64,a7:f64,
-         b0:f64,b1:f64,b2:f64,b3:f64,b4:f64,b5:f64,b6:f64,b7:f64) with Mut {
+fn oct_p(a: &[f64; 8], b: &[f64; 8]) with Mut {
+    let a0 = (*a)[0]; let a1 = (*a)[1]; let a2 = (*a)[2]; let a3 = (*a)[3]
+    let a4 = (*a)[4]; let a5 = (*a)[5]; let a6 = (*a)[6]; let a7 = (*a)[7]
+    let b0 = (*b)[0]; let b1 = (*b)[1]; let b2 = (*b)[2]; let b3 = (*b)[3]
+    let b4 = (*b)[4]; let b5 = (*b)[5]; let b6 = (*b)[6]; let b7 = (*b)[7]
     SED_P[0]=a0*b0-a1*b1-a2*b2-a3*b3-a4*b4-a5*b5-a6*b6-a7*b7
     SED_P[1]=a0*b1+a1*b0+a2*b3-a3*b2+a4*b5-a5*b4-a6*b7+a7*b6
     SED_P[2]=a0*b2+a2*b0-a1*b3+a3*b1+a4*b6-a6*b4+a5*b7-a7*b5
@@ -44,8 +50,11 @@ fn oct_p(a0:f64,a1:f64,a2:f64,a3:f64,a4:f64,a5:f64,a6:f64,a7:f64,
     SED_P[7]=a0*b7+a7*b0-a1*b6+a6*b1+a2*b5-a5*b2+a3*b4-a4*b3
 }
 
-fn oct_q(a0:f64,a1:f64,a2:f64,a3:f64,a4:f64,a5:f64,a6:f64,a7:f64,
-         b0:f64,b1:f64,b2:f64,b3:f64,b4:f64,b5:f64,b6:f64,b7:f64) with Mut {
+fn oct_q(a: &[f64; 8], b: &[f64; 8]) with Mut {
+    let a0 = (*a)[0]; let a1 = (*a)[1]; let a2 = (*a)[2]; let a3 = (*a)[3]
+    let a4 = (*a)[4]; let a5 = (*a)[5]; let a6 = (*a)[6]; let a7 = (*a)[7]
+    let b0 = (*b)[0]; let b1 = (*b)[1]; let b2 = (*b)[2]; let b3 = (*b)[3]
+    let b4 = (*b)[4]; let b5 = (*b)[5]; let b6 = (*b)[6]; let b7 = (*b)[7]
     SED_Q[0]=a0*b0-a1*b1-a2*b2-a3*b3-a4*b4-a5*b5-a6*b6-a7*b7
     SED_Q[1]=a0*b1+a1*b0+a2*b3-a3*b2+a4*b5-a5*b4-a6*b7+a7*b6
     SED_Q[2]=a0*b2+a2*b0-a1*b3+a3*b1+a4*b6-a6*b4+a5*b7-a7*b5
@@ -56,20 +65,48 @@ fn oct_q(a0:f64,a1:f64,a2:f64,a3:f64,a4:f64,a5:f64,a6:f64,a7:f64,
     SED_Q[7]=a0*b7+a7*b0-a1*b6+a6*b1+a2*b5-a5*b2+a3*b4-a4*b3
 }
 
-// Private: sedenion product (a,b)*(h,...) → SED_OUT via CD half-split
-fn sed_vv(a0:f64,a1:f64,a2:f64,a3:f64,a4:f64,a5:f64,a6:f64,a7:f64,
-          a8:f64,a9:f64,a10:f64,a11:f64,a12:f64,a13:f64,a14:f64,a15:f64,
-          h0:f64,h1:f64,h2:f64,h3:f64,h4:f64,h5:f64,h6:f64,h7:f64,
-          h8:f64,h9:f64,h10:f64,h11:f64,h12:f64,h13:f64,h14:f64,h15:f64) with Mut {
+fn sed_fill_conj(src: &[f64; 8], dst: &![f64; 8]) with Mut {
+    (*dst)[0] = (*src)[0]
+    var i = 1
+    while i < 8 {
+        (*dst)[i] = 0.0 - (*src)[i]
+        i = i + 1
+    }
+}
+
+// Private: sedenion product a*h → SED_OUT via CD half-split
+fn sed_vv(a: &[f64; 16], h: &[f64; 16]) with Mut {
+    var a_lo: [f64; 8] = [0.0; 8]
+    var a_hi: [f64; 8] = [0.0; 8]
+    var h_lo: [f64; 8] = [0.0; 8]
+    var h_hi: [f64; 8] = [0.0; 8]
+    var conj: [f64; 8] = [0.0; 8]
+    var i = 0
+    while i < 8 {
+        a_lo[i] = (*a)[i]
+        a_hi[i] = (*a)[8 + i]
+        h_lo[i] = (*h)[i]
+        h_hi[i] = (*h)[8 + i]
+        i = i + 1
+    }
     // Lower 8: o1a*o1b − conj(o2b)*o2a
-    oct_p(a0,a1,a2,a3,a4,a5,a6,a7, h0,h1,h2,h3,h4,h5,h6,h7)
-    oct_q(h8,0.0-h9,0.0-h10,0.0-h11,0.0-h12,0.0-h13,0.0-h14,0.0-h15,
-          a8,a9,a10,a11,a12,a13,a14,a15)
-    var i=0; while i<8 { SED_OUT[i]=SED_P[i]-SED_Q[i]; i=i+1 }
+    oct_p(&a_lo, &h_lo)
+    sed_fill_conj(&h_hi, &!conj)
+    oct_q(&conj, &a_hi)
+    i = 0
+    while i < 8 {
+        SED_OUT[i] = SED_P[i] - SED_Q[i]
+        i = i + 1
+    }
     // Upper 8: o2b*o1a + o2a*conj(o1b)
-    oct_p(h8,h9,h10,h11,h12,h13,h14,h15, a0,a1,a2,a3,a4,a5,a6,a7)
-    oct_q(a8,a9,a10,a11,a12,a13,a14,a15, h0,0.0-h1,0.0-h2,0.0-h3,0.0-h4,0.0-h5,0.0-h6,0.0-h7)
-    i=0; while i<8 { SED_OUT[8+i]=SED_P[i]+SED_Q[i]; i=i+1 }
+    oct_p(&h_hi, &a_lo)
+    sed_fill_conj(&h_lo, &!conj)
+    oct_q(&a_hi, &conj)
+    i = 0
+    while i < 8 {
+        SED_OUT[8 + i] = SED_P[i] + SED_Q[i]
+        i = i + 1
+    }
 }
 
 // =============================================================================
@@ -162,10 +199,7 @@ pub fn sed_dot(a: &[f64; 16], b: &[f64; 16]) -> f64 with Mut {
 
 /// Sedenion product: out = a * b  (Cayley-Dickson k=4, left-multiplication).
 pub fn sed_mul(a: &[f64; 16], b: &[f64; 16], out: &![f64; 16]) with Mut {
-    sed_vv((*a)[0],(*a)[1],(*a)[2],(*a)[3],(*a)[4],(*a)[5],(*a)[6],(*a)[7],
-           (*a)[8],(*a)[9],(*a)[10],(*a)[11],(*a)[12],(*a)[13],(*a)[14],(*a)[15],
-           (*b)[0],(*b)[1],(*b)[2],(*b)[3],(*b)[4],(*b)[5],(*b)[6],(*b)[7],
-           (*b)[8],(*b)[9],(*b)[10],(*b)[11],(*b)[12],(*b)[13],(*b)[14],(*b)[15])
+    sed_vv(a, b)
     var i=0; while i<16 { (*out)[i]=SED_OUT[i]; i=i+1 }
 }
 
