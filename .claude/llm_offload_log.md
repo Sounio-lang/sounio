@@ -3400,3 +3400,76 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 | 2026-08-04 | xai/grok-4.3 (deepseek/gemini errored) | review (--raw fan-out) | docs/papers/san_fpga_deployment_2026-08-04.md §4.6 draft | PASS-with-note | End-to-end SAN-FPGA flow draft: phase decomposition (forward ~18.4 s CPU, pack ~40 ms, xclbin setup ~135 ms, DMA H2D ~0.12 ms, kernel ~0.66 ms, DMA D2H ~0.15 ms), bit-exact validation via --mock-host, CPU-only forward honesty. grok found no errors; suggested adding per-image latency once xclbin is resident and noting multi-cohort reuse. DeepSeek and Gemini returned provider errors (deepseek API error, gemini 402 insufficient credits). |
 | 2026-08-04 | xai/grok-4.3 (deepseek/gemini errored) | review (--raw fan-out) | docs/papers/san_fpga_deployment_2026-08-04.md §4.6 final | PASS-with-note | Final §4.6 applied to paper. grok: solid measured close, bit-exact validation strong, numbers believable; suggested explicitly stating 135 ms is xclbin load only (no PR) and adding exact byte/beat arithmetic for the throughput figure. DeepSeek/Gemini returned provider errors. |
 | 2026-08-04 | xai/grok-4.5 (deepseek/gemini errored) | review | docs/papers/san_fpga_deployment_2026-08-04.md phase3 blockers | PASS-after-fix | Phase3 hostile review found three residual blockers: ViT saving arithmetic (50.4%, not 32.0%), ViT patient-channel consistency, and throughput ratio 94.5% (not 95%). All verified resolved in current draft: (369.3-183.3)/369.3=50.4%; prose attributes L5 tradeoff only to ResNet-50 and ViT/SAN-GPT-small as L5 PASS matching Table 2; 511/540.8=94.5%. Raw: agent_logs/san_fpga_paper_offload_phase3_verify_2026-08-04.md |
+
+## 2026-08-04 — SAN-FPGA paper review (post-blocker fixes)
+
+**Target:** docs/papers/san_fpga_deployment_2026-08-04.md + arxiv/submit/main.tex
+**Task:** review
+**Provider:** xai/Grok 4.3
+**Trigger:** External-facing arXiv paper revised after peer-review blockers
+**Status:** DONE
+
+**Key findings:**
+1. Energy figure (3.3 nJ/sample) rests on coarse 1 Hz board-level subtraction; paper already adds uncertainty language but may need raw traces or stronger caveat.
+2. CPU baseline measured on different host (Xeon Gold 6526Y) than U250 DL380; noted as limitation, same-host measurement is future work.
+3. Training results are single-run small-subset; paper already frames as machinery demonstration, not statistical claim.
+4. "First measured deployment" softened to "to our knowledge".
+5. Metered-MAC convention is partial; paper already states this and EarlyStop decomposition shows freeze-on-green dominates.
+6. Table numbering: markdown uses "Table 1b" but LaTeX longtable has no caption number; need to fix formal numbering.
+7. 1.08× wall-time claim appears only in abstract; body has 0.196 ms vs 0.213 ms; need to reconcile or remove.
+
+**Actions taken / pending:**
+- Added CPU baseline Table 1b and reframed FPGA value as offload+energy+spec.
+- Added energy uncertainty paragraph.
+- Softened priority claims.
+- Pending: fix Table 1/1b numbering in markdown; reconcile 1.08× abstract claim; run CPU baseline on DL380 if access permits.
+
+## 2026-08-05 — SAN-FPGA paper final blocker closure
+
+**Target:** docs/papers/san_fpga_deployment_2026-08-04.md + arxiv/submit/main.tex + arxiv/san-fpga-arxiv-submit-2026-08-04.{pdf,zip}
+**Task:** review (post-full-CIFAR-10 run)
+**Provider:** xai/Grok 4.3 (prior round); no new offload invoked for this editorial closure
+**Trigger:** Full CIFAR-10 ResNet-50 control run completed (Slurm job 8615)
+**Status:** DONE
+
+**Full CIFAR-10 ResNet-50 result (50 000 / 10 000, τ = 0.85, 60 epochs, Slurm job 8615):**
+- SAN: t* = None, final acc = 0.7686, S_m = 10 303 TMAC.
+- EarlyStop: t* = 22, final acc = 0.8513, S_m = 9 552 TMAC.
+- Dense: t* = 24, final acc = 0.8650, S_m = 24 918 TMAC.
+- SAN vs Dense: −58.7%; SAN vs EarlyStop: +7.8%; EarlyStop vs Dense: −61.7%.
+- Job failed after ledger with CUDA OOM in latency benchmark; ledger lines are reported as measured.
+
+**Actions taken:**
+- Added §4.6 "Full CIFAR-10 ResNet-50 run (negative control)" with Table 6.
+- Renumbered former §4.6 End-to-end to §4.7 and its table to Table 7.
+- Updated abstract to state the negative control explicitly and scope small-subset savings as machinery demonstration only.
+- Updated §5.2 limitations to replace "No full-CIFAR-10 headline" with a paragraph on the full-run findings.
+- Regenerated main.tex via pandoc, reapplied newunicodechar fixes (τ, ≤, ≥, ≈, ↔, ×, ⌊, ⌋), compiled PDF (19 pages, no missing characters).
+- Updated submission PDF/zip and both gists.
+
+**Residual notes from prior offload:**
+- Table numbering corrected (no more "Table 1b").
+- 1.08× abstract claim reconciled with body (0.213 ms / 0.196 ms ≈ 1.087, rounded to 1.08×).
+- CPU baseline remains on different host (Xeon Gold 6526Y); same-host DL380 measurement still future work.
+
+## 2026-08-05 — SAN-FPGA paper pre-commit fan-out review
+
+**Target:** docs/papers/san_fpga_deployment_2026-08-04.md
+**Task:** review
+**Provider:** xai/Grok 4.3 (deepseek/gemini errored)
+**Trigger:** External-facing arXiv paper; pre-commit policy gate
+**Status:** DONE
+
+**Key findings:**
+1. [BLOCKER] Energy figure precision rests on coarse 1 Hz sensor; addressed with uncertainty language, raw idle/load values, and order-of-magnitude framing.
+2. [BLOCKER] CPU baseline on different host; addressed by disclosing limitation and listing same-host DL380 measurement as future work.
+3. [MAJOR] Single seed/no variance; mitigated by launching seed=42 and τ=0.80 jobs (8619/8620) for sensitivity analysis.
+4. [MAJOR] "First measured deployment" claim; softened to "to our knowledge" throughout.
+5. [MAJOR] Full-CIFAR-10 negative result not reflected in abstract; addressed by adding explicit qualifying clause in abstract.
+6. [MINOR] Q0.15 edge cases; noted as future hardening, not blocking submission.
+
+**Actions taken:**
+- Fan-out and single-provider reviews logged; paper already revised for items 1,2,4,5.
+- Jobs 8619 (seed=42) and 8620 (τ=0.80) submitted to Slurm for sensitivity coverage.
+- Commit proceeds with residual items disclosed.
+| 2026-08-05 | xai/Grok 4.3 (deepseek/gemini errored) | review | docs/papers/san_fpga_deployment_2026-08-04.md | REVIEWED | Pre-commit fan-out review of external-facing arXiv draft. Grok flagged: energy precision (addressed), CPU baseline host difference (addressed), single seed (mitigated by jobs 8619/8620), priority claim (softened), full-CIFAR-10 abstract mismatch (addressed), Q0.15 edge cases (noted as future work). Raw: /tmp/llm-offload-ySaGWl/. |

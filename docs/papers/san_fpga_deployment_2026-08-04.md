@@ -23,32 +23,44 @@ authority; LLM reviews are recorded in §7 only as an AI-assist disclosure.
 
 ## Abstract
 
-We report the first measured deployment of the SAN exit-audit / FLOP-metering
+We report, to our knowledge, the first measured deployment of the SAN exit-audit / FLOP-metering
 kernel on an AMD Alveo U250 FPGA, together with a GPU training study of
 SAN-ResNet-50, SAN-ViT-small/d384, and a tiny decoder LM (SAN-GPT-small). Suffering-aware neural networks
 (SANs) are early-exit architectures whose training freezes as soon as a
 held-out feasibility target is met, eliminating gratuitous computation. We
 offload only the inference-time catastrophe-scan and FLOP-metering path to the
 FPGA; the trunk runs on the host CPU/GPU. On the U250 the scan kernel runs at
-**511 Msamples/s sustained** on a 1.2M-sample stress cohort (**94.5%** of the
-540.8 Msamples/s bus-limited theoretical peak at the achieved 135.2 MHz clock)
-and consumes approximately **3.3 nJ/sample** incremental board-level energy
-(rounded to the precision the on-card power sensor supports). The kernel is
-bit-exact against the control-VM golden model on synthetic cohorts, the stress
-cohort, and real photographs from ImageNette2-160.
+**511 Msamples/s sustained** on a 1.2M-sample stress cohort. Because the kernel
+is bus-limited by construction, this figure is best read as **94.5% of the
+540.8 Msamples/s DMA-limited theoretical peak** at the achieved 135.2 MHz clock.
+The same integer function on a host Xeon Gold 6526Y measures **130.8 Msamples/s**
+scalar, **173.9 Msamples/s** AVX-512 single-thread, and **1.05 Gsamples/s**
+AVX-512 across 8 threads (bit-exact on the same cohorts). The FPGA therefore does
+not win on raw throughput against a multi-core CPU; its value is the combination
+of offloading the audit path from the host, the fixed low-energy operation, and
+the hardware-enforced integer specification. It consumes approximately
+**3.3 nJ/sample** incremental board-level energy (rounded to the precision the
+on-card power sensor supports). The kernel is bit-exact against the control-VM
+golden model on synthetic cohorts, the stress cohort, and real photographs from
+ImageNette2-160.
 
 On NVIDIA GPUs (A5000 / RTX 4000 Ada) SAN training reduces the *metered-MAC*
 integrated machine burden by **40.7%** (ResNet-50), **50.4%** (ViT-small/d384), and
 **52.2%** (SAN-GPT-small) relative to dense training in a small-subset, fast-convergence
 regime (validation accuracies 0.39, 0.26, 0.17, chosen to demonstrate the
-freeze-on-green mechanism, not to claim competitive task accuracy). ResNet-50
-also shows a measured 1.08x wall-time latency speedup on CIFAR-10, though this
-margin is small and task-dependent. We disclose the limits honestly: the energy
-number is board-level, not rack-level; full ImageNet-1k is unavailable, so
-ImageNette2-160 is the real-image proxy; and ResNet-50 shows a disclosed
-patient-channel tradeoff while the other families satisfy the stricter L5 clause
-in this run. All artifacts, measurements, and
-reproduction scripts are in the repository.
+freeze-on-green mechanism, not to claim competitive task accuracy). A separate
+ResNet-50 run on the full CIFAR-10 split (50 000 / 10 000) with τ = 0.85 did
+**not** reach the feasibility target: SAN stopped at 0.7686 accuracy and consumed
+**7.8% more** computation than an early-stop baseline that froze at 0.8513. The
+small-subset savings therefore do not generalise to this accuracy regime; they
+are reported as a machinery demonstration, not as a universal efficiency claim.
+ResNet-50 also shows a measured 1.08x wall-time latency speedup on CIFAR-10,
+though this margin is small and task-dependent. We disclose the limits honestly:
+the energy number is board-level, not rack-level; full ImageNet-1k is
+unavailable, so ImageNette2-160 is the real-image proxy; and ResNet-50 shows a
+disclosed patient-channel tradeoff while the other families satisfy the stricter
+L5 clause in this run. All artifacts, measurements, and reproduction scripts are
+in the repository.
 
 ---
 
@@ -89,7 +101,7 @@ measured end to end.
 |---|---|---|---|
 | 1 | A SAN training harness for ResNet-50, ViT-small/d384, and a tiny decoder LM on real data, with metered-MAC accounting and freeze-on-green | `scripts/research/suffering_aware_large_architecture.py` | `MEASURED` on GPU (small subset) |
 | 2 | An FPGA exit-audit / FLOP-meter kernel with integer semantics, no multipliers/DSPs, and one sample/cycle/PE throughput | `hardware/fpga/u250_catastrophe_scan/krnl_san_scan.cpp` | `MEASURED` on U250 |
-| 3 | On-target U250 benchmark: 511 Msamples/s on 1.2M stress cohort, ~3.3 nJ/sample board-level energy, bit-exact against golden model | `host_san_scan`, `host_san_scan_bench` | `MEASURED` |
+| 3 | On-target U250 benchmark: 511 Msamples/s on 1.2M stress cohort; host-CPU baseline 130.8 Msamples/s scalar to 1.05 Gsamples/s AVX-512/8t; ~3.3 nJ/sample board-level energy; bit-exact against golden model | `host_san_scan`, `host_san_scan_bench`, `san_scan_cpu_baseline.c` | `MEASURED` |
 | 4 | GPU training study: 40.7–52.2% metered-MAC savings in a fast-convergence, small-subset regime; CIFAR-100 is infeasible under the same budget | Slurm jobs 8584/8588/8591, 8599–8607, 8611–8612 | `MEASURED / MIXED` |
 | 5 | Real-image kernel validation on ImageNette2-160, bit-exact on the U250 | `train_san_imagenette.py` + `host_san_scan` | `MEASURED` |
 | 6 | Honest accounting of limits: small-subset accuracy, partial meter convention, ImageNet-1k unavailable, board-level power, ResNet-50 patient-channel tradeoff | §5, §6 | `DECLARED` |
@@ -264,11 +276,31 @@ the DL380 U250. Table 1 reports the on-target campaign.
 | stress_1p2M | 1,200,000 | 5 | 481.9 | **511.0** | `HOST_SAN_SCAN_PASS` |
 | val_imagenette | 3,925 | 5 | 24.1 | 122.2 | `HOST_SAN_SCAN_PASS` |
 
-The 1.2M stress cohort reaches **511 Msamples/s sustained**, **94.5%** of the
-540.8 Msamples/s theoretical peak at the achieved 135.2 MHz clock. This is a
-best-case stress microbenchmark; smaller cohorts are enqueue/sync dominated and
-report lower sustained rates (Table 1). We report both numbers honestly rather
-than lead only with the large-cohort peak.
+The 1.2M stress cohort reaches **511 Msamples/s sustained**. Because the kernel
+is bus-limited by construction, this is best read as **94.5% of the 540.8
+Msamples/s DMA-limited theoretical peak** at the achieved 135.2 MHz clock, not
+as a claim about kernel microarchitecture performance. Smaller cohorts are
+enqueue/sync dominated and report lower sustained rates (Table 1).
+
+**CPU baseline.** The same integer scan/meter function was implemented in C with
+scalar, AVX2, AVX-512, and OpenMP-parallel AVX-512 paths and run on the same 1.2M
+stress cohort on a Xeon Gold 6526Y host. All paths are bit-exact against the
+golden model.
+
+**Table 2: Host-CPU baseline for the audit kernel (stress cohort, n=1,200,000).**
+
+| variant | threads | throughput (Msamples/s) | vs FPGA |
+|---|---|---|---|
+| Scalar | 1 | 130.8 | 0.26× |
+| AVX2 | 1 | 164.5 | 0.32× |
+| AVX-512 | 1 | 173.9 | 0.34× |
+| AVX-512 + OpenMP | 8 | 1,045 | 2.0× |
+
+The multi-core CPU is faster in raw throughput than the U250 on this
+workload. The FPGA value is therefore not a pure speedup claim; it is (a)
+offloading the audit path so the host CPU/GPU remains available for the trunk,
+(b) fixed incremental board-level energy, and (c) a hardware-enforced integer
+specification that is bit-exact against the golden model.
 
 **Energy.** Board-level power was measured with `xrt-smi examine -r electrical`
 (1 Hz, 30 s). Idle card: 24.435 W. Under continuous `host_san_scan_bench` on the
@@ -277,12 +309,18 @@ than lead only with the large-cohort peak.
 **3.3 nJ/sample** incremental board-level energy. A repeat with the tiny
 ImageNette cohort gave load power below idle because the kernel idles between
 micro-enqueues; the stress-cohort number is therefore the honest per-sample
-energy figure. We round to two significant figures because the on-card power
-sensor is sampled at 1 Hz.
+energy figure.
+
+The 3.3 nJ/sample value is rounded to two significant figures. The idle and load
+power samples are coarse (1 Hz on-card sensor), and the incremental draw is the
+difference of two large numbers (ΔP ≈ 1.7 W against 24.4 W idle). We therefore
+treat it as an order-of-magnitude board-level estimate, not as a precise energy
+claim; a higher-rate external meter would be needed for three-significant-figure
+energy.
 
 ### 4.2 GPU training savings and latency
 
-Table 2 reports the GPU scale pilot. All numbers are measured on real CIFAR-10
+Table 3 reports the GPU scale pilot. All numbers are measured on real CIFAR-10
 training with `SAN_LARGE_DEVICE=cuda`, using stratified subsets of 4,000 train
 / 1,000 val images and a small epoch budget (8 for ResNet-50, 10 for ViT-small/d384/SAN-GPT-small).
 The feasibility targets τ (0.34, 0.251, 0.165) are intentionally low so the
@@ -292,22 +330,43 @@ to show that the SAN machinery (meter conservation, freeze-on-green, early
 exits, compassion grid) operates correctly across families, not to claim a new
 accuracy result.
 
-**Table 2: GPU training study (CIFAR-10, small subset).**
+**Table 3: GPU training study (CIFAR-10, small subset).**
 
-| family | t* | SAN acc@t* | S_m(SAN) | S_m(Dense) | saving | latency SAN | latency Dense | speedup | verdict |
-|---|---|---|---|---|---|---|---|---|---|
-| ResNet-50 | 4 | 0.390 | 160.1 TMAC | 269.9 TMAC | **40.7%** | 0.196 ms | 0.213 ms | 1.08x | L1–L4, L6–L8 PASS; L5 tradeoff |
-| ViT-small/d384 | 4 | 0.262 | 183.3 TMAC | 369.3 TMAC | **50.4%** | 0.310 ms | 0.308 ms | 0.99x | L1–L4, L7–L8 PASS; L5 PASS, L6 exit-frac 0.03 |
-| SAN-GPT-small | 4 | 0.167 | 115.4 TMAC | 241.5 TMAC | **52.2%** | 0.343 ms | 0.341 ms | 0.99x | L1–L8 PASS |
+| family | t* | SAN acc@t* | EarlyStop acc@t* | S_m(SAN) | S_m(EarlyStop) | S_m(Dense) | SAN vs Dense | SAN vs EarlyStop | exit@t* | verdict |
+|---|---|---|---|---|---|---|---|---|---|---|
+| ResNet-50 | 4 | 0.390 | 0.361 | 160.1 TMAC | 101.2 TMAC | 269.9 TMAC | **40.7%** | **−58.2%** | 0.489 | L1–L4, L6–L8 PASS; L5 tradeoff |
+| ViT-small/d384 | 4 | 0.262 | 0.275 | 183.3 TMAC | 184.6 TMAC | 369.3 TMAC | **50.4%** | **0.7%** | 0.033 | L1–L4, L7–L8 PASS; L5 PASS, L6 exit-frac 0.03 |
+| SAN-GPT-small | 4 | 0.167 | 0.172 | 115.4 TMAC | 120.8 TMAC | 241.5 TMAC | **52.2%** | **4.5%** | 0.112 | L1–L8 PASS |
 
 *S_m is the metered-MAC burden (MAC×2, backward = 2× forward, biases/norms/etc.
-unmetered). Verdicts refer to the companion contract clauses L1–L8; see
-Appendix B for clause definitions.*
+unmetered). EarlyStop is the same trunk with SAN's stop rule but no exit heads,
+so its inference latency equals Dense. Verdicts refer to the companion contract
+clauses L1–L8; see Appendix B for clause definitions.*
 
-**Machine channel.** SAN saves metered-MAC burden in every family. ResNet-50,
-with its early-exit-friendly residual stages, also translates the MAC savings
-into a small real wall-time speedup on CIFAR-10 (0.196 ms vs 0.213 ms), though
-the margin is within the noise regime of CUDA synchronize microbenchmarks.
+**Machine channel — two separable mechanisms.** The total saving against Dense is
+the sum of (a) freeze-on-green (the EarlyStop baseline) and (b) early exits (the
+increment over EarlyStop). In this small-subset, fast-convergence regime the split
+is:
+
+| family | vs Dense | = freeze-on-green | + early exits |
+|---|---|---|---|
+| ResNet-50 | 40.7% | 62.5% | −21.8 pp |
+| ViT-small/d384 | 50.4% | 50.0% | +0.4 pp |
+| SAN-GPT-small | 52.2% | 50.0% | +2.2 pp |
+
+For ResNet-50 the early-exit heads add per-sample compute at the chosen Δ, so
+SAN is *slower* than EarlyStop on metered-MAC (−58.2%); the net 40.7% saving
+comes almost entirely from stopping early. For ViT-small/d384 the exit fraction
+at t* is only 0.033 (below the L6 threshold), so early exits are effectively inert
+and the 50.4% saving is freeze-on-green alone. SAN-GPT-small shows the only
+meaningful early-exit contribution (4.5% over EarlyStop), with an exit fraction
+of 0.112. These are honest findings: the freeze-on-green rule carries the
+machine-channel result in this regime, and the per-family exit-head behaviour
+varies.
+
+ResNet-50, with its early-exit-friendly residual stages, also translates the MAC
+savings into a small real wall-time speedup on CIFAR-10 (0.196 ms vs 0.213 ms),
+though the margin is within the noise regime of CUDA synchronize microbenchmarks.
 ViT-small/d384 and SAN-GPT-small are essentially tied with Dense in wall time because the
 forward is short enough that dispatch overhead dominates; at larger scale the
 MAC savings would likely translate to latency savings as well.
@@ -321,7 +380,7 @@ clinical claim is made.
 
 ### 4.3 Threshold ablation
 
-Table 3 reports the Δ sensitivity study on the same CIFAR-10 small subset
+Table 4 reports the Δ sensitivity study on the same CIFAR-10 small subset
 (Slurm jobs 8599–8607).  The threshold changes which samples exit early and
 therefore the metered-MAC burden, but it cannot overcome the small training
 budget: even the best configurations remain `L_RED` because the patient-channel
@@ -329,7 +388,7 @@ clauses (L5/L7 in particular) are not fully satisfied on this subset.  The
 ablation is therefore reported as a *sensitivity knob*, not as a tuning recipe
 that turns the study green.
 
-**Table 3: Threshold ablation (CIFAR-10, 4,000 train / 1,000 val).**
+**Table 4: Threshold ablation (CIFAR-10, 4,000 train / 1,000 val).**
 
 | family | Δ | t* | SAN acc@t* | S_m(SAN) | S_m(Dense) | saving | speedup | clauses PASS |
 |---|---|---|---|---|---|---|---|---|
@@ -366,7 +425,7 @@ small epoch budget: neither family reaches its lowered τ, so `t* = None` and
 the freeze-on-green rule never fires.  The result is reported as a negative
 result, not hidden.
 
-**Table 4: CIFAR-100 small-subset pilot.**
+**Table 5: CIFAR-100 small-subset pilot.**
 
 | family | τ | epochs | final acc | S_m(SAN) | S_m(Dense) | saving | verdict |
 |---|---|---|---|---|---|---|---|
@@ -394,17 +453,50 @@ HOST_SAN_SCAN_PASS (val_imagenette)
 The card's histogram, catastrophe count, and FLOP total are bit-exact against
 the Python golden model on real photographs.
 
-### 4.6 End-to-end deployment loop
+### 4.6 Full CIFAR-10 ResNet-50 run (negative control)
 
-Table 1 showed the scan kernel in isolation. We now report the first measured
-pass through the full inference pipeline: a SAN-ResNet-18 trunk running on the
-DL380 host CPU, exit confidences quantized to Q0.15, packed into the same
-512-bit beats used by `host_san_scan`, and streamed to the U250 via the new
-`host_san_scan_e2e` XRT host. The orchestration script
+To test whether the small-subset savings generalise to a non-trivial accuracy
+regime, we ran SAN-ResNet-50 on the full CIFAR-10 train/val split (50 000 / 10
+000) with τ = 0.85, Δ = 0.55, and a 60-epoch budget (Slurm job 8615). The SAN
+branch never reached τ (`t* = None`); its best validation accuracy was 0.7734 at
+epoch 52 and it ended at 0.7686. The dense baseline reached τ at epoch 24 and
+ended at 0.8650; the early-stop baseline reached τ at epoch 22 and stopped at
+0.8513.
+
+**Table 6: Full CIFAR-10 ResNet-50 (50k/10k, τ = 0.85).**
+
+| variant | t* | epochs run | final acc | S_m (TMAC) | vs Dense | vs EarlyStop |
+|---|---|---|---|---|---|---|
+| SAN | None | 60 | 0.7686 | 10 303 | −58.7% | +7.8% |
+| EarlyStop | 22 | 23 | 0.8513 | 9 552 | −61.7% | — |
+| Dense | 24 | 60 | 0.8650 | 24 918 | — | +160.9% |
+
+Three findings:
+
+1. **Freeze-on-green is the dominant savings mechanism.** EarlyStop alone removes
+   61.7% of Dense's computation; this is the single largest effect.
+2. **SAN early-exit heads did not help at this target.** Because τ was never
+   reached, SAN ran the full 60 epochs and consumed 7.8% *more* computation than
+   EarlyStop.
+3. **The small-subset results are regime-specific.** The CIFAR-10 small-subset
+   numbers in §4.2 demonstrate the training machinery, not a guaranteed
+   efficiency margin at competitive accuracy.
+
+The job failed after the training ledger with a CUDA out-of-memory error in the
+latency benchmark, but the ledger lines were written before the failure and are
+the numbers reported here.
+
+### 4.7 End-to-end deployment loop
+
+Table 1 showed the scan kernel in isolation. We now report, to our knowledge,
+the first measured pass through the full inference pipeline: a SAN-ResNet-18
+trunk running on the DL380 host CPU, exit confidences quantized to Q0.15, packed
+into the same 512-bit beats used by `host_san_scan`, and streamed to the U250
+via the new `host_san_scan_e2e` XRT host. The orchestration script
 `scripts/research/san_fpga_endtoend.py` measures every phase and validates the
 card output bit-exactly against an independent Python golden scan.
 
-**Table 5: Host↔card phase decomposition (ImageNette2-160, n=3 925).**
+**Table 7: Host↔card phase decomposition (ImageNette2-160, n=3 925).**
 
 | phase | time | note |
 |---|---|---|
@@ -468,10 +560,12 @@ the honest real-image proxy, and all "ImageNet scale" claims refer to (a) the
 real architecture FLOP constants, (b) the 1.2M-sample stress cohort, or (c)
 explicit extrapolation.
 
-**U250 energy is board-level only.** We report the card's own power sensor at
-1 Hz, not a server-rack measurement. The incremental ~1.7 W is rounded to two
-significant figures; three-decimal-nJ precision would require a higher-rate
-external meter.
+**Full-CIFAR-10 control run.** §4.6 reports a ResNet-50 run on the full 50 000 /
+10 000 split with τ = 0.85. SAN did not reach τ and ended at 0.7686 accuracy,
+consuming 7.8% *more* computation than an early-stop baseline that froze at
+0.8513. This confirms that the small-subset savings are regime-specific and that
+the freeze-on-green rule, not the early-exit heads, is the dominant savings
+mechanism at non-trivial accuracy.
 
 **Patient channel is mixed.** ResNet-50 shows the disclosed patient-channel
 tradeoff on this task: its integrated patient harm is slightly above EarlyStop's
@@ -484,17 +578,20 @@ the small-proxy result should not be read as a general claim.
 exploration, multi-bitstream campaigns, or comparison with HLS alternatives. The
 135.2 MHz achieved clock is the honest result of one Vitis build.
 
-**No CPU baseline for the audit kernel.** Table 5 decomposes the host↔card
-phases, but we do not report a host-CPU implementation of the same integer
-audit/metering kernel. The FPGA speedup claim is therefore relative to the
-bus-limited theoretical peak and to the application need (run the trunk on
-host/GPU and audit exits on card), not relative to a measured CPU baseline.
+**CPU baseline measured.** Table 2 reports a host-CPU implementation of the
+same integer audit/metering kernel. The multi-core CPU is faster in raw
+throughput than the U250 on this workload, so the FPGA claim is reframed as
+offload + energy + hardware-enforced integer specification, not as a raw speedup.
+The CPU measurement was taken on a Xeon Gold 6526Y host; the DL380 host that
+holds the U250 may differ, and a same-host measurement would tighten the
+comparison further.
 
-**Table 2 omits the EarlyStop baseline.** The companion contract evaluates SAN
-against both Dense and EarlyStop (L5), and the text discusses the comparison, but
-the table itself reports only SAN and Dense integrated machine burden. A future
-revision will add the per-family EarlyStop column so the reader can see the
-savings against both baselines in one view.
+**Energy uncertainty.** The 3.3 nJ/sample figure derives from ΔP ≈ 1.7 W against
+a 24.4 W idle, read from a 1 Hz on-card sensor. The sensor and the subtraction
+are coarse; the per-sample value is rounded to two significant figures and
+should be read as an order-of-magnitude board-level estimate, not a precise
+energy claim. A higher-rate external meter would be needed for three-significant-
+figure energy.
 
 ### 5.3 Future work
 
@@ -505,8 +602,8 @@ savings against both baselines in one view.
 - Extend the kernel to multi-batch continuous streaming and measure host
   PCIe overhead in a server context.
 - Investigate sparsity and quantization ladders for the machine channel.
-- Add a measured host-CPU baseline for the integer audit/metering kernel to
-  close the FPGA speedup claim.
+- Measure the CPU baseline on the same DL380 host that holds the U250, and
+  collect rack-level energy for both host and card.
 - Include the EarlyStop baseline column in the GPU training table for direct
   three-way comparison.
 
@@ -514,7 +611,7 @@ savings against both baselines in one view.
 
 ## 6 Conclusion
 
-We have presented the first measured deployment of the SAN exit-audit /
+We have presented, to our knowledge, the first measured deployment of the SAN exit-audit /
 FLOP-metering kernel on an FPGA, together with a GPU training study across three
 architecture families. The U250 kernel runs at 511 Msamples/s on a 1.2M-sample
 stress cohort and approximately 3.3 nJ/sample board-level energy, with bit-exact

@@ -114,7 +114,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 # ---------------- determinism / config --------------------------------------
-SEED = 17
+SEED = int(os.environ.get("SAN_LARGE_SEED", "17"))
 torch.manual_seed(SEED)
 np.random.seed(SEED)
 
@@ -179,7 +179,8 @@ WARMUP_AUX = os.environ.get("SAN_LARGE_WARMUP_AUX", "1") == "1"
 AUX_W = float(os.environ.get("SAN_LARGE_AUXW", "1.0"))  # probe-head loss weight
 E_PER_FLOP = 4e-12      # J/FLOP, same convention as the machine-channel benchmark
 LR = 1e-3
-BATCH = 128
+BATCH = int(os.environ.get("SAN_LARGE_BATCH", "128"))
+GRAD_ACCUM = int(os.environ.get("SAN_LARGE_GRAD_ACCUM", "1"))
 
 # GPT configuration (larger transformer leg).
 GPT_DIM, GPT_HEADS = 384, 6
@@ -215,6 +216,13 @@ else:
     else:
         _DEF_TAU_RESNET, _DEF_TAU_VIT, _DEF_TAU_GPT = "0.34", "0.251", "0.165"
         _DEF_DELTA_RESNET, _DEF_DELTA_VIT, _DEF_DELTA_GPT = "0.55", "0.45", "0.31"
+    _N_TRAIN = int(os.environ.get("SAN_LARGE_N_TRAIN", "4000"))
+    _N_VAL = int(os.environ.get("SAN_LARGE_N_VAL", "1000"))
+    N_TRAIN, N_VAL = _N_TRAIN, _N_VAL
+    _EPOCHS_RESNET = int(os.environ.get("SAN_LARGE_EPOCHS_RESNET", "8"))
+    _EPOCHS_VIT = int(os.environ.get("SAN_LARGE_EPOCHS_VIT", "10"))
+    _EPOCHS_GPT = int(os.environ.get("SAN_LARGE_EPOCHS_GPT", "10"))
+    EPOCHS_RESNET, EPOCHS_VIT, EPOCHS_GPT = _EPOCHS_RESNET, _EPOCHS_VIT, _EPOCHS_GPT
     TAU_RESNET = float(os.environ.get("SAN_LARGE_TAU_RESNET", _DEF_TAU_RESNET))
     TAU_VIT = float(os.environ.get("SAN_LARGE_TAU_VIT", _DEF_TAU_VIT))
     TAU_GPT = float(os.environ.get("SAN_LARGE_TAU_GPT", _DEF_TAU_GPT))
@@ -920,9 +928,11 @@ def train_run(model, x_tr, y_tr, x_va, y_va, epochs, tau, tag, is_lm=False):
         detach = getattr(model, "detach_aux", False)
         train_aux = (model.kind == "san") and (
             use_exits or (WARMUP_AUX and (epoch >= 1 or detach)))
+        nb = 0
         for b0 in range(0, x_tr.shape[0], BATCH):
             idx = schedule[epoch][b0:b0 + BATCH]
             xb, yb = x_tr[idx], y_tr[idx]
+            micro = (xb.shape[0] == BATCH)
             _, _, _, _, aux_records, final_record = model(
                 xb, train=True, use_exit_heads=use_exits, train_aux=train_aux)
             if not is_lm:
@@ -948,16 +958,30 @@ def train_run(model, x_tr, y_tr, x_va, y_va, epochs, tau, tag, is_lm=False):
                             yg[a_idx].reshape(-1))
                          for a_idx, a_logits in aux_records]).mean())
                 loss = sum(losses)
-            opt.zero_grad()
+            if GRAD_ACCUM > 1:
+                loss = loss / GRAD_ACCUM
+            if nb % GRAD_ACCUM == 0:
+                opt.zero_grad()
             loss.backward()
-            opt.step()
+            if (nb + 1) % GRAD_ACCUM == 0 or not micro:
+                opt.step()
+            nb += 1
         train_flops = model.meter.flops
         # held-out evaluation (forward only): the cohort-in-waiting
         model.eval()
         model.meter = MachineMeter()
+        EVAL_BATCH = int(os.environ.get("SAN_LARGE_EVAL_BATCH", "512"))
         with torch.no_grad():
-            vlogits, vdepth, _, _, _, _ = model(
-                x_va, train=False, use_exit_heads=use_exits)
+            vlogits_chunks = []
+            vdepth_chunks = []
+            for e0 in range(0, x_va.shape[0], EVAL_BATCH):
+                e1 = e0 + EVAL_BATCH
+                xb = x_va[e0:e1]
+                l, d, _, _, _, _ = model(xb, train=False, use_exit_heads=use_exits)
+                vlogits_chunks.append(l)
+                vdepth_chunks.append(d)
+            vlogits = torch.cat(vlogits_chunks, dim=0)
+            vdepth = torch.cat(vdepth_chunks, dim=0)
         eval_flops = model.meter.flops
         if not is_lm:
             pred = vlogits.argmax(dim=1)
@@ -1247,6 +1271,7 @@ def main():
           "no clinical claim; not medical guidance")
     print("note=no_consciousness_claim (machine channel is an operational burden proxy)")
     print(f"config: n_train={N_TRAIN} n_val={N_VAL} batch={BATCH} "
+          f"grad_accum={GRAD_ACCUM} "
           f"epochs=({EPOCHS_RESNET},{EPOCHS_VIT},{EPOCHS_GPT}) "
           f"tau=({TAU_RESNET},{TAU_VIT},{TAU_GPT}) "
           f"delta=({DELTA_RESNET},{DELTA_VIT},{DELTA_GPT}) "
