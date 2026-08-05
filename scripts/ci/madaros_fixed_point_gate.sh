@@ -33,9 +33,25 @@
 # short and when it goes further — a ratchet, so ground gained cannot be lost
 # silently and ground gained is not absorbed silently either.
 #
-# The default is `none`: measured 2026-08-04 against origin/main 40116b661d,
-# gen1 reports 3635 errors on main.sio and never gets to lowering. Every stage
-# of the fixed-point line raises this default by one rung.
+# The default is `check`. It was `none` when this gate was written: measured
+# 2026-08-04 against origin/main 40116b661d, gen1 reported 3635 errors on
+# main.sio and never reached lowering. As of 2026-08-05 `madaros check
+# self-hosted/compiler/main.sio` exits 0 with zero diagnostics — the first time
+# Madaros has typechecked its own entry point.
+#
+# The next wall is named and loud, which is the point of the whole line:
+#
+#     imported_compile: typecheck ok
+#     imported_compile: lower_done
+#     IR lowering failed during merge: too many functions:
+#         shared IR module capacity exceeded (max 8191 slots)
+#
+# 120 modules load, typecheck passes, lowering completes, and the MERGE
+# overflows. main.sio's closure declares 10705 functions; a reachability census
+# from `main` leaves 5997, which would fit. The gap is that cross-module DCE
+# (spec_dce_unreachable_item_fns) only runs on the specialized-collapse path, so
+# nothing prunes here. Raising IR_MAX_FUNCS again would also work and is the
+# worse answer: the pruning already exists and is not being asked to run.
 
 set -uo pipefail
 
@@ -47,7 +63,7 @@ cd "$ROOT_DIR"
 gate_name "madaros_fixed_point"
 
 SRC="${SOUNIO_MADAROS_FP_SRC:-self-hosted/compiler/main.sio}"
-EXPECT="${SOUNIO_MADAROS_FP_EXPECT:-none}"
+EXPECT="${SOUNIO_MADAROS_FP_EXPECT:-check}"
 MADAROS="${MADAROS_BIN:-}"
 
 RUNGS=(none check gen2 run gen3 fixpoint)
