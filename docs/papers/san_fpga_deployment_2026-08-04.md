@@ -49,14 +49,15 @@ integrated machine burden by **40.7%** (ResNet-50), **50.4%** (ViT-small/d384), 
 **52.2%** (SAN-GPT-small) relative to dense training in a small-subset, fast-convergence
 regime (validation accuracies 0.39, 0.26, 0.17, chosen to demonstrate the
 freeze-on-green mechanism, not to claim competitive task accuracy). A separate
-ResNet-50 run on the full CIFAR-10 split (50 000 / 10 000) with τ = 0.85 did
-**not** reach the feasibility target: SAN stopped at 0.7686 accuracy and consumed
-**7.8% more** computation than an early-stop baseline that froze at 0.8513. The
-small-subset savings therefore do not generalise to this accuracy regime; they
-are reported as a machinery demonstration, not as a universal efficiency claim.
-ResNet-50 also shows a measured 1.08x wall-time latency speedup on CIFAR-10,
-though this margin is small and task-dependent. We disclose the limits honestly:
-the energy number is board-level, not rack-level; full ImageNet-1k is
+full-CIFAR-10 sensitivity study (50 000 / 10 000, ResNet-50, two seeds, τ ∈
+{0.80, 0.85}) shows that these savings do **not** generalise to this accuracy
+regime: SAN never reached the feasibility target and consumed between 6.5% less
+and 71% more computation than an early-stop baseline, while achieving lower
+final accuracy (0.759–0.769 vs 0.824–0.865). The small-subset savings are
+therefore reported as a machinery demonstration, not as a universal efficiency
+claim. ResNet-50 also shows a measured 1.08x wall-time latency speedup on
+CIFAR-10, though this margin is small and task-dependent. We disclose the limits
+honestly: the energy number is board-level, not rack-level; full ImageNet-1k is
 unavailable, so ImageNette2-160 is the real-image proxy; and ResNet-50 shows a
 disclosed patient-channel tradeoff while the other families satisfy the stricter
 L5 clause in this run. All artifacts, measurements, and reproduction scripts are
@@ -453,38 +454,47 @@ HOST_SAN_SCAN_PASS (val_imagenette)
 The card's histogram, catastrophe count, and FLOP total are bit-exact against
 the Python golden model on real photographs.
 
-### 4.6 Full CIFAR-10 ResNet-50 run (negative control)
+### 4.6 Full CIFAR-10 ResNet-50 sensitivity study (negative control)
 
 To test whether the small-subset savings generalise to a non-trivial accuracy
 regime, we ran SAN-ResNet-50 on the full CIFAR-10 train/val split (50 000 / 10
-000) with τ = 0.85, Δ = 0.55, and a 60-epoch budget (Slurm job 8615). The SAN
-branch never reached τ (`t* = None`); its best validation accuracy was 0.7734 at
-epoch 52 and it ended at 0.7686. The dense baseline reached τ at epoch 24 and
-ended at 0.8650; the early-stop baseline reached τ at epoch 22 and stopped at
-0.8513.
+000) with Δ = 0.55 and a 60-epoch budget. We report three runs: τ = 0.85 with
+seed 17 (job 8615), τ = 0.85 with seed 42 (job 8619), and τ = 0.80 with seed 17
+(job 8620). All three jobs failed with a CUDA out-of-memory error in the final
+latency benchmark, but the training ledgers were written before the failure and
+are the numbers reported here.
 
-**Table 6: Full CIFAR-10 ResNet-50 (50k/10k, τ = 0.85).**
+**Table 6: Full CIFAR-10 ResNet-50 sensitivity (50k/10k, Δ = 0.55).**
 
-| variant | t* | epochs run | final acc | S_m (TMAC) | vs Dense | vs EarlyStop |
-|---|---|---|---|---|---|---|
-| SAN | None | 60 | 0.7686 | 10 303 | −58.7% | +7.8% |
-| EarlyStop | 22 | 23 | 0.8513 | 9 552 | −61.7% | — |
-| Dense | 24 | 60 | 0.8650 | 24 918 | — | +160.9% |
+| run | τ | seed | variant | t* | epochs run | final acc | S_m (TMAC) | vs Dense | vs EarlyStop |
+|---|---|---|---|---|---|---|---|---|---|
+| 8615 | 0.85 | 17 | SAN | None | 60 | 0.7686 | 10 303 | −58.7% | +7.8% |
+| 8615 | 0.85 | 17 | EarlyStop | 22 | 23 | 0.8513 | 9 552 | −61.7% | — |
+| 8615 | 0.85 | 17 | Dense | 24 | 60 | 0.8650 | 24 918 | — | +160.9% |
+| 8619 | 0.85 | 42 | SAN | None | 60 | 0.7675 | 10 486 | −57.9% | −6.5% |
+| 8619 | 0.85 | 42 | EarlyStop | 26 | 27 | 0.8504 | 11 213 | −55.0% | — |
+| 8619 | 0.85 | 42 | Dense | 21 | 60 | 0.8576 | 24 918 | — | +122.1% |
+| 8620 | 0.80 | 17 | SAN | None | 60 | 0.7592 | 10 138 | −59.3% | +71.3% |
+| 8620 | 0.80 | 17 | EarlyStop | 6 | 7 | 0.8240 | 2 907 | −88.3% | — |
+| 8620 | 0.80 | 17 | Dense | 5 | 60 | 0.8501 | 24 918 | — | +756.7% |
 
-Three findings:
+Four findings:
 
 1. **Freeze-on-green is the dominant savings mechanism.** EarlyStop alone removes
-   61.7% of Dense's computation; this is the single largest effect.
-2. **SAN early-exit heads did not help at this target.** Because τ was never
-   reached, SAN ran the full 60 epochs and consumed 7.8% *more* computation than
-   EarlyStop.
+   55–88% of Dense's computation across the three runs; this is the single
+   largest and most robust effect.
+2. **SAN early-exit heads are seed- and τ-sensitive.** At τ = 0.85 the SAN never
+   reaches the target and consumes between 6.5% less and 7.8% more than
+   EarlyStop depending on the seed; at τ = 0.80 the SAN is 71% more expensive
+   than EarlyStop because the baseline can freeze after only 6 epochs while the
+   SAN runs the full budget.
 3. **The small-subset results are regime-specific.** The CIFAR-10 small-subset
    numbers in §4.2 demonstrate the training machinery, not a guaranteed
    efficiency margin at competitive accuracy.
-
-The job failed after the training ledger with a CUDA out-of-memory error in the
-latency benchmark, but the ledger lines were written before the failure and are
-the numbers reported here.
+4. **Early exits do not guarantee higher accuracy.** Across all three runs the
+   SAN's final accuracy (0.759–0.769) is below both EarlyStop (0.824–0.851) and
+   Dense (0.850–0.865), suggesting the exit heads can interfere with convergence
+   when the target is high.
 
 ### 4.7 End-to-end deployment loop
 
@@ -560,12 +570,14 @@ the honest real-image proxy, and all "ImageNet scale" claims refer to (a) the
 real architecture FLOP constants, (b) the 1.2M-sample stress cohort, or (c)
 explicit extrapolation.
 
-**Full-CIFAR-10 control run.** §4.6 reports a ResNet-50 run on the full 50 000 /
-10 000 split with τ = 0.85. SAN did not reach τ and ended at 0.7686 accuracy,
-consuming 7.8% *more* computation than an early-stop baseline that froze at
-0.8513. This confirms that the small-subset savings are regime-specific and that
-the freeze-on-green rule, not the early-exit heads, is the dominant savings
-mechanism at non-trivial accuracy.
+**Full-CIFAR-10 sensitivity study.** §4.6 reports three ResNet-50 runs on the
+full 50 000 / 10 000 split with τ ∈ {0.80, 0.85} and two seeds. Across all
+runs, SAN never reached the feasibility target and achieved lower final accuracy
+(0.759–0.769) than both EarlyStop (0.824–0.851) and Dense (0.850–0.865). The
+SAN–EarlyStop comparison is seed- and τ-sensitive: SAN consumed between 6.5%
+less and 71% more computation than EarlyStop. This confirms that the
+small-subset savings are regime-specific and that the freeze-on-green rule, not
+the early-exit heads, is the dominant savings mechanism at non-trivial accuracy.
 
 **Patient channel is mixed.** ResNet-50 shows the disclosed patient-channel
 tradeoff on this task: its integrated patient harm is slightly above EarlyStop's
