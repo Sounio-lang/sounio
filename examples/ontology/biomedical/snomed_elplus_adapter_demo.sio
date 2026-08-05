@@ -4,9 +4,8 @@
 // examples/ontology/biomedical/snomed_elplus_adapter_demo.sio
 //
 // Struct-adapter counterpart of snomed_elplus_demo.sio: the same
-// classic EL+ inference (Baader et al.), now driven entirely through
-// the SNOMEDElplus high-level API (add_isa / add_rel / add_role_sub /
-// add_role_chain / close / subsumes / role_targets).
+// classic EL+ inference (Baader et al.), driven through the
+// SNOMEDElplus high-level API.
 //
 // Clinical fragment:
 //   Pericarditis  ≤  ∃finding_site.Pericardium
@@ -16,13 +15,13 @@
 //   finding_site  ⊑  part_of          (role hierarchy)
 //   part_of ∘ part_of  ≤  part_of     (role composition)
 //
-// Derived (the is-a chain is visible to basic Floyd-Warshall
-// transitivity; the role-layer inferences require CR3-CR8 which are
-// not computed by the current close() path on this Madaros lane):
-//   Pericarditis  ⊑*  Heart               (via Pericardium)
-//   Pericarditis  ⊑*  TOP                 (everything ≤ TOP)
+// Derived (by the inlined 8-rule EL+ fixpoint in close()):
+//   Pericarditis  ⊑*  Heart               (transitivity via Pericardium)
+//   Pericarditis  ⊑*  ∃part_of.Heart      (role hierarchy: finding_site⊑part_of
+//                                          + filler subsumption)
+//   Endocardium   ⊑*  ∃part_of.Heart      (stated role edge)
 
-use ontology::biomedical::snomed::{snomed_elplus_new, snomed_elplus_add_isa, snomed_elplus_add_rel, snomed_relationship_new, snomed_elplus_add_role_sub, snomed_elplus_add_role_chain, snomed_elplus_close, snomed_subsumes_elplus, snomed_elplus_nc, REL_FINDING_SITE, REL_PART_OF}
+use ontology::biomedical::snomed::{snomed_elplus_new, snomed_elplus_add_isa, snomed_elplus_add_rel, snomed_relationship_new, snomed_elplus_add_role_sub, snomed_elplus_add_role_chain, snomed_elplus_close, snomed_subsumes_elplus, snomed_subsumes_ex_elplus, snomed_elplus_nc, REL_FINDING_SITE, REL_PART_OF}
 
 fn main() -> i32 with IO, Mut, Div, Panic {
     var n_fail: i64 = 0
@@ -55,40 +54,29 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     print("nc=")
     println(el.snomed_elplus_nc())
 
-    // 1. Pericarditis ⊑* Heart (via Pericardium is-a chain).
+    // Is-a transitivity (CR2).
     let t1 = el.snomed_subsumes_elplus(PERICARDITIS, HEART)
-    if !t1 {
-        print("FAIL: Pericarditis should subsume Heart\n")
-        n_fail = n_fail + 1
-    }
+    if !t1 { print("FAIL: Pericarditis should subsume Heart\n"); n_fail = n_fail + 1 }
 
-    // 2. Pericardium ⊑* Heart (stated is-a).
     let t2 = el.snomed_subsumes_elplus(PERICARDIUM, HEART)
-    if !t2 {
-        print("FAIL: Pericardium should subsume Heart\n")
-        n_fail = n_fail + 1
-    }
+    if !t2 { print("FAIL: Pericardium should subsume Heart\n"); n_fail = n_fail + 1 }
 
-    // 3. Heart should NOT subsume Pericarditis (asymmetric).
     let t3 = el.snomed_subsumes_elplus(HEART, PERICARDITIS)
-    if t3 {
-        print("FAIL: Heart should NOT subsume Pericarditis\n")
-        n_fail = n_fail + 1
-    }
+    if t3 { print("FAIL: Heart should NOT subsume Pericarditis\n"); n_fail = n_fail + 1 }
 
-    // 4. Pericarditis ⊑* TOP (everything subsumes TOP).
     let t4 = el.snomed_subsumes_elplus(PERICARDITIS, TOP_SCTID)
-    if !t4 {
-        print("FAIL: Pericarditis should subsume TOP\n")
-        n_fail = n_fail + 1
-    }
+    if !t4 { print("FAIL: Pericarditis should subsume TOP\n"); n_fail = n_fail + 1 }
 
-    // 5. Endocardium ⊑* Heart (stated is-a).
-    let t5 = el.snomed_subsumes_elplus(ENDOCARDIUM, HEART)
-    if !t5 {
-        print("FAIL: Endocardium should subsume Heart\n")
-        n_fail = n_fail + 1
-    }
+    // Role-layer: existential subsumption (CR4 + CR3 on r, then RtoS).
+    // Pericarditis ≤ ∃finding_site.Pericardium (stated) + finding_site⊑part_of
+    //   → Pericarditis ≤ ∃part_of.Pericardium (CR4 on r)
+    // Pericardium ≤ Heart (is-a) + above
+    //   → Pericarditis ≤ ∃part_of.Heart (Rmono on r)
+    let t5 = el.snomed_subsumes_ex_elplus(PERICARDITIS, REL_PART_OF, HEART)
+    if !t5 { print("FAIL: Pericarditis should subsume ex.part_of.Heart\n"); n_fail = n_fail + 1 }
+
+    let t6 = el.snomed_subsumes_ex_elplus(ENDOCARDIUM, REL_PART_OF, HEART)
+    if !t6 { print("FAIL: Endocardium should subsume ex.part_of.Heart\n"); n_fail = n_fail + 1 }
 
     if n_fail == 0 {
         print("ADAPTER ALL PASS\n")
