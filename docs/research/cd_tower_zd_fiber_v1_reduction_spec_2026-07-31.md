@@ -3620,3 +3620,57 @@ showed 1/2/3 splits at `n = 7,8,9` and looked like a failure of separability; th
 two `popcount(g)` parities sharing an `lsb`. Same error as §54.2, in a fresh check. Recording the
 repeat: when a check on this law reports splits, **look for the missing parity key before looking
 for a finding.**
+
+### 54.4 — §33.3's CANDIDATE MECHANISM IS REFUTED, in both of its forms
+
+§33.3 recorded, as "a candidate mechanism for the open residual":
+
+> `[j choose 3]₂` counts subspaces of the `j` bit positions **below** the seam — precisely the
+> coordinates `g` forgets. So "`D` does not depend on `g`" stops being a brute fact and becomes: the
+> triangle deficit is a count over independent triples strictly below the seam... **The proof to
+> build is a sign-preserving bijection between the deficit triangles of `8y + 2^j` and those of
+> `2^j`, given by `a ↦ a ⊕ 8y`.**
+
+Both halves are now tested, and both fail.
+
+**(i) The deficit is NOT classified by independence below the seam.** Split the signed triangle sum
+by whether the three vertices' low `j` bits are linearly independent over `𝔽₂`, for a seam and for
+its fibre reference, and take the difference. At `n = 8`, `j = 3`, the total is `−884736` for every
+`g` — the law — but the split is not:
+
+| `g` | independent class | dependent class |
+|---|---|---|
+| `0` | `−866304` | `−18432` |
+| `6` | `−792576` | `−92160` |
+| `10` | `−755712` | `−129024` |
+| `12` | `−829440` | `−55296` |
+
+**The `g`-dependence is present in each class and cancels only in the total.** So the deficit is not
+a count over independent triples below the seam; that classification does not see the law.
+
+**(ii) The bijection `a ↦ a ⊕ 8y` fails at TRIANGLE level too.** §33.3 refuted it at edge level and
+explicitly left the triangle-level form open ("A bijection at the level of deficit *triangles* is not
+excluded by this test"). It is now excluded: comparing the triple products of `A(n, 8(g+2^j))` and
+`A(n, 2^j)` under `a ↦ a ⊕ 8g`, **69072 of 238328 triples mismatch at `n = 7`** (≈29%), and
+320784–886608 of 2000376 at `n = 8` depending on `g`.
+
+So the lane's recorded lead for the open residual is dead. Four routes are now closed: the
+edge-level bijection (§33.3), the triangle-level bijection (here), the two-term high-branch
+recursion for any coefficients (§54.2–54.3), and the complementation third invariant (§54.3).
+
+**What survives, and is worth carrying:**
+
+- `t3(n,·)` on the high labels is exactly a function of `(g, lsb)` — 0 splits.
+- The law has a **local form**: for two seams in the SAME fibre with consecutive `lsb`,
+  `t3(W_j) − t3(W_{j−1}) = δ(n,j) − δ(n,j−1)`, and `[j,3]₂`'s Pascal identity gives
+  `δ(n,j) − δ(n,j−1) = −27·8^(n−j)·[j−1,2]₂`. 0 violations at `n = 6,7,8`. This compares two labels
+  differing in one bit position rather than a seam against a Fano reference — a smaller object than
+  anything §33 considered. ⚠ But the two matrices differ in thousands of entries (424–35592 of
+  `N²`), so it is *not* a local perturbation of the graph.
+
+⚠⚠ **THE PARITY WAS DROPPED BY HAND A THIRD TIME.** Re-deriving the prediction inline for the
+consecutive-`j` check produced 1/2/3 violations at `n = 7,8,9` that looked like a refutation of
+separability; the check had lost the `popcount(g)` parity. **Fixed structurally, not by resolve**:
+the law is now one function, `dev_pred`, in `scripts/research/zd_v1_separability_probe.py`, and the
+docstring says not to inline it again. Three occurrences in one session is a tooling problem, not an
+attention problem.
