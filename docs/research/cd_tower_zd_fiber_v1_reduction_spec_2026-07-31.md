@@ -3991,3 +3991,43 @@ level"; this rung shows the sampling version of the same error — §56.4(2) con
 of `W_lo` that happened to share a fibre. **Sweep the parameter, not a sample of it.**
 
 **(III) is still reduced, not proven.**
+
+### 57.4 — the box vs. the level below: `P3` is INVARIANT, `P1` FLIPS, and the graphs are edge-disjoint
+
+Attacking the variation of `t3(box)` inside a fibre. The box of the high label `2^n + W_lo` sits on
+`[1, 2^n)`, which is the level-`(n−1)` vertex set, so the first question is how it relates to the
+level-`(n−1)` matrix of the **low** label `W_lo`. Measured at `n = 3,4,5`, every `(W_lo, l, y)`:
+
+| | |
+|---|---|
+| `P3 l y (2^n+W_lo) n` vs `P3 l y W_lo (n−1)` | **identical**, 100% |
+| `P1`, off the diagonal | **exactly negated**, 100% |
+| `P1`, on the diagonal | `= 1` at both levels |
+| the two masks `resB`, off the diagonal | **never both true** — `0/28830` at `n = 5` |
+
+The last line follows from the first two in one line: `resB`'s third clause is `P1 = P3`; if `P3` is
+unchanged and `P1` flips, then `P1 = P3` at one level forces `P1 = −P3` at the other, and both are
+`±1`. **So the box and the level-below matrix are EDGE-DISJOINT graphs on the same vertex set.**
+
+The `P1` flip has a paper derivation: `P1_red` turns `P1 l y (2^n+W_lo) n` into
+`cdSigma l y n · cdSigma (l⊕W_lo) (y⊕W_lo) n` through `R_uu` (both `l⊕W` and `y⊕W` carry the top
+bit), while `P1_red` at level `n−1` gives the same product with the **second factor's arguments in
+the other order** — and `antisym` supplies the sign. The `P3` invariance is measured, not derived.
+
+**★ This is what `Ncnt_hi`'s `−4` was.** §54.3 read the minus as "the high branch COMPLEMENTS rather
+than blows up", went looking for a complement's third moment, and found nothing — the candidate
+moments were all label-constant. The complementation is real but it lives at the level of the
+**support**, not of a moment: the high label's graph avoids every edge of the low label's. That
+retro-explains both the `−4` and why the third-moment search was bound to fail.
+
+**Status.** This does not yet give `t3(box)`'s variation. Edge-disjointness constrains the pair but
+does not determine either triangle count, and the two graphs do not cover everything (they miss the
+diagonal and, off it, the pairs where both masks are false). What it does is replace "the box is
+unclassified" with a precise relation to an object one level down that the lane already understands.
+
+Two Lean lemmas would make it a theorem, both of the `P1_pow2_succ` four-branch shape:
+`P3 l y (2^n+W_lo) n = P3 l y W_lo (n−1)` and `P1 l y (2^n+W_lo) n = −P1 l y W_lo (n−1)` off the
+diagonal. Not attempted here — and per this session's own rule, that is a statement of what was not
+done, not an estimate of what it would cost.
+
+**(III) is still reduced, not proven.**
