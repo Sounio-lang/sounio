@@ -556,6 +556,35 @@ fn g30_troe_t2() -> f64 { 5.182e03 }
 
 // ---------------- thermochemistry (NASA7) ----------------
 
+// NASA7 dimensionless sensible enthalpy h/(R T) and heat capacity cp/R.
+// These are kept beside g30_g_rt so the adiabatic reactor uses the same
+// coefficient tables and temperature break as detailed balance.
+fn g30_h_rt(sp: i64, t: f64) -> f64 with Mut, Div, Panic {
+    let lo = g30_nasa_low(); let hi = g30_nasa_high();
+    let base = if t <= 1000.0 { sp * 7 } else { 10000 + sp * 7 };
+    var a0 = 0.0; var a1 = 0.0; var a2 = 0.0; var a3 = 0.0; var a4 = 0.0; var a5 = 0.0;
+    if base >= 10000 {
+        let bb = base - 10000;
+        a0 = hi[bb]; a1 = hi[bb+1]; a2 = hi[bb+2]; a3 = hi[bb+3]; a4 = hi[bb+4]; a5 = hi[bb+5];
+    } else {
+        a0 = lo[base]; a1 = lo[base+1]; a2 = lo[base+2]; a3 = lo[base+3]; a4 = lo[base+4]; a5 = lo[base+5];
+    }
+    a0 + a1*t/2.0 + a2*t*t/3.0 + a3*t*t*t/4.0 + a4*t*t*t*t/5.0 + a5/t
+}
+
+fn g30_cp_r(sp: i64, t: f64) -> f64 with Mut, Div, Panic {
+    let lo = g30_nasa_low(); let hi = g30_nasa_high();
+    let base = if t <= 1000.0 { sp * 7 } else { 10000 + sp * 7 };
+    var a0 = 0.0; var a1 = 0.0; var a2 = 0.0; var a3 = 0.0; var a4 = 0.0;
+    if base >= 10000 {
+        let bb = base - 10000;
+        a0 = hi[bb]; a1 = hi[bb+1]; a2 = hi[bb+2]; a3 = hi[bb+3]; a4 = hi[bb+4];
+    } else {
+        a0 = lo[base]; a1 = lo[base+1]; a2 = lo[base+2]; a3 = lo[base+3]; a4 = lo[base+4];
+    }
+    a0 + a1*t + a2*t*t + a3*t*t*t + a4*t*t*t*t
+}
+
 // standard Gibbs free energy G0/(R T) for species sp at temperature t
 fn g30_g_rt(sp: i64, t: f64) -> f64 with Mut, Div, Panic {
     let lo = g30_nasa_low()
@@ -688,6 +717,56 @@ pub fn g30_dc_kc(t: f64, c: &[f64; 10], kc: &[f64; 29]) -> [f64; 10] with Mut, D
 pub fn g30_dc(t: f64, c: &[f64; 10]) -> [f64; 10] with Mut, Div, Panic {
     let kc = g30_kc_all(t);
     g30_dc_kc(t, c, &kc)
+}
+
+// Constant-volume adiabatic energy balance. Concentrations are mol/cm3,
+// sensible internal energies are J/mol, and cv is J/(mol K), so dT/dt is K/s:
+//   dT/dt = -sum_i(u_i dc_i/dt) / sum_i(c_i cv_i), u_i = h_i - R T.
+fn g30_adiabatic_rhs(t: f64, c: &[f64; 10]) -> [f64; 11] with Mut, Div, Panic {
+    let kc = g30_kc_all(t);
+    let dc = g30_dc_kc(t, c, &kc);
+    let rj = 8.314462618;
+    var power = 0.0;
+    var capacity = 0.0;
+    var i: i64 = 0;
+    while i < 10 {
+        let u = rj * t * (g30_h_rt(i, t) - 1.0);
+        let cv = rj * (g30_cp_r(i, t) - 1.0);
+        power = power + u * dc[i];
+        capacity = capacity + c[i] * cv;
+        i = i + 1;
+    }
+    var out: [f64; 11] = [0.0; 11];
+    i = 0;
+    while i < 10 { out[i] = dc[i]; i = i + 1; }
+    if capacity > 0.0 { out[10] = 0.0 - power / capacity; }
+    out
+}
+
+// Isolated constant-volume adiabatic reactor. The existing
+// simulate_gri30_h2 remains the isothermal Cantera-parity reference.
+pub fn simulate_gri30_h2_adiabatic(init: &[f64; 10], t_k: f64, dt: f64, steps: i64) -> ([f64; 10], f64) with Mut, Div, Panic {
+    var y: [f64; 11] = [init[0], init[1], init[2], init[3], init[4], init[5], init[6], init[7], init[8], init[9], t_k];
+    var yt: [f64; 11] = [0.0; 11];
+    var s: i64 = 0;
+    while s < steps {
+        var c: [f64; 10] = [y[0], y[1], y[2], y[3], y[4], y[5], y[6], y[7], y[8], y[9]];
+        let k1 = g30_adiabatic_rhs(y[10], &c);
+        var i: i64 = 0;
+        while i < 11 { yt[i] = y[i] + 0.5 * dt * k1[i]; i = i + 1; }
+        c = [yt[0], yt[1], yt[2], yt[3], yt[4], yt[5], yt[6], yt[7], yt[8], yt[9]];
+        let k2 = g30_adiabatic_rhs(yt[10], &c);
+        i = 0; while i < 11 { yt[i] = y[i] + 0.5 * dt * k2[i]; i = i + 1; }
+        c = [yt[0], yt[1], yt[2], yt[3], yt[4], yt[5], yt[6], yt[7], yt[8], yt[9]];
+        let k3 = g30_adiabatic_rhs(yt[10], &c);
+        i = 0; while i < 11 { yt[i] = y[i] + dt * k3[i]; i = i + 1; }
+        c = [yt[0], yt[1], yt[2], yt[3], yt[4], yt[5], yt[6], yt[7], yt[8], yt[9]];
+        let k4 = g30_adiabatic_rhs(yt[10], &c);
+        i = 0;
+        while i < 11 { y[i] = y[i] + (dt / 6.0) * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i]); i = i + 1; }
+        s = s + 1;
+    }
+    ([y[0], y[1], y[2], y[3], y[4], y[5], y[6], y[7], y[8], y[9]], y[10])
 }
 
 // ---------------- deterministic simulator (RK4, isothermal) ----------------
