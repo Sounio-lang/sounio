@@ -721,6 +721,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.cpc2026-yale-evidence-dossier-2026-07-11 | historical | docs/research/cpc2026_yale_evidence_dossier_2026-07-11.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.delta-epistemic-gradual-compilation-paper | historical | docs/research/delta_epistemic_gradual_compilation_paper.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.e-series-semantic-germ-spec-2026-07-26 | historical | docs/research/e_series_semantic_germ_spec_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.elplus-applications-2026-08-05 | historical | docs/research/elplus_applications_2026-08-05.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.epistemic-algebra-review | repo_only | docs/research/epistemic_algebra_review.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.epistemic-calculus-value-carrying-redesign | historical | docs/research/epistemic_calculus_value_carrying_redesign.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.epistemic-self-reference-design | historical | docs/research/epistemic_self_reference_design.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -901,6 +902,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.prereg-piloto1-addendum2 | historical | docs/research/PREREG-piloto1-addendum2.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.prereg-piloto1-semantic-barriers | historical | docs/research/PREREG-piloto1-semantic-barriers.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.primitive-zd-gap-resolution | historical | docs/research/PRIMITIVE_ZD_GAP_RESOLUTION.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.prior-art-k3-signed-switching-2026-08-04 | historical | docs/research/prior_art_k3_signed_switching_2026-08-04.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.private-evidence-envelope-2026-06-23 | historical | docs/research/private-evidence-envelope-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.probe-corrected-protocol | historical | docs/research/probe-corrected-protocol.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.probe-preprint-draft | historical | docs/research/probe-preprint-draft.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

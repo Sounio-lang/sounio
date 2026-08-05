@@ -478,6 +478,22 @@ Do not promote remaining known-failure probes (full `qd128`, combined, receipt) 
 `run-pass` until default Madaros prints their PASS markers. Do not alter the
 semantic oracles while repairing `qd_mul` / aggregate-return emission.
 
+## Module-level data pitfalls (Madaros native lane)
+
+Surfaced by the round-13 EL+ closure optimization
+(`artifacts/ontology-frontiers/real-data/scale/OPTIMIZATION_RESULTS.md`):
+
+- **Module-level scalar initializers are unreliable.** `pub var g: i64 = 0`
+  at module scope can read back garbage (probe 2026-08-05: five scalars
+  declared `= 0` read 4202496..4202501). Same family as the known
+  leading-cell pitfall of module-level splat arrays (bool cells 0..2, i64
+  index 0). Workaround: assign every module-level scalar explicitly in
+  `main` before first use, in addition to the array leading-cell fixups.
+- **`&&` / `||` do not short-circuit an array read on the RHS.** Probe:
+  `while v > 0 && arr[v - 1] > 3` reads `arr[-1]` at `v = 0` and
+  segfaults. Workaround: guard the index with a flag variable; never put
+  a potentially out-of-range subscript on the RHS of `&&`/`||`.
+
 ## Reporting Issues
 
 If you encounter any new issues, please report them at:

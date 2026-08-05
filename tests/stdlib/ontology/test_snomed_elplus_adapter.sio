@@ -1,0 +1,136 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+//@ known-failure: SNOMEDElplus.close() runs the cross-module fixpoint inertly from the impl-method frame on the current Madaros lane (rounds=1, no derived edges; probes in artifacts/handoff of lane elplus-apps-20260805).  Repair in flight on lane elplus-optimize-20260805 (uncommitted snomed.sio rewrite, 2026-08-05).  This test is the acceptance gate: remove the annotation once close() derives transitivity and role edges.
+
+// tests/stdlib/ontology/test_snomed_elplus_adapter.sio
+//
+// End-to-end test of the SNOMEDElplus adapter in
+// stdlib/ontology/biomedical/snomed.sio: the role-aware EL+ mini-closure
+// over a curated SNOMED fragment, driven entirely through the public
+// adapter API:
+//
+//   snomed_elplus_new -> add_isa / add_rel / add_role_sub / add_role_chain
+//   -> snomed_elplus_close -> subsumes / subsumes_ex / role_targets
+//
+// Fragment (the classic EL+ heart example; disease/structure ids below
+// 100000 are illustrative module-local keys, real SCTIDs come from the
+// snomed module constants):
+//
+//   Pericarditis  is_a  ClinicalFinding
+//   Pericardium   is_a  BodyStructure
+//   Endocardium   is_a  BodyStructure
+//   Heart         is_a  BodyStructure
+//   Pericarditis  -finding_site-> Pericardium
+//   Pericardium   -part_of->      Heart
+//   Endocardium   -part_of->      Heart
+//   finding_site  sqsubseteq part_of          (role hierarchy)
+//   part_of o part_of sqsubseteq part_of      (role composition)
+//
+// The role layer derives what plain is-a BFS cannot:
+//   Pericarditis <= exists part_of.Heart   ("heart finding")
+//
+// Engine: default (Madaros) — the adapter was repaired for that lane
+// (commit 30f28d2d83).  Named imports only: the qualified form
+// miscompiles (see stdlib/ontology/elplus.sio).
+
+use ontology::biomedical::snomed::{
+    SNOMEDElplus,
+    snomed_elplus_new,
+    snomed_relationship_new,
+    CONCEPT_ROOT,
+    CONCEPT_CLINICAL_FINDING,
+    CONCEPT_BODY_STRUCTURE,
+    REL_FINDING_SITE,
+    REL_PART_OF
+}
+
+// Illustrative module-local concept keys (not real SCTIDs).
+let PERICARDITIS: i64 = 900101
+let PERICARDIUM: i64 = 900102
+let ENDOCARDIUM: i64 = 900103
+let HEART: i64 = 900104
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var n_fail = 0
+
+    var c = snomed_elplus_new(CONCEPT_ROOT)
+
+    // Stated is-a edges.
+    c.snomed_elplus_add_isa(PERICARDITIS, CONCEPT_CLINICAL_FINDING)
+    c.snomed_elplus_add_isa(PERICARDIUM, CONCEPT_BODY_STRUCTURE)
+    c.snomed_elplus_add_isa(ENDOCARDIUM, CONCEPT_BODY_STRUCTURE)
+    c.snomed_elplus_add_isa(HEART, CONCEPT_BODY_STRUCTURE)
+
+    // Attribute relationships (existential restrictions).
+    let rel1 = snomed_relationship_new(PERICARDITIS, REL_FINDING_SITE, PERICARDIUM)
+    c.snomed_elplus_add_rel(&rel1)
+    let rel2 = snomed_relationship_new(PERICARDIUM, REL_PART_OF, HEART)
+    c.snomed_elplus_add_rel(&rel2)
+    let rel3 = snomed_relationship_new(ENDOCARDIUM, REL_PART_OF, HEART)
+    c.snomed_elplus_add_rel(&rel3)
+
+    // Role layer: finding_site <= part_of, part_of o part_of <= part_of.
+    c.snomed_elplus_add_role_sub(REL_FINDING_SITE, REL_PART_OF)
+    c.snomed_elplus_add_role_chain(REL_PART_OF, REL_PART_OF, REL_PART_OF)
+
+    let rounds = c.snomed_elplus_close()
+    if rounds <= 0 {
+        println("FAIL: close() took no fixpoint rounds")
+        n_fail = n_fail + 1
+    }
+
+    // 1. Stated is-a survives the closure.
+    if !c.snomed_subsumes_elplus(PERICARDITIS, CONCEPT_CLINICAL_FINDING) {
+        println("FAIL: Pericarditis should subsume to ClinicalFinding")
+        n_fail = n_fail + 1
+    }
+
+    // 2. Everything subsumes to the top concept.
+    if !c.snomed_subsumes_elplus(PERICARDITIS, CONCEPT_ROOT) {
+        println("FAIL: Pericarditis should subsume to root")
+        n_fail = n_fail + 1
+    }
+
+    // 3. Role-aware derivation: finding_site <= part_of lifts
+    //    Pericarditis <= ex finding_site.Pericardium and
+    //    Pericardium <= ex part_of.Heart to
+    //    Pericarditis <= ex part_of.Heart.
+    if !c.snomed_subsumes_ex_elplus(PERICARDITIS, REL_PART_OF, HEART) {
+        println("FAIL: Pericarditis should subsume to ex part_of.Heart")
+        n_fail = n_fail + 1
+    }
+
+    // 4. Direct existential: Endocardium <= ex part_of.Heart.
+    if !c.snomed_subsumes_ex_elplus(ENDOCARDIUM, REL_PART_OF, HEART) {
+        println("FAIL: Endocardium should subsume to ex part_of.Heart")
+        n_fail = n_fail + 1
+    }
+
+    // 5. Derived role targets: Pericardium has part_of-target Heart.
+    var targets: [i64; 64] = [0; 64]
+    let n_targets = c.snomed_role_targets_elplus(PERICARDIUM, REL_PART_OF, &!targets)
+    if n_targets != 1 || targets[0] != HEART {
+        println("FAIL: Pericardium should have exactly one part_of target (Heart)")
+        n_fail = n_fail + 1
+    }
+
+    // 6. Negative: a body structure is not a clinical finding.
+    if c.snomed_subsumes_elplus(ENDOCARDIUM, CONCEPT_CLINICAL_FINDING) {
+        println("FAIL: Endocardium must not subsume to ClinicalFinding")
+        n_fail = n_fail + 1
+    }
+
+    // 7. Negative: subsumption is not symmetric.
+    if c.snomed_subsumes_elplus(CONCEPT_CLINICAL_FINDING, PERICARDITIS) {
+        println("FAIL: ClinicalFinding must not subsume to Pericarditis")
+        n_fail = n_fail + 1
+    }
+
+    if n_fail == 0 {
+        println("ALL PASS")
+        return 0
+    }
+    println("FAILURES:")
+    println(n_fail)
+    return 1
+}

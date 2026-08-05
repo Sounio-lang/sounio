@@ -1,3 +1,17 @@
+<!-- docs:meta
+topic_id: repo.docs.research.prior-art-k3-signed-switching-2026-08-04
+authority: historical
+audience: researchers
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.prior-art-k3-signed-switching-2026-08-04
+-->
+
+<!-- docs:status-note:start -->
+> Docs status: `historical`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
+
 # Prior-art audit — the "k = 3 phenomenon" is classical: switching classes, two-graphs, spectral moments
 
 **Date:** 2026-08-04 · **Mode:** `deep-research` / lit-review (prior-art scan) · **Scope:** the §35–§37
