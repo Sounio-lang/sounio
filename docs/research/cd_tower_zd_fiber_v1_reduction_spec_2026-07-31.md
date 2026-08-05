@@ -2966,8 +2966,9 @@ only; the values on the families are Tiers 38/40 and are *not* assembled into a 
 > ✅ **Both mechanics are now proven** (Tiers 46–47): `sumLtI_split_pred` / `sumLtI_of_support` /
 > `sumLtI_of_cosupport` cut a range by membership, and `sumLtI_eq_at` / `sumLtI_eq_at2` collapse a
 > sum onto one or two support points — the shape the matching and coset families give, since for a
-> fixed low vertex both partners are determined. **The general injective reindexing is still not
-> proven**, and more to the point **neither mechanic reaches the dense hub rows.** The blocker for
+> fixed low vertex both partners are determined. ~~The general injective reindexing is still not
+> proven~~ — **it is now proven, Tier 48, see §48 below** — and more to the point **neither mechanic
+> reaches the dense hub rows.** The blocker for
 > `tr(BE²)` is unchanged and is not a missing tool.
 
 So the honest position: every *pointwise* and *structural* fact §18.1 rests on is a theorem, the
@@ -2976,3 +2977,47 @@ is carried and a second has its gate — and the last two need an argument of a 
 yet had to make.
 
 **§18.1 is not yet proven, so (III) is still reduced, not proven.** (d) and V1 untouched.
+
+
+---
+
+## §48 — reindexing along an injection (Tier 48): the lemma §47 should not have skipped
+
+`5e0a008df6`. Two theorems in `formal/lean4/SounioZDFiberAntisym.lean`, both `[propext, Quot.sound]`,
+full-file build green:
+
+```lean
+theorem sumLtI_peel : ∀ (n k : Nat) (f : Nat → Int), k < n →
+    sumLtI n f = f k + sumLtI n (fun i => if i = k then 0 else f i)
+
+theorem sumLtI_reindex : ∀ (m n : Nat) (i : Nat → Nat) (f : Nat → Int),
+    (∀ a, a < m → i a < n) →                              -- ι lands in the range
+    (∀ a b, a < m → b < m → i a = i b → a = b) →           -- ι injective
+    (∀ x, x < n → (∀ a, a < m → i a ≠ x) → f x = 0) →      -- f supported on the image
+    sumLtI n f = sumLtI m (fun a => f (i a))
+```
+
+### §48.1 — this is a self-correction, and the correction is the point
+
+§47 wrote that the general reindexing was "not proven — without `Finset` it needs index deletion from
+a `sumLtI` range, which is awkward", and scoped it out. **That was a wrong call rather than a real
+obstruction.** `sumLtI_peel` *is* the index deletion, it is a short induction on the range, and with
+it the reindexing goes by induction on `m`, stripping the image one point at a time. The whole thing
+compiled first try.
+
+The general shape of the error is worth recording because it is cheap to repeat: **"awkward without
+X" is a prediction about a proof I had not attempted, and I filed it as if it were a finding.** The
+file's own precedent (`sumLt_lowMap` at `:5240`, and every `sumLtI_*` lemma in Tiers 43–47) already
+showed that this file does index surgery without `Finset` routinely.
+
+### §48.2 — what it does not do
+
+**It does not move `tr(BE²)`.** There is no sparse family to reindex on the hub rows — they are
+dense, `≈2(h−2)` entries each — so the blocker stated in §47 stands verbatim: the vanishing is a
+**cancellation**, and no reindexing, splitting or collapsing lemma produces one. What Tier 48 removes
+is the *tool gap the earlier tier claimed*, not the mathematical one.
+
+Reviewed per M1 before commit: grok-4.5 `[OK]` on both statements; Z.AI truncated at 81 diff lines,
+consistent with the measured ~50-line threshold for that provider.
+
+**§18.1 is still not proven, so (III) is still reduced, not proven.** (d) and V1 untouched.
