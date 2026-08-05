@@ -10,14 +10,34 @@ use check::types::{TypeEntry, empty_type_entry}
 // the lowering path can use the capacity that is already physically allocated.
 //
 // IR_MAX_INSTRS history:
-//   1024 → 2048 (earlier) → 4096 (2026-07-20, unsplit oct_mul).
+//   1024 → 2048 (earlier) → 4096 (2026-07-20, unsplit oct_mul) → 3072 (2026-08-05).
 // Full exclusive-ref 8-component oct_mul lowers to ~2180 IR ops; under 2048 the
 // body filled the array, IrReturn was dropped, and core_ir codegen fell through
 // into main (ENTER/BEFORE_MUL re-entry storm). #1274 lo/hi split stayed green
 // because each half is ~1100 ops.
+//
+// 4096 → 3072 IS A MEMORY CHANGE, not a capacity one. IrFunction carries
+// `instrs` INLINE at ~168 bytes per IrInstr, so this array IS the function:
+// 672 KB at 4096, 504 KB at 3072. Measured 2026-08-05 by sampling
+// /proc/<pid>/status through a 3000-function compile, peak RSS grows at a FLAT
+// rate per function lowered no matter how few instructions those functions
+// contain — the runtime allocator is a bump cursor with no reclamation — and
+// halving this constant moved that rate by 336 KB, i.e. 168 bytes per slot.
+//
+// 3072 rather than 2048 because ~2180 is a MEASURED requirement of working
+// code, and this is not the constant to set by a round number. The margin above
+// oct_mul is ~40%.
+//
+// It is safe to move now in a way it was not before: #1645 made a function past
+// this wall FAIL THE BUILD instead of silently dropping the tail and exiting 0,
+// and #1649 made the diagnostic report what the function actually needed. A
+// corpus census at 4096 found exactly six files over the limit — one at 14389
+// and five div_witness_* at 5496 — all of which were already failing. Nothing
+// that works lives between 3072 and 4096; if something ever does, it now says
+// so by name and by count.
 pub let IR_MAX_FUNCS: i64 = 8192
 pub let IR_MAX_STRINGS: i64 = 4096
-pub let IR_MAX_INSTRS: i64 = 4096
+pub let IR_MAX_INSTRS: i64 = 3072
 pub let IR_MAX_PARAMS: i64 = 64
 pub let IR_INVALID_REG: i64 = -1
 pub let IR_INVALID_LABEL: i64 = -1
@@ -713,7 +733,7 @@ pub fn ir_strategy_name(s: i64) -> string {
 
 pub struct IrFunction {
     pub name: Name,
-    pub instrs: [IrInstr; 4096],
+    pub instrs: [IrInstr; 3072],
     pub instr_count: i64,
     pub reg_count: i64,
     pub label_count: i64,
@@ -2296,7 +2316,7 @@ fn ir_empty_prof_counter_info() -> IrProfCounterInfo {
 // hold one inline. That made the instruction ~248 bytes, of which 55% was a
 // buffer that MOST INSTRUCTIONS NEVER USE — an add, a jump, a label, a return
 // all carried 128 zero bytes each. Multiplied out through
-// `IrFunction.instrs: [IrInstr; 4096]` and `IrModule.functions:
+// `IrFunction.instrs: [IrInstr; 3072]` and `IrModule.functions:
 // [IrFunction; 2048]`, that was 2.1 GB of the shipped compiler's 3.40 GB BSS,
 // and it is why IR_MAX_FUNCS could not be raised.
 //
@@ -3898,7 +3918,7 @@ pub fn ir_phi(dst: i64) -> IrInstr {
 pub fn ir_empty_function() -> IrFunction {
     IrFunction {
         name: ir_empty_name(),
-        instrs: [ir_nop(); 4096],
+        instrs: [ir_nop(); 3072],
         instr_count: 0,
         reg_count: 0,
         label_count: 0,
