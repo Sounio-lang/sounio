@@ -48,6 +48,34 @@ pub fn padf7(x: i64) -> i64 { x + 7 }
 
 use ontology::elplus::{elplus_role_closure, elplus_seed, elplus_fixpoint_packed}
 
+// Module-level scratch buffers for the SNOMEDElplus close() path.
+// On the current Madaros lane, a function that takes &!SNOMEDElplus AND
+// allocates large bool arrays as locals corrupts the &! argument it
+// passes to cross-module elplus calls (writes land in wrong memory).
+// Hoisting the two large scratch arrays to module-level BSS globals
+// (a la NC_V2_LABEL_OFFSETS in self-hosted/native/frame.sio:203-209
+// and NC_FLAT_RELOC_* in frame.sio:212-226) eliminates the large stack
+// frame and the &! field-offset path.  Both arrays must be explicitly
+// zeroed at the start of close() — the [false; N] initialiser only
+// initialises the first slice of the array.
+pub var CLOSE_S: [bool; 4096] = [false; 4096]
+pub var CLOSE_R: [bool; 32768] = [false; 32768]
+
+// Free-function trampoline for elplus_fixpoint_packed.  Calling it
+// directly from within an impl method on SNOMEDElplus corrupts the
+// ELPLUS_MAXC constant resolution (the fixpoint computes indices as
+// c*8 instead of c*64), so the fixpoint runs to a no-op.  Routing the
+// call through this free-function frame (no &!SNOMEDElplus parameter)
+// restores exact EL+ completion semantics.
+fn run_fixpoint_on_globals(
+    pack: &[i64; 704],
+    rclos: &[bool; 64],
+    chains: &[i64; 24],
+    dims: &[i64; 4],
+) -> i64 with Mut, Div, Panic {
+    elplus_fixpoint_packed(&!CLOSE_S, &!CLOSE_R, pack, rclos, chains, dims)
+}
+
 // ============================================================================
 // SNOMED-CT CONSTANTS
 // ============================================================================
@@ -659,13 +687,23 @@ impl SNOMEDElplus {
     // through elplus_fixpoint_packed because imported calls with more
     // than 8 parameters fail native codegen from non-main callers.
     pub fn snomed_elplus_close(self: &!SNOMEDElplus) -> i64 with Mut, Div, Panic {
-        var s: [bool; 4096] = [false; 4096]
-        var r: [bool; 32768] = [false; 32768]
+        // Explicitly zero the BSS scratch buffers (initialiser only
+        // covers the first slice on the current lane).
+        var k: i64 = 0
+        while k < 4096 {
+            CLOSE_S[k] = false
+            k = k + 1
+        }
+        k = 0
+        while k < 32768 {
+            CLOSE_R[k] = false
+            k = k + 1
+        }
         var rclos: [bool; 64] = [false; 64]
         var pack: [i64; 704] = [0; 704]
         var chains: [i64; 24] = [0; 24]
         var dims: [i64; 4] = [0; 4]
-        var k: i64 = 0
+        k = 0
         while k < 64 {
             pack[k] = self.ckind[k]
             pack[64 + k] = self.carg1[k]
@@ -690,21 +728,38 @@ impl SNOMEDElplus {
         dims[2] = self.nc
         dims[3] = self.nr
         elplus_role_closure(&!rclos, self.nr)
-        elplus_seed(&!s, self.nc, self.top)
+        // Inline seed: the cross-module elplus_seed call from within
+        // an impl method on SNOMEDElplus corrupts the c*ELPLUS_MAXC
+        // index computation (writes land at c*8 instead of c*64).
+        var c: i64 = 0
+        while c < 64 {
+            var cc: i64 = 0
+            while cc < 64 {
+                CLOSE_S[c * 64 + cc] = false
+                cc = cc + 1
+            }
+            c = c + 1
+        }
+        c = 0
+        while c < self.nc {
+            CLOSE_S[c * 64 + c] = true
+            CLOSE_S[c * 64 + self.top] = true
+            c = c + 1
+        }
         k = 0
         while k < self.n_stated {
-            s[self.stated_a[k] * 64 + self.stated_b[k]] = true
+            CLOSE_S[self.stated_a[k] * 64 + self.stated_b[k]] = true
             k = k + 1
         }
-        let rounds = elplus_fixpoint_packed(&!s, &!r, &pack, &rclos, &chains, &dims)
+        let rounds = run_fixpoint_on_globals(&pack, &rclos, &chains, &dims)
         k = 0
         while k < 4096 {
-            self.s[k] = s[k]
+            self.s[k] = CLOSE_S[k]
             k = k + 1
         }
         k = 0
         while k < 32768 {
-            self.r[k] = r[k]
+            self.r[k] = CLOSE_R[k]
             k = k + 1
         }
         k = 0
