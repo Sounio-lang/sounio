@@ -3210,7 +3210,7 @@ rests on is therefore no longer prose at any point.
 | term | status |
 |---|---|
 | `tr(B³) = 8·t3′` | ✅ PROVEN ∀n (`tri3_Asig_blow`, Tier 43) |
-| `3·tr(B²E) = 24·t2′` | ✅ **PROVEN ∀n (`trB2E_eq`, Tier 51)** — `tr(B²E) = 8·degSum` |
+| `3·tr(B²E) = 24·t2′` | ✅ **PROVEN ∀n, in exactly this form** — `trB2E_three` (Tier 51b), over `trB2E_eq` (Tier 51) |
 | `3·tr(BE²) = 0` | ✅ **PROVEN ∀n (`trBE2_zero`, Tier 50)** |
 | `tr(E³) = −24(h−2)` | **MEASURED — the only one left** |
 
@@ -3259,6 +3259,20 @@ imported statement **verbatim**, and the port compiled first try.
 `B² = [[2A², 2A²], [2A², 2A²]]` independently and concluded "`trB2E_split` is perfectly correct"; its
 single doubt — can row `0` of `A′` really be null? — came from context I failed to give it: index `0`
 is not a vertex of the fiber graph, and `W` is the isolated vertex.
+
+### §50.2 — the coefficient `3` is a theorem too (Tier 51b, `c9f56307e4`)
+
+§34.2 justified the `3×` in prose and §49.8b noted the ingredients were theorems — but **no theorem
+in the file stated the collapsed form.** Tier 51 proved `tr(B²E) = 8·t2′`; the file said nothing
+about `3·tr(B²E)`. Now it does:
+
+```lean
+theorem trB2E_three : T(B,B,E) + T(B,E,B) + T(E,B,B) = 24 * degSum W k
+```
+
+Two applications of `tri3_cyc` (Tier 44) make the three mixed `BBE` positions of `tr((B+E)³)` equal;
+`trB2E_eq` gives each `= 8·degSum`. No new mathematics — it closes the gap between what the file
+proves and what §34's table claims, which is the kind of gap this lane has been caught by before.
 
 ### §50.1 — what is left of §18.1
 
