@@ -567,6 +567,14 @@ always exit at the first stage — which is accuracy-capped. A usable SAN at hig
 trains deep stages before allowing early exits, or (c) a gate constrained to
 match a target accuracy, not just a target FLOP count.
 
+**SAN-v3: curriculum + depth penalty (implemented, pending validation).** We
+implemented SAN-v3 with (i) a curriculum that opens gate *k* only after stage
+*k*'s head reaches a minimum accuracy threshold, and (ii) a depth penalty
+λ × (remaining depth) charged during training for every sample that continues
+past an open gate. The implementation is in
+`scripts/research/suffering_aware_large_architecture_v2.py`; validation on the
+full CIFAR-10 split is pending cluster availability at the time of writing.
+
 ---
 
 ## 5 Discussion

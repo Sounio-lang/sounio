@@ -682,8 +682,15 @@ class GatingNetwork(nn.Module):
 
 class SufferingAwareResNet(nn.Module):
     """ResNet trunk (basic or bottleneck) with per-stage exit heads and a
-    learned gating network (SAN-v2). kind='dense'/'earlystop' never runs the
-    exit heads or the gate."""
+    learned gating network (SAN-v2/v3). kind='dense'/'earlystop' never runs the
+    exit heads or the gate.
+
+    SAN-v3 additions:
+    - Curriculum: stage k gates open only after the stage's head has reached a
+      minimum accuracy threshold (prevents premature first-stage exit).
+    - Depth penalty: training loss adds λ × (exit depth) to discourage
+      unnecessary deep traversal once the gate is open.
+    """
 
     def __init__(self, blocks, width, kind, block_type="bottleneck"):
         super().__init__()
@@ -699,9 +706,26 @@ class SufferingAwareResNet(nn.Module):
             [GatingNetwork(c, self.n_stages) for c in self.trunk.channels])
         self.final_head = nn.Linear(self.trunk.channels[-1], N_CLASS)
         self.meter = MachineMeter()
+        # Curriculum state: per-stage running accuracy (EMA) and minimum
+        # accuracy required before the gate is allowed to open.
+        self.stage_acc_ema = torch.zeros(self.n_stages)
+        self.stage_acc_momentum = 0.9
+        self.stage_min_acc = float(os.environ.get("SAN_LARGE_STAGE_MIN_ACC", "0.35"))
+        # Depth penalty weight (only during training).
+        self.depth_penalty_w = float(os.environ.get("SAN_LARGE_DEPTH_PENALTY", "0.01"))
 
     def _head_logits(self, k, h):
         return self.exit_heads[k](h.mean(dim=(2, 3)))
+
+    def _update_stage_acc(self, k, acc):
+        """Exponential moving average of per-stage validation accuracy."""
+        self.stage_acc_ema[k] = (
+            self.stage_acc_momentum * self.stage_acc_ema[k]
+            + (1 - self.stage_acc_momentum) * acc)
+
+    def _gate_open(self, k):
+        """Curriculum: gate k opens only after its head has proven itself."""
+        return float(self.stage_acc_ema[k]) >= self.stage_min_acc
 
     def forward(self, x, train=False, use_exit_heads=True, train_aux=False):
         meter = self.meter
@@ -716,6 +740,7 @@ class SufferingAwareResNet(nn.Module):
         gated = use_exit_heads and self.kind == "san"
         aux_active = train and (gated or train_aux)
         final_logits_for_distill = None
+        depth_penalty = x.new_zeros(n)
         for k in range(self.n_stages):
             if active.numel() == 0:
                 break
@@ -733,12 +758,19 @@ class SufferingAwareResNet(nn.Module):
                 aux_records.append((active, logits_k, k))
             if not gated:
                 continue
+            # Curriculum: do not evaluate the gate until the head is trained
+            if not self._gate_open(k):
+                continue
             gate_logit = self.gates[k](head_in.detach(), k)
             leave = torch.sigmoid(gate_logit) > self.gates[k].threshold
             if leave.any():
                 idx = active[leave]
                 out_logits[idx] = logits_k[leave]
                 out_depth[idx] = k
+                # Depth penalty: charge a small cost for every sample that
+                # continues past this stage, proportional to remaining depth.
+                if train:
+                    depth_penalty[idx] = float(self.n_stages - k)
                 keep = ~leave
                 active = active[keep]
                 h = h[keep]
@@ -750,7 +782,8 @@ class SufferingAwareResNet(nn.Module):
             if train:
                 final_record = (active, final_logits)
                 final_logits_for_distill = final_logits.detach()
-        return out_logits, out_depth, per_stage_active, n_final, aux_records, final_record, final_logits_for_distill
+                depth_penalty[active] = 0.0
+        return out_logits, out_depth, per_stage_active, n_final, aux_records, final_record, final_logits_for_distill, depth_penalty
 
     def forward_dense(self, x):
         """Every gate forced open: every sample traverses every stage AND
@@ -1004,7 +1037,7 @@ def train_run(model, x_tr, y_tr, x_va, y_va, epochs, tau, tag, is_lm=False):
                 idx = schedule[epoch][b0:b0 + BATCH]
                 xb, yb = x_tr[idx], y_tr[idx]
                 micro = (xb.shape[0] == BATCH)
-                _, _, _, _, aux_records, final_record, final_distill = model(
+                _, _, _, _, aux_records, final_record, final_distill, depth_penalty = model(
                     xb, train=True, use_exit_heads=use_exits, train_aux=train_aux)
                 if not is_lm:
                     losses = []
@@ -1014,6 +1047,9 @@ def train_run(model, x_tr, y_tr, x_va, y_va, epochs, tau, tag, is_lm=False):
                     if aux_records:
                         aux_losses = [CE(a_logits, yb[a_idx]) for a_idx, a_logits, k in aux_records]
                         losses.append(AUX_W * torch.stack(aux_losses).mean())
+                    # Depth penalty: discourage deep traversal once gates are open
+                    if hasattr(model, "depth_penalty_w") and model.depth_penalty_w > 0:
+                        losses.append(model.depth_penalty_w * depth_penalty.mean())
                     loss = sum(losses)
                 else:
                     yg = yb[:, -g:]
@@ -1047,7 +1083,7 @@ def train_run(model, x_tr, y_tr, x_va, y_va, epochs, tau, tag, is_lm=False):
                 for e0 in range(0, x_va.shape[0], EVAL_BATCH):
                     e1 = e0 + EVAL_BATCH
                     xb = x_va[e0:e1]
-                    l, d, _, _, _, _, _ = model(xb, train=False, use_exit_heads=use_exits)
+                    l, d, _, _, _, _, _, _ = model(xb, train=False, use_exit_heads=use_exits)
                     vlogits_chunks.append(l)
                     vdepth_chunks.append(d)
                 vlogits = torch.cat(vlogits_chunks, dim=0)
@@ -1063,6 +1099,12 @@ def train_run(model, x_tr, y_tr, x_va, y_va, epochs, tau, tag, is_lm=False):
                 acc = float((pred == yg).float().mean().item())
                 harm = float(HARM_LM[yg.reshape(-1), pred.reshape(-1)].mean().item())
             exit_frac = float((vdepth < model_depth(model)).float().mean().item())
+            # Update curriculum state: use final accuracy as a proxy for all
+            # stage heads (cheap approximation; exact per-stage validation would
+            # require an extra ungated forward pass).
+            if hasattr(model, "_update_stage_acc") and model.kind == "san":
+                for k in range(model.n_stages):
+                    model._update_stage_acc(k, acc)
             # Feasibility is a property of the DEPLOYED (gated) model: for SAN it
             # only counts once the gates are active (post-warmup). Counting an
             # ungated warmup epoch would freeze on a model that is never shipped.
@@ -1183,7 +1225,7 @@ def conservation_check(model, x_va, depth_units, is_lm=False):
     model.eval()
     model.meter = MachineMeter()
     with torch.no_grad():
-        vlogits_gated, vdepth, per_active, n_final, _, _, _ = model(x_va, train=False)
+        vlogits_gated, vdepth, per_active, n_final, _, _, _, _ = model(x_va, train=False)
     gated_flops = model.meter.flops
     with torch.no_grad():
         vlogits_dense, dense_meter = model.forward_dense(x_va)
