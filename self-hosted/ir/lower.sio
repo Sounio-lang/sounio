@@ -360,6 +360,21 @@ var IR_LOWER_HARD_ERROR_NEEDED: i64 = 0
 // rejects a `Name { … }` literal in a global and zero IS the empty name.
 var IR_LOWER_ERROR_FIRST_FN: Name
 var IR_LOWER_ERROR_TOTAL: i64 = 0
+// WHICH PRESEED STAGE first turned had_error true, and for the two that loop,
+// on which module index. The counters above proved the flag goes true without
+// any `had_error = true` in this file firing, so the write happens inside one
+// of the three preseed calls by some other route; this narrows it to one call
+// without having to instrument all of them.
+//   1 = external struct items   2 = own program items   3 = external BSS globals
+var IR_LOWER_ERROR_STAGE: i64 = 0
+var IR_LOWER_ERROR_STAGE_IDX: i64 = 0
+
+fn lower_note_stage(stage: i64, idx: i64, flagged: bool) with Mut {
+    if flagged && IR_LOWER_ERROR_STAGE == 0 {
+        IR_LOWER_ERROR_STAGE = stage
+        IR_LOWER_ERROR_STAGE_IDX = idx
+    }
+}
 
 // report_error() is not the only way lowering fails: TEN sites in this file set
 // `lo.had_error = true` directly and never pass through it. That is why the
@@ -383,6 +398,13 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
     // identical: "the reporter never ran" and "the reporter ran and nothing had
     // been recorded". Distinguishing them is the whole job of a probe, and it
     // cost a build to notice the probe could not.
+    if IR_LOWER_ERROR_STAGE > 0 {
+        print("  first flagged in preseed stage ")
+        print_int(IR_LOWER_ERROR_STAGE)
+        print(" (1=external structs, 2=own items, 3=external bss) at module index ")
+        print_int(IR_LOWER_ERROR_STAGE_IDX)
+        print("\n")
+    }
     print("  lowering-error record: total=")
     print_int(IR_LOWER_ERROR_TOTAL)
     print(" hard=")
@@ -431,6 +453,8 @@ pub fn lower_hard_error_reset() with Mut {
     IR_LOWER_HARD_ERROR_FN.len = 0
     IR_LOWER_ERROR_TOTAL = 0
     IR_LOWER_ERROR_FIRST_FN.len = 0
+    IR_LOWER_ERROR_STAGE = 0
+    IR_LOWER_ERROR_STAGE_IDX = 0
 }
 
 // OR the durable flag into a value-threaded had_error. Used at every
@@ -16056,12 +16080,14 @@ pub fn lower_program_to_ir_summary_box_with_externs_ref(
             let ext_prog = (*programs)[i as usize]
             // Structs + free-fn signatures only — no BSS allocation here.
             lowerer_preseed_external_struct_items_mut(&! lo, &ext_prog.items)
+            lower_note_stage(1, i, lo.had_error)
         }
         i = i + 1
     }
     // Own items first so seed BSS layout is: [own globals | dep1 | dep2 | ...],
     // matching multi-mod merge order (seed, then deps 1..n).
     lowerer_preseed_program_items_mut(&! lo, &prog.items, ir_empty_name())
+    lower_note_stage(2, self_index, lo.had_error)
     // Wave13 bare cross-mod f64 Ident: only the seed module needs external BSS
     // slots at body-lower time (deps resolve their own globals locally). Walk
     // deps in merge order so offsets match ir_merge place+remap.
@@ -16070,6 +16096,7 @@ pub fn lower_program_to_ir_summary_box_with_externs_ref(
         while di < program_count {
             let dep_prog = (*programs)[di as usize]
             lowerer_preseed_external_bss_globals_mut(&! lo, &dep_prog.items)
+            lower_note_stage(3, di, lo.had_error)
             di = di + 1
         }
     }
