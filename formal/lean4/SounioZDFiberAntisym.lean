@@ -11041,6 +11041,111 @@ theorem trB2E_three (W k : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0) :
   rw [← c2, ← c1, trB2E_eq W k hW hW0]
   omega
 
+
+/-! ## Tier 52 — the hub structure of `E`, and the two-path identity at a hub
+
+    Towards §34's LAST term, `tr(E³) = −24(h−2)` (spec §51).  Measured mechanism: the generic
+    subgraph of `E` is 2-regular (matching `+1`, coset `−1`), so its components are 4-cycles and it
+    has NO triangle; row `W` is null and the three special vertices are pairwise non-adjacent; so
+    every triangle of `E` uses exactly one of the two real hubs `2^(k+1)` and `W + 2^(k+1)`, each of
+    which sees every generic vertex.
+
+    `HubOf` bundles what the two hubs have in common, and `E2_hub_gen` is the identity that does the
+    work:  for a generic `b`, the only `c` surviving in `(E²)(b,H)` are `b`'s two generic
+    neighbours, and their contributions ADD rather than cancel —
+
+      matching partner: the hub row flips by the BLOCK flip   (`Asig_hub0`/`Asig_hubL`, Tier 38)
+      coset partner:    the hub row flips by `A1`             (THIS FILE'S HEADLINE LEMMA)
+
+    giving `(E²)(b,H) = (+1)(−s) + (−1)(+s) = −2·E(H,b)`.
+
+    ⚠ **NOT proven here: `tr(E³)` itself.**  Two pieces remain — the support discharge that feeds
+    `E2_hub_gen`'s `hoth`, and a DEGREE COUNT `Σ_b E(H,b)² = 2(h−2)`, which is a kind of ingredient
+    no earlier tier needed (every previous sum collapsed onto named points rather than counting a
+    support). -/
+
+/-- `P1` is `±1`: it is a product of two `cdSigma` values. -/
+theorem P1_pm (l y Llo n : Nat) : P1 l y Llo n = 1 ∨ P1 l y Llo n = -1 := by
+  unfold P1
+  rcases cdSigma_pm (n+2) l y with h1 | h1 <;>
+    rcases cdSigma_pm (n+2) (hi l Llo n) (hi y Llo n) with h2 | h2 <;>
+      rw [h1, h2] <;> decide
+
+/-- `Asig` is `0` or `±1`, and it is `±1` exactly where the mask holds. -/
+theorem Asig_sq_of_resB (l y Llo n : Nat) (h : resB l y Llo n = true) :
+    Asig l y Llo n * Asig l y Llo n = 1 := by
+  unfold Asig
+  rw [if_pos h]
+  rcases P1_pm l y Llo n with e | e <;> rw [e] <;> decide
+
+/-- What the two real hubs have in common. -/
+structure HubOf (k W H : Nat) : Prop where
+  hblow : ∀ x, Esig W k H x = Asig H x W (k+1)
+  hflip : ∀ y, y < 2^(k+1) → y ≠ 0 → y ≠ W →
+      Asig H (y + 2^(k+1)) W (k+1) = - Asig H y W (k+1)
+  hfull : ∀ y, y < 2^(k+1) → y ≠ 0 → y ≠ W → resB H y W (k+1) = true
+  hdead : ∀ x, x = 2^(k+1) ∨ x = W + 2^(k+1) → Esig W k x H = 0
+
+/-- **The two-path identity at a hub.**  For a generic `b`, the only `c` that survives are `b`'s
+    two generic neighbours: the matching partner, where the hub row flips by the BLOCK flip, and
+    the coset partner, where it flips by `A1`.  The two contributions are equal, not cancelling. -/
+theorem E2_hub_gen (W k H b u v : Nat)
+    (hu : u < 2^(k+1)+2^(k+1)) (hv : v < 2^(k+1)+2^(k+1)) (huv : u ≠ v)
+    (hbu : Esig W k b u = 1) (hbv : Esig W k b v = -1)
+    (huH : Esig W k u H = - Esig W k H b) (hvH : Esig W k v H = Esig W k H b)
+    (hoth : ∀ c, c < 2^(k+1)+2^(k+1) → c ≠ u → c ≠ v → Esig W k b c * Esig W k c H = 0) :
+    sumLtI (2^(k+1)+2^(k+1)) (fun c => Esig W k b c * Esig W k c H)
+      = -2 * Esig W k H b := by
+  rw [sumLtI_eq_at2 (2^(k+1)+2^(k+1)) u v _ hu hv huv hoth, hbu, hbv, huH, hvH]
+  omega
+
+/-- The hub at `2^(k+1)`. -/
+theorem hubOf_hub0 (W k : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0) : HubOf k W (2^(k+1)) := by
+  have hp := Nat.two_pow_pos (k+1)
+  have hpow : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by rw [Nat.pow_succ]; omega
+  have hWl : W < 2^(k+2) := by omega
+  have hml : (2:Nat)^(k+1) < 2^(k+2) := by omega
+  have hWml : W + 2^(k+1) < 2^(k+2) := by omega
+  have hmW : (2:Nat)^(k+1) ^^^ W ≠ 0 := by intro e; have := xor_zero_eq _ _ e; omega
+  have hb : ∀ x, blow (2^(k+1)) (fun u v => Asig u v W k) (2^(k+1)) x = 0 := by
+    intro x; simp only [blow, Nat.mod_self]
+    exact Asig_zero_row _ W k (Nat.mod_lt _ hp) hW hW0
+  have hbL : ∀ x, blow (2^(k+1)) (fun u v => Asig u v W k) (W + 2^(k+1)) x = 0 := by
+    intro x; simp only [blow, Nat.add_mod_right, Nat.mod_eq_of_lt hW]
+    exact isoW_row W k hW hW0 _ (Nat.mod_lt _ hp)
+  refine ⟨fun x => by simp only [Esig, hb]; omega,
+    fun y hy hy0 hyW => Asig_hub0 k y W hy hW hy0 hW0 hyW,
+    fun y hy hy0 hyW => resB_hub0_low k y W hy hW hy0 hW0 hyW, fun x hx => ?_⟩
+  rcases hx with rfl | rfl
+  · simp only [Esig, hb, Asig_diag (2^(k+1)) W (k+1) hml hWl (by omega) hmW]; omega
+  · simp only [Esig, hbL,
+      Asig_symm_full (W + 2^(k+1)) (2^(k+1)) W (k+1) hWml hml hWl hW0,
+      asig_zero_of (resB_hub_hub k W hW hW0)]
+    omega
+
+/-- The hub at `L_lo + 2^(k+1)`. -/
+theorem hubOf_hubL (W k : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0) :
+    HubOf k W (W + 2^(k+1)) := by
+  have hp := Nat.two_pow_pos (k+1)
+  have hpow : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by rw [Nat.pow_succ]; omega
+  have hWl : W < 2^(k+2) := by omega
+  have hml : (2:Nat)^(k+1) < 2^(k+2) := by omega
+  have hWml : W + 2^(k+1) < 2^(k+2) := by omega
+  have hWmW : (W + 2^(k+1)) ^^^ W ≠ 0 := by
+    rw [shift_xorL k W W hW hW, Nat.xor_self]; omega
+  have hb : ∀ x, blow (2^(k+1)) (fun u v => Asig u v W k) (2^(k+1)) x = 0 := by
+    intro x; simp only [blow, Nat.mod_self]
+    exact Asig_zero_row _ W k (Nat.mod_lt _ hp) hW hW0
+  have hbL : ∀ x, blow (2^(k+1)) (fun u v => Asig u v W k) (W + 2^(k+1)) x = 0 := by
+    intro x; simp only [blow, Nat.add_mod_right, Nat.mod_eq_of_lt hW]
+    exact isoW_row W k hW hW0 _ (Nat.mod_lt _ hp)
+  refine ⟨fun x => by simp only [Esig, hbL]; omega,
+    fun y hy hy0 hyW => Asig_hubL k y W hy hW hy0 hW0 hyW,
+    fun y hy hy0 hyW => resB_hubL_low k y W hy hW hy0 hW0 hyW, fun x hx => ?_⟩
+  rcases hx with rfl | rfl
+  · simp only [Esig, hb, asig_zero_of (resB_hub_hub k W hW hW0)]; omega
+  · simp only [Esig, hbL, Asig_diag (W + 2^(k+1)) W (k+1) hWml hWl (by omega) hWmW]; omega
+
 end SounioZDFiberAntisym
 
 
