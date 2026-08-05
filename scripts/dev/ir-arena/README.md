@@ -34,7 +34,7 @@ ir_arena_store(slot, IrInstr {)
 }
 ```
 
-**C — multi-line right-hand side truncated** (~34 candidates, OPEN)
+**C — the closer landed at the end of the FIRST line of the RHS** (34 sites, fixed)
 
 Two sub-shapes, and they fail differently:
 
@@ -56,25 +56,48 @@ ir_arena_store(slot, ir_call()
 )
 ```
 
-C1 wants one more `)` at the construct's end. C2 wants the `)` after `ir_call(`
-deleted and the closer moved to the end of the argument list. **Do not batch C2
-blindly** — it is the one shape where the compiler will not tell you that you got
-it wrong.
+There is a third variant, **C2a**, which is the most common and the least
+visible — the closer sits after the *first argument*:
 
-## Detecting shape C
+```sounio
+ir_arena_store(slot, ir_binop(bf_instr.dst,)
+    am_or_var_src[bf_s2 as usize], BinaryOp::OpBitAnd, bf_s1)
+```
 
-Flag lines mentioning `ir_arena_store` / `ir_region_slot` whose comment-stripped
-paren depth is non-zero with brace depth zero, then walk forward to see where
-depth returns to 0. Legitimate multi-line calls close cleanly; C1 never does, and
-C2 closes at the wrong arity.
+**Do not batch C2 blindly.** `classify_c.py` buckets by how the opener line ends;
+`fix_shape_c.py` applies the unified repair — drop the stray closer, then append
+one `)` at the first following line where cumulative depth reaches +1 — and
+**refuses any reconstruction whose argument count does not match the callee's
+declaration**. That arity check is the only defence available, because C2 is
+syntactically valid and the compiler never points at the site. Verified arities:
+`ir_binop` 4, `ir_load_imm` 2, `ir_call` 5, `ir_merge_adjust_epistemic_instr` 12,
+`ir_arena_store` 2. Result: 34 verified, 0 refused, all 37 multi-line arena
+constructs closing cleanly.
 
 ## Measured, one compile each, seed pre-derived
 
 | tree | errors |
 |---|---|
-| `origin/main` (baseline, still produces the 101,627,712 B artifact) | **6** |
+| `origin/main` and merge-base `40116b661d` (baseline, ~101.6 MB artifact) | **6** |
 | committed SoA tree | **≥151,940** — first at `main.sio:2985` |
-| + shape A fixed | 23,035 — first at `ir.sio:940` |
-| + shape B and `(*node).head` fixed | 5,051 — of which 6 are baseline |
+| + shape A | 23,035 — first at `ir.sio:940` |
+| + shape B and `(*node).head` | 5,051 |
+| + shape C | **6 — the baseline set. exit 0, artifact produced.** |
+
+## What the green build does NOT yet buy
+
+Measured, not assumed:
+
+- **bss went up, not down.** 3,559,050,480 vs main's 3,418,213,544 — exactly
+  +140,836,936, which is the arena arrays + pools + region tables (140,836,864
+  computed). Dropping `[IrInstr; 4096]` from `IrFunction` moved bss by **zero**,
+  so `IrModule` does not live in bss and #1649's "doubling `IR_MAX_INSTRS` roughly
+  doubles bss" does not follow. Peak RSS on a small compile is 458 MB against
+  466 MB — parity.
+- **The 4096 cap still stands.** `IR_MAX_INSTRS: i64 = 4096` (`ir.sio:20`) is
+  unchanged, so `knowledge_octonion_structure.sio` still fails with *needs 14389
+  IR instructions* on **both** compilers. Storage is no longer the blocker — the
+  arena holds 1,048,576 slots, 256× the cap — so raising it is a separate and now
+  unblocked change.
 
 Refs #1649, #1655.
