@@ -11146,6 +11146,86 @@ theorem hubOf_hubL (W k : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0) :
   · simp only [Esig, hb, asig_zero_of (resB_hub_hub k W hW hW0)]; omega
   · simp only [Esig, hbL, Asig_diag (W + 2^(k+1)) W (k+1) hWml hWl (by omega) hWmW]; omega
 
+
+/-! ### Tier 52b — the DEGREE COUNT
+
+    §51's route to `tr(E³)` needs one ingredient of a kind no earlier tier used: a sum that COUNTS
+    a support instead of collapsing onto named points.  The hub row is `±1` on every generic vertex
+    and `0` on `0` and `W`, so its square-sum over a half-range is `2^(k+1) − 2`, and over the full
+    range twice that.  The count itself is `sumLtI_one` against two `sumLtI_single`s; the doubling
+    is `sumLtI_double` against the hub's block flip. -/
+
+theorem sumLtI_one (n : Nat) : sumLtI n (fun _ => (1:Int)) = (n : Int) := by
+  induction n with
+  | zero => rfl
+  | succ n ih => rw [sumLtI, ih]; omega
+
+/-- **The hub row has exactly `2^(k+1) - 2` nonzero entries in each half.**  This is the one
+    ingredient in `tr(E³)` that COUNTS a support rather than collapsing onto named points: the
+    summand is `1` off `{0, W}` and `0` on it, and the count comes from `sumLtI_one` against two
+    `sumLtI_single`s. -/
+theorem hub_deg_low (W k H : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0) (hH : HubOf k W H)
+    (hHl : H < 2^(k+1) + 2^(k+1)) (hH0 : H ≠ 0) (hHW : H ^^^ W ≠ 0) :
+    sumLtI (2^(k+1)) (fun b => Esig W k H b * Esig W k H b)
+      = ((2^(k+1) : Nat) : Int) - 2 := by
+  have hp := Nat.two_pow_pos (k+1)
+  have hpow : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by rw [Nat.pow_succ]; omega
+  have hWl : W < 2^(k+2) := by omega
+  have hHl2 : H < 2^(k+2) := by omega
+  have key : ∀ b, b < 2^(k+1) →
+      Esig W k H b * Esig W k H b
+        = 1 + (if b = 0 then -1 else 0) + (if b = W then -1 else 0) := by
+    intro b hb
+    rw [hH.hblow b]
+    by_cases hb0 : b = 0
+    · rw [hb0, Asig_zero_col H W (k+1) hHl2 hWl hW0, if_pos rfl,
+          if_neg (fun e => hW0 e.symm)]
+      decide
+    by_cases hbW : b = W
+    · rw [hbW, Asig_isolated H W (k+1) hHl2 hWl hH0 hW0 hHW, if_neg hW0, if_pos rfl]
+      decide
+    · rw [if_neg hb0, if_neg hbW,
+          Asig_sq_of_resB H b W (k+1) (hH.hfull b hb hb0 hbW)]
+      decide
+  rw [sumLtI_congr _ _ _ key, sumLtI_add, sumLtI_add, sumLtI_one,
+      sumLtI_single (2^(k+1)) 0 (-1) hp, sumLtI_single (2^(k+1)) W (-1) hW]
+  omega
+
+/-- **The degree count.**  `Σ_b E(H,b)² = 2(h−2)` — the hub is adjacent to every generic vertex
+    and to nothing else. -/
+theorem hub_deg (W k H : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0) (hH : HubOf k W H)
+    (hHl : H < 2^(k+1) + 2^(k+1)) (hH0 : H ≠ 0) (hHW : H ^^^ W ≠ 0) :
+    sumLtI (2^(k+1) + 2^(k+1)) (fun b => Esig W k H b * Esig W k H b)
+      = 2 * (((2^(k+1) : Nat) : Int) - 2) := by
+  have hp := Nat.two_pow_pos (k+1)
+  have hpow : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by rw [Nat.pow_succ]; omega
+  have hWl : W < 2^(k+2) := by omega
+  have hHl2 : H < 2^(k+2) := by omega
+  have hper : ∀ i, i < 2^(k+1) →
+      Esig W k H (2^(k+1) + i) * Esig W k H (2^(k+1) + i)
+        = Esig W k H i * Esig W k H i := by
+    intro i hi
+    have hcomm : 2^(k+1) + i = i + 2^(k+1) := by omega
+    by_cases hi0 : i = 0
+    · have e1 : Esig W k H i = 0 := by
+        rw [hi0, hH.hblow, Asig_zero_col H W (k+1) hHl2 hWl hW0]
+      have e2 : Esig W k H (2^(k+1) + i) = 0 := by
+        rw [hi0, Nat.add_zero,
+            Esig_symm W k H (2^(k+1)) hHl2 (by omega) hW hW0,
+            hH.hdead (2^(k+1)) (Or.inl rfl)]
+      rw [e1, e2]
+    by_cases hiW : i = W
+    · have e1 : Esig W k H i = 0 := by
+        rw [hiW, hH.hblow, Asig_isolated H W (k+1) hHl2 hWl hH0 hW0 hHW]
+      have e2 : Esig W k H (2^(k+1) + i) = 0 := by
+        rw [hiW, (by omega : 2^(k+1) + W = W + 2^(k+1)),
+            Esig_symm W k H (W + 2^(k+1)) hHl2 (by omega) hW hW0,
+            hH.hdead (W + 2^(k+1)) (Or.inr rfl)]
+      rw [e1, e2]
+    · rw [hcomm, hH.hblow, hH.hblow, hH.hflip i hi hi0 hiW]
+      exact Int.neg_mul_neg _ _
+  rw [sumLtI_double (2^(k+1)) _ hper, hub_deg_low W k H hW hW0 hH hHl hH0 hHW]
+
 end SounioZDFiberAntisym
 
 

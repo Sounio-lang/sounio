@@ -85,6 +85,9 @@ def main():
                     c3 += int(E[H - 1, ix(u) - 1] == 0)
                 degs.add(int(np.count_nonzero(E[H - 1])))
                 c3 += int(np.count_nonzero(E[H - 1]) != 2 * (h - 2))
+                # the DEGREE COUNT as Lean states it: the square-sum of the hub row.
+                # (Equal to the nonzero count only because the entries are +-1.)
+                c3 += int(int((E[H - 1] * E[H - 1]).sum()) != 2 * (h - 2))
 
             # --- C4: every hub-edge triangle has sign product -1; and the two flips
             for H in hubs:
