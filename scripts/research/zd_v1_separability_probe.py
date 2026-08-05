@@ -19,6 +19,20 @@ C3  §33.3's CANDIDATE MECHANISM, tested for the first time: "the triangle defic
 C4  §33.3's proposed bijection `a |-> a XOR 8y`, at TRIANGLE level (the edge level was already
     refuted there).
 
+C5  THE LOCAL FORM, attacked (§54.5).  The fibre-g family is ONE parameter:
+        W_j = 8g + 2^j   for j = 0 .. lsb(8g)-1     (j = 0,1,2 Fano, j >= 3 seams)
+    -- so the reference 8g+1 is the j=0 member and consecutive members differ in TWO BITS.
+    ⚠ The range is j < lsb(8g), NOT j <= n-2: a first version of this probe used the latter and
+    silently compared labels from DIFFERENT fibres (e.g. 8*10+2^4 = 96 = 8*12 has g = 8, not 10).
+    Tested there, all NEGATIVE:
+      - is A_{W_j} - A_{W_{j-1}} a function of the low m bits of the two vertices?  No, for every
+        m < n-1 (i.e. for every non-vacuous m).  There is no locality.
+      - the perturbative split t3(W_j) - t3(W_{j-1}) = 3tr(A'^2 D) + 3tr(A' D^2) + tr(D^3):
+        all three pieces are g-DEPENDENT and each is as large as the total.  Only the sum is
+        g-independent.
+    One regularity did survive: nnz(A_{W_j} - A_{W_{j-1}}) depends only on (n, g) -- it is the
+    SAME for every j in the family -- while the triangle-count difference depends only on (n, j).
+
 ⚠ THE LAW IS COMPUTED BY ONE FUNCTION, `dev_pred`, ON PURPOSE.  The popcount(g) parity was dropped
 by hand THREE times in one session while re-deriving the prediction inline, and each time the
 resulting check FAILED and looked like a refutation.  Do not inline it again.

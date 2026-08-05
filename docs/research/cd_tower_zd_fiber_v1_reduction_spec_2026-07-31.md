@@ -3674,3 +3674,55 @@ separability; the check had lost the `popcount(g)` parity. **Fixed structurally,
 the law is now one function, `dev_pred`, in `scripts/research/zd_v1_separability_probe.py`, and the
 docstring says not to inline it again. Three occurrences in one session is a tooling problem, not an
 attention problem.
+
+### 54.5 — the local form attacked: it is TRUE and it does not localize
+
+The fibre-`g` family is one parameter, and writing it that way is the clearest thing to come out of
+this rung:
+
+> **`W_j = 8g + 2^j`, `j = 0 … lsb(8g)−1`** — `j = 0,1,2` are Fano members, `j ≥ 3` are the seams,
+> and the fibre reference `8g+1` is simply the `j = 0` member. The law is `D(W_j) = δ(n,j)` with
+> `δ = 0` for `j < 3` because `[j,3]₂ = 0` there: **one statement, no case split.**
+
+Consecutive members differ in exactly **two bits**. The local form
+`t3(W_j) − t3(W_{j−1}) = −27·8^(n−j)·[j−1,2]₂` holds with 0 violations at `n = 6,7,8`. Attacked:
+
+- **No locality.** Is `A_{W_j} − A_{W_{j−1}}` a function of the low `m` bits of the two vertices?
+  **No, for every `m < n−1`** — i.e. for every non-vacuous `m`. The difference is global.
+- **The perturbative split fails to isolate anything.** With `Δ = A_{W_j} − A_{W_{j−1}}`,
+  `t3(W_j) − t3(W_{j−1}) = 3tr(A′²Δ) + 3tr(A′Δ²) + tr(Δ³)`. **All three pieces are `g`-dependent**,
+  and each is of the same order as the total (e.g. `n = 8, j = 3`: `3tr(A′²Δ)` runs
+  `−1335288, −522360, −144504, −879096` over `g = 0,6,10,12` while the total is `−884736`
+  throughout).
+
+**One regularity survived, and it is a strange one.** `nnz(A_{W_j} − A_{W_{j−1}})` depends only on
+`(n, g)` — it is the *same for every `j`* in a fibre's family (`2160` for `g = 0` at `n = 7`, `2296`
+for `g = 6`, `8432`/`9120`/`9224`/`8824` for `g = 0,6,10,12` at `n = 8`). So the two quantities have
+**complementary dependences**: the size of the perturbation sees only `g`, the triangle count sees
+only `j`.
+
+### 54.6 — what five failed decompositions have in common
+
+| decomposition | `g`-dependence |
+|---|---|
+| independence of low `j` bits (§54.4) | present in each class, cancels in the total |
+| `a ↦ a ⊕ 8g` on triangles (§54.4) | ~29% of triples mismatch |
+| high-branch two-term recursion (§54.2–3) | no coefficients exist |
+| complementation third invariant (§54.3) | the candidate moments are label-constant |
+| perturbative `3tr(A′²Δ) + 3tr(A′Δ²) + tr(Δ³)` (§54.5) | present in all three pieces |
+
+**In every one of them the `g`-dependence is present at the fine level and cancels only in the
+signed triangle count.** That is now a pattern across five independent attempts, not an accident of
+one. It says the mechanism is unlikely to be a combinatorial bijection or a term-by-term
+decomposition at all — the natural remaining reading is **spectral**: `tr(A³)` is a symmetric
+function of the spectrum, and the lane's own prior-art work (§40–41) established that the
+**switching class** is the spectrally meaningful datum. A route through switching equivalence is the
+one thing this section has NOT tried, and it is what §35 said `k = 3` is the first moment able to
+see.
+
+⚠ **A range error caught in this rung, worth recording.** The first version of the local-form probe
+took `j` up to `n−2` instead of `j < lsb(8g)`, which silently compares labels in DIFFERENT fibres
+(`8·10 + 2^4 = 96 = 8·12` has `g = 8`, not `10`). It produced one anomalous row that briefly looked
+like structure. Caught by recomputing `g(W)` from the label rather than trusting the loop bound.
+
+**(III) is still reduced, not proven.**
