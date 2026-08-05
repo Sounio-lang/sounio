@@ -4012,7 +4012,11 @@ unchanged and `P1` flips, then `P1 = P3` at one level forces `P1 = −P3` at the
 The `P1` flip has a paper derivation: `P1_red` turns `P1 l y (2^n+W_lo) n` into
 `cdSigma l y n · cdSigma (l⊕W_lo) (y⊕W_lo) n` through `R_uu` (both `l⊕W` and `y⊕W` carry the top
 bit), while `P1_red` at level `n−1` gives the same product with the **second factor's arguments in
-the other order** — and `antisym` supplies the sign. The `P3` invariance is measured, not derived.
+the other order** — and `antisym` supplies the sign. **The `P3` invariance is derived too** (Tier 60
+below): it is the same two lines with `R_lu`/`R_ul` in place of `R_ll`/`R_uu`, where the branch
+reduction contributes one extra minus on each factor and the two cancel. When I first wrote this
+section I recorded it as "measured, not derived" — that was a statement about what I had done, and
+the derivation turned out to be the same size as `P1`'s.
 
 **★ This is what `Ncnt_hi`'s `−4` was.** §54.3 read the minus as "the high branch COMPLEMENTS rather
 than blows up", went looking for a complement's third moment, and found nothing — the candidate
@@ -4025,9 +4029,31 @@ does not determine either triangle count, and the two graphs do not cover everyt
 diagonal and, off it, the pairs where both masks are false). What it does is replace "the box is
 unclassified" with a precise relation to an object one level down that the lane already understands.
 
-Two Lean lemmas would make it a theorem, both of the `P1_pow2_succ` four-branch shape:
-`P3 l y (2^n+W_lo) n = P3 l y W_lo (n−1)` and `P1 l y (2^n+W_lo) n = −P1 l y W_lo (n−1)` off the
-diagonal. Not attempted here — and per this session's own rule, that is a statement of what was not
-done, not an estimate of what it would cost.
+### 57.5 — Tier 60: all three statements are now theorems ∀n
+
+The two lemmas §57.4 named, plus the disjointness they were wanted for, are in
+`SounioZDFiberAntisym.lean`, kernel-clean (`[propext, Classical.choice, Quot.sound]`):
+
+| theorem | statement | hypotheses |
+|---|---|---|
+| `hi_shift` | `hi l (W + 2^(m+1)) (m+1) = hi l W m + 2^(m+2)` | `l, W < 2^(m+1)` |
+| `P1_hi_lo` | `P1 l y (W + 2^(m+1)) (m+1) = − P1 l y W m` | `+ l ≠ y` |
+| `P3_hi_lo` | `P3 l y (W + 2^(m+1)) (m+1) = P3 l y W m` | `+ l ≠ 0`, `y ≠ 0` |
+| `resB_hi_lo_disjoint` | `¬(resB … (m+1) ∧ resB … m)` | `+ l ≠ y`, `l ≠ 0`, `y ≠ 0` |
+
+`hi_shift` is the whole content: the `⊕` with the new label's top bit is a `+ 2^(m+2)` because
+`l < 2^(m+1)` puts the two bits in disjoint positions, so both `hi` images move up one storey
+together and the four branch reductions apply unchanged. The asymmetry between the two conclusions
+is then just which branches each product lands on — `P1` on `(R_ll, R_uu)` (one `antisym`, one
+minus), `P3` on `(R_lu, R_ul)` (two minuses that cancel). The disjointness needs no new work: clause
+`P1 = P3` at both levels plus `P1_pm` gives `P1 = −P1` with `P1 = ±1`.
+
+Dual-provider review `[OK]/[OK]` on the sign asymmetry and on both hypothesis sets. Measured before
+asking, at the Lean levels `m = 2,3,4`: `P1_hi_lo` 0 violations in 36032 instances, `P3_hi_lo` 0 in
+34744.
+
+**What this does NOT give.** `t3(box)`'s variation inside the fibre. Edge-disjointness restricts the
+pair of graphs without determining either triangle count. `Ncnt_hi`'s `−4` is now a theorem at the
+level of the support; the moment is still open.
 
 **(III) is still reduced, not proven.**

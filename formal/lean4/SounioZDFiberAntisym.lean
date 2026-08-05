@@ -12493,6 +12493,100 @@ theorem tri3_fold_high (W n : Nat) (hn : n ≠ 0) (hWhi : 2^n ≤ W) (hW : W < 2
         sumLtI (2^n) (fun c => Asig a b W n * (Asig b c W n * Asig c a W n))))
         (fun a _ => by rw [sumLtI_half n]; exact sumLtI_congr _ _ _ (fun b _ => sumLtI_half n _))]
 
+
+/-! ### Tier 60 — the high label at level `m+1` vs the low label at level `m`
+
+    §57.4 measured that the box of a high label sits on the level-below vertex set and relates to
+    the LOW label's matrix there by: `P3` unchanged, `P1` negated off the diagonal, hence the two
+    masks never both hold.  All three are now theorems.
+
+    Both reductions are the same two lines.  Writing `H = hi x W m = (x ⊕ W) + 2^(m+1)`, the high
+    label's `hi` is `H + 2^(m+2)` (`hi_shift`), so:
+
+      `P1`: `R_ll` on the first factor and `R_uu` on the second, and `R_uu` returns its arguments
+            SWAPPED — `antisym` then gives the minus.
+      `P3`: `R_lu` and `R_ul` produce the low-level factors in the opposite order and with one extra
+            minus, and `antisym` cancels both.
+
+    The disjointness is one line from those two: `resB`'s third clause is `P1 = P3`, and a clause
+    that equates an invariant to a flipped quantity cannot hold at both levels.
+
+    **This is `Ncnt_hi`'s `−4` at the level of the SUPPORT.**  §54.3 read that minus as "the high
+    branch complements rather than blows up" and went looking for a complement's third moment; every
+    candidate turned out label-constant.  The complementation is real and it is the edge-disjointness
+    proved here — not a moment identity. -/
+
+/-- The high label's `hi` is the low label's, shifted by the next power. -/
+private theorem hi_shift (m l W : Nat) (hl : l < 2^(m+1)) (hW : W < 2^(m+1)) :
+    hi l (W + 2^(m+1)) (m+1) = hi l W m + 2^(m+2) := by
+  unfold hi
+  rw [xor_lo_hi (m+1) l W (by omega) hl hW]
+
+/-- **`P1` FLIPS.**  Off the diagonal the high label at level `m+1` and the low label at level `m`
+    give opposite `P1`: the two reductions differ only by the ORDER of the second `cdSigma`'s
+    arguments, and `antisym` supplies the sign. -/
+theorem P1_hi_lo (m l y W : Nat) (hl : l < 2^(m+1)) (hy : y < 2^(m+1)) (hW : W < 2^(m+1))
+    (hly : l ≠ y) : P1 l y (W + 2^(m+1)) (m+1) = - P1 l y W m := by
+  have hp := Nat.two_pow_pos (m+1)
+  have hpow : (2:Nat)^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  have hL : hi l W m = (l ^^^ W) + 2^(m+1) := rfl
+  have hY : hi y W m = (y ^^^ W) + 2^(m+1) := rfl
+  have hLlt : hi l W m < 2^(m+2) := by rw [hL]; have := xorlt (n := m) hl hW; omega
+  have hYlt : hi y W m < 2^(m+2) := by rw [hY]; have := xorlt (n := m) hy hW; omega
+  have hL0 : hi l W m ≠ 0 := by rw [hL]; omega
+  have hY0 : hi y W m ≠ 0 := by rw [hY]; omega
+  have hne : hi l W m ≠ hi y W m := by
+    rw [hL, hY]
+    intro e
+    apply hly
+    have h2 : (l ^^^ W) ^^^ W = (y ^^^ W) ^^^ W := by
+      have : l ^^^ W = y ^^^ W := by omega
+      rw [this]
+    rwa [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero, Nat.xor_assoc, Nat.xor_self,
+        Nat.xor_zero] at h2
+  unfold P1
+  rw [hi_shift m l W hl hW, hi_shift m y W hy hW,
+      R_ll l y (m+1) (by omega) (by omega),
+      R_uu (hi l W m) (hi y W m) (m+1) hLlt hYlt, if_neg hY0,
+      antisym (m+2) (hi y W m) (hi l W m) hYlt hLlt hY0 hL0 (fun e => hne e.symm)]
+  grind
+
+/-- **`P3` is INVARIANT.**  The `R_lu`/`R_ul` reductions produce the low-level factors in the
+    opposite order and with one extra minus, and `antisym` cancels both. -/
+theorem P3_hi_lo (m l y W : Nat) (hl : l < 2^(m+1)) (hy : y < 2^(m+1)) (hW : W < 2^(m+1))
+    (hl0 : l ≠ 0) (hy0 : y ≠ 0) : P3 l y (W + 2^(m+1)) (m+1) = P3 l y W m := by
+  have hp := Nat.two_pow_pos (m+1)
+  have hpow : (2:Nat)^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  have hL : hi l W m = (l ^^^ W) + 2^(m+1) := rfl
+  have hY : hi y W m = (y ^^^ W) + 2^(m+1) := rfl
+  have hLlt : hi l W m < 2^(m+2) := by rw [hL]; have := xorlt (n := m) hl hW; omega
+  have hYlt : hi y W m < 2^(m+2) := by rw [hY]; have := xorlt (n := m) hy hW; omega
+  have hY0 : hi y W m ≠ 0 := by rw [hY]; omega
+  have hlY : l ≠ hi y W m := by rw [hY]; omega
+  unfold P3
+  rw [hi_shift m l W hl hW, hi_shift m y W hy hW,
+      R_lu l (hi y W m) (m+1) (by omega) hYlt,
+      R_ul (hi l W m) y (m+1) hLlt (by omega), if_neg hy0,
+      antisym (m+2) l (hi y W m) (by omega) hYlt hl0 hY0 hlY]
+  grind
+
+
+/-- **THE GRAPHS ARE EDGE-DISJOINT.**  `resB`'s third clause is `P1 = P3`; `P3` is invariant and
+    `P1` flips, so the clause cannot hold at both levels.  Hence the high label's graph at level
+    `m+1` avoids every edge of the low label's at level `m` — which is what `Ncnt_hi`'s `−4`
+    (complementation rather than blow-up) was, at the level of the SUPPORT. -/
+theorem resB_hi_lo_disjoint (m l y W : Nat) (hl : l < 2^(m+1)) (hy : y < 2^(m+1))
+    (hW : W < 2^(m+1)) (hl0 : l ≠ 0) (hy0 : y ≠ 0) (hly : l ≠ y) :
+    ¬ (resB l y (W + 2^(m+1)) (m+1) = true ∧ resB l y W m = true) := by
+  rintro ⟨h1, h2⟩
+  unfold resB at h1 h2
+  simp only [Bool.and_eq_true, beq_iff_eq] at h1 h2
+  have e1 : P1 l y (W + 2^(m+1)) (m+1) = P3 l y (W + 2^(m+1)) (m+1) := h1.2
+  have e2 : P1 l y W m = P3 l y W m := h2.2
+  have hP1 := P1_hi_lo m l y W hl hy hW hly
+  have hP3 := P3_hi_lo m l y W hl hy hW hl0 hy0
+  rcases P1_pm l y W m with h | h <;> rw [h] at e2 <;> omega
+
 end SounioZDFiberAntisym
 
 
