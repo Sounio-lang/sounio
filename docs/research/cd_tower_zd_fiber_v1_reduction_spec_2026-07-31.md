@@ -3102,4 +3102,42 @@ outer indices — it cannot, because `B` kills it on both sides. This is the sam
 Tier 47's "awkward without `Finset`" (§48.1): a property of the object was read off as a property of
 the proof, without attempting the proof.
 
+### 49.5 — the same lemma closes the OTHER remaining sum, and it is one lemma, not two
+
+The collapsed row `y_w` does not depend on `δ` — the two blocks give the same vector. So the `2×2`
+block sum of `E` is `Z(b,a) = 2[(a=b) − (a=b⊕W)]`, and since `B² = 2·J₂⊗A′²`,
+
+```
+tr(B²E) = 2 Σ_{a,b} (A′²)(a,b)·Z(b,a) = 4[t2′ − S(W)] = 8·t2′
+```
+
+through the already-proven `S(W) = −t2′` (`cosetSum_eq`, Tier 42). So **§34's last two sums are ONE
+lemma apart, not two**, and §34.3's `24 = 3 × (4+4)` is exactly the two support points of the
+collapsed row. Measured: `0` violations on both `Z`'s closed form and `tr(B²E) = 8·t2′` at
+`n = 6,7,8`, every low label (`scripts/research/zd_v1_yrow_probe.py`).
+
+### 49.6 — a gap the §49 draft did not see: the index `0`
+
+Lean's sum ranges are `[0, 2^(n+1))`, one element **wider** than the contract's vertex set
+`[1, 2^(n+1))`, and Tier 43's `blow m A x y = A (x % m) (y % m)` sends the hub `2^(k+1)` to `0`. So
+every denotation claim in this arc — "this `sumLtI` **is** `t3′`", `blow = B` — silently needs row and
+column `0` of `A_σ` to be zero. **`Asig_isolated` does not cover it: that theorem requires `l ≠ 0`.**
+This is the "true theorem about the wrong sum" hazard, and it was live.
+
+It is closed, in the good direction: the resonance predicate **fails at `l = 0` for every column**.
+Verified first against a Lean-faithful re-implementation of `cdSigma`/`P1`/`P3`/`resB`/`Asig` (not the
+fast builder, which never constructs the index at all) over every label at `n = 2…5`, then proven —
+`resB_zero_row` / `Asig_zero_row`, Tier 49. My own first hand-derivation of the diagonal entry got it
+wrong (`Asig 0 0 = −1`, from `cdSigma L L = +1`); the true value is `−1` and the entry is `0`. The
+measurement caught it, which is the reason to run one.
+
+### 49.7 — what Tier 49 puts in Lean, and what it does not
+
+`resB_zero_row`, `Asig_zero_row`, `yrow_gen` — the **pointwise** inputs. The assembly (§49.1's
+collapse) is still not formalised; the route is per-`w`: split the `u,v` range into four blocks with
+`sumLtI_shift`/`_double` (Tier 43), then collapse the inner sum onto `{b, b⊕W}` with `sumLtI_eq_at2`
+(Tier 47) — the summand vanishes at the index `W` through `A′`'s null column, not through `y`.
+`sumLtI_reindex` (Tier 48) is **not** needed here; §49.4's tool list named it, and that was the long
+way round.
+
 **§18.1 is still not proven, so (III) is still reduced, not proven.** (d) and V1 untouched.

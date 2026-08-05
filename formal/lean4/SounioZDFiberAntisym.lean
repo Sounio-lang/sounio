@@ -10155,6 +10155,255 @@ theorem sumLtI_eq_at2 (n j k : Nat) (f : Nat → Int) (hj : j < n) (hk : k < n) 
       sumLtI_add, sumLtI_single n j (f j) hj, sumLtI_single n k (f k) hk]
 
 
+/-! ## Tier 48: reindexing along an injection — the general form
+
+Tier 47 proved only the one- and two-point collapses and recorded the general reindexing as "not
+proven, awkward without `Finset`". That was too quick: with the right peel it is an induction on the
+index range. `sumLtI_peel` removes one index from a sum; `sumLtI_reindex` then strips the injection's
+image one point at a time.
+
+This does not change the `tr(BE²)` position — the hub rows are dense, so there is no sparse family to
+reindex there — but it removes the tool gap the earlier tier claimed. -/
+
+/-- Peel one index out of a sum. -/
+theorem sumLtI_peel : ∀ (n k : Nat) (f : Nat → Int), k < n →
+    sumLtI n f = f k + sumLtI n (fun i => if i = k then 0 else f i) := by
+  intro n
+  induction n with
+  | zero => intro k f hk; omega
+  | succ n ih =>
+      intro k f hk
+      rcases Nat.lt_or_ge k n with h | h
+      · rw [sumLtI, ih k f h, sumLtI]
+        show _ = f k + (sumLtI n (fun i => if i = k then 0 else f i)
+                        + (if n = k then 0 else f n))
+        rw [if_neg (by omega)]
+        omega
+      · have hkn : k = n := by omega
+        subst hkn
+        rw [sumLtI, sumLtI, if_pos rfl,
+            sumLtI_congr k (fun i => if i = k then 0 else f i) f (fun i hi => if_neg (by omega))]
+        omega
+
+/-- **Reindexing along an injection.** A sum supported on the image of an injective `ι` is the sum
+    over the index. -/
+theorem sumLtI_reindex : ∀ (m n : Nat) (i : Nat → Nat) (f : Nat → Int),
+    (∀ a, a < m → i a < n) →
+    (∀ a b, a < m → b < m → i a = i b → a = b) →
+    (∀ x, x < n → (∀ a, a < m → i a ≠ x) → f x = 0) →
+    sumLtI n f = sumLtI m (fun a => f (i a)) := by
+  intro m
+  induction m with
+  | zero =>
+      intro n i f _ _ h0
+      show sumLtI n f = 0
+      rw [sumLtI_congr n f (fun _ => 0) (fun x hx => h0 x hx (fun a ha => by omega))]
+      exact sumLtI_zero n
+  | succ m ih =>
+      intro n i f hlt hinj h0
+      have hk : i m < n := hlt m (by omega)
+      rw [sumLtI_peel n (i m) f hk]
+      show _ = sumLtI m (fun a => f (i a)) + f (i m)
+      have hrest : sumLtI n (fun x => if x = i m then 0 else f x)
+          = sumLtI m (fun a => f (i a)) := by
+        rw [ih n i (fun x => if x = i m then 0 else f x)
+              (fun a ha => hlt a (by omega))
+              (fun a b ha hb e => hinj a b (by omega) (by omega) e)
+              (fun x hx hno => by
+                by_cases hxk : x = i m
+                · rw [if_pos hxk]
+                · rw [if_neg hxk]
+                  refine h0 x hx (fun a ha => ?_)
+                  rcases Nat.lt_or_ge a m with h | h
+                  · exact hno a h
+                  · have : a = m := by omega
+                    subst this
+                    exact fun e => hxk e.symm)]
+        refine sumLtI_congr m _ _ (fun a ha => ?_)
+        refine if_neg (fun e => ?_)
+        exact absurd (hinj a m (by omega) (by omega) e) (by omega)
+      rw [hrest]
+      omega
+
+
+/-! ## Tier 49 — the index `0` carries no weight, and the COLLAPSED ROW
+
+    §49 of the reduction spec withdraws §47's diagnosis of `tr(BE²)`.  Two pointwise facts are
+    needed before the sum bookkeeping can start, and both are here.
+
+    **(A) `Asig 0 y = 0`.**  Lean's sum ranges are `[0, 2^(n+1))`, one element wider than the
+    contract's vertex set `[1, 2^(n+1))`, and `blow` (Tier 43) sends the hub `2^(k+1)` to `0`.
+    So every denotation claim — "this `sumLtI` IS `t3′`" — needs the index `0` to carry no
+    weight.  `Asig_isolated` does NOT cover it: that theorem requires `l ≠ 0`.
+
+    **(B) the collapsed row.**  `y_w(a) = E[w,a] + E[w,a+h]` with `E = A − J₂⊗A′`.  For a generic
+    `w = b + δ·2^(k+1)` it is `e_b − e_{b⊕W}` — two support points, and INDEPENDENT of `δ`.
+    ⚠ **What this file proves is `yrow_gen` and nothing downstream of it.**  The reduction spec
+    (§49) argues that this one closed form settles both of §34's remaining sums — the generic
+    contribution to `tr(BE²)` becomes `−2·A′(b, b⊕W) = 0`, and `E`'s `2×2` block sum becomes
+    `Z(b,a) = 2[(a=b) − (a=b⊕W)]`, giving `tr(B²E) = 4[t2′ − S(W)] = 8·t2′` via `cosetSum_eq`.
+    **Neither trace identity is proven here or anywhere in this file**; both are MEASURED
+    (0 violations, every low label at `n = 6…8`, `scripts/research/zd_v1_yrow_probe.py`), and the
+    step from `yrow_gen` to them is the sum assembly, which is not formalised.
+
+    NOT claimed here: the assembly.  These are the pointwise inputs to it. -/
+
+private theorem asig_zero_of {l y L n : Nat} (h : resB l y L n = false) : Asig l y L n = 0 := by
+  unfold Asig; rw [h]; rfl
+
+private theorem yr_selfxor {a W : Nat} (hW0 : W ≠ 0) : a ≠ a ^^^ W := by
+  intro e
+  apply hW0
+  have h : a ^^^ a = a ^^^ (a ^^^ W) := by rw [← e]
+  rw [Nat.xor_self, ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor] at h
+  omega
+
+/-! ## (A) The row at index `0` is identically zero.
+
+    Lean's sum ranges are `[0, 2^(n+1))`, one element wider than the contract's vertex set
+    `[1, 2^(n+1))`, and `blow` sends the hub `2^(k+1)` to `0`.  So every denotation claim
+    ("this `sumLtI` IS `t3'`") needs the index `0` to carry no weight.  It does not: the
+    resonance predicate FAILS at `l = 0` for every column. -/
+
+theorem resB_zero_row (y Llo n : Nat) (hy : y < 2^(n+1)) (hL : Llo < 2^(n+1)) (hL0 : Llo ≠ 0) :
+    resB 0 y Llo n = false := by
+  have hp := Nat.two_pow_pos (n+1)
+  have hyL : y ^^^ Llo < 2^(n+1) := xorlt hy hL
+  have h0L : (0:Nat) ^^^ Llo = Llo := by rw [Nat.zero_xor]
+  -- P1 0 y and P1 y 0, both through the upper-upper branch
+  have e1 : P1 0 y Llo n = (if y ^^^ Llo = 0 then -1 else cdSigma (y ^^^ Llo) Llo (n+1)) := by
+    unfold P1 hi
+    rw [h0L, cdSig0, R_uu Llo (y ^^^ Llo) n hL hyL, Int.one_mul]
+  have e2 : P1 y 0 Llo n = (if Llo = 0 then -1 else cdSigma Llo (y ^^^ Llo) (n+1)) := by
+    unfold P1 hi
+    rw [h0L, cdSig0', R_uu (y ^^^ Llo) Llo n hyL hL, Int.one_mul]
+  rw [if_neg hL0] at e2
+  by_cases hy0 : y = 0
+  · -- diagonal at 0: P1 = -1, P3 = 1
+    subst hy0
+    have hP1 : P1 0 0 Llo n = -1 := by
+      rw [e1, Nat.zero_xor, if_neg hL0, sigma_self (n+1) Llo hL hL0]
+    have hP3 : P3 0 0 Llo n = 1 := by
+      unfold P3 hi
+      rw [h0L, cdSig0, R_ul Llo 0 n hL hp, if_pos rfl, Int.one_mul]
+    unfold resB
+    rw [hP1, hP3]
+    simp
+  · by_cases hyx : y ^^^ Llo = 0
+    · -- the excluded column y = Llo
+      have hP1a : P1 0 y Llo n = -1 := by rw [e1, if_pos hyx]
+      have hP1b : P1 y 0 Llo n = 1 := by
+        rw [e2, hyx, cdSig0']
+      unfold resB
+      rw [hP1a, hP1b]
+      simp
+    · -- generic column: P1 0 y = - P1 y 0 by the antisymmetry of cdSigma
+      have hne : y ^^^ Llo ≠ Llo := by
+        intro e
+        exact hy0 (by have := congrArg (· ^^^ Llo) e; rwa [xor_cancel, Nat.xor_self] at this)
+      have hP1a : P1 0 y Llo n = cdSigma (y ^^^ Llo) Llo (n+1) := by rw [e1, if_neg hyx]
+      have hP1b : P1 y 0 Llo n = - cdSigma (y ^^^ Llo) Llo (n+1) := by
+        rw [e2, antisym (n+1) Llo (y ^^^ Llo) hL hyL hL0 hyx (fun e => hne e.symm)]
+      unfold resB
+      rw [hP1a, hP1b]
+      rcases cdSigma_pm (n+1) (y ^^^ Llo) Llo with h | h <;> rw [h] <;> simp
+
+theorem Asig_zero_row (y Llo n : Nat) (hy : y < 2^(n+1)) (hL : Llo < 2^(n+1)) (hL0 : Llo ≠ 0) :
+    Asig 0 y Llo n = 0 :=
+  asig_zero_of (resB_zero_row y Llo n hy hL hL0)
+
+/-! ## (B) The collapsed row.
+
+    `y_w(a) = E[w,a] + E[w,a+h]` with `E = A − J₂⊗A′`.  For a GENERIC `w = b + δ·2^(k+1)` it is
+    `e_b − e_{b⊕W}` — two support points, independent of `δ`.  That single closed form kills both
+    of §34's remaining sums: `tr(BE²) = 0` and `tr(B²E) = 8·t2′`. -/
+
+def yrow (k b d a W : Nat) : Int :=
+  Asig (b + d * 2^(k+1)) a W (k+1) + Asig (b + d * 2^(k+1)) (a + 2^(k+1)) W (k+1)
+    - 2 * Asig b a W k
+
+theorem yrow_gen (k b d a W : Nat) (hb : b < 2^(k+1)) (ha : a < 2^(k+1)) (hW : W < 2^(k+1))
+    (hb0 : b ≠ 0) (ha0 : a ≠ 0) (hW0 : W ≠ 0) (hbW : b ≠ W) (haW : a ≠ W)
+    (hd : d = 0 ∨ d = 1) :
+    yrow k b d a W = (if a = b then 1 else 0) - (if a = b ^^^ W then 1 else 0) := by
+  have hp := Nat.two_pow_pos (k+1)
+  have hpow : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by rw [Nat.pow_succ]; omega
+  have hbWx : b ^^^ W ≠ 0 := fun e => hbW (xor_zero_eq _ _ e)
+  have haWx : a ^^^ W ≠ 0 := fun e => haW (xor_zero_eq _ _ e)
+  have hbWlt : b ^^^ W < 2^(k+1) := xorlt hb hW
+  have hbl : b < 2^(k+2) := by omega
+  have hal : a < 2^(k+2) := by omega
+  have hbl2 : b + 2^(k+1) < 2^(k+2) := by omega
+  have hWl : W < 2^(k+2) := by omega
+  have hx : (b + 2^(k+1)) ^^^ W = (b ^^^ W) + 2^(k+1) := shift_xorL k b W hb hW
+  have hxne : (b + 2^(k+1)) ^^^ W ≠ 0 := by rw [hx]; omega
+  have hne : b ≠ b ^^^ W := yr_selfxor hW0
+  have hne' : b ^^^ W ≠ b := fun e => hne e.symm
+  have hif0 : (if (b ^^^ W) = b then (1:Int) else 0) = 0 := if_neg hne'
+  have hif1 : (if (b ^^^ W) = b ^^^ W then (1:Int) else 0) = 1 := if_pos rfl
+  have hbWneW : b ^^^ W ≠ W := by
+    intro e
+    exact hb0 (by have := congrArg (· ^^^ W) e; rwa [xor_cancel, Nat.xor_self] at this)
+  by_cases hab : a = b
+  · subst hab
+    have z : Asig a a W k = 0 := Asig_diag a W k ha hW ha0 haWx
+    rcases hd with rfl | rfl
+    · have e1 : Asig a a W (k+1) = 0 := Asig_diag a W (k+1) hal hWl ha0 haWx
+      have e2 : Asig a (a + 2^(k+1)) W (k+1) = 1 := Asig_matching k a W ha hW ha0 hW0 haW
+      simp only [yrow, Nat.zero_mul, Nat.add_zero, e1, e2, z, if_pos rfl, if_neg hne]
+      decide
+    · have e1 : Asig (a + 2^(k+1)) a W (k+1) = 1 := by
+        rw [Asig_symm (a + 2^(k+1)) a W (k+1) hbl2 hal hWl (by omega) ha0 hxne haWx]
+        exact Asig_matching k a W ha hW ha0 hW0 haW
+      have e2 : Asig (a + 2^(k+1)) (a + 2^(k+1)) W (k+1) = 0 :=
+        Asig_diag (a + 2^(k+1)) W (k+1) hbl2 hWl (by omega) hxne
+      simp only [yrow, Nat.one_mul, e1, e2, z, if_pos rfl, if_neg hne]
+      decide
+  · by_cases hcs : a = b ^^^ W
+    · subst hcs
+      have z : Asig b (b ^^^ W) W k = 0 := asig_zero_of (resB_coset b W k hb hW hb0 hbWx)
+      rcases hd with rfl | rfl
+      · have e1 : Asig b (b ^^^ W) W (k+1) = 0 := asig_zero_of (resB_coset b W (k+1) hbl hWl hb0 hbWx)
+        have e2 : Asig b ((b ^^^ W) + 2^(k+1)) W (k+1) = -1 :=
+          Asig_coset k b W hb hW hb0 hW0 hbW
+        simp only [yrow, Nat.zero_mul, Nat.add_zero, e1, e2, z, hif0, hif1]
+        decide
+      · have e1 : Asig (b + 2^(k+1)) (b ^^^ W) W (k+1) = -1 := by
+          rw [Asig_symm (b + 2^(k+1)) (b ^^^ W) W (k+1) hbl2 (by omega) hWl (by omega) hbWx
+                hxne (by rw [xor_cancel]; exact hb0)]
+          have := Asig_coset k (b ^^^ W) W hbWlt hW hbWx hW0 hbWneW
+          rwa [xor_cancel] at this
+        have e2 : Asig (b + 2^(k+1)) ((b ^^^ W) + 2^(k+1)) W (k+1) = 0 := by
+          refine asig_zero_of ?_
+          have := resB_coset (b + 2^(k+1)) W (k+1) hbl2 hWl (by omega) hxne
+          rwa [hx] at this
+        simp only [yrow, Nat.one_mul, e1, e2, z, hif0, hif1]
+        decide
+    · -- NB `BlkStd k b a W`: the structure's own fields are named for the pair `(a,b)`, so here
+      -- `blk.ha` is the bound on `b` and `blk.hb` the bound on `a`.  Read the field names against
+      -- the ORDER of the arguments, not against the local variable names.
+      have blk : BlkStd k b a W :=
+        { ha := hb, hb := ha, hW := hW, ha0 := hb0, hb0 := ha0, haW := hbW, hbW := haW
+          hab := fun e => hab e.symm
+          hcos := fun e => hcs (by rw [e, xor_cancel]) }
+      rcases hd with rfl | rfl
+      · have e1 : Asig b a W (k+1) = Asig b a W k := by
+          have := Asig_block k b a W 0 0 (Or.inl rfl) (Or.inl rfl) blk
+          simpa using this
+        have e2 : Asig b (a + 2^(k+1)) W (k+1) = Asig b a W k := by
+          have := Asig_block k b a W 0 1 (Or.inl rfl) (Or.inr rfl) blk
+          simpa using this
+        simp only [yrow, Nat.zero_mul, Nat.add_zero, e1, e2, if_neg hab, if_neg hcs]
+        omega
+      · have e1 : Asig (b + 2^(k+1)) a W (k+1) = Asig b a W k := by
+          have := Asig_block k b a W 1 0 (Or.inr rfl) (Or.inl rfl) blk
+          simpa using this
+        have e2 : Asig (b + 2^(k+1)) (a + 2^(k+1)) W (k+1) = Asig b a W k := by
+          have := Asig_block k b a W 1 1 (Or.inr rfl) (Or.inr rfl) blk
+          simpa using this
+        simp only [yrow, Nat.one_mul, e1, e2, if_neg hab, if_neg hcs]
+        omega
+
 end SounioZDFiberAntisym
 
 
