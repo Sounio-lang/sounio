@@ -3533,14 +3533,15 @@ fn lowerer_lower_fn_item_mut(
     var reused = (*lo).current_func
     ir_reset_function_in_place(&! (*reused), name)
     if fn_id >= 0 && fn_id < (*(*lo).module).fn_count {
-        let preserved = (*(*lo).module).functions[fn_id as usize]
-        (*reused).name = preserved.name
-        (*reused).compile_strategy = preserved.compile_strategy
-        (*reused).returns_float = preserved.returns_float
-        (*reused).return_fixed_array_len = preserved.return_fixed_array_len
-        (*reused).return_struct_name = preserved.return_struct_name
-        (*reused).first_param_is_ref = preserved.first_param_is_ref
-        (*reused).prof_counter_id = preserved.prof_counter_id
+        // Field-by-field, not `let preserved = …`: that bound a whole
+        // ~504 KB IrFunction to read seven scalars out of it.
+        (*reused).name = (*(*lo).module).functions[fn_id as usize].name
+        (*reused).compile_strategy = (*(*lo).module).functions[fn_id as usize].compile_strategy
+        (*reused).returns_float = (*(*lo).module).functions[fn_id as usize].returns_float
+        (*reused).return_fixed_array_len = (*(*lo).module).functions[fn_id as usize].return_fixed_array_len
+        (*reused).return_struct_name = (*(*lo).module).functions[fn_id as usize].return_struct_name
+        (*reused).first_param_is_ref = (*(*lo).module).functions[fn_id as usize].first_param_is_ref
+        (*reused).prof_counter_id = (*(*lo).module).functions[fn_id as usize].prof_counter_id
     }
     (*lo).current_func = reused
     (*lo).current_func_loaded = true
@@ -5073,19 +5074,22 @@ impl Lowerer {
     fn begin_function_body_lowering(self, fn_id: i64, name: Name) -> Lowerer with Mut, Panic, Div {
         var lo = self.flush_current_func()
         lo.current_fn = fn_id
-        var current_func = ir_empty_function()
-        current_func.name = name
+        // Reuse the Box the Lowerer already holds instead of bump-allocating a
+        // fresh ~504 KB IrFunction per function; and read the preserved fields
+        // in place instead of `let preserved = …`, which copied the whole
+        // function to look at seven scalars.
+        var reused = lo.current_func
+        ir_reset_function_in_place(&! (*reused), name)
         if fn_id >= 0 && fn_id < lo.module.fn_count {
-            let preserved = lo.module.functions[fn_id as usize]
-            current_func.name = preserved.name
-            current_func.compile_strategy = preserved.compile_strategy
-            current_func.returns_float = preserved.returns_float
-            current_func.return_fixed_array_len = preserved.return_fixed_array_len
-            current_func.return_struct_name = preserved.return_struct_name
-            current_func.first_param_is_ref = preserved.first_param_is_ref
-            current_func.prof_counter_id = preserved.prof_counter_id
+            (*reused).name = lo.module.functions[fn_id as usize].name
+            (*reused).compile_strategy = lo.module.functions[fn_id as usize].compile_strategy
+            (*reused).returns_float = lo.module.functions[fn_id as usize].returns_float
+            (*reused).return_fixed_array_len = lo.module.functions[fn_id as usize].return_fixed_array_len
+            (*reused).return_struct_name = lo.module.functions[fn_id as usize].return_struct_name
+            (*reused).first_param_is_ref = lo.module.functions[fn_id as usize].first_param_is_ref
+            (*reused).prof_counter_id = lo.module.functions[fn_id as usize].prof_counter_id
         }
-        lo.current_func = Box::new(current_func)
+        lo.current_func = reused
         lo.current_func_loaded = true
         lo.env = None
         var rst_locals = lo.locals
@@ -10362,10 +10366,15 @@ impl Lowerer {
         lo
     }
 
+    // Works THROUGH the Box. `var current_func = *lo.current_func` copied a
+    // ~504 KB IrFunction out of the heap and `Box::new` put a fresh one back —
+    // unconditionally, even for a function with no parameters at all. Measured
+    // by sampling RSS between lower_live fn_begin/fn_done: 641 KB per function
+    // appeared INSIDE body lowering, and this is it.
     fn lower_fn_params_ref(self, params: &Option<Box<ParamList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self
         var current = params
-        var current_func = *lo.current_func
+        var current_func = lo.current_func
         var locals = lo.locals
         while true {
             match *current {
@@ -10380,16 +10389,16 @@ impl Lowerer {
                         current = &(*list).tail
                         continue
                     }
-                    let preg = current_func.reg_count
-                    current_func.reg_count = preg + 1
+                    let preg = (*current_func).reg_count
+                    (*current_func).reg_count = preg + 1
 
-                    if current_func.param_count < IR_MAX_PARAMS {
-                        let param_count = current_func.param_count
-                        current_func.param_regs[param_count as usize] = preg
-                        current_func.param_count = param_count + 1
+                    if (*current_func).param_count < IR_MAX_PARAMS {
+                        let param_count = (*current_func).param_count
+                        (*current_func).param_regs[param_count as usize] = preg
+                        (*current_func).param_count = param_count + 1
                         if lower_live_diag_enabled() {
                             print("lower_live: ref_param_count_now=")
-                            print_int(current_func.param_count)
+                            print_int((*current_func).param_count)
                             print("\n")
                         }
                     } else {
@@ -10397,10 +10406,10 @@ impl Lowerer {
                     }
 
                     if lower_type_expr_is_f64(&(*list).head.ty) {
-                        let instr_count = current_func.instr_count
+                        let instr_count = (*current_func).instr_count
                         if instr_count < IR_MAX_INSTRS {
-                            current_func.instrs[instr_count as usize] = ir_mark_float_reg(preg)
-                            current_func.instr_count = instr_count + 1
+                            (*current_func).instrs[instr_count as usize] = ir_mark_float_reg(preg)
+                            (*current_func).instr_count = instr_count + 1
                         } else {
                             lo = lo.report_error()
                         }
@@ -10410,7 +10419,7 @@ impl Lowerer {
                     let param_word_scalar = lower_type_expr_fixed_array_word_scalar_ref(&(*list).head.ty)
                     var param_value_reg = preg
                     if param_array_len >= 0 && param_word_scalar {
-                        lo.current_func = Box::new(current_func)
+                        lo.current_func = current_func
                         let copy_pair = lo.emit_fixed_array_value_copy(
                             preg,
                             param_array_len,
@@ -10418,7 +10427,7 @@ impl Lowerer {
                         )
                         lo = copy_pair.0
                         param_value_reg = copy_pair.1
-                        current_func = *lo.current_func
+                        current_func = lo.current_func
                     }
 
                     let _is_mut = (*list).head.is_self_mut
@@ -10454,7 +10463,7 @@ impl Lowerer {
                 _ => break
             }
         }
-        lo.current_func = Box::new(current_func)
+        lo.current_func = current_func
         lo.locals = locals
         lo
     }
@@ -10613,19 +10622,22 @@ impl Lowerer {
 
         lo = lo.flush_current_func()
         lo.current_fn = fn_id
-        var current_func = ir_empty_function()
-        current_func.name = name
+        // Reuse the Box the Lowerer already holds instead of bump-allocating a
+        // fresh ~504 KB IrFunction per function; and read the preserved fields
+        // in place instead of `let preserved = …`, which copied the whole
+        // function to look at seven scalars.
+        var reused = lo.current_func
+        ir_reset_function_in_place(&! (*reused), name)
         if fn_id >= 0 && fn_id < lo.module.fn_count {
-            let preserved = lo.module.functions[fn_id as usize]
-            current_func.name = preserved.name
-            current_func.compile_strategy = preserved.compile_strategy
-            current_func.returns_float = preserved.returns_float
-            current_func.return_fixed_array_len = preserved.return_fixed_array_len
-            current_func.return_struct_name = preserved.return_struct_name
-            current_func.first_param_is_ref = preserved.first_param_is_ref
-            current_func.prof_counter_id = preserved.prof_counter_id
+            (*reused).name = lo.module.functions[fn_id as usize].name
+            (*reused).compile_strategy = lo.module.functions[fn_id as usize].compile_strategy
+            (*reused).returns_float = lo.module.functions[fn_id as usize].returns_float
+            (*reused).return_fixed_array_len = lo.module.functions[fn_id as usize].return_fixed_array_len
+            (*reused).return_struct_name = lo.module.functions[fn_id as usize].return_struct_name
+            (*reused).first_param_is_ref = lo.module.functions[fn_id as usize].first_param_is_ref
+            (*reused).prof_counter_id = lo.module.functions[fn_id as usize].prof_counter_id
         }
-        lo.current_func = Box::new(current_func)
+        lo.current_func = reused
         lo.current_func_loaded = true
         lo.env = None
         var rst_locals2 = lo.locals
@@ -10809,19 +10821,22 @@ impl Lowerer {
 
         lo = lo.flush_current_func()
         lo.current_fn = fn_id
-        var current_func = ir_empty_function()
-        current_func.name = name
+        // Reuse the Box the Lowerer already holds instead of bump-allocating a
+        // fresh ~504 KB IrFunction per function; and read the preserved fields
+        // in place instead of `let preserved = …`, which copied the whole
+        // function to look at seven scalars.
+        var reused = lo.current_func
+        ir_reset_function_in_place(&! (*reused), name)
         if fn_id >= 0 && fn_id < lo.module.fn_count {
-            let preserved = lo.module.functions[fn_id as usize]
-            current_func.name = preserved.name
-            current_func.compile_strategy = preserved.compile_strategy
-            current_func.returns_float = preserved.returns_float
-            current_func.return_fixed_array_len = preserved.return_fixed_array_len
-            current_func.return_struct_name = preserved.return_struct_name
-            current_func.first_param_is_ref = preserved.first_param_is_ref
-            current_func.prof_counter_id = preserved.prof_counter_id
+            (*reused).name = lo.module.functions[fn_id as usize].name
+            (*reused).compile_strategy = lo.module.functions[fn_id as usize].compile_strategy
+            (*reused).returns_float = lo.module.functions[fn_id as usize].returns_float
+            (*reused).return_fixed_array_len = lo.module.functions[fn_id as usize].return_fixed_array_len
+            (*reused).return_struct_name = lo.module.functions[fn_id as usize].return_struct_name
+            (*reused).first_param_is_ref = lo.module.functions[fn_id as usize].first_param_is_ref
+            (*reused).prof_counter_id = lo.module.functions[fn_id as usize].prof_counter_id
         }
-        lo.current_func = Box::new(current_func)
+        lo.current_func = reused
         lo.current_func_loaded = true
         lo.env = None
         var rst_locals3 = lo.locals
