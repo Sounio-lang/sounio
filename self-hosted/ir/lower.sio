@@ -756,16 +756,58 @@ fn lowerer_new_probe() -> Lowerer with Alloc, Mut, Panic, Div {
     lo
 }
 
+// Diagnostic gates, MEMOISED — and this is a memory fix, not a speed one.
+//
+// Each of these was `str_eq(read_env("..."), "1")`, evaluated at every call
+// site. read_env allocates, the runtime allocator is a bump cursor with NO
+// reclamation, and lowerer_lower_fn_item_mut alone calls
+// lower_live_diag_enabled() NINE times per function. Measured with
+// /proc/self/statm probes placed at the internal boundaries of that function,
+// on a 50-function chain: ~56 KB of resident memory appears at nearly every
+// mark, and the one thing between nearly every pair of marks is one of these
+// gates. 9 x 56 KB = 504 KB of the ~688 KB each function was costing.
+//
+// There are 99 call sites of these five gates in this file. They are read once
+// now; nothing reads the environment mid-compile, so caching cannot change a
+// verdict. The CHECKED flag is separate from the value because "off" and
+// "not yet read" must not be the same state.
+var LOWER_DIAG_SUMMARY_ON: i64 = 0
+var LOWER_DIAG_SUMMARY_CHECKED: i64 = 0
+
 fn lower_summary_diag_enabled() -> bool with IO, Mut, Panic, Div {
-    str_eq(read_env("SOUNIO_LOWER_SUMMARY_TRACE"), "1")
+    if LOWER_DIAG_SUMMARY_CHECKED == 0 {
+        LOWER_DIAG_SUMMARY_CHECKED = 1
+        if str_eq(read_env("SOUNIO_LOWER_SUMMARY_TRACE"), "1") {
+            LOWER_DIAG_SUMMARY_ON = 1
+        }
+    }
+    LOWER_DIAG_SUMMARY_ON == 1
 }
+
+var LOWER_DIAG_LIVE_ON: i64 = 0
+var LOWER_DIAG_LIVE_CHECKED: i64 = 0
 
 fn lower_live_diag_enabled() -> bool with IO, Mut, Panic, Div {
-    str_eq(read_env("SOUNIO_LOWER_LIVE_TRACE"), "1")
+    if LOWER_DIAG_LIVE_CHECKED == 0 {
+        LOWER_DIAG_LIVE_CHECKED = 1
+        if str_eq(read_env("SOUNIO_LOWER_LIVE_TRACE"), "1") {
+            LOWER_DIAG_LIVE_ON = 1
+        }
+    }
+    LOWER_DIAG_LIVE_ON == 1
 }
 
+var LOWER_DIAG_BODY_ON: i64 = 0
+var LOWER_DIAG_BODY_CHECKED: i64 = 0
+
 fn lower_body_diag_enabled() -> bool with IO, Mut, Panic, Div {
-    str_eq(read_env("SOUNIO_LOWER_BODY_TRACE"), "1")
+    if LOWER_DIAG_BODY_CHECKED == 0 {
+        LOWER_DIAG_BODY_CHECKED = 1
+        if str_eq(read_env("SOUNIO_LOWER_BODY_TRACE"), "1") {
+            LOWER_DIAG_BODY_ON = 1
+        }
+    }
+    LOWER_DIAG_BODY_ON == 1
 }
 
 fn lower_body_trace_path() -> string {
@@ -784,12 +826,30 @@ fn lower_body_trace_append(msg: string) with IO, Mut, Panic, Div {
     let _ok = io_write_bytes_to_file(lower_body_trace_path(), buf, p)
 }
 
+var LOWER_DIAG_ORDERED_ON: i64 = 0
+var LOWER_DIAG_ORDERED_CHECKED: i64 = 0
+
 fn lower_ordered_diag_enabled() -> bool with IO, Mut, Panic, Div {
-    str_eq(read_env("SOUNIO_LOWER_ORDERED_TRACE"), "1")
+    if LOWER_DIAG_ORDERED_CHECKED == 0 {
+        LOWER_DIAG_ORDERED_CHECKED = 1
+        if str_eq(read_env("SOUNIO_LOWER_ORDERED_TRACE"), "1") {
+            LOWER_DIAG_ORDERED_ON = 1
+        }
+    }
+    LOWER_DIAG_ORDERED_ON == 1
 }
 
+var LOWER_DIAG_AGG_ON: i64 = 0
+var LOWER_DIAG_AGG_CHECKED: i64 = 0
+
 fn lower_aggregate_diag_enabled() -> bool with IO, Mut, Panic, Div {
-    str_eq(read_env("SOUNIO_LOWER_AGG_TRACE"), "1")
+    if LOWER_DIAG_AGG_CHECKED == 0 {
+        LOWER_DIAG_AGG_CHECKED = 1
+        if str_eq(read_env("SOUNIO_LOWER_AGG_TRACE"), "1") {
+            LOWER_DIAG_AGG_ON = 1
+        }
+    }
+    LOWER_DIAG_AGG_ON == 1
 }
 
 fn ir_normalize_string_literal_name(n: Name) -> Name {
@@ -3575,12 +3635,14 @@ fn lowerer_lower_fn_item_mut(
     ir_instr_overflow_begin_fn()
     lower_rss_mark("fn_enter")
     (*lo).so_enabled = so_block_uses_hessian(&(*fd).body)
+    lower_rss_mark("after_hessian_scan")
     if lower_live_diag_enabled() {
         print("lower_live: fn_before_find_or_add name=")
         print(str_from_bytes(name.buf, name.len))
         print("\n")
     }
     let fn_id = lowerer_find_or_add_fn_id_mut(lo, name)
+    lower_rss_mark("after_findfn")
     if lower_live_diag_enabled() {
         print("lower_live: fn_after_find_or_add name=")
         print(str_from_bytes(name.buf, name.len))
@@ -3642,6 +3704,7 @@ fn lowerer_lower_fn_item_mut(
     // callers (e.g. main) see helpers defined earlier in the module.
     // Note: fo_xfer_* is NOT cleared per-function — it accumulates across the module.
     let lo_xfer = (*lo).fo_register_pure_fn_transfer(name, fd)
+    lower_rss_mark("after_fo_register")
     (*lo) = lo_xfer
     if lower_live_diag_enabled() {
         print("lower_live: fn_state_after_begin current_fn=")
@@ -3655,6 +3718,7 @@ fn lowerer_lower_fn_item_mut(
     }
 
     let strategy = lowerer_compute_strategy_from_ast_ref(&fd.return_type, &fd.effects)
+    lower_rss_mark("after_strategy")
     if lower_live_diag_enabled() {
         print("lower_live: fn_after_strategy name=")
         print(str_from_bytes(name.buf, name.len))
@@ -3720,6 +3784,7 @@ fn lowerer_lower_fn_item_mut(
     if ir_param_list_count_ref(&fd.params) > 0 {
         lowerer_lower_fn_params_mut(lo, &fd.params)
     }
+    lower_rss_mark("after_params")
     if lower_live_diag_enabled() {
         print("lower_live: fn_after_params name=")
         print(str_from_bytes(name.buf, name.len))
@@ -3770,6 +3835,7 @@ fn lowerer_lower_fn_item_mut(
         }
     }
 
+lower_rss_mark("before_block")
     let bpair = (*lo).lower_block_ref(&fd.body)
     (*lo) = bpair.0
     let result_reg = bpair.1
@@ -3789,6 +3855,7 @@ fn lowerer_lower_fn_item_mut(
         (*lo) = (*lo).emit(ir_jump(kernel_top_label))
         (*lo) = (*lo).emit(ir_label(kernel_end_label))
     }
+    lower_rss_mark("after_block")
     // ---- end kernel CPU lane loop ----
     if lower_live_diag_enabled() {
         print("lower_live: fn_after_block name=")
@@ -3825,6 +3892,7 @@ fn lowerer_lower_fn_item_mut(
         (*lo).scope_depth = (*lo).scope_depth - 1
     }
     lowerer_flush_current_func_mut(lo)
+    lower_rss_mark("after_flush")
     (*lo).current_fn = IR_INVALID_FN
     // #1586/#1645: the body did not fit. Report at the END of the function, so
     // the message carries what it actually needed rather than only that it
@@ -3850,6 +3918,7 @@ fn lowerer_lower_fn_item_mut(
         print(str_from_bytes(name.buf, name.len))
         print("\n")
     }
+    lower_rss_mark("fn_exit")
 }
 
 fn lowerer_lower_impl_methods_mut(
