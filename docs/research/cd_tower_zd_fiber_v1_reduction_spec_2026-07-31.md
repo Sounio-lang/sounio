@@ -3796,3 +3796,52 @@ the spectrum of an explicit nonsingular half-size matrix, and the two endpoints 
 (`j ≤ 2` cospectral, `j = n−2` equal to `I − J`) are both settled.
 
 **(III) is still reduced, not proven.**
+
+## §56 — §33.5(C)'s BASE CASE IS A THEOREM (Tiers 57–58)
+
+```lean
+theorem tri3_pow2_value (n : Nat) (hn : n ≠ 0) :
+    tri3 (2^(n+1)) (fun x y => Asig x y (2^n) n)
+      = -8 * ((2^n : Int) − 1) * ((2^n : Int) − 2) * ((2^n : Int) − 3)
+```
+
+Build green, no `sorry`, no `axiom` in the file.
+
+§33.5(C) derived this on paper from the `K_N`-minus-a-perfect-matching structure plus the
+antibalance theorem, and called it "DERIVED". It is now proven, and by a different route — the fold.
+
+### 56.1 — the one missing lemma was `P3_pow2_top`
+
+`Asig_pow2_top` (Tier 37) carries `resB … = true` as a **hypothesis**, so on its own it says nothing
+about *where* the graph has edges. Supplying that hypothesis needs `P3` at the maximal-seam label,
+which the file did not have. Tier 57 adds it:
+
+> `P3_pow2_top : P3 l y (2^n) n = μ(l)·μ(y)` — **with `l ≠ y`, which `P1_pow2_top` does not need.**
+> On the diagonal `P1 = 1` but `P3 = −1`, and that disagreement is exactly `Asig_diag`. The extra
+> hypothesis is the content, not a weakening.
+
+With both, `resB_pow2_top` gives a FULL mask off the four excluded lines, and `Asig_pow2_rep` gives
+`−1` on the representative box: **the fold of the maximal seam is `I − J`, proven.**
+
+### 56.2 — the count
+
+`tri3_kron` (Tier 56) reduces the trace to `8 ×` the box sum. The box summand is `(−1)³ = −1`
+exactly on ordered triples of distinct nonzero representatives and `0` otherwise — zero rows at `0`,
+`Asig_diag` whenever two indices coincide. Verified exhaustive: over `n = 1…4` there is **no**
+distinct nonzero pair in the box with entry `≠ −1`.
+
+The count itself is three nested instances of one pattern — a constant over a range minus a measured
+excluded set (`sumLtI_const_excl` against `cnt1`/`cnt2`/`cnt3`) — giving
+`(2^n−1)(2^n−2)(2^n−3)`.
+
+Measured: `n = 1,2,3,4,5` → `0, −48, −1680, −21840, −215760`, all matching, including the degenerate
+`n = 1` where no such triples exist and both sides are `0`.
+
+### 56.3 — status
+
+**This closes the `y = 0` base case only.** §33.5 already had it on paper; what is new is that it is
+now a theorem, that it follows from the fold rather than from a bespoke count, and that the fold is
+available at **every** label. The **general seam's** base case — the actual open content of the
+deviation law — is untouched.
+
+**(III) is still reduced, not proven.**

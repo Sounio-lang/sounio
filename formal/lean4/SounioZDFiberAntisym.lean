@@ -12072,6 +12072,337 @@ theorem tri3_kron (W n : Nat) (hW : W < 2^(n+1)) (hW0 : W ≠ 0) :
         · rw [if_neg h, if_neg h])]
   omega
 
+
+/-! ### Tier 57 — the maximal seam folds to `I − J`
+
+    §55.3 measured that at the maximal-seam label `2^n` the folded matrix is exactly `I − J`, the
+    complete graph with every edge `−1`, and that this makes §33.5(C)'s base case a one-line
+    corollary.  Proving it needed one lemma the file did not have: **`P3_pow2_top`**, the `P3` twin
+    of `P1_pow2_top` (Tier 37).  With it, `resB` is FULL off the four excluded lines — both `P1` and
+    `P3` equal `μ(l)·μ(y)` there — and on the representative box `l, y < 2^n` the entry is `−1`.
+
+    ⚠ `P3_pow2_top` needs `l ≠ y`, which `P1_pow2_top` does not: **on the diagonal `P1 = 1` but
+    `P3 = −1`**, and that disagreement is exactly `Asig_diag`.  The extra hypothesis is the content,
+    not a weakening.
+
+    ⚠ **NOT proven here: the base case's VALUE.**  `tri3_kron` (Tier 56) reduces `tr(A³)` at this
+    label to `8 ×` the sum over the representative box, and `Asig_pow2_rep` says that sum is
+    `−#{ordered triples of distinct nonzero elements of [0, 2^n)}`.  Turning that count into
+    `−(s)(s−1)(s−2)` is elementary but is a `sumLtI` triple-distinct count that this file does not
+    have. -/
+
+/-- `P3` at the maximal-seam label, OFF the diagonal.  (On the diagonal `P3 = -1` while `P1 = 1`;
+    that difference is exactly `Asig_diag`.) -/
+private theorem P3_pow2_succ (k l y : Nat) (hl : l < 2^(k+2)) (hy : y < 2^(k+2))
+    (hl0 : l ≠ 0) (hy0 : y ≠ 0) (hlL : l ≠ 2^(k+1)) (hyL : y ≠ 2^(k+1)) (hly : l ≠ y) :
+    P3 l y (2^(k+1)) (k+1) = muTop l (k+1) * muTop y (k+1) := by
+  have hnz : k + 1 ≠ 0 := by omega
+  have hpow : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by rw [Nat.pow_succ]; omega
+  have hLlt : (2:Nat)^(k+1) < 2^(k+2) := by have := Nat.two_pow_pos (k+1); omega
+  rw [P3_red l y (2^(k+1)) (k+1) hl hy hLlt hy0]
+  unfold muTop
+  rcases Nat.lt_or_ge l (2^(k+1)) with hlo | hhi
+  · rcases Nat.lt_or_ge y (2^(k+1)) with hylo | hyhi
+    · -- LL
+      rw [xor_pow_low (k+1) y hnz hylo, xor_pow_low (k+1) l hnz hlo,
+          R_ul y l k hylo hlo, R_ul l y k hlo hylo, if_neg hl0, if_neg hy0,
+          if_pos hlo, if_pos hylo,
+          antisym (k+1) y l hylo hlo hy0 hl0 (fun e => hly e.symm)]
+      rcases cdSigma_pm (k+1) l y with h | h <;> rw [h] <;> decide
+    · -- LH
+      obtain ⟨y', hy'lt, rfl⟩ : ∃ y', y' < 2^(k+1) ∧ y = y' + 2^(k+1) :=
+        ⟨y - 2^(k+1), by omega, by omega⟩
+      have hy'0 : y' ≠ 0 := by intro h; exact hyL (by omega)
+      rw [xor_top_add (k+1) y' hnz hy'lt, xor_pow_low (k+1) l hnz hlo,
+          R_ll y' l k hy'lt hlo, R_uu l y' k hlo hy'lt, if_neg hy'0,
+          if_pos hlo, if_neg (by omega : ¬ y' + 2^(k+1) < 2^(k+1))]
+      rcases cdSigma_pm (k+1) y' l with h | h <;> rw [h] <;> decide
+  · obtain ⟨l', hl'lt, rfl⟩ : ∃ l', l' < 2^(k+1) ∧ l = l' + 2^(k+1) :=
+      ⟨l - 2^(k+1), by omega, by omega⟩
+    have hl'0 : l' ≠ 0 := by intro h; exact hlL (by omega)
+    rcases Nat.lt_or_ge y (2^(k+1)) with hylo | hyhi
+    · -- HL
+      rw [xor_pow_low (k+1) y hnz hylo, xor_top_add (k+1) l' hnz hl'lt,
+          R_uu y l' k hylo hl'lt, if_neg hl'0, R_ll l' y k hl'lt hylo,
+          if_neg (by omega : ¬ l' + 2^(k+1) < 2^(k+1)), if_pos hylo]
+      rcases cdSigma_pm (k+1) l' y with h | h <;> rw [h] <;> decide
+    · -- HH
+      obtain ⟨y', hy'lt, rfl⟩ : ∃ y', y' < 2^(k+1) ∧ y = y' + 2^(k+1) :=
+        ⟨y - 2^(k+1), by omega, by omega⟩
+      have hy'0 : y' ≠ 0 := by intro h; exact hyL (by omega)
+      have hne : l' ≠ y' := by intro h; exact hly (by omega)
+      rw [xor_top_add (k+1) y' hnz hy'lt, xor_top_add (k+1) l' hnz hl'lt,
+          R_lu y' l' k hy'lt hl'lt, R_lu l' y' k hl'lt hy'lt,
+          if_neg (by omega : ¬ l' + 2^(k+1) < 2^(k+1)),
+          if_neg (by omega : ¬ y' + 2^(k+1) < 2^(k+1)),
+          antisym (k+1) y' l' hy'lt hl'lt hy'0 hl'0 (fun e => hne e.symm)]
+      rcases cdSigma_pm (k+1) l' y' with h | h <;> rw [h] <;> decide
+
+theorem P3_pow2_top (n l y : Nat) (hl : l < 2^(n+1)) (hy : y < 2^(n+1))
+    (hl0 : l ≠ 0) (hy0 : y ≠ 0) (hlL : l ≠ 2^n) (hyL : y ≠ 2^n) (hly : l ≠ y) :
+    P3 l y (2^n) n = muTop l n * muTop y n := by
+  cases n with
+  | zero =>
+      exfalso
+      have h1 : (2:Nat)^1 = 2 := rfl
+      have h0 : (2:Nat)^0 = 1 := rfl
+      omega
+  | succ k => exact P3_pow2_succ k l y hl hy hl0 hy0 hlL hyL hly
+
+/-- **The maximal-seam label's mask is FULL off the four excluded lines.**  `P1` and `P3` both
+    equal `μ(l)μ(y)` there, so all three clauses of `resB` hold. -/
+theorem resB_pow2_top (n l y : Nat) (hl : l < 2^(n+1)) (hy : y < 2^(n+1))
+    (hl0 : l ≠ 0) (hy0 : y ≠ 0) (hlL : l ≠ 2^n) (hyL : y ≠ 2^n) (hly : l ≠ y)
+    (hcos : y ≠ l ^^^ 2^n) : resB l y (2^n) n = true := by
+  have hcos' : l ≠ y ^^^ 2^n := by
+    intro e; exact hcos (by rw [e, xor_cancel])
+  unfold resB
+  rw [P1_pow2_top n l y hl hy hl0 hy0 hlL hyL hcos,
+      P1_pow2_top n y l hy hl hy0 hl0 hyL hlL hcos',
+      P3_pow2_top n l y hl hy hl0 hy0 hlL hyL hly,
+      P3_pow2_top n y l hy hl hy0 hl0 hyL hlL (fun e => hly e.symm)]
+  simp [Int.mul_comm]
+
+/-- **`A_σ = I − J` on the representative box.**  For `l, y < 2^n` nonzero and distinct the entry is
+    `−1`; with `Asig_diag` giving `0` on the diagonal, the folded matrix at the maximal seam is
+    exactly the all-`−1` complete graph. -/
+theorem Asig_pow2_rep (n l y : Nat) (hl : l < 2^n) (hy : y < 2^n)
+    (hl0 : l ≠ 0) (hy0 : y ≠ 0) (hly : l ≠ y) : Asig l y (2^n) n = -1 := by
+  have hp := Nat.two_pow_pos n
+  have hpow : (2:Nat)^(n+1) = 2^n + 2^n := by rw [Nat.pow_succ]; omega
+  have hll : l < 2^(n+1) := by omega
+  have hyy : y < 2^(n+1) := by omega
+  have hlL : l ≠ 2^n := by omega
+  have hyL : y ≠ 2^n := by omega
+  have hcos : y ≠ l ^^^ 2^n := by
+    intro e
+    have : l ^^^ 2^n = l + 2^n := xor_pow_low n l (by intro h; simp [h] at hl; omega) hl
+    omega
+  unfold Asig
+  rw [if_pos (resB_pow2_top n l y hll hyy hl0 hy0 hlL hyL hly hcos),
+      P1_pow2_top n l y hll hyy hl0 hy0 hlL hyL hcos]
+  unfold muTop
+  rw [if_pos hl, if_pos hy]
+  decide
+
+
+/-! ### Tier 58 — THE BASE VALUE: `tr(A³)(2^n) = −8(2^n−1)(2^n−2)(2^n−3)`
+
+    Tier 56 folds the trace onto the representative box; Tier 57 shows the box carries `I − J`.
+    What was left was the count, and it is three nested instances of one pattern: a constant summed
+    over a range minus a measured excluded set (`sumLtI_const_excl` against `cnt1`/`cnt2`/`cnt3`).
+
+    The triple sum collapses because the summand is `(−1)³ = −1` exactly on ordered triples of
+    DISTINCT NONZERO representatives and `0` otherwise — zero rows at `0`, and `Asig_diag` whenever
+    two of the three indices coincide.  Counting those triples gives
+    `(2^n−1)(2^n−2)(2^n−3)`, and the fold's `8` is `tr(K³)`.
+
+    This is **§33.5(C)'s base case, proven** — previously derived on paper from the
+    `K_N`-minus-a-perfect-matching structure plus the antibalance theorem, and now a consequence of
+    the fold. -/
+
+/-! ## Counting -/
+
+/-- A constant `v` summed over `[0,n)` minus an excluded set of measured size `k`. -/
+theorem sumLtI_const_excl (n : Nat) (v : Int) (S : Nat → Prop) [DecidablePred S] (k : Int)
+    (hcount : sumLtI n (fun i => if S i then (1:Int) else 0) = k) :
+    sumLtI n (fun i => if S i then 0 else v) = ((n : Int) - k) * v := by
+  rw [sumLtI_congr n _ (fun i => v * 1 + (-v) * (if S i then (1:Int) else 0))
+        (fun i _ => by by_cases h : S i <;> simp [h] <;> omega),
+      sumLtI_add, sumLtI_mul, sumLtI_mul, sumLtI_one, hcount]
+  grind
+
+theorem cnt1 (n x : Nat) (hx : x < n) :
+    sumLtI n (fun i => if i = x then (1:Int) else 0) = 1 := sumLtI_single n x 1 hx
+
+theorem cnt2 (n x y : Nat) (hx : x < n) (hy : y < n) (hxy : x ≠ y) :
+    sumLtI n (fun i => if i = x ∨ i = y then (1:Int) else 0) = 2 := by
+  rw [sumLtI_congr n _ (fun i => (if i = x then (1:Int) else 0) + (if i = y then (1:Int) else 0))
+        (fun i _ => by
+          by_cases h1 : i = x
+          · rw [if_pos (Or.inl h1), if_pos h1, if_neg (by omega)]; omega
+          by_cases h2 : i = y
+          · rw [if_pos (Or.inr h2), if_neg h1, if_pos h2]; omega
+          · rw [if_neg (fun e => e.elim h1 h2), if_neg h1, if_neg h2]; omega),
+      sumLtI_add, sumLtI_single n x 1 hx, sumLtI_single n y 1 hy]
+  omega
+
+theorem cnt3 (n x y z : Nat) (hx : x < n) (hy : y < n) (hz : z < n)
+    (hxy : x ≠ y) (hxz : x ≠ z) (hyz : y ≠ z) :
+    sumLtI n (fun i => if i = x ∨ i = y ∨ i = z then (1:Int) else 0) = 3 := by
+  rw [sumLtI_congr n _
+        (fun i => (if i = x ∨ i = y then (1:Int) else 0) + (if i = z then (1:Int) else 0))
+        (fun i _ => by
+          by_cases h3 : i = z
+          · rw [if_pos (Or.inr (Or.inr h3)), if_pos h3,
+                if_neg (fun e => e.elim (fun e1 => hxz (by omega)) (fun e2 => hyz (by omega)))]
+            omega
+          · by_cases h1 : i = x
+            · rw [if_pos (Or.inl h1), if_pos (Or.inl h1), if_neg h3]; omega
+            by_cases h2 : i = y
+            · rw [if_pos (Or.inr (Or.inl h2)), if_pos (Or.inr h2), if_neg h3]; omega
+            · rw [if_neg (fun e => e.elim h1 (fun e2 => e2.elim h2 h3)),
+                  if_neg (fun e => e.elim h1 h2), if_neg h3]
+              omega),
+      sumLtI_add, cnt2 n x y hx hy hxy, sumLtI_single n z 1 hz]
+  omega
+
+/-! ## The base value -/
+
+/-- The representative predicate at the maximal seam is just "below the top bit". -/
+theorem rep_iff (n x : Nat) (hn : n ≠ 0) (hx : x < 2^(n+1)) : (x < x ^^^ 2^n) ↔ (x < 2^n) := by
+  have hp := Nat.two_pow_pos n
+  have hpow : (2:Nat)^(n+1) = 2^n + 2^n := by rw [Nat.pow_succ]; omega
+  constructor
+  · intro h
+    rcases Nat.lt_or_ge x (2^n) with hc | hc
+    · exact hc
+    · exfalso
+      obtain ⟨u, hu, rfl⟩ : ∃ u, u < 2^n ∧ x = u + 2^n := ⟨x - 2^n, by omega, by omega⟩
+      rw [xor_top_add n u hn hu] at h
+      omega
+  · intro h; rw [xor_pow_low n x hn h]; omega
+
+/-- Restricting a full-range sum by "below the top bit". -/
+theorem sumLtI_half (n : Nat) (f : Nat → Int) :
+    sumLtI (2^(n+1)) (fun x => if x < 2^n then f x else 0) = sumLtI (2^n) f := by
+  have hpow : (2:Nat)^(n+1) = 2^n + 2^n := by rw [Nat.pow_succ]; have := Nat.two_pow_pos n; omega
+  rw [hpow, sumLtI_shift (2^n) (2^n),
+      sumLtI_congr (2^n) _ f (fun i hi => if_pos hi),
+      sumLtI_congr (2^n) (fun i => if 2^n + i < 2^n then f (2^n + i) else 0) (fun _ => 0)
+        (fun i _ => if_neg (by omega)),
+      sumLtI_zero]
+  omega
+
+/-- **THE BASE VALUE, ∀n.**  At the maximal-seam label the folded matrix is `I − J`, so the
+    triangle sum counts ordered triples of DISTINCT NONZERO representatives, each contributing
+    `(−1)³ = −1`, and the fold multiplies by `8`. -/
+theorem tri3_pow2_value (n : Nat) (hn : n ≠ 0) :
+    sumLtI (2^(n+1)) (fun a => sumLtI (2^(n+1)) (fun b => sumLtI (2^(n+1)) (fun c =>
+        Asig a b (2^n) n * (Asig b c (2^n) n * Asig c a (2^n) n))))
+      = -8 * (((2^n : Nat) : Int) - 1) * (((2^n : Nat) : Int) - 2)
+          * (((2^n : Nat) : Int) - 3) := by
+  have hp := Nat.two_pow_pos n
+  have hpow : (2:Nat)^(n+1) = 2^n + 2^n := by rw [Nat.pow_succ]; omega
+  have hWlt : (2:Nat)^n < 2^(n+1) := by omega
+  have hW0 : (2:Nat)^n ≠ 0 := by omega
+  -- the summand on the representative box
+  have hbox : ∀ a b c, a < 2^n → b < 2^n → c < 2^n →
+      Asig a b (2^n) n * (Asig b c (2^n) n * Asig c a (2^n) n)
+        = if a = 0 ∨ b = 0 ∨ c = 0 ∨ a = b ∨ b = c ∨ c = a then 0 else -1 := by
+    intro a b c ha hb hc
+    have lift : ∀ x, x < 2^n → x < 2^(n+1) := fun x hx => by omega
+    have hdz : ∀ x, x < 2^n → x ≠ 0 → Asig x x (2^n) n = 0 := by
+      intro x hx hx0
+      refine Asig_diag x (2^n) n (lift x hx) hWlt hx0 ?_
+      intro e
+      rw [xor_pow_low n x hn hx] at e; omega
+    by_cases h0 : a = 0 ∨ b = 0 ∨ c = 0 ∨ a = b ∨ b = c ∨ c = a
+    · rw [if_pos h0]
+      rcases h0 with e | e | e | e | e | e
+      · rw [e, Asig_zero_row b (2^n) n (lift b hb) hWlt hW0]; omega
+      · rw [e, Asig_zero_col a (2^n) n (lift a ha) hWlt hW0]; omega
+      · rw [e, Asig_zero_col b (2^n) n (lift b hb) hWlt hW0]; omega
+      · by_cases hb0 : b = 0
+        · rw [hb0, Asig_zero_col a (2^n) n (lift a ha) hWlt hW0]; omega
+        · rw [e, hdz b hb hb0]; omega
+      · by_cases hc0 : c = 0
+        · rw [hc0, Asig_zero_col b (2^n) n (lift b hb) hWlt hW0]; omega
+        · rw [e, hdz c hc hc0]; omega
+      · by_cases ha0 : a = 0
+        · rw [ha0, Asig_zero_row b (2^n) n (lift b hb) hWlt hW0]; omega
+        · rw [e, hdz a ha ha0]; omega
+    · rw [if_neg h0]
+      have ha0 : a ≠ 0 := fun e => h0 (Or.inl e)
+      have hb0 : b ≠ 0 := fun e => h0 (Or.inr (Or.inl e))
+      have hc0 : c ≠ 0 := fun e => h0 (Or.inr (Or.inr (Or.inl e)))
+      have hab : a ≠ b := fun e => h0 (Or.inr (Or.inr (Or.inr (Or.inl e))))
+      have hbc : b ≠ c := fun e => h0 (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl e)))))
+      have hca : c ≠ a := fun e => h0 (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr e)))))
+      rw [Asig_pow2_rep n a b ha hb ha0 hb0 hab, Asig_pow2_rep n b c hb hc hb0 hc0 hbc,
+          Asig_pow2_rep n c a hc ha hc0 ha0 hca]
+      decide
+  -- the inner two sums, for a fixed nonzero representative a
+  have hBsum : ∀ a, a < 2^n → a ≠ 0 →
+      sumLtI (2^n) (fun b => sumLtI (2^n) (fun c =>
+          Asig a b (2^n) n * (Asig b c (2^n) n * Asig c a (2^n) n)))
+        = ((2^n : Int) - 2) * (((2^n : Int) - 3) * (-1)) := by
+    intro a ha ha0
+    rw [sumLtI_congr (2^n) _ (fun b => if b = 0 ∨ b = a then 0 else ((2^n : Int) - 3) * (-1))
+      (fun b hb => by
+        by_cases hb0 : b = 0 ∨ b = a
+        · rw [if_pos hb0,
+              sumLtI_congr (2^n) _ (fun _ => 0) (fun c hc => by
+                rw [hbox a b c ha hb hc]
+                rcases hb0 with e | e
+                · rw [if_pos (Or.inr (Or.inl e))]
+                · rw [if_pos (Or.inr (Or.inr (Or.inr (Or.inl e.symm))))]),
+              sumLtI_zero]
+        · have hb1 : b ≠ 0 := fun e => hb0 (Or.inl e)
+          have hb2 : b ≠ a := fun e => hb0 (Or.inr e)
+          rw [if_neg hb0,
+              sumLtI_congr (2^n) _ (fun c => if c = 0 ∨ c = b ∨ c = a then 0 else (-1))
+                (fun c hc => by
+                  rw [hbox a b c ha hb hc]
+                  by_cases h : c = 0 ∨ c = b ∨ c = a
+                  · rcases h with e | e | e
+                    · rw [if_pos (Or.inr (Or.inr (Or.inl e))), if_pos (Or.inl e)]
+                    · rw [if_pos (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl e.symm))))),
+                          if_pos (Or.inr (Or.inl e))]
+                    · rw [if_pos (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr e))))),
+                          if_pos (Or.inr (Or.inr e))]
+                  · rw [if_neg h, if_neg (fun hh => by
+                      rcases hh with e|e|e|e|e|e
+                      · exact ha0 e
+                      · exact hb1 e
+                      · exact h (Or.inl e)
+                      · exact hb2 e.symm
+                      · exact h (Or.inr (Or.inl e.symm))
+                      · exact h (Or.inr (Or.inr e)))]),
+              sumLtI_const_excl (2^n) (-1) (fun i => i = 0 ∨ i = b ∨ i = a) 3
+                (cnt3 (2^n) 0 b a hp hb ha (fun e => hb1 e.symm) (fun e => ha0 e.symm) hb2)]
+          push_cast
+          grind),
+      sumLtI_const_excl (2^n) (((2^n : Int) - 3) * (-1)) (fun i => i = 0 ∨ i = a) 2
+        (cnt2 (2^n) 0 a hp ha (fun e => ha0 e.symm))]
+    push_cast
+    grind
+  rw [tri3_kron (2^n) n hWlt hW0]
+
+  -- replace the representative guard by "below the top bit", then restrict each range
+  rw [sumLtI_congr (2^(n+1)) _ (fun a => if a < 2^n then
+        sumLtI (2^(n+1)) (fun b => if b < 2^n then
+          sumLtI (2^(n+1)) (fun c => if c < 2^n then
+            Asig a b (2^n) n * (Asig b c (2^n) n * Asig c a (2^n) n) else 0) else 0) else 0)
+        (fun a ha => by
+          by_cases h : a < 2^n
+          · rw [if_pos ((rep_iff n a hn ha).mpr h), if_pos h]
+            refine sumLtI_congr _ _ _ (fun b hb => ?_)
+            by_cases h2 : b < 2^n
+            · rw [if_pos ((rep_iff n b hn hb).mpr h2), if_pos h2]
+              refine sumLtI_congr _ _ _ (fun c hc => ?_)
+              by_cases h3 : c < 2^n
+              · rw [if_pos ((rep_iff n c hn hc).mpr h3), if_pos h3]
+              · rw [if_neg (fun hh => h3 ((rep_iff n c hn hc).mp hh)), if_neg h3]
+            · rw [if_neg (fun hh => h2 ((rep_iff n b hn hb).mp hh)), if_neg h2]
+          · rw [if_neg (fun hh => h ((rep_iff n a hn ha).mp hh)), if_neg h]),
+      sumLtI_half n]
+  rw [sumLtI_congr (2^n) _ (fun a => sumLtI (2^n) (fun b =>
+        sumLtI (2^n) (fun c => Asig a b (2^n) n * (Asig b c (2^n) n * Asig c a (2^n) n))))
+        (fun a _ => by rw [sumLtI_half n]; exact sumLtI_congr _ _ _ (fun b _ => sumLtI_half n _))]
+  -- now count
+  rw [sumLtI_congr (2^n) _ (fun a => if a = 0 then 0 else
+        ((2^n : Int) - 2) * (((2^n : Int) - 3) * (-1))) (fun a ha => by
+        by_cases ha0 : a = 0
+        · rw [if_pos ha0, sumLtI_congr (2^n) _ (fun _ => 0) (fun b hb => by
+            rw [sumLtI_congr (2^n) _ (fun _ => 0) (fun c hc => by
+              rw [hbox a b c ha hb hc, if_pos (Or.inl ha0)]), sumLtI_zero]), sumLtI_zero]
+        · rw [if_neg ha0, hBsum a ha ha0])]
+  · rw [sumLtI_const_excl (2^n) (((2^n:Int) - 2) * (((2^n:Int) - 3) * (-1)))
+        (fun i => i = 0) 1 (cnt1 (2^n) 0 hp)]
+    push_cast
+    grind
+
 end SounioZDFiberAntisym
 
 
