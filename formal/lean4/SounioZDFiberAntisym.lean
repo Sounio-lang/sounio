@@ -12403,6 +12403,96 @@ theorem tri3_pow2_value (n : Nat) (hn : n ≠ 0) :
     push_cast
     grind
 
+
+/-! ### Tier 59 — the representative box depends only on the label's TOP BIT
+
+    §56.4(1) recorded, as a measurement, that the fold's representative predicate `a < a ⊕ W` is
+    decided by `W`'s top bit alone, so every label with top bit `2^n` folds onto the SAME box
+    `[0, 2^n)` — and therefore, at the deviation law's base level, a seam and its fibre reference
+    (both high, same top bit) fold onto one index set.  It also recorded that stating this in Lean
+    needed a highest-differing-bit fact about `Nat.xor` the file did not have.
+
+    That fact turns out to be two lines of `xor_pow_low` plus associativity: xoring a low value
+    against a top-bit-shifted one keeps the top bit, and two top-bit-shifted values xor to a low
+    one.  `rep_iff` (Tier 58) is now the special case `W = 2^n`. -/
+
+/-- Xoring a low value against a top-bit-shifted one keeps the top bit. -/
+private theorem xor_lo_hi (n u v : Nat) (hn : n ≠ 0) (hu : u < 2^n) (hv : v < 2^n) :
+    u ^^^ (v + 2^n) = (u ^^^ v) + 2^n := by
+  have huv : u ^^^ v < 2^n := by
+    have := @xorlt u v (n-1)
+    have hn' : n - 1 + 1 = n := by omega
+    rw [hn'] at this
+    exact this hu hv
+  rw [← xor_pow_low n v hn hv, ← Nat.xor_assoc, ← xor_pow_low n (u ^^^ v) hn huv]
+
+/-- Two top-bit-shifted values xor to a low one. -/
+private theorem xor_hi_hi (n u v : Nat) (hn : n ≠ 0) (hu : u < 2^n) (hv : v < 2^n) :
+    (u + 2^n) ^^^ (v + 2^n) = u ^^^ v := by
+  rw [← xor_pow_low n u hn hu, ← xor_pow_low n v hn hv]
+  rw [Nat.xor_assoc, ← Nat.xor_assoc (2^n) v (2^n), Nat.xor_comm (2^n) v,
+      Nat.xor_assoc v (2^n) (2^n), Nat.xor_self, Nat.xor_zero]
+
+/-- **The representative predicate depends only on the label's TOP BIT.**  For any `W` whose top
+    bit is `2^n`, `a` is the representative of the pair `{a, a ⊕ W}` exactly when `a < 2^n` —
+    independent of `W`'s low part.  So a seam and its fibre reference, both high at the base level,
+    fold onto the SAME box. -/
+theorem rep_iff_gen (n W x : Nat) (hn : n ≠ 0) (hWhi : 2^n ≤ W) (hW : W < 2^(n+1))
+    (hx : x < 2^(n+1)) : (x < x ^^^ W) ↔ (x < 2^n) := by
+  have hp := Nat.two_pow_pos n
+  have hpow : (2:Nat)^(n+1) = 2^n + 2^n := by rw [Nat.pow_succ]; omega
+  obtain ⟨W', hW'lt, rfl⟩ : ∃ W', W' < 2^n ∧ W = W' + 2^n := ⟨W - 2^n, by omega, by omega⟩
+  constructor
+  · intro h
+    rcases Nat.lt_or_ge x (2^n) with hlo | hhi
+    · exact hlo
+    · exfalso
+      obtain ⟨x', hx'lt, rfl⟩ : ∃ x', x' < 2^n ∧ x = x' + 2^n := ⟨x - 2^n, by omega, by omega⟩
+      rw [xor_hi_hi n x' W' hn hx'lt hW'lt] at h
+      have : x' ^^^ W' < 2^n := by
+        have := @xorlt x' W' (n-1)
+        have hn' : n - 1 + 1 = n := by omega
+        rw [hn'] at this
+        exact this hx'lt hW'lt
+      omega
+  · intro hlo
+    rw [xor_lo_hi n x W' hn hlo hW'lt]
+    omega
+
+
+/-- **THE SAME-BOX FOLD.**  Every label with top bit `2^n` folds onto the SAME representative box
+    `[0, 2^n)`.  At the deviation law's base level a seam and its fibre reference are both high with
+    the same top bit, so their triangle sums become two sums over ONE index set — which is the
+    reformulation §56.4 recorded and could not previously state in Lean. -/
+theorem tri3_fold_high (W n : Nat) (hn : n ≠ 0) (hWhi : 2^n ≤ W) (hW : W < 2^(n+1)) :
+    sumLtI (2^(n+1)) (fun a => sumLtI (2^(n+1)) (fun b => sumLtI (2^(n+1)) (fun c =>
+        Asig a b W n * (Asig b c W n * Asig c a W n))))
+      = 8 * sumLtI (2^n) (fun a => sumLtI (2^n) (fun b => sumLtI (2^n) (fun c =>
+          Asig a b W n * (Asig b c W n * Asig c a W n)))) := by
+  have hp := Nat.two_pow_pos n
+  have hW0 : W ≠ 0 := by omega
+  rw [tri3_kron W n hW hW0,
+      sumLtI_congr (2^(n+1)) _ (fun a => if a < 2^n then
+        sumLtI (2^(n+1)) (fun b => if b < 2^n then
+          sumLtI (2^(n+1)) (fun c => if c < 2^n then
+            Asig a b W n * (Asig b c W n * Asig c a W n) else 0) else 0) else 0)
+        (fun a ha => by
+          by_cases h : a < 2^n
+          · rw [if_pos ((rep_iff_gen n W a hn hWhi hW ha).mpr h), if_pos h]
+            refine sumLtI_congr _ _ _ (fun b hb => ?_)
+            by_cases h2 : b < 2^n
+            · rw [if_pos ((rep_iff_gen n W b hn hWhi hW hb).mpr h2), if_pos h2]
+              refine sumLtI_congr _ _ _ (fun c hc => ?_)
+              by_cases h3 : c < 2^n
+              · rw [if_pos ((rep_iff_gen n W c hn hWhi hW hc).mpr h3), if_pos h3]
+              · rw [if_neg (fun hh => h3 ((rep_iff_gen n W c hn hWhi hW hc).mp hh)), if_neg h3]
+            · rw [if_neg (fun hh => h2 ((rep_iff_gen n W b hn hWhi hW hb).mp hh)), if_neg h2]
+          · rw [if_neg (fun hh => h ((rep_iff_gen n W a hn hWhi hW ha).mp hh)), if_neg h]),
+      sumLtI_half n,
+      sumLtI_congr (2^n) _ (fun a => sumLtI (2^n) (fun b =>
+        sumLtI (2^n) (fun c => Asig a b W n * (Asig b c W n * Asig c a W n))))
+        (fun a _ => by rw [sumLtI_half n]; exact sumLtI_congr _ _ _ (fun b _ => sumLtI_half n _))]
+
 end SounioZDFiberAntisym
 
 

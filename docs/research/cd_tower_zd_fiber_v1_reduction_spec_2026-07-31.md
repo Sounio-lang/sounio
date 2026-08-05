@@ -3860,16 +3860,21 @@ top bit, so
 > `D(W) = 8 · ( t3(box_W) − t3(box_{W₀}) )` — **a difference of two triangle sums on one index set.**
 
 That is a real simplification of the base case: before, the seam and the reference lived on
-different vertex sets and the comparison was between objects of different shape. (Measured; the
-Lean `rep_iff` is currently stated for `W = 2^n` only, and generalising it needs a
-highest-differing-bit lemma about `Nat.xor` that the file does not have.)
+different vertex sets and the comparison was between objects of different shape. ~~(Measured; the Lean `rep_iff` is currently stated for `W = 2^n` only, and generalising it needs a
+highest-differing-bit lemma about `Nat.xor` that the file does not have.)~~ — **⚠ WRONG COST
+ESTIMATE, corrected in §57: the missing fact is two lines of `xor_pow_low` plus associativity, and
+both this and the same-box fold are now theorems (`rep_iff_gen`, `tri3_fold_high`).**
 
 **(2) The general high box is `I − J` plus a sparse correction.** Entries lie in `{−1, 0, +1}`, and
 the `+1` entries number exactly `2(2^n − 2)` at `n = 3,4,5` for every low part tested — which is
 §34's matching/coset family size. The correction is *not* supported on the coset line `l ⊕ y = W_lo`
 (tested: mixed), so the obvious identification is wrong.
 
-**Stopping here on purpose.** Six angles have now been tried on this base case — edge bijection,
+⚠ **And the "stop" below was called one lemma too early** — see §57. The reason to stop was sound
+(measurements without a proof plan); the specific claim that (1) could not be stated in Lean was
+not, and it was again a guess about a proof I had not attempted. Fourth occurrence in this session.
+
+**Stopping the MEASUREMENT SWEEP on purpose.** Six angles have now been tried on this base case — edge bijection,
 triangle bijection, high-branch two-term recursion, complementation third invariant, perturbative
 split, spectral fold — five closed and one (the fold) turned into the `y = 0` proof. What is
 accumulating now is measurements without a proof plan, which is how this lane has previously spent
@@ -3877,3 +3882,42 @@ rungs for nothing. The next rung should start from (1) — the same-box reformul
 have a target statement before it starts measuring.
 
 **(III) is still reduced, not proven.** (d) and V1 untouched.
+
+## §57 — the same-box fold is a theorem (Tier 59)
+
+```lean
+theorem rep_iff_gen (n W x) (hn : n ≠ 0) (2^n ≤ W) (W < 2^(n+1)) (x < 2^(n+1)) :
+    (x < x ^^^ W) ↔ (x < 2^n)
+theorem tri3_fold_high (W n) (hn : n ≠ 0) (2^n ≤ W) (W < 2^(n+1)) :
+    tri3 (2^(n+1)) (Asig · · W n) = 8 * (the triple sum over [0, 2^n))
+```
+
+Build green, no `sorry`, no `axiom`. Denotation measured: `n = 2,3,4`, **every** high label, 0
+violations.
+
+**§56.4(1) is now stateable and stated.** Every label with top bit `2^n` folds onto the SAME box
+`[0, 2^n)` — independent of the label's low part — so at the deviation law's base level a seam and
+its fibre reference fold onto ONE index set and
+
+> `D(W) = 8 · ( t3(box_W) − t3(box_{W₀}) )`.
+
+`rep_iff` (Tier 58) is the special case `W = 2^n`.
+
+### 57.1 — the cost estimate in §56.4 was wrong, and that is the fourth time
+
+§56.4 said generalising `rep_iff` "needs a highest-differing-bit lemma about `Nat.xor` that the file
+does not have", and stopped there. The fact needed is:
+
+```
+u ^^^ (v + 2^n) = (u ^^^ v) + 2^n        (low against shifted keeps the top bit)
+(u + 2^n) ^^^ (v + 2^n) = u ^^^ v        (two shifted give a low)
+```
+
+— two lines each from `xor_pow_low` and associativity. **Fourth recorded cost estimate in this
+session about a proof I had not attempted** (§47 "dense rows ⇒ cancellation", §49.7 "needs
+`sumLtI_eq_at2`", §51.5 "needs the 4-cycle argument", and this). Three erred toward *too easy* and
+two toward *too hard*; the direction is not the pattern — the guess is. The rule stands: **do not
+record a difficulty you have not attempted.**
+
+The decision to stop the measurement sweep was still right; what was wrong was bundling a
+un-attempted-proof claim into it.
