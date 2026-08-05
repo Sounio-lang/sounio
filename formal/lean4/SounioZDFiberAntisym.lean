@@ -11897,6 +11897,181 @@ theorem deviation_descent (W V k : Nat) (hW : W < 2^(k+1)) (hW0 : W ≠ 0)
   rw [section_18_1 W k hW hW0, section_18_1 V k hV hV0, hfib]
   omega
 
+
+/-! ### Tier 56 — THE KRONECKER FOLD
+
+    `A1` — this file's headline lemma, `Asig (l ⊕ L_lo) y = − Asig l y` — says the vertices come in
+    pairs `{l, l ⊕ W}` on which the matrix is antisymmetric.  Folding on those pairs writes
+
+        A  =  M ⊗ K   (plus the isolated row/column),        K = [[1,-1],[-1,1]]
+
+    and since `tr(K²) = 4`, `tr(K³) = 8`, the traces halve exactly.  Rather than construct `M` —
+    which needs index surgery — the content is stated as the sum identity it amounts to: the
+    triangle summand is INVARIANT under `a ↦ a ⊕ W` in **each index separately** (the involution
+    flips exactly two of the three factors), so restricting all three indices to representatives
+    divides the sum by `2³ = 8`.
+
+    ⚠ **This holds for EVERY label.**  `section_18_1` is the low branch only; the deviation law's
+    open base case lives on the high branch, where this is the only exact factorisation available.
+    Measured against the contract at `n = 6,7,8`, all labels, 0 violations
+    (`scripts/research/zd_v1_spectral_fold_probe.py`), together with `tr(A²) = 4·tr(M²)` and the
+    fact that `M` is NONSINGULAR — so the fold is exactly one level deep and the `8^(n−j)` of the
+    deviation law is NOT iterated folding. -/
+
+/-! ## The Kronecker fold -/
+
+
+/-- Reindexing a full-range sum by the involution `a ↦ a ⊕ W` changes nothing. -/
+theorem sumLtI_xor (m W : Nat) (hW : W < 2^m) (f : Nat → Int) :
+    sumLtI (2^m) f = sumLtI (2^m) (fun a => f (a ^^^ W)) := by
+  refine sumLtI_reindex (2^m) (2^m) (fun a => a ^^^ W) f (fun a ha => ?_) (fun a b _ _ h => ?_)
+    (fun x hx hno => ?_)
+  · exact Nat.xor_lt_two_pow ha hW
+  · have := congrArg (· ^^^ W) h
+    simpa [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero] using this
+  · exact absurd (by simpa [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero] using rfl :
+      (x ^^^ W) ^^^ W = x) (hno (x ^^^ W) (Nat.xor_lt_two_pow hx hW))
+
+/-- **Each index halves.**  If the summand is invariant under `a ↦ a ⊕ W`, the full sum is twice
+    the sum over representatives (`a < a ⊕ W` picks exactly one of each pair). -/
+theorem sumLtI_halve (m W : Nat) (hW : W < 2^m) (hW0 : W ≠ 0) (f : Nat → Int)
+    (hinv : ∀ a, a < 2^m → f (a ^^^ W) = f a) :
+    sumLtI (2^m) f = 2 * sumLtI (2^m) (fun a => if a < a ^^^ W then f a else 0) := by
+  have hne : ∀ a, a ≠ a ^^^ W := by
+    intro a e
+    apply hW0
+    have h : a ^^^ a = a ^^^ (a ^^^ W) := by rw [← e]
+    rw [Nat.xor_self, ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor] at h
+    omega
+  have hcc : ∀ a, (a ^^^ W) ^^^ W = a := by
+    intro a; rw [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+  have hsplit : sumLtI (2^m) f
+      = sumLtI (2^m) (fun a => if a < a ^^^ W then f a else 0)
+      + sumLtI (2^m) (fun a => if a < a ^^^ W then 0 else f a) := by
+    rw [← sumLtI_add]
+    exact sumLtI_congr _ _ _ (fun a _ => by by_cases h : a < a ^^^ W <;> simp [h])
+  have hflip : sumLtI (2^m) (fun a => if a < a ^^^ W then 0 else f a)
+      = sumLtI (2^m) (fun a => if a < a ^^^ W then f a else 0) := by
+    rw [sumLtI_xor m W hW (fun a => if a < a ^^^ W then 0 else f a)]
+    refine sumLtI_congr _ _ _ (fun a ha => ?_)
+    simp only [hcc]
+    by_cases h : a < a ^^^ W
+    · rw [if_pos h, if_neg (by omega), hinv a ha]
+    · rw [if_neg h, if_pos (by have := hne a; omega)]
+  rw [hsplit, hflip]
+  omega
+
+/-- `A1` without side conditions: on the boundary (`l` or `y` in `{0, W}`) both sides vanish. -/
+theorem A1_full (l y W n : Nat) (hl : l < 2^(n+1)) (hy : y < 2^(n+1)) (hW : W < 2^(n+1))
+    (hW0 : W ≠ 0) : Asig (l ^^^ W) y W n = - Asig l y W n := by
+  have hcc : ∀ x, (x ^^^ W) ^^^ W = x := by
+    intro x; rw [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+  have hlt : ∀ x, x < 2^(n+1) → x ^^^ W < 2^(n+1) := fun x hx => Nat.xor_lt_two_pow hx hW
+  have zrow : ∀ x, x < 2^(n+1) → Asig 0 x W n = 0 := fun x hx => Asig_zero_row x W n hx hW hW0
+  have zcol : ∀ x, x < 2^(n+1) → Asig x 0 W n = 0 := fun x hx => Asig_zero_col x W n hx hW hW0
+  have irow : ∀ x, x < 2^(n+1) → Asig W x W n = 0 := by
+    intro x hx
+    by_cases h0 : x = 0
+    · rw [h0]; exact zcol W hW
+    by_cases hx2 : x = W
+    · rw [hx2]; exact Asig_isolated_diag W n hW hW0
+    · exact Asig_isolated_row x W n hx hW h0 hW0 (fun e => hx2 (xor_zero_eq _ _ e))
+  have icol : ∀ x, x < 2^(n+1) → Asig x W W n = 0 := by
+    intro x hx
+    by_cases h0 : x = 0
+    · rw [h0]; exact zrow W hW
+    by_cases hx2 : x = W
+    · rw [hx2]; exact Asig_isolated_diag W n hW hW0
+    · exact Asig_isolated x W n hx hW h0 hW0 (fun e => hx2 (xor_zero_eq _ _ e))
+  by_cases hl0 : l = 0
+  · rw [hl0, Nat.zero_xor, zrow y hy, irow y hy]; omega
+  by_cases hlW : l = W
+  · rw [hlW, Nat.xor_self, zrow y hy, irow y hy]; omega
+  by_cases hy0 : y = 0
+  · rw [hy0, zcol _ (hlt l hl), zcol l hl]; omega
+  by_cases hyW : y = W
+  · rw [hyW, icol _ (hlt l hl), icol l hl]; omega
+  · exact A1 l y W n hl hy hW hl0 hy0
+      (fun e => hlW (xor_zero_eq _ _ e)) (fun e => hyW (xor_zero_eq _ _ e))
+
+theorem A1_full' (l y W n : Nat) (hl : l < 2^(n+1)) (hy : y < 2^(n+1)) (hW : W < 2^(n+1))
+    (hW0 : W ≠ 0) : Asig l (y ^^^ W) W n = - Asig l y W n := by
+  have hlt : y ^^^ W < 2^(n+1) := Nat.xor_lt_two_pow hy hW
+  rw [Asig_symm_full l (y ^^^ W) W n hl hlt hW hW0, A1_full y l W n hy hl hW hW0,
+      Asig_symm_full y l W n hy hl hW hW0]
+
+/-- **The triangle summand is invariant under `a ↦ a ⊕ W` in EACH index** — the involution flips
+    exactly two of the three factors, so the signs cancel.  This is the whole content of the
+    Kronecker fold `A = M ⊗ [[1,-1],[-1,1]]`. -/
+theorem tri_summand_inv (W n a b c : Nat) (ha : a < 2^(n+1)) (hb : b < 2^(n+1))
+    (hc : c < 2^(n+1)) (hW : W < 2^(n+1)) (hW0 : W ≠ 0) :
+    Asig (a ^^^ W) b W n * (Asig b c W n * Asig c (a ^^^ W) W n)
+      = Asig a b W n * (Asig b c W n * Asig c a W n) := by
+  rw [A1_full a b W n ha hb hW hW0, A1_full' c a W n hc ha hW hW0]
+  grind
+
+/-- **THE KRONECKER FOLD, as a trace identity.**  `A = M ⊗ [[1,-1],[-1,1]]` up to the isolated
+    row/column, and `tr(K³) = 8`; stated here as: restricting all three indices to the
+    representatives of `l ↦ l ⊕ W` divides the triangle sum by exactly `8`.  Valid for EVERY
+    label — unlike §18.1, which is the low branch only. -/
+theorem tri3_kron (W n : Nat) (hW : W < 2^(n+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(n+1)) (fun a => sumLtI (2^(n+1)) (fun b => sumLtI (2^(n+1)) (fun c =>
+        Asig a b W n * (Asig b c W n * Asig c a W n))))
+      = 8 * sumLtI (2^(n+1)) (fun a => if a < a ^^^ W then
+          sumLtI (2^(n+1)) (fun b => if b < b ^^^ W then
+            sumLtI (2^(n+1)) (fun c => if c < c ^^^ W then
+              Asig a b W n * (Asig b c W n * Asig c a W n) else 0) else 0) else 0) := by
+  have hcc : ∀ x, (x ^^^ W) ^^^ W = x := by
+    intro x; rw [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+  -- the summand is invariant in each index separately
+  have invA : ∀ a b c, a < 2^(n+1) → b < 2^(n+1) → c < 2^(n+1) →
+      Asig (a ^^^ W) b W n * (Asig b c W n * Asig c (a ^^^ W) W n)
+        = Asig a b W n * (Asig b c W n * Asig c a W n) :=
+    fun a b c ha hb hc => tri_summand_inv W n a b c ha hb hc hW hW0
+  have invB : ∀ a b c, a < 2^(n+1) → b < 2^(n+1) → c < 2^(n+1) →
+      Asig a (b ^^^ W) W n * (Asig (b ^^^ W) c W n * Asig c a W n)
+        = Asig a b W n * (Asig b c W n * Asig c a W n) := by
+    intro a b c ha hb hc
+    rw [A1_full' a b W n ha hb hW hW0, A1_full b c W n hb hc hW hW0]; grind
+  have invC : ∀ a b c, a < 2^(n+1) → b < 2^(n+1) → c < 2^(n+1) →
+      Asig a b W n * (Asig b (c ^^^ W) W n * Asig (c ^^^ W) a W n)
+        = Asig a b W n * (Asig b c W n * Asig c a W n) := by
+    intro a b c ha hb hc
+    rw [A1_full' b c W n hb hc hW hW0, A1_full c a W n hc ha hW hW0]; grind
+  -- step 1: for each a and b, the c-sum halves
+  have hC : ∀ a b, a < 2^(n+1) → b < 2^(n+1) →
+      sumLtI (2^(n+1)) (fun c => Asig a b W n * (Asig b c W n * Asig c a W n))
+        = 2 * sumLtI (2^(n+1)) (fun c => if c < c ^^^ W then
+            Asig a b W n * (Asig b c W n * Asig c a W n) else 0) :=
+    fun a b ha hb => sumLtI_halve (n+1) W hW hW0 _ (fun c hc => invC a b c ha hb hc)
+  -- step 2: for each a, the b-sum halves
+  have hB : ∀ a, a < 2^(n+1) →
+      sumLtI (2^(n+1)) (fun b => sumLtI (2^(n+1)) (fun c =>
+          Asig a b W n * (Asig b c W n * Asig c a W n)))
+        = 4 * sumLtI (2^(n+1)) (fun b => if b < b ^^^ W then
+            sumLtI (2^(n+1)) (fun c => if c < c ^^^ W then
+              Asig a b W n * (Asig b c W n * Asig c a W n) else 0) else 0) := by
+    intro a ha
+    rw [sumLtI_congr (2^(n+1)) _ _ (fun b hb => hC a b ha hb), sumLtI_mul,
+        sumLtI_halve (n+1) W hW hW0 _ (fun b hb => by
+          refine sumLtI_congr _ _ _ (fun c hc => ?_)
+          by_cases h : c < c ^^^ W
+          · rw [if_pos h, if_pos h, invB a b c ha hb hc]
+          · rw [if_neg h, if_neg h])]
+    omega
+  -- step 3: the a-sum halves
+  rw [sumLtI_congr (2^(n+1)) _ _ (fun a ha => hB a ha), sumLtI_mul,
+      sumLtI_halve (n+1) W hW hW0 _ (fun a ha => by
+        refine sumLtI_congr _ _ _ (fun b hb => ?_)
+        by_cases h : b < b ^^^ W
+        · rw [if_pos h, if_pos h]
+          refine sumLtI_congr _ _ _ (fun c hc => ?_)
+          by_cases h2 : c < c ^^^ W
+          · rw [if_pos h2, if_pos h2, invA a b c ha hb hc]
+          · rw [if_neg h2, if_neg h2]
+        · rw [if_neg h, if_neg h])]
+  omega
+
 end SounioZDFiberAntisym
 
 
