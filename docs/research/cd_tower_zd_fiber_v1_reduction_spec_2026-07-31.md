@@ -4162,10 +4162,48 @@ measured, and the measurement is what caught it. **A first version of this parag
 damage was "exactly the diagonal"** — that was measured about `P1` alone; the index-0 row and column
 differ too, because both `hi_lo` lemmas exclude the index 0.
 
-**Status of (III).** Still reduced, not proven. What moved: the box's variation is no longer an
-unrelated unknown but the level-below's variation plus three `P`-terms; `P` is a Seidel matrix whose
-cubic trace is a two-graph count; and the mask is gone from the object entirely. What has not been
-attempted: the fibre variation of `tr(Alo² P)` and `tr(Alo P²)`, and the diagonal correction that
-would link the two levels' polynomial forms. No difficulty is recorded for either.
+### 57.8 — Tier 63: the diagonal correction, and the refuted corollary comes back exact
+
+The correction is one line. `P1` is `1` on the **whole** diagonal — `P1_diag` off the isolated
+corner, and at the corner the computation already inside `Asig_isolated_diag` — and `P3` is `−1`
+there. So
+
+| | | |
+|---|---|---|
+| `P1_diag_full` | `P1 l l Llo n = 1` | `l ≠ 0` only |
+| `diag_sum_zero` | `P1 + P3 = 0` on the diagonal | ← the combination `A_σ` is built from |
+| `diag_diff_two` | `P1 − P3 = 2` on the diagonal | ← the combination the level link needs |
+| `P1_add_P3_zero_row` / `_col` | `P1 + P3 = 0` on the index-`0` line | |
+
+**That asymmetry is the whole bug.** `2·A_σ = −(P1+P3)`, and the sum vanishes exactly where `A_σ`
+does — the diagonal and the index-`0` line — so masking `P1+P3` is a no-op. The box's copy needs
+`P1−P3`, which is `2` at each of the `2^(n+1)−1` diagonal entries and `±2` on the index-`0` line,
+and `tri3` sums over both loci. All five statements are Lean theorems, kernel-clean.
+
+With the mask put back, the corollary refuted in §57.7 is **exact**, 0 violations at `m = 2,3,4`,
+every label — writing `X̃` for `X` zeroed on the diagonal and on the index-`0` line:
+
+    8·t3(A_lo)  = − tri3(P1̃ + P3̃)        (the mask is a no-op here)
+    8·t3(A_box) =   tri3(P1̃ − P3̃)        (the mask is load-bearing here)
+    4·(t3(A_lo) + t3(A_box)) = − ( tri3(P3̃) + 3·tri3m(P3̃, P1̃, P1̃) )
+
+**What that buys.** The deviation law now reads entirely inside level `m`, on two Seidel matrices:
+
+    D[tri3(P3̃)] + 3·D[tri3m(P3̃,P1̃,P1̃)] = −4·(−27·8^(n−j)·[j,3]₂)     0 viol, m = 3,4,5
+
+and measuring the two terms separately: **every label with `j ≥ 3` moves, every label with `j < 3`
+does not, and off the maximal seam the two deviations are EQUAL**, each `= 27·8^(n−j)·[j,3]₂`. The
+single exception at each level is `W = 2^m`, where they differ (`m = 3`: `2016` vs `1632`; `m = 4`:
+`27936` vs `25248`; `m = 5`: `277920` vs `264480` — the identity still holds, the split does not).
+
+So the law is now equivalent to a statement about **one** moment of **one** Seidel matrix,
+`tri3(P3̃)` — i.e. about the two-graph of `P3` alone, with no `P1` and no mask. `tri3(P3̃)` takes
+only `2^(m−2)` distinct values per level.
+
+**Status of (III).** Still reduced, not proven. What moved this round: the diagonal correction is a
+theorem, the level-linking corollary is exact, and the target has narrowed from "the box's triangle
+count" to "the two-graph count of `P3`". What has not been attempted: `D[tri3(P3̃)] = 27·8^(n−j)[j,3]₂`
+itself, the maximal-seam exception, and the fibre variation of `tr(Alo²P)` / `tr(AloP²)`. No
+difficulty is recorded for any of them.
 
 **(III) is still reduced, not proven.**

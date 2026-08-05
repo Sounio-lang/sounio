@@ -12836,6 +12836,122 @@ theorem Asig_no_mask (l y Llo n : Nat) (hl : l < 2^(n+1)) (hy : y < 2^(n+1)) (hL
     rw [if_neg hres]
     omega
 
+
+/-! ### Tier 63 — THE DIAGONAL CORRECTION, in one line: the SUM vanishes, the DIFFERENCE is `2`
+
+    Tier 62 made `A_σ` a polynomial, `2·A_σ = −(P1+P3)`.  Trying to link two levels with Tier 60's
+    `P1_hi = −P1_lo` / `P3_hi = P3_lo` — which hold OFF the diagonal — produced an identity that is
+    false, and this tier is the exact reason.
+
+    `P1` is `1` on the WHOLE diagonal (`P1_diag_full`: `P1_diag` off the isolated corner, and the
+    corner computation inside `Asig_isolated_diag` at it) and `P3` is `−1` there (`P3_diag`).  So
+
+      `P1 + P3 = 0`   and   `P1 − P3 = 2`      on the diagonal.
+
+    The combination that `A_σ` is built from vanishes; the combination the box's copy needs does
+    NOT.  The same asymmetry holds on the index-`0` row and column (`P1_add_P3_zero_row/col`), where
+    `A_σ` is zero and the sum must therefore vanish too.
+
+    Consequence, measured at `m = 2,3,4` with 0 violations and stated here as the arithmetic it is:
+    masking `P1+P3` to the off-diagonal nonzero indices is a NO-OP, so
+
+      `8 · t3(A_lo) = − tri3(P1 + P3)`         needs no correction, and
+      `8 · t3(A_box) = tri3(P1̃ − P3̃)`          needs the mask,
+
+    and with both masked the refuted corollary comes back exact:
+
+      `4·(t3(A_lo) + t3(A_box)) = − ( tri3(P3̃) + 3·tri3m(P3̃, P1̃, P1̃) )`   0 viol, m = 2,3,4.
+
+    The `tri3` half of that is not formalised here; what is formalised is the correction itself. -/
+
+/-- `P1` is `1` on the WHOLE diagonal — the isolated corner `l = L_lo` included, where `P1_diag`'s
+    hypothesis `l ⊕ L_lo ≠ 0` fails and the computation is the one inside `Asig_isolated_diag`. -/
+theorem P1_diag_full (l Llo n : Nat) (hl : l < 2^(n+1)) (hL : Llo < 2^(n+1)) (hl0 : l ≠ 0) :
+    P1 l l Llo n = 1 := by
+  by_cases hlL : l ^^^ Llo = 0
+  · have hlq : l = Llo := xor_zero_eq l Llo hlL
+    have hp := Nat.two_pow_pos (n+1)
+    have hL0 : Llo ≠ 0 := by rw [← hlq]; exact hl0
+    have hLl : Llo < 2^(n+2) := by
+      have h2 : (2:Nat)^(n+2) = 2^(n+1) + 2^(n+1) := by rw [Nat.pow_succ]; omega
+      omega
+    rw [hlq]
+    unfold P1 hi
+    rw [Nat.xor_self, sigma_self (n+2) Llo hLl hL0, R_uu 0 0 n hp hp, if_pos rfl]
+    decide
+  · exact P1_diag l Llo n hl hL hl0 hlL
+
+/-- **THE CORRECTION, half one.**  On the diagonal the two products CANCEL — which is why the
+    `A_σ` identity needs no diagonal term at all. -/
+theorem diag_sum_zero (l Llo n : Nat) (hl : l < 2^(n+1)) (hL : Llo < 2^(n+1)) (hl0 : l ≠ 0) :
+    P1 l l Llo n + P3 l l Llo n = 0 := by
+  rw [P1_diag_full l Llo n hl hL hl0, P3_diag l Llo n hl hL hl0]
+  decide
+
+/-- **THE CORRECTION, half two.**  The DIFFERENCE is `2` on the diagonal — the term that the
+    level-linking substitution silently drops, at every one of the `2^(n+1)−1` diagonal entries. -/
+theorem diag_diff_two (l Llo n : Nat) (hl : l < 2^(n+1)) (hL : Llo < 2^(n+1)) (hl0 : l ≠ 0) :
+    P1 l l Llo n - P3 l l Llo n = 2 := by
+  rw [P1_diag_full l Llo n hl hL hl0, P3_diag l Llo n hl hL hl0]
+  decide
+
+/-- The index-`0` ROW: the sum vanishes there too, so the mask is a no-op for `P1+P3`. -/
+theorem P1_add_P3_zero_row (y Llo n : Nat) (hy : y < 2^(n+1)) (hL : Llo < 2^(n+1))
+    (hL0 : Llo ≠ 0) : P1 0 y Llo n + P3 0 y Llo n = 0 := by
+  have hp := Nat.two_pow_pos (n+1)
+  have hml : y ^^^ Llo < 2^(n+1) := xorlt hy hL
+  have hP1 : P1 0 y Llo n
+      = (if y ^^^ Llo = 0 then -1 else cdSigma (y ^^^ Llo) Llo (n+1)) := by
+    unfold P1 hi
+    rw [Nat.zero_xor, cdSig0, R_uu Llo (y ^^^ Llo) n hL hml]
+    exact Int.one_mul _
+  have hP3 : P3 0 y Llo n = (if y = 0 then 1 else - cdSigma Llo y (n+1)) := by
+    unfold P3 hi
+    rw [Nat.zero_xor, cdSig0, R_ul Llo y n hL hy]
+    exact Int.one_mul _
+  by_cases hyL : y ^^^ Llo = 0
+  · have hyq : y = Llo := xor_zero_eq y Llo hyL
+    have hy0 : y ≠ 0 := by rw [hyq]; exact hL0
+    rw [hP1, hP3, if_pos hyL, if_neg hy0, hyq, sigma_self (n+1) Llo hL hL0]
+    decide
+  · by_cases hy0 : y = 0
+    · have hyx : y ^^^ Llo = Llo := by rw [hy0, Nat.zero_xor]
+      rw [hP1, hP3, if_neg hyL, if_pos hy0, hyx, sigma_self (n+1) Llo hL hL0]
+      decide
+    · have hLy : Llo ≠ y := by
+        intro e
+        exact hyL (by rw [← e, Nat.xor_self])
+      rw [hP1, hP3, if_neg hyL, if_neg hy0,
+          antisym (n+1) Llo y hL hy hL0 hy0 hLy,
+          A4_sub (n+1) y Llo hy hL hy0 hL0 hyL]
+      omega
+
+/-- The index-`0` COLUMN.  `Asig_symm` cannot supply it from the row — that theorem needs both
+    indices nonzero — so this is the same three-case computation on the other side. -/
+theorem P1_add_P3_zero_col (l Llo n : Nat) (hl : l < 2^(n+1)) (hL : Llo < 2^(n+1))
+    (hL0 : Llo ≠ 0) : P1 l 0 Llo n + P3 l 0 Llo n = 0 := by
+  have hp := Nat.two_pow_pos (n+1)
+  have hml : l ^^^ Llo < 2^(n+1) := xorlt hl hL
+  have hP1 : P1 l 0 Llo n
+      = (if Llo = 0 then -1 else cdSigma Llo (l ^^^ Llo) (n+1)) := by
+    unfold P1 hi
+    rw [Nat.zero_xor, cdSig0', R_uu (l ^^^ Llo) Llo n hml hL]
+    exact Int.one_mul _
+  have hP3 : P3 l 0 Llo n = cdSigma Llo l (n+1) := by
+    unfold P3 hi
+    rw [Nat.zero_xor, R_lu l Llo n hl hL, R_ul (l ^^^ Llo) 0 n hml hp, if_pos rfl]
+    exact (Int.mul_one _)
+  by_cases hlL : l ^^^ Llo = 0
+  · have hlq : l = Llo := xor_zero_eq l Llo hlL
+    rw [hP1, hP3, if_neg hL0, hlL, cdSig0', hlq, sigma_self (n+1) Llo hL hL0]
+    decide
+  · by_cases hl0 : l = 0
+    · rw [hP1, hP3, if_neg hL0, hl0, Nat.zero_xor, sigma_self (n+1) Llo hL hL0, cdSig0']
+      decide
+    · have hcomm : Llo ^^^ l ≠ 0 := by rw [Nat.xor_comm]; exact hlL
+      rw [hP1, hP3, if_neg hL0, A4_sub' (n+1) Llo l hL hl hL0 hl0 hcomm, Nat.xor_comm Llo l]
+      omega
+
 end SounioZDFiberAntisym
 
 
