@@ -23,6 +23,16 @@ C5  IS THERE A HIGH-BRANCH TWIN OF §18.1?  For W with top bit n-2, write W_lo =
     ask whether t3(n,W) - 8*t3(n-1,W_lo) - 24*t2(n-1,W_lo) is a constant of the level alone.
     §18.1 is the LOW branch; the base case of the deviation lives on the HIGH one, where no
     recursion is on the books.
+
+C6  THE THIRD INVARIANT (§54.3).  `Ncnt_hi` reads N(high) = 4e^2 - 6e - 2 - 4*N(child): the high
+    branch carries a MINUS, i.e. it complements rather than blows up, and a complement's triangle
+    count needs a third moment beyond the edge count.  Tested, all REFUTED at n = 7,8,9:
+      - exact affine t3(n,W) = a*t3' + b*t2' + c for ANY (a,b,c)             -- none
+      - the same plus sum of squared degrees, or cubed degrees, or a signed 2-path count -- none
+      - the natural "complement" corrections 1^T A 1, 1^T A^2 1, 1^T A^3 1 and the third moment
+        of the signed row sums are all LABEL-INDEPENDENT CONSTANTS here, so they carry no
+        information at all and cannot be the missing term.
+    What IS true: t3 on the high labels is exactly a function of (g, lsb) -- 0 splits.
 """
 
 import sys

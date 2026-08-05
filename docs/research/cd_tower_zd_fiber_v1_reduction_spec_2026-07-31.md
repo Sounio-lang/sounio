@@ -3574,3 +3574,49 @@ recorded so the next rung does not restart from them.
 
 **(III) is still reduced, not proven.** What is open is now exactly: **the base value for a general
 seam at its own top-bit level**. Its `n`-dependence is a theorem; its `g`-independence is not.
+
+### 54.3 — the third invariant: the natural candidates are REFUTED, and the target is reformulated
+
+`Ncnt_hi` (Tier 31) is the tr(A²) high recursion, and it reads
+
+```
+N(m+2, W+e) = 4e² − 6e − 2 − 4·N(m+1, W),      e = 2^(m+1)
+```
+
+— **a minus**. The low branch is `+4` (`Ncnt_low`), and `+4 = tr(J₂²)`, `+8 = tr(J₂³)`: a Kronecker
+blow-up. `−4` is not `tr(K²)` for any real sign matrix `K`, so the high branch **complements**
+rather than blows up. A complement's triangle count needs a third moment beyond the edge count, so
+that is where the third invariant should be.
+
+**It is not there.** Measured at `n = 7,8,9` over every high label:
+
+| candidate | result |
+|---|---|
+| exact affine `t3(n,W) = a·t3′ + b·t2′ + c`, **any** `(a,b,c)` | **none** (exact rational search) |
+| the same plus `Σ deg²`, or `Σ deg³`, or a signed 2-path count | **none** |
+| `1ᵀA1`, `1ᵀA²1`, `1ᵀA³1`, third moment of the signed row sums | **label-independent constants** — they carry no information at all |
+
+That last row is the informative one: the corrections a complement formula would need are *identically
+constant* on this family, so the analogy that motivated the search does not transfer. The
+two-term refutation is now direct (an exact search found no coefficients), not only the growth
+argument of §54.2.
+
+**What the measurements did establish, and it reframes the target.** `t3(n,·)` restricted to the
+high labels is **exactly a function of `(g, lsb)`** — 0 splits at `n = 7,8,9`. Since the fibre
+reference `8g+1` is low, its own `g`-dependence descends by §18.1. So the open content of the
+deviation law is not "a missing recursion" but:
+
+> **`t3(n, ·)` is additively separable in `(g, j)` on the even-parity fibres:
+> `t3(g, j) = f₀(g) + δ(n, j)`.**
+
+That is a sharper statement than "the base value does not depend on `g`", and it is the shape any
+proof would have to produce: not a recursion, a **separation of variables**.
+
+⚠ **Scope:** a handful of candidate invariants were refuted, not all of them. "No third invariant
+exists" is NOT claimed.
+
+⚠ **I made the parity-keying mistake a SECOND time.** Grouping `t3(W) − t3(8g+1)` by `lsb` alone
+showed 1/2/3 splits at `n = 7,8,9` and looked like a failure of separability; the splits are just the
+two `popcount(g)` parities sharing an `lsb`. Same error as §54.2, in a fresh check. Recording the
+repeat: when a check on this law reports splits, **look for the missing parity key before looking
+for a finding.**
