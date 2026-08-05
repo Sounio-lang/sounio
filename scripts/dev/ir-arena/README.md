@@ -85,9 +85,19 @@ comparison was vacuous. Always confirm `optimize=1` via
 `SOUNIO_REBRACKET_TRACE=1` before reading a parity number.
 
 The arena capacity risk — functions × passes × length against 1,048,576 slots
-with no reclamation — is still **untested**, because codegen walls out first.
-`ir_arena_mark` / `ir_arena_release` exist and are called from nowhere; they are
-the intended fix when it bites.
+with no reclamation — is **retired at realistic scale**. What looked like a
+separate "codegen wall" was rc=12 itself; with that fixed, a generated
+60-function × 100-statement program (6,304 lines) compiles clean, runs, and
+returns 56 — the same as `origin/main` — with no violation, capacity error or
+quarantine line in the log. `ir_arena_mark` / `ir_arena_release` remain unused
+and stay the intended fix if a much larger input ever does exhaust it.
+
+**Coverage gap worth naming.** `ir_arena_swap_slots` is the one primitive here
+written from scratch, and nothing in the evidence above demonstrably executes it:
+its two call sites are `ocp_licm`'s hoist and the sink-loads swap, which need
+specific IR shapes that a 24-file sample and a generated arithmetic stress are
+unlikely to produce. Gate green plus 18 parity matches does **not** cover it.
+A witness that forces both shapes is the honest next test.
 
 | tree | errors |
 |---|---|
