@@ -22,7 +22,11 @@ TMPDIR=$(mktemp -d /tmp/san-large-gpu.XXXXXX)
 trap 'rm -rf "$TMPDIR"' EXIT
 
 mkdir -p "$TMPDIR/work"
-cp "$PAYLOAD_DIR/suffering_aware_large_architecture.py" "$TMPDIR/work/"
+if [[ "${SAN_LARGE_V2:-0}" == "1" ]]; then
+  cp "$PAYLOAD_DIR/suffering_aware_large_architecture_v2.py" "$TMPDIR/work/suffering_aware_large_architecture.py"
+else
+  cp "$PAYLOAD_DIR/suffering_aware_large_architecture.py" "$TMPDIR/work/"
+fi
 cp -r "$DATA_SRC" "$TMPDIR/work/$DATA_DIR_NAME"
 if [[ -f "$PAYLOAD_DIR/corpus_snapshot_v2000.npz" ]]; then
   cp "$PAYLOAD_DIR/corpus_snapshot_v2000.npz" "$TMPDIR/work/"
@@ -88,6 +92,9 @@ export SAN_LARGE_TAU_VIT="${SAN_LARGE_TAU_VIT:-0.251}"
 export SAN_LARGE_TAU_GPT="${SAN_LARGE_TAU_GPT:-0.165}"
 export SAN_LARGE_BATCH="${SAN_LARGE_BATCH:-128}"
 export SAN_LARGE_GRAD_ACCUM="${SAN_LARGE_GRAD_ACCUM:-1}"
+export SAN_LARGE_GRAD_ANALYSIS="${SAN_LARGE_GRAD_ANALYSIS:-0}"
+export SAN_LARGE_DISTILLW="${SAN_LARGE_DISTILLW:-0.5}"
+export SAN_LARGE_V2="${SAN_LARGE_V2:-0}"
 
 LOG="$OUT_DIR/${LEG}.log"
 python3 suffering_aware_large_architecture.py 2>&1 | tee "$LOG"

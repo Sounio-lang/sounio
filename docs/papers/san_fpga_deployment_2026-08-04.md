@@ -533,6 +533,40 @@ This closes the loop between training (§4.2), confidence extraction, and FPGA
 audit: the trunk runs on the host, the card decides and meters, and the
 orchestration script verifies that the two agree exactly.
 
+### 4.8 SAN-v2: learned gating and stronger exit heads
+
+To test whether the SAN's accuracy deficit at high τ is an architecture problem
+or a training problem, we built SAN-v2 with three changes:
+
+1. **MLP exit heads** (two-layer GELU with residual) replacing the v1 linear
+   heads, giving each exit more capacity.
+2. **Learned gating network** (per-stage MLP + stage embedding) replacing the
+   fixed confidence threshold, letting the model learn *when* to exit.
+3. **Gradient instrumentation** measuring per-stage gradient norms during
+   training.
+
+**Gradient analysis (job 8622).** On the full CIFAR-10 run, the v1 SAN shows a
+clear pathology: trunk stage gradients grow 8–23× over 60 epochs while the
+final head grows only 5×, and the exit-head-to-final gradient ratio *falls*
+from 0.118 to 0.098. The exit heads are learning more slowly than the final
+head but still inject growing gradient into the trunk — they are both weak and
+interfering.
+
+**SAN-v2 result (job 8625).** With MLP heads and a learned gate, the SAN's
+final accuracy rises from 0.768 to **0.812** and S_m falls from 10 303 to
+**8 012 TMAC** (−22%). The learned gate, however, converges to exit_frac =
+1.000 — every sample exits at the first stage — so the model still does not
+reach τ = 0.85. The gate has learned to minimise FLOPs by always exiting early,
+which caps accuracy at the first-stage head's capacity.
+
+**What this tells us.** The SAN-v1 accuracy deficit is partly an architecture
+problem (weak linear heads), which MLP heads fix. But the deeper problem is
+that an unconstrained learned gate discovers the FLOP-minimising solution —
+always exit at the first stage — which is accuracy-capped. A usable SAN at high
+τ needs either (a) a gating penalty for early exits, (b) a curriculum that
+trains deep stages before allowing early exits, or (c) a gate constrained to
+match a target accuracy, not just a target FLOP count.
+
 ---
 
 ## 5 Discussion

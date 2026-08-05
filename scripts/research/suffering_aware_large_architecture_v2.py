@@ -177,6 +177,7 @@ DETACH_VIT = os.environ.get("SAN_LARGE_DETACH_VIT", "1") == "1"
 # reach the trunk, so epoch-0 exposure stays shared with the baselines.
 WARMUP_AUX = os.environ.get("SAN_LARGE_WARMUP_AUX", "1") == "1"
 AUX_W = float(os.environ.get("SAN_LARGE_AUXW", "1.0"))  # probe-head loss weight
+DISTILL_W = float(os.environ.get("SAN_LARGE_DISTILLW", "0.5"))  # distillation weight
 E_PER_FLOP = 4e-12      # J/FLOP, same convention as the machine-channel benchmark
 LR = 1e-3
 BATCH = int(os.environ.get("SAN_LARGE_BATCH", "128"))
@@ -643,9 +644,46 @@ class GPTTrunk(nn.Module):
 
 
 # ---------------- SAN wrappers (exit gates + metering) -----------------------
+class MLPExitHead(nn.Module):
+    """Two-layer MLP exit head with residual, replacing the v1 linear head."""
+
+    def __init__(self, cin, n_class, hidden=256):
+        super().__init__()
+        self.fc1 = nn.Linear(cin, hidden)
+        self.fc2 = nn.Linear(hidden, n_class)
+        self.proj = nn.Linear(cin, n_class)
+
+    def forward(self, x):
+        h = F.gelu(self.fc1(x))
+        return self.fc2(h) + self.proj(x)
+
+
+class GatingNetwork(nn.Module):
+    """Learned per-stage gate. Input: GAP features + stage embedding.
+    Output: scalar logit; samples leave when sigmoid(logit) > threshold.
+    A higher threshold makes the gate less aggressive, preventing premature
+    exit at the first stage (the SAN-v2 exit_frac=1.000 failure mode)."""
+
+    def __init__(self, cin, n_stages, hidden=128, threshold=0.7):
+        super().__init__()
+        self.stage_emb = nn.Parameter(torch.randn(n_stages, 16))
+        self.net = nn.Sequential(
+            nn.Linear(cin + 16, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, 1),
+        )
+        self.threshold = threshold
+
+    def forward(self, x, k):
+        n = x.shape[0]
+        emb = self.stage_emb[k].unsqueeze(0).expand(n, -1)
+        return self.net(torch.cat([x, emb], dim=1)).squeeze(-1)
+
+
 class SufferingAwareResNet(nn.Module):
-    """ResNet trunk (basic or bottleneck) with a per-stage exit head
-    (GAP + linear). kind='dense'/'earlystop' never runs the exit heads."""
+    """ResNet trunk (basic or bottleneck) with per-stage exit heads and a
+    learned gating network (SAN-v2). kind='dense'/'earlystop' never runs the
+    exit heads or the gate."""
 
     def __init__(self, blocks, width, kind, block_type="bottleneck"):
         super().__init__()
@@ -656,7 +694,9 @@ class SufferingAwareResNet(nn.Module):
         self.trunk = ResNetTrunk(blocks, width, block_type)
         self.n_stages = len(self.trunk.stages)
         self.exit_heads = nn.ModuleList(
-            [nn.Linear(c, N_CLASS) for c in self.trunk.channels])
+            [MLPExitHead(c, N_CLASS) for c in self.trunk.channels])
+        self.gates = nn.ModuleList(
+            [GatingNetwork(c, self.n_stages) for c in self.trunk.channels])
         self.final_head = nn.Linear(self.trunk.channels[-1], N_CLASS)
         self.meter = MachineMeter()
 
@@ -675,6 +715,7 @@ class SufferingAwareResNet(nn.Module):
         aux_records, final_record = [], None
         gated = use_exit_heads and self.kind == "san"
         aux_active = train and (gated or train_aux)
+        final_logits_for_distill = None
         for k in range(self.n_stages):
             if active.numel() == 0:
                 break
@@ -689,11 +730,11 @@ class SufferingAwareResNet(nn.Module):
                 head_in = head_in.detach()   # probe head: no trunk gradient
             logits_k = self.exit_heads[k](head_in)
             if train:
-                aux_records.append((active, logits_k))
+                aux_records.append((active, logits_k, k))
             if not gated:
                 continue
-            conf = torch.softmax(logits_k.detach(), dim=1).max(dim=1).values
-            leave = conf >= DELTA_RESNET
+            gate_logit = self.gates[k](head_in.detach(), k)
+            leave = torch.sigmoid(gate_logit) > self.gates[k].threshold
             if leave.any():
                 idx = active[leave]
                 out_logits[idx] = logits_k[leave]
@@ -708,7 +749,8 @@ class SufferingAwareResNet(nn.Module):
             out_logits[active] = final_logits
             if train:
                 final_record = (active, final_logits)
-        return out_logits, out_depth, per_stage_active, n_final, aux_records, final_record
+                final_logits_for_distill = final_logits.detach()
+        return out_logits, out_depth, per_stage_active, n_final, aux_records, final_record, final_logits_for_distill
 
     def forward_dense(self, x):
         """Every gate forced open: every sample traverses every stage AND
@@ -962,7 +1004,7 @@ def train_run(model, x_tr, y_tr, x_va, y_va, epochs, tau, tag, is_lm=False):
                 idx = schedule[epoch][b0:b0 + BATCH]
                 xb, yb = x_tr[idx], y_tr[idx]
                 micro = (xb.shape[0] == BATCH)
-                _, _, _, _, aux_records, final_record = model(
+                _, _, _, _, aux_records, final_record, final_distill = model(
                     xb, train=True, use_exit_heads=use_exits, train_aux=train_aux)
                 if not is_lm:
                     losses = []
@@ -970,9 +1012,8 @@ def train_run(model, x_tr, y_tr, x_va, y_va, epochs, tau, tag, is_lm=False):
                         f_idx, f_logits = final_record
                         losses.append(CE(f_logits, yb[f_idx]))
                     if aux_records:
-                        losses.append(AUX_W * torch.stack(
-                            [CE(a_logits, yb[a_idx])
-                             for a_idx, a_logits in aux_records]).mean())
+                        aux_losses = [CE(a_logits, yb[a_idx]) for a_idx, a_logits, k in aux_records]
+                        losses.append(AUX_W * torch.stack(aux_losses).mean())
                     loss = sum(losses)
                 else:
                     yg = yb[:, -g:]
@@ -1006,7 +1047,7 @@ def train_run(model, x_tr, y_tr, x_va, y_va, epochs, tau, tag, is_lm=False):
                 for e0 in range(0, x_va.shape[0], EVAL_BATCH):
                     e1 = e0 + EVAL_BATCH
                     xb = x_va[e0:e1]
-                    l, d, _, _, _, _ = model(xb, train=False, use_exit_heads=use_exits)
+                    l, d, _, _, _, _, _ = model(xb, train=False, use_exit_heads=use_exits)
                     vlogits_chunks.append(l)
                     vdepth_chunks.append(d)
                 vlogits = torch.cat(vlogits_chunks, dim=0)
@@ -1142,7 +1183,7 @@ def conservation_check(model, x_va, depth_units, is_lm=False):
     model.eval()
     model.meter = MachineMeter()
     with torch.no_grad():
-        vlogits_gated, vdepth, per_active, n_final, _, _ = model(x_va, train=False)
+        vlogits_gated, vdepth, per_active, n_final, _, _, _ = model(x_va, train=False)
     gated_flops = model.meter.flops
     with torch.no_grad():
         vlogits_dense, dense_meter = model.forward_dense(x_va)
