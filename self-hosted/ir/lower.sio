@@ -845,11 +845,12 @@ fn lowerer_seed_module_from_summary(lo_in: Lowerer, summary: &IrProgramSummary) 
         if ic > 0 {
             var ji: i64 = 0
             while ji < ic && ji < IR_MAX_INSTRS {
-                IR_INSTR_ARENA[(ir_region_base_write(&func.region) + (ji)) as usize] = IR_INSTR_ARENA[(ir_region_base_read(&(*summary.module).functions[i as usize].region) + (ji)) as usize]
+                IR_INSTR_ARENA[ir_region_slot_w(func.region, (ji)) as usize] = IR_INSTR_ARENA[ir_region_slot_r((*summary.module).functions[i as usize].region, (ji)) as usize]
                 ji = ji + 1
             }
             func.instr_count = ic
         }
+        if func.region.slot < 0 { ir_function_alloc_region(&! func) }
         (*module_box).functions[i as usize] = func
         i = i + 1
     }
@@ -1216,6 +1217,7 @@ fn lowerer_preseed_dep_items_into_acc_mut(
                                                 }
                                             }
                                         }
+                                        if fn_slot_sig.region.slot < 0 { ir_function_alloc_region(&! fn_slot_sig) }
                                         (*module_box_sig).functions[fn_id_sig as usize] = fn_slot_sig
                                         (*lo).module = module_box_sig
                                     }
@@ -1225,12 +1227,14 @@ fn lowerer_preseed_dep_items_into_acc_mut(
                                             var mbox_k = (*lo).module
                                             var slot_k = (*mbox_k).functions[fn_id_ps as usize]
                                             slot_k.compile_strategy = 6
+                                            if slot_k.region.slot < 0 { ir_function_alloc_region(&! slot_k) }
                                             (*mbox_k).functions[fn_id_ps as usize] = slot_k
                                             (*lo).module = mbox_k
                                         } else if visibility_to_bool(head.visibility) {
                                             var mbox_e = (*lo).module
                                             var slot_e = (*mbox_e).functions[fn_id_ps as usize]
                                             slot_e.compile_strategy = 7
+                                            if slot_e.region.slot < 0 { ir_function_alloc_region(&! slot_e) }
                                             (*mbox_e).functions[fn_id_ps as usize] = slot_e
                                             let exp_count = (*mbox_e).export_count
                                             if exp_count < 64 {
@@ -1265,6 +1269,7 @@ fn lowerer_preseed_dep_items_into_acc_mut(
                                         bss_slot.bss_size = bss_size
                                         bss_slot.hyper_algebra_kind = lower_typeexpr_bss_elem_size(&head.type_alias_ty)
                                         lower_apply_global_var_init(&! bss_slot, name)
+                                        if bss_slot.region.slot < 0 { ir_function_alloc_region(&! bss_slot) }
                                         (*mbox2).functions[bss_fn_id as usize] = bss_slot
                                         (*mbox2).bss_total_size = bss_off + aligned_size
                                         (*lo).module = mbox2
@@ -1480,11 +1485,12 @@ fn lowerer_new_from_program_summary_flat(summary: &IrProgramSummaryFlat, epistem
         if ic > 0 {
             var ji: i64 = 0
             while ji < ic && ji < IR_MAX_INSTRS {
-                IR_INSTR_ARENA[(ir_region_base_write(&func.region) + (ji)) as usize] = IR_INSTR_ARENA[(ir_region_base_read(&summary.module.functions[i as usize].region) + (ji)) as usize]
+                IR_INSTR_ARENA[ir_region_slot_w(func.region, (ji)) as usize] = IR_INSTR_ARENA[ir_region_slot_r(summary.module.functions[i as usize].region, (ji)) as usize]
                 ji = ji + 1
             }
             func.instr_count = ic
         }
+        if func.region.slot < 0 { ir_function_alloc_region(&! func) }
         (*module_box).functions[i as usize] = func
         i = i + 1
     }
@@ -1603,6 +1609,12 @@ fn lowerer_find_or_add_fn_id_mut(lo: &! Lowerer, name: Name) -> i64 with Mut, Pa
     let idx = (*module_box).fn_count
     var fn_slot = (*module_box).functions[idx as usize]
     fn_slot.name = name
+    // #1649: give this function its OWN region. It cannot be done in
+    // ir_empty_function(): `[ir_empty_function(); 2048]` evaluates once and
+    // copies, so every slot in a fresh module would share one region and the
+    // functions would overwrite each other's instructions.
+    ir_function_alloc_region(&! fn_slot)
+    if fn_slot.region.slot < 0 { ir_function_alloc_region(&! fn_slot) }
     (*module_box).functions[idx as usize] = fn_slot
     (*module_box).fn_count = idx + 1
     (*lo).module = module_box
@@ -1673,6 +1685,8 @@ fn lowerer_preseed_fn_signature_mut(
     fn_slot.instr_count = 0
     fn_slot.reg_count = 0
     fn_slot.label_count = 0
+    if fn_slot.region.slot < 0 { ir_function_alloc_region(&! fn_slot) }
+    if fn_slot.region.slot < 0 { ir_function_alloc_region(&! fn_slot) }
     (*module_box).functions[fn_id as usize] = fn_slot
     (*lo).module = module_box
 }
@@ -1863,6 +1877,7 @@ fn lowerer_preseed_external_bss_globals_mut(
                                     bss_slot.bss_size = bss_size
                                     bss_slot.hyper_algebra_kind = lower_typeexpr_bss_elem_size(&head.type_alias_ty)
                                     lower_apply_global_var_init(&! bss_slot, name)
+                                    if bss_slot.region.slot < 0 { ir_function_alloc_region(&! bss_slot) }
                                     (*mbox).functions[bss_fn_id as usize] = bss_slot
                                     (*mbox).bss_total_size = bss_off + aligned_size
                                     (*lo).module = mbox
@@ -2381,9 +2396,9 @@ fn lower_apply_global_var_init(slot: &! IrFunction, name: Name) with Mut, Div {
     if count > 1 {
         var j: i64 = 0
         while j < count && j < IR_MAX_INSTRS {
-            var instr = IR_INSTR_ARENA[(ir_region_base_read(&(*slot).region) + (j)) as usize]
+            var instr = IR_INSTR_ARENA[ir_region_slot_r((*slot).region, (j)) as usize]
             instr.imm_i64 = ast_global_var_init_nth(name, j)
-            IR_INSTR_ARENA[(ir_region_base_write(&(*slot).region) + (j)) as usize] = instr
+            IR_INSTR_ARENA[ir_region_slot_w((*slot).region, (j)) as usize] = instr
             j = j + 1
         }
         (*slot).instr_count = j
@@ -2448,6 +2463,7 @@ fn lowerer_preseed_program_items_mut(
                                             }
                                         }
                                     }
+                                    if fn_slot_sig.region.slot < 0 { ir_function_alloc_region(&! fn_slot_sig) }
                                     (*module_box_sig).functions[fn_id_sig as usize] = fn_slot_sig
                                     (*lo).module = module_box_sig
                                 }
@@ -2480,6 +2496,7 @@ fn lowerer_preseed_program_items_mut(
                                     bss_slot.bss_size = bss_size
                                     bss_slot.hyper_algebra_kind = lower_typeexpr_bss_elem_size(&head.type_alias_ty)
                                     lower_apply_global_var_init(&! bss_slot, name)
+                                    if bss_slot.region.slot < 0 { ir_function_alloc_region(&! bss_slot) }
                                     (*mbox2).functions[bss_fn_id as usize] = bss_slot
                                     (*mbox2).bss_total_size = bss_off + aligned_size
                                     (*lo).module = mbox2
@@ -2532,7 +2549,9 @@ fn ir_fast_summary_find_or_add_fn_id(module: &! IrModule, name: Name) -> i64 wit
         return -1
     }
     let idx = module_value.fn_count
-    module_value.functions[idx as usize] = ir_empty_function()
+    var fresh_ir_fn = ir_empty_function()
+    ir_function_alloc_region(&! fresh_ir_fn)
+    module_value.functions[idx as usize] = fresh_ir_fn
     module_value.functions[idx as usize].name = name
     module_value.functions[idx as usize].param_regs = [IR_INVALID_REG; 64]
     module_value.fn_count = idx + 1
@@ -2658,7 +2677,9 @@ fn ir_fast_summary_find_or_add_fn_id_owned(module: IrModule, name: Name) -> (IrM
         return (module_value, -1)
     }
     let idx = module_value.fn_count
-    module_value.functions[idx as usize] = ir_empty_function()
+    var fresh_ir_fn = ir_empty_function()
+    ir_function_alloc_region(&! fresh_ir_fn)
+    module_value.functions[idx as usize] = fresh_ir_fn
     module_value.functions[idx as usize].name = name
     module_value.functions[idx as usize].param_regs = [IR_INVALID_REG; 64]
     module_value.fn_count = idx + 1
@@ -2918,6 +2939,7 @@ fn ir_fast_summary_preseed_items_seed_owned(
                                         bss_slot.bss_size = bss_size
                                         bss_slot.hyper_algebra_kind = lower_typeexpr_bss_elem_size(&item.type_alias_ty)
                                         lower_apply_global_var_init(&! bss_slot, name)
+                                        if bss_slot.region.slot < 0 { ir_function_alloc_region(&! bss_slot) }
                                         bss_mod.functions[bss_fid as usize] = bss_slot
                                         bss_mod.fn_count = bss_fid + 1
                                         bss_mod.bss_total_size = bss_mod.bss_total_size + aligned_size
@@ -2985,7 +3007,9 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                             }
                             if fn_id < 0 && module.fn_count < IR_MAX_FUNCS {
                                 fn_id = module.fn_count
-                                module.functions[fn_id as usize] = ir_empty_function()
+                                var fresh_ir_fn = ir_empty_function()
+                                ir_function_alloc_region(&! fresh_ir_fn)
+                                module.functions[fn_id as usize] = fresh_ir_fn
                                 module.functions[fn_id as usize].name = name
                                 module.functions[fn_id as usize].param_regs = [IR_INVALID_REG; 64]
                                 module.fn_count = fn_id + 1
@@ -3031,6 +3055,7 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                 bss_slot.bss_size = bss_size
                                 bss_slot.hyper_algebra_kind = lower_typeexpr_bss_elem_size(&item.type_alias_ty)
                                 lower_apply_global_var_init(&! bss_slot, name)
+                                if bss_slot.region.slot < 0 { ir_function_alloc_region(&! bss_slot) }
                                 bss_mod.functions[bss_fid as usize] = bss_slot
                                 bss_mod.fn_count = bss_fid + 1
                                 bss_mod.bss_total_size = bss_mod.bss_total_size + aligned_size
@@ -3076,7 +3101,9 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                                     }
                                                     if fn_id < 0 && module.fn_count < IR_MAX_FUNCS {
                                                         fn_id = module.fn_count
-                                                        module.functions[fn_id as usize] = ir_empty_function()
+                                                        var fresh_ir_fn = ir_empty_function()
+                                                        ir_function_alloc_region(&! fresh_ir_fn)
+                                                        module.functions[fn_id as usize] = fresh_ir_fn
                                                         module.functions[fn_id as usize].name = mangled
                                                         module.functions[fn_id as usize].param_regs = [IR_INVALID_REG; 64]
                                                         module.fn_count = fn_id + 1
@@ -3357,7 +3384,7 @@ fn lowerer_lower_fn_params_mut(
                     var current_func_box2 = (*lo).current_func
                     let instr_count = (*current_func_box2).instr_count
                     if instr_count < IR_MAX_INSTRS {
-                        IR_INSTR_ARENA[(ir_region_base_write(&(*current_func_box2).region) + (instr_count)) as usize] = ir_mark_float_reg(preg)
+                        IR_INSTR_ARENA[ir_region_slot_w((*current_func_box2).region, (instr_count)) as usize] = ir_mark_float_reg(preg)
                         (*current_func_box2).instr_count = instr_count + 1
                         (*lo).current_func = current_func_box2
                     } else {
@@ -8631,7 +8658,7 @@ impl Lowerer {
         var current_func_box = lo.current_func
         let instr_count = (*current_func_box).instr_count
         if instr_count < IR_MAX_INSTRS {
-            IR_INSTR_ARENA[(ir_region_base_write(&(*current_func_box).region) + (instr_count)) as usize] = instr
+            IR_INSTR_ARENA[ir_region_slot_w((*current_func_box).region, (instr_count)) as usize] = instr
             (*current_func_box).instr_count = instr_count + 1
             lo.current_func = current_func_box
             lo
@@ -8719,7 +8746,7 @@ impl Lowerer {
         if count <= 0 {
             return false
         }
-        let last = IR_INSTR_ARENA[(ir_region_base_read(&self.current_func.region) + (count - 1)) as usize]
+        let last = IR_INSTR_ARENA[ir_region_slot_r(self.current_func.region, (count - 1)) as usize]
         last.op == IrOpcode::IrReturn
     }
 
@@ -10323,7 +10350,7 @@ impl Lowerer {
                     if lower_type_expr_is_f64(&(*list).head.ty) {
                         let instr_count = current_func.instr_count
                         if instr_count < IR_MAX_INSTRS {
-                            IR_INSTR_ARENA[(ir_region_base_write(&current_func.region) + (instr_count)) as usize] = ir_mark_float_reg(preg)
+                            IR_INSTR_ARENA[ir_region_slot_w(current_func.region, (instr_count)) as usize] = ir_mark_float_reg(preg)
                             current_func.instr_count = instr_count + 1
                         } else {
                             lo = lo.report_error()
@@ -11883,7 +11910,7 @@ impl Lowerer {
         var saw_return = false
         var i: i64 = 0
         while i < func.instr_count {
-            let instr = IR_INSTR_ARENA[(ir_region_base_read(&func.region) + (i)) as usize]
+            let instr = IR_INSTR_ARENA[ir_region_slot_r(func.region, (i)) as usize]
             if instr.op == IrOpcode::IrCallIndirect {
                 call_count = call_count + 1
                 if instr.src1 != func.param_regs[0] { return false }
@@ -15427,7 +15454,7 @@ fn ir_module_has_instrumented_strategy(module: &IrModule) -> bool with Panic, Di
 fn ir_function_has_opcode(func: IrFunction, op: IrOpcode) -> bool with Mut, Panic, Div {
     var i: i64 = 0
     while i < func.instr_count {
-        if IR_INSTR_ARENA[(ir_region_base_read(&func.region) + (i)) as usize].op == op {
+        if IR_INSTR_ARENA[ir_region_slot_r(func.region, (i)) as usize].op == op {
             return true
         }
         i = i + 1
@@ -15438,7 +15465,7 @@ fn ir_function_has_opcode(func: IrFunction, op: IrOpcode) -> bool with Mut, Pani
 fn ir_function_has_opcode_ref(func: &! IrFunction, op: IrOpcode) -> bool with Mut, Panic, Div {
     var i: i64 = 0
     while i < func.instr_count {
-        if IR_INSTR_ARENA[(ir_region_base_read(&func.region) + (i)) as usize].op == op {
+        if IR_INSTR_ARENA[ir_region_slot_r(func.region, (i)) as usize].op == op {
             return true
         }
         i = i + 1
@@ -15452,10 +15479,10 @@ fn ir_function_insert_instr_front(func: &! IrFunction, instr: IrInstr) -> bool w
     }
     var i = func.instr_count
     while i > 0 {
-        IR_INSTR_ARENA[(ir_region_base_write(&func.region) + (i)) as usize] = IR_INSTR_ARENA[(ir_region_base_read(&func.region) + ((i - 1))) as usize]
+        IR_INSTR_ARENA[ir_region_slot_w(func.region, (i)) as usize] = IR_INSTR_ARENA[ir_region_slot_r(func.region, ((i - 1))) as usize]
         i = i - 1
     }
-    IR_INSTR_ARENA[(ir_region_base_write(&func.region) + (0)) as usize] = instr
+    IR_INSTR_ARENA[ir_region_slot_w(func.region, (0)) as usize] = instr
     func.instr_count = func.instr_count + 1
     true
 }
@@ -15486,7 +15513,7 @@ fn ir_patch_validated_calls_in_function(
 
     var scan_i: i64 = 0
     while scan_i < func.instr_count {
-        if ir_call_needs_validated_patch(fn_count, callee_strategies, callee_param_counts, IR_INSTR_ARENA[(ir_region_base_read(&func.region) + (scan_i)) as usize]) {
+        if ir_call_needs_validated_patch(fn_count, callee_strategies, callee_param_counts, IR_INSTR_ARENA[ir_region_slot_r(func.region, (scan_i)) as usize]) {
             needs_patch = true
             break
         }
@@ -15508,15 +15535,15 @@ fn ir_patch_validated_calls_in_function(
 
     var i: i64 = 0
     while i < func.instr_count {
-        if ir_call_needs_validated_patch(fn_count, callee_strategies, callee_param_counts, IR_INSTR_ARENA[(ir_region_base_read(&func.region) + (i)) as usize]) {
+        if ir_call_needs_validated_patch(fn_count, callee_strategies, callee_param_counts, IR_INSTR_ARENA[ir_region_slot_r(func.region, (i)) as usize]) {
             let validated_reg = if func.compile_strategy == IR_STRATEGY_INSTRUMENTED {
                 func.param_regs[0]
             } else {
                 shared_validated_reg
             }
-            var instr = IR_INSTR_ARENA[(ir_region_base_read(&func.region) + (i)) as usize]
+            var instr = IR_INSTR_ARENA[ir_region_slot_r(func.region, (i)) as usize]
             ir_patch_validated_call_instr(&! instr, validated_reg)
-            IR_INSTR_ARENA[(ir_region_base_write(&func.region) + (i)) as usize] = instr
+            IR_INSTR_ARENA[ir_region_slot_w(func.region, (i)) as usize] = instr
             patch_count = patch_count + 1
         }
         i = i + 1
@@ -15548,7 +15575,7 @@ fn ir_patch_validated_calls(module: &! IrModule) -> IrValidatedPatchStats with M
         var instr_i: i64 = 0
         let instr_count = module.functions[i as usize].instr_count
         while instr_i < instr_count {
-            if IR_INSTR_ARENA[(ir_region_base_read(&module.functions[i as usize].region) + (instr_i)) as usize].op == IrOpcode::IrCall {
+            if IR_INSTR_ARENA[ir_region_slot_r(module.functions[i as usize].region, (instr_i)) as usize].op == IrOpcode::IrCall {
                 has_call = true
                 instr_i = instr_count
             } else {
@@ -15558,6 +15585,7 @@ fn ir_patch_validated_calls(module: &! IrModule) -> IrValidatedPatchStats with M
         if has_call {
             var func = module.functions[i as usize]
             ir_patch_validated_calls_in_function(module.fn_count, &callee_strategies, &callee_param_counts, &! func, &! stats)
+            if func.region.slot < 0 { ir_function_alloc_region(&! func) }
             module.functions[i as usize] = func
         }
         i = i + 1

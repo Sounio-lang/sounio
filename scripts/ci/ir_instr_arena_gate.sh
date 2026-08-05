@@ -160,9 +160,9 @@ for entry in "${WITNESSES[@]}"; do
 done
 
 # --- static contract: the guards must be present and the tiers coherent ------
-grep -q 'pub fn ir_instr_arena_capacity() -> i64 { 65536 }' "$ARENA" \
+grep -q 'pub fn ir_instr_arena_capacity() -> i64 { 1048576 }' "$ARENA" \
   || fail "arena_capacity_accessor_drift"
-grep -q 'pub var IR_INSTR_ARENA: \[IrInstr; 65536\]' "$ARENA" \
+grep -q 'pub var IR_INSTR_ARENA: \[IrInstr; 1048576\]' "$ARENA" \
   || fail "arena_declaration_accessor_incoherent"
 grep -q 'pub fn ir_region_table_capacity() -> i64 { 8192 }' "$ARENA" \
   || fail "region_table_accessor_drift"
@@ -189,5 +189,5 @@ fi
 
 head_sha="$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || printf not_available)"
 printf 'IR_INSTR_ARENA_BOUNDARY generation_guard=proved sealing_guard=proved fail_closed_capacity=proved conversion=not_started\n'
-printf 'IR_INSTR_ARENA_PASS witnesses=%d arena_capacity=65536 region_table=8192 head=%s\n' \
+printf 'IR_INSTR_ARENA_PASS witnesses=%d arena_capacity=1048576 region_table=8192 head=%s\n' \
   "${#WITNESSES[@]}" "$head_sha"

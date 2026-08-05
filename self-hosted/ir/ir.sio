@@ -776,8 +776,8 @@ pub fn ir_strategy_name(s: i64) -> string {
 // nc_flat_reloc_capacity() in self-hosted/native/frame.sio. Sized for this
 // module's own witnesses; the conversion change sizes it from measurement.
 
-pub var IR_INSTR_ARENA: [IrInstr; 65536] = [ir_nop(); 65536]
-pub fn ir_instr_arena_capacity() -> i64 { 65536 }
+pub var IR_INSTR_ARENA: [IrInstr; 1048576] = [ir_nop(); 1048576]
+pub fn ir_instr_arena_capacity() -> i64 { 1048576 }
 
 pub var IR_REGION_BASE: [i64; 8192] = [0; 8192]
 pub var IR_REGION_CAP: [i64; 8192] = [0; 8192]
@@ -864,6 +864,11 @@ pub fn ir_instr_arena_region_count() -> i64 { IR_REGION_COUNT }
 
 pub fn ir_instr_arena_alloc(cap: i64, out: &! IrInstrRegion) -> i64 with Mut, Panic, Div {
     if cap < 0 { return IR_ARENA_ERR_NEGATIVE }
+    // Self-arming. The driver calls ir_instr_arena_init() per compile, but the
+    // compiler has several entry paths and one of them reaches lowering without
+    // passing through that barrier -- relying on the driver alone left the
+    // quarantine region unreserved. Init is idempotent-by-count here.
+    if IR_REGION_COUNT == 0 { ir_instr_arena_init() }
     if IR_REGION_COUNT >= ir_region_table_capacity() { return IR_ARENA_ERR_REGIONS }
     if IR_ARENA_TOP + cap > ir_instr_arena_capacity() { return IR_ARENA_ERR_CAPACITY }
     let slot = IR_REGION_COUNT
@@ -883,11 +888,13 @@ pub fn ir_instr_arena_alloc(cap: i64, out: &! IrInstrRegion) -> i64 with Mut, Pa
 // Handle validation
 // ---------------------------------------------------------------------------
 
-pub fn ir_region_status(r: &IrInstrRegion) -> i64 with Panic, Div {
-    let s = (*r).slot
+pub fn ir_region_status(r: &IrInstrRegion) -> i64 with Panic, Div { ir_region_status_v(*r) }
+
+pub fn ir_region_status_v(r: IrInstrRegion) -> i64 with Panic, Div {
+    let s = r.slot
     if s < 0 || s >= IR_REGION_COUNT { return IR_ARENA_ERR_INVALID }
     if IR_REGION_STATE[s as usize] == IR_REGION_FREE { return IR_ARENA_ERR_INVALID }
-    if IR_REGION_GEN[s as usize] != (*r).generation { return IR_ARENA_ERR_STALE }
+    if IR_REGION_GEN[s as usize] != r.generation { return IR_ARENA_ERR_STALE }
     IR_ARENA_OK
 }
 
@@ -938,11 +945,11 @@ pub let IR_ARENA_VIOLATION_STALE: i64 = 1
 pub let IR_ARENA_VIOLATION_INVALID: i64 = 2
 pub let IR_ARENA_VIOLATION_SEALED: i64 = 3
 
-fn ir_arena_latch(kind: i64, r: &IrInstrRegion) with Mut, Panic, Div {
+fn ir_arena_latch(kind: i64, r: IrInstrRegion) with Mut, Panic, Div {
     if IR_ARENA_VIOLATION == 0 {
         IR_ARENA_VIOLATION_KIND = kind
-        IR_ARENA_VIOLATION_SLOT = (*r).slot
-        IR_ARENA_VIOLATION_GEN = (*r).generation
+        IR_ARENA_VIOLATION_SLOT = r.slot
+        IR_ARENA_VIOLATION_GEN = r.generation
     }
     IR_ARENA_VIOLATION = 1
 }
@@ -968,14 +975,122 @@ pub fn ir_arena_report_violation() -> bool with IO, Mut, Panic, Div {
     true
 }
 
+// Slot accessors -- what every converted instruction access actually calls.
+//
+// The WRITE form takes a mutable handle and the index so it can ENSURE the
+// region exists and is large enough: that is what finally lets a function grow
+// past the old 4096 wall. The READ form cannot allocate and must not -- reading
+// past a function's instructions is a bug, not a request for space.
+//
+// Both are total. On a contract violation they latch (ir_arena_latch) and return
+// a quarantine slot, so the access stays memory-safe and the compile is
+// guaranteed to fail rather than emit code built on corrupted IR.
+pub fn ir_region_slot_r(r: IrInstrRegion, idx: i64) -> i64 with Mut, Panic, Div {
+    if idx < 0 { return IR_QUARANTINE_BASE }
+    let st = ir_region_status_v(r)
+    if st != IR_ARENA_OK {
+        var kind = IR_ARENA_VIOLATION_INVALID
+        if st == IR_ARENA_ERR_STALE { kind = IR_ARENA_VIOLATION_STALE }
+        ir_arena_latch(kind, r)
+        return IR_QUARANTINE_BASE + (idx % ir_quarantine_slots())
+    }
+    let slot = r.slot
+    // Reading past the region is a caller bug, not a request for space. It must
+    // never be allowed to compute an address outside the arena -- an accessor
+    // that can segfault would defeat the entire point of this design.
+    if idx >= IR_REGION_CAP[slot as usize] {
+        ir_arena_latch(IR_ARENA_VIOLATION_INVALID, r)
+        return IR_QUARANTINE_BASE + (idx % ir_quarantine_slots())
+    }
+    let at = IR_REGION_BASE[slot as usize] + idx
+    if at < 0 || at >= ir_instr_arena_capacity() {
+        ir_arena_latch(IR_ARENA_VIOLATION_INVALID, r)
+        return IR_QUARANTINE_BASE + (idx % ir_quarantine_slots())
+    }
+    at
+}
+
+// Takes an IMMUTABLE handle on purpose. Growth only moves IR_REGION_BASE[slot],
+// and the handle stores the SLOT, not the base -- so every copy of a handle sees
+// the new base through the same indirection and growth cannot make a copy stale.
+// That is also what keeps this callable from the ~1425 write sites: `&!` through
+// a chain like `module.functions[0].region` does not typecheck.
+//
+// A region is NOT allocated here. Writing into a function that was never given
+// one is a bug in the caller, and it is latched as a violation rather than
+// papered over -- the whole point of this design is that nothing about it is
+// silent.
+pub fn ir_region_slot_w(r: IrInstrRegion, idx: i64) -> i64 with Mut, Panic, Div {
+    if idx < 0 { return IR_QUARANTINE_BASE }
+    let st = ir_region_status_v(r)
+    if st != IR_ARENA_OK {
+        var kind = IR_ARENA_VIOLATION_INVALID
+        if st == IR_ARENA_ERR_STALE { kind = IR_ARENA_VIOLATION_STALE }
+        ir_arena_latch(kind, r)
+        return IR_QUARANTINE_BASE + (idx % ir_quarantine_slots())
+    }
+    let slot = r.slot
+    if IR_REGION_STATE[slot as usize] == IR_REGION_SEALED {
+        ir_arena_latch(IR_ARENA_VIOLATION_SEALED, r)
+        return IR_QUARANTINE_BASE + (idx % ir_quarantine_slots())
+    }
+    if idx >= IR_REGION_CAP[slot as usize] {
+        if ir_region_grow_slot(slot, idx + 1) != IR_ARENA_OK {
+            ir_arena_latch(IR_ARENA_VIOLATION_INVALID, r)
+            return IR_QUARANTINE_BASE + (idx % ir_quarantine_slots())
+        }
+    }
+    if idx >= IR_REGION_LEN[slot as usize] {
+        IR_REGION_LEN[slot as usize] = idx + 1
+    }
+    let at = IR_REGION_BASE[slot as usize] + idx
+    if at < 0 || at >= ir_instr_arena_capacity() {
+        ir_arena_latch(IR_ARENA_VIOLATION_INVALID, r)
+        return IR_QUARANTINE_BASE + (idx % ir_quarantine_slots())
+    }
+    at
+}
+
+// Grow by SLOT, so no handle has to be updated and none can go stale.
+fn ir_region_grow_slot(slot: i64, want: i64) -> i64 with Mut, Panic, Div {
+    if slot < 0 || slot >= IR_REGION_COUNT { return IR_ARENA_ERR_INVALID }
+    if want <= IR_REGION_CAP[slot as usize] { return IR_ARENA_OK }
+    var grown = IR_REGION_CAP[slot as usize] * 2
+    if grown < want { grown = want }
+    if IR_ARENA_TOP + grown > ir_instr_arena_capacity() { return IR_ARENA_ERR_CAPACITY }
+    let old_base = IR_REGION_BASE[slot as usize]
+    let len = IR_REGION_LEN[slot as usize]
+    let new_base = IR_ARENA_TOP
+    var i: i64 = 0
+    while i < len {
+        IR_INSTR_ARENA[(new_base + i) as usize] = IR_INSTR_ARENA[(old_base + i) as usize]
+        i = i + 1
+    }
+    IR_ARENA_TOP = new_base + grown
+    IR_REGION_BASE[slot as usize] = new_base
+    IR_REGION_CAP[slot as usize] = grown
+    IR_ARENA_OK
+}
+
+// Give a function its own region. Called where a function slot is created for
+// real; ir_empty_function() cannot do it because array-repeat initialisers
+// evaluate once and copy, which would hand every slot the SAME region.
+pub fn ir_function_alloc_region(f: &! IrFunction) -> i64 with Mut, Panic, Div {
+    var r = ir_region_invalid()
+    let rc = ir_instr_arena_alloc(16, &! r)
+    if rc != IR_ARENA_OK { return rc }
+    (*f).region = r
+    IR_ARENA_OK
+}
+
 pub fn ir_region_base_read(r: &IrInstrRegion) -> i64 with Mut, Panic, Div {
     let st = ir_region_status(r)
     if st == IR_ARENA_ERR_STALE {
-        ir_arena_latch(IR_ARENA_VIOLATION_STALE, r)
+        ir_arena_latch(IR_ARENA_VIOLATION_STALE, *r)
         return IR_QUARANTINE_BASE
     }
     if st != IR_ARENA_OK {
-        ir_arena_latch(IR_ARENA_VIOLATION_INVALID, r)
+        ir_arena_latch(IR_ARENA_VIOLATION_INVALID, *r)
         return IR_QUARANTINE_BASE
     }
     IR_REGION_BASE[(*r).slot as usize]
@@ -984,15 +1099,15 @@ pub fn ir_region_base_read(r: &IrInstrRegion) -> i64 with Mut, Panic, Div {
 pub fn ir_region_base_write(r: &IrInstrRegion) -> i64 with Mut, Panic, Div {
     let st = ir_region_status(r)
     if st == IR_ARENA_ERR_STALE {
-        ir_arena_latch(IR_ARENA_VIOLATION_STALE, r)
+        ir_arena_latch(IR_ARENA_VIOLATION_STALE, *r)
         return IR_QUARANTINE_BASE
     }
     if st != IR_ARENA_OK {
-        ir_arena_latch(IR_ARENA_VIOLATION_INVALID, r)
+        ir_arena_latch(IR_ARENA_VIOLATION_INVALID, *r)
         return IR_QUARANTINE_BASE
     }
     if IR_REGION_STATE[(*r).slot as usize] == IR_REGION_SEALED {
-        ir_arena_latch(IR_ARENA_VIOLATION_SEALED, r)
+        ir_arena_latch(IR_ARENA_VIOLATION_SEALED, *r)
         return IR_QUARANTINE_BASE
     }
     IR_REGION_BASE[(*r).slot as usize]
