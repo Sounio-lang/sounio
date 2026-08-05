@@ -10119,6 +10119,42 @@ theorem sumLtI_of_cosupport (n : Nat) (P : Nat → Bool) (f : Nat → Int)
   · rw [if_pos (by simp [h]), h0 i hi h]
 
 
+/-! ## Tier 47: collapsing a sum onto its support points
+
+Tier 45's second missing mechanic. The general form — reindex a sum along an injection onto a sparse
+family — is **not** proven here; without `Finset` it needs index deletion from a `sumLtI` range, which
+is awkward. What the mixed sums actually use is the special case where the support is a bounded set
+of explicit indices, and that is cheap: for a fixed vertex, its matching partner and its coset partner
+are each a single determined index, so the inner sum collapses to one or two terms.
+
+⚠ This does NOT reach the hub rows. Those are dense — a hub meets ≈`2(h−2)` vertices — so the sums
+over them are not collapsible this way, and `tr(BE²)`'s vanishing there is a cancellation, not a
+support argument. That obstruction (§46 of the spec) stands. -/
+
+/-- A sum supported at one index is the value there. -/
+theorem sumLtI_eq_at (n k : Nat) (f : Nat → Int) (hk : k < n)
+    (h0 : ∀ i, i < n → i ≠ k → f i = 0) : sumLtI n f = f k := by
+  rw [sumLtI_congr n f (fun i => if i = k then f k else 0)
+        (fun i hi => by
+          by_cases h : i = k
+          · rw [if_pos h, h]
+          · rw [if_neg h, h0 i hi h]),
+      sumLtI_single n k (f k) hk]
+
+/-- A sum supported at two indices is the sum of the two values. This is the shape the matching and
+    coset families give: for a fixed low vertex, both partners are determined. -/
+theorem sumLtI_eq_at2 (n j k : Nat) (f : Nat → Int) (hj : j < n) (hk : k < n) (hjk : j ≠ k)
+    (h0 : ∀ i, i < n → i ≠ j → i ≠ k → f i = 0) : sumLtI n f = f j + f k := by
+  rw [sumLtI_congr n f (fun i => (if i = j then f j else 0) + (if i = k then f k else 0))
+        (fun i hi => by
+          by_cases h1 : i = j
+          · subst h1; rw [if_pos rfl, if_neg hjk]; omega
+          · by_cases h2 : i = k
+            · subst h2; rw [if_neg h1, if_pos rfl]; omega
+            · rw [if_neg h1, if_neg h2, h0 i hi h1 h2]; omega),
+      sumLtI_add, sumLtI_single n j (f j) hj, sumLtI_single n k (f k) hk]
+
+
 end SounioZDFiberAntisym
 
 
