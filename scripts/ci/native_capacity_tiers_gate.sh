@@ -18,7 +18,17 @@
 #      (vs rc=19 for code-buffer overflow), so callers can tell the tiers apart;
 #   5. the legacy NATIVE_ELF_BUF writer bounds its byte emitter and consults the
 #      emitter overflow flags before writing (it previously did neither);
-#   6. the ELF LOAD BASE ADDRESS 0x400000 (4194304) was NOT rewritten as a capacity.
+#   6b. the per-function LABEL tier (NC_V2_LABEL_*) is coherent, fail-closed with
+#      its own rc=22, and at least as large as IR_MAX_INSTRS. History: it was
+#      [i64; 256] with BOTH bounds silent, so a function with more than ~128 `if`s
+#      had jump patches dropped -- the jz/jmp rel32 operand stayed at the
+#      placeholder 0 and the branch fell through. Programs exited 0 with wrong
+#      answers, and past ~160 `if`s printed nothing at all. That is #1586/#1570,
+#      and it is why "move it into a helper function" read as a fix: the tier
+#      resets per function. The >= IR_MAX_INSTRS clause is the actual proof of
+#      sufficiency -- every label and patch comes from an IR instruction, and the
+#      emit loop that reads them is bounded by IR_MAX_INSTRS.
+#   7. the ELF LOAD BASE ADDRESS 0x400000 (4194304) was NOT rewritten as a capacity.
 #      It numerically collides with the retired 4 MiB ELF tier and must stay a
 #      plain literal argument — this clause is the regression guard for that trap.
 #
@@ -36,6 +46,8 @@ EXPECT_RELOC=131072        # NC_FLAT_RELOC_* x4    131,072 entries
 EXPECT_ELF=16777216        # NC_BIG_ELF            16 MiB
 EXPECT_LEGACY_ELF=16777216 # NATIVE_ELF_BUF        16 MiB
 ELF_BASE_ADDR=4194304      # 0x400000 — load address, NOT a capacity
+EXPECT_LABEL=4096          # NC_V2_LABEL_* x3      4,096 labels/patches per fn
+                           # (must stay >= IR_MAX_INSTRS — see clause 8)
 
 if ! command -v python3 >/dev/null 2>&1; then
   printf 'NATIVE_CAPACITY_TIERS_FAIL reason=python3_missing\n' >&2
@@ -46,8 +58,11 @@ if ! test -f "$CHECKER"; then
   exit 1
 fi
 
+# NOTE: the checker reads argv POSITIONALLY. Append new tiers at the END; putting
+# one in the middle silently rotates every tier that follows it.
 python3 "$CHECKER" "$ROOT" \
-  "$EXPECT_CODE" "$EXPECT_RELOC" "$EXPECT_ELF" "$EXPECT_LEGACY_ELF" "$ELF_BASE_ADDR"
+  "$EXPECT_CODE" "$EXPECT_RELOC" "$EXPECT_ELF" "$EXPECT_LEGACY_ELF" "$ELF_BASE_ADDR" \
+  "$EXPECT_LABEL"
 
 head_sha="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || printf not_available)"
 tree_sha="$(git -C "$ROOT" rev-parse 'HEAD^{tree}' 2>/dev/null || printf not_available)"

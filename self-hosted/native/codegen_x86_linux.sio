@@ -47,6 +47,17 @@ var NATIVE_ELF_OFF: i64 = 0
 // refuses to emit rather than shipping a truncated ELF. i64 (0/1) rather than
 // bool: module-global bool init is not exercised elsewhere in this backend.
 var NATIVE_ELF_OVERFLOW: i64 = 0
+// Which function is being emitted right now, so nc_note_label_overflow can name
+// it. Per-function state, set beside nc_v2_reset_label_state; the surviving
+// record lives in NC_V2_LABEL_OVERFLOW_FN (frame.sio), which is reset per COMPILE.
+var NC_V2_CURRENT_FN_INDEX: i64 = -1
+
+fn nc_note_label_overflow(nc: &! NativeCompiler) with Mut, Panic {
+    (*nc).label_overflow = true
+    if NC_V2_LABEL_OVERFLOW_FN < 0 {
+        NC_V2_LABEL_OVERFLOW_FN = NC_V2_CURRENT_FN_INDEX
+    }
+}
 // Off-stack ELF-image output buffer for native_v2_write_min_elf64_to_file. Its
 // image used to be built into a `var bytes: [i8; 262144]` STACK local — too small
 // for large programs (isa ELF ~700KB, evm ~2.1MB) and itself a large-stack-frame
@@ -2023,7 +2034,7 @@ fn nc_emit_movzx_rax_al(nc: &! NativeCompiler) with Mut, Panic, Div {
 
 fn nc_v2_reset_label_state() with Mut, Panic {
     var i: i64 = 0
-    while i < 256 {
+    while i < nc_v2_label_capacity() {
         NC_V2_LABEL_OFFSETS[i as usize] = -1
         i = i + 1
     }
@@ -2034,16 +2045,25 @@ fn nc_v2_reset_label_state() with Mut, Panic {
 
 fn nc_add_label_patch(nc: &! NativeCompiler, patch_offset: i64, label_id: i64) with Mut, Panic {
     let idx = NC_V2_LABEL_PATCH_COUNT
-    if idx >= 0 && idx < 256 {
+    if idx >= 0 && idx < nc_v2_label_capacity() {
         NC_V2_LABEL_PATCH_OFFSETS[idx as usize] = patch_offset
         NC_V2_LABEL_PATCH_IDS[idx as usize] = label_id
         NC_V2_LABEL_PATCH_COUNT = idx + 1
+    } else {
+        // Dropping a patch leaves this branch's rel32 operand at the placeholder
+        // 0, so it falls through instead of jumping: wrong answer, rc=0, silence.
+        // Fail closed instead -- see nc_v2_label_capacity() in frame.sio.
+        nc_note_label_overflow(nc)
     }
 }
 
 fn nc_define_label(nc: &! NativeCompiler, label_id: i64) with Mut, Panic {
-    if label_id >= 0 && label_id < 256 {
+    if label_id >= 0 && label_id < nc_v2_label_capacity() {
         NC_V2_LABEL_OFFSETS[label_id as usize] = (*nc).code.len
+    } else {
+        // An undefined label means every patch aimed at it stays at 0, so this is
+        // the same silent miscompile from the other end.
+        nc_note_label_overflow(nc)
     }
 }
 
@@ -7361,6 +7381,7 @@ fn nc_compute_float_types(nc: &! NativeCompiler, func: &IrFunction) with Mut, Pa
 
 pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunction, fn_index: i64) -> bool with IO, Mut, Panic, Div, Alloc {
     nc_v2_reset_label_state()
+    NC_V2_CURRENT_FN_INDEX = fn_index
     reset_function_state_mut(nc)
     nc_compute_float_types(nc, func)
     let function_offset = (*nc).code.len
@@ -7903,6 +7924,19 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
     }
 
     patch_label_forwards_mut(nc)
+    if native_v2_capacity_trace_enabled() {
+        print("nv2cap fn=")
+        print_int(fn_index)
+        print(" labels=")
+        print_int((*func).label_count)
+        print(" patches=")
+        print_int(NC_V2_LABEL_PATCH_COUNT)
+        print(" instrs=")
+        print_int((*func).instr_count)
+        print(" returns=")
+        print_int((*nc).return_jump_count)
+        print("\n")
+    }
     true
 }
 
@@ -10647,6 +10681,14 @@ fn native_v2_ir_trace_enabled() -> bool with IO, Mut, Panic, Div {
     str_len(read_env("SOUNIO_NV2_IR_TRACE")) > 0
 }
 
+// Per-function capacity census for the native_v2 tiers. Off by default; this is
+// how the label tier was sized and how you check headroom before raising or
+// lowering any of them. One line per compiled function:
+//   nv2cap fn=<i> labels=<n> patches=<n> instrs=<n> returns=<n>
+fn native_v2_capacity_trace_enabled() -> bool with IO, Mut, Panic, Div {
+    str_len(read_env("SOUNIO_NV2_CAPACITY_TRACE")) > 0
+}
+
 fn native_v2_trace_instr_ref(fn_index: i64, instr_index: i64, instr: &IrInstr) with IO, Mut, Panic, Div {
     var interesting = false
     if (*instr).op == IrOpcode::IrNop { interesting = true }
@@ -10817,6 +10859,16 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
     // above so callers can tell the two tiers apart.
     if nc.reloc_overflow {
         return 20
+    }
+    // A label or a jump patch exceeded nc_v2_label_capacity(). The dropped entry
+    // leaves a jz/jmp rel32 operand at the placeholder 0, so the branch falls
+    // through: the program would run, exit 0, and print the wrong answer. This is
+    // the failure this whole tier exists to make impossible; refuse to write.
+    if nc.label_overflow {
+        print("Error: native label table overflow in fn #")
+        print_int(NC_V2_LABEL_OVERFLOW_FN)
+        print(" (raise nc_v2_label_capacity)\n")
+        return 22
     }
     native_v2_write_min_elf64_to_file(output_path, &! nc, entry, 4194304)
 }
@@ -11009,6 +11061,12 @@ fn compile_native_finalize_and_write_ref(nc: &! NativeCompiler, base_addr: i64, 
     if (*nc).reloc_overflow {
         print("Error: native relocation table overflow (raise nc_flat_reloc_capacity)\n")
         return 20
+    }
+    if (*nc).label_overflow {
+        print("Error: native label table overflow in fn #")
+        print_int(NC_V2_LABEL_OVERFLOW_FN)
+        print(" (raise nc_v2_label_capacity)\n")
+        return 22
     }
 
     let code_len = (*nc).code.len

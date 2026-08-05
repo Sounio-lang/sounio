@@ -11,7 +11,7 @@ use ir::opt_cleanup::{OcpCleanupModuleReceipt, opt_cleanup_module_inplace}
 use io::env::{read_env}
 use io::trace::{io_trace_i64_string}
 use check::mod::{check_items_verdict_boot4, check_items_verdict_boot4_with_ontocache_sidecar, check_modules_verdict_boot4, check_program_epistemic_into, check_program_with_artifacts, checker_to_ir_epistemic_into, checker_apply_ir_metadata, checker_apply_ir_ontology_parameter_links_from_items}
-use ir::lower::{lower_program_to_ir_trace, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_bodies_from_summary_flat_with_epistemic_ref, lower_program_bodies_from_summary_with_epistemic_boxed_owned, lower_dep_program_items_into_acc_with_externs}
+use ir::lower::{lower_program_to_ir_trace, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_bodies_from_summary_flat_with_epistemic_ref, lower_program_bodies_from_summary_with_epistemic_boxed_owned, lower_dep_program_items_into_acc_with_externs, lower_hard_error_reset, lower_hard_error_pending}
 use native::codegen_x86_linux::{compile_native_v2_preview_to_file, native_resolve_target, native_v2_builtin_id_for_name, native_v2_builtin_returns_float}
 use check::knowledge_context::{knowledge_context_validate_items, knowledge_context_validate_items_values_only}
 use resolve::mod::{resolve_modules}
@@ -26,6 +26,11 @@ use check::specializer::{specialize_generics, spec_last_instantiated, spec_mono_
 fn module_frontend_global_init_compile_begin() with Mut {
     ast_reset_global_var_inits()
     GLOBAL_VAR_INIT_SUPPRESS_RESET = 1
+    // #1645: arm the durable lowering-error channel for THIS compile. It is
+    // deliberately not reset per lowering pass -- a compile runs several and an
+    // intermediate one may be discarded, which is precisely how the flag used to
+    // get lost.
+    lower_hard_error_reset()
 }
 
 fn module_frontend_global_init_compile_end() with Mut {
@@ -6150,6 +6155,11 @@ pub fn module_frontend_compile_imported_to_file(
         // only an immutable module reference after this audit snapshot.
         module_frontend_print_ordered_path_receipt("single-final", optimize, &(*module_box))
         parser_reset_last_errors()
+        if lower_hard_error_pending() {
+            print("Error: refusing to write a truncated binary -- lowering hit a hard capacity wall (see the error above)\n")
+            module_frontend_global_init_compile_end()
+            return 1
+        }
         let single_target_spec = native_resolve_target("native", "auto", false)
         let single_write_rc = compile_native_v2_preview_to_file(&(*module_box), single_target_spec, output_path)
         if single_write_rc != 0 {
@@ -6208,6 +6218,16 @@ pub fn module_frontend_compile_imported_to_file(
     // module reference after this audit snapshot.
     module_frontend_print_ordered_path_receipt("merged-final", optimize, &(*module_box))
     parser_reset_last_errors()
+    // Last barrier before the ELF is written. The OR into had_error at every
+    // IrLowerResult construction should already have stopped this compile, but a
+    // truncated binary that exits 0 is the failure mode this whole change exists
+    // to remove, so it is also checked at the one place every route passes
+    // through -- it must not depend on which of the six lowering wrappers ran.
+    if lower_hard_error_pending() {
+        print("Error: refusing to write a truncated binary -- lowering hit a hard capacity wall (see the error above)\n")
+        module_frontend_global_init_compile_end()
+        return 1
+    }
     let target_spec = native_resolve_target("native", "auto", false)
     let write_rc = compile_native_v2_preview_to_file(&(*module_box), target_spec, output_path)
     if write_rc != 0 {
