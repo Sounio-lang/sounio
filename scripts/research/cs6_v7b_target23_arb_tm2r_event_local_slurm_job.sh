@@ -3,7 +3,7 @@
 #SBATCH --partition=gpu-orangefs
 #SBATCH --account=plruntime
 #SBATCH --qos=gpuorangefs
-#SBATCH --nodelist=gpuorangefs-r770-proxmox
+#SBATCH --nodelist=gpuorangefs-multi-r740-proxmox
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
@@ -31,7 +31,7 @@ python3 --version
 python3 -c 'import platform; print(platform.platform())'
 nvidia-smi --query-gpu=name,uuid --format=csv,noheader || true
 
-[[ "$SLURM_NODELIST" == "gpuorangefs-r770-proxmox" ]]
+[[ "$SLURM_NODELIST" == "gpuorangefs-multi-r740-proxmox" ]]
 [[ -d "$REPO/scripts/research" ]]
 [[ -d "$DEPS/flint" ]]
 
