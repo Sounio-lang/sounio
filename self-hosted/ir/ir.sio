@@ -984,8 +984,31 @@ pub fn ir_arena_put_name(at: i64, nm: Name) with Mut, Panic, Div {
     var len = nm.len
     if len < 0 { len = 0 }
     if len > 128 { len = 128 }
+    // Re-storing an instruction used to re-append its name, so pool consumption
+    // tracked STORES rather than instructions and a dozen cleanup peels
+    // multiplied it. If this slot already holds exactly this name, keep the
+    // binding: that turns the common read-modify-write into free.
+    if IR_A_NAME_LEN[at as usize] == len {
+        let prev = IR_A_NAME_OFF[at as usize]
+        var same = true
+        var k: i64 = 0
+        while k < len {
+            if IR_NAME_POOL[(prev + k) as usize] != nm.buf[k as usize] {
+                same = false
+                k = len
+            }
+            k = k + 1
+        }
+        if same { return }
+    }
     if IR_NAME_POOL_LEN + len > ir_name_pool_capacity() {
+        // Was: drop the name and carry on. Names are load-bearing -- cleanup
+        // matches on ir_name_eq and codegen resolves callees by name -- so a
+        // dropped name is a silently different program. Same defect as the rc=12
+        // argument loss, with the alarm removed. Poison the compile instead; the
+        // driver refuses to emit on a latched violation.
         IR_A_NAME_LEN[at as usize] = 0
+        ir_arena_latch(IR_ARENA_VIOLATION_NAME_POOL, ir_region_invalid())
         return
     }
     let off = IR_NAME_POOL_LEN
@@ -1018,7 +1041,11 @@ pub fn ir_arena_put_args(at: i64, args: Option<Box<IrRegList>>, count: i64) with
     if at < 0 || at >= ir_instr_arena_capacity() { return }
     if count <= 0 { IR_A_ARG_BASE[at as usize] = 0  return }
     if IR_ARG_POOL_LEN + count > ir_arg_pool_capacity() {
+        // Was: drop the arguments and carry on -- which is exactly the rc=12
+        // failure this arena already paid for once, except silent. A call that
+        // loses its arguments is a different program, not a slower one.
         IR_A_ARG_COUNT[at as usize] = 0
+        ir_arena_latch(IR_ARENA_VIOLATION_ARG_POOL, ir_region_invalid())
         return
     }
     let base = IR_ARG_POOL_LEN
@@ -1239,6 +1266,11 @@ pub var IR_ARENA_VIOLATION_GEN: i64 = -1
 pub let IR_ARENA_VIOLATION_STALE: i64 = 1
 pub let IR_ARENA_VIOLATION_INVALID: i64 = 2
 pub let IR_ARENA_VIOLATION_SEALED: i64 = 3
+// Exhaustion, not a handle-contract breach: the side pools ran out. Distinct
+// kinds because the remedy is different -- these say "raise the pool" or "stop
+// re-appending", never "you aliased a region".
+pub let IR_ARENA_VIOLATION_NAME_POOL: i64 = 4
+pub let IR_ARENA_VIOLATION_ARG_POOL: i64 = 5
 
 fn ir_arena_latch(kind: i64, r: IrInstrRegion) with Mut, Panic, Div {
     if IR_ARENA_VIOLATION == 0 {
@@ -1259,6 +1291,22 @@ pub fn ir_arena_report_violation() -> bool with IO, Mut, Panic, Div {
         print("stale handle -- a region was reallocated and this copy was not updated")
     } else if IR_ARENA_VIOLATION_KIND == IR_ARENA_VIOLATION_SEALED {
         print("write through a sealed handle -- a value copy was made without cloning the region")
+    } else if IR_ARENA_VIOLATION_KIND == IR_ARENA_VIOLATION_NAME_POOL {
+        print("name pool exhausted -- an instruction name was dropped, which changes call resolution")
+        print(") fill ")
+        print_int(IR_NAME_POOL_LEN)
+        print(" of ")
+        print_int(ir_name_pool_capacity())
+        print("\n")
+        return true
+    } else if IR_ARENA_VIOLATION_KIND == IR_ARENA_VIOLATION_ARG_POOL {
+        print("call-argument pool exhausted -- a call lost its arguments")
+        print(") fill ")
+        print_int(IR_ARG_POOL_LEN)
+        print(" of ")
+        print_int(ir_arg_pool_capacity())
+        print("\n")
+        return true
     } else {
         print("invalid handle")
     }
