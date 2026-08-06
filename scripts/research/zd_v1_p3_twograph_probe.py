@@ -427,3 +427,26 @@ def T_coset(m, g):
     """The coset piece of `tri3w(chi01)`, from §57.18's closed form."""
     N = (1 << (m + 1)) - 1
     return sigma_coset(m, g) - (2 * N - 2)
+
+
+# --- §57.35: Sigma_coset satisfies a first-order LEVEL RECURSION ---------------------------------
+#
+#     Sigma_coset(m+1, W) = 4 * Sigma_coset(m, W) + (24*2^m - 24)
+#
+# for EVERY label W < 2^(m+1) — every label valid at both levels.  0 violations at m = 3,4 over all
+# labels; confirmed OUT OF SAMPLE at m = 5 (c(5) = 744, predicted from m = 3,4 before computing).
+#
+# The constant is c(m) = 24*2^m - 24 = 12*2^(m+1) - 24, which is §57.18's w[0] AT LEVEL m+1: the
+# recursion's constant is the next level's mean, exactly.
+#
+# The recursion fixes Sigma_coset at every label that exists one level down; the labels using the
+# NEW top bit are the extra input each level — the same structure as every other transfer here, and
+# consistent with the Walsh picture, where each level adds exactly one new top-anchored character.
+#
+# This replaces a global Walsh statement with the shape the block identities of Tiers 66/70-74 were
+# built for.  The route to a proof: split the level-(m+1) coset sum into its four index blocks and
+# apply those identities to the summand S(a,b) * P(b, b^W) * P(b^W, a).  Not attempted.
+
+def sigma_coset_step(m):
+    """The additive constant of the §57.35 level recursion."""
+    return 24 * 2**m - 24

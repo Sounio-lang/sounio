@@ -5080,6 +5080,33 @@ form transfers, and `tri3w(χ01)` is now determined: two level constants plus `�
 of sample at `m = 6,7`), so nothing here makes `D` a theorem. What changed is that the last piece is
 no longer an unknown — it is a known measured quantity, and the two routes to it are identified.
 
+### 57.35 — `Σ_coset` satisfies a first-order LEVEL RECURSION
+
+Before recording that `Σ_coset`'s Walsh closed form is hard to prove — the mistake I made twice
+already this session — I measured whether it has a level transfer, as `tri3` did. It does, and it is
+much simpler than the Walsh expansion:
+
+    Σ_coset(m+1, W) = 4 · Σ_coset(m, W) + (24·2^m − 24)
+
+**for every label `W < 2^(m+1)`** — that is, every label valid at both levels. 0 violations at
+`m = 3,4` over all labels, and confirmed **out of sample at `m = 5`** (`c(5) = 744`, predicted from
+`m = 3,4` before computing).
+
+The constant is `c(m) = 24·2^m − 24 = 12·2^(m+1) − 24`, which is §57.18's `w[0]` **at level `m+1`** —
+the recursion's constant is the next level's mean, exactly.
+
+**What the recursion does and does not determine.** It fixes `Σ_coset` at every label that exists one
+level down; the labels using the NEW top bit are not covered and are the extra input each level —
+the same structure as every other transfer in this expansion, and consistent with the Walsh picture,
+where each level adds exactly one new top-anchored character. Checked: the §57.18 closed form obeys
+the recursion on the shared fibres at `m = 2,3,4,5`.
+
+**Why this matters for proving it.** A Walsh expansion over `2^(m−2)` characters is a global
+statement; a first-order recursion in `m` is the shape the block identities of Tiers 66/70–74 were
+built for. The concrete route is now: split the level-`(m+1)` coset sum into its four index blocks
+and apply those identities to the summand `S(a,b)·P(b,b⊕W)·P(b⊕W,a)`. That is not attempted here,
+and — having twice recorded a difficulty that dissolved on contact — I record no estimate of it.
+
 **Status of (III).** Still reduced, not proven — but the reduction is now a single explicit
 first-order recursion in `m` whose only non-constant input is a coset-line sum with a closed form.
 What has not been attempted: proving the recursion (the constants and `Σ_coset` from the same
