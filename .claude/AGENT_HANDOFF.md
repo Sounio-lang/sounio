@@ -119,6 +119,72 @@ lanes restructured, where a wrong resolution is a silent miscompile rather than
 a build error.
 
 
+### Active-lane map over `self-hosted/ir` + `compiler` — surveyed 2026-08-06
+
+Surveyed because this lane worked ~15 hours in `ir/lower.sio` without one, and
+`#1649` — which its own commits reference — had two PRs open against it since
+2026-08-05. The survey is the deliverable; the numbers below are measured trial
+merges, not impressions.
+
+**The three "IR lanes" are one lane, stacked.** Each contains the previous:
+
+```
+refactor/ir-instruction-arena (#1650)  ⊂  refactor/ir-arena-step2 (#1651)  ⊂  probe/ir-soa-phase0
+      7dde0d403d, 08-05                       6c32908852, 08-05                94bcff71a3, 08-06
+```
+
+`probe/ir-soa-phase0` is the tip, not a rival. (`6c32908852` is also where this
+lane took `tests/known_failures/lean_single_global_aggregate_store.sio` from —
+the file only, never the commit, which is why no history was duplicated.)
+
+**Conflict against `feat/madaros-fixed-point-core` (#1672), measured:**
+
+| lane | files | hunks | where |
+|---|---|---|---|
+| #1650 `refactor/ir-instruction-arena` | **0** | **0** | merges clean |
+| #1651 `refactor/ir-arena-step2` | 8 | 14 | `module_frontend.sio` 6, `ir/lower.sio` 2, six files at 1 |
+| `probe/ir-soa-phase0` | 10 | 30 | as above plus `ir/opt_cleanup.sio` 13 |
+
+`ir/ir.sio` does NOT conflict with #1651: this lane's `StructFieldEntry`
+interning and their arena work sit in different regions of the file.
+
+**Twelve other open PRs touch this write-set**, all last active 07-17..07-29 and
+none in the past week: #1527, #1500, #1508, #1531, #1501, #1493, #1421, #1339,
+#1069, #1605. #1527 is the self-parse/visibility/Box lane this lane's own plan
+said to re-slice rather than merge.
+
+### Proposed landing order
+
+```
+1. #1650  refactor/ir-instruction-arena   — base of the stack, 0 conflicts with anything
+2. #1672  feat/madaros-fixed-point-core   — 0 conflicts with #1650
+3. #1651  refactor/ir-arena-step2         — absorbs 14 hunks
+4.        probe/ir-soa-phase0             — tip, absorbs the rest
+```
+
+Rationale, and the one place it is arguable:
+
+- #1650 first because it is free — it conflicts with nothing measured here.
+- #1672 second because its load-bearing fix is **silent wrong code**:
+  cross-module DCE deleted every module-level global, and the emitted binary
+  printed nothing rather than failing. That class should not wait behind a
+  refactor.
+- #1651 third. Note it **removes** `instrs: [IrInstr; 4096]`, the field #1672
+  grows from 3072. The two agree on the number, so this is supersession and not
+  contradiction. **If #1651 is landed before #1672 instead**, drop the
+  `IR_MAX_INSTRS` hunks from #1672 (21 type positions across six files, the
+  constant, the struct field, eight initialisers) — nothing else in #1672
+  depends on them.
+- The finding behind that raise survives the representation and argues FOR the
+  arena: `lex_source_to_globals` needs 3269 instructions, and it never appeared
+  in the corpus census that justified the 3072 cap, because that census does not
+  contain this compiler's own 120-module closure. A fixed cap chosen from the
+  corpus will keep being wrong for self-compilation.
+
+Owner of #1650/#1651/`probe/ir-soa-phase0` has not been contacted. This map is
+on the #1672 branch; relaying it is a human action.
+
+
 ## 6-Agent Lane Activation — 2026-05-10T13:35Z
 
 **Authority**: human-approved at 2026-05-10 (this commit).
