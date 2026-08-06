@@ -247,3 +247,51 @@ def O1_at_reference(m, g):
     t_m = predict(m)[g % (1 << (m - 3))]
     t_m1 = predict(m + 1)[g % (1 << (m - 2))]
     return (t_m1 - 2 * t_m + 24 * 2**m - 102) // 6
+
+
+# --- §57.17: O_1 DERIVED from the block identities -----------------------------------------------
+#
+# The honest route §57.16 owed.  Take the weight-1 orthant (lambda_a, lambda_b, lambda_c) = (0,0,1):
+# `a`, `b` low, `c = c0 + H` high.  Tiers 66/67 give each of the three factors:
+#
+#   M(a,b)  = block (0,0) = S(a,b)            the level-m Seidel matrix (same masking)
+#   M(b,c)  = block (0,1) = eps01 * P(b,c0)   eps01 = -1 iff b = W or b^c0 = W
+#   M(c,a)  = block (1,0) = eps10 * P(c0,a)   eps10 = -1 iff a = W or c0^a = W
+#
+# where P is the level-m P3 with index 0 zeroed but the DIAGONAL KEPT (P(x,x) = -1, `P3_diag`) --
+# because `b = c0` and `c0 = a` are legal at level m+1, the two indices being in different halves.
+# `c0 = 0` is legal too (the index H), and Tier 67's lemmas exclude it, so it is a separate slice.
+# Expanding eps01*eps10 = 1 - 2u - 2v + 4uv:
+#
+#   O_1 = S0 - 2 Su - 2 Sv + 4 Suv + slice0        (verified for every label, m = 3,4)
+#
+# and each piece is then identified:
+#
+#   S0  = sum S(a,b) P(b,c) P(c,a) = tri3_m - 2 tr(S^2) = tri3_m - 2 N(N-1)     [P = S - I_1]
+#   Su  = Sv, and Su splits as {b = W} + {b^c = W} with EMPTY overlap (the overlap forces c = 0);
+#         its ISOLATED-ROW half is itself a level constant 10*2^m - 22 (58, 138, 298 at m = 3,4,5;
+#         154, 810, 3658 at the seam), so ALL the label dependence sits in the COSET-LINE term
+#             Sigma_coset(W) = sum_{a,b} S(a,b) P(b, b^W) P(b^W, a)
+#   Suv = 2(N-1)             -- a level constant
+#   slice0 = 18*2^m - 30 off the maximal seam, and N(N-1) AT it
+#
+# giving, off the seam,
+#
+#   O_1 = tri3_m - 4*Su + 2(N-1)(4-N) + 18*2^m - 30          0 violations, every label, m = 3,4
+#
+# so the single remaining unknown is Su -- a SECOND-order sum, over the isolated row and the coset
+# line, the two loci this lane already has theorems about.  Suv, slice0 and the seam value were all
+# confirmed OUT OF SAMPLE at m = 5.
+#
+# N = 2^(m+1) - 1 throughout.
+
+def O1_pieces(m):
+    """The level constants of the O_1 derivation: (Suv, slice0 off the seam, slice0 at the seam)."""
+    N = (1 << (m + 1)) - 1
+    return 2 * (N - 1), 18 * 2**m - 30, N * (N - 1)
+
+
+def O1_from_Su(m, tri3_m, Su):
+    """`O_1` from the level-m triangle count and the second-order sum `Su`, off the maximal seam."""
+    N = (1 << (m + 1)) - 1
+    return tri3_m - 4 * Su + 2 * (N - 1) * (4 - N) + 18 * 2**m - 30

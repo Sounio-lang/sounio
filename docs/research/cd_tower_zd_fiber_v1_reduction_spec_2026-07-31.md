@@ -4523,12 +4523,59 @@ at both levels:
 adds no independent evidence — what it does is make `O_1` explicit wherever the deviation law lives,
 which is exactly the references.
 
-**Status of (III).** Still reduced, not proven. What moved: the transfer is now one recursion with a
-single unknown, that unknown is explicit at the references, and the seam exception is identified
-across two independent computations. What has not been attempted: a DERIVATION of `O_1` from the
-block identities (the honest route — the one above is bookkeeping on top of measured closed forms),
-the two level constants `26·2^m − 64` and `54·2^m − 90` from the exceptional-loci counts, the
-coset-line case of block `(1,1)`, the `q`-binomial finish that would produce `[j,3]₂`, and the fibre
-variation of `tr(Alo²P)` / `tr(AloP²)`. No difficulty is recorded for any of them.
+### 57.17 — `O_1` DERIVED from the block identities: down to ONE coset-line sum
+
+The honest route §57.16 owed. Take the weight-1 orthant `(λ_a,λ_b,λ_c) = (0,0,1)`: `a, b` low,
+`c = c₀ + H` high. Tiers 66/67 give each of the three factors:
+
+| factor | block | value |
+|---|---|---|
+| `M(a,b)` | `(0,0)` | `S(a,b)` — the level-`m` Seidel matrix, same masking |
+| `M(b,c)` | `(0,1)` | `ε₀₁·P(b,c₀)`, `ε₀₁ = −1` iff `b = W` or `b ⊕ c₀ = W` |
+| `M(c,a)` | `(1,0)` | `ε₁₀·P(c₀,a)`, `ε₁₀ = −1` iff `a = W` or `c₀ ⊕ a = W` |
+
+where `P` is the level-`m` `P3` with index `0` zeroed but the **diagonal kept** (`P(x,x) = −1`, by
+`P3_diag`) — because `b = c₀` and `c₀ = a` are legal at level `m+1`, the two indices living in
+different halves. And `c₀ = 0` is legal too (the index `H`), which Tier 67's lemmas exclude, so it is
+a separate slice. Expanding `ε₀₁ε₁₀ = 1 − 2u − 2v + 4uv`:
+
+    O_1 = S_0 − 2·S_u − 2·S_v + 4·S_uv + slice₀        verified for every label, m = 3,4
+
+and each piece then identifies:
+
+| piece | value | |
+|---|---|---|
+| `S_0` | `tri3_m − 2·N(N−1)` | since `P = S − I₁`, so `tri3m(S,P,P) = tri3(S) − 2·tr(S²)` |
+| `S_u` | `= S_v`, and splits as `{b = W} + {b ⊕ c = W}` with **empty** overlap | the overlap forces `c = 0` |
+| `S_uv` | `2(N−1)` | a level constant |
+| `slice₀` | `18·2^m − 30` off the seam, `N(N−1)` at it | |
+
+giving, off the maximal seam,
+
+    O_1 = tri3_m − 4·S_u + 2(N−1)(4−N) + 18·2^m − 30      0 violations, every label, m = 3,4
+
+and `S_u` splits further: its **isolated-row** half is itself a level constant `10·2^m − 22`
+(`58, 138, 298` at `m = 3,4,5`, and `154, 810, 3658` at the seam), so **all** the label dependence of
+`O_1` sits in one second-order sum, the **coset-line** term
+
+    Σ_coset(W) = Σ_{a,b} S(a,b)·P(b, b⊕W)·P(b⊕W, a)
+
+`S_uv`, `slice₀`, the seam value and the isolated-row constant were all confirmed **out of sample at
+`m = 5`** (`124`, `546`, `3906`, `298`, the last at five different labels).
+
+That is the derivation: `O_1`, a triple sum at level `m+1`, comes down to `tri3_m` plus level
+constants plus **one coset-line bilinear sum** — and the coset line is an object the lane already has
+theorems about (`cosetSum_eq` proves the `A_σ` analogue equals `−t2′`).
+
+*Measured and unexplained, recorded so it is not mistaken for a finding later:* at `m = 3` the coset
+term takes the values `−24` and `168`. The `168` does **not** extend — at `m = 4` the four values are
+`−504, 72, 264, 840`. No claim is attached.
+
+**Status of (III).** Still reduced, not proven. What moved: `O_1` is no longer an opaque orthant but
+`tri3_m` plus constants plus a single coset-line sum, derived from the block theorems rather than
+fitted. What has not been attempted: a closed form for `Σ_coset` (the last label-dependent piece),
+the two level constants `26·2^m − 64` / `54·2^m − 90` from the same expansion, the coset-line case of
+block `(1,1)`, the `q`-binomial finish that would produce `[j,3]₂`, and the fibre variation of
+`tr(Alo²P)` / `tr(AloP²)`. No difficulty is recorded for any of them.
 
 **(III) is still reduced, not proven.**
