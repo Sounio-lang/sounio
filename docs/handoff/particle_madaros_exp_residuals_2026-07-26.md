@@ -97,3 +97,12 @@ Native fix blocked this session by active claims on `self-hosted/native/**` and
   (ratio ≈ 3.4866, band (2, 6)).
 - Gate: `scripts/research/particle_exp18_w_vertex_amp_gate.sh`.
 
+## 8 — EXP19 H Yukawa amp (2026-08-06)
+
+- `nonunitary_amp::h_bb_yukawa_amplitude_nu` — `y_b⁴·|D_H|²`, `y_b=√2 m_b/v`
+  via `mass_bottom` + `higgs_vev`.
+- Ratio **0.652209**, band (0.3, 2); matches EXP16. Shared vector `12π`
+  kept (math-review noted scalar `4π`; twin ratio preserved — see EXP19 doc).
+- Gate: `scripts/research/particle_exp19_h_yukawa_amp_gate.sh` (Madaros retry×3).
+- Completes stdlib amp restore trio Z/W/H (EXP14/18/19); thin EXP14–16 stay.
+

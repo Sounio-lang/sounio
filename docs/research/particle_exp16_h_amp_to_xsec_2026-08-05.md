@@ -73,6 +73,8 @@ Yukawa toy; equality is **not** claimed.
 | Gate | `PARTICLE_EXP16_GATE_OK` |
 
 Closes the thin-graph trio **Z / W / H** (EXP14 / EXP15 / EXP16).
+EXP19 restores the same H continuum path via `h_bb_yukawa_amplitude_nu`
+(stdlib Yukawa + GUM `mass_bottom`); this leaf stays the thin local-num witness.
 
 ## Non-claims
 
