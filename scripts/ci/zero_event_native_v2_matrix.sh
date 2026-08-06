@@ -89,6 +89,18 @@ require_marker combined 'Failed to write native binary'
 reject_marker combined 'Segmentation fault'
 reject_marker combined 'ZERO_PROVENANCE PASS'
 
+# Bool-cmp-in-struct-field shape residual (not an IR fn-count ceiling)
+run_capture bool_cmp_precomp tests/run-pass/thinlink_bool_cmp_field_precomp_smoke.sio
+require_rc bool_cmp_precomp 0
+require_marker bool_cmp_precomp 'BOOL_CMP_FIELD_PRECOMP PASS'
+reject_marker bool_cmp_precomp 'Segmentation fault'
+
+run_capture bool_cmp_probe tests/known_failures/thinlink_bool_cmp_field_probe.sio
+require_rc bool_cmp_probe 1
+require_marker bool_cmp_probe 'Failed to write native binary'
+reject_marker bool_cmp_probe 'Segmentation fault'
+reject_marker bool_cmp_probe 'BOOL_CMP_FIELD PASS'
+
 # Receipt stdlib probe is green on stock Madaros (main already closed this surface)
 run_capture receipt tests/known_failures/zero_event_stdlib_native_v2_probe.sio
 require_rc receipt 0
@@ -96,4 +108,4 @@ require_marker receipt 'Compilation successful!'
 require_marker receipt 'ZERO_EVENT_STDLIB PASS'
 reject_marker receipt 'Segmentation fault'
 
-echo '[zero-native-matrix] PASS: dd64+sedenion+qd128(+core,+mul)+zp_compact+receipt green; eisa+sedenion combined fail-closed'
+echo '[zero-native-matrix] PASS: dd64+sedenion+qd128(+core,+mul)+zp_compact+bool_cmp_precomp+receipt green; eisa+sedenion combined + bool_cmp_probe fail-closed'

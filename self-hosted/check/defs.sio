@@ -1498,8 +1498,8 @@ pub fn fn_sig_table_find(t: *mut FnSigTable, name: Name) -> i64 with Mut, Panic,
 //   1. free fn defined in `prefer_module_id` (private helpers of the module
 //      currently being checked)
 //   2. any non-private free fn (legitimate cross-module import target)
-//   3. first free-fn match (legacy; visibility check still rejects private
-//      cross-module access)
+//   3. first free-fn match that is not a foreign private extern stub
+//      (#1627: those shadow native builtins and false-E175 siblings)
 pub fn fn_sig_table_find_prefer_module(t: *mut FnSigTable, name: Name, prefer_module_id: i64) -> i64 with Mut, Panic, Div {
     var gi: i64 = 0
     var cur = (*t).head
@@ -1533,7 +1533,30 @@ pub fn fn_sig_table_find_prefer_module(t: *mut FnSigTable, name: Name, prefer_mo
         }
         cur = (*cur).next
     }
-    fn_sig_table_find(t, name)
+    // Legacy first-match, but skip cross-module private `extern "C"` stubs.
+    // Those shadow native builtins (#1627 / particle E175). Same-module private
+    // externs still resolve here (local declaration).
+    gi = 0
+    cur = (*t).head
+    while gi < (*t).count {
+        if cur == (0 as *mut FnSigChunk) { break }
+        var local: i64 = 0
+        while local < 512 && gi < (*t).count {
+            if !(*cur).entries[local as usize].is_method
+                && name_eq((*cur).entries[local as usize].name, name) {
+                let foreign_private_extern = (*cur).entries[local as usize].is_extern
+                    && (*cur).entries[local as usize].visibility_kind == VISIBILITY_PRIVATE
+                    && (*cur).entries[local as usize].defining_module_id != prefer_module_id
+                if !foreign_private_extern {
+                    return gi
+                }
+            }
+            local = local + 1
+            gi = gi + 1
+        }
+        cur = (*cur).next
+    }
+    0 - 1
 }
 
 pub fn fn_sig_table_find_method(t: *mut FnSigTable, type_name: Name, method_name: Name) -> i64 with Mut, Panic, Div {
