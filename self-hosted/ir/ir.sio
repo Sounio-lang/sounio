@@ -1553,6 +1553,49 @@ pub fn ir_region_seal(r: &IrInstrRegion) -> i64 with Mut, Panic, Div {
     IR_ARENA_OK
 }
 
+// Publish the module: every function's region refuses further writes from here.
+//
+// This is the only mechanism that can answer "is the aliasing class closed?".
+// A static scan can only find the sites its own matching rule knows how to see,
+// and this branch has already been bitten twice by that: Sweep 1 matched writes
+// that were syntactically local and missed two `&!`-one-frame-down sites, and a
+// third shape -- a copy parked in a struct field and mutated later -- would evade
+// both scans. Sealing does not care what the write LOOKS like. It catches the
+// write.
+//
+// Returns the number of regions sealed. Regions that are not live (an empty
+// function never given one) are skipped rather than treated as an error.
+pub fn ir_module_seal_functions(module: &IrModule) -> i64 with Mut, Panic, Div {
+    var sealed: i64 = 0
+    var i: i64 = 0
+    while i < (*module).fn_count && i < IR_MAX_FUNCS {
+        // Hoist the handle before taking its address. Do not "simplify" this
+        // back to `ir_region_seal(&(*module).functions[i as usize].region)`:
+        // that is what the first version did, and it sealed ZERO of seven
+        // regions in a real compile while reporting nothing.
+        //
+        // WHY it failed is NOT established. The obvious explanation -- that
+        // `&<indexed expression>` is the bad shape, as in #1651's
+        // `&IR_INSTR_ARENA[...]` -- does not survive testing:
+        // tests/native-v2/ir_module_seal_witness.sio seals 3 of 3 with EITHER
+        // form. The difference the witness cannot reach is that the compiler's
+        // module is a Box, and `Box::new(ir_empty_module())` SIGSEGVs in a
+        // witness (a 4.2 MB value through Box), so the failing shape has no
+        // isolated reproduction yet. The hoist is a measured fix, 0 -> 7, with
+        // an unproven mechanism. Treat it as load-bearing until someone can
+        // reproduce and explain it.
+        //
+        // Sealing writes IR_REGION_STATE, a global, so a copy of the handle is
+        // all this needs -- nothing has to be written back to the module.
+        var r = (*module).functions[i as usize].region
+        if ir_region_seal(&r) == IR_ARENA_OK {
+            sealed = sealed + 1
+        }
+        i = i + 1
+    }
+    sealed
+}
+
 pub fn ir_region_clone(src: &IrInstrRegion, out: &! IrInstrRegion) -> i64 with Mut, Panic, Div {
     let st = ir_region_status(src)
     if st != IR_ARENA_OK { return st }

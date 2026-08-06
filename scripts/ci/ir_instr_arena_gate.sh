@@ -127,6 +127,11 @@ WITNESSES=(
   # 32768 for names, 262144/64 = 4096 for args. Before this, both pools dropped
   # their payload and carried on, which is rc=12 with the alarm removed.
   "ir_arena_pool_witness:IR_ARENA_POOL_WITNESS_PASS"
+  # Publication. Pins that sealing a module seals EVERY live region -- the count,
+  # not merely "no error" -- and that a write afterwards is refused, quarantined
+  # and latched. The count half exists because the first wiring sealed 0 of 7 in
+  # silence.
+  "ir_module_seal_witness:IR_MODULE_SEAL_WITNESS_PASS"
 )
 
 run_one() {
@@ -206,6 +211,12 @@ if [ "$VACUITY" = "1" ]; then
   run_one ir_instr_arena_stale_witness IR_INSTR_ARENA_STALE_PASS "$TMP/no_gen.sio" fail
   sed 's/IR_REGION_STATE\[(\*r).slot as usize\] == IR_REGION_SEALED/false/g' "$ARENA" >"$TMP/no_seal.sio"
   run_one ir_instr_arena_seal_witness IR_INSTR_ARENA_SEAL_PASS "$TMP/no_seal.sio" fail
+  # no_seal.sio strips the sealed CHECK on the (*r) paths, which ir_region_slot_w
+  # does not use -- so it leaves this witness passing. Strip the sealing itself
+  # instead: ir_region_seal still returns OK (the count half stays green) but the
+  # state is never set, so the write is no longer refused.
+  sed 's/IR_REGION_STATE\[(\*r).slot as usize\] = IR_REGION_SEALED//' "$ARENA" >"$TMP/no_seal_apply.sio"
+  run_one ir_module_seal_witness IR_MODULE_SEAL_WITNESS_PASS "$TMP/no_seal_apply.sio" fail
   # Strip only the two pool latches. Measured: the witness then reports
   # NAME_POOL_FIRED_AT -1 and exits 12, so it is testing the latch and not some
   # other property that happens to hold.
@@ -216,6 +227,6 @@ if [ "$VACUITY" = "1" ]; then
 fi
 
 head_sha="$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || printf not_available)"
-printf 'IR_INSTR_ARENA_BOUNDARY generation_guard=proved sealing_guard=proved fail_closed_capacity=proved pool_exhaustion=proved conversion=complete\n'
+printf 'IR_INSTR_ARENA_BOUNDARY generation_guard=proved sealing_guard=proved fail_closed_capacity=proved pool_exhaustion=proved publication_sealed=proved conversion=complete\n'
 printf 'IR_INSTR_ARENA_PASS witnesses=%d arena_capacity=1048576 region_table=8192 head=%s\n' \
   "${#WITNESSES[@]}" "$head_sha"

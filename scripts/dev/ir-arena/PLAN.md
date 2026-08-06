@@ -152,8 +152,20 @@ to design against.
    payload. Non-vacuous: stripping just the two latch calls makes it report
    `NAME_POOL_FIRED_AT -1` and exit 12. Wired into `ir_instr_arena_gate.sh`,
    which now carries 4 witnesses and 3 vacuity checks.
-4. **Seal after cleanup** — the merge-time proof that the alias sweeps closed
-   anything.
+4. ~~**Seal after cleanup**~~ — **DONE**. Both publication routes seal every
+   function region (`sealed=7 of 7`), and a second violation barrier runs AFTER
+   codegen, since the existing one runs before it and would never see a
+   codegen-time write. Result: **zero violations across all seven regression
+   programs**, i.e. nothing currently writes through a published region — the
+   comment claiming codegen gets an immutable module is now a checked fact.
+   `tests/native-v2/ir_module_seal_witness.sio` pins the count and the refusal;
+   gate now carries 5 witnesses and 4 vacuity checks.
+
+   **Open, and load-bearing:** the first wiring sealed **0 of 7 in silence**, and
+   the hoist that fixed it (0 → 7) has an *unproven mechanism* — the witness
+   passes with both the hoisted and the direct form, and a Box'd `IrModule`
+   SIGSEGVs in a witness, so the failing shape has no isolated reproduction.
+   Do not "simplify" that loop.
 5. **Cover `ir_arena_swap_slots`.** It is the only primitive here written from
    scratch and nothing in the evidence executes it; its two call sites need
    specific IR shapes. The corpus must force them.
