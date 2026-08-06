@@ -13295,7 +13295,7 @@ def orth (N : Nat) (f : Nat → Nat → Int) (u v w : Nat) : Int :=
     f (u + a) (v + b) * (f (v + b) (w + c) * f (w + c) (u + a)))))
 
 /-- Splitting the inner two sums of a doubled double-sum into four. -/
-private theorem split_inner (N : Nat) (F : Nat → Nat → Int) :
+theorem split_inner (N : Nat) (F : Nat → Nat → Int) :
     sumLtI (N+N) (fun b => sumLtI (N+N) (fun c => F b c))
       = sumLtI N (fun b => sumLtI N (fun c => F b c))
         + sumLtI N (fun b => sumLtI N (fun c => F b (N+c)))
@@ -14254,6 +14254,55 @@ theorem P3_block11_cos (m l W : Nat) (hl : l < 2^(m+1)) (hW : W < 2^(m+1))
       if_neg (by omega : (l ^^^ W) + 2^(m+1) ≠ 0),
       sigma_self (m+2) ((l ^^^ W) + 2^(m+1)) (by omega) (by omega)]
   grind
+
+
+/-! ### Tier 83 — the coset sum, and its four-block split
+
+    §57.35's recursion is about the MASKED coset sum.  This tier is about the UNMASKED one — no
+    diagonal, index-`0` or `b = W` exclusions at all — which has its OWN measured level recursion,
+    `U(m+1,W) = 4·U(m,W) + (40·2^m − 48)` (0 violations at `m = 2,3`, confirmed out of sample at
+    `m = 4`), and is far simpler to state.
+
+    ⚠ `cosetU` is NOT a substitute for `Σ_coset`, and both M1 providers pushed back when I implied
+    it was: the excluded set is not where the summand vanishes, so a parallel fibre-constancy and a
+    parallel recursion do not licence discarding the masks.  The two objects are related by terms I
+    have not computed.  What is claimed here is only that `cosetU` is worth formalising on its own.
+
+    The cut is `split_inner` — the same lemma Tier 69 used for `tri3`, now public — applied to the
+    coset summand.  It uses nothing about `P3` and carries no hypothesis.
+
+    ⚠ The shifted `(2^(m+1)+b) ^^^ W` occurrences are deliberately left UNSIMPLIFIED, and grok
+    pointed out why that is not merely tidy but necessary: `(2^(m+1)+b) ⊕ W = (b ⊕ W) + 2^(m+1)`
+    holds only when bit `m+1` of `W` is clear.  For a label using the new top bit the middle factor
+    is a CROSS-HALF pair, not block `(1,1)` — so the next step's appeal to Tiers 66/70–74/82 is
+    licensed only under `W < 2^(m+1)`, which is exactly the range §57.35's recursion lives in. -/
+
+/-- The (unmasked) coset sum: `Σ_{a,b} P3 a b · P3 b (b⊕W) · P3 (b⊕W) a` at level `m`. -/
+def cosetU (m W : Nat) : Int :=
+  sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+    P3 a b W m * (P3 b (b ^^^ W) W m * P3 (b ^^^ W) a W m)))
+
+/-- **THE FOUR-BLOCK CUT.**  The level-`(m+1)` coset sum is its four index blocks. -/
+theorem cosetU_split4 (m W : Nat) :
+    cosetU (m+1) W
+      = sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+          P3 a b W (m+1) * (P3 b (b ^^^ W) W (m+1) * P3 (b ^^^ W) a W (m+1))))
+        + sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+            P3 a (2^(m+1)+b) W (m+1)
+              * (P3 (2^(m+1)+b) ((2^(m+1)+b) ^^^ W) W (m+1)
+                 * P3 ((2^(m+1)+b) ^^^ W) a W (m+1))))
+        + (sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+             P3 (2^(m+1)+a) b W (m+1)
+               * (P3 b (b ^^^ W) W (m+1) * P3 (b ^^^ W) (2^(m+1)+a) W (m+1))))
+           + sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+               P3 (2^(m+1)+a) (2^(m+1)+b) W (m+1)
+                 * (P3 (2^(m+1)+b) ((2^(m+1)+b) ^^^ W) W (m+1)
+                    * P3 ((2^(m+1)+b) ^^^ W) (2^(m+1)+a) W (m+1))))) := by
+  unfold cosetU
+  have h2 : (2:Nat)^(m+1+1) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  rw [h2]
+  exact split_inner (2^(m+1))
+    (fun a b => P3 a b W (m+1) * (P3 b (b ^^^ W) W (m+1) * P3 (b ^^^ W) a W (m+1)))
 
 end SounioZDFiberAntisym
 

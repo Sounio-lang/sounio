@@ -5126,9 +5126,37 @@ and both confirmed the reading that `(b, b⊕W)` sits on that locus with `l := b
 recursion needed it. zai checked the bit arithmetic on a worked example rather than taking it on
 trust.
 
-**Still not the recursion.** This closes a prerequisite. The recursion itself — the four-block split
-of the coset sum and the collection of the resulting terms — is not attempted, and I record no
-estimate of it.
+### 57.37 — Tier 83: the four-block cut, and two claims of mine corrected
+
+`cosetU` is the coset sum with **no masks at all** — no diagonal, index-`0` or `b = W` exclusions.
+It has its own measured level recursion, `U(m+1,W) = 4·U(m,W) + (40·2^m − 48)`, 0 violations at
+`m = 2,3` over every label and confirmed **out of sample at `m = 4`** (`c'(4) = 592`, predicted
+before computing). And the cut:
+
+    cosetU_split4 : cosetU (m+1) W = [block (0,0)] + [block (0,1)] + ([block (1,0)] + [block (1,1)])
+
+kernel-clean at `[propext, Quot.sound]`, green first try. The cut is `split_inner` — Tier 69's
+lemma, now public — applied to the coset summand; it uses nothing about `P3` and carries no
+hypothesis.
+
+**⚠ Two claims of mine were wrong, and the reviewers caught both.**
+
+*First,* I implied `cosetU` could stand in for §57.35's masked `Σ_coset` because both are
+fibre-constant and both satisfy a recursion of the same shape. **Both providers rejected that**: the
+excluded set is not where the summand vanishes, so parallel behaviour does not licence discarding
+the masks. The two objects are related by terms I have not computed. `cosetU` is worth formalising
+on its own; it is not a substitute.
+
+*Second,* I claimed the four blocks are now covered by Tiers 66/70–74/82. grok showed that is
+licensed only for `W < 2^(m+1)`: the identity `(2^(m+1)+b) ⊕ W = (b ⊕ W) + 2^(m+1)` needs bit `m+1`
+of `W` clear, and for a label using the new top bit the middle factor `P3 (2^(m+1)+b)
+((2^(m+1)+b)⊕W)` is a **cross-half** pair, not block `(1,1)`. It also noted the corollary that
+leaving those `⊕` unsimplified in the statement is not tidiness but necessity. `W < 2^(m+1)` is
+exactly the range §57.35's recursion lives in, so the route survives — but the unqualified claim did
+not.
+
+**Still not the recursion.** The cut is done; collecting the four blocks through the identities is
+not attempted, and I record no estimate.
 
 **Status of (III).** Still reduced, not proven — but the reduction is now a single explicit
 first-order recursion in `m` whose only non-constant input is a coset-line sum with a closed form.
