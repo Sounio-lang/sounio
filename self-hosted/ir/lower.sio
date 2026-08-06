@@ -421,6 +421,29 @@ fn ir_print_flat_name(buf: &[i8; 128], len: i64) with IO, Mut, Panic, Div {
 // the one shape this session has proved survives.
 var IR_LOWER_ERR_SITES: [i64; 64]
 
+// The first 8 UNRESOLVED IDENTIFIERS, verbatim. Site 15400 fires when an
+// ExprPath is neither an enum variant, nor None, nor a local, nor a function --
+// i.e. a name that lowering cannot resolve at all. It fired 3136 times in one
+// module while reporting only the ENCLOSING function's name, which says where
+// the compiler was and never what it was looking for. Flat arrays, because a
+// Name in a global overruns into its neighbours in this tree.
+var IR_LOWER_UNRES_BUF: [i8; 1024]
+var IR_LOWER_UNRES_LEN: [i64; 8]
+var IR_LOWER_UNRES_COUNT: i64 = 0
+
+pub fn lower_note_unresolved(n: Name) with Mut {
+    if IR_LOWER_UNRES_COUNT < 8 {
+        let base = IR_LOWER_UNRES_COUNT * 128
+        var i: i64 = 0
+        while i < n.len && i < 128 {
+            IR_LOWER_UNRES_BUF[(base + i) as usize] = n.buf[i as usize]
+            i = i + 1
+        }
+        IR_LOWER_UNRES_LEN[IR_LOWER_UNRES_COUNT as usize] = n.len
+    }
+    IR_LOWER_UNRES_COUNT = IR_LOWER_UNRES_COUNT + 1
+}
+
 pub fn lower_note_error(site: i64, n: Name) with Mut {
     IR_LOWER_ERROR_TOTAL = IR_LOWER_ERROR_TOTAL + 1
     if IR_LOWER_ERROR_TOTAL <= 64 {
@@ -447,6 +470,23 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
         print_int(IR_LOWER_ERROR_STAGE)
         print(" (1=external structs, 2=own items, 3=external bss) at module index ")
         print_int(IR_LOWER_ERROR_STAGE_IDX)
+        print("\n")
+    }
+    if IR_LOWER_UNRES_COUNT > 0 {
+        print("  unresolved identifiers (")
+        print_int(IR_LOWER_UNRES_COUNT)
+        print(" total, first 8):")
+        var u: i64 = 0
+        while u < IR_LOWER_UNRES_COUNT && u < 8 {
+            print(" `")
+            var c: i64 = 0
+            while c < IR_LOWER_UNRES_LEN[u as usize] && c < 128 {
+                print_char(IR_LOWER_UNRES_BUF[(u * 128 + c) as usize] as i64)
+                c = c + 1
+            }
+            print("`")
+            u = u + 1
+        }
         print("\n")
     }
     print("  lowering-error record: total=")
@@ -2276,6 +2316,28 @@ fn lowerer_preseed_external_items_into_acc_mut(
         match *current {
             Some(list) => {
                 let head_owned = (*list).head
+                // ENUMS, ALONGSIDE STRUCTS. This preseed registered struct
+                // layouts and nothing else, so lowering a dependency INTO THE
+                // ACCUMULATOR left the enum variant table empty. Every
+                // `SomeEnum::Variant` path then failed to resolve, fell through
+                // to the identifier lookup, and reported the ENUM'S TYPE NAME as
+                // an unresolved identifier:
+                //
+                //   into_acc failed at module index 1 of 120
+                //   unresolved identifiers: `IrOpcode` `BinaryOp`
+                //                           `TypeExprKind` `ItemKind` ...
+                //
+                // 3140 of them, all from one site, none of which said what was
+                // missing until the name was recorded. Struct layouts were
+                // seeded here from the start; enums were simply never added.
+                if head_owned.kind == ItemKind::ItemEnum {
+                    match head_owned.enum_def {
+                        Some(ed) => {
+                            lowerer_register_enum_variants_mut(lo, head_owned.name, &(*ed).variants, 0)
+                        }
+                        _ => {}
+                    }
+                }
                 if head_owned.kind == ItemKind::ItemStruct {
                     match head_owned.struct_def {
                         Some(sd) => {
@@ -15400,6 +15462,17 @@ impl Lowerer {
                     let lo3 = lo2.emit(ir_load_fn_ref(ref_reg, fn_id))
                     (lo3, ref_reg)
                 } else {
+                    // Record the LAST segment, not the first. For `IrOpcode::Add`
+                    // the fall-through above computes ir_path_first_name, which is
+                    // the ENUM TYPE -- so the first version of this ledger reported
+                    // `IrOpcode` `BinaryOp` `TypeExprKind` and looked like four
+                    // missing types when what actually failed was
+                    // lookup_variant_discriminant on the VARIANT.
+                    if e.path.seg_count >= 2 {
+                        lower_note_unresolved(ir_path_last_name(e.path))
+                    } else {
+                        lower_note_unresolved(n)
+                    }
                     let loe = self.report_error_at(15400)
                     loe.emit_unit()
                 }
