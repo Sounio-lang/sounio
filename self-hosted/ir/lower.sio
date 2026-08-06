@@ -351,15 +351,29 @@ pub fn ir_instr_census_report() with IO, Mut, Panic, Div {
 // lowerer_lower_fn_item_mut and this path does not go through that function.
 // Exactly one site in the compiler raises the flag, so recording its reason
 // there costs two stores and removes the anonymity for good.
-// No initialiser: the seed (lean_single) rejects a `Name { … }` fill literal in
-// a global, and this compiler BSS-zeroes `var` initialisers anyway. len 0 IS the
-// empty name, so all-zero is the correct initial state — the same reasoning as
-// IR_NAME_POOL in ir.sio, which hit this exact rejection first.
-var IR_LOWER_HARD_ERROR_FN: Name
+// PARALLEL FLAT ARRAYS, NOT `Name`. Storing a Name into a global OVERRUNS INTO
+// THE NEXT GLOBALS. Reproduced 2026-08-05 with a probe replicating this exact
+// declaration order, compiled by the seed that builds this compiler:
+//
+//   40-char names:  total=4702111234474983747  stage=4702111234474983745
+//                   = 0x4141414141414143 and 0x4141414141414141 — eight 'A'
+//                     bytes, i.e. the NAME's own contents, sitting in the two
+//                     i64 globals declared after it
+//   4-char names:   total=0  stage=2
+//                   — the short name's zero padding lands on total and erases it
+//
+// The second row IS the signature that was read for three commits as "no
+// lowering error was ever recorded". It was never a fact about lowering; it was
+// a neighbouring global being overwritten by padding. Every other place in this
+// tree that keeps a name in a global already uses flat bytes —
+// IR_NAME_POOL_BUF (ir.sio), GLOBAL_NAME_BUF, EXTERN_STUB_NAME_BUF — and these
+// two were the only `Name`-typed globals in it.
+var IR_LOWER_HARD_ERROR_FN_BUF: [i8; 128]
+var IR_LOWER_HARD_ERROR_FN_LEN: i64 = 0
 var IR_LOWER_HARD_ERROR_NEEDED: i64 = 0
-// Same reasoning as IR_LOWER_HARD_ERROR_FN: no initialiser, because the seed
-// rejects a `Name { … }` literal in a global and zero IS the empty name.
-var IR_LOWER_ERROR_FIRST_FN: Name
+// Same flat-array treatment, same reason.
+var IR_LOWER_ERROR_FIRST_FN_BUF: [i8; 128]
+var IR_LOWER_ERROR_FIRST_FN_LEN: i64 = 0
 var IR_LOWER_ERROR_TOTAL: i64 = 0
 // WHICH PRESEED STAGE first turned had_error true, and for the two that loop,
 // on which module index. The counters above proved the flag goes true without
@@ -381,10 +395,29 @@ fn lower_note_stage(stage: i64, idx: i64, flagged: bool) with Mut {
 // `lo.had_error = true` directly and never pass through it. That is why the
 // first attempt at naming the error came back empty — the counters were in
 // report_error and the failure was not. Both channels record here now.
+// Byte copy into parallel flats. `dst = src` on a Name-typed global is the
+// construct this replaces; see the declarations above for what it did.
+fn ir_copy_name_to_flat(src: &Name, buf: &! [i8; 128], len: &! i64) with Mut {
+    var i: i64 = 0
+    while i < (*src).len && i < 128 {
+        buf[i as usize] = (*src).buf[i as usize]
+        i = i + 1
+    }
+    *len = (*src).len
+}
+
+fn ir_print_flat_name(buf: &[i8; 128], len: i64) with IO, Mut, Panic, Div {
+    var i: i64 = 0
+    while i < len && i < 128 {
+        print_char(buf[i as usize] as i64)
+        i = i + 1
+    }
+}
+
 pub fn lower_note_error(n: Name) with Mut {
     IR_LOWER_ERROR_TOTAL = IR_LOWER_ERROR_TOTAL + 1
     if IR_LOWER_ERROR_TOTAL == 1 {
-        IR_LOWER_ERROR_FIRST_FN = n
+        ir_copy_name_to_flat(&n, &! IR_LOWER_ERROR_FIRST_FN_BUF, &! IR_LOWER_ERROR_FIRST_FN_LEN)
     }
 }
 var IR_LOWER_HARD_ERROR_LIMIT: i64 = 0
@@ -419,11 +452,7 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
         print("  lowering errors: ")
         print_int(IR_LOWER_ERROR_TOTAL)
         print(", first while lowering function `")
-        var f: i64 = 0
-        while f < IR_LOWER_ERROR_FIRST_FN.len && f < 128 {
-            print_char(IR_LOWER_ERROR_FIRST_FN.buf[f as usize] as i64)
-            f = f + 1
-        }
+        ir_print_flat_name(&IR_LOWER_ERROR_FIRST_FN_BUF, IR_LOWER_ERROR_FIRST_FN_LEN)
         print("`\n")
     }
     if IR_LOWER_HARD_ERROR == 0 {
@@ -431,11 +460,7 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
     }
     if IR_LOWER_HARD_ERROR_NEEDED > 0 {
         print("  cause: function `")
-        var i: i64 = 0
-        while i < IR_LOWER_HARD_ERROR_FN.len && i < 128 {
-            print_char(IR_LOWER_HARD_ERROR_FN.buf[i as usize] as i64)
-            i = i + 1
-        }
+        ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
         print("` needs at least ")
         print_int(IR_LOWER_HARD_ERROR_NEEDED)
         print(" IR instructions but IR_MAX_INSTRS is ")
@@ -451,9 +476,9 @@ pub fn lower_hard_error_reset() with Mut {
     IR_LOWER_HARD_ERROR = 0
     IR_LOWER_HARD_ERROR_NEEDED = 0
     IR_LOWER_HARD_ERROR_LIMIT = 0
-    IR_LOWER_HARD_ERROR_FN.len = 0
+    IR_LOWER_HARD_ERROR_FN_LEN = 0
     IR_LOWER_ERROR_TOTAL = 0
-    IR_LOWER_ERROR_FIRST_FN.len = 0
+    IR_LOWER_ERROR_FIRST_FN_LEN = 0
     IR_LOWER_ERROR_STAGE = 0
     IR_LOWER_ERROR_STAGE_IDX = 0
 }
@@ -9034,7 +9059,7 @@ impl Lowerer {
                 // that raises the flag. The end-of-body report in
                 // lowerer_lower_fn_item_mut is richer but only runs on the path
                 // that goes through it; this runs on every path.
-                IR_LOWER_HARD_ERROR_FN = (*current_func_box).name
+                ir_copy_name_to_flat(&(*current_func_box).name, &! IR_LOWER_HARD_ERROR_FN_BUF, &! IR_LOWER_HARD_ERROR_FN_LEN)
                 IR_LOWER_HARD_ERROR_LIMIT = IR_MAX_INSTRS
                 IR_LOWER_HARD_ERROR_NEEDED = IR_MAX_INSTRS + IR_INSTR_OVERFLOW_COUNT + 1
             }

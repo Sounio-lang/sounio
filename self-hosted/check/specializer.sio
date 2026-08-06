@@ -1615,6 +1615,37 @@ fn spec_dce_filter_items(
             let it = (*list).head
             let rest = spec_dce_filter_items((*list).tail, marks, mark_count)
             if it.kind == ItemKind::ItemFn {
+                // A MODULE-LEVEL GLOBAL IS ALSO AN ItemFn. parse_global_var_item
+                // and parse_global_let_item (parser/items.sio:1394, :1338) both
+                // build `kind: ItemKind::ItemFn` with `fn_def: None` -- there is
+                // no ItemVar in the enum. Lowering then gives each one an
+                // IrFunction slot with compile_strategy = IR_STRATEGY_BSS_GLOBAL,
+                // carrying its BSS offset and size (ir/lower.sio:1609).
+                //
+                // Nothing CALLS a global -- globals are read, not called -- so no
+                // reachability scan rooted at `main` can ever mark one, and
+                // filtering by marks alone deletes the program's BSS slots.
+                //
+                // Measured 2026-08-06, before this guard, on the ordinary
+                // multi-module path:
+                //
+                //   var G: [i64; 4]                    merged 4 -> 3, and
+                //   fn main() { print_int(G[0]) ... }  the binary printed NOTHING
+                //
+                // No crash and no diagnostic: bss_total_size is accumulated as
+                // the slots are lowered, so dropping one shifts every global
+                // after it and the program reads someone else's storage. A
+                // struct-typed global then segfaults outright. Confirmed by
+                // A/B against SOUNIO_DISABLE_MM_DCE=1 on the same binary.
+                //
+                // `fn_def: None` is the discriminator, and it is the RIGHT one:
+                // a real function always carries a body here, and the other
+                // fn_def-less ItemFns the parser builds are error-recovery
+                // stubs, which are harmless to keep and dangerous to guess at.
+                match it.fn_def {
+                    None => return Some(Box::new(ItemList { head: it, tail: rest }))
+                    Some(_) => {}
+                }
                 let h = ast_name_hash(it.name)
                 if spec_dce_hash_find(marks, mark_count, h) {
                     return Some(Box::new(ItemList { head: it, tail: rest }))
@@ -1652,6 +1683,22 @@ var SPEC_DCE_G_MARKS: [i64; 16384]
 var SPEC_DCE_G_COUNT: i64 = 0
 var SPEC_DCE_G_READY: i64 = 0
 
+// Memoised for the same reason as every other read_env in this file: the
+// runtime allocator never reclaims, so a call per invocation is a per-compile
+// leak.
+var SPEC_DCE_MM_OFF: i64 = 0
+var SPEC_DCE_MM_OFF_CHECKED: i64 = 0
+
+fn spec_dce_mm_disabled() -> bool with IO, Mut, Panic, Div {
+    if SPEC_DCE_MM_OFF_CHECKED == 0 {
+        SPEC_DCE_MM_OFF_CHECKED = 1
+        if str_eq(read_env("SOUNIO_DISABLE_MM_DCE"), "1") {
+            SPEC_DCE_MM_OFF = 1
+        }
+    }
+    SPEC_DCE_MM_OFF == 1
+}
+
 // Compute the live set across every loaded program. Returns the mark count, 0
 // if there is no `main` to root from, or -1 if the mark set could not be
 // completed — in which case the caller must NOT filter.
@@ -1661,6 +1708,29 @@ pub fn spec_dce_mark_across_programs(
 ) -> i64 with IO, Mut, Panic, Div, Alloc {
     SPEC_DCE_G_READY = 0
     SPEC_DCE_G_COUNT = 0
+
+    // SOUNIO_DISABLE_MM_DCE=1 forces the refusal path. Two reasons it exists.
+    //
+    // First, it is the only cheap way to attribute a miscompile to this pass. A
+    // Madaros built before cross-module DCE ran on the ordinary path and one
+    // built after are ~100 MB binaries from tree states that cannot be diffed,
+    // so "did the DCE do this?" otherwise costs a 40-minute rebuild per guess.
+    //
+    // Second, this pass deletes by SOURCE-LEVEL reachability, and lowering
+    // emits calls that no source-level scan can see. Measured 2026-08-06 on a
+    // 5-function program with a struct-typed global: 9 merged functions before,
+    // 7 after, and the emitted binary SILENTLY SKIPS `print_int(G.len)` -- no
+    // crash, no diagnostic, a statement that simply does not execute. The
+    // filter's own contract ("returns its input unchanged unless a COMPLETE
+    // mark set is ready") was honoured: the mark set was complete for the AST
+    // and still wrong for the program.
+    //
+    // Until the seed set covers what lowering synthesises, this knob is the
+    // difference between a suspected miscompile and a demonstrated one.
+    if spec_dce_mm_disabled() {
+        return 0 - 1
+    }
+
     var z: i64 = 0
     while z < SPEC_DCE_SLOTS {
         SPEC_DCE_G_MARKS[z as usize] = 0
