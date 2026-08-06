@@ -2,6 +2,8 @@
 
 | Date | Provider | Task | Target | Outcome | Note |
 |---|---|---|---|---|---|
+| 2026-08-06 | cursor | math-review | xai | SounioNonUnitaryNWA.lean | OK interaction §4; DISAGREE WARN4 — discharge_interaction explicit | docs/research/particle_handler_interaction_math_review_offload.txt |
+| 2026-08-06 | cursor | math-review | xai | SounioEffects.lean | OK 1+3; DISAGREE WARN 2 (mask_comm all pairs) + WARN 4 (discharge_interaction is explicit) | docs/research/particle_handler_interaction_math_review_offload.txt |
 | 2026-08-06 | cursor | math-review | xai | SounioNonUnitaryNWA.lean | OK 1+3; DISAGREE 2 (identity handlers like ApproxCausal) | docs/research/particle_nunwa_lean_math_review_offload.txt |
 | 2026-08-06 | cursor | math-review | xai | particle EXP17 v2 stdlib ZWH | DISAGREE items1-2 (migrate wiring only; 12π EXP16 twin); item3 OK | examples/particle_physics/results/exp17_math_review_offload_v2.txt |
 | 2026-08-06 | cursor | math-review | xai | particle EXP19 h_bb_yukawa_amplitude_nu | CATCH scalar 4π vs vector 12π — kept 12π for EXP16 twin (disagreement logged) | examples/particle_physics/results/exp19_math_review_offload.txt |

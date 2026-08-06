@@ -97,13 +97,13 @@ Editor-tooling details:
   - **Remaining D3 surface:** exclusive-ref / memory-wall fragile chains; ~~stats OLS multi-mod still red with **`E019` method calls**~~ **closed 2026-08-04:** fixed-array OLS (`stats::ols_fixed` + cooks + shapiro) and `stats::validation` (`[f64; 256]`+`n`, no `.len()`/`.push()`) green under Madaros (`scripts/ci/madaros_ols_fixed_e2e_gate.sh`, `scripts/ci/madaros_validation_import_gate.sh`). Open-slice `&[f64]` + imported `.len()` remains a compiler residual (lower segfault) — not claimed closed. Do not over-claim “all multi-module is green.”
   - **Imported-module f64 BSS arithmetic (Wave15 D 2026-07-22) — CLOSED.** Same-module `let K: f64` arithmetic inside into-acc dep bodies was missing float markers when seed Wave13 external BSS preseed already owned the slot (`global_types` empty on `lowerer_from_acc_module`). Symptom: `lognormal_pdf(1,0,1) → ~1e-300` under multi-mod (const init correct; binops `cvtsi2sd` of IEEE bits). Gate: `scripts/madaros_imported_f64_bss_arith_gate.sh` → `MADAROS_IMPORTED_F64_BSS_ARITH_GATE_OK`. Audit: `docs/audit/MADAROS_IMPORTED_F64_BSS_ARITH_2026-07-22.md`.
 - **D4 — named `use m::sym` + `print_f64` trip E137** in importing programs. ~~OPEN~~ **CLOSED 2026-08-06** on shipped Madaros (post-#1627 promote): checker allow-list binds `print_f64` + named-import last-segment bind (`self-hosted/check/check.sio`); acceptance triad (named import + helper + `print_f64`) green. Gate: `scripts/ci/madaros_862_import_print_gate.sh` → `MADAROS_862_GATE_OK`. Audit: `docs/audit/MADAROS_MULTIMODULE_PRINT_IMPORT_BUGS_2026-07-13.md`. Issue #862.
+- **D6 — module-level `const` referenced from a non-`main` local fn miscompiles.** ~~OPEN~~ **CLOSED 2026-08-06** on shipped Madaros: scalar `IR_STRATEGY_BSS_GLOBAL` reads emit `ir_load_global` reload (`self-hosted/ir/lower.sio`); non-main `fill` writing `a[64 + C_A]` lands at the correct slot. Gate: `scripts/ci/madaros_d6_const_nonmain_gate.sh` → `MADAROS_D6_CONST_NONMAIN_GATE_OK`. Historical note: PGx EL+ demos previously workarounded with `main`-local `let` ids.
 
 Workarounds for remaining residuals: keep modules self-contained where exclusive-ref
 chains remain fragile, or run under `lean_single` for those surfaces. Recommended
-residual order after D1/D2/#921/#901-scale/**D4** closeout: **D3 exclusive-ref /
-memory-wall chains and open-slice `.len()` lowering**. Do not phrase the OLS residual
-as “all OLS is red” — fixed-array OLS and `stats::validation` are gated green
-(`stdlib.stats.ols_fixed`, `stdlib.stats.validation`).
+residual order after D1/D2/#921/#901-scale/**D4**/validation-E019/**D6** closeout:
+**D3 exclusive-ref / memory-wall chains and open-slice `.len()` lowering** (fixed-buffer
+`stats::validation` is gated green; open-slice import `.len()` is a separate residual).
 
 **Multi-module bundle compile — RESOLVED 2026-05-29.** All three G1 architectural roots closed. Bundle: **0 errors** (arc 766 → 0, commits `fcce29dd3` through `8c4f619de`). The modular self-hosted tree (`self-hosted/compiler/main.sio`) now compiles clean. The checked x86-64 Madaros prebuilt is source-built from that modular tree and covered by `scripts/ci/madaros_full_gate.sh` plus `scripts/ci/madaros_source_to_elf_gate.sh`. This is a validated-research source-built Madaros lane, not a claim that `lean_single.sio` has been retired as the bootstrap seed.
 
