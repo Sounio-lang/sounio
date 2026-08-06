@@ -4738,6 +4738,32 @@ pub fn ir_float_bits_capacity() -> i64 { 2048 }
 // see ir_float_bits_set.
 pub var IR_FLOAT_BITS_OVER_CAP: i64 = 0
 
+// #1669 probe. The hot sites carry no IO -- giving them any would cascade to
+// every caller, which is the failure that desynchronised the checker -- so the
+// evidence is accumulated here and printed from the driver, where IO already is.
+//
+//   WRITES  bits actually flipped on by ir_float_bits_set
+//   GETS    times ir_float_bits_get answered true
+//   LIVE    bits still set across the module when codegen is about to run
+//
+// WRITES > 0 with LIVE == 0 means the writes are landing somewhere that does not
+// survive to codegen -- a copy, or the 512-byte aggregate store defect that
+// lower.sio:1652 documents for the identically-shaped param_regs.
+// MEASURED 2026-08-06 and the reason the consumers below are inert: a probe on a
+// five-line program reported writes=8 but live_at_codegen=3363 -- roughly a third
+// of all bits set across the module. The field is NOT reliably zero-initialised,
+// so seeding anything from it is seeding from garbage. IrModule builds its
+// functions with `[ir_empty_function(); 2048]`, a repeat initialiser, and
+// IrFunction just grew by a 512-byte array -- the same shape lower.sio:1652
+// documents as miscompiled for param_regs.
+//
+// Until that is understood, consumers must not trust the bits. Flip this to 1
+// only with a probe showing live_at_codegen == writes.
+pub let IR_FLOAT_BITS_TRUSTED: i64 = 0
+
+pub var IR_FLOAT_BITS_WRITES: i64 = 0
+pub var IR_FLOAT_BITS_GETS: i64 = 0
+
 fn ir_float_bit_mask(bit: i64) -> i64 {
     var m: i64 = 1
     var k: i64 = 0
@@ -4755,7 +4781,26 @@ pub fn ir_float_bits_get(f: &IrFunction, reg: i64) -> bool with Mut, Panic, Div 
     if reg < 0 || reg >= ir_float_bits_capacity() { return false }
     let word = reg / 32
     let bit = reg % 32
-    ((*f).float_reg_bits[word as usize] / ir_float_bit_mask(bit)) % 2 == 1
+    let hit = ((*f).float_reg_bits[word as usize] / ir_float_bit_mask(bit)) % 2 == 1
+    if hit { IR_FLOAT_BITS_GETS = IR_FLOAT_BITS_GETS + 1 }
+    hit
+}
+
+// Set bits still visible across a whole module. Called from the driver just
+// before codegen: this is the number that separates "never written" from
+// "written and lost in transit".
+pub fn ir_module_count_float_bits(module: &IrModule) -> i64 with Mut, Panic, Div {
+    var total: i64 = 0
+    var fi: i64 = 0
+    while fi < (*module).fn_count && fi < IR_MAX_FUNCS {
+        var r: i64 = 0
+        while r < ir_float_bits_capacity() {
+            if ir_float_bits_get(&(*module).functions[fi as usize], r) { total = total + 1 }
+            r = r + 1
+        }
+        fi = fi + 1
+    }
+    total
 }
 
 pub fn ir_float_bits_set(f: &! IrFunction, reg: i64) -> i64 with Mut, Panic, Div {
@@ -4781,6 +4826,7 @@ pub fn ir_float_bits_set(f: &! IrFunction, reg: i64) -> i64 with Mut, Panic, Div
     let mask = ir_float_bit_mask(bit)
     if ((*f).float_reg_bits[word as usize] / mask) % 2 == 0 {
         (*f).float_reg_bits[word as usize] = (*f).float_reg_bits[word as usize] + mask
+        IR_FLOAT_BITS_WRITES = IR_FLOAT_BITS_WRITES + 1
     }
     IR_ARENA_OK
 }
