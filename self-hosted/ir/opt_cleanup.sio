@@ -32,6 +32,24 @@ struct OcpCseTables {
 
 // Mirrors the fixed register-indexed tables in cleanup passes A2/B. A future
 // pass-capacity change must update this named boundary and its focused gate.
+// Diagnostic peel mask, set from the environment by the driver (which has IO;
+// this dispatcher does not, and giving it IO would cascade -- that cascade is
+// what desynchronised the checker in #1649). 0 means every peel runs, so the
+// default behaviour is unchanged.
+//
+//   bit 0  ocp_mfi_redundant_jump
+//   bit 1  ocp_mfi_jump_to_return
+//   bit 2  ocp_mfi_dead_after_jump
+//   bit 3  ocp_mfi_dead_label
+//   bit 4  ocp_mfi_dedup_imm      bit 8   ocp_mfi_cse
+//   bit 5  ocp_mfi_const_fold     bit 9   the ocp_mfi_dce_once loop
+//   bit 6  ocp_mfi_copy_prop      bit 10  ocp_mfi_sccp
+//   bit 7  ocp_mfi_dse            bit 11  ocp_mfi_compact_nops
+//
+// Exists because bisecting these four otherwise costs one full compiler build
+// each; with the mask it is one build and then seconds per experiment.
+pub var OCP_SKIP_MASK: i64 = 0
+
 let OCP_REBRACKET_TRACKED_REG_LIMIT: i64 = 256
 
 // The reachability witness below is intentionally bounded to the current
@@ -9658,27 +9676,31 @@ fn opt_cleanup_function_mfi(module: &! IrModule, fi: i64) with Mut, Div, Panic {
     if ic <= 0 {
         return
     }
-    ocp_mfi_dedup_imm(module, fi)
-    ocp_mfi_const_fold(module, fi)
-    ocp_mfi_copy_prop(module, fi)
-    ocp_mfi_dse(module, fi)
-    ocp_mfi_redundant_jump(module, fi)
-    ocp_mfi_jump_to_return(module, fi)
-    ocp_mfi_dead_after_jump(module, fi)
-    ocp_mfi_dead_label(module, fi)
-    ocp_mfi_cse(module, fi)
-    var iter: i64 = 0
-    while iter < 8 {
-        let removed = ocp_mfi_dce_once(module, fi)
-        if removed == 0 {
-            iter = 8
+    if (OCP_SKIP_MASK / 16) % 2 == 0 { ocp_mfi_dedup_imm(module, fi) }
+    if (OCP_SKIP_MASK / 32) % 2 == 0 { ocp_mfi_const_fold(module, fi) }
+    if (OCP_SKIP_MASK / 64) % 2 == 0 { ocp_mfi_copy_prop(module, fi) }
+    if (OCP_SKIP_MASK / 128) % 2 == 0 { ocp_mfi_dse(module, fi) }
+    if OCP_SKIP_MASK % 2 == 0 { ocp_mfi_redundant_jump(module, fi) }
+    if (OCP_SKIP_MASK / 2) % 2 == 0 { ocp_mfi_jump_to_return(module, fi) }
+    if (OCP_SKIP_MASK / 4) % 2 == 0 { ocp_mfi_dead_after_jump(module, fi) }
+    if (OCP_SKIP_MASK / 8) % 2 == 0 { ocp_mfi_dead_label(module, fi) }
+    if (OCP_SKIP_MASK / 256) % 2 == 0 { ocp_mfi_cse(module, fi) }
+    if (OCP_SKIP_MASK / 512) % 2 == 0 {
+        var iter: i64 = 0
+        while iter < 8 {
+            let removed = ocp_mfi_dce_once(module, fi)
+            if removed == 0 {
+                iter = 8
+            }
+            iter = iter + 1
         }
-        iter = iter + 1
     }
     // SCCP-lite + compact: previously deferred (by-value path only).
-    ocp_mfi_sccp(module, fi)
-    let _ = ocp_mfi_dce_once(module, fi)
-    ocp_mfi_compact_nops(module, fi)
+    if (OCP_SKIP_MASK / 1024) % 2 == 0 {
+        ocp_mfi_sccp(module, fi)
+        let _ = ocp_mfi_dce_once(module, fi)
+    }
+    if (OCP_SKIP_MASK / 2048) % 2 == 0 { ocp_mfi_compact_nops(module, fi) }
 }
 
 // Run safe field-wise cleanup on every function without copying IrModule or
