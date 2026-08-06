@@ -419,7 +419,18 @@ fn ir_print_flat_name(buf: &[i8; 128], len: i64) with IO, Mut, Panic, Div {
 // shape recorded as miscompiled in this tree -- and it came back EMPTY on the
 // first real reading, naming nothing. A call-site id is an i64 in a flat array:
 // the one shape this session has proved survives.
+// A HISTOGRAM, not a sample. This was "the first 64 site ids, in order", and
+// the report printed those 64 -- which for one compile were all 15400. Read
+// beside `total=3177` that looked like 3177 errors at one site. It is not: only
+// 111 were, and the other ~3066 were at sites the window never reached. The
+// mismatch against the unresolved-name counter (111) was then taken for a
+// corrupted counter rather than for what it was, a misread sample.
+//
+// Parallel flats: site id and its count. 64 distinct sites exceeds the number
+// of report_error_at callers in this file.
 var IR_LOWER_ERR_SITES: [i64; 64]
+var IR_LOWER_ERR_SITE_N: [i64; 64]
+var IR_LOWER_ERR_SITE_COUNT: i64 = 0
 
 // The first 8 UNRESOLVED IDENTIFIERS, verbatim. Site 15400 fires when an
 // ExprPath is neither an enum variant, nor None, nor a local, nor a function --
@@ -444,10 +455,281 @@ pub fn lower_note_unresolved(n: Name) with Mut {
     IR_LOWER_UNRES_COUNT = IR_LOWER_UNRES_COUNT + 1
 }
 
+// ============================================================================
+// ENUM-VARIANT REGISTRATION LEDGER (2026-08-06, one measuring build)
+//
+// Answers, without changing any behaviour: how many DISTINCT (enum, variant)
+// pairs the closure needs, how many attempts happen and from which caller, how
+// many are duplicates, and whether the unresolved lookups at 15400 are the
+// downstream of the counted drops at 2066 or of something never counted.
+//
+// Flat scalars and flat arrays only. A struct-typed global overruns into its
+// BSS neighbours in this compiler, which would corrupt the 15400/2066 histogram
+// this run has to reproduce as its control.
+//
+// Every counter keeps counting past its capture array's capacity. A ledger that
+// stops counting when its window fills is the "first 64 sites" misread again.
+// ============================================================================
+
+// Is the enum ITEM even reached by the walk, and does it carry its variants?
+// 107 of the 111 unresolved variant names were never ATTEMPTED, so the question
+// is upstream of registration: either the item is not walked, or it arrives
+// with enum_def = None.
+var EV_ITEM_ENUM: i64 = 0
+var EV_ITEM_ENUM_NODEF: i64 = 0
+var EV_ITEM_NAMES: [i8; 4096]
+var EV_ITEM_NAME_LEN: [i64; 32]
+var EV_ITEM_NAME_N: i64 = 0
+var EV_WALK_PROGRAMS: i64 = 0
+var EV_WALK_ITEMS: i64 = 0
+
+var EV_ATT_TOTAL: i64 = 0
+var EV_DUP_TOTAL: i64 = 0
+var EV_DROP_TOTAL: i64 = 0
+var EV_SUM_ATT: i64 = 0
+var EV_SUM_DROP: i64 = 0
+var EV_DEDUP_SKIP: i64 = 0
+var EV_UNRES_SEEN: i64 = 0
+var EV_UNRES_NEVER: i64 = 0
+
+// site id 0 is RESERVED for "unattributed": a caller missed by the sweep shows
+// up as a nonzero site-0 bucket instead of merging silently into another site.
+var EV_SITE_ID: [i64; 64]
+var EV_SITE_ATT: [i64; 64]
+var EV_SITE_DUP: [i64; 64]
+var EV_SITE_DROP: [i64; 64]
+var EV_SITE_N: i64 = 0
+
+// Process-wide distinct ledgers, FNV-1a-64. Q1's answer.
+var EV_PAIRS: [i64; 4096]
+var EV_PAIR_N: i64 = 0
+// VERBATIM, not hashed. "Was this variant ever registered?" is the measurement
+// the whole investigation turns on, so it does not get to depend on a hash I
+// wrote and did not validate. Direct byte comparison: no collisions, no
+// overflow, no cleverness.
+var EV_VN_BUF: [i8; 262144]
+var EV_VN_LEN: [i64; 2048]
+var EV_VN_N: i64 = 0
+var EV_LEDGER_SAT: i64 = 0
+
+// Generations: the table is rebuilt per dep, so the requirement is the MAX over
+// lowerers, not the total. gen starts at 1 -- 0 means "never constructed",
+// which matters because var inits are BSS-zeroed.
+var EV_GEN: i64 = 0
+var EV_GEN_ATT: [i64; 512]
+var EV_GEN_DUP: [i64; 512]
+var EV_GEN_DROP: [i64; 512]
+var EV_GEN_FINAL: [i64; 512]
+var EV_GEN_SAT: i64 = 0
+var EV_MAX_FILL: i64 = 0
+var EV_MAX_FILL_GEN: i64 = 0
+
+// First 16 dropped pairs, and first 8 dedup-skipped enum names, verbatim.
+var EV_DROP_BUF: [i8; 2048]
+var EV_DROP_LEN: [i64; 16]
+var EV_SKIP_BUF: [i8; 1024]
+var EV_SKIP_LEN: [i64; 8]
+
+// MODULUS 1e9+7, NOT 2^62. The first version of this used
+// `% 4611686018427387847`, which lets h reach ~4.6e18; h * 31 is then ~1.4e20
+// against an i64 ceiling of 9.2e18, so it overflowed on nearly every name and
+// the ledger it fed was noise. It reported "107 of 111 variants never
+// registered" while the walk census showed their enums being walked AND
+// registered -- two measurements from the same build contradicting each other,
+// which is how the overflow was caught.
+//
+// h < 1e9 here, so h * 31 + 255 < 3.2e10. No overflow is possible.
+fn ev_hash_pair(a: Name, b: Name) -> i64 with Mut, Panic, Div {
+    var h: i64 = 5381
+    var i: i64 = 0
+    while i < a.len && i < 128 {
+        h = (h * 31 + (a.buf[i as usize] as i64)) % 1000000007
+        i = i + 1
+    }
+    h = (h * 31 + 7) % 1000000007
+    var j: i64 = 0
+    while j < b.len && j < 128 {
+        h = (h * 31 + (b.buf[j as usize] as i64)) % 1000000007
+        j = j + 1
+    }
+    h
+}
+
+fn ev_ledger_add(tbl: &! [i64; 4096], n: &! i64, h: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < *n && i < 4096 {
+        if tbl[i as usize] == h { return false }
+        i = i + 1
+    }
+    if *n < 4096 {
+        tbl[*n as usize] = h
+        *n = *n + 1
+        return true
+    }
+    EV_LEDGER_SAT = 1
+    false
+}
+
+fn ev_site_slot(site: i64) -> i64 with Mut {
+    var i: i64 = 0
+    while i < EV_SITE_N && i < 64 {
+        if EV_SITE_ID[i as usize] == site { return i }
+        i = i + 1
+    }
+    if EV_SITE_N < 64 {
+        let k = EV_SITE_N
+        EV_SITE_ID[k as usize] = site
+        EV_SITE_N = EV_SITE_N + 1
+        return k
+    }
+    0 - 1
+}
+
+fn ev_gen_slot() -> i64 with Mut {
+    if EV_GEN >= 1 && EV_GEN <= 512 { return EV_GEN - 1 }
+    EV_GEN_SAT = 1
+    0 - 1
+}
+
+// Called at every point a lowerer's enum table is created or reset.
+pub fn ev_note_generation() with Mut {
+    EV_GEN = EV_GEN + 1
+}
+
+// Wrapper so every construction site is counted without touching each one.
+fn ev_gen_boxed_empty_enum_variant_table() -> Box<EnumVariantTable> with Mut, Alloc {
+    ev_note_generation()
+    Box::new(empty_enum_variant_table())
+}
+
+fn ev_note_attempt(site: i64, enum_name: Name, variant_name: Name, is_dup: bool, dropped: bool) with Mut, Panic, Div {
+    EV_ATT_TOTAL = EV_ATT_TOTAL + 1
+    if is_dup { EV_DUP_TOTAL = EV_DUP_TOTAL + 1 }
+    if dropped { EV_DROP_TOTAL = EV_DROP_TOTAL + 1 }
+
+    let ss = ev_site_slot(site)
+    if ss >= 0 {
+        EV_SITE_ATT[ss as usize] = EV_SITE_ATT[ss as usize] + 1
+        if is_dup { EV_SITE_DUP[ss as usize] = EV_SITE_DUP[ss as usize] + 1 }
+        if dropped { EV_SITE_DROP[ss as usize] = EV_SITE_DROP[ss as usize] + 1 }
+    }
+    let gs = ev_gen_slot()
+    if gs >= 0 {
+        EV_GEN_ATT[gs as usize] = EV_GEN_ATT[gs as usize] + 1
+        if is_dup { EV_GEN_DUP[gs as usize] = EV_GEN_DUP[gs as usize] + 1 }
+        if dropped { EV_GEN_DROP[gs as usize] = EV_GEN_DROP[gs as usize] + 1 }
+    }
+    var _p = ev_ledger_add(&! EV_PAIRS, &! EV_PAIR_N, ev_hash_pair(enum_name, variant_name))
+    ev_vname_add(variant_name)
+
+    if dropped && EV_DROP_TOTAL <= 16 {
+        let base = (EV_DROP_TOTAL - 1) * 128
+        var w: i64 = 0
+        var q: i64 = 0
+        while q < enum_name.len && w < 127 {
+            EV_DROP_BUF[(base + w) as usize] = enum_name.buf[q as usize]
+            w = w + 1
+            q = q + 1
+        }
+        if w < 127 { EV_DROP_BUF[(base + w) as usize] = 58  w = w + 1 }
+        var r: i64 = 0
+        while r < variant_name.len && w < 127 {
+            EV_DROP_BUF[(base + w) as usize] = variant_name.buf[r as usize]
+            w = w + 1
+            r = r + 1
+        }
+        EV_DROP_LEN[(EV_DROP_TOTAL - 1) as usize] = w
+    }
+}
+
+// Is this variant name known to ANY generation? Distinguishes a table that was
+// composed wrong from a variant that never reached a registration path at all.
+fn ev_vname_eq(slot: i64, n: Name) -> bool with Mut, Panic, Div {
+    if EV_VN_LEN[slot as usize] != n.len { return false }
+    let base = slot * 128
+    var i: i64 = 0
+    while i < n.len && i < 128 {
+        if EV_VN_BUF[(base + i) as usize] != n.buf[i as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn ev_vname_add(n: Name) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < EV_VN_N && i < 2048 {
+        if ev_vname_eq(i, n) { return }
+        i = i + 1
+    }
+    if EV_VN_N < 2048 {
+        let base = EV_VN_N * 128
+        var j: i64 = 0
+        while j < n.len && j < 128 {
+            EV_VN_BUF[(base + j) as usize] = n.buf[j as usize]
+            j = j + 1
+        }
+        EV_VN_LEN[EV_VN_N as usize] = n.len
+        EV_VN_N = EV_VN_N + 1
+    } else {
+        EV_LEDGER_SAT = 1
+    }
+}
+
+pub fn ev_variant_ever_seen(variant_name: Name) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < EV_VN_N && i < 2048 {
+        if ev_vname_eq(i, variant_name) { return true }
+        i = i + 1
+    }
+    false
+}
+
+pub fn ev_note_enum_item(enum_name: Name, has_def: bool) with Mut {
+    EV_ITEM_ENUM = EV_ITEM_ENUM + 1
+    if !has_def { EV_ITEM_ENUM_NODEF = EV_ITEM_ENUM_NODEF + 1 }
+    if EV_ITEM_NAME_N < 32 {
+        let base = EV_ITEM_NAME_N * 128
+        var i: i64 = 0
+        while i < enum_name.len && i < 127 {
+            EV_ITEM_NAMES[(base + i) as usize] = enum_name.buf[i as usize]
+            i = i + 1
+        }
+        EV_ITEM_NAME_LEN[EV_ITEM_NAME_N as usize] = enum_name.len
+        EV_ITEM_NAME_N = EV_ITEM_NAME_N + 1
+    }
+}
+
+pub fn ev_note_walk_program() with Mut { EV_WALK_PROGRAMS = EV_WALK_PROGRAMS + 1 }
+pub fn ev_note_walk_item() with Mut { EV_WALK_ITEMS = EV_WALK_ITEMS + 1 }
+
+pub fn ev_note_dedup_skip(enum_name: Name) with Mut {
+    EV_DEDUP_SKIP = EV_DEDUP_SKIP + 1
+    if EV_DEDUP_SKIP <= 8 {
+        let base = (EV_DEDUP_SKIP - 1) * 128
+        var i: i64 = 0
+        while i < enum_name.len && i < 127 {
+            EV_SKIP_BUF[(base + i) as usize] = enum_name.buf[i as usize]
+            i = i + 1
+        }
+        EV_SKIP_LEN[(EV_DEDUP_SKIP - 1) as usize] = enum_name.len
+    }
+}
+
 pub fn lower_note_error(site: i64, n: Name) with Mut {
     IR_LOWER_ERROR_TOTAL = IR_LOWER_ERROR_TOTAL + 1
-    if IR_LOWER_ERROR_TOTAL <= 64 {
-        IR_LOWER_ERR_SITES[(IR_LOWER_ERROR_TOTAL - 1) as usize] = site
+    var si: i64 = 0
+    var found = false
+    while si < IR_LOWER_ERR_SITE_COUNT && si < 64 {
+        if IR_LOWER_ERR_SITES[si as usize] == site {
+            IR_LOWER_ERR_SITE_N[si as usize] = IR_LOWER_ERR_SITE_N[si as usize] + 1
+            found = true
+        }
+        si = si + 1
+    }
+    if !found && IR_LOWER_ERR_SITE_COUNT < 64 {
+        IR_LOWER_ERR_SITES[IR_LOWER_ERR_SITE_COUNT as usize] = site
+        IR_LOWER_ERR_SITE_N[IR_LOWER_ERR_SITE_COUNT as usize] = 1
+        IR_LOWER_ERR_SITE_COUNT = IR_LOWER_ERR_SITE_COUNT + 1
     }
     if IR_LOWER_ERROR_TOTAL == 1 {
         ir_copy_name_to_flat(&n, &! IR_LOWER_ERROR_FIRST_FN_BUF, &! IR_LOWER_ERROR_FIRST_FN_LEN)
@@ -470,6 +752,104 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
         print_int(IR_LOWER_ERROR_STAGE)
         print(" (1=external structs, 2=own items, 3=external bss) at module index ")
         print_int(IR_LOWER_ERROR_STAGE_IDX)
+        print("\n")
+    }
+    print("  ev attempts=")
+    print_int(EV_ATT_TOTAL)
+    print(" dup=")
+    print_int(EV_DUP_TOTAL)
+    print(" drop=")
+    print_int(EV_DROP_TOTAL)
+    print(" distinct_pairs=")
+    print_int(EV_PAIR_N)
+    print(" distinct_variants=")
+    print_int(EV_VN_N)
+    print("\n")
+    print("  ev summary_channel: att=")
+    print_int(EV_SUM_ATT)
+    print(" DROP=")
+    print_int(EV_SUM_DROP)
+    print(" | dedup_skip=")
+    print_int(EV_DEDUP_SKIP)
+    print(" | unresolved seen=")
+    print_int(EV_UNRES_SEEN)
+    print(" never=")
+    print_int(EV_UNRES_NEVER)
+    print("\n")
+    print("  ev generations=")
+    print_int(EV_GEN)
+    print(" max_fill=")
+    print_int(EV_MAX_FILL)
+    print(" at_gen=")
+    print_int(EV_MAX_FILL_GEN)
+    print(" ledger_sat=")
+    print_int(EV_LEDGER_SAT)
+    print(" gen_sat=")
+    print_int(EV_GEN_SAT)
+    print("\n")
+    print("  ev walk: programs=")
+    print_int(EV_WALK_PROGRAMS)
+    print(" items=")
+    print_int(EV_WALK_ITEMS)
+    print(" enum_items=")
+    print_int(EV_ITEM_ENUM)
+    print(" of_which_no_def=")
+    print_int(EV_ITEM_ENUM_NODEF)
+    print("\n")
+    print("  ev enum items seen:")
+    var evi: i64 = 0
+    while evi < EV_ITEM_NAME_N && evi < 32 {
+        print(" ")
+        var evj: i64 = 0
+        while evj < EV_ITEM_NAME_LEN[evi as usize] && evj < 128 {
+            print_char(EV_ITEM_NAMES[(evi * 128 + evj) as usize] as i64)
+            evj = evj + 1
+        }
+        evi = evi + 1
+    }
+    print("\n")
+    print("  ev per-site (id att dup drop):")
+    var evs: i64 = 0
+    while evs < EV_SITE_N && evs < 64 {
+        print(" ")
+        print_int(EV_SITE_ID[evs as usize])
+        print(":")
+        print_int(EV_SITE_ATT[evs as usize])
+        print("/")
+        print_int(EV_SITE_DUP[evs as usize])
+        print("/")
+        print_int(EV_SITE_DROP[evs as usize])
+        evs = evs + 1
+    }
+    print("\n")
+    if EV_DROP_TOTAL > 0 {
+        print("  ev dropped pairs:")
+        var evd: i64 = 0
+        while evd < EV_DROP_TOTAL && evd < 16 {
+            print(" `")
+            var evc: i64 = 0
+            while evc < EV_DROP_LEN[evd as usize] && evc < 128 {
+                print_char(EV_DROP_BUF[(evd * 128 + evc) as usize] as i64)
+                evc = evc + 1
+            }
+            print("`")
+            evd = evd + 1
+        }
+        print("\n")
+    }
+    if EV_DEDUP_SKIP > 0 {
+        print("  ev dedup-skipped enums:")
+        var evk: i64 = 0
+        while evk < EV_DEDUP_SKIP && evk < 8 {
+            print(" `")
+            var evm: i64 = 0
+            while evm < EV_SKIP_LEN[evk as usize] && evm < 128 {
+                print_char(EV_SKIP_BUF[(evk * 128 + evm) as usize] as i64)
+                evm = evm + 1
+            }
+            print("`")
+            evk = evk + 1
+        }
         print("\n")
     }
     if IR_LOWER_UNRES_COUNT > 0 {
@@ -508,17 +888,17 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
         // current_func gave nothing, NOT that there is nothing to say -- these
         // ids name the lower.sio line each error was raised from, in order.
         // 6514 is Lowerer::report_error, the funnel that ~54 call sites reach.
-        print("  raised at lower.sio lines:")
+        print("  raised at lower.sio lines (site x count):")
         var e: i64 = 0
-        while e < IR_LOWER_ERROR_TOTAL && e < 64 {
+        while e < IR_LOWER_ERR_SITE_COUNT && e < 64 {
             print(" ")
             print_int(IR_LOWER_ERR_SITES[e as usize])
+            print("x")
+            print_int(IR_LOWER_ERR_SITE_N[e as usize])
             e = e + 1
         }
-        if IR_LOWER_ERROR_TOTAL > 64 {
-            print(" (first 64 of ")
-            print_int(IR_LOWER_ERROR_TOTAL)
-            print(")")
+        if IR_LOWER_ERR_SITE_COUNT >= 64 {
+            print(" (site table full at 64 distinct)")
         }
         print("\n")
     }
@@ -919,6 +1299,10 @@ fn lowerer_new() -> Lowerer with Alloc {
         loop_depth: 0,
         error_count: 0,
         had_error: false,
+        // NOT generation-counted: this constructor's signature declares neither
+        // Mut nor Alloc, and widening it would ripple through its callers and
+        // change more than this build is measuring. EV_GEN is therefore a LOWER
+        // BOUND on constructions -- read it as such.
         enum_variants: Box::new(empty_enum_variant_table()),
         struct_layouts: Box::new(empty_struct_layout_table()),
         global_types: Box::new(empty_lower_global_type_table()),
@@ -1203,6 +1587,10 @@ fn lowerer_lookup_fn_id_by_name_ref(lo: &Lowerer, name: Name) -> i64 with Mut, P
 pub fn ir_empty_program_summary() -> IrProgramSummary {
     IrProgramSummary {
         module: Box::new(ir_empty_module()),
+        // NOT generation-counted: this constructor's signature declares neither
+        // Mut nor Alloc, and widening it would ripple through its callers and
+        // change more than this build is measuring. EV_GEN is therefore a LOWER
+        // BOUND on constructions -- read it as such.
         enum_variants: Box::new(empty_enum_variant_table()),
         struct_layouts: Box::new(empty_struct_layout_table()),
         global_types: Box::new(empty_lower_global_type_table()),
@@ -1282,7 +1670,7 @@ fn lowerer_seed_metadata_from_summary(lo_in: Lowerer, summary: &IrProgramSummary
     var enum_variants = *lo.enum_variants
     enum_variants.count = 0
     var vi: i64 = 0
-    while vi < (*summary.enum_variants).count && vi < 1024 {
+    while vi < (*summary.enum_variants).count && vi < 2048 {
         enum_variants.entries[vi as usize] = (*summary.enum_variants).entries[vi as usize]
         vi = vi + 1
     }
@@ -1458,7 +1846,7 @@ fn lowerer_from_acc_module(module: Box<IrModule>) -> Lowerer with Alloc, Mut, Pa
         loop_depth: 0,
         error_count: 0,
         had_error: false,
-        enum_variants: Box::new(empty_enum_variant_table()),
+        enum_variants: ev_gen_boxed_empty_enum_variant_table(),
         struct_layouts: Box::new(empty_struct_layout_table()),
         global_types: Box::new(empty_lower_global_type_table()),
         array_elem_float_regs: [IR_INVALID_REG; 512],
@@ -1712,7 +2100,7 @@ fn lowerer_preseed_dep_items_into_acc_mut(
                     let enum_def_opt_ref: &Option<Box<EnumDef>> = &head.enum_def
                     match *enum_def_opt_ref {
                         Some(ed) => {
-                            lowerer_register_enum_variants_mut(lo, name, &(*ed).variants, 0)
+                            lowerer_register_enum_variants_mut_at(lo, name, &(*ed).variants, 0, 1918)
                         }
                         _ => {}
                     }
@@ -1937,10 +2325,15 @@ fn ir_param_list_count(params: Option<Box<ParamList>>) -> i64 with Alloc, Mut, D
     ir_param_list_count_ref(&params)
 }
 
-fn lowerer_mark_error(lo: &! Lowerer) with Mut {
+// SECOND FUNNEL, and it was the dominant one. The site histogram read
+// `15400x111 1876x3022 2066x46` -- 3022 of 3179 errors arrive here, through
+// seven callers, and tagging this function with its OWN line named the funnel
+// rather than the cause. That is the same mistake report_error_at already
+// forced once; `site` is the CALLER's line.
+fn lowerer_mark_error_at(lo: &! Lowerer, site: i64) with Mut {
     lo.error_count = lo.error_count + 1
     lo.had_error = true
-    lower_note_error(1876, (*lo.current_func).name)
+    lower_note_error(site, (*lo.current_func).name)
 }
 
 fn lowerer_effect_list_has_name_ref(effects: &Option<Box<EffectList>>, target: string) -> bool with Mut, Panic, Div {
@@ -2019,7 +2412,7 @@ fn lowerer_find_or_add_fn_id_mut(lo: &! Lowerer, name: Name) -> i64 with Mut, Pa
 
     if (*module_box).fn_count >= IR_MAX_FUNCS {
         (*lo).module = module_box
-        lowerer_mark_error(lo)
+        lowerer_mark_error_at(lo, 2044)
         return -1
     }
 
@@ -2101,18 +2494,44 @@ fn lowerer_preseed_fn_signature_mut(
     (*lo).module = module_box
 }
 
-fn lowerer_register_enum_variants_mut(
+fn lowerer_register_enum_variants_mut_at(
     lo: &! Lowerer,
     enum_name: Name,
     variants: &Option<Box<VariantDefList>>,
-    next_disc: i64
+    next_disc: i64,
+    site: i64
 ) with Mut, Panic, Div, Alloc {
     var current = variants
     var disc = next_disc
     while true {
         match *current {
             Some(list) => {
-                if (*(*lo).enum_variants).count < 1024 {
+                // Duplicate scan against the LOWERER'S ACTUAL TABLE, not a hash
+                // ledger: per-lowerer duplication is what burns slots. Counted
+                // only -- skipping here would change behaviour and void the
+                // control this run is measured against.
+                var ev_dup_box = (*lo).enum_variants
+                var ev_is_dup: bool = false
+                var ev_di: i64 = 0
+                while ev_di < (*ev_dup_box).count && ev_di < 2048 {
+                    if ir_name_eq((*ev_dup_box).entries[ev_di as usize].enum_name, enum_name)
+                        && ir_name_eq((*ev_dup_box).entries[ev_di as usize].variant_name, (*list).head.name) {
+                        ev_is_dup = true
+                    }
+                    ev_di = ev_di + 1
+                }
+                let ev_full = (*(*lo).enum_variants).count >= 2048
+                ev_note_attempt(site, enum_name, (*list).head.name, ev_is_dup, ev_full)
+                if !ev_full {
+                    let ev_fill = (*(*lo).enum_variants).count + 1
+                    if ev_fill > EV_MAX_FILL {
+                        EV_MAX_FILL = ev_fill
+                        EV_MAX_FILL_GEN = EV_GEN
+                    }
+                    let ev_gs = ev_gen_slot()
+                    if ev_gs >= 0 { EV_GEN_FINAL[ev_gs as usize] = ev_fill }
+                }
+                if (*(*lo).enum_variants).count < 2048 {
                     // Extract the Box pointer to a local first, then store through it
                     // once: the two-level nested store
                     // `(*(*lo).enum_variants).entries[idx] = ...` is discarded by the
@@ -2316,24 +2735,51 @@ fn lowerer_preseed_external_items_into_acc_mut(
         match *current {
             Some(list) => {
                 let head_owned = (*list).head
-                // ENUMS, ALONGSIDE STRUCTS. This preseed registered struct
-                // layouts and nothing else, so lowering a dependency INTO THE
-                // ACCUMULATOR left the enum variant table empty. Every
-                // `SomeEnum::Variant` path then failed to resolve, fell through
-                // to the identifier lookup, and reported the ENUM'S TYPE NAME as
-                // an unresolved identifier:
+                // ENUMS, ALONGSIDE STRUCTS, AND DEDUPED LIKE THEM. This
+                // preseed registered struct layouts and nothing else, so
+                // lowering a dependency into the accumulator left the enum
+                // variant table empty and `SomeEnum::Variant` could not resolve.
                 //
-                //   into_acc failed at module index 1 of 120
-                //   unresolved identifiers: `IrOpcode` `BinaryOp`
-                //                           `TypeExprKind` `ItemKind` ...
+                // The dedup is not optional here, and leaving it out is what the
+                // first version of this branch did. The table is
+                // [EnumVariantEntry; 1024] of VARIANTS, keyed (enum_name,
+                // variant_name), and this preseed runs over all 119 external
+                // programs for every one of the 120 dep modules. Re-registering
+                // an enum that is already present burns slots until the table
+                // fills, and the overflow arm is silent apart from a bumped
+                // error count -- it showed up as `2066x46` in the site
+                // histogram, 46 registrations dropped on the floor, which is
+                // exactly the variants that then failed to resolve.
                 //
-                // 3140 of them, all from one site, none of which said what was
-                // missing until the name was recorded. Struct layouts were
-                // seeded here from the start; enums were simply never added.
+                // The ItemStruct arm below has had this check from the start.
+                ev_note_walk_item()
                 if head_owned.kind == ItemKind::ItemEnum {
                     match head_owned.enum_def {
+                        None => ev_note_enum_item(head_owned.name, false)
+                        _ => ev_note_enum_item(head_owned.name, true)
+                    }
+                    match head_owned.enum_def {
                         Some(ed) => {
-                            lowerer_register_enum_variants_mut(lo, head_owned.name, &(*ed).variants, 0)
+                            var ev_seen = (*lo).enum_variants
+                            var enum_already: bool = false
+                            var ei: i64 = 0
+                            while ei < (*ev_seen).count && ei < 2048 {
+                                if ir_name_eq((*ev_seen).entries[ei as usize].enum_name, head_owned.name) {
+                                    enum_already = true
+                                }
+                                ei = ei + 1
+                            }
+                            if !enum_already {
+                                lowerer_register_enum_variants_mut_at(lo, head_owned.name, &(*ed).variants, 0, 2557)
+                            } else {
+                                // KEYED ON enum_name ONLY, which makes this a DROP
+                                // disguised as a dedup: a same-named enum from
+                                // another module is skipped whole and its variants
+                                // never register. This tree has documented homonym
+                                // duplication (codegen.sio x codegen_x86_linux.sio),
+                                // so the case is live, not theoretical.
+                                ev_note_dedup_skip(head_owned.name)
+                            }
                         }
                         _ => {}
                     }
@@ -2951,7 +3397,7 @@ fn lowerer_preseed_program_items_mut(
                     let enum_def_opt_ref: &Option<Box<EnumDef>> = &head.enum_def
                     match *enum_def_opt_ref {
                         Some(ed) => {
-                            lowerer_register_enum_variants_mut(lo, name, &(*ed).variants, 0)
+                            lowerer_register_enum_variants_mut_at(lo, name, &(*ed).variants, 0, 3176)
                         }
                         _ => {}
                     }
@@ -3238,7 +3684,8 @@ fn ir_fast_summary_register_enum_variants_owned(
     match variants {
         Some(list) => {
             var table_value = table
-            if table_value.count < 1024 {
+            EV_SUM_ATT = EV_SUM_ATT + 1
+            if table_value.count < 2048 {
                 let idx = table_value.count
                 table_value.entries[idx as usize] = EnumVariantEntry {
                     enum_name: enum_name,
@@ -3246,6 +3693,13 @@ fn ir_fast_summary_register_enum_variants_owned(
                     discriminant: next_disc,
                 }
                 table_value.count = idx + 1
+            } else {
+                // THIS ARM DID NOT EXIST. The bound was `if count < 1024 { insert }`
+                // with no else -- a variant dropped here never reached the error
+                // counter, never reached the site histogram, and was invisible to
+                // every measurement taken of this failure. Found by Fable 5 on
+                // 2026-08-06 while planning this ledger.
+                EV_SUM_DROP = EV_SUM_DROP + 1
             }
             ir_fast_summary_register_enum_variants_owned(table_value, enum_name, (*list).tail, next_disc + 1)
         }
@@ -3614,7 +4068,7 @@ fn lowerer_bind_local_mut(
         (*locals_box).count = idx + 1
         (*lo).locals = locals_box
     } else {
-        lowerer_mark_error(lo)
+        lowerer_mark_error_at(lo, 3639)
     }
 }
 
@@ -3756,7 +4210,7 @@ fn lowerer_mark_local_global_mut(
 
 fn lowerer_fresh_reg_mut(lo: &! Lowerer) -> i64 with Mut, Panic, Div {
     if (*lo).current_fn < 0 || (*lo).current_fn >= (*(*lo).module).fn_count {
-        lowerer_mark_error(lo)
+        lowerer_mark_error_at(lo, 3781)
         return 0
     }
     var current_func_box = (*lo).current_func
@@ -3787,7 +4241,7 @@ fn lowerer_lower_fn_params_mut(
 
                 let fn_id = (*lo).current_fn
                 if fn_id < 0 || fn_id >= (*(*lo).module).fn_count {
-                    lowerer_mark_error(lo)
+                    lowerer_mark_error_at(lo, 3812)
                 } else {
                     var current_func_box = (*lo).current_func
                     if (*current_func_box).param_count < IR_MAX_PARAMS {
@@ -3801,7 +4255,7 @@ fn lowerer_lower_fn_params_mut(
                             print("\n")
                         }
                     } else {
-                        lowerer_mark_error(lo)
+                        lowerer_mark_error_at(lo, 3826)
                     }
                 }
 
@@ -3813,7 +4267,7 @@ fn lowerer_lower_fn_params_mut(
                         (*current_func_box2).instr_count = instr_count + 1
                         (*lo).current_func = current_func_box2
                     } else {
-                        lowerer_mark_error(lo)
+                        lowerer_mark_error_at(lo, 3838)
                     }
                 }
 
@@ -4247,7 +4701,7 @@ fn lowerer_lower_program_items_mut(
                 } else if kind == ItemKind::ItemEnum {
                     match item.enum_def {
                         Some(ed) => {
-                            lowerer_register_enum_variants_mut(lo, name, &(*ed).variants, 0)
+                            lowerer_register_enum_variants_mut_at(lo, name, &(*ed).variants, 0, 4472)
                         }
                         _ => {}
                     }
@@ -10048,7 +10502,7 @@ impl Lowerer {
         while true {
             match *current {
                 Some(list) => {
-                    if table.count < 1024 {
+                    if table.count < 2048 {
                         table.entries[table.count as usize] = EnumVariantEntry {
                             enum_name: enum_name,
                             variant_name: (*list).head.name,
@@ -10218,7 +10672,7 @@ impl Lowerer {
                         let enum_def_opt: Option<Box<EnumDef>> = head.enum_def
                         match enum_def_opt {
                             Some(ed) => {
-                                lowerer_register_enum_variants_mut(&! lo, name, &(*ed).variants, 0)
+                                lowerer_register_enum_variants_mut_at(&! lo, name, &(*ed).variants, 0, 10443)
                             }
                             _ => {}
                         }
@@ -10301,7 +10755,7 @@ impl Lowerer {
                         let enum_def_opt: Option<Box<EnumDef>> = head.enum_def
                         match enum_def_opt {
                             Some(ed) => {
-                                lowerer_register_enum_variants_mut(&! lo, name, &(*ed).variants, 0)
+                                lowerer_register_enum_variants_mut_at(&! lo, name, &(*ed).variants, 0, 10526)
                             }
                             _ => {}
                         }
@@ -10545,7 +10999,7 @@ impl Lowerer {
                     } else if kind == ItemKind::ItemEnum {
                         let enum_def_opt: Option<Box<EnumDef>> = head.enum_def
                         match enum_def_opt {
-                            Some(ed) => { lowerer_register_enum_variants_mut(&! lo, name, &(*ed).variants, 0) }
+                            Some(ed) => { lowerer_register_enum_variants_mut_at(&! lo, name, &(*ed).variants, 0, 10770) }
                             _ => {}
                         }
                     } else if kind == ItemKind::ItemImpl {
@@ -15469,7 +15923,20 @@ impl Lowerer {
                     // missing types when what actually failed was
                     // lookup_variant_discriminant on the VARIANT.
                     if e.path.seg_count >= 2 {
-                        lower_note_unresolved(ir_path_last_name(e.path))
+                        let ev_vn = ir_path_last_name(e.path)
+                        // THE DISCRIMINATING MEASUREMENT. Was this variant name
+                        // registered by ANY generation? If yes, the table was
+                        // composed wrong -- dropped in this lowerer, lost in the
+                        // summary channel, or shadowed by the enum_name-only
+                        // dedup. If no, the enum item never reached a
+                        // registration path at all, and the fix is in the walk
+                        // or the DCE filter, not in registration.
+                        if ev_variant_ever_seen(ev_vn) {
+                            EV_UNRES_SEEN = EV_UNRES_SEEN + 1
+                        } else {
+                            EV_UNRES_NEVER = EV_UNRES_NEVER + 1
+                        }
+                        lower_note_unresolved(ev_vn)
                     } else {
                         lower_note_unresolved(n)
                     }
@@ -16212,6 +16679,7 @@ pub fn lower_program_to_ir_summary_box_with_externs_ref(
             // preseed still saw every declared function and filled the fn-id
             // table at lower.sio:1927. Returns the input unchanged unless a
             // complete mark set is ready.
+            ev_note_walk_program()
             let ext_items = spec_dce_filter_with_global_marks(ext_prog.items)
             lowerer_preseed_external_struct_items_mut(&! lo, &ext_items)
             lower_note_stage(1, i, lo.had_error)
@@ -16535,26 +17003,27 @@ pub fn lower_dep_program_items_into_acc_with_externs(
         if i != self_index {
             let ext_prog = (*programs)[i as usize]
             // FILTER THE EXTERNALS TOO. The caller already ran the dep's OWN
-            // items through spec_dce_filter_with_global_marks (module_frontend.sio,
-            // `let dep_items = ...`), but the 119 external programs were preseeded
-            // RAW -- every declaration in every loaded module took a slot in the
-            // accumulator whether `main` could reach it or not.
+            // items through spec_dce_filter_with_global_marks
+            // (module_frontend.sio, `let dep_items = ...`), but the 119 external
+            // programs were preseeded RAW -- every declaration in every loaded
+            // module took a slot in the accumulator whether `main` could reach
+            // it or not.
             //
-            // That is what filled it. Measured 2026-08-06 with a per-site error
-            // histogram: `2044x3022`, i.e. 3022 calls to
-            // lowerer_find_or_add_fn_id_mut refused because fn_count was already
-            // at IR_MAX_FUNCS. With this filter the same compile reports 157
-            // errors instead of 3179, and site 2044 disappears entirely.
+            // That is what filled it. Measured 2026-08-06, the site histogram
+            // reported `2044x3022`: 3022 calls to lowerer_find_or_add_fn_id_mut
+            // refused because fn_count was already at IR_MAX_FUNCS, and the
+            // unresolved identifiers and the enum-table overflow downstream are
+            // consequences of an accumulator that ran out of room, not causes.
             //
-            // Raising the cap does not fix this, it postpones it. The preflight
-            // census counts what the MERGE needs; into_acc accumulates every
-            // module, so the number that matters is the union over 120 closures.
+            // Raising the cap does not fix this, it postpones it: the preflight
+            // census counts what the merge needs, but into_acc accumulates every
+            // module, so the count that matters is the union of 120 closures.
             // Filtering is the only move that scales.
             //
-            // spec_dce_filter_with_global_marks returns its input UNCHANGED unless
-            // a complete mark set is ready, so a refusal upstream cannot silently
-            // become a deletion here -- the same contract the other three call
-            // sites in this file rely on.
+            // spec_dce_filter_with_global_marks returns its input UNCHANGED
+            // unless a complete mark set is ready, so a refusal upstream cannot
+            // silently become a deletion here -- the same contract the other
+            // three call sites in this file rely on.
             let ext_items = spec_dce_filter_with_global_marks(ext_prog.items)
             // DEDUP: do not re-zero seed main / previously-filled dep methods.
             lowerer_preseed_external_items_into_acc_mut(&! lo, &ext_items)

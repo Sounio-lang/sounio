@@ -5208,7 +5208,19 @@ let MF_AREBOX_CAP: i64 = 8192
 var MF_AREBOX_FI: [i64; 8192] = [0; 8192]
 var MF_AREBOX_II: [i64; 8192] = [0; 8192]
 var MF_AREBOX_ARGC: [i64; 8192] = [0; 8192]
-var MF_AREBOX_ARGS: [i64; 65536] = [0; 65536]
+// 16 ARGS PER SITE, was 8. The stride is what overflowed, not the site count:
+// MF_AREBOX_CAP is 8192 and a self-compile of main.sio records ~4110 sites, but
+// `while n < 8` in mf_arebox_extract_at trips MF_AREBOX_OVERFLOW the moment a
+// call carries a ninth argument. The scan then returns false, __arena_reset is
+// SKIPPED for that whole module, nothing is reclaimed, and the accumulated
+// arena kills the process a few modules later:
+//
+//     lower_array: arena_reset_skipped (call-arg scratch overflow) module 3 sites 3882
+//     ... module 4 sites 3882 ... module 5 sites 3942 ... module 6 sites 4110
+//     dep_begin 7  -> SIGSEGV
+//
+// 8192 sites x 16 args x 8 bytes = 1 MB of BSS, up from 512 KB.
+var MF_AREBOX_ARGS: [i64; 131072] = [0; 131072]
 var MF_AREBOX_COUNT: i64 = 0
 var MF_AREBOX_OVERFLOW: bool = false
 // Loud metrics (session totals across lower_array dep merges).
@@ -5222,7 +5234,7 @@ fn mf_arebox_reset_scratch() with Mut {
 }
 
 // Extract up to 8 reg heads from the call_args chain at (fi, ii) into
-// MF_AREBOX_ARGS[slot*8 ..]. Walks via module indices so we never pass a
+// MF_AREBOX_ARGS[slot*16 ..]. Walks via module indices so we never pass a
 // Box-carrying Option into a helper by value (defense in depth vs A8-class
 // large-struct/Box by-value miscompiles). A wider chain cannot be rebuilt from
 // this scratch slot, so mark overflow and let the caller skip the arena reset.
@@ -5230,13 +5242,13 @@ fn mf_arebox_extract_at(module: &IrModule, fi: i64, ii: i64, slot: i64) -> i64 w
     var n: i64 = 0
     match (*module).functions[fi as usize].instrs[ii as usize].call_args {
         Some(node0) => {
-            MF_AREBOX_ARGS[(slot * 8 + n) as usize] = (*node0).head
+            MF_AREBOX_ARGS[(slot * 16 + n) as usize] = (*node0).head
             n = 1
             var cur = (*node0).tail
-            while n < 8 {
+            while n < 16 {
                 match cur {
                     Some(node) => {
-                        MF_AREBOX_ARGS[(slot * 8 + n) as usize] = (*node).head
+                        MF_AREBOX_ARGS[(slot * 16 + n) as usize] = (*node).head
                         cur = (*node).tail
                         n = n + 1
                     }
@@ -5276,7 +5288,7 @@ fn mf_arebox_rebuild(slot: i64) -> Option<Box<IrRegList>> with Alloc, Mut, Panic
     var out: Option<Box<IrRegList>> = None
     var k = n - 1
     while k >= 0 {
-        out = Some(Box::new(ir_reg_list_cons(MF_AREBOX_ARGS[(slot * 8 + k) as usize], out)))
+        out = Some(Box::new(ir_reg_list_cons(MF_AREBOX_ARGS[(slot * 16 + k) as usize], out)))
         k = k - 1
     }
     out

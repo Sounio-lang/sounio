@@ -52,7 +52,26 @@ use check::types::{TypeEntry, empty_type_entry}
 // The cost is the one already measured above and is unchanged: ~168 bytes per
 // slot, 504 KB → 672 KB per lowered function, paid flat per function because
 // the allocator never reclaims.
-pub let IR_MAX_FUNCS: i64 = 8192
+// 8192 -> 12288 (2026-08-06). The wall was NOT the merge preflight this time:
+// with main.sio's test suite extracted the preflight passes, and lowering then
+// dies inside lowerer_find_or_add_fn_id_mut -- 3022 attempts to add a function
+// to an accumulator already at the cap, which the site histogram reports as
+// `2044x3022`. The into_acc path accumulates every module's functions, so the
+// preflight count (`globals 1825 + functions 7035 = 8860`) is a floor, not the
+// requirement.
+//
+// RAISING THIS ALONE DOES NOTHING, and that is worth stating because it was
+// tried at 16384 earlier in this line and the wall did not move. `fn_offsets`
+// is `function index -> code buffer offset` and is declared `[i64; 8192]` at
+// ELEVEN sites across native/{reloc,frame,elf,elf_bulk,codegen_x86_linux}.sio.
+// They are part of this constant whether or not they mention it. Keep them in
+// step; array sizes cannot reference a constant here.
+//
+// 12288 rather than 16384: IrFunction embeds `instrs` inline, so this array IS
+// the compiler's memory, and the shipped ELF already carries 3.43 GB of BSS.
+// 1.5x buys ~3400 slots over the measured floor; 2x buys memory nobody measured
+// a need for.
+pub let IR_MAX_FUNCS: i64 = 12288
 pub let IR_MAX_STRINGS: i64 = 4096
 pub let IR_MAX_INSTRS: i64 = 4096
 pub let IR_MAX_PARAMS: i64 = 64
@@ -2164,7 +2183,7 @@ pub fn ir_empty_epistemic_section_boxed() -> Box<IrEpistemicSection> with Alloc,
 }
 
 pub struct IrModule {
-    pub functions: [IrFunction; 8192],
+    pub functions: [IrFunction; 12288],
     pub fn_count: i64,
     pub string_table: [Name; 4096],
     pub string_count: i64,
@@ -4040,7 +4059,7 @@ pub fn ir_reset_function_in_place(f: &! IrFunction, name: Name) with Mut, Panic,
 
 pub fn ir_empty_module() -> IrModule {
     IrModule {
-        functions: [ir_empty_function(); 8192],
+        functions: [ir_empty_function(); 12288],
         fn_count: 0,
         string_table: [ir_empty_name(); 4096],
         string_count: 0,
