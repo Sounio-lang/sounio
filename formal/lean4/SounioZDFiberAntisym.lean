@@ -13092,6 +13092,49 @@ theorem P3_pow2_coherent (n a b c : Nat) (ha : a < 2^(n+1)) (hb : b < 2^(n+1)) (
   unfold muTop
   split <;> split <;> split <;> decide
 
+
+/-! ### Tier 66 — the LEVEL-TRANSFER backbone: `P3` is level-stable on the low block
+
+    The reviewer's recommended target is a transfer recursion
+    `tri3(P3̃)_{m+1} = 8·tri3(P3̃)_m + (defect)`, of which the `8` is "each level-`m` triangle lifts
+    `2³` ways across the doubling".  Measuring the four blocks of the level-`(m+1)` matrix against
+    the level-`m` one, at a label `W < 2^(m+1)` valid at BOTH levels, gives exactly that picture —
+    and the `(0,0)` block is not approximately the level below, it IS it:
+
+    | block | agreement with `P3 l y W m` |
+    |---|---|
+    | `(0,0)` | **exact**, every `l, y, W` — index `0` and the diagonal included |
+    | `(0,1)` | flips exactly on `l = W` and on the coset line `l ⊕ y = W` |
+    | `(1,0)` | flips exactly on `y = W` and on `l ⊕ y = W` |
+    | `(1,1)` | flips exactly on the isolated line `l = W` or `y = W` |
+
+    (the last three measured at `m = 3,4`, every label, `2(2^(m+1)−2)` exceptions each).  So the
+    defect is supported on the two loci this lane already has names and theorems for: the ISOLATED
+    VERTEX and the COSET LINE.  This tier proves the first row; the other three are not attempted.
+
+    The proof is four branch reductions and nothing else: `R_lu` and `R_ul` peel the `hi` argument at
+    both levels, `R_ll` identifies the two results, and the `if y = 0` branches match on the nose —
+    so no nonzero hypothesis is needed anywhere. -/
+
+/-- **`P3` DOES NOT SEE THE LEVEL.**  On the low block the level-`(m+1)` matrix at label `W` is the
+    level-`m` matrix at the same label, with no hypothesis beyond the ranges. -/
+theorem P3_level_stable (m l y W : Nat) (hl : l < 2^(m+1)) (hy : y < 2^(m+1)) (hW : W < 2^(m+1)) :
+    P3 l y W (m+1) = P3 l y W m := by
+  have h2 : (2:Nat)^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  have hlW : l ^^^ W < 2^(m+1) := xorlt hl hW
+  have hyW : y ^^^ W < 2^(m+1) := xorlt hy hW
+  have hl2 : l < 2^(m+2) := by omega
+  have hy2 : y < 2^(m+2) := by omega
+  have hlW2 : l ^^^ W < 2^(m+2) := by omega
+  have hyW2 : y ^^^ W < 2^(m+2) := by omega
+  unfold P3 hi
+  rw [R_lu l (y ^^^ W) (m+1) hl2 hyW2, R_ul (l ^^^ W) y (m+1) hlW2 hy2,
+      R_lu l (y ^^^ W) m hl hyW, R_ul (l ^^^ W) y m hlW hy,
+      R_ll (y ^^^ W) l m hyW hl]
+  by_cases h : y = 0
+  · rw [if_pos h, if_pos h]
+  · rw [if_neg h, if_neg h, R_ll (l ^^^ W) y m hlW hy]
+
 end SounioZDFiberAntisym
 
 

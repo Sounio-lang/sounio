@@ -4404,12 +4404,68 @@ and `μ` takes `0,2,4,6,8,…`. So this is not an equiangular line system at the
 seam) that a literature search can be run against. It does **not** establish novelty — the two-graph
 catalogues have not been searched, and that search is owed before any claim is made.
 
-**Status of (III).** Still reduced, not proven. What moved: every fibre reference of `tri3(P3̃)` has
-a closed form, verified out of sample at `m = 8`; the block law has two dead mechanisms and one exact
-reformulation; and the two standard identifications of the two-graph are excluded. What has not been
-attempted: the level-transfer recursion `tri3(P3̃)_{m+1} = 8·tri3(P3̃)_m + (rank-one defect)` — which
-is the reviewer's recommended target, and would make the block law and `(III)` corollaries rather
-than separate problems — `D[tri3(P3̃)] = 27·8^(n−j)[j,3]₂` itself, and the fibre variation of
-`tr(Alo²P)` / `tr(AloP²)`. No difficulty is recorded for any of them.
+### 57.14 — Tier 66: the level-transfer backbone, and where the defect lives
+
+Attacking the reviewer's recommended target. The recursion's `8` is supposed to be "each level-`m`
+triangle lifts `2³` ways across the doubling". Measuring the four blocks of the level-`(m+1)` matrix
+against the level-`m` one, at a label `W < 2^(m+1)` (valid at **both** levels), gives exactly that —
+and the `(0,0)` block is not approximately the level below, **it is it**:
+
+| block | agreement with `P3 l y W m` |
+|---|---|
+| `(0,0)` | **exact** — every `l, y, W`, index `0` and the diagonal included, 0 violations |
+| `(0,1)` | flips exactly on `l = W` and on the coset line `l ⊕ y = W` |
+| `(1,0)` | flips exactly on `y = W` and on `l ⊕ y = W` |
+| `(1,1)` | flips exactly on the isolated line `l = W` or `y = W` |
+
+The last three are measured at `m = 3,4`, **every** label (15/15 and 31/31), with `2(2^(m+1)−2)`
+exceptions each. So the defect is supported on the two loci this lane already has names and theorems
+for — the **isolated vertex** and the **coset line** — which is what makes the recursion look
+provable rather than merely true.
+
+**Tier 66 proves the first row:**
+
+| | |
+|---|---|
+| `P3_level_stable` | `P3 l y W (m+1) = P3 l y W m` for `l, y, W < 2^(m+1)` |
+
+no nonzero hypothesis, no `l ≠ y`. The proof is four branch reductions and nothing else: `R_lu` and
+`R_ul` peel the `hi` argument at both levels, `R_ll` identifies the two results, and the `if y = 0`
+branches that `R_ul` produces **match on the nose** on both sides — which is why the statement is
+hypothesis-free. Kernel-clean.
+
+**⚠ The `8×` shape is REFUTED — and both M1 providers called it before I measured.** Asked whether
+the block table licenses "each of the eight `(λ_a,λ_b,λ_c)` orthants contributes a copy of `tri3_m`",
+grok and zai both answered `[PROBLEM]`, with the same reason: `R_lu` transposes its arguments and
+`R_ul` adds a minus, so the cross-block products need not assemble that way. Measuring the eight
+orthant sums directly at `m = 3`, `W = 1` (`tri3_m = 714`):
+
+| orthant weight | sum | vs `tri3_m` |
+|---|---|---|
+| 0 | `714` | **exact** |
+| 1 (×3) | `−384` | `−1098` |
+| 2 (×3) | `−528` | `−1242` |
+| 3 | `1056` | `+342` |
+
+So only the all-low orthant is a copy. **But the failure is structured**: the orthant sum depends
+only on the **weight** of `(λ_a,λ_b,λ_c)`, at every label of `m = 3` and `m = 4` (15/15, 31/31), and
+the weight-0 orthant is exactly `tri3_m` (15/15, 31/31). The transfer is therefore not `8×` a copy
+but the lane's own **1+3+3+1 word decomposition** — the same shape as §34's `B`/`E` ledger and Tier
+54's `tri3_expand`:
+
+    tri3(P3̃)_{m+1} = O_0 + 3·O_1 + 3·O_2 + O_3,        O_0 = tri3(P3̃)_m
+
+Consistent with this, the defect `T_{m+1}(W) − 8·T_m(W)` is **not** a function of `j = lsb W` — at
+`m = 5` it takes eight distinct values. It is a function of the fibre, and by §57.11's closed form a
+combination of exactly the `b` **suffix** characters.
+
+The three off-blocks and the three unknown orthants `O_1, O_2, O_3` are measured, not proved.
+
+**Status of (III).** Still reduced, not proven. What moved: the transfer's backbone is a theorem,
+its defect is localised to two loci the lane already understands, and the recursion's SHAPE is
+settled — `1+3+3+1`, not `8×`, with the leading term proved to be the level below. What has not been
+attempted: the three off-block identities, closed forms for `O_1, O_2, O_3`, the `q`-binomial finish
+that would produce `[j,3]₂`, and the fibre variation of `tr(Alo²P)` / `tr(AloP²)`. No difficulty is
+recorded for any of them.
 
 **(III) is still reduced, not proven.**
