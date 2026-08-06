@@ -217,3 +217,67 @@ Measured, not assumed:
   takes the handle by value now. Same guard, same strength.
 
 Refs #1649, #1655.
+
+## The reference hazard: hoist before you take `&` into a boxed array
+
+Taking a reference to an element of an array inside a `Box`'d struct reads the
+**wrong address** under the bootstrap seed:
+
+```sounio
+ir_float_bits_get(&(*module).functions[i as usize], r)   // garbage
+var fslot = (*module).functions[i as usize]
+ir_float_bits_get(&fslot, r)                             // correct
+```
+
+Same binary, same probe, one line apart:
+
+| | `live_at_codegen` |
+|---|---|
+| in place | 4003 / 4643 / 4963 — varies per run |
+| hoisted | **8 / 8 / 8 — exactly equal to `writes`** |
+
+This is why `ir_module_seal_functions` sealed **0 of 7** regions until the
+element was hoisted into a local. That fix was landed with its mechanism
+recorded as unproven; this is the proof, and it generalises — the hazard is the
+reference, not sealing.
+
+### Three false diagnoses this produced, and what killed each
+
+Every alarming number in the `float_reg_bits` investigation came from the broken
+instrument, not from broken storage.
+
+| claim | killed by |
+|---|---|
+| the module is born dirty (`untouched8=7388`) | hoisting the counter → `untouched8=0` |
+| `Box::new` delivers uninitialised memory | control run on `origin/main` with only a probe added: `instr_count=0, reg_count=0` |
+| the function slot is recycled memory | `IR_FLOAT_BITS_INHERITED = 0` over runs lowering 5 functions — my own falsifier |
+| a by-value struct copy drops array fields (#1655 shape) | known pattern: `pattern_direct=8`, `pattern_copied=8` |
+
+The fourth hypothesis was only reachable because the third was tested with a
+**known pattern** rather than by inference. Proving copies were fine left the
+reference as the only remaining difference between the clean reading and the
+dirty one.
+
+`IR_FLOAT_BITS_INHERITED` stays in the tree although it now always reads 0. It
+is the falsifier that killed a wrong theory, and it is what would catch that
+theory becoming true.
+
+### Where the bitset actually stands
+
+`writes=8`, `live_at_codegen=8`, deterministic, and the end-to-end case behind
+#1669 — an `f64` returned from a call, under `-O` — prints `v=2.500000`, `rc=0`.
+`IR_FLOAT_BITS_TRUSTED` is still `0`: flipping it is a behaviour change and
+belongs in its own commit with the consumers switched and a gate. The evidence
+for flipping it now exists, which it did not before.
+
+### Not yet reproduced standalone against `main`
+
+A minimal `.sio` reproducer of the reference hazard is **blocked**, not
+negative. Boxing a struct in a *user program* under `--native-v2-compile`
+segfaults before the reference is even reached — `Box::new(make())` followed by
+`print_int((*a).n)`, where `Flat` is `{ n: i64, xs: [i64; 32] }`, gives rc=139
+on a compiler built from `origin/main`. Without the `Box` the same program
+prints the right answer (`hoisted=5 inplace=5`), so the shape cannot be
+demonstrated without it. Whether `main`'s own compiler code hits the hazard is
+therefore **open**; the two `&(*lock).entries[i as usize]` sites in
+`compiler/pkg/lock.sio` are the candidates to check first.
