@@ -254,11 +254,23 @@ def probe_obo_shape(path):
     return n_super_side, n_equiv_restr
 
 
-def extract_obo(name, ns, owl_path, ro_path):
-    """Namespace-restricted syntactic extraction (round-12 GO-only policy
-    generalised).  Returns (stats, tbox) in the same shape as slice_cone,
-    with id_map iri->id."""
-    print(f"[{name}] parsing {owl_path} ...")
+def extract_obo(name, ns, owl_path, ro_path, policy="ns_only"):
+    """OBO syntactic extraction with RO-closed roles.
+
+    policy:
+      ns_only       — round-12/13: classes/parents/fillers/disj partners
+                      restricted to `/{ns}_` (default; prior receipts).
+      open_fillers  — primary-NS classes PLUS any parent/filler/disj partner
+                      of a primary-NS subject, closed under superclasses of
+                      everything kept.  Measures the axioms namespace-only
+                      dropped (cross-namespace fillers / parents).
+
+    Returns (stats, tbox, labels_out, role_labels_out, iris_out, role_iris_out)
+    in the same shape as slice_cone.
+    """
+    if policy not in ("ns_only", "open_fillers"):
+        sys.exit(f"[{name}] unknown extract policy {policy!r}")
+    print(f"[{name}] parsing {owl_path} (policy={policy}) ...")
     t0 = time.time()
     order, labels, sub, exsub, disj, onto_role_labels, gstats = \
         parse_go(owl_path, skip_deprecated=True)
@@ -269,8 +281,42 @@ def extract_obo(name, ns, owl_path, ro_path):
           f"anon_subclassof={gstats['skipped_anon_subclassof']}) "
           f"[{time.time() - t0:.1f}s]")
 
-    keep_iris = [iri for iri in order if f"/{ns}_" in iri]
+    primary = {iri for iri in order if f"/{ns}_" in iri}
+    n_primary = len(primary)
+    # axioms with primary subject but foreign parent/filler (the ns_only
+    # drop set — measured even when policy=ns_only, for honesty).
+    foreign_parent = sum(1 for c, p in sub if c in primary and p not in primary)
+    foreign_filler = sum(1 for c, _r, f in exsub
+                         if c in primary and f not in primary)
+    foreign_disj = sum(1 for a, b in disj
+                       if (a in primary) ^ (b in primary))
+
+    if policy == "ns_only":
+        keep = set(primary)
+    else:
+        keep = set(primary)
+        for c, p in sub:
+            if c in primary:
+                keep.add(p)
+        for c, _r, f in exsub:
+            if c in primary:
+                keep.add(f)
+        for a, b in disj:
+            if a in primary or b in primary:
+                keep.add(a)
+                keep.add(b)
+        # close under superclasses of kept classes (complete ancestor rows)
+        changed = True
+        while changed:
+            changed = False
+            for c, p in sub:
+                if c in keep and p not in keep:
+                    keep.add(p)
+                    changed = True
+
+    keep_iris = [iri for iri in order if iri in keep]
     inset = set(keep_iris)
+    n_foreign = sum(1 for iri in keep_iris if f"/{ns}_" not in iri)
     id_map = {iri: i for i, iri in enumerate(keep_iris)}
     h = len(keep_iris)
     sub2 = sorted({(id_map[c], id_map[p]) for c, p in sub
@@ -279,8 +325,11 @@ def extract_obo(name, ns, owl_path, ro_path):
                     if a in inset and b in inset})
     exsub_kept = [(id_map[c], r, id_map[f]) for c, r, f in exsub
                   if c in inset and f in inset]
-    print(f"[{name}] {ns}-only: H={h} classes, sub={len(sub2)}, "
-          f"exsub={len(exsub_kept)}, disj={len(disj2)}")
+    print(f"[{name}] {ns}/{policy}: H={h} (primary={n_primary}, "
+          f"foreign_interned={n_foreign}), sub={len(sub2)}, "
+          f"exsub={len(exsub_kept)}, disj={len(disj2)}; "
+          f"ns_only would drop foreign_parent={foreign_parent} "
+          f"foreign_filler={foreign_filler} foreign_disj_half={foreign_disj}")
 
     t0 = time.time()
     rsub, chains, ro_role_labels, rstats = parse_ro(ro_path)
@@ -321,7 +370,12 @@ def extract_obo(name, ns, owl_path, ro_path):
 
     stats = {"h": h, "nr": nr, "super_side": n_super_side,
              "equiv_restr": n_equiv_restr,
-             "skipped_deprecated": gstats["skipped_deprecated_class"]}
+             "skipped_deprecated": gstats["skipped_deprecated_class"],
+             "policy": policy, "n_primary": n_primary,
+             "n_foreign": n_foreign,
+             "foreign_parent": foreign_parent,
+             "foreign_filler": foreign_filler,
+             "foreign_disj": foreign_disj}
     labels_out = {id_map[iri]: labels.get(iri, "") for iri in keep_iris}
     role_labels_out = {role_map[r]: (ro_role_labels.get(r) or
                                      onto_role_labels.get(r, ""))
