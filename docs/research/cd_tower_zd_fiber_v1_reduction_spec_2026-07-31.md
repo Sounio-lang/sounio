@@ -4291,12 +4291,49 @@ reviewer flagged the overstatement and both the docstring and this line were cor
 committing. The counting half (empty two-graph ⇒ `tri3 = N(N−1)(N−2)`) is the `sumLtI` argument of
 Tier 58 and was not redone.
 
-**Status of (III).** Still reduced, not proven. What moved: the exception is no longer an exception
-without a formula, the reference's two-graph is regular with explicit parameters, and `D[tri3(P3̃)]`
-is now a difference of three graph counts of which only the invariant combination matters. What has
-not been attempted: `D[tri3(P3̃)] = 27·8^(n−j)[j,3]₂` itself for `j ≥ 3`, `tri3(P3̃)` at a reference
-with `g ≠ 0` (the values at `m = 5` are `−39654, 15642, −7398, 11034` for `g mod 4 = 0,1,2,3` and I
-have no formula), and the fibre variation of `tr(Alo²P)` / `tr(AloP²)`. No difficulty is recorded
-for any of them.
+### 57.11 — `tri3(P3̃)` at EVERY fibre reference: a closed form, confirmed out of sample
+
+§57.10 left this open: the `g ≠ 0` references had no formula (`−39654, 15642, −7398, 11034` at
+`m = 5`). They do now, and the right coordinate is the WALSH basis.
+
+Fix a level `m`, write `b = m−3`, `N = 2^(m+1)−1`. The references are `W = 8g+1`, and
+`P3_top_switch` (Tier 64) makes `g` and `g + 2^b` switching-equivalent, so `g` runs over `[0, 2^b)`.
+Expand `g ↦ tri3(P3̃)(8g+1)` in characters of `(ℤ/2)^b`:
+
+    tri3(P3̃)(8g+1) = Σ_k w_k · (−1)^popcount(g ∧ k)
+
+| | |
+|---|---|
+| **(1) support** | `w_k = 0` unless the set bits of `k` form a **contiguous block** of positions — only `b(b+1)/2` of the `2^b` characters survive |
+| **(2) value** | for the block `[i, i+L−1]`: `w_k = −2304·(2^(i+1)−1)·8^(m−4−i) / 2^(L−1)` |
+| **(3) mean** | `w_0 = N(N−1)(N−2) − 1728·[m,3]₂ − 288·[m−1,2]₂ − Σ_{k≠0} w_k` (§57.10's `g=0` form) |
+
+Everything is fixed by the single-bit coefficients `s_i = −2304·(2^(i+1)−1)·8^(m−4−i)`; lengthening
+a block by one bit **halves** its coefficient. The level-to-level rule is `s_i(m+1) = 8·s_i(m)`, with
+one new coefficient appearing per level, `s_{m−4} = −2304·(2^(m−3)−1)`.
+
+**Evidence, and the order it came in.** Discovered on `m = 4,5,6` (1, 3 and 6 nonzero characters).
+Then, before extending the formula:
+
+| test | prediction | result |
+|---|---|---|
+| `m = 7`, the seven characters already present at `m = 6` | `w_7[k] = 8·w_6[k]` | exact, 7/7 |
+| `m = 7`, `k = 5 = 0b101` (not a block) | `w = 0` | exact |
+| **`m = 8`, ALL 32 reference values**, none used to build the formula | full closed form | **0 mismatches / 32** |
+
+The `m = 8` run is the real test: `N = 511`, thirty-two references, every value predicted before
+being computed. Probe: `scripts/research/zd_v1_p3_twograph_probe.py`.
+
+**What this is NOT.** A closed form for the REFERENCES, not a proof of the deviation law. The law
+`D[tri3(P3̃)] = 27·8^(n−j)·[j,3]₂` compares `W = 8g+2^j` with `8g+1`; this settles only the second
+term. And none of it is in Lean — the statement is a global count over `~N³` triples, not a
+pointwise identity like the tiers above, so it is a different kind of formalisation job.
+
+**Status of (III).** Still reduced, not proven. What moved: every fibre reference of `tri3(P3̃)` now
+has a closed form, verified out of sample at `m = 8`; the deviation law's remaining unknown is the
+`W = 8g+2^j` side alone. What has not been attempted: `D[tri3(P3̃)] = 27·8^(n−j)[j,3]₂` itself for
+`j ≥ 3`, a PROOF of the contiguous-block law (it is measured across five levels and predicted one,
+but the mechanism — why interval-supported characters and why the halving — is unexplained), and
+the fibre variation of `tr(Alo²P)` / `tr(AloP²)`. No difficulty is recorded for any of them.
 
 **(III) is still reduced, not proven.**
