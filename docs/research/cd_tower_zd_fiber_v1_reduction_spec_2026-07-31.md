@@ -4488,12 +4488,47 @@ and the coset line breaks both, so it carries `l ⊕ y ≠ W` — but the measur
 still holds there, the two breakages cancelling (on that line both sides collapse to
 `−σ(l,l)·σ(y,y)`). That case is not proved.
 
-**Status of (III).** Still reduced, not proven. What moved: the whole block decomposition of the
-level transfer is now four theorems, its defect is localised to two loci the lane already
-understands and EXPLAINED as `antisym`'s failure locus, and the recursion's shape is settled —
-`1+3+3+1`, not `8×`, with the leading term proved to be the level below. What has not been
-attempted: the coset-line case of `(1,1)`, closed forms for `O_1, O_2, O_3` (which is where the
-exceptional loci have to be counted), the `q`-binomial finish that would produce `[j,3]₂`, and the
-fibre variation of `tr(Alo²P)` / `tr(AloP²)`. No difficulty is recorded for any of them.
+### 57.16 — `O_1, O_2, O_3`: two level constants, and the transfer collapses to ONE unknown
+
+`O_0 = tri3(P3̃)_m` was already known. The other three are not independent:
+
+| | value | scope |
+|---|---|---|
+| `O_1 − O_2` | `26·2^m − 64` | every label except the maximal seam |
+| `O_3 − O_0` | `54·2^m − 90` | every label except the maximal seam |
+| at `W = 2^m` | **both shift by `+288·[m−1,2]₂`** | |
+
+Found on `m = 3,4,5` (both constants are affine in `2^m`, the successive differences doubling) and
+then **confirmed out of sample at `m = 6`** — `c_1 = 1600` and `c_3 = 3366` at three different
+labels, and the seam shift `44640 = 288·[5,2]₂` for **both** constants, all exact.
+
+**★ The seam shift is the same number as §57.10's.** The maximal-seam excess in the deviation law
+and the maximal-seam anomaly in the transfer are the identical constant `288·[m−1,2]₂`. Two
+independent places, one number — which says the seam exception is a single phenomenon, not two.
+
+**The transfer, off the seam.** Substituting into `1+3+3+1`:
+
+    tri3(P3̃)_{m+1} = 2·tri3(P3̃)_m + 6·O_1 − 24·2^m + 102        0 violations, m = 4,5,6
+
+so the recursion has ONE unknown left. (Note `2 + 6 = 8`: the `8` heuristic survives, but split
+`2` on the level below and `6` on the weight-1 orthant, which is exactly what the refutation in
+§57.14 forced.)
+
+**And `O_1` is explicit at the fibre references.** Solving the line above with §57.11's closed form
+at both levels:
+
+    O_1(8g+1) = [ tri3(P3̃)_{m+1}(g) − 2·tri3(P3̃)_m(g) + 24·2^m − 102 ] / 6
+
+0 violations at `m = 4,5,6`. This is a closed form *derived from* two measured closed forms, so it
+adds no independent evidence — what it does is make `O_1` explicit wherever the deviation law lives,
+which is exactly the references.
+
+**Status of (III).** Still reduced, not proven. What moved: the transfer is now one recursion with a
+single unknown, that unknown is explicit at the references, and the seam exception is identified
+across two independent computations. What has not been attempted: a DERIVATION of `O_1` from the
+block identities (the honest route — the one above is bookkeeping on top of measured closed forms),
+the two level constants `26·2^m − 64` and `54·2^m − 90` from the exceptional-loci counts, the
+coset-line case of block `(1,1)`, the `q`-binomial finish that would produce `[j,3]₂`, and the fibre
+variation of `tr(Alo²P)` / `tr(AloP²)`. No difficulty is recorded for any of them.
 
 **(III) is still reduced, not proven.**

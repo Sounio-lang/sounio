@@ -211,3 +211,39 @@ def switched_log(m, W, root=1):
     Sp = S * np.outer(eps, eps)
     np.fill_diagonal(Sp, 1)
     return ((1 - Sp) // 2).astype(np.int64)
+
+
+# --- §57.16: the level-transfer orthants ---------------------------------------------------------
+#
+# Tier 66/67 give the four blocks of the level transfer.  Summing triples by which half each vertex
+# lands in gives eight orthants; the sum depends only on the WEIGHT of (lambda_a, lambda_b, lambda_c)
+# (§57.14), so there are four numbers O_0..O_3 and tri3_(m+1) = O_0 + 3 O_1 + 3 O_2 + O_3.
+#
+#   O_0 = tri3(P3~)_m                                       (proved-shaped: Tier 66's block)
+#   O_1 - O_2 = 26*2^m - 64      | every label EXCEPT the maximal seam, where both
+#   O_3 - O_0 = 54*2^m - 90      | shift by +288*[m-1,2]_2 -- the SAME constant as §57.10's
+#                                  maximal-seam excess in the deviation law
+#
+# found on m = 3,4,5 and confirmed OUT OF SAMPLE at m = 6 (c1 = 1600, c3 = 3366 at three labels; the
+# seam shift 44640 = 288*[5,2]_2 for both).  Substituting:
+#
+#   tri3(P3~)_(m+1) = 2 * tri3(P3~)_m + 6 * O_1 - 24*2^m + 102        (off the seam, 0 viol m=4,5,6)
+#
+# -- one unknown left, and 2 + 6 = 8 recovers the heuristic factor with the weights the refutation
+# in §57.14 forced.  At the fibre references O_1 follows from the closed form at both levels:
+#
+#   O_1(8g+1) = [ T_(m+1)(g) - 2 T_m(g) + 24*2^m - 102 ] / 6
+#
+# which is bookkeeping on top of measured closed forms, not independent evidence.
+
+def transfer_constants(m):
+    """The two level constants of §57.16, off the maximal seam."""
+    return 26 * 2**m - 64, 54 * 2**m - 90
+
+
+def O1_at_reference(m, g):
+    """`O_1` at the fibre reference `W = 8g+1`, from the closed form at both levels."""
+    c1, c3 = transfer_constants(m)
+    t_m = predict(m)[g % (1 << (m - 3))]
+    t_m1 = predict(m + 1)[g % (1 << (m - 2))]
+    return (t_m1 - 2 * t_m + 24 * 2**m - 102) // 6
