@@ -7,6 +7,7 @@ validated_by: A6
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.particle-nunwa-lean-2026-08-06
 -->
 
+
 <!-- docs:status-note:start -->
 > Docs status: `historical`
 > This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
@@ -32,10 +33,20 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.parti
 
 - Item 1 (NWA Nat peak shadow) **[OK]**
 - Item 3 (continuum ≠ peak possibility) **[OK]**
-- Item 2 flagged missing handler-interaction axioms — **disagreement logged**:
-  this leaf mirrors `SounioApproxCausalKnowledge` identity handlers (structural
-  tag clears); richer effect-row semantics belong in a follow-up extending
-  `SounioEffects.lean`, not a silent expand of this file's claim.
+- Item 2 flagged missing handler-interaction axioms — initially deferred to
+  `SounioEffects.lean` §19 + this file §4 (2026-08-06 follow-up).
+
+## Follow-up (2026-08-06): handler × payload interaction
+
+- `SounioEffects.lean` §19 — `Effectful α`, `handle_preserves_value`,
+  `handle_comm`, `discharge_pair_interaction`.
+- This file §4 — `discharge_eq_mask_fold`, `discharge_interaction`
+  (tags ↔ TagRow masks; observables preserved).
+- Gate: `scripts/ci/effects_handler_interaction_lean_gate.sh`.
+- Math-review (xai): items 1+3 **[OK]**; item 2 **[WARN]** on disjointness —
+  **disagreement**: `mask_comm` holds for all pairs including `e₁=e₂`;
+  item 4 **[WARN]** informal preservation — **disagreement**:
+  `discharge_interaction` is the explicit five-conjunct lemma.
 
 ## Non-claims
 

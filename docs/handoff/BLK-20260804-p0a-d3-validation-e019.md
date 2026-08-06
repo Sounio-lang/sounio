@@ -11,29 +11,28 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.handoff.blk-20
 
 ```text
 Blocker-ID: BLK-20260804-p0a-d3-validation-e019
-Status: closed (2026-08-04)
-Severity: B1 (was)
-Class: compiler-semantics / stdlib-reshape
-Owner: cursor--p0a3-e019-validation-20260804
-Lane: p0a3-e019-validation-20260804
-Worktree: /tmp/sounio-p0a3-e019-20260804
-Branch: research/p0a3-e019-validation-20260804
-Closed-By: rewrite stats::validation to fixed &[f64; 256] + explicit n (no .len()/.push())
-Root-Cause (two layers):
-  1) growable [f64].push() → multi-module check E019 (poisoned whole module import)
-  2) any imported .len() method (slice or [T;N]) → Madaros lower segfault
-Acceptance-Gate: scripts/ci/madaros_validation_import_gate.sh
-  + scripts/ci/madaros_ols_fixed_e2e_gate.sh (positive validation control)
+Status: closed
+Severity: B1
+Class: compiler-semantics
+Owner: cursor--madaros-d3-d6-effects-20260806
+Lane: madaros-d3-d6-effects-20260806
+Closed-utc: 2026-08-06
+Closeout: stats::validation migrated to fixed [f64;256]+n (no open-slice .len());
+  Madaros import green via scripts/ci/madaros_validation_import_gate.sh and
+  positive control in scripts/ci/madaros_ols_fixed_e2e_gate.sh.
+  Checker also accepts .len() on TyArray/TySlice via len_method_supported when
+  present; science path no longer depends on open-slice methods.
+Acceptance-Gate: MADAROS_VALIDATION_IMPORT_GATE_OK + MADAROS_OLS_FIXED_E2E_GATE_OK
 Evidence-Level: E3
-LLM-Offload: not-required (API reshape; textbook OLS oracles unchanged)
-Residual: open-slice &[f64] + .len() still unsupported under Madaros import/lower
-  (compiler residual; not claimed closed — use fixed buffers + n)
-Next-Action: none for validation science path; optional future check/lower for .len()
+Legacy-Kept: yes (ols_fixed remains the thinner OLS surface)
+LLM-Offload: not-required
+Residual: open-slice &[f64] + imported .len() lowering is NOT claimed closed
+  (KNOWN_LIMITATIONS D3 remaining surface).
 ```
 
 ## Context
 
-Attention P0=A closed fixed-array OLS via `ols_fixed`. This closeout brings
-`stats::validation` itself onto the same Madaros-safe contract so textbook
-descriptives + OLS import/compile/run under default Madaros. Call sites must
-pass `n` and use `[f64; 256]` buffers (breaking change vs open slices).
+Attention P0=A closed the science-usable OLS path under Madaros via fixed arrays.
+Shepherd-merge `1e74b97610` migrated `stats::validation` to the same fixed-buffer
+contract. The historical E019 negative control is retired; gates pin
+`SOUNIO_STDLIB_PATH=$ROOT/stdlib` so a foreign stdlib cannot revive the false red.

@@ -176,4 +176,55 @@ theorem dischargeToy_preserves_continuum (r : ResonanceToy) :
     (dischargeToy r).continuum = r.continuum := by
   rfl
 
+-- ================================================================
+-- §4. Handler × observable interaction (math-review follow-up)
+-- ================================================================
+
+/-! Encode `ApproxTags` as a 3-bit characteristic row and prove that
+    structural discharge is successive masking that (a) clears the handled
+    bits, (b) preserves the third bit, and (c) leaves Nat observables alone.
+    This answers the SounioEffects-side interaction obligation without claiming
+    optical theorem / Float BW content. -/
+
+/-- Characteristic row over the three physical approximation tags. -/
+structure TagRow where
+  nonUnitary : Bool
+  nwa : Bool
+  perturbative : Bool
+  deriving DecidableEq, Repr
+
+def tagsToRow (t : ApproxTags) : TagRow :=
+  { nonUnitary := t.nonUnitary, nwa := t.nwa, perturbative := t.perturbative }
+
+def maskNU (r : TagRow) : TagRow := { r with nonUnitary := false }
+def maskNWA (r : TagRow) : TagRow := { r with nwa := false }
+
+/-- Structural handlers on tags coincide with successive TagRow masks. -/
+theorem discharge_eq_mask_fold (t : ApproxTags) :
+    tagsToRow (dischargeNU_NWA t) = maskNWA (maskNU (tagsToRow t)) := by
+  cases t <;> rfl
+
+/-- Commutation lifts from handlers to TagRow masks. -/
+theorem tagRow_mask_comm (r : TagRow) :
+    maskNWA (maskNU r) = maskNU (maskNWA r) := by
+  cases r <;> rfl
+
+/-- After NU+NWA discharge, only the perturbative bit may remain. -/
+theorem discharge_clears_only_nu_nwa (t : ApproxTags) :
+    (tagsToRow (dischargeNU_NWA t)).nonUnitary = false ∧
+    (tagsToRow (dischargeNU_NWA t)).nwa = false ∧
+    (tagsToRow (dischargeNU_NWA t)).perturbative = t.perturbative := by
+  cases t <;> simp [tagsToRow, dischargeNU_NWA, handleNWA, handleNonUnitary]
+
+/-- Full interaction: discharge preserves continuum+peak and clears NU/NWA. -/
+theorem discharge_interaction (r : ResonanceToy) :
+    (dischargeToy r).continuum = r.continuum ∧
+    (dischargeToy r).peak = r.peak ∧
+    (dischargeToy r).tags.nonUnitary = false ∧
+    (dischargeToy r).tags.nwa = false ∧
+    (dischargeToy r).tags.perturbative = r.tags.perturbative := by
+  cases r with
+  | mk cont peak mass2 gtot gin gout pref tags =>
+    cases tags <;> simp [dischargeToy, dischargeNU_NWA, handleNWA, handleNonUnitary]
+
 end Sounio.NonUnitaryNWA
