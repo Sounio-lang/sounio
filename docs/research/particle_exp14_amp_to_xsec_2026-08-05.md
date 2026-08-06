@@ -70,20 +70,14 @@ import pulls `amplitude`/`vertex`/`spinor`; see Non-claims).
 | Surface | Status |
 |---|---|
 | lean_single **run** | green (`PARTICLE_EXP14_OK`, 5/5) |
-| Madaros **run** | green on the EXP12 import graph |
+| Madaros **run** | green — imports `nonunitary_amp::eemm_z_amplitude_nu` (E175 closed 2026-08-05/06) |
 | Gate | `PARTICLE_EXP14_GATE_OK` (both engines) |
-| Imported `eemm_z_amplitude_nu` under Madaros | **E175** private-fn residual via `vertex`/`spinor` (also breaks EXP13 gate on current `main`) — compiler/stdlib visibility, not EXP14 physics |
-| lean_single + `ep_scale` / `coupling_g` selective import | residual on this graph — avoided; NC factor uses PDG-central scalars `g = 0.629773`, `sin²θ_W = 0.23121` (= `sm_params` centrals); `Var(cX) = c² Var(X)` from propagator `M_Z` |
-
-Thin reconstruction matches `nonunitary_amp::eemm_z_amplitude_nu` centrals
-(`g_A² = 1/4`, `g_V = −1/2 + 2 sin²θ_W`) without pulling the broken import closure.
-Madaros `print_f64` still renders `~3e-7` as `0.000000`; pass checks use raw `f64`.
+| Imported `eemm_z_amplitude_nu` under Madaros | **closed** — private `extern "C"` sqrt stubs removed from particle_physics; see `particle_e175_amp_import_2026-08-05.md` / trilogy |
 
 ## Non-claims
 
 - Not a full NLO / ISR / beamstrahlung cross-section.
 - Does not equate continuum BW to the partial-width NWA peak.
-- Does not claim EXP13's Madaros import path is green on current tip (it is not).
 - Not a BSM bound.
 
 ## Reproduce

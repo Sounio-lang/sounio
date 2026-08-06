@@ -61,7 +61,8 @@ Additional joint checks:
 
 - Ratios are construction gaps, not PDG fits or collider observables.
 - Not a full matrix-element / NLO / PDF ledger.
-- Does not restore Madaros `eemm_z_amplitude_nu` import (E175 residual remains).
+- EXP14 now imports Madaros-safe `eemm_z_amplitude_nu` (E175 closed); EXP17
+  still uses local NC scalars for the joint thin graph (IR size), not a regression.
 
 ## Reproduce
 
