@@ -6,6 +6,17 @@ ledger. The git timestamp of this commit is the precedence proof. If the
 measurements falsify these predictions, the falsification will be reported
 in the paper with the same prominence as a confirmation.
 
+**Timing disclosure (added 2026-08-06 21:45 UTC, before inspecting any sweep
+output).** Job 8732 (threshold 0.85, prediction P1) reached a terminal state
+at 21:19:29 UTC — 22 minutes *before* the commit below (21:41:54 UTC). The
+author had not inspected its output: the last cluster inspection before
+writing this file was ~20:20 UTC, at which point all three sweep jobs were
+RUNNING, and the first read of 8732's log happens after this disclosure is
+committed. The git-timestamp precedence therefore provably holds for P2, P3,
+P4 (8733/8734 still RUNNING at commit time) and P5 (8738/8739 PENDING), but
+**not** for P1, which rests on the author's word alone. We report this
+rather than retro-fit the precedence claim.
+
 ## Basis (measured, jobs 8717/8720, full CIFAR-10, τ = 0.85, seed 17)
 
 | threshold | t* | final acc | S_m (TMAC) | latency speedup | post-τ exit_frac |
