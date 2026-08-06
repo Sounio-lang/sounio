@@ -1,9 +1,21 @@
-# Round 16a — multi-namespace (open_fillers) vs ns_only
+# Round 16 — multi-namespace (`open_fillers`) vs `ns_only`
 
-Policy `open_fillers`: primary-namespace classes plus any
-parent/filler/disj partner of a primary subject, closed under
-superclasses.  Mirrors are the same bitmask/sparse engines as
-rounds 13–15.  Packed drivers remain ns_only receipts.
+**Date:** 2026-08-06 · **Branch:** `research/zd-fiber-antisymmetry-lemma-20260731`
+
+## Policy
+
+| policy | meaning |
+|---|---|
+| `ns_only` | rounds 12–15: only `/{NS}_` classes as parents/fillers/disj partners |
+| `open_fillers` | primary-NS classes **plus** any parent/filler/disj partner of a primary subject, **closed under superclasses** |
+
+Mirrors: bitmask (H&lt;50k) or sparse sets (H≥50k), same as rounds 13–15.  
+**Packed ns_only drivers stay the historical receipts.**  
+**Sounio open_fillers driver** (round 16b): `open_fillers_elplus_driver.sio` on PATO+CL open — **ALL PASS**.
+
+Generator: `gen_cross_ns_probe.py` · `extract_obo(..., policy=...)`.
+
+---
 
 ### pato
 
@@ -40,6 +52,7 @@ rounds 13–15.  Packed drivers remain ns_only receipts.
 | foreign_filler dropped by ns_only | 3754 | (recovered in open) | — |
 | foreign_parent dropped by ns_only | 216 | (recovered in open) | — |
 | super_side / equiv_restr (probed) | 1/2 | 1/2 | — |
+| NEP (endpoints) | — | **162** | needs 4×64-bit epm words |
 
 ### uberon
 
@@ -59,32 +72,47 @@ rounds 13–15.  Packed drivers remain ns_only receipts.
 | foreign_parent dropped by ns_only | 11 | (recovered in open) | — |
 | super_side / equiv_restr (probed) | 1/15 | 1/15 | — |
 
+### chebi (item D)
+
+| metric | ns_only | open_fillers | Δ |
+|---|---:|---:|---:|
+| H | 218253 | 218253 | **0** |
+| foreign_interned | 0 | 0 | 0 |
+| sub / exsub / disj | 307965 / 109108 / 0 | same | **0** |
+| NR | 13 | 13 | 0 |
+| atomic_edges | 5297445 | 5297445 | 0 |
+| role_edges | 29846298 | 29846298 | 0 |
+| conf | 0 | 0 | 0 |
+| amp (edges/exsub) | 273.5× | 273.5× | 0 |
+| foreign_filler / parent dropped | **0 / 0** | — | — |
+| super_side / equiv_restr | 0/0 | 0/0 | — |
+
+**ChEBI is namespace-closed under this cut:** every parent and filler of a CHEBI subject is already CHEBI. Round-15 ns_only numbers are **also** open_fillers numbers — no multi-namespace undercount on ChEBI (unlike CL/UBERON).
+
+---
+
 ## Takeaway
 
-- **pato**: 0 foreign fillers but **1 foreign parent** (the super-side / external
-  parent honesty case). Interning it raises H 1887→1888 and, via denser
-  ancestor rows, **+836 role edges** (4005→4841) with conf unchanged
-  (disj endpoints unchanged, so conflict pairs are invariant here).
-- **cl**: ns_only drops **3754 foreign-filler axioms** and **216 foreign-parent
-  axioms** (axiom counts, not unique classes). Unique foreign classes interned
-  under open_fillers: **2871** (H 3335→6206). exsub 477→5697 (+5220), role edges
-  **146 188→1 204 329** (+1 058 141, ~8.2×). Amp falls 306.5×→211.4×: the
-  *marginal* edges/exsub on the recovered slice is ≈202.7, below the ns_only
-  average (not “denser restrictions” in the colloquial sense).
-- **uberon**: drops **2040 foreign-filler axioms** / **11 foreign parents**;
-  unique foreign interned **1320** (H 14975→16295). Role edges
-  **2 343 535→5 190 470** (+2 846 935, ~2.2×). Amp *rises* 137.2×→263.0×
-  (foreign lattice deepens role propagation).
+- **pato**: 0 foreign fillers, **1 foreign parent** → H+1, **+836 role edges**, conf invariant.
+- **cl**: drops **3754 foreign-filler axioms** / **216 foreign-parent axioms** (axiom counts ≠ unique H). Unique foreign interned **2871**. Role edges **146 188 → 1 204 329** (~**8.2×**). Marginal edges/exsub on recovered slice ≈202.7 (&lt; ns_only amp 306.5).
+- **uberon**: **2040** foreign-filler axioms, unique foreign **1320**. Role edges **2.34M → 5.19M** (~**2.2×**); amp rises 137→263.
+- **chebi**: **Δ = 0** on every metric — multi-namespace is a no-op; r15 is OWL-complete for the extracted shape.
 
-If Δ role_edges ≫ 0, namespace-only **understates** the OWL TBox. Round-13/15
-ns_only numbers remain exact for the *extracted* TBox; they are not
-OWL-complete. Packed Sounio drivers stay on ns_only until an open_fillers
-capacity resize is deliberate.
+## Sounio open_fillers driver (16b)
 
-## GO full sparse reaffirmation (item 4)
+| target | packed | Sounio | notes |
+|---|---|---|---|
+| PATO open | `pato_open_packed.txt` | **ALL PASS** | NEP=118 |
+| CL open | `cl_open_packed.txt` | **ALL PASS** | NEP=162, KMAX=16, 4-word epm |
+| UBERON open | (Python only) | deferred | needs NEPW multi-word sparse port at disj scale |
+| ChEBI open | ≡ ns_only packed | covered by r15 driver | Δ=0 |
 
-`artifacts/ontology-frontiers/real-data/scale/go_full_elplus_driver.sio`
-(round-14 sparse engine) re-run under Madaros 2026-08-06: **ALL PASS**
-with the round-12 mirror numbers (H=38 245, role edges=2 135 207,
-conf=792 814 846, rounds=4). Same sparse lineage as the ChEBI driver;
-GO is not a new engine, it is the already-scaled target re-verified.
+Driver: `open_fillers_elplus_driver.sio` · log: `open_fillers_run.log` · gate-wired.
+
+## GO full sparse reaffirmation
+
+`go_full_elplus_driver.sio` (r14): **ALL PASS** H=38 245, role edges=2 135 207, conf=792 814 846, rounds=4.
+
+## Merge readiness (item A)
+
+See `MERGE_READINESS_PR1580.md`: PR #1580 is **CONFLICTING** vs base (~60 commits); science side is pushed and documented; no auto-merge.
