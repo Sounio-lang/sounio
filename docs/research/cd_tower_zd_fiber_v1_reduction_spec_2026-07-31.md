@@ -5047,8 +5047,38 @@ Confirmed **out of sample at `m = 5`**: `−546` and `174` at four different lab
 invariant.** That is §57.17's conclusion — reached there by hand on a different decomposition —
 now localised to a single named term and verified independently. Two routes, one answer.
 
-**What remains open is exactly that piece**, and it is not an accident that it resists: it IS the
-deviation law's content. A closed form for it would be a closed form for `D`. Not attempted.
+### 57.34 — the coset piece IS §57.18's `Σ_coset`, offset by `2N − 2`
+
+I said the coset piece "resists because it IS the deviation law's content". It does not resist: it
+is an object this lane already has a closed form for, and the two routes meet exactly.
+
+Expanding `T_C(W) = Σ_{c ∉ {0,W}} A(c⊕W, c)·(A²)(c, c⊕W)` in Walsh characters of `g`:
+
+| `m` | `T_C`'s coefficients | `Σ_coset`'s (§57.18) |
+|---|---|---|
+| 3 | `44`; `96` | `72`; `96` |
+| 4 | `108`; `288, 384` | `168`; `288, 384` |
+| 5 | `236`; `672, 1152, 1536` | `360`; `672, 1152, 1536` |
+
+**Every non-constant coefficient is identical.** Only the mean differs, and by `28, 60, 124` —
+which is `2N − 2`. Directly:
+
+    T_C(W) = Σ_coset(W) − (2N − 2)        0 violations, m = 3,4,5, every label
+
+and therefore `T_C` inherits §57.18's closed form. **Confirmed out of sample at `m = 6`**: all eight
+fibres predicted from the `Σ_coset` formula minus `252`, all exact.
+
+**★ `2N − 2` is now this lane's third sighting of the same constant.** It is §57.17's `S_uv`; it is
+the `+1`-count of the joint locus in §57.28 (`2N−2` of the `10N−8` triples); and it is the offset
+between the two routes' coset terms. Three different computations, one number.
+
+**What this settles.** The formal chain (Tiers 66–81) and the hand route (§57.16–57.18) do not merely
+agree numerically — their coset terms are the same object up to an explicit constant, so the closed
+form transfers, and `tri3w(χ01)` is now determined: two level constants plus `Σ_coset − (2N−2)`.
+
+**What it does not.** `Σ_coset`'s closed form is itself measured, not proved (§57.18, confirmed out
+of sample at `m = 6,7`), so nothing here makes `D` a theorem. What changed is that the last piece is
+no longer an unknown — it is a known measured quantity, and the two routes to it are identified.
 
 **Status of (III).** Still reduced, not proven — but the reduction is now a single explicit
 first-order recursion in `m` whose only non-constant input is a coset-line sum with a closed form.

@@ -408,3 +408,22 @@ def joint_signed_sum(m):
 def chi01_row_constants(m):
     """(isolated-row part, isolated-column part) of `tri3w(chi01)`, off the maximal seam."""
     return -18 * 2**m + 30, 6 * 2**m - 18
+
+
+# --- §57.34: the coset piece IS Sigma_coset, offset by 2N-2 --------------------------------------
+#
+# T_C(W) = sum_{c not in {0,W}} A(c^W, c) * (A^2)(c, c^W), the coset piece of tri3w(chi01) reached
+# through the formal chain, has EXACTLY the same non-constant Walsh coefficients in g as §57.18's
+# Sigma_coset, reached by hand.  Only the mean differs, and by 2N - 2:
+#
+#     T_C(W) = Sigma_coset(W) - (2N - 2)      0 violations, m = 3,4,5, every label
+#
+# so T_C inherits §57.18's closed form.  Confirmed OUT OF SAMPLE at m = 6: all eight fibres.
+#
+# 2N - 2 is this lane's THIRD sighting of the same constant: §57.17's Suv, the +1-count of the joint
+# locus in §57.28, and now the offset between the two routes' coset terms.
+
+def T_coset(m, g):
+    """The coset piece of `tri3w(chi01)`, from §57.18's closed form."""
+    N = (1 << (m + 1)) - 1
+    return sigma_coset(m, g) - (2 * N - 2)
