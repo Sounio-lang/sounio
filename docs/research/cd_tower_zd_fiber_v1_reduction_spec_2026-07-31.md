@@ -4664,6 +4664,36 @@ for `P3`, the SHAPE of the level transfer — the `1+3+3+1` and its leading term
 The three remaining orthant VALUES (`O_1, O_2, O_3`) are still measured, and so are the level
 constants and `Σ_coset`.
 
+### 57.21 — Tier 70: the `ε` of block `(0,1)` as a function, and the index-0 obstruction
+
+Tier 67's block identities hold only OFF their exceptional loci. That is fine pointwise and useless
+for rewriting a **sum**: `sumLtI_congr` needs a statement true at every index. This tier supplies the
+two missing cases for block `(0,1)` and packages all three with an explicit sign.
+
+| | |
+|---|---|
+| `P3_block01_iso` | at `l = W`: `P3 W (y+2^(m+1)) W (m+1) = − P3 W y W m` |
+| `P3_block01_cos` | at `l ⊕ y = W`: same flip |
+| `eps01 l y W` | `−1` iff `l = W` or `l ⊕ y = W`, else `+1` |
+| `P3_block01_eps` | `P3 l (y+2^(m+1)) W (m+1) = eps01 l y W · P3 l y W m`, for `l, y ≠ 0` |
+
+Both exceptional cases are Tier 67's computation with one `cdSigma` degenerating, so that `antisym`
+is skipped exactly once and its minus is the flip. The two loci are **disjoint** for `y ≠ 0` (they
+would force `y = 0`), so the `if … ∨ …` cannot hide a double sign — both providers checked that.
+Measured first, exactly as stated: 0 violations in `49/225/961`, `42/210/930` and `343/3375/29791`
+instances at `m = 2,3,4`.
+
+**⚠ The sum-level step does NOT follow, and both providers said so.** `sumLtI` ranges over `[0,N)`,
+which includes `0`, where `P3_block01_eps`'s hypotheses fail — and the summand there is **not** zero,
+so the index cannot be dropped. What is missing is either a separate identity for the `y = 0` row
+(and the `l = 0` one), or a proof that those rows contribute nothing to the outer sum. Neither is
+attempted. So this tier is the pointwise ingredient, not the sum.
+
+*A correction the reviewer forced:* my first docstring said that in the coset case "both surviving
+factors become `σ(x,x) = −1`". zai marked it `[OVERREACH]` — the `cdSigma` VALUES are `−1`, but the
+factors of the product are `−σ(x,x) = +1`. The arithmetic was right, the sentence was not; both the
+docstring and this paragraph now say it the reviewer's way.
+
 **Status of (III).** Still reduced, not proven — but the reduction is now a single explicit
 first-order recursion in `m` whose only non-constant input is a coset-line sum with a closed form.
 What has not been attempted: proving the recursion (the constants and `Σ_coset` from the same

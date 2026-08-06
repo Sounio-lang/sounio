@@ -13354,6 +13354,105 @@ theorem tri3_split_1331 (N : Nat) (f : Nat → Nat → Int) :
   rw [tri3_split8 N f, h1, h2, h3, h4]
   omega
 
+
+/-! ### Tier 70 — the `ε` of block `(0,1)` as a FUNCTION
+
+    Tier 67 proves the block identities OFF their exceptional loci, which is enough pointwise but not
+    enough to rewrite a SUM: `sumLtI_congr` needs a statement that holds at every index. This tier
+    supplies the two missing cases for block `(0,1)` and packages all three as one identity with an
+    explicit sign.
+
+    Both exceptional cases are the same computation as Tier 67's with one `cdSigma` degenerating:
+
+    * `l = W` — then `l ⊕ W = 0`, the factor `σ(y, l⊕W)` collapses to `σ(y,0) = 1` instead of being
+      turned round by `antisym`, and the missing minus is the flip;
+    * `l ⊕ y = W` — then `y ⊕ W = l` and `l ⊕ W = y`, so the two `cdSigma` values are `σ(l,l)` and
+      `σ(y,y)`, both `−1`. At the UNSHIFTED index those two `−1`s multiply against `P3_red`'s
+      leading minus and give `−1`; at the SHIFTED index each factor picks up one extra `R_ul` sign,
+      so both product factors are `+1` and the result is `+1`. The ratio is `−1`. (The M1 reviewer
+      marked an earlier phrasing of this paragraph `[OVERREACH]` — I had written "both surviving
+      factors become `σ(x,x) = −1`", conflating the `cdSigma` VALUES with the factors of the
+      product, which are `−σ(x,x) = +1`. The arithmetic was right, the sentence was not.)
+
+    The two loci are DISJOINT for `y ≠ 0` (they would force `y = 0`), so the sign is well defined:
+
+      `eps01 l y W = −1` iff `l = W` or `l ⊕ y = W`, `+1` otherwise.
+
+    ⚠ SCOPE, and it is narrower than "the expansion is now a sum". Only block `(0,1)`; blocks `(1,0)`
+    and `(1,1)` need the mirror work, and `(1,1)`'s coset case is still the one Tier 67 flagged as
+    unproved. **And the sum-level step does NOT yet follow**: `sumLtI` ranges over `[0,N)`, which
+    includes `0`, where `P3_block01_eps`'s hypotheses `l ≠ 0` / `y ≠ 0` fail — and the summand there
+    is not zero, so the index cannot simply be dropped. Both M1 providers flagged this as a real
+    obstruction. What is missing is either a separate identity for the `y = 0` row (and the `l = 0`
+    one), or a proof that those rows contribute nothing to the outer sum. Neither is attempted. -/
+
+/-- The isolated case of block `(0,1)`: at `l = W` the identity FLIPS. -/
+theorem P3_block01_iso (m y W : Nat) (hy : y < 2^(m+1)) (hW : W < 2^(m+1))
+    (hW0 : W ≠ 0) (hy0 : y ≠ 0) :
+    P3 W (y + 2^(m+1)) W (m+1) = - P3 W y W m := by
+  have hp := Nat.two_pow_pos (m+1)
+  have h2 : (2:Nat)^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  have hyW' : y ^^^ W < 2^(m+1) := xorlt hy hW
+  have hyH : (y + 2^(m+1)) ^^^ W = (y ^^^ W) + 2^(m+1) := by
+    have h := xor_lo_hi (m+1) W y (by omega) hW hy
+    rw [Nat.xor_comm (y + 2^(m+1)) W, h, Nat.xor_comm W y]
+  have hyHne : y + 2^(m+1) ≠ 0 := by omega
+  rw [P3_red W y W m hW hy hW hy0, Nat.xor_self W, cdSig0]
+  unfold P3 hi
+  rw [hyH, Nat.xor_self W,
+      R_lu W ((y ^^^ W) + 2^(m+1)) (m+1) (by omega) (by omega),
+      R_ul (y ^^^ W) W m hyW' hW, if_neg hW0,
+      R_ul 0 (y + 2^(m+1)) (m+1) (Nat.two_pow_pos (m+2)) (by omega), if_neg hyHne,
+      cdSig0]
+  grind
+
+/-- The coset case of block `(0,1)`: on `l ⊕ y = W` the identity FLIPS. -/
+theorem P3_block01_cos (m l W : Nat) (hl : l < 2^(m+1)) (hW : W < 2^(m+1))
+    (hl0 : l ≠ 0) (hlW : l ^^^ W ≠ 0) :
+    P3 l ((l ^^^ W) + 2^(m+1)) W (m+1) = - P3 l (l ^^^ W) W m := by
+  have hp := Nat.two_pow_pos (m+1)
+  have h2 : (2:Nat)^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  have hyl : l < 2^(m+2) := by omega
+  have hlW' : l ^^^ W < 2^(m+1) := xorlt hl hW
+  have hback : (l ^^^ W) ^^^ W = l := xor_cancel l W
+  have hyH : ((l ^^^ W) + 2^(m+1)) ^^^ W = l + 2^(m+1) := by
+    have h := xor_lo_hi (m+1) W (l ^^^ W) (by omega) hW hlW'
+    rw [Nat.xor_comm ((l ^^^ W) + 2^(m+1)) W, h, Nat.xor_comm W (l ^^^ W), hback]
+  have hne : (l ^^^ W) + 2^(m+1) ≠ 0 := by omega
+  rw [P3_red l (l ^^^ W) W m hl hlW' hW hlW, hback,
+      sigma_self (m+1) l hl hl0, sigma_self (m+1) (l ^^^ W) hlW' hlW]
+  unfold P3 hi
+  rw [hyH,
+      R_lu l (l + 2^(m+1)) (m+1) hyl (by omega),
+      R_ul l l m hl hl, if_neg hl0,
+      R_ul (l ^^^ W) ((l ^^^ W) + 2^(m+1)) (m+1) (by omega) (by omega), if_neg hne,
+      R_lu (l ^^^ W) (l ^^^ W) m hlW' hlW',
+      sigma_self (m+1) l hl hl0, sigma_self (m+1) (l ^^^ W) hlW' hlW]
+  grind
+
+/-- The sign of block `(0,1)`: `−1` exactly on the isolated line and the coset line. -/
+def eps01 (l y W : Nat) : Int := if l ^^^ W = 0 ∨ (l ^^^ y) ^^^ W = 0 then -1 else 1
+
+/-- **BLOCK `(0,1)` WITH ITS SIGN, AT EVERY INDEX.**  The form a `sumLtI_congr` can use. -/
+theorem P3_block01_eps (m l y W : Nat) (hl : l < 2^(m+1)) (hy : y < 2^(m+1)) (hW : W < 2^(m+1))
+    (hl0 : l ≠ 0) (hy0 : y ≠ 0) :
+    P3 l (y + 2^(m+1)) W (m+1) = eps01 l y W * P3 l y W m := by
+  unfold eps01
+  by_cases hlW : l ^^^ W = 0
+  · have hlq : l = W := xor_zero_eq l W hlW
+    have hW0 : W ≠ 0 := by rw [← hlq]; exact hl0
+    rw [if_pos (Or.inl hlW), hlq]
+    rw [P3_block01_iso m y W hy hW hW0 hy0]
+    grind
+  · by_cases hcos : (l ^^^ y) ^^^ W = 0
+    · have hyq : y = l ^^^ W := by
+        have := xor_zero_eq (l ^^^ y) W hcos
+        rw [← this, ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor]
+      rw [if_pos (Or.inr hcos), hyq, P3_block01_cos m l W hl hW hl0 hlW]
+      grind
+    · rw [if_neg (fun h => h.elim hlW hcos), P3_block01 m l y W hl hy hW hl0 hy0 hlW hcos]
+      grind
+
 end SounioZDFiberAntisym
 
 
