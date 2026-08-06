@@ -2326,8 +2326,32 @@ pub struct EnumVariantEntry {
     discriminant: i64,
 }
 
+// CAPACITY 2048, raised from 1024 on 2026-08-06 against a MEASURED requirement.
+//
+// A per-variant ledger over `build self-hosted/compiler/main.sio` reported:
+//
+//     ev attempts=1070 dup=2 drop=46 distinct_pairs=1068
+//
+// 1068 distinct (enum_name, variant_name) pairs against a 1024 cap: short by 44,
+// and 46 registrations dropped. Every dropped pair was a `TokenKind:*` -- the
+// tail of the largest enum in the tree lands past the line.
+//
+// TWO EARLIER ANSWERS WERE WRONG, and the ledger is what settled it:
+//   - A regex census over `^enum X {` bodies estimated 784 variants in the
+//     closure, which is 27% low, and that estimate was used to ELIMINATE
+//     capacity as a cause. Do not size this table by grepping the source.
+//   - Duplication was the leading suspect: nine of the ten registration sites
+//     do no dedup at all. Measured, there are TWO duplicate attempts in 1070.
+//     Deduping would have bought nothing.
+//
+// 2048 rather than 4096: the entry is two Names plus an i64 (~280 bytes), so the
+// table is ~570 KB here, and it is Box::new'd per lowerer against an allocator
+// that never reclaims. ~980 slots of headroom over the measured need.
+//
+// The bound is spelled at nine sites across ir.sio and ir/lower.sio; array sizes
+// cannot reference a constant here. Keep them in step.
 pub struct EnumVariantTable {
-    entries: [EnumVariantEntry; 1024],
+    entries: [EnumVariantEntry; 2048],
     count: i64,
 }
 
@@ -2341,7 +2365,7 @@ fn empty_enum_variant_entry() -> EnumVariantEntry {
 
 pub fn empty_enum_variant_table() -> EnumVariantTable {
     EnumVariantTable {
-        entries: [empty_enum_variant_entry(); 1024],
+        entries: [empty_enum_variant_entry(); 2048],
         count: 0,
     }
 }
