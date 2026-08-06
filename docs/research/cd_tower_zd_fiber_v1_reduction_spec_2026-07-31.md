@@ -4447,11 +4447,14 @@ orthant sums directly at `m = 3`, `W = 1` (`tri3_m = 714`):
 | 2 (×3) | `−528` | `−1242` |
 | 3 | `1056` | `+342` |
 
-So only the all-low orthant is a copy. **But the failure is structured**: the orthant sum depends
-only on the **weight** of `(λ_a,λ_b,λ_c)`, at every label of `m = 3` and `m = 4` (15/15, 31/31), and
-the weight-0 orthant is exactly `tri3_m` (15/15, 31/31). The transfer is therefore not `8×` a copy
-but the lane's own **1+3+3+1 word decomposition** — the same shape as §34's `B`/`E` ledger and Tier
-54's `tri3_expand`:
+So only the all-low orthant is a copy. The orthant sum depends only on the **weight** of
+`(λ_a,λ_b,λ_c)`, at every label of `m = 3` and `m = 4` (15/15, 31/31), and the weight-0 orthant is
+exactly `tri3_m` (15/15, 31/31).
+
+⚠ **The weight-dependence is NOT a finding — see §57.19.** It is forced by `sumLtI3_cyc`, already in
+the file, and holds for an arbitrary matrix. Only the weight-0 half has content. What survives is the
+lane's own **1+3+3+1 word decomposition** — the same shape as §34's `B`/`E` ledger and Tier 54's
+`tri3_expand`:
 
     tri3(P3̃)_{m+1} = O_0 + 3·O_1 + 3·O_2 + O_3,        O_0 = tri3(P3̃)_m
 
@@ -4604,6 +4607,30 @@ coefficient per level comes from `Σ_coset`'s new top-anchored block.
 **Provenance.** The block identities this rests on (Tiers 66/67) are theorems. The constants, the
 `Σ_coset` closed form and the assembled recursion are measured — with out-of-sample confirmation at
 two levels for `Σ_coset` and none of it in Lean.
+
+### 57.19 — ⚠ DEFLATION: the `1+3+3+1` weight-dependence is forced, and Tier 68 proves what is not
+
+§57.14 recorded, as a measured finding, that the eight orthant sums depend only on the **weight** of
+`(λ_a,λ_b,λ_c)`. **That is not a finding.** `tri3`'s summand is `f a b · (f b c · f c a)`, which is
+invariant under the cyclic rotation `(a,b,c) ↦ (b,c,a)` — this file already contains that as
+`sumLtI3_cyc` — and the rotation sends the orthant `(λ_a,λ_b,λ_c)` to `(λ_b,λ_c,λ_a)`. So the three
+weight-1 orthants are equal for free, and likewise the three weight-2 ones.
+
+Null control, since the lane's rule demands one: on a **random** `{−1,0,1}` matrix the weight-1
+orthants are equal and the weight-2 orthants are equal, every trial. The property has nothing to do
+with `P3`.
+
+What the measurement did establish, and what is not free, is the **weight-0** statement `O_0 =
+tri3_m` — plus the refutation of the `8×` shape. **Tier 68 promotes the first from Tier 66's
+pointwise identity to the sum itself:**
+
+| | |
+|---|---|
+| `tri3_congr` | `tri3 N f = tri3 N g` when `f = g` on `[0,N)²` |
+| `tri3_low_orthant` | `tri3 (2^(m+1)) (P3 · · W (m+1)) = tri3 (2^(m+1)) (P3 · · W m)` |
+
+for `W < 2^(m+1)`, kernel-clean. `tri3_congr` applies to any matrix built pointwise from `P3`, the
+masked one included, because a mask depends only on the indices and so is the same on both sides.
 
 **Status of (III).** Still reduced, not proven — but the reduction is now a single explicit
 first-order recursion in `m` whose only non-constant input is a coset-line sum with a closed form.

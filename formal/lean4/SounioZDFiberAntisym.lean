@@ -13246,6 +13246,37 @@ theorem P3_block11 (m l y W : Nat) (hl : l < 2^(m+1)) (hy : y < 2^(m+1)) (hW : W
       antisym (m+1) y (l ^^^ W) hy hlW' hy0 hlW hne2]
   grind
 
+
+/-! ### Tier 68 — the low orthant of the level transfer, as a SUM
+
+    §57.14 recorded, as a measured finding, that the eight orthant sums of the level transfer depend
+    only on the WEIGHT of `(λ_a, λ_b, λ_c)`, giving the `1+3+3+1` shape.  **That was not a finding:
+    it is forced by `sumLtI3_cyc`**, which is in this file already.  Rotating the summation variables
+    `(a,b,c) ↦ (b,c,a)` sends the orthant `(λ_a,λ_b,λ_c)` to `(λ_b,λ_c,λ_a)` and leaves the summand
+    invariant, so the three weight-1 orthants are equal for free, and likewise the three weight-2
+    ones.  The lane's own rule — check whether a pattern is forced by cheaper structure before
+    calling it a fingerprint — applies, and §57.19 records the deflation.
+
+    What is NOT free is the leading term, `O_0 = tri3` of the level below, and that is what this tier
+    proves at the level of the SUM rather than pointwise.  `tri3_congr` does the work; it applies to
+    any matrix built pointwise from `P3`, the masked one included, because a mask depends only on the
+    indices and is therefore the same on both sides. -/
+
+/-- `tri3` only sees its matrix on `[0,N)²`. -/
+theorem tri3_congr (N : Nat) (f g : Nat → Nat → Int)
+    (h : ∀ x y, x < N → y < N → f x y = g x y) : tri3 N f = tri3 N g := by
+  unfold tri3
+  exact sumLtI_congr N _ _ (fun a ha =>
+    sumLtI_congr N _ _ (fun b hb =>
+      sumLtI_congr N _ _ (fun c hc => by rw [h a b ha hb, h b c hb hc, h c a hc ha])))
+
+/-- **THE LOW ORTHANT IS THE LEVEL BELOW.**  The level-`(m+1)` triangle sum restricted to the low
+    indices is the level-`m` one, at the same label — the `O_0 = tri3_m` of the transfer, promoted
+    from Tier 66's pointwise identity to the sum itself. -/
+theorem tri3_low_orthant (m W : Nat) (hW : W < 2^(m+1)) :
+    tri3 (2^(m+1)) (fun x y => P3 x y W (m+1)) = tri3 (2^(m+1)) (fun x y => P3 x y W m) :=
+  tri3_congr _ _ _ (fun x y hx hy => P3_level_stable m x y W hx hy hW)
+
 end SounioZDFiberAntisym
 
 
