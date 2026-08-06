@@ -113,3 +113,9 @@ Native fix blocked this session by active claims on `self-hosted/native/**` and
 - Gate: `scripts/research/particle_exp19_h_yukawa_amp_gate.sh` (Madaros retry×3).
 - Completes stdlib amp restore trio Z/W/H (EXP14/18/19); thin EXP14–16 stay.
 
+## 9 — EXP17 stdlib ZWH ledger (2026-08-06)
+
+- EXP17 W/H now use `cc_w_leptonic_amplitude_nu` + `h_bb_yukawa_amplitude_nu`
+  (schema v2). Ratios Z/W/H: 13.952395 / 3.486637 / 0.652209.
+- Thin EXP14–16 remain witnesses. Gate: `particle_exp17_zwh_ledger_gate.sh`.
+
