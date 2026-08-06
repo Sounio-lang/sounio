@@ -91,18 +91,61 @@ Both `-O` results are pre-existing `origin/main` defects — the first is #1669,
 which this branch fixes separately — and neither is touched by the seed patch.
 Madaros built at the 6-error baseline.
 
+## The three open items, now closed
+
+### 1. Broad suite — bit-identical
+
+`scripts/dev/run_sio_test_suite.sh`, **2948 tests**, run twice from pristine
+`origin/main` sources: once with a Madaros built by the stock seed, once by the
+patched seed. Both compilers built at the 6-error baseline and differ in md5, so
+the patch did change generated code.
+
+```
+Pass 377   Fail 1213   Known failures 143   Skip 1215   Total 2948
+```
+
+**`diff` of the two full outputs: 0 lines. Same md5, `9443281c…`.** Not one test
+moves in either direction.
+
+Stated honestly: with 1213 failing and 1215 skipped, this harness has limited
+discriminating power when pointed at a raw Madaros ELF — it is normally driven
+against `bin/souc`. The real signal is the 377 that pass, and none of them
+changed. It is evidence of no regression, not proof of safety.
+
+### 2. Bootstrap fixed point — on `origin/main`'s own source this time
+
+| chain | result |
+|---|---|
+| patched | `gen2 == gen3 == 25fb229c2bf68e94b17ba5d9bc79174f` |
+| unpatched control | `gen2 == 3a7a17a0f62e97e771c96c029ccd18b3` |
+| **shipped `bin/souc-lean-single-x86_64`** | **`3a7a17a0f62e97e771c96c029ccd18b3`** |
+
+The unpatched control **reproduces the shipped seed bit-exactly**, so a refresh
+is an auditable operation rather than an act of faith. The earlier attempt could
+not show this because it patched a copy of `lean_single.sio` that was 715 lines
+behind `origin/main`.
+
+### 3. `&!` mutable borrows — worse than reading
+
+`repro_mut_borrow_element.sio`. The element holds `tag=101 bits0=8`; a mutable
+borrow of it, in place, through a reference parameter, then reads back:
+
+```
+stock seed     A_hoisted tag=101 bits0=8 | B_inplace tag=0   bits0=0
+patched seed   A_hoisted tag=101 bits0=8 | B_inplace tag=201 bits0=15
+```
+
+The write did not merely land at the wrong address — **it zeroed the element**.
+Every earlier witness only read, so until now the demonstrated harm was wrong
+numbers. This is silent destruction of state, and it raises the severity of
+#1678.
+
 ## Still not established
 
-- **No broad suite run against the patched seed.** `make test` /
-  `scripts/dev/full_gate.sh` have not been run. That is the remaining gate on
-  shipping a seed refresh.
-- **The 3-stage bootstrap fixed point was measured on a stale copy** of
-  `lean_single.sio`, not this one. It reached a fixed point at stage 1 there
-  (`gen1==gen2==gen3`), and the unpatched control reproduced the shipped binary
-  bit-exactly — strong evidence, but it needs re-running against `origin/main`'s
-  source before the refresh PR.
-- **`&!` mutable borrows are not exercised** by any witness here. The same
-  branch serves them and propagates `ref_hash_mut`, so they are expected fixed;
-  expected is not measured.
+- The three `ir/egraph.sio` sites remain unaudited beyond "private, zero
+  external callers". They are moot if the seed fix lands.
+- No measurement of whether other `lean_single` codegen paths share the
+  pointer-per-slot confusion; only the `type_is_array_ref` borrow path was
+  examined.
 
 Refs #1678, #1680, #740, #1669
