@@ -13854,6 +13854,92 @@ theorem orth_weight1_expand (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
       P3_block01_total m b c W hb hc hW hW0,
       P3_block10_total m c a W hc ha hW hW0]
 
+
+/-! ### Tier 76 — the sign-weighted sums, and §57.17's four-way split as a THEOREM
+
+    Tier 75 leaves the weight-1 orthant as a level-`m` triple sum carrying two `±1` weights.  To
+    EVALUATE it one writes each weight as `1 − 2·χ` with `χ` the `0/1` indicator of its `−1` locus,
+    multiplies out, and splits by linearity — which is exactly the `S₀ − 2S_u − 2S_v + 4S_uv` of
+    §57.17, there done by hand.
+
+    `tri3w` is `tri3` with a weight on the summand; it is linear in that weight, which is all the
+    split needs. -/
+
+/-- `tri3` with a weight on the triple. -/
+def tri3w (N : Nat) (A : Nat → Nat → Int) (g : Nat → Nat → Nat → Int) : Int :=
+  sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c => g a b c * (A a b * (A b c * A c a)))))
+
+theorem tri3w_add (N : Nat) (A : Nat → Nat → Int) (g h : Nat → Nat → Nat → Int) :
+    tri3w N A (fun a b c => g a b c + h a b c) = tri3w N A g + tri3w N A h := by
+  unfold tri3w
+  rw [← sumLtI_add]
+  refine sumLtI_congr _ _ _ (fun a _ => ?_)
+  rw [← sumLtI_add]
+  refine sumLtI_congr _ _ _ (fun b _ => ?_)
+  rw [← sumLtI_add]
+  exact sumLtI_congr _ _ _ (fun c _ => by grind)
+
+theorem tri3w_smul (N : Nat) (A : Nat → Nat → Int) (k : Int) (g : Nat → Nat → Nat → Int) :
+    tri3w N A (fun a b c => k * g a b c) = k * tri3w N A g := by
+  unfold tri3w
+  rw [← sumLtI_mul]
+  refine sumLtI_congr _ _ _ (fun a _ => ?_)
+  rw [← sumLtI_mul]
+  refine sumLtI_congr _ _ _ (fun b _ => ?_)
+  rw [← sumLtI_mul]
+  exact sumLtI_congr _ _ _ (fun c _ => by grind)
+
+theorem tri3w_one (N : Nat) (A : Nat → Nat → Int) :
+    tri3w N A (fun _ _ _ => 1) = tri3 N A := by
+  unfold tri3w tri3
+  exact sumLtI_congr _ _ _ (fun a _ => sumLtI_congr _ _ _ (fun b _ =>
+    sumLtI_congr _ _ _ (fun c _ => by grind)))
+
+/-- The `0/1` indicator of block `(0,1)`'s `−1` locus. -/
+def chi01 (l y W : Nat) : Int :=
+  if l = 0 then (if y ^^^ W = 0 then 0 else 1)
+  else if y = 0 then 0
+  else (if l ^^^ W = 0 ∨ (l ^^^ y) ^^^ W = 0 then 1 else 0)
+
+/-- The `0/1` indicator of block `(1,0)`'s `−1` locus. -/
+def chi10 (l y W : Nat) : Int :=
+  if l = 0 then (if y = 0 then 0 else 1)
+  else if y = 0 then (if l ^^^ W = 0 then 0 else 1)
+  else (if y ^^^ W = 0 ∨ (l ^^^ y) ^^^ W = 0 then 1 else 0)
+
+theorem E01_eq (l y W : Nat) : E01 l y W = 1 - 2 * chi01 l y W := by
+  unfold E01 chi01 eps01
+  split <;> split <;> try split
+  all_goals simp_all
+
+theorem E10_eq (l y W : Nat) : E10 l y W = 1 - 2 * chi10 l y W := by
+  unfold E10 chi10 eps10
+  split <;> split <;> try split
+  all_goals simp_all
+
+/-- **§57.17's FOUR-WAY SPLIT, AS A THEOREM.**  The weight-1 orthant is the level-`m` triangle sum
+    minus twice each single-locus sum plus four times the joint one. -/
+theorem orth_weight1_split4 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    orth (2^(m+1)) (fun x y => P3 x y W (m+1)) 0 0 (2^(m+1))
+      = tri3 (2^(m+1)) (fun x y => P3 x y W m)
+        - 2 * tri3w (2^(m+1)) (fun x y => P3 x y W m) (fun _ b c => chi01 b c W)
+        - 2 * tri3w (2^(m+1)) (fun x y => P3 x y W m) (fun a _ c => chi10 c a W)
+        + 4 * tri3w (2^(m+1)) (fun x y => P3 x y W m) (fun a b c => chi01 b c W * chi10 c a W) := by
+  rw [orth_weight1_expand m W hW hW0]
+  have key : sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+        P3 a b W m * (E01 b c W * P3 b c W m * (E10 c a W * P3 c a W m)))))
+      = tri3w (2^(m+1)) (fun x y => P3 x y W m)
+          (fun a b c => 1 + (-2) * chi01 b c W + ((-2) * chi10 c a W
+            + 4 * (chi01 b c W * chi10 c a W))) := by
+    unfold tri3w
+    refine sumLtI_congr _ _ _ (fun a _ => sumLtI_congr _ _ _ (fun b _ =>
+      sumLtI_congr _ _ _ (fun c _ => ?_)))
+    rw [E01_eq, E10_eq]
+    grind
+  rw [key]
+  simp only [tri3w_add, tri3w_smul, tri3w_one]
+  grind
+
 end SounioZDFiberAntisym
 
 

@@ -4842,6 +4842,34 @@ sign factors — as a THEOREM, where §57.16–57.18 had it by hand. It is not y
 sum into `tri3_m − 4·S_u + …` means evaluating the sign-weighted sums, which is §57.17's arithmetic
 and is not formalised.
 
+### 57.27 — Tier 76: §57.17's four-way split is now a THEOREM
+
+Tier 75 leaves the weight-1 orthant as a level-`m` triple sum carrying two `±1` weights. To evaluate
+it, write each weight as `1 − 2·χ` with `χ` the `0/1` indicator of its `−1` locus, multiply out, and
+split by linearity. That is exactly `S₀ − 2S_u − 2S_v + 4S_uv`, which §57.17 derived by hand and only
+measured.
+
+| | |
+|---|---|
+| `tri3w N A g` | `tri3` with a weight `g` on the triple |
+| `tri3w_add` / `tri3w_smul` / `tri3w_one` | linearity in the weight, and the unit weight is `tri3` |
+| `E01_eq` / `E10_eq` | `E = 1 − 2·χ` — pure case checks, needing only `propext` |
+| **`orth_weight1_split4`** | `orth … 0 0 N = tri3_m − 2·tri3w(χ01) − 2·tri3w(χ10) + 4·tri3w(χ01·χ10)` |
+
+Kernel-clean. Denotation checked with both sides computed independently: 0 violations at `m = 2,3`,
+every label.
+
+**On the `slice₀` of §57.17.** The hand derivation carried a separate term for the `c = 0` index,
+because the block lemmas it used excluded it. Here the border behaviour is folded into `χ01`/`χ10`'s
+if-chains, so no separate slice appears — grok confirmed the two forms agree with the slice absorbed.
+That is the payoff of Tiers 71/72/74: the totals made the split uniform.
+
+**What is still not evaluated.** `tri3w(χ01)`, `tri3w(χ10)` and `tri3w(χ01·χ10)` are now well-defined
+level-`m` objects, but their VALUES — §57.17's `S_uv = 2(N−1)`, the isolated-row constant
+`10·2^m − 22`, and the coset-line sum — are still measured only. Turning those into theorems means
+counting over the loci, which is a different kind of argument (cardinality, not rewriting) and is not
+attempted.
+
 **Status of (III).** Still reduced, not proven — but the reduction is now a single explicit
 first-order recursion in `m` whose only non-constant input is a coset-line sum with a closed form.
 What has not been attempted: proving the recursion (the constants and `Σ_coset` from the same
