@@ -69,7 +69,17 @@ produced the first configuration in which the SAN loses to EarlyStop on
 metered burden (14 121 vs 13 290 TMAC) — a negative result the ledger
 explains mechanistically. A corrected variant with gates supervised by a
 correctness-distillation objective (SAN-v7, in the lineage of BERxiT's
-learning-to-exit module) is reported in the same section `(in progress)`. The
+learning-to-exit module) fires as designed: validation exit fraction 0.52–0.98
+post-τ, total metered burden 9.3% below EarlyStop *including* twenty post-τ
+epochs (the exit discount pays for the extra training), and a measured 1.41×
+inference wall-time speedup against Dense — at a post-τ accuracy of 0.7998
+that breaks the contract met at t*. A second point of the same frontier at
+threshold 0.95 (SAN-v7b) recovers the contract (final accuracy 0.8594 ≥ τ)
+with exits still firing (0.68–0.86), 6.9% below EarlyStop and a 1.12×
+inference speedup: the first configuration in the study satisfying the
+declared target with learned exits, and evidence that the
+accuracy–compute trade is a *declared deployment point* — exactly what the
+audit kernel enforces (§4.9–§4.10). The
 strongest positive result stands: a curriculum-gated SAN reaches τ = 0.85 on
 full CIFAR-10 at accuracy 0.8561 — inside the observed cross-job Dense band
 (0.8576–0.8650 at identical seed and configuration; §4.8 discloses the
@@ -784,15 +794,44 @@ post-τ epochs bought accuracy (via distillation and auxiliary heads acting as
 regularisers) and zero exits. Post-τ training without a working gate is pure
 cost; the ledger prices it exactly.
 
-**The correction (SAN-v7).** The gate is now supervised directly with the
+**The correction (SAN-v7, job 8717).** The gate is now supervised directly with the
 correctness target of BERxiT's learning-to-exit module [11] — exit at stage k
 iff stage k's head was correct on this sample — via a per-stage BCE applied
 post-τ. We claim no novelty for the mechanism; the novelty is that its
 behaviour is now *accounted*. A unit-level gradient test (BCE 0.694 → 0.326 in
-five steps, all gate parameters move) and a CPU smoke run verify the path
-before any GPU hour is spent. The full-scale run is in progress
-(Slurm job 8711); its ledger, exit fraction, and measured inference latency
-will be reported here in the next revision `(in progress)`.
+five steps, all gate parameters move) and a CPU smoke run verified the path
+before any GPU hour was spent. The full-scale result (50 000/10 000, τ = 0.85,
+seed 17, adaptive exit threshold 0.8):
+
+**Table 9: SAN-v7 — the first learned-gate run.**
+
+| variant | t* | epochs run | final acc | S_m (TMAC) | latency (ms/sample) |
+|---|---|---|---|---|---|
+| SAN-v7 | 11 | 32 | 0.7998 | 9 799 | **0.3515** |
+| EarlyStop | 25 | 26 | 0.8509 | 10 798 | — |
+| Dense | 35 | 60 | 0.8546 | 24 918 | 0.4941 |
+
+Three findings, all measured. First, **the gates fire**: the validation exit
+fraction rises from 0.000 at t* to 0.52–0.98 across the twenty post-τ epochs,
+and per-epoch metered cost falls from 415 GF to ~210–250 GF (−40–50%). Second,
+**the exit discount pays for the post-τ training**: total S_m is 9 799 TMAC,
+9.3% *below* the within-run EarlyStop (10 798) even though the SAN trained six
+more epochs — the first configuration in which the SAN beats EarlyStop with
+post-τ training included (60.7% below Dense). Third, **inference gets
+measurably faster**: 0.3515 ms/sample against Dense's 0.4941, a 1.41×
+wall-time speedup on the same GPU — the first inference-time win in this
+study that comes from learned exits rather than from freeze accounting.
+
+And one honest failure: the post-τ validation accuracy settles at 0.7998,
+*below* the contract the model met at t* (0.8544, clause L2 passes there).
+With threshold 0.8 the gate trades too much accuracy for compute. The run
+therefore reads as the first point of a frontier — (exit-heavy, 1.41× faster,
+acc 0.80) — not as a contract-satisfying configuration. A second point with
+threshold 0.95 (SAN-v7b, job 8720) is measured in §4.10. Clauses L4 and L6
+fail by construction in the v6/v7 design: gratuitous burden is nonzero by
+deliberate post-τ training, and the exit fraction at t* is exactly zero
+because exits exist only after t* — the clause predates the design it now
+judges, and we say so rather than redrawing it.
 
 **Why this section exists.** Every element of this episode — five variants
 carrying a silently false claim, the claim surviving two external LLM reviews,
@@ -801,6 +840,46 @@ all missed — is the phenomenon this paper's
 instrument exists to catch, caught *in vivo*. We considered quietly fixing the
 gate and reporting only the corrected numbers; that would have been the
 stronger-looking paper and the weaker science.
+
+### 4.10 The frontier is a deployment choice: SAN-v7b at threshold 0.95
+
+The SAN-v7 result left one question open: was the contract violation a
+property of the learned gate or of the chosen threshold? SAN-v7b (job 8720)
+repeats the run identically except for the adaptive exit threshold, raised
+from 0.8 to 0.95.
+
+**Table 10: two measured points of the accuracy–compute frontier
+(full CIFAR-10, τ = 0.85, seed 17; baselines within-run).**
+
+| variant | threshold | t* | final acc | S_m (TMAC) | vs EarlyStop | vs Dense | latency speedup |
+|---|---|---|---|---|---|---|---|
+| SAN-v7 | 0.80 | 11 | 0.7998 | 9 799 | −9.3% | −60.7% | 1.41× |
+| SAN-v7b | 0.95 | 14 | **0.8594** | 12 757 | −6.9% | −48.8% | 1.12× |
+| EarlyStop (v7 run) | — | 25 | 0.8509 | 10 798 | — | — | — |
+| EarlyStop (v7b run) | — | 32 | 0.8566 | 13 705 | — | — | — |
+| Dense (either run) | — | 35 / 27 | 0.8546 / 0.8431 | 24 918 | — | — | 1.00× |
+
+Three findings. First, **the threshold buys accuracy at a measured price**:
+raising it from 0.80 to 0.95 recovers the contract (final accuracy 0.8594 ≥
+τ, against 0.7998) at a cost of 2 958 TMAC of additional training burden and
+a smaller — but still positive — inference speedup (1.12× against 1.41×).
+The frontier is real, monotone in the expected direction, and priced exactly.
+Second, **SAN-v7b is the first configuration in this study that satisfies the
+declared contract at the end of training with learned exits firing**
+(validation exit fraction 0.68–0.86 across the post-τ epochs; L1 conservation
+exact with 1 737 exits on the 10 000-sample cohort; clause L2 passes at t* =
+14 with 0.8562). Third, both SAN variants beat their within-run EarlyStop on
+total metered burden *including* the twenty post-τ epochs — the exit discount
+during post-τ training consistently pays for the extra epochs (the two
+EarlyStop legs differ, 10 798 and 13 705 TMAC, by the cross-job variance
+disclosed in §4.8; comparisons are within-run only).
+
+The deployment reading is the point of the instrument: the threshold is not a
+hyperparameter to be tuned and forgotten but a *declared* frontier point —
+and the FPGA audit kernel enforces exactly the declared point at inference,
+with the stage-cost LUT and threshold loaded by the host and every decision
+attested bit-exactly. Training-time accounting and deployment-time
+attestation close their loop here.
 
 ---
 
@@ -905,8 +984,8 @@ figure energy.
 - Investigate sparsity and quantization ladders for the machine channel.
 - Measure the CPU baseline on the same DL380 host that holds the U250, and
   collect rack-level energy for both host and card.
-- Report the SAN-v7 (correctly-supervised gate) ledger, exit fraction, and
-  inference latency when the full-scale run completes (§4.9).
+- Map the accuracy–compute frontier across the adaptive exit threshold beyond
+  the two measured points of §4.9–§4.10, and characterise gate calibration.
 
 ### 5.4 Terminology: what "machine suffering" does and does not mean here
 
