@@ -69,6 +69,14 @@ Madaros imported multimodule:
 Native fix blocked this session by active claims on `self-hosted/native/**` and
 `self-hosted/ir/lower.sio`. Stdlib workarounds remain until `MADAROS_FIELD_IF_I64_FIXED`.
 
-## Field-if closeout
+## 5 — E175 trilogy (2026-08-06)
 
-**CLOSED** #1511 + workaround drop (direct `e.confidence >= k` restored).
+- **stdlib:** remaining private `extern "C"` sqrt/exp/log/… stubs removed from
+  `particle_physics/*.sio` (detector/fitting use `math::libm` for pow/fabs).
+- **checker (#1627):** `prefer_module` skips foreign private extern stubs;
+  visibility treats native-builtin externs as always visible (needs Madaros rebuild
+  to take effect in the shipped ELF).
+- **EXP14:** restores `eemm_z_amplitude_nu` import; dual-engine green.
+- Gate: `scripts/research/particle_e175_amp_import_gate.sh` → `PARTICLE_E175_TRILOGY_GATE_OK`.
+- Note: `docs/research/particle_e175_trilogy_2026-08-06.md`.
+

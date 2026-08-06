@@ -7,6 +7,7 @@ validated_by: A6
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.particle-e175-amp-import-2026-08-05
 -->
 
+
 <!-- docs:status-note:start -->
 > Docs status: `historical`
 > This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
@@ -78,3 +79,8 @@ bash scripts/research/particle_e175_amp_import_gate.sh
 ```
 
 Minimal witness after fix: complex + lorentz `check: OK` under Madaros.
+
+## Follow-up (2026-08-06 trilogy)
+
+Broader `particle_physics` extern sweep + #1627 checker hardening + EXP14
+`eemm_z_amplitude_nu` restore: see `docs/research/particle_e175_trilogy_2026-08-06.md`.
