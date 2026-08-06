@@ -9721,7 +9721,19 @@ fn ocp_mfi_compact_nops(module: &! IrModule, fi: i64) with Mut, Div, Panic {
     let ic = (*module).functions[fi as usize].instr_count
     while read < ic {
         let op = (IR_A_OP[(ir_region_slot_r((*module).functions[fi as usize].region, (read))) as usize] as IrOpcode)
-        if op != IrOpcode::IrNop {
+        // A nop carrying IR_FLOAT_REG_MARKER_FLAG is NOT dead. Codegen reads it
+        // to learn that a register holds f64 -- codegen_x86_linux.sio:7406,
+        // "Always honor an explicit float-marker IrNop". Dropping it makes the
+        // register read as an integer, so every f64 coming back from a call was
+        // garbage under -O:
+        //
+        //     fn half(x: f64) -> f64 { x * 0.5 }
+        //     half(5.0)  ->  9223372036854775808.000000   instead of 2.5
+        //
+        // This is also why an epistemic variance read back as 0 under -O: the
+        // shadow value is an f64 reached through exactly this marker.
+        let marker = IR_A_IMM_FLAGS[(ir_region_slot_r((*module).functions[fi as usize].region, (read))) as usize]
+        if op != IrOpcode::IrNop || marker == IR_FLOAT_REG_MARKER_FLAG {
             if write != read {
                 ocp_mfi_instr_move_fields(module, fi, write, read)
             }
