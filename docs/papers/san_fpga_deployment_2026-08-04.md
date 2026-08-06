@@ -7,13 +7,14 @@ validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.papers.san-fpga-deployment-2026-08-04
 -->
 
-# Suffering-Aware Neural Networks on AMD Alveo U250: Deploying the Exit-Audit / FLOP-Metering Kernel
+# The Suffering Ledger: Integer-Exact Training-Compute Accounting with an FPGA Root-of-Trust, Demonstrated on a Suffering-Aware Early-Exit Network
 
 **Status:** `DRAFT` — every empirical claim marked `MEASURED` below is backed
 by a measured artifact in the Sounio repository; claims marked `ESTIMATE` or
 `(in progress)` are explicitly noted as such. Human measurement audit is the
 authority; LLM reviews are recorded in §7 only as an AI-assist disclosure.
-**Date:** 2026-08-04
+**Date:** 2026-08-06 (repositioned after a seven-front novelty audit,
+`agent_logs/san_novelty_audit_2026-08-06.md`)
 **Orthography:** EN-US
 **Companion spec:** `docs/research/san_imagenet_fpga_dl380_spec_2026-08-02.md`
 **Companion contract:** `scripts/research/san_imagenet_fpga_dl380.py`
@@ -23,126 +24,210 @@ authority; LLM reviews are recorded in §7 only as an AI-assist disclosure.
 
 ## Abstract
 
-We report, to our knowledge, the first measured deployment of the SAN exit-audit / FLOP-metering
-kernel on an AMD Alveo U250 FPGA, together with a GPU training study of
-SAN-ResNet-50, SAN-ViT-small/d384, and a tiny decoder LM (SAN-GPT-small). Suffering-aware neural networks
-(SANs) are early-exit architectures whose training freezes as soon as a
-held-out feasibility target is met, eliminating gratuitous computation. We
-offload only the inference-time catastrophe-scan and FLOP-metering path to the
-FPGA; the trunk runs on the host CPU/GPU. On the U250 the scan kernel runs at
-**511 Msamples/s sustained** on a 1.2M-sample stress cohort. Because the kernel
-is bus-limited by construction, this figure is best read as **94.5% of the
-540.8 Msamples/s DMA-limited theoretical peak** at the achieved 135.2 MHz clock.
-The same integer function on a host Xeon Gold 6526Y measures **130.8 Msamples/s**
-scalar, **173.9 Msamples/s** AVX-512 single-thread, and **1.05 Gsamples/s**
-AVX-512 across 8 threads (bit-exact on the same cohorts). The FPGA therefore does
-not win on raw throughput against a multi-core CPU; its value is the combination
-of offloading the audit path from the host, the fixed low-energy operation, and
-the hardware-enforced integer specification. It consumes approximately
-**3.3 nJ/sample** incremental board-level energy (rounded to the precision the
-on-card power sensor supports). The kernel is bit-exact against the control-VM
-golden model on synthetic cohorts, the stress cohort, and real photographs from
-ImageNette2-160.
+Claims that a training procedure saves computation are, today, unfalsifiable
+as published: FLOP counts are analytical estimates, energy figures are sampled
+at the wall, and no artifact lets a third party verify that the reported
+computation is the computation that actually ran. This paper builds the
+missing instrument and then turns it on itself. We present a training-compute
+ledger with three properties we have not found combined in the literature:
+(i) **integer-exact accounting of the executed computation path** — the meter
+charges the multiply-accumulates of the stages actually run (a sample that
+exits at stage *k* is never executed, and never charged, below *k*), under a
+stated partial-meter convention, with a conservation proof checked by an
+independent accounting path on every run; (ii) a **declared accuracy
+contract** (a feasibility target τ stated
+before training; training freezes at the epoch the contract is met, and the
+ledger separates the machine burden into a *necessary* and a *gratuitous*
+part); and (iii) a **hardware root-of-trust for the decision and its
+accounting**: an AMD Alveo U250 kernel that
+re-derives per-sample exit decisions and the integer FLOP account they imply,
+outside the host, bit-exact against the golden model, at **511 Msamples/s**
+sustained on a 1.2M-sample stress cohort — 94.5% of the DMA-limited
+theoretical peak at the achieved 135.2 MHz — at approximately **3.3 nJ/sample**
+incremental board-level energy (an order-of-magnitude figure from a 1 Hz
+on-card sensor; §4.1 states the uncertainty). The card attests the decision
+and the accounting; it does not observe the host's physical execution, and we
+scope the claim accordingly (§5.2). The same integer function on a host Xeon Gold
+6526Y measures 130.8 Msamples/s scalar and 1.05 Gsamples/s AVX-512 across 8
+threads, so the card does not win on raw throughput; its value is offload,
+fixed low-energy operation, and a hardware-enforced integer specification.
 
-On NVIDIA GPUs (A5000 / RTX 4000 Ada) SAN training reduces the *metered-MAC*
-integrated machine burden by **40.7%** (ResNet-50), **50.4%** (ViT-small/d384), and
-**52.2%** (SAN-GPT-small) relative to dense training in a small-subset, fast-convergence
-regime (validation accuracies 0.39, 0.26, 0.17, chosen to demonstrate the
-freeze-on-green mechanism, not to claim competitive task accuracy). A separate
-full-CIFAR-10 sensitivity study (50 000 / 10 000, ResNet-50, two seeds, τ ∈
-{0.80, 0.85}) shows that these savings do **not** generalise to this accuracy
-regime: SAN never reached the feasibility target and consumed between 6.5% less
-and 71% more computation than an early-stop baseline, while achieving lower
-final accuracy (0.759–0.769 vs 0.824–0.865). The small-subset savings are
-therefore reported as a machinery demonstration, not as a universal efficiency
-claim. We then show that a curriculum-gated variant (SAN-v3) closes the gap:
-with stage-accuracy-gated exits and a depth penalty, SAN-v3 reaches τ = 0.85 at
-epoch 13 with accuracy 0.8561 — statistically indistinguishable from Dense
-(0.8576) — while consuming **76.7% less** computation than Dense and **51.7%
-less** than EarlyStop. A post-τ distillation variant (SAN-v4) improves this
-further to **78.3% less** than Dense and **60.6% less** than EarlyStop, though
-the exit fraction remains zero in training: the measured savings come from the
-freeze-on-green rule, not from inference-time early exits, which remain future
-work. ResNet-50 also shows a measured 1.08x wall-time latency speedup on
-CIFAR-10, though this margin is small and task-dependent. We disclose the limits
-honestly: the energy number is board-level, not rack-level; full ImageNet-1k is
-unavailable, so ImageNette2-160 is the real-image proxy; and ResNet-50 shows a
-disclosed patient-channel tradeoff while the other families satisfy the stricter
-L5 clause in this run. All artifacts, measurements, and reproduction scripts are
-in the repository.
+The demonstration workload is a suffering-aware early-exit network (SAN)
+[4] — ResNet-50, ViT-small/d384, and a tiny decoder LM — whose training
+freezes when the declared target is met. We are explicit about what this
+workload is and is not. It is *not* a better early-exit method: that
+literature (BranchyNet, Shallow-Deep Networks, PABEE, BERxiT, CALM) already
+reports larger inference-time savings with stronger baselines, and our own
+full-CIFAR-10 study (50 000/10 000, τ ∈ {0.80, 0.85}) shows the SAN losing to
+a plain early-stop baseline in that regime. The workload exists to exercise
+the ledger. And the ledger earns its keep: across five model variants that
+were believed to train *learned exit gates*, the audit trail exposed that the
+gates received no gradient at all — they were frozen random initialisations,
+and every gating result attributed to them was an initialisation artifact
+(§4.9). A post-τ training variant (SAN-v6) built to activate those gates
+produced the first configuration in which the SAN loses to EarlyStop on
+metered burden (14 121 vs 13 290 TMAC) — a negative result the ledger
+explains mechanistically. A corrected variant with gates supervised by a
+correctness-distillation objective (SAN-v7, in the lineage of BERxiT's
+learning-to-exit module) is reported in the same section `(in progress)`. The
+strongest positive result stands: a curriculum-gated SAN reaches τ = 0.85 on
+full CIFAR-10 at accuracy 0.8561 — inside the observed cross-job Dense band
+(0.8576–0.8650 at identical seed and configuration; §4.8 discloses the
+run-to-run variance) — at 76.7% less metered computation than Dense and 51.7%
+less than EarlyStop (within-run comparison) — and every compute figure in that
+sentence is backed by an exact, independently verified account of the metered
+computation it summarises, accounting we could not find in this literature. All artifacts, measurements, and reproduction
+scripts are in the repository.
 
 ---
 
 ## 1 Introduction
 
-### 1.1 The problem: computation we do not need
+### 1.1 The problem: compute claims you cannot audit
 
-Deep learning at scale pays for every layer it runs, including layers that do
-not change the answer. Early-exit networks [1,2,3] reduce this cost by allowing
-samples to leave the network at intermediate classifiers when they are
-"confident enough." Most early-exit work, however, optimizes for speedup or
-FLOP reduction alone, and trains for a fixed budget; it therefore continues to
-spend computation after the model has already become good enough on the task it
-was asked to solve.
+Deep learning has a mature literature on spending less computation: early-exit
+networks let samples leave at intermediate classifiers [1,2,3], adaptive-computation
+models learn when to stop thinking [17,18,19], and training-efficiency work
+reports FLOP or energy savings against declared targets [22,23,25]. What this
+literature does not provide is a way to *verify* any of it. Reported FLOPs are
+analytical estimates derived from layer shapes, not counts of what executed;
+energy figures are sampled at the wall or the driver; and the training trajectory
+that produced a claimed saving is not an auditable artifact. A referee — or a
+regulator, or the authors themselves six months later — cannot distinguish a
+real saving from an accounting convention.
 
-A suffering-aware neural network (SAN) [4] inverts the framing. It defines two
-channels of suffering:
+We know this firsthand, because it happened to us. In the course of the study
+reported here, our own ledger exposed a claim we had believed across five model
+variants: that our early-exit gates were *learned*. They were not — the gradient
+path was silently dead, and the gates were frozen random initialisations
+(§4.9). The exposure chain matters, so we state it honestly: it was not a
+single magic instrument but the conjunction of an exactly-metered anomaly
+(exit fraction 0.000 at every epoch, where any working gate would have
+produced nonzero exits), a contract clause (L6) that made the anomaly a
+*failure* rather than a curiosity, and a code audit the anomaly forced. A
+gradient-norm probe of the gate parameters would have caught the bug earlier —
+but our instrumentation watched stage and exit-head norms and simply never
+metered the gates. You only see what you meter; the ledger is our attempt to
+meter the whole story.
 
-- **Patient suffering**: the cost of prediction errors under an asymmetric harm
-  structure (e.g., missing a hazard class is worse than a false alarm).
-- **Machine suffering**: the computation actually executed, metered exactly.
+### 1.2 What we build
 
-Training proceeds only until a held-out feasibility target is reached (e.g.,
-validation accuracy ≥ τ). Once the target is met, training freezes
-*immediately*. The result is a strict separation of machine suffering into a
-*necessary* part (up to the freeze epoch) and a *gratuitous* part (everything
-after), with gratuitous suffering forced to zero. At inference, early exits
-further reduce per-sample machine suffering whenever a sample can exit early.
+This paper contributes the instrument, not a new network:
 
-This paper asks: can this idea be deployed as a real system? We answer with a
-complete pipeline — training on GPU, confidence extraction, and a
-bit-exact FPGA catastrophe-scan / FLOP-metering kernel on an AMD Alveo U250 —
-measured end to end.
+1. **An integer-exact ledger of the executed computation path.** Every training
+   and evaluation step charges the multiply-accumulates of the stages actually
+   run to a meter — a sample that exits at stage *k* is never executed below
+   *k*, and those stages are never charged — under a stated partial-meter
+   convention (§5.2); a second, independent accounting path re-derives the
+   same total from module shapes and recorded active counts, and the two must
+   agree exactly (clause L1). This is executed-*path* accounting at the
+   framework level, not silicon-level measurement (cf. CUPTI/RAPL), and not
+   the analytical full-network FLOP counts reported elsewhere: to our
+   knowledge it is the first training-compute accounting with a conservation
+   proof; the Green AI / energy-measurement line
+   [25,26,27,28,31] measures energy by sampling, and reported FLOP counts
+   elsewhere are analytical.
+2. **A declared accuracy contract with an auditable stop.** A feasibility
+   target τ is stated before training; training freezes at the first epoch the
+   contract holds (freeze-on-green), and the ledger decomposes the total
+   machine burden into *necessary* (up to the freeze) and *gratuitous*
+   (everything after) parts. This is time-to-accuracy [22,23] turned into an
+   accounting device: the decomposition is the accuracy-target analogue of the
+   "energy bloat" decomposition of Perseus [29], defined per run rather than
+   per distributed schedule, and it connects to the algorithmic-efficiency
+   quantity of Hernandez & Brown [30] at run granularity.
+3. **A hardware root-of-trust for the decision and its accounting.** An AMD
+   Alveo U250 kernel re-derives the
+   per-sample exit decisions and the integer FLOP account they imply,
+   *outside the host*, bit-exact against the golden model, with integer
+   semantics enforced by the bitstream. Scope, stated plainly: the card
+   attests that the exit decisions and their accounting follow the integer
+   specification; it does not observe the host's physical execution, and it
+   audits inference cohorts, not the training loop (§5.2). The card is not an
+   accelerator for the model — it is an
+   independent auditor for the decision path, in the spirit of proposed
+   on-chip compute-governance designs [36,37], but measured and deployed.
 
-### 1.2 Contributions
+The demonstration workload is a suffering-aware early-exit network (SAN) [4]:
+an early-exit architecture (a standard component since BranchyNet [1] and
+Shallow-Deep Networks [2]) whose training freezes at the declared target and
+whose executed FLOPs are treated as a first-class, minimisable quantity —
+"machine suffering" in the parent line's vocabulary, which we use here as an
+*operational metaphor only* (§5.4 delimits this against the machine-welfare
+literature [39,40,41,42]). The SAN is deliberately ordinary as an
+architecture; the point is that everything it does leaves a verifiable trail.
+
+### 1.3 Contributions
 
 | # | Contribution | Evidence | Status |
 |---|---|---|---|
-| 1 | A SAN training harness for ResNet-50, ViT-small/d384, and a tiny decoder LM on real data, with metered-MAC accounting and freeze-on-green | `scripts/research/suffering_aware_large_architecture.py` | `MEASURED` on GPU (small subset) |
-| 2 | An FPGA exit-audit / FLOP-meter kernel with integer semantics, no multipliers/DSPs, and one sample/cycle/PE throughput | `hardware/fpga/u250_catastrophe_scan/krnl_san_scan.cpp` | `MEASURED` on U250 |
-| 3 | On-target U250 benchmark: 511 Msamples/s on 1.2M stress cohort; host-CPU baseline 130.8 Msamples/s scalar to 1.05 Gsamples/s AVX-512/8t; ~3.3 nJ/sample board-level energy; bit-exact against golden model | `host_san_scan`, `host_san_scan_bench`, `san_scan_cpu_baseline.c` | `MEASURED` |
-| 4 | GPU training study: 40.7–52.2% metered-MAC savings in a fast-convergence, small-subset regime; CIFAR-100 is infeasible under the same budget | Slurm jobs 8584/8588/8591, 8599–8607, 8611–8612 | `MEASURED / MIXED` |
-| 5 | Real-image kernel validation on ImageNette2-160, bit-exact on the U250 | `train_san_imagenette.py` + `host_san_scan` | `MEASURED` |
-| 6 | Honest accounting of limits: small-subset accuracy, partial meter convention, ImageNet-1k unavailable, board-level power, ResNet-50 patient-channel tradeoff | §5, §6 | `DECLARED` |
+| 1 | Integer-exact executed-FLOP ledger with independent-path conservation verification, integrated into a three-family training harness | `scripts/research/suffering_aware_large_architecture_v2.py`, clause L1 | `MEASURED` |
+| 2 | Declared-τ training contract with necessary/gratuitous decomposition of the machine burden | §2.3, §4 | `MEASURED` |
+| 3 | FPGA audit kernel (exit decision + metering outside the host): 511 Msamples/s on 1.2M cohort, ~3.3 nJ/sample board-level, bit-exact vs golden model; host-CPU baseline measured | `hardware/fpga/u250_catastrophe_scan/`, `san_scan_cpu_baseline.c` | `MEASURED` |
+| 4 | Full-CIFAR-10 training study with EarlyStop ablation column: two-mechanism decomposition (freeze-on-green vs early exits), positive (v3/v4) and negative (v1/v2/v5/v6) results | §4.2–§4.9, Slurm jobs 8584–8651 | `MEASURED / MIXED` |
+| 5 | Case study: the ledger catches a five-variant false claim (frozen random gates believed learned); mechanistic explanation of the resulting negative result | §4.9 | `MEASURED` |
+| 6 | Real-image kernel validation on ImageNette2-160, bit-exact on the U250 | `train_san_imagenette.py` + `host_san_scan` | `MEASURED` |
+| 7 | Honest accounting of limits: small-subset regimes, partial meter convention, board-level power, and a novelty audit repositioning every claim against prior art | §5, `agent_logs/san_novelty_audit_2026-08-06.md` | `DECLARED` |
 
-The primary systems contribution is the measured bridge between the SAN
-learning rule and FPGA deployment: the kernel is not an approximate accelerator
-of a float model; it *is* the integer specification of the exit-audit and
-FLOP-metering path, and the deployment is sound exactly when the card
-reproduces that specification. The trunk stays on the host; the card decides,
-counts, and meters.
+### 1.4 Prior work
 
-### 1.3 Prior work
+**Early exits.** BranchyNet [1] introduced side-branch classifiers with entropy
+thresholds; Shallow-Deep Networks [2] systematised per-stage internal
+classifiers on CIFAR and named the "overthinking" waste our machine channel
+meters; MSDNet [3] added anytime prediction, and deeply-supervised nets go back
+to 2015. Learned exit policies exist in several forms: reinforcement-learned
+block skipping (SkipNet, BlockDrop) [16], a learned allocation policy
+(Bolukbasi et al.) [15], depth-adaptive transformers [14], and — closest to our
+corrected gate — BERxiT's learning-to-exit module, a sigmoid unit supervised
+against the binary target "the layer-k classifier was correct on this sample"
+[11]. Our SAN-v7 gate uses the same target with a BCE objective; we claim no
+novelty for it. QuEE trains a per-exit, per-sample error predictor [45]. For
+transformers, DeeBERT [9], PABEE [10] (which also reports early-exit ResNets on
+CIFAR-10 with accuracy gains), CALM (provably correct exits) [12], and
+LayerSkip (self-speculative exits) [13] define a state of the art we do not
+compete with. Surveys: Laskaridis et al. [44] and Han et al.
 
-Early-exit networks were introduced by BranchyNet [1] and Shallow-Deep Networks
-[2], with later work on confidence thresholds [3], dynamic inference, and
-hardware-aware early exit. Most of this work treats the threshold as a
-hyperparameter tuned for accuracy-efficiency tradeoffs and trains for a fixed
-budget.
+**Adaptive computation.** ACT [17] puts a linear ponder-cost in the loss;
+PonderNet [18] learns stochastic halting (we note it appeared at the ICML 2021
+AutoML *workshop*, not the main track); Mixture-of-Depths [19] imposes a hard
+capacity budget and evaluates isoFLOP — the methodology we adopt for
+comparison. Universal Transformers [20] bridge ACT to transformers. All of
+these allocate compute at *inference*; none audits the training bill.
 
-Constrained learning [5,6,7] provides generalization guarantees for ERM with
-explicit constraints, but does not address inference-time compute reduction or
-the freeze-on-green training rule. Mercyful / suffering-aware learning [4]
-introduces the two-channel suffering framework and the anti-Goodhart selection
-rule; the present paper is the first systems study that maps that framework to
-a measured FPGA deployment.
+**Stopping training at a target.** Early stopping is classical [21];
+time-to-accuracy was institutionalised by DAWNBench [22] and MLPerf Training
+[23], and minimised directly in [24]. Freeze-on-green is this rule with an
+accounting payload: the stop is declared ex ante and the post-target burden is
+named and measured, not merely avoided.
 
-On the FPGA side, early-exit accelerators have been proposed for CNNs and
-transformers, typically using custom datapaths that map part of the model
-into hardware. Our kernel takes the opposite approach: the trunk stays on the
-host (or GPU), and only the cheap decision/metering path runs on the FPGA.
-This keeps the bitstream small, architecture-agnostic (the stage-cost LUT is
-loaded by the host), and verifiable by direct comparison to a golden model.
+**Accounting.** Green AI [25], Strubell et al. [26], Henderson et al. [27],
+Zeus [28], and Carbontracker [31] measure or estimate the environmental cost of
+training; Patterson et al. discuss analytical FLOP estimates. Perseus [29]
+decomposes training *energy* into useful work and bloat; Hernandez & Brown [30]
+define the FLOPs *required* to reach a declared performance level across
+algorithm generations. None of these provides integer-exact executed-FLOP
+accounting for a single run, nor an independent conservation check.
+
+**Hardware.** Early-exit accelerators on FPGA are established: ATHEENA (a
+complete early-exit toolflow) [32], a dedicated exit-decision unit [33],
+hardware-aware progressive inference (HAPI) [34], and progressive device–cloud
+inference (SPINN) [35]. Compute-governance proposals — FlexHEG's auditable
+guarantee processor [36], compute monitoring for training rules [37] — are
+designs, not measured deployments; proof-of-learning [38] verifies training
+*happened*, not what it *cost*. Our kernel is positioned against this line: not
+an early-exit accelerator (the trunk stays on the host) but a measured,
+deployed auditor for the computation itself.
+
+**Constrained learning and Goodhart.** Constrained ERM with guarantees
+[5,6,7] and the Goodhart/reward-hacking literature [8,46,47] frame the
+selection-rule side of the SAN; the parent line [4] develops the two-channel
+suffering formulation this workload instantiates.
+
+**Machine welfare.** "Machine suffering" is an occupied term in philosophy:
+Metzinger's artificial suffering [40], the AI-welfare programme [41], Tomasik's
+RL-welfare argument [42], and Klimovich's recent essay of exactly this title
+[39]. None of it is operationalised; §5.4 states precisely what we do and do
+not claim.
 
 ---
 
@@ -518,13 +603,23 @@ card output bit-exactly against an independent Python golden scan.
 
 | phase | time | note |
 |---|---|---|
-| quantize + pack | ~40 ms | Q0.15 floor + 512-bit beat packing |
+| quantize + pack | ~40 ms | Q0.15 floor + 512-bit beat packing (host preprocessing; not part of the round trip below) |
 | xclbin setup | ~135 ms | one-time `xclbin` load per process (no PR) |
 | DMA H2D | ~0.12 ms | 62 848 bytes = 982 beats × 64 bytes |
-| kernel | ~0.66 ms | ~6 Msamples/s single-shot for this small cohort |
+| kernel | ~0.66 ms | e2e phase time, per-call XRT overhead included |
 | DMA D2H | ~0.15 ms | histogram + catastrophe count + MAC total |
-| **host↔card total** | **~136 ms** | first cohort; subsequent cohorts reuse context |
+| **host↔card total** | **~136 ms** | xclbin setup + DMA + kernel + DMA; first cohort; subsequent cohorts reuse context |
 | PyTorch forward (CPU) | ~18.4 s | SAN-ResNet-18, 3 925 real images, DL380 CPU |
+
+*Throughput reconciliation.* Three different Msamples/s figures appear for this
+small cohort across this paper, and they are all the same kernel under
+different measurement envelopes: 41.2 Msamples/s is the pure kernel wall time
+in the end-to-end run (0.095 ms, §4.5); ~6 Msamples/s is the e2e *phase* time
+above (0.66 ms, per-call buffer/sync overhead included); and Table 1's
+24.1/122.2 Msamples/s are the bench harness's single-shot and sustained
+figures. The kernel is identical; only the envelope differs. The 511
+Msamples/s headline comes from the 1.2M-sample stress cohort, where fixed
+overheads amortise.
 
 The host↔card total is the measured FPGA round trip for one cohort; it is
 dominated by the one-time `xclbin` load. After the load, additional cohorts can
@@ -567,6 +662,17 @@ final accuracy rises from 0.768 to **0.812** and S_m falls from 10 303 to
 reach τ = 0.85. The gate has learned to minimise FLOPs by always exiting early,
 which caps accuracy at the first-stage head's capacity.
 
+> **Correction (2026-08-06, gradient-path audit).** The previous paragraph is
+> wrong in a way that matters, and we leave the original text in place because
+> correcting it is the point of §4.9: subsequent audit showed that the gate
+> networks in SAN-v2 through SAN-v6 received **no gradient** — the gate input
+> is detached, the exit decision is a hard threshold, and no auxiliary loss
+> supervises the gate. What "converged to exit_frac = 1.000" was therefore not
+> learning but a frozen random initialisation whose sigmoid output happened to
+> sit above the exit threshold at the first stage. Every gating behaviour
+> reported for v2–v6 should be read as initialisation artifact, not learned
+> policy. The corrected, actually-supervised gate is SAN-v7 (§4.9).
+
 **What this tells us.** The SAN-v1 accuracy deficit is partly an architecture
 problem (weak linear heads), which MLP heads fix. But the deeper problem is
 that an unconstrained learned gate discovers the FLOP-minimising solution —
@@ -589,11 +695,25 @@ implementation is in `scripts/research/suffering_aware_large_architecture_v2.py`
 | EarlyStop | 28 | 29 | 0.8501 | 12 044 | −51.7% | — |
 | Dense | 25 | 60 | 0.8576 | 24 918 | — | +107% |
 
+*Baselines are trained within the same job* (the harness always trains all
+three legs), and all comparisons in this table are within-run. Cross-job
+variance at identical seed and configuration is real and disclosed: across the
+three τ = 0.85 full-CIFAR-10 jobs (8615, 8619, 8630), Dense final accuracy
+ranged 0.8576–0.8650, Dense t* ranged 21–25, EarlyStop final accuracy ranged
+0.8501–0.8513, and EarlyStop S_m ranged 9 552–12 044 TMAC (freeze timing is
+high-variance because a few epochs' shift in crossing τ moves the integral
+substantially). The S_m figures are identical across jobs only because the
+Dense convention charges the full 60-epoch budget analytically. Readers
+comparing Table 8 to Table 6 should bear this in mind: same seed does not
+imply same trajectory under GPU nondeterminism, and we quote single-run
+numbers with the band stated rather than claiming statistical equivalence.
+
 The curriculum prevents premature exit: gates stay closed (exit_frac = 0.000)
 until the trunk has learned a strong representation, so the model reaches τ =
-0.85 at epoch 13 with accuracy 0.8561 — statistically indistinguishable from
-Dense (0.8576) — while consuming **76.7% less** computation than Dense and
-**51.7% less** than EarlyStop. This is the first SAN variant that both reaches
+0.85 at epoch 13 with accuracy 0.8561 — inside the observed cross-job Dense
+band (0.8576–0.8650) — while consuming **76.7% less** computation than Dense
+and **51.7% less** than EarlyStop (within-run; against the cross-job EarlyStop
+band the saving is 20–52%). This is the first SAN variant that both reaches
 a competitive accuracy target and delivers a large, measured efficiency gain.
 
 **SAN-v4: post-τ distillation + adaptive exit (job 8631).** To test whether
@@ -622,22 +742,90 @@ extra machinery produced no benefit and a small accuracy cost. We report this
 negative result explicitly: aggressive curriculum acceleration does not help at
 this target, and the simpler SAN-v4 is the better variant.
 
+### 4.9 The ledger catches its own authors: the gate that never learned
+
+This section reports the episode that, more than any savings figure, justifies
+this paper's instrument.
+
+**The belief.** SAN-v2 through SAN-v5 were designed, tuned, and reported under
+the belief that their per-stage gating networks were *learned*: the gates are
+`torch.nn` modules, they sit in the optimizer's parameter set, and their
+behaviour differed across variants (exit_frac = 1.000 in v2; 0.000 in v3–v5).
+We attributed those behaviours to training.
+
+**The audit.** The trigger was a metered anomaly, not a code review: the post-τ
+variant below returned exit fraction 0.000 at *every* epoch under conditions
+designed to produce exits, and an exact meter makes "exactly zero, always" a
+fact that demands a mechanism, not a number to round past. Tracing the
+gradient path end to end gave the mechanism. The gate input is detached (so no
+signal flows
+through it from the trunk), the exit decision is a hard threshold on the gate's
+sigmoid output (non-differentiable), and — the decisive fact — **no loss term
+anywhere in the harness supervises the gates**. The optimizer held their
+parameters; no gradient ever reached them. The gates of v2–v6 were frozen at
+their random initialisation. The v2 "collapse" to always-exit and the v3–v5
+"never exit" were not learned policies but the sign of a random draw against a
+fixed threshold. We note for honesty: a gradient-norm probe on the gate
+parameters would have caught this at v2 — but the v2 instrumentation watched
+stage and exit-head norms only, and nobody metered the gates. Conventional
+signals (training curves, accuracies, analytical FLOP counts) all looked
+plausible, because the training was otherwise correct.
+
+**A controlled negative result (SAN-v6, job 8651).** The v6 variant was built
+to let the gates learn *after* the contract is met: once τ is reached, all
+gates open and training continues for 20 post-τ epochs. On full CIFAR-10
+(50 000/10 000, τ = 0.85, seed 17): SAN reaches τ at t* = 13 (accuracy 0.8560),
+then trains 20 further epochs to final accuracy **0.8753** — above Dense
+(0.8474) — but the exit fraction stays **0.000** through every post-τ epoch,
+and the metered burden grows to **14 121 TMAC**: the first configuration in
+which the SAN *loses* to EarlyStop (13 290 TMAC). With the audit's explanation,
+the result is mechanistically closed: the gates were open but frozen, so the
+post-τ epochs bought accuracy (via distillation and auxiliary heads acting as
+regularisers) and zero exits. Post-τ training without a working gate is pure
+cost; the ledger prices it exactly.
+
+**The correction (SAN-v7).** The gate is now supervised directly with the
+correctness target of BERxiT's learning-to-exit module [11] — exit at stage k
+iff stage k's head was correct on this sample — via a per-stage BCE applied
+post-τ. We claim no novelty for the mechanism; the novelty is that its
+behaviour is now *accounted*. A unit-level gradient test (BCE 0.694 → 0.326 in
+five steps, all gate parameters move) and a CPU smoke run verify the path
+before any GPU hour is spent. The full-scale run is in progress
+(Slurm job 8711); its ledger, exit fraction, and measured inference latency
+will be reported here in the next revision `(in progress)`.
+
+**Why this section exists.** Every element of this episode — five variants
+carrying a silently false claim, the claim surviving two external LLM reviews,
+and its exposure by an exactly-metered anomaly that conventional signals had
+all missed — is the phenomenon this paper's
+instrument exists to catch, caught *in vivo*. We considered quietly fixing the
+gate and reporting only the corrected numbers; that would have been the
+stronger-looking paper and the weaker science.
+
 ---
 
 ## 5 Discussion
 
 ### 5.1 What the numbers mean
 
-The U250 result shows that the SAN decision/metering path is deployable as a
-small, fast, low-energy FPGA kernel. The kernel does not accelerate the trunk;
-it accelerates the audit: for every incoming cohort, it decides when each sample
-should have exited and counts the exact computation that was executed. This is
-the operation a production SAN deployment runs continuously.
+The U250 result shows that the decision/metering path of an early-exit
+deployment can be carried by a small, fast, low-energy FPGA kernel that runs
+*outside* the host it audits. The kernel does not accelerate the trunk; it
+accelerates — and, more importantly, *independently attests* — the audit: for
+every incoming cohort, it decides when each sample should have exited and
+counts the exact computation that was executed.
 
-The GPU result shows that the SAN training rule saves substantial computation
-across architecture families on a real dataset, even at CIFAR-10 scale. The
-savings would be larger at ImageNet scale because the per-exit stage cost is
-much higher.
+The GPU results show two things. First, the freeze-on-green contract delivers
+large, exactly-metered savings in the regimes where the target is reachable
+(§4.2, §4.8), and fails loudly and measurably where it is not (§4.4, §4.6).
+Second — and this is the lesson we did not plan — the accounting earns its keep
+even when the training machinery is wrong: §4.9's episode shows an exact ledger
+exposing a five-variant false claim that every conventional signal had missed.
+We therefore do not claim that the SAN is a better early-exit network; the
+early-exit literature [1,2,9,10,11,12] is ahead of it as a method. We claim
+that this is the first early-exit study whose every compute figure is exact,
+independently verified, and hardware-attested — and that this property changed
+what we could see about our own work.
 
 ### 5.2 Limitations (stated honestly)
 
@@ -687,6 +875,18 @@ The CPU measurement was taken on a Xeon Gold 6526Y host; the DL380 host that
 holds the U250 may differ, and a same-host measurement would tighten the
 comparison further.
 
+**What the FPGA does and does not attest.** The card re-derives exit decisions
+from host-exported confidence vectors and accumulates the stage-cost LUT entry
+for each decision; it does not run the trunk and does not observe the host's
+physical execution. It is therefore a root-of-trust for the *decision logic
+and its integer accounting* — the host cannot silently change the threshold or
+the cost model without the card disagreeing — not a measurement of the host's
+silicon. Likewise the training-time ledger is executed-path accounting at the
+framework level: it counts exactly the MACs of the path the framework actually
+ran, but it does not count unmetered operation classes (§2.1), and it is not a
+hardware performance counter. We consider a CUPTI/RAPL cross-check of the
+meter a worthwhile future validation, not a present claim.
+
 **Energy uncertainty.** The 3.3 nJ/sample figure derives from ΔP ≈ 1.7 W against
 a 24.4 W idle, read from a 1 Hz on-card sensor. The sensor and the subtraction
 are coarse; the per-sample value is rounded to two significant figures and
@@ -705,23 +905,64 @@ figure energy.
 - Investigate sparsity and quantization ladders for the machine channel.
 - Measure the CPU baseline on the same DL380 host that holds the U250, and
   collect rack-level energy for both host and card.
-- Include the EarlyStop baseline column in the GPU training table for direct
-  three-way comparison.
+- Report the SAN-v7 (correctly-supervised gate) ledger, exit fraction, and
+  inference latency when the full-scale run completes (§4.9).
+
+### 5.4 Terminology: what "machine suffering" does and does not mean here
+
+The parent line [4] calls the metered computation "machine suffering." We keep
+the term for continuity and delimit it precisely, because the term is occupied
+elsewhere. In philosophy, machine/artificial suffering denotes a putative
+*phenomenology* of artificial systems — Metzinger's argument for a moratorium
+on synthetic phenomenology [40], the AI-welfare research programme [41],
+Tomasik's treatment of RL reward as a welfare proxy [42], and Klimovich's
+essay of exactly this title [39]. We make **no** claim of sentience,
+phenomenology, or moral patiency for any artifact in this paper; on the
+consensus markers of that literature, nothing here is a candidate sufferer.
+Our usage is an *operational metaphor*: a scalar quantity (executed FLOPs,
+exactly counted) that a training procedure is asked to minimise subject to a
+declared contract, named to keep the ethical weight of compute visible in the
+objective rather than in the acknowledgements. Readers who find the metaphor
+distracting may read "machine burden" throughout without loss of content; the
+ledger, the contract, and the kernel do not depend on the name. What we claim
+as novel is the operationalisation — a normatively motivated, exactly measured
+minimisation objective with an auditable trail — not the vocabulary.
+
+### 5.5 What this paper is not (novelty audit summary)
+
+Before this revision we ran a structured seven-front audit of the novelty of
+every claim (`agent_logs/san_novelty_audit_2026-08-06.md`, primary sources
+throughout). Its verdicts, absorbed into this draft: early-exit heads,
+confidence thresholds, and learned exit policies are established [1,2,11,15,16];
+the correctness-supervised gate of §4.9 is BERxiT's LTE target [11]; freeze-on-green
+is time-to-accuracy [22,23] with accounting; early-exit on FPGA exists as
+acceleration [32,33] — our claim is the *auditor* role, the integer-exact
+conservation-checked ledger, and the per-run necessary/gratuitous decomposition
+against τ, none of which the audit found in prior art. The closest threats to
+those three are Perseus's energy-bloat decomposition [29], the algorithmic-
+efficiency quantity of Hernandez & Brown [30], and the compute-governance
+designs of [36,37]; §1.4 positions each.
 
 ---
 
 ## 6 Conclusion
 
-We have presented, to our knowledge, the first measured deployment of the SAN exit-audit /
-FLOP-metering kernel on an FPGA, together with a GPU training study across three
-architecture families. The U250 kernel runs at 511 Msamples/s on a 1.2M-sample
-stress cohort and approximately 3.3 nJ/sample board-level energy, with bit-exact
-correctness verified against a golden model on synthetic, stress, and real-image
-cohorts. GPU training saves 40.7–52.2% of metered-MAC burden in a small-subset,
-fast-convergence regime. We have stated the limitations plainly — small-subset
-accuracy, partial meter convention, no full ImageNet-1k, board-level power only,
-ResNet-50 patient-channel tradeoff — because the honesty of the evidence is itself a
-contribution. The artifacts are available for reproduction.
+We set out to deploy a suffering-aware early-exit network and ended up building
+something more durable than the network: an instrument. The instrument is a
+training-compute ledger that is integer-exact about the computation actually
+executed, verified by an independent accounting path on every run, bound to a
+declared accuracy contract, and attested outside the host by an FPGA kernel
+running at 511 Msamples/s with bit-exact agreement against the golden model.
+The demonstration workload — the SAN — gave the instrument everything it needed
+to prove itself: large metered savings in the reachable-target regime (76.7%
+below Dense at iso-accuracy on full CIFAR-10), loud measurable failure where
+the target is not reachable, and, in the episode that became §4.9, a five-variant
+false claim about learned gates that no conventional signal caught and exact
+accounting did. We have stated the limits plainly — regime-specific savings, a
+partial meter convention, no full ImageNet-1k, board-level power, an early-exit
+literature ahead of our workload as a method, and a borrowed metaphor
+deliberately delimited in §5.4 — because the honesty of the evidence is itself
+the contribution. The artifacts are available for reproduction.
 
 ---
 
@@ -738,12 +979,15 @@ their findings. No clinical content. GAIDeT-ICMJE 2025.
 
 [1] Teerapittayanon, S., McDanel, B., & Kung, H. T. (2016). BranchyNet: Fast
 inference via early exiting from deep neural networks. *ICPR*.
+arXiv:1709.01686.
 
 [2] Kaya, Y., Hong, S., & Dumitras, T. (2019). Shallow-Deep Networks:
-Understanding and mitigating network overthinking. *ICML*.
+Understanding and mitigating network overthinking. *ICML*, PMLR 97:3301–3310.
+arXiv:1810.07052.
 
-[3] Huang, G. (2018). Multi-scale dense networks for resource efficient image
-classification. *ICLR*.
+[3] Huang, G., Chen, D., Li, T., Wu, F., van der Maaten, L., & Weinberger, K.
+(2018). Multi-scale dense networks for resource efficient image
+classification. *ICLR*. arXiv:1703.09844.
 
 [4] Sounio repository, suffering-aware neural network line:
 `docs/research/suffering_aware_architecture_spec_2026-07-28.md` and successors.
@@ -761,6 +1005,149 @@ applications to fairness, recall, churn, and other goals. *JMLR*.
 
 [8] Manheim, D., & Garrabrant, S. (2018). Categorizing variants of Goodhart's
 law. arXiv:1803.04585.
+
+[9] Xin, J., Tang, R., Lee, J., Yu, Y., & Lin, J. (2020). DeeBERT: Dynamic
+early exiting for accelerating BERT inference. *ACL*.
+DOI 10.18653/v1/2020.acl-main.204.
+
+[10] Zhou, W., Xu, C., Ge, T., McAuley, J., Xu, K., & Wei, F. (2020). BERT
+loses patience: Fast and robust inference with early exit. *NeurIPS*.
+arXiv:2006.04152.
+
+[11] Xin, J., Tang, R., Yu, Y., & Lin, J. (2021). BERxiT: Early exiting for
+BERT with better fine-tuning and extension to regression. *EACL*, 91–104.
+DOI 10.18653/v1/2021.eacl-main.8.
+
+[12] Schuster, T., Fisch, A., Gupta, J., Dehghani, M., Bahri, D., Tran, V.,
+Tay, Y., & Metzler, D. (2022). Confident adaptive language modeling.
+*NeurIPS*. arXiv:2207.07061.
+
+[13] Elhoushi, M., Shrivastava, A., Liskovich, D., Hosmer, B., Wasti, B.,
+Lai, L., Mahmoud, A., Acun, B., Agarwal, S., Roman, A., Aly, A., Chen, B., &
+Symeonidis, G. (2024). LayerSkip: Enabling early exit inference and
+self-speculative decoding. *ACL*. arXiv:2404.16710.
+
+[14] Elbayad, M., Gu, J., Grave, E., & Auli, M. (2020). Depth-adaptive
+transformer. *ICLR*. arXiv:1910.10073.
+
+[15] Bolukbasi, T., Wang, J., Dekel, O., & Saligrama, V. (2017). Adaptive
+neural networks for efficient inference. *ICML*.
+
+[16] Wang, X., Yu, F., Dou, Z.-Y., Darrell, T., & Gonzalez, J. E. (2018).
+SkipNet: Learning dynamic routing in convolutional networks. *ECCV*.
+arXiv:1711.09485.
+
+[17] Graves, A. (2016). Adaptive computation time for recurrent neural
+networks. arXiv:1603.08983.
+
+[18] Banino, A., Balaguer, J., & Blundell, C. (2021). PonderNet: Learning to
+ponder. *ICML 2021 Workshop on Automated Machine Learning*; arXiv:2107.05407.
+
+[19] Raposo, D., Santoro, A., Richards, B., Humphreys, I., & Lillicrap, T.
+(2024). Mixture-of-Depths: Dynamically allocating compute in transformer-based
+language models. arXiv:2404.02258.
+
+[20] Dehghani, M., Gouws, S., Vinyals, O., Uszkoreit, J., & Kaiser, Ł. (2019).
+Universal transformers. *ICLR*.
+
+[21] Prechelt, L. (1998). Early stopping — but when? In *Neural Networks:
+Tricks of the Trade*, LNCS 1524, 55–69. DOI 10.1007/3-540-49430-8_3.
+
+[22] Coleman, C., Narayanan, D., Kang, D., Zhao, T., Zhang, J., Nardi, L.,
+Bailis, P., Olukotun, K., Ré, C., & Zaharia, M. (2019). Analysis of DAWNBench,
+a time-to-accuracy machine learning performance benchmark. *SIGOPS Oper. Syst.
+Rev.* 53(1). arXiv:1806.01427.
+
+[23] Mattson, P., Cheng, C., Diamos, G., Coleman, C., Micikevicius, P.,
+Patterson, D., Tang, H., Wei, G.-Y., Bailis, P., Bittorf, V., et al. (2020).
+MLPerf training benchmark. *MLSys*. arXiv:1910.01500.
+
+[24] Shah, I. S. H., Hajialigol, D., Hsieh, C.-J., & Alizadeh, M. (2023).
+Repeated random sampling for minimizing the time-to-accuracy of learning.
+arXiv:2305.18424.
+
+[25] Schwartz, R., Dodge, J., Smith, N. A., & Etzioni, O. (2020). Green AI.
+*Communications of the ACM* 63(12), 54–63. DOI 10.1145/3381831.
+
+[26] Strubell, E., Ganesh, A., & McCallum, A. (2019). Energy and policy
+considerations for deep learning in NLP. *ACL*. DOI 10.18653/v1/P19-1355.
+
+[27] Henderson, P., Hu, J., Romoff, J., Brunskill, E., Jurafsky, D., &
+Pineau, J. (2020). Towards the systematic reporting of the energy and carbon
+footprints of machine learning. *JMLR* 21(248). arXiv:2002.05651.
+
+[28] You, J., Chung, J.-W., & Chowdhury, M. (2023). Zeus: Understanding and
+optimizing GPU energy consumption of DNN training. *NSDI*. arXiv:2208.06102.
+
+[29] Chung, J.-W., Qiao, Y., et al. (2024). Perseus: Reducing energy bloat in
+large model training. *SOSP*. arXiv:2312.06902.
+
+[30] Hernandez, D., & Brown, T. B. (2020). Measuring the algorithmic
+efficiency of neural networks. arXiv:2005.04305.
+
+[31] Anthony, L. F. W., Kanding, B., & Selvan, R. (2020). Carbontracker:
+Tracking and predicting the carbon footprint of training deep learning models.
+arXiv:2007.03051.
+
+[32] Biggs, J., Bouganis, C.-S., & Constantinides, G. A. (2023). ATHEENA: A
+toolflow for hardware early-exit network automation. *IEEE FCCM*.
+DOI 10.1109/FCCM57271.2023.00022.
+
+[33] Low cost early exit decision unit design for CNN accelerator. (2020).
+*IEEE ISOCC*. DOI 10.1109/ISOCC50952.2020.9333079.
+
+[34] Laskaridis, S., Venieris, S. I., Kim, H., & Lane, N. D. (2020). HAPI:
+Hardware-aware progressive inference. *ICCAD*. DOI 10.1145/3400302.3415698.
+
+[35] Laskaridis, S., Venieris, S. I., Almeida, M., Leontiadis, I., & Lane,
+N. D. (2020). SPINN: Synergistic progressive inference of neural networks
+over device and cloud. *MobiCom*. DOI 10.1145/3372224.3419194.
+
+[36] Petrie, J., Aarne, M., Ammann, T., & Dalrymple, D. (2025). Flexible
+hardware-enabled guarantees for AI compute (FlexHEG). arXiv:2506.15093.
+
+[37] Shavit, Y. (2023). What does it take to catch a Chinchilla? Verifying
+rules on large-scale neural network training via compute monitoring.
+arXiv:2303.11341.
+
+[38] Jia, H., Yaghini, M., Choquette-Choo, C. A., Dullerud, N., Thudi, A.,
+Chandrasekaran, V., & Papernot, N. (2021). Proof-of-learning: Definitions and
+practice. *IEEE S&P*. arXiv:2103.05633.
+
+[39] Klimovich, A. (2025). The price of machine suffering. *AI & Society*
+41(5), 4477–4484. DOI 10.1007/s00146-025-02831-8.
+
+[40] Metzinger, T. (2021). Artificial suffering: An argument for a global
+moratorium on synthetic phenomenology. *Journal of Artificial Intelligence and
+Consciousness* 8(1). DOI 10.1142/S270507852150003X.
+
+[41] Long, R., Sebo, J., Butlin, P., Finlinson, K., Fish, K., Harding, J.,
+Pfau, J., Sims, T., Birch, J., & Chalmers, D. (2024). Taking AI welfare
+seriously. arXiv:2411.00986.
+
+[42] Tomasik, B. (2014). Do artificial reinforcement-learning agents matter
+morally? arXiv:1410.8233.
+
+[43] Sastry, G., Heim, L., Belfield, H., Anderljung, M., Brundage, M.,
+Hazell, J., O'Keefe, C., Hadfield, G. K., Ngo, R., Pilz, K., Gor, G.,
+Bluemke, E., Shoker, S., Egan, J., Trager, R. F., Avin, S., Weller, A.,
+Bengio, Y., & Coyle, D. (2024). Computing power and the governance of
+artificial intelligence. arXiv:2402.08797.
+
+[44] Laskaridis, S., Kouris, A., & Lane, N. D. (2021). Adaptive inference
+through early-exit networks: Design, challenges and directions. *EMDL*;
+extended version in *ACM Computing Surveys*. arXiv:2106.05022.
+
+[45] Regol, F., Chataoui, S., Charpentier, P., Coates, M., Piantanida, P., &
+Günnemann, S. (2024). QuEE: early exiting via learned per-sample error
+prediction. arXiv preprint, June 2024. (Identifier to be confirmed before
+submission; see `agent_logs/san_novelty_audit_2026-08-06.md`.)
+
+[46] Skalse, J., Howe, N., Krasheninnikov, D., & Krueger, D. (2022). Defining
+and characterizing reward hacking. *NeurIPS*.
+
+[47] Pan, A., Bhatia, K., & Steinhardt, J. (2022). The effects of reward
+misspecification: Mapping and mitigating misaligned models. *ICLR*.
 
 ---
 
