@@ -383,3 +383,28 @@ def locus_sizes(m):
 def joint_signed_sum(m):
     """`tri3w(chi01 * chi10)`, label-independent."""
     return 4 - 6 * ((1 << (m + 1)) - 1)
+
+
+# --- §57.33: A^2 on the chi loci -----------------------------------------------------------------
+#
+# Pointwise there is NO closed form.  A (the unmasked level-m P3) is NOT symmetric — P3_symm needs
+# both indices nonzero, so the index-0 line breaks it.  A^2 has diagonal -(H-2) at index 0 and
+# +(H-2) elsewhere (H = 2^(m+1)); off the diagonal it takes many values, and even restricted to the
+# three loci families (A^2)(c,0), (A^2)(c,W), (A^2)(c,c^W) it takes 2-6 distinct values each.
+#
+# But the three SUB-SUMS of tri3w(chi01) separate:
+#
+#   b = 0     (isolated row)     -18*2^m + 30   a LEVEL CONSTANT   |  -N(N-1) at the maximal seam
+#   b = W     (isolated column)    6*2^m - 18   a LEVEL CONSTANT   |  126, 750, 3534 at m = 3,4,5
+#   b = c^W   (coset line)       constant on each g-fibre, as many values as fibres
+#
+# confirmed OUT OF SAMPLE at m = 5 (-546 and 174 at four labels, -3906 = -N(N-1) at the seam).
+#
+# So ALL the fibre dependence of tri3w(chi01) sits in the coset-line piece, and it is a fibre
+# invariant — §57.17's conclusion, reached there by hand on a different decomposition, now localised
+# to one named term and confirmed independently.  That piece is where a closed form would BE the
+# deviation law, which is why it resists.
+
+def chi01_row_constants(m):
+    """(isolated-row part, isolated-column part) of `tri3w(chi01)`, off the maximal seam."""
+    return -18 * 2**m + 30, 6 * 2**m - 18

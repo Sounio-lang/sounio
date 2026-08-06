@@ -5022,8 +5022,33 @@ the `~3N` explicit points of §57.28's loci — so what carries `O_1`'s fibre de
 over those points against the SQUARE of the level-`m` matrix. That is the same object §57.17
 identified by hand as the coset-line term, reached formally.
 
-**Still not a value.** `A²` on the `χ` loci is not evaluated, and that is where a closed form for
-`tri3w(χ01)` / `tri3w(χ10)` would have to come from. Not attempted; no estimate recorded.
+### 57.33 — `A²` on the `χ` loci: pointwise NO, sub-sums YES
+
+**Pointwise there is no closed form.** `A` here is the unmasked level-`m` `P3`, and the first thing
+the measurement says is that **`A` is not symmetric** — `P3_symm` needs both indices nonzero, so the
+index-`0` line breaks it. `A²` has diagonal `−(H−2)` at index `0` and `+(H−2)` elsewhere
+(`H = 2^(m+1)`), and off the diagonal it takes many values. Restricted to the three loci families
+`(A²)(c,0)`, `(A²)(c,W)`, `(A²)(c,c⊕W)` it still takes 2–6 distinct values each. **So the route
+"evaluate `A²` pointwise and substitute" does not close.**
+
+**But the three sub-sums do separate.** `tri3w(χ01)` is the sum of three pieces, one per branch of
+the locus, and they behave completely differently:
+
+| piece | off the maximal seam | at it |
+|---|---|---|
+| `b = 0` (isolated row) | `−18·2^m + 30` — a LEVEL CONSTANT | `−N(N−1)` |
+| `b = W` (isolated column) | `6·2^m − 18` — a LEVEL CONSTANT | `126, 750, 3534` at `m = 3,4,5` |
+| `b = c ⊕ W` (coset line) | **constant on each `g`-fibre**, as many values as fibres | |
+
+Confirmed **out of sample at `m = 5`**: `−546` and `174` at four different labels, and `−3906 =
+−N(N−1)` at the seam, all exactly as predicted from `m = 3,4`.
+
+**★ So all the fibre dependence of `tri3w(χ01)` sits in the coset-line piece, and it is a fibre
+invariant.** That is §57.17's conclusion — reached there by hand on a different decomposition —
+now localised to a single named term and verified independently. Two routes, one answer.
+
+**What remains open is exactly that piece**, and it is not an accident that it resists: it IS the
+deviation law's content. A closed form for it would be a closed form for `D`. Not attempted.
 
 **Status of (III).** Still reduced, not proven — but the reduction is now a single explicit
 first-order recursion in `m` whose only non-constant input is a coset-line sum with a closed form.
