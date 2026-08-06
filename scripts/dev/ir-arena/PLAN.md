@@ -62,8 +62,11 @@ substitute:
   construction — per-site guards then protect memory, not correctness.
 - **Every `*_capacity()` gets a boundary witness** at cap−1 / cap / cap+1,
   asserting *correct output or a diagnostic, never silence*. CI fails if a
-  capacity function has no witness. The name-pool and arg-pool witnesses will
-  fail on day one, which is the point.
+  capacity function has no witness. The name-pool and arg-pool cases now latch
+  rather than corrupt, so their witnesses should show a diagnostic — and until
+  one exists, that latch is an untested branch. Cheapest form: a scratch copy of
+  `ir.sio` with the capacity accessor reduced, the way
+  `SOUNIO_IR_ARENA_VACUITY=1` already patches out the generation guard.
 
 ## Scope correction: the widening is 10 tables, not 90
 
@@ -138,9 +141,12 @@ to design against.
    are churn-prone; every day of delay grows the conflict.
 2. **Build and differentially verify the two frame-down clone fixes**
    (`const_prop.sio:1671`, `dce.sio:880` — patched, build in flight).
-3. **Latch the two silent pool overflows**, and preserve the name binding on
-   same-slot RMW the way the args already are. Merging the arena with rc=12's
-   silent sibling still live would be the one genuinely embarrassing outcome.
+3. ~~**Latch the two silent pool overflows**~~ — **DONE** (`f11599deda`). Both now
+   latch with distinct kinds, and `put_name` keeps the binding when the slot
+   already holds that name, moving pool consumption from O(stores) to
+   O(instructions). Zero violations on the compiler's own 9.5 MB self-compile and
+   on all seven regression programs. **Still owed: proof the latch can fire** —
+   it needs a boundary witness (below), not a claim.
 4. **Seal after cleanup** — the merge-time proof that the alias sweeps closed
    anything.
 5. **Cover `ir_arena_swap_slots`.** It is the only primitive here written from
