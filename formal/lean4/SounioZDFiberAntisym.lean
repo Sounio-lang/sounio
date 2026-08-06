@@ -13672,6 +13672,104 @@ theorem P3_block10_eps (m l y W : Nat) (hl : l < 2^(m+1)) (hy : y < 2^(m+1)) (hW
     · rw [if_neg (fun h => h.elim hyW hcos), P3_block10 m l y W hl hy hW hl0 hy0 hyW hcos]
       grind
 
+
+/-! ### Tier 74 — the two border rows of block `(1,0)`, and the weight-1 orthant CLOSES
+
+    Block `(1,0)`'s two borders, and with them every block the weight-1 orthant uses.
+
+    * `l = 0` row: BOTH `P3`s keep their second factor only — `cdSig0` kills the first on each side —
+      and the two reductions differ by exactly one `R_ul` sign. **No `antisym` is involved, so there
+      is no exceptional locus**: the row flips at every `y ≠ 0`, and at `y = 0` the `R_ul` `v = 0`
+      branch fires on both sides and the flip disappears.
+    * `y = 0` column: the second factors die instead (`R_ul`'s `v = 0` branch on both sides) and the
+      first ones survive as `σ(l,W)` against `σ(W,l)` — an `antisym`, so this border DOES have
+      exceptional loci, at `l = W` and at `l = 0`.
+
+    That is the same ordered-arguments asymmetry as everywhere else in this expansion, now visible
+    between the two borders of a single block.
+
+    With Tiers 66 (block `(0,0)`, hypothesis-free), 70/71/72 (block `(0,1)`, complete for `W ≠ 0`)
+    and 73 + this tier (block `(1,0)`, complete for `W ≠ 0`), **every factor of the weight-1 orthant
+    `orth N f 0 0 N` is now a theorem at every index**.  What is still missing to evaluate the
+    orthant is the assembly itself — carrying these three pointwise identities through
+    `sumLtI_congr` and collecting the resulting sign patterns — which is not attempted here. -/
+
+/-- The `l = 0` row of block `(1,0)`, off the corner: it FLIPS, with no exceptional locus. -/
+theorem P3_block10_row0 (m y W : Nat) (hy : y < 2^(m+1)) (hW : W < 2^(m+1))
+    (hy0 : y ≠ 0) (hW0 : W ≠ 0) :
+    P3 (0 + 2^(m+1)) y W (m+1) = - P3 0 y W m := by
+  have hp := Nat.two_pow_pos (m+1)
+  have h2 : (2:Nat)^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  have hyW' : y ^^^ W < 2^(m+1) := xorlt hy hW
+  have hzH : (0 + 2^(m+1) : Nat) ^^^ W = W + 2^(m+1) := by
+    rw [Nat.zero_add, Nat.xor_comm]
+    have h := xor_lo_hi (m+1) W 0 (by omega) hW hp
+    rw [Nat.zero_add] at h
+    rw [h, Nat.xor_zero]
+  unfold P3 hi
+  rw [hzH, Nat.zero_xor,
+      R_lu (0 + 2^(m+1)) (y ^^^ W) (m+1) (by omega) (by omega),
+      R_lu (y ^^^ W) 0 m hyW' hp,
+      R_ul (W + 2^(m+1)) y (m+1) (by omega) (by omega), if_neg hy0]
+  simp only [cdSig0]
+  grind
+
+/-- The `y = 0` column of block `(1,0)`, off its two loci: it FLIPS. -/
+theorem P3_block10_col0 (m l W : Nat) (hl : l < 2^(m+1)) (hW : W < 2^(m+1))
+    (hl0 : l ≠ 0) (hW0 : W ≠ 0) (hlW : l ^^^ W ≠ 0) :
+    P3 (l + 2^(m+1)) 0 W (m+1) = - P3 l 0 W m := by
+  have hp := Nat.two_pow_pos (m+1)
+  have h2 : (2:Nat)^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  have hlW' : l ^^^ W < 2^(m+1) := xorlt hl hW
+  have hlH : (l + 2^(m+1)) ^^^ W = (l ^^^ W) + 2^(m+1) := by
+    have h := xor_lo_hi (m+1) W l (by omega) hW hl
+    rw [Nat.xor_comm (l + 2^(m+1)) W, h, Nat.xor_comm W l]
+  have hlWne : l ≠ W := by intro h; exact hlW (by rw [h, Nat.xor_self])
+  unfold P3 hi
+  rw [hlH, Nat.zero_xor,
+      R_lu (l + 2^(m+1)) W (m+1) (by omega) (by omega),
+      R_lu W l m hW hl,
+      R_ul ((l ^^^ W) + 2^(m+1)) 0 (m+1) (by omega) (Nat.two_pow_pos (m+2)), if_pos rfl,
+      R_lu l W m hl hW,
+      R_ul (l ^^^ W) 0 m hlW' hp, if_pos rfl,
+      antisym (m+1) l W hl hW hl0 hW0 hlWne]
+  grind
+
+/-- On `l = W` the `y = 0` column does NOT flip. -/
+theorem P3_block10_col0_seam (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    P3 (W + 2^(m+1)) 0 W (m+1) = P3 W 0 W m := by
+  have hp := Nat.two_pow_pos (m+1)
+  have h2 : (2:Nat)^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  have hWH : (W + 2^(m+1)) ^^^ W = 0 + 2^(m+1) := by
+    have h := xor_lo_hi (m+1) W W (by omega) hW hW
+    rw [Nat.xor_comm (W + 2^(m+1)) W, h, Nat.xor_self]
+  unfold P3 hi
+  rw [hWH, Nat.zero_xor,
+      R_lu (W + 2^(m+1)) W (m+1) (by omega) (by omega),
+      R_lu W W m hW hW,
+      R_ul (0 + 2^(m+1)) 0 (m+1) (by omega) (Nat.two_pow_pos (m+2)), if_pos rfl,
+      Nat.xor_self W,
+      R_ul 0 0 m hp hp, if_pos rfl]
+
+/-- The corner `l = y = 0` of block `(1,0)`: no flip. -/
+theorem P3_block10_corner (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    P3 (0 + 2^(m+1)) 0 W (m+1) = P3 0 0 W m := by
+  have hp := Nat.two_pow_pos (m+1)
+  have h2 : (2:Nat)^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  have hzH : (0 + 2^(m+1) : Nat) ^^^ W = W + 2^(m+1) := by
+    rw [Nat.zero_add, Nat.xor_comm]
+    have h := xor_lo_hi (m+1) W 0 (by omega) hW hp
+    rw [Nat.zero_add] at h
+    rw [h, Nat.xor_zero]
+  unfold P3 hi
+  rw [hzH, Nat.zero_xor,
+      R_lu (0 + 2^(m+1)) W (m+1) (by omega) (by omega),
+      R_lu W 0 m hW hp, cdSig0,
+      R_ul (W + 2^(m+1)) 0 (m+1) (by omega) (Nat.two_pow_pos (m+2)), if_pos rfl,
+      R_lu 0 W m hp hW,
+      R_ul W 0 m hW hp, if_pos rfl]
+  simp only [cdSig0']
+
 end SounioZDFiberAntisym
 
 

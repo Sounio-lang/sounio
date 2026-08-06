@@ -4771,6 +4771,37 @@ iso, `0/42, 0/210, 0/930` cos, `0/343, 0/3375, 0/29791` for the packaged form.
 `y = 0` row flips except at `l = W` and at `l = 0`. With those, block `(1,0)` would close as block
 `(0,1)` did in Tier 72 — and the weight-1 orthant would have all three of its blocks.
 
+### 57.25 — Tier 74: the borders of block `(1,0)`, and every factor of the weight-1 orthant closes
+
+The last two rows, and they behave differently from each other for a reason worth stating:
+
+* **`l = 0` row** — both `P3`s lose their FIRST factor to `cdSig0`, and the two surviving second
+  factors differ by exactly one `R_ul` sign. **No `antisym` is involved, so there is no exceptional
+  locus**: the row flips at every `y ≠ 0`, and at `y = 0` the `R_ul` `v = 0` branch fires on both
+  sides and the flip disappears. It is the only border in this whole expansion with no `antisym` in
+  it — which is why I asked the reviewer to try to refute it specifically.
+* **`y = 0` column** — the SECOND factors die instead, and the first ones survive as `σ(l,W)` against
+  `σ(W,l)`: an `antisym`, hence two exceptional loci, `l = W` and `l = 0`.
+
+| | |
+|---|---|
+| `P3_block10_row0` | `l = 0`, `y ≠ 0`: flip |
+| `P3_block10_col0` | `y = 0`, `l ∉ {0, W}`: flip |
+| `P3_block10_col0_seam` | `y = 0`, `l = W`: no flip |
+| `P3_block10_corner` | `l = y = 0`: no flip — **shared** by the two borders, both packings reporting `+1` |
+
+Measured first, `m = 2,3,4`, every label: the `l = 0` row packaged as `[y = 0 → +1, else −1]` gives
+`0/56, 0/240, 0/992`; the `y = 0` column as `[l = W or l = 0 → +1, else −1]` the same.
+
+**★ Every factor of the weight-1 orthant is now a theorem at every index, for `W ≠ 0`.** grok
+confirmed the closure explicitly: the summand `f a b · (f b (N+c) · f (N+c) a)` only ever touches
+blocks `(0,0)`, `(0,1)` and `(1,0)`; `(1,1)` never appears. Tier 66 gives the first
+(hypothesis-free), Tiers 70/71/72 the second, Tiers 73/74 the third.
+
+**What is still missing** is the ASSEMBLY: carrying these three pointwise identities through
+`sumLtI_congr` and collecting the sign patterns into a value for `O_1`. That is the step §57.16–57.18
+did on paper and measured; it is not formalised, and no difficulty is recorded for it.
+
 **Status of (III).** Still reduced, not proven — but the reduction is now a single explicit
 first-order recursion in `m` whose only non-constant input is a coset-line sum with a closed form.
 What has not been attempted: proving the recursion (the constants and `Σ_coset` from the same
