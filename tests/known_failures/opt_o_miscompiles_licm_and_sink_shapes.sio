@@ -1,0 +1,66 @@
+//@ ignore
+// TWO PRE-EXISTING -O MISCOMPILES on origin/main, found while trying to cover
+// ir_arena_swap_slots end to end. NEITHER is caused by the #1649 arena: both
+// reproduce identically on origin/main's compiler and on this branch, and both
+// disappear without -O.
+//
+//   shape        -O          no -O     what it is
+//   ----------   ---------   -------   --------------------------------------
+//   loop         HANGS       exit 0    loop-invariant const + call in a loop
+//   sink         exit 1      exit 0    const load followed by an independent
+//                                      binop -- wrong answer, not a hang
+//
+// Measured on both compilers, four combinations each. Compilation succeeds
+// (rc=0) every time; the defect is in the emitted program.
+//
+// These are the two IR shapes that reach ir_arena_swap_slots -- ocp_licm's
+// hoist and the sink-loads swap -- which is why covering that primitive through
+// a running program is currently impossible: the passes that call it miscompile
+// on their own, before the swap can be blamed or exonerated. The primitive
+// itself IS covered, in isolation and non-vacuously, by
+// tests/native-v2/ir_arena_swap_witness.sio.
+//
+// Minimal reproductions, both self-contained:
+//
+//   LOOP (hangs under -O on both compilers)
+//       fn add3(a: i64, b: i64, c: i64) -> i64 { a + b + c }
+//       fn main() -> i64 {
+//           var acc: i64 = 0
+//           var i: i64 = 0
+//           while i < 4 { let k = 7  let m = 9  acc = acc + add3(k, m, i)  i = i + 1 }
+//           if acc == 70 { return 0 }
+//           return 1
+//       }
+//
+//   SINK (returns 1 instead of 0 under -O on both compilers)
+//       fn add3(a: i64, b: i64, c: i64) -> i64 { a + b + c }
+//       fn main() -> i64 {
+//           let z = 11
+//           let w = 5 * 2
+//           let acc = w + add3(1, 2, 3) + z
+//           if acc == 27 { return 0 }
+//           return 1
+//       }
+//
+// The sink case is the more dangerous of the two: a hang is loud, a wrong exit
+// code is not. Worth its own issue against main rather than living here.
+//
+// Refs #1649
+
+fn add3(a: i64, b: i64, c: i64) -> i64 { a + b + c }
+
+fn main() -> i64 {
+    var acc: i64 = 0
+    var i: i64 = 0
+    while i < 4 {
+        let k = 7
+        let m = 9
+        acc = acc + add3(k, m, i)
+        i = i + 1
+    }
+    let z = 11
+    let w = acc * 2
+    acc = w + add3(1, 2, 3) + z
+    if acc == 157 { return 0 }
+    return 1
+}

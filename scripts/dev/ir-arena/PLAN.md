@@ -166,9 +166,24 @@ to design against.
    passes with both the hoisted and the direct form, and a Box'd `IrModule`
    SIGSEGVs in a witness, so the failing shape has no isolated reproduction.
    Do not "simplify" that loop.
-5. **Cover `ir_arena_swap_slots`.** It is the only primitive here written from
-   scratch and nothing in the evidence executes it; its two call sites need
-   specific IR shapes. The corpus must force them.
+5. ~~**Cover `ir_arena_swap_slots`**~~ — **DONE for the primitive, BLOCKED for the
+   call sites.** `tests/native-v2/ir_arena_swap_witness.sio` gives every lane a
+   distinct value on each side and checks the two a two-store swap would lose,
+   the name and the argument binding, plus that a self-swap is a no-op. In the
+   gate, non-vacuous: dropping only the ARG_BASE/ARG_COUNT half fails it at
+   rc=29.
+
+   End-to-end coverage of the two call sites is **not currently possible**, and
+   the attempt found why: both IR shapes that reach the primitive miscompile
+   under `-O` on `origin/main` itself. A loop with a loop-invariant constant and
+   a call **hangs**; a constant load followed by an independent binop returns the
+   **wrong answer**. Both are clean without `-O`, both reproduce identically on
+   the branch and on main, and compilation succeeds every time. So the passes
+   that call the swap are broken independently of it, and no passing program can
+   route through them. Recorded with minimal repros in
+   `tests/known_failures/opt_o_miscompiles_licm_and_sink_shapes.sio`; the
+   wrong-answer one deserves its own issue against main, since a hang is loud and
+   a wrong exit code is not.
 6. **The `-O` register/label widening**, or — if it slips — the lowering-side cap
    check that latches and refuses the artifact. What must not ship is the current
    state: an in-tree `run-pass` test that miscompiles at rc=0 under `-O`.

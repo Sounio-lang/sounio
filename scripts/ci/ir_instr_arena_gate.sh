@@ -132,6 +132,11 @@ WITNESSES=(
   # and latched. The count half exists because the first wiring sealed 0 of 7 in
   # silence.
   "ir_module_seal_witness:IR_MODULE_SEAL_WITNESS_PASS"
+  # The swap primitive. A swap written as two stores cannot carry call arguments
+  # -- the first store overwrites the slot the second must read them from -- so
+  # this is the one piece of the rc=12 repair with no natural coverage: its call
+  # sites need specific IR shapes.
+  "ir_arena_swap_witness:IR_ARENA_SWAP_WITNESS_PASS"
 )
 
 run_one() {
@@ -224,6 +229,12 @@ if [ "$VACUITY" = "1" ]; then
       -e 's/ir_arena_latch(IR_ARENA_VIOLATION_ARG_POOL, ir_region_invalid())//' \
       "$ARENA" >"$TMP/no_pool_latch.sio"
   run_one ir_arena_pool_witness IR_ARENA_POOL_WITNESS_PASS "$TMP/no_pool_latch.sio" fail
+  # Drop only the argument-binding half of the swap. Every scalar lane still
+  # exchanges, so a witness that checked less would stay green; this one fails at
+  # rc=29 = ARG_COUNT_NOT_SWAPPED.
+  sed -e '/let t_ab = IR_A_ARG_BASE/d' -e '/let t_ac = IR_A_ARG_COUNT/d' \
+      "$ARENA" >"$TMP/no_swap_args.sio"
+  run_one ir_arena_swap_witness IR_ARENA_SWAP_WITNESS_PASS "$TMP/no_swap_args.sio" fail
 fi
 
 head_sha="$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || printf not_available)"
