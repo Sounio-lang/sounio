@@ -3385,6 +3385,10 @@ fn lowerer_lower_fn_params_mut(
                     let instr_count = (*current_func_box2).instr_count
                     if instr_count < IR_MAX_INSTRS {
                         ir_arena_store(ir_region_slot_w((*current_func_box2).region, (instr_count)), ir_mark_float_reg(preg))
+                        // #1669: this store bypasses Lowerer.emit, so the bit has
+                        // to be set beside it. f64 PARAMS are the purest orphan
+                        // fact -- there is no defining instruction to ride on.
+                        let _fb = ir_float_bits_set(&! (*current_func_box2), preg)
                         (*current_func_box2).instr_count = instr_count + 1
                         (*lo).current_func = current_func_box2
                     } else {
@@ -8663,6 +8667,19 @@ impl Lowerer {
             return lo.report_error()
         }
         var current_func_box = lo.current_func
+        // #1669: record float-ness on the FUNCTION, at the moment it is asserted,
+        // instead of leaving it in the instruction stream where a later pass is
+        // entitled to drop it. One site; all 70 ir_mark_float_reg emitters keep
+        // their exact shape and get this for free.
+        //
+        // ANY instruction carrying the marker, not just IrNop. The first version
+        // matched nops only and the proof run failed: a call returning f64 gets
+        // the flag stamped on the CALL (`call_instr.imm_flags = ...`), and lowering
+        // uses both channels. Narrowing to nops recorded the orphan facts and
+        // silently missed every instruction-attached one.
+        if instr.imm_flags == IR_FLOAT_REG_MARKER_FLAG && instr.dst >= 0 {
+            let _fb = ir_float_bits_set(&! (*current_func_box), instr.dst)
+        }
         let instr_count = (*current_func_box).instr_count
         if instr_count < IR_MAX_INSTRS {
             ir_arena_store(ir_region_slot_w((*current_func_box).region, (instr_count)), instr)
@@ -10358,6 +10375,8 @@ impl Lowerer {
                         let instr_count = current_func.instr_count
                         if instr_count < IR_MAX_INSTRS {
                             ir_arena_store(ir_region_slot_w(current_func.region, (instr_count)), ir_mark_float_reg(preg))
+                            // #1669: second off-funnel param-marker store.
+                            let _fb = ir_float_bits_set(&! current_func, preg)
                             current_func.instr_count = instr_count + 1
                         } else {
                             lo = lo.report_error()

@@ -1271,6 +1271,10 @@ pub let IR_ARENA_VIOLATION_SEALED: i64 = 3
 // re-appending", never "you aliased a region".
 pub let IR_ARENA_VIOLATION_NAME_POOL: i64 = 4
 pub let IR_ARENA_VIOLATION_ARG_POOL: i64 = 5
+// #1669: a float fact the backend cannot represent. Today every consumer caps at
+// 2048 vregs and SILENTLY drops the typing above it, which is the same silent
+// miscompile-in-waiting; this makes it a refusal.
+pub let IR_ARENA_VIOLATION_FLOAT_SET: i64 = 6
 
 fn ir_arena_latch(kind: i64, r: IrInstrRegion) with Mut, Panic, Div {
     if IR_ARENA_VIOLATION == 0 {
@@ -1297,6 +1301,12 @@ pub fn ir_arena_report_violation() -> bool with IO, Mut, Panic, Div {
         print_int(IR_NAME_POOL_LEN)
         print(" of ")
         print_int(ir_name_pool_capacity())
+        print("\n")
+        return true
+    } else if IR_ARENA_VIOLATION_KIND == IR_ARENA_VIOLATION_FLOAT_SET {
+        print("a vreg above the float-typing capacity was marked as f64 -- the backend cannot represent it")
+        print(") capacity ")
+        print_int(ir_float_bits_capacity())
         print("\n")
         return true
     } else if IR_ARENA_VIOLATION_KIND == IR_ARENA_VIOLATION_ARG_POOL {
@@ -1708,6 +1718,23 @@ pub struct IrFunction {
     // 1 = first param is &T / &!T (method self-by-ref). Call sites must pass an
     // address; bare-value receivers need auto-OpRef (Root 2 method fix).
     pub first_param_is_ref: i64,
+    // #1669: which vregs live in an xmm. This used to be smuggled through the
+    // instruction stream as IrNop + IR_FLOAT_REG_MARKER_FLAG -- a fact with
+    // FUNCTION lifetime stored in a slot with PASS lifetime. compact_nops deleted
+    // it and every f64 returned from a call came back as i64 MAX.
+    //
+    // 64 words x 32 bits = 2048 vregs, which is not arbitrary: every consumer
+    // already caps float typing there (NC_MAX_VREGS, MIR_MAX_FLOAT_SLOTS, and
+    // codegen's `ty: [i64; 2048]`), so this is exactly information-preserving.
+    // 32 bits per word, not 64, so every mask stays a positive i64.
+    //
+    // A BIT, not a tag, and that is not a limitation on f128/f256: wide floats
+    // are software-emulated over consecutive INTEGER limbs (the 11 IrWide*
+    // opcodes carry limb_count) and never set the marker. The question here is
+    // strictly "xmm or general-purpose register" -- movsd or mov. A future
+    // HARDWARE float of another width would need more than a bit; widening this
+    // lane is then two helpers and four consumers, not a re-plumb.
+    pub float_reg_bits: [i64; 64],
 }
 
 pub struct IrAlgebraInfo {
@@ -4703,6 +4730,61 @@ pub fn ir_phi(dst: i64) -> IrInstr {
     }
 }
 
+// Word/bit split for float_reg_bits. 32 bits per word keeps every mask positive.
+pub fn ir_float_bits_capacity() -> i64 { 2048 }
+
+// Counts float marks for vregs above the cap, where the bitset cannot represent
+// them and codegen's fixpoint is the only channel. Visible rather than fatal --
+// see ir_float_bits_set.
+pub var IR_FLOAT_BITS_OVER_CAP: i64 = 0
+
+fn ir_float_bit_mask(bit: i64) -> i64 {
+    var m: i64 = 1
+    var k: i64 = 0
+    while k < bit {
+        m = m * 2
+        k = k + 1
+    }
+    m
+}
+
+// Returns false when reg is out of range rather than pretending. The caller that
+// matters -- the emit funnel -- latches instead, because a marker for a reg this
+// side of the cap is information the backend cannot represent at all.
+pub fn ir_float_bits_get(f: &IrFunction, reg: i64) -> bool with Mut, Panic, Div {
+    if reg < 0 || reg >= ir_float_bits_capacity() { return false }
+    let word = reg / 32
+    let bit = reg % 32
+    ((*f).float_reg_bits[word as usize] / ir_float_bit_mask(bit)) % 2 == 1
+}
+
+pub fn ir_float_bits_set(f: &! IrFunction, reg: i64) -> i64 with Mut, Panic, Div {
+    if reg < 0 || reg >= ir_float_bits_capacity() {
+        // MEASURED, and it is why this does not latch. Latching here was the
+        // first version, and it refused knowledge_octonion_structure.sio, which
+        // uses 7088 vregs and marks some of them float above the cap -- a program
+        // that COMPILES AND PASSES today. Codegen's join-over-defs fixpoint
+        // (nc_compute_float_types) recovers the typing for those registers from
+        // their definitions, so the marker is not the only channel and dropping
+        // it above the cap is not, on this evidence, a miscompile.
+        //
+        // So: above the cap the bits carry nothing and the fixpoint is the
+        // authority, exactly as before this change. That is a real gap in the
+        // guarantee -- it is bounded at 2048 because every consumer is -- and it
+        // is recorded rather than escalated, because escalating it measured worse
+        // than the thing it was meant to prevent.
+        IR_FLOAT_BITS_OVER_CAP = IR_FLOAT_BITS_OVER_CAP + 1
+        return IR_ARENA_ERR_RANGE
+    }
+    let word = reg / 32
+    let bit = reg % 32
+    let mask = ir_float_bit_mask(bit)
+    if ((*f).float_reg_bits[word as usize] / mask) % 2 == 0 {
+        (*f).float_reg_bits[word as usize] = (*f).float_reg_bits[word as usize] + mask
+    }
+    IR_ARENA_OK
+}
+
 pub fn ir_empty_function() -> IrFunction {
     IrFunction {
         name: ir_empty_name(),
@@ -4722,6 +4804,7 @@ pub fn ir_empty_function() -> IrFunction {
         sret_dest_reg: -1,
         bss_size: 0,
         first_param_is_ref: 0,
+        float_reg_bits: [0; 64],
     }
 }
 
