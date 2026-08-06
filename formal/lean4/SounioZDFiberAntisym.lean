@@ -12952,6 +12952,107 @@ theorem P1_add_P3_zero_col (l Llo n : Nat) (hl : l < 2^(n+1)) (hL : Llo < 2^(n+1
       rw [hP1, hP3, if_neg hL0, A4_sub' (n+1) Llo l hL hl hL0 hl0 hcomm, Nat.xor_comm Llo l]
       omega
 
+
+/-! ### Tier 64 — the label's TOP BIT acts by SWITCHING, so `P3`'s two-graph cannot see it
+
+    §57.8 left the deviation law as a statement about ONE moment of ONE Seidel matrix: `tri3(P3̃)`,
+    the two-graph count of `P3` masked to the off-diagonal nonzero indices.  Measuring that moment
+    across all labels showed it depends only on `W mod 2^m` — the top bit of the label is invisible
+    to it (0 violations, `m = 2,3,4,5`).
+
+    This tier says why, and it is the lane's own vocabulary: **adding `2^m` to the label SWITCHES
+    the Seidel matrix.**  Switching is `S ↦ diag(ε) S diag(ε)`; it preserves every triple product
+    `S_ab S_bc S_ca`, hence the two-graph, hence `tri3`.  The switching vector is
+
+      `epsTop x m = −1` exactly above the seam vertex (`2^m < x`), `+1` at and below it.
+
+    The pointwise cause is one branch computation (`sigma_lift`): flipping the top bit of `cdSigma`'s
+    FIRST argument multiplies it by `−epsTop` of the second — `R_ul`/`R_ll` in the lower half,
+    `R_uu`/`R_lu` in the upper, and the sign lands differently on the two, which is exactly where the
+    `−1` above the seam comes from.  `P3` is a product of two such factors (`P3_red`), so the two
+    `−1`s cancel and what survives is `epsTop l · epsTop y`.
+
+    ⚠ On the INDEX-0 line the identity FAILS (measured: 42/210/930/3906 entries at `m = 2..5`) —
+    `epsTop 0 = 1` but the branch computation gives the opposite sign there.  That locus is masked
+    out of `tri3(P3̃)` (Tier 63), so the corollary is unaffected; the theorem below carries `l ≠ 0`
+    and `y ≠ 0` for exactly this reason. -/
+
+/-- The switching vector of Tier 64: `−1` strictly above the seam vertex `2^m`. -/
+def epsTop (x m : Nat) : Int := if 2^m < x then -1 else 1
+
+private theorem epsTop_pm (x m : Nat) : epsTop x m = 1 ∨ epsTop x m = -1 := by
+  unfold epsTop
+  split
+  · exact Or.inr rfl
+  · exact Or.inl rfl
+
+/-- Lifting `cdSigma`'s FIRST argument over the seam multiplies it by `−epsTop` of the second. -/
+private theorem sigma_lift (k a l : Nat) (ha : a < 2^(k+1)) (hl : l < 2^(k+2)) (hl0 : l ≠ 0) :
+    cdSigma (a + 2^(k+1)) l (k+2) = (- epsTop l (k+1)) * cdSigma a l (k+2) := by
+  have hpow : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by rw [Nat.pow_succ]; omega
+  have hp := Nat.two_pow_pos (k+1)
+  by_cases hlh : l < 2^(k+1)
+  · have he : epsTop l (k+1) = 1 := by unfold epsTop; rw [if_neg (by omega)]
+    rw [he, R_ul a l k ha hlh, if_neg hl0, R_ll a l k ha hlh]
+    omega
+  · obtain ⟨l₀, hl₀⟩ : ∃ l₀, l = l₀ + 2^(k+1) := ⟨l - 2^(k+1), by omega⟩
+    have hl₀lt : l₀ < 2^(k+1) := by omega
+    subst hl₀
+    by_cases h0 : l₀ = 0
+    · subst h0
+      have he : epsTop (0 + 2^(k+1)) (k+1) = 1 := by unfold epsTop; rw [if_neg (by omega)]
+      rw [he, R_uu a 0 k ha hp, if_pos rfl, R_lu a 0 k ha hp, cdSig0]
+      omega
+    · have he : epsTop (l₀ + 2^(k+1)) (k+1) = -1 := by unfold epsTop; rw [if_pos (by omega)]
+      rw [he, R_uu a l₀ k ha hl₀lt, if_neg h0, R_lu a l₀ k ha hl₀lt]
+      omega
+
+/-- The same, stated as the `⊕`-flip it is: the direction of the flip does not matter, because
+    `epsTop` squares to `1`. -/
+theorem sigma_top_flip (k c l : Nat) (hc : c < 2^(k+2)) (hl : l < 2^(k+2)) (hl0 : l ≠ 0) :
+    cdSigma (c ^^^ 2^(k+1)) l (k+2) = (- epsTop l (k+1)) * cdSigma c l (k+2) := by
+  have hpow : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by rw [Nat.pow_succ]; omega
+  have hp := Nat.two_pow_pos (k+1)
+  by_cases hch : c < 2^(k+1)
+  · have hx : c ^^^ 2^(k+1) = c + 2^(k+1) := by
+      have h := xor_lo_hi (k+1) c 0 (by omega) hch hp
+      simpa using h
+    rw [hx]
+    exact sigma_lift k c l hch hl hl0
+  · obtain ⟨c₀, hc₀⟩ : ∃ c₀, c = c₀ + 2^(k+1) := ⟨c - 2^(k+1), by omega⟩
+    have hc₀lt : c₀ < 2^(k+1) := by omega
+    subst hc₀
+    have hx0 : c₀ ^^^ 2^(k+1) = c₀ + 2^(k+1) := by
+      have h := xor_lo_hi (k+1) c₀ 0 (by omega) hc₀lt hp
+      simpa using h
+    have hx : (c₀ + 2^(k+1)) ^^^ 2^(k+1) = c₀ := by rw [← hx0, xor_cancel]
+    rw [hx, sigma_lift k c₀ l hc₀lt hl hl0]
+    rcases epsTop_pm l (k+1) with h | h <;> rw [h] <;> omega
+
+/-- **THE TOP BIT OF THE LABEL IS A SWITCHING.**  `P3` at the label `W + 2^(k+1)` is `P3` at `W`
+    conjugated by the diagonal sign matrix `epsTop`.  Since switching preserves every triple
+    product `S_ab S_bc S_ca`, the two-graph of `P3̃` — and therefore `tri3(P3̃)`, and therefore the
+    whole deviation statement §57.8 reduced to — is BLIND to the label's top bit. -/
+theorem P3_top_switch (k l y W : Nat) (hl : l < 2^(k+2)) (hy : y < 2^(k+2))
+    (hW : W < 2^(k+1)) (hl0 : l ≠ 0) (hy0 : y ≠ 0) :
+    P3 l y (W + 2^(k+1)) (k+1) = epsTop l (k+1) * epsTop y (k+1) * P3 l y W (k+1) := by
+  have hpow : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by rw [Nat.pow_succ]; omega
+  have hp := Nat.two_pow_pos (k+1)
+  have hWlt : W < 2^(k+2) := by omega
+  have hWhi : W + 2^(k+1) < 2^(k+2) := by omega
+  have hxW : W ^^^ 2^(k+1) = W + 2^(k+1) := by
+    have h := xor_lo_hi (k+1) W 0 (by omega) hW hp
+    simpa using h
+  have hy' : y ^^^ (W + 2^(k+1)) = (y ^^^ W) ^^^ 2^(k+1) := by
+    rw [← hxW, Nat.xor_assoc]
+  have hl' : l ^^^ (W + 2^(k+1)) = (l ^^^ W) ^^^ 2^(k+1) := by
+    rw [← hxW, Nat.xor_assoc]
+  rw [P3_red l y (W + 2^(k+1)) (k+1) hl hy hWhi hy0,
+      P3_red l y W (k+1) hl hy hWlt hy0, hy', hl',
+      sigma_top_flip k (y ^^^ W) l (xorlt hy hWlt) hl hl0,
+      sigma_top_flip k (l ^^^ W) y (xorlt hl hWlt) hy hy0]
+  grind
+
 end SounioZDFiberAntisym
 
 

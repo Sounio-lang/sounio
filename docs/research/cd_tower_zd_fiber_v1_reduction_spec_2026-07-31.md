@@ -4200,10 +4200,50 @@ So the law is now equivalent to a statement about **one** moment of **one** Seid
 `tri3(P3̃)` — i.e. about the two-graph of `P3` alone, with no `P1` and no mask. `tri3(P3̃)` takes
 only `2^(m−2)` distinct values per level.
 
-**Status of (III).** Still reduced, not proven. What moved this round: the diagonal correction is a
-theorem, the level-linking corollary is exact, and the target has narrowed from "the box's triangle
-count" to "the two-graph count of `P3`". What has not been attempted: `D[tri3(P3̃)] = 27·8^(n−j)[j,3]₂`
-itself, the maximal-seam exception, and the fibre variation of `tr(Alo²P)` / `tr(AloP²)`. No
-difficulty is recorded for any of them.
+### 57.9 — Tier 64: `tri3(P3̃)`, and the label's TOP BIT is a SWITCHING
+
+Attacking the one moment §57.8 reduced the law to. Two things came out, both with the lane's own
+signed-graph vocabulary.
+
+**(1) The maximal seam is the empty two-graph.** At `W = 2^m` the spectrum of `P3̃` is exactly
+`{N−1 (×1), −1 (×N−1)}` — the spectrum of `J − I` — at `m = 2,3,4,5`. That is not a coincidence:
+`P3_pow2_top` (Tier 57) already says `P3 l y (2^n) n = μ(l)·μ(y)`, a RANK-ONE sign matrix, so every
+triple product is a square and `|Ω| = 0`. Hence
+
+    tri3(P3̃)|_{W = 2^m} = N(N−1)(N−2),  N = 2^(m+1)−1
+
+measured exactly: `210, 2730, 26970, 238266` at `m = 2,3,4,5`. (Verified rank-one on *all* distinct
+nonzero triples, including those through the seam vertex, where `P3_pow2_top`'s hypotheses exclude
+it: 0 bad triples.)
+
+**(2) The label's top bit acts by SWITCHING — now a theorem.** `tri3(P3̃)` depends only on
+`W mod 2^m` (0 violations, `m = 2,3,4,5`). The reason:
+
+| | |
+|---|---|
+| `epsTop x m` | `= −1` iff `2^m < x` — the switching vector |
+| `sigma_top_flip` | `cdSigma (c ⊕ 2^(k+1)) l = (−epsTop l)·cdSigma c l` |
+| `P3_top_switch` | `P3 l y (W + 2^(k+1)) = epsTop l · epsTop y · P3 l y W` |
+
+Switching is `S ↦ diag(ε)·S·diag(ε)`; it preserves every triple product `S_ab S_bc S_ca`, hence the
+two-graph, hence `tri3`. `P3` is a product of two `cdSigma` factors (`P3_red`), each picking up
+`−epsTop`, and the two minus signs cancel. Measured first: 0 violations in 139176 instances at
+nonzero indices.
+
+Two sharp boundaries, both measured and both reflected in the hypotheses:
+
+* **the index-`0` line FAILS** the switching law (42/210/930/3906 entries at `m = 2..5`) — `epsTop 0`
+  would have to be `−1` and it is `+1`. Tier 63 masks that line out of `tri3(P3̃)`, so the corollary
+  survives; the theorem carries `l ≠ 0`, `y ≠ 0` for exactly this reason.
+* **`P1` is NOT switched by the top bit** — not by `epsTop`, and not by any vector: at every label
+  of `m = 2,3,4` some triple product of `P1(W)·P1(W+2^m)` is `−1`. The property is specific to `P3`.
+
+**Status of (III).** Still reduced, not proven. What moved: `tri3(P3̃)` has a closed form at the
+maximal seam and a proven invariance (the top bit), which explains the class structure of its value
+table — at `m = 5` the eight values pair up exactly as `{8,40}, {24,56}, {16,48}` plus the singleton
+`{32}`. What has not been attempted: `D[tri3(P3̃)] = 27·8^(n−j)[j,3]₂` itself, `tri3(P3̃)`'s value at
+a generic label (its spectrum has irrational eigenvalues at `m = 3,4,5`, so no strongly-regular /
+conference structure to lean on), the maximal-seam exception in §57.8's split, and the fibre
+variation of `tr(Alo²P)` / `tr(AloP²)`. No difficulty is recorded for any of them.
 
 **(III) is still reduced, not proven.**
