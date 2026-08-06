@@ -293,6 +293,13 @@ because the native-v2 observation is separately true.
 Scalar field reads in place through the `Box` are **correct** (`tag_inplace=77`).
 The hazard is a reference to an aggregate *element*, dereferenced in a callee.
 
+**CORRECTION (see `REF_HAZARD_SITE_AUDIT.md`): the `Box` is not the ingredient.**
+The line above saying "without the `Box` the same program prints 5 and 5" was
+measured with `madaros --native-v2-compile`. Under `lean_single` the same
+program gives `hoisted=5 inplace=288899952421056`. A local, a reference
+parameter and a `Box` all fail alike. The file name
+`repro_boxed_element_ref.sio` is therefore too narrow.
+
 Branch sweep for the shape: 5 sites — 2 are comments describing this hazard, 3
 are in `compiler/pkg/{lock,registry_client}.sio` and off the IR path. Every IR
 site is hoisted.

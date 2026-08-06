@@ -1,0 +1,52 @@
+// Exactly the two shapes used in compiler/pkg/{lock,registry_client}.sio:
+// a reference PARAMETER to a struct holding an array of aggregates, with the
+// element reached either straight into a callee or bound to a local `let` ref.
+// No Box anywhere -- SouniuLock and RegistrySearchResult are not boxed.
+
+struct Inner { tag: i64, bits: [i64; 8] }
+struct Outer { n: i64, items: [Inner; 4] }
+
+fn inner_sum(p: &Inner) -> i64 with Mut, Panic, Div {
+    var t: i64 = 0
+    var i: i64 = 0
+    while i < 8 { t = t + (*p).bits[i as usize]; i = i + 1 }
+    t
+}
+
+// registry_client.sio:430 -- registry_print_package(&(*r).packages[i as usize])
+fn shape_callee(p: &Outer) -> i64 with Mut, Panic, Div {
+    inner_sum(&(*p).items[2 as usize])
+}
+
+// lock.sio:217 / :364 -- let e = &(*lock).entries[i as usize]; then (*e).field
+fn shape_bound_scalar(p: &Outer) -> i64 with Mut, Panic, Div {
+    let e = &(*p).items[2 as usize]
+    (*e).tag
+}
+
+// lock.sio -- lock_print_buf64(&(*e).name, (*e).name_len): a ref to a FIELD of
+// the bound element, handed to a callee
+fn shape_bound_callee(p: &Outer) -> i64 with Mut, Panic, Div {
+    let e = &(*p).items[2 as usize]
+    inner_sum(e)
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    var o = Outer { n: 0, items: [Inner { tag: 0, bits: [0; 8] }; 4] }
+    var sl = o.items[2 as usize]
+    sl.tag = 77
+    var k: i64 = 0
+    while k < 5 { sl.bits[k as usize] = 1; k = k + 1 }
+    o.items[2 as usize] = sl
+
+    print("baseline_local=")
+    print_int(inner_sum(&o.items[2 as usize]))
+    print(" registry_shape=")
+    print_int(shape_callee(&o))
+    print(" lock_shape_scalar=")
+    print_int(shape_bound_scalar(&o))
+    print(" lock_shape_callee=")
+    print_int(shape_bound_callee(&o))
+    print("\n(expect: 5 5 77 5)\n")
+    0
+}
