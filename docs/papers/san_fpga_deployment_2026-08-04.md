@@ -611,6 +611,17 @@ requires either a longer post-τ budget so the curriculum can open the gates, or
 a deployment-time exit policy that is evaluated separately from the training
 freeze rule.
 
+**SAN-v5: adaptive curriculum + accuracy guarantee (job 8634).** We then tested
+a more aggressive variant: gates open when a stage head reaches 0.7 × τ (not τ),
+plus a double penalty for early-exit errors and multi-exit distillation from all
+deeper heads. The result is negative: SAN-v5 reaches τ = 0.85 at the same epoch
+12 as SAN-v4, but with slightly lower accuracy (0.8512 vs 0.8557) and identical
+S_m (5 399 TMAC). The adaptive curriculum did not open the gates earlier — the
+stage heads still had not reached 0.7 × τ by the time the model froze — so the
+extra machinery produced no benefit and a small accuracy cost. We report this
+negative result explicitly: aggressive curriculum acceleration does not help at
+this target, and the simpler SAN-v4 is the better variant.
+
 ---
 
 ## 5 Discussion

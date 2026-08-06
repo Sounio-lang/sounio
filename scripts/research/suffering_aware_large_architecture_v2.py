@@ -682,7 +682,7 @@ class GatingNetwork(nn.Module):
 
 class SufferingAwareResNet(nn.Module):
     """ResNet trunk (basic or bottleneck) with per-stage exit heads and a
-    learned gating network (SAN-v2/v3/v4). kind='dense'/'earlystop' never runs the
+    learned gating network (SAN-v2/v3/v4/v5). kind='dense'/'earlystop' never runs the
     exit heads or the gate.
 
     SAN-v3 additions:
@@ -697,6 +697,15 @@ class SufferingAwareResNet(nn.Module):
       KL divergence, so early exits inherit the trunk's accuracy.
     - Adaptive early exit: gates open progressively after τ, letting confident
       samples exit early without degrading accuracy.
+
+    SAN-v5 additions (bold):
+    - Adaptive curriculum: gates open when stage k reaches a *fraction* of τ
+      (e.g. 0.7 × τ), not τ itself, allowing early exits during training.
+    - Accuracy guarantee: samples that exit early and are wrong incur a double
+      penalty (classification loss + exit-error loss), forcing heads to be
+      conservative.
+    - Multi-exit distillation: each exit head distills from *all* deeper heads,
+      not just the final one, creating a chain of reliable early exits.
     """
 
     def __init__(self, blocks, width, kind, block_type="bottleneck"):
@@ -726,6 +735,13 @@ class SufferingAwareResNet(nn.Module):
         self.adaptive_exit = os.environ.get("SAN_LARGE_ADAPTIVE_EXIT", "1") == "1"
         self.adaptive_exit_threshold = float(os.environ.get("SAN_LARGE_ADAPTIVE_EXIT_THRESHOLD", "0.8"))
         self.reached_tau = False
+        # SAN-v5: adaptive curriculum and accuracy guarantee.
+        self.adaptive_curriculum = os.environ.get("SAN_LARGE_ADAPTIVE_CURRICULUM", "1") == "1"
+        self.curriculum_fraction = float(os.environ.get("SAN_LARGE_CURRICULUM_FRACTION", "0.7"))
+        self.accuracy_guarantee = os.environ.get("SAN_LARGE_ACCURACY_GUARANTEE", "1") == "1"
+        self.exit_error_penalty = float(os.environ.get("SAN_LARGE_EXIT_ERROR_PENALTY", "2.0"))
+        self.multi_exit_distill = os.environ.get("SAN_LARGE_MULTI_EXIT_DISTILL", "1") == "1"
+        self.tau = None  # set by train_run when known
 
     def _head_logits(self, k, h):
         return self.exit_heads[k](h.mean(dim=(2, 3)))
@@ -737,12 +753,21 @@ class SufferingAwareResNet(nn.Module):
             + (1 - self.stage_acc_momentum) * acc)
 
     def _gate_open(self, k):
-        """Curriculum: gate k opens only after its head has proven itself."""
-        return float(self.stage_acc_ema[k]) >= self.stage_min_acc
+        """Adaptive curriculum: gate k opens when its head reaches a fraction
+        of the target τ (or the fixed minimum if τ is not yet known)."""
+        if self.adaptive_curriculum and self.tau is not None:
+            threshold = self.curriculum_fraction * self.tau
+        else:
+            threshold = self.stage_min_acc
+        return float(self.stage_acc_ema[k]) >= threshold
 
     def set_reached_tau(self, value):
         """Mark that the model has reached the feasibility target τ."""
         self.reached_tau = value
+
+    def set_tau(self, tau):
+        """Set the feasibility target for the adaptive curriculum."""
+        self.tau = tau
 
     def forward(self, x, train=False, use_exit_heads=True, train_aux=False):
         meter = self.meter
@@ -758,6 +783,7 @@ class SufferingAwareResNet(nn.Module):
         aux_active = train and (gated or train_aux)
         final_logits_for_distill = None
         depth_penalty = x.new_zeros(n)
+        all_stage_logits = []  # SAN-v5: store all stage logits for multi-exit distill
         for k in range(self.n_stages):
             if active.numel() == 0:
                 break
@@ -771,6 +797,7 @@ class SufferingAwareResNet(nn.Module):
             if train and self.detach_aux:
                 head_in = head_in.detach()   # probe head: no trunk gradient
             logits_k = self.exit_heads[k](head_in)
+            all_stage_logits.append((active, logits_k, k))
             if train:
                 aux_records.append((active, logits_k, k))
             if not gated:
@@ -778,7 +805,7 @@ class SufferingAwareResNet(nn.Module):
             # Curriculum: do not evaluate the gate until the head is trained
             if not self._gate_open(k):
                 continue
-            # SAN-v4: adaptive exit — after τ, use a higher confidence threshold
+            # SAN-v4/v5: adaptive exit — after τ, use a higher confidence threshold
             # so only very confident samples exit early.
             threshold = self.gates[k].threshold
             if self.adaptive_exit and self.reached_tau:
@@ -805,7 +832,7 @@ class SufferingAwareResNet(nn.Module):
                 final_record = (active, final_logits)
                 final_logits_for_distill = final_logits.detach()
                 depth_penalty[active] = 0.0
-        return out_logits, out_depth, per_stage_active, n_final, aux_records, final_record, final_logits_for_distill, depth_penalty
+        return out_logits, out_depth, per_stage_active, n_final, aux_records, final_record, final_logits_for_distill, depth_penalty, all_stage_logits
 
     def forward_dense(self, x):
         """Every gate forced open: every sample traverses every stage AND
@@ -1014,6 +1041,9 @@ def train_run(model, x_tr, y_tr, x_va, y_va, epochs, tau, tag, is_lm=False):
     ledger = []
     t_star = None
     g = model.g if is_lm else 0
+    # SAN-v5: set the feasibility target for the adaptive curriculum.
+    if hasattr(model, "set_tau"):
+        model.set_tau(tau)
     # Gradient-analysis instrumentation: collect per-stage gradient norms
     # after each backward pass. Hooks are registered once per run and removed
     # at the end to avoid side effects on other runs.
@@ -1059,7 +1089,7 @@ def train_run(model, x_tr, y_tr, x_va, y_va, epochs, tau, tag, is_lm=False):
                 idx = schedule[epoch][b0:b0 + BATCH]
                 xb, yb = x_tr[idx], y_tr[idx]
                 micro = (xb.shape[0] == BATCH)
-                _, _, _, _, aux_records, final_record, final_distill, depth_penalty = model(
+                _, _, _, _, aux_records, final_record, final_distill, depth_penalty, all_stage_logits = model(
                     xb, train=True, use_exit_heads=use_exits, train_aux=train_aux)
                 if not is_lm:
                     losses = []
@@ -1070,9 +1100,27 @@ def train_run(model, x_tr, y_tr, x_va, y_va, epochs, tau, tag, is_lm=False):
                         aux_losses = []
                         for a_idx, a_logits, k in aux_records:
                             ce = CE(a_logits, yb[a_idx])
-                            # SAN-v4: post-τ distillation — match the final head's
-                            # soft predictions for the same samples.
-                            if (getattr(model, "distill_after_tau", False)
+                            # SAN-v5: accuracy guarantee — if a sample exited early
+                            # and is wrong, double the penalty.
+                            if (getattr(model, "accuracy_guarantee", False)
+                                    and model.reached_tau):
+                                pred_k = a_logits.argmax(dim=1)
+                                wrong = (pred_k != yb[a_idx]).float()
+                                ce = ce * (1.0 + model.exit_error_penalty * wrong.mean())
+                            # SAN-v5: multi-exit distillation — distill from all
+                            # deeper heads, not just the final one.
+                            if (getattr(model, "multi_exit_distill", False)
+                                    and model.reached_tau):
+                                for d_idx, d_logits, d_k in all_stage_logits:
+                                    if d_k > k and len(d_idx) == len(a_idx) and (d_idx == a_idx).all():
+                                        teacher = d_logits.detach()
+                                        student_logp = F.log_softmax(a_logits, dim=1)
+                                        teacher_p = F.softmax(teacher, dim=1)
+                                        kl = F.kl_div(student_logp, teacher_p, reduction="batchmean")
+                                        ce = ce + model.distill_w * kl / max(1, model.n_stages - k - 1)
+                            # SAN-v4: post-τ distillation from final head (fallback
+                            # when multi-exit distill is off).
+                            elif (getattr(model, "distill_after_tau", False)
                                     and getattr(model, "reached_tau", False)
                                     and final_distill is not None
                                     and k < model_depth(model) - 1):
@@ -1119,7 +1167,7 @@ def train_run(model, x_tr, y_tr, x_va, y_va, epochs, tau, tag, is_lm=False):
                 for e0 in range(0, x_va.shape[0], EVAL_BATCH):
                     e1 = e0 + EVAL_BATCH
                     xb = x_va[e0:e1]
-                    l, d, _, _, _, _, _, _ = model(xb, train=False, use_exit_heads=use_exits)
+                    l, d, _, _, _, _, _, _, _ = model(xb, train=False, use_exit_heads=use_exits)
                     vlogits_chunks.append(l)
                     vdepth_chunks.append(d)
                 vlogits = torch.cat(vlogits_chunks, dim=0)
@@ -1263,7 +1311,7 @@ def conservation_check(model, x_va, depth_units, is_lm=False):
     model.eval()
     model.meter = MachineMeter()
     with torch.no_grad():
-        vlogits_gated, vdepth, per_active, n_final, _, _, _, _ = model(x_va, train=False)
+        vlogits_gated, vdepth, per_active, n_final, _, _, _, _, _ = model(x_va, train=False)
     gated_flops = model.meter.flops
     with torch.no_grad():
         vlogits_dense, dense_meter = model.forward_dense(x_va)
