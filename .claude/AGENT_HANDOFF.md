@@ -18,6 +18,107 @@
 >    (`souc main.sio` / `lean_single.sio` / `make build`). Bare full builds are
 >    what saturate CPU and trip the probe. Cheap `souc check` is exempt.
 
+---
+
+## LANE CLAIM + ownership-conflict — 2026-08-06
+
+### Parallel Lane Contract
+
+```text
+Lane:            Madaros self-compilation (gen2 == gen3) — the fixed-point line
+Owner:           claude-1
+Base:            b260dba66e (origin/main, 2026-08-05) — 24 commits BEHIND origin/main
+Worktree:        /tmp/claude-1000/-workspace-sounio/fecdd497-.../scratchpad/wt-fpw
+Branch:          feat/madaros-fixed-point-line @ a807138314 (45 commits ahead)
+Write-Set:       self-hosted/ir/ir.sio, self-hosted/ir/lower.sio,
+                 self-hosted/check/specializer.sio,
+                 self-hosted/compiler/module_frontend.sio,
+                 self-hosted/compiler/main.sio, self-hosted/compiler/main_tests.sio (new),
+                 scripts/ci/madaros_*_gate.sh, scripts/ci/global_aggregate_store_gate.sh,
+                 scripts/lib/souc_invoke.sh, tests/known_failures/lean_single_global_*.sio
+                 (89 files total vs origin/main)
+Read-Set:        self-hosted/check/check.sio, self-hosted/native/*
+Required-Gates:  scripts/ci/madaros_fixed_point_gate.sh (rung `check`, green),
+                 scripts/ci/global_aggregate_store_gate.sh (4/4, green)
+Merge-Target:    main
+Known-Blockers:  BLK-20260806-madaros-fixedpoint-mainsio-overlap (below)
+```
+
+### Blocker record
+
+```text
+Blocker-ID: BLK-20260806-madaros-fixedpoint-mainsio-overlap
+Status: reproduced
+Severity: B2
+Class: ownership-conflict
+Owner: claude-1
+Lane: Madaros self-compilation (gen2 == gen3)
+Worktree: /tmp/claude-1000/-workspace-sounio/fecdd497-.../scratchpad/wt-fpw
+Branch: feat/madaros-fixed-point-line @ a807138314
+Files-Owned: see Write-Set above
+Files-Read-Only: self-hosted/ir/opt_cleanup.sio, self-hosted/ir/tailcall.sio
+Do-Not-Touch: self-hosted/compiler/main.sio until this record is resolved
+Repro: git worktree add --detach <tmp> probe/ir-soa-phase0
+       && cd <tmp> && git merge --no-commit --no-ff feat/madaros-fixed-point-line
+Observed: 10 conflicted files, ~110 conflict hunks. 81 of them are in
+          self-hosted/compiler/main.sio alone. Measured 2026-08-06 against
+          probe/ir-soa-phase0 @ 6b0698ce22.
+Expected: disjoint write sets, per Ownership Rule 1 (one active writer per file)
+Acceptance-Gate: a clean `git merge` of both lanes, then
+                 scripts/ci/madaros_fixed_point_gate.sh at rung `check`
+Evidence-Level: E1
+Evidence: trial merge above; per-file hunk counts recorded in this entry
+Fallback-Path: land this lane WITHOUT the main.sio test-suite extraction
+Legacy-Kept: yes — no test assertion removed (1163 test fns before and after)
+LLM-Offload: not-required
+Next-Action: human decision on merge order (see below)
+```
+
+### What actually overlaps, measured
+
+`probe/ir-soa-phase0` (tip `6b0698ce22`, last commit 2026-08-06 15:25Z, NOT merged
+to main, merge-base 2026-07-25) and this lane both write
+`ir/ir.sio`, `ir/lower.sio` and `compiler/main.sio`. That sounds total. It is not:
+
+| file | conflict hunks |
+|---|---|
+| `compiler/main.sio` | **81** |
+| `ir/opt_cleanup.sio` | 13 |
+| `compiler/module_frontend.sio` | 7 |
+| `ir/ir.sio` | **2** |
+| `ir/lower.sio` | **2** |
+| 5 others | 1 each |
+
+Of 89 files this lane changes, 10 conflict. The two lanes turn out to work on
+DIFFERENT PARTS of the same files: `probe/ir-soa-phase0` is in the optimizer
+(`compact_nops`, float markers, the `-O` miscompile, #1667); this lane is in
+lowering, capacities and diagnostics. `ir/lower.sio` — 3600 changed lines on
+their side, ~700 on ours — collides in two hunks.
+
+**The wall is one change, not the lane:** the extraction of main.sio's 1163-test
+self-test suite into `compiler/main_tests.sio` (main.sio 28525 -> 9408 lines).
+It is also the most re-doable change here — it is mechanical, its inputs are
+recorded (commit `1241ac359e`), and re-running it after the other lane lands
+costs a script, not a rediscovery.
+
+### Recommendation (human decision required)
+
+Land this lane WITHOUT `compiler/main.sio`, and redo the extraction afterwards.
+That drops the conflict from ~110 hunks to ~29 across 9 files, all of them
+ordinary review-sized. Everything this lane found stays landable:
+
+- module-level globals are `ItemFn`, and cross-module DCE was deleting them all
+  (`541536f777`) — a silent-wrong-code fix, independent of main.sio
+- `IR_MAX_INSTRS` 3072 -> 4096, required by `lex_source_to_globals` at 3269
+- `StructFieldEntry` name interning (~18.6 KB -> ~2.1 KB per layout entry)
+- the IR slot census, the error-site ledger, the unresolved-identifier ledger
+- two checked-in seed-defect reproductions + `global_aggregate_store_gate.sh`
+
+The cost of the alternative — merging main.sio too — is 81 hunks in a file both
+lanes restructured, where a wrong resolution is a silent miscompile rather than
+a build error.
+
+
 ## 6-Agent Lane Activation — 2026-05-10T13:35Z
 
 **Authority**: human-approved at 2026-05-10 (this commit).
