@@ -5363,3 +5363,44 @@ One asymmetry, and it is why Tier 89 and this tier coexist without contradiction
 expansion needs NO mask because `P3_block11_total` is an identity of ENTRIES, index `0` included.
 What fails at index `0` is only the further step of cancelling the three `E11` weights against each
 other — that is Tier 89's identity, and it is the one that needs `E11` to be a switching.
+
+### §57.45 — Tier 91: the ε-weights factored (three elementary signs), and what that does NOT do
+
+The task was to evaluate the four ε-weighted sums of §57.44. What came out is one genuine evaluation
+and one change of unknown, and the M1 review made me relabel the tier accordingly.
+
+**The weights.** All three are products of three elementary signs, and of no others:
+
+    sigRow x W = −1 iff x = W       (the switching of Tier 89)
+    epsZero x  = −1 iff x = 0       (the index-0 flip)
+    tauW l y W = −1 iff l ⊕ y = W   (the COSET flip — the only two-index factor)
+
+    E11 l y = sigRow l · (sigRow y · epsZero y)
+    E01 l y = epsZero l · (sigRow l · tauW l y)
+    E10 l y = epsZero l · (tauW l y · (sigRow y · epsZero y))
+
+all for `W ≠ 0`, which is load-bearing: at `W = 0`, `l = y = 0` the `E11` identity reads `1 = −1`,
+and I found that from a failed proof rather than from the measurement. Both providers confirm there
+is no other degenerate case. This is the precise sense in which `E01`/`E10` "are not switchings":
+each carries `tauW`, which is not a row×column product, and `E11` does not. The loci that Tiers
+70–88 discovered one border at a time are these three signs and nothing more.
+
+`P3_coset_value`: off its two borders, `P3` is CONSTANT `−1` on the line `y = l ⊕ W`. So the coset
+flip's carrier is a permutation matrix, and `X = tauW ⊙ M = M + 2Π_W` up to those borders — zai
+re-derived the sign of that `+2` independently rather than take it.
+
+**The sums (measured, no matrix layer in the file).** With `M = P3` at level `m`, `X = tauW ⊙ M`,
+`D = diag(sigRow)`, `Z = diag(epsZero)`: `M01 = Z D X`, `M10 = Z X D Z`, `M11 = D M D Z`, and
+
+    T3 = tr((M Z)³) = S₀ + 6·(u′ᵀ M′ u′) − 2      with u = P3 · 0, primes = index-0 deleted
+    T2 = tr(X (D M D) X)
+    T1 = tr((D Z) M (D Z) X Z X)
+
+all 53/53 labels at `m = 2,3,4`. The `D`s cancel out of `T3` entirely — Tier 89's switching
+invariance reappearing as an algebraic identity rather than a lemma.
+
+**⚠ The providers split on the framing and I took the harsher reading.** I titled the tier "the
+ε-weights EVALUATED". grok returned `[OVERREACH]`: the four sums' values are explicitly untouched,
+so this is a change of unknown, not an evaluation in the sense the request used the word. zai called
+the framing honest and precise. grok's objection is about the word the task itself used, so it wins;
+the tier is now "the ε-weights FACTORED". `T3` is the one sum that really is evaluated.

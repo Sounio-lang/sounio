@@ -14909,4 +14909,127 @@ theorem tri3_level_transfer (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
     simp only [Nat.zero_add]
   rw [h0]
 
+/-! ### Tier 91 — the ε-weights FACTORED: a switching, a coset flip, an index-`0` flip
+
+    Tier 90 reduced the level transfer to four ε-weighted level-`m` sums and evaluated none of them.
+    The task here was to EVALUATE those four sums; what this tier does is factor their WEIGHTS, and
+    an M1 reviewer rejected my first title ("the ε-weights EVALUATED") for exactly that gap — the
+    sums' VALUES are untouched, so this is a clean change of unknown, not an evaluation.  With that
+    said: all three weights are products of three elementary signs, and there are no others:
+
+      `sigRow x W = −1` iff `x = W`          — the switching of Tier 89
+      `epsZero x   = −1` iff `x = 0`          — the index-`0` flip
+      `tauW l y W  = −1` iff `l ⊕ y = W`      — the COSET flip, and the only two-index factor
+
+    and then
+
+      `E11 l y = sigRow l · (sigRow y · epsZero y)`   (needs `W ≠ 0`: at `W = 0` it FAILS at `l = y = 0`)
+      `E01 l y = epsZero l · (sigRow l · tauW l y)`
+      `E10 l y = epsZero l · (tauW l y · (sigRow y · epsZero y))`
+
+    This is the exact sense in which `E01`/`E10` "are not switchings" (§57.42): each carries the
+    coset factor `tauW`, which is not a row×column product, and `E11` does not.  The three loci that
+    the four tiers 70–88 discovered case by case are these three signs and nothing else.
+
+    In matrix terms — measured, not formalised, since this file has no matrix layer — write
+    `M` for `P3` at level `m`, `X = tauW ⊙ M`, `D = diag(sigRow)`, `Z = diag(epsZero)`.  Then
+    `M01 = Z D X`, `M10 = Z X D Z`, `M11 = D M D Z`, and the three ε-sums are WORDS:
+
+      `T3 = tr((M Z)³) = S₀ + 6·(u′ᵀ M′ u′) − 2`   with `u = P3 ·  0`,  primes = index-`0` removed
+      `T2 = tr(X (D M D) X)`
+      `T1 = tr((D Z) M (D Z) X Z X)`
+
+    all 53/53 labels at `m = 2,3,4`.  The `D`s cancel out of `T3` entirely — that is Tier 89's
+    switching invariance showing up as an algebraic identity rather than a lemma.
+
+    The last lemma below says what `X` is: on the coset line `P3` is CONSTANT, `−1`, off the two
+    borders.  So `X = M + 2Π_W` up to those borders, `Π_W` the involution `l ↦ l ⊕ W`, and the whole
+    ε-structure sits on a permutation matrix.
+
+    ⚠ What is NOT done: the four sums still have no VALUES.  Reducing the weights to three signs and
+    the sums to words in `M` and `Π_W` is a change of unknown, not an evaluation of `tri3`.  The one
+    genuine evaluation is `T3`, which is now a closed expression in `S₀` and one quadratic form.
+
+    ⚠ The trace identities are MEASURED and live only in this comment: this file has no matrix layer,
+    so `tr((M Z)³)` is not a Lean object here.  The four Lean theorems below are the pointwise
+    factorisations and the coset value; nothing about traces is proved. -/
+
+/-- The index-`0` flip. -/
+def epsZero (x : Nat) : Int := if x = 0 then -1 else 1
+
+/-- The coset flip: `−1` exactly on `l ⊕ y = W`. -/
+def tauW (l y W : Nat) : Int := if (l ^^^ y) ^^^ W = 0 then -1 else 1
+
+/-- If `l = W` and `l ⊕ y = W` then `y = 0`. -/
+private theorem coset_meets_row (l y W : Nat) (h1 : l ^^^ W = 0) (h2 : (l ^^^ y) ^^^ W = 0) :
+    y = 0 := by
+  have e2 : l ^^^ y = W := xor_zero_eq (l ^^^ y) W h2
+  have e3 : l ^^^ W = y := by rw [← e2, ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor]
+  rw [h1] at e3; exact e3.symm
+
+/-- If `y = W` and `l ⊕ y = W` then `l = 0`. -/
+private theorem coset_meets_col (l y W : Nat) (h1 : y ^^^ W = 0) (h2 : (l ^^^ y) ^^^ W = 0) :
+    l = 0 := by
+  have e2 : l ^^^ y = W := xor_zero_eq (l ^^^ y) W h2
+  have e3 : y ^^^ W = l := by
+    rw [← e2, Nat.xor_comm l y, ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor]
+  rw [h1] at e3; exact e3.symm
+
+/-- **`E11` = switching × index-`0` flip.** -/
+theorem E11_split (l y W : Nat) (hW0 : W ≠ 0) :
+    E11 l y W = sigRow l W * (sigRow y W * epsZero y) := by
+  unfold E11 sigRow epsZero
+  have hz : ¬ ((0:Nat) ^^^ W = 0) := by rw [Nat.zero_xor]; exact hW0
+  by_cases hy0 : y = 0
+  · subst hy0
+    by_cases hlW : l ^^^ W = 0 <;> simp [hlW, hz, hW0]
+  · by_cases hlW : l ^^^ W = 0 <;> by_cases hyW : y ^^^ W = 0 <;>
+      simp [hlW, hyW, hy0]
+
+/-- **`E01` = index-`0` flip × switching × COSET flip.** -/
+theorem E01_split (l y W : Nat) (hW0 : W ≠ 0) :
+    E01 l y W = epsZero l * (sigRow l W * tauW l y W) := by
+  unfold E01 eps01 sigRow epsZero tauW
+  by_cases hl0 : l = 0
+  · subst hl0
+    have hz : ¬ ((0:Nat) ^^^ W = 0) := by rw [Nat.zero_xor]; exact hW0
+    by_cases hyW : y ^^^ W = 0 <;> simp [hz, hyW, hW0, Nat.zero_xor]
+  · by_cases hy0 : y = 0
+    · subst hy0
+      by_cases hlW : l ^^^ W = 0 <;> simp [hl0, hlW, hW0, Nat.xor_zero]
+    · by_cases hlW : l ^^^ W = 0
+      · have hc : ¬ ((l ^^^ y) ^^^ W = 0) := fun h => hy0 (coset_meets_row l y W hlW h)
+        simp [hl0, hy0, hlW, hc]
+      · by_cases hc : (l ^^^ y) ^^^ W = 0 <;> simp [hl0, hy0, hlW, hc]
+
+/-- **`E10` = index-`0` flip × COSET flip × switching × index-`0` flip.**  The extra `epsZero` on the
+    SECOND index against `E01`'s on the first is the ordered-arguments asymmetry of `P3`, in its
+    final form. -/
+theorem E10_split (l y W : Nat) (hW0 : W ≠ 0) :
+    E10 l y W = epsZero l * (tauW l y W * (sigRow y W * epsZero y)) := by
+  unfold E10 eps10 sigRow epsZero tauW
+  have hz : ¬ ((0:Nat) ^^^ W = 0) := by rw [Nat.zero_xor]; exact hW0
+  by_cases hl0 : l = 0
+  · subst hl0
+    by_cases hy0 : y = 0
+    · subst hy0; simp [hz, hW0]
+    · by_cases hyW : y ^^^ W = 0 <;> simp [hy0, hyW, hW0, Nat.zero_xor]
+  · by_cases hy0 : y = 0
+    · subst hy0
+      by_cases hlW : l ^^^ W = 0 <;> simp [hl0, hlW, hz, hW0, Nat.xor_zero]
+    · by_cases hyW : y ^^^ W = 0
+      · have hc : ¬ ((l ^^^ y) ^^^ W = 0) := fun h => hl0 (coset_meets_col l y W hyW h)
+        simp [hl0, hy0, hyW, hc]
+      · by_cases hc : (l ^^^ y) ^^^ W = 0 <;> simp [hl0, hy0, hyW, hc]
+
+/-- **THE COSET LINE CARRIES A CONSTANT.**  Off its two borders `P3` is `−1` on `y = l ⊕ W`, so the
+    coset flip's carrier is (up to those borders) the permutation matrix of `l ↦ l ⊕ W`. -/
+theorem P3_coset_value (m l W : Nat) (hl : l < 2^(m+1)) (hW : W < 2^(m+1))
+    (hl0 : l ≠ 0) (hlW : l ^^^ W ≠ 0) :
+    P3 l (l ^^^ W) W m = -1 := by
+  have hlW' : l ^^^ W < 2^(m+1) := xorlt hl hW
+  rw [P3_red l (l ^^^ W) W m hl hlW' hW hlW, xor_cancel l W,
+      sigma_self (m+1) l hl hl0, sigma_self (m+1) (l ^^^ W) hlW' hlW]
+  grind
+
 end SounioZDFiberAntisym
