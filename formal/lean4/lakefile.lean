@@ -457,6 +457,11 @@ lean_lib «SounioDeGreyChi529Exact» where
 @[default_target]
 lean_lib «SounioApproxCausalKnowledge» where
 
+-- Physical approximation effects: NonUnitary × NarrowWidthApproximation composition
+-- (particle amp→σ honesty leaves). Mathlib-free, no sorry.
+@[default_target]
+lean_lib «SounioNonUnitaryNWA» where
+
 -- M2: Vancomycin-Knightian thrust — Ferson p-box operator
 @[default_target]
 lean_lib «SounioKnightian» where
