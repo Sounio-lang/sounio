@@ -243,3 +243,48 @@ to design against.
 Reintroducing the truncation class should require writing a bounded table that
 bypasses both the blessed-literal grep and the boundary-witness pairing — two
 mechanical, visible failures — rather than silently indexing past a cap at rc=0.
+
+
+## Where the codegen IrModule is actually created (2026-08-06)
+
+Traced statically, since probes kept landing on paths that never fire:
+
+    module_frontend.sio:5997   let module_box = lowered.module
+      <- module_frontend_lower_programs_array_direct_box / _lower_specialized_items_box
+      <- module_frontend_lower_program_items_box_traced_with_externs   (:5016)
+      <- lower_program_to_ir_summary_box_with_externs_ref              (lower.sio:15728)
+      <- lowerer_new_with_epistemic -> lowerer_new                     (lower.sio:548)
+
+**`lower.sio:550` — `module: Box::new(ir_empty_module())`.** That is the one. The
+body lowerer deliberately reuses the summary's Box ("no second empty"), so there
+is exactly one live module and this is where it comes from.
+
+A creation-time probe placed in `module_frontend_lower_source_file_summary`
+(:4381) never fired — that summary path is not on this route. Worth knowing
+before someone instruments it again.
+
+### Why the dirty slots are still unexplained
+
+`untouched8` says the module's function slots above `fn_count` hold ~41-47% random
+bits, varying run to run: uninitialised memory. Three hypotheses tested and
+killed:
+
+| hypothesis | verdict |
+|---|---|
+| `ir_empty_function()` does not zero | refuted — `fresh=0` |
+| the `[ir_empty_function(); 2048]` repeat initialiser loses a 512-byte field | refuted — a standalone `[Big; 2048]` with an `[i64; 64]` field reports `nonzero=0` on both compilers |
+| `Box::new` of a large value leaves the tail uninitialised | **not settled** — the repro faults for an unrelated reason |
+
+That last one is the honest status. A user-level repro
+(`Box::new` a 1 MB struct, then read `(*b).fns[0].a`) **SIGSEGVs on the FIRST
+element**, while the compiler does `(*lo.module).functions[i]` constantly and
+works. So the repro is hitting the nested `Box` + index + field access fragility
+this tree already documents for stores (`lower.sio:1652`, "the aggregate lvalue
+base is wrong") — the same shape that forced hoisting the handle out of
+`&(*module).functions[i].region` in `ir_module_seal_functions`. The instrument is
+unreliable, not the hypothesis.
+
+**Next step, and it should not be another user-level repro:** probe inside the
+compiler at `lowerer_new`, counting bits on `(*lo.module)` immediately after the
+`Box::new`. That is a two-line addition at the site now that the site is known,
+and it answers the question the last four builds could not.
