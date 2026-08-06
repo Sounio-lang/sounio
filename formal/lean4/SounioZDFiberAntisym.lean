@@ -13505,6 +13505,94 @@ theorem P3_block01_zero (m l W : Nat) (hl : l < 2^(m+1)) (hW : W < 2^(m+1)) (hl0
       R_ul (l ^^^ W) 0 m hlW' hp, if_pos rfl]
   grind
 
+
+/-! ### Tier 72 — the `b = 0` row, and block `(0,1)` CLOSES
+
+    The last gap in block `(0,1)`.  On the `l = 0` row both `P3`s lose their first factor to
+    `cdSig0`, so the whole identity is carried by the second one: `R_ul` then `R_lu` on the shifted
+    side give `−σ(y, W)`, `R_ul` alone on the unshifted side gives `−σ(W, y)`, and `antisym` turns
+    one into the other — **producing a FLIP**, the opposite of the `y = 0` row (Tier 71), which had
+    none.  Three signs on three loci, and each one is a different `antisym` accident:
+
+    | locus | sign | why |
+    |---|---|---|
+    | `l = 0`, `y ≠ W` | **flip** | `antisym` fires once, unopposed |
+    | `l = 0`, `y = W` | none | `antisym` degenerates: both sides are `σ(W,W)` |
+    | `l = 0 = y` | **flip** | `σ(0,W) = 1` on the shifted side, `R_ul`'s `v = 0` branch on the other |
+
+    Packaged, the row's sign is `+1` exactly on `y = W`:
+
+      `eps01row0 y W = if y ⊕ W = 0 then 1 else −1`
+
+    and it holds for EVERY `y`, the corner included — so with Tiers 67/70/71 **block `(0,1)` is
+    proved at every index of `[0,2^(m+1))², FOR `W ≠ 0`**, which is what `sumLtI_congr` needs from it.
+
+    ⚠ The `W ≠ 0` is load-bearing, not decoration, and the M1 reviewer caught me claiming coverage
+    without it: at `W = 0` the `l = 0` row's `ε` form fails at EVERY `y` (measured `8/8` and `16/16`
+    at `m = 2,3`). A zero fibre label is outside this lane's scope — every `Asig_isolated`-style
+    theorem carries `hL0` — but the coverage claim has to say so.
+
+    ⚠ Block `(1,0)` is still missing entirely as an `ε`-form, and its two border rows with it. The
+    weight-1 orthant needs `(0,0)` (done), `(0,1)` (done here, `W ≠ 0`) and `(1,0)` (open). -/
+
+/-- The `l = 0` row of block `(0,1)`, off the seam: it FLIPS. -/
+theorem P3_block01_row0 (m y W : Nat) (hy : y < 2^(m+1)) (hW : W < 2^(m+1))
+    (hy0 : y ≠ 0) (hW0 : W ≠ 0) (hyW : y ^^^ W ≠ 0) :
+    P3 0 (y + 2^(m+1)) W (m+1) = - P3 0 y W m := by
+  have hp := Nat.two_pow_pos (m+1)
+  have h2 : (2:Nat)^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  have hne : y + 2^(m+1) ≠ 0 := by omega
+  have hyWne : y ≠ W := by intro h; exact hyW (by rw [h, Nat.xor_self])
+  unfold P3 hi
+  simp only [Nat.zero_xor, cdSig0]
+  rw [R_ul W (y + 2^(m+1)) (m+1) (by omega) (by omega), if_neg hne,
+      R_lu W y m hW hy,
+      R_ul W y m hW hy, if_neg hy0,
+      antisym (m+1) y W hy hW hy0 hW0 hyWne]
+  grind
+
+/-- On the seam `y = W` the row does NOT flip: `antisym` degenerates. -/
+theorem P3_block01_row0_seam (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    P3 0 (W + 2^(m+1)) W (m+1) = P3 0 W W m := by
+  have hp := Nat.two_pow_pos (m+1)
+  have h2 : (2:Nat)^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  have hne : W + 2^(m+1) ≠ 0 := by omega
+  unfold P3 hi
+  simp only [Nat.zero_xor, cdSig0]
+  rw [R_ul W (W + 2^(m+1)) (m+1) (by omega) (by omega), if_neg hne,
+      R_lu W W m hW hW,
+      R_ul W W m hW hW, if_neg hW0]
+
+/-- The corner `l = y = 0`: it flips too. -/
+theorem P3_block01_row0_corner (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    P3 0 (0 + 2^(m+1)) W (m+1) = - P3 0 0 W m := by
+  have hp := Nat.two_pow_pos (m+1)
+  have h2 : (2:Nat)^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  have hne : (0 + 2^(m+1) : Nat) ≠ 0 := by omega
+  unfold P3 hi
+  simp only [Nat.zero_xor, cdSig0]
+  rw [R_ul W (0 + 2^(m+1)) (m+1) (by omega) (by omega), if_neg hne,
+      R_lu W 0 m hW hp, cdSig0,
+      R_ul W 0 m hW hp, if_pos rfl]
+  grind
+
+/-- The sign of the `l = 0` row: `+1` exactly on the seam `y = W`. -/
+def eps01row0 (y W : Nat) : Int := if y ^^^ W = 0 then 1 else -1
+
+/-- **THE `l = 0` ROW, AT EVERY `y`.**  With Tiers 67/70/71 this completes block `(0,1)`. -/
+theorem P3_block01_row0_eps (m y W : Nat) (hy : y < 2^(m+1)) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    P3 0 (y + 2^(m+1)) W (m+1) = eps01row0 y W * P3 0 y W m := by
+  unfold eps01row0
+  by_cases h : y ^^^ W = 0
+  · have hq : y = W := xor_zero_eq y W h
+    rw [if_pos h, hq, P3_block01_row0_seam m W hW hW0]
+    grind
+  · by_cases hy0 : y = 0
+    · rw [if_neg h, hy0, P3_block01_row0_corner m W hW hW0]
+      grind
+    · rw [if_neg h, P3_block01_row0 m y W hy hW hy0 hW0 h]
+      grind
+
 end SounioZDFiberAntisym
 
 

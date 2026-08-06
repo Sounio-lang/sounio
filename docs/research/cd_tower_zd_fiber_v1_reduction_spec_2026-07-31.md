@@ -4720,6 +4720,31 @@ block `(1,0)` needs more than its border rows (grok's catch). Corrected:
 
 None of that is attempted. What this rung establishes is one row and a corrected map of the rest.
 
+### 57.23 — Tier 72: the `l = 0` row, and block `(0,1)` closes (for `W ≠ 0`)
+
+The last gap in block `(0,1)`. On the `l = 0` row both `P3`s lose their FIRST factor to `cdSig0`, so
+the whole identity is carried by the second — and it **flips**, the opposite of the `y = 0` row of
+Tier 71, which does not. Three loci, three different `antisym` accidents:
+
+| locus | sign | why |
+|---|---|---|
+| `l = 0`, `y ≠ W` | **flip** | `antisym` fires once, unopposed |
+| `l = 0`, `y = W` | none | `antisym` degenerates — both sides are `σ(W,W)` |
+| `l = 0 = y` | **flip** | `σ(0,W) = 1` on the shifted side, `R_ul`'s `v = 0` branch on the other |
+
+Packaged as `eps01row0 y W = if y ⊕ W = 0 then 1 else −1`, holding at **every** `y`, corner included.
+Measured first: `0/42, 0/210, 0/930` generic, `0/7, 0/15, 0/31` seam and corner, and `0/56, 0/240,
+0/992` for the `ε` form over all `y`.
+
+**⚠ `W ≠ 0` is load-bearing, and I claimed coverage without it.** grok's `[PROBLEM]`: every row-0
+lemma assumes `hW0`, so a zero label is uncovered. Measured: at `W = 0` the row-0 `ε` form fails at
+**every** `y` (`8/8`, `16/16` at `m = 2,3`). A zero fibre label is outside this lane's scope — every
+`Asig_isolated`-style theorem carries `hL0` — but the claim has to say so, and now does.
+
+So with Tiers 67/70/71/72, **block `(0,1)` is proved at every pair `(l,y)` for `W ≠ 0`**. Block
+`(1,0)` is still missing entirely as an `ε`-form, border rows included; the weight-1 orthant needs
+`(0,0)` (done), `(0,1)` (done) and `(1,0)` (open).
+
 **Status of (III).** Still reduced, not proven — but the reduction is now a single explicit
 first-order recursion in `m` whose only non-constant input is a coset-line sum with a closed form.
 What has not been attempted: proving the recursion (the constants and `Σ_coset` from the same
