@@ -4632,6 +4632,38 @@ pointwise identity to the sum itself:**
 for `W < 2^(m+1)`, kernel-clean. `tri3_congr` applies to any matrix built pointwise from `P3`, the
 masked one included, because a mask depends only on the indices and so is the same on both sides.
 
+### 57.20 — Tier 69: the decomposition moves into `sumLtI`, and `1+3+3+1` is a THEOREM
+
+§57.16–57.18's expansion is written in ordinary mathematics. This tier moves its first half — the
+DECOMPOSITION — into the file's own formalism.
+
+`sumLtI_shift N N` is exactly an orthant cut: it splits a sum over `[0, N+N)` into the low half and
+the high half reindexed by `i ↦ N + i`. Applying it to each of `tri3`'s three nested sums (reaching
+under the binders with `sumLtI_congr`, pulling the splits out with `sumLtI_add`) gives:
+
+| | |
+|---|---|
+| `orth N f u v w` | the orthant with each index offset by `u`, `v`, `w` ∈ `{0, N}` |
+| `tri3_split8` | `tri3 (N+N) f` = the sum of the eight orthants |
+| `orth_cyc` | `orth N f u v w = orth N f w u v` |
+| `tri3_split_1331` | `tri3 (N+N) f = orth 0 0 0 + 3·orth 0 0 N + 3·orth 0 N N + orth N N N` |
+
+`orth_cyc` is `sumLtI3_cyc` plus a pointwise reassociation of the three factors, and it is the formal
+content of §57.19's deflation: the rotation of the summation variables `(a,b,c) ↦ (b,c,a)` rotates
+the offsets as `(u,v,w) ↦ (w,u,v)`, whose orbits are `{(0,0,0)}`, `{(0,0,N),(N,0,0),(0,N,0)}`,
+`{(0,N,N),(N,0,N),(N,N,0)}`, `{(N,N,N)}` — hence `1+3+3+1`, for **any** matrix. `tri3_split8` is
+kernel-clean at `[propext, Quot.sound]`, without even `Classical.choice`.
+
+Denotation check on **random** matrices (these are statements about `tri3`, not about `P3`): all
+three identities, 0 violations in 12 trials at `N = 3,4,5`. One build iteration: my first `1331`
+assembly rotated the offsets the other way and Lean rejected it — the surviving direction is the one
+the reviewer then confirmed independently.
+
+**What this does and does not close.** With `tri3_low_orthant` (Tier 68) giving `orth 0 0 0 = tri3_m`
+for `P3`, the SHAPE of the level transfer — the `1+3+3+1` and its leading term — is now a theorem.
+The three remaining orthant VALUES (`O_1, O_2, O_3`) are still measured, and so are the level
+constants and `Σ_coset`.
+
 **Status of (III).** Still reduced, not proven — but the reduction is now a single explicit
 first-order recursion in `m` whose only non-constant input is a coset-line sum with a closed form.
 What has not been attempted: proving the recursion (the constants and `Σ_coset` from the same

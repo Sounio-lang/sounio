@@ -13277,6 +13277,83 @@ theorem tri3_low_orthant (m W : Nat) (hW : W < 2^(m+1)) :
     tri3 (2^(m+1)) (fun x y => P3 x y W (m+1)) = tri3 (2^(m+1)) (fun x y => P3 x y W m) :=
   tri3_congr _ _ _ (fun x y hx hy => P3_level_stable m x y W hx hy hW)
 
+
+/-! ### Tier 69 — the orthant split of `tri3` across a doubling, in `sumLtI`
+
+    §57.16-57.18's expansion of the transfer is written in ordinary mathematics; this tier moves its
+    first half — the DECOMPOSITION — into the file's formalism, where the rest of the lane lives.
+
+    `sumLtI_shift N N` is exactly an orthant cut: it splits a sum over `[0, N+N)` into the low half
+    and the high half, the latter reindexed by `i ↦ N + i`.  Applying it to each of `tri3`'s three
+    nested sums gives the eight orthants, and nothing else is involved — no `P3`, no branch
+    reduction.  That is the point: **the `1+3+3+1` shape of §57.14 is a fact about `tri3`, not about
+    this lane's matrices** (§57.19), and here it is as one identity. -/
+
+/-- The `(u,v,w)` orthant of a doubled `tri3`, each index offset by `0` or by `N`. -/
+def orth (N : Nat) (f : Nat → Nat → Int) (u v w : Nat) : Int :=
+  sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c =>
+    f (u + a) (v + b) * (f (v + b) (w + c) * f (w + c) (u + a)))))
+
+/-- Splitting the inner two sums of a doubled double-sum into four. -/
+private theorem split_inner (N : Nat) (F : Nat → Nat → Int) :
+    sumLtI (N+N) (fun b => sumLtI (N+N) (fun c => F b c))
+      = sumLtI N (fun b => sumLtI N (fun c => F b c))
+        + sumLtI N (fun b => sumLtI N (fun c => F b (N+c)))
+        + (sumLtI N (fun b => sumLtI N (fun c => F (N+b) c))
+           + sumLtI N (fun b => sumLtI N (fun c => F (N+b) (N+c)))) := by
+  rw [sumLtI_shift N N (fun b => sumLtI (N+N) (fun c => F b c)),
+      sumLtI_congr N (fun b => sumLtI (N+N) (fun c => F b c))
+        (fun b => sumLtI N (fun c => F b c) + sumLtI N (fun c => F b (N+c)))
+        (fun b _ => sumLtI_shift N N (fun c => F b c)),
+      sumLtI_congr N (fun b => sumLtI (N+N) (fun c => F (N+b) c))
+        (fun b => sumLtI N (fun c => F (N+b) c) + sumLtI N (fun c => F (N+b) (N+c)))
+        (fun b _ => sumLtI_shift N N (fun c => F (N+b) c)),
+      sumLtI_add N (fun b => sumLtI N (fun c => F b c)) (fun b => sumLtI N (fun c => F b (N+c))),
+      sumLtI_add N (fun b => sumLtI N (fun c => F (N+b) c))
+        (fun b => sumLtI N (fun c => F (N+b) (N+c)))]
+
+/-- **THE ORTHANT SPLIT.**  A `tri3` over a doubled range is the sum of its eight orthants. -/
+theorem tri3_split8 (N : Nat) (f : Nat → Nat → Int) :
+    tri3 (N + N) f
+      = (orth N f 0 0 0 + orth N f 0 0 N + (orth N f 0 N 0 + orth N f 0 N N))
+        + (orth N f N 0 0 + orth N f N 0 N + (orth N f N N 0 + orth N f N N N)) := by
+  unfold tri3 orth
+  simp only [Nat.zero_add]
+  rw [sumLtI_shift N N
+        (fun a => sumLtI (N+N) (fun b => sumLtI (N+N) (fun c => f a b * (f b c * f c a)))),
+      sumLtI_congr N
+        (fun a => sumLtI (N+N) (fun b => sumLtI (N+N) (fun c => f a b * (f b c * f c a)))) _
+        (fun a _ => split_inner N (fun b c => f a b * (f b c * f c a))),
+      sumLtI_congr N
+        (fun a => sumLtI (N+N) (fun b => sumLtI (N+N) (fun c =>
+            f (N+a) b * (f b c * f c (N+a))))) _
+        (fun a _ => split_inner N (fun b c => f (N+a) b * (f b c * f c (N+a)))),
+      sumLtI_add, sumLtI_add, sumLtI_add, sumLtI_add, sumLtI_add, sumLtI_add]
+
+
+/-- **THE ORTHANTS ROTATE.**  `tri3`'s summand is cyclically invariant, so an orthant only depends on
+    its offset triple UP TO ROTATION — which is why the eight collapse to four.  Nothing about `P3`
+    enters; this is the formal content of §57.19's deflation. -/
+theorem orth_cyc (N : Nat) (f : Nat → Nat → Int) (u v w : Nat) :
+    orth N f u v w = orth N f w u v := by
+  unfold orth
+  rw [sumLtI3_cyc N (fun a b c =>
+        f (u + a) (v + b) * (f (v + b) (w + c) * f (w + c) (u + a)))]
+  exact sumLtI_congr N _ _ (fun a _ => sumLtI_congr N _ _ (fun b _ =>
+    sumLtI_congr N _ _ (fun c _ => by grind)))
+
+/-- **`1 + 3 + 3 + 1`.**  The eight orthants collapse into four classes by weight, and the shape of
+    the level transfer is a theorem about `tri3` alone. -/
+theorem tri3_split_1331 (N : Nat) (f : Nat → Nat → Int) :
+    tri3 (N + N) f
+      = orth N f 0 0 0 + 3 * orth N f 0 0 N + 3 * orth N f 0 N N + orth N f N N N := by
+  have h2 : orth N f N 0 0 = orth N f 0 0 N := (orth_cyc N f 0 0 N).symm
+  have h1 : orth N f 0 N 0 = orth N f 0 0 N := (orth_cyc N f N 0 0).symm.trans h2
+  have h3 : orth N f N 0 N = orth N f 0 N N := (orth_cyc N f 0 N N).symm
+  have h4 : orth N f N N 0 = orth N f 0 N N := (orth_cyc N f N 0 N).symm.trans h3
+  rw [tri3_split8 N f, h1, h2, h3, h4]
+  omega
+
 end SounioZDFiberAntisym
 
 
