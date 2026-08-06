@@ -189,11 +189,14 @@ to design against.
    `tests/native-v2/ir_module_seal_witness.sio` pins the count and the refusal;
    gate now carries 5 witnesses and 4 vacuity checks.
 
-   **Open, and load-bearing:** the first wiring sealed **0 of 7 in silence**, and
-   the hoist that fixed it (0 → 7) has an *unproven mechanism* — the witness
-   passes with both the hoisted and the direct form, and a Box'd `IrModule`
-   SIGSEGVs in a witness, so the failing shape has no isolated reproduction.
-   Do not "simplify" that loop.
+   **RESOLVED — the mechanism is #1678.** The first wiring sealed **0 of 7 in
+   silence** because `&(*module).functions[i].region` takes a reference to an
+   aggregate element of an array inside a `Box`, and on the seed that is a wrong
+   address. The hoist is the fix, not a workaround for something unknown.
+   30-line reproducer: `scripts/dev/ir-arena/repro_boxed_element_ref.sio`, run
+   under **lean_single** — earlier attempts failed to reproduce because they
+   used `madaros --native-v2-compile`, where `Box` in a user program faults
+   first. Still do not "simplify" that loop.
 5. ~~**Cover `ir_arena_swap_slots`**~~ — **DONE for the primitive, BLOCKED for the
    call sites.** `tests/native-v2/ir_arena_swap_witness.sio` gives every lane a
    distinct value on each side and checks the two a two-store swap would lose,
@@ -263,28 +266,36 @@ A creation-time probe placed in `module_frontend_lower_source_file_summary`
 (:4381) never fired — that summary path is not on this route. Worth knowing
 before someone instruments it again.
 
-### Why the dirty slots are still unexplained
+### The dirty slots were an artifact — RETRACTED
 
-`untouched8` says the module's function slots above `fn_count` hold ~41-47% random
-bits, varying run to run: uninitialised memory. Three hypotheses tested and
-killed:
+`untouched8` reported the module's function slots above `fn_count` holding
+~41-47% random bits, varying per run. **That reading came from the measuring
+code, not from the memory.** With the counter's element hoisted into a local it
+reads `0`, deterministically, and the live count drops from 4003/4643/4963 to
+`8` — exactly the write count.
 
-| hypothesis | verdict |
-|---|---|
-| `ir_empty_function()` does not zero | refuted — `fresh=0` |
-| the `[ir_empty_function(); 2048]` repeat initialiser loses a 512-byte field | refuted — a standalone `[Big; 2048]` with an `[i64; 64]` field reports `nonzero=0` on both compilers |
-| `Box::new` of a large value leaves the tail uninitialised | **not settled** — the repro faults for an unrelated reason |
+So the module is not born dirty, `Box::new` does not return uninitialised
+memory, and function slots are not recycled dirty
+(`IR_FLOAT_BITS_INHERITED = 0` over runs lowering 5 functions). All three were
+hypotheses about *storage*; the defect was in the *instrument*. See #1678 and
+the README section "The reference hazard".
 
-That last one is the honest status. A user-level repro
-(`Box::new` a 1 MB struct, then read `(*b).fns[0].a`) **SIGSEGVs on the FIRST
-element**, while the compiler does `(*lo.module).functions[i]` constantly and
-works. So the repro is hitting the nested `Box` + index + field access fragility
-this tree already documents for stores (`lower.sio:1652`, "the aggregate lvalue
-base is wrong") — the same shape that forced hoisting the handle out of
-`&(*module).functions[i].region` in `ir_module_seal_functions`. The instrument is
-unreliable, not the hypothesis.
+Kept as method, because it is the transferable part: the fourth hypothesis was
+only reachable because the third was tested with a **known pattern**
+(`pattern_direct=8`, `pattern_copied=8`) instead of by inference. Proving copies
+were fine left the reference as the only remaining difference between the clean
+reading and the dirty one.
 
-**Next step, and it should not be another user-level repro:** probe inside the
-compiler at `lowerer_new`, counting bits on `(*lo.module)` immediately after the
-`Box::new`. That is a two-line addition at the site now that the site is known,
-and it answers the question the last four builds could not.
+### Still open after all this
+
+- `IR_FLOAT_BITS_TRUSTED` is **0**. The round-trip evidence now exists
+  (`writes=8` / `live_at_codegen=8`); the flip does not. It is a behaviour
+  change and belongs in its own commit, with the consumers switched and a gate.
+- The three `&(*ptr).arr[i]` sites in `compiler/pkg/{lock,registry_client}.sio`
+  are **off the IR path, not audited**. #1678 acceptance criterion 2 is unmet.
+- `Box` in a **user program** under `--native-v2-compile` segfaults on a plain
+  field read. Recorded as a side observation in #1678; it is a **separate,
+  unfiled defect**, not covered by it.
+- Pre-merge, unchanged: rewrite the 97 MB `artifacts/self-hosted/mad-cr2` out of
+  history, then rebase onto freshly fetched `origin/main`.
+- #1667 (`add3(1,2,3)` returns 3) still open.
