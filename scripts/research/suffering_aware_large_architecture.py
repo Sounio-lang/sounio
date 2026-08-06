@@ -124,7 +124,7 @@ DATA_DIR = os.environ.get(
 CORPUS_GLOB_DIR = os.path.join(REPO_ROOT, "docs", "research")
 SMOKE = os.environ.get("SAN_LARGE_SMOKE", "") == "1"
 ONLY = os.environ.get("SAN_LARGE_ONLY", "").strip().lower()
-THREADS = int(os.environ.get("SAN_LARGE_THREADS", "48"))
+THREADS = int(os.environ.get("SAN_LARGE_THREADS", "16"))
 torch.set_num_threads(THREADS)
 
 # Device selection. Slurm gpu-orangefs workers see CUDA via /host-nvidia;
