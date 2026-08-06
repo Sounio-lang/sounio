@@ -63,3 +63,67 @@ through `cs6_v7b_target23_arb_tm2r_composability_run.sh` on the Compiler Foundry
 or Slurm path.  If the tree reaches its depth/node cap, the next mathematical
 change is QR transport/reanchoring of the residual basis at the downward event,
 not a relaxation of the orientation inequality.
+
+## Foundry/Slurm execution
+
+The four base tiles were launched on the three `gpu-orangefs` nodes from Git
+commit `8e00e0a7dc3b170ade3a74199c063708c56d858e`.  No atomic tile receipt was
+emitted.
+
+- `XLEL` failed after `02:54:13` at the exact split-depth cap `8`.
+- `XLEH` and the slow `XHEL` run reached the six-hour operational timeout.
+- A deterministic `XHEL` duplicate on the r770 node failed at the same base
+  split budget after `02:54:34`.
+- The base `XHEH` job was replaced after 32 minutes by the audited retry profile.
+
+The retry profile at commit
+`8674961617d4686ede9e2230a7bfe870e5f23e33` changed only the explicit search
+budget from depth `8`, 63 nodes to depth `12`, 255 nodes.  It retained the same
+TM2R worker, exact binary substitutions, signed Picard closure, strict event
+derivative, strict interval-Newton containment, point-fallback refusal, and
+box-flattening refusal.  Its operational Slurm limit was extended to 24 hours;
+the mathematical budget did not change.
+
+`XLEL` crossed the former failing depth.  One depth-10 sibling certified its
+second event, but the remaining child continued to return `PREDICTOR_ESCAPED`
+for every tested slab radius from `2^-18` through `2^-7`.  It reached depth 12
+on the branch
+
+```
+DOWN_RHO0L/DOWN_ETAH/DOWN_RHO0L/DOWN_ETAL/
+DOWN_RHO0L/DOWN_ETAL/DOWN_RHO0L/DOWN_RHO1H/
+DOWN_ETAH/DOWN_RHO0L/DOWN_RHO1H/DOWN_ETAH
+```
+
+and failed closed with `EVENT_SLAB_UNRESOLVED` after `06:17:31`.  The other
+retry jobs were then cancelled because no completion of those tiles could
+repair the missing `XLEL` support.
+
+The exact local refusal receipts are
+`foundry_XLEL_base.incomplete.stderr.txt` and
+`foundry_XLEL_retry.incomplete.stderr.txt`.  Their SHA-256 hashes and the full
+Slurm accounting are bound by `foundry_execution_context.txt`; the staged
+archive and retry hashes are retained under `foundry_provenance/`.
+
+## Foundry verdict
+
+- Complete atomic tile receipts: **0 of 4**.
+- Full rigorous support of `P^2(B)`: **not certified**.
+- Target h-set `C` from full support: **not derivable**.
+- Exit-face inequalities for `C`: **not certified**.
+- Entry inequalities for `C`: **not certified**.
+- Covering degree and return determinant for `B -> C`: **not certified**.
+- Local covering relation `B -> C`: **false as a current claim**.
+- Recurrent covering graph and chaos: **not proved**.
+
+The fail-closed analyzer, verifier, mutation audit, and gate for a future full
+support family are implemented but deliberately cannot run without all four
+atomic JSON receipts.  Increasing Cartesian split depth again is not the next
+credible attack: the quantitative failure persisted from depth 8 through 12.
+The next experiment should discriminate accumulated event-chart drift, the
+event criterion, and an implementation defect.  One candidate is event-local
+chart reanchoring, with QR justified only under the hypothesis that frame drift
+causes the offset; an alternative is a Taylor-model event chart that directly
+tests validated predictor containment.  Preserving all six symbolic variables
+is a design requirement on either falsifier, not a consequence of this failure
+evidence.
