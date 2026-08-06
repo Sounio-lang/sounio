@@ -182,8 +182,9 @@ to design against.
    that call the swap are broken independently of it, and no passing program can
    route through them. Recorded with minimal repros in
    `tests/known_failures/opt_o_miscompiles_licm_and_sink_shapes.sio`; the
-   wrong-answer one deserves its own issue against main, since a hang is loud and
-   a wrong exit code is not.
+   wrong-answer one is filed against main as **#1667**, where it minimised much
+   further than the "sink" framing: a function summing three or more parameters
+   returns the wrong value under `-O` at rc=0, on both compilers.
 6. **The `-O` register/label widening**, or — if it slips — the lowering-side cap
    check that latches and refuses the artifact. What must not ship is the current
    state: an in-tree `run-pass` test that miscompiles at rc=0 under `-O`.
