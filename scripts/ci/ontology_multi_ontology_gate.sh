@@ -25,7 +25,7 @@
 # Env overrides:
 #   SOUC_BIN                          compiler wrapper (default: bin/souc)
 #   ONTOLOGY_MULTI_RUN_TIMEOUT        per-file `souc run` timeout, seconds
-#                                     (default: 600)
+#                                     (default: 900; ChEBI+PATO needs headroom)
 #
 # Exit 0 = all drivers pass. Exit 1 = at least one driver failed.
 
@@ -35,11 +35,12 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 SOUC_BIN="${SOUC_BIN:-$ROOT_DIR/bin/souc}"
-RUN_TIMEOUT="${ONTOLOGY_MULTI_RUN_TIMEOUT:-600}"
+RUN_TIMEOUT="${ONTOLOGY_MULTI_RUN_TIMEOUT:-900}"
 
 DRIVERS=(
     "artifacts/ontology-frontiers/multi-ontology/go_roots_elplus_driver.sio"
     "artifacts/ontology-frontiers/multi-ontology/obo_elplus_driver.sio"
+    "artifacts/ontology-frontiers/multi-ontology/chebi_pato_elplus_driver.sio"
 )
 
 TMP_DIR="$(mktemp -d /tmp/ontology-multi-gate.XXXXXX)"
