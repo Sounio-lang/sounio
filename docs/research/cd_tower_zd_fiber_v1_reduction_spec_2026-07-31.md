@@ -5181,9 +5181,33 @@ its four units come from the measured blocks. zai's phrasing: *"The recursion `4
 remains a measured conjecture; only the block `(0,0)` component (`1U`) is a theorem."*
 
 So the state is: the cut is a theorem (Tier 83), one of its four blocks is a theorem (Tier 84), and
-the recursion — coefficient and constant alike — remains measured. The three remaining blocks carry
-the `E01`/`E10` signs and Tier 82's coset case; collecting them is not attempted, and I record no
-estimate.
+the recursion — coefficient and constant alike — remains measured.
+
+### 57.39 — Tier 85: block `(1,0)` collected; the other two are BLOCKED, and by what
+
+Of the three remaining blocks, `(1,0)` is the one whose three factors are all covered by lemmas that
+already hold at every index:
+
+| factor | block | lemma |
+|---|---|---|
+| `P3 (2^(m+1)+a) b` | `(1,0)` | `P3_block10_total` (Tier 75) |
+| `P3 b (b⊕W)` | `(0,0)` | `P3_level_stable` (Tier 66, hypothesis-free) |
+| `P3 (b⊕W) (2^(m+1)+a)` | `(0,1)` | `P3_block01_total` (Tier 75) |
+
+`cosetU_block10`, kernel-clean, green first try, 0 violations at `m = 2,3` every label.
+
+**The other two do not collect, and the obstructions are specific:**
+
+* **block `(0,1)`** — its middle factor `P3 (2^(m+1)+b) ((2^(m+1)+b)⊕W)` is block `(1,1)` on its
+  coset line, i.e. Tier 82 — but Tier 82 needs `b ≠ 0` **and** `b ⊕ W ≠ 0`, and the sum runs over
+  all `b`. Two border cases missing.
+* **block `(1,1)`** — its outer factors need an `E11` **total**, which was never built: Tier 67 gives
+  the off-locus version, Tier 82 the coset case, and the `l = W` / `y = W` loci and both borders are
+  open.
+
+I put that account to the reviewers rather than asserting it, and grok confirmed the gaps are exactly
+those with no further one. **This is one block of the three that were asked for**; the other two are
+named, not done, and I record no estimate for either.
 
 **Status of (III).** Still reduced, not proven — but the reduction is now a single explicit
 first-order recursion in `m` whose only non-constant input is a coset-line sum with a closed form.

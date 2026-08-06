@@ -14341,6 +14341,41 @@ theorem cosetU_block00 (m W : Nat) (hW : W < 2^(m+1)) :
       P3_level_stable m b (b ^^^ W) W hb hbW hW,
       P3_level_stable m (b ^^^ W) a W hbW ha hW]
 
+
+/-! ### Tier 85 — block `(1,0)`, collected
+
+    Of the three remaining blocks, `(1,0)` is the one whose three factors are ALL covered by lemmas
+    that already exist at every index:
+
+      `P3 (2^(m+1)+a) b`            block `(1,0)`  → `P3_block10_total` (Tier 75)
+      `P3 b (b⊕W)`                  block `(0,0)`  → `P3_level_stable` (Tier 66, hypothesis-free)
+      `P3 (b⊕W) (2^(m+1)+a)`        block `(0,1)`  → `P3_block01_total` (Tier 75)
+
+    so it collects with no new work.  The other two do NOT:
+
+    * `(0,1)`'s middle factor is `P3 (2^(m+1)+b) ((2^(m+1)+b)⊕W)`, block `(1,1)` on its coset line —
+      Tier 82 — but Tier 82 needs `b ≠ 0` and `b ⊕ W ≠ 0`, and the sum runs over both;
+    * `(1,1)`'s outer factors need an `E11` total, which was never built (Tier 67 gives the
+      off-locus version, Tier 82 the coset case, and the `l = W` / `y = W` loci and the borders are
+      open).
+
+    Both are stated here as what they are: not attempted. -/
+
+/-- **BLOCK `(1,0)`, COLLECTED.**  Every factor rewritten to level `m` with its sign. -/
+theorem cosetU_block10 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+        P3 (2^(m+1)+a) b W (m+1)
+          * (P3 b (b ^^^ W) W (m+1) * P3 (b ^^^ W) (2^(m+1)+a) W (m+1))))
+      = sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+          E10 a b W * P3 a b W m
+            * (P3 b (b ^^^ W) W m * (E01 (b ^^^ W) a W * P3 (b ^^^ W) a W m)))) := by
+  refine sumLtI_congr _ _ _ (fun a ha => sumLtI_congr _ _ _ (fun b hb => ?_))
+  have hbW : b ^^^ W < 2^(m+1) := xorlt hb hW
+  rw [Nat.add_comm (2^(m+1)) a,
+      P3_block10_total m a b W ha hb hW hW0,
+      P3_level_stable m b (b ^^^ W) W hb hbW hW,
+      P3_block01_total m (b ^^^ W) a W hbW ha hW hW0]
+
 end SounioZDFiberAntisym
 
 
