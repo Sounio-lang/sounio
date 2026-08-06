@@ -39,6 +39,7 @@ if [[ $rc -ne 0 ]]; then
   exit "$rc"
 fi
 
+set +e
 PYTHONPATH="$DEPS" PYTHONDONTWRITEBYTECODE=1 python3 -B "$VERIFY" \
   "$tmp_result" \
   --worker "$WORKER" \
@@ -49,10 +50,18 @@ PYTHONPATH="$DEPS" PYTHONDONTWRITEBYTECODE=1 python3 -B "$VERIFY" \
   --event "$ROOT/scripts/research/cs6_v7b_target23_arb_tm2r_second_return_worker.py" \
   --base "$ROOT/scripts/research/cs6_v7b_target23_arb_tm2r_first_return_worker.py" \
   --prior-receipt "$PRIOR_RECEIPT" \
-  > "$tmp_verified"
+  > "$tmp_verified" 2> "$OUT_DIR/event_centered.verify.stderr.txt"
+verify_rc=$?
+set -e
 
+# Always retain the worker receipt for forensic inspection, even if verify fails.
 mv "$tmp_result" "$result"
 mv "$tmp_stderr" "$stderr"
+if [[ $verify_rc -ne 0 ]]; then
+  echo "event-centered verify failed with rc=$verify_rc" >&2
+  exit "$verify_rc"
+fi
+
 mv "$tmp_verified" "$verified"
 trap - EXIT
 echo "CS6_EVENT_CENTERED_COMPLETE=true"

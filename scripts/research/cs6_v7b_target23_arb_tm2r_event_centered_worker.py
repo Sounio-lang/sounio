@@ -137,7 +137,11 @@ def frozen_predictor(
     derivative = tube[0] * tube[1] - tube[2] - base.ZS
     predictor = -state[2] / derivative.mid()
     predictor_range = predictor.range()
-    center = Fraction(base.exact_fraction(predictor_range.mid()))
+    # Exact rational midpoint of the serialized enclosure endpoints — not Arb mid(),
+    # which can differ from (lower+upper)/2 and break the frozen-center gate.
+    lower = Fraction(base.lower_fraction(predictor_range))
+    upper = Fraction(base.upper_fraction(predictor_range))
+    center = (lower + upper) / 2
     bool_check(checks, "anchor_derivative_strictly_negative", derivative.upper() < 0)
     bool_check(checks, "predictor_center_matches_frozen_receipt", center == EXPECTED_CENTER)
     bool_check(
