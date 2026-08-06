@@ -79,7 +79,12 @@ with exits still firing (0.68–0.86), 6.9% below EarlyStop and a 1.12×
 inference speedup: the first configuration in the study satisfying the
 declared target with learned exits, and evidence that the
 accuracy–compute trade is a *declared deployment point* — exactly what the
-audit kernel enforces (§4.9–§4.10). The
+audit kernel enforces (§4.9–§4.10). A five-threshold sweep, with predictions
+preregistered before the runs (git-timestamped), confirms the accuracy and
+latency frontiers as smooth and monotone (5/5 predictions each) and
+falsifies the training-burden monotonicity — the necessary/gratuitous split
+is dominated by freeze-timing jitter, a mechanism we report because the
+preregistered failure revealed it (§4.11). The
 strongest positive result stands: a curriculum-gated SAN reaches τ = 0.85 on
 full CIFAR-10 at accuracy 0.8561 — inside the observed cross-job Dense band
 (0.8576–0.8650 at identical seed and configuration; §4.8 discloses the
@@ -880,6 +885,66 @@ and the FPGA audit kernel enforces exactly the declared point at inference,
 with the stage-cost LUT and threshold loaded by the host and every decision
 attested bit-exactly. Training-time accounting and deployment-time
 attestation close their loop here.
+
+### 4.11 Preregistered: the five-point frontier, and what its falsifications teach
+
+Before the sweep below was run, we committed preregistered predictions for
+it — intervals for final accuracy, S_m, and latency at three new thresholds,
+monotone constraints across the frontier, contract invariants, and
+predictions for the ViT/GPT legs — with the git timestamp as precedence
+proof and a timing disclosure for the one job whose completion preceded the
+commit by 22 minutes (`agent_logs/san_v7_frontier_preregistration_2026-08-06.md`,
+which carries the full scorecard). The measured frontier:
+
+**Table 11: accuracy–compute frontier, five thresholds
+(full CIFAR-10, ResNet-50, τ = 0.85, seed 17).**
+
+| threshold | t* | final acc | S_m (TMAC) | latency speedup | post-τ exit_frac (late epochs) |
+|---|---|---|---|---|---|
+| 0.80  | 11 | 0.7998 | 9 799  | 1.41× | 0.71–0.98 |
+| 0.85  | 15 | 0.8293 | 12 163 | 1.27× | 0.89–0.96 |
+| 0.90  | 10 | 0.8379 | 10 357 | 1.18× | 0.85–0.92 |
+| 0.95  | 14 | 0.8594 | 12 757 | 1.12× | 0.68–0.86 |
+| 0.975 | 15 | 0.8688 | 13 795 | 1.04× | 0.74–0.79 |
+
+**Scorecard.** Accuracy: all five points inside the preregistered intervals
+or monotone band (5/5; the final accuracies are perfectly monotone in the
+threshold). Latency: 5/5, perfectly monotone decreasing. Contract
+invariants: L1 conservation exact with exits firing in every run, L2 passes
+at every t*, exit_frac(t*) = 0 with L6 failing exactly as declared
+by construction. **S_m: falsified.** Only one of three intervals held, and
+the predicted monotonicity broke — S_m at threshold 0.90 (10 357 TMAC) dips
+*below* the 0.85 point (12 163). The baseline invariant fell with it: the
+within-run EarlyStop legs swung from 7 891 to 13 705 TMAC across the five
+v7-line runs at identical configurations, and the SAN won only one of the
+three new pairings.
+
+**Mechanism, stated because the falsification bought it.** The accuracy and
+latency frontiers are smooth functions of the threshold — the gate's
+selectivity controls them directly. The training burden is not: S_m =
+nec(t*) + discounted post-τ epochs, and nec(t*) swings by ~2 000 TMAC with
+the epoch at which τ happens to be crossed (t* ∈ {10, 11, 14, 15} across
+identical configs), larger than the inter-threshold effect. The threshold
+controls the *post-contract* cost; it does not control *when the contract is
+met*. And since the EarlyStop baseline shares that same freeze-timing
+variance, the stable, reportable claim of this study is the SAN's own
+frontier — not any pairwise win against a baseline whose freeze jitter
+exceeds the effect being measured. We would not have written this paragraph
+without the preregistered failure.
+
+**ViT and GPT legs (jobs 8738/8739).** With the v7-era post-τ plumbing both
+families now run the full protocol (confidence-threshold exits, no learned
+gates — declared difference). ViT-large/d384 reaches τ = 0.251 at t* = 4,
+finishes post-τ training at 0.3763 ≥ τ, and its exit fraction at t* is
+0.342 — the first L6 pass on full CIFAR-10, ten times the pre-v7 line's
+0.03 — with a 1.17× measured latency speedup. The GPT leg reaches τ = 0.165
+at t* = 4 with L6 passing (0.120) and a 3.33× latency speedup, but its
+accuracy decays to 0.1309 < τ by the end of post-τ training: the preregistered
+"stays ≥ τ" claim held for ViT and failed for the LM, and the LM's cheap
+exits (3.33×) are exactly the regime where over-exiting eats the margin.
+One-line summary of both: the contract machinery works across families; the
+post-τ accuracy floor does not come for free and currently holds only where
+the exit threshold leaves enough margin.
 
 ---
 
