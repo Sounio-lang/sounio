@@ -4098,6 +4098,13 @@ fn checker_check_impl_method_inplace(c: *mut Checker, item: Item) with Mut, Pani
                 (*c).current_return_type = sig.return_type
                 (*c).current_effects = sig.effects
                 (*c).current_effect_count = sig.effect_count
+            } else {
+                // An imported named impl can remain unresolved while its own body
+                // is checked. Its declaration is nevertheless authoritative for
+                // effect checking; do not silently treat that body as effect-free.
+                let declared_effects = checker_extract_effects_mut(c, (*fd).effects)
+                (*c).current_effects = declared_effects.effects
+                (*c).current_effect_count = declared_effects.count
             }
             (*c).multitest_count = 0
             (*c).multitest_corrected = false
@@ -19995,6 +20002,16 @@ impl Checker {
                 c = c.release_call_arg_borrows(e.args, sig.params, call_start_borrows)
                 (c, sig.return_type)
             } else {
+                // A named type which is not a declared struct/enum is an unresolved
+                // function type parameter. Its trait contract was accepted at the
+                // generic declaration boundary, so defer concrete method selection
+                // until monomorphization instead of issuing E011 for `F.er_add`.
+                if type_is_unresolved_type_param_in_tables(c.structs, c.enums, base_ty) {
+                    let call_start_borrows = c.borrows
+                    c = c.check_expr_list_no_type_no_linear_consume(e.args)
+                    c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                    return (c, base_ty)
+                }
                 // Method not found
                 c = c.report_error_at(e.span, 11, 0, 0, 0)
                 // Still check args to accumulate errors
@@ -20136,11 +20153,18 @@ impl Checker {
                 c = c.release_call_arg_borrows(e.args, sig.params, call_start_borrows)
                 (c, sig.return_type)
             } else {
+                if type_is_unresolved_type_param_in_tables(c.structs, c.enums, base_ty) {
+                    let call_start_borrows = c.borrows
+                    c = c.check_expr_list_no_type_no_linear_consume(e.args)
+                    c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                    (c, base_ty)
+                } else {
                 c = c.report_error_at(e.span, 11, 0, 0, 0)
                 let call_start_borrows = c.borrows
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
                 c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
                 (c, ty_error())
+                }
             }
         } else if base_ty.kind == TypeKind::TyString {
             let call_start_borrows = c.borrows
