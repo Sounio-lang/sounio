@@ -14757,4 +14757,76 @@ theorem cosetU_block11 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
       P3_block11_cos_total m b W hb hW hW0,
       P3_block11_total m (b ^^^ W) a W hbW ha hW hW0]
 
+/-! ### Tier 89 — the `(1,1,1)` ORTHANT, proved, and switching-invariance of `tri3` as a lemma
+
+    Tier 88 measured that the level-`(m+1)` triple products with all three indices HIGH and nonzero
+    equal the level-`m` ones, and said so was not yet a theorem.  This tier proves it, and the proof
+    is worth more than the instance: what makes it work is that `tri3` is invariant under SWITCHING,
+    which is a statement about `tri3` alone and holds for any matrix.
+
+      `tri3_switch`: if `f x y = s x · s y · g x y` with `s` taking values in `{±1}`, then
+      `tri3 N f = tri3 N g`, because each `s x` occurs exactly twice in the cyclic product.
+
+    Tier 88's `E11` is of that form — `E11 l y W = sigRow l · sigRow y` — but ONLY for `y ≠ 0`: at
+    `y = 0` the column sign is `−1` where `sigRow 0 = 1`, which is precisely the `g ≠ h` obstruction
+    §57.42 records.  So the theorem below is about the ZERO-MASKED matrices, and that mask is not a
+    convenience: on the unmasked ones the sum identity FAILS AT EVERY LABEL (measured `7/7` and
+    `15/15` at `m = 2,3`), while the masked one holds at every label.
+
+    This is the exact mirror of Tier 68's `tri3_low_orthant`, with one asymmetry that is the content:
+    the low orthant needs no mask and no hypothesis, because `P3_level_stable` is an equality of
+    ENTRIES; the high orthant is an equality of TRIPLE PRODUCTS only, so it needs both the mask and
+    the switching lemma.  Two of the eight orthants of the level transfer are now theorems. -/
+
+/-- Zero-masking: kill every entry with an index `0`.  This is the `P3̃` convention of §57.8 in the
+    only part this tier needs. -/
+def zmsk (f : Nat → Nat → Int) : Nat → Nat → Int :=
+  fun x y => if x = 0 ∨ y = 0 then 0 else f x y
+
+/-- **`tri3` IS SWITCHING-INVARIANT.**  Nothing about `P3` enters: each vertex sign appears twice in
+    the cyclic product `f a b · f b c · f c a` and squares away. -/
+theorem tri3_switch (N : Nat) (f g : Nat → Nat → Int) (s : Nat → Int)
+    (hs : ∀ x, s x = 1 ∨ s x = -1)
+    (h : ∀ x y, x < N → y < N → f x y = s x * s y * g x y) :
+    tri3 N f = tri3 N g := by
+  unfold tri3
+  refine sumLtI_congr N _ _ (fun a ha => sumLtI_congr N _ _ (fun b hb =>
+    sumLtI_congr N _ _ (fun c hc => ?_)))
+  rw [h a b ha hb, h b c hb hc, h c a hc ha]
+  rcases hs a with ha' | ha' <;> rcases hs b with hb' | hb' <;> rcases hs c with hc' | hc' <;>
+    rw [ha', hb', hc'] <;> grind
+
+/-- The row sign of Tier 88's `E11`. -/
+def sigRow (x W : Nat) : Int := if x ^^^ W = 0 then -1 else 1
+
+/-- **`E11` IS A SWITCHING WEIGHT — off the index-`0` column.**  For `y ≠ 0` the column sign of
+    Tier 88 coincides with the row sign, which is exactly the `g = h` that §57.42's correction says
+    is needed, and exactly what fails at `y = 0`. -/
+theorem E11_factor (x y W : Nat) (hy0 : y ≠ 0) : E11 x y W = sigRow x W * sigRow y W := by
+  unfold E11 sigRow
+  have e : (if y = 0 ∨ y ^^^ W = 0 then (-1:Int) else 1) = (if y ^^^ W = 0 then (-1:Int) else 1) := by
+    by_cases hyW : y ^^^ W = 0
+    · rw [if_pos (Or.inr hyW), if_pos hyW]
+    · rw [if_neg (fun hh => hh.elim hy0 hyW), if_neg hyW]
+  rw [e]
+
+/-- **THE `(1,1,1)` ORTHANT.**  The mirror of Tier 68's `tri3_low_orthant`: on the zero-masked
+    matrices, the level-`(m+1)` triangle sum over the HIGH block is the level-`m` one. -/
+theorem tri3_high_orthant (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    tri3 (2^(m+1)) (zmsk (fun x y => P3 (2^(m+1)+x) (2^(m+1)+y) W (m+1)))
+      = tri3 (2^(m+1)) (zmsk (fun x y => P3 x y W m)) := by
+  refine tri3_switch _ _ _ (fun x => sigRow x W) (fun x => by
+    unfold sigRow; by_cases hx : x ^^^ W = 0
+    · exact Or.inr (if_pos hx)
+    · exact Or.inl (if_neg hx)) (fun x y hx hy => ?_)
+  unfold zmsk
+  by_cases hx0 : x = 0
+  · rw [if_pos (Or.inl hx0), if_pos (Or.inl hx0), Int.mul_zero]
+  · by_cases hy0 : y = 0
+    · rw [if_pos (Or.inr hy0), if_pos (Or.inr hy0), Int.mul_zero]
+    · rw [if_neg (fun hh => hh.elim hx0 hy0), if_neg (fun hh => hh.elim hx0 hy0)]
+      show P3 (2^(m+1)+x) (2^(m+1)+y) W (m+1) = sigRow x W * sigRow y W * P3 x y W m
+      rw [Nat.add_comm (2^(m+1)) x, Nat.add_comm (2^(m+1)) y,
+          P3_block11_total m x y W hx hy hW hW0, E11_factor x y W hy0]
+
 end SounioZDFiberAntisym

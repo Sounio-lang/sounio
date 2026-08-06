@@ -5313,3 +5313,31 @@ proved, and it is the obvious next rung.
 One hypothesis dropped: `P3_block11_corner` needs no `W ≠ 0`. The linter flagged it unused, and the
 identity does hold at `W = 0` (measured `m = 2,3,4`); both `P3`s collapse through `cdSig0`/`cdSig0'`
 before the label can matter.
+
+### §57.43 — Tier 89: the (1,1,1) orthant is a theorem, via switching-invariance of tri3
+
+§57.42 ended by naming the orthant identity as measured-not-proved and the obvious next rung. It is
+now proved, and the general lemma it needed is worth more than the instance:
+
+    tri3_switch:  f x y = s x · s y · g x y  with  s : ℕ → ℤ  valued in {±1}
+                  ⟹  tri3 N f = tri3 N g
+
+— nothing about `P3` enters; each vertex sign occurs exactly twice in the cyclic product and squares
+away. This is the formal content of "switching preserves the two-graph", now available to the lane
+as a lemma rather than as a phrase.
+
+Tier 88's `E11` is of that form, `E11 l y W = sigRow l · sigRow y`, but **only for `y ≠ 0`** — the
+`g ≠ h` obstruction of §57.42, in one line. So the theorem is about the ZERO-MASKED matrices, and
+the mask is load-bearing rather than tidy: measured, the unmasked sum identity fails at EVERY label
+(7/7 and 15/15 at `m = 2,3`) while the masked one holds at every label.
+
+    tri3_high_orthant:  tri3 (zmsk (lift to the high block at level m+1)) = tri3 (zmsk (level m))
+
+The asymmetry with Tier 68 is the content. The low orthant needs no mask and no hypothesis because
+`P3_level_stable` is an equality of ENTRIES; the high orthant is an equality of TRIPLE PRODUCTS
+only, so it needs the mask and the switching lemma. Two of the eight orthants of the level transfer
+are now theorems.
+
+Both M1 providers passed all three questions, including the one I expected to lose: masking only the
+index-`0` lines, where §57.8's `P3̃` also kills the diagonal, does not weaken the claim — diagonal
+terms put a squared factor in the cyclic product and are immaterial to this identity.
