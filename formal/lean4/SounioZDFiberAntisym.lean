@@ -13135,6 +13135,117 @@ theorem P3_level_stable (m l y W : Nat) (hl : l < 2^(m+1)) (hy : y < 2^(m+1)) (h
   · rw [if_pos h, if_pos h]
   · rw [if_neg h, if_neg h, R_ll (l ^^^ W) y m hlW hy]
 
+
+/-! ### Tier 67 — the three OFF-BLOCKS of the level transfer
+
+    Tier 66 proved the `(0,0)` block: on the low indices the level-`(m+1)` matrix at a label
+    `W < 2^(m+1)` IS the level-`m` matrix.  The other three blocks are the same computation with one
+    or both indices lifted over the seam, and each ends at the SAME place: after `R_lu`/`R_ul` peel
+    the two `hi` arguments, what is left is a `cdSigma` pair in the wrong ORDER, and `antisym` puts
+    it right.  So the exceptional loci are not a separate phenomenon — **they are exactly where
+    `antisym`'s hypotheses fail**:
+
+    | block | after the reductions | `antisym` applied to | fails when |
+    |---|---|---|---|
+    | `(0,1)` | `σ(y⊕W, l)·σ(y, l⊕W)` | `σ(y, l⊕W)` | `l = W` or `l ⊕ y = W` |
+    | `(1,0)` | `σ(l, y⊕W)·σ(l⊕W, y)` | `σ(l, y⊕W)` | `y = W` or `l ⊕ y = W` |
+    | `(1,1)` | `−σ(l, y⊕W)·σ(y, l⊕W)` | both | `l = W` or `y = W` (see below) |
+
+    which is precisely the measured table of §57.14: the isolated vertex and the coset line, and
+    nothing else.
+
+    ⚠ SCOPE on `(1,1)`.  Its proof needs `l ⊕ y ≠ W` as well, because it applies `antisym` twice and
+    the coset line breaks BOTH applications.  On that line the identity still holds — both sides
+    collapse to `−σ(l,l)·σ(y,y)` — but that case is not proved here, so the hypothesis stays.  The
+    measured statement "`(1,1)` flips exactly on `l = W` or `y = W`" is therefore WIDER than the
+    theorem below. -/
+
+/-- Lifting the SECOND index over the seam. -/
+theorem P3_block01 (m l y W : Nat) (hl : l < 2^(m+1)) (hy : y < 2^(m+1)) (hW : W < 2^(m+1))
+    (hl0 : l ≠ 0) (hy0 : y ≠ 0) (hlW : l ^^^ W ≠ 0) (hcos : (l ^^^ y) ^^^ W ≠ 0) :
+    P3 l (y + 2^(m+1)) W (m+1) = P3 l y W m := by
+  have hp := Nat.two_pow_pos (m+1)
+  have h2 : (2:Nat)^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  have hlW' : l ^^^ W < 2^(m+1) := xorlt hl hW
+  have hyW' : y ^^^ W < 2^(m+1) := xorlt hy hW
+  have hyH : (y + 2^(m+1)) ^^^ W = (y ^^^ W) + 2^(m+1) := by
+    have h := xor_lo_hi (m+1) W y (by omega) hW hy
+    rw [Nat.xor_comm (y + 2^(m+1)) W, h, Nat.xor_comm W y]
+  have hne : y ≠ l ^^^ W := by
+    intro h
+    apply hcos
+    rw [h, ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor, Nat.xor_self]
+  have hyHne : y + 2^(m+1) ≠ 0 := by omega
+  rw [P3_red l y W m hl hy hW hy0]
+  unfold P3 hi
+  rw [hyH,
+      R_lu l ((y ^^^ W) + 2^(m+1)) (m+1) (by omega) (by omega),
+      R_ul (y ^^^ W) l m hyW' hl, if_neg hl0,
+      R_ul (l ^^^ W) (y + 2^(m+1)) (m+1) (by omega) (by omega), if_neg hyHne,
+      R_lu (l ^^^ W) y m hlW' hy,
+      antisym (m+1) y (l ^^^ W) hy hlW' hy0 hlW hne]
+  grind
+
+/-- Lifting the FIRST index over the seam. -/
+theorem P3_block10 (m l y W : Nat) (hl : l < 2^(m+1)) (hy : y < 2^(m+1)) (hW : W < 2^(m+1))
+    (hl0 : l ≠ 0) (hy0 : y ≠ 0) (hyW : y ^^^ W ≠ 0) (hcos : (l ^^^ y) ^^^ W ≠ 0) :
+    P3 (l + 2^(m+1)) y W (m+1) = P3 l y W m := by
+  have hp := Nat.two_pow_pos (m+1)
+  have h2 : (2:Nat)^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  have hlW' : l ^^^ W < 2^(m+1) := xorlt hl hW
+  have hyW' : y ^^^ W < 2^(m+1) := xorlt hy hW
+  have hlH : (l + 2^(m+1)) ^^^ W = (l ^^^ W) + 2^(m+1) := by
+    have h := xor_lo_hi (m+1) W l (by omega) hW hl
+    rw [Nat.xor_comm (l + 2^(m+1)) W, h, Nat.xor_comm W l]
+  have hne : l ≠ y ^^^ W := by
+    intro h
+    apply hcos
+    rw [h, Nat.xor_comm (y ^^^ W) y, ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor, Nat.xor_self]
+  rw [P3_red l y W m hl hy hW hy0]
+  unfold P3 hi
+  rw [hlH,
+      R_lu (l + 2^(m+1)) (y ^^^ W) (m+1) (by omega) (by omega),
+      R_lu (y ^^^ W) l m hyW' hl,
+      R_ul ((l ^^^ W) + 2^(m+1)) y (m+1) (by omega) (by omega), if_neg hy0,
+      R_ul (l ^^^ W) y m hlW' hy, if_neg hy0,
+      antisym (m+1) l (y ^^^ W) hl hyW' hl0 hyW hne]
+  grind
+
+/-- Lifting BOTH indices over the seam. -/
+theorem P3_block11 (m l y W : Nat) (hl : l < 2^(m+1)) (hy : y < 2^(m+1)) (hW : W < 2^(m+1))
+    (hl0 : l ≠ 0) (hy0 : y ≠ 0) (hlW : l ^^^ W ≠ 0) (hyW : y ^^^ W ≠ 0)
+    (hcos : (l ^^^ y) ^^^ W ≠ 0) :
+    P3 (l + 2^(m+1)) (y + 2^(m+1)) W (m+1) = P3 l y W m := by
+  have hp := Nat.two_pow_pos (m+1)
+  have h2 : (2:Nat)^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  have hlW' : l ^^^ W < 2^(m+1) := xorlt hl hW
+  have hyW' : y ^^^ W < 2^(m+1) := xorlt hy hW
+  have hlH : (l + 2^(m+1)) ^^^ W = (l ^^^ W) + 2^(m+1) := by
+    have h := xor_lo_hi (m+1) W l (by omega) hW hl
+    rw [Nat.xor_comm (l + 2^(m+1)) W, h, Nat.xor_comm W l]
+  have hyH : (y + 2^(m+1)) ^^^ W = (y ^^^ W) + 2^(m+1) := by
+    have h := xor_lo_hi (m+1) W y (by omega) hW hy
+    rw [Nat.xor_comm (y + 2^(m+1)) W, h, Nat.xor_comm W y]
+  have hne1 : l ≠ y ^^^ W := by
+    intro h
+    apply hcos
+    rw [h, Nat.xor_comm (y ^^^ W) y, ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor, Nat.xor_self]
+  have hne2 : y ≠ l ^^^ W := by
+    intro h
+    apply hcos
+    rw [h, ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor, Nat.xor_self]
+  have hyHne : y + 2^(m+1) ≠ 0 := by omega
+  rw [P3_red l y W m hl hy hW hy0]
+  unfold P3 hi
+  rw [hlH, hyH,
+      R_lu (l + 2^(m+1)) ((y ^^^ W) + 2^(m+1)) (m+1) (by omega) (by omega),
+      R_uu (y ^^^ W) l m hyW' hl, if_neg hl0,
+      R_ul ((l ^^^ W) + 2^(m+1)) (y + 2^(m+1)) (m+1) (by omega) (by omega), if_neg hyHne,
+      R_uu (l ^^^ W) y m hlW' hy, if_neg hy0,
+      antisym (m+1) l (y ^^^ W) hl hyW' hl0 hyW hne1,
+      antisym (m+1) y (l ^^^ W) hy hlW' hy0 hlW hne2]
+  grind
+
 end SounioZDFiberAntisym
 
 

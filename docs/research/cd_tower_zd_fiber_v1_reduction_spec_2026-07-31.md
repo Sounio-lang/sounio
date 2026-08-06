@@ -4461,11 +4461,39 @@ combination of exactly the `b` **suffix** characters.
 
 The three off-blocks and the three unknown orthants `O_1, O_2, O_3` are measured, not proved.
 
-**Status of (III).** Still reduced, not proven. What moved: the transfer's backbone is a theorem,
-its defect is localised to two loci the lane already understands, and the recursion's SHAPE is
-settled — `1+3+3+1`, not `8×`, with the leading term proved to be the level below. What has not been
-attempted: the three off-block identities, closed forms for `O_1, O_2, O_3`, the `q`-binomial finish
-that would produce `[j,3]₂`, and the fibre variation of `tr(Alo²P)` / `tr(AloP²)`. No difficulty is
-recorded for any of them.
+### 57.15 — Tier 67: the three off-blocks are theorems, and the exceptions ARE `antisym`'s failures
+
+The three off-blocks reduce exactly like the `(0,0)` one, and they all end at the same place: after
+the two branch reductions peel the `hi` arguments, what is left is a `cdSigma` pair **in the wrong
+order**, and `antisym` puts it right. So the exceptional loci measured in §57.14 are not a separate
+phenomenon — **they are precisely where `antisym`'s hypotheses fail**:
+
+| block | surviving pair | `antisym` applied to | breaks when |
+|---|---|---|---|
+| `(0,1)` | `σ(y⊕W, l)·σ(y, l⊕W)` | `σ(y, l⊕W)` | `l = W` or `l ⊕ y = W` |
+| `(1,0)` | `σ(l, y⊕W)·σ(l⊕W, y)` | `σ(l, y⊕W)` | `y = W` or `l ⊕ y = W` |
+| `(1,1)` | `−σ(l, y⊕W)·σ(y, l⊕W)` | **both** | `l = W` or `y = W` |
+
+which is the measured table exactly — the isolated vertex and the coset line, nothing else. Note the
+asymmetry the table explains: `(0,1)` does **not** need `y ≠ W`, because the factor `y ⊕ W` sits in
+the pair that cancels rather than the one `antisym` touches.
+
+All three are now Lean theorems (`P3_block01`, `P3_block10`, `P3_block11`), kernel-clean, with the
+hypotheses `l,y ≠ 0` plus the failure locus of the `antisym` each one uses. Measured first, with
+exactly the stated hypotheses: 0 violations in `252/2940/27900` (blocks 01 and 10) and
+`210/2730/26970` (block 11) instances at `m = 2,3,4`.
+
+⚠ **`(1,1)`'s theorem is NARROWER than the measured statement.** Its proof applies `antisym` twice
+and the coset line breaks both, so it carries `l ⊕ y ≠ W` — but the measurement says the identity
+still holds there, the two breakages cancelling (on that line both sides collapse to
+`−σ(l,l)·σ(y,y)`). That case is not proved.
+
+**Status of (III).** Still reduced, not proven. What moved: the whole block decomposition of the
+level transfer is now four theorems, its defect is localised to two loci the lane already
+understands and EXPLAINED as `antisym`'s failure locus, and the recursion's shape is settled —
+`1+3+3+1`, not `8×`, with the leading term proved to be the level below. What has not been
+attempted: the coset-line case of `(1,1)`, closed forms for `O_1, O_2, O_3` (which is where the
+exceptional loci have to be counted), the `q`-binomial finish that would produce `[j,3]₂`, and the
+fibre variation of `tr(Alo²P)` / `tr(AloP²)`. No difficulty is recorded for any of them.
 
 **(III) is still reduced, not proven.**
