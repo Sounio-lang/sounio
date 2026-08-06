@@ -4753,6 +4753,19 @@ fn module_frontend_count_loaded_bss_global_slots(programs: &! [Program; 256], lo
     count
 }
 
+// EVERY ARM REPORTS THE CENSUS, not just the verdict. Both numbers are already
+// in hand here and were being discarded, which made the message name a wall
+// without saying how far over it the program is -- and the four ways past this
+// wall differ by an order of magnitude in cost, so choosing between them
+// without the number is guessing:
+//
+//   extract main.sio's test suite   ~1165 fns, no structural change
+//   raise IR_MAX_FUNCS              ~1 MB of BSS per function
+//   box IrFunction.instrs           the largest change in the backend
+//
+// "over by 12" and "over by 4000" call for different answers. Measured
+// 2026-08-06: gen2 on main.sio reported the combined arm with no counts, and
+// deciding what to do next required instrumenting this line first.
 fn module_frontend_ir_slot_capacity_error_from_counts(total_slots: i64, bss_slots: i64, slot_limit: i64) -> string with Mut, Panic, Div, Alloc {
     if bss_slots > BSS_MAX_GLOBALS {
         return "too many globals: shared IR module capacity exceeded (max " + io_trace_i64_string(BSS_MAX_GLOBALS) + " slots)"
@@ -4761,6 +4774,34 @@ fn module_frontend_ir_slot_capacity_error_from_counts(total_slots: i64, bss_slot
         return "too many functions: shared IR module capacity exceeded (max " + io_trace_i64_string(slot_limit) + " slots)"
     }
     "too many lowered items: combined globals and functions exceed shared IR module capacity (max " + io_trace_i64_string(slot_limit) + " slots)"
+}
+
+// The census, on its OWN line. Two constraints rule out appending it to the
+// message above.
+//
+// The message text is matched by nine consumers -- four gates
+// (madaros_fixed_point, madaros_global_capacity, madaros_ir_capacity_probe,
+// madaros_imported_capacity), two tests that assert on it
+// (door1_too_many_globals_1025.sio, ir_capacity/ir_capacity_main.sio), and
+// lean_single.sio itself. Rewording it to make room would break all of them to
+// carry a number that fits perfectly well elsewhere.
+//
+// And Madaros truncates a printed string at 128 bytes with no diagnostic. The
+// combined-arm message is already ~104 characters before any count is
+// appended, so the natural phrasing would have silently dropped exactly the
+// census it exists to carry.
+fn module_frontend_print_slot_census(total_slots: i64, bss_slots: i64, slot_limit: i64) with IO, Mut, Panic, Div, Alloc {
+    print("IR slot census: globals ")
+    print_int(bss_slots)
+    print(" + functions ")
+    print_int(total_slots - bss_slots)
+    print(" = ")
+    print_int(total_slots)
+    print(" (max ")
+    print_int(slot_limit)
+    print(", over by ")
+    print_int(total_slots - slot_limit)
+    print(")\n")
 }
 
 fn module_frontend_ir_slot_capacity_exceeded(items: &Option<Box<ItemList>>) -> bool with Alloc {
@@ -4793,11 +4834,13 @@ fn module_frontend_loaded_ir_slot_capacity_exceeded(programs: &! [Program; 256],
 }
 
 fn module_frontend_loaded_ir_slot_capacity_error(programs: &! [Program; 256], loaded: i64) -> string with Mut, Panic, Div, Alloc, IO {
-    module_frontend_ir_slot_capacity_error_from_counts(
-        module_frontend_count_loaded_ir_slots(programs, loaded),
-        module_frontend_count_loaded_bss_global_slots(programs, loaded),
-        module_frontend_loaded_ir_slot_limit(loaded)
-    )
+    let total_slots = module_frontend_count_loaded_ir_slots(programs, loaded)
+    let bss_slots = module_frontend_count_loaded_bss_global_slots(programs, loaded)
+    let slot_limit = module_frontend_loaded_ir_slot_limit(loaded)
+    // This is the multi-module path -- the one self-hosted/compiler/main.sio
+    // takes -- so it is the one whose census anybody actually needs.
+    module_frontend_print_slot_census(total_slots, bss_slots, slot_limit)
+    module_frontend_ir_slot_capacity_error_from_counts(total_slots, bss_slots, slot_limit)
 }
 
 fn module_frontend_lower_program_counts_traced(
