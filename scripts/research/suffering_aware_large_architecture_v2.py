@@ -773,6 +773,9 @@ class SufferingAwareResNet(nn.Module):
         # SAN-v7: learned gate supervision (correctness-distillation BCE).
         self.gate_train = os.environ.get("SAN_LARGE_GATE_TRAIN", "1") == "1"
         self.gate_loss_w = float(os.environ.get("SAN_LARGE_GATE_LOSS_W", "0.3"))
+        # SAN-v8: cost-aware gate — pos_weight ∝ remaining depth, so early
+        # exits are favoured at equal correctness ("correct AND cheap").
+        self.gate_cost_aware = os.environ.get("SAN_LARGE_GATE_COST_AWARE", "0") == "1"
 
     def _head_logits(self, k, h):
         return self.exit_heads[k](h.mean(dim=(2, 3)))
@@ -1198,8 +1201,22 @@ def train_run(model, x_tr, y_tr, x_va, y_va, epochs, tau, tag, is_lm=False):
                             if len(a_idx) != len(g_idx) or not bool((a_idx == g_idx).all()):
                                 continue
                             correct = (a_logits.argmax(dim=1) == yb[a_idx]).float()
-                            gate_losses.append(
-                                F.binary_cross_entropy_with_logits(g_logit, correct))
+                            # SAN-v8: cost-aware gate. pos_weight proportional
+                            # to the remaining depth makes "correct AND cheap"
+                            # worth more gradient than "correct AND expensive":
+                            # the stage-0 gate learns to fire at lower
+                            # confidence than the stage-3 gate. With the default
+                            # uniform weight the v7 behaviour is recovered.
+                            if getattr(model, "gate_cost_aware", False):
+                                pw = torch.full_like(
+                                    g_logit, float(model.n_stages - k),
+                                    dtype=g_logit.dtype)
+                                gate_losses.append(
+                                    F.binary_cross_entropy_with_logits(
+                                        g_logit, correct, pos_weight=pw))
+                            else:
+                                gate_losses.append(
+                                    F.binary_cross_entropy_with_logits(g_logit, correct))
                         if gate_losses:
                             losses.append(model.gate_loss_w
                                           * torch.stack(gate_losses).mean())
