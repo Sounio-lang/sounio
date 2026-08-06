@@ -5341,3 +5341,25 @@ are now theorems.
 Both M1 providers passed all three questions, including the one I expected to lose: masking only the
 index-`0` lines, where §57.8's `P3̃` also kills the diagonal, does not weaken the claim — diagonal
 terms put a squared factor in the cyclic product and are immaterial to this identity.
+
+### §57.44 — Tier 90: the six remaining orthants, and the level transfer of tri3 in full
+
+The six are two. `orth_cyc` makes the three weight-1 orthants equal and the three weight-2 ones
+equal, and `tri3_split_1331` already carries the 1/3/3/1 multiplicities; what was missing were the
+weight-2 expansion and the weight-3 expansion as an identity of raw sums. Both are now theorems, and
+with Tier 68's weight-0 leg they compose into
+
+    tri3_level_transfer:  tri3 at level m+1 over [0, 2^(m+2))
+      = tri3 at level m  +  3·[E01,E10 sum]  +  3·[E01,E11,E10 sum]  +  [E11,E11,E11 sum],
+
+every term a level-`m` triple sum with explicit ±1 weights. Denotation: 0 labels fail at `m = 2,3`.
+
+**This is a complete reduction and evaluates nothing.** The four ε-weighted sums have no values yet
+— §57.17's `S₀ − 2S_u − 2S_v + 4S_uv` split lives in the weight-1 one, and the other two now admit
+the same treatment. Nothing here computes `tri3(P3̃)` or bears on the deviation law. Both providers
+were asked directly whether "complete reduction" is already too strong; both said it is accurate.
+
+One asymmetry, and it is why Tier 89 and this tier coexist without contradiction: the weight-3
+expansion needs NO mask because `P3_block11_total` is an identity of ENTRIES, index `0` included.
+What fails at index `0` is only the further step of cancelling the three `E11` weights against each
+other — that is Tier 89's identity, and it is the one that needs `E11` to be a switching.

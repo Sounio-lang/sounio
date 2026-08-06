@@ -14829,4 +14829,84 @@ theorem tri3_high_orthant (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
       rw [Nat.add_comm (2^(m+1)) x, Nat.add_comm (2^(m+1)) y,
           P3_block11_total m x y W hx hy hW hW0, E11_factor x y W hy0]
 
+/-! ### Tier 90 — the remaining orthants, and the LEVEL TRANSFER of `tri3` in full
+
+    `tri3_split_1331` already collapses the eight orthants to four objects — `orth_cyc` makes the
+    three weight-1 orthants equal and the three weight-2 ones equal, so "the six remaining orthants"
+    are two.  Tier 68 expanded the weight-0 one, Tier 75 the weight-1 one, and Tier 89 proved the
+    weight-3 one equal to the level below IN ITS MASKED FORM.  Missing were the weight-2 expansion
+    and the weight-3 expansion as an identity of the raw (unmasked) sums.
+
+    Both are now here, and with them the whole level transfer:
+
+      `tri3_level_transfer`:  `tri3` at level `m+1` over `[0,2^(m+2))` equals
+      `tri3` at level `m`  +  `3·[weight-1 expansion]`  +  `3·[weight-2 expansion]`
+      +  `[weight-3 expansion]`, every term a level-`m` triple sum carrying explicit `±1` weights.
+
+    ⚠ This is a REDUCTION, not an evaluation.  The four ε-weighted sums are still unevaluated — the
+    weight-1 one is where §57.17's `S₀ − 2S_u − 2S_v + 4S_uv` split lives, and the other two now
+    admit the same treatment.  Nothing here computes `tri3(P3̃)`, and nothing here bears on the
+    deviation law until those sums have values.
+
+    One asymmetry worth recording, because it is the reason Tier 89 needed a mask and this tier does
+    not: the weight-3 expansion below is an identity of ENTRIES (`P3_block11_total` holds at every
+    index, index `0` included), so it needs no mask; what fails at index `0` is only the further
+    step of CANCELLING the three `E11` weights against each other, which is what Tier 89 does and
+    what needs `E11` to be a switching. -/
+
+/-- **THE WEIGHT-2 ORTHANT, EXPANDED.**  Two indices high: blocks `(0,1)`, `(1,1)`, `(1,0)`. -/
+theorem orth_weight2_expand (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    orth (2^(m+1)) (fun x y => P3 x y W (m+1)) 0 (2^(m+1)) (2^(m+1))
+      = sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+          E01 a b W * P3 a b W m
+            * (E11 b c W * P3 b c W m * (E10 c a W * P3 c a W m))))) := by
+  unfold orth
+  refine sumLtI_congr _ _ _ (fun a ha => sumLtI_congr _ _ _ (fun b hb =>
+    sumLtI_congr _ _ _ (fun c hc => ?_)))
+  simp only [Nat.zero_add]
+  rw [Nat.add_comm (2^(m+1)) b, Nat.add_comm (2^(m+1)) c,
+      P3_block01_total m a b W ha hb hW hW0,
+      P3_block11_total m b c W hb hc hW hW0,
+      P3_block10_total m c a W hc ha hW hW0]
+
+/-- **THE WEIGHT-3 ORTHANT, EXPANDED.**  All three indices high: block `(1,1)` three times.  Unlike
+    Tier 89 this needs no mask, being an identity of entries. -/
+theorem orth_weight3_expand (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    orth (2^(m+1)) (fun x y => P3 x y W (m+1)) (2^(m+1)) (2^(m+1)) (2^(m+1))
+      = sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+          E11 a b W * P3 a b W m
+            * (E11 b c W * P3 b c W m * (E11 c a W * P3 c a W m))))) := by
+  unfold orth
+  refine sumLtI_congr _ _ _ (fun a ha => sumLtI_congr _ _ _ (fun b hb =>
+    sumLtI_congr _ _ _ (fun c hc => ?_)))
+  simp only []
+  rw [Nat.add_comm (2^(m+1)) a, Nat.add_comm (2^(m+1)) b, Nat.add_comm (2^(m+1)) c,
+      P3_block11_total m a b W ha hb hW hW0,
+      P3_block11_total m b c W hb hc hW hW0,
+      P3_block11_total m c a W hc ha hW hW0]
+
+/-- **THE LEVEL TRANSFER OF `tri3`, IN FULL.**  Every one of the eight orthants of the level-`(m+1)`
+    triangle sum written as a level-`m` triple sum with explicit `±1` weights. -/
+theorem tri3_level_transfer (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    tri3 (2^(m+1) + 2^(m+1)) (fun x y => P3 x y W (m+1))
+      = tri3 (2^(m+1)) (fun x y => P3 x y W m)
+        + 3 * sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+            P3 a b W m * (E01 b c W * P3 b c W m * (E10 c a W * P3 c a W m)))))
+        + 3 * sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+            E01 a b W * P3 a b W m
+              * (E11 b c W * P3 b c W m * (E10 c a W * P3 c a W m)))))
+        + sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+            E11 a b W * P3 a b W m
+              * (E11 b c W * P3 b c W m * (E11 c a W * P3 c a W m))))) := by
+  rw [tri3_split_1331 (2^(m+1)) (fun x y => P3 x y W (m+1)),
+      orth_weight1_expand m W hW hW0, orth_weight2_expand m W hW hW0,
+      orth_weight3_expand m W hW hW0]
+  have h0 : orth (2^(m+1)) (fun x y => P3 x y W (m+1)) 0 0 0
+      = tri3 (2^(m+1)) (fun x y => P3 x y W m) := by
+    unfold orth
+    rw [← tri3_low_orthant m W hW]
+    unfold tri3
+    simp only [Nat.zero_add]
+  rw [h0]
+
 end SounioZDFiberAntisym
