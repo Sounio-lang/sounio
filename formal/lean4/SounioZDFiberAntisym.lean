@@ -13593,6 +13593,85 @@ theorem P3_block01_row0_eps (m y W : Nat) (hy : y < 2^(m+1)) (hW : W < 2^(m+1)) 
     · rw [if_neg h, P3_block01_row0 m y W hy hW hy0 hW0 h]
       grind
 
+
+/-! ### Tier 73 — the `ε` of block `(1,0)`
+
+    The mirror of Tier 70.  Block `(1,0)` reduces to the pair `σ(l, y⊕W)·σ(l⊕W, y)`, and the single
+    `antisym` it needs is the one on `σ(l, y⊕W)` — so its exceptional loci are `y = W` (the second
+    argument collapses to `0`) and `l ⊕ y = W` (the two arguments coincide), exactly as measured in
+    §57.14, and NOT `l = W`, which is block `(0,1)`'s locus.
+
+    Packaged: `eps10 l y W = −1` iff `y = W` or `l ⊕ y = W`. The two loci are disjoint for `l ≠ 0`
+    (together they force `l = 0`).
+
+    ⚠ SCOPE.  `l, y ≠ 0` only — the two BORDER rows are not proved here.  Measured, `m = 2,3,4`,
+    every label: the `l = 0` row FLIPS for every `y ≠ 0` with no exception, and does NOT flip at
+    `y = 0`; the `y = 0` row flips except at `l = W` and at `l = 0`.  With those, block `(1,0)` would
+    close as block `(0,1)` did in Tier 72. -/
+
+/-- The isolated case of block `(1,0)`: at `y = W` the identity FLIPS. -/
+theorem P3_block10_iso (m l W : Nat) (hl : l < 2^(m+1)) (hW : W < 2^(m+1))
+    (hl0 : l ≠ 0) (hW0 : W ≠ 0) :
+    P3 (l + 2^(m+1)) W W (m+1) = - P3 l W W m := by
+  have hp := Nat.two_pow_pos (m+1)
+  have h2 : (2:Nat)^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  have hlW' : l ^^^ W < 2^(m+1) := xorlt hl hW
+  have hlH : (l + 2^(m+1)) ^^^ W = (l ^^^ W) + 2^(m+1) := by
+    have h := xor_lo_hi (m+1) W l (by omega) hW hl
+    rw [Nat.xor_comm (l + 2^(m+1)) W, h, Nat.xor_comm W l]
+  rw [P3_red l W W m hl hW hW hW0, Nat.xor_self W, cdSig0]
+  unfold P3 hi
+  rw [hlH, Nat.xor_self W,
+      R_lu (l + 2^(m+1)) 0 (m+1) (by omega) (Nat.two_pow_pos (m+2)), cdSig0,
+      R_ul ((l ^^^ W) + 2^(m+1)) W (m+1) (by omega) (by omega), if_neg hW0,
+      R_ul (l ^^^ W) W m hlW' hW, if_neg hW0]
+  grind
+
+/-- The coset case of block `(1,0)`: on `l ⊕ y = W` the identity FLIPS. -/
+theorem P3_block10_cos (m l W : Nat) (hl : l < 2^(m+1)) (hW : W < 2^(m+1))
+    (hl0 : l ≠ 0) (hlW : l ^^^ W ≠ 0) :
+    P3 (l + 2^(m+1)) (l ^^^ W) W (m+1) = - P3 l (l ^^^ W) W m := by
+  have hp := Nat.two_pow_pos (m+1)
+  have h2 : (2:Nat)^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  have hlW' : l ^^^ W < 2^(m+1) := xorlt hl hW
+  have hback : (l ^^^ W) ^^^ W = l := xor_cancel l W
+  have hlH : (l + 2^(m+1)) ^^^ W = (l ^^^ W) + 2^(m+1) := by
+    have h := xor_lo_hi (m+1) W l (by omega) hW hl
+    rw [Nat.xor_comm (l + 2^(m+1)) W, h, Nat.xor_comm W l]
+  rw [P3_red l (l ^^^ W) W m hl hlW' hW hlW, hback,
+      sigma_self (m+1) l hl hl0, sigma_self (m+1) (l ^^^ W) hlW' hlW]
+  unfold P3 hi
+  rw [hlH, hback,
+      R_lu (l + 2^(m+1)) l (m+1) (by omega) (by omega),
+      R_lu l l m hl hl, sigma_self (m+1) l hl hl0,
+      R_ul ((l ^^^ W) + 2^(m+1)) (l ^^^ W) (m+1) (by omega) (by omega), if_neg hlW,
+      R_ul (l ^^^ W) (l ^^^ W) m hlW' hlW', if_neg hlW,
+      sigma_self (m+1) (l ^^^ W) hlW' hlW]
+  grind
+
+/-- The sign of block `(1,0)`: `−1` exactly on `y = W` and on the coset line. -/
+def eps10 (l y W : Nat) : Int := if y ^^^ W = 0 ∨ (l ^^^ y) ^^^ W = 0 then -1 else 1
+
+/-- **BLOCK `(1,0)` WITH ITS SIGN**, at every pair of nonzero indices. -/
+theorem P3_block10_eps (m l y W : Nat) (hl : l < 2^(m+1)) (hy : y < 2^(m+1)) (hW : W < 2^(m+1))
+    (hl0 : l ≠ 0) (hy0 : y ≠ 0) :
+    P3 (l + 2^(m+1)) y W (m+1) = eps10 l y W * P3 l y W m := by
+  unfold eps10
+  by_cases hyW : y ^^^ W = 0
+  · have hyq : y = W := xor_zero_eq y W hyW
+    have hW0 : W ≠ 0 := by rw [← hyq]; exact hy0
+    rw [if_pos (Or.inl hyW), hyq, P3_block10_iso m l W hl hW hl0 hW0]
+    grind
+  · by_cases hcos : (l ^^^ y) ^^^ W = 0
+    · have hyq : y = l ^^^ W := by
+        have := xor_zero_eq (l ^^^ y) W hcos
+        rw [← this, ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor]
+      have hlW : l ^^^ W ≠ 0 := by rw [← hyq]; exact hy0
+      rw [if_pos (Or.inr hcos), hyq, P3_block10_cos m l W hl hW hl0 hlW]
+      grind
+    · rw [if_neg (fun h => h.elim hyW hcos), P3_block10 m l y W hl hy hW hl0 hy0 hyW hcos]
+      grind
+
 end SounioZDFiberAntisym
 
 

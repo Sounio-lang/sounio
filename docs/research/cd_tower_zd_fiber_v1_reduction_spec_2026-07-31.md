@@ -4745,6 +4745,32 @@ So with Tiers 67/70/71/72, **block `(0,1)` is proved at every pair `(l,y)` for `
 `(1,0)` is still missing entirely as an `ε`-form, border rows included; the weight-1 orthant needs
 `(0,0)` (done), `(0,1)` (done) and `(1,0)` (open).
 
+### 57.24 — Tier 73: the `ε` of block `(1,0)`
+
+The mirror of Tier 70. Block `(1,0)` reduces to the pair `σ(l, y⊕W)·σ(l⊕W, y)`, and the single
+`antisym` it needs sits on the **first** factor — so its exceptional loci are `y = W` (the second
+argument collapses to `0`, and `σ(l,0) = 1` replaces the `antisym`) and `l ⊕ y = W` (the two
+arguments coincide, both factors becoming `σ(x,x) = −1`). **Not** `l = W`, which is block `(0,1)`'s
+locus: the asymmetry between the two blocks is purely that `P3`'s two arguments are ordered.
+
+| | |
+|---|---|
+| `P3_block10_iso` | at `y = W`: flip |
+| `P3_block10_cos` | at `l ⊕ y = W`: flip |
+| `eps10 l y W` | `−1` iff `y = W` or `l ⊕ y = W` |
+| `P3_block10_eps` | the packaged form, at every pair of **nonzero** indices |
+
+The two loci are disjoint for `l ≠ 0` (together they force `l = 0`), so the `if … ∨ …` cannot hide a
+double sign — both providers checked that, and both also checked that the two hypotheses the `eps`
+proof derives inside its branches (`W ≠ 0` from `y = W`, `l ⊕ W ≠ 0` from `y = l ⊕ W`) come only
+from `y ≠ 0` and the branch equality, with nothing smuggled. Measured first: `0/49, 0/225, 0/961`
+iso, `0/42, 0/210, 0/930` cos, `0/343, 0/3375, 0/29791` for the packaged form.
+
+**⚠ SCOPE: nonzero indices only.** The two border rows are not proved. Measured, every label at
+`m = 2,3,4`: block `(1,0)`'s `l = 0` row FLIPS for every `y ≠ 0` **with no exception**, and its
+`y = 0` row flips except at `l = W` and at `l = 0`. With those, block `(1,0)` would close as block
+`(0,1)` did in Tier 72 — and the weight-1 orthant would have all three of its blocks.
+
 **Status of (III).** Still reduced, not proven — but the reduction is now a single explicit
 first-order recursion in `m` whose only non-constant input is a coset-line sum with a closed form.
 What has not been attempted: proving the recursion (the constants and `Σ_coset` from the same
