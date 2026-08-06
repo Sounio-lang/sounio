@@ -14056,6 +14056,73 @@ theorem chi01_col (m c W : Nat) (hc : c < 2^(m+1)) (hW : W < 2^(m+1)) (hW0 : W �
         exact e.symm
       exact cnt3 _ 0 W (c ^^^ W) hp hW hcW d1 d2 d3
 
+
+/-- **THE `χ10` COLUMN COUNT.**  The mirror of `chi01_col`, except at `c = 0`, where the indicator
+    is `1` off a single excluded point rather than `1` at one — so that case is `sumLtI_const_excl`
+    where the other block's was `cnt1`.  That single difference is the whole of the `N` against `1`
+    in the two counts, and it traces back to `P3`'s arguments being ordered. -/
+theorem chi10_col (m c W : Nat) (hc : c < 2^(m+1)) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun a => chi10 c a W)
+      = if c = 0 then ((2^(m+1) : Nat) : Int) - 1 else (if c ^^^ W = 0 then 1 else 3) := by
+  have hp := Nat.two_pow_pos (m+1)
+  have hcW : c ^^^ W < 2^(m+1) := xorlt hc hW
+  by_cases h0 : c = 0
+  · subst h0
+    rw [if_pos rfl,
+        sumLtI_congr _ _ (fun a => if a = 0 then (0:Int) else 1) (fun a _ => by
+          unfold chi10
+          by_cases ha : a = 0 <;> simp [ha]),
+        sumLtI_const_excl (2^(m+1)) 1 (fun i => i = 0) 1 (cnt1 _ 0 hp)]
+    omega
+  · by_cases hw : c ^^^ W = 0
+    · have hcq : c = W := xor_zero_eq c W hw
+      rw [if_neg h0, if_pos hw,
+          sumLtI_congr _ _ (fun a => if a = W then (1:Int) else 0) (fun a _ => by
+            unfold chi10
+            by_cases ha : a = 0
+            · have hzW : (0:Nat) ≠ W := fun h => hW0 h.symm
+              simp [ha, h0, hw, hzW]
+            · simp only [if_neg h0, if_neg ha]
+              by_cases h1 : a ^^^ W = 0
+              · have haq : a = W := xor_zero_eq a W h1
+                rw [if_pos (Or.inl h1), if_pos haq]
+              · have h2 : (c ^^^ a) ^^^ W ≠ 0 := by
+                  rw [hcq, Nat.xor_comm W a, xor_cancel]; exact ha
+                have n1 : a ≠ W := fun h => h1 (by rw [h, Nat.xor_self])
+                rw [if_neg (fun h => h.elim h1 h2), if_neg n1])]
+      exact cnt1 _ W hW
+    · rw [if_neg h0, if_neg hw,
+          sumLtI_congr _ _ (fun a => if a = 0 ∨ a = W ∨ a = c ^^^ W then (1:Int) else 0)
+            (fun a _ => by
+              unfold chi10
+              by_cases ha : a = 0
+              · simp [ha, h0, hw]
+              · simp only [if_neg h0, if_neg ha]
+                by_cases h1 : a ^^^ W = 0
+                · have haq : a = W := xor_zero_eq a W h1
+                  rw [if_pos (Or.inl h1), if_pos (Or.inr (Or.inl haq))]
+                · by_cases h2 : (c ^^^ a) ^^^ W = 0
+                  · have hca : c ^^^ a = W := xor_zero_eq _ _ h2
+                    have haq : a = c ^^^ W := by
+                      rw [← hca, ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor]
+                    rw [if_pos (Or.inr h2), if_pos (Or.inr (Or.inr haq))]
+                  · have n1 : a ≠ W := fun h => h1 (by rw [h, Nat.xor_self])
+                    have n2 : a ≠ c ^^^ W := by
+                      intro h
+                      apply h2
+                      rw [h, ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor, Nat.xor_self]
+                    rw [if_neg (fun h => h.elim h1 h2),
+                        if_neg (fun h => h.elim ha (fun h' => h'.elim n1 n2))])]
+      have d1 : (0:Nat) ≠ W := fun h => hW0 h.symm
+      have d2 : (0:Nat) ≠ c ^^^ W := fun h => hw h.symm
+      have d3 : W ≠ c ^^^ W := by
+        intro h
+        apply h0
+        have e : W ^^^ W = (c ^^^ W) ^^^ W := by rw [← h]
+        rw [Nat.xor_self, xor_cancel] at e
+        exact e.symm
+      exact cnt3 _ 0 W (c ^^^ W) hp hW hcW d1 d2 d3
+
 end SounioZDFiberAntisym
 
 

@@ -4968,9 +4968,25 @@ you have not attempted. I recorded one, the reviewers echoed my framing back —
 evidence when the question is the thing that is wrong — and it dissolved on contact with the actual
 loci.
 
-**Still open:** the `χ10` column count (`N` at `c = 0`, `1` at `c = W`, `3` elsewhere). Its `c = 0`
-case needs `sumLtI_const_excl` rather than `cnt1`, the other two mirror `chi01_col`. Not attempted
-here, and after the above I am recording no estimate of what it costs.
+### 57.31 — Tier 79: the `χ10` count too, and both inner counts are now theorems
+
+    chi10_col : Σ_{a < 2^(m+1)} χ10 c a W
+      = if c = 0 then 2^(m+1) − 1 else (if c ⊕ W = 0 then 1 else 3)
+
+Kernel-clean, green first try, 0 violations over every `(c,W)` at `m = 2,3,4` (56, 240, 992 pairs).
+Three cases, mirroring `chi01_col` except at `c = 0`: there the summand **is** `if a = 0 then 0
+else 1`, so it is `sumLtI_const_excl` (constant off one excluded point) where the other block's was
+`cnt1` (an indicator at one point).
+
+**That single difference is the whole of the `N` against `1`**, and grok confirmed the reading: it is
+the ordered-arguments asymmetry of `P3` in its last visible form — `χ01`'s `l = 0` branch and
+`χ10`'s are genuinely different clauses, not an artefact of how I wrote the two if-chains.
+
+**Both inner counts are now theorems**, so with `chi_joint_factor` (Tier 77) §57.28's joint locus
+count is one arithmetic step: `c` runs over `N + 1` values, two of them special, giving
+`1·N + 1·1 + 9·(N−1) = 10N − 8`. That last step is not itself formalised — it needs the two column
+lemmas fed through a sum over `c`, splitting off the two special columns — but nothing in it is of a
+new kind, and I record no estimate.
 
 **Status of (III).** Still reduced, not proven — but the reduction is now a single explicit
 first-order recursion in `m` whose only non-constant input is a coset-line sum with a closed form.
