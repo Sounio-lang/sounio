@@ -13770,6 +13770,90 @@ theorem P3_block10_corner (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
       R_ul W 0 m hW hp, if_pos rfl]
   simp only [cdSig0']
 
+
+/-! ### Tier 75 — the TOTAL signs, and the weight-1 orthant assembled through `sumLtI_congr`
+
+    Tiers 66–74 give block `(0,1)` and block `(1,0)` at every index, but split across five lemmas
+    each with its own hypotheses.  `sumLtI_congr` wants ONE identity per factor, true everywhere.
+    Here are the two, and then the assembly.
+
+    `E01` and `E10` are the tiers' signs glued along their borders.  They are NOT the same function
+    with the arguments swapped — block `(0,1)`'s interior locus is `l = W` and block `(1,0)`'s is
+    `y = W`, and their borders differ too (the `l = 0` row of `(1,0)` has no exceptional locus at
+    all, Tier 74) — which is the ordered-arguments asymmetry of `P3`, now visible in the two sign
+    functions side by side. -/
+
+/-- Block `(0,1)`'s sign at EVERY index: interior, `y = 0` row, `l = 0` row. -/
+def E01 (l y W : Nat) : Int :=
+  if l = 0 then (if y ^^^ W = 0 then 1 else -1)
+  else if y = 0 then 1
+  else eps01 l y W
+
+/-- Block `(1,0)`'s sign at EVERY index. -/
+def E10 (l y W : Nat) : Int :=
+  if l = 0 then (if y = 0 then 1 else -1)
+  else if y = 0 then (if l ^^^ W = 0 then 1 else -1)
+  else eps10 l y W
+
+/-- **BLOCK `(0,1)`, TOTAL.** -/
+theorem P3_block01_total (m l y W : Nat) (hl : l < 2^(m+1)) (hy : y < 2^(m+1))
+    (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    P3 l (y + 2^(m+1)) W (m+1) = E01 l y W * P3 l y W m := by
+  unfold E01
+  by_cases hl0 : l = 0
+  · subst hl0
+    rw [if_pos rfl]
+    exact P3_block01_row0_eps m y W hy hW hW0
+  · rw [if_neg hl0]
+    by_cases hy0 : y = 0
+    · subst hy0
+      rw [if_pos rfl, P3_block01_zero m l W hl hW hl0]
+      grind
+    · rw [if_neg hy0]
+      exact P3_block01_eps m l y W hl hy hW hl0 hy0
+
+/-- **BLOCK `(1,0)`, TOTAL.** -/
+theorem P3_block10_total (m l y W : Nat) (hl : l < 2^(m+1)) (hy : y < 2^(m+1))
+    (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    P3 (l + 2^(m+1)) y W (m+1) = E10 l y W * P3 l y W m := by
+  unfold E10
+  by_cases hl0 : l = 0
+  · subst hl0
+    rw [if_pos rfl]
+    by_cases hy0 : y = 0
+    · subst hy0
+      rw [if_pos rfl, P3_block10_corner m W hW hW0]
+      grind
+    · rw [if_neg hy0, P3_block10_row0 m y W hy hW hy0 hW0]
+      grind
+  · rw [if_neg hl0]
+    by_cases hy0 : y = 0
+    · subst hy0
+      rw [if_pos rfl]
+      by_cases hlW : l ^^^ W = 0
+      · have hlq : l = W := xor_zero_eq l W hlW
+        rw [if_pos hlW, hlq, P3_block10_col0_seam m W hW hW0]
+        grind
+      · rw [if_neg hlW, P3_block10_col0 m l W hl hW hl0 hW0 hlW]
+        grind
+    · rw [if_neg hy0]
+      exact P3_block10_eps m l y W hl hy hW hl0 hy0
+
+/-- **THE WEIGHT-1 ORTHANT, ASSEMBLED.**  Every factor rewritten to the level below, with its sign.
+    This is §57.16-57.18's `O_1` expansion, carried through `sumLtI_congr` instead of by hand. -/
+theorem orth_weight1_expand (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    orth (2^(m+1)) (fun x y => P3 x y W (m+1)) 0 0 (2^(m+1))
+      = sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+          P3 a b W m * (E01 b c W * P3 b c W m * (E10 c a W * P3 c a W m))))) := by
+  unfold orth
+  refine sumLtI_congr _ _ _ (fun a ha => sumLtI_congr _ _ _ (fun b hb =>
+    sumLtI_congr _ _ _ (fun c hc => ?_)))
+  simp only [Nat.zero_add]
+  rw [Nat.add_comm (2^(m+1)) c,
+      P3_level_stable m a b W ha hb hW,
+      P3_block01_total m b c W hb hc hW hW0,
+      P3_block10_total m c a W hc ha hW hW0]
+
 end SounioZDFiberAntisym
 
 

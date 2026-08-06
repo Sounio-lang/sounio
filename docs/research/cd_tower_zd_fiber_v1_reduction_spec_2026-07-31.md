@@ -4802,6 +4802,46 @@ blocks `(0,0)`, `(0,1)` and `(1,0)`; `(1,1)` never appears. Tier 66 gives the fi
 `sumLtI_congr` and collecting the sign patterns into a value for `O_1`. That is the step §57.16–57.18
 did on paper and measured; it is not formalised, and no difficulty is recorded for it.
 
+### 57.26 — Tier 75: the TOTAL signs, and the weight-1 orthant ASSEMBLED
+
+Tiers 66–74 give blocks `(0,1)` and `(1,0)` at every index, but split across five lemmas each with
+its own hypotheses. `sumLtI_congr` wants ONE identity per factor, true everywhere. Glue them:
+
+    E01 l y W = if l = 0 then (if y ⊕ W = 0 then 1 else −1)
+                else if y = 0 then 1 else eps01 l y W
+    E10 l y W = if l = 0 then (if y = 0 then 1 else −1)
+                else if y = 0 then (if l ⊕ W = 0 then 1 else −1) else eps10 l y W
+
+| | |
+|---|---|
+| `P3_block01_total` | `P3 l (y+2^(m+1)) W (m+1) = E01 l y W · P3 l y W m` |
+| `P3_block10_total` | `P3 (l+2^(m+1)) y W (m+1) = E10 l y W · P3 l y W m` |
+
+for `W ≠ 0`, at **every** `(l,y)`. Measured as total functions: 0 violations / `448, 3840, 31744` at
+`m = 2,3,4`, borders and corner included.
+
+**★ And then the assembly goes through:**
+
+    orth_weight1_expand :
+      orth (2^(m+1)) (P3 · · W (m+1)) 0 0 (2^(m+1))
+        = Σ_a Σ_b Σ_c  P3 a b W m · (E01 b c W · P3 b c W m · (E10 c a W · P3 c a W m))
+
+three nested `sumLtI_congr`, a `Nat.zero_add` normalisation, a `Nat.add_comm` to match the block
+lemmas' shape, and the three total identities on the three factors. Kernel-clean, green first try.
+Denotation checked independently, both sides computed separately: 0 violations at `m = 2,3`, every
+label.
+
+**`E01` and `E10` are not each other's transpose**, and grok confirmed the asymmetry is real rather
+than a gluing error: block `(0,1)`'s interior locus is `l = W` and block `(1,0)`'s is `y = W`, and
+their borders differ too — block `(1,0)`'s `l = 0` row has no exceptional locus at all (Tier 74)
+while block `(0,1)`'s does (Tier 72). It also confirmed the factor-to-block matching, including that
+the third factor `f (N+c) (0+a)` is block `(1,0)` with `(l,y) = (c,a)` and not a transpose.
+
+**What this is and is not.** The weight-1 orthant is now a level-`m` triple sum with two explicit
+sign factors — as a THEOREM, where §57.16–57.18 had it by hand. It is not yet a VALUE: turning that
+sum into `tri3_m − 4·S_u + …` means evaluating the sign-weighted sums, which is §57.17's arithmetic
+and is not formalised.
+
 **Status of (III).** Still reduced, not proven — but the reduction is now a single explicit
 first-order recursion in `m` whose only non-constant input is a coset-line sum with a closed form.
 What has not been attempted: proving the recursion (the constants and `Σ_coset` from the same
