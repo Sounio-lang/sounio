@@ -5246,3 +5246,27 @@ would produce `[j,3]₂` from the solved recursion, the coset-line case of block
 variation of `tr(Alo²P)` / `tr(AloP²)`. No difficulty is recorded for any of them.
 
 **(III) is still reduced, not proven.**
+
+### §57.41 — Tier 87: block (0,1) collected, and what block (1,1) actually still needs
+
+Tier 86's two borders glue to Tier 82's interior into one total on the coset line of block `(1,1)`:
+
+    P3 (b+2^(m+1)) ((b⊕W)+2^(m+1)) W (m+1)  =  E11cos b · P3 b (b⊕W) W m,
+    E11cos b = −1 at b = 0, +1 otherwise.
+
+`E11cos` does not depend on `W` — the flip sits at `b = 0` only, and the seam `b = W` carries `+1`.
+With it and a bit lemma (`(2^(m+1)+b) ⊕ W = (b⊕W) + 2^(m+1)` for `W < 2^(m+1)`), block `(0,1)` of
+`cosetU_split4` reduces to level `m` with weight `E01 · E11cos · E10`. Three of the four blocks are
+now theorems (`(0,0)`, `(1,0)`, `(0,1)`).
+
+**Correction to §57.39, from the M1 review.** I described block `(1,1)`'s remaining work as "the
+`l = W` / `y = W` loci and the two borders". That under-counts. Its outer factors are GENERAL
+block-`(1,1)` pairs, not coset ones, so what is required is a full `E11` total valid at EVERY index —
+the same kind of object as `E01` and `E10`, not a list of special cases. The loci and borders are the
+missing inputs to that total; the total itself, glued from them together with Tier 67's interior and
+the coset line above, is the deliverable.
+
+Two structural notes that fall out. Because `W < 2^(m+1)`, `b` and `b ⊕ W` always lie in the SAME
+half — the middle factor of the coset sum never crosses, which is why the four blocks pair as they
+do. And the level-`m` right-hand sides of all four blocks are the same three-factor shape, so the
+recursion, once block `(1,1)` closes, is a statement about the four ε-weights alone.

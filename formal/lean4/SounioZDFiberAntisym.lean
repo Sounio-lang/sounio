@@ -14433,6 +14433,70 @@ theorem P3_block11_cos_seam (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
       R_ul 0 0 m hp hp, if_pos rfl]
   grind
 
+
+/-! ### Tier 87 — block `(0,1)`, collected
+
+    With Tier 86's two borders, block `(1,1)`'s coset line has a TOTAL form, and its sign is as
+    simple as it could be: `−1` at `b = 0` and `+1` everywhere else, the seam `b = W` included.
+    That was the only missing piece for block `(0,1)`, whose three factors are
+
+      `P3 a (2^(m+1)+b)`                       block `(0,1)`        `E01` (Tier 75)
+      `P3 (2^(m+1)+b) ((2^(m+1)+b)⊕W)`         block `(1,1)` coset  `E11cos` (here)
+      `P3 ((2^(m+1)+b)⊕W) a`                   block `(1,0)`        `E10` (Tier 75)
+
+    so THREE of the four blocks of `cosetU_split4` are now collected.  Only `(1,1)` is left.
+
+    ⚠ What it needs, in the reviewer's sharper phrasing rather than mine: a FULL `E11` total on every
+    index, exactly as `E01`/`E10` are — its outer factors are GENERAL block-`(1,1)` pairs, not coset
+    ones.  Listing the missing cases (`l = W`, `y = W`, and the two borders) under-counts the job:
+    those still have to be glued to Tier 67's interior and to the coset line above into one function.
+
+    Note also, and it is why the four blocks pair as they do: with `W < 2^(m+1)`, `b` and `b ⊕ W` are
+    always in the SAME half, so the middle factor never crosses. -/
+
+/-- The `⊕` of a high index with a low label keeps the shift on the outside. -/
+private theorem shift_xor (m b W : Nat) (hb : b < 2^(m+1)) (hW : W < 2^(m+1)) :
+    (2^(m+1) + b) ^^^ W = (b ^^^ W) + 2^(m+1) := by
+  rw [Nat.add_comm (2^(m+1)) b]
+  have h := xor_lo_hi (m+1) W b (by omega) hW hb
+  rw [Nat.xor_comm (b + 2^(m+1)) W, h, Nat.xor_comm W b]
+
+/-- The sign of block `(1,1)` on its coset line: `−1` only at `b = 0`. -/
+def E11cos (b : Nat) : Int := if b = 0 then -1 else 1
+
+/-- **BLOCK `(1,1)`'S COSET LINE, TOTAL.**  Tier 82 in the interior, Tier 86 at the two borders. -/
+theorem P3_block11_cos_total (m b W : Nat) (hb : b < 2^(m+1)) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    P3 (b + 2^(m+1)) ((b ^^^ W) + 2^(m+1)) W (m+1) = E11cos b * P3 b (b ^^^ W) W m := by
+  unfold E11cos
+  by_cases hb0 : b = 0
+  · subst hb0
+    rw [if_pos rfl, Nat.zero_xor, P3_block11_cos_zero m W hW hW0]
+    grind
+  · rw [if_neg hb0]
+    by_cases hbW : b ^^^ W = 0
+    · have hbq : b = W := xor_zero_eq b W hbW
+      rw [hbq, Nat.xor_self, P3_block11_cos_seam m W hW hW0]
+      grind
+    · rw [P3_block11_cos m b W hb hW hb0 hbW]
+      grind
+
+/-- **BLOCK `(0,1)`, COLLECTED.** -/
+theorem cosetU_block01 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+        P3 a (2^(m+1)+b) W (m+1)
+          * (P3 (2^(m+1)+b) ((2^(m+1)+b) ^^^ W) W (m+1)
+             * P3 ((2^(m+1)+b) ^^^ W) a W (m+1))))
+      = sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+          E01 a b W * P3 a b W m
+            * (E11cos b * P3 b (b ^^^ W) W m
+               * (E10 (b ^^^ W) a W * P3 (b ^^^ W) a W m)))) := by
+  refine sumLtI_congr _ _ _ (fun a ha => sumLtI_congr _ _ _ (fun b hb => ?_))
+  have hbW : b ^^^ W < 2^(m+1) := xorlt hb hW
+  rw [shift_xor m b W hb hW, Nat.add_comm (2^(m+1)) b,
+      P3_block01_total m a b W ha hb hW hW0,
+      P3_block11_cos_total m b W hb hW hW0,
+      P3_block10_total m (b ^^^ W) a W hbW ha hW hW0]
+
 end SounioZDFiberAntisym
 
 
