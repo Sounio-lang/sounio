@@ -4369,10 +4369,47 @@ enters through `b` nested dyadic quantities, one per bit position, each an affin
 binary fraction whose digits are the **prefix parities** of `g` from that position on. That is the
 shape a proof has to produce, and the `2^{−(L−1)}` is a place value, not a coincidence.
 
+### 57.13 — the IDENTIFICATION check: the two standard families are EXCLUDED
+
+Consulted an outside reviewer on where the new knowledge in this lane is. Its first instruction was
+a novelty check to run **before** spending another rung, on the grounds that the lane's memory
+already records two label-drift near-misses and a firewall (the `168` freezing is Kirshtein 2012).
+The check has two halves and **both came back negative**, which is the outcome that keeps the object
+interesting rather than the one that deflates it.
+
+**(1) Not a bilinear-form two-graph.** If `P3̃` were `(−1)^(B(l,y)+f(l)+f(y))` for an `F₂`-bilinear
+`B` on the index space — the symplectic / quadratic-form two-graphs of Seidel, whose triple
+invariants and Seidel spectra are classical — then switching away `f` and taking the `F₂` logarithm
+would leave a matrix of rank `≤ m+1`. Measured instead:
+
+| `m` | 3 | 4 | 5 | 6 | 7 |
+|---|---|---|---|---|---|
+| `rank_F₂` of the switched sign-log | 4 | 12 | 28 | 60 | 124 |
+| `2^m − 4` | 4 | 12 | 28 | 60 | 124 |
+| bilinear-form bound `m+1` | 4 | 5 | 6 | 7 | 8 |
+| `N = 2^(m+1)−1` | 15 | 31 | 63 | 127 | 255 |
+
+**`rank_F₂ = 2^m − 4` exactly**, at every label of `m = 3,4,5` (all of them) and at six labels of
+`m = 6,7` — which is the descendant graph's DEGREE, and which exceeds the bilinear bound from `m = 4`
+on. The one exception is the maximal seam, where the rank is **`0`**: consistent, since there the
+two-graph is empty (Tier 65). So the family is not a bilinear-form two-graph, and `m = 3` is the
+coincidence level where `2^m − 4 = m + 1` — exactly the level that would have made this look settled.
+
+**(2) Not a regular two-graph.** The descendant graph at a reference is regular (§57.10), which
+would allow it, but it is not STRONGLY regular: at `m = 5`, `λ` takes the values `12,14,16,18,20,…`
+and `μ` takes `0,2,4,6,8,…`. So this is not an equiangular line system at the relative bound.
+
+**What this does and does not license.** It excludes the two identifications that would have made
+`tri3(P3̃)` a known computation, and it hands over a clean invariant (`rank_F₂ = 2^m − 4`, `0` at the
+seam) that a literature search can be run against. It does **not** establish novelty — the two-graph
+catalogues have not been searched, and that search is owed before any claim is made.
+
 **Status of (III).** Still reduced, not proven. What moved: every fibre reference of `tri3(P3̃)` has
-a closed form, verified out of sample at `m = 8`, and the block law now has two dead mechanisms and
-one exact reformulation. What has not been attempted: `D[tri3(P3̃)] = 27·8^(n−j)[j,3]₂` itself for
-`j ≥ 3`, a proof of the block law from the reformulation, and the fibre variation of `tr(Alo²P)` /
-`tr(AloP²)`. No difficulty is recorded for any of them.
+a closed form, verified out of sample at `m = 8`; the block law has two dead mechanisms and one exact
+reformulation; and the two standard identifications of the two-graph are excluded. What has not been
+attempted: the level-transfer recursion `tri3(P3̃)_{m+1} = 8·tri3(P3̃)_m + (rank-one defect)` — which
+is the reviewer's recommended target, and would make the block law and `(III)` corollaries rather
+than separate problems — `D[tri3(P3̃)] = 27·8^(n−j)[j,3]₂` itself, and the fibre variation of
+`tr(Alo²P)` / `tr(AloP²)`. No difficulty is recorded for any of them.
 
 **(III) is still reduced, not proven.**

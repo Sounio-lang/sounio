@@ -163,3 +163,51 @@ def check_reformulation(m):
         if abs(w[0] + sum(s[i] * R[i] for i in range(b)) - vals[g]) > 1e-6:
             bad += 1
     return bad, 1 << b
+
+
+# --- §57.13: the IDENTIFICATION check (both standard families EXCLUDED) --------------------------
+#
+# (1) NOT a bilinear-form two-graph.  If P3~ were (-1)^(B(l,y)+f(l)+f(y)) with B F2-bilinear, then
+#     switching away f and taking the F2 log would leave a matrix of rank <= m+1.  Measured
+#     rank_F2 = 2^m - 4 exactly -- 4, 12, 28, 60, 124 at m = 3..7 against the bound 4, 5, 6, 7, 8 --
+#     at EVERY label of m = 3,4,5 and six labels of m = 6,7.  The maximal seam has rank 0, which is
+#     consistent: its two-graph is empty (Tier 65).  m = 3 is the coincidence level where
+#     2^m - 4 = m + 1, i.e. the level at which this test cannot distinguish anything.
+#
+# (2) NOT a regular two-graph.  The descendant graph is regular but not STRONGLY regular: at m = 5
+#     lambda takes 12,14,16,18,20,... and mu takes 0,2,4,6,8,...
+#
+# Neither result establishes novelty -- the two-graph catalogues have not been searched -- but they
+# exclude the two identifications that would have made tri3(P3~) a known computation, and they hand
+# over a clean invariant (rank_F2 = 2^m - 4, zero at the seam) to search WITH.
+
+def f2rank(M):
+    M = M.copy() % 2
+    r = 0
+    rows, cols = M.shape
+    for c in range(cols):
+        p = next((i for i in range(r, rows) if M[i, c]), None)
+        if p is None:
+            continue
+        if p != r:
+            M[[r, p]] = M[[p, r]]
+        sel = (M[:, c] == 1)
+        sel[r] = False
+        M[sel] = (M[sel] + M[r]) % 2
+        r += 1
+        if r == rows:
+            break
+    return r
+
+
+def switched_log(m, W, root=1):
+    """`P3~` switched so the root row is all `+1`, as an F2 matrix (1 where the entry is -1)."""
+    V = 1 << (m + 1)
+    S = np.array([[_P3(l, y, W, m) for y in range(1, V)] for l in range(1, V)], dtype=np.int64)
+    np.fill_diagonal(S, 0)
+    r = root - 1
+    eps = S[r].copy()
+    eps[r] = 1
+    Sp = S * np.outer(eps, eps)
+    np.fill_diagonal(Sp, 1)
+    return ((1 - Sp) // 2).astype(np.int64)
