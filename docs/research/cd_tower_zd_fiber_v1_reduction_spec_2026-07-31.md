@@ -4694,6 +4694,32 @@ factors become `σ(x,x) = −1`". zai marked it `[OVERREACH]` — the `cdSigma` 
 factors of the product are `−σ(x,x) = +1`. The arithmetic was right, the sentence was not; both the
 docstring and this paragraph now say it the reviewer's way.
 
+### 57.22 — Tier 71: the `y = 0` row, and the corrected list of what the sum still needs
+
+The row both providers named as the obstruction. It transfers with **no sign**:
+
+    P3 l (0 + 2^(m+1)) W (m+1) = P3 l 0 W m        for l ≠ 0;  0 violations / 49, 225, 961
+
+and it is a genuinely **separate** lemma, not a special case: at `y = 0` the two clauses of `eps01`
+coincide (`l ⊕ 0 = l`), so `eps01 l 0 W` reports `−1` whenever `l = W` — and measurement shows the
+identity has no sign there. Extending the `ε` form to `y = 0` fails at exactly those `2^(m+1) − 1`
+pairs. The computation says why: on the shifted side the second factor degenerates to `−1` (via
+`cdSigma 0 (l⊕W) = 1`), on the unshifted side to `1` (via `R_ul`'s `v = 0` branch), and the two
+degeneracies **cancel**.
+
+**⚠ My list of what remains was wrong in two directions, and each provider caught one.** The
+weight-1 orthant `orth N f 0 0 N` has summand `f a b · (f b (N+c) · f (N+c) a)`, so it uses blocks
+`(0,0)`, `(0,1)`, `(1,0)` — **not** `(1,1)`, which belongs to the weight-2 orthant (zai's catch); and
+block `(1,0)` needs more than its border rows (grok's catch). Corrected:
+
+| block | status |
+|---|---|
+| `(0,0)` | **done** — `P3_level_stable` has no nonzero hypotheses, so it already holds at every index |
+| `(0,1)` | Tier 70 at `b,c ≠ 0`, Tier 71 at `c = 0`; **missing** the `b = 0` row — measured FLIPPED, with `2^(m+1) − 1` exceptions, all at `c = W` |
+| `(1,0)` | **missing entirely as an `ε`-form** — Tier 67 gives only the off-locus version, so its isolated and coset cases still need packaging, and both border rows are open |
+
+None of that is attempted. What this rung establishes is one row and a corrected map of the rest.
+
 **Status of (III).** Still reduced, not proven — but the reduction is now a single explicit
 first-order recursion in `m` whose only non-constant input is a coset-line sum with a closed form.
 What has not been attempted: proving the recursion (the constants and `Σ_coset` from the same

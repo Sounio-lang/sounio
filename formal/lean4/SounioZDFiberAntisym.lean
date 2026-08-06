@@ -13453,6 +13453,58 @@ theorem P3_block01_eps (m l y W : Nat) (hl : l < 2^(m+1)) (hy : y < 2^(m+1)) (hW
     · rw [if_neg (fun h => h.elim hlW hcos), P3_block01 m l y W hl hy hW hl0 hy0 hlW hcos]
       grind
 
+
+/-! ### Tier 71 — the `y = 0` row of block `(0,1)`
+
+    Both M1 providers named this as the real obstruction to the sum-level step: `sumLtI` ranges over
+    `[0,N)`, `P3_block01_eps` needs `y ≠ 0`, and the summand at `y = 0` is not zero, so the index
+    cannot be dropped.  Here is that row.
+
+    It transfers with **NO sign**:  `P3 l (0 + 2^(m+1)) W (m+1) = P3 l 0 W m`.
+
+    The reason the `ε` cannot simply be extended is visible in the computation: at `y = 0` the second
+    factor degenerates to `−cdSigma 0 (l ⊕ W) = −1` on the shifted side and to the `v = 0` branch of
+    `R_ul`, i.e. `1`, on the unshifted side, while the first factor is the same `−cdSigma W l` on
+    both.  The two degeneracies cancel.  `eps01 l 0 W` would report `−1` whenever `l = W` (its two
+    clauses COINCIDE at `y = 0`), and measurement confirms that extending it fails at exactly those
+    `2^(m+1) − 1` pairs — so this is a genuinely separate lemma, not a special case.
+
+    ⚠ STILL MISSING for the weight-1 orthant `orth N f 0 0 N`, whose summand is
+    `f a b · (f b (N+c) · f (N+c) a)` and therefore uses blocks `(0,0)`, `(0,1)`, `(1,0)` — **not**
+    `(1,1)`, which belongs to the weight-2 orthant.  Both M1 providers corrected an earlier version
+    of this list, one adding an item and the other removing one:
+
+    * block `(0,0)`: `P3_level_stable` — DONE, and it carries no nonzero hypotheses, so it already
+      holds at every index;
+    * block `(0,1)`: `P3_block01_eps` (Tier 70) at `b, c ≠ 0`, this tier at `c = 0`; **missing** the
+      `b = 0` row, measured FLIPPED with exactly `2^(m+1) − 1` exceptions, all at `c = W`;
+    * block `(1,0)`: **missing entirely as an `ε`-form** — Tier 67 gives only the off-locus version,
+      so its isolated and coset cases still need packaging, and both of its border rows are open.
+
+    None of that is attempted here. -/
+
+/-- The `y = 0` row of block `(0,1)`: it transfers unchanged. -/
+theorem P3_block01_zero (m l W : Nat) (hl : l < 2^(m+1)) (hW : W < 2^(m+1)) (hl0 : l ≠ 0) :
+    P3 l (0 + 2^(m+1)) W (m+1) = P3 l 0 W m := by
+  have hp := Nat.two_pow_pos (m+1)
+  have h2 : (2:Nat)^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  have hlW' : l ^^^ W < 2^(m+1) := xorlt hl hW
+  have hHW : (0 + 2^(m+1) : Nat) ^^^ W = W + 2^(m+1) := by
+    rw [Nat.zero_add, Nat.xor_comm]
+    have h := xor_lo_hi (m+1) W 0 (by omega) hW hp
+    rw [Nat.zero_add] at h
+    rw [h, Nat.xor_zero]
+  have hne : (0 + 2^(m+1) : Nat) ≠ 0 := by omega
+  unfold P3 hi
+  rw [hHW, Nat.zero_xor,
+      R_lu l (W + 2^(m+1)) (m+1) (by omega) (by omega),
+      R_ul W l m hW hl, if_neg hl0,
+      R_ul (l ^^^ W) (0 + 2^(m+1)) (m+1) (by omega) (by omega), if_neg hne,
+      R_lu (l ^^^ W) 0 m hlW' hp, cdSig0,
+      R_lu l W m hl hW,
+      R_ul (l ^^^ W) 0 m hlW' hp, if_pos rfl]
+  grind
+
 end SounioZDFiberAntisym
 
 
