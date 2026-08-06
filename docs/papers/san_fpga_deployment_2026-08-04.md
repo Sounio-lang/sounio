@@ -59,13 +59,17 @@ claim. We then show that a curriculum-gated variant (SAN-v3) closes the gap:
 with stage-accuracy-gated exits and a depth penalty, SAN-v3 reaches τ = 0.85 at
 epoch 13 with accuracy 0.8561 — statistically indistinguishable from Dense
 (0.8576) — while consuming **76.7% less** computation than Dense and **51.7%
-less** than EarlyStop. ResNet-50 also shows a measured 1.08x wall-time latency
-speedup on CIFAR-10, though this margin is small and task-dependent. We disclose
-the limits honestly: the energy number is board-level, not rack-level; full
-ImageNet-1k is unavailable, so ImageNette2-160 is the real-image proxy; and
-ResNet-50 shows a disclosed patient-channel tradeoff while the other families
-satisfy the stricter L5 clause in this run. All artifacts, measurements, and
-reproduction scripts are in the repository.
+less** than EarlyStop. A post-τ distillation variant (SAN-v4) improves this
+further to **78.3% less** than Dense and **60.6% less** than EarlyStop, though
+the exit fraction remains zero in training: the measured savings come from the
+freeze-on-green rule, not from inference-time early exits, which remain future
+work. ResNet-50 also shows a measured 1.08x wall-time latency speedup on
+CIFAR-10, though this margin is small and task-dependent. We disclose the limits
+honestly: the energy number is board-level, not rack-level; full ImageNet-1k is
+unavailable, so ImageNette2-160 is the real-image proxy; and ResNet-50 shows a
+disclosed patient-channel tradeoff while the other families satisfy the stricter
+L5 clause in this run. All artifacts, measurements, and reproduction scripts are
+in the repository.
 
 ---
 
@@ -591,6 +595,21 @@ until the trunk has learned a strong representation, so the model reaches τ =
 Dense (0.8576) — while consuming **76.7% less** computation than Dense and
 **51.7% less** than EarlyStop. This is the first SAN variant that both reaches
 a competitive accuracy target and delivers a large, measured efficiency gain.
+
+**SAN-v4: post-τ distillation + adaptive exit (job 8631).** To test whether
+early exits can be made useful *after* the curriculum has trained the trunk, we
+added (i) KL-distillation from the final head into every exit head once τ is
+reached, and (ii) an adaptive exit threshold that rises to 0.8 after τ, so only
+very confident samples leave early. The result is a further small improvement:
+t* = 12 (one epoch earlier than SAN-v3), final accuracy 0.8557, and S_m = 5 399
+TMAC — **78.3% less** than Dense and **60.6% less** than EarlyStop. The exit
+fraction, however, remains 0.000: the model reaches τ before any stage head has
+crossed the curriculum threshold, so no sample ever exits early in training.
+The measured savings therefore come from the freeze-on-green rule, not from
+inference-time early exits. Making the latter contribute is future work: it
+requires either a longer post-τ budget so the curriculum can open the gates, or
+a deployment-time exit policy that is evaluated separately from the training
+freeze rule.
 
 ---
 
