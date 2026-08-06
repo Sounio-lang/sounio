@@ -2218,6 +2218,37 @@ pub struct StructLayoutEntry {
 }
 
 // Table of all known struct layouts (populated during lowering)
+// CAPACITY 256, AND IT IS TOO SMALL. Raising it is blocked, which is the point
+// of this note -- the next person to hit the wall should not spend the two
+// builds it took to learn that.
+//
+// THE WALL. Once main.sio's test suite moved out and the merge stopped failing
+// on IR slots, lowering the compiler's own closure reported eight errors, all
+// eight from one line: lowerer_register_struct_fields_direct_mut refusing to
+// register a struct past this cap. A census of that closure -- 120 modules --
+// finds 693 distinct struct types.
+//
+// EIGHT IS NOT THE SHORTFALL. Only ONE of the seven capacity guards raises an
+// error; the four other registration sites say `if count < CAP { ... }` and skip
+// in silence. The 8 counts attempts through the guard that speaks. Reading it as
+// "needs ~264" is what sent me to 512, which failed with the identical message
+// and the identical count -- which is exactly what a silent skip looks like from
+// outside.
+//
+// AND 1024 SEGFAULTS. Not for lack of memory: ir_register_knowledge_layout takes
+// StructLayoutTable BY VALUE, returns it by value, and copies it once more
+// internally. An entry is ~18.6 KB -- a Name is 136 bytes and an entry holds 64
+// fields of two Names each -- so the table is ~19 MB at 1024 and one call costs
+// ~57 MB of stack. gen2 died at `lower_array: seed_begin` with the compiler's
+// own "stack frame too large ... consider passing by &!/reference" warnings
+// already in the log, describing the defect that killed it.
+//
+// SO THE FIX IS NOT A BIGGER NUMBER. Intern the names: StructFieldEntry would
+// hold two i64 pool ids instead of two Names and the entry would shrink ~30x,
+// putting 1024 entries under a megabyte and the by-value copies back in range.
+// IR_NAME_POOL_BUF in this same file already does exactly this for function
+// names. Until then this stays at 256, because 512 buys nothing measurable and
+// costs 2x the memory on every compile.
 pub struct StructLayoutTable {
     entries: [StructLayoutEntry; 256],
     count: i64,
