@@ -5270,3 +5270,36 @@ Two structural notes that fall out. Because `W < 2^(m+1)`, `b` and `b ⊕ W` alw
 half — the middle factor of the coset sum never crosses, which is why the four blocks pair as they
 do. And the level-`m` right-hand sides of all four blocks are the same three-factor shape, so the
 recursion, once block `(1,1)` closes, is a statement about the four ε-weights alone.
+
+### §57.42 — Tier 88: block (1,1)'s total, and it is rank-one (a switching off index 0)
+
+Six new pointwise lemmas (`row0`, `corner`, `col0`, `seamrow`, `seam2`, `seamcol`) complete block
+`(1,1)` at every index, and the assembled sign is
+
+    E11 l y W = g(l) · h(y),   g(l) = −1 iff l = W,   h(y) = −1 iff y ∈ {0, W}.
+
+This answers §57.41's obligation in the reviewer's own terms — a total on every index — and gives
+more than was asked: **`E11` factorises**, where `E01` and `E10` do not. Their `(l⊕y)⊕W = 0` clause
+is a coset condition, and the sign set of a rank-one matrix is a rectangle, never a diagonal. The
+discriminating test is `E(a,b)E(a',b')E(a,b')E(a',b) = 1`, which holds for `E11` on all 28672 and
+983040 quadruples at `m = 2,3` and fails for `E01`/`E10` on 9408 and 201600 of them.
+
+With this, `cosetU_block11` collects the LAST of `cosetU_split4`'s four blocks, so all four are now
+theorems and the recursion is a statement about the four ε-weights alone.
+
+**Correction, from the M1 review, to a claim I made and one provider passed.** I wrote that rank-one
+means a SWITCHING and therefore that the lift preserves every triple product. It does not: a
+two-sided weight `g(l)h(y)` multiplies `E(l,y)E(y,z)E(l,z)` by `g(y)h(y)`, which is `1` for all `y`
+only when `g = h`, and here `g(0) = +1` while `h(0) = −1`. Measured: 1036/3584 and 10140/61440
+triples change at `m = 2,3`. grok answered `[OK]`; zai did the computation and answered `[PROBLEM]`.
+zai is right, and grok's agreement was not evidence.
+
+The true statement is sharper. `g` and `h` differ at `y = 0` and nowhere else — both are `−1` at
+`y = W` and `+1` elsewhere — so on the NONZERO indices `σ = g = h` and the lift IS a switching:
+0/2401 and 0/50625 triples change at `m = 2,3`. Index `0` is exactly what `P3̃` masks out (Tier 63),
+so the two-graph of the masked matrix is preserved and the deviation law's moment is blind to this
+lift — the same index-`0` exception, for the same reason, as in Tier 64.
+
+One hypothesis dropped: `P3_block11_corner` needs no `W ≠ 0`. The linter flagged it unused, and the
+identity does hold at `W = 0` (measured `m = 2,3,4`); both `P3`s collapse through `cdSig0`/`cdSig0'`
+before the label can matter.

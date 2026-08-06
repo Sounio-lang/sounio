@@ -14497,14 +14497,256 @@ theorem cosetU_block01 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
       P3_block11_cos_total m b W hb hW hW0,
       P3_block10_total m (b ^^^ W) a W hbW ha hW hW0]
 
+/-! ### Tier 88 — block `(1,1)`'s TOTAL, and it is a SWITCHING
+
+    The M1 reviewer's correction to Tier 87 was that block `(1,1)` needs a full sign function on
+    EVERY index, exactly as `E01`/`E10` — its outer factors in the coset sum are general pairs, not
+    coset ones.  This tier builds it, and the answer is better than the correction asked for.
+
+    Measured first (0 violations at `m = 2,3`, confirmed out of sample at `m = 4`, all `W ≠ 0`):
+
+      `P3 (a+2^(m+1)) (b+2^(m+1)) W (m+1) = g(a)·h(b)·P3 a b W m`,
+      `g(a) = −1` iff `a = W`,   `h(b) = −1` iff `b = 0` or `b = W`.
+
+    **`E11` FACTORISES into a row sign times a column sign** — a rank-one sign matrix.  `E01` and
+    `E10` do NOT: their `(l⊕y) ⊕ W = 0` clause is a coset condition, which no row×column product can
+    express.  The discriminating test is the rank-one identity `E(a,b)E(a',b')E(a,b')E(a',b) = 1`: at
+    `m = 2,3` it holds for `E11` on all 28672 / 983040 quadruples and FAILS for `E01` and `E10` on
+    9408 / 201600 of them.
+
+    ⚠ Rank-one is NOT the same as a SWITCHING, and my first version of this paragraph claimed it was.
+    An M1 reviewer did the computation I had not: a two-sided weight `g(l)·h(y)` multiplies the
+    triple product `E(l,y)E(y,z)E(l,z)` by `g(y)h(y)`, which is `1` for every `y` only when `g = h`.
+    Here `g(0) = +1` while `h(0) = −1`, so the unqualified claim is FALSE — measured, 1036/3584 and
+    10140/61440 triples change at `m = 2,3`.
+
+    What IS true, and is the sharper statement: `g` and `h` differ at `y = 0` and NOWHERE ELSE (both
+    are `−1` at `y = W` and `+1` elsewhere), so on the NONZERO indices the transfer is a genuine
+    switching by `σ = g` and does preserve every triple product — 0/2401 and 0/50625 at `m = 2,3`.
+    Index `0` is exactly what `P3̃` masks out (Tier 63), so the two-graph of the masked matrix is
+    preserved and the deviation law's moment is blind to this lift.  The exception is the index-`0`
+    line, once more, and for the same reason as in Tier 64.
+
+    Six new pointwise lemmas supply what Tiers 67/82/86 left: the `l = 0` row (no flip), the corner
+    `l = y = 0` (flip), the `y = 0` column (flip), the `l = W` row (flip), the `y = W` column (flip,
+    by `P3_symm` off the row), and the double seam `l = y = W` (no flip).  Every one is the same
+    branch computation — `R_lu`, `R_uu`, `R_ul`, `R_uu` — differing only in which `v = 0` branch of
+    `R_uu` fires and whether `antisym` has a degenerate argument.
+
+    With this, ALL FOUR blocks of the level transfer are totals, and `cosetU_split4`'s last block
+    can be collected. -/
+
+/-- The `l = 0` row of block `(1,1)`, off its two loci: NO flip. -/
+theorem P3_block11_row0 (m b W : Nat) (hb : b < 2^(m+1)) (hW : W < 2^(m+1))
+    (hb0 : b ≠ 0) (hW0 : W ≠ 0) (hbW : b ^^^ W ≠ 0) :
+    P3 (0 + 2^(m+1)) (b + 2^(m+1)) W (m+1) = P3 0 b W m := by
+  have hp := Nat.two_pow_pos (m+1)
+  have h2 : (2:Nat)^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  have hbW' : b ^^^ W < 2^(m+1) := xorlt hb hW
+  have hbne : b ≠ W := by intro h; exact hbW (by rw [h, Nat.xor_self])
+  have e1 : (b + 2^(m+1)) ^^^ W = (b ^^^ W) + 2^(m+1) := by
+    have h := xor_lo_hi (m+1) W b (by omega) hW hb
+    rw [Nat.xor_comm (b + 2^(m+1)) W, h, Nat.xor_comm W b]
+  have e2 : (0 + 2^(m+1) : Nat) ^^^ W = W + 2^(m+1) := by
+    have h := xor_lo_hi (m+1) W 0 (by omega) hW hp
+    rw [Nat.xor_comm (0 + 2^(m+1)) W, h, Nat.xor_zero]
+  rw [P3_red 0 b W m hp hb hW hb0, Nat.zero_xor, cdSig0']
+  unfold P3 hi
+  rw [e1, e2,
+      R_lu (0 + 2^(m+1)) ((b ^^^ W) + 2^(m+1)) (m+1) (by omega) (by omega),
+      R_uu (b ^^^ W) 0 m hbW' hp, if_pos rfl,
+      R_ul (W + 2^(m+1)) (b + 2^(m+1)) (m+1) (by omega) (by omega),
+      if_neg (by omega : b + 2^(m+1) ≠ 0),
+      R_uu W b m hW hb, if_neg hb0,
+      antisym (m+1) b W hb hW hb0 hW0 hbne]
+  grind
+
+/-- The corner `l = b = 0` of block `(1,1)`: it FLIPS.  ⚠ Unlike every other lemma of this tier it
+    needs NO `W ≠ 0` — the linter caught the hypothesis unused, and the identity does hold at `W = 0`
+    (measured at `m = 2,3,4`).  Both `P3`s collapse to `cdSig0`/`cdSig0'` before the label matters. -/
+theorem P3_block11_corner (m W : Nat) (hW : W < 2^(m+1)) :
+    P3 (0 + 2^(m+1)) (0 + 2^(m+1)) W (m+1) = - P3 0 0 W m := by
+  have hp := Nat.two_pow_pos (m+1)
+  have h2 : (2:Nat)^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  have e2 : (0 + 2^(m+1) : Nat) ^^^ W = W + 2^(m+1) := by
+    have h := xor_lo_hi (m+1) W 0 (by omega) hW hp
+    rw [Nat.xor_comm (0 + 2^(m+1)) W, h, Nat.xor_zero]
+  unfold P3 hi
+  rw [e2, Nat.zero_xor,
+      R_lu (0 + 2^(m+1)) (W + 2^(m+1)) (m+1) (by omega) (by omega),
+      R_uu W 0 m hW hp, if_pos rfl,
+      R_ul (W + 2^(m+1)) (0 + 2^(m+1)) (m+1) (by omega) (by omega),
+      if_neg (by omega : (0:Nat) + 2^(m+1) ≠ 0),
+      R_uu W 0 m hW hp, if_pos rfl,
+      cdSig0, cdSig0']
+  grind
+
+/-- The `y = 0` column of block `(1,1)`, off its two loci: it FLIPS. -/
+theorem P3_block11_col0 (m a W : Nat) (ha : a < 2^(m+1)) (hW : W < 2^(m+1))
+    (ha0 : a ≠ 0) (hW0 : W ≠ 0) (haW : a ^^^ W ≠ 0) :
+    P3 (a + 2^(m+1)) (0 + 2^(m+1)) W (m+1) = - P3 a 0 W m := by
+  have hp := Nat.two_pow_pos (m+1)
+  have h2 : (2:Nat)^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  have haW' : a ^^^ W < 2^(m+1) := xorlt ha hW
+  have hane : a ≠ W := by intro h; exact haW (by rw [h, Nat.xor_self])
+  have e1 : (0 + 2^(m+1) : Nat) ^^^ W = W + 2^(m+1) := by
+    have h := xor_lo_hi (m+1) W 0 (by omega) hW hp
+    rw [Nat.xor_comm (0 + 2^(m+1)) W, h, Nat.xor_zero]
+  have e2 : (a + 2^(m+1)) ^^^ W = (a ^^^ W) + 2^(m+1) := by
+    have h := xor_lo_hi (m+1) W a (by omega) hW ha
+    rw [Nat.xor_comm (a + 2^(m+1)) W, h, Nat.xor_comm W a]
+  unfold P3 hi
+  rw [e1, e2, Nat.zero_xor,
+      R_lu (a + 2^(m+1)) (W + 2^(m+1)) (m+1) (by omega) (by omega),
+      R_uu W a m hW ha, if_neg ha0,
+      R_ul ((a ^^^ W) + 2^(m+1)) (0 + 2^(m+1)) (m+1) (by omega) (by omega),
+      if_neg (by omega : (0:Nat) + 2^(m+1) ≠ 0),
+      R_uu (a ^^^ W) 0 m haW' hp, if_pos rfl,
+      R_lu a W m ha hW,
+      R_ul (a ^^^ W) 0 m haW' hp, if_pos rfl,
+      antisym (m+1) a W ha hW ha0 hW0 hane]
+  grind
+
+/-- The `l = W` row of block `(1,1)`, off its two loci: it FLIPS. -/
+theorem P3_block11_seamrow (m b W : Nat) (hb : b < 2^(m+1)) (hW : W < 2^(m+1))
+    (hb0 : b ≠ 0) (hW0 : W ≠ 0) (hbW : b ^^^ W ≠ 0) :
+    P3 (W + 2^(m+1)) (b + 2^(m+1)) W (m+1) = - P3 W b W m := by
+  have hp := Nat.two_pow_pos (m+1)
+  have h2 : (2:Nat)^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  have hbW' : b ^^^ W < 2^(m+1) := xorlt hb hW
+  have hbne : W ≠ b ^^^ W := by
+    intro h
+    exact hb0 (by
+      have : W ^^^ W = (b ^^^ W) ^^^ W := by rw [← h]
+      rw [Nat.xor_self, xor_cancel] at this
+      exact this.symm)
+  have e1 : (b + 2^(m+1)) ^^^ W = (b ^^^ W) + 2^(m+1) := by
+    have h := xor_lo_hi (m+1) W b (by omega) hW hb
+    rw [Nat.xor_comm (b + 2^(m+1)) W, h, Nat.xor_comm W b]
+  have e2 : (W + 2^(m+1)) ^^^ W = 0 + 2^(m+1) := by
+    have h := xor_lo_hi (m+1) W W (by omega) hW hW
+    rw [Nat.xor_comm (W + 2^(m+1)) W, h, Nat.xor_self]
+  rw [P3_red W b W m hW hb hW hb0, Nat.xor_self, cdSig0]
+  unfold P3 hi
+  rw [e1, e2,
+      R_lu (W + 2^(m+1)) ((b ^^^ W) + 2^(m+1)) (m+1) (by omega) (by omega),
+      R_uu (b ^^^ W) W m hbW' hW, if_neg hW0,
+      R_ul (0 + 2^(m+1)) (b + 2^(m+1)) (m+1) (by omega) (by omega),
+      if_neg (by omega : b + 2^(m+1) ≠ 0),
+      R_uu 0 b m hp hb, if_neg hb0, cdSig0',
+      antisym (m+1) W (b ^^^ W) hW hbW' hW0 hbW hbne]
+  grind
+
+/-- The DOUBLE SEAM `l = y = W`: no flip. -/
+theorem P3_block11_seam2 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    P3 (W + 2^(m+1)) (W + 2^(m+1)) W (m+1) = P3 W W W m := by
+  have hp := Nat.two_pow_pos (m+1)
+  have h2 : (2:Nat)^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  have e2 : (W + 2^(m+1)) ^^^ W = 0 + 2^(m+1) := by
+    have h := xor_lo_hi (m+1) W W (by omega) hW hW
+    rw [Nat.xor_comm (W + 2^(m+1)) W, h, Nat.xor_self]
+  unfold P3 hi
+  rw [e2, Nat.xor_self,
+      R_lu (W + 2^(m+1)) (0 + 2^(m+1)) (m+1) (by omega) (by omega),
+      R_uu 0 W m hp hW, if_neg hW0,
+      R_ul (0 + 2^(m+1)) (W + 2^(m+1)) (m+1) (by omega) (by omega),
+      if_neg (by omega : W + 2^(m+1) ≠ 0),
+      R_uu 0 W m hp hW, if_neg hW0,
+      R_lu W 0 m hW hp,
+      R_ul 0 W m hp hW, if_neg hW0,
+      cdSig0, cdSig0']
+
+/-- The `y = W` column of block `(1,1)`, off its two loci: it FLIPS — obtained from the `l = W` row
+    by `P3_symm`, which applies because all four indices in play are nonzero. -/
+theorem P3_block11_seamcol (m a W : Nat) (ha : a < 2^(m+1)) (hW : W < 2^(m+1))
+    (ha0 : a ≠ 0) (hW0 : W ≠ 0) (haW : a ^^^ W ≠ 0) :
+    P3 (a + 2^(m+1)) (W + 2^(m+1)) W (m+1) = - P3 a W W m := by
+  have hp := Nat.two_pow_pos (m+1)
+  have h2 : (2:Nat)^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  rw [P3_symm (a + 2^(m+1)) (W + 2^(m+1)) W (m+1) (by omega) (by omega) (by omega)
+        (by omega) (by omega),
+      P3_block11_seamrow m a W ha hW ha0 hW0 haW,
+      P3_symm W a W m hW ha hW hW0 ha0]
+
+/-- **BLOCK `(1,1)`'s SIGN, AND IT FACTORISES.**  A row sign times a column sign — a switching. -/
+def E11 (l y W : Nat) : Int :=
+  (if l ^^^ W = 0 then -1 else 1) * (if y = 0 ∨ y ^^^ W = 0 then -1 else 1)
+
+/-- **BLOCK `(1,1)`, TOTAL.**  Every index, for `W ≠ 0`. -/
+theorem P3_block11_total (m l y W : Nat) (hl : l < 2^(m+1)) (hy : y < 2^(m+1))
+    (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    P3 (l + 2^(m+1)) (y + 2^(m+1)) W (m+1) = E11 l y W * P3 l y W m := by
+  have hp := Nat.two_pow_pos (m+1)
+  unfold E11
+  by_cases hlW : l ^^^ W = 0
+  · have hlq : l = W := xor_zero_eq l W hlW
+    subst hlq
+    rw [if_pos hlW]
+    by_cases hy0 : y = 0
+    · subst hy0
+      rw [if_pos (Or.inl rfl), P3_block11_cos_seam m l hW hW0]
+      grind
+    · by_cases hyW : y ^^^ l = 0
+      · have hyq : y = l := xor_zero_eq y l hyW
+        subst hyq
+        rw [if_pos (Or.inr hyW), P3_block11_seam2 m y hW hW0]
+        grind
+      · rw [if_neg (fun h => h.elim hy0 hyW),
+            P3_block11_seamrow m y l hy hW hy0 hW0 hyW]
+        grind
+  · rw [if_neg hlW]
+    by_cases hl0 : l = 0
+    · subst hl0
+      by_cases hy0 : y = 0
+      · subst hy0
+        rw [if_pos (Or.inl rfl), P3_block11_corner m W hW]
+        grind
+      · by_cases hyW : y ^^^ W = 0
+        · have hyq : y = W := xor_zero_eq y W hyW
+          subst hyq
+          rw [if_pos (Or.inr hyW), P3_block11_cos_zero m y hW hW0]
+          grind
+        · rw [if_neg (fun h => h.elim hy0 hyW),
+              P3_block11_row0 m y W hy hW hy0 hW0 hyW]
+          grind
+    · by_cases hy0 : y = 0
+      · subst hy0
+        rw [if_pos (Or.inl rfl), P3_block11_col0 m l W hl hW hl0 hW0 hlW]
+        grind
+      · by_cases hyW : y ^^^ W = 0
+        · have hyq : y = W := xor_zero_eq y W hyW
+          subst hyq
+          rw [if_pos (Or.inr hyW), P3_block11_seamcol m l y hl hW hl0 hW0 hlW]
+          grind
+        · rw [if_neg (fun h => h.elim hy0 hyW)]
+          by_cases hcos : (l ^^^ y) ^^^ W = 0
+          · have hyq : y = l ^^^ W := by
+              have h1 : l ^^^ y = W := xor_zero_eq (l ^^^ y) W hcos
+              have : (l ^^^ (l ^^^ y)) = l ^^^ W := by rw [h1]
+              rw [← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor] at this
+              exact this
+            rw [hyq, P3_block11_cos m l W hl hW hl0 hlW]
+            grind
+          · rw [P3_block11 m l y W hl hy hW hl0 hy0 hlW hyW hcos]
+            grind
+
+/-- **BLOCK `(1,1)` OF THE COSET SUM, COLLECTED.**  The LAST of `cosetU_split4`'s four blocks: the
+    two outer factors are GENERAL block-`(1,1)` pairs — which is exactly why the total was needed —
+    and the middle one is the coset line of Tier 87. -/
+theorem cosetU_block11 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+        P3 (2^(m+1)+a) (2^(m+1)+b) W (m+1)
+          * (P3 (2^(m+1)+b) ((2^(m+1)+b) ^^^ W) W (m+1)
+             * P3 ((2^(m+1)+b) ^^^ W) (2^(m+1)+a) W (m+1))))
+      = sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+          E11 a b W * P3 a b W m
+            * (E11cos b * P3 b (b ^^^ W) W m
+               * (E11 (b ^^^ W) a W * P3 (b ^^^ W) a W m)))) := by
+  refine sumLtI_congr _ _ _ (fun a ha => sumLtI_congr _ _ _ (fun b hb => ?_))
+  have hbW : b ^^^ W < 2^(m+1) := xorlt hb hW
+  rw [shift_xor m b W hb hW, Nat.add_comm (2^(m+1)) b, Nat.add_comm (2^(m+1)) a,
+      P3_block11_total m a b W ha hb hW hW0,
+      P3_block11_cos_total m b W hb hW hW0,
+      P3_block11_total m (b ^^^ W) a W hbW ha hW hW0]
+
 end SounioZDFiberAntisym
-
-
-
-
-
-
-
-
-
-
