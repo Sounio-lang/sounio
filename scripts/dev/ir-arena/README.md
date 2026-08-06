@@ -264,13 +264,40 @@ theory becoming true.
 
 ### Where the bitset actually stands
 
-`writes=8`, `live_at_codegen=8`, deterministic, and the end-to-end case behind
-#1669 — an `f64` returned from a call, under `-O` — prints `v=2.500000`, `rc=0`.
+`writes=8`, `live_at_codegen=8`, deterministic. That pair is the round-trip
+evidence, and it is the whole of it.
+
+**The `v=2.500000` run is NOT evidence for the bitset.** With
+`IR_FLOAT_BITS_TRUSTED = 0` the consumers are gated off, so that `f64` comes out
+right through the existing marker-nop path. It shows the branch has not
+regressed, which is worth having and is not the same claim. Commit `d55ee1ed08`
+runs the two together in one sentence; read the round-trip claim off
+`writes`/`live_at_codegen` alone.
+
 `IR_FLOAT_BITS_TRUSTED` is still `0`: flipping it is a behaviour change and
 belongs in its own commit with the consumers switched and a gate. The evidence
 for flipping it now exists, which it did not before.
 
-### Not yet reproduced standalone against `main`
+### Reproduced standalone — `scripts/dev/ir-arena/repro_boxed_element_ref.sio`
+
+    hoisted=5 inplace=22499901309144        # both should be 5
+
+30 lines, no dependency on this branch, on **lean_single** — the seed that
+builds Madaros and therefore the compiler that generated the miscompiled code.
+
+The first attempt ran it through `madaros --native-v2-compile` and it segfaulted
+before reaching the reference, which I recorded below as "blocked". That was
+blocked on the choice of compiler, not on the compiler; the paragraph is kept
+because the native-v2 observation is separately true.
+
+Scalar field reads in place through the `Box` are **correct** (`tag_inplace=77`).
+The hazard is a reference to an aggregate *element*, dereferenced in a callee.
+
+Branch sweep for the shape: 5 sites — 2 are comments describing this hazard, 3
+are in `compiler/pkg/{lock,registry_client}.sio` and off the IR path. Every IR
+site is hoisted.
+
+### The earlier, wrong conclusion, kept
 
 A minimal `.sio` reproducer of the reference hazard is **blocked**, not
 negative. Boxing a struct in a *user program* under `--native-v2-compile`
