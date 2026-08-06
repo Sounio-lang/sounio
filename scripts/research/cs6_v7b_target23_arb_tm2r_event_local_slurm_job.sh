@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/bash
 #SBATCH --job-name=cs6-event-local
 #SBATCH --partition=gpu-orangefs
 #SBATCH --account=plruntime
@@ -12,7 +12,10 @@
 
 set -euo pipefail
 
-: "${CS6_STAGE_ROOT:?CS6_STAGE_ROOT must name the staged OrangeFS directory}"
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+CS6_STAGE_ROOT="${CS6_STAGE_ROOT:-${1:-}}"
+: "${CS6_STAGE_ROOT:?pass the staged OrangeFS directory as argument 1}"
 REPO="$CS6_STAGE_ROOT/repo"
 DEPS="$CS6_STAGE_ROOT/deps"
 RESULTS="$CS6_STAGE_ROOT/results"
