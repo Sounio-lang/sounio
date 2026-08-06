@@ -14123,6 +14123,59 @@ theorem chi10_col (m c W : Nat) (hc : c < 2^(m+1)) (hW : W < 2^(m+1)) (hW0 : W �
         exact e.symm
       exact cnt3 _ 0 W (c ^^^ W) hp hW hcW d1 d2 d3
 
+
+/-- **§57.28's `10N − 8`, CLOSED.**  The joint locus count, from `chi_joint_factor` and the two
+    column counts.  `c` runs over `B = 2^(m+1)` values; the column product is `B − 1` at `c = 0`,
+    `1` at `c = W` and `9` elsewhere, so the total is `9B + (B−10) − 8 = 10B − 18 = 10N − 8`. -/
+theorem chi_joint_count (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun c =>
+        sumLtI (2^(m+1)) (fun b => chi01 b c W) * sumLtI (2^(m+1)) (fun a => chi10 c a W))
+      = 10 * (((2^(m+1) : Nat) : Int) - 1) - 8 := by
+  have hp := Nat.two_pow_pos (m+1)
+  rw [sumLtI_congr _ _
+        (fun c => (if c = 0 ∨ c ^^^ W = 0 then (1:Int) else 3)
+                    * (if c = 0 then ((2^(m+1) : Nat) : Int) - 1
+                       else (if c ^^^ W = 0 then 1 else 3)))
+        (fun c hc => by rw [chi01_col m c W hc hW hW0, chi10_col m c W hc hW hW0]),
+      sumLtI_congr _ _
+        (fun c => 9 + (((((2^(m+1) : Nat) : Int) - 10) * (if c = 0 then (1:Int) else 0))
+                    + (-8) * (if c = W then (1:Int) else 0)))
+        (fun c _ => by
+          by_cases h0 : c = 0
+          · have hcw : ¬ (c = W) := by rw [h0]; exact fun h => hW0 h.symm
+            have e1 : (if c = 0 ∨ c ^^^ W = 0 then (1:Int) else 3) = 1 := if_pos (Or.inl h0)
+            have e2 : (if c = 0 then ((2^(m+1) : Nat) : Int) - 1
+                       else (if c ^^^ W = 0 then 1 else 3)) = ((2^(m+1) : Nat) : Int) - 1 :=
+              if_pos h0
+            have e3 : (if c = 0 then (1:Int) else 0) = 1 := if_pos h0
+            have e4 : (if c = W then (1:Int) else 0) = 0 := if_neg hcw
+            rw [e1, e2, e3, e4]
+            omega
+          · by_cases hw : c ^^^ W = 0
+            · have hcq : c = W := xor_zero_eq c W hw
+              have e1 : (if c = 0 ∨ c ^^^ W = 0 then (1:Int) else 3) = 1 := if_pos (Or.inr hw)
+              have e2 : (if c = 0 then ((2^(m+1) : Nat) : Int) - 1
+                         else (if c ^^^ W = 0 then 1 else 3)) = 1 := by
+                rw [if_neg h0, if_pos hw]
+              have e3 : (if c = 0 then (1:Int) else 0) = 0 := if_neg h0
+              have e4 : (if c = W then (1:Int) else 0) = 1 := if_pos hcq
+              rw [e1, e2, e3, e4]
+              omega
+            · have hcw : ¬ (c = W) := fun h => hw (by rw [h, Nat.xor_self])
+              have e1 : (if c = 0 ∨ c ^^^ W = 0 then (1:Int) else 3) = 3 :=
+                if_neg (fun h => h.elim h0 hw)
+              have e2 : (if c = 0 then ((2^(m+1) : Nat) : Int) - 1
+                         else (if c ^^^ W = 0 then 1 else 3)) = 3 := by
+                rw [if_neg h0, if_neg hw]
+              have e3 : (if c = 0 then (1:Int) else 0) = 0 := if_neg h0
+              have e4 : (if c = W then (1:Int) else 0) = 0 := if_neg hcw
+              rw [e1, e2, e3, e4]
+              omega),
+      sumLtI_add, sumLtI_add, sumLtI_mul, sumLtI_mul, cnt1 _ 0 hp, cnt1 _ W hW,
+      sumLtI_congr (2^(m+1)) (fun _ => (9:Int)) (fun _ => 9 * 1) (fun _ _ => by omega),
+      sumLtI_mul, sumLtI_one]
+  omega
+
 end SounioZDFiberAntisym
 
 

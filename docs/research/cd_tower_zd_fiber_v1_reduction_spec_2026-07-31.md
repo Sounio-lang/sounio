@@ -4982,11 +4982,22 @@ else 1`, so it is `sumLtI_const_excl` (constant off one excluded point) where th
 the ordered-arguments asymmetry of `P3` in its last visible form — `χ01`'s `l = 0` branch and
 `χ10`'s are genuinely different clauses, not an artefact of how I wrote the two if-chains.
 
-**Both inner counts are now theorems**, so with `chi_joint_factor` (Tier 77) §57.28's joint locus
-count is one arithmetic step: `c` runs over `N + 1` values, two of them special, giving
-`1·N + 1·1 + 9·(N−1) = 10N − 8`. That last step is not itself formalised — it needs the two column
-lemmas fed through a sum over `c`, splitting off the two special columns — but nothing in it is of a
-new kind, and I record no estimate.
+**Both inner counts are now theorems**, and Tier 80 closes the arithmetic:
+
+    chi_joint_count : Σ_{c < 2^(m+1)} (Σ_b χ01 b c W)·(Σ_a χ10 c a W)
+                        = 10·(2^(m+1) − 1) − 8
+
+kernel-clean, 0 violations at `m = 2,3,4`. Two `sumLtI_congr` steps — the first substitutes the two
+column lemmas, the second turns the product (which is `B−1` at `c = 0`, `1` at `c = W`, `9`
+elsewhere) into `9 + (B−10)·[c=0] + (−8)·[c=W]` — then `sumLtI_add`, `sumLtI_mul`, `cnt1` twice and
+`sumLtI_one`, giving `9B + (B−10) − 8 = 10B − 18 = 10N − 8`.
+
+Both providers checked the one thing that could have gone wrong silently: `c = 0` and `c = W` must
+be DISTINCT for the two indicator counts to add without overlap, and `W ≠ 0` guarantees it.
+
+**So §57.28's brute-force count is now a theorem**, and with it the chain from §57.26's assembly
+through §57.27's four-way split down to this number is formal, except for the two single sums
+`tri3w(χ01)` and `tri3w(χ10)`, which are fibre-dependent and remain measured.
 
 **Status of (III).** Still reduced, not proven — but the reduction is now a single explicit
 first-order recursion in `m` whose only non-constant input is a coset-line sum with a closed form.
