@@ -2199,18 +2199,30 @@ pub struct IrLowerResult {
 // ============================================================================
 
 // A single struct field: name + sequential index
+// NAMES ARE INTERNED IDS, NOT Names. A Name is 136 bytes; this entry held two
+// of them, and StructLayoutEntry holds 64 entries, so a single layout cost
+// ~18.6 KB and the table ~4.8 MB at 256 entries. That is what made the capacity
+// unraisable: ir_register_knowledge_layout takes StructLayoutTable BY VALUE and
+// returns it by value, so growing the table to fit the compiler's own closure
+// (693 struct types) put ~57 MB on the stack per call and segfaulted lowering.
+//
+// Two i64 pool ids instead of two Names take the entry from ~18.6 KB to ~2.1 KB.
+// The pool is IR_NAME_POOL_BUF in this file, already used for function names.
+//
+// id 0 IS the empty name -- ir_intern_name returns 0 for an empty input and
+// ir_name_at(0) gives it back -- so a zeroed entry still means "no name", which
+// is what BSS-zeroed globals in this tree rely on.
 pub struct StructFieldEntry {
-    name: Name,
+    name_id: i64,
     index: i64,
     is_float: i64,
-    // Element type name of a fixed-size array field (`[T; N]` -> "T"); empty for
+    // Element type name of a fixed-size array field (`[T; N]` -> "T"); id 0 for
     // non-array fields. Used to dispatch trait-method calls on a struct array
     // element (`a.c[i].m()`) to the real `<T>_<method>` instead of a hardcoded
-    // `i64_<method>` (which is body-less for non-i64 T -> codegen crash).
-    elem_type_name: Name,
+    // fallback.
+    elem_type_name_id: i64,
 }
 
-// Layout for one struct type: name + ordered fields
 pub struct StructLayoutEntry {
     type_name: Name,
     fields: [StructFieldEntry; 64],
@@ -2218,44 +2230,38 @@ pub struct StructLayoutEntry {
 }
 
 // Table of all known struct layouts (populated during lowering)
-// CAPACITY 256, AND IT IS TOO SMALL. Raising it is blocked, which is the point
-// of this note -- the next person to hit the wall should not spend the two
-// builds it took to learn that.
+// CAPACITY 1024, raised from 256. The compiler's own closure (120 modules)
+// declares 693 distinct struct types.
 //
-// THE WALL. Once main.sio's test suite moved out and the merge stopped failing
-// on IR slots, lowering the compiler's own closure reported eight errors, all
-// eight from one line: lowerer_register_struct_fields_direct_mut refusing to
-// register a struct past this cap. A census of that closure -- 120 modules --
-// finds 693 distinct struct types.
+// THERE ARE NINE CAPACITY GUARDS on this table across ir/lower.sio, not the
+// seven a first sweep finds. An attempt at 512 raised seven of them and failed
+// with the identical message and the identical error count, which reads like
+// "the raise did nothing" when it actually meant "lower.sio:9933 and :10039 are
+// still at the old cap".
 //
-// EIGHT IS NOT THE SHORTFALL. Only ONE of the seven capacity guards raises an
-// error; the four other registration sites say `if count < CAP { ... }` and skip
-// in silence. The 8 counts attempts through the guard that speaks. Reading it as
-// "needs ~264" is what sent me to 512, which failed with the identical message
-// and the identical count -- which is exactly what a silent skip looks like from
-// outside.
+// Only ONE of the nine raises a diagnostic; the others skip in silence. The
+// error count is therefore a count of attempts through the guard that speaks,
+// never the shortfall. DO NOT SIZE THIS TABLE FROM IT -- reading "8 over 256"
+// as "needs ~264" is what sent the first attempt to 512.
 //
-// AND 1024 SEGFAULTS. Not for lack of memory: ir_register_knowledge_layout takes
-// StructLayoutTable BY VALUE, returns it by value, and copies it once more
-// internally. An entry is ~18.6 KB -- a Name is 136 bytes and an entry holds 64
-// fields of two Names each -- so the table is ~19 MB at 1024 and one call costs
-// ~57 MB of stack. gen2 died at `lower_array: seed_begin` with the compiler's
-// own "stack frame too large ... consider passing by &!/reference" warnings
-// already in the log, describing the defect that killed it.
+// The entry is interned (see StructFieldEntry below): two i64 pool ids instead
+// of two 136-byte Names take it from ~18.6 KB to ~2.1 KB, and this table from
+// ~19 MB to ~2.1 MB at 1024. That matters because ir_register_knowledge_layout
+// takes StructLayoutTable BY VALUE and returns it by value, so every call
+// copies the whole thing -- twice.
 //
-// SO THE FIX IS NOT A BIGGER NUMBER. Intern the names: StructFieldEntry would
-// hold two i64 pool ids instead of two Names and the entry would shrink ~30x,
-// putting 1024 entries under a megabyte and the by-value copies back in range.
-// IR_NAME_POOL_BUF in this same file already does exactly this for function
-// names. Until then this stays at 256, because 512 buys nothing measurable and
-// costs 2x the memory on every compile.
+// (An earlier revision of this note blamed a SIGSEGV at 1024 on those by-value
+// copies. That was wrong: the crash was a `ulimit -s 524288` in the measuring
+// shell, which LOWERS the stack on a host whose default is unlimited. The
+// interning is still right, for the reason above, but it was never what fixed
+// the crash.)
 pub struct StructLayoutTable {
-    entries: [StructLayoutEntry; 256],
+    entries: [StructLayoutEntry; 1024],
     count: i64,
 }
 
 pub fn empty_struct_field_entry() -> StructFieldEntry {
-    StructFieldEntry { name: ir_empty_name(), index: 0, is_float: 0, elem_type_name: ir_empty_name() }
+    StructFieldEntry { name_id: 0, index: 0, is_float: 0, elem_type_name_id: 0 }
 }
 
 pub fn empty_struct_layout_entry() -> StructLayoutEntry {
@@ -2268,7 +2274,7 @@ pub fn empty_struct_layout_entry() -> StructLayoutEntry {
 
 pub fn empty_struct_layout_table() -> StructLayoutTable {
     StructLayoutTable {
-        entries: [empty_struct_layout_entry(); 256],
+        entries: [empty_struct_layout_entry(); 1024],
         count: 0,
     }
 }
