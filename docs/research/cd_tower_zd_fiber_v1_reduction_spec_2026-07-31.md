@@ -5103,9 +5103,32 @@ the recursion on the shared fibres at `m = 2,3,4,5`.
 
 **Why this matters for proving it.** A Walsh expansion over `2^(m−2)` characters is a global
 statement; a first-order recursion in `m` is the shape the block identities of Tiers 66/70–74 were
-built for. The concrete route is now: split the level-`(m+1)` coset sum into its four index blocks
-and apply those identities to the summand `S(a,b)·P(b,b⊕W)·P(b⊕W,a)`. That is not attempted here,
-and — having twice recorded a difficulty that dissolved on contact — I record no estimate of it.
+built for. The concrete route is: split the level-`(m+1)` coset sum into its four index blocks and
+apply those identities to the summand `S(a,b)·P(b,b⊕W)·P(b⊕W,a)`.
+
+### 57.36 — Tier 82: block `(1,1)`'s coset case, the gap Tier 67 flagged
+
+Working out which identities that route needs found a hole: the summand's middle factor is
+`P(b, b⊕W)`, and when `b` is high that pair is in block `(1,1)` **exactly on its coset line** — the
+one case Tier 67 left unproved, because its proof applies `antisym` twice and the coset line breaks
+both.
+
+    P3_block11_cos : P3 (l+2^(m+1)) ((l⊕W)+2^(m+1)) W (m+1) = P3 l (l⊕W) W m
+
+No flip, and **no `antisym` at all**: with `y = l ⊕ W` the two `hi` images SWAP the two indices, so
+`R_lu` and `R_ul` land directly on the diagonal and every surviving `cdSigma` is a `sigma_self`.
+Both sides are `−1`. Kernel-clean, green first try; measured first, 0 violations / 42, 210, 930 at
+`m = 2,3,4`.
+
+Both providers confirmed the closure: `hcos`'s failure locus is exactly `y = l ⊕ W`, Tier 67 covers
+the complement, this covers the locus, so **block `(1,1)` is now exhaustive for nonzero `l, y, W`** —
+and both confirmed the reading that `(b, b⊕W)` sits on that locus with `l := b`, which is why the
+recursion needed it. zai checked the bit arithmetic on a worked example rather than taking it on
+trust.
+
+**Still not the recursion.** This closes a prerequisite. The recursion itself — the four-block split
+of the coset sum and the collection of the resulting terms — is not attempted, and I record no
+estimate of it.
 
 **Status of (III).** Still reduced, not proven — but the reduction is now a single explicit
 first-order recursion in `m` whose only non-constant input is a coset-line sum with a closed form.

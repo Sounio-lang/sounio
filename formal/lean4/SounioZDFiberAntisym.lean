@@ -14217,6 +14217,44 @@ theorem tri3w_ca (B : Nat) (A : Nat → Nat → Int) (g : Nat → Nat → Int) :
   rw [← sumLtI_mul B (g c a * A c a) (fun b => A a b * A b c)]
   exact sumLtI_congr _ _ _ (fun b _ => by grind)
 
+
+/-! ### Tier 82 — block `(1,1)`'s coset case, the gap Tier 67 flagged
+
+    Tier 67 proved block `(1,1)` only off the coset line, and said so: its proof applies `antisym`
+    twice and the coset line breaks BOTH, so the hypothesis `l ⊕ y ≠ W` stayed in. On that line the
+    identity still holds, and here is why — no `antisym` is needed at all, because with `y = l ⊕ W`
+    the two `hi` images coincide with the two indices and every `cdSigma` in sight is a
+    `sigma_self`.  Both sides are `−1`.
+
+    This is a prerequisite for the `Σ_coset` level recursion of §57.35: that recursion's summand
+    `S(a,b)·P(b,b⊕W)·P(b⊕W,a)` hits block `(1,1)` whenever `b` is high, and the pair `(b, b⊕W)` is
+    exactly on the coset line. -/
+
+/-- Block `(1,1)` on the coset line: no flip, and no `antisym`. -/
+theorem P3_block11_cos (m l W : Nat) (hl : l < 2^(m+1)) (hW : W < 2^(m+1))
+    (hl0 : l ≠ 0) (hlW : l ^^^ W ≠ 0) :
+    P3 (l + 2^(m+1)) ((l ^^^ W) + 2^(m+1)) W (m+1) = P3 l (l ^^^ W) W m := by
+  have hp := Nat.two_pow_pos (m+1)
+  have h2 : (2:Nat)^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  have hlW' : l ^^^ W < 2^(m+1) := xorlt hl hW
+  have hback : (l ^^^ W) ^^^ W = l := xor_cancel l W
+  have hlH : (l + 2^(m+1)) ^^^ W = (l ^^^ W) + 2^(m+1) := by
+    have h := xor_lo_hi (m+1) W l (by omega) hW hl
+    rw [Nat.xor_comm (l + 2^(m+1)) W, h, Nat.xor_comm W l]
+  have hyH : ((l ^^^ W) + 2^(m+1)) ^^^ W = l + 2^(m+1) := by
+    have h := xor_lo_hi (m+1) W (l ^^^ W) (by omega) hW hlW'
+    rw [Nat.xor_comm ((l ^^^ W) + 2^(m+1)) W, h, Nat.xor_comm W (l ^^^ W), hback]
+  rw [P3_red l (l ^^^ W) W m hl hlW' hW hlW, hback,
+      sigma_self (m+1) l hl hl0, sigma_self (m+1) (l ^^^ W) hlW' hlW]
+  unfold P3 hi
+  rw [hlH, hyH,
+      R_lu (l + 2^(m+1)) (l + 2^(m+1)) (m+1) (by omega) (by omega),
+      sigma_self (m+2) (l + 2^(m+1)) (by omega) (by omega),
+      R_ul ((l ^^^ W) + 2^(m+1)) ((l ^^^ W) + 2^(m+1)) (m+1) (by omega) (by omega),
+      if_neg (by omega : (l ^^^ W) + 2^(m+1) ≠ 0),
+      sigma_self (m+2) ((l ^^^ W) + 2^(m+1)) (by omega) (by omega)]
+  grind
+
 end SounioZDFiberAntisym
 
 
