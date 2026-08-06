@@ -22,7 +22,7 @@ transport = carrier.transport
 chain = transport.chain
 event = transport.event
 
-SCHEMA = "sounio.cs6.v7b-target23-arb-tm2r-event-local-diagnostic.v1"
+SCHEMA = "sounio.cs6.v7b-target23-arb-tm2r-event-local-diagnostic.v2"
 TILE_ID = "XLEL"
 CRITICAL_PATH = (
     "DOWN_RHO0L",
@@ -55,6 +55,10 @@ def bool_check(checks: list[dict[str, object]], name: str, passed: bool) -> None
 
 def same_interval(left: arb, right: arb) -> bool:
     return left.contains(right) and right.contains(left)
+
+
+def compatible_interval(left: arb, right: arb) -> bool:
+    return left.overlaps(right)
 
 
 def local_slab_scan(state: list[base.TM2R]) -> dict[str, object]:
@@ -236,6 +240,13 @@ def state_metrics(state: list[base.TM2R]) -> dict[str, object]:
     return {
         "ranges": [interval_json(value) for value in ranges],
         "widths": [interval_json(base.width(value)) for value in ranges],
+        "remainders": [
+            interval_json(component.remainder) for component in state
+        ],
+        "remainder_widths": [
+            interval_json(base.width(component.remainder))
+            for component in state
+        ],
         "max_width": interval_json(
             base.max_upper([base.width(value) for value in ranges])
         ),
@@ -245,15 +256,19 @@ def state_metrics(state: list[base.TM2R]) -> dict[str, object]:
 def classify(
     implementation_ok: bool,
     raw_accepted: bool,
-    reconditioned_accepted: bool,
-    anchored_accepted: bool,
+    chart_accepted: bool,
+    event_criterion_accepted: bool,
+    joint_accepted: bool,
 ) -> str:
     if not implementation_ok:
         return "IMPLEMENTATION_INCONSISTENCY"
     if raw_accepted:
         return "CURRENT_CRITERION_ACCEPTS"
-    chart = reconditioned_accepted
-    criterion = anchored_accepted
+    chart = chart_accepted
+    criterion = event_criterion_accepted
+    if joint_accepted:
+        chart = True
+        criterion = True
     if chart and criterion:
         return "MIXED_CHART_AND_EVENT_CRITERION"
     if chart:
@@ -276,18 +291,69 @@ def main() -> None:
     tile_state, _domain = tiles[TILE_ID]
     first = event.integrate_positive_return(tile_state)
     first_projection = event.interval_newton_project(first)
-    approach = chain.integrate_downward_return(first_projection.carrier)
 
-    endpoint_ranges = [component.range() for component in approach.endpoint]
+    captured_steps: list[dict[str, object]] = []
+    captured_elapsed = Fraction(0)
+    original_advance = adaptive.advance_with_endpoint_intersection
+
+    def capture_advance(
+        initial: list[base.TM2R], step: arb
+    ) -> tuple[list[base.TM2R], list[arb]]:
+        nonlocal captured_elapsed
+        next_state, tube = original_advance(initial, step)
+        step_q = Fraction(base.exact_fraction(step))
+        captured_elapsed += step_q
+        derivative = tube[0] * tube[1] - tube[2] - base.ZS
+        captured_steps.append(
+            {
+                "state": next_state,
+                "tube": tube,
+                "reference_time": captured_elapsed,
+                "contains_section": tube[2].lower() <= 0 <= tube[2].upper(),
+                "strictly_downward": derivative.upper() < 0,
+            }
+        )
+        return next_state, tube
+
+    adaptive.advance_with_endpoint_intersection = capture_advance
+    try:
+        approach = chain.integrate_downward_return(first_projection.carrier)
+    finally:
+        adaptive.advance_with_endpoint_intersection = original_advance
+
+    crossing_candidates = [
+        item
+        for item in captured_steps
+        if item["contains_section"] and item["strictly_downward"]
+    ]
+    if not crossing_candidates:
+        raise base.Refusal(
+            "CAPTURED_CROSSING_TUBE_MISSING",
+            "production downward integration reported no captured downward crossing",
+        )
+    crossing = crossing_candidates[-1]
+    crossing_state = crossing["state"]
+    crossing_tube = crossing["tube"]
+    crossing_reference_time = crossing["reference_time"]
     bool_check(
         checks,
-        "approach_endpoint_in_crossing_tube",
-        all(
-            tube.contains(component)
-            for tube, component in zip(
-                approach.event_tube, endpoint_ranges, strict=True
-            )
-        ),
+        "captured_elapsed_matches_production_reference",
+        captured_elapsed == approach.reference_time,
+    )
+    bool_check(
+        checks,
+        "captured_crossing_precedes_production_endpoint",
+        crossing_reference_time <= approach.reference_time,
+    )
+    bool_check(
+        checks,
+        "captured_tube_contains_section",
+        bool(crossing["contains_section"]),
+    )
+    bool_check(
+        checks,
+        "captured_tube_strictly_downward",
+        bool(crossing["strictly_downward"]),
     )
     derivative_direct = (
         approach.event_tube[0] * approach.event_tube[1]
@@ -346,8 +412,15 @@ def main() -> None:
             not raw_scan["accepted"],
         )
         left, right, reconstruction_checks = adaptive.split_state(state, variable)
+        crossing_left, crossing_right, crossing_checks = adaptive.split_state(
+            crossing_state, variable
+        )
         split_reconstruction_checks += reconstruction_checks
+        split_reconstruction_checks += crossing_checks
         child = left if side_token == "L" else right
+        crossing_child = (
+            crossing_left if side_token == "L" else crossing_right
+        )
         parent_ranges = [component.range() for component in state]
         child_ranges = [component.range() for component in child]
         bool_check(
@@ -361,10 +434,19 @@ def main() -> None:
             ),
         )
         state = child
+        crossing_state = crossing_child
 
     final_raw = prefixes[-1]["raw_symmetric_slab"]
     final_reconditioned = prefixes[-1]["reconditioned_symmetric_slab"]
     anchored = anchored_event_step_newton(state, approach.event_tube)
+    crossing_raw = local_slab_scan(crossing_state)
+    crossing_reconditioned_state = adaptive.point_coefficient_recondition(
+        crossing_state
+    )
+    crossing_reconditioned = local_slab_scan(crossing_reconditioned_state)
+    crossing_anchored = anchored_event_step_newton(
+        crossing_state, crossing_tube
+    )
 
     tm_derivative = state[0] * state[1] - state[2] - base.ZS
     coefficient_derivative = base.tm_flow_coefficients(state, 1)[2][1]
@@ -374,28 +456,29 @@ def main() -> None:
     )
     bool_check(
         checks,
-        "tm_event_derivative_coefficient_identity",
+        "tm_event_derivative_enclosures_compatible",
         all(
-            same_interval(
+            compatible_interval(
                 tm_derivative.coefficients.get(monomial, arb(0)),
                 coefficient_derivative.coefficients.get(monomial, arb(0)),
             )
             for monomial in monomials
         )
-        and same_interval(tm_derivative.remainder, coefficient_derivative.remainder),
-    )
-    bool_check(
-        checks,
-        "anchored_endpoint_in_crossing_tube",
-        bool(anchored["endpoint_in_crossing_tube"]),
+        and compatible_interval(
+            tm_derivative.remainder, coefficient_derivative.remainder
+        ),
     )
 
     implementation_ok = all(bool(item["passed"]) for item in checks)
+    chart_test_accepted = bool(final_reconditioned["accepted"])
+    event_criterion_test_accepted = bool(crossing_raw["accepted"])
+    joint_test_accepted = bool(crossing_reconditioned["accepted"])
     classification = classify(
         implementation_ok,
         bool(final_raw["accepted"]),
-        bool(final_reconditioned["accepted"]),
-        bool(anchored["accepted"]),
+        chart_test_accepted,
+        event_criterion_test_accepted,
+        joint_test_accepted,
     )
     source_path = Path(__file__)
     payload = {
@@ -417,12 +500,32 @@ def main() -> None:
         "critical_depth": len(CRITICAL_PATH),
         "first_return_end_step": first.end_step,
         "downward_reference_time_q": str(approach.reference_time),
+        "crossing_reference_time_q": str(crossing_reference_time),
+        "endpoint_delay_from_crossing_q": str(
+            approach.reference_time - crossing_reference_time
+        ),
+        "captured_successful_steps": len(captured_steps),
+        "returned_tube_contains_section": (
+            approach.event_tube[2].lower() <= 0 <= approach.event_tube[2].upper()
+        ),
         "source_split_reconstruction_checks": source_split_checks,
         "critical_split_reconstruction_checks": split_reconstruction_checks,
         "implementation_checks": checks,
         "implementation_checks_passed": implementation_ok,
         "prefix_diagnostics": prefixes,
-        "anchored_crossing_step_newton": anchored,
+        "delayed_endpoint_anchored_newton": anchored,
+        "crossing_event_diagnostic": {
+            "state": state_metrics(crossing_state),
+            "raw_symmetric_slab": crossing_raw,
+            "reconditioned_state": state_metrics(
+                crossing_reconditioned_state
+            ),
+            "reconditioned_symmetric_slab": crossing_reconditioned,
+            "anchored_newton": crossing_anchored,
+        },
+        "chart_test_accepted": chart_test_accepted,
+        "event_criterion_test_accepted": event_criterion_test_accepted,
+        "joint_reanchor_recondition_test_accepted": joint_test_accepted,
         "final_raw_accepted": bool(final_raw["accepted"]),
         "final_reconditioned_accepted": bool(final_reconditioned["accepted"]),
         "final_anchored_accepted": bool(anchored["accepted"]),

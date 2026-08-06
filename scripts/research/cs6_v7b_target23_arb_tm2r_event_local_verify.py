@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 
 
-SCHEMA = "sounio.cs6.v7b-target23-arb-tm2r-event-local-diagnostic.v1"
+SCHEMA = "sounio.cs6.v7b-target23-arb-tm2r-event-local-diagnostic.v2"
 EXPECTED_PATH = [
     "DOWN_RHO0L",
     "DOWN_ETAH",
@@ -50,19 +50,36 @@ def require(payload: dict[str, object], key: str, expected: object) -> None:
 def expected_classification(payload: dict[str, object]) -> str:
     implementation_ok = payload.get("implementation_checks_passed") is True
     raw = payload.get("final_raw_accepted") is True
-    reconditioned = payload.get("final_reconditioned_accepted") is True
-    anchored = payload.get("final_anchored_accepted") is True
+    chart = payload.get("chart_test_accepted") is True
+    event_criterion = payload.get("event_criterion_test_accepted") is True
+    joint = payload.get("joint_reanchor_recondition_test_accepted") is True
     if not implementation_ok:
         return "IMPLEMENTATION_INCONSISTENCY"
     if raw:
         return "CURRENT_CRITERION_ACCEPTS"
-    if reconditioned and anchored:
+    if joint or (chart and event_criterion):
         return "MIXED_CHART_AND_EVENT_CRITERION"
-    if reconditioned:
+    if chart:
         return "CHART_DRIFT"
-    if anchored:
+    if event_criterion:
         return "EVENT_CRITERION"
     return "UNRESOLVED_ENCLOSURE"
+
+
+def validate_scan(scan: object, label: str) -> None:
+    if not isinstance(scan, dict) or not isinstance(scan.get("scales"), list):
+        fail(f"{label} is absent")
+    powers = [item.get("power") for item in scan["scales"]]
+    expected_powers = list(range(18, 18 - len(powers), -1))
+    if powers != expected_powers or not powers or powers[-1] < 7:
+        fail(f"{label} has a malformed slab scale sequence")
+    if scan.get("accepted") is True:
+        if scan.get("accepted_power") != powers[-1]:
+            fail(f"{label} has an inconsistent accepted power")
+        if scan["scales"][-1].get("status") != "ACCEPTED":
+            fail(f"{label} accepted without an accepted scale")
+    elif powers != list(range(18, 6, -1)):
+        fail(f"{label} refusal did not exhaust every scale")
 
 
 def main() -> None:
@@ -110,20 +127,7 @@ def main() -> None:
         if prefix.get("path") != EXPECTED_PATH[:depth]:
             fail(f"prefix {depth} has the wrong path")
         for mode in ("raw_symmetric_slab", "reconditioned_symmetric_slab"):
-            scan = prefix.get(mode)
-            if not isinstance(scan, dict) or not isinstance(scan.get("scales"), list):
-                fail(f"prefix {depth} lacks {mode}")
-            powers = [item.get("power") for item in scan["scales"]]
-            expected_powers = list(range(18, 18 - len(powers), -1))
-            if powers != expected_powers or not powers or powers[-1] < 7:
-                fail(f"prefix {depth} has a malformed slab scale sequence")
-            if scan.get("accepted") is True:
-                if scan.get("accepted_power") != powers[-1]:
-                    fail(f"prefix {depth} has an inconsistent accepted power")
-                if scan["scales"][-1].get("status") != "ACCEPTED":
-                    fail(f"prefix {depth} accepted without an accepted scale")
-            elif powers != list(range(18, 6, -1)):
-                fail(f"prefix {depth} refusal did not exhaust every scale")
+            validate_scan(prefix.get(mode), f"prefix {depth} {mode}")
 
     checks = payload.get("implementation_checks")
     if not isinstance(checks, list) or not checks:
@@ -141,11 +145,34 @@ def main() -> None:
     if classification != expected:
         fail(f"classification mismatch: expected {expected}, got {classification}")
 
-    anchored = payload.get("anchored_crossing_step_newton")
+    anchored = payload.get("delayed_endpoint_anchored_newton")
     if not isinstance(anchored, dict):
         fail("anchored Newton diagnostic is absent")
     if anchored.get("accepted") is not payload.get("final_anchored_accepted"):
         fail("anchored acceptance summary mismatch")
+    crossing = payload.get("crossing_event_diagnostic")
+    if not isinstance(crossing, dict):
+        fail("captured crossing-event diagnostic is absent")
+    crossing_raw = crossing.get("raw_symmetric_slab")
+    crossing_reconditioned = crossing.get("reconditioned_symmetric_slab")
+    if not isinstance(crossing_raw, dict) or not isinstance(
+        crossing_reconditioned, dict
+    ):
+        fail("captured crossing-event scans are absent")
+    validate_scan(crossing_raw, "captured crossing raw scan")
+    validate_scan(
+        crossing_reconditioned, "captured crossing reconditioned scan"
+    )
+    if (
+        crossing_raw.get("accepted")
+        is not payload.get("event_criterion_test_accepted")
+    ):
+        fail("event-criterion acceptance summary mismatch")
+    if (
+        crossing_reconditioned.get("accepted")
+        is not payload.get("joint_reanchor_recondition_test_accepted")
+    ):
+        fail("joint acceptance summary mismatch")
     if (
         prefixes[-1]["raw_symmetric_slab"].get("accepted")
         is not payload.get("final_raw_accepted")
@@ -166,6 +193,14 @@ def main() -> None:
         f"{str(payload['final_reconditioned_accepted']).lower()}"
     )
     print(f"FINAL_ANCHORED_ACCEPTED={str(payload['final_anchored_accepted']).lower()}")
+    print(
+        "EVENT_CRITERION_TEST_ACCEPTED="
+        f"{str(payload['event_criterion_test_accepted']).lower()}"
+    )
+    print(
+        "JOINT_REANCHOR_RECONDITION_TEST_ACCEPTED="
+        f"{str(payload['joint_reanchor_recondition_test_accepted']).lower()}"
+    )
     print("FULL_TRANSPORT_ATTEMPTED=false")
     print("COVERING_RELATION_CERTIFIED=false")
     print("VERIFIED=true")

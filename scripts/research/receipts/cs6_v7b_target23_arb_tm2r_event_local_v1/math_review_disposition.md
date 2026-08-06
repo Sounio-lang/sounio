@@ -34,3 +34,23 @@ not identify a discrepancy.
 Z.AI and all available fallback providers failed operationally as recorded in
 `provider_failures.md`.  This review is retained as single-provider degraded,
 not as a dual-provider pass.
+
+## Version 2 focused review
+
+After job 8723 showed that the returned endpoint is delayed relative to the
+actual crossing tube, version 2 instruments the unchanged production advance
+call and captures that crossing endpoint.  xAI accepted that applying the same
+12 exact affine substitutions preserves the source subdomain and accepted the
+updated fail-closed classification.  Its remainder-width suggestion was
+adopted as explicit per-component metrics for raw and reconditioned states.
+
+The new sign objection is algebraically false: the suggested replacement
+`X_w / mid(-D)` is exactly equal to the implemented `-X_w / mid(D)`.  With
+`X_w < 0` and `D < 0`, both expressions are negative, as required for a
+backward correction.  The claimed absence of monotonicity is also false for an
+accepted crossing tube because the diagnostic explicitly requires
+`upper(D) < 0`; this is strict monotonicity of `w` throughout that tube.  No
+uniqueness claim outside the accepted local slab is made.
+
+Z.AI again returned an empty artifact.  Version 2 therefore remains
+single-provider degraded pending independent re-review.
