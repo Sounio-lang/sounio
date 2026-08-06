@@ -5296,9 +5296,19 @@ zai is right, and grok's agreement was not evidence.
 
 The true statement is sharper. `g` and `h` differ at `y = 0` and nowhere else — both are `−1` at
 `y = W` and `+1` elsewhere — so on the NONZERO indices `σ = g = h` and the lift IS a switching:
-0/2401 and 0/50625 triples change at `m = 2,3`. Index `0` is exactly what `P3̃` masks out (Tier 63),
-so the two-graph of the masked matrix is preserved and the deviation law's moment is blind to this
-lift — the same index-`0` exception, for the same reason, as in Tier 64.
+0/2401 and 0/50625 triples change at `m = 2,3`.
+
+**Second correction, to the correction itself.** I then wrote that the masked two-graph is therefore
+preserved and the deviation law's moment blind to this lift, "as in Tier 64". Both halves overreach.
+The measurement ranges over triples with all three indices HIGH and nonzero, so what it establishes
+is the `(1,1,1)` ORTHANT identity — the top mirror of Tier 68's `tri3_low_orthant`. The level-`(m+1)`
+moment is a sum of eight orthants; the other seven are untouched, and the moment is manifestly not
+level-invariant (§57.9's 210, 2730, 26970, …). And Tier 64 is structurally different: it switches
+the whole matrix at a fixed level, which does give moment invariance, whereas this tier relates a
+sub-block at level `m+1` to the whole matrix at level `m`. The defensible form: the induced two-graph
+on the high half's nonzero indices is switching-equivalent to the level-`m` two-graph. Stating the
+orthant identity in Lean — the mirror of Tier 68 — is what would upgrade this from measured to
+proved, and it is the obvious next rung.
 
 One hypothesis dropped: `P3_block11_corner` needs no `W ≠ 0`. The linter flagged it unused, and the
 identity does hold at `W = 0` (measured `m = 2,3,4`); both `P3`s collapse through `cdSig0`/`cdSig0'`

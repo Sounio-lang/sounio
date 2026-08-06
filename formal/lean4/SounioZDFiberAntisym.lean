@@ -14520,12 +14520,20 @@ theorem cosetU_block01 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
     Here `g(0) = +1` while `h(0) = −1`, so the unqualified claim is FALSE — measured, 1036/3584 and
     10140/61440 triples change at `m = 2,3`.
 
-    What IS true, and is the sharper statement: `g` and `h` differ at `y = 0` and NOWHERE ELSE (both
-    are `−1` at `y = W` and `+1` elsewhere), so on the NONZERO indices the transfer is a genuine
-    switching by `σ = g` and does preserve every triple product — 0/2401 and 0/50625 at `m = 2,3`.
-    Index `0` is exactly what `P3̃` masks out (Tier 63), so the two-graph of the masked matrix is
-    preserved and the deviation law's moment is blind to this lift.  The exception is the index-`0`
-    line, once more, and for the same reason as in Tier 64.
+    What IS true: `g` and `h` differ at `y = 0` and NOWHERE ELSE (both are `−1` at `y = W` and `+1`
+    elsewhere), so on the NONZERO indices `σ = g = h` and the lift is a genuine switching, preserving
+    every triple product — measured 0/2401 and 0/50625 at `m = 2,3`.
+
+    ⚠ And that is ALL it says, which is less than the sentence I first wrote here.  The scope is the
+    `(1,1,1)` orthant: the level-`(m+1)` triple products with all three indices HIGH and nonzero
+    equal the level-`m` ones.  That is the top mirror of Tier 68's `tri3_low_orthant`, not a
+    statement about `tri3(P3̃)`, whose level-`(m+1)` value is a sum of EIGHT orthants — the other
+    seven are untouched here, and the moment plainly is not level-invariant (§57.9: 210, 2730,
+    26970, …).  The Tier 64 analogy is also weaker than it looks: `P3_top_switch` switches the WHOLE
+    matrix at a FIXED level, so it does give moment invariance; this tier relates a SUB-BLOCK at
+    level `m+1` to the whole matrix at level `m`, so what it gives is that the induced two-graph on
+    the high half's nonzero indices is switching-equivalent to the level-`m` two-graph.  The orthant
+    identity itself is measured, not yet a Lean theorem.
 
     Six new pointwise lemmas supply what Tiers 67/82/86 left: the `l = 0` row (no flip), the corner
     `l = y = 0` (flip), the `y = 0` column (flip), the `l = W` row (flip), the `y = W` column (flip,
