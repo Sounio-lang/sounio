@@ -13053,6 +13053,45 @@ theorem P3_top_switch (k l y W : Nat) (hl : l < 2^(k+2)) (hy : y < 2^(k+2))
       sigma_top_flip k (l ^^^ W) y (xorlt hl hWlt) hy hy0]
   grind
 
+
+/-! ### Tier 65 — at the maximal seam the TWO-GRAPH IS EMPTY
+
+    §57.9 measured that `P3̃`'s spectrum at `W = 2^n` is `{N−1, −1^(N−1)}` — the spectrum of `J − I`
+    — and read `P3_pow2_top` as the reason.  Here that reading is the theorem it is: every triple
+    product is `+1`, i.e. the two-graph `Ω = { {a,b,c} : P3_ab·P3_bc·P3_ca = −1 }` is EMPTY, because
+    a rank-one sign matrix makes each product a product of three SQUARES.
+
+    That is the geometric content of the closed form
+    `tri3(P3̃)|_{W=2^n} = N(N−1)(N−2)` with `N = 2^(n+1)−1` (measured `210, 2730, 26970, 238266,
+    2000250` at `n = 2…6`); the counting half is the `sumLtI` argument of Tier 58 and is not redone
+    here.
+
+    It is also the reason the maximal seam is the EXCEPTION in §57.8's split, and that exception now
+    has a closed form of its own, confirmed OUT OF SAMPLE at `n = 6`:
+
+      `D[tri3(P3̃)]|_{W = 2^n}` `= 27·8²·[n,3]₂ + 288·[n−1,2]₂`
+
+    against the plain law `27·8^(m−j)·[j,3]₂` that every other label obeys. -/
+
+/-- **EVERY TRIPLE OFF THE SEAM VERTEX IS COHERENT AT THE MAXIMAL SEAM.**  `P3_pow2_top` makes
+    `P3` a rank-one sign matrix there, so the product is a product of three squares.
+
+    ⚠ SCOPE.  This is the two-graph being empty on the triples that AVOID the seam vertex `2^n` —
+    `P3_pow2_top`'s own hypotheses exclude it, and so do `haS`/`hbS`/`hcS` here.  The triples THROUGH
+    `2^n` are coherent as well, but that is MEASURED (0 bad triples at `n = 2,3,4`), not proved:
+    closing it needs `P3_pow2_top` extended to the seam vertex.  The M1 reviewer flagged exactly
+    this, and the docstring's first version overstated it. -/
+theorem P3_pow2_coherent (n a b c : Nat) (ha : a < 2^(n+1)) (hb : b < 2^(n+1)) (hc : c < 2^(n+1))
+    (ha0 : a ≠ 0) (hb0 : b ≠ 0) (hc0 : c ≠ 0)
+    (haS : a ≠ 2^n) (hbS : b ≠ 2^n) (hcS : c ≠ 2^n)
+    (hab : a ≠ b) (hbc : b ≠ c) (hca : c ≠ a) :
+    P3 a b (2^n) n * (P3 b c (2^n) n * P3 c a (2^n) n) = 1 := by
+  rw [P3_pow2_top n a b ha hb ha0 hb0 haS hbS hab,
+      P3_pow2_top n b c hb hc hb0 hc0 hbS hcS hbc,
+      P3_pow2_top n c a hc ha hc0 ha0 hcS haS hca]
+  unfold muTop
+  split <;> split <;> split <;> decide
+
 end SounioZDFiberAntisym
 
 

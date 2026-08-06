@@ -4238,12 +4238,65 @@ Two sharp boundaries, both measured and both reflected in the hypotheses:
 * **`P1` is NOT switched by the top bit** — not by `epsTop`, and not by any vector: at every label
   of `m = 2,3,4` some triple product of `P1(W)·P1(W+2^m)` is `−1`. The property is specific to `P3`.
 
-**Status of (III).** Still reduced, not proven. What moved: `tri3(P3̃)` has a closed form at the
-maximal seam and a proven invariance (the top bit), which explains the class structure of its value
-table — at `m = 5` the eight values pair up exactly as `{8,40}, {24,56}, {16,48}` plus the singleton
-`{32}`. What has not been attempted: `D[tri3(P3̃)] = 27·8^(n−j)[j,3]₂` itself, `tri3(P3̃)`'s value at
-a generic label (its spectrum has irrational eigenvalues at `m = 3,4,5`, so no strongly-regular /
-conference structure to lean on), the maximal-seam exception in §57.8's split, and the fibre
-variation of `tr(Alo²P)` / `tr(AloP²)`. No difficulty is recorded for any of them.
+### 57.10 — `D[tri3(P3̃)]`: the reference is a REGULAR two-graph, and the exception has a closed form
+
+**The fibre reference is regular.** Switching `P3̃` so that vertex `1`'s row is all `+1` and reading
+off the descendant graph at `W = 8g+1`:
+
+| `m` | vertices | degree | edges |
+|---|---|---|---|
+| 3 | 14 = 2 isolated + 12 | 4 | 24 |
+| 4 | 30 = 2 isolated + 28 | 12 | 168 |
+| 5 | 62 = 2 isolated + 60 | 28 | 840 |
+
+i.e. **regular of degree `2^m − 4` on `2^(m+1) − 4` vertices**, plus exactly two isolated ones, with
+`E = (2^(m+1)−4)(2^m−4)/2`. (At `m = 4` that edge count is `168` — noted, not claimed: the lane's
+`168`s have burned me before, and this one is a product of two binomials that happens to land there.)
+
+**The reduction.** For a two-graph with descendant graph `G` on `N` vertices, elementary counting
+gives `|Ω| = E·(N−2) − 2·Σ_v C(d_v,2) + 4·t(G)` with `t` the triangle count, so
+
+    tri3(P3̃) = 6·C(N,3) − 12·|Ω|
+
+turns `D[tri3(P3̃)]` into the deviation of three graph statistics. Measuring them separately shows
+the expected thing and is a useful control: **`ΔE`, `Δpaths` and `Δtriangles` are all
+root-dependent** (at `m = 5`, `W = 8` gives `ΔE = −204` while `W = 24` gives `ΔE = −432`) **while
+`Δ|Ω|` is not** — both give `−9216`. Only the switching-class invariant is stable, which is exactly
+what the theory demands.
+
+**The maximal-seam exception, in closed form.** §57.9 left it open. The excess of the measured
+deviation over the plain law is `288, 2016, 10080` at `m = 3,4,5` — that is `288·[m−1,2]₂`. So
+
+    D[tri3(P3̃)]|_{W = 2^m} = 27·8²·[m,3]₂ + 288·[m−1,2]₂
+
+**Confirmed out of sample at `m = 6`**, a level not used to find the pattern — three independent
+predictions, all exact:
+
+| prediction | value | |
+|---|---|---|
+| `tri3(P3̃)|_{W=2^m} = N(N−1)(N−2)`, `N = 127` | `2000250` | ✓ |
+| `D` at `j = 3` `= 27·8^(n−3)` | `884736` | ✓ |
+| `D` at the maximal seam `= 27·8²·[6,3]₂ + 288·[5,2]₂` | `2455200` | ✓ |
+
+Equivalently, the `g = 0` reference itself has a closed form,
+`tri3(P3̃)|_{W=1} = N(N−1)(N−2) − 1728·[m,3]₂ − 288·[m−1,2]₂`, checked at `m = 3,4,5,6`
+(`714, −966, −39654, −454950`).
+
+**Tier 65** makes the geometric half a theorem: `P3_pow2_coherent`, every triple product is `+1`
+at the maximal seam — because `P3_pow2_top` makes `P3` rank-one and each product becomes a product
+of three squares. **Scope, and it is narrower than "the two-graph is empty":** the theorem covers
+only the triples that AVOID the seam vertex `2^n`, which `P3_pow2_top`'s hypotheses exclude. The
+triples through `2^n` are coherent too, but that is measured (0 bad triples), not proved — the M1
+reviewer flagged the overstatement and both the docstring and this line were corrected before
+committing. The counting half (empty two-graph ⇒ `tri3 = N(N−1)(N−2)`) is the `sumLtI` argument of
+Tier 58 and was not redone.
+
+**Status of (III).** Still reduced, not proven. What moved: the exception is no longer an exception
+without a formula, the reference's two-graph is regular with explicit parameters, and `D[tri3(P3̃)]`
+is now a difference of three graph counts of which only the invariant combination matters. What has
+not been attempted: `D[tri3(P3̃)] = 27·8^(n−j)[j,3]₂` itself for `j ≥ 3`, `tri3(P3̃)` at a reference
+with `g ≠ 0` (the values at `m = 5` are `−39654, 15642, −7398, 11034` for `g mod 4 = 0,1,2,3` and I
+have no formula), and the fibre variation of `tr(Alo²P)` / `tr(AloP²)`. No difficulty is recorded
+for any of them.
 
 **(III) is still reduced, not proven.**
