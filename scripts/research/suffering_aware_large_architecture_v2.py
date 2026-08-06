@@ -682,7 +682,7 @@ class GatingNetwork(nn.Module):
 
 class SufferingAwareResNet(nn.Module):
     """ResNet trunk (basic or bottleneck) with per-stage exit heads and a
-    learned gating network (SAN-v2/v3). kind='dense'/'earlystop' never runs the
+    learned gating network (SAN-v2/v3/v4). kind='dense'/'earlystop' never runs the
     exit heads or the gate.
 
     SAN-v3 additions:
@@ -690,6 +690,13 @@ class SufferingAwareResNet(nn.Module):
       minimum accuracy threshold (prevents premature first-stage exit).
     - Depth penalty: training loss adds λ × (exit depth) to discourage
       unnecessary deep traversal once the gate is open.
+
+    SAN-v4 additions:
+    - Post-τ distillation: after the model reaches the feasibility target τ,
+      the final head's soft predictions are distilled into every exit head via
+      KL divergence, so early exits inherit the trunk's accuracy.
+    - Adaptive early exit: gates open progressively after τ, letting confident
+      samples exit early without degrading accuracy.
     """
 
     def __init__(self, blocks, width, kind, block_type="bottleneck"):
@@ -713,6 +720,12 @@ class SufferingAwareResNet(nn.Module):
         self.stage_min_acc = float(os.environ.get("SAN_LARGE_STAGE_MIN_ACC", "0.35"))
         # Depth penalty weight (only during training).
         self.depth_penalty_w = float(os.environ.get("SAN_LARGE_DEPTH_PENALTY", "0.01"))
+        # SAN-v4: distillation and adaptive exit parameters.
+        self.distill_after_tau = os.environ.get("SAN_LARGE_DISTILL_AFTER_TAU", "1") == "1"
+        self.distill_w = float(os.environ.get("SAN_LARGE_DISTILL_W", "0.5"))
+        self.adaptive_exit = os.environ.get("SAN_LARGE_ADAPTIVE_EXIT", "1") == "1"
+        self.adaptive_exit_threshold = float(os.environ.get("SAN_LARGE_ADAPTIVE_EXIT_THRESHOLD", "0.8"))
+        self.reached_tau = False
 
     def _head_logits(self, k, h):
         return self.exit_heads[k](h.mean(dim=(2, 3)))
@@ -726,6 +739,10 @@ class SufferingAwareResNet(nn.Module):
     def _gate_open(self, k):
         """Curriculum: gate k opens only after its head has proven itself."""
         return float(self.stage_acc_ema[k]) >= self.stage_min_acc
+
+    def set_reached_tau(self, value):
+        """Mark that the model has reached the feasibility target τ."""
+        self.reached_tau = value
 
     def forward(self, x, train=False, use_exit_heads=True, train_aux=False):
         meter = self.meter
@@ -761,8 +778,13 @@ class SufferingAwareResNet(nn.Module):
             # Curriculum: do not evaluate the gate until the head is trained
             if not self._gate_open(k):
                 continue
+            # SAN-v4: adaptive exit — after τ, use a higher confidence threshold
+            # so only very confident samples exit early.
+            threshold = self.gates[k].threshold
+            if self.adaptive_exit and self.reached_tau:
+                threshold = max(threshold, self.adaptive_exit_threshold)
             gate_logit = self.gates[k](head_in.detach(), k)
-            leave = torch.sigmoid(gate_logit) > self.gates[k].threshold
+            leave = torch.sigmoid(gate_logit) > threshold
             if leave.any():
                 idx = active[leave]
                 out_logits[idx] = logits_k[leave]
@@ -1045,7 +1067,21 @@ def train_run(model, x_tr, y_tr, x_va, y_va, epochs, tau, tag, is_lm=False):
                         f_idx, f_logits = final_record
                         losses.append(CE(f_logits, yb[f_idx]))
                     if aux_records:
-                        aux_losses = [CE(a_logits, yb[a_idx]) for a_idx, a_logits, k in aux_records]
+                        aux_losses = []
+                        for a_idx, a_logits, k in aux_records:
+                            ce = CE(a_logits, yb[a_idx])
+                            # SAN-v4: post-τ distillation — match the final head's
+                            # soft predictions for the same samples.
+                            if (getattr(model, "distill_after_tau", False)
+                                    and getattr(model, "reached_tau", False)
+                                    and final_distill is not None
+                                    and k < model_depth(model) - 1):
+                                teacher = final_distill[a_idx]
+                                student_logp = F.log_softmax(a_logits, dim=1)
+                                teacher_p = F.softmax(teacher, dim=1)
+                                kl = F.kl_div(student_logp, teacher_p, reduction="batchmean")
+                                ce = ce + model.distill_w * kl
+                            aux_losses.append(ce)
                         losses.append(AUX_W * torch.stack(aux_losses).mean())
                     # Depth penalty: discourage deep traversal once gates are open
                     if hasattr(model, "depth_penalty_w") and model.depth_penalty_w > 0:
@@ -1112,6 +1148,8 @@ def train_run(model, x_tr, y_tr, x_va, y_va, epochs, tau, tag, is_lm=False):
             feasible = (acc >= tau) and gates_active
             if feasible and t_star is None:
                 t_star = epoch
+                if hasattr(model, "set_reached_tau"):
+                    model.set_reached_tau(True)
             ledger.append({
                 "epoch": epoch, "flops": train_flops + eval_flops,
                 "acc": acc, "harm": harm, "exit_frac": exit_frac,
