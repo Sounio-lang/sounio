@@ -75,8 +75,36 @@ the file, but only **10 on the `ocp_mfi_*` spine**, which is the only path `-O`
 executes (`module_frontend.sio:6149`/`:6217`). The other 80 are on the by-value
 audit/self-test spine, which production never runs.
 
-So: **gate the by-value spine** (a probe declining an oversized input is fine),
-and **widen the ten**. Widen them as **global scalar lanes**, not locals —
+**FALSIFIED, 2026-08-06 — do not do this widening.** Both 256-width hypotheses
+were tested directly and both are wrong:
+
+- **not registers** — a generated program with **400 live registers** compiles and
+  runs correctly under `-O`;
+- **not labels** — **three `if/else` statements** (about six labels) already
+  miscompile under `-O`, on `origin/main` as well as on this branch.
+
+`-O` is broken far below any capacity boundary, and it is a **control-flow**
+defect: instrumenting the three-`if/else` repro shows `s` going 1 → 4 → 7, i.e.
+each `if/else` after the first adds `1 + 2` because **both branches execute**. A
+jump or label that is still needed is being removed. Filed on **#1667**.
+
+That also removes the register-width explanation for the octonion test's `-O`
+failure, which has no validated cause now. The octonion test has only `abs_f64`
+and `main`, so #1667's original three-parameter framing does not explain it
+either.
+
+Widening ten tables in the most accident-prone file on the branch, to fix a
+boundary that demonstrably is not the boundary, would be the fourth
+obvious-fix-that-measures-worse of this effort. The real next step is localising
+the missing jump: disable `ocp_mfi_redundant_jump`, `ocp_mfi_jump_to_return`,
+`ocp_mfi_dead_after_jump` and `ocp_mfi_dead_label` one at a time against the
+seven-line repro.
+
+The stale plan follows, kept only because the label-indexed table IS still wrong
+for functions with more than 256 labels -- a real but separate, larger-input bug.
+
+~~So: **gate the by-value spine** (a probe declining an oversized input is fine),
+and **widen the ten**.~~ Widen them as **global scalar lanes**, not locals —
 16K-wide locals would put multi-megabyte frames on a seed-built stack, and global
 scalar arrays are the shape this branch has already proven safe under the seed.
 Reset by **epoch counter**, not by clearing loops: `ocp_mfi_dse` currently clears
