@@ -4870,6 +4870,40 @@ level-`m` objects, but their VALUES — §57.17's `S_uv = 2(N−1)`, the isolate
 counting over the loci, which is a different kind of argument (cardinality, not rewriting) and is not
 attempted.
 
+### 57.28 — counting the loci of the four-way split
+
+Tier 76 leaves `tri3w(χ01)`, `tri3w(χ10)` and `tri3w(χ01·χ10)` as well-defined level-`m` objects with
+unknown values. Counting them, with `N = 2^(m+1) − 1`:
+
+| locus | size | `m = 3,4,5,6` |
+|---|---|---|
+| `χ01` | `3N − 1` | 44, 92, 188, 380 |
+| `χ10` | `4N − 2` | 58, 122, 250, 506 |
+| joint | `10N − 8` | 142, 302, 622, 1262 |
+
+**All three label-independent**, at every label of every level tested. The asymmetry `3N−1` against
+`4N−2` is the same ordered-arguments asymmetry as everywhere else in this expansion — blocks `(0,1)`
+and `(1,0)` do not have mirror-image loci, and the counts say so numerically.
+
+**The signed joint sum is label-independent too, and closed:**
+
+    tri3w(χ01 · χ10) = 4 − 6N        −38, −86, −182, −374 at m = 2,3,4,5
+
+confirmed out of sample at `m = 5`, and it decomposes exactly: of the `10N − 8` triples in the joint
+locus, `2N − 2` carry summand `+1` and `8N − 6` carry `−1`, and `(2N−2) − (8N−6) = 4 − 6N`.
+**Note `2N − 2 = 2(N−1)` is §57.17's `S_uv`** — the hand derivation and the total-sign formulation
+agree on that count, which is a real cross-check between the two routes.
+
+The two SINGLE sums are **not** label-independent: `tri3w(χ01)` takes 2 and 4 values and
+`tri3w(χ10)` takes 3 and 5 at `m = 3,4`, so they are fibre-dependent like `tri3` itself. That is
+where the label dependence of `O_1` lives, consistent with §57.17 having found it all in the
+coset-line term.
+
+**None of §57.28 is formalised**, and the reason is a change of kind: turning a locus count into a
+Lean theorem needs the Tier 58 machinery (`sumLtI_const_excl`, `cnt1/cnt2/cnt3`, `rep_iff`) — a
+cardinality argument, not the rewriting that carried Tiers 66–76. Not attempted, no difficulty
+recorded.
+
 **Status of (III).** Still reduced, not proven — but the reduction is now a single explicit
 first-order recursion in `m` whose only non-constant input is a coset-line sum with a closed form.
 What has not been attempted: proving the recursion (the constants and `Σ_coset` from the same

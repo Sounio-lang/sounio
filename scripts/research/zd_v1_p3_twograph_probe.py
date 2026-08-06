@@ -344,3 +344,42 @@ def transfer_constant(m):
     """`c(m)` in `tri3_(m+1) = 8 tri3_m - 24 Sigma_coset + c(m)`, off the maximal seam."""
     N = (1 << (m + 1)) - 1
     return -156 * 2**m + 450 + 12 * (N - 1) * (4 - N)
+
+
+# --- §57.28: COUNTING THE LOCI of the four-way split ---------------------------------------------
+#
+# Tier 76 leaves tri3w(chi01), tri3w(chi10) and tri3w(chi01*chi10) as well-defined level-m objects
+# with unknown values.  Counting them:
+#
+#   |chi01 locus| = 3N - 1     44, 92, 188, 380     at m = 3,4,5,6
+#   |chi10 locus| = 4N - 2     58, 122, 250, 506
+#   |joint locus| = 10N - 8    142, 302, 622, 1262
+#
+# all three LABEL-INDEPENDENT, at every label of every level tested, N = 2^(m+1) - 1.  The
+# asymmetry 3N-1 vs 4N-2 is the same ordered-arguments asymmetry as everywhere else in this
+# expansion -- block (0,1) and block (1,0) do not have mirror-image loci.
+#
+# The SIGNED joint sum is label-independent too, and has a closed form:
+#
+#   tri3w(chi01 * chi10) = 4 - 6N        -38, -86, -182, -374 at m = 2,3,4,5
+#
+# confirmed OUT OF SAMPLE at m = 5.  It decomposes exactly: of the 10N-8 triples in the joint locus,
+# 2N-2 carry summand +1 and 8N-6 carry -1, and (2N-2) - (8N-6) = 4 - 6N.  Note 2N-2 = 2(N-1) is
+# §57.17's `Suv` -- the hand derivation and the total-sign formulation agree on that count.
+#
+# The two SINGLE sums are NOT label-independent: tri3w(chi01) takes 2/4 values and tri3w(chi10)
+# takes 3/5 at m = 3,4, so they are fibre-dependent like tri3 itself.
+#
+# NONE of this is formalised.  Turning a locus count into a Lean theorem needs the Tier 58 style
+# machinery (sumLtI_const_excl / cnt1-cnt3 / rep_iff), i.e. a cardinality argument rather than the
+# rewriting that carried Tiers 66-76.  Not attempted.
+
+def locus_sizes(m):
+    """The three locus cardinalities of §57.28, in closed form."""
+    N = (1 << (m + 1)) - 1
+    return 3 * N - 1, 4 * N - 2, 10 * N - 8
+
+
+def joint_signed_sum(m):
+    """`tri3w(chi01 * chi10)`, label-independent."""
+    return 4 - 6 * ((1 << (m + 1)) - 1)
