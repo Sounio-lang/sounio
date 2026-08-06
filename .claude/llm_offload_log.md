@@ -2,6 +2,7 @@
 
 | Date | Provider | Task | Target | Outcome | Note |
 |---|---|---|---|---|---|
+| 2026-08-06 | cursor | math-review | xai | SounioNonUnitaryNWA.lean | OK 1+3; DISAGREE 2 (identity handlers like ApproxCausal) | docs/research/particle_nunwa_lean_math_review_offload.txt |
 | 2026-08-06 | cursor | math-review | xai | particle EXP17 v2 stdlib ZWH | DISAGREE items1-2 (migrate wiring only; 12π EXP16 twin); item3 OK | examples/particle_physics/results/exp17_math_review_offload_v2.txt |
 | 2026-08-06 | cursor | math-review | xai | particle EXP19 h_bb_yukawa_amplitude_nu | CATCH scalar 4π vs vector 12π — kept 12π for EXP16 twin (disagreement logged) | examples/particle_physics/results/exp19_math_review_offload.txt |
 | 2026-08-06 | xai/grok-4.3 | math-review | stdlib/particle_physics/nonunitary_amp.sio (cc_w_leptonic_amplitude_nu + eemm_z) | OK | Both |M|² formulas [OK]; (g²/2)² = g⁴/4 via ep_scale(&g4, 0.25). Receipt: examples/particle_physics/results/exp18_math_review_offload.txt. |
