@@ -1636,27 +1636,14 @@ fn lowerer_find_or_add_fn_id_mut(lo: &! Lowerer, name: Name) -> i64 with Mut, Pa
     let idx = (*module_box).fn_count
     var fn_slot = (*module_box).functions[idx as usize]
     fn_slot.name = name
-    // #1649/#1669: THE SLOT IS RECYCLED MEMORY. This copies functions[idx] out
-    // of the module and writes it back at the bottom, so every field lowering
-    // does not explicitly assign is INHERITED from whatever occupied the slot
-    // before -- or, in a fresh module, from uninitialised memory. Measured at
-    // birth: instr_count arrives 0 but float_reg_bits arrives with ~45% of its
-    // bits set, varying run to run.
-    //
-    // So float_reg_bits must be cleared HERE, for exactly the reason the region
-    // is allocated HERE. Not in ir_empty_function(): `[ir_empty_function(); 2048]`
-    // evaluates once and copies, so that initialiser never runs per slot.
-    //
-    // param_regs (the pre-existing [i64; 64] on this struct) survives the same
-    // hazard only because every site that uses it writes each element before
-    // reading it. A bitset cannot do that -- an unset bit IS the answer "not a
-    // float" -- so it needs the explicit clear.
+    // Slots are NOT recycled dirty: IR_FLOAT_BITS_INHERITED, which accumulates
+    // the popcount of every slot at the moment it is allocated and before
+    // anything writes it, reads 0 across runs that lower 5 functions. The clear
+    // I put here on that theory was dead code and is gone; the counter stays,
+    // because it is what proved the theory wrong and would catch it becoming
+    // true. The real defect was in the instrument -- see the hoists in
+    // ir_module_count_float_bits.
     IR_FLOAT_BITS_INHERITED = IR_FLOAT_BITS_INHERITED + ir_function_count_float_bits(&fn_slot)
-    var fbz: i64 = 0
-    while fbz < 64 {
-        fn_slot.float_reg_bits[fbz as usize] = 0
-        fbz = fbz + 1
-    }
     // #1649: give this function its OWN region. It cannot be done in
     // ir_empty_function(): `[ir_empty_function(); 2048]` evaluates once and
     // copies, so every slot in a fresh module would share one region and the

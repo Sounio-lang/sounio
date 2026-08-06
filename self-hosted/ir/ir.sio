@@ -4819,9 +4819,12 @@ pub fn ir_module_count_float_bits_untouched(module: &IrModule, n: i64) -> i64 wi
     while k < n {
         let slot = (*module).fn_count + k
         if slot >= IR_MAX_FUNCS { return total }
+        // Same hoist as the live counter: a reference into a boxed array element
+        // reads a wrong address under the seed. See the commit that measured it.
+        var uslot = (*module).functions[slot as usize]
         var r: i64 = 0
         while r < ir_float_bits_capacity() {
-            if ir_float_bits_get(&(*module).functions[slot as usize], r) { total = total + 1 }
+            if ir_float_bits_get(&uslot, r) { total = total + 1 }
             r = r + 1
         }
         k = k + 1
@@ -4836,9 +4839,18 @@ pub fn ir_module_count_float_bits(module: &IrModule) -> i64 with Mut, Panic, Div
     var total: i64 = 0
     var fi: i64 = 0
     while fi < (*module).fn_count && fi < IR_MAX_FUNCS {
+        // Hoist the element to a local BEFORE taking a reference to it. Taking
+        // &(*module).functions[i] directly is the same shape that made
+        // ir_region_seal silently seal 0 of 7 regions until it was hoisted; that
+        // fix worked but its mechanism was never explained. This is the probe
+        // that explains it -- if the hoisted count differs from the in-place one,
+        // the reference-into-a-boxed-array-element is computing a wrong address,
+        // and every reading in this investigation came from a broken instrument
+        // rather than from broken storage.
+        var fslot = (*module).functions[fi as usize]
         var r: i64 = 0
         while r < ir_float_bits_capacity() {
-            if ir_float_bits_get(&(*module).functions[fi as usize], r) { total = total + 1 }
+            if ir_float_bits_get(&fslot, r) { total = total + 1 }
             r = r + 1
         }
         fi = fi + 1
