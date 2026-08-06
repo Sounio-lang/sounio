@@ -98,16 +98,16 @@ Generator: `gen_cross_ns_probe.py` · `extract_obo(..., policy=...)`.
 - **uberon**: **2040** foreign-filler axioms, unique foreign **1320**. Role edges **2.34M → 5.19M** (~**2.2×**); amp rises 137→263.
 - **chebi**: **Δ = 0** on every metric — multi-namespace is a no-op; r15 is OWL-complete for the extracted shape.
 
-## Sounio open_fillers driver (16b)
+## Sounio open_fillers drivers (16b–16c)
 
 | target | packed | Sounio | notes |
 |---|---|---|---|
-| PATO open | `pato_open_packed.txt` | **ALL PASS** | NEP=118 |
-| CL open | `cl_open_packed.txt` | **ALL PASS** | NEP=162, KMAX=16, 4-word epm |
-| UBERON open | (Python only) | deferred | needs NEPW multi-word sparse port at disj scale |
+| PATO open | `pato_open_packed.txt` | **ALL PASS** | NEP=118 · `open_fillers_elplus_driver.sio` |
+| CL open | `cl_open_packed.txt` | **ALL PASS** | NEP=162, KMAX=16, 4-word epm · same |
+| **UBERON open** | `uberon_open_packed.txt` | **ALL PASS** | NEP=957, NEPW=16 multi-word epm + actor-pair conf · `uberon_open_elplus_driver.sio` · role edges **5 190 470** |
 | ChEBI open | ≡ ns_only packed | covered by r15 driver | Δ=0 |
 
-Driver: `open_fillers_elplus_driver.sio` · log: `open_fillers_run.log` · gate-wired.
+Gate: both open drivers wired in `ontology_multi_ontology_gate.sh`.
 
 ## GO full sparse reaffirmation
 

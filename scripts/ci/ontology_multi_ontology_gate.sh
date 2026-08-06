@@ -42,6 +42,7 @@ DRIVERS=(
     "artifacts/ontology-frontiers/multi-ontology/obo_elplus_driver.sio"
     "artifacts/ontology-frontiers/multi-ontology/chebi_pato_elplus_driver.sio"
     "artifacts/ontology-frontiers/multi-ontology/open_fillers_elplus_driver.sio"
+    "artifacts/ontology-frontiers/multi-ontology/uberon_open_elplus_driver.sio"
 )
 
 TMP_DIR="$(mktemp -d /tmp/ontology-multi-gate.XXXXXX)"
