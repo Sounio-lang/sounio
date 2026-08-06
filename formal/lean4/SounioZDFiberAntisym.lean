@@ -14376,6 +14376,63 @@ theorem cosetU_block10 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
       P3_level_stable m b (b ^^^ W) W hb hbW hW,
       P3_block01_total m (b ^^^ W) a W hbW ha hW hW0]
 
+
+/-! ### Tier 86 — Tier 82's two borders, and they differ
+
+    Tier 82 proved block `(1,1)` on its coset line under `l ≠ 0` and `l ⊕ W ≠ 0`.  The two excluded
+    points are the ones block `(0,1)`'s collection needs, and they do NOT behave alike:
+
+      `l = 0`  (so the pair is `(0+2^(m+1), W+2^(m+1))`)   **FLIPS**
+      `l = W`  (so the pair is `(W+2^(m+1), 0+2^(m+1))`)   does NOT
+
+    Both are the same computation as Tier 82's with `R_uu`'s `v = 0` branch firing on one side and
+    not the other — which is where the asymmetry comes from, and it is the ordered-arguments
+    asymmetry of `P3` for the last time in this expansion. -/
+
+/-- Tier 82's `l = 0` border: it FLIPS. -/
+theorem P3_block11_cos_zero (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    P3 (0 + 2^(m+1)) (W + 2^(m+1)) W (m+1) = - P3 0 W W m := by
+  have hp := Nat.two_pow_pos (m+1)
+  have h2 : (2:Nat)^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  have e1 : (W + 2^(m+1)) ^^^ W = 0 + 2^(m+1) := by
+    have h := xor_lo_hi (m+1) W W (by omega) hW hW
+    rw [Nat.xor_comm (W + 2^(m+1)) W, h, Nat.xor_self]
+  have e2 : (0 + 2^(m+1) : Nat) ^^^ W = W + 2^(m+1) := by
+    have h := xor_lo_hi (m+1) W 0 (by omega) hW hp
+    rw [Nat.xor_comm (0 + 2^(m+1)) W, h, Nat.xor_zero]
+  unfold P3 hi
+  rw [e1, e2, Nat.xor_self, Nat.zero_xor,
+      R_lu (0 + 2^(m+1)) (0 + 2^(m+1)) (m+1) (by omega) (by omega),
+      R_uu 0 0 m hp hp, if_pos rfl,
+      R_ul (W + 2^(m+1)) (W + 2^(m+1)) (m+1) (by omega) (by omega),
+      if_neg (by omega : W + 2^(m+1) ≠ 0),
+      R_uu W W m hW hW, if_neg hW0, sigma_self (m+1) W hW hW0,
+      cdSig0,
+      R_ul W W m hW hW, if_neg hW0, sigma_self (m+1) W hW hW0]
+  grind
+
+/-- Tier 82's `l = W` border: it does NOT flip. -/
+theorem P3_block11_cos_seam (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    P3 (W + 2^(m+1)) (0 + 2^(m+1)) W (m+1) = P3 W 0 W m := by
+  have hp := Nat.two_pow_pos (m+1)
+  have h2 : (2:Nat)^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  have e1 : (0 + 2^(m+1) : Nat) ^^^ W = W + 2^(m+1) := by
+    have h := xor_lo_hi (m+1) W 0 (by omega) hW hp
+    rw [Nat.xor_comm (0 + 2^(m+1)) W, h, Nat.xor_zero]
+  have e2 : (W + 2^(m+1)) ^^^ W = 0 + 2^(m+1) := by
+    have h := xor_lo_hi (m+1) W W (by omega) hW hW
+    rw [Nat.xor_comm (W + 2^(m+1)) W, h, Nat.xor_self]
+  unfold P3 hi
+  rw [e1, e2, Nat.xor_self, Nat.zero_xor,
+      R_lu (W + 2^(m+1)) (W + 2^(m+1)) (m+1) (by omega) (by omega),
+      R_uu W W m hW hW, if_neg hW0, sigma_self (m+1) W hW hW0,
+      R_ul (0 + 2^(m+1)) (0 + 2^(m+1)) (m+1) (by omega) (by omega),
+      if_neg (by omega : (0 + 2^(m+1) : Nat) ≠ 0),
+      R_uu 0 0 m hp hp, if_pos rfl,
+      R_lu W W m hW hW, sigma_self (m+1) W hW hW0,
+      R_ul 0 0 m hp hp, if_pos rfl]
+  grind
+
 end SounioZDFiberAntisym
 
 

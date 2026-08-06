@@ -5209,6 +5209,35 @@ I put that account to the reviewers rather than asserting it, and grok confirmed
 those with no further one. **This is one block of the three that were asked for**; the other two are
 named, not done, and I record no estimate for either.
 
+### 57.40 — Tier 86: Tier 82's two borders, and they differ
+
+The two points Tier 82 excluded — `l = 0` and `l = W` — are exactly what block `(0,1)` of the coset
+split needs, and they do **not** behave alike:
+
+| | |
+|---|---|
+| `P3_block11_cos_zero` | `P3 (0+2^(m+1)) (W+2^(m+1)) W (m+1) = − P3 0 W W m` — **flips** |
+| `P3_block11_cos_seam` | `P3 (W+2^(m+1)) (0+2^(m+1)) W (m+1) = P3 W 0 W m` — does not |
+
+Both kernel-clean, 0 violations / 7, 15, 31 each at `m = 2,3,4`. Same reduction chain as Tier 82,
+with `R_uu`'s `v = 0` branch firing on one side and not the other.
+
+**★ The asymmetry is not free — it is forced, and it forces something back.** I asked whether it can
+be consistent that swapping the same two indices changes the answer. grok's reply sharpened the
+question into a check: the two high indices `0+2^(m+1)` and `W+2^(m+1)` are **both nonzero**, so
+`P3_symm` applies to the two left-hand sides and they are EQUAL. Therefore the two lemmas together
+force
+
+    P3 W 0 W m = − P3 0 W W m
+
+at level `m` — legitimate only because `P3_symm` does **not** apply there, index `0` being one of the
+arguments. Measured, both the premise and the consequence: 0 violations at `m = 2,3,4,5`. Had either
+lemma carried a sign slip, this identity would have failed.
+
+**Block `(1,1)`'s coset line is now covered at every `l`**, which was the first of the two
+obstructions §57.39 named. The second — an `E11` total for block `(1,1)`'s outer factors — is
+untouched.
+
 **Status of (III).** Still reduced, not proven — but the reduction is now a single explicit
 first-order recursion in `m` whose only non-constant input is a coset-line sum with a closed form.
 What has not been attempted: proving the recursion (the constants and `Σ_coset` from the same
