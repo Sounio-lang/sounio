@@ -86,9 +86,16 @@ Native fix blocked this session by active claims on `self-hosted/native/**` and
 
 ## 6 — #1627 verify + EXP17 amp (2026-08-06)
 
-- Tip Madaros rebuild verifies #1627 fixture green; **promote deferred** (tip E035
-  on `sm_params` breaks EXP17). See `docs/research/particle_e175_1627_close_2026-08-06.md`.
+- Tip Madaros rebuild verifies #1627 fixture green.
 - EXP17 Z continuum uses `eemm_z_amplitude_nu` (shipped Madaros dual-engine OK).
+
+## 6b — #1627 promote (2026-08-06)
+
+- Root cause of promote E035: `sm_params` thin `Epistemic::measured` accessors
+  lacked `with Mut, Div, Panic`. Fixed in `sm_params.sio`.
+- Promoted tip ELF → `bin/madaros-linux-x86_64` (sha256 `f9ddba96…5189e`).
+- Gates green: #1627 shipped, E175 trilogy, EXP17/18/19.
+- Issue #1627 closable.
 
 ## 7 — EXP18 W vertex amp (2026-08-06)
 

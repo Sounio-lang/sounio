@@ -1,14 +1,10 @@
 #!/usr/bin/env bash
 # #1627 closeout gate: private extern "C" sqrt must not false-E175 complex builtins.
 #
-# Default Madaros is bin/madaros-linux-x86_64 (shipped). Tip rebuilds currently
-# regress E035 on sm_params, so this gate accepts MADAROS_BIN override for a
-# freshly built artifacts/self-hosted/madaros from:
-#   bash scripts/ci/build_modular_madaros.sh artifacts/self-hosted/madaros
-#
-# When MADAROS_BIN is unset, runs against the shipped ELF — which should FAIL
-# until a safe promote lands. Set REQUIRE_SHIPPED_GREEN=1 to demand green on
-# the committed binary (post-promote).
+# Default Madaros is bin/madaros-linux-x86_64 (shipped). As of 2026-08-06 promote
+# (sm_params Mut/Div/Panic + tip checker), the committed ELF is expected green.
+# Override with MADAROS_BIN=... for a tip rebuild. REQUIRE_SHIPPED_GREEN=1 is
+# redundant post-promote but kept for CI call sites.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
@@ -58,14 +54,9 @@ rc=$?
 set -e
 
 if grep -q 'E175' "$FIX_DIR/out.txt" "$FIX_DIR/err.txt"; then
-  if [[ "${REQUIRE_SHIPPED_GREEN:-0}" == "1" ]] || [[ "$MADAROS_BIN" == *"artifacts/self-hosted/madaros"* ]]; then
-    echo "FAIL: E175 still present (#1627 not closed in $MADAROS_BIN)" >&2
-    grep 'E175' "$FIX_DIR/out.txt" "$FIX_DIR/err.txt" | head -20 >&2
-    exit 1
-  fi
-  echo "PARTICLE_E175_1627_SHIPPED_STILL_E175"
-  echo "hint: rebuild tip Madaros and re-run with MADAROS_BIN=artifacts/self-hosted/madaros"
-  exit 0
+  echo "FAIL: E175 still present (#1627 not closed in $MADAROS_BIN)" >&2
+  grep 'E175' "$FIX_DIR/out.txt" "$FIX_DIR/err.txt" | head -20 >&2
+  exit 1
 fi
 if ! grep -qE 'verdict=0|check: OK' "$FIX_DIR/out.txt" "$FIX_DIR/err.txt"; then
   echo "FAIL: check did not pass rc=$rc" >&2
