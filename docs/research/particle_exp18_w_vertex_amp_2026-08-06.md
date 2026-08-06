@@ -7,6 +7,7 @@ validated_by: A6
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.particle-exp18-w-vertex-amp-2026-08-06
 -->
 
+
 <!-- docs:status-note:start -->
 > Docs status: `historical`
 > This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
@@ -60,7 +61,7 @@ Tiny ratio drift vs EXP15 is GUM on `g` vs inlined PDG scalar — not a bug.
 - Not a full eν→μν helicity amplitude.
 - Not NLO / PDF.
 - Does not migrate EXP15 (thin local-num leaf remains a regression witness).
-- Does not add H Yukawa stdlib amplitude (next leaf).
+- H Yukawa stdlib amplitude is EXP19 (`h_bb_yukawa_amplitude_nu`).
 
 ## Reproduce
 
