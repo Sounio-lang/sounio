@@ -9,7 +9,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.epistemi
 
 # Epistemic trust map — which stdlib/epistemic results a real program can trust today
 
-**Date:** 2026-07-14 (Wave10 k95 closeout 2026-07-21)
+**Date:** 2026-07-14 (Wave10 k95 closeout 2026-07-21; **C1 imported ep-var preserve 2026-08-06**)
 **Toolchain:** `./bin/souc` → Madaros v0.80.0 (default **native** engine)
 **Scope:** core uncertainty primitives (GUM, uncertainty propagation, Knowledge<T>,
 correlation/covariance, imprecise probability). Bounded, not exhaustive.
@@ -55,6 +55,7 @@ A result is usable under native import iff **both** hold:
 | `propagate` (delta-method + MC) | product `6`/`0.25`; `exp_delta(1,σ²=0.01)` → `e` / `e²·0.01`; MC identity mean≈`1` var≈`0.01`; MC square E[X²]≈`4.01` var≈`0.16` | **2026-07-20 multi-module green** for free-function `Epistemic` + `exp_delta`/`product`/`ln`/`sin`/`cos_delta` and value-style LCG MC kernels (`monte_carlo_identity`, `monte_carlo_square`). Gate: `scripts/madaros_propagate_native_gate.sh` + Section A `PROPAGATE_TRUST_OK`. Caveats (pre-Wave6-C): literal `exp`/`cos` SEGV — **fixed** (empty-stub builtins only); remaining: exclusive-ref xoshiro inside imported bodies untrustworthy (MC uses Knuth LCG+CLT); generic `monte_carlo(x,f,n)` fn-ptr still fragile. |
 | `algebra::associator_field` | non-Fano ‖α‖²=`4`, g2=`2`, aug var=`4.25`; pentagon (e1,e2,e4,e1) var=`0.96` | **2026-07-20 multi-module green** after #1274 oct_mul lo/hi split + pub API surface (`assoc_field_*`, `pentagon_*`, `af_*`). Gate: `scripts/madaros_associator_field_native_gate.sh`. L0: `associator_field_octonion` + `associator_field_pentagon`. |
 | `algebra::octonion` (`oct_mul`, `oct_associator`, …) | e1·e2→e3; non-Fano ‖[e1,e2,e4]‖²=`4` | **2026-07-20** lo/hi frame split. Gate: `scripts/madaros_algebra_octonion_import_gate.sh`. |
+| `particle_physics::nonunitary_amp` + `sm_params::mass_bottom` | imported `Epistemic` **variance** bit-identical Madaros≡lean_single (scaled i64×1e18): `mass_bottom` → `900000000000000` (=0.0009×1e18); `h_bb_yukawa_amplitude_nu` amp → `1354` (~1.354e-15×1e18) | **C1 2026-08-06** — EXP `print_f64` `0.000000` was display rounding of ~1e-15, not Var corruption. Gate: `scripts/ci/madaros_imported_ep_var_preserve_gate.sh`. Audit: `docs/audit/MADAROS_IMPORTED_EP_VAR_PRESERVE_2026-08-06.md`. |
 
 Heuristic: **self-contained modules (no stdlib `use` deps) import cleanly and
 return correct numbers** under default Madaros. Method-call form on `Epistemic`
@@ -124,8 +125,10 @@ Historical failures reduce to filed compiler dispatches (status as of Wave10):
 ## Living boundary
 
 `scripts/epistemic_trust_gate.sh` gates the trustworthy set (Section A), including
-finite-dof gum k95 (`witness_gum_k95` → `2776`). Section B (k95 trip-wire) is
-**retired**. Update this map when a residual Section C / fragile form graduates.
+finite-dof gum k95 (`witness_gum_k95` → `2776`) and **C1 imported ep-var preserve**
+(`madaros_imported_ep_var_preserve_gate.sh` — Madaros≡lean_single scaled Var).
+Section B (k95 trip-wire) is **retired**. Update this map when a residual
+Section C / fragile form graduates.
 
 ## AI disclosure
 
