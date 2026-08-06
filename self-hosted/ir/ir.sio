@@ -4749,16 +4749,23 @@ pub var IR_FLOAT_BITS_OVER_CAP: i64 = 0
 // WRITES > 0 with LIVE == 0 means the writes are landing somewhere that does not
 // survive to codegen -- a copy, or the 512-byte aggregate store defect that
 // lower.sio:1652 documents for the identically-shaped param_regs.
-// MEASURED 2026-08-06 and the reason the consumers below are inert: a probe on a
-// five-line program reported writes=8 but live_at_codegen=3363 -- roughly a third
-// of all bits set across the module. The field is NOT reliably zero-initialised,
-// so seeding anything from it is seeding from garbage. IrModule builds its
-// functions with `[ir_empty_function(); 2048]`, a repeat initialiser, and
-// IrFunction just grew by a 512-byte array -- the same shape lower.sio:1652
-// documents as miscompiled for param_regs.
+// MEASURED 2026-08-06 and the reason the consumers below are inert:
 //
-// Until that is understood, consumers must not trust the bits. Flip this to 1
-// only with a probe showing live_at_codegen == writes.
+//   writes=8  live_at_codegen=3683  fresh=0  live_fn0=744
+//
+// Eight bits written; 744 set in the module's function 0 alone. But `fresh=0` --
+// a function straight out of ir_empty_function() is CLEAN. So the initialiser
+// works and my first guess was wrong: the corruption happens between creation
+// and the module's function array, not at initialisation.
+//
+// That points at the copy, not the constructor: `[ir_empty_function(); 2048]` is
+// a repeat initialiser, and IrFunction just grew by a 512-byte array -- the same
+// shape lower.sio:1652 documents as miscompiled for param_regs. The next probe
+// is to count bits immediately after the module is built, before any lowering,
+// which separates "the repeat-copy loses it" from "a lowering copy dirties it".
+//
+// Until then, consumers must not trust the bits. Flip this to 1 only with a
+// probe showing live == writes.
 pub let IR_FLOAT_BITS_TRUSTED: i64 = 0
 
 pub var IR_FLOAT_BITS_WRITES: i64 = 0
@@ -4784,6 +4791,19 @@ pub fn ir_float_bits_get(f: &IrFunction, reg: i64) -> bool with Mut, Panic, Div 
     let hit = ((*f).float_reg_bits[word as usize] / ir_float_bit_mask(bit)) % 2 == 1
     if hit { IR_FLOAT_BITS_GETS = IR_FLOAT_BITS_GETS + 1 }
     hit
+}
+
+// Set bits in ONE function. Used by the initialisation probe to ask the question
+// the module-wide count cannot: is a freshly built IrFunction already dirty, or
+// does it only become dirty on its way into the module array?
+pub fn ir_function_count_float_bits(f: &IrFunction) -> i64 with Mut, Panic, Div {
+    var n: i64 = 0
+    var r: i64 = 0
+    while r < ir_float_bits_capacity() {
+        if ir_float_bits_get(f, r) { n = n + 1 }
+        r = r + 1
+    }
+    n
 }
 
 // Set bits still visible across a whole module. Called from the driver just
