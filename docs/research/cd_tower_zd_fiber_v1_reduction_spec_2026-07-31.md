@@ -4329,11 +4329,50 @@ being computed. Probe: `scripts/research/zd_v1_p3_twograph_probe.py`.
 term. And none of it is in Lean — the statement is a global count over `~N³` triples, not a
 pointwise identity like the tiers above, so it is a different kind of formalisation job.
 
-**Status of (III).** Still reduced, not proven. What moved: every fibre reference of `tri3(P3̃)` now
-has a closed form, verified out of sample at `m = 8`; the deviation law's remaining unknown is the
-`W = 8g+2^j` side alone. What has not been attempted: `D[tri3(P3̃)] = 27·8^(n−j)[j,3]₂` itself for
-`j ≥ 3`, a PROOF of the contiguous-block law (it is measured across five levels and predicted one,
-but the mechanism — why interval-supported characters and why the halving — is unexplained), and
-the fibre variation of `tr(Alo²P)` / `tr(AloP²)`. No difficulty is recorded for any of them.
+### 57.12 — attacking the contiguous-block law: two mechanisms REFUTED, one reformulation
+
+**(a) "each triple's coherence is `±` a character of `g`."** If that held, the support would be the
+set of characters realised by triples and the whole law would be a counting statement. **Refuted:**
+`10464 / 39711` triples at `m = 5` and `139032 / 333375` at `m = 6` have a coherence vector that is
+not `±` a character.
+
+**(b) "the entries are characters and the block structure is inherited."** **Refuted twice over.**
+Only `13164 / 16002` entries at `m = 6` are single characters at all (the rest have Walsh support of
+size 3, 5 or 7), and — decisively — those that are **realise the non-block character**: `k = 5 =
+0b101` occurs at `1624` entries. Block-ness is invisible at the entry level, so it cannot be
+inherited from there.
+
+**(c) What is true.** Splitting the triple sum at `m = 6` into the two classes of (a):
+
+| `k` | | from character triples | from the rest | total |
+|---|---|---|---|---|
+| 3 | block | `0` | `−73728` | `−73728` |
+| **5** | **NOT a block** | **`0`** | **`0`** | **`0`** |
+| 6 | block | `0` | `−27648` | `−27648` |
+| 7 | block | `0` | `−36864` | `−36864` |
+
+The non-block coefficient vanishes **in each class separately** — it is not a conspiracy between
+them, and any proof has to explain a cancellation that already holds inside each class. Note also
+that `k = 3, 6, 7` get *nothing* from the character triples: their whole coefficient comes from the
+triples that are not characters.
+
+**The reformulation.** Writing `x_t = (−1)^(bit t of g)` and
+
+    R_i = Σ_{L≥1} 2^{−(L−1)}·x_i x_{i+1} ⋯ x_{i+L−1}      equivalently   R_i = x_i·(1 + R_{i+1}/2)
+
+the two halves of the law — interval support **and** the halving — are together *equivalent* to
+
+    tri3(P3̃)(8g+1) = w_0 + Σ_i s_i·R_i(g)
+
+(algebra, not measurement; checked at `m = 5,6,7,8`, 0 violations). So the whole `g`-dependence
+enters through `b` nested dyadic quantities, one per bit position, each an affine function of the
+binary fraction whose digits are the **prefix parities** of `g` from that position on. That is the
+shape a proof has to produce, and the `2^{−(L−1)}` is a place value, not a coincidence.
+
+**Status of (III).** Still reduced, not proven. What moved: every fibre reference of `tri3(P3̃)` has
+a closed form, verified out of sample at `m = 8`, and the block law now has two dead mechanisms and
+one exact reformulation. What has not been attempted: `D[tri3(P3̃)] = 27·8^(n−j)[j,3]₂` itself for
+`j ≥ 3`, a proof of the block law from the reformulation, and the fibre variation of `tr(Alo²P)` /
+`tr(AloP²)`. No difficulty is recorded for any of them.
 
 **(III) is still reduced, not proven.**

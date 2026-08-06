@@ -112,3 +112,54 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# --- §57.12: attacking the contiguous-block law itself -----------------------------------------
+#
+# Three mechanisms were tried and the first two are REFUTED.  Recorded so the next attempt does not
+# re-spend them.
+#
+# (a) "each TRIPLE's coherence is +-a character of g, so the support is the set of realised k".
+#     REFUTED: 10464 / 39711 triples at m = 5 and 139032 / 333375 at m = 6 have a coherence vector
+#     that is not +-a character.
+#
+# (b) "the ENTRIES are characters and the block structure is inherited".  REFUTED twice over: only
+#     13164 / 16002 entries at m = 6 are single characters at all, and those that are REALISE THE
+#     NON-BLOCK CHARACTER — k = 5 = 0b101 occurs at 1624 entries.  Block-ness is invisible at the
+#     entry level.
+#
+# (c) what IS true, measured at m = 6 by splitting the triple sum into the two classes of (a):
+#     the non-block coefficient vanishes IN EACH CLASS SEPARATELY (k = 5 gets exactly 0 from the
+#     character triples and exactly 0 from the rest).  So it is not a conspiracy between the two;
+#     any proof has to explain a cancellation that already holds inside each class.  Note also that
+#     k = 3, 6, 7 get NOTHING from the character triples — their whole coefficient comes from the
+#     non-character ones.
+#
+# An exact reformulation of the law (algebra, not measurement; checked at m = 5..8, 0 violations):
+# writing x_t = (-1)^(bit t of g) and
+#
+#     R_i = sum_{L>=1} 2^-(L-1) * x_i x_(i+1) ... x_(i+L-1),   equivalently   R_i = x_i (1 + R_(i+1)/2)
+#
+# the two halves of the law -- interval support AND the halving -- are together equivalent to
+#
+#     tri3(P3~)(8g+1) = w_0 + sum_i s_i * R_i(g)
+#
+# i.e. the whole g-dependence enters through b nested dyadic quantities, one per bit position, each
+# an affine function of the binary fraction whose digits are the PREFIX PARITIES of g from that
+# position on.  That is what a proof would have to produce.
+
+def check_reformulation(m):
+    """`tri3 = w_0 + sum_i s_i R_i` and the recursion for `R_i`.  Returns (violations, cases)."""
+    b = m - 3
+    w = coefficients(m)
+    vals = predict(m)
+    s = [w[1 << i] for i in range(b)]
+    bad = 0
+    for g in range(1 << b):
+        x = [(-1)**((g >> t) & 1) for t in range(b)]
+        R = [0.0] * (b + 1)
+        for i in range(b - 1, -1, -1):
+            R[i] = x[i] * (1 + R[i + 1] / 2)
+        if abs(w[0] + sum(s[i] * R[i] for i in range(b)) - vals[g]) > 1e-6:
+            bad += 1
+    return bad, 1 << b
