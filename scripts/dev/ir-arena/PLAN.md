@@ -145,8 +145,13 @@ to design against.
    latch with distinct kinds, and `put_name` keeps the binding when the slot
    already holds that name, moving pool consumption from O(stores) to
    O(instructions). Zero violations on the compiler's own 9.5 MB self-compile and
-   on all seven regression programs. **Still owed: proof the latch can fire** —
-   it needs a boundary witness (below), not a claim.
+   on all seven regression programs — and the latch is **proved to fire**:
+   `tests/native-v2/ir_arena_pool_witness.sio` consumes both pools for real (no
+   capacity reduced) and asserts the exact arithmetic boundary, 32768 for names
+   (4194304/128) and 4096 for args (262144/64), with the right kind and a cleared
+   payload. Non-vacuous: stripping just the two latch calls makes it report
+   `NAME_POOL_FIRED_AT -1` and exit 12. Wired into `ir_instr_arena_gate.sh`,
+   which now carries 4 witnesses and 3 vacuity checks.
 4. **Seal after cleanup** — the merge-time proof that the alias sweeps closed
    anything.
 5. **Cover `ir_arena_swap_slots`.** It is the only primitive here written from

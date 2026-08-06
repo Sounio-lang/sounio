@@ -122,6 +122,11 @@ WITNESSES=(
   "ir_instr_arena_witness:IR_INSTR_ARENA_WITNESS_PASS"
   "ir_instr_arena_stale_witness:IR_INSTR_ARENA_STALE_PASS"
   "ir_instr_arena_seal_witness:IR_INSTR_ARENA_SEAL_PASS"
+  # Side-pool exhaustion. Consumes the pools for real -- no capacity is reduced --
+  # and asserts the latch fires at the exact arithmetic boundary: 4194304/128 =
+  # 32768 for names, 262144/64 = 4096 for args. Before this, both pools dropped
+  # their payload and carried on, which is rc=12 with the alarm removed.
+  "ir_arena_pool_witness:IR_ARENA_POOL_WITNESS_PASS"
 )
 
 run_one() {
@@ -201,9 +206,16 @@ if [ "$VACUITY" = "1" ]; then
   run_one ir_instr_arena_stale_witness IR_INSTR_ARENA_STALE_PASS "$TMP/no_gen.sio" fail
   sed 's/IR_REGION_STATE\[(\*r).slot as usize\] == IR_REGION_SEALED/false/g' "$ARENA" >"$TMP/no_seal.sio"
   run_one ir_instr_arena_seal_witness IR_INSTR_ARENA_SEAL_PASS "$TMP/no_seal.sio" fail
+  # Strip only the two pool latches. Measured: the witness then reports
+  # NAME_POOL_FIRED_AT -1 and exits 12, so it is testing the latch and not some
+  # other property that happens to hold.
+  sed -e 's/ir_arena_latch(IR_ARENA_VIOLATION_NAME_POOL, ir_region_invalid())//' \
+      -e 's/ir_arena_latch(IR_ARENA_VIOLATION_ARG_POOL, ir_region_invalid())//' \
+      "$ARENA" >"$TMP/no_pool_latch.sio"
+  run_one ir_arena_pool_witness IR_ARENA_POOL_WITNESS_PASS "$TMP/no_pool_latch.sio" fail
 fi
 
 head_sha="$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || printf not_available)"
-printf 'IR_INSTR_ARENA_BOUNDARY generation_guard=proved sealing_guard=proved fail_closed_capacity=proved conversion=complete\n'
+printf 'IR_INSTR_ARENA_BOUNDARY generation_guard=proved sealing_guard=proved fail_closed_capacity=proved pool_exhaustion=proved conversion=complete\n'
 printf 'IR_INSTR_ARENA_PASS witnesses=%d arena_capacity=1048576 region_table=8192 head=%s\n' \
   "${#WITNESSES[@]}" "$head_sha"
