@@ -926,6 +926,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.particle-exp15-w-amp-to-xsec-2026-08-05 | historical | docs/research/particle_exp15_w_amp_to_xsec_2026-08-05.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.particle-exp16-h-amp-to-xsec-2026-08-05 | historical | docs/research/particle_exp16_h_amp_to_xsec_2026-08-05.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.particle-exp17-zwh-amp-xsec-ledger-2026-08-05 | historical | docs/research/particle_exp17_zwh_amp_xsec_ledger_2026-08-05.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.particle-exp18-w-vertex-amp-2026-08-06 | historical | docs/research/particle_exp18_w_vertex_amp_2026-08-06.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.particle-exp6-universal-xi-2026-07-26 | historical | docs/research/particle_exp6_universal_xi_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.particle-exp7-gum-transfer-2026-07-26 | historical | docs/research/particle_exp7_gum_transfer_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.particle-exp8-collapse-failure-2026-07-26 | historical | docs/research/particle_exp8_collapse_failure_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

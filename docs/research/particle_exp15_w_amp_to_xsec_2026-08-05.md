@@ -78,6 +78,8 @@ inlined; GUM via `Var(cX) = c² Var(X)` on the propagator.
 
 - Not a full eν→μν helicity amplitude (angular structure omitted).
 - Not NLO / QCD / PDF.
+- EXP18 restores the same continuum path via `cc_w_leptonic_amplitude_nu`
+  (`coupling_g` GUM); this leaf keeps the inlined-`g` thin graph.
 - Does not equate continuum BW to the partial-width NWA peak.
 - Not a BSM bound.
 - No `eemm_w_peak_xsec_nu` in stdlib — peak is a local PDG toy.

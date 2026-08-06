@@ -90,3 +90,10 @@ Native fix blocked this session by active claims on `self-hosted/native/**` and
   on `sm_params` breaks EXP17). See `docs/research/particle_e175_1627_close_2026-08-06.md`.
 - EXP17 Z continuum uses `eemm_z_amplitude_nu` (shipped Madaros dual-engine OK).
 
+## 7 — EXP18 W vertex amp (2026-08-06)
+
+- `nonunitary_amp::cc_w_leptonic_amplitude_nu` — `(g⁴/4)·|D_W|²` via `coupling_g`.
+- `examples/particle_physics/exp18_w_vertex_amp_to_xsec.sio` dual-engine green
+  (ratio ≈ 3.4866, band (2, 6)).
+- Gate: `scripts/research/particle_exp18_w_vertex_amp_gate.sh`.
+
