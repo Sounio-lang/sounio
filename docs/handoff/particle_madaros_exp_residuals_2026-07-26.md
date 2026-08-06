@@ -69,6 +69,10 @@ Madaros imported multimodule:
 Native fix blocked this session by active claims on `self-hosted/native/**` and
 `self-hosted/ir/lower.sio`. Stdlib workarounds remain until `MADAROS_FIELD_IF_I64_FIXED`.
 
+## Field-if closeout
+
+**CLOSED** #1511 + workaround drop (direct `e.confidence >= k` restored).
+
 ## 5 — E175 trilogy (2026-08-06)
 
 - **stdlib:** remaining private `extern "C"` sqrt/exp/log/… stubs removed from
@@ -79,4 +83,10 @@ Native fix blocked this session by active claims on `self-hosted/native/**` and
 - **EXP14:** restores `eemm_z_amplitude_nu` import; dual-engine green.
 - Gate: `scripts/research/particle_e175_amp_import_gate.sh` → `PARTICLE_E175_TRILOGY_GATE_OK`.
 - Note: `docs/research/particle_e175_trilogy_2026-08-06.md`.
+
+## 6 — #1627 verify + EXP17 amp (2026-08-06)
+
+- Tip Madaros rebuild verifies #1627 fixture green; **promote deferred** (tip E035
+  on `sm_params` breaks EXP17). See `docs/research/particle_e175_1627_close_2026-08-06.md`.
+- EXP17 Z continuum uses `eemm_z_amplitude_nu` (shipped Madaros dual-engine OK).
 
