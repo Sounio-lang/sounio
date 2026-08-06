@@ -16534,8 +16534,30 @@ pub fn lower_dep_program_items_into_acc_with_externs(
     while i < program_count {
         if i != self_index {
             let ext_prog = (*programs)[i as usize]
+            // FILTER THE EXTERNALS TOO. The caller already ran the dep's OWN
+            // items through spec_dce_filter_with_global_marks (module_frontend.sio,
+            // `let dep_items = ...`), but the 119 external programs were preseeded
+            // RAW -- every declaration in every loaded module took a slot in the
+            // accumulator whether `main` could reach it or not.
+            //
+            // That is what filled it. Measured 2026-08-06 with a per-site error
+            // histogram: `2044x3022`, i.e. 3022 calls to
+            // lowerer_find_or_add_fn_id_mut refused because fn_count was already
+            // at IR_MAX_FUNCS. With this filter the same compile reports 157
+            // errors instead of 3179, and site 2044 disappears entirely.
+            //
+            // Raising the cap does not fix this, it postpones it. The preflight
+            // census counts what the MERGE needs; into_acc accumulates every
+            // module, so the number that matters is the union over 120 closures.
+            // Filtering is the only move that scales.
+            //
+            // spec_dce_filter_with_global_marks returns its input UNCHANGED unless
+            // a complete mark set is ready, so a refusal upstream cannot silently
+            // become a deletion here -- the same contract the other three call
+            // sites in this file rely on.
+            let ext_items = spec_dce_filter_with_global_marks(ext_prog.items)
             // DEDUP: do not re-zero seed main / previously-filled dep methods.
-            lowerer_preseed_external_items_into_acc_mut(&! lo, &ext_prog.items)
+            lowerer_preseed_external_items_into_acc_mut(&! lo, &ext_items)
         }
         i = i + 1
     }
