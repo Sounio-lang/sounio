@@ -295,3 +295,52 @@ def O1_from_Su(m, tri3_m, Su):
     """`O_1` from the level-m triangle count and the second-order sum `Su`, off the maximal seam."""
     N = (1 << (m + 1)) - 1
     return tri3_m - 4 * Su + 2 * (N - 1) * (4 - N) + 18 * 2**m - 30
+
+
+# --- §57.18: Sigma_coset in closed form, and the transfer recursion COMPLETES --------------------
+#
+# Sigma_coset(W) = sum_{a,b} S(a,b) P(b, b^W) P(b^W, a) -- the last label-dependent piece of O_1.
+#
+# It is CONSTANT ON EACH g-FIBRE (every label, m = 3,4,5), and its Walsh expansion in g -- now over
+# b = m-2 bits, with NO top-bit identification -- is far sparser than tri3's:
+#
+#   nonzero exactly at the b blocks ANCHORED AT THE TOP BIT, k_L = 2^b - 2^(b-L), L = 1..b
+#   w[k_L] = 24*2^(m+L-1) - 96*4^(L-1)
+#   w[0]   = 12*2^m - 24
+#
+# so b+1 coefficients instead of tri3's b(b+1)/2, and lengthening a top-anchored block MULTIPLIES by
+# 4 rather than dividing by 2.  Found on m = 3,4,5; confirmed OUT OF SAMPLE at m = 6 (0 mismatches /
+# 16 references) and m = 7 (0 / 32).
+#
+# Substituting into §57.17's O_1 and §57.16's assembly, the whole transfer collapses to
+#
+#   tri3(P3~)_(m+1) = 8 * tri3(P3~)_m - 24 * Sigma_coset(W) + c(m)
+#   c(m) = -156*2^m + 450 + 12 (N-1)(4-N),   N = 2^(m+1)-1
+#
+# verified for EVERY non-seam label at m = 3,4,5 (14/14, 30/30, 62/62).  ** The factor 8 is back **:
+# the heuristic "each level-m triangle lifts 2^3 ways" survives after all, but only once the defect
+# is identified -- it is exactly -24 times the coset-line sum, plus a level constant.  That also
+# retro-explains §57.11's s_i(m+1) = 8 s_i(m): it IS this 8.
+#
+# NOTE none of §57.18 is formalised.  The block identities it rests on (Tiers 66/67) are theorems;
+# the constants and the Sigma_coset closed form are measured.
+
+def sigma_coset_coefficients(m):
+    """Walsh coefficients of `g -> Sigma_coset(8g+1)`, over `b = m-2` bits."""
+    b = m - 2
+    w = [0] * (1 << b)
+    w[0] = 12 * 2**m - 24
+    for L in range(1, b + 1):
+        w[(1 << b) - (1 << (b - L))] = 24 * 2**(m + L - 1) - 96 * 4**(L - 1)
+    return w
+
+
+def sigma_coset(m, g):
+    w = sigma_coset_coefficients(m)
+    return sum(w[k] * (-1)**(bin(g & k).count("1")) for k in range(1 << (m - 2)))
+
+
+def transfer_constant(m):
+    """`c(m)` in `tri3_(m+1) = 8 tri3_m - 24 Sigma_coset + c(m)`, off the maximal seam."""
+    N = (1 << (m + 1)) - 1
+    return -156 * 2**m + 450 + 12 * (N - 1) * (4 - N)

@@ -4571,11 +4571,45 @@ theorems about (`cosetSum_eq` proves the `A_σ` analogue equals `−t2′`).
 term takes the values `−24` and `168`. The `168` does **not** extend — at `m = 4` the four values are
 `−504, 72, 264, 840`. No claim is attached.
 
-**Status of (III).** Still reduced, not proven. What moved: `O_1` is no longer an opaque orthant but
-`tri3_m` plus constants plus a single coset-line sum, derived from the block theorems rather than
-fitted. What has not been attempted: a closed form for `Σ_coset` (the last label-dependent piece),
-the two level constants `26·2^m − 64` / `54·2^m − 90` from the same expansion, the coset-line case of
-block `(1,1)`, the `q`-binomial finish that would produce `[j,3]₂`, and the fibre variation of
-`tr(Alo²P)` / `tr(AloP²)`. No difficulty is recorded for any of them.
+### 57.18 — `Σ_coset` in closed form, and the transfer recursion COMPLETES (the `8` comes back)
+
+`Σ_coset(W) = Σ_{a,b} S(a,b)·P(b, b⊕W)·P(b⊕W, a)` is **constant on each `g`-fibre** (every label,
+`m = 3,4,5`), and its Walsh expansion — now over `b = m−2` bits, with **no** top-bit identification —
+is far sparser than `tri3`'s:
+
+| | |
+|---|---|
+| support | exactly the `b` blocks **anchored at the top bit**, `k_L = 2^b − 2^(b−L)`, `L = 1…b` |
+| value | `w[k_L] = 24·2^(m+L−1) − 96·4^(L−1)` |
+| mean | `w[0] = 12·2^m − 24` |
+
+So `b+1` coefficients instead of `tri3`'s `b(b+1)/2`, and lengthening a top-anchored block
+**multiplies by 4** rather than dividing by 2. Found on `m = 3,4,5`; confirmed **out of sample** at
+`m = 6` (0 mismatches / 16 references) and again at `m = 7` (0 / 32).
+
+**★ Substituting back, the whole transfer collapses — and the factor `8` returns:**
+
+    tri3(P3̃)_{m+1} = 8·tri3(P3̃)_m − 24·Σ_coset(W) + c(m)
+    c(m) = −156·2^m + 450 + 12(N−1)(4−N),   N = 2^(m+1)−1
+
+verified for **every** non-seam label at `m = 3,4,5` (14/14, 30/30, 62/62). The heuristic "each
+level-`m` triangle lifts `2³` ways" survives after all — but only once the defect is named. §57.14
+refuted the naive version (the eight orthants are *not* eight copies); what is true is that after
+the `1+3+3+1` assembly and the `O_1` derivation, the `8` reassembles and the entire defect is
+**`−24` times the coset-line sum**, plus a level constant.
+
+That also retro-explains §57.11's `s_i(m+1) = 8·s_i(m)`: it **is** this `8`. And the one new Walsh
+coefficient per level comes from `Σ_coset`'s new top-anchored block.
+
+**Provenance.** The block identities this rests on (Tiers 66/67) are theorems. The constants, the
+`Σ_coset` closed form and the assembled recursion are measured — with out-of-sample confirmation at
+two levels for `Σ_coset` and none of it in Lean.
+
+**Status of (III).** Still reduced, not proven — but the reduction is now a single explicit
+first-order recursion in `m` whose only non-constant input is a coset-line sum with a closed form.
+What has not been attempted: proving the recursion (the constants and `Σ_coset` from the same
+block-identity expansion that produced `O_1`), the maximal-seam case, the `q`-binomial finish that
+would produce `[j,3]₂` from the solved recursion, the coset-line case of block `(1,1)`, and the fibre
+variation of `tr(Alo²P)` / `tr(AloP²)`. No difficulty is recorded for any of them.
 
 **(III) is still reduced, not proven.**
