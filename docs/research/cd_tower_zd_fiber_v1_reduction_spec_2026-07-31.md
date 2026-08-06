@@ -5155,8 +5155,35 @@ leaving those `⊕` unsimplified in the statement is not tidiness but necessity.
 exactly the range §57.35's recursion lives in, so the route survives — but the unqualified claim did
 not.
 
-**Still not the recursion.** The cut is done; collecting the four blocks through the identities is
-not attempted, and I record no estimate.
+### 57.38 — Tier 84: the four blocks collected, and the leading block proved
+
+Measuring the four blocks of `cosetU_split4` against `U = cosetU m W`, for `W < 2^(m+1)`:
+
+| block | value |
+|---|---|
+| `(0,0)` | `U` |
+| `(0,1)` | `U + 16·2^m − 16` |
+| `(1,0)` | `U + 12·2^m − 16` |
+| `(1,1)` | `U + 12·2^m − 16` |
+
+the last two **equal**, and the four summing to `4U + (40·2^m − 48)` — §57.35's recursion constant
+recovered as `(16·2^m − 16) + 2·(12·2^m − 16)`. Verified at `m = 2,3` and confirmed **out of sample
+at `m = 4`**, including at a label from a different fibre (`W = 9`, `U = −48`).
+
+**`cosetU_block00` proves the first row.** Every factor of that block is a low-low pair, so
+`P3_level_stable` — hypothesis-free — turns each into its level-`m` self and the block IS `cosetU m
+W`. Both providers confirmed no index escapes the low half, given `b ⊕ W < 2^(m+1)` from `xorlt`.
+
+**⚠ I was about to overstate this, and asked before doing so.** My question was whether it is fair
+to call the LEADING term of the recursion a theorem. Both said no, with the same correction: only
+**one** of the four `U`s is proved, so **the coefficient `4` is not a theorem either** — three of
+its four units come from the measured blocks. zai's phrasing: *"The recursion `4U + 40·2^m − 48`
+remains a measured conjecture; only the block `(0,0)` component (`1U`) is a theorem."*
+
+So the state is: the cut is a theorem (Tier 83), one of its four blocks is a theorem (Tier 84), and
+the recursion — coefficient and constant alike — remains measured. The three remaining blocks carry
+the `E01`/`E10` signs and Tier 82's coset case; collecting them is not attempted, and I record no
+estimate.
 
 **Status of (III).** Still reduced, not proven — but the reduction is now a single explicit
 first-order recursion in `m` whose only non-constant input is a coset-line sum with a closed form.

@@ -14304,6 +14304,43 @@ theorem cosetU_split4 (m W : Nat) :
   exact split_inner (2^(m+1))
     (fun a b => P3 a b W (m+1) * (P3 b (b ^^^ W) W (m+1) * P3 (b ^^^ W) a W (m+1)))
 
+
+/-! ### Tier 84 — the four blocks, collected
+
+    Measuring the four blocks of `cosetU_split4` against `cosetU m W` (call it `U`), for
+    `W < 2^(m+1)`:
+
+      block `(0,0)` `= U`                    block `(0,1)` `= U + 16·2^m − 16`
+      block `(1,0)` `= U + 12·2^m − 16`      block `(1,1)` `= U + 12·2^m − 16`
+
+    the last two EQUAL, and the four summing to `4U + (40·2^m − 48)` — §57.35's recursion constant,
+    recovered as `(16·2^m − 16) + 2·(12·2^m − 16)`.
+
+    The `(0,0)` block is the one that needs no sign bookkeeping at all: every one of its three
+    factors is a low-low pair, so `P3_level_stable` — which carries no nonzero hypotheses — turns
+    each into its level-`m` self, and the block IS `cosetU m W`.  That is proved here.
+
+    ⚠ SCOPE, and I had it wrong before asking.  I was going to write that "the LEADING term of the
+    recursion is a theorem".  Both M1 providers rejected that, and the correction is exact: only
+    **one** of the four `U`s is proved.  The coefficient `4` is not a theorem either — three of its
+    four units come from the other blocks, which are measured.  So what this tier establishes is
+    `block (0,0) = U`, and nothing about `4U + (40·2^m − 48)` beyond what §57.35 measured.
+
+    The other three blocks carry the `E01`/`E10` signs and Tier 82's coset case; their deviations
+    `16·2^m − 16` and `12·2^m − 16` are measured, not derived. -/
+
+/-- **THE LEADING BLOCK IS THE LEVEL BELOW.**  `P3_level_stable` alone, three times. -/
+theorem cosetU_block00 (m W : Nat) (hW : W < 2^(m+1)) :
+    sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+        P3 a b W (m+1) * (P3 b (b ^^^ W) W (m+1) * P3 (b ^^^ W) a W (m+1))))
+      = cosetU m W := by
+  unfold cosetU
+  refine sumLtI_congr _ _ _ (fun a ha => sumLtI_congr _ _ _ (fun b hb => ?_))
+  have hbW : b ^^^ W < 2^(m+1) := xorlt hb hW
+  rw [P3_level_stable m a b W ha hb hW,
+      P3_level_stable m b (b ^^^ W) W hb hbW hW,
+      P3_level_stable m (b ^^^ W) a W hbW ha hW]
+
 end SounioZDFiberAntisym
 
 
