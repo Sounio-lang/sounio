@@ -14176,6 +14176,47 @@ theorem chi_joint_count (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
       sumLtI_mul, sumLtI_one]
   omega
 
+
+/-! ### Tier 81 — the two SINGLE sums drop from triple to double
+
+    The joint sum factorised because its weight carried no `A` (Tier 77).  The two single sums do
+    carry `A`, so they do not factorise — but each weight depends on only TWO of the three indices,
+    and the third sum comes out anyway:
+
+      weight `g b c`  ⇒  `Σ_b Σ_c g b c · A b c · (A²) c b`
+      weight `g c a`  ⇒  `Σ_a Σ_c g c a · A c a · (A²) a c`
+
+    where `(A²) x y = Σ_i A x i · A i y`.  `χ01`'s weight is `χ01 b c W` and `χ10`'s is `χ10 c a W`,
+    so one lemma each.  Triple to double is a real reduction: with the weights supported on the
+    explicit loci of §57.28, what remains is a sum over `~3N` points against the square of the
+    level-`m` matrix — which is where the fibre dependence of `O_1` lives, and is the object §57.17
+    identified by hand as the coset-line term. -/
+
+/-- A weight in `(b,c)` lets the `a` sum out, leaving `A` against its square. -/
+theorem tri3w_bc (B : Nat) (A : Nat → Nat → Int) (g : Nat → Nat → Int) :
+    tri3w B A (fun _ b c => g b c)
+      = sumLtI B (fun b => sumLtI B (fun c =>
+          g b c * A b c * sumLtI B (fun a => A c a * A a b))) := by
+  unfold tri3w
+  rw [sumLtI_swap B B (fun a b => sumLtI B (fun c => g b c * (A a b * (A b c * A c a))))]
+  refine sumLtI_congr _ _ _ (fun b _ => ?_)
+  rw [sumLtI_swap B B (fun a c => g b c * (A a b * (A b c * A c a)))]
+  refine sumLtI_congr _ _ _ (fun c _ => ?_)
+  rw [← sumLtI_mul B (g b c * A b c) (fun a => A c a * A a b)]
+  exact sumLtI_congr _ _ _ (fun a _ => by grind)
+
+/-- A weight in `(c,a)` lets the `b` sum out. -/
+theorem tri3w_ca (B : Nat) (A : Nat → Nat → Int) (g : Nat → Nat → Int) :
+    tri3w B A (fun a _ c => g c a)
+      = sumLtI B (fun a => sumLtI B (fun c =>
+          g c a * A c a * sumLtI B (fun b => A a b * A b c))) := by
+  unfold tri3w
+  refine sumLtI_congr _ _ _ (fun a _ => ?_)
+  rw [sumLtI_swap B B (fun b c => g c a * (A a b * (A b c * A c a)))]
+  refine sumLtI_congr _ _ _ (fun c _ => ?_)
+  rw [← sumLtI_mul B (g c a * A c a) (fun b => A a b * A b c)]
+  exact sumLtI_congr _ _ _ (fun b _ => by grind)
+
 end SounioZDFiberAntisym
 
 

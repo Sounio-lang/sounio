@@ -4996,8 +4996,34 @@ Both providers checked the one thing that could have gone wrong silently: `c = 0
 be DISTINCT for the two indicator counts to add without overlap, and `W ≠ 0` guarantees it.
 
 **So §57.28's brute-force count is now a theorem**, and with it the chain from §57.26's assembly
-through §57.27's four-way split down to this number is formal, except for the two single sums
-`tri3w(χ01)` and `tri3w(χ10)`, which are fibre-dependent and remain measured.
+through §57.27's four-way split down to this number is formal, except for the two single sums.
+
+### 57.32 — Tier 81: the two single sums drop from triple to double
+
+The joint sum factorised because its weight carried no `A`. The two single ones do carry `A`, so
+they do not factorise — but each weight depends on only TWO of the three indices, and the third sum
+comes out anyway:
+
+| weight | reduction |
+|---|---|
+| `g b c` (`χ01`'s shape) | `Σ_b Σ_c g b c · A b c · (A²) c b` |
+| `g c a` (`χ10`'s shape) | `Σ_a Σ_c g c a · A c a · (A²) a c` |
+
+`tri3w_bc` and `tri3w_ca`, kernel-clean, green first try, and — as both providers confirmed —
+**using no property of `g` or `A` whatsoever**: pure index bookkeeping. Checked by denotation on
+RANDOM integer matrices (they are statements about `tri3w`, not about `P3`): 0 violations in 12
+trials at `B = 4,5,6`. Both also confirmed the orientations `(A²) c b` and `(A²) a c` are not
+transposed, which is the thing that would have been wrong silently.
+
+**Is triple→double a real reduction or bookkeeping dressed up?** I asked that as its own question,
+prepared to be told it was oversell. Both said it is real: the inner sum is a precomputable `A²`, so
+the object drops from `O(B³)` to `O(B²)` and, more to the point here, the weights are supported on
+the `~3N` explicit points of §57.28's loci — so what carries `O_1`'s fibre dependence is now a sum
+over those points against the SQUARE of the level-`m` matrix. That is the same object §57.17
+identified by hand as the coset-line term, reached formally.
+
+**Still not a value.** `A²` on the `χ` loci is not evaluated, and that is where a closed form for
+`tri3w(χ01)` / `tri3w(χ10)` would have to come from. Not attempted; no estimate recorded.
 
 **Status of (III).** Still reduced, not proven — but the reduction is now a single explicit
 first-order recursion in `m` whose only non-constant input is a coset-line sum with a closed form.
