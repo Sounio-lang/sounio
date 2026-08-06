@@ -658,6 +658,16 @@ class MLPExitHead(nn.Module):
         return self.fc2(h) + self.proj(x)
 
 
+def _head_bias(head):
+    """Mutable output bias of an exit head, for the L9 forced-exit probe.
+    Linear heads expose `.bias`; MLPExitHead's output bias is `proj.bias`."""
+    if hasattr(head, "bias"):
+        return head.bias
+    if hasattr(head, "proj"):
+        return head.proj.bias
+    raise AttributeError(f"{type(head).__name__} has no exposed output bias")
+
+
 class GatingNetwork(nn.Module):
     """Learned per-stage gate. Input: GAP features + stage embedding.
     Output: scalar logit; samples leave when sigmoid(logit) > threshold.
@@ -919,7 +929,7 @@ class SufferingAwareViT(nn.Module):
                 head_in = head_in.detach()   # probe head: no trunk gradient
             logits_k = self.exit_heads[k](head_in)
             if train:
-                aux_records.append((active, logits_k))
+                aux_records.append((active, logits_k, k))
             if not gated:
                 continue
             conf = torch.softmax(logits_k.detach(), dim=1).max(dim=1).values
@@ -938,7 +948,10 @@ class SufferingAwareViT(nn.Module):
             out_logits[active] = final_logits
             if train:
                 final_record = (active, final_logits)
-        return out_logits, out_depth, per_block_active, n_final, aux_records, final_record
+        # 10-field contract shared with the ResNet forward: no distill target,
+        # no depth penalty, no gate records for this family (confidence exits).
+        return (out_logits, out_depth, per_block_active, n_final, aux_records,
+                final_record, None, x.new_zeros(n), [], [])
 
     def forward_dense(self, x):
         meter = MachineMeter()
@@ -1031,7 +1044,10 @@ class SufferingAwareGPT(nn.Module):
                                     n_final * self.g, train)
                 out_logits[active] = self.final_head(h[:, -self.g:, :])
             final_record = (active, full_logits) if train else None
-        return out_logits, out_depth, per_block_active, n_final, aux_records, final_record
+        # 10-field contract shared with the ResNet forward: no distill target,
+        # no depth penalty, no gate records for this family (confidence exits).
+        return (out_logits, out_depth, per_block_active, n_final, aux_records,
+                final_record, None, x.new_zeros(n), [], [])
 
     def forward_dense(self, x):
         meter = MachineMeter()
@@ -1268,8 +1284,11 @@ def train_run(model, x_tr, y_tr, x_va, y_va, epochs, tau, tag, is_lm=False):
             # SAN-v6: after τ, keep training for post_tau_epochs with gates open
             # so the model learns to exit early without dropping below τ.
             if model.kind == "san" and t_star is not None:
-                if not hasattr(model, "post_tau_training") or not model.post_tau_training:
+                if not getattr(model, "post_tau_training", False):
                     model.post_tau_training = True
+                    if not hasattr(model, "post_tau_epochs"):
+                        model.post_tau_epochs = int(os.environ.get(
+                            "SAN_LARGE_POST_TAU_EPOCHS", "20"))
                     print(f"    [{tag}] entering post-τ early-exit training for {model.post_tau_epochs} epochs", flush=True)
                 post_tau_elapsed = epoch - t_star
                 if post_tau_elapsed >= model.post_tau_epochs:
@@ -1929,8 +1948,12 @@ def main():
             model.eval()
             fire_stage = i % model.n_stages
             with torch.no_grad():
-                model.exit_heads[fire_stage].bias.fill_(0.0)
-                model.exit_heads[fire_stage].bias[0] = 30.0
+                # v7: exits require the gate to fire, not just a confident
+                # head — open all gates (post-τ state) and force the gate logit.
+                model.reached_tau = True
+                model.gates[fire_stage].net[-1].bias.fill_(30.0)
+                _head_bias(model.exit_heads[fire_stage]).fill_(0.0)
+                _head_bias(model.exit_heads[fire_stage])[0] = 30.0
             ok, det = conservation_check(model, x_sweep, model.n_stages)
             overhead = 1.0 - overhead_fraction(model, x_sweep)
             ok = ok and det["n_exits"] > 0 and overhead < 0.05
@@ -1946,8 +1969,8 @@ def main():
             model.eval()
             fire_block = i % model.depth
             with torch.no_grad():
-                model.exit_heads[fire_block].bias.fill_(0.0)
-                model.exit_heads[fire_block].bias[0] = 30.0
+                _head_bias(model.exit_heads[fire_block]).fill_(0.0)
+                _head_bias(model.exit_heads[fire_block])[0] = 30.0
             ok, det = conservation_check(model, x_sweep, model.depth)
             overhead = 1.0 - overhead_fraction(model, x_sweep)
             ok = ok and det["n_exits"] > 0 and overhead < 0.05
@@ -1970,8 +1993,8 @@ def main():
             model.eval()
             fire_block = i % model.depth
             with torch.no_grad():
-                model.exit_heads[fire_block].bias.fill_(0.0)
-                model.exit_heads[fire_block].bias[0] = 30.0
+                _head_bias(model.exit_heads[fire_block]).fill_(0.0)
+                _head_bias(model.exit_heads[fire_block])[0] = 30.0
             ok, det = conservation_check(model, x_lm_sweep, model.depth, is_lm=True)
             overhead = 1.0 - overhead_fraction(model, x_lm_sweep)
             ok = ok and det["n_exits"] > 0 and overhead < 0.05
