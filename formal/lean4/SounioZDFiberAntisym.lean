@@ -13980,6 +13980,82 @@ theorem chi_joint_factor (B W : Nat) :
   exact sumLtI_congr _ _ _ (fun c _ =>
     sumLtI_mul B (sumLtI B (fun b => chi01 b c W)) (fun a => chi10 c a W))
 
+
+
+/-! ### Tier 78 — the two inner counts, PROVED
+
+    §57.29 called these "a different kind of obligation — cardinality over an `xor` locus, not
+    rewriting", and both M1 providers agreed.  **The framing was too pessimistic, and it was mine,
+    not theirs**: they were answering about counting solutions of a boolean equation in general,
+    which is indeed induction-on-bits work.  Here the loci are not general — they are EXPLICIT
+    SINGLE POINTS.  `b ⊕ W = 0` says `b = W`; `(b ⊕ c) ⊕ W = 0` says `b = c ⊕ W`.  So each inner sum
+    is an indicator supported on one or three NAMED points, and Tier 58's `cnt1` / `cnt3` evaluate
+    exactly that.
+
+    The lesson is the lane's own rule, which I broke twice in two tiers: do not record a difficulty
+    you have not attempted.  I recorded one, the reviewers echoed my framing back, and it dissolved
+    on contact with the actual loci. -/
+
+/-- **THE `χ01` COLUMN COUNT.**  `1` on the two special columns, `3` on the rest. -/
+theorem chi01_col (m c W : Nat) (hc : c < 2^(m+1)) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun b => chi01 b c W) = if c = 0 ∨ c ^^^ W = 0 then 1 else 3 := by
+  have hp := Nat.two_pow_pos (m+1)
+  have hcW : c ^^^ W < 2^(m+1) := xorlt hc hW
+  by_cases h0 : c = 0
+  · subst h0
+    rw [if_pos (Or.inl rfl),
+        sumLtI_congr _ _ (fun b => if b = 0 then (1:Int) else 0) (fun b _ => by
+          unfold chi01
+          by_cases hb : b = 0 <;> simp [hb, Nat.zero_xor, hW0])]
+    exact cnt1 _ 0 hp
+  · by_cases hw : c ^^^ W = 0
+    · have hcq : c = W := xor_zero_eq c W hw
+      rw [if_pos (Or.inr hw),
+          sumLtI_congr _ _ (fun b => if b = W then (1:Int) else 0) (fun b _ => by
+            unfold chi01
+            by_cases hb : b = 0
+            · have hzW : (0:Nat) ≠ W := fun h => hW0 h.symm
+              simp [hb, hw, hzW]
+            · simp only [if_neg hb, if_neg h0]
+              by_cases h1 : b ^^^ W = 0
+              · have hbq : b = W := xor_zero_eq b W h1
+                rw [if_pos (Or.inl h1), if_pos hbq]
+              · have h2 : (b ^^^ c) ^^^ W ≠ 0 := by rw [hcq, xor_cancel]; exact hb
+                have n1 : b ≠ W := fun h => h1 (by rw [h, Nat.xor_self])
+                rw [if_neg (fun h => h.elim h1 h2), if_neg n1])]
+      exact cnt1 _ W hW
+    · rw [if_neg (fun h => h.elim h0 hw),
+          sumLtI_congr _ _ (fun b => if b = 0 ∨ b = W ∨ b = c ^^^ W then (1:Int) else 0)
+            (fun b _ => by
+              unfold chi01
+              by_cases hb : b = 0
+              · simp [hb, hw]
+              · simp only [if_neg hb, if_neg h0]
+                by_cases h1 : b ^^^ W = 0
+                · have hbq : b = W := xor_zero_eq b W h1
+                  rw [if_pos (Or.inl h1), if_pos (Or.inr (Or.inl hbq))]
+                · by_cases h2 : (b ^^^ c) ^^^ W = 0
+                  · have hbc : b ^^^ c = W := xor_zero_eq _ _ h2
+                    have hbq : b = c ^^^ W := by
+                      rw [← hbc, Nat.xor_comm b c, ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor]
+                    rw [if_pos (Or.inr h2), if_pos (Or.inr (Or.inr hbq))]
+                  · have n1 : b ≠ W := fun h => h1 (by rw [h, Nat.xor_self])
+                    have n2 : b ≠ c ^^^ W := by
+                      intro h
+                      apply h2
+                      rw [h, Nat.xor_comm c W, xor_cancel, Nat.xor_self]
+                    rw [if_neg (fun h => h.elim h1 h2),
+                        if_neg (fun h => h.elim hb (fun h' => h'.elim n1 n2))])]
+      have d1 : (0:Nat) ≠ W := fun h => hW0 h.symm
+      have d2 : (0:Nat) ≠ c ^^^ W := fun h => hw h.symm
+      have d3 : W ≠ c ^^^ W := by
+        intro h
+        apply h0
+        have e : W ^^^ W = (c ^^^ W) ^^^ W := by rw [← h]
+        rw [Nat.xor_self, xor_cancel] at e
+        exact e.symm
+      exact cnt3 _ 0 W (c ^^^ W) hp hW hcW d1 d2 d3
+
 end SounioZDFiberAntisym
 
 

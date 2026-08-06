@@ -4936,6 +4936,42 @@ zai put it precisely: counting solutions of a boolean/`xor` equation needs induc
 Hamming weight, categorically different from evaluating sums by associativity and distributivity.
 That is the Tier 58 kind of work, and it is where this line of formalisation stops.
 
+### 57.30 — ⚠ CORRECTION, and Tier 78: the `χ01` inner count is PROVED
+
+§57.28 and §57.29 recorded the two inner counts as "a different **kind** of obligation — cardinality
+over an `xor` locus, not rewriting", and said there was no rewriting route. **That was wrong, and it
+was my framing, not the reviewers'.** They were answering about counting solutions of a general
+boolean equation, which genuinely is bit-induction work. These loci are not general:
+
+    b ⊕ W = 0        says        b = W
+    (b ⊕ c) ⊕ W = 0  says        b = c ⊕ W
+
+— **named points**, by `xor_zero_eq` and `xor_cancel`. So each inner sum is an indicator supported
+on one or three explicit points, and Tier 58's `cnt1`/`cnt3` evaluate exactly that.
+
+    chi01_col : Σ_{b < 2^(m+1)} χ01 b c W = if c = 0 ∨ c ⊕ W = 0 then 1 else 3
+
+kernel-clean at `[propext, Quot.sound]`. Three cases: at `c = 0` the indicator collapses to `b = 0`;
+at `c = W` the second disjunct never fires because `(b ⊕ c) ⊕ W = b ≠ 0`; otherwise the support is
+`{0, W, c ⊕ W}`, three distinct points. Measured first: 0 violations over every `(c,W)` at
+`m = 2,3,4`.
+
+**On putting the correction to the reviewers.** I asked them directly whether I had been
+overcorrecting. Both said no and both gave the reason back: `x ⊕ y = 0` is solvable by cancellation,
+so the constraint names points rather than describing a solution set, and the earlier framing
+answered the generic problem instead of this one. zai: *"The previous framing answered the generic
+problem of arbitrary boolean equations rather than the exact structure of this specific
+constraint."*
+
+**The lesson is the lane's own rule, and I broke it twice in two tiers:** do not record a difficulty
+you have not attempted. I recorded one, the reviewers echoed my framing back — agreement is not
+evidence when the question is the thing that is wrong — and it dissolved on contact with the actual
+loci.
+
+**Still open:** the `χ10` column count (`N` at `c = 0`, `1` at `c = W`, `3` elsewhere). Its `c = 0`
+case needs `sumLtI_const_excl` rather than `cnt1`, the other two mirror `chi01_col`. Not attempted
+here, and after the above I am recording no estimate of what it costs.
+
 **Status of (III).** Still reduced, not proven — but the reduction is now a single explicit
 first-order recursion in `m` whose only non-constant input is a coset-line sum with a closed form.
 What has not been attempted: proving the recursion (the constants and `Σ_coset` from the same
