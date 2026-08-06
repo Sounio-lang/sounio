@@ -13940,6 +13940,46 @@ theorem orth_weight1_split4 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
   simp only [tri3w_add, tri3w_smul, tri3w_one]
   grind
 
+
+/-! ### Tier 77 — the joint locus FACTORISES over `c`
+
+    §57.28 counted the three loci by brute force.  The joint one has a reason: its indicator is
+    `χ01 b c W · χ10 c a W`, in which `a` and `b` never meet — so for each `c` the sums over `a` and
+    over `b` separate, and the triple sum collapses to a single sum of products.
+
+    That is what makes the count computable, and it is rewriting rather than cardinality, so it is
+    provable here.  Two `sumLtI_swap`s to bring `c` outside and two `sumLtI_mul`s to pull each
+    factor through.
+
+    ⚠ TWO DIFFERENT `N`s, and both M1 providers caught me conflating them.  The theorem's bound `B`
+    is the number of INDEX VALUES, `2^(m+1)`; §57.28's `N` is the number of NONZERO indices,
+    `2^(m+1) − 1 = B − 1`.  An earlier version of this docstring called both `N`, which made the
+    arithmetic below look off by one.  With the two kept apart, and writing `N = B − 1`:
+
+      `Σ_b χ01 b c W` = `1` at `c = 0` and at `c = W`, `3` elsewhere      — total `3N − 1`
+      `Σ_a χ10 c a W` = `N` at `c = 0`, `1` at `c = W`, `3` elsewhere     — total `4N − 2`
+
+    (MEASURED, `m = 3,4,5,6`, every label).  `c` runs over `B = N + 1` values, two of them special,
+    so the joint count is `1·N + 1·1 + 9·(B − 2) = N + 1 + 9(N − 1) = 10N − 8`, which is §57.28's.
+
+    Those two inner counts are NOT proved: each is a cardinality over an `xor` locus — the Tier 58
+    kind of work — and both providers confirmed there is no rewriting route to them. -/
+
+/-- **THE JOINT INDICATOR FACTORISES.**  `a` and `b` never occur together, so for each `c` the two
+    inner sums separate. -/
+theorem chi_joint_factor (B W : Nat) :
+    sumLtI B (fun a => sumLtI B (fun b => sumLtI B (fun c => chi01 b c W * chi10 c a W)))
+      = sumLtI B (fun c => sumLtI B (fun b => chi01 b c W) * sumLtI B (fun a => chi10 c a W)) := by
+  have step1 : ∀ a, sumLtI B (fun b => sumLtI B (fun c => chi01 b c W * chi10 c a W))
+      = sumLtI B (fun c => sumLtI B (fun b => chi01 b c W) * chi10 c a W) := by
+    intro a
+    rw [sumLtI_swap B B (fun b c => chi01 b c W * chi10 c a W)]
+    exact sumLtI_congr _ _ _ (fun c _ => sumLtI_mul_r B (fun b => chi01 b c W) (chi10 c a W))
+  rw [sumLtI_congr B _ _ (fun a _ => step1 a),
+      sumLtI_swap B B (fun a c => sumLtI B (fun b => chi01 b c W) * chi10 c a W)]
+  exact sumLtI_congr _ _ _ (fun c _ =>
+    sumLtI_mul B (sumLtI B (fun b => chi01 b c W)) (fun a => chi10 c a W))
+
 end SounioZDFiberAntisym
 
 

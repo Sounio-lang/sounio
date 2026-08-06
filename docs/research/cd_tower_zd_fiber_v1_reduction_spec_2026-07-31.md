@@ -4904,6 +4904,38 @@ Lean theorem needs the Tier 58 machinery (`sumLtI_const_excl`, `cnt1/cnt2/cnt3`,
 cardinality argument, not the rewriting that carried Tiers 66–76. Not attempted, no difficulty
 recorded.
 
+### 57.29 — Tier 77: the joint locus FACTORISES over `c`
+
+§57.28 counted the three loci by brute force. The joint one has a reason: its indicator is
+`χ01 b c W · χ10 c a W`, in which `a` and `b` never meet — so for each `c` the sums over `a` and over
+`b` separate:
+
+    Σ_a Σ_b Σ_c χ01(b,c)·χ10(c,a) = Σ_c (Σ_b χ01(b,c))·(Σ_a χ10(c,a))
+
+`chi_joint_factor`, kernel-clean at `[propext, Quot.sound]` (no `Classical.choice`). Two
+`sumLtI_swap`s to bring `c` outside and two `sumLtI_mul`s to pull each factor through — and, as both
+providers confirmed, **it uses nothing about `χ01`/`χ10`**: it holds for arbitrary `F(b,c)` and
+`G(c,a)`. That is the honest scope of the result: it is Fubini plus distributivity, and what it buys
+is that the joint count reduces to two one-dimensional counts.
+
+**⚠ Two different `N`s, and both providers caught me conflating them.** The theorem's bound is the
+number of INDEX VALUES, `B = 2^(m+1)`; §57.28's `N` is the number of NONZERO indices, `B − 1`. My
+first docstring called both `N`, which made the arithmetic look off by one — grok computed the
+`10N − 17` that would follow. The theorem's variable is now `B`, and with the two apart:
+
+| | value at `c = 0` | at `c = W` | elsewhere | total |
+|---|---|---|---|---|
+| `Σ_b χ01 b c W` | `1` | `1` | `3` | `3N − 1` |
+| `Σ_a χ10 c a W` | `N` | `1` | `3` | `4N − 2` |
+
+`c` runs over `B = N + 1` values, two special, so the joint count is `1·N + 1·1 + 9·(B − 2) =
+10N − 8` — §57.28's number. Measured at `m = 3,4,5,6`, every label, for both inner counts.
+
+**The two inner counts are not proved, and both providers confirmed there is no rewriting route.**
+zai put it precisely: counting solutions of a boolean/`xor` equation needs induction on bits or
+Hamming weight, categorically different from evaluating sums by associativity and distributivity.
+That is the Tier 58 kind of work, and it is where this line of formalisation stops.
+
 **Status of (III).** Still reduced, not proven — but the reduction is now a single explicit
 first-order recursion in `m` whose only non-constant input is a coset-line sum with a closed form.
 What has not been attempted: proving the recursion (the constants and `Σ_coset` from the same
