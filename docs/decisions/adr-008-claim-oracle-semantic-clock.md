@@ -76,6 +76,7 @@ must be classifiable as exactly one of:
 | `forbidden_as_claim_oracle` | Known anti-pattern: foreign runtime is sole expected authority | Must not open new; migrate |
 | `bootstrap_integrity` | Fixed-point, seed ELF, Stage0 recovery (ADR-006) | Yes for *bootstrap*, not library claims |
 | `formal_only` | Lean lake / proof obligations; no numeric product expecteds | N/A for run-pass floats |
+| `research_harness` | Pure-Python (or non-Sounio) research contract; **not** a language/library claim clock | No (outside product semantics) |
 
 ### 2. New work rule
 
@@ -138,9 +139,11 @@ Shared helper: `scripts/ci/lib_sounio_claim_oracle.sh`.
 
 Legacy hard-fail: export `SOUNIO_FOREIGN_ORACLE_HARD=1`.
 
-Remaining inventory `foreign_hard_fail=yes` rows are largely **Python-only research harnesses**
-(suffering_aware_*, self_falsifying_compilation_line_r*, sac_llm) or **false positives**
-(native_v2_* golden stdout, claim_ast preprocessor)—not dual Sounio+Python claim judges.
+Scanner residual hygiene (2026-08-07): pure-Python research harnesses
+(`suffering_aware_*`, `self_falsifying_*`, …) are classed `research_harness`
+(not language claims). `native_v2_*` golden gates and `claim_ast` tooling are
+`sounio_native_expected`. After reclassify, `foreign_hard_fail=yes` should
+approach zero for dual claim judges; any remaining rows need manual review.
 
 ## Grounded in
 

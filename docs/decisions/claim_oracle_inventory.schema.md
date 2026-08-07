@@ -19,7 +19,7 @@ values (oracles).
 |---|---|---|
 | `gate_id` | string | Path relative to repo root (stable id) |
 | `kind` | enum | `gate` \| `oracle` \| `parity_ref` \| `other` |
-| `oracle_class` | enum | See ADR-008 table |
+| `oracle_class` | enum | See ADR-008 table (+ `research_harness`) |
 | `foreign_hard_fail` | `yes`/`no`/`unknown` | Does foreign mismatch set fail/exit≠0 by default? |
 | `sounio_witness` | `yes`/`no`/`partial` | Is there a Sounio sentinel / ALL PASS / native expected? |
 | `foreign_runtimes` | string | Comma-separated: `python3`, `mpmath`, `scipy`, `none`, … |
@@ -42,6 +42,8 @@ last wins).
 | Two `souc` engines or dual Sounio paths compared | `sounio_closed_form_twin` |
 | Fixed-point / bootstrap / gen2 gen3 | `bootstrap_integrity` |
 | Lean lake / formal only | `formal_only` |
+| Pure-Python research harness (no Sounio claim clock) | `research_harness` (not a language claim) |
+| ADR-008 soft foreign markers present | `external_corroboration_only`, `foreign_hard_fail=no` |
 | Insufficient signal | `unknown` → notes must say so; treat as review debt |
 
 ## Migration priorities (ADR-008)

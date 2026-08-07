@@ -60,7 +60,8 @@ classify_one() {
   local has_adr008_soft=0
 
   echo "$text" | grep -qE 'python3|python |[.]py["'"'"' ]' && has_py=1 || true
-  echo "$text" | grep -qE 'bin/souc|SOUC|souc run|souc check' && has_souc=1 || true
+  # resolve_souc / SOUC_BIN / sounio_require_souc count as Sounio surface
+  echo "$text" | grep -qE 'bin/souc|SOUC|souc run|souc check|resolve_souc|sounio_require_souc|SOUC_BIN' && has_souc=1 || true
   echo "$text" | grep -qE '\bdiff\b|/usr/bin/diff' && has_diff=1 || true
   echo "$text" | grep -qE 'fail=1|exit 1|GATE FAILED|ORACLE MISMATCH' && has_fail=1 || true
   echo "$text" | grep -qiE 'mpmath|scipy|numpy' && has_mpmath=1 || true
@@ -72,6 +73,9 @@ classify_one() {
   echo "$text" | grep -qiE 'optional.*oracle|oracle.*optional|corroboration' && has_optional=1 || true
   # ADR-008 demotion markers: foreign path soft unless SOUNIO_FOREIGN_ORACLE_HARD=1
   echo "$text" | grep -qE 'lib_sounio_claim_oracle|SOUNIO_FOREIGN_ORACLE_HARD|sounio_foreign_mismatch|sounio_foreign_diff|ADR-008' && has_adr008_soft=1 || true
+  # C research contracts (l8/l9 census) still count as non-peer-language claim clocks
+  local has_c_contract=0
+  echo "$text" | grep -qE '_VERDICT PASS|l8_zd_census|l9_zd_census|cc -O|CC_BIN' && has_c_contract=1 || true
 
   local foreign="none"
   local fr=()
@@ -94,6 +98,50 @@ classify_one() {
     sounio_wit="yes"
   fi
 
+  # Pure-Python research harnesses: not language/library claim clocks (ADR-008 residual).
+  case "$path" in
+    *suffering_aware*|*self_falsifying_compilation_line*|*sac_llm*|*mercyful_machine*|*moonshot_*|*federated_san*|*san_real_patient*)
+      if [[ $has_souc -eq 0 ]]; then
+        oclass="research_harness"
+        foreign_hard="no"
+        migration="none"
+        notes="python_research_contract_not_language_claim"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+          "$path" "$kind" "$oclass" "$foreign_hard" "$sounio_wit" \
+          "$foreign" "$tier" "$notes" "$migration" "$UTC"
+        return 0
+      fi
+      ;;
+  esac
+
+  # native_v2 golden-stdout gates: Sounio ELF vs expected file, not peer-language oracle
+  case "$path" in
+    *native_v2_*_gate.sh)
+      oclass="sounio_native_expected"
+      foreign_hard="no"
+      migration="keep"
+      notes="native_v2_sounio_golden_or_self_check"
+      sounio_wit="yes"
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$path" "$kind" "$oclass" "$foreign_hard" "$sounio_wit" \
+        "$foreign" "$tier" "$notes" "$migration" "$UTC"
+      return 0
+      ;;
+  esac
+
+  # claim_ast: Sounio typecheck is claim; python preprocessor is tooling
+  if [[ "$path" == *claim_ast_gate* ]]; then
+    oclass="sounio_native_expected"
+    foreign_hard="no"
+    migration="keep"
+    notes="claim_ast_sounio_check_plus_tooling_preprocessor"
+    sounio_wit="partial"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$path" "$kind" "$oclass" "$foreign_hard" "$sounio_wit" \
+      "$foreign" "$tier" "$notes" "$migration" "$UTC"
+    return 0
+  fi
+
   if [[ $has_fixed -eq 1 && $has_py -eq 0 ]]; then
     oclass="bootstrap_integrity"
     migration="keep"
@@ -102,20 +150,20 @@ classify_one() {
     oclass="formal_only"
     migration="keep"
     notes="lean_or_formal_path"
-  elif [[ $has_adr008_soft -eq 1 && $has_souc -eq 1 ]]; then
-    # Demoted: Sounio claim + soft foreign corroboration (ADR-008 pilot pattern)
-    oclass="sounio_native_expected"
+  elif [[ $has_adr008_soft -eq 1 ]]; then
+    # Demoted dual clock (Sounio and/or C claim + soft foreign)
     foreign_hard="no"
     migration="keep"
-    notes="adr008_soft_foreign_corroboration"
-    sounio_wit="yes"
-    if [[ $has_py -eq 1 ]]; then
+    if [[ $has_souc -eq 1 || $has_c_contract -eq 1 ]]; then
       oclass="external_corroboration_only"
-      notes="adr008_claim_sounio_plus_soft_foreign"
+      notes="adr008_claim_plus_soft_foreign"
       sounio_wit="partial"
+      [[ $has_souc -eq 1 || $has_c_contract -eq 1 ]] && sounio_wit="yes"
+    else
+      oclass="external_corroboration_only"
+      notes="adr008_soft_foreign_only"
     fi
   elif [[ $has_py -eq 1 && $has_fail -eq 1 ]] && { [[ $has_diff -eq 1 ]] || [[ $has_mpmath -eq 1 ]]; }; then
-    # Foreign mismatch can fail the gate
     if [[ $has_optional -eq 1 ]]; then
       oclass="external_corroboration_only"
       foreign_hard="unknown"
@@ -142,12 +190,12 @@ classify_one() {
     notes="souc_without_python_judge"
     sounio_wit="yes"
   elif [[ $kind == "oracle" || $kind == "parity_ref" ]]; then
-    oclass="forbidden_as_claim_oracle"
-    foreign_hard="unknown"
+    # Standalone research oracles: measurement helpers, not claim gates
+    oclass="research_harness"
+    foreign_hard="no"
     foreign="python3"
-    migration="rehome_sounio"
-    notes="standalone_oracle_or_parity_ref"
-    has_py=1
+    migration="none"
+    notes="standalone_measurement_oracle_not_gate"
   else
     oclass="unknown"
     migration="none"
