@@ -5563,3 +5563,34 @@ paper must either show it is not or cite it as such. This is the one item the ga
 
 Still owed: de Marrais (box-kites — highest rediscovery risk for the FIBRATION), Zhilina's sedenion
 relation graph vs our `n = 4` annihilation graph, the van Dam–Haemers DS survey, two-graph catalogues.
+
+### §58.7 — the seam_coincidence question is SETTLED, with a concession (2026-08-07)
+
+Report: `docs/research/cd_tower_seam_vs_dddd_criterion_2026-08-07.md`. Settled by computation against
+the cocycle at `bits = 4…7`, not by reading.
+
+First, a fact I had not checked about my own predicate: `isZD` is defined as "has a TWO-TERM
+annihilator", a priori stronger than being a zero-divisor — and on the loHi locus **the two
+coincide** (0 disagreements at `bits = 4,5,6`, with `dim Ann ∈ {0}` on-seam and `{4,12,20,28}`
+off-seam). So the content is genuinely about zero-divisors and the comparison is live.
+
+**The concession.** Writing `x = e_l + e_u` as `{p,q}` in [DDDD]'s ±`i_n` splitting, their Theorem
+1.3/1.5 applies wherever `p,q ≠ 0` and both slots lie in `C⊥_n`, and there the dimension formula is
+confirmed exactly (182/182 at `bits = 5`, 870/870 at `bits = 6`). On that covered set **their
+dichotomy is our dichotomy**: every off-seam pair has `p,q` C-orthogonal (168/168, 840/840), so
+"C-orthogonal ⟹ zero-divisor" gives our off-seam half; every on-seam covered pair misses the D-locus
+and gets `dim Ann = 0` (14/14, 30/30). **The ZD clause of `seam_coincidence` is a basis-level
+specialisation of [DDDD] Thm 1.5 and must be cited as such** — at `n = 4` it is [DDD] Prop 12.1,
+i.e. Moreno / Khalil–Yiu.
+
+**What survives as ours.** (i) The **two-term annihilator with an explicit witness** —
+`hasXorAnnih = offSeam` says the annihilator can always be taken with support 2, though its dimension
+reaches 28 at `bits = 6`; [DDD]/[DDDD] compute dimensions and describe subspaces, never minimal
+support, and nothing in their machinery yields it. (ii) **`anti0 = ¬offSeam`**, the operator identity
+`{L_l,L_u} = 0`, absent from their work. (iii) A **closed** `O(1)` criterion where theirs is an
+inductive reduction the authors call "not as explicit as we might like". (iv) The corners their
+hypotheses exclude — 24%/12%/6% of the locus at `bits = 5,6,7`, namely the pairs meeting `i_{n−1}`:
+**their splitting has its own seam, one level below ours.**
+
+`seam_coincidence` is hereby downgraded in the arc from "our theorem" to "our formalisation and our
+refinement of a known dichotomy". The claim carried forward is the COINCIDENCE, not the dichotomy.
