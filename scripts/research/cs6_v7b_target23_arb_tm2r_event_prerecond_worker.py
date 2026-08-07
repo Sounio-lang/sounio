@@ -185,12 +185,17 @@ def prerecond_event_chart(
 
         event_time_model = predictor.with_remainder(newton_image)
         event_time_range = event_time_model.range()
+        # Exact rational shift: combined endpoints = frozen center + serialized
+        # residual event-time endpoints. Do not re-round through Arb addition.
+        event_lower_q = Fraction(base.lower_fraction(event_time_range))
+        event_upper_q = Fraction(base.upper_fraction(event_time_range))
         record.update(
             correction=interval_json(newton_image),
-            event_time=interval_json(event_time_range),
-            combined_event_time=interval_json(
-                base.rational_ball(center) + event_time_range
-            ),
+            event_time=[str(event_lower_q), str(event_upper_q)],
+            combined_event_time=[
+                str(center + event_lower_q),
+                str(center + event_upper_q),
+            ],
             event_time_variable_weights=weights_json(
                 centered.model_variable_weights(event_time_model)
             ),
