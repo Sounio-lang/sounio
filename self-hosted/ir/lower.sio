@@ -15485,6 +15485,19 @@ fn count_expr_list(elems: Option<Box<ExprList>>) -> i64 with Alloc, Mut, Div {
     count_expr_list_ref(&elems)
 }
 
+// #1649: materialise an arena-resident argument list. The flat pool is the
+// source of truth; this rebuilds the Box chain ONLY where something needs to
+// mutate it, so ir_arena_load can stay effect-free for its ~431 callers.
+fn ir_reg_list_from_arena(at: i64, n: i64) -> Option<Box<IrRegList>> with Mut, Panic, Div, Alloc {
+    var out = ir_empty_reg_list()
+    var k = n - 1
+    while k >= 0 {
+        out = ir_reg_list_prepend(ir_arena_arg_at(at, k), out)
+        k = k - 1
+    }
+    out
+}
+
 fn ir_reg_list_prepend(reg: i64, args: Option<Box<IrRegList>>) -> Option<Box<IrRegList>> with Alloc {
     Some(Box::new(IrRegList { head: reg, tail: args }))
 }
@@ -15602,7 +15615,16 @@ fn ir_patch_validated_calls_in_function(
             } else {
                 shared_validated_reg
             }
-            var instr = ir_arena_load(ir_region_slot_r(func.region, (i)))
+            // #1649: ir_arena_load deliberately does NOT rebuild call_args --
+            // that needs Alloc and it is called at ~431 sites, where forcing the
+            // effect cascades. Arena-resident arguments live in the flat pool.
+            // This site MUTATES the list, so it has to materialise it first, and
+            // it already carries Alloc. Without this the prepend below built onto
+            // an empty list and the call's original arguments were dropped --
+            // which is what failed self-test T10 and T11.
+            let rd_slot = ir_region_slot_r(func.region, (i))
+            var instr = ir_arena_load(rd_slot)
+            instr.call_args = ir_reg_list_from_arena(rd_slot, instr.arg_count)
             ir_patch_validated_call_instr(&! instr, validated_reg)
             ir_arena_store(ir_region_slot_w(func.region, (i)), instr)
             patch_count = patch_count + 1

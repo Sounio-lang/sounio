@@ -5202,30 +5202,22 @@ fn mf_arebox_reset_scratch() with Mut {
 // large-struct/Box by-value miscompiles). A wider chain cannot be rebuilt from
 // this scratch slot, so mark overflow and let the caller skip the arena reset.
 fn mf_arebox_extract_at(module: &IrModule, fi: i64, ii: i64, slot: i64) -> i64 with Mut, Panic, Div {
+    // #1649: read the FLAT POOL, not the Box chain. ir_arena_load does not
+    // rebuild call_args -- rebuilding needs Alloc and it is called at ~431 sites
+    // -- so the chain walked here was ALWAYS None, this returned 0 for every
+    // instruction, and the reset proceeded believing no call had arguments to
+    // preserve. Silent argument loss on the dependency-merge path, not a crash.
+    // The pool needs no allocation, so this is also simpler than what it replaces.
+    let at = ir_region_slot_r((*module).functions[fi as usize].region, (ii))
+    let total = IR_A_ARG_COUNT[at as usize]
+    if total <= 0 { return 0 }
     var n: i64 = 0
-    match ir_arena_load(ir_region_slot_r((*module).functions[fi as usize].region, (ii))).call_args {
-        Some(node0) => {
-            MF_AREBOX_ARGS[(slot * 8 + n) as usize] = (*node0).head
-            n = 1
-            var cur = (*node0).tail
-            while n < 8 {
-                match cur {
-                    Some(node) => {
-                        MF_AREBOX_ARGS[(slot * 8 + n) as usize] = (*node).head
-                        cur = (*node).tail
-                        n = n + 1
-                    }
-                    _ => { return n }
-                }
-            }
-            match cur {
-                Some(_) => { MF_AREBOX_OVERFLOW = true }
-                _ => {}
-            }
-            n
-        }
-        _ => 0
+    while n < 8 && n < total {
+        MF_AREBOX_ARGS[(slot * 8 + n) as usize] = ir_arena_arg_at(at, n)
+        n = n + 1
     }
+    if total > 8 { MF_AREBOX_OVERFLOW = true }
+    n
 }
 
 // Record one (fi, ii) call-arg site for post-reset re-boxing, extracting its
@@ -5268,9 +5260,10 @@ fn mf_arebox_scan(module: &IrModule, fn_lo: i64, fn_hi: i64) -> bool with Mut, P
         let ic = (*module).functions[fi as usize].instr_count
         var ii: i64 = 0
         while ii < ic {
-            match ir_arena_load(ir_region_slot_r((*module).functions[fi as usize].region, (ii))).call_args {
-                Some(_) => mf_arebox_record_at(module, fi, ii)
-                _ => {}
+            // #1649: same correction -- ask the pool whether this instruction has
+            // arguments. The call_args chain on a loaded instr is always empty.
+            if IR_A_ARG_COUNT[(ir_region_slot_r((*module).functions[fi as usize].region, (ii))) as usize] > 0 {
+                mf_arebox_record_at(module, fi, ii)
             }
             ii = ii + 1
         }
