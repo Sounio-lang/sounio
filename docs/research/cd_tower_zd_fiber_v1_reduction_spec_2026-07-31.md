@@ -5462,3 +5462,76 @@ is flat, so on a domain containing `W = 2^m` it would move every coefficient. Th
 rests on the direct check at `m = 4,5,6`, whose domain is the references `W = 8g+1` — none of them
 the seam. (ii) "the antisymmetry is WHY the cost is quadratic" is motivation: antisymmetry gives that
 the two lines ADD; the degree `N²` is measured. zai passed both; grok's scoping is right.
+
+---
+
+## §58 — STRATEGY RESET (2026-08-07): the arc is pointed at its least publishable component
+
+Consulted Fable-5 for a plan toward real novelty, with the whole arc laid out including the worry
+that a 30-rung tower reducing X to X may never terminate. Its read, and the actions taken.
+
+### §58.1 The headline is NOT the deviation law
+
+The most likely publishable result in this material is the **spectral completeness theorem**: the
+adjacency spectrum of the signed annihilation graph is a complete isomorphism invariant for the
+CD-tower zero-divisor fiber geometries, with `3·2^{n−5}` classes at level `n`, proved ∀n. It sits in
+the van Dam–Haemers "which graphs are determined by their spectrum" programme, where explicit
+algebraically-defined infinite families with a proven complete spectral invariant are rare, and the
+genre "spectra of zero-divisor graphs" already exists for commutative rings while nobody has done
+Cayley–Dickson. Zhilina–Guterman compute diameters and cliques, not spectra — that is the daylight.
+
+The Fano fibration, the antisymmetry, the rank bound and the spectral halving all become supporting
+machinery of that paper instead of orphan lemmas. The Lean formalisation earns zero novelty credit
+from a math referee; it is a secondary selling point and a possible companion ITP/CPP paper.
+
+### §58.2 The pivot that dissolves the non-termination worry
+
+**`tri3` is `tr(A³)` — the third spectral moment. (I) is the second. The whole deviation-law arc has
+been the moment-separation half of the completeness theorem under a different name.** And it needs
+strictly less than what I have been chasing: not the closed form `−27·8^{n−j}·[j,3]₂`, only that the
+deviations are **pairwise distinct across `j`**.
+
+**Checked immediately, and it is better than hoped.** `v₂(27·8^{n−j}·[j,3]₂) = 3(n−j) + v₂([j,3]₂)`,
+and **`[j,3]₂` is ODD for every `j`** — numerator and denominator of `(2^j−1)(2^{j−1}−1)(2^{j−2}−1)
+/ ((2³−1)(2²−1)(2−1))` are products of odd numbers. Verified `j = 3…12`. So
+
+    v₂(D(n,j)) = 3(n−j)  exactly,
+
+pairwise distinct across `j` by construction, with no possible conspiracy — no Kummer-carry analysis
+needed, and the parity is a one-line proof. The 2-adic route to moment separation is open.
+
+### §58.3 Abandon
+
+- the exact Walsh closed form / contiguous-block coefficients — demote to a stated conjecture with
+  its out-of-sample confirmation at `m = 8`; not load-bearing once separation is valuation-only;
+- the `tri3 → tri3` self-recursion as a programme (keep the level-transfer LEMMAS, they feed the
+  valuation argument);
+- the per-label mask-correction identities (§57.47) — appendix at most;
+- any further work on the 168 action (Kirshtein's territory, already scoped);
+- two-graph family identification beyond one catalogue afternoon;
+- **counting rungs as progress.** The only metric from here is distance to moment separation ∀n and
+  the class count ∀n.
+
+### §58.4 Mandatory literature gate — BEFORE any novelty claim
+
+A threat not on my list at all: **Dugger–Isaksen, "Eigentheory of Cayley–Dickson algebras"
+(arXiv:0905.2987)** — a paper whose entire subject is eigenvalues of multiplication operators in CD
+algebras — and **Biss–Dugger–Isaksen, "Large annihilators in Cayley–Dickson algebras" I/II
+(math/0511691, math/0702075)**, which prove ∀n annihilator structure theorems including the maximal
+dimension `2ⁿ−4n+4`, via a splitting that may be our hi/lo decomposition. Must determine whether
+(a) `seam_coincidence` is a reformulation of BDI's characterisation of maximal-annihilator elements,
+and (b) our spectrum is derivable from their eigentheory of `L_a`. Also: de Marrais's box-kites are
+the highest rediscovery risk for the FIBRATION itself, and Zhilina's sedenion relation graph must be
+compared with our `n = 4` annihilation graph.
+
+### §58.5 Mis-scopings called out, and fixed
+
+- **"beats Weisfeiler–Leman" was impossible as stated.** 2-WL-equivalent graphs are cospectral, so
+  the spectrum can never strictly refine 2-WL. Our `wl_signature` refines by (own colour, multiset
+  of neighbour colours) — that is **1-WL / colour refinement**. Fixed in the classifier doc.
+- **`tri3` switching-invariance (Tier 89) is classical** — it is Seidel's defining invariant of a
+  two-graph. It must be presented as a formalisation of a classical fact, never as our lemma.
+- **The review pipeline is weaker than it feels.** Two LLM reviewers passing every rung while I
+  self-catch overclaims means they validate proof-step locality, not research direction — which is
+  exactly how one builds a tower reducing X to X. One human expert (signed graphs / spectral graph
+  theory) must see the completeness statement and the related-work section before submission.

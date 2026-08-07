@@ -38,8 +38,15 @@ This rung closes it with a concrete computable invariant:
 
 > **The adjacency spectrum of the ZD annihilation graph is a complete invariant of the fiber
 > geometry for `n = 6, 7, 8`.** The number of distinct spectra over all `2^{n-1}-1` fibers is exactly
-> `3·2^{n-5}` (`= 6, 12, 24`) — the full nauty-complete count — while Weisfeiler–Leman gives only
-> `4, 8, 16`. The spectrum is **strictly finer**: it separates the odd/Fano stratum that WL cannot.
+> `3·2^{n-5}` (`= 6, 12, 24`) — the full nauty-complete count — while COLOUR REFINEMENT (1-WL)
+> gives only `4, 8, 16`. The spectrum is **strictly finer than colour refinement**: it separates the
+> odd/Fano stratum that colour refinement cannot.
+>
+> ⚠ **SCOPE CORRECTION (2026-08-07, Fable-5 review).** This must always say 1-WL / colour
+> refinement, never "Weisfeiler–Leman" unqualified. `wl_signature` in the contract script refines by
+> (own colour, multiset of neighbour colours) — that is 1-WL. The spectrum can NEVER strictly refine
+> **2**-WL, because 2-WL-equivalent graphs are cospectral; an unqualified claim is not merely
+> unsupported but impossible, and a referee kills the hook in one line.
 
 And the spectral bound, paired with the *explicit* even-weight collapse isomorphisms, closes the
 open half self-containedly:
@@ -57,7 +64,7 @@ open half self-containedly:
 | Clause | Result | Reading |
 |---|---|---|
 | `S1_SPECTRUM_COUNT` | `n=6,7,8`: `#distinct spectra = 6, 12, 24 = 3·2^{n-5}` | matches the nauty-complete geometry count. |
-| `S2_WL_UNDERCOUNTS` | `#WL = 4, 8, 16 < #spectra`; explicit witness (same WL, distinct spectra) | spectrum **strictly finer** than WL/degree — separates the Fano stratum. |
+| `S2_WL_UNDERCOUNTS` | `#1-WL = 4, 8, 16 < #spectra`; explicit witness (same colour-refinement class, distinct spectra) | spectrum **strictly finer than colour refinement (1-WL)** — separates the Fano stratum. NOT a claim about 2-WL, which cospectrality forbids. |
 | `S3_COMPLETENESS` | pincer: `#iso ≥ #spectra` (spectrum is an iso-invariant) and `#iso ≤ 3·2^{n-5}` (monochromaticity ∀n + even-weight `Φ`, `n≤8`) | `#iso = 3·2^{n-5}` exactly ⇒ **spectrum is complete** (no cospectral non-isomorphic fibers). |
 | `S3b_FANO_INJECTIVITY` | bounds meet using only even-weight merges ⇒ no odd-weight collapse | **Fano-stratum injectivity, `n≤8`, self-contained** — the open half, closed. |
 | `S4_DEFLATION_GUARD` | `#spectra` (6/12/24) ≫ `(n-4)` possible outer-seam-bit values; spectrum ⊋ degree histogram | the invariant is **not** a function of the core-law datum `b` — genuinely finer. |
@@ -112,7 +119,7 @@ Probe, contract, and note produced under human direction (2026-07-26), pursuing 
 `PSL(2,7)` orbit-theorem thread (distinct from the ord-3 vein, which closed negative). The foundation
 (kernel-dimension spectrum, orbit theorem, parity-collapse law + explicit `Φ`) is prior in-repo work,
 independently re-verified here. **New:** the adjacency spectrum realizes the full fiber-geometry
-classification (`#spectra = 3·2^{n-5}`, `n=6,7,8`), strictly finer than Weisfeiler–Leman, closing the
+classification (`#spectra = 3·2^{n-5}`, `n=6,7,8`), strictly finer than colour refinement (1-WL), closing the
 reviewer's "needs spectral" open half for `n≤8` — with a self-contained pincer proof of Fano-stratum
 injectivity. §10 math-review (Grok `[OK]` on all claims; novelty "not standard in de Marrais/Moreno").
 Numerical certificate; `∀n` OPEN. No semantic claim, no clinical content. GAIDeT-ICMJE 2025.
