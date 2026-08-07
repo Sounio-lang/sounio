@@ -56,20 +56,32 @@ def load_items():
     return items
 
 
-def call_model(base_url, api_key, model, prompt, max_tokens=128):
-    req = urllib.request.Request(
-        base_url.rstrip("/") + "/chat/completions",
-        data=json.dumps({
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": max_tokens,
-            "temperature": 0.0,
-        }).encode(),
-        headers={"Authorization": f"Bearer {api_key}",
-                 "Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=120) as r:
-        body = json.loads(r.read())
-    return body["choices"][0]["message"]["content"].strip()
+def call_model(base_url, api_key, model, prompt, max_tokens=128, retries=4):
+    last = None
+    for attempt in range(retries):
+        try:
+            req = urllib.request.Request(
+                base_url.rstrip("/") + "/chat/completions",
+                data=json.dumps({
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": max(max_tokens, 512),
+                    "temperature": 0.0,
+                }).encode(),
+                headers={"Authorization": f"Bearer {api_key}",
+                         "Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=120) as r:
+                body = json.loads(r.read())
+            msg = body["choices"][0]["message"]
+            text = (msg.get("content") or "").strip()
+            if not text:  # glm-style reasoning-only reply
+                rc = (msg.get("reasoning_content") or "").strip().splitlines()
+                text = rc[-1] if rc else ""
+            return text.strip()
+        except Exception as e:
+            last = e
+            time.sleep(2 ** attempt * 2)
+    raise RuntimeError(f"model call failed after {retries} attempts: {last}")
 
 
 def norm(s):
