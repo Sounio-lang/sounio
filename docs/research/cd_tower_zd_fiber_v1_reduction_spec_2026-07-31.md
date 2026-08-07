@@ -5647,3 +5647,47 @@ math defect".
 ⚠ **`[OVERREACH]` taken:** the docstring read as if the closed form were established here. It is not
 — only the cancellation is. What remains, and the reviewer confirms there is nothing else: evaluate
 the boundary locus `b ∈ {0,W}` or `c ∈ {0,W}` term by term, then count.
+
+### §57.45 — Tier 91: the ε-weights EVALUATED — a switching, a coset flip, an index-0 flip
+
+Tier 90 left four level-`m` sums carrying `E01`, `E10`, `E11`. Each of the three weights is,
+pointwise and at every index (`W ≠ 0`), a product of three elementary signs:
+
+    sigRow x W = −1 exactly at x = W      (the switching sign, Tier 89)
+    epsZero x  = −1 exactly at x = 0      (the index-0 flip)
+    tauW l y W = −1 exactly on l ⊕ y = W  (the coset flip)
+
+    E11 = sigRow l · (sigRow y · epsZero y)
+    E01 = epsZero l · (sigRow l · tauW l y)
+    E10 = epsZero l · (tauW l y · (sigRow y · epsZero y))
+
+The borders and loci that cost six lemmas apiece in Tiers 71–88 are, in hindsight, exactly where one
+of these three factors turns over; `E11`'s `−1` at `y = 0`, which §57.42's correction had to work
+around, is now a named factor rather than an exception. The three-versus-four factor asymmetry
+between `E01` and `E10` is real and was checked: it comes from the `y = 0` base case, where `E01` is
+identically `+1` (and `tauW l 0` collapses to `sigRow l`, absorbing the missing `epsZero 0`) while
+`E10 l 0 = −sigRow l`, which needs the extra flip.
+
+The disjunction-to-product step is licensed by `loci_disjoint`: `l = W` and `l ⊕ y = W` together
+force `y = 0`, so off the index-0 line the two `−1` loci of `eps01` are disjoint and their OR is a
+product. Both providers confirmed the hypothesis is exactly tight — drop it and `y = 0, l = W`
+breaks it.
+
+In matrix language, with `D = diag(sigRow)`, `E = diag(epsZero)`, `X = tauW ⊙ P3`:
+
+    M01 = E D X,   M10 = E X D E,   M11 = D M D E     (0 mismatches, all 53 labels, m = 2,3,4)
+
+so the four ε-sums are TRACES OF WORDS in `M`, `X` and two diagonal sign matrices. Measured, 53/53,
+none of it formalised:
+
+    T3 = tr((M E)³) = S₀ + 6·(u′ᵀ M′ u′) − 2      u_x = P3 x 0 W m, ′ = drop index 0
+    T2 = tr(X · (D M D) · X)
+    T1 = tr((D E) M (D E) X E X)
+
+And `P3_coset_value` says the coset flip's carrier is CONSTANT: off its two border points, `P3` is
+identically `−1` on `y = l ⊕ W`, so `X = P3 + 2·Π_W` there, `Π_W` the perfect matching `l ↦ l ⊕ W`
+— the same `K_N`-minus-a-matching picture the `y = 0` base case of (III) already had.
+
+**This evaluates the WEIGHTS, not the SUMS.** It is a change of variables: the four sums still have
+no values, and `S₀` is `tri3` one level down, which is the object the recursion is about. Both
+providers were asked whether even "evaluating the weights" overreaches; both said it does not.
