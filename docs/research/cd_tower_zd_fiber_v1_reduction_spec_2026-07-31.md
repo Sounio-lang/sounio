@@ -5440,3 +5440,25 @@ took it, for the second tier running on the same kind of word.
 grok also returned `[OVERREACH]` on the `f_a` description, and that one changed the FILE rather than the
 prose: I had stated the two-point support as a measurement. It is now `sig_tau_zero` and
 `sig_tau_pts`, both theorems, both at the purest kernel level `[propext, Quot.sound]`.
+
+### §57.47 — Tier 93: S₀ against the masked object, and the mask's exact cost
+
+    S₀ − tri3(P3̃) = −3N² − 25N + 64 − 288·[m−1,2]₂·⟦W = 2^m⟧,   N = 2^(m+1) − 1
+
+measured at EVERY label, m = 2…6 (243/243). Off the maximal seam the correction is label-independent,
+so there `S₀` and the masked object differ by a constant. The exception is the seam once more, and
+its excess `288·[m−1,2]₂` is the SAME constant Tier 65 recorded for the masked object's own seam
+anomaly. A first sweep gave 239/243; the four failures were the seam at m = 3…6 — at m = 2 the
+Gaussian binomial vanishes and the seam is not exceptional. Re-deriving the descriptor from its own
+numbers, rather than accepting "almost", is what turned a broken formula into the right one.
+
+Formalised: the generators of the correction. `P3_col_zero` (the index-0 column is the label's
+cocycle row), `P3_row_zero`, `P3_zero_antisym` (**P3 0 y = −P3 y 0** for y ≠ 0) and `P3_zero_corner`
+(the corner is `+1`, the one entry not negated).
+
+**Two `[OVERREACH]`s from grok, both on prose, both taken.** (i) "differ by a constant ⇒ same Walsh
+spectrum apart from the mean" is valid only OFF the seam: the seam term is a spike, whose transform
+is flat, so on a domain containing `W = 2^m` it would move every coefficient. The spectral claim
+rests on the direct check at `m = 4,5,6`, whose domain is the references `W = 8g+1` — none of them
+the seam. (ii) "the antisymmetry is WHY the cost is quadratic" is motivation: antisymmetry gives that
+the two lines ADD; the degree `N²` is measured. zai passed both; grok's scoping is right.
