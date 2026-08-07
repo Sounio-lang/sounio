@@ -202,6 +202,25 @@ def main() -> None:
             fail("projection_scales count is wrong")
         if chart.get("status") != payload.get("classification"):
             fail("chart status disagrees with classification")
+        classification = str(payload.get("classification"))
+        if classification == "NO_SCALE_REACHED_PROJECTION":
+            if projection_scales:
+                fail("no-projection classification retained projection scales")
+        elif classification in {
+            "RECONDITION_COLLAPSES_RESIDUAL_RANK",
+            "FLOW_ERASES_RHO3",
+            "PROJECTION_ERASES_RHO3",
+            "RHO3_PRESERVED_ALL_STAGES",
+            "MIXED_RHO3_LOCI",
+        }:
+            if not projection_scales:
+                fail("locus classification lacks any projection scale")
+            if classification != "MIXED_RHO3_LOCI":
+                if locus_counts.get(classification, 0) != len(projection_scales):
+                    fail("locus classification does not cover every projection scale")
+            else:
+                if len(locus_counts) < 2:
+                    fail("mixed locus classification has fewer than two modes")
 
     print(f"SCHEMA={SCHEMA}")
     print(f"CLASSIFICATION={payload.get('classification')}")
