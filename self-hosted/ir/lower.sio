@@ -522,6 +522,82 @@ fn lx_mark(tag: i64, kind: i64, span_start: i64) with IO, Mut, Panic, Div {
     print("\n")
 }
 
+// I1 -- STATEMENT CURSOR. SOUNIO_LOWER_STMT_FN=<name> narrows a SIGSEGV from
+// "somewhere in the body" to a statement index. The crash is a single huge stack
+// frame (measured: identical at 2, 4 and 8 GB, jumps between 1 and 2 GB), so
+// nothing runs after it -- the cursor must PRINT BEFORE lowering, never after.
+//
+// The name is matched BYTE-VERBATIM against a flat buffer. Not hashed: a hash of
+// mine already overflowed i64 this session and produced a confidently wrong
+// ledger. The flag is latched once per function at entry so the comparison cost
+// is paid once, not per statement.
+//
+// CONTROL: point it at a function in module 4/5/6 that lowers fine. It MUST
+// print `stmt 1..N` and then `stmt_done`. Silence means the cursor sits on a
+// dead path -- lower.sio has both lowerer_lower_fn_item_mut (live) and
+// lower_fn_item_owned (the by-value twin) -- and the run must be discarded, not
+// interpreted.
+var LOWER_STMT_WANT: [i8; 128]
+var LOWER_STMT_WANT_LEN: i64 = 0
+var LOWER_STMT_CHECKED: i64 = 0
+var LOWER_STMT_ARMED: i64 = 0
+var LOWER_STMT_N: i64 = 0
+
+fn lower_stmt_cursor_init() with IO, Mut, Panic, Div {
+    if LOWER_STMT_CHECKED == 0 {
+        LOWER_STMT_CHECKED = 1
+        let w = read_env("SOUNIO_LOWER_STMT_FN")
+        var i: i64 = 0
+        while i < str_len(w) && i < 128 {
+            LOWER_STMT_WANT[i as usize] = str_char_at(w, i) as i8
+            i = i + 1
+        }
+        LOWER_STMT_WANT_LEN = i
+    }
+}
+
+// Latch at function entry: arm only for the named function.
+pub fn lower_stmt_cursor_arm(n: Name) with IO, Mut, Panic, Div {
+    lower_stmt_cursor_init()
+    LOWER_STMT_ARMED = 0
+    LOWER_STMT_N = 0
+    if LOWER_STMT_WANT_LEN <= 0 { return }
+    if n.len != LOWER_STMT_WANT_LEN { return }
+    var i: i64 = 0
+    while i < n.len && i < 128 {
+        if n.buf[i as usize] != LOWER_STMT_WANT[i as usize] { return }
+        i = i + 1
+    }
+    LOWER_STMT_ARMED = 1
+    print("stmt_cursor: ARMED for ")
+    var j: i64 = 0
+    while j < n.len && j < 128 {
+        print_char(n.buf[j as usize] as i64)
+        j = j + 1
+    }
+    print("\n")
+}
+
+fn lower_stmt_cursor_note(kind: i64, span_start: i64) with IO, Mut, Panic, Div {
+    if LOWER_STMT_ARMED != 1 { return }
+    LOWER_STMT_N = LOWER_STMT_N + 1
+    print("stmt ")
+    print_int(LOWER_STMT_N)
+    print(" kind=")
+    print_int(kind)
+    print(" span=")
+    print_int(span_start)
+    print("\n")
+}
+
+fn lower_stmt_cursor_done() with IO, Mut, Panic, Div {
+    if LOWER_STMT_ARMED != 1 { return }
+    print("stmt_done total=")
+    print_int(LOWER_STMT_N)
+    print("\n")
+    LOWER_STMT_ARMED = 0
+}
+
 var LOWER_FN_TRACE_ON: i64 = 0
 var LOWER_FN_TRACE_CHECKED: i64 = 0
 
@@ -2207,7 +2283,9 @@ fn lowerer_lower_program_bodies_dedup_mut(
                                     print("\n")
                                 }
                                 LX_FN_SEQ = 0
+                                lower_stmt_cursor_arm(name)
                                 lowerer_lower_fn_item_mut(lo, name, &(*fd))
+                                lower_stmt_cursor_done()
                                 if lx_on() {
                                     print("lower_fn_done: ")
                                     var lfd: i64 = 0
@@ -11932,6 +12010,7 @@ impl Lowerer {
             match *current {
                 Some(list) => {
                     let stmt_ref = &(*list).head
+                    lower_stmt_cursor_note(stmt_ref.kind as i64, stmt_ref.span.start)
                     if lx_on() { lx_mark(66, stmt_ref.kind as i64, stmt_ref.span.start) }
                     let pair = if stmt_ref.kind == StmtKind::StmtLet {
                         lo.lower_let_stmt_ref(stmt_ref, false)
