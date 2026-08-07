@@ -480,6 +480,48 @@ pub fn lower_note_unresolved(n: Name) with Mut {
 // self-compile is to print each name BEFORE lowering it: the last line printed
 // is the culprit. Memoised env read -- the runtime allocator never reclaims, so
 // a read per function is a per-compile leak.
+// ---------------------------------------------------------------------------
+// TIER 2: statement/expression trace. `print` compiles to a bare write(2) with
+// no buffering, so the LAST LINE PRINTED IS THE LAST LINE REACHED -- that is
+// what makes a printf instrument sound against a SIGSEGV.
+//
+// LX_MODE: 0 = unread, 1 = on, 2 = off. Zero cannot mean "on", because var
+// inits are BSS-zeroed and a zeroed gate that reads as enabled would trace
+// every build.
+//
+// NOTHING ON THIS PATH ALLOCATES. No read_env (memoised once), no read_file, no
+// string concat -- lower_rss_mark reads /proc/self/statm per mark from an arena
+// that never reclaims, which makes it a valid phase localiser and a
+// self-confounded memory instrument. This one must not repeat that.
+//
+// NOT A WRAPPER, deliberately. A wrapper adds a frame carrying Lowerer by value
+// in and (Lowerer, i64) out -- it would consume the very stack the stack
+// hypothesis is about. Marks go at the top of the existing bodies.
+var LX_MODE: i64 = 0
+var LX_SEQ: i64 = 0
+var LX_FN_SEQ: i64 = 0
+
+fn lx_on() -> bool with IO, Mut, Panic, Div {
+    if LX_MODE == 0 {
+        if str_eq(read_env("SOUNIO_LOWER_STMT_TRACE"), "1") { LX_MODE = 1 } else { LX_MODE = 2 }
+    }
+    LX_MODE == 1
+}
+
+// tag is a single letter: X expr, S stmt, B block-stmt.
+fn lx_mark(tag: i64, kind: i64, span_start: i64) with IO, Mut, Panic, Div {
+    LX_SEQ = LX_SEQ + 1
+    LX_FN_SEQ = LX_FN_SEQ + 1
+    print_char(tag)
+    print(" k=")
+    print_int(kind)
+    print(" at=")
+    print_int(span_start)
+    print(" seq=")
+    print_int(LX_SEQ)
+    print("\n")
+}
+
 var LOWER_FN_TRACE_ON: i64 = 0
 var LOWER_FN_TRACE_CHECKED: i64 = 0
 
@@ -1173,10 +1215,8 @@ struct Lowerer {
     // Inter-procedural FO: pure-fn transfer table (survives across function lowers).
     // kind: 0=none 1=id(p0) 2=scale(lit*p0) 3=add(p0+p1) 4=mul(p0*p1) 5=fwd(g)
     fo_xfer_count: i64,
-    fo_xfer_names: [Name; 64],
     fo_xfer_kind: [i64; 64],
     fo_xfer_lit: [f64; 64],
-    fo_xfer_fwd: [Name; 64],
 }
 
 struct IrPreparedCallArgs {
@@ -1346,10 +1386,8 @@ fn lowerer_new() -> Lowerer with Alloc {
         so_expr_hess: [-1; 36],
         so_bind_hess: [-1; 576],
         fo_xfer_count: 0,
-        fo_xfer_names: [ir_empty_name(); 64],
         fo_xfer_kind: [0; 64],
         fo_xfer_lit: [0.0; 64],
-        fo_xfer_fwd: [ir_empty_name(); 64],
     }
 }
 
@@ -1770,10 +1808,8 @@ fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEp
         so_expr_hess: [-1; 36],
         so_bind_hess: [-1; 576],
         fo_xfer_count: 0,
-        fo_xfer_names: [ir_empty_name(); 64],
         fo_xfer_kind: [0; 64],
         fo_xfer_lit: [0.0; 64],
-        fo_xfer_fwd: [ir_empty_name(); 64],
     }
     lo.epistemic_contests = lower_epistemic_contest_index_from_ref(epistemic)
     if lower_live_diag_enabled() {
@@ -1828,10 +1864,8 @@ fn lowerer_new_from_program_summary_owned(summary: IrProgramSummary, epistemic: 
         so_expr_hess: [-1; 36],
         so_bind_hess: [-1; 576],
         fo_xfer_count: 0,
-        fo_xfer_names: [ir_empty_name(); 64],
         fo_xfer_kind: [0; 64],
         fo_xfer_lit: [0.0; 64],
-        fo_xfer_fwd: [ir_empty_name(); 64],
     }
     (*lo.module).epistemic = (*epistemic)
     lo.epistemic_contests = lower_epistemic_contest_index_from_ref(epistemic)
@@ -1889,10 +1923,8 @@ fn lowerer_from_acc_module(module: Box<IrModule>) -> Lowerer with Alloc, Mut, Pa
         so_expr_hess: [-1; 36],
         so_bind_hess: [-1; 576],
         fo_xfer_count: 0,
-        fo_xfer_names: [ir_empty_name(); 64],
         fo_xfer_kind: [0; 64],
         fo_xfer_lit: [0.0; 64],
-        fo_xfer_fwd: [ir_empty_name(); 64],
     }
     // Knowledge layout is required for epistemic field lowering; match
     // lowerer_new_with_epistemic. Do NOT wipe module.epistemic / strings.
@@ -2174,7 +2206,19 @@ fn lowerer_lower_program_bodies_dedup_mut(
                                     }
                                     print("\n")
                                 }
+                                LX_FN_SEQ = 0
                                 lowerer_lower_fn_item_mut(lo, name, &(*fd))
+                                if lx_on() {
+                                    print("lower_fn_done: ")
+                                    var lfd: i64 = 0
+                                    while lfd < name.len && lfd < 128 {
+                                        print_char(name.buf[lfd as usize] as i64)
+                                        lfd = lfd + 1
+                                    }
+                                    print(" marks=")
+                                    print_int(LX_FN_SEQ)
+                                    print("\n")
+                                }
                             }
                             _ => {}
                         }
@@ -11888,6 +11932,7 @@ impl Lowerer {
             match *current {
                 Some(list) => {
                     let stmt_ref = &(*list).head
+                    if lx_on() { lx_mark(66, stmt_ref.kind as i64, stmt_ref.span.start) }
                     let pair = if stmt_ref.kind == StmtKind::StmtLet {
                         lo.lower_let_stmt_ref(stmt_ref, false)
                     } else if stmt_ref.kind == StmtKind::StmtVar {
@@ -12070,6 +12115,7 @@ impl Lowerer {
     }
 
     fn lower_let_stmt_ref(self, s: &Stmt, is_mut: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if lx_on() { lx_mark(83, s.kind as i64, s.span.start) }
         var lhs_lo = self
         match s.expr {
             Some(expr_box_closure) => {
@@ -12459,6 +12505,7 @@ impl Lowerer {
     }
 
     fn lower_expr_stmt_ref(self, s: &Stmt) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if lx_on() { lx_mark(83, s.kind as i64, s.span.start) }
         self.lower_opt_expr_ref(&s.expr)
     }
 
@@ -12467,6 +12514,7 @@ impl Lowerer {
     }
 
     fn lower_assign_stmt_ref(self, s: &Stmt) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if lx_on() { lx_mark(83, s.kind as i64, s.span.start) }
         let pair_rhs = self.lower_opt_expr_ref(&s.expr)
         var lo = pair_rhs.0
         var rhs = pair_rhs.1
@@ -15731,6 +15779,7 @@ impl Lowerer {
     }
 
     fn lower_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if lx_on() { lx_mark(88, e.kind as i64, e.span.start) }
         if self.probe_mode && lower_body_diag_enabled() {
             print("lower_probe: expr_kind=")
             if e.kind == ExprKind::ExprIntLit { print("int") }
