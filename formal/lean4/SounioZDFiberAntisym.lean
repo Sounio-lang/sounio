@@ -15018,4 +15018,89 @@ theorem P3_coset_value (m l W : Nat) (hl : l < 2^(m+1)) (hW : W < 2^(m+1))
       sigma_self (m+1) l hl hl0, sigma_self (m+1) (l ^^^ W) hlW' hlW]
   grind
 
+/-! ### Tier 92 — the three MATRIX FORMS, proved
+
+    §57.45 recorded, as measurement only, that the three ε-weighted matrices are words in `P3`, the
+    coset-flipped `X = tauW ⊙ P3`, and two diagonal sign matrices:
+
+      `M01 = E D X`,   `M10 = E X D E`,   `M11 = D M D E`
+
+    with `D = diag(sigRow)` and `E = diag(epsZero)`.  This tier proves them.  There is no matrix
+    library here and none is needed: a diagonal factor on the left is a weight depending only on the
+    row index, one on the right a weight depending only on the column, so each matrix form IS the
+    corresponding pointwise identity, re-associated.  Tier 91's splits do the work.
+
+    What is NOT bookkeeping is the sum-level consequence, and it is the reason the forms were worth
+    proving.  In `M11 = D M D E` the `D`s sit on BOTH sides with the SAME function, so `tri3_switch`
+    applies and they cancel:
+
+      `weight3_switch`: the weight-3 sum equals `tri3` of `P3` with a single column weight
+      `epsZero` — the whole `sigRow` dependence of the last orthant is GONE.
+
+    That is the Lean form of the measured `T3 = tr((M E)³)`, and it says the weight-3 orthant does
+    not see the label's `W = l` locus at all.  The other two words have `D` inside, between the two
+    `X`s (weight 2) or split by an `E` (weight 1), so no such cancellation is available and their
+    `sigRow` dependence is real. -/
+
+/-- **`M11 = D M D E`.** -/
+theorem M11_entry (m l y W : Nat) (hW0 : W ≠ 0) :
+    E11 l y W * P3 l y W m = sigRow l W * (P3 l y W m * (sigRow y W * epsZero y)) := by
+  rw [E11_split l y W hW0]; grind
+
+/-- **`M01 = E D X`.** -/
+theorem M01_entry (m l y W : Nat) (hW0 : W ≠ 0) :
+    E01 l y W * P3 l y W m = epsZero l * sigRow l W * (tauW l y W * P3 l y W m) := by
+  rw [E01_split l y W hW0]; grind
+
+/-- **`M10 = E X D E`.** -/
+theorem M10_entry (m l y W : Nat) (hW0 : W ≠ 0) :
+    E10 l y W * P3 l y W m
+      = epsZero l * ((tauW l y W * P3 l y W m) * (sigRow y W * epsZero y)) := by
+  rw [E10_split l y W hW0]; grind
+
+private theorem sigRow_pm (x W : Nat) : sigRow x W = 1 ∨ sigRow x W = -1 := by
+  unfold sigRow
+  by_cases h : x ^^^ W = 0
+  · exact Or.inr (if_pos h)
+  · exact Or.inl (if_neg h)
+
+/-- **THE WEIGHT-3 ORTHANT LOSES ITS SWITCHING.**  `D M D E` conjugates by the SAME diagonal on both
+    sides, so `tri3_switch` cancels it and only the column weight `epsZero` survives: the last
+    orthant of the level transfer cannot see the locus `x = W`. -/
+theorem weight3_switch (m W : Nat) (hW0 : W ≠ 0) :
+    tri3 (2^(m+1)) (fun x y => E11 x y W * P3 x y W m)
+      = tri3 (2^(m+1)) (fun x y => epsZero y * P3 x y W m) := by
+  refine tri3_switch _ _ _ (fun x => sigRow x W) (fun x => sigRow_pm x W) (fun x y _ _ => ?_)
+  rw [E11_split x y W hW0]
+  grind
+
+/-- The weight-2 orthant as the word `X · (D M D) · X`: the two coset flips sit OUTSIDE and the
+    switching survives BETWEEN them, so no cancellation is available. -/
+theorem weight2_word (m W : Nat) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+        E01 a b W * P3 a b W m
+          * (E11 b c W * P3 b c W m * (E10 c a W * P3 c a W m)))))
+      = sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+          (tauW a b W * P3 a b W m)
+            * ((sigRow b W * (sigRow c W * P3 b c W m)) * (tauW c a W * P3 c a W m))))) := by
+  refine sumLtI_congr _ _ _ (fun a _ => sumLtI_congr _ _ _ (fun b _ =>
+    sumLtI_congr _ _ _ (fun c _ => ?_)))
+  rw [E01_split a b W hW0, E11_split b c W hW0, E10_split c a W hW0]
+  unfold epsZero sigRow tauW
+  grind
+
+/-- The weight-1 orthant as its word: the switching survives, but split by an `epsZero` on each
+    index rather than sitting on both sides of one factor — again no cancellation. -/
+theorem weight1_word (m W : Nat) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+        P3 a b W m * (E01 b c W * P3 b c W m * (E10 c a W * P3 c a W m)))))
+      = sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+          ((sigRow a W * epsZero a) * (sigRow b W * epsZero b) * P3 a b W m)
+            * ((tauW b c W * P3 b c W m) * (epsZero c * (tauW c a W * P3 c a W m)))))) := by
+  refine sumLtI_congr _ _ _ (fun a _ => sumLtI_congr _ _ _ (fun b _ =>
+    sumLtI_congr _ _ _ (fun c _ => ?_)))
+  rw [E01_split b c W hW0, E10_split c a W hW0]
+  unfold epsZero sigRow tauW
+  grind
+
 end SounioZDFiberAntisym

@@ -5691,3 +5691,34 @@ identically `−1` on `y = l ⊕ W`, so `X = P3 + 2·Π_W` there, `Π_W` the per
 **This evaluates the WEIGHTS, not the SUMS.** It is a change of variables: the four sums still have
 no values, and `S₀` is `tri3` one level down, which is the object the recursion is about. Both
 providers were asked whether even "evaluating the weights" overreaches; both said it does not.
+
+### §57.46 — Tier 92: the three matrix forms proved, and the weight-3 orthant loses its switching
+
+§57.45 recorded the matrix forms as measurement only. They are now theorems. There is no matrix
+library in the file and none is needed: a diagonal factor on the left is a weight depending only on
+the row index and one on the right a weight depending only on the column, so
+
+    M01 = E D X,   M10 = E X D E,   M11 = D M D E     (D = diag(sigRow), E = diag(epsZero), X = tauW ⊙ P3)
+
+each IS the corresponding entrywise identity, re-associated — `M01_entry`, `M10_entry`, `M11_entry`.
+
+The payoff is not the bookkeeping but what the shape of the words permits. In `M11 = D M D E` the
+two `D`s carry the SAME function on both sides, so `tri3_switch` (Tier 89) cancels them:
+
+    weight3_switch:  tri3 (E11 ⊙ P3)  =  tri3 (epsZero-column-weighted P3)
+
+**The weight-3 orthant cannot see the locus `x = W` at all.** In the cyclic product the weights are
+`(D_a D_b E_b)(D_b D_c E_c)(D_c D_a E_a)`; every `D` occurs twice and squares away, leaving
+`E_a E_b E_c`. This is the Lean form of the measured `T3 = tr((M E)³)`.
+
+No analogous cancellation exists for the other two, and the obstruction is real rather than a gap in
+my search: `tri3_switch` needs the weight on `(a,b)` to be exactly `s_a s_b`. In weight-2 the pair
+`(a,b)` carries only a coset flip and no `D` at all, so `D_b, D_c` cannot pair up; in weight-1 the
+pair `(a,b)` carries no weight from the ε's whatsoever. Both words are proved in the form the
+obstruction makes visible (`weight2_word`, `weight1_word`), so their `sigRow` dependence is real.
+
+⚠ Process note: the M1 fan-out DEGRADED on this tier. grok timed out on three attempts (180 s cap),
+including one with a stripped-down input; zai returned a complete verdict block, `[OK]` on all five
+checks, having independently derived the `D_a² D_b² D_c² = 1` cancellation and the exact reason
+weight-1 and weight-2 cannot be cancelled. Substitute evidence for the missing provider is the
+denotation: all three sum-level identities hold at every label at `m = 2,3`.
