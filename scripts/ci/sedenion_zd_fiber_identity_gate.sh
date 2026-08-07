@@ -8,6 +8,11 @@
 #
 # souc false-greens; a bare PASS is not proof. Asserter: /usr/bin/diff on the 7 specific fiber records.
 set -euo pipefail
+# ADR-008 foreign corroboration (soft unless SOUNIO_FOREIGN_ORACLE_HARD=1)
+ROOT_FOR_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=scripts/ci/lib_sounio_claim_oracle.sh
+source "$ROOT_FOR_LIB/scripts/ci/lib_sounio_claim_oracle.sh"
+
 cd "$(dirname "$0")/../.."
 export SOUNIO_STDLIB_PATH="$PWD/stdlib"
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
@@ -27,14 +32,15 @@ field() { grep -m1 "^$1 " "$2" | awk '{print $2}'; }
 fail=0
 for key in VERTICES FIBER_ID; do
   s=$(field "$key" "$WORK/souc.txt"); p=$(field "$key" "$WORK/py.txt")
-  [ "$s" = "$p" ] || { echo "MISMATCH $key: souc=$s oracle=$p"; fail=1; }
+  if [ "$s" != "$p" ]; then sounio_foreign_mismatch "MISMATCH $key: souc=$s oracle=$p" || fail=1; fi
 done
 [ "$(field VERTICES "$WORK/souc.txt")" = "84" ]  || { echo "souc VERTICES != 84"; fail=1; }
 [ "$(field FIBER_ID "$WORK/souc.txt")" = "OK" ]  || { echo "souc FIBER_ID != OK"; fail=1; }
-[ "$(field COMPLEMENT_C4 "$WORK/py.txt")" = "7" ] || { echo "oracle COMPLEMENT_C4 != 7"; fail=1; }
+[ "$(field COMPLEMENT_C4 "$WORK/py.txt")" = "7" ] || sounio_foreign_mismatch "oracle COMPLEMENT_C4 != 7" || fail=1
 
-if [ "$(wc -l < "$WORK/souc_f.txt")" -ne 7 ] || ! diff -q "$WORK/souc_f.txt" "$WORK/py_f.txt" >/dev/null; then
-  echo "MISMATCH fiber-identity records:"; diff "$WORK/souc_f.txt" "$WORK/py_f.txt" | head; fail=1
+if [ "$(wc -l < "$WORK/souc_f.txt")" -ne 7 ]; then echo "souc fiber-identity count != 7"; fail=1; fi
+if ! diff -q "$WORK/souc_f.txt" "$WORK/py_f.txt" >/dev/null 2>&1; then
+  sounio_foreign_diff "$WORK/souc_f.txt" "$WORK/py_f.txt" "fiber-identity records" || fail=1
 fi
 
 [ "$fail" -eq 0 ] || { echo "fiber-identity gate: FAIL"; exit 1; }

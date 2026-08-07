@@ -121,12 +121,15 @@ without a grandfather exception.
 
 ## Pilot demotion (2026-08-07)
 
-First migrations to the ADR default:
+Migrations to the ADR default:
 
-| gate | claim clock | foreign path |
+| gate family | claim clock | foreign path |
 |---|---|---|
 | `scripts/special_scipy_parity_gate.sh` | Sounio `tests/parity/special_parity_*.sio` emit | mpmath report-only unless `SOUNIO_FOREIGN_ORACLE_HARD=1` |
-| `scripts/bigrat_gate.sh` | Sounio `eq_or_fail` + `BIGRAT_STDLIB_OK` | Python print-diff report-only unless `SOUNIO_FOREIGN_ORACLE_HARD=1` |
+| `scripts/bigrat_gate.sh` | Sounio `eq_or_fail` + `BIGRAT_STDLIB_OK` | Python print-diff report-only unless HARD |
+| `scripts/ci/sedenion_*.sh` (16 gates) | Sounio sentinels / OK tokens / constants | Python/diff via `lib_sounio_claim_oracle.sh` soft unless HARD |
+
+Shared helper: `scripts/ci/lib_sounio_claim_oracle.sh`.
 
 Legacy hard-fail: export `SOUNIO_FOREIGN_ORACLE_HARD=1`.
 
