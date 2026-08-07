@@ -5535,3 +5535,31 @@ compared with our `n = 4` annihilation graph.
   self-catch overclaims means they validate proof-step locality, not research direction — which is
   exactly how one builds a tower reducing X to X. One human expert (signed graphs / spectral graph
   theory) must see the completeness statement and the related-work section before submission.
+
+### §58.6 — the literature gate of §58.4 is CLEARED (2026-08-07)
+
+Read directly, full text: [DDD] math/0511691, [DDDD] math/0702075, [Eig] arXiv:0905.2987. Report:
+`docs/research/cd_tower_bdi_dugger_isaksen_gate_2026-08-07.md`.
+
+**None of the three defines a graph, an adjacency matrix, or a graph spectrum; none uses a binary-
+index/XOR condition.** [DDD] is about annihilator DIMENSIONS of continuous elements and the topology
+of the strata (Stiefel varieties); [DDDD]'s "splitting" is the ±`i_n` eigen-splitting `{a,b}` of one
+doubling step — a real-linear decomposition of `H⊥_{n+1}`, not our index involution; [Eig] is the
+eigentheory of `M_a = L_{a*}L_a/|a|²`, an operator on the `2^n`-dimensional ALGEBRA, whose spectrum
+is not ours in any sense either paper supplies.
+
+**The positive finding is worth more than the clearance.** [Eig] closes with **Question 9.3/9.4:
+"Fix `n`. Describe the space of all possible spectra of elements / of zero-divisors in `A_n`" —
+"We don't even have a guess."** So the question our completeness theorem is a discrete analogue of is
+an explicitly stated, unanswered open question of this school since 2009. That is the framing
+citation. ⚠ We do NOT answer it — different operator — and must never say we do.
+
+**⚠ One residual risk, now named precisely instead of vaguely.** [DDDD]'s criterion "if `a` and `b`
+are `C`-orthogonal then `{a,b}` is a zero-divisor" becomes a condition on INDICES when restricted to
+standard basis elements (`e_i e_j*` is `±e_k`, which lies in `C_n` exactly when `k` is `0` or the
+index of `i_n`). `seam_coincidence` lives in that register. Its ∀n anchor-free Lean proof is ours
+regardless, but its mathematical CONTENT may be a basis-level specialisation of [DDDD] §5, and the
+paper must either show it is not or cite it as such. This is the one item the gate does not close.
+
+Still owed: de Marrais (box-kites — highest rediscovery risk for the FIBRATION), Zhilina's sedenion
+relation graph vs our `n = 4` annihilation graph, the van Dam–Haemers DS survey, two-graph catalogues.
