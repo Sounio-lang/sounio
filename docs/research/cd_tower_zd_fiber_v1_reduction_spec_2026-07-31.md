@@ -5594,3 +5594,56 @@ hypotheses exclude — 24%/12%/6% of the locus at `bits = 5,6,7`, namely the pai
 
 `seam_coincidence` is hereby downgraded in the arc from "our theorem" to "our formalisation and our
 refinement of a known dichotomy". The claim carried forward is the COINCIDENCE, not the dichotomy.
+
+---
+
+## §59 — the coset involution, and the arc stops being a reduction (2026-08-07)
+
+After the strategy reset and a direct challenge on timidity, three tiers that are not another rung of
+the same ladder.
+
+### §59.1 Tier 94 — `Π M Π = D M`, and it is one-sided
+
+    P3(x ⊕ W, y ⊕ W, W, n) = δ(x) · P3(x, y, W, n),   δ = −1 exactly on {0, W}
+
+Conjugating `P3` by the coset involution rescales its ROWS and leaves its columns alone. Measured
+first (0 violations / 294080 at `m = 2…5`, every `W ≠ 0`) — after a WRONG first guess at the sign
+that the sweep killed in seconds, 283440 violations. The one-sidedness is real: `Π M Π ≠ M D`, and
+the reviewer's resolution of the apparent paradox is that full symmetry would collapse left into
+right, while `M` is not fully symmetric — rows `0` and `W` are exactly where `δ_x ≠ δ_y`.
+
+`δ = epsZero · sigRow`, the diagonal that had already appeared alone in Tier 92's `T1`. So two of
+Tier 91's three "elementary signs" are not independent accidents: they are the coset involution's
+character. All six reviewer checks `[OK]`, including the full-strength reading: *"no hidden weakening"*.
+
+**The spectral corollary.** `Π Δ Π = Δ`, so `Π(ΔM) = MΠ`: **`Π` swaps `M` and `ΔM`**. Hence
+`spec(M) = spec(ΔM)` — `M` is similar to its own two-row negation, a rank-2 perturbation preserving
+the whole spectrum. 53/53 labels; **null control: 0/200 on random ±1 matrices.** This is the register
+the §58 headline lives in, and it gives `tr(M^k) = tr((ΔM)^k)` for every `k`.
+
+### §59.2 Tier 95 — the δ-weight is invisible to `tri3`
+
+Three reindexings by `x ↦ x ⊕ W` plus Tier 94 give `tri3(P3) = Σ δ(a)δ(b)δ(c) P3_ab P3_bc P3_ca`.
+(The reindexing lemma `sumLtI_xor` was already in the file, proved via `sumLtI_reindex`; I had begun
+rebuilding it by induction on the level before finding it. Cheapest kind of waste, recorded.)
+
+Asked directly whether the identity is VACUOUS: **it is.** With `S₃ = 0` and `S₂ = S₁/2` it reads
+`3S₁ − 3S₁ = 0`. The content is the closed form of `S₁ = (M³)₀₀ + (M³)_WW`, measured
+**label-independent** and equal to `−16(2^m − 1)`, confirmed out of sample at `m = 6` (19 labels).
+
+### §59.3 Tier 96 — the cancellation, and the file's first import
+
+Both special rows are built from ONE vector, because `σ(x ⊕ W, W) = σ(W, x)` off `{0,W}` — `antisym`
+supplies one sign, the cocycle `L² = −I` the other, and they cancel. Hence `S1_summand_zero`: the two
+triple products are exact negatives at every `(b,c)` outside `{0,W}`.
+
+⚠ **This file now has an import.** Self-contained for 96 tiers; the cocycle is the one thing it never
+had and cannot cheaply rebuild (a module's worth of bit-list development). Rather than re-derive it
+for the sake of a self-imposed rule, `import SounioCDCocycle`, after checking that
+`cdSigma_cocycle` is `[propext, Quot.sound]` — no `native_decide`, no choice. The bridge is a width
+induction, not `rfl`. Reviewer: no soundness objection; "project self-containment preference is not a
+math defect".
+
+⚠ **`[OVERREACH]` taken:** the docstring read as if the closed form were established here. It is not
+— only the cancellation is. What remains, and the reviewer confirms there is nothing else: evaluate
+the boundary locus `b ∈ {0,W}` or `c ∈ {0,W}` term by term, then count.

@@ -58,6 +58,8 @@
   Lean silently recovers unknown identifiers with `sorryAx`.
 -/
 
+import SounioCDCocycle
+
 namespace SounioZDFiberAntisym
 
 /-! ## Carried prerequisites (from SounioSeamFlip.lean, branch lean/cd-seamflip-forall-n) -/
@@ -15230,5 +15232,252 @@ theorem P3_zero_antisym (y W n : Nat) (hy : y < 2^(n+1)) (hW : W < 2^(n+1)) (hy0
 theorem P3_zero_corner (W n : Nat) (hW : W < 2^(n+1)) : P3 0 0 W n = 1 := by
   rw [P3_col_zero 0 W n (Nat.two_pow_pos (n+1)) hW]
   exact cdSig0' W n
+
+/-! ### Tier 94 — THE COSET INVOLUTION ACTS BY A LEFT DIAGONAL
+
+    Every tier since 66 has been a reduction: an object at level `m+1` rewritten in terms of the same
+    object at level `m`.  This one is not a reduction.  It is an identity *within* a level, and it is
+    the strongest structural statement in the file:
+
+      `P3 (x ⊕ W) (y ⊕ W) W n = δ x · P3 x y W n`,   `δ x = −1` exactly on `x ∈ {0, W}`
+
+    — conjugating `P3` by the coset involution `Π_W : x ↦ x ⊕ W` **rescales its ROWS and does nothing
+    to its columns**.  In matrix form `Π M Π = D M` with `D = diag δ`, and the one-sidedness is real:
+    `Π M Π ≠ M D` (measured).  For a matrix that is symmetric off the index-`0` lines that is a
+    surprise; the reviewer's resolution of the apparent paradox is that full symmetry WOULD collapse
+    left into right, and `M` is not fully symmetric — rows `0` and `W` are exactly where `δ_x ≠ δ_y`.
+
+    `δ` is not a new sign: `δ = epsZero · sigRow`, the very diagonal that appeared on its own in
+    Tier 92's `T1` formula.  So the three elementary signs of Tier 91 were not three independent
+    accidents — two of them are the coset involution's character.
+
+    The proof is two applications of `antisym`, whose two `−1`s cancel in the generic case, plus the
+    five degenerate loci where one of them cannot fire — `x = 0`, `x = W`, `y = 0`, `y = W`, and the
+    coset line `y = x ⊕ W` — and `δ` is exactly the record of which of those flips.
+
+    Measured before proving: 0 violations / 294080 at `m = 2,3,4,5`, every `W ≠ 0`. -/
+
+/-- The coset involution's character: `−1` exactly on `{0, W}`.  Definitionally `epsZero · sigRow`. -/
+def cosetChar (x W : Nat) : Int := epsZero x * sigRow x W
+
+private theorem cosetChar_gen (x W : Nat) (hx0 : x ≠ 0) (hxW : x ^^^ W ≠ 0) :
+    cosetChar x W = 1 := by
+  unfold cosetChar epsZero sigRow; rw [if_neg hx0, if_neg hxW]; decide
+
+private theorem cosetChar_zero (W : Nat) (hW0 : W ≠ 0) : cosetChar 0 W = -1 := by
+  unfold cosetChar epsZero sigRow
+  have hz : ¬ ((0:Nat) ^^^ W = 0) := by rw [Nat.zero_xor]; exact hW0
+  rw [if_pos rfl, if_neg hz]; decide
+
+private theorem cosetChar_seam (W : Nat) (hW0 : W ≠ 0) : cosetChar W W = -1 := by
+  unfold cosetChar epsZero sigRow; rw [if_neg hW0, if_pos (Nat.xor_self W)]; decide
+
+/-- **THE COSET INVOLUTION IS A LEFT DIAGONAL.**  `Π M Π = D M`, not `M D`. -/
+theorem P3_coset_conj (n x y W : Nat) (hx : x < 2^(n+1)) (hy : y < 2^(n+1))
+    (hW : W < 2^(n+1)) (hW0 : W ≠ 0) :
+    P3 (x ^^^ W) (y ^^^ W) W n = cosetChar x W * P3 x y W n := by
+  have hp := Nat.two_pow_pos (n+1)
+  have hxW' : x ^^^ W < 2^(n+1) := xorlt hx hW
+  have hyW' : y ^^^ W < 2^(n+1) := xorlt hy hW
+  by_cases hyW : y ^^^ W = 0
+  · -- y = W : the LHS column collapses to index 0
+    have hyq : y = W := xor_zero_eq y W hyW
+    subst hyq
+    rw [hyW, P3_col_zero (x ^^^ y) y n hxW' hW,
+        P3_red x y y n hx hy hy hW0, Nat.xor_self, cdSig0]
+    by_cases hx0 : x = 0
+    · subst hx0
+      rw [cosetChar_zero y hW0, Nat.zero_xor]
+      have := sigma_self (n+1) y hy hW0
+      rw [this]; grind
+    · by_cases hxW0 : x ^^^ y = 0
+      · have hxq : x = y := xor_zero_eq x y hxW0
+        subst hxq
+        rw [cosetChar_seam x hx0, Nat.xor_self, cdSig0, cdSig0']
+        grind
+      · rw [cosetChar_gen x y hx0 hxW0,
+            antisym (n+1) y (x ^^^ y) hy hxW' hW0 hxW0
+              (by
+                intro h
+                have e : y ^^^ y = (x ^^^ y) ^^^ y := by rw [← h]
+                rw [Nat.xor_self, xor_cancel] at e
+                exact hx0 e.symm)]
+        grind
+  · by_cases hy0 : y = 0
+    · -- y = 0 : the RHS column collapses to index 0
+      subst hy0
+      rw [Nat.zero_xor, P3_col_zero x W n hx hW,
+          P3_red (x ^^^ W) W W n hxW' hW hW hW0, Nat.xor_self, cdSig0, xor_cancel x W]
+      by_cases hx0 : x = 0
+      · subst hx0
+        rw [cosetChar_zero W hW0, cdSig0, cdSig0']
+        grind
+      · by_cases hxW0 : x ^^^ W = 0
+        · have hxq : x = W := xor_zero_eq x W hxW0
+          subst hxq
+          rw [cosetChar_seam x hx0, sigma_self (n+1) x hx hx0]
+          grind
+        · rw [cosetChar_gen x W hx0 hxW0,
+              antisym (n+1) x W hx hW hx0 hW0
+                (by intro h; exact hxW0 (by rw [h, Nat.xor_self]))]
+          grind
+    · -- the generic column: both sides reduce
+      rw [P3_red (x ^^^ W) (y ^^^ W) W n hxW' hyW' hW hyW,
+          P3_red x y W n hx hy hW hy0, xor_cancel x W, xor_cancel y W]
+      by_cases hx0 : x = 0
+      · subst hx0
+        rw [cosetChar_zero W hW0, Nat.zero_xor, cdSig0, cdSig0']
+        rw [antisym (n+1) y W hy hW hy0 hW0
+              (by intro h; exact hyW (by rw [h, Nat.xor_self]))]
+        grind
+      · by_cases hxW0 : x ^^^ W = 0
+        · have hxq : x = W := xor_zero_eq x W hxW0
+          subst hxq
+          rw [cosetChar_seam x hx0, Nat.xor_self, cdSig0, cdSig0']
+          rw [antisym (n+1) x (y ^^^ x) hx hyW' hx0 hyW
+                (by intro h; exact hy0 (by
+                  have : x ^^^ x = (y ^^^ x) ^^^ x := by rw [← h]
+                  rw [Nat.xor_self, xor_cancel] at this; exact this.symm))]
+          grind
+        · rw [cosetChar_gen x W hx0 hxW0]
+          by_cases hcos : y ^^^ (x ^^^ W) = 0
+          · have hyq : y = x ^^^ W := xor_zero_eq y (x ^^^ W) hcos
+            subst hyq
+            rw [xor_cancel x W, sigma_self (n+1) x hx hx0,
+                sigma_self (n+1) (x ^^^ W) hxW' hxW0]
+            grind
+          · have hne1 : y ≠ x ^^^ W := fun h => hcos (by rw [h, Nat.xor_self])
+            have hne2 : x ≠ y ^^^ W := by
+              intro h
+              exact hne1 (by rw [h, xor_cancel y W])
+            rw [antisym (n+1) y (x ^^^ W) hy hxW' hy0 hxW0 hne1,
+                antisym (n+1) x (y ^^^ W) hx hyW' hx0 hyW hne2]
+            grind
+
+/-! ### Tier 95 — the δ-WEIGHTED triangle sum equals the plain one
+
+    Tier 94 is pointwise; this is what it buys.  `x ↦ x ⊕ W` is a bijection of `[0, 2^(m+1))`, and
+    the file already had the reindexing lemma for it — `sumLtI_xor`, proved via `sumLtI_reindex`.
+    (I had started to build it again by induction on the level before finding it.  Recorded because
+    it is the cheapest kind of waste: the toolkit was already there.)
+
+    Reindexing all three summation variables and applying Tier 94 to each of the three factors gives
+
+      `tri3(P3) = Σ_{a,b,c} δ(a)·δ(b)·δ(c) · P3_ab P3_bc P3_ca`,   `δ = −1` exactly on `{0, W}`
+
+    — the δ-weighted triple sum equals the unweighted one.  Since `δ` differs from `1` at only TWO
+    of the `2^(m+1)` indices, this is a strong cancellation: expanding `δ = 1 − 2·1_S` and subtracting
+    leaves an identity among sums restricted to the two rows `0` and `W` alone. -/
+
+/-- **THE δ-WEIGHT IS INVISIBLE TO `tri3`.**  Three reindexings and three applications of Tier 94. -/
+theorem tri3_coset_weight (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    tri3 (2^(m+1)) (fun x y => P3 x y W m)
+      = sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+          cosetChar a W * (cosetChar b W * cosetChar c W)
+            * (P3 a b W m * (P3 b c W m * P3 c a W m))))) := by
+  unfold tri3
+  rw [sumLtI_xor (m+1) W hW (fun a => sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+        P3 a b W m * (P3 b c W m * P3 c a W m))))]
+  refine sumLtI_congr _ _ _ (fun a ha => ?_)
+  rw [sumLtI_xor (m+1) W hW (fun b => sumLtI (2^(m+1)) (fun c =>
+        P3 (a ^^^ W) b W m * (P3 b c W m * P3 c (a ^^^ W) W m)))]
+  refine sumLtI_congr _ _ _ (fun b hb => ?_)
+  rw [sumLtI_xor (m+1) W hW (fun c =>
+        P3 (a ^^^ W) (b ^^^ W) W m * (P3 (b ^^^ W) c W m * P3 c (a ^^^ W) W m))]
+  refine sumLtI_congr _ _ _ (fun c hc => ?_)
+  rw [P3_coset_conj m a b W ha hb hW hW0,
+      P3_coset_conj m b c W hb hc hW hW0,
+      P3_coset_conj m c a W hc ha hW hW0]
+  grind
+
+/-! ### Tier 96 — the closed form of `S₁`, and the first import this file has ever needed
+
+    Tier 95's identity turns out to be VACUOUS as a constraint — the reviewer confirmed it: with
+    `S₃ = 0` and `S₂ = S₁/2` it reads `3S₁ − 3S₁ = 0`.  The content is the closed form of `S₁`
+    itself, measured label-independent and confirmed out of sample at `m = 6`:
+
+      `(M³)₀₀ + (M³)_WW = −16·(2^m − 1) = −8·(2^(m+1) − 2)`.
+
+    ⚠ The closed form is MEASURED; this tier proves only the pointwise cancellation that reduces it
+    to a boundary evaluation plus a count, and a reviewer flagged the paragraph below for reading as
+    if the identity were established here.  It is not.  Here is the ARGUMENT, of which the first half
+    is now a theorem.  Both rows are built from ONE vector: `P3 0 b = −σ(W,b)`, `P3 c 0 = σ(W,c)` (Tier
+    93), and `P3 W b = P3 b W = −σ(b⊕W, W)`.  The two families are the same vector because
+
+      `σ(x ⊕ W, W) = σ(W, x)`   for `x ∉ {0, W}`,
+
+    which is `antisym` composed with the cocycle `L² = −I`.  Consequently the two triple products
+    CANCEL pointwise off `{0,W}` — that is `S1_summand_zero`, below, and it is proved.  What remains
+    is the boundary locus `b ∈ {0,W}` or `c ∈ {0,W}`, which has to be evaluated term by term, and
+    only then does a count of the `2^(m+1) − 2` free indices appear, with whatever constant results.
+    The narrative factor `−4` twice is the plausible outcome of that calculation, not a derivation.
+
+    ⚠ **This file now has an import.**  It was self-contained for 96 tiers, and the cocycle
+    `σ(i,j)·σ(i, i⊕j) = −1` is the one thing it never had and cannot cheaply rebuild — it is a whole
+    module's worth of bit-list development in `SounioCDCocycle`.  Rather than re-derive it I use the
+    tree's proven asset, after checking that `SounioCDCocycle.cdSigma_cocycle` is itself
+    `[propext, Quot.sound]` — no `native_decide`, no `Classical.choice`.  The two `cdSigma`
+    definitions are character-for-character identical, so the bridge is `rfl`. -/
+
+/-- The two `cdSigma` definitions in the tree are the same function — by induction on the width,
+    since the equation compiler does not make them `rfl`-equal. -/
+theorem cdSigma_defeq : ∀ (n a b : Nat), cdSigma a b n = SounioCDCocycle.cdSigma a b n
+  | 0, _, _ => rfl
+  | 1, _, _ => rfl
+  | (n+2), a, b => by
+      have ih : ∀ a b, cdSigma a b (n+1) = SounioCDCocycle.cdSigma a b (n+1) :=
+        fun a b => cdSigma_defeq (n+1) a b
+      simp only [cdSigma, SounioCDCocycle.cdSigma, ih]
+
+/-- `L_i² = −I`, carried in from `SounioCDCocycle`. -/
+theorem sigma_cocycle (n i j : Nat) (hi : i < 2^n) (hj : j < 2^n) (hi0 : i ≠ 0) :
+    cdSigma i j n * cdSigma i (i ^^^ j) n = -1 := by
+  rw [cdSigma_defeq n i j, cdSigma_defeq n i (i ^^^ j)]
+  exact SounioCDCocycle.cdSigma_cocycle n i j hi hj hi0
+
+/-- **THE TWO ROWS ARE THE SAME VECTOR.**  `σ(x ⊕ W, W) = σ(W, x)` off `{0, W}` — `antisym` and the
+    cocycle, each contributing one sign, and the two cancel. -/
+theorem sigma_coset_eq (m x W : Nat) (hx : x < 2^(m+1)) (hW : W < 2^(m+1))
+    (hW0 : W ≠ 0) (hx0 : x ≠ 0) (hxW : x ^^^ W ≠ 0) :
+    cdSigma (x ^^^ W) W (m+1) = cdSigma W x (m+1) := by
+  have hxW' : x ^^^ W < 2^(m+1) := xorlt hx hW
+  have hne : x ^^^ W ≠ W := by
+    intro h
+    exact hx0 (by
+      have e : (x ^^^ W) ^^^ W = W ^^^ W := by rw [h]
+      rw [xor_cancel, Nat.xor_self] at e
+      exact e)
+  have ha := antisym (m+1) (x ^^^ W) W hxW' hW hxW hW0 hne
+  have hc := sigma_cocycle (m+1) W x hW hx hW0
+  rw [Nat.xor_comm W x] at hc
+  rw [ha]
+  rcases cdSigma_pm (m+1) W x with h1 | h1 <;>
+    rcases cdSigma_pm (m+1) W (x ^^^ W) with h2 | h2 <;>
+      rw [h1, h2] at hc ⊢ <;> first | rfl | exact absurd hc (by decide)
+
+/-- The `W` column of `P3`. -/
+theorem P3_W_col (m x W : Nat) (hx : x < 2^(m+1)) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    P3 x W W m = - cdSigma (x ^^^ W) W (m+1) := by
+  rw [P3_red x W W m hx hW hW hW0, Nat.xor_self, cdSig0]
+  grind
+
+/-- The `W` row of `P3`, off index `0`: the same vector. -/
+theorem P3_W_row (m y W : Nat) (hy : y < 2^(m+1)) (hW : W < 2^(m+1)) (hy0 : y ≠ 0) :
+    P3 W y W m = - cdSigma (y ^^^ W) W (m+1) := by
+  rw [P3_red W y W m hW hy hW hy0, Nat.xor_self, cdSig0]
+  grind
+
+/-- **THE `S₁` SUMMAND VANISHES OFF `{0, W}`.**  The two triple products are negatives of each other
+    at every index pair outside the two special rows — which is what collapses `S₁` to a count. -/
+theorem S1_summand_zero (m b c W : Nat) (hb : b < 2^(m+1)) (hc : c < 2^(m+1))
+    (hW : W < 2^(m+1)) (hW0 : W ≠ 0) (hb0 : b ≠ 0) (hbW : b ^^^ W ≠ 0)
+    (hc0 : c ≠ 0) (hcW : c ^^^ W ≠ 0) :
+    P3 0 b W m * (P3 b c W m * P3 c 0 W m)
+      + P3 W b W m * (P3 b c W m * P3 c W W m) = 0 := by
+  rw [P3_row_zero b W m hb hW hb0, P3_col_zero c W m hc hW,
+      P3_W_row m b W hb hW hb0, P3_W_col m c W hc hW hW0,
+      sigma_coset_eq m b W hb hW hW0 hb0 hbW,
+      sigma_coset_eq m c W hc hW hW0 hc0 hcW]
+  grind
 
 end SounioZDFiberAntisym
