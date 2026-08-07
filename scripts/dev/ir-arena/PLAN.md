@@ -286,16 +286,56 @@ only reachable because the third was tested with a **known pattern**
 were fine left the reference as the only remaining difference between the clean
 reading and the dirty one.
 
-### Still open after all this
+### Where this stands, 2026-08-07
 
-- `IR_FLOAT_BITS_TRUSTED` is **0**. The round-trip evidence now exists
-  (`writes=8` / `live_at_codegen=8`); the flip does not. It is a behaviour
-  change and belongs in its own commit, with the consumers switched and a gate.
-- The three `&(*ptr).arr[i]` sites in `compiler/pkg/{lock,registry_client}.sio`
-  are **off the IR path, not audited**. #1678 acceptance criterion 2 is unmet.
+**#1678 is root-caused and the fix is measured, but it is not mine to land.**
+One opcode in `lean_single.sio:16045` — arrays of aggregates are stored
+pointer-per-slot, the value path `mov`s the element pointer and the borrow path
+`lea`d the address of the pointer cell. It is the unfinished half of #740.
+
+- `handoff/1678-seed-fix` (off `origin/main`) carries the patch, four
+  reproducers and `scripts/dev/seed-1678/README.md`. **Delivered to the Madaros
+  fixed-point lane, which claimed it in `0e6a294ac8`. No PR opened on purpose.**
+- PR **#1681** carries the four source hoists against `main` as a tourniquet for
+  anyone on the shipped seed. It becomes redundant when the refresh lands.
+- Bootstrap: patched `gen2 == gen3`; the unpatched control reproduces the
+  **shipped** binary bit-exactly. 2948-test suite byte-identical either way.
+- `&!` mutable borrows are the severe case: the write **zeroes the element**.
+- Full record in `SEED_FIX_MEASUREMENT.md` and `REF_HAZARD_SITE_AUDIT.md`.
+
+**This branch is now strictly ahead of `origin/main` on the self-test.**
+25 OK / 3 FAIL against main's 22 OK / 6, and its failure set `{T14, T15, T16}`
+is a strict subset of main's. It introduces no failure main does not have.
+
+### Still open
+
+- **T10/T11 pass for an unknown reason.** Binding one test's five-clause `&&`
+  tail to a local flipped both, without touching T11. A standalone reproducer
+  (`probe_tail_and_chain.sio`) does NOT reproduce it, build diagnostics are
+  unchanged, and T11's flip is unexplained. Leading suspicion is the known
+  per-function codegen cap failure mode. The change is a shape change in a test,
+  not a repair.
+- **T14/T15/T16 fail here and on main** (`prof counter INC encoding`, `reloc
+  recorded`, `prof dump emitted`). Pre-existing, untouched, part of #1680's
+  seven.
+- `IR_FLOAT_BITS_TRUSTED` is **0**. Round-trip evidence exists (`writes=8` /
+  `live_at_codegen=8`); the flip does not. Own commit, consumers switched, gate.
+- `ir_opt_apply_strategy` now allocates a region per call **with no
+  reclamation**. Harmless at 8192 slots for a self-test; it is a leak.
+- Three `ir/egraph.sio` sites share the #1678 shape: private, zero external
+  callers, internal roots not established as reachable. Moot once the seed
+  refresh lands.
+- `compiler/pkg/` is entirely **outside the 113-module build closure**, so its
+  three sites are latent, not live. #1678 criterion 2 met for them.
 - `Box` in a **user program** under `--native-v2-compile` segfaults on a plain
-  field read. Recorded as a side observation in #1678; it is a **separate,
-  unfiled defect**, not covered by it.
+  field read. A **separate, still-unfiled defect**; noted in #1678, not covered
+  by it.
 - Pre-merge, unchanged: rewrite the 97 MB `artifacts/self-hosted/mad-cr2` out of
-  history, then rebase onto freshly fetched `origin/main`.
+  history, then rebase onto freshly fetched `origin/main`. **Claude 1 measured a
+  trial merge: 81 conflict hunks in `compiler/main.sio`** (`0e6a294ac8`), driven
+  by their extraction of the 1163-test suite into `compiler/main_tests.sio`.
+  Coordinate before rebasing.
 - #1667 (`add3(1,2,3)` returns 3) still open.
+- #1680: `madaros --self-test` still exits 139 and still runs no CI gate. The
+  crash moved T23 → T24 → (with the seed fix) T25, but 1100+ tests still never
+  execute.
