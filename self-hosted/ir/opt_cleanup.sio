@@ -9356,13 +9356,44 @@ fn ocp_mfi_dce_once(module: &! IrModule, fi: i64) -> i64 with Mut, Div, Panic {
     var used: [bool; 256] = [false; 256]
     var i: i64 = 0
     while i < (*module).functions[fi as usize].instr_count {
-        let s1 = IR_A_SRC1[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize]
-        let s2 = IR_A_SRC2[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize]
+        let at = ir_region_slot_r((*module).functions[fi as usize].region, (i))
+        let s1 = IR_A_SRC1[at as usize]
+        let s2 = IR_A_SRC2[at as usize]
         if s1 >= 0 && s1 < 256 {
             used[s1 as usize] = true
         }
         if s2 >= 0 && s2 < 256 {
             used[s2 as usize] = true
+        }
+        // #1682: NOT EVERY REGISTER USE LIVES IN src1/src2, and this scan used to
+        // assume it did. Two operand classes were invisible to it:
+        //
+        //   IrIndexSet's THIRD operand -- the value being stored -- is parked in
+        //   imm_i64 (see ir_index_set). An immediate slot holding a register is
+        //   exactly what a liveness scan will not look at. `var a: [i64; 4] = [7; 4]`
+        //   lowers to a fill loop whose only use of the 7 is that field, so the
+        //   `load_imm` defining it was removed as dead and the array was filled
+        //   with garbage -- ten lines, no loop in the source, wrong answer under -O.
+        //
+        //   Call arguments live in the flat IR_ARG_POOL, not in src1/src2 either.
+        //   No test caught that one; it is the same defect one operand class over,
+        //   and it is fixed here rather than waiting for it to be found the hard way.
+        //
+        // ocp_rebracket_source_use_count already counted the IrIndexSet operand.
+        // The two disagreed, and DCE is the one that deletes.
+        if (IR_A_OP[at as usize] as IrOpcode) == IrOpcode::IrIndexSet {
+            let v = IR_A_IMM_I64[at as usize]
+            if v >= 0 && v < 256 {
+                used[v as usize] = true
+            }
+        }
+        var ak: i64 = 0
+        while ak < IR_A_ARG_COUNT[at as usize] {
+            let a = ir_arena_arg_at(at, ak)
+            if a >= 0 && a < 256 {
+                used[a as usize] = true
+            }
+            ak = ak + 1
         }
         i = i + 1
     }
