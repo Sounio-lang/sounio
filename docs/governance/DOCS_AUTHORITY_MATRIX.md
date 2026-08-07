@@ -304,6 +304,8 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.decisions.adr-005-algebra-keyword-compiler-infrastructure | repo_only | docs/decisions/adr-005-algebra-keyword-compiler-infrastructure.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.decisions.adr-006-fixed-point-trust-anchor | repo_only | docs/decisions/adr-006-fixed-point-trust-anchor.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.decisions.adr-007-second-order-compilation | repo_only | docs/decisions/adr-007-second-order-compilation.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.decisions.adr-008-claim-oracle-semantic-clock | repo_only | docs/decisions/adr-008-claim-oracle-semantic-clock.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.decisions.claim-oracle-inventory.schema | repo_only | docs/decisions/claim_oracle_inventory.schema.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.decisions.readme | repo_only | docs/decisions/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.design.epistemic-tensor-core-gum-turing | repo_only | docs/design/EPISTEMIC_TENSOR_CORE_GUM_TURING.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.design.gpu-rendering-roadmap | repo_only | docs/design/gpu_rendering_roadmap.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

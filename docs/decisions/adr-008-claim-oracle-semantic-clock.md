@@ -119,12 +119,23 @@ without a grandfather exception.
 - Research EL+ / sedenion / bigrat gates with foreign oracles become
   explicit migration debt, visible in the inventory TSV.
 
+## Pilot demotion (2026-08-07)
+
+First migrations to the ADR default:
+
+| gate | claim clock | foreign path |
+|---|---|---|
+| `scripts/special_scipy_parity_gate.sh` | Sounio `tests/parity/special_parity_*.sio` emit | mpmath report-only unless `SOUNIO_FOREIGN_ORACLE_HARD=1` |
+| `scripts/bigrat_gate.sh` | Sounio `eq_or_fail` + `BIGRAT_STDLIB_OK` | Python print-diff report-only unless `SOUNIO_FOREIGN_ORACLE_HARD=1` |
+
+Legacy hard-fail: export `SOUNIO_FOREIGN_ORACLE_HARD=1`.
+
 ## Grounded in
 
 - Stage0/Stage1 compiler contract; ADR-006 fixed-point seed scope
 - `scripts/epistemic_trust_gate.sh` (class A pattern)
-- Residual class B: `special_scipy_parity_gate.sh`, `bigrat_gate.sh`,
-  `sedenion_zd_fiber_identity_gate.sh`, et al.
+- Residual class B: sedenion fiber gates, other inventory rows
+  (`artifacts/audit/claim_oracle_inventory.tsv`)
 - Prior art: McKeeman differential testing; CompCert/CakeML formal clock;
   EMI / intramorphic oracles; JCGM/NPL model-derived references
 - Session research: single semantic clock survey (2026-08-06)
