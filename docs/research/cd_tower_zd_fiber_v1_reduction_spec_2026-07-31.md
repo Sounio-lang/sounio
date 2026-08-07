@@ -5404,3 +5404,39 @@ invariance reappearing as an algebraic identity rather than a lemma.
 so this is a change of unknown, not an evaluation in the sense the request used the word. zai called
 the framing honest and precise. grok's objection is about the word the task itself used, so it wins;
 the tier is now "the ε-weights FACTORED". `T3` is the one sum that really is evaluated.
+
+### §57.46 — Tier 92: T1 and T2 ε-reduced to M and M², via the cyclic weights
+
+Multiplying Tier 91's factored weights around a triangle is where the factoring pays:
+
+    E11 ab · E11 bc · E11 ca = epsZero a · epsZero b · epsZero c
+    E01 ab · E11 bc · E10 ca = sigRow b · sigRow c · tauW ab · tauW ca
+    E01 bc · E10 ca          = epsZero a·b·c · sigRow a·sigRow b · tauW bc · tauW ca
+
+Every switching leaves the first, every index-0 flip leaves the second. The bookkeeping for the
+second: `E01` carries `epsZero` on its first index, `E11` on its second, `E10` on both — so `a` gets
+it twice, `c` twice, and `b` not at all. Each index that gets it at all gets it exactly twice.
+
+**T2.** Its weight, for fixed `a`, is `f_a(b)·f_a(c)` with `f_a x = sigRow x · tauW a x`, and two new
+theorems say what `f_a` is: `f_0 ≡ 1` (the switching locus and the coset locus COLLIDE at `a = 0`),
+and for `a ≠ 0`, `f_a = −1` exactly on the two-point set `{W, a ⊕ W}`. Inclusion–exclusion:
+
+    T2 = S₀ − 2A − 2B + 4C,  A = Σ_{a≠0} Σ_{b∈S_a} M_ab (M²)_ba,  B = Σ_{a≠0} Σ_{c∈S_a} (M²)_ac M_ca,
+    C = Σ_{a≠0} Σ_{b,c∈S_a} M_ab M_bc M_ca   (four terms per a).
+
+**T1.** Here `c` sits in BOTH coset flips, so the `c`-sum is a three-point parity correction:
+
+    T1 = Σ_{a,b} P_a P_b M_ab · [ (M²)_ba − 2 Σ_{c∈T_ab} M_bc M_ca ],  P = diag(epsZero·sigRow),
+
+`T_ab` = the points of the multiset `{0, b⊕W, a⊕W}` hit an odd number of times, which collide
+exactly at `b = W`, `a = W`, `a = b`. Both forms: 53/53 labels at `m = 2,3,4`.
+
+**What this is.** All three ε-sums are now expressions in `M` and `M²` — no weighted triple sums
+remain. `S₀` and `M²` are NOT evaluated, and `S₀` at level `m` is the same object as at level `m+1`,
+which is exactly what makes the whole thing a recursion rather than a closed form. grok returned
+`[TIGHTENABLE]` on my title "EVALUATED" — "prefer ε-reduced to M/M², or evaluated mod S₀,M²" — and I
+took it, for the second tier running on the same kind of word.
+
+grok also returned `[OVERREACH]` on the `f_a` description, and that one changed the FILE rather than the
+prose: I had stated the two-point support as a measurement. It is now `sig_tau_zero` and
+`sig_tau_pts`, both theorems, both at the purest kernel level `[propext, Quot.sound]`.

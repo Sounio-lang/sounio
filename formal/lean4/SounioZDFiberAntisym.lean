@@ -15032,4 +15032,137 @@ theorem P3_coset_value (m l W : Nat) (hl : l < 2^(m+1)) (hW : W < 2^(m+1))
       sigma_self (m+1) l hl hl0, sigma_self (m+1) (l ^^^ W) hlW' hlW]
   grind
 
+/-! ### Tier 92 — `T1` and `T2` ε-REDUCED to `M` and `M²`, via the cyclic weights
+
+    Tier 91 factored the three ε-weights.  Multiplying them around a triangle is where the factoring
+    pays: almost everything squares away, and what survives is short.
+
+      `E11 a b · E11 b c · E11 c a = epsZero a · epsZero b · epsZero c`
+      `E01 a b · E11 b c · E10 c a = sigRow b · sigRow c · tauW a b · tauW c a`
+      `E01 b c · E10 c a           = epsZero a·epsZero b·epsZero c · sigRow a·sigRow b
+                                      · tauW b c · tauW c a`
+
+    Every `sigRow` disappears from the first, every `epsZero` from the second.  The bookkeeping for
+    the second: `E01` carries `epsZero` on its FIRST index, `E11` on its second, `E10` on BOTH — so
+    around the triangle `a` gets it from `E01` and `E10`, `c` from `E11` and `E10`, and `b` gets it
+    not at all.  Every index that gets it at all gets it exactly twice.  That is why `T3` was the
+    easy one and why `T2` is the next easiest: its weight involves NO index-`0` flip.
+
+    With those, both open sums evaluate — measured at every label, `m = 2,3,4` (53/53):
+
+    **`T2`.**  Its weight `sigRow b · sigRow c · tauW a b · tauW c a` is, for FIXED `a`, a product
+    `f_a(b)·f_a(c)` with `f_a x = sigRow x · tauW a x`.  The two lemmas below say what `f_a` is, and
+    they are theorems rather than the measurement I first offered: `f_0 ≡ 1` (the two points
+    collide), and for `a ≠ 0`, `f_a = −1` exactly on the TWO-POINT set `{W, a ⊕ W}`.
+    Inclusion–exclusion on that set gives
+
+      `T2 = S₀ − 2A − 2B + 4C`,
+      `A = Σ_{a≠0} Σ_{b ∈ {W, a⊕W}} M_ab (M²)_ba`,  `B = Σ_{a≠0} Σ_{c ∈ {W, a⊕W}} (M²)_ac M_ca`,
+      `C = Σ_{a≠0} Σ_{b,c ∈ {W, a⊕W}} M_ab M_bc M_ca`  (four terms per `a`).
+
+    **`T1`.**  Here `c` sits in BOTH `tauW`s, so the `c`-sum is a three-point parity correction:
+
+      `T1 = Σ_{a,b} P_a P_b M_ab · [ (M²)_ba − 2 Σ_{c ∈ T_ab} M_bc M_ca ]`,
+      `P = diag(epsZero · sigRow)`,  `T_ab` = the points of the multiset `{0, b⊕W, a⊕W}` hit an ODD
+      number of times (they collide exactly when `b = W`, `a = W`, or `a = b`).
+
+    So all three ε-sums are now expressions in `M` and `M²` — no weighted triple sums remain.  With
+    `T3 = S₀ + 6·(u′ᵀM′u′) − 2` this closes what §57.44 left open, in the following exact sense and
+    no other: **the ε-weights are gone; `S₀` and `M²` are not evaluated, and `S₀` at level `m` is the
+    same object as the one at level `m+1`, which is what makes the whole thing a recursion.**
+
+    ⚠ Formalised below: the three cyclic-weight identities and the three orthant sums rewritten with
+    them.  The `M²` evaluations are measured and stated in this comment only — this file has no
+    matrix layer, and `A`, `B`, `C`, `T_ab` are not Lean objects. -/
+
+private theorem sigRow_pm (x W : Nat) : sigRow x W = 1 ∨ sigRow x W = -1 := by
+  unfold sigRow; by_cases h : x ^^^ W = 0
+  · exact Or.inr (if_pos h)
+  · exact Or.inl (if_neg h)
+
+private theorem epsZero_pm (x : Nat) : epsZero x = 1 ∨ epsZero x = -1 := by
+  unfold epsZero; by_cases h : x = 0
+  · exact Or.inr (if_pos h)
+  · exact Or.inl (if_neg h)
+
+/-- `f_0 ≡ 1`: at `a = 0` the switching's locus and the coset flip's locus COINCIDE. -/
+theorem sig_tau_zero (x W : Nat) : sigRow x W * tauW 0 x W = 1 := by
+  unfold sigRow tauW
+  rw [Nat.zero_xor]
+  by_cases h : x ^^^ W = 0 <;> simp [h]
+
+/-- **`f_a` IS SUPPORTED ON TWO POINTS.**  For `a ≠ 0` the product of the switching and the coset
+    flip is `−1` exactly on `{W, a ⊕ W}`, which is what makes `T2`'s inclusion–exclusion run over a
+    two-element set. -/
+theorem sig_tau_pts (a x W : Nat) (ha : a ≠ 0) :
+    sigRow x W * tauW a x W = if x ^^^ W = 0 ∨ (a ^^^ x) ^^^ W = 0 then -1 else 1 := by
+  unfold sigRow tauW
+  by_cases h1 : x ^^^ W = 0
+  · have h2 : ¬ ((a ^^^ x) ^^^ W = 0) := fun h => ha (coset_meets_col a x W h1 h)
+    simp [h1, h2]
+  · by_cases h2 : (a ^^^ x) ^^^ W = 0 <;> simp [h1, h2]
+
+/-- **THE WEIGHT-3 CYCLE.**  Every switching cancels; only the index-`0` flips survive. -/
+theorem cyc_weight_3 (a b c W : Nat) (hW0 : W ≠ 0) :
+    E11 a b W * (E11 b c W * E11 c a W) = epsZero a * (epsZero b * epsZero c) := by
+  rw [E11_split a b W hW0, E11_split b c W hW0, E11_split c a W hW0]
+  rcases sigRow_pm a W with h1 | h1 <;> rcases sigRow_pm b W with h2 | h2 <;>
+    rcases sigRow_pm c W with h3 | h3 <;> rw [h1, h2, h3] <;> grind
+
+/-- **THE WEIGHT-2 CYCLE.**  Every index-`0` flip cancels; two switchings and two coset flips
+    survive — and for fixed `a` the survivor factorises over `b` and `c`, which is what makes `T2`
+    an inclusion–exclusion over a TWO-POINT set. -/
+theorem cyc_weight_2 (a b c W : Nat) (hW0 : W ≠ 0) :
+    E01 a b W * (E11 b c W * E10 c a W)
+      = sigRow b W * sigRow c W * (tauW a b W * tauW c a W) := by
+  rw [E01_split a b W hW0, E11_split b c W hW0, E10_split c a W hW0]
+  rcases sigRow_pm a W with h1 | h1 <;> rcases epsZero_pm a with h2 | h2 <;>
+    rcases epsZero_pm c with h3 | h3 <;> rw [h1, h2, h3] <;> grind
+
+/-- **THE WEIGHT-1 CYCLE.**  Nothing cancels: this is the long one, and it is why `T1` needs a
+    three-point parity correction where `T2` needs a two-point one. -/
+theorem cyc_weight_1 (a b c W : Nat) (hW0 : W ≠ 0) :
+    E01 b c W * E10 c a W
+      = epsZero a * epsZero b * epsZero c * (sigRow a W * sigRow b W)
+        * (tauW b c W * tauW c a W) := by
+  rw [E01_split b c W hW0, E10_split c a W hW0]
+  rcases epsZero_pm c with h | h <;> rw [h] <;> grind
+
+/-- The weight-3 orthant with its cyclic weight collapsed. -/
+theorem orth_weight3_cyc (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    orth (2^(m+1)) (fun x y => P3 x y W (m+1)) (2^(m+1)) (2^(m+1)) (2^(m+1))
+      = sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+          epsZero a * (epsZero b * epsZero c)
+            * (P3 a b W m * (P3 b c W m * P3 c a W m))))) := by
+  rw [orth_weight3_expand m W hW hW0]
+  refine sumLtI_congr _ _ _ (fun a ha => sumLtI_congr _ _ _ (fun b hb =>
+    sumLtI_congr _ _ _ (fun c hc => ?_)))
+  rw [← cyc_weight_3 a b c W hW0]
+  grind
+
+/-- The weight-2 orthant with its cyclic weight collapsed. -/
+theorem orth_weight2_cyc (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    orth (2^(m+1)) (fun x y => P3 x y W (m+1)) 0 (2^(m+1)) (2^(m+1))
+      = sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+          sigRow b W * sigRow c W * (tauW a b W * tauW c a W)
+            * (P3 a b W m * (P3 b c W m * P3 c a W m))))) := by
+  rw [orth_weight2_expand m W hW hW0]
+  refine sumLtI_congr _ _ _ (fun a ha => sumLtI_congr _ _ _ (fun b hb =>
+    sumLtI_congr _ _ _ (fun c hc => ?_)))
+  rw [← cyc_weight_2 a b c W hW0]
+  grind
+
+/-- The weight-1 orthant with its cyclic weight collapsed. -/
+theorem orth_weight1_cyc (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    orth (2^(m+1)) (fun x y => P3 x y W (m+1)) 0 0 (2^(m+1))
+      = sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+          (epsZero a * epsZero b * epsZero c * (sigRow a W * sigRow b W)
+            * (tauW b c W * tauW c a W))
+            * (P3 a b W m * (P3 b c W m * P3 c a W m))))) := by
+  rw [orth_weight1_expand m W hW hW0]
+  refine sumLtI_congr _ _ _ (fun a ha => sumLtI_congr _ _ _ (fun b hb =>
+    sumLtI_congr _ _ _ (fun c hc => ?_)))
+  rw [← cyc_weight_1 a b c W hW0]
+  grind
+
 end SounioZDFiberAntisym
