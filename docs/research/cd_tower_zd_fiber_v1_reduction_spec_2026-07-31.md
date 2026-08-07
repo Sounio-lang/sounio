@@ -5722,3 +5722,42 @@ including one with a stripped-down input; zai returned a complete verdict block,
 checks, having independently derived the `D_a² D_b² D_c² = 1` cancellation and the exact reason
 weight-1 and weight-2 cannot be cancelled. Substitute evidence for the missing provider is the
 denotation: all three sum-level identities hold at every label at `m = 2,3`.
+
+### §57.47 — Tier 93: the weight-1 and weight-2 sums, carrier-decomposed and reduced
+
+Tier 92 showed no switching cancels in these two words. The way through is not a switching but the
+CARRIER. `P3_coset_value` says `P3` is identically `−1` on `y = l ⊕ W` off its two borders, and the
+borders are now computed (`P3 0 W = 1`, `P3 W 0 = −1` — the ordered-arguments asymmetry at one
+point). Together, proved pointwise at every index:
+
+    tauW ⊙ P3  =  P3 + 2·Π_W − 4·e₀e_Wᵀ          (Π_W the matching l ↦ l ⊕ W)
+
+The coset flip is a rank-one-corrected permutation perturbation of `P3`, not a new matrix. Expanding
+both words in `P3 + 2Π − 4e` gives nine terms, and the five rank-one ones cancel EXACTLY
+(`tr(eYM) = 2^(m+1) = −tr(MYe)`, `tr(eYΠ) = −1 = −tr(ΠYe)`, `tr(eYe) = 0`). What survives:
+
+    T1 = tr(A M E M) + 4·tr(A M E Π_W) + 2^(m+3) − 16      A = (D E) M (D E)
+    T2 = tr(M Y M)   + 4·tr(M Y Π_W)   + 2^(m+3) + 8       Y = D M D
+
+116/116 labels at `m = 2,3,4,5`. **The coset structure enters each sum linearly, through exactly one
+`Π_W` trace.** Two label-independent difference laws make the constants explicit and are themselves
+closed forms: `tr(Π Y M) − tr(M Y Π) = 2^(m+3)` and `tr(A Π E M) − tr(A M E Π) = 2^(m+3) − 8`. Both
+are the same word read in the two orders, so what they measure is the ordered-arguments asymmetry of
+`P3`.
+
+**The constants are derived, not fitted — and I only found that out because a reviewer caught a
+factor of two in my arithmetic.** I had written `2·tr(MYΠ) + 2·tr(ΠYM) = 4·tr(MYΠ) + 2^(m+3)`; it is
+`2^(m+4)`. With the correction the rest closes: `Π` is a fixed-point-free involution and `D² = I`, so
+`tr(ΠYΠ) = tr(Y) = tr(P3)`, and `P3_diag` — in the file since Tier 2 — gives `tr(P3) = 2 − 2^(m+1)`
+(measured 116/116). Then `2^(m+4) + 4(2 − 2^(m+1)) = 2^(m+3) + 8`. The `+8` is `4·tr(P3)` and
+nothing else. grok flagged the constant as unidentified on the strength of the same intermediate,
+having dropped the `2^(m+4)`; zai did the arithmetic correctly and its version matches measurement.
+
+**NOT "evaluated"** — both reviewers rejected the word and they are right. `tr(A M E M)` and
+`tr(M Y M)` are open traces. Each sum was REDUCED from a word containing `X` to one open trace, one
+coset trace, and a closed constant. Only the carrier decomposition and the two seam entries are
+formalised.
+
+One duplicate caught by the compiler: I wrote `P3_diag` again, and it had been in the file since
+Tier 2. The lane's own rule — look for the cheaper structure before adding a lemma — applies to my
+own file, not just to the literature.

@@ -15103,4 +15103,111 @@ theorem weight1_word (m W : Nat) (hW0 : W ≠ 0) :
   unfold epsZero sigRow tauW
   grind
 
+/-! ### Tier 93 — the weight-1 and weight-2 sums, CARRIER-DECOMPOSED and reduced
+
+    Tier 92 left both sums as words containing the coset-flipped matrix `X = tauW ⊙ P3`, with the
+    obstruction that no switching cancels there.  The way through is not a switching but the CARRIER:
+    `P3_coset_value` (Tier 91) says `P3` is identically `−1` on the line `y = l ⊕ W` off its two
+    borders, and the two borders are computed below (`P3 0 W = 1`, `P3 W 0 = −1`).  Together they
+    give the decomposition this tier is named for, proved pointwise and at every index:
+
+      `X = P3 + 2·Π_W − 4·e₀e_Wᵀ`,   `Π_W` the perfect matching `l ↦ l ⊕ W`
+
+    i.e. the coset flip is a RANK-ONE-CORRECTED PERMUTATION perturbation of `P3`, not a new matrix.
+    Expanding the two words in `P3 + 2Π − 4e` and collecting is then pure trace algebra, and it
+    collapses much further than expected — the rank-one terms cancel EXACTLY, and the two sums come
+    out with the same shape:
+
+      `T1 = tr(A M E M) + 4·tr(A M E Π_W) + 2^(m+3) − 16`,   `A = (D E) M (D E)`
+      `T2 = tr(M Y M) + 4·tr(M Y Π_W) + 2^(m+3) + 8`,        `Y = D M D`
+
+    with `D = diag(sigRow)`, `E = diag(epsZero)`.  Measured at every label for `m = 2,3,4,5`:
+    116/116 each.  The coset structure enters each sum LINEARLY, through exactly one `Π_W` trace.
+
+    **The constants are DERIVED, not fitted**, and that only became clear because a reviewer caught a
+    factor of two in my arithmetic.  `Π` is a fixed-point-free involution for `W ≠ 0` and `D² = I`,
+    so `tr(Π Y Π) = tr(Y) = tr(P3)`, and `P3_diag` — in this file since Tier 2 — gives
+    `tr(P3) = 2 − 2^(m+1)`.  Then from the difference law,
+
+      `2·tr(M Y Π) + 2·tr(Π Y M) = 4·tr(M Y Π) + 2^(m+4)`   (NOT `2^(m+3)`; that was my slip)
+
+    and adding `4·tr(Π Y Π) = 8 − 2^(m+3)` gives the constant `2^(m+4) + 8 − 2^(m+3) = 2^(m+3) + 8`.
+    The `+8` is `4·tr(P3)`'s contribution and nothing else.
+
+    Two label-independent facts fell out of the same expansion and are what make the constants
+    explicit (116/116 each): `tr(Π_W Y M) − tr(M Y Π_W) = 2^(m+3)`, and its weight-1 analogue
+    `tr(A Π_W E M) − tr(A M E Π_W) = 2^(m+3) − 8`.  Both are differences of the SAME word read in
+    the two orders, so what they measure is the ordered-arguments asymmetry of `P3`, now with a
+    closed form.
+
+    ⚠ NOT "evaluated" — both reviewers rejected that word and they are right.  `tr(A M E M)` and
+    `tr(M Y M)` are open traces; what happened is that each sum was REDUCED from a word containing
+    `X` to one open trace, one coset trace, and a closed constant.  Formalised here is only the
+    CARRIER decomposition and the two seam entries it rests on; the trace algebra needs sum-level
+    machinery this file does not have.
+
+    ⚠ The third entry value the constants use — the diagonal `P3 l l = −1` off index `0`, giving
+    `tr(P3) = 2 − 2^(m+1)` — is NOT proved here because it was already in the file, as `P3_diag`
+    since Tier 2.  I wrote it again and the compiler caught the duplicate; the lane's own rule is to
+    look for the cheaper structure before adding a lemma. -/
+
+/-- The seam entry `P3 0 W = 1`. -/
+theorem P3_zero_seam (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    P3 0 W W m = 1 := by
+  have hp := Nat.two_pow_pos (m+1)
+  unfold P3 hi
+  rw [Nat.zero_xor, cdSig0, R_ul W W m hW hW, if_neg hW0, sigma_self (m+1) W hW hW0]
+  grind
+
+/-- The opposite seam entry `P3 W 0 = −1` — the ordered-arguments asymmetry, at one point. -/
+theorem P3_seam_zero (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    P3 W 0 W m = -1 := by
+  have hp := Nat.two_pow_pos (m+1)
+  unfold P3 hi
+  rw [Nat.zero_xor, Nat.xor_self,
+      R_lu W W m hW hW, sigma_self (m+1) W hW hW0,
+      R_ul 0 0 m hp hp, if_pos rfl]
+  grind
+
+/-- **THE CARRIER DECOMPOSITION.**  The coset flip applied to `P3` is `P3` plus twice the perfect
+    matching `l ↦ l ⊕ W`, corrected by `−4` at the single entry `(0, W)`. -/
+theorem tauW_carrier (m l y W : Nat) (hl : l < 2^(m+1)) (hy : y < 2^(m+1))
+    (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    tauW l y W * P3 l y W m
+      = P3 l y W m + (if y = l ^^^ W then 2 else 0) - (if l = 0 ∧ y = W then 4 else 0) := by
+  unfold tauW
+  by_cases hcos : (l ^^^ y) ^^^ W = 0
+  · have hy' : y = l ^^^ W := by
+      have h1 : l ^^^ y = W := xor_zero_eq (l ^^^ y) W hcos
+      have h : l ^^^ (l ^^^ y) = l ^^^ W := by rw [h1]
+      rw [← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor] at h
+      exact h
+    rw [if_pos hcos, if_pos hy']
+    by_cases hl0 : l = 0
+    · subst hl0
+      have hyW : y = W := by rw [hy', Nat.zero_xor]
+      subst hyW
+      rw [if_pos ⟨rfl, rfl⟩, P3_zero_seam m y hW hW0]
+      grind
+    · have hne : ¬(l = 0 ∧ y = W) := fun h => hl0 h.1
+      rw [if_neg hne]
+      by_cases hlW : l ^^^ W = 0
+      · have hlq : l = W := xor_zero_eq l W hlW
+        have hy0 : y = 0 := by rw [hy', hlW]
+        subst hy0; subst hlq
+        rw [P3_seam_zero m l hW hW0]
+        grind
+      · rw [hy', P3_coset_value m l W hl hW hl0 hlW]
+        grind
+  · have hy' : y ≠ l ^^^ W := by
+      intro h
+      apply hcos
+      rw [h, ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor, Nat.xor_self]
+    have hne : ¬(l = 0 ∧ y = W) := by
+      intro ⟨h1, h2⟩
+      apply hy'
+      rw [h1, h2, Nat.zero_xor]
+    rw [if_neg hcos, if_neg hy', if_neg hne]
+    grind
+
 end SounioZDFiberAntisym
