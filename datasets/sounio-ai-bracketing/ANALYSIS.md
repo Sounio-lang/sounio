@@ -33,3 +33,20 @@ unmeasured. None of these rescue the positive claim; they bound its scope.
 - multi-model battery (the same harness takes any OpenAI-compatible endpoint)
 - human validation of the 50 gold labels
 - judge-agreement check (second judge on a sample)
+
+## Preregistered battery predictions (2026-08-07, before any non-grok run)
+
+Reference point (grok-4.3): semantic flip 0.10, directional 0.02, recency
+default. Predictions for the battery (llama-3.3-70b via Groq, glm-5.2 via
+Z.AI, deepseek-v4-pro if balance allows):
+
+- B1: every model's judged semantic flip rate ≤ 0.25.
+- B2: every model's directional clean rate ≤ 0.10.
+- B3: a recency default (right-reading rate under LEFT induction > 0.5 among
+  decidable items) appears in at least half of the probed models.
+- B4: no model achieves directional rate ≥ 0.30 (i.e., none is
+  bracket-sensitive under framing induction).
+
+Same scoring rule as before: judged by glm-5.2 (independent of each target,
+and itself a target — when glm-5.2 is the target, a second judge (grok-4.3)
+scores it, and the two judges' agreement is reported).
