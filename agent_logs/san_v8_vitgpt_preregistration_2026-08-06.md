@@ -56,3 +56,45 @@ latency 1.12×, late post-τ exit_frac 0.68–0.86.
 As before: intervals CONFIRMED if the measured value lands inside; monotone
 constraints are all-or-nothing; every falsification is reported in the paper
 with the same prominence as a confirmation.
+
+---
+
+## RESULTS — scorecard (added after all six jobs terminated)
+
+**E — SAN-v8 (job 8750, cost-aware gate, threshold 0.95): 5/5 CONFIRMED.**
+E1 late exits 0.77–0.86 ∈ [0.75, 0.97] ✓; E2 final acc 0.8279 ∈
+[0.820, 0.870] ✓ (dip below τ as priced); E3 latency 1.34× ∈ [1.10, 1.40] ✓;
+E4 S_m 10 781 TMAC ∈ [10 000, 13 000] ✓; E5 L1 PASS (1 638 exits, exact) /
+L2 PASS (0.8555 at t*=12) / L6 FAIL by construction ✓. Comparison against
+the frontier (not preregistered as an interval, stated as analysis): v8 does
+not dominate v7b at the same threshold — (0.8279, 10 781, 1.34×) vs
+(0.8594, 12 757, 1.12×) — it moves along the frontier; pos_weight is a
+reparameterisation of the threshold dial at this scale. Measured negative,
+reported in §4.12.
+
+**G — ViT sweep (jobs 8751/8752/8753):**
+G1 (exits monotone decreasing): FALSIFIED — band means 0.28 / 0.35 / 0.10 /
+0.10; the 0.35 ↔ 0.45 pair breaks the order (bands overlap).
+G2 (acc monotone non-decreasing): FALSIFIED — 0.2600 / 0.3763 / 0.3248 /
+0.3755 (dip at Δ=0.55). All three accuracy intervals falsified as well
+(0.2600 ∉ [0.330, 0.380]; 0.3248 ∉ [0.370, 0.430]; 0.3755 ∉ [0.390, 0.470]).
+G3 (all runs ≥ τ): CONFIRMED (0.2600 / 0.3248 / 0.3755 ≥ 0.251).
+G4 (latency monotone decreasing): CONFIRMED — 1.19× / 1.17× / 0.99× / 0.98×.
+Exit intervals: Δ=0.35 → 0.28 ∉ [0.40, 0.65] ✗; Δ=0.55 → 0.10 ∉
+[0.15, 0.32] ✗; Δ=0.65 → 0.10 ∈ [0.04, 0.20] ✓.
+
+**G — GPT sweep (jobs 8754/8755):**
+G5 (exits): CONFIRMED — late exits 0.86 ∈ [0.75, 0.93] and 0.52 ∈
+[0.45, 0.85], monotone 0.95 → 0.86 → 0.52.
+G6 (acc increasing): FALSIFIED — 0.1309 / 0.1312 / 0.1276 (flat).
+G7 (≥ one run ends ≥ τ = 0.165): FALSIFIED — 0.1312 and 0.1276; the
+accuracy floor is structural, not a threshold artefact.
+G8 (speedups): monotone 3.33× → 2.02× → 1.23× confirmed; intervals 2.02 ∈
+[1.8, 2.8] ✓, 1.23 ∉ [1.3, 2.2] ✗ (marginal).
+
+**Totals:** E 5/5. G-ViT: G3, G4 confirmed; G1, G2 + 5 intervals falsified.
+G-GPT: G5 confirmed; G6, G7 falsified; G8 monotone confirmed with one
+interval miss. Grand total across both preregistrations: the dial
+(exit/latency) predictions are reliable everywhere; the training-burden and
+accuracy-floor predictions fail exactly where t* jitter or representation
+erosion dominate — the two mechanisms now named in the paper.

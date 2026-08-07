@@ -84,7 +84,12 @@ preregistered before the runs (git-timestamped), confirms the accuracy and
 latency frontiers as smooth and monotone (5/5 predictions each) and
 falsifies the training-burden monotonicity — the necessary/gratuitous split
 is dominated by freeze-timing jitter, a mechanism we report because the
-preregistered failure revealed it (§4.11). The
+preregistered failure revealed it (§4.11). A second preregistered round —
+submission-timestamped this time — confirms all five predictions for a
+cost-aware gate variant (SAN-v8) while showing it merely reparameterises the
+threshold dial, and maps the ViT/GPT threshold dials, falsifying the
+accuracy-floor recovery for the LM leg and locating its cause as structural
+rather than a threshold artefact (§4.12). The
 strongest positive result stands: a curriculum-gated SAN reaches τ = 0.85 on
 full CIFAR-10 at accuracy 0.8561 — inside the observed cross-job Dense band
 (0.8576–0.8650 at identical seed and configuration; §4.8 discloses the
@@ -945,6 +950,60 @@ exits (3.33×) are exactly the regime where over-exiting eats the margin.
 One-line summary of both: the contract machinery works across families; the
 post-τ accuracy floor does not come for free and currently holds only where
 the exit threshold leaves enough margin.
+
+### 4.12 Second preregistered round: the cost-aware gate, and the ViT/GPT dials
+
+A second preregistration (`agent_logs/san_v8_vitgpt_preregistration_2026-08-06.md`,
+committed before any of the six jobs was submitted — the submission
+timestamps are verifiable against it) covered two questions: whether a
+cost-aware gate (SAN-v8) moves the frontier, and whether the ViT/GPT legs
+have well-behaved threshold dials.
+
+**SAN-v8 (job 8750).** The v7 gate learns P(stage-k head correct); v8 keeps
+the target and adds a pos_weight proportional to the remaining depth, so
+"correct AND cheap" is worth more gradient than "correct AND expensive" — a
+mechanism verified before any GPU hour by a unit test showing the early-gate
+firing propensity shifting up (0.093 → 0.256 at gate 0, smoke scale) while
+deep gates stay fixed. All five preregistered predictions confirmed (E1–E5):
+late exit fraction 0.77–0.86 (predicted [0.75, 0.97]), final accuracy 0.8279
+(predicted [0.820, 0.870] — including the allowed dip below τ), latency
+speedup 1.34× (predicted [1.10, 1.40]), S_m 10 781 TMAC (predicted
+[10 000, 13 000], the interval widened by the t*-jitter lesson of §4.11), and
+the L1/L2/L6 contract pattern exactly as declared. **But the comparison that
+matters is against the frontier, not the intervals**: at the same threshold
+(0.95), v7b achieves (acc 0.8594, S_m 12 757, 1.12×) and v8 achieves
+(0.8279, 10 781, 1.34×) — v8 trades 3.2 accuracy points for 2 000 TMAC and
+speed, i.e. it moves *along* the frontier rather than outward. Neither
+dominates; the pos_weight axis is, at this scale, a reparameterisation of the
+threshold axis. We report this as a measured negative for a plausible
+improvement: one selectivity dial is enough, and the dial to keep is the
+declared threshold, because the FPGA enforces it.
+
+**ViT dial (jobs 8751–8753, Δ ∈ {0.35, 0.55, 0.65} against the Δ = 0.45
+reference).** The dial behaves on the quantities the gate controls and not on
+the ones it does not: late-epoch exit fractions fall (band means 0.28 / 0.35
+/ 0.10 / 0.10 — monotone only from the second point on, preregistered G1
+falsified by the 0.35 ↔ 0.45 overlap), latency speedups decay monotonically
+(1.19× / 1.17× / 0.99× / 0.98×, G4 confirmed), and every run ends above τ
+(G3 confirmed). Final accuracy, however, is not a function of the dial:
+0.2600 / 0.3763 / 0.3248 / 0.3755 — all three accuracy intervals falsified,
+and the monotone-ordering claim with them (G2). At τ = 0.251 the target is
+met almost immediately (t* = 4), so post-τ accuracy is shaped by exit
+composition noise, not by the threshold.
+
+**GPT dial (jobs 8754/8755, Δ ∈ {0.40, 0.50} against the Δ = 0.31
+reference).** Exits and speedups obey the dial cleanly (late exits 0.95 /
+0.86 / 0.52 and speedups 3.33× / 2.02× / 1.23×, both monotone, three of four
+intervals confirmed). The accuracy floor does not move: final accuracies
+0.1309 / 0.1312 / 0.1276 — G6 falsified (no monotone rise) and, decisively,
+**G7 falsified: no threshold in the swept range restores accuracy ≥ τ after
+post-τ training**. The LM leg's accuracy decay is therefore structural, not
+a threshold artefact: confidence-driven exits during post-τ training erode
+the representation regardless of where the bar is set. This closes, by
+falsification, the question §4.11 left open — the post-τ accuracy floor for
+the LM family requires a different mechanism (most plausibly a
+correctness-gated exit like the ResNet's, rather than a confidence one), not
+a better threshold.
 
 ---
 
