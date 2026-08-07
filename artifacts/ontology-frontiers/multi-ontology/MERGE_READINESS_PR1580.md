@@ -1,59 +1,69 @@
-# PR #1580 merge readiness (2026-08-06)
+# PR #1580 merge readiness (updated 2026-08-07)
 
 **PR:** https://github.com/Sounio-lang/sounio/pull/1580  
 **Head:** `research/zd-fiber-antisymmetry-lemma-20260731`  
 **Base:** `research/self-falsifying-compilation-line-20260726`  
 **GitHub:** `mergeable=CONFLICTING` · `mergeStateStatus=DIRTY`
 
+## Scale (measured 2026-08-07)
+
+| metric | value |
+|---|---:|
+| Commits on head not in base | ~295 |
+| Commits on base not in head | ~60 |
+| Merge-base | `47c34f69c64d…` |
+
 ## Verdict
 
-**Not auto-mergeable.** Base has moved ~60 commits ahead of the
-merge-base; several files changed on both sides. Merging requires a
-deliberate conflict-resolution session (or rebase onto base), not a
-green button.
+**Still not auto-mergeable.** Base advanced ~60 commits with overlapping
+governance docs, Lean lakefile, and tooling. A single green button would
+not resolve content conflicts.
 
-## Conflict surface (merge-tree, sample)
+## Recommended paths (operator choice)
 
-Both sides edited at least:
+### Path A — merge base into head (preferred for keeping science + ZD together)
 
-| path | notes |
+```bash
+git fetch origin research/self-falsifying-compilation-line-20260726
+git checkout research/zd-fiber-antisymmetry-lemma-20260731
+git merge origin/research/self-falsifying-compilation-line-20260726
+# resolve: .claude/llm_offload_log.md (concat)
+#          docs/governance/* (prefer registry re-sync after)
+#          formal/lean4/lakefile.lean (union roots)
+#          scripts/mcp/llm-offload.sh
+node scripts/docs/sync_governance_metadata.mjs
+# smoke: lake build (formal), bash scripts/dev/claim_oracle_inventory.sh
+#        bash scripts/ci/ontology_multi_ontology_gate.sh  # long
+git push
+```
+
+Do **not** force-push rewrite of shared history.
+
+### Path B — science-only PR cut
+
+If ZD Lean stack should land separately: open a PR with only
+
+- `artifacts/ontology-frontiers/**`
+- `artifacts/audit/claim_oracle_inventory.tsv`
+- `docs/decisions/adr-008*`
+- `examples/clinical/ddi_elplus_demo.sio`
+- demoted gates under `scripts/`
+- `FOUNDER_INTENT.md` / `AGENTS.md` ADR-008 pointers
+
+stacked on current base or `main`.
+
+## Science already on head (independent of merge)
+
+| item | note |
 |---|---|
-| `.claude/llm_offload_log.md` | append-only log; merge by concatenation |
-| `docs/governance/DOCS_ACCEPTANCE_REPORT.md` | governance |
-| `docs/governance/DOCS_AUTHORITY_MATRIX.md` | governance |
-| `docs/governance/topic-registry.v1.json` | registry |
-| `formal/lean4/lakefile.lean` | Lean package |
-| `scripts/mcp/llm-offload.sh` | tooling |
+| SAN large L_GREEN | commit earlier on branch |
+| ChEBI+PATO EL+ r15 | sparse driver ALL PASS |
+| open_fillers PATO/CL/UBERON | Sounio ALL PASS |
+| ADR-008 single semantic clock | inventory `foreign_hard_fail=yes` → **0**; `unknown` → **0** (978 rows) |
+| Demoted dual-oracle gates | special, bigrat*, sedenion×16, furey, gresnigt, parity, l8/l9, … |
+| Inventory residual triage | path rules + dual tooling / C-receipt / Python-only meta → no hard foreign clocks |
 
-Plus many one-sided adds (base r27–r29 self-falsifying line, agent-bus,
-MCL fixtures; head ZD/ontology/SAN work).
+## Worktree hygiene
 
-## What is merge-ready on the science side
-
-These commits on head are self-contained and do not depend on resolving
-the governance/docs conflicts first:
-
-- SAN large L_GREEN closeout
-- Ontology round 15 ChEBI+PATO
-- DDI Madaros repair + open_fillers Python deltas
-- (this session) open_fillers Sounio + ChEBI open measurement
-
-## Recommended integration path (operator)
-
-1. Do **not** force-push rewrite of shared history without review.
-2. Preferred: `git merge origin/research/self-falsifying-compilation-line-20260726`
-   on a clean worktree, resolve the six “changed in both” files, run
-   targeted gates (Lean, ontology multi, SAN if claimed).
-3. Alternate: cut a **science-only PR** stacked on current `main` / base
-   with only `artifacts/ontology-frontiers/**`, `examples/clinical/ddi_*`,
-   `scripts/ci/ontology_multi_ontology_gate.sh` if the ZD Lean stack
-   should land separately.
-4. Worktree hygiene: local unstaged deletes of `.claude/*` and
-   `.beagle/*` are **not** part of the science delivery — do not commit
-   them.
-
-## This session’s A deliverable
-
-Document readiness + keep science branch pushed. **No merge commit**
-until the conflict list is resolved explicitly (risk: governance
-registry + Lean lakefile).
+Local unstaged deletes of `.claude/*` / `.beagle/*` must **not** be
+committed as part of merge resolution unless intentional.

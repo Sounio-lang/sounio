@@ -98,14 +98,44 @@ classify_one() {
     sounio_wit="yes"
   fi
 
-  # Pure-Python research harnesses: not language/library claim clocks (ADR-008 residual).
+  # Path-based residual classes (not dual Sounio+foreign claim judges).
   case "$path" in
-    *suffering_aware*|*self_falsifying_compilation_line*|*sac_llm*|*mercyful_machine*|*moonshot_*|*federated_san*|*san_real_patient*)
+    scripts/archive/*)
+      oclass="research_harness"
+      foreign_hard="no"
+      migration="none"
+      notes="archived_gate_not_active_claim_clock"
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$path" "$kind" "$oclass" "$foreign_hard" "$sounio_wit" \
+        "$foreign" "$tier" "$notes" "$migration" "$UTC"
+      return 0
+      ;;
+    scripts/bootstrap/*|scripts/selfhost/*|*bootstrap_chain*|*bootstrap_full*|*bootstrap_kernel*)
+      oclass="bootstrap_integrity"
+      foreign_hard="no"
+      migration="keep"
+      notes="bootstrap_or_selfhost_integrity"
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$path" "$kind" "$oclass" "$foreign_hard" "$sounio_wit" \
+        "$foreign" "$tier" "$notes" "$migration" "$UTC"
+      return 0
+      ;;
+    scripts/ci/fixtures/*)
+      oclass="research_harness"
+      foreign_hard="no"
+      migration="none"
+      notes="fixture_not_product_gate"
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$path" "$kind" "$oclass" "$foreign_hard" "$sounio_wit" \
+        "$foreign" "$tier" "$notes" "$migration" "$UTC"
+      return 0
+      ;;
+    *suffering_aware*|*self_falsifying_compilation_line*|*sac_llm*|*mercyful_machine*|*moonshot_*|*federated_san*|*san_real_patient*|*chingon_zd*|*ade_wildgen*|*e_series_semantic*|*falsification_ledger*|*168_biology*|*associator_gum*|*cd_zd_graph*|*cd_tower_nullity*|*functor_f_g2*|*g2_zd_fibers*|*garden_to_claim*)
       if [[ $has_souc -eq 0 ]]; then
         oclass="research_harness"
         foreign_hard="no"
         migration="none"
-        notes="python_research_contract_not_language_claim"
+        notes="python_or_shell_research_contract_not_language_claim"
         printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
           "$path" "$kind" "$oclass" "$foreign_hard" "$sounio_wit" \
           "$foreign" "$tier" "$notes" "$migration" "$UTC"
@@ -129,13 +159,25 @@ classify_one() {
       ;;
   esac
 
-  # claim_ast: Sounio typecheck is claim; python preprocessor is tooling
-  if [[ "$path" == *claim_ast_gate* ]]; then
+  # claim_ast / claim_native: Sounio typecheck is claim; python preprocessor is tooling
+  if [[ "$path" == *claim_ast_gate* || "$path" == *claim_native_gate* ]]; then
     oclass="sounio_native_expected"
     foreign_hard="no"
     migration="keep"
-    notes="claim_ast_sounio_check_plus_tooling_preprocessor"
+    notes="claim_sounio_check_plus_optional_tooling"
     sounio_wit="partial"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$path" "$kind" "$oclass" "$foreign_hard" "$sounio_wit" \
+      "$foreign" "$tier" "$notes" "$migration" "$UTC"
+    return 0
+  fi
+
+  # Shell meta / ops gates with no Sounio and no Python: operational, not claim clocks
+  if [[ $has_souc -eq 0 && $has_py -eq 0 && $has_c_contract -eq 0 ]]; then
+    oclass="research_harness"
+    foreign_hard="no"
+    migration="none"
+    notes="shell_meta_or_ops_gate_no_claim_clock"
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$path" "$kind" "$oclass" "$foreign_hard" "$sounio_wit" \
       "$foreign" "$tier" "$notes" "$migration" "$UTC"
@@ -164,20 +206,30 @@ classify_one() {
       notes="adr008_soft_foreign_only"
     fi
   elif [[ $has_py -eq 1 && $has_fail -eq 1 ]] && { [[ $has_diff -eq 1 ]] || [[ $has_mpmath -eq 1 ]]; }; then
-    if [[ $has_optional -eq 1 ]]; then
+    # Numeric foreign judge on a fail path. Prefer soft inventory when Sounio
+    # already witnesses the claim (ADR-008 single clock); hard-flag only pure
+    # foreign claim clocks still pending demotion.
+    if [[ $has_souc -eq 1 || $has_c_contract -eq 1 || $has_optional -eq 1 ]]; then
       oclass="external_corroboration_only"
-      foreign_hard="unknown"
+      foreign_hard="no"
       migration="demote_corroboration"
-      notes="python_present_with_fail_but_optional_markers"
+      notes="numeric_foreign_with_sounio_or_optional_soft"
+      sounio_wit="partial"
+      [[ $has_souc -eq 1 || $has_c_contract -eq 1 ]] && sounio_wit="yes"
     else
       oclass="forbidden_as_claim_oracle"
       foreign_hard="yes"
       migration="rehome_sounio"
       notes="python_diff_or_mpmath_on_fail_path"
     fi
-    if [[ $has_souc -eq 1 ]]; then
-      sounio_wit="partial"
-    fi
+  elif [[ $has_souc -eq 1 && $has_py -eq 1 ]]; then
+    # Dual surface without numeric foreign judge (no diff/mpmath): Sounio is
+    # the claim clock; Python is tooling / helper (LSP, packaging, meta).
+    oclass="sounio_native_expected"
+    foreign_hard="no"
+    migration="keep"
+    notes="dual_souc_python_tooling_not_numeric_judge"
+    sounio_wit="yes"
   elif [[ $has_py -eq 1 && $has_fail -eq 0 ]]; then
     oclass="external_corroboration_only"
     foreign_hard="no"
@@ -189,6 +241,23 @@ classify_one() {
     migration="keep"
     notes="souc_without_python_judge"
     sounio_wit="yes"
+  elif [[ $has_c_contract -eq 1 && $has_souc -eq 0 ]]; then
+    # CUDA / C receipt gates (kretikos phases, FPGA): not peer-language claim clocks
+    oclass="research_harness"
+    foreign_hard="no"
+    migration="none"
+    notes="hardware_or_c_receipt_not_language_claim_clock"
+  elif [[ $has_lean -eq 1 && $has_souc -eq 0 ]]; then
+    oclass="formal_only"
+    foreign_hard="no"
+    migration="keep"
+    notes="lean_formal_with_optional_tooling"
+  elif [[ $has_py -eq 1 && $has_souc -eq 0 ]]; then
+    # Python-only gate without numeric foreign pairing: paper/meta/research
+    oclass="research_harness"
+    foreign_hard="no"
+    migration="none"
+    notes="python_only_gate_without_numeric_claim_pairing"
   elif [[ $kind == "oracle" || $kind == "parity_ref" ]]; then
     # Standalone research oracles: measurement helpers, not claim gates
     oclass="research_harness"

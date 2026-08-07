@@ -36,14 +36,16 @@ last wins).
 
 | Signal in file | Provisional `oracle_class` |
 |---|---|
-| Invokes `python3` / `*.py` and `diff`/mismatch → `fail=1` or `exit 1` | `forbidden_as_claim_oracle` if no strong Sounio-only pass path; else mark `foreign_hard_fail=yes` |
-| `python3` only under optional / SKIP / non-failing branch | `external_corroboration_only` |
+| Invokes `python3` / `*.py` and `diff`/mpmath on fail path **without** Sounio/C witness | `forbidden_as_claim_oracle`, `foreign_hard_fail=yes` (demote next) |
+| Same numeric foreign path **with** Sounio/C witness or optional markers | `external_corroboration_only`, `foreign_hard_fail=no` |
+| Dual `souc`+Python without numeric foreign judge | `sounio_native_expected` (Python tooling) |
 | `souc`/`ALL PASS`/`GUM_TRUST`/`check: OK` and no foreign judge on fail path | `sounio_native_expected` |
 | Two `souc` engines or dual Sounio paths compared | `sounio_closed_form_twin` |
-| Fixed-point / bootstrap / gen2 gen3 | `bootstrap_integrity` |
-| Lean lake / formal only | `formal_only` |
-| Pure-Python research harness (no Sounio claim clock) | `research_harness` (not a language claim) |
-| ADR-008 soft foreign markers present | `external_corroboration_only`, `foreign_hard_fail=no` |
+| Fixed-point / bootstrap / gen2 gen3 / `scripts/bootstrap/*` / `scripts/selfhost/*` | `bootstrap_integrity` |
+| Lean lake / formal (optionally with tooling Python) | `formal_only` |
+| Path `scripts/archive/*`, CI fixtures, pure C/CUDA receipt, Python-only meta | `research_harness` (not a language claim clock) |
+| ADR-008 soft foreign markers (`lib_sounio_claim_oracle`, `SOUNIO_FOREIGN_ORACLE_HARD`) | `external_corroboration_only`, `foreign_hard_fail=no` |
+| Shell meta with neither Sounio nor Python nor C contract | `research_harness` |
 | Insufficient signal | `unknown` → notes must say so; treat as review debt |
 
 ## Migration priorities (ADR-008)
