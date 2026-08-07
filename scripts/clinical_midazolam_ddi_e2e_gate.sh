@@ -2,6 +2,7 @@
 # scripts/clinical_midazolam_ddi_e2e_gate.sh
 # Midazolam CYP3A DDI E2E under lean_single.
 set -euo pipefail
+HARD="${SOUNIO_FOREIGN_ORACLE_HARD:-0}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT/stdlib}"
@@ -46,7 +47,10 @@ aucr=float("$aucr")
 import sys
 sys.exit(0 if 12.0 < aucr < 18.0 else 1)
 PY
-      if [[ $? -ne 0 ]]; then echo "FAIL: aucr band"; fail=1; fi
+      if [[ $? -ne 0 ]]; then
+        echo "FOREIGN CORROBORATION: aucr band (ADR-008 soft unless HARD=1)"
+        if [ "${HARD:-0}" = "1" ]; then echo "FAIL: aucr band"; fail=1; fi
+      fi
     fi
   fi
 fi

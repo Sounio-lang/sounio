@@ -2,7 +2,7 @@
 # scripts/dev/claim_oracle_inventory.sh
 #
 # Scan gate / oracle scripts and emit a provisional claim-oracle inventory
-# (ADR-008). Classifications are heuristic — overrides may be supplied later.
+# (ADR-008). Classifications are heuristic - overrides may be supplied later.
 #
 # Output: artifacts/audit/claim_oracle_inventory.tsv
 # Schema: docs/decisions/claim_oracle_inventory.schema.md
@@ -57,6 +57,7 @@ classify_one() {
 
   local has_py=0 has_souc=0 has_diff=0 has_fail=0 has_mpmath=0 has_skip=0
   local has_all_pass=0 has_trust=0 has_fixed=0 has_lean=0 has_optional=0
+  local has_adr008_soft=0
 
   echo "$text" | grep -qE 'python3|python |[.]py["'"'"' ]' && has_py=1 || true
   echo "$text" | grep -qE 'bin/souc|SOUC|souc run|souc check' && has_souc=1 || true
@@ -69,6 +70,8 @@ classify_one() {
   echo "$text" | grep -qiE 'gen2|gen3|fixed.point|fixed-point|boot4' && has_fixed=1 || true
   echo "$text" | grep -qiE '\bleach\b|lake build|formal/' && has_lean=1 || true
   echo "$text" | grep -qiE 'optional.*oracle|oracle.*optional|corroboration' && has_optional=1 || true
+  # ADR-008 demotion markers: foreign path soft unless SOUNIO_FOREIGN_ORACLE_HARD=1
+  echo "$text" | grep -qE 'lib_sounio_claim_oracle|SOUNIO_FOREIGN_ORACLE_HARD|sounio_foreign_mismatch|sounio_foreign_diff|ADR-008' && has_adr008_soft=1 || true
 
   local foreign="none"
   local fr=()
@@ -99,7 +102,19 @@ classify_one() {
     oclass="formal_only"
     migration="keep"
     notes="lean_or_formal_path"
-  elif [[ $has_py -eq 1 && $has_fail -eq 1 && ( $has_diff -eq 1 || $has_mpmath -eq 1 ) ]]; then
+  elif [[ $has_adr008_soft -eq 1 && $has_souc -eq 1 ]]; then
+    # Demoted: Sounio claim + soft foreign corroboration (ADR-008 pilot pattern)
+    oclass="sounio_native_expected"
+    foreign_hard="no"
+    migration="keep"
+    notes="adr008_soft_foreign_corroboration"
+    sounio_wit="yes"
+    if [[ $has_py -eq 1 ]]; then
+      oclass="external_corroboration_only"
+      notes="adr008_claim_sounio_plus_soft_foreign"
+      sounio_wit="partial"
+    fi
+  elif [[ $has_py -eq 1 && $has_fail -eq 1 ]] && { [[ $has_diff -eq 1 ]] || [[ $has_mpmath -eq 1 ]]; }; then
     # Foreign mismatch can fail the gate
     if [[ $has_optional -eq 1 ]]; then
       oclass="external_corroboration_only"
@@ -149,7 +164,7 @@ classify_one() {
 }
 
 {
-  printf '# claim_oracle_inventory.tsv — provisional classifications (ADR-008)\n'
+  printf '# claim_oracle_inventory.tsv - provisional classifications (ADR-008)\n'
   printf '# schema: docs/decisions/claim_oracle_inventory.schema.md\n'
   printf '# scanner: scripts/dev/claim_oracle_inventory.sh\n'
   printf '# scanned_utc=%s\n' "$UTC"

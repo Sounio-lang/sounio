@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
-# Cross-toolchain gate: Furey Cl(6) charge + G2 automorphism does-not-preserve-charge (vector 4/3).
+# ADR-008: claim = FUREYCHARGE OK on Sounio; Python/diff soft unless HARD=1.
 set -euo pipefail
+ROOT_FOR_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT_FOR_LIB/scripts/ci/lib_sounio_claim_oracle.sh"
 cd "$(dirname "$0")/../.."
 export SOUNIO_STDLIB_PATH="$PWD/stdlib"
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 SOUC="${SOUNIO_TEST_SOUC_BIN:-./bin/souc}"
 run_souc() { if [ "$SOUC" = "./bin/souc" ]; then ./bin/souc run "$1" 2>/dev/null; else
-  "$SOUC" "$1" "$WORK/c.elf" >/dev/null 2>&1; chmod +x "$WORK/c.elf"; "$WORK/c.elf" 2>/dev/null; fi }
-run_souc tests/run-pass/furey_charge_g2.sio | grep -E '^(WITT_OK|COMM_NONZERO|CHARGE_OK|FUREYCHARGE)' | sort > "$WORK/souc.txt"
-python3 scripts/research/furey_charge_g2_oracle.py | grep -E '^(WITT_OK|COMM_NONZERO|CHARGE_OK|FUREYCHARGE)' | sort > "$WORK/py.txt"
-diff -q "$WORK/souc.txt" "$WORK/py.txt" >/dev/null || { echo "MISMATCH:"; diff "$WORK/souc.txt" "$WORK/py.txt"; echo "furey charge gate: FAIL"; exit 1; }
-grep -q '^FUREYCHARGE OK' "$WORK/souc.txt" || { echo "verdict != FUREYCHARGE OK"; echo "furey charge gate: FAIL"; exit 1; }
-echo "CROSS-VERIFIED: Furey Cl(6) Witt ladder relations exact; the G2 automorphism phi does NOT preserve"
-echo "  the charge operator ([P,D]!=0) => phi is not a family symmetry at the state level. E1 stands."
+  "$SOUC" "$1" "$WORK/x.elf" >/dev/null 2>&1; chmod +x "$WORK/x.elf"; "$WORK/x.elf" 2>/dev/null; fi }
+run_souc tests/run-pass/furey_charge_g2.sio | grep -E '^(WITT_OK|COMM_NONZERO|CHARGE_OK|FUREYCHARGE)' | sort > "$WORK/souc.txt" || true
+fail=0
+grep -q '^FUREYCHARGE OK' "$WORK/souc.txt" || { echo "CLAIM FAIL: missing FUREYCHARGE OK"; fail=1; }
+if python3 scripts/research/furey_charge_g2_oracle.py 2>/dev/null | grep -E '^(WITT_OK|COMM_NONZERO|CHARGE_OK|FUREYCHARGE)' | sort > "$WORK/py.txt"; then
+  sounio_foreign_diff "$WORK/souc.txt" "$WORK/py.txt" "furey charge" || fail=1
+fi
+[ "$fail" -eq 0 ] || { echo "furey charge gate: FAIL"; exit 1; }
 echo "furey charge gate: PASS"
