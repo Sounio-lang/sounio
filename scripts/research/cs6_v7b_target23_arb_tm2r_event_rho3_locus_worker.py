@@ -334,11 +334,7 @@ def main() -> None:
     predictor, predictor_range, center, _tube, _derivative, anchor = (
         centered.frozen_predictor(state, checks)
     )
-    centered.bool_check(
-        checks,
-        "predictor_center_matches_frozen_receipt",
-        center == EXPECTED_CENTER,
-    )
+    # frozen_predictor already records predictor_center_matches_frozen_receipt.
     chart = instrumented_chart(state, center)
     if chart.get("centered_rho3_positive") is True:
         centered.bool_check(checks, "centered_state_keeps_rho3", True)
