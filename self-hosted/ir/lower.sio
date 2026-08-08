@@ -2582,6 +2582,35 @@ fn lowerer_compute_strategy_from_ast_ref(
 // DO NOT "fix" the logic here. The workaround, when someone takes it, is the
 // same shape as #1678: stop the two values sharing a slot -- hoist the constant,
 // or reorder the declarations -- leaving the seed defect itself intact.
+// TWO WORKAROUNDS TRIED HERE, BOTH FAILED. Recorded so nobody spends the builds
+// again, and because the second failure refutes the obvious mechanism.
+//
+//   1. Hoist the constant: `let cap_limit: i64 = IR_MAX_FUNCS` above the loop,
+//      read below. Rebuilt: [rbp-0x20] still held the constant at the fault.
+//   2. Move the capacity test into this separate function, so IR_MAX_FUNCS
+//      cannot share a frame with the caller's loop counter at all. Rebuilt:
+//      [rbp-0x20] STILL held 12288.
+//
+// Both verified by reading the slot out of a fresh core, not by inspection.
+//
+// SO THE CONSTANT DOES NOT COME FROM THE CAPACITY GUARD. The remaining
+// candidate is the indexing itself: `functions[i as usize]` over
+// `[IrFunction; IR_MAX_FUNCS]` makes codegen materialise the ARRAY LENGTH into a
+// temporary, and that temporary is what aliases the loop counter. It fits all
+// three observations at once -- it tracks IR_MAX_FUNCS because the array is
+// sized by it, and it is immune to hoisting and to moving the guard because
+// neither touches the index expression.
+//
+// If someone takes this further, the next thing to try is extracting the
+// `functions[i].name` read into its own function taking the index, so the
+// length temp and the counter never live in one frame.
+// Takes the COUNT, not the module: passing `&Box<IrModule>` would drag in the
+// Box-reference deref this tree already records as unsafe, and an i64 carries
+// everything the test needs.
+fn lowerer_fn_table_is_full(fn_count: i64) -> bool {
+    fn_count >= IR_MAX_FUNCS
+}
+
 fn lowerer_find_or_add_fn_id_mut(lo: &! Lowerer, name: Name) -> i64 with Mut, Panic, Div {
     var module_box = (*lo).module
     var i: i64 = 0
@@ -2593,7 +2622,7 @@ fn lowerer_find_or_add_fn_id_mut(lo: &! Lowerer, name: Name) -> i64 with Mut, Pa
         i = i + 1
     }
 
-    if (*module_box).fn_count >= IR_MAX_FUNCS {
+    if lowerer_fn_table_is_full((*module_box).fn_count) {
         (*lo).module = module_box
         lowerer_mark_error_at(lo, 2044)
         return -1
