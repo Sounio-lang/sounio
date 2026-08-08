@@ -20,6 +20,56 @@
 
 ---
 
+### #1649 — the self-compile blocker is a SEED SLOT-ALIASING MISCOMPILE (2026-08-08)
+
+`build self-hosted/compiler/main.sio` SIGSEGVs. Localised end to end, every link
+measured:
+
+```
+module 7 of 120 = self-hosted/check/epistemic.sio
+fn check_knowledge_type, statement 5 (StmtAssign), epistemic.sio:51
+  -> lowerer_find_or_add_fn_id_mut, ir/lower.sio
+     while i < (*module_box).fn_count     count = 346    (correct)
+     ...functions[i as usize]             i     = 8192   (= IR_MAX_FUNCS)
+     si_addr = 0x1d04, SEGV_MAPERR, RSP healthy
+```
+
+`8192 < 346` is false, so the loop should have exited. The generated code
+**reloads `i` from its stack slot inside the body, after the comparison**, and
+that slot holds IR_MAX_FUNCS. Two locals share one slot: the loop counter, and
+the constant in the capacity guard twenty lines below.
+
+**It tracks the constant, not the array.** Rebuilt at IR_MAX_FUNCS = 12288 the
+bad index is 12288; at 8192 it is 8192. Same statement, same fault address. That
+is what makes this a slot-aliasing miscompile in the SEED and not a logic bug in
+lower.sio -- the source is correct at both values.
+
+Same family as the seed defects already reproduced in
+`tests/known_failures/lean_single_global_*.sio` and worked around by #1678
+(`&container.items[i]` yields a wrong address). Four manifestations now:
+struct-into-global-array is a silent no-op; struct-into-plain-global overruns
+into the next global; taking the address of an aggregate array element is wrong;
+and two locals alias one stack slot.
+
+**How it was found**, since the tooling is not obvious here: no gdb in this
+container, and the binary has no symbols (lean_single emits a two-segment ELF,
+shnum=0). Cores DO get written, as `core.<pid>`. Read NT_PRSTATUS and NT_SIGINFO
+out of the core with a short script, take RIP - 0x400000 as the file offset, and
+`objdump -D -b binary -m i386:x86-64` around it. `SOUNIO_LOWER_FN_TRACE=1` and
+`SOUNIO_LOWER_STMT_FN=<name>` (both in ir/lower.sio) narrow the crash to the
+function and the statement first.
+
+**Two environment facts that cost measurements before they were known:**
+`ulimit -s` is INERT above ~1.95 GB here -- the usable stack is capped by the
+address-space layout, so a 2/4/8 GB sweep measures the same stack three times.
+And `0x3000` is both IR_MAX_FUNCS-at-12288 and `MEM_COMMIT|MEM_RESERVE` in
+native/codegen.sio, so the value alone proves nothing.
+
+**Not fixed.** The workaround, when someone takes it, is #1678's shape: stop the
+two values sharing a slot (hoist the constant, or reorder the declarations),
+leaving the seed defect intact. Do not "fix" the loop -- it is correct.
+
+
 ## LANE CLAIM + ownership-conflict — 2026-08-06
 
 ### Parallel Lane Contract

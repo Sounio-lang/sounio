@@ -2548,6 +2548,40 @@ fn lowerer_compute_strategy_from_ast_ref(
     }
 }
 
+// THE SELF-COMPILE DIES HERE, AND NOT FOR A REASON VISIBLE IN THIS SOURCE.
+// `build self-hosted/compiler/main.sio` SIGSEGVs inside this loop. The logic is
+// correct; the binary running it is miscompiled by the seed.
+//
+// WHAT THE CORE SAYS (2026-08-08, read from NT_PRSTATUS/NT_SIGINFO -- there is
+// no gdb in this container, and the binary carries no symbols: lean_single emits
+// a two-segment ELF with shnum=0):
+//
+//     while i < (*module_box).fn_count      count = 346   <- correct
+//     ...functions[i as usize]              i     = 8192  <- IR_MAX_FUNCS
+//     si_addr = 0x1d04, SEGV_MAPERR, RSP healthy
+//
+// 8192 < 346 is false, so the loop should have exited. It did not, because the
+// generated code RELOADS `i` from its stack slot inside the body, after the
+// comparison -- and that slot has been overwritten with IR_MAX_FUNCS. The two
+// locals share one slot. This function is where they meet: the loop counter `i`
+// above, and the IR_MAX_FUNCS in the capacity guard below.
+//
+// PROOF THAT IT TRACKS THE CONSTANT, not the array: rebuilt with
+// IR_MAX_FUNCS = 12288 the bad index is 12288; at 8192 it is 8192. Same
+// statement, same si_addr, same everything else. The value in the clobbered slot
+// IS the constant.
+//
+// Reached while lowering check/epistemic.sio:51 (`c = c.report_error_at(...)`,
+// statement 5 of check_knowledge_type, module 7 of 120) -- but that is only
+// where the aliasing first bites, not a property of that statement.
+//
+// The `2044` in the guard below is the same site the error histogram reported as
+// `2044x3022`: it was already complaining 3022 times per compile. What was not
+// visible is that the counter beside it was corrupt.
+//
+// DO NOT "fix" the logic here. The workaround, when someone takes it, is the
+// same shape as #1678: stop the two values sharing a slot -- hoist the constant,
+// or reorder the declarations -- leaving the seed defect itself intact.
 fn lowerer_find_or_add_fn_id_mut(lo: &! Lowerer, name: Name) -> i64 with Mut, Panic, Div {
     var module_box = (*lo).module
     var i: i64 = 0
