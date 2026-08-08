@@ -6016,9 +6016,39 @@ With it, both lines close to `−1` (`four_factor_seamrow`, `four_factor_seamcol
 each), which is exactly what the four-sign law predicts there: off `{0, W}` all of `δ`, `τ` and both
 `epsZero` factors are `+1`.
 
-**Residue of obligation (ii), confirmed by the reviewer.** Proved: the generic interior (Tier 96)
-and the two seam lines. Not proved: the diagonal `a = b`, the coset `a ⊕ b = W`, and the index-`0`
-rows `a = 0` / `b = 0`. Three loci left, all of them lines the lane already has `resB` lemmas near.
+**Residue of obligation (ii).** Proved: the two seam lines. Not proved: the diagonal `a = b`, the
+coset `a ⊕ b = W`, and the index-`0` rows `a = 0` / `b = 0`.
+
+⚠ This paragraph first said "Proved: the generic interior (Tier 96) and the two seam lines". That
+was WRONG and is corrected here: Tier 96 REDUCED the interior (summand `= −(P1·P3)`, and `P1·P3 = +1`
+iff `resB`), it did not prove it — "resB holds off the six lines" is still open. The reviewer of
+Tier 98 confirmed the corrected accounting.
 
 The name is deliberate and was checked: this is NOT the lane's existing fibre antisymmetry for
 `A_σ` — that one is about the annihilation matrix; this is about the cocycle itself.
+
+
+### §57.54 — Tier 98: the diagonal, the coset, the two index-0 rows, and the four corners
+
+Four of the five remaining loci close, and two of them need nothing new:
+
+    diagonal a = b   : P3 x x = −1 (P3_diag, Tier 2) and P3 a (a⊕W) = −1 (P3_coset_value, Tier 91)
+    coset b = a ⊕ W  : the same two theorems with their roles exchanged
+
+Both products are `+1`. That the coset line's value and the diagonal's were already in the file is
+the point: the carrier decomposition of Tier 93 was built out of exactly these two, so the loci where
+the four-factor law is hardest to see are the ones the lane had already computed.
+
+The two index-`0` rows need Tier 97's flip, once each and in its two forms — `P3 0 b · P3 b W =
+(−σ(W,b))·(−σ(b⊕W,W)) = σ(W,b)² = +1`, and the mirror for `b = 0`. (Both factors carry a minus; my
+first draft of that line dropped one, and the reviewer marked it `[WRONG]`. The Lean was right.)
+
+**And four CORNERS that no theorem covered.** The line theorems all exclude their pairwise
+intersections, so `(0,0)`, `(0,W)`, `(W,0)`, `(W,W)` were on no line's domain and are not interior —
+without them "the residue is the interior alone" would have been false. The reviewer caught it. They
+close immediately from `P3_zero_seam`, `P3_seam_zero`, `P3_diag` and `P3 0 0 = 1`, with values
+`+1, −1, −1, +1`, matching the law at each (0 violations / 212).
+
+**Residue of obligation (ii): the generic interior, and nothing else.** There the summand is
+`−(P1·P3)` and `P1·P3 = +1` iff `resB` (Tier 96), so what is left is exactly `resB` holding off the
+six lines — a mask statement, on lines the lane already has `resB` lemmas near.

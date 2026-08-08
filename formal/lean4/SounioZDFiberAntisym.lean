@@ -15660,4 +15660,130 @@ theorem four_factor_seamcol (m a W : Nat) (ha : a < 2^(m+1)) (hW : W < 2^(m+1))
       sigma_fibre_flip (m+1) a W ha hW ha0 hW0 haW]
   rcases cdSigma_pm (m+1) a W with h | h <;> rw [h] <;> grind
 
+
+/-! ### Tier 98 — the diagonal, the coset, and the two index-`0` rows
+
+    Four of the five remaining loci of the `cp2` four-factor identity close here, and two of them
+    need nothing new at all:
+
+      diagonal `a = b`   : both factors are `P3 x x = −1` (`P3_diag`, Tier 2) and
+                           `P3 a (a⊕W) = −1` (`P3_coset_value`, Tier 91) — product `+1`
+      coset `b = a ⊕ W`  : the same two theorems with their roles exchanged — product `+1`
+
+    That the coset line's own value and the diagonal's were already in the file is the point: the
+    carrier decomposition of Tier 93 was built out of exactly these two, so the loci where the
+    four-factor law is hardest to see are the ones the lane had already computed.
+
+    The two index-`0` rows need the Tier 97 flip, once each and in its two forms:
+
+      `a = 0` : `P3 0 b · P3 b W = (−σ(W,b))·(−σ(b⊕W,W)) = σ(W,b)² = +1` via the flip and
+                `antisym` — BOTH factors carry a minus, which my first draft of this line dropped
+      `b = 0` : `P3 a 0 · P3 0 (a⊕W) = −σ(W,a)·σ(W,a⊕W) = σ(W,a)² = +1` via the mirror form
+
+    and `+1` is what the four-sign law predicts on all four loci: on the diagonal `δ = −1` alone, on
+    the coset `τ = −1` alone, and on each index-`0` row one `epsZero` alone — a single `−1` against
+    the law's leading minus in every case. -/
+
+/-- The `l = 0` row, evaluated: `P3 0 b W m = −σ(W, b)` for `b ≠ 0`. -/
+theorem P3_row0_val (m b W : Nat) (hb : b < 2^(m+1)) (hW : W < 2^(m+1)) (hb0 : b ≠ 0) :
+    P3 0 b W m = - cdSigma W b (m+1) := by
+  have hp := Nat.two_pow_pos (m+1)
+  unfold P3 hi
+  rw [Nat.zero_xor, cdSig0, R_ul W b m hW hb, if_neg hb0]
+  grind
+
+/-- **THE DIAGONAL.**  Both factors are `−1`, by two theorems that were already in the file. -/
+theorem four_factor_diag (m a W : Nat) (ha : a < 2^(m+1)) (hW : W < 2^(m+1))
+    (ha0 : a ≠ 0) (haW : a ^^^ W ≠ 0) :
+    P3 a a W m * P3 a (a ^^^ W) W m = 1 := by
+  rw [P3_diag a W m ha hW ha0, P3_coset_value m a W ha hW ha0 haW]
+  grind
+
+/-- **THE COSET LINE.**  The same two theorems, with their roles exchanged. -/
+theorem four_factor_coset (m a W : Nat) (ha : a < 2^(m+1)) (hW : W < 2^(m+1))
+    (ha0 : a ≠ 0) (haW : a ^^^ W ≠ 0) :
+    P3 a (a ^^^ W) W m * P3 (a ^^^ W) (a ^^^ W) W m = 1 := by
+  have haW' : a ^^^ W < 2^(m+1) := xorlt ha hW
+  rw [P3_coset_value m a W ha hW ha0 haW, P3_diag (a ^^^ W) W m haW' hW haW]
+  grind
+
+/-- **THE `a = 0` ROW.**  One application of the fibre flip, then `antisym`. -/
+theorem four_factor_row0 (m b W : Nat) (hb : b < 2^(m+1)) (hW : W < 2^(m+1))
+    (hW0 : W ≠ 0) (hb0 : b ≠ 0) (hbW : b ≠ W) :
+    P3 0 b W m * P3 b (0 ^^^ W) W m = 1 := by
+  have hp := Nat.two_pow_pos (m+1)
+  have hbW' : b ^^^ W < 2^(m+1) := xorlt hb hW
+  rw [Nat.zero_xor, P3_row0_val m b W hb hW hb0,
+      P3_red b W W m hb hW hW hW0, Nat.xor_self, cdSig0,
+      sigma_fibre_flip (m+1) b W hb hW hb0 hW0 hbW,
+      antisym (m+1) b W hb hW hb0 hW0 hbW]
+  rcases cdSigma_pm (m+1) W b with h | h <;> rw [h] <;> grind
+
+/-- **THE `b = 0` ROW.**  The mirror form of the same flip. -/
+theorem four_factor_col0 (m a W : Nat) (ha : a < 2^(m+1)) (hW : W < 2^(m+1))
+    (hW0 : W ≠ 0) (ha0 : a ≠ 0) (haW : a ≠ W) :
+    P3 a 0 W m * P3 0 (a ^^^ W) W m = 1 := by
+  have hp := Nat.two_pow_pos (m+1)
+  have haW' : a ^^^ W < 2^(m+1) := xorlt ha hW
+  have haW0 : a ^^^ W ≠ 0 := by intro h; exact haW (xor_zero_eq a W h)
+  have hmir : cdSigma W (a ^^^ W) (m+1) = - cdSigma W a (m+1) := by
+    have hx0 : a ^^^ W ≠ 0 := haW0
+    have hne : W ≠ a ^^^ W := by
+      intro h
+      apply ha0
+      have h2 : W ^^^ W = (a ^^^ W) ^^^ W := by rw [← h]
+      rw [Nat.xor_self, xor_cancel] at h2
+      exact h2.symm
+    rw [antisym (m+1) W (a ^^^ W) hW haW' hW0 hx0 hne,
+        sigma_fibre_flip (m+1) a W ha hW ha0 hW0 haW,
+        antisym (m+1) a W ha hW ha0 hW0 haW]
+    grind
+  rw [P3_col0_val m a W ha hW, P3_row0_val m (a ^^^ W) W haW' hW haW0, hmir]
+  rcases cdSigma_pm (m+1) W a with h | h <;> rw [h] <;> grind
+
+/-! ### Tier 98b — the four CORNERS, and the residue is now the interior alone
+
+    The line theorems above all exclude their pairwise intersections, and a reviewer caught that this
+    leaves four points uncovered — `(0,0)`, `(0,W)`, `(W,0)`, `(W,W)` — none of them interior and
+    none of them on a line theorem's domain.  They are single points and every factor they need is
+    already a theorem, so they close immediately, but they had to be NAMED: without them the residue
+    claim "the interior alone" is false.
+
+    The values, and the four-sign law's prediction at each:
+
+      `(0,0)` : `1 · 1 = +1`     `δ = −1` alone            → `+1`
+      `(0,W)` : `1 · (−1) = −1`  `τ = −1` and `epsZero 0`  → `−1`
+      `(W,0)` : `(−1) · 1 = −1`  `τ = −1` and `epsZero 0`  → `−1`
+      `(W,W)` : `(−1)(−1) = +1`  `δ = −1` alone            → `+1` -/
+
+/-- `P3 0 0 W m = 1`: both factors are `cdSig0`/`cdSig0'`. -/
+theorem P3_zero_zero (m W : Nat) : P3 0 0 W m = 1 := by
+  unfold P3 hi
+  rw [cdSig0, cdSig0']
+  grind
+
+/-- The corner `(0,0)`. -/
+theorem four_factor_corner00 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    P3 0 0 W m * P3 0 (0 ^^^ W) W m = 1 := by
+  rw [Nat.zero_xor, P3_zero_zero m W, P3_zero_seam m W hW hW0]
+  grind
+
+/-- The corner `(0,W)`. -/
+theorem four_factor_corner0W (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    P3 0 W W m * P3 W (0 ^^^ W) W m = -1 := by
+  rw [Nat.zero_xor, P3_zero_seam m W hW hW0, P3_diag W W m hW hW hW0]
+  grind
+
+/-- The corner `(W,0)`. -/
+theorem four_factor_cornerW0 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    P3 W 0 W m * P3 0 (W ^^^ W) W m = -1 := by
+  rw [Nat.xor_self, P3_seam_zero m W hW hW0, P3_zero_zero m W]
+  grind
+
+/-- The corner `(W,W)`. -/
+theorem four_factor_cornerWW (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    P3 W W W m * P3 W (W ^^^ W) W m = 1 := by
+  rw [Nat.xor_self, P3_diag W W m hW hW hW0, P3_seam_zero m W hW hW0]
+  grind
+
 end SounioZDFiberAntisym
