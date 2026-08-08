@@ -5995,3 +5995,30 @@ attempts, and the fan-out driver dropped the output while leaving the raw JSON o
 is that zai was unavailable — a 5-hour usage cap (`code 1308`, reset 2026-08-09 07:16), not an
 authentication problem. The lesson for this lane: when the driver prints nothing, READ THE RAW JSON
 before recording a provider as silent.
+
+### §57.53 — Tier 97: the two seam lines closed, via a FIBRE FLIP of the cocycle itself
+
+The lines `a = W` and `b = W` were left open because they are exactly where `P1_symm` and `core_P3`
+lose their hypotheses. Reducing both by `P3_red` collapses them onto ONE two-factor statement, and
+it is a fibre antisymmetry one level below the lane's usual one:
+
+    sigma_fibre_flip:   cdSigma (a ⊕ W) W k = − cdSigma a W k        for a ∉ {0, W}, W ≠ 0
+
+— the vector `a ↦ σ(a, W)` ANTI-COMMUTES with the involution `a ↦ a ⊕ W` off that involution's
+degenerate locus. Measured first (5094/5094 at `k = 2..6`, this form and its mirror), then proved
+∀ levels by induction with the four branch cases, the same shape as `antisym`'s own proof. Two of
+the four branches need the mirror form, which `antisym` converts back into this one — so the two
+forms are one theorem, and the conversion is where `a ≠ 0` earns its keep (`W ≠ a ⊕ W` **is**
+`a ≠ 0`). The reviewer confirmed the routing is not circular: `flip_mirror` takes the induction
+hypothesis as an argument rather than re-invoking the theorem.
+
+With it, both lines close to `−1` (`four_factor_seamrow`, `four_factor_seamcol`, 0 violations / 1182
+each), which is exactly what the four-sign law predicts there: off `{0, W}` all of `δ`, `τ` and both
+`epsZero` factors are `+1`.
+
+**Residue of obligation (ii), confirmed by the reviewer.** Proved: the generic interior (Tier 96)
+and the two seam lines. Not proved: the diagonal `a = b`, the coset `a ⊕ b = W`, and the index-`0`
+rows `a = 0` / `b = 0`. Three loci left, all of them lines the lane already has `resB` lemmas near.
+
+The name is deliberate and was checked: this is NOT the lane's existing fibre antisymmetry for
+`A_σ` — that one is about the annihilation matrix; this is about the cocycle itself.

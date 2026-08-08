@@ -15507,4 +15507,157 @@ theorem P1_mul_P3_mask (m a b W : Nat) (ha : a < 2^(m+1)) (hb : b < 2^(m+1))
   rcases P1_pm a b W m with h1 | h1 <;> rcases P3_pm a b W m with h3 | h3 <;>
     rw [h1, h3] <;> simp
 
+/-! ### Tier 97 — the two remaining lines, and the FIBRE FLIP of the cocycle itself
+
+    Tier 96's reduction leaves `a = W` and `b = W` undischarged: they are exactly where `P1_symm`
+    and `core_P3` lose their hypotheses.  Reducing both by `P3_red` collapses them onto ONE two-factor
+    statement about the cocycle, and it is a fibre antisymmetry one level below the lane's usual one:
+
+      **`cdSigma (a ⊕ W) W k = − cdSigma a W k`**    for `a ∉ {0, W}`, `W ≠ 0`
+
+    — the vector `a ↦ σ(a, W)` ANTI-commutes with the involution `a ↦ a ⊕ W`.  (Measured first:
+    5094/5094 at `k = 2..6`, both this form and its mirror `σ(W, a⊕W) = −σ(W, a)`.)
+
+    The proof is an induction on the level with the four branch cases, the same shape as `antisym`'s.
+    Two of the four branches need the MIRROR form, which `antisym` converts back into this one — so
+    the two forms are one theorem, not two, and the conversion is where `a ≠ 0` earns its keep
+    (`W ≠ a ⊕ W` is exactly `a ≠ 0`).
+
+    The four branches, and what carries each: both-low is `R_ll` and the induction hypothesis;
+    low-high is `R_uu`/`R_lu` and the mirror; high-low is `R_ul` twice and the hypothesis directly;
+    both-high is `R_lu`/`R_uu` and the mirror again.  The degenerate sub-cases — `W₀ = 0`, `a₀ = 0`,
+    `a₀ = W₀` — are where `sigma_self` and `cdSig0`/`cdSig0'` do the work instead. -/
+
+/-- The mirror form, obtained from the flip by `antisym` on both sides.  Stated with the flip as a
+    hypothesis so the two forms can be proved as one induction. -/
+private theorem flip_mirror (n a W : Nat) (ha : a < 2^(n+1)) (hW : W < 2^(n+1)) (hW0 : W ≠ 0)
+    (IH : ∀ x, x < 2^(n+1) → x ≠ 0 → x ≠ W → cdSigma (x ^^^ W) W (n+1) = - cdSigma x W (n+1)) :
+    cdSigma W (a ^^^ W) (n+1) = - cdSigma W a (n+1) := by
+  by_cases ha0 : a = 0
+  · subst ha0
+    rw [Nat.zero_xor, sigma_self (n+1) W hW hW0, cdSig0']
+  · by_cases haW : a = W
+    · subst haW
+      rw [Nat.xor_self, cdSig0', sigma_self (n+1) a hW hW0]
+      grind
+    · have haW' : a ^^^ W < 2^(n+1) := xorlt ha hW
+      have hx0 : a ^^^ W ≠ 0 := by
+        intro h; exact haW (xor_zero_eq a W h)
+      have hne : W ≠ a ^^^ W := by
+        intro h
+        apply ha0
+        have h2 : W ^^^ W = (a ^^^ W) ^^^ W := by rw [← h]
+        rw [Nat.xor_self, xor_cancel] at h2
+        exact h2.symm
+      have hneW : a ≠ W := haW
+      rw [antisym (n+1) W (a ^^^ W) hW haW' hW0 hx0 hne,
+          IH a ha ha0 hneW,
+          antisym (n+1) a W ha hW ha0 hW0 hneW]
+      grind
+
+/-- **THE FIBRE FLIP OF THE COCYCLE.**  `σ(·, W)` anti-commutes with `· ⊕ W` off the two fixed
+    points of that involution's degenerate locus. -/
+theorem sigma_fibre_flip : ∀ (k a W : Nat), a < 2^k → W < 2^k → a ≠ 0 → W ≠ 0 → a ≠ W →
+    cdSigma (a ^^^ W) W k = - cdSigma a W k
+  | 0, a, _, ha, _, ha0, _, _ => by
+      have : (2:Nat)^0 = 1 := rfl
+      omega
+  | 1, a, W, ha, hW, ha0, hW0, haW => by
+      have : (2:Nat)^1 = 2 := rfl
+      omega
+  | (n+2), a, W, ha, hW, ha0, hW0, haW => by
+    have hp := Nat.two_pow_pos (n+1)
+    have h2 : (2:Nat)^(n+2) = 2^(n+1) + 2^(n+1) := by rw [Nat.pow_succ]; omega
+    have IH : ∀ x y, x < 2^(n+1) → y < 2^(n+1) → x ≠ 0 → y ≠ 0 → x ≠ y →
+        cdSigma (x ^^^ y) y (n+1) = - cdSigma x y (n+1) :=
+      fun x y hx hy hx0 hy0 hxy => sigma_fibre_flip (n+1) x y hx hy hx0 hy0 hxy
+    by_cases hal : a < 2^(n+1)
+    · by_cases hWl : W < 2^(n+1)
+      · -- both low
+        have haW' : a ^^^ W < 2^(n+1) := xorlt hal hWl
+        rw [R_ll (a ^^^ W) W n haW' hWl, R_ll a W n hal hWl]
+        exact IH a W hal hWl ha0 hW0 haW
+      · -- a low, W high
+        obtain ⟨W₀, hW₀⟩ : ∃ W₀, W = W₀ + 2^(n+1) := ⟨W - 2^(n+1), by omega⟩
+        have hW₀l : W₀ < 2^(n+1) := by omega
+        subst hW₀
+        have hx : a ^^^ (W₀ + 2^(n+1)) = (a ^^^ W₀) + 2^(n+1) := by
+          have h := xor_lo_hi (n+1) a W₀ (by omega) hal hW₀l
+          exact h
+        have haW₀ : a ^^^ W₀ < 2^(n+1) := xorlt hal hW₀l
+        rw [hx, R_uu (a ^^^ W₀) W₀ n haW₀ hW₀l, R_lu a W₀ n hal hW₀l]
+        by_cases h0 : W₀ = 0
+        · subst h0
+          rw [if_pos rfl, cdSig0]
+        · rw [if_neg h0]
+          exact flip_mirror n a W₀ hal hW₀l h0 (fun x hx0' hx1 hx2 => IH x W₀ hx0' hW₀l hx1 h0 hx2)
+    · obtain ⟨a₀, ha₀⟩ : ∃ a₀, a = a₀ + 2^(n+1) := ⟨a - 2^(n+1), by omega⟩
+      have ha₀l : a₀ < 2^(n+1) := by omega
+      subst ha₀
+      by_cases hWl : W < 2^(n+1)
+      · -- a high, W low
+        have hx : (a₀ + 2^(n+1)) ^^^ W = (a₀ ^^^ W) + 2^(n+1) := by
+          have h := xor_lo_hi (n+1) W a₀ (by omega) hWl ha₀l
+          rw [Nat.xor_comm (a₀ + 2^(n+1)) W, h, Nat.xor_comm W a₀]
+        have ha₀W : a₀ ^^^ W < 2^(n+1) := xorlt ha₀l hWl
+        rw [hx, R_ul (a₀ ^^^ W) W n ha₀W hWl, if_neg hW0, R_ul a₀ W n ha₀l hWl, if_neg hW0]
+        by_cases h0 : a₀ = 0
+        · subst h0
+          rw [Nat.zero_xor, cdSig0, sigma_self (n+1) W hWl hW0]
+        · by_cases hw : a₀ = W
+          · subst hw
+            rw [Nat.xor_self, cdSig0, sigma_self (n+1) a₀ hWl hW0]
+            grind
+          · rw [IH a₀ W ha₀l hWl h0 hW0 hw]
+      · -- both high
+        obtain ⟨W₀, hW₀⟩ : ∃ W₀, W = W₀ + 2^(n+1) := ⟨W - 2^(n+1), by omega⟩
+        have hW₀l : W₀ < 2^(n+1) := by omega
+        subst hW₀
+        have hx : (a₀ + 2^(n+1)) ^^^ (W₀ + 2^(n+1)) = a₀ ^^^ W₀ := by
+          exact xor_hi_hi (n+1) a₀ W₀ (by omega) ha₀l hW₀l
+        have ha₀W : a₀ ^^^ W₀ < 2^(n+1) := xorlt ha₀l hW₀l
+        rw [hx, R_lu (a₀ ^^^ W₀) W₀ n ha₀W hW₀l, R_uu a₀ W₀ n ha₀l hW₀l]
+        by_cases h0 : W₀ = 0
+        · subst h0
+          rw [if_pos rfl, cdSig0]
+          grind
+        · rw [if_neg h0]
+          exact flip_mirror n a₀ W₀ ha₀l hW₀l h0
+            (fun x hx0' hx1 hx2 => IH x W₀ hx0' hW₀l hx1 h0 hx2)
+
+/-- The `y = 0` column, evaluated: `P3 b 0 W m = σ(W, b)`. -/
+theorem P3_col0_val (m b W : Nat) (hb : b < 2^(m+1)) (hW : W < 2^(m+1)) :
+    P3 b 0 W m = cdSigma W b (m+1) := by
+  have hp := Nat.two_pow_pos (m+1)
+  unfold P3 hi
+  rw [Nat.zero_xor, R_lu b W m hb hW,
+      R_ul (b ^^^ W) 0 m (xorlt hb hW) hp, if_pos rfl]
+  grind
+
+/-- **THE LINE `a = W`.**  Tier 96 left it open because `core_P3` loses its hypotheses there; the
+    fibre flip closes it, together with `antisym`. -/
+theorem four_factor_seamrow (m b W : Nat) (hb : b < 2^(m+1)) (hW : W < 2^(m+1))
+    (hW0 : W ≠ 0) (hb0 : b ≠ 0) (hbW : b ≠ W) :
+    P3 W b W m * P3 b 0 W m = -1 := by
+  have hp := Nat.two_pow_pos (m+1)
+  have hbW' : b ^^^ W < 2^(m+1) := xorlt hb hW
+  rw [P3_red W b W m hW hb hW hb0, Nat.xor_self, cdSig0,
+      P3_col0_val m b W hb hW,
+      sigma_fibre_flip (m+1) b W hb hW hb0 hW0 hbW,
+      antisym (m+1) b W hb hW hb0 hW0 hbW]
+  rcases cdSigma_pm (m+1) W b with h | h <;> rw [h] <;> grind
+
+/-- **THE LINE `b = W`.**  Same two ingredients, with the roles of the two factors exchanged — and
+    the sign comes out the same, which is what the four-factor law needs. -/
+theorem four_factor_seamcol (m a W : Nat) (ha : a < 2^(m+1)) (hW : W < 2^(m+1))
+    (hW0 : W ≠ 0) (ha0 : a ≠ 0) (haW : a ≠ W) :
+    P3 a W W m * P3 W (a ^^^ W) W m = -1 := by
+  have hp := Nat.two_pow_pos (m+1)
+  have haW' : a ^^^ W < 2^(m+1) := xorlt ha hW
+  have haW0 : a ^^^ W ≠ 0 := by intro h; exact haW (xor_zero_eq a W h)
+  rw [P3_red a W W m ha hW hW hW0, Nat.xor_self, cdSig0,
+      P3_red W (a ^^^ W) W m hW haW' hW haW0, xor_cancel a W, Nat.xor_self, cdSig0,
+      sigma_fibre_flip (m+1) a W ha hW ha0 hW0 haW]
+  rcases cdSigma_pm (m+1) a W with h | h <;> rw [h] <;> grind
+
 end SounioZDFiberAntisym
