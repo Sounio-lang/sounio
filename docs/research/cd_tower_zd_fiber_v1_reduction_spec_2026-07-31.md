@@ -5761,3 +5761,37 @@ formalised.
 One duplicate caught by the compiler: I wrote `P3_diag` again, and it had been in the file since
 Tier 2. The lane's own rule — look for the cheaper structure before adding a lemma — applies to my
 own file, not just to the literature.
+
+### §57.48 — Tier 94: the three signs are rank-one perturbations, and where T2 ends up
+
+`sigRow` differs from `1` at one index, `epsZero` at one index, `tauW` on one perfect matching:
+
+    sigRow = 1 − 2·χ_seam,    epsZero = 1 − 2·χ_zero,    tauW = 1 − 2·χ_cos
+
+so as operators `D = I − 2 e_W e_Wᵀ` and `E = I − 2 e₀ e₀ᵀ` are genuine RANK-ONE perturbations of
+the identity. The third is not, and both reviewers rejected my coinage "matching-rank": `tauW ⊙ ·`
+is a **diagonal sign-flip operator supported on the `W`-matching** — diagonal on entries, flipping
+the `2^(m+1)` entries `(l, l⊕W)`. Their phrasing, adopted.
+
+Carried through §57.47's two traces (measured 53/53, `m = 2,3,4`; derivation confirmed by both from
+`P M P = M_WW·P`, `tr(P X) = X_WW`, `M_WW = −1`):
+
+    tr(M · D M D · M)   = S₀ − 4·(M³)_WW − 4·(M²)_WW
+    tr(M · D M D · Π_W) = tr(M²Π_W) − 2·(M Π_W M)_WW − 2·(Π_W M²)_WW − 4·(Π_W M)_WW
+
+with `(Π_W M)_WW = M_{0,W} = 1` already a theorem (`P3_zero_seam`). Substituting:
+
+    T2 = S₀ − 4(M³)_WW − 4(M²)_WW + 4·tr(M²Π_W) − 8(MΠ_W M)_WW − 8(Π_W M²)_WW + 2^(m+3) − 8
+
+verified 53/53. Every surviving term is level-`m` with a graph reading: `(M²)_WW` and `(M³)_WW` are
+CLOSED WALKS AT THE SEAM VERTEX, `tr(M²Π_W)` sums walks between coset partners.
+
+**Correction to my own scope claim, from both reviewers.** I wrote that the weight-2 sum "sees the
+label only through the seam vertex and the matching". That is false as a locality statement: `S₀` is
+`tr(M³)` with `M = P3(·,·,W,m)` and carries unrestricted `W`-dependence. The accurate version, in
+their words: *`T2` is reduced to the recursive trace object `S₀` plus level-`m` terms that depend on
+`W` only through (i) the seam vertex `W` and (ii) the coset matching `Π_W`.*
+
+Formalised: the three `1 − 2χ` identities and the two support lemmas. The trace substitutions are
+measured and need matrix machinery the file does not have; the walk counts are unevaluated. This
+locates what is left, it does not compute it.

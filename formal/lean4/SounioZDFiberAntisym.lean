@@ -15210,4 +15210,96 @@ theorem tauW_carrier (m l y W : Nat) (hl : l < 2^(m+1)) (hy : y < 2^(m+1))
     rw [if_neg hcos, if_neg hy', if_neg hne]
     grind
 
+/-! ### Tier 94 — the three signs as RANK-ONE perturbations, and where the weight-2 sum ends up
+
+    Tier 76 wrote `E01 = 1 − 2·χ01` and `E10 = 1 − 2·χ10` to make the four-way split of §57.17 a
+    theorem.  The same move applies to the three elementary signs of Tier 91, and it is what turns
+    Tier 93's traces into level-`m` walk data: `sigRow` differs from `1` at ONE index, `epsZero` at
+    ONE index, `tauW` on ONE perfect matching, so as matrices
+
+      `D = I − 2·e_W e_Wᵀ`,   `E = I − 2·e₀ e₀ᵀ`,   `tauW ⊙ · = · − 2·(Π_W ⊙ ·)`
+
+    with `D` and `E` genuine RANK-ONE perturbations of the identity.  The third is not: `tauW ⊙ ·` is
+    a DIAGONAL SIGN-FLIP OPERATOR SUPPORTED ON THE `W`-MATCHING — as a map on matrices it is diagonal
+    on entries, flipping the `2^(m+1)` entries `(l, l ⊕ W)` and fixing the rest.  My first draft
+    called it "matching-rank"; both reviewers rejected the coinage as implying rank-one, and the
+    phrasing above is theirs.  Conjugating by any of the three therefore cannot produce anything new:
+    it produces `M` back, plus terms pinned to the seam vertex `W` and the index-`0` vertex.
+
+    Carried through Tier 93's two traces, MEASURED 53/53 at `m = 2,3,4`:
+
+      `tr(M · D M D · M)   = S₀ − 4·(M³)_{WW} − 4·(M²)_{WW}`
+      `tr(M · D M D · Π_W) = tr(M² Π_W) − 2·(M Π_W M)_{WW} − 2·(Π_W M²)_{WW} − 4·(Π_W M)_{WW}`
+
+    and `(Π_W M)_{WW} = M_{0,W} = 1` is `P3_zero_seam`, already a theorem.  Substituting into §57.47:
+
+      `T2 = S₀ − 4(M³)_{WW} − 4(M²)_{WW} + 4·tr(M²Π_W) − 8(MΠ_W M)_{WW} − 8(Π_W M²)_{WW}
+            + 2^(m+3) − 8`
+
+    Every surviving term is a level-`m` quantity with a graph reading: `(M²)_{WW}` and `(M³)_{WW}`
+    are CLOSED WALKS AT THE SEAM VERTEX, and `tr(M²Π_W)` sums walks between coset partners `a` and
+    `a ⊕ W`.  The correct scope statement, in the reviewers' words rather than mine: **`T2` is
+    reduced to the recursive trace object `S₀` plus level-`m` terms that depend on `W` only through
+    (i) the seam vertex `W` and (ii) the coset matching `Π_W`.**  What I first wrote — that the
+    weight-2 sum sees the label only through those two — is FALSE as a locality claim, because `S₀`
+    is `tr(M³)` with `M = P3(·,·,W,m)` and carries unrestricted `W`-dependence of its own.
+
+    ⚠ Formalised here are only the three `1 − 2χ` identities.  The trace substitutions above are
+    measured; they need matrix machinery this file does not have.  And the walk counts themselves
+    are unevaluated — this locates what is left, it does not compute it. -/
+
+/-- The seam indicator. -/
+def chiSeam (x W : Nat) : Int := if x ^^^ W = 0 then 1 else 0
+
+/-- The index-`0` indicator. -/
+def chiZero (x : Nat) : Int := if x = 0 then 1 else 0
+
+/-- The coset indicator. -/
+def chiCos (l y W : Nat) : Int := if (l ^^^ y) ^^^ W = 0 then 1 else 0
+
+/-- `D = I − 2·e_W e_Wᵀ`. -/
+theorem sigRow_eq (x W : Nat) : sigRow x W = 1 - 2 * chiSeam x W := by
+  unfold sigRow chiSeam
+  by_cases h : x ^^^ W = 0
+  · rw [if_pos h, if_pos h]
+    grind
+  · rw [if_neg h, if_neg h]
+    grind
+
+/-- `E = I − 2·e₀ e₀ᵀ`. -/
+theorem epsZero_eq (x : Nat) : epsZero x = 1 - 2 * chiZero x := by
+  unfold epsZero chiZero
+  by_cases h : x = 0
+  · rw [if_pos h, if_pos h]
+    grind
+  · rw [if_neg h, if_neg h]
+    grind
+
+/-- The coset flip is `1 − 2·Π_W`. -/
+theorem tauW_eq (l y W : Nat) : tauW l y W = 1 - 2 * chiCos l y W := by
+  unfold tauW chiCos
+  by_cases h : (l ^^^ y) ^^^ W = 0
+  · rw [if_pos h, if_pos h]
+    grind
+  · rw [if_neg h, if_neg h]
+    grind
+
+/-- The seam indicator is supported at ONE index — the statement that `D − I` has rank one. -/
+theorem chiSeam_support (x W : Nat) (hx : x ≠ W) : chiSeam x W = 0 := by
+  unfold chiSeam
+  rw [if_neg]
+  intro h
+  exact hx (xor_zero_eq x W h)
+
+/-- The coset indicator is supported on ONE perfect matching: for each `l` exactly one `y`. -/
+theorem chiCos_support (l y W : Nat) (hy : y ≠ l ^^^ W) : chiCos l y W = 0 := by
+  unfold chiCos
+  rw [if_neg]
+  intro h
+  apply hy
+  have h1 : l ^^^ y = W := xor_zero_eq (l ^^^ y) W h
+  have h2 : l ^^^ (l ^^^ y) = l ^^^ W := by rw [h1]
+  rw [← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor] at h2
+  exact h2
+
 end SounioZDFiberAntisym
