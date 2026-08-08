@@ -15452,4 +15452,59 @@ theorem cp2_count (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
       epsZero_shift_sum m W hW hW0]
   grind
 
+/-! ### Tier 96 — the four-factor identity REDUCED to the mask
+
+    Tier 95 left obligation (ii) as one identity in the CD cocycle:
+
+      `P3 a b W m · P3 b (a⊕W) W m = −( δ · tauW · epsZero a · epsZero b )`.
+
+    It is not a new sign computation.  The second factor carries its index shifted by `W`, which is
+    exactly what this file's CORE INVOLUTION does, and `core_P3` has been available since Tier 2:
+
+      `P3_symm` swaps the arguments, then `core_P3 : P3 (a⊕W) b = − P1 a b`,
+
+    so the summand is `−(P1 · P3)` AT THE SAME INDEX.  That is the lane's own pair, and `resB` is
+    defined as their agreement.  With `P1_pm`/`P3_pm` the product is `±1` and equals `+1` exactly
+    when `resB` holds, so what is left of obligation (ii) is no longer sign algebra at all:
+
+      **`resB a b W m` holds exactly off the six lines `a = 0`, `b = 0`, `a = b`, `a ⊕ b = W`,
+      `a = W`, `b = W`** — for `g(W) = 0`, which is where the whole obligation lives.
+
+    Measured, that is exactly the observed pattern (0 mixed predicate classes at `m = 3`, `W = 1, 8`;
+    at `m = 4`, `W = 9`, i.e. `g = 1`, the generic class already splits).  The lane has resB lemmas
+    for several of those lines already (`resB_zero_row`, `resB_zero_col`, `resB_coset`, …), so the
+    remaining work is mask combinatorics against existing theorems rather than new cocycle algebra.
+
+    ⚠ The reduction below is unconditional in the sense that matters — it carries only the nonzero
+    hypotheses `core_P3` and `P3_symm` need — but it does NOT prove the identity.  It changes what
+    must be proved. -/
+
+/-- **THE SUMMAND IS `−(P1 · P3)` AT THE SAME INDEX.**  The `W`-shift in the second factor is the
+    core involution, not a new object. -/
+theorem cp2_summand_core (m a b W : Nat) (ha : a < 2^(m+1)) (hb : b < 2^(m+1))
+    (hW : W < 2^(m+1)) (hb0 : b ≠ 0) (hbW : b ^^^ W ≠ 0) (haW : a ^^^ W ≠ 0) :
+    P3 a b W m * P3 b (a ^^^ W) W m = - (P1 a b W m * P3 a b W m) := by
+  have haW' : a ^^^ W < 2^(m+1) := xorlt ha hW
+  rw [P3_symm b (a ^^^ W) W m hb haW' hW hb0 haW,
+      core_P3 a b W m ha hb hW hb0 hbW]
+  grind
+
+/-- **AND `P1 · P3` IS THE MASK.**  For nonzero indices `resB` is exactly the agreement of `P1` and
+    `P3` — its first two clauses are `A2_VACUITY` — so the product is `+1` on the mask and `−1` off
+    it.  This is what turns the last piece of obligation (ii) from cocycle algebra into a statement
+    about which index lines `resB` covers. -/
+theorem P1_mul_P3_mask (m a b W : Nat) (ha : a < 2^(m+1)) (hb : b < 2^(m+1))
+    (hW : W < 2^(m+1)) (ha0 : a ≠ 0) (hb0 : b ≠ 0)
+    (haW : a ^^^ W ≠ 0) (hbW : b ^^^ W ≠ 0) :
+    P1 a b W m * P3 a b W m = if resB a b W m then 1 else -1 := by
+  have hs1 : P1 a b W m = P1 b a W m := P1_symm a b W m ha hb hW ha0 hb0 haW hbW
+  have hs2 : P3 a b W m = P3 b a W m := P3_symm a b W m ha hb hW ha0 hb0
+  have hr : resB a b W m = (P1 a b W m == P3 a b W m) := by
+    unfold resB
+    rw [hs1, hs2]
+    simp
+  rw [hr]
+  rcases P1_pm a b W m with h1 | h1 <;> rcases P3_pm a b W m with h3 | h3 <;>
+    rw [h1, h3] <;> simp
+
 end SounioZDFiberAntisym

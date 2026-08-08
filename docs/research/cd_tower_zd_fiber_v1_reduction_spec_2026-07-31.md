@@ -5942,3 +5942,39 @@ exactly where the coset matching meets index `0`.
 `cp2` off `g = 0` is untouched, and the pointwise law is assumed, not proved. But the obligation is
 now a single sign identity rather than a sum evaluation — and since pinning `cp2` absolutely on
 `g = 0` also discharges obligation (0), closing that one identity would settle two of the four.
+
+### §57.52 — Tier 96: the four-factor identity is the CORE INVOLUTION, and reduces to the mask
+
+The identity Tier 95 left open is not a new sign computation. Its second factor carries its index
+shifted by `W`, which is exactly what this file's core involution does, and the lemma has been
+available since Tier 2:
+
+    P3 b (a⊕W)  =  P3 (a⊕W) b        [P3_symm]
+                =  − P1 a b           [core_P3]
+
+so the `cp2` summand is **`−(P1 · P3)` at the same index** (`cp2_summand_core`, 0 violations /
+32274). That is the lane's own pair, and `resB` is *defined* as their agreement. With `P1_pm`/`P3_pm`
+the product is `±1`, and for `a, b ∉ {0, W}` the first two clauses of `resB` are `A2_VACUITY`, so
+
+    P1 · P3 = +1 exactly when resB holds        (`P1_mul_P3_mask`, 0 violations / 31092)
+
+What remains of obligation (ii) is therefore no longer cocycle algebra:
+
+    **resB a b W m holds exactly off the six lines a = 0, b = 0, a = b, a ⊕ b = W, a = W, b = W**,
+    for g(W) = 0.
+
+That is mask combinatorics, and the lane already has resB lemmas for several of those lines
+(`resB_zero_row`, `resB_zero_col`, `resB_coset`, `resB_pow2_top`, `resB_hi_or_lo`, …). Measured, the
+six-line description is exact on `g = 0` and fails off it — at `m = 4`, `W = 9` the generic class
+already splits, which is the same boundary the pointwise law had.
+
+**What this is and is not.** It does not prove the identity; it exchanges it for a statement about
+which index lines `resB` covers. Whether that is a genuine reduction or relabelling turns on whether
+the existing `resB` lemmas cover those lines — they cover several, not yet all, so the honest reading
+is: the remaining difficulty moved onto machinery that already exists, and shrank, but did not
+vanish.
+
+⚠ M1 DEGRADED on this tier: three fan-out attempts, grok returned nothing each time and zai errored
+on the last two. Substitute evidence is the denotation above plus the Lean proofs; the three
+questions put to the reviewers — in particular "is this real progress or relabelling?" — went
+unanswered and are recorded here unresolved.
