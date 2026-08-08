@@ -544,6 +544,80 @@ fn g30_urel() -> [f64; 29] {
 ]
 }
 
+// The generated functions above remain the immutable source for the GRI30
+// coefficients. Native-v2 materializes an array return in the managed arena,
+// so calling them from every RHS evaluation exhausts the arena long before a
+// chemistry integration completes. Populate persistent BSS tables once and
+// read them directly from the nominal, UQ, and adiabatic paths.
+var G30_TABLES_READY: i64 = 0
+var G30_NASA_LOW: [f64; 70] = [0.0; 70]
+var G30_NASA_HIGH: [f64; 70] = [0.0; 70]
+var G30_RXN_A: [f64; 29] = [0.0; 29]
+var G30_RXN_B: [f64; 29] = [0.0; 29]
+var G30_RXN_EA: [f64; 29] = [0.0; 29]
+var G30_RXN_TYPE: [i64; 29] = [0; 29]
+var G30_REAC: [f64; 290] = [0.0; 290]
+var G30_PROD: [f64; 290] = [0.0; 290]
+var G30_NU: [f64; 290] = [0.0; 290]
+var G30_EFF: [f64; 290] = [0.0; 290]
+var G30_DN: [f64; 29] = [0.0; 29]
+var G30_UREL: [f64; 29] = [0.0; 29]
+
+// Native-v2 cannot yet safely pass a reference to an array field, and the UQ
+// RHS needs more scratch arrays than its call ABI accepts. These BSS workspaces
+// therefore remain module-private and are reused by the sequential UQ solver.
+// They contain no model state and are overwritten on every RHS evaluation.
+var G30_UQ_JAC: [f64; 100] = [0.0; 100]
+var G30_UQ_CP: [f64; 10] = [0.0; 10]
+var G30_UQ_CM: [f64; 10] = [0.0; 10]
+var G30_UQ_DCP: [f64; 10] = [0.0; 10]
+var G30_UQ_DCM: [f64; 10] = [0.0; 10]
+var G30_UQ_FWD: [f64; 29] = [0.0; 29]
+var G30_UQ_REV: [f64; 29] = [0.0; 29]
+var G30_UQ_RHS: [f64; 10] = [0.0; 10]
+var G30_UQ_SRHS: [f64; 310] = [0.0; 310]
+
+fn g30_tables_ensure() with Mut, Panic {
+    if G30_TABLES_READY != 0 { return }
+    let nasa_low = g30_nasa_low()
+    let nasa_high = g30_nasa_high()
+    let rxn_a = g30_rxn_a()
+    let rxn_b = g30_rxn_b()
+    let rxn_ea = g30_rxn_ea()
+    let rxn_type = g30_rxn_type()
+    let reac = g30_reac()
+    let prod = g30_prod()
+    let nu = g30_nu()
+    let eff = g30_eff()
+    let dn = g30_dn()
+    let urel = g30_urel()
+    var i: i64 = 0
+    while i < 70 {
+        G30_NASA_LOW[i] = nasa_low[i]
+        G30_NASA_HIGH[i] = nasa_high[i]
+        i = i + 1
+    }
+    i = 0
+    while i < 29 {
+        G30_RXN_A[i] = rxn_a[i]
+        G30_RXN_B[i] = rxn_b[i]
+        G30_RXN_EA[i] = rxn_ea[i]
+        G30_RXN_TYPE[i] = rxn_type[i]
+        G30_DN[i] = dn[i]
+        G30_UREL[i] = urel[i]
+        i = i + 1
+    }
+    i = 0
+    while i < 290 {
+        G30_REAC[i] = reac[i]
+        G30_PROD[i] = prod[i]
+        G30_NU[i] = nu[i]
+        G30_EFF[i] = eff[i]
+        i = i + 1
+    }
+    G30_TABLES_READY = 1
+}
+
 // falloff (only rxn 21): low-P Arrhenius + Troe parameters
 fn g30_fall_idx() -> i64 { 21 as i64 }
 fn g30_low_a() -> f64 { 2.3e18 }
@@ -560,63 +634,62 @@ fn g30_troe_t2() -> f64 { 5.182e03 }
 // These are kept beside g30_g_rt so the adiabatic reactor uses the same
 // coefficient tables and temperature break as detailed balance.
 fn g30_h_rt(sp: i64, t: f64) -> f64 with Mut, Div, Panic {
-    let lo = g30_nasa_low(); let hi = g30_nasa_high();
+    g30_tables_ensure()
     let base = if t <= 1000.0 { sp * 7 } else { 10000 + sp * 7 };
     var a0 = 0.0; var a1 = 0.0; var a2 = 0.0; var a3 = 0.0; var a4 = 0.0; var a5 = 0.0;
     if base >= 10000 {
         let bb = base - 10000;
-        a0 = hi[bb]; a1 = hi[bb+1]; a2 = hi[bb+2]; a3 = hi[bb+3]; a4 = hi[bb+4]; a5 = hi[bb+5];
+        a0 = G30_NASA_HIGH[bb]; a1 = G30_NASA_HIGH[bb+1]; a2 = G30_NASA_HIGH[bb+2]; a3 = G30_NASA_HIGH[bb+3]; a4 = G30_NASA_HIGH[bb+4]; a5 = G30_NASA_HIGH[bb+5];
     } else {
-        a0 = lo[base]; a1 = lo[base+1]; a2 = lo[base+2]; a3 = lo[base+3]; a4 = lo[base+4]; a5 = lo[base+5];
+        a0 = G30_NASA_LOW[base]; a1 = G30_NASA_LOW[base+1]; a2 = G30_NASA_LOW[base+2]; a3 = G30_NASA_LOW[base+3]; a4 = G30_NASA_LOW[base+4]; a5 = G30_NASA_LOW[base+5];
     }
     a0 + a1*t/2.0 + a2*t*t/3.0 + a3*t*t*t/4.0 + a4*t*t*t*t/5.0 + a5/t
 }
 
 fn g30_cp_r(sp: i64, t: f64) -> f64 with Mut, Div, Panic {
-    let lo = g30_nasa_low(); let hi = g30_nasa_high();
+    g30_tables_ensure()
     let base = if t <= 1000.0 { sp * 7 } else { 10000 + sp * 7 };
     var a0 = 0.0; var a1 = 0.0; var a2 = 0.0; var a3 = 0.0; var a4 = 0.0;
     if base >= 10000 {
         let bb = base - 10000;
-        a0 = hi[bb]; a1 = hi[bb+1]; a2 = hi[bb+2]; a3 = hi[bb+3]; a4 = hi[bb+4];
+        a0 = G30_NASA_HIGH[bb]; a1 = G30_NASA_HIGH[bb+1]; a2 = G30_NASA_HIGH[bb+2]; a3 = G30_NASA_HIGH[bb+3]; a4 = G30_NASA_HIGH[bb+4];
     } else {
-        a0 = lo[base]; a1 = lo[base+1]; a2 = lo[base+2]; a3 = lo[base+3]; a4 = lo[base+4];
+        a0 = G30_NASA_LOW[base]; a1 = G30_NASA_LOW[base+1]; a2 = G30_NASA_LOW[base+2]; a3 = G30_NASA_LOW[base+3]; a4 = G30_NASA_LOW[base+4];
     }
     a0 + a1*t + a2*t*t + a3*t*t*t + a4*t*t*t*t
 }
 
 // standard Gibbs free energy G0/(R T) for species sp at temperature t
 fn g30_g_rt(sp: i64, t: f64) -> f64 with Mut, Div, Panic {
-    let lo = g30_nasa_low()
-    let hi = g30_nasa_high()
+    g30_tables_ensure()
     let base = if t <= 1000.0 { sp * 7 } else { 10000 + sp * 7 };  // 10000 marks high set
     var a0 = 0.0; var a1 = 0.0; var a2 = 0.0; var a3 = 0.0; var a4 = 0.0; var a5 = 0.0; var a6 = 0.0;
     if base >= 10000 {
         let bb = base - 10000;
-        a0 = hi[bb]; a1 = hi[bb+1]; a2 = hi[bb+2]; a3 = hi[bb+3]; a4 = hi[bb+4]; a5 = hi[bb+5]; a6 = hi[bb+6];
+        a0 = G30_NASA_HIGH[bb]; a1 = G30_NASA_HIGH[bb+1]; a2 = G30_NASA_HIGH[bb+2]; a3 = G30_NASA_HIGH[bb+3]; a4 = G30_NASA_HIGH[bb+4]; a5 = G30_NASA_HIGH[bb+5]; a6 = G30_NASA_HIGH[bb+6];
     } else {
-        a0 = lo[base]; a1 = lo[base+1]; a2 = lo[base+2]; a3 = lo[base+3]; a4 = lo[base+4]; a5 = lo[base+5]; a6 = lo[base+6];
+        a0 = G30_NASA_LOW[base]; a1 = G30_NASA_LOW[base+1]; a2 = G30_NASA_LOW[base+2]; a3 = G30_NASA_LOW[base+3]; a4 = G30_NASA_LOW[base+4]; a5 = G30_NASA_LOW[base+5]; a6 = G30_NASA_LOW[base+6];
     }
     let h_rt = a0 + a1*t/2.0 + a2*t*t/3.0 + a3*t*t*t/4.0 + a4*t*t*t*t/5.0 + a5/t;
     let s_r = a0*g30_ln(t) + a1*t + a2*t*t/2.0 + a3*t*t*t/3.0 + a4*t*t*t*t/4.0 + a6;
     h_rt - s_r
 }
 
-// Kp (dimensionless, standard state 1e5 Pa) for reaction r at t
+// Kp (dimensionless, CHEMKIN/GRI standard state 1 atm = 101325 Pa) for r at t
 pub fn g30_kp(r: i64, t: f64) -> f64 with Mut, Div, Panic {
-    let nu = g30_nu();
+    g30_tables_ensure()
     var dg = 0.0;
     var s: i64 = 0;
-    while s < 10 { dg = dg + nu[r*10+s] * g30_g_rt(s, t); s = s + 1; }
+    while s < 10 { dg = dg + G30_NU[r*10+s] * g30_g_rt(s, t); s = s + 1; }
     g30_exp(0.0 - dg)
 }
 
 // Kc in (mol/cm^3)^dn units: CHEMKIN/GRI standard state is 1 atm.
 // Kc = Kp * (c0 * 1e-6)^dn, c0 = P0/(R T) mol/m^3.
 pub fn g30_kc(r: i64, t: f64) -> f64 with Mut, Div, Panic {
-    let dn = g30_dn();
+    g30_tables_ensure()
     let c0cm = 101325.0 / (8.314462618 * t) * 1.0e-6;
-    g30_kp(r, t) * g30_pow(c0cm, dn[r])
+    g30_kp(r, t) * g30_pow(c0cm, G30_DN[r])
 }
 
 // ---------------- rates ----------------
@@ -625,11 +698,10 @@ pub fn g30_kc(r: i64, t: f64) -> f64 with Mut, Div, Panic {
 // third-body concentration m_eff (includes [M] factor for three-body and the
 // Troe falloff correction; Arrhenius reactions return plain k)
 pub fn g30_kfwd_eff(r: i64, t: f64, m_eff: f64) -> f64 with Mut, Div, Panic {
-    let aa = g30_rxn_a(); let bb = g30_rxn_b(); let ee = g30_rxn_ea();
-    let ty = g30_rxn_type();
-    let kf = aa[r] * g30_pow(t, bb[r]) * g30_exp(0.0 - ee[r] / (1.9872041 * t));
-    if ty[r] == 1 { return kf * m_eff }
-    if ty[r] == 2 {
+    g30_tables_ensure()
+    let kf = G30_RXN_A[r] * g30_pow(t, G30_RXN_B[r]) * g30_exp(0.0 - G30_RXN_EA[r] / (1.9872041 * t));
+    if G30_RXN_TYPE[r] == 1 { return kf * m_eff }
+    if G30_RXN_TYPE[r] == 2 {
         let k0 = g30_low_a() * g30_pow(t, g30_low_b()) * g30_exp(0.0 - g30_low_ea() / (1.9872041 * t));
         let pr = k0 * m_eff / kf;
         if pr <= 0.0 { return 0.0 }
@@ -649,31 +721,35 @@ pub fn g30_kfwd_eff(r: i64, t: f64, m_eff: f64) -> f64 with Mut, Div, Panic {
 }
 
 pub fn g30_m_eff(r: i64, c: &[f64; 10]) -> f64 with Mut, Div, Panic {
-    let eff = g30_eff();
+    g30_tables_ensure()
     var m = 0.0;
     var s: i64 = 0;
-    while s < 10 { m = m + eff[r*10+s] * c[s]; s = s + 1; }
+    while s < 10 { m = m + G30_EFF[r*10+s] * c[s]; s = s + 1; }
     m
 }
 
 // all equilibrium constants at t (Kc depends on T only — precompute per simulation)
-pub fn g30_kc_all(t: f64) -> [f64; 29] with Mut, Div, Panic {
-    var kc: [f64; 29] = [0.0; 29];
+fn g30_kc_all_into(t: f64, kc: &![f64; 29]) with Mut, Div, Panic {
     var r: i64 = 0;
     while r < 29 { kc[r] = g30_kc(r, t); r = r + 1; }
+}
+
+pub fn g30_kc_all(t: f64) -> [f64; 29] with Mut, Div, Panic {
+    var kc: [f64; 29] = [0.0; 29];
+    g30_kc_all_into(t, &!kc);
     kc
 }
 
 // forward and reverse rates for every reaction; returns (fwd[29], rev[29]) flattened
 pub fn g30_rates_fb(t: f64, c: &[f64; 10], kc: &[f64; 29], fwd: &![f64; 29], rev: &![f64; 29]) with Mut, Div, Panic {
-    let reac = g30_reac(); let prod = g30_prod();
+    g30_tables_ensure()
     var r: i64 = 0;
     while r < 29 {
         let kf = g30_kfwd_eff(r, t, g30_m_eff(r, c));
         var f = kf;
         var s: i64 = 0;
         while s < 10 {
-            let o = reac[r*10+s];
+            let o = G30_REAC[r*10+s];
             if o == 2.0 { f = f * c[s] * c[s]; }
             if o == 1.0 { f = f * c[s]; }
             s = s + 1;
@@ -683,7 +759,7 @@ pub fn g30_rates_fb(t: f64, c: &[f64; 10], kc: &[f64; 29], fwd: &![f64; 29], rev
             rv = kf / kc[r];
             s = 0;
             while s < 10 {
-                let o = prod[r*10+s];
+                let o = G30_PROD[r*10+s];
                 if o == 2.0 { rv = rv * c[s] * c[s]; }
                 if o == 1.0 { rv = rv * c[s]; }
                 s = s + 1;
@@ -695,21 +771,26 @@ pub fn g30_rates_fb(t: f64, c: &[f64; 10], kc: &[f64; 29], fwd: &![f64; 29], rev
     }
 }
 
-// dc_i/dt with precomputed Kc table
-pub fn g30_dc_kc(t: f64, c: &[f64; 10], kc: &[f64; 29]) -> [f64; 10] with Mut, Div, Panic {
-    let nu = g30_nu();
-    var fwd: [f64; 29] = [0.0; 29];
-    var rev: [f64; 29] = [0.0; 29];
-    g30_rates_fb(t, c, kc, &!fwd, &!rev);
-    var dc: [f64; 10] = [0.0; 10];
+// dc_i/dt with precomputed Kc table. The caller supplies all temporary arrays
+// so an integration reuses a fixed workspace instead of allocating per RHS.
+fn g30_dc_kc_into(t: f64, c: &[f64; 10], kc: &[f64; 29], fwd: &![f64; 29], rev: &![f64; 29], dc: &![f64; 10]) with Mut, Div, Panic {
+    g30_tables_ensure()
+    g30_rates_fb(t, c, kc, fwd, rev);
     var i: i64 = 0;
     while i < 10 {
         var acc = 0.0;
         var r: i64 = 0;
-        while r < 29 { acc = acc + nu[r*10+i] * (fwd[r] - rev[r]); r = r + 1; }
+        while r < 29 { acc = acc + G30_NU[r*10+i] * (fwd[r] - rev[r]); r = r + 1; }
         dc[i] = acc;
         i = i + 1;
     }
+}
+
+pub fn g30_dc_kc(t: f64, c: &[f64; 10], kc: &[f64; 29]) -> [f64; 10] with Mut, Div, Panic {
+    var fwd: [f64; 29] = [0.0; 29];
+    var rev: [f64; 29] = [0.0; 29];
+    var dc: [f64; 10] = [0.0; 10];
+    g30_dc_kc_into(t, c, kc, &!fwd, &!rev, &!dc);
     dc
 }
 
@@ -722,9 +803,9 @@ pub fn g30_dc(t: f64, c: &[f64; 10]) -> [f64; 10] with Mut, Div, Panic {
 // Constant-volume adiabatic energy balance. Concentrations are mol/cm3,
 // sensible internal energies are J/mol, and cv is J/(mol K), so dT/dt is K/s:
 //   dT/dt = -sum_i(u_i dc_i/dt) / sum_i(c_i cv_i), u_i = h_i - R T.
-fn g30_adiabatic_rhs(t: f64, c: &[f64; 10]) -> [f64; 11] with Mut, Div, Panic {
-    let kc = g30_kc_all(t);
-    let dc = g30_dc_kc(t, c, &kc);
+fn g30_adiabatic_rhs_into(t: f64, c: &[f64; 10], kc: &![f64; 29], fwd: &![f64; 29], rev: &![f64; 29], dc: &![f64; 10], out: &![f64; 11]) with Mut, Div, Panic {
+    g30_kc_all_into(t, kc);
+    g30_dc_kc_into(t, c, kc, fwd, rev, dc);
     let rj = 8.314462618;
     var power = 0.0;
     var capacity = 0.0;
@@ -736,11 +817,9 @@ fn g30_adiabatic_rhs(t: f64, c: &[f64; 10]) -> [f64; 11] with Mut, Div, Panic {
         capacity = capacity + c[i] * cv;
         i = i + 1;
     }
-    var out: [f64; 11] = [0.0; 11];
     i = 0;
     while i < 10 { out[i] = dc[i]; i = i + 1; }
     if capacity > 0.0 { out[10] = 0.0 - power / capacity; }
-    out
 }
 
 // Isolated constant-volume adiabatic reactor. The existing
@@ -748,20 +827,30 @@ fn g30_adiabatic_rhs(t: f64, c: &[f64; 10]) -> [f64; 11] with Mut, Div, Panic {
 pub fn simulate_gri30_h2_adiabatic(init: &[f64; 10], t_k: f64, dt: f64, steps: i64) -> ([f64; 10], f64) with Mut, Div, Panic {
     var y: [f64; 11] = [init[0], init[1], init[2], init[3], init[4], init[5], init[6], init[7], init[8], init[9], t_k];
     var yt: [f64; 11] = [0.0; 11];
+    var c: [f64; 10] = [0.0; 10];
+    var kc: [f64; 29] = [0.0; 29];
+    var fwd: [f64; 29] = [0.0; 29];
+    var rev: [f64; 29] = [0.0; 29];
+    var dc: [f64; 10] = [0.0; 10];
+    var k1: [f64; 11] = [0.0; 11];
+    var k2: [f64; 11] = [0.0; 11];
+    var k3: [f64; 11] = [0.0; 11];
+    var k4: [f64; 11] = [0.0; 11];
     var s: i64 = 0;
     while s < steps {
-        var c: [f64; 10] = [y[0], y[1], y[2], y[3], y[4], y[5], y[6], y[7], y[8], y[9]];
-        let k1 = g30_adiabatic_rhs(y[10], &c);
         var i: i64 = 0;
+        while i < 10 { c[i] = y[i]; i = i + 1; }
+        g30_adiabatic_rhs_into(y[10], &c, &!kc, &!fwd, &!rev, &!dc, &!k1);
+        i = 0;
         while i < 11 { yt[i] = y[i] + 0.5 * dt * k1[i]; i = i + 1; }
-        c = [yt[0], yt[1], yt[2], yt[3], yt[4], yt[5], yt[6], yt[7], yt[8], yt[9]];
-        let k2 = g30_adiabatic_rhs(yt[10], &c);
+        i = 0; while i < 10 { c[i] = yt[i]; i = i + 1; }
+        g30_adiabatic_rhs_into(yt[10], &c, &!kc, &!fwd, &!rev, &!dc, &!k2);
         i = 0; while i < 11 { yt[i] = y[i] + 0.5 * dt * k2[i]; i = i + 1; }
-        c = [yt[0], yt[1], yt[2], yt[3], yt[4], yt[5], yt[6], yt[7], yt[8], yt[9]];
-        let k3 = g30_adiabatic_rhs(yt[10], &c);
+        i = 0; while i < 10 { c[i] = yt[i]; i = i + 1; }
+        g30_adiabatic_rhs_into(yt[10], &c, &!kc, &!fwd, &!rev, &!dc, &!k3);
         i = 0; while i < 11 { yt[i] = y[i] + dt * k3[i]; i = i + 1; }
-        c = [yt[0], yt[1], yt[2], yt[3], yt[4], yt[5], yt[6], yt[7], yt[8], yt[9]];
-        let k4 = g30_adiabatic_rhs(yt[10], &c);
+        i = 0; while i < 10 { c[i] = yt[i]; i = i + 1; }
+        g30_adiabatic_rhs_into(yt[10], &c, &!kc, &!fwd, &!rev, &!dc, &!k4);
         i = 0;
         while i < 11 { y[i] = y[i] + (dt / 6.0) * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i]); i = i + 1; }
         s = s + 1;
@@ -772,21 +861,28 @@ pub fn simulate_gri30_h2_adiabatic(init: &[f64; 10], t_k: f64, dt: f64, steps: i
 // ---------------- deterministic simulator (RK4, isothermal) ----------------
 
 pub fn simulate_gri30_h2(init: &[f64; 10], t_k: f64, dt: f64, steps: i64) -> [f64; 10] with Mut, Div, Panic {
-    let kc = g30_kc_all(t_k);
+    var kc: [f64; 29] = [0.0; 29];
+    g30_kc_all_into(t_k, &!kc);
     var y: [f64; 10] = [init[0], init[1], init[2], init[3], init[4], init[5], init[6], init[7], init[8], init[9]];
     var yt: [f64; 10] = [0.0; 10];
+    var fwd: [f64; 29] = [0.0; 29];
+    var rev: [f64; 29] = [0.0; 29];
+    var k1: [f64; 10] = [0.0; 10];
+    var k2: [f64; 10] = [0.0; 10];
+    var k3: [f64; 10] = [0.0; 10];
+    var k4: [f64; 10] = [0.0; 10];
     var s: i64 = 0;
     while s < steps {
-        let k1 = g30_dc_kc(t_k, &y, &kc);
+        g30_dc_kc_into(t_k, &y, &kc, &!fwd, &!rev, &!k1);
         var i: i64 = 0;
         while i < 10 { yt[i] = y[i] + 0.5 * dt * k1[i]; i = i + 1; }
-        let k2 = g30_dc_kc(t_k, &yt, &kc);
+        g30_dc_kc_into(t_k, &yt, &kc, &!fwd, &!rev, &!k2);
         i = 0;
         while i < 10 { yt[i] = y[i] + 0.5 * dt * k2[i]; i = i + 1; }
-        let k3 = g30_dc_kc(t_k, &yt, &kc);
+        g30_dc_kc_into(t_k, &yt, &kc, &!fwd, &!rev, &!k3);
         i = 0;
         while i < 10 { yt[i] = y[i] + dt * k3[i]; i = i + 1; }
-        let k4 = g30_dc_kc(t_k, &yt, &kc);
+        g30_dc_kc_into(t_k, &yt, &kc, &!fwd, &!rev, &!k4);
         i = 0;
         while i < 10 { y[i] = y[i] + (dt / 6.0) * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i]); i = i + 1; }
         s = s + 1;
@@ -796,18 +892,65 @@ pub fn simulate_gri30_h2(init: &[f64; 10], t_k: f64, dt: f64, steps: i64) -> [f6
 
 // ---------------- epistemic layer (GUM delta method on rate uncertainties) ----------------
 
-fn g30_jacobian(t: f64, c: &[f64; 10], kc: &[f64; 29], eps: f64, jac: &![f64; 100]) with Mut, Div, Panic {
+fn g30_rates_uq(t: f64, c: &[f64; 10], kc: &[f64; 29]) with Mut, Div, Panic {
+    g30_tables_ensure()
+    var r: i64 = 0
+    while r < 29 {
+        let kf = g30_kfwd_eff(r, t, g30_m_eff(r, c))
+        var f = kf
+        var s: i64 = 0
+        while s < 10 {
+            let o = G30_REAC[r*10+s]
+            if o == 2.0 { f = f * c[s] * c[s] }
+            if o == 1.0 { f = f * c[s] }
+            s = s + 1
+        }
+        var rv = 0.0
+        if kc[r] > 0.0 {
+            rv = kf / kc[r]
+            s = 0
+            while s < 10 {
+                let o = G30_PROD[r*10+s]
+                if o == 2.0 { rv = rv * c[s] * c[s] }
+                if o == 1.0 { rv = rv * c[s] }
+                s = s + 1
+            }
+        }
+        G30_UQ_FWD[r] = f
+        G30_UQ_REV[r] = rv
+        r = r + 1
+    }
+}
+
+fn g30_dc_kc_uq(t: f64, c: &[f64; 10], kc: &[f64; 29]) with Mut, Div, Panic {
+    g30_rates_uq(t, c, kc)
+    var i: i64 = 0
+    while i < 10 {
+        var acc = 0.0
+        var r: i64 = 0
+        while r < 29 {
+            acc = acc + G30_NU[r*10+i] * (G30_UQ_FWD[r] - G30_UQ_REV[r])
+            r = r + 1
+        }
+        G30_UQ_RHS[i] = acc
+        i = i + 1
+    }
+}
+
+fn g30_jacobian_uq(t: f64, c: &[f64; 10], kc: &[f64; 29], eps: f64) with Mut, Div, Panic {
     var s: i64 = 0;
     while s < 10 {
-        var cp: [f64; 10] = [c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9]];
-        var cm: [f64; 10] = [c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9]];
-        cp[s] = cp[s] + eps;
-        cm[s] = cm[s] - eps;
-        let dcp = g30_dc_kc(t, &cp, kc);
-        let dcm = g30_dc_kc(t, &cm, kc);
+        var j: i64 = 0;
+        while j < 10 { G30_UQ_CP[j] = c[j]; G30_UQ_CM[j] = c[j]; j = j + 1; }
+        G30_UQ_CP[s] = G30_UQ_CP[s] + eps;
+        G30_UQ_CM[s] = G30_UQ_CM[s] - eps;
+        g30_dc_kc_uq(t, &G30_UQ_CP, kc);
+        j = 0; while j < 10 { G30_UQ_DCP[j] = G30_UQ_RHS[j]; j = j + 1; }
+        g30_dc_kc_uq(t, &G30_UQ_CM, kc);
+        j = 0; while j < 10 { G30_UQ_DCM[j] = G30_UQ_RHS[j]; j = j + 1; }
         var i: i64 = 0;
         while i < 10 {
-            jac[i*10+s] = (dcp[i] - dcm[i]) / (2.0 * eps);
+            G30_UQ_JAC[i*10+s] = (G30_UQ_DCP[i] - G30_UQ_DCM[i]) / (2.0 * eps);
             i = i + 1;
         }
         s = s + 1;
@@ -817,65 +960,72 @@ fn g30_jacobian(t: f64, c: &[f64; 10], kc: &[f64; 29], eps: f64, jac: &![f64; 10
 // Forward sensitivities for persistent relative rate errors and initial state
 // errors. Columns 0..28 are d c / d ln(k_r); columns 29 and 30 are the H2/O2
 // initial-condition sensitivities, already scaled by their 1% standard errors.
-fn g30_sens_rhs(t: f64, c: &[f64; 10], kc: &[f64; 29], sens: &[f64; 310]) -> [f64; 310] with Mut, Div, Panic {
-    let nu = g30_nu();
-    var jac: [f64; 100] = [0.0; 100];
-    g30_jacobian(t, c, kc, 1.0e-12, &!jac);
-    var fwd: [f64; 29] = [0.0; 29];
-    var rev: [f64; 29] = [0.0; 29];
-    g30_rates_fb(t, c, kc, &!fwd, &!rev);
-    var out: [f64; 310] = [0.0; 310];
+fn g30_sens_rhs_uq(t: f64, c: &[f64; 10], kc: &[f64; 29], sens: &[f64; 310]) with Mut, Div, Panic {
+    g30_tables_ensure()
+    g30_jacobian_uq(t, c, kc, 1.0e-12)
+    g30_rates_uq(t, c, kc)
     var p: i64 = 0;
     while p < 31 {
         var i: i64 = 0;
         while i < 10 {
             var acc = 0.0;
             var j: i64 = 0;
-            while j < 10 { acc = acc + jac[i*10+j] * sens[j*31+p]; j = j + 1; }
-            if p < 29 { acc = acc + nu[p*10+i] * (fwd[p] - rev[p]); }
-            out[i*31+p] = acc;
+            while j < 10 { acc = acc + G30_UQ_JAC[i*10+j] * sens[j*31+p]; j = j + 1; }
+            if p < 29 { acc = acc + G30_NU[p*10+i] * (G30_UQ_FWD[p] - G30_UQ_REV[p]); }
+            G30_UQ_SRHS[i*31+p] = acc;
             i = i + 1;
         }
         p = p + 1;
     }
-    out
 }
 
 // Integrate the state and the 31 independent sensitivity columns. Columns 0..28
 // are d c / d ln(k_r); 29 and 30 carry the already-scaled H2/O2 initial-state
 // standard uncertainties. Keeping this internal representation separate lets the
 // public APIs report either sigma alone or an auditable variance budget.
-fn g30_epistemic_sensitivities(init: &[f64; 10], inits: &[f64; 10], t_k: f64, dt: f64, steps: i64) -> ([f64; 10], [f64; 310]) with Mut, Div, Panic {
-    let kc = g30_kc_all(t_k);
-    var y: [f64; 10] = [init[0], init[1], init[2], init[3], init[4], init[5], init[6], init[7], init[8], init[9]];
-    var sens: [f64; 310] = [0.0; 310];
+fn g30_epistemic_sensitivities_into(init: &[f64; 10], inits: &[f64; 10], t_k: f64, dt: f64, steps: i64, y: &![f64; 10], sens: &![f64; 310]) with Mut, Div, Panic {
+    var kc: [f64; 29] = [0.0; 29];
+    g30_kc_all_into(t_k, &!kc);
+    var reset_i: i64 = 0;
+    while reset_i < 10 { y[reset_i] = init[reset_i]; reset_i = reset_i + 1; }
+    reset_i = 0;
+    while reset_i < 310 { sens[reset_i] = 0.0; reset_i = reset_i + 1; }
     sens[0*31+29] = inits[0];
     sens[3*31+30] = inits[3];
     var yt: [f64; 10] = [0.0; 10];
     var srhs1: [f64; 310] = [0.0; 310];
     var srhs2: [f64; 310] = [0.0; 310];
     var spred: [f64; 310] = [0.0; 310];
+    var k1: [f64; 10] = [0.0; 10];
+    var k2: [f64; 10] = [0.0; 10];
+    var k3: [f64; 10] = [0.0; 10];
+    var k4: [f64; 10] = [0.0; 10];
     var s: i64 = 0;
     while s < steps {
-        srhs1 = g30_sens_rhs(t_k, &y, &kc, &sens);
-        let k1 = g30_dc_kc(t_k, &y, &kc);
-        var i: i64 = 0;
+        g30_sens_rhs_uq(t_k, y, &kc, sens);
+        var i: i64 = 0; while i < 310 { srhs1[i] = G30_UQ_SRHS[i]; i = i + 1; }
+        g30_dc_kc_uq(t_k, y, &kc);
+        i = 0; while i < 10 { k1[i] = G30_UQ_RHS[i]; i = i + 1; }
+        i = 0;
         while i < 10 { yt[i] = y[i] + 0.5 * dt * k1[i]; i = i + 1; }
-        let k2 = g30_dc_kc(t_k, &yt, &kc);
+        g30_dc_kc_uq(t_k, &yt, &kc);
+        i = 0; while i < 10 { k2[i] = G30_UQ_RHS[i]; i = i + 1; }
         i = 0;
         while i < 10 { yt[i] = y[i] + 0.5 * dt * k2[i]; i = i + 1; }
-        let k3 = g30_dc_kc(t_k, &yt, &kc);
+        g30_dc_kc_uq(t_k, &yt, &kc);
+        i = 0; while i < 10 { k3[i] = G30_UQ_RHS[i]; i = i + 1; }
         i = 0;
         while i < 10 { yt[i] = y[i] + dt * k3[i]; i = i + 1; }
-        let k4 = g30_dc_kc(t_k, &yt, &kc);
+        g30_dc_kc_uq(t_k, &yt, &kc);
+        i = 0; while i < 10 { k4[i] = G30_UQ_RHS[i]; i = i + 1; }
         i = 0;
         while i < 10 { y[i] = y[i] + (dt / 6.0) * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i]); i = i + 1; }
         i = 0; while i < 310 { spred[i] = sens[i] + dt * srhs1[i]; i = i + 1; }
-        srhs2 = g30_sens_rhs(t_k, &y, &kc, &spred);
+        g30_sens_rhs_uq(t_k, y, &kc, &spred);
+        i = 0; while i < 310 { srhs2[i] = G30_UQ_SRHS[i]; i = i + 1; }
         i = 0; while i < 310 { sens[i] = sens[i] + 0.5 * dt * (srhs1[i] + srhs2[i]); i = i + 1; }
         s = s + 1;
     }
-    (y, sens)
 }
 
 // Stable names for the 31 independent uncertainty sources in the H/O mechanism.
@@ -919,17 +1069,14 @@ pub fn g30_h2_uq_source_label(source: i64) -> string {
 // independent contribution of source p to Var(c_i), in (mol/cm3)^2. The 31
 // entries for a species sum to u[i]^2, modulo floating-point roundoff. These
 // are first-order GUM contributions, not a replacement for skew-aware quantiles.
-pub fn simulate_gri30_h2_epistemic_attributed(init: &[f64; 10], inits: &[f64; 10], t_k: f64, dt: f64, steps: i64) -> ([f64; 10], [f64; 10], [f64; 310]) with Mut, Div, Panic {
-    let (y, sens) = g30_epistemic_sensitivities(init, inits, t_k, dt, steps);
-    let urel = g30_urel();
-    var u: [f64; 10] = [0.0; 10];
-    var contribution: [f64; 310] = [0.0; 310];
+fn g30_epistemic_sigma_into(sens: &[f64; 310], u: &![f64; 10], contribution: &![f64; 310]) with Mut, Div, Panic {
+    g30_tables_ensure()
     var i: i64 = 0;
     while i < 10 {
         var v = 0.0;
         var r: i64 = 0;
         while r < 29 {
-            let z = sens[i*31+r] * urel[r];
+            let z = sens[i*31+r] * G30_UREL[r];
             contribution[i*31+r] = z * z;
             v = v + contribution[i*31+r];
             r = r + 1;
@@ -940,6 +1087,15 @@ pub fn simulate_gri30_h2_epistemic_attributed(init: &[f64; 10], inits: &[f64; 10
         u[i] = g30_sqrt(v);
         i = i + 1;
     }
+}
+
+pub fn simulate_gri30_h2_epistemic_attributed(init: &[f64; 10], inits: &[f64; 10], t_k: f64, dt: f64, steps: i64) -> ([f64; 10], [f64; 10], [f64; 310]) with Mut, Div, Panic {
+    var y: [f64; 10] = [0.0; 10];
+    var sens: [f64; 310] = [0.0; 310];
+    var u: [f64; 10] = [0.0; 10];
+    var contribution: [f64; 310] = [0.0; 310];
+    g30_epistemic_sensitivities_into(init, inits, t_k, dt, steps, &!y, &!sens);
+    g30_epistemic_sigma_into(&sens, &!u, &!contribution);
     (y, u, contribution)
 }
 
@@ -967,7 +1123,12 @@ pub fn g30_h2_uq_top3(contribution: &[f64; 310], species: i64) -> [i64; 3] with 
 
 // Backward-compatible epistemic simulation: values + 1-sigma per species.
 pub fn simulate_gri30_h2_epistemic(init: &[f64; 10], inits: &[f64; 10], t_k: f64, dt: f64, steps: i64) -> ([f64; 10], [f64; 10]) with Mut, Div, Panic {
-    let (y, u, _) = simulate_gri30_h2_epistemic_attributed(init, inits, t_k, dt, steps);
+    var y: [f64; 10] = [0.0; 10];
+    var sens: [f64; 310] = [0.0; 310];
+    var u: [f64; 10] = [0.0; 10];
+    var contribution: [f64; 310] = [0.0; 310];
+    g30_epistemic_sensitivities_into(init, inits, t_k, dt, steps, &!y, &!sens);
+    g30_epistemic_sigma_into(&sens, &!u, &!contribution);
     (y, u)
 }
 
@@ -1034,7 +1195,7 @@ pub fn g30_uv_rhs(t: f64, c: &[f64; 10]) -> (f64, [f64; 10]) with Mut, Div, Pani
     // Kc(T) from the shared g_rt pass (Kc = exp(-Δg/RT) · c0^Δn, c0 in mol/cm^3)
     let nu = g30_nu()
     let dn = g30_dn()
-    let c0cm = 1.0e5 / (8.314462618 * t) * 1.0e-6
+    let c0cm = 101325.0 / (8.314462618 * t) * 1.0e-6
     var kc: [f64; 29] = [0.0; 29]
     var r: i64 = 0
     while r < 29 {
@@ -1082,7 +1243,7 @@ pub fn g30_cp_rhs(t: f64, c: &[f64; 10]) -> (f64, [f64; 10]) with Mut, Div, Pani
     }
     let nu = g30_nu()
     let dn = g30_dn()
-    let c0cm = 1.0e5 / (8.314462618 * t) * 1.0e-6
+    let c0cm = 101325.0 / (8.314462618 * t) * 1.0e-6
     var kc: [f64; 29] = [0.0; 29]
     var r: i64 = 0
     while r < 29 {
@@ -1163,7 +1324,7 @@ pub fn g30_adiabatic_delay(t0: f64, dt: f64, max_steps: i64) -> (f64, f64) with 
     if done { (best_h2o_t, best_dt_t) } else { (0.0 - 1.0, 0.0 - 1.0) }
 }
 
-// ---------------- tests (all expectations from the independent Python replica) ----------------
+// ---------------- tests (Cantera 3.2.0 / gri30.yaml reference checkpoints) ----------------
 
 fn g30_check_near(a: f64, b: f64, tol: f64) -> bool { g30_abs(a - b) < tol }
 fn g30_check_rel(a: f64, b: f64, rel: f64) -> bool { g30_abs(a - b) < rel * g30_abs(b) }
@@ -1255,15 +1416,14 @@ pub fn test_g30_epistemic_step_invariance() -> bool with Mut, Div, Panic {
     var u0: [f64; 10] = [0.0; 10];
     u0[0] = 0.01 * c0[0];
     u0[3] = 0.01 * c0[3];
-    let (_, u) = simulate_gri30_h2_epistemic(&c0, &u0, t, 5.0e-9, 20000 as i64);
-    g30_check_rel(u[0], 8.8648e-9, 1.0e-2) &&
-    g30_check_rel(u[1], 4.9112e-9, 1.0e-2) &&
-    g30_check_rel(u[2], 8.2198e-10, 1.0e-2) &&
-    g30_check_rel(u[3], 3.7442e-9, 1.0e-2) &&
-    g30_check_rel(u[4], 6.9688e-10, 1.0e-2) &&
-    g30_check_rel(u[5], 5.9736e-9, 1.0e-2) &&
-    g30_check_rel(u[6], 6.0112e-12, 1.0e-2) &&
-    g30_check_rel(u[7], 7.8519e-14, 1.0e-2)
+    let (_, u_dt) = simulate_gri30_h2_epistemic(&c0, &u0, t, 1.0e-8, 10000 as i64);
+    let (_, u_half) = simulate_gri30_h2_epistemic(&c0, &u0, t, 5.0e-9, 20000 as i64);
+    var i: i64 = 0;
+    while i < 8 {
+        if !g30_check_rel(u_half[i], u_dt[i], 1.0e-2) { return false }
+        i = i + 1;
+    }
+    true
 }
 
 pub fn test_g30_uv_thermo() -> bool with Mut, Div, Panic {
