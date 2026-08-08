@@ -29,10 +29,24 @@ case "$(uname -m 2>/dev/null || echo unknown)" in
     ;;
 esac
 
-# THIS GATE IS WIRED. scripts/ci/native_v2_cpu_compiler_umbrella_gate.sh:138
-# runs it. The header used to say "SUPERSEDED -- do not wire this into CI",
-# which was true of its then-current behaviour and false of its actual use, so
-# the warning protected nobody. Three defects, all measured 2026-08-08:
+# WHO RUNS THIS, precisely -- measured 2026-08-08, because the header has been
+# wrong in both directions:
+#
+#   lean_single_fixed_point_gate.sh
+#     <- native_v2_cpu_compiler_umbrella_gate.sh:138
+#        <- native_v2_frontend_convergence_gate.sh:73
+#           <- NOTHING in .github/workflows/ or the Makefile
+#
+# So it is reachable only by hand, and CI never executes it. The old header said
+# "SUPERSEDED -- do not wire this into CI", which read as if it were unused; it
+# has two callers. An earlier draft of this header said "THIS GATE IS WIRED",
+# which was equally wrong in the direction that matters. It is a hand-run
+# diagnostic with a live call chain, and it was broken.
+#
+# That is also why fixing it is worth doing but not urgent: nothing red goes
+# green here. Somebody debugging a bootstrap by hand stops being lied to.
+#
+# Three defects, all measured 2026-08-08:
 #
 #   SUBJECT.  It resolved its compiler through resolve_souc.sh, which returns
 #   bin/souc -- a WRAPPER SCRIPT that routes to Madaros. So "stage1" was Madaros
