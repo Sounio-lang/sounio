@@ -106,3 +106,28 @@ kind to the API runs; it is comparable in content).
 - **K3 (the plot twist):** if directional ≥ 0.30, B4 breaks and the
   bracket-sensitivity hypothesis resurfaces with a champion model — reported
   with the same prominence either way, per protocol.
+
+## kimi-k3 verdict (2026-08-08, judge grok-4.5)
+
+| model | semantic flip | directional | recency |
+|---|---|---|---|
+| kimi-k3 | 0.82 | 0.06 | 0.20 |
+
+Preregistration verdict: **K1 FALSIFIED** (0.06 < 0.08), **K2 FALSIFIED**
+(0.82 ≫ 0.46), **K3 FALSIFIED** (directional nowhere near 0.30). The K3
+profile is the most extreme in the battery and in the wrong direction for
+the positive hypothesis: maximally framing-reactive (0.82 semantic flips)
+but neither directed at the induced reading nor anchored on recency (0.20,
+the battery's lowest) — the model generates a third reading of its own.
+Loudest undirected associator measured; sensitivity without direction is
+variance, not bracket-sensitivity. Declared protocol caveats: in-session
+subagent answers (up to 15 words, no temperature control, contexts fresh
+per category) are more verbose than the API runs, which may inflate judged
+semantic difference; judge was grok-4.5 after glm-5.2 hit HTTP 429
+(rate-limited after ~700 judge calls; grok-4.5 has no family conflict with
+kimi-k3).
+
+**Battery-wide standing (5 models, 3 families):** directional clean rate
+≤ 0.08 everywhere. The associator-as-steering is absent in all measured
+regimes; what varies across families is the amount of undirected variance
+(0.10 → 0.82) and the recency anchor (0.20 → 0.74).
