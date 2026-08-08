@@ -131,3 +131,19 @@ kimi-k3).
 ≤ 0.08 everywhere. The associator-as-steering is absent in all measured
 regimes; what varies across families is the amount of undirected variance
 (0.10 → 0.82) and the recency anchor (0.20 → 0.74).
+
+## Preregistered: local/self-hosted wing (2026-08-08, before any local probe)
+
+Endpoints discovered on-cluster (k8s): llm-router service
+(`10.96.188.231:4000`, LiteLLM router, OpenAI-compatible, no key needed
+from inside the cluster). Alive local backends verified by direct call:
+qwen2.5-14b, qwen2.5-coder-32b, spark-qwq-32b (QwQ-32B reasoning),
+spark-phi4-reasoning (Phi-4 14B). Dead/slow backends noted: r1-distill-70b,
+qwen3.6-35b, hermes-4, baichuan-m2-med, spark-glm-air, spark-deepseek-16b,
+hunyuan-7b, olmo3-think (connection errors or >90s cold start).
+
+Predictions (reference: frontier battery directional ≤ 0.08 everywhere):
+- **L1:** every local's directional clean rate ≤ 0.10.
+- **L2:** at least one local has semantic flip ≥ 0.25 (smaller models are
+  more framing-reactive).
+- **L3:** no local achieves directional ≥ 0.30 (B4 extends to self-hosted).
