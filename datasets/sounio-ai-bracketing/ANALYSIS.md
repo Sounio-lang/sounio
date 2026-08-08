@@ -90,3 +90,19 @@ on this host; rescore is now incremental with resume.
 may disagree; agreement was not measured (declared). The glm-5.2-as-judge
 and grok-as-judge tables were computed with family-crossed judges precisely
 to bound this.
+
+## Preregistered: kimi-k3 in the dock (2026-08-08, before any Kimi answer)
+
+Protocol exception, declared: the kimi-k3 run is produced by fresh subagent
+instances of the same model that authors this repository line (one clean
+context per category, identical harness prompts, no temperature control,
+single pass — flagged as "in-session, subagent-fresh" and NOT comparable in
+kind to the API runs; it is comparable in content).
+
+- **K1:** kimi-k3 directional clean rate > 0.08 (beats the battery's best,
+  grok-4.5).
+- **K2:** kimi-k3 semantic flip rate ≤ 0.46 (below the battery's worst,
+  glm-5.2).
+- **K3 (the plot twist):** if directional ≥ 0.30, B4 breaks and the
+  bracket-sensitivity hypothesis resurfaces with a champion model — reported
+  with the same prominence either way, per protocol.
