@@ -5911,3 +5911,34 @@ a finite, explicitly listed set of statements instead of an open conjecture. The
 is a tier apiece at least — (0) and (i) evaluations of orthant sums, (ii) a fibre-invariance plus a
 closed-form count, (iii) two closed forms — and nothing in §57.49 or here should be read as more
 than measured until they are done.
+
+### §57.51 — Tier 95: obligation (ii) split, and its counting half PROVED
+
+Measurement split obligation (ii) cleanly. For `g(W) = 0` — and, measured, for no other label — the
+`cp2` summand has a complete pointwise description: it is MINUS A PRODUCT OF FOUR ELEMENTARY SIGNS,
+
+    P3 a b W m · P3 b (a⊕W) W m = −( δ(a,b) · tauW(a,b,W) · epsZero a · epsZero b )
+
+with `δ = −1` exactly on the diagonal. Three of the four are already the file's vocabulary (Tier 91);
+the fourth is the diagonal. Off `g = 0` the description fails — at `m = 4, W = 9` the generic class
+already carries both values, which is precisely why `cp2`'s closed form lives on `g = 0`.
+
+`cp2_count` proves the counting half: **the pointwise law forces the closed form.** The pointwise law
+is the hypothesis, so what remains of obligation (ii) is exactly one four-factor identity in the CD
+cocycle, and everything downstream of it is now a theorem. Both providers confirmed the split is
+honest and that nothing is smuggled past the hypothesis.
+
+The count, and where the shape comes from:
+
+    Σ_b δ·τ·e(a)e(b) = e(a)(H−2) − 2 − 2·e(a)e(a⊕W)      then Σ_a  ⇒  (H−2)² − 2H − 2(H−4)
+                                                                    = H² − 8H + 12 = (H−2)(H−6)
+
+The `−2` is the diagonal point; the `−2·e(a)e(a⊕W)` the coset point. Two support lemmas carry it,
+both now theorems: `epsZero_sum : Σ_a epsZero a = H − 2` and
+`epsZero_shift_sum : Σ_a epsZero a · epsZero(a⊕W) = H − 4` — the two `−1`s in the latter being
+exactly where the coset matching meets index `0`.
+
+**What this does and does not do.** It proves the counting half of (ii) only. Fibre-constancy of
+`cp2` off `g = 0` is untouched, and the pointwise law is assumed, not proved. But the obligation is
+now a single sign identity rather than a sum evaluation — and since pinning `cp2` absolutely on
+`g = 0` also discharges obligation (0), closing that one identity would settle two of the four.

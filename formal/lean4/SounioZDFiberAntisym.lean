@@ -15302,4 +15302,154 @@ theorem chiCos_support (l y W : Nat) (hy : y ≠ l ^^^ W) : chiCos l y W = 0 := 
   rw [← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor] at h2
   exact h2
 
+/-! ### Tier 95 — obligation (ii), the counting half: `cp2 = −(H−2)(H−6)` on the reference class
+
+    §57.50 made the deviation law's obligation (ii) exact: `cp2 = tr(M² Π_W)` is fibre-constant and
+    equals `−(H−2)(H−6)` on the `g = 0` class, which contains every reference label `W = 2^j`.
+
+    Measurement then split that obligation cleanly in two.  For `g(W) = 0` — and, measured, for NO
+    other label — the summand has a complete pointwise description: it is MINUS THE PRODUCT OF FOUR
+    ELEMENTARY SIGNS,
+
+      `P3 a b W m · P3 b (a⊕W) W m = −( δ(a,b) · tauW(a,b,W) · epsZero a · epsZero b )`
+
+    with `δ = −1` exactly on the diagonal.  Three of the four are already this file's vocabulary; the
+    fourth is the diagonal.  (Off `g = 0` the description fails: at `m = 4, W = 9` the generic class
+    already carries both values.)
+
+    This tier proves the COUNTING half — that the pointwise law forces the closed form — and takes
+    the pointwise law as a hypothesis, so what remains of obligation (ii) is exactly one four-factor
+    identity in the CD sign cocycle.  The count itself is short and worth stating because it is where
+    the shape `(H−2)(H−6)` comes from:
+
+      `Σ_b δ·τ·e(a)e(b) = e(a)(H−2) − 2 − 2·e(a)e(a⊕W)`,  then `Σ_a` gives `(H−2)² − 2H − 2(H−4)`.
+
+    The `−2` is the diagonal point, the `−2·e(a)e(a⊕W)` the coset point, and the two `−1`s in
+    `Σ_a e(a)e(a⊕W) = H − 4` are the two places where the coset line meets index `0`. -/
+
+/-- `epsZero` squares away. -/
+private theorem epsZero_sq (a : Nat) : epsZero a * epsZero a = 1 := by
+  unfold epsZero; by_cases h : a = 0
+  · rw [if_pos h]; grind
+  · rw [if_neg h]; grind
+
+/-- The index-`0` weight sums to `H − 2`. -/
+theorem epsZero_sum (n : Nat) (hn : 0 < n) : sumLtI n (fun i => epsZero i) = (n : Int) - 2 := by
+  rw [sumLtI_congr n _ (fun i => 1 + (-2) * (if i = 0 then (1:Int) else 0))
+        (fun i _ => by unfold epsZero; by_cases h : i = 0
+                       · rw [if_pos h, if_pos h]; grind
+                       · rw [if_neg h, if_neg h]; grind),
+      sumLtI_add n (fun _ => (1:Int)) (fun i => (-2) * (if i = 0 then (1:Int) else 0)),
+      sumLtI_one n, sumLtI_mul n (-2) (fun i => if i = 0 then (1:Int) else 0), cnt1 n 0 hn]
+  grind
+
+/-- The coset-shifted weight sums to `H − 4`: the two `−1`s are where the matching meets index `0`. -/
+theorem epsZero_shift_sum (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun a => epsZero a * epsZero (a ^^^ W)) = ((2^(m+1) : Nat) : Int) - 4 := by
+  have hp := Nat.two_pow_pos (m+1)
+  have hWne : (0:Nat) ≠ W := fun h => hW0 h.symm
+  rw [sumLtI_congr (2^(m+1)) _ (fun a => 1 + (-2) * (if a = 0 ∨ a = W then (1:Int) else 0))
+        (fun a ha => by
+          unfold epsZero
+          by_cases h0 : a = 0
+          · subst h0
+            rw [if_pos rfl, if_pos (Or.inl rfl), Nat.zero_xor, if_neg hW0]
+            grind
+          · by_cases hw : a = W
+            · subst hw
+              rw [if_neg h0, if_pos (Or.inr rfl), Nat.xor_self, if_pos rfl]
+              grind
+            · have hx : a ^^^ W ≠ 0 := by
+                intro h; exact hw (xor_zero_eq a W h)
+              rw [if_neg h0, if_neg hx, if_neg (fun hh => hh.elim h0 hw)]
+              grind),
+      sumLtI_add (2^(m+1)) (fun _ => (1:Int)) (fun a => (-2) * (if a = 0 ∨ a = W then (1:Int) else 0)),
+      sumLtI_one (2^(m+1)),
+      sumLtI_mul (2^(m+1)) (-2) (fun a => if a = 0 ∨ a = W then (1:Int) else 0),
+      cnt2 (2^(m+1)) 0 W hp hW hWne]
+  grind
+
+/-- **OBLIGATION (ii), COUNTING HALF.**  The pointwise four-sign law FORCES the closed form.  The
+    law itself — the one four-factor identity in the CD cocycle — is the hypothesis `hpt`, and is
+    what remains of obligation (ii). -/
+theorem cp2_count (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
+    (hpt : ∀ a b, a < 2^(m+1) → b < 2^(m+1) →
+        P3 a b W m * P3 b (a ^^^ W) W m
+          = -((if a = b then (-1:Int) else 1) * (if (a ^^^ b) ^^^ W = 0 then (-1:Int) else 1)
+              * (epsZero a * epsZero b))) :
+    sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b => P3 a b W m * P3 b (a ^^^ W) W m))
+      = -((((2^(m+1) : Nat) : Int) - 2) * ((((2^(m+1) : Nat) : Int)) - 6)) := by
+  have hp := Nat.two_pow_pos (m+1)
+  -- the inner sum, for each `a`
+  have inner : ∀ a, a < 2^(m+1) →
+      sumLtI (2^(m+1)) (fun b => P3 a b W m * P3 b (a ^^^ W) W m)
+        = - (epsZero a * (((2^(m+1) : Nat) : Int) - 2)) + 2
+          + 2 * (epsZero a * epsZero (a ^^^ W)) := by
+    intro a ha
+    have haW : a ^^^ W < 2^(m+1) := xorlt ha hW
+    rw [sumLtI_congr (2^(m+1)) _
+          (fun b => (- (epsZero a * epsZero b))
+                    + ((if b = a then (2:Int) else 0)
+                       + (if b = a ^^^ W then 2 * (epsZero a * epsZero (a ^^^ W)) else 0)))
+          (fun b hb => by
+            rw [hpt a b ha hb]
+            by_cases hab : a = b
+            · have hc : (a ^^^ b) ^^^ W ≠ 0 := by
+                rw [hab, Nat.xor_self, Nat.zero_xor]; exact hW0
+              have hne : b ≠ a ^^^ W := by
+                intro h
+                apply hW0
+                have h1 : a = a ^^^ W := hab.trans h
+                have h2 : a ^^^ a = a ^^^ (a ^^^ W) := by rw [← h1]
+                rw [Nat.xor_self, ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor] at h2
+                exact h2.symm
+              have hsq : epsZero a * epsZero b = 1 := by rw [hab]; exact epsZero_sq b
+              rw [if_pos hab, if_neg hc, if_pos hab.symm, if_neg hne, hsq]
+              grind
+            · by_cases hcos : (a ^^^ b) ^^^ W = 0
+              · have hb' : b = a ^^^ W := by
+                  have h1 : a ^^^ b = W := xor_zero_eq (a ^^^ b) W hcos
+                  have h : a ^^^ (a ^^^ b) = a ^^^ W := by rw [h1]
+                  rw [← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor] at h
+                  exact h
+                rw [if_neg hab, if_pos hcos, if_neg (fun h => hab h.symm), if_pos hb', ← hb']
+                grind
+              · have hb' : b ≠ a ^^^ W := by
+                  intro h
+                  apply hcos
+                  rw [h, ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor, Nat.xor_self]
+                rw [if_neg hab, if_neg hcos, if_neg (fun h => hab h.symm), if_neg hb']
+                grind),
+        sumLtI_add (2^(m+1)) (fun b => - (epsZero a * epsZero b))
+          (fun b => (if b = a then (2:Int) else 0)
+                    + (if b = a ^^^ W then 2 * (epsZero a * epsZero (a ^^^ W)) else 0)),
+        sumLtI_add (2^(m+1)) (fun b => if b = a then (2:Int) else 0)
+          (fun b => if b = a ^^^ W then 2 * (epsZero a * epsZero (a ^^^ W)) else 0),
+        sumLtI_single (2^(m+1)) a 2 ha,
+        sumLtI_single (2^(m+1)) (a ^^^ W) (2 * (epsZero a * epsZero (a ^^^ W))) haW,
+        sumLtI_congr (2^(m+1)) (fun b => - (epsZero a * epsZero b))
+          (fun b => (- epsZero a) * epsZero b) (fun b _ => by grind),
+        sumLtI_mul (2^(m+1)) (- epsZero a) (fun b => epsZero b),
+        epsZero_sum (2^(m+1)) hp]
+    grind
+  rw [sumLtI_congr (2^(m+1)) _
+        (fun a => (- epsZero a) * (((2^(m+1) : Nat) : Int) - 2) + 2
+                  + 2 * (epsZero a * epsZero (a ^^^ W)))
+        (fun a ha => by rw [inner a ha]; grind),
+      sumLtI_add (2^(m+1))
+        (fun a => (- epsZero a) * (((2^(m+1) : Nat) : Int) - 2) + 2)
+        (fun a => 2 * (epsZero a * epsZero (a ^^^ W))),
+      sumLtI_add (2^(m+1)) (fun a => (- epsZero a) * (((2^(m+1) : Nat) : Int) - 2)) (fun _ => (2:Int)),
+      sumLtI_congr (2^(m+1)) (fun a => (- epsZero a) * (((2^(m+1) : Nat) : Int) - 2))
+        (fun a => (((2^(m+1) : Nat) : Int) - 2) * (- epsZero a)) (fun a _ => by grind),
+      sumLtI_mul (2^(m+1)) (((2^(m+1) : Nat) : Int) - 2) (fun a => - epsZero a),
+      sumLtI_congr (2^(m+1)) (fun a => - epsZero a) (fun a => (-1) * epsZero a)
+        (fun a _ => by grind),
+      sumLtI_mul (2^(m+1)) (-1) (fun a => epsZero a), epsZero_sum (2^(m+1)) hp,
+      sumLtI_congr (2^(m+1)) (fun _ => (2:Int)) (fun _ => 2 * 1) (fun _ _ => by grind),
+      sumLtI_mul (2^(m+1)) 2 (fun _ => (1:Int)), sumLtI_one (2^(m+1)),
+      sumLtI_mul (2^(m+1)) 2 (fun a => epsZero a * epsZero (a ^^^ W)),
+      epsZero_shift_sum m W hW hW0]
+  grind
+
 end SounioZDFiberAntisym
