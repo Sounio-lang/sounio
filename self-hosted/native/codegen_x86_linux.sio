@@ -2949,16 +2949,62 @@ fn native_v2_resolve_handle_to_object_base_rax_into(nc: &! NativeCompiler) with 
     nc_patch_u32_le(nc, done_jmp + 1, done_target - (done_jmp + 5))
 }
 
-fn native_data_add_u64(st: StringTable, value: i64) -> StringTable with Mut, Panic, Div {
-    var t = st
-    t.last_offset = t.len
+fn nc_flat_data_prepare_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    if (*nc).flat_data_len > 0 { return }
     var i: i64 = 0
-    while i < 8 && t.len < 8192 {
-        t.bytes[t.len as usize] = ((value >> (i * 8)) & 0xFF) as i8
-        t.len = t.len + 1
+    while i < (*nc).data.len && i < nc_flat_data_capacity() {
+        NC_BIG_DATA[i as usize] = (*nc).data.bytes[i as usize]
         i = i + 1
     }
-    t
+    if i < (*nc).data.len {
+        (*nc).data_overflow = true
+    }
+    (*nc).flat_data_len = i
+}
+
+fn nc_flat_data_append_byte_into(nc: &! NativeCompiler, value: i64) with Mut, Panic, Div {
+    nc_flat_data_prepare_into(nc)
+    let offset = (*nc).flat_data_len
+    if offset < nc_flat_data_capacity() {
+        NC_BIG_DATA[offset as usize] = (value & 0xFF) as i8
+        (*nc).flat_data_len = offset + 1
+    } else {
+        (*nc).data_overflow = true
+    }
+    // Preserve the legacy prefix so existing decoders remain useful for small
+    // blobs. The full emitter always selects NC_BIG_DATA once it is active.
+    if (*nc).data.len < 8192 {
+        (*nc).data.bytes[(*nc).data.len as usize] = (value & 0xFF) as i8
+        (*nc).data.len = (*nc).data.len + 1
+    }
+}
+
+fn nc_flat_data_align_into(nc: &! NativeCompiler, alignment: i64) with Mut, Panic, Div {
+    nc_flat_data_prepare_into(nc)
+    while alignment > 0 && ((*nc).flat_data_len % alignment) != 0 {
+        nc_flat_data_append_byte_into(nc, 0)
+    }
+}
+
+fn nc_flat_data_add_u64_into(nc: &! NativeCompiler, value: i64) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < 8 {
+        nc_flat_data_append_byte_into(nc, (value >> (i * 8)) & 0xFF)
+        i = i + 1
+    }
+}
+
+pub fn native_v2_flat_data_read_u64(data_len: i64, offset: i64) -> i64 with Mut, Panic, Div {
+    if offset < 0 || (offset + 7) >= data_len { return 0 }
+    var out: i64 = 0
+    var i: i64 = 0
+    while i < 8 {
+        let raw = NC_BIG_DATA[(offset + i) as usize] as i64
+        let byte = if raw < 0 { raw + 256 } else { raw }
+        out = out | (byte << (i * 8))
+        i = i + 1
+    }
+    out
 }
 
 fn native_v2_alloc_descriptor_id(tag: i64) -> i64 {
@@ -2969,31 +3015,26 @@ fn native_v2_alloc_descriptor_id(tag: i64) -> i64 {
     255
 }
 
-fn native_v2_emit_descriptor_entry(data: StringTable, id: i64, kind: i64, payload_bytes: i64, payload_slots: i64, pointer_bitmap: i64) -> StringTable with Mut, Panic, Div {
-    var out = data
-    out = native_data_add_u64(out, id)
-    out = native_data_add_u64(out, kind)
-    out = native_data_add_u64(out, payload_bytes)
-    out = native_data_add_u64(out, payload_slots)
-    out = native_data_add_u64(out, pointer_bitmap)
-    out
+fn native_v2_emit_descriptor_entry_into(nc: &! NativeCompiler, id: i64, kind: i64, payload_bytes: i64, payload_slots: i64, pointer_bitmap: i64) with Mut, Panic, Div {
+    nc_flat_data_add_u64_into(nc, id)
+    nc_flat_data_add_u64_into(nc, kind)
+    nc_flat_data_add_u64_into(nc, payload_bytes)
+    nc_flat_data_add_u64_into(nc, payload_slots)
+    nc_flat_data_add_u64_into(nc, pointer_bitmap)
 }
 
-fn native_v2_emit_descriptor_table(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
-    var data = data_section_align(c.data, 8)
-    c.descriptor_data_offset = data.len
-    c.descriptor_count = 5
-    data = native_data_add_u64(data, native_v2_descriptor_magic())
-    data = native_data_add_u64(data, native_v2_descriptor_version())
-    data = native_data_add_u64(data, c.descriptor_count)
-    data = native_v2_emit_descriptor_entry(data, 0, native_v2_descriptor_kind_struct(), 512, 64, -1)
-    data = native_v2_emit_descriptor_entry(data, 1, native_v2_descriptor_kind_array(), 512, 64, -1)
-    data = native_v2_emit_descriptor_entry(data, 2, native_v2_descriptor_kind_tuple(), 128, 16, -1)
-    data = native_v2_emit_descriptor_entry(data, 8, native_v2_descriptor_kind_box(), 16, 2, 1)
-    data = native_v2_emit_descriptor_entry(data, 255, native_v2_descriptor_kind_opaque(), 64, 8, 0)
-    c.data = data
-    c
+fn native_v2_emit_descriptor_table_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_flat_data_align_into(nc, 8)
+    (*nc).descriptor_data_offset = (*nc).flat_data_len
+    (*nc).descriptor_count = 5
+    nc_flat_data_add_u64_into(nc, native_v2_descriptor_magic())
+    nc_flat_data_add_u64_into(nc, native_v2_descriptor_version())
+    nc_flat_data_add_u64_into(nc, (*nc).descriptor_count)
+    native_v2_emit_descriptor_entry_into(nc, 0, native_v2_descriptor_kind_struct(), 512, 64, -1)
+    native_v2_emit_descriptor_entry_into(nc, 1, native_v2_descriptor_kind_array(), 512, 64, -1)
+    native_v2_emit_descriptor_entry_into(nc, 2, native_v2_descriptor_kind_tuple(), 128, 16, -1)
+    native_v2_emit_descriptor_entry_into(nc, 8, native_v2_descriptor_kind_box(), 16, 2, 1)
+    native_v2_emit_descriptor_entry_into(nc, 255, native_v2_descriptor_kind_opaque(), 64, 8, 0)
 }
 
 fn native_v2_record_safepoint(
@@ -3062,72 +3103,69 @@ fn native_v2_record_safepoint_mut(
     (*nc).deopt_point_count = (*nc).deopt_point_count + 1
 }
 
-fn native_v2_emit_runtime_metadata(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
-    var c = nc
-    c = native_v2_emit_descriptor_table(c)
-    var data = data_section_align(c.data, 8)
-    c.stack_map_data_offset = data.len
-    data = native_data_add_u64(data, native_v2_stack_map_version())
-    data = native_data_add_u64(data, c.stack_map_record_count)
-    data = native_data_add_u64(data, c.safepoint_count)
-    data = native_data_add_u64(data, c.deopt_point_count)
+pub fn native_v2_emit_runtime_metadata_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    native_v2_emit_descriptor_table_into(nc)
+    nc_flat_data_align_into(nc, 8)
+    (*nc).stack_map_data_offset = (*nc).flat_data_len
+    nc_flat_data_add_u64_into(nc, native_v2_stack_map_version())
+    nc_flat_data_add_u64_into(nc, (*nc).stack_map_record_count)
+    nc_flat_data_add_u64_into(nc, (*nc).safepoint_count)
+    nc_flat_data_add_u64_into(nc, (*nc).deopt_point_count)
     var i: i64 = 0
-    while i < c.stack_map_record_count {
-        data = native_data_add_u64(data, c.stack_map_fn_indices[i as usize])
-        data = native_data_add_u64(data, c.stack_map_kinds[i as usize])
-        data = native_data_add_u64(data, c.stack_map_machine_instr_indices[i as usize])
-        data = native_data_add_u64(data, c.stack_map_code_offsets[i as usize])
-        data = native_data_add_u64(data, c.stack_map_frame_sizes[i as usize])
-        data = native_data_add_u64(data, c.stack_map_temp_counts[i as usize])
-        data = native_data_add_u64(data, c.stack_map_spill_counts[i as usize])
-        data = native_data_add_u64(data, c.stack_map_root_temp_counts[i as usize])
-        data = native_data_add_u64(data, c.stack_map_root_spill_counts[i as usize])
-        data = native_data_add_u64(data, c.stack_map_callee_saved_root_masks[i as usize])
-        data = native_data_add_u64(data, c.stack_map_root_kind_masks[i as usize])
-        data = native_data_add_u64(data, c.stack_map_deopt_ids[i as usize])
-        data = native_data_add_u64(data, c.stack_map_tier_ids[i as usize])
-        data = native_data_add_u64(data, c.stack_map_osr_eligibility[i as usize])
+    while i < (*nc).stack_map_record_count {
+        nc_flat_data_add_u64_into(nc, (*nc).stack_map_fn_indices[i as usize])
+        nc_flat_data_add_u64_into(nc, (*nc).stack_map_kinds[i as usize])
+        nc_flat_data_add_u64_into(nc, (*nc).stack_map_machine_instr_indices[i as usize])
+        nc_flat_data_add_u64_into(nc, (*nc).stack_map_code_offsets[i as usize])
+        nc_flat_data_add_u64_into(nc, (*nc).stack_map_frame_sizes[i as usize])
+        nc_flat_data_add_u64_into(nc, (*nc).stack_map_temp_counts[i as usize])
+        nc_flat_data_add_u64_into(nc, (*nc).stack_map_spill_counts[i as usize])
+        nc_flat_data_add_u64_into(nc, (*nc).stack_map_root_temp_counts[i as usize])
+        nc_flat_data_add_u64_into(nc, (*nc).stack_map_root_spill_counts[i as usize])
+        nc_flat_data_add_u64_into(nc, (*nc).stack_map_callee_saved_root_masks[i as usize])
+        nc_flat_data_add_u64_into(nc, (*nc).stack_map_root_kind_masks[i as usize])
+        nc_flat_data_add_u64_into(nc, (*nc).stack_map_deopt_ids[i as usize])
+        nc_flat_data_add_u64_into(nc, (*nc).stack_map_tier_ids[i as usize])
+        nc_flat_data_add_u64_into(nc, (*nc).stack_map_osr_eligibility[i as usize])
         i = i + 1
     }
 
-    data = data_section_align(data, 8)
-    c.deopt_state_data_offset = data.len
-    data = native_data_add_u64(data, 1)
-    data = native_data_add_u64(data, c.deopt_point_count)
-    data = native_data_add_u64(data, c.stack_map_data_offset)
+    nc_flat_data_align_into(nc, 8)
+    (*nc).deopt_state_data_offset = (*nc).flat_data_len
+    nc_flat_data_add_u64_into(nc, 1)
+    nc_flat_data_add_u64_into(nc, (*nc).deopt_point_count)
+    nc_flat_data_add_u64_into(nc, (*nc).stack_map_data_offset)
     i = 0
-    while i < c.stack_map_record_count {
-        data = native_data_add_u64(data, c.stack_map_fn_indices[i as usize])
-        data = native_data_add_u64(data, c.stack_map_code_offsets[i as usize])
-        data = native_data_add_u64(data, c.stack_map_kinds[i as usize])
+    while i < (*nc).stack_map_record_count {
+        nc_flat_data_add_u64_into(nc, (*nc).stack_map_fn_indices[i as usize])
+        nc_flat_data_add_u64_into(nc, (*nc).stack_map_code_offsets[i as usize])
+        nc_flat_data_add_u64_into(nc, (*nc).stack_map_kinds[i as usize])
         i = i + 1
     }
 
-    data = data_section_align(data, 8)
-    c.gc_state_data_offset = data.len
-    data = native_data_add_u64(data, native_v2_gc_magic())
-    data = native_data_add_u64(data, native_v2_gc_version())
-    data = native_data_add_u64(data, native_v2_gc_flag_ready() + native_v2_gc_flag_managed_handles())
-    data = native_data_add_u64(data, 0)
-    data = native_data_add_u64(data, 0)
-    data = native_data_add_u64(data, 0)
-    data = native_data_add_u64(data, 0)
-    data = native_data_add_u64(data, 0)
-    data = native_data_add_u64(data, c.stack_map_data_offset)
-    data = native_data_add_u64(data, c.deopt_state_data_offset)
-    data = native_data_add_u64(data, native_v2_gc_reason_none())
-    data = native_data_add_u64(data, 0)
-    data = native_data_add_u64(data, 0)
-    data = native_data_add_u64(data, 0)
-    data = native_data_add_u64(data, native_v2_handle_table_capacity_default())
-    data = native_data_add_u64(data, c.descriptor_data_offset)
-    data = native_data_add_u64(data, c.descriptor_count)
-    data = native_data_add_u64(data, 0)
-    data = native_data_add_u64(data, 0)
-    data = native_data_add_u64(data, 0)
-    data = native_data_add_u64(data, 0)
-    c.data = data
-    c
+    nc_flat_data_align_into(nc, 8)
+    (*nc).gc_state_data_offset = (*nc).flat_data_len
+    nc_flat_data_add_u64_into(nc, native_v2_gc_magic())
+    nc_flat_data_add_u64_into(nc, native_v2_gc_version())
+    nc_flat_data_add_u64_into(nc, native_v2_gc_flag_ready() + native_v2_gc_flag_managed_handles())
+    nc_flat_data_add_u64_into(nc, 0)
+    nc_flat_data_add_u64_into(nc, 0)
+    nc_flat_data_add_u64_into(nc, 0)
+    nc_flat_data_add_u64_into(nc, 0)
+    nc_flat_data_add_u64_into(nc, 0)
+    nc_flat_data_add_u64_into(nc, (*nc).stack_map_data_offset)
+    nc_flat_data_add_u64_into(nc, (*nc).deopt_state_data_offset)
+    nc_flat_data_add_u64_into(nc, native_v2_gc_reason_none())
+    nc_flat_data_add_u64_into(nc, 0)
+    nc_flat_data_add_u64_into(nc, 0)
+    nc_flat_data_add_u64_into(nc, 0)
+    nc_flat_data_add_u64_into(nc, native_v2_handle_table_capacity_default())
+    nc_flat_data_add_u64_into(nc, (*nc).descriptor_data_offset)
+    nc_flat_data_add_u64_into(nc, (*nc).descriptor_count)
+    nc_flat_data_add_u64_into(nc, 0)
+    nc_flat_data_add_u64_into(nc, 0)
+    nc_flat_data_add_u64_into(nc, 0)
+    nc_flat_data_add_u64_into(nc, 0)
 }
 
 // OS-dispatch helper: replaces the pattern "mov rax, 1; syscall" for sys_write.
@@ -5374,6 +5412,13 @@ pub fn compile_module_streaming_finish_into(nc: &! NativeCompiler, module: &IrMo
         (*nc).fn_count = (*nc).fn_count + 1
         (*nc) = emit_prof_dump_function((*nc), module)
     }
+
+    // The streaming Core-IR path has no precise root locations yet, so its
+    // stack-map record count remains zero. It must still publish descriptors
+    // and GC-state storage through the same persistent .data path used by the
+    // Machine-IR pipeline; a future Core collector can then consume real
+    // runtime metadata instead of a private compiler-only blob.
+    native_v2_emit_runtime_metadata_into(nc)
 
     // Pass 2: Emit entry trampoline (_start: call main; sys_exit)
     let main_idx = find_main_index(module)
@@ -8688,7 +8733,7 @@ pub fn compile_module_v2_mut(nc: &! NativeCompiler, module: &IrModule) -> string
         (*nc) = emit_prof_dump_function((*nc), module)
     }
 
-    (*nc) = native_v2_emit_runtime_metadata((*nc))
+    native_v2_emit_runtime_metadata_into(nc)
 
     let main_idx = find_main_index(module)
     if main_idx >= 0 {
@@ -8698,7 +8743,8 @@ pub fn compile_module_v2_mut(nc: &! NativeCompiler, module: &IrModule) -> string
     let text_file_offset = 4096
     let rodata_file_offset = align_page(text_file_offset + (*nc).code.len)
     let min_data_len = (*nc).prof_counter_data_base + ((*nc).prof_counter_count * 8)
-    let effective_data_len = if (*nc).data.len < min_data_len { min_data_len } else { (*nc).data.len }
+    let emitted_data_len = if (*nc).flat_data_len > 0 { (*nc).flat_data_len } else { (*nc).data.len }
+    let effective_data_len = if emitted_data_len < min_data_len { min_data_len } else { emitted_data_len }
     let data_file_offset = if effective_data_len > 0 {
         align_page(rodata_file_offset + (*nc).rodata.len)
     } else { 0 }
@@ -10620,9 +10666,9 @@ fn native_v2_write_min_elf64_to_file(output_path: string, nc: &! NativeCompiler,
     let text_offset: i64 = 4096
     let code_len = (*nc).code.len
     let rodata_len = if (*nc).flat_rodata_len > 0 { (*nc).flat_rodata_len } else { (*nc).rodata.len }
-    let raw_data_len = (*nc).data.len
+    if (*nc).data_overflow { return 21 }
+    let raw_data_len = if (*nc).flat_data_len > 0 { (*nc).flat_data_len } else { (*nc).data.len }
     var data_len = if raw_data_len < runtime_context_global_slot_size() { runtime_context_global_slot_size() } else { raw_data_len }
-    if data_len > 8192 { data_len = 8192 }
     let rodata_offset = align_page(text_offset + code_len)
     let data_offset = if data_len > 0 { align_page(rodata_offset + rodata_len) } else { 0 }
     let text_vaddr = base_addr + text_offset
@@ -10727,6 +10773,25 @@ fn native_v2_build_elf_image_into(nc: &! NativeCompiler, base_addr: i64, entry_o
         while i < rodata_len && (rodata_offset + i) < nc_elf_capacity_bytes() {
             NC_BIG_ELF[(rodata_offset + i) as usize] = (*nc).rodata.bytes[i as usize]
             i = i + 1
+        }
+    }
+
+    if data_len > 0 {
+        i = 0
+        if (*nc).flat_data_len > 0 {
+            while i < data_len && (data_offset + i) < nc_elf_capacity_bytes() {
+                NC_BIG_ELF[(data_offset + i) as usize] = NC_BIG_DATA[i as usize]
+                i = i + 1
+            }
+        } else {
+            while i < data_len && (data_offset + i) < nc_elf_capacity_bytes() {
+                var db: i8 = 0 as i8
+                if i < (*nc).data.len {
+                    db = (*nc).data.bytes[i as usize]
+                }
+                NC_BIG_ELF[(data_offset + i) as usize] = db
+                i = i + 1
+            }
         }
     }
 }
@@ -10897,6 +10962,10 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
     if !compile_ok {
         return 12
     }
+    // Publish descriptor and GC-state storage for the actual frontend route.
+    // Core-IR deliberately contributes zero stack-map records until it emits
+    // root locations precise enough to authorize collection and retry.
+    native_v2_emit_runtime_metadata_into(&! nc)
     var final_data = nc.data
     if final_data.len < runtime_context_global_slot_size() {
         final_data.len = runtime_context_global_slot_size()
@@ -11135,10 +11204,14 @@ fn compile_native_finalize_and_write_ref(nc: &! NativeCompiler, base_addr: i64, 
         print(" (raise nc_v2_label_capacity)\n")
         return 22
     }
+    if (*nc).data_overflow {
+        print("Error: native data section overflow (raise nc_flat_data_capacity)\n")
+        return 21
+    }
 
     let code_len = (*nc).code.len
     let rodata_len = if (*nc).flat_rodata_len > 0 { (*nc).flat_rodata_len } else { (*nc).rodata.len }
-    let raw_data_len = (*nc).data.len
+    let raw_data_len = if (*nc).flat_data_len > 0 { (*nc).flat_data_len } else { (*nc).data.len }
     let min_data_len = (*nc).prof_counter_data_base + ((*nc).prof_counter_count * 8)
     let actual_data_len = if raw_data_len < min_data_len { min_data_len } else { raw_data_len }
     let entry_offset = (*nc).entry_offset
@@ -11278,7 +11351,14 @@ fn compile_native_finalize_and_write_ref(nc: &! NativeCompiler, base_addr: i64, 
         NATIVE_ELF_OFF = data_offset
         var di: i64 = 0
         while di < actual_data_len {
-            let db: i8 = if di < raw_data_len { (*nc).data.bytes[di as usize] } else { 0 as i8 }
+            var db: i8 = 0 as i8
+            if di < raw_data_len {
+                if (*nc).flat_data_len > 0 {
+                    db = NC_BIG_DATA[di as usize]
+                } else {
+                    db = (*nc).data.bytes[di as usize]
+                }
+            }
             NATIVE_ELF_BUF[NATIVE_ELF_OFF as usize] = db
             NATIVE_ELF_OFF = NATIVE_ELF_OFF + 1
             di = di + 1

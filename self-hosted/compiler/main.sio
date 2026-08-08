@@ -2850,6 +2850,13 @@ fn run_native_v2_gc_retry_smoke() with IO, Mut, Panic, Div, Alloc {
     println("native_v2_gc_retry_smoke: ok")
 }
 
+fn run_native_v2_runtime_metadata_large_blob_smoke() with IO, Mut, Panic, Div, Alloc {
+    if !compiler_main_test_native_v2_runtime_metadata_large_blob() {
+        panic("native-v2 runtime metadata large-blob smoke failed")
+    }
+    println("native_v2_runtime_metadata_large_blob_smoke: ok")
+}
+
 fn run_exact_bitwise_rebracket_authority_smoke() with IO, Mut, Panic, Div {
     let receipt = ocp_exact_bitwise_rebracket_authority_probe()
     let pipeline = ocp_exact_bitwise_rebracket_pipeline_probe()
@@ -8218,6 +8225,50 @@ fn compiler_main_test_native_v2_descriptor_table_blob() -> bool with Mut, Panic,
     if table.entries[3].id != 8 { return false }
     if table.entries[3].kind != native_v2_descriptor_kind_box() { return false }
     table.entries[4].id == 255 && table.entries[4].kind == native_v2_descriptor_kind_opaque()
+}
+
+// The inline StringTable is deliberately only 8 KiB. Exercise the full 256-map
+// metadata tier and inspect its tail in NC_BIG_DATA so a future GC cannot claim
+// a complete stack-map blob after the ELF writer has silently cut it short.
+fn compiler_main_test_native_v2_runtime_metadata_large_blob() -> bool with Mut, Panic, Div, Alloc {
+    var nc = compiler_new()
+    var data = nc.data
+    data.len = runtime_context_global_slot_size()
+    nc.data = data
+    nc.stack_map_record_count = 256
+    nc.safepoint_count = 256
+    nc.deopt_point_count = 256
+
+    var i: i64 = 0
+    while i < 256 {
+        nc.stack_map_fn_indices[i as usize] = i
+        nc.stack_map_kinds[i as usize] = NATIVE_V2_SAFEPOINT_CALL()
+        nc.stack_map_machine_instr_indices[i as usize] = i * 2
+        nc.stack_map_code_offsets[i as usize] = i * 16
+        nc.stack_map_frame_sizes[i as usize] = 64
+        nc.stack_map_temp_counts[i as usize] = i + 1
+        nc.stack_map_spill_counts[i as usize] = 3
+        nc.stack_map_root_temp_counts[i as usize] = i + 1
+        nc.stack_map_root_spill_counts[i as usize] = 3
+        nc.stack_map_callee_saved_root_masks[i as usize] = 0
+        nc.stack_map_root_kind_masks[i as usize] = native_v2_stack_map_root_kind_mixed()
+        nc.stack_map_deopt_ids[i as usize] = i
+        nc.stack_map_tier_ids[i as usize] = native_v2_stack_map_tier_baseline()
+        nc.stack_map_osr_eligibility[i as usize] = native_v2_stack_map_osr_eligible()
+        i = i + 1
+    }
+
+    native_v2_emit_runtime_metadata_into(&! nc)
+    if nc.data_overflow { return false }
+    if nc.flat_data_len <= 8192 { return false }
+    if nc.data.len != 8192 { return false }
+    if native_v2_flat_data_read_u64(nc.flat_data_len, nc.stack_map_data_offset) != native_v2_stack_map_version() { return false }
+    if native_v2_flat_data_read_u64(nc.flat_data_len, nc.stack_map_data_offset + 8) != 256 { return false }
+    let last_record = nc.stack_map_data_offset + 32 + (255 * native_v2_stack_map_record_size())
+    if native_v2_flat_data_read_u64(nc.flat_data_len, last_record) != 255 { return false }
+    if native_v2_flat_data_read_u64(nc.flat_data_len, last_record + 24) != 4080 { return false }
+    if native_v2_flat_data_read_u64(nc.flat_data_len, last_record + 88) != 255 { return false }
+    native_v2_flat_data_read_u64(nc.flat_data_len, nc.gc_state_data_offset) == native_v2_gc_magic()
 }
 
 fn compiler_main_test_native_v2_alloc_uses_descriptor_handles() -> bool with Mut, Panic, Div, Alloc {
@@ -23324,6 +23375,13 @@ fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
         println("  FAIL: T197 native-v2 stack-map decoder root fields")
     }
 
+    if compiler_main_test_native_v2_runtime_metadata_large_blob() {
+        println("  T1202 OK: native-v2 keeps all 256 stack-map records beyond the inline data tier")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T1202 native-v2 large runtime metadata blob")
+    }
+
     if compiler_main_test_block_i_bitand_const() {
         println("  T198 OK: Sprint 81 Block I: 3 & 5 → IrLoadImm(1) (both-const BitAnd)")
         passed = passed + 1
@@ -28314,6 +28372,9 @@ fn main() with IO, Mut, Panic, Div, Alloc {
             return
         } else if mode == "--native-v2-gc-retry-smoke" {
             run_native_v2_gc_retry_smoke()
+            return
+        } else if mode == "--native-v2-runtime-metadata-large-blob-smoke" {
+            run_native_v2_runtime_metadata_large_blob_smoke()
             return
         } else if mode == "--rebracket-authority-smoke" {
             run_exact_bitwise_rebracket_authority_smoke()
