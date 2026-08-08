@@ -84,8 +84,22 @@ def main():
     if rows and "summary" in rows[-1]:
         rows.pop()
 
+    out = Path(args.out) if args.out else Path(args.run).with_suffix(".judged.jsonl")
+    done_ids = set()
+    if out.exists():  # resume: skip already-judged items
+        for l in out.open():
+            try:
+                d = json.loads(l)
+                if "judge" in d:
+                    done_ids.add(d["id"])
+            except json.JSONDecodeError:
+                pass
+        print(f"resume: {len(done_ids)} items already judged")
+
     out_rows = []
     for it in rows:
+        if it["id"] in done_ids:
+            continue
         ll = call_model(args.base_url, api_key, args.judge_model,
                         match_q(it["response_left"], it["answer_left"]))
         time.sleep(0.2)
@@ -107,13 +121,26 @@ def main():
                                                     else ("both" if ll and lr else "neither"))
         read_right = "left" if (rl and not rr) else ("right" if (rr and not rl)
                                                      else ("both" if rl and rr else "neither"))
-        out_rows.append({**it, "judge": {
+        rec = {**it, "judge": {
             "left_resp_matches": read_left, "right_resp_matches": read_right,
-            "semantic_flip": sem_diff}})
+            "semantic_flip": sem_diff}}
+        out_rows.append(rec)
+        with out.open("a") as f:  # incremental: survive a SIGKILL mid-run
+            f.write(json.dumps(rec) + "\n")
         print(f"{it['id']}: L-induction→{read_left} R-induction→{read_right} "
-              f"sem_flip={sem_diff} gold={it['gold_human']}")
+              f"sem_flip={sem_diff} gold={it['gold_human']}", flush=True)
 
+    # final summary over ALL judged rows (resumed + new)
+    all_rows = []
+    for l in out.open():
+        d = json.loads(l)
+        if "judge" in d:
+            all_rows.append(d)
+    out_rows = all_rows
     n = len(out_rows)
+    if n < len(rows):
+        print(f"partial: {n}/{len(rows)} judged — rerun to resume")
+        return
     sem_flips = sum(r["judge"]["semantic_flip"] for r in out_rows)
     directional = sum(
         r["judge"]["left_resp_matches"] == "left"

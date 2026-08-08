@@ -50,3 +50,43 @@ Z.AI, deepseek-v4-pro if balance allows):
 Same scoring rule as before: judged by glm-5.2 (independent of each target,
 and itself a target — when glm-5.2 is the target, a second judge (grok-4.3)
 scores it, and the two judges' agreement is reported).
+
+## Battery results — 4 models, judged (2026-08-08)
+
+| model | semantic flip | directional clean | recency under left-induction |
+|---|---|---|---|
+| grok-4.3 | 0.10 | 0.02 | 0.72 |
+| grok-4.5 | 0.16 | 0.08 | 0.74 |
+| glm-5.2 | 0.46 | 0.04 | 0.45 |
+| glm-4.7 | 0.30 | 0.02 | 0.68 |
+
+Judges: glm-5.2 judged the grok runs; grok-4.3 judged glm-5.2; grok-4.5
+judged glm-4.7 (no family self-judging anywhere).
+
+**Verdict on the preregistered predictions:**
+- **B1 (all flips ≤ 0.25): FALSIFIED** — glm-5.2 (0.46) and glm-4.7 (0.30).
+- **B2 (all directional ≤ 0.10): CONFIRMED** — 0.02 / 0.08 / 0.04 / 0.02.
+- **B3 (recency default in ≥ half the models): CONFIRMED** — 3 of 4 above
+  0.5 (0.72, 0.74, 0.68).
+- **B4 (no model directional ≥ 0.30): CONFIRMED** — max 0.08.
+
+**Family profiles.** grok: framing-insensitive (flip ≤ 0.16) with a strong
+recency default; grok-4.5 improves directional compliance 4× over 4.3 — the
+family is moving toward bracket sensitivity but is not there. glm:
+framing-sensitive (flip 0.30–0.46) but undirected; the framing shakes the
+interpretation without steering it to the induced reading — concentrated on
+`gold=both` items for glm-5.2 (0.71 flip rate on genuinely ambiguous items).
+Universal: **no model lands directionally on the induced bracketing** (max
+0.08/50 items). Turn-level bracketing is, for these four frontier models,
+either invisible (grok) or a source of undirected variance (glm). The
+associator as a steering signal is absent in both regimes.
+
+**Infrastructure notes:** deepseek key invalid (401, key revoked — not
+balance); OpenRouter has no credits; api.groq.com unresolvable from this
+host. Battery ran with 4 models via xAI + Z.AI. Two SIGKILLs hit long tasks
+on this host; rescore is now incremental with resume.
+
+**Judge-agreement caveat:** grok-4.3 and glm-5.2 judging the same responses
+may disagree; agreement was not measured (declared). The glm-5.2-as-judge
+and grok-as-judge tables were computed with family-crossed judges precisely
+to bound this.
