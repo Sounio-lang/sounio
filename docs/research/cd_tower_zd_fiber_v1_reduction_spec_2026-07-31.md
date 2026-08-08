@@ -5969,12 +5969,29 @@ six-line description is exact on `g = 0` and fails off it — at `m = 4`, `W = 9
 already splits, which is the same boundary the pointwise law had.
 
 **What this is and is not.** It does not prove the identity; it exchanges it for a statement about
-which index lines `resB` covers. Whether that is a genuine reduction or relabelling turns on whether
-the existing `resB` lemmas cover those lines — they cover several, not yet all, so the honest reading
-is: the remaining difficulty moved onto machinery that already exists, and shrank, but did not
-vanish.
+which index lines `resB` covers.
 
-⚠ M1 DEGRADED on this tier: three fan-out attempts, grok returned nothing each time and zai errored
-on the last two. Substitute evidence is the denotation above plus the Lean proofs; the three
-questions put to the reviewers — in particular "is this real progress or relabelling?" — went
-unanswered and are recorded here unresolved.
+**Scope correction, from the review.** My "now equivalent to the six-line statement" was too strong.
+Under the hypotheses the two theorems actually carry (`a, b ∉ {0, W}`), only TWO of the six lines are
+visible — the diagonal and the coset — and what the reduction delivers there is
+
+    χ(resB) = δ · tauW · epsZero a · epsZero b,   i.e. resB fails exactly on a = b and a ⊕ b = W.
+
+The lines `a = W` and `b = W` lie OUTSIDE both `cp2_summand_core` and `P1_mul_P3_mask` (they are
+where `P1_symm` and `core_P3` lose their hypotheses), so the original identity on those loci is NOT
+discharged by `resB` alone and still needs direct case-work — either the `δ/τ/ε` computation or the
+existing `resB_*` lemmas. In grok's accounting: no loss of content once those cases are kept, and no
+gain of free discharge either.
+
+**On the question I most wanted answered — real progress or relabelling?** `[OK] real progress`: the
+reduction re-uses `core_P3`/`P3_symm` from Tier 2 to eliminate the shift, and turns the remaining
+sign algebra into a mask-membership statement already partially covered by
+`resB_zero_row`/`resB_zero_col`/`resB_coset`; the residual work is combinatorics on known lines, not
+new cocycle identities.
+
+⚠ Process note, and it corrects §57.52's own first version. I recorded this tier as "M1 DEGRADED —
+no verdict from either provider". That was WRONG for grok: it had answered in full on two of the
+attempts, and the fan-out driver dropped the output while leaving the raw JSON on disk. What is true
+is that zai was unavailable — a 5-hour usage cap (`code 1308`, reset 2026-08-09 07:16), not an
+authentication problem. The lesson for this lane: when the driver prints nothing, READ THE RAW JSON
+before recording a provider as silent.
