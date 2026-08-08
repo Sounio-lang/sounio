@@ -89,6 +89,34 @@ dereferencing the wrong address.
   the Makefile compares `gen2 == gen3`. This fix passes either way, but the gate
   is wrong in general and will reject the next legitimate codegen change.
 
+## The refreshed seed ELF is IN this branch, and it passes the canonical gate
+
+`bin/souc-lean-single-x86_64` is replaced here with the fixed point of the
+patched source, **`25fb229c2bf68e94b17ba5d9bc79174f`** (the shipped one is
+`3a7a17a0f62e97e771c96c029ccd18b3`).
+
+This is not optional. `scripts/ci/canonical_compiler_gate.sh` — the CI step
+"Canonical lean_single fixed point" — **fails** when the committed ELF is not
+the byte-identical self-reproducing fixed point of `lean_single.sio`. Patching
+the source without refreshing the ELF would land a red gate.
+
+Run on this branch:
+
+```
+[canonical-compiler] bin/souc md5     = 25fb229c2bf68e94b17ba5d9bc79174f
+[canonical-compiler] self-compile md5 = 25fb229c2bf68e94b17ba5d9bc79174f
+[canonical-compiler] PASS: bin/souc IS the canonical self-reproducing fixed point
+```
+
+That it would fail otherwise is arithmetic on measured values, not an assertion:
+the shipped seed is `3a7a17a0…`, and that seed compiling this branch's source
+produces `397b88a3…`. The gate compares those two for equality.
+
+**Note that this gate was NOT RUNNING when the handoff was first delivered.** The
+`Contracts` job died at an earlier step from 2026-08-06 09:33Z until PR #1684,
+taking 30 later steps with it — this one included. So the first version of this
+handoff was verified against a gate that was switched off.
+
 ## Ownership
 
 This branch is a **handoff, not a claim**. The Madaros fixed-point lane declared
