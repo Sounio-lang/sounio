@@ -56,7 +56,7 @@ def load_items():
     return items
 
 
-def call_model(base_url, api_key, model, prompt, max_tokens=128, retries=4):
+def call_model(base_url, api_key, model, prompt, max_tokens=128, retries=8):
     last = None
     for attempt in range(retries):
         try:
