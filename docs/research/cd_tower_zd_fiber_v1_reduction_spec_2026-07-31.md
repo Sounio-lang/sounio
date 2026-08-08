@@ -6052,3 +6052,36 @@ close immediately from `P3_zero_seam`, `P3_seam_zero`, `P3_diag` and `P3 0 0 = 1
 **Residue of obligation (ii): the generic interior, and nothing else.** There the summand is
 `−(P1·P3)` and `P1·P3 = +1` iff `resB` (Tier 96), so what is left is exactly `resB` holding off the
 six lines — a mask statement, on lines the lane already has `resB` lemmas near.
+
+### §57.55 — a search for what closes the interior: two routes ruled out, one target sharpened
+
+The residue is the generic interior, where the claim reduces (proved) to `resB = true` off the six
+lines. I searched the file for what could close it. Three findings, reviewed:
+
+**(1) The statement already exists — and its proof does not generalise.** `resB_pow2_top` IS the
+interior statement, with exactly the right hypothesis set, but only for the label `W = 2^n`. Its
+proof goes through `P1_pow2_top`/`P3_pow2_top`, which say that at the maximal seam BOTH matrices are
+RANK-ONE (`muTop l · muTop y`). That cannot hold at other labels: if `P3` were rank-one at every
+label, every triple product would be `+1` and `tri3` would be label-independent, contradicting the
+deviation law itself. Confirmed `[OK]`. So the existing theorem is not a special case of a general
+technique — it is special because the maximal seam is degenerate.
+
+**(2) A measured equivalence that is content-free as a route.** `resB` off the six lines is exactly
+the fibre antisymmetry of `P3`: `resB(l,y,W,m) ⟺ P3 (l⊕W) y = − P3 l y`, 28728/28728. But `core_P3`
+gives `P3 (l⊕W) y = − P1 l y` unconditionally, so the equivalence is `P1 = P3` rearranged. The
+reviewer's correction to my wording, adopted: it is not a *tautology*, it is **definitionally
+equivalent mod `core_P3`** — content-free as a proof strategy, which is the operative point. Note
+also that the lane's existing fibre antisymmetry for `A_σ` does NOT discharge this, because there
+the mask is part of the definition.
+
+**(3) The interior statement holds for a label iff `g(W) = 0`** — the lane's own fibre invariant,
+measured exact at `m = 3,4,5`. My proposed next target was "connect interior `resB` to `g`", and the
+reviewer marked that `[OVERREACH]`: a coincidence does not by itself give a proof direction, and
+routing through `g` helps only if the existing `g`-tier already classifies `g = 0` by an algebraic
+criterion that implies `P1 = P3` off the six lines — otherwise it is finding (2) again, one
+restatement further out.
+
+**The sharpened target, in the reviewer's formulation:** characterise directly the labels `W` for
+which `P1(·,·,W) = P3(·,·,W)` off the six lines — via the carry/bit structure of `W` — and only then
+match that set against `g⁻¹(0)`. That is a statement about the cocycle's bit arithmetic, which is
+the kind of thing this file's `R_*` machinery is built for.
