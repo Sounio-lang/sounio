@@ -5841,3 +5841,73 @@ numbers independently (2016, 10080, 44640 against `288·{7,35,155}`). The mask i
 artifact reading, and corrected two accounting slips of mine: the 13-component tally (3 dynamic + 8
 closed forms + 2 bookkeeping, not "8 + 3"), and that the augmentation needs `H²`, which is not in
 `span{1, H}` because `cp3` carries `24H²`.
+
+### §57.50 — the three obligations, made exact (and what "prove" still costs)
+
+§57.49 left the deviation law resting on three obligations stated in words. Each is now an exact
+identity, verified; none is yet a Lean theorem, and the honest report is that converting them cost
+one afternoon and proving them will cost tiers.
+
+**(i) The transfer step.** Not decomposable into the three ε-sums separately — measured, `T1`, `T2`
+and `T3` are each OUTSIDE the span of `{s3, cp2, cp3, 1, H, H², H³}`; only their combination is
+inside it. So the obligation is exactly
+
+    3·T1 + 3·T2 + T3 = 7·s3 + 24·cp2 − 176 + 72H        [139/139, m = 3..7, all labels < 32]
+
+with `T1`, `T2`, `T3` the sums Tier 90 already produced as theorems. That the pieces do not close
+but the combination does is information — the closure is a property of the orthant SUM.
+
+⚠ It is NOT, however, evidence that evaluating the three separately is a harder problem, which is
+what I first wrote. Both reviewers rejected the inference: falling outside one probed 7-element span
+says nothing about a larger natural basis (more fibre invariants, parity projectors, `tr(M)`-type
+terms), and in a bigger basis the separate route may reduce to cross-cancellation of the
+out-of-basis parts. The honest statement is that the combination closes in THIS basis and the pieces
+do not; which route is easier is untested.
+
+(A by-product, worth its own look: `T1 − T2` is label-independent off the maximal seam — 1408 at
+`m = 5` for every label tested except `W = 2^m`.)
+
+**(ii) The coset coordinate on the references.** Stronger and cleaner than "Δcp2 = 0": `cp2` is
+FIBRE-CONSTANT — it depends on the label only through `g = (W ∧ (W−1)) ≫ 3`, and the classes match
+exactly (30/30 classes, `m = 3..6`). On the reference class it has a closed form:
+
+    cp2 = −(H−2)(H−6)   for every W with g(W) = 0    [50/50, m = 3..7]
+
+Since every reference label `W = 2^j` has `g = 0`, `Δcp2 = 0` follows. This is a better target than
+the difference: an equality of two unknowns became a closed form, and the lane already has
+fibre-invariance machinery for `g` (Tier 23, proven end to end for the count `N`).
+
+**(iii) The base case.** Exact, at every level tested:
+
+    s3(2^m) − s3(1) = 1728 · [m,3]₂          [m = 3..7]
+
+i.e. the q-binomial enters once, as the gap between the maximal seam and the `g = 0` reference at
+the level where the label first exists. Both ends are wanted as closed forms; the maximal seam
+should be the easier one, since Tier 65 already proves `P3` is coherent there (every triple product
+`+1`), which is exactly the structure that makes such a sum computable.
+
+**(0) The obligation I had not listed — and both reviewers found it.** The chain "(i) ⇒ within-fibre
+differences obey the homogeneous 2×2 ⇒ Δs3 scales by 8" hides a step. For `Δcp2 = 0` at one level to
+stay zero at the next, the system must be UPPER-TRIANGULAR — `M₂₁ = 0`, i.e. `cp2`'s evolution must
+not depend on `s3`. That is the second measured line,
+
+    cp2(m+1) = 4·cp2(m) + 36 − 16H        [measured, 75 + 92 transitions]
+
+and I had listed only the `s3` line as an obligation. zai isolated it exactly; grok made the same
+point as "the 2×2 must be derived from the rewritten transfer map, and that derivation is an
+unlisted obligation".
+
+**And that is the argument for (ii)'s absolute form that I could not give when asked.** grok's
+`[TIGHTENABLE]` on "better proof target" was that stronger ≠ better, since the chain only needs the
+difference to vanish. It is better, for a reason neither of us stated at the time: if `cp2` is
+pinned ABSOLUTELY on the `g = 0` class, then `Δcp2 = 0` holds at every level directly, with no
+propagation argument — so obligation (0) is discharged for free rather than added. The absolute form
+removes an obligation instead of creating one.
+
+**Status, stated plainly: four obligations, each now an exact identity verified over the accessible
+range. NONE is proven, and "the deviation law reduces to these" is not yet earned** — grok:
+"not entitled yet — isolate the 2×2 step before claiming reduction". What is earned: the law is now
+a finite, explicitly listed set of statements instead of an open conjecture. The remaining Lean work
+is a tier apiece at least — (0) and (i) evaluations of orthant sums, (ii) a fibre-invariance plus a
+closed-form count, (iii) two closed forms — and nothing in §57.49 or here should be read as more
+than measured until they are done.
