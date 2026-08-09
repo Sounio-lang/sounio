@@ -15812,6 +15812,16 @@ theorem four_factor_cornerWW (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
     bit-arithmetic equivalence: what the deviation law needs is that every reference label `W = 2^j`
     is in the class, which is one line.
 
+    ⚠ So the headline — the bit characterisation — is PROSE AND MEASUREMENT here, not Lean.  Two
+    reviewers split on whether that matters: one called it cosmetic debt worth paying and estimated
+    "a 5-line lemma"; the other called the omission proper definitional hygiene.  I tested the cost
+    rather than picking a side.  `grind` does not close the equivalence; the easy leg
+    (`W < 8 → W ∧ (W−1) < 8`) is two lines via `Nat.and_le_right`, but `2^p ∧ (2^p − 1) = 0` and the
+    whole forward direction need real bit induction, which this Mathlib-free file has no `&&&`
+    machinery for beyond `and_one_testBit`.  It is not a five-line lemma.  The debt is therefore
+    left standing DELIBERATELY, and named here so the docstring no longer advertises more than the
+    file carries.
+
     ⚠ The interior statement for this class remains OPEN.  What is proved is its `W = 2^n` case,
     `resB_pow2_top` — and §57.55 records why that proof does not generalise (at the maximal seam
     both matrices are rank-one, which cannot hold at other labels). -/
