@@ -7,7 +7,7 @@
 module native::codegen_x86_linux
 
 use parser::ast::{Name}
-use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_MAX_FUNCS, IR_MAX_STRINGS, IR_FLOAT_REG_MARKER_FLAG, ir_name_eq, BSS_BASE_LINUX, IR_STRATEGY_BSS_GLOBAL, BSS_INIT_STRING_MAGIC}
+use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_MAX_FUNCS, IR_MAX_STRINGS, IR_FLOAT_REG_MARKER_FLAG, ir_name_eq, BSS_BASE_LINUX, IR_STRATEGY_BSS_GLOBAL, BSS_INIT_STRING_MAGIC, IR_FLOAT_BITS_TRUSTED, IR_FLOAT_NO_MARKERS, ir_float_bits_get, ir_float_bits_capacity}
 use native::encode::*
 use native::elf::*
 use native::aarch64::*
@@ -7298,6 +7298,14 @@ fn nc_core_emit_println_i64_literal_sentinel_into(nc: &! NativeCompiler, value: 
 // lowering imm_flags bits (their loadimm+marker pair makes them CONFLICT here).
 fn nc_compute_float_types(nc: &! NativeCompiler, func: &IrFunction) with Mut, Panic, Div {
     var ty: [i64; 2048] = [0; 2048]
+    // #1669: seed the lattice from the function-scoped bits. Equivalent to the
+    // marker-as-definition join -- join(UNKNOWN, FLOAT) = FLOAT -- and a later
+    // int def still drives the register to CONFLICT.
+    var fb: i64 = 0
+    while fb < ir_float_bits_capacity() && IR_FLOAT_BITS_TRUSTED == 1 {
+        if ir_float_bits_get(func, fb) { ty[fb as usize] = 1 }
+        fb = fb + 1
+    }
     var changed = true
     var iters = 0
     while changed && iters < 24 {
@@ -7403,6 +7411,19 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
     var i = 0
     while i < (*func).instr_count && i < IR_MAX_INSTRS {
         let instr_op = (*func).instrs[i as usize].op
+        // #1669 POSITIONAL RE-ASSERT. A pre-mark done before the stream is
+        // walked gets clobbered by anything that marks the register int later;
+        // the marker nop works precisely because it is honoured AT ITS POSITION.
+        // Re-asserting the bit for the register this instruction defines makes
+        // the bits positional too, at O(1) per instruction. (An earlier version
+        // re-asserted all 2048 bits per instruction and made the compiler too
+        // slow to compile itself.)
+        if IR_FLOAT_BITS_TRUSTED == 1 {
+            let rdst = (*func).instrs[i as usize].dst
+            if rdst >= 0 && rdst < ir_float_bits_capacity() && ir_float_bits_get(func, rdst) {
+                nc_core_mark_float_reg(nc, rdst)
+            }
+        }
         if instr_op == IrOpcode::IrNop && (*func).instrs[i as usize].imm_flags == IR_FLOAT_REG_MARKER_FLAG {
             let mark_reg = (*func).instrs[i as usize].dst
             // Always honor an explicit float-marker IrNop. The previous guard
@@ -7413,7 +7434,13 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             // neutralizer; #478 is now fixed at source in lower.sio, so this marker
             // is only emitted for genuinely-float values. nc_core_mark_float_reg
             // bounds-checks internally.
-            nc_core_mark_float_reg(nc, mark_reg)
+            // The IR_FLOAT_NO_MARKERS switch belongs HERE, not on the arm's
+            // condition: guarding the condition makes a marker nop fall through
+            // to the following `else if` arms and changes emission rather than
+            // just withholding the mark.
+            if IR_FLOAT_NO_MARKERS == 0 {
+                nc_core_mark_float_reg(nc, mark_reg)
+            }
         } else if instr_op == IrOpcode::IrLoadImm {
             let imm_value = (*func).instrs[i as usize].imm_i64
             if imm_value == (0 - 4242) {

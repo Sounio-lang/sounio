@@ -5,7 +5,7 @@
 module native::machine_ir
 
 use parser::ast::{Name, BinaryOp, UnaryOp, empty_name}
-use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IrRegList, BSS_BASE_LINUX, IR_FLOAT_REG_MARKER_FLAG}
+use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IrRegList, BSS_BASE_LINUX, IR_FLOAT_REG_MARKER_FLAG, IR_FLOAT_NO_MARKERS, IR_FLOAT_BITS_TRUSTED, ir_float_bits_get, ir_float_bits_capacity}
 
 pub let MIR_MAX_BLOCKS: i64 = 1
 // MIR_MAX_INSTRS history:
@@ -1007,11 +1007,20 @@ pub fn native_v2_legalize_ir_summary_ref(func: &IrFunction) -> NativeV2LegalizeS
     }
 
     var is_float_slot: [i64; 2048] = [0; 2048]
+    // #1669: seed from the function-scoped bits, then keep the in-stream marker
+    // arm below. A union: the bits are the durable channel, the markers the
+    // legacy one, and any disagreement is measurable rather than guessed.
+    var sfb: i64 = 0
+    while sfb < ir_float_bits_capacity() && sfb < MIR_MAX_FLOAT_SLOTS && IR_FLOAT_BITS_TRUSTED == 1 {
+        if ir_float_bits_get(func, sfb) { is_float_slot[sfb as usize] = 1 }
+        sfb = sfb + 1
+    }
     var i: i64 = 0
     while i < (*func).instr_count {
         let instr = (*func).instrs[i as usize]
         if instr.op == IrOpcode::IrNop {
-            if instr.imm_flags == IR_FLOAT_REG_MARKER_FLAG && instr.dst >= 0 && instr.dst < MIR_MAX_FLOAT_SLOTS {
+            if instr.imm_flags == IR_FLOAT_REG_MARKER_FLAG && instr.dst >= 0 && instr.dst < MIR_MAX_FLOAT_SLOTS
+                && IR_FLOAT_NO_MARKERS == 0 {
                 is_float_slot[instr.dst as usize] = 1
             }
             i = i + 1
@@ -1156,7 +1165,8 @@ pub fn native_v2_lower_legal_function_from_ir_ref(func: &IrFunction, out: &! Mac
     while i < (*func).instr_count {
         let ir_instr = (*func).instrs[i as usize]
         if ir_instr.op == IrOpcode::IrNop {
-            if ir_instr.imm_flags == IR_FLOAT_REG_MARKER_FLAG && ir_instr.dst >= 0 && ir_instr.dst < MIR_MAX_FLOAT_SLOTS {
+            if ir_instr.imm_flags == IR_FLOAT_REG_MARKER_FLAG && ir_instr.dst >= 0 && ir_instr.dst < MIR_MAX_FLOAT_SLOTS
+                && IR_FLOAT_NO_MARKERS == 0 {
                 (*out).is_float_slot[ir_instr.dst as usize] = 1
             }
             i = i + 1

@@ -65,6 +65,79 @@ let SOUNIO_RUNTIME_VERSION_MINOR: i64 = 0
 let SOUNIO_RUNTIME_VERSION_PATCH: i64 = 0
 pub let IR_FLOAT_REG_MARKER_FLAG: i64 = 64064
 
+
+// ── #1669: float-ness carried on the REGISTER ────────────────────────────────
+//
+// The marker IrNop above says "this register holds an f64", but it says it as an
+// instruction, and an instruction can be deleted. ocp_mfi_compact_nops deleted
+// every nop including these, and every f64 returned from a call came back as
+// i64 MAX -- silently, under -O only. This bitset is the same fact attached to
+// the function, where no pass can drop it.
+//
+// The in-stream markers are KEPT. This is a union, not a replacement: the bits
+// are the durable channel, the markers are the legacy one, and they are measured
+// against each other rather than assumed to agree.
+
+pub fn ir_float_bits_capacity() -> i64 { 2048 }
+
+// Float marks for vregs above the cap cannot be represented here, and codegen's
+// fixpoint is then the only channel. Counted rather than fatal.
+pub var IR_FLOAT_BITS_OVER_CAP: i64 = 0
+
+// Evidence accumulated in globals and printed from the driver: the hot sites
+// carry no IO, and widening them would cascade the effect to every caller.
+pub var IR_FLOAT_BITS_WRITES: i64 = 0
+pub var IR_FLOAT_BITS_GETS: i64 = 0
+
+// TRUSTED=1: consumers seed from the bits. Landed with the measurement, not on
+// faith -- 390 float-bearing run-pass tests compiled AND RUN under -O with the
+// in-stream markers suppressed (IR_FLOAT_NO_MARKERS=1) match their markers-on
+// baseline 390/390, while the same suppression on a compiler without the
+// positional fix changes the output of 169 of them. Emitted code is unchanged.
+pub let IR_FLOAT_BITS_TRUSTED: i64 = 1
+
+// Test switch: when 1, the in-stream marker arms are skipped so the bits stand
+// alone. This is how the claim above is checked, and how it stays checkable.
+// A global rather than read_env at each site because read_env carries IO.
+pub var IR_FLOAT_NO_MARKERS: i64 = 0
+
+fn ir_float_bit_mask(bit: i64) -> i64 {
+    var m: i64 = 1
+    var k: i64 = 0
+    while k < bit {
+        m = m * 2
+        k = k + 1
+    }
+    m
+}
+
+pub fn ir_float_bits_get(f: &IrFunction, reg: i64) -> bool with Mut, Panic, Div {
+    if reg < 0 || reg >= ir_float_bits_capacity() { return false }
+    let word = reg / 32
+    let bit = reg % 32
+    let hit = ((*f).float_reg_bits[word as usize] / ir_float_bit_mask(bit)) % 2 == 1
+    if hit { IR_FLOAT_BITS_GETS = IR_FLOAT_BITS_GETS + 1 }
+    hit
+}
+
+pub fn ir_float_bits_set(f: &! IrFunction, reg: i64) -> i64 with Mut, Panic, Div {
+    if reg < 0 {
+        return 0
+    }
+    if reg >= ir_float_bits_capacity() {
+        IR_FLOAT_BITS_OVER_CAP = IR_FLOAT_BITS_OVER_CAP + 1
+        return 0
+    }
+    let word = reg / 32
+    let bit = reg % 32
+    let mask = ir_float_bit_mask(bit)
+    if ((*f).float_reg_bits[word as usize] / mask) % 2 == 0 {
+        (*f).float_reg_bits[word as usize] = (*f).float_reg_bits[word as usize] + mask
+        IR_FLOAT_BITS_WRITES = IR_FLOAT_BITS_WRITES + 1
+    }
+    1
+}
+
 pub enum IrOpcode {
     IrLoadImm,
     IrLoadFloat,
@@ -735,6 +808,12 @@ pub struct IrFunction {
     // 1 = first param is &T / &!T (method self-by-ref). Call sites must pass an
     // address; bare-value receivers need auto-OpRef (Root 2 method fix).
     pub first_param_is_ref: i64,
+    // #1669: which vregs hold an f64, as a function-scoped bitset. Float-ness is
+    // a property of the VALUE; before this it lived only on an IrNop carrying
+    // IR_FLOAT_REG_MARKER_FLAG, which any pass is entitled to treat as dead --
+    // and one did, so every f64 returned from a call came back as i64 MAX.
+    // 64 words x 32 bits = 2048 vregs; see ir_float_bits_capacity.
+    pub float_reg_bits: [i64; 64],
 }
 
 pub struct IrAlgebraInfo {
@@ -3749,6 +3828,7 @@ pub fn ir_empty_function() -> IrFunction {
         sret_dest_reg: -1,
         bss_size: 0,
         first_param_is_ref: 0,
+        float_reg_bits: [0; 64],
     }
 }
 
