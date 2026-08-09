@@ -6396,3 +6396,28 @@ hosted one at this input size**, and the review of Tiers 105 and 106 remains unp
 **The interior obligation is now exactly two mechanical bridges away:** `P1 = P3 ↔ starP` on the
 interior (the `R_*` reduction of §57.57, derived on paper and never formalised), and
 `octCheck = true → ∀`-form. Everything mathematical — step, borders, lift, descent — is proved.
+
+### §57.67 — Tier 107: both bridges, and the interior CLOSES for the octonion labels
+
+**Bridge 1** formalises §57.57's paper derivation at last: applying `R_ll`, `R_uu`, `R_lu`, `R_ul` to
+`P1` and `P3` reduces their equality, on the interior, to the single-level identity `(*)`. The two
+`if` branches that appear are exactly the interior's `y ≠ 0` and `y ⊕ W ≠ 0` — the hypotheses were
+not chosen for convenience, they are what the reductions demand. 0 violations / 33456.
+
+**Bridge 2** unpacks Tier 104's `octCheck = true` through `List.all_eq_true` and `List.mem_range`
+into the quantified form. It needs only `[propext, Quot.sound]` — no `Classical.choice` — the purest
+theorem in the arc.
+
+**And they close the first label family end to end.** `starP_all_octonion_labels`: for every
+`W < 8`, `W ≠ 0`, the identity `(*)` holds at EVERY level on the whole interior — the descent of
+Tier 106 fed by the octonion bottom. 0 violations / 7224 measured.
+
+**Ledger for the interior obligation.**
+
+    step, borders, lift, descent            proved (Tiers 100–106)
+    bridge P1 = P3 ↔ starP                  proved (here)
+    bottom, octonions → ∀-form              proved (here)
+    octonion labels, all levels             PROVED end to end (here)
+    power-of-two labels                     bottom is the maximal seam, a theorem since Tier 57;
+                                            chaining it needs the same three lines as the octonion
+                                            case and is NOT written

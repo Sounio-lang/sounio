@@ -16398,4 +16398,60 @@ theorem starP_descend (W k : Nat) (hW0 : W ≠ 0) (hWk : W < 2^(k+1))
       have := ihj x z (by rw [hlvl']; exact hx) (by rw [hlvl']; exact hz) hx0 hz0 hxW hzW hxz hxcos
       rwa [hlvl'] at this
 
+/-! ### Tier 107 — the two BRIDGES, and the interior obligation closes
+
+    Everything mathematical for the interior is proved.  What remained were two bridges, both
+    mechanical, and both are here.
+
+    **Bridge 1, `P1 = P3 ↔ starP`.**  §57.57 derived on paper that applying the four `R_*` rules to
+    `P1` and `P3` reduces their equality, on the interior, to the single-level identity `(*)`.  That
+    derivation was never formalised; this is it.  The four reductions are `R_ll`, `R_uu`, `R_lu`,
+    `R_ul`, and the two `if` branches are exactly the interior's `y ≠ 0` and `y ⊕ W ≠ 0`.
+
+    **Bridge 2, the octonion bottom as a `∀`-statement.**  Tier 104 verified `octCheck = true` by
+    `decide`; this unpacks it through `List.all_eq_true` and `List.mem_range` into the quantified
+    form the descent consumes.  Nothing is computed here that was not computed there. -/
+
+/-- **BRIDGE 1.**  On the interior, `P1 = P3` IS the single-level identity `(*)`. -/
+theorem P1_eq_P3_iff_starP (m l y W : Nat) (hl : l < 2^(m+1)) (hy : y < 2^(m+1))
+    (hW : W < 2^(m+1)) (hy0 : y ≠ 0) (hyW0 : y ^^^ W ≠ 0) :
+    P1 l y W m = P3 l y W m ↔ starP (m+1) l y W := by
+  have hlW : l ^^^ W < 2^(m+1) := xorlt hl hW
+  have hyW : y ^^^ W < 2^(m+1) := xorlt hy hW
+  unfold P1 P3 hi starP
+  rw [R_ll l y m hl hy,
+      R_uu (l ^^^ W) (y ^^^ W) m hlW hyW, if_neg hyW0,
+      R_lu l (y ^^^ W) m hl hyW,
+      R_ul (l ^^^ W) y m hlW hy, if_neg hy0]
+  constructor
+  · intro h; grind
+  · intro h; grind
+
+/-- **BRIDGE 2.**  Tier 104's verified computation, in the quantified form the descent consumes. -/
+theorem starP_octonion (l y W : Nat) (hl : l < 8) (hy : y < 8) (hW : W < 8)
+    (hW0 : W ≠ 0) (hl0 : l ≠ 0) (hy0 : y ≠ 0) (hlW : l ≠ W) (hyW : y ≠ W)
+    (hly : l ≠ y) (hcos : y ≠ l ^^^ W) : starP 3 l y W := by
+  have h := octCheck_true
+  unfold octCheck at h
+  rw [List.all_eq_true] at h
+  have h1 := h l (List.mem_range.mpr hl)
+  rw [List.all_eq_true] at h1
+  have h2 := h1 y (List.mem_range.mpr hy)
+  rw [List.all_eq_true] at h2
+  have h3 := h2 W (List.mem_range.mpr hW)
+  unfold starP
+  simp [hW0, hl0, hy0, hlW, hyW, hly, hcos] at h3
+  exact h3
+
+/-- **THE PAYOFF.**  For every octonion label — `W < 8`, `W ≠ 0` — the identity `(*)` holds at EVERY
+    level, on the whole interior.  Descent (Tier 106) fed by the octonion bottom (Bridge 2).  This
+    is the first label family for which the interior obligation is closed end to end. -/
+theorem starP_all_octonion_labels (W : Nat) (hW0 : W ≠ 0) (hW : W < 8) :
+    ∀ j a b, a < 2^(3+j) → b < 2^(3+j) → a ≠ 0 → b ≠ 0 → a ≠ W → b ≠ W → a ≠ b →
+      b ≠ a ^^^ W → starP (3+j) a b W := by
+  have h := starP_descend W 2 hW0 (by simpa using hW)
+    (fun a b ha hb ha0 hb0 haW hbW hab hcos =>
+      starP_octonion a b W (by simpa using ha) (by simpa using hb) hW hW0 ha0 hb0 haW hbW hab hcos)
+  simpa using h
+
 end SounioZDFiberAntisym
