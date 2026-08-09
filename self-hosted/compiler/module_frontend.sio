@@ -7,7 +7,7 @@ use parser::ast::{AstPath, empty_path, Item, ItemKind, ItemList, Name, ParamList
 use parser::mod::{count_items}
 use parser::parser::{parser_last_error_count, parser_reset_last_errors}
 use ir::ir::*
-use ir::opt_cleanup::{OcpCleanupModuleReceipt, opt_cleanup_module_inplace}
+use ir::opt_cleanup::{OcpCleanupModuleReceipt, opt_cleanup_module_inplace, OCP_SKIP_MASK}
 use io::env::{read_env}
 use io::trace::{io_trace_i64_string}
 use check::mod::{check_items_verdict_boot4, check_items_verdict_boot4_with_ontocache_sidecar, check_modules_verdict_boot4, check_program_epistemic_into, check_program_with_artifacts, checker_to_ir_epistemic_into, checker_apply_ir_metadata, checker_apply_ir_ontology_parameter_links_from_items}
@@ -6138,11 +6138,33 @@ fn module_frontend_merge_imported_into_box(
     true
 }
 
+// Load the per-peel kill switch once, here: this compile entry already carries
+// IO, and the peels it gates do not. One env var per peel rather than an integer
+// mask, so the peel's name appears in the command line that reproduced a bug.
+fn module_frontend_load_ocp_skip_mask() with IO, Mut, Panic, Div {
+    var m: i64 = 0
+    if str_eq(read_env("SOUNIO_OCP_SKIP_DEDUP_IMM"), "1")       { m = m + 1 }
+    if str_eq(read_env("SOUNIO_OCP_SKIP_CONST_FOLD"), "1")      { m = m + 2 }
+    if str_eq(read_env("SOUNIO_OCP_SKIP_COPY_PROP"), "1")       { m = m + 4 }
+    if str_eq(read_env("SOUNIO_OCP_SKIP_DSE"), "1")             { m = m + 8 }
+    if str_eq(read_env("SOUNIO_OCP_SKIP_REDUNDANT_JUMP"), "1")  { m = m + 16 }
+    if str_eq(read_env("SOUNIO_OCP_SKIP_JUMP_TO_RETURN"), "1")  { m = m + 32 }
+    if str_eq(read_env("SOUNIO_OCP_SKIP_DEAD_AFTER_JUMP"), "1") { m = m + 64 }
+    if str_eq(read_env("SOUNIO_OCP_SKIP_DEAD_LABEL"), "1")      { m = m + 128 }
+    if str_eq(read_env("SOUNIO_OCP_SKIP_CSE"), "1")             { m = m + 256 }
+    if str_eq(read_env("SOUNIO_OCP_SKIP_DCE_LOOP"), "1")        { m = m + 512 }
+    if str_eq(read_env("SOUNIO_OCP_SKIP_SCCP"), "1")            { m = m + 1024 }
+    if str_eq(read_env("SOUNIO_OCP_SKIP_DCE_FINAL"), "1")       { m = m + 2048 }
+    if str_eq(read_env("SOUNIO_OCP_SKIP_COMPACT_NOPS"), "1")    { m = m + 4096 }
+    OCP_SKIP_MASK = m
+}
+
 pub fn module_frontend_compile_imported_to_file(
     main_path: string,
     output_path: string,
     optimize: bool,
 ) -> i32 with IO, Mut, Div, Panic, Alloc {
+    module_frontend_load_ocp_skip_mask()
     parser_reset_last_errors()
     // One reset + suppress for the full multi-mod load/typecheck/lower window so
     // imported module f64 constants (e.g. stats::densities::DE_LN_SQRT_2PI) remain
