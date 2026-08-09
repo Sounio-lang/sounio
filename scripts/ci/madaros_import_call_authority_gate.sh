@@ -144,6 +144,13 @@ grep -Fq 'ir_name_eq((*binding).local_name, local_name)' "$FRONTEND" || fail bar
 grep -Fq 'ir_name_eq((*binding).export_name, export_name)' "$FRONTEND" || fail qualified_export_identity_missing
 grep -Fq 'module_frontend_call_path_has_import_prefix(' "$FRONTEND" || fail qualified_structural_prefix_missing
 grep -Fq 'module_frontend_copy_ast_path_into(' "$FRONTEND" || fail qualified_binding_path_deep_copy_missing
+grep -Fq 'let qualifier_path_handle = heap_alloc(1024) as *mut AstPath' "$FRONTEND" ||
+  fail qualified_binding_path_handle_missing
+grep -Fq '&!(*qualifier_path_handle),' "$FRONTEND" || fail qualified_binding_path_handle_not_collected
+grep -Fq '&(*qualifier_path_handle),' "$FRONTEND" || fail qualified_binding_path_handle_not_appended
+if grep -Fq 'var qualifier_path = empty_path()' <<<"$(sed -n '/^fn module_frontend_collect_external_binding_name(/,/^fn module_frontend_collect_external_impl_bindings(/p' "$FRONTEND")"; then
+  fail qualified_binding_path_stack_local_reintroduced
+fi
 if grep -Fq '(*binding).qualifier_path = (*qualifier_path)' "$FRONTEND"; then
   fail qualified_binding_path_aggregate_copy_reintroduced
 fi
