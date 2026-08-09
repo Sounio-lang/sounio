@@ -9302,6 +9302,43 @@ fn ocp_mfi_dce_once(module: &! IrModule, fi: i64) -> i64 with Mut, Div, Panic {
         if s2 >= 0 && s2 < 256 {
             used[s2 as usize] = true
         }
+        // #1682: NOT EVERY REGISTER USE LIVES IN src1/src2. This scan assumed it
+        // did, and two operand classes were invisible to it.
+        //
+        // IrIndexSet's THIRD operand -- the value being stored -- is parked in
+        // `imm_i64` (see ir_index_set), because IrInstr has only two source
+        // slots. An IMMEDIATE field holding a REGISTER is exactly what a liveness
+        // scan will not look at. `var a: [i64; 4] = [7; 4]` lowers to a fill loop
+        // whose only use of the 7 is that field, so the load_imm defining it was
+        // deleted as dead and the array was filled with garbage.
+        //
+        // ocp_rebracket_source_use_count already counted this operand. Two
+        // use-scanners disagreed, and the one that deletes was the wrong one.
+        if (*module).functions[fi as usize].instrs[i as usize].op == IrOpcode::IrIndexSet {
+            let v = (*module).functions[fi as usize].instrs[i as usize].imm_i64
+            if v >= 0 && v < 256 {
+                used[v as usize] = true
+            }
+        }
+        // Call arguments beyond the first two. ir_reg_list_first_two mirrors args
+        // 0 and 1 into src1/src2, so a two-argument call was already covered by
+        // accident; the THIRD argument onwards was not. Walking the chain needs no
+        // allocation -- same read-only shape mf_arebox_extract_at uses.
+        var arg_cur = (*module).functions[fi as usize].instrs[i as usize].call_args
+        var guard: i64 = 0
+        while guard < 64 {
+            match arg_cur {
+                Some(node) => {
+                    let h = (*node).head
+                    if h >= 0 && h < 256 {
+                        used[h as usize] = true
+                    }
+                    arg_cur = (*node).tail
+                    guard = guard + 1
+                }
+                _ => { guard = 64 }
+            }
+        }
         i = i + 1
     }
     var removed: i64 = 0

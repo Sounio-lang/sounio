@@ -3,7 +3,8 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
-export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT/stdlib}"
+# Always pin this worktree's stdlib (never inherit a foreign SOUNIO_STDLIB_PATH).
+export SOUNIO_STDLIB_PATH="$ROOT/stdlib"
 unset SOUNIO_SOUC_ENGINE || true
 SOUC="${SOUC:-$ROOT/bin/souc}"
 SRC="tests/run-pass/validation_madaros_import_smoke.sio"

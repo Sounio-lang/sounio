@@ -5,7 +5,8 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
-export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT/stdlib}"
+# Always pin this worktree's stdlib (never inherit a foreign SOUNIO_STDLIB_PATH).
+export SOUNIO_STDLIB_PATH="$ROOT/stdlib"
 # Force default Madaros (do not inherit lean_single from caller)
 unset SOUNIO_SOUC_ENGINE || true
 SOUC="${SOUC:-$ROOT/bin/souc}"

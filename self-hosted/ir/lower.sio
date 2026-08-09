@@ -9893,6 +9893,12 @@ impl Lowerer {
             }
         }
         if (*e).kind == ExprKind::ExprMethodCall {
+            // Intrinsic `.len()` on arrays/slices/strings → i64. Without this,
+            // lowering emits IrArrayLen (no fn symbol), so the mangled-method
+            // lookup below misses and kind stays 0 → println's char* printer SEGVs.
+            if ir_name_eq((*e).name, make_name("len")) {
+                return 1
+            }
             let recv_type = self.lower_method_recv_type(&(*e).left)
             let call_name = if recv_type.len > 0 { ir_mangle_method_name(recv_type, (*e).name) } else { (*e).name }
             let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, call_name)
@@ -14631,7 +14637,23 @@ impl Lowerer {
         match *left {
             Some(recv) => {
                 if (*recv).kind == ExprKind::ExprIdent {
-                    return self.lookup_local_struct_type((*recv).name)
+                    let struct_type = self.lookup_local_struct_type((*recv).name)
+                    if struct_type.len > 0 {
+                        return struct_type
+                    }
+                    // Primitive impl methods are registered under their builtin
+                    // type names (`i64_er_add`), not under the bare method name.
+                    // Locals retain scalar-kind metadata even though they have no
+                    // struct type; preserve it for dispatch or lowering invents a
+                    // body-less `er_add` function and native codegen dereferences it.
+                    let scalar_kind = self.lookup_local_scalar_kind((*recv).name)
+                    if scalar_kind == 2 {
+                        return make_name("f64")
+                    }
+                    if scalar_kind == 1 {
+                        return make_name("i64")
+                    }
+                    return ir_empty_name()
                 }
                 // Root 2 chain residual: method call on a method result.
                 // `a.add(&b).get()` — outer mangling needs the inner method's
@@ -14739,6 +14761,39 @@ impl Lowerer {
             let reg_u = pair_u.1
             lo_u = lo_u.emit(ir_load_imm(reg_u, 0))
             return (lo_u, reg_u)
+        }
+        // `.len()` is intrinsic for arrays and open slices. It is accepted by
+        // the checker, but lowering it as an ordinary method invents a body-less
+        // `len` function and crashes the native path. String locals retain their
+        // separate string-length lowering below.
+        if ir_name_eq(e.name, make_name("len")) {
+            match e.args {
+                None => {
+                    match e.left {
+                        Some(recv) => {
+                            if (*recv).kind == ExprKind::ExprIdent
+                                && self.lookup_local_scalar_kind((*recv).name) != 3 {
+                                let pair_b = self.lower_expr_ref(&(*recv))
+                                var lo = pair_b.0
+                                let base_reg = pair_b.1
+                                let pair_d = lo.fresh_reg()
+                                lo = pair_d.0
+                                let dst = pair_d.1
+                                var len_instr = ir_array_len(dst, base_reg)
+                                // A slice/reference parameter may be a bare handle, a
+                                // raw BSS address, or an explicit caller cell. Preserve
+                                // that distinction for the native resolver.
+                                if lo.lookup_local_is_ref((*recv).name) {
+                                    len_instr.label_id = 1
+                                }
+                                return (lo.emit(len_instr), dst)
+                            }
+                        }
+                        None => {}
+                    }
+                }
+                Some(_) => {}
+            }
         }
         // Impl methods are lowered as mangled free functions (ir_mangle_method_name).
         // A `recv.method()` call must resolve to that SAME mangled name; using the bare
