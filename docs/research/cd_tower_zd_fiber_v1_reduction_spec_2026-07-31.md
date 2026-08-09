@@ -6321,3 +6321,28 @@ families: proved (Tiers 101–103). Bottom, maximal seam: already a theorem (`re
 octonions: computed and kernel-checked, bridge pending. What is NOT assembled is the descent itself —
 the recursion that chains the step down to the bottom for a given label — and that is now the only
 structural piece left between this file and the interior for every reference label.
+
+### §57.64 — the lift: attempted, NOT landed, and what it costs
+
+The remaining structural piece is one theorem — `starP_lift`: `(*)` at level `n+1` implies `(*)` at
+level `n+2` for any label in the low half — assembling Tier 100's step with Tiers 101–103's borders.
+I wrote it and it does not compile. This section records the attempt honestly rather than leaving a
+false impression that the interior is closed.
+
+**The case tree, which is the content and which I believe is right.** Split `l` and `y` by the top
+bit; in each quadrant ask whether the HALVED pair is still interior. If yes, the matching step lemma
+applies to the induction hypothesis. If no, the halved pair violates one of six conditions, and each
+violation pins the ORIGINAL pair to a border lemma — e.g. `y₀ = 0` with `l` low forces
+`y = 2^(n+1)`, the hub column; `y₀ = l ⊕ W` is the top-bit border at `l ⊕ W` composed with
+`starP_flip`. Every leaf has a lemma; none is missing.
+
+**Why it did not land: 13 errors, and the dominant one is a trap this session has hit before.** The
+`subst` calls on `e2 : y₀ = W` eliminate `W` itself rather than `y₀`, so later references to `W`
+break; and several hypotheses are about the LIFTED index (`y₀ + 2^(n+1) ≠ 0`) where the lemma wants
+the halved one (`y₀ ≠ 0`). Both are mechanical, and both need iterations I did not have room for.
+The attempt is preserved at `scratchpad/tier105_attempt.lean`; the committed file is green.
+
+**So the ledger, exactly.** Proved: the induction step, all six border families, the maximal-seam
+bottom (from before this arc). Verified as computation: the octonion bottom. NOT done: the lift that
+chains them, and the two bridges (`P1 = P3 ↔ starP`, and `octCheck = true → ∀`-form). The interior
+is not closed, and nothing above should be read as closing it.
