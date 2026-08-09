@@ -140,16 +140,73 @@ def _assert_count_invariant(before: np.ndarray, after: np.ndarray) -> None:
 # ---------------------------------------------------------------
 
 def gen_dyck_word(n_pairs: int, rng: np.random.Generator) -> np.ndarray:
-    """Random balanced string via the ( A ) B decomposition."""
-    sys.setrecursionlimit(max(10000, 4 * n_pairs + 100))
+    """UNIFORM random Dyck word of semilength n_pairs (cycle lemma).
 
-    def rec(n: int) -> list:
-        if n == 0:
-            return []
-        k = int(rng.integers(n))
-        return [OPEN] + rec(k) + [CLOSE] + rec(n - 1 - k)
+    Amendment 2026-08-09 (pre-results): replaces the ( A ) B recursive
+    sampler, whose distribution is NOT invariant under the Task B
+    corruptions (mirror fallback reverses its size bias; the swap perturbs
+    its order statistics), which made the NEG arm separable above chance
+    (smoke seed 2026080900 / L=64: GRU 0.604). With a uniform sampler and
+    both NEG classes conditioned on admitting a swap (rejection, see
+    sample_arm), the two NEG classes are exactly identical in distribution
+    by construction: uniform-Dyck is preserved by the segment swap
+    (involution on words x qualifying pairs, qualifying-pair count
+    invariant), so any measured NEG separation is an implementation
+    artifact, as the freeze intends.
 
-    return np.array(rec(n_pairs), dtype=np.int64)
+    Method: uniform arrangement of n+1 OPEN / n CLOSE; rotate to start
+    after the LAST minimum of the partial-sum walk; drop the leading OPEN
+    (Dvoretzky-Motzkin cycle lemma; each Dyck word has exactly 2n+1
+    preimages, hence uniform).
+    """
+    if n_pairs < 1:
+        return np.array([], dtype=np.int64)
+    w = np.array([OPEN] * (n_pairs + 1) + [CLOSE] * n_pairs, dtype=np.int64)
+    rng.shuffle(w)
+    steps = np.where(w == OPEN, 1, -1)
+    s = np.concatenate([[0], np.cumsum(steps)])  # S_0 .. S_{2n+1}
+    m = int(np.max(np.nonzero(s == s.min())[0]))  # last minimizer
+    w2 = np.concatenate([w[m:], w[:m]])
+    if w2[0] != OPEN:  # cycle-lemma invariant; fail closed
+        raise ValueError("uniform Dyck sampler: rotation does not start OPEN")
+    out = w2[1:]
+    bal = np.cumsum(np.where(out == OPEN, 1, -1))
+    if not ((bal >= 0).all() and bal[-1] == 0):  # fail closed
+        raise ValueError("uniform Dyck sampler produced a non-Dyck word")
+    return out
+
+
+def has_qualifying_pair(tokens: np.ndarray) -> bool:
+    """True iff swap_corrupt would take the swap path (>= 2 top-level
+    substructures with a length-ratio pair in [0.5, 2])."""
+    _, segments = _matched_pairs(tokens)
+    for a in range(len(segments)):
+        for b in range(a + 1, len(segments)):
+            la = segments[a][1] - segments[a][0] + 1
+            lb = segments[b][1] - segments[b][0] + 1
+            if 0.5 <= la / lb <= 2.0:
+                return True
+    return False
+
+
+def verify_uniform_dyck(n_check: int = 4000) -> bool:
+    """Self-test of the uniform sampler. Fail closed.
+
+    n_pairs = 3 has C_3 = 5 Dyck words; a uniform sampler must hit each
+    with frequency 1/5. Chi-square against uniformity at a deterministic
+    seed; also checks Dyck validity (already asserted per-call).
+    """
+    from collections import Counter
+
+    rng = np.random.default_rng(20260809)
+    counts = Counter(_encode(gen_dyck_word(3, rng)) for _ in range(n_check))
+    expected = {"((()))", "(()())", "(())()", "()(())", "()()()"}
+    if set(counts) != expected:
+        raise ValueError(f"uniform Dyck sampler: wrong support {set(counts)}")
+    chi2 = sum((counts[w] - n_check / 5) ** 2 / (n_check / 5) for w in expected)
+    if chi2 > 9.488:  # chi2(df=4) 95% — deterministic seed, deterministic pass
+        raise ValueError(f"uniform Dyck sampler fails uniformity: chi2={chi2:.2f}")
+    return True
 
 
 # ---------------------------------------------------------------
