@@ -205,3 +205,33 @@ one model, naive metric only).
 - **S3 (the rescue test):** no model reaches directional ≥ 0.30 even under
   summary induction. If S3 fails, the positive hypothesis gains its first
   champion and the battery's null needs re-reading.
+
+## Induction #2 (hierarchical summarisation) — full results (2026-08-09)
+
+| model | framing flip/dir/recency | summary flip/dir/recency |
+|---|---|---|
+| grok-4.3 | 0.10 / 0.02 / 0.72 | 0.16 / 0.08 / 0.58 |
+| grok-4.5 | 0.16 / 0.08 / 0.74 | 0.20 / 0.12 / 0.54 |
+| glm-5.2 | 0.46 / 0.04 / 0.45 | 0.60 / 0.00 / 0.62 |
+| glm-4.7 | 0.30 / 0.02 / 0.68 | 0.24 / 0.08 / 0.62 |
+
+**Preregistration verdict:**
+- **S1 (directional rises for every model, ≤ 0.20): FALSIFIED as universal** —
+  3/4 rose (grok-4.3 0.02→0.08, grok-4.5 0.08→0.12, glm-4.7 0.02→0.08) but
+  glm-5.2 fell to zero (0.04→0.00). The rise is a property of anchored
+  models, not of the induction.
+- **S2 (flip rises for every model): FALSIFIED as universal** — 3/4 rose
+  (0.10→0.16, 0.16→0.20, 0.46→0.60) but glm-4.7 fell (0.30→0.24).
+- **S3 (no model directional ≥ 0.30): CONFIRMED** — battery-wide maximum
+  under literal composition is 0.12 (grok-4.5).
+
+**Synthesis.** Literal composition helps anchored models: modest directional
+gains (≤ 0.12) and a weakened recency anchor (0.72–0.74 → 0.54–0.58 for the
+groks). On the reactive outlier (glm-5.2) it amplifies volume without
+direction (flip 0.60, directional 0.00) and even re-anchors it on recency
+(0.45 → 0.62). glm-4.7 sits behaviourally closer to the groks than to its
+own family's flagship. Two inductions, nine model-runs, one robust null:
+**no measured model is bracket-steerable**; the associator exists as
+variance everywhere, as steering nowhere. The one lever that produced any
+direction at all is explicit composition — which is precisely the operation
+a non-associative semantic architecture would need to supply natively.
