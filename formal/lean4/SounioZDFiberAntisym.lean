@@ -16268,4 +16268,103 @@ set_option maxRecDepth 100000 in
 /-- **THE OCTONION BOTTOM.**  `(*)` holds at every interior point of level 3. -/
 theorem octCheck_true : octCheck = true := by decide
 
+/-! ### Tier 105 — THE LIFT: step and borders assembled into one level transfer
+
+    One theorem taking `(*)` at level `n+1` to `(*)` at level `n+2`, for any label in the low half.
+    Split `l` and `y` by the top bit; in each quadrant ask whether the HALVED pair is still interior.
+    If it is, Tier 100's step applies to the hypothesis.  If it is not, the halved pair violates one
+    of six conditions and each violation pins the original pair to a border lemma of Tiers 101–103.
+
+    Two of the leaves are not lemma applications but observations, and they are what makes the tree
+    finite: in the both-high quadrant `l₀ = y₀` forces `l = y`, and `y₀ = l₀ ⊕ W` forces
+    `y = l ⊕ W` — both excluded by the interior hypotheses, so those leaves are VACUOUS rather than
+    borders.  The corresponding leaves in the mixed quadrants are NOT vacuous (the top bits differ
+    there) and need the flip composed with the top-bit border.
+
+    ⚠ `subst` is avoided throughout.  On `y₀ = W` it eliminates `W` rather than `y₀` and every later
+    mention of the label breaks; rewriting the goal instead keeps the label. -/
+
+theorem starP_lift (n W : Nat) (hW : W < 2^(n+1)) (hW0 : W ≠ 0)
+    (ih : ∀ a b, a < 2^(n+1) → b < 2^(n+1) → a ≠ 0 → b ≠ 0 → a ≠ W → b ≠ W → a ≠ b →
+            b ≠ a ^^^ W → starP (n+1) a b W)
+    (l y : Nat) (hl : l < 2^(n+2)) (hy : y < 2^(n+2))
+    (hl0 : l ≠ 0) (hy0 : y ≠ 0) (hlW : l ≠ W) (hyW : y ≠ W) (hly : l ≠ y)
+    (hcos : y ≠ l ^^^ W) : starP (n+2) l y W := by
+  have hp := Nat.two_pow_pos (n+1)
+  have h2 : (2:Nat)^(n+2) = 2^(n+1) + 2^(n+1) := by rw [Nat.pow_succ]; omega
+  by_cases hlh : l < 2^(n+1)
+  · have hlWlt : l ^^^ W < 2^(n+1) := xorlt hlh hW
+    have hlW0 : l ^^^ W ≠ 0 := fun h => hlW (xor_zero_eq l W h)
+    by_cases hyh : y < 2^(n+1)
+    · exact starP_step_ll n l y W hlh hyh hW (ih l y hlh hyh hl0 hy0 hlW hyW hly hcos)
+    · obtain ⟨y₀, rfl⟩ : ∃ y₀, y = y₀ + 2^(n+1) := ⟨y - 2^(n+1), by omega⟩
+      have hy₀ : y₀ < 2^(n+1) := by omega
+      by_cases e1 : y₀ = 0
+      · rw [e1, Nat.zero_add]
+        exact starP_border_hubcol_lo n l W hlh hW hl0 hW0 hlW
+      · by_cases e2 : y₀ = W
+        · rw [e2]; exact starP_border_seamcol_lo n l W hlh hW hl0 hW0 hlW
+        · by_cases e3 : y₀ = l
+          · rw [e3]; exact starP_border_topbit n l W hlh hW hl0 hW0 hlW
+          · by_cases e4 : y₀ = l ^^^ W
+            · rw [e4]
+              have hb := starP_border_topbit n (l ^^^ W) W hlWlt hW hlW0 hW0
+                (fun h => hl0 (by rw [← xor_cancel l W, h, Nat.xor_self]))
+              have hf := starP_flip (n+2) (l ^^^ W) ((l ^^^ W) + 2^(n+1)) W hb
+              rwa [xor_cancel l W] at hf
+            · exact starP_step_lu n l y₀ W hlh hy₀ hW hl0 e1 hlW0 e3 e4
+                (ih l y₀ hlh hy₀ hl0 e1 hlW e2 (fun h => e3 h.symm) e4)
+  · obtain ⟨l₀, rfl⟩ : ∃ l₀, l = l₀ + 2^(n+1) := ⟨l - 2^(n+1), by omega⟩
+    have hl₀ : l₀ < 2^(n+1) := by omega
+    by_cases hyh : y < 2^(n+1)
+    · have hyWlt : y ^^^ W < 2^(n+1) := xorlt hyh hW
+      have hyW0 : y ^^^ W ≠ 0 := fun h => hyW (xor_zero_eq y W h)
+      by_cases e1 : l₀ = 0
+      · rw [e1, Nat.zero_add]
+        exact starP_border_hub_lo n y W hyh hW hy0 hW0 hyW
+      · by_cases e2 : l₀ = W
+        · rw [e2]; exact starP_border_seamrow_lo n y W hyh hW hy0 hW0 hyW
+        · by_cases e3 : l₀ = y
+          · rw [e3]; exact starP_border_topbit' n y W hyh hW hy0 hW0 hyW
+          · by_cases e4 : l₀ = y ^^^ W
+            · rw [e4]
+              have hb := starP_border_topbit' n y W hyh hW hy0 hW0 hyW
+              have hf := starP_flip (n+2) (y + 2^(n+1)) y W hb
+              have hxx : (y + 2^(n+1)) ^^^ W = (y ^^^ W) + 2^(n+1) := by
+                have e := xor_lo_hi (n+1) W y (by omega) hW hyh
+                rw [Nat.xor_comm (y + 2^(n+1)) W, e, Nat.xor_comm W y]
+              rwa [hxx] at hf
+            · exact starP_step_ul n l₀ y W hl₀ hyh hW hy0 e1
+                (fun h => e2 (xor_zero_eq l₀ W h)) hyW0 e3 e4
+                (ih l₀ y hl₀ hyh e1 hy0 e2 hyW e3 (fun h => e4 (by rw [h, xor_cancel])))
+    · obtain ⟨y₀, rfl⟩ : ∃ y₀, y = y₀ + 2^(n+1) := ⟨y - 2^(n+1), by omega⟩
+      have hy₀ : y₀ < 2^(n+1) := by omega
+      have hxl : (l₀ + 2^(n+1)) ^^^ W = (l₀ ^^^ W) + 2^(n+1) := by
+        have e := xor_lo_hi (n+1) W l₀ (by omega) hW hl₀
+        rw [Nat.xor_comm (l₀ + 2^(n+1)) W, e, Nat.xor_comm W l₀]
+      by_cases e3 : y₀ = 0
+      · by_cases e1 : l₀ = 0
+        · exact absurd (by rw [e1, e3] : l₀ + 2^(n+1) = y₀ + 2^(n+1)) hly
+        · by_cases e2 : l₀ = W
+          · exact absurd (by rw [hxl, e2, e3, Nat.xor_self]) hcos
+          · rw [e3, Nat.zero_add]
+            exact starP_border_hubcol_hi n l₀ W hl₀ hW e1 hW0 e2
+      · by_cases e4 : y₀ = W
+        · by_cases e1 : l₀ = 0
+          · exact absurd (by rw [hxl, e1, e4, Nat.zero_xor]) hcos
+          · by_cases e2 : l₀ = W
+            · exact absurd (by rw [e2, e4] : l₀ + 2^(n+1) = y₀ + 2^(n+1)) hly
+            · rw [e4]; exact starP_border_seamcol_hi n l₀ W hl₀ hW e1 hW0 e2
+        · by_cases e1 : l₀ = 0
+          · rw [e1, Nat.zero_add]
+            exact starP_border_hub_hi n y₀ W hy₀ hW e3 hW0 e4
+          · by_cases e2 : l₀ = W
+            · rw [e2]; exact starP_border_seamrow_hi n y₀ W hy₀ hW e3 hW0 e4
+            · exact starP_step_uu n l₀ y₀ W hl₀ hy₀ hW e1 e3
+                (fun h => e2 (xor_zero_eq l₀ W h)) (fun h => e4 (xor_zero_eq y₀ W h))
+                (fun h => hly (by rw [h])) (fun h => hcos (by rw [hxl, ← h]))
+                (fun h => hcos (by rw [hxl, h, xor_cancel]))
+                (ih l₀ y₀ hl₀ hy₀ e1 e3 e2 e4 (fun h => hly (by rw [h]))
+                  (fun h => hcos (by rw [hxl, h])))
+
 end SounioZDFiberAntisym

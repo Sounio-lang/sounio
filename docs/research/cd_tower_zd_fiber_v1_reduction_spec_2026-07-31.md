@@ -6346,3 +6346,32 @@ The attempt is preserved at `scratchpad/tier105_attempt.lean`; the committed fil
 bottom (from before this arc). Verified as computation: the octonion bottom. NOT done: the lift that
 chains them, and the two bridges (`P1 = P3 ↔ starP`, and `octCheck = true → ∀`-form). The interior
 is not closed, and nothing above should be read as closing it.
+
+### §57.65 — Tier 105: THE LIFT LANDS
+
+§57.64 recorded this as attempted and failed. It is now proved: `starP_lift` takes `(*)` at level
+`n+1` to `(*)` at level `n+2` for any label in the low half, assembling Tier 100's step with the six
+border families of Tiers 101–103.
+
+**What fixed it.** Two things, both diagnosed in §57.64. `subst` on `y₀ = W` eliminates the LABEL
+rather than the index, so every later mention of `W` breaks — replaced throughout by rewriting the
+goal, which keeps `W`. And the both-high quadrant was split in the wrong ORDER: it called the hub
+lemma before establishing `y₀ ≠ 0` and `y₀ ≠ W`, which are not derivable from the lifted hypotheses.
+Splitting on `y₀` first fixes it and exposes something the first attempt had missed —
+
+**four corners of the both-high quadrant are VACUOUS, not borders.** `l₀ = 0` with `y₀ = 0` gives
+`l = y`; `l₀ = 0` with `y₀ = W` gives `y = l ⊕ W`; `l₀ = W` with `y₀ = 0` likewise; `l₀ = W` with
+`y₀ = W` gives `l = y` — all excluded by the interior hypotheses. And in that quadrant `y₀ = l₀ ⊕ W`
+would force `y = l ⊕ W`, so that leaf cannot occur there at all, while the same leaf in the MIXED
+quadrants is real and needs `starP_flip` composed with the top-bit border. The two quadrants differ
+because the top bits differ.
+
+Denotation: 0 failures over the 24 (label, level) pairs at `m = 2,3,4` where the hypothesis holds.
+
+⚠ M1 DEGRADED: providers returned empty (raw JSON read). The three questions — exhaustiveness of the
+case tree, the vacuity of the four corners, and whether the residue is now exactly the bottom — are
+UNANSWERED.
+
+**The interior obligation now reduces to the BOTTOM and nothing else:** chain `starP_lift` by
+induction down to the level where `W` leaves the low half, and supply the two bridges — `P1 = P3 ↔
+starP`, and `octCheck = true → ∀`-form. Both bridges are mechanical; the mathematics is done.
