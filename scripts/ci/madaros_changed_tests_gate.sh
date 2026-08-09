@@ -59,9 +59,26 @@ fi
 # current Madaros multi-module lower+codegen: measured 2026-07-20, 65536 KiB
 # completes lower (final_fn_count 225) but fails to emit the ELF (wrapper then
 # reports "run exited 1" / typecheck: failed); >= ~120000 KiB writes and runs
-# DUAL_GUM_KNOWLEDGE_OK. Default 131072 leaves headroom on GHA Linux runners
-# (hard limit unlimited).
-stack_kb="${SOUNIO_MADAROS_CHANGED_TESTS_STACK_KB:-131072}"
+# DUAL_GUM_KNOWLEDGE_OK.
+#
+# 131072 was calibrated on THAT witness alone, and "leaves headroom" did not
+# hold. This gate runs tests through `$SOUC_BIN run <file>`
+# (scripts/dev/run_sio_test_suite_v1.sh:153), which executes the program on top
+# of the compiler's own frame rather than in a fresh process, so it needs
+# materially more stack than `compile` + exec. Measured 2026-08-09 on a
+# current-source Madaros, six tests, unanimous:
+#
+#   131072 KiB -> SIGSEGV (rc 139)   524288 KiB -> rc 0
+#     gpu_kernel_lane_loop            epistemic_var_accumulator_slots
+#     _diag_sobol                     approx_basic
+#     arima_levinson_ar2              array_elem_field_store
+#
+# CI surfaced this as `run timed out after 30s` while the same binary faults in
+# under a second locally, so it read as slowness and hid a crash.
+# madaros_imported_call_arity_13_gate.sh already recorded the same lesson
+# ("262144 KiB passes; 131072 fails. Default 512 MiB for headroom"); 524288 is
+# what 16 other gates in scripts/ci already use.
+stack_kb="${SOUNIO_MADAROS_CHANGED_TESTS_STACK_KB:-524288}"
 [[ "$stack_kb" =~ ^[1-9][0-9]*$ && ${#stack_kb} -le 9 ]] \
   || fail "invalid_stack_kb"
 
