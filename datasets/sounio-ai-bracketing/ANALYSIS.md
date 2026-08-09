@@ -253,3 +253,39 @@ embedding/projection is frozen BEFORE any magnitude is looked at.
 
 If the semantic embedding cannot be obtained (offline fallback), only C2
 runs and C1 is declared UNTESTED, not failed.
+
+## C1/C2 verdict — octonion grouping magnitude vs semantic ambiguity (2026-08-09)
+
+Pipeline: all-MiniLM-L6-v2 embeddings (384-dim, normalised) → frozen
+projection (seed 17) to 16-dim payloads → Sounio-native associator
+(grouping_magnitude_sq) per item, run in 5 chunked Madaros drivers.
+
+**C1: NOT CONFIRMED.** Median grouping magnitude: gold=both 6.12e-05,
+gold∈{left,right} 5.56e-05 — right direction, far too weak
+(Mann–Whitney one-sided p = 0.248, two-sided p = 0.496). With MiniLM-class
+embeddings, the functor's grouping magnitude does not separate
+human-ambiguous from committed items. The associator is exact and real;
+its semantic informativeness at this embedding quality is unproven.
+
+**C2 (calibration band): FALSIFIED as "narrow".** The canonical
+hash/Halton embedder (unit S⁷) produces magnitudes spanning 0.0–3.22
+across the 50 items — a WIDE null band, setting a hard normalisation bar
+for any future semantic-separation claim. R-009's exact zero is fully
+explained and is itself a double finding: (i) `embed_into` reduces hashes
+mod 1024 (`embed_table_rows`), so u1/u3 collided to the same row (549) —
+the canonical embedder resolves at most 1024 distinct utterances, a
+load-bearing limitation for the O-CSSM line (expected ≈ 11 collisions
+over 150 turns); (ii) the resulting [a,b,a] = 0 is a native confirmation
+of the octonion flexibility identity, appearing in production data.
+
+**Instrumentation incidents (all resolved, all documented):**
+1. The single 561-line driver (300+ vars in main) printed 2.5e17 for
+   A-005; the same item in isolated/chunked drivers gives 0.00025269.
+   Repro preserved as a suspected Madaros large-main miscompilation —
+   reported to the compiler lane (see commit message and coord bus).
+2. A python port of oct_mul matched the basis-element ground truth
+   (‖[e1,e2,e4]‖²=4) but diverges from the canonical oct_mul on generic
+   vectors; basis-level ground truth is necessary but not sufficient.
+   All reported magnitudes are Sounio-native.
+3. sentence-transformers all-MiniLM-L6-v2 installed into the repo .venv
+   for this measurement (declared; not a project dependency).
