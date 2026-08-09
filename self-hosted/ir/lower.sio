@@ -2582,31 +2582,43 @@ fn lowerer_compute_strategy_from_ast_ref(
 // DO NOT "fix" the logic here. The workaround, when someone takes it, is the
 // same shape as #1678: stop the two values sharing a slot -- hoist the constant,
 // or reorder the declarations -- leaving the seed defect itself intact.
-// TWO WORKAROUNDS TRIED HERE, BOTH FAILED. Recorded so nobody spends the builds
-// again, and because the second failure refutes the obvious mechanism.
+// THREE WORKAROUNDS TRIED HERE. ALL THREE FAILED. Do not retry them.
 //
-//   1. Hoist the constant: `let cap_limit: i64 = IR_MAX_FUNCS` above the loop,
-//      read below. Rebuilt: [rbp-0x20] still held the constant at the fault.
-//   2. Move the capacity test into this separate function, so IR_MAX_FUNCS
-//      cannot share a frame with the caller's loop counter at all. Rebuilt:
-//      [rbp-0x20] STILL held 12288.
+//   1. Hoist the constant above the loop (`let cap_limit: i64 = IR_MAX_FUNCS`).
+//   2. Move the capacity test into its own function (lowerer_fn_table_is_full),
+//      so IR_MAX_FUNCS cannot share a frame with the loop counter at all.
+//   3. Move the indexed read into its own function
+//      (lowerer_fn_slot_name_matches), so the address computation for
+//      `functions[i]` happens in a different frame.
 //
-// Both verified by reading the slot out of a fresh core, not by inspection.
+// After each rebuild, [rbp-0x20] STILL held IR_MAX_FUNCS at the fault, read out
+// of a fresh core rather than assumed. Three independent ways of separating the
+// two values, no movement. This is NOT avoidable in source; it is a slot
+// allocation defect in the seed and has to be fixed there. (#1649 records four
+// earlier attempts at the seed itself, built and reverted.)
 //
-// SO THE CONSTANT DOES NOT COME FROM THE CAPACITY GUARD. The remaining
-// candidate is the indexing itself: `functions[i as usize]` over
-// `[IrFunction; IR_MAX_FUNCS]` makes codegen materialise the ARRAY LENGTH into a
-// temporary, and that temporary is what aliases the loop counter. It fits all
-// three observations at once -- it tracks IR_MAX_FUNCS because the array is
-// sized by it, and it is immune to hoisting and to moving the guard because
-// neither touches the index expression.
+// I ALSO PROPOSED A MECHANISM AND REFUTED IT. After (1) and (2) failed I
+// reasoned the constant must come from the array-length temporary that codegen
+// materialises for `functions[i]` over `[IrFunction; IR_MAX_FUNCS]`. That is
+// what (3) tested, and (3) failed too. The origin of the value in that slot is
+// still unknown.
 //
-// If someone takes this further, the next thing to try is extracting the
-// `functions[i].name` read into its own function taking the index, so the
-// length temp and the counter never live in one frame.
+// WHAT THE THREE BUILDS DID SETTLE, and a single run would have hidden: the
+// faulting value rose 7428 -> 7429 -> 7430, exactly +1 per function added to
+// this file. It is not garbage -- it is `fn_count`, the field sitting
+// immediately after `functions` in memory. So there is ONE fault here, the
+// out-of-bounds read at `functions[IR_MAX_FUNCS]`, and everything read out of
+// it is just the neighbour.
 // Takes the COUNT, not the module: passing `&Box<IrModule>` would drag in the
 // Box-reference deref this tree already records as unsafe, and an i64 carries
 // everything the test needs.
+// The indexed read, isolated. Takes the Box by value (it is a pointer) and the
+// index, so the caller's loop counter never shares a frame with whatever
+// codegen needs to compute the element address.
+fn lowerer_fn_slot_name_matches(module_box: Box<IrModule>, idx: i64, name: Name) -> bool with Mut, Panic, Div {
+    ir_name_eq((*module_box).functions[idx as usize].name, name)
+}
+
 fn lowerer_fn_table_is_full(fn_count: i64) -> bool {
     fn_count >= IR_MAX_FUNCS
 }
@@ -2615,7 +2627,10 @@ fn lowerer_find_or_add_fn_id_mut(lo: &! Lowerer, name: Name) -> i64 with Mut, Pa
     var module_box = (*lo).module
     var i: i64 = 0
     while i < (*module_box).fn_count {
-        if ir_name_eq((*module_box).functions[i as usize].name, name) {
+        // THIRD WORKAROUND, AND IT ALSO FAILED. Kept because a refuted attempt
+        // that is written down costs the next person nothing, and one that is
+        // not costs them a build.
+        if lowerer_fn_slot_name_matches(module_box, i, name) {
             (*lo).module = module_box
             return i
         }
