@@ -6119,3 +6119,41 @@ one proved case side by side.
 
 ⚠ The interior statement for the class remains OPEN, and §57.55 records why the proved case does not
 generalise.
+
+### §57.57 — the interior: the induction closes, and the base case is already a theorem
+
+The residue was: prove `resB` on the interior for the reference labels. Applying the four `R_*` rules
+to `P1 = P3` reduces it, entirely at level `m+1`, to one identity:
+
+    (*)   σ(l,y) · σ(y⊕W, l⊕W)  =  − σ(y⊕W, l) · σ(l⊕W, y)
+
+**The induction step closes, for EVERY label.** Splitting `l` and `y` by their top bit at level `n`
+and applying `R_ll`/`R_lu`/`R_ul`/`R_uu`, all four branches reduce to `(*)` one level down at the
+halved indices — and in three of them the reduction needs `antisym` to re-pair the factors, which is
+exactly what `sigma_fibre_flip` could not do for itself (there the second argument was pinned to `W`;
+here both arguments move). Verified as an exact equivalence, not just an implication:
+
+    interior (*) at level n  ⟺  (*) at (l mod h, y mod h) at level n−1
+    672/672 at n = 4,  10080/10080 at n = 5,  104160/104160 at n = 6, over every low-half label.
+
+**So the label condition does not live in the induction step at all — it lives in the BASE.** The
+failing labels fail because the failure propagates upward from the bottom: at `W = 9`, `m = 4`, every
+one of the 384 interior failures reduces to a point where `(*)` is FALSE one level down, and none of
+them reduces to a non-interior point. The step is innocent.
+
+**And for `W = 2^p` the descent bottoms out exactly at the maximal seam.** The recursion descends
+while `W` stays in the low half, i.e. while `2^(n−1) > W`; it stops at `n = p+1`, where
+`W = 2^p = 2^(n−1)` IS the top bit — the maximal-seam label, whose interior statement is already a
+theorem in the file (`resB_pow2_top`, via the rank-one `P1_pow2_top`/`P3_pow2_top`). Measured at the
+base: 24/24, 168/168, 840/840, 3720/3720 at `n = 3,4,5,6`.
+
+**Proof architecture for every reference label `W = 2^j`, with one named gap:**
+
+1. the induction step (four branches + `antisym`) — derived, verified, not yet in Lean;
+2. the base `W = 2^(n−1)` — ALREADY PROVED (`resB_pow2_top`);
+3. the points whose reduction leaves the interior — 504, 2520, 11160 of them at `n = 4,5,6`, i.e.
+   where `l₀` or `y₀` hits `0`, or `l₀ = y₀`, or `y₀ = l₀ ⊕ W`. These are the borders, and they are
+   the same shape of case-work every tier in this arc has needed.
+
+That is the residue reduced from "an open mask statement" to "an induction whose step is verified and
+whose base is a theorem, plus borders".
