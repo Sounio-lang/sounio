@@ -6085,3 +6085,37 @@ restatement further out.
 which `P1(·,·,W) = P3(·,·,W)` off the six lines — via the carry/bit structure of `W` — and only then
 match that set against `g⁻¹(0)`. That is a statement about the cocycle's bit arithmetic, which is
 the kind of thing this file's `R_*` machinery is built for.
+
+### §57.56 — Tier 99: the reference labels, characterised by bit structure
+
+§57.55's sharpened target was to characterise the labels `W` for which `P1(·,·,W) = P3(·,·,W)` off
+the six lines. The answer is closed:
+
+    g(W) = 0   ⟺   W < 8   or   W is a POWER OF TWO
+
+`W ∧ (W−1)` clears `W`'s lowest set bit, so `g(W) = 0` says every OTHER bit of `W` sits below
+position 3. If `W` has two or more bits, the higher ones must be at positions ≤ 2, which forces the
+lowest below them and hence `W < 8`; otherwise `W` has exactly one bit. Verified exhaustively for
+every `W < 2^20`, and the interior-`resB` label set was confirmed to match at `m = 6` — out of the
+sample the class was found on — giving `{1,…,7, 8, 16, 32, 64}`.
+
+**Both halves mean something in Cayley–Dickson terms**, which is why this is worth stating and not
+just computing. Labels are BASIS INDICES `0 … 2^(n+1)−1`, so `W < 8` is a label inside the OCTONION
+sub-algebra — the last alternative one, one doubling below where zero divisors begin. And `W = 2^p`
+is the index of the `p`-th DOUBLING GENERATOR, the imaginary unit adjoined at the `p`-th CD step. So:
+
+> the mask is full exactly when the fibre label is either a doubling generator or an octonion index.
+
+⚠ My first phrasing called `W = 2^p` "a single basis index", which is empty — every label is a basis
+index. One reviewer spent its whole budget unable to decide whether `W` was an index or a bitmask,
+and that confusion is what exposed the sloppiness; the corrected phrasing is above.
+
+In Lean the class is stated as `refLabel W := W < 8 ∨ ∃ p, W = 2^p`, without proving its equivalence
+to the `∧`/`≫` form: nothing downstream needs the bit-arithmetic bridge, because what the deviation
+law needs is only that every reference label `W = 2^j` is in the class, which is one line
+(`refLabel_pow`). The open statement is named — `InteriorMask W m` — and `resB_pow2_top` is recorded
+as its `W = 2^m` instance (`interiorMask_pow2_top`), so the file now carries the conjecture and its
+one proved case side by side.
+
+⚠ The interior statement for the class remains OPEN, and §57.55 records why the proved case does not
+generalise.

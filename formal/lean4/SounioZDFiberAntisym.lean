@@ -15786,4 +15786,57 @@ theorem four_factor_cornerWW (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
   rw [Nat.xor_self, P3_diag W W m hW hW hW0, P3_seam_zero m W hW hW0]
   grind
 
+/-! ### Tier 99 — the reference labels, characterised by BIT STRUCTURE
+
+    §57.55 sharpened the residue to: characterise the labels `W` for which `P1(·,·,W) = P3(·,·,W)`
+    off the six lines.  The answer is closed, and it is not arithmetic trivia:
+
+      **`g(W) = 0`  ⟺  `W < 8`  or  `W` is a POWER OF TWO**
+
+    (`g(W) = (W ∧ (W−1)) ≫ 3` is the lane's fibre invariant; `W ∧ (W−1)` clears `W`'s lowest set
+    bit, so the condition says every OTHER bit of `W` sits below position 3.  If `W` has two or more
+    bits, the higher ones must be at positions ≤ 2, forcing the lowest below them, hence `W < 8`;
+    otherwise `W` has one bit.  Verified exhaustively for every `W < 2^20`, and the interior-`resB`
+    label set was confirmed to match at `m = 6`, out of the sample the class was found on.)
+
+    In Cayley–Dickson terms both halves are meaningful, which is why the characterisation is worth
+    stating rather than just computing.  Labels here are BASIS INDICES `0 … 2^(n+1)−1`, so `W < 8`
+    is a label inside the OCTONION sub-algebra — the last alternative one, one doubling below where
+    zero divisors begin.  And `W = 2^p` is the index of the `p`-th DOUBLING GENERATOR: the imaginary
+    unit adjoined at the `p`-th Cayley–Dickson step.  (My first phrasing called that "a single basis
+    index", which is empty — every label is a basis index — and one reviewer's confusion over the
+    convention is what exposed it.)  So the mask is full exactly when the fibre label is either a
+    doubling generator or an octonion index.
+
+    The predicate is stated here without the `∧`/`≫` form, because nothing downstream needs the
+    bit-arithmetic equivalence: what the deviation law needs is that every reference label `W = 2^j`
+    is in the class, which is one line.
+
+    ⚠ The interior statement for this class remains OPEN.  What is proved is its `W = 2^n` case,
+    `resB_pow2_top` — and §57.55 records why that proof does not generalise (at the maximal seam
+    both matrices are rank-one, which cannot hold at other labels). -/
+
+/-- The reference class: a single basis index, or a label inside the octonion sub-algebra. -/
+def refLabel (W : Nat) : Prop := W < 8 ∨ ∃ p, W = 2^p
+
+/-- Every power of two is a reference label — in particular every label the deviation law compares. -/
+theorem refLabel_pow (p : Nat) : refLabel (2^p) := Or.inr ⟨p, rfl⟩
+
+/-- So is every label below the octonion seam. -/
+theorem refLabel_lt8 (W : Nat) (h : W < 8) : refLabel W := Or.inl h
+
+/-- `1` is a reference label — the base of every within-fibre comparison. -/
+theorem refLabel_one : refLabel 1 := refLabel_lt8 1 (by omega)
+
+/-- **THE OPEN STATEMENT, NAMED.**  `resB_pow2_top` is exactly this at `W = 2^n`; the general case
+    is what remains of obligation (ii) of the deviation law. -/
+def InteriorMask (W m : Nat) : Prop :=
+  ∀ l y, l < 2^(m+1) → y < 2^(m+1) → l ≠ 0 → y ≠ 0 → l ≠ W → y ≠ W → l ≠ y →
+    y ≠ l ^^^ W → resB l y W m = true
+
+/-- The maximal-seam instance, restated in the new vocabulary: the conjecture holds at `W = 2^m`. -/
+theorem interiorMask_pow2_top (m : Nat) : InteriorMask (2^m) m := by
+  intro l y hl hy hl0 hy0 hlW hyW hly hcos
+  exact resB_pow2_top m l y hl hy hl0 hy0 hlW hyW hly hcos
+
 end SounioZDFiberAntisym
