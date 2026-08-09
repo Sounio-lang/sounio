@@ -158,7 +158,6 @@ let LOWER_GLOBAL_ARRAY: i64 = 4
 // kind: 0=none 1=id 2=scale 3=add 4=mul 5=fwd
 // Keys are polynomial hashes of Name bytes (Name aggregates do not survive
 // global array stores — same family as ClaimDecl name truncation).
-
 // #1645: a DURABLE record that lowering hit a hard capacity wall.
 //
 // Lowerer is threaded by VALUE. `emit` writes the instruction through
@@ -557,7 +556,7 @@ pub fn lower_hard_error_reset() with Mut {
 // OR the durable flag into a value-threaded had_error. Used at every
 // IrLowerResult/IrLowerBoxResult construction site.
 pub fn lower_had_error_with_hard(v: bool) -> bool { v || IR_LOWER_HARD_ERROR != 0 }
-
+fn lower_ok_without_hard(v: bool) -> bool { !lower_had_error_with_hard(v) }
 var FO_XFER_COUNT: i64 = 0
 var FO_XFER_KIND: [i64; 64] = [0; 64]
 var FO_XFER_LIT: [f64; 64] = [0.0; 64]
@@ -907,7 +906,8 @@ pub(crate) fn ir_register_knowledge_layout(table: StructLayoutTable) -> StructLa
     t
 }
 
-fn lowerer_new() -> Lowerer with Alloc {
+fn lowerer_new() -> Lowerer with Alloc, Mut {
+    lower_hard_error_reset()
     Lowerer {
         module: Box::new(ir_empty_module()),
         epistemic_contests: Box::new(empty_lower_epistemic_contest_index()),
@@ -1322,6 +1322,7 @@ fn lowerer_seed_metadata_from_summary(lo_in: Lowerer, summary: &IrProgramSummary
 // IrModule then seed while summary still holds the first (empty+live concurrent).
 // Still one densify copy (ref cannot move); owned path reuses the Box with zero densify.
 fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEpistemicSection) -> Lowerer with Alloc, Mut, Panic, Div, IO {
+    lower_hard_error_reset()
     var module_box = Box::new(*(*summary).module)
     // Match seed/owned body path: rebuild string table during body lower.
     (*module_box).string_count = 0
@@ -1382,6 +1383,7 @@ fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEp
 // Consume the owned summary and reuse its live Boxes. string_count is zeroed to
 // match seed behaviour (body lower rebuilds the string table).
 fn lowerer_new_from_program_summary_owned(summary: IrProgramSummary, epistemic: &IrEpistemicSection) -> Lowerer with Alloc, Mut, Panic, Div, IO {
+    lower_hard_error_reset()
     var lo = Lowerer {
         module: summary.module,
         epistemic_contests: Box::new(empty_lower_epistemic_contest_index()),
@@ -1441,6 +1443,7 @@ fn lowerer_new_from_program_summary_owned(summary: IrProgramSummary, epistemic: 
 // epistemic / algebras / bss / exports — body lower appends/fills. Fresh
 // metadata tables (structs/enums/globals) are rebuilt from extern + dep preseed.
 fn lowerer_from_acc_module(module: Box<IrModule>) -> Lowerer with Alloc, Mut, Panic, Div, IO {
+    lower_hard_error_reset()
     var lo = Lowerer {
         module: module,
         epistemic_contests: Box::new(empty_lower_epistemic_contest_index()),
@@ -3893,6 +3896,7 @@ fn lowerer_lower_fn_item_mut(
     name: Name,
     fd: &FnDef
 ) with Mut, Panic, Div, Alloc, IO {
+    ir_instr_overflow_begin_fn()
     // Seed the transcendental chain-rule entries here, on the confirmed live path.
     //
     // fo_xfer_global_reset (:3578, :9019) and lowerer_lower_program_bodies_dedup_mut
@@ -16821,7 +16825,7 @@ fn lower_program_to_ir_staged_with_lowerer_box_trace_ref(
     lower_monolithic_public_probe_boundary("preseed_begin")
     var lo2 = lo.preseed_program_items_ref(&prog.items, ir_empty_name())
     lower_monolithic_public_probe_boundary("preseed_done")
-    if !lo2.had_error {
+    if lower_ok_without_hard(lo2.had_error) {
         lower_monolithic_public_probe_boundary("bodies_begin")
         lo2 = lo2.lower_program_bodies_ref(&prog.items)
         lower_monolithic_public_probe_boundary("bodies_done")
@@ -16829,7 +16833,7 @@ fn lower_program_to_ir_staged_with_lowerer_box_trace_ref(
         lower_monolithic_public_probe_boundary("bodies_skipped")
     }
     (*patch_stats) = ir_empty_validated_patch_stats()
-    if !lo2.had_error {
+    if lower_ok_without_hard(lo2.had_error) {
         lower_monolithic_public_probe_boundary("patch_begin")
         (*patch_stats) = ir_patch_validated_calls(&! (*lo2.module))
         lower_monolithic_public_probe_boundary("patch_done")
@@ -17065,7 +17069,7 @@ fn lower_program_to_ir_probe_ref(prog: &Program) -> IrLowerResult with Mut, Pani
     let lo = lowerer_new_probe()
     var lo2 = lo.lower_program_items_ref(&prog.items)
     var patch_stats = ir_empty_validated_patch_stats()
-    if !lo2.had_error {
+    if lower_ok_without_hard(lo2.had_error) {
         patch_stats = ir_patch_validated_calls(&! (*lo2.module))
     }
     IrLowerResult {
@@ -17114,7 +17118,7 @@ fn lower_program_function_body_from_summary_with_epistemic_ref(
     let lo = lowerer_new_from_program_summary(summary, &epistemic)
     var lo2 = lo.lower_program_bodies_filtered_ref(&prog.items, fn_name)
     var patch_stats = ir_empty_validated_patch_stats()
-    if !lo2.had_error {
+    if lower_ok_without_hard(lo2.had_error) {
         patch_stats = ir_patch_validated_calls(&! (*lo2.module))
     }
 
@@ -17174,7 +17178,7 @@ fn lower_program_function_body_from_program_with_epistemic_ref(
     var lo2 = lo
     lo2 = lo2.lower_program_bodies_filtered_ref(&prog.items, fn_name)
     var patch_stats = ir_empty_validated_patch_stats()
-    if !lo2.had_error {
+    if lower_ok_without_hard(lo2.had_error) {
         patch_stats = ir_patch_validated_calls(&! (*lo2.module))
     }
 
@@ -17205,7 +17209,7 @@ fn lower_program_bodies_from_summary_with_epistemic_boxed_ref(
     let lo = lowerer_new_from_program_summary(summary, epistemic)
     var lo2 = lo.lower_program_bodies_ref(&prog.items)
     var patch_stats = ir_empty_validated_patch_stats()
-    if !lo2.had_error {
+    if lower_ok_without_hard(lo2.had_error) {
         var module_box = lo2.module
         patch_stats = ir_patch_validated_calls(&! (*module_box))
         lo2.module = module_box
@@ -17228,7 +17232,7 @@ pub fn lower_program_bodies_from_summary_with_epistemic_boxed_owned(
     let lo = lowerer_new_from_program_summary_owned(summary, epistemic)
     var lo2 = lo.lower_program_bodies_ref(&prog.items)
     var patch_stats = ir_empty_validated_patch_stats()
-    if !lo2.had_error {
+    if lower_ok_without_hard(lo2.had_error) {
         var module_box = lo2.module
         patch_stats = ir_patch_validated_calls(&! (*module_box))
         lo2.module = module_box
@@ -17292,7 +17296,7 @@ pub fn lower_dep_program_items_into_acc_with_externs(
     // Residual closeout: re-attempt any ItemImpl methods still at ic=0.
     lowerer_force_fill_impl_methods_mut(&! lo, items)
     var patch_stats = ir_empty_validated_patch_stats()
-    if !lo.had_error {
+    if lower_ok_without_hard(lo.had_error) {
         var module_box = lo.module
         patch_stats = ir_patch_validated_calls(&! (*module_box))
         lo.module = module_box
@@ -17303,7 +17307,7 @@ pub fn lower_dep_program_items_into_acc_with_externs(
         print(" fn_count=")
         print_int((*lo.module).fn_count)
         print(" had_error=")
-        if lo.had_error { print_int(1) } else { print_int(0) }
+        if lower_had_error_with_hard(lo.had_error) { print_int(1) } else { print_int(0) }
         print("\n")
         // List zero-body slots + watchlist ics for residual diagnosis.
         var module_box_tr = lo.module
@@ -17391,7 +17395,7 @@ fn lower_program_to_ir_probe_callsite_ref(prog: &Program, caller_name: Name) -> 
     var lo2 = lo.preseed_program_items_ref(&prog.items, caller_name)
     lo2 = lo2.lower_program_bodies_filtered_ref(&prog.items, caller_name)
     var patch_stats = ir_empty_validated_patch_stats()
-    if !lo2.had_error {
+    if lower_ok_without_hard(lo2.had_error) {
         patch_stats = ir_patch_validated_calls(&! (*lo2.module))
     }
     IrLowerResult {
@@ -17434,7 +17438,7 @@ fn lower_program_to_ir_ordered_boxed_trace_ref(
     var lo2 = lo.lower_program_items_ref(&prog.items)
     if lower_live_diag_enabled() { print("lower_live: ordered_after_items\n") }
     (*patch_stats) = ir_empty_validated_patch_stats()
-    if !lo2.had_error {
+    if lower_ok_without_hard(lo2.had_error) {
         (*patch_stats) = ir_patch_validated_calls(&! (*lo2.module))
     }
     IrLowerBoxResult {
@@ -17455,7 +17459,7 @@ fn lower_program_to_ir_ordered_boxed_trace(
     lowerer_lower_program_items_mut(&! lo, prog.items)
     if lower_live_diag_enabled() { print("lower_live: ordered_after_items\n") }
     (*patch_stats) = ir_empty_validated_patch_stats()
-    if !lo.had_error {
+    if lower_ok_without_hard(lo.had_error) {
         (*patch_stats) = ir_patch_validated_calls(&! (*lo.module))
     }
     IrLowerBoxResult {
@@ -17489,7 +17493,7 @@ pub fn lower_program_to_ir_ordered_with_epistemic_boxed_trace_ref(
         print("lower_ordered_core: after_items\n")
     }
     (*patch_stats) = ir_empty_validated_patch_stats()
-    if !lo2.had_error {
+    if lower_ok_without_hard(lo2.had_error) {
         (*patch_stats) = ir_patch_validated_calls(&! (*lo2.module))
     }
     IrLowerBoxResult {
