@@ -8,6 +8,10 @@
 #   xai|grok     — Grok 4.5 (primary adversarial math/review lane; XAI_MODEL overrides)
 #   xai-fast     — Grok 4.1 Fast Reasoning (lower-latency fallback)
 #   zai|glm      — Z.AI GLM-5.2 direct (independent math/review provider)
+#   local        — a LOCAL OpenAI-compatible endpoint (Ollama/vLLM/llama.cpp/LM Studio):
+#                  set LOCAL_LLM_URL (with the /v1 prefix) and LOCAL_LLM_MODEL
+#   local2       — a second local endpoint (LOCAL2_LLM_URL / LOCAL2_LLM_MODEL), so a
+#                  two-local fan-out can satisfy the two-provider review policy
 #   grok-code    — Grok Code Fast 1 (fast code tasks)
 #   groq         — Llama 3.3 70B on Groq (fast inference)
 #   gemini       — Gemini 2.5 Pro via OpenRouter (1M ctx, best long-context)
@@ -150,6 +154,25 @@ run_provider() {
         minimax)
             [[ -n "${MINIMAX_API_KEY:-}" ]] && \
             call_openai_compat "MiniMax M2.7" "https://api.minimax.io/v1" "$MINIMAX_API_KEY" "MiniMax-M2.7" "$OUTDIR/minimax.json"
+            ;;
+        local|local1|local2)
+            # LOCAL endpoints (Ollama / vLLM / llama.cpp / LM Studio — all OpenAI-compatible).
+            # Configure with LOCAL_LLM_URL (must end in the OpenAI-compatible prefix, e.g.
+            # http://host:11434/v1) and LOCAL_LLM_MODEL.  LOCAL_LLM_KEY is optional; most local
+            # servers ignore it but curl still needs a bearer, so it defaults to "local".
+            # A SECOND endpoint can be given as LOCAL2_LLM_URL / LOCAL2_LLM_MODEL, so that a
+            # fan-out of two independent local models satisfies the two-provider review policy.
+            local _u _m _k _tag
+            if [[ "$p" == "local2" ]]; then
+                _u="${LOCAL2_LLM_URL:-}"; _m="${LOCAL2_LLM_MODEL:-}"; _k="${LOCAL2_LLM_KEY:-local}"; _tag="local2"
+            else
+                _u="${LOCAL_LLM_URL:-}"; _m="${LOCAL_LLM_MODEL:-}"; _k="${LOCAL_LLM_KEY:-local}"; _tag="local"
+            fi
+            if [[ -n "$_u" && -n "$_m" ]]; then
+                call_openai_compat "Local $_m" "$_u" "$_k" "$_m" "$OUTDIR/$_tag.json"
+            else
+                echo "  <- Local ($_tag): SKIPPED (set ${_tag^^}_LLM_URL and ${_tag^^}_LLM_MODEL; URL must include the /v1 prefix)"
+            fi
             ;;
         *)
             echo "  ?? Unknown provider: $p"
