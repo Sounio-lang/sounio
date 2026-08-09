@@ -186,3 +186,22 @@ is a family/deployment trait, not steering. Recency anchors everything
 except kimi-k3. Local models sit inside the frontier envelope on every
 metric — no local champion, no local outlier worse than the worst frontier
 model either.
+
+## Preregistered: induction #2 (hierarchical summarisation) — 2026-08-09
+
+Design: the pair is composed into a literal one-sentence summary by the
+target model itself, then the probe is answered with that summary in
+context (left: summary of (u1,u2) + u3; right: u1 + summary of (u2,u3)).
+μ is operationalised as the summarisation step. Declared mechanics test
+BEFORE preregistration: 2 items (R-001, R-002) on grok-4.5 to verify the
+codepath — R-002 came out clean-flip on the naive matcher; disclosed so the
+preregistration below is honest about what was already seen (2/50 items,
+one model, naive metric only).
+
+- **S1:** every model's judged directional rate under summary induction
+  exceeds its framing-induction rate, but no model exceeds 0.20.
+- **S2:** semantic flip rates rise vs framing for every model (the summary
+  injects the bracketing into the context explicitly).
+- **S3 (the rescue test):** no model reaches directional ≥ 0.30 even under
+  summary induction. If S3 fails, the positive hypothesis gains its first
+  champion and the battery's null needs re-reading.
