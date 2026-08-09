@@ -137,10 +137,13 @@ for sidecar in \
   MF_EXTERN_BINDING_QUALIFIED_NAMES; do
   grep -Fq "var $sidecar: [string; 2048]" "$FRONTEND" || fail "binding_sidecar_${sidecar}_missing"
 done
-grep -Fq 'fn module_frontend_call_text_selects_binding(' "$FRONTEND" || fail qualified_exact_path_selection_missing
+grep -Fq 'fn module_frontend_binding_find_qualified(' "$FRONTEND" || fail qualified_exact_path_selection_missing
 grep -Fq 'ir_name_eq((*binding).local_name, local_name)' "$FRONTEND" || fail bare_exact_local_name_selection_missing
-grep -Fq 'call_len != qualifier_len + 2 + export_len' "$FRONTEND" || fail qualified_exact_path_length_missing
-grep -Fq 'str_char_at(call_path, qualifier_len) != 58' "$FRONTEND" || fail qualified_separator_comparison_missing
+grep -Fq 'ir_name_eq((*binding).export_name, export_name)' "$FRONTEND" || fail qualified_export_identity_missing
+grep -Fq 'module_frontend_call_path_has_import_prefix(' "$FRONTEND" || fail qualified_structural_prefix_missing
+if grep -Fq 'module_frontend_call_text_selects_binding(' "$FRONTEND"; then
+  fail qualified_text_authority_reintroduced
+fi
 grep -Fq 'module_frontend_prepend_used_checker_stubs(' <<<"$authority_shape" ||
   fail checker_stub_adapter_missing
 grep -Fq 'visibility_is_pub((*item).visibility)' "$FRONTEND" || fail checker_stub_public_guard_missing
