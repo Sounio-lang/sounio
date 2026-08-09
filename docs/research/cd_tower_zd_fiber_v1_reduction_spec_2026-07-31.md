@@ -6421,3 +6421,15 @@ Tier 106 fed by the octonion bottom. 0 violations / 7224 measured.
     power-of-two labels                     bottom is the maximal seam, a theorem since Tier 57;
                                             chaining it needs the same three lines as the octonion
                                             case and is NOT written
+
+### §57.68 — Tier 108: the power-of-two labels, and the interior obligation is CLOSED
+
+`starP_pow2_bottom` takes `resB_pow2_top` (a theorem since Tier 57) through its third clause —
+`P1 = P3` — and Bridge 1 turns that into `(*)` at the maximal seam. `starP_all_pow2_labels` then
+feeds it to the descent.
+
+    0 violations / 46512, over p = 0..4 and every level up to 128 indices.
+
+**The interior obligation is closed for BOTH reference families** — `W < 8` (Tier 107) and `W = 2^p`
+(here). Together they are exactly `g(W) = 0`, the class §57.56 characterised, which is exactly the
+class the deviation law's references live in.

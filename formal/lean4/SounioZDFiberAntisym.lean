@@ -16454,4 +16454,25 @@ theorem starP_all_octonion_labels (W : Nat) (hW0 : W ≠ 0) (hW : W < 8) :
       starP_octonion a b W (by simpa using ha) (by simpa using hb) hW hW0 ha0 hb0 haW hbW hab hcos)
   simpa using h
 
+/-- The maximal-seam bottom, as `starP`: `resB`'s third clause is `P1 = P3`, and Bridge 1 turns that
+    into `(*)`. -/
+theorem starP_pow2_bottom (n l y : Nat) (hl : l < 2^(n+1)) (hy : y < 2^(n+1))
+    (hl0 : l ≠ 0) (hy0 : y ≠ 0) (hlW : l ≠ 2^n) (hyW : y ≠ 2^n) (hly : l ≠ y)
+    (hcos : y ≠ l ^^^ 2^n) : starP (n+1) l y (2^n) := by
+  have hp := Nat.two_pow_pos n
+  have hWlt : (2:Nat)^n < 2^(n+1) := by rw [Nat.pow_succ]; omega
+  have hyW0 : y ^^^ 2^n ≠ 0 := fun h => hyW (xor_zero_eq y (2^n) h)
+  have hr := resB_pow2_top n l y hl hy hl0 hy0 hlW hyW hly hcos
+  unfold resB at hr
+  simp only [Bool.and_eq_true, beq_iff_eq] at hr
+  exact (P1_eq_P3_iff_starP n l y (2^n) hl hy hWlt hy0 hyW0).mp hr.2
+
+/-- **THE POWER-OF-TWO LABELS, CLOSED.**  Descent fed by the maximal seam. -/
+theorem starP_all_pow2_labels (p : Nat) :
+    ∀ j a b, a < 2^(p+1+j) → b < 2^(p+1+j) → a ≠ 0 → b ≠ 0 → a ≠ 2^p → b ≠ 2^p → a ≠ b →
+      b ≠ a ^^^ 2^p → starP (p+1+j) a b (2^p) :=
+  starP_descend (2^p) p (Nat.ne_of_gt (Nat.two_pow_pos p)) (by have := Nat.two_pow_pos p; rw [Nat.pow_succ]; omega)
+    (fun a b ha hb ha0 hb0 haW hbW hab hcos =>
+      starP_pow2_bottom p a b ha hb ha0 hb0 haW hbW hab hcos)
+
 end SounioZDFiberAntisym
