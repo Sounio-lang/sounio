@@ -7,7 +7,7 @@ validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.papers.san-fpga-deployment-2026-08-04
 -->
 
-# Suffering-Aware Neural Networks on AMD Alveo U250: A Systems Study of Early-Exit Deployment
+# Suffering-Aware Neural Networks on AMD Alveo U250: Deploying the Exit-Audit / FLOP-Metering Kernel
 
 **Status:** `DRAFT` — every empirical claim marked `MEASURED` below is backed
 by a measured artifact in the Sounio repository; claims marked `ESTIMATE` or
@@ -104,24 +104,24 @@ counts, and meters.
 ### 1.3 Prior work
 
 Early-exit networks were introduced by BranchyNet [1] and Shallow-Deep Networks
-[2], with later work on confidence thresholds [3], dynamic inference [5], and
-hardware-aware early exit [6]. Most of this work treats the threshold as a
+[2], with later work on confidence thresholds [3], dynamic inference, and
+hardware-aware early exit. Most of this work treats the threshold as a
 hyperparameter tuned for accuracy-efficiency tradeoffs and trains for a fixed
 budget.
 
-Constrained learning [7,8,9] provides generalization guarantees for ERM with
+Constrained learning [5,6,7] provides generalization guarantees for ERM with
 explicit constraints, but does not address inference-time compute reduction or
 the freeze-on-green training rule. Mercyful / suffering-aware learning [4]
 introduces the two-channel suffering framework and the anti-Goodhart selection
 rule; the present paper is the first systems study that maps that framework to
 a measured FPGA deployment.
 
-On the FPGA side, early-exit accelerators have been proposed for CNNs [10,11]
-and transformers [12], typically using custom datapaths that approximate the
-full model. Our kernel takes the opposite approach: the trunk stays on the host
-(or GPU), and only the cheap decision/metering path runs on the FPGA. This
-keeps the bitstream small, architecture-agnostic (the stage-cost LUT is loaded
-by the host), and verifiable by direct comparison to a golden model.
+On the FPGA side, early-exit accelerators have been proposed for CNNs and
+transformers, typically using custom datapaths that map part of the model
+into hardware. Our kernel takes the opposite approach: the trunk stays on the
+host (or GPU), and only the cheap decision/metering path runs on the FPGA.
+This keeps the bitstream small, architecture-agnostic (the stage-cost LUT is
+loaded by the host), and verifiable by direct comparison to a golden model.
 
 ---
 
@@ -156,7 +156,7 @@ side operation has been charged.
 ### 2.2 Anti-Goodhart gating
 
 A standard risk when optimizing a proxy (FLOPs) is that the model learns to
-satisfy the proxy while failing the real task [13]. SAN prevents this by
+satisfy the proxy while failing the real task [8]. SAN prevents this by
 selection: the compassion grid may only choose checkpoints that are feasible
 (accuracy ≥ τ). If no checkpoint is feasible, the gate returns `NO_FEASIBLE`
 instead of silently degrading accuracy. This is an executable property checked
@@ -208,8 +208,9 @@ does *not* run the trunk; the trunk produces per-sample confidence vectors on
 the host CPU/GPU and the kernel receives them as Q0.15 integers. Per lane it
 does:
 
-1. Read a packed 512-bit record containing four Q0.15 confidence fields.
-2. Compare each field to the integer threshold q_Δ = round(Δ · 2^15).
+1. Read a packed 512-bit beat containing four 128-bit samples; each sample
+   holds up to seven 15-bit Q0.15 confidence fields.
+2. Compare each field to the integer threshold q_Δ = ⌊Δ · 2^15⌋.
 3. Return the index of the first field ≥ q_Δ (priority encoder).
 4. If none, return the final index (catastrophe).
 5. Look up the stage-cost LUT at the exit index and accumulate into a 64-bit
@@ -403,29 +404,28 @@ DL380 host CPU, exit confidences quantized to Q0.15, packed into the same
 `scripts/research/san_fpga_endtoend.py` measures every phase and validates the
 card output bit-exactly against an independent Python golden scan.
 
-**Table 5: End-to-end phase decomposition (ImageNette2-160, n=3 925).**
+**Table 5: Host↔card phase decomposition (ImageNette2-160, n=3 925).**
 
 | phase | time | note |
 |---|---|---|
-| PyTorch forward (CPU) | ~18.4 s | SAN-ResNet-18, 3 925 real images, DL380 CPU |
 | quantize + pack | ~40 ms | Q0.15 floor + 512-bit beat packing |
-| xclbin setup | ~135 ms | paid once per process |
-| DMA H2D | ~0.12 ms | 62 848 bytes of packed cohort |
-| kernel | ~0.66 ms | ~24 Msamples/s single-shot |
+| xclbin setup | ~135 ms | one-time `xclbin` load per process (no PR) |
+| DMA H2D | ~0.12 ms | 62 848 bytes = 982 beats × 64 bytes |
+| kernel | ~0.66 ms | ~6 Msamples/s single-shot for this small cohort |
 | DMA D2H | ~0.15 ms | histogram + catastrophe count + MAC total |
-| **end-to-end total** | **~136 ms** | dominated by one-time xclbin setup |
+| **host↔card total** | **~136 ms** | first cohort; subsequent cohorts reuse context |
+| PyTorch forward (CPU) | ~18.4 s | SAN-ResNet-18, 3 925 real images, DL380 CPU |
 
-The forward pass is CPU-only because the DL380 has no GPU fitted; a GPU would
-reduce it proportionally. The 135 ms setup is the one-time `xclbin` load only
-(no partial reconfiguration); once loaded, the same host binary can enqueue
-multiple cohorts without reloading. The kernel itself is <1 ms, and even with
-the one-time load the full host-to-card round trip is <150 ms for the entire
-validation cohort. The packed cohort is 62 848 bytes = 982 beats × 64 bytes,
-so the DMA times correspond to ~470 MB/s effective PCIe bandwidth for the
-small transfer. The script supports `--mock-host` for CI or environments
-without the U250; the mock run reproduces the same histogram, catastrophe
-count, and FLOP total and confirms the Python packing matches the C++
-unpacking bit-exactly.
+The host↔card total is the measured FPGA round trip for one cohort; it is
+dominated by the one-time `xclbin` load. After the load, additional cohorts can
+be enqueued without reloading, so the per-cohort cost excluding forward is
+~1 ms. The PyTorch forward pass is CPU-only because the DL380 has no GPU
+fitted; a GPU would reduce it proportionally. The packed cohort is 62 848 bytes
+= 982 beats × 64 bytes, so the DMA times correspond to ~470 MB/s effective
+PCIe bandwidth for the small transfer. The script supports `--mock-host` for CI
+or environments without the U250; the mock run reproduces the same histogram,
+catastrophe count, and FLOP total and confirms the Python packing matches the
+C++ unpacking bit-exactly.
 
 This closes the loop between training (§4.2), confidence extraction, and FPGA
 audit: the trunk runs on the host, the card decides and meters, and the
@@ -484,6 +484,18 @@ the small-proxy result should not be read as a general claim.
 exploration, multi-bitstream campaigns, or comparison with HLS alternatives. The
 135.2 MHz achieved clock is the honest result of one Vitis build.
 
+**No CPU baseline for the audit kernel.** Table 5 decomposes the host↔card
+phases, but we do not report a host-CPU implementation of the same integer
+audit/metering kernel. The FPGA speedup claim is therefore relative to the
+bus-limited theoretical peak and to the application need (run the trunk on
+host/GPU and audit exits on card), not relative to a measured CPU baseline.
+
+**Table 2 omits the EarlyStop baseline.** The companion contract evaluates SAN
+against both Dense and EarlyStop (L5), and the text discusses the comparison, but
+the table itself reports only SAN and Dense integrated machine burden. A future
+revision will add the per-family EarlyStop column so the reader can see the
+savings against both baselines in one view.
+
 ### 5.3 Future work
 
 - Run the full pipeline on ImageNet-1k when credentials and storage become
@@ -493,6 +505,10 @@ exploration, multi-bitstream campaigns, or comparison with HLS alternatives. The
 - Extend the kernel to multi-batch continuous streaming and measure host
   PCIe overhead in a server context.
 - Investigate sparsity and quantization ladders for the machine channel.
+- Add a measured host-CPU baseline for the integer audit/metering kernel to
+  close the FPGA speedup claim.
+- Include the EarlyStop baseline column in the GPU training table for direct
+  three-way comparison.
 
 ---
 
@@ -534,33 +550,18 @@ classification. *ICLR*.
 [4] Sounio repository, suffering-aware neural network line:
 `docs/research/suffering_aware_architecture_spec_2026-07-28.md` and successors.
 
-[5] Han, S., Mao, H., & Dally, W. (2016). Deep compression: Compressing deep
-neural networks with pruning, trained quantization and Huffman coding. *ICLR*.
-
-[6] Chen, J., Ran, X. (2019). Deep learning with edge computing: A review.
-*Proceedings of the IEEE*.
-
-[7] Chamon, L. F., & Ribeiro, A. (2020). Probably approximately correct
+[5] Chamon, L. F., & Ribeiro, A. (2020). Probably approximately correct
 constrained learning. *NeurIPS*.
 
-[8] Chamon, L. F., Paternain, S., Calvo-Fullana, M., & Ribeiro, A. (2023).
+[6] Chamon, L. F., Paternain, S., Calvo-Fullana, M., & Ribeiro, A. (2023).
 Constrained learning with non-convex losses. *IEEE Transactions on Information
 Theory*.
 
-[9] Cotter, A., Jiang, H., Gupta, M., Wang, S., Narayan, T., You, S., &
+[7] Cotter, A., Jiang, H., Gupta, M., Wang, S., Narayan, T., You, S., &
 Sridharan, D. (2019). Optimization with non-differentiable constraints with
 applications to fairness, recall, churn, and other goals. *JMLR*.
 
-[10] Bolukbasi, T., Wang, J., Dekel, O., & Saligrama, V. (2017). Adaptive
-neural networks for efficient inference. *ICML*.
-
-[11] Li, H., Ota, K., & Dong, M. (2018). Learning IoT in edge: Deep learning
-for the Internet of Things with edge computing. *IEEE Network*.
-
-[12] Zhang, X., Zhou, X., Lin, M., & Sun, J. (2018). Shufflenet: An extremely
-efficient convolutional neural network for mobile devices. *CVPR*.
-
-[13] Manheim, D., & Garrabrant, S. (2018). Categorizing variants of Goodhart's
+[8] Manheim, D., & Garrabrant, S. (2018). Categorizing variants of Goodhart's
 law. arXiv:1803.04585.
 
 ---

@@ -11,12 +11,12 @@ use ir::opt_cleanup::{OcpCleanupModuleReceipt, opt_cleanup_module_inplace}
 use io::env::{read_env}
 use io::trace::{io_trace_i64_string}
 use check::mod::{check_items_verdict_boot4, check_items_verdict_boot4_with_ontocache_sidecar, check_modules_verdict_boot4, check_program_epistemic_into, check_program_with_artifacts, checker_to_ir_epistemic_into, checker_apply_ir_metadata, checker_apply_ir_ontology_parameter_links_from_items}
-use ir::lower::{lower_program_to_ir_trace, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_bodies_from_summary_flat_with_epistemic_ref, lower_program_bodies_from_summary_with_epistemic_boxed_owned, lower_dep_program_items_into_acc_with_externs, lower_hard_error_reset, lower_hard_error_pending}
+use ir::lower::{lower_hard_error_report, lower_program_to_ir_trace, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_bodies_from_summary_flat_with_epistemic_ref, lower_program_bodies_from_summary_with_epistemic_boxed_owned, lower_dep_program_items_into_acc_with_externs, lower_hard_error_reset, lower_hard_error_pending, ir_instr_census_report}
 use native::codegen_x86_linux::{compile_native_v2_preview_to_file, native_resolve_target, native_v2_builtin_id_for_name, native_v2_builtin_returns_float}
 use check::knowledge_context::{knowledge_context_validate_items, knowledge_context_validate_items_values_only}
 use resolve::mod::{resolve_modules}
 use module_parse::{extract_imports_from_ast, file_exists, file_path_to_module_path, load_module_file}
-use check::specializer::{specialize_generics, spec_last_instantiated, spec_mono_marker_count, spec_append_item_lists, spec_dce_unreachable_item_fns}
+use check::specializer::{specialize_generics, spec_last_instantiated, spec_mono_marker_count, spec_append_item_lists, spec_dce_unreachable_item_fns, spec_dce_mark_across_programs, spec_dce_filter_with_global_marks, spec_dce_live_item_fns}
 
 // Multi-module parse accumulates every module's GLOBAL_VAR_INIT_* side-table
 // entries so imported f64/i64 BSS constants survive to lower time. Without
@@ -42,8 +42,20 @@ fn module_frontend_global_init_compile_end() with Mut {
     GLOBAL_VAR_INIT_SUPPRESS_RESET = 0
 }
 
+// Memoised: read_env allocates and the runtime allocator never reclaims,
+// so a gate evaluated at every call site leaks on every call. CHECKED is
+// separate from the value because "off" and "not yet read" are different.
+var MODULE_FRONTEND_LOWER_TRACE_ENABLED_ON: i64 = 0
+var MODULE_FRONTEND_LOWER_TRACE_ENABLED_CHECKED: i64 = 0
+
 fn module_frontend_lower_trace_enabled() -> bool with IO, Mut, Panic, Div {
-    str_eq(read_env("SOUNIO_MODULE_FRONTEND_LOWER_TRACE"), "1")
+    if MODULE_FRONTEND_LOWER_TRACE_ENABLED_CHECKED == 0 {
+        MODULE_FRONTEND_LOWER_TRACE_ENABLED_CHECKED = 1
+        if str_eq(read_env("SOUNIO_MODULE_FRONTEND_LOWER_TRACE"), "1") {
+            MODULE_FRONTEND_LOWER_TRACE_ENABLED_ON = 1
+        }
+    }
+    MODULE_FRONTEND_LOWER_TRACE_ENABLED_ON == 1
 }
 
 // Wave13 into-acc multi-mod dep lower (default ON). Avoids concurrent
@@ -74,14 +86,48 @@ fn module_frontend_find_user_main_idx(module: &IrModule) -> i64 with Mut, Div, P
     user_main
 }
 
+// Memoised: read_env allocates and the runtime allocator never reclaims,
+// so a gate evaluated at every call site leaks on every call. CHECKED is
+// separate from the value because "off" and "not yet read" are different.
+var MODULE_FRONTEND_DUMP_MERGED_CALLS_ENABLED_ON: i64 = 0
+var MODULE_FRONTEND_DUMP_MERGED_CALLS_ENABLED_CHECKED: i64 = 0
+
 fn module_frontend_dump_merged_calls_enabled() -> bool with IO, Mut, Panic, Div {
-    str_eq(read_env("SOUNIO_DUMP_MERGED_CALLS"), "1")
+    if MODULE_FRONTEND_DUMP_MERGED_CALLS_ENABLED_CHECKED == 0 {
+        MODULE_FRONTEND_DUMP_MERGED_CALLS_ENABLED_CHECKED = 1
+        if str_eq(read_env("SOUNIO_DUMP_MERGED_CALLS"), "1") {
+            MODULE_FRONTEND_DUMP_MERGED_CALLS_ENABLED_ON = 1
+        }
+    }
+    MODULE_FRONTEND_DUMP_MERGED_CALLS_ENABLED_ON == 1
 }
+
+// Memoised: read_env allocates and the runtime allocator never reclaims,
+// so a gate evaluated at every call site leaks on every call. CHECKED is
+// separate from the value because "off" and "not yet read" are different.
+var MODULE_FRONTEND_REBRACKET_TRACE_ENABLED_ON: i64 = 0
+var MODULE_FRONTEND_REBRACKET_TRACE_ENABLED_CHECKED: i64 = 0
 
 fn module_frontend_rebracket_trace_enabled() -> bool with IO, Mut, Panic, Div {
-    str_eq(read_env("SOUNIO_REBRACKET_TRACE"), "1")
+    if MODULE_FRONTEND_REBRACKET_TRACE_ENABLED_CHECKED == 0 {
+        MODULE_FRONTEND_REBRACKET_TRACE_ENABLED_CHECKED = 1
+        if str_eq(read_env("SOUNIO_REBRACKET_TRACE"), "1") {
+            MODULE_FRONTEND_REBRACKET_TRACE_ENABLED_ON = 1
+        }
+    }
+    MODULE_FRONTEND_REBRACKET_TRACE_ENABLED_ON == 1
 }
 
+// Memoised: read_env allocates and the runtime allocator never reclaims,
+// so a gate evaluated at every call site leaks on every call. CHECKED is
+// separate from the value because "off" and "not yet read" are different.
+var MODULE_FRONTEND_ORDERED_PATH_TRACE_ENABLED_ON: i64 = 0
+var MODULE_FRONTEND_ORDERED_PATH_TRACE_ENABLED_CHECKED: i64 = 0
+
+// Both sides of this merge added top-level declarations here and neither
+// replaces the other: main's memoised trace gate above, #1649's seal receipt
+// and skip-mask tracing below. main's vars are referenced by code that arrived
+// with the merge, so dropping either half breaks a caller.
 // #1649: how many function regions were sealed at publication. A count below
 // fn_count is not an error -- an empty function is never given a region -- but a
 // count of ZERO on a module with functions means sealing silently did nothing,
@@ -190,7 +236,13 @@ fn module_frontend_load_ocp_skip_mask() with IO, Mut, Panic, Div {
 }
 
 fn module_frontend_ordered_path_trace_enabled() -> bool with IO, Mut, Panic, Div {
-    str_eq(read_env("SOUNIO_ORDERED_PATH_TRACE"), "1")
+    if MODULE_FRONTEND_ORDERED_PATH_TRACE_ENABLED_CHECKED == 0 {
+        MODULE_FRONTEND_ORDERED_PATH_TRACE_ENABLED_CHECKED = 1
+        if str_eq(read_env("SOUNIO_ORDERED_PATH_TRACE"), "1") {
+            MODULE_FRONTEND_ORDERED_PATH_TRACE_ENABLED_ON = 1
+        }
+    }
+    MODULE_FRONTEND_ORDERED_PATH_TRACE_ENABLED_ON == 1
 }
 
 fn module_frontend_items_have_ontology(items: &Option<Box<ItemList>>) -> bool with Alloc {
@@ -583,7 +635,7 @@ fn module_frontend_source_contains_pattern(path: string, pattern: string) -> boo
     module_frontend_loaded_contains_pattern(size, pattern)
 }
 
-fn module_frontend_check_items_with_source_context(items: Option<Box<ItemList>>, source_path: string) -> i64 with IO, Mut, Div, Panic, Alloc {
+pub(crate) fn module_frontend_check_items_with_source_context(items: Option<Box<ItemList>>, source_path: string) -> i64 with IO, Mut, Div, Panic, Alloc {
     let module_path = file_path_to_module_path(source_path)
     if module_frontend_source_contains_pattern(source_path, "//@ ontology-side-table-cache:") {
         let cache_verdict = check_items_verdict_boot4_with_ontocache_sidecar(items, source_path, module_path)
@@ -1937,7 +1989,7 @@ fn ir_module_dump_fn_body(module: &IrModule, fn_index: i64, label: string) with 
             print_int(ins.fn_id)
             if ins.op == IrOpcode::IrCall || ins.op == IrOpcode::IrCallSret {
                 print(" name=")
-                print(str_from_bytes(ins.name.buf, ins.name.len))
+                print(str_from_bytes(ir_name_at(ins.name_id).buf, ir_name_at(ins.name_id).len))
             }
         }
         print("\n")
@@ -2061,7 +2113,7 @@ fn ir_module_dump_merge_calls(module: &IrModule) with IO, Mut, Div, Panic {
                         print(" fn_id=")
                         print_int(ins.fn_id)
                         print(" name=")
-                        print(str_from_bytes(ins.name.buf, ins.name.len))
+                        print(str_from_bytes(ir_name_at(ins.name_id).buf, ir_name_at(ins.name_id).len))
                         if ins.fn_id >= 0 && ins.fn_id < (*module).fn_count {
                             print(" ->")
                             print(str_from_bytes((*module).functions[ins.fn_id as usize].name.buf, (*module).functions[ins.fn_id as usize].name.len))
@@ -2089,7 +2141,7 @@ fn ir_module_dump_merge_calls(module: &IrModule) with IO, Mut, Div, Panic {
                     print(" fn_id=")
                     print_int(ins.fn_id)
                     print(" name=")
-                    print(str_from_bytes(ins.name.buf, ins.name.len))
+                    print(str_from_bytes(ir_name_at(ins.name_id).buf, ir_name_at(ins.name_id).len))
                     if ins.fn_id >= 0 && ins.fn_id < (*module).fn_count {
                         print(" ->")
                         print(str_from_bytes((*module).functions[ins.fn_id as usize].name.buf, (*module).functions[ins.fn_id as usize].name.len))
@@ -2140,7 +2192,7 @@ fn ir_module_dump_merge_calls(module: &IrModule) with IO, Mut, Div, Panic {
                 print(" fn_id=")
                 print_int(ins.fn_id)
                 print(" name=")
-                print(str_from_bytes(ins.name.buf, ins.name.len))
+                print(str_from_bytes(ir_name_at(ins.name_id).buf, ir_name_at(ins.name_id).len))
                 if ins.fn_id >= 0 && ins.fn_id < (*module).fn_count {
                     print(" ->")
                     print(str_from_bytes((*module).functions[ins.fn_id as usize].name.buf, (*module).functions[ins.fn_id as usize].name.len))
@@ -2562,6 +2614,11 @@ pub fn module_frontend_collect_ast_closure_into(
             work_front = (*out).node_count
         }
         let imports = extract_imports_from_ast(work_prog)
+        if imports.overflowed {
+            // More `use` statements than ImportList can hold. Reported through the same channel as
+            // the walker's own caps so the closure is never silently incomplete.
+            (*out).saturated = true
+        }
         var i: i64 = 0
         while i < imports.count && !(*out).parse_failed {
             let dependency_path = resolve_import_file_path(imports.paths[i], cur_dir)
@@ -3008,10 +3065,10 @@ fn module_frontend_name_is_print_int(name: Name) -> bool {
     name.buf[8] == (116 as i8)
 }
 
-fn module_frontend_ir_named_call(dst: i64, fn_name: Name) -> IrInstr {
+fn module_frontend_ir_named_call(dst: i64, fn_name: Name) -> IrInstr with Div, Mut, Panic {
     var instr = ir_call(dst, 0 - 1, fn_name, None, 0)
     instr.fn_id = 0 - 1
-    instr.name = fn_name
+    instr.name_id = ir_intern_name(fn_name)
     instr
 }
 
@@ -4790,11 +4847,32 @@ fn module_frontend_count_bss_global_slots(items: &Option<Box<ItemList>>) -> i64 
     count
 }
 
-fn module_frontend_count_loaded_ir_slots(programs: &! [Program; 256], loaded: i64) -> i64 with Alloc {
+// Counts what will ACTUALLY be lowered. Before cross-module DCE ran on this
+// path the count was of everything parsed, which is why a 10705-declaration
+// closure failed a preflight that 5997 live declarations would have passed.
+var MF_DCE_TRACE_ON: i64 = 0
+var MF_DCE_TRACE_CHECKED: i64 = 0
+
+fn module_frontend_dce_trace_enabled() -> bool with IO, Mut, Panic, Div {
+    if MF_DCE_TRACE_CHECKED == 0 {
+        MF_DCE_TRACE_CHECKED = 1
+        if str_eq(read_env("SOUNIO_MM_SPEC_TRACE"), "1") {
+            MF_DCE_TRACE_ON = 1
+        }
+    }
+    MF_DCE_TRACE_ON == 1
+}
+
+fn module_frontend_count_loaded_ir_slots(programs: &! [Program; 256], loaded: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
     var count: i64 = 0
     var i: i64 = 0
     while i < loaded && i < 256 {
-        let items = (*programs)[i as usize].items
+        // Filtered, not raw: the two lowering read sites below filter too, so
+        // counting the unfiltered list would reject a program that fits.
+        // spec_dce_filter_with_global_marks returns its input unchanged unless
+        // a COMPLETE mark set is ready, so this stays conservative when the DCE
+        // refused.
+        let items = spec_dce_filter_with_global_marks((*programs)[i as usize].items)
         count = count + module_frontend_count_lowered_ir_slots(&items)
         i = i + 1
     }
@@ -4812,6 +4890,19 @@ fn module_frontend_count_loaded_bss_global_slots(programs: &! [Program; 256], lo
     count
 }
 
+// EVERY ARM REPORTS THE CENSUS, not just the verdict. Both numbers are already
+// in hand here and were being discarded, which made the message name a wall
+// without saying how far over it the program is -- and the four ways past this
+// wall differ by an order of magnitude in cost, so choosing between them
+// without the number is guessing:
+//
+//   extract main.sio's test suite   ~1165 fns, no structural change
+//   raise IR_MAX_FUNCS              ~1 MB of BSS per function
+//   box IrFunction.instrs           the largest change in the backend
+//
+// "over by 12" and "over by 4000" call for different answers. Measured
+// 2026-08-06: gen2 on main.sio reported the combined arm with no counts, and
+// deciding what to do next required instrumenting this line first.
 fn module_frontend_ir_slot_capacity_error_from_counts(total_slots: i64, bss_slots: i64, slot_limit: i64) -> string with Mut, Panic, Div, Alloc {
     if bss_slots > BSS_MAX_GLOBALS {
         return "too many globals: shared IR module capacity exceeded (max " + io_trace_i64_string(BSS_MAX_GLOBALS) + " slots)"
@@ -4820,6 +4911,34 @@ fn module_frontend_ir_slot_capacity_error_from_counts(total_slots: i64, bss_slot
         return "too many functions: shared IR module capacity exceeded (max " + io_trace_i64_string(slot_limit) + " slots)"
     }
     "too many lowered items: combined globals and functions exceed shared IR module capacity (max " + io_trace_i64_string(slot_limit) + " slots)"
+}
+
+// The census, on its OWN line. Two constraints rule out appending it to the
+// message above.
+//
+// The message text is matched by nine consumers -- four gates
+// (madaros_fixed_point, madaros_global_capacity, madaros_ir_capacity_probe,
+// madaros_imported_capacity), two tests that assert on it
+// (door1_too_many_globals_1025.sio, ir_capacity/ir_capacity_main.sio), and
+// lean_single.sio itself. Rewording it to make room would break all of them to
+// carry a number that fits perfectly well elsewhere.
+//
+// And Madaros truncates a printed string at 128 bytes with no diagnostic. The
+// combined-arm message is already ~104 characters before any count is
+// appended, so the natural phrasing would have silently dropped exactly the
+// census it exists to carry.
+fn module_frontend_print_slot_census(total_slots: i64, bss_slots: i64, slot_limit: i64) with IO, Mut, Panic, Div, Alloc {
+    print("IR slot census: globals ")
+    print_int(bss_slots)
+    print(" + functions ")
+    print_int(total_slots - bss_slots)
+    print(" = ")
+    print_int(total_slots)
+    print(" (max ")
+    print_int(slot_limit)
+    print(", over by ")
+    print_int(total_slots - slot_limit)
+    print(")\n")
 }
 
 fn module_frontend_ir_slot_capacity_exceeded(items: &Option<Box<ItemList>>) -> bool with Alloc {
@@ -4845,18 +4964,20 @@ fn module_frontend_loaded_ir_slot_limit(loaded: i64) -> i64 {
     IR_MAX_FUNCS
 }
 
-fn module_frontend_loaded_ir_slot_capacity_exceeded(programs: &! [Program; 256], loaded: i64) -> bool with Alloc {
+fn module_frontend_loaded_ir_slot_capacity_exceeded(programs: &! [Program; 256], loaded: i64) -> bool with Alloc, Div, IO, Mut, Panic {
     let total_slots = module_frontend_count_loaded_ir_slots(programs, loaded)
     let bss_slots = module_frontend_count_loaded_bss_global_slots(programs, loaded)
     bss_slots > BSS_MAX_GLOBALS || total_slots > module_frontend_loaded_ir_slot_limit(loaded)
 }
 
-fn module_frontend_loaded_ir_slot_capacity_error(programs: &! [Program; 256], loaded: i64) -> string with Mut, Panic, Div, Alloc {
-    module_frontend_ir_slot_capacity_error_from_counts(
-        module_frontend_count_loaded_ir_slots(programs, loaded),
-        module_frontend_count_loaded_bss_global_slots(programs, loaded),
-        module_frontend_loaded_ir_slot_limit(loaded)
-    )
+fn module_frontend_loaded_ir_slot_capacity_error(programs: &! [Program; 256], loaded: i64) -> string with Mut, Panic, Div, Alloc, IO {
+    let total_slots = module_frontend_count_loaded_ir_slots(programs, loaded)
+    let bss_slots = module_frontend_count_loaded_bss_global_slots(programs, loaded)
+    let slot_limit = module_frontend_loaded_ir_slot_limit(loaded)
+    // This is the multi-module path -- the one self-hosted/compiler/main.sio
+    // takes -- so it is the one whose census anybody actually needs.
+    module_frontend_print_slot_census(total_slots, bss_slots, slot_limit)
+    module_frontend_ir_slot_capacity_error_from_counts(total_slots, bss_slots, slot_limit)
 }
 
 fn module_frontend_lower_program_counts_traced(
@@ -4901,9 +5022,18 @@ fn module_frontend_lower_program_box_traced_with_epistemic(
     }
     let summary_result = lower_program_to_ir_summary_box_with_epistemic_ref(program, epistemic)
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_done\n") }
-    if summary_result.had_error || (*(*summary_result.summary).module).fn_count <= 0 {
+    // "ir_summary_failed" conflated TWO different failures — the lowering
+    // reported an error, or it produced an empty module — and said which
+    // neither. Separated, because the first thing anyone asks on seeing it
+    // is which one happened.
+    if summary_result.had_error {
         trace.last_stage = "lower_summary_error"
-        return module_frontend_lower_box_error("ir_summary_failed")
+        lower_hard_error_report()
+        return module_frontend_lower_box_error("ir_summary_failed: lowering reported an error")
+    }
+    if (*(*summary_result.summary).module).fn_count <= 0 {
+        trace.last_stage = "lower_summary_error"
+        return module_frontend_lower_box_error("ir_summary_failed: lowering produced an empty module (fn_count 0)")
     }
 
     trace.summary_seeded_modules = trace.summary_seeded_modules + 1
@@ -4964,9 +5094,18 @@ fn module_frontend_lower_program_items_box_traced(
     let program = mf_program_from_items(items)
     let summary_result = lower_program_to_ir_summary_box_with_epistemic_ref(&program, &epistemic)
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_done\n") }
-    if summary_result.had_error || (*(*summary_result.summary).module).fn_count <= 0 {
+    // "ir_summary_failed" conflated TWO different failures — the lowering
+    // reported an error, or it produced an empty module — and said which
+    // neither. Separated, because the first thing anyone asks on seeing it
+    // is which one happened.
+    if summary_result.had_error {
         trace.last_stage = "lower_summary_error"
-        return module_frontend_lower_box_error("ir_summary_failed")
+        lower_hard_error_report()
+        return module_frontend_lower_box_error("ir_summary_failed: lowering reported an error")
+    }
+    if (*(*summary_result.summary).module).fn_count <= 0 {
+        trace.last_stage = "lower_summary_error"
+        return module_frontend_lower_box_error("ir_summary_failed: lowering produced an empty module (fn_count 0)")
     }
 
     trace.summary_seeded_modules = trace.summary_seeded_modules + 1
@@ -5015,9 +5154,18 @@ fn module_frontend_lower_program_box_traced_with_externs(
     var epistemic = ir_empty_epistemic_section()
     let summary_result = lower_program_to_ir_summary_box_with_externs_ref(program, programs, program_count, module_index, &epistemic)
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_done\n") }
-    if summary_result.had_error || (*(*summary_result.summary).module).fn_count <= 0 {
+    // "ir_summary_failed" conflated TWO different failures — the lowering
+    // reported an error, or it produced an empty module — and said which
+    // neither. Separated, because the first thing anyone asks on seeing it
+    // is which one happened.
+    if summary_result.had_error {
         trace.last_stage = "lower_summary_error"
-        return module_frontend_lower_box_error("ir_summary_failed")
+        lower_hard_error_report()
+        return module_frontend_lower_box_error("ir_summary_failed: lowering reported an error")
+    }
+    if (*(*summary_result.summary).module).fn_count <= 0 {
+        trace.last_stage = "lower_summary_error"
+        return module_frontend_lower_box_error("ir_summary_failed: lowering produced an empty module (fn_count 0)")
     }
 
     trace.summary_seeded_modules = trace.summary_seeded_modules + 1
@@ -5067,9 +5215,18 @@ fn module_frontend_lower_program_items_box_traced_with_externs(
     let program = mf_program_from_items(items)
     let summary_result = lower_program_to_ir_summary_box_with_externs_ref(&program, programs, program_count, module_index, &epistemic)
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_done\n") }
-    if summary_result.had_error || (*(*summary_result.summary).module).fn_count <= 0 {
+    // "ir_summary_failed" conflated TWO different failures — the lowering
+    // reported an error, or it produced an empty module — and said which
+    // neither. Separated, because the first thing anyone asks on seeing it
+    // is which one happened.
+    if summary_result.had_error {
         trace.last_stage = "lower_summary_error"
-        return module_frontend_lower_box_error("ir_summary_failed")
+        lower_hard_error_report()
+        return module_frontend_lower_box_error("ir_summary_failed: lowering reported an error")
+    }
+    if (*(*summary_result.summary).module).fn_count <= 0 {
+        trace.last_stage = "lower_summary_error"
+        return module_frontend_lower_box_error("ir_summary_failed: lowering produced an empty module (fn_count 0)")
     }
 
     trace.summary_seeded_modules = trace.summary_seeded_modules + 1
@@ -5315,12 +5472,26 @@ fn module_frontend_lower_programs_array_direct_box(
 
     trace.last_stage = "lower_summary"
     trace.last_module_index = 0
+    // Cross-module DCE BEFORE the capacity preflight, so the preflight counts
+    // what will be lowered rather than what was parsed. spec_dce_unreachable_item_fns
+    // only runs on the specialized-collapse path, so this path had no pruning at
+    // all: main.sio's 120-module closure declares 10705 functions against a
+    // limit of IR_MAX_FUNCS - 1, while only 5997 are reachable from `main`.
+    // Returns -1 when the mark set could not be completed, and the filter
+    // helpers then hand back their input unchanged — a refusal upstream cannot
+    // become a deletion downstream.
+    let dce_marks = spec_dce_mark_across_programs(programs, loaded)
+    if dce_marks > 0 && module_frontend_dce_trace_enabled() {
+        print("lower_array: dce marks=")
+        print_int(dce_marks)
+        print("\n")
+    }
     if module_frontend_loaded_ir_slot_capacity_exceeded(programs, loaded) {
         trace.last_stage = "lower_summary_error"
         return module_frontend_lower_direct_box_error(module_frontend_loaded_ir_slot_capacity_error(programs, loaded))
     }
     print("lower_array: seed_begin\n")
-    let seed_items = (*programs)[0].items
+    let seed_items = spec_dce_filter_with_global_marks((*programs)[0].items)
     let seed_lower = module_frontend_lower_program_items_box_traced_with_externs(&seed_items, programs, loaded, 0, trace)
     print("lower_array: seed_done\n")
     if !seed_lower.ok {
@@ -5366,7 +5537,7 @@ fn module_frontend_lower_programs_array_direct_box(
                 // this mark and is untouched by the reset below -- only the
                 // per-module lowering scratch falls inside [mark, reset).
                 let dep_arena_mark = __arena_mark()
-                let dep_items = (*programs)[i as usize].items
+                let dep_items = spec_dce_filter_with_global_marks((*programs)[i as usize].items)
 
                 if into_acc_default {
                     // Wave13: body-lower dep directly into acc (no concurrent dep_box).
@@ -5384,6 +5555,17 @@ fn module_frontend_lower_programs_array_direct_box(
                     print_int(i)
                     print("\n")
                     if into_result.had_error {
+                        // Say WHICH module and WHAT was raised. This site used to
+                        // return the bare string, so a failure here named the
+                        // stage and nothing else -- and the lowering-error ledger
+                        // that knows the answer was already sitting in globals,
+                        // unread. The four *_ir_slot paths above already do this.
+                        print("  into_acc failed at module index ")
+                        print_int(i)
+                        print(" of ")
+                        print_int(loaded)
+                        print("\n")
+                        lower_hard_error_report()
                         return module_frontend_lower_direct_box_error("ir_into_acc_failed")
                     }
                     acc_box = into_result.module
@@ -5905,7 +6087,7 @@ fn module_frontend_specialized_prepare(
 // True when the lowered module has at least one `main` with a non-empty body.
 // Specialized collapse must not ship a hollow main (measured dual gum+knowledge:
 // specialized lower left main@53 ic=0 → silent rc=0 without DUAL_GUM_KNOWLEDGE_OK).
-fn module_frontend_module_has_main_body(module: &IrModule) -> bool {
+fn module_frontend_module_has_main_body(module: &IrModule) -> bool with Div, Mut, Panic {
     let watch_main = make_name("main")
     var fi: i64 = 0
     while fi < (*module).fn_count {
@@ -6258,6 +6440,7 @@ pub fn module_frontend_compile_imported_to_file(
         trace.last_stage = "done"
         trace.last_module_index = 0
         trace.merged_modules = 1
+        ir_instr_census_report()
         print("Merged IR: ")
         print_int(fn_count)
         print(" functions\n")
@@ -6339,6 +6522,7 @@ pub fn module_frontend_compile_imported_to_file(
     trace.last_stage = "done"
     trace.last_module_index = loaded - 1
     trace.merged_modules = loaded
+    ir_instr_census_report()
     print("Merged IR: ")
     print_int(fn_count)
     print(" functions\n")
@@ -7109,6 +7293,7 @@ pub fn load_multimodule_imported_simple_ir_global(main_path: string) -> MultiMod
     }
     trace.last_stage = "done"
     trace.last_module_index = trace.loaded_modules - 1
+    ir_instr_census_report()
     print("Merged IR: ")
     print_int(MODULE_FRONTEND_IMPORTED_SIMPLE_FN_COUNT)
     print(" functions\n")
@@ -7300,6 +7485,7 @@ fn load_multimodule_ir_to_box_traced(main_path: string, trace: &! LoadMultimodul
         }
         trace.merged_modules = 1
         trace.last_stage = "done"
+        ir_instr_census_report()
         print("Merged IR: ")
         print_int(single_lower_result_no_use.fn_count)
         print(" functions\n")
@@ -7338,6 +7524,7 @@ fn load_multimodule_ir_to_box_traced(main_path: string, trace: &! LoadMultimodul
         }
         trace.merged_modules = 1
         trace.last_stage = "done"
+        ir_instr_census_report()
         print("Merged IR: ")
         print_int(single_lower_result.fn_count)
         print(" functions\n")
@@ -7413,6 +7600,7 @@ fn load_multimodule_ir_to_box_traced(main_path: string, trace: &! LoadMultimodul
 
     trace.last_stage = "done"
     trace.last_module_index = loaded - 1
+    ir_instr_census_report()
     print("Merged IR: ")
     print_int((*module_box).fn_count)
     print(" functions\n")
@@ -7466,6 +7654,7 @@ pub fn load_multimodule_ir_counts_traced(main_path: string, trace: &! LoadMultim
 
         trace.last_stage = "done"
         trace.last_module_index = trace.loaded_modules - 1
+        ir_instr_census_report()
         print("Merged IR: ")
         print_int(total_fn_count)
         print(" functions\n")
@@ -7521,6 +7710,7 @@ pub fn load_multimodule_ir_counts_traced(main_path: string, trace: &! LoadMultim
         }
         trace.merged_modules = 1
         trace.last_stage = "done"
+        ir_instr_census_report()
         print("Merged IR: ")
         print_int(single_fn_count)
         print(" functions\n")
@@ -7563,6 +7753,7 @@ pub fn load_multimodule_ir_counts_traced(main_path: string, trace: &! LoadMultim
         }
         trace.merged_modules = 1
         trace.last_stage = "done"
+        ir_instr_census_report()
         print("Merged IR: ")
         print_int(single_fn_count2)
         print(" functions\n")
@@ -7658,6 +7849,7 @@ pub fn load_multimodule_ir_counts_traced(main_path: string, trace: &! LoadMultim
 
     trace.last_stage = "done"
     trace.last_module_index = loaded - 1
+    ir_instr_census_report()
     print("Merged IR: ")
     print_int(total_fn_count)
     print(" functions\n")
@@ -7717,6 +7909,7 @@ pub fn load_multimodule_ir_fn_count_traced(main_path: string, trace: &! LoadMult
     trace.lowered_modules = 1
     trace.merged_modules = 1
     trace.last_stage = "done"
+    ir_instr_census_report()
     print("Merged IR: ")
     print_int(fn_count)
     print(" functions\n")
@@ -7874,6 +8067,7 @@ pub fn load_multimodule_ir_probe_summary_traced(main_path: string, trace: &! Loa
 
     trace.last_stage = "done"
     trace.last_module_index = loaded - 1
+    ir_instr_census_report()
     print("Merged IR: ")
     print_int(merged_module.fn_count)
     print(" functions\n")

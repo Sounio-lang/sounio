@@ -5,6 +5,7 @@
 //
 // Methods return (Checker, ...) to thread state through value semantics.
 
+use io::env::{read_env}
 use check::refinement::*
 use check::types::*
 use check::defs::*
@@ -40,22 +41,59 @@ use ir::ir::*
 // Visibility / module-path helpers
 // ============================================================
 
-fn string_list_eq_sl(a: StringList, b: StringList) -> bool with Mut, Panic, Div {
+// Head-only segment comparison. Touches NO Option<Box<T>> field, which is the whole point:
+// reading `tail` — even as `tail == None` — is a read through a Box-typed struct field, and
+// Madaros miscompiles those (StructFieldEntry at ir/ir.sio:2175 carries no pointer metadata,
+// so field access computes base+off+off, correct for an inline field and wrong for a Box).
+// The note that used to sit on the tail comparison below tried to dodge this by replacing
+// `match` with `== None`; that does not help, because the read itself is the defect.
+fn string_list_head_eq_sl(a: StringList, b: StringList) -> bool with Mut, Panic, Div {
     if a.head_len != b.head_len { return false }
     var i: i64 = 0
     while i < a.head_len && i < 128 {
         if a.head_buf[i as usize] != b.head_buf[i as usize] { return false }
         i = i + 1
     }
-    // Avoid any Option<Box<T>> matching inside *mut callers: bin/souc miscompiles it.
-    if a.tail == None && b.tail == None { return true }
-    if a.tail == None || b.tail == None { return false }
-    string_list_eq_sl(*a.tail, *b.tail)
+    true
+}
+
+fn string_list_eq_sl(a: StringList, b: StringList) -> bool with Mut, Panic, Div {
+    if !string_list_head_eq_sl(a, b) { return false }
+    // Reached only for genuinely multi-segment paths. Module identity is single-segment
+    // (compiler/module_loader.sio file_path_to_module_path returns seg_count 1), so
+    // ast_path_eq below never routes here today.
+    // `*a.tail` unwraps the Option and stops at the Box, so it types as Box and
+    // not StringList. The tree's working idiom for a boxed tail is to match the
+    // Option and deref the Box the match binds — see substitute_type_param_list
+    // (check.sio:770) and mangle_append_args (:593).
+    match a.tail {
+        None => {
+            match b.tail {
+                None => true
+                Some(_) => false
+            }
+        }
+        Some(at) => {
+            match b.tail {
+                None => false
+                Some(bt) => string_list_eq_sl(*at, *bt)
+            }
+        }
+    }
 }
 
 fn ast_path_eq(a: AstPath, b: AstPath) -> bool with Mut, Panic, Div {
     if a.seg_count != b.seg_count { return false }
     if a.seg_count == 0 { return true }
+    // seg_count 1 means the tail carries nothing to compare, so compare heads and return.
+    // This is not an optimisation: it is what stops the ONLY caller of ast_path_eq
+    // (visibility_allows_access, check.sio:90) from crashing the compiler. Two modules whose
+    // first segment bytes are EQUAL used to fall through to the tail walk above, and reading
+    // that Option<Box<StringList>> field SIGSEGVs with no diagnostic — reproduced with a
+    // deterministic 3-file witness: colliding basenames plus a private cross-module access,
+    // rc=139. Making the callee public (short-circuits at :6574) or the basenames distinct
+    // (byte loop exits early) both avoid the read, which is why the crash stayed hidden.
+    if a.seg_count == 1 { return string_list_head_eq_sl(a.segments, b.segments) }
     string_list_eq_sl(a.segments, b.segments)
 }
 
@@ -74,9 +112,19 @@ fn ast_path_is_prefix(ancestor: AstPath, descendant: AstPath) -> bool with Mut, 
         }
         i = i + 1
         if i < ancestor.seg_count {
-            if a_segs.tail == None || d_segs.tail == None { return false }
-            a_segs = *a_segs.tail
-            d_segs = *d_segs.tail
+            // Same as string_list_eq_sl: match the Option, deref the Box it binds.
+            match a_segs.tail {
+                None => return false
+                Some(at) => {
+                    match d_segs.tail {
+                        None => return false
+                        Some(dt) => {
+                            a_segs = *at
+                            d_segs = *dt
+                        }
+                    }
+                }
+            }
         }
     }
     true
@@ -242,6 +290,14 @@ pub struct Checker {
     // carries no module identity -- pointed into whichever buffer the reader
     // guessed. Two of them were attributed to the wrong file that way.
     current_fn_name: Name,
+    // Effect inference (§7.2.1) publishes the inferred set into the signature of the function being
+    // checked, which means knowing WHICH signature that is. The name is stored beside the index as
+    // a GUARD: at a set-site this pair is not updated at, the index would still point at an earlier
+    // function and writing there would corrupt an unrelated signature silently. The write-back
+    // checks the name first and skips on mismatch, so a missed site costs lost propagation rather
+    // than a wrong effect set. -1 disables the write outright.
+    current_sig_id: i64,
+    current_sig_name: Name,
     multitest_count: i64,
     multitest_corrected: bool,
     last_literal_int: i64,
@@ -933,6 +989,11 @@ pub fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
         current_effects: [0; 8],
         current_effect_count: 0,
         current_fn_name: empty_name(),
+        // -1 disables the effect-inference write-back until a signature is
+        // entered, which is the safe default: a stale id would widen the wrong
+        // function's effects.
+        current_sig_id: 0 - 1,
+        current_sig_name: empty_name(),
         multitest_count: 0,
         multitest_corrected: false,
         last_literal_int: 0,
@@ -1030,6 +1091,8 @@ pub fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     (*raw).current_impl_type = ty_error()
     (*raw).current_effects = [0; 8]
     (*raw).current_effect_count = 0
+    (*raw).current_sig_id = 0 - 1
+    (*raw).current_sig_name = empty_name()
     (*raw).multitest_count = 0
     (*raw).multitest_corrected = false
     (*raw).last_literal_int = 0
@@ -1131,6 +1194,8 @@ fn checker_store_from_value(dst: *mut Checker, src: Checker) with Mut, Panic, Di
     (*dst).current_impl_type = src.current_impl_type
     (*dst).current_effects = src.current_effects
     (*dst).current_effect_count = src.current_effect_count
+    (*dst).current_sig_id = src.current_sig_id
+    (*dst).current_sig_name = src.current_sig_name
     (*dst).multitest_count = src.multitest_count
     (*dst).multitest_corrected = src.multitest_corrected
     (*dst).last_literal_int = src.last_literal_int
@@ -4098,6 +4163,15 @@ fn checker_check_impl_method_inplace(c: *mut Checker, item: Item) with Mut, Pani
                 (*c).current_return_type = sig.return_type
                 (*c).current_effects = sig.effects
                 (*c).current_effect_count = sig.effect_count
+                (*c).current_sig_id = sig_id
+                (*c).current_sig_name = sig.name
+            } else {
+                // An imported named impl can remain unresolved while its own body
+                // is checked. Its declaration is nevertheless authoritative for
+                // effect checking; do not silently treat that body as effect-free.
+                let declared_effects = checker_extract_effects_mut(c, (*fd).effects)
+                (*c).current_effects = declared_effects.effects
+                (*c).current_effect_count = declared_effects.count
             }
             (*c).multitest_count = 0
             (*c).multitest_corrected = false
@@ -4119,6 +4193,7 @@ fn checker_check_impl_method_inplace(c: *mut Checker, item: Item) with Mut, Pani
             (*c).borrows = (*c).borrows.pop_scope()
             (*c).env = (*c).env.pop_scope()
             (*c).current_return_type = ty_unit()
+            (*c).current_sig_id = 0 - 1
             (*c).current_effects = saved_effects
             (*c).current_effect_count = saved_effect_count
             (*c).multitest_count = saved_multitest_count
@@ -4399,6 +4474,8 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
                 (*c).current_return_type = sig.return_type
                 (*c).current_effects = sig.effects
                 (*c).current_effect_count = sig.effect_count
+                (*c).current_sig_id = sig_id
+                (*c).current_sig_name = sig.name
                 // Per-call-site recording: note a `with Chaotic` (effect id 22) function.
                 if has_effect_id(sig.effects, sig.effect_count, 22) { equiv_set_chaotic() }
                 // Loud-failure guard (#187): warn on oversized by-value return.
@@ -4414,6 +4491,7 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             match (*fd).body.stmts {
                 None => {
                     (*c).current_return_type = ty_unit()
+                    (*c).current_sig_id = 0 - 1
                     (*c).current_effects = saved_effects
                     (*c).current_effect_count = saved_effect_count
                     (*c).multitest_count = saved_multitest_count
@@ -4446,6 +4524,7 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             (*c).borrows = (*c).borrows.pop_scope()
             (*c).env = (*c).env.pop_scope()
             (*c).current_return_type = ty_unit()
+            (*c).current_sig_id = 0 - 1
             (*c).current_effects = saved_effects
             (*c).current_effect_count = saved_effect_count
             (*c).multitest_count = saved_multitest_count
@@ -6191,6 +6270,7 @@ fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
     checker_pop_const_scope_inplace(c)
     (*c).borrows = (*c).borrows.pop_scope()
     (*c).env = (*c).env.pop_scope()
+    (*c).current_sig_id = 0 - 1
     (*c).current_effects = saved_effects
     (*c).current_effect_count = saved_effect_count
 
@@ -6336,7 +6416,7 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
             let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
             let call_start_borrows = (*c).borrows
             checker_check_call_args_inplace(c, expr_list_handle(e.args), fn_param_list_handle(fn_param_list_clone(&sig.params)), sig.param_count, e.span)
-            checker_check_callee_effects_inplace(c, e.span, sig.effects, sig.effect_count)
+            checker_check_callee_effects_named_inplace(c, e.span, sig.effects, sig.effect_count, sig.name)
             checker_release_call_arg_borrows_inplace(c, e.args, fn_param_list_clone(&sig.params), call_start_borrows)
             sig.return_type
         } else {
@@ -6369,7 +6449,7 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
             let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
             let call_start_borrows = (*c).borrows
             checker_check_call_args_inplace(c, expr_list_handle(e.args), fn_param_list_handle(fn_param_list_clone(&sig.params)), sig.param_count, e.span)
-            checker_check_callee_effects_inplace(c, e.span, sig.effects, sig.effect_count)
+            checker_check_callee_effects_named_inplace(c, e.span, sig.effects, sig.effect_count, sig.name)
             checker_release_call_arg_borrows_inplace(c, e.args, fn_param_list_clone(&sig.params), call_start_borrows)
             sig.return_type
         } else {
@@ -6822,6 +6902,14 @@ fn checker_fn_sigs_find_inplace(c: *mut Checker, name: Name) -> i64 with Mut, Pa
 
 fn checker_fn_sig_visible_inplace(c: *mut Checker, sig_id: i64) -> bool with Mut, Panic, Div, Alloc, IO {
     let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
+    // #1627 / E175: a private `extern "C"` stub for a native-backend builtin must
+    // not false-reject sibling modules that call the builtin by name. Same
+    // allow-list as E219 (#1622). Without this, the first module that declared
+    // `extern "C" { fn sqrt; }` owns a private sig that prefer_module falls
+    // through to, and every later module's `sqrt(...)` becomes E175.
+    if sig.is_extern && name_is_native_backend_builtin(sig.name) {
+        return true
+    }
     let vis_kind = sig.visibility_kind
     if vis_kind == VISIBILITY_PUB {
         return true
@@ -7068,7 +7156,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             direct_sig.param_count,
             e.span,
         )
-        checker_check_callee_effects_inplace(c, e.span, direct_sig.effects, direct_sig.effect_count)
+        checker_check_callee_effects_named_inplace(c, e.span, direct_sig.effects, direct_sig.effect_count, direct_sig.name)
         checker_release_call_arg_borrows_inplace(c, e.args, effective_params, call_start_borrows)
         return effective_return_type
     }
@@ -7151,7 +7239,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             None => {}
         }
         checker_check_call_args_inplace(c, expr_list_handle(e.args), fn_param_list_handle(effective_params), sig.param_count, e.span)
-        checker_check_callee_effects_inplace(c, e.span, sig.effects, sig.effect_count)
+        checker_check_callee_effects_named_inplace(c, e.span, sig.effects, sig.effect_count, sig.name)
         checker_release_call_arg_borrows_inplace(c, e.args, effective_params, call_start_borrows)
         effective_return_type
     } else if is_error_or_unknown(callee_ty) {
@@ -7181,7 +7269,59 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
 }
 
 
-fn checker_check_callee_effects_inplace(c: *mut Checker, span: Span, callee_effects: [i64; 8], callee_effect_count: i64) with Mut, IO, Panic, Div, Alloc {
+// Effect INFERENCE, spec §7.2.1: "the checker is intended to infer this from the function body
+// rather than require the author to reason about it; the annotation is a declaration of the
+// inferred fact, not an independent obligation."
+//
+// STEP 1 of that, behind SOUNIO_EFFECT_INFER=1 and off by default so the shipped behaviour is
+// unchanged while this is measured. Instead of reporting E035, the effect the callee needs is
+// ADDED to the effect set in force for the function being checked. Adding only: an inferred set
+// grows as callees are discovered and never shrinks, so a declared effect cannot be dropped.
+//
+// What this step does NOT yet do is write the widened set back into the caller's FnSig, so a
+// caller-of-a-caller still sees the narrow DECLARED set and the inference stops after one level.
+// Doing that needs the checker to know which signature it is currently inside, and the only handle
+// would be a `current_sig_id` field kept in sync across 13 assignment sites and 6 save/restore
+// pairs — where a stale id would widen the WRONG function's effects, a silent semantic corruption
+// rather than a wrong message. Measured first, then decided.
+fn checker_widen_current_effects_inplace(c: *mut Checker, extra: [i64; 8], extra_count: i64) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < extra_count && i < 8 {
+        let e = extra[i as usize]
+        var seen = false
+        var j: i64 = 0
+        while j < (*c).current_effect_count && j < 8 {
+            if (*c).current_effects[j as usize] == e {
+                seen = true
+            }
+            j = j + 1
+        }
+        if !seen && (*c).current_effect_count < 8 {
+            let k = (*c).current_effect_count
+            (*c).current_effects[k as usize] = e
+            (*c).current_effect_count = k + 1
+        }
+        i = i + 1
+    }
+}
+
+// Memoised: read_env allocates and the runtime allocator never reclaims,
+// so a gate evaluated at every call site leaks on every call. CHECKED is
+// separate from the value because "off" and "not yet read" are different.
+var CHECKER_EFFECT_INFERENCE_ENABLED_ON: i64 = 0
+var CHECKER_EFFECT_INFERENCE_ENABLED_CHECKED: i64 = 0
+
+fn checker_effect_inference_enabled() -> bool with IO, Mut, Panic, Div {
+    if CHECKER_EFFECT_INFERENCE_ENABLED_CHECKED == 0 {
+        CHECKER_EFFECT_INFERENCE_ENABLED_CHECKED = 1
+        if str_eq(read_env("SOUNIO_EFFECT_INFER"), "1") {
+            CHECKER_EFFECT_INFERENCE_ENABLED_ON = 1
+        }
+    }
+    CHECKER_EFFECT_INFERENCE_ENABLED_ON == 1
+}
+
+fn checker_check_callee_effects_named_inplace(c: *mut Checker, span: Span, callee_effects: [i64; 8], callee_effect_count: i64, source: Name) with Mut, IO, Panic, Div, Alloc {
     if callee_effect_count == 0 {
         return
     }
@@ -7189,8 +7329,65 @@ fn checker_check_callee_effects_inplace(c: *mut Checker, span: Span, callee_effe
         return
     }
     let missing_pair = find_missing_effects(callee_effects, callee_effect_count, (*c).current_effects, (*c).current_effect_count)
-    let t = (*c).report_effect_error(span, missing_pair.0, missing_pair.1)
+    if checker_effect_inference_enabled() {
+        checker_widen_current_effects_inplace(c, missing_pair.0, missing_pair.1)
+        // STEP 2: publish the inferred set into this function's own signature, so that ITS callers
+        // see the effect too and inference is transitive rather than one level deep. Without this,
+        // widening only silences the check locally — a pub fn could declare nothing and reach IO
+        // through two hops with nobody noticing.
+        //
+        // Guarded by name: current_sig_id is only trusted when the signature it points at still
+        // carries current_sig_name. A set-site that failed to update the pair leaves a stale index,
+        // and the guard turns that into a skipped write (lost propagation) instead of effects
+        // written onto an unrelated function.
+        if (*c).current_sig_id >= 0 {
+            let owner = fn_sig_table_get((*c).fn_sigs, (*c).current_sig_id)
+            if name_eq(owner.name, (*c).current_sig_name) {
+                let widened = fn_sig_table_widen_effects((*c).fn_sigs, (*c).current_sig_id, missing_pair.0, missing_pair.1)
+                // SOUNIO_EFFECT_INFER_TRACE makes the propagation OBSERVABLE. Without it, step 1
+                // (local widening) and step 2 (write-back) are indistinguishable by error count —
+                // both drive E035 to 0 — so there would be no evidence the publication happens at
+                // all. Prints once per effect actually added to a signature.
+                // BOUNDARY CHECK (W045). The widening event itself is the proof that the
+                // declaration is narrower than the inferred set — no snapshot or extra pass is
+                // needed, because a widen only happens when something was missing. Reported for
+                // `pub` only: outside a module the declaration is all a caller can read, so that is
+                // where the annotation earns its keep. Private functions stay silent, which is the
+                // whole point of inference — the author does not reason about effects internally.
+                //
+                // A WARNING and not an error, deliberately: 409 functions in main.sio's closure
+                // already declare Mut without reaching any store, so this class is demonstrably
+                // noisy in both directions today, and turning a measurement into a build failure
+                // before the noise is understood would be the wrong order.
+                if widened && owner.visibility_kind != VISIBILITY_PRIVATE {
+                    checker_report_warning_at_mut(c, span, 45, 0, 0, 0)
+                }
+                if widened && str_eq(read_env("SOUNIO_EFFECT_INFER_TRACE"), "1") {
+                    print("effect_infer: ")
+                    e035_print_ident(owner.name)
+                    print(" += ")
+                    var ti: i64 = 0
+                    while ti < missing_pair.1 {
+                        if ti > 0 { print(", ") }
+                        print_effect_name(missing_pair.0[ti as usize])
+                        ti = ti + 1
+                    }
+                    print(" (from ")
+                    e035_print_ident(source)
+                    print(")\n")
+                }
+            }
+        }
+        return
+    }
+    let t = (*c).report_effect_error_from(span, missing_pair.0, missing_pair.1, source)
     checker_store_from_value(c, t)
+}
+
+// Retained for the arms that synthesise an effect list with no signature behind it (Observe on
+// println, IO on syscall6, the store-site Mut from #1522): there is no callee name to report.
+fn checker_check_callee_effects_inplace(c: *mut Checker, span: Span, callee_effects: [i64; 8], callee_effect_count: i64) with Mut, IO, Panic, Div, Alloc {
+    checker_check_callee_effects_named_inplace(c, span, callee_effects, callee_effect_count, empty_name())
 }
 
     fn checker_release_call_arg_borrows_inplace(c: *mut Checker, args: Option<Box<ExprList> >, params: Option<Box<FnParamList> >, call_start_borrows: BorrowEnv) with Mut, Panic, Div, Alloc, IO {
@@ -10344,23 +10541,6 @@ impl Checker {
         c
     }
 
-    fn checker_report_warning_at_mut(c: *mut Checker, span: Span, code: i64, msg_a: i64, msg_b: i64, msg_c: i64) with Mut, IO, Panic, Div {
-        (*c).warning_count = (*c).warning_count + 1
-        print("warning[W")
-        if code < 100 { print("0") }
-        if code < 10 { print("0") }
-        print_int(code)
-        print("]")
-        if span.start > 0 || span.end > 0 {
-            print(" at ")
-            print_int(span.start)
-            print("..")
-            print_int(span.end)
-        }
-        print(": ")
-        print_warning_message(code)
-        print("\n")
-    }
 
     fn report_unknown_policy_metric(self, span: Span, metric_name: Name) -> Checker with Mut, IO, Panic, Div {
         var c = self
@@ -12048,7 +12228,16 @@ impl Checker {
 
 
 
-    fn report_effect_error(self, span: Span, missing: [i64; 8], missing_count: i64) -> Checker with Mut, IO, Panic, Div, Alloc {
+    // E035 names WHAT DEMANDED the effect. The span cannot locate it: on a self-compile of
+    // compiler/main.sio all 230 E035 carry span.start == 0, and no diagnostic in this compiler
+    // prints span.file_id, so an offset alone cannot even say which of 112 closure files it is in.
+    //
+    // `source` is the CALLEE. It travels with the effect list it came from — both out of the same
+    // FnSig — so it cannot desynchronise by construction. The ENCLOSING function is printed too
+    // (current_module::current_fn_name, below), which the original of this comment argued against
+    // on the grounds that the checker did not track it; it does now, and the two attributions
+    // answer different questions: which call demanded the effect, and which body has to declare it.
+    fn report_effect_error_from(self, span: Span, missing: [i64; 8], missing_count: i64, source: Name) -> Checker with Mut, IO, Panic, Div, Alloc {
         var c = self
         c.error_count = c.error_count + 1
         c.had_error = true
@@ -12076,8 +12265,18 @@ impl Checker {
             print_effect_name(missing[i as usize])
             i = i + 1
         }
-        print(")\n")
+        print(")")
+        if source.len > 0 {
+            print(" -- required by `")
+            e035_print_ident(source)
+            print("`")
+        }
+        print("\n")
         c
+    }
+
+    fn report_effect_error(self, span: Span, missing: [i64; 8], missing_count: i64) -> Checker with Mut, IO, Panic, Div, Alloc {
+        self.report_effect_error_from(span, missing, missing_count, empty_name())
     }
 
     fn check_callee_effects(self, span: Span, callee_effects: [i64; 8], callee_effect_count: i64) -> Checker with Mut, IO, Panic, Div, Alloc {
@@ -12210,6 +12409,24 @@ impl Checker {
         }
         (false, 0)
     }
+}
+
+fn checker_report_warning_at_mut(c: *mut Checker, span: Span, code: i64, msg_a: i64, msg_b: i64, msg_c: i64) with Mut, IO, Panic, Div {
+    (*c).warning_count = (*c).warning_count + 1
+    print("warning[W")
+    if code < 100 { print("0") }
+    if code < 10 { print("0") }
+    print_int(code)
+    print("]")
+    if span.start > 0 || span.end > 0 {
+        print(" at ")
+        print_int(span.start)
+        print("..")
+        print_int(span.end)
+    }
+    print(": ")
+    print_warning_message(code)
+    print("\n")
 }
 
 fn print_error_message(code: i64) with IO, Mut, Panic, Div {
@@ -13018,6 +13235,16 @@ fn print_warning_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 43 {
         print("boolean equality on uncertain value: exact == ignores uncertainty\n")
         print("   = help: use ep_eq_prob + ep_decide (epistemic::uncertain_eq) or claim exactness")
+    }
+    else if code == 45 {
+        print("public function performs an effect its signature does not declare\n")
+        print("   = note: the effect was INFERRED from the body (spec 7.2.1); callers outside this module read the declaration, not the inference\n")
+        print("   = help: add the inferred effect to the `with` clause, or make the function private")
+    }
+    else if code == 44 {
+        print("associated-function call on an unknown type: the target resolves to no definition\n")
+        print("   = note: this compiles and evaluates to 0 -- it does not allocate or call anything\n")
+        print("   = help: define the type and its associated function, or call an existing one")
     }
     else {
         print("unknown warning")
@@ -14428,6 +14655,13 @@ fn contest_matches_audit_target(contest_ty: TypeEntry, contest_info: ContestInfo
     && contest_info.policy_id == audit_info.policy_id
 }
 
+// Free function, not a method: declared at column 0 with an explicit
+// `self: Checker` parameter rather than inside `impl Checker`. Its two call
+// sites used method syntax and drew E011 "no method named for this type" —
+// the mirror of the four functions on this branch that sat INSIDE an impl and
+// were called bare. Callers now use the free-function form; moving the
+// declaration into the impl would work too, but relocating a 100-line body in
+// a 24k-line file to fix a call syntax is the larger change.
 fn contest_type_seeded_from_audit(self: Checker, audit_info: AuditInfo, audit_id: i64, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc {
     var c = self
     if audit_info.family_id < 0 || audit_info.family_id >= c.model_families.count {
@@ -17791,7 +18025,12 @@ impl Checker {
                 var c = self
                 let item = (*list).head
                 if item.kind == ItemKind::ItemFn {
-                    c = c.collect_fn_def(item.name, item.fn_def)
+                    // collect_fn_def takes visibility and the defining module too;
+                    // this call passed two of four. The sibling call site
+                    // (check.sio:16372) is the shape: item.visibility and the
+                    // module currently being collected. A trait method is
+                    // declared in the module its trait is.
+                    c = c.collect_fn_def(item.name, item.fn_def, item.visibility, c.current_module)
                 }
                 c.collect_trait_methods((*list).tail, trait_id)
             }
@@ -18670,12 +18909,15 @@ impl Checker {
                     c.current_return_type = sig.return_type
                     c.current_effects = sig.effects
                     c.current_effect_count = sig.effect_count
+                    c.current_sig_id = sig_id
+                    c.current_sig_name = sig.name
                 }
                 c.multitest_count = 0
                 c.multitest_corrected = false
                 match (*fd).body.stmts {
                     None => {
                         c.current_return_type = ty_unit()
+                        c.current_sig_id = 0 - 1
                         c.current_effects = saved_effects
                         c.current_effect_count = saved_effect_count
                         c.multitest_count = saved_multitest_count
@@ -18715,6 +18957,7 @@ impl Checker {
                 c.env = c.env.pop_scope()
                 c.current_return_type = ty_unit()
                 // Restore outer effects context
+                c.current_sig_id = 0 - 1
                 c.current_effects = saved_effects
                 c.current_effect_count = saved_effect_count
                 c.multitest_count = saved_multitest_count
@@ -18801,6 +19044,8 @@ impl Checker {
                     c.current_return_type = sig.return_type
                     c.current_effects = sig.effects
                     c.current_effect_count = sig.effect_count
+                    c.current_sig_id = sig_id
+                    c.current_sig_name = sig.name
                 }
                 c.multitest_count = 0
                 c.multitest_corrected = false
@@ -18825,6 +19070,7 @@ impl Checker {
                 c.env = c.env.pop_scope()
                 c.current_return_type = ty_unit()
                 // Restore outer effects context
+                c.current_sig_id = 0 - 1
                 c.current_effects = saved_effects
                 c.current_effect_count = saved_effect_count
                 c.multitest_count = saved_multitest_count
@@ -19987,6 +20233,16 @@ impl Checker {
                 c = c.release_call_arg_borrows(e.args, sig.params, call_start_borrows)
                 (c, sig.return_type)
             } else {
+                // A named type which is not a declared struct/enum is an unresolved
+                // function type parameter. Its trait contract was accepted at the
+                // generic declaration boundary, so defer concrete method selection
+                // until monomorphization instead of issuing E011 for `F.er_add`.
+                if type_is_unresolved_type_param_in_tables(c.structs, c.enums, base_ty) {
+                    let call_start_borrows = c.borrows
+                    c = c.check_expr_list_no_type_no_linear_consume(e.args)
+                    c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                    return (c, base_ty)
+                }
                 // Method not found
                 c = c.report_error_at(e.span, 11, 0, 0, 0)
                 // Still check args to accumulate errors
@@ -20128,11 +20384,18 @@ impl Checker {
                 c = c.release_call_arg_borrows(e.args, sig.params, call_start_borrows)
                 (c, sig.return_type)
             } else {
+                if type_is_unresolved_type_param_in_tables(c.structs, c.enums, base_ty) {
+                    let call_start_borrows = c.borrows
+                    c = c.check_expr_list_no_type_no_linear_consume(e.args)
+                    c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                    (c, base_ty)
+                } else {
                 c = c.report_error_at(e.span, 11, 0, 0, 0)
                 let call_start_borrows = c.borrows
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
                 c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
                 (c, ty_error())
+                }
             }
         } else if base_ty.kind == TypeKind::TyString {
             let call_start_borrows = c.borrows
@@ -20443,7 +20706,15 @@ impl Checker {
                             let extra_pair = c.check_expr(*extra)
                             c = extra_pair.0
                             c = c.report_error_at(e.span, 17, 0, 0, 0)
-                            (c, ty_error())
+                            // The `(c, ty_error())` that used to close this arm was
+                            // DISCARDED — the enclosing match is a statement — and it
+                            // was what made this arm yield a pair while the outer
+                            // `None => {}` yields unit, i.e. the E018. Deleted rather
+                            // than turned into `return (c, ty_error())`: that would
+                            // also typecheck, but it would change behaviour, since the
+                            // code currently reports error 17 and falls through to the
+                            // TyFn check below. Fixing a type error is not the place to
+                            // decide that.
                         }
                         None => {
                             match array_like_ty.inner {
@@ -20601,7 +20872,7 @@ impl Checker {
                 if (*left_expr).kind == ExprKind::ExprContest {
                     let seeded_pair =
                         if seeded_expected_ty.kind == TypeKind::TyContest { (seeded_checker, seeded_expected_ty) }
-                        else { self.contest_type_seeded_from_audit(audit_info, audit_id, e.span) }
+                        else { contest_type_seeded_from_audit(self, audit_info, audit_id, e.span) }
                     if seeded_pair.1.kind == TypeKind::TyError {
                         seeded_pair
                     } else {
@@ -20610,7 +20881,7 @@ impl Checker {
                 } else if (*left_expr).kind == ExprKind::ExprCall && call_expr_is_builtin_lift_knowledge((*left_expr).left) {
                     let seeded_pair =
                         if seeded_expected_ty.kind == TypeKind::TyContest { (seeded_checker, seeded_expected_ty) }
-                        else { self.contest_type_seeded_from_audit(audit_info, audit_id, e.span) }
+                        else { contest_type_seeded_from_audit(self, audit_info, audit_id, e.span) }
                     if seeded_pair.1.kind == TypeKind::TyError {
                         seeded_pair
                     } else {
@@ -20981,40 +21252,8 @@ impl Checker {
         }
     }
 
-    fn alternative_metric_name(metric_id: i64) -> Name with Mut, Panic, Div {
-        if metric_id == ALTERNATIVE_METRIC_INTERVENTION_COST {
-            make_name("intervention_cost")
-        } else if metric_id == ALTERNATIVE_METRIC_RESIDUAL_TAIL_RISK {
-            make_name("residual_tail_risk")
-        } else if metric_id == ALTERNATIVE_METRIC_MECHANISTIC_DIVERGENCE {
-            make_name("mechanistic_divergence")
-        } else if metric_id == ALTERNATIVE_METRIC_ADMISSIBILITY_MARGIN {
-            make_name("admissibility_margin")
-        } else {
-            make_name("unknown_metric")
-        }
-    }
 
-    fn transition_metric_is_candidate(metric_id: i64) -> bool {
-        metric_id == TRANSITION_METRIC_INTERVENTION_COST
-        || metric_id == TRANSITION_METRIC_RESIDUAL_TAIL_RISK
-        || metric_id == TRANSITION_METRIC_MECHANISTIC_DIVERGENCE
-        || metric_id == TRANSITION_METRIC_ADMISSIBILITY_MARGIN
-    }
 
-    fn transition_metric_to_candidate_metric(metric_id: i64) -> i64 {
-        if metric_id == TRANSITION_METRIC_INTERVENTION_COST {
-            ALTERNATIVE_METRIC_INTERVENTION_COST
-        } else if metric_id == TRANSITION_METRIC_RESIDUAL_TAIL_RISK {
-            ALTERNATIVE_METRIC_RESIDUAL_TAIL_RISK
-        } else if metric_id == TRANSITION_METRIC_MECHANISTIC_DIVERGENCE {
-            ALTERNATIVE_METRIC_MECHANISTIC_DIVERGENCE
-        } else if metric_id == TRANSITION_METRIC_ADMISSIBILITY_MARGIN {
-            ALTERNATIVE_METRIC_ADMISSIBILITY_MARGIN
-        } else {
-            -1
-        }
-    }
 
     fn transition_candidate_metric_pair(self, candidate: AlternativeCandidateInfo, metric_id: i64) -> (i64, f64) with Mut, Panic, Div {
         if transition_metric_is_candidate(metric_id) {
@@ -23545,6 +23784,7 @@ impl Checker {
         let body_ty = body_pair.1
 
         // Restore original effects (handler discharges the effect)
+        c.current_sig_id = 0 - 1
         c.current_effects = saved_effects
         c.current_effect_count = saved_count
 
@@ -23621,6 +23861,7 @@ impl Checker {
         c.env = c.env.pop_scope()
 
         // Restore outer effects context
+        c.current_sig_id = 0 - 1
         c.current_effects = saved_effects
         c.current_effect_count = saved_effect_count
 
@@ -23748,6 +23989,41 @@ impl Checker {
             Some(te) => self.lower_type_expr(*te)
             None => (self, ty_unknown())
         }
+    }
+}
+
+fn transition_metric_to_candidate_metric(metric_id: i64) -> i64 {
+    if metric_id == TRANSITION_METRIC_INTERVENTION_COST {
+        ALTERNATIVE_METRIC_INTERVENTION_COST
+    } else if metric_id == TRANSITION_METRIC_RESIDUAL_TAIL_RISK {
+        ALTERNATIVE_METRIC_RESIDUAL_TAIL_RISK
+    } else if metric_id == TRANSITION_METRIC_MECHANISTIC_DIVERGENCE {
+        ALTERNATIVE_METRIC_MECHANISTIC_DIVERGENCE
+    } else if metric_id == TRANSITION_METRIC_ADMISSIBILITY_MARGIN {
+        ALTERNATIVE_METRIC_ADMISSIBILITY_MARGIN
+    } else {
+        -1
+    }
+}
+
+fn transition_metric_is_candidate(metric_id: i64) -> bool {
+    metric_id == TRANSITION_METRIC_INTERVENTION_COST
+    || metric_id == TRANSITION_METRIC_RESIDUAL_TAIL_RISK
+    || metric_id == TRANSITION_METRIC_MECHANISTIC_DIVERGENCE
+    || metric_id == TRANSITION_METRIC_ADMISSIBILITY_MARGIN
+}
+
+fn alternative_metric_name(metric_id: i64) -> Name with Mut, Panic, Div {
+    if metric_id == ALTERNATIVE_METRIC_INTERVENTION_COST {
+        make_name("intervention_cost")
+    } else if metric_id == ALTERNATIVE_METRIC_RESIDUAL_TAIL_RISK {
+        make_name("residual_tail_risk")
+    } else if metric_id == ALTERNATIVE_METRIC_MECHANISTIC_DIVERGENCE {
+        make_name("mechanistic_divergence")
+    } else if metric_id == ALTERNATIVE_METRIC_ADMISSIBILITY_MARGIN {
+        make_name("admissibility_margin")
+    } else {
+        make_name("unknown_metric")
     }
 }
 
