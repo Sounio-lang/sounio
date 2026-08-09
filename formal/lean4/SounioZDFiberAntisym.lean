@@ -16179,4 +16179,63 @@ theorem starP_border_seamcol_hi (n l₀ W : Nat) (hl : l₀ < 2^(n+1)) (hW : W <
   exact starP_symm (n+2) (W + 2^(n+1)) (l₀ + 2^(n+1)) W (by omega) (by omega) (by omega)
     (by omega) (by omega) (by rw [← hx, xor_cancel]; omega) (by rw [hxl]; omega) (by omega) hb
 
+/-! ### Tier 103 — the LAST border, and the border analysis closes
+
+    Tier 102 reduced the six border families to one direct computation: the pairs differing only in
+    the top bit, `y = l ⊕ 2^(n+1)`.  Here it is, and it is the shortest of the arc.
+
+    Both halved indices coincide, so `R_lu`/`R_ul` land on the DIAGONAL and `sigma_self` fires twice:
+    `σ(l,y)` becomes `−1` outright, and `σ(y⊕W, l⊕W)` becomes `+1` (an `R_ul` non-zero branch on a
+    self-pair).  The left side is `−1` with no hypotheses beyond `l ≠ 0`.  The right side is a
+    product of `σ(l⊕W, l)` with `σ(l, l⊕W)`, which `antisym` turns into `−σ(l⊕W,l)²` — and `σ` is
+    `±1`, so that is `−1` too.
+
+    The other sub-case, `l` high and `y` low, is the swap of this one and comes from `starP_symm`.
+
+    With this, EVERY border family is proved, and the residue of the interior obligation is the
+    BOTTOM of the descent alone. -/
+
+/-- **THE LAST BORDER: pairs differing only in the top bit.**  Three factors collapse through
+    `sigma_self`; the fourth is a square. -/
+theorem starP_border_topbit (n l W : Nat) (hl : l < 2^(n+1)) (hW : W < 2^(n+1))
+    (hl0 : l ≠ 0) (hW0 : W ≠ 0) (hlW : l ≠ W) :
+    starP (n+2) l (l + 2^(n+1)) W := by
+  have hp := Nat.two_pow_pos (n+1)
+  have hlW' : l ^^^ W < 2^(n+1) := xorlt hl hW
+  have hlW0 : l ^^^ W ≠ 0 := by intro h; exact hlW (xor_zero_eq l W h)
+  have hne : l ≠ l ^^^ W := by
+    intro h
+    apply hW0
+    have h2 : l ^^^ l = (l ^^^ W) ^^^ l := by rw [← h]
+    rw [Nat.xor_self, Nat.xor_comm (l ^^^ W) l, ← Nat.xor_assoc, Nat.xor_self,
+        Nat.zero_xor] at h2
+    exact h2.symm
+  have hx : (l + 2^(n+1)) ^^^ W = (l ^^^ W) + 2^(n+1) := by
+    have e := xor_lo_hi (n+1) W l (by omega) hW hl
+    rw [Nat.xor_comm (l + 2^(n+1)) W, e, Nat.xor_comm W l]
+  unfold starP
+  rw [hx,
+      R_lu l l n hl hl, sigma_self (n+1) l hl hl0,
+      R_ul (l ^^^ W) (l ^^^ W) n hlW' hlW', if_neg hlW0,
+      sigma_self (n+1) (l ^^^ W) hlW' hlW0,
+      R_ul (l ^^^ W) l n hlW' hl, if_neg hl0,
+      R_lu (l ^^^ W) l n hlW' hl,
+      antisym (n+1) l (l ^^^ W) hl hlW' hl0 hlW0 hne]
+  rcases cdSigma_pm (n+1) (l ^^^ W) l with h | h <;> rw [h] <;> grind
+
+/-- The other sub-case — `l` high, `y` low — is this one under the swap. -/
+theorem starP_border_topbit' (n l W : Nat) (hl : l < 2^(n+1)) (hW : W < 2^(n+1))
+    (hl0 : l ≠ 0) (hW0 : W ≠ 0) (hlW : l ≠ W) :
+    starP (n+2) (l + 2^(n+1)) l W := by
+  have hp := Nat.two_pow_pos (n+1)
+  have h2 : (2:Nat)^(n+2) = 2^(n+1) + 2^(n+1) := by rw [Nat.pow_succ]; omega
+  have hlW' : l ^^^ W < 2^(n+1) := xorlt hl hW
+  have hlW0 : l ^^^ W ≠ 0 := by intro h; exact hlW (xor_zero_eq l W h)
+  have hx : (l + 2^(n+1)) ^^^ W = (l ^^^ W) + 2^(n+1) := by
+    have e := xor_lo_hi (n+1) W l (by omega) hW hl
+    rw [Nat.xor_comm (l + 2^(n+1)) W, e, Nat.xor_comm W l]
+  exact starP_symm (n+2) l (l + 2^(n+1)) W (by omega) (by omega) (by omega)
+    hl0 (by omega) hlW0 (by rw [hx]; omega) (by omega)
+    (starP_border_topbit n l W hl hW hl0 hW0 hlW)
+
 end SounioZDFiberAntisym

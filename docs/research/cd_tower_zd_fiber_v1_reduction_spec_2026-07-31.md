@@ -6270,3 +6270,27 @@ flip. So the residue of the entire border analysis is ONE direct computation, no
 confirmed by both reviewers against the six-family / ten-sub-case census.
 
 Denotation: 0 violations over 252 instances of each of the six derived lemmas.
+
+### §57.62 — Tier 103: the last border, and the border analysis CLOSES
+
+Tier 102 reduced the six border families to one direct computation — the pairs differing only in the
+top bit, `y = l ⊕ 2^(n+1)`. It is the shortest of the arc, because both halved indices coincide and
+the reductions land on the DIAGONAL:
+
+    σ(l, l + 2^(n+1))            →  R_lu  →  σ(l,l)          = −1   (sigma_self)
+    σ((l⊕W)+2^(n+1), l⊕W)        →  R_ul  →  −σ(l⊕W, l⊕W)    = +1
+
+so the left side is `−1` outright. The right side is `σ(l⊕W, l) · σ(l, l⊕W)`, which `antisym` turns
+into `−σ(l⊕W,l)²`, and `σ` is `±1` — so `−1` as well. The other sub-case (`l` high, `y` low) is this
+one under `starP_symm`.
+
+**With this every border family is proved — all six, all ten sub-cases — and the residue of the
+interior obligation is the BOTTOM of the descent alone**: the maximal seam for `W = 2^p`, already a
+theorem (`resB_pow2_top`), and the octonion bottom for `W < 8`, where §57.58 records the Fano
+argument that is not yet formalised.
+
+⚠ M1 DEGRADED on this tier: two fan-out attempts, the second at a 520 s deadline, and BOTH providers
+returned empty — verified by reading the raw JSON, not the driver's summary. Substitute evidence is
+the Lean proofs (kernel-clean) plus the denotation, 0 violations / 1182 for each sub-case at
+`m = 2,3,4`. The three questions put to the reviewers — in particular whether the border analysis is
+now genuinely complete — are recorded here as UNANSWERED.
