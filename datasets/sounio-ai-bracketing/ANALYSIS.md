@@ -235,3 +235,21 @@ own family's flagship. Two inductions, nine model-runs, one robust null:
 variance everywhere, as steering nowhere. The one lever that produced any
 direction at all is explicit composition — which is precisely the operation
 a non-associative semantic architecture would need to supply natively.
+
+## Preregistered: does the octonion functor's grouping magnitude track
+## semantic ambiguity? (2026-08-09, before any embedding is computed)
+
+Pipeline: sentence-transformers all-MiniLM-L6-v2 (384-dim) for the 150 SBMP
+turns → fixed deterministic projection to the 16-dim trajectory payload →
+generated .sio driver → Madaros-native associator magnitude per item. The
+embedding/projection is frozen BEFORE any magnitude is looked at.
+
+- **C1:** items with gold_human="both" have higher median grouping
+  magnitude than items with gold_human ∈ {left, right} (Mann–Whitney
+  one-sided, reported with the p-value; no threshold promised in advance).
+- **C2 (calibration):** the same pipeline with the canonical hash/Halton
+  embedding (semantics-free) concentrates all items in a narrow band; C1's
+  separation, if any, must exceed that band to count.
+
+If the semantic embedding cannot be obtained (offline fallback), only C2
+runs and C1 is declared UNTESTED, not failed.
