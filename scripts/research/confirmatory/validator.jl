@@ -22,6 +22,8 @@ const MODELS = ["CountBaseline", "RealTree-8", "CliffTree-8",
                 "LearnedBilinTree", "OctTree-8", "GRU-8"]
 const LS = [64, 128, 256, 512]
 const FAILS = String[]
+const REPORT = Dict{String,Any}("gates" => Dict{String,Any}(),
+                                "cells_verified" => 0)
 
 fail(msg) = (push!(FAILS, msg); println("  FAIL: $msg"))
 ok(msg) = println("  ok: $msg")
@@ -163,6 +165,7 @@ if isdir(resdir)
         cells[(d["seed_idx"], d["L"])] = d
     end
     ok("$(length(cells)) result cells hash-verified")
+    REPORT["cells_verified"] = length(cells)
 end
 
 # ---- V3: promotion gates --------------------------------------------------
@@ -198,11 +201,39 @@ for L in LS
     println("   G4 A-dir     cliff $(round(m4, digits=4)) real $(round(m4r, digits=4)) pass=$g4")
     println("   G5 CountBase $(round(mcb, digits=4)) pass=$g5")
     println("   G6 NEG       pass=$negok")
+    REPORT["gates"][string(L)] = Dict(
+        "n_seeds" => n,
+        "G1" => Dict("diff" => m1, "ci" => h1, "pass" => g1),
+        "G2" => Dict("diff" => m2, "ci" => h2, "pass" => g2),
+        "G3" => Dict("diff" => m3, "pass" => g3),
+        "G4" => Dict("cliff" => m4, "real" => m4r, "pass" => g4),
+        "G5" => Dict("countbaseline" => mcb, "pass" => g5),
+        "G6" => Dict("pass" => negok),
+        "all_pass" => g1 && g2 && g3 && g4 && g5 && g6,
+    )
     n == 20 && L == 128 &&
         println("   PROMOTION (primary): $(g1 && g2 && g3 && g4 && g5 && g6)")
 end
 
 println()
+REPORT["fails"] = FAILS
+REPORT["verdict"] = isempty(FAILS) ? "PASS" : "FAIL"
+if haskey(REPORT["gates"], "128") && REPORT["gates"]["128"]["n_seeds"] == 20
+    g = REPORT["gates"]["128"]
+    sign_ok = all(haskey(REPORT["gates"], string(L)) &&
+                  REPORT["gates"][string(L)]["G1"]["diff"] > 0 &&
+                  REPORT["gates"][string(L)]["G2"]["diff"] > 0 for L in LS)
+    REPORT["promotion"] = Dict("primary_L128_gates_pass" => g["all_pass"],
+                               "sign_consistency_all_L" => sign_ok,
+                               "claim_promoted" => g["all_pass"] && sign_ok)
+end
+resdir = joinpath(CONF, "results")
+isdir(resdir) || mkpath(resdir)
+open(joinpath(resdir, "validator_c5_report.json"), "w") do io
+    JSON.print(io, REPORT, 2)
+    write(io, "\n")
+end
+println("wrote $(joinpath(resdir, "validator_c5_report.json"))")
 if isempty(FAILS)
     println("VALIDATOR: all checks passed ($(length(cells)) cells)")
 else
