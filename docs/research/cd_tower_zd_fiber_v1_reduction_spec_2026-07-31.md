@@ -6243,3 +6243,30 @@ it appeared inside Tier 97's own induction, and it closes these borders — whic
 isolating as a theorem rather than inlining.
 
 Denotation: 0 violations / 1182 each. Residue: five border families, and the bottom of the descent.
+
+### §57.61 — Tier 102: two symmetries of (*), and four of the six border families collapse
+
+Five families remained after Tier 101 — ten sub-cases. Writing ten more branch computations was the
+obvious move and would have been wrong: `(*)` has two symmetries, and they do most of the work.
+
+    starP_flip : (*) at (l ⊕ W, y) IS (*) at (l, y) — the same equation with its sides exchanged.
+                 NO side conditions: commutativity plus xor_cancel.
+    starP_symm : (*) at (y, l) follows by antisym on exactly TWO factors, because the two
+                 statements' right-hand sides are already the same product, reordered.
+
+The `starP_symm` count matters: my first attempt used four `antisym` applications and two of their
+side conditions were unprovable. Two is correct AND minimal — the cross pairs are never needed, so
+the hypotheses `l ≠ y ⊕ W` and its mirror are avoided entirely. Both reviewers derived this
+independently.
+
+The border loci are related by exactly these two moves, so Tier 101's hub family — two branch
+computations — closes four of the six:
+
+    l₀ = W  is  l₀ = 0  under the flip, since (W + 2^(n+1)) ⊕ W = 2^(n+1)
+    y₀ = 0  and  y₀ = W  are the row families under the swap
+
+**And the last two are one, not two:** `l₀ = y₀` and `y₀ = l₀ ⊕ W` are each other's image under the
+flip. So the residue of the entire border analysis is ONE direct computation, not five families —
+confirmed by both reviewers against the six-family / ten-sub-case census.
+
+Denotation: 0 violations over 252 instances of each of the six derived lemmas.

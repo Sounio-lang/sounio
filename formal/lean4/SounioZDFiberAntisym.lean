@@ -16050,4 +16050,133 @@ theorem starP_border_hub_hi (n y₀ W : Nat) (hy : y₀ < 2^(n+1)) (hW : W < 2^(
       antisym (n+1) y₀ W hy hW hy0 hW0 hyW]
   grind
 
+/-! ### Tier 102 — two SYMMETRIES of `(*)`, and four of the five border families collapse
+
+    Five border families remained after Tier 101, ten sub-cases in all.  Writing ten more branch
+    computations would have been the obvious move and would have been wrong: `(*)` has two
+    symmetries, and they do most of the work.
+
+      `starP_flip`  : `(*)` at `(l ⊕ W, y)` IS `(*)` at `(l, y)` — the same equation with its two
+                      sides exchanged.  No side conditions at all: it is commutativity of `*` plus
+                      `xor_cancel`.
+      `starP_symm`  : `(*)` at `(y, l)` follows from `(*)` at `(l, y)` by `antisym` on all four
+                      factors, whose signs cancel in pairs.
+
+    The families then reduce to each other, because the border loci are related by exactly these two
+    moves.  `(W + 2^(n+1)) ⊕ W = 2^(n+1)`, so family `l₀ = W` IS family `l₀ = 0` under the flip; and
+    families `y₀ = 0`, `y₀ = W` are families `l₀ = 0`, `l₀ = W` under the swap.  So Tier 101's hub
+    family, which cost two branch computations, closes four of the six.
+
+    ⚠ What does NOT reduce this way is `l₀ = y₀` and `y₀ = l₀ ⊕ W` — and those two are each other's
+    image under the flip, so ONE direct computation remains, not five families.  It is not done
+    here. -/
+
+/-- **FLIP SYMMETRY.**  `(*)` is invariant under `l ↦ l ⊕ W`; the two sides simply exchange. -/
+theorem starP_flip (n l y W : Nat) (h : starP n l y W) : starP n (l ^^^ W) y W := by
+  unfold starP at h ⊢
+  rw [xor_cancel l W]
+  grind
+
+/-- **SWAP SYMMETRY.**  `(*)` is invariant under `l ↔ y`, by `antisym` on all four factors. -/
+theorem starP_symm (n l y W : Nat) (hl : l < 2^n) (hy : y < 2^n) (hW : W < 2^n)
+    (hl0 : l ≠ 0) (hy0 : y ≠ 0) (hlW0 : l ^^^ W ≠ 0) (hyW0 : y ^^^ W ≠ 0)
+    (hne : l ≠ y) (h : starP n l y W) : starP n y l W := by
+  have hlW : l ^^^ W < 2^n := Nat.xor_lt_two_pow hl hW
+  have hyW : y ^^^ W < 2^n := Nat.xor_lt_two_pow hy hW
+  have hne4 : l ^^^ W ≠ y ^^^ W := by
+    intro e; exact hne (by rw [← xor_cancel l W, e, xor_cancel])
+  unfold starP at h ⊢
+  rw [antisym n y l hy hl hy0 hl0 (fun e => hne e.symm),
+      antisym n (l ^^^ W) (y ^^^ W) hlW hyW hlW0 hyW0 hne4]
+  grind
+
+/-- **BORDER `l₀ = W`, both sub-cases** — the hub family under the flip, since `(W + 2^(n+1)) ⊕ W`
+    is exactly the hub `2^(n+1)`. -/
+theorem starP_border_seamrow_lo (n y W : Nat) (hy : y < 2^(n+1)) (hW : W < 2^(n+1))
+    (hy0 : y ≠ 0) (hW0 : W ≠ 0) (hyW : y ≠ W) :
+    starP (n+2) (W + 2^(n+1)) y W := by
+  have hp := Nat.two_pow_pos (n+1)
+  have hx : (2^(n+1) : Nat) ^^^ W = W + 2^(n+1) := by
+    have e := xor_lo_hi (n+1) W 0 (by omega) hW hp
+    rw [Nat.zero_add] at e
+    rw [Nat.xor_comm (2^(n+1)) W, e, Nat.xor_zero]
+  have := starP_flip (n+2) (2^(n+1)) y W (starP_border_hub_lo n y W hy hW hy0 hW0 hyW)
+  rwa [hx] at this
+
+theorem starP_border_seamrow_hi (n y₀ W : Nat) (hy : y₀ < 2^(n+1)) (hW : W < 2^(n+1))
+    (hy0 : y₀ ≠ 0) (hW0 : W ≠ 0) (hyW : y₀ ≠ W) :
+    starP (n+2) (W + 2^(n+1)) (y₀ + 2^(n+1)) W := by
+  have hp := Nat.two_pow_pos (n+1)
+  have hx : (2^(n+1) : Nat) ^^^ W = W + 2^(n+1) := by
+    have e := xor_lo_hi (n+1) W 0 (by omega) hW hp
+    rw [Nat.zero_add] at e
+    rw [Nat.xor_comm (2^(n+1)) W, e, Nat.xor_zero]
+  have := starP_flip (n+2) (2^(n+1)) (y₀ + 2^(n+1)) W
+    (starP_border_hub_hi n y₀ W hy hW hy0 hW0 hyW)
+  rwa [hx] at this
+
+/-- **BORDER `y₀ = 0`** — the hub family under the SWAP. -/
+theorem starP_border_hubcol_lo (n l W : Nat) (hl : l < 2^(n+1)) (hW : W < 2^(n+1))
+    (hl0 : l ≠ 0) (hW0 : W ≠ 0) (hlW : l ≠ W) :
+    starP (n+2) l (2^(n+1)) W := by
+  have hp := Nat.two_pow_pos (n+1)
+  have h2 : (2:Nat)^(n+2) = 2^(n+1) + 2^(n+1) := by rw [Nat.pow_succ]; omega
+  have hx : (2^(n+1) : Nat) ^^^ W = W + 2^(n+1) := by
+    have e := xor_lo_hi (n+1) W 0 (by omega) hW hp
+    rw [Nat.zero_add] at e
+    rw [Nat.xor_comm (2^(n+1)) W, e, Nat.xor_zero]
+  have hlW0 : l ^^^ W ≠ 0 := by intro h; exact hlW (xor_zero_eq l W h)
+  exact starP_symm (n+2) (2^(n+1)) l W (by omega) (by omega) (by omega)
+    (by omega) hl0 (by rw [hx]; omega) hlW0 (by omega)
+    (starP_border_hub_lo n l W hl hW hl0 hW0 hlW)
+
+theorem starP_border_hubcol_hi (n l₀ W : Nat) (hl : l₀ < 2^(n+1)) (hW : W < 2^(n+1))
+    (hl0 : l₀ ≠ 0) (hW0 : W ≠ 0) (hlW : l₀ ≠ W) :
+    starP (n+2) (l₀ + 2^(n+1)) (2^(n+1)) W := by
+  have hp := Nat.two_pow_pos (n+1)
+  have h2 : (2:Nat)^(n+2) = 2^(n+1) + 2^(n+1) := by rw [Nat.pow_succ]; omega
+  have hlW' : l₀ ^^^ W < 2^(n+1) := xorlt hl hW
+  have hx : (2^(n+1) : Nat) ^^^ W = W + 2^(n+1) := by
+    have e := xor_lo_hi (n+1) W 0 (by omega) hW hp
+    rw [Nat.zero_add] at e
+    rw [Nat.xor_comm (2^(n+1)) W, e, Nat.xor_zero]
+  have hxl : (l₀ + 2^(n+1)) ^^^ W = (l₀ ^^^ W) + 2^(n+1) := by
+    have e := xor_lo_hi (n+1) W l₀ (by omega) hW hl
+    rw [Nat.xor_comm (l₀ + 2^(n+1)) W, e, Nat.xor_comm W l₀]
+  exact starP_symm (n+2) (2^(n+1)) (l₀ + 2^(n+1)) W (by omega) (by omega) (by omega)
+    (by omega) (by omega) (by rw [hx]; omega) (by rw [hxl]; omega) (by omega)
+    (starP_border_hub_hi n l₀ W hl hW hl0 hW0 hlW)
+
+/-- **BORDER `y₀ = W`** — the column family under the FLIP, applied on the `y` side via the swap. -/
+theorem starP_border_seamcol_lo (n l W : Nat) (hl : l < 2^(n+1)) (hW : W < 2^(n+1))
+    (hl0 : l ≠ 0) (hW0 : W ≠ 0) (hlW : l ≠ W) :
+    starP (n+2) l (W + 2^(n+1)) W := by
+  have hp := Nat.two_pow_pos (n+1)
+  have h2 : (2:Nat)^(n+2) = 2^(n+1) + 2^(n+1) := by rw [Nat.pow_succ]; omega
+  have hx : (2^(n+1) : Nat) ^^^ W = W + 2^(n+1) := by
+    have e := xor_lo_hi (n+1) W 0 (by omega) hW hp
+    rw [Nat.zero_add] at e
+    rw [Nat.xor_comm (2^(n+1)) W, e, Nat.xor_zero]
+  have hlW0 : l ^^^ W ≠ 0 := by intro h; exact hlW (xor_zero_eq l W h)
+  have hb := starP_border_seamrow_lo n l W hl hW hl0 hW0 hlW
+  exact starP_symm (n+2) (W + 2^(n+1)) l W (by omega) (by omega) (by omega)
+    (by omega) hl0 (by rw [← hx, xor_cancel]; omega) hlW0 (by omega) hb
+
+theorem starP_border_seamcol_hi (n l₀ W : Nat) (hl : l₀ < 2^(n+1)) (hW : W < 2^(n+1))
+    (hl0 : l₀ ≠ 0) (hW0 : W ≠ 0) (hlW : l₀ ≠ W) :
+    starP (n+2) (l₀ + 2^(n+1)) (W + 2^(n+1)) W := by
+  have hp := Nat.two_pow_pos (n+1)
+  have h2 : (2:Nat)^(n+2) = 2^(n+1) + 2^(n+1) := by rw [Nat.pow_succ]; omega
+  have hlW' : l₀ ^^^ W < 2^(n+1) := xorlt hl hW
+  have hx : (2^(n+1) : Nat) ^^^ W = W + 2^(n+1) := by
+    have e := xor_lo_hi (n+1) W 0 (by omega) hW hp
+    rw [Nat.zero_add] at e
+    rw [Nat.xor_comm (2^(n+1)) W, e, Nat.xor_zero]
+  have hxl : (l₀ + 2^(n+1)) ^^^ W = (l₀ ^^^ W) + 2^(n+1) := by
+    have e := xor_lo_hi (n+1) W l₀ (by omega) hW hl
+    rw [Nat.xor_comm (l₀ + 2^(n+1)) W, e, Nat.xor_comm W l₀]
+  have hb := starP_border_seamrow_hi n l₀ W hl hW hl0 hW0 hlW
+  exact starP_symm (n+2) (W + 2^(n+1)) (l₀ + 2^(n+1)) W (by omega) (by omega) (by omega)
+    (by omega) (by omega) (by rw [← hx, xor_cancel]; omega) (by rw [hxl]; omega) (by omega) hb
+
 end SounioZDFiberAntisym
