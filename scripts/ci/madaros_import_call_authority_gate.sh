@@ -76,6 +76,7 @@ authority_shape="$(sed -n '/^fn module_frontend_prepare_import_authority(/,/^fn 
 stub_shape="$(sed -n '/^fn module_frontend_prepend_used_checker_stubs(/,/^fn module_frontend_drop_item_prefix(/p' "$FRONTEND")"
 strip_shape="$(sed -n '/^fn module_frontend_strip_import_authority_stubs(/,/^fn module_frontend_prepare_import_authority(/p' "$FRONTEND")"
 compile_shape="$(sed -n '/^pub fn module_frontend_compile_collected_to_file(/,/^pub fn module_frontend_imported_native_compile(/p' "$FRONTEND")"
+lower_array_shape="$(sed -n '/^fn module_frontend_lower_programs_array_direct_box(/,/^fn module_frontend_lower_programs_array_boxed(/p' "$FRONTEND")"
 lower_binding_shape="$(sed -n '/^fn lowerer_extern_binding_index(/,/^fn lowerer_preseed_external_impl_method_items_mut(/p' "$LOWER")"
 
 for field in caller_module_id local_name defining_module_id export_name qualified_name qualifier_path; do
@@ -83,17 +84,23 @@ for field in caller_module_id local_name defining_module_id export_name qualifie
 done
 grep -Fq 'MF_IMPORT_AUTHORITY_PREPARED_COLLECTION_ID = (*out).collection_id' <<<"$collector_shape" ||
   fail collector_authority_receipt_missing
-grep -Fq 'module_frontend_snapshot_program_item_handles(programs, (*out).node_count)' <<<"$collector_shape" ||
-  fail collector_item_handle_snapshot_missing
-grep -Fq '(*item_handle).items = (*programs)[i as usize].items' "$FRONTEND" ||
-  fail item_handle_snapshot_not_field_scoped
+grep -Fq 'module_frontend_publish_program_item_handle(0, &(*root_program))' <<<"$collector_shape" ||
+  fail collector_root_item_handle_publish_missing
+[[ "$(grep -Fc 'module_frontend_publish_program_item_handle(' <<<"$collector_shape")" -ge 2 ]] ||
+  fail collector_dependency_item_handle_publish_missing
+grep -Fq 'module_frontend_imports_from_program_item_handle(work_front)' <<<"$collector_shape" ||
+  fail collector_import_scan_not_handle_owned
+grep -Fq 'module_frontend_program_item_handles_available((*out).node_count)' <<<"$collector_shape" ||
+  fail collector_item_handle_completeness_guard_missing
 grep -Fq 'let seed_item_handle = MF_PROGRAM_ITEM_PTRS[0] as *mut LowerProgramItemsHandle' "$FRONTEND" ||
   fail seed_lowering_item_handle_missing
 grep -Fq 'let dep_item_handle = MF_PROGRAM_ITEM_PTRS[i as usize] as *mut LowerProgramItemsHandle' "$FRONTEND" ||
   fail dependency_lowering_item_handle_missing
-if grep -Eq '^[[:space:]]*let [A-Za-z_][A-Za-z0-9_]* = \(\*programs\)\[[^]]+\][[:space:]]*$' "$FRONTEND"; then
-  fail whole_program_copy_reintroduced
-fi
+for authoritative_shape in "$collector_shape" "$authority_shape" "$lower_array_shape"; do
+  if grep -Fq 'module_frontend_snapshot_program_item_handles(' <<<"$authoritative_shape"; then
+    fail authoritative_program_resnapshot_reintroduced
+  fi
+done
 grep -Fq 'module_frontend_prepare_import_authority(' <<<"$collector_shape" ||
   fail collector_authority_prepare_missing
 grep -Fq 'module_frontend_authority_rewrite_item_list_opt(' <<<"$authority_shape" ||
