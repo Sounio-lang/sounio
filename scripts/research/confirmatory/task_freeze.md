@@ -51,7 +51,38 @@ labels). Any model separability above chance there invalidates the run
 
 ## Frozen execution parameters
 
-- L grid: {32, 64, 128, 256, 512} (pad/truncate as exploratory)
+- L grid: {64, 128, 256, 512} (pad/truncate as exploratory; sampling rule:
+  eligible records with L//4 ≤ len ≤ L per split, without replacement where
+  the pool allows, with replacement otherwise — as exploratory)
+- **Amendment 2026-08-09 (pre-results):** L=32 removed from the grid. Under
+  the frozen sampling rule the L=32 pools are degenerate (train 108, val 0,
+  test 226 records of length exactly 32); the exploratory L=32 numbers were
+  drawn from ~100 structures with replacement and are not confirmable. No
+  confirmatory result existed when this amendment was made.
+- **Amendment 2, 2026-08-09 (pre-results; gate-6 failure caught by smoke):**
+  the seed-0 / L=64 smoke cell (the only confirmatory cell inspected before
+  this amendment) showed NEG-arm separability above chance (GRU test 0.604,
+  OctTree 0.542; chance CI ±0.015 at n=4096) — exactly the pipeline-artifact
+  signature gate 6 exists to catch. Population diagnostic (`diag_neg.py`,
+  10k samples × 3 seeds × 4 L): the ( A ) B recursive Dyck sampler is not
+  invariant under the Task B corruptions — 22% of L=64 random Dyck words
+  fall into the mirror fallback (no qualifying swap pair), and the mirror
+  reverses the sampler's first-component size bias, so corrupted and
+  uncorrupted random Dyck words differ distributionally without any
+  biological content. Fix, applied before any further confirmatory compute:
+  (a) `gen_dyck_word` replaced by a UNIFORM Dyck sampler (cycle lemma;
+  self-test `verify_uniform_dyck` runs fail-closed at runner start);
+  (b) BOTH NEG classes are rejection-conditioned on admitting a swap, and
+  NEG negatives therefore always take the swap path. Under uniformity the
+  segment swap preserves the distribution (involution on words ×
+  qualifying pairs; qualifying-pair count invariant), so the two NEG
+  classes are exactly identical in distribution by construction — the null
+  is exact, and any residual NEG separation can only be an implementation
+  artifact. Arms A and B are untouched: data streams are derived per
+  (arm, L, split, seed) via `derive_seed`, and `gen_dyck_word` is only
+  called for NEG. All pre-amendment cells (the single smoke cell) are
+  discarded as evidence-only (`results/_prefix_evidence/`) and the full
+  grid is re-run from scratch under this amendment.
 - Samples per arm per seed: train 16,384 / val 2,048 / test 4,096, drawn from
   the respective frozen split without replacement where pool size allows
 - Seeds: 20 frozen seeds, `s_i = 2026080900 + i`, i = 0..19; the same 20 seeds
