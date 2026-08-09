@@ -16238,4 +16238,34 @@ theorem starP_border_topbit' (n l W : Nat) (hl : l < 2^(n+1)) (hW : W < 2^(n+1))
     hl0 (by omega) hlW0 (by rw [hx]; omega) (by omega)
     (starP_border_topbit n l W hl hW hl0 hW0 hlW)
 
+/-! ### Tier 104 — the OCTONION BOTTOM, as a verified finite computation
+
+    §57.58 located the classification at the bottom of the descent: for `W = 2^p` the bottom is the
+    maximal seam (already a theorem), and for `W < 8` it is level 3 — the OCTONIONS.  That bottom is
+    a FINITE statement: `l, y, W < 8`, so at most 512 triples.  It needs no cleverness, only a
+    decision procedure, and `decide` is enough — `native_decide` is not used anywhere in this file
+    and is not used here.
+
+    `starP` is a `def … : Prop` and therefore opaque to instance synthesis, and the nested bounded
+    quantifiers do not resolve either, so the check is written as a BOOLEAN over `List.range 8` and
+    `decide` discharges it.  `octCheck = true` IS the octonion bottom, computed and kernel-checked.
+
+    ⚠ The bridge from the Boolean to the `∀`-form of `starP` is not written here; it needs the
+    `List.all`/`List.mem_range` plumbing and nothing mathematical.  What is verified is the
+    computation. -/
+
+/-- The octonion bottom as a Boolean: for every triple below 8, either the point is outside the
+    interior, or `(*)` holds there. -/
+def octCheck : Bool :=
+  (List.range 8).all fun l =>
+    (List.range 8).all fun y =>
+      (List.range 8).all fun W =>
+        (W == 0 || l == 0 || y == 0 || l == W || y == W || l == y || y == (l ^^^ W)) ||
+        (cdSigma l y 3 * cdSigma (y ^^^ W) (l ^^^ W) 3
+          == - (cdSigma (y ^^^ W) l 3 * cdSigma (l ^^^ W) y 3))
+
+set_option maxRecDepth 100000 in
+/-- **THE OCTONION BOTTOM.**  `(*)` holds at every interior point of level 3. -/
+theorem octCheck_true : octCheck = true := by decide
+
 end SounioZDFiberAntisym

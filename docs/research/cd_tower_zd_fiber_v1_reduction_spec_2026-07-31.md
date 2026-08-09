@@ -6294,3 +6294,30 @@ returned empty — verified by reading the raw JSON, not the driver's summary. S
 the Lean proofs (kernel-clean) plus the denotation, 0 violations / 1182 for each sub-case at
 `m = 2,3,4`. The three questions put to the reviewers — in particular whether the border analysis is
 now genuinely complete — are recorded here as UNANSWERED.
+
+### §57.63 — Tier 104: the octonion bottom, as a verified finite computation
+
+The last piece of the interior obligation was the bottom of the descent for labels `W < 8`: level 3,
+the OCTONIONS. That bottom is FINITE — `l, y, W < 8`, at most 512 triples — so it needs a decision
+procedure, not an idea.
+
+`starP` is a `def … : Prop` and therefore opaque to instance synthesis, and the nested bounded
+quantifiers do not resolve either, so the check is written as a Boolean over `List.range 8` and
+`decide` discharges it. **`octCheck_true` costs `[propext]` and nothing else** — the purest axiom
+footprint in the file — and that axiom list is also the proof that `native_decide` was not used,
+since it would appear as `Lean.ofReduceBool`. An independent Python oracle agrees: 0 violations over
+the 168 interior triples.
+
+⚠ The bridge from `octCheck = true` to the `∀`-form of `starP` is NOT written. It needs
+`List.all`/`List.mem_range` plumbing and nothing mathematical, but until it exists the octonion
+bottom is a verified computation rather than a quantified theorem, and should be read that way.
+
+⚠ M1 DEGRADED: two attempts, both providers empty (raw JSON read, not the driver summary). The
+questions — whether `octCheck` expresses the right exclusion set, whether `decide` hides anything
+here, and whether the missing bridge means the bottom is not really formalised — are UNANSWERED.
+
+**Where the interior obligation now stands.** Induction step: proved (Tier 100). All six border
+families: proved (Tiers 101–103). Bottom, maximal seam: already a theorem (`resB_pow2_top`). Bottom,
+octonions: computed and kernel-checked, bridge pending. What is NOT assembled is the descent itself —
+the recursion that chains the step down to the bottom for a given label — and that is now the only
+structural piece left between this file and the interior for every reference label.
