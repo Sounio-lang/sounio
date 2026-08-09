@@ -15958,4 +15958,96 @@ theorem starP_step_uu (n l₀ y₀ W : Nat) (hl : l₀ < 2^(n+1)) (hy : y₀ < 2
       antisym (n+1) y₀ (l₀ ^^^ W) hy hlW hy0 hlW0 hne2]
   grind
 
+/-! ### Tier 101 — the BORDER family `l₀ = 0`, and the flip pays a third time
+
+    The step of Tier 100 covers every interior point whose halved pair is still interior.  What is
+    left are six border families — `l₀ = 0`, `y₀ = 0`, `l₀ = W`, `y₀ = W`, `l₀ = y₀`, `y₀ = l₀ ⊕ W`
+    — each of which is where the halving lands on an excluded line even though the full pair does
+    not.  Measured over the reference labels they are perfectly balanced: 84 points apiece at
+    `n = 4`, 224 apiece at `n = 5`, and all six hold.
+
+    This tier does the first, `l₀ = 0`, i.e. `l = 2^(n+1)` — the HUB row.  It splits once more on
+    `y`'s top bit, and both halves collapse the same way: three of the four `cdSigma` factors go to
+    `±1` through `cdSig0`/`cdSig0'` or an `R_uu` zero branch, and what is left is exactly
+
+      `σ(W, y ⊕ W) = − σ(W, y)`
+
+    — the MIRROR of Tier 97's fibre flip.  That lemma was proved to close the two seam lines of the
+    four-factor identity; it closes these borders too, which is the third distinct use of the same
+    fact and the reason it was worth isolating as a theorem rather than inlining. -/
+
+/-- The mirror form of the fibre flip, as a standalone theorem: `σ(W, ·)` anti-commutes with `· ⊕ W`.
+    (Tier 97 proved this inside the induction; here it is stated for reuse.) -/
+theorem sigma_fibre_flip_mirror (n a W : Nat) (ha : a < 2^n) (hW : W < 2^n)
+    (ha0 : a ≠ 0) (hW0 : W ≠ 0) (haW : a ≠ W) :
+    cdSigma W (a ^^^ W) n = - cdSigma W a n := by
+  have haW' : a ^^^ W < 2^n := Nat.xor_lt_two_pow ha hW
+  have hx0 : a ^^^ W ≠ 0 := by intro h; exact haW (xor_zero_eq a W h)
+  have hne : W ≠ a ^^^ W := by
+    intro h
+    apply ha0
+    have h2 : W ^^^ W = (a ^^^ W) ^^^ W := by rw [← h]
+    rw [Nat.xor_self, xor_cancel] at h2
+    exact h2.symm
+  rw [antisym n W (a ^^^ W) hW haW' hW0 hx0 hne,
+      sigma_fibre_flip n a W ha hW ha0 hW0 haW,
+      antisym n a W ha hW ha0 hW0 haW]
+  grind
+
+/-- **BORDER `l₀ = 0`, `y` LOW.**  `l` is the hub `2^(n+1)`; three factors collapse to `±1` and the
+    fibre flip supplies the fourth. -/
+theorem starP_border_hub_lo (n y W : Nat) (hy : y < 2^(n+1)) (hW : W < 2^(n+1))
+    (hy0 : y ≠ 0) (hW0 : W ≠ 0) (hyW : y ≠ W) :
+    starP (n+2) (2^(n+1)) y W := by
+  have hp := Nat.two_pow_pos (n+1)
+  have hyW' : y ^^^ W < 2^(n+1) := xorlt hy hW
+  have hx : (2^(n+1) : Nat) ^^^ W = W + 2^(n+1) := by
+    have e := xor_lo_hi (n+1) W 0 (by omega) hW hp
+    rw [Nat.zero_add] at e
+    rw [Nat.xor_comm (2^(n+1)) W, e, Nat.xor_zero]
+  have e1 : cdSigma (2^(n+1)) y (n+2) = -1 := by
+    have t := R_ul 0 y n hp hy
+    rw [Nat.zero_add] at t
+    rw [t, if_neg hy0, cdSig0]
+  have e3 : cdSigma (y ^^^ W) (2^(n+1)) (n+2) = 1 := by
+    have t := R_lu (y ^^^ W) 0 n hyW' hp
+    rw [Nat.zero_add] at t
+    rw [t, cdSig0]
+  unfold starP
+  rw [hx, e1, e3,
+      R_lu (y ^^^ W) W n hyW' hW,
+      R_ul W y n hW hy, if_neg hy0,
+      sigma_fibre_flip_mirror (n+1) y W hy hW hy0 hW0 hyW]
+  grind
+
+/-- **BORDER `l₀ = 0`, `y` HIGH.**  The same three collapses, through `R_uu`'s zero branch instead,
+    and the same flip. -/
+theorem starP_border_hub_hi (n y₀ W : Nat) (hy : y₀ < 2^(n+1)) (hW : W < 2^(n+1))
+    (hy0 : y₀ ≠ 0) (hW0 : W ≠ 0) (hyW : y₀ ≠ W) :
+    starP (n+2) (2^(n+1)) (y₀ + 2^(n+1)) W := by
+  have hp := Nat.two_pow_pos (n+1)
+  have hyW' : y₀ ^^^ W < 2^(n+1) := xorlt hy hW
+  have hxl : (2^(n+1) : Nat) ^^^ W = W + 2^(n+1) := by
+    have e := xor_lo_hi (n+1) W 0 (by omega) hW hp
+    rw [Nat.zero_add] at e
+    rw [Nat.xor_comm (2^(n+1)) W, e, Nat.xor_zero]
+  have hxy : (y₀ + 2^(n+1)) ^^^ W = (y₀ ^^^ W) + 2^(n+1) := by
+    have e := xor_lo_hi (n+1) W y₀ (by omega) hW hy
+    rw [Nat.xor_comm (y₀ + 2^(n+1)) W, e, Nat.xor_comm W y₀]
+  have e1 : cdSigma (2^(n+1)) (y₀ + 2^(n+1)) (n+2) = 1 := by
+    have t := R_uu 0 y₀ n hp hy
+    rw [Nat.zero_add] at t
+    rw [t, if_neg hy0, cdSig0']
+  have e3 : cdSigma ((y₀ ^^^ W) + 2^(n+1)) (2^(n+1)) (n+2) = -1 := by
+    have t := R_uu (y₀ ^^^ W) 0 n hyW' hp
+    rw [Nat.zero_add] at t
+    rw [t, if_pos rfl]
+  unfold starP
+  rw [hxl, hxy, e1, e3,
+      R_uu (y₀ ^^^ W) W n hyW' hW, if_neg hW0,
+      R_uu W y₀ n hW hy, if_neg hy0,
+      sigma_fibre_flip_mirror (n+1) y₀ W hy hW hy0 hW0 hyW,
+      antisym (n+1) y₀ W hy hW hy0 hW0 hyW]
+  grind
+
 end SounioZDFiberAntisym

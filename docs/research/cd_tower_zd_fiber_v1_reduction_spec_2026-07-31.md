@@ -6222,3 +6222,24 @@ branches at `n = 2,3,4`.
 **Residue.** The step is proved; the BOTTOM (where `W` enters the top half — the maximal seam for
 `W = 2^p`, the octonions for `W < 8`) and the BORDER points (where the reduced pair leaves the
 interior) are not.
+
+### §57.60 — Tier 101: the first border family, and the flip pays a third time
+
+The step of Tier 100 covers every interior point whose halved pair is still interior. The remainder
+is six border families — `l₀ = 0`, `y₀ = 0`, `l₀ = W`, `y₀ = W`, `l₀ = y₀`, `y₀ = l₀ ⊕ W` — each
+where the halving lands on an excluded line although the full pair does not. Over the reference
+labels they are perfectly balanced: 84 points apiece at `n = 4`, 224 apiece at `n = 5`, all holding.
+
+This tier proves the first, `l₀ = 0` (`l` = the hub `2^(n+1)`), in both sub-cases. Each collapses
+the same way: three of the four `cdSigma` factors go to `±1` — through `cdSig0`/`cdSig0'` after an
+`R_ul`/`R_lu` with a zero argument in the low case, through `R_uu`'s `v = 0` branch in the high one
+— and what is left is exactly
+
+    σ(W, y ⊕ W) = − σ(W, y)
+
+the MIRROR of Tier 97's fibre flip, now extracted as `sigma_fibre_flip_mirror` for reuse. **That is
+the third distinct use of the same fact** — it closed the two seam lines of the four-factor identity,
+it appeared inside Tier 97's own induction, and it closes these borders — which is why it was worth
+isolating as a theorem rather than inlining.
+
+Denotation: 0 violations / 1182 each. Residue: five border families, and the bottom of the descent.
