@@ -56,19 +56,66 @@ SLOT_LIMIT="$((IR_MAX_FUNCS - 1))"
 HALF="$(( (SLOT_LIMIT - 1) / 2 ))"        # deps, and locals at the boundary
 LOCALS_OVER="$((SLOT_LIMIT - HALF))"      # one local past the limit
 
-for i in $(seq 0 "$((HALF - 1))"); do
-  if [[ "$i" -eq 0 ]]; then
-    printf 'pub fn dep%s() -> i64 { return 7 }\n' "$i" >>"$DEP"
+# THE PADDING MUST BE REACHABLE, or neither arm of this gate measures anything.
+#
+# It used to be padding nobody called -- `fn local<i>() { return i }`,
+# `pub fn dep<i>() { return i }`, with main calling dep0 alone. That only ever
+# worked because cross-module reachability DCE did not run on the ordinary
+# multi-module path. This branch makes it run (that is how main.sio's 10705
+# declared / 5997 live functions fit under the cap at all), and pruning happens
+# BEFORE the slot-capacity check, by necessity -- checking first would refuse the
+# very program the pruning exists to admit.
+#
+# So dead padding no longer occupies slots, and both arms silently stopped
+# testing the ceiling:
+#
+#   overflow arm  lowered to 2 functions and COMPILED, so the gate went red with
+#                 "aggregate capacity witness unexpectedly compiled"
+#   boundary arm  lowered to 2 functions and PASSED -- the worse failure, because
+#                 a green arm that never approaches the limit reads as proof the
+#                 limit works
+#
+# The chain below is the construction tests/multimodule/ir_capacity already uses
+# (`ir_cap_<i>() { ir_cap_<i+1>() + 1 }`), whose own comment warns that a capacity
+# fixture whose witness stops reaching the ceiling "goes on passing for the wrong
+# reason". Slot arithmetic is unchanged: every function is now LIVE, which is the
+# only thing that changed.
+#
+# dep0 contributes the 7 the boundary arm checks and every other link adds
+# nothing, so the chain evaluates to 7 at any length.
+DEP_LAST="$((HALF - 1))"
+for i in $(seq 0 "$DEP_LAST"); do
+  if [[ "$i" -eq "$DEP_LAST" ]]; then
+    # Terminator. Also the i==0 case when HALF==1, so dep0 must still yield 7.
+    if [[ "$i" -eq 0 ]]; then
+      printf 'pub fn dep%s() -> i64 { return 7 }\n' "$i" >>"$DEP"
+    else
+      printf 'pub fn dep%s() -> i64 { return 0 }\n' "$i" >>"$DEP"
+    fi
+  elif [[ "$i" -eq 0 ]]; then
+    printf 'pub fn dep%s() -> i64 { return 7 + dep%s() }\n' "$i" "$((i + 1))" >>"$DEP"
   else
-    printf 'pub fn dep%s() -> i64 { return %s }\n' "$i" "$i" >>"$DEP"
+    printf 'pub fn dep%s() -> i64 { return dep%s() }\n' "$i" "$((i + 1))" >>"$DEP"
   fi
 done
 
+# `use` still names dep0 only. The rest of the chain is reached THROUGH it, so a
+# green boundary arm now also proves the pass follows calls across the module
+# boundary instead of stopping at the imported names it can see.
+emit_local_chain() {
+  local out="$1" last="$2" i
+  for i in $(seq 0 "$last"); do
+    if [[ "$i" -eq "$last" ]]; then
+      printf 'fn local%s() -> i64 { return 0 }\n' "$i" >>"$out"
+    else
+      printf 'fn local%s() -> i64 { return local%s() }\n' "$i" "$((i + 1))" >>"$out"
+    fi
+  done
+}
+
 printf 'use cap_dep::{dep0}\n' >"$BOUNDARY_MAIN"
-for i in $(seq 0 "$((HALF - 1))"); do
-  printf 'fn local%s() -> i64 { return %s }\n' "$i" "$i" >>"$BOUNDARY_MAIN"
-done
-printf 'fn main() -> i64 { return dep0() }\n' >>"$BOUNDARY_MAIN"
+emit_local_chain "$BOUNDARY_MAIN" "$((HALF - 1))"
+printf 'fn main() -> i64 { return dep0() + local0() }\n' >>"$BOUNDARY_MAIN"
 
 set +e
 MADAROS_RAW_BIN="$MADAROS_ELF" "$ROOT_DIR/bin/madaros" compile "$BOUNDARY_MAIN" -o "$BOUNDARY_OUT" >"$BOUNDARY_LOG" 2>&1
@@ -91,10 +138,8 @@ if [[ "$boundary_run_rc" -ne 7 ]]; then
 fi
 
 printf 'use cap_dep::{dep0}\n' >"$OVERFLOW_MAIN"
-for i in $(seq 0 "$((LOCALS_OVER - 1))"); do
-  printf 'fn local%s() -> i64 { return %s }\n' "$i" "$i" >>"$OVERFLOW_MAIN"
-done
-printf 'fn main() -> i64 { return dep0() }\n' >>"$OVERFLOW_MAIN"
+emit_local_chain "$OVERFLOW_MAIN" "$((LOCALS_OVER - 1))"
+printf 'fn main() -> i64 { return dep0() + local0() }\n' >>"$OVERFLOW_MAIN"
 
 set +e
 MADAROS_RAW_BIN="$MADAROS_ELF" "$ROOT_DIR/bin/madaros" compile "$OVERFLOW_MAIN" -o "$OUT" >"$LOG" 2>&1
