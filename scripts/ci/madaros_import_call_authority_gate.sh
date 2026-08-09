@@ -61,6 +61,8 @@ for path in \
   "$FIXTURES/selective_negative/leaf.sio" \
   "$FIXTURES/qualified/main.sio" \
   "$FIXTURES/qualified/leaf.sio" \
+  "$FIXTURES/qualified_shadow/main.sio" \
+  "$FIXTURES/qualified_shadow/leaf.sio" \
   "$FIXTURES/glob_multi/main.sio" \
   "$FIXTURES/glob_multi/leaf.sio" \
   "$FIXTURES/duplicate_order/left.sio" \
@@ -92,6 +94,18 @@ grep -Fq 'module_frontend_imports_from_program_item_handle(work_front)' <<<"$col
   fail collector_import_scan_not_handle_owned
 grep -Fq 'module_frontend_program_item_handles_available((*out).node_count)' <<<"$collector_shape" ||
   fail collector_item_handle_completeness_guard_missing
+grep -Fq 'var MF_CHECKER_ITEM_PTRS: [i64; 256]' "$FRONTEND" ||
+  fail checker_item_handle_table_missing
+grep -Fq '(*checker_handle).items = rewritten_items' <<<"$authority_shape" ||
+  fail checker_rewrite_view_not_pinned
+grep -Fq '(*programs)[caller_module_id as usize].items = (*checker_handle).items' <<<"$authority_shape" ||
+  fail checker_program_view_not_field_scoped
+if grep -Fq '(*caller_handle).items = rewritten_items' <<<"$authority_shape"; then
+  fail authored_item_handle_rewritten
+fi
+if grep -Fq 'module_frontend_publish_program_item_handle(' <<<"$strip_shape"; then
+  fail checker_stub_strip_overwrites_authored_handle
+fi
 grep -Fq 'let seed_item_handle = MF_PROGRAM_ITEM_PTRS[0] as *mut LowerProgramItemsHandle' "$FRONTEND" ||
   fail seed_lowering_item_handle_missing
 grep -Fq 'let dep_item_handle = MF_PROGRAM_ITEM_PTRS[i as usize] as *mut LowerProgramItemsHandle' "$FRONTEND" ||
@@ -130,8 +144,6 @@ grep -Fq 'str_char_at(call_path, qualifier_len) != 58' "$FRONTEND" || fail quali
 grep -Fq 'module_frontend_prepend_used_checker_stubs(' <<<"$authority_shape" ||
   fail checker_stub_adapter_missing
 grep -Fq 'visibility_is_pub((*item).visibility)' "$FRONTEND" || fail checker_stub_public_guard_missing
-grep -Fq '(*programs)[caller_module_id as usize].items = rewritten_items' <<<"$authority_shape" ||
-  fail authority_rewrite_not_field_scoped
 grep -Fq '(*programs)[caller_module_id as usize].items = Some(Box::new(ItemList {' <<<"$stub_shape" ||
   fail checker_stub_prepend_not_field_scoped
 grep -Fq '(*programs)[i as usize].items = module_frontend_drop_item_prefix(items, count)' <<<"$strip_shape" ||
@@ -149,6 +161,20 @@ grep -Fq 'ir_merge_find_function_identity_index(' "$FRONTEND" ||
   fail qualified_ir_exact_identity_lookup_missing
 grep -Fq 'MADAROS_IMPORT_AUTHORITY_IR_REBIND_RECEIPT schema=1 caller=' "$FRONTEND" ||
   fail qualified_ir_rebind_receipt_missing
+grep -Fq 'fn module_frontend_rebind_merged_calls_for_caller(' "$FRONTEND" ||
+  fail post_merge_caller_scoped_rebind_missing
+grep -Fq 'func.defining_module_id == caller_module_id' "$FRONTEND" ||
+  fail post_merge_caller_identity_guard_missing
+grep -Fq 'func.instrs[ii as usize].fn_id < 0' "$FRONTEND" ||
+  fail post_merge_unresolved_call_guard_missing
+grep -Fq '(*binding).export_name,' "$FRONTEND" ||
+  fail post_merge_export_identity_lookup_missing
+grep -Fq 'let post_merge_rebind_count = module_frontend_rebind_merged_import_calls(' <<<"$lower_array_shape" ||
+  fail post_merge_rebind_not_wired_after_merge
+grep -Fq 'post_merge_import_call_identity_rebind_failed' <<<"$lower_array_shape" ||
+  fail post_merge_rebind_not_fail_closed
+grep -Fq 'MADAROS_IMPORT_AUTHORITY_POST_MERGE_REBIND_TOTAL schema=1 callers=' "$FRONTEND" ||
+  fail post_merge_rebind_total_receipt_missing
 grep -Fq 'module_frontend_strip_import_authority_stubs(programs, loaded)' <<<"$compile_shape" ||
   fail checker_stub_strip_missing
 grep -Fq 'trace.last_stage = "lower_merge"' <<<"$compile_shape" || fail lower_boundary_missing
@@ -166,6 +192,10 @@ fi
 grep -Fq 'use leaf::{allowed}' "$FIXTURES/selective_negative/main.sio" || fail selective_fixture_import
 grep -Fq 'leaked()' "$FIXTURES/selective_negative/main.sio" || fail selective_fixture_leak_call
 grep -Fq 'leaf::answer()' "$FIXTURES/qualified/main.sio" || fail qualified_fixture_call
+grep -Fq 'answer() + leaf::answer()' "$FIXTURES/qualified_shadow/main.sio" ||
+  fail qualified_shadow_fixture_calls
+grep -Fq 'fn answer() -> i64' "$FIXTURES/qualified_shadow/main.sio" ||
+  fail qualified_shadow_local_definition
 grep -Fq 'use leaf::*' "$FIXTURES/glob_multi/main.sio" || fail glob_fixture_import
 grep -Fq 'second()' "$FIXTURES/glob_multi/main.sio" || fail glob_fixture_second_call
 [[ "$(grep -Fc 'pub fn picked()' "$FIXTURES/duplicate_order/left.sio")" -eq 1 ]] || fail left_picked_missing
@@ -183,7 +213,7 @@ source_sha256="$({
   sha256sum "$LOWER" | awk '{print $1}'
 } | sha256sum | awk '{print $1}')"
 
-printf 'MADAROS_IMPORT_CALL_AUTHORITY_SOURCE_PASS binding=caller+local+defining+export+qualifier checker_adapter=collection-owned lowering=explicit-only global_unique_fallback=absent fixtures=selective-reject,qualified-call,duplicate-order-x2,glob-multi source_sha256=%s\n' "$source_sha256"
+printf 'MADAROS_IMPORT_CALL_AUTHORITY_SOURCE_PASS binding=caller+local+defining+export+qualifier checker_adapter=collection-owned lowering=explicit-only+post-merge-exact global_unique_fallback=absent fixtures=selective-reject,qualified-call,qualified-shadow,duplicate-order-x2,glob-multi source_sha256=%s\n' "$source_sha256"
 
 if [[ "$MODE" == "source-only" ]]; then
   exit 0
@@ -260,11 +290,13 @@ compile_case() {
   grep -Fq 'MADAROS_IMPORT_AUTHORITY_RECEIPT schema=1' "$log" || fail "${label}_authority_receipt_missing"
   grep -Fq 'global_unique_fallback=0' "$log" || fail "${label}_fallback_receipt_missing"
   grep -Fq 'MADAROS_IMPORT_AUTHORITY_IR_REBIND_RECEIPT schema=1' "$log" || fail "${label}_ir_rebind_receipt_missing"
+  grep -Fq 'MADAROS_IMPORT_AUTHORITY_POST_MERGE_REBIND_TOTAL schema=1' "$log" || fail "${label}_post_merge_rebind_receipt_missing"
   grep -Eq '^Merged IR: [1-9][0-9]*$' "$log" || fail "${label}_merged_ir_receipt_missing"
 }
 
-run_exit_42() {
+run_exit_code() {
   local label="$1"
+  local expected="$2"
   local elf="$WORK/$label.elf"
   local rc=0
 
@@ -272,7 +304,7 @@ run_exit_42() {
   timeout --signal=TERM --kill-after=5s 30s "$elf" >"$WORK/$label.stdout" 2>"$WORK/$label.stderr"
   rc=$?
   set -e
-  [[ "$rc" -eq 42 ]] || {
+  [[ "$rc" -eq "$expected" ]] || {
     cat "$WORK/$label.stdout" >&2 || true
     cat "$WORK/$label.stderr" >&2 || true
     fail "${label}_runtime_rc_${rc}"
@@ -301,16 +333,25 @@ fi
 
 compile_case qualified "$FIXTURES/qualified/main.sio"
 grep -Eq 'qualified_rewrites=[1-9][0-9]*' "$WORK/qualified.compile.log" || fail qualified_rewrite_receipt_missing
-run_exit_42 qualified
+grep -Eq '^MADAROS_IMPORT_AUTHORITY_POST_MERGE_REBIND_RECEIPT schema=1 caller=0 bindings=[1-9][0-9]* rewrites=1 global_unique_fallback=0$' "$WORK/qualified.compile.log" ||
+  fail qualified_ir_rewrite_count
+run_exit_code qualified 42
+
+compile_case qualified_shadow "$FIXTURES/qualified_shadow/main.sio"
+grep -Eq 'qualified_rewrites=[1-9][0-9]*' "$WORK/qualified_shadow.compile.log" ||
+  fail qualified_shadow_rewrite_receipt_missing
+grep -Eq '^MADAROS_IMPORT_AUTHORITY_POST_MERGE_REBIND_RECEIPT schema=1 caller=0 bindings=[1-9][0-9]* rewrites=1 global_unique_fallback=0$' "$WORK/qualified_shadow.compile.log" ||
+  fail qualified_shadow_ir_rewrite_count
+run_exit_code qualified_shadow 44
 
 compile_case duplicate_left_first "$FIXTURES/duplicate_order/left_first.sio"
-run_exit_42 duplicate_left_first
+run_exit_code duplicate_left_first 42
 compile_case duplicate_right_first "$FIXTURES/duplicate_order/right_first.sio"
-run_exit_42 duplicate_right_first
+run_exit_code duplicate_right_first 42
 compile_case glob_multi "$FIXTURES/glob_multi/main.sio"
-run_exit_42 glob_multi
+run_exit_code glob_multi 42
 
 final_compiler_sha256="$(sha256sum "$RAW_MADAROS" | awk '{print $1}')"
 [[ "$final_compiler_sha256" == "$compiler_sha256" ]] || fail compiler_changed_during_gate
-printf 'MADAROS_IMPORT_CALL_AUTHORITY_RUNTIME_PASS compiler_provenance=source-fresh compiler_sha256=%s source_sha256=%s selective_negative=E137+no-elf+pre-lowering qualified=42 duplicate_left_first=42 duplicate_right_first=42 glob_multi=42 closure_order=both compact=disabled fallback=none\n' \
+printf 'MADAROS_IMPORT_CALL_AUTHORITY_RUNTIME_PASS compiler_provenance=source-fresh compiler_sha256=%s source_sha256=%s selective_negative=E137+no-elf+pre-lowering qualified=42 qualified_shadow=44+ir-rebind1 duplicate_left_first=42 duplicate_right_first=42 glob_multi=42 closure_order=both compact=disabled fallback=none\n' \
   "$compiler_sha256" "$source_sha256"
