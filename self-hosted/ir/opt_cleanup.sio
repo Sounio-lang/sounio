@@ -9690,32 +9690,54 @@ fn ocp_mfi_compact_nops(module: &! IrModule, fi: i64) with Mut, Div, Panic {
 }
 
 // Safe multi-module function cleanup via module+fi field access only.
+// Per-peel kill switch for the in-place -O pipeline. Bit set = peel SKIPPED.
+// Default 0, so with no environment set this file behaves exactly as before.
+//
+// WHY THIS EXISTS. Bisecting "which peel produced this bad IR" previously cost a
+// full ~15-minute Madaros rebuild per hypothesis, because the only way to remove
+// a peel was to edit this list and recompile. With the switch it is one build
+// and N runs. It paid for itself the first time it was used: it showed that
+// skipping ALL peels is not a valid control, because skipping compaction leaves
+// every nop in the stream and is independently fatal -- an experiment that had
+// already produced one wrong conclusion before the switch made it visible.
+//
+// A global rather than read_env at each site: the peels carry Mut/Div/Panic and
+// no IO, and widening them would cascade the effect to every caller. The value
+// is loaded once from the compile entry, which already has IO.
+pub var OCP_SKIP_MASK: i64 = 0
+
+fn ocp_skip(bit: i64) -> bool with Div {
+    (OCP_SKIP_MASK / bit) % 2 == 1
+}
+
 fn opt_cleanup_function_mfi(module: &! IrModule, fi: i64) with Mut, Div, Panic {
     let ic = (*module).functions[fi as usize].instr_count
     if ic <= 0 {
         return
     }
-    ocp_mfi_dedup_imm(module, fi)
-    ocp_mfi_const_fold(module, fi)
-    ocp_mfi_copy_prop(module, fi)
-    ocp_mfi_dse(module, fi)
-    ocp_mfi_redundant_jump(module, fi)
-    ocp_mfi_jump_to_return(module, fi)
-    ocp_mfi_dead_after_jump(module, fi)
-    ocp_mfi_dead_label(module, fi)
-    ocp_mfi_cse(module, fi)
-    var iter: i64 = 0
-    while iter < 8 {
-        let removed = ocp_mfi_dce_once(module, fi)
-        if removed == 0 {
-            iter = 8
+    if !ocp_skip(1)    { ocp_mfi_dedup_imm(module, fi) }
+    if !ocp_skip(2)    { ocp_mfi_const_fold(module, fi) }
+    if !ocp_skip(4)    { ocp_mfi_copy_prop(module, fi) }
+    if !ocp_skip(8)    { ocp_mfi_dse(module, fi) }
+    if !ocp_skip(16)   { ocp_mfi_redundant_jump(module, fi) }
+    if !ocp_skip(32)   { ocp_mfi_jump_to_return(module, fi) }
+    if !ocp_skip(64)   { ocp_mfi_dead_after_jump(module, fi) }
+    if !ocp_skip(128)  { ocp_mfi_dead_label(module, fi) }
+    if !ocp_skip(256)  { ocp_mfi_cse(module, fi) }
+    if !ocp_skip(512) {
+        var iter: i64 = 0
+        while iter < 8 {
+            let removed = ocp_mfi_dce_once(module, fi)
+            if removed == 0 {
+                iter = 8
+            }
+            iter = iter + 1
         }
-        iter = iter + 1
     }
     // SCCP-lite + compact: previously deferred (by-value path only).
-    ocp_mfi_sccp(module, fi)
-    let _ = ocp_mfi_dce_once(module, fi)
-    ocp_mfi_compact_nops(module, fi)
+    if !ocp_skip(1024) { ocp_mfi_sccp(module, fi) }
+    if !ocp_skip(2048) { let _ = ocp_mfi_dce_once(module, fi) }
+    if !ocp_skip(4096) { ocp_mfi_compact_nops(module, fi) }
 }
 
 // Run safe field-wise cleanup on every function without copying IrModule or
