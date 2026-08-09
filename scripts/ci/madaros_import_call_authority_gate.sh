@@ -147,6 +147,10 @@ grep -Fq 'module_frontend_copy_ast_path_into(' "$FRONTEND" || fail qualified_bin
 if grep -Fq '(*binding).qualifier_path = (*qualifier_path)' "$FRONTEND"; then
   fail qualified_binding_path_aggregate_copy_reintroduced
 fi
+if grep -Fq '(*qualifier_path) = item.use_path' "$FRONTEND" ||
+   grep -Fq '(*qualifier_path) = candidate_qualifier' "$FRONTEND"; then
+  fail qualified_out_path_aggregate_copy_reintroduced
+fi
 if grep -Fq 'module_frontend_call_text_selects_binding(' "$FRONTEND"; then
   fail qualified_text_authority_reintroduced
 fi
