@@ -147,3 +147,42 @@ Predictions (reference: frontier battery directional ≤ 0.08 everywhere):
 - **L2:** at least one local has semantic flip ≥ 0.25 (smaller models are
   more framing-reactive).
 - **L3:** no local achieves directional ≥ 0.30 (B4 extends to self-hosted).
+
+## Local wing results (2026-08-09, judge glm-5.2)
+
+| model | params | semantic flip | directional | recency |
+|---|---|---|---|---|
+| qwen2.5-14b | 14B | 0.16 | 0.00 | 0.53 |
+| qwen2.5-coder-32b | 32B | 0.16 | 0.04 | 0.50 |
+| spark-deepseek-coder-16b | 16B | 0.38 | 0.00 | 0.53 |
+| spark-qwq-32b | 32B reasoning | DNF | — | — |
+| spark-phi4-reasoning | 14B reasoning | DNF | — | — |
+
+DNF = per-call generation exceeded the 600 s budget on the shared ollama
+backend (reasoning models); declared, not retuned.
+
+**Verdict on the preregistered L-predictions:**
+- **L1 (all locals directional ≤ 0.10): CONFIRMED** (0.00 / 0.04 / 0.00).
+- **L2 (≥ one local flip ≥ 0.25): CONFIRMED** (dscoder-16b 0.38).
+- **L3 (no local directional ≥ 0.30): CONFIRMED** (max 0.04).
+
+## The 8-model map
+
+| model | class | flip | directional | recency |
+|---|---|---|---|---|
+| grok-4.3 | frontier | 0.10 | 0.02 | 0.72 |
+| qwen2.5-14b | local | 0.16 | 0.00 | 0.53 |
+| grok-4.5 | frontier | 0.16 | 0.08 | 0.74 |
+| qwen2.5-coder-32b | local | 0.16 | 0.04 | 0.50 |
+| glm-4.7 | frontier | 0.30 | 0.02 | 0.68 |
+| dscoder-16b | local | 0.38 | 0.00 | 0.53 |
+| glm-5.2 | frontier | 0.46 | 0.04 | 0.45 |
+| kimi-k3 | frontier (in-session) | 0.82 | 0.06 | 0.20 |
+
+Across 8 models, 3+ families, 2 deployment classes: **directional clean
+rate ≤ 0.08 everywhere** — the strongest, most replicated finding of the
+SBMP v0. Framing reactivity varies by an order of magnitude (0.10–0.82) and
+is a family/deployment trait, not steering. Recency anchors everything
+except kimi-k3. Local models sit inside the frontier envelope on every
+metric — no local champion, no local outlier worse than the worst frontier
+model either.
