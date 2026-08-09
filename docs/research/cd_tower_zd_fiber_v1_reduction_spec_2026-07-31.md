@@ -6157,3 +6157,39 @@ base: 24/24, 168/168, 840/840, 3720/3720 at `n = 3,4,5,6`.
 
 That is the residue reduced from "an open mask statement" to "an induction whose step is verified and
 whose base is a theorem, plus borders".
+
+### §57.58 — why the truth set has that shape: every descent bottoms out, and the bottom decides
+
+§57.57 showed the induction step for `(*)` is label-blind, so the classification is decided at the
+bottom of the descent. The descent runs while `W` stays in the LOW half and stops at the level where
+`W` sits in the top half — `n = W.bit_length()`. Measured at each bottom:
+
+    W < 4         bottom n = 2 (quaternions)   — vacuous, 0 interior points
+    4 ≤ W < 8     bottom n = 3 (OCTONIONS)     — 24/24 hold
+    W = 2^p       bottom n = p+1, W = 2^(n−1)  — the MAXIMAL SEAM, already a theorem
+    W = 9,10,12,13  bottom n = 4 (SEDENIONS)   — 96 of 168 interior points FAIL
+    W = 24, 25      bottom n = 5               — 672/840 and 288/840 FAIL
+
+So the classification is not about `W`'s arithmetic at all. **A label's interior statement holds iff
+its descent bottoms out at or below the octonions, or at a maximal seam** — and it fails exactly when
+the bottom lands in the sedenions or above, which is where zero divisors and the failure of
+alternativity begin. That is the answer to "why `W < 8` or a power of two": those are precisely the
+labels whose bottom is not a sedenion bottom.
+
+**The two families' bases hold for DIFFERENT reasons, and one of them came from the offload.** A
+model I asked to attack the problem supplied the octonion half: in `𝕆` the non-associativity of a
+basis triple requires `a ⊕ b ⊕ c = 0` (the Fano lines are the triples summing to zero), and the
+interior hypotheses exclude exactly the two ways the relevant triples can sum to zero — `l = y` and
+`y = l ⊕ W`. So both triples associate and `(*)` is immediate. The maximal-seam half is the
+rank-one collapse already proved (`P1_pow2_top`/`P3_pow2_top`).
+
+⚠ Its scope needs care, and the model did not state it: the Fano argument applies at the BOTTOM of
+the descent, where the indices are octonion indices — not at the top, where `l, y` range over the
+whole level. It is the descent of §57.57 that brings the general case down to where the argument is
+available.
+
+**A second suggestion from the same call is REFUTED.** It proposed the standard closed form
+`σ(a,b) = (−1)^{Σ_{i<j} a_j b_i}`. Tested against this lane's `cdSigma` in four index conventions at
+`n = 3,4,5`: 25/49, 33/49, 125/225, 529/961 — chance. This cocycle is not that quadratic form, which
+is consistent with the lane's standing result that it is not a character sum and that the Walsh route
+is excluded. Had it matched, `(*)` would have been a parity computation.
