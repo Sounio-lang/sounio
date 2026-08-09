@@ -15849,4 +15849,113 @@ theorem interiorMask_pow2_top (m : Nat) : InteriorMask (2^m) m := by
   intro l y hl hy hl0 hy0 hlW hyW hly hcos
   exact resB_pow2_top m l y hl hy hl0 hy0 hlW hyW hly hcos
 
+/-! ### Tier 100 — the interior's INDUCTION STEP, proved
+
+    §57.57 reduced the interior obligation to one identity at a single level,
+
+      `(*)  σ(l,y) · σ(y⊕W, l⊕W)  =  − σ(y⊕W, l) · σ(l⊕W, y)`,
+
+    and found that its induction step is LABEL-BLIND: splitting `l` and `y` by their top bit, all
+    four branches reduce `(*)` at level `n+2` to `(*)` at level `n+1` on the halved indices.  This
+    tier proves that step.
+
+    The four branches are not symmetric, and the asymmetry is the content.  Both-low is `R_ll` four
+    times and needs nothing else.  The other three each produce the factors in the WRONG ORDER, and
+    `antisym` puts them back — which is why the step needs `l, y₀ ≠ 0` and the two distinctness
+    conditions at the LOWER level, and why the points whose reduction leaves the interior are a
+    separate obligation rather than a corollary.
+
+    ⚠ This is the step only.  With it, `(*)` for a label descends to the level where `W` enters the
+    top half; §57.58 measured that this bottom decides the classification, and that for `W = 2^p` the
+    bottom IS the maximal seam, where `resB_pow2_top` already holds.  Neither the bottom nor the
+    border points are proved here. -/
+
+/-- The single-level identity the interior reduces to. -/
+def starP (n l y W : Nat) : Prop :=
+  cdSigma l y n * cdSigma (y ^^^ W) (l ^^^ W) n
+    = - (cdSigma (y ^^^ W) l n * cdSigma (l ^^^ W) y n)
+
+/-- **BRANCH (0,0): both indices low.**  `R_ll` four times; no side conditions at all. -/
+theorem starP_step_ll (n l y W : Nat) (hl : l < 2^(n+1)) (hy : y < 2^(n+1)) (hW : W < 2^(n+1))
+    (h : starP (n+1) l y W) : starP (n+2) l y W := by
+  have hlW : l ^^^ W < 2^(n+1) := xorlt hl hW
+  have hyW : y ^^^ W < 2^(n+1) := xorlt hy hW
+  unfold starP at h ⊢
+  rw [R_ll l y n hl hy, R_ll (y ^^^ W) (l ^^^ W) n hyW hlW,
+      R_ll (y ^^^ W) l n hyW hl, R_ll (l ^^^ W) y n hlW hy]
+  exact h
+
+/-- **BRANCH (0,1): `l` low, `y` high.**  `R_lu`/`R_ul` swap two of the four factors, and `antisym`
+    restores them — hence the two distinctness hypotheses at the lower level. -/
+theorem starP_step_lu (n l y₀ W : Nat) (hl : l < 2^(n+1)) (hy : y₀ < 2^(n+1)) (hW : W < 2^(n+1))
+    (hl0 : l ≠ 0) (hy0 : y₀ ≠ 0) (hlW0 : l ^^^ W ≠ 0)
+    (hne1 : y₀ ≠ l) (hne2 : y₀ ≠ l ^^^ W)
+    (h : starP (n+1) l y₀ W) : starP (n+2) l (y₀ + 2^(n+1)) W := by
+  have hp := Nat.two_pow_pos (n+1)
+  have hlW : l ^^^ W < 2^(n+1) := xorlt hl hW
+  have hyW : y₀ ^^^ W < 2^(n+1) := xorlt hy hW
+  have hx : (y₀ + 2^(n+1)) ^^^ W = (y₀ ^^^ W) + 2^(n+1) := by
+    have e := xor_lo_hi (n+1) W y₀ (by omega) hW hy
+    rw [Nat.xor_comm (y₀ + 2^(n+1)) W, e, Nat.xor_comm W y₀]
+  unfold starP at h ⊢
+  rw [hx,
+      R_lu l y₀ n hl hy,
+      R_ul (y₀ ^^^ W) (l ^^^ W) n hyW hlW, if_neg hlW0,
+      R_ul (y₀ ^^^ W) l n hyW hl, if_neg hl0,
+      R_lu (l ^^^ W) y₀ n hlW hy,
+      antisym (n+1) y₀ l hy hl hy0 hl0 hne1,
+      antisym (n+1) y₀ (l ^^^ W) hy hlW hy0 hlW0 hne2]
+  grind
+
+/-- **BRANCH (1,0): `l` high, `y` low.**  The mirror of the previous branch. -/
+theorem starP_step_ul (n l₀ y W : Nat) (hl : l₀ < 2^(n+1)) (hy : y < 2^(n+1)) (hW : W < 2^(n+1))
+    (hy0 : y ≠ 0) (hl0 : l₀ ≠ 0) (hlW0 : l₀ ^^^ W ≠ 0) (hyW0 : y ^^^ W ≠ 0)
+    (hne1 : l₀ ≠ y) (hne2 : l₀ ≠ y ^^^ W)
+    (h : starP (n+1) l₀ y W) : starP (n+2) (l₀ + 2^(n+1)) y W := by
+  have hp := Nat.two_pow_pos (n+1)
+  have hlW : l₀ ^^^ W < 2^(n+1) := xorlt hl hW
+  have hyW : y ^^^ W < 2^(n+1) := xorlt hy hW
+  have hne3 : l₀ ^^^ W ≠ y ^^^ W := by
+    intro e; exact hne1 (by rw [← xor_cancel l₀ W, e, xor_cancel])
+  have hx : (l₀ + 2^(n+1)) ^^^ W = (l₀ ^^^ W) + 2^(n+1) := by
+    have e := xor_lo_hi (n+1) W l₀ (by omega) hW hl
+    rw [Nat.xor_comm (l₀ + 2^(n+1)) W, e, Nat.xor_comm W l₀]
+  unfold starP at h ⊢
+  rw [hx,
+      R_ul l₀ y n hl hy, if_neg hy0,
+      R_lu (y ^^^ W) (l₀ ^^^ W) n hyW hlW,
+      R_lu (y ^^^ W) l₀ n hyW hl,
+      R_ul (l₀ ^^^ W) y n hlW hy, if_neg hy0,
+      antisym (n+1) (l₀ ^^^ W) (y ^^^ W) hlW hyW hlW0 hyW0 hne3,
+      antisym (n+1) l₀ (y ^^^ W) hl hyW hl0 hyW0 hne2]
+  grind
+
+/-- **BRANCH (1,1): both high.**  `R_uu` four times, then `antisym` on all four factors. -/
+theorem starP_step_uu (n l₀ y₀ W : Nat) (hl : l₀ < 2^(n+1)) (hy : y₀ < 2^(n+1)) (hW : W < 2^(n+1))
+    (hl0 : l₀ ≠ 0) (hy0 : y₀ ≠ 0) (hlW0 : l₀ ^^^ W ≠ 0) (hyW0 : y₀ ^^^ W ≠ 0)
+    (hne1 : l₀ ≠ y₀) (hne2 : y₀ ≠ l₀ ^^^ W) (hne3 : l₀ ≠ y₀ ^^^ W)
+    (h : starP (n+1) l₀ y₀ W) : starP (n+2) (l₀ + 2^(n+1)) (y₀ + 2^(n+1)) W := by
+  have hp := Nat.two_pow_pos (n+1)
+  have hlW : l₀ ^^^ W < 2^(n+1) := xorlt hl hW
+  have hyW : y₀ ^^^ W < 2^(n+1) := xorlt hy hW
+  have hne4 : l₀ ^^^ W ≠ y₀ ^^^ W := by
+    intro e; exact hne1 (by rw [← xor_cancel l₀ W, e, xor_cancel])
+  have hxl : (l₀ + 2^(n+1)) ^^^ W = (l₀ ^^^ W) + 2^(n+1) := by
+    have e := xor_lo_hi (n+1) W l₀ (by omega) hW hl
+    rw [Nat.xor_comm (l₀ + 2^(n+1)) W, e, Nat.xor_comm W l₀]
+  have hxy : (y₀ + 2^(n+1)) ^^^ W = (y₀ ^^^ W) + 2^(n+1) := by
+    have e := xor_lo_hi (n+1) W y₀ (by omega) hW hy
+    rw [Nat.xor_comm (y₀ + 2^(n+1)) W, e, Nat.xor_comm W y₀]
+  unfold starP at h ⊢
+  rw [hxl, hxy,
+      R_uu l₀ y₀ n hl hy, if_neg hy0,
+      R_uu (y₀ ^^^ W) (l₀ ^^^ W) n hyW hlW, if_neg hlW0,
+      R_uu (y₀ ^^^ W) l₀ n hyW hl, if_neg hl0,
+      R_uu (l₀ ^^^ W) y₀ n hlW hy, if_neg hy0,
+      antisym (n+1) y₀ l₀ hy hl hy0 hl0 (fun e => hne1 e.symm),
+      antisym (n+1) (l₀ ^^^ W) (y₀ ^^^ W) hlW hyW hlW0 hyW0 hne4,
+      antisym (n+1) l₀ (y₀ ^^^ W) hl hyW hl0 hyW0 hne3,
+      antisym (n+1) y₀ (l₀ ^^^ W) hy hlW hy0 hlW0 hne2]
+  grind
+
 end SounioZDFiberAntisym

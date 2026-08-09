@@ -6193,3 +6193,32 @@ available.
 `n = 3,4,5`: 25/49, 33/49, 125/225, 529/961 — chance. This cocycle is not that quadratic form, which
 is consistent with the lane's standing result that it is not a character sum and that the Walsh route
 is excluded. Had it matched, `(*)` would have been a parity computation.
+
+### §57.59 — Tier 100: the interior's induction step, PROVED
+
+`starP n l y W` names the single-level identity `(*)`, and the four branch lemmas prove the step:
+
+    starP_step_ll / _lu / _ul / _uu :  starP (n+1) (halved indices) W  →  starP (n+2) (lifted) W
+
+Both-low is `R_ll` four times and needs NO side conditions. The other three produce the factors in
+the wrong order — `R_lu`/`R_ul` swap two, `R_uu` swaps all four — and `antisym` puts them back. That
+is why the step carries `≠ 0` and distinctness hypotheses AT THE LOWER LEVEL: `y₀ ≠ l` and
+`y₀ ≠ l ⊕ W` do not follow from the upper-level interior, since `y = y₀ + 2^(n+1)` is automatically
+distinct from `l`. The reviewer confirmed the accounting: every `antisym`/`if_neg` is discharged by a
+stated hypothesis, none is derivable from the lift, and no branch carries an extra.
+
+Coverage: with `W < 2^(n+1)`, the high bit of `x ⊕ W` equals the high bit of `x`, so the four
+`(l-bit, y-bit)` cases exhaust `l, y < 2^(n+2)`. The low-half restriction on `W` is the explicit
+induction guard, not hidden work.
+
+**The step is label-blind and that is a feature, not an oversight.** Each lemma is an implication
+between identities of the four `cdSigma` values, valid whether or not those values satisfy `(*)` —
+so it holds for every `W < 2^(n+1)`, including labels for which `(*)` is FALSE. §57.58 measured why:
+the classification is decided at the bottom of the descent, not in the step.
+
+Denotation before review: 0 violations over 20552 / 19158 / 17976 / 17976 instances of the four
+branches at `n = 2,3,4`.
+
+**Residue.** The step is proved; the BOTTOM (where `W` enters the top half — the maximal seam for
+`W = 2^p`, the octonions for `W < 8`) and the BORDER points (where the reduced pair leaves the
+interior) are not.
