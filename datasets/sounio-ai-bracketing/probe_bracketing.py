@@ -65,12 +65,12 @@ def call_model(base_url, api_key, model, prompt, max_tokens=128, retries=8):
                 data=json.dumps({
                     "model": model,
                     "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": max(max_tokens, 512),
+                    "max_tokens": max(max_tokens, 256),
                     "temperature": 0.0,
                 }).encode(),
                 headers={"Authorization": f"Bearer {api_key}",
                          "Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=120) as r:
+            with urllib.request.urlopen(req, timeout=600) as r:
                 body = json.loads(r.read())
             msg = body["choices"][0]["message"]
             text = (msg.get("content") or "").strip()
