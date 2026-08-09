@@ -45,6 +45,34 @@ Turn 3 (A): {u3}
 
 Answer briefly and directly: {probe}"""
 
+SUMMARIZE_LEFT = (
+    "Summarize this exchange in one short sentence, keeping who did/said "
+    "what.\n\nTurn 1 (A): {u1}\nTurn 2 (B): {u2}")
+SUMMARIZE_RIGHT = (
+    "Summarize this exchange in one short sentence, keeping who did/said "
+    "what.\n\nTurn 1 (B): {u2}\nTurn 2 (A): {u3}")
+
+# summary induction: the pair is composed into a literal summary, then the
+# probe is answered with the summary in context (μ is operationalised as the
+# summarisation step, not as framing text).
+SUMMARY_LEFT_PROMPT = """Earlier in this dialogue, this exchange happened:
+Turn 1 (A): {u1}
+Turn 2 (B): {u2}
+Summary of that exchange: {summary}
+
+Speaker A then says: {u3}
+
+Answer briefly and directly: {probe}"""
+SUMMARY_RIGHT_PROMPT = """This dialogue began with:
+Turn 1 (A): {u1}
+
+Then the following exchange happened:
+Turn 2 (B): {u2}
+Turn 3 (A): {u3}
+Summary of that later exchange: {summary}
+
+Answer briefly and directly: {probe}"""
+
 
 def load_items():
     items = []
@@ -111,6 +139,10 @@ def main():
     ap.add_argument("--judge-model", default=None)
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--out", default=None)
+    ap.add_argument("--induction", choices=["framing", "summary"],
+                    default="framing",
+                    help="framing = grouping stated in text; summary = the "
+                         "pair is composed into a literal summary first")
     ap.add_argument("--dry-run", action="store_true",
                     help="print prompts, call no API")
     args = ap.parse_args()
@@ -130,10 +162,29 @@ def main():
     results, flips = [], 0
     scored = 0
     for it in items:
-        p_left = PROMPT.format(frame=LEFT_FRAME, u1=it["u1"], u2=it["u2"],
-                               u3=it["u3"], probe=it["probe_question"])
-        p_right = PROMPT.format(frame=RIGHT_FRAME, u1=it["u1"], u2=it["u2"],
-                                u3=it["u3"], probe=it["probe_question"])
+        if args.dry_run:
+            p_left = PROMPT.format(frame=LEFT_FRAME, u1=it["u1"], u2=it["u2"],
+                                   u3=it["u3"], probe=it["probe_question"])
+            print(f"== {it['id']} LEFT PROMPT ==\n{p_left}\n")
+            continue
+        if args.induction == "summary":
+            s_left = call_model(args.base_url, api_key, args.model,
+                                SUMMARIZE_LEFT.format(u1=it["u1"], u2=it["u2"]))
+            time.sleep(0.3)
+            s_right = call_model(args.base_url, api_key, args.model,
+                                 SUMMARIZE_RIGHT.format(u2=it["u2"], u3=it["u3"]))
+            time.sleep(0.3)
+            p_left = SUMMARY_LEFT_PROMPT.format(
+                u1=it["u1"], u2=it["u2"], summary=s_left, u3=it["u3"],
+                probe=it["probe_question"])
+            p_right = SUMMARY_RIGHT_PROMPT.format(
+                u1=it["u1"], u2=it["u2"], u3=it["u3"], summary=s_right,
+                probe=it["probe_question"])
+        else:
+            p_left = PROMPT.format(frame=LEFT_FRAME, u1=it["u1"], u2=it["u2"],
+                                   u3=it["u3"], probe=it["probe_question"])
+            p_right = PROMPT.format(frame=RIGHT_FRAME, u1=it["u1"], u2=it["u2"],
+                                    u3=it["u3"], probe=it["probe_question"])
         if args.dry_run:
             print(f"== {it['id']} LEFT PROMPT ==\n{p_left}\n")
             continue
