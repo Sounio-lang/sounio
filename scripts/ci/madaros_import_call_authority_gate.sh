@@ -141,6 +141,10 @@ grep -Fq 'fn module_frontend_binding_find_qualified(' "$FRONTEND" || fail qualif
 grep -Fq 'ir_name_eq((*binding).local_name, local_name)' "$FRONTEND" || fail bare_exact_local_name_selection_missing
 grep -Fq 'ir_name_eq((*binding).export_name, export_name)' "$FRONTEND" || fail qualified_export_identity_missing
 grep -Fq 'module_frontend_call_path_has_import_prefix(' "$FRONTEND" || fail qualified_structural_prefix_missing
+grep -Fq 'module_frontend_copy_ast_path_into(' "$FRONTEND" || fail qualified_binding_path_deep_copy_missing
+if grep -Fq '(*binding).qualifier_path = (*qualifier_path)' "$FRONTEND"; then
+  fail qualified_binding_path_aggregate_copy_reintroduced
+fi
 if grep -Fq 'module_frontend_call_text_selects_binding(' "$FRONTEND"; then
   fail qualified_text_authority_reintroduced
 fi
