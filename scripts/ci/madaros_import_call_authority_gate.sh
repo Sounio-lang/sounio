@@ -63,6 +63,8 @@ for path in \
   "$FIXTURES/qualified/leaf.sio" \
   "$FIXTURES/qualified_shadow/main.sio" \
   "$FIXTURES/qualified_shadow/leaf.sio" \
+  "$FIXTURES/qualified_nested/main.sio" \
+  "$FIXTURES/qualified_nested/alpha/leaf.sio" \
   "$FIXTURES/glob_multi/main.sio" \
   "$FIXTURES/glob_multi/leaf.sio" \
   "$FIXTURES/duplicate_order/left.sio" \
@@ -203,6 +205,8 @@ grep -Fq 'answer() + leaf::answer()' "$FIXTURES/qualified_shadow/main.sio" ||
   fail qualified_shadow_fixture_calls
 grep -Fq 'fn answer() -> i64' "$FIXTURES/qualified_shadow/main.sio" ||
   fail qualified_shadow_local_definition
+grep -Fq 'alpha::leaf::answer()' "$FIXTURES/qualified_nested/main.sio" ||
+  fail qualified_nested_fixture_call
 grep -Fq 'use leaf::*' "$FIXTURES/glob_multi/main.sio" || fail glob_fixture_import
 grep -Fq 'second()' "$FIXTURES/glob_multi/main.sio" || fail glob_fixture_second_call
 [[ "$(grep -Fc 'pub fn picked()' "$FIXTURES/duplicate_order/left.sio")" -eq 1 ]] || fail left_picked_missing
@@ -220,7 +224,7 @@ source_sha256="$({
   sha256sum "$LOWER" | awk '{print $1}'
 } | sha256sum | awk '{print $1}')"
 
-printf 'MADAROS_IMPORT_CALL_AUTHORITY_SOURCE_PASS binding=caller+local+defining+export+qualifier checker_adapter=collection-owned lowering=explicit-only+post-merge-exact global_unique_fallback=absent fixtures=selective-reject,qualified-call,qualified-shadow,duplicate-order-x2,glob-multi source_sha256=%s\n' "$source_sha256"
+printf 'MADAROS_IMPORT_CALL_AUTHORITY_SOURCE_PASS binding=caller+local+defining+export+qualifier checker_adapter=collection-owned lowering=explicit-only+post-merge-exact global_unique_fallback=absent fixtures=selective-reject,qualified-call,qualified-shadow,qualified-nested,duplicate-order-x2,glob-multi source_sha256=%s\n' "$source_sha256"
 
 if [[ "$MODE" == "source-only" ]]; then
   exit 0
@@ -351,6 +355,13 @@ grep -Eq 'qualified_rewrites=[1-9][0-9]*' "$WORK/qualified_shadow.compile.log" |
   fail qualified_shadow_ir_rewrite_count
 run_exit_code qualified_shadow 44
 
+compile_case qualified_nested "$FIXTURES/qualified_nested/main.sio"
+grep -Eq 'qualified_rewrites=[1-9][0-9]*' "$WORK/qualified_nested.compile.log" ||
+  fail qualified_nested_rewrite_receipt_missing
+[[ "$(grep -Fxc ' rewrites=1' "$WORK/qualified_nested.compile.log" || true)" -eq 1 ]] ||
+  fail qualified_nested_ir_rewrite_count
+run_exit_code qualified_nested 42
+
 compile_case duplicate_left_first "$FIXTURES/duplicate_order/left_first.sio"
 run_exit_code duplicate_left_first 42
 compile_case duplicate_right_first "$FIXTURES/duplicate_order/right_first.sio"
@@ -360,5 +371,5 @@ run_exit_code glob_multi 42
 
 final_compiler_sha256="$(sha256sum "$RAW_MADAROS" | awk '{print $1}')"
 [[ "$final_compiler_sha256" == "$compiler_sha256" ]] || fail compiler_changed_during_gate
-printf 'MADAROS_IMPORT_CALL_AUTHORITY_RUNTIME_PASS compiler_provenance=source-fresh compiler_sha256=%s source_sha256=%s selective_negative=E137+no-elf+pre-lowering qualified=42 qualified_shadow=44+ir-rebind1 duplicate_left_first=42 duplicate_right_first=42 glob_multi=42 closure_order=both compact=disabled fallback=none\n' \
+printf 'MADAROS_IMPORT_CALL_AUTHORITY_RUNTIME_PASS compiler_provenance=source-fresh compiler_sha256=%s source_sha256=%s selective_negative=E137+no-elf+pre-lowering qualified=42 qualified_shadow=44+ir-rebind1 qualified_nested=42+deep-path duplicate_left_first=42 duplicate_right_first=42 glob_multi=42 closure_order=both compact=disabled fallback=none\n' \
   "$compiler_sha256" "$source_sha256"
