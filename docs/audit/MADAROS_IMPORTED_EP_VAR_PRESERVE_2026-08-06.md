@@ -7,7 +7,6 @@ validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-imported-ep-var-preserve-2026-08-06
 -->
 
-
 # Madaros C1 — imported Epistemic variance preservation (2026-08-06)
 
 ## Claim
