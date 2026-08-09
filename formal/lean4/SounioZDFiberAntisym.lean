@@ -16367,4 +16367,35 @@ theorem starP_lift (n W : Nat) (hW : W < 2^(n+1)) (hW0 : W ≠ 0)
                 (ih l₀ y₀ hl₀ hy₀ e1 e3 e2 e4 (fun h => hly (by rw [h]))
                   (fun h => hcos (by rw [hxl, h])))
 
+/-! ### Tier 106 — the DESCENT, chained: the lift iterated to any level
+
+    `starP_lift` moves one level.  Iterating it is a plain induction, and this is it: given `(*)` at
+    a BOTTOM level `k+1` for a label that is still in the low half there, `(*)` holds at every level
+    above.  Nothing new is proved — the content is entirely in the step and the borders — but this is
+    the theorem that turns them into a descent, which is what the interior obligation actually needs.
+
+    The label hypothesis travels: `W < 2^(k+1)` gives `W < 2^(k+j+1)` for every `j` by monotonicity of
+    `2^·`, which is exactly the low-half guard each lift needs. -/
+
+theorem starP_descend (W k : Nat) (hW0 : W ≠ 0) (hWk : W < 2^(k+1))
+    (hbot : ∀ a b, a < 2^(k+1) → b < 2^(k+1) → a ≠ 0 → b ≠ 0 → a ≠ W → b ≠ W → a ≠ b →
+              b ≠ a ^^^ W → starP (k+1) a b W) :
+    ∀ j a b, a < 2^(k+1+j) → b < 2^(k+1+j) → a ≠ 0 → b ≠ 0 → a ≠ W → b ≠ W → a ≠ b →
+      b ≠ a ^^^ W → starP (k+1+j) a b W := by
+  intro j
+  induction j with
+  | zero => exact hbot
+  | succ j ihj =>
+      have hmono : (2:Nat)^(k+1) ≤ 2^(k+j+1) := Nat.pow_le_pow_right (by omega) (by omega)
+      have hWj : W < 2^(k+j+1) := by omega
+      intro a b ha hb ha0 hb0 haW hbW hab hcos
+      have hlvl : k + 1 + (j+1) = (k+j) + 2 := by omega
+      have hlvl' : k + 1 + j = (k+j) + 1 := by omega
+      rw [hlvl]
+      refine starP_lift (k+j) W (by omega) hW0 ?_ a b
+        (by rw [← hlvl]; exact ha) (by rw [← hlvl]; exact hb) ha0 hb0 haW hbW hab hcos
+      intro x z hx hz hx0 hz0 hxW hzW hxz hxcos
+      have := ihj x z (by rw [hlvl']; exact hx) (by rw [hlvl']; exact hz) hx0 hz0 hxW hzW hxz hxcos
+      rwa [hlvl'] at this
+
 end SounioZDFiberAntisym

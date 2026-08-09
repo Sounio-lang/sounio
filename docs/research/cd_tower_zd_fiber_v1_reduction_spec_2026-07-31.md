@@ -6375,3 +6375,24 @@ UNANSWERED.
 **The interior obligation now reduces to the BOTTOM and nothing else:** chain `starP_lift` by
 induction down to the level where `W` leaves the low half, and supply the two bridges — `P1 = P3 ↔
 starP`, and `octCheck = true → ∀`-form. Both bridges are mechanical; the mathematics is done.
+
+### §57.66 — Tier 106: the descent, chained
+
+`starP_lift` moves one level; `starP_descend` iterates it. Given `(*)` at a bottom level `k+1` for a
+label still in the low half there, `(*)` holds at every level above. Nothing new is proved — the
+content is entirely in the step and the borders — but this is the theorem that turns them into a
+DESCENT, which is what the interior obligation needs.
+
+The label hypothesis travels: `W < 2^(k+1)` gives `W < 2^(k+j+1)` for every `j` by monotonicity of
+`2^·`, which is exactly the low-half guard each lift requires; it does not need re-establishing.
+
+⚠ M1 DEGRADED, and the reason is new and worth recording. The hosted providers were silent again,
+so I pointed the fan-out at the LOCAL models that were alive (`local-think`, `local-code` on the
+gateway) — and they returned empty too, on a prompt carrying the whole Tier 105 proof. A short-form
+question to `local-think` also exceeded the call budget. The local tier answers 5-token probes
+instantly but not long mathematical prompts; **a local fan-out is not a drop-in replacement for the
+hosted one at this input size**, and the review of Tiers 105 and 106 remains unperformed.
+
+**The interior obligation is now exactly two mechanical bridges away:** `P1 = P3 ↔ starP` on the
+interior (the `R_*` reduction of §57.57, derived on paper and never formalised), and
+`octCheck = true → ∀`-form. Everything mathematical — step, borders, lift, descent — is proved.
