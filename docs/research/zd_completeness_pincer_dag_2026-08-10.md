@@ -298,3 +298,36 @@ sums (two already theorems). See §57.76.
 missing. `quad_level_transfer` assembles `Q(m+1) = 16H − 28` from it plus Tiers 114-115, with
 `B = −Q + 8H − 12` as an explicit hypothesis — the one open obligation. `Q(m)` cancels, so no base
 case enters above the level where the label first exists. See §57.77.
+
+### Step 9 — Tier 117: T2 loses its switching (`D`-pin)
+
+`sumLtI2_sigRow` + `weight2_D_pinned` (kernel-clean): the weight-2 orthant expands to four walks in
+`X = tauW ⊙ P3` and `P3`, all free of `sigRow`:
+
+    T2 = Σ X P3 X − 2 Σ X(·,W) P3(W,·) X − 2 Σ X P3(·,W) X(W,·) + 4 Σ X(·,W) P3(W,W) X(W,·)
+
+That is the T2 twin of `weight3_switch` + the first half of `weight3_pinned`. Remaining for the T2
+leg: the carrier step `X = P3 + 2Π − 4 e₀e_Wᵀ` (to reach the Tier 94 form in `s3`/`cp2`/seam walks)
+and the evaluation of `(M³)_WW`.
+
+#### DAG after Tier 117
+
+    E1, E2, E6, E8, E4a               PROVED
+    E4b  T3 / Q                       chain to B = −Q+8H−12 as hypothesis (Tiers 110–116)
+    E4b  T2                           constant walks (113) + D-pin (117) PROVED;
+                                      open: carrier expansion + (M³)_WW
+    E4b  T1                           MEASURED closed form
+    E5, E3                            open
+
+### Step 9 — B is proved; the T3 leg is closed
+
+`blockB_value`: `B = −Q + 8H − 12`, every label. It discharges Tier 116's hypothesis, giving
+`quad_level_value` (`Q(m+1) = 16H − 28`, no base case — `Q(m)` cancels) and `weight3_closed`
+(`T3 = s3 + 48H − 176`), which is §57.69's measured form for the weight-3 orthant, now a theorem.
+
+    E4b, T3 leg      PROVED end to end — no measured step in the chain
+    E4b, T1/T2 legs  open (Tier 93 reduction in hand; concurrent lane on T2)
+    Q at top level   open — labels whose top bit equals the level; the transfer does not reach them
+    E5, E3           open
+
+See §57.78.

@@ -6834,3 +6834,60 @@ hypothesis:
 giving `Q(m+1) = 2Q + 2B − 4 = 16H − 28`, with `Q(m)` cancelling. Every row but the last is a
 theorem, and `ρ_W = H − 4` (measured) is the object the last one turns on — together with its
 transpose, which is `H − 2` and therefore **a different object**, measured today at `m = 3..6`.
+
+### §57.78 — Tiers 117–119: `B` is proved, and the `T3` leg has no measured step left
+
+**`B = −Q + 8H − 12`** (`blockB_value`, kernel-clean, every label, maximal seam included). With
+Tier 116's split that discharges the last hypothesis, so:
+
+    quad_level_value:  Q(m+1) = 16·2^(m+1) − 28,   every W < 2^(m+1), W ≠ 0
+    weight3_closed:    T3 = s3 + 48·2^(m+2) − 176  at level m+1, every label existing at level m
+
+The second is §57.69's measured closed form for the weight-3 orthant, now a theorem — and off the
+maximal seam *by construction*, since at level `m+1` the seam is `2^(m+1)` and the hypothesis is
+`W < 2^(m+1)`. `Q(m)` cancels in the transfer, so no base case is needed.
+
+#### The three single sums (Tier 117), and where they came from
+
+None needed new machinery. Two reductions carry everything — `R_ul`/`R_lu` to drop a level and
+`A4_sub`/`A4_sub'` to move an argument:
+
+    P3 0 c W m = −σ(W, c)        at level m+1, for c ≠ 0      P3_row0_reduce
+    P3 c W W m = −σ(c ⊕ W, W)    at level m+1, every c        P3_colW_reduce
+
+so each product is two level-`(m+1)` cocycle entries, and one `A4_sub` plus one `A4_sub'` makes it
+a square: `σ(W,x)·σ(x⊕W,W) = 1` off `x ∈ {0,W}` (`sigma_seam_pair`). Hence
+
+| law | value | sum |
+|---|---|---|
+| `P3(0,c)·P3(W,c)` | `1` off `{0,W}`, `−1` on it | `H − 4` |
+| `P3(0,b)·P3(b,W)` | `1` off `b = W`, `−1` at it | `H − 2` |
+| `P3(0,b)·P3(0,b⊕W)` | `−1` off `{0,W}` | weighted: `2 − H` |
+
+The third — **the row-`0` vector anti-correlates along the coset shift** — was the one least
+expected, and it is *not* the fibre flip: `core_P3`'s hypothesis `y ⊕ L_lo ≠ 0` fails exactly at the
+seam column `y = W`. It is `A4_sub'` applied inside row `W` one level down.
+
+#### The `B` assembly (Tier 119)
+
+`B`'s weight is `−ε(b)σ(b)σ(c)τ(b,c)`; `tauW_carrier` takes the coset flip off, leaving a main term
+and two isolated points,
+
+    B(b,c) = −(ε(b)σ(b))·(σ(c)·P3(b,c)·u_b u_c) + [c = b⊕W]·A(b) + [c = W][b = 0]·4
+
+with `A(b)` the coset sum's summand. Summing `c` then `b`, pinned at `0` (Tier 110) and at `W`
+(Tier 118), lands on the four sums and gives `−(Q − 6H + 12) − 2(2−H) + 4 = −Q + 8H − 12`.
+
+#### The chain, with nothing measured in it
+
+    weight3_switch (91) → three pins (110) → walk2_value (111) → quadratic form (112)
+      → block weights (114–115) → the split (116) → single sums (117–118) → B (119)
+      → Q(m+1) = 16H − 28 → T3 = s3 + 48H − 176
+
+Every arrow is a theorem. §57.75's "six closed forms plus a base-case family" is dissolved: there
+was no base case, because `Q(m)` cancels, and there were never six forms — only `B` and `D`, both
+of which are `Q` plus a constant.
+
+**Still open for E4b:** the `T1` and `T2` legs (Tier 93's reduction is in hand, and the concurrent
+lane is on `T2`), and `Q` at the top level — labels with top bit exactly `m`, which the transfer
+does not reach. The `T3` closed form above is stated exactly for the labels it does reach.

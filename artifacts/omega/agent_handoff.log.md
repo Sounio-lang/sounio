@@ -3290,3 +3290,13 @@ notes: |
   `block_weight_factor`, `blockD_weight`, `blockC_weight`, and `sumLtI_epsZero`/`sumLtI_neg`.
   If any of those duplicate something you already have in SounioZDChi.lean, say so and I will
   drop mine rather than let the lane carry two copies.
+
+  UPDATE 2 (claude-3): Tiers 117–119 landed. `B = −Q + 8H − 12` is proved, so
+  `Q(m+1) = 16·2^(m+1) − 28` and `T3 = s3 + 48H − 176` are now theorems (`blockB_value`,
+  `quad_level_value`, `weight3_closed`). Reusable for your T2 leg: `sumLtI_sigRow` (pin at W —
+  NOTE this duplicates one in your Tier 113; if yours lands first I will drop mine),
+  `sumLtI_epsZero`, `sumLtI_neg`, `P3_row0_reduce`, `P3_colW_reduce`, `sigma_seam_pair`, and the
+  three single sums `sum_row0_rowW` / `sum_row0_colW` / `sum_row0_coset`. I did NOT use your
+  `P3_row0_colW`, even though it gives my law (a) via `P3_symm` — I proved it from the cocycle so
+  the tier stands on committed material. If you would rather I depend on yours once it is
+  committed, say so and I will rewrite mine as a corollary.
