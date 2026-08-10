@@ -5,6 +5,7 @@
 //
 // Methods return (Checker, ...) to thread state through value semantics.
 
+use io::env::{read_env}
 use check::refinement::*
 use check::types::*
 use check::defs::*
@@ -40,22 +41,59 @@ use ir::ir::*
 // Visibility / module-path helpers
 // ============================================================
 
-fn string_list_eq_sl(a: StringList, b: StringList) -> bool with Mut, Panic, Div {
+// Head-only segment comparison. Touches NO Option<Box<T>> field, which is the whole point:
+// reading `tail` — even as `tail == None` — is a read through a Box-typed struct field, and
+// Madaros miscompiles those (StructFieldEntry at ir/ir.sio:2175 carries no pointer metadata,
+// so field access computes base+off+off, correct for an inline field and wrong for a Box).
+// The note that used to sit on the tail comparison below tried to dodge this by replacing
+// `match` with `== None`; that does not help, because the read itself is the defect.
+fn string_list_head_eq_sl(a: StringList, b: StringList) -> bool with Mut, Panic, Div {
     if a.head_len != b.head_len { return false }
     var i: i64 = 0
     while i < a.head_len && i < 128 {
         if a.head_buf[i as usize] != b.head_buf[i as usize] { return false }
         i = i + 1
     }
-    // Avoid any Option<Box<T>> matching inside *mut callers: bin/souc miscompiles it.
-    if a.tail == None && b.tail == None { return true }
-    if a.tail == None || b.tail == None { return false }
-    string_list_eq_sl(*a.tail, *b.tail)
+    true
+}
+
+fn string_list_eq_sl(a: StringList, b: StringList) -> bool with Mut, Panic, Div {
+    if !string_list_head_eq_sl(a, b) { return false }
+    // Reached only for genuinely multi-segment paths. Module identity is single-segment
+    // (compiler/module_loader.sio file_path_to_module_path returns seg_count 1), so
+    // ast_path_eq below never routes here today.
+    // `*a.tail` unwraps the Option and stops at the Box, so it types as Box and
+    // not StringList. The tree's working idiom for a boxed tail is to match the
+    // Option and deref the Box the match binds — see substitute_type_param_list
+    // (check.sio:770) and mangle_append_args (:593).
+    match a.tail {
+        None => {
+            match b.tail {
+                None => true
+                Some(_) => false
+            }
+        }
+        Some(at) => {
+            match b.tail {
+                None => false
+                Some(bt) => string_list_eq_sl(*at, *bt)
+            }
+        }
+    }
 }
 
 fn ast_path_eq(a: AstPath, b: AstPath) -> bool with Mut, Panic, Div {
     if a.seg_count != b.seg_count { return false }
     if a.seg_count == 0 { return true }
+    // seg_count 1 means the tail carries nothing to compare, so compare heads and return.
+    // This is not an optimisation: it is what stops the ONLY caller of ast_path_eq
+    // (visibility_allows_access, check.sio:90) from crashing the compiler. Two modules whose
+    // first segment bytes are EQUAL used to fall through to the tail walk above, and reading
+    // that Option<Box<StringList>> field SIGSEGVs with no diagnostic — reproduced with a
+    // deterministic 3-file witness: colliding basenames plus a private cross-module access,
+    // rc=139. Making the callee public (short-circuits at :6574) or the basenames distinct
+    // (byte loop exits early) both avoid the read, which is why the crash stayed hidden.
+    if a.seg_count == 1 { return string_list_head_eq_sl(a.segments, b.segments) }
     string_list_eq_sl(a.segments, b.segments)
 }
 
@@ -74,9 +112,19 @@ fn ast_path_is_prefix(ancestor: AstPath, descendant: AstPath) -> bool with Mut, 
         }
         i = i + 1
         if i < ancestor.seg_count {
-            if a_segs.tail == None || d_segs.tail == None { return false }
-            a_segs = *a_segs.tail
-            d_segs = *d_segs.tail
+            // Same as string_list_eq_sl: match the Option, deref the Box it binds.
+            match a_segs.tail {
+                None => return false
+                Some(at) => {
+                    match d_segs.tail {
+                        None => return false
+                        Some(dt) => {
+                            a_segs = *at
+                            d_segs = *dt
+                        }
+                    }
+                }
+            }
         }
     }
     true
@@ -236,6 +284,20 @@ pub struct Checker {
     current_impl_type: TypeEntry,
     current_effects: [i64; 8],
     current_effect_count: i64,
+    // Which function is being checked. current_module was already tracked (it is
+    // what makes E175 fire across modules); the FUNCTION was not, so E035 could
+    // name neither, and in a multi-module check its span -- which starts at 0 and
+    // carries no module identity -- pointed into whichever buffer the reader
+    // guessed. Two of them were attributed to the wrong file that way.
+    current_fn_name: Name,
+    // Effect inference (§7.2.1) publishes the inferred set into the signature of the function being
+    // checked, which means knowing WHICH signature that is. The name is stored beside the index as
+    // a GUARD: at a set-site this pair is not updated at, the index would still point at an earlier
+    // function and writing there would corrupt an unrelated signature silently. The write-back
+    // checks the name first and skips on mismatch, so a missed site costs lost propagation rather
+    // than a wrong effect set. -1 disables the write outright.
+    current_sig_id: i64,
+    current_sig_name: Name,
     multitest_count: i64,
     multitest_corrected: bool,
     last_literal_int: i64,
@@ -861,7 +923,7 @@ fn call_expr_type_args(e: Expr) -> Option<Box<TypeExprList> > with Mut, Panic, D
     }
 }
 
-fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
+pub fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
     Checker {
         env: type_env_new(),
         borrows: borrow_env_new(),
@@ -926,6 +988,12 @@ fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
         current_impl_type: ty_error(),
         current_effects: [0; 8],
         current_effect_count: 0,
+        current_fn_name: empty_name(),
+        // -1 disables the effect-inference write-back until a signature is
+        // entered, which is the safe default: a stale id would widen the wrong
+        // function's effects.
+        current_sig_id: 0 - 1,
+        current_sig_name: empty_name(),
         multitest_count: 0,
         multitest_corrected: false,
         last_literal_int: 0,
@@ -959,7 +1027,7 @@ fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
     }
 }
 
-fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
+pub fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     (*raw).env = type_env_new()
     (*raw).borrows = borrow_env_new()
     (*raw).units = register_builtin_units(unit_registry_new())
@@ -1023,6 +1091,8 @@ fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     (*raw).current_impl_type = ty_error()
     (*raw).current_effects = [0; 8]
     (*raw).current_effect_count = 0
+    (*raw).current_sig_id = 0 - 1
+    (*raw).current_sig_name = empty_name()
     (*raw).multitest_count = 0
     (*raw).multitest_corrected = false
     (*raw).last_literal_int = 0
@@ -1124,6 +1194,8 @@ fn checker_store_from_value(dst: *mut Checker, src: Checker) with Mut, Panic, Di
     (*dst).current_impl_type = src.current_impl_type
     (*dst).current_effects = src.current_effects
     (*dst).current_effect_count = src.current_effect_count
+    (*dst).current_sig_id = src.current_sig_id
+    (*dst).current_sig_name = src.current_sig_name
     (*dst).multitest_count = src.multitest_count
     (*dst).multitest_corrected = src.multitest_corrected
     (*dst).last_literal_int = src.last_literal_int
@@ -1231,7 +1303,30 @@ fn checker_lower_named_type_mut(c: *mut Checker, path: AstPath) -> TypeEntry wit
         ty_wide_int(name_wide_int_bits(name), (name.buf[0] as i64) == 105)
     } else {
         let bound_ty = (*c).env.lookup(name)
-        if bound_ty.kind != TypeKind::TyError || bound_ty.ontology_id >= 0 {
+        // A type-position name resolves against the VALUE environment first so
+        // that type aliases and ontology bindings win. But `use m::{S}` binds
+        // every imported name here as TyUnknown — see
+        // checker_collect_use_item_inplace, whose comment calls binding an
+        // extra name "harmless if unused". It is not harmless: an imported
+        // STRUCT name lands in env carrying no information, and this lookup
+        // then returned that TyUnknown in place of the struct.
+        //
+        // The whole of it: single-module code has no `use`, so nothing shadows
+        // and `ty_named` is reached; the moment the same file is compiled as
+        // part of a closure, every annotation, parameter and return type naming
+        // an imported struct silently became unknown, every field access on one
+        // read `()`, and the constructors written `var out: T` had nothing left
+        // to take a type from. Struct literals kept working because they go to
+        // struct_table_find directly and never come through here, which is why
+        // this looked like a let/var bug for hours.
+        //
+        // A binding that carries no information must not outrank a type that
+        // does.
+        let bound_is_informative = bound_ty.kind != TypeKind::TyError
+            && !(bound_ty.kind == TypeKind::TyUnknown
+                 && (struct_table_find((*c).structs, name) >= 0
+                     || enum_table_find((*c).enums, name) >= 0))
+        if bound_is_informative || bound_ty.ontology_id >= 0 {
             bound_ty
         } else {
             ty_named(name)
@@ -1748,6 +1843,7 @@ fn checker_lower_fn_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry wi
         effect_count: eff_pair.count,
         is_kernel: false,
         is_epistemic_kernel: false,
+        is_extern: false,
         is_linear_closure: false,
         linear_capture_count: 0,
         epistemic_epsilon: 0.0 - 1.0,
@@ -2008,7 +2104,7 @@ fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with 
     lowered
 }
 
-fn checker_collect_items_mut(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
+pub fn checker_collect_items_mut(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
     // Route through the true *mut collect spine (ItemFn handled in place,
     // other item kinds bridge by value). The crash lived here: the by-value
     // (*c).collect_items(items) copied the 164KB Checker into `self` and
@@ -2016,7 +2112,7 @@ fn checker_collect_items_mut(c: *mut Checker, items: Option<Box<ItemList> >) wit
     checker_collect_items_inplace(c, items)
 }
 
-fn checker_check_items_mut(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
+pub fn checker_check_items_mut(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
     checker_check_items_inplace(c, items)
 }
 
@@ -2855,7 +2951,7 @@ fn checker_prove_robust_names_mut(c: *mut Checker, contest_name: Name, policy_na
 // `checker_check_expr_mut` (a single copy, off the hello.sio path).
 // ============================================================
 
-fn checker_report_error_at_inplace(c: *mut Checker, span: Span, code: i64, msg_a: i64, msg_b: i64, msg_c: i64) with Mut, IO, Panic, Div {
+fn checker_report_error_at_inplace(c: *mut Checker, span: Span, code: i64, msg_a: i64, msg_b: i64, msg_c: i64) with Mut, IO, Panic, Div, Alloc {
     (*c).error_count = (*c).error_count + 1
     (*c).had_error = true
     (*c).diag_emitted = true
@@ -2864,6 +2960,16 @@ fn checker_report_error_at_inplace(c: *mut Checker, span: Span, code: i64, msg_a
     if code < 10 { print("0") }
     print_int(code)
     print("]")
+    // WHERE, for the third time and the same reason as E035 and E002. This is
+    // the widest reporter in the checker -- E175 among many others -- and it
+    // printed a bare span. On the self-hosted sources that span is a BUNDLE
+    // offset with start pinned at 0, so a reader is handed "at 0..79850" and
+    // cannot open a single one of the 2 269 E175s that lean.sio produces. The
+    // module and the function are already on the Checker; they cost two prints.
+    print(" in ")
+    e035_print_module_path((*c).current_module)
+    print("::")
+    e035_print_ident((*c).current_fn_name)
     if span.start > 0 || span.end > 0 {
         print(" at ")
         print_int(span.start)
@@ -2877,6 +2983,75 @@ fn checker_report_error_at_inplace(c: *mut Checker, span: Span, code: i64, msg_a
     print_error_note(code)
 }
 
+// E175 says a function is private in its defining module without saying WHICH
+// function or WHOSE module, which makes it unactionable at scale and, worse,
+// indistinguishable from the known false positive: two modules each owning a
+// private function of the same name, where name-only lookup resolves the call
+// to the wrong table entry (tests/compiler/madaros_visibility_context). The
+// callee's path plus both module ids separate the two cases on sight -- equal
+// paths with different ids is the lookup bug, different paths is a real
+// violation.
+fn checker_report_private_fn_inplace(c: *mut Checker, span: Span, sig_id: i64) with Mut, IO, Panic, Div, Alloc {
+    checker_report_error_at_inplace(c, span, 175, 0, 0, 0)
+    let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
+    print("   = callee ")
+    e035_print_module_path(sig.defining_module)
+    print("::")
+    e035_print_ident(sig.name)
+    print("\n   = defining module id ")
+    print_int(sig.defining_module_id)
+    print(", calling from module id ")
+    print_int((*c).current_module_id)
+    print("\n")
+}
+
+// E177 is E175 one wall further in: "enum constructor is private in its defining
+// module", 820 of them on lean.sio, and until now none said which enum or whose
+// module. It also has a second ambiguity E175 does not, because a path
+// expression reaches an enum two ways -- by the enum's own name, or by a bare
+// variant name that resolves back to it. Printing what was WRITTEN alongside
+// what it RESOLVED TO separates "you named a private enum" from "you named a
+// variant whose enum happens to be private", which are different fixes.
+fn checker_report_private_enum_inplace(c: *mut Checker, span: Span, enum_idx: i64, referenced: Name) with Mut, IO, Panic, Div, Alloc {
+    checker_report_error_at_inplace(c, span, 177, 0, 0, 0)
+    let ei = enum_table_get((*c).enums, enum_idx)
+    print("   = enum ")
+    e035_print_module_path(ei.defining_module)
+    print("::")
+    e035_print_ident(ei.name)
+    print("\n   = written as ")
+    e035_print_ident(referenced)
+    print("\n   = defining module id ")
+    print_int(ei.defining_module_id)
+    print(", used from module id ")
+    print_int((*c).current_module_id)
+    print("\n")
+}
+
+// E012 said "this type has no field named" and then named neither the field nor
+// the type, which on a bundle span leaves the reader with nothing at all. Both
+// are in scope at every site that can say them: the field is the accessor's own
+// name, the owner is the base type already computed to reach the check.
+fn checker_report_no_field_inplace(c: *mut Checker, span: Span, field: Name, owner: TypeEntry) with Mut, IO, Panic, Div, Alloc {
+    checker_report_error_at_inplace(c, span, 12, 0, 0, 0)
+    print("   = no field ")
+    e035_print_ident(field)
+    print(" on type ")
+    print_type_name(owner)
+    print("\n")
+}
+
+// E137 said "use of undeclared variable" and then did not say which one. Both
+// emission sites hold the identifier that failed to resolve, and on a bundle
+// span the name is the only thing that lets a reader find it at all. Same
+// omission as E175, E177 and E012 had, same fix.
+fn checker_report_undeclared_inplace(c: *mut Checker, span: Span, ident: Name) with Mut, IO, Panic, Div, Alloc {
+    checker_report_error_at_inplace(c, span, 137, 0, 0, 0)
+    print("   = name ")
+    e035_print_ident(ident)
+    print("\n")
+}
+
 fn checker_report_mismatch_inplace(c: *mut Checker, span: Span, code: i64, expected: TypeEntry, got: TypeEntry) with Mut, IO, Panic, Div, Alloc {
     (*c).error_count = (*c).error_count + 1
     (*c).had_error = true
@@ -2886,6 +3061,16 @@ fn checker_report_mismatch_inplace(c: *mut Checker, span: Span, code: i64, expec
     if code < 10 { print("0") }
     print_int(code)
     print("]")
+    // WHERE, for the same reason E035 needed it. This reporter carries a Span,
+    // but for assignment statements that span is unusable: every E002 in the
+    // driver's closure came out exactly 32 bytes wide and starting mid-token, so
+    // it indexes nothing a reader can open. Module and function are on the
+    // Checker already -- current_module for E175, current_fn_name added with the
+    // E035 fix -- and cost two prints.
+    print(" in ")
+    e035_print_module_path((*c).current_module)
+    print("::")
+    e035_print_ident((*c).current_fn_name)
     if span.start > 0 || span.end > 0 {
         print(" at ")
         print_int(span.start)
@@ -3140,6 +3325,7 @@ fn checker_collect_fn_def_inplace(c: *mut Checker, opt: Option<Box<FnDef> >, vis
                 effect_count: kernel_effect_count,
                 is_kernel: is_kernel_fn,
                 is_epistemic_kernel: has_epistemic_param,
+                is_extern: (*fd).is_extern,
                 is_linear_closure: false,
                 linear_capture_count: 0,
                 epistemic_epsilon: 0.0 - 1.0,
@@ -3298,7 +3484,7 @@ fn checker_collect_known_module_backing_imports_inplace(c: *mut Checker, path: A
     }
 }
 
-fn checker_collect_use_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Div {
+fn checker_collect_use_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Div, Alloc {
     checker_collect_import_item_list_inplace(c, item.use_items)
     // Path-form named import `use module::symbol` (no braces, no glob): the
     // parser leaves the symbol as the last path segment with use_items=None.
@@ -3335,6 +3521,23 @@ fn checker_collect_runtime_builtins_inplace(c: *mut Checker) with Mut, Panic, Di
     // visibility-preflight pass even though the codegen lane would resolve
     // the call correctly. See docs/audit/MADAROS_MULTIMODULE_PRINT_IMPORT_BUGS_2026-07-13.md
     // defect 2 for the original report on print_f64.
+    // Raw syscall + arena/pool/mmap runtime intrinsics. Same defect the print_f64
+    // block above records, one layer down: native codegen resolves these (they
+    // are emitted by codegen_x86_linux.sio, and io/file_write.sio + lsp/server.sio
+    // call syscall6 directly), but the checker never had them bound, so every
+    // multi-module program that reaches them tripped E137 "use of undeclared
+    // variable" on a name that is not a variable at all. Nine of the twenty-nine
+    // errors on native_compile_driver.sio were exactly this, which is what made
+    // the whole driver-self-compile chain — five umbrella gates — unbuildable.
+    checker_bind_import_unknown_inplace(c, make_name("syscall6"))
+    checker_bind_import_unknown_inplace(c, make_name("__arena_mark"))
+    checker_bind_import_unknown_inplace(c, make_name("__arena_reset"))
+    checker_bind_import_unknown_inplace(c, make_name("__arena_refill_bytes"))
+    checker_bind_import_unknown_inplace(c, make_name("__arena_unmap_bytes"))
+    checker_bind_import_unknown_inplace(c, make_name("__pool_mark"))
+    checker_bind_import_unknown_inplace(c, make_name("__pool_refill_bytes"))
+    checker_bind_import_unknown_inplace(c, make_name("__rtmmap_count"))
+    checker_bind_import_unknown_inplace(c, make_name("__rtmmap_bytes"))
     checker_bind_import_unknown_inplace(c, make_name("print_f64"))
     checker_bind_import_unknown_inplace(c, make_name("sqrt"))
     checker_bind_import_unknown_inplace(c, make_name("exp"))
@@ -3354,6 +3557,7 @@ fn checker_collect_runtime_builtins_inplace(c: *mut Checker) with Mut, Panic, Di
     checker_bind_import_unknown_inplace(c, make_name("panic"))
     checker_bind_import_unknown_inplace(c, make_name("exit"))
     checker_bind_import_unknown_inplace(c, make_name("variance_of"))
+    checker_bind_import_unknown_inplace(c, make_name("sensitivity_of"))
     checker_bind_import_unknown_inplace(c, make_name("uncertainty_of"))
     checker_bind_import_unknown_inplace(c, make_name("hessian_of"))
     checker_bind_import_unknown_inplace(c, make_name("chain_to_knowledge_into"))
@@ -3689,7 +3893,7 @@ fn checker_collect_type_alias_inplace(c: *mut Checker, name: Name, ty_opt: Optio
     }
 }
 
-fn checker_collect_items_inplace(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
+pub fn checker_collect_items_inplace(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
     // Stash the program items so the deep call-arg compat path can resolve
     // ontology subclass relations by name (E009 subsumption). Single shallow
     // pointer write — persists where deep ontology_kernel mutation does not.
@@ -3968,12 +4172,22 @@ fn checker_check_impl_method_inplace(c: *mut Checker, item: Item) with Mut, Pani
             // current_effects empty and firing a spurious E035 on the merged/imported
             // lane. The semantic lookup disambiguates by TypeKind (TyUnknown vs TyI64),
             // so each impl body sees ITS OWN declared effects.
+            (*c).current_fn_name = (*fd).name
             let sig_id = fn_sig_table_find_method_semantic((*c).fn_sigs, (*c).current_impl_type, (*fd).name)
             if sig_id >= 0 {
                 let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
                 (*c).current_return_type = sig.return_type
                 (*c).current_effects = sig.effects
                 (*c).current_effect_count = sig.effect_count
+                (*c).current_sig_id = sig_id
+                (*c).current_sig_name = sig.name
+            } else {
+                // An imported named impl can remain unresolved while its own body
+                // is checked. Its declaration is nevertheless authoritative for
+                // effect checking; do not silently treat that body as effect-free.
+                let declared_effects = checker_extract_effects_mut(c, (*fd).effects)
+                (*c).current_effects = declared_effects.effects
+                (*c).current_effect_count = declared_effects.count
             }
             (*c).multitest_count = 0
             (*c).multitest_corrected = false
@@ -3995,6 +4209,7 @@ fn checker_check_impl_method_inplace(c: *mut Checker, item: Item) with Mut, Pani
             (*c).borrows = (*c).borrows.pop_scope()
             (*c).env = (*c).env.pop_scope()
             (*c).current_return_type = ty_unit()
+            (*c).current_sig_id = 0 - 1
             (*c).current_effects = saved_effects
             (*c).current_effect_count = saved_effect_count
             (*c).multitest_count = saved_multitest_count
@@ -4077,6 +4292,7 @@ fn checker_collect_impl_method_inplace(c: *mut Checker, item: Item, type_name: N
                 effect_count: fn_effect_count,
                 is_kernel: false,
                 is_epistemic_kernel: false,
+                is_extern: false,
                 is_linear_closure: false,
                 linear_capture_count: 0,
                 epistemic_epsilon: 0.0 - 1.0,
@@ -4267,12 +4483,15 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             // return-type path until the expr spine lands — so the conservative
             // proven path ships. Revisit direct-read with a real return-mismatch
             // gate once `return <expr>` no longer crashes the check spine.
+            (*c).current_fn_name = (*fd).name
             let sig_id = fn_sig_table_find((*c).fn_sigs, (*fd).name)
             if sig_id >= 0 {
                 let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
                 (*c).current_return_type = sig.return_type
                 (*c).current_effects = sig.effects
                 (*c).current_effect_count = sig.effect_count
+                (*c).current_sig_id = sig_id
+                (*c).current_sig_name = sig.name
                 // Per-call-site recording: note a `with Chaotic` (effect id 22) function.
                 if has_effect_id(sig.effects, sig.effect_count, 22) { equiv_set_chaotic() }
                 // Loud-failure guard (#187): warn on oversized by-value return.
@@ -4288,6 +4507,7 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             match (*fd).body.stmts {
                 None => {
                     (*c).current_return_type = ty_unit()
+                    (*c).current_sig_id = 0 - 1
                     (*c).current_effects = saved_effects
                     (*c).current_effect_count = saved_effect_count
                     (*c).multitest_count = saved_multitest_count
@@ -4320,6 +4540,7 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             (*c).borrows = (*c).borrows.pop_scope()
             (*c).env = (*c).env.pop_scope()
             (*c).current_return_type = ty_unit()
+            (*c).current_sig_id = 0 - 1
             (*c).current_effects = saved_effects
             (*c).current_effect_count = saved_effect_count
             (*c).multitest_count = saved_multitest_count
@@ -4380,6 +4601,58 @@ fn checker_place_root_local(c: *mut Checker, place: Expr) -> bool with Mut, Pani
     } else {
         false
     }
+}
+
+// True when an assignment target writes THROUGH an exclusive reference:
+//
+//     *p = v        p: &!T
+//     p.f = v       p: &!S
+//     p[i] = v      p: &![T; N] / &![T]
+//
+// Walks the place to its root binding — same shape as checker_place_root_local
+// above — and asks whether that binding is an exclusive reference.
+//
+// Only this shape generates `Mut` (#1488). The two authorities on what `Mut`
+// means disagree about a plain local `var`: docs/guide/LLM_PROGRAMMING_GUIDE.md:230
+// says "mutating `&!` refs or arrays" (narrow, what Madaros implements) and
+// docs/spec/LANGUAGE_SPECIFICATION.md:965 says "reading/writing mutable variables"
+// (broad, what lean_single implements). They AGREE about a write through an
+// exclusive reference. Generating the effect only where both readings agree closes
+// the unsound case without pre-empting an operator ruling on the other — and the
+// broad reading is viral over every loop counter in 1113 stdlib files, so adopting
+// it is a language decision, not a compiler fix.
+//
+// Conservative by construction: an unknown root yields false, so this can add a
+// required effect but never remove one, and cannot false-reject a program whose
+// place shape it does not recognise.
+fn checker_place_excl_ref_root(c: *mut Checker, place: Expr, depth: i64) -> bool with Mut, Panic, Div, Alloc, IO {
+    if depth > 16 { return false }
+    if place.kind == ExprKind::ExprIdent {
+        if !(*c).env.has_binding(place.name) { return false }
+        let root_ty = (*c).env.lookup(place.name)
+        // TyRefMut only — deliberately NOT TySliceMut.
+        //
+        // Measured 2026-07-26: lean_single requires Mut for a write through
+        // `&!T`, `&!S` and `&![T; N]`, and does NOT require it for a write
+        // through a slice `&![T]`. Including TySliceMut here made Madaros
+        // stricter than the seed and rejected existing intentional code —
+        // `kernel fn vec_add_in_place(n: i64, a: &![f64], …) with GPU` writes
+        // `a[tid] = …` and declares only GPU.
+        //
+        // Whether a slice write is Mut is a language question of the same kind
+        // as the local-`var` one, and answering it unilaterally inside a fix for
+        // a different defect would be drift. This closes the shapes on which
+        // both engines already agree; the slice case is left open and recorded.
+        return root_ty.kind == TypeKind::TyRefMut
+    }
+    if place.kind == ExprKind::ExprFieldAccess
+        || place.kind == ExprKind::ExprIndex
+        || place.kind == ExprKind::ExprUnary {
+        let base = expr_opt_get(place.left)
+        if base == 0 as *mut Expr { return false }
+        return checker_place_excl_ref_root(c, *base, depth + 1)
+    }
+    false
 }
 
 fn checker_expr_provenance(c: *mut Checker, e: Expr) -> i64 with Mut, Panic, Div, Alloc, IO {
@@ -4779,7 +5052,7 @@ fn checker_check_path_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     if enum_idx >= 0 {
         let ei = enum_table_get((*c).enums, enum_idx)
         if (*c).enforce_visibility && !checker_enum_visible_inplace(c, enum_idx) {
-            checker_report_error_at_inplace(c, e.span, 177, 0, 0, 0)
+            checker_report_private_enum_inplace(c, e.span, enum_idx, first_name)
         }
         ty_named(first_name)
     } else {
@@ -4788,7 +5061,7 @@ fn checker_check_path_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         if variant_enum_idx >= 0 {
             let ei = enum_table_get((*c).enums, variant_enum_idx)
             if (*c).enforce_visibility && !checker_enum_visible_inplace(c, variant_enum_idx) {
-                checker_report_error_at_inplace(c, e.span, 177, 0, 0, 0)
+                checker_report_private_enum_inplace(c, e.span, variant_enum_idx, first_name)
             }
             ty_named(ei.name)
         } else {
@@ -5418,7 +5691,7 @@ fn checker_check_field_access_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
             let si = struct_table_get((*c).structs, struct_idx)
                     let field_ty = field_info_list_find(si.fields, e.name)
             if field_ty.kind == TypeKind::TyError && !field_info_list_has(si.fields, e.name) {
-                checker_report_error_at_inplace(c, e.span, 12, 0, 0, 0)
+                checker_report_no_field_inplace(c, e.span, e.name, base_ty)
             }
             field_ty
         } else {
@@ -5452,7 +5725,7 @@ fn checker_check_field_access_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
             // reads the correct value and is what the darwin_pbpk sources use.
             ty_f64()
         } else {
-            checker_report_error_at_inplace(c, e.span, 12, 0, 0, 0)
+            checker_report_no_field_inplace(c, e.span, e.name, base_ty)
             ty_error()
         }
     } else if base_ty.kind == TypeKind::TyIntervention {
@@ -5465,7 +5738,7 @@ fn checker_check_field_access_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
         } else if name_matches_str7(e.name, 101, 112, 115, 105, 108, 111, 110) {
             ty_f64()
         } else {
-            checker_report_error_at_inplace(c, e.span, 12, 0, 0, 0)
+            checker_report_no_field_inplace(c, e.span, e.name, base_ty)
             ty_error()
         }
     } else if base_ty.kind == TypeKind::TyCounterfactual {
@@ -5478,7 +5751,7 @@ fn checker_check_field_access_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
         } else if name_matches_str7(e.name, 101, 112, 115, 105, 108, 111, 110) {
             ty_f64()
         } else {
-            checker_report_error_at_inplace(c, e.span, 12, 0, 0, 0)
+            checker_report_no_field_inplace(c, e.span, e.name, base_ty)
             ty_error()
         }
     } else if base_ty.kind == TypeKind::TyValidated {
@@ -5491,7 +5764,7 @@ fn checker_check_field_access_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
         } else if name_matches_str7(e.name, 101, 112, 115, 105, 108, 111, 110) {
             ty_f64()
         } else {
-            checker_report_error_at_inplace(c, e.span, 12, 0, 0, 0)
+            checker_report_no_field_inplace(c, e.span, e.name, base_ty)
             ty_error()
         }
     } else if base_ty.kind == TypeKind::TyHyper {
@@ -5510,7 +5783,7 @@ fn checker_check_field_access_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
             if name_matches_str4(e.name, 114, 101, 97, 108) { inner_ty }
             else if name_matches_str4(e.name, 105, 109, 97, 103) { inner_ty }
             else {
-                checker_report_error_at_inplace(c, e.span, 12, 0, 0, 0)
+                checker_report_no_field_inplace(c, e.span, e.name, base_ty)
                 ty_error()
             }
         // Quaternion fields
@@ -5521,7 +5794,7 @@ fn checker_check_field_access_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
             else if name_matches_str1(e.name, 121) { inner_ty }
             else if name_matches_str1(e.name, 122) { inner_ty }
             else {
-                checker_report_error_at_inplace(c, e.span, 12, 0, 0, 0)
+                checker_report_no_field_inplace(c, e.span, e.name, base_ty)
                 ty_error()
             }
         } else {
@@ -5552,14 +5825,31 @@ fn checker_check_field_access_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
         // name.buf[0] (TypeEntry byte 8 — within the *mut SRET window) holds the struct_idx
         // encoded by ty_ref_with_idx / ty_ref_mut_with_idx at signature-lowering time.
         // -1 means "not a struct ref" (primitive, slice, etc.) → return ty_error() silently.
-        let dec_lo = (base_ty.name.buf[0] as i64 + 256) % 256
-        let dec_hi = (base_ty.name.buf[1] as i64 + 256) % 256
-        let struct_idx = dec_lo + dec_hi * 256 - 1
+        //
+        // The packed index is a CACHE of a lookup done when the signature was
+        // lowered, and it is only as good as the struct table was at that
+        // moment. Resolve by the pointee's own name first, exactly as the
+        // by-value twin at check_field_access has always done, and keep the
+        // packed index only as the fallback for a pointee that is not named.
+        // Trusting the index alone is what produced "no field guard on type
+        // &MatchArm" against a MatchArm that has a guard: the printed type came
+        // from `inner`, the fields came from whatever struct the stale index
+        // happened to address.
+        let ref_inner = call_ref_inner_or_self(base_ty)
+        var struct_idx: i64 = -1
+        if ref_inner.kind == TypeKind::TyNamed {
+            struct_idx = struct_table_find((*c).structs, ref_inner.name)
+        }
+        if struct_idx < 0 {
+            let dec_lo = (base_ty.name.buf[0] as i64 + 256) % 256
+            let dec_hi = (base_ty.name.buf[1] as i64 + 256) % 256
+            struct_idx = dec_lo + dec_hi * 256 - 1
+        }
         if struct_idx >= 0 && struct_idx < (*(*c).structs).count {
             let si = struct_table_get((*c).structs, struct_idx)
             let field_ty = field_info_list_find(si.fields, e.name)
             if field_ty.kind == TypeKind::TyError && !field_info_list_has(si.fields, e.name) {
-                checker_report_error_at_inplace(c, e.span, 12, 0, 0, 0)
+                checker_report_no_field_inplace(c, e.span, e.name, base_ty)
             }
             field_ty
         } else {
@@ -5568,7 +5858,7 @@ fn checker_check_field_access_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
     } else if is_error_or_unknown(base_ty) {
         base_ty
     } else {
-        checker_report_error_at_inplace(c, e.span, 12, 0, 0, 0)
+        checker_report_no_field_inplace(c, e.span, e.name, base_ty)
         ty_error()
     }
 }
@@ -6010,6 +6300,7 @@ fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
     checker_pop_const_scope_inplace(c)
     (*c).borrows = (*c).borrows.pop_scope()
     (*c).env = (*c).env.pop_scope()
+    (*c).current_sig_id = 0 - 1
     (*c).current_effects = saved_effects
     (*c).current_effect_count = saved_effect_count
 
@@ -6062,6 +6353,7 @@ fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
         effect_count: inferred_effect_count,
         is_kernel: false,
         is_epistemic_kernel: false,
+        is_extern: false,
         is_linear_closure: capture_linear,
         linear_capture_count: capture_linear_count,
         epistemic_epsilon: capture_epsilon,
@@ -6154,7 +6446,7 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
             let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
             let call_start_borrows = (*c).borrows
             checker_check_call_args_inplace(c, expr_list_handle(e.args), fn_param_list_handle(fn_param_list_clone(&sig.params)), sig.param_count, e.span)
-            checker_check_callee_effects_inplace(c, e.span, sig.effects, sig.effect_count)
+            checker_check_callee_effects_named_inplace(c, e.span, sig.effects, sig.effect_count, sig.name)
             checker_release_call_arg_borrows_inplace(c, e.args, fn_param_list_clone(&sig.params), call_start_borrows)
             sig.return_type
         } else {
@@ -6187,7 +6479,7 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
             let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
             let call_start_borrows = (*c).borrows
             checker_check_call_args_inplace(c, expr_list_handle(e.args), fn_param_list_handle(fn_param_list_clone(&sig.params)), sig.param_count, e.span)
-            checker_check_callee_effects_inplace(c, e.span, sig.effects, sig.effect_count)
+            checker_check_callee_effects_named_inplace(c, e.span, sig.effects, sig.effect_count, sig.name)
             checker_release_call_arg_borrows_inplace(c, e.args, fn_param_list_clone(&sig.params), call_start_borrows)
             sig.return_type
         } else {
@@ -6277,6 +6569,8 @@ fn call_expr_should_bridge_by_value(e: Expr) -> bool with Mut, Panic, Div, Alloc
     if call_expr_is_builtin_measure(e.left) { return true }
     if call_expr_is_builtin_variance_of(e.left) { return true }
     if call_expr_is_builtin_uncertainty_of(e.left) { return true }
+    if call_expr_is_builtin_sensitivity_of(e.left) { return true }
+    if call_expr_is_builtin_hessian_of(e.left) { return true }
     if call_expr_contest_witness_kind(e.left) >= 0 { return true }
     false
 }
@@ -6464,6 +6758,34 @@ fn checker_check_variance_metric_expr_inplace(c: *mut Checker, e: Expr) -> TypeE
     ty_f64()
 }
 
+// hessian_of(x, j, k) -> f64. THREE arguments.
+fn checker_check_hessian_metric_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let first_arg = expr_list_head(e.args)
+    match first_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(_) => {}
+    }
+    checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+    ty_f64()
+}
+
+// sensitivity_of(x, k) -> f64. TWO arguments, so it cannot reuse
+// checker_check_variance_metric_expr_inplace, which reports E010 on a second one.
+fn checker_check_sensitivity_metric_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let first_arg = expr_list_head(e.args)
+    let second_arg = expr_list_second(e.args)
+    match first_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(_) => {}
+    }
+    match second_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(_) => {}
+    }
+    checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+    ty_f64()
+}
+
 // slice_len(s: &[T]) -> i64. Inplace transcription of check_slice_len_call_expr —
 // the by-value bridge SRET-smashed on populated enum tables (slice_fat_pointers crash).
 fn checker_check_assert_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
@@ -6619,6 +6941,14 @@ fn checker_fn_sigs_find_inplace(c: *mut Checker, name: Name) -> i64 with Mut, Pa
 
 fn checker_fn_sig_visible_inplace(c: *mut Checker, sig_id: i64) -> bool with Mut, Panic, Div, Alloc, IO {
     let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
+    // #1627 / E175: a private `extern "C"` stub for a native-backend builtin must
+    // not false-reject sibling modules that call the builtin by name. Same
+    // allow-list as E219 (#1622). Without this, the first module that declared
+    // `extern "C" { fn sqrt; }` owns a private sig that prefer_module falls
+    // through to, and every later module's `sqrt(...)` becomes E175.
+    if sig.is_extern && name_is_native_backend_builtin(sig.name) {
+        return true
+    }
     let vis_kind = sig.visibility_kind
     if vis_kind == VISIBILITY_PUB {
         return true
@@ -6718,6 +7048,12 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     }
     if call_expr_is_builtin_uncertainty_of(e.left) {
         return checker_check_variance_metric_expr_inplace(c, e)
+    }
+    if call_expr_is_builtin_sensitivity_of(e.left) {
+        return checker_check_sensitivity_metric_expr_inplace(c, e)
+    }
+    if call_expr_is_builtin_hessian_of(e.left) {
+        return checker_check_hessian_metric_expr_inplace(c, e)
     }
     if call_expr_is_builtin_slice_len(e.left) {
         return checker_check_slice_len_expr_inplace(c, e)
@@ -6827,10 +7163,16 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     }
     if direct_sig_id >= 0 {
         if (*c).enforce_visibility && !checker_fn_sig_visible_inplace(c, direct_sig_id) {
-            checker_report_error_at_inplace(c, e.span, 175, 0, 0, 0)
+            checker_report_private_fn_inplace(c, e.span, direct_sig_id)
         }
         let call_start_borrows = (*c).borrows
         let direct_sig = fn_sig_table_get((*c).fn_sigs, direct_sig_id)
+        // #1622: calling an `extern "C"` name the native backend does not
+        // implement. This is the live arm -- a plain ident callee resolves via
+        // direct_sig_id and returns below, never reaching the TyFn fallback.
+        if direct_sig.is_extern && !name_is_native_backend_builtin(direct_sig.name) {
+            checker_report_error_at_inplace(c, e.span, 219, 0, 0, 0)
+        }
         var effective_params = fn_param_list_clone(&direct_sig.params)
         var effective_return_type = direct_sig.return_type
         match call_expr_type_args(e) {
@@ -6856,7 +7198,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             direct_sig.param_count,
             e.span,
         )
-        checker_check_callee_effects_inplace(c, e.span, direct_sig.effects, direct_sig.effect_count)
+        checker_check_callee_effects_named_inplace(c, e.span, direct_sig.effects, direct_sig.effect_count, direct_sig.name)
         checker_release_call_arg_borrows_inplace(c, e.args, effective_params, call_start_borrows)
         return effective_return_type
     }
@@ -6907,7 +7249,17 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     if callee_ty.kind == TypeKind::TyFn && callee_ty.fn_sig_id >= 0 {
         let sig = fn_sig_table_get((*c).fn_sigs, callee_ty.fn_sig_id)
         if (*c).enforce_visibility && !checker_fn_sig_visible_inplace(c, callee_ty.fn_sig_id) {
-            checker_report_error_at_inplace(c, e.span, 175, 0, 0, 0)
+            checker_report_private_fn_inplace(c, e.span, callee_ty.fn_sig_id)
+        }
+        // #1622: calling an `extern "C"` name the native backend does not
+        // implement. Refuse here rather than emit a call that reads 0.
+        // Checked at the CALL, not at the declaration: ffi_libm_call.sio
+        // declares tgamma/pow/floor/ceil and calls only sqrt, and
+        // parser_card_a_raw_pointer_types.sio declares malloc and never calls
+        // it -- both compile and pass today, and a declaration-site refusal
+        // would break them for no gain.
+        if sig.is_extern && !name_is_native_backend_builtin(sig.name) {
+            checker_report_error_at_inplace(c, e.span, 219, 0, 0, 0)
         }
         let call_start_borrows = (*c).borrows
         var effective_params = fn_param_list_clone(&sig.params)
@@ -6929,7 +7281,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             None => {}
         }
         checker_check_call_args_inplace(c, expr_list_handle(e.args), fn_param_list_handle(effective_params), sig.param_count, e.span)
-        checker_check_callee_effects_inplace(c, e.span, sig.effects, sig.effect_count)
+        checker_check_callee_effects_named_inplace(c, e.span, sig.effects, sig.effect_count, sig.name)
         checker_release_call_arg_borrows_inplace(c, e.args, effective_params, call_start_borrows)
         effective_return_type
     } else if is_error_or_unknown(callee_ty) {
@@ -6959,7 +7311,59 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
 }
 
 
-fn checker_check_callee_effects_inplace(c: *mut Checker, span: Span, callee_effects: [i64; 8], callee_effect_count: i64) with Mut, IO, Panic, Div, Alloc {
+// Effect INFERENCE, spec §7.2.1: "the checker is intended to infer this from the function body
+// rather than require the author to reason about it; the annotation is a declaration of the
+// inferred fact, not an independent obligation."
+//
+// STEP 1 of that, behind SOUNIO_EFFECT_INFER=1 and off by default so the shipped behaviour is
+// unchanged while this is measured. Instead of reporting E035, the effect the callee needs is
+// ADDED to the effect set in force for the function being checked. Adding only: an inferred set
+// grows as callees are discovered and never shrinks, so a declared effect cannot be dropped.
+//
+// What this step does NOT yet do is write the widened set back into the caller's FnSig, so a
+// caller-of-a-caller still sees the narrow DECLARED set and the inference stops after one level.
+// Doing that needs the checker to know which signature it is currently inside, and the only handle
+// would be a `current_sig_id` field kept in sync across 13 assignment sites and 6 save/restore
+// pairs — where a stale id would widen the WRONG function's effects, a silent semantic corruption
+// rather than a wrong message. Measured first, then decided.
+fn checker_widen_current_effects_inplace(c: *mut Checker, extra: [i64; 8], extra_count: i64) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < extra_count && i < 8 {
+        let e = extra[i as usize]
+        var seen = false
+        var j: i64 = 0
+        while j < (*c).current_effect_count && j < 8 {
+            if (*c).current_effects[j as usize] == e {
+                seen = true
+            }
+            j = j + 1
+        }
+        if !seen && (*c).current_effect_count < 8 {
+            let k = (*c).current_effect_count
+            (*c).current_effects[k as usize] = e
+            (*c).current_effect_count = k + 1
+        }
+        i = i + 1
+    }
+}
+
+// Memoised: read_env allocates and the runtime allocator never reclaims,
+// so a gate evaluated at every call site leaks on every call. CHECKED is
+// separate from the value because "off" and "not yet read" are different.
+var CHECKER_EFFECT_INFERENCE_ENABLED_ON: i64 = 0
+var CHECKER_EFFECT_INFERENCE_ENABLED_CHECKED: i64 = 0
+
+fn checker_effect_inference_enabled() -> bool with IO, Mut, Panic, Div {
+    if CHECKER_EFFECT_INFERENCE_ENABLED_CHECKED == 0 {
+        CHECKER_EFFECT_INFERENCE_ENABLED_CHECKED = 1
+        if str_eq(read_env("SOUNIO_EFFECT_INFER"), "1") {
+            CHECKER_EFFECT_INFERENCE_ENABLED_ON = 1
+        }
+    }
+    CHECKER_EFFECT_INFERENCE_ENABLED_ON == 1
+}
+
+fn checker_check_callee_effects_named_inplace(c: *mut Checker, span: Span, callee_effects: [i64; 8], callee_effect_count: i64, source: Name) with Mut, IO, Panic, Div, Alloc {
     if callee_effect_count == 0 {
         return
     }
@@ -6967,8 +7371,65 @@ fn checker_check_callee_effects_inplace(c: *mut Checker, span: Span, callee_effe
         return
     }
     let missing_pair = find_missing_effects(callee_effects, callee_effect_count, (*c).current_effects, (*c).current_effect_count)
-    let t = (*c).report_effect_error(span, missing_pair.0, missing_pair.1)
+    if checker_effect_inference_enabled() {
+        checker_widen_current_effects_inplace(c, missing_pair.0, missing_pair.1)
+        // STEP 2: publish the inferred set into this function's own signature, so that ITS callers
+        // see the effect too and inference is transitive rather than one level deep. Without this,
+        // widening only silences the check locally — a pub fn could declare nothing and reach IO
+        // through two hops with nobody noticing.
+        //
+        // Guarded by name: current_sig_id is only trusted when the signature it points at still
+        // carries current_sig_name. A set-site that failed to update the pair leaves a stale index,
+        // and the guard turns that into a skipped write (lost propagation) instead of effects
+        // written onto an unrelated function.
+        if (*c).current_sig_id >= 0 {
+            let owner = fn_sig_table_get((*c).fn_sigs, (*c).current_sig_id)
+            if name_eq(owner.name, (*c).current_sig_name) {
+                let widened = fn_sig_table_widen_effects((*c).fn_sigs, (*c).current_sig_id, missing_pair.0, missing_pair.1)
+                // SOUNIO_EFFECT_INFER_TRACE makes the propagation OBSERVABLE. Without it, step 1
+                // (local widening) and step 2 (write-back) are indistinguishable by error count —
+                // both drive E035 to 0 — so there would be no evidence the publication happens at
+                // all. Prints once per effect actually added to a signature.
+                // BOUNDARY CHECK (W045). The widening event itself is the proof that the
+                // declaration is narrower than the inferred set — no snapshot or extra pass is
+                // needed, because a widen only happens when something was missing. Reported for
+                // `pub` only: outside a module the declaration is all a caller can read, so that is
+                // where the annotation earns its keep. Private functions stay silent, which is the
+                // whole point of inference — the author does not reason about effects internally.
+                //
+                // A WARNING and not an error, deliberately: 409 functions in main.sio's closure
+                // already declare Mut without reaching any store, so this class is demonstrably
+                // noisy in both directions today, and turning a measurement into a build failure
+                // before the noise is understood would be the wrong order.
+                if widened && owner.visibility_kind != VISIBILITY_PRIVATE {
+                    checker_report_warning_at_mut(c, span, 45, 0, 0, 0)
+                }
+                if widened && str_eq(read_env("SOUNIO_EFFECT_INFER_TRACE"), "1") {
+                    print("effect_infer: ")
+                    e035_print_ident(owner.name)
+                    print(" += ")
+                    var ti: i64 = 0
+                    while ti < missing_pair.1 {
+                        if ti > 0 { print(", ") }
+                        print_effect_name(missing_pair.0[ti as usize])
+                        ti = ti + 1
+                    }
+                    print(" (from ")
+                    e035_print_ident(source)
+                    print(")\n")
+                }
+            }
+        }
+        return
+    }
+    let t = (*c).report_effect_error_from(span, missing_pair.0, missing_pair.1, source)
     checker_store_from_value(c, t)
+}
+
+// Retained for the arms that synthesise an effect list with no signature behind it (Observe on
+// println, IO on syscall6, the store-site Mut from #1522): there is no callee name to report.
+fn checker_check_callee_effects_inplace(c: *mut Checker, span: Span, callee_effects: [i64; 8], callee_effect_count: i64) with Mut, IO, Panic, Div, Alloc {
+    checker_check_callee_effects_named_inplace(c, span, callee_effects, callee_effect_count, empty_name())
 }
 
     fn checker_release_call_arg_borrows_inplace(c: *mut Checker, args: Option<Box<ExprList> >, params: Option<Box<FnParamList> >, call_start_borrows: BorrowEnv) with Mut, Panic, Div, Alloc, IO {
@@ -7284,7 +7745,7 @@ fn checker_check_ident_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
         if fn_sig_id >= 0 {
             return ty_fn(fn_sig_id)
         }
-        checker_report_error_at_inplace(c, e.span, 137, 0, 0, 0)
+        checker_report_undeclared_inplace(c, e.span, e.name)
         return ty_error()
     }
     let ident_ty = (*c).env.lookup(e.name)
@@ -7573,7 +8034,7 @@ fn checker_lower_opt_type_inplace(c: *mut Checker, opt: Option<Box<TypeExpr> >) 
 // *mut transcription of check_refinement_literal (12312). Reads refinements via
 // (*c); emits E042 through checker_report_error_at_inplace. Replicates the final
 // last_literal_kind = 0 reset (12338) so downstream stmts see clean state.
-fn checker_check_refinement_literal_inplace(c: *mut Checker, span: Span, ty: TypeEntry) with Mut, Panic, Div, IO {
+fn checker_check_refinement_literal_inplace(c: *mut Checker, span: Span, ty: TypeEntry) with Mut, Panic, Div, IO, Alloc {
     if ty.refinement_id < 0 || ty.refinement_id >= 128 {
         return
     }
@@ -7881,6 +8342,30 @@ fn checker_check_assign_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with
         }
     }
     checker_check_assign_mutability_inplace(c, s.target, s.span)
+    // Effect GENERATION at the store site (#1488).
+    //
+    // Madaros propagated declared effects correctly — a caller of a `with Mut`
+    // callee was required to declare it — but had no leaf-level SOURCE of Mut.
+    // Nothing anywhere introduced the effect at the point where mutation actually
+    // happens, so `fn poke(x: &!i64) { *x = 42 }` type-checked with no `with Mut`
+    // and every caller above it was unconstrained. The effect system propagated a
+    // fact nobody ever asserted: `with Mut` was true only where a human had written
+    // it, which makes the guarantee vacuous exactly at the leaves.
+    //
+    // Reuses checker_check_callee_effects_inplace rather than a new reporting path:
+    // requiring Mut here is the same question as requiring a callee's effect, and
+    // it already emits E035 with the missing-effect list.
+    match s.target {
+        Some(effect_target) => {
+            if checker_place_excl_ref_root(c, *effect_target, 0) {
+                var store_effects: [i64; 8] = [0; 8]
+                // 1 = Mut (effect_name_to_id, self-hosted/check/effects.sio:26)
+                store_effects[0] = 1
+                checker_check_callee_effects_inplace(c, s.span, store_effects, 1)
+            }
+        }
+        None => {}
+    }
     // Raw-reference escape (store sites): a reference may not be stored into a struct field,
     // an array element, or through a pointer — doing so lets it outlive its referent → a
     // dangling reference. References are second-class: pass them to functions and read/write
@@ -7936,7 +8421,7 @@ fn checker_check_items_inner_store_return_error_count_mut(c: *mut Checker, items
     (*c).error_count
 }
 
-fn checker_check_items_inner_store_return_had_error_mut(c: *mut Checker, items: Option<Box<ItemList> >) -> i64 with Mut, Panic, Div, Alloc, IO {
+pub fn checker_check_items_inner_store_return_had_error_mut(c: *mut Checker, items: Option<Box<ItemList> >) -> i64 with Mut, Panic, Div, Alloc, IO {
     // Route through the true *mut spine: no 164KB by-value Checker copy
     // ever lands on the hot path, so the layout-sensitive stale-stack
     // codegen crash never fires. (Was: `(*c).check_items(items)` by value.)
@@ -8223,7 +8708,7 @@ fn check_policy_requirements_to_ir_export(
     }
 }
 
-fn checker_export_ir_epistemic_into_local(checker: &Checker, ep: &! IrEpistemicSection) with Mut, Panic, Div, Alloc {
+pub fn checker_export_ir_epistemic_into_local(checker: &Checker, ep: &! IrEpistemicSection) with Mut, Panic, Div, Alloc {
     ep.model_family_count = checker.model_families.count
     if ep.model_family_count > IR_MAX_EPI_MODEL_FAMILIES {
         ep.model_family_count = IR_MAX_EPI_MODEL_FAMILIES
@@ -9932,6 +10417,41 @@ fn print_contest_model_family(info: ContestInfo) with IO, Mut, Panic, Div {
 // Error reporting with diagnostics
 // ============================================================
 
+fn e035_print_ident(n: Name) with IO, Mut, Panic, Div {
+    if n.len <= 0 {
+        print("<unnamed>")
+        return
+    }
+    var i: i64 = 0
+    while i < n.len && i < 128 {
+        print_char(n.buf[i as usize] as i64)
+        i = i + 1
+    }
+}
+
+fn e035_print_module_path(p: AstPath) with IO, Mut, Panic, Div, Alloc {
+    if p.seg_count <= 0 {
+        print("<main>")
+        return
+    }
+    var seg = p.segments
+    var idx: i64 = 0
+    var more = true
+    while more && idx < p.seg_count && idx < 32 {
+        if idx > 0 { print("::") }
+        var j: i64 = 0
+        while j < seg.head_len && j < 128 {
+            print_char(seg.head_buf[j as usize] as i64)
+            j = j + 1
+        }
+        match seg.tail {
+            Some(t) => { seg = *t }
+            None => { more = false }
+        }
+        idx = idx + 1
+    }
+}
+
 impl Checker {
     fn report_error(self) -> Checker with Mut {
         var c = self
@@ -9940,7 +10460,7 @@ impl Checker {
         c
     }
 
-    fn report_error_at(self, span: Span, code: i64, msg_a: i64, msg_b: i64, msg_c: i64) -> Checker with Mut, IO, Panic, Div {
+    fn report_error_at(self, span: Span, code: i64, msg_a: i64, msg_b: i64, msg_c: i64) -> Checker with Mut, IO, Panic, Div, Alloc {
         var c = self
         c.error_count = c.error_count + 1
         c.had_error = true
@@ -9949,6 +10469,12 @@ impl Checker {
         if code < 10 { print("0") }
         print_int(code)
         print("]")
+        // The value-path twin of the naming on checker_report_error_at_inplace.
+        // Both reporters carry the same spans and the same uselessness without it.
+        print(" in ")
+        e035_print_module_path(c.current_module)
+        print("::")
+        e035_print_ident(c.current_fn_name)
         if span.start > 0 || span.end > 0 {
             print(" at ")
             print_int(span.start)
@@ -9961,6 +10487,62 @@ impl Checker {
         // Print help and note if available
         print_error_help(code)
         print_error_note(code)
+        c
+    }
+
+    // Value-path twin of checker_report_private_fn_inplace. Same reason: the
+    // callee is the half that matters, and equal paths with different module ids
+    // are the name-only-lookup false positive rather than a real violation.
+    fn report_private_fn(self, span: Span, sig_id: i64) -> Checker with Mut, IO, Panic, Div, Alloc {
+        var c = self.report_error_at(span, 175, 0, 0, 0)
+        let sig = fn_sig_table_get(c.fn_sigs, sig_id)
+        print("   = callee ")
+        e035_print_module_path(sig.defining_module)
+        print("::")
+        e035_print_ident(sig.name)
+        print("\n   = defining module id ")
+        print_int(sig.defining_module_id)
+        print(", calling from module id ")
+        print_int(c.current_module_id)
+        print("\n")
+        c
+    }
+
+    // Value-path twin of checker_report_private_enum_inplace.
+    fn report_private_enum(self, span: Span, enum_idx: i64, referenced: Name) -> Checker with Mut, IO, Panic, Div, Alloc {
+        var c = self.report_error_at(span, 177, 0, 0, 0)
+        let ei = enum_table_get(c.enums, enum_idx)
+        print("   = enum ")
+        e035_print_module_path(ei.defining_module)
+        print("::")
+        e035_print_ident(ei.name)
+        print("\n   = written as ")
+        e035_print_ident(referenced)
+        print("\n   = defining module id ")
+        print_int(ei.defining_module_id)
+        print(", used from module id ")
+        print_int(c.current_module_id)
+        print("\n")
+        c
+    }
+
+    // Value-path twin of checker_report_no_field_inplace.
+    fn report_no_field(self, span: Span, field: Name, owner: TypeEntry) -> Checker with Mut, IO, Panic, Div, Alloc {
+        var c = self.report_error_at(span, 12, 0, 0, 0)
+        print("   = no field ")
+        e035_print_ident(field)
+        print(" on type ")
+        print_type_name(owner)
+        print("\n")
+        c
+    }
+
+    // Value-path twin of checker_report_undeclared_inplace.
+    fn report_undeclared(self, span: Span, ident: Name) -> Checker with Mut, IO, Panic, Div, Alloc {
+        var c = self.report_error_at(span, 137, 0, 0, 0)
+        print("   = name ")
+        e035_print_ident(ident)
+        print("\n")
         c
     }
 
@@ -10001,23 +10583,6 @@ impl Checker {
         c
     }
 
-    fn checker_report_warning_at_mut(c: *mut Checker, span: Span, code: i64, msg_a: i64, msg_b: i64, msg_c: i64) with Mut, IO, Panic, Div {
-        (*c).warning_count = (*c).warning_count + 1
-        print("warning[W")
-        if code < 100 { print("0") }
-        if code < 10 { print("0") }
-        print_int(code)
-        print("]")
-        if span.start > 0 || span.end > 0 {
-            print(" at ")
-            print_int(span.start)
-            print("..")
-            print_int(span.end)
-        }
-        print(": ")
-        print_warning_message(code)
-        print("\n")
-    }
 
     fn report_unknown_policy_metric(self, span: Span, metric_name: Name) -> Checker with Mut, IO, Panic, Div {
         var c = self
@@ -11705,11 +12270,30 @@ impl Checker {
 
 
 
-    fn report_effect_error(self, span: Span, missing: [i64; 8], missing_count: i64) -> Checker with Mut, IO, Panic, Div {
+    // E035 names WHAT DEMANDED the effect. The span cannot locate it: on a self-compile of
+    // compiler/main.sio all 230 E035 carry span.start == 0, and no diagnostic in this compiler
+    // prints span.file_id, so an offset alone cannot even say which of 112 closure files it is in.
+    //
+    // `source` is the CALLEE. It travels with the effect list it came from — both out of the same
+    // FnSig — so it cannot desynchronise by construction. The ENCLOSING function is printed too
+    // (current_module::current_fn_name, below), which the original of this comment argued against
+    // on the grounds that the checker did not track it; it does now, and the two attributions
+    // answer different questions: which call demanded the effect, and which body has to declare it.
+    fn report_effect_error_from(self, span: Span, missing: [i64; 8], missing_count: i64, source: Name) -> Checker with Mut, IO, Panic, Div, Alloc {
         var c = self
         c.error_count = c.error_count + 1
         c.had_error = true
         print("error[E035]")
+        // WHERE, before anything else. This diagnostic used to print only a span
+        // whose start is always 0 and which carries no module identity, so in a
+        // multi-module check the reader had to guess which file the offset
+        // indexed -- and guessing wrong is how two of these were blamed on the
+        // wrong module. current_module was already tracked for E175;
+        // current_fn_name is recorded now for the same reason.
+        print(" in ")
+        e035_print_module_path(c.current_module)
+        print("::")
+        e035_print_ident(c.current_fn_name)
         if span.start > 0 || span.end > 0 {
             print(" at ")
             print_int(span.start)
@@ -11723,11 +12307,21 @@ impl Checker {
             print_effect_name(missing[i as usize])
             i = i + 1
         }
-        print(")\n")
+        print(")")
+        if source.len > 0 {
+            print(" -- required by `")
+            e035_print_ident(source)
+            print("`")
+        }
+        print("\n")
         c
     }
 
-    fn check_callee_effects(self, span: Span, callee_effects: [i64; 8], callee_effect_count: i64) -> Checker with Mut, IO, Panic, Div {
+    fn report_effect_error(self, span: Span, missing: [i64; 8], missing_count: i64) -> Checker with Mut, IO, Panic, Div, Alloc {
+        self.report_effect_error_from(span, missing, missing_count, empty_name())
+    }
+
+    fn check_callee_effects(self, span: Span, callee_effects: [i64; 8], callee_effect_count: i64) -> Checker with Mut, IO, Panic, Div, Alloc {
         if callee_effect_count == 0 {
             return self
         }
@@ -11742,7 +12336,7 @@ impl Checker {
     // Security hardening: depth and complexity tracking
     // --------------------------------------------------------
 
-    fn check_type_depth(self, span: Span) -> (Checker, bool) with Mut, Panic, Div {
+    fn check_type_depth(self, span: Span) -> (Checker, bool) with Mut, Panic, Div, Alloc, IO {
         var c = self
         if c.type_depth >= MAX_TYPE_DEPTH {
             c = c.report_error_at(span, 60, c.type_depth, MAX_TYPE_DEPTH, 0)
@@ -11760,7 +12354,7 @@ impl Checker {
         c
     }
 
-    fn check_expr_depth(self, span: Span) -> (Checker, bool) with Mut, Panic, Div {
+    fn check_expr_depth(self, span: Span) -> (Checker, bool) with Mut, Panic, Div, Alloc, IO {
         var c = self
         if c.expr_depth >= MAX_EXPR_DEPTH {
             c = c.report_error_at(span, 61, c.expr_depth, MAX_EXPR_DEPTH, 0)
@@ -11778,7 +12372,7 @@ impl Checker {
         c
     }
 
-    fn check_loop_depth(self, span: Span) -> (Checker, bool) with Mut, Panic, Div {
+    fn check_loop_depth(self, span: Span) -> (Checker, bool) with Mut, Panic, Div, Alloc, IO {
         var c = self
         if c.loop_depth >= MAX_LOOP_DEPTH {
             c = c.report_error_at(span, 62, c.loop_depth, MAX_LOOP_DEPTH, 0)
@@ -11787,7 +12381,7 @@ impl Checker {
         (c, true)
     }
 
-    fn check_complexity(self, cost: i64, span: Span) -> (Checker, bool) with Mut, Panic, Div {
+    fn check_complexity(self, cost: i64, span: Span) -> (Checker, bool) with Mut, Panic, Div, Alloc, IO {
         var c = self
         if c.complexity_budget + cost > MAX_TYPE_COMPLEXITY {
             c = c.report_error_at(span, 64, c.complexity_budget, MAX_TYPE_COMPLEXITY, 0)
@@ -11836,11 +12430,11 @@ impl Checker {
         c
     }
 
-    fn const_int_bind_unknown(self, name: Name) -> Checker with Mut {
+    fn const_int_bind_unknown(self, name: Name) -> Checker with Mut, Div, Panic {
         self.const_int_bind_raw(name, 0, 0)
     }
 
-    fn const_int_bind_value(self, name: Name, value: i64) -> Checker with Mut {
+    fn const_int_bind_value(self, name: Name, value: i64) -> Checker with Mut, Div, Panic {
         self.const_int_bind_raw(name, 1, value)
     }
 
@@ -11857,6 +12451,24 @@ impl Checker {
         }
         (false, 0)
     }
+}
+
+fn checker_report_warning_at_mut(c: *mut Checker, span: Span, code: i64, msg_a: i64, msg_b: i64, msg_c: i64) with Mut, IO, Panic, Div {
+    (*c).warning_count = (*c).warning_count + 1
+    print("warning[W")
+    if code < 100 { print("0") }
+    if code < 10 { print("0") }
+    print_int(code)
+    print("]")
+    if span.start > 0 || span.end > 0 {
+        print(" at ")
+        print_int(span.start)
+        print("..")
+        print_int(span.end)
+    }
+    print(": ")
+    print_warning_message(code)
+    print("\n")
 }
 
 fn print_error_message(code: i64) with IO, Mut, Panic, Div {
@@ -12037,6 +12649,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 216 { print("infinite recursive type") }
     else if code == 217 { print("f128/f256 value conversion is not implemented; wide-float casts fail closed") }
     else if code == 218 { print("f128/f256 is reserved for compiler-owned format identity; source values are unavailable in V0-A") }
+    else if code == 219 { print("call to an `extern \"C\"` function the native backend does not implement") }
     else { print("unknown error") }
 }
 
@@ -12320,6 +12933,9 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
     }
     else if code == 218 {
         print("   |\n   = help: V0-A exposes binary128/binary256 descriptors internally but rejects every source-level use before IR\n")
+    }
+    else if code == 219 {
+        print("   |\n   = help: only these body-less names are implemented: print, print_int, print_char, print_f64, get_arg, get_arg_count, str_len, str_char_at, str_eq, str_slice, starts_with, str_concat, str_from_bytes, read_file, write_file, file_size, sqrt, exp, log, sin, cos, assert, heap_alloc, heap_free, f64_to_bits, bits_to_f64, syscall6\n")
     }
     else {
         // No help available for unknown errors
@@ -12642,6 +13258,9 @@ fn print_error_note(code: i64) with IO, Mut, Panic, Div {
     else if code == 218 {
         print("   = note: no literal, field, alias, binding, signature, conversion, ABI, or native carrier is implemented\n")
     }
+    else if code == 219 {
+        print("   = note: there is no dynamic linker in this backend; an unimplemented extern compiles to an empty stub whose calls read 0\n")
+    }
     else {
         // No note available for unknown errors
     }
@@ -12658,6 +13277,16 @@ fn print_warning_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 43 {
         print("boolean equality on uncertain value: exact == ignores uncertainty\n")
         print("   = help: use ep_eq_prob + ep_decide (epistemic::uncertain_eq) or claim exactness")
+    }
+    else if code == 45 {
+        print("public function performs an effect its signature does not declare\n")
+        print("   = note: the effect was INFERRED from the body (spec 7.2.1); callers outside this module read the declaration, not the inference\n")
+        print("   = help: add the inferred effect to the `with` clause, or make the function private")
+    }
+    else if code == 44 {
+        print("associated-function call on an unknown type: the target resolves to no definition\n")
+        print("   = note: this compiles and evaluates to 0 -- it does not allocate or call anything\n")
+        print("   = help: define the type and its associated function, or call an existing one")
     }
     else {
         print("unknown warning")
@@ -12929,6 +13558,30 @@ fn call_expr_is_builtin_variance_of(opt: Option<Box<Expr> >) -> bool with Mut, P
     }
 }
 
+fn call_expr_is_builtin_hessian_of(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            name_matches_str10((*expr).name, 104, 101, 115, 115, 105, 97, 110, 95, 111, 102)
+        }
+        None => false
+    }
+}
+
+fn call_expr_is_builtin_sensitivity_of(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            name_matches_str14((*expr).name, 115, 101, 110, 115, 105, 116, 105, 118, 105, 116, 121, 95, 111, 102)
+        }
+        None => false
+    }
+}
+
 fn call_expr_is_builtin_uncertainty_of(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(expr) => {
@@ -12981,6 +13634,52 @@ fn call_expr_is_syscall6(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, 
         }
         None => false
     }
+}
+
+// #1622: the names the native backend implements for a body-less function.
+//
+// MIRROR of native_v2_builtin_id_for_func_ref in
+// self-hosted/native/codegen_x86_linux.sio (~:1116), which is the authority:
+// it maps an instr_count == 0 IrFunction to a builtin id 1..27, and returns 0 —
+// "emit nothing" — for every other name. An `extern "C"` declaration reaches
+// codegen as exactly such a stub (ir/lower.sio:3498 flushes it that way), so a
+// name absent from this list compiles to an empty function and every call to it
+// silently reads 0. That is what this list exists to refuse.
+//
+// Kept in sync by scripts/ci/extern_builtin_mirror_gate.sh, which diffs the two
+// lists and fails if they drift. Verified empirically as well: of 19 non-listed
+// extern names probed under Madaros (fabs, pow, floor, ceil, malloc, getpid,
+// tgamma, ...) all 19 returned 0, and heap_alloc — listed but dispatched
+// elsewhere — returned a real pointer.
+fn name_is_native_backend_builtin(n: Name) -> bool with Mut, Panic, Div, Alloc, IO {
+    if name_eq(n, make_name("print_int")) { return true }        // id 1
+    if name_eq(n, make_name("print_char")) { return true }       // id 2
+    if name_eq(n, make_name("print")) { return true }            // id 3
+    if name_eq(n, make_name("get_arg_count")) { return true }    // id 4
+    if name_eq(n, make_name("get_arg")) { return true }          // id 5
+    if name_eq(n, make_name("str_len")) { return true }          // id 6
+    if name_eq(n, make_name("str_eq")) { return true }           // id 7
+    if name_eq(n, make_name("str_slice")) { return true }        // id 8
+    if name_eq(n, make_name("starts_with")) { return true }      // id 9
+    if name_eq(n, make_name("str_concat")) { return true }       // id 10
+    if name_eq(n, make_name("read_file")) { return true }        // id 11
+    if name_eq(n, make_name("write_file")) { return true }       // id 12
+    if name_eq(n, make_name("file_size")) { return true }        // id 13
+    if name_eq(n, make_name("sqrt")) { return true }             // id 14
+    if name_eq(n, make_name("print_f64")) { return true }        // id 15
+    if name_eq(n, make_name("exp")) { return true }              // id 16
+    if name_eq(n, make_name("log")) { return true }              // id 17
+    if name_eq(n, make_name("sin")) { return true }              // id 18
+    if name_eq(n, make_name("cos")) { return true }              // id 19
+    if name_eq(n, make_name("str_char_at")) { return true }      // id 20
+    if name_eq(n, make_name("assert")) { return true }           // id 21
+    if name_eq(n, make_name("str_from_bytes")) { return true }   // id 22
+    if name_eq(n, make_name("heap_alloc")) { return true }       // id 23
+    if name_eq(n, make_name("heap_free")) { return true }        // id 24
+    if name_eq(n, make_name("f64_to_bits")) { return true }      // id 25
+    if name_eq(n, make_name("bits_to_f64")) { return true }      // id 26
+    if name_eq(n, make_name("syscall6")) { return true }         // id 27
+    false
 }
 
 fn call_expr_is_gpu_builtin(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
@@ -14015,6 +14714,13 @@ fn contest_matches_audit_target(contest_ty: TypeEntry, contest_info: ContestInfo
     && contest_info.policy_id == audit_info.policy_id
 }
 
+// Free function, not a method: declared at column 0 with an explicit
+// `self: Checker` parameter rather than inside `impl Checker`. Its two call
+// sites used method syntax and drew E011 "no method named for this type" —
+// the mirror of the four functions on this branch that sat INSIDE an impl and
+// were called bare. Callers now use the free-function form; moving the
+// declaration into the impl would work too, but relocating a 100-line body in
+// a 24k-line file to fix a call syntax is the larger change.
 fn contest_type_seeded_from_audit(self: Checker, audit_info: AuditInfo, audit_id: i64, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc {
     var c = self
     if audit_info.family_id < 0 || audit_info.family_id >= c.model_families.count {
@@ -15026,6 +15732,7 @@ impl Checker {
             effect_count: effect_count,
             is_kernel: false,
             is_epistemic_kernel: false,
+            is_extern: false,
             is_linear_closure: false,
             linear_capture_count: 0,
             epistemic_epsilon: 0.0 - 1.0,
@@ -17154,6 +17861,7 @@ impl Checker {
                     effect_count: kernel_effect_count,
                     is_kernel: is_kernel_fn,
                     is_epistemic_kernel: has_epistemic_param,
+                    is_extern: (*fd).is_extern,
                     is_linear_closure: false,
                     linear_capture_count: 0,
                     epistemic_epsilon: 0.0 - 1.0,
@@ -17376,7 +18084,12 @@ impl Checker {
                 var c = self
                 let item = (*list).head
                 if item.kind == ItemKind::ItemFn {
-                    c = c.collect_fn_def(item.name, item.fn_def)
+                    // collect_fn_def takes visibility and the defining module too;
+                    // this call passed two of four. The sibling call site
+                    // (check.sio:16372) is the shape: item.visibility and the
+                    // module currently being collected. A trait method is
+                    // declared in the module its trait is.
+                    c = c.collect_fn_def(item.name, item.fn_def, item.visibility, c.current_module)
                 }
                 c.collect_trait_methods((*list).tail, trait_id)
             }
@@ -18147,6 +18860,7 @@ impl Checker {
                     effect_count: fn_effect_count,
                     is_kernel: false,
                     is_epistemic_kernel: false,
+                    is_extern: false,
                     is_linear_closure: false,
                     linear_capture_count: 0,
                     epistemic_epsilon: 0.0 - 1.0,
@@ -18239,6 +18953,10 @@ impl Checker {
         match opt {
             Some(fd) => {
                 var c = self
+                // The in-place checker records this at its two fn entry points;
+                // the value path never did, so every diagnostic reported through
+                // `report_error_at` would have named its caller `<unnamed>`.
+                c.current_fn_name = (*fd).name
                 // Save outer effects context
                 let saved_effects = c.current_effects
                 let saved_effect_count = c.current_effect_count
@@ -18250,12 +18968,15 @@ impl Checker {
                     c.current_return_type = sig.return_type
                     c.current_effects = sig.effects
                     c.current_effect_count = sig.effect_count
+                    c.current_sig_id = sig_id
+                    c.current_sig_name = sig.name
                 }
                 c.multitest_count = 0
                 c.multitest_corrected = false
                 match (*fd).body.stmts {
                     None => {
                         c.current_return_type = ty_unit()
+                        c.current_sig_id = 0 - 1
                         c.current_effects = saved_effects
                         c.current_effect_count = saved_effect_count
                         c.multitest_count = saved_multitest_count
@@ -18295,6 +19016,7 @@ impl Checker {
                 c.env = c.env.pop_scope()
                 c.current_return_type = ty_unit()
                 // Restore outer effects context
+                c.current_sig_id = 0 - 1
                 c.current_effects = saved_effects
                 c.current_effect_count = saved_effect_count
                 c.multitest_count = saved_multitest_count
@@ -18381,6 +19103,8 @@ impl Checker {
                     c.current_return_type = sig.return_type
                     c.current_effects = sig.effects
                     c.current_effect_count = sig.effect_count
+                    c.current_sig_id = sig_id
+                    c.current_sig_name = sig.name
                 }
                 c.multitest_count = 0
                 c.multitest_corrected = false
@@ -18405,6 +19129,7 @@ impl Checker {
                 c.env = c.env.pop_scope()
                 c.current_return_type = ty_unit()
                 // Restore outer effects context
+                c.current_sig_id = 0 - 1
                 c.current_effects = saved_effects
                 c.current_effect_count = saved_effect_count
                 c.multitest_count = saved_multitest_count
@@ -18579,7 +19304,7 @@ impl Checker {
         (c, ty_unit())
     }
 
-    fn check_refinement_literal(self, span: Span, ty: TypeEntry) -> Checker with Mut, Panic, Div {
+    fn check_refinement_literal(self, span: Span, ty: TypeEntry) -> Checker with Mut, Panic, Div, Alloc, IO {
         if ty.refinement_id < 0 || ty.refinement_id >= 128 { return self }
         let rt = self.refinements.entries[ty.refinement_id as usize]
         var c = self
@@ -18782,7 +19507,7 @@ impl Checker {
                     if fn_sig_id >= 0 {
                         return (c, ty_fn(fn_sig_id))
                     }
-                    let c_err = c.report_error_at(e.span, 137, 0, 0, 0)
+                    let c_err = c.report_undeclared(e.span, e.name)
                     return (c_err, ty_error())
                 }
                 let ident_ty = c.env.lookup(e.name)
@@ -18844,7 +19569,7 @@ impl Checker {
         if enum_idx >= 0 {
             let ei = enum_table_get(self.enums, enum_idx)
             if self.enforce_visibility && !visibility_allows_access(ei.visibility, ei.defining_module, self.current_module, self.crate_root) {
-                let c = self.report_error_at(e.span, 177, 0, 0, 0)
+                let c = self.report_private_enum(e.span, enum_idx, first_name)
                 return (c, ty_named(first_name))
             }
             (self, ty_named(first_name))
@@ -18854,7 +19579,7 @@ impl Checker {
             if variant_enum_idx >= 0 {
                 let ei = enum_table_get(self.enums, variant_enum_idx)
                 if self.enforce_visibility && !visibility_allows_access(ei.visibility, ei.defining_module, self.current_module, self.crate_root) {
-                    let c = self.report_error_at(e.span, 177, 0, 0, 0)
+                    let c = self.report_private_enum(e.span, variant_enum_idx, first_name)
                     return (c, ty_named(ei.name))
                 }
                 (self, ty_named(ei.name))
@@ -19304,7 +20029,7 @@ impl Checker {
                 let si = struct_table_get(c.structs, struct_idx)
                 let field_ty = field_info_list_find(si.fields, e.name)
                 if field_ty.kind == TypeKind::TyError && !field_info_list_has(si.fields, e.name) {
-                    c = c.report_error_at(e.span, 12, 0, 0, 0)
+                    c = c.report_no_field(e.span, e.name, base_ty)
                 }
                 (c, field_ty)
             } else {
@@ -19330,7 +20055,7 @@ impl Checker {
                 // "confidence" — IR field 2.
                 (c, ty_f64())
             } else {
-                c = c.report_error_at(e.span, 12, 0, 0, 0)
+                c = c.report_no_field(e.span, e.name, base_ty)
                 (c, ty_error())
             }
         } else if base_ty.kind == TypeKind::TyIntervention {
@@ -19343,7 +20068,7 @@ impl Checker {
             } else if name_matches_str7(e.name, 101, 112, 115, 105, 108, 111, 110) {
                 (c, ty_f64())
             } else {
-                c = c.report_error_at(e.span, 12, 0, 0, 0)
+                c = c.report_no_field(e.span, e.name, base_ty)
                 (c, ty_error())
             }
         } else if base_ty.kind == TypeKind::TyCounterfactual {
@@ -19356,7 +20081,7 @@ impl Checker {
             } else if name_matches_str7(e.name, 101, 112, 115, 105, 108, 111, 110) {
                 (c, ty_f64())
             } else {
-                c = c.report_error_at(e.span, 12, 0, 0, 0)
+                c = c.report_no_field(e.span, e.name, base_ty)
                 (c, ty_error())
             }
         } else if base_ty.kind == TypeKind::TyValidated {
@@ -19369,7 +20094,7 @@ impl Checker {
             } else if name_matches_str7(e.name, 101, 112, 115, 105, 108, 111, 110) {
                 (c, ty_f64())
             } else {
-                c = c.report_error_at(e.span, 12, 0, 0, 0)
+                c = c.report_no_field(e.span, e.name, base_ty)
                 (c, ty_error())
             }
         } else if base_ty.kind == TypeKind::TyHyper {
@@ -19388,7 +20113,7 @@ impl Checker {
                 if name_matches_str4(e.name, 114, 101, 97, 108) { (c, inner_ty) }
                 else if name_matches_str4(e.name, 105, 109, 97, 103) { (c, inner_ty) }
                 else {
-                    c = c.report_error_at(e.span, 12, 0, 0, 0)
+                    c = c.report_no_field(e.span, e.name, base_ty)
                     (c, ty_error())
                 }
             // Quaternion fields
@@ -19399,7 +20124,7 @@ impl Checker {
                 else if name_matches_str1(e.name, 121) { (c, inner_ty) }
                 else if name_matches_str1(e.name, 122) { (c, inner_ty) }
                 else {
-                    c = c.report_error_at(e.span, 12, 0, 0, 0)
+                    c = c.report_no_field(e.span, e.name, base_ty)
                     (c, ty_error())
                 }
             } else {
@@ -19427,20 +20152,20 @@ impl Checker {
                     let si = struct_table_get(c.structs, struct_idx)
                     let field_ty = field_info_list_find(si.fields, e.name)
                     if field_ty.kind == TypeKind::TyError && !field_info_list_has(si.fields, e.name) {
-                        c = c.report_error_at(e.span, 12, 0, 0, 0)
+                        c = c.report_no_field(e.span, e.name, base_ty)
                     }
                     (c, field_ty)
                 } else {
                     (c, ty_error())
                 }
             } else {
-                c = c.report_error_at(e.span, 12, 0, 0, 0)
+                c = c.report_no_field(e.span, e.name, base_ty)
                 (c, ty_error())
             }
         } else if is_error_or_unknown(base_ty) {
             (c, base_ty)
         } else {
-            c = c.report_error_at(e.span, 12, 0, 0, 0)
+            c = c.report_no_field(e.span, e.name, base_ty)
             (c, ty_error())
         }
     }
@@ -19573,6 +20298,16 @@ impl Checker {
                 c = c.release_call_arg_borrows(e.args, sig.params, call_start_borrows)
                 (c, sig.return_type)
             } else {
+                // A named type which is not a declared struct/enum is an unresolved
+                // function type parameter. Its trait contract was accepted at the
+                // generic declaration boundary, so defer concrete method selection
+                // until monomorphization instead of issuing E011 for `F.er_add`.
+                if type_is_unresolved_type_param_in_tables(c.structs, c.enums, base_ty) {
+                    let call_start_borrows = c.borrows
+                    c = c.check_expr_list_no_type_no_linear_consume(e.args)
+                    c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                    return (c, base_ty)
+                }
                 // Method not found
                 c = c.report_error_at(e.span, 11, 0, 0, 0)
                 // Still check args to accumulate errors
@@ -19714,11 +20449,18 @@ impl Checker {
                 c = c.release_call_arg_borrows(e.args, sig.params, call_start_borrows)
                 (c, sig.return_type)
             } else {
+                if type_is_unresolved_type_param_in_tables(c.structs, c.enums, base_ty) {
+                    let call_start_borrows = c.borrows
+                    c = c.check_expr_list_no_type_no_linear_consume(e.args)
+                    c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                    (c, base_ty)
+                } else {
                 c = c.report_error_at(e.span, 11, 0, 0, 0)
                 let call_start_borrows = c.borrows
                 c = c.check_expr_list_no_type_no_linear_consume(e.args)
                 c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
                 (c, ty_error())
+                }
             }
         } else if base_ty.kind == TypeKind::TyString {
             let call_start_borrows = c.borrows
@@ -20032,7 +20774,15 @@ impl Checker {
                             let extra_pair = c.check_expr(*extra)
                             c = extra_pair.0
                             c = c.report_error_at(e.span, 17, 0, 0, 0)
-                            (c, ty_error())
+                            // The `(c, ty_error())` that used to close this arm was
+                            // DISCARDED — the enclosing match is a statement — and it
+                            // was what made this arm yield a pair while the outer
+                            // `None => {}` yields unit, i.e. the E018. Deleted rather
+                            // than turned into `return (c, ty_error())`: that would
+                            // also typecheck, but it would change behaviour, since the
+                            // code currently reports error 17 and falls through to the
+                            // TyFn check below. Fixing a type error is not the place to
+                            // decide that.
                         }
                         None => {
                             match array_like_ty.inner {
@@ -20048,7 +20798,17 @@ impl Checker {
         if callee_ty.kind == TypeKind::TyFn && callee_ty.fn_sig_id >= 0 {
             let sig = fn_sig_table_get(c.fn_sigs, callee_ty.fn_sig_id)
             if c.enforce_visibility && !visibility_allows_access(sig.visibility, sig.defining_module, c.current_module, c.crate_root) {
-                c = c.report_error_at(e.span, 175, 0, 0, 0)
+                c = c.report_private_fn(e.span, callee_ty.fn_sig_id)
+            }
+            // #1622: calling an `extern "C"` name the native backend does not
+            // implement. Refuse here rather than emit a call that reads 0.
+            // Checked at the CALL, not at the declaration: ffi_libm_call.sio
+            // declares tgamma/pow/floor/ceil and calls only sqrt, and
+            // parser_card_a_raw_pointer_types.sio declares malloc and never
+            // calls it — both compile and pass today, and a declaration-site
+            // refusal would break them for no gain.
+            if sig.is_extern && !name_is_native_backend_builtin(sig.name) {
+                c = c.report_error_at(e.span, 219, 0, 0, 0)
             }
             let call_start_borrows = c.borrows
             var effective_params = fn_param_list_clone(&sig.params)
@@ -20180,7 +20940,7 @@ impl Checker {
                 if (*left_expr).kind == ExprKind::ExprContest {
                     let seeded_pair =
                         if seeded_expected_ty.kind == TypeKind::TyContest { (seeded_checker, seeded_expected_ty) }
-                        else { self.contest_type_seeded_from_audit(audit_info, audit_id, e.span) }
+                        else { contest_type_seeded_from_audit(self, audit_info, audit_id, e.span) }
                     if seeded_pair.1.kind == TypeKind::TyError {
                         seeded_pair
                     } else {
@@ -20189,7 +20949,7 @@ impl Checker {
                 } else if (*left_expr).kind == ExprKind::ExprCall && call_expr_is_builtin_lift_knowledge((*left_expr).left) {
                     let seeded_pair =
                         if seeded_expected_ty.kind == TypeKind::TyContest { (seeded_checker, seeded_expected_ty) }
-                        else { self.contest_type_seeded_from_audit(audit_info, audit_id, e.span) }
+                        else { contest_type_seeded_from_audit(self, audit_info, audit_id, e.span) }
                     if seeded_pair.1.kind == TypeKind::TyError {
                         seeded_pair
                     } else {
@@ -20560,40 +21320,8 @@ impl Checker {
         }
     }
 
-    fn alternative_metric_name(metric_id: i64) -> Name with Mut, Panic, Div {
-        if metric_id == ALTERNATIVE_METRIC_INTERVENTION_COST {
-            make_name("intervention_cost")
-        } else if metric_id == ALTERNATIVE_METRIC_RESIDUAL_TAIL_RISK {
-            make_name("residual_tail_risk")
-        } else if metric_id == ALTERNATIVE_METRIC_MECHANISTIC_DIVERGENCE {
-            make_name("mechanistic_divergence")
-        } else if metric_id == ALTERNATIVE_METRIC_ADMISSIBILITY_MARGIN {
-            make_name("admissibility_margin")
-        } else {
-            make_name("unknown_metric")
-        }
-    }
 
-    fn transition_metric_is_candidate(metric_id: i64) -> bool {
-        metric_id == TRANSITION_METRIC_INTERVENTION_COST
-        || metric_id == TRANSITION_METRIC_RESIDUAL_TAIL_RISK
-        || metric_id == TRANSITION_METRIC_MECHANISTIC_DIVERGENCE
-        || metric_id == TRANSITION_METRIC_ADMISSIBILITY_MARGIN
-    }
 
-    fn transition_metric_to_candidate_metric(metric_id: i64) -> i64 {
-        if metric_id == TRANSITION_METRIC_INTERVENTION_COST {
-            ALTERNATIVE_METRIC_INTERVENTION_COST
-        } else if metric_id == TRANSITION_METRIC_RESIDUAL_TAIL_RISK {
-            ALTERNATIVE_METRIC_RESIDUAL_TAIL_RISK
-        } else if metric_id == TRANSITION_METRIC_MECHANISTIC_DIVERGENCE {
-            ALTERNATIVE_METRIC_MECHANISTIC_DIVERGENCE
-        } else if metric_id == TRANSITION_METRIC_ADMISSIBILITY_MARGIN {
-            ALTERNATIVE_METRIC_ADMISSIBILITY_MARGIN
-        } else {
-            -1
-        }
-    }
 
     fn transition_candidate_metric_pair(self, candidate: AlternativeCandidateInfo, metric_id: i64) -> (i64, f64) with Mut, Panic, Div {
         if transition_metric_is_candidate(metric_id) {
@@ -23134,6 +23862,7 @@ impl Checker {
         let body_ty = body_pair.1
 
         // Restore original effects (handler discharges the effect)
+        c.current_sig_id = 0 - 1
         c.current_effects = saved_effects
         c.current_effect_count = saved_count
 
@@ -23210,6 +23939,7 @@ impl Checker {
         c.env = c.env.pop_scope()
 
         // Restore outer effects context
+        c.current_sig_id = 0 - 1
         c.current_effects = saved_effects
         c.current_effect_count = saved_effect_count
 
@@ -23267,6 +23997,7 @@ impl Checker {
             effect_count: inferred_effect_count,
             is_kernel: false,
             is_epistemic_kernel: false,
+            is_extern: false,
             is_linear_closure: capture_linear,
             linear_capture_count: capture_linear_count,
             epistemic_epsilon: capture_epsilon,
@@ -23336,6 +24067,41 @@ impl Checker {
             Some(te) => self.lower_type_expr(*te)
             None => (self, ty_unknown())
         }
+    }
+}
+
+fn transition_metric_to_candidate_metric(metric_id: i64) -> i64 {
+    if metric_id == TRANSITION_METRIC_INTERVENTION_COST {
+        ALTERNATIVE_METRIC_INTERVENTION_COST
+    } else if metric_id == TRANSITION_METRIC_RESIDUAL_TAIL_RISK {
+        ALTERNATIVE_METRIC_RESIDUAL_TAIL_RISK
+    } else if metric_id == TRANSITION_METRIC_MECHANISTIC_DIVERGENCE {
+        ALTERNATIVE_METRIC_MECHANISTIC_DIVERGENCE
+    } else if metric_id == TRANSITION_METRIC_ADMISSIBILITY_MARGIN {
+        ALTERNATIVE_METRIC_ADMISSIBILITY_MARGIN
+    } else {
+        -1
+    }
+}
+
+fn transition_metric_is_candidate(metric_id: i64) -> bool {
+    metric_id == TRANSITION_METRIC_INTERVENTION_COST
+    || metric_id == TRANSITION_METRIC_RESIDUAL_TAIL_RISK
+    || metric_id == TRANSITION_METRIC_MECHANISTIC_DIVERGENCE
+    || metric_id == TRANSITION_METRIC_ADMISSIBILITY_MARGIN
+}
+
+fn alternative_metric_name(metric_id: i64) -> Name with Mut, Panic, Div {
+    if metric_id == ALTERNATIVE_METRIC_INTERVENTION_COST {
+        make_name("intervention_cost")
+    } else if metric_id == ALTERNATIVE_METRIC_RESIDUAL_TAIL_RISK {
+        make_name("residual_tail_risk")
+    } else if metric_id == ALTERNATIVE_METRIC_MECHANISTIC_DIVERGENCE {
+        make_name("mechanistic_divergence")
+    } else if metric_id == ALTERNATIVE_METRIC_ADMISSIBILITY_MARGIN {
+        make_name("admissibility_margin")
+    } else {
+        make_name("unknown_metric")
     }
 }
 

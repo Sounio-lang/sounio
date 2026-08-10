@@ -59,9 +59,32 @@ echo "[madaros-corpus] compiler: $MADAROS"
 
 # Only run-pass programs. compile-fail and typecheck-fail tests have their own
 # gates and their verdicts are engine-specific by design.
-mapfile -t PROGRAMS < <(ls tests/run-pass/*.sio 2>/dev/null | sort)
+# Exclude files that are not programs. Library leaves and `//@ ignore` files
+# compile fine and then die with SIGSEGV because the ELF has no entry point --
+# 11 of them sat in the baseline as `run` failures, saying nothing about the
+# compiler. Same blind spot the parity gate had (#1601, #1593).
+#
+# Only these two exclusions. `//@ check-only` is deliberately NOT one: measured
+# on the parity side, 15 check-only files also declare //@ run-pass and have a
+# main, and one check-only file with no run-pass executes and agrees across both
+# engines. The marker says which harness checks the file, not whether it runs.
+#
+# Filtered HERE rather than inside run_one.sh so the count below is the number
+# actually exercised. Reporting 1699 while skipping 11 of them is the kind of
+# misleading instrument this gate exists to catch.
+corpus_is_program() {
+    local f="$1"
+    head -n 8 "$f" | grep -qE '^//@[[:space:]]*ignore\b' && return 1
+    grep -qE '^[[:space:]]*(pub[[:space:]]+)?fn[[:space:]]+main[[:space:]]*\(' "$f"
+}
+mapfile -t ALL_SIO < <(ls tests/run-pass/*.sio 2>/dev/null | sort)
+PROGRAMS=()
+skipped=0
+for f in "${ALL_SIO[@]}"; do
+    if corpus_is_program "$f"; then PROGRAMS+=("$f"); else skipped=$((skipped + 1)); fi
+done
 [[ ${#PROGRAMS[@]} -gt 0 ]] || fail "no programs found under tests/run-pass"
-echo "[madaros-corpus] programs: ${#PROGRAMS[@]}"
+echo "[madaros-corpus] programs: ${#PROGRAMS[@]} (skipped $skipped: //@ ignore or no fn main)"
 
 cat > "$WORK/run_one.sh" <<'INNER'
 #!/usr/bin/env bash
@@ -79,12 +102,29 @@ if ! "$MADAROS" compile "$src" -o "$elf" >/dev/null 2>&1; then
   exit 0
 fi
 chmod +x "$elf" 2>/dev/null
-if ! timeout 30 "$elf" >/dev/null 2>&1; then
-  echo "$name run"
+out="$("$WORK/timeout_run.sh" "$elf")" || { echo "$name run"; exit 0; }
+
+# If the test declares an expected marker, assert it. Exit status alone is not
+# evidence: a CPC 2026 receipt was found compiling, exiting 0 and printing ZERO
+# BYTES under Madaros while lean_single printed the full receipt, and this gate
+# reported it as newly fixed (#1498). A program that produces nothing scored the
+# same as one that produced the right answer.
+marker="$(sed -n 's|^//@ expect-stdout:[[:space:]]*||p' "$src" | head -1)"
+if [ -n "$marker" ]; then
+  case "$out" in
+    *"$marker"*) ;;
+    *) echo "$name stdout" ;;
+  esac
 fi
 exit 0
 INNER
 chmod +x "$WORK/run_one.sh"
+
+cat > "$WORK/timeout_run.sh" <<'TR'
+#!/usr/bin/env bash
+timeout 30 "$1" 2>/dev/null
+TR
+chmod +x "$WORK/timeout_run.sh"
 export MADAROS WORK
 
 printf '%s\n' "${PROGRAMS[@]}" \
@@ -102,7 +142,11 @@ if [[ "$REFRESH" == "1" ]]; then
     echo "#   SOUNIO_MADAROS_CORPUS_BIN=<madaros> SOUNIO_MADAROS_CORPUS_REFRESH=1 \\"
     echo "#     bash scripts/ci/madaros_corpus_regression_gate.sh"
     echo "#"
-    echo "# One entry per failing program: '<name>.sio compile' or '<name>.sio run'."
+    echo "# One entry per failing program:
+#   '<name>.sio compile'  -- did not compile
+#   '<name>.sio run'      -- compiled, non-zero exit or timeout
+#   '<name>.sio stdout'   -- ran fine but did not print its //@ expect-stdout
+#                            marker (165 of 1688 tests declare one)"
     echo "# These are PRE-EXISTING Madaros failures, NOT approvals. Shrinking this"
     echo "# file is the point; the gate blocks only on entries that are NEW."
     cat "$WORK/actual.txt"

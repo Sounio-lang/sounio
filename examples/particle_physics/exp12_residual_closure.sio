@@ -1,0 +1,143 @@
+// examples/particle_physics/exp12_residual_closure.sio
+//
+// EXP12 — Residual-closure ledger (construction, not paper)
+//
+// Single vertical that jointly asserts four pillars closed or still honest:
+//   P1 — imported Z peak under Madaros (NonUnitary effect path)
+//   P2 — confidence gate via call-arg compare (ep_gate)
+//   P3 — collapse ladder: fixed holds, running fails at same ξ
+//   P4 — scheme×approx product residual ordering (EXP11 cell)
+//
+// If any pillar regresses, the ledger fails loudly.
+// Gate: scripts/ci/particle_exp12_residual_closure_gate.sh
+
+use particle_physics::sm_params::{mass_z}
+use particle_physics::nonunitary::{
+    eemm_z_peak_xsec_nu, nu_collapse_test, nu_scheme_approx_cell,
+    SCHEME_FIXED_WIDTH, SCHEME_RUNNING_WIDTH,
+    COLLAPSE_HOLDS, COLLAPSE_FAILS_WIDTH_SCHEME,
+}
+use epistemic::knowledge::{ep_val, ep_variance, ep_new, ep_gate}
+
+fn f_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    if g > 1.0 { g = x / 2.0 }
+    var i: i64 = 0
+    while i < 40 {
+        g = 0.5 * (g + x / g)
+        i = i + 1
+    }
+    g
+}
+
+fn pass_if(cond: bool, tag: i64) -> i64 with IO {
+    if cond {
+        print("PASS ")
+        print_int(tag)
+        print("\n")
+        1
+    } else {
+        print("FAIL ")
+        print_int(tag)
+        print("\n")
+        0
+    }
+}
+
+fn main() -> i32 with IO, NonUnitary, Mut, Div, Panic {
+    print("PARTICLE_EXP12_BEGIN\n")
+    print("EXP12_CLAIM residual_closure_ledger_p1_peak_p2_gate_p3_collapse_p4_product\n")
+    var n: i64 = 0
+    var bits: i64 = 0
+
+    // P1 — imported peak
+    let peak = eemm_z_peak_xsec_nu(0.08399, 0.08399, 2.4952)
+    let pval = ep_val(&peak)
+    let pvar = ep_variance(&peak)
+    print("EXP12_PEAK_VAL ")
+    print_f64(pval)
+    print("\n")
+    print("EXP12_PEAK_VAR ")
+    print_f64(pvar)
+    print("\n")
+    let p1 = pval > 1.0e-7 && pval < 1.0e-4 && pvar > 0.0
+    n = n + pass_if(p1, 2001)
+    if p1 { bits = bits + 1 }
+
+    // P2 — ep_gate on synthetic conf=846
+    let e = ep_new(1.0, 0.01, 846)
+    let g800 = ep_gate(&e, 800)
+    let g9999 = ep_gate(&e, 9999)
+    print("EXP12_GATE_800 ")
+    print_int(g800)
+    print("\n")
+    print("EXP12_GATE_9999 ")
+    print_int(g9999)
+    print("\n")
+    let p2 = g800 == 1 && g9999 == 0
+    n = n + pass_if(p2, 2002)
+    if p2 { bits = bits + 2 }
+
+    // P3 — collapse ladder at ξ=2
+    let mz = mass_z().val()
+    let gz = 2.4952
+    let xi = 2.0
+    let tol = 1.0e-3
+    let c_fix = nu_collapse_test(SCHEME_FIXED_WIDTH(), xi, mz, gz, 0.0, 0.0, 0.0, tol)
+    let c_run = nu_collapse_test(SCHEME_RUNNING_WIDTH(), xi, mz, gz, 0.0, 0.0, 0.0, tol)
+    print("EXP12_COLLAPSE_FIXED ")
+    print_int(c_fix.status)
+    print("\n")
+    print("EXP12_COLLAPSE_RUN ")
+    print_int(c_run.status)
+    print("\n")
+    let p3 = c_fix.status == COLLAPSE_HOLDS() && c_run.status == COLLAPSE_FAILS_WIDTH_SCHEME()
+    n = n + pass_if(p3, 2003)
+    if p3 { bits = bits + 4 }
+
+    // P4 — scheme×approx residual ordering
+    let r_nwa = gz / mz
+    let a_tri = f_sqrt(1.0 + r_nwa * r_nwa + 0.09)
+    let cell0 = nu_scheme_approx_cell(SCHEME_FIXED_WIDTH(), xi, mz, gz, 0.0, 0.0, 0.0, tol, 0, 0.0, 0)
+    let cell_t = nu_scheme_approx_cell(SCHEME_FIXED_WIDTH(), xi, mz, gz, 0.0, 0.0, 0.0, tol, 7, a_tri, 1)
+    print("EXP12_CELL_EMPTY ")
+    print_f64(cell0.cell_residual)
+    print("\n")
+    print("EXP12_CELL_TRI ")
+    print_f64(cell_t.cell_residual)
+    print("\n")
+    let p4 = cell0.fails == 0 && cell_t.fails == 0 && cell_t.cell_residual > cell0.cell_residual && cell_t.approx_tension == 1
+    n = n + pass_if(p4, 2004)
+    if p4 { bits = bits + 8 }
+
+    let expected: i64 = 4
+    print("EXP12_LEDGER_JSON {")
+    print("\"schema\":\"particle.exp12.residual_closure.v1\",")
+    print("\"bits\":")
+    print_int(bits)
+    print(",\"peak_val\":")
+    print_f64(pval)
+    print(",\"gate800\":")
+    print_int(g800)
+    print(",\"collapse_fixed\":")
+    print_int(c_fix.status)
+    print(",\"collapse_run\":")
+    print_int(c_run.status)
+    print(",\"cell_empty\":")
+    print_f64(cell0.cell_residual)
+    print(",\"cell_tri\":")
+    print_f64(cell_t.cell_residual)
+    print("}\n")
+
+    print("PARTICLE_EXP12_PASS ")
+    print_int(n)
+    print("\n")
+    if n == expected && bits == 15 {
+        print("PARTICLE_EXP12_OK\n")
+        0
+    } else {
+        print("PARTICLE_EXP12_FAILED\n")
+        1
+    }
+}

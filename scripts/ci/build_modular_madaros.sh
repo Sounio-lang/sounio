@@ -83,7 +83,26 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if [[ -n "${SOUC_BIN:-}" || -n "${SOUNIO_SOUC_BIN:-}" ]]; then
+# The freshness decision must be made on the seed ACTUALLY resolved, not on
+# whether the variable happened to be set. resolve_bootstrap_elf REJECTS `#!`
+# wrappers, so SOUC_BIN=bin/souc -- the wrapper, and the default export in some
+# agent shells -- used to fall through to a committed ELF that lags the source
+# AND skip the derivation meant to compensate for exactly that lag. Result:
+# "import too large for SRC buffer: codegen_plan.sio", then SIGSEGV, ~40 s in.
+# Measured 2026-07-30 while rebuilding to re-confirm the FO GUM stack.
+PROVIDED_SEED=0
+for v in SOUC_BIN SOUNIO_SOUC_BIN; do
+    val="${!v:-}"
+    [[ -n "$val" ]] || continue
+    if [[ "$val" == "$BOOTSTRAP_ELF" ]]; then
+        PROVIDED_SEED=1
+    else
+        echo "warning: $v=$val is not usable as a bootstrap ELF (a '#!' wrapper," \
+             "or missing/non-executable); ignoring it and deriving a seed instead" >&2
+    fi
+done
+
+if [[ $PROVIDED_SEED -eq 1 ]]; then
     SEED="$BOOTSTRAP_ELF"
     echo "→ using provided seed directly (SOUC_BIN/SOUNIO_SOUC_BIN): $SEED"
 else
