@@ -685,7 +685,7 @@ lean_lib «SounioFoMethodXferFragment» where
 @[default_target]
 lean_lib «SounioFoMultimodFragment» where
 
--- Registered by the #1580 split: these four proof files were carried on
+-- Registered by the #1580 split: these proof files were carried on
 -- research/zd-fiber-antisymmetry-lemma-20260731 together with their lakefile
 -- entries. Adding the files without the entries would put unbuilt .lean in
 -- formal/lean4/ -- present in the tree and proven by nothing.
@@ -698,5 +698,3 @@ lean_lib «SounioSeamFlip» where
 @[default_target]
 lean_lib «SounioZDChi» where
 
-@[default_target]
-lean_lib «SounioZDCollapse» where
