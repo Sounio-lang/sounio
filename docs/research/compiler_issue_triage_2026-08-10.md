@@ -478,6 +478,22 @@ attempt starts from the ratchet output rather than rediscovering it.
 their own acceptance tests, and blocked on the ratchet; #1531 held pending a decision on its
 108-test delta.
 
+`main` CI at `d9d56436e` (both merges applied) closes exactly on the pre-existing baseline:
+
+| job | result |
+|---|---|
+| Contracts, Sounio Lint, Website, Impact | success |
+| Native Self-Host (Linux x86_64) | success |
+| Native Self-Host (macOS arm64) | success |
+| Source-Bootstrap Self-Host (Linux x86_64) | success |
+| **Madaros Current-Source f64 Lowering** (the ratchet) | **success** |
+| Full Test Suite | success |
+| `Lean Proofs` | **failure** — the floating `leanprover/lean4:stable` pin, unchanged from before either merge |
+| `CI Decision` | failure, solely because `Lean Proofs` did |
+
+Every compiler job is green. The one red is the toolchain drift documented above, and it predates
+this work.
+
 
 ## Ranking
 
