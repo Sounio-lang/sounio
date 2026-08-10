@@ -84,3 +84,29 @@ class from measurement into a theorem.
 
 **E4b is where the mathematics is**, and Fable's structural remark is the lead: `8 = 2³` on a cubic
 trace under a doubling whose folding map satisfies `JJᵀ = 2I`. That routes through E2.
+
+## E4b is not a new lemma — it is §57.50's obligation (i), on differences
+
+Chasing E4b to its floor: `tri3_level_transfer` is already a THEOREM (Tier 90) —
+
+    tri3 at level m+1  =  tri3 at level m  +  3·T1 + 3·T2 + T3
+
+with `T1, T2, T3` the three ε-weighted orthant sums, themselves theorems. Taking within-fibre
+differences kills the label-independent inhomogeneity, so what E4b needs is exactly
+
+    3·ΔT1 + 3·ΔT2 + ΔT3  =  7·Δs3 + 24·Δcp2          [95/95 within-fibre pairs, m = 3,4,5]
+
+which is §57.50's obligation (i) restricted to differences. So the DAG collapses further than the
+last revision said: **E4b is not an independent lemma**, it is the evaluation of the ε-sums'
+combination, and Tier 90 already supplies everything except that evaluation.
+
+### The DAG, current
+
+    E1, E2, E6, E8                    PROVED
+    E4a  (cp2 fibre-constant)          assembly of Tiers 95–108 — not yet written
+    E4b  = obligation (i)              THE open lemma: evaluate 3T1 + 3T2 + T3
+    E5   (base case at m = j)          open, and where the q-binomial's combinatorial content sits
+    E3   (deviation ignores g)         open, and the dangerous one
+
+Three open, two of them (E4b, E5) being the two Fable named, and E3 being the one that decides
+whether the other two are about the right objects.
