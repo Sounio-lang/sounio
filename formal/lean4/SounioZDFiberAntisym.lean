@@ -17768,4 +17768,80 @@ theorem corePin_WW (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
   grind
 
 
+/-! ### Tier 126 — the rest of `T1` CORE's label-independent terms: `c` pinned, and the corners
+
+    Tier 125 did the four double-pin sums whose free index is `c`.  These are the other four, where
+    `c` is pinned at `0` and the free index is `a` or `b`, plus the four corners.  Same three
+    ingredients: `walk2_value`, Tier 124's re-signings, and `Σσ = H − 2`.
+
+    With these, **all twelve label-independent terms of the CORE expansion are theorems**: eight
+    double pins at `2 − H` each (contributing `8·(8 − 4H) = 64 − 32H` with their `+4` coefficients)
+    and four corners at `1, −1, −1, 1` which cancel against their `−8`.
+
+    What is left of `T1` is the identification of the five single pins with `(M³)₀₀` and `(M³)_WW`
+    (cyclicity, the shape Tier 110's `tri3_epsZero` already did for the symmetric weight), and the
+    carrier expansion of the two `τ`s into `R1, R2, R3` and the rank-one corrections. -/
+
+/-- `(0, f, 0)`: `Σ_b P3(0,b)·P3(b,0)·P3(0,0) = 2 − H`. -/
+theorem corePin_0f0 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun b => P3 0 b W m * (P3 b 0 W m * P3 0 0 W m))
+      = 2 - ((2^(m+1) : Nat) : Int) := by
+  rw [sumLtI_congr _ _ (fun b => P3 0 b W m * P3 b 0 W m)
+        (fun b _ => by rw [P3_zero_zero m W]; grind), walk2_value m W hW]
+
+/-- `(f, 0, 0)`: `Σ_a P3(a,0)·P3(0,0)·P3(0,a) = 2 − H`. -/
+theorem corePin_f00 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun a => P3 a 0 W m * (P3 0 0 W m * P3 0 a W m))
+      = 2 - ((2^(m+1) : Nat) : Int) := by
+  rw [sumLtI_congr _ _ (fun a => P3 0 a W m * P3 a 0 W m)
+        (fun a _ => by rw [P3_zero_zero m W]; grind), walk2_value m W hW]
+
+/-- `(f, W, 0)`: `Σ_a P3(a,W)·P3(W,0)·P3(0,a) = 2 − H`. -/
+theorem corePin_fW0 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun a => P3 a W W m * (P3 W 0 W m * P3 0 a W m))
+      = 2 - ((2^(m+1) : Nat) : Int) := by
+  have hz : P3 W 0 W m = -1 := P3_seam_zero m W hW hW0
+  rw [sumLtI_congr _ _ (fun a => -(sigRow a W))
+        (fun a ha => by
+          rw [hz, P3_colW_eq_row0 m a W ha hW hW0]
+          rcases P3_pm 0 a W m with h | h <;> rw [h] <;> grind),
+      sumLtI_neg, sum_sigRow m W hW]
+  grind
+
+/-- `(W, f, 0)`: `Σ_b P3(W,b)·P3(b,0)·P3(0,W) = 2 − H`. -/
+theorem corePin_Wf0 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun b => P3 W b W m * (P3 b 0 W m * P3 0 W W m))
+      = 2 - ((2^(m+1) : Nat) : Int) := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hs : P3 0 W W m = 1 := P3_zero_seam m W hW hW0
+  have hcong : ∀ b, b < 2^(m+1) →
+      P3 W b W m * (P3 b 0 W m * P3 0 W W m)
+        = (0 - (epsZero b * sigRow b W)) + (if b = 0 then -2 else 0) := by
+    intro b hb
+    rw [hs, P3_rowW_eq_row0 m b W hb hW hW0, P3_col0_eq_neg_row0 m b W hb hW]
+    unfold epsZero sigRow
+    by_cases hb0 : b = 0
+    · subst hb0
+      rw [Nat.zero_xor, if_neg hW0, P3_zero_zero m W]
+      grind
+    · have hne : ¬(b = 0) := hb0
+      rcases P3_pm 0 b W m with h | h <;> rw [h] <;> grind
+  rw [sumLtI_congr _ _ _ hcong, sumLtI_add, sumLtI_single (2^(m+1)) 0 (-2) hp]
+  have hneg : sumLtI (2^(m+1)) (fun b => 0 - (epsZero b * sigRow b W))
+      = - (((2^(m+1) : Nat) : Int) - 4) := by
+    rw [sumLtI_congr _ _ (fun b => -(epsZero b * sigRow b W)) (fun b _ => by grind),
+        sumLtI_neg, sum_epsSig m W hW hW0]
+  rw [hneg]
+  grind
+
+/-- **THE FOUR CORNERS.**  `1, −1, −1, 1`, so with the triple pin's `−8` they cancel outright. -/
+theorem coreCorners (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    P3 0 0 W m * (P3 0 0 W m * P3 0 0 W m)
+      + P3 0 W W m * (P3 W 0 W m * P3 0 0 W m)
+      + P3 W 0 W m * (P3 0 0 W m * P3 0 W W m)
+      + P3 W W W m * (P3 W 0 W m * P3 0 W W m) = 0 := by
+  rw [P3_zero_zero m W, P3_zero_seam m W hW hW0, P3_seam_zero m W hW hW0,
+      P3_diag W W m hW hW hW0]
+  grind
+
 end SounioZDFiberAntisym
