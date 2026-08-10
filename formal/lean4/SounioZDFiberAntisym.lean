@@ -17112,4 +17112,173 @@ theorem quad_level_transfer (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
   rw [quadSplit m W hW hW0, blockC_eq_blockB m W hW hW0, blockD_value m W hW hW0, hB]
   grind
 
+/-! ### Tier 117 — the three SINGLE SUMS the `B` block turns on
+
+    §57.76 reduced `B` to four single sums, one immediate and three measured.  This tier proves the
+    three, and none of them needs new machinery: they all come from the cocycle's own reduction
+    lemmas, `R_ul`/`R_lu` to drop a level and `A4_sub`/`A4_sub'` to move an argument.
+
+    Two reductions do the work.  Writing `σ` for `cdSigma` and using `hi 0 W m = W + 2^(m+1)`,
+    `hi W W m = 2^(m+1)`:
+
+      `P3 0 c W m = −σ(W, c)` at level `m+1`, for `c ≠ 0`        (`P3_row0_reduce`)
+      `P3 c W W m = −σ(c ⊕ W, W)` at level `m+1`, every `c`      (`P3_colW_reduce`)
+
+    so every product below is a product of two level-`(m+1)` cocycle entries, and one application
+    each of `A4_sub` and `A4_sub'` turns it into a square:
+
+      `σ(W, x) · σ(x ⊕ W, W) = 1`   off `x ∈ {0, W}`             (`sigma_seam_pair`)
+
+    From that the three pointwise laws and their sums follow.  All three hold at EVERY label, the
+    maximal seam included — the seam is not special for any of them. -/
+
+/-- Row `0` of `P3`, one level down. -/
+theorem P3_row0_reduce (m c W : Nat) (hc : c < 2^(m+1)) (hW : W < 2^(m+1)) (hc0 : c ≠ 0) :
+    P3 0 c W m = - cdSigma W c (m+1) := by
+  unfold P3 hi
+  rw [Nat.zero_xor, cdSig0 _ (m+1), R_ul W c m hW hc, if_neg hc0]
+  grind
+
+/-- Column `W` of `P3`, one level down. -/
+theorem P3_colW_reduce (m c W : Nat) (hc : c < 2^(m+1)) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    P3 c W W m = - cdSigma (c ^^^ W) W (m+1) := by
+  have hcW : c ^^^ W < 2^(m+1) := xorlt hc hW
+  have hpos : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  unfold P3 hi
+  rw [Nat.xor_self, R_lu c 0 m hc hpos, cdSig0 c m, R_ul (c ^^^ W) W m hcW hW, if_neg hW0]
+  grind
+
+/-- **THE SEAM PAIR IS A SQUARE.**  One `A4_sub` and one `A4_sub'`. -/
+theorem sigma_seam_pair (m x W : Nat) (hx : x < 2^(m+1)) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
+    (hx0 : x ≠ 0) (hxW : x ≠ W) :
+    cdSigma W x (m+1) * cdSigma (x ^^^ W) W (m+1) = 1 := by
+  have hxWl : x ^^^ W < 2^(m+1) := xorlt hx hW
+  have hxW0 : x ^^^ W ≠ 0 := fun h => hxW (xor_zero_eq x W h)
+  have hback : (x ^^^ W) ^^^ W = x := xor_cancel x W
+  have hWx0 : W ^^^ x ≠ 0 := by
+    intro h; exact hxW ((xor_zero_eq W x h).symm)
+  have h1 : cdSigma (x ^^^ W) W (m+1) = - cdSigma (x ^^^ W) x (m+1) := by
+    have := A4_sub' (m+1) (x ^^^ W) W hxWl hW hxW0 hW0 (by rw [hback]; exact hx0)
+    rw [this, hback]
+  have h2 : cdSigma W x (m+1) = - cdSigma (x ^^^ W) x (m+1) := by
+    have := A4_sub (m+1) W x hW hx hW0 hx0 hWx0
+    rw [this, Nat.xor_comm W x]
+  rw [h1, h2]
+  rcases cdSigma_pm (m+1) (x ^^^ W) x with h | h <;> rw [h] <;> grind
+
+/-- **LAW (b).**  `P3(0,b)·P3(b,W) = 1` off `b = W`, `−1` at it. -/
+theorem P3_row0_colW_law (m b W : Nat) (hb : b < 2^(m+1)) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    P3 0 b W m * P3 b W W m = if b = W then -1 else 1 := by
+  by_cases hbW : b = W
+  · rw [if_pos hbW, hbW, P3_zero_seam m W hW hW0, P3_diag W W m hW hW hW0]
+    grind
+  · rw [if_neg hbW]
+    by_cases hb0 : b = 0
+    · subst hb0
+      rw [P3_zero_zero m W, P3_zero_seam m W hW hW0]
+      grind
+    · rw [P3_row0_reduce m b W hb hW hb0, P3_colW_reduce m b W hb hW hW0]
+      have := sigma_seam_pair m b W hb hW hW0 hb0 hbW
+      grind
+
+/-- **LAW (a).**  `P3(0,c)·P3(W,c) = 1` off `c ∈ {0, W}`, `−1` on it. -/
+theorem P3_row0_rowW_law (m c W : Nat) (hc : c < 2^(m+1)) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    P3 0 c W m * P3 W c W m = if c = 0 then -1 else if c = W then -1 else 1 := by
+  by_cases hc0 : c = 0
+  · subst hc0
+    rw [if_pos rfl, P3_zero_zero m W, P3_seam_zero m W hW hW0]
+    grind
+  · rw [if_neg hc0]
+    have hsym : P3 W c W m = P3 c W W m := P3_symm W c W m hW hc hW hW0 hc0
+    rw [hsym]
+    exact (P3_row0_colW_law m c W hc hW hW0).trans (by grind)
+
+/-- **LAW (c).**  The row-`0` vector ANTI-correlates along the coset shift: `−1` off `{0, W}`. -/
+theorem P3_row0_coset_law (m b W : Nat) (hb : b < 2^(m+1)) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    P3 0 b W m * P3 0 (b ^^^ W) W m = if b = 0 then 1 else if b = W then 1 else -1 := by
+  have hbW : b ^^^ W < 2^(m+1) := xorlt hb hW
+  by_cases hb0 : b = 0
+  · subst hb0
+    rw [if_pos rfl, Nat.zero_xor, P3_zero_zero m W, P3_zero_seam m W hW hW0]
+    grind
+  · rw [if_neg hb0]
+    by_cases hbq : b = W
+    · rw [if_pos hbq, hbq, Nat.xor_self, P3_zero_zero m W, P3_zero_seam m W hW hW0]
+      grind
+    · rw [if_neg hbq]
+      have hbW0 : b ^^^ W ≠ 0 := fun h => hbq (xor_zero_eq b W h)
+      rw [P3_row0_reduce m b W hb hW hb0, P3_row0_reduce m (b ^^^ W) W hbW hW hbW0]
+      have h1 : cdSigma W b (m+1) = - cdSigma W (b ^^^ W) (m+1) := by
+        have hWb0 : W ^^^ b ≠ 0 := by intro h; exact hbq ((xor_zero_eq W b h).symm)
+        have := A4_sub' (m+1) W b hW hb hW0 hb0 hWb0
+        rw [this, Nat.xor_comm W b]
+      rw [h1]
+      rcases cdSigma_pm (m+1) W (b ^^^ W) with h | h <;> rw [h] <;> grind
+
+/-- **SUM (a).**  `Σ_c P3(0,c)·P3(W,c) = 2^(m+1) − 4`. -/
+theorem sum_row0_rowW (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun c => P3 0 c W m * P3 W c W m)
+      = ((2^(m+1) : Nat) : Int) - 4 := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hz : (0:Nat) ≠ W := fun h => hW0 h.symm
+  have h1 : sumLtI (2^(m+1)) (fun c => P3 0 c W m * P3 W c W m)
+      = sumLtI (2^(m+1)) (fun c =>
+          (1 - (if c = 0 then 2 else 0)) - (if c = W then 2 else 0)) := by
+    refine sumLtI_congr _ _ _ (fun c hc => ?_)
+    rw [P3_row0_rowW_law m c W hc hW hW0]
+    grind
+  rw [h1, sumLtI_sub, sumLtI_sub, sumLtI_one,
+      sumLtI_single (2^(m+1)) 0 2 hp, sumLtI_single (2^(m+1)) W 2 hW]
+  grind
+
+/-- **SUM (b).**  `Σ_b P3(0,b)·P3(b,W) = 2^(m+1) − 2`. -/
+theorem sum_row0_colW (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun b => P3 0 b W m * P3 b W W m)
+      = ((2^(m+1) : Nat) : Int) - 2 := by
+  have h1 : sumLtI (2^(m+1)) (fun b => P3 0 b W m * P3 b W W m)
+      = sumLtI (2^(m+1)) (fun b => 1 - (if b = W then 2 else 0)) := by
+    refine sumLtI_congr _ _ _ (fun b hb => ?_)
+    rw [P3_row0_colW_law m b W hb hW hW0]
+    grind
+  rw [h1, sumLtI_sub, sumLtI_one, sumLtI_single (2^(m+1)) W 2 hW]
+
+/-- The coset sum's summand, with the weights `B` actually carries. -/
+theorem P3_row0_coset_weighted (m b W : Nat) (hb : b < 2^(m+1)) (hW : W < 2^(m+1))
+    (hW0 : W ≠ 0) :
+    epsZero b * (sigRow b W * (sigRow (b ^^^ W) W * (P3 0 b W m * P3 0 (b ^^^ W) W m)))
+      = -1 + (if b = 0 then 2 else 0) := by
+  rw [P3_row0_coset_law m b W hb hW hW0]
+  unfold epsZero sigRow
+  by_cases hb0 : b = 0
+  · subst hb0
+    rw [Nat.zero_xor, Nat.xor_self]
+    grind
+  · by_cases hbW : b = W
+    · rw [hbW, Nat.xor_self, Nat.zero_xor]
+      have : ¬(W = 0) := hW0
+      grind
+    · have h1 : b ^^^ W ≠ 0 := fun h => hbW (xor_zero_eq b W h)
+      have h2 : (b ^^^ W) ^^^ W = b := xor_cancel b W
+      rw [h2]
+      grind
+
+/-- **SUM (c).**  The weighted coset sum is `2 − 2^(m+1)`. -/
+theorem sum_row0_coset (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun b =>
+        epsZero b * (sigRow b W * (sigRow (b ^^^ W) W * (P3 0 b W m * P3 0 (b ^^^ W) W m))))
+      = 2 - ((2^(m+1) : Nat) : Int) := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have h1 : sumLtI (2^(m+1)) (fun b =>
+        epsZero b * (sigRow b W * (sigRow (b ^^^ W) W * (P3 0 b W m * P3 0 (b ^^^ W) W m))))
+      = sumLtI (2^(m+1)) (fun b => (0 - 1) + (if b = 0 then 2 else 0)) :=
+    sumLtI_congr _ _ _ (fun b hb => by
+      rw [P3_row0_coset_weighted m b W hb hW hW0]; grind)
+  rw [h1, sumLtI_add, sumLtI_single (2^(m+1)) 0 2 hp]
+  have h2 : sumLtI (2^(m+1)) (fun _ : Nat => (0:Int) - 1)
+      = - ((2^(m+1) : Nat) : Int) := by
+    rw [sumLtI_congr (2^(m+1)) _ (fun _ => -(1:Int)) (fun i _ => by grind), sumLtI_neg,
+        sumLtI_one]
+  rw [h2]
+  grind
+
 end SounioZDFiberAntisym
