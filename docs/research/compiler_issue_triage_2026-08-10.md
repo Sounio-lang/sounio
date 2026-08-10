@@ -45,7 +45,10 @@ seconds" but fails to terminate at all.
 3. `formal/lean4/lean-toolchain` pins a floating `leanprover/lean4:stable`, so the proofs gate
    breaks on toolchain drift and blames whichever commit merges next.
 
-**Landed:** #1490 (verified clean — every compiler job green on `main` before and after).
+**Landed:** #1490. Every compiler job is green on `main` before and after it — `Contracts`,
+`Sounio Lint`, `Native Self-Host` (Linux and macOS), `Source-Bootstrap Self-Host`, and
+`Madaros Current-Source f64 Lowering`. `main` *is* red, on `Lean Proofs` only, from the floating
+toolchain pin described below and not from this merge.
 
 **Verified but not landed:** #1501, #1493, #1508, each restacked onto `main` and passing its own
 acceptance tests, jointly and individually.
