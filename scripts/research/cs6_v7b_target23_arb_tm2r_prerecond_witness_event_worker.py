@@ -105,13 +105,10 @@ def reconstruct_witness(
     raw_projection, chart, captured_count = prior.capture_accepted_raw_projection(
         state, center
     )
-    # The capture helper intentionally restores the production point
-    # reconditioner; this diagnostic must restore the frozen six-variable
-    # lineage policy before any witness split or event projection.
-    # Replay the frozen production path through the raw event capture first.
-    # reconstruct_witness switches to the lineage-preserving policy immediately
-    # after that capture and before the new witness-local work begins.
-    base.recondition = adaptive.point_coefficient_recondition
+    # The capture helper restores the production point reconditioner. Switch to
+    # the frozen six-variable lineage policy before any new witness split or
+    # event projection.
+    base.recondition = prior.lineage_preserving_recondition
     bool_check(checks, "raw_projection_capture_is_unique", captured_count == 1)
     bool_check(checks, "prerecond_event_replay_is_accepted", chart.get("accepted") is True)
     root_domain = prior.critical_domain()
@@ -399,7 +396,10 @@ def main() -> None:
         raise SystemExit("witness event diagnostic requires Python >= 3.10")
     base.SOURCE_DEGREE = 2
     base.TIME_TAYLOR_ORDER = 12
-    base.recondition = prior.lineage_preserving_recondition
+    # Replay the frozen production path through the raw event capture first.
+    # reconstruct_witness switches to lineage preservation immediately after
+    # that capture and before the new witness-local work begins.
+    base.recondition = adaptive.point_coefficient_recondition
     event.MAX_PHASE_STEPS = composability.MAX_FIRST_RETURN_STEPS
 
     source_path = Path(__file__)
@@ -416,6 +416,11 @@ def main() -> None:
         / "prerecond_transport.json"
     )
     checks: list[dict[str, object]] = []
+    bool_check(
+        checks,
+        "production_reconditioner_active_before_replay",
+        base.recondition is adaptive.point_coefficient_recondition,
+    )
     if not prerecond_receipt.is_file():
         raise SystemExit(f"frozen preconditioned event receipt is missing: {prerecond_receipt}")
     if not transport_receipt.is_file():

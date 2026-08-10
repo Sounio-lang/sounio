@@ -68,6 +68,14 @@ def remove_lineage_control(payload: dict[str, object]) -> None:
     ]
 
 
+def remove_production_control(payload: dict[str, object]) -> None:
+    payload["implementation_checks"] = [
+        item
+        for item in payload["implementation_checks"]
+        if item.get("name") != "production_reconditioner_active_before_replay"
+    ]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("receipt", type=Path)
@@ -98,6 +106,7 @@ def main() -> None:
         "check": flip_check,
         "duplicate_check": duplicate_check,
         "lineage_control": remove_lineage_control,
+        "production_control": remove_production_control,
         "boundary": set_diag("production_boundary_reproduced", False),
         "last_negative": corrupt_last_negative,
         "first_tube": corrupt_first_tube,

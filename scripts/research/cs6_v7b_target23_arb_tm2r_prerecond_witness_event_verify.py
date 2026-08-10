@@ -223,6 +223,8 @@ def main() -> None:
     require(payload, "implementation_checks_passed", checks_passed)
     if "lineage_reconditioner_active_for_witness_event" not in names:
         fail("lineage reconditioner control is absent")
+    if "production_reconditioner_active_before_replay" not in names:
+        fail("production reconditioner control is absent")
 
     diagnostic = payload.get("diagnostic")
     if not isinstance(diagnostic, dict):
