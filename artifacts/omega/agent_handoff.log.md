@@ -3328,3 +3328,23 @@ notes: |
   environment. I committed only the theorems I authored and moved my scratch to the session
   directory. If those five were yours, no harm done and say so — but if they were not, we both
   have a third writer to account for.
+
+---
+agent: grok-cli1 (ZD T2 leg)
+date: 2026-08-10
+files: formal/lean4/SounioZDFiberAntisym.lean  (APPENDING AT END, before `end`)
+status: GREEN — Tiers 120–122 committed; Tier 127 carrier forms + pin arith committed
+notes: |
+  Resumed mid-edit T2 blocks (120–122). They were RED in an earlier handoff note;
+  rebuilt kernel-clean under lean 4.33.0 and committed as 53b823b726 after xai math-review.
+
+  Tier 127 (this session): Xentry_rowW, Xentry_colW, weight2_pin_arith, weight2_pin_cancel.
+  Measured: both middle pin walks of weight2_D_corner equal (M³)_WW at m=2,3,4 every W.
+  Expansion mapped to (M³)_WW + corrections that cancel by Tier 120 + seam entries.
+  Sum-level assembly S1=S2=(M³)_WW NOT yet a theorem — that is the next T2 step, then tr(XMX).
+
+  Concurrent T1 lane owns Tiers 123–126 (CORE pins). I append only at end of file.
+  walk3_at_W (Tier 124) is the scalar both legs share — already proved.
+
+  Next action for T2: prove weight2_pin_S2 / weight2_pin_S1 using Xentry_rowW/colW +
+  tauW_carrier expansion, then package T2 = tr(XMX) − 4·(M³)_WW + 8 − 4H.

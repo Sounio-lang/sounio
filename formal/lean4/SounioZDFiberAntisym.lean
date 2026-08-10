@@ -18274,4 +18274,82 @@ theorem coreCorners (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
       P3_diag W W m hW hW hW0]
   grind
 
+
+/-! ### Tier 127 — the D-pin's middle walks: carrier forms and the cancellation that closes them
+
+    `weight2_D_corner` left three walks.  Measured (`m = 2,3,4`, every label including the
+    maximal seam): both middle pins equal `(M³)_WW`, so
+
+      `T2 = tr(X M X) − 4·(M³)_WW + 8 − 4H`.
+
+    The expansion that proves it, once the free factor is replaced by the carrier, is
+
+      `S₂ = (M³)_WW + 2(M²)_{0W} + 2(M Π_W M)_WW + 4·P3(W,W) + 4·P3(W,0) + 8`
+
+    and the three constant walks of Tier 120 plus the two seam entries cancel the correction:
+
+      `2(H−2) + 2(−(H−2)) + 4(−1) + 4(−1) + 8 = 0`     (`weight2_pin_arith`)
+
+    This tier lands the two carrier specialisations the expansion needs, and the free-integer
+    cancellation.  The sum-level assembly that turns those into `S₁ = S₂ = (M³)_WW` is the next
+    step (same shape as Tiers 110/116/119). -/
+
+/-- Seam-row form of the carrier: `X(W,a) = P3(W,a) + 2·[a = 0]`.
+    `W ≠ 0` kills the rank-one corner of `tauW_carrier`. -/
+theorem Xentry_rowW (m a W : Nat) (ha : a < 2^(m+1)) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    Xentry m W a W = P3 W a W m + (if a = 0 then 2 else 0) := by
+  unfold Xentry
+  have h := tauW_carrier m W a W hW ha hW hW0
+  have hWW : W ^^^ W = 0 := Nat.xor_self W
+  have hne : ¬(W = 0 ∧ a = W) := fun ⟨hW0', _⟩ => hW0 hW0'
+  rw [h, hWW, if_neg hne]
+  -- after `hWW`, the coset indicator is `if a = 0`; the rank-one is gone
+  by_cases ha0 : a = 0 <;> (simp only [ha0, ↓reduceIte]; grind)
+
+/-- Seam-column form of the carrier: `X(a,W) = P3(a,W) − 2·[a = 0]`.
+    The coset indicator fires at `a = 0` and the rank-one corner subtracts `4` there, net `−2`. -/
+theorem Xentry_colW (m a W : Nat) (ha : a < 2^(m+1)) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    Xentry m a W W = P3 a W W m + (if a = 0 then -2 else 0) := by
+  unfold Xentry
+  have h := tauW_carrier m a W W ha hW hW hW0
+  by_cases ha0 : a = 0
+  · subst ha0
+    have hz : 0 ^^^ W = W := Nat.zero_xor W
+    rw [h, hz, if_pos rfl, if_pos ⟨rfl, rfl⟩]
+    grind
+  · have hne_cos : ¬(W = a ^^^ W) := by
+      intro e
+      -- W = a ⊕ W  ⇒  xor both sides by W  ⇒  0 = a
+      have h1 : W ^^^ W = (a ^^^ W) ^^^ W := congrArg (· ^^^ W) e
+      rw [Nat.xor_self, xor_cancel a W] at h1
+      exact ha0 h1.symm
+    have hne4 : ¬(a = 0 ∧ W = W) := fun hh => ha0 hh.1
+    rw [h, if_neg hne_cos, if_neg hne4, if_neg ha0]
+    grind
+
+/-- Arithmetic cancellation for the middle-pin expansion: the five correction terms sum to `0`.
+    Stated over free integers so it is available the moment the sum-level expansion is a theorem. -/
+theorem weight2_pin_arith (H m3 w20 mPiM : Int)
+    (hw2 : w20 = H - 2) (hm : mPiM = -(H - 2)) :
+    m3 + 2 * w20 + 2 * mPiM + 4 * (-1) + 4 * (-1) + 8 = m3 := by
+  rw [hw2, hm]; grind
+
+/-- Packaged: the three constant walks plus the two seam entries cancel the pin correction. -/
+theorem weight2_pin_cancel (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
+    (m3 : Int) :
+    m3
+      + 2 * sumLtI (2^(m+1)) (fun c => P3 0 c W m * P3 c W W m)
+      + 2 * sumLtI (2^(m+1)) (fun b => P3 W b W m * P3 (b ^^^ W) W W m)
+      + 4 * P3 W W W m
+      + 4 * P3 W 0 W m
+      + 8
+    = m3 := by
+  have hw2 := walk2_0W m W hW hW0
+  have hm := walk_MPiM_WW m W hW hW0
+  have hd : P3 W W W m = -1 := P3_diag W W m hW hW hW0
+  have hz : P3 W 0 W m = -1 := P3_seam_zero m W hW hW0
+  rw [hw2, hm, hd, hz]
+  grind
+
+
 end SounioZDFiberAntisym
