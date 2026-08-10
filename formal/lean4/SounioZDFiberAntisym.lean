@@ -17676,4 +17676,96 @@ theorem walk3_at_W (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
       sum_sigRow m W hW, hG0, hGW, hsig0, hsigW]
   grind
 
+/-! ### Tier 125 — the `T1` CORE's twelve label-independent terms, PROVED
+
+    Tier 123's pin expansion of `CORE` has 18 terms: one free (`s3`), five single pins (three at `0`
+    and two at `W`, giving `−6(M³)₀₀ − 4(M³)_WW`), eight double pins, and four corners.  This tier
+    kills the last twelve.
+
+    **All eight double-pin sums equal `2 − H`** — the same value as the double walk `(M²)₀₀`, and for
+    the same reason: Tier 124's re-signings turn every one of them into a sum of `ε`, `σ` or `u²`.
+    Three are `walk2_value` re-associated; the other five reduce by
+
+      `P3 W c · P3 c W = ε(c)`         `P3 0 c · P3 c W = σ(c)`
+      `P3 W c · P3 c 0 = −ε(c)σ(c) + 2·[c = 0]·(…)`
+
+    to `Σε = H − 2`, `Σσ = H − 2` and `Σεσ = H − 4`.
+
+    **The four corners are `1, −1, −1, 1`**, so with their `−8` coefficient they cancel outright.
+
+    Net: `CORE = s3 − 6(M³)₀₀ − 4(M³)_WW + 8·(8 − 4H) + 0 = s3 − 6(M³)₀₀ − 4(M³)_WW + 64 − 32H`,
+    with only the single-pin identifications left to write. -/
+
+/-- `Σ_c ε(c) = 2^(m+1) − 2`. -/
+theorem sum_epsZero (m : Nat) :
+    sumLtI (2^(m+1)) (fun c => epsZero c) = ((2^(m+1) : Nat) : Int) - 2 := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have h := sumLtI_epsZero (2^(m+1)) hp (fun _ => (1:Int))
+  rw [sumLtI_one] at h
+  rw [sumLtI_congr (2^(m+1)) _ (fun c => epsZero c * 1) (fun c _ => by grind), h]
+  grind
+
+/-- `P3 W c · P3 c W = ε(c)`: the seam row against the seam column. -/
+theorem P3_rowW_colW (m c W : Nat) (hc : c < 2^(m+1)) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    P3 W c W m * P3 c W W m = epsZero c := by
+  rw [P3_rowW_eq_row0 m c W hc hW hW0, P3_colW_eq_row0 m c W hc hW hW0]
+  rcases P3_pm 0 c W m with h | h <;> rw [h] <;> unfold epsZero sigRow <;> grind
+
+/-- `P3 0 c · P3 c W = σ(c)`: row `0` against the seam column (Tier 117's law (b)). -/
+theorem P3_row0_colW_sig (m c W : Nat) (hc : c < 2^(m+1)) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    P3 0 c W m * P3 c W W m = sigRow c W := by
+  rw [P3_colW_eq_row0 m c W hc hW hW0]
+  rcases P3_pm 0 c W m with h | h <;> rw [h] <;> grind
+
+/-- **THE EIGHT DOUBLE-PIN SUMS.**  Every one is `2 − 2^(m+1)`. -/
+theorem corePin_00 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun c => P3 0 0 W m * (P3 0 c W m * P3 c 0 W m))
+      = 2 - ((2^(m+1) : Nat) : Int) := by
+  rw [sumLtI_congr _ _ (fun c => P3 0 c W m * P3 c 0 W m)
+        (fun c _ => by rw [P3_zero_zero m W]; grind), walk2_value m W hW]
+
+theorem corePin_0W (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun c => P3 0 W W m * (P3 W c W m * P3 c 0 W m))
+      = 2 - ((2^(m+1) : Nat) : Int) := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hs : P3 0 W W m = 1 := P3_zero_seam m W hW hW0
+  have hcong : ∀ c, c < 2^(m+1) →
+      P3 0 W W m * (P3 W c W m * P3 c 0 W m)
+        = (0 - (epsZero c * sigRow c W)) + (if c = 0 then -2 else 0) := by
+    intro c hc
+    rw [hs, P3_rowW_eq_row0 m c W hc hW hW0, P3_col0_eq_neg_row0 m c W hc hW]
+    unfold epsZero sigRow
+    by_cases hc0 : c = 0
+    · subst hc0
+      rw [Nat.zero_xor, if_neg hW0, P3_zero_zero m W]
+      grind
+    · have hne : ¬(c = 0) := hc0
+      rcases P3_pm 0 c W m with h | h <;> rw [h] <;> grind
+  rw [sumLtI_congr _ _ _ hcong, sumLtI_add, sumLtI_single (2^(m+1)) 0 (-2) hp]
+  have hneg : sumLtI (2^(m+1)) (fun c => 0 - (epsZero c * sigRow c W))
+      = - (((2^(m+1) : Nat) : Int) - 4) := by
+    rw [sumLtI_congr _ _ (fun c => -(epsZero c * sigRow c W)) (fun c _ => by grind),
+        sumLtI_neg, sum_epsSig m W hW hW0]
+  rw [hneg]
+  grind
+
+theorem corePin_W0 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun c => P3 W 0 W m * (P3 0 c W m * P3 c W W m))
+      = 2 - ((2^(m+1) : Nat) : Int) := by
+  have hz : P3 W 0 W m = -1 := P3_seam_zero m W hW hW0
+  rw [sumLtI_congr _ _ (fun c => -(sigRow c W))
+        (fun c hc => by rw [hz, P3_row0_colW_sig m c W hc hW hW0]; grind),
+      sumLtI_neg, sum_sigRow m W hW]
+  grind
+
+theorem corePin_WW (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun c => P3 W W W m * (P3 W c W m * P3 c W W m))
+      = 2 - ((2^(m+1) : Nat) : Int) := by
+  have hd : P3 W W W m = -1 := P3_diag W W m hW hW hW0
+  rw [sumLtI_congr _ _ (fun c => -(epsZero c))
+        (fun c hc => by rw [hd, P3_rowW_colW m c W hc hW hW0]; grind),
+      sumLtI_neg, sum_epsZero m]
+  grind
+
+
 end SounioZDFiberAntisym
