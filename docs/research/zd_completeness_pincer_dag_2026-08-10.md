@@ -218,3 +218,14 @@ is not special is that the partner `W + 2^(m+1)` lies outside `c`'s range, which
 structural reason the double walk carries no q-binomial and the triple walk does.
 
 **The T3 leg of E4b is now ONE statement**: `(M³)₀₀ = 32 − 10H − 96·[m−1,2]₂·[W = 2^m]`. See §57.73.
+
+### Step 5 — Tier 112: the T3 leg is ONE quadratic form
+
+`weight3_quad` (kernel-clean, all `W ≠ 0`, all `m`): **`T3 = s3 + 6·Q − 8`**, with
+`Q = Σ_{b,c} P3(0,b)P3(b,c)P3(0,c)` a quadratic form in the row-`0` vector — the object Tier 91 had
+only measured. Route: `P3 c 0 = −P3 0 c + 2·[c=0]` (from Tier 111), which turns the triple walk into
+`−Q + 2·(M²)₀₀`.
+
+`Q` is measured `8H − 28` off the seam and `(H−2)²` at it, via a pointwise law for `ρ_b` with the
+special locus `{0,W} ⊕ {0,2^m}` (236/236 labels). Not proved: `ρ_b = 4` on the bulk is a genuine
+cancellation, so it needs a different technique from Tiers 111–112. See §57.74.

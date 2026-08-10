@@ -6642,3 +6642,49 @@ label's own locus, and the triple walk must.
 #### The T3 leg, remaining
 
 One statement: `(M³)₀₀ = 32 − 10H − 96·[m−1,2]₂·[W = 2^m]`. Everything else in `T3` is proved.
+
+### §57.74 — Tier 112: the triple walk IS a quadratic form, and `T3 = s3 + 6Q − 8`
+
+Tier 111's `P3_row0_col0` says more than it was used for. Since `P3` is `±1`, a product of `−1` off
+index `0` means the column-`0` vector *is* the negated row-`0` vector, corrected at one index:
+
+    P3 c 0 = −P3 0 c + 2·[c = 0]        (`P3_col0_eq_neg_row0`)
+
+Substituting into the closed triple walk collapses it onto the row-`0` vector alone:
+
+    (M³)₀₀ = −Q + 2·(M²)₀₀ = −Q + 2(2 − H),    Q := Σ_{b,c} P3(0,b)·P3(b,c)·P3(0,c)
+
+and hence, with Tiers 110–111, **`T3 = s3 + 6·Q − 8`** (`weight3_quad`, kernel-clean, every
+`W ≠ 0`, every `m`). That is exactly the shape Tier 91 *measured* — "`T3 = S₀ + 6·(u′ᵀM′u′) − 2`" —
+now derived, with the constant coming out of the two index-`0` corrections rather than a fit.
+
+So the `T3` leg is one symmetric scalar: a quadratic form in the row-`0` vector of `P3`.
+
+#### `Q`, measured — and it has a POINTWISE law
+
+Write `u_b = P3(0,b)` and `ρ_b = u_b·(Mu)_b = Σ_c P3(0,b)P3(b,c)P3(0,c)`, so `Q = Σ_b ρ_b`. Over
+**every** label at `m = 3..6` (236/236):
+
+| locus | `ρ_b` |
+|---|---|
+| `b = 0` | `H` |
+| `b ∈ {W, T, W⊕T} \ {0}`, `T = 2^m` | `H − 4` |
+| all other `b` | `4` |
+
+and at the maximal seam `W = T`, where that locus set degenerates, **every** `b ≠ 0` gives `H − 4`.
+Summing:
+
+    Q = H + 3(H−4) + (H−4)·4 = 8H − 28        (off the seam)
+    Q = H + (H−1)(H−4) = (H−2)²               (at W = 2^m)
+
+Two things worth recording. The special locus is the coset union `{0,W} ⊕ {0,T}` — the top bit and
+the label, together — which is *why* the seam is exceptional: at `W = T` the four-element set
+collapses to two. But the collapse is not the whole story, because the bulk value flips from `4` to
+`H − 4` as well; that discontinuity is the q-binomial's entry point, and it is the open part.
+
+And at the seam `Q = (H−2)² = ((M²)₀₀)²` exactly — a perfect square, which is what one expects if
+`P3` is coherent there, as Tier 65 proves.
+
+⚠ `Q` is NOT evaluated in Lean. The pointwise law is measured only; `ρ_b = 4` is a genuine
+cancellation (about half the `c`-summands are `−1`), not a pointwise sign identity, so it will not
+fall to the technique of Tiers 111–112.
