@@ -954,7 +954,7 @@ fn i64_to_string_decimal(n: i64) -> string with Mut, Panic, Div {
     str_from_bytes(out, total_len)
 }
 
-fn int_to_string(n: i64) -> string with Mut, Panic, Div {
+pub(crate) fn int_to_string(n: i64) -> string with Mut, Panic, Div {
     i64_to_string_decimal(n)
 }
 
@@ -1069,6 +1069,81 @@ fn compile_scan_incomplete_assignment(path: string) -> (i64, i64) with IO, Mut, 
     var col: i64 = 1
     while i < size {
         let ch = bytes[i as usize]
+        // Comments and literals are skipped, because this scan is over RAW BYTES and an '=' inside
+        // one is not an assignment. Without this it rejected any file whose last non-whitespace
+        // byte is '=' — which the `// ====...` banner at end of file makes common: 5 versioned
+        // .sio files, among them self-hosted/hlir/lower.sio, a module compiler/main.sio imports.
+        // The module then contributed nothing to the symbol table and its exports surfaced as
+        // E137 "use of undeclared variable" at every call site, blamed on the caller.
+        if ch == (47 as i8) && i + 1 < size && bytes[(i + 1) as usize] == (47 as i8) {
+            while i < size && bytes[i as usize] != (10 as i8) {
+                i = i + 1
+                col = col + 1
+            }
+            continue
+        }
+        if ch == (47 as i8) && i + 1 < size && bytes[(i + 1) as usize] == (42 as i8) {
+            i = i + 2
+            col = col + 2
+            var closed = false
+            while i < size && !closed {
+                if bytes[i as usize] == (42 as i8) && i + 1 < size && bytes[(i + 1) as usize] == (47 as i8) {
+                    i = i + 2
+                    col = col + 2
+                    closed = true
+                } else {
+                    if bytes[i as usize] == (10 as i8) {
+                        line = line + 1
+                        col = 1
+                    } else {
+                        col = col + 1
+                    }
+                    i = i + 1
+                }
+            }
+            continue
+        }
+        if ch == (34 as i8) {
+            i = i + 1
+            col = col + 1
+            var done = false
+            while i < size && !done {
+                let q = bytes[i as usize]
+                if q == (92 as i8) {
+                    i = i + 2
+                    col = col + 2
+                } else {
+                    if q == (34 as i8) {
+                        done = true
+                    }
+                    if q == (10 as i8) {
+                        line = line + 1
+                        col = 1
+                    } else {
+                        col = col + 1
+                    }
+                    i = i + 1
+                }
+            }
+            continue
+        }
+        // A quote is a char literal ONLY in the shapes 'x' and '\x'. An apostrophe also opens a
+        // LIFETIME in this language (`&'static str`, `most_uncertain<'a>` — both live in stdlib),
+        // and skipping from there to the next apostrophe would swallow real code.
+        if ch == (39 as i8) {
+            var char_lit_len: i64 = 0
+            if i + 2 < size && bytes[(i + 1) as usize] != (92 as i8) && bytes[(i + 2) as usize] == (39 as i8) {
+                char_lit_len = 3
+            }
+            if i + 3 < size && bytes[(i + 1) as usize] == (92 as i8) && bytes[(i + 3) as usize] == (39 as i8) {
+                char_lit_len = 4
+            }
+            if char_lit_len > 0 {
+                i = i + char_lit_len
+                col = col + char_lit_len
+                continue
+            }
+        }
         if ch == (61 as i8) { // '='
             var j = i + 1
             while j < size {
@@ -1787,7 +1862,7 @@ fn compiler_ir_ser_write_instr(buf: &![i8; 131072], pos: i64, instr: IrInstr) ->
     p = compiler_ir_ser_write_padding(buf, p, 7)
     p = compiler_ir_ser_write_i8(buf, p, compiler_ir_ser_unary_op_tag(instr.un_op) as i8)
     p = compiler_ir_ser_write_padding(buf, p, 7)
-    p = compiler_ir_ser_write_name(buf, p, instr.name)
+    p = compiler_ir_ser_write_name(buf, p, ir_name_at(instr.name_id))
     p = compiler_ir_ser_write_i64(buf, p, instr.arg_count)
     p
 }
@@ -2049,14 +2124,32 @@ fn compiler_visibility_preflight(source_path: string) -> bool with IO, Mut, Pani
         unresolved_count: 0,
         saturated: false,
         parse_failed: false,
+        parse_failed_path: "",
     }
     if !module_frontend_collect_ast_closure_into(source_path, &!closure) {
+        // Report the field that EXPLAINS the failure, not only the three that
+        // happen to look healthy.
+        //
+        // A dependency parse failure short-circuits the closure walk, so
+        // unresolved_count stays 0 and saturated stays false — the exact values a
+        // healthy-but-small closure has. Printing only those three said "something
+        // is wrong somewhere" and sent readers looking at import resolution, which
+        // was fine. The cause is parse_failed, and it names a file.
+        if closure.parse_failed {
+            print("run_check_mode: module failed to parse: ")
+            print(closure.parse_failed_path)
+            print("\n")
+            print("  note: the closure walk stops at the first parse failure, so the")
+            print(" node/unresolved/saturated counts below describe only what was reached\n")
+        }
         print("run_check_mode: AST closure incomplete nodes=")
         print_int(closure.node_count)
         print(" unresolved=")
         print_int(closure.unresolved_count)
         print(" saturated=")
         if closure.saturated { print("true") } else { print("false") }
+        print(" parse_failed=")
+        if closure.parse_failed { print("true") } else { print("false") }
         print("\n")
         return false
     }
@@ -2120,6 +2213,16 @@ fn compiler_visibility_preflight(source_path: string) -> bool with IO, Mut, Pani
     print("run_check_mode: verdict=")
     print_int(verdict)
     print("\n")
+    // A non-zero verdict is a TYPE error across the merged modules, not a
+    // visibility or parse problem. The caller turns `false` into
+    // "error: visibility preflight failed", which names the stage that ran rather
+    // than the thing that went wrong — a program whose only fault is a bad type
+    // gets told its visibility failed. Say so here, where the distinction is known.
+    if verdict != 0 {
+        print("run_check_mode: type checking failed across ")
+        print_int(closure.node_count)
+        print(" module(s); the diagnostics above name the offending declarations\n")
+    }
     verdict == 0
 }
 
@@ -2139,6 +2242,7 @@ fn run_science_boundary_closure_report(
         unresolved_count: 0,
         saturated: false,
         parse_failed: false,
+        parse_failed_path: "",
     }
     let complete = module_frontend_collect_ast_closure_into(source_path, &!closure)
     println("SOUNIO_BOUNDARY_CLOSURE_V1")
@@ -2148,6 +2252,15 @@ fn run_science_boundary_closure_report(
     if closure.saturated { println("true") } else { println("false") }
     print("parse_failed\t")
     if closure.parse_failed { println("true") } else { println("false") }
+    // Which module. The walker has known this since it stopped
+    // (module_frontend.sio:2421,2435 set parse_failed_path) and the report threw
+    // it away, so a consumer learned THAT the closure broke and had to bisect to
+    // find WHERE. That is how a compiler that could not parse
+    // self-hosted/resolve/scope.sio stayed unattributed.
+    if closure.parse_failed {
+        print("failed_path\t")
+        println(closure.parse_failed_path)
+    }
     var i: i64 = 0
     while i < closure.node_count {
         print("node\t")
@@ -2564,7 +2677,7 @@ fn pkg_run_init(science: bool) with IO {
     println("  4. souc pkg audit")
 }
 
-fn pkg_run_build(path: str) with IO, Div, Panic, Mut {
+fn pkg_run_build(path: string) with IO, Div, Panic, Mut {
     println("Sounio Package Manager (SPM) v0.1.0")
     println("Building: " + path)
     println("")
@@ -2578,7 +2691,7 @@ fn pkg_run_build(path: str) with IO, Div, Panic, Mut {
     println("[pkg] Claim-bearing release requires an explicit claim contract and receipt.")
 }
 
-fn pkg_run_audit(path: str) with IO, Div, Panic, Mut {
+fn pkg_run_audit(path: string) with IO, Div, Panic, Mut {
     println("Sounio Package Manager (SPM) v0.1.0")
     println("=== Package Boundary Guidance ===")
     println("File: " + path)
@@ -2591,7 +2704,7 @@ fn pkg_run_audit(path: str) with IO, Div, Panic, Mut {
     println("Audit complete.")
 }
 
-fn pkg_run_install(name: str, version: str) with IO, Mut, Panic {
+fn pkg_run_install(name: string, version: string) with IO, Mut, Panic {
     println("Sounio Package Manager (SPM) v0.1.0")
     print("Installing: ")
     println(name)
@@ -2616,14 +2729,14 @@ fn pkg_run_publish(dry_run: bool) with IO, Div, Panic, Mut {
     }
 }
 
-fn pkg_run_info(name: str) with IO, Mut, Panic {
+fn pkg_run_info(name: string) with IO, Mut, Panic {
     println("Sounio Package Manager (SPM) v0.1.0")
     print("Package: "); println(name)
     println("")
     println("[pkg] Public registry metadata is unavailable in R0-R2.")
 }
 
-fn pkg_run_search(query: str, min_score: str) with IO, Mut, Panic {
+fn pkg_run_search(query: string, min_score: string) with IO, Mut, Panic {
     println("Sounio Package Manager (SPM) v0.1.0")
     print("Searching: "); println(query)
     if str_len(min_score) > 0 {
@@ -2835,13 +2948,13 @@ fn ir_return_sret(src: i64) -> IrInstr {
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: base.name,
+        name_id: base.name_id,
         call_args: base.call_args,
         arg_count: base.arg_count,
     }
 }
 
-fn ir_call_sret(dst: i64, dest_reg: i64, fn_name: Name, fn_id: i64, arg0: i64, explicit_arg_count: i64) -> IrInstr {
+fn ir_call_sret(dst: i64, dest_reg: i64, fn_name: Name, fn_id: i64, arg0: i64, explicit_arg_count: i64) -> IrInstr with Div, Mut, Panic {
     let base = ir_instr_new(IrOpcode::IrCallSret)
     IrInstr {
         op: base.op,
@@ -2856,7 +2969,7 @@ fn ir_call_sret(dst: i64, dest_reg: i64, fn_name: Name, fn_id: i64, arg0: i64, e
         imm_flags: base.imm_flags,
         bin_op: base.bin_op,
         un_op: base.un_op,
-        name: fn_name,
+        name_id: ir_intern_name(fn_name),
         call_args: base.call_args,
         arg_count: explicit_arg_count,
     }
@@ -5178,7 +5291,12 @@ fn compile(opts: CompilerOptions) -> CompileResult with IO, Mut, Panic, Div, All
 
     if !compiler_visibility_preflight(opts.input_file) {
         var visibility_errors = compile_errors_new()
-        visibility_errors = compile_errors_push(visibility_errors, "error: visibility preflight failed")
+        // The preflight covers three distinct failures — a module that will not
+        // parse, an AST closure that could not be completed, and a type error
+        // across the merged modules — and this one message described only the
+        // stage. run_check_mode prints which of the three it was just above; say
+        // that here too, so the final line a user sees is not misleading on its own.
+        visibility_errors = compile_errors_push(visibility_errors, "error: preflight failed (parse, module closure, or type check — see run_check_mode output above)")
         return CompileResult {
             success: false,
             errors: visibility_errors,
@@ -5305,11 +5423,17 @@ fn compile(opts: CompilerOptions) -> CompileResult with IO, Mut, Panic, Div, All
             // Sprint 48: log promotion decisions
             var li: i64 = 0
             while li < (*ir_result.module).fn_count {
-                let lcount = sprof_lookup(&profile, &(*ir_result.module).functions[li as usize].name)
+                // #1678: same hoist as sprof_apply_promotion. This loop is the
+                // RECEIPT for the decisions applied above, so leaving it on the
+                // in-place reference would have made it report a different set of
+                // promotions than the ones performed. A log that lies is worse
+                // than no log.
+                var lf = (*ir_result.module).functions[li as usize]
+                let lcount = sprof_lookup(&profile, &lf.name)
                 let ltarget = sprof_promotion_target(lcount)
                 if ltarget >= 0 {
                     print("[sprof] ")
-                    compiler_manifest_print_name((*ir_result.module).functions[li as usize].name)
+                    compiler_manifest_print_name(lf.name)
                     println(": count " + int_to_string(lcount) + " -> strategy " + ir_strategy_name(ltarget))
                 }
                 li = li + 1
@@ -5503,7 +5627,7 @@ fn compiler_main_find_call_idx(f: IrFunction, callee_name: Name) -> i64 with Mut
     var i: i64 = 0
     while i < f.instr_count {
         if f.instrs[i].op == IrOpcode::IrCall &&
-           ir_name_eq(f.instrs[i].name, callee_name) {
+           ir_name_eq(ir_name_at(f.instrs[i].name_id), callee_name) {
             return i
         }
         i = i + 1
@@ -6452,7 +6576,7 @@ fn compiler_main_test_tco_run_pass_transforms() -> bool with Mut, Div, Panic {
         if instr.op == IrOpcode::IrJump {
             saw_jump = true
         }
-        if instr.op == IrOpcode::IrCall && ir_name_eq(instr.name, out_func.name) {
+        if instr.op == IrOpcode::IrCall && ir_name_eq(ir_name_at(instr.name_id), out_func.name) {
             saw_self_call = true
         }
         i = i + 1
@@ -8353,7 +8477,11 @@ fn compiler_main_make_licm_hoist_test_func() -> IrFunction with Mut, Panic, Div 
     instrs[8] = ir_label(1)
     instrs[9] = ir_jump(0)
     func.name = make_name("licm_hoist")
-    func.instrs = instrs
+    var ci: i64 = 0
+    while ci < 1024 {
+        func.instrs[ci as usize] = instrs[ci as usize]
+        ci = ci + 1
+    }
     func.instr_count = 10
     func.reg_count = 5
     func.label_count = 3
@@ -8376,7 +8504,11 @@ fn compiler_main_make_licm_call_test_func() -> IrFunction with Mut, Panic, Div {
     instrs[7] = ir_label(1)
     instrs[8] = ir_jump(0)
     func.name = make_name("licm_call")
-    func.instrs = instrs
+    var ci: i64 = 0
+    while ci < 1024 {
+        func.instrs[ci as usize] = instrs[ci as usize]
+        ci = ci + 1
+    }
     func.instr_count = 9
     func.reg_count = 2
     func.label_count = 3
@@ -12155,11 +12287,11 @@ fn compiler_main_test_knowledge_layout_registered() -> bool with Mut, Panic, Div
     let entry = table.entries[0]
     if !ir_name_eq(entry.type_name, make_name("Knowledge")) { return false }
     if entry.field_count != 3 { return false }
-    if !ir_name_eq(entry.fields[0].name, make_name("value")) { return false }
+    if !ir_name_eq(ir_name_at(entry.fields[0].name_id), make_name("value")) { return false }
     if entry.fields[0].index != 0 { return false }
-    if !ir_name_eq(entry.fields[1].name, make_name("variance")) { return false }
+    if !ir_name_eq(ir_name_at(entry.fields[1].name_id), make_name("variance")) { return false }
     if entry.fields[1].index != 1 { return false }
-    if !ir_name_eq(entry.fields[2].name, make_name("confidence")) { return false }
+    if !ir_name_eq(ir_name_at(entry.fields[2].name_id), make_name("confidence")) { return false }
     if entry.fields[2].index != 2 { return false }
     true
 }
@@ -12173,7 +12305,7 @@ fn compiler_main_test_knowledge_field_idx_lookup() -> bool with Mut, Panic, Div 
     while si < table.count {
         var fi: i64 = 0
         while fi < table.entries[si].field_count {
-            if ir_name_eq(table.entries[si].fields[fi].name, make_name("value")) {
+            if ir_name_eq(ir_name_at(table.entries[si].fields[fi].name_id), make_name("value")) {
                 found_value = table.entries[si].fields[fi].index
             }
             fi = fi + 1
@@ -12187,7 +12319,7 @@ fn compiler_main_test_knowledge_field_idx_lookup() -> bool with Mut, Panic, Div 
     while si < table.count {
         var fi2: i64 = 0
         while fi2 < table.entries[si].field_count {
-            if ir_name_eq(table.entries[si].fields[fi2].name, make_name("variance")) {
+            if ir_name_eq(ir_name_at(table.entries[si].fields[fi2].name_id), make_name("variance")) {
                 found_var = table.entries[si].fields[fi2].index
             }
             fi2 = fi2 + 1
@@ -12201,7 +12333,7 @@ fn compiler_main_test_knowledge_field_idx_lookup() -> bool with Mut, Panic, Div 
     while si < table.count {
         var fi3: i64 = 0
         while fi3 < table.entries[si].field_count {
-            if ir_name_eq(table.entries[si].fields[fi3].name, make_name("confidence")) {
+            if ir_name_eq(ir_name_at(table.entries[si].fields[fi3].name_id), make_name("confidence")) {
                 found_conf = table.entries[si].fields[fi3].index
             }
             fi3 = fi3 + 1

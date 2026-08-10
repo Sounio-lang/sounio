@@ -124,9 +124,27 @@ write_rows() {
     branch="$(git -C "$wt_path" branch --show-current 2>/dev/null || true)"
     [[ -n "$branch" ]] || branch="detached"
     upstream="$(git -C "$wt_path" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
-    dirty_count="$(git -C "$wt_path" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
-    wt_state="clean"
-    [[ "$dirty_count" == "0" ]] || wt_state="dirty"
+    # `git status` can fail on a worktree this process cannot read — a
+    # root-owned .git, a stale gitdir, a deleted checkout. Under
+    # `set -euo pipefail` that non-zero status crossed the pipe and killed the
+    # audit, and the `2>/dev/null` swallowed the only clue: the gate exited 128
+    # having printed nothing, indistinguishable from the script crashing.
+    # Measured 2026-07-30 on /workspace/.source-fresh/worktree-*, whose .git is
+    # owned by root ("fatal: detected dubious ownership").
+    #
+    # An unreadable worktree is NOT a clean one. Defaulting it to dirty_count=0
+    # would report a clean audit over a worktree the audit never read, which is
+    # a worse failure than the crash it replaces.
+    local st_out st_rc=0
+    st_out="$(git -C "$wt_path" status --porcelain 2>&1)" || st_rc=$?
+    if [[ "$st_rc" -ne 0 ]]; then
+      wt_state="UNREADABLE:$(printf '%s' "$st_out" | head -1 | cut -c1-72)"
+      dirty_count="?"
+    else
+      dirty_count="$(printf '%s' "$st_out" | grep -c . || true)"
+      wt_state="clean"
+      [[ "$dirty_count" == "0" ]] || wt_state="dirty"
+    fi
 
     if [[ -n "$upstream" ]]; then
       counts="$(git -C "$wt_path" rev-list --left-right --count "$upstream"...HEAD 2>/dev/null || printf '? ?')"
@@ -168,7 +186,10 @@ summary="$(
     }
     NR > 1 {
       total++
-      if ($5 != "clean") dirty++
+      # UNREADABLE is counted on its own, not folded into dirty: "dirty" means
+      # measured and found modified, and these were never measured.
+      if ($5 ~ /^UNREADABLE/) unreadable++
+      else if ($5 != "clean") dirty++
       if ($5 ~ /^PRUNABLE/) prunable++
       if ($9 != "") {
         critical_dirty++
@@ -180,8 +201,8 @@ summary="$(
       if ($11 != "") open_pr++
     }
     END {
-      printf "total=%d dirty=%d prunable=%d critical_dirty=%d unallowed_critical_dirty=%d critical_vs_base=%d open_pr=%d\n",
-        total, dirty, prunable, critical_dirty, unallowed_critical_dirty, critical_vs_base, open_pr
+      printf "total=%d dirty=%d unreadable=%d prunable=%d critical_dirty=%d unallowed_critical_dirty=%d critical_vs_base=%d open_pr=%d\n",
+        total, dirty, unreadable, prunable, critical_dirty, unallowed_critical_dirty, critical_vs_base, open_pr
     }
   ' "$OUT"
 )"
@@ -217,13 +238,21 @@ awk -F '\t' '
   }
 ' "$OUT"
 
+echo "unreadable_worktrees:"
+awk -F '\t' 'NR > 1 && $5 ~ /^UNREADABLE/ { print "- " $1 " | " $5 }' "$OUT"
+
 if [[ "$CHECK_MODE" == "1" ]]; then
+  max_unreadable="${SOUNIO_AUDIT_MAX_UNREADABLE:-0}"
   max_prunable="${SOUNIO_AUDIT_MAX_PRUNABLE:-0}"
   max_critical_dirty="${SOUNIO_AUDIT_MAX_CRITICAL_DIRTY:-0}"
   max_dirty="${SOUNIO_AUDIT_MAX_DIRTY:-}"
   max_open_pr="${SOUNIO_AUDIT_MAX_OPEN_PR:-}"
 
   failed=0
+  # A worktree the audit could not read is a hole in the audit's own coverage,
+  # so it is a gate violation by default rather than a silent omission. Raise
+  # SOUNIO_AUDIT_MAX_UNREADABLE if a host legitimately has unreadable checkouts.
+  check_threshold "unreadable" "$(summary_value unreadable)" "$max_unreadable" || failed=1
   check_threshold "prunable" "$(summary_value prunable)" "$max_prunable" || failed=1
   check_threshold "unallowed_critical_dirty" "$(summary_value unallowed_critical_dirty)" "$max_critical_dirty" || failed=1
   check_threshold "dirty" "$(summary_value dirty)" "$max_dirty" || failed=1
