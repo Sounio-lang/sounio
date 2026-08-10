@@ -1,0 +1,89 @@
+// #1649 instruction arena: sealing refuses writes through a published handle,
+// and cloning is what gives back an independent one.
+//
+// This is hazard 2, and it is the one the type checker cannot help with. The
+// optimizer depends on IrFunction copies being DEEP:
+//
+//     var result = func                  // today: full deep copy
+//     result.instrs[i] = ir_copy(...)    // does not touch func
+//     return (false, func)               // rollback returns the pristine original
+//
+// Under a shared region that value copy aliases, the write corrupts `func`, and
+// the rollback returns already-corrupted data. Sounio has no copy constructor, so
+// every one of the 216 by-value boundaries must call a clone by hand -- and a
+// missed one compiles perfectly cleanly.
+//
+// Sealing is what makes a missed clone LOUD instead of silent: a region is sealed
+// when its function is published, and writing through a sealed handle is refused.
+// This witness pins both halves -- that sealing refuses, and that a clone really
+// is independent.
+
+use ir::ir::*
+use ir::instr_arena::*
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    if ir_instr_arena_init() != IR_ARENA_OK { return 10 }
+
+    var src = ir_region_invalid()
+    if ir_instr_arena_alloc(4, &! src) != IR_ARENA_OK { return 11 }
+    if ir_region_push(&! src, ir_load_imm(0, 700)) != IR_ARENA_OK { return 12 }
+    if ir_region_push(&! src, ir_load_imm(1, 800)) != IR_ARENA_OK { return 13 }
+
+    // Publish it.
+    if ir_region_seal(&src) != IR_ARENA_OK { return 14 }
+    if !ir_region_is_sealed(&src) { return 15 }
+
+    // Reads still work -- sealing is about writes.
+    var got = ir_nop()
+    if ir_region_get(&src, 0, &! got) != IR_ARENA_OK || got.imm_i64 != 700 { return 16 }
+    if ir_region_base_read(&src) < 0 { return 17 }
+    if ir_instr_arena_violation() { return 18 }
+
+    // Every write path must refuse.
+    if ir_region_set(&src, 0, ir_load_imm(0, 999)) != IR_ARENA_ERR_SEALED { return 20 }
+    if ir_region_push(&! src, ir_load_imm(2, 999)) != IR_ARENA_ERR_SEALED { return 21 }
+    if ir_region_reserve(&! src, 64) != IR_ARENA_ERR_SEALED { return 22 }
+    if ir_region_set_len(&src, 1) != IR_ARENA_ERR_SEALED { return 23 }
+    // contents unchanged by any of the refusals
+    if ir_region_get(&src, 0, &! got) != IR_ARENA_OK || got.imm_i64 != 700 { return 24 }
+    if ir_region_len(&src) != 2 { return 25 }
+
+    // The raw write path -- what the textual rewrite emits at assignment sites --
+    // quarantines and raises the violation flag so the compile cannot exit 0.
+    let quarantined = ir_region_base_write(&src)
+    if !ir_instr_arena_violation() { return 30 }
+    if quarantined != IR_QUARANTINE_BASE { return 31 }
+
+    // A CLONE is the supported way to get something writable, and it must be
+    // genuinely independent -- this is the property the optimizer's rollback
+    // depends on.
+    var copy = ir_region_invalid()
+    if ir_region_clone(&src, &! copy) != IR_ARENA_OK { return 40 }
+    if ir_region_len(&copy) != 2 { return 41 }
+    if ir_region_is_sealed(&copy) { return 42 }
+    if ir_region_base_read(&copy) == ir_region_base_read(&src) { return 43 }
+    // clone is sized to the LENGTH, not the source capacity
+    if ir_region_cap(&copy) != 2 { return 44 }
+
+    if ir_region_set(&copy, 0, ir_load_imm(0, 555)) != IR_ARENA_OK { return 45 }
+    if ir_region_get(&copy, 0, &! got) != IR_ARENA_OK || got.imm_i64 != 555 { return 46 }
+    // the source must NOT have moved with it
+    if ir_region_get(&src, 0, &! got) != IR_ARENA_OK || got.imm_i64 != 700 { return 47 }
+
+    // Mark/release: regions taken after the mark are invalidated on release, and
+    // a handle that escaped is detected rather than aliasing whatever is
+    // allocated there next.
+    let mark = ir_arena_mark()
+    var scratch = ir_region_invalid()
+    if ir_instr_arena_alloc(8, &! scratch) != IR_ARENA_OK { return 50 }
+    if ir_region_push(&! scratch, ir_load_imm(0, 1)) != IR_ARENA_OK { return 51 }
+    if !ir_region_is_valid(&scratch) { return 52 }
+    if ir_arena_release(&mark) != IR_ARENA_OK { return 53 }
+    if ir_instr_arena_used() != mark.top { return 54 }
+    if ir_region_status(&scratch) != IR_ARENA_ERR_INVALID { return 55 }
+    // regions from before the mark are untouched
+    if ir_region_get(&copy, 0, &! got) != IR_ARENA_OK || got.imm_i64 != 555 { return 56 }
+
+    print("IR_INSTR_ARENA_SEAL_PASS\n")
+    0
+}

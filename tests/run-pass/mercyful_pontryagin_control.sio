@@ -1,0 +1,168 @@
+//@ run-pass
+// tests/run-pass/mercyful_pontryagin_control.sio
+//
+// Mercyful Learning x continuous optimal control (Pontryagin rung), Sounio
+// native. Closed-form optimal-control structure of the suffering ODE
+//
+//   dd/dt = -a*u*d,   s(t) = c*d(t) + tau*u(t),   u in [0, u_max]
+//
+// with anti-Goodhart target d(T) = d_T and Mercyful objective
+// J = ∫ s dt + mu * max s. Verifies natively, from the same closed forms as
+// the Python twin:
+//   K1 baseline bang numbers (V, t_B, m_B, I_B)
+//   K4 frontier points I*(m), T*(m) at m = 2.0 (hybrid iso->bang) and
+//      m = 1.5 (pure iso-suffering boundary arc)
+//   K5 smooth crossover: curvature of I* at the bang peak = 1/(2 a tau u_max^2)
+//      and the first-order exchange law m*(mu) = m_B - mu*a*tau*u_max^2
+//   K6 budgetary necessity peak_min(L0) = (T*)^-1(L0) via bisection
+//
+// Spec: docs/research/mercyful_pontryagin_control_spec_2026-07-26.md
+// Gate: scripts/ci/mercyful_pontryagin_control_gate.sh
+// Python twin (K1..K9): scripts/research/mercyful_pontryagin_control_contract.py
+//
+// Clinical warning: synthetic ODE, synthetic suffering values, normalized
+// units. This is not medical guidance and carries no clinical claim.
+
+extern "C" {
+    fn log(x: f64) -> f64;
+    fn exp(x: f64) -> f64;
+}
+
+// Synthetic instance (normalized; spec section 4)
+let D0: f64 = 1.0
+let DT: f64 = 0.05
+let A: f64 = 1.0
+let UMAX: f64 = 2.0
+let C: f64 = 1.0
+let TAU: f64 = 1.0
+
+// (I*(m), T*(m)): min suffering integral and min time under peak cap s <= m.
+fn closed_form_i(m: f64) -> f64 {
+    let d_join = (m - TAU * UMAX) / C
+    if d_join <= DT {
+        let t_iso = (TAU / (A * m)) * log(((m - C * DT) / (C * DT)) * ((C * D0) / (m - C * D0)))
+        return m * t_iso
+    }
+    let k = (m - C * D0) / (C * D0)
+    let t_iso = (TAU / (A * m)) * log((TAU * UMAX / (C * d_join)) / k)
+    let i_bang = (C / (A * UMAX)) * (d_join - DT) + (TAU / A) * log(d_join / DT)
+    m * t_iso + i_bang
+}
+
+fn closed_form_t(m: f64) -> f64 {
+    let d_join = (m - TAU * UMAX) / C
+    if d_join <= DT {
+        return (TAU / (A * m)) * log(((m - C * DT) / (C * DT)) * ((C * D0) / (m - C * D0)))
+    }
+    let k = (m - C * D0) / (C * D0)
+    let t_iso = (TAU / (A * m)) * log((TAU * UMAX / (C * d_join)) / k)
+    let t_bang = (1.0 / (A * UMAX)) * log(d_join / DT)
+    t_iso + t_bang
+}
+
+// Budgetary necessity: minimal attainable peak under horizon budget L0.
+// Returns -1.0 when infeasible (L0 < t_B).
+fn peak_min(l0: f64) -> f64 with Mut {
+    let t_b = closed_form_t(3.0)
+    if l0 < t_b { return 0.0 - 1.0 }
+    var lo = 1.0 + 1e-9
+    var hi = 3.0
+    var i = 0
+    while i < 200 {
+        let mid = 0.5 * (lo + hi)
+        if closed_form_t(mid) <= l0 { hi = mid } else { lo = mid }
+        i = i + 1
+    }
+    hi
+}
+
+// argmin_m I*(m) + mu*m on a grid (K5 exchange law).
+fn m_star(mu: f64) -> f64 with Mut {
+    var best_m = 3.0
+    var best_j = 1e100
+    var i = 0
+    while i < 6000 {
+        let m = 1.0001 + (3.0 - 1.0001) * (i as f64) / 5999.0
+        let j = closed_form_i(m) + mu * m
+        if j < best_j { best_j = j; best_m = m }
+        i = i + 1
+    }
+    best_m
+}
+
+fn fabs_(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    x
+}
+
+fn main() -> i32 with IO, Mut {
+    var failures = 0
+
+    // K1: baseline bang numbers.
+    let v = log(D0 / DT) / A
+    let t_b = v / UMAX
+    let m_b = C * D0 + TAU * UMAX
+    let i_b = (C / (A * UMAX)) * (D0 - DT) + TAU * v
+    println(v)
+    println(t_b)
+    println(m_b)
+    println(i_b)
+    if fabs_(v - 2.995732) < 1e-6 && fabs_(t_b - 1.497866) < 1e-6
+        && m_b == 3.0 && fabs_(i_b - 3.470732) < 1e-6 {
+        println("K1_BASELINE PASS")
+    } else {
+        println("K1_BASELINE FAIL")
+        failures = failures + 1
+    }
+
+    // K4: frontier closed forms at m = 2.0 (hybrid) and m = 1.5 (pure iso).
+    let i20 = closed_form_i(2.0)
+    let t20 = closed_form_t(2.0)
+    let i15 = closed_form_i(1.5)
+    let t15 = closed_form_t(1.5)
+    println(i20)
+    println(t20)
+    println(i15)
+    println(t15)
+    if fabs_(i20 - 3.663562) < 1e-6 && fabs_(t20 - 1.831781) < 1e-6
+        && fabs_(i15 - 4.060443) < 1e-6 && fabs_(t15 - 2.706962) < 1e-6 {
+        println("K4_FRONTIER PASS")
+    } else {
+        println("K4_FRONTIER FAIL")
+        failures = failures + 1
+    }
+
+    // K5: smooth crossover. Curvature of I* at the bang peak from below is
+    // exactly 1/(2*a*tau*u_max^2) = 0.125, and m*(0.001) = m_B - 0.004.
+    let eps = 0.01
+    let curv = (closed_form_i(m_b - eps) - i_b) / (eps * eps)
+    let ms = m_star(0.001)
+    println(curv)
+    println(ms)
+    if fabs_(curv - 0.125) < 0.0025 && fabs_(ms - 2.996) < 0.002 {
+        println("K5_SMOOTH_CROSSOVER PASS")
+    } else {
+        println("K5_SMOOTH_CROSSOVER FAIL")
+        failures = failures + 1
+    }
+
+    // K6: budgetary necessity via bisection; infeasible below t_B.
+    let pm2 = peak_min(2.0)
+    let pm3 = peak_min(3.0)
+    let pm_tight = peak_min(1.4)
+    println(pm2)
+    println(pm3)
+    if fabs_(pm2 - 1.867628) < 1e-6 && fabs_(pm3 - 1.402552) < 1e-6 && pm_tight < 0.0 {
+        println("K6_BUDGETARY_NECESSITY PASS")
+    } else {
+        println("K6_BUDGETARY_NECESSITY FAIL")
+        failures = failures + 1
+    }
+
+    if failures == 0 {
+        println("MERCYFUL_PONTRYAGIN_PASS")
+        return 0
+    }
+    println("MERCYFUL_PONTRYAGIN_FAIL")
+    1
+}

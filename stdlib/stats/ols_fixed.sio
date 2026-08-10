@@ -1,0 +1,74 @@
+// stdlib/stats/ols_fixed.sio — simple OLS on fixed arrays (Madaros-safe import)
+//
+// Companion to stats::validation (also fixed [f64; 256]+n as of 2026-08-04).
+// Kept for the dedicated ols_fixed claim/gate and as a minimal OLS surface.
+// Historical note: open-slice validation previously failed Madaros multi-module
+// check (E019 on .push) and lower (segfault on .len()); that path is closed by
+// the fixed-buffer rewrite — see docs/handoff/BLK-20260804-p0a-d3-validation-e019.md.
+
+module stats::ols_fixed
+
+pub struct OlsFit {
+    pub intercept: f64,
+    pub slope: f64,
+    pub r_squared: f64,
+}
+
+fn ols_mean(x: &[f64; 256], n: i32) -> f64 with Div, Panic {
+    if n <= 0 { return 0.0 }
+    var s = 0.0
+    var i = 0
+    while i < n {
+        s = s + x[i as usize]
+        i = i + 1
+    }
+    s / (n as f64)
+}
+
+/// Pearson r² for paired samples of length n (n >= 2, n <= 256).
+pub fn r_squared_n(x: &[f64; 256], y: &[f64; 256], n: i32) -> f64 with Div, Panic {
+    if n < 2 { return 0.0 }
+    let mx = ols_mean(x, n)
+    let my = ols_mean(y, n)
+    var sum_xy = 0.0
+    var sum_x2 = 0.0
+    var sum_y2 = 0.0
+    var i = 0
+    while i < n {
+        let dx = x[i as usize] - mx
+        let dy = y[i as usize] - my
+        sum_xy = sum_xy + dx * dy
+        sum_x2 = sum_x2 + dx * dx
+        sum_y2 = sum_y2 + dy * dy
+        i = i + 1
+    }
+    let denom = sum_x2 * sum_y2
+    if denom <= 1.0e-30 { return 0.0 }
+    // r = sum_xy / sqrt(sum_x2*sum_y2); r² = sum_xy² / (sum_x2*sum_y2)
+    (sum_xy * sum_xy) / denom
+}
+
+/// Simple linear regression y = a + b·x on fixed buffers of length n.
+pub fn linear_regression_n(x: &[f64; 256], y: &[f64; 256], n: i32) -> OlsFit with Div, Panic {
+    if n < 2 {
+        return OlsFit { intercept: 0.0, slope: 0.0, r_squared: 0.0 }
+    }
+    let mx = ols_mean(x, n)
+    let my = ols_mean(y, n)
+    var sum_xy = 0.0
+    var sum_x2 = 0.0
+    var i = 0
+    while i < n {
+        let dx = x[i as usize] - mx
+        sum_xy = sum_xy + dx * (y[i as usize] - my)
+        sum_x2 = sum_x2 + dx * dx
+        i = i + 1
+    }
+    if sum_x2 < 1.0e-30 {
+        return OlsFit { intercept: my, slope: 0.0, r_squared: 0.0 }
+    }
+    let slope = sum_xy / sum_x2
+    let intercept = my - slope * mx
+    let rsq = r_squared_n(x, y, n)
+    OlsFit { intercept: intercept, slope: slope, r_squared: rsq }
+}
