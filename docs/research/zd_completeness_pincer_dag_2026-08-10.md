@@ -348,3 +348,16 @@ concurrent lane's T2 tier needs the same object.
     E5, E3         open
 
 See §57.79.
+
+### Step 11 — T1 CORE's twelve label-independent terms are theorems
+
+Tiers 125–126: the eight double-pin sums are each `2 − H` and the four corners cancel, so the
+`+64 − 32H` of the CORE identity is proved. Everything reduces through Tier 124's re-signings to
+`Σε`, `Σσ`, `Σεσ`.
+
+    E4b, T1 leg   scalars PROVED; CORE's 12 label-independent terms PROVED;
+                  remaining: the 5 single-pin cyclicity identifications, and the carrier
+                  expansion of the two taus (R1, R2, R3, rank-one)
+    E4b, T2 leg   concurrent lane landed Tiers 120–122 at 53b823b726
+
+See §57.80.

@@ -344,20 +344,59 @@ So the E5 reference can be taken as any low octonion label, not only `W = 1`.
 
 ### 10.6 Lean targets (updated)
 
-| # | statement | depends on |
-|---|---|---|
-| L1 | `s3_maximal_seam`: (S) | S0–S4 of §3 |
-| L2 | transfer of `s3` at fixed `W` (at least `W = 1`) | E4b orthant closed forms |
-| L3 | `s3_ref_base`: `s3(3,1) = -272` | `decide` / small enumeration |
-| L4 | `e5_inductive_form`: `F` closed under (T)+(C) | pure `Int`/`Nat` arithmetic + Gaussian def |
-| L5 | `e5_base`: assemble L1–L4 ⇒ E5 ∀ `m ≥ 3` | L1–L4 |
+| # | statement | depends on | status |
+|---|---|---|---|
+| L1 | `s3_maximal_seam`: (S) | S0–S4 of §3 | open (CD) |
+| L2 | transfer of `s3` at fixed `W` (at least `W = 1`) | E4b orthant closed forms | open (CD) |
+| L3 | `s3_ref_base`: `s3(3,1) = -272` | `decide` / small enumeration | finite; `F_base` / `F7_base` recorded |
+| L4 | `e5_inductive_form`: `F` closed under (T)+(C) | pure `Int` arithmetic | **LANDED** |
+| L5 | `e5_base`: assemble L1–L4 ⇒ E5 ∀ `m ≥ 3` | L1–L4 | open |
 
-L4 is the new content of this section: it can be written **now**, Mathlib-free, with
-`[m,k]_2` defined as the product formula, without waiting for L1–L2.
+**L4 location:** `formal/lean4/SounioZDE5Inductive.lean` (own Lake target
+`SounioZDE5Inductive`; does **not** import the tip — parallel-safe with the E4b claim).
+
+Form used: the 7-cleared integer
+
+\[
+F_7(H) \;=\; 7\,P(H) - 9(H-2)(H-4)(H-8)
+\]
+
+(so \(F_7 = 7F\) whenever the product formula for \([m,3]_2\) is exact). Kernel-clean theorem:
+
+\[
+F_7(2H) \;=\; 8\,F_7(H) + 7\cdot\bigl(24(-(H-2)(H-6)) - 176 + 72H\bigr)
+\qquad(\forall\, H\in\mathbb{Z}).
+\]
+
+Also: `poly_residual`, `gauss_residual_cleared`, `residuals_match`, tower specialisation
+`e5_inductive_form_tower`. Axioms of the free-`H` theorems:
+`[propext, Classical.choice, Quot.sound]`. Base constants use `native_decide`.
 
 ### 10.7 Evidence commands
 
 ```bash
 .venv/bin/python scripts/research/zd_e5_qbinomial_base_probe.py   # seat + seam model
 .venv/bin/python scripts/research/zd_e5_ref_gap_probe.py          # residual induction
+# Lean L4 (toolchain: formal/lean4/lean-toolchain; elan provides `lake`)
+(cd formal/lean4 && lake build SounioZDE5Inductive)
+# or direct:
+# lean formal/lean4/SounioZDE5Inductive.lean
 ```
+
+### 10.8 Residual after L4 (2026-08-10, step 3)
+
+E5 is now:
+
+> **Prove (T) and (S); invoke (C), (B), L4.**
+
+| obligation | role | seat |
+|---|---|---|
+| **(T)** | transfer of `s3` at `W = 1` | E4b orthants → absolute `s3` at fixed label |
+| **(S)** | seam poly `s3(2^m) = P(H)` | S0–S4 of §3; alignment S4 is the open structural pin |
+| **(C)** | `cp2` on g=0 | E4a / Tier 109 **PROVED** |
+| **(B)** | `s3(3,1) = −272` | finite; `F_base` |
+| **L4** | `F` closed under (T)+(C) | **PROVED** (`e5_inductive_form`) |
+
+Recommended next attack on this lane (still avoiding the tip claim): deepen S0–S4 as a
+**probe + named lemmas note**, or wait for the tip claim to free and land L1 as a tier there.
+Do not reopen closed v1 routes (§5).

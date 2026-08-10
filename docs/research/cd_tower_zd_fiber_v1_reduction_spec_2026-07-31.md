@@ -6951,3 +6951,38 @@ and is expected to cost a comparable number of tiers.
 
 `T2` is the concurrent lane's (Tiers 120–122, mid-edit and currently red in the shared tree). Its
 remaining scalar is the one proved here.
+
+### §57.80 — Tiers 125–126: all twelve label-independent terms of `T1`'s CORE are theorems
+
+Tier 123's pin expansion of `CORE` has 18 terms. Twelve of them are now proved:
+
+- **the eight double-pin sums, each `2 − H`** (`corePin_00/0W/W0/WW` at Tier 125, `corePin_0f0/f00/
+  fW0/Wf0` at Tier 126) — contributing `8·(8 − 4H) = 64 − 32H` with their `+4` coefficients;
+- **the four corners, `1, −1, −1, 1`** (`coreCorners`), cancelling against their `−8`.
+
+They all reduce through Tier 124's re-signings, which give two clean pointwise products:
+
+    P3 W c · P3 c W = ε(c)      (`P3_rowW_colW`)
+    P3 0 c · P3 c W = σ(c)      (`P3_row0_colW_sig`)
+
+so each sum collapses to `Σε = H − 2` (`sum_epsZero`), `Σσ = H − 2` (`sum_sigRow`) or
+`Σεσ = H − 4` (`sum_epsSig`). That every one lands on the *same* `2 − H` as the double walk
+`(M²)₀₀` is not a coincidence of fitting — it is what the re-signings force.
+
+So the `+64 − 32H` of §57.79's measured CORE identity is no longer measured.
+
+#### `T1`, what remains
+
+1. the five single pins' identification with `(M³)₀₀` and `(M³)_WW` — cyclicity, the shape
+   `tri3_epsZero` (Tier 110) already handled for the symmetric weight;
+2. the carrier expansion of the two `τ`s into `R1 = 2cp2 + 4H − 8`, `R2 = 2cp2 − 4H + 8`,
+   `R3 = 16 − 4H` and the rank-one corrections `−16`.
+
+Both scalars those pins land on are theorems (`walk3_eq_quad` + `quad_level_value`, and
+`walk3_at_W`), so nothing below this level is open.
+
+#### Note on the concurrent lane
+
+Tiers 120–122 (`T2`: the weight-2 orthant's switching, three constant walks, the corner) landed
+from the other lane at `53b823b726`, directly after Tier 126. Both lanes' work is intact in the
+tip, no duplicate declarations, and the tip builds green from a clean checkout.
