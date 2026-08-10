@@ -35,8 +35,19 @@ tmp_verified="$verified.tmp.$$"
 tmp_mutations="$mutations.tmp.$$"
 trap 'rm -f "$tmp_result" "$tmp_stderr" "$tmp_verified" "$tmp_mutations"' EXIT
 
+set +e
 PYTHONPATH="$DEPS" PYTHONDONTWRITEBYTECODE=1 \
   python3 -B "$WORKER" > "$tmp_result" 2> "$tmp_stderr"
+worker_rc=$?
+set -e
+if [[ $worker_rc -ne 0 ]]; then
+  mv "$tmp_stderr" "$OUT_DIR/witness_event.incomplete.stderr.txt"
+  if [[ -s "$tmp_result" ]]; then
+    mv "$tmp_result" "$OUT_DIR/witness_event.incomplete.json"
+  fi
+  echo "witness-local event worker failed with rc=$worker_rc" >&2
+  exit "$worker_rc"
+fi
 
 verify_args=(
   "$tmp_result"

@@ -108,7 +108,10 @@ def reconstruct_witness(
     # The capture helper intentionally restores the production point
     # reconditioner; this diagnostic must restore the frozen six-variable
     # lineage policy before any witness split or event projection.
-    base.recondition = prior.lineage_preserving_recondition
+    # Replay the frozen production path through the raw event capture first.
+    # reconstruct_witness switches to the lineage-preserving policy immediately
+    # after that capture and before the new witness-local work begins.
+    base.recondition = adaptive.point_coefficient_recondition
     bool_check(checks, "raw_projection_capture_is_unique", captured_count == 1)
     bool_check(checks, "prerecond_event_replay_is_accepted", chart.get("accepted") is True)
     root_domain = prior.critical_domain()
