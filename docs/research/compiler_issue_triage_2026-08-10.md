@@ -63,7 +63,7 @@ the compiler built from the tree could no longer typecheck its own entry point (
 **Corrected in place:** #1667 (title symptom fixed, comment-1 shape still fails) and #852
 (does not terminate, rather than exiting in seconds).
 
-**#1531 is held**: the 108-test delta is a repository-scale decision, not a triage one.
+**#1531 landed** after its delta was measured correctly (16 failures under CI's compiler, not the 108 first reported here) and each one dispositioned — see below.
 
 The two systemic findings explain the backlog's shape better than any individual bug does: type
 errors in the compiler do not stop a build, and wrong answers at rc=0 do not fail a test.
@@ -561,6 +561,54 @@ The `if` is present — `split` simply stopped being able to case on this `ite` 
 4.33.0. No case analysis is needed: `Nat.add_zero` reduces the guard to exactly `hv`, so
 `exact if_pos hv` closes it. Verified under **both** toolchains, and under 4.33.0 a full
 `lake build` completes (215 jobs).
+
+
+
+## #1531 landed, and the numbers in this report were wrong twice
+
+The harness fix is merged. The suite now evaluates its `//@ expect-stdout:` and
+`//@ error-pattern:` annotations for the first time, with pre-existing debt recorded in
+`tests/vacuous_expect_baseline.txt` rather than left invisible.
+
+### Correcting this document's own measurements
+
+Two numbers reported earlier here were measured against the wrong subject:
+
+- **"108 tests go red"** — measured by applying a hand-written regex fix and running the suite
+  against a from-source **Madaros**.
+- **"Fail: 542"** — same mistake, with #1531's own harness.
+
+`.github/workflows/ci.yml` runs the suite with `SOUNIO_TEST_SOUC_BIN=/tmp/souc-stage2` and
+`--format junit`. **stage2 and Madaros do not emit the same diagnostics**, so neither number
+predicted CI. The true figures, from the CI job itself:
+
+| | |
+|---|---|
+| Pass | **1545** |
+| Fail | **16** (beyond the author's 36-entry baseline) |
+| Known failures | 137 |
+| Vacuous baseline tolerated | 35 of 36 |
+| Total | 2956 |
+
+A shrink of the baseline from 36 to 8 was also attempted and **reverted**: it was derived from
+the Madaros run, and CI immediately failed on entries it had removed. The lesson is the one this
+report already makes about the ratchet, in a second costume — *which binary produced the
+measurement is part of the measurement.*
+
+### What arming the assertions actually exposed
+
+Of the 16 CI failures, all were run again under Madaros to tell a feature gap from a defect:
+
+- **14 `madaros_gum_fo_*` fail under BOTH engines**, and `madaros_gum_fo_knowledge_ops`
+  segfaults. Their `MADAROS_GUM_FO_*_PASS` markers had never been evaluated, so an entire
+  feature's regression family read green while the feature did not work. They are named
+  `madaros_*` yet carry no `//@ requires: madaros` — and adding one would be false, since
+  Madaros fails them too. Filed as **#1706**.
+- **2 are a real engine divergence**: `ontology_property_weakening` and `gum_correlated` pass
+  under Madaros and fail under stage2.
+
+That is the concrete payoff of #444: not a projection, but fourteen tests that asserted a
+feature works when it does not, plus one that crashes.
 
 
 ## Ranking
