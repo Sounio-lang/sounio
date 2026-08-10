@@ -1,0 +1,131 @@
+//@ run-pass
+//@ expect-stdout: MADAROS_GUM_FO_PK_STRUCT_PASS
+
+// Dissertation PK struct end-to-end FO driver.
+// Combines the FO stack surfaces science actually uses on a Pk value:
+//   peels on fields · nested methods · shared channel · call/nested projections
+//
+// Model (oral steady-state):
+//   rate = F · Dose / τ
+//   CL   = CL0 · exp(η)
+//   Css  = rate / CL
+//
+// Frozen analytic refs match fo_pk_exposure_* drivers / FO audit table:
+//   Var(CL) = 0.34, Var(Css) = 0.795833, E₂(Css) = 6.724
+//
+// Call-result method FO (make_pk(...).css) is gated in method_call_recv.
+
+struct Pk {
+    cl0: f64
+    v0: f64
+}
+
+impl Pk {
+    fn clearance(self: &Pk, eta: f64) -> f64 {
+        self.cl0 * exp(eta)
+    }
+    fn rate(self: &Pk, f: f64, dose: f64, tau: f64) -> f64 {
+        (f * dose) / tau
+    }
+    fn css(self: &Pk, f: f64, dose: f64, tau: f64, eta: f64) -> f64 {
+        self.rate(f, dose, tau) / self.clearance(eta)
+    }
+    fn exposure(self: &Pk, eta: f64) -> f64 {
+        self.cl0 * self.v0 * exp(eta)
+    }
+}
+
+fn make_pk(cl0: f64, v0: f64) -> Pk {
+    Pk { cl0: cl0, v0: v0 }
+}
+
+fn id_pk(p: Pk) -> Pk {
+    p
+}
+
+fn free_css(f: f64, dose: f64, tau: f64, cl0: f64, eta: f64) -> f64 {
+    ((f * dose) / tau) / (cl0 * exp(eta))
+}
+
+fn abs_f(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn main() with IO, Mut, Div, Epistemic {
+    let kF: Knowledge<f64> = measure(0.8, uncertainty: 0.05)
+    let kDose: Knowledge<f64> = measure(500.0, uncertainty: 10.0)
+    let kCL0: Knowledge<f64> = measure(5.0, uncertainty: 0.3)
+    let kV: Knowledge<f64> = measure(50.0, uncertainty: 2.0)
+    let kEta: Knowledge<f64> = measure(0.0, uncertainty: 0.1)
+
+    let f = kF.value
+    let dose = kDose.value
+    let cl0 = kCL0.value
+    let v0 = kV.value
+    let eta = kEta.value
+    let tau = 12.0
+
+    let pk = Pk { cl0: cl0, v0: v0 }
+
+    // ── Field peels ──
+    let v_field_cl = variance_of(pk.cl0)
+    let v_peel_cl = variance_of(cl0)
+    let v_alias = variance_of(id_pk(pk).cl0)
+    let v_call_cl = variance_of(make_pk(cl0, v0).cl0)
+    let v_call_v = variance_of(make_pk(cl0, v0).v0)
+
+    // ── Nested methods on live struct ──
+    let v_css = variance_of(pk.css(f, dose, tau, eta))
+    let v_css_free = variance_of(free_css(f, dose, tau, cl0, eta))
+    let v_css_site = variance_of(pk.rate(f, dose, tau) / pk.clearance(eta))
+    let m2_css = second_order_mean(pk.css(f, dose, tau, eta))
+    let v_cl = variance_of(pk.clearance(eta))
+    let v_cl_peel = variance_of(cl0 * exp(eta))
+
+    // ── Field alias + call nested projections ──
+    let pk2 = pk
+    let v_alias_field = variance_of(pk2.cl0)
+    let v_id_nest = variance_of(id_pk(make_pk(cl0, v0)).cl0)
+
+    // ── Shared channel: same η twice (CL · pseudo-V) ──
+    // Independent measures would be 2-channel; shared peel reuses σ² reg.
+    let v_shared = variance_of(pk.clearance(eta) * (v0 * exp(eta)))
+    let v_shared_peel = variance_of((cl0 * exp(eta)) * (v0 * exp(eta)))
+
+    // ── Exposure product via method (cl0·v0·exp(η)) ──
+    let v_exp = variance_of(pk.exposure(eta))
+    let v_exp_peel = variance_of(cl0 * v0 * exp(eta))
+
+    print("v_field_cl="); print_f64(v_field_cl); print("\n")
+    print("v_call_cl="); print_f64(v_call_cl); print("\n")
+    print("v_css="); print_f64(v_css); print("\n")
+    print("v_cl="); print_f64(v_cl); print("\n")
+    print("m2_css="); print_f64(m2_css); print("\n")
+    print("v_alias_field="); print_f64(v_alias_field); print("\n")
+    print("v_id_nest="); print_f64(v_id_nest); print("\n")
+    print("v_shared="); print_f64(v_shared); print("\n")
+    print("v_exp="); print_f64(v_exp); print("\n")
+
+    let ok = abs_f(v_field_cl - v_peel_cl) < 1.0e-9
+        && abs_f(v_field_cl - 0.09) < 1.0e-9
+        && abs_f(v_alias - v_peel_cl) < 1.0e-9
+        && abs_f(v_alias_field - v_peel_cl) < 1.0e-9
+        && abs_f(v_call_cl - v_peel_cl) < 1.0e-9
+        && abs_f(v_call_v - 4.0) < 1.0e-9
+        && abs_f(v_id_nest - v_peel_cl) < 1.0e-9
+        && abs_f(v_cl - v_cl_peel) < 1.0e-9
+        && abs_f(v_cl - 0.34) < 1.0e-4
+        && abs_f(v_css - v_css_free) < 1.0e-9
+        && abs_f(v_css - v_css_site) < 1.0e-9
+        && abs_f(v_css - 0.795833) < 1.0e-4
+        && abs_f(m2_css - 6.724) < 1.0e-3
+        && abs_f(v_shared - v_shared_peel) < 1.0e-6
+        && abs_f(v_exp - v_exp_peel) < 1.0e-6
+        && v_exp > 1.0
+    if ok {
+        print("MADAROS_GUM_FO_PK_STRUCT_PASS\n")
+    } else {
+        print("MADAROS_GUM_FO_PK_STRUCT_FAIL\n")
+    }
+}
