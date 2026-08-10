@@ -206,6 +206,7 @@ run_test() {
     
     local is_run_pass=false
     local is_compile_fail=false
+    local is_typecheck_fail=false
     local is_ignored=false
     local is_check_only=false
     local is_known_failure=false
@@ -223,6 +224,7 @@ run_test() {
         case "$line" in
             *"//@ run-pass"*) is_run_pass=true ;;
             *"//@ compile-fail"*) is_compile_fail=true ;;
+            *"//@ typecheck-fail"*) is_typecheck_fail=true ;;
             *"//@ ignore"*) is_ignored=true ;;
             *"//@ check-only"*) is_check_only=true ;;
             *"//@ known-failure"*) 
@@ -289,7 +291,7 @@ run_test() {
     fi
     
     # Skip tests with no annotation
-    if ! $is_run_pass && ! $is_compile_fail && ! $is_check_only; then
+    if ! $is_run_pass && ! $is_compile_fail && ! $is_check_only && ! $is_typecheck_fail; then
         echo "{\"status\":\"skip\",\"reason\":\"no-annotation\",\"name\":\"$basename\",\"idx\":$idx}" > "$output_file"
         return
     fi
@@ -301,6 +303,12 @@ run_test() {
         if [[ ! "$line" =~ ^[[:space:]]*//@\  && ! "$line" =~ ^[[:space:]]*//\  && ! "$line" =~ ^[[:space:]]*$ ]]; then
             break
         fi
+        # NOTE: these two `=~` extractions capture EMPTY on real patterns
+        # (esp. ones with regex metachars like `[`), so existing error-pattern/
+        # expect-stdout tests match vacuously. Fixing it here is out of scope —
+        # it flips ~305 latent vacuous passes repo-wide. The `typecheck-fail`
+        # mode below therefore parses its own pattern robustly and does NOT rely
+        # on `error_patterns`. Tracked as a separate harness finding.
         if [[ "$line" =~ "//@ expect-stdout:\ "(.*) ]]; then
             expect_stdout+=("${BASH_REMATCH[1]}")
         fi
@@ -374,8 +382,48 @@ run_test() {
                 exit_code=0  # Reset - compile failure is expected
             fi
         fi
+    elif $is_typecheck_fail; then
+        # Proof-carrying tests: the illegal inference must be rejected by the
+        # TYPE CHECKER (`souc check`), and the reason MUST be pinned via
+        # //@ error-pattern. Running `check` (not `compile`) is deliberate:
+        # `check` runs the boundary-preserving visibility/type pass, whereas
+        # `compile` can "pass" on unrelated backend / missing-main failures
+        # without ever exercising the guarantee (see audit 2026-07-24).
+        # Parse the pinned pattern(s) locally & robustly (see note above: the
+        # shared error_patterns parse captures empty and is left as-is to avoid
+        # flipping ~305 latent vacuous tests repo-wide).
+        local tf_patterns=()
+        local pline
+        while IFS= read -r pline; do
+            case "$pline" in
+                *"//@ error-pattern: "*) tf_patterns+=("${pline#*//@ error-pattern: }") ;;
+            esac
+        done < <(head -n 20 "$file")
+
+        output=$(timeout "$timeout_val" "$SOUC_BIN" check "$file" 2>&1) || exit_code=$?
+        if [[ $exit_code -eq 124 ]]; then
+            test_output="check timed out after ${timeout_val}s"
+        elif [[ $exit_code -eq 0 ]]; then
+            test_output="expected typecheck failure but passed"
+            exit_code=1
+        else
+            exit_code=0  # nonzero check exit == the expected rejection
+            # A typecheck-fail test MUST pin the reason; no error-pattern is vacuous.
+            if [[ ${#tf_patterns[@]} -eq 0 ]]; then
+                exit_code=1
+                test_output="typecheck-fail requires //@ error-pattern to pin the diagnostic"
+            else
+                for pattern in "${tf_patterns[@]}"; do
+                    if ! echo "$output" | grep -qiF "$pattern"; then
+                        exit_code=1
+                        test_output="missing error: $pattern"
+                        break
+                    fi
+                done
+            fi
+        fi
     fi
-    
+
     end_time=$(date +%s)
     local duration=$((end_time - start_time))
     

@@ -58,6 +58,27 @@ lean_lib «SounioGradedModal» where
 @[default_target]
 lean_lib «SounioMeasConf» where
 
+-- Machine-checked algebra backing demos/hydrogen/ (Jensen/variance gap,
+-- correlated-sum variance decomposition, monotone p-box propagation).
+@[default_target]
+lean_lib «SounioHydrogenPbox» where
+
+-- The demo numbers as theorems: exact-rational receipt for the IDM and
+-- delivered-cost claims (native_decide over Rat; Python oracle retired).
+@[default_target]
+lean_lib «SounioHydrogenReceipt» where
+
+-- The van't Hoff extrapolation gate: rational spine of the calcite
+-- scaling demo (corner exactness, pK sandwiches, SI straddle, gate).
+@[default_target]
+lean_lib «SounioHydrogenVanthoff» where
+
+-- Valley-chain composition: corner-exactness of the composed
+-- subsurface·compressor·capacity-factor p-box (explicit premises,
+-- exact-rational receipt for the demo's constants).
+@[default_target]
+lean_lib «SounioHydrogenValleyPbox» where
+
 @[default_target]
 lean_lib «SounioProofObligation» where
 
@@ -436,6 +457,11 @@ lean_lib «SounioDeGreyChi529Exact» where
 @[default_target]
 lean_lib «SounioApproxCausalKnowledge» where
 
+-- Physical approximation effects: NonUnitary × NarrowWidthApproximation composition
+-- (particle amp→σ honesty leaves). Mathlib-free, no sorry.
+@[default_target]
+lean_lib «SounioNonUnitaryNWA» where
+
 -- M2: Vancomycin-Knightian thrust — Ferson p-box operator
 @[default_target]
 lean_lib «SounioKnightian» where
@@ -631,3 +657,31 @@ lean_lib «SounioCayleyDicksonErasure» where
 -- the sedenion S³-fiber ker=4. Manifold homeomorphism / V₂(ℝ⁷) cited only.
 @[default_target]
 lean_lib «SounioG2Derivations» where
+
+@[default_target]
+lean_lib «SounioMercyfulScheduler» where
+
+@[default_target]
+lean_lib «SounioFoCssSurfaceParity» where
+
+@[default_target]
+lean_lib «SounioFoSurfaceTransfer» where
+
+@[default_target]
+lean_lib «SounioFoBytecodeFragment» where
+
+@[default_target]
+lean_lib «SounioFoEmitPure» where
+
+@[default_target]
+lean_lib «SounioFoRegistrationFragment» where
+
+@[default_target]
+lean_lib «SounioFoEngineInstallFragment» where
+
+@[default_target]
+lean_lib «SounioFoMethodXferFragment» where
+
+@[default_target]
+lean_lib «SounioFoMultimodFragment» where
+

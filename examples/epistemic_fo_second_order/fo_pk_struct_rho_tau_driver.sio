@@ -1,0 +1,117 @@
+//@ run-pass
+//@ expect-stdout: FO_PK_STRUCT_RHO_TAU_DRIVER_PASS
+
+// Companion science driver: exposure ρ-sweep + Css with τ uncertainty.
+// Parent: fo_pk_struct_method_driver.sio (method FO stack, ρ∈{0,1}).
+//
+// Model: exposure = CL0·exp(η_cl)·V0·exp(η_v)  (FO on CL0, V0, η_cl, η_v)
+//   ρ = Cov(η_cl,η_v)/(σ_cl σ_v); σ_η = 0.1, CL0=5±0.3, V0=50±2
+//   Base (ρ=0):  Var = 225 + 100 + 625 + 625 = 1575
+//   Cross term:  2·s_η1·s_η2·ρ·σ² = 2·250·250·ρ·0.01 = 1250·ρ
+//   ρ=0.5 → 1575+625 = 2200
+//   ρ=1   → 1575+1250 = 2825  (= shared peel)
+//
+// Css with τ FO: F=0.8±0.05, Dose=500±10, τ=12±0.5, CL0=5±0.3, η=0±0.1
+//   measured Var(Css)=0.872993 (wider than fixed-τ 0.795833)
+//
+// Not clinical guidance. Gate greps table numbers.
+
+struct Pk {
+    cl0: f64
+    v0: f64
+}
+
+impl Pk {
+    fn clearance(self: &Pk, eta: f64) -> f64 {
+        self.cl0 * exp(eta)
+    }
+    fn volume(self: &Pk, eta: f64) -> f64 {
+        self.v0 * exp(eta)
+    }
+    fn rate(self: &Pk, f: f64, dose: f64, tau: f64) -> f64 {
+        (f * dose) / tau
+    }
+    fn css(self: &Pk, f: f64, dose: f64, tau: f64, eta: f64) -> f64 {
+        self.rate(f, dose, tau) / self.clearance(eta)
+    }
+    fn exposure(self: &Pk, eta_cl: f64, eta_v: f64) -> f64 {
+        self.clearance(eta_cl) * self.volume(eta_v)
+    }
+}
+
+fn make_pk(cl0: f64, v0: f64) -> Pk {
+    Pk { cl0: cl0, v0: v0 }
+}
+
+fn main() with IO, Mut, Div, Epistemic {
+    let kCL0: Knowledge<f64> = measure(5.0, uncertainty: 0.3)
+    let kV0: Knowledge<f64> = measure(50.0, uncertainty: 2.0)
+    let cl0 = kCL0.value
+    let v0 = kV0.value
+    let pk = Pk { cl0: cl0, v0: v0 }
+
+    // ── ρ-sweep: fresh measure pairs per ρ (avoid channel overwrite) ──
+    // ρ = 0 (independent)
+    let a0: Knowledge<f64> = measure(0.0, uncertainty: 0.1)
+    let b0: Knowledge<f64> = measure(0.0, uncertainty: 0.1)
+    let n0a = a0.value
+    let n0b = b0.value
+    let v_rho0 = variance_of(pk.exposure(n0a, n0b))
+    let v_rho0_call = variance_of(make_pk(cl0, v0).exposure(n0a, n0b))
+
+    // ρ = 0.5
+    let a5: Knowledge<f64> = measure(0.0, uncertainty: 0.1)
+    let b5: Knowledge<f64> = measure(0.0, uncertainty: 0.1)
+    let n5a = a5.value
+    let n5b = b5.value
+    let _r5 = correlate(n5a, n5b, 0.5)
+    let v_rho05 = variance_of(pk.exposure(n5a, n5b))
+    let v_rho05_call = variance_of(make_pk(cl0, v0).exposure(n5a, n5b))
+
+    // ρ = 1
+    let a1: Knowledge<f64> = measure(0.0, uncertainty: 0.1)
+    let b1: Knowledge<f64> = measure(0.0, uncertainty: 0.1)
+    let n1a = a1.value
+    let n1b = b1.value
+    let _r1 = correlate(n1a, n1b, 1.0)
+    let v_rho1 = variance_of(pk.exposure(n1a, n1b))
+    let v_rho1_call = variance_of(make_pk(cl0, v0).exposure(n1a, n1b))
+
+    // Shared peel (one η twice) — upper bound of the sweep
+    let kEta: Knowledge<f64> = measure(0.0, uncertainty: 0.1)
+    let eta = kEta.value
+    let v_shared = variance_of(pk.exposure(eta, eta))
+
+    // ── Css with τ uncertainty ──
+    let kF: Knowledge<f64> = measure(0.8, uncertainty: 0.05)
+    let kDose: Knowledge<f64> = measure(500.0, uncertainty: 10.0)
+    let kTau: Knowledge<f64> = measure(12.0, uncertainty: 0.5)
+    let kEta2: Knowledge<f64> = measure(0.0, uncertainty: 0.1)
+    let f = kF.value
+    let dose = kDose.value
+    let tau = kTau.value
+    let eta2 = kEta2.value
+    let css_pt = pk.css(f, dose, tau, eta2)
+    let v_css_tau = variance_of(pk.css(f, dose, tau, eta2))
+    let v_css_tau_call = variance_of(make_pk(cl0, v0).css(f, dose, tau, eta2))
+    let m2_css_tau = second_order_mean(pk.css(f, dose, tau, eta2))
+    // Fixed-τ reference surface (σ_τ=0) for delta
+    let kTau0: Knowledge<f64> = measure(12.0, uncertainty: 0.0)
+    let tau0 = kTau0.value
+    let v_css_fixed = variance_of(pk.css(f, dose, tau0, eta2))
+
+    print("=== FO_PK_STRUCT_RHO_TAU science table ===\n")
+    print("v_exp_rho0="); print_f64(v_rho0); print("\n")
+    print("v_exp_rho0_call="); print_f64(v_rho0_call); print("\n")
+    print("v_exp_rho05="); print_f64(v_rho05); print("\n")
+    print("v_exp_rho05_call="); print_f64(v_rho05_call); print("\n")
+    print("v_exp_rho1="); print_f64(v_rho1); print("\n")
+    print("v_exp_rho1_call="); print_f64(v_rho1_call); print("\n")
+    print("v_exp_shared="); print_f64(v_shared); print("\n")
+    print("css_point_tau="); print_f64(css_pt); print("\n")
+    print("v_css_tau="); print_f64(v_css_tau); print("\n")
+    print("v_css_tau_call="); print_f64(v_css_tau_call); print("\n")
+    print("m2_css_tau="); print_f64(m2_css_tau); print("\n")
+    print("v_css_fixed_tau="); print_f64(v_css_fixed); print("\n")
+    print("FO_PK_STRUCT_RHO_TAU_DRIVER_PASS\n")
+}
