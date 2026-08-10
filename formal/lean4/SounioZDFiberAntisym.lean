@@ -16475,4 +16475,96 @@ theorem starP_all_pow2_labels (p : Nat) :
     (fun a b ha hb ha0 hb0 haW hbW hab hcos =>
       starP_pow2_bottom p a b ha hb ha0 hb0 haW hbW hab hcos)
 
+/-! ### Tier 109 — E4a: the four-sign law assembled, and `cp2`'s closed form made unconditional
+
+    `cp2_count` (Tier 95) proved `cp2 = −(H−2)(H−6)` CONDITIONAL on the four-sign law.  Tiers 96–108
+    supplied every piece; this assembles them.  The interior needs no `resB`: `cp2_summand_core`
+    makes the summand `−(P1·P3)`, Bridge 1 turns the interior identity into `P1 = P3`, and `P3² = 1`.
+
+    ⚠ Written the second time round.  The first attempt drove the `if`s by hand with `simp only` and
+    the goal shape drifted out from under the border lemmas (`0 ⊕ W` left un-normalised).  Here the
+    case facts go into the context and `grind` evaluates the `if`s, with only the value equation
+    supplied — shorter and not shape-dependent. -/
+
+theorem cp2_summand_law (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
+    (hint : ∀ a b, a < 2^(m+1) → b < 2^(m+1) → a ≠ 0 → b ≠ 0 → a ≠ W → b ≠ W → a ≠ b →
+              b ≠ a ^^^ W → starP (m+1) a b W) :
+    ∀ a b, a < 2^(m+1) → b < 2^(m+1) →
+      P3 a b W m * P3 b (a ^^^ W) W m
+        = -((if a = b then (-1:Int) else 1) * (if (a ^^^ b) ^^^ W = 0 then (-1:Int) else 1)
+            * (epsZero a * epsZero b)) := by
+  intro a b ha hb
+  have hp := Nat.two_pow_pos (m+1)
+  unfold epsZero
+  by_cases ha0 : a = 0
+  · subst ha0
+    rw [Nat.zero_xor, Nat.zero_xor]
+    by_cases hb0 : b = 0
+    · subst hb0
+      have hv := four_factor_corner00 m W hW hW0
+      rw [Nat.zero_xor] at hv
+      grind
+    · by_cases hbW : b = W
+      · subst hbW
+        have hv := four_factor_corner0W m b hW hW0
+        rw [Nat.zero_xor] at hv
+        have hbs : (b ^^^ b) = 0 := Nat.xor_self b
+        grind
+      · have hv := four_factor_row0 m b W hb hW hW0 hb0 hbW
+        rw [Nat.zero_xor] at hv
+        have hc : b ^^^ W ≠ 0 := fun h => hbW (xor_zero_eq b W h)
+        grind
+  · by_cases hb0 : b = 0
+    · subst hb0
+      rw [Nat.xor_zero]
+      by_cases haWq : a = W
+      · subst haWq
+        have hv := four_factor_cornerW0 m a hW hW0
+        rw [Nat.xor_self] at hv
+        grind
+      · have hv := four_factor_col0 m a W ha hW hW0 ha0 haWq
+        have hc : a ^^^ W ≠ 0 := fun h => haWq (xor_zero_eq a W h)
+        grind
+    · by_cases hab : a = b
+      · subst hab
+        rw [Nat.xor_self, Nat.zero_xor]
+        by_cases haWq : a ^^^ W = 0
+        · have hq : a = W := xor_zero_eq a W haWq
+          subst hq
+          have hv := four_factor_cornerWW m a hW hW0
+          rw [Nat.xor_self] at hv
+          grind
+        · have hv := four_factor_diag m a W ha hW ha0 haWq
+          grind
+      · by_cases hcos : (a ^^^ b) ^^^ W = 0
+        · have hbq : b = a ^^^ W := by
+            have h1 : a ^^^ b = W := xor_zero_eq (a ^^^ b) W hcos
+            have h : a ^^^ (a ^^^ b) = a ^^^ W := by rw [h1]
+            rw [← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor] at h
+            exact h
+          have haWq : a ^^^ W ≠ 0 := by rw [← hbq]; exact hb0
+          have hv := four_factor_coset m a W ha hW ha0 haWq
+          rw [← hbq] at hv
+          grind
+        · by_cases haWq : a = W
+          · subst haWq
+            have hv := four_factor_seamrow m b a hb hW hW0 hb0
+              (fun h => hab h.symm)
+            grind
+          · by_cases hbWq : b = W
+            · subst hbWq
+              have hv := four_factor_seamcol m a b ha hW hW0 ha0 haWq
+              grind
+            · have hccc : b ≠ a ^^^ W := by
+                intro h
+                exact hcos (by rw [h, ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor, Nat.xor_self])
+              have hs := hint a b ha hb ha0 hb0 haWq hbWq hab hccc
+              have hbW0 : b ^^^ W ≠ 0 := fun h => hbWq (xor_zero_eq b W h)
+              have haW0 : a ^^^ W ≠ 0 := fun h => haWq (xor_zero_eq a W h)
+              have hpe : P1 a b W m = P3 a b W m :=
+                (P1_eq_P3_iff_starP m a b W ha hb hW hb0 hbW0).mpr hs
+              have hv := cp2_summand_core m a b W ha hb hW hb0 hbW0 haW0
+              rw [hpe] at hv
+              rcases P3_pm a b W m with h | h <;> rw [h] at hv <;> grind
+
 end SounioZDFiberAntisym

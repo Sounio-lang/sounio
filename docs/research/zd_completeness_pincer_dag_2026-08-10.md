@@ -128,3 +128,22 @@ all mechanical, and of two kinds.
 The file is restored to green and the attempt is preserved at `scratchpad/tier109_attempt.lean`.
 Recorded because the first lift attempt failed the same way — mechanically, with a clean diagnosis —
 and landed on the second pass once the diagnosis was in hand.
+
+## E4a — LANDED on the second pass
+
+`cp2_summand_law` compiles. The diagnosis written after the first attempt was the whole fix: stop
+driving the `if`s by hand with `simp only` (which let the goal shape drift out from under the border
+lemmas), put the case facts in the context and supply only the value equation, and let `grind`
+evaluate. Twelve loci, one `grind` each.
+
+With it, `cp2_count`'s hypothesis is discharged for any label whose interior satisfies `starP` — and
+Tiers 107–108 prove exactly that for both reference families. So **E4a is a theorem**: `cp2` has the
+closed form `−(H−2)(H−6)` on the reference class, hence `Δcp2 = 0`, hence the `24·Δcp2` term of the
+transfer vanishes within a fibre.
+
+### DAG after this
+
+    E1, E2, E6, E8, E4a               PROVED
+    E4b  = obligation (i)             THE open lemma: evaluate 3T1 + 3T2 + T3
+    E5   base case at m = j           open — the q-binomial's combinatorial content
+    E3   deviation ignores g          open — decides whether E4b and E5 are about the right objects
