@@ -6529,3 +6529,45 @@ over ℚ:
 
 So the `cp2`-dependence of `T1` and `T2` is real and not a proxy for `g`, and §57.69's claim (4) —
 the whole `cp2` content of the transfer sits in `T1` and `T2` at coefficient 4 — stands as measured.
+
+### §57.71 — `T3` reduced to TWO ROW-0 SCALARS, and the seam anomaly localised to one of them
+
+§57.69 gives `T3 = s3 + 48H − 176` off the seam. That is a fit. Here is the derivation, and it is
+better than the fit: it holds at EVERY label, seam included.
+
+Tier 91's `weight3_switch` already proves the hard half — the weight-3 orthant's `sigRow`
+conjugation cancels and only the column weight `epsZero` survives, so `T3 = tr((EM)³)` with
+`E = diag(epsZero) = I − 2e₀e₀ᵀ`. Expanding in the rank-one pin, using cyclic symmetry of the
+summand and `P3 0 0 = 1` (`P3_zero_zero`, already in the file):
+
+    T3 = s3 − 6·(M³)₀₀ + 12·(M²)₀₀ − 8
+
+**Exact at all 491 label-levels, `m = 3..7`, on and off the seam.** No basis, no fit: three pins at
+one index, with multiplicities `3, 3, 1` from the three cyclic positions.
+
+The two row-0 scalars are the lane's `z3` and `z2`:
+
+- `(M²)₀₀ = z2 = −(H−2)`, **label-independent at every label including `W = 2^m`** (491/491);
+- `(M³)₀₀ = z3 = 32 − 10H` off the seam, and at `W = 2^m` exactly `32 − 10H − 96·[m−1,2]₂`
+  (verified `m = 3..7`).
+
+Substituting recovers `T3 − s3 = −6(32−10H) + 12(−(H−2)) − 8 = 48H − 176` off the seam, and
+`−6·(−96·[m−1,2]₂) = 576·[m−1,2]₂ = 3·192·[m−1,2]₂` at it — §57.70's seam deviation, in the `3`
+component of `(1, −2, 3)`, now with a mechanism.
+
+**So the whole maximal-seam anomaly of `T3` is one scalar: `(M³)₀₀`, the closed triple walk through
+index 0.** `(M²)₀₀` does not see the seam at all. That is a much sharper object than "the seam is
+exceptional", and it is a Lean-sized target.
+
+#### The Lean route this opens (Tier 110)
+
+Tier 93 recorded that the trace algebra "needs sum-level machinery this file does not have". For
+`T3` the machinery needed is one lemma:
+
+    sumLtI N (fun a => epsZero a * f a) = sumLtI N f − 2 * f 0      (N > 0)
+
+i.e. `ε = 1 − 2·[·=0]` at the level of `sumLtI`. Applied three times to `weight3_switch`'s output,
+with the cyclic symmetry of the summand collapsing the three single pins and the three double pins,
+it gives the displayed identity. `T3`'s evaluation then rests on two scalars instead of a triple
+sum, and neither `cp2` nor any coset structure enters — which is why `T3` is the right first target
+of the three.
