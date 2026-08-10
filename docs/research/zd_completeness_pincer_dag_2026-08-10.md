@@ -299,26 +299,6 @@ missing. `quad_level_transfer` assembles `Q(m+1) = 16H − 28` from it plus Tier
 `B = −Q + 8H − 12` as an explicit hypothesis — the one open obligation. `Q(m)` cancels, so no base
 case enters above the level where the label first exists. See §57.77.
 
-### Step 9 — Tier 117: T2 loses its switching (`D`-pin)
-
-`sumLtI2_sigRow` + `weight2_D_pinned` (kernel-clean): the weight-2 orthant expands to four walks in
-`X = tauW ⊙ P3` and `P3`, all free of `sigRow`:
-
-    T2 = Σ X P3 X − 2 Σ X(·,W) P3(W,·) X − 2 Σ X P3(·,W) X(W,·) + 4 Σ X(·,W) P3(W,W) X(W,·)
-
-That is the T2 twin of `weight3_switch` + the first half of `weight3_pinned`. Remaining for the T2
-leg: the carrier step `X = P3 + 2Π − 4 e₀e_Wᵀ` (to reach the Tier 94 form in `s3`/`cp2`/seam walks)
-and the evaluation of `(M³)_WW`.
-
-#### DAG after Tier 117
-
-    E1, E2, E6, E8, E4a               PROVED
-    E4b  T3 / Q                       chain to B = −Q+8H−12 as hypothesis (Tiers 110–116)
-    E4b  T2                           constant walks (113) + D-pin (117) PROVED;
-                                      open: carrier expansion + (M³)_WW
-    E4b  T1                           MEASURED closed form
-    E5, E3                            open
-
 ### Step 9 — B is proved; the T3 leg is closed
 
 `blockB_value`: `B = −Q + 8H − 12`, every label. It discharges Tier 116's hypothesis, giving
@@ -326,12 +306,45 @@ and the evaluation of `(M³)_WW`.
 (`T3 = s3 + 48H − 176`) — §57.69's form **for the labels the transfer reaches** (`W < 2^n` at level
 `n`). The top-bit-`n` labels above the seam were measured and are not covered. For the reference
 class that costs nothing above the base: `W < 8` is unaffected, and for `W = 2^p` the uncovered
-level is `n = p`, which is exactly where E5's base case already sits.
+level is `n = p`, which is exactly where E5's base case already sits. See §57.78.
 
-    E4b, T3 leg      PROVED for W < 2^n at level n — no measured step in that chain;
-                     top-bit-n labels (2^n < W < 2^(n+1)) still MEASURED only
-    E4b, T1/T2 legs  open (Tier 93 reduction in hand; concurrent lane on T2)
-    Q at top level   open — labels whose top bit equals the level; the transfer does not reach them
-    E5, E3           open
+### Step 10 — Tiers 120–122: the T2 leg (kernel-clean, uncommitted)
 
-See §57.78.
+Numbered after the T3 chain so as not to renumber 117–119.
+
+| Tier | content |
+|---|---|
+| **120** | seam walks: `(M²)_WW = H−2`, `(MΠM)_WW = −(H−2)`, `(M²)_{0W} = H−2` |
+| **121** | `weight2_D_pinned`: T2 loses `sigRow` → four walks in `X=tauW⊙P3` |
+| **122** | corner evaluated: `Σ X(a,W)P3(W,W)X(W,a) = 2−H` ⇒ `+4·corner = −4(H−2)` |
+
+`weight2_D_corner` leaves three walks. Open on T2: the two middle pin walks (expect `(M³)_WW`
+each), bulk `tr(XMX)`, carrier `X=P3+2Π−4e₀e_Wᵀ`, and `(M³)_WW` itself.
+
+#### DAG now
+
+    E1, E2, E6, E8, E4a               PROVED
+    E4b  T3 / Q                       **CLOSED** for W < 2^n (Tiers 110–119)
+    E4b  T2                           120–122 PROVED; open: 2 pin walks + tr(XMX) + carrier + (M³)_WW
+    E4b  T1                           MEASURED closed form
+    E5, E3                            open
+
+### Step 10 — the T1 leg mapped; the shared scalar proved
+
+`t1_weight` (Tier 123) factors the weight-1 orthant's two coset flips. The map is then MEASURED
+(236/236, seam included):
+
+    T1 = s3 + 4·cp2 − 6·(M³)₀₀ − 4·(M³)_WW + 64 − 36H
+
+with `R1 + R2 = 4·cp2` — §57.69's `4·cp2` is the two coset flips one each.
+
+`walk3_at_W` (Tier 124) PROVES `(M³)_WW = Q − 6H + 12`, unconditional: row `W` is row `0` re-signed,
+so the seam walk is `Q`'s quadratic form weighted. **This is the scalar T1 and T2 share** — the
+concurrent lane's T2 tier needs the same object.
+
+    E4b, T3 leg    PROVED for W < 2^n at level n
+    E4b, T1 leg    all SCALARS proved; the ASSEMBLY (carrier + 18-term pin expansion) MEASURED
+    E4b, T2 leg    concurrent lane, mid-flight; its remaining scalar is walk3_at_W
+    E5, E3         open
+
+See §57.79.

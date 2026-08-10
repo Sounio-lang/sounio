@@ -6902,3 +6902,52 @@ of which are `Q` plus a constant.
 **Still open for E4b:** the `T1` and `T2` legs (Tier 93's reduction is in hand, and the concurrent
 lane is on `T2`), and `Q` at the top level — labels with top bit exactly `m`, which the transfer
 does not reach. The `T3` closed form above is stated exactly for the labels it does reach.
+
+### §57.79 — Tiers 123–124: the `T1` leg mapped, and the scalar `T1` and `T2` share is PROVED
+
+**`T1`'s weight factors** (`t1_weight`, Tier 123). The weight-1 orthant carries `E01` and `E10`, so
+unlike `T3` it has TWO coset flips:
+
+    E01(b,c) · E10(c,a) = (ε(a)σ(a)) · (ε(b)σ(b)) · ε(c) · τ(b,c) · τ(c,a)
+
+**The map, MEASURED at all 236 label-levels `m = 3..6`, seam included.** With the two `τ`s removed
+by `tauW_carrier` and the pins expanded (at `0` and `W` on `a` and `b`, at `0` on `c`):
+
+| piece | value |
+|---|---|
+| CORE `Σ ε(a)σ(a)ε(b)σ(b)ε(c)·P3(a,b)P3(b,c)P3(c,a)` | `s3 − 6(M³)₀₀ − 4(M³)_WW + 64 − 32H` |
+| R1 (one `Π_W`) | `2·cp2 + 4H − 8` |
+| R2 (the other `Π_W`) | `2·cp2 − 4H + 8` |
+| R3 (both `Π_W`) | `16 − 4H` — label-independent |
+| rank1 (the carrier's `e₀e_Wᵀ` corrections) | `−16` — label-independent |
+
+    ⇒  T1 = s3 + 4·cp2 − 6·(M³)₀₀ − 4·(M³)_WW + 64 − 36H
+
+Of the 18 pin terms in CORE, **12 are label-independent**: the four all-pinned ones cancel in pairs
+(`−8, +8, +8, −8`) and the eight one-free ones are each `8 − 4H`. And `R1 + R2 = 4·cp2` exactly — so
+§57.69's `4·cp2` is the two coset flips taken *one each*; neither alone gives it.
+
+**`(M³)_WW = Q − 6H + 12`, PROVED** (`walk3_at_W`, Tier 124, kernel-clean, every label including the
+seam). Row `W` of `P3` is row `0` re-signed, and column `W` is row `0` re-signed differently — both
+straight from Tier 117's two laws:
+
+    P3 W b = ε(b)·σ(b)·P3 0 b      P3 c W = σ(c)·P3 0 c
+
+so the seam walk is the *same quadratic form as `Q`*, weighted; three pins and the slices `G(0) = H`,
+`G(W) = H − 4`, `Σσ = H − 2`, `Σεσ = H − 4` finish it. At the seam it reads `(H−2)² − 6H + 12`, the
+measured value; on the reachable labels `Q = 8H − 28` gives `2H − 16`, the lane's `a3` of §57.49.
+
+**This is the object `T1` and `T2` share.** The concurrent lane's Tier 120 is titled "the `T2` leg's
+cheap scalars: walks pinned at the seam vertex" and is proving the same walks. One theorem, both
+legs.
+
+#### Status, stated plainly
+
+`T1` is **NOT closed.** Every *scalar* it needs is now a theorem — `s3` and `cp2` stay in the
+statement, `(M³)₀₀` is Tiers 112+119, `(M³)_WW` is Tier 124. What is still MEASURED is the
+**assembly**: the carrier expansion of the two `τ`s and the 18-term pin expansion that gets from the
+`T1` triple sum to the master identity above. That is the same shape as Tiers 110/116/119 for `T3`
+and is expected to cost a comparable number of tiers.
+
+`T2` is the concurrent lane's (Tiers 120–122, mid-edit and currently red in the shared tree). Its
+remaining scalar is the one proved here.
