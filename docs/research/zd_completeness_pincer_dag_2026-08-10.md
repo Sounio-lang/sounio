@@ -147,3 +147,39 @@ transfer vanishes within a fibre.
     E4b  = obligation (i)             THE open lemma: evaluate 3T1 + 3T2 + T3
     E5   base case at m = j           open — the q-binomial's combinatorial content
     E3   deviation ignores g          open — decides whether E4b and E5 are about the right objects
+
+## Step 2 — E4b taken apart: three closed forms, and a second maximal-seam artifact
+
+E4b was "evaluate `3T1 + 3T2 + T3`", filed as irreducible because §57.50 measured each piece
+outside the probed span. **That was a fit broken by one label per level.** Off the maximal seam
+`W = 2^m`, each piece has a closed form (`H = 2^(m+1)`):
+
+    T1 = s3 + 4·cp2 + 16H − 64
+    T2 = s3 + 4·cp2 −  8H + 64
+    T3 = s3          + 48H − 176
+
+486/486 off-seam label-levels at `m = 3..7`, out of sample at `m = 8`. At `W = 2^m` the three
+deviate by exactly `(1, −2, 3)·2(H−4)(H−8)`, and `(3,3,1)·(1,−2,3) = 0` — so the combination never
+saw it. Second maximal-seam artifact in the lane, after the `288·[m−1,2]₂` term.
+
+Consequences for this DAG:
+
+- **E4b is no longer one opaque lemma.** Obligation (i) follows by arithmetic from the three forms,
+  on and off the seam. Within a fibre, `ΔT1 = ΔT2 = Δs3 + 4Δcp2` and `ΔT3 = Δs3`; with E4a all four
+  coincide and `Δs3(m+1) = 8Δs3(m)` is orthant counting.
+- **The `8 = 2³` remark is CORRECTED.** The `8` is `1 + 3 + 3 + 1`, the orthant count of a triple sum
+  over a doubled index set — every orthant contributes `s3` plus a `span{cp2, H, 1}` correction.
+  E2 is not load-bearing for this edge on the reading given above.
+- **E4b's status is now MEASURED-with-a-proof-shape**, three closed forms, each a Lean target.
+
+### DAG after Step 2
+
+    E1, E2, E6, E8, E4a               PROVED
+    E4b  = the three closed forms     MEASURED, shape known — three lemmas, not one evaluation
+    E5   base case at m = j           open — the q-binomial's combinatorial content
+    E3   deviation ignores g          open — decides whether E4b and E5 are about the right objects
+
+Scope note, since E4a and E4b differ in it: **E4a holds on the reference class** (`refLabel`, i.e.
+`g(W) = 0`) — that is where `cp2`'s closed form and hence `Δcp2 = 0` are proved. **E4b's three forms
+hold for every label off the maximal seam**, no reference hypothesis. Rows must not inherit each
+other's quantifiers.

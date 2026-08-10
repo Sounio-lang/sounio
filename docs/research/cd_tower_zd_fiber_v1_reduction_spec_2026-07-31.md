@@ -6433,3 +6433,58 @@ feeds it to the descent.
 **The interior obligation is closed for BOTH reference families** — `W < 8` (Tier 107) and `W = 2^p`
 (here). Together they are exactly `g(W) = 0`, the class §57.56 characterised, which is exactly the
 class the deviation law's references live in.
+
+### §57.69 — obligation (i) TAKEN APART: the three orthant sums each close, and "only the combination closes" was a maximal-seam artifact
+
+§57.50 recorded obligation (i) as irreducible: `T1`, `T2`, `T3` each fall OUTSIDE
+`span{s3, cp2, cp3, 1, H, H², H³}` and only `3·T1 + 3·T2 + T3` lands inside it — "that the pieces do
+not close but the combination does is information — the closure is a property of the orthant SUM".
+Both reviewers pushed back at the time on the *inference* (a bigger basis might close the pieces),
+and they were right for a reason none of us guessed: **the pieces close in a SMALLER basis, and the
+fit was broken by one label per level.**
+
+Computing the three sums directly from the level-`(m+1)` blocks — `T1 = tr(B₀₀B₀₁B₁₀)`,
+`T2 = tr(B₀₁B₁₁B₁₀)`, `T3 = tr(B₁₁³)`, `s3 = tr(B₀₀³)`, `H = 2^(m+1)` — every label except the
+maximal seam `W = 2^m` satisfies, exactly:
+
+    T1 = s3 + 4·cp2 + 16H − 64
+    T2 = s3 + 4·cp2 −  8H + 64
+    T3 = s3          + 48H − 176
+
+486/486 off-seam label-levels at `m = 3..7`, and out of sample at `m = 8` (labels never fitted).
+
+**At `W = 2^m` the three deviate by exactly `(1, −2, 3) · 2(H−4)(H−8)`** — verified at every level
+`m = 3..8`, closed form included. And `(3, 3, 1) · (1, −2, 3) = 0`. That is the whole explanation:
+the seam anomaly is real in the pieces, lives in the one direction the orthant multiplicities
+annihilate, and is therefore invisible in the combination. §57.50 fitted the pieces on data that
+included the seam, found no closed form, and read the failure as structure.
+
+**This is the second maximal-seam artifact in this lane** — the first was the `288·[m−1,2]₂` term
+deflated in §57.49. Standing rule, now with two instances behind it: *before calling a fit's failure
+structural, refit with `W = 2^m` excluded.*
+
+#### What it buys
+
+1. **Obligation (i) is a consequence, not a target.** Summing: `3T1 + 3T2 + T3 = 7·s3 + 24·cp2 + 72H − 176`,
+   which is §57.50's identity — and it now holds on and off the seam alike, since the seam deviation
+   cancels. The Lean route to obligation (i) is three closed-form lemmas plus arithmetic, instead of
+   one irreducible evaluation of a combination.
+
+2. **The "7" is `3 + 3 + 1`, not a cancellation.** Hence the transfer's `8` is `1 + 3 + 3 + 1`: *every
+   one of the eight orthants of the level-`(m+1)` triple sum contributes `s3` plus a correction in
+   `span{cp2, H, 1}`*. The `8 = 2³` remark of the DAG is right about the number but the mechanism is
+   the orthant count of a triple sum over a doubled index set, not `JJᵀ = 2I` acting on a cubic
+   trace. Recorded as a correction, since the DAG promoted E2 to load-bearing on that reading.
+
+3. **E4b, on differences.** Within a fibre and off the seam, `ΔT1 = ΔT2 = Δs3 + 4·Δcp2` and
+   `ΔT3 = Δs3`. With E4a (`Δcp2 = 0` on the reference class, Tier 109) **all four within-fibre
+   deviations coincide**, and `Δs3(m+1) = 8·Δs3(m)` follows by counting orthants. E4b stops being
+   "the open lemma" and becomes the three closed forms above.
+
+4. **`cp2` re-enters where it was not expected.** `T3` is label-independent above `s3`; the entire
+   `cp2` content of the transfer sits in `T1` and `T2`, at coefficient `4` each — and `4` is the
+   `cp2` eigenvalue of the 2×2. That is a lead for the `cp2` line of the recursion, which §57.50's
+   obligation (0) still lists as underived.
+
+Probe: `scripts/research/zd_v1_obligation_i_pieces_probe.py` (`closed_forms()` re-verifies).
+**Status: MEASURED.** Three Lean lemmas now stand where one opaque obligation stood.
