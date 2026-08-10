@@ -621,6 +621,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.papers.main.epistemic-types.benchmarks.nvidia-l4-benchmarks | repo_only | docs/papers/main/epistemic-types/benchmarks/NVIDIA_L4_BENCHMARKS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.main.epistemic-types.readme | repo_only | docs/papers/main/epistemic-types/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.main.kybernetes-second-order | repo_only | docs/papers/main/kybernetes-second-order.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.papers.main.non-assoc-tree-fold-skeleton-2026-08-06 | repo_only | docs/papers/main/non_assoc_tree_fold_skeleton_2026-08-06.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.main.oopsla2027.outline | repo_only | docs/papers/main/oopsla2027/outline.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.main.paper | repo_only | docs/papers/main/paper.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.main.preprint | repo_only | docs/papers/main/preprint.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -792,6 +793,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.l9-zd-census-spec-2026-07-26 | historical | docs/research/l9_zd_census_spec_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.lean-falsification-ledger-spec-2026-07-25 | historical | docs/research/lean_falsification_ledger_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.lean-float-real-roadmap | historical | docs/research/lean_float_real_roadmap.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.lemon-associator-neuroticism-2026-08-09 | historical | docs/research/lemon_associator_neuroticism_2026-08-09.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.llm-collaboration-brief | historical | docs/research/llm_collaboration_brief.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.llm-collaboration-brief-claude | historical | docs/research/llm_collaboration_brief_claude.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.llm-collaboration-brief-gpt | historical | docs/research/llm_collaboration_brief_gpt.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -1017,6 +1019,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.u250-catastrophe-scan-fpga-spec-2026-07-26 | historical | docs/research/u250_catastrophe_scan_fpga_spec_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.variance-of-associator | historical | docs/research/variance_of_associator.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.while-loop-bug-investigation | historical | docs/research/WHILE_LOOP_BUG_INVESTIGATION.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.zd-completeness-pincer-dag-2026-08-10 | historical | docs/research/zd_completeness_pincer_dag_2026-08-10.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.zd-qec-prediction-falsifiers-2026-07-26 | historical | docs/research/zd_qec_prediction_falsifiers_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.zd-qec-prediction-spec-2026-07-26 | historical | docs/research/zd_qec_prediction_spec_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.zero-provenance-claims-falsifiers-2026-07-25 | historical | docs/research/zero_provenance_claims_falsifiers_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
