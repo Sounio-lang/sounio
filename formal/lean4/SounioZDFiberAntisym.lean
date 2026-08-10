@@ -17281,4 +17281,46 @@ theorem sum_row0_coset (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
   rw [h2]
   grind
 
+/-! ### Tier 118 — the two pins and the square sum, so the `B` assembly has its parts
+
+    `B`'s weight is `E01(b,c)·E01(0,c) = −ε(b)·σ(b)·σ(c)·τ(b,c)` (`blockB_weight`), so assembling it
+    needs a pin at `W` beside Tier 110's pin at `0`:
+
+      `Σ_x σ(x)·f(x) = Σ_x f(x) − 2·f(W)`      (`sumLtI_sigRow`)
+
+    together with the one immediate single sum, `Σ_c P3(0,c)² = 2^(m+1)` (`sum_row0_sq`), which is
+    just `P3 = ±1`. -/
+
+/-- **THE PIN AT `W`.**  `sigRow · W` is `1 − 2·[·=W]`, the companion of Tier 110's `sumLtI_epsZero`. -/
+theorem sumLtI_sigRow (n W : Nat) (hW : W < n) (f : Nat → Int) :
+    sumLtI n (fun x => sigRow x W * f x) = sumLtI n f - 2 * f W := by
+  have h1 : sumLtI n (fun x => sigRow x W * f x)
+      = sumLtI n (fun x => f x - (if x = W then 2 * f W else 0)) := by
+    refine sumLtI_congr _ _ _ (fun i _ => ?_)
+    unfold sigRow
+    by_cases h0 : i = W
+    · subst h0
+      rw [Nat.xor_self, if_pos rfl, if_pos rfl]
+      grind
+    · have hne : i ^^^ W ≠ 0 := fun h => h0 (xor_zero_eq i W h)
+      rw [if_neg hne, if_neg h0]
+      grind
+  rw [h1, sumLtI_sub n f (fun x => if x = W then 2 * f W else 0),
+      sumLtI_single n W (2 * f W) hW]
+
+/-- **THE SQUARE SUM.**  `Σ_c P3(0,c)² = 2^(m+1)`, since `P3` is `±1`. -/
+theorem sum_row0_sq (m W : Nat) :
+    sumLtI (2^(m+1)) (fun c => P3 0 c W m * P3 0 c W m) = ((2^(m+1) : Nat) : Int) := by
+  rw [sumLtI_congr (2^(m+1)) _ (fun _ => (1:Int)) (fun c _ => by
+        rcases P3_pm 0 c W m with h | h <;> rw [h] <;> grind),
+      sumLtI_one]
+
+/-- **`B`'s WEIGHT.**  A row flip at `0`, two switchings, and the coset flip. -/
+theorem blockB_weight (b c W : Nat) (hW0 : W ≠ 0) :
+    E01 b c W * E01 0 c W
+      = - (epsZero b * sigRow b W * (sigRow c W * tauW b c W)) := by
+  rw [E01_split b c W hW0, E01_zero_eq_neg_sigRow c W]
+  unfold epsZero sigRow tauW
+  grind
+
 end SounioZDFiberAntisym
