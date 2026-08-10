@@ -3348,3 +3348,18 @@ notes: |
 
   Next action for T2: prove weight2_pin_S2 / weight2_pin_S1 using Xentry_rowW/colW +
   tauW_carrier expansion, then package T2 = tr(XMX) − 4·(M³)_WW + 8 − 4H.
+
+---
+agent: grok-cli1 (ZD T2 leg)
+date: 2026-08-10 (later)
+files: formal/lean4/SounioZDFiberAntisym.lean
+status: GREEN — Tier 128 weight2_pin_S2
+notes: |
+  S₂ = Σ X(a,b) P3(b,W) X(W,a) = (M³)_WW, every label including maximal seam.
+  Route: peel → XM_at_W (carrier) → Xentry_rowW → six terms → weight2_pin_cancel.
+  weight2_D_S2 packages into the D-corner identity.
+
+  STILL OPEN on T2:
+    1. S₁ = Σ X(a,W) P3(W,c) X(c,a) = (M³)_WW  (measured equal; dual expansion)
+    2. bulk tr(X M X) via carrier → s3 + 4 cp2 + corrections
+    3. closed form T2 = s3 + 4 cp2 − 8H + 64 off the maximal seam

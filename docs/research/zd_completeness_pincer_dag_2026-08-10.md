@@ -345,9 +345,8 @@ concurrent lane's T2 tier needs the same object.
     E4b, T3 leg    PROVED for W < 2^n at level n
     E4b, T1 leg    Tiers 123–126: scalars + twelve CORE label-independent terms PROVED;
                    single-pin IDs + τ-carrier expansion still open
-    E4b, T2 leg    Tiers 120–122 PROVED (D-pin + three walks + corner);
-                   Tier 127: carrier forms Xentry_rowW/colW + pin-correction cancellation PROVED;
-                   sum-level S1=S2=(M³)_WW and tr(XMX) still open (measured)
+    E4b, T2 leg    Tiers 120–122, 127–128: D-pin, corner, S₂=(M³)_WW PROVED;
+                   S₁ still open (measured = S₂); bulk tr(XMX) open
     E5, E3         open
 
 See §57.79.
