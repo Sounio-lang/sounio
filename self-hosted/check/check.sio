@@ -5332,6 +5332,15 @@ fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut
             checker_report_mismatch_inplace(c, e.span, 6, ty_bool(), cond_ty)
         }
     }
+    // Fork linear ownership after the condition. Branch blocks pop their own
+    // locals, but moves of outer bindings must be checked as path-sensitive.
+    let branch_borrow_count = (*c).borrows.count
+    var branch_before_consumed: [bool; 128] = [false; 128]
+    var branch_i: i64 = 0
+    while branch_i < branch_borrow_count {
+        branch_before_consumed[branch_i as usize] = (*c).borrows.entries[branch_i as usize].consumed
+        branch_i = branch_i + 1
+    }
     // Condition narrowing (mirrors check_if_expr: push a refinement guard for the then-branch)
     let saved_cond_env = (*c).refine_cond_env
     let cond_guard = if_cond_extract_pred(e.left)
@@ -5339,10 +5348,31 @@ fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut
         (*c).refine_cond_env = refine_static_env_push((*c).refine_cond_env, cond_guard.1)
     }
     let then_ty = checker_check_opt_block_inplace(c, e.block)
+    var then_consumed: [bool; 128] = [false; 128]
+    branch_i = 0
+    while branch_i < branch_borrow_count {
+        then_consumed[branch_i as usize] = (*c).borrows.entries[branch_i as usize].consumed
+        (*c).borrows.entries[branch_i as usize].consumed = branch_before_consumed[branch_i as usize]
+        branch_i = branch_i + 1
+    }
     (*c).refine_cond_env = saved_cond_env
     match e.else_expr {
         Some(else_e) => {
             let else_ty = checker_check_expr_inplace(c, *else_e)
+            var ownership_mismatch = false
+            branch_i = 0
+            while branch_i < branch_borrow_count {
+                let entry = (*c).borrows.entries[branch_i as usize]
+                let else_consumed = entry.consumed
+                if entry.is_linear && then_consumed[branch_i as usize] != else_consumed {
+                    ownership_mismatch = true
+                }
+                (*c).borrows.entries[branch_i as usize].consumed = then_consumed[branch_i as usize] || else_consumed
+                branch_i = branch_i + 1
+            }
+            if ownership_mismatch {
+                checker_report_error_at_inplace(c, e.span, 40, 0, 0, 0)
+            }
             (*c).refine_cond_env = saved_cond_env
             if !checker_types_compatible_inplace(c, then_ty, else_ty) {
                 checker_report_mismatch_inplace(c, e.span, 7, then_ty, else_ty)
@@ -5350,6 +5380,20 @@ fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut
             then_ty
         }
         None => {
+            var ownership_mismatch = false
+            branch_i = 0
+            while branch_i < branch_borrow_count {
+                let entry = (*c).borrows.entries[branch_i as usize]
+                let else_consumed = branch_before_consumed[branch_i as usize]
+                if entry.is_linear && then_consumed[branch_i as usize] != else_consumed {
+                    ownership_mismatch = true
+                }
+                (*c).borrows.entries[branch_i as usize].consumed = then_consumed[branch_i as usize] || else_consumed
+                branch_i = branch_i + 1
+            }
+            if ownership_mismatch {
+                checker_report_error_at_inplace(c, e.span, 40, 0, 0, 0)
+            }
             (*c).refine_cond_env = saved_cond_env
             ty_unit()
         }
@@ -23138,6 +23182,15 @@ impl Checker {
         if !is_error_or_unknown(cond_ty) && !is_bool_type(cond_ty) {
             c = c.report_mismatch(e.span, 6, ty_bool(), cond_ty)
         }
+        // Fork linear ownership after the condition. Branch blocks pop their own
+        // locals, but moves of outer bindings must be checked as path-sensitive.
+        let branch_borrow_count = c.borrows.count
+        var branch_before_consumed: [bool; 128] = [false; 128]
+        var branch_i: i64 = 0
+        while branch_i < branch_borrow_count {
+            branch_before_consumed[branch_i as usize] = c.borrows.entries[branch_i as usize].consumed
+            branch_i = branch_i + 1
+        }
         // ── Condition narrowing ──────────────────────────────────────────────
         // Attempt to extract a refinement predicate from the `if` condition so
         // the then-branch can prove refinement requirements without Z3.
@@ -23152,6 +23205,13 @@ impl Checker {
         let then_pair = c.check_opt_block(e.block)
         c = then_pair.0
         let then_ty = then_pair.1
+        var then_consumed: [bool; 128] = [false; 128]
+        branch_i = 0
+        while branch_i < branch_borrow_count {
+            then_consumed[branch_i as usize] = c.borrows.entries[branch_i as usize].consumed
+            c.borrows.entries[branch_i as usize].consumed = branch_before_consumed[branch_i as usize]
+            branch_i = branch_i + 1
+        }
         // Restore env before else branch (negation narrowing is not yet implemented
         // — the safe choice is no narrowing in the else branch).
         c.refine_cond_env = saved_cond_env
@@ -23161,6 +23221,20 @@ impl Checker {
                 let else_pair = c.check_expr(*else_e)
                 c = else_pair.0
                 let else_ty = else_pair.1
+                var ownership_mismatch = false
+                branch_i = 0
+                while branch_i < branch_borrow_count {
+                    let entry = c.borrows.entries[branch_i as usize]
+                    let else_consumed = entry.consumed
+                    if entry.is_linear && then_consumed[branch_i as usize] != else_consumed {
+                        ownership_mismatch = true
+                    }
+                    c.borrows.entries[branch_i as usize].consumed = then_consumed[branch_i as usize] || else_consumed
+                    branch_i = branch_i + 1
+                }
+                if ownership_mismatch {
+                    c = c.report_error_at(e.span, 40, 0, 0, 0)
+                }
                 // Restore after else branch
                 c.refine_cond_env = saved_cond_env
                 if !c.types_compatible_structural(then_ty, else_ty) {
@@ -23169,6 +23243,20 @@ impl Checker {
                 (c, then_ty)
             }
             None => {
+                var ownership_mismatch = false
+                branch_i = 0
+                while branch_i < branch_borrow_count {
+                    let entry = c.borrows.entries[branch_i as usize]
+                    let else_consumed = branch_before_consumed[branch_i as usize]
+                    if entry.is_linear && then_consumed[branch_i as usize] != else_consumed {
+                        ownership_mismatch = true
+                    }
+                    c.borrows.entries[branch_i as usize].consumed = then_consumed[branch_i as usize] || else_consumed
+                    branch_i = branch_i + 1
+                }
+                if ownership_mismatch {
+                    c = c.report_error_at(e.span, 40, 0, 0, 0)
+                }
                 c.refine_cond_env = saved_cond_env
                 (c, ty_unit())
             }
