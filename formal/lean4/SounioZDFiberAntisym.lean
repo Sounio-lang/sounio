@@ -16698,4 +16698,74 @@ theorem weight3_pinned (m W : Nat) (hW0 : W ≠ 0) :
       P3_zero_zero m W]
   grind
 
+/-! ### Tier 111 — the DOUBLE WALK through index `0`, evaluated: `(M²)₀₀ = 2 − 2^(m+1)`
+
+    Tier 110 left `T3` resting on two scalars.  This tier closes the cheaper one, and it turns out
+    to need no reduction machinery at all — no `R_ul`, no `R_lu`, no seam analysis.
+
+    Writing out `P3` at the two row-`0`/column-`0` positions, the corner factors `cdSigma 0 ·` and
+    `cdSigma · 0` are both `1` (`cdSig0`, `cdSig0'`), and what survives is a single transposed pair
+    at level `m+2`:
+
+      `P3 0 c · P3 c 0  =  cdSigma (W + 2^(m+1)) c · cdSigma c (W + 2^(m+1))`
+
+    The two arguments are never equal — `c < 2^(m+1) ≤ W + 2^(m+1)` — and neither is `0` once
+    `c ≠ 0`, so `antisym` applies and the product is `−(cdSigma …)² = −1`.  **At every label,
+    the maximal seam included, and at `c = W` as well**: the locus `c = W` is not special here
+    because the transposed pair lives one level up, where `W + 2^(m+1)` is out of `c`'s range.
+
+    So the double walk is `1` at `c = 0` and `−1` at each of the other `2^(m+1) − 1` indices:
+
+      `(M²)₀₀ = 1 − (2^(m+1) − 1) = 2 − 2^(m+1) = −(H − 2)`
+
+    which is the lane's `z2`, unconditional — matching the measurement (491/491, seam included) and
+    NOT carrying the q-binomial that the triple walk does. -/
+
+/-- **THE ROW-0/COLUMN-0 PRODUCT.**  `−1` at every index but `0`, for every label. -/
+theorem P3_row0_col0 (m c W : Nat) (hc : c < 2^(m+1)) (hW : W < 2^(m+1)) (hc0 : c ≠ 0) :
+    P3 0 c W m * P3 c 0 W m = -1 := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hpow : (2:Nat)^(m+2) = 2^(m+1) + 2^(m+1) := by
+    rw [Nat.pow_succ]; omega
+  have hY : W + 2^(m+1) < 2^(m+2) := by omega
+  have hcl : c < 2^(m+2) := by omega
+  have hY0 : W + 2^(m+1) ≠ 0 := by omega
+  have hne : c ≠ W + 2^(m+1) := by omega
+  unfold P3 hi
+  rw [Nat.zero_xor, cdSig0 _ (m+1), cdSig0' _ (m+1),
+      antisym (m+2) c (W + 2^(m+1)) hcl hY hc0 hY0 hne]
+  rcases cdSigma_pm (m+2) (W + 2^(m+1)) c with h | h <;> rw [h] <;> grind
+
+/-- Sums of `−1`. -/
+theorem sumLtI_neg_one (n : Nat) : sumLtI n (fun _ => (-1:Int)) = -(n : Int) := by
+  induction n with
+  | zero => rfl
+  | succ n ih => rw [sumLtI, ih]; push_cast; omega
+
+/-- **THE DOUBLE WALK, EVALUATED.**  `(M²)₀₀ = 2 − 2^(m+1)`, for every label. -/
+theorem walk2_value (m W : Nat) (hW : W < 2^(m+1)) :
+    sumLtI (2^(m+1)) (fun c => P3 0 c W m * P3 c 0 W m)
+      = 2 - ((2^(m+1) : Nat) : Int) := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have h1 : sumLtI (2^(m+1)) (fun c => P3 0 c W m * P3 c 0 W m)
+      = sumLtI (2^(m+1)) (fun c => (-1:Int) + (if c = 0 then 2 else 0)) := by
+    refine sumLtI_congr _ _ _ (fun c hcl => ?_)
+    by_cases hc0 : c = 0
+    · subst hc0
+      rw [if_pos rfl, P3_zero_zero m W]
+      grind
+    · rw [if_neg hc0, P3_row0_col0 m c W hcl hW hc0]
+      grind
+  rw [h1, sumLtI_add, sumLtI_neg_one, sumLtI_single (2^(m+1)) 0 2 hp]
+  omega
+
+/-- **`T3` WITH ITS DOUBLE WALK EVALUATED.**  One scalar left: the closed triple walk. -/
+theorem weight3_pinned_walk2 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    tri3 (2^(m+1)) (fun x y => E11 x y W * P3 x y W m)
+      = tri3 (2^(m+1)) (fun x y => P3 x y W m)
+        - 6 * sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+              P3 0 b W m * (P3 b c W m * P3 c 0 W m)))
+        + 12 * (2 - ((2^(m+1) : Nat) : Int)) - 8 := by
+  rw [weight3_pinned m W hW0, walk2_value m W hW]
+
 end SounioZDFiberAntisym

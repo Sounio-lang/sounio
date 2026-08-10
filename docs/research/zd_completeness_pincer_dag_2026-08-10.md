@@ -200,10 +200,21 @@ cannot replace `cp2`. See §57.70.
 `weight3_pinned` (kernel-clean): `T3 = s3 − 6·(M³)₀₀ + 12·(M²)₀₀ − 8`, for every `W ≠ 0` and every
 `m`, with no off-seam hypothesis. The general form `tri3_epsZero` holds for arbitrary `f` and is
 reusable. So the first of E4b's three closed forms is reduced to two scalar evaluations —
-`(M²)₀₀` and `(M³)₀₀` — neither of which is a triple sum. See §57.72.
+`(M²)₀₀` and `(M³)₀₀` — neither of which is a triple sum. Both are to be stated for ALL labels:
+`(M²)₀₀ = −(H−2)` unconditionally, and `(M³)₀₀ = 32 − 10H − 96·[m−1,2]₂·[W = 2^m]` with the
+q-binomial IN the statement, since `weight3_pinned` carries no off-seam hypothesis. See §57.72.
 
     E1, E2, E6, E8, E4a               PROVED
     E4b  T3 leg                       PROVED down to two row-0 scalars (Tier 110)
     E4b  T1, T2 legs                  MEASURED closed forms; Tier 93 reduction in hand
     E5   base case at m = j           open
     E3   deviation ignores g          open
+
+### Step 4 — Tier 111: the double walk falls, unconditionally
+
+`walk2_value` (kernel-clean): `(M²)₀₀ = 2 − 2^(m+1)`, every label, no hypothesis beyond
+`W < 2^(m+1)`. It reduces to `antisym` on a transposed pair one level up — and the reason `c = W`
+is not special is that the partner `W + 2^(m+1)` lies outside `c`'s range, which is also the
+structural reason the double walk carries no q-binomial and the triple walk does.
+
+**The T3 leg of E4b is now ONE statement**: `(M³)₀₀ = 32 − 10H − 96·[m−1,2]₂·[W = 2^m]`. See §57.73.

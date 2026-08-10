@@ -6605,5 +6605,40 @@ tactic` errors for exactly that reason — the diagnosis was the whole fix, as i
 | `T3` | **PROVED** down to `(M³)₀₀` and `(M²)₀₀`, all labels |
 | `T1`, `T2` | reduced by Tier 93 to one open trace + one coset trace + a derived constant |
 
-What remains for `T3` is two scalar evaluations — `(M²)₀₀ = −(H−2)` (measured label-independent
-everywhere, seam included) and `(M³)₀₀ = 32 − 10H` off the seam. Neither is a triple sum.
+What remains for `T3` is two scalar evaluations, and — since `weight3_pinned` carries no off-seam
+hypothesis — **both should be stated for all labels**, the seam term included rather than excluded:
+
+- `(M²)₀₀ = −(H−2)`, unconditional (491/491, seam included);
+- `(M³)₀₀ = 32 − 10H − 96·[m−1,2]₂·[W = 2^m]`, i.e. the q-binomial belongs in the statement.
+
+Writing the second with an off-seam hypothesis would force a restatement the moment `T3` is wanted
+at `W = 2^m`, which is exactly what Tier 110's generality makes unnecessary. Neither is a triple
+sum.
+
+### §57.73 — Tier 111: the double walk is `2 − 2^(m+1)`, unconditionally
+
+`walk2_value` compiles, kernel-clean: `(M²)₀₀ = Σ_c P3(0,c)·P3(c,0) = 2 − 2^(m+1) = −(H−2)`, for
+**every** label `W < 2^(m+1)` — no `W ≠ 0`, no off-seam hypothesis, no reference class.
+
+It needed no reduction machinery at all. Writing `P3` out at the row-`0`/column-`0` positions, the
+corner factors `cdSigma 0 ·` and `cdSigma · 0` are both `1` (`cdSig0`, `cdSig0'`), and what survives
+is a single transposed pair one level up:
+
+    P3 0 c · P3 c 0  =  cdSigma (W + 2^(m+1)) c · cdSigma c (W + 2^(m+1))
+
+whose arguments are never equal (`c < 2^(m+1) ≤ W + 2^(m+1)`) and never `0` once `c ≠ 0`. So
+`antisym` — the file's oldest lemma, and the one the whole development is named after — gives
+`−(cdSigma …)² = −1` directly (`P3_row0_col0`).
+
+**Why `c = W` is not special here**, which is the point worth keeping: the transposed pair lives at
+level `m+2`, where the partner `W + 2^(m+1)` is out of `c`'s range entirely. That is the structural
+reason `(M²)₀₀` carries no q-binomial while `(M³)₀₀` does — the double walk never revisits the
+label's own locus, and the triple walk must.
+
+`weight3_pinned_walk2` substitutes it, leaving `T3` with exactly one unevaluated scalar:
+
+    T3 = s3 − 6·(M³)₀₀ + 12·(2 − H) − 8
+
+#### The T3 leg, remaining
+
+One statement: `(M³)₀₀ = 32 − 10H − 96·[m−1,2]₂·[W = 2^m]`. Everything else in `T3` is proved.
