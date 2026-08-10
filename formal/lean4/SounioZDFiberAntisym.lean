@@ -17488,6 +17488,436 @@ theorem weight3_closed (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
   push_cast
   grind
 
+/-! ### Tier 120 — the T2 leg's CHEAP SCALARS: walks pinned at the seam vertex
+
+    §57.69's closed form for the weight-2 orthant is
+
+      `T2 = s3 + 4·cp2 − 8H + 64`     (off the maximal seam)
+
+    and Tier 94's measured reduction writes the same object as
+
+      `T2 = s3 − 4(M³)_WW − 4(M²)_WW + 4·cp2
+            − 8(M Π_W M)_WW − 8(Π_W M²)_WW + 2^(m+3) − 8`
+
+    The three non-`s3`/`cp2`/`(M³)_WW` terms are **label-independent constants**, measured at
+    every label including the maximal seam:
+
+      `(M²)_WW       =  H − 2`
+      `(M Π_W M)_WW  = −(H − 2)`
+      `(Π_W M²)_WW   =  H − 2`     (`= (M²)_{0W}`, since `Π_W` sends `W ↦ 0`)
+
+    Plugging them in collapses the expansion to the one-scalar form
+
+      `T2 = s3 + 4·cp2 − 4·(M³)_WW`
+
+    (`t2_walk_arith` below; the expansion that justifies substituting into `T2` is still the Tier 94
+    measurement, not yet a theorem).  The remaining scalar is
+
+      `(M³)_WW = 2(H − 8) + 96·[m−1,2]₂ · [W = 2^m]`
+
+    — the T2-leg twin of the open triple walk at index `0`, with the SAME q-binomial at the seam
+    vertex.  Off the seam this is `2(H−8)`, and `T2 = s3 + 4·cp2 − 8H + 64` is pure arithmetic.
+
+    This tier proves the three constant walks.  The pointwise `±1` laws rest on `A4_sub`
+    (`σ(a,b) = −σ(a⊕b, b)`, already ∀n) and on the seam entries `P3_zero_seam` / `P3_seam_zero` /
+    `P3_diag`.  Parentheses around every `· ^^^ ·` are load-bearing: `^^^` binds looser than `+`. -/
+
+/-- A transposed `cdSigma` pair multiplies to `−1`. -/
+theorem cdSigma_prod_neg (k a b : Nat) (ha : a < 2^k) (hb : b < 2^k)
+    (ha0 : a ≠ 0) (hb0 : b ≠ 0) (hab : a ≠ b) :
+    cdSigma a b k * cdSigma b a k = -1 := by
+  rw [antisym k a b ha hb ha0 hb0 hab]
+  rcases cdSigma_pm k b a with h | h <;> rw [h] <;> grind
+
+/-- **THE SEAM ROW/COLUMN PRODUCT.**  `+1` at every index but `0`. -/
+theorem P3_seam_row_col (m c W : Nat) (hc : c < 2^(m+1)) (hW : W < 2^(m+1))
+    (hW0 : W ≠ 0) (hc0 : c ≠ 0) :
+    P3 W c W m * P3 c W W m = 1 := by
+  by_cases hcW : c = W
+  · -- c = W: product is P3(W,W)² = (−1)² = 1
+    rw [hcW, P3_diag W W m hW hW hW0]; rfl
+  · -- two transposed cdSigma pairs at level m+2, each contributing −1
+    have hpow : (2:Nat)^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+    have hWc : W < 2^(m+2) := by omega
+    have hcl : c < 2^(m+2) := by omega
+    have hxorlt : c ^^^ W < 2^(m+1) := xorlt hc hW
+    have hhic : (c ^^^ W) + 2^(m+1) < 2^(m+2) := by omega
+    have hhic0 : (c ^^^ W) + 2^(m+1) ≠ 0 := by omega
+    have hWne : W ≠ (c ^^^ W) + 2^(m+1) := by omega
+    have hH : (2:Nat)^(m+1) < 2^(m+2) := by omega
+    have hH0 : (2:Nat)^(m+1) ≠ 0 := Nat.ne_of_gt (Nat.two_pow_pos (m+1))
+    have hHne : (2:Nat)^(m+1) ≠ c := by omega
+    unfold P3 hi
+    have h1 : cdSigma W ((c ^^^ W) + 2^(m+1)) (m+2)
+          * cdSigma ((c ^^^ W) + 2^(m+1)) W (m+2) = -1 :=
+      cdSigma_prod_neg (m+2) W ((c ^^^ W) + 2^(m+1)) hWc hhic hW0 hhic0 hWne
+    have h2 : cdSigma (2^(m+1)) c (m+2) * cdSigma c (2^(m+1)) (m+2) = -1 :=
+      cdSigma_prod_neg (m+2) (2^(m+1)) c hH hcl hH0 hc0 hHne
+    have hWW : W ^^^ W = 0 := Nat.xor_self W
+    simp only [hWW, Nat.zero_add]
+    have hre :
+        cdSigma W ((c ^^^ W) + 2^(m+1)) (m+2)
+          * cdSigma (2^(m+1)) c (m+2)
+          * (cdSigma c (2^(m+1)) (m+2)
+              * cdSigma ((c ^^^ W) + 2^(m+1)) W (m+2))
+        = (cdSigma W ((c ^^^ W) + 2^(m+1)) (m+2)
+            * cdSigma ((c ^^^ W) + 2^(m+1)) W (m+2))
+          * (cdSigma (2^(m+1)) c (m+2)
+              * cdSigma c (2^(m+1)) (m+2)) := by
+      grind
+    rw [hre, h1, h2]; grind
+
+/-- **THE SEAM DOUBLE WALK.**  `(M²)_WW = 2^(m+1) − 2`, every label. -/
+theorem walk2_at_W (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun c => P3 W c W m * P3 c W W m)
+      = ((2^(m+1) : Nat) : Int) - 2 := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have h1 : sumLtI (2^(m+1)) (fun c => P3 W c W m * P3 c W W m)
+      = sumLtI (2^(m+1)) (fun c => (1:Int) + (if c = 0 then -2 else 0)) := by
+    refine sumLtI_congr _ _ _ (fun c hcl => ?_)
+    by_cases hc0 : c = 0
+    · subst hc0
+      rw [if_pos rfl, P3_seam_zero m W hW hW0, P3_zero_seam m W hW hW0]
+      grind
+    · rw [if_neg hc0, P3_seam_row_col m c W hcl hW hW0 hc0]
+      grind
+  rw [h1, sumLtI_add, sumLtI_one, sumLtI_single (2^(m+1)) 0 (-2) hp]
+  omega
+
+/-- **CROSS PRODUCT ROW-0 / COL-W.**  `+1` off the seam index.  Uses `A4_sub`. -/
+theorem P3_row0_colW (m c W : Nat) (hc : c < 2^(m+1)) (hW : W < 2^(m+1))
+    (hW0 : W ≠ 0) (hcW : c ≠ W) :
+    P3 0 c W m * P3 c W W m = 1 := by
+  by_cases hc0 : c = 0
+  · -- P3 0 0 · P3 0 W = 1 · 1 = 1
+    rw [hc0, P3_zero_zero m W, P3_zero_seam m W hW hW0]; rfl
+  · -- P3_red (y ≠ 0 is the SECOND argument):
+    -- P3 0 c = −σ(c⊕W, 0) · σ(0⊕W, c) = −1 · σ(W, c)
+    -- P3 c W = −σ(W⊕W, c) · σ(c⊕W, W) = −σ(0, c) · σ(c⊕W, W) = −σ(c⊕W, W)
+    have hP30c : P3 0 c W m = - cdSigma W c (m+1) := by
+      have hred := P3_red 0 c W m (Nat.two_pow_pos (m+1)) hc hW hc0
+      have hz : 0 ^^^ W = W := Nat.zero_xor W
+      rw [hred, hz, cdSig0' (c ^^^ W) m]; grind
+    have hP3cW : P3 c W W m = - cdSigma (c ^^^ W) W (m+1) := by
+      have hred := P3_red c W W m hc hW hW hW0
+      have hz : W ^^^ W = 0 := Nat.xor_self W
+      rw [hred, hz, cdSig0 c m]; grind
+    rw [hP30c, hP3cW]
+    -- (−σ(W,c)) · (−σ(c⊕W,W)) = σ(W,c) · σ(c⊕W,W)
+    have hA4 : cdSigma c W (m+1) = - cdSigma (c ^^^ W) W (m+1) :=
+      A4_sub (m+1) c W hc hW hc0 hW0 (by
+        intro h; exact hcW (xor_zero_eq c W h))
+    have ha : cdSigma c W (m+1) = - cdSigma W c (m+1) :=
+      antisym (m+1) c W hc hW hc0 hW0 hcW
+    -- exhaust ±1 to rearrange hA4 / ha into σ(c⊕W,W) = σ(W,c)
+    rcases cdSigma_pm (m+1) c W with hc1 | hc1 <;>
+      rcases cdSigma_pm (m+1) (c ^^^ W) W with hc2 | hc2 <;>
+        rcases cdSigma_pm (m+1) W c with hc3 | hc3 <;>
+          (rw [hc1, hc2] at hA4; rw [hc1, hc3] at ha; rw [hc2, hc3]; grind)
+
+/-- **`(M²)_{0W} = H − 2`.**  Equals `(Π_W M²)_WW`. -/
+theorem walk2_0W (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun c => P3 0 c W m * P3 c W W m)
+      = ((2^(m+1) : Nat) : Int) - 2 := by
+  have h1 : sumLtI (2^(m+1)) (fun c => P3 0 c W m * P3 c W W m)
+      = sumLtI (2^(m+1)) (fun c => (1:Int) + (if c = W then -2 else 0)) := by
+    refine sumLtI_congr _ _ _ (fun c hcl => ?_)
+    by_cases hcW : c = W
+    · rw [if_pos hcW, hcW, P3_zero_seam m W hW hW0, P3_diag W W m hW hW hW0]
+      grind
+    · rw [if_neg hcW, P3_row0_colW m c W hcl hW hW0 hcW]
+      grind
+  rw [h1, sumLtI_add, sumLtI_one, sumLtI_single (2^(m+1)) W (-2) hW]
+  omega
+
+/-- **COSET EDGE AT THE SEAM.**  `P3 W b · P3 (b⊕W) W = −1` for `b ≠ 0`. -/
+theorem P3_seam_coset (m b W : Nat) (hb : b < 2^(m+1)) (hW : W < 2^(m+1))
+    (hW0 : W ≠ 0) (hb0 : b ≠ 0) :
+    P3 W b W m * P3 (b ^^^ W) W W m = -1 := by
+  by_cases hbW : b = W
+  · -- b = W: P3 W W · P3 0 W = (−1)·1 = −1
+    rw [hbW, Nat.xor_self, P3_diag W W m hW hW hW0, P3_zero_seam m W hW hW0]; rfl
+  · have hbWlt : b ^^^ W < 2^(m+1) := xorlt hb hW
+    -- P3 W b = −σ(b⊕W, W) · σ(W⊕W, b) = −σ(b⊕W, W) · σ(0, b) = −σ(b⊕W, W)
+    have hP3Wb : P3 W b W m = - cdSigma (b ^^^ W) W (m+1) := by
+      have hred := P3_red W b W m hW hb hW hb0
+      have hz : W ^^^ W = 0 := Nat.xor_self W
+      rw [hred, hz, cdSig0 b m]; grind
+    -- P3 (b⊕W) W = −σ(W⊕W, b⊕W) · σ((b⊕W)⊕W, W) = −σ(0, b⊕W) · σ(b, W) = −σ(b, W)
+    have hP3bWW : P3 (b ^^^ W) W W m = - cdSigma b W (m+1) := by
+      have hred := P3_red (b ^^^ W) W W m hbWlt hW hW hW0
+      have hz : W ^^^ W = 0 := Nat.xor_self W
+      have hcancel : (b ^^^ W) ^^^ W = b := xor_cancel b W
+      rw [hred, hz, hcancel, cdSig0 (b ^^^ W) m]; grind
+    rw [hP3Wb, hP3bWW]
+    -- (−σ(b⊕W,W)) · (−σ(b,W)) = σ(b⊕W,W) · σ(b,W)
+    -- A4_sub: σ(b,W) = −σ(b⊕W,W) ⇒ product = (−σ(b,W)) · σ(b,W) = −(σ(b,W))² = −1
+    have hA4 : cdSigma b W (m+1) = - cdSigma (b ^^^ W) W (m+1) :=
+      A4_sub (m+1) b W hb hW hb0 hW0 (by
+        intro h; exact hbW (xor_zero_eq b W h))
+    rcases cdSigma_pm (m+1) b W with hb1 | hb1 <;>
+      rcases cdSigma_pm (m+1) (b ^^^ W) W with hb2 | hb2 <;>
+        (rw [hb1, hb2] at hA4; rw [hb1, hb2]; grind)
+
+/-- **`(M Π_W M)_WW = −(H − 2)`.** -/
+theorem walk_MPiM_WW (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun b => P3 W b W m * P3 (b ^^^ W) W W m)
+      = 2 - ((2^(m+1) : Nat) : Int) := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have h1 : sumLtI (2^(m+1)) (fun b => P3 W b W m * P3 (b ^^^ W) W W m)
+      = sumLtI (2^(m+1)) (fun b => (-1:Int) + (if b = 0 then 2 else 0)) := by
+    refine sumLtI_congr _ _ _ (fun b hbl => ?_)
+    by_cases hb0 : b = 0
+    · rw [if_pos hb0, hb0, Nat.zero_xor, P3_seam_zero m W hW hW0, P3_diag W W m hW hW hW0]
+      grind
+    · rw [if_neg hb0, P3_seam_coset m b W hbl hW hW0 hb0]
+      grind
+  rw [h1, sumLtI_add, sumLtI_neg_one, sumLtI_single (2^(m+1)) 0 2 hp]
+  omega
+
+/-- Arithmetic consequence of the three constant walks: the Tier 94 remainder collapses to
+    `−4·(M³)_WW`.  Stated over free integers so it is available the moment the expansion is a
+    theorem; not itself a claim about `T2`. -/
+theorem t2_walk_arith (s3 cp2 w3W w2W mPiM piM2 H : Int)
+    (hw2 : w2W = H - 2) (hm : mPiM = -(H - 2)) (hp : piM2 = H - 2) :
+    s3 - 4 * w3W - 4 * w2W + 4 * cp2 - 8 * mPiM - 8 * piM2 + 4 * H - 8
+      = s3 + 4 * cp2 - 4 * w3W := by
+  rw [hw2, hm, hp]; grind
+
+/-- **THE THREE CONSTANT WALKS, PACKAGED.**  Ready for the Tier 94 expansion of `T2`. -/
+theorem t2_constant_walks (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun c => P3 W c W m * P3 c W W m)
+      = ((2^(m+1) : Nat) : Int) - 2
+    ∧ sumLtI (2^(m+1)) (fun b => P3 W b W m * P3 (b ^^^ W) W W m)
+      = 2 - ((2^(m+1) : Nat) : Int)
+    ∧ sumLtI (2^(m+1)) (fun c => P3 0 c W m * P3 c W W m)
+      = ((2^(m+1) : Nat) : Int) - 2 :=
+  ⟨walk2_at_W m W hW hW0, walk_MPiM_WW m W hW hW0, walk2_0W m W hW hW0⟩
+
+/-! ### Tier 121 — the weight-2 orthant LOSES its switching: `D`-pin of the middle factor
+
+    Tier 120 evaluated the three constant walks of the T2 leg.  What still sits between
+    `weight2_word` and those walks is the expansion that removes `sigRow` (the diagonal `D`) and
+    then the coset carrier `tauW`.  This tier does the first half.
+
+    The middle factor of `weight2_word` is `sigRow b · P3 b c · sigRow c` — i.e. `D M D` at
+    `(b,c)`.  Since `sigRow = 1 − 2·χ_W` (Tier 94), a double sum against both pins expands exactly
+    as `tri3_epsZero` did at index `0`, but now at the seam vertex:
+
+      `Σ_{b,c} σ(b) f(b,c) σ(c)
+         = Σ f − 2 Σ_c f(W,c) − 2 Σ_b f(b,W) + 4 f(W,W)`     (`sumLtI2_sigRow`)
+
+    Carried through the outer coset-flipped factors `X = tauW ⊙ P3` of `weight2_word`, this is
+
+      `T2 = Σ_abc X(a,b) P3(b,c) X(c,a)
+            − 2 Σ_ac X(a,W) P3(W,c) X(c,a)
+            − 2 Σ_ab X(a,b) P3(b,W) X(W,a)
+            + 4 Σ_a X(a,W) P3(W,W) X(W,a)`                   (`weight2_D_pinned`)
+
+    with `X(u,v) = tauW u v · P3 u v`.  The `sigRow` dependence is GONE — every surviving term is a
+    walk in `X` and `P3` pinned at the seam vertex `W`.
+
+    ⚠ Not yet: the carrier step `X = P3 + 2Π − 4 e₀e_Wᵀ` (Tier 94 form) nor `(M³)_WW`. -/
+
+/-- **DOUBLE `sigRow` PIN.**  Twin of the two-index half of `tri3_epsZero`, at the seam. -/
+theorem sumLtI2_sigRow (n W : Nat) (hW : W < n) (f : Nat → Nat → Int) :
+    sumLtI n (fun b => sumLtI n (fun c => sigRow b W * (f b c * sigRow c W)))
+      = sumLtI n (fun b => sumLtI n (fun c => f b c))
+        - 2 * sumLtI n (fun c => f W c)
+        - 2 * sumLtI n (fun b => f b W)
+        + 4 * f W W := by
+  have hinner : ∀ b, sumLtI n (fun c => sigRow b W * (f b c * sigRow c W))
+      = sigRow b W * (sumLtI n (fun c => f b c) - 2 * f b W) := by
+    intro b
+    have h : sumLtI n (fun c => sigRow b W * (f b c * sigRow c W))
+        = sumLtI n (fun c => sigRow c W * (sigRow b W * f b c)) :=
+      sumLtI_congr _ _ _ (fun c _ => by grind)
+    rw [h, sumLtI_sigRow n W hW (fun c => sigRow b W * f b c), sumLtI_mul]
+    grind
+  rw [sumLtI_congr n _ (fun b => sigRow b W * (sumLtI n (fun c => f b c) - 2 * f b W))
+      (fun b _ => hinner b)]
+  -- outer pin: Σ σ(b)·g(b) = Σ g − 2·g(W), g(b) = Σ_c f b c − 2 f b W
+  rw [sumLtI_sigRow n W hW (fun b => sumLtI n (fun c => f b c) - 2 * f b W)]
+  -- Σ (Σ f − 2 f b W) − 2 (Σ f W c − 2 f W W)
+  rw [sumLtI_sub n (fun b => sumLtI n (fun c => f b c)) (fun b => 2 * f b W)]
+  have h2 : sumLtI n (fun b => 2 * f b W) = 2 * sumLtI n (fun b => f b W) := by
+    rw [← sumLtI_mul]
+  rw [h2]
+  -- goal: ΣΣ f − 2 Σ f(·,W) − 2(Σ f(W,·) − 2 fWW) = ΣΣ f − 2 Σ f(W,·) − 2 Σ f(·,W) + 4 fWW
+  grind
+
+/-- The coset-flipped matrix entry. -/
+def Xentry (m l y W : Nat) : Int := tauW l y W * P3 l y W m
+
+/-- For one outer index `a`, expand the `(b,c)` double sum by the double `sigRow` pin. -/
+private theorem weight2_D_pinned_slice (m a W : Nat) (hW : W < 2^(m+1)) :
+    sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+        (tauW a b W * P3 a b W m)
+          * ((sigRow b W * (sigRow c W * P3 b c W m)) * (tauW c a W * P3 c a W m))))
+      = sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+            Xentry m a b W * (P3 b c W m * Xentry m c a W)))
+        - 2 * sumLtI (2^(m+1)) (fun c =>
+            Xentry m a W W * (P3 W c W m * Xentry m c a W))
+        - 2 * sumLtI (2^(m+1)) (fun b =>
+            Xentry m a b W * (P3 b W W m * Xentry m W a W))
+        + 4 * (Xentry m a W W * (P3 W W W m * Xentry m W a W)) := by
+  let f : Nat → Nat → Int := fun b c =>
+    Xentry m a b W * (P3 b c W m * Xentry m c a W)
+  have hshape : sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+        (tauW a b W * P3 a b W m)
+          * ((sigRow b W * (sigRow c W * P3 b c W m)) * (tauW c a W * P3 c a W m))))
+      = sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+            sigRow b W * (f b c * sigRow c W))) := by
+    refine sumLtI_congr _ _ _ (fun b _ => sumLtI_congr _ _ _ (fun c _ => ?_))
+    unfold f Xentry; grind
+  rw [hshape, sumLtI2_sigRow (2^(m+1)) W hW f]
+
+/-- Distribute `Σ_a (S0 − 2 S1 − 2 S2 + 4 S3)`. -/
+private theorem sumLtI_four_expand (n : Nat)
+    (S0 S1 S2 S3 : Nat → Int) :
+    sumLtI n (fun a => S0 a - 2 * S1 a - 2 * S2 a + 4 * S3 a)
+      = sumLtI n S0 - 2 * sumLtI n S1 - 2 * sumLtI n S2 + 4 * sumLtI n S3 := by
+  have h : sumLtI n (fun a => S0 a - 2 * S1 a - 2 * S2 a + 4 * S3 a)
+      = sumLtI n (fun a => S0 a - (2 * S1 a + (2 * S2 a - 4 * S3 a))) :=
+    sumLtI_congr _ _ _ (fun a _ => by grind)
+  rw [h, sumLtI_sub n S0 (fun a => 2 * S1 a + (2 * S2 a - 4 * S3 a))]
+  have hadd : sumLtI n (fun a => 2 * S1 a + (2 * S2 a - 4 * S3 a))
+      = sumLtI n (fun a => 2 * S1 a) + sumLtI n (fun a => 2 * S2 a - 4 * S3 a) :=
+    sumLtI_add n (fun a => 2 * S1 a) (fun a => 2 * S2 a - 4 * S3 a)
+  rw [hadd, sumLtI_sub n (fun a => 2 * S2 a) (fun a => 4 * S3 a)]
+  have h2s1 : sumLtI n (fun a => 2 * S1 a) = 2 * sumLtI n S1 := by rw [← sumLtI_mul]
+  have h2s2 : sumLtI n (fun a => 2 * S2 a) = 2 * sumLtI n S2 := by rw [← sumLtI_mul]
+  have h4s3 : sumLtI n (fun a => 4 * S3 a) = 4 * sumLtI n S3 := by rw [← sumLtI_mul]
+  rw [h2s1, h2s2, h4s3]
+  grind
+
+/-- **`T2` WITH `D` EXPANDED.**  The weight-2 orthant equals four walks in `X` and `P3`, all
+    free of `sigRow`. -/
+theorem weight2_D_pinned (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+        E01 a b W * P3 a b W m
+          * (E11 b c W * P3 b c W m * (E10 c a W * P3 c a W m)))))
+      = sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+            Xentry m a b W * (P3 b c W m * Xentry m c a W))))
+        - 2 * sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun c =>
+            Xentry m a W W * (P3 W c W m * Xentry m c a W)))
+        - 2 * sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+            Xentry m a b W * (P3 b W W m * Xentry m W a W)))
+        + 4 * sumLtI (2^(m+1)) (fun a =>
+            Xentry m a W W * (P3 W W W m * Xentry m W a W)) := by
+  rw [weight2_word m W hW0]
+  rw [sumLtI_congr (2^(m+1)) _ _
+      (fun a _ => weight2_D_pinned_slice m a W hW)]
+  exact sumLtI_four_expand (2^(m+1))
+    (fun a => sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+        Xentry m a b W * (P3 b c W m * Xentry m c a W))))
+    (fun a => sumLtI (2^(m+1)) (fun c =>
+        Xentry m a W W * (P3 W c W m * Xentry m c a W)))
+    (fun a => sumLtI (2^(m+1)) (fun b =>
+        Xentry m a b W * (P3 b W W m * Xentry m W a W)))
+    (fun a => Xentry m a W W * (P3 W W W m * Xentry m W a W))
+
+/-! ### Tier 122 — the corner term of the D-pin, EVALUATED
+
+    Of the four walks in `weight2_D_pinned`, the last is a single sum:
+
+      `Σ_a X(a,W) · P3(W,W) · X(W,a)`
+
+    The coset flip on the seam column/row collapses to `epsZero`:
+
+      `tauW a W W = epsZero a = tauW W a W`     (`a ⊕ W ⊕ W = a`)
+
+    so with `P3(W,W) = −1` (`P3_diag`) and `epsZero² = 1`,
+
+      `Σ_a X(a,W) X(W,a) = Σ_a P3(a,W) P3(W,a) = (M²)_WW = H − 2`
+
+    and the corner contributes `4 · (−1) · (H − 2) = −4(H − 2)` to `T2`.  That is the first of
+    Tier 94's constant terms, derived rather than fitted. -/
+
+/-- On the seam column, the coset flip is the index-`0` flip. -/
+theorem tauW_seam_col (a W : Nat) : tauW a W W = epsZero a := by
+  unfold tauW epsZero
+  have h : (a ^^^ W) ^^^ W = a := xor_cancel a W
+  by_cases ha0 : a = 0
+  · rw [ha0, if_pos (by rw [Nat.zero_xor, Nat.xor_self]), if_pos rfl]
+  · have hne : (a ^^^ W) ^^^ W ≠ 0 := by rw [h]; exact ha0
+    rw [if_neg hne, if_neg ha0]
+
+/-- On the seam row, the same. -/
+theorem tauW_seam_row (a W : Nat) : tauW W a W = epsZero a := by
+  unfold tauW epsZero
+  have h : (W ^^^ a) ^^^ W = a := by
+    rw [Nat.xor_comm W a, xor_cancel a W]
+  by_cases ha0 : a = 0
+  · rw [ha0, if_pos (by rw [Nat.xor_zero, Nat.xor_self]), if_pos rfl]
+  · have hne : (W ^^^ a) ^^^ W ≠ 0 := by rw [h]; exact ha0
+    rw [if_neg hne, if_neg ha0]
+
+/-- Seam-column entry of `X`. -/
+theorem Xentry_seam_col (m a W : Nat) :
+    Xentry m a W W = epsZero a * P3 a W W m := by
+  unfold Xentry; rw [tauW_seam_col]
+
+/-- Seam-row entry of `X`. -/
+theorem Xentry_seam_row (m a W : Nat) :
+    Xentry m W a W = epsZero a * P3 W a W m := by
+  unfold Xentry; rw [tauW_seam_row]
+
+/-- **THE TRANSPOSED SEAM PRODUCT OF `X`.**  Equals `(M²)_WW`. -/
+theorem X_seam_walk2 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun a => Xentry m a W W * Xentry m W a W)
+      = ((2^(m+1) : Nat) : Int) - 2 := by
+  have h1 : sumLtI (2^(m+1)) (fun a => Xentry m a W W * Xentry m W a W)
+      = sumLtI (2^(m+1)) (fun a => P3 a W W m * P3 W a W m) := by
+    refine sumLtI_congr _ _ _ (fun a _ => ?_)
+    rw [Xentry_seam_col, Xentry_seam_row]
+    -- (ε P3aW)(ε P3Wa) = ε² · P3aW · P3Wa = P3aW · P3Wa
+    have he : epsZero a * P3 a W W m * (epsZero a * P3 W a W m)
+        = (epsZero a * epsZero a) * (P3 a W W m * P3 W a W m) := by grind
+    rw [he, epsZero_sq]
+    grind
+  have h2 : sumLtI (2^(m+1)) (fun a => P3 a W W m * P3 W a W m)
+      = sumLtI (2^(m+1)) (fun a => P3 W a W m * P3 a W W m) :=
+    sumLtI_congr _ _ _ (fun a _ => by grind)
+  rw [h1, h2, walk2_at_W m W hW hW0]
+
+/-- **THE CORNER TERM.**  `Σ_a X(a,W)·P3(W,W)·X(W,a) = 2 − H`. -/
+theorem weight2_corner (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun a =>
+        Xentry m a W W * (P3 W W W m * Xentry m W a W))
+      = 2 - ((2^(m+1) : Nat) : Int) := by
+  have hd : P3 W W W m = -1 := P3_diag W W m hW hW hW0
+  have h1 : sumLtI (2^(m+1)) (fun a =>
+        Xentry m a W W * (P3 W W W m * Xentry m W a W))
+      = sumLtI (2^(m+1)) (fun a => - (Xentry m a W W * Xentry m W a W)) := by
+    refine sumLtI_congr _ _ _ (fun a _ => ?_)
+    rw [hd]; grind
+  have h2 : sumLtI (2^(m+1)) (fun a => - (Xentry m a W W * Xentry m W a W))
+      = - sumLtI (2^(m+1)) (fun a => Xentry m a W W * Xentry m W a W) := by
+    have hmul := sumLtI_mul (2^(m+1)) (-1)
+      (fun a => Xentry m a W W * Xentry m W a W)
+    have hL : sumLtI (2^(m+1)) (fun a => - (Xentry m a W W * Xentry m W a W))
+        = sumLtI (2^(m+1)) (fun a => (-1:Int) * (Xentry m a W W * Xentry m W a W)) :=
+      sumLtI_congr _ _ _ (fun a _ => by grind)
+    rw [hL, hmul]
+    grind
+  rw [h1, h2, X_seam_walk2 m W hW hW0]
+  omega
+
+/-- **`T2` WITH CORNER EVALUATED.**  Three walks left from the D-pin. -/
+theorem weight2_D_corner (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+        E01 a b W * P3 a b W m
+          * (E11 b c W * P3 b c W m * (E10 c a W * P3 c a W m)))))
+      = sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+            Xentry m a b W * (P3 b c W m * Xentry m c a W))))
+        - 2 * sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun c =>
+            Xentry m a W W * (P3 W c W m * Xentry m c a W)))
+        - 2 * sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+            Xentry m a b W * (P3 b W W m * Xentry m W a W)))
+        + 4 * (2 - ((2^(m+1) : Nat) : Int)) := by
+  rw [weight2_D_pinned m W hW hW0, weight2_corner m W hW hW0]
+
 /-! ### Tier 123 — the `T1` leg: its weight factors, and `T1` reduces to ONE unproved scalar
 
     The weight-1 orthant carries `E01` and `E10`, so unlike `T3` it has TWO coset flips.  They
