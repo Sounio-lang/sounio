@@ -110,3 +110,21 @@ combination, and Tier 90 already supplies everything except that evaluation.
 
 Three open, two of them (E4b, E5) being the two Fable named, and E3 being the one that decides
 whether the other two are about the right objects.
+
+## E4a attempted, not landed — with the diagnosis
+
+`cp2_summand_law` assembles the four-sign law from Tiers 96–108: interior via `cp2_summand_core` +
+Bridge 1 + `P3² = 1` (no `resB` needed at all), the rest matched to the border lemmas. The structure
+is right — every locus has its lemma and the target values match — but it does not compile: 9 errors,
+all mechanical, and of two kinds.
+
+1. **`simp only` mangles the goal shape before the border lemma can be rewritten in.** After
+   `simp only [if_neg …]` the goal reads `P3 0 b W m * P3 b (0 ^^^ W) W m` while the lemma is stated
+   with `P3 b W W m` — the `0 ^^^ W` was not normalised. Rewriting the `Nat.zero_xor` FIRST, before
+   any `simp`, is the fix.
+2. **`fun h => hb0 h.symm` fails to infer `h`'s type** in argument position. Needs an explicit
+   annotation or a `have`.
+
+The file is restored to green and the attempt is preserved at `scratchpad/tier109_attempt.lean`.
+Recorded because the first lift attempt failed the same way — mechanically, with a clean diagnosis —
+and landed on the second pass once the diagnosis was in hand.
