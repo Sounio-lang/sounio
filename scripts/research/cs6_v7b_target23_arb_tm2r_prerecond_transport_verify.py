@@ -250,6 +250,7 @@ def main() -> None:
     )
     require(transport, "split_depth_limit", 8)
     require(transport, "split_node_limit", 255)
+    require(transport, "stop_after_first_unresolved", True)
     for count_key in (
         "outward_stabilization_checks",
         "split_nodes",
@@ -316,6 +317,8 @@ def main() -> None:
         if not unresolved and not carriers:
             fail("incomplete transport records neither a refusal nor a terminal carrier")
         if transport.get("status") == "TRANSPORT_REFUSED":
+            if len(unresolved) != 1:
+                fail("fail-fast refused transport must retain exactly one witness")
             if transport.get("terminal_domain_cover_certified") is True:
                 fail("refused transport claims a terminal domain cover")
             for key in ("event_time", "event_derivative", "event_normal"):

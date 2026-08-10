@@ -115,6 +115,7 @@ def main() -> None:
         "duplicate_check": duplicate_check,
         "reconditioner": set_transport("reconditioner", "point_qr"),
         "split_limit": set_transport("split_node_limit", 256),
+        "stop_policy": set_transport("stop_after_first_unresolved", False),
         "terminal": corrupt_terminal,
         "partial_hull": expose_partial_hull,
         "aggregate_hull": corrupt_aggregate_hull,

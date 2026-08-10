@@ -32,6 +32,7 @@ CRITICAL_PATH = prerecond.CRITICAL_PATH
 SECTION_ROWS = prerecond.SECTION_ROWS
 MAX_SPLIT_DEPTH = 8
 MAX_SPLIT_NODES = 255
+STOP_AFTER_FIRST_UNRESOLVED = True
 EXPECTED_PRERECOND_RECEIPT_SHA256 = (
     "4b615c5632ba9537d639d4fe831c924aff1586a0d4a9db1f2f4efd9c1f1daa3a"
 )
@@ -150,6 +151,7 @@ def transport_next_return(
         ),
         "split_depth_limit": MAX_SPLIT_DEPTH,
         "split_node_limit": MAX_SPLIT_NODES,
+        "stop_after_first_unresolved": STOP_AFTER_FIRST_UNRESOLVED,
     }
     stabilized, stabilization_checks = chain.outward_stabilize_carrier(
         raw_projection
@@ -195,6 +197,8 @@ def transport_next_return(
                                 "domain": branch.domain.as_json(),
                             }
                         )
+                        if STOP_AFTER_FIRST_UNRESOLVED:
+                            pending.clear()
                         continue
                     variable, _weight = adaptive.dominant_variable(branch.state)
                     left, right, checks = adaptive.split_state(
