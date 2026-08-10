@@ -34,6 +34,7 @@ const ACTIVE_RESEARCH_DOCS = new Set([
   'docs/research/epistemic_algebra_review.md',
   'docs/research/vancomycin-uncertainty.md',
   'docs/research/cd-tower-automorphism-freeze.md',
+  'docs/research/rna_cayley_dickson_confirmatory_preregistration_2026-08-09.md',
 ]);
 
 const WEBSITE_DOC_OVERRIDES = {
