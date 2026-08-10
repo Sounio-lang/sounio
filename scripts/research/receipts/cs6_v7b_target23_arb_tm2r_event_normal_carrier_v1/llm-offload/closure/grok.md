@@ -1,0 +1,3 @@
+PASS
+
+The inductive enclosure is sound: each reconditioning step replaces sigma-bearing monomials by independent generators whose ranges contain the original values (odd/mixed monomials ⊑ [-1,1], even monomials ⊑ [0,1] via ½+½g, radii as fresh generators), preserving the invariant while strictly widening. The rational basis identity Q·Q⁻¹=I is exact; interval reconstruction is a verified containment, not an interval inverse. The reported one-step margin (≈5.84e-10) exceeds the allowed rounding tolerance (2⁻²³⁰) by >10⁶⁰, certifying strict ordering. No transversality or multi-step claims are asserted.
