@@ -6774,9 +6774,18 @@ Both kernel-clean, every label, no seam hypothesis.
 
 | | status |
 |---|---|
+| `Q(m+1) = A + B + C + D` — the block SPLIT itself | **MEASURED, not proved** — see below |
 | `D = Q + 2H − 4` | **PROVED** — subsumes 2 of the 6 measured values |
 | `C = B − 2H` | **PROVED** — couples the other 4 in pairs |
-| `B = −Q + 8H − 12` | **the single remaining obligation** (236/236 labels, seam included) |
+| `B = −Q + 8H − 12` | open (236/236 labels, seam included) |
+
+⚠ **The load-bearing row is the first one, and it was missing from the first draft of this ledger.**
+Tiers 114–115 prove things about the four block sums *in isolation*; nothing yet says those four
+sums ARE the halves of `Q` at level `m+1`. `block_weight_factor` is a statement about weights and
+never touches a sum. So even with `B` proved, `Q(m+1) = 16H − 28` would not follow. Tier 90 did
+exactly this split for `tri3` (`tri3_split_1331` + `orth_weight*_expand`) and the `P3_block**_total`
+entry lemmas are theorems, so the machinery exists — but the split for `Q` has to be written, and it
+comes BEFORE `B`, because it is what makes the other two mean anything.
 
 **The seam-dependence of the original six was never in the blocks.** It is `Q`'s, showing through
 `D = Q + 2H − 4` and `B = −Q + 8H − 12`: substitute `Q = 8H − 28` and you get `10H − 32` and `16`;
@@ -6794,5 +6803,34 @@ corrections leaves `Q` (which cancels against the `−Q` in the statement) plus 
     Σ_b ε(b)σ(b)σ(b⊕W)·u_b u_{b⊕W}  — one coset sum
     P3(W,W) = −1, P3(0,W) = 1       — theorems (`P3_diag`, `P3_zero_seam`)
 
-So `B` is not a double-sum problem any more: it is four single sums, of which two are already
-theorems. That is the next tier.
+So `B` is not a double-sum problem any more: it is **four single sums, one immediate and three
+measured** — `(Mu)₀ = H` is `Σ_c P3(0,c)² = H`; `ρ_W`, its transpose and the coset sum are not.
+(`P3(W,W) = −1` and `P3(0,W) = 1` are theorems, but they are point values, not sums; an earlier
+draft of this paragraph counted them as two of the four and was wrong.)
+
+And `ρ_W = u_W·(Mu)_W` is a ROW CORRELATION — the object §57.74 recorded as not falling to the
+technique of Tiers 111–112, because `ρ_b = 4` on the bulk is a genuine cancellation. `ρ_W` sits at a
+special locus rather than in the bulk, so it may be easier; that is a hope, not a reduction. `B` is
+not bookkeeping.
+
+### §57.77 — Tier 116: the split is a theorem, and the chain connects
+
+`quadSplit` proves what §57.76's ledger listed as MEASURED: `Q` at level `m+1` over
+`[0, 2^(m+1)+2^(m+1))` **is** the four level-`m` double sums. `sumLtI_shift` cuts each index range
+into halves; `P3_level_stable` handles the low-low corner and `P3_block01/10/11_total` the other
+three. It is Tier 90's construction for `tri3`, one dimension lower.
+
+`quad_level_transfer` then assembles everything, carrying the one open obligation as an explicit
+hypothesis:
+
+| step | source |
+|---|---|
+| `Q(m+1) = A + B + C + D` | `quadSplit` — **PROVED** (Tier 116) |
+| `A = Q` | by construction |
+| `D = Q + 2H − 4` | `blockD_value` — **PROVED** (Tier 114) |
+| `C = B − 2H` | `blockC_eq_blockB` — **PROVED** (Tier 115) |
+| `B = −Q + 8H − 12` | **hypothesis — the one open obligation** |
+
+giving `Q(m+1) = 2Q + 2B − 4 = 16H − 28`, with `Q(m)` cancelling. Every row but the last is a
+theorem, and `ρ_W = H − 4` (measured) is the object the last one turns on — together with its
+transpose, which is `H − 2` and therefore **a different object**, measured today at `m = 3..6`.

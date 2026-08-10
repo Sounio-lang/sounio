@@ -291,3 +291,10 @@ pointwise. Per block: `A:1`, `B:−εσστ`, `C:ε(c)·[B]`, `D:ε(c)`.
 
 The seam-dependence of the six was never in the blocks; it is `Q`'s. `B` now reduces to four SINGLE
 sums (two already theorems). See §57.76.
+
+### Step 8 — Tier 116: the split is a theorem
+
+`quadSplit` (kernel-clean): `Q(m+1) = A + B + C + D`, the step §57.76's first ledger draft was
+missing. `quad_level_transfer` assembles `Q(m+1) = 16H − 28` from it plus Tiers 114-115, with
+`B = −Q + 8H − 12` as an explicit hypothesis — the one open obligation. `Q(m)` cancels, so no base
+case enters above the level where the label first exists. See §57.77.
