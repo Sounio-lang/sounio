@@ -6571,3 +6571,39 @@ with the cyclic symmetry of the summand collapsing the three single pins and the
 it gives the displayed identity. `T3`'s evaluation then rests on two scalars instead of a triple
 sum, and neither `cp2` nor any coset structure enters — which is why `T3` is the right first target
 of the three.
+
+### §57.72 — Tier 110: the three pins, PROVED — `T3` is a theorem down to two row-0 scalars
+
+`weight3_pinned` compiles, kernel-clean, zero axiom beyond the standard three, zero `sorry`:
+
+    tri3(E11·P3)  =  tri3(P3)  −  6·Σ_{b,c} P3(0,b)P3(b,c)P3(c,0)
+                              + 12·Σ_c P3(0,c)P3(c,0)  −  8
+
+i.e. `T3 = s3 − 6·(M³)₀₀ + 12·(M²)₀₀ − 8`, **for every `W ≠ 0` and every `m`** — no reference class,
+no off-seam hypothesis, no bound on `W`.
+
+The machinery Tier 93 said the file lacked turned out to be one lemma, `sumLtI_epsZero`:
+`Σ_a ε(a)·f(a) = Σ_a f(a) − 2·f(0)`, proved by rewriting `ε` as `1 − 2·[·=0]` and using
+`sumLtI_sub` + `sumLtI_single`. Applied three times to `weight3_switch`'s output it gives
+`tri3_epsZero`, stated for an ARBITRARY `f` and therefore reusable:
+
+    tri3(ε⊙f) = tri3(f) − 6·Σ_{b,c} f(0,b)f(b,c)f(c,0) + 12·f(0,0)·Σ_c f(0,c)f(c,0)
+                − 8·f(0,0)³
+
+The three single pins and the three double pins are identified by relabelling: two of each by a
+pointwise congruence, and the middle single pin by `sumLtI_swap` — the only exchange of summation
+order in the tier. Specialising to `P3` and rewriting `P3 0 0 = 1` gives `weight3_pinned`.
+
+**Note on tactics, for the next tier:** this file is Mathlib-free, so `ring` does not exist. Every
+commutative-ring rearrangement here is `grind`, and the first draft failed with nine `unknown
+tactic` errors for exactly that reason — the diagnosis was the whole fix, as in Tier 109.
+
+#### Where this leaves the three orthant sums
+
+| | status |
+|---|---|
+| `T3` | **PROVED** down to `(M³)₀₀` and `(M²)₀₀`, all labels |
+| `T1`, `T2` | reduced by Tier 93 to one open trace + one coset trace + a derived constant |
+
+What remains for `T3` is two scalar evaluations — `(M²)₀₀ = −(H−2)` (measured label-independent
+everywhere, seam included) and `(M³)₀₀ = 32 − 10H` off the seam. Neither is a triple sum.

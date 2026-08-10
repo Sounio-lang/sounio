@@ -16567,4 +16567,135 @@ theorem cp2_summand_law (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
               rw [hpe] at hv
               rcases P3_pm a b W m with h | h <;> rw [h] at hv <;> grind
 
+/-! ### Tier 110 — the weight-3 orthant, PINNED: `T3` down to two row-0 scalars
+
+    Tier 91's `weight3_switch` proves the hard half: the weight-3 orthant's `sigRow` conjugation
+    cancels and only the column weight `epsZero` survives, so `T3` is `tri3` of `P3` with an
+    index-`0` flip on every factor.  Tier 93 recorded that going further "needs sum-level machinery
+    this file does not have".  The machinery is one lemma —
+
+      `sumLtI_epsZero`:  `Σ_a ε(a)·f(a) = Σ_a f(a) − 2·f(0)`,   `ε = 1 − 2·[·=0]`
+
+    — applied three times.  What comes out is `tri3_epsZero`, for ANY `f`: the flipped triangle sum
+    is the plain one, minus six copies of the closed triple walk through index `0`, plus twelve
+    copies of the double walk, minus eight.  The multiplicities `6 = 3·2`, `12 = 3·4`, `8` are the
+    three cyclic positions times the pin's `−2` per pin; the three single pins and the three double
+    pins are identified by relabelling (two by a pointwise congruence, one — the middle pin — by an
+    exchange of summation order).
+
+    Specialised to `P3`, where `P3 0 0 = 1` (`P3_zero_zero`), this is
+
+      `T3 = s3 − 6·(M³)₀₀ + 12·(M²)₀₀ − 8`
+
+    measured exact at all 491 label-levels `m = 3..7`, ON AND OFF the maximal seam — so unlike
+    §57.69's fitted closed form this one has no exceptional label.  What it buys is that `T3`'s
+    entire seam anomaly is now carried by ONE scalar, the closed triple walk `(M³)₀₀`: the double
+    walk is `−(H−2)` at every label including `W = 2^m`, and the triple walk is `32 − 10H` off the
+    seam and `32 − 10H − 96·[m−1,2]₂` at it.  Neither `cp2` nor any coset structure enters, which is
+    why `T3` is the first of the three orthant sums to fall. -/
+
+/-- **THE PIN.**  `epsZero` is `1 − 2·[·=0]`, so a sum against it is the plain sum less twice the
+    value at `0`.  This is the sum-level machinery Tier 93 said the file lacked. -/
+theorem sumLtI_epsZero (n : Nat) (hn : 0 < n) (f : Nat → Int) :
+    sumLtI n (fun a => epsZero a * f a) = sumLtI n f - 2 * f 0 := by
+  have h1 : sumLtI n (fun a => epsZero a * f a)
+      = sumLtI n (fun a => f a - (if a = 0 then 2 * f 0 else 0)) := by
+    refine sumLtI_congr _ _ _ (fun i _ => ?_)
+    unfold epsZero
+    by_cases h0 : i = 0
+    · subst h0; rw [if_pos rfl, if_pos rfl]; grind
+    · rw [if_neg h0, if_neg h0]; grind
+  rw [h1, sumLtI_sub n f (fun a => if a = 0 then 2 * f 0 else 0),
+      sumLtI_single n 0 (2 * f 0) hn]
+
+/-- The two inner pins, for a fixed outer index: the `b`- and `c`-sums against `epsZero`. -/
+private theorem tri3_eps_inner (N : Nat) (hn : 0 < N) (f : Nat → Nat → Int) (a : Nat) :
+    sumLtI N (fun b => sumLtI N (fun c =>
+        (epsZero b * f a b) * ((epsZero c * f b c) * (epsZero a * f c a))))
+      = epsZero a * (sumLtI N (fun b => epsZero b *
+          (sumLtI N (fun c => f a b * (f b c * f c a)) - 2 * (f a b * (f b 0 * f 0 a)))) ) := by
+  rw [← sumLtI_mul]
+  refine sumLtI_congr _ _ _ (fun b _ => ?_)
+  have hc : sumLtI N (fun c => (epsZero b * f a b) * ((epsZero c * f b c) * (epsZero a * f c a)))
+      = sumLtI N (fun c => epsZero c * ((epsZero a * epsZero b) * (f a b * (f b c * f c a)))) :=
+    sumLtI_congr _ _ _ (fun c _ => by grind)
+  rw [hc, sumLtI_epsZero N hn, sumLtI_mul]
+  grind
+
+/-- **THE THREE PINS, EXPANDED.**  Valid for any `f`; the six pinned sums are left in their natural
+    forms and identified in `tri3_epsZero`. -/
+private theorem tri3_epsZero_raw (N : Nat) (hn : 0 < N) (f : Nat → Nat → Int) :
+    tri3 N (fun x y => epsZero y * f x y)
+      = tri3 N f
+        - 2 * (sumLtI N (fun b => sumLtI N (fun c => f 0 b * (f b c * f c 0)))
+             + sumLtI N (fun a => sumLtI N (fun c => f a 0 * (f 0 c * f c a)))
+             + sumLtI N (fun a => sumLtI N (fun b => f a b * (f b 0 * f 0 a))))
+        + 4 * (sumLtI N (fun a => f a 0 * (f 0 0 * f 0 a))
+             + sumLtI N (fun b => f 0 b * (f b 0 * f 0 0))
+             + sumLtI N (fun c => f 0 0 * (f 0 c * f c 0)))
+        - 8 * (f 0 0 * (f 0 0 * f 0 0)) := by
+  unfold tri3
+  rw [sumLtI_congr N _ (fun a => epsZero a * (sumLtI N (fun b => epsZero b *
+        (sumLtI N (fun c => f a b * (f b c * f c a)) - 2 * (f a b * (f b 0 * f 0 a))))))
+      (fun a _ => tri3_eps_inner N hn f a),
+      sumLtI_epsZero N hn]
+  -- the outer pin is discharged; expand the two remaining `b`-pins
+  have hb : ∀ a, sumLtI N (fun b => epsZero b *
+        (sumLtI N (fun c => f a b * (f b c * f c a)) - 2 * (f a b * (f b 0 * f 0 a))))
+      = sumLtI N (fun b => sumLtI N (fun c => f a b * (f b c * f c a)))
+        - 2 * sumLtI N (fun b => f a b * (f b 0 * f 0 a))
+        - 2 * (sumLtI N (fun c => f a 0 * (f 0 c * f c a)) - 2 * (f a 0 * (f 0 0 * f 0 a))) := by
+    intro a
+    rw [sumLtI_epsZero N hn, sumLtI_sub N (fun b => sumLtI N (fun c => f a b * (f b c * f c a)))
+        (fun b => 2 * (f a b * (f b 0 * f 0 a))), sumLtI_mul]
+  rw [sumLtI_congr N _ (fun a =>
+        sumLtI N (fun b => sumLtI N (fun c => f a b * (f b c * f c a)))
+        - 2 * sumLtI N (fun b => f a b * (f b 0 * f 0 a))
+        - 2 * (sumLtI N (fun c => f a 0 * (f 0 c * f c a)) - 2 * (f a 0 * (f 0 0 * f 0 a))))
+      (fun a _ => hb a), hb 0]
+  rw [sumLtI_sub, sumLtI_sub, sumLtI_mul, sumLtI_mul, sumLtI_sub, sumLtI_mul]
+  grind
+
+/-- **THE FLIPPED TRIANGLE SUM.**  Three pins, six sums, three identifications. -/
+theorem tri3_epsZero (N : Nat) (hn : 0 < N) (f : Nat → Nat → Int) :
+    tri3 N (fun x y => epsZero y * f x y)
+      = tri3 N f
+        - 6 * sumLtI N (fun b => sumLtI N (fun c => f 0 b * (f b c * f c 0)))
+        + 12 * (f 0 0 * sumLtI N (fun c => f 0 c * f c 0))
+        - 8 * (f 0 0 * (f 0 0 * f 0 0)) := by
+  have hSc : sumLtI N (fun a => sumLtI N (fun b => f a b * (f b 0 * f 0 a)))
+      = sumLtI N (fun b => sumLtI N (fun c => f 0 b * (f b c * f c 0))) :=
+    sumLtI_congr _ _ _ (fun b _ => sumLtI_congr _ _ _ (fun c _ => by grind))
+  have hSb : sumLtI N (fun a => sumLtI N (fun c => f a 0 * (f 0 c * f c a)))
+      = sumLtI N (fun b => sumLtI N (fun c => f 0 b * (f b c * f c 0))) := by
+    rw [sumLtI_swap N N (fun a c => f a 0 * (f 0 c * f c a))]
+    exact sumLtI_congr _ _ _ (fun b _ => sumLtI_congr _ _ _ (fun c _ => by grind))
+  have hD1 : sumLtI N (fun a => f a 0 * (f 0 0 * f 0 a))
+      = f 0 0 * sumLtI N (fun c => f 0 c * f c 0) := by
+    rw [← sumLtI_mul]
+    exact sumLtI_congr _ _ _ (fun c _ => by grind)
+  have hD2 : sumLtI N (fun b => f 0 b * (f b 0 * f 0 0))
+      = f 0 0 * sumLtI N (fun c => f 0 c * f c 0) := by
+    rw [← sumLtI_mul]
+    exact sumLtI_congr _ _ _ (fun c _ => by grind)
+  have hD3 : sumLtI N (fun c => f 0 0 * (f 0 c * f c 0))
+      = f 0 0 * sumLtI N (fun c => f 0 c * f c 0) := by
+    rw [← sumLtI_mul]
+  rw [tri3_epsZero_raw N hn f, hSb, hSc, hD1, hD2, hD3]
+  grind
+
+/-- **`T3`, PINNED.**  The weight-3 orthant of the level transfer equals the level-`m` triangle sum
+    minus six closed triple walks through index `0`, plus twelve double walks, minus eight. -/
+theorem weight3_pinned (m W : Nat) (hW0 : W ≠ 0) :
+    tri3 (2^(m+1)) (fun x y => E11 x y W * P3 x y W m)
+      = tri3 (2^(m+1)) (fun x y => P3 x y W m)
+        - 6 * sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+              P3 0 b W m * (P3 b c W m * P3 c 0 W m)))
+        + 12 * sumLtI (2^(m+1)) (fun c => P3 0 c W m * P3 c 0 W m)
+        - 8 := by
+  rw [weight3_switch m W hW0,
+      tri3_epsZero (2^(m+1)) (Nat.two_pow_pos (m+1)) (fun x y => P3 x y W m),
+      P3_zero_zero m W]
+  grind
+
 end SounioZDFiberAntisym

@@ -194,3 +194,16 @@ real `[m−1,2]₂`. It is **not** E5's `1728·[m,3]₂` — different q-binomia
 location, so E5's row should be read as "the maximal seam is where the q-binomials enter", twice
 sighted. Basis check: `{cp2, H, 1}` is exact, unique and minimal; `H²` gets coefficient 0; `g`
 cannot replace `cp2`. See §57.70.
+
+### Step 3 — Tier 110: `T3` is a theorem
+
+`weight3_pinned` (kernel-clean): `T3 = s3 − 6·(M³)₀₀ + 12·(M²)₀₀ − 8`, for every `W ≠ 0` and every
+`m`, with no off-seam hypothesis. The general form `tri3_epsZero` holds for arbitrary `f` and is
+reusable. So the first of E4b's three closed forms is reduced to two scalar evaluations —
+`(M²)₀₀` and `(M³)₀₀` — neither of which is a triple sum. See §57.72.
+
+    E1, E2, E6, E8, E4a               PROVED
+    E4b  T3 leg                       PROVED down to two row-0 scalars (Tier 110)
+    E4b  T1, T2 legs                  MEASURED closed forms; Tier 93 reduction in hand
+    E5   base case at m = j           open
+    E3   deviation ignores g          open
