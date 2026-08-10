@@ -17488,4 +17488,56 @@ theorem weight3_closed (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
   push_cast
   grind
 
+/-! ### Tier 123 — the `T1` leg: its weight factors, and `T1` reduces to ONE unproved scalar
+
+    The weight-1 orthant carries `E01` and `E10`, so unlike `T3` it has TWO coset flips.  They
+    factor exactly as the others did (Tier 91's splits, re-associated):
+
+      `E01(b,c) · E10(c,a) = (ε(a)σ(a)) · (ε(b)σ(b)) · ε(c) · τ(b,c) · τ(c,a)`
+
+    (`t1_weight`).  The two `τ`s come off by `tauW_carrier` (Tier 93), and the pins — at `0` and `W`
+    on `a` and `b`, at `0` on `c` — expand the rest.  Measured over all 236 label-levels
+    `m = 3..6`, **including the maximal seam**, that route ends at
+
+      `T1 = s3 + 4·cp2 − 6·(M³)₀₀ − 4·(M³)_WW + 64 − 36H`
+
+    of which every term but the last is already a theorem or already in the statement:
+    `(M³)₀₀ = −Q + 2(2−H)` is Tier 112, and `Q` is Tier 119.  So **the whole `T1` leg rests on one
+    scalar, `(M³)_WW`** — the closed triple walk through the SEAM vertex, measured `2H − 16` off the
+    maximal seam (the lane's `a3` of §57.49).
+
+    That is worth recording for coordination as much as for mathematics: the concurrent `T2` lane's
+    tier is titled "the `T2` leg's cheap scalars: walks pinned at the seam vertex" and is proving
+    exactly the walks at `W`.  **`T1` and `T2` share their remaining obligation.**
+
+    Structure of the reduction, measured, each piece exact at every label:
+
+      CORE  `Σ ε(a)σ(a)ε(b)σ(b)ε(c) P3(a,b)P3(b,c)P3(c,a)` = `s3 − 6(M³)₀₀ − 4(M³)_WW + 64 − 32H`
+      R1    (one `Π_W`)                                    = `2·cp2 + 4H − 8`
+      R2    (the other `Π_W`)                              = `2·cp2 − 4H + 8`
+      R3    (both `Π_W`)                                   = `16 − 4H`      label-independent
+      rank1 (the carrier's `e₀e_Wᵀ` corrections)            = `−16`         label-independent
+
+    `R1 + R2 = 4·cp2` exactly — the `4·cp2` of §57.69's closed form is the two coset flips, one
+    each, and neither alone. -/
+
+/-- **THE `T1` WEIGHT, FACTORED.**  Two switchings, two index-`0` flips, and the two coset flips. -/
+theorem t1_weight (a b c W : Nat) (hW0 : W ≠ 0) :
+    E01 b c W * E10 c a W
+      = (epsZero a * sigRow a W) * ((epsZero b * sigRow b W) *
+          (epsZero c * (tauW b c W * tauW c a W))) := by
+  rw [E01_split b c W hW0, E10_split c a W hW0]
+  unfold epsZero sigRow tauW
+  grind
+
+/-- The `T1` summand, with its weight factored out. -/
+theorem t1_summand (m a b c W : Nat) (hW0 : W ≠ 0) :
+    P3 a b W m * (E01 b c W * P3 b c W m * (E10 c a W * P3 c a W m))
+      = (epsZero a * sigRow a W) * ((epsZero b * sigRow b W) * (epsZero c *
+          (P3 a b W m * ((tauW b c W * P3 b c W m) * (tauW c a W * P3 c a W m))))) := by
+  have h := t1_weight a b c W hW0
+  rw [E01_split b c W hW0, E10_split c a W hW0] at h ⊢
+  unfold epsZero sigRow tauW at h ⊢
+  grind
+
 end SounioZDFiberAntisym
