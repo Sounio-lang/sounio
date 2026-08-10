@@ -16930,4 +16930,95 @@ theorem blockD_value (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
       sumLtI_sub, sumLtI_mul, walk2_value m W hW]
   grind
 
+/-! ### Tier 115 — the `C` block is the `B` block, shifted: six measured forms become ONE
+
+    Tier 114's factorisation reads off each block's weight separately:
+
+      `A` : `1`
+      `B` : `E01(b,c)·r₀(c) = −ε(b)σ(b)σ(c)τ(b,c)`
+      `C` : `r₀(b)·E10(b,c) = ε(c) · [the B weight]`
+      `D` : `r₀(b)·E11(b,c)·r₀(c) = ε(c)`
+
+    So `C`'s summand is `ε(c)` times `B`'s, pointwise, and Tier 110's pin lemma turns that into a
+    difference — `C = B − 2·(B's summand at c = 0)`.  That slice is not merely a single sum, it is
+    CONSTANT: at `c = 0` the weight `E01(b,0)` is `ε(b)` and `r₀(0)` is `−1`, so the summand is
+    `−ε(b)·(P3(0,b)·P3(b,0))`, and Tier 111's `P3_row0_col0` makes that `1` at EVERY `b` — the two
+    sign flips at `b = 0` cancel each other exactly.  Hence
+
+      `C = B − 2·2^(m+1)`      (`blockC_eq_blockB`, unconditional, seam included)
+
+    #### What that does to the six closed forms
+
+    §57.75 listed six measured values — `B, C, D` off the maximal seam and again at `W = 2^m`.
+    They are now **one open statement**:
+
+      `D = Q + 2H − 4`        Tier 114, PROVED, unconditional  → 2 of the 6
+      `C = B − 2H`            here,      PROVED, unconditional  → couples the other 4 in pairs
+      `B = −Q + 8H − 12`      the single remaining obligation   (236/236 labels, seam included)
+
+    and the seam-dependence of the original six was never in the blocks at all: it is `Q`'s, showing
+    through `D = Q + 2H − 4` and `B = −Q + 8H − 12`.  With `B`, §57.75's recursion becomes
+    `Q(m+1) = Q + (−Q + 8H − 12) + (−Q + 6H − 12) + (Q + 2H − 4) = 16H − 28` — `Q(m)` cancelling, so
+    no base case is needed above the level where the label first exists. -/
+
+/-- **`C`'s SUMMAND IS `ε(c)` TIMES `B`'s.**  Both switchings and one index-`0` flip survive. -/
+theorem blockC_weight (b c W : Nat) (hW0 : W ≠ 0) :
+    E01 0 b W * E10 b c W = epsZero c * (E01 b c W * E01 0 c W) := by
+  rw [E01_split b c W hW0, E10_split b c W hW0,
+      E01_zero_eq_neg_sigRow b W, E01_zero_eq_neg_sigRow c W]
+  unfold epsZero sigRow tauW
+  grind
+
+/-- **`B`'s SUMMAND AT `c = 0` IS `1`, AT EVERY `b`.**  The `ε(b)` from `E01(b,0)` and the sign of
+    `P3(0,b)·P3(b,0)` flip together at `b = 0` and cancel. -/
+theorem blockB_at_zero (m b W : Nat) (hb : b < 2^(m+1)) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    P3 0 b W m * (E01 b 0 W * P3 b 0 W m * (E01 0 0 W * P3 0 0 W m)) = 1 := by
+  have h00 : E01 0 0 W = -1 := by unfold E01; grind
+  have hb0 : E01 b 0 W = epsZero b := by unfold E01 epsZero; grind
+  rw [h00, hb0, P3_zero_zero m W]
+  by_cases h : b = 0
+  · subst h; rw [P3_zero_zero m W]; unfold epsZero; grind
+  · have := P3_row0_col0 m b W hb hW h
+    unfold epsZero
+    rw [if_neg h]
+    grind
+
+/-- **THE `C` BLOCK IS THE `B` BLOCK, SHIFTED BY `2·2^(m+1)`.** -/
+theorem blockC_eq_blockB (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+        (E01 0 b W * P3 0 b W m) * (E10 b c W * P3 b c W m * P3 0 c W m)))
+      = sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+            P3 0 b W m * (E01 b c W * P3 b c W m * (E01 0 c W * P3 0 c W m))))
+        - 2 * ((2^(m+1) : Nat) : Int) := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hb : ∀ b, b < 2^(m+1) →
+      sumLtI (2^(m+1)) (fun c =>
+        (E01 0 b W * P3 0 b W m) * (E10 b c W * P3 b c W m * P3 0 c W m))
+      = sumLtI (2^(m+1)) (fun c =>
+            P3 0 b W m * (E01 b c W * P3 b c W m * (E01 0 c W * P3 0 c W m))) - 2 := by
+    intro b hbl
+    have h1 : sumLtI (2^(m+1)) (fun c =>
+          (E01 0 b W * P3 0 b W m) * (E10 b c W * P3 b c W m * P3 0 c W m))
+        = sumLtI (2^(m+1)) (fun c => epsZero c *
+            (P3 0 b W m * (E01 b c W * P3 b c W m * (E01 0 c W * P3 0 c W m)))) := by
+      refine sumLtI_congr _ _ _ (fun c _ => ?_)
+      have hw := blockC_weight b c W hW0
+      rw [E01_split b c W hW0, E10_split b c W hW0,
+          E01_zero_eq_neg_sigRow b W, E01_zero_eq_neg_sigRow c W] at hw ⊢
+      unfold epsZero sigRow tauW at hw ⊢
+      grind
+    rw [h1, sumLtI_epsZero _ hp, blockB_at_zero m b W hbl hW hW0]
+    grind
+  rw [sumLtI_congr (2^(m+1)) _ (fun b =>
+        sumLtI (2^(m+1)) (fun c =>
+          P3 0 b W m * (E01 b c W * P3 b c W m * (E01 0 c W * P3 0 c W m))) - 2)
+      (fun b hbl => hb b hbl),
+      sumLtI_sub]
+  have hconst : sumLtI (2^(m+1)) (fun _ : Nat => (2:Int)) = 2 * ((2^(m+1) : Nat) : Int) := by
+    have h := sumLtI_mul (2^(m+1)) 2 (fun _ : Nat => (1:Int))
+    rw [sumLtI_one] at h
+    rw [← h]
+    exact sumLtI_congr _ _ _ (fun i _ => by grind)
+  rw [hconst]
+
 end SounioZDFiberAntisym
