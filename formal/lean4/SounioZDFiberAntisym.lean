@@ -16845,4 +16845,89 @@ theorem weight3_quad (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
   rw [weight3_pinned m W hW0, walk3_eq_quad m W hW, walk2_value m W hW]
   grind
 
+/-! ### Tier 114 — the four blocks' WEIGHT, factored: why `Q` cancels
+
+    §57.75 mapped `Q(m+1) = A + B + C + D` and gave the four blocks closed forms.  Measurement then
+    said something sharper, and this tier proves the mechanism.
+
+    The row weight that the two high blocks carry is `E01 0 · W`, and it is nothing new:
+
+      `E01 0 c W = −sigRow c W`      (`E01_zero_eq_neg_sigRow`, by definition)
+
+    With that, the four blocks' weights add up to a PRODUCT:
+
+      `1 + E01(b,c)·r₀(c) + r₀(b)·E10(b,c) + r₀(b)·E11(b,c)·r₀(c)
+         = (1 + ε(c)) · (1 − ε(b)·σ(b)·σ(c)·τ(b,c))`,     `r₀ = E01 0 ·`
+
+    (`block_weight_factor`).  Two consequences, and they are the reason the recursion of §57.75 has
+    no base case in it:
+
+    * the first factor KILLS THE WHOLE COLUMN `c = 0`, since `ε(0) = −1`;
+    * the second is `1 − (±1)`, so it is `0` or `2` — and it is `0` unless an odd number of
+      `b = 0`, `b = W`, `c = W`, `c = b ⊕ W` hold.
+
+    So the combined weight is `0` on all but a union of four LINES (measured: `4` on 84603 of
+    2374848 index pairs, `0` on the rest), and a double sum over `P3` collapses to single sums.
+    That is where the `Q` on the two sides of the recursion cancels: it is not an accident of the
+    four closed forms, it is pointwise.
+
+    The `D` block is the extreme case — its weight collapses all the way to `ε(c)` alone
+    (`blockD_weight`), so Tier 110's pin lemma evaluates it outright:
+
+      `D = Q + 2·2^(m+1) − 4`,   unconditionally, seam included (`blockD_value`)
+
+    matching the measurement `10H − 32` off the seam and `H² − 2H` at it — both of which are just
+    `Q + 2H − 4` with the two values of `Q` substituted. -/
+
+/-- The high blocks' row weight is a switching sign. -/
+theorem E01_zero_eq_neg_sigRow (c W : Nat) : E01 0 c W = -sigRow c W := by
+  unfold E01 sigRow; grind
+
+/-- **THE FOUR BLOCKS' WEIGHT, FACTORED.**  The first factor kills the column `c = 0`; the second is
+    `0` off a union of four lines. -/
+theorem block_weight_factor (b c W : Nat) (hW0 : W ≠ 0) :
+    1 + E01 b c W * E01 0 c W + E01 0 b W * E10 b c W
+        + E01 0 b W * (E11 b c W * E01 0 c W)
+      = (1 + epsZero c) * (1 - epsZero b * sigRow b W * (sigRow c W * tauW b c W)) := by
+  rw [E01_split b c W hW0, E10_split b c W hW0, E11_split b c W hW0,
+      E01_zero_eq_neg_sigRow b W, E01_zero_eq_neg_sigRow c W]
+  unfold epsZero sigRow tauW
+  grind
+
+/-- **THE `D` BLOCK'S WEIGHT IS `ε(c)`.**  Both switchings cancel against the row weights. -/
+theorem blockD_weight (b c W : Nat) (hW0 : W ≠ 0) :
+    E01 0 b W * (E11 b c W * E01 0 c W) = epsZero c := by
+  rw [E11_split b c W hW0, E01_zero_eq_neg_sigRow b W, E01_zero_eq_neg_sigRow c W]
+  unfold epsZero sigRow
+  grind
+
+/-- **THE `D` BLOCK, EVALUATED.**  `D = Q + 2·2^(m+1) − 4`, every label, seam included. -/
+theorem blockD_value (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+        (E01 0 b W * P3 0 b W m) * (E11 b c W * P3 b c W m * (E01 0 c W * P3 0 c W m))))
+      = sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+            P3 0 b W m * (P3 b c W m * P3 0 c W m)))
+        + 2 * ((2^(m+1) : Nat) : Int) - 4 := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hb : ∀ b, sumLtI (2^(m+1)) (fun c =>
+        (E01 0 b W * P3 0 b W m) * (E11 b c W * P3 b c W m * (E01 0 c W * P3 0 c W m)))
+      = sumLtI (2^(m+1)) (fun c => P3 0 b W m * (P3 b c W m * P3 0 c W m))
+        - 2 * (P3 0 b W m * P3 b 0 W m) := by
+    intro b
+    have h1 : sumLtI (2^(m+1)) (fun c =>
+          (E01 0 b W * P3 0 b W m) * (E11 b c W * P3 b c W m * (E01 0 c W * P3 0 c W m)))
+        = sumLtI (2^(m+1)) (fun c =>
+            epsZero c * (P3 0 b W m * (P3 b c W m * P3 0 c W m))) := by
+      refine sumLtI_congr _ _ _ (fun c _ => ?_)
+      rw [E11_split b c W hW0, E01_zero_eq_neg_sigRow b W, E01_zero_eq_neg_sigRow c W]
+      unfold epsZero sigRow
+      grind
+    rw [h1, sumLtI_epsZero _ hp, P3_zero_zero m W]
+    grind
+  rw [sumLtI_congr (2^(m+1)) _ (fun b =>
+        sumLtI (2^(m+1)) (fun c => P3 0 b W m * (P3 b c W m * P3 0 c W m))
+          - 2 * (P3 0 b W m * P3 b 0 W m)) (fun b _ => hb b),
+      sumLtI_sub, sumLtI_mul, walk2_value m W hW]
+  grind
+
 end SounioZDFiberAntisym
