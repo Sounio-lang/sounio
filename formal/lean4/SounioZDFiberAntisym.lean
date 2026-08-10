@@ -17540,4 +17540,140 @@ theorem t1_summand (m a b c W : Nat) (hW0 : W ≠ 0) :
   unfold epsZero sigRow tauW at h ⊢
   grind
 
+/-! ### Tier 124 — `(M³)_WW = Q − 6H + 12`: the seam walk IS the row-`0` quadratic form
+
+    Tier 123 left the whole `T1` leg on one scalar, the closed triple walk through the seam vertex,
+    and the concurrent `T2` lane needs the same object.  It falls to Tier 117's two laws, because
+    **row `W` of `P3` is row `0` re-signed, and column `W` is row `0` re-signed differently**:
+
+      `P3 W b = ε(b)·σ(b)·P3 0 b`      from law (a), `P3(0,b)·P3(W,b) = ε(b)σ(b)`
+      `P3 c W = σ(c)·P3 0 c`           from law (b) plus `P3 c W = ε(c)·P3 W c`
+
+    So the seam walk is the SAME quadratic form as `Q`, weighted:
+
+      `(M³)_WW = Σ_{b,c} ε(b)σ(b)·σ(c)·(u_b · P3(b,c) · u_c)`,   `u_x = P3 0 x`
+
+    and three pins finish it — at `W` on `c`, at `0` and `W` on `b` — with the three slices
+    evaluating by `sum_row0_sq`, law (a) and law (b) to `H`, `H − 4` and `σ`:
+
+      `Σ_b σ(b) = H − 2`,  `Σ_c ε(c)σ(c) = H − 4`,  `G(0) = H`,  `G(W) = H − 4`
+
+    giving `(M³)_WW = Q − 6(H − 2)`.  Unconditional, maximal seam included — at the seam it reads
+    `(H−2)² − 6H + 12`, which is the measured value there.
+
+    With Tier 119's `Q = 8H − 28` on the reachable labels this is `2H − 16`, the lane's `a3` of
+    §57.49, and Tier 123's measured master identity for `T1` becomes an identity in `s3` and `cp2`
+    alone. -/
+
+/-- Row `W` is row `0`, re-signed. -/
+theorem P3_rowW_eq_row0 (m b W : Nat) (hb : b < 2^(m+1)) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    P3 W b W m = epsZero b * (sigRow b W * P3 0 b W m) := by
+  have h := P3_row0_rowW_law m b W hb hW hW0
+  unfold epsZero sigRow
+  by_cases hb0 : b = 0
+  · subst hb0
+    rw [if_pos rfl] at h
+    rw [Nat.zero_xor, if_neg hW0]
+    rcases P3_pm 0 0 W m with h1 | h1 <;> rw [h1] at h ⊢ <;> grind
+  · rw [if_neg hb0] at h
+    by_cases hbW : b = W
+    · rw [hbW, Nat.xor_self, if_pos rfl]
+      rw [if_pos hbW] at h
+      rw [hbW] at h
+      rcases P3_pm 0 W W m with h1 | h1 <;> rw [h1] at h ⊢ <;> grind
+    · have hne : b ^^^ W ≠ 0 := fun hh => hbW (xor_zero_eq b W hh)
+      rw [if_neg hne, if_neg hbW] at *
+      rcases P3_pm 0 b W m with h1 | h1 <;> rw [h1] at h ⊢ <;> grind
+
+/-- Column `W` is row `0`, re-signed the other way. -/
+theorem P3_colW_eq_row0 (m c W : Nat) (hc : c < 2^(m+1)) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    P3 c W W m = sigRow c W * P3 0 c W m := by
+  have h := P3_row0_colW_law m c W hc hW hW0
+  unfold sigRow
+  by_cases hcW : c = W
+  · rw [hcW, Nat.xor_self, if_pos rfl]
+    rw [if_pos hcW, hcW] at h
+    rcases P3_pm 0 W W m with h1 | h1 <;> rw [h1] at h ⊢ <;> grind
+  · have hne : c ^^^ W ≠ 0 := fun hh => hcW (xor_zero_eq c W hh)
+    rw [if_neg hne]
+    rw [if_neg hcW] at h
+    rcases P3_pm 0 c W m with h1 | h1 <;> rw [h1] at h ⊢ <;> grind
+
+/-- `Σ_b σ(b) = 2^(m+1) − 2`. -/
+theorem sum_sigRow (m W : Nat) (hW : W < 2^(m+1)) :
+    sumLtI (2^(m+1)) (fun b => sigRow b W) = ((2^(m+1) : Nat) : Int) - 2 := by
+  have h := sumLtI_sigRow (2^(m+1)) W hW (fun _ => (1:Int))
+  rw [sumLtI_one] at h
+  rw [sumLtI_congr (2^(m+1)) _ (fun b => sigRow b W * 1) (fun b _ => by grind), h]
+  grind
+
+/-- `Σ_c ε(c)σ(c) = 2^(m+1) − 4`. -/
+theorem sum_epsSig (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun c => epsZero c * sigRow c W) = ((2^(m+1) : Nat) : Int) - 4 := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  rw [sumLtI_epsZero (2^(m+1)) hp (fun c => sigRow c W), sum_sigRow m W hW]
+  unfold sigRow
+  rw [Nat.zero_xor, if_neg hW0]
+  grind
+
+/-- **THE SEAM WALK.**  `(M³)_WW = Q − 6·2^(m+1) + 12`, every label, seam included. -/
+theorem walk3_at_W (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+        P3 W b W m * (P3 b c W m * P3 c W W m)))
+      = sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+            P3 0 b W m * (P3 b c W m * P3 0 c W m)))
+        - 6 * ((2^(m+1) : Nat) : Int) + 12 := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hz : P3 0 0 W m = 1 := P3_zero_zero m W
+  have hs : P3 0 W W m = 1 := P3_zero_seam m W hW hW0
+  -- the inner sum, for a fixed b: pin at W
+  have hinner : ∀ b, b < 2^(m+1) →
+      sumLtI (2^(m+1)) (fun c => P3 W b W m * (P3 b c W m * P3 c W W m))
+      = (epsZero b * sigRow b W) *
+          (sumLtI (2^(m+1)) (fun c => P3 0 b W m * (P3 b c W m * P3 0 c W m))
+            - 2 * sigRow b W) := by
+    intro b hb
+    have h1 : sumLtI (2^(m+1)) (fun c => P3 W b W m * (P3 b c W m * P3 c W W m))
+        = sumLtI (2^(m+1)) (fun c => sigRow c W *
+            ((epsZero b * sigRow b W) * (P3 0 b W m * (P3 b c W m * P3 0 c W m)))) := by
+      refine sumLtI_congr _ _ _ (fun c hc => ?_)
+      rw [P3_rowW_eq_row0 m b W hb hW hW0, P3_colW_eq_row0 m c W hc hW hW0]
+      grind
+    rw [h1, sumLtI_sigRow (2^(m+1)) W hW, sumLtI_mul]
+    have hW' : P3 0 b W m * (P3 b W W m * P3 0 W W m) = sigRow b W := by
+      have hlaw := P3_row0_colW_law m b W hb hW hW0
+      unfold sigRow
+      by_cases hbW : b = W
+      · rw [hbW, Nat.xor_self, if_pos rfl]
+        rw [if_pos hbW] at hlaw
+        rw [hbW] at hlaw
+        grind
+      · have hne : b ^^^ W ≠ 0 := fun hh => hbW (xor_zero_eq b W hh)
+        rw [if_neg hne]
+        rw [if_neg hbW] at hlaw
+        grind
+    rw [hW']
+    grind
+  rw [sumLtI_congr _ _ _ (fun b hb => hinner b hb)]
+  -- now pin b at 0 and at W
+  have hG0 : sumLtI (2^(m+1)) (fun c => P3 0 0 W m * (P3 0 c W m * P3 0 c W m))
+      = ((2^(m+1) : Nat) : Int) := by
+    rw [sumLtI_congr _ _ (fun c => P3 0 c W m * P3 0 c W m)
+          (fun c _ => by grind), sum_row0_sq m W]
+  have hGW : sumLtI (2^(m+1)) (fun c => P3 0 W W m * (P3 W c W m * P3 0 c W m))
+      = ((2^(m+1) : Nat) : Int) - 4 := by
+    rw [sumLtI_congr _ _ (fun c => epsZero c * sigRow c W)
+          (fun c hc => by
+            have hr := P3_rowW_eq_row0 m c W hc hW hW0
+            rcases P3_pm 0 c W m with h1 | h1 <;> rw [h1] at hr <;> grind),
+        sum_epsSig m W hW hW0]
+  have hsig0 : sigRow 0 W = 1 := by unfold sigRow; rw [Nat.zero_xor, if_neg hW0]
+  have hsigW : sigRow W W = -1 := by unfold sigRow; rw [Nat.xor_self, if_pos rfl]
+  rw [sumLtI_congr _ _ (fun b => epsZero b * (sigRow b W *
+        (sumLtI (2^(m+1)) (fun c => P3 0 b W m * (P3 b c W m * P3 0 c W m)) - 2 * sigRow b W)))
+      (fun b _ => by grind),
+      sumLtI_epsZero _ hp, sumLtI_sigRow (2^(m+1)) W hW, sumLtI_sub, sumLtI_mul,
+      sum_sigRow m W hW, hG0, hGW, hsig0, hsigW]
+  grind
+
 end SounioZDFiberAntisym
