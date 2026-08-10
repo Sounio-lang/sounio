@@ -52,11 +52,18 @@ toolchain pin described below and not from this merge.
 
 **Also landed:** #1501, after porting it onto main's interned-id representation.
 
-**Restacked, verified against their own tests, and blocked:** #1500, #1493, #1508. Each passes
-`Contracts`, `Sounio Lint`, `Full Test Suite` and both self-host jobs, and each fails the
-self-compilation ratchet — the compiler built from the tree can no longer typecheck its own entry
-point (`E175`; `E020`+`E016`; `2xE002`+`E137`). **#1531 is held**: the 108-test delta is a
-repository-scale decision, not a triage one.
+**Also landed:** #1493, after repairing the ratchet failure it introduced (closes #1471).
+
+**Repaired and awaiting CI:** #1500, #1508. Each initially failed the self-compilation ratchet —
+the compiler built from the tree could no longer typecheck its own entry point (`E175`;
+`2xE002`+`E137`). All three causes are fixed and the ratchet now reports
+`MADAROS_FIXED_POINT_OK` on both. See "The ratchet failures, resolved".
+
+**Closed as not reproducing:** #643, #877, #891, #933, #1070 — each with its measurement.
+**Corrected in place:** #1667 (title symptom fixed, comment-1 shape still fails) and #852
+(does not terminate, rather than exiting in seconds).
+
+**#1531 is held**: the 108-test delta is a repository-scale decision, not a triage one.
 
 The two systemic findings explain the backlog's shape better than any individual bug does: type
 errors in the compiler do not stop a build, and wrong answers at rc=0 do not fail a test.
@@ -493,6 +500,67 @@ their own acceptance tests, and blocked on the ratchet; #1531 held pending a dec
 
 Every compiler job is green. The one red is the toolchain drift documented above, and it predates
 this work.
+
+
+
+## The ratchet failures, resolved
+
+All three blocked PRs were repaired. In every case the ratchet was right and the fix was small
+— but none of the three would have been found without running that specific gate.
+
+**#1500 — one missing keyword.** `ir_name_is_knowledge_ctor` was added to `self-hosted/ir/ir.sio`
+without `pub`, while its only caller lives in `ir/lower.sio`. Every sibling `ir_name_is_*` helper
+in that file is `pub`. One word; the ratchet then reports `MADAROS_FIXED_POINT_OK`, rung `check`
+with `rc=0 errors=0`.
+
+**#1493 — a named const in a repeat-literal length.** `BorrowEnv.branch_snap` is declared
+`[bool; 4096]` but `borrow_env_new` initialised it `[false; BRANCH_SNAP_PLANE]`, producing
+`E020` + `E016`. The const holds exactly 4096, so this is not an arithmetic error — the checker
+does not resolve a named const in that position. A comment above the field asserted the opposite
+("a const in a repeat-literal LENGTH ... is fine; only the type position is affected"); that
+claim is false and has been corrected in place.
+
+**#1508 — three causes behind three errors, and one of them was mine.**
+- `2x E002`: `1 << (bit as u8)` will not assign to an `i64`. Every other shift in `self-hosted`
+  uses `as i32`; these were the only `as u8` shifts in the tree.
+- `E137`: a `let` bound in the tail position of an `else` block reads back as undeclared.
+- `E137` (second round): **the conflict resolution recorded above dropped main's
+  `lower_opt_type_is_tuple_of_all_f64` and `lower_type_expr_is_tuple_of_all_f64` while keeping
+  the call to the first one.** Taking one side of a hunk wholesale deleted two definitions whose
+  caller survived elsewhere in the file. Restored — all-f64 tuples keep main's `returns_float=2`
+  path, mixed tuples take the PR's `1024+mask`.
+
+That last one is worth stating plainly: the same class of mistake this report warns about in
+other people's merges appeared in its own. It was caught by the gate, not by review.
+
+### What this says about the ratchet
+
+Two of the three failures (#1508's `as u8` shifts and its `let`-in-tail-position, #1493's const)
+are cases where **new code used constructs the compiler's own checker rejects**. They compile
+fine as user programs. They only fail when the compiler must typecheck itself, which is exactly
+what `madaros_fixed_point_gate.sh` measures and what nothing else does — `madaros_full_gate.sh`
+and `madaros_current_source_f64_lowering_gate.sh` are green on all three broken trees.
+
+Practical consequence: **a PR touching `self-hosted/` is not verified until the fixed-point gate
+has run on it.**
+
+## `Lean Proofs`: fixed upstream, and de-fragilised
+
+While this triage was running, `7cd35ba73c` (#1701) took `main` green by pinning
+`lean-toolchain` back to `v4.32.2`. That is the correct immediate fix and is left in place.
+
+The underlying proof was also repaired (#1703), so the pin can move forward later without
+reopening the failure. Traced goal at the failure point:
+
+```
+hv : prior.confidence ≤ bound
+⊢ (if prior.confidence + 0 ≤ bound then prior.confidence + 0 else bound) = prior.confidence
+```
+
+The `if` is present — `split` simply stopped being able to case on this `ite` between 4.32.2 and
+4.33.0. No case analysis is needed: `Nat.add_zero` reduces the guard to exactly `hv`, so
+`exact if_pos hv` closes it. Verified under **both** toolchains, and under 4.33.0 a full
+`lake build` completes (215 jobs).
 
 
 ## Ranking
