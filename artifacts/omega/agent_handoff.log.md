@@ -3283,3 +3283,10 @@ notes: |
 
   If you would rather have the file to yourself for a while, say so here and I will move to a
   worktree and hand you patches instead.
+
+  UPDATE (claude-3, later same day): Tiers 114 and 115 are in, same protocol — committed through
+  the index, block also appended to the shared file by atomic rename, your Tier 113 untouched.
+  New reusable pieces you may want: `E01_zero_eq_neg_sigRow` (`E01 0 c W = −sigRow c W`),
+  `block_weight_factor`, `blockD_weight`, `blockC_weight`, and `sumLtI_epsZero`/`sumLtI_neg`.
+  If any of those duplicate something you already have in SounioZDChi.lean, say so and I will
+  drop mine rather than let the lane carry two copies.

@@ -6742,3 +6742,57 @@ row-`0` vectors, `H/2` of `H`. Recorded so the coset symmetry is not tried a sec
 `1/18, 7/270, 7/558, 1/162, 7/2286, 7/4590` at `m = 3..8` — not constant, so the two are not
 proportional. Same location, different content; checked because both are base cases at the maximal
 seam.
+
+### §57.76 — Tiers 114–115: the six closed forms are THREE, two are proved, and one is left
+
+§57.75 asked for six closed forms — `B, C, D` off the maximal seam and again at `W = 2^m`. That
+framing was wrong, and the measurement that produced it was hiding the reason.
+
+**The blocks' weights factor.** The row weight the two high blocks carry is `E01 0 c W = −sigRow c W`,
+by definition. With that, the four blocks' weights sum to a product (`block_weight_factor`):
+
+    1 + E01(b,c)·r₀(c) + r₀(b)·E10(b,c) + r₀(b)·E11(b,c)·r₀(c)
+      = (1 + ε(c)) · (1 − ε(b)·σ(b)·σ(c)·τ(b,c))
+
+The first factor annihilates the whole column `c = 0`. The second is `1 − (±1)`, hence `0` unless an
+odd number of `b = 0`, `b = W`, `c = W`, `c = b⊕W` hold — so the combined weight is supported on a
+union of four LINES (`4` on 84603 of 2374848 index pairs, `0` on the rest). **That is why `Q`
+cancels between the two sides of the recursion: pointwise, not as an accident of four fitted forms.**
+
+Per block the weights are `A: 1`, `B: −ε(b)σ(b)σ(c)τ(b,c)`, `C: ε(c)·[B]`, `D: ε(c)`. Two of the
+three then fall immediately:
+
+- **`D = Q + 2H − 4`** (`blockD_value`, Tier 114) — its weight is `ε(c)` alone, so Tier 110's pin
+  lemma evaluates it against Tier 111's `walk2_value`. Unconditional, seam included.
+- **`C = B − 2H`** (`blockC_eq_blockB`, Tier 115) — `C`'s summand is `ε(c)` times `B`'s, and the
+  slice the pin subtracts is CONSTANT: at `c = 0` the summand is `−ε(b)·(P3(0,b)·P3(b,0))`, which
+  Tier 111's `P3_row0_col0` makes `1` at every `b`, the two flips at `b = 0` cancelling.
+
+Both kernel-clean, every label, no seam hypothesis.
+
+#### The ledger, restated
+
+| | status |
+|---|---|
+| `D = Q + 2H − 4` | **PROVED** — subsumes 2 of the 6 measured values |
+| `C = B − 2H` | **PROVED** — couples the other 4 in pairs |
+| `B = −Q + 8H − 12` | **the single remaining obligation** (236/236 labels, seam included) |
+
+**The seam-dependence of the original six was never in the blocks.** It is `Q`'s, showing through
+`D = Q + 2H − 4` and `B = −Q + 8H − 12`: substitute `Q = 8H − 28` and you get `10H − 32` and `16`;
+substitute `Q = (H−2)²` and you get `H² − 2H` and `−H² + 12H − 16`. Six numbers, two formulas.
+
+#### What `B` needs
+
+Expanding `B = −Σ ε(b)σ(b)σ(c)τ(b,c)·u_b u_c P3(b,c)` with `tauW_carrier` (Tier 93, a theorem —
+`τ⊙P3 = P3 + 2Π_W − 4e₀e_Wᵀ`) removes the coset flip, and expanding `ε, σ` into their index
+corrections leaves `Q` (which cancels against the `−Q` in the statement) plus **single sums**:
+
+    (Mu)₀ = H                       — trivial, `Σ_c P3(0,c)² = H`
+    ρ_W = u_W·(Mu)_W = H − 4        — one row correlation, measured
+    u_W·(Mᵀu)_W                     — its transpose, measured
+    Σ_b ε(b)σ(b)σ(b⊕W)·u_b u_{b⊕W}  — one coset sum
+    P3(W,W) = −1, P3(0,W) = 1       — theorems (`P3_diag`, `P3_zero_seam`)
+
+So `B` is not a double-sum problem any more: it is four single sums, of which two are already
+theorems. That is the next tier.

@@ -242,3 +242,52 @@ a family** — labels with top bit exactly `m` (`2^m < W < 2^(m+1)`) have no lev
 to. The `W ↦ W ⊕ 2^m` conjugation that would have collapsed that family is **REFUTED** (entrywise
 agreement exactly `H²/2` — chance). And `Q` is not E5 in disguise: the two q-binomials are not
 proportional. See §57.75.
+
+### Step 7 — Tier 113: the T2 leg's three constant walks, PROVED
+
+Parallel to Tiers 110–111 on T3 (row-0 pins), the T2 leg's Tier 94 measured expansion
+
+    T2 = s3 − 4(M³)_WW − 4(M²)_WW + 4·cp2
+          − 8(M Π_W M)_WW − 8(Π_W M²)_WW + 2^(m+3) − 8
+
+has three label-independent constant walks. Kernel-clean in Lean (no `sorry`):
+
+| theorem | identity | ∀ labels |
+|---|---|---|
+| `walk2_at_W` | `(M²)_WW = H − 2` | yes |
+| `walk_MPiM_WW` | `(M Π_W M)_WW = −(H − 2)` | yes |
+| `walk2_0W` | `(M²)_{0W} = H − 2` (= `(Π_W M²)_WW`) | yes |
+
+Pointwise laws: `P3_seam_row_col`, `P3_row0_colW`, `P3_seam_coset`, via `A4_sub` and
+`cdSigma_prod_neg`. Arithmetic packaging: `t2_walk_arith` / `t2_constant_walks` collapse the
+Tier 94 remainder to `−4·(M³)_WW`, so once the expansion itself is a theorem,
+
+    T2 = s3 + 4·cp2 − 4·(M³)_WW
+
+and the measured closed form is exactly `(M³)_WW = 2(H−8) + 96·[m−1,2]₂·[W=2^m]`.
+
+Also landed: `sumLtI_sigRow`, the seam-index twin of `sumLtI_epsZero` (infrastructure for a
+future weight-2 pin expansion parallel to `tri3_epsZero`).
+
+#### DAG after Tier 113
+
+    E1, E2, E6, E8, E4a               PROVED
+    E4b  T3 leg                       PROVED down to Q / (M³)₀₀ (Tiers 110–112)
+    E4b  T2 leg                       three constant walks PROVED; open: Tier 94 expansion
+                                      as theorem + (M³)_WW evaluation
+    E4b  T1 leg                       MEASURED closed form; weight-1 word in hand
+    E5   base case at m = j           open
+    E3   deviation ignores g          open
+
+### Step 7 — Tiers 114–115: six forms → three → one
+
+The four blocks' weights FACTOR: `(1+ε(c))·(1−ε(b)σ(b)σ(c)τ(b,c))`. First factor kills the column
+`c=0`; second is `0` off a union of four lines. That is why `Q` cancels in the recursion —
+pointwise. Per block: `A:1`, `B:−εσστ`, `C:ε(c)·[B]`, `D:ε(c)`.
+
+    D = Q + 2H − 4    PROVED (Tier 114), unconditional  — 2 of the 6 measured values
+    C = B − 2H        PROVED (Tier 115), unconditional  — couples the other 4
+    B = −Q + 8H − 12  the single remaining obligation
+
+The seam-dependence of the six was never in the blocks; it is `Q`'s. `B` now reduces to four SINGLE
+sums (two already theorems). See §57.76.
