@@ -229,3 +229,16 @@ only measured. Route: `P3 c 0 = −P3 0 c + 2·[c=0]` (from Tier 111), which tur
 `Q` is measured `8H − 28` off the seam and `(H−2)²` at it, via a pointwise law for `ρ_b` with the
 special locus `{0,W} ⊕ {0,2^m}` (236/236 labels). Not proved: `ρ_b = 4` on the bulk is a genuine
 cancellation, so it needs a different technique from Tiers 111–112. See §57.74.
+
+### Step 6 — `Q`'s recursion mapped; the base case is the open part
+
+`Q(m+1) = Q(m) + B + C + D` by block decomposition (four `P3_block**_total` lemmas, already
+theorems). Off the seam `B = 16`, `C = 16 − 2H`, `D = 10H − 32`, giving `Q(m+1) = Q(m) + 8H`; at
+`W = 2^m` all three are quadratic in `H` and the level above still lands on `8H′ − 28`, so the
+recursion HEALS across the seam. 236/236 labels, `m = 3..6`, full scan.
+
+Left open: the six closed forms in Lean (same shape as Tiers 90–93), and **the base case, which is
+a family** — labels with top bit exactly `m` (`2^m < W < 2^(m+1)`) have no level below to descend
+to. The `W ↦ W ⊕ 2^m` conjugation that would have collapsed that family is **REFUTED** (entrywise
+agreement exactly `H²/2` — chance). And `Q` is not E5 in disguise: the two q-binomials are not
+proportional. See §57.75.

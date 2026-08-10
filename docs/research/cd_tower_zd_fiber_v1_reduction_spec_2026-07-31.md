@@ -6663,7 +6663,8 @@ So the `T3` leg is one symmetric scalar: a quadratic form in the row-`0` vector 
 #### `Q`, measured — and it has a POINTWISE law
 
 Write `u_b = P3(0,b)` and `ρ_b = u_b·(Mu)_b = Σ_c P3(0,b)P3(b,c)P3(0,c)`, so `Q = Σ_b ρ_b`. Over
-**every** label at `m = 3..6` (236/236):
+**every** label at `m = 3..6` (236/236 labels, full scan; `m = 7` spot-checked at four labels only,
+not swept):
 
 | locus | `ρ_b` |
 |---|---|
@@ -6688,3 +6689,56 @@ And at the seam `Q = (H−2)² = ((M²)₀₀)²` exactly — a perfect square, 
 ⚠ `Q` is NOT evaluated in Lean. The pointwise law is measured only; `ρ_b = 4` is a genuine
 cancellation (about half the `c`-summands are `−1`), not a pointwise sign identity, so it will not
 fall to the technique of Tiers 111–112.
+
+### §57.75 — `Q`'s level recursion, its four blocks, and the base case that is genuinely open
+
+With Tier 112, closing `(M³)₀₀` *is* closing `Q`. Two routes were tested against data; the results
+below map the remaining work exactly, and one candidate shortcut is refuted.
+
+#### The route that works: block decomposition of `Q(m+1)`
+
+Splitting both summation indices into low/high halves and applying the four `P3_block**_total`
+lemmas (Tier 88–89, already theorems) writes `Q` at level `m+1` as four level-`m` sums,
+
+    Q(m+1) = A + B + C + D,   A = Q(m)
+
+with `B, C, D` carrying the weights `E01, E10, E11` and the row weight `E01(0,·) = −1 + 2·[·=W]`.
+The decomposition is exact at every label including the seam, and the three new sums have closed
+forms — **236/236 labels, `m = 3..6`, full scan**:
+
+| | off the maximal seam | at `W = 2^m` |
+|---|---|---|
+| `B` | `16` | `−H² + 12H − 16` |
+| `C` | `16 − 2H` | `−H² + 10H − 16` |
+| `D` | `10H − 32` | `H² − 2H` |
+
+Off the seam these give **`Q(m+1) = Q(m) + 8H`**, which is exactly `8H − 28 ↦ 8(2H) − 28`. At the
+seam they give `(H−2)² + (−H²+12H−16) + (−H²+10H−16) + (H²−2H) = 16H − 28` — the level above lands
+on the off-seam form, so the recursion HEALS across the seam rather than breaking there. That is a
+better structural picture than "the seam is exceptional": the seam is exceptional *at its own
+level only*.
+
+#### What is actually left
+
+1. The six closed forms above, in Lean. These are level-`m` sums with explicit `±1` weights —
+   the same shape as Tiers 90–93, so the technique exists.
+2. **The base case, and it is a family.** The induction descends `m ↦ m−1` only while `W < 2^m`.
+   For labels whose top bit is exactly `m` — i.e. `2^m < W < 2^(m+1)`, everything but the seam
+   itself — there is no level below, so `Q = 8H − 28` must be established directly. That is the
+   open part, and it is not one computation.
+
+#### The shortcut that would have closed it, REFUTED
+
+The special locus of §57.74 is `{0,W} ⊕ {0,T}`, invariant under `W ↦ W ⊕ T` — which suggested that
+`P3(·,·,W⊕T,m)` is `P3(·,·,W,m)` conjugated by the involution `b ↦ b ⊕ T`. If it were, every
+top-bit-`m` label would reduce to one below `2^m` and the base-case family would collapse to the
+induction. **It is not.** Entrywise agreement between `M(b,c,W⊕T)` and `M(b⊕T,c⊕T,W)` is exactly
+`H²/2` at every label tested (`m = 3,4,5`, `W = 1,3,5,7`) — chance level, no relation. Same for the
+row-`0` vectors, `H/2` of `H`. Recorded so the coset symmetry is not tried a second time.
+
+#### And `Q` is NOT E5 in disguise
+
+`Q_seam − Q_offseam = (H−4)(H−8) = 96·[m−1,2]₂`, while E5's gap is `1728·[m,3]₂`. The ratio is
+`1/18, 7/270, 7/558, 1/162, 7/2286, 7/4590` at `m = 3..8` — not constant, so the two are not
+proportional. Same location, different content; checked because both are base cases at the maximal
+seam.
