@@ -17021,4 +17021,95 @@ theorem blockC_eq_blockB (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
     exact sumLtI_congr _ _ _ (fun i _ => by grind)
   rw [hconst]
 
+/-! ### Tier 116 — the SPLIT itself: `Q` at level `m+1` IS the four blocks
+
+    Tiers 114–115 prove things about four double sums.  Nothing so far says those four sums are the
+    halves of `Q` one level up — that was measured (236/236) and nothing more, and it is the
+    load-bearing step: without it, `blockD_value` and `blockC_eq_blockB` are statements about
+    objects with no stated relation to `Q(m+1)`.
+
+    This tier writes the split.  It is Tier 90's construction for `tri3`, one dimension lower:
+    `sumLtI_shift` cuts each index range `2^(m+1) + 2^(m+1)` into its two halves, and the four
+    entry lemmas — `P3_level_stable` for the low-low corner and `P3_block01/10/11_total` for the
+    rest — convert every level-`(m+1)` entry into a level-`m` one with an explicit `±1` weight.
+
+    With `quadSplit`, the ledger's chain finally connects end to end:
+
+      `Q(m+1) = A + B + C + D`        here (Tier 116)
+      `A      = Q`                    by construction
+      `D      = Q + 2H − 4`           Tier 114
+      `C      = B − 2H`               Tier 115
+      `B      = −Q + 8H − 12`         the one remaining obligation
+
+    and those five give `Q(m+1) = 16H − 28` with `Q` cancelling. -/
+
+/-- **THE BLOCK SPLIT OF `Q`.**  `Q` at level `m+1` over `[0, 2^(m+1)+2^(m+1))`, as the four
+    level-`m` double sums of §57.75. -/
+theorem quadSplit (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1) + 2^(m+1)) (fun b => sumLtI (2^(m+1) + 2^(m+1)) (fun c =>
+        P3 0 b W (m+1) * (P3 b c W (m+1) * P3 0 c W (m+1))))
+      = sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+            P3 0 b W m * (P3 b c W m * P3 0 c W m)))
+        + sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+            P3 0 b W m * (E01 b c W * P3 b c W m * (E01 0 c W * P3 0 c W m))))
+        + sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+            (E01 0 b W * P3 0 b W m) * (E10 b c W * P3 b c W m * P3 0 c W m)))
+        + sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+            (E01 0 b W * P3 0 b W m) * (E11 b c W * P3 b c W m * (E01 0 c W * P3 0 c W m)))) := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  -- the inner split, for a LOW outer index
+  have hlow : ∀ b, b < 2^(m+1) →
+      sumLtI (2^(m+1) + 2^(m+1)) (fun c =>
+        P3 0 b W (m+1) * (P3 b c W (m+1) * P3 0 c W (m+1)))
+      = sumLtI (2^(m+1)) (fun c => P3 0 b W m * (P3 b c W m * P3 0 c W m))
+        + sumLtI (2^(m+1)) (fun c =>
+            P3 0 b W m * (E01 b c W * P3 b c W m * (E01 0 c W * P3 0 c W m))) := by
+    intro b hb
+    rw [sumLtI_shift (2^(m+1)) (2^(m+1))]
+    congr 1
+    · exact sumLtI_congr _ _ _ (fun c hc => by
+        rw [P3_level_stable m 0 b W hp hb hW, P3_level_stable m b c W hb hc hW,
+            P3_level_stable m 0 c W hp hc hW])
+    · exact sumLtI_congr _ _ _ (fun c hc => by
+        rw [Nat.add_comm (2^(m+1)) c, P3_level_stable m 0 b W hp hb hW,
+            P3_block01_total m b c W hb hc hW hW0, P3_block01_total m 0 c W hp hc hW hW0])
+  -- the inner split, for a HIGH outer index
+  have hhigh : ∀ b, b < 2^(m+1) →
+      sumLtI (2^(m+1) + 2^(m+1)) (fun c =>
+        P3 0 (2^(m+1) + b) W (m+1) * (P3 (2^(m+1) + b) c W (m+1) * P3 0 c W (m+1)))
+      = sumLtI (2^(m+1)) (fun c =>
+            (E01 0 b W * P3 0 b W m) * (E10 b c W * P3 b c W m * P3 0 c W m))
+        + sumLtI (2^(m+1)) (fun c =>
+            (E01 0 b W * P3 0 b W m) * (E11 b c W * P3 b c W m * (E01 0 c W * P3 0 c W m))) := by
+    intro b hb
+    rw [sumLtI_shift (2^(m+1)) (2^(m+1))]
+    congr 1
+    · exact sumLtI_congr _ _ _ (fun c hc => by
+        rw [Nat.add_comm (2^(m+1)) b, P3_block01_total m 0 b W hp hb hW hW0,
+            P3_block10_total m b c W hb hc hW hW0, P3_level_stable m 0 c W hp hc hW])
+    · exact sumLtI_congr _ _ _ (fun c hc => by
+        rw [Nat.add_comm (2^(m+1)) b, Nat.add_comm (2^(m+1)) c,
+            P3_block01_total m 0 b W hp hb hW hW0,
+            P3_block11_total m b c W hb hc hW hW0, P3_block01_total m 0 c W hp hc hW hW0])
+  rw [sumLtI_shift (2^(m+1)) (2^(m+1)),
+      sumLtI_congr (2^(m+1)) _ _ (fun b hb => hlow b hb),
+      sumLtI_congr (2^(m+1)) _ _ (fun b hb => hhigh b hb),
+      sumLtI_add, sumLtI_add]
+  grind
+
+/-- **THE CHAIN, ASSEMBLED.**  With the one remaining obligation on the `B` block as a hypothesis,
+    `Q` at level `m+1` has its closed form — and `Q` at level `m` CANCELS, which is why no base case
+    enters above the level where the label first exists. -/
+theorem quad_level_transfer (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
+    (hB : sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+              P3 0 b W m * (E01 b c W * P3 b c W m * (E01 0 c W * P3 0 c W m))))
+        = - sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+                P3 0 b W m * (P3 b c W m * P3 0 c W m)))
+          + 8 * ((2^(m+1) : Nat) : Int) - 12) :
+    sumLtI (2^(m+1) + 2^(m+1)) (fun b => sumLtI (2^(m+1) + 2^(m+1)) (fun c =>
+        P3 0 b W (m+1) * (P3 b c W (m+1) * P3 0 c W (m+1))))
+      = 16 * ((2^(m+1) : Nat) : Int) - 28 := by
+  rw [quadSplit m W hW hW0, blockC_eq_blockB m W hW hW0, blockD_value m W hW hW0, hB]
+  grind
+
 end SounioZDFiberAntisym
