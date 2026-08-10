@@ -6488,3 +6488,44 @@ structural, refit with `W = 2^m` excluded.*
 
 Probe: `scripts/research/zd_v1_obligation_i_pieces_probe.py` (`closed_forms()` re-verifies).
 **Status: MEASURED.** Three Lean lemmas now stand where one opaque obligation stood.
+
+### §57.70 — the seam deviation is a q-BINOMIAL, and the basis of §57.69 is the unique minimal one
+
+Two checks on §57.69, both prompted by review, and the first changes what the seam means.
+
+**(1) `2(H−4)(H−8) = 192·[m−1,2]₂`.** Exactly, at every level `m = 3..9`:
+
+| m | 3 | 4 | 5 | 6 | 7 | 8 | 9 |
+|---|---|---|---|---|---|---|---|
+| seam deviation | 192 | 1344 | 6720 | 29760 | 124992 | 512064 | 2072640 |
+| `[m−1,2]₂` | 1 | 7 | 35 | 155 | 651 | 2667 | 10795 |
+| ratio | 192 | 192 | 192 | 192 | 192 | 192 | 192 |
+
+Algebraically it is forced: `2(H−4)(H−8) = 64·(2^(m−1)−1)(2^(m−2)−1) = 192·[m−1,2]₂`, since
+`[m−1,2]₂ = (2^(m−1)−1)(2^(m−2)−1)/3`.
+
+**That is the SAME q-binomial as §57.49's `288·[m−1,2]₂`** — the term the masked `tri3` carries at
+`j = m` and the unmasked one does not. So "the maximal-seam exception is a mask artifact" needs
+sharpening: it is an artifact *of the combination*, not of the seam. The seam carries a genuine
+`[m−1,2]₂` signal in the three orthant pieces (`192·[m−1,2]₂`, in the direction `(1,−2,3)`); the
+combination `(3,3,1)` annihilates that direction; the mask re-exposes a multiple of it
+(`288 = 1.5·192`). Three sightings of one q-binomial, and the lane had filed the seam as featureless.
+
+It is **not** E5's content. E5's base-case gap is `1728·[m,3]₂` — a different q-binomial, and
+`[m,3]₂ = [m−1,2]₂·(2^m−1)/7`, so the two are not constant multiples. (This probe reconfirms E5's
+numbers independently: `Δs3` on the reference pair at `j = m` is 25920, 267840, 2410560 at
+`m = 4,5,6`, matching `1728·[m,3]₂`.) What the two share is the location: **the maximal seam is
+where the q-binomials enter**, in both the pieces and the base case.
+
+**(2) `{cp2, H, 1}` is the unique minimal basis.** Over the 486 off-seam points, solving exactly
+over ℚ:
+
+- `{cp2, H, 1}` — exact, rank 3, solution unique: `(4, 16, −64)`, `(4, −8, 64)`, `(0, 48, −176)`;
+- adding `H²` — still exact, and its coefficient is **0** in all three, so the forms are not an
+  artifact of a truncated basis;
+- replacing `cp2` by the fibre invariant `g` (with or without a `g·H` term) — **no exact solution**
+  for `T1` or `T2`; exact for `T3` only because `T3`'s `cp2` coefficient is 0 anyway;
+- dropping either `H` or the constant — no exact solution.
+
+So the `cp2`-dependence of `T1` and `T2` is real and not a proxy for `g`, and §57.69's claim (4) —
+the whole `cp2` content of the transfer sits in `T1` and `T2` at coefficient 4 — stands as measured.

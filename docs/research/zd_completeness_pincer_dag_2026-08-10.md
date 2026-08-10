@@ -7,6 +7,7 @@ validated_by: A6
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.zd-completeness-pincer-dag-2026-08-10
 -->
 
+
 <!-- docs:status-note:start -->
 > Docs status: `historical`
 > This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
@@ -183,3 +184,13 @@ Scope note, since E4a and E4b differ in it: **E4a holds on the reference class**
 `g(W) = 0`) — that is where `cp2`'s closed form and hence `Δcp2 = 0` are proved. **E4b's three forms
 hold for every label off the maximal seam**, no reference hypothesis. Rows must not inherit each
 other's quantifiers.
+
+### Step 2, addendum — the excluded label is not featureless
+
+The seam deviation `2(H−4)(H−8)` equals `192·[m−1,2]₂` exactly (m = 3..9) — the same q-binomial as
+the `288·[m−1,2]₂` term §57.49 deflated as a mask artifact. The artifact was in the *combination*:
+`(3,3,1)` annihilates the direction `(1,−2,3)` the seam signal lives in. The seam itself carries a
+real `[m−1,2]₂`. It is **not** E5's `1728·[m,3]₂` — different q-binomial — but it is the same
+location, so E5's row should be read as "the maximal seam is where the q-binomials enter", twice
+sighted. Basis check: `{cp2, H, 1}` is exact, unique and minimal; `H²` gets coefficient 0; `g`
+cannot replace `cp2`. See §57.70.
