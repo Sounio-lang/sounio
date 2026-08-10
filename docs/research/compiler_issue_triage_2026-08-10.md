@@ -50,12 +50,13 @@ seconds" but fails to terminate at all.
 `Madaros Current-Source f64 Lowering`. `main` *is* red, on `Lean Proofs` only, from the floating
 toolchain pin described below and not from this merge.
 
-**Verified but not landed:** #1501, #1493, #1508, each restacked onto `main` and passing its own
-acceptance tests, jointly and individually.
+**Also landed:** #1501, after porting it onto main's interned-id representation.
 
-**Disqualified:** #1500 regresses the self-compilation ratchet (`E175`, gen1 can no longer
-typecheck the compiler's entry point) despite passing every other gate. **#1531 is held**: the
-108-test delta is a repository-scale decision, not a triage one.
+**Restacked, verified against their own tests, and blocked:** #1500, #1493, #1508. Each passes
+`Contracts`, `Sounio Lint`, `Full Test Suite` and both self-host jobs, and each fails the
+self-compilation ratchet — the compiler built from the tree can no longer typecheck its own entry
+point (`E175`; `E020`+`E016`; `2xE002`+`E137`). **#1531 is held**: the 108-test delta is a
+repository-scale decision, not a triage one.
 
 The two systemic findings explain the backlog's shape better than any individual bug does: type
 errors in the compiler do not stop a build, and wrong answers at rc=0 do not fail a test.
@@ -387,6 +388,12 @@ that the file goes from *not compiling* to *compiling and running*; the remainin
 failure is a separate residual and is not attributable to the conflict resolution, which touched
 only diagnostics.
 
+**The local gate set used above was incomplete — see "What landing actually found".** It ran
+`madaros_full_gate.sh` and `madaros_current_source_f64_lowering_gate.sh`, both of which pass on
+trees that CI then rejects. The gate that decides is `scripts/ci/madaros_fixed_point_gate.sh`, a
+*separate script* that happens to run inside the same CI job as the f64 lowering gate. Any local
+pre-merge check on this compiler must run it explicitly.
+
 Note on PR CI: the compiler gates on a pull request are **gated behind the `Impact` job** and do
 not appear until it passes. Once it does, `Contracts`, `Sounio Lint`, `Native Self-Host (Linux
 x86_64)`, `Source-Bootstrap Self-Host (Linux x86_64)` and `Madaros Current-Source f64 Lowering`
@@ -441,6 +448,35 @@ The methodological point is worth keeping: the local acceptance suite ran the PR
 (`scripts/ci/madaros_current_source_f64_lowering_gate.sh`) is the one that asks whether the
 compiler can still build itself, and it belongs in any local pre-merge check on this compiler.
 It has been added to the verification used for the remaining PRs.
+
+
+
+### The ratchet rejects three of the four, and only CI could tell
+
+Every one of the four PRs passes `Contracts`, `Sounio Lint`, `Full Test Suite`, `Native
+Self-Host` (Linux **and** macOS) and `Source-Bootstrap Self-Host`. What separates them is one
+gate — `scripts/ci/madaros_fixed_point_gate.sh`, which asks whether the compiler built from the
+tree can still typecheck its own entry point:
+
+| PR | fixed-point ratchet | outcome |
+|---|---|---|
+| #1501 | **passes** | **merged** (`d9d56436ee`) |
+| #1500 | `1 error[E175]` | blocked |
+| #1493 | `1 error[E020]`, `1 error[E016]` | blocked |
+| #1508 | `2 error[E002]`, `1 error[E137]` | blocked |
+
+For #1493 the likely reading is that the PR does its job: it makes the linear/borrow checker
+stricter, and the compiler's own source violates the newly-enforced rule in two places. If so
+the remedy is to repair those two sites, not to weaken the checker — but that grows the PR
+beyond what a triage should decide.
+
+All three blocked PRs keep their restacked branches: the conflict resolution is pushed (additive
+merge of `main`, never a force-push) and the evidence is posted as a comment on each, so the next
+attempt starts from the ratchet output rather than rediscovering it.
+
+**Final landing state:** #1490 and #1501 merged; #1500, #1493, #1508 restacked, verified against
+their own acceptance tests, and blocked on the ratchet; #1531 held pending a decision on its
+108-test delta.
 
 
 ## Ranking
