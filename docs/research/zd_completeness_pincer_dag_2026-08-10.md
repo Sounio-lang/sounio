@@ -323,9 +323,13 @@ and the evaluation of `(M³)_WW`.
 
 `blockB_value`: `B = −Q + 8H − 12`, every label. It discharges Tier 116's hypothesis, giving
 `quad_level_value` (`Q(m+1) = 16H − 28`, no base case — `Q(m)` cancels) and `weight3_closed`
-(`T3 = s3 + 48H − 176`), which is §57.69's measured form for the weight-3 orthant, now a theorem.
+(`T3 = s3 + 48H − 176`) — §57.69's form **for the labels the transfer reaches** (`W < 2^n` at level
+`n`). The top-bit-`n` labels above the seam were measured and are not covered. For the reference
+class that costs nothing above the base: `W < 8` is unaffected, and for `W = 2^p` the uncovered
+level is `n = p`, which is exactly where E5's base case already sits.
 
-    E4b, T3 leg      PROVED end to end — no measured step in the chain
+    E4b, T3 leg      PROVED for W < 2^n at level n — no measured step in that chain;
+                     top-bit-n labels (2^n < W < 2^(n+1)) still MEASURED only
     E4b, T1/T2 legs  open (Tier 93 reduction in hand; concurrent lane on T2)
     Q at top level   open — labels whose top bit equals the level; the transfer does not reach them
     E5, E3           open

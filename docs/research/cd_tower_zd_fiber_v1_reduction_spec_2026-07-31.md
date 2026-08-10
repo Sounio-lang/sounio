@@ -6843,9 +6843,20 @@ Tier 116's split that discharges the last hypothesis, so:
     quad_level_value:  Q(m+1) = 16·2^(m+1) − 28,   every W < 2^(m+1), W ≠ 0
     weight3_closed:    T3 = s3 + 48·2^(m+2) − 176  at level m+1, every label existing at level m
 
-The second is §57.69's measured closed form for the weight-3 orthant, now a theorem — and off the
-maximal seam *by construction*, since at level `m+1` the seam is `2^(m+1)` and the hypothesis is
-`W < 2^(m+1)`. `Q(m)` cancels in the transfer, so no base case is needed.
+The second is §57.69's form for the weight-3 orthant **on the labels the transfer reaches** — at
+level `n`, those with `W < 2^n`. §57.69 measured it for every off-seam label at each level, i.e.
+every `W < 2^(n+1)` with `W ≠ 2^n`, so the labels with `2^n < W < 2^(n+1)` — top bit exactly `n`,
+above the seam — are measured and **not** covered here. Within its range the statement is off-seam
+by construction, since at level `m+1` the seam is `2^(m+1)` and the hypothesis is `W < 2^(m+1)`.
+`Q(m)` cancels in the transfer, so no base case is needed *inside* that range.
+
+**What the restriction costs the deviation law: nothing, above the base.** The reference class is
+`g(W) = 0`, i.e. `W < 8` or `W = 2^p`. For `W < 8` the restriction is vacuous at any level `n ≥ 3`.
+For `W = 2^p` the uncovered level is exactly `n = p` — the label's own level, where it IS the
+maximal seam and `Q = (H−2)²` rather than `8H − 28`. But that level is precisely where E5's base
+case lives; the deviation law needs the transfer only for `m ≥ j` stepping upward, and
+`weight3_closed` covers every level strictly above the label's own. So the gap coincides with E5's
+territory rather than adding a new one.
 
 #### The three single sums (Tier 117), and where they came from
 
@@ -6878,7 +6889,7 @@ and two isolated points,
 with `A(b)` the coset sum's summand. Summing `c` then `b`, pinned at `0` (Tier 110) and at `W`
 (Tier 118), lands on the four sums and gives `−(Q − 6H + 12) − 2(2−H) + 4 = −Q + 8H − 12`.
 
-#### The chain, with nothing measured in it
+#### The chain, with nothing measured in it (within its stated range)
 
     weight3_switch (91) → three pins (110) → walk2_value (111) → quadratic form (112)
       → block weights (114–115) → the split (116) → single sums (117–118) → B (119)
