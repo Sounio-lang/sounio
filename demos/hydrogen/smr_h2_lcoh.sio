@@ -1,0 +1,238 @@
+// demos/hydrogen/smr_h2_lcoh.sio
+//
+// Techno-economic LCOH for an integrated SMR/H2 energy system with
+// uncertainty quantification — GUM vs Monte Carlo vs p-box, plus first-order
+// Sobol shares. Uses the stdlib epistemic::pbox module. One deterministic
+// run on the default engine.
+//
+// Written for Dr. Emmanuel Stamatakis (NCSR Demokritos, H2Lab), following his
+// Energies 16(17):6257 (2023) techno-economic feasibility study of a hybrid
+// SMR/H2 system. Where that study reports a point estimate plus sensitivity
+// cases, this file reports the full distribution — and prices the ignorance.
+//
+// Model (levelized cost of hydrogen, EUR/kg):
+//   LCOH = (CAPEX·CRF(r,n) + f_OM·CAPEX) / annual_production
+//   CRF  = r(1+r)^n / ((1+r)^n − 1),   n = 25 yr
+//   production = 300 MW · CF · 8760 h / specific_energy
+// Parameters:
+//   CAPEX           = 1200 ± 240 M€          (aleatory, ±20%)
+//   discount rate r = 7.0 ± 1.5 pp           (aleatory)
+//   specific energy = 50 ± 2.5 kWh/kg        (aleatory)
+//   capacity factor = 0.85 nominal, epistemic INTERVAL [0.75, 0.90]
+//                     (site/grid dependent, scarce data -> p-box, not Gaussian;
+//                      within each scenario a tight ±0.02 aleatory band)
+// Question: what is the probability of beating the 4 EUR/kg market threshold?
+
+use epistemic::pbox::*
+
+// ─── pure-Sounio math ───
+
+fn mh_sqrt(x: f64) -> f64 with Mut {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 30 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn mh_exp(x: f64) -> f64 with Mut, Div {
+    if x > 700.0 { return 1.0e200 }
+    if x < 0.0 - 700.0 { return 0.0 }
+    var kf = x / 0.6931471805599453
+    var k = kf as i64
+    if kf < 0.0 {
+        if kf != (k as f64) { k = k - 1 }
+    }
+    let r = x - (k as f64) * 0.6931471805599453
+    var s = 1.0
+    var term = 1.0
+    var n: i64 = 1
+    while n < 25 { term = term * r / (n as f64); s = s + term; n = n + 1 }
+    var result = s
+    if k >= 0 {
+        var i: i64 = 0
+        while i < k { result = result * 2.0; i = i + 1 }
+    } else {
+        var i: i64 = 0
+        while i < (0 - k) { result = result / 2.0; i = i + 1 }
+    }
+    result
+}
+
+fn mh_ln(x: f64) -> f64 with Mut, Div {
+    var m = x
+    var k: i64 = 0
+    while m >= 2.0 { m = m / 2.0; k = k + 1 }
+    while m < 1.0 { m = m * 2.0; k = k - 1 }
+    let y = (m - 1.0) / (m + 1.0)
+    let y2 = y * y
+    var term = y
+    var sum = 0.0
+    var i: i64 = 0
+    while i < 12 {
+        sum = sum + term / (2.0 * (i as f64) + 1.0)
+        term = term * y2
+        i = i + 1
+    }
+    2.0 * sum + (k as f64) * 0.6931471805599453
+}
+
+// ─── PRNG ───
+
+var RNG_A: i64 = 0
+var RNG_B: i64 = 0
+
+fn rng_seed(a: i64, b: i64) with Mut {
+    RNG_A = a
+    RNG_B = b
+}
+
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A
+    let y = RNG_B
+    RNG_A = y
+    x = x ^ (x << 23)
+    x = x ^ (x >> 17)
+    x = x ^ (y ^ (y >> 26))
+    RNG_B = x
+    let r = x + y
+    if r < 0 { 0 - r } else { r }
+}
+
+fn rand_uniform() -> f64 with Mut, Div {
+    let r = rng_next()
+    (r % 10000) as f64 / 10000.0
+}
+
+fn rand_normal() -> f64 with Mut, Div {
+    var sum = 0.0
+    var j = 0
+    while j < 12 { sum = sum + rand_uniform(); j = j + 1 }
+    sum - 6.0
+}
+
+fn rand_gaussian(mu: f64, sigma: f64) -> f64 with Mut, Div {
+    mu + sigma * rand_normal()
+}
+
+// ─── economics ───
+
+fn crf(r: f64, n_yr: i64) -> f64 with Mut, Div {
+    let q = mh_exp((n_yr as f64) * mh_ln(1.0 + r))
+    r * q / (q - 1.0)
+}
+
+fn lcoh(capex_me: f64, r: f64, cf: f64, eff: f64) -> f64 with Mut, Div {
+    let ann = capex_me * 1000000.0 * crf(r, 25) + 0.03 * capex_me * 1000000.0
+    let prod = 300000.0 * cf * 8760.0 / eff
+    ann / prod
+}
+
+// P(LCOH < 4 EUR/kg) at a fixed capacity factor
+fn prob_below4(cf: f64, s_cf: f64, n: i64) -> f64 with IO, Mut, Div {
+    var i: i64 = 0
+    var hits: i64 = 0
+    var sum = 0.0
+    var sumsq = 0.0
+    while i < n {
+        var r_s = rand_gaussian(0.07, 0.015)
+        if r_s < 0.01 { r_s = 0.01 }
+        let v = lcoh(rand_gaussian(1200.0, 240.0), r_s,
+                     rand_gaussian(cf, s_cf), rand_gaussian(50.0, 2.5))
+        sum = sum + v
+        sumsq = sumsq + v * v
+        if v < 4.0 { hits = hits + 1 }
+        i = i + 1
+    }
+    let mean = sum / (n as f64)
+    print("   mean LCOH [EUR/kg]: "); println(mean)
+    print("   std  LCOH [EUR/kg]: "); println(mh_sqrt(sumsq / (n as f64) - mean * mean))
+    100.0 * (hits as f64) / (n as f64)
+}
+
+// ─── main ───
+
+fn main() -> i32 with IO, Mut, Div {
+    print("=== SMR/H2 levelized cost of hydrogen — GUM / MC / p-box / Sobol ===")
+    println("")
+
+    // nominal + exact analytic derivatives (only CRF' needs a finite step)
+    let l0 = lcoh(1200.0, 0.07, 0.85, 50.0)
+    let h = 0.00001
+    let d_crf = (crf(0.07 + h, 25) - crf(0.07 - h, 25)) / (2.0 * h)
+    let prod = 300000.0 * 0.85 * 8760.0 / 50.0
+    let g_cap = l0 / 1200.0
+    let g_r = 1200000000.0 * d_crf / prod
+    // dLCOH/dCF = -LCOH/CF (LCOH ~ 1/CF); sign matters for the gradient,
+    // only the magnitude enters the squared GUM/Sobol terms below
+    let g_cf = 0.0 - (l0 / 0.85)
+    let g_eff = l0 / 50.0
+    print("nominal LCOH [EUR/kg]: "); println(l0)
+    print("CRF(7%, 25y): "); println(crf(0.07, 25))
+    println("")
+
+    // GUM screening. sigma_CF = 0.05 deliberately spans the full epistemic
+    // interval [0.75, 0.90] (half-width 0.075 ~ 1.5 sigma) so the combined
+    // uncertainty prices the CF ignorance, not just the +-0.02 aleatory band.
+    let gum = mh_sqrt((g_cap * 240.0) * (g_cap * 240.0)
+            + (g_r * 0.015) * (g_r * 0.015)
+            + (g_cf * 0.05) * (g_cf * 0.05)
+            + (g_eff * 2.5) * (g_eff * 2.5))
+    print("GUM sigma [EUR/kg]: "); println(gum)
+    println("")
+
+    // MC at nominal CF — aleatory band +-0.02, consistent with the p-box
+    // scenarios below (Gaussian CF left untruncated: 0.85 +- 0.02 sits
+    // >7 sigma from the [0,1] bounds, so truncation bias is negligible)
+    print("Monte Carlo (CF = 0.85):")
+    println("")
+    rng_seed(314159265, 271828182)
+    let p_mid = prob_below4(0.85, 0.02, 20000)
+    print("   P(LCOH < 4 EUR/kg) [%]: "); println(p_mid)
+    println("")
+
+    // p-box over the epistemic CF interval
+    print("p-box over CF in [0.75, 0.90] (aleatory band +-0.02):")
+    println("")
+    rng_seed(314159265, 271828182)
+    let p_lo_cf = prob_below4(0.75, 0.02, 20000)
+    print("   P(<4) at CF=0.75 [%]: "); println(p_lo_cf)
+    rng_seed(314159265, 271828182)
+    let p_hi_cf = prob_below4(0.90, 0.02, 20000)
+    print("   P(<4) at CF=0.90 [%]: "); println(p_hi_cf)
+    let box = new(p_lo_cf, p_hi_cf)
+    print("   PBOX on beating 4 EUR/kg: ["); println(box.lo)
+    print("                          ,"); println(box.hi)
+    print("   ]  epistemic width [pp]: "); println(width(box))
+    println("")
+
+    // first-order Sobol shares (same math as sobol_indices::log_linear_indices:
+    // normalized squared sensitivity coefficients). Screening-grade:
+    // exact for a linear model with independent inputs; LCOH is mildy
+    // nonlinear (1/CF, CRF(r)), so treat shares as approximate rankings.
+    let s0 = g_cap * 240.0
+    let s1 = g_r * 0.015
+    let s2 = g_cf * 0.05
+    let s3 = g_eff * 2.5
+    let tot = s0 * s0 + s1 * s1 + s2 * s2 + s3 * s3
+    print("Sobol first-order shares of LCOH variance:")
+    println("")
+    print("   CAPEX: "); println(s0 * s0 / tot)
+    print("   discount rate: "); println(s1 * s1 / tot)
+    print("   capacity factor: "); println(s2 * s2 / tot)
+    print("   specific energy: "); println(s3 * s3 / tot)
+    println("")
+
+    print("A point estimate says 3.11 EUR/kg. The honest statement: P(beat")
+    println("")
+    print("4 EUR/kg) is an INTERVAL [~72, ~93] % — 21 pp of ignorance priced")
+    println("")
+    print("by the missing capacity-factor data. And 71% of cost variance is")
+    println("")
+    print("CAPEX: that is where engineering effort goes, not electrolyser")
+    println("")
+    print("efficiency (4.5%). Sounio turns feasibility studies into portfolios.")
+    println("")
+    println("SMR_H2_LCOH_OK")
+    0
+}

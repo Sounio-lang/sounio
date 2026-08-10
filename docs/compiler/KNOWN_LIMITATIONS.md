@@ -94,11 +94,16 @@ Editor-tooling details:
   - **#921 thin-link `rc=12` (`math::rational` + second module) — CLOSED on default path (Wave14D 2026-07-21).** Default multi-module route uses the full IR lane (`module_frontend_compile_imported_to_file`; compact path disabled unless `SOUNIO_ENABLE_COMPACT_IMPORTED_IR=1` — PR #1236). Handoff repro `docs/handoff/repros/multimodule_thinlink_rc12_madaros.sio` compiles and runs `11\n` under stock Madaros. Gate: `scripts/madaros_thinlink_921_residual_gate.sh` → `MADAROS_THINLINK_921_RESIDUAL_GATE_OK`. Audit: `docs/audit/WAVE14D_THINLINK_921_RESIDUAL_2026-07-21.md`.
   - **#901 large multi-module scale (`prob::distributions` ~210-fn graph) — CLOSED on default path (Wave15C 2026-07-22).** Post into-acc (#1402) + specialized-list DCE (#1397) + full-IR default, the filed probe compiles under stock Madaros (`Merged IR` ~71–73 after into-acc), runs `m=5.000000`, and the textbook / `test_prob_stdlib` science graphs print `PROB_TEXTBOOK_OK` / `PROB_STDLIB_OK` without a lean_single pin. Gate: `scripts/madaros_native_multimodule_scale_901_gate.sh` → `MADAROS_NATIVE_MULTIMODULE_SCALE_901_GATE_OK`. Audit: `docs/audit/MADAROS_WAVE15C_ISSUE901_SCALE_CLOSEOUT_2026-07-22.md`.
   - **Compact experimental residual (not default):** with `SOUNIO_ENABLE_COMPACT_IMPORTED_IR=1`, the unfinished simple-IR emitter still reports `imported_simple_ir_emit_failed` / compact ELF write `rc=1`, then **falls back to full IR** and succeeds. Residual class is `compact_emit_failed` → fallback, **not** hard thin-link `rc=12`. Do not re-enable compact as default without a real emitter (silent `"42\n"` corruption was the prior failure mode).
-  - **Remaining D3 surface:** exclusive-ref / memory-wall fragile chains; stats OLS multi-mod still red with **`E019` method calls** (not thin-link/scale). Do not over-claim “all multi-module is green.”
+  - **Remaining D3 surface:** concrete shipped exclusive-ref science witnesses are green (unsplit `oct_mul`, imported `associator_field`); gate `scripts/ci/madaros_d3_exclref_shipped_gate.sh`. ~~stats OLS E019~~ / ~~open-slice `.len()`~~ closed earlier. ~~trait-impl methods on primitive `i64` SIGSEGV~~ / ~~`cd_exact_generic_i64` E035/E011 preflight~~ **CLOSED 2026-08-06:** primitive scalar-kind method mangling + declared-impl effects + deferred generic method dispatch; gate `scripts/ci/madaros_trait_i64_cd_exact_gate.sh` → `MADAROS_TRAIT_I64_CD_EXACT_GATE_OK`. Audit: `docs/audit/MADAROS_TRAIT_I64_CD_EXACT_2026-08-06.md`. `cd_exact_generic_i64` runs green on tip Madaros (historical IrModule memory-wall not reproduced on this witness). Do not over-claim “all multi-module is green.”
   - **Imported-module f64 BSS arithmetic (Wave15 D 2026-07-22) — CLOSED.** Same-module `let K: f64` arithmetic inside into-acc dep bodies was missing float markers when seed Wave13 external BSS preseed already owned the slot (`global_types` empty on `lowerer_from_acc_module`). Symptom: `lognormal_pdf(1,0,1) → ~1e-300` under multi-mod (const init correct; binops `cvtsi2sd` of IEEE bits). Gate: `scripts/madaros_imported_f64_bss_arith_gate.sh` → `MADAROS_IMPORTED_F64_BSS_ARITH_GATE_OK`. Audit: `docs/audit/MADAROS_IMPORTED_F64_BSS_ARITH_2026-07-22.md`.
-- **D4 — named `use m::sym` + `print_f64` trip E137** in importing programs. `docs/audit/MADAROS_MULTIMODULE_PRINT_IMPORT_BUGS_2026-07-13.md`. Issue #862.
+- **D4 — named `use m::sym` + `print_f64` trip E137** in importing programs. ~~OPEN~~ **CLOSED 2026-08-06** on shipped Madaros (post-#1627 promote): checker allow-list binds `print_f64` + named-import last-segment bind (`self-hosted/check/check.sio`); acceptance triad (named import + helper + `print_f64`) green. Gate: `scripts/ci/madaros_862_import_print_gate.sh` → `MADAROS_862_GATE_OK`. Audit: `docs/audit/MADAROS_MULTIMODULE_PRINT_IMPORT_BUGS_2026-07-13.md`. Issue #862.
+- **D6 — module-level `const` referenced from a non-`main` local fn miscompiles.** ~~OPEN~~ **CLOSED 2026-08-06** on shipped Madaros: scalar `IR_STRATEGY_BSS_GLOBAL` reads emit `ir_load_global` reload (`self-hosted/ir/lower.sio`); non-main `fill` writing `a[64 + C_A]` lands at the correct slot. Gate: `scripts/ci/madaros_d6_const_nonmain_gate.sh` → `MADAROS_D6_CONST_NONMAIN_GATE_OK`. Historical note: PGx EL+ demos previously workarounded with `main`-local `let` ids.
 
-Workarounds for remaining residuals: inline logic into `main()`, keep modules self-contained (no stdlib `use` deps), or run under `lean_single` where multi-module still fragile. Recommended residual order after D1/D2/#921/#901-scale closeout: **D3 exclusive-ref / memory-wall chains and OLS E019 → D4 ergonomics**.
+Workarounds for remaining multi-module residuals: keep modules self-contained where
+exclusive-ref chains outside the gated corpus remain fragile. Recommended residual
+order after trait-i64 / `cd_exact` closeout: other multi-module fragile shapes as
+they appear (do not re-open the closed `cd_exact_generic_i64` memory-wall claim
+without a new failing witness).
 
 **Multi-module bundle compile — RESOLVED 2026-05-29.** All three G1 architectural roots closed. Bundle: **0 errors** (arc 766 → 0, commits `fcce29dd3` through `8c4f619de`). The modular self-hosted tree (`self-hosted/compiler/main.sio`) now compiles clean. The checked x86-64 Madaros prebuilt is source-built from that modular tree and covered by `scripts/ci/madaros_full_gate.sh` plus `scripts/ci/madaros_source_to_elf_gate.sh`. This is a validated-research source-built Madaros lane, not a claim that `lean_single.sio` has been retired as the bootstrap seed.
 
@@ -114,7 +119,7 @@ See `docs/audit/PL_ADOPTION_AUDIT_2026-05-27.md` §5 / G1 and memory `[[project_
 
 **Unsplit full `oct_mul` core_ir fallthrough / main re-entry — FIXED (2026-07-20).** After #1292 (vreg tables 512→2048) a single-file unsplit 8-component exclusive-ref `oct_mul` still compiled but re-entered `main` (`ENTER`/`BEFORE_MUL` storm until stack death). Root cause was **not** wrong call-target/PLT: `IR_MAX_INSTRS=2048` silently dropped body tail + `IrReturn` once the exclusive-ref expansion hit the wall (measured: N=7 → 1910 IR ops PASS; N=8 → 2048 ops, no ret). `compile_ir_function_v2_core_ir_into` only emits epilogue on `IrReturn`, so control fell through into the next function. Fix: `IR_MAX_INSTRS` / `IrFunction.instrs` 2048→4096 (unsplit body ~2182 ops) + synthetic epilogue if no return was seen. Gate: `scripts/madaros_unsplit_oct_mul_gate.sh`. **#1274 lo/hi split kept** in `stdlib/algebra/octonion.sio` as defense-in-depth for older binaries / multi-module import. Residual: doubling per-function IR storage grows `IrModule` further (multi-module body-lowering memory wall still OPEN below); RA still caps at 2048 simple instrs (core_ir path does not use RA).
 
-**Multi-module dependency body-lowering memory wall + downstream segfault — OPEN (blocks `cd_exact_generic_i64` / WP-A5).** With the impl-preseed fix above, `cd_exact_generic_i64` now clears module-1 (`cayley_dickson_exact`) *summary* lowering, but still fails to produce an ELF. Two coupled residuals, both PRE-EXISTING (identical on the base branch for `algebra_g2_invariants_import` and `associator_field_octonion`, neither of which contains an `impl`, so they are unrelated to the impl fix): (1) **Pathological memory.** `IrModule` is large (`functions: [IrFunction; 2048]`, each `instrs: [IrInstr; 4096]` as of the unsplit-oct fix); the multi-module lowerer makes many by-value module/summary copies, so compiling the 4-module cd_exact closure peaks at **~18 GB+ VM**. Under the `bin/madaros` wrapper's `ulimit -v 16 GiB` the allocator fails mid-`lower_program_bodies_ref` and SIGSEGVs while lowering the 5th generic `[F;2048]`-returning body (`cd_sub_exact`, structurally identical to the `cd_add_exact` that lowered fine one step earlier — i.e. accumulation, not a per-statement defect). (2) **Downstream crash.** Running the raw `madaros.elf` with NO ulimit (node has 93 GB free, so 18 GB is not an OS OOM) advances past module-1 body lowering + merge and then SIGSEGVs at `lower_array: dep_begin 2` (module-2 summary lowering) — a genuine fault, not memory pressure. Fixing this requires shrinking `IrModule`/eliminating by-value module copies in the multi-module path and/or resolving the module-2 summary fault; it is distinct from both A8 (SRET forwarding) and A10 (impl-preseed). `cd_exact_generic_i64` remains NOT verified on Madaros.
+**Multi-module dependency body-lowering memory wall + downstream segfault — HISTORICAL (2026-07) / tip `cd_exact_generic_i64` GREEN 2026-08-06.** Earlier measurement peaked ~18 GB VM under tight `ulimit -v` and could SIGSEGV at `dep_begin 2`. Tip Madaros (post trait-i64 / E035–E011 closeout) runs `scripts/dev/madaros_cd_exact_generic_i64_gate.sh` → `MADAROS_CD_EXACT_GENERIC_I64_GATE_OK` (`ZD PROVED`). Do not re-assert the OPEN memory-wall claim without a fresh failing corpus. See `docs/audit/MADAROS_TRAIT_I64_CD_EXACT_2026-08-06.md`.
 
 **`cd_exact_generic_i64` — GREEN on Madaros 2026-07-07 (WP-A5).** Build now succeeds (the memory wall above is cleared by building the raw madaros ELF under `ulimit -v unlimited` instead of the wrapper's `ulimit -v 16 GiB`; the 18 GB VM peak is data, not a compiler bug). With the build unblocked, the last *runtime* SIGSEGV was traced (Slurm + capstone disasm of the emitted ELF) to a **transitive cross-module call drop**: generic `cd_mul_exact` calls `cd_sigma` via `use algebra::cayley_dickson::{cd_sigma}`, and on the Madaros imported-lane a direct call whose target lives in a *transitively-imported* module is silently elided — the `IrCall` never emits, and its result vreg defaults to 0, clobbering parameter slot 0 (`a`), so the next `a.c[i]` dereferences a null handle inside the nested accumulation loop → SIGSEGV. Same-module callees (`cd_zero_exact`, the `er_*` trait methods) resolve correctly; only different-module targets drop. **Fix (stdlib workaround):** define `cd_sigma_x` same-module in `cayley_dickson_exact.sio` (verbatim copy) and call it — exactly the pattern the concrete sibling `cayley_dickson_exact_i64.sio` already uses (`cd_sigma_exact_i64`, whose header documents the `use cd_sigma` "HARD BLOCKER"). Result: `ZD PROVED` / `SQ PASS` / `NONZERO PASS` / 16×`COMP i 0`, rc=0. Stdlib-only; compiler untouched.
 
@@ -445,45 +450,44 @@ Phase 5 attempted to "close the butterfly" at the compiler level (commit reverte
 - **Dynamic `.so` linking / GOT–PLT**: The native toolchain emits statically linked executables on the default bring-up path. Relocation metadata records `R_X86_64_PLT32` for ET_REL objects (`self-hosted/native/reloc.sio`), but wiring arbitrary shared-library symbols end-to-end (libc-style `-lfoo`, full GOT/PLT for external calls) remains future work. FFI tests that require `libzstd` stay behind `//@ ignore` until dynamic link and stable stubs land consistently.
 - **`*const u8` in callee position**: Passing `expr as *const u8` can still produce arity/type mismatch diagnostics versus `*mut u8` in some FFI-heavy shapes; stdlib wrappers prefer `*mut u8` until call lowering treats `*const T` and `*mut T` uniformly at the invocation site. See the header comment in `tests/stdlib/compress/test_zstd_e2e.sio`.
 
-## Zero-event native-v2 frontier (open)
+## Zero-event native-v2 frontier (partially closed)
 
-The zero-event receipt layer is checkable, its receipt witness now executes on
-default Madaros, and constructor opacity is enforced by both `check` and
-`compile`. Two neighboring native limitations remain:
+The zero-event receipt layer is checkable; constructor opacity is enforced by
+both `check` and `compile` (E176 compile-fail). The receipt semantic oracle
+executes under `lean_single` via `scripts/ci/zero_event_gate.sh`. Under default
+Madaros native-v2 (shepherd-merge 2026-08-05 onto `origin/main`):
 
-1. **Minimal `qd128` import fails closed during native emission.**
-   `tests/known_failures/qd128_import_native_v2_probe.sio` now completes
-   imported-module lowering without a segmentation fault, then reports backend
-   `rc=12`. The neighboring `dd64` control executes successfully.
-2. **Minimal sedenion import executes but does not prove its semantic marker.**
-   `tests/known_failures/sedenion_import_native_v2_probe.sio` reaches
-   `Compilation successful!`; the generated executable exits `1`, without a
-   segmentation fault and without `SEDENION_IMPORT_NATIVE_V2 PASS`.
+| Surface | Status | Evidence |
+|---|---|---|
+| `dd64` import smoke | green | `tests/run-pass/dd64_import_native_v2_smoke.sio` |
+| **sedenion** import smoke | **green** (closed 2026-08-04) | `tests/run-pass/sedenion_import_native_v2_smoke.sio`; gate `scripts/ci/madaros_sedenion_native_v2_gate.sh` |
+| **`qd128_core` import smoke** | **green** (closed 2026-08-04) | `math::qd128_core` constructors only; gate `scripts/ci/madaros_qd128_core_native_v2_gate.sh` |
+| **full `math::qd128` / `qd_mul`** | **green** (closed 2026-08-04) | `qd_nine_*` take `[f64;9]`; gates `madaros_qd128_mul_native_v2_gate.sh`, `qd128_import_native_v2_smoke.sio` |
+| **compact zero-provenance** (sedenion + local f64 kinds) | **green** (closed 2026-08-05) | `tests/run-pass/zero_provenance_native_v2_smoke.sio` (~41 fn); gate `scripts/ci/madaros_zero_provenance_native_v2_gate.sh`. Does **not** import `eisa::core_v2`. |
+| **combined zero-provenance (sedenion+eisa::core_v2)** | **fail-closed / waived-E3** (2026-08-05) | ~5 modules / ~111 fn → thin-link `rc=12`. Probe + gate: `tests/known_failures/zero_provenance_native_v2_probe.sio`, `madaros_zero_provenance_failclosed_gate.sh`. BLK: `docs/handoff/BLK-20260805-p0b-zero-provenance.md` |
+| **≥2 f64 comparisons in `bool` struct fields** | **fail-closed** (classified 2026-08-05) | Minimal CU `Pair { a: 2.0 > 0.0, b: 3.0 > 0.0 }` → thin-link `rc=12` (~3 fn). Precomp locals green. **Not** an IR fn-count ceiling (pad-to-49 still emits). Probe/gate: `thinlink_bool_cmp_field_probe.sio`, `madaros_thinlink_bool_cmp_field_gate.sh`. BLK: `docs/handoff/BLK-20260805-thinlink-ir-threshold.md` |
+| `zero_event` stdlib probe (Madaros native) | green | `tests/known_failures/zero_event_stdlib_native_v2_probe.sio` prints `ZERO_EVENT_STDLIB PASS` under stock Madaros |
 
 Constructor privacy was closed by running the same visibility preflight used
-by `check` before the canonical native `compile` path. The receipt and erased
-constructors are compile-fail tests with E176. Direct reads of private fields
-remain a separate language-wide visibility limitation and are not treated as
-constructor authority.
-
-The classified compiler handoff, root-cause boundary, and required acceptance
-matrix are recorded in
-`docs/handoff/zero_event_native_compile_privacy_2026-07-11.md`. In particular,
-globally enabling the merged checker's visibility bit is not an accepted fix:
-the native path must preserve legitimate import edges and cover the generic
-specialization branch as well as the ordinary fallback.
+by `check` before the canonical native `compile` path. Direct reads of private
+fields remain a separate language-wide visibility limitation.
 
 Reproduce the classified matrix with:
 
 ```bash
+bash scripts/ci/madaros_sedenion_native_v2_gate.sh
+bash scripts/ci/madaros_qd128_core_native_v2_gate.sh
+bash scripts/ci/madaros_qd128_mul_native_v2_gate.sh
+bash scripts/ci/madaros_zero_provenance_native_v2_gate.sh
+bash scripts/ci/madaros_zero_provenance_failclosed_gate.sh
+bash scripts/ci/madaros_thinlink_bool_cmp_field_gate.sh
 bash scripts/ci/zero_event_native_v2_matrix.sh
 bash scripts/ci/zero_event_gate.sh
 ```
 
-Do not promote the known-failure probes to `run-pass` until the default engine
-executes the same markers without `SOUNIO_SOUC_ENGINE=lean_single`. Do not alter
-the semantic oracles while repairing compiler lowering, aggregate return, or
-privacy enforcement.
+Do not claim `eisa::core_v2`+sedenion combined import Madaros-green; the compact
+smoke is a distinct, smaller CU. Do not cite a raw `final_fn_count` ceiling for
+the fat `ZeroWitness` fail — prefer the bool-cmp-in-field classification.
 
 ## Bootstrap seed: imported-module typecheck errors are non-fatal (#1494)
 

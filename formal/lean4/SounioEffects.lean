@@ -635,4 +635,61 @@ theorem mask_union_single_superset (r : EffectRow) (e : Effect) :
   · subst h; simp
   · simp [h, hf]
 
+-- ================================================================
+-- §19. Handler × payload interaction (identity handlers)
+-- ================================================================
+
+/-! ### Effectful computations
+
+    Models a value paired with an effect row. Identity handlers (Plotkin–Pretnar
+    structural clears) change only the row; they do not rewrite the payload.
+    This is the missing interaction layer flagged against the NonUnitary×NWA
+    leaf: commutation of masks alone does not state payload preservation or
+    sequential discharge of membership. -/
+
+/-- A computation carrying a payload and an effect row. -/
+structure Effectful (α : Type) where
+  value : α
+  effects : EffectRow
+
+/-- Handle effect `e`: clear it from the row; keep the value. -/
+def handle (c : Effectful α) (e : Effect) : Effectful α :=
+  { c with effects := mask c.effects e }
+
+/-- Identity handlers preserve the computational payload. -/
+theorem handle_preserves_value (c : Effectful α) (e : Effect) :
+    (handle c e).value = c.value := by
+  rfl
+
+/-- Handling twice for distinct effects is order-independent on the whole
+    `Effectful` (value + row), not merely on the row. -/
+theorem handle_comm (c : Effectful α) (e₁ e₂ : Effect) :
+    handle (handle c e₁) e₂ = handle (handle c e₂) e₁ := by
+  cases c with
+  | mk v r =>
+    simp only [handle]
+    rw [mask_comm]
+
+/-- Sequential discharge: after handling `e`, `e` is absent from the row. -/
+theorem handle_clears_target (c : Effectful α) (e : Effect) :
+    ¬(e ∈ᵣ (handle c e).effects) := by
+  simp [handle, memberOf, mask]
+
+/-- Handling `e` preserves membership of every other effect. -/
+theorem handle_preserves_other_member (c : Effectful α) (e f : Effect)
+    (hne : f ≠ e) :
+    (f ∈ᵣ (handle c e).effects) ↔ (f ∈ᵣ c.effects) := by
+  simp [handle, memberOf, mask, hne]
+
+/-- Two-handler discharge clears both targets and leaves the payload intact. -/
+theorem discharge_pair_interaction (c : Effectful α) (e₁ e₂ : Effect) :
+    (handle (handle c e₁) e₂).value = c.value ∧
+    ¬(e₁ ∈ᵣ (handle (handle c e₁) e₂).effects) ∧
+    ¬(e₂ ∈ᵣ (handle (handle c e₁) e₂).effects) := by
+  refine ⟨by rfl, ?_, ?_⟩
+  · -- e₁ cleared even after a subsequent distinct/same mask
+    simp only [handle, memberOf, mask]
+    by_cases h : e₁ = e₂ <;> simp [h]
+  · exact handle_clears_target (handle c e₁) e₂
+
 end Sounio.Effects

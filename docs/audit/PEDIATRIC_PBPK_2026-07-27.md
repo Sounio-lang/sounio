@@ -10,10 +10,11 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.pediatri
 # Paediatric PBPK — functional maturation + AUC-guided vanco + gentamicin
 
 **Date:** 2026-07-27  
-**Status:** live (v5: AUC individualisation under IIV + multi-dose accumulation)  
+**Status:** live (v6: noisy TDM ladder + neonate accumulation)  
 **Module:** `stdlib/clinical/pediatric_pbpk.sio`  
-**Demo:** `examples/pediatric_pbpk_demo.sio`  
-**Gate:** `scripts/ci/pediatric_pbpk_gate.sh` → `PEDIATRIC_PBPK_GATE_OK` (16/16)
+**Receipt:** `tests/run-pass/pediatric_pbpk_receipt.sio` (18 self-tests)  
+**Demo:** `examples/pediatric_pbpk_demo.sio` (16 base tests; examples/** may lag under parallel claims)  
+**Gate:** `scripts/ci/pediatric_pbpk_gate.sh` → `PEDIATRIC_PBPK_GATE_OK`
 
 ## Scope
 
@@ -36,6 +37,8 @@ Educational / compiler-stdlib **paediatric PBPK spine** with:
 14. **IIV grid cohort** (deterministic z∈[-2,2], not RNG — lean-safe)
 15. **Fixed vs AUC-guided** under IIV — %AUC in 400–600 (perfect-CL upper bound)
 16. **Multi-dose accumulation** — Cmin_n/Cmin_ss → 1; doses to 90% SS
+17. **Noisy TDM** — fixed < noisy-CL guided < perfect-CL under IIV+assay error
+18. **Neonate/preterm accumulation** — multi-dose build-up with r∈(0,1)
 
 **Not medical guidance.**
 

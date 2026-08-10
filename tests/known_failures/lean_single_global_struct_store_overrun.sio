@@ -1,0 +1,91 @@
+//@ ignore
+// REPRODUCTION for the SECOND lean_single global-aggregate defect. The sibling
+// file lean_single_global_aggregate_store.sio records the ARRAY case (storing a
+// struct into a global array is a silent no-op). This is the PLAIN case, and it
+// fails the other way: the store lands, but it OVERRUNS INTO THE GLOBALS
+// DECLARED AFTER IT.
+//
+//   ./bin/souc-lean-single-x86_64 tests/known_failures/lean_single_global_struct_store_overrun.sio /tmp/x.elf \
+//     && chmod +x /tmp/x.elf && /tmp/x.elf
+//
+// Expected: total=3 stage=2 first_len=40
+// Measured (lean_single, 2026-08-06, this exact file):
+//
+//   total=4702111234474983747  stage=2  first_len=40
+//
+// 4702111234474983747 is 0x4141414141414143 -- eight 'A' bytes (65) with the
+// low byte carrying the 3 that the counter had legitimately reached. `P_FIRST`'s
+// OWN CONTENTS are sitting in the i64 global declared after it. `P_STAGE`, one
+// slot further out, survives; the overrun here is 8 bytes, not 16.
+//
+// The byte VALUE is what makes this expensive. With a 4-character name in the
+// same shape the overrun writes that name's zero PADDING instead of its payload,
+// and the global reads back as 0 -- indistinguishable from a counter that was
+// simply never incremented.
+//
+// The second row is why this cost three commits to find. A global that reads 0
+// looks exactly like a counter that was never incremented, so instrumentation
+// built on it reports "nothing ever happened" with total confidence. Anything
+// concluded from such a counter is void, not merely unproven.
+//
+// This is not hypothetical: self-hosted/ir/lower.sio carried exactly this shape
+// (`var IR_LOWER_ERROR_FIRST_FN: Name` immediately followed by
+// `var IR_LOWER_ERROR_TOTAL: i64`) and reported total=0 for every compile. Both
+// are parallel flat arrays now. Every other global name-holder in this tree --
+// IR_NAME_POOL_BUF, GLOBAL_NAME_BUF, EXTERN_STUB_NAME_BUF -- is already flat,
+// which is very unlikely to be a coincidence.
+//
+// RULE: do not give a global a struct type in code compiled by the seed. Use
+// parallel flat arrays (`[i8; N]` + a length) instead.
+
+struct Name {
+    buf: [i8; 128],
+    len: i64,
+}
+
+var P_FIRST: Name
+var P_TOTAL: i64 = 0
+var P_STAGE: i64 = 0
+
+fn note(n: Name) with Mut {
+    P_TOTAL = P_TOTAL + 1
+    if P_TOTAL == 1 {
+        P_FIRST = n
+    }
+}
+
+fn mk(c: i64, n: i64) -> Name with Mut {
+    var r: Name = Name { buf: [0; 128], len: 0 }
+    var i: i64 = 0
+    while i < n {
+        r.buf[i as usize] = c as i8
+        i = i + 1
+    }
+    r.len = n
+    r
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    // 'A' = 65, 40 characters -- long enough that the payload itself lands on
+    // the neighbours rather than the zero padding.
+    var a: Name = mk(65, 40)
+    note(a)
+    note(a)
+    note(a)
+    P_STAGE = 2
+
+    print("total=")
+    print_int(P_TOTAL)
+    print(" stage=")
+    print_int(P_STAGE)
+    print(" first_len=")
+    print_int(P_FIRST.len)
+    print("\n")
+
+    if P_TOTAL == 3 && P_STAGE == 2 && P_FIRST.len == 40 {
+        print("OK\n")
+        return 0
+    }
+    print("BROKEN: a 136-byte struct store into a plain global overran into the globals after it\n")
+    1
+}

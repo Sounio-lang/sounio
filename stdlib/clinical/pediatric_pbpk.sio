@@ -1077,6 +1077,96 @@ pub fn ped_vanco_indiv_child_default(s: &PedSubject) -> PedIndivCompare with Mut
 }
 
 // ============================================================================
+// NOISY TDM — imperfect CL observation (realistic individualisation bound)
+// ============================================================================
+// True CL_i = CL_typ · exp(ω_CL · z_i)
+// Assay / model error: CL_hat_i = CL_i · exp(ω_err · z'_i)  (phase-shifted grid)
+// Dose from hat: D = AUC* · CL_hat · τ / 24
+// True AUC = 24 · (D/τ) / CL_i = AUC* · (CL_hat / CL_i)
+// So residual log-error maps 1:1 into AUC error.
+// Expect: fixed% < noisy% < perfect% (=100 when ω_err=0).
+
+pub struct PedNoisyTdmCompare {
+    n: i64,
+    omega_cl: f64,
+    omega_err: f64,
+    auc_target: f64,
+    pct_fixed: f64,
+    pct_noisy: f64,
+    pct_perfect: f64,
+    auc_noisy_mean: f64,
+    auc_noisy_p05: f64,
+    auc_noisy_p95: f64,
+}
+
+/// Fixed mg/kg vs noisy-CL TDM vs perfect-CL guidance under IIV.
+pub fn ped_vanco_noisy_tdm_compare(
+    s: &PedSubject,
+    mg_per_kg_fixed: f64,
+    interval_h: f64,
+    auc_target: f64,
+    n_subj: i64,
+    omega_cl: f64,
+    omega_err: f64,
+) -> PedNoisyTdmCompare with Mut, Div, Panic {
+    var n = n_subj
+    if n < 2 { n = 2 }
+    if n > 32 { n = 32 }
+    let phy = ped_physio_model(s)
+    let cl_typ = ped_vanco_cl_l_h(phy.gfr_ml_min)
+    let dose_fixed = mg_per_kg_fixed * s.weight_kg
+
+    var a_noisy: [f64; 32] = [0.0; 32]
+    var i: i64 = 0
+    var n_fix: i64 = 0
+    var n_noisy: i64 = 0
+    var n_perf: i64 = 0
+    var sum_n: f64 = 0.0
+
+    while i < n {
+        let z = ped_grid_z(i, n)
+        // phase-shift error grid so not collinear with CL
+        let j = (i + n / 3) % n
+        let z_e = ped_grid_z(j, n)
+        let cl_i = cl_typ * ped_exp(omega_cl * z)
+        let cl_hat = cl_i * ped_exp(omega_err * z_e)
+
+        let auc_f = if cl_i > 0.0 { 24.0 * (dose_fixed / interval_h) / cl_i } else { 0.0 }
+        let dose_n = auc_target * cl_hat * interval_h / 24.0
+        let auc_n = if cl_i > 0.0 { 24.0 * (dose_n / interval_h) / cl_i } else { 0.0 }
+        let dose_p = auc_target * cl_i * interval_h / 24.0
+        let auc_p = if cl_i > 0.0 { 24.0 * (dose_p / interval_h) / cl_i } else { 0.0 }
+
+        a_noisy[i as usize] = auc_n
+        sum_n = sum_n + auc_n
+        if auc_f >= 400.0 && auc_f <= 600.0 { n_fix = n_fix + 1 }
+        if auc_n >= 400.0 && auc_n <= 600.0 { n_noisy = n_noisy + 1 }
+        if auc_p >= 400.0 && auc_p <= 600.0 { n_perf = n_perf + 1 }
+        i = i + 1
+    }
+
+    let sn = ped_sort32(a_noisy, n)
+    let nf = n as f64
+    PedNoisyTdmCompare {
+        n: n,
+        omega_cl: omega_cl,
+        omega_err: omega_err,
+        auc_target: auc_target,
+        pct_fixed: 100.0 * (n_fix as f64) / nf,
+        pct_noisy: 100.0 * (n_noisy as f64) / nf,
+        pct_perfect: 100.0 * (n_perf as f64) / nf,
+        auc_noisy_mean: sum_n / nf,
+        auc_noisy_p05: ped_pct32(sn, n, 0.05),
+        auc_noisy_p95: ped_pct32(sn, n, 0.95),
+    }
+}
+
+/// Default: ω_CL=0.25 IIV, ω_err=0.15 residual on CL hat, N=32.
+pub fn ped_vanco_noisy_tdm_child_default(s: &PedSubject) -> PedNoisyTdmCompare with Mut, Div, Panic {
+    ped_vanco_noisy_tdm_compare(s, 15.0, 12.0, ped_vanco_auc_target_mid(), 32, 0.25, 0.15)
+}
+
+// ============================================================================
 // MULTI-DOSE ACCUMULATION TO STEADY STATE (1-cmt bolus)
 // ============================================================================
 // After n doses: Cmax_n = (D/V) · (1 − r^n) / (1 − r),  r = e^{-ke·τ}
@@ -1392,4 +1482,52 @@ pub fn ped_selftest() -> i64 with IO, Mut, Div, Panic {
     }
 
     n
+}
+
+/// Extra deep tests (v6+): noisy TDM ladder + neonate accumulation.
+/// Kept separate so examples/pediatric_pbpk_demo (expects 16) stays green.
+pub fn ped_selftest_v6() -> i64 with IO, Mut, Div, Panic {
+    var n: i64 = 0
+    let child = ped_child_5yr()
+    let neo = ped_neonate_term_2wk()
+
+    // T17: fixed < noisy TDM < perfect under IIV+assay error
+    let tdm = ped_vanco_noisy_tdm_child_default(&child)
+    if tdm.pct_fixed < tdm.pct_noisy
+        && tdm.pct_noisy < tdm.pct_perfect
+        && tdm.pct_perfect > 95.0
+        && tdm.pct_noisy > tdm.pct_fixed + 5.0 {
+        print("PASS ped_noisy_tdm_ladder\n")
+        n = n + 1
+    } else {
+        print("FAIL ped_noisy_tdm_ladder fixed=")
+        print_f64(tdm.pct_fixed)
+        print(" noisy=")
+        print_f64(tdm.pct_noisy)
+        print(" perfect=")
+        print_f64(tdm.pct_perfect)
+        print("\n")
+    }
+
+    // T18: preterm + term neonate accumulation — frac rises, r∈(0,1), last>0.9
+    let acc_n = ped_vanco_accumulation(&neo, 15.0 * neo.weight_kg, 12.0, 6)
+    let pre = ped_preterm_ga28_2wk()
+    let acc_p = ped_vanco_accumulation(&pre, 15.0 * pre.weight_kg, 12.0, 6)
+    if acc_p.frac_cmin_dose1 < acc_p.frac_cmin_last
+        && acc_n.frac_cmin_dose1 < acc_n.frac_cmin_last
+        && acc_p.frac_cmin_last > 0.90
+        && acc_n.frac_cmin_last > 0.90
+        && acc_p.r > 0.0 && acc_p.r < 1.0
+        && acc_n.r > 0.0 && acc_n.r < 1.0 {
+        print("PASS ped_neonate_accumulation\n")
+        n = n + 1
+    } else {
+        print("FAIL ped_neonate_accumulation\n")
+    }
+    n
+}
+
+/// Combined self-test count (v1–v6).
+pub fn ped_selftest_all() -> i64 with IO, Mut, Div, Panic {
+    ped_selftest() + ped_selftest_v6()
 }

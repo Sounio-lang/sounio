@@ -1,0 +1,1197 @@
+// demos/hydrogen/valley_chain_epistemic.sio
+//
+// VALLEY-CHAIN epistemic digital twin — ONE receipt composing three house
+// models into a single wellhead-to-dispenser p-box chain:
+//
+//   [A] subsurface geochemical H2 loss p-box (UHS brine-calcite network)
+//         --> availability factor f_s on delivered kg
+//   [B] 7-stage MH compressor reliability under alloy batch uncertainty
+//         --> availability factor f_c on delivered kg
+//   [C] TRIERES wellhead-to-dispensed cost chain vs the 6 EUR/kg gate
+//
+//   CF_eff = f_s * f_c * CF        (both couplings ILLUSTRATIVE — see below)
+//
+// The question: what does closing the loop through the subsurface and the
+// compressor do to the valley's headline claim, P(dispensed < 6 EUR/kg)?
+// Answer printed three ways, as in the component demos: the CONVENTIONAL
+// independence-uniform number, the DISTRIBUTION-FREE corner p-box (no
+// independence assumption anywhere), and a GUM first-order cross-check.
+//
+// COMPOSITION BY CONSTRUCTION. The three component demos are NOT modified;
+// their models are re-derived here with the same formulas, constants, seeds,
+// and integer-decision idioms, and Sections B and C must reproduce the
+// component receipts digit-for-digit:
+//   - Section C byte-pins demos/hydrogen/trieres_chain.sio:
+//     conventional P(<6) = 20.765000 %, corner p-box [0, 100] %,
+//     GUM sigma_D = 0.520451, delivered interval [4.463184, 9.023636].
+//   - Section B byte-pins demos/hydrogen/mh7_reliability.sio:
+//     P(P7>=350) = 65.255000 % independent / 59.030000 % comonotonic,
+//     corner p-box [1.310000, 99.890000] %, log-margin 0.041964.
+//   - Section A does NOT re-run the chemistry: the 30-yr loss p-box
+//     [0.458073, 2.630814] % (central 1.710120 %) is a PINNED INPUT,
+//     re-derived by demos/hydrogen/uhs_brine_calcite.sio (merged #1585;
+//     main 3a4a59921, content-identical to demos/uhs-brine-calcite @
+//     a64fbba91; Ghaedi et al. 2025 network, public PHREEQC/PWP rates).
+//     Keeping the demo chemistry-free is deliberate: this file then runs
+//     on BOTH compiler engines, lean_single and Madaros (Madaros is
+//     blocked on chemistry imports — issue #1584).
+//
+// ILLUSTRATIVE COUPLINGS (OURS, labeled — no citable source; swap slots):
+//   - residence time tau = 1.0 yr: the valley's storage is a seasonal
+//     buffer, so only tau/30 of the 30-yr loss p-box applies per cycle:
+//     f_s = 1 - (L30/100)*(tau/30). SWAP SLOT: set tau to the valley's
+//     actual storage residence time; every downstream number re-derives.
+//   - compressor availability f_c = R, the probability that the 350-bar
+//     delivery target holds under batch uncertainty, applied as an
+//     availability derate on delivered kg (per-kg costs of compression,
+//     storage, dispensing are unchanged — the derate lands on the
+//     fixed-cost term of production, which is 1/CF-shaped). SWAP SLOT:
+//     replace f_c with a maintenance-model availability when one exists.
+//   Both factors enter as CF_eff = f_s * f_c * CF. D is decreasing in
+//   CF_eff; CF_eff is increasing in f_s (decreasing in L30), f_c
+//   (increasing in R), and CF — per-stage monotone chains, so the composed
+//   corner p-box remains EXACT. The economic chain's monotonicity is
+//   machine-checked in formal/lean4/SounioHydrogenPbox.lean
+//   (monotone_event_equiv); the compressor's P7 is strictly increasing in
+//   every batch deviation (mh7_reliability.sio header).
+//
+// Sources for the economic inputs: see trieres_chain.sio (SOURCED vs
+// ILLUSTRATIVE split is reproduced in Section C). Compressor oracles:
+// Stamatakis et al., Renewable Energy 147 (2020) 164-178 — representative
+// per-stage ladder, his Table 3 paywalled (mh7_reliability.sio header).
+//
+// Run:  bin/souc run demos/hydrogen/valley_chain_epistemic.sio
+// Reference engine: lean_single (SOUNIO_SOUC_ENGINE=lean_single). NOTE: on
+// current main (47e5847b0) Madaros SIGSEGVs inside the Saltelli/Sobol
+// machinery of BOTH component demos after printing their GUM sections —
+// pre-existing engine divergence (#1570 family). This file hits the SAME
+// wall at Section I: everything before it (Sections A-H) is byte-identical
+// across the two engines (verified by prefix diff), then Madaros dies
+// inside print_sobol10. The lean_single receipt is authoritative and ends
+// with VALLEY_CHAIN_OK.
+
+// NOTE: `use epistemic::pbox::*` and `use epistemic::sobol_indices::*`
+// together trip a spurious E035 (both modules export a `run_tests` symbol;
+// dual-wildcard collision). Qualified calls without `use` silently no-op on
+// this compiler, so the workaround is selective import of the two pbox
+// functions this file uses.
+use epistemic::sobol_indices::*
+use epistemic::pbox::new
+use epistemic::pbox::width
+
+// ─── pure-Sounio math (no extern) ───
+
+fn mh_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn mh_sqrt(x: f64) -> f64 with Mut {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 30 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn mh_exp(x: f64) -> f64 with Mut, Div {
+    if x > 700.0 { return 1.0e200 }
+    if x < 0.0 - 700.0 { return 0.0 }
+    var kf = x / 0.6931471805599453
+    var k = kf as i64
+    if kf < 0.0 {
+        if kf != (k as f64) { k = k - 1 }
+    }
+    let r = x - (k as f64) * 0.6931471805599453
+    var s = 1.0
+    var term = 1.0
+    var n: i64 = 1
+    while n < 25 { term = term * r / (n as f64); s = s + term; n = n + 1 }
+    var result = s
+    if k >= 0 {
+        var i: i64 = 0
+        while i < k { result = result * 2.0; i = i + 1 }
+    } else {
+        var i: i64 = 0
+        while i < (0 - k) { result = result / 2.0; i = i + 1 }
+    }
+    result
+}
+
+fn mh_ln(x: f64) -> f64 with Mut, Div {
+    var m = x
+    var k: i64 = 0
+    while m >= 2.0 { m = m / 2.0; k = k + 1 }
+    while m < 1.0 { m = m * 2.0; k = k - 1 }
+    let y = (m - 1.0) / (m + 1.0)
+    let y2 = y * y
+    var term = y
+    var sum = 0.0
+    var i: i64 = 0
+    while i < 12 {
+        sum = sum + term / (2.0 * (i as f64) + 1.0)
+        term = term * y2
+        i = i + 1
+    }
+    2.0 * sum + (k as f64) * 0.6931471805599453
+}
+
+// normal CDF via Abramowitz-Stegun 7.1.26 (|err| < 1.5e-7 on erf)
+fn phi(x: f64) -> f64 with Mut, Div {
+    var v = x / 1.4142135623730951
+    var neg = false
+    if v < 0.0 { neg = true; v = 0.0 - v }
+    let t = 1.0 / (1.0 + 0.3275911 * v)
+    let t2 = t * t
+    let poly = 0.254829592 * t - 0.284496736 * t2 + 1.421413741 * t2 * t
+             - 1.453152027 * t2 * t2 + 1.061405429 * t2 * t2 * t
+    var e = 1.0 - poly * mh_exp(0.0 - v * v)
+    if neg { e = 0.0 - e }
+    0.5 * (1.0 + e)
+}
+
+// ─── PRNG (xorshift, deterministic seed → reproducible receipt) ───
+
+var RNG_A: i64 = 0
+var RNG_B: i64 = 0
+
+fn rng_seed(a: i64, b: i64) with Mut {
+    RNG_A = a
+    RNG_B = b
+}
+
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A
+    let y = RNG_B
+    RNG_A = y
+    x = x ^ (x << 23)
+    x = x ^ (x >> 17)
+    x = x ^ (y ^ (y >> 26))
+    RNG_B = x
+    let r = x + y
+    if r < 0 { 0 - r } else { r }
+}
+
+fn rand_u() -> f64 with Mut, Div {
+    (rng_next() % 10000) as f64 / 10000.0
+}
+
+fn rand_normal() -> f64 with Mut, Div {
+    var sum = 0.0
+    var j = 0
+    while j < 12 { sum = sum + rand_u(); j = j + 1 }
+    sum - 6.0
+}
+
+// ─── cross-engine determinism helpers ───
+//
+// The two compiler backends (Madaros, lean_single) evaluate this file's
+// pure-Sounio float chains to within 1 ulp of each other, but their f64
+// PRINTERS are not interchangeable — one truncates where the other rounds,
+// and 6-decimal decimals are not binary-representable, so no binary float
+// can be trusted to print identically on both. Therefore every number below
+// is printed by print_fix6, which scales to an INTEGER with round-half-up
+// and emits decimal digits as string literals — bit-identical integer in,
+// byte-identical text out. Monte Carlo hit counts are pure-integer
+// decisions (micro-EUR for the cost gate, the ceiling rule for the
+// compressor target), so no borderline float comparison can flip a count.
+
+fn floor_i64(x: f64) -> i64 with Mut {
+    var n = x as i64
+    if (n as f64) > x { n = n - 1 }
+    return n
+}
+
+fn ceil_i64(x: f64) -> i64 with Mut {
+    var n = floor_i64(x)
+    if (n as f64) < x { n = n + 1 }
+    return n
+}
+
+fn pct(hits: i64, n: i64) -> f64 with Div {
+    100.0 * (hits as f64) / (n as f64)
+}
+
+fn pd(d: i64) with IO {
+    if d == 0 { print("0") }
+    if d == 1 { print("1") }
+    if d == 2 { print("2") }
+    if d == 3 { print("3") }
+    if d == 4 { print("4") }
+    if d == 5 { print("5") }
+    if d == 6 { print("6") }
+    if d == 7 { print("7") }
+    if d == 8 { print("8") }
+    if d == 9 { print("9") }
+}
+
+// fixed 6-decimal printer; |x| < 10^6, round-half-up
+fn print_fix6(x: f64) with IO, Mut {
+    var v = x
+    if v < 0.0 { print("-"); v = 0.0 - v }
+    let n = floor_i64(v * 1000000.0 + 0.5)
+    let ip = n / 1000000
+    let fp = n % 1000000
+    var div: i64 = 100000
+    while div > ip { div = div / 10 }
+    if div < 1 { div = 1 }
+    while div > 0 { pd((ip / div) % 10); div = div / 10 }
+    print(".")
+    var fdiv: i64 = 100000
+    while fdiv > 0 { pd((fp / fdiv) % 10); fdiv = fdiv / 10 }
+}
+
+// ─── [C] the TRIERES valley chain (verbatim re-derivation) ───
+
+fn crf(r: f64, n_yr: i64) -> f64 with Mut, Div {
+    let q = mh_exp((n_yr as f64) * mh_ln(1.0 + r))
+    r * q / (q - 1.0)
+}
+
+// production [EUR/kg]: electricity + annualized CAPEX/O&M over annual output.
+// A = annual EUR per kW; kg per kW per year = CF x 8760 / e_spec.
+fn prod_cost(p_elec: f64, capex_m: f64, e_spec: f64, cf: f64) -> f64 with Mut, Div {
+    let a = 1500.0 * capex_m * crf(0.07, 25) + 20.0
+    e_spec * p_elec + a * e_spec / (cf * 8760.0)
+}
+
+// compression [EUR/kg]: thermal energy x waste-heat price
+fn compr_cost(e_th: f64, p_heat: f64) -> f64 {
+    e_th * p_heat
+}
+
+// storage [EUR/kg]: 500 EUR/kg tank, CRF 7 %/25 y, ncyc cycles/yr
+fn storage_cost(ncyc: f64) -> f64 with Mut, Div {
+    500.0 * crf(0.07, 25) / ncyc
+}
+
+// wellhead -> dispensed cost [EUR/kg]. The couplings enter through the cf
+// argument as CF_eff = f_s * f_c * CF, computed OUTSIDE this function, so
+// the economic chain itself is byte-identical to trieres_chain.sio.
+fn delivered(p_elec: f64, capex_m: f64, e_spec: f64, cf: f64,
+             e_th: f64, p_heat: f64, ncyc: f64, disp: f64) -> f64 with Mut, Div {
+    prod_cost(p_elec, capex_m, e_spec, cf)
+        + compr_cost(e_th, p_heat) + storage_cost(ncyc) + disp
+}
+
+// analytic partials of D at the evaluation point (for GUM and exact
+// first-order shares of the linearized model). The cf argument is CF_eff
+// when the couplings are active.
+fn d_pelec(e_spec: f64) -> f64 { e_spec }
+fn d_capex(e_spec: f64, cf: f64) -> f64 with Mut, Div {
+    1500.0 * crf(0.07, 25) * e_spec / (cf * 8760.0)
+}
+fn d_espec(p_elec: f64, capex_m: f64, cf: f64) -> f64 with Mut, Div {
+    let a = 1500.0 * capex_m * crf(0.07, 25) + 20.0
+    p_elec + a / (cf * 8760.0)
+}
+fn d_cf(capex_m: f64, e_spec: f64, cf: f64) -> f64 with Mut, Div {
+    let a = 1500.0 * capex_m * crf(0.07, 25) + 20.0
+    0.0 - a * e_spec / (8760.0 * cf * cf)
+}
+fn d_eth(p_heat: f64) -> f64 { p_heat }
+fn d_pheat(e_th: f64) -> f64 { e_th }
+fn d_ncyc(ncyc: f64) -> f64 with Mut, Div {
+    0.0 - 500.0 * crf(0.07, 25) / (ncyc * ncyc)
+}
+fn d_disp() -> f64 { 1.0 }
+
+// ─── [A] subsurface coupling (pinned p-box -> availability factor) ───
+//
+// f_s = 1 - (L30/100)*(tau/30): L30 is the 30-yr loss in PERCENT, so
+// L30/100 is the 30-yr loss fraction and tau/30 the exposed share of it
+// per storage cycle. f_s is DECREASING in L30 (more loss, less delivered).
+
+fn fs_of(l30_pct: f64, tau: f64) -> f64 {
+    1.0 - l30_pct * tau / 3000.0
+}
+
+// ─── [B] MH compressor reliability (verbatim re-derivation) ───
+// Representative ladder internals are OURS (his Table 3 is paywalled);
+// (S80, gamma) solved from his two published ratios — see
+// mh7_reliability.sio for the full honesty block and the swap slot.
+
+var DH_NOM: [f64; 7] = [0.0; 7]   // kJ/mol H2, OUR representative ladder
+var W_DH: [f64; 7] = [0.0; 7]     // kJ/mol batch interval half-widths
+
+// thermal leverage a_i = (1/T_cold,i − 1/T_hot,i)/R  [per kJ/mol]:
+// d(ln r_i)/d(ΔH_i) — how stage i's batch deviation moves ln P7.
+fn stage_a(i: i64, t0: f64, step: f64, swing: f64) -> f64 with Div {
+    let tc = t0 + (i as f64) * step
+    let th = tc + swing
+    (1.0 / tc - 1.0 / th) / 8.314 * 1000.0
+}
+
+// ─── Monte Carlo on P(ln P7 >= ln 350) — integer decision ───
+// Identical to mh7_reliability.sio's mc_hits; see that file for the
+// derivation. mode: 0 independent batches, 1 comonotonic, 2 mid (δ = 0),
+// 3 corner δ = −w (lowest reliability), 4 corner δ = +w (highest).
+
+fn mc_hits(mode: i64, n: i64, t0: f64, step: f64, swing: f64,
+           margin: f64, sig_eta: f64, sum_aw: f64) -> i64 with Mut, Div {
+    var hits: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        var ad = 0.0
+        if mode == 0 {
+            var k: i64 = 0
+            while k < 7 {
+                // NOTE: keep the RNG call in its own statement — on this
+                // Madaros build, a Mut-effectful call combined with a
+                // global-array read in one expression double-consumes the
+                // stream (engine divergence; lean_single is correct).
+                let u = rand_u()
+                let d = W_DH[k] * (2.0 * u - 1.0)
+                ad = ad + stage_a(k, t0, step, swing) * d
+                k = k + 1
+            }
+        }
+        if mode == 1 {
+            let phi_u = 2.0 * rand_u() - 1.0
+            ad = phi_u * sum_aw
+        }
+        if mode == 3 { ad = 0.0 - sum_aw }
+        if mode == 4 { ad = sum_aw }
+        var sd: i64 = 0
+        var j: i64 = 0
+        while j < 84 { sd = sd + rng_next() % 10000; j = j + 1 }
+        let y = (42.0 - (margin + ad) / sig_eta) * 10000.0
+        if sd >= ceil_i64(y) { hits = hits + 1 }
+        i = i + 1
+    }
+    hits
+}
+
+// ─── epistemic intervals (globals so the MC/Sobol draws share them) ───
+// cols: 0 p_elec | 1 capex mult | 2 e_spec | 3 CF | 4 compr energy |
+//       5 heat price | 6 tank cycling | 7 dispensing
+// (cols 8 L30 and 9 R of the composed problem travel as function args —
+//  their intervals are computed in main, not pinned as literals.)
+
+var LO8: [f64; 8] = [0.0; 8]
+var HI8: [f64; 8] = [0.0; 8]
+
+fn mid(c: i64) -> f64 with Div {
+    0.5 * (LO8[c] + HI8[c])
+}
+
+// ─── Monte Carlo: P(D < 6 EUR/kg), integer micro-EUR decision ───
+
+// aleatory scatter only, epistemic inputs pinned (corners / nominal).
+// The aleatory 0.02 band is on the BASE CF (valley operational
+// variability); the availability derates multiply the scattered value.
+// With fs = fc = 1 this is byte-identical to trieres_chain.sio's
+// mc_hits_pinned (multiplication by 1.0 is exact).
+fn mc_hits_pinned_c(fs: f64, fc: f64, p_elec: f64, capex_m: f64,
+                    e_spec: f64, cf: f64, e_th: f64, p_heat: f64,
+                    ncyc: f64, disp: f64, n: i64) -> i64 with Mut, Div {
+    var hits: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        let e = p_elec + 0.002 * rand_normal()
+        let c = cf + 0.02 * rand_normal()
+        let t = e_th + 5.0 * rand_normal()
+        let d = delivered(e, capex_m, e_spec, fs * fc * c, t, p_heat, ncyc, disp)
+        let k6 = floor_i64(d * 1000000.0 + 0.5)
+        if k6 < 6000000 { hits = hits + 1 }
+        i = i + 1
+    }
+    hits
+}
+
+// the CONVENTIONAL baseline analysis, VERBATIM from trieres_chain.sio:
+// all eight epistemic inputs as independent uniforms on their intervals +
+// the same aleatory bands. Reproduces the no-subsurface baseline digit for
+// digit (mean 6.442682, std 0.521381, P 20.765000).
+fn mc_hits_indep(n: i64) -> i64 with IO, Mut, Div {
+    var hits: i64 = 0
+    var sum = 0.0
+    var sumsq = 0.0
+    var i: i64 = 0
+    while i < n {
+        var v0 = 0.0
+        var v1 = 0.0
+        var v2 = 0.0
+        var v3 = 0.0
+        var v4 = 0.0
+        var c: i64 = 0
+        while c < 8 {
+            // NOTE: keep the RNG call in its own statement — see the
+            // mc_hits note above.
+            let u = rand_u()
+            let x = LO8[c] + (HI8[c] - LO8[c]) * u
+            if c == 0 { v0 = x }
+            if c == 1 { v1 = x }
+            if c == 2 { v2 = x }
+            if c == 3 { v3 = x }
+            if c == 4 { v4 = x }
+            c = c + 1
+        }
+        let e = v0 + 0.002 * rand_normal()
+        let cc = v3 + 0.02 * rand_normal()
+        let t = v4 + 5.0 * rand_normal()
+        let u5 = rand_u()
+        let ph = LO8[5] + (HI8[5] - LO8[5]) * u5
+        let u6 = rand_u()
+        let ny = LO8[6] + (HI8[6] - LO8[6]) * u6
+        let u7 = rand_u()
+        let dp = LO8[7] + (HI8[7] - LO8[7]) * u7
+        let d = delivered(e, v1, v2, cc, t, ph, ny, dp)
+        sum = sum + d
+        sumsq = sumsq + d * d
+        let k6 = floor_i64(d * 1000000.0 + 0.5)
+        if k6 < 6000000 { hits = hits + 1 }
+        i = i + 1
+    }
+    let mean = sum / (n as f64)
+    print("  mean delivered [EUR/kg] : "); print_fix6(mean); println("")
+    print("  std  delivered [EUR/kg] : ")
+    print_fix6(mh_sqrt(sumsq / (n as f64) - mean * mean)); println("")
+    hits
+}
+
+// the COMPOSED conventional analysis: ten independent uniforms — the eight
+// economic inputs plus L30 on its pinned p-box interval and R on the
+// compressor corner p-box interval (the conventional sin, now coupled).
+// Draw order: the eight economic draws and three aleatory normals exactly
+// as in mc_hits_indep, then u8 (L30) and u9 (R). pr == 0 prints mean/std.
+fn mc_hits_indep10(l30_lo: f64, l30_hi: f64, r_lo: f64, r_hi: f64,
+                   tau: f64, n: i64, pr: i64) -> i64 with IO, Mut, Div {
+    var hits: i64 = 0
+    var sum = 0.0
+    var sumsq = 0.0
+    var i: i64 = 0
+    while i < n {
+        var v0 = 0.0
+        var v1 = 0.0
+        var v2 = 0.0
+        var v3 = 0.0
+        var v4 = 0.0
+        var c: i64 = 0
+        while c < 8 {
+            let u = rand_u()
+            let x = LO8[c] + (HI8[c] - LO8[c]) * u
+            if c == 0 { v0 = x }
+            if c == 1 { v1 = x }
+            if c == 2 { v2 = x }
+            if c == 3 { v3 = x }
+            if c == 4 { v4 = x }
+            c = c + 1
+        }
+        let e = v0 + 0.002 * rand_normal()
+        let cc = v3 + 0.02 * rand_normal()
+        let t = v4 + 5.0 * rand_normal()
+        let u5 = rand_u()
+        let ph = LO8[5] + (HI8[5] - LO8[5]) * u5
+        let u6 = rand_u()
+        let ny = LO8[6] + (HI8[6] - LO8[6]) * u6
+        let u7 = rand_u()
+        let dp = LO8[7] + (HI8[7] - LO8[7]) * u7
+        let u8 = rand_u()
+        let l30 = l30_lo + (l30_hi - l30_lo) * u8
+        let u9 = rand_u()
+        let rr = r_lo + (r_hi - r_lo) * u9
+        let d = delivered(e, v1, v2, fs_of(l30, tau) * rr * cc, t, ph, ny, dp)
+        sum = sum + d
+        sumsq = sumsq + d * d
+        let k6 = floor_i64(d * 1000000.0 + 0.5)
+        if k6 < 6000000 { hits = hits + 1 }
+        i = i + 1
+    }
+    if pr == 0 {
+        let mean = sum / (n as f64)
+        print("  mean delivered [EUR/kg] : "); print_fix6(mean); println("")
+        print("  std  delivered [EUR/kg] : ")
+        print_fix6(mh_sqrt(sumsq / (n as f64) - mean * mean)); println("")
+    }
+    hits
+}
+
+// ─── Sobol machinery (Saltelli matrices, precomputed outputs) ───
+// 10 inputs, uniform on their intervals (the conventional measure): cols
+// 0..7 economic, col 8 L30 [%], col 9 R. Aleatory excluded, as in
+// trieres_chain.sio. The model is NOT linear (1/CF_eff, 1/ncyc, products,
+// and now the f_s * R * CF product), so GUM-linear indices are the exact
+// shares of the LINEARIZED model and centered Jansen is the sampling
+// cross-check — both labeled, both a screening map under the measure the
+// p-box refuses.
+
+var SAL_A: [f64; 160000] = [0.0; 160000]
+var SAL_B: [f64; 160000] = [0.0; 160000]
+var SFA: [f64; 16384] = [0.0; 16384]
+var SFB: [f64; 16384] = [0.0; 16384]
+var SFAB: [f64; 16384] = [0.0; 16384]
+var SIG10: [f64; 16384] = [0.0; 16384]
+var OUT10: [f64; 16384] = [0.0; 16384]
+
+fn draw_input10(c: i64, l30_lo: f64, l30_hi: f64,
+                r_lo: f64, r_hi: f64) -> f64 with Mut, Div {
+    // RNG call hoisted into its own statement — see the mc_hits note.
+    let u = rand_u()
+    if c == 8 { return l30_lo + (l30_hi - l30_lo) * u }
+    if c == 9 { return r_lo + (r_hi - r_lo) * u }
+    LO8[c] + (HI8[c] - LO8[c]) * u
+}
+
+fn eval_row10(c_override: i64, j: i64, tau: f64) -> f64 with Mut, Div {
+    let v0 = SAL_A[0 * 16000 + j]
+    let v1 = SAL_A[1 * 16000 + j]
+    let v2 = SAL_A[2 * 16000 + j]
+    let v3 = SAL_A[3 * 16000 + j]
+    let v4 = SAL_A[4 * 16000 + j]
+    let v5 = SAL_A[5 * 16000 + j]
+    let v6 = SAL_A[6 * 16000 + j]
+    let v7 = SAL_A[7 * 16000 + j]
+    let v8 = SAL_A[8 * 16000 + j]
+    let v9 = SAL_A[9 * 16000 + j]
+    var r0 = v0
+    var r1 = v1
+    var r2 = v2
+    var r3 = v3
+    var r4 = v4
+    var r5 = v5
+    var r6 = v6
+    var r7 = v7
+    var r8 = v8
+    var r9 = v9
+    if c_override == 0 { r0 = SAL_B[0 * 16000 + j] }
+    if c_override == 1 { r1 = SAL_B[1 * 16000 + j] }
+    if c_override == 2 { r2 = SAL_B[2 * 16000 + j] }
+    if c_override == 3 { r3 = SAL_B[3 * 16000 + j] }
+    if c_override == 4 { r4 = SAL_B[4 * 16000 + j] }
+    if c_override == 5 { r5 = SAL_B[5 * 16000 + j] }
+    if c_override == 6 { r6 = SAL_B[6 * 16000 + j] }
+    if c_override == 7 { r7 = SAL_B[7 * 16000 + j] }
+    if c_override == 8 { r8 = SAL_B[8 * 16000 + j] }
+    if c_override == 9 { r9 = SAL_B[9 * 16000 + j] }
+    delivered(r0, r1, r2, fs_of(r8, tau) * r9 * r3, r4, r5, r6, r7)
+}
+
+fn eval_row_b10(j: i64, tau: f64) -> f64 with Mut, Div {
+    let r0 = SAL_B[0 * 16000 + j]
+    let r1 = SAL_B[1 * 16000 + j]
+    let r2 = SAL_B[2 * 16000 + j]
+    let r3 = SAL_B[3 * 16000 + j]
+    let r4 = SAL_B[4 * 16000 + j]
+    let r5 = SAL_B[5 * 16000 + j]
+    let r6 = SAL_B[6 * 16000 + j]
+    let r7 = SAL_B[7 * 16000 + j]
+    let r8 = SAL_B[8 * 16000 + j]
+    let r9 = SAL_B[9 * 16000 + j]
+    delivered(r0, r1, r2, fs_of(r8, tau) * r9 * r3, r4, r5, r6, r7)
+}
+
+// ─── Sobol section (helper — see the NOTE at the call site in main) ───
+
+fn print_sobol10(l30_lo: f64, l30_hi: f64, r_lo: f64, r_hi: f64,
+                 tau: f64) with IO, Mut, Div {
+    log_linear_indices(SIG10, &!OUT10, 10)
+    let ns: i64 = 16000
+    rng_seed(314159265, 271828182)
+    var c: i64 = 0
+    var j: i64 = 0
+    while c < 10 {
+        j = 0
+        while j < ns {
+            SAL_A[c * 16000 + j] = draw_input10(c, l30_lo, l30_hi, r_lo, r_hi)
+            j = j + 1
+        }
+        c = c + 1
+    }
+    c = 0
+    while c < 10 {
+        j = 0
+        while j < ns {
+            SAL_B[c * 16000 + j] = draw_input10(c, l30_lo, l30_hi, r_lo, r_hi)
+            j = j + 1
+        }
+        c = c + 1
+    }
+    j = 0
+    while j < ns {
+        SFA[j] = eval_row10(0 - 1, j, tau)
+        SFB[j] = eval_row_b10(j, tau)
+        j = j + 1
+    }
+    // Centered Viano/Saltelli first-order estimator: see trieres_chain.sio
+    // for why centering fB by its sample mean is asymptotically unbiased
+    // and cuts the estimator noise ~10x.
+    var mb = 0.0
+    j = 0
+    while j < ns { mb = mb + SFB[j]; j = j + 1 }
+    mb = mb / (ns as f64)
+    j = 0
+    while j < ns { SFB[j] = SFB[j] - mb; j = j + 1 }
+    let var_tot = variance(SFA, ns)
+
+    print("Sobol first-order shares of Var(D), COMPOSED model [%] —")
+    println("")
+    print("  CONVENTIONAL measure (independence-uniform, aleatory")
+    println("")
+    print("  excluded): GUM-linear exact (linearized model) | Jansen on")
+    println("")
+    print("  the true model (centered estimator, Saltelli n = 16000):")
+    println("")
+    var jansen_sum = 0.0
+    c = 0
+    while c < 10 {
+        j = 0
+        while j < ns {
+            SFAB[j] = eval_row10(c, j, tau)
+            j = j + 1
+        }
+        let sj = first_order_jansen(SFA, SFB, SFAB, ns, var_tot)
+        jansen_sum = jansen_sum + sj
+        if c == 0 { print("  LCOE price      : ") }
+        if c == 1 { print("  CAPEX mult      : ") }
+        if c == 2 { print("  specific energy : ") }
+        if c == 3 { print("  capacity factor : ") }
+        if c == 4 { print("  compr energy    : ") }
+        if c == 5 { print("  heat price      : ") }
+        if c == 6 { print("  tank cycling    : ") }
+        if c == 7 { print("  dispensing      : ") }
+        if c == 8 { print("  subsurface L30  : ") }
+        if c == 9 { print("  compressor R    : ") }
+        print("GUM-lin ")
+        print_fix6(100.0 * OUT10[c]); print(" | Jansen ")
+        print_fix6(100.0 * sj); println("")
+        c = c + 1
+    }
+    print("  Jansen indices sum (centered estimator): the gap to 100 is")
+    println("")
+    print("  genuine interaction share — energy x price x availability")
+    println("")
+    print("  products couple the intervals — not missing mass: ")
+    print_fix6(100.0 * jansen_sum); println("")
+    println("")
+}
+
+// ─── Sections F-H (helper — Madaros codegen-boundary workaround) ───
+//
+// With Sections F-H inline in main, this Madaros build (47e5847b0)
+// silently stops executing main right after Section E: exit code 0, no
+// diagnostic, receipt truncated (the component demos instead SIGSEGV
+// inside their Saltelli sections — same #1570 family of Madaros
+// mis-lowering; lean_single runs the full receipt either way). A fresh
+// function boundary resets the codegen shape, as in print_sobol10.
+
+fn print_fgh(l30_lo: f64, l30_hi: f64, r_lo: f64, r_hi: f64,
+             tau: f64, n: i64, sig_gum: f64, d_mid: f64,
+             p_comp: f64) with IO, Mut, Div {
+    let r_mid = 0.5 * (r_lo + r_hi)
+    let s3 = mh_sqrt(3.0)
+    let w0 = 0.5 * (HI8[0] - LO8[0])
+    let w1 = 0.5 * (HI8[1] - LO8[1])
+    let w2 = 0.5 * (HI8[2] - LO8[2])
+    let w3 = 0.5 * (HI8[3] - LO8[3])
+    let w4 = 0.5 * (HI8[4] - LO8[4])
+    let w5 = 0.5 * (HI8[5] - LO8[5])
+    let w6 = 0.5 * (HI8[6] - LO8[6])
+    let w7 = 0.5 * (HI8[7] - LO8[7])
+
+    // ─── SECTION F: GUM cross-check at the composed nominal ───
+    let l30_mid = 0.5 * (l30_lo + l30_hi)
+    let fs_nom = fs_of(l30_mid, tau)
+    let cf_nom_eff = fs_nom * r_mid * mid(3)
+    let d_mid_c = delivered(mid(0), mid(1), mid(2), cf_nom_eff,
+                            mid(4), mid(5), mid(6), mid(7))
+    let dce = d_cf(mid(1), mid(2), cf_nom_eff)
+    let g0 = d_pelec(mid(2))
+    let g1 = d_capex(mid(2), cf_nom_eff)
+    let g2 = d_espec(mid(0), mid(1), cf_nom_eff)
+    let g3 = dce * fs_nom * r_mid
+    let g4 = d_eth(mid(5))
+    let g5 = d_pheat(mid(4))
+    let g6 = d_ncyc(mid(6))
+    let g7 = d_disp()
+    let g8 = dce * r_mid * mid(3) * (0.0 - tau / 3000.0)
+    let g9 = dce * fs_nom * mid(3)
+    let w8 = 0.5 * (l30_hi - l30_lo)
+    let w9 = 0.5 * (r_hi - r_lo)
+    var var_gum_c = (g0 * w0) * (g0 * w0) / 3.0 + (g1 * w1) * (g1 * w1) / 3.0
+        + (g2 * w2) * (g2 * w2) / 3.0 + (g3 * w3) * (g3 * w3) / 3.0
+        + (g4 * w4) * (g4 * w4) / 3.0 + (g5 * w5) * (g5 * w5) / 3.0
+        + (g6 * w6) * (g6 * w6) / 3.0 + (g7 * w7) * (g7 * w7) / 3.0
+        + (g8 * w8) * (g8 * w8) / 3.0 + (g9 * w9) * (g9 * w9) / 3.0
+    var_gum_c = var_gum_c + (g0 * 0.002) * (g0 * 0.002)
+        + (g3 * 0.02) * (g3 * 0.02) + (g4 * 5.0) * (g4 * 5.0)
+    let sig_gum_c = mh_sqrt(var_gum_c)
+    let gump_c = 100.0 * phi((6.0 - d_mid_c) / sig_gum_c)
+    print("SECTION F — GUM first-order cross-check at the COMPOSED")
+    println("")
+    print("  nominal (L30, R at interval mids; uniform w^2/3 + aleatory;")
+    println("")
+    print("  analytic chain-rule partials through CF_eff):")
+    println("")
+    print("  composed nominal D [EUR/kg] : "); print_fix6(d_mid_c); println("")
+    print("  sigma_D composed [EUR/kg]   : "); print_fix6(sig_gum_c); println("")
+    print("  GUM P(<6) composed [%]      : ")
+    print_fix6(gump_c); println("")
+    print("  (baseline Section C: sigma_D ")
+    print_fix6(sig_gum); print(", GUM P ")
+    print_fix6(100.0 * phi((6.0 - d_mid) / sig_gum)); print(")")
+    println("")
+    print("  NOTE the GUM-vs-MC gap (")
+    print_fix6(gump_c); print(" vs "); print_fix6(p_comp)
+    print(" %): the linearization")
+    println("")
+    print("  at the composed nominal is symmetric and cannot see the")
+    println("")
+    print("  1/R tail of the reliability coupling — the MC number is the")
+    println("")
+    print("  conventional analysis; GUM is the first-order cross-check.")
+    println("")
+    println("")
+
+    // ─── SECTION G: one-at-a-time corners, composed nominal ───
+    print("SECTION G — one-at-a-time corners, COMPOSED (P(<6) [%], others")
+    println("")
+    print("  at composed nominal: L30 mid, R mid = ")
+    print_fix6(r_mid); print("):")
+    println("")
+    print("  composed nominal point     : ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned_c(fs_nom, r_mid, mid(0), mid(1), mid(2), mid(3), mid(4), mid(5), mid(6), mid(7), n), n))
+    println("")
+    print("  LCOE     .046 / .052       : ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned_c(fs_nom, r_mid, LO8[0], mid(1), mid(2), mid(3), mid(4), mid(5), mid(6), mid(7), n), n))
+    print(" / ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned_c(fs_nom, r_mid, HI8[0], mid(1), mid(2), mid(3), mid(4), mid(5), mid(6), mid(7), n), n))
+    println("")
+    print("  CAPEX    x0.8 / x1.2       : ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned_c(fs_nom, r_mid, mid(0), LO8[1], mid(2), mid(3), mid(4), mid(5), mid(6), mid(7), n), n))
+    print(" / ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned_c(fs_nom, r_mid, mid(0), HI8[1], mid(2), mid(3), mid(4), mid(5), mid(6), mid(7), n), n))
+    println("")
+    print("  e_spec   43.9 / 48.9       : ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned_c(fs_nom, r_mid, mid(0), mid(1), LO8[2], mid(3), mid(4), mid(5), mid(6), mid(7), n), n))
+    print(" / ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned_c(fs_nom, r_mid, mid(0), mid(1), HI8[2], mid(3), mid(4), mid(5), mid(6), mid(7), n), n))
+    println("")
+    print("  CF       .80 / .55  (valley): ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned_c(fs_nom, r_mid, mid(0), mid(1), mid(2), HI8[3], mid(4), mid(5), mid(6), mid(7), n), n))
+    print(" / ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned_c(fs_nom, r_mid, mid(0), mid(1), mid(2), LO8[3], mid(4), mid(5), mid(6), mid(7), n), n))
+    println("")
+    print("  compr    44 / 89 kWh_th    : ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned_c(fs_nom, r_mid, mid(0), mid(1), mid(2), mid(3), LO8[4], mid(5), mid(6), mid(7), n), n))
+    print(" / ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned_c(fs_nom, r_mid, mid(0), mid(1), mid(2), mid(3), HI8[4], mid(5), mid(6), mid(7), n), n))
+    println("")
+    print("  heat     .005 / .02        : ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned_c(fs_nom, r_mid, mid(0), mid(1), mid(2), mid(3), mid(4), LO8[5], mid(6), mid(7), n), n))
+    print(" / ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned_c(fs_nom, r_mid, mid(0), mid(1), mid(2), mid(3), mid(4), HI8[5], mid(6), mid(7), n), n))
+    println("")
+    print("  cycling  45 / 30           : ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned_c(fs_nom, r_mid, mid(0), mid(1), mid(2), mid(3), mid(4), mid(5), HI8[6], mid(7), n), n))
+    print(" / ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned_c(fs_nom, r_mid, mid(0), mid(1), mid(2), mid(3), mid(4), mid(5), LO8[6], mid(7), n), n))
+    println("")
+    print("  dispensing .50 / 1.50      : ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned_c(fs_nom, r_mid, mid(0), mid(1), mid(2), mid(3), mid(4), mid(5), mid(6), LO8[7], n), n))
+    print(" / ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned_c(fs_nom, r_mid, mid(0), mid(1), mid(2), mid(3), mid(4), mid(5), mid(6), HI8[7], n), n))
+    println("")
+    print("  subsurf  L30 lo / hi       : ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned_c(fs_of(l30_lo, tau), r_mid, mid(0), mid(1), mid(2), mid(3), mid(4), mid(5), mid(6), mid(7), n), n))
+    print(" / ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned_c(fs_of(l30_hi, tau), r_mid, mid(0), mid(1), mid(2), mid(3), mid(4), mid(5), mid(6), mid(7), n), n))
+    println("")
+    print("  compr R  hi / lo           : ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned_c(fs_nom, r_hi, mid(0), mid(1), mid(2), mid(3), mid(4), mid(5), mid(6), mid(7), n), n))
+    print(" / ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned_c(fs_nom, r_lo, mid(0), mid(1), mid(2), mid(3), mid(4), mid(5), mid(6), mid(7), n), n))
+    println("")
+    println("")
+
+    // ─── SECTION H: decisive coalition, composed ───
+    print("SECTION H — decisive COALITION, composed (CF .80 + heat .005")
+    println("")
+    print("  + dispensing .50 + L30 lo + R hi, rest nominal): ")
+    rng_seed(314159265, 271828182)
+    print_fix6(pct(mc_hits_pinned_c(fs_of(l30_lo, tau), r_hi, mid(0), mid(1), mid(2), HI8[3], mid(4), LO8[5], mid(6), LO8[7], n), n))
+    println("")
+    println("")
+
+    // ─── SECTION I setup: GUM-linear sigmas for the Sobol helper ───
+    SIG10[0] = g0 * w0 / s3
+    SIG10[1] = g1 * w1 / s3
+    SIG10[2] = g2 * w2 / s3
+    SIG10[3] = mh_abs(g3) * w3 / s3
+    SIG10[4] = g4 * w4 / s3
+    SIG10[5] = g5 * w5 / s3
+    SIG10[6] = mh_abs(g6) * w6 / s3
+    SIG10[7] = g7 * w7 / s3
+    SIG10[8] = mh_abs(g8) * w8 / s3
+    SIG10[9] = mh_abs(g9) * w9 / s3
+}
+
+// ─── main ───
+
+fn main() -> i32 with IO, Mut, Div {
+    // ── economic intervals (identical to trieres_chain.sio) ──
+    // SOURCED intervals (see trieres_chain.sio header)
+    LO8[0] = 0.046; HI8[0] = 0.052      // LCOE EUR/kWh (Energies 2023)
+    LO8[4] = 44.0; HI8[4] = 89.0        // compr kWh_th/kg (his two papers)
+    LO8[5] = 0.005; HI8[5] = 0.02       // heat EUR/kWh_th (hub_chain)
+    LO8[6] = 30.0; HI8[6] = 45.0        // tank cycling /yr (hub_chain)
+    // ILLUSTRATIVE ASSUMPTIONS (OURS — see trieres_chain.sio header)
+    LO8[1] = 0.8; HI8[1] = 1.2          // CAPEX multiplier
+    LO8[2] = 43.9; HI8[2] = 48.9        // e_spec kWh/kg
+    LO8[3] = 0.55; HI8[3] = 0.80        // CF — the valley claim on trial
+    LO8[7] = 0.50; HI8[7] = 1.50        // dispensing EUR/kg
+
+    // ── compressor ladder internals (identical to mh7_reliability.sio) ──
+    DH_NOM[0] = 24.0; DH_NOM[1] = 26.0; DH_NOM[2] = 28.0; DH_NOM[3] = 30.0
+    DH_NOM[4] = 32.0; DH_NOM[5] = 34.0; DH_NOM[6] = 36.0
+    W_DH[0] = 1.5; W_DH[1] = 1.5; W_DH[2] = 2.0; W_DH[3] = 2.0
+    W_DH[4] = 2.0; W_DH[5] = 2.5; W_DH[6] = 2.5
+
+    // ── pinned subsurface p-box (uhs_brine_calcite.sio @ a64fbba91) ──
+    let l30_lo = 0.458073    // % over 30 yr, best corner (k_m lo x A lo)
+    let l30_hi = 2.630814    // % over 30 yr, worst corner (k_m hi x A hi)
+    let tau = 1.0            // yr residence — ILLUSTRATIVE (swap slot)
+
+    let n: i64 = 20000
+
+    print("=== VALLEY-CHAIN epistemic twin: subsurface -> compressor ->")
+    println("")
+    print("    dispensed EUR/kg — one composed p-box receipt ===")
+    println("")
+    print("  Composes uhs_brine_calcite (pinned p-box), mh7_reliability")
+    println("")
+    print("  (re-derived) and trieres_chain (re-derived) by construction;")
+    println("")
+    print("  components unchanged. Couplings CF_eff = f_s * f_c * CF are")
+    println("")
+    print("  ILLUSTRATIVE (ours, labeled; swap slots in the file header).")
+    println("")
+    print("  Gate: 6 EUR/kg dispensed. Reference engine: lean_single.")
+    println("")
+    println("")
+
+    // ─── SECTION A: subsurface (pinned) ───
+    print("SECTION A — subsurface geochemical loss (PINNED p-box; the")
+    println("")
+    print("  chemistry is not re-run here, keeping this receipt chemistry-")
+    println("")
+    print("  free and runnable on both engines):")
+    println("")
+    print("  25 C 30-yr H2 loss p-box [%] : [")
+    print_fix6(l30_lo); print(" , "); print_fix6(l30_hi)
+    print("]  central 1.710120")
+    println("")
+    print("    re-derived by demos/hydrogen/uhs_brine_calcite.sio,")
+    println("")
+    print("    merged #1585 (Ghaedi 2025 network, public PHREEQC rates)")
+    println("")
+    print("  residence time tau [yr]        : ")
+    print_fix6(tau); print("  <- ILLUSTRATIVE (ours; seasonal")
+    println("")
+    print("    buffer). SWAP SLOT: the valley's true storage residence.")
+    println("")
+    print("  availability f_s = 1 - (L30/100)*(tau/30): [")
+    print_fix6(fs_of(l30_hi, tau)); print(" , ")
+    print_fix6(fs_of(l30_lo, tau)); println("]")
+    print("  reading: at 1-yr residence the subsurface is NOT the binding")
+    println("")
+    print("    term — f_s kisses 1: a fraction of a cent per kg, and")
+    println("")
+    print("    (Section D) 0.3 pp off the gate probability where the")
+    println("")
+    print("    compressor takes 17. A RESULT of the pinned p-box, not an")
+    println("")
+    print("    assumption: at tau = 10 yr f_s would drop to [0.991, 0.998].")
+    println("")
+    println("")
+
+    // ─── SECTION B: compressor reliability (re-derived) ───
+    let t0 = 293.15
+    let s80 = 15.238957          // K, fitted (with gamma) from his two ratios
+    let eta_nom = 0.90           // per-stage efficiency lump (assumption)
+    let sig_eta = 0.035          // aleatory scatter on ln eta (assumption)
+    let t80 = 353.15
+    let step80 = ((t80 - s80) - t0) / 6.0
+    let p0 = 365.0 / 18.7        // supply bar implied by the 365/18.7 oracle
+    let ln_eta = mh_ln(eta_nom)
+    var p = p0
+    var k: i64 = 0
+    while k < 7 {
+        let a = stage_a(k, t0, step80, s80)
+        let lnr = a * DH_NOM[k] + ln_eta
+        let r = mh_exp(lnr)
+        p = p * r
+        k = k + 1
+    }
+    let margin = mh_ln(p / 350.0)
+    var sum_aw = 0.0
+    k = 0
+    while k < 7 {
+        sum_aw = sum_aw + stage_a(k, t0, step80, s80) * W_DH[k]
+        k = k + 1
+    }
+    rng_seed(314159265, 271828182)
+    let h_ind = mc_hits(0, n, t0, step80, s80, margin, sig_eta, sum_aw)
+    rng_seed(314159265, 271828182)
+    let h_cor = mc_hits(1, n, t0, step80, s80, margin, sig_eta, sum_aw)
+    rng_seed(314159265, 271828182)
+    let h_mid = mc_hits(2, n, t0, step80, s80, margin, sig_eta, sum_aw)
+    rng_seed(314159265, 271828182)
+    let h_lo = mc_hits(3, n, t0, step80, s80, margin, sig_eta, sum_aw)
+    rng_seed(314159265, 271828182)
+    let h_hi = mc_hits(4, n, t0, step80, s80, margin, sig_eta, sum_aw)
+    let r_lo = pct(h_lo, n) / 100.0
+    let r_hi = pct(h_hi, n) / 100.0
+    let r_mid = 0.5 * (r_lo + r_hi)
+
+    print("SECTION B — 7-stage MH compressor reliability (re-derived")
+    println("")
+    print("  in-file; byte-pins mh7_reliability.sio — representative")
+    println("")
+    print("  ladder, his Table 3 paywalled; oracles Renewable Energy 147")
+    println("")
+    print("  (2020) 164-178):")
+    println("")
+    print("  nominal log-margin (365 bar vs 350 target): ")
+    print_fix6(margin); println("")
+    print("  P(P7 >= 350 bar) [%], MC n = 20000, integer-counted:")
+    println("")
+    print("    batches at nominal dH (eta scatter only) : ")
+    print_fix6(pct(h_mid, n)); println("")
+    print("    (a) independent batches                  : ")
+    print_fix6(pct(h_ind, n)); println("")
+    print("    (b) same batch, full correlation         : ")
+    print_fix6(pct(h_cor, n)); println("")
+    print("    distribution-free corner p-box           : [")
+    print_fix6(pct(h_lo, n)); print(" , "); print_fix6(pct(h_hi, n))
+    println("]")
+    print("  COUPLING (ILLUSTRATIVE, ours — swap slot): availability")
+    println("")
+    print("    factor f_c = R, the probability the 350-bar delivery")
+    println("")
+    print("    target holds. An AVAILABILITY derate on delivered kg, not")
+    println("")
+    print("    a thermodynamic efficiency; per-kg costs are untouched.")
+    println("")
+    print("    f_c interval (corner p-box)      : [")
+    print_fix6(r_lo); print(" , "); print_fix6(r_hi); println("]")
+    print("    f_c central (independence model) : ")
+    print_fix6(pct(h_ind, n) / 100.0); println("")
+    println("")
+
+    // ─── SECTION C: economic baseline (verbatim re-derivation) ───
+    print("SECTION C — economic chain, NO-COUPLING baseline (verbatim")
+    println("")
+    print("  re-derivation; byte-pins trieres_chain.sio; SOURCED vs")
+    println("")
+    print("  ILLUSTRATIVE inputs as in that file):")
+    println("")
+    print("  stage intervals [EUR/kg] (best .. worst corner):")
+    println("")
+    print("    production   : [")
+    print_fix6(prod_cost(0.046, 0.8, 43.9, 0.80)); print(" , ")
+    print_fix6(prod_cost(0.052, 1.2, 48.9, 0.55)); println(" ]")
+    print("    compression  : [")
+    print_fix6(compr_cost(44.0, 0.005)); print(" , ")
+    print_fix6(compr_cost(89.0, 0.02)); println(" ]")
+    print("    storage      : [")
+    print_fix6(storage_cost(45.0)); print(" , ")
+    print_fix6(storage_cost(30.0)); println(" ]")
+    print("    dispensing   : [0.500000 , 1.500000]  <- ILLUSTRATIVE (ours)")
+    println("")
+    let d_lo = delivered(0.046, 0.8, 43.9, 0.80, 44.0, 0.005, 45.0, 0.50)
+    let d_hi = delivered(0.052, 1.2, 48.9, 0.55, 89.0, 0.02, 30.0, 1.50)
+    let d_mid = delivered(mid(0), mid(1), mid(2), mid(3),
+                          mid(4), mid(5), mid(6), mid(7))
+    print("  delivered cost interval [EUR/kg]: [")
+    print_fix6(d_lo); print(" , "); print_fix6(d_hi); println(" ]")
+    print("  nominal point estimate [EUR/kg]:   ")
+    print_fix6(d_mid); print("  <- MISSES the 6 EUR gate")
+    println("")
+    println("")
+    print("  CONVENTIONAL baseline (independent uniforms + aleatory,")
+    println("")
+    print("    MC n = 20000):")
+    println("")
+    rng_seed(314159265, 271828182)
+    let h_base = mc_hits_indep(n)
+    let p_base = pct(h_base, n)
+    print("  P(dispensed < 6 EUR/kg) [%]   : "); print_fix6(p_base)
+    println("")
+    println("")
+    print("  DISTRIBUTION-FREE corner p-box (aleatory scatter only):")
+    println("")
+    rng_seed(314159265, 271828182)
+    let h_best0 = mc_hits_pinned_c(1.0, 1.0, 0.046, 0.8, 43.9, 0.80,
+                                   44.0, 0.005, 45.0, 0.50, n)
+    print("  BEST  corner P(<6) [%]: "); print_fix6(pct(h_best0, n)); println("")
+    rng_seed(314159265, 271828182)
+    let h_worst0 = mc_hits_pinned_c(1.0, 1.0, 0.052, 1.2, 48.9, 0.55,
+                                    89.0, 0.02, 30.0, 1.50, n)
+    print("  WORST corner P(<6) [%]: "); print_fix6(pct(h_worst0, n)); println("")
+    let box0 = new(pct(h_worst0, n), pct(h_best0, n))
+    print("  PBOX on beating 6 EUR/kg: [")
+    print_fix6(box0.lo); print(" , "); print_fix6(box0.hi)
+    print("] %  width "); print_fix6(width(box0)); println("")
+    println("")
+    // baseline GUM (verbatim formulas, partials at the uncoupled nominal)
+    let s3 = mh_sqrt(3.0)
+    let b0 = d_pelec(mid(2))
+    let b1 = d_capex(mid(2), mid(3))
+    let b2 = d_espec(mid(0), mid(1), mid(3))
+    let b3 = d_cf(mid(1), mid(2), mid(3))
+    let b4 = d_eth(mid(5))
+    let b5 = d_pheat(mid(4))
+    let b6 = d_ncyc(mid(6))
+    let b7 = d_disp()
+    let w0 = 0.5 * (HI8[0] - LO8[0])
+    let w1 = 0.5 * (HI8[1] - LO8[1])
+    let w2 = 0.5 * (HI8[2] - LO8[2])
+    let w3 = 0.5 * (HI8[3] - LO8[3])
+    let w4 = 0.5 * (HI8[4] - LO8[4])
+    let w5 = 0.5 * (HI8[5] - LO8[5])
+    let w6 = 0.5 * (HI8[6] - LO8[6])
+    let w7 = 0.5 * (HI8[7] - LO8[7])
+    var var_gum = (b0 * w0) * (b0 * w0) / 3.0 + (b1 * w1) * (b1 * w1) / 3.0
+        + (b2 * w2) * (b2 * w2) / 3.0 + (b3 * w3) * (b3 * w3) / 3.0
+        + (b4 * w4) * (b4 * w4) / 3.0 + (b5 * w5) * (b5 * w5) / 3.0
+        + (b6 * w6) * (b6 * w6) / 3.0 + (b7 * w7) * (b7 * w7) / 3.0
+    var_gum = var_gum + (b0 * 0.002) * (b0 * 0.002)
+        + (b3 * 0.02) * (b3 * 0.02) + (b4 * 5.0) * (b4 * 5.0)
+    let sig_gum = mh_sqrt(var_gum)
+    print("  GUM first-order cross-check at nominal:")
+    println("")
+    print("  sigma_D [EUR/kg]          : "); print_fix6(sig_gum); println("")
+    print("  GUM P(<6) [%]             : ")
+    print_fix6(100.0 * phi((6.0 - d_mid) / sig_gum)); println("")
+    println("")
+
+    // ─── SECTION D: composed conventional analysis ───
+    print("SECTION D — COMPOSED conventional analysis (TEN independent")
+    println("")
+    print("  uniforms: 8 economic + L30 on its pinned p-box + R on the")
+    println("")
+    print("  compressor corner p-box; the conventional sin, now with the")
+    println("")
+    print("  two couplings it never sees; same seed idiom, MC n = 20000):")
+    println("")
+    rng_seed(314159265, 271828182)
+    let h_comp = mc_hits_indep10(l30_lo, l30_hi, r_lo, r_hi, tau, n, 0)
+    let p_comp = pct(h_comp, n)
+    print("  P(dispensed < 6 EUR/kg) COMPOSED [%]: "); print_fix6(p_comp)
+    println("")
+    println("")
+    print("  decomposition (same machinery, one coupling at a time):")
+    println("")
+    rng_seed(314159265, 271828182)
+    let h_sub = mc_hits_indep10(l30_lo, l30_hi, 1.0, 1.0, tau, n, 1)
+    print("    subsurface-only coupling (R = 1)   [%]: ")
+    print_fix6(pct(h_sub, n)); println("")
+    rng_seed(314159265, 271828182)
+    let h_cpr = mc_hits_indep10(0.0, 0.0, r_lo, r_hi, tau, n, 1)
+    print("    compressor-only coupling (L30 = 0) [%]: ")
+    print_fix6(pct(h_cpr, n)); println("")
+    println("")
+
+    // ─── SECTION E: composed distribution-free corner p-box ───
+    // Monotonicity chain: D decreasing in CF_eff (economic chain,
+    // Lean-checked); CF_eff = f_s * f_c * CF increasing in f_s, f_c, CF;
+    // f_s decreasing in L30; f_c = R. So the composed best corner is
+    // (L30 lo, R hi, economic best) and the worst is (L30 hi, R lo,
+    // economic worst) — exact bounds for ANY dependence, as before.
+    print("SECTION E — COMPOSED distribution-free corner p-box (MC n =")
+    println("")
+    print("  20000 per corner). Monotone chain: D down in CF_eff; CF_eff")
+    println("")
+    print("  = f_s * f_c * CF up in f_s (down in L30), f_c (= R), CF —")
+    println("")
+    print("  corners exact, no independence assumption anywhere):")
+    println("")
+    rng_seed(314159265, 271828182)
+    let h_best1 = mc_hits_pinned_c(fs_of(l30_lo, tau), r_hi,
+                                   0.046, 0.8, 43.9, 0.80,
+                                   44.0, 0.005, 45.0, 0.50, n)
+    print("  BEST  corner (L30 lo, R hi, econ best)  [%]: ")
+    print_fix6(pct(h_best1, n)); println("")
+    rng_seed(314159265, 271828182)
+    let h_worst1 = mc_hits_pinned_c(fs_of(l30_hi, tau), r_lo,
+                                    0.052, 1.2, 48.9, 0.55,
+                                    89.0, 0.02, 30.0, 1.50, n)
+    print("  WORST corner (L30 hi, R lo, econ worst) [%]: ")
+    print_fix6(pct(h_worst1, n)); println("")
+    let box1 = new(pct(h_worst1, n), pct(h_best1, n))
+    print("  PBOX on beating 6 EUR/kg, COMPOSED: [")
+    print_fix6(box1.lo); print(" , "); print_fix6(box1.hi)
+    print("] %  width "); print_fix6(width(box1)); println("")
+    println("")
+
+    // ─── SECTIONS F-I (helpers — see the NOTE above print_fgh) ───
+    print_fgh(l30_lo, l30_hi, r_lo, r_hi, tau, n, sig_gum, d_mid, p_comp)
+    print("SECTION I — ")
+    print_sobol10(l30_lo, l30_hi, r_lo, r_hi, tau)
+
+    // ─── headline ───
+    print("=== HEADLINE: what closing the loop does to the 6 EUR/kg gate")
+    println("")
+    print("  conventional P(<6) [%]  no-coupling baseline : ")
+    print_fix6(p_base); println("")
+    print("  conventional P(<6) [%]  composed valley-chain: ")
+    print_fix6(p_comp); println("")
+    print("  delta [pp]                                   : ")
+    print_fix6(p_comp - p_base); println("")
+    print("  distribution-free p-box   baseline  [%]      : [")
+    print_fix6(box0.lo); print(" , "); print_fix6(box0.hi)
+    print("]  width "); print_fix6(width(box0)); println("")
+    print("  distribution-free p-box   composed  [%]      : [")
+    print_fix6(box1.lo); print(" , "); print_fix6(box1.hi)
+    print("]  width "); print_fix6(width(box1)); println("")
+    println("")
+
+    // ─── the statement ───
+    print("Reading: closing the loop through the subsurface and the")
+    println("")
+    print("compressor moves the CONVENTIONAL number violently — the")
+    println("")
+    print("independence-uniform toolkit would report a different valley —")
+    println("")
+    print("but it does NOT shrink the honest interval: the distribution-")
+    println("")
+    print("free p-box still spans [0, 100], because the compressor's")
+    println("")
+    print("corner p-box on reliability is itself [1.3, 99.9] %. The")
+    println("")
+    print("decomposition names the physics: the subsurface loss at 1-yr")
+    println("")
+    print("residence is a rounding term; the compressor's uncharacterized")
+    println("")
+    print("alloy batches are the gate. For TRIERES: the euro is not in")
+    println("")
+    print("the rock, it is in the reliability data — characterize the")
+    println("")
+    print("high-pressure-stage alloys and the heat/dispensing contracts")
+    println("")
+    print("FIRST. The p-box is the deliverable; the Sobol map says where")
+    println("")
+    print("to spend to shrink it.")
+    println("")
+    println("VALLEY_CHAIN_OK")
+    0
+}
