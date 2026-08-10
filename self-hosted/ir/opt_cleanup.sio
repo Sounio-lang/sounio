@@ -9030,6 +9030,10 @@ pub(crate) fn ocp_compact_nops(func: IrFunction) -> IrFunction with Mut, Div, Pa
 // Full e-graph / mul3_sr / LICM / epistemic rewrites stay on the by-value
 // stack-local path used by main.sio self-tests. Const-fold / SCCP-lite /
 // compact_nops are now field-wise (never by-value IrFunction).
+//
+// The propagation peels below are linear scans, not CFG analyses. Their tables
+// must be cleared before an IrLabel and after a control terminator; otherwise a
+// fact learned in one arm of a branch leaks into a sibling arm or join.
 
 // Dedup IrLoadImm → IrCopy when an earlier reg already holds the same imm.
 fn ocp_mfi_dedup_imm(module: &! IrModule, fi: i64) with Mut, Div, Panic {
@@ -9040,6 +9044,13 @@ fn ocp_mfi_dedup_imm(module: &! IrModule, fi: i64) with Mut, Div, Panic {
         let op = (*module).functions[fi as usize].instrs[i as usize].op
         let dst = (*module).functions[fi as usize].instrs[i as usize].dst
         let imm = (*module).functions[fi as usize].instrs[i as usize].imm_i64
+        if op == IrOpcode::IrLabel {
+            var bb: i64 = 0
+            while bb < 256 {
+                seen_const[bb as usize] = false
+                bb = bb + 1
+            }
+        }
         if op == IrOpcode::IrLoadImm && dst >= 0 && dst < 256 {
             var found: i64 = 0 - 1
             var j: i64 = 0
@@ -9057,6 +9068,13 @@ fn ocp_mfi_dedup_imm(module: &! IrModule, fi: i64) with Mut, Div, Panic {
                 seen_val[dst as usize] = imm
             }
         }
+        if ocp_rebracket_is_control_terminator(op) {
+            var bb: i64 = 0
+            while bb < 256 {
+                seen_const[bb as usize] = false
+                bb = bb + 1
+            }
+        }
         i = i + 1
     }
 }
@@ -9066,6 +9084,14 @@ fn ocp_mfi_copy_prop(module: &! IrModule, fi: i64) with Mut, Div, Panic {
     var copy_target: [i64; 256] = [-1; 256]
     var i: i64 = 0
     while i < (*module).functions[fi as usize].instr_count {
+        let op = (*module).functions[fi as usize].instrs[i as usize].op
+        if op == IrOpcode::IrLabel {
+            var bb: i64 = 0
+            while bb < 256 {
+                copy_target[bb as usize] = 0 - 1
+                bb = bb + 1
+            }
+        }
         let s1 = (*module).functions[fi as usize].instrs[i as usize].src1
         if s1 >= 0 && s1 < 256 && copy_target[s1 as usize] >= 0 {
             (*module).functions[fi as usize].instrs[i as usize].src1 = copy_target[s1 as usize]
@@ -9074,7 +9100,6 @@ fn ocp_mfi_copy_prop(module: &! IrModule, fi: i64) with Mut, Div, Panic {
         if s2 >= 0 && s2 < 256 && copy_target[s2 as usize] >= 0 {
             (*module).functions[fi as usize].instrs[i as usize].src2 = copy_target[s2 as usize]
         }
-        let op = (*module).functions[fi as usize].instrs[i as usize].op
         let dst = (*module).functions[fi as usize].instrs[i as usize].dst
         let cur_s1 = (*module).functions[fi as usize].instrs[i as usize].src1
         if op == IrOpcode::IrCopy && dst >= 0 && dst < 256 {
@@ -9086,6 +9111,13 @@ fn ocp_mfi_copy_prop(module: &! IrModule, fi: i64) with Mut, Div, Panic {
             }
         } else if dst >= 0 && dst < 256 {
             copy_target[dst as usize] = 0 - 1
+        }
+        if ocp_rebracket_is_control_terminator(op) {
+            var bb: i64 = 0
+            while bb < 256 {
+                copy_target[bb as usize] = 0 - 1
+                bb = bb + 1
+            }
         }
         i = i + 1
     }
@@ -9372,6 +9404,13 @@ fn ocp_mfi_const_fold(module: &! IrModule, fi: i64) with Mut, Div, Panic {
     while i < (*module).functions[fi as usize].instr_count {
         let op = (*module).functions[fi as usize].instrs[i as usize].op
         let dst = (*module).functions[fi as usize].instrs[i as usize].dst
+        if op == IrOpcode::IrLabel {
+            var bb: i64 = 0
+            while bb < 256 {
+                is_const[bb as usize] = false
+                bb = bb + 1
+            }
+        }
         if dst >= 0 && dst < 256 {
             is_const[dst as usize] = false
         }
@@ -9563,6 +9602,13 @@ fn ocp_mfi_const_fold(module: &! IrModule, fi: i64) with Mut, Div, Panic {
                 }
             }
         }
+        if ocp_rebracket_is_control_terminator(op) {
+            var bb: i64 = 0
+            while bb < 256 {
+                is_const[bb as usize] = false
+                bb = bb + 1
+            }
+        }
         i = i + 1
     }
 }
@@ -9580,6 +9626,13 @@ fn ocp_mfi_sccp(module: &! IrModule, fi: i64) with Mut, Div, Panic {
     while i < (*module).functions[fi as usize].instr_count {
         let op = (*module).functions[fi as usize].instrs[i as usize].op
         let dst = (*module).functions[fi as usize].instrs[i as usize].dst
+        if op == IrOpcode::IrLabel {
+            var bb: i64 = 0
+            while bb < 256 {
+                is_const[bb as usize] = false
+                bb = bb + 1
+            }
+        }
         if dst >= 0 && dst < 256 {
             is_const[dst as usize] = false
         }
@@ -9616,6 +9669,15 @@ fn ocp_mfi_sccp(module: &! IrModule, fi: i64) with Mut, Div, Panic {
                 } else {
                     (*module).functions[fi as usize].instrs[i as usize] = ir_nop()
                 }
+            }
+        }
+        // Clear after the terminator so SCCP can still fold a branch from its
+        // known condition before invalidating the next block's lattice.
+        if ocp_rebracket_is_control_terminator(op) {
+            var bb: i64 = 0
+            while bb < 256 {
+                is_const[bb as usize] = false
+                bb = bb + 1
             }
         }
         i = i + 1
