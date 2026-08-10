@@ -56,3 +56,31 @@ E2 from infrastructure to load-bearing.
 
 NOT proved. `D[tri3] = 1728·8^(m−j)·[j,3]₂` rests on E4 + E5, both measured. The Lean development
 proves its supporting obligation (E6), not the law.
+
+## Step 1, first result — and a null control I had to run against myself
+
+The homogeneous pair verified 206/206 on within-fibre pairs. **That number is weaker than it looks,
+and the check that showed it is the kind this lane exists to force.**
+
+Within a fibre, `Δcp2 = 0` in 95/95 pairs tested — `cp2` is fibre-constant. So:
+
+- the line `Δcp2(m+1) = 4·Δcp2(m)` is **VACUOUS** on within-fibre pairs: it reads `0 = 0`;
+- the `24·Δcp2` term **never fires** within a fibre, so the second line is not
+  `Δs3(m+1) = 8·Δs3(m) + 24·Δcp2(m)` there but simply `Δs3(m+1) = 8·Δs3(m)`.
+
+So E4 was one edge and is really two, of very different kinds:
+
+| | content | status |
+|---|---|---|
+| **E4a** | `cp2` is fibre-constant, hence `Δcp2 = 0` | **assembly-reachable now** |
+| **E4b** | `Δs3(m+1) = 8·Δs3(m)` within a fibre | **the open lemma** |
+
+**E4a is closer than the DAG said.** `cp2_count` (Tier 95) proves `cp2 = −(H−2)(H−6)` on the `g = 0`
+class CONDITIONAL on the four-sign law for its summand — and that law is exactly what Tiers 96–108
+established for the reference labels: the interior through `cp2_summand_core` + `P1_mul_P3_mask` +
+Bridge 1 + `starP_all_{octonion,pow2}_labels`, and the borders directly in Tiers 97–98. Discharging
+`cp2_count`'s hypothesis is assembly, not new mathematics, and it turns `Δcp2 = 0` on the reference
+class from measurement into a theorem.
+
+**E4b is where the mathematics is**, and Fable's structural remark is the lead: `8 = 2³` on a cubic
+trace under a doubling whose folding map satisfies `JJᵀ = 2I`. That routes through E2.
