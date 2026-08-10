@@ -17323,4 +17323,169 @@ theorem blockB_weight (b c W : Nat) (hW0 : W ≠ 0) :
   unfold epsZero sigRow tauW
   grind
 
+/-! ### Tier 119 — `B` ASSEMBLED: the last block, and `Q`'s closed form follows
+
+    Everything is in place.  `B`'s weight is `−ε(b)σ(b)σ(c)τ(b,c)` (Tier 118), the coset flip comes
+    off by `tauW_carrier` (Tier 93), and what is left is pinned twice — at `0` by Tier 110's
+    `sumLtI_epsZero` and at `W` by Tier 118's `sumLtI_sigRow` — onto the three single sums of
+    Tier 117 and the square sum.
+
+    Pointwise, the `c`-summand is a main term plus two isolated points:
+
+      `B(b,c) = −(ε(b)σ(b))·(σ(c)·P3(b,c)·u_b u_c)  +  [c = b⊕W]·A(b)  +  [c = W]·[b = 0]·4`
+
+    with `u_x = P3(0,x)` and `A(b) = −2·ε(b)σ(b)σ(b⊕W)·u_b u_{b⊕W}` — the coset sum's summand.
+    Summing `c`, then `b`, and substituting
+
+      `Σ_c u_c²          = H`        `sum_row0_sq`      (Tier 118)
+      `Σ_b u_b·P3(b,W)   = H − 2`    `sum_row0_colW`    (Tier 117)
+      `Σ_c u_c·P3(W,c)   = H − 4`    `sum_row0_rowW`    (Tier 117)
+      `Σ_b A(b)/(−2)     = 2 − H`    `sum_row0_coset`   (Tier 117)
+
+    gives `B = −Q + 8H − 12`.  With Tiers 114–116 that closes `Q(m+1) = 16H − 28` outright. -/
+
+/-- **THE `B` BLOCK, EVALUATED.**  `B = −Q + 8·2^(m+1) − 12`, every label, seam included. -/
+theorem blockB_value (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+        P3 0 b W m * (E01 b c W * P3 b c W m * (E01 0 c W * P3 0 c W m))))
+      = - sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+            P3 0 b W m * (P3 b c W m * P3 0 c W m)))
+        + 8 * ((2^(m+1) : Nat) : Int) - 12 := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hz : P3 0 0 W m = 1 := P3_zero_zero m W
+  have hs : P3 0 W W m = 1 := P3_zero_seam m W hW hW0
+  have hd : P3 W W W m = -1 := P3_diag W W m hW hW hW0
+  -- the c-summand, split into a main term and two isolated points
+  have hpt : ∀ b, b < 2^(m+1) → ∀ c, c < 2^(m+1) →
+      P3 0 b W m * (E01 b c W * P3 b c W m * (E01 0 c W * P3 0 c W m))
+      = (- (epsZero b * sigRow b W)) *
+            (sigRow c W * (P3 b c W m * (P3 0 b W m * P3 0 c W m)))
+        + (if c = b ^^^ W then
+              (-2) * (epsZero b * (sigRow b W *
+                (sigRow (b ^^^ W) W * (P3 0 b W m * P3 0 (b ^^^ W) W m)))) else 0)
+        + (if c = W then (if b = 0 then (4:Int) else 0) else 0) := by
+    intro b hb c hc
+    have hw := blockB_weight b c W hW0
+    have hcar := tauW_carrier m b c W hb hc hW hW0
+    by_cases h1 : c = b ^^^ W
+    · subst h1
+      by_cases h2 : b = 0
+      · subst h2
+        rw [Nat.zero_xor] at *
+        rw [if_pos rfl, if_pos rfl, if_pos rfl]
+        unfold epsZero sigRow at *
+        rw [hz, hs] at *
+        grind
+      · have hne : ¬(b ^^^ W = W) := by
+          intro h; exact h2 (by rw [← xor_cancel b W, h, Nat.xor_self])
+        rw [if_pos rfl, if_neg hne]
+        unfold epsZero sigRow at *
+        grind
+    · rw [if_neg h1]
+      by_cases h2 : c = W
+      · subst h2
+        have hb0 : b ≠ 0 := by
+          intro h; subst h; exact h1 (by rw [Nat.zero_xor])
+        rw [if_pos rfl, if_neg hb0]
+        unfold epsZero sigRow at *
+        grind
+      · rw [if_neg h2]
+        unfold epsZero sigRow at *
+        grind
+  -- sum over c, for a fixed b
+  have hbsum : ∀ b, b < 2^(m+1) →
+      sumLtI (2^(m+1)) (fun c =>
+        P3 0 b W m * (E01 b c W * P3 b c W m * (E01 0 c W * P3 0 c W m)))
+      = (- (epsZero b * sigRow b W)) *
+          (sumLtI (2^(m+1)) (fun c => P3 b c W m * (P3 0 b W m * P3 0 c W m))
+            - 2 * (P3 b W W m * (P3 0 b W m * P3 0 W W m)))
+        + (-2) * (epsZero b * (sigRow b W *
+            (sigRow (b ^^^ W) W * (P3 0 b W m * P3 0 (b ^^^ W) W m))))
+        + (if b = 0 then (4:Int) else 0) := by
+    intro b hb
+    have hbx : b ^^^ W < 2^(m+1) := xorlt hb hW
+    rw [sumLtI_congr _ _ _ (fun c hc => hpt b hb c hc), sumLtI_add, sumLtI_add,
+        sumLtI_single (2^(m+1)) (b ^^^ W) _ hbx, sumLtI_single (2^(m+1)) W _ hW,
+        sumLtI_mul, sumLtI_sigRow (2^(m+1)) W hW]
+  rw [sumLtI_congr _ _ _ (fun b hb => hbsum b hb), sumLtI_add, sumLtI_add,
+      sumLtI_single (2^(m+1)) 0 (4:Int) hp, sumLtI_mul, sum_row0_coset m W hW hW0]
+  -- the main term: pin at 0, then at W
+  have hG : ∀ b,
+      (- (epsZero b * sigRow b W)) *
+          (sumLtI (2^(m+1)) (fun c => P3 b c W m * (P3 0 b W m * P3 0 c W m))
+            - 2 * (P3 b W W m * (P3 0 b W m * P3 0 W W m)))
+      = - (epsZero b * (sigRow b W *
+          (sumLtI (2^(m+1)) (fun c => P3 b c W m * (P3 0 b W m * P3 0 c W m))
+            - 2 * (P3 b W W m * (P3 0 b W m * P3 0 W W m))))) := by
+    intro b; grind
+  rw [sumLtI_congr _ _ _ (fun b _ => hG b), sumLtI_neg, sumLtI_epsZero _ hp,
+      sumLtI_sigRow (2^(m+1)) W hW]
+  -- the three evaluations
+  have e0 : sumLtI (2^(m+1)) (fun c => P3 0 c W m * (P3 0 0 W m * P3 0 c W m))
+        - 2 * (P3 0 W W m * (P3 0 0 W m * P3 0 W W m))
+      = ((2^(m+1) : Nat) : Int) - 2 := by
+    have c0 : ∀ c, c < 2^(m+1) →
+        P3 0 c W m * (P3 0 0 W m * P3 0 c W m) = P3 0 c W m * P3 0 c W m := by
+      intro c _; rw [hz]; grind
+    rw [sumLtI_congr _ _ (fun c => P3 0 c W m * P3 0 c W m) c0, sum_row0_sq m W, hz, hs]
+    grind
+  have eW : sumLtI (2^(m+1)) (fun c => P3 W c W m * (P3 0 W W m * P3 0 c W m))
+        - 2 * (P3 W W W m * (P3 0 W W m * P3 0 W W m))
+      = ((2^(m+1) : Nat) : Int) - 2 := by
+    have cW : ∀ c, c < 2^(m+1) →
+        P3 W c W m * (P3 0 W W m * P3 0 c W m) = P3 0 c W m * P3 W c W m := by
+      intro c _; rw [hs]; grind
+    rw [sumLtI_congr _ _ (fun c => P3 0 c W m * P3 W c W m) cW,
+        sum_row0_rowW m W hW hW0, hs, hd]
+    grind
+  have eAll : sumLtI (2^(m+1)) (fun b =>
+        sumLtI (2^(m+1)) (fun c => P3 b c W m * (P3 0 b W m * P3 0 c W m))
+          - 2 * (P3 b W W m * (P3 0 b W m * P3 0 W W m)))
+      = sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+            P3 0 b W m * (P3 b c W m * P3 0 c W m)))
+        - 2 * (((2^(m+1) : Nat) : Int) - 2) := by
+    rw [sumLtI_sub, sumLtI_mul]
+    have h1 : sumLtI (2^(m+1)) (fun b =>
+          sumLtI (2^(m+1)) (fun c => P3 b c W m * (P3 0 b W m * P3 0 c W m)))
+        = sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+            P3 0 b W m * (P3 b c W m * P3 0 c W m))) :=
+      sumLtI_congr _ _ (fun b => sumLtI (2^(m+1)) (fun c =>
+          P3 0 b W m * (P3 b c W m * P3 0 c W m)))
+        (fun b _ => sumLtI_congr _ _ (fun c => P3 0 b W m * (P3 b c W m * P3 0 c W m))
+          (fun c _ => by grind))
+    have h2 : sumLtI (2^(m+1)) (fun b => P3 b W W m * (P3 0 b W m * P3 0 W W m))
+        = ((2^(m+1) : Nat) : Int) - 2 := by
+      have cb : ∀ b, b < 2^(m+1) →
+          P3 b W W m * (P3 0 b W m * P3 0 W W m) = P3 0 b W m * P3 b W W m := by
+        intro b _; rw [hs]; grind
+      rw [sumLtI_congr _ _ (fun b => P3 0 b W m * P3 b W W m) cb,
+          sum_row0_colW m W hW hW0]
+    rw [h1, h2]
+  rw [eAll, eW, e0]
+  unfold sigRow
+  rw [Nat.zero_xor, if_neg hW0]
+  grind
+
+/-- **`Q`'s CLOSED FORM.**  Unconditional, every label that exists one level below. -/
+theorem quad_level_value (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1) + 2^(m+1)) (fun b => sumLtI (2^(m+1) + 2^(m+1)) (fun c =>
+        P3 0 b W (m+1) * (P3 b c W (m+1) * P3 0 c W (m+1))))
+      = 16 * ((2^(m+1) : Nat) : Int) - 28 :=
+  quad_level_transfer m W hW hW0 (blockB_value m W hW hW0)
+
+/-- **THE `T3` LEG, CLOSED.**  `T3 = s3 + 48·H − 176` at level `m+1`, for every label that already
+    exists at level `m` — which is §57.69's measured closed form, off the maximal seam by
+    construction (at level `m+1` the seam is `2^(m+1)`, and `W < 2^(m+1)`). -/
+theorem weight3_closed (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    tri3 (2^(m+2)) (fun x y => E11 x y W * P3 x y W (m+1))
+      = tri3 (2^(m+2)) (fun x y => P3 x y W (m+1))
+        + 48 * ((2^(m+2) : Nat) : Int) - 176 := by
+  have hpow : (2:Nat)^(m+2) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  have hW' : W < 2^(m+2) := by omega
+  have hq := quad_level_value m W hW hW0
+  rw [← hpow] at hq
+  rw [weight3_quad (m+1) W hW' hW0, hq, hpow]
+  push_cast
+  grind
+
 end SounioZDFiberAntisym
