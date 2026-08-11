@@ -18579,4 +18579,61 @@ theorem weight2_D_S2 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
   rw [weight2_D_corner m W hW hW0, weight2_pin_S2 m W hW hW0]
 
 
+/-! ### Tier 127 — the five single pins of `T1`'s CORE, identified
+
+    Tier 123's expansion leaves five single-pin double sums: three with the pin at `0` and two with
+    it at `W` (the third index carries only `ε`, so it has no `W` pin).  Each must be identified
+    with the closed triple walk through its pinned vertex.
+
+    Two identifications do it, both stated for an ARBITRARY pin `p` so they serve `0` and `W` alike:
+
+      `cyc_pin_last`  `Σ_a Σ_b F(a,b,p) = Σ_b Σ_c F(p,b,c)`   — pure relabelling
+      `cyc_pin_mid`   `Σ_a Σ_c F(a,p,c) = Σ_b Σ_c F(p,b,c)`   — needs `sumLtI_swap`
+
+    with `F(x,y,z) = P3(x,y)·(P3(y,z)·P3(z,x))`.  That the middle pin is the one needing an exchange
+    of summation order is the same asymmetry Tier 110's `tri3_epsZero` met for the symmetric weight;
+    the cyclic summand makes the other two pure congruences.
+
+    Specialised at `p = 0` and `p = W` these give all five, so the single-pin part of CORE is
+    `−6·(M³)₀₀ − 4·(M³)_WW` — three copies of the first walk and two of the second, exactly the
+    multiplicities Tier 123 measured. Both walks are already theorems: `(M³)₀₀` by
+    `walk3_eq_quad` + `quad_level_value`, `(M³)_WW` by `walk3_at_W`. -/
+
+/-- Pin on the LAST index: pure relabelling, the summand being cyclic. -/
+theorem cyc_pin_last (m W p : Nat) :
+    sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+        P3 a b W m * (P3 b p W m * P3 p a W m)))
+      = sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+            P3 p b W m * (P3 b c W m * P3 c p W m))) :=
+  sumLtI_congr _ _ _ (fun b _ => sumLtI_congr _ _ _ (fun c _ => by grind))
+
+/-- Pin on the MIDDLE index: needs an exchange of summation order. -/
+theorem cyc_pin_mid (m W p : Nat) :
+    sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun c =>
+        P3 a p W m * (P3 p c W m * P3 c a W m)))
+      = sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+            P3 p b W m * (P3 b c W m * P3 c p W m))) := by
+  rw [sumLtI_swap (2^(m+1)) (2^(m+1))
+        (fun a c => P3 a p W m * (P3 p c W m * P3 c a W m))]
+  exact sumLtI_congr _ _ _ (fun b _ => sumLtI_congr _ _ _ (fun c _ => by grind))
+
+/-- **THE SINGLE-PIN PART OF CORE.**  Three copies of the walk at `0`, two of the walk at `W`. -/
+theorem corePins_single (m W : Nat) :
+    (sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+        P3 0 b W m * (P3 b c W m * P3 c 0 W m)))
+      + sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun c =>
+          P3 a 0 W m * (P3 0 c W m * P3 c a W m)))
+      + sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+          P3 a b W m * (P3 b 0 W m * P3 0 a W m))))
+      + (sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+            P3 W b W m * (P3 b c W m * P3 c W W m)))
+        + sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun c =>
+            P3 a W W m * (P3 W c W m * P3 c a W m))))
+      = 3 * sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+            P3 0 b W m * (P3 b c W m * P3 c 0 W m)))
+        + 2 * sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+            P3 W b W m * (P3 b c W m * P3 c W W m))) := by
+  rw [cyc_pin_mid m W 0, cyc_pin_last m W 0, cyc_pin_mid m W W]
+  grind
+
 end SounioZDFiberAntisym
