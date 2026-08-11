@@ -18636,4 +18636,271 @@ theorem corePins_single (m W : Nat) :
   rw [cyc_pin_mid m W 0, cyc_pin_last m W 0, cyc_pin_mid m W W]
   grind
 
+/-! ### Tier 130 — the middle pin `S₁` equals `(M³)_WW` (kimi, T2 leg)
+
+    The dual of Tier 128: the OTHER middle pin of the D-corner expansion,
+    `S₁ = Σ_{a,c} X(a,W)·P3(W,c)·X(c,a)`, is also the pure triple walk.
+
+    The route mirrors Tier 128 with the roles of the two carrier specialisations swapped —
+    `Xentry_colW` (`X(a,W) = P3(a,W) − 2·[a=0]`) on the outer factor and the carrier on the
+    inner one's free index.  Two spots where the naive dual is WRONG, both caught by measuring
+    first (`.tmp/zd_s1_probe.py`, 53/53 labels at `m = 2,3,4`):
+
+      1. The coset sum arrives as `Σ_a P3(W,a⊕W)·P3(a,W)` and becomes `walk_MPiM_WW`'s sum
+         only after reindexing by `a ↦ a⊕W` (`sumLtI_xor`).
+      2. The `a = 0` pin hits `Σ_c P3(W,c)·P3(c,0) = 2−H` — NOT `walk2_0W` (`H−2`): the
+         column-`0` vector negates the row-`0` vector (`P3_col0_eq_neg_row0`), AND the two
+         seam entries differ (`P3 W 0 = −1` vs `P3 0 W = +1`), so swapping row for column
+         costs exactly `2`, at `c = 0`.  Proved as `sum_P3W_col0`.
+
+    Corrections: `2·(2−H) − 4·P3(W,0)·P3(W,W) − 2·(2−H) − 4·P3(W,W) = 0`. -/
+
+/-- Pointwise: the seam row against the carrier.  Dual of `Xentry_mul_colW`. -/
+private theorem P3W_mul_Xentry (m a c W : Nat)
+    (ha : a < 2^(m+1)) (hc : c < 2^(m+1)) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    P3 W c W m * Xentry m c a W
+      = P3 W c W m * P3 c a W m
+        + (if a = c ^^^ W then 2 * P3 W c W m else 0)
+        - (if c = 0 ∧ a = W then 4 * P3 W c W m else 0) := by
+  unfold Xentry
+  have hcarr := tauW_carrier m c a W hc ha hW hW0
+  rw [hcarr]
+  grind
+
+/-- After the carrier on the free column: the inner sum against the seam row.
+    Dual of `XM_at_W`. -/
+private theorem MX_rowW (m a W : Nat) (ha : a < 2^(m+1)) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun c => P3 W c W m * Xentry m c a W)
+      = sumLtI (2^(m+1)) (fun c => P3 W c W m * P3 c a W m)
+        + 2 * P3 W (a ^^^ W) W m
+        - (if a = W then 4 * P3 W 0 W m else 0) := by
+  have hxorlt : a ^^^ W < 2^(m+1) := xorlt ha hW
+  rw [sumLtI_congr _ _ _ (fun c hc => P3W_mul_Xentry m a c W ha hc hW hW0)]
+  have h1 :
+      sumLtI (2^(m+1)) (fun c =>
+          P3 W c W m * P3 c a W m
+            + (if a = c ^^^ W then 2 * P3 W c W m else 0)
+            - (if c = 0 ∧ a = W then 4 * P3 W c W m else 0))
+      = sumLtI (2^(m+1)) (fun c =>
+          P3 W c W m * P3 c a W m
+            + ((if a = c ^^^ W then 2 * P3 W c W m else 0)
+              - (if c = 0 ∧ a = W then 4 * P3 W c W m else 0))) :=
+    sumLtI_congr _ _ _ (fun c _ => by grind)
+  rw [h1, sumLtI_add]
+  have h2 :
+      sumLtI (2^(m+1)) (fun c =>
+          (if a = c ^^^ W then 2 * P3 W c W m else 0)
+            - (if c = 0 ∧ a = W then 4 * P3 W c W m else 0))
+      = sumLtI (2^(m+1)) (fun c => if a = c ^^^ W then 2 * P3 W c W m else 0)
+        - sumLtI (2^(m+1)) (fun c => if c = 0 ∧ a = W then 4 * P3 W c W m else 0) :=
+    sumLtI_sub _ _ _
+  rw [h2]
+  -- coset term: single at c = a ⊕ W
+  have hcos :
+      sumLtI (2^(m+1)) (fun c => if a = c ^^^ W then 2 * P3 W c W m else 0)
+      = 2 * P3 W (a ^^^ W) W m := by
+    have hcongr := sumLtI_congr (2^(m+1))
+      (fun c => if a = c ^^^ W then 2 * P3 W c W m else 0)
+      (fun c => if c = a ^^^ W then 2 * P3 W (a ^^^ W) W m else 0)
+      (fun c _ => by
+        by_cases hc : c = a ^^^ W
+        · have hc' : a = c ^^^ W := by rw [hc, xor_cancel a W]
+          rw [if_pos hc', if_pos hc, hc]
+        · have hc' : ¬ a = c ^^^ W := by
+            intro h
+            apply hc
+            have h1 := congrArg (· ^^^ W) h
+            rw [xor_cancel c W] at h1
+            exact h1.symm
+          rw [if_neg hc', if_neg hc])
+    rw [hcongr, sumLtI_single (2^(m+1)) (a ^^^ W) _ hxorlt]
+  -- rank-one term: single at c = 0, present only when a = W
+  have hr1 :
+      sumLtI (2^(m+1)) (fun c => if c = 0 ∧ a = W then 4 * P3 W c W m else 0)
+      = if a = W then 4 * P3 W 0 W m else 0 := by
+    by_cases haW : a = W
+    · have hcongr := sumLtI_congr (2^(m+1))
+        (fun c => if c = 0 ∧ a = W then 4 * P3 W c W m else 0)
+        (fun c => if c = 0 then 4 * P3 W 0 W m else 0)
+        (fun c _ => by
+          by_cases hc : c = 0
+          · rw [if_pos ⟨hc, haW⟩, if_pos hc, hc]
+          · rw [if_neg (fun h => hc h.1), if_neg hc])
+      rw [if_pos haW, hcongr, sumLtI_single (2^(m+1)) 0 _ (Nat.two_pow_pos (m+1))]
+    · have hcongr := sumLtI_congr (2^(m+1))
+        (fun c => if c = 0 ∧ a = W then 4 * P3 W c W m else 0)
+        (fun _ => (0:Int))
+        (fun c _ => by rw [if_neg (fun h => haW h.2)])
+      rw [if_neg haW, hcongr, sumLtI_zero]
+  rw [hcos, hr1]
+  grind
+
+/-- **THE SEAM ROW AGAINST COLUMN `0`.**  `Σ_c P3(W,c)·P3(c,0) = 2 − H`.  NOT `walk2_0W`:
+    the column-`0` vector is the negated row-`0` vector (`P3_col0_eq_neg_row0`), and the two
+    seam entries DIFFER (`P3_seam_zero : P3 W 0 = −1` vs `P3_zero_seam : P3 0 W = 1`), so the
+    row-for-column swap costs exactly `2`, at `c = 0`. -/
+theorem sum_P3W_col0 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun c => P3 W c W m * P3 c 0 W m)
+      = 2 - ((2^(m+1) : Nat) : Int) := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have h1 : sumLtI (2^(m+1)) (fun c => P3 W c W m * P3 c 0 W m)
+      = sumLtI (2^(m+1)) (fun c =>
+          -(P3 W c W m * P3 0 c W m) + (if c = 0 then 2 * P3 W 0 W m else 0)) := by
+    refine sumLtI_congr _ _ _ (fun c hcl => ?_)
+    rw [P3_col0_eq_neg_row0 m c W hcl hW]
+    by_cases hc0 : c = 0
+    · subst hc0
+      rw [if_pos rfl, if_pos rfl]; grind
+    · rw [if_neg hc0, if_neg hc0]; grind
+  rw [h1, sumLtI_add, sumLtI_neg, sumLtI_single (2^(m+1)) 0 (2 * P3 W 0 W m) hp]
+  have h2 : sumLtI (2^(m+1)) (fun c => P3 W c W m * P3 0 c W m)
+      = sumLtI (2^(m+1)) (fun c => P3 0 c W m * P3 c W W m) - 2 := by
+    have hpt : sumLtI (2^(m+1)) (fun c => P3 W c W m * P3 0 c W m)
+        = sumLtI (2^(m+1)) (fun c =>
+            P3 0 c W m * P3 c W W m + (if c = 0 then -2 else 0)) := by
+      refine sumLtI_congr _ _ _ (fun c hcl => ?_)
+      by_cases hc0 : c = 0
+      · subst hc0
+        rw [if_pos rfl, P3_seam_zero m W hW hW0, P3_zero_seam m W hW hW0, P3_zero_zero m W]
+        grind
+      · rw [if_neg hc0, P3_symm W c W m hW hcl hW hW0 hc0]
+        grind
+    rw [hpt, sumLtI_add, sumLtI_single (2^(m+1)) 0 (-2) hp]
+    grind
+  rw [h2, walk2_0W m W hW hW0, P3_seam_zero m W hW hW0]
+  grind
+
+/-- Pointwise product after both expansions.  Dual of `weight2_pin_S2_pt`. -/
+private theorem weight2_pin_S1_pt (m a W : Nat)
+    (ha : a < 2^(m+1)) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    Xentry m a W W * sumLtI (2^(m+1)) (fun c => P3 W c W m * Xentry m c a W)
+      = sumLtI (2^(m+1)) (fun c => P3 W c W m * P3 c a W m) * P3 a W W m
+        + (2 * P3 W (a ^^^ W) W m * P3 a W W m
+        + (-(if a = W then 4 * P3 W 0 W m * P3 a W W m else 0)
+        + ((if a = 0 then -2 * sumLtI (2^(m+1)) (fun c => P3 W c W m * P3 c 0 W m) else 0)
+        + (if a = 0 then -4 * P3 W W W m else 0)))) := by
+  rw [MX_rowW m a W ha hW hW0, Xentry_colW m a W ha hW hW0]
+  by_cases ha0 : a = 0
+  · subst ha0
+    rw [Nat.zero_xor]
+    grind
+  · grind
+
+/-- Sum of five right-associated terms (same shape as Tier 128's `sumLtI_six`). -/
+private theorem sumLtI_five (n : Nat) (A B C D E : Nat → Int) :
+    sumLtI n (fun a => A a + (B a + (C a + (D a + E a))))
+      = sumLtI n A + sumLtI n B + sumLtI n C + sumLtI n D + sumLtI n E := by
+  rw [sumLtI_add]
+  have h2 : sumLtI n (fun a => B a + (C a + (D a + E a)))
+      = sumLtI n B + sumLtI n (fun a => C a + (D a + E a)) :=
+    sumLtI_add _ _ _
+  rw [h2]
+  have h3 : sumLtI n (fun a => C a + (D a + E a))
+      = sumLtI n C + sumLtI n (fun a => D a + E a) :=
+    sumLtI_add _ _ _
+  rw [h3]
+  have h4 : sumLtI n (fun a => D a + E a)
+      = sumLtI n D + sumLtI n E :=
+    sumLtI_add _ _ _
+  rw [h4]
+  grind
+
+/-- **THE MIDDLE PIN `S₁`.**  Equals the pure triple walk `(M³)_WW`, like `S₂` (Tier 128). -/
+theorem weight2_pin_S1 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun c =>
+        Xentry m a W W * (P3 W c W m * Xentry m c a W)))
+      = sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+            P3 W a W m * (P3 a b W m * P3 b W W m))) := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hpeel :
+      sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun c =>
+          Xentry m a W W * (P3 W c W m * Xentry m c a W)))
+      = sumLtI (2^(m+1)) (fun a =>
+          Xentry m a W W * sumLtI (2^(m+1)) (fun c => P3 W c W m * Xentry m c a W)) := by
+    refine sumLtI_congr _ _ _ (fun a _ => ?_)
+    exact sumLtI_mul _ _ _
+  rw [hpeel]
+  rw [sumLtI_congr _ _ _ (fun a ha => weight2_pin_S1_pt m a W ha hW hW0)]
+  let A : Nat → Int := fun a =>
+    sumLtI (2^(m+1)) (fun c => P3 W c W m * P3 c a W m) * P3 a W W m
+  let B : Nat → Int := fun a => 2 * P3 W (a ^^^ W) W m * P3 a W W m
+  let C : Nat → Int := fun a =>
+    -(if a = W then 4 * P3 W 0 W m * P3 a W W m else 0)
+  let D : Nat → Int := fun a =>
+    if a = 0 then -2 * sumLtI (2^(m+1)) (fun c => P3 W c W m * P3 c 0 W m) else 0
+  let E : Nat → Int := fun a => if a = 0 then -4 * P3 W W W m else 0
+  have hshape :
+      sumLtI (2^(m+1)) (fun a =>
+          sumLtI (2^(m+1)) (fun c => P3 W c W m * P3 c a W m) * P3 a W W m
+            + (2 * P3 W (a ^^^ W) W m * P3 a W W m
+            + (-(if a = W then 4 * P3 W 0 W m * P3 a W W m else 0)
+            + ((if a = 0 then -2 * sumLtI (2^(m+1)) (fun c => P3 W c W m * P3 c 0 W m) else 0)
+            + (if a = 0 then -4 * P3 W W W m else 0)))))
+      = sumLtI (2^(m+1)) (fun a => A a + (B a + (C a + (D a + E a)))) :=
+    sumLtI_congr _ _ _ (fun a _ => by rfl)
+  rw [hshape, sumLtI_five]
+  have hA : sumLtI (2^(m+1)) A
+      = sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+            P3 W a W m * (P3 a b W m * P3 b W W m))) := by
+    unfold A
+    have h1 : sumLtI (2^(m+1)) (fun a =>
+          sumLtI (2^(m+1)) (fun c => P3 W c W m * P3 c a W m) * P3 a W W m)
+        = sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun c =>
+              P3 W c W m * (P3 c a W m * P3 a W W m))) := by
+      refine sumLtI_congr _ _ _ (fun a _ => ?_)
+      have hmul := sumLtI_mul_r (2^(m+1)) (fun c => P3 W c W m * P3 c a W m) (P3 a W W m)
+      rw [← hmul]
+      exact sumLtI_congr _ _ _ (fun c _ => by grind)
+    rw [h1]
+    exact sumLtI_swap _ _ _
+  have hB : sumLtI (2^(m+1)) B
+      = 2 * sumLtI (2^(m+1)) (fun b => P3 W b W m * P3 (b ^^^ W) W W m) := by
+    unfold B
+    have h1 : sumLtI (2^(m+1)) (fun a => 2 * P3 W (a ^^^ W) W m * P3 a W W m)
+        = sumLtI (2^(m+1)) (fun a => 2 * (P3 W (a ^^^ W) W m * P3 a W W m)) :=
+      sumLtI_congr _ _ _ (fun a _ => by grind)
+    rw [h1, sumLtI_mul]
+    have h2 : sumLtI (2^(m+1)) (fun a => P3 W (a ^^^ W) W m * P3 a W W m)
+        = sumLtI (2^(m+1)) (fun b => P3 W b W m * P3 (b ^^^ W) W W m) := by
+      have hx := sumLtI_xor (m+1) W hW (fun b => P3 W b W m * P3 (b ^^^ W) W W m)
+      rw [hx]
+      refine sumLtI_congr _ _ _ (fun a _ => ?_)
+      rw [xor_cancel a W]
+    rw [h2]
+  have hC : sumLtI (2^(m+1)) C = -(4 * P3 W 0 W m * P3 W W W m) := by
+    unfold C
+    have hcongr := sumLtI_congr (2^(m+1))
+      (fun a => -(if a = W then 4 * P3 W 0 W m * P3 a W W m else 0))
+      (fun a => if a = W then -(4 * P3 W 0 W m * P3 W W W m) else 0)
+      (fun a _ => by
+        by_cases haW : a = W
+        · rw [if_pos haW, if_pos haW, haW]
+        · rw [if_neg haW, if_neg haW]
+          grind)
+    rw [hcongr, sumLtI_single (2^(m+1)) W _ hW]
+  have hD : sumLtI (2^(m+1)) D
+      = -2 * sumLtI (2^(m+1)) (fun c => P3 W c W m * P3 c 0 W m) := by
+    unfold D
+    rw [sumLtI_single (2^(m+1)) 0 _ hp]
+  have hE : sumLtI (2^(m+1)) E = -4 * P3 W W W m := by
+    unfold E
+    rw [sumLtI_single (2^(m+1)) 0 _ hp]
+  rw [hA, hB, hC, hD, hE]
+  rw [walk_MPiM_WW m W hW hW0, sum_P3W_col0 m W hW hW0,
+      P3_seam_zero m W hW hW0, P3_diag W W m hW hW hW0]
+  grind
+
+/-- **`T2` WITH BOTH MIDDLE PINS EVALUATED.**  `S₁ = S₂ = (M³)_WW`; only the bulk remains. -/
+theorem weight2_D_S1 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+        E01 a b W * P3 a b W m
+          * (E11 b c W * P3 b c W m * (E10 c a W * P3 c a W m)))))
+      = sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+            Xentry m a b W * (P3 b c W m * Xentry m c a W))))
+        - 4 * sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+            P3 W a W m * (P3 a b W m * P3 b W W m)))
+        + 4 * (2 - ((2^(m+1) : Nat) : Int)) := by
+  rw [weight2_D_S2 m W hW hW0, weight2_pin_S1 m W hW hW0]
+  grind
+
 end SounioZDFiberAntisym
