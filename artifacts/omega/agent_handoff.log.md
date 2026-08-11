@@ -3409,3 +3409,11 @@ notes: |
   Next: scratch-file iteration (.tmp/tier130_scratch.lean against the tip olean), then
   append Tier 130 (`sum_P3W_col0`, `weight2_pin_S1`, `weight2_D_S1` — both pins evaluated,
   only the bulk tr(XMX) remains on T2), xai math-review, commit through the index.
+
+  UPDATE (kimi, same day): **Tier 130 LANDED, GREEN — `a334552595`.**  `sum_P3W_col0`
+  (Σ_c P3(W,c)·P3(c,0) = 2−H), `weight2_pin_S1` (S₁ = (M³)_WW, all labels incl. maximal
+  seam), `weight2_D_S1` (D-corner expansion with BOTH middle pins evaluated).  Kernel-clean
+  under lean 4.33.0 direct build, xai math-review [OK]×3 (grok re-derived Q(0)=2−H
+  independently).  T2 leg now has exactly ONE open step before the closed form:
+  bulk `tr(XMX)` → s3 + 4·cp2 + corrections (grok-cli1's step 2).  Claim released;
+  next writer on the T2 leg should take an EVEN tier number ≥ 132.
