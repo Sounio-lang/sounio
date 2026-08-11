@@ -611,6 +611,59 @@ That is the concrete payoff of #444: not a projection, but fourteen tests that a
 feature works when it does not, plus one that crashes.
 
 
+
+## Following the thread to its end: #1706 defect 1, fixed
+
+Arming the assertions (#1531) exposed 14 `madaros_gum_fo_*` tests asserting a PASS marker
+neither engine produces (#1706). Investigating *why* found two independent defects, not one.
+
+**Defect 1 — variance was never tracked per struct field.** It was keyed by local NAME and by
+base REG only, so `let a = A { x: k.value }` followed by `variance_of(a.x)` had nowhere to look
+and emitted a silent `0.0`. **One hop was enough**; this was not a deep-nesting corner case. The
+compiler's own trace (`SOUNIO_LOWER_LIVE_TRACE=1`, printing `fo_xfer_miss name=…`) was what
+separated this from the transfer-table story.
+
+Fixed and merged as **#1711** (`9c6a04d865`):
+
+| expression | before | after |
+|---|---|---|
+| `a.x` (one hop) | `0.000000` | **`0.090000`** |
+| `d.c.b.a.x` (four hops) | `0.000000` | **`0.090000`** |
+| `d.v0` | `0.000000` | **`4.000000`** |
+| `pk2.cl0` (aggregate alias) | `0.000000` | **`0.090000`** |
+
+152 lines, insertions only. No new tables — `Lowerer` is passed by value and already carries
+`[i64; 4096]` plus two `[i64; 1024]` inline, so a field slot encodes `(base_reg, field_idx)` into
+two disjoint key bands of the existing base-reg table.
+
+**Defect 2 — the FO transfer classifier's coverage — remains open.** `fo_classify_expr_transfer`
+accepts only identity, `lit*x`, `a+b`, `a*b`, and a bare forwarded call; `ExprIf` bodies, calls
+nested inside a binary, and >2-param bodies fall through unregistered. So `v_call` and `v_meth`
+still read zero, all 14 entries stay in `tests/vacuous_expect_baseline.txt`, and #1706 stays open.
+
+### Two method notes worth keeping
+
+**A regression test must be proven to discriminate.** `gum_fo_field_chain_variance.sio` was run
+against unmodified `main` (FAIL) *and* the fix (OK) before being committed. In a report whose
+subject is assertions that never ran, shipping a test that passes either way would have been
+self-defeating.
+
+**`//@ requires: madaros` is truthful here and would be a lie on the other 14.** This fix lives
+in `self-hosted/ir/lower.sio`, which only Madaros runs — Madaros passes, stage2 does not, so the
+annotation states a real engine boundary. On the `madaros_gum_fo_*` family the same annotation
+would be false, because Madaros fails those too.
+
+### The suite is flaky, and that is now visible
+
+`main` fails roughly one run in four, on a *different* test each time
+(`global_scalar_init_still_works`, `observe_io_boundary`) — always `missing stdout` or
+`missing error`. A re-run of an unchanged commit went from red to 10/10 green, which is what
+identified it as flakiness rather than regression.
+
+Those are precisely the assertions #1531 armed. The instability is not new; the ability to see it
+is. Whoever picks this up should expect to re-run before believing a single red.
+
+
 ## Ranking
 
 Silent-wrong ranks above crash, because a crash announces itself.
