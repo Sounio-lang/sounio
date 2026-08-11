@@ -18579,7 +18579,7 @@ theorem weight2_D_S2 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
   rw [weight2_D_corner m W hW hW0, weight2_pin_S2 m W hW hW0]
 
 
-/-! ### Tier 127 — the five single pins of `T1`'s CORE, identified
+/-! ### Tier 129 — the five single pins of `T1`'s CORE, identified
 
     Tier 123's expansion leaves five single-pin double sums: three with the pin at `0` and two with
     it at `W` (the third index carries only `ε`, so it has no `W` pin).  Each must be identified
