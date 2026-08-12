@@ -20239,4 +20239,515 @@ theorem t1_route_inner (m a b W : Nat) (ha : a < 2^(m+1)) (hb : b < 2^(m+1))
       sumLtI_single (2^(m+1)) 0 _ hp,
       sumLtI_single (2^(m+1)) W _ hW]
 
+/-! ### Tier 136 — `s3` at the maximal seam: the E5 polynomial (kimi)
+
+    The E5 note's item 3: `tr(M³) = H³ − 12H² + 28H − 16` at `W = 2^(k+1)`.
+    With Tier 134's coboundary the diagonal of `M³` is constant off index `0`
+    (`seam_K`: every `a ≠ 0` gives `(H−2)² − 6H + 12` — the SAME value as the seam
+    walk `(M³)_WW`), and index `0` alone carries `−H² + 2H` (`seam_K0`).
+    Measured before proving (`.tmp/zd_s1_probe.py` extension): `K_a` constant,
+    `K_0 = −H² + 2H`, and the assembled polynomial exact at levels 2,3,4; the
+    level-3 value `1456` matches the E5 table.  What this tier proves is the seam end:
+    `s3(2^m)` is a pure polynomial in `H`.  The reading that E5's q-binomial therefore
+    lives entirely on the reference side is the E5 note's (its §1, measured there
+    `m = 3..8`); it is not a theorem of this file. -/
+
+/-- The row-`0` entries square to `1`. -/
+private theorem s_sq (k a : Nat) :
+    P3 0 a (2^(k+1)) (k+1) * P3 0 a (2^(k+1)) (k+1) = 1 := by
+  rcases P3_pm 0 a (2^(k+1)) (k+1) with h | h <;> rw [h] <;> grind
+
+/-- **Entry law, first factor.**  For `a ≠ 0`: `M(a,b) = s_a·s_b − 2[b=a] − 2·s_a·[b=0]`. -/
+private theorem P3_seam_entry_fst (k a b : Nat)
+    (ha : a < 2^(k+2)) (hb : b < 2^(k+2)) (ha0 : a ≠ 0) :
+    P3 a b (2^(k+1)) (k+1)
+      = P3 0 a (2^(k+1)) (k+1) * P3 0 b (2^(k+1)) (k+1)
+        - 2 * (if b = a then 1 else 0)
+        - 2 * P3 0 a (2^(k+1)) (k+1) * (if b = 0 then 1 else 0) := by
+  have hW : 2^(k+1) < 2^(k+2) := by
+    have hpow : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by
+      show (2:Nat)^(k+1+1) = 2^(k+1) + 2^(k+1)
+      rw [Nat.pow_succ, Nat.mul_comm, Nat.two_mul]
+    have := Nat.two_pow_pos (k+1); omega
+  by_cases hb0 : b = 0
+  · subst hb0
+    rw [if_neg (fun h : (0:Nat) = a => ha0 h.symm), if_pos rfl, P3_zero_zero (k+1) (2^(k+1))]
+    have h1 := P3_col0_eq_neg_row0 (k+1) a (2^(k+1)) ha hW
+    rw [if_neg ha0] at h1
+    rw [h1]
+    grind
+  · by_cases hba : b = a
+    · subst hba
+      rw [if_pos rfl, if_neg ha0, P3_diag b (2^(k+1)) (k+1) hb hW ha0]
+      have h2 := s_sq k b
+      grind
+    · rw [if_neg hba, if_neg hb0]
+      have hcb := P3_seam_coboundary k a b ha hb ha0 hb0 (fun h => hba h.symm)
+      rcases P3_pm a b (2^(k+1)) (k+1) with h1 | h1 <;>
+        rcases P3_pm 0 a (2^(k+1)) (k+1) with h2 | h2 <;>
+        rcases P3_pm 0 b (2^(k+1)) (k+1) with h3 | h3 <;>
+        rw [h1, h2, h3] at hcb ⊢ <;> grind
+
+/-- **Entry law, second factor.**  For `a ≠ 0`, every `c`: `M(c,a) = s_c·s_a − 2[c=a]`. -/
+private theorem P3_seam_entry_snd (k c a : Nat)
+    (hc : c < 2^(k+2)) (ha : a < 2^(k+2)) (ha0 : a ≠ 0) :
+    P3 c a (2^(k+1)) (k+1)
+      = P3 0 c (2^(k+1)) (k+1) * P3 0 a (2^(k+1)) (k+1)
+        - 2 * (if c = a then 1 else 0) := by
+  have hW : 2^(k+1) < 2^(k+2) := by
+    have hpow : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by
+      show (2:Nat)^(k+1+1) = 2^(k+1) + 2^(k+1)
+      rw [Nat.pow_succ, Nat.mul_comm, Nat.two_mul]
+    have := Nat.two_pow_pos (k+1); omega
+  by_cases hc0 : c = 0
+  · subst hc0
+    rw [if_neg (fun h : (0:Nat) = a => ha0 h.symm), P3_zero_zero (k+1) (2^(k+1))]
+    grind
+  · by_cases hca : c = a
+    · subst hca
+      rw [if_pos rfl, P3_diag c (2^(k+1)) (k+1) hc hW ha0]
+      have h2 := s_sq k c
+      grind
+    · rw [if_neg hca]
+      have hcb := P3_seam_coboundary k c a hc ha hc0 ha0 hca
+      rcases P3_pm c a (2^(k+1)) (k+1) with h1 | h1 <;>
+        rcases P3_pm 0 c (2^(k+1)) (k+1) with h2 | h2 <;>
+        rcases P3_pm 0 a (2^(k+1)) (k+1) with h3 | h3 <;>
+        rw [h1, h2, h3] at hcb ⊢ <;> grind
+
+/-- The row sum `Σ_c M(a,c)·s_c = s_a·(H−4)` for `a ≠ 0`. -/
+private theorem seam_S_row (k a : Nat) (ha : a < 2^(k+2)) (ha0 : a ≠ 0) :
+    sumLtI (2^(k+1+1)) (fun c => P3 a c (2^(k+1)) (k+1) * P3 0 c (2^(k+1)) (k+1))
+      = P3 0 a (2^(k+1)) (k+1) * (((2^(k+1+1) : Nat) : Int) - 4) := by
+  have hp : (0:Nat) < 2^(k+1+1) := Nat.two_pow_pos (k+1+1)
+  have hpt : ∀ c, c < 2^(k+1+1) →
+      P3 a c (2^(k+1)) (k+1) * P3 0 c (2^(k+1)) (k+1)
+      = P3 0 a (2^(k+1)) (k+1)
+        + (if c = a then -2 * P3 0 a (2^(k+1)) (k+1) else 0)
+        + (if c = 0 then -2 * P3 0 a (2^(k+1)) (k+1) else 0) := by
+    intro c hc
+    rw [P3_seam_entry_fst k a c ha hc ha0]
+    have hsc := s_sq k c
+    by_cases hca : c = a
+    · subst hca
+      rw [if_pos rfl, if_neg ha0]
+      grind
+    · by_cases hc0 : c = 0
+      · subst hc0
+        rw [if_neg (fun h : (0:Nat) = a => ha0 h.symm), if_pos rfl,
+            P3_zero_zero (k+1) (2^(k+1))]
+        grind
+      · rw [if_neg hca, if_neg hc0]
+        grind
+  rw [sumLtI_congr _ _ _ hpt, sumLtI_add, sumLtI_add]
+  have hconst : sumLtI (2^(k+1+1)) (fun _ => P3 0 a (2^(k+1)) (k+1))
+      = P3 0 a (2^(k+1)) (k+1) * ((2^(k+1+1) : Nat) : Int) := by
+    rw [sumLtI_congr _ _ (fun c => P3 0 a (2^(k+1)) (k+1) * (1:Int)) (fun c _ => by grind),
+        sumLtI_mul, sumLtI_one]
+  rw [hconst, sumLtI_single (2^(k+1+1)) a _ ha, sumLtI_single (2^(k+1+1)) 0 _ hp]
+  grind
+
+/-- The column sum `Σ_b s_b·M(b,a) = s_a·(H−2)` for `a ≠ 0` — no column-0 correction,
+    because `M(0,a) = s_a` is exactly `s_0·s_a`. -/
+private theorem seam_S_col (k a : Nat) (ha : a < 2^(k+2)) (ha0 : a ≠ 0) :
+    sumLtI (2^(k+1+1)) (fun b => P3 0 b (2^(k+1)) (k+1) * P3 b a (2^(k+1)) (k+1))
+      = P3 0 a (2^(k+1)) (k+1) * (((2^(k+1+1) : Nat) : Int) - 2) := by
+  have hp : (0:Nat) < 2^(k+1+1) := Nat.two_pow_pos (k+1+1)
+  have hW : 2^(k+1) < 2^(k+2) := by
+    have hpow : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by
+      show (2:Nat)^(k+1+1) = 2^(k+1) + 2^(k+1)
+      rw [Nat.pow_succ, Nat.mul_comm, Nat.two_mul]
+    have := Nat.two_pow_pos (k+1); omega
+  have hpt : ∀ b, b < 2^(k+1+1) →
+      P3 0 b (2^(k+1)) (k+1) * P3 b a (2^(k+1)) (k+1)
+      = P3 0 a (2^(k+1)) (k+1) + (if b = a then -2 * P3 0 a (2^(k+1)) (k+1) else 0) := by
+    intro b hb
+    by_cases hba : b = a
+    · subst hba
+      rw [if_pos rfl, P3_diag b (2^(k+1)) (k+1) hb hW ha0]
+      grind
+    · rw [if_neg hba]
+      by_cases hb0 : b = 0
+      · subst hb0
+        rw [P3_zero_zero (k+1) (2^(k+1))]
+        grind
+      · have hcb := P3_seam_coboundary k b a hb ha hb0 ha0 hba
+        rcases P3_pm b a (2^(k+1)) (k+1) with h1 | h1 <;>
+          rcases P3_pm 0 b (2^(k+1)) (k+1) with h2 | h2 <;>
+          rcases P3_pm 0 a (2^(k+1)) (k+1) with h3 | h3 <;>
+          rw [h1, h2, h3] at hcb ⊢ <;> grind
+  rw [sumLtI_congr _ _ _ hpt, sumLtI_add]
+  have hconst : sumLtI (2^(k+1+1)) (fun _ => P3 0 a (2^(k+1)) (k+1))
+      = P3 0 a (2^(k+1)) (k+1) * ((2^(k+1+1) : Nat) : Int) := by
+    rw [sumLtI_congr _ _ (fun b => P3 0 a (2^(k+1)) (k+1) * (1:Int)) (fun b _ => by grind),
+        sumLtI_mul, sumLtI_one]
+  rw [hconst, sumLtI_single (2^(k+1+1)) a _ ha]
+  grind
+
+
+/-- The row sum `R_b = Σ_c M(b,c)·s_c` evaluated: `H` at `b = 0`, `s_b·(H−4)` off it. -/
+private theorem seam_Rval (k b : Nat) (hb : b < 2^(k+2)) :
+    sumLtI (2^(k+1+1)) (fun c => P3 b c (2^(k+1)) (k+1) * P3 0 c (2^(k+1)) (k+1))
+      = if b = 0 then ((2^(k+1+1) : Nat) : Int)
+        else P3 0 b (2^(k+1)) (k+1) * (((2^(k+1+1) : Nat) : Int) - 4) := by
+  by_cases hb0 : b = 0
+  · subst hb0
+    rw [if_pos rfl, seam_J0 k]
+  · rw [if_neg hb0, seam_S_row k b hb hb0]
+
+/-- `Σ_b M(a,b)·R_b = s_a·(H²−8H+12)` for `a ≠ 0`: the `(H−2)²` main term, minus the
+    `b = a` pin, minus the `b = 0` pin. -/
+private theorem seam_A1_inner (k a : Nat) (ha : a < 2^(k+2)) (ha0 : a ≠ 0) :
+    sumLtI (2^(k+1+1)) (fun b => P3 a b (2^(k+1)) (k+1)
+        * sumLtI (2^(k+1+1)) (fun c => P3 b c (2^(k+1)) (k+1) * P3 0 c (2^(k+1)) (k+1)))
+      = P3 0 a (2^(k+1)) (k+1)
+        * ((((2^(k+1+1) : Nat) : Int)) * (((2^(k+1+1) : Nat) : Int))
+          - 8 * ((2^(k+1+1) : Nat) : Int) + 12) := by
+  have hp : (0:Nat) < 2^(k+1+1) := Nat.two_pow_pos (k+1+1)
+  have hW : 2^(k+1) < 2^(k+2) := by
+    have hpow : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by
+      show (2:Nat)^(k+1+1) = 2^(k+1) + 2^(k+1)
+      rw [Nat.pow_succ, Nat.mul_comm, Nat.two_mul]
+    have := Nat.two_pow_pos (k+1); omega
+  rw [sumLtI_congr _ _ _ (fun b hb => congrArg (P3 a b (2^(k+1)) (k+1) * ·) (seam_Rval k b hb))]
+  have hpt : ∀ b, b < 2^(k+1+1) →
+      P3 a b (2^(k+1)) (k+1)
+        * (if b = 0 then ((2^(k+1+1) : Nat) : Int)
+          else P3 0 b (2^(k+1)) (k+1) * (((2^(k+1+1) : Nat) : Int) - 4))
+      = P3 0 a (2^(k+1)) (k+1) * (((2^(k+1+1) : Nat) : Int) - 4)
+        + (if b = 0 then
+            P3 0 a (2^(k+1)) (k+1) * (4 - 2 * ((2^(k+1+1) : Nat) : Int)) else 0)
+        + (if b = a then
+            -2 * (P3 0 a (2^(k+1)) (k+1) * (((2^(k+1+1) : Nat) : Int) - 4)) else 0) := by
+    intro b hb
+    rw [P3_seam_entry_fst k a b ha hb ha0]
+    have hsqa := s_sq k a
+    have hsqb := s_sq k b
+    have hz := P3_zero_zero (k+1) (2^(k+1))
+    by_cases hb0 : b = 0
+    · subst hb0
+      rw [if_pos rfl, if_neg (fun h : (0:Nat) = a => ha0 h.symm)]
+      grind
+    · by_cases hba : b = a
+      · subst hba
+        rw [if_neg ha0, if_pos rfl]
+        grind
+      · rw [if_neg hb0, if_neg hba]
+        grind
+  rw [sumLtI_congr _ _ _ hpt, sumLtI_add, sumLtI_add]
+  have hconst : sumLtI (2^(k+1+1)) (fun _ =>
+        P3 0 a (2^(k+1)) (k+1) * (((2^(k+1+1) : Nat) : Int) - 4))
+      = P3 0 a (2^(k+1)) (k+1) * (((2^(k+1+1) : Nat) : Int) - 4)
+        * ((2^(k+1+1) : Nat) : Int) := by
+    rw [sumLtI_congr _ _
+          (fun b => (P3 0 a (2^(k+1)) (k+1) * (((2^(k+1+1) : Nat) : Int) - 4)) * (1:Int))
+          (fun b _ => by grind),
+        sumLtI_mul, sumLtI_one]
+  rw [hconst, sumLtI_single (2^(k+1+1)) 0 _ hp, sumLtI_single (2^(k+1+1)) a _ ha]
+  grind
+
+/-- `Σ_b M(a,b)·M(b,a) = H − 2` for `a ≠ 0`: `+1` everywhere, `−1` at `b = 0`. -/
+private theorem seam_A2_inner (k a : Nat) (ha : a < 2^(k+2)) (ha0 : a ≠ 0) :
+    sumLtI (2^(k+1+1)) (fun b =>
+        P3 a b (2^(k+1)) (k+1) * P3 b a (2^(k+1)) (k+1))
+      = ((2^(k+1+1) : Nat) : Int) - 2 := by
+  have hp : (0:Nat) < 2^(k+1+1) := Nat.two_pow_pos (k+1+1)
+  have hpt : ∀ b, b < 2^(k+1+1) →
+      P3 a b (2^(k+1)) (k+1) * P3 b a (2^(k+1)) (k+1)
+      = 1 + (if b = a then 4 - 4 * (P3 0 a (2^(k+1)) (k+1) * P3 0 b (2^(k+1)) (k+1)) else 0)
+        + (if b = 0 then -2 else 0) := by
+    intro b hb
+    rw [P3_seam_entry_fst k a b ha hb ha0, P3_seam_entry_snd k b a hb ha ha0]
+    have hsqa := s_sq k a
+    have hsqb := s_sq k b
+    have hz := P3_zero_zero (k+1) (2^(k+1))
+    by_cases hb0 : b = 0
+    · subst hb0
+      rw [if_neg (fun h : (0:Nat) = a => ha0 h.symm), if_pos rfl]
+      grind
+    · by_cases hba : b = a
+      · subst hba
+        rw [if_neg ha0, if_pos rfl]
+        grind
+      · rw [if_neg hb0, if_neg hba]
+        grind
+  rw [sumLtI_congr _ _ _ hpt, sumLtI_add, sumLtI_add]
+  rw [sumLtI_one]
+  have hmid : sumLtI (2^(k+1+1)) (fun b =>
+        if b = a then 4 - 4 * (P3 0 a (2^(k+1)) (k+1) * P3 0 b (2^(k+1)) (k+1)) else 0)
+      = sumLtI (2^(k+1+1)) (fun b =>
+          if b = a then 4 - 4 * (P3 0 a (2^(k+1)) (k+1) * P3 0 a (2^(k+1)) (k+1)) else 0) :=
+    sumLtI_congr _ _ _ (fun b _ => by
+      by_cases h : b = a
+      · rw [if_pos h, if_pos h, h]
+      · rw [if_neg h, if_neg h])
+  rw [hmid, sumLtI_single (2^(k+1+1)) a _ ha, sumLtI_single (2^(k+1+1)) 0 _ hp]
+  have hsqa := s_sq k a
+  grind
+
+/-- **THE DIAGONAL OF `M³` OFF INDEX `0`.**  For `a ≠ 0`, `(M³)_aa = (H−2)² − 6H + 12` —
+    the SAME value as Tier 134's seam walk `(M³)_WW`: at the maximal seam the whole
+    nonzero diagonal is constant. -/
+private theorem seam_K (k a : Nat) (ha : a < 2^(k+2)) (ha0 : a ≠ 0) :
+    sumLtI (2^(k+1+1)) (fun b => sumLtI (2^(k+1+1)) (fun c =>
+        P3 a b (2^(k+1)) (k+1) * (P3 b c (2^(k+1)) (k+1) * P3 c a (2^(k+1)) (k+1))))
+      = (((2^(k+1+1) : Nat) : Int) - 2) * (((2^(k+1+1) : Nat) : Int) - 2)
+        - 6 * ((2^(k+1+1) : Nat) : Int) + 12 := by
+  have hp : (0:Nat) < 2^(k+1+1) := Nat.two_pow_pos (k+1+1)
+  have hsqa := s_sq k a
+  -- split off the second entry law: M(c,a) = s_c·s_a − 2[c=a]
+  have hsplit : sumLtI (2^(k+1+1)) (fun b => sumLtI (2^(k+1+1)) (fun c =>
+        P3 a b (2^(k+1)) (k+1) * (P3 b c (2^(k+1)) (k+1) * P3 c a (2^(k+1)) (k+1))))
+      = sumLtI (2^(k+1+1)) (fun b => sumLtI (2^(k+1+1)) (fun c =>
+            P3 a b (2^(k+1)) (k+1) * (P3 b c (2^(k+1)) (k+1)
+              * (P3 0 c (2^(k+1)) (k+1) * P3 0 a (2^(k+1)) (k+1)))))
+        - sumLtI (2^(k+1+1)) (fun b => sumLtI (2^(k+1+1)) (fun c =>
+            (if c = a then
+                2 * (P3 a b (2^(k+1)) (k+1) * P3 b c (2^(k+1)) (k+1)) else 0))) := by
+    have hpt : ∀ b, b < 2^(k+1+1) → ∀ c, c < 2^(k+1+1) →
+        P3 a b (2^(k+1)) (k+1) * (P3 b c (2^(k+1)) (k+1) * P3 c a (2^(k+1)) (k+1))
+        = P3 a b (2^(k+1)) (k+1) * (P3 b c (2^(k+1)) (k+1)
+              * (P3 0 c (2^(k+1)) (k+1) * P3 0 a (2^(k+1)) (k+1)))
+          - (if c = a then
+              2 * (P3 a b (2^(k+1)) (k+1) * P3 b c (2^(k+1)) (k+1)) else 0) := by
+      intro b hb c hc
+      rw [P3_seam_entry_snd k c a hc ha ha0]
+      grind
+    rw [sumLtI_congr _ _ _ (fun b hb => sumLtI_congr _ _ _ (hpt b hb))]
+    have hnest : ∀ b, b < 2^(k+1+1) →
+        sumLtI (2^(k+1+1)) (fun c =>
+            P3 a b (2^(k+1)) (k+1) * (P3 b c (2^(k+1)) (k+1)
+                * (P3 0 c (2^(k+1)) (k+1) * P3 0 a (2^(k+1)) (k+1)))
+            - (if c = a then
+                2 * (P3 a b (2^(k+1)) (k+1) * P3 b c (2^(k+1)) (k+1)) else 0))
+        = sumLtI (2^(k+1+1)) (fun c =>
+              P3 a b (2^(k+1)) (k+1) * (P3 b c (2^(k+1)) (k+1)
+                * (P3 0 c (2^(k+1)) (k+1) * P3 0 a (2^(k+1)) (k+1))))
+          - sumLtI (2^(k+1+1)) (fun c =>
+              (if c = a then
+                  2 * (P3 a b (2^(k+1)) (k+1) * P3 b c (2^(k+1)) (k+1)) else 0)) :=
+      fun b _ => sumLtI_sub _ _ _
+    rw [sumLtI_congr _ _ _ hnest, sumLtI_sub]
+  rw [hsplit]
+  -- first piece: s_a · Σ_b M(a,b)·R_b = H²−8H+12
+  have hA1 : sumLtI (2^(k+1+1)) (fun b => sumLtI (2^(k+1+1)) (fun c =>
+        P3 a b (2^(k+1)) (k+1) * (P3 b c (2^(k+1)) (k+1)
+          * (P3 0 c (2^(k+1)) (k+1) * P3 0 a (2^(k+1)) (k+1)))))
+      = ((2^(k+1+1) : Nat) : Int) * ((2^(k+1+1) : Nat) : Int)
+        - 8 * ((2^(k+1+1) : Nat) : Int) + 12 := by
+    have hper : ∀ b, b < 2^(k+1+1) →
+        sumLtI (2^(k+1+1)) (fun c =>
+            P3 a b (2^(k+1)) (k+1) * (P3 b c (2^(k+1)) (k+1)
+              * (P3 0 c (2^(k+1)) (k+1) * P3 0 a (2^(k+1)) (k+1))))
+        = P3 a b (2^(k+1)) (k+1) * P3 0 a (2^(k+1)) (k+1)
+          * sumLtI (2^(k+1+1)) (fun c => P3 b c (2^(k+1)) (k+1) * P3 0 c (2^(k+1)) (k+1)) := by
+      intro b hb
+      have hcongr := sumLtI_congr (2^(k+1+1))
+        (fun c => P3 a b (2^(k+1)) (k+1) * (P3 b c (2^(k+1)) (k+1)
+            * (P3 0 c (2^(k+1)) (k+1) * P3 0 a (2^(k+1)) (k+1))))
+        (fun c => (P3 a b (2^(k+1)) (k+1) * P3 0 a (2^(k+1)) (k+1))
+            * (P3 b c (2^(k+1)) (k+1) * P3 0 c (2^(k+1)) (k+1)))
+        (fun c _ => by grind)
+      rw [hcongr, sumLtI_mul]
+    rw [sumLtI_congr _ _ _ hper]
+    have hf : ∀ b, P3 a b (2^(k+1)) (k+1) * P3 0 a (2^(k+1)) (k+1)
+          * sumLtI (2^(k+1+1)) (fun c => P3 b c (2^(k+1)) (k+1) * P3 0 c (2^(k+1)) (k+1))
+        = P3 0 a (2^(k+1)) (k+1) * (P3 a b (2^(k+1)) (k+1)
+            * sumLtI (2^(k+1+1)) (fun c => P3 b c (2^(k+1)) (k+1) * P3 0 c (2^(k+1)) (k+1))) :=
+      fun b => by grind
+    rw [sumLtI_congr _ _ _ (fun b _ => hf b), sumLtI_mul, seam_A1_inner k a ha ha0]
+    grind
+  -- second piece: −2·Σ_b M(a,b)M(b,a) = −2(H−2)
+  have hA2 : sumLtI (2^(k+1+1)) (fun b => sumLtI (2^(k+1+1)) (fun c =>
+        (if c = a then
+            2 * (P3 a b (2^(k+1)) (k+1) * P3 b c (2^(k+1)) (k+1)) else 0)))
+      = 2 * (((2^(k+1+1) : Nat) : Int) - 2) := by
+    have hper : ∀ b, b < 2^(k+1+1) →
+        sumLtI (2^(k+1+1)) (fun c =>
+          (if c = a then
+              2 * (P3 a b (2^(k+1)) (k+1) * P3 b c (2^(k+1)) (k+1)) else 0))
+        = 2 * (P3 a b (2^(k+1)) (k+1) * P3 b a (2^(k+1)) (k+1)) := by
+      intro b hb
+      have hcongr := sumLtI_congr (2^(k+1+1))
+        (fun c => (if c = a then
+            2 * (P3 a b (2^(k+1)) (k+1) * P3 b c (2^(k+1)) (k+1)) else 0))
+        (fun c => (if c = a then
+            2 * (P3 a b (2^(k+1)) (k+1) * P3 b a (2^(k+1)) (k+1)) else 0))
+        (fun c _ => by
+          by_cases hca : c = a
+          · rw [if_pos hca, if_pos hca, hca]
+          · rw [if_neg hca, if_neg hca])
+      rw [hcongr, sumLtI_single (2^(k+1+1)) a _ ha]
+    rw [sumLtI_congr _ _ _ hper]
+    have hf : ∀ b, 2 * (P3 a b (2^(k+1)) (k+1) * P3 b a (2^(k+1)) (k+1))
+        = 2 * ((P3 a b (2^(k+1)) (k+1) * P3 b a (2^(k+1)) (k+1))) := fun b => rfl
+    rw [sumLtI_mul, seam_A2_inner k a ha ha0]
+  rw [hA1, hA2]
+  grind
+
+
+/-- **THE DIAGONAL OF `M³` AT INDEX `0`.**  `(M³)_00 = −H² + 2H` — via `P3_col0_eq_neg_row0`
+    the sum becomes `−Q + 2·(2−H)`. -/
+private theorem seam_K0 (k : Nat) :
+    sumLtI (2^(k+1+1)) (fun b => sumLtI (2^(k+1+1)) (fun c =>
+        P3 0 b (2^(k+1)) (k+1) * (P3 b c (2^(k+1)) (k+1) * P3 c 0 (2^(k+1)) (k+1))))
+      = -(((2^(k+1+1) : Nat) : Int) * ((2^(k+1+1) : Nat) : Int))
+        + 2 * ((2^(k+1+1) : Nat) : Int) := by
+  have hp : (0:Nat) < 2^(k+1+1) := Nat.two_pow_pos (k+1+1)
+  have hW : 2^(k+1) < 2^(k+2) := by
+    have hpow : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by
+      show (2:Nat)^(k+1+1) = 2^(k+1) + 2^(k+1)
+      rw [Nat.pow_succ, Nat.mul_comm, Nat.two_mul]
+    have := Nat.two_pow_pos (k+1); omega
+  -- pointwise: expand column 0
+  have hpt : ∀ b, b < 2^(k+1+1) → ∀ c, c < 2^(k+1+1) →
+      P3 0 b (2^(k+1)) (k+1) * (P3 b c (2^(k+1)) (k+1) * P3 c 0 (2^(k+1)) (k+1))
+      = -(P3 0 b (2^(k+1)) (k+1) * (P3 b c (2^(k+1)) (k+1) * P3 0 c (2^(k+1)) (k+1)))
+        + (if c = 0 then
+            2 * (P3 0 b (2^(k+1)) (k+1) * P3 b c (2^(k+1)) (k+1)) else 0) := by
+    intro b hb c hc
+    rw [P3_col0_eq_neg_row0 (k+1) c (2^(k+1)) hc hW]
+    grind
+  -- inner sum per b
+  have hper : ∀ b, b < 2^(k+1+1) →
+      sumLtI (2^(k+1+1)) (fun c =>
+          P3 0 b (2^(k+1)) (k+1) * (P3 b c (2^(k+1)) (k+1) * P3 c 0 (2^(k+1)) (k+1)))
+      = -(P3 0 b (2^(k+1)) (k+1)
+            * sumLtI (2^(k+1+1)) (fun c =>
+                P3 b c (2^(k+1)) (k+1) * P3 0 c (2^(k+1)) (k+1)))
+        + 2 * (P3 0 b (2^(k+1)) (k+1) * P3 b 0 (2^(k+1)) (k+1)) := by
+    intro b hb
+    rw [sumLtI_congr _ _ _ (hpt b hb), sumLtI_add]
+    have hneg : sumLtI (2^(k+1+1)) (fun c =>
+          -(P3 0 b (2^(k+1)) (k+1) * (P3 b c (2^(k+1)) (k+1) * P3 0 c (2^(k+1)) (k+1))))
+        = -(P3 0 b (2^(k+1)) (k+1)
+            * sumLtI (2^(k+1+1)) (fun c =>
+                P3 b c (2^(k+1)) (k+1) * P3 0 c (2^(k+1)) (k+1))) := by
+      rw [sumLtI_neg]
+      have hcongr := sumLtI_congr (2^(k+1+1))
+        (fun c => P3 0 b (2^(k+1)) (k+1) * (P3 b c (2^(k+1)) (k+1) * P3 0 c (2^(k+1)) (k+1)))
+        (fun c => P3 0 b (2^(k+1)) (k+1) * (P3 b c (2^(k+1)) (k+1) * P3 0 c (2^(k+1)) (k+1)))
+        (fun c _ => rfl)
+      rw [hcongr, sumLtI_mul]
+    have hsing : sumLtI (2^(k+1+1)) (fun c =>
+          (if c = 0 then
+              2 * (P3 0 b (2^(k+1)) (k+1) * P3 b c (2^(k+1)) (k+1)) else 0))
+        = 2 * (P3 0 b (2^(k+1)) (k+1) * P3 b 0 (2^(k+1)) (k+1)) := by
+      have hcongr := sumLtI_congr (2^(k+1+1))
+        (fun c => (if c = 0 then
+            2 * (P3 0 b (2^(k+1)) (k+1) * P3 b c (2^(k+1)) (k+1)) else 0))
+        (fun c => (if c = 0 then
+            2 * (P3 0 b (2^(k+1)) (k+1) * P3 b 0 (2^(k+1)) (k+1)) else 0))
+        (fun c _ => by
+          by_cases hc0 : c = 0
+          · rw [if_pos hc0, if_pos hc0, hc0]
+          · rw [if_neg hc0, if_neg hc0])
+      rw [hcongr, sumLtI_single (2^(k+1+1)) 0 _ hp]
+    rw [hneg, hsing]
+  rw [sumLtI_congr _ _ _ hper]
+  rw [sumLtI_congr _ _ _ (fun b _ => show
+      -(P3 0 b (2^(k+1)) (k+1)
+          * sumLtI (2^(k+1+1)) (fun c =>
+              P3 b c (2^(k+1)) (k+1) * P3 0 c (2^(k+1)) (k+1)))
+        + 2 * (P3 0 b (2^(k+1)) (k+1) * P3 b 0 (2^(k+1)) (k+1))
+      = -(P3 0 b (2^(k+1)) (k+1)
+            * sumLtI (2^(k+1+1)) (fun c =>
+                P3 b c (2^(k+1)) (k+1) * P3 0 c (2^(k+1)) (k+1)))
+        + (2 * (P3 0 b (2^(k+1)) (k+1) * P3 b 0 (2^(k+1)) (k+1))) from by grind)]
+  rw [sumLtI_add]
+  -- piece 1: −Σ_b s_b·R_b = −((H−4)·H + 4)
+  have hp1 : sumLtI (2^(k+1+1)) (fun b =>
+        -(P3 0 b (2^(k+1)) (k+1)
+          * sumLtI (2^(k+1+1)) (fun c =>
+              P3 b c (2^(k+1)) (k+1) * P3 0 c (2^(k+1)) (k+1))))
+      = -((((2^(k+1+1) : Nat) : Int) - 4) * ((2^(k+1+1) : Nat) : Int) + 4) := by
+    rw [sumLtI_neg]
+    have hcongr := sumLtI_congr (2^(k+1+1))
+      (fun b => P3 0 b (2^(k+1)) (k+1)
+          * sumLtI (2^(k+1+1)) (fun c =>
+              P3 b c (2^(k+1)) (k+1) * P3 0 c (2^(k+1)) (k+1)))
+      (fun b => (((2^(k+1+1) : Nat) : Int) - 4) + (if b = 0 then 4 else 0))
+      (fun b hb => by
+        rw [seam_Rval k b hb]
+        have hsqb := s_sq k b
+        have hz := P3_zero_zero (k+1) (2^(k+1))
+        by_cases hb0 : b = 0
+        · subst hb0
+          rw [if_pos rfl, if_pos rfl]
+          grind
+        · rw [if_neg hb0, if_neg hb0]
+          grind)
+    rw [hcongr, sumLtI_add]
+    have hconst : sumLtI (2^(k+1+1)) (fun _ => (((2^(k+1+1) : Nat) : Int) - 4))
+        = (((2^(k+1+1) : Nat) : Int) - 4) * ((2^(k+1+1) : Nat) : Int) := by
+      rw [sumLtI_congr _ _ (fun b => (((2^(k+1+1) : Nat) : Int) - 4) * (1:Int))
+            (fun b _ => by grind),
+          sumLtI_mul, sumLtI_one]
+    rw [hconst, sumLtI_single (2^(k+1+1)) 0 4 hp]
+  -- piece 2: 2·Σ_b s_b·M(b,0) = 2·(2−H)
+  have hp2 : sumLtI (2^(k+1+1)) (fun b =>
+        2 * (P3 0 b (2^(k+1)) (k+1) * P3 b 0 (2^(k+1)) (k+1)))
+      = 2 * (2 - ((2^(k+1+1) : Nat) : Int)) := by
+    rw [sumLtI_mul]
+    have hcongr := sumLtI_congr (2^(k+1+1))
+      (fun b => P3 0 b (2^(k+1)) (k+1) * P3 b 0 (2^(k+1)) (k+1))
+      (fun b => -1 + (if b = 0 then 2 else 0))
+      (fun b hb => by
+        have h1 := P3_col0_eq_neg_row0 (k+1) b (2^(k+1)) hb hW
+        have hsqb := s_sq k b
+        have hz := P3_zero_zero (k+1) (2^(k+1))
+        by_cases hb0 : b = 0
+        · subst hb0
+          rw [if_pos rfl] at h1 ⊢
+          grind
+        · rw [if_neg hb0] at h1 ⊢
+          grind)
+    rw [hcongr, sumLtI_add, sumLtI_neg_one, sumLtI_single (2^(k+1+1)) 0 2 hp]
+    grind
+  rw [hp1, hp2]
+  grind
+
+/-- **`s3` AT THE MAXIMAL SEAM** — the E5 note's item 3.  `tr(M³) = H³ − 12H² + 28H − 16`
+    at `W = 2^(k+1)`: the constant nonzero diagonal `(H−2)² − 6H + 12` (Tier 134's seam
+    value, measured for every `a ≠ 0`) times `H−1`, plus the `−H² + 2H` of index `0`.
+    Level-3 value `1456` matches the E5 table. -/
+theorem s3_maximal_seam (k : Nat) :
+    tri3 (2^(k+1+1)) (fun x y => P3 x y (2^(k+1)) (k+1))
+      = ((2^(k+1+1) : Nat) : Int) * ((2^(k+1+1) : Nat) : Int) * ((2^(k+1+1) : Nat) : Int)
+        - 12 * (((2^(k+1+1) : Nat) : Int) * ((2^(k+1+1) : Nat) : Int))
+        + 28 * ((2^(k+1+1) : Nat) : Int) - 16 := by
+  have hp : (0:Nat) < 2^(k+1+1) := Nat.two_pow_pos (k+1+1)
+  have hper : ∀ a, a < 2^(k+1+1) →
+      sumLtI (2^(k+1+1)) (fun b => sumLtI (2^(k+1+1)) (fun c =>
+          P3 a b (2^(k+1)) (k+1) * (P3 b c (2^(k+1)) (k+1) * P3 c a (2^(k+1)) (k+1))))
+      = ((((2^(k+1+1) : Nat) : Int) - 2) * (((2^(k+1+1) : Nat) : Int) - 2)
+          - 6 * ((2^(k+1+1) : Nat) : Int) + 12)
+        + (if a = 0 then
+            (-(2 * (((2^(k+1+1) : Nat) : Int) * ((2^(k+1+1) : Nat) : Int)))
+              + 12 * ((2^(k+1+1) : Nat) : Int) - 16) else 0) := by
+    intro a ha
+    by_cases ha0 : a = 0
+    · subst ha0
+      rw [if_pos rfl, seam_K0 k]
+      grind
+    · rw [if_neg ha0, seam_K k a ha ha0]
+      grind
+  show sumLtI (2^(k+1+1)) (fun a => sumLtI (2^(k+1+1)) (fun b => sumLtI (2^(k+1+1)) (fun c =>
+      P3 a b (2^(k+1)) (k+1) * (P3 b c (2^(k+1)) (k+1) * P3 c a (2^(k+1)) (k+1)))))
+    = _
+  rw [sumLtI_congr _ _ _ hper, sumLtI_add]
+  have hconst : sumLtI (2^(k+1+1)) (fun _ =>
+        ((((2^(k+1+1) : Nat) : Int) - 2) * (((2^(k+1+1) : Nat) : Int) - 2)
+          - 6 * ((2^(k+1+1) : Nat) : Int) + 12))
+      = ((((2^(k+1+1) : Nat) : Int) - 2) * (((2^(k+1+1) : Nat) : Int) - 2)
+          - 6 * ((2^(k+1+1) : Nat) : Int) + 12) * ((2^(k+1+1) : Nat) : Int) := by
+    rw [sumLtI_congr _ _
+          (fun a => ((((2^(k+1+1) : Nat) : Int) - 2) * (((2^(k+1+1) : Nat) : Int) - 2)
+              - 6 * ((2^(k+1+1) : Nat) : Int) + 12) * (1:Int))
+          (fun a _ => by grind),
+        sumLtI_mul, sumLtI_one]
+  rw [hconst, sumLtI_single (2^(k+1+1)) 0 _ hp]
+  grind
+
+
 end SounioZDFiberAntisym

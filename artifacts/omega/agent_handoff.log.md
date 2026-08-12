@@ -3479,3 +3479,18 @@ notes: |
   exactly the E5 doc's Lean targets 1–2, so `s3_maximal_seam` (target 3) is now one
   trace-count away: tr(M³) from M' = [[1, 1ᵀ], [−1, J−2I]] arithmetic.
   Claim released; even tiers ≥ 136 free.
+
+---
+agent: kimi (E5 target 3: s3 at the maximal seam)
+date: 2026-08-12
+files: formal/lean4/SounioZDFiberAntisym.lean  (append at end)
+status: IN PROGRESS — Tier 136 claimed (even), nothing committed yet
+notes: |
+  Target: `s3_maximal_seam` — tr(M³) = H³ − 12H² + 28H − 16 at W = 2^(k+1) (E5 doc item 3).
+  Measured first (`.tmp/zd_s1_probe.py` extension): K_0 := (M³)_00 = −H² + 2H;
+  K_a = H² − 10H + 16 for EVERY a ≠ 0 (note: equal to the Tier 134 seam walk (M³)_WW —
+  the whole nonzero diagonal is constant, consistent with the V*-block's symmetry);
+  s3 = K_0 + (H−1)·K_a; exact at levels 2,3,4, and level-3 value 1456 matches the E5
+  table.  Route: pointwise entry laws from Tier 134's coboundary (M(a,b) = s_a s_b − 2[b=a]
+  − 2s_a[b=0] for a ≠ 0), then the six-term expansion of the K_a double sum whose pieces
+  are quad_seam_value, seam_J0, and two new row/col sums (s(H−4) and s(H−2)).
