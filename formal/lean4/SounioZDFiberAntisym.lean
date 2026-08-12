@@ -19726,4 +19726,80 @@ theorem weight2_T2_one_scalar (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
   grind
 
 
+/-! ### Tier 137 — `T1`'s RANK-ONE corrections: one sum, three points, and the `4H`s cancel
+
+    `tauW_carrier` writes the coset-flipped matrix as `X = P3 + 2·Π_W − 4·e₀e_Wᵀ`.  Expanding
+    `X(b,c)·X(c,a)` gives nine terms: `CORE` (Tiers 125–126, 129), `R1` and `R2` (Tier 135), `R3`
+    (Tier 131), and five carrying the rank-one entry.  Those five are the last open piece, and four
+    of them are point values because `e₀e_Wᵀ` pins two indices at once:
+
+      `−4·P3·E(c,a)`   `E(c,a) = 1` forces `c = 0, a = W`   → `−4·Σ_b εσ(b)·P3(W,b)P3(b,0)`
+      `−4·E(b,c)·P3`   `E(b,c) = 1` forces `b = 0, c = W`   → `+4·Σ_a εσ(a)·P3(a,0)P3(W,a)`
+      `−8·Π·E`          `c = 0` and `c = b ⊕ W` force `b = W`, then `a = W`   → `−8`
+      `−8·E·Π`          `b = 0, c = W`, then `a = c ⊕ W = 0`                  → `−8`
+      `+16·E·E`         needs `c = W` and `c = 0` at once                     → `0`
+
+    The two sums are the SAME sum (the product commutes), so one lemma serves both — and they enter
+    with opposite signs, so their `±4H` cancel and only the constants survive:
+
+      `(4H − 8) + (8 − 4H) − 8 − 8 + 0 = −16`
+
+    which is the label-independent value §57.79 measured.  The pointwise fact underneath is the one
+    Tier 133 found: `P3(a,0)·P3(W,a) = −σ(a)` at EVERY index, so against the weight `ε(a)σ(a)` it
+    becomes `−ε(a)` and the sum is `−(H − 2)`. -/
+
+/-- The pointwise fact behind `t1_colsum`, named: `P3(a,0)·P3(W,a) = −σ(a)` at every index. -/
+theorem P3_col0_rowW_pt (m a W : Nat) (ha : a < 2^(m+1)) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    P3 a 0 W m * P3 W a W m = -(sigRow a W) := by
+  by_cases ha0 : a = 0
+  · subst ha0
+    rw [P3_zero_zero m W, P3_seam_zero m W hW hW0]
+    unfold sigRow; rw [Nat.zero_xor, if_neg hW0]; grind
+  · rw [P3_col0_eq_neg_row0 m a W ha hW, P3_rowW_eq_row0 m a W ha hW hW0, if_neg ha0]
+    unfold epsZero; rw [if_neg ha0]
+    rcases P3_pm 0 a W m with h | h <;> rw [h] <;> grind
+
+/-- **THE RANK-ONE SUM.**  `Σ_a ε(a)σ(a)·P3(a,0)·P3(W,a) = 2 − H`. -/
+theorem t1_rank1_sum (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun a => (epsZero a * sigRow a W) * (P3 a 0 W m * P3 W a W m))
+      = 2 - ((2^(m+1) : Nat) : Int) := by
+  have hcong : ∀ a, a < 2^(m+1) →
+      (epsZero a * sigRow a W) * (P3 a 0 W m * P3 W a W m) = -(epsZero a) := by
+    intro a ha
+    rw [P3_col0_rowW_pt m a W ha hW hW0]
+    unfold sigRow
+    by_cases haW : a = W
+    · rw [haW, Nat.xor_self, if_pos rfl]; grind
+    · have hne : a ^^^ W ≠ 0 := fun h => haW (xor_zero_eq a W h)
+      rw [if_neg hne]; grind
+  rw [sumLtI_congr _ _ _ hcong, sumLtI_neg, sum_epsZero m]
+  grind
+
+/-- The same sum with the factors in the other order — the shape the `E(c,a)` term produces. -/
+theorem t1_rank1_sum' (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun b => (epsZero b * sigRow b W) * (P3 W b W m * P3 b 0 W m))
+      = 2 - ((2^(m+1) : Nat) : Int) := by
+  rw [sumLtI_congr _ _ (fun b => (epsZero b * sigRow b W) * (P3 b 0 W m * P3 W b W m))
+        (fun b _ => by grind), t1_rank1_sum m W hW hW0]
+
+/-- **THE RANK-ONE TOTAL.**  The two sums enter with opposite signs, so the `±4H` cancel. -/
+theorem t1_rank1_total (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    (-4) * sumLtI (2^(m+1)) (fun b => (epsZero b * sigRow b W) * (P3 W b W m * P3 b 0 W m))
+      + 4 * sumLtI (2^(m+1)) (fun a => (epsZero a * sigRow a W) * (P3 a 0 W m * P3 W a W m))
+      + (-8) + (-8) + 0
+      = -16 := by
+  rw [t1_rank1_sum m W hW hW0, t1_rank1_sum' m W hW hW0]
+  grind
+
+/-- The two isolated points the `Π·E` and `E·Π` terms land on. -/
+theorem t1_rank1_points (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    (epsZero W * sigRow W W) * ((epsZero W * sigRow W W) * (epsZero 0 * P3 W W W m)) = 1
+    ∧ (epsZero 0 * sigRow 0 W) * ((epsZero 0 * sigRow 0 W) * (epsZero W * P3 0 0 W m)) = 1 := by
+  have hs0 : sigRow 0 W = 1 := by unfold sigRow; rw [Nat.zero_xor, if_neg hW0]
+  have hsW : sigRow W W = -1 := by unfold sigRow; rw [Nat.xor_self, if_pos rfl]
+  have heW : epsZero W = 1 := by unfold epsZero; rw [if_neg hW0]
+  constructor
+  · rw [hsW, heW, P3_diag W W m hW hW hW0]; unfold epsZero; grind
+  · rw [hs0, heW, P3_zero_zero m W]; unfold epsZero; grind
+
 end SounioZDFiberAntisym
