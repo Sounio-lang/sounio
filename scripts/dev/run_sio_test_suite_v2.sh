@@ -53,7 +53,14 @@ export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
 FILTER=""
 VERBOSE=""
 FORMAT="text"
-JOBS="${SOUNIO_TEST_JOBS:-$(nproc 2>/dev/null || echo 4)}"
+# Teto de 32 jobs. Medido em 2026-08-12 no cluster: a banda de memoria satura
+# entre 16 e 32 threads em TODOS os nos, e acima disso tres deles PIORAM por
+# contencao. Pico de banda (STREAM Triad): t560 151 GB/s @32 | r740 131 @32 |
+# dl380 85 @16 | r770 60 @128 (2 DIMMs em 32 slots) | 5860 60 @12.
+# `nproc` cru dava 64 no t560 e 128 no r770 — 2 a 4x acima do otimo.
+# Sobrepor com SOUNIO_TEST_JOBS ou --jobs quando houver motivo medido.
+_SOUNIO_NPROC=$(nproc 2>/dev/null || echo 4)
+JOBS="${SOUNIO_TEST_JOBS:-$(( _SOUNIO_NPROC > 32 ? 32 : _SOUNIO_NPROC ))}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
