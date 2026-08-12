@@ -18953,4 +18953,119 @@ theorem t1_diag_sum (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
   rw [hneg]
   grind
 
+/-! ### Tier 133 — `T1`'s single-`Π_W` terms: the three sums `R1` needs
+
+    The carrier's two single-`Π_W` terms are where `cp2` enters `T1`.  The permutation collapses one
+    index — `Π_W(b,c) = 1` forces `c = b ⊕ W` — so `R1/2` is the DOUBLE sum
+
+      `Σ_{a,b} (ε(a)σ(a)) · (ε(b)σ(b)) · ε(b ⊕ W) · P3(a,b) · P3(b ⊕ W, a)`
+
+    and its weight simplifies before anything else does: `σ(b)·ε(b⊕W)` is `1` unless `b = W`, where
+    both flip, so
+
+      `ε(b)·σ(b)·ε(b ⊕ W) = ε(b)`      (`epsSig_coset`)
+
+    — the `W`-pin on the middle index cancels against the coset flip's own. What is left is a pin at
+    `0` and `W` on `a` and a pin at `0` on `b`, landing on three single sums, all proved here:
+
+      `Σ_a P3(a,0)·P3(W,a)          = 2 − H`      pointwise `−σ(a)`, at EVERY index
+      `Σ_b P3(0,b)·P3(b⊕W,0)        = H − 2`      pointwise `1 − 2[b=0]`
+      `Σ_b P3(W,b)·P3(b⊕W,W)        = 2 − H`      pointwise `−1 + 2[b=0]`
+
+    The first is the prettiest: the column-`0` and seam-row re-signings multiply out to `−σ(a)` with
+    no exceptional index at all, the `a = 0` correction of `P3_col0_eq_neg_row0` cancelling exactly
+    against `P3(W,0) = −1`. -/
+
+/-- The `W`-pin on the middle index cancels against the coset flip's own. -/
+theorem epsSig_coset (b W : Nat) (hW0 : W ≠ 0) :
+    epsZero b * sigRow b W * epsZero (b ^^^ W) = epsZero b := by
+  unfold epsZero sigRow
+  by_cases hb : b = W
+  · subst hb; rw [Nat.xor_self]; grind
+  · have hne : b ^^^ W ≠ 0 := fun h => hb (xor_zero_eq b W h)
+    rw [if_neg hne]
+    grind
+
+/-- `Σ_a P3(a,0)·P3(W,a) = 2 − H`; the summand is `−σ(a)` at every index. -/
+theorem t1_colsum (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun a => P3 a 0 W m * P3 W a W m) = 2 - ((2^(m+1) : Nat) : Int) := by
+  have hcong : ∀ a, a < 2^(m+1) → P3 a 0 W m * P3 W a W m = -(sigRow a W) := by
+    intro a ha
+    by_cases ha0 : a = 0
+    · subst ha0
+      rw [P3_zero_zero m W, P3_seam_zero m W hW hW0]
+      unfold sigRow; rw [Nat.zero_xor, if_neg hW0]; grind
+    · rw [P3_col0_eq_neg_row0 m a W ha hW, P3_rowW_eq_row0 m a W ha hW hW0, if_neg ha0]
+      unfold epsZero; rw [if_neg ha0]
+      rcases P3_pm 0 a W m with h | h <;> rw [h] <;> grind
+  rw [sumLtI_congr _ _ _ hcong, sumLtI_neg, sum_sigRow m W hW]
+  try grind
+
+/-- `Σ_b P3(0,b)·P3(b⊕W,0) = H − 2`. -/
+theorem t1_G0 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun b => P3 0 b W m * P3 (b ^^^ W) 0 W m)
+      = ((2^(m+1) : Nat) : Int) - 2 := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hz : P3 0 0 W m = 1 := P3_zero_zero m W
+  have hs : P3 0 W W m = 1 := P3_zero_seam m W hW hW0
+  have hcong : ∀ b, b < 2^(m+1) →
+      P3 0 b W m * P3 (b ^^^ W) 0 W m = 1 - (if b = 0 then 2 else 0) := by
+    intro b hb
+    have hbW : b ^^^ W < 2^(m+1) := xorlt hb hW
+    rw [P3_col0_eq_neg_row0 m (b ^^^ W) W hbW hW]
+    have hlaw := P3_row0_coset_law m b W hb hW hW0
+    by_cases hb0 : b = 0
+    · subst hb0
+      rw [Nat.zero_xor, if_neg hW0, if_pos rfl]
+      rw [if_pos rfl] at hlaw
+      rw [Nat.zero_xor] at hlaw
+      grind
+    · rw [if_neg hb0]
+      rw [if_neg hb0] at hlaw
+      by_cases hbq : b = W
+      · rw [hbq, Nat.xor_self, if_pos rfl]
+        rw [if_pos hbq, hbq, Nat.xor_self] at hlaw
+        grind
+      · have hne : b ^^^ W ≠ 0 := fun h => hbq (xor_zero_eq b W h)
+        rw [if_neg hne, if_neg hbq] at *
+        grind
+  rw [sumLtI_congr _ _ _ hcong, sumLtI_sub, sumLtI_one, sumLtI_single (2^(m+1)) 0 2 hp]
+  try grind
+
+/-- `Σ_b P3(W,b)·P3(b⊕W,W) = 2 − H`. -/
+theorem t1_GW (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun b => P3 W b W m * P3 (b ^^^ W) W W m)
+      = 2 - ((2^(m+1) : Nat) : Int) := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hz : P3 0 0 W m = 1 := P3_zero_zero m W
+  have hs : P3 0 W W m = 1 := P3_zero_seam m W hW hW0
+  have hcong : ∀ b, b < 2^(m+1) →
+      P3 W b W m * P3 (b ^^^ W) W W m = (0 - 1) + (if b = 0 then 2 else 0) := by
+    intro b hb
+    have hbW : b ^^^ W < 2^(m+1) := xorlt hb hW
+    rw [P3_rowW_eq_row0 m b W hb hW hW0, P3_colW_eq_row0 m (b ^^^ W) W hbW hW hW0]
+    have hlaw := P3_row0_coset_law m b W hb hW hW0
+    unfold epsZero sigRow
+    by_cases hb0 : b = 0
+    · subst hb0
+      rw [Nat.zero_xor, if_neg hW0, if_pos rfl, Nat.xor_self, if_pos rfl]
+      rw [if_pos rfl, Nat.zero_xor] at hlaw
+      grind
+    · rw [if_neg hb0]
+      rw [if_neg hb0] at hlaw
+      by_cases hbq : b = W
+      · rw [hbq, Nat.xor_self, if_pos rfl, Nat.zero_xor, if_neg hW0]
+        rw [if_pos hbq, hbq, Nat.xor_self] at hlaw
+        grind
+      · have hne : b ^^^ W ≠ 0 := fun h => hbq (xor_zero_eq b W h)
+        have hne2 : (b ^^^ W) ^^^ W ≠ 0 := by rw [xor_cancel b W]; exact hb0
+        rw [if_neg hne, if_neg hne2, if_neg hbq] at *
+        grind
+  rw [sumLtI_congr _ _ _ hcong, sumLtI_add, sumLtI_single (2^(m+1)) 0 2 hp]
+  have hneg : sumLtI (2^(m+1)) (fun _ : Nat => (0:Int) - 1) = - ((2^(m+1) : Nat) : Int) := by
+    rw [sumLtI_congr (2^(m+1)) _ (fun _ => -(1:Int)) (fun i _ => by grind),
+        sumLtI_neg, sumLtI_one]
+  rw [hneg]
+  grind
+
 end SounioZDFiberAntisym
