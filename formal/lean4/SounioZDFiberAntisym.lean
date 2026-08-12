@@ -19068,4 +19068,111 @@ theorem t1_GW (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
   rw [hneg]
   grind
 
+/-! ### Tier 135 — `R1` and `R2` ASSEMBLED: the two single-`Π_W` terms of `T1`
+
+    Tier 133 proved the three single sums; this tier pins onto them.  One observation makes `R2`'s
+    outer pin free: as functions of `c`,
+
+      `ε(c ⊕ W) = σ(c)`      (`epsZero_xor_eq_sigRow`)
+
+    both being `−1` exactly at `c = W`, so `sumLtI_sigRow` serves directly.
+
+    `R1`: pin `ε` on `b`, then `ε` and `σ` on `a`.  The three evaluations are `t1_colsum` for the
+    `b = 0` slice, `t1_G0` for `a = 0` and `t1_GW` for `a = W`, with the corner values
+    `P3(0,0)P3(W,0) = −1` and `P3(W,0)P3(W,W) = 1`.
+
+    `R2`: pin `ε` and `σ` on `b`, then `σ` on `c`.  Same three sums plus Tier 117's
+    `sum_row0_colW` for the `c = W` slice.
+
+      `R1/2 = cp2 + 2H − 4`      `R2/2 = cp2 − 2H + 4`
+
+    so `R1 + R2 = 4·cp2` — §57.69's `4·cp2` is the two coset flips taken one each, now proved
+    rather than measured. -/
+
+/-- The coset-shifted index-`0` flip IS the switching sign. -/
+theorem epsZero_xor_eq_sigRow (c W : Nat) : epsZero (c ^^^ W) = sigRow c W := by
+  unfold epsZero sigRow; grind
+
+/-- **`R1/2 = cp2 + 2H − 4`.** -/
+theorem t1_R1 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+        (epsZero a * sigRow a W) * (epsZero b * (P3 a b W m * P3 (b ^^^ W) a W m))))
+      = sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+            P3 a b W m * P3 (b ^^^ W) a W m))
+        + 2 * ((2^(m+1) : Nat) : Int) - 4 := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hs0 : sigRow 0 W = 1 := by unfold sigRow; rw [Nat.zero_xor, if_neg hW0]
+  have hinner : ∀ a, sumLtI (2^(m+1)) (fun b =>
+        (epsZero a * sigRow a W) * (epsZero b * (P3 a b W m * P3 (b ^^^ W) a W m)))
+      = (epsZero a * sigRow a W) *
+          (sumLtI (2^(m+1)) (fun b => P3 a b W m * P3 (b ^^^ W) a W m)
+            - 2 * (P3 a 0 W m * P3 W a W m)) := by
+    intro a
+    rw [sumLtI_mul, sumLtI_epsZero _ hp, Nat.zero_xor]
+  rw [sumLtI_congr _ _ _ (fun a _ => hinner a)]
+  have hshape : ∀ a, (epsZero a * sigRow a W) *
+        (sumLtI (2^(m+1)) (fun b => P3 a b W m * P3 (b ^^^ W) a W m)
+          - 2 * (P3 a 0 W m * P3 W a W m))
+      = epsZero a * (sigRow a W *
+          (sumLtI (2^(m+1)) (fun b => P3 a b W m * P3 (b ^^^ W) a W m)
+            - 2 * (P3 a 0 W m * P3 W a W m))) := by
+    intro a; grind
+  rw [sumLtI_congr _ _ _ (fun a _ => hshape a), sumLtI_epsZero _ hp,
+      sumLtI_sigRow (2^(m+1)) W hW, sumLtI_sub, sumLtI_mul, t1_colsum m W hW hW0, hs0,
+      P3_zero_zero m W, P3_seam_zero m W hW hW0, P3_diag W W m hW hW hW0,
+      t1_G0 m W hW hW0, t1_GW m W hW hW0]
+  grind
+
+/-- **`R2/2 = cp2 − 2H + 4`.** -/
+theorem t1_R2 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun c => sumLtI (2^(m+1)) (fun b =>
+        epsZero (c ^^^ W) * ((epsZero b * sigRow b W) *
+          (P3 (c ^^^ W) b W m * P3 b c W m))))
+      = sumLtI (2^(m+1)) (fun c => sumLtI (2^(m+1)) (fun b =>
+            P3 (c ^^^ W) b W m * P3 b c W m))
+        - 2 * ((2^(m+1) : Nat) : Int) + 4 := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hs0 : sigRow 0 W = 1 := by unfold sigRow; rw [Nat.zero_xor, if_neg hW0]
+  have hinner : ∀ c, sumLtI (2^(m+1)) (fun b =>
+        epsZero (c ^^^ W) * ((epsZero b * sigRow b W) *
+          (P3 (c ^^^ W) b W m * P3 b c W m)))
+      = epsZero (c ^^^ W) *
+          ((sumLtI (2^(m+1)) (fun b => P3 (c ^^^ W) b W m * P3 b c W m)
+              - 2 * (P3 (c ^^^ W) W W m * P3 W c W m))
+            - 2 * (sigRow 0 W * (P3 (c ^^^ W) 0 W m * P3 0 c W m))) := by
+    intro c
+    rw [sumLtI_mul]
+    have hb : sumLtI (2^(m+1)) (fun b => (epsZero b * sigRow b W) *
+          (P3 (c ^^^ W) b W m * P3 b c W m))
+        = sumLtI (2^(m+1)) (fun b => epsZero b * (sigRow b W *
+            (P3 (c ^^^ W) b W m * P3 b c W m))) :=
+      sumLtI_congr _ _ _ (fun b _ => by grind)
+    rw [hb, sumLtI_epsZero _ hp, sumLtI_sigRow (2^(m+1)) W hW]
+  rw [sumLtI_congr _ _ _ (fun c _ => hinner c), hs0]
+  have hsig : ∀ c, epsZero (c ^^^ W) *
+        ((sumLtI (2^(m+1)) (fun b => P3 (c ^^^ W) b W m * P3 b c W m)
+            - 2 * (P3 (c ^^^ W) W W m * P3 W c W m))
+          - 2 * (1 * (P3 (c ^^^ W) 0 W m * P3 0 c W m)))
+      = sigRow c W *
+        ((sumLtI (2^(m+1)) (fun b => P3 (c ^^^ W) b W m * P3 b c W m)
+            - 2 * (P3 (c ^^^ W) W W m * P3 W c W m))
+          - 2 * (1 * (P3 (c ^^^ W) 0 W m * P3 0 c W m))) := by
+    intro c; rw [epsZero_xor_eq_sigRow]
+  rw [sumLtI_congr _ _ _ (fun c _ => hsig c), sumLtI_sigRow (2^(m+1)) W hW,
+      sumLtI_sub, sumLtI_sub, sumLtI_mul, sumLtI_mul,
+      Nat.xor_self, P3_zero_zero m W, P3_zero_seam m W hW hW0,
+      P3_diag W W m hW hW hW0]
+  have e1 : sumLtI (2^(m+1)) (fun c => P3 (c ^^^ W) W W m * P3 W c W m)
+      = 2 - ((2^(m+1) : Nat) : Int) := by
+    rw [sumLtI_congr _ _ (fun c => P3 W c W m * P3 (c ^^^ W) W W m)
+          (fun c _ => by grind), t1_GW m W hW hW0]
+  have e2 : sumLtI (2^(m+1)) (fun c => 1 * (P3 (c ^^^ W) 0 W m * P3 0 c W m))
+      = ((2^(m+1) : Nat) : Int) - 2 := by
+    rw [sumLtI_congr _ _ (fun c => P3 0 c W m * P3 (c ^^^ W) 0 W m)
+          (fun c _ => by grind), t1_G0 m W hW hW0]
+  have e3 : sumLtI (2^(m+1)) (fun b => P3 0 b W m * P3 b W W m)
+      = ((2^(m+1) : Nat) : Int) - 2 := sum_row0_colW m W hW hW0
+  rw [e1, e2, e3]
+  grind
+
 end SounioZDFiberAntisym
