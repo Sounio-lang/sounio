@@ -3469,3 +3469,13 @@ notes: |
   This is the E5 doc's items 1–3 (S0–S4 ⇒ seam polynomial), which ALSO give
   `s3_maximal_seam` later — this tier stops at Q and (M³)_WW.
   Consequence packaged: weight2_T2_seam (T2 at the seam from Tier 132's one-scalar form).
+
+  UPDATE (kimi, same day): **Tier 134 LANDED, GREEN — `f02854d101`.**  The shared scalar is
+  CLOSED at the maximal seam: `P3_seam_coboundary` (the E5 note's S3+S4 as one pointwise law:
+  P3(a,b)·P3(0,a)·P3(0,b) = 1 for a,b ≠ 0, a ≠ b at W = 2^(k+1)), `quad_seam_value`
+  (Q = (H−2)²), `walk3_maximal_seam` ((M³)_WW = (H−2)² − 6H + 12), `weight2_T2_seam`.
+  The seam correction 96·[m−1,2]₂ is polynomial AT the seam: (H−4)(H−8).  Kernel-clean
+  lean 4.33.0, xai math-review [OK]×7, no corrections.  The coboundary + row0 alignment are
+  exactly the E5 doc's Lean targets 1–2, so `s3_maximal_seam` (target 3) is now one
+  trace-count away: tr(M³) from M' = [[1, 1ᵀ], [−1, J−2I]] arithmetic.
+  Claim released; even tiers ≥ 136 free.
