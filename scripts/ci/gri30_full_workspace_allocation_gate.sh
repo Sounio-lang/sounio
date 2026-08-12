@@ -46,7 +46,17 @@ BEGIN {
     target["g30f_ws_sens_rhs"] = 1
     current = ""
 }
-/^NV2_IR function / { current = ""; next }
+/^NV2_IR function / {
+    current = ""
+    if (match($0, /name=[^ ]+/)) {
+        fn_name = substr($0, RSTART + 5, RLENGTH - 5)
+        if (fn_name in target) {
+            current = fn_name
+            seen[fn_name] = 1
+        }
+    }
+    next
+}
 /^ name=/ {
     split(substr($0, 7), fields, " ")
     fn_name = fields[1]
@@ -57,6 +67,9 @@ BEGIN {
     next
 }
 /^ op=alloc / {
+    if (current != "") allocs[current]++
+}
+/^NV2_IR fn=.* op=alloc / {
     if (current != "") allocs[current]++
 }
 END {
