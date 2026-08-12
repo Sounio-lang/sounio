@@ -20143,4 +20143,100 @@ theorem weight2_T2_seam (k : Nat) :
   rw [weight2_T2_one_scalar (k+1) (2^(k+1)) hW hW0, walk3_maximal_seam k]
 
 
+/-! ### Tier 139 — the ROUTING, inner stage: the `c`-sum of `X(b,c)·X(c,a)`
+
+    This is the first of the three stages that route `T1`'s triple sum onto Tiers 125–137.  Nine
+    terms come out of `tauW_carrier` applied twice; one stays a `c`-sum, six collapse `c` to a
+    single index, and two are doubly pinned:
+
+      `Σ_c ε(c)·X(b,c)·X(c,a)`
+        `= Σ_c ε(c)·P3(b,c)·P3(c,a)`
+        `+ 2·ε(a⊕W)·P3(b,a⊕W)  +  2·ε(b⊕W)·P3(b⊕W,a)`
+        `+ [a=W]·(−4·ε(0)·P3(b,0))  +  [b=0]·(−4·ε(W)·P3(W,a))`
+        `+ [a=b]·(4·ε(a⊕W))`
+        `+ [a=W][b=W]·(−8·ε(0))  +  [b=0][a=0]·(−8·ε(W))`
+
+    verified exactly on 294080 `(a,b)` pairs over every label at `m = 2..5` before being written.
+    The ninth term vanishes: it needs `c = W` and `c = 0` at once.
+
+    The one conversion the proof needs is `(a = c ⊕ W) ↔ (c = a ⊕ W)` (`xor_eq_comm`), because
+    `tauW_carrier` states its coset indicator on the SECOND argument and `sumLtI_single` wants it on
+    the summation variable. -/
+
+/-- The coset indicator, moved to the summation variable. -/
+theorem xor_eq_comm (a c W : Nat) : (a = c ^^^ W) ↔ (c = a ^^^ W) := by
+  constructor <;> intro h <;> subst h <;> rw [xor_cancel]
+
+/-- `sumLtI_single` with the coset indicator on the second argument, as `tauW_carrier` states it. -/
+theorem sumLtI_single_xor (n a W : Nat) (v : Int) (h : a ^^^ W < n) :
+    sumLtI n (fun c => if a = c ^^^ W then v else 0) = v := by
+  rw [sumLtI_congr n _ (fun c => if c = a ^^^ W then v else 0) (fun c _ => by
+        by_cases hc : c = a ^^^ W
+        · rw [if_pos hc, if_pos ((xor_eq_comm a c W).mpr hc)]
+        · rw [if_neg hc, if_neg (fun hh => hc ((xor_eq_comm a c W).mp hh))]),
+      sumLtI_single n (a ^^^ W) v h]
+
+/-- **THE INNER STAGE.**  Nine terms; one sum, six collapses, two points. -/
+theorem t1_route_inner (m a b W : Nat) (ha : a < 2^(m+1)) (hb : b < 2^(m+1))
+    (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun c =>
+        epsZero c * ((tauW b c W * P3 b c W m) * (tauW c a W * P3 c a W m)))
+      = sumLtI (2^(m+1)) (fun c => epsZero c * (P3 b c W m * P3 c a W m))
+        + 2 * (epsZero (a ^^^ W) * P3 b (a ^^^ W) W m)
+        + 2 * (epsZero (b ^^^ W) * P3 (b ^^^ W) a W m)
+        + (if a = W then -4 * (epsZero 0 * P3 b 0 W m) else 0)
+        + (if b = 0 then -4 * (epsZero W * P3 W a W m) else 0)
+        + (if a = b then 4 * epsZero (a ^^^ W) else 0)
+        + (if a = W then (if b = W then -8 * epsZero 0 else 0) else 0)
+        + (if b = 0 then (if a = 0 then -8 * epsZero W else 0) else 0) := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have haW : a ^^^ W < 2^(m+1) := xorlt ha hW
+  have hbW : b ^^^ W < 2^(m+1) := xorlt hb hW
+  have hpt : ∀ c, c < 2^(m+1) →
+      epsZero c * ((tauW b c W * P3 b c W m) * (tauW c a W * P3 c a W m))
+      = epsZero c * (P3 b c W m * P3 c a W m)
+        + (if a = c ^^^ W then 2 * (epsZero (a ^^^ W) * P3 b (a ^^^ W) W m) else 0)
+        + (if c = b ^^^ W then 2 * (epsZero (b ^^^ W) * P3 (b ^^^ W) a W m) else 0)
+        + (if c = 0 then (if a = W then -4 * (epsZero 0 * P3 b 0 W m) else 0) else 0)
+        + (if c = W then (if b = 0 then -4 * (epsZero W * P3 W a W m) else 0) else 0)
+        + (if a = c ^^^ W then (if a = b then 4 * epsZero (a ^^^ W) else 0) else 0)
+        + (if c = 0 then (if a = W then (if b = W then -8 * epsZero 0 else 0) else 0) else 0)
+        + (if c = W then (if b = 0 then (if a = 0 then -8 * epsZero W else 0) else 0) else 0) := by
+    intro c hc
+    rw [tauW_carrier m b c W hb hc hW hW0, tauW_carrier m c a W hc ha hW hW0]
+    by_cases h1' : a = c ^^^ W
+    · have h1 : c = a ^^^ W := (xor_eq_comm a c W).mp h1'
+      subst h1
+      by_cases h2 : a ^^^ W = b ^^^ W
+      · have hab : a = b := by
+          have := congrArg (fun x => x ^^^ W) h2
+          simpa [xor_cancel] using this
+        subst hab
+        by_cases h3 : a ^^^ W = 0
+        · have : a = W := xor_zero_eq a W h3
+          subst this
+          rw [Nat.xor_self]
+          unfold epsZero
+          grind
+        · unfold epsZero
+          grind
+      · unfold epsZero
+        grind
+    · have h1 : ¬(c = a ^^^ W) := fun hh => h1' ((xor_eq_comm a c W).mpr hh)
+      by_cases h2 : c = b ^^^ W
+      · subst h2
+        unfold epsZero
+        grind
+      · unfold epsZero
+        grind
+  rw [sumLtI_congr _ _ _ hpt]
+  rw [sumLtI_add, sumLtI_add, sumLtI_add, sumLtI_add, sumLtI_add, sumLtI_add, sumLtI_add,
+      sumLtI_single_xor (2^(m+1)) a W _ haW,
+      sumLtI_single (2^(m+1)) (b ^^^ W) _ hbW,
+      sumLtI_single (2^(m+1)) 0 _ hp,
+      sumLtI_single (2^(m+1)) W _ hW,
+      sumLtI_single_xor (2^(m+1)) a W _ haW,
+      sumLtI_single (2^(m+1)) 0 _ hp,
+      sumLtI_single (2^(m+1)) W _ hW]
+
 end SounioZDFiberAntisym
