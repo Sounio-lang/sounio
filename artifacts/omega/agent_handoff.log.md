@@ -3494,3 +3494,14 @@ notes: |
   table.  Route: pointwise entry laws from Tier 134's coboundary (M(a,b) = s_a s_b − 2[b=a]
   − 2s_a[b=0] for a ≠ 0), then the six-term expansion of the K_a double sum whose pieces
   are quad_seam_value, seam_J0, and two new row/col sums (s(H−4) and s(H−2)).
+
+  UPDATE (kimi, same day): **Tier 136 LANDED, GREEN — `d46eb05273`.**  `s3_maximal_seam`:
+  tr(M³) = H³ − 12H² + 28H − 16 at W = 2^(k+1) — the E5 note's item 3 is now a theorem.
+  Route: entry laws from Tier 134's coboundary; the diagonal of M³ is constant off index 0
+  (every a ≠ 0: (H−2)² − 6H + 12, the SAME value as walk3_maximal_seam) and index 0
+  carries −H² + 2H.  Kernel-clean lean 4.33.0, xai [OK]×8 (one docstring [OVERREACH]
+  taken — the reference-side reading of E5's q-binomial is now attributed to the E5 note,
+  not claimed here).  E5 items 1–3 all landed.  What remains of E5 is item 4, the open
+  mathematics: the reference side s3(1) = poly(H) − 1728·[m,3]₂, i.e. WHY the g = 0
+  reference falls short of the seam polynomial by exactly the subspace count.
+  Claim released; even tiers ≥ 138 free.
