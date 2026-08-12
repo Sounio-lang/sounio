@@ -18903,4 +18903,54 @@ theorem weight2_D_S1 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
   rw [weight2_D_S2 m W hW hW0, weight2_pin_S1 m W hW hW0]
   grind
 
+/-! ### Tier 131 — `T1`'s BOTH-`Π_W` term: the triple sum collapses to a diagonal
+
+    (Odd tier numbers, per the numbering split proposed in the handoff log.)
+
+    Tier 123's carrier expansion of `T1` has a term carrying `Π_W` in BOTH factors.  It is the
+    cheapest of the four, because two permutation constraints collapse a triple sum to a single one:
+    `Π_W(b,c) = 1` forces `c = b ⊕ W`, and then `Π_W(c,a) = 1` forces `a = c ⊕ W = b`.  So the free
+    index is `b` alone and the surviving entry is the DIAGONAL `P3(b,b)`.
+
+    The weight collapses too.  With `a = b` the two `ε·σ` factors square to `1`, leaving only the
+    third index's flip at `c = b ⊕ W`:
+
+      `R3 / 4 = Σ_b ε(b ⊕ W) · P3(b,b)`
+
+    and `P3_diag` makes that `−1` off `b = 0`, with the two exceptional points `b = 0` and `b = W`
+    each contributing `+1` — the first because `P3(0,0) = 1`, the second because `ε(0) = −1` turns
+    the diagonal's `−1` over.  Hence `Σ = 4 − H` and `R3 = 16 − 4H`, the label-independent value
+    Tier 123 measured. -/
+
+/-- **THE DIAGONAL SUM.**  `Σ_b ε(b ⊕ W)·P3(b,b) = 4 − 2^(m+1)`. -/
+theorem t1_diag_sum (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun b => epsZero (b ^^^ W) * P3 b b W m)
+      = 4 - ((2^(m+1) : Nat) : Int) := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hcong : ∀ b, b < 2^(m+1) →
+      epsZero (b ^^^ W) * P3 b b W m
+        = ((0 - 1) + (if b = 0 then 2 else 0)) + (if b = W then 2 else 0) := by
+    intro b hb
+    unfold epsZero
+    by_cases hb0 : b = 0
+    · subst hb0
+      have hbW : ¬((0:Nat) = W) := fun h => hW0 h.symm
+      rw [Nat.zero_xor, if_neg hW0, if_pos rfl, if_neg hbW, P3_zero_zero m W]
+      grind
+    · rw [if_neg hb0, P3_diag b W m hb hW hb0]
+      by_cases hbW : b = W
+      · rw [hbW, Nat.xor_self, if_pos rfl, if_pos rfl]
+        grind
+      · have hne : b ^^^ W ≠ 0 := fun h => hbW (xor_zero_eq b W h)
+        rw [if_neg hne, if_neg hbW]
+        grind
+  rw [sumLtI_congr _ _ _ hcong, sumLtI_add, sumLtI_add,
+      sumLtI_single (2^(m+1)) 0 2 hp, sumLtI_single (2^(m+1)) W 2 hW]
+  have hneg : sumLtI (2^(m+1)) (fun _ : Nat => (0:Int) - 1)
+      = - ((2^(m+1) : Nat) : Int) := by
+    rw [sumLtI_congr (2^(m+1)) _ (fun _ => -(1:Int)) (fun i _ => by grind),
+        sumLtI_neg, sumLtI_one]
+  rw [hneg]
+  grind
+
 end SounioZDFiberAntisym
