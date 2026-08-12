@@ -835,7 +835,16 @@ pub var IR_A_ARG_BASE: [i64; 1048576] = [0; 1048576]
 
 // Byte pool for instruction names, and a flat pool for call-argument registers.
 pub var IR_NAME_POOL: [i8; 4194304] = [0; 4194304]
-pub var IR_NAME_POOL_LEN: i64 = 0
+// RENAMED from IR_NAME_POOL_LEN. main declares `var IR_NAME_POOL_LEN:
+// [i64; 65536]` for interned per-id lengths; this lane declared a SCALAR of
+// the same name as the arena byte cursor. Two globals, one name, different
+// types: ir_intern_name's `IR_NAME_POOL_LEN[(id-1)] = n.len` wrote through
+// THIS cursor, so ir_arena_put_name then stored name bytes at a corrupted
+// offset -- and IR_ARG_POOL sits just past IR_NAME_POOL, so call arguments
+// were what got overwritten. Bisected to this on Slurm (20 jobs): every
+// cross-module call of arity >= 5 miscompiled; replacing the intern calls
+// with literal 0 fixed it, hoisting them out of the struct literal did not.
+pub var IR_A_NAME_BYTES_USED: i64 = 0
 pub fn ir_name_pool_capacity() -> i64 { 4194304 }
 
 pub var IR_ARG_POOL: [i64; 262144] = [0; 262144]
@@ -1018,7 +1027,7 @@ pub fn ir_arena_put_name(at: i64, nm: Name) with Mut, Panic, Div {
         }
         if same { return }
     }
-    if IR_NAME_POOL_LEN + len > ir_name_pool_capacity() {
+    if IR_A_NAME_BYTES_USED + len > ir_name_pool_capacity() {
         // Was: drop the name and carry on. Names are load-bearing -- cleanup
         // matches on ir_name_eq and codegen resolves callees by name -- so a
         // dropped name is a silently different program. Same defect as the rc=12
@@ -1028,13 +1037,13 @@ pub fn ir_arena_put_name(at: i64, nm: Name) with Mut, Panic, Div {
         ir_arena_latch(IR_ARENA_VIOLATION_NAME_POOL, ir_region_invalid())
         return
     }
-    let off = IR_NAME_POOL_LEN
+    let off = IR_A_NAME_BYTES_USED
     var i: i64 = 0
     while i < len {
         IR_NAME_POOL[(off + i) as usize] = nm.buf[i as usize]
         i = i + 1
     }
-    IR_NAME_POOL_LEN = off + len
+    IR_A_NAME_BYTES_USED = off + len
     IR_A_NAME_OFF[at as usize] = off
     IR_A_NAME_LEN[at as usize] = len
 }
@@ -1321,7 +1330,7 @@ pub fn ir_arena_report_violation() -> bool with IO, Mut, Panic, Div {
     } else if IR_ARENA_VIOLATION_KIND == IR_ARENA_VIOLATION_NAME_POOL {
         print("name pool exhausted -- an instruction name was dropped, which changes call resolution")
         print(") fill ")
-        print_int(IR_NAME_POOL_LEN)
+        print_int(IR_A_NAME_BYTES_USED)
         print(" of ")
         print_int(ir_name_pool_capacity())
         print("\n")
