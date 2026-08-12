@@ -7510,7 +7510,78 @@ impl Lowerer {
             lo.variance_value_regs[idx as usize] = variance_reg
             lo.variance_base_reg_count = idx + 1
         }
+        // #1706 NOTE: past this wall a variance binding is silently DROPPED and the
+        // later lookup returns -1, which variance_of turns into a 0.0 -- the exact
+        // shape of defect that let a whole test family read green. Field slots (two
+        // keys per struct field) raise the pressure here.
+        //
+        // A diagnostic print belongs here, but this helper is declared
+        // `with Mut, Panic, Div` while print/lower_live_diag_enabled need IO, and
+        // widening the effect signature of a helper this widely called broke the
+        // self-compile ratchet with 2x error[E035]. Documented rather than fixed by
+        // effect-widening; no program is known to reach the wall.
         lo
+    }
+
+    // #1706 defect 1: variance was tracked per LOCAL NAME and per BASE REG only, so
+    // `variance_of(a.x)` on `let a = A { x: k.value }` read 0.0 -- a zero that means
+    // "not tracked" is indistinguishable from a true zero, which is how an entire
+    // test family stayed green (see tests/vacuous_expect_baseline.txt).
+    //
+    // Rather than add another pair of [i64; 1024] arrays to Lowerer -- which is
+    // passed BY VALUE, so every field costs a copy on each of the thousands of
+    // threadings per function -- a field slot reuses the existing base-reg table by
+    // encoding (base_reg, field_idx) into one key. NC_MAX_VREGS is 2048
+    // (native/frame.sio), and the encoding leaves the whole non-negative reg range
+    // untouched: real base regs stay < 2^20, so no encoded key can ever collide with
+    // a plain reg key.
+    fn variance_field_key(self, base_reg: i64, field_idx: i64) -> i64 with Div {
+        if base_reg < 0 || field_idx < 0 || base_reg >= 1048576 || field_idx >= 1024 {
+            return -1
+        }
+        1048576 + base_reg * 1024 + field_idx
+    }
+
+    fn bind_variance_for_field(self, base_reg: i64, field_idx: i64, variance_reg: i64) -> Lowerer with Mut, Panic, Div {
+        let key = self.variance_field_key(base_reg, field_idx)
+        if key < 0 {
+            return self
+        }
+        self.bind_variance_for_base_reg(key, variance_reg)
+    }
+
+    fn lookup_variance_for_field(self, base_reg: i64, field_idx: i64) -> i64 with Mut, Panic, Div {
+        let key = self.variance_field_key(base_reg, field_idx)
+        if key < 0 {
+            return -1
+        }
+        self.lookup_variance_for_base_reg(key)
+    }
+
+    // The reg holding a STRUCT-valued field, so a chain can hop: for `c.a.x`, the
+    // `.a` step needs the inner aggregate's base reg to then look up `.x` on it.
+    // Second key band, disjoint from both plain regs and the field-variance band.
+    fn variance_field_base_key(self, base_reg: i64, field_idx: i64) -> i64 with Div {
+        if base_reg < 0 || field_idx < 0 || base_reg >= 1048576 || field_idx >= 1024 {
+            return -1
+        }
+        1073741824 + base_reg * 1024 + field_idx
+    }
+
+    fn bind_variance_for_field_base(self, base_reg: i64, field_idx: i64, inner_reg: i64) -> Lowerer with Mut, Panic, Div {
+        let key = self.variance_field_base_key(base_reg, field_idx)
+        if key < 0 {
+            return self
+        }
+        self.bind_variance_for_base_reg(key, inner_reg)
+    }
+
+    fn lookup_variance_for_field_base(self, base_reg: i64, field_idx: i64) -> i64 with Mut, Panic, Div {
+        let key = self.variance_field_base_key(base_reg, field_idx)
+        if key < 0 {
+            return -1
+        }
+        self.lookup_variance_for_base_reg(key)
     }
 
     fn lookup_variance_for_base_reg(self, base_reg: i64) -> i64 with Mut, Panic, Div {
@@ -8883,6 +8954,31 @@ impl Lowerer {
         (lo, dst)
     }
 
+    // Resolve the aggregate reg that a field access is rooted at, hopping through
+    // struct-valued fields recorded by bind_variance_for_field_base. `a.x` roots at
+    // the local `a`; `c.a.x` roots at `c`, then hops `.a`. Depth-capped so a
+    // pathological chain terminates rather than recursing without bound.
+    fn variance_field_chain_base(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        match (*e).left {
+            Some(base_expr) => {
+                if (*base_expr).kind == ExprKind::ExprIdent {
+                    return (self, self.lookup_local((*base_expr).name))
+                }
+                if (*base_expr).kind == ExprKind::ExprFieldAccess {
+                    let inner = self.variance_field_chain_base(&(*base_expr))
+                    var lo = inner.0
+                    if inner.1 < 0 {
+                        return (lo, -1)
+                    }
+                    let idx = lo.field_idx_from_name_simple((*base_expr).name)
+                    return (lo, lo.lookup_variance_for_field_base(inner.1, idx))
+                }
+                (self, -1)
+            }
+            _ => (self, -1),
+        }
+    }
+
     fn lower_expr_variance_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         if (*e).kind == ExprKind::ExprCall {
             match (*e).left {
@@ -8959,6 +9055,20 @@ impl Lowerer {
                         }
                     }
                     _ => {}
+                }
+            }
+            // #1706: any other field access -- `a.x`, `c.a.x`, arbitrary depth --
+            // resolves through the field slots recorded when the struct literal was
+            // lowered. Before this, every one of these fell to the `-1` below and
+            // variance_of read a silent 0.0.
+            let fbase = self.variance_field_chain_base(e)
+            if fbase.1 >= 0 {
+                var lo_f = fbase.0
+                let idx = lo_f.field_idx_from_name_simple((*e).name)
+                let fv = lo_f.lookup_variance_for_field(fbase.1, idx)
+                if fv >= 0 {
+                    lo_f = lo_f.so_clear_expr_hess().fo_seed_from_variance(fv)
+                    return (lo_f, fv)
                 }
             }
             return (self.fo_clear_expr_sens().so_clear_expr_hess(), -1)
@@ -12308,6 +12418,34 @@ impl Lowerer {
             lo = lo.bind_local_closure_fn_id(s.name, lo.pending_closure_fn_id)
             lo.pending_closure_fn_id = -1
         }
+        // #1706: `let pk2 = pk` on an aggregate gives pk2 its own reg, so the field
+        // slots recorded under pk's reg are invisible through pk2. Copy the mapping
+        // across for the fields actually recorded. This is a VALUE copy of the
+        // uncertainty mapping, matching the value semantics of the assignment (see
+        // #1487): a later rebind of one does not retroactively change the other.
+        match s.expr {
+            Some(rhs_alias) => {
+                if (*rhs_alias).kind == ExprKind::ExprIdent {
+                    let src_reg = lo.lookup_local((*rhs_alias).name)
+                    let dst_reg = lo.lookup_local(s.name)
+                    if src_reg >= 0 && dst_reg >= 0 && src_reg != dst_reg {
+                        var fi: i64 = 0
+                        while fi < 64 {
+                            let sv = lo.lookup_variance_for_field(src_reg, fi)
+                            if sv >= 0 {
+                                lo = lo.bind_variance_for_field(dst_reg, fi, sv)
+                            }
+                            let sb = lo.lookup_variance_for_field_base(src_reg, fi)
+                            if sb >= 0 {
+                                lo = lo.bind_variance_for_field_base(dst_reg, fi, sb)
+                            }
+                            fi = fi + 1
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
         if lo.pending_variance_reg >= 0 {
             lo = lo.bind_local_variance_reg(s.name, lo.pending_variance_reg)
             lo.pending_variance_reg = -1
@@ -13274,6 +13412,20 @@ impl Lowerer {
                     lo = pair.0
                     let vreg = pair.1
                     lo = lo.emit(ir_field_set(base_reg, named_field_idx, vreg, (*list).head.name))
+                    // #1706: record this field's uncertainty so `variance_of(a.x)` can
+                    // find it later. The initialiser expression is the only place the
+                    // provenance is still visible -- after the field_set the value is
+                    // just bytes in an aggregate. Nested literals recurse naturally,
+                    // because lowering the inner literal runs this same loop against
+                    // the inner base reg.
+                    let fv = lo.lower_expr_variance_ref(&(*list).head.value)
+                    lo = fv.0
+                    if fv.1 >= 0 {
+                        lo = lo.bind_variance_for_field(base_reg, named_field_idx, fv.1)
+                    }
+                    // A struct-valued field carries its own field slots; remember the
+                    // inner base so a chain (`c.a.x`) can hop through it.
+                    lo = lo.bind_variance_for_field_base(base_reg, named_field_idx, vreg)
                     current = &(*list).tail
                     field_idx = field_idx + 1
                 }
