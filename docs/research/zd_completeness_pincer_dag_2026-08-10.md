@@ -374,3 +374,16 @@ Tier 131: the both-`Π_W` term collapses to `Σ_b ε(b⊕W)·P3(b,b) = 4 − H`,
     E4b, T2 leg   concurrent lane, Tiers 120-122 and 127-128 landed; consumes walk3_at_W
 
 See §57.81.
+
+### Step 13 — every piece of T1's carrier expansion is a theorem
+
+Tiers 133–137: `R1 = 2cp2 + 4H − 8` and `R2 = 2cp2 − 4H + 8` (so `R1 + R2 = 4cp2`), and the
+rank-one corrections `= −16` (two equal sums with opposite signs cancel; `−8 − 8` survives).
+With CORE (125–126, 129) and `R3` (131), all five pieces are proved.
+
+    E4b, T1 leg   ALL PIECES PROVED; remaining: the nine-way pointwise expansion of
+                  X(b,c)·X(c,a) routing the T1 triple sum onto them (the quadSplit analogue)
+    E4b, T2 leg   concurrent lane
+    E5, E3        open
+
+See §57.82.

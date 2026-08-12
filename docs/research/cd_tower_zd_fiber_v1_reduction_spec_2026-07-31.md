@@ -7024,3 +7024,43 @@ final assembly. Nothing below that level is open.
 The two lanes collided at 127 — the `T2` lane had committed its own Tier 127 and 128 (`25d64dc14c`,
 `52c2de4f90`) before mine landed. Mine was renumbered to 129 (`046caf93ac`, a one-line diff), and
 this lane now takes **odd** numbers by the split proposed in the handoff log.
+
+### §57.82 — Tiers 133–137: every piece of `T1`'s carrier expansion is a theorem
+
+`tauW_carrier` writes `X = P3 + 2·Π_W − 4·e₀e_Wᵀ`. Expanding `X(b,c)·X(c,a)` gives nine terms, and
+all of them are now proved:
+
+| piece | value | tier |
+|---|---|---|
+| CORE (free + 5 single pins + 12 label-indep.) | `s3 − 6(M³)₀₀ − 4(M³)_WW + 64 − 32H` | 125–126, 129 |
+| `R1` (one `Π_W`) | `2·cp2 + 4H − 8` | 135 |
+| `R2` (the other `Π_W`) | `2·cp2 − 4H + 8` | 135 |
+| `R3` (both `Π_W`) | `16 − 4H` | 131 |
+| rank-one (five terms) | `−16` | 137 |
+
+**`R1` and `R2`.** The `Π_W` collapses one index, and the weight simplifies first:
+`ε(b)·σ(b)·ε(b⊕W) = ε(b)` (`epsSig_coset`) — the `W`-pin on the middle index cancels against the
+coset flip's own. What is left pins onto three single sums (Tier 133):
+
+    Σ_a P3(a,0)·P3(W,a)   = 2 − H      pointwise `−σ(a)`, at EVERY index
+    Σ_b P3(0,b)·P3(b⊕W,0) = H − 2
+    Σ_b P3(W,b)·P3(b⊕W,W) = 2 − H
+
+The first has no exceptional index at all: the `a = 0` correction of `P3_col0_eq_neg_row0` cancels
+exactly against `P3(W,0) = −1`. `R2`'s outer pin is free because, as functions of `c`,
+`ε(c ⊕ W) = σ(c)` (`epsZero_xor_eq_sigRow`) — so `sumLtI_sigRow` serves and no reindexing is needed.
+Hence `R1 + R2 = 4·cp2`, and §57.69's `4·cp2` being "the two coset flips one each" is proved.
+
+**Rank-one.** `e₀e_Wᵀ` pins two indices at once, so four of the five terms are point values. The two
+that are sums are the *same* sum and enter with opposite signs, so they cancel outright — the `±4H`
+never has to be evaluated. What survives is `−8 − 8 = −16`.
+
+#### What remains for `T1`: one step
+
+The nine-way pointwise expansion of `X(b,c)·X(c,a)` that routes the `T1` triple sum onto the five
+pieces above — the analogue of `quadSplit` for `Q`, and the same kind of load-bearing step: until it
+is written, the five results are statements about objects with no stated relation to `T1` itself.
+Every scalar and every sum they need is a theorem, so nothing below that step is open.
+
+Target: `T1 = s3 + 4·cp2 − 6·(M³)₀₀ − 4·(M³)_WW + 64 − 36H`, which with `(M³)₀₀` (Tiers 112+119) and
+`(M³)_WW` (Tier 124) is `s3 + 4·cp2 + 16H − 64` on the reachable labels — §57.69's measured form.
