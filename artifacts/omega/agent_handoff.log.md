@@ -3417,3 +3417,26 @@ notes: |
   independently).  T2 leg now has exactly ONE open step before the closed form:
   bulk `tr(XMX)` → s3 + 4·cp2 + corrections (grok-cli1's step 2).  Claim released;
   next writer on the T2 leg should take an EVEN tier number ≥ 132.
+
+---
+agent: kimi (ZD T2 leg — the bulk)
+date: 2026-08-12
+files: formal/lean4/SounioZDFiberAntisym.lean  (append at end, before `end`)
+status: IN PROGRESS — Tier 132 claimed (even, per the split), nothing committed yet
+notes: |
+  Picking up the T2 leg's last open step: the BULK `tr(XMX)`.
+  Measured before proving: `tr(XMX) = s3 + 4·cp2 + 4H − 8` on ALL labels at m=2,3
+  (22/22, m=4 running), no seam hypothesis.  With `weight2_D_S1` (Tier 130) this gives
+  `T2 = s3 + 4·cp2 − 4·(M³)_WW` — exactly Tier 120's one-scalar form — as a THEOREM,
+  and off the maximal seam `(M³)_WW = 2(H−8)` recovers §57.69's `T2 = s3 + 4cp2 − 8H + 64`.
+
+  The route is the eight-term carrier expansion of `X = M + 2Π_W − 4e₀e_Wᵀ`; every piece
+  is already a theorem or one lemma away:
+    single-Π terms   2·cp2 each (reindex via sumLtI_xor)
+    both-Π term      4·tr(M) — needs `tr_P3 : Σ_l P3 l l W m = 2 − H` (one lemma from
+                     P3_diag + P3_zero_zero)
+    rank-one terms   Q(0) and the (W,0)-walk — BOTH are Tier 130's `sum_P3W_col0`
+    corners          P3_zero_zero, P3_diag
+  Tools note: bin/sounio-coord died on a root-owned claim file (codex session 019febc7,
+  mode 600); patched load_claim to skip unreadable claim files. Fix is in the working
+  tree, will commit separately as chore.

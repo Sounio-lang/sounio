@@ -19175,4 +19175,555 @@ theorem t1_R2 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
   rw [e1, e2, e3]
   grind
 
+/-! ### Tier 132 — the bulk: `tr(XMX) = s3 + 4·cp2 + 4H − 8` (kimi, T2 leg)
+
+    The last open step of the T2 leg.  The eight-term carrier expansion of
+    `X = M + 2Π_W − 4e₀e_Wᵀ` inside `tr(XMX) = Σ_{a,b,c} X(a,b)·M(b,c)·X(c,a)`:
+
+      free term        `s3 = tr(M³)`
+      two single-`Π_W` `2·cp2` each           (`cp2_reindex` via `sumLtI_xor`)
+      both-`Π_W`       `4·tr(M) = 4(2−H)`     (`tr_P3`, new)
+      pure rank-one    `−8·(M²)_{W,0} = −8(2−H)` — via Tier 130's `sum_P3W_col0`
+      mixed `Π×R`      `−8·M(0,0) − 8·M(W,W) = 0`  (the two corners cancel)
+      rank-one²        impossible (`W ≠ 0`)
+
+    Packaged with Tier 130's `weight2_D_S1`, this proves Tier 120's measured one-scalar
+    form `T2 = s3 + 4·cp2 − 4·(M³)_WW` for EVERY label (`weight2_T2_one_scalar`); off the
+    maximal seam it is §57.69's `T2 = s3 + 4·cp2 − 8H + 64`.  Measured before proving:
+    53/53 labels at `m = 2,3,4` (`.tmp/zd_s1_probe.py`). -/
+
+/-- The trace of `P3`: `−1` off index `0` (`P3_diag`), `+1` at it (`P3_zero_zero`). -/
+theorem tr_P3 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun l => P3 l l W m) = 2 - ((2^(m+1) : Nat) : Int) := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  rw [sumLtI_congr (2^(m+1)) _ (fun l => (-1:Int) + (if l = 0 then 2 else 0))
+        (fun l hl => by
+          by_cases h0 : l = 0
+          · subst h0
+            rw [if_pos rfl, P3_zero_zero m W]; grind
+          · rw [if_neg h0, P3_diag l W m hl hW h0]; grind),
+      sumLtI_add, sumLtI_neg_one, sumLtI_single (2^(m+1)) 0 2 hp]
+  grind
+
+/-- Pointwise: an arbitrary row against the carrier.  `P3W_mul_Xentry` with `W → b`. -/
+private theorem P3b_mul_Xentry (m a b c W : Nat)
+    (ha : a < 2^(m+1)) (hc : c < 2^(m+1)) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    P3 b c W m * Xentry m c a W
+      = P3 b c W m * P3 c a W m
+        + (if a = c ^^^ W then 2 * P3 b c W m else 0)
+        - (if c = 0 ∧ a = W then 4 * P3 b c W m else 0) := by
+  unfold Xentry
+  have hcarr := tauW_carrier m c a W hc ha hW hW0
+  rw [hcarr]
+  grind
+
+/-- After the carrier on the free column: the inner sum against an ARBITRARY row `b`.
+    `MX_rowW` with the seam row replaced by `b`. -/
+private theorem MX_gen (m a b W : Nat)
+    (ha : a < 2^(m+1)) (hb : b < 2^(m+1)) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun c => P3 b c W m * Xentry m c a W)
+      = sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c a W m)
+        + 2 * P3 b (a ^^^ W) W m
+        - (if a = W then 4 * P3 b 0 W m else 0) := by
+  have hxorlt : a ^^^ W < 2^(m+1) := xorlt ha hW
+  rw [sumLtI_congr _ _ _ (fun c hc => P3b_mul_Xentry m a b c W ha hc hW hW0)]
+  have h1 :
+      sumLtI (2^(m+1)) (fun c =>
+          P3 b c W m * P3 c a W m
+            + (if a = c ^^^ W then 2 * P3 b c W m else 0)
+            - (if c = 0 ∧ a = W then 4 * P3 b c W m else 0))
+      = sumLtI (2^(m+1)) (fun c =>
+          P3 b c W m * P3 c a W m
+            + ((if a = c ^^^ W then 2 * P3 b c W m else 0)
+              - (if c = 0 ∧ a = W then 4 * P3 b c W m else 0))) :=
+    sumLtI_congr _ _ _ (fun c _ => by grind)
+  rw [h1, sumLtI_add]
+  have h2 :
+      sumLtI (2^(m+1)) (fun c =>
+          (if a = c ^^^ W then 2 * P3 b c W m else 0)
+            - (if c = 0 ∧ a = W then 4 * P3 b c W m else 0))
+      = sumLtI (2^(m+1)) (fun c => if a = c ^^^ W then 2 * P3 b c W m else 0)
+        - sumLtI (2^(m+1)) (fun c => if c = 0 ∧ a = W then 4 * P3 b c W m else 0) :=
+    sumLtI_sub _ _ _
+  rw [h2]
+  have hcos :
+      sumLtI (2^(m+1)) (fun c => if a = c ^^^ W then 2 * P3 b c W m else 0)
+      = 2 * P3 b (a ^^^ W) W m := by
+    have hcongr := sumLtI_congr (2^(m+1))
+      (fun c => if a = c ^^^ W then 2 * P3 b c W m else 0)
+      (fun c => if c = a ^^^ W then 2 * P3 b (a ^^^ W) W m else 0)
+      (fun c _ => by
+        by_cases hc : c = a ^^^ W
+        · have hc' : a = c ^^^ W := by rw [hc, xor_cancel a W]
+          rw [if_pos hc', if_pos hc, hc]
+        · have hc' : ¬ a = c ^^^ W := by
+            intro h
+            apply hc
+            have h1 := congrArg (· ^^^ W) h
+            rw [xor_cancel c W] at h1
+            exact h1.symm
+          rw [if_neg hc', if_neg hc])
+    rw [hcongr, sumLtI_single (2^(m+1)) (a ^^^ W) _ hxorlt]
+  have hr1 :
+      sumLtI (2^(m+1)) (fun c => if c = 0 ∧ a = W then 4 * P3 b c W m else 0)
+      = if a = W then 4 * P3 b 0 W m else 0 := by
+    by_cases haW : a = W
+    · have hcongr := sumLtI_congr (2^(m+1))
+        (fun c => if c = 0 ∧ a = W then 4 * P3 b c W m else 0)
+        (fun c => if c = 0 then 4 * P3 b 0 W m else 0)
+        (fun c _ => by
+          by_cases hc : c = 0
+          · rw [if_pos ⟨hc, haW⟩, if_pos hc, hc]
+          · rw [if_neg (fun h => hc h.1), if_neg hc])
+      rw [if_pos haW, hcongr, sumLtI_single (2^(m+1)) 0 _ (Nat.two_pow_pos (m+1))]
+    · have hcongr := sumLtI_congr (2^(m+1))
+        (fun c => if c = 0 ∧ a = W then 4 * P3 b c W m else 0)
+        (fun _ => (0:Int))
+        (fun c _ => by rw [if_neg (fun h => haW h.2)])
+      rw [if_neg haW, hcongr, sumLtI_zero]
+  rw [hcos, hr1]
+  grind
+
+/-- Reindexing the coset form of the `cp2` sum to its canonical one. -/
+private theorem cp2_reindex (m W : Nat) (hW : W < 2^(m+1)) :
+    sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun c => P3 (a ^^^ W) c W m * P3 c a W m))
+      = sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun c => P3 a c W m * P3 c (a ^^^ W) W m)) := by
+  have hx := sumLtI_xor (m+1) W hW
+    (fun x => sumLtI (2^(m+1)) (fun c => P3 x c W m * P3 c (x ^^^ W) W m))
+  rw [hx]
+  refine sumLtI_congr _ _ _ (fun a _ => ?_)
+  show sumLtI (2^(m+1)) (fun c => P3 (a ^^^ W) c W m * P3 c a W m)
+     = sumLtI (2^(m+1)) (fun c => P3 (a ^^^ W) c W m * P3 c ((a ^^^ W) ^^^ W) W m)
+  rw [xor_cancel a W]
+
+
+/-- Pointwise: the carrier against an opaque factor.  Serves both the `Q(b,a)` and the
+    `P3 b (a⊕W)` middle sums. -/
+private theorem Xentry_mul_pt (m a b W : Nat) (q : Int)
+    (ha : a < 2^(m+1)) (hb : b < 2^(m+1)) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    Xentry m a b W * q
+      = P3 a b W m * q
+        + (if b = a ^^^ W then 2 * q else 0)
+        - (if a = 0 ∧ b = W then 4 * q else 0) := by
+  unfold Xentry
+  have hcarr := tauW_carrier m a b W ha hb hW hW0
+  rw [hcarr]
+  grind
+
+/-- The `A` row: `Σ_b X(a,b)·(M²)_{b,a}` after the carrier on `X(a,b)`. -/
+private theorem bulk_A_pt (m a W : Nat)
+    (ha : a < 2^(m+1)) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun b => Xentry m a b W *
+        sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c a W m))
+      = sumLtI (2^(m+1)) (fun b => P3 a b W m *
+            sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c a W m))
+        + 2 * sumLtI (2^(m+1)) (fun c => P3 (a ^^^ W) c W m * P3 c a W m)
+        + (if a = 0 then
+            -4 * sumLtI (2^(m+1)) (fun c => P3 W c W m * P3 c a W m) else 0) := by
+  have hxorlt : a ^^^ W < 2^(m+1) := xorlt ha hW
+  rw [sumLtI_congr _ _ _ (fun b hb => Xentry_mul_pt m a b W _ ha hb hW hW0)]
+  have h1 :
+      sumLtI (2^(m+1)) (fun b =>
+          P3 a b W m * sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c a W m)
+            + (if b = a ^^^ W then
+                2 * sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c a W m) else 0)
+            - (if a = 0 ∧ b = W then
+                4 * sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c a W m) else 0))
+      = sumLtI (2^(m+1)) (fun b =>
+          P3 a b W m * sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c a W m)
+            + ((if b = a ^^^ W then
+                  2 * sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c a W m) else 0)
+              - (if a = 0 ∧ b = W then
+                  4 * sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c a W m) else 0))) :=
+    sumLtI_congr _ _ _ (fun b _ => by grind)
+  rw [h1, sumLtI_add]
+  have h2 :
+      sumLtI (2^(m+1)) (fun b =>
+          (if b = a ^^^ W then
+              2 * sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c a W m) else 0)
+            - (if a = 0 ∧ b = W then
+                4 * sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c a W m) else 0))
+      = sumLtI (2^(m+1)) (fun b => if b = a ^^^ W then
+            2 * sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c a W m) else 0)
+        - sumLtI (2^(m+1)) (fun b => if a = 0 ∧ b = W then
+            4 * sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c a W m) else 0) :=
+    sumLtI_sub _ _ _
+  rw [h2]
+  -- coset term: single at b = a ⊕ W
+  have hcos :
+      sumLtI (2^(m+1)) (fun b => if b = a ^^^ W then
+          2 * sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c a W m) else 0)
+      = 2 * sumLtI (2^(m+1)) (fun c => P3 (a ^^^ W) c W m * P3 c a W m) := by
+    have hcongr := sumLtI_congr (2^(m+1))
+      (fun b => if b = a ^^^ W then
+          2 * sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c a W m) else 0)
+      (fun b => if b = a ^^^ W then
+          2 * sumLtI (2^(m+1)) (fun c => P3 (a ^^^ W) c W m * P3 c a W m) else 0)
+      (fun b _ => by
+        by_cases hb : b = a ^^^ W
+        · rw [if_pos hb, if_pos hb, hb]
+        · rw [if_neg hb, if_neg hb])
+    rw [hcongr, sumLtI_single (2^(m+1)) (a ^^^ W) _ hxorlt]
+  -- rank-one term: single at b = W, present only when a = 0
+  have hr1 :
+      sumLtI (2^(m+1)) (fun b => if a = 0 ∧ b = W then
+          4 * sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c a W m) else 0)
+      = if a = 0 then
+          4 * sumLtI (2^(m+1)) (fun c => P3 W c W m * P3 c a W m) else 0 := by
+    by_cases ha0 : a = 0
+    · have hcongr := sumLtI_congr (2^(m+1))
+        (fun b => if a = 0 ∧ b = W then
+            4 * sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c a W m) else 0)
+        (fun b => if b = W then
+            4 * sumLtI (2^(m+1)) (fun c => P3 W c W m * P3 c a W m) else 0)
+        (fun b _ => by
+          by_cases hb : b = W
+          · rw [if_pos ⟨ha0, hb⟩, if_pos hb, hb]
+          · rw [if_neg (fun h => hb h.2), if_neg hb])
+      rw [if_pos ha0, hcongr, sumLtI_single (2^(m+1)) W _ hW]
+    · have hcongr := sumLtI_congr (2^(m+1))
+        (fun b => if a = 0 ∧ b = W then
+            4 * sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c a W m) else 0)
+        (fun _ => (0:Int))
+        (fun b _ => by rw [if_neg (fun h => ha0 h.1)])
+      rw [if_neg ha0, hcongr, sumLtI_zero]
+  rw [hcos, hr1]
+  grind
+
+/-- The `B` row: `Σ_b X(a,b)·M(b,a⊕W)` after the carrier on `X(a,b)`. -/
+private theorem bulk_B_pt (m a W : Nat)
+    (ha : a < 2^(m+1)) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun b => Xentry m a b W * P3 b (a ^^^ W) W m)
+      = sumLtI (2^(m+1)) (fun b => P3 a b W m * P3 b (a ^^^ W) W m)
+        + 2 * P3 (a ^^^ W) (a ^^^ W) W m
+        + (if a = 0 then -4 * P3 W (a ^^^ W) W m else 0) := by
+  have hxorlt : a ^^^ W < 2^(m+1) := xorlt ha hW
+  rw [sumLtI_congr _ _ _ (fun b hb => Xentry_mul_pt m a b W _ ha hb hW hW0)]
+  have h1 :
+      sumLtI (2^(m+1)) (fun b =>
+          P3 a b W m * P3 b (a ^^^ W) W m
+            + (if b = a ^^^ W then 2 * P3 b (a ^^^ W) W m else 0)
+            - (if a = 0 ∧ b = W then 4 * P3 b (a ^^^ W) W m else 0))
+      = sumLtI (2^(m+1)) (fun b =>
+          P3 a b W m * P3 b (a ^^^ W) W m
+            + ((if b = a ^^^ W then 2 * P3 b (a ^^^ W) W m else 0)
+              - (if a = 0 ∧ b = W then 4 * P3 b (a ^^^ W) W m else 0))) :=
+    sumLtI_congr _ _ _ (fun b _ => by grind)
+  rw [h1, sumLtI_add]
+  have h2 :
+      sumLtI (2^(m+1)) (fun b =>
+          (if b = a ^^^ W then 2 * P3 b (a ^^^ W) W m else 0)
+            - (if a = 0 ∧ b = W then 4 * P3 b (a ^^^ W) W m else 0))
+      = sumLtI (2^(m+1)) (fun b => if b = a ^^^ W then 2 * P3 b (a ^^^ W) W m else 0)
+        - sumLtI (2^(m+1)) (fun b => if a = 0 ∧ b = W then 4 * P3 b (a ^^^ W) W m else 0) :=
+    sumLtI_sub _ _ _
+  rw [h2]
+  have hcos :
+      sumLtI (2^(m+1)) (fun b => if b = a ^^^ W then 2 * P3 b (a ^^^ W) W m else 0)
+      = 2 * P3 (a ^^^ W) (a ^^^ W) W m := by
+    have hcongr := sumLtI_congr (2^(m+1))
+      (fun b => if b = a ^^^ W then 2 * P3 b (a ^^^ W) W m else 0)
+      (fun b => if b = a ^^^ W then 2 * P3 (a ^^^ W) (a ^^^ W) W m else 0)
+      (fun b _ => by
+        by_cases hb : b = a ^^^ W
+        · rw [if_pos hb, if_pos hb, hb]
+        · rw [if_neg hb, if_neg hb])
+    rw [hcongr, sumLtI_single (2^(m+1)) (a ^^^ W) _ hxorlt]
+  have hr1 :
+      sumLtI (2^(m+1)) (fun b => if a = 0 ∧ b = W then 4 * P3 b (a ^^^ W) W m else 0)
+      = if a = 0 then 4 * P3 W (a ^^^ W) W m else 0 := by
+    by_cases ha0 : a = 0
+    · have hcongr := sumLtI_congr (2^(m+1))
+        (fun b => if a = 0 ∧ b = W then 4 * P3 b (a ^^^ W) W m else 0)
+        (fun b => if b = W then 4 * P3 W (a ^^^ W) W m else 0)
+        (fun b _ => by
+          by_cases hb : b = W
+          · rw [if_pos ⟨ha0, hb⟩, if_pos hb, hb]
+          · rw [if_neg (fun h => hb h.2), if_neg hb])
+      rw [if_pos ha0, hcongr, sumLtI_single (2^(m+1)) W _ hW]
+    · have hcongr := sumLtI_congr (2^(m+1))
+        (fun b => if a = 0 ∧ b = W then 4 * P3 b (a ^^^ W) W m else 0)
+        (fun _ => (0:Int))
+        (fun b _ => by rw [if_neg (fun h => ha0 h.1)])
+      rw [if_neg ha0, hcongr, sumLtI_zero]
+  rw [hcos, hr1]
+  grind
+
+/-- The `C` walk: the seam row against column `0`, with the carrier on `X(W,b)`.
+    `Q(0) + 2·P3(0,0) = (2−H) + 2`. -/
+private theorem bulk_C_val (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun b => Xentry m W b W * P3 b 0 W m)
+      = 4 - ((2^(m+1) : Nat) : Int) := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have h1 : sumLtI (2^(m+1)) (fun b => Xentry m W b W * P3 b 0 W m)
+      = sumLtI (2^(m+1)) (fun b =>
+          P3 W b W m * P3 b 0 W m + (if b = 0 then 2 * P3 0 0 W m else 0)) := by
+    refine sumLtI_congr _ _ _ (fun b hbl => ?_)
+    rw [Xentry_rowW m b W hbl hW hW0]
+    by_cases hb0 : b = 0
+    · subst hb0
+      rw [if_pos rfl, if_pos rfl]; grind
+    · rw [if_neg hb0, if_neg hb0]; grind
+  rw [h1, sumLtI_add, sum_P3W_col0 m W hW hW0,
+      sumLtI_single (2^(m+1)) 0 _ hp, P3_zero_zero m W]
+  grind
+
+/-- The full row of the bulk at fixed `a`: peel `X(a,·)`, expand the inner sum by
+    `MX_gen`, and distribute.  The `C` term is evaluated by `bulk_C_val`. -/
+private theorem bulk_row (m a W : Nat)
+    (ha : a < 2^(m+1)) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+        Xentry m a b W * (P3 b c W m * Xentry m c a W)))
+      = sumLtI (2^(m+1)) (fun b => Xentry m a b W *
+            sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c a W m))
+        + 2 * sumLtI (2^(m+1)) (fun b => Xentry m a b W * P3 b (a ^^^ W) W m)
+        - (if a = W then 4 * (4 - ((2^(m+1) : Nat) : Int)) else 0) := by
+  have hpeel :
+      sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+          Xentry m a b W * (P3 b c W m * Xentry m c a W)))
+      = sumLtI (2^(m+1)) (fun b => Xentry m a b W *
+          sumLtI (2^(m+1)) (fun c => P3 b c W m * Xentry m c a W)) := by
+    refine sumLtI_congr _ _ _ (fun b _ => ?_)
+    exact sumLtI_mul _ _ _
+  rw [hpeel]
+  rw [sumLtI_congr _ _ _ (fun b hb =>
+        congrArg (Xentry m a b W * ·) (MX_gen m a b W ha hb hW hW0))]
+  -- distribute X(a,b) over the three MX_gen terms
+  have hdist :
+      sumLtI (2^(m+1)) (fun b => Xentry m a b W *
+          (sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c a W m)
+            + 2 * P3 b (a ^^^ W) W m
+            - (if a = W then 4 * P3 b 0 W m else 0)))
+      = sumLtI (2^(m+1)) (fun b =>
+          Xentry m a b W * sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c a W m)
+            + (2 * (Xentry m a b W * P3 b (a ^^^ W) W m)
+              - (if a = W then 4 * (Xentry m a b W * P3 b 0 W m) else 0))) :=
+    sumLtI_congr _ _ _ (fun b _ => by grind)
+  rw [hdist, sumLtI_add]
+  have hsub :
+      sumLtI (2^(m+1)) (fun b =>
+          2 * (Xentry m a b W * P3 b (a ^^^ W) W m)
+            - (if a = W then 4 * (Xentry m a b W * P3 b 0 W m) else 0))
+      = sumLtI (2^(m+1)) (fun b => 2 * (Xentry m a b W * P3 b (a ^^^ W) W m))
+        - sumLtI (2^(m+1)) (fun b => if a = W then 4 * (Xentry m a b W * P3 b 0 W m) else 0) :=
+    sumLtI_sub _ _ _
+  rw [hsub]
+  have hmid :
+      sumLtI (2^(m+1)) (fun b => 2 * (Xentry m a b W * P3 b (a ^^^ W) W m))
+      = 2 * sumLtI (2^(m+1)) (fun b => Xentry m a b W * P3 b (a ^^^ W) W m) :=
+    sumLtI_mul _ _ _
+  rw [hmid]
+  have hC :
+      sumLtI (2^(m+1)) (fun b => if a = W then 4 * (Xentry m a b W * P3 b 0 W m) else 0)
+      = if a = W then 4 * (4 - ((2^(m+1) : Nat) : Int)) else 0 := by
+    by_cases haW : a = W
+    · have hcongr := sumLtI_congr (2^(m+1))
+        (fun b => if a = W then 4 * (Xentry m a b W * P3 b 0 W m) else 0)
+        (fun b => 4 * (Xentry m W b W * P3 b 0 W m))
+        (fun b _ => by rw [if_pos haW, haW])
+      rw [if_pos haW, hcongr, sumLtI_mul, bulk_C_val m W hW hW0]
+    · have hcongr := sumLtI_congr (2^(m+1))
+        (fun b => if a = W then 4 * (Xentry m a b W * P3 b 0 W m) else 0)
+        (fun _ => (0:Int))
+        (fun b _ => by rw [if_neg haW])
+      rw [if_neg haW, hcongr, sumLtI_zero]
+  rw [hC]
+  grind
+
+
+/-- `Σ_a` of the `A` row: `s3 + 2·cp2 + 4H − 8`.  The free term is `tri3`; the coset pin
+    reindexes to `cp2` (`cp2_reindex`); the rank-one pin at `a = 0` is `sum_P3W_col0`. -/
+private theorem bulk_A_sum (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun a =>
+        sumLtI (2^(m+1)) (fun b => P3 a b W m *
+            sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c a W m))
+        + 2 * sumLtI (2^(m+1)) (fun c => P3 (a ^^^ W) c W m * P3 c a W m)
+        + (if a = 0 then
+            -4 * sumLtI (2^(m+1)) (fun c => P3 W c W m * P3 c a W m) else 0))
+      = tri3 (2^(m+1)) (fun x y => P3 x y W m)
+        + 2 * sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun c =>
+            P3 a c W m * P3 c (a ^^^ W) W m))
+        + (4 * ((2^(m+1) : Nat) : Int) - 8) := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hA1 : ∀ a, sumLtI (2^(m+1)) (fun b => P3 a b W m *
+        sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c a W m))
+      = sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+            P3 a b W m * (P3 b c W m * P3 c a W m))) := by
+    intro a
+    refine sumLtI_congr _ _ _ (fun b _ => ?_)
+    rw [← sumLtI_mul]
+  have hA1sum : sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b => P3 a b W m *
+        sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c a W m)))
+      = tri3 (2^(m+1)) (fun x y => P3 x y W m) :=
+    sumLtI_congr _ _ _ (fun a _ => hA1 a)
+  have hA2 : sumLtI (2^(m+1)) (fun a =>
+        2 * sumLtI (2^(m+1)) (fun c => P3 (a ^^^ W) c W m * P3 c a W m))
+      = 2 * sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun c =>
+            P3 a c W m * P3 c (a ^^^ W) W m)) := by
+    rw [sumLtI_mul, cp2_reindex m W hW]
+  have hA3 : sumLtI (2^(m+1)) (fun a => if a = 0 then
+        -4 * sumLtI (2^(m+1)) (fun c => P3 W c W m * P3 c a W m) else 0)
+      = -4 * (2 - ((2^(m+1) : Nat) : Int)) := by
+    have hcongr := sumLtI_congr (2^(m+1))
+      (fun a => if a = 0 then
+          -4 * sumLtI (2^(m+1)) (fun c => P3 W c W m * P3 c a W m) else 0)
+      (fun a => if a = 0 then
+          -4 * sumLtI (2^(m+1)) (fun c => P3 W c W m * P3 c 0 W m) else 0)
+      (fun a _ => by
+        by_cases ha0 : a = 0
+        · rw [if_pos ha0, if_pos ha0, ha0]
+        · rw [if_neg ha0, if_neg ha0])
+    rw [hcongr, sumLtI_single (2^(m+1)) 0 _ hp, sum_P3W_col0 m W hW hW0]
+  have hpt : ∀ a, a < 2^(m+1) →
+      sumLtI (2^(m+1)) (fun b => P3 a b W m *
+          sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c a W m))
+        + 2 * sumLtI (2^(m+1)) (fun c => P3 (a ^^^ W) c W m * P3 c a W m)
+        + (if a = 0 then
+            -4 * sumLtI (2^(m+1)) (fun c => P3 W c W m * P3 c a W m) else 0)
+      = sumLtI (2^(m+1)) (fun b => P3 a b W m *
+          sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c a W m))
+        + (2 * sumLtI (2^(m+1)) (fun c => P3 (a ^^^ W) c W m * P3 c a W m)
+          + (if a = 0 then
+              -4 * sumLtI (2^(m+1)) (fun c => P3 W c W m * P3 c a W m) else 0)) :=
+    fun a _ => by grind
+  have hsplit :
+      sumLtI (2^(m+1)) (fun a =>
+          sumLtI (2^(m+1)) (fun b => P3 a b W m *
+              sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c a W m))
+          + 2 * sumLtI (2^(m+1)) (fun c => P3 (a ^^^ W) c W m * P3 c a W m)
+          + (if a = 0 then
+              -4 * sumLtI (2^(m+1)) (fun c => P3 W c W m * P3 c a W m) else 0))
+      = sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b => P3 a b W m *
+              sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c a W m)))
+        + (sumLtI (2^(m+1)) (fun a =>
+              2 * sumLtI (2^(m+1)) (fun c => P3 (a ^^^ W) c W m * P3 c a W m))
+          + sumLtI (2^(m+1)) (fun a => if a = 0 then
+              -4 * sumLtI (2^(m+1)) (fun c => P3 W c W m * P3 c a W m) else 0)) := by
+    rw [sumLtI_congr _ _ _ hpt, sumLtI_add, sumLtI_add]
+  rw [hsplit, hA1sum, hA2, hA3]
+  grind
+
+/-- `Σ_a` of the `B` row: `cp2 + 2·tr(M) + 4`.  The diagonal reindexes by `sumLtI_xor`
+    onto `tr_P3`; the rank-one pin at `a = 0` lands on `P3(W,W) = −1`. -/
+private theorem bulk_B_sum (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun a =>
+        sumLtI (2^(m+1)) (fun b => P3 a b W m * P3 b (a ^^^ W) W m)
+        + 2 * P3 (a ^^^ W) (a ^^^ W) W m
+        + (if a = 0 then -4 * P3 W (a ^^^ W) W m else 0))
+      = sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+            P3 a b W m * P3 b (a ^^^ W) W m))
+        + (2 * (2 - ((2^(m+1) : Nat) : Int)) + 4) := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hB2 : sumLtI (2^(m+1)) (fun a => 2 * P3 (a ^^^ W) (a ^^^ W) W m)
+      = 2 * (2 - ((2^(m+1) : Nat) : Int)) := by
+    rw [sumLtI_mul]
+    have hx := sumLtI_xor (m+1) W hW (fun x => P3 x x W m)
+    have h2 : sumLtI (2^(m+1)) (fun a => P3 (a ^^^ W) (a ^^^ W) W m)
+        = sumLtI (2^(m+1)) (fun x => P3 x x W m) := hx.symm
+    rw [h2, tr_P3 m W hW hW0]
+  have hB3 : sumLtI (2^(m+1)) (fun a => if a = 0 then -4 * P3 W (a ^^^ W) W m else 0)
+      = 4 := by
+    have hcongr := sumLtI_congr (2^(m+1))
+      (fun a => if a = 0 then -4 * P3 W (a ^^^ W) W m else 0)
+      (fun a => if a = 0 then -4 * P3 W W W m else 0)
+      (fun a _ => by
+        by_cases ha0 : a = 0
+        · rw [if_pos ha0, if_pos ha0, ha0, Nat.zero_xor]
+        · rw [if_neg ha0, if_neg ha0])
+    rw [hcongr, sumLtI_single (2^(m+1)) 0 _ hp, P3_diag W W m hW hW hW0]
+    grind
+  have hpt : ∀ a, a < 2^(m+1) →
+      sumLtI (2^(m+1)) (fun b => P3 a b W m * P3 b (a ^^^ W) W m)
+        + 2 * P3 (a ^^^ W) (a ^^^ W) W m
+        + (if a = 0 then -4 * P3 W (a ^^^ W) W m else 0)
+      = sumLtI (2^(m+1)) (fun b => P3 a b W m * P3 b (a ^^^ W) W m)
+        + (2 * P3 (a ^^^ W) (a ^^^ W) W m
+          + (if a = 0 then -4 * P3 W (a ^^^ W) W m else 0)) :=
+    fun a _ => by grind
+  have hsplit :
+      sumLtI (2^(m+1)) (fun a =>
+          sumLtI (2^(m+1)) (fun b => P3 a b W m * P3 b (a ^^^ W) W m)
+          + 2 * P3 (a ^^^ W) (a ^^^ W) W m
+          + (if a = 0 then -4 * P3 W (a ^^^ W) W m else 0))
+      = sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+            P3 a b W m * P3 b (a ^^^ W) W m))
+        + (sumLtI (2^(m+1)) (fun a => 2 * P3 (a ^^^ W) (a ^^^ W) W m)
+          + sumLtI (2^(m+1)) (fun a => if a = 0 then -4 * P3 W (a ^^^ W) W m else 0)) := by
+    rw [sumLtI_congr _ _ _ hpt, sumLtI_add, sumLtI_add]
+  rw [hsplit, hB2, hB3]
+
+/-- **THE BULK.**  `tr(XMX) = s3 + 4·cp2 + 4H − 8`, every label, no seam hypothesis.
+    The eight-term carrier expansion of `X = M + 2Π_W − 4e₀e_Wᵀ`, with every piece a
+    theorem: the two single-`Π_W` terms are `2·cp2` each, the both-`Π_W` term is
+    `4·tr(M) = 4(2−H)`, and the two rank-one walks are Tier 130's `sum_P3W_col0`.
+    Measured before proving: 53/53 labels at `m = 2,3,4` (`.tmp/zd_s1_probe.py`). -/
+theorem weight2_bulk (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+        Xentry m a b W * (P3 b c W m * Xentry m c a W))))
+      = tri3 (2^(m+1)) (fun x y => P3 x y W m)
+        + 4 * sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+            P3 a b W m * P3 b (a ^^^ W) W m))
+        + 4 * ((2^(m+1) : Nat) : Int) - 8 := by
+  have hA : sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b => Xentry m a b W *
+        sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c a W m)))
+      = tri3 (2^(m+1)) (fun x y => P3 x y W m)
+        + 2 * sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun c =>
+            P3 a c W m * P3 c (a ^^^ W) W m))
+        + (4 * ((2^(m+1) : Nat) : Int) - 8) := by
+    rw [sumLtI_congr _ _ _ (fun a ha => bulk_A_pt m a W ha hW hW0)]
+    exact bulk_A_sum m W hW hW0
+  have hB : sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+        Xentry m a b W * P3 b (a ^^^ W) W m))
+      = sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+            P3 a b W m * P3 b (a ^^^ W) W m))
+        + (2 * (2 - ((2^(m+1) : Nat) : Int)) + 4) := by
+    rw [sumLtI_congr _ _ _ (fun a ha => bulk_B_pt m a W ha hW hW0)]
+    exact bulk_B_sum m W hW hW0
+  have hC : sumLtI (2^(m+1)) (fun a => if a = W then
+        4 * (4 - ((2^(m+1) : Nat) : Int)) else 0)
+      = 4 * (4 - ((2^(m+1) : Nat) : Int)) :=
+    sumLtI_single (2^(m+1)) W _ hW
+  rw [sumLtI_congr _ _ _ (fun a ha => bulk_row m a W ha hW hW0)]
+  have hpt : ∀ a, a < 2^(m+1) →
+      sumLtI (2^(m+1)) (fun b => Xentry m a b W *
+          sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c a W m))
+        + 2 * sumLtI (2^(m+1)) (fun b => Xentry m a b W * P3 b (a ^^^ W) W m)
+        - (if a = W then 4 * (4 - ((2^(m+1) : Nat) : Int)) else 0)
+      = sumLtI (2^(m+1)) (fun b => Xentry m a b W *
+          sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c a W m))
+        + (2 * sumLtI (2^(m+1)) (fun b => Xentry m a b W * P3 b (a ^^^ W) W m)
+          + -(if a = W then 4 * (4 - ((2^(m+1) : Nat) : Int)) else 0)) :=
+    fun a _ => by grind
+  have hsplit :
+      sumLtI (2^(m+1)) (fun a =>
+          sumLtI (2^(m+1)) (fun b => Xentry m a b W *
+              sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c a W m))
+          + 2 * sumLtI (2^(m+1)) (fun b => Xentry m a b W * P3 b (a ^^^ W) W m)
+          - (if a = W then 4 * (4 - ((2^(m+1) : Nat) : Int)) else 0))
+      = sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b => Xentry m a b W *
+              sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c a W m)))
+        + (2 * sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+              Xentry m a b W * P3 b (a ^^^ W) W m))
+          + -sumLtI (2^(m+1)) (fun a => if a = W then
+              4 * (4 - ((2^(m+1) : Nat) : Int)) else 0)) := by
+    rw [sumLtI_congr _ _ _ hpt, sumLtI_add, sumLtI_add, sumLtI_mul, sumLtI_neg]
+  rw [hsplit, hA, hB, hC]
+  grind
+
+/-- **THE ONE-SCALAR FORM OF `T2`, AS A THEOREM.**  `T2 = s3 + 4·cp2 − 4·(M³)_WW`,
+    every label including the maximal seam — Tier 120's measured collapse, now proved.
+    Off the seam `(M³)_WW = 2(H−8)` recovers §57.69's `T2 = s3 + 4·cp2 − 8H + 64`. -/
+theorem weight2_T2_one_scalar (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+        E01 a b W * P3 a b W m
+          * (E11 b c W * P3 b c W m * (E10 c a W * P3 c a W m)))))
+      = tri3 (2^(m+1)) (fun x y => P3 x y W m)
+        + 4 * sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+            P3 a b W m * P3 b (a ^^^ W) W m))
+        - 4 * sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+            P3 W a W m * (P3 a b W m * P3 b W W m))) := by
+  rw [weight2_D_S1 m W hW hW0, weight2_bulk m W hW hW0]
+  grind
+
+
 end SounioZDFiberAntisym
