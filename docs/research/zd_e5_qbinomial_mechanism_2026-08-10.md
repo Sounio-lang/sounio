@@ -400,3 +400,109 @@ E5 is now:
 Recommended next attack on this lane (still avoiding the tip claim): deepen S0–S4 as a
 **probe + named lemmas note**, or wait for the tip claim to free and land L1 as a tier there.
 Do not reopen closed v1 routes (§5).
+
+---
+
+## 11. S4 closed form — the seam coboundary is a step function (2026-08-10, step 4)
+
+Probe: `scripts/research/zd_e5_seam_s4_probe.py` (PASS, `m` through 9 on the cocycle column).
+
+### 11.1 The vector `s`
+
+At `W = 2^m`, `H = 2^{m+1}`, `V* = {1,…,H−1}`:
+
+\[
+s_b \;=\;
+\begin{cases}
++1 & \text{if } 1 \le b \le W, \\
+-1 & \text{if } W < b \le H-1.
+\end{cases}
+\qquad\bigl(\,=\, \mathbf{1}_{b\le W} - \mathbf{1}_{b>W}\,\bigr)
+\]
+
+| law | statement at `W = 2^m` | status |
+|---|---|---|
+| **S0** | `P3(0,0) = +1` | tip: `P3_zero_zero` |
+| **S1** | `P3(b,b) = −1` for `b ≠ 0` | tip: `P3_diag` |
+| **S2** | `P3(0,b)·P3(b,0) = −1` for `b ≠ 0` | tip: `P3_col0_eq_neg_row0` |
+| **S4** | `P3(0,b) = s_b` for `b ∈ V*` | **CLOSED FORM** (below); Lean via tip reduce + one column |
+| **S3** | `P3(b,c) = s_b s_c` for `b ≠ c` in `V*` | MEASURED `m=3..7`; = multiplicative S4 |
+
+### 11.2 Reduction of S4 to one cocycle column
+
+The tip already has (`P3_row0_reduce`, every label):
+
+\[
+P3(0,b) \;=\; -\,\sigma(W,b)\qquad\text{at level }m+1,\; b\neq 0.
+\]
+
+So S4 is exactly
+
+\[
+\sigma(2^m,\, b)_{m+1}
+\;=\;
+\begin{cases}
++1 & b=0 \text{ or } b > 2^m, \\
+-1 & 1 \le b \le 2^m.
+\end{cases}
+\]
+
+**Proof sketch (case split on the CD recursion; uses tip `R_ul` / `R_uu`).**
+For `m ≥ 1` write `2^m = 0 + 2^m` as the seam lift of `0` at level `m+1 = (m−1)+2`:
+
+| case | branch | value |
+|---|---|---|
+| `b = 0` | `R_ul 0 0` | `+1` |
+| `0 < b < 2^m` | `R_ul 0 b` → `−σ(0,b) = −1` | `−1` |
+| `b = 2^m` | `R_uu 0 0` | `−1` |
+| `b = v + 2^m`, `v > 0` | `R_uu 0 v` → `σ(v,0) = +1` | `+1` |
+
+That is the whole of S4.  Kernel-ready once written against the tip's `cdSigma` / `R_ul` / `R_uu`
+(this lane does not append to the tip while it is claimed elsewhere).
+
+### 11.3 S3 is the Gram form of the same `s`
+
+With S4 in hand, S3 is the statement that the nonzero principal submatrix is the rank-one form
+of row-0, corrected on the diagonal to `−1`:
+
+\[
+P3(b,c) \;=\; s_b\, s_c \qquad (b\neq c),\qquad P3(b,b) \;=\; -1.
+\]
+
+Equivalently (multiplicative S4): `P3(0,b)·P3(0,c) = P3(b,c)` for `b ≠ c` in `V*`.
+Measured through `m = 7`.  Lean path: evaluate `P3_red` at `W = 2^m` under the same
+half-split, or derive from empty two-graph / coboundary counting already in the tip's Tier 65
+neighbourhood.  Not yet a theorem.
+
+### 11.4 What (S) still is
+
+Once S0–S4 are theorems, the diagonal switch `diag(1,s)` yields the constant matrix of §3 and
+the arithmetic
+
+\[
+\operatorname{tr}(M^3) \;=\; H^3 - 12 H^2 + 28 H - 16
+\]
+
+is free `Int` (same shape as L4).  So **(S) = S3 as a theorem + one arithmetic block**.
+S4 is no longer an unknown shape — it is a named cocycle column with a four-line proof.
+
+### 11.5 Evidence
+
+```bash
+.venv/bin/python scripts/research/zd_e5_seam_s4_probe.py
+.venv/bin/python scripts/research/zd_e5_qbinomial_base_probe.py
+.venv/bin/python scripts/research/zd_e5_ref_gap_probe.py
+(cd formal/lean4 && lake build SounioZDE5Inductive)   # L4 still green
+```
+
+### 11.6 Lean landing plan (when tip claim is free)
+
+| lemma | content | depends on |
+|---|---|---|
+| `cdSigma_pow2_col` | column formula of §11.2 | `R_ul`, `R_uu`, `cdSig0` |
+| `P3_pow2_row0` | S4: `P3(0,b)=s_b` at `W=2^m` | `P3_row0_reduce` + `cdSigma_pow2_col` |
+| `P3_pow2_block_coboundary` | S3 off-diag | `P3_red` + half-split |
+| `s3_maximal_seam` | (S) | S0–S4 + `tr` arithmetic |
+
+Do **not** open a parallel copy of `cdSigma` on this lane while the tip owns the names; land as a
+tier in `SounioZDFiberAntisym.lean` when free.

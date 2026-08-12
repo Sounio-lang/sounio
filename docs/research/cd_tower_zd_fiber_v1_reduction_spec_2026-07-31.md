@@ -6986,3 +6986,41 @@ Both scalars those pins land on are theorems (`walk3_eq_quad` + `quad_level_valu
 Tiers 120–122 (`T2`: the weight-2 orthant's switching, three constant walks, the corner) landed
 from the other lane at `53b823b726`, directly after Tier 126. Both lanes' work is intact in the
 tip, no duplicate declarations, and the tip builds green from a clean checkout.
+
+### §57.81 — Tiers 129 and 131: `T1`'s CORE is fully accounted, and the both-`Π_W` term closes
+
+**Tier 129 (the five single pins).** Two identifications, both for an arbitrary pin `p` so they
+serve `0` and `W` alike, with `F(x,y,z) = P3(x,y)·(P3(y,z)·P3(z,x))`:
+
+    cyc_pin_last   Σ_a Σ_b F(a,b,p) = Σ_b Σ_c F(p,b,c)     pure relabelling
+    cyc_pin_mid    Σ_a Σ_c F(a,p,c) = Σ_b Σ_c F(p,b,c)     needs `sumLtI_swap`
+
+`corePins_single` assembles them into `3·(M³)₀₀ + 2·(M³)_WW` — the multiplicities §57.79 measured,
+and only two at `W` because the third index carries just `ε` and so has no `W` pin. That the middle
+pin is the one needing an exchange of summation order is the same asymmetry Tier 110 met.
+
+**With that, every term of CORE is a theorem**: the free term is `s3`, the five single pins are the
+two walks (both proved — `walk3_eq_quad` + `quad_level_value`, and `walk3_at_W`), and the twelve
+label-independent terms went in Tiers 125–126.
+
+**Tier 131 (the both-`Π_W` term).** The cheapest of the carrier's four, because two permutation
+constraints collapse the triple sum to a single one: `Π_W(b,c) = 1` forces `c = b ⊕ W`, then
+`Π_W(c,a) = 1` forces `a = b`. The free index is `b` and the surviving entry is the **diagonal**
+`P3(b,b)`; the weight collapses too, the two `ε·σ` squaring to `1`:
+
+    t1_diag_sum:  Σ_b ε(b ⊕ W)·P3(b,b) = 4 − H     ⇒  R3 = 16 − 4H
+
+`P3_diag` gives `−1` off `b = 0`, with two exceptional points each contributing `+1` — `b = 0`
+because `P3(0,0) = 1`, and `b = W` because `ε(0) = −1` turns the diagonal's `−1` over.
+
+#### `T1`, what is left
+
+Three of the carrier's four terms: `R1 = 2cp2 + 4H − 8`, `R2 = 2cp2 − 4H + 8` (the two single-`Π_W`
+terms, which is where `cp2` enters — `R1 + R2 = 4cp2`), and the rank-one corrections `−16`. Then the
+final assembly. Nothing below that level is open.
+
+#### Tier numbering
+
+The two lanes collided at 127 — the `T2` lane had committed its own Tier 127 and 128 (`25d64dc14c`,
+`52c2de4f90`) before mine landed. Mine was renumbered to 129 (`046caf93ac`, a one-line diff), and
+this lane now takes **odd** numbers by the split proposed in the handoff log.

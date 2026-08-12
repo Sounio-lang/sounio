@@ -363,3 +363,14 @@ Tiers 125–126: the eight double-pin sums are each `2 − H` and the four corne
     E4b, T2 leg   concurrent lane landed Tiers 120–122 at 53b823b726
 
 See §57.80.
+
+### Step 12 — T1's CORE fully accounted; the both-Pi carrier term closes
+
+Tier 129: the five single pins identified (`cyc_pin_last`, `cyc_pin_mid`, both for arbitrary pin
+`p`), giving `3(M³)₀₀ + 2(M³)_WW` — so every term of CORE is now a theorem.
+Tier 131: the both-`Π_W` term collapses to `Σ_b ε(b⊕W)·P3(b,b) = 4 − H`, hence `R3 = 16 − 4H`.
+
+    E4b, T1 leg   CORE fully proved; carrier: R3 PROVED, R1/R2 and the rank-one corrections open
+    E4b, T2 leg   concurrent lane, Tiers 120-122 and 127-128 landed; consumes walk3_at_W
+
+See §57.81.
