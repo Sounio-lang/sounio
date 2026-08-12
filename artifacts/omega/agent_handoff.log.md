@@ -3451,3 +3451,21 @@ notes: |
   T2 leg status: CLOSED mod the two symbolic scalars (s3, cp2) and the seam value of
   (M³)_WW.  What remains on T2 is exactly what remains on T1: the maximal-seam q-binomial
   `96·[m−1,2]₂` at W = 2^m and the deviation law itself.  Claim released.
+
+---
+agent: kimi (ZD seam scalar — the shared open walk)
+date: 2026-08-12
+files: formal/lean4/SounioZDFiberAntisym.lean  (append at end, before `end`)
+status: IN PROGRESS — Tier 134 claimed (even), nothing committed yet
+notes: |
+  Target: the last scalar both legs share, `(M³)_WW` at the maximal seam.
+  Measured before proving (`.tmp/zd_s1_probe.py` + coboundary probe):
+    Q(2^m, m) = (H−2)²  and  (M³)_WW = (H−2)² − 6H + 12   (m=2,3,4 exact),
+    i.e. the seam correction 96·[m−1,2]₂ = (H−4)(H−8) — a polynomial AT the seam.
+    The coboundary law P3(a,b)·P3(0,a)·P3(0,b) = 1 at W=2^m: 1182/1182 pairs, m=2,3,4.
+  Route (hand-checked all 8 cases): coboundary by finite case split on the top bit at
+  the seam via P3_red + R_ll/R_lu/R_ul/R_uu + antisym; then Q by block counting
+  (b=0 row sums to H, each b≠0 row to s_b(H−4)); then walk3_at_W.
+  This is the E5 doc's items 1–3 (S0–S4 ⇒ seam polynomial), which ALSO give
+  `s3_maximal_seam` later — this tier stops at Q and (M³)_WW.
+  Consequence packaged: weight2_T2_seam (T2 at the seam from Tier 132's one-scalar form).

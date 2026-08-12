@@ -19802,4 +19802,345 @@ theorem t1_rank1_points (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
   · rw [hsW, heW, P3_diag W W m hW hW hW0]; unfold epsZero; grind
   · rw [hs0, heW, P3_zero_zero m W]; unfold epsZero; grind
 
+/-! ### Tier 134 — the maximal-seam scalar: `(M³)_WW = (H−2)² − 6H + 12` (kimi)
+
+    The last open scalar the T1 and T2 legs SHARE.  At the maximal seam `W = 2^(k+1)`,
+    `P3` on the nonzero indices is the rank-one form of its own row `0`, off-diagonal
+    (`P3_seam_coboundary`: `P3(a,b)·P3(0,a)·P3(0,b) = 1` — the E5 note's S3+S4), and the
+    quadratic form closes as `Q = (H−2)²` (`quad_seam_value`).  The seam correction the
+    lane has measured since §57 is therefore polynomial AT the seam:
+
+      `96·[m−1,2]₂ = (H−4)(H−8)`   (at `W = 2^m`, `H = 2^(m+1)`)
+
+    `walk3_maximal_seam` is the closed walk; `weight2_T2_seam` packages it with Tier 132's
+    one-scalar form.  The proof is a finite case split on the top bit (`P3_red` + the
+    `R_*` branches + `antisym`), measured before proving: coboundary 1182/1182 pairs and
+    `Q = (H−2)²` exactly, at `k+1 = 2,3,4` (`.tmp/zd_s1_probe.py`). -/
+
+/-- Above the seam the flip is a subtraction. -/
+private theorem xor_seam_sub (x k : Nat) (hlo : 2^(k+1) ≤ x) (hhi : x < 2^(k+2)) :
+    x ^^^ 2^(k+1) = x - 2^(k+1) := by
+  have h1 : x = (x - 2^(k+1)) + 2^(k+1) := by omega
+  have hpow : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by
+    show (2:Nat)^(k+1+1) = 2^(k+1) + 2^(k+1)
+    rw [Nat.pow_succ, Nat.mul_comm, Nat.two_mul]
+  have h2 : x - 2^(k+1) < 2^(k+1) := Nat.sub_lt_left_of_lt_add hlo (hpow ▸ hhi)
+  have h3 := congrArg (· ^^^ 2^(k+1)) h1
+  rw [h3, seam_add_xor (x - 2^(k+1)) k h2, Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+
+/-- **ROW `0` AT THE MAXIMAL SEAM.**  `P3(0,x) = +1` up to the seam point, `−1` past it. -/
+theorem P3_seam_row0 (k x : Nat) (hx : x < 2^(k+2)) (hx0 : x ≠ 0) :
+    P3 0 x (2^(k+1)) (k+1) = if x ≤ 2^(k+1) then 1 else -1 := by
+  have hW : 2^(k+1) < 2^(k+2) := by
+    have hpow : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by
+      show (2:Nat)^(k+1+1) = 2^(k+1) + 2^(k+1)
+      rw [Nat.pow_succ, Nat.mul_comm, Nat.two_mul]
+    have hpos : 0 < 2^(k+1) := Nat.two_pow_pos (k+1)
+    omega
+  have hp2 : (0:Nat) < 2^(k+2) := Nat.two_pow_pos (k+2)
+  have h0W : (0:Nat) < 2^(k+1) := Nat.two_pow_pos (k+1)
+  have hred := P3_red 0 x (2^(k+1)) (k+1) hp2 hx hW hx0
+  rw [hred, cdSig0', Nat.zero_xor]
+  by_cases hlt : x < 2^(k+1)
+  · rw [if_pos (Nat.le_of_lt hlt)]
+    have hr := R_ul 0 x k h0W hlt
+    rw [Nat.zero_add] at hr
+    rw [hr, if_neg hx0, cdSig0]
+    grind
+  · by_cases heq : x = 2^(k+1)
+    · subst heq
+      rw [if_pos (Nat.le_refl _)]
+      have hr := R_uu 0 0 k h0W h0W
+      rw [Nat.zero_add] at hr
+      rw [hr, if_pos rfl]
+      grind
+    · have hgt : x > 2^(k+1) := by omega
+      rw [if_neg (by omega : ¬ x ≤ 2^(k+1))]
+      have hsub : x - 2^(k+1) ≠ 0 := by omega
+      have hpow : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by
+        show (2:Nat)^(k+1+1) = 2^(k+1) + 2^(k+1)
+        rw [Nat.pow_succ, Nat.mul_comm, Nat.two_mul]
+      have hhi : x - 2^(k+1) < 2^(k+1) :=
+        Nat.sub_lt_left_of_lt_add (by omega) (hpow ▸ hx)
+      have hxx : x = (x - 2^(k+1)) + 2^(k+1) := by omega
+      rw [hxx]
+      have hr := R_uu 0 (x - 2^(k+1)) k h0W hhi
+      rw [Nat.zero_add] at hr
+      rw [hr, if_neg hsub, cdSig0']
+      grind
+
+
+/-- **THE SEAM COBOUNDARY.**  At the maximal seam `W = 2^(k+1)`, `P3` on the nonzero
+    indices is the rank-one form of row `0`, off-diagonal: `P3(a,b)·s_a·s_b = 1` with
+    `s_x = P3(0,x)`.  Measured first: 1182/1182 pairs at `k+1 = 3,4,5`.  The proof is a
+    finite case split on the top bit, one application of `antisym` per same-side case. -/
+theorem P3_seam_coboundary (k a b : Nat)
+    (ha : a < 2^(k+2)) (hb : b < 2^(k+2)) (ha0 : a ≠ 0) (hb0 : b ≠ 0) (hab : a ≠ b) :
+    P3 a b (2^(k+1)) (k+1) * P3 0 a (2^(k+1)) (k+1) * P3 0 b (2^(k+1)) (k+1) = 1 := by
+  have hpow : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by
+    show (2:Nat)^(k+1+1) = 2^(k+1) + 2^(k+1)
+    rw [Nat.pow_succ, Nat.mul_comm, Nat.two_mul]
+  have hW : 2^(k+1) < 2^(k+2) := by have := Nat.two_pow_pos (k+1); omega
+  have h0W : (0:Nat) < 2^(k+1) := Nat.two_pow_pos (k+1)
+  have hW0 : 2^(k+1) ≠ 0 := by have := Nat.two_pow_pos (k+1); omega
+  have hsa := P3_seam_row0 k a ha ha0
+  have hsb := P3_seam_row0 k b hb hb0
+  by_cases halt : a < 2^(k+1)
+  · by_cases hblt : b < 2^(k+1)
+    · -- a < W, b < W
+      have hσ1 : cdSigma (b ^^^ 2^(k+1)) a (k+1+1) = - cdSigma b a (k+1) := by
+        rw [(seam_add_xor b k hblt).symm, R_ul b a k hblt halt, if_neg ha0]
+      have hσ2 : cdSigma (a ^^^ 2^(k+1)) b (k+1+1) = - cdSigma a b (k+1) := by
+        rw [(seam_add_xor a k halt).symm, R_ul a b k halt hblt, if_neg hb0]
+      have hsy := antisym (k+1) a b halt hblt ha0 hb0 hab
+      have key : P3 a b (2^(k+1)) (k+1) = 1 := by
+        rw [P3_red a b (2^(k+1)) (k+1) ha hb hW hb0, hσ1, hσ2, hsy]
+        rcases cdSigma_pm (k+1) b a with h | h <;> rw [h] <;> grind
+      rw [key, hsa, hsb]
+      grind
+    · by_cases hbeq : b = 2^(k+1)
+      · -- a < W, b = W
+        subst hbeq
+        have hσ1 : cdSigma ((2^(k+1)) ^^^ 2^(k+1)) a (k+1+1) = 1 := by
+          rw [Nat.xor_self, cdSig0]
+        have hσ2 : cdSigma (a ^^^ 2^(k+1)) (2^(k+1)) (k+1+1) = -1 := by
+          rw [(seam_add_xor a k halt).symm]
+          have hr := R_uu a 0 k halt h0W
+          rw [Nat.zero_add] at hr
+          rw [hr, if_pos rfl]
+        have key : P3 a (2^(k+1)) (2^(k+1)) (k+1) = 1 := by
+          rw [P3_red a (2^(k+1)) (2^(k+1)) (k+1) ha hW hW hW0, hσ1, hσ2]
+          grind
+        rw [key, hsa, hsb]
+        grind
+      · -- a < W, b > W
+        have hbgt : b > 2^(k+1) := by omega
+        have hbW : b - 2^(k+1) < 2^(k+1) := Nat.sub_lt_left_of_lt_add (by omega) (hpow ▸ hb)
+        have hb0' : b - 2^(k+1) ≠ 0 := by omega
+        have hbeq' : b = (b - 2^(k+1)) + 2^(k+1) := by omega
+        have hflip : b ^^^ 2^(k+1) = b - 2^(k+1) := xor_seam_sub b k (by omega) hb
+        have hσ1 : cdSigma (b ^^^ 2^(k+1)) a (k+1+1) = cdSigma (b - 2^(k+1)) a (k+1) := by
+          rw [hflip, R_ll (b - 2^(k+1)) a k hbW halt]
+        have hσ2 : cdSigma (a ^^^ 2^(k+1)) b (k+1+1) = cdSigma (b - 2^(k+1)) a (k+1) := by
+          rw [(seam_add_xor a k halt).symm,
+              congrArg (fun y => cdSigma (a + 2^(k+1)) y (k+1+1)) hbeq',
+              R_uu a (b - 2^(k+1)) k halt hbW, if_neg hb0']
+        have key : P3 a b (2^(k+1)) (k+1) = -1 := by
+          rw [P3_red a b (2^(k+1)) (k+1) ha hb hW hb0, hσ1, hσ2]
+          rcases cdSigma_pm (k+1) (b - 2^(k+1)) a with h | h <;> rw [h] <;> grind
+        rw [key, hsa, hsb]
+        grind
+  · by_cases haeq : a = 2^(k+1)
+    · subst haeq
+      by_cases hblt : b < 2^(k+1)
+      · -- a = W, b < W
+        have hσ1 : cdSigma (b ^^^ 2^(k+1)) (2^(k+1)) (k+1+1) = -1 := by
+          rw [(seam_add_xor b k hblt).symm]
+          have hr := R_uu b 0 k hblt h0W
+          rw [Nat.zero_add] at hr
+          rw [hr, if_pos rfl]
+        have hσ2 : cdSigma ((2^(k+1)) ^^^ 2^(k+1)) b (k+1+1) = 1 := by
+          rw [Nat.xor_self, cdSig0]
+        have key : P3 (2^(k+1)) b (2^(k+1)) (k+1) = 1 := by
+          rw [P3_red (2^(k+1)) b (2^(k+1)) (k+1) hW hb hW hb0, hσ1, hσ2]
+          grind
+        rw [key, hsa, hsb]
+        grind
+      · by_cases hbeq : b = 2^(k+1)
+        · subst hbeq; exact absurd rfl hab
+        · -- a = W, b > W
+          have hbgt : b > 2^(k+1) := by omega
+          have hbW : b - 2^(k+1) < 2^(k+1) := Nat.sub_lt_left_of_lt_add (by omega) (hpow ▸ hb)
+          have hflip : b ^^^ 2^(k+1) = b - 2^(k+1) := xor_seam_sub b k (by omega) hb
+          have hσ1 : cdSigma (b ^^^ 2^(k+1)) (2^(k+1)) (k+1+1) = 1 := by
+            rw [hflip]
+            have hg : cdSigma (b - 2^(k+1)) (2^(k+1)) (k+1+1)
+                = cdSigma (b - 2^(k+1)) (0 + 2^(k+1)) (k+1+1) := by rw [Nat.zero_add]
+            rw [hg, R_lu (b - 2^(k+1)) 0 k hbW h0W, cdSig0]
+          have hσ2 : cdSigma ((2^(k+1)) ^^^ 2^(k+1)) b (k+1+1) = 1 := by
+            rw [Nat.xor_self, cdSig0]
+          have key : P3 (2^(k+1)) b (2^(k+1)) (k+1) = -1 := by
+            rw [P3_red (2^(k+1)) b (2^(k+1)) (k+1) hW hb hW hb0, hσ1, hσ2]
+            grind
+          rw [key, hsa, hsb]
+          grind
+    · have hagt : a > 2^(k+1) := by omega
+      have haW : a - 2^(k+1) < 2^(k+1) := Nat.sub_lt_left_of_lt_add (by omega) (hpow ▸ ha)
+      have ha0' : a - 2^(k+1) ≠ 0 := by omega
+      have haeq' : a = (a - 2^(k+1)) + 2^(k+1) := by omega
+      have hflipa : a ^^^ 2^(k+1) = a - 2^(k+1) := xor_seam_sub a k (by omega) ha
+      by_cases hblt : b < 2^(k+1)
+      · -- a > W, b < W
+        have hσ1 : cdSigma (b ^^^ 2^(k+1)) a (k+1+1) = cdSigma (a - 2^(k+1)) b (k+1) := by
+          rw [(seam_add_xor b k hblt).symm,
+              congrArg (fun y => cdSigma (b + 2^(k+1)) y (k+1+1)) haeq',
+              R_uu b (a - 2^(k+1)) k hblt haW, if_neg ha0']
+        have hσ2 : cdSigma (a ^^^ 2^(k+1)) b (k+1+1) = cdSigma (a - 2^(k+1)) b (k+1) := by
+          rw [hflipa, R_ll (a - 2^(k+1)) b k haW hblt]
+        have key : P3 a b (2^(k+1)) (k+1) = -1 := by
+          rw [P3_red a b (2^(k+1)) (k+1) ha hb hW hb0, hσ1, hσ2]
+          rcases cdSigma_pm (k+1) (a - 2^(k+1)) b with h | h <;> rw [h] <;> grind
+        rw [key, hsa, hsb]
+        grind
+      · by_cases hbeq : b = 2^(k+1)
+        · -- a > W, b = W
+          subst hbeq
+          have hσ1 : cdSigma ((2^(k+1)) ^^^ 2^(k+1)) a (k+1+1) = 1 := by
+            rw [Nat.xor_self, cdSig0]
+          have hσ2 : cdSigma (a ^^^ 2^(k+1)) (2^(k+1)) (k+1+1) = 1 := by
+            rw [hflipa]
+            have hg : cdSigma (a - 2^(k+1)) (2^(k+1)) (k+1+1)
+                = cdSigma (a - 2^(k+1)) (0 + 2^(k+1)) (k+1+1) := by rw [Nat.zero_add]
+            rw [hg, R_lu (a - 2^(k+1)) 0 k haW h0W, cdSig0]
+          have key : P3 a (2^(k+1)) (2^(k+1)) (k+1) = -1 := by
+            rw [P3_red a (2^(k+1)) (2^(k+1)) (k+1) ha hW hW hW0, hσ1, hσ2]
+            grind
+          rw [key, hsa, hsb]
+          grind
+        · -- a > W, b > W
+          have hbgt : b > 2^(k+1) := by omega
+          have hbW : b - 2^(k+1) < 2^(k+1) := Nat.sub_lt_left_of_lt_add (by omega) (hpow ▸ hb)
+          have hb0' : b - 2^(k+1) ≠ 0 := by omega
+          have hbeq' : b = (b - 2^(k+1)) + 2^(k+1) := by omega
+          have hflipb : b ^^^ 2^(k+1) = b - 2^(k+1) := xor_seam_sub b k (by omega) hb
+          have hsub_ne : a - 2^(k+1) ≠ b - 2^(k+1) := by omega
+          have hσ1 : cdSigma (b ^^^ 2^(k+1)) a (k+1+1) = cdSigma (a - 2^(k+1)) (b - 2^(k+1)) (k+1) := by
+            rw [hflipb,
+                congrArg (fun y => cdSigma (b - 2^(k+1)) y (k+1+1)) haeq',
+                R_lu (b - 2^(k+1)) (a - 2^(k+1)) k hbW haW]
+          have hσ2 : cdSigma (a ^^^ 2^(k+1)) b (k+1+1) = cdSigma (b - 2^(k+1)) (a - 2^(k+1)) (k+1) := by
+            rw [hflipa,
+                congrArg (fun y => cdSigma (a - 2^(k+1)) y (k+1+1)) hbeq',
+                R_lu (a - 2^(k+1)) (b - 2^(k+1)) k haW hbW]
+          have hsy := antisym (k+1) (a - 2^(k+1)) (b - 2^(k+1)) haW hbW ha0' hb0' hsub_ne
+          have key : P3 a b (2^(k+1)) (k+1) = 1 := by
+            rw [P3_red a b (2^(k+1)) (k+1) ha hb hW hb0, hσ1, hσ2, hsy]
+            rcases cdSigma_pm (k+1) (b - 2^(k+1)) (a - 2^(k+1)) with h | h <;> rw [h] <;> grind
+          rw [key, hsa, hsb]
+          grind
+
+
+/-- The row-`0`-weighted row sums at the seam: for `b ≠ 0`, `J_b = s_b·(H−4)` —
+    every `c ∉ {0, b}` contributes `s_b` by the coboundary, and `c ∈ {0, b}` each
+    contribute `−s_b` instead. -/
+private theorem seam_J (k b : Nat) (hb : b < 2^(k+2)) (hb0 : b ≠ 0) :
+    sumLtI (2^(k+1+1)) (fun c => P3 b c (2^(k+1)) (k+1) * P3 0 c (2^(k+1)) (k+1))
+      = P3 0 b (2^(k+1)) (k+1) * (((2^(k+1+1) : Nat) : Int) - 4) := by
+  have hp : (0:Nat) < 2^(k+1+1) := Nat.two_pow_pos (k+1+1)
+  have hW : 2^(k+1) < 2^(k+2) := by
+    have hpow : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by
+      show (2:Nat)^(k+1+1) = 2^(k+1) + 2^(k+1)
+      rw [Nat.pow_succ, Nat.mul_comm, Nat.two_mul]
+    have := Nat.two_pow_pos (k+1); omega
+  have hW0 : 2^(k+1) ≠ 0 := by have := Nat.two_pow_pos (k+1); omega
+  -- pointwise decomposition
+  have hpt : ∀ c, c < 2^(k+1+1) →
+      P3 b c (2^(k+1)) (k+1) * P3 0 c (2^(k+1)) (k+1)
+      = P3 0 b (2^(k+1)) (k+1)
+        + (if c = 0 then -2 * P3 0 b (2^(k+1)) (k+1) else 0)
+        + (if c = b then -2 * P3 0 b (2^(k+1)) (k+1) else 0) := by
+    intro c hc
+    by_cases hc0 : c = 0
+    · subst hc0
+      rw [if_pos rfl, if_neg (fun h : (0:Nat) = b => hb0 h.symm)]
+      have h1 := P3_col0_eq_neg_row0 (k+1) b (2^(k+1)) hb hW
+      rw [if_neg hb0] at h1
+      rw [h1, P3_zero_zero (k+1) (2^(k+1))]
+      grind
+    · by_cases hcb : c = b
+      · subst hcb
+        rw [if_neg hb0, if_pos rfl, P3_diag c (2^(k+1)) (k+1) hc hW hb0]
+        grind
+      · rw [if_neg hc0, if_neg hcb]
+        have hcb2 := P3_seam_coboundary k b c hb hc hb0 hc0 (Ne.symm hcb)
+        rcases P3_pm b c (2^(k+1)) (k+1) with h1 | h1 <;>
+          rcases P3_pm 0 b (2^(k+1)) (k+1) with h2 | h2 <;>
+          rcases P3_pm 0 c (2^(k+1)) (k+1) with h3 | h3 <;>
+          rw [h1, h2, h3] at hcb2 ⊢ <;> grind
+  rw [sumLtI_congr _ _ _ hpt]
+  rw [sumLtI_add, sumLtI_add]
+  -- Σ_c s_b = s_b · H
+  have hconst : sumLtI (2^(k+1+1)) (fun _ => P3 0 b (2^(k+1)) (k+1))
+      = P3 0 b (2^(k+1)) (k+1) * ((2^(k+1+1) : Nat) : Int) := by
+    rw [sumLtI_congr _ _ (fun c => P3 0 b (2^(k+1)) (k+1) * (1:Int)) (fun c _ => by grind),
+        sumLtI_mul, sumLtI_one]
+  rw [hconst, sumLtI_single (2^(k+1+1)) 0 _ hp, sumLtI_single (2^(k+1+1)) b _ hb]
+  grind
+
+/-- The `b = 0` row sum at the seam: every `c` contributes `s_c² = 1`. -/
+private theorem seam_J0 (k : Nat) :
+    sumLtI (2^(k+1+1)) (fun c => P3 0 c (2^(k+1)) (k+1) * P3 0 c (2^(k+1)) (k+1))
+      = ((2^(k+1+1) : Nat) : Int) := by
+  rw [sumLtI_congr _ _ (fun _ => (1:Int)) (fun c _ => by
+        rcases P3_pm 0 c (2^(k+1)) (k+1) with h | h <;> rw [h] <;> grind),
+      sumLtI_one]
+
+/-- **`Q` AT THE MAXIMAL SEAM: `(H−2)²`.**  Row `0` contributes `H`; every other row `b`
+    contributes `s_b·J_b = H−4`.  This is the `+96·[m−1,2]₂ = (H−4)(H−8)` seam correction,
+    as a polynomial in `H` at the seam itself. -/
+theorem quad_seam_value (k : Nat) :
+    sumLtI (2^(k+1+1)) (fun b => sumLtI (2^(k+1+1)) (fun c =>
+        P3 0 b (2^(k+1)) (k+1) * (P3 b c (2^(k+1)) (k+1) * P3 0 c (2^(k+1)) (k+1))))
+      = ((2^(k+1+1) : Nat) : Int) * ((2^(k+1+1) : Nat) : Int)
+        - 4 * ((2^(k+1+1) : Nat) : Int) + 4 := by
+  have hp : (0:Nat) < 2^(k+1+1) := Nat.two_pow_pos (k+1+1)
+  -- peel P3(0,b) out of the inner sum, then evaluate per b
+  have hpeel : ∀ b, sumLtI (2^(k+1+1)) (fun c =>
+        P3 0 b (2^(k+1)) (k+1) * (P3 b c (2^(k+1)) (k+1) * P3 0 c (2^(k+1)) (k+1)))
+      = P3 0 b (2^(k+1)) (k+1) * sumLtI (2^(k+1+1)) (fun c =>
+          P3 b c (2^(k+1)) (k+1) * P3 0 c (2^(k+1)) (k+1)) := by
+    intro b
+    exact sumLtI_mul _ _ _
+  have hpt : ∀ b, b < 2^(k+1+1) →
+      P3 0 b (2^(k+1)) (k+1) * sumLtI (2^(k+1+1)) (fun c =>
+          P3 b c (2^(k+1)) (k+1) * P3 0 c (2^(k+1)) (k+1))
+      = (((2^(k+1+1) : Nat) : Int) - 4) + (if b = 0 then 4 else 0) := by
+    intro b hb
+    by_cases hb0 : b = 0
+    · subst hb0
+      rw [if_pos rfl, seam_J0, P3_zero_zero (k+1) (2^(k+1))]
+      grind
+    · rw [if_neg hb0, seam_J k b hb hb0]
+      rcases P3_pm 0 b (2^(k+1)) (k+1) with h | h <;> rw [h] <;> grind
+  rw [sumLtI_congr _ _ _ (fun b hb => (hpeel b).trans (hpt b hb))]
+  rw [sumLtI_add]
+  have hconst : sumLtI (2^(k+1+1)) (fun _ => (((2^(k+1+1) : Nat) : Int) - 4))
+      = (((2^(k+1+1) : Nat) : Int) - 4) * ((2^(k+1+1) : Nat) : Int) := by
+    rw [sumLtI_congr _ _ (fun c => (((2^(k+1+1) : Nat) : Int) - 4) * (1:Int))
+          (fun c _ => by grind),
+        sumLtI_mul, sumLtI_one]
+  rw [hconst, sumLtI_single (2^(k+1+1)) 0 4 hp]
+  grind
+
+/-- **THE SEAM SCALAR, CLOSED.**  `(M³)_WW = (H−2)² − 6H + 12` at the maximal seam —
+    the measured `2(H−8) + 96·[m−1,2]₂·[W = 2^m]`, as a polynomial in `H`. -/
+theorem walk3_maximal_seam (k : Nat) :
+    sumLtI (2^(k+1+1)) (fun b => sumLtI (2^(k+1+1)) (fun c =>
+        P3 (2^(k+1)) b (2^(k+1)) (k+1)
+          * (P3 b c (2^(k+1)) (k+1) * P3 c (2^(k+1)) (2^(k+1)) (k+1))))
+      = ((2^(k+1+1) : Nat) : Int) * ((2^(k+1+1) : Nat) : Int)
+        - 10 * ((2^(k+1+1) : Nat) : Int) + 16 := by
+  have hW : 2^(k+1) < 2^(k+1+1) := by
+    rw [Nat.pow_succ]; have := Nat.two_pow_pos (k+1); omega
+  have hW0 : 2^(k+1) ≠ 0 := by have := Nat.two_pow_pos (k+1); omega
+  rw [walk3_at_W (k+1) (2^(k+1)) hW hW0, quad_seam_value k]
+  grind
+
+/-- **`T2` AT THE MAXIMAL SEAM.**  Tier 132's one-scalar form with the walk evaluated. -/
+theorem weight2_T2_seam (k : Nat) :
+    sumLtI (2^(k+1+1)) (fun a => sumLtI (2^(k+1+1)) (fun b => sumLtI (2^(k+1+1)) (fun c =>
+        E01 a b (2^(k+1)) * P3 a b (2^(k+1)) (k+1)
+          * (E11 b c (2^(k+1)) * P3 b c (2^(k+1)) (k+1)
+            * (E10 c a (2^(k+1)) * P3 c a (2^(k+1)) (k+1))))))
+      = tri3 (2^(k+1+1)) (fun x y => P3 x y (2^(k+1)) (k+1))
+        + 4 * sumLtI (2^(k+1+1)) (fun a => sumLtI (2^(k+1+1)) (fun b =>
+            P3 a b (2^(k+1)) (k+1) * P3 b (a ^^^ 2^(k+1)) (2^(k+1)) (k+1)))
+        - 4 * (((2^(k+1+1) : Nat) : Int) * ((2^(k+1+1) : Nat) : Int)
+            - 10 * ((2^(k+1+1) : Nat) : Int) + 16) := by
+  have hW : 2^(k+1) < 2^(k+1+1) := by
+    rw [Nat.pow_succ]; have := Nat.two_pow_pos (k+1); omega
+  have hW0 : 2^(k+1) ≠ 0 := by have := Nat.two_pow_pos (k+1); omega
+  rw [weight2_T2_one_scalar (k+1) (2^(k+1)) hW hW0, walk3_maximal_seam k]
+
+
 end SounioZDFiberAntisym
