@@ -3440,3 +3440,14 @@ notes: |
   Tools note: bin/sounio-coord died on a root-owned claim file (codex session 019febc7,
   mode 600); patched load_claim to skip unreadable claim files. Fix is in the working
   tree, will commit separately as chore.
+
+  UPDATE (kimi, same day): **Tier 132 LANDED, GREEN — `9a1ddeb4ba`.**  The bulk is a
+  theorem: `tr(XMX) = s3 + 4·cp2 + 4H − 8` (all labels, no seam hypothesis), and with it
+  `weight2_T2_one_scalar`: **T2 = s3 + 4·cp2 − 4·(M³)_WW**, maximal seam included — Tier
+  120's measured one-scalar form, proved.  Kernel-clean lean 4.33.0, xai math-review
+  [OK]×6 (one docstring [TIGHTENABLE] taken).  Also in this lane: `bin/sounio-coord`
+  robustness fix at `c6c4475505` (root-owned claim file killed every command).
+
+  T2 leg status: CLOSED mod the two symbolic scalars (s3, cp2) and the seam value of
+  (M³)_WW.  What remains on T2 is exactly what remains on T1: the maximal-seam q-binomial
+  `96·[m−1,2]₂` at W = 2^m and the deviation law itself.  Claim released.
