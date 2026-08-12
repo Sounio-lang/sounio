@@ -54,7 +54,7 @@ cd "$ROOT_DIR"
 # SOUNIO_IR_ARENA_SOUC or an in-repo raw ELF is accepted, and it must identify
 # itself as Madaros before anything is compiled with it.
 SOUC="${SOUNIO_IR_ARENA_SOUC:-}"
-ARENA="self-hosted/ir/instr_arena.sio"
+ARENA="self-hosted/ir/ir.sio"   # the arena now lives beside IrInstr/IrFunction
 VACUITY="${SOUNIO_IR_ARENA_VACUITY:-0}"
 RUN_TIMEOUT="${SOUNIO_IR_ARENA_TIMEOUT:-60}"
 
@@ -101,7 +101,6 @@ DEPS=(
   "self-hosted/check/numeric_format.sio:check::numeric_format"
   "self-hosted/parser/ast.sio:parser::ast"
   "self-hosted/check/types.sio:check::types"
-  "self-hosted/ir/ir.sio:ir::ir"
 )
 
 compose() {
@@ -113,7 +112,7 @@ compose() {
       [ -f "$path" ] || fail "dep_missing_${path//\//_}"
       sed -e "/^module ${mod//::/\\:\\:}\$/d" -e '/^use /d' "$path"
     done
-    sed -e '/^module ir::instr_arena$/d' -e '/^use /d' "$arena_src"
+    sed -e '/^module ir::ir$/d' -e '/^use /d' "$arena_src"
     sed -e '/^use /d' "$witness"
   } >"$out"
 }
@@ -123,6 +122,21 @@ WITNESSES=(
   "ir_instr_arena_witness:IR_INSTR_ARENA_WITNESS_PASS"
   "ir_instr_arena_stale_witness:IR_INSTR_ARENA_STALE_PASS"
   "ir_instr_arena_seal_witness:IR_INSTR_ARENA_SEAL_PASS"
+  # Side-pool exhaustion. Consumes the pools for real -- no capacity is reduced --
+  # and asserts the latch fires at the exact arithmetic boundary: 4194304/128 =
+  # 32768 for names, 262144/64 = 4096 for args. Before this, both pools dropped
+  # their payload and carried on, which is rc=12 with the alarm removed.
+  "ir_arena_pool_witness:IR_ARENA_POOL_WITNESS_PASS"
+  # Publication. Pins that sealing a module seals EVERY live region -- the count,
+  # not merely "no error" -- and that a write afterwards is refused, quarantined
+  # and latched. The count half exists because the first wiring sealed 0 of 7 in
+  # silence.
+  "ir_module_seal_witness:IR_MODULE_SEAL_WITNESS_PASS"
+  # The swap primitive. A swap written as two stores cannot carry call arguments
+  # -- the first store overwrites the slot the second must read them from -- so
+  # this is the one piece of the rc=12 repair with no natural coverage: its call
+  # sites need specific IR shapes.
+  "ir_arena_swap_witness:IR_ARENA_SWAP_WITNESS_PASS"
 )
 
 run_one() {
@@ -161,10 +175,23 @@ for entry in "${WITNESSES[@]}"; do
 done
 
 # --- static contract: the guards must be present and the tiers coherent ------
-grep -q 'pub fn ir_instr_arena_capacity() -> i64 { 65536 }' "$ARENA" \
+grep -q 'pub fn ir_instr_arena_capacity() -> i64 { 1048576 }' "$ARENA" \
   || fail "arena_capacity_accessor_drift"
-grep -q 'pub var IR_INSTR_ARENA: \[IrInstr; 65536\]' "$ARENA" \
-  || fail "arena_declaration_accessor_incoherent"
+# The storage is struct-of-arrays, not one array of IrInstr. That is forced, not
+# stylistic: #1655 measured that the bootstrap seed turns a store into a GLOBAL
+# array of AGGREGATES into a silent no-op, so `[IrInstr; N]` as a global is
+# exactly the shape that must NOT come back. Assert its absence, then hold every
+# scalar lane to the capacity the accessor reports.
+grep -q 'pub var IR_INSTR_ARENA: \[IrInstr; ' "$ARENA" \
+  && fail "aggregate_arena_reintroduced_see_1655"
+for lane in IR_A_OP IR_A_DST IR_A_SRC1 IR_A_SRC2 IR_A_IMM_I64 IR_A_LABEL_ID \
+            IR_A_FN_ID IR_A_FIELD_IDX IR_A_IMM_FLAGS IR_A_BIN_OP IR_A_UN_OP \
+            IR_A_ARG_COUNT IR_A_NAME_OFF IR_A_NAME_LEN IR_A_ARG_BASE; do
+  grep -q "pub var $lane: \[i64; 1048576\]" "$ARENA" \
+    || fail "arena_lane_${lane}_incoherent"
+done
+grep -q 'pub var IR_A_IMM_F64: \[f64; 1048576\]' "$ARENA" \
+  || fail "arena_lane_IR_A_IMM_F64_incoherent"
 grep -q 'pub fn ir_region_table_capacity() -> i64 { 8192 }' "$ARENA" \
   || fail "region_table_accessor_drift"
 grep -cq . /dev/null
@@ -172,7 +199,10 @@ for arr in IR_REGION_BASE IR_REGION_CAP IR_REGION_LEN IR_REGION_GEN IR_REGION_ST
   grep -q "pub var $arr: \[i64; 8192\]" "$ARENA" || fail "region_array_${arr}_incoherent"
 done
 # The two guards this gate exists for.
-grep -q 'IR_REGION_GEN\[s as usize\] != (\*r).generation' "$ARENA" \
+# ir_region_status_v takes the handle BY VALUE, so the guard reads `r.generation`
+# rather than `(*r).generation`. Same guard, same strength -- only the binding
+# form moved.
+grep -q 'IR_REGION_GEN\[s as usize\] != r\.generation' "$ARENA" \
   || fail "generation_check_missing"
 grep -q 'IR_REGION_STATE\[(\*r).slot as usize\] == IR_REGION_SEALED' "$ARENA" \
   || fail "sealed_check_missing"
@@ -182,13 +212,32 @@ awk '/^pub fn ir_region_base_write/,/^}/' "$ARENA" | grep -q 'IR_REGION_SEALED' 
 
 # --- optional vacuity re-check ----------------------------------------------
 if [ "$VACUITY" = "1" ]; then
-  sed 's/IR_REGION_GEN\[s as usize\] != (\*r).generation/false/' "$ARENA" >"$TMP/no_gen.sio"
+  sed 's/IR_REGION_GEN\[s as usize\] != r\.generation/false/' "$ARENA" >"$TMP/no_gen.sio"
   run_one ir_instr_arena_stale_witness IR_INSTR_ARENA_STALE_PASS "$TMP/no_gen.sio" fail
   sed 's/IR_REGION_STATE\[(\*r).slot as usize\] == IR_REGION_SEALED/false/g' "$ARENA" >"$TMP/no_seal.sio"
   run_one ir_instr_arena_seal_witness IR_INSTR_ARENA_SEAL_PASS "$TMP/no_seal.sio" fail
+  # no_seal.sio strips the sealed CHECK on the (*r) paths, which ir_region_slot_w
+  # does not use -- so it leaves this witness passing. Strip the sealing itself
+  # instead: ir_region_seal still returns OK (the count half stays green) but the
+  # state is never set, so the write is no longer refused.
+  sed 's/IR_REGION_STATE\[(\*r).slot as usize\] = IR_REGION_SEALED//' "$ARENA" >"$TMP/no_seal_apply.sio"
+  run_one ir_module_seal_witness IR_MODULE_SEAL_WITNESS_PASS "$TMP/no_seal_apply.sio" fail
+  # Strip only the two pool latches. Measured: the witness then reports
+  # NAME_POOL_FIRED_AT -1 and exits 12, so it is testing the latch and not some
+  # other property that happens to hold.
+  sed -e 's/ir_arena_latch(IR_ARENA_VIOLATION_NAME_POOL, ir_region_invalid())//' \
+      -e 's/ir_arena_latch(IR_ARENA_VIOLATION_ARG_POOL, ir_region_invalid())//' \
+      "$ARENA" >"$TMP/no_pool_latch.sio"
+  run_one ir_arena_pool_witness IR_ARENA_POOL_WITNESS_PASS "$TMP/no_pool_latch.sio" fail
+  # Drop only the argument-binding half of the swap. Every scalar lane still
+  # exchanges, so a witness that checked less would stay green; this one fails at
+  # rc=29 = ARG_COUNT_NOT_SWAPPED.
+  sed -e '/let t_ab = IR_A_ARG_BASE/d' -e '/let t_ac = IR_A_ARG_COUNT/d' \
+      "$ARENA" >"$TMP/no_swap_args.sio"
+  run_one ir_arena_swap_witness IR_ARENA_SWAP_WITNESS_PASS "$TMP/no_swap_args.sio" fail
 fi
 
 head_sha="$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || printf not_available)"
-printf 'IR_INSTR_ARENA_BOUNDARY generation_guard=proved sealing_guard=proved fail_closed_capacity=proved conversion=not_started\n'
-printf 'IR_INSTR_ARENA_PASS witnesses=%d arena_capacity=65536 region_table=8192 head=%s\n' \
+printf 'IR_INSTR_ARENA_BOUNDARY generation_guard=proved sealing_guard=proved fail_closed_capacity=proved pool_exhaustion=proved publication_sealed=proved conversion=complete\n'
+printf 'IR_INSTR_ARENA_PASS witnesses=%d arena_capacity=1048576 region_table=8192 head=%s\n' \
   "${#WITNESSES[@]}" "$head_sha"
