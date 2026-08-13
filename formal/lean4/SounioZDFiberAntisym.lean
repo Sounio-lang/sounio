@@ -24898,4 +24898,61 @@ theorem hentry_law (m x y : Nat) (hx : x < 2^(m+1)) (hy : y < 2^(m+1)) (hxy : x 
                 · exact (hDef ⟨(by omega : x / 2 ≠ 0), (by omega : y / 2 ≠ 0), hXY, hne⟩).elim
         rw [if_neg hDef, Int.mul_one, P3_eq_eDef_mul_refP m x y hx0 hy0 hxy, heDef, Int.one_mul]
 
+/-! ### Tier 149 — `CORE`'s pin expansion, COMPLETE: the outer `a`-pin
+
+    The third and last pin.  With Tier 147's inner two, `CORE`'s 18 terms are now an explicit
+    expression: three `a`-branches (free, `a = W`, `a = 0`), each carrying Tier 147's three
+    `b`-branches, each carrying the `c`-pin's pair. -/
+
+theorem core_pin_cba (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun a => epsZero a * sigRow a W *
+        sumLtI (2^(m+1)) (fun b => epsZero b * sigRow b W *
+          (P3 a b W m * sumLtI (2^(m+1)) (fun c => epsZero c * (P3 b c W m * P3 c a W m)))))
+      = sumLtI (2^(m+1)) (fun a =>
+            sumLtI (2^(m+1)) (fun b => P3 a b W m *
+                (sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c a W m)
+                  - 2 * (P3 b 0 W m * P3 0 a W m)))
+            - 2 * (P3 a W W m *
+                (sumLtI (2^(m+1)) (fun c => P3 W c W m * P3 c a W m)
+                  - 2 * (P3 W 0 W m * P3 0 a W m)))
+            - 2 * (P3 a 0 W m *
+                (sumLtI (2^(m+1)) (fun c => P3 0 c W m * P3 c a W m)
+                  - 2 * (P3 0 0 W m * P3 0 a W m))))
+        - 2 * (sumLtI (2^(m+1)) (fun b => P3 W b W m *
+                (sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c W W m)
+                  - 2 * (P3 b 0 W m * P3 0 W W m)))
+            - 2 * (P3 W W W m *
+                (sumLtI (2^(m+1)) (fun c => P3 W c W m * P3 c W W m)
+                  - 2 * (P3 W 0 W m * P3 0 W W m)))
+            - 2 * (P3 W 0 W m *
+                (sumLtI (2^(m+1)) (fun c => P3 0 c W m * P3 c W W m)
+                  - 2 * (P3 0 0 W m * P3 0 W W m))))
+        - 2 * (sumLtI (2^(m+1)) (fun b => P3 0 b W m *
+                (sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c 0 W m)
+                  - 2 * (P3 b 0 W m * P3 0 0 W m)))
+            - 2 * (P3 0 W W m *
+                (sumLtI (2^(m+1)) (fun c => P3 W c W m * P3 c 0 W m)
+                  - 2 * (P3 W 0 W m * P3 0 0 W m)))
+            - 2 * (P3 0 0 W m *
+                (sumLtI (2^(m+1)) (fun c => P3 0 c W m * P3 c 0 W m)
+                  - 2 * (P3 0 0 W m * P3 0 0 W m)))) := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hs0 : sigRow 0 W = 1 := by unfold sigRow; rw [Nat.zero_xor, if_neg hW0]
+  have h1 : sumLtI (2^(m+1)) (fun a => epsZero a * sigRow a W *
+        sumLtI (2^(m+1)) (fun b => epsZero b * sigRow b W *
+          (P3 a b W m * sumLtI (2^(m+1)) (fun c => epsZero c * (P3 b c W m * P3 c a W m)))))
+      = sumLtI (2^(m+1)) (fun a => epsZero a * (sigRow a W *
+          (sumLtI (2^(m+1)) (fun b => P3 a b W m *
+              (sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c a W m)
+                - 2 * (P3 b 0 W m * P3 0 a W m)))
+            - 2 * (P3 a W W m *
+                (sumLtI (2^(m+1)) (fun c => P3 W c W m * P3 c a W m)
+                  - 2 * (P3 W 0 W m * P3 0 a W m)))
+            - 2 * (P3 a 0 W m *
+                (sumLtI (2^(m+1)) (fun c => P3 0 c W m * P3 c a W m)
+                  - 2 * (P3 0 0 W m * P3 0 a W m)))))) :=
+    sumLtI_congr _ _ _ (fun a _ => by rw [core_pin_cb m a W hW hW0]; grind)
+  rw [h1, sumLtI_epsZero _ hp, sumLtI_sigRow (2^(m+1)) W hW, hs0]
+  grind
+
 end SounioZDFiberAntisym
