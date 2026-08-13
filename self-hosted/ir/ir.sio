@@ -1399,7 +1399,7 @@ pub fn ir_region_slot_r(r: IrInstrRegion, idx: i64) -> i64 with Mut, Panic, Div 
 // and the handle stores the SLOT, not the base -- so every copy of a handle sees
 // the new base through the same indirection and growth cannot make a copy stale.
 // That is also what keeps this callable from the ~1425 write sites: `&!` through
-// a chain like `(*module.functions)[0].region` does not typecheck.
+// a chain like `ir_module_fn(&module, 0).region` does not typecheck.
 //
 // A region is NOT allocated here. Writing into a function that was never given
 // one is a bug in the caller, and it is latched as a violation rather than
@@ -1612,7 +1612,7 @@ pub fn ir_module_seal_functions(module: &IrModule) -> i64 with Mut, Panic, Div {
     var i: i64 = 0
     while i < (*module).fn_count && i < IR_MAX_FUNCS {
         // Hoist the handle before taking its address. Do not "simplify" this
-        // back to `ir_region_seal(&(*(*module).functions)[i as usize].region)`:
+        // back to `ir_region_seal(&ir_module_fn(&(*module), i as usize).region)`:
         // that is what the first version did, and it sealed ZERO of seven
         // regions in a real compile while reporting nothing.
         //
@@ -1629,7 +1629,7 @@ pub fn ir_module_seal_functions(module: &IrModule) -> i64 with Mut, Panic, Div {
         //
         // Sealing writes IR_REGION_STATE, a global, so a copy of the handle is
         // all this needs -- nothing has to be written back to the module.
-        var r = (*(*module).functions)[i as usize].region
+        var r = ir_module_fn(&(*module), i as usize).region
         if ir_region_seal(&r) == IR_ARENA_OK {
             sealed = sealed + 1
         }
@@ -3157,13 +3157,11 @@ pub fn ir_empty_epistemic_section_boxed() -> Box<IrEpistemicSection> with Alloc,
     Box::new(ep)
 }
 
-// #B3 (2026-08-13): functions table lives on the heap so IrModule is a small
-// handle-like value. Box::new(ir_empty_module()) previously materialised a
-// ~9–13 MiB stack temp (measured stack-frame warning on ir_empty_module
-// return). Hello lower seed_begin SEGVd under a 32 MiB stack because of that.
-// Access: (*module.functions)[i] / (*(*module).functions)[i].
+// #B3 (2026-08-13): functions table is off-struct in a BSS pool so IrModule
+// is a small value. Slot index selects IR_FN_TABLE_N. Access via
+// ir_module_fn / ir_module_fn_set (pointer-to-array indexing hung under seed).
 pub struct IrModule {
-    pub functions: *mut [IrFunction; 8192],
+    pub fn_table_slot: i64,
     pub fn_count: i64,
     pub string_table: [Name; 4096],
     pub string_count: i64,
@@ -5136,7 +5134,7 @@ pub fn ir_module_count_float_bits_untouched(module: &IrModule, n: i64) -> i64 wi
         if slot >= IR_MAX_FUNCS { return total }
         // Same hoist as the live counter: a reference into a boxed array element
         // reads a wrong address under the seed. See the commit that measured it.
-        var uslot = (*(*module).functions)[slot as usize]
+        var uslot = ir_module_fn(&(*module), slot as usize)
         var r: i64 = 0
         while r < ir_float_bits_capacity() {
             if ir_float_bits_get(&uslot, r) { total = total + 1 }
@@ -5155,14 +5153,14 @@ pub fn ir_module_count_float_bits(module: &IrModule) -> i64 with Mut, Panic, Div
     var fi: i64 = 0
     while fi < (*module).fn_count && fi < IR_MAX_FUNCS {
         // Hoist the element to a local BEFORE taking a reference to it. Taking
-        // &(*(*module).functions)[i] directly is the same shape that made
+        // &ir_module_fn(&(*module), i) directly is the same shape that made
         // ir_region_seal silently seal 0 of 7 regions until it was hoisted; that
         // fix worked but its mechanism was never explained. This is the probe
         // that explains it -- if the hoisted count differs from the in-place one,
         // the reference-into-a-boxed-array-element is computing a wrong address,
         // and every reading in this investigation came from a broken instrument
         // rather than from broken storage.
-        var fslot = (*(*module).functions)[fi as usize]
+        var fslot = ir_module_fn(&(*module), fi as usize)
         var r: i64 = 0
         while r < ir_float_bits_capacity() {
             if ir_float_bits_get(&fslot, r) { total = total + 1 }
@@ -5279,6 +5277,7 @@ pub fn ir_reset_function_in_place(f: &! IrFunction, name: Name) with Mut, Panic,
 // need Alloc (no effect cascade across the compiler). Zero-init via
 // ir_empty_function() at load; live slots are fully rewritten on use.
 // Concurrent multi-mod merge peaks well under 8 live modules.
+// Off-struct function tables (B3). Slot index, not *mut — seed hung on *mut [T;N] index.
 var IR_FN_TABLE_0: [IrFunction; 8192] = [ir_empty_function(); 8192]
 var IR_FN_TABLE_1: [IrFunction; 8192] = [ir_empty_function(); 8192]
 var IR_FN_TABLE_2: [IrFunction; 8192] = [ir_empty_function(); 8192]
@@ -5289,28 +5288,38 @@ var IR_FN_TABLE_6: [IrFunction; 8192] = [ir_empty_function(); 8192]
 var IR_FN_TABLE_7: [IrFunction; 8192] = [ir_empty_function(); 8192]
 var IR_FN_TABLE_POOL_NEXT: i64 = 0
 
-fn ir_fn_table_ptr(slot: i64) -> *mut [IrFunction; 8192] with Mut {
-    if slot == 0 { return &! IR_FN_TABLE_0 }
-    if slot == 1 { return &! IR_FN_TABLE_1 }
-    if slot == 2 { return &! IR_FN_TABLE_2 }
-    if slot == 3 { return &! IR_FN_TABLE_3 }
-    if slot == 4 { return &! IR_FN_TABLE_4 }
-    if slot == 5 { return &! IR_FN_TABLE_5 }
-    if slot == 6 { return &! IR_FN_TABLE_6 }
-    &! IR_FN_TABLE_7
+pub fn ir_module_fn(m: &IrModule, i: i64) -> IrFunction with Mut, Panic, Div {
+    let s = (*m).fn_table_slot
+    if s == 0 { return IR_FN_TABLE_0[i as usize] }
+    if s == 1 { return IR_FN_TABLE_1[i as usize] }
+    if s == 2 { return IR_FN_TABLE_2[i as usize] }
+    if s == 3 { return IR_FN_TABLE_3[i as usize] }
+    if s == 4 { return IR_FN_TABLE_4[i as usize] }
+    if s == 5 { return IR_FN_TABLE_5[i as usize] }
+    if s == 6 { return IR_FN_TABLE_6[i as usize] }
+    IR_FN_TABLE_7[i as usize]
+}
+
+pub fn ir_module_fn_set(m: &! IrModule, i: i64, f: IrFunction) with Mut, Panic, Div {
+    let s = (*m).fn_table_slot
+    if s == 0 { IR_FN_TABLE_0[i as usize] = f; return }
+    if s == 1 { IR_FN_TABLE_1[i as usize] = f; return }
+    if s == 2 { IR_FN_TABLE_2[i as usize] = f; return }
+    if s == 3 { IR_FN_TABLE_3[i as usize] = f; return }
+    if s == 4 { IR_FN_TABLE_4[i as usize] = f; return }
+    if s == 5 { IR_FN_TABLE_5[i as usize] = f; return }
+    if s == 6 { IR_FN_TABLE_6[i as usize] = f; return }
+    IR_FN_TABLE_7[i as usize] = f
 }
 
 pub fn ir_empty_module() -> IrModule with Mut {
-    // Rotate through BSS slots. Does not clear prior contents — callers set
-    // fn_count = 0 and only read [0, fn_count). Soft wrap at 8.
     let use_slot = IR_FN_TABLE_POOL_NEXT
     IR_FN_TABLE_POOL_NEXT = use_slot + 1
     if IR_FN_TABLE_POOL_NEXT >= 8 {
         IR_FN_TABLE_POOL_NEXT = 0
     }
-    let funcs = ir_fn_table_ptr(use_slot)
     IrModule {
-        functions: funcs,
+        fn_table_slot: use_slot,
         fn_count: 0,
         string_table: [ir_empty_name(); 4096],
         string_count: 0,
@@ -5323,89 +5332,6 @@ pub fn ir_empty_module() -> IrModule with Mut {
         export_count: 0,
         bss_total_size: 0,
     }
-}
-
-// ============================================================================
-// BSS global-variable tracking (mirrors lean_single GL table)
-// ============================================================================
-
-// BSS globals occupy the same fixed IrModule.functions storage as functions.
-// A native entry module needs one shared slot for main, so this is the
-// executable global boundary enforced by the module frontend.
-// Keep this aligned with IR_MAX_FUNCS = 8192; global initializers in the
-// bootstrap compiler do not evaluate a reference-plus-arithmetic expression.
-pub let BSS_MAX_GLOBALS: i64 = 8191
-pub let BSS_BASE_LINUX: i64 = 0x10000000
-pub let IR_STRATEGY_BSS_GLOBAL: i64 = 99
-// Wave15e: module-level string literal BSS init. prof_counter_id holds this
-// magic; return_struct_name carries the normalized payload; codegen LEAs
-// rodata into the BSS slot (imm fill cannot encode a RIP-relative pointer).
-pub let BSS_INIT_STRING_MAGIC: i64 = 0 - 800001
-// Must match native::gc::native_v2_object_header_size(). BSS aggregate & / &!
-// refs stash (bss_addr - header) so native-v2 ref_array_* (load slot; resolve
-// raw ptr; add header to index) lands on the true BSS base. Direct GG[i] still
-// uses raw IndexGet (label_id=2) at BSS_BASE+off with no header.
-pub let IR_NATIVE_V2_OBJECT_HEADER_SIZE: i64 = 32
-
-pub fn bss_name_hash(n: Name) -> i64 with Div {
-    var hash: i64 = 5381
-    var i = 0
-    while i < n.len {
-        hash = hash * 33 + (n.buf[i as usize] as i64)
-        i = i + 1
-    }
-    if hash < 0 { 0 - hash } else { hash }
-}
-
-pub fn ir_load_global(dst: i64, bss_offset: i64, name: Name) -> IrInstr with Mut, Panic, Div {
-    var instr = ir_instr_new(IrOpcode::IrLoadGlobal)
-    instr.dst = dst
-    instr.imm_i64 = bss_offset
-    instr.name_id = ir_intern_name(name)
-    instr
-}
-
-pub fn ir_store_global(src: i64, bss_offset: i64, name: Name) -> IrInstr with Mut, Panic, Div {
-    var instr = ir_instr_new(IrOpcode::IrStoreGlobal)
-    instr.src1 = src
-    instr.imm_i64 = bss_offset
-    instr.name_id = ir_intern_name(name)
-    instr
-}
-
-// Store val (src2) through the raw pointer in ptr (src1): [ptr] = val.
-pub fn ir_store_ptr(ptr: i64, val: i64) -> IrInstr with Mut, Panic {
-    var instr = ir_instr_new(IrOpcode::IrStorePtr)
-    instr.src1 = ptr
-    instr.src2 = val
-    instr
-}
-
-pub fn ir_call_extern(dst: i64, symbol: Name, args: Option<Box<IrRegList>>, arg_count: i64) -> IrInstr with Mut, Panic, Div {
-    var instr = ir_instr_new(IrOpcode::IrCallExtern)
-    instr.dst = dst
-    instr.name_id = ir_intern_name(symbol)
-    instr.call_args = args
-    instr.arg_count = arg_count
-    instr
-}
-
-// Sprint 228: Load a function reference as a first-class i64 value.
-pub fn ir_load_fn_ref(dst: i64, fn_id: i64) -> IrInstr with Mut, Panic {
-    var instr = ir_instr_new(IrOpcode::IrLoadFnRef)
-    instr.dst = dst
-    instr.fn_id = fn_id
-    instr
-}
-
-// Sprint 228: Indirect call — fn_id comes from register src1.
-pub fn ir_call_indirect(dst: i64, fn_ref_reg: i64, args: Option<Box<IrRegList>>, arg_count: i64) -> IrInstr with Mut, Panic {
-    var instr = ir_instr_new(IrOpcode::IrCallIndirect)
-    instr.dst = dst
-    instr.src1 = fn_ref_reg
-    instr.call_args = args
-    instr.arg_count = arg_count
-    instr
 }
 
 pub fn ir_module_add_export(module: IrModule, name: Name) -> IrModule with Mut, Panic {
