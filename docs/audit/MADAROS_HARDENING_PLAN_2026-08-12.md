@@ -15,6 +15,23 @@ checked prebuilt `bin/madaros-linux-x86_64` (`Madaros v0.80.0`).
 
 ---
 
+## Status update 2026-08-13
+
+**Lane A:** landed on `main` via #1725 (honest exit status + `MADAROS_STACK_KB` + measure script).
+
+**Lane B — instruction storage (B3-instrs):** DONE in source. `IrFunction.region: IrInstrRegion`
+and `IR_MAX_INSTRS = 16384` are on `main`. A current-source Madaros rebuild compiles and
+runs `tests/run-pass/knowledge_octonion_structure.sio` (14 389 IR ops) to `PASS`. The
+checked-in `bin/madaros-linux-x86_64` can lag (still reports 4096 until rebuilt/shipped).
+
+**Lane B residual (stack floor):** with current-source Madaros, minimal hello still needs
+**64 MiB** stack (fails at 8/16/32). `IrModule.functions: [IrFunction; 8192]` remains
+inline (~11 MiB) and codegen still has multi-10 MiB frames. Next peel: functions table
+as arena handles + shrink by-value `IrFunction`/`IrModule` copies (B3-functions).
+
+Re-measure: `MADAROS_RAW_BIN=artifacts/self-hosted/madaros bash scripts/dev/measure_madaros_stack_floor.sh`
+
+
 ## TL;DR
 
 The shipped Madaros compiler **cannot compile a one-function program under the
