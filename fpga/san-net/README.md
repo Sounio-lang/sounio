@@ -72,3 +72,36 @@ tabela de sockets — com porta efêmera o UDP do VNx descarta em silêncio.
 - `eth_in` delta **0** → nenhum quadro chegou (cabo / VLAN / rota)
 - `eth_in` delta **> 0** → chegou quadro e o UDP descartou (tabela de
   sockets / porta)
+
+## Estado medido (2026-08-13)
+
+Correção provada duas vezes, de forma limpa, em 4.000.003 amostras: zero
+perda de pacote, histograma/catástrofes/FLOPs bit-exatos contra o golden
+model. Isso é o resultado de arquitetura — publicável como está.
+
+**Throughput ainda não medido corretamente.** `sendto` de thread única
+satura em ~104 Msamples/s (limite do host, não da placa). Tentei elevar isso
+com `sendmmsg` (lotes de 64 datagramas por chamada): a taxa de envio subiu
+para 146,6 Msamples/s, mas **97,7% dos pacotes se perderam** — achado real:
+o `networklayer` do VNx tem FIFOs pequenas e nenhum controle de fluxo, e uma
+rajada nesse ritmo estoura o buffer.
+
+### A rajada deixou a FPGA travada — `xrt-smi program` sozinho NÃO recupera
+
+Depois da perda de pacotes, nenhuma corrida completava mais — nem revertendo
+para `sendto`, nem com coortes de 8 amostras, mesmo após `xrt-smi program`
+duas vezes. Isolado com cuidado antes de concluir: `tcpdump` no injetor
+mostrou o pacote saindo certo (IP/porta corretos); a tabela de sockets da
+FPGA conferia na leitura de volta; mesmo assim o kernel nunca recebia o
+stream. O quadro chegava ao CMAC (contador sobia) mas nunca atravessava o
+`networklayer` até o kernel — reprogramar só a região dinâmica não limpa
+esse estado.
+
+**Recuperação que funcionou:** `systemctl restart u250-vnx.service` (recarrega
+o bitstream de BASE do VNx e refaz o bring-up do CMAC do zero), seguido de
+`xrt-smi program --user san_net.xclbin` por cima. Confirmado por duas
+corridas limpas depois disso (1000 e 4.000.003 amostras, ambas bit-exatas).
+
+**Para a próxima tentativa de medir throughput real:** não repetir a rajada
+sem controle. Um injetor com *pacing* (intervalo entre lotes, sweep
+crescente) é o próximo passo — ainda não escrito.

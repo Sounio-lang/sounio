@@ -210,6 +210,7 @@ int main(int argc, char **argv) {
         run.set_arg(5, bo_hist);
         run.set_arg(6, bo_cat);
         run.set_arg(7, bo_flop);
+        auto t_arma = std::chrono::steady_clock::now();
         run.start();
         printf("ARMADO — rode agora, no outro no:\n");
         printf("  ./inject_san 10.100.100.50 %u %u %u 140 %u\n",
@@ -218,6 +219,12 @@ int main(int argc, char **argv) {
 
         // 120 s: a 100G a coorte inteira leva ms; se estourar, nao chegou nada.
         auto estado = run.wait(std::chrono::seconds(120));
+        auto t_fim = std::chrono::steady_clock::now();
+        // Cronometro do PROPRIO host de controle: arma -> kernel completo.
+        // Inclui o atraso ate o injetor comecar a mandar (lancamento remoto),
+        // entao subestima o throughput real do caminho de dados — e' um vies
+        // conservador, nao otimista.
+        double dt = std::chrono::duration<double>(t_fim - t_arma).count();
         uint32_t eth1 = nl.read_register(NL_ETH_IN);
         if (estado == ERT_CMD_STATE_TIMEOUT) {
             fprintf(stderr,
@@ -250,6 +257,8 @@ int main(int argc, char **argv) {
         for (uint32_t i = 0; i < HIST_BINS; i++) printf("%u ", g.hist[i]);
         printf("\n  soma=%llu (esperado %u)  quadros eth_in delta=%u\n",
                (unsigned long long)soma, n_samples, eth1 - eth0);
+        printf("  arma->completo (host, subestimado): %.4fs = %.1f Msamples/s\n",
+               dt, n_samples / dt / 1e6);
 
         if (soma != n_samples) {
             fprintf(stderr, "FALHA: histograma nao fecha — houve perda de pacote UDP.\n");

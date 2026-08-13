@@ -24,6 +24,7 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 
 #define LANES 4
 #define BEAT_BYTES 64          /* 512 bits */
@@ -102,17 +103,42 @@ int main(int argc, char **argv) {
     }
     double tpack = now_s() - tp0;
 
-    /* --- FASE 2: so a transmissao entra no cronometro --- */
-    long pacotes = 0, bytes = 0;
-    double t0 = now_s();
-    for (long b = 0; b < n_beats; ) {
+    /* --- FASE 2: so a transmissao entra no cronometro ---
+       sendmmsg agrupa varios datagramas por chamada de sistema. Com sendto
+       simples, 4M amostras = 7143 syscalls a ~103 Msamples/s: o custo por
+       chamada (troca de contexto, nao a rede) dominava. */
+    long total_pkts = (n_beats + bpp - 1) / bpp;
+    struct mmsghdr *msgs = calloc((size_t)total_pkts, sizeof *msgs);
+    struct iovec   *iovs = calloc((size_t)total_pkts, sizeof *iovs);
+    if (!msgs || !iovs) { perror("calloc"); free(buf); close(fd); return 1; }
+    long p = 0;
+    for (long b = 0; b < n_beats; p++) {
         long nb = (n_beats - b < bpp) ? (n_beats - b) : bpp;
-        ssize_t w = sendto(fd, buf + (size_t)b * BEAT_BYTES, (size_t)nb * BEAT_BYTES, 0,
-                           (struct sockaddr *)&dst, sizeof dst);
-        if (w < 0) { perror("sendto"); free(buf); close(fd); return 1; }
-        bytes += w; pacotes++; b += nb;
+        iovs[p].iov_base = buf + (size_t)b * BEAT_BYTES;
+        iovs[p].iov_len  = (size_t)nb * BEAT_BYTES;
+        msgs[p].msg_hdr.msg_name    = &dst;
+        msgs[p].msg_hdr.msg_namelen = sizeof dst;
+        msgs[p].msg_hdr.msg_iov     = &iovs[p];
+        msgs[p].msg_hdr.msg_iovlen  = 1;
+        b += nb;
+    }
+
+    long pacotes = 0, bytes = 0;
+    const int LOTE = 64; /* datagramas por chamada de sendmmsg */
+    double t0 = now_s();
+    for (long i = 0; i < total_pkts; ) {
+        int n = (int)((total_pkts - i < LOTE) ? (total_pkts - i) : LOTE);
+        int sent = sendmmsg(fd, &msgs[i], n, 0);
+        if (sent < 0) { perror("sendmmsg"); free(buf); free(msgs); free(iovs); close(fd); return 1; }
+        for (int j = 0; j < sent; j++) bytes += msgs[i + j].msg_len;
+        pacotes += sent; i += sent;
+        if (sent < n) { /* buffer de socket cheio: recua um pouco e retenta */
+            struct timespec ts = {0, 100000};
+            nanosleep(&ts, NULL);
+        }
     }
     double dt = now_s() - t0;
+    free(msgs); free(iovs);
 
     printf("INJECT_SAN origem=:%d destino=%s:%d n_samples=%ld n_points=%d beats=%ld\n",
            sport, ip, port, n_samples, n_points, n_beats);
