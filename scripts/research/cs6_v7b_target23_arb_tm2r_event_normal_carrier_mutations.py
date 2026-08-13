@@ -34,6 +34,18 @@ def first_basis(payload: dict[str, object]) -> dict[str, object]:
     return initial(payload)["stats"]["basis_history"][0]
 
 
+def first_basis_with_geometry(
+    payload: dict[str, object], geometry: str
+) -> dict[str, object]:
+    mode = first_mode(payload)
+    analyses = [*mode["analyses"].values(), mode["initial_witness_analysis"]]
+    for analysis in analyses:
+        for record in analysis["stats"]["basis_history"]:
+            if record.get("geometry") == geometry:
+                return record
+    raise ValueError(f"missing basis geometry {geometry}")
+
+
 def corrupt_basis(payload: dict[str, object]) -> None:
     first_basis(payload)["basis"][0][0] = "0"
 
@@ -47,7 +59,7 @@ def corrupt_kernel_pairing(payload: dict[str, object]) -> None:
 
 
 def corrupt_covector(payload: dict[str, object]) -> None:
-    first_basis(payload)["event_covector"][2] = "0"
+    first_basis_with_geometry(payload, "ambient_event_normal")["event_covector"][2] = "0"
 
 
 def corrupt_radius(payload: dict[str, object]) -> None:
@@ -64,6 +76,18 @@ def corrupt_kernel_count(payload: dict[str, object]) -> None:
 
 def corrupt_normal_form_count(payload: dict[str, object]) -> None:
     initial(payload)["stats"]["normal_form_checks"] = 0
+
+
+def corrupt_anchor_count(payload: dict[str, object]) -> None:
+    initial(payload)["stats"]["section_anchored_reconditionings"] = 0
+
+
+def corrupt_anchor_checks(payload: dict[str, object]) -> None:
+    initial(payload)["stats"]["section_anchor_checks"] = 0
+
+
+def corrupt_anchor_flag(payload: dict[str, object]) -> None:
+    initial(payload)["section_anchor_control_exact_w"] = False
 
 
 def corrupt_history(payload: dict[str, object]) -> None:
@@ -154,6 +178,9 @@ def main() -> None:
         "reconstruction_count": corrupt_reconstruction_count,
         "kernel_count": corrupt_kernel_count,
         "normal_form_count": corrupt_normal_form_count,
+        "anchor_count": corrupt_anchor_count,
+        "anchor_checks": corrupt_anchor_checks,
+        "anchor_flag": corrupt_anchor_flag,
         "history": corrupt_history,
         "component_variables": corrupt_component_variables,
         "component_degree": corrupt_component_degree,

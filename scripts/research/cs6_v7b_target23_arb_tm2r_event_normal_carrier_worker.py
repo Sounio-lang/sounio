@@ -42,6 +42,8 @@ CARRIER_NAMES = ("sigma0", "sigma1", "sigma2", "sigma3")
 @dataclass
 class CarrierStats:
     reconditionings: int = 0
+    section_anchored_reconditionings: int = 0
+    section_anchor_checks: int = 0
     generator_reconstructions: int = 0
     coefficient_uncertainty_generators: int = 0
     normal_direction_seeds: int = 0
@@ -154,7 +156,7 @@ def orthogonalize(
         factor = dot(result, direction) / denominator
         result = [
             result[index] - factor * direction[index]
-            for index in range(4)
+            for index in range(len(result))
         ]
     return result
 
@@ -165,7 +167,7 @@ def fraction_vector(vector: list[arb]) -> list[Fraction]:
 
 def event_covector(state: list[base.TM2R]) -> list[Fraction]:
     ranges = [component.range() for component in state]
-    # D = x*y - w - z_s, so grad(D) = (y, x, -1, 0).
+    # D = x*y - w - ZS, with frozen interval parameter ZS.
     return [
         midpoint_fraction(ranges[1]),
         midpoint_fraction(ranges[0]),
@@ -186,7 +188,7 @@ def kernel_projection(
     factor = dot(covector, vector) / denominator
     projected = [
         vector[index] - factor * normal_direction[index]
-        for index in range(4)
+        for index in range(len(vector))
     ]
     if dot(covector, projected):
         raise base.Refusal(
@@ -199,14 +201,15 @@ def kernel_projection(
 def matrix_rank(columns: list[list[Fraction]]) -> int:
     if not columns:
         return 0
+    dimension = len(columns[0])
     matrix = [
         [columns[column][row] for column in range(len(columns))]
-        for row in range(4)
+        for row in range(dimension)
     ]
     rank = 0
     for column in range(len(columns)):
         pivot = next(
-            (row for row in range(rank, 4) if matrix[row][column]),
+            (row for row in range(rank, dimension) if matrix[row][column]),
             None,
         )
         if pivot is None:
@@ -219,7 +222,7 @@ def matrix_rank(columns: list[list[Fraction]]) -> int:
                 "exact rank elimination selected a zero pivot",
             )
         matrix[rank] = [value / scale for value in matrix[rank]]
-        for row in range(4):
+        for row in range(dimension):
             if row == rank:
                 continue
             factor = matrix[row][column]
@@ -228,23 +231,26 @@ def matrix_rank(columns: list[list[Fraction]]) -> int:
                 for index in range(len(columns))
             ]
         rank += 1
-        if rank == 4:
+        if rank == dimension:
             break
     return rank
 
 
 def fixed_kernel_candidates(covector: list[Fraction]) -> list[list[Fraction]]:
-    pivot = 2  # The w coefficient is exactly -1.
-    if covector[pivot] != -1:
+    dimension = len(covector)
+    pivot = max(range(dimension), key=lambda index: abs(covector[index]))
+    if not covector[pivot]:
         raise base.Refusal(
-            "EVENT_COVECTOR_W_COEFFICIENT_DRIFT",
-            "event covector no longer has exact w coefficient -1",
+            "EVENT_COVECTOR_ZERO",
+            "event covector has no nonzero component",
         )
     candidates: list[list[Fraction]] = []
-    for coordinate in (0, 1, 3):
-        vector = [Fraction(0) for _ in range(4)]
+    for coordinate in range(dimension):
+        if coordinate == pivot:
+            continue
+        vector = [Fraction(0) for _ in range(dimension)]
         vector[coordinate] = Fraction(1)
-        vector[pivot] = covector[coordinate]
+        vector[pivot] = -covector[coordinate] / covector[pivot]
         if dot(covector, vector):
             raise base.Refusal(
                 "FIXED_EVENT_KERNEL_DIRECTION_FAILED",
@@ -296,6 +302,7 @@ def event_normal_basis(
     privileged1: list[arb] | None,
     covector: list[Fraction],
 ) -> tuple[list[list[Fraction]], list[list[Fraction]], bool, bool]:
+    dimension = len(covector)
     normal_direction, normal_transported = select_normal_direction(
         generators, privileged0, covector
     )
@@ -322,9 +329,9 @@ def event_normal_basis(
             )
         if matrix_rank([*columns, candidate]) > len(columns):
             columns.append(normalize(candidate))
-        if len(columns) == 4:
+        if len(columns) == dimension:
             break
-    if len(columns) != 4:
+    if len(columns) != dimension:
         raise base.Refusal(
             "EVENT_NORMAL_BASIS_INCOMPLETE",
             "could not complete the event-normal carrier basis",
@@ -337,8 +344,8 @@ def event_normal_basis(
             )
         STATS.kernel_orthogonality_checks += 1
     basis = [
-        [columns[column][row] for column in range(4)]
-        for row in range(4)
+        [columns[column][row] for column in range(dimension)]
+        for row in range(dimension)
     ]
     inverse = base.fraction_inverse(basis)
     row_sum = max(sum(abs(value) for value in row) for row in inverse)
@@ -370,18 +377,24 @@ def carrier_normal_form(state: list[base.TM2R]) -> bool:
     return True
 
 
-def event_normal_recondition(state: list[base.TM2R]) -> list[base.TM2R]:
-    """Move all non-source uncertainty into an event-normal rational carrier."""
+def _carrier_recondition(
+    state: list[base.TM2R], rows: tuple[int, ...], geometry: str
+) -> list[base.TM2R]:
+    """Move uncertainty into a rational carrier on the requested physical rows."""
     global CARRIER_INITIALIZED
     STATS.reconditionings += 1
+    if geometry == "section_anchored":
+        STATS.section_anchored_reconditionings += 1
     base.STATS.reconditionings += 1
+    dimension = len(rows)
     source_coefficients: list[dict[tuple[int, ...], arb]] = [
         {} for _ in range(4)
     ]
     residual_monomials: set[tuple[int, ...]] = set()
     generators: list[list[arb]] = []
 
-    for row, component in enumerate(state):
+    for row in rows:
+        component = state[row]
         for monomial, coefficient in component.coefficients.items():
             midpoint = coefficient.mid()
             radius = coefficient.rad()
@@ -390,8 +403,8 @@ def event_normal_recondition(state: list[base.TM2R]) -> list[base.TM2R]:
             else:
                 source_coefficients[row][monomial] = midpoint
             if radius.upper() > 0:
-                generator = [arb(0) for _ in range(4)]
-                generator[row] = radius
+                generator = [arb(0) for _ in range(dimension)]
+                generator[rows.index(row)] = radius
                 generators.append(generator)
                 STATS.coefficient_uncertainty_generators += 1
 
@@ -401,8 +414,8 @@ def event_normal_recondition(state: list[base.TM2R]) -> list[base.TM2R]:
     sigma1_key = pure_carrier_key(1)
     for monomial in sorted(residual_monomials):
         generator = [
-            component.coefficients.get(monomial, arb(0)).mid()
-            for component in state
+            state[row].coefficients.get(monomial, arb(0)).mid()
+            for row in rows
         ]
         if not base.vector_nonzero(generator):
             continue
@@ -412,24 +425,25 @@ def event_normal_recondition(state: list[base.TM2R]) -> list[base.TM2R]:
             privileged1 = generator
         if all(exponent % 2 == 0 for exponent in monomial):
             half = [value / 2 for value in generator]
-            for row in range(4):
-                source_coefficients[row][base.ZERO_MONOMIAL] = (
-                    source_coefficients[row].get(base.ZERO_MONOMIAL, arb(0))
-                    + half[row]
+            for local_row, physical_row in enumerate(rows):
+                source_coefficients[physical_row][base.ZERO_MONOMIAL] = (
+                    source_coefficients[physical_row].get(base.ZERO_MONOMIAL, arb(0))
+                    + half[local_row]
                 )
             generators.append(half)
         else:
             generators.append(generator)
 
-    for row, component in enumerate(state):
+    for row in rows:
+        component = state[row]
         midpoint = component.remainder.mid()
         radius = component.remainder.rad()
         source_coefficients[row][base.ZERO_MONOMIAL] = (
             source_coefficients[row].get(base.ZERO_MONOMIAL, arb(0)) + midpoint
         )
         if radius.upper() > 0:
-            generator = [arb(0) for _ in range(4)]
-            generator[row] = radius
+            generator = [arb(0) for _ in range(dimension)]
+            generator[rows.index(row)] = radius
             generators.append(generator)
 
     if not generators:
@@ -438,7 +452,8 @@ def event_normal_recondition(state: list[base.TM2R]) -> list[base.TM2R]:
             "event-normal reconditioning received no residual generators",
         )
     STATS.maximum_generator_count = max(STATS.maximum_generator_count, len(generators))
-    covector = event_covector(state)
+    ambient_covector = event_covector(state)
+    covector = [ambient_covector[row] for row in rows]
     basis, inverse, normal_transported, kernel_transported = event_normal_basis(
         generators,
         privileged0 if CARRIER_INITIALIZED else None,
@@ -456,17 +471,17 @@ def event_normal_recondition(state: list[base.TM2R]) -> list[base.TM2R]:
             STATS.kernel_direction_seeds += 1
     CARRIER_INITIALIZED = True
 
-    radii = [arb(0) for _ in range(4)]
+    radii = [arb(0) for _ in range(dimension)]
     for generator in generators:
         coordinates = [
             sum(
                 (
                     base.rational_ball(inverse[coordinate][row]) * generator[row]
-                    for row in range(4)
+                    for row in range(dimension)
                 ),
                 arb(0),
             )
-            for coordinate in range(4)
+            for coordinate in range(dimension)
         ]
         for coordinate, projected in enumerate(coordinates):
             radii[coordinate] += base.upper_abs(projected)
@@ -475,11 +490,11 @@ def event_normal_recondition(state: list[base.TM2R]) -> list[base.TM2R]:
                 (
                     base.rational_ball(basis[row][coordinate])
                     * coordinates[coordinate]
-                    for coordinate in range(4)
+                    for coordinate in range(dimension)
                 ),
                 arb(0),
             )
-            for row in range(4)
+            for row in range(dimension)
         ]
         if not all(
             enclosure.contains(component)
@@ -495,11 +510,23 @@ def event_normal_recondition(state: list[base.TM2R]) -> list[base.TM2R]:
     result: list[base.TM2R] = []
     for row in range(4):
         coefficients = dict(source_coefficients[row])
-        for coordinate in range(4):
-            coefficients[pure_carrier_key(coordinate)] = (
-                base.rational_ball(basis[row][coordinate]) * radii[coordinate]
-            )
+        if row in rows:
+            local_row = rows.index(row)
+            for coordinate in range(dimension):
+                coefficients[pure_carrier_key(coordinate)] = (
+                    base.rational_ball(basis[local_row][coordinate])
+                    * radii[coordinate]
+                )
         result.append(base.TM2R(coefficients, arb(0)))
+
+    if geometry == "section_anchored":
+        w_range = result[2].range()
+        if w_range.lower() != 0 or w_range.upper() != 0:
+            raise base.Refusal(
+                "SECTION_ANCHOR_RECONSTRUCTION_DRIFT",
+                "section-anchored reconditioning recreated nonzero w width",
+            )
+        STATS.section_anchor_checks += 1
 
     if not carrier_normal_form(result):
         raise base.Refusal(
@@ -508,29 +535,50 @@ def event_normal_recondition(state: list[base.TM2R]) -> list[base.TM2R]:
         )
     STATS.normal_form_checks += 1
 
-    if len(STATS.basis_history) < 8 or STATS.reconditionings % 256 == 0:
+    if (
+        len(STATS.basis_history) < 8
+        or STATS.reconditionings % 256 == 0
+        or geometry == "section_anchored"
+    ):
         STATS.basis_history.append(
             {
                 "reconditioning": STATS.reconditionings,
+                "geometry": geometry,
+                "physical_rows": list(rows),
                 "event_covector": [str(value) for value in covector],
                 "basis": [[str(value) for value in row] for row in basis],
                 "inverse": [[str(value) for value in row] for row in inverse],
                 "coordinate_radii": [interval_json(value) for value in radii],
                 "normal_pairing_q": str(
-                    sum(covector[row] * basis[row][0] for row in range(4))
+                    sum(covector[row] * basis[row][0] for row in range(dimension))
                 ),
                 "kernel_pairings_q": [
-                    str(sum(covector[row] * basis[row][column] for row in range(4)))
-                    for column in range(1, 4)
+                    str(
+                        sum(
+                            covector[row] * basis[row][column]
+                            for row in range(dimension)
+                        )
+                    )
+                    for column in range(1, dimension)
                 ],
             }
         )
     return result
 
 
+def event_normal_recondition(state: list[base.TM2R]) -> list[base.TM2R]:
+    """Use an ambient carrier, except that an exact section remains exact."""
+    w_range = state[2].range()
+    if w_range.lower() == 0 and w_range.upper() == 0:
+        return _carrier_recondition(state, SECTION_ROWS, "section_anchored")
+    return _carrier_recondition(state, (0, 1, 2, 3), "ambient_event_normal")
+
+
 def stats_json() -> dict[str, object]:
     return {
         "reconditionings": STATS.reconditionings,
+        "section_anchored_reconditionings": STATS.section_anchored_reconditionings,
+        "section_anchor_checks": STATS.section_anchor_checks,
         "generator_reconstructions": STATS.generator_reconstructions,
         "coefficient_uncertainty_generators": STATS.coefficient_uncertainty_generators,
         "normal_direction_seeds": STATS.normal_direction_seeds,
@@ -687,6 +735,13 @@ def preflight_mode(
     step_improvement = lineage_width / carrier_width if carrier_width else Fraction(0)
     width_margin = lineage_width - carrier_width
     receipt_rounding_tolerance = Fraction(1, 2**230)
+    projected_control = [
+        component if row != 2 else base.TM2R.constant(0)
+        for row, component in enumerate(carrier_step)
+    ]
+    anchored_control = event_normal_recondition(projected_control)
+    anchored_w = anchored_control[2].range()
+    section_anchor_exact = anchored_w.lower() == 0 and anchored_w.upper() == 0
     initial_analysis = {
         "initial_state_range_hull_containments_forensic": initial_containments,
         "all_initial_state_range_hulls_contained_forensic": all(initial_containments),
@@ -705,15 +760,26 @@ def preflight_mode(
             width_margin > receipt_rounding_tolerance
         ),
         "one_step_improves_lineage": step_improvement > 1,
+        "section_anchor_control_exact_w": section_anchor_exact,
+        "section_anchor_control_w": interval_json(anchored_w),
         "stats": stats_json(),
     }
     stats = initial_analysis["stats"]
+    expected_kernel_checks = (
+        3
+        * (
+            stats["reconditionings"]
+            - stats["section_anchored_reconditionings"]
+        )
+        + 2 * stats["section_anchored_reconditionings"]
+    )
     reconstruction_certified = (
         stats["generator_reconstructions"] > 0
         and stats["generator_reconstructions"] == stats["reconstruction_checks"]
-        and stats["kernel_orthogonality_checks"]
-        == 3 * stats["reconditionings"]
+        and stats["kernel_orthogonality_checks"] == expected_kernel_checks
         and stats["normal_form_checks"] == stats["reconditionings"]
+        and stats["section_anchored_reconditionings"] > 0
+        and section_anchor_exact
     )
     initial_analysis["generator_reconstruction_certificate"] = reconstruction_certified
     if not reconstruction_certified:
@@ -818,6 +884,15 @@ def run_transport(
     bool_check(checks, "event_normal_reconditioner_active", base.recondition is event_normal_recondition)
     if xi_eta_preserved is not None:
         bool_check(checks, "terminal_xi_eta_coordinates_retained", xi_eta_preserved)
+    transport_stats = stats_json()
+    if diagnostic.get("accepted") is True:
+        bool_check(
+            checks,
+            "accepted_projection_used_exact_section_anchor",
+            transport_stats["section_anchored_reconditionings"] >= 2
+            and transport_stats["section_anchor_checks"]
+            == transport_stats["section_anchored_reconditionings"],
+        )
     implementation_ok = all(item["passed"] is True for item in checks)
     return {
         "execution_mode": "TRANSPORT",
@@ -825,7 +900,7 @@ def run_transport(
         "witness_domain": witness_domain,
         "reconstruction": reconstruction,
         "diagnostic": diagnostic,
-        "carrier_stats": stats_json(),
+        "carrier_stats": transport_stats,
         "terminal_xi_eta_preserved": xi_eta_preserved,
         "full_transport_attempted": True,
         "implementation_checks_passed": implementation_ok,

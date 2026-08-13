@@ -57,21 +57,25 @@ def dot(left: list[Fraction], right: list[Fraction]) -> Fraction:
 def matrix_product(
     left: list[list[Fraction]], right: list[list[Fraction]]
 ) -> list[list[Fraction]]:
+    dimension = len(left)
     return [
         [
-            sum((left[row][k] * right[k][column] for k in range(4)), Fraction(0))
-            for column in range(4)
+            sum(
+                (left[row][k] * right[k][column] for k in range(dimension)),
+                Fraction(0),
+            )
+            for column in range(dimension)
         ]
-        for row in range(4)
+        for row in range(dimension)
     ]
 
 
-def parse_matrix(value: object, label: str) -> list[list[Fraction]]:
-    if not isinstance(value, list) or len(value) != 4:
-        fail(f"{label} is not a four-row matrix")
+def parse_matrix(value: object, label: str, dimension: int) -> list[list[Fraction]]:
+    if not isinstance(value, list) or len(value) != dimension:
+        fail(f"{label} is not a {dimension}-row matrix")
     result: list[list[Fraction]] = []
     for row, raw in enumerate(value):
-        if not isinstance(raw, list) or len(raw) != 4:
+        if not isinstance(raw, list) or len(raw) != dimension:
             fail(f"{label} row {row} is malformed")
         result.append([rational(item, f"{label}[{row}]") for item in raw])
     return result
@@ -89,35 +93,51 @@ def validate_basis_history(value: object, label: str) -> tuple[int, Fraction]:
         if not isinstance(reconditioning, int) or reconditioning <= previous:
             fail(f"{label} basis history is not chronological")
         previous = reconditioning
+        geometry = record.get("geometry")
+        if geometry == "ambient_event_normal":
+            dimension = 4
+            expected_rows = [0, 1, 2, 3]
+        elif geometry == "section_anchored":
+            dimension = 3
+            expected_rows = [0, 1, 3]
+        else:
+            fail(f"{label} basis geometry is unknown")
+        if record.get("physical_rows") != expected_rows:
+            fail(f"{label} physical-row chart is malformed")
         covector_raw = record.get("event_covector")
-        if not isinstance(covector_raw, list) or len(covector_raw) != 4:
+        if not isinstance(covector_raw, list) or len(covector_raw) != dimension:
             fail(f"{label} event covector is malformed")
         covector = [rational(item, f"{label} covector") for item in covector_raw]
-        if covector[2:] != [Fraction(-1), Fraction(0)]:
+        if geometry == "ambient_event_normal" and covector[2:] != [Fraction(-1), Fraction(0)]:
             fail(f"{label} event covector has wrong w/ell coefficients")
-        basis = parse_matrix(record.get("basis"), f"{label} basis")
-        inverse = parse_matrix(record.get("inverse"), f"{label} inverse")
+        if geometry == "section_anchored" and covector[2] != 0:
+            fail(f"{label} section covector has wrong ell coefficient")
+        basis = parse_matrix(record.get("basis"), f"{label} basis", dimension)
+        inverse = parse_matrix(record.get("inverse"), f"{label} inverse", dimension)
         identity = [
-            [Fraction(int(row == column)) for column in range(4)]
-            for row in range(4)
+            [Fraction(int(row == column)) for column in range(dimension)]
+            for row in range(dimension)
         ]
         if matrix_product(basis, inverse) != identity:
             fail(f"{label} basis times inverse is not identity")
-        columns = [[basis[row][column] for row in range(4)] for column in range(4)]
+        columns = [
+            [basis[row][column] for row in range(dimension)]
+            for column in range(dimension)
+        ]
         normal_pairing = dot(covector, columns[0])
         if not normal_pairing:
             fail(f"{label} normal column lies in the event kernel")
         if rational(record.get("normal_pairing_q"), f"{label} normal pairing") != normal_pairing:
             fail(f"{label} normal pairing is incorrect")
         kernel_pairings = record.get("kernel_pairings_q")
-        if not isinstance(kernel_pairings, list) or len(kernel_pairings) != 3:
+        if not isinstance(kernel_pairings, list) or len(kernel_pairings) != dimension - 1:
             fail(f"{label} kernel pairings are malformed")
         for column, raw_pairing in enumerate(kernel_pairings, start=1):
             pairing = dot(covector, columns[column])
             if pairing or rational(raw_pairing, f"{label} kernel pairing") != 0:
                 fail(f"{label} complement column {column} leaves the exact kernel")
         radii = record.get("coordinate_radii")
-        if not isinstance(radii, list) or len(radii) != 4:
+        if not isinstance(radii, list) or len(radii) != dimension:
             fail(f"{label} coordinate radii are malformed")
         for coordinate, radius in enumerate(radii):
             lower, upper = interval(radius, f"{label} radius {coordinate}")
@@ -134,15 +154,22 @@ def validate_stats(value: object, label: str, complete_history: bool) -> None:
     if not isinstance(value, dict):
         fail(f"{label} stats are absent")
     reconditionings = value.get("reconditionings")
+    anchored = value.get("section_anchored_reconditionings")
+    anchor_checks = value.get("section_anchor_checks")
     reconstructions = value.get("generator_reconstructions")
     checks = value.get("reconstruction_checks")
     kernel_checks = value.get("kernel_orthogonality_checks")
     normal_form_checks = value.get("normal_form_checks")
     if not isinstance(reconditionings, int) or reconditionings <= 0:
         fail(f"{label} has no reconditionings")
+    if not isinstance(anchored, int) or not 0 <= anchored <= reconditionings:
+        fail(f"{label} section-anchored count is inconsistent")
+    if anchor_checks != anchored:
+        fail(f"{label} section-anchor check count is inconsistent")
     if not isinstance(reconstructions, int) or reconstructions <= 0 or checks != reconstructions:
         fail(f"{label} generator reconstruction count is inconsistent")
-    if kernel_checks != 3 * reconditionings:
+    expected_kernel_checks = 3 * (reconditionings - anchored) + 2 * anchored
+    if kernel_checks != expected_kernel_checks:
         fail(f"{label} kernel check count is inconsistent")
     if normal_form_checks != reconditionings:
         fail(f"{label} normal-form check count is inconsistent")
@@ -197,8 +224,11 @@ def validate_components(value: object, label: str) -> None:
         if not isinstance(component, dict):
             fail(f"{label} component {row} is malformed")
         coefficients = component.get("coefficients")
-        if not isinstance(coefficients, list) or not coefficients:
+        remainder = interval(component.get("remainder"), f"{label} component remainder")
+        if not isinstance(coefficients, list):
             fail(f"{label} component {row} has no coefficients")
+        if not coefficients and not (row == 2 and remainder == (Fraction(0), Fraction(0))):
+            fail(f"{label} component {row} is unexpectedly coefficient-free")
         seen: set[tuple[int, ...]] = set()
         for item in coefficients:
             if not isinstance(item, dict):
@@ -218,7 +248,6 @@ def validate_components(value: object, label: str) -> None:
                 fail(f"{label} component {row} leaves carrier normal form")
             seen.add(monomial)
             interval(item.get("interval"), f"{label} coefficient interval")
-        remainder = interval(component.get("remainder"), f"{label} component remainder")
         if remainder != (Fraction(0), Fraction(0)):
             fail(f"{label} component {row} has a nonzero remainder after reconditioning")
 
@@ -282,13 +311,27 @@ def validate_mode(
     improves = improvement > 1
     if initial.get("one_step_improves_lineage") is not improves:
         fail(f"{mode} one-step improvement flag is incorrect")
+    anchored_w = interval(initial.get("section_anchor_control_w"), f"{mode} anchor w")
+    section_anchor_exact = anchored_w == (Fraction(0), Fraction(0))
+    if initial.get("section_anchor_control_exact_w") is not section_anchor_exact:
+        fail(f"{mode} section-anchor control flag is incorrect")
     validate_stats(initial.get("stats"), f"{mode} initial", True)
     stats = initial["stats"]
+    expected_kernel_checks = (
+        3
+        * (
+            stats["reconditionings"]
+            - stats["section_anchored_reconditionings"]
+        )
+        + 2 * stats["section_anchored_reconditionings"]
+    )
     certificate = (
         stats["generator_reconstructions"] > 0
         and stats["generator_reconstructions"] == stats["reconstruction_checks"]
-        and stats["kernel_orthogonality_checks"] == 3 * stats["reconditionings"]
+        and stats["kernel_orthogonality_checks"] == expected_kernel_checks
         and stats["normal_form_checks"] == stats["reconditionings"]
+        and stats["section_anchored_reconditionings"] > 0
+        and section_anchor_exact
     )
     if initial.get("generator_reconstruction_certificate") is not certificate:
         fail(f"{mode} reconstruction certificate is incorrect")
@@ -386,6 +429,10 @@ def main() -> None:
             fail("transport diagnostic is absent")
         attempts = bool(diagnostic.get("projection_attempts"))
         require(payload, "interval_newton_attempted", attempts)
+        if diagnostic.get("accepted") is True:
+            stats = result["carrier_stats"]
+            if stats.get("section_anchored_reconditionings", 0) < 2:
+                fail("accepted transport lacks an event-local section anchor")
         expected = (
             "IMPLEMENTATION_INCONSISTENCY"
             if result.get("implementation_checks_passed") is not True
