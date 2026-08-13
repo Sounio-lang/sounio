@@ -25672,4 +25672,770 @@ theorem hDelta_law (k : Nat) (Delta net : Int)
   rw [hcomb, hsplit, hdegzero, hregroup, hcanon2]
   omega
 
+/-! # Tier 162 scratch — `hmult`: the defect-triangle↔subspace multiplicity
+
+    Target (consumed by `triangle_count_hrule`, Tier 154):
+      `168 * T3 = 288 * indTripleCount (m-1)`
+    with `T3 = t3Count m` the canonical (`x<y<z`) defect-triangle count at `W = 1`.
+
+    Measured first (`.tmp/tier162_probe.py`, m = 4,5, exact):
+      * every defect triangle's reduced coords `c = (x/2) % 2^(m-1)` are pairwise
+        distinct, nonzero, F₂-independent;
+      * fiber per qualifying orbit-triple = 16 = 8 (e0 bits) × 2 (e1 bits);
+      * qualifying ⟺ `t12⊕t23⊕t31 = 0` (t = strip-depth parity); no dependent
+        triple (line) is consistent;
+      * per 3-dim subspace: exactly 18 qualifying unordered orbit-triples
+        (all bases); subspaces hit = `[m-1,3]₂`.  Hence `T3 = 288·[m-1,3]₂`
+        and `168·T3 = 288·indTripleCount(m−1)` (checked: m=4: 48384, m=5: 725760).
+
+    Route:
+      K1 (`Rp_iff_dpar`): the pointwise strip-depth-parity rule for `Rp`, proved
+        UNCONDITIONALLY by induction from Tier 150's `Rp_R3`.
+      Map lemmas (`isDefect_iff_Rp`, `Rp_reduced`): unconditional.
+      Fiber (`ordDefTri = 16 · ordQualOrbit`): the 16 = 8×2 count.
+      Sixfold (`ordDefTri = 6 · t3Count`): the order-regrouping.
+      The 18-count enters as the hypothesis `hdc` (cp2_count pattern). -/
+
+/-- **Strip-depth parity on orbit indices**, aligned with the R3 recursion.
+    `dpar n X Y = 0` iff the defect edge holds between the orbit indices `X, Y < 2^n`.
+    The guard-override (value 1) fires exactly when the reduced coordinates
+    (`mod 2^(n-1)`) vanish or coincide — the seam/diagonal cases. -/
+def dpar : Nat → Nat → Nat → Nat
+  | 0, _, _ => 1
+  | n+1, X, Y =>
+    if X % 2^n = 0 ∨ Y % 2^n = 0 ∨ X % 2^n = Y % 2^n then 1
+    else if (X < 2^n ∧ Y < 2^n) ∨ (2^n ≤ X ∧ 2^n ≤ Y) then dpar n (X % 2^n) (Y % 2^n)
+    else if dpar n (X % 2^n) (Y % 2^n) = 0 then 1 else 0
+
+/-- The successor unfolding of `dpar` (definitional). -/
+theorem dpar_succ' (n X Y : Nat) :
+    dpar (n+1) X Y
+      = (if X % 2^n = 0 ∨ Y % 2^n = 0 ∨ X % 2^n = Y % 2^n then 1
+        else if (X < 2^n ∧ Y < 2^n) ∨ (2^n ≤ X ∧ 2^n ≤ Y) then dpar n (X % 2^n) (Y % 2^n)
+        else if dpar n (X % 2^n) (Y % 2^n) = 0 then 1 else 0) := rfl
+
+/-- `dpar` only takes values `0` and `1`. -/
+theorem dpar_le_one (n X Y : Nat) : dpar n X Y ≤ 1 := by
+  induction n generalizing X Y with
+  | zero => exact Nat.le_refl 1
+  | succ n ih =>
+    rw [dpar_succ']
+    by_cases hg : X % 2^n = 0 ∨ Y % 2^n = 0 ∨ X % 2^n = Y % 2^n
+    · rw [if_pos hg]; exact Nat.le_refl 1
+    · rw [if_neg hg]
+      by_cases hs : (X < 2^n ∧ Y < 2^n) ∨ (2^n ≤ X ∧ 2^n ≤ Y)
+      · rw [if_pos hs]; exact ih _ _
+      · rw [if_neg hs]
+        by_cases hd : dpar n (X % 2^n) (Y % 2^n) = 0
+        · rw [if_pos hd]; exact Nat.le_refl 1
+        · rw [if_neg hd]; exact Nat.zero_le 1
+/-- The reduced-coordinate guards from `Rp`: distinct nonzero `mod 2^(n-1)`.
+    One-level unfold of `Rp_R3` — the inner `Rp`/`Rp'` guards of each clause are
+    exactly the reduced-coordinate conditions.  (The orbit map is well-defined.) -/
+theorem Rp_reduced (n X Y : Nat) (hn : 1 ≤ n) (hX : X < 2^n) (hY : Y < 2^n)
+    (h : Rp n X Y) :
+    X % 2^(n-1) ≠ 0 ∧ Y % 2^(n-1) ≠ 0 ∧ X % 2^(n-1) ≠ Y % 2^(n-1) := by
+  obtain ⟨k, rfl⟩ : ∃ k, n = k + 1 := ⟨n - 1, by omega⟩
+  have hHp : (0:Nat) < 2^k := Nat.two_pow_pos k
+  have hpow : (2:Nat)^(k+1) = 2^k + 2^k := by rw [Nat.pow_succ]; omega
+  have hR := (Rp_R3 (k+1) X Y hX hY).mp h
+  show X % 2^k ≠ 0 ∧ Y % 2^k ≠ 0 ∧ X % 2^k ≠ Y % 2^k
+  rcases hR with ⟨hXl, hYl, hR⟩ | ⟨hXh, hYh, hR⟩ | ⟨hXl, hYh, hR⟩ | ⟨hXh, hYl, hR⟩
+  · have hXl' : X < 2^k := hXl
+    have hYl' : Y < 2^k := hYl
+    have hR' : Rp k X Y := hR
+    rw [Nat.mod_eq_of_lt hXl', Nat.mod_eq_of_lt hYl']
+    exact ⟨hR'.1, hR'.2.1, hR'.2.2.1⟩
+  · have hXh' : 2^k ≤ X := hXh
+    have hYh' : 2^k ≤ Y := hYh
+    have hR' : Rp k (X - 2^k) (Y - 2^k) := hR
+    have hmodX : X % 2^k = X - 2^k := by
+      rw [Nat.mod_eq_sub_mod hXh', Nat.mod_eq_of_lt (by omega)]
+    have hmodY : Y % 2^k = Y - 2^k := by
+      rw [Nat.mod_eq_sub_mod hYh', Nat.mod_eq_of_lt (by omega)]
+    rw [hmodX, hmodY]
+    exact ⟨hR'.1, hR'.2.1, hR'.2.2.1⟩
+  · have hXl' : X < 2^k := hXl
+    have hYh' : 2^k ≤ Y := hYh
+    have hR' : Rp' k X (Y - 2^k) := hR
+    have hmodY : Y % 2^k = Y - 2^k := by
+      rw [Nat.mod_eq_sub_mod hYh', Nat.mod_eq_of_lt (by omega)]
+    rw [Nat.mod_eq_of_lt hXl', hmodY]
+    exact ⟨hR'.1, hR'.2.1, hR'.2.2.1⟩
+  · have hXh' : 2^k ≤ X := hXh
+    have hYl' : Y < 2^k := hYl
+    have hR' : Rp' k (X - 2^k) Y := hR
+    have hmodX : X % 2^k = X - 2^k := by
+      rw [Nat.mod_eq_sub_mod hXh', Nat.mod_eq_of_lt (by omega)]
+    rw [hmodX, Nat.mod_eq_of_lt hYl']
+    exact ⟨hR'.1, hR'.2.1, hR'.2.2.1⟩
+
+/-- **`isDefect` is `Rp` on the halved indices.**  The bit-0 flips
+    (`eDef_flipL`/`eDef_flipR`, Tier 150, unconditional) identify `eDef m x y`
+    with `eDef m (2·(x/2)) (2·(y/2))`. -/
+theorem isDefect_iff_Rp (m x y : Nat) (hm : 2 ≤ m) (hx : x < 2^(m+1)) (hy : y < 2^(m+1)) :
+    isDefect m x y ↔ Rp m (x/2) (y/2) := by
+  have hpm : (0:Nat) < 2^m := Nat.two_pow_pos m
+  have hkey : ∀ a b : Nat, a < 2^(m+1) → b < 2^(m+1) → a/2 ≠ 0 → b/2 ≠ 0 → a/2 ≠ b/2 →
+      eDef m a b = eDef m (2*(a/2)) (2*(b/2)) := by
+    intro a b ha hb h1 h2 h3
+    obtain ⟨A, hA⟩ : ∃ A, A = a/2 := ⟨a/2, rfl⟩
+    obtain ⟨B, hB⟩ : ∃ B, B = b/2 := ⟨b/2, rfl⟩
+    rw [← hA, ← hB]
+    rw [← hA] at h1 h3
+    rw [← hB] at h2 h3
+    have hAlt : A < 2^m := by omega
+    have hBlt : B < 2^m := by omega
+    have h2A : (2*A)/2 = A := by omega
+    have h2B : (2*B)/2 = B := by omega
+    have h2B1 : (2*B+1)/2 = B := by omega
+    have hA0 : A ≠ 0 := h1
+    have hB0 : B ≠ 0 := h2
+    have hAB : A ≠ B := h3
+    have hae : a = 2*A ∨ a = 2*A + 1 := by omega
+    have hbe : b = 2*B ∨ b = 2*B + 1 := by omega
+    rcases hae with hae | hae <;> rcases hbe with hbe | hbe
+    · rw [hae, hbe]
+    · rw [hae, hbe]
+      exact eDef_flipR m hm (2*A) B (by omega) hBlt (by rw [h2A]; exact hA0) hB0
+        (by rw [h2A]; exact hAB)
+    · rw [hae, hbe,
+        eDef_flipL m hm A (2*B) hAlt (by omega) hA0 (by rw [h2B]; exact hB0)
+          (by rw [h2B]; exact hAB)]
+    · rw [hae, hbe,
+        eDef_flipL m hm A (2*B+1) hAlt (by omega) hA0 (by rw [h2B1]; exact hB0)
+          (by rw [h2B1]; exact hAB)]
+      exact eDef_flipR m hm (2*A) B (by omega) hBlt (by rw [h2A]; exact hA0) hB0
+        (by rw [h2A]; exact hAB)
+  unfold isDefect Rp rdef
+  constructor
+  · rintro ⟨h1, h2, h3, h4⟩
+    rw [hkey x y hx hy h1 h2 h3] at h4
+    exact ⟨h1, h2, h3, h4⟩
+  · rintro ⟨h1, h2, h3, h4⟩
+    refine ⟨h1, h2, h3, ?_⟩
+    rw [hkey x y hx hy h1 h2 h3]
+    exact h4
+
+/-- **K1 — THE POINTWISE STRIP-DEPTH RULE.**  `Rp n X Y` holds iff the aligned
+    strip-depth parity `dpar n X Y` vanishes.  Induction from `Rp_R3`: the
+    guard-override of `dpar` matches the guard deaths of the R3 clauses, the
+    same-half clauses copy the recursion, and the cross clauses complement it.
+    This is the Lean form of DEFECT-ALGEBRA §1's `e1_a ⊕ e1_b = t(c_a, c_b)`. -/
+theorem Rp_iff_dpar (n : Nat) : ∀ X Y, X < 2^n → Y < 2^n → (Rp n X Y ↔ dpar n X Y = 0) := by
+  induction n with
+  | zero =>
+    intro X Y hX hY
+    have h1 : (2:Nat)^0 = 1 := rfl
+    have hX0 : X = 0 := by omega
+    have hY0 : Y = 0 := by omega
+    subst hX0; subst hY0
+    constructor
+    · intro h; exact absurd rfl h.1
+    · intro h; exact absurd h (by decide)
+  | succ n ih =>
+    intro X Y hX hY
+    have hHp : (0:Nat) < 2^n := Nat.two_pow_pos n
+    have hpow : (2:Nat)^(n+1) = 2^n + 2^n := by rw [Nat.pow_succ]; omega
+    have he1 : (2:Nat)^(n+1-1) = 2^n := rfl
+    rw [Rp_R3 (n+1) X Y hX hY, dpar_succ']
+    by_cases hg : X % 2^n = 0 ∨ Y % 2^n = 0 ∨ X % 2^n = Y % 2^n
+    · -- the guard-override fires: dpar = 1, and every R3 clause dies to a guard
+      rw [if_pos hg]
+      constructor
+      · rintro (⟨hXl, hYl, hR⟩ | ⟨hXh, hYh, hR⟩ | ⟨hXl, hYh, hR⟩ | ⟨hXh, hYl, hR⟩)
+        · have hXl' : X < 2^n := hXl
+          have hYl' : Y < 2^n := hYl
+          have hR' : Rp n X Y := hR
+          obtain ⟨g1, g2, g3, -⟩ := hR'
+          rw [Nat.mod_eq_of_lt hXl', Nat.mod_eq_of_lt hYl'] at hg
+          rcases hg with e | e | e
+          · exact (g1 e).elim
+          · exact (g2 e).elim
+          · exact (g3 e).elim
+        · have hXh' : 2^n ≤ X := hXh
+          have hYh' : 2^n ≤ Y := hYh
+          have hR' : Rp n (X - 2^n) (Y - 2^n) := hR
+          obtain ⟨g1, g2, g3, -⟩ := hR'
+          have hmodX : X % 2^n = X - 2^n := by
+            rw [Nat.mod_eq_sub_mod hXh', Nat.mod_eq_of_lt (by omega)]
+          have hmodY : Y % 2^n = Y - 2^n := by
+            rw [Nat.mod_eq_sub_mod hYh', Nat.mod_eq_of_lt (by omega)]
+          rw [hmodX, hmodY] at hg
+          rcases hg with e | e | e
+          · exact (g1 e).elim
+          · exact (g2 e).elim
+          · exact (g3 e).elim
+        · have hXl' : X < 2^n := hXl
+          have hYh' : 2^n ≤ Y := hYh
+          have hR' : Rp' n X (Y - 2^n) := hR
+          obtain ⟨g1, g2, g3, -⟩ := hR'
+          have hmodY : Y % 2^n = Y - 2^n := by
+            rw [Nat.mod_eq_sub_mod hYh', Nat.mod_eq_of_lt (by omega)]
+          rw [Nat.mod_eq_of_lt hXl', hmodY] at hg
+          rcases hg with e | e | e
+          · exact (g1 e).elim
+          · exact (g2 e).elim
+          · exact (g3 e).elim
+        · have hXh' : 2^n ≤ X := hXh
+          have hYl' : Y < 2^n := hYl
+          have hR' : Rp' n (X - 2^n) Y := hR
+          obtain ⟨g1, g2, g3, -⟩ := hR'
+          have hmodX : X % 2^n = X - 2^n := by
+            rw [Nat.mod_eq_sub_mod hXh', Nat.mod_eq_of_lt (by omega)]
+          rw [hmodX, Nat.mod_eq_of_lt hYl'] at hg
+          rcases hg with e | e | e
+          · exact (g1 e).elim
+          · exact (g2 e).elim
+          · exact (g3 e).elim
+      · intro h; exact absurd h (by decide)
+    · rw [if_neg hg]
+      by_cases hs : (X < 2^n ∧ Y < 2^n) ∨ (2^n ≤ X ∧ 2^n ≤ Y)
+      · rw [if_pos hs]
+        rcases hs with ⟨hXl, hYl⟩ | ⟨hXh, hYh⟩
+        · -- lo-lo: the recursion copies
+          rw [Nat.mod_eq_of_lt hXl, Nat.mod_eq_of_lt hYl]
+          constructor
+          · rintro (⟨-, -, hR⟩ | ⟨hXh2, -, -⟩ | ⟨-, hYh2, -⟩ | ⟨hXh2, -, -⟩)
+            · exact (ih X Y hXl hYl).mp hR
+            · omega
+            · omega
+            · omega
+          · intro hd
+            exact Or.inl ⟨hXl, hYl, (ih X Y hXl hYl).mpr hd⟩
+        · -- hi-hi: the recursion copies on the lowered indices
+          have hmodX : X % 2^n = X - 2^n := by
+            rw [Nat.mod_eq_sub_mod hXh, Nat.mod_eq_of_lt (by omega)]
+          have hmodY : Y % 2^n = Y - 2^n := by
+            rw [Nat.mod_eq_sub_mod hYh, Nat.mod_eq_of_lt (by omega)]
+          rw [hmodX, hmodY]
+          have hXb : X - 2^n < 2^n := by omega
+          have hYb : Y - 2^n < 2^n := by omega
+          constructor
+          · rintro (⟨hXl2, -, -⟩ | ⟨-, -, hR⟩ | ⟨hXl2, -, -⟩ | ⟨-, hYl2, -⟩)
+            · omega
+            · exact (ih (X - 2^n) (Y - 2^n) hXb hYb).mp hR
+            · omega
+            · omega
+          · intro hd
+            exact Or.inr (Or.inl ⟨hXh, hYh, (ih (X - 2^n) (Y - 2^n) hXb hYb).mpr hd⟩)
+      · rw [if_neg hs]
+        have hcross : (X < 2^n ∧ 2^n ≤ Y) ∨ (2^n ≤ X ∧ Y < 2^n) := by
+          rcases Nat.lt_or_ge X (2^n) with hXl | hXh
+          · rcases Nat.lt_or_ge Y (2^n) with hYl | hYh
+            · exact absurd (Or.inl ⟨hXl, hYl⟩) hs
+            · exact Or.inl ⟨hXl, hYh⟩
+          · rcases Nat.lt_or_ge Y (2^n) with hYl | hYh
+            · exact Or.inr ⟨hXh, hYl⟩
+            · exact absurd (Or.inr ⟨hXh, hYh⟩) hs
+        rcases hcross with ⟨hXl, hYh⟩ | ⟨hXh, hYl⟩
+        · -- cross lh: the recursion complements
+          have hmodY : Y % 2^n = Y - 2^n := by
+            rw [Nat.mod_eq_sub_mod hYh, Nat.mod_eq_of_lt (by omega)]
+          rw [Nat.mod_eq_of_lt hXl, hmodY]
+          have g1 : X ≠ 0 := by
+            have e : X % 2^n ≠ 0 := fun e => hg (Or.inl e)
+            rw [Nat.mod_eq_of_lt hXl] at e; exact e
+          have g2 : Y - 2^n ≠ 0 := by
+            have e : Y % 2^n ≠ 0 := fun e => hg (Or.inr (Or.inl e))
+            rw [hmodY] at e; exact e
+          have g3 : X ≠ Y - 2^n := by
+            have e : X % 2^n ≠ Y % 2^n := fun e => hg (Or.inr (Or.inr e))
+            rw [Nat.mod_eq_of_lt hXl, hmodY] at e; exact e
+          have hYb : Y - 2^n < 2^n := by omega
+          have hconv : Rp n X (Y - 2^n) ↔ rdef n X (Y - 2^n) :=
+            ⟨fun h => h.2.2.2, fun h => ⟨g1, g2, g3, h⟩⟩
+          constructor
+          · rintro (⟨-, hYl2, -⟩ | ⟨hXh2, -, -⟩ | ⟨-, -, hR⟩ | ⟨hXh2, -, -⟩)
+            · omega
+            · omega
+            · have hR' : Rp' n X (Y - 2^n) := hR
+              obtain ⟨-, -, -, r4⟩ := hR'
+              have hnot : ¬ (dpar n X (Y - 2^n) = 0) := by
+                intro hd
+                exact r4 (hconv.mp ((ih X (Y - 2^n) hXl hYb).mpr hd))
+              rw [if_neg hnot]
+            · omega
+          · intro hRHS
+            by_cases hd : dpar n X (Y - 2^n) = 0
+            · rw [if_pos hd] at hRHS; exact absurd hRHS (by decide)
+            · have hnotRp : ¬ Rp n X (Y - 2^n) :=
+                fun hR => hd ((ih X (Y - 2^n) hXl hYb).mp hR)
+              exact Or.inr (Or.inr (Or.inl
+                ⟨hXl, hYh, g1, g2, g3, fun hr => hnotRp ⟨g1, g2, g3, hr⟩⟩))
+        · -- cross hl: symmetric
+          have hmodX : X % 2^n = X - 2^n := by
+            rw [Nat.mod_eq_sub_mod hXh, Nat.mod_eq_of_lt (by omega)]
+          rw [hmodX, Nat.mod_eq_of_lt hYl]
+          have g1 : X - 2^n ≠ 0 := by
+            have e : X % 2^n ≠ 0 := fun e => hg (Or.inl e)
+            rw [hmodX] at e; exact e
+          have g2 : Y ≠ 0 := by
+            have e : Y % 2^n ≠ 0 := fun e => hg (Or.inr (Or.inl e))
+            rw [Nat.mod_eq_of_lt hYl] at e; exact e
+          have g3 : X - 2^n ≠ Y := by
+            have e : X % 2^n ≠ Y % 2^n := fun e => hg (Or.inr (Or.inr e))
+            rw [hmodX, Nat.mod_eq_of_lt hYl] at e; exact e
+          have hXb : X - 2^n < 2^n := by omega
+          have hconv : Rp n (X - 2^n) Y ↔ rdef n (X - 2^n) Y :=
+            ⟨fun h => h.2.2.2, fun h => ⟨g1, g2, g3, h⟩⟩
+          constructor
+          · rintro (⟨hXl2, -, -⟩ | ⟨-, hYl2, -⟩ | ⟨hXl3, -, -⟩ | ⟨-, -, hR⟩)
+            · omega
+            · omega
+            · omega
+            · have hR' : Rp' n (X - 2^n) Y := hR
+              obtain ⟨-, -, -, r4⟩ := hR'
+              have hnot : ¬ (dpar n (X - 2^n) Y = 0) := by
+                intro hd
+                exact r4 (hconv.mp ((ih (X - 2^n) Y hXb hYl).mpr hd))
+              rw [if_neg hnot]
+          · intro hRHS
+            by_cases hd : dpar n (X - 2^n) Y = 0
+            · rw [if_pos hd] at hRHS; exact absurd hRHS (by decide)
+            · have hnotRp : ¬ Rp n (X - 2^n) Y :=
+                fun hR => hd ((ih (X - 2^n) Y hXb hYl).mp hR)
+              exact Or.inr (Or.inr (Or.inr
+                ⟨hXh, hYl, g1, g2, g3, fun hr => hnotRp ⟨g1, g2, g3, hr⟩⟩))
+
+/-! ### The counts and the fiber theorem -/
+
+/-- **The canonical defect-triangle count** at level `m`: unordered (`x<y<z`)
+    vertex triples of `[0, 2^(m+1))` carrying all three defect edges. -/
+def t3Count (m : Nat) : Int :=
+  sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+    if a < b ∧ b < c ∧ isDefect m a b ∧ isDefect m b c ∧ isDefect m c a
+    then (1:Int) else 0)))
+
+/-- **The ordered defect-triangle count** at level `m` (the regrouping-friendly
+    form: pairwise-distinct guard, symmetric edge body). -/
+def ordDefTri (m : Nat) : Int :=
+  sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+    if a ≠ b ∧ b ≠ c ∧ c ≠ a then
+      (if isDefect m a b ∧ isDefect m b c ∧ isDefect m c a then (1:Int) else 0)
+    else 0)))
+
+/-- **Qualifying ordered orbit-triples** at reduced level `k`: pairwise distinct
+    nonzero reduced coordinates whose cyclic strip-depth parity vanishes
+    (`q12 ⊕ q23 ⊕ q31 = 0`, the e1-consistency of the three lift equations). -/
+def qqual (k c1 c2 c3 : Nat) : Prop :=
+  c1 ≠ 0 ∧ c2 ≠ 0 ∧ c3 ≠ 0 ∧ c1 ≠ c2 ∧ c2 ≠ c3 ∧ c3 ≠ c1 ∧
+  (dpar k c1 c2 + dpar k c2 c3 + dpar k c3 c1) % 2 = 0
+
+instance decQqual (k c1 c2 c3 : Nat) : Decidable (qqual k c1 c2 c3) := by
+  delta qqual; infer_instance
+
+/-- **The qualifying orbit-triple count** at reduced level `k`. -/
+def ordQualOrbit (k : Nat) : Int :=
+  sumLtI (2^k) (fun c1 => sumLtI (2^k) (fun c2 => sumLtI (2^k) (fun c3 =>
+    if qqual k c1 c2 c3 then (1:Int) else 0)))
+
+/-- Halving a sum whose summand depends only on the halved index: the two
+    bit-0 lifts contribute equal terms. -/
+theorem sumLtI_pairs_halve (n : Nat) (g : Nat → Int) :
+    sumLtI (2*n) (fun i => g (i/2)) = 2 * sumLtI n g := by
+  rw [sumLtI_pairs, sumLtI_congr n _ (fun A => 2 * g A) (fun A _ => by
+    have h1 : (2*A)/2 = A := by omega
+    have h2 : (2*A+1)/2 = A := by omega
+    show g ((2*A)/2) + g ((2*A+1)/2) = 2 * g A
+    rw [h1, h2]; omega), sumLtI_mul]
+
+/-- **Vertex indicator = orbit indicator.**  A pairwise-distinct defect triple
+    is exactly a triple whose halved indices form an `Rp`-triple (the vertex
+    distinctness is then automatic). -/
+theorem triInd_orbit (m a b c : Nat) (hm : 2 ≤ m)
+    (ha : a < 2^(m+1)) (hb : b < 2^(m+1)) (hc : c < 2^(m+1)) :
+    (if a ≠ b ∧ b ≠ c ∧ c ≠ a then
+      (if isDefect m a b ∧ isDefect m b c ∧ isDefect m c a then (1:Int) else 0)
+    else 0)
+    = (if Rp m (a/2) (b/2) ∧ Rp m (b/2) (c/2) ∧ Rp m (c/2) (a/2) then (1:Int) else 0) := by
+  by_cases h : Rp m (a/2) (b/2) ∧ Rp m (b/2) (c/2) ∧ Rp m (c/2) (a/2)
+  · rw [if_pos h]
+    obtain ⟨h1, h2, h3⟩ := h
+    have hab : a ≠ b := fun e => h1.2.2.1 (congrArg (fun x => x/2) e)
+    have hbc : b ≠ c := fun e => h2.2.2.1 (congrArg (fun x => x/2) e)
+    have hca : c ≠ a := fun e => h3.2.2.1 (congrArg (fun x => x/2) e)
+    rw [if_pos ⟨hab, hbc, hca⟩,
+        if_pos ⟨(isDefect_iff_Rp m a b hm ha hb).mpr h1,
+                (isDefect_iff_Rp m b c hm hb hc).mpr h2,
+                (isDefect_iff_Rp m c a hm hc ha).mpr h3⟩]
+  · rw [if_neg h]
+    by_cases hd : a ≠ b ∧ b ≠ c ∧ c ≠ a
+    · rw [if_pos hd]
+      rw [if_neg (fun he => h ⟨(isDefect_iff_Rp m a b hm ha hb).mp he.1,
+                               (isDefect_iff_Rp m b c hm hb hc).mp he.2.1,
+                               (isDefect_iff_Rp m c a hm hc ha).mp he.2.2⟩)]
+    · rw [if_neg hd]
+
+/-- **The e0-freeness**: the ordered triangle count is `8 ×` the orbit-level
+    `Rp`-triple count (each vertex's bit-0 lift is free, `2³ = 8`). -/
+theorem ordDefTri_eight (m : Nat) (hm : 2 ≤ m) :
+    ordDefTri m
+      = 8 * sumLtI (2^m) (fun A => sumLtI (2^m) (fun B => sumLtI (2^m) (fun C =>
+          if Rp m A B ∧ Rp m B C ∧ Rp m C A then (1:Int) else 0))) := by
+  have hpow : (2:Nat)^(m+1) = 2 * 2^m := by rw [Nat.pow_succ]; omega
+  -- step 1: pointwise rewrite to the orbit indicator
+  have hpt : ∀ a, a < 2^(m+1) →
+      sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+        if a ≠ b ∧ b ≠ c ∧ c ≠ a then
+          (if isDefect m a b ∧ isDefect m b c ∧ isDefect m c a then (1:Int) else 0)
+        else 0))
+      = sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+        if Rp m (a/2) (b/2) ∧ Rp m (b/2) (c/2) ∧ Rp m (c/2) (a/2) then (1:Int) else 0)) := by
+    intro a ha
+    rw [sumLtI_congr (2^(m+1)) _ _ (fun b hb => sumLtI_congr (2^(m+1)) _ _
+      (fun c hc => triInd_orbit m a b c hm ha hb hc))]
+  unfold ordDefTri
+  rw [sumLtI_congr (2^(m+1)) _ _ hpt, hpow]
+  -- step 2: halve each of the three loops
+  rw [sumLtI_pairs_halve (2^m)
+        (fun A => sumLtI (2*2^m) (fun b => sumLtI (2*2^m) (fun c =>
+          if Rp m A (b/2) ∧ Rp m (b/2) (c/2) ∧ Rp m (c/2) A then (1:Int) else 0)))]
+  rw [sumLtI_congr (2^m) _ _ (fun A _ =>
+        sumLtI_pairs_halve (2^m)
+          (fun B => sumLtI (2*2^m) (fun c =>
+            if Rp m A B ∧ Rp m B (c/2) ∧ Rp m (c/2) A then (1:Int) else 0)))]
+  rw [sumLtI_congr (2^m) _ _ (fun A _ =>
+        congrArg (fun x => 2 * x)
+          (sumLtI_congr (2^m) _ _ (fun B _ =>
+            sumLtI_pairs_halve (2^m)
+              (fun C => if Rp m A B ∧ Rp m B C ∧ Rp m C A then (1:Int) else 0))))]
+  -- normalize `2 * Σ_A (2 * Σ_B (2 * Σ_C))` to `8 * Σ_A Σ_B Σ_C`
+  rw [sumLtI_congr (2^m) _ (fun A => 4 * sumLtI (2^m) (fun B => sumLtI (2^m) (fun C =>
+        if Rp m A B ∧ Rp m B C ∧ Rp m C A then (1:Int) else 0)))
+      (fun A _ => by
+        rw [sumLtI_mul (2^m) 2 (fun B => sumLtI (2^m) (fun C =>
+          if Rp m A B ∧ Rp m B C ∧ Rp m C A then (1:Int) else 0))]
+        omega)]
+  rw [sumLtI_mul (2^m) 4 (fun A => sumLtI (2^m) (fun B => sumLtI (2^m) (fun C =>
+        if Rp m A B ∧ Rp m B C ∧ Rp m C A then (1:Int) else 0)))]
+  omega
+
+/-- **The lift rule.**  An `Rp` edge between lifted orbit indices is exactly the
+    e1-parity equation: with `c₁, c₂` distinct nonzero reduced coordinates and
+    `e, f ∈ {0,1}` the top (e1) bits, `Rp (k+1) (c₁ + e·2^k) (c₂ + f·2^k)` holds
+    iff `e ⊕ f = dpar k c₁ c₂`.  This is K1 evaluated through `dpar_succ'`. -/
+theorem Rp_lift_iff (k c1 c2 e f : Nat) (hc1 : c1 < 2^k) (hc2 : c2 < 2^k)
+    (h10 : c1 ≠ 0) (h20 : c2 ≠ 0) (h12 : c1 ≠ c2) (he : e < 2) (hf : f < 2) :
+    Rp (k+1) (c1 + e*2^k) (c2 + f*2^k) ↔ (e + f) % 2 = dpar k c1 c2 := by
+  have hHp : (0:Nat) < 2^k := Nat.two_pow_pos k
+  have hpow : (2:Nat)^(k+1) = 2^k + 2^k := by rw [Nat.pow_succ]; omega
+  have hg : ¬ (c1 = 0 ∨ c2 = 0 ∨ c1 = c2) := fun h => h.elim h10 (fun h => h.elim h20 h12)
+  rcases (by omega : e = 0 ∨ e = 1) with rfl | rfl <;>
+    rcases (by omega : f = 0 ∨ f = 1) with rfl | rfl
+  · -- e = 0, f = 0 : same half, recursion copies
+    rw [show c1 + 0 * 2^k = c1 from by omega, show c2 + 0 * 2^k = c2 from by omega]
+    have hA : c1 < 2^(k+1) := by omega
+    have hB : c2 < 2^(k+1) := by omega
+    rw [Rp_iff_dpar (k+1) c1 c2 hA hB, dpar_succ',
+        Nat.mod_eq_of_lt hc1, Nat.mod_eq_of_lt hc2,
+        if_neg hg, if_pos (Or.inl ⟨hc1, hc2⟩)]
+    rw [show ((0:Nat)+0)%2 = 0 from rfl]
+    exact eq_comm
+  · -- e = 0, f = 1 : cross, recursion complements
+    rw [show c1 + 0 * 2^k = c1 from by omega,
+        show c2 + 1 * 2^k = c2 + 2^k from by omega]
+    have hA : c1 < 2^(k+1) := by omega
+    have hB : c2 + 2^k < 2^(k+1) := by omega
+    have hss : ¬ ((c1 < 2^k ∧ c2 + 2^k < 2^k) ∨ (2^k ≤ c1 ∧ 2^k ≤ c2 + 2^k)) := by
+      rintro (⟨-, h2⟩ | ⟨h1, -⟩) <;> omega
+    rw [Rp_iff_dpar (k+1) c1 (c2 + 2^k) hA hB, dpar_succ',
+        Nat.mod_eq_of_lt hc1,
+        show (c2 + 2^k) % 2^k = c2 from by
+          rw [Nat.add_mod_right, Nat.mod_eq_of_lt hc2],
+        if_neg hg, if_neg hss]
+    rw [show ((0:Nat)+1)%2 = 1 from rfl]
+    by_cases hd : dpar k c1 c2 = 0
+    · rw [if_pos hd, hd]
+    · rw [if_neg hd]
+      have hle := dpar_le_one k c1 c2
+      exact ⟨fun _ => by omega, fun _ => rfl⟩
+  · -- e = 1, f = 0 : cross, recursion complements
+    rw [show c1 + 1 * 2^k = c1 + 2^k from by omega,
+        show c2 + 0 * 2^k = c2 from by omega]
+    have hA : c1 + 2^k < 2^(k+1) := by omega
+    have hB : c2 < 2^(k+1) := by omega
+    have hss : ¬ ((c1 + 2^k < 2^k ∧ c2 < 2^k) ∨ (2^k ≤ c1 + 2^k ∧ 2^k ≤ c2)) := by
+      rintro (⟨h1, -⟩ | ⟨-, h2⟩) <;> omega
+    rw [Rp_iff_dpar (k+1) (c1 + 2^k) c2 hA hB, dpar_succ',
+        show (c1 + 2^k) % 2^k = c1 from by
+          rw [Nat.add_mod_right, Nat.mod_eq_of_lt hc1],
+        Nat.mod_eq_of_lt hc2,
+        if_neg hg, if_neg hss]
+    rw [show ((1:Nat)+0)%2 = 1 from rfl]
+    by_cases hd : dpar k c1 c2 = 0
+    · rw [if_pos hd, hd]
+    · rw [if_neg hd]
+      have hle := dpar_le_one k c1 c2
+      exact ⟨fun _ => by omega, fun _ => rfl⟩
+  · -- e = 1, f = 1 : same half, recursion copies
+    rw [show c1 + 1 * 2^k = c1 + 2^k from by omega,
+        show c2 + 1 * 2^k = c2 + 2^k from by omega]
+    have hA : c1 + 2^k < 2^(k+1) := by omega
+    have hB : c2 + 2^k < 2^(k+1) := by omega
+    have hss : (c1 + 2^k < 2^k ∧ c2 + 2^k < 2^k) ∨ (2^k ≤ c1 + 2^k ∧ 2^k ≤ c2 + 2^k) :=
+      Or.inr ⟨by omega, by omega⟩
+    rw [Rp_iff_dpar (k+1) (c1 + 2^k) (c2 + 2^k) hA hB, dpar_succ',
+        show (c1 + 2^k) % 2^k = c1 from by
+          rw [Nat.add_mod_right, Nat.mod_eq_of_lt hc1],
+        show (c2 + 2^k) % 2^k = c2 from by
+          rw [Nat.add_mod_right, Nat.mod_eq_of_lt hc2],
+        if_neg hg, if_pos hss]
+    rw [show ((1:Nat)+1)%2 = 0 from rfl]
+    exact eq_comm
+
+/-- **The e1-consistency count.**  Three bit-parity equations
+    `e1⊕e2 = q12`, `e2⊕e3 = q23`, `e3⊕e1 = q31` over `{0,1}³` have exactly two
+    solutions when consistent (`q12⊕q23⊕q31 = 0`), none otherwise. -/
+theorem e1_count (q12 q23 q31 : Nat) (h12 : q12 ≤ 1) (h23 : q23 ≤ 1) (h31 : q31 ≤ 1) :
+    sumLtI 2 (fun e1 => sumLtI 2 (fun e2 => sumLtI 2 (fun e3 =>
+      if (e1+e2)%2 = q12 ∧ (e2+e3)%2 = q23 ∧ (e3+e1)%2 = q31 then (1:Int) else 0)))
+      = if (q12 + q23 + q31) % 2 = 0 then (2:Int) else 0 := by
+  rcases (by omega : q12 = 0 ∨ q12 = 1) with hq12 | hq12 <;>
+    rcases (by omega : q23 = 0 ∨ q23 = 1) with hq23 | hq23 <;>
+    rcases (by omega : q31 = 0 ∨ q31 = 1) with hq31 | hq31 <;>
+    rw [hq12, hq23, hq31] <;> decide
+
+/-- **The lift fiber, at fixed reduced coordinates.**  For any reduced
+    coordinate triple, the number of e1-lifts carrying all three defect edges is
+    `2` exactly on qualifying triples (guards + consistency), else `0`. -/
+theorem lift_e_sum (k c1 c2 c3 : Nat) (hc1 : c1 < 2^k) (hc2 : c2 < 2^k) (hc3 : c3 < 2^k) :
+    sumLtI 2 (fun e1 => sumLtI 2 (fun e2 => sumLtI 2 (fun e3 =>
+      if Rp (k+1) (c1 + e1*2^k) (c2 + e2*2^k) ∧ Rp (k+1) (c2 + e2*2^k) (c3 + e3*2^k)
+          ∧ Rp (k+1) (c3 + e3*2^k) (c1 + e1*2^k) then (1:Int) else 0)))
+      = 2 * (if qqual k c1 c2 c3 then (1:Int) else 0) := by
+  have hHp : (0:Nat) < 2^k := Nat.two_pow_pos k
+  have hpow : (2:Nat)^(k+1) = 2^k + 2^k := by rw [Nat.pow_succ]; omega
+  by_cases hg : c1 ≠ 0 ∧ c2 ≠ 0 ∧ c3 ≠ 0 ∧ c1 ≠ c2 ∧ c2 ≠ c3 ∧ c3 ≠ c1
+  · obtain ⟨g1, g2, g3, g12, g23, g31⟩ := hg
+    have hpt : ∀ e1 e2 e3 : Nat, e1 < 2 → e2 < 2 → e3 < 2 →
+        (if Rp (k+1) (c1 + e1*2^k) (c2 + e2*2^k) ∧ Rp (k+1) (c2 + e2*2^k) (c3 + e3*2^k)
+            ∧ Rp (k+1) (c3 + e3*2^k) (c1 + e1*2^k) then (1:Int) else 0)
+        = (if (e1+e2)%2 = dpar k c1 c2 ∧ (e2+e3)%2 = dpar k c2 c3
+            ∧ (e3+e1)%2 = dpar k c3 c1 then (1:Int) else 0) := by
+      intro e1 e2 e3 he1 he2 he3
+      have h12 := Rp_lift_iff k c1 c2 e1 e2 hc1 hc2 g1 g2 g12 he1 he2
+      have h23 := Rp_lift_iff k c2 c3 e2 e3 hc2 hc3 g2 g3 g23 he2 he3
+      have h31 := Rp_lift_iff k c3 c1 e3 e1 hc3 hc1 g3 g1 g31 he3 he1
+      by_cases hR : Rp (k+1) (c1 + e1*2^k) (c2 + e2*2^k) ∧
+          Rp (k+1) (c2 + e2*2^k) (c3 + e3*2^k) ∧ Rp (k+1) (c3 + e3*2^k) (c1 + e1*2^k)
+      · rw [if_pos hR, if_pos ⟨h12.mp hR.1, h23.mp hR.2.1, h31.mp hR.2.2⟩]
+      · rw [if_neg hR,
+            if_neg (fun he => hR ⟨h12.mpr he.1, h23.mpr he.2.1, h31.mpr he.2.2⟩)]
+    rw [sumLtI_congr 2 _ _ (fun e1 he1 => sumLtI_congr 2 _ _ (fun e2 he2 =>
+        sumLtI_congr 2 _ _ (fun e3 he3 => hpt e1 e2 e3 he1 he2 he3)))]
+    rw [e1_count (dpar k c1 c2) (dpar k c2 c3) (dpar k c3 c1)
+        (dpar_le_one _ _ _) (dpar_le_one _ _ _) (dpar_le_one _ _ _)]
+    by_cases hcon : (dpar k c1 c2 + dpar k c2 c3 + dpar k c3 c1) % 2 = 0
+    · rw [if_pos hcon,
+          if_pos (show qqual k c1 c2 c3 from ⟨g1, g2, g3, g12, g23, g31, hcon⟩)]
+      omega
+    · rw [if_neg hcon,
+          if_neg (show ¬ qqual k c1 c2 c3 from fun h => hcon h.2.2.2.2.2.2)]
+      omega
+  · -- guards fail: no lift can carry an edge (Rp_reduced), so both sides are 0
+    have hz : ∀ e1 e2 e3 : Nat, e1 < 2 → e2 < 2 → e3 < 2 →
+        (if Rp (k+1) (c1 + e1*2^k) (c2 + e2*2^k) ∧ Rp (k+1) (c2 + e2*2^k) (c3 + e3*2^k)
+            ∧ Rp (k+1) (c3 + e3*2^k) (c1 + e1*2^k) then (1:Int) else 0) = 0 := by
+      intro e1 e2 e3 he1 he2 he3
+      by_cases hR : Rp (k+1) (c1 + e1*2^k) (c2 + e2*2^k) ∧
+          Rp (k+1) (c2 + e2*2^k) (c3 + e3*2^k) ∧ Rp (k+1) (c3 + e3*2^k) (c1 + e1*2^k)
+      · exfalso; apply hg
+        have hb1 : c1 + e1*2^k < 2^(k+1) := by
+          have h1 : e1 * 2^k ≤ 1 * 2^k := Nat.mul_le_mul (by omega) (Nat.le_refl _)
+          omega
+        have hb2 : c2 + e2*2^k < 2^(k+1) := by
+          have h1 : e2 * 2^k ≤ 1 * 2^k := Nat.mul_le_mul (by omega) (Nat.le_refl _)
+          omega
+        have hb3 : c3 + e3*2^k < 2^(k+1) := by
+          have h1 : e3 * 2^k ≤ 1 * 2^k := Nat.mul_le_mul (by omega) (Nat.le_refl _)
+          omega
+        have he1k : (2:Nat)^(k+1-1) = 2^k := rfl
+        obtain ⟨r1, r2, r3⟩ := Rp_reduced (k+1) (c1 + e1*2^k) (c2 + e2*2^k)
+          (by omega) hb1 hb2 hR.1
+        obtain ⟨s1, s2, s3⟩ := Rp_reduced (k+1) (c2 + e2*2^k) (c3 + e3*2^k)
+          (by omega) hb2 hb3 hR.2.1
+        obtain ⟨t1, t2, t3⟩ := Rp_reduced (k+1) (c3 + e3*2^k) (c1 + e1*2^k)
+          (by omega) hb3 hb1 hR.2.2
+        rw [he1k, Nat.add_mul_mod_self_right, Nat.mod_eq_of_lt hc1] at r1
+        rw [he1k, Nat.add_mul_mod_self_right, Nat.mod_eq_of_lt hc2] at r2
+        rw [he1k, Nat.add_mul_mod_self_right, Nat.add_mul_mod_self_right,
+            Nat.mod_eq_of_lt hc1, Nat.mod_eq_of_lt hc2] at r3
+        rw [he1k, Nat.add_mul_mod_self_right, Nat.mod_eq_of_lt hc3] at s2
+        rw [he1k, Nat.add_mul_mod_self_right, Nat.add_mul_mod_self_right,
+            Nat.mod_eq_of_lt hc2, Nat.mod_eq_of_lt hc3] at s3
+        rw [he1k, Nat.add_mul_mod_self_right, Nat.mod_eq_of_lt hc3] at t1
+        rw [he1k, Nat.add_mul_mod_self_right, Nat.add_mul_mod_self_right,
+            Nat.mod_eq_of_lt hc3, Nat.mod_eq_of_lt hc1] at t3
+        exact ⟨r1, r2, s2, r3, s3, t3⟩
+      · rw [if_neg hR]
+    rw [sumLtI_congr 2 _ _ (fun e1 he1 => sumLtI_congr 2 _ _ (fun e2 he2 =>
+        sumLtI_congr 2 _ _ (fun e3 he3 => hz e1 e2 e3 he1 he2 he3)))]
+    rw [sumLtI_zero, sumLtI_zero, sumLtI_zero]
+    rw [if_neg (fun h => hg ⟨h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1⟩)]
+    omega
+
+/-- **Bit-split of a sum**: peeling the top bit off the loop index,
+    `Σ_{A < 2h} F A = Σ_{c < h} Σ_{e < 2} F (c + e·h)`. -/
+theorem sumLtI_bit_split (h : Nat) (F : Nat → Int) :
+    sumLtI (h + h) F = sumLtI h (fun c => sumLtI 2 (fun e => F (c + e*h))) := by
+  rw [sumLtI_shift, ← sumLtI_add]
+  rw [sumLtI_congr h (fun c => F c + F (h + c)) (fun c => sumLtI 2 (fun e => F (c + e*h)))
+      (fun c _ => by
+        rw [sumLtI_two', show c + 0 * h = c from by omega,
+            show c + 1 * h = h + c from by omega])]
+
+/-- **THE FIBER THEOREM — the 16 = 8 × 2.**  The ordered defect-triangle count
+    at level `m` is `16 ×` the qualifying ordered orbit-triple count at reduced
+    level `m−1`: `8` from the free bit-0 lifts (`ordDefTri_eight`) and `2` from
+    the consistent e1-lifts (`lift_e_sum`), via the top-bit split
+    (`sumLtI_bit_split`) of each orbit index.  UNCONDITIONAL. -/
+theorem ordDefTri_fiber (m : Nat) (hm : 2 ≤ m) :
+    ordDefTri m = 16 * ordQualOrbit (m-1) := by
+  obtain ⟨k, rfl⟩ : ∃ k, m = k + 1 := ⟨m - 1, by omega⟩
+  rw [ordDefTri_eight (k+1) (by omega)]
+  have hpow : (2:Nat)^(k+1) = 2^k + 2^k := by rw [Nat.pow_succ]; omega
+  show 8 * sumLtI (2^(k+1)) (fun A => sumLtI (2^(k+1)) (fun B => sumLtI (2^(k+1)) (fun C =>
+        if Rp (k+1) A B ∧ Rp (k+1) B C ∧ Rp (k+1) C A then (1:Int) else 0)))
+    = 16 * ordQualOrbit k
+  rw [hpow]
+  -- split the three loops' top bits
+  rw [sumLtI_bit_split (2^k) (fun A => sumLtI (2^k + 2^k) (fun B => sumLtI (2^k + 2^k) (fun C =>
+        if Rp (k+1) A B ∧ Rp (k+1) B C ∧ Rp (k+1) C A then (1:Int) else 0)))]
+  rw [sumLtI_congr (2^k) _ _ (fun c1 _ => sumLtI_congr 2 _ _ (fun e1 _ =>
+        sumLtI_bit_split (2^k) (fun B => sumLtI (2^k + 2^k) (fun C =>
+          if Rp (k+1) (c1 + e1*2^k) B ∧ Rp (k+1) B C ∧ Rp (k+1) C (c1 + e1*2^k)
+          then (1:Int) else 0))))]
+  rw [sumLtI_congr (2^k) _ _ (fun c1 _ => sumLtI_congr 2 _ _ (fun e1 _ =>
+        sumLtI_congr (2^k) _ _ (fun c2 _ => sumLtI_congr 2 _ _ (fun e2 _ =>
+          sumLtI_bit_split (2^k) (fun C =>
+            if Rp (k+1) (c1 + e1*2^k) (c2 + e2*2^k) ∧ Rp (k+1) (c2 + e2*2^k) C
+                ∧ Rp (k+1) C (c1 + e1*2^k) then (1:Int) else 0)))))]
+  -- reorder: move c2 left of e1, then c3 left of e2 and of e1
+  rw [sumLtI_congr (2^k) _ _ (fun c1 _ =>
+        sumLtI_swap 2 (2^k) (fun e1 c2 => sumLtI 2 (fun e2 => sumLtI (2^k) (fun c3 =>
+          sumLtI 2 (fun e3 =>
+            if Rp (k+1) (c1 + e1*2^k) (c2 + e2*2^k) ∧ Rp (k+1) (c2 + e2*2^k) (c3 + e3*2^k)
+                ∧ Rp (k+1) (c3 + e3*2^k) (c1 + e1*2^k) then (1:Int) else 0)))))]
+  rw [sumLtI_congr (2^k) _ _ (fun c1 _ => sumLtI_congr (2^k) _ _ (fun c2 _ =>
+        sumLtI_congr 2 _ _ (fun e1 _ =>
+          sumLtI_swap 2 (2^k) (fun e2 c3 => sumLtI 2 (fun e3 =>
+            if Rp (k+1) (c1 + e1*2^k) (c2 + e2*2^k) ∧ Rp (k+1) (c2 + e2*2^k) (c3 + e3*2^k)
+                ∧ Rp (k+1) (c3 + e3*2^k) (c1 + e1*2^k) then (1:Int) else 0)))))]
+  rw [sumLtI_congr (2^k) _ _ (fun c1 _ => sumLtI_congr (2^k) _ _ (fun c2 _ =>
+        sumLtI_swap 2 (2^k) (fun e1 c3 => sumLtI 2 (fun e2 => sumLtI 2 (fun e3 =>
+          if Rp (k+1) (c1 + e1*2^k) (c2 + e2*2^k) ∧ Rp (k+1) (c2 + e2*2^k) (c3 + e3*2^k)
+              ∧ Rp (k+1) (c3 + e3*2^k) (c1 + e1*2^k) then (1:Int) else 0)))))]
+  -- evaluate the inner e-sum (lift_e_sum) and collect the factors
+  rw [sumLtI_congr (2^k) _ _ (fun c1 hc1 => sumLtI_congr (2^k) _ _ (fun c2 hc2 =>
+        sumLtI_congr (2^k) _ _ (fun c3 hc3 => lift_e_sum k c1 c2 c3 hc1 hc2 hc3)))]
+  rw [sumLtI_congr (2^k) _ _ (fun c1 _ => sumLtI_congr (2^k) _ _ (fun c2 _ =>
+        sumLtI_mul (2^k) 2 (fun c3 => if qqual k c1 c2 c3 then (1:Int) else 0)))]
+  rw [sumLtI_congr (2^k) _ _ (fun c1 _ =>
+        sumLtI_mul (2^k) 2 (fun c2 => sumLtI (2^k) (fun c3 =>
+          if qqual k c1 c2 c3 then (1:Int) else 0)))]
+  rw [sumLtI_mul (2^k) 2 (fun c1 => sumLtI (2^k) (fun c2 => sumLtI (2^k) (fun c3 =>
+        if qqual k c1 c2 c3 then (1:Int) else 0)))]
+  show 8 * (2 * ordQualOrbit k) = 16 * ordQualOrbit k
+  omega
+
+/-! ### The sixfold regrouping (private engine pieces copied from Tier 160, primed) -/
+
+/-- The defect-triangle edge indicator is cyclic (pure reassociation). -/
+theorem trih_cyc (m a b c : Nat) :
+    (if isDefect m a b ∧ isDefect m b c ∧ isDefect m c a then (1:Int) else 0)
+    = (if isDefect m b c ∧ isDefect m c a ∧ isDefect m a b then (1:Int) else 0) := by
+  by_cases h1 : isDefect m a b <;> by_cases h2 : isDefect m b c <;>
+    by_cases h3 : isDefect m c a <;> simp [h1, h2, h3]
+
+/-- The defect-triangle edge indicator is swap-23 symmetric (bounded),
+    via `isDefect_symm'` on each edge. -/
+theorem trih_swap (m a b c : Nat) (ha : a < 2^(m+1)) (hb : b < 2^(m+1))
+    (hc : c < 2^(m+1)) :
+    (if isDefect m a b ∧ isDefect m b c ∧ isDefect m c a then (1:Int) else 0)
+    = (if isDefect m a c ∧ isDefect m c b ∧ isDefect m b a then (1:Int) else 0) := by
+  have e1 : isDefect m a c ↔ isDefect m c a :=
+    ⟨isDefect_symm' m a c ha hc, isDefect_symm' m c a hc ha⟩
+  have e2 : isDefect m c b ↔ isDefect m b c :=
+    ⟨isDefect_symm' m c b hc hb, isDefect_symm' m b c hb hc⟩
+  have e3 : isDefect m b a ↔ isDefect m a b :=
+    ⟨isDefect_symm' m b a hb ha, isDefect_symm' m a b ha hb⟩
+  have hiff : (isDefect m a b ∧ isDefect m b c ∧ isDefect m c a)
+      ↔ (isDefect m a c ∧ isDefect m c b ∧ isDefect m b a) :=
+    ⟨fun h => ⟨e1.mpr h.2.2, e2.mpr h.2.1, e3.mpr h.1⟩,
+     fun h => ⟨e3.mp h.2.2, e2.mp h.2.1, e1.mp h.1⟩⟩
+  by_cases hP : isDefect m a b ∧ isDefect m b c ∧ isDefect m c a
+  · rw [if_pos hP, if_pos (hiff.mp hP)]
+  · rw [if_neg hP, if_neg (fun hq => hP (hiff.mpr hq))]
+
+/-- **The sixfold regrouping, instantiated**: the ordered defect-triangle count
+    is `6 ×` the canonical (`x<y<z`) count.  UNCONDITIONAL. -/
+theorem ordDefTri_sixfold (m : Nat) :
+    ordDefTri m = 6 * t3Count m := by
+  have hreg := sixfold_regroup_cond
+    (fun a b c => if isDefect m a b ∧ isDefect m b c ∧ isDefect m c a then (1:Int) else 0)
+    (2^(m+1)) (fun a b c _ _ _ _ _ _ => trih_cyc m a b c)
+    (fun a b c ha hb hc _ _ _ => trih_swap m a b c ha hb hc)
+  unfold ordDefTri t3Count
+  rw [hreg]
+  have hpt2 : ∀ x y z : Nat,
+      (if x < y ∧ y < z then
+        (if isDefect m x y ∧ isDefect m y z ∧ isDefect m z x then (1:Int) else 0) else 0)
+      = (if x < y ∧ y < z ∧ isDefect m x y ∧ isDefect m y z ∧ isDefect m z x
+        then (1:Int) else 0) := by
+    intro x y z
+    by_cases hlt : x < y ∧ y < z
+    · by_cases he : isDefect m x y ∧ isDefect m y z ∧ isDefect m z x
+      · rw [if_pos hlt, if_pos he, if_pos ⟨hlt.1, hlt.2, he⟩]
+      · rw [if_pos hlt, if_neg he, if_neg (fun h => he h.2.2)]
+    · rw [if_neg hlt, if_neg (fun h => hlt ⟨h.1, h.2.1⟩)]
+  rw [sumLtI_congr (2^(m+1)) _ _ (fun x _ => sumLtI_congr (2^(m+1)) _ _ (fun y _ =>
+      sumLtI_congr (2^(m+1)) _ _ (fun z _ => hpt2 x y z)))]
+
+/-- **TIER 162 HEADLINE — `hmult`, the defect-triangle↔subspace multiplicity
+    table.**  In the exact shape Tier 154's `triangle_count_hrule` consumes
+    (with `T3 := t3Count m`, the canonical defect-triangle count at `W = 1`).
+
+    PROVED HERE, unconditionally: the full enumeration pipeline
+      `168 · t3Count m`
+        `= 28 · ordDefTri m`          (sixfold regrouping, `ordDefTri_sixfold`)
+        `= 28 · 16 · ordQualOrbit (m−1)`   (the fiber theorem `ordDefTri_fiber`:
+                                            16 = 8 bit-0 lifts × 2 consistent
+                                            e1-lifts, from K1 `Rp_iff_dpar`)
+    so `168 · t3Count m = 448 · ordQualOrbit (m−1)`, and the claim follows from
+    the single remaining hypothesis by linear arithmetic
+    (`3·448 = 8·168`, `8·108 = 864`, `504·T = 864·I ↔ 7·T = 12·I ↔ 168·T = 288·I`).
+
+    THE REMAINING HYPOTHESIS `hdc` (cp2_count pattern) is the **18-count**:
+    per ordered independent triple (ordered basis of a 3-dim `F₂`-subspace of
+    `F₂^(m−1)`), exactly `108 = 18 × 6` ordered qualifying orbit-triples lie in
+    its span, while the subspace is counted by its `168 = |GL(3,2)|` ordered
+    bases in `indTripleCount`; the division-free double-count form is
+    `168 · ordQualOrbit (m−1) = 108 · indTripleCount (m−1)`.
+    Measured at `.tmp/tier162_probe.py`: m=4: 18 qualifying per subspace (all
+    bases, no lines), m=5: 15 subspaces × 18 = 270, fibers exactly 16; and
+    `168·T3 = 288·indTriple` exact (48384 at m=4, 725760 at m=5). -/
+theorem tier162_hmult (m : Nat) (hm : 2 ≤ m)
+    (hdc : 168 * ordQualOrbit (m-1) = 108 * indTripleCount (m-1)) :
+    168 * t3Count m = 288 * indTripleCount (m-1) := by
+  have h1 := ordDefTri_sixfold m
+  have h2 := ordDefTri_fiber m hm
+  omega
+
+/-- SANITY (kernel evaluation; matches `.tmp/tier162_probe.py`): no qualifying
+    orbit-triples at reduced level `k = 2` — the `m = 3` defect graph is
+    triangle-free, so `t3Count 3 = 0` follows. -/
+theorem ordQualOrbit_two : ordQualOrbit 2 = 0 := by decide
+
+/-- SANITY: at `k = 3` the unique Fano plane carries exactly `108 = 18 × 6`
+    ordered qualifying orbit-triples — the measured 18 per 3-dim subspace,
+    kernel-checked.  (So `t3Count 4 = 16·108/6 = 288` via the green pipeline.) -/
+theorem ordQualOrbit_three : ordQualOrbit 3 = 108 := by decide
+
+set_option maxRecDepth 100000 in
+/-- END-TO-END SANITY: the canonical defect-triangle count at `m = 4` is `288`,
+    kernel-evaluated against the raw `P3` definition (matches the Python
+    enumeration of `.tmp/tier162_probe.py`; `288 = 288·[3,3]₂`). -/
+theorem t3Count_four : t3Count 4 = 288 := by decide
+
 end SounioZDFiberAntisym
