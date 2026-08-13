@@ -1399,7 +1399,7 @@ pub fn ir_region_slot_r(r: IrInstrRegion, idx: i64) -> i64 with Mut, Panic, Div 
 // and the handle stores the SLOT, not the base -- so every copy of a handle sees
 // the new base through the same indirection and growth cannot make a copy stale.
 // That is also what keeps this callable from the ~1425 write sites: `&!` through
-// a chain like `ir_module_fn(&module, 0).region` does not typecheck.
+// a chain like `ir_fn_get(module.fn_table_slot, 0).region` does not typecheck.
 //
 // A region is NOT allocated here. Writing into a function that was never given
 // one is a bug in the caller, and it is latched as a violation rather than
@@ -1612,7 +1612,7 @@ pub fn ir_module_seal_functions(module: &IrModule) -> i64 with Mut, Panic, Div {
     var i: i64 = 0
     while i < (*module).fn_count && i < IR_MAX_FUNCS {
         // Hoist the handle before taking its address. Do not "simplify" this
-        // back to `ir_region_seal(&ir_module_fn(&(*module), i as usize).region)`:
+        // back to `ir_region_seal(&ir_fn_get((*module).fn_table_slot, i as usize).region)`:
         // that is what the first version did, and it sealed ZERO of seven
         // regions in a real compile while reporting nothing.
         //
@@ -1629,7 +1629,7 @@ pub fn ir_module_seal_functions(module: &IrModule) -> i64 with Mut, Panic, Div {
         //
         // Sealing writes IR_REGION_STATE, a global, so a copy of the handle is
         // all this needs -- nothing has to be written back to the module.
-        var r = ir_module_fn(&(*module), i as usize).region
+        var r = ir_fn_get((*module).fn_table_slot, i as usize).region
         if ir_region_seal(&r) == IR_ARENA_OK {
             sealed = sealed + 1
         }
@@ -5134,7 +5134,7 @@ pub fn ir_module_count_float_bits_untouched(module: &IrModule, n: i64) -> i64 wi
         if slot >= IR_MAX_FUNCS { return total }
         // Same hoist as the live counter: a reference into a boxed array element
         // reads a wrong address under the seed. See the commit that measured it.
-        var uslot = ir_module_fn(&(*module), slot as usize)
+        var uslot = ir_fn_get((*module).fn_table_slot, slot as usize)
         var r: i64 = 0
         while r < ir_float_bits_capacity() {
             if ir_float_bits_get(&uslot, r) { total = total + 1 }
@@ -5153,14 +5153,14 @@ pub fn ir_module_count_float_bits(module: &IrModule) -> i64 with Mut, Panic, Div
     var fi: i64 = 0
     while fi < (*module).fn_count && fi < IR_MAX_FUNCS {
         // Hoist the element to a local BEFORE taking a reference to it. Taking
-        // &ir_module_fn(&(*module), i) directly is the same shape that made
+        // &ir_fn_get((*module).fn_table_slot, i) directly is the same shape that made
         // ir_region_seal silently seal 0 of 7 regions until it was hoisted; that
         // fix worked but its mechanism was never explained. This is the probe
         // that explains it -- if the hoisted count differs from the in-place one,
         // the reference-into-a-boxed-array-element is computing a wrong address,
         // and every reading in this investigation came from a broken instrument
         // rather than from broken storage.
-        var fslot = ir_module_fn(&(*module), fi as usize)
+        var fslot = ir_fn_get((*module).fn_table_slot, fi as usize)
         var r: i64 = 0
         while r < ir_float_bits_capacity() {
             if ir_float_bits_get(&fslot, r) { total = total + 1 }
@@ -5288,28 +5288,38 @@ var IR_FN_TABLE_6: [IrFunction; 8192] = [ir_empty_function(); 8192]
 var IR_FN_TABLE_7: [IrFunction; 8192] = [ir_empty_function(); 8192]
 var IR_FN_TABLE_POOL_NEXT: i64 = 0
 
-pub fn ir_module_fn(m: &IrModule, i: i64) -> IrFunction with Mut, Panic, Div {
-    let s = (*m).fn_table_slot
-    if s == 0 { return IR_FN_TABLE_0[i as usize] }
-    if s == 1 { return IR_FN_TABLE_1[i as usize] }
-    if s == 2 { return IR_FN_TABLE_2[i as usize] }
-    if s == 3 { return IR_FN_TABLE_3[i as usize] }
-    if s == 4 { return IR_FN_TABLE_4[i as usize] }
-    if s == 5 { return IR_FN_TABLE_5[i as usize] }
-    if s == 6 { return IR_FN_TABLE_6[i as usize] }
+// Slot-based accessors — take the pool index, not &IrModule, so call sites
+// with either IrModule or &IrModule can pass module.fn_table_slot (field
+// auto-deref works for both).
+pub fn ir_fn_get(slot: i64, i: i64) -> IrFunction with Mut, Panic, Div {
+    if slot == 0 { return IR_FN_TABLE_0[i as usize] }
+    if slot == 1 { return IR_FN_TABLE_1[i as usize] }
+    if slot == 2 { return IR_FN_TABLE_2[i as usize] }
+    if slot == 3 { return IR_FN_TABLE_3[i as usize] }
+    if slot == 4 { return IR_FN_TABLE_4[i as usize] }
+    if slot == 5 { return IR_FN_TABLE_5[i as usize] }
+    if slot == 6 { return IR_FN_TABLE_6[i as usize] }
     IR_FN_TABLE_7[i as usize]
 }
 
-pub fn ir_module_fn_set(m: &! IrModule, i: i64, f: IrFunction) with Mut, Panic, Div {
-    let s = (*m).fn_table_slot
-    if s == 0 { IR_FN_TABLE_0[i as usize] = f; return }
-    if s == 1 { IR_FN_TABLE_1[i as usize] = f; return }
-    if s == 2 { IR_FN_TABLE_2[i as usize] = f; return }
-    if s == 3 { IR_FN_TABLE_3[i as usize] = f; return }
-    if s == 4 { IR_FN_TABLE_4[i as usize] = f; return }
-    if s == 5 { IR_FN_TABLE_5[i as usize] = f; return }
-    if s == 6 { IR_FN_TABLE_6[i as usize] = f; return }
+pub fn ir_fn_set(slot: i64, i: i64, f: IrFunction) with Mut, Panic, Div {
+    if slot == 0 { IR_FN_TABLE_0[i as usize] = f; return }
+    if slot == 1 { IR_FN_TABLE_1[i as usize] = f; return }
+    if slot == 2 { IR_FN_TABLE_2[i as usize] = f; return }
+    if slot == 3 { IR_FN_TABLE_3[i as usize] = f; return }
+    if slot == 4 { IR_FN_TABLE_4[i as usize] = f; return }
+    if slot == 5 { IR_FN_TABLE_5[i as usize] = f; return }
+    if slot == 6 { IR_FN_TABLE_6[i as usize] = f; return }
     IR_FN_TABLE_7[i as usize] = f
+}
+
+// Compatibility wrappers (prefer ir_fn_get / ir_fn_set at call sites).
+pub fn ir_module_fn(m: &IrModule, i: i64) -> IrFunction with Mut, Panic, Div {
+    ir_fn_get((*m).fn_table_slot, i)
+}
+
+pub fn ir_module_fn_set(m: &! IrModule, i: i64, f: IrFunction) with Mut, Panic, Div {
+    ir_fn_set((*m).fn_table_slot, i, f)
 }
 
 pub fn ir_empty_module() -> IrModule with Mut {
