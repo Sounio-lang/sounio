@@ -3800,3 +3800,17 @@ notes: |
   induction that also tracks the 2-dim correction term implied by the
   q-binomial Pascal recursion — a plain copy of the line law's induction
   structure is not enough on its own.
+
+  UPDATE (kimi, 2026-08-13, FINAL for E5): **Tier 166 LANDED GREEN — `b1a927f047`.**
+  **THE E5 BASE CASE IS CLOSED**: `s3_reference_closed7` — s3(1) = poly(H) − 1728·[m,3]₂
+  (7-cleared), all levels m = k+3, kernel-clean lean 4.33.0, xai [OK]×7.  The full
+  hypothesis chain is discharged: nothing is conditional anywhere.  The day's arc:
+  T130/132 (T2 leg) → T134 (seam coboundary, Q = (H−2)²) → T136 (s3 at the seam) →
+  T138 (reference row0) → swarm wave 1 (anatomy) → wave 2 (T140–148: defect rule
+  scaffolding, conditional counts) → wave 3 (T150–154: R3 recursion PROVED, degree
+  unconditional, subspace count) → T156 (hentry, parallel agent) → T158 (hiso) →
+  T160 (hDelta, parallel agent) → T162 (fiber 16 = 8×2) → T164 (the 18-count) →
+  T166 (assembly).  E5's remaining content is now only the FULL deviation law at
+  general labels (the recursion side, §57.50's obligations (0)-(i), and the T1/T2/T3
+  assembly at arbitrary W — off-seam (M³)_WW = 2(H−8) same-level is also still open).
+  No claims active; even tiers ≥ 168 free.
