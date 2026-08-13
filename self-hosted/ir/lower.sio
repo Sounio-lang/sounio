@@ -906,24 +906,104 @@ pub(crate) fn ir_register_knowledge_layout(table: StructLayoutTable) -> StructLa
     t
 }
 
+// ---------------------------------------------------------------------------
+// Stack peels for large Box materialisations (Lane B residual, 2026-08-13)
+// ---------------------------------------------------------------------------
+// `Box::new(ir_empty_module())` (and friends) evaluated as field initialisers
+// of a single Lowerer { ... } literal keep several multi-MiB temps live at once:
+//   IrModule            ~11.5 MiB  ([IrFunction; 8192] after instr arena)
+//   StructLayoutTable   ~3.3 MiB
+//   LowerLocalStack     ~1.6 MiB
+// Concurrent peak ≈ 16 MiB inside lowerer_new alone — enough, with parent frames
+// (epistemic section, frontend), to SEGV hello under a 32 MiB stack at
+// `lower_array: seed_begin` (measured: fail 32 MiB, ok 48 MiB on madaros-peel3).
+// Isolate each materialisation in its own function so only one large frame is
+// live at a time; the returned Box is a pointer-sized value.
+fn lowerer_box_empty_module() -> Box<IrModule> with Alloc, Mut {
+    Box::new(ir_empty_module())
+}
+
+fn lowerer_box_empty_function() -> Box<IrFunction> with Alloc, Mut {
+    Box::new(ir_empty_function())
+}
+
+fn lowerer_box_empty_locals() -> Box<LowerLocalStack> with Alloc, Mut {
+    Box::new(empty_lower_local_stack())
+}
+
+fn lowerer_box_empty_loop_labels() -> Box<LowerLoopLabels> with Alloc, Mut {
+    Box::new(empty_lower_loop_labels())
+}
+
+fn lowerer_box_empty_enum_variants() -> Box<EnumVariantTable> with Alloc, Mut {
+    Box::new(empty_enum_variant_table())
+}
+
+fn lowerer_box_empty_struct_layouts() -> Box<StructLayoutTable> with Alloc, Mut {
+    Box::new(empty_struct_layout_table())
+}
+
+fn lowerer_box_empty_global_types() -> Box<LowerGlobalTypeTable> with Alloc, Mut {
+    Box::new(empty_lower_global_type_table())
+}
+
+fn lowerer_box_empty_closure_caps() -> Box<ClosureCapTable> with Alloc, Mut {
+    Box::new(empty_closure_cap_table())
+}
+
+fn lowerer_box_empty_epistemic_contests() -> Box<LowerEpistemicContestIndex> with Alloc, Mut {
+    Box::new(empty_lower_epistemic_contest_index())
+}
+
+fn lowerer_box_clone_module(src: &IrModule) -> Box<IrModule> with Alloc, Mut {
+    Box::new(*src)
+}
+
+fn lowerer_box_clone_enum_variants(src: &EnumVariantTable) -> Box<EnumVariantTable> with Alloc, Mut {
+    Box::new(*src)
+}
+
+fn lowerer_box_clone_struct_layouts(src: &StructLayoutTable) -> Box<StructLayoutTable> with Alloc, Mut {
+    Box::new(*src)
+}
+
+fn lowerer_box_clone_global_types(src: &LowerGlobalTypeTable) -> Box<LowerGlobalTypeTable> with Alloc, Mut {
+    Box::new(*src)
+}
+
+fn lowerer_box_register_knowledge_layout(layouts: Box<StructLayoutTable>) -> Box<StructLayoutTable> with Alloc, Mut, Panic, Div {
+    Box::new(ir_register_knowledge_layout(*layouts))
+}
+
+
 fn lowerer_new() -> Lowerer with Alloc, Mut {
     lower_hard_error_reset()
+    // Sequential peels — one large Box::new frame at a time (see helpers above).
+    let module = lowerer_box_empty_module()
+    let epistemic_contests = lowerer_box_empty_epistemic_contests()
+    let current_func = lowerer_box_empty_function()
+    let locals = lowerer_box_empty_locals()
+    let loop_labels = lowerer_box_empty_loop_labels()
+    let enum_variants = lowerer_box_empty_enum_variants()
+    let struct_layouts = lowerer_box_empty_struct_layouts()
+    let global_types = lowerer_box_empty_global_types()
+    let closure_caps = lowerer_box_empty_closure_caps()
     Lowerer {
-        module: Box::new(ir_empty_module()),
-        epistemic_contests: Box::new(empty_lower_epistemic_contest_index()),
+        module: module,
+        epistemic_contests: epistemic_contests,
         current_fn: IR_INVALID_FN,
-        current_func: Box::new(ir_empty_function()),
+        current_func: current_func,
         current_func_loaded: false,
         env: None,
-        locals: Box::new(empty_lower_local_stack()),
+        locals: locals,
         scope_depth: 0,
-        loop_labels: Box::new(empty_lower_loop_labels()),
+        loop_labels: loop_labels,
         loop_depth: 0,
         error_count: 0,
         had_error: false,
-        enum_variants: Box::new(empty_enum_variant_table()),
-        struct_layouts: Box::new(empty_struct_layout_table()),
-        global_types: Box::new(empty_lower_global_type_table()),
+        enum_variants: enum_variants,
+        struct_layouts: struct_layouts,
+        global_types: global_types,
         array_elem_float_regs: [IR_INVALID_REG; 512],
         array_elem_float_reg_count: 0,
         variance_base_regs: [IR_INVALID_REG; 1024],
@@ -931,7 +1011,7 @@ fn lowerer_new() -> Lowerer with Alloc, Mut {
         variance_base_reg_count: 0,
         debug_mode: false,
         probe_mode: false,
-        closure_caps: Box::new(empty_closure_cap_table()),
+        closure_caps: closure_caps,
         pending_closure_fn_id: -1,
         allow_direct_capturing_closure_literal: false,
         pending_variance_reg: -1,
@@ -988,7 +1068,9 @@ fn lowerer_new_with_epistemic(epistemic: &IrEpistemicSection) -> Lowerer with Al
         print("\n")
     }
     // Sprint 116: pre-register Knowledge<f64> layout
-    lo.struct_layouts = Box::new(ir_register_knowledge_layout(*lo.struct_layouts))
+    // Peel: ir_register_knowledge_layout takes/returns StructLayoutTable by value (~3.3 MiB).
+    // Isolate materialisation so lowerer_new_with_epistemic's frame stays small.
+    lo.struct_layouts = lowerer_box_register_knowledge_layout(lo.struct_layouts)
     lo
 }
 
@@ -996,7 +1078,9 @@ fn lowerer_new_probe() -> Lowerer with Alloc, Mut, Panic, Div {
     var lo = lowerer_new()
     lo.probe_mode = true
     // Sprint 116: pre-register Knowledge<f64> layout
-    lo.struct_layouts = Box::new(ir_register_knowledge_layout(*lo.struct_layouts))
+    // Peel: ir_register_knowledge_layout takes/returns StructLayoutTable by value (~3.3 MiB).
+    // Isolate materialisation so lowerer_new_with_epistemic's frame stays small.
+    lo.struct_layouts = lowerer_box_register_knowledge_layout(lo.struct_layouts)
     lo
 }
 
@@ -1227,12 +1311,19 @@ fn lowerer_lookup_fn_id_by_name_ref(lo: &Lowerer, name: Name) -> i64 with Mut, P
     -1
 }
 
-pub fn ir_empty_program_summary() -> IrProgramSummary {
+pub fn ir_empty_program_summary() -> IrProgramSummary with Alloc, Mut {
+    // Sequential peels — same concurrent-temp hazard as lowerer_new.
+    // Effects: Box::new peels require Alloc+Mut (E035 if omitted — measured
+    // on fixed-point gate: 4× E035 from this function alone).
+    let module = lowerer_box_empty_module()
+    let enum_variants = lowerer_box_empty_enum_variants()
+    let struct_layouts = lowerer_box_empty_struct_layouts()
+    let global_types = lowerer_box_empty_global_types()
     IrProgramSummary {
-        module: Box::new(ir_empty_module()),
-        enum_variants: Box::new(empty_enum_variant_table()),
-        struct_layouts: Box::new(empty_struct_layout_table()),
-        global_types: Box::new(empty_lower_global_type_table()),
+        module: module,
+        enum_variants: enum_variants,
+        struct_layouts: struct_layouts,
+        global_types: global_types,
         probe_mode: false,
     }
 }
@@ -1307,18 +1398,18 @@ fn lowerer_seed_module_from_summary(lo_in: Lowerer, summary: &IrProgramSummary) 
 
 fn lowerer_seed_metadata_from_summary(lo_in: Lowerer, summary: &IrProgramSummary) -> Lowerer with Mut, Panic, Div {
     var lo = lo_in
-    var enum_variants = *lo.enum_variants
-    enum_variants.count = 0
+    // Mutate boxed tables in place — do NOT unbox to stack (`var t = *lo.table`
+    // materialises EnumVariantTable / StructLayoutTable / LowerGlobalTypeTable,
+    // multi-MiB each) then Box::new again.
+    (*lo.enum_variants).count = 0
     var vi: i64 = 0
     while vi < (*summary.enum_variants).count && vi < 1024 {
-        enum_variants.entries[vi as usize] = (*summary.enum_variants).entries[vi as usize]
+        (*lo.enum_variants).entries[vi as usize] = (*summary.enum_variants).entries[vi as usize]
         vi = vi + 1
     }
-    enum_variants.count = vi
-    lo.enum_variants = Box::new(enum_variants)
+    (*lo.enum_variants).count = vi
 
-    var struct_layouts = *lo.struct_layouts
-    struct_layouts.count = 0
+    (*lo.struct_layouts).count = 0
     var si: i64 = 0
     while si < (*summary.struct_layouts).count && si < 1024 {
         var entry = empty_struct_layout_entry()
@@ -1329,19 +1420,16 @@ fn lowerer_seed_metadata_from_summary(lo_in: Lowerer, summary: &IrProgramSummary
             entry.fields[fi as usize] = (*summary.struct_layouts).entries[si as usize].fields[fi as usize]
             fi = fi + 1
         }
-        struct_layouts.entries[si as usize] = entry
+        (*lo.struct_layouts).entries[si as usize] = entry
         si = si + 1
     }
-    struct_layouts.count = si
-    lo.struct_layouts = Box::new(struct_layouts)
+    (*lo.struct_layouts).count = si
 
-    var global_types = empty_lower_global_type_table()
     var gi: i64 = 0
     while gi < IR_MAX_FUNCS {
-        global_types.elem_kinds[gi as usize] = (*summary.global_types).elem_kinds[gi as usize]
+        (*lo.global_types).elem_kinds[gi as usize] = (*summary.global_types).elem_kinds[gi as usize]
         gi = gi + 1
     }
-    lo.global_types = Box::new(global_types)
     lo
 }
 
@@ -1351,26 +1439,35 @@ fn lowerer_seed_metadata_from_summary(lo_in: Lowerer, summary: &IrProgramSummary
 // Still one densify copy (ref cannot move); owned path reuses the Box with zero densify.
 fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEpistemicSection) -> Lowerer with Alloc, Mut, Panic, Div, IO {
     lower_hard_error_reset()
-    var module_box = Box::new(*(*summary).module)
+    // Sequential peels for large clones (same rationale as lowerer_new).
+    var module_box = lowerer_box_clone_module(&(*(*summary).module))
     // Match seed/owned body path: rebuild string table during body lower.
     (*module_box).string_count = 0
     (*module_box).epistemic = (*epistemic)
+    let epistemic_contests = lowerer_box_empty_epistemic_contests()
+    let current_func = lowerer_box_empty_function()
+    let locals = lowerer_box_empty_locals()
+    let loop_labels = lowerer_box_empty_loop_labels()
+    let enum_variants = lowerer_box_clone_enum_variants(&(*(*summary).enum_variants))
+    let struct_layouts = lowerer_box_clone_struct_layouts(&(*(*summary).struct_layouts))
+    let global_types = lowerer_box_clone_global_types(&(*(*summary).global_types))
+    let closure_caps = lowerer_box_empty_closure_caps()
     var lo = Lowerer {
         module: module_box,
-        epistemic_contests: Box::new(empty_lower_epistemic_contest_index()),
+        epistemic_contests: epistemic_contests,
         current_fn: IR_INVALID_FN,
-        current_func: Box::new(ir_empty_function()),
+        current_func: current_func,
         current_func_loaded: false,
         env: None,
-        locals: Box::new(empty_lower_local_stack()),
+        locals: locals,
         scope_depth: 0,
-        loop_labels: Box::new(empty_lower_loop_labels()),
+        loop_labels: loop_labels,
         loop_depth: 0,
         error_count: 0,
         had_error: false,
-        enum_variants: Box::new(*(*summary).enum_variants),
-        struct_layouts: Box::new(*(*summary).struct_layouts),
-        global_types: Box::new(*(*summary).global_types),
+        enum_variants: enum_variants,
+        struct_layouts: struct_layouts,
+        global_types: global_types,
         array_elem_float_regs: [IR_INVALID_REG; 512],
         array_elem_float_reg_count: 0,
         variance_base_regs: [IR_INVALID_REG; 1024],
@@ -1378,7 +1475,7 @@ fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEp
         variance_base_reg_count: 0,
         debug_mode: false,
         probe_mode: summary.probe_mode,
-        closure_caps: Box::new(empty_closure_cap_table()),
+        closure_caps: closure_caps,
         pending_closure_fn_id: -1,
         allow_direct_capturing_closure_literal: false,
         pending_variance_reg: -1,
@@ -1412,16 +1509,23 @@ fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEp
 // match seed behaviour (body lower rebuilds the string table).
 fn lowerer_new_from_program_summary_owned(summary: IrProgramSummary, epistemic: &IrEpistemicSection) -> Lowerer with Alloc, Mut, Panic, Div, IO {
     lower_hard_error_reset()
+    // Reuse summary's live Boxes (no IrModule densify). Remaining empties
+    // still go through sequential peels.
+    let epistemic_contests = lowerer_box_empty_epistemic_contests()
+    let current_func = lowerer_box_empty_function()
+    let locals = lowerer_box_empty_locals()
+    let loop_labels = lowerer_box_empty_loop_labels()
+    let closure_caps = lowerer_box_empty_closure_caps()
     var lo = Lowerer {
         module: summary.module,
-        epistemic_contests: Box::new(empty_lower_epistemic_contest_index()),
+        epistemic_contests: epistemic_contests,
         current_fn: IR_INVALID_FN,
-        current_func: Box::new(ir_empty_function()),
+        current_func: current_func,
         current_func_loaded: false,
         env: None,
-        locals: Box::new(empty_lower_local_stack()),
+        locals: locals,
         scope_depth: 0,
-        loop_labels: Box::new(empty_lower_loop_labels()),
+        loop_labels: loop_labels,
         loop_depth: 0,
         error_count: 0,
         had_error: false,
@@ -1435,7 +1539,7 @@ fn lowerer_new_from_program_summary_owned(summary: IrProgramSummary, epistemic: 
         variance_base_reg_count: 0,
         debug_mode: false,
         probe_mode: summary.probe_mode,
-        closure_caps: Box::new(empty_closure_cap_table()),
+        closure_caps: closure_caps,
         pending_closure_fn_id: -1,
         allow_direct_capturing_closure_literal: false,
         pending_variance_reg: -1,
@@ -1472,22 +1576,30 @@ fn lowerer_new_from_program_summary_owned(summary: IrProgramSummary, epistemic: 
 // metadata tables (structs/enums/globals) are rebuilt from extern + dep preseed.
 fn lowerer_from_acc_module(module: Box<IrModule>) -> Lowerer with Alloc, Mut, Panic, Div, IO {
     lower_hard_error_reset()
+    let epistemic_contests = lowerer_box_empty_epistemic_contests()
+    let current_func = lowerer_box_empty_function()
+    let locals = lowerer_box_empty_locals()
+    let loop_labels = lowerer_box_empty_loop_labels()
+    let enum_variants = lowerer_box_empty_enum_variants()
+    let struct_layouts = lowerer_box_empty_struct_layouts()
+    let global_types = lowerer_box_empty_global_types()
+    let closure_caps = lowerer_box_empty_closure_caps()
     var lo = Lowerer {
         module: module,
-        epistemic_contests: Box::new(empty_lower_epistemic_contest_index()),
+        epistemic_contests: epistemic_contests,
         current_fn: IR_INVALID_FN,
-        current_func: Box::new(ir_empty_function()),
+        current_func: current_func,
         current_func_loaded: false,
         env: None,
-        locals: Box::new(empty_lower_local_stack()),
+        locals: locals,
         scope_depth: 0,
-        loop_labels: Box::new(empty_lower_loop_labels()),
+        loop_labels: loop_labels,
         loop_depth: 0,
         error_count: 0,
         had_error: false,
-        enum_variants: Box::new(empty_enum_variant_table()),
-        struct_layouts: Box::new(empty_struct_layout_table()),
-        global_types: Box::new(empty_lower_global_type_table()),
+        enum_variants: enum_variants,
+        struct_layouts: struct_layouts,
+        global_types: global_types,
         array_elem_float_regs: [IR_INVALID_REG; 512],
         array_elem_float_reg_count: 0,
         variance_base_regs: [IR_INVALID_REG; 1024],
@@ -1495,7 +1607,7 @@ fn lowerer_from_acc_module(module: Box<IrModule>) -> Lowerer with Alloc, Mut, Pa
         variance_base_reg_count: 0,
         debug_mode: false,
         probe_mode: false,
-        closure_caps: Box::new(empty_closure_cap_table()),
+        closure_caps: closure_caps,
         pending_closure_fn_id: -1,
         allow_direct_capturing_closure_literal: false,
         pending_variance_reg: -1,
@@ -1515,7 +1627,9 @@ fn lowerer_from_acc_module(module: Box<IrModule>) -> Lowerer with Alloc, Mut, Pa
     }
     // Knowledge layout is required for epistemic field lowering; match
     // lowerer_new_with_epistemic. Do NOT wipe module.epistemic / strings.
-    lo.struct_layouts = Box::new(ir_register_knowledge_layout(*lo.struct_layouts))
+    // Peel: ir_register_knowledge_layout takes/returns StructLayoutTable by value (~3.3 MiB).
+    // Isolate materialisation so lowerer_new_with_epistemic's frame stays small.
+    lo.struct_layouts = lowerer_box_register_knowledge_layout(lo.struct_layouts)
     if lower_live_diag_enabled() {
         print("CONTEST_IR_INDEX_BIND constructor=acc_attach contest_count=")
         print_int((*lo.epistemic_contests).contest_count)
@@ -7002,9 +7116,9 @@ impl Lowerer {
         lo
     }
 
-    fn report_fatal_lowering_error(self) -> Lowerer with Mut, IO {
+    fn report_fatal_lowering_error(self) -> Lowerer with Mut, IO, Alloc {
         var lo = self.report_error_at(6546)
-        lo.module = Box::new(ir_empty_module())
+        lo.module = lowerer_box_empty_module()
         lo.current_fn = IR_INVALID_FN
         lo.current_func_loaded = false
         lo
@@ -16613,10 +16727,10 @@ impl Lowerer {
         // lo.current_func — not the empty module placeholder, which is what zeroed
         // param_count and produced a malformed closure body.
         lo.current_fn = closure_fn_id
-        lo.current_func = Box::new(ir_empty_function())
+        lo.current_func = lowerer_box_empty_function()
         (*lo.current_func).name = closure_name
         lo.current_func_loaded = true
-        lo.locals = Box::new(empty_lower_local_stack())
+        lo.locals = lowerer_box_empty_locals()
         lo.scope_depth = 0
         lo.loop_depth = 0
         // D5 (#986): per-function reset of vreg-keyed float/variance tables.
