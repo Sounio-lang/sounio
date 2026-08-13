@@ -3364,12 +3364,67 @@ fn test_eg_fano_allows_fano_triple() -> bool with Mut, Div, Panic {
 }
 
 // ============================================================================
+// Section 29a: Epistemic reassociation gate — value-algebra x exactness x chaos
+//
+// Duplicated from self-hosted/compiler/main.sio's T143b/c/d
+// (compiler_main_test_eg_small_satf_*, main.sio:8951-8974) so this gate is
+// verified from egraph.sio's own independent self-test entrypoint
+// (test_eg_main / egraph_self_test_main, run standalone via
+// `souc run self-hosted/ir/egraph.sio`) rather than only from inside
+// main.sio's much larger self-test suite. Measured 2026-07-27: that larger
+// suite has a pre-existing crash reached partway through a full run (main.sio
+// documents this at its own T143b/c/d call site: "a pre-existing crash
+// downstream of T1201 on this WIP branch" forces those three to be run
+// first) -- so a test living only inside it is only as reliable as the
+// binary's ability to reach that point without segfaulting first. These
+// three duplicates carry no such dependency: they exercise only
+// EgSmallContext and eg_small_saturate_float, both defined in this file.
+
+// Build the FADD chain (a+b)+c over `ctx` and return the float-saturation
+// merge count. Distinct var ids 1,2,3 keep the leaves apart.
+fn eg_satf_fadd_chain_merges(ctx: &! EgSmallContext) -> i64 with Mut, Div, Panic {
+    let a  = eg_small_add_var(ctx, 1)
+    let b  = eg_small_add_var(ctx, 2)
+    let c  = eg_small_add_var(ctx, 3)
+    let ab = eg_small_add_binop(ctx, EG_OP_FADD, a, b)     // a+b
+    let _o = eg_small_add_binop(ctx, EG_OP_FADD, ab, c)    // (a+b)+c
+    eg_small_saturate_float(ctx)
+}
+
+// T83 (Feature A-1): a default EgSmallContext is INEXACT, so float associativity
+// is FORBIDDEN -- eg_small_saturate_float must perform zero reassociation merges
+// on the f64 chain (a+b)+c.
+fn test_eg_small_satf_blocks_inexact_default() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    return eg_satf_fadd_chain_merges(&! ctx) == 0
+}
+
+// T84 (Feature A-1): when the producing context explicitly opts in to inexact
+// reassociation (the GUM-guided precision-preserving pass), float associativity
+// fires again -- at least one merge on the same chain.
+fn test_eg_small_satf_allows_optin() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    ctx.allow_inexact_reassoc = true
+    return eg_satf_fadd_chain_merges(&! ctx) > 0
+}
+
+// T85 (Feature A-layer-2): even with the inexact-reassoc opt-in enabled, a
+// CHAOTIC context refuses all float reassociation -- the chaos gate
+// (e^{lambda t} amplification) dominates the precision-preserving opt-in.
+fn test_eg_small_satf_chaotic_blocks() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    ctx.allow_inexact_reassoc = true
+    ctx.chaotic = true
+    return eg_satf_fadd_chain_merges(&! ctx) == 0
+}
+
+// ============================================================================
 // Section 29: Test Runner
 // ============================================================================
 
 fn test_eg_main() -> i32 with IO, Mut, Panic, Div {
     var passed: i64 = 0
-    let total: i64 = 82
+    let total: i64 = 85
 
     print("=== E-Graph Equality Saturation Tests ===\n")
 
@@ -3455,6 +3510,9 @@ fn test_eg_main() -> i32 with IO, Mut, Panic, Div {
     if test_eg_guided_e2e() { passed = passed + 1; print("  T80 OK guided_e2e\n") } else { print("  FAIL: T80 guided_e2e\n") }
     if test_eg_fano_blocks_non_fano()    { passed = passed + 1; print("  T81 OK fano_blocks_non_fano\n")    } else { print("  FAIL: T81 fano_blocks_non_fano\n")    }
     if test_eg_fano_allows_fano_triple() { passed = passed + 1; print("  T82 OK fano_allows_fano_triple\n") } else { print("  FAIL: T82 fano_allows_fano_triple\n") }
+    if test_eg_small_satf_blocks_inexact_default() { passed = passed + 1; print("  T83 OK satf_blocks_inexact_default\n") } else { print("  FAIL: T83 satf_blocks_inexact_default\n") }
+    if test_eg_small_satf_allows_optin() { passed = passed + 1; print("  T84 OK satf_allows_optin\n") } else { print("  FAIL: T84 satf_allows_optin\n") }
+    if test_eg_small_satf_chaotic_blocks() { passed = passed + 1; print("  T85 OK satf_chaotic_blocks\n") } else { print("  FAIL: T85 satf_chaotic_blocks\n") }
 
     print("\nE-Graph: ")
     print_int(passed)

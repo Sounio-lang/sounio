@@ -315,7 +315,15 @@ def read_sprint_hardware_lineage(
     if fpga_path.exists():
         try:
             payload = json.loads(fpga_path.read_text())
-            if isinstance(payload, dict):
+            if isinstance(payload, dict) and payload.get("stale"):
+                # hardware/** has never been versioned in this repository --
+                # the status fields below describe an environment this
+                # checkout doesn't have. Record an explicit fail rather than
+                # let a stale "pass" propagate. See fpga_seed_report.json's
+                # stale_reason.
+                result["bidir_kaxi_pass"] = False
+                result["merkle_lane_pass"] = False
+            elif isinstance(payload, dict):
                 sim = payload.get("k_axi_return_sim_status", "")
                 synth = payload.get("k_axi_return_synth_status", "")
                 if isinstance(sim, str) and isinstance(synth, str):

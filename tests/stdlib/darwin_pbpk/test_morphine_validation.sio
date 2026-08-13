@@ -1,0 +1,214 @@
+//@ run-pass
+//@ expect-stdout: PASS
+// morphine_fase6_valid.sio (v3) — validação morfina Fase 6 (kernel UTIped)
+// Parâmetros: LITERAIS extraídos do módulo canônico
+// darwin_pbpk::drugs::morphine via morph_dump.sio (fonte única de verdade).
+//
+// NOTA DE ENGINE (corrigida 2026-08-13, review PR #1714): o "thin-link rc=12"
+// de RUNTIME_NOTES.md item 3 era `with Mut` faltando nos helpers locais
+// (exp/ln/sqrt/powf e os `pub fn` que os chamam) — ver RUNTIME_NOTES.md
+// para o diagnóstico completo. Com os efeitos corrigidos aqui e no módulo,
+// import multimódulo + structs locais + fns retornando array cruzando
+// módulo funcionam normalmente. Mantido self-contained por simplicidade,
+// não por necessidade.
+// CL_eff (L/h) por faixa, do módulo: adult 83.9972 · neo7 1.2166 ·
+// lac4 6.6864 · lac6 9.0332 · pre3 16.7722 · esc8 30.7104.
+
+struct State28 { cv: [f64; 14], ct: [f64; 14] }
+struct Params28 {
+    v_ref: [f64; 14], vasc_frac: [f64; 14], kp: [f64; 14],
+    ps: [f64; 14], q: [f64; 14], cl_central: f64,
+}
+
+// ─── Matemática ────────────────────────────────────────────────────────────
+fn exp_f64(x: f64) -> f64 with Mut {
+    if x > 20.0 { return exp_f64(x / 2.0) * exp_f64(x / 2.0) }
+    if x < 0.0 - 20.0 { return 1.0 / exp_f64(0.0 - x) }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1.0
+    while i <= 20.0 { term = term * x / i; sum = sum + term; i = i + 1.0 }
+    return sum
+}
+fn sqrt_f64(x: f64) -> f64 with Mut {
+    if x <= 0.0 { return 0.0 }
+    var guess = x / 2.0
+    if guess < 1.0 { guess = 1.0 }
+    var i = 0.0
+    while i < 20.0 { guess = (guess + x / guess) / 2.0; i = i + 1.0 }
+    return guess
+}
+fn ln_f64(x: f64) -> f64 with Mut {
+    if x <= 0.0 { return 0.0 - 1000000.0 }
+    if x == 1.0 { return 0.0 }
+    if x > 1.5 { return 2.0 * ln_f64(sqrt_f64(x)) }
+    if x < 0.7 { return 0.0 - ln_f64(1.0 / x) }
+    let u = x - 1.0
+    var sum = 0.0
+    var term = u
+    var i = 1.0
+    while i <= 30.0 { sum = sum + term / i; term = 0.0 - term * u; i = i + 1.0 }
+    return sum
+}
+fn powf(b: f64, e: f64) -> f64 with Mut { return exp_f64(e * ln_f64(b)) }
+
+// ─── Passo CN (verbatim) ───────────────────────────────────────────────────
+fn state_zero() -> State28 {
+    State28 { cv: [0.0; 14], ct: [0.0; 14] }
+}
+fn cn_step(state: State28, p: Params28, rel_mid: f64, dt: f64) -> State28 with Mut, Div {
+    let h = 0.5 * dt
+    let vb = p.v_ref[0]
+    var sum_q = 0.0
+    var i: i32 = 1
+    while i < 14 { sum_q = sum_q + p.q[i]; i = i + 1 }
+    let big_s = h * (sum_q + p.cl_central) / vb
+    let cb_old = state.cv[0]
+    var rhs0 = (1.0 - big_s) * cb_old + dt * rel_mid / vb
+    var a_v: [f64; 14] = [0.0; 14]
+    var b_v: [f64; 14] = [0.0; 14]
+    var a_t: [f64; 14] = [0.0; 14]
+    var b_t: [f64; 14] = [0.0; 14]
+    var sum_beta_a = 0.0
+    var sum_beta_b = 0.0
+    i = 1
+    while i < 14 {
+        let vi = p.v_ref[i]
+        let vf = p.vasc_frac[i]
+        let vv_raw = vi * vf
+        let vt_raw = vi * (1.0 - vf)
+        let vv = if vv_raw < 1.0e-30 { 1.0e-30 } else { vv_raw }
+        let vt = if vt_raw < 1.0e-30 { 1.0e-30 } else { vt_raw }
+        let kp = p.kp[i]
+        let psi = p.ps[i]
+        let qi = p.q[i]
+        let beta  = h * qi / vb
+        let gamma = h * qi / vv
+        let pp    = 1.0 + h * (qi + psi) / vv
+        let qq    = h * psi / (vv * kp)
+        let rr    = h * psi / vt
+        let sb    = 1.0 + h * psi / (vt * kp)
+        let det   = pp * sb - qq * rr
+        rhs0 = rhs0 + beta * state.cv[i]
+        let rhs_v = gamma * cb_old + (1.0 - h * (qi + psi) / vv) * state.cv[i] + qq * state.ct[i]
+        let rhs_t = rr * state.cv[i] + (1.0 - h * psi / (vt * kp)) * state.ct[i]
+        let av = (sb * rhs_v + qq * rhs_t) / det
+        let bv = (sb * gamma) / det
+        let at = (rr * rhs_v + pp * rhs_t) / det
+        let bt = (rr * gamma) / det
+        a_v[i] = av
+        b_v[i] = bv
+        a_t[i] = at
+        b_t[i] = bt
+        sum_beta_a = sum_beta_a + beta * av
+        sum_beta_b = sum_beta_b + beta * bv
+        i = i + 1
+    }
+    let cb_new = (rhs0 + sum_beta_a) / ((1.0 + big_s) - sum_beta_b)
+    var out = state_zero()
+    out.cv[0] = if cb_new < 0.0 { 0.0 } else { cb_new }
+    i = 1
+    while i < 14 {
+        let cv = a_v[i] + b_v[i] * cb_new
+        let ct = a_t[i] + b_t[i] * cb_new
+        out.cv[i] = if cv < 0.0 { 0.0 } else { cv }
+        out.ct[i] = if ct < 0.0 { 0.0 } else { ct }
+        i = i + 1
+    }
+    return out
+}
+
+
+fn build_morph(w: f64, cl: f64) -> Params28 with Mut, Div {
+    let wr = w / 70.0
+    let v70 = [5.0, 1.8, 0.31, 1.45, 0.33, 1.1, 28.0, 20.0, 1.2, 3.6, 6.6, 0.18, 0.09, 3.7]
+    let q70 = [350.0, 90.0, 74.0, 44.0, 16.0, 350.0, 42.0, 10.0, 55.0, 21.0, 17.0, 10.0, 8.0, 13.0]
+    let kp = [1.0, 10.0, 7.0, 2.0, 5.5, 7.0, 2.6, 1.1, 9.0, 2.0, 1.0, 7.0, 5.5, 2.0]
+    let ps70 = [0.0, 45.0, 37.0, 4.4, 8.0, 0.0, 21.0, 5.0, 27.5, 10.5, 8.5, 5.0, 4.0, 6.5]
+    let vf = [1.0, 0.21, 0.16, 0.037, 0.262, 0.262, 0.04, 0.05, 0.024, 0.019, 0.041, 0.282, 0.18, 0.05]
+    var v: [f64; 14] = [0.0; 14]
+    var q: [f64; 14] = [0.0; 14]
+    var ps: [f64; 14] = [0.0; 14]
+    var i: i64 = 0
+    while i < 14 {
+        v[i] = v70[i] * wr
+        q[i] = q70[i] * wr
+        ps[i] = ps70[i] * wr
+        i = i + 1
+    }
+    return Params28 { v_ref: v, vasc_frac: vf, kp: kp, ps: ps, q: q, cl_central: cl }
+}
+
+fn main() -> i64 with Mut, Div, IO {
+    println("FASE 6 — validação morfina (params do módulo canônico)")
+    var ok: i64 = 1
+    // A+B) adulto: infusão 1 mg/h x 96h -> parada -> CSHT
+    let pa = build_morph(70.0, 83.997211)
+    var st = state_zero()
+    var t = 0.0
+    let dt = 0.05
+    var c_stop = 0.0
+    var c4 = 0.0
+    var c10 = 0.0
+    var steps: i64 = 0
+    while t < 120.0 {
+        if steps > 100000 { t = 120.0 }
+        var rel = 1.0
+        if t >= 96.0 { rel = 0.0 }
+        let st_new = cn_step(st, pa, rel, dt)
+        let c_new = st_new.cv[0]
+        if !(c_new == c_new) { t = 120.0 ok = 0 }
+        let t_new = t + dt
+        if t < 96.0 && t_new >= 96.0 { c_stop = c_new }
+        if c_stop > 0.0 && t_new >= 100.0 && t < 100.0 { c4 = c_new }
+        if c_stop > 0.0 && t_new >= 106.0 && t < 106.0 { c10 = c_new }
+        t = t_new
+        st = st_new
+        steps = steps + 1
+    }
+    let cl_obs = 1.0 / c_stop
+    print("adulto: Css="); print(c_stop); print(" -> CL="); print(cl_obs)
+    println(" L/h (alvo 84 +-10%)")
+    if cl_obs < 75.6 || cl_obs > 92.4 { ok = 0 println("  G FAIL CL adulto") }
+    let thalf = 0.693 * 6.0 / ln_f64(c4 / c10)
+    print("adulto: t1/2 terminal="); print(thalf); println(" h (gate [1.5,4.5]; lit 2-3h)")
+    if thalf < 1.5 || thalf > 4.5 { ok = 0 println("  G FAIL t1/2 adulto") }
+
+    // C) Vss
+    let v70 = [5.0, 1.8, 0.31, 1.45, 0.33, 1.1, 28.0, 20.0, 1.2, 3.6, 6.6, 0.18, 0.09, 3.7]
+    let kp = [1.0, 10.0, 7.0, 2.0, 5.5, 7.0, 2.6, 1.1, 9.0, 2.0, 1.0, 7.0, 5.5, 2.0]
+    var vss = v70[0]
+    var i: i64 = 1
+    while i < 14 {
+        vss = vss + kp[i] * v70[i]
+        i = i + 1
+    }
+    print("Vss(Kp)="); print(vss); println(" L (gate [140,280]; lit NCA 1-6 L/kg)")
+    if vss < 140.0 || vss > 280.0 { ok = 0 println("  G FAIL Vss") }
+
+    // E) pediátrico 4m/6.15kg: Css simulado vs analítico (rate 0.05 mg/kg/h)
+    let pp = build_morph(6.15, 6.686430)
+    let rate_p = 0.05 * 6.15
+    var stp = state_zero()
+    var tp = 0.0
+    var css_p = 0.0
+    var steps2: i64 = 0
+    while tp < 120.0 {
+        if steps2 > 100000 { tp = 120.0 }
+        let st_new = cn_step(stp, pp, rate_p, dt)
+        css_p = st_new.cv[0]
+        tp = tp + dt
+        stp = st_new
+        steps2 = steps2 + 1
+    }
+    let css_an = rate_p / 6.686430
+    print("4m: Css sim="); print(css_p); print(" vs analit="); println(css_an)
+    if css_p < 0.9 * css_an || css_p > 1.1 * css_an { ok = 0 println("  G FAIL Css 4m") }
+
+    if ok == 1 {
+        println("PASS")
+        return 0
+    }
+    println("FAIL")
+    return 1
+}
