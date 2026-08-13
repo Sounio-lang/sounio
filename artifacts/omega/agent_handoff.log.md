@@ -3691,3 +3691,15 @@ notes: |
   of E5 is `hmult`** (the 18×16 orbit-triples-per-subspace enumeration) — "the last
   genuinely open mathematics."  After `hmult`, Tier 146's `hrule` and Tier 148's
   assembly discharge and `s3(1) = poly(H) − 1728·[m,3]₂` is a theorem.
+
+  UPDATE (kimi, 2026-08-13, wave 4 solo): **Tier 162 LANDED GREEN — `d74a2ad46e`.**  The
+  multiplicity pipeline is proved; `hmult` is reduced to exactly ONE hypothesis: `hdc`,
+  the 18-count (168·ordQualOrbit(m−1) = 108·indTripleCount(m−1) — 18 qualifying
+  orbit-triples per 3-dim subspace).  New unconditional engine: `Rp_iff_dpar` (the
+  pointwise strip-depth rule from Rp_R3).  Reviewer's route for hdc: prove
+  "qualifier ⟺ independent ∧ cyclic dpar sum = 0", then count over the 28 bases of each
+  3-subspace; the measured line law (each F₂-line's dpar cyclic sum = 1) handles the 7
+  non-base triples but does NOT alone give 18.  After hdc: discharge Tier 146's hrule
+  (triangle_count_hrule + tier162_hmult), Tier 148's strata (Tier 152's theorems +
+  defect_regular_free + hiso_ref), and the final assembly gives
+  s3(1) = poly(H) − 1728·[m,3]₂ — E5 closed.  No claims active; even tiers ≥ 164 free.
