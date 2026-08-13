@@ -55,6 +55,35 @@ Uncertainty quantification in neural networks typically requires expensive ensem
 
 ---
 
+## Paper C — DRAFT, not yet PDF-ready
+
+**Source**: `docs/papers/paper_c_san_net_fpga.md` (Markdown draft, 2026-08-13
+— needs a LaTeX/PDF pass before it can be uploaded here)
+
+**Title**: Network-Attached FPGA Inference Scanning: A Bit-Exact SAN
+Catastrophe Scan over 100G Ethernet, and a Cautionary Tale About ARP
+
+**Authors**:
+1. Demetrios Chiuratto Agourakis (ORCID: 0009-0001-8671-8878)
+
+**Abstract** (copy-paste once PDF exists):
+We port a previously-accepted, production FPGA kernel -- a catastrophe-exit scan for early-exit inference architectures (SAN-ResNet-50, SAN-ViT-large), validated bit-exact over PCIe DMA at 511 Msamples/s on an AMD Alveo U250 -- to receive its input directly from a 100G Ethernet fibre instead of host DMA. We report two results. First, a correctness result: the network-attached kernel reproduces the DMA-attached kernel's output bit-for-bit across cohorts up to 4,000,003 samples, confirmed in a batch of ten consecutive, independent hardware runs with zero data loss. Second, a systems-debugging result: an initial throughput measurement attempt produced what appeared to be hardware instability -- a third-party network IP core that would intermittently stop accepting traffic regardless of the offered send rate, recoverable only by a full bitstream reload. We show this was not a hardware fault: it was ARP cache staleness in the host's Linux IP stack, silently discarding or delaying the first datagram of a burst sent after any idle period. A three-packet ICMP warm-up immediately before each data burst eliminates the failure entirely (10/10 clean runs post-fix, including a deliberately adversarial run with the ARP entry forcibly deleted). We report this debugging narrative in full because the failure signature -- a third-party accelerator that "just needs a reset" under unpredictable conditions -- is a common and expensive misdiagnosis in FPGA/network co-design, and the actual root cause was one layer up the stack from where we first looked.
+
+**Keywords**: FPGA, Alveo U250, 100G Ethernet, RoCE fabric, network-attached accelerators, early-exit inference, catastrophe scan, VNx, HLS, bit-exact validation, ARP, systems debugging
+
+**Category**: Computer Science > Distributed, Parallel, and Cluster Computing
+
+**License**: CC BY 4.0
+
+**Before uploading**: this paper reports a throughput floor (8 Gbit/s,
+confirmed reproducible), not a ceiling — Section 5.3 of the draft is
+explicit that the rate sweep needs re-running with the ARP fix in place
+before a stronger throughput claim can be made. Consider whether to wait
+for that follow-up measurement before submitting, or submit this as-is
+with the limitation stated (already written into the draft).
+
+---
+
 ## Upload Steps
 
 1. Go to https://www.techrxiv.org/submit
