@@ -27097,4 +27097,1352 @@ theorem qqual_independent (n c1 c2 c3 : Nat) (h1 : c1 < 2^n) (h2 : c2 < 2^n)
   rw [← hc3eq] at hodd
   omega
 
+/-! ### Tier 164 — the 18-count (`hdc`), UNCONDITIONAL (kimi lane, E5)
+
+    `168·ordQualOrbit k = 108·indTripleCount k` — the last open mathematics of E5.
+    Route (found by probing, cleaner than the per-subspace Fano analysis): the level
+    recursion `ordQualOrbit (k+1) = 8·ordQualOrbit k + 18·(2^k−1)(2^k−2)` via the
+    shadow/top-bit split of `dpar` (`dpar_lift'`), with the per-shadow lift sums
+    8/4/2/0 by pattern (`qualOrbit_pointwise`), and the Gaussian closed form matches
+    the same recurrence.  Measured first: the recursion exact at `k ≤ 5`. -/
+
+
+
+
+/-- dpar lifted through the top bit, in `dlift` form. -/
+def dlift (k A B e f : Nat) : Nat :=
+  if A = 0 ∨ B = 0 ∨ A = B then 1
+  else if e = f then dpar k A B else (if dpar k A B = 0 then 1 else 0)
+
+theorem dpar_lift' (k A B e f : Nat) (hA : A < 2^k) (hB : B < 2^k)
+    (he : e < 2) (hf : f < 2) :
+    dpar (k+1) (A + e*2^k) (B + f*2^k) = dlift k A B e f := by
+  have hHp : (0:Nat) < 2^k := Nat.two_pow_pos k
+  have hmodA : (A + e*2^k) % 2^k = A := by
+    rw [Nat.add_mul_mod_self_right, Nat.mod_eq_of_lt hA]
+  have hmodB : (B + f*2^k) % 2^k = B := by
+    rw [Nat.add_mul_mod_self_right, Nat.mod_eq_of_lt hB]
+  show dpar (k+1) (A + e*2^k) (B + f*2^k)
+    = (if A = 0 ∨ B = 0 ∨ A = B then 1
+      else if e = f then dpar k A B else (if dpar k A B = 0 then 1 else 0))
+  rw [dpar_succ', hmodA, hmodB]
+  rcases (by omega : e = 0 ∨ e = 1) with rfl | rfl <;>
+    rcases (by omega : f = 0 ∨ f = 1) with rfl | rfl
+  · rw [show A + 0 * 2^k = A from by omega, show B + 0 * 2^k = B from by omega]
+    by_cases hg : A = 0 ∨ B = 0 ∨ A = B
+    · rw [if_pos hg, if_pos hg]
+    · rw [if_neg hg, if_neg hg, if_pos (Or.inl ⟨hA, hB⟩), if_pos rfl]
+  · rw [show A + 0 * 2^k = A from by omega, show B + 1 * 2^k = B + 2^k from by omega]
+    have hss : ¬ ((A < 2^k ∧ B + 2^k < 2^k) ∨ (2^k ≤ A ∧ 2^k ≤ B + 2^k)) := by
+      rintro (⟨-, h2⟩ | ⟨h1, -⟩) <;> omega
+    by_cases hg : A = 0 ∨ B = 0 ∨ A = B
+    · rw [if_pos hg, if_pos hg]
+    · rw [if_neg hg, if_neg hg, if_neg hss, if_neg (show (0:Nat) ≠ 1 by omega)]
+  · rw [show A + 1 * 2^k = A + 2^k from by omega, show B + 0 * 2^k = B from by omega]
+    have hss : ¬ ((A + 2^k < 2^k ∧ B < 2^k) ∨ (2^k ≤ A + 2^k ∧ 2^k ≤ B)) := by
+      rintro (⟨h1, -⟩ | ⟨-, h2⟩) <;> omega
+    by_cases hg : A = 0 ∨ B = 0 ∨ A = B
+    · rw [if_pos hg, if_pos hg]
+    · rw [if_neg hg, if_neg hg, if_neg hss, if_neg (show (1:Nat) ≠ 0 by omega)]
+  · rw [show A + 1 * 2^k = A + 2^k from by omega, show B + 1 * 2^k = B + 2^k from by omega]
+    have hss : (A + 2^k < 2^k ∧ B + 2^k < 2^k) ∨ (2^k ≤ A + 2^k ∧ 2^k ≤ B + 2^k) :=
+      Or.inr ⟨by omega, by omega⟩
+    by_cases hg : A = 0 ∨ B = 0 ∨ A = B
+    · rw [if_pos hg, if_pos hg]
+    · rw [if_neg hg, if_neg hg, if_pos hss, if_pos rfl]
+
+/-- dpar is symmetric. -/
+theorem dpar_symm' (n X Y : Nat) : dpar n X Y = dpar n Y X := by
+  induction n generalizing X Y with
+  | zero => rfl
+  | succ n ih =>
+    rw [dpar_succ', dpar_succ']
+    by_cases hg : X % 2^n = 0 ∨ Y % 2^n = 0 ∨ X % 2^n = Y % 2^n
+    · rw [if_pos hg, if_pos (hg.elim (fun h => Or.inr (Or.inl h))
+        (fun h => h.elim Or.inl (fun h' => Or.inr (Or.inr h'.symm))))]
+    · rw [if_neg hg, if_neg (show ¬(Y % 2^n = 0 ∨ X % 2^n = 0 ∨ Y % 2^n = X % 2^n) from
+        fun h => hg (h.elim (fun h' => Or.inr (Or.inl h'))
+          (fun h' => h'.elim Or.inl (fun h'' => Or.inr (Or.inr h''.symm)))))]
+      by_cases hs : (X < 2^n ∧ Y < 2^n) ∨ (2^n ≤ X ∧ 2^n ≤ Y)
+      · rw [if_pos hs, if_pos (hs.elim (fun h => Or.inl ⟨h.2, h.1⟩)
+          (fun h => Or.inr ⟨h.2, h.1⟩)), ih]
+      · rw [if_neg hs, if_neg (show ¬((Y < 2^n ∧ X < 2^n) ∨ (2^n ≤ Y ∧ 2^n ≤ X)) from
+          fun h => hs (h.elim (fun h' => Or.inl ⟨h'.2, h'.1⟩)
+            (fun h' => Or.inr ⟨h'.2, h'.1⟩))), ih]
+
+theorem dlift_symm' (k A B e f : Nat) :
+    dlift k A B e f = dlift k B A f e := by
+  have hds := dpar_symm' k A B
+  unfold dlift
+  grind
+
+/-- two-equal-nonzero shadow pattern (third nonzero, hence distinct). -/
+def twoeqC (A1 A2 A3 : Nat) : Prop :=
+  (A1 = A2 ∧ A1 ≠ 0 ∧ A3 ≠ 0 ∧ A3 ≠ A1) ∨
+  (A2 = A3 ∧ A2 ≠ 0 ∧ A1 ≠ 0 ∧ A1 ≠ A2) ∨
+  (A3 = A1 ∧ A3 ≠ 0 ∧ A2 ≠ 0 ∧ A2 ≠ A3)
+
+/-- one-zero shadow pattern (other two distinct nonzero). -/
+def onezeroC (A1 A2 A3 : Nat) : Prop :=
+  (A1 = 0 ∧ A2 ≠ 0 ∧ A3 ≠ 0 ∧ A2 ≠ A3) ∨
+  (A2 = 0 ∧ A3 ≠ 0 ∧ A1 ≠ 0 ∧ A3 ≠ A1) ∨
+  (A3 = 0 ∧ A1 ≠ 0 ∧ A2 ≠ 0 ∧ A1 ≠ A2)
+
+instance decTwoeqC (A1 A2 A3 : Nat) : Decidable (twoeqC A1 A2 A3) := by
+  delta twoeqC; infer_instance
+
+instance decOnezeroC (A1 A2 A3 : Nat) : Decidable (onezeroC A1 A2 A3) := by
+  delta onezeroC; infer_instance
+
+/-- constant sum over two elements. -/
+theorem sumLtI_two_const (v : Int) : sumLtI 2 (fun _ => v) = 2 * v := by
+  rw [sumLtI_two']; omega
+
+
+/-- **THE POINTWISE e-SUM LAW.**  For a shadow triple `(A1,A2,A3)` of reduced
+    coordinates at level `k`, the number of top-bit lifts carrying a qualifying
+    triple at level `k+1` is: `8 × [qualifying at level k]` (all-distinct-nonzero
+    shadows: the lift parity is level-`k` parity plus an always-even bit-flip sum),
+    `4` on exactly-two-equal nonzero shadows (the two lifts of the doubled
+    coordinate split, all four e-choices of the third qualify), `2` on exactly-one-
+    zero shadows (two guard edges force the third edge to vanish), else `0`. -/
+theorem qualOrbit_pointwise (k A1 A2 A3 : Nat)
+    (hA1b : A1 < 2^k) (hA2b : A2 < 2^k) (hA3b : A3 < 2^k) :
+    sumLtI 2 (fun e1 => sumLtI 2 (fun e2 => sumLtI 2 (fun e3 =>
+      if qqual (k+1) (A1+e1*2^k) (A2+e2*2^k) (A3+e3*2^k) then (1:Int) else 0)))
+    = 8 * (if qqual k A1 A2 A3 then (1:Int) else 0)
+      + 4 * (if twoeqC A1 A2 A3 then (1:Int) else 0)
+      + 2 * (if onezeroC A1 A2 A3 then (1:Int) else 0) := by
+  have hHp : (0:Nat) < 2^k := Nat.two_pow_pos k
+  by_cases hall : A1 ≠ 0 ∧ A2 ≠ 0 ∧ A3 ≠ 0 ∧ A1 ≠ A2 ∧ A2 ≠ A3 ∧ A3 ≠ A1
+  ·
+    -- all distinct nonzero: 8 consistent lifts
+    obtain ⟨g1, g2, g3, g12, g23, g31⟩ := hall
+    have hle12 := dpar_le_one k A1 A2
+    have hle23 := dpar_le_one k A2 A3
+    have hle31 := dpar_le_one k A3 A1
+    have tv : ∀ e1 e2 e3 : Nat, e1 < 2 → e2 < 2 → e3 < 2 →
+        (if qqual (k+1) (A1+e1*2^k) (A2+e2*2^k) (A3+e3*2^k) then (1:Int) else 0)
+          = (if qqual k A1 A2 A3 then (1:Int) else 0) := by
+      intro e1 e2 e3 he1 he2 he3
+      have d1 := dpar_lift' k A1 A2 e1 e2 hA1b hA2b he1 he2
+      have d2 := dpar_lift' k A2 A3 e2 e3 hA2b hA3b he2 he3
+      have d3 := dpar_lift' k A3 A1 e3 e1 hA3b hA1b he3 he1
+      have hiff : qqual (k+1) (A1+e1*2^k) (A2+e2*2^k) (A3+e3*2^k) ↔ qqual k A1 A2 A3 := by
+        rcases (by omega : e1 = 0 ∨ e1 = 1) with rfl | rfl <;>
+          rcases (by omega : e2 = 0 ∨ e2 = 1) with rfl | rfl <;>
+          rcases (by omega : e3 = 0 ∨ e3 = 1) with rfl | rfl <;>
+        · constructor
+          · intro h
+            obtain ⟨h1, h2, h3, h12, h23, h31, hpar⟩ := h
+            rw [d1, d2, d3] at hpar
+            refine ⟨g1, g2, g3, g12, g23, g31, ?_⟩
+            grind [dlift]
+          · intro h
+            obtain ⟨h1, h2, h3, h12, h23, h31, hpar⟩ := h
+            refine ⟨by omega, by omega, by omega, by omega, by omega, by omega, ?_⟩
+            rw [d1, d2, d3]
+            grind [dlift]
+      by_cases hP : qqual (k+1) (A1+e1*2^k) (A2+e2*2^k) (A3+e3*2^k)
+      · rw [if_pos hP, if_pos (hiff.mp hP)]
+      · rw [if_neg hP, if_neg (fun hq => hP (hiff.mpr hq))]
+    rw [sumLtI_congr 2 _ _ (fun e1 he1 => sumLtI_congr 2 _ _ (fun e2 he2 =>
+        sumLtI_congr 2 _ _ (fun e3 he3 => tv e1 e2 e3 he1 he2 he3)))]
+    rw [sumLtI_two_const, sumLtI_two_const, sumLtI_two_const]
+    rw [if_neg (show ¬twoeqC A1 A2 A3 from fun h => h.elim (fun c => g12 c.1)
+        (fun h' => h'.elim (fun c => g23 c.1) (fun c => g31 c.1))),
+        if_neg (show ¬onezeroC A1 A2 A3 from fun h => h.elim (fun c => g1 c.1)
+        (fun h' => h'.elim (fun c => g2 c.1) (fun c => g3 c.1)))]
+    omega
+  · by_cases h12 : A1 = A2
+    · subst h12
+      by_cases h13 : A1 = A3
+      · subst h13
+        -- LEAF H: all three equal
+        have tv : ∀ e1 e2 e3 : Nat, e1 < 2 → e2 < 2 → e3 < 2 →
+            (if qqual (k+1) (A1+e1*2^k) (A1+e2*2^k) (A1+e3*2^k) then (1:Int) else 0)
+              = ((0:Int)) := by
+          intro e1 e2 e3 he1 he2 he3
+          rcases (by omega : e1 = 0 ∨ e1 = 1) with rfl | rfl <;>
+            rcases (by omega : e2 = 0 ∨ e2 = 1) with rfl | rfl <;>
+            rcases (by omega : e3 = 0 ∨ e3 = 1) with rfl | rfl
+          · rw [if_neg (fun h => by
+              obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+              omega)]
+          · rw [if_neg (fun h => by
+              obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+              omega)]
+          · rw [if_neg (fun h => by
+              obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+              omega)]
+          · rw [if_neg (fun h => by
+              obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+              omega)]
+          · rw [if_neg (fun h => by
+              obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+              omega)]
+          · rw [if_neg (fun h => by
+              obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+              omega)]
+          · rw [if_neg (fun h => by
+              obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+              omega)]
+          · rw [if_neg (fun h => by
+              obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+              omega)]
+        rw [sumLtI_congr 2 _ _ (fun e1 he1 => sumLtI_congr 2 _ _ (fun e2 he2 =>
+            sumLtI_congr 2 _ _ (fun e3 he3 => tv e1 e2 e3 he1 he2 he3)))]
+        rw [if_neg (show ¬qqual k A1 A1 A1 from fun h => h.2.2.2.1 rfl),
+            if_neg (show ¬twoeqC A1 A1 A1 from fun h => h.elim (fun c => c.2.2.2 rfl)
+            (fun h' => h'.elim (fun c => c.2.2.2 rfl) (fun c => c.2.2.2 rfl))),
+            if_neg (show ¬onezeroC A1 A1 A1 from fun h => h.elim (fun c => c.2.1 c.1)
+            (fun h' => h'.elim (fun c => c.2.2.1 c.1) (fun c => c.2.1 c.1)))]
+        decide
+      · by_cases z1 : A1 = 0
+        · subst z1
+          -- LEAF C12: A1 = A2 = 0, A3 ≠ 0
+          have g3 : A3 ≠ 0 := fun h => h13 h.symm
+          have tv : ∀ e1 e2 e3 : Nat, e1 < 2 → e2 < 2 → e3 < 2 →
+              (if qqual (k+1) (0+e1*2^k) (0+e2*2^k) (A3+e3*2^k) then (1:Int) else 0)
+                = ((0:Int)) := by
+            intro e1 e2 e3 he1 he2 he3
+            rcases (by omega : e1 = 0 ∨ e1 = 1) with rfl | rfl <;>
+              rcases (by omega : e2 = 0 ∨ e2 = 1) with rfl | rfl <;>
+              rcases (by omega : e3 = 0 ∨ e3 = 1) with rfl | rfl
+            · rw [if_neg (fun h => by
+                obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                omega)]
+            · rw [if_neg (fun h => by
+                obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                omega)]
+            · rw [if_neg (fun h => by
+                obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                omega)]
+            · rw [if_neg (fun h => by
+                obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                omega)]
+            · rw [if_neg (fun h => by
+                obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                omega)]
+            · rw [if_neg (fun h => by
+                obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                omega)]
+            · rw [if_neg (fun h => by
+                obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                omega)]
+            · rw [if_neg (fun h => by
+                obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                omega)]
+          rw [sumLtI_congr 2 _ _ (fun e1 he1 => sumLtI_congr 2 _ _ (fun e2 he2 =>
+              sumLtI_congr 2 _ _ (fun e3 he3 => tv e1 e2 e3 he1 he2 he3)))]
+          rw [if_neg (show ¬qqual k 0 0 A3 from fun h => h.1 rfl),
+              if_neg (show ¬twoeqC 0 0 A3 from fun h => h.elim (fun c => c.2.1 rfl)
+              (fun h' => h'.elim (fun c => g3 c.1.symm) (fun c => g3 c.1))),
+              if_neg (show ¬onezeroC 0 0 A3 from fun h => h.elim (fun c => c.2.1 rfl)
+              (fun h' => h'.elim (fun c => c.2.2.1 rfl) (fun c => g3 c.1)))]
+          decide
+        · by_cases z3 : A3 = 0
+          · subst z3
+            -- LEAF D12: A1 = A2 ≠ 0, A3 = 0
+            have tv : ∀ e1 e2 e3 : Nat, e1 < 2 → e2 < 2 → e3 < 2 →
+                (if qqual (k+1) (A1+e1*2^k) (A1+e2*2^k) (0+e3*2^k) then (1:Int) else 0)
+                  = ((0:Int)) := by
+              intro e1 e2 e3 he1 he2 he3
+              have d1 := dpar_lift' k A1 A1 e1 e2 hA1b hA1b he1 he2
+              have d2 := dpar_lift' k A1 0 e2 e3 hA1b (by omega) he2 he3
+              have d3 := dpar_lift' k 0 A1 e3 e1 (by omega) hA1b he3 he1
+              rcases (by omega : e1 = 0 ∨ e1 = 1) with rfl | rfl <;>
+                rcases (by omega : e2 = 0 ∨ e2 = 1) with rfl | rfl <;>
+                rcases (by omega : e3 = 0 ∨ e3 = 1) with rfl | rfl
+              · rw [if_neg (fun h => by
+                  have hp := h.2.2.2.2.2.2
+                  rw [d1, d2, d3] at hp
+                  grind [dlift])]
+              · rw [if_neg (fun h => by
+                  have hp := h.2.2.2.2.2.2
+                  rw [d1, d2, d3] at hp
+                  grind [dlift])]
+              · rw [if_neg (fun h => by
+                  have hp := h.2.2.2.2.2.2
+                  rw [d1, d2, d3] at hp
+                  grind [dlift])]
+              · rw [if_neg (fun h => by
+                  have hp := h.2.2.2.2.2.2
+                  rw [d1, d2, d3] at hp
+                  grind [dlift])]
+              · rw [if_neg (fun h => by
+                  have hp := h.2.2.2.2.2.2
+                  rw [d1, d2, d3] at hp
+                  grind [dlift])]
+              · rw [if_neg (fun h => by
+                  have hp := h.2.2.2.2.2.2
+                  rw [d1, d2, d3] at hp
+                  grind [dlift])]
+              · rw [if_neg (fun h => by
+                  have hp := h.2.2.2.2.2.2
+                  rw [d1, d2, d3] at hp
+                  grind [dlift])]
+              · rw [if_neg (fun h => by
+                  have hp := h.2.2.2.2.2.2
+                  rw [d1, d2, d3] at hp
+                  grind [dlift])]
+            rw [sumLtI_congr 2 _ _ (fun e1 he1 => sumLtI_congr 2 _ _ (fun e2 he2 =>
+                sumLtI_congr 2 _ _ (fun e3 he3 => tv e1 e2 e3 he1 he2 he3)))]
+            rw [if_neg (show ¬qqual k A1 A1 0 from fun h => h.2.2.2.1 rfl),
+                if_neg (show ¬twoeqC A1 A1 0 from fun h => h.elim (fun c => c.2.2.1 rfl)
+                (fun h' => h'.elim (fun c => z1 c.1) (fun c => z1 c.1.symm))),
+                if_neg (show ¬onezeroC A1 A1 0 from fun h => h.elim (fun c => z1 c.1)
+                (fun h' => h'.elim (fun c => z1 c.1) (fun c => c.2.2.2 rfl)))]
+            decide
+          · -- LEAF E12
+            have g13 : A3 ≠ A1 := fun h => h13 h.symm
+            have hle := dpar_le_one k A1 A3
+            have tv : ∀ e1 e2 e3 : Nat, e1 < 2 → e2 < 2 → e3 < 2 →
+                (if qqual (k+1) (A1+e1*2^k) (A1+e2*2^k) (A3+e3*2^k) then (1:Int) else 0)
+                  = (if e1 = e2 then (0:Int) else 1) := by
+              intro e1 e2 e3 he1 he2 he3
+              have d1 := dpar_lift' k A1 A1 e1 e2 hA1b hA1b he1 he2
+              have d2 := dpar_lift' k A1 A3 e2 e3 hA1b hA3b he2 he3
+              have d3 := dpar_lift' k A3 A1 e3 e1 hA3b hA1b he3 he1
+              rcases (by omega : e1 = 0 ∨ e1 = 1) with rfl | rfl <;>
+                rcases (by omega : e2 = 0 ∨ e2 = 1) with rfl | rfl <;>
+                rcases (by omega : e3 = 0 ∨ e3 = 1) with rfl | rfl
+              · rw [if_pos (show (0:Nat) = (0:Nat) by decide)]
+                rw [if_neg (fun h => by
+                  obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                  omega)]
+              · rw [if_pos (show (0:Nat) = (0:Nat) by decide)]
+                rw [if_neg (fun h => by
+                  obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                  omega)]
+              · rw [if_neg (show ¬((0:Nat) = (1:Nat)) by decide)]
+                rw [if_pos (by
+                  refine ⟨by omega, by omega, by omega, by omega, by omega, by omega, ?_⟩
+                  rw [d1, d2, d3, dlift_symm' k A3 A1 0 0]
+                  grind [dlift])]
+              · rw [if_neg (show ¬((0:Nat) = (1:Nat)) by decide)]
+                rw [if_pos (by
+                  refine ⟨by omega, by omega, by omega, by omega, by omega, by omega, ?_⟩
+                  rw [d1, d2, d3, dlift_symm' k A3 A1 1 0]
+                  grind [dlift])]
+              · rw [if_neg (show ¬((1:Nat) = (0:Nat)) by decide)]
+                rw [if_pos (by
+                  refine ⟨by omega, by omega, by omega, by omega, by omega, by omega, ?_⟩
+                  rw [d1, d2, d3, dlift_symm' k A3 A1 0 1]
+                  grind [dlift])]
+              · rw [if_neg (show ¬((1:Nat) = (0:Nat)) by decide)]
+                rw [if_pos (by
+                  refine ⟨by omega, by omega, by omega, by omega, by omega, by omega, ?_⟩
+                  rw [d1, d2, d3, dlift_symm' k A3 A1 1 1]
+                  grind [dlift])]
+              · rw [if_pos (show (1:Nat) = (1:Nat) by decide)]
+                rw [if_neg (fun h => by
+                  obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                  omega)]
+              · rw [if_pos (show (1:Nat) = (1:Nat) by decide)]
+                rw [if_neg (fun h => by
+                  obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                  omega)]
+            rw [sumLtI_congr 2 _ _ (fun e1 he1 => sumLtI_congr 2 _ _ (fun e2 he2 =>
+                sumLtI_congr 2 _ _ (fun e3 he3 => tv e1 e2 e3 he1 he2 he3)))]
+            rw [if_neg (show ¬qqual k A1 A1 A3 from fun h => h.2.2.2.1 rfl),
+                if_pos (show twoeqC A1 A1 A3 from Or.inl ⟨rfl, z1, z3, g13⟩),
+                if_neg (show ¬onezeroC A1 A1 A3 from fun h => h.elim (fun c => z1 c.1)
+                (fun h' => h'.elim (fun c => z1 c.1) (fun c => z3 c.1)))]
+            decide
+    · by_cases h23 : A2 = A3
+      · subst h23
+        by_cases h12b : A1 = A2
+        · exact absurd h12b h12
+        · by_cases z2 : A2 = 0
+          · subst z2
+            -- LEAF C23: A2 = A3 = 0, A1 ≠ 0
+            have tv : ∀ e1 e2 e3 : Nat, e1 < 2 → e2 < 2 → e3 < 2 →
+                (if qqual (k+1) (A1+e1*2^k) (0+e2*2^k) (0+e3*2^k) then (1:Int) else 0)
+                  = ((0:Int)) := by
+              intro e1 e2 e3 he1 he2 he3
+              rcases (by omega : e1 = 0 ∨ e1 = 1) with rfl | rfl <;>
+                rcases (by omega : e2 = 0 ∨ e2 = 1) with rfl | rfl <;>
+                rcases (by omega : e3 = 0 ∨ e3 = 1) with rfl | rfl
+              · rw [if_neg (fun h => by
+                  obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                  omega)]
+              · rw [if_neg (fun h => by
+                  obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                  omega)]
+              · rw [if_neg (fun h => by
+                  obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                  omega)]
+              · rw [if_neg (fun h => by
+                  obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                  omega)]
+              · rw [if_neg (fun h => by
+                  obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                  omega)]
+              · rw [if_neg (fun h => by
+                  obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                  omega)]
+              · rw [if_neg (fun h => by
+                  obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                  omega)]
+              · rw [if_neg (fun h => by
+                  obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                  omega)]
+            rw [sumLtI_congr 2 _ _ (fun e1 he1 => sumLtI_congr 2 _ _ (fun e2 he2 =>
+                sumLtI_congr 2 _ _ (fun e3 he3 => tv e1 e2 e3 he1 he2 he3)))]
+            rw [if_neg (show ¬qqual k A1 0 0 from fun h => h.2.1 rfl),
+                if_neg (show ¬twoeqC A1 0 0 from fun h => h.elim (fun c => h12b c.1)
+                (fun h' => h'.elim (fun c => c.2.1 rfl) (fun c => h12b c.1.symm))),
+                if_neg (show ¬onezeroC A1 0 0 from fun h => h.elim (fun c => h12b c.1)
+                (fun h' => h'.elim (fun c => c.2.1 rfl) (fun c => c.2.2.1 rfl)))]
+            decide
+          · by_cases z1 : A1 = 0
+            · subst z1
+              -- LEAF D23: A2 = A3 ≠ 0, A1 = 0
+              have tv : ∀ e1 e2 e3 : Nat, e1 < 2 → e2 < 2 → e3 < 2 →
+                  (if qqual (k+1) (0+e1*2^k) (A2+e2*2^k) (A2+e3*2^k) then (1:Int) else 0)
+                    = ((0:Int)) := by
+                intro e1 e2 e3 he1 he2 he3
+                have d1 := dpar_lift' k 0 A2 e1 e2 (by omega) hA2b he1 he2
+                have d2 := dpar_lift' k A2 A2 e2 e3 hA2b hA2b he2 he3
+                have d3 := dpar_lift' k A2 0 e3 e1 hA2b (by omega) he3 he1
+                rcases (by omega : e1 = 0 ∨ e1 = 1) with rfl | rfl <;>
+                  rcases (by omega : e2 = 0 ∨ e2 = 1) with rfl | rfl <;>
+                  rcases (by omega : e3 = 0 ∨ e3 = 1) with rfl | rfl
+                · rw [if_neg (fun h => by
+                    have hp := h.2.2.2.2.2.2
+                    rw [d1, d2, d3] at hp
+                    grind [dlift])]
+                · rw [if_neg (fun h => by
+                    have hp := h.2.2.2.2.2.2
+                    rw [d1, d2, d3] at hp
+                    grind [dlift])]
+                · rw [if_neg (fun h => by
+                    have hp := h.2.2.2.2.2.2
+                    rw [d1, d2, d3] at hp
+                    grind [dlift])]
+                · rw [if_neg (fun h => by
+                    have hp := h.2.2.2.2.2.2
+                    rw [d1, d2, d3] at hp
+                    grind [dlift])]
+                · rw [if_neg (fun h => by
+                    have hp := h.2.2.2.2.2.2
+                    rw [d1, d2, d3] at hp
+                    grind [dlift])]
+                · rw [if_neg (fun h => by
+                    have hp := h.2.2.2.2.2.2
+                    rw [d1, d2, d3] at hp
+                    grind [dlift])]
+                · rw [if_neg (fun h => by
+                    have hp := h.2.2.2.2.2.2
+                    rw [d1, d2, d3] at hp
+                    grind [dlift])]
+                · rw [if_neg (fun h => by
+                    have hp := h.2.2.2.2.2.2
+                    rw [d1, d2, d3] at hp
+                    grind [dlift])]
+              rw [sumLtI_congr 2 _ _ (fun e1 he1 => sumLtI_congr 2 _ _ (fun e2 he2 =>
+                  sumLtI_congr 2 _ _ (fun e3 he3 => tv e1 e2 e3 he1 he2 he3)))]
+              rw [if_neg (show ¬qqual k 0 A2 A2 from fun h => h.1 rfl),
+                  if_neg (show ¬twoeqC 0 A2 A2 from fun h => h.elim (fun c => z2 c.1.symm)
+                  (fun h' => h'.elim (fun c => c.2.2.1 rfl) (fun c => z2 c.1))),
+                  if_neg (show ¬onezeroC 0 A2 A2 from fun h => h.elim (fun c => c.2.2.2 rfl)
+                  (fun h' => h'.elim (fun c => z2 c.1) (fun c => z2 c.1)))]
+              decide
+            · -- LEAF E23
+              have hle := dpar_le_one k A1 A2
+              have tv : ∀ e1 e2 e3 : Nat, e1 < 2 → e2 < 2 → e3 < 2 →
+                  (if qqual (k+1) (A1+e1*2^k) (A2+e2*2^k) (A2+e3*2^k) then (1:Int) else 0)
+                    = (if e2 = e3 then (0:Int) else 1) := by
+                intro e1 e2 e3 he1 he2 he3
+                have d1 := dpar_lift' k A1 A2 e1 e2 hA1b hA2b he1 he2
+                have d2 := dpar_lift' k A2 A2 e2 e3 hA2b hA2b he2 he3
+                have d3 := dpar_lift' k A2 A1 e3 e1 hA2b hA1b he3 he1
+                rcases (by omega : e1 = 0 ∨ e1 = 1) with rfl | rfl <;>
+                  rcases (by omega : e2 = 0 ∨ e2 = 1) with rfl | rfl <;>
+                  rcases (by omega : e3 = 0 ∨ e3 = 1) with rfl | rfl
+                · rw [if_pos (show (0:Nat) = (0:Nat) by decide)]
+                  rw [if_neg (fun h => by
+                    obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                    omega)]
+                · rw [if_neg (show ¬((0:Nat) = (1:Nat)) by decide)]
+                  rw [if_pos (by
+                    refine ⟨by omega, by omega, by omega, by omega, by omega, by omega, ?_⟩
+                    rw [d1, d2, d3, dlift_symm' k A2 A1 1 0]
+                    grind [dlift])]
+                · rw [if_neg (show ¬((1:Nat) = (0:Nat)) by decide)]
+                  rw [if_pos (by
+                    refine ⟨by omega, by omega, by omega, by omega, by omega, by omega, ?_⟩
+                    rw [d1, d2, d3, dlift_symm' k A2 A1 0 0]
+                    grind [dlift])]
+                · rw [if_pos (show (1:Nat) = (1:Nat) by decide)]
+                  rw [if_neg (fun h => by
+                    obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                    omega)]
+                · rw [if_pos (show (0:Nat) = (0:Nat) by decide)]
+                  rw [if_neg (fun h => by
+                    obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                    omega)]
+                · rw [if_neg (show ¬((0:Nat) = (1:Nat)) by decide)]
+                  rw [if_pos (by
+                    refine ⟨by omega, by omega, by omega, by omega, by omega, by omega, ?_⟩
+                    rw [d1, d2, d3, dlift_symm' k A2 A1 1 1]
+                    grind [dlift])]
+                · rw [if_neg (show ¬((1:Nat) = (0:Nat)) by decide)]
+                  rw [if_pos (by
+                    refine ⟨by omega, by omega, by omega, by omega, by omega, by omega, ?_⟩
+                    rw [d1, d2, d3, dlift_symm' k A2 A1 0 1]
+                    grind [dlift])]
+                · rw [if_pos (show (1:Nat) = (1:Nat) by decide)]
+                  rw [if_neg (fun h => by
+                    obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                    omega)]
+              rw [sumLtI_congr 2 _ _ (fun e1 he1 => sumLtI_congr 2 _ _ (fun e2 he2 =>
+                  sumLtI_congr 2 _ _ (fun e3 he3 => tv e1 e2 e3 he1 he2 he3)))]
+              rw [if_neg (show ¬qqual k A1 A2 A2 from fun h => h.2.2.2.2.1 rfl),
+                  if_pos (show twoeqC A1 A2 A2 from Or.inr (Or.inl ⟨rfl, z2, z1, h12b⟩)),
+                  if_neg (show ¬onezeroC A1 A2 A2 from fun h => h.elim (fun c => z1 c.1)
+                  (fun h' => h'.elim (fun c => z2 c.1) (fun c => z2 c.1)))]
+              decide
+      · by_cases h13 : A1 = A3
+        · subst h13
+          by_cases z1 : A1 = 0
+          · subst z1
+            -- LEAF C13: A1 = A3 = 0, A2 ≠ 0
+            have g2 : A2 ≠ 0 := fun h => h12 h.symm
+            have tv : ∀ e1 e2 e3 : Nat, e1 < 2 → e2 < 2 → e3 < 2 →
+                (if qqual (k+1) (0+e1*2^k) (A2+e2*2^k) (0+e3*2^k) then (1:Int) else 0)
+                  = ((0:Int)) := by
+              intro e1 e2 e3 he1 he2 he3
+              rcases (by omega : e1 = 0 ∨ e1 = 1) with rfl | rfl <;>
+                rcases (by omega : e2 = 0 ∨ e2 = 1) with rfl | rfl <;>
+                rcases (by omega : e3 = 0 ∨ e3 = 1) with rfl | rfl
+              · rw [if_neg (fun h => by
+                  obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                  omega)]
+              · rw [if_neg (fun h => by
+                  obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                  omega)]
+              · rw [if_neg (fun h => by
+                  obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                  omega)]
+              · rw [if_neg (fun h => by
+                  obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                  omega)]
+              · rw [if_neg (fun h => by
+                  obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                  omega)]
+              · rw [if_neg (fun h => by
+                  obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                  omega)]
+              · rw [if_neg (fun h => by
+                  obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                  omega)]
+              · rw [if_neg (fun h => by
+                  obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                  omega)]
+            rw [sumLtI_congr 2 _ _ (fun e1 he1 => sumLtI_congr 2 _ _ (fun e2 he2 =>
+                sumLtI_congr 2 _ _ (fun e3 he3 => tv e1 e2 e3 he1 he2 he3)))]
+            rw [if_neg (show ¬qqual k 0 A2 0 from fun h => h.1 rfl),
+                if_neg (show ¬twoeqC 0 A2 0 from fun h => h.elim (fun c => g2 c.1.symm)
+                (fun h' => h'.elim (fun c => g2 c.1) (fun c => c.2.1 rfl))),
+                if_neg (show ¬onezeroC 0 A2 0 from fun h => h.elim (fun c => c.2.2.1 rfl)
+                (fun h' => h'.elim (fun c => g2 c.1) (fun c => c.2.1 rfl)))]
+            decide
+          · by_cases z2 : A2 = 0
+            · subst z2
+              -- LEAF D13: A3 = A1 ≠ 0, A2 = 0
+              have tv : ∀ e1 e2 e3 : Nat, e1 < 2 → e2 < 2 → e3 < 2 →
+                  (if qqual (k+1) (A1+e1*2^k) (0+e2*2^k) (A1+e3*2^k) then (1:Int) else 0)
+                    = ((0:Int)) := by
+                intro e1 e2 e3 he1 he2 he3
+                have d1 := dpar_lift' k A1 0 e1 e2 hA1b (by omega) he1 he2
+                have d2 := dpar_lift' k 0 A1 e2 e3 (by omega) hA1b he2 he3
+                have d3 := dpar_lift' k A1 A1 e3 e1 hA1b hA1b he3 he1
+                rcases (by omega : e1 = 0 ∨ e1 = 1) with rfl | rfl <;>
+                  rcases (by omega : e2 = 0 ∨ e2 = 1) with rfl | rfl <;>
+                  rcases (by omega : e3 = 0 ∨ e3 = 1) with rfl | rfl
+                · rw [if_neg (fun h => by
+                    have hp := h.2.2.2.2.2.2
+                    rw [d1, d2, d3] at hp
+                    grind [dlift])]
+                · rw [if_neg (fun h => by
+                    have hp := h.2.2.2.2.2.2
+                    rw [d1, d2, d3] at hp
+                    grind [dlift])]
+                · rw [if_neg (fun h => by
+                    have hp := h.2.2.2.2.2.2
+                    rw [d1, d2, d3] at hp
+                    grind [dlift])]
+                · rw [if_neg (fun h => by
+                    have hp := h.2.2.2.2.2.2
+                    rw [d1, d2, d3] at hp
+                    grind [dlift])]
+                · rw [if_neg (fun h => by
+                    have hp := h.2.2.2.2.2.2
+                    rw [d1, d2, d3] at hp
+                    grind [dlift])]
+                · rw [if_neg (fun h => by
+                    have hp := h.2.2.2.2.2.2
+                    rw [d1, d2, d3] at hp
+                    grind [dlift])]
+                · rw [if_neg (fun h => by
+                    have hp := h.2.2.2.2.2.2
+                    rw [d1, d2, d3] at hp
+                    grind [dlift])]
+                · rw [if_neg (fun h => by
+                    have hp := h.2.2.2.2.2.2
+                    rw [d1, d2, d3] at hp
+                    grind [dlift])]
+              rw [sumLtI_congr 2 _ _ (fun e1 he1 => sumLtI_congr 2 _ _ (fun e2 he2 =>
+                  sumLtI_congr 2 _ _ (fun e3 he3 => tv e1 e2 e3 he1 he2 he3)))]
+              rw [if_neg (show ¬qqual k A1 0 A1 from fun h => h.2.1 rfl),
+                  if_neg (show ¬twoeqC A1 0 A1 from fun h => h.elim (fun c => z1 c.1)
+                  (fun h' => h'.elim (fun c => z1 c.1.symm) (fun c => c.2.2.1 rfl))),
+                  if_neg (show ¬onezeroC A1 0 A1 from fun h => h.elim (fun c => z1 c.1)
+                  (fun h' => h'.elim (fun c => c.2.2.2 rfl) (fun c => z1 c.1)))]
+              decide
+            · -- LEAF E13
+              have hle := dpar_le_one k A1 A2
+              have tv : ∀ e1 e2 e3 : Nat, e1 < 2 → e2 < 2 → e3 < 2 →
+                  (if qqual (k+1) (A1+e1*2^k) (A2+e2*2^k) (A1+e3*2^k) then (1:Int) else 0)
+                    = (if e3 = e1 then (0:Int) else 1) := by
+                intro e1 e2 e3 he1 he2 he3
+                have d1 := dpar_lift' k A1 A2 e1 e2 hA1b hA2b he1 he2
+                have d2 := dpar_lift' k A2 A1 e2 e3 hA2b hA1b he2 he3
+                have d3 := dpar_lift' k A1 A1 e3 e1 hA1b hA1b he3 he1
+                rcases (by omega : e1 = 0 ∨ e1 = 1) with rfl | rfl <;>
+                  rcases (by omega : e2 = 0 ∨ e2 = 1) with rfl | rfl <;>
+                  rcases (by omega : e3 = 0 ∨ e3 = 1) with rfl | rfl
+                · rw [if_pos (show (0:Nat) = (0:Nat) by decide)]
+                  rw [if_neg (fun h => by
+                    obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                    omega)]
+                · rw [if_neg (show ¬((1:Nat) = (0:Nat)) by decide)]
+                  rw [if_pos (by
+                    refine ⟨by omega, by omega, by omega, by omega, by omega, by omega, ?_⟩
+                    rw [d1, d2, d3, dlift_symm' k A2 A1 0 1]
+                    grind [dlift])]
+                · rw [if_pos (show (0:Nat) = (0:Nat) by decide)]
+                  rw [if_neg (fun h => by
+                    obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                    omega)]
+                · rw [if_neg (show ¬((1:Nat) = (0:Nat)) by decide)]
+                  rw [if_pos (by
+                    refine ⟨by omega, by omega, by omega, by omega, by omega, by omega, ?_⟩
+                    rw [d1, d2, d3, dlift_symm' k A2 A1 1 1]
+                    grind [dlift])]
+                · rw [if_neg (show ¬((0:Nat) = (1:Nat)) by decide)]
+                  rw [if_pos (by
+                    refine ⟨by omega, by omega, by omega, by omega, by omega, by omega, ?_⟩
+                    rw [d1, d2, d3, dlift_symm' k A2 A1 0 0]
+                    grind [dlift])]
+                · rw [if_pos (show (1:Nat) = (1:Nat) by decide)]
+                  rw [if_neg (fun h => by
+                    obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                    omega)]
+                · rw [if_neg (show ¬((0:Nat) = (1:Nat)) by decide)]
+                  rw [if_pos (by
+                    refine ⟨by omega, by omega, by omega, by omega, by omega, by omega, ?_⟩
+                    rw [d1, d2, d3, dlift_symm' k A2 A1 1 0]
+                    grind [dlift])]
+                · rw [if_pos (show (1:Nat) = (1:Nat) by decide)]
+                  rw [if_neg (fun h => by
+                    obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                    omega)]
+              rw [sumLtI_congr 2 _ _ (fun e1 he1 => sumLtI_congr 2 _ _ (fun e2 he2 =>
+                  sumLtI_congr 2 _ _ (fun e3 he3 => tv e1 e2 e3 he1 he2 he3)))]
+              rw [if_neg (show ¬qqual k A1 A2 A1 from fun h => h.2.2.2.2.2.1 rfl),
+                  if_pos (show twoeqC A1 A2 A1 from Or.inr (Or.inr ⟨rfl, z1, z2, h23⟩)),
+                  if_neg (show ¬onezeroC A1 A2 A1 from fun h => h.elim (fun c => z1 c.1)
+                  (fun h' => h'.elim (fun c => z2 c.1) (fun c => z1 c.1)))]
+              decide
+        · by_cases z1 : A1 = 0
+          · subst z1
+            by_cases z2 : A2 = 0
+            · subst z2; exact absurd rfl h12
+            · by_cases z3 : A3 = 0
+              · subst z3; exact absurd rfl h13
+              · -- LEAF B1
+                have g2 : A2 ≠ 0 := fun h => h12 h.symm
+                have g3 : A3 ≠ 0 := fun h => h13 h.symm
+                by_cases hd : dpar k A2 A3 = 0
+                ·
+                  have tv : ∀ e1 e2 e3 : Nat, e1 < 2 → e2 < 2 → e3 < 2 →
+                      (if qqual (k+1) (0+e1*2^k) (A2+e2*2^k) (A3+e3*2^k) then (1:Int) else 0)
+                        = (if e1 = 1 ∧ e2 = e3 then (1:Int) else 0) := by
+                    intro e1 e2 e3 he1 he2 he3
+                    have d1 := dpar_lift' k 0 A2 e1 e2 (by omega) hA2b he1 he2
+                    have d2 := dpar_lift' k A2 A3 e2 e3 hA2b hA3b he2 he3
+                    have d3 := dpar_lift' k A3 0 e3 e1 hA3b (by omega) he3 he1
+                    rcases (by omega : e1 = 0 ∨ e1 = 1) with rfl | rfl <;>
+                      rcases (by omega : e2 = 0 ∨ e2 = 1) with rfl | rfl <;>
+                      rcases (by omega : e3 = 0 ∨ e3 = 1) with rfl | rfl
+                    · rw [if_neg (show ¬((0:Nat) = 1 ∧ (0:Nat) = (0:Nat)) by decide)]
+                      rw [if_neg (fun h => by
+                        obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                        omega)]
+                    · rw [if_neg (show ¬((0:Nat) = 1 ∧ (0:Nat) = (1:Nat)) by decide)]
+                      rw [if_neg (fun h => by
+                        obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                        omega)]
+                    · rw [if_neg (show ¬((0:Nat) = 1 ∧ (1:Nat) = (0:Nat)) by decide)]
+                      rw [if_neg (fun h => by
+                        obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                        omega)]
+                    · rw [if_neg (show ¬((0:Nat) = 1 ∧ (1:Nat) = (1:Nat)) by decide)]
+                      rw [if_neg (fun h => by
+                        obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                        omega)]
+                    · rw [if_pos (show (1:Nat) = 1 ∧ (0:Nat) = (0:Nat) by decide)]
+                      rw [if_pos (by
+                        refine ⟨by omega, by omega, by omega, by omega, by omega, by omega, ?_⟩
+                        rw [d1, d2, d3]
+                        grind [dlift])]
+                    · rw [if_neg (show ¬((1:Nat) = 1 ∧ (0:Nat) = (1:Nat)) by decide)]
+                      rw [if_neg (fun h => by
+                        have hp := h.2.2.2.2.2.2
+                        rw [d1, d2, d3] at hp
+                        grind [dlift])]
+                    · rw [if_neg (show ¬((1:Nat) = 1 ∧ (1:Nat) = (0:Nat)) by decide)]
+                      rw [if_neg (fun h => by
+                        have hp := h.2.2.2.2.2.2
+                        rw [d1, d2, d3] at hp
+                        grind [dlift])]
+                    · rw [if_pos (show (1:Nat) = 1 ∧ (1:Nat) = (1:Nat) by decide)]
+                      rw [if_pos (by
+                        refine ⟨by omega, by omega, by omega, by omega, by omega, by omega, ?_⟩
+                        rw [d1, d2, d3]
+                        grind [dlift])]
+                  rw [sumLtI_congr 2 _ _ (fun e1 he1 => sumLtI_congr 2 _ _ (fun e2 he2 =>
+                      sumLtI_congr 2 _ _ (fun e3 he3 => tv e1 e2 e3 he1 he2 he3)))]
+                  rw [if_neg (show ¬qqual k 0 A2 A3 from fun h => h.1 rfl),
+                      if_neg (show ¬twoeqC 0 A2 A3 from fun h => h.elim (fun c => g2 c.1.symm)
+                      (fun h' => h'.elim (fun c => h23 c.1) (fun c => g3 c.1))),
+                      if_pos (show onezeroC 0 A2 A3 from Or.inl ⟨rfl, g2, g3, h23⟩)]
+                  decide
+                · have hd1 : dpar k A2 A3 = 1 := by
+                    have hle := dpar_le_one k A2 A3
+                    omega
+                  have tv : ∀ e1 e2 e3 : Nat, e1 < 2 → e2 < 2 → e3 < 2 →
+                      (if qqual (k+1) (0+e1*2^k) (A2+e2*2^k) (A3+e3*2^k) then (1:Int) else 0)
+                        = (if e1 = 1 ∧ ¬ e2 = e3 then (1:Int) else 0) := by
+                    intro e1 e2 e3 he1 he2 he3
+                    have d1 := dpar_lift' k 0 A2 e1 e2 (by omega) hA2b he1 he2
+                    have d2 := dpar_lift' k A2 A3 e2 e3 hA2b hA3b he2 he3
+                    have d3 := dpar_lift' k A3 0 e3 e1 hA3b (by omega) he3 he1
+                    rcases (by omega : e1 = 0 ∨ e1 = 1) with rfl | rfl <;>
+                      rcases (by omega : e2 = 0 ∨ e2 = 1) with rfl | rfl <;>
+                      rcases (by omega : e3 = 0 ∨ e3 = 1) with rfl | rfl
+                    · rw [if_neg (show ¬((0:Nat) = 1 ∧ ¬ (0:Nat) = (0:Nat)) by decide)]
+                      rw [if_neg (fun h => by
+                        obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                        omega)]
+                    · rw [if_neg (show ¬((0:Nat) = 1 ∧ ¬ (0:Nat) = (1:Nat)) by decide)]
+                      rw [if_neg (fun h => by
+                        obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                        omega)]
+                    · rw [if_neg (show ¬((0:Nat) = 1 ∧ ¬ (1:Nat) = (0:Nat)) by decide)]
+                      rw [if_neg (fun h => by
+                        obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                        omega)]
+                    · rw [if_neg (show ¬((0:Nat) = 1 ∧ ¬ (1:Nat) = (1:Nat)) by decide)]
+                      rw [if_neg (fun h => by
+                        obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                        omega)]
+                    · rw [if_neg (show ¬((1:Nat) = 1 ∧ ¬ (0:Nat) = (0:Nat)) by decide)]
+                      rw [if_neg (fun h => by
+                        have hp := h.2.2.2.2.2.2
+                        rw [d1, d2, d3] at hp
+                        grind [dlift])]
+                    · rw [if_pos (show (1:Nat) = 1 ∧ ¬ (0:Nat) = (1:Nat) by decide)]
+                      rw [if_pos (by
+                        refine ⟨by omega, by omega, by omega, by omega, by omega, by omega, ?_⟩
+                        rw [d1, d2, d3]
+                        grind [dlift])]
+                    · rw [if_pos (show (1:Nat) = 1 ∧ ¬ (1:Nat) = (0:Nat) by decide)]
+                      rw [if_pos (by
+                        refine ⟨by omega, by omega, by omega, by omega, by omega, by omega, ?_⟩
+                        rw [d1, d2, d3]
+                        grind [dlift])]
+                    · rw [if_neg (show ¬((1:Nat) = 1 ∧ ¬ (1:Nat) = (1:Nat)) by decide)]
+                      rw [if_neg (fun h => by
+                        have hp := h.2.2.2.2.2.2
+                        rw [d1, d2, d3] at hp
+                        grind [dlift])]
+                  rw [sumLtI_congr 2 _ _ (fun e1 he1 => sumLtI_congr 2 _ _ (fun e2 he2 =>
+                      sumLtI_congr 2 _ _ (fun e3 he3 => tv e1 e2 e3 he1 he2 he3)))]
+                  rw [if_neg (show ¬qqual k 0 A2 A3 from fun h => h.1 rfl),
+                      if_neg (show ¬twoeqC 0 A2 A3 from fun h => h.elim (fun c => g2 c.1.symm)
+                      (fun h' => h'.elim (fun c => h23 c.1) (fun c => g3 c.1))),
+                      if_pos (show onezeroC 0 A2 A3 from Or.inl ⟨rfl, g2, g3, h23⟩)]
+                  decide
+          · by_cases z2 : A2 = 0
+            · subst z2
+              by_cases z3 : A3 = 0
+              · subst z3; exact absurd rfl h23
+              · -- LEAF B2
+                have g31 : A3 ≠ A1 := fun h => h13 h.symm
+                by_cases hd : dpar k A3 A1 = 0
+                ·
+                  have tv : ∀ e1 e2 e3 : Nat, e1 < 2 → e2 < 2 → e3 < 2 →
+                      (if qqual (k+1) (A1+e1*2^k) (0+e2*2^k) (A3+e3*2^k) then (1:Int) else 0)
+                        = (if e2 = 1 ∧ e3 = e1 then (1:Int) else 0) := by
+                    intro e1 e2 e3 he1 he2 he3
+                    have d1 := dpar_lift' k A1 0 e1 e2 hA1b (by omega) he1 he2
+                    have d2 := dpar_lift' k 0 A3 e2 e3 (by omega) hA3b he2 he3
+                    have d3 := dpar_lift' k A3 A1 e3 e1 hA3b hA1b he3 he1
+                    rcases (by omega : e1 = 0 ∨ e1 = 1) with rfl | rfl <;>
+                      rcases (by omega : e2 = 0 ∨ e2 = 1) with rfl | rfl <;>
+                      rcases (by omega : e3 = 0 ∨ e3 = 1) with rfl | rfl
+                    · rw [if_neg (show ¬((0:Nat) = 1 ∧ (0:Nat) = (0:Nat)) by decide)]
+                      rw [if_neg (fun h => by
+                        obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                        omega)]
+                    · rw [if_neg (show ¬((0:Nat) = 1 ∧ (1:Nat) = (0:Nat)) by decide)]
+                      rw [if_neg (fun h => by
+                        obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                        omega)]
+                    · rw [if_pos (show (1:Nat) = 1 ∧ (0:Nat) = (0:Nat) by decide)]
+                      rw [if_pos (by
+                        refine ⟨by omega, by omega, by omega, by omega, by omega, by omega, ?_⟩
+                        rw [d1, d2, d3]
+                        grind [dlift])]
+                    · rw [if_neg (show ¬((1:Nat) = 1 ∧ (1:Nat) = (0:Nat)) by decide)]
+                      rw [if_neg (fun h => by
+                        have hp := h.2.2.2.2.2.2
+                        rw [d1, d2, d3] at hp
+                        grind [dlift])]
+                    · rw [if_neg (show ¬((0:Nat) = 1 ∧ (0:Nat) = (1:Nat)) by decide)]
+                      rw [if_neg (fun h => by
+                        obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                        omega)]
+                    · rw [if_neg (show ¬((0:Nat) = 1 ∧ (1:Nat) = (1:Nat)) by decide)]
+                      rw [if_neg (fun h => by
+                        obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                        omega)]
+                    · rw [if_neg (show ¬((1:Nat) = 1 ∧ (0:Nat) = (1:Nat)) by decide)]
+                      rw [if_neg (fun h => by
+                        have hp := h.2.2.2.2.2.2
+                        rw [d1, d2, d3] at hp
+                        grind [dlift])]
+                    · rw [if_pos (show (1:Nat) = 1 ∧ (1:Nat) = (1:Nat) by decide)]
+                      rw [if_pos (by
+                        refine ⟨by omega, by omega, by omega, by omega, by omega, by omega, ?_⟩
+                        rw [d1, d2, d3]
+                        grind [dlift])]
+                  rw [sumLtI_congr 2 _ _ (fun e1 he1 => sumLtI_congr 2 _ _ (fun e2 he2 =>
+                      sumLtI_congr 2 _ _ (fun e3 he3 => tv e1 e2 e3 he1 he2 he3)))]
+                  rw [if_neg (show ¬qqual k A1 0 A3 from fun h => h.2.1 rfl),
+                      if_neg (show ¬twoeqC A1 0 A3 from fun h => h.elim (fun c => z1 c.1)
+                      (fun h' => h'.elim (fun c => z3 c.1.symm) (fun c => g31 c.1))),
+                      if_pos (show onezeroC A1 0 A3 from Or.inr (Or.inl ⟨rfl, z3, z1, g31⟩))]
+                  decide
+                · have hd1 : dpar k A3 A1 = 1 := by
+                    have hle := dpar_le_one k A3 A1
+                    omega
+                  have tv : ∀ e1 e2 e3 : Nat, e1 < 2 → e2 < 2 → e3 < 2 →
+                      (if qqual (k+1) (A1+e1*2^k) (0+e2*2^k) (A3+e3*2^k) then (1:Int) else 0)
+                        = (if e2 = 1 ∧ ¬ e3 = e1 then (1:Int) else 0) := by
+                    intro e1 e2 e3 he1 he2 he3
+                    have d1 := dpar_lift' k A1 0 e1 e2 hA1b (by omega) he1 he2
+                    have d2 := dpar_lift' k 0 A3 e2 e3 (by omega) hA3b he2 he3
+                    have d3 := dpar_lift' k A3 A1 e3 e1 hA3b hA1b he3 he1
+                    rcases (by omega : e1 = 0 ∨ e1 = 1) with rfl | rfl <;>
+                      rcases (by omega : e2 = 0 ∨ e2 = 1) with rfl | rfl <;>
+                      rcases (by omega : e3 = 0 ∨ e3 = 1) with rfl | rfl
+                    · rw [if_neg (show ¬((0:Nat) = 1 ∧ ¬ (0:Nat) = (0:Nat)) by decide)]
+                      rw [if_neg (fun h => by
+                        obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                        omega)]
+                    · rw [if_neg (show ¬((0:Nat) = 1 ∧ ¬ (1:Nat) = (0:Nat)) by decide)]
+                      rw [if_neg (fun h => by
+                        obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                        omega)]
+                    · rw [if_neg (show ¬((1:Nat) = 1 ∧ ¬ (0:Nat) = (0:Nat)) by decide)]
+                      rw [if_neg (fun h => by
+                        have hp := h.2.2.2.2.2.2
+                        rw [d1, d2, d3] at hp
+                        grind [dlift])]
+                    · rw [if_pos (show (1:Nat) = 1 ∧ ¬ (1:Nat) = (0:Nat) by decide)]
+                      rw [if_pos (by
+                        refine ⟨by omega, by omega, by omega, by omega, by omega, by omega, ?_⟩
+                        rw [d1, d2, d3]
+                        grind [dlift])]
+                    · rw [if_neg (show ¬((0:Nat) = 1 ∧ ¬ (0:Nat) = (1:Nat)) by decide)]
+                      rw [if_neg (fun h => by
+                        obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                        omega)]
+                    · rw [if_neg (show ¬((0:Nat) = 1 ∧ ¬ (1:Nat) = (1:Nat)) by decide)]
+                      rw [if_neg (fun h => by
+                        obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                        omega)]
+                    · rw [if_pos (show (1:Nat) = 1 ∧ ¬ (0:Nat) = (1:Nat) by decide)]
+                      rw [if_pos (by
+                        refine ⟨by omega, by omega, by omega, by omega, by omega, by omega, ?_⟩
+                        rw [d1, d2, d3]
+                        grind [dlift])]
+                    · rw [if_neg (show ¬((1:Nat) = 1 ∧ ¬ (1:Nat) = (1:Nat)) by decide)]
+                      rw [if_neg (fun h => by
+                        have hp := h.2.2.2.2.2.2
+                        rw [d1, d2, d3] at hp
+                        grind [dlift])]
+                  rw [sumLtI_congr 2 _ _ (fun e1 he1 => sumLtI_congr 2 _ _ (fun e2 he2 =>
+                      sumLtI_congr 2 _ _ (fun e3 he3 => tv e1 e2 e3 he1 he2 he3)))]
+                  rw [if_neg (show ¬qqual k A1 0 A3 from fun h => h.2.1 rfl),
+                      if_neg (show ¬twoeqC A1 0 A3 from fun h => h.elim (fun c => z1 c.1)
+                      (fun h' => h'.elim (fun c => z3 c.1.symm) (fun c => g31 c.1))),
+                      if_pos (show onezeroC A1 0 A3 from Or.inr (Or.inl ⟨rfl, z3, z1, g31⟩))]
+                  decide
+            · by_cases z3 : A3 = 0
+              · subst z3
+                -- LEAF B3
+                by_cases hd : dpar k A1 A2 = 0
+                ·
+                  have tv : ∀ e1 e2 e3 : Nat, e1 < 2 → e2 < 2 → e3 < 2 →
+                      (if qqual (k+1) (A1+e1*2^k) (A2+e2*2^k) (0+e3*2^k) then (1:Int) else 0)
+                        = (if e3 = 1 ∧ e1 = e2 then (1:Int) else 0) := by
+                    intro e1 e2 e3 he1 he2 he3
+                    have d1 := dpar_lift' k A1 A2 e1 e2 hA1b hA2b he1 he2
+                    have d2 := dpar_lift' k A2 0 e2 e3 hA2b (by omega) he2 he3
+                    have d3 := dpar_lift' k 0 A1 e3 e1 (by omega) hA1b he3 he1
+                    rcases (by omega : e1 = 0 ∨ e1 = 1) with rfl | rfl <;>
+                      rcases (by omega : e2 = 0 ∨ e2 = 1) with rfl | rfl <;>
+                      rcases (by omega : e3 = 0 ∨ e3 = 1) with rfl | rfl
+                    · rw [if_neg (show ¬((0:Nat) = 1 ∧ (0:Nat) = (0:Nat)) by decide)]
+                      rw [if_neg (fun h => by
+                        obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                        omega)]
+                    · rw [if_pos (show (1:Nat) = 1 ∧ (0:Nat) = (0:Nat) by decide)]
+                      rw [if_pos (by
+                        refine ⟨by omega, by omega, by omega, by omega, by omega, by omega, ?_⟩
+                        rw [d1, d2, d3]
+                        grind [dlift])]
+                    · rw [if_neg (show ¬((0:Nat) = 1 ∧ (0:Nat) = (1:Nat)) by decide)]
+                      rw [if_neg (fun h => by
+                        obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                        omega)]
+                    · rw [if_neg (show ¬((1:Nat) = 1 ∧ (0:Nat) = (1:Nat)) by decide)]
+                      rw [if_neg (fun h => by
+                        have hp := h.2.2.2.2.2.2
+                        rw [d1, d2, d3] at hp
+                        grind [dlift])]
+                    · rw [if_neg (show ¬((0:Nat) = 1 ∧ (1:Nat) = (0:Nat)) by decide)]
+                      rw [if_neg (fun h => by
+                        obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                        omega)]
+                    · rw [if_neg (show ¬((1:Nat) = 1 ∧ (1:Nat) = (0:Nat)) by decide)]
+                      rw [if_neg (fun h => by
+                        have hp := h.2.2.2.2.2.2
+                        rw [d1, d2, d3] at hp
+                        grind [dlift])]
+                    · rw [if_neg (show ¬((0:Nat) = 1 ∧ (1:Nat) = (1:Nat)) by decide)]
+                      rw [if_neg (fun h => by
+                        obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                        omega)]
+                    · rw [if_pos (show (1:Nat) = 1 ∧ (1:Nat) = (1:Nat) by decide)]
+                      rw [if_pos (by
+                        refine ⟨by omega, by omega, by omega, by omega, by omega, by omega, ?_⟩
+                        rw [d1, d2, d3]
+                        grind [dlift])]
+                  rw [sumLtI_congr 2 _ _ (fun e1 he1 => sumLtI_congr 2 _ _ (fun e2 he2 =>
+                      sumLtI_congr 2 _ _ (fun e3 he3 => tv e1 e2 e3 he1 he2 he3)))]
+                  rw [if_neg (show ¬qqual k A1 A2 0 from fun h => h.2.2.1 rfl),
+                      if_neg (show ¬twoeqC A1 A2 0 from fun h => h.elim (fun c => h12 c.1)
+                      (fun h' => h'.elim (fun c => z2 c.1) (fun c => z1 c.1.symm))),
+                      if_pos (show onezeroC A1 A2 0 from Or.inr (Or.inr ⟨rfl, z1, z2, h12⟩))]
+                  decide
+                · have hd1 : dpar k A1 A2 = 1 := by
+                    have hle := dpar_le_one k A1 A2
+                    omega
+                  have tv : ∀ e1 e2 e3 : Nat, e1 < 2 → e2 < 2 → e3 < 2 →
+                      (if qqual (k+1) (A1+e1*2^k) (A2+e2*2^k) (0+e3*2^k) then (1:Int) else 0)
+                        = (if e3 = 1 ∧ ¬ e1 = e2 then (1:Int) else 0) := by
+                    intro e1 e2 e3 he1 he2 he3
+                    have d1 := dpar_lift' k A1 A2 e1 e2 hA1b hA2b he1 he2
+                    have d2 := dpar_lift' k A2 0 e2 e3 hA2b (by omega) he2 he3
+                    have d3 := dpar_lift' k 0 A1 e3 e1 (by omega) hA1b he3 he1
+                    rcases (by omega : e1 = 0 ∨ e1 = 1) with rfl | rfl <;>
+                      rcases (by omega : e2 = 0 ∨ e2 = 1) with rfl | rfl <;>
+                      rcases (by omega : e3 = 0 ∨ e3 = 1) with rfl | rfl
+                    · rw [if_neg (show ¬((0:Nat) = 1 ∧ ¬ (0:Nat) = (0:Nat)) by decide)]
+                      rw [if_neg (fun h => by
+                        obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                        omega)]
+                    · rw [if_neg (show ¬((1:Nat) = 1 ∧ ¬ (0:Nat) = (0:Nat)) by decide)]
+                      rw [if_neg (fun h => by
+                        have hp := h.2.2.2.2.2.2
+                        rw [d1, d2, d3] at hp
+                        grind [dlift])]
+                    · rw [if_neg (show ¬((0:Nat) = 1 ∧ ¬ (0:Nat) = (1:Nat)) by decide)]
+                      rw [if_neg (fun h => by
+                        obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                        omega)]
+                    · rw [if_pos (show (1:Nat) = 1 ∧ ¬ (0:Nat) = (1:Nat) by decide)]
+                      rw [if_pos (by
+                        refine ⟨by omega, by omega, by omega, by omega, by omega, by omega, ?_⟩
+                        rw [d1, d2, d3]
+                        grind [dlift])]
+                    · rw [if_neg (show ¬((0:Nat) = 1 ∧ ¬ (1:Nat) = (0:Nat)) by decide)]
+                      rw [if_neg (fun h => by
+                        obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                        omega)]
+                    · rw [if_pos (show (1:Nat) = 1 ∧ ¬ (1:Nat) = (0:Nat) by decide)]
+                      rw [if_pos (by
+                        refine ⟨by omega, by omega, by omega, by omega, by omega, by omega, ?_⟩
+                        rw [d1, d2, d3]
+                        grind [dlift])]
+                    · rw [if_neg (show ¬((0:Nat) = 1 ∧ ¬ (1:Nat) = (1:Nat)) by decide)]
+                      rw [if_neg (fun h => by
+                        obtain ⟨n1, n2, n3, n12, n23, n31, -⟩ := h
+                        omega)]
+                    · rw [if_neg (show ¬((1:Nat) = 1 ∧ ¬ (1:Nat) = (1:Nat)) by decide)]
+                      rw [if_neg (fun h => by
+                        have hp := h.2.2.2.2.2.2
+                        rw [d1, d2, d3] at hp
+                        grind [dlift])]
+                  rw [sumLtI_congr 2 _ _ (fun e1 he1 => sumLtI_congr 2 _ _ (fun e2 he2 =>
+                      sumLtI_congr 2 _ _ (fun e3 he3 => tv e1 e2 e3 he1 he2 he3)))]
+                  rw [if_neg (show ¬qqual k A1 A2 0 from fun h => h.2.2.1 rfl),
+                      if_neg (show ¬twoeqC A1 A2 0 from fun h => h.elim (fun c => h12 c.1)
+                      (fun h' => h'.elim (fun c => z2 c.1) (fun c => z1 c.1.symm))),
+                      if_pos (show onezeroC A1 A2 0 from Or.inr (Or.inr ⟨rfl, z1, z2, h12⟩))]
+                  decide
+              · exact absurd ⟨z1, z2, z3, h12, h23, fun h => h13 h.symm⟩ hall
+
+/-- The twoeq-indicator splits into its three (mutually exclusive) disjuncts. -/
+theorem twoeqC_ind (A1 A2 A3 : Nat) :
+    (if twoeqC A1 A2 A3 then (1:Int) else 0)
+    = (if (A1 = A2 ∧ A1 ≠ 0 ∧ A3 ≠ 0 ∧ A3 ≠ A1) then (1:Int) else 0)
+      + (if (A2 = A3 ∧ A2 ≠ 0 ∧ A1 ≠ 0 ∧ A1 ≠ A2) then (1:Int) else 0)
+      + (if (A3 = A1 ∧ A3 ≠ 0 ∧ A2 ≠ 0 ∧ A2 ≠ A3) then (1:Int) else 0) := by
+  by_cases h1 : A1 = A2 ∧ A1 ≠ 0 ∧ A3 ≠ 0 ∧ A3 ≠ A1 <;>
+  by_cases h2 : A2 = A3 ∧ A2 ≠ 0 ∧ A1 ≠ 0 ∧ A1 ≠ A2 <;>
+  by_cases h3 : A3 = A1 ∧ A3 ≠ 0 ∧ A2 ≠ 0 ∧ A2 ≠ A3
+  · exact absurd (h2.1.symm.trans h1.1.symm) h1.2.2.2
+  · exact absurd (h2.1.symm.trans h1.1.symm) h1.2.2.2
+  · exact absurd h3.1 h1.2.2.2
+  · rw [if_pos h1, if_neg h2, if_neg h3, if_pos (show twoeqC A1 A2 A3 from Or.inl h1)]
+    omega
+  · exact absurd (h3.1.symm.trans h2.1.symm) h2.2.2.2
+  · rw [if_neg h1, if_pos h2, if_neg h3,
+        if_pos (show twoeqC A1 A2 A3 from Or.inr (Or.inl h2))]
+    omega
+  · rw [if_neg h1, if_neg h2, if_pos h3,
+        if_pos (show twoeqC A1 A2 A3 from Or.inr (Or.inr h3))]
+    omega
+  · rw [if_neg h1, if_neg h2, if_neg h3,
+        if_neg (show ¬twoeqC A1 A2 A3 from fun h => h.elim h1 (fun h' => h'.elim h2 h3))]
+    omega
+
+/-- The onezero-indicator splits into its three (mutually exclusive) disjuncts. -/
+theorem onezeroC_ind (A1 A2 A3 : Nat) :
+    (if onezeroC A1 A2 A3 then (1:Int) else 0)
+    = (if (A1 = 0 ∧ A2 ≠ 0 ∧ A3 ≠ 0 ∧ A2 ≠ A3) then (1:Int) else 0)
+      + (if (A2 = 0 ∧ A3 ≠ 0 ∧ A1 ≠ 0 ∧ A3 ≠ A1) then (1:Int) else 0)
+      + (if (A3 = 0 ∧ A1 ≠ 0 ∧ A2 ≠ 0 ∧ A1 ≠ A2) then (1:Int) else 0) := by
+  by_cases h1 : A1 = 0 ∧ A2 ≠ 0 ∧ A3 ≠ 0 ∧ A2 ≠ A3 <;>
+  by_cases h2 : A2 = 0 ∧ A3 ≠ 0 ∧ A1 ≠ 0 ∧ A3 ≠ A1 <;>
+  by_cases h3 : A3 = 0 ∧ A1 ≠ 0 ∧ A2 ≠ 0 ∧ A1 ≠ A2
+  · exact absurd h2.1 h1.2.1
+  · exact absurd h2.1 h1.2.1
+  · exact absurd h3.1 h1.2.2.1
+  · rw [if_pos h1, if_neg h2, if_neg h3, if_pos (show onezeroC A1 A2 A3 from Or.inl h1)]
+    omega
+  · exact absurd h3.1 h2.2.1
+  · rw [if_neg h1, if_pos h2, if_neg h3,
+        if_pos (show onezeroC A1 A2 A3 from Or.inr (Or.inl h2))]
+    omega
+  · rw [if_neg h1, if_neg h2, if_pos h3,
+        if_pos (show onezeroC A1 A2 A3 from Or.inr (Or.inr h3))]
+    omega
+  · rw [if_neg h1, if_neg h2, if_neg h3,
+        if_neg (show ¬onezeroC A1 A2 A3 from fun h => h.elim h1 (fun h' => h'.elim h2 h3))]
+    omega
+
+/-- First-disjunct count for `twoeqC`: `(2^k−1)(2^k−2)`. -/
+theorem twoeqC_count1 (k : Nat) :
+    sumLtI (2^k) (fun A1 => sumLtI (2^k) (fun A2 => sumLtI (2^k) (fun A3 =>
+      if (A1 = A2 ∧ A1 ≠ 0 ∧ A3 ≠ 0 ∧ A3 ≠ A1) then (1:Int) else 0)))
+    = (((2^k:Nat):Int) - 1) * (((2^k:Nat):Int) - 2) := by
+  have hHp : (0:Nat) < 2^k := Nat.two_pow_pos k
+  rw [sumLtI_congr (2^k) _ _ (fun A1 _ => sumLtI_swap (2^k) (2^k) (fun A2 A3 =>
+      if (A1 = A2 ∧ A1 ≠ 0 ∧ A3 ≠ 0 ∧ A3 ≠ A1) then (1:Int) else 0))]
+  have hcol : ∀ A1 A3 : Nat, A1 < 2^k →
+      sumLtI (2^k) (fun A2 => if (A1 = A2 ∧ A1 ≠ 0 ∧ A3 ≠ 0 ∧ A3 ≠ A1) then (1:Int) else 0)
+      = if (A1 ≠ 0 ∧ A3 ≠ 0 ∧ A3 ≠ A1) then (1:Int) else 0 := by
+    intro A1 A3 hA1
+    rw [sumLtI_congr (2^k) _ (fun A2 => if A2 = A1 then
+          (if (A1 ≠ 0 ∧ A3 ≠ 0 ∧ A3 ≠ A1) then (1:Int) else 0) else 0)
+      (fun A2 _ => by
+        by_cases h : A2 = A1
+        · subst h
+          by_cases hG : A2 ≠ 0 ∧ A3 ≠ 0 ∧ A3 ≠ A2 <;> simp [hG]
+        · have h' : ¬(A1 = A2) := fun e => h e.symm
+          simp [h', h])]
+    exact sumLtI_single (2^k) A1 _ hA1
+  rw [sumLtI_congr (2^k) _ _ (fun A1 hA1 => sumLtI_congr (2^k) _ _ (fun A3 _ =>
+      hcol A1 A3 hA1))]
+  have hA3sum : ∀ A1 : Nat, A1 < 2^k →
+      sumLtI (2^k) (fun A3 => if (A1 ≠ 0 ∧ A3 ≠ 0 ∧ A3 ≠ A1) then (1:Int) else 0)
+      = if A1 = 0 then (0:Int) else (((2^k:Nat):Int) - 2) := by
+    intro A1 hA1
+    by_cases z1 : A1 = 0
+    · rw [if_pos z1, sumLtI_congr (2^k) _ (fun _ => 0) (fun A3 _ => if_neg (fun h => h.1 z1)),
+          sumLtI_zero]
+    · rw [if_neg z1, sumLtI_congr (2^k) _
+          (fun A3 => if (A1 ≠ 0 ∧ A3 ≠ 0 ∧ A1 ≠ A3) then (1:Int) else 0)
+          (fun A3 _ => by
+            by_cases h3eq : A3 = A1
+            · subst h3eq; simp
+            · have h3ne' : ¬(A1 = A3) := fun e => h3eq e.symm
+              simp [h3eq, h3ne'])]
+      exact sumLtI_guard_cnt (2^k) A1 hA1 z1 hHp
+  rw [sumLtI_congr (2^k) _ _ (fun A1 hA1 => hA3sum A1 hA1)]
+  have hcount1 : sumLtI (2^k) (fun i => if i = 0 then (1:Int) else 0) = 1 :=
+    cnt1 (2^k) 0 hHp
+  rw [sumLtI_const_excl (2^k) (((2^k:Nat):Int) - 2) (fun i => i = 0) 1 hcount1]
+
+/-- First-disjunct count for `onezeroC`: `(2^k−1)(2^k−2)`. -/
+theorem onezeroC_count1 (k : Nat) :
+    sumLtI (2^k) (fun A1 => sumLtI (2^k) (fun A2 => sumLtI (2^k) (fun A3 =>
+      if (A1 = 0 ∧ A2 ≠ 0 ∧ A3 ≠ 0 ∧ A2 ≠ A3) then (1:Int) else 0)))
+    = (((2^k:Nat):Int) - 1) * (((2^k:Nat):Int) - 2) := by
+  have hHp : (0:Nat) < 2^k := Nat.two_pow_pos k
+  rw [sumLtI_swap (2^k) (2^k) (fun A1 A2 => sumLtI (2^k) (fun A3 =>
+      if (A1 = 0 ∧ A2 ≠ 0 ∧ A3 ≠ 0 ∧ A2 ≠ A3) then (1:Int) else 0))]
+  rw [sumLtI_congr (2^k) _ _ (fun A2 _ => sumLtI_swap (2^k) (2^k) (fun A1 A3 =>
+      if (A1 = 0 ∧ A2 ≠ 0 ∧ A3 ≠ 0 ∧ A2 ≠ A3) then (1:Int) else 0))]
+  have hcol : ∀ A2 A3 : Nat,
+      sumLtI (2^k) (fun A1 => if (A1 = 0 ∧ A2 ≠ 0 ∧ A3 ≠ 0 ∧ A2 ≠ A3) then (1:Int) else 0)
+      = if (A2 ≠ 0 ∧ A3 ≠ 0 ∧ A2 ≠ A3) then (1:Int) else 0 := by
+    intro A2 A3
+    rw [sumLtI_congr (2^k) _ (fun A1 => if A1 = 0 then
+          (if (A2 ≠ 0 ∧ A3 ≠ 0 ∧ A2 ≠ A3) then (1:Int) else 0) else 0)
+      (fun A1 _ => by
+        by_cases h : A1 = 0
+        · subst h; simp
+        · simp [h])]
+    exact sumLtI_single (2^k) 0 _ hHp
+  have hA3sum : ∀ A2 : Nat, A2 < 2^k →
+      sumLtI (2^k) (fun A3 => if (A2 ≠ 0 ∧ A3 ≠ 0 ∧ A2 ≠ A3) then (1:Int) else 0)
+      = if A2 = 0 then (0:Int) else (((2^k:Nat):Int) - 2) := by
+    intro A2 hA2
+    by_cases z2 : A2 = 0
+    · rw [if_pos z2, sumLtI_congr (2^k) _ (fun _ => 0) (fun A3 _ => if_neg (fun h => h.1 z2)),
+          sumLtI_zero]
+    · rw [if_neg z2]
+      exact sumLtI_guard_cnt (2^k) A2 hA2 z2 hHp
+  rw [sumLtI_congr (2^k) _ _ (fun A2 _ => sumLtI_congr (2^k) _ _ (fun A3 _ => hcol A2 A3))]
+  rw [sumLtI_congr (2^k) _ _ (fun A2 hA2 => hA3sum A2 hA2)]
+  have hcount1 : sumLtI (2^k) (fun i => if i = 0 then (1:Int) else 0) = 1 :=
+    cnt1 (2^k) 0 hHp
+  rw [sumLtI_const_excl (2^k) (((2^k:Nat):Int) - 2) (fun i => i = 0) 1 hcount1]
+
+/-- **The twoeq region count**: `3·(2^k−1)(2^k−2)`. -/
+theorem twoeqC_count (k : Nat) :
+    sumLtI (2^k) (fun A1 => sumLtI (2^k) (fun A2 => sumLtI (2^k) (fun A3 =>
+      if twoeqC A1 A2 A3 then (1:Int) else 0)))
+    = 3 * ((((2^k:Nat):Int) - 1) * (((2^k:Nat):Int) - 2)) := by
+  have hI2 : sumLtI (2^k) (fun A1 => sumLtI (2^k) (fun A2 => sumLtI (2^k) (fun A3 =>
+      if (A2 = A3 ∧ A2 ≠ 0 ∧ A1 ≠ 0 ∧ A1 ≠ A2) then (1:Int) else 0)))
+    = (((2^k:Nat):Int) - 1) * (((2^k:Nat):Int) - 2) := by
+    rw [← twoeqC_count1 k]
+    exact (sumLtI3_cyc (2^k) (fun a b c =>
+      if (a = b ∧ a ≠ 0 ∧ c ≠ 0 ∧ c ≠ a) then (1:Int) else 0)).symm
+  have hI3 : sumLtI (2^k) (fun A1 => sumLtI (2^k) (fun A2 => sumLtI (2^k) (fun A3 =>
+      if (A3 = A1 ∧ A3 ≠ 0 ∧ A2 ≠ 0 ∧ A2 ≠ A3) then (1:Int) else 0)))
+    = (((2^k:Nat):Int) - 1) * (((2^k:Nat):Int) - 2) := by
+    rw [← hI2]
+    exact (sumLtI3_cyc (2^k) (fun a b c =>
+      if (b = c ∧ b ≠ 0 ∧ a ≠ 0 ∧ a ≠ b) then (1:Int) else 0)).symm
+  rw [sumLtI_congr (2^k) _ _ (fun a _ => sumLtI_congr (2^k) _ _ (fun b _ =>
+      sumLtI_congr (2^k) _ _ (fun c _ => twoeqC_ind a b c)))]
+  rw [sumLtI_congr (2^k) _ _ (fun a _ => sumLtI_congr (2^k) _ _ (fun b _ =>
+      sumLtI_add (2^k) _ _))]
+  rw [sumLtI_congr (2^k) _ _ (fun a _ => sumLtI_add (2^k) _ _)]
+  rw [sumLtI_add (2^k) _ _]
+  rw [sumLtI_congr (2^k) _ _ (fun a _ => sumLtI_congr (2^k) _ _ (fun b _ =>
+      sumLtI_add (2^k) _ _))]
+  rw [sumLtI_congr (2^k) _ _ (fun a _ => sumLtI_add (2^k) _ _)]
+  rw [sumLtI_add (2^k) _ _]
+  rw [twoeqC_count1 k, hI2, hI3]
+  omega
+
+/-- **The onezero region count**: `3·(2^k−1)(2^k−2)`. -/
+theorem onezeroC_count (k : Nat) :
+    sumLtI (2^k) (fun A1 => sumLtI (2^k) (fun A2 => sumLtI (2^k) (fun A3 =>
+      if onezeroC A1 A2 A3 then (1:Int) else 0)))
+    = 3 * ((((2^k:Nat):Int) - 1) * (((2^k:Nat):Int) - 2)) := by
+  have hJ2 : sumLtI (2^k) (fun A1 => sumLtI (2^k) (fun A2 => sumLtI (2^k) (fun A3 =>
+      if (A2 = 0 ∧ A3 ≠ 0 ∧ A1 ≠ 0 ∧ A3 ≠ A1) then (1:Int) else 0)))
+    = (((2^k:Nat):Int) - 1) * (((2^k:Nat):Int) - 2) := by
+    rw [← onezeroC_count1 k]
+    exact (sumLtI3_cyc (2^k) (fun a b c =>
+      if (a = 0 ∧ b ≠ 0 ∧ c ≠ 0 ∧ b ≠ c) then (1:Int) else 0)).symm
+  have hJ3 : sumLtI (2^k) (fun A1 => sumLtI (2^k) (fun A2 => sumLtI (2^k) (fun A3 =>
+      if (A3 = 0 ∧ A1 ≠ 0 ∧ A2 ≠ 0 ∧ A1 ≠ A2) then (1:Int) else 0)))
+    = (((2^k:Nat):Int) - 1) * (((2^k:Nat):Int) - 2) := by
+    rw [← hJ2]
+    exact (sumLtI3_cyc (2^k) (fun a b c =>
+      if (b = 0 ∧ c ≠ 0 ∧ a ≠ 0 ∧ c ≠ a) then (1:Int) else 0)).symm
+  rw [sumLtI_congr (2^k) _ _ (fun a _ => sumLtI_congr (2^k) _ _ (fun b _ =>
+      sumLtI_congr (2^k) _ _ (fun c _ => onezeroC_ind a b c)))]
+  rw [sumLtI_congr (2^k) _ _ (fun a _ => sumLtI_congr (2^k) _ _ (fun b _ =>
+      sumLtI_add (2^k) _ _))]
+  rw [sumLtI_congr (2^k) _ _ (fun a _ => sumLtI_add (2^k) _ _)]
+  rw [sumLtI_add (2^k) _ _]
+  rw [sumLtI_congr (2^k) _ _ (fun a _ => sumLtI_congr (2^k) _ _ (fun b _ =>
+      sumLtI_add (2^k) _ _))]
+  rw [sumLtI_congr (2^k) _ _ (fun a _ => sumLtI_add (2^k) _ _)]
+  rw [sumLtI_add (2^k) _ _]
+  rw [onezeroC_count1 k, hJ2, hJ3]
+  omega
+
+/-- Scalar extraction through the triple sum. -/
+theorem sumLtI3_smul (N : Nat) (c : Int) (F : Nat → Nat → Nat → Int) :
+    sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun cc => c * F a b cc)))
+    = c * sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun cc => F a b cc))) := by
+  rw [sumLtI_congr N _ _ (fun a _ => sumLtI_congr N _ _ (fun b _ => sumLtI_mul N c _)),
+      sumLtI_congr N _ _ (fun a _ => sumLtI_mul N c _), sumLtI_mul]
+
+/-- **THE RECURSION (the 18-count engine).**  The qualifying ordered orbit-triple
+    count obeys `Q(k+1) = 8·Q(k) + 18·(2^k−1)(2^k−2)`: split each coordinate's top
+    bit (`sumLtI_bit_split`), evaluate the lift sum pointwise
+    (`qualOrbit_pointwise`), and collect `8·Q + 4·(3U) + 2·(3U)` with
+    `U = (2^k−1)(2^k−2)`. -/
+theorem ordQualOrbit_rec (k : Nat) :
+    ordQualOrbit (k+1)
+      = 8 * ordQualOrbit k + 18 * ((((2^k:Nat):Int) - 1) * (((2^k:Nat):Int) - 2)) := by
+  have hHp : (0:Nat) < 2^k := Nat.two_pow_pos k
+  have hpow : (2:Nat)^(k+1) = 2^k + 2^k := by rw [Nat.pow_succ]; omega
+  unfold ordQualOrbit
+  rw [hpow]
+  rw [sumLtI_bit_split (2^k) (fun A => sumLtI (2^k + 2^k) (fun B => sumLtI (2^k + 2^k) (fun C =>
+        if qqual (k+1) A B C then (1:Int) else 0)))]
+  rw [sumLtI_congr (2^k) _ _ (fun c1 _ => sumLtI_congr 2 _ _ (fun e1 _ =>
+        sumLtI_bit_split (2^k) (fun B => sumLtI (2^k + 2^k) (fun C =>
+          if qqual (k+1) (c1 + e1*2^k) B C then (1:Int) else 0))))]
+  rw [sumLtI_congr (2^k) _ _ (fun c1 _ => sumLtI_congr 2 _ _ (fun e1 _ =>
+        sumLtI_congr (2^k) _ _ (fun c2 _ => sumLtI_congr 2 _ _ (fun e2 _ =>
+          sumLtI_bit_split (2^k) (fun C =>
+            if qqual (k+1) (c1 + e1*2^k) (c2 + e2*2^k) C then (1:Int) else 0)))))]
+  rw [sumLtI_congr (2^k) _ _ (fun c1 _ =>
+        sumLtI_swap 2 (2^k) (fun e1 c2 => sumLtI 2 (fun e2 => sumLtI (2^k) (fun c3 =>
+          sumLtI 2 (fun e3 =>
+            if qqual (k+1) (c1 + e1*2^k) (c2 + e2*2^k) (c3 + e3*2^k) then (1:Int) else 0)))))]
+  rw [sumLtI_congr (2^k) _ _ (fun c1 _ => sumLtI_congr (2^k) _ _ (fun c2 _ =>
+        sumLtI_congr 2 _ _ (fun e1 _ =>
+          sumLtI_swap 2 (2^k) (fun e2 c3 => sumLtI 2 (fun e3 =>
+            if qqual (k+1) (c1 + e1*2^k) (c2 + e2*2^k) (c3 + e3*2^k) then (1:Int) else 0)))))]
+  rw [sumLtI_congr (2^k) _ _ (fun c1 _ => sumLtI_congr (2^k) _ _ (fun c2 _ =>
+        sumLtI_swap 2 (2^k) (fun e1 c3 => sumLtI 2 (fun e2 => sumLtI 2 (fun e3 =>
+          if qqual (k+1) (c1 + e1*2^k) (c2 + e2*2^k) (c3 + e3*2^k) then (1:Int) else 0)))))]
+  rw [sumLtI_congr (2^k) _ _ (fun c1 hc1 => sumLtI_congr (2^k) _ _ (fun c2 hc2 =>
+        sumLtI_congr (2^k) _ _ (fun c3 hc3 => qualOrbit_pointwise k c1 c2 c3 hc1 hc2 hc3)))]
+  rw [sumLtI3_add, sumLtI3_add]
+  rw [sumLtI3_smul (2^k) 8 _, sumLtI3_smul (2^k) 4 _, sumLtI3_smul (2^k) 2 _]
+  rw [twoeqC_count k, onezeroC_count k]
+  omega
+
+/-- **TIER 164 HEADLINE — the 18-count, `hdc`, UNCONDITIONAL.**  The qualifying
+    ordered orbit-triples and the ordered independent triples are in the ratio
+    `108 : 168` (per 3-dim `F₂`-subspace: `108 = 18 × 6` qualifying ordered
+    triples among the `168 = |GL(3,2)|` ordered bases).  Proof: the recursion
+    `ordQualOrbit_rec` and the closed form `indTripleCount_val` satisfy the same
+    first-order recurrence, and `k = 0` is a kernel check.  Consumed by Tier
+    162's `tier162_hmult` as the hypothesis `hdc`. -/
+theorem tier164_hdc (k : Nat) :
+    168 * ordQualOrbit k = 108 * indTripleCount k := by
+  induction k with
+  | zero => decide
+  | succ k ih =>
+    have e1 : (2:Nat)^(k+1) = 2 * 2^k := by rw [Nat.pow_succ]; omega
+    have hx : ((2^(k+1):Nat):Int) = 2 * ((2^k:Nat):Int) := by omega
+    rw [indTripleCount_val k] at ih
+    rw [ordQualOrbit_rec k, indTripleCount_val (k+1), hx]
+    grind
+
+
+/-- Confirmation: the exact `hdc` shape consumed by `tier162_hmult`. -/
+theorem tier164_hdc_at (m : Nat) :
+    168 * ordQualOrbit (m-1) = 108 * indTripleCount (m-1) :=
+  tier164_hdc (m-1)
+
+/-! ### Tier 166 — **THE E5 BASE CASE** (kimi): `s3(1) = poly(H) − 1728·[m,3]₂`
+
+    The deviation law's base case, assembled from proved pieces only:
+    `trace_ref_entry_law` (Tier 142, the predicted trace), `hDelta_law` (Tier 160,
+    the sign-law aggregate), `defect_regular_free` (Tiers 144+150, degree regularity),
+    `hiso_ref` (Tier 158, spine isolation), the Tier 152 stratum counts,
+    `triangle_count_hrule` + `tier162_hmult` + `tier164_hdc` (Tiers 154/162/164, the
+    triangle count), and Tier 148's assembly algebra.  Stated 7-cleared (the file is
+    q-binomial-free): `7·s3(1) = 7·(H³ − 12H² + 28H − 16) − 9·(H−2)(H−4)(H−8)`,
+    `H = 2^(m+1)`, level `m = k+3`.  Measured: `s3(1) = −48, −272, −4560, −53072`
+    at levels 2,3,4,5 — matching `poly(H) − 1728·[m,3]₂` exactly. -/
+
+/-- Bridge: `t3Count`'s defect-triple form equals the `kcnt = 3` form. -/
+private theorem t3Count_eq_kcnt3 (m : Nat) :
+    t3Count m
+      = sumLtI (2^(m+1)) (fun x => sumLtI (2^(m+1)) (fun y => sumLtI (2^(m+1)) (fun z =>
+          if x < y ∧ y < z ∧ kcnt m x y z = 3 then (1:Int) else 0))) := by
+  unfold t3Count
+  refine sumLtI_congr _ _ _ (fun x _ => sumLtI_congr _ _ _ (fun y _ =>
+    sumLtI_congr _ _ _ (fun z _ => ?_)))
+  unfold kcnt
+  by_cases h1 : isDefect m x y <;> by_cases h2 : isDefect m y z <;>
+    by_cases h3 : isDefect m z x <;> grind
+
+/-- **E5, THE BASE CASE.**  `7·s3(1) = 7·poly(H) − 9·(H−2)(H−4)(H−8)` at level `k+3`. -/
+theorem s3_reference_closed7 (k : Nat) :
+    7 * sumLtI (2^(k+4)) (fun a => sumLtI (2^(k+4)) (fun b => sumLtI (2^(k+4)) (fun c =>
+        P3 a b 1 (k+3) * (P3 b c 1 (k+3) * P3 c a 1 (k+3)))))
+      = 7 * ((((2^(k+4) : Nat) : Int) * ((2^(k+4) : Nat) : Int) * ((2^(k+4) : Nat) : Int))
+          - 12 * (((2^(k+4) : Nat) : Int) * ((2^(k+4) : Nat) : Int))
+          + 28 * ((2^(k+4) : Nat) : Int) - 16)
+        - 9 * ((((2^(k+4) : Nat) : Int) - 2) * ((((2^(k+4) : Nat) : Int) - 4)
+          * (((2^(k+4) : Nat) : Int) - 8))) := by
+  have hiso' : ∀ x y, x < 2^(k+4) → y < 2^(k+4) → x % 2^(k+3) < 2 →
+      ¬ isDefect (k+3) x y :=
+    fun x y hx hy hxs => hiso_ref (k+3) x y hx hy hxs
+  have hdeg' : ∀ x, x < 2^(k+4) → 2 ≤ x % 2^(k+3) →
+      sumLtI (2^(k+4)) (fun y => if isDefect (k+3) x y then (1:Int) else 0)
+        = ((2^(k+3) - 4 : Nat) : Int) :=
+    fun x hx hxV => defect_regular_free (k+3) (by omega) x hx hxV
+  have hD := stratum_handshake k _ rfl hiso' hdeg'
+  have hN2 := stratum_N2 k _ _ rfl (t3Count_eq_kcnt3 (k+3)) hiso' hdeg'
+  have hN1 := stratum_N1 k _ _ _ _ rfl rfl (t3Count_eq_kcnt3 (k+3)) rfl
+  have hnet := stratum_net k _ _ _ _ rfl rfl (t3Count_eq_kcnt3 (k+3)) rfl hiso'
+  have hDelta := hDelta_law k _ _ rfl rfl
+  have hHd : ((2^(k+4) : Nat) : Int)
+      = 2 * (((2^(k+3) : Nat) : Int) - 4) + 8 := by
+    have h : (2:Nat)^(k+4) = 2^(k+3) * 2 := Nat.pow_succ _ _
+    have h2 : (0:Nat) < 2^(k+3) := Nat.two_pow_pos _
+    omega
+  have hnet3 := deviation_net_count ((2^(k+4) : Nat) : Int) (((2^(k+4) : Nat) : Int) - 4)
+    (((2^(k+3) : Nat) : Int) - 4) _ _ _ _ _ rfl hHd hD hN2 hN1 hnet
+  have hDelta' := deviation_value _ _ _ _ _ hDelta hnet3
+  have hT3val := triangle_count_hrule (k+3) (by omega) (t3Count (k+3))
+    (tier162_hmult (k+3) (by omega) (tier164_hdc (k+2)))
+  have hH : ((2^(k+4) : Nat) : Int) = 2 * ((2^(k+3) : Nat) : Int) := by
+    have h : (2:Nat)^(k+4) = 2^(k+3) * 2 := Nat.pow_succ _ _
+    omega
+  have hab : ((2^(k+3) : Nat) : Int) = 2 * ((2^(k+2) : Nat) : Int) := by
+    have h : (2:Nat)^(k+3) = 2^(k+2) * 2 := Nat.pow_succ _ _
+    omega
+  have hbc : ((2^(k+2) : Nat) : Int) = 2 * ((2^(k+1) : Nat) : Int) := by
+    have h : (2:Nat)^(k+2) = 2^(k+1) * 2 := Nat.pow_succ _ _
+    omega
+  have hce : ((2^(k+1) : Nat) : Int) = 2 * ((2^k : Nat) : Int) := by
+    have h : (2:Nat)^(k+1) = 2^k * 2 := Nat.pow_succ _ _
+    omega
+  have hT3val' : 7 * t3Count (k+3)
+      = 96 * ((((2^(k+2) : Nat) : Int) - 1) * (((2^(k+1) : Nat) : Int) - 1)
+          * (((2^k : Nat) : Int) - 1)) := by grind
+  have hclear := deviation_Hform_cleared ((2^(k+4) : Nat) : Int) ((2^(k+3) : Nat) : Int)
+    ((2^(k+2) : Nat) : Int) ((2^(k+1) : Nat) : Int) ((2^k : Nat) : Int) (t3Count (k+3))
+    hH hab hbc hce hT3val'
+  have htrace := trace_ref_entry_law (k+3)
+  grind
+
 end SounioZDFiberAntisym
