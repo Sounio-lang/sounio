@@ -25049,6 +25049,206 @@ theorem t1_term2_eq_R2 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
   refine sumLtI_congr _ _ _ (fun c _ => ?_)
   rw [xor_cancel c W, ← sumLtI_mul]
 
+/-! ### Tier 153 — **the `T1` leg CLOSED**: `T1 = s3 + 4·cp2 − 6·(M³)₀₀ − 4·(M³)_WW + 64 − 36H`
+
+    Tier 145 routed `T1`'s triple sum onto eight terms; Tier 151 identified the second with `R2`.
+    This tier matches the other seven and does the arithmetic, so Tier 123's MEASURED master
+    identity becomes a theorem for every level and every label, maximal seam included.
+
+    The seven matches, in the order Tier 145 leaves them:
+
+      1  `CORE`            `core_value` below      `s3 − 6(M³)₀₀ − 4(M³)_WW + 64 − 32H`
+      3  `R1`              `t1_term3_eq_R1`        one `sumLtI_mul` under a congruence
+      4,5,7,8  rank-one    `t1_rank1_block`        Tier 137's two sums and two corner points
+      6  `R3`              `4 ·t1_diag_sum`        `16 − 4H`
+
+    `CORE`'s 18 terms (Tier 149's `core_pin_cba`) are distributed by ONE lemma applied three
+    times: `core_block_pinned` expands a block whose outer index is an arbitrary `p`, which is
+    simultaneously the shape of the two pinned blocks (`p = W`, `p = 0`) and — under the outer
+    `a`-sum — of the free one (`core_block_free`).  The 18 shapes then land on Tier 129's
+    `corePins_single` (the five single pins, `−2` each, `= −6(M³)₀₀ − 4(M³)_WW`), Tiers 125/126's
+    eight `corePin_*` (`+4` each, `2 − H` each, `= 64 − 32H`) and Tier 126's `coreCorners`
+    (`−8` each, summing to `0`).
+
+    One reindexing is needed to see `R1 + R2 = 4·cp2` in a single spelling: `R2` arrives in
+    Tier 132's coset form (`cp2_reindex`) and `R1` in the mirror form, with the seam shift on
+    the second factor's FIRST argument — `cp2_reindex_R1`, a summation swap followed by
+    `sumLtI_xor` on the outer index.
+
+    With Tier 124's `(M³)_WW = Q − 6(H−2)` and Tier 112/119 for `(M³)₀₀` and `Q`, the `T1` leg
+    now carries no unproved scalar. -/
+
+/-- Tier 145's term 3 IS `R1`: the routing leaves `εσ(a)` outside the `b`-sum, `t1_R1` has it
+    inside.  One `sumLtI_mul` under a congruence — the mirror of Tier 151's `t1_term2_eq_R2`. -/
+theorem t1_term3_eq_R1 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun a => epsZero a * sigRow a W *
+        sumLtI (2^(m+1)) (fun b => epsZero b * (P3 a b W m * P3 (b ^^^ W) a W m)))
+      = sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+            P3 a b W m * P3 (b ^^^ W) a W m))
+        + 2 * ((2^(m+1) : Nat) : Int) - 4 := by
+  rw [sumLtI_congr _ _ _ (fun a _ =>
+        (sumLtI_mul (2^(m+1)) (epsZero a * sigRow a W)
+          (fun b => epsZero b * (P3 a b W m * P3 (b ^^^ W) a W m))).symm)]
+  exact t1_R1 m W hW hW0
+
+/-- **THE ROUTING'S FOUR RANK-ONE TERMS TOTAL `−16`.**  Terms 4, 5, 7 and 8 of Tier 145:
+    the two `Π·E` / `E·Π` sums of Tier 137 with their weights evaluated (`ε(W)=1`, `σ(W,W)=−1`,
+    `σ(0,W)=1`, `ε(0)=−1`), and the two isolated corner points at `−8` each. -/
+theorem t1_rank1_block (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    epsZero W * sigRow W W * (-4 * epsZero 0 *
+        sumLtI (2^(m+1)) (fun b => epsZero b * sigRow b W * (P3 W b W m * P3 b 0 W m)))
+      + sumLtI (2^(m+1)) (fun a => epsZero a * sigRow a W *
+          (epsZero 0 * sigRow 0 W * (P3 a 0 W m * (-4 * (epsZero W * P3 W a W m)))))
+      + epsZero W * sigRow W W * (epsZero W * sigRow W W * (P3 W W W m * (-8 * epsZero 0)))
+      + epsZero 0 * sigRow 0 W * (epsZero 0 * sigRow 0 W * (P3 0 0 W m * (-8 * epsZero W)))
+      = -16 := by
+  have hs0 : sigRow 0 W = 1 := by unfold sigRow; rw [Nat.zero_xor, if_neg hW0]
+  have hsW : sigRow W W = -1 := by unfold sigRow; rw [Nat.xor_self, if_pos rfl]
+  have heW : epsZero W = 1 := by unfold epsZero; rw [if_neg hW0]
+  have he0 : epsZero 0 = -1 := by unfold epsZero; rw [if_pos rfl]
+  have h5 : sumLtI (2^(m+1)) (fun a => epsZero a * sigRow a W *
+        (epsZero 0 * sigRow 0 W * (P3 a 0 W m * (-4 * (epsZero W * P3 W a W m)))))
+      = 4 * sumLtI (2^(m+1)) (fun b => (epsZero b * sigRow b W) * (P3 b 0 W m * P3 W b W m)) := by
+    rw [← sumLtI_mul]
+    exact sumLtI_congr _ _ _ (fun a _ => by rw [hs0, heW, he0]; grind)
+  rw [h5, t1_rank1_sum m W hW hW0,
+      sumLtI_congr _ (fun b => epsZero b * sigRow b W * (P3 W b W m * P3 b 0 W m))
+        (fun b => (epsZero b * sigRow b W) * (P3 W b W m * P3 b 0 W m)) (fun b _ => rfl),
+      t1_rank1_sum' m W hW hW0,
+      hs0, hsW, heW, he0, P3_zero_zero m W, P3_diag W W m hW hW hW0]
+  grind
+
+/-- The `a`-pinned block of `core_pin_cba`'s RHS, distributed.  `p` is the pin (`W` or `0`). -/
+theorem core_block_pinned (m W p : Nat) :
+    sumLtI (2^(m+1)) (fun b => P3 p b W m *
+        (sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c p W m)
+          - 2 * (P3 b 0 W m * P3 0 p W m)))
+      - 2 * (P3 p W W m *
+          (sumLtI (2^(m+1)) (fun c => P3 W c W m * P3 c p W m)
+            - 2 * (P3 W 0 W m * P3 0 p W m)))
+      - 2 * (P3 p 0 W m *
+          (sumLtI (2^(m+1)) (fun c => P3 0 c W m * P3 c p W m)
+            - 2 * (P3 0 0 W m * P3 0 p W m)))
+      = sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+            P3 p b W m * (P3 b c W m * P3 c p W m)))
+        - 2 * sumLtI (2^(m+1)) (fun b => P3 p b W m * (P3 b 0 W m * P3 0 p W m))
+        - 2 * sumLtI (2^(m+1)) (fun c => P3 p W W m * (P3 W c W m * P3 c p W m))
+        + 4 * (P3 p W W m * (P3 W 0 W m * P3 0 p W m))
+        - 2 * sumLtI (2^(m+1)) (fun c => P3 p 0 W m * (P3 0 c W m * P3 c p W m))
+        + 4 * (P3 p 0 W m * (P3 0 0 W m * P3 0 p W m)) := by
+  have hb : ∀ b, P3 p b W m *
+      (sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c p W m)
+        - 2 * (P3 b 0 W m * P3 0 p W m))
+      = sumLtI (2^(m+1)) (fun c => P3 p b W m * (P3 b c W m * P3 c p W m))
+        - 2 * (P3 p b W m * (P3 b 0 W m * P3 0 p W m)) := by
+    intro b
+    rw [sumLtI_mul (2^(m+1)) (P3 p b W m) (fun c => P3 b c W m * P3 c p W m)]
+    grind
+  have h2 : P3 p W W m *
+      (sumLtI (2^(m+1)) (fun c => P3 W c W m * P3 c p W m)
+        - 2 * (P3 W 0 W m * P3 0 p W m))
+      = sumLtI (2^(m+1)) (fun c => P3 p W W m * (P3 W c W m * P3 c p W m))
+        - 2 * (P3 p W W m * (P3 W 0 W m * P3 0 p W m)) := by
+    rw [sumLtI_mul (2^(m+1)) (P3 p W W m) (fun c => P3 W c W m * P3 c p W m)]
+    grind
+  have h3 : P3 p 0 W m *
+      (sumLtI (2^(m+1)) (fun c => P3 0 c W m * P3 c p W m)
+        - 2 * (P3 0 0 W m * P3 0 p W m))
+      = sumLtI (2^(m+1)) (fun c => P3 p 0 W m * (P3 0 c W m * P3 c p W m))
+        - 2 * (P3 p 0 W m * (P3 0 0 W m * P3 0 p W m)) := by
+    rw [sumLtI_mul (2^(m+1)) (P3 p 0 W m) (fun c => P3 0 c W m * P3 c p W m)]
+    grind
+  rw [sumLtI_congr _ _ _ (fun b _ => hb b), sumLtI_sub, sumLtI_mul, h2, h3]
+  grind
+
+/-- The FREE block, distributed.  Its summand at each `a` is `core_block_pinned`'s left side
+    with the pin taken to be `a` itself, so the same lemma serves; what is left is splitting the
+    outer sum across the six pieces. -/
+theorem core_block_free (m W : Nat) :
+    sumLtI (2^(m+1)) (fun a =>
+        sumLtI (2^(m+1)) (fun b => P3 a b W m *
+            (sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c a W m)
+              - 2 * (P3 b 0 W m * P3 0 a W m)))
+        - 2 * (P3 a W W m *
+            (sumLtI (2^(m+1)) (fun c => P3 W c W m * P3 c a W m)
+              - 2 * (P3 W 0 W m * P3 0 a W m)))
+        - 2 * (P3 a 0 W m *
+            (sumLtI (2^(m+1)) (fun c => P3 0 c W m * P3 c a W m)
+              - 2 * (P3 0 0 W m * P3 0 a W m))))
+      = sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+            P3 a b W m * (P3 b c W m * P3 c a W m))))
+        - 2 * sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+            P3 a b W m * (P3 b 0 W m * P3 0 a W m)))
+        - 2 * sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun c =>
+            P3 a W W m * (P3 W c W m * P3 c a W m)))
+        + 4 * sumLtI (2^(m+1)) (fun a => P3 a W W m * (P3 W 0 W m * P3 0 a W m))
+        - 2 * sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun c =>
+            P3 a 0 W m * (P3 0 c W m * P3 c a W m)))
+        + 4 * sumLtI (2^(m+1)) (fun a => P3 a 0 W m * (P3 0 0 W m * P3 0 a W m)) := by
+  rw [sumLtI_congr _ _ _ (fun a _ => core_block_pinned m W a)]
+  rw [sumLtI_add, sumLtI_sub, sumLtI_add, sumLtI_sub, sumLtI_sub,
+      sumLtI_mul, sumLtI_mul, sumLtI_mul, sumLtI_mul, sumLtI_mul]
+
+/-- **`CORE = s3 − 6(M³)₀₀ − 4(M³)_WW + 64 − 32H`.** -/
+theorem core_value (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun a => epsZero a * sigRow a W *
+        sumLtI (2^(m+1)) (fun b => epsZero b * sigRow b W *
+          (P3 a b W m * sumLtI (2^(m+1)) (fun c => epsZero c * (P3 b c W m * P3 c a W m)))))
+      = sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+            P3 a b W m * (P3 b c W m * P3 c a W m))))
+        - 6 * sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+            P3 0 b W m * (P3 b c W m * P3 c 0 W m)))
+        - 4 * sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+            P3 W b W m * (P3 b c W m * P3 c W W m)))
+        + 64 - 32 * ((2^(m+1) : Nat) : Int) := by
+  have hs := corePins_single m W
+  have hc := coreCorners m W hW hW0
+  rw [core_pin_cba m W hW hW0, core_block_free m W,
+      core_block_pinned m W W, core_block_pinned m W 0,
+      corePin_00 m W hW hW0, corePin_0W m W hW hW0, corePin_W0 m W hW hW0,
+      corePin_WW m W hW hW0, corePin_0f0 m W hW hW0, corePin_f00 m W hW hW0,
+      corePin_fW0 m W hW hW0, corePin_Wf0 m W hW hW0]
+  grind
+
+/-- `R1`'s coset form of `cp2` reindexes to the canonical one — the mirror of `cp2_reindex`,
+    with the seam shift on the SECOND factor's first argument. -/
+theorem cp2_reindex_R1 (m W : Nat) (hW : W < 2^(m+1)) :
+    sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b => P3 a b W m * P3 (b ^^^ W) a W m))
+      = sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun c => P3 a c W m * P3 c (a ^^^ W) W m)) := by
+  rw [sumLtI_swap (2^(m+1)) (2^(m+1)) (fun a b => P3 a b W m * P3 (b ^^^ W) a W m),
+      sumLtI_xor (m+1) W hW
+        (fun b => sumLtI (2^(m+1)) (fun a => P3 a b W m * P3 (b ^^^ W) a W m))]
+  refine sumLtI_congr _ _ _ (fun b _ => sumLtI_congr _ _ _ (fun a _ => ?_))
+  have hxc : b ^^^ W ^^^ W = b := by
+    rw [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+  rw [hxc]
+  exact Int.mul_comm _ _
+
+/-- **THE `T1` LEG, CLOSED.**  `T1 = s3 + 4·cp2 − 6·(M³)₀₀ − 4·(M³)_WW + 64 − 36H`. -/
+theorem t1_master (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+        P3 a b W m * (E01 b c W * P3 b c W m * (E10 c a W * P3 c a W m)))))
+      = tri3 (2^(m+1)) (fun x y => P3 x y W m)
+        + 4 * sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun c =>
+            P3 a c W m * P3 c (a ^^^ W) W m))
+        - 6 * sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+            P3 0 b W m * (P3 b c W m * P3 c 0 W m)))
+        - 4 * sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+            P3 W b W m * (P3 b c W m * P3 c W W m)))
+        + 64 - 36 * ((2^(m+1) : Nat) : Int) := by
+  unfold tri3
+  have hcore := core_value m W hW hW0
+  have h2 := t1_term2_eq_R2 m W hW hW0
+  have h2' := t1_R2 m W hW hW0
+  have h3 := t1_term3_eq_R1 m W hW hW0
+  have hr := t1_rank1_block m W hW hW0
+  have h6 := t1_diag_sum m W hW hW0
+  have hx2 := cp2_reindex m W hW
+  have hx1 := cp2_reindex_R1 m W hW
+  rw [t1_routed m W hW hW0]
+  grind
+
+
 /-! ### Tier 158 — spine isolation (`hiso`) at the reference (kimi)
 
     No defect edge touches the spine `{0, 1, 2^m, 2^m+1}` at `W = 1`, within the level's
