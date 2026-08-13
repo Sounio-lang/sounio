@@ -24649,4 +24649,44 @@ theorem defect_regular_free (m : Nat) (hm : 2 ≤ m)
       = ((2^m - 4 : Nat) : Int) :=
   defect_regular m hm (eDef_flipL m hm) (eDef_flipR m hm) (Rp_R3 m) x hx hxV
 
+/-! ### Tier 147 — `CORE`'s pin expansion, inner two levels
+
+    `CORE` is `Σ_a εσ(a)·Σ_b εσ(b)·(P3(a,b)·Σ_c ε(c)·P3(b,c)P3(c,a))`, and its 18 terms come from
+    three pins: `ε` on `c`, `ε·σ` on `b`, `ε·σ` on `a`.  This tier does the inner two, leaving the
+    outer `a`-pin and the match onto Tiers 125–129.
+
+    The `c`-pin is `sumLtI_epsZero` outright.  The `b`-pin needs the constant-value congruence
+    before each `sumLtI_single`, as Tier 141 established. -/
+
+/-- The `c`-pin: `Σ_c ε(c)·P3(b,c)P3(c,a) = Σ_c P3(b,c)P3(c,a) − 2·P3(b,0)P3(0,a)`. -/
+theorem core_pin_c (m a b W : Nat) :
+    sumLtI (2^(m+1)) (fun c => epsZero c * (P3 b c W m * P3 c a W m))
+      = sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c a W m)
+        - 2 * (P3 b 0 W m * P3 0 a W m) :=
+  sumLtI_epsZero (2^(m+1)) (Nat.two_pow_pos (m+1)) _
+
+/-- The `b`-pin, on top of the `c`-pin: three terms. -/
+theorem core_pin_cb (m a W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun b => epsZero b * sigRow b W *
+        (P3 a b W m * sumLtI (2^(m+1)) (fun c => epsZero c * (P3 b c W m * P3 c a W m))))
+      = sumLtI (2^(m+1)) (fun b => P3 a b W m *
+            (sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c a W m)
+              - 2 * (P3 b 0 W m * P3 0 a W m)))
+        - 2 * (P3 a W W m *
+            (sumLtI (2^(m+1)) (fun c => P3 W c W m * P3 c a W m)
+              - 2 * (P3 W 0 W m * P3 0 a W m)))
+        - 2 * (P3 a 0 W m *
+            (sumLtI (2^(m+1)) (fun c => P3 0 c W m * P3 c a W m)
+              - 2 * (P3 0 0 W m * P3 0 a W m))) := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hs0 : sigRow 0 W = 1 := by unfold sigRow; rw [Nat.zero_xor, if_neg hW0]
+  have h1 : sumLtI (2^(m+1)) (fun b => epsZero b * sigRow b W *
+        (P3 a b W m * sumLtI (2^(m+1)) (fun c => epsZero c * (P3 b c W m * P3 c a W m))))
+      = sumLtI (2^(m+1)) (fun b => epsZero b * (sigRow b W *
+          (P3 a b W m * (sumLtI (2^(m+1)) (fun c => P3 b c W m * P3 c a W m)
+            - 2 * (P3 b 0 W m * P3 0 a W m))))) :=
+    sumLtI_congr _ _ _ (fun b _ => by rw [core_pin_c m a b W]; grind)
+  rw [h1, sumLtI_epsZero _ hp, sumLtI_sigRow (2^(m+1)) W hW, hs0]
+  grind
+
 end SounioZDFiberAntisym
