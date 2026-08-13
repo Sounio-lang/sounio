@@ -25279,6 +25279,109 @@ theorem t1_closed (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
   rw [t1_master m W hW hW0, walk3_eq_quad m W hW, walk3_at_W m W hW hW0]
   grind
 
+/-! ### Tier 157 — **THE LEVEL RECURSION IS A THEOREM**: `s3(m+1) = 8·s3 + 24·cp2 + 72H − 176`
+
+    The three orthant legs are now in the same basis, so Tier 90's full decomposition closes.
+
+      `tri3_level_transfer`   `s3(m+1) = s3 + 3·T1 + 3·T2 + T3`      (Tier 90, unconditional)
+      `t1_closed`             `T1 = s3 + 4·cp2 + 2·Q − 8`            (Tier 155)
+      `t2_closed`             `T2 = s3 + 4·cp2 − 4·Q + 24H − 48`     (below; Tier 132 + `walk3_at_W`)
+      `weight3_quad`          `T3 = s3 + 6·Q − 8`                    (Tier 118, unconditional)
+
+    **`Q` cancels exactly**: `3·(+2Q) + 3·(−4Q) + (+6Q) = 0`.  That is what makes the recursion
+    unconditional — `Q`'s numeric value (Tier 119's `Q = 8H − 28`) holds on the reachable labels
+    only, and the recursion never needs it.  The remaining coefficients are
+    `1 + 3 + 3 + 1 = 8` on `s3`, `3·4 + 3·4 = 24` on `cp2`, `3·24 = 72` on `H`, and
+    `3·(−8) + 3·(−48) + (−8) = −176`.
+
+    This is the `[8, 24]` row of the lane's 2×2 transfer matrix (the `2026-08-08` fit), proved
+    rather than fitted, with no seam hypothesis and no restriction on `W` beyond `W ≠ 0`.
+
+    ⚠ SCOPE.  The recursion is SYMBOLIC — it carries `cp2` as an unevaluated object.  The numeric
+    closed form needs `cp2 = −(H−2)(H−6)`, which is Tier 95/109's `cp2_count` and is NOT
+    unconditional in general; keep the two statements separate. -/
+
+/-- **`T2 = s3 + 4·cp2 − 4·Q + 24H − 48`.**  Tier 132's one-scalar form with Tier 124's
+    `walk3_at_W` substituted — the T2 twin of `t1_closed`, and unconditional for the same reason. -/
+theorem t2_closed (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+        E01 a b W * P3 a b W m
+          * (E11 b c W * P3 b c W m * (E10 c a W * P3 c a W m)))))
+      = tri3 (2^(m+1)) (fun x y => P3 x y W m)
+        + 4 * sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun c =>
+            P3 a c W m * P3 c (a ^^^ W) W m))
+        - 4 * sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+            P3 0 b W m * (P3 b c W m * P3 0 c W m)))
+        + 24 * ((2^(m+1) : Nat) : Int) - 48 := by
+  rw [weight2_T2_one_scalar m W hW hW0, walk3_at_W m W hW hW0]
+  grind
+
+/-- **THE LEVEL RECURSION.**  `s3(m+1) = 8·s3(m) + 24·cp2(m) + 72·2^(m+1) − 176`, for every
+    level and every label with `W ≠ 0`, maximal seam included.  `Q` cancels. -/
+theorem s3_level_recursion (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    tri3 (2^(m+1) + 2^(m+1)) (fun x y => P3 x y W (m+1))
+      = 8 * tri3 (2^(m+1)) (fun x y => P3 x y W m)
+        + 24 * sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun c =>
+            P3 a c W m * P3 c (a ^^^ W) W m))
+        + 72 * ((2^(m+1) : Nat) : Int) - 176 := by
+  have h1 := t1_closed m W hW hW0
+  have h2 := t2_closed m W hW hW0
+  have h3 : sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+        E11 a b W * P3 a b W m
+          * (E11 b c W * P3 b c W m * (E11 c a W * P3 c a W m)))))
+      = tri3 (2^(m+1)) (fun x y => P3 x y W m)
+        + 6 * sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+              P3 0 b W m * (P3 b c W m * P3 0 c W m)))
+        - 8 := by
+    rw [← weight3_quad m W hW hW0]
+    unfold tri3
+    rfl
+  rw [tri3_level_transfer m W hW hW0]
+  grind
+
+/-! ### Tier 157b — the recursion made NUMERIC on the power-of-two labels
+
+    The recursion above carries `cp2` unevaluated.  On the labels the deviation law actually
+    compares — `W = 2^p`, every level at or above `p` — `cp2` has a closed value with NO open
+    hypothesis, by chaining three existing tiers: `starP_all_pow2_labels` (Tier 108) discharges
+    the interior hypothesis of `cp2_summand_law` (Tier 109), whose conclusion is exactly the
+    pointwise hypothesis of `cp2_count` (Tier 95).  The only work is the index bookkeeping
+    `p + 1 + j = p + j + 1`.
+
+      `cp2 = −(H − 2)(H − 6)`        (`cp2_pow2_labels`)
+
+    so the level map on this class is a single affine recursion in `s3`, with everything else a
+    polynomial in `H`.  Iterating it from a base level gives the closed form; the base case is a
+    finite computation, not new structure. -/
+
+/-- **`cp2 = −(H−2)(H−6)` AT `W = 2^p`, unconditional.**  Tier 95's count with its pointwise
+    hypothesis discharged by Tiers 108/109. -/
+theorem cp2_pow2_labels (p j : Nat) :
+    sumLtI (2^(p+j+1)) (fun a => sumLtI (2^(p+j+1)) (fun b =>
+        P3 a b (2^p) (p+j) * P3 b (a ^^^ 2^p) (2^p) (p+j)))
+      = -((((2^(p+j+1) : Nat) : Int) - 2) * ((((2^(p+j+1) : Nat) : Int)) - 6)) := by
+  have hWlt : (2:Nat)^p < 2^(p+j+1) := Nat.pow_lt_pow_right (by omega) (by omega)
+  have hW0 : (2:Nat)^p ≠ 0 := Nat.ne_of_gt (Nat.two_pow_pos p)
+  have hint : ∀ a b, a < 2^(p+j+1) → b < 2^(p+j+1) → a ≠ 0 → b ≠ 0 →
+      a ≠ 2^p → b ≠ 2^p → a ≠ b → b ≠ a ^^^ 2^p → starP (p+j+1) a b (2^p) := by
+    have he : p + 1 + j = p + j + 1 := Nat.add_right_comm p 1 j
+    have hall := starP_all_pow2_labels p j
+    rw [he] at hall
+    exact hall
+  exact cp2_count (p+j) (2^p) hWlt hW0 (cp2_summand_law (p+j) (2^p) hWlt hW0 hint)
+
+/-- **THE NUMERIC LEVEL RECURSION** on `W = 2^p`:
+    `s3(m+1) = 8·s3(m) − 24(H−2)(H−6) + 72H − 176`, no open hypothesis. -/
+theorem s3_recursion_pow2 (p j : Nat) :
+    tri3 (2^(p+j+1) + 2^(p+j+1)) (fun x y => P3 x y (2^p) (p+j+1))
+      = 8 * tri3 (2^(p+j+1)) (fun x y => P3 x y (2^p) (p+j))
+        - 24 * ((((2^(p+j+1) : Nat) : Int) - 2) * ((((2^(p+j+1) : Nat) : Int)) - 6))
+        + 72 * ((2^(p+j+1) : Nat) : Int) - 176 := by
+  have hWlt : (2:Nat)^p < 2^(p+j+1) := Nat.pow_lt_pow_right (by omega) (by omega)
+  have hW0 : (2:Nat)^p ≠ 0 := Nat.ne_of_gt (Nat.two_pow_pos p)
+  rw [s3_level_recursion (p+j) (2^p) hWlt hW0, cp2_pow2_labels p j]
+  grind
+
 
 /-! ### Tier 158 — spine isolation (`hiso`) at the reference (kimi)
 
