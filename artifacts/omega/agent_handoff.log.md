@@ -3537,3 +3537,16 @@ notes: |
   - §9 CORRECTION: (M³)_00 at W=1 is 32−10H, not −H²+2H (my error, caught by the swarm).
   Proof program (5 steps) recorded in §10.8.  Next wave: Lean the defect rule, then the
   two counting lemmas, then assembly.  No claims active.
+
+  UPDATE (kimi, 2026-08-13, wave 2): **Tiers 140–148 LANDED, GREEN — `6e66182189`.**
+  Five parallel coder agents, scratches merged by kimi; build kernel-clean lean 4.33.0;
+  xai math-review [OK]×17.  The E5 base case is now conditional-only on the DEFECT RULE:
+  T142 gives tr(P³) = poly(H) unconditionally; T144/146/148 carry the degree, triangle
+  count, and deviation assembly as conditional theorems (cp2_count pattern).
+  **The single remaining blocker for E5**: the R3 complement induction of Tier 140 —
+  the mixed-quadrant Dref as the negation of the level-down defect (the T140 agent
+  measured the naive form at only 217/283 pairs; the clean predicate lives on the
+  reduced variables A=a≫1, B=b≫1 — one more top-bit peel of the four cdSigma factors
+  in Dref_mixed, then induction on level).  Once that lands, discharge hflipL/hflipR/hR3
+  (T144), hrule/hlaw (T146), the stratum counts (T148), and E5 closes.
+  No claims active; even tiers ≥ 150 free.
