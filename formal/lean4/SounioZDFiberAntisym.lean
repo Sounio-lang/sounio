@@ -26669,4 +26669,432 @@ set_option maxRecDepth 100000 in
     enumeration of `.tmp/tier162_probe.py`; `288 = 288·[3,3]₂`). -/
 theorem t3Count_four : t3Count 4 = 288 := by decide
 
+/-! # Tier 164 — `hdc`, the 18-count: the LINE LAW (PARTIAL PROGRESS)
+
+    Target (Tier 162's remaining hypothesis, `hdc`):
+      `168 * ordQualOrbit (m-1) = 108 * indTripleCount (m-1)`
+    equivalently `ordQualOrbit k = 108 · [k,3]₂` for all `k` — 18 qualifying
+    UNORDERED orbit-triples per 3-dim `F₂`-subspace (measured: `k=0,1,2`
+    trivially both sides `0`; `k=3`: `ordQualOrbit 3 = 108` kernel-checked
+    against `indTripleCount 3 = 168`; `k=4,5` checked by an external Python
+    transcription of `dpar`, `168·1620 = 108·2520` and `168·16740 = 108·26040`,
+    both exact).
+
+    Tier 162's handoff flagged the REMAINING open piece precisely: "the
+    measured line law (each F₂-line's dpar cyclic sum = 1) handles the 7
+    non-base triples but does NOT alone give 18" — i.e. the line law was
+    KNOWN to be necessary but not sufficient, and had not yet been proved.
+
+    **THIS TIER PROVES THE LINE LAW UNCONDITIONALLY** (`dpar_line_law`) and
+    its direct corollary (`qqual_independent`: every qualifying triple is
+    `F₂`-independent).  The 18-count among the 28 independent bases of each
+    subspace — the part the Tier 162 note already identified as insufficient
+    from the line law alone — remains OPEN; see the docstring on
+    `dpar_line_law` and the Tier 164 handoff log entry for what was tried and
+    why the natural induction is harder here (the q-binomial Pascal
+    recursion `[n+1,3]₂ = [n,3]₂ + 2^(n-2)·[n,2]₂` means the induction step
+    would need to independently track a 2-dimensional sub-count, not just
+    carry the same statement down one level the way the line law's induction
+    does). -/
+
+/-- **Strip-depth parity is LEVEL-STABLE.**  Once `X, Y` are both below `2^n`,
+    raising the ambient level by one more bit (to `n+1`, still testing `X, Y`
+    unchanged) never changes `dpar`'s value.  Holds completely
+    unconditionally: the `X = 0 ∨ Y = 0 ∨ X = Y` guard-fire cases at level
+    `n+1` are handled by the companion lemmas below, which show the SAME
+    value (`1`) already holds at level `n` directly, without needing the
+    recursive unfold to literally agree syntactically. -/
+theorem dpar_zero_left (n Y : Nat) : dpar n 0 Y = 1 := by
+  induction n generalizing Y with
+  | zero => rfl
+  | succ n _ =>
+    rw [dpar_succ']
+    have : (0:Nat) % 2^n = 0 := Nat.zero_mod _
+    rw [if_pos (Or.inl this)]
+
+theorem dpar_zero_right (n X : Nat) : dpar n X 0 = 1 := by
+  induction n generalizing X with
+  | zero => rfl
+  | succ n _ =>
+    rw [dpar_succ']
+    have : (0:Nat) % 2^n = 0 := Nat.zero_mod _
+    rw [if_pos (Or.inr (Or.inl this))]
+
+theorem dpar_diag (n X : Nat) : dpar n X X = 1 := by
+  induction n generalizing X with
+  | zero => rfl
+  | succ n _ =>
+    rw [dpar_succ']
+    rw [if_pos (Or.inr (Or.inr rfl))]
+
+theorem dpar_stable (n X Y : Nat) (hX : X < 2^n) (hY : Y < 2^n) :
+    dpar (n+1) X Y = dpar n X Y := by
+  rw [dpar_succ']
+  rw [Nat.mod_eq_of_lt hX, Nat.mod_eq_of_lt hY]
+  by_cases hg : X = 0 ∨ Y = 0 ∨ X = Y
+  · rw [if_pos hg]
+    rcases hg with h | h | h
+    · subst h; rw [dpar_zero_left]
+    · subst h; rw [dpar_zero_right]
+    · subst h; rw [dpar_diag]
+  · rw [if_neg hg, if_pos (Or.inl ⟨hX, hY⟩)]
+
+/-- Same-side HIGH step: both arguments in `[2^n, 2^(n+1))`. -/
+theorem dpar_same_hi (n X Y : Nat) (hX : 2^n ≤ X) (hX' : X < 2^(n+1)) (hY : 2^n ≤ Y)
+    (hY' : Y < 2^(n+1)) :
+    dpar (n+1) X Y = dpar n (X - 2^n) (Y - 2^n) := by
+  have hXm : X % 2^n = X - 2^n := by
+    rw [Nat.mod_eq_sub_mod hX, Nat.mod_eq_of_lt (by omega)]
+  have hYm : Y % 2^n = Y - 2^n := by
+    rw [Nat.mod_eq_sub_mod hY, Nat.mod_eq_of_lt (by omega)]
+  rw [dpar_succ', hXm, hYm]
+  by_cases hg : X - 2^n = 0 ∨ Y - 2^n = 0 ∨ X - 2^n = Y - 2^n
+  · rw [if_pos hg]
+    rcases hg with h | h | h
+    · rw [h, dpar_zero_left]
+    · rw [h, dpar_zero_right]
+    · rw [h, dpar_diag]
+  · rw [if_neg hg, if_pos (Or.inr ⟨hX, hY⟩)]
+
+/-- Cross step: `X` low, `Y` high. -/
+theorem dpar_cross_lo_hi (n X Y : Nat) (hX : X < 2^n) (hY : 2^n ≤ Y) (hY' : Y < 2^(n+1)) :
+    dpar (n+1) X Y = if X = 0 ∨ Y - 2^n = 0 ∨ X = Y - 2^n then 1
+      else (if dpar n X (Y - 2^n) = 0 then 1 else 0) := by
+  have hYm : Y % 2^n = Y - 2^n := by
+    rw [Nat.mod_eq_sub_mod hY, Nat.mod_eq_of_lt (by omega)]
+  rw [dpar_succ', Nat.mod_eq_of_lt hX, hYm]
+  by_cases hg : X = 0 ∨ Y - 2^n = 0 ∨ X = Y - 2^n
+  · rw [if_pos hg, if_pos hg]
+  · rw [if_neg hg, if_neg hg]
+    have hnotside : ¬((X < 2^n ∧ Y < 2^n) ∨ (2^n ≤ X ∧ 2^n ≤ Y)) := by
+      rintro (⟨-, h2⟩ | ⟨h1, -⟩)
+      · omega
+      · omega
+    rw [if_neg hnotside]
+
+/-- Cross step: `X` high, `Y` low. -/
+theorem dpar_cross_hi_lo (n X Y : Nat) (hX : 2^n ≤ X) (hX' : X < 2^(n+1)) (hY : Y < 2^n) :
+    dpar (n+1) X Y = if X - 2^n = 0 ∨ Y = 0 ∨ X - 2^n = Y then 1
+      else (if dpar n (X - 2^n) Y = 0 then 1 else 0) := by
+  have hXm : X % 2^n = X - 2^n := by
+    rw [Nat.mod_eq_sub_mod hX, Nat.mod_eq_of_lt (by omega)]
+  rw [dpar_succ', hXm, Nat.mod_eq_of_lt hY]
+  by_cases hg : X - 2^n = 0 ∨ Y = 0 ∨ X - 2^n = Y
+  · rw [if_pos hg, if_pos hg]
+  · rw [if_neg hg, if_neg hg]
+    have hnotside : ¬((X < 2^n ∧ Y < 2^n) ∨ (2^n ≤ X ∧ 2^n ≤ Y)) := by
+      rintro (⟨h1, -⟩ | ⟨-, h2⟩)
+      · omega
+      · omega
+    rw [if_neg hnotside]
+
+theorem hi_div_eq_one (n x : Nat) (h1 : 2^n ≤ x) (h2 : x < 2^(n+1)) : x / 2^n = 1 := by
+  apply Nat.div_eq_of_lt_le
+  · omega
+  · have : (2:Nat)^(n+1) = 2 * 2^n := by rw [Nat.pow_succ]; omega
+    omega
+
+theorem lo_div_eq_zero (n x : Nat) (h : x < 2^n) : x / 2^n = 0 := Nat.div_eq_of_lt h
+
+/-- Splits `a ^^^ b` (for `a,b < 2^(n+1)`) across the level-`n` seam: records
+    whether the result is high or low and gives its reduced value, purely from
+    the high/low status of `a,b` (no case bash on `dpar` needed here). -/
+theorem xor_seam_lo_lo (n a b : Nat) (ha : a < 2^n) (hb : b < 2^n) :
+    a ^^^ b < 2^n := Nat.xor_lt_two_pow ha hb
+
+theorem xor_seam_hi_hi (n a b : Nat) (ha1 : 2^n ≤ a) (ha2 : a < 2^(n+1))
+    (hb1 : 2^n ≤ b) (hb2 : b < 2^(n+1)) :
+    a ^^^ b < 2^n ∧ a ^^^ b = (a - 2^n) ^^^ (b - 2^n) := by
+  have hdiv : (a ^^^ b) / 2^n = 0 := by
+    rw [Nat.xor_div_two_pow, hi_div_eq_one n a ha1 ha2, hi_div_eq_one n b hb1 hb2]
+    decide
+  have hmod : (a ^^^ b) % 2^n = (a - 2^n) ^^^ (b - 2^n) := by
+    rw [Nat.xor_mod_two_pow]
+    congr 1
+    · rw [Nat.mod_eq_sub_mod ha1, Nat.mod_eq_of_lt (by omega)]
+    · rw [Nat.mod_eq_sub_mod hb1, Nat.mod_eq_of_lt (by omega)]
+  have hlt : (a ^^^ b) % 2^n < 2^n := Nat.mod_lt _ (Nat.two_pow_pos n)
+  have hrec : 2^n * ((a ^^^ b) / 2^n) + (a ^^^ b) % 2^n = a ^^^ b := Nat.div_add_mod _ _
+  rw [hdiv] at hrec
+  refine ⟨?_, ?_⟩
+  · omega
+  · rw [← hmod]; omega
+
+theorem xor_seam_lo_hi (n a b : Nat) (ha : a < 2^n) (hb1 : 2^n ≤ b) (hb2 : b < 2^(n+1)) :
+    2^n ≤ a ^^^ b ∧ a ^^^ b < 2^(n+1) ∧ (a ^^^ b) - 2^n = a ^^^ (b - 2^n) := by
+  have hdiv : (a ^^^ b) / 2^n = 1 := by
+    rw [Nat.xor_div_two_pow, lo_div_eq_zero n a ha, hi_div_eq_one n b hb1 hb2]
+    decide
+  have hmod : (a ^^^ b) % 2^n = a ^^^ (b - 2^n) := by
+    rw [Nat.xor_mod_two_pow]
+    congr 1
+    · exact Nat.mod_eq_of_lt ha
+    · rw [Nat.mod_eq_sub_mod hb1, Nat.mod_eq_of_lt (by omega)]
+  have hlt : (a ^^^ b) % 2^n < 2^n := Nat.mod_lt _ (Nat.two_pow_pos n)
+  have hrec : 2^n * ((a ^^^ b) / 2^n) + (a ^^^ b) % 2^n = a ^^^ b := Nat.div_add_mod _ _
+  rw [hdiv] at hrec
+  refine ⟨by omega, by omega, ?_⟩
+  rw [← hmod]; omega
+
+theorem xor_seam_hi_lo (n a b : Nat) (ha1 : 2^n ≤ a) (ha2 : a < 2^(n+1)) (hb : b < 2^n) :
+    2^n ≤ a ^^^ b ∧ a ^^^ b < 2^(n+1) ∧ (a ^^^ b) - 2^n = (a - 2^n) ^^^ b := by
+  have hdiv : (a ^^^ b) / 2^n = 1 := by
+    rw [Nat.xor_div_two_pow, hi_div_eq_one n a ha1 ha2, lo_div_eq_zero n b hb]
+    decide
+  have hmod : (a ^^^ b) % 2^n = (a - 2^n) ^^^ b := by
+    rw [Nat.xor_mod_two_pow]
+    congr 1
+    · rw [Nat.mod_eq_sub_mod ha1, Nat.mod_eq_of_lt (by omega)]
+    · exact Nat.mod_eq_of_lt hb
+  have hlt : (a ^^^ b) % 2^n < 2^n := Nat.mod_lt _ (Nat.two_pow_pos n)
+  have hrec : 2^n * ((a ^^^ b) / 2^n) + (a ^^^ b) % 2^n = a ^^^ b := Nat.div_add_mod _ _
+  rw [hdiv] at hrec
+  refine ⟨by omega, by omega, ?_⟩
+  rw [← hmod]; omega
+
+/-- The generic "two flips cancel mod 2" arithmetic step, used identically in
+    all three non-trivial branches of the line-law induction. -/
+theorem flip_cancel_lemma (D1 D2 D3 : Nat) (h1 : D1 ≤ 1) (h3 : D3 ≤ 1)
+    (hIH : (D1 + D2 + D3) % 2 = 1) :
+    ((if D1 = 0 then (1:Nat) else 0) + D2 + (if D3 = 0 then (1:Nat) else 0)) % 2 = 1 := by
+  by_cases hd1 : D1 = 0 <;> by_cases hd3 : D3 = 0 <;> simp_all <;> omega
+
+theorem flip_cancel_lemma' (D1 D2 D3 : Nat) (h2 : D2 ≤ 1) (h3 : D3 ≤ 1)
+    (hIH : (D1 + D2 + D3) % 2 = 1) :
+    (D1 + (if D2 = 0 then (1:Nat) else 0) + (if D3 = 0 then (1:Nat) else 0)) % 2 = 1 := by
+  by_cases hd2 : D2 = 0 <;> by_cases hd3 : D3 = 0 <;> simp_all <;> omega
+
+theorem flip_cancel_lemma'' (D1 D2 D3 : Nat) (h1 : D1 ≤ 1) (h2 : D2 ≤ 1)
+    (hIH : (D1 + D2 + D3) % 2 = 1) :
+    ((if D1 = 0 then (1:Nat) else 0) + (if D2 = 0 then (1:Nat) else 0) + D3) % 2 = 1 := by
+  by_cases hd1 : D1 = 0 <;> by_cases hd2 : D2 = 0 <;> simp_all <;> omega
+
+/-- `x ^^^ y = 0 → x = y`. -/
+theorem xor_eq_zero_eq (x y : Nat) (h : x ^^^ y = 0) : x = y := by
+  have hh : x ^^^ (x ^^^ y) = x ^^^ 0 := by rw [h]
+  rw [← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor, Nat.xor_zero] at hh
+  exact hh.symm
+
+/-- Left-cancellation for `^^^`. -/
+theorem xor_left_cancel (x y z : Nat) (h : x ^^^ y = x ^^^ z) : y = z := by
+  have hh : x ^^^ (x ^^^ y) = x ^^^ (x ^^^ z) := by rw [h]
+  rwa [← Nat.xor_assoc, ← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor, Nat.zero_xor] at hh
+
+/-- **THE LINE LAW.**  Every "line" (dependent triple `a, b, a^^^b`, the three
+    nonzero points of an `F₂`-line through the origin) has ODD cyclic
+    strip-depth-parity sum — it NEVER qualifies (`qqual` needs the sum EVEN).
+    Proved by induction on the ambient level `n`, peeling one bit at a time in
+    lockstep across all three pairs via `dpar`'s own recursive structure:
+    the "both low" and "both high" top-bit patterns collapse directly to the
+    same statement one level down (`dpar_stable`/`dpar_same_hi`, no sign
+    change); the two "mixed" patterns pick up a flip on exactly TWO of the
+    three edges, which cancel mod 2, so the parity is preserved at every level
+    — except for two genuinely degenerate configurations (one of the two
+    "reduced" coordinates is itself `0`) where all three `dpar` values are
+    forced to `1` directly by the guard clauses, independent of the
+    induction hypothesis, and the sum is `3 ≡ 1` by direct computation.
+
+    STATUS: this closes the "line law" piece the Tier 162 handoff explicitly
+    flagged as necessary-but-known-insufficient.  It does NOT by itself close
+    `hdc` (the 18-count among the 28 independent bases per subspace is still
+    open) — see the `qqual_independent` corollary immediately below and the
+    Tier 164 handoff log entry for the full status and what remains. -/
+theorem dpar_line_law : ∀ n a b : Nat, a < 2^n → b < 2^n → a ≠ 0 → b ≠ 0 → a ≠ b →
+    (dpar n a b + dpar n b (a ^^^ b) + dpar n (a ^^^ b) a) % 2 = 1 := by
+  intro n
+  induction n with
+  | zero => intro a b ha hb _ _ _; omega
+  | succ n ih =>
+    intro a b ha hb ha0 hb0 hab
+    by_cases haH : a < 2^n
+    · by_cases hbH : b < 2^n
+      · -- case (0,0): both low — direct level-stability, no sign change
+        have hclow : a ^^^ b < 2^n := xor_seam_lo_lo n a b haH hbH
+        have e1 : dpar (n+1) a b = dpar n a b := dpar_stable n a b haH hbH
+        have e2 : dpar (n+1) b (a^^^b) = dpar n b (a^^^b) :=
+          dpar_stable n b (a^^^b) hbH hclow
+        have e3 : dpar (n+1) (a^^^b) a = dpar n (a^^^b) a :=
+          dpar_stable n (a^^^b) a hclow haH
+        rw [e1, e2, e3]
+        exact ih a b haH hbH ha0 hb0 hab
+      · -- case (0,1): a low, b high
+        replace hbH : 2^n ≤ b := by omega
+        obtain ⟨hclo, hchi, hceq⟩ := xor_seam_lo_hi n a b haH hbH hb
+        have e1 : dpar (n+1) a b =
+            if a = 0 ∨ (b - 2^n) = 0 ∨ a = b - 2^n then 1
+            else (if dpar n a (b - 2^n) = 0 then 1 else 0) :=
+          dpar_cross_lo_hi n a b haH hbH hb
+        have e2 : dpar (n+1) b (a^^^b) = dpar n (b - 2^n) ((a^^^b) - 2^n) :=
+          dpar_same_hi n b (a^^^b) hbH hb hclo hchi
+        have e3 : dpar (n+1) (a^^^b) a =
+            if ((a^^^b) - 2^n) = 0 ∨ a = 0 ∨ ((a^^^b) - 2^n) = a then 1
+            else (if dpar n ((a^^^b) - 2^n) a = 0 then 1 else 0) :=
+          dpar_cross_hi_lo n (a^^^b) a hclo hchi haH
+        rw [hceq] at e2 e3
+        by_cases hgb : b - 2^n = 0
+        · have hv1 : dpar (n+1) a b = 1 := by
+            rw [e1]; simp [hgb]
+          have hv2 : dpar (n+1) b (a^^^b) = 1 := by
+            rw [e2, hgb]; simp [dpar_zero_left]
+          have hv3 : dpar (n+1) (a^^^b) a = 1 := by
+            rw [e3, hgb]; simp
+          rw [hv1, hv2, hv3]
+        · by_cases hgeq : a = b - 2^n
+          · have hv1 : dpar (n+1) a b = 1 := by rw [e1]; simp [hgeq]
+            have hv2 : dpar (n+1) b (a^^^b) = 1 := by
+              rw [e2, ← hgeq]; simp [dpar_zero_right]
+            have hv3 : dpar (n+1) (a^^^b) a = 1 := by
+              rw [e3, ← hgeq]; simp
+            rw [hv1, hv2, hv3]
+          · have hnq1 : ¬(a = 0 ∨ (b - 2^n) = 0 ∨ a = b - 2^n) := by
+              rintro (h|h|h)
+              · exact ha0 h
+              · exact hgb h
+              · exact hgeq h
+            have hxne0 : a ^^^ (b - 2^n) ≠ 0 := by
+              intro h
+              exact hgeq ((xor_eq_zero_eq a (b - 2^n) h))
+            have hxnea : a ^^^ (b - 2^n) ≠ a := by
+              intro h
+              apply hgb
+              have h' : a ^^^ (b - 2^n) = a ^^^ 0 := by rw [h, Nat.xor_zero]
+              exact xor_left_cancel a (b - 2^n) 0 h'
+            have hnq3 : ¬((a^^^(b - 2^n)) = 0 ∨ a = 0 ∨ (a^^^(b - 2^n)) = a) := by
+              rintro (h|h|h)
+              · exact hxne0 h
+              · exact ha0 h
+              · exact hxnea h
+            rw [e1, e2, e3, if_neg hnq1, if_neg hnq3]
+            have hbLlt : b - 2^n < 2^n := by omega
+            have hIH := ih a (b - 2^n) haH hbLlt ha0 hgb hgeq
+            exact flip_cancel_lemma _ _ _ (dpar_le_one _ _ _) (dpar_le_one _ _ _) hIH
+    · replace haH : 2^n ≤ a := by omega
+      by_cases hbH : b < 2^n
+      · -- case (1,0): a high, b low
+        obtain ⟨hclo, hchi, hceq⟩ := xor_seam_hi_lo n a b haH ha hbH
+        have e1 : dpar (n+1) a b =
+            if (a - 2^n) = 0 ∨ b = 0 ∨ (a - 2^n) = b then 1
+            else (if dpar n (a - 2^n) b = 0 then 1 else 0) :=
+          dpar_cross_hi_lo n a b haH ha hbH
+        have e2 : dpar (n+1) b (a^^^b) =
+            if b = 0 ∨ ((a^^^b) - 2^n) = 0 ∨ b = (a^^^b) - 2^n then 1
+            else (if dpar n b ((a^^^b) - 2^n) = 0 then 1 else 0) :=
+          dpar_cross_lo_hi n b (a^^^b) hbH hclo hchi
+        have e3 : dpar (n+1) (a^^^b) a = dpar n ((a^^^b) - 2^n) (a - 2^n) :=
+          dpar_same_hi n (a^^^b) a hclo hchi haH ha
+        rw [hceq] at e2 e3
+        by_cases hga : a - 2^n = 0
+        · have hv1 : dpar (n+1) a b = 1 := by rw [e1]; simp [hga]
+          have hv2 : dpar (n+1) b (a^^^b) = 1 := by
+            rw [e2, hga]; simp
+          have hv3 : dpar (n+1) (a^^^b) a = 1 := by
+            rw [e3, hga]; simp [dpar_zero_right]
+          rw [hv1, hv2, hv3]
+        · by_cases hgeq : (a - 2^n) = b
+          · have hv1 : dpar (n+1) a b = 1 := by rw [e1]; simp [hgeq]
+            have hv2 : dpar (n+1) b (a^^^b) = 1 := by
+              rw [e2, hgeq]; simp
+            have hv3 : dpar (n+1) (a^^^b) a = 1 := by
+              rw [e3, hgeq]; simp [dpar_zero_left]
+            rw [hv1, hv2, hv3]
+          · have hnq1 : ¬((a - 2^n) = 0 ∨ b = 0 ∨ (a - 2^n) = b) := by
+              rintro (h|h|h)
+              · exact hga h
+              · exact hb0 h
+              · exact hgeq h
+            have hxne0 : (a - 2^n) ^^^ b ≠ 0 := by
+              intro h
+              exact hgeq (xor_eq_zero_eq (a - 2^n) b h)
+            have hxneb : (a - 2^n) ^^^ b ≠ b := by
+              intro h
+              apply hga
+              have h' : b ^^^ (a - 2^n) = b ^^^ 0 := by
+                rw [Nat.xor_comm b (a - 2^n), h, Nat.xor_zero]
+              exact xor_left_cancel b (a - 2^n) 0 h'
+            have hnq2 : ¬(b = 0 ∨ ((a - 2^n) ^^^ b) = 0 ∨ b = (a - 2^n) ^^^ b) := by
+              rintro (h|h|h)
+              · exact hb0 h
+              · exact hxne0 h
+              · exact hxneb h.symm
+            rw [e1, e2, e3, if_neg hnq1, if_neg hnq2]
+            have haLlt : a - 2^n < 2^n := by omega
+            have hIH := ih (a - 2^n) b haLlt hbH hga hb0 hgeq
+            exact flip_cancel_lemma'' _ _ _ (dpar_le_one _ _ _) (dpar_le_one _ _ _) hIH
+      · -- case (1,1): both high
+        replace hbH : 2^n ≤ b := by omega
+        obtain ⟨hclow, hceq⟩ := xor_seam_hi_hi n a b haH ha hbH hb
+        have e1 : dpar (n+1) a b = dpar n (a - 2^n) (b - 2^n) :=
+          dpar_same_hi n a b haH ha hbH hb
+        have e2 : dpar (n+1) b (a^^^b) =
+            if (b - 2^n) = 0 ∨ (a^^^b) = 0 ∨ (b - 2^n) = (a^^^b) then 1
+            else (if dpar n (b - 2^n) (a^^^b) = 0 then 1 else 0) :=
+          dpar_cross_hi_lo n b (a^^^b) hbH hb hclow
+        have e3 : dpar (n+1) (a^^^b) a =
+            if (a^^^b) = 0 ∨ (a - 2^n) = 0 ∨ (a^^^b) = a - 2^n then 1
+            else (if dpar n (a^^^b) (a - 2^n) = 0 then 1 else 0) :=
+          dpar_cross_lo_hi n (a^^^b) a hclow haH ha
+        by_cases hga : a - 2^n = 0
+        · have hv1 : dpar (n+1) a b = 1 := by rw [e1, hga]; simp [dpar_zero_left]
+          have hv2 : dpar (n+1) b (a^^^b) = 1 := by
+            rw [e2]; rw [hceq, hga]; simp
+          have hv3 : dpar (n+1) (a^^^b) a = 1 := by
+            rw [e3]; simp [hga]
+          rw [hv1, hv2, hv3]
+        · by_cases hgb : b - 2^n = 0
+          · have hv1 : dpar (n+1) a b = 1 := by rw [e1, hgb]; simp [dpar_zero_right]
+            have hv2 : dpar (n+1) b (a^^^b) = 1 := by
+              rw [e2]; simp [hgb]
+            have hv3 : dpar (n+1) (a^^^b) a = 1 := by
+              rw [e3]; rw [hceq, hgb]; simp
+            rw [hv1, hv2, hv3]
+          · have hxne0 : (a - 2^n) ^^^ (b - 2^n) ≠ 0 := by
+              intro h
+              exact hab (by
+                have heq := xor_eq_zero_eq (a - 2^n) (b - 2^n) h
+                omega)
+            have hxnea : (a - 2^n) ^^^ (b - 2^n) ≠ a - 2^n := by
+              intro h
+              apply hgb
+              have h' : (a - 2^n) ^^^ (b - 2^n) = (a - 2^n) ^^^ 0 := by rw [h, Nat.xor_zero]
+              exact xor_left_cancel (a - 2^n) (b - 2^n) 0 h'
+            have hnq2 : ¬((b - 2^n) = 0 ∨ (a^^^b) = 0 ∨ (b - 2^n) = (a^^^b)) := by
+              rw [hceq]
+              rintro (h|h|h)
+              · exact hgb h
+              · exact hxne0 h
+              · apply hga
+                have h' : (b - 2^n) ^^^ (a - 2^n) = (b - 2^n) ^^^ 0 := by
+                  rw [Nat.xor_comm (b - 2^n) (a - 2^n), ← h, Nat.xor_zero]
+                exact xor_left_cancel (b - 2^n) (a - 2^n) 0 h'
+            have hnq3 : ¬((a^^^b) = 0 ∨ (a - 2^n) = 0 ∨ (a^^^b) = a - 2^n) := by
+              rw [hceq]
+              rintro (h|h|h)
+              · exact hxne0 h
+              · exact hga h
+              · exact hxnea h
+            rw [e1, e2, e3, if_neg hnq2, if_neg hnq3, hceq]
+            have haLlt : a - 2^n < 2^n := by omega
+            have hbLlt : b - 2^n < 2^n := by omega
+            have haLneb : a - 2^n ≠ b - 2^n := by omega
+            have hIH := ih (a - 2^n) (b - 2^n) haLlt hbLlt hga hgb haLneb
+            exact flip_cancel_lemma' _ _ _ (dpar_le_one _ _ _) (dpar_le_one _ _ _) hIH
+
+/-- **Corollary — every qualifying triple is `F₂`-independent.**  A dependent
+    triple (`c1 ^^^ c2 ^^^ c3 = 0`, i.e. `c3 = c1 ^^^ c2` — a "line") has ODD
+    cyclic strip-depth-parity sum by `dpar_line_law`, so it can never satisfy
+    `qqual`'s evenness requirement.  This is the unconditional half of the
+    Tier 162 handoff's reviewer route ("qualifier ⟺ independent ∧ cyclic dpar
+    sum = 0"); the 18-count among the 28 independent bases of each 3-dim
+    subspace remains open — see the Tier 164 handoff log entry. -/
+theorem qqual_independent (n c1 c2 c3 : Nat) (h1 : c1 < 2^n) (h2 : c2 < 2^n)
+    (hq : qqual n c1 c2 c3) : c1 ^^^ c2 ^^^ c3 ≠ 0 := by
+  obtain ⟨hc1, hc2, hc3, h12, h23, h31, hsum⟩ := hq
+  intro hdep
+  have hc3eq : c3 = c1 ^^^ c2 := by
+    have hh : c1 ^^^ c2 ^^^ (c1 ^^^ c2 ^^^ c3) = c1 ^^^ c2 ^^^ 0 := by rw [hdep]
+    rwa [← Nat.xor_assoc, Nat.xor_self, Nat.zero_xor, Nat.xor_zero] at hh
+  have hodd := dpar_line_law n c1 c2 h1 h2 hc1 hc2 h12
+  rw [← hc3eq] at hodd
+  omega
+
 end SounioZDFiberAntisym

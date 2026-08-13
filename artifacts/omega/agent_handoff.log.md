@@ -3703,3 +3703,100 @@ notes: |
   (triangle_count_hrule + tier162_hmult), Tier 148's strata (Tier 152's theorems +
   defect_regular_free + hiso_ref), and the final assembly gives
   s3(1) = poly(H) − 1728·[m,3]₂ — E5 closed.  No claims active; even tiers ≥ 164 free.
+
+  UPDATE (claude, 2026-08-13, Tier 164 — PARTIAL): **The LINE LAW is now
+  PROVED UNCONDITIONALLY** (`dpar_line_law`, plus its corollary
+  `qqual_independent`), landed at the end of `SounioZDFiberAntisym.lean`.
+  Claimed lane `zd-e5-tier164-hdc`, scope = `hdc` (the 18-count, Tier 162's
+  one remaining hypothesis).  **`hdc` itself is NOT closed** — this is
+  honest partial progress, reported as such per this lane's brief.
+
+  What's proved (all unconditional, no `sorry`/axioms/`native_decide`):
+  `dpar_zero_left`/`dpar_zero_right`/`dpar_diag` (guard-value base facts);
+  `dpar_stable` (level-stability: `dpar (n+1) X Y = dpar n X Y` whenever
+  `X, Y < 2^n` — bumping the ambient level never changes the value, proved
+  in one line from `dpar_succ'` once the guard base facts are in hand — this
+  was the first real structural discovery: `dpar`'s "intrinsic" value for a
+  pair is level-INDEPENDENT once both coordinates fit, matching the Python
+  reference `tdepth` used throughout Tier 162's probes exactly, verified
+  against it for 85866 pairs up to level 8 in `dpar_check.py`/`recheck.py`
+  before touching Lean); `dpar_same_hi`/`dpar_cross_lo_hi`/`dpar_cross_hi_lo`
+  (the three other one-step unfold shapes, needed because a triple's three
+  pairs can straddle the level-`n` seam in mixed ways); `xor_seam_lo_lo`/
+  `xor_seam_hi_hi`/`xor_seam_lo_hi`/`xor_seam_hi_lo` (splits `a ^^^ b` across
+  the seam via `Nat.xor_div_two_pow`/`Nat.xor_mod_two_pow`, i.e. figures out
+  whether the XOR of two "one-bit-longer" numbers lands high or low and what
+  its reduced value is, purely from the two inputs' high/low status — no
+  `dpar` involved); then **`dpar_line_law`**: for `a ≠ b` both nonzero,
+  `dpar n a b + dpar n b (a^^^b) + dpar n (a^^^b) a ≡ 1 (mod 2)` — i.e. the
+  cyclic strip-depth-parity sum of a "line" `{a, b, a^^^b}` (the 3 nonzero
+  points of an `F₂`-2-dim subspace = 2-dim, i.e. a line through 0 in the
+  reduced coordinates) is ALWAYS ODD, so a line can NEVER satisfy `qqual`'s
+  evenness requirement.  Proved by induction on the ambient level `n`,
+  peeling one bit at a time across all three pairs in lockstep: the "all
+  three pairs stay on the same side of the new top bit" cases (both `a, b`
+  low, or both high) reduce directly to the same statement one level down,
+  no sign change; the two "mixed" cases (`a` low/`b` high or vice versa)
+  each put a sign flip on exactly TWO of the three edges, which cancel mod 2
+  (`flip_cancel_lemma`/`'`/`''`, one variant per which two edges flip) — EXCEPT
+  for two genuinely degenerate sub-cases per mixed branch (the reduced
+  coordinate on one side is itself `0`), where the induction hypothesis
+  doesn't even apply and all three `dpar` values are forced to `1` directly
+  by `dpar`'s guard clauses, giving `3 ≡ 1` by direct computation instead.
+  Corollary `qqual_independent`: any triple satisfying `qqual` must be
+  `F₂`-independent (`c1 ^^^ c2 ^^^ c3 ≠ 0`) — the unconditional half of the
+  Tier 162 note's "qualifier ⟺ independent ∧ cyclic dpar sum = 0" route.
+
+  **What's still open (`hdc` itself)**: among the 28 independent (basis)
+  triples of each 3-dim `F₂`-subspace, exactly 18 have EVEN cyclic dpar sum
+  — this is the part the Tier 162 handoff already flagged as NOT following
+  from the line law alone, and it doesn't.  Things tried/ruled out this
+  session: (1) `dpar`'s pointwise value on a pair, once level-stabilized,
+  exactly matches the Python `tdepth` reference used throughout the prior
+  probes (verified, not just assumed) — so `tdepth`/`dpar` are the SAME
+  function and prior numeric findings transfer directly; (2) the natural
+  next step — mirror the line law's level-by-level induction, but for the
+  FULL `ordQualOrbit(n)` count instead of a fixed triple — looks
+  significantly harder than the line law, not just more casework: unlike
+  `indTripleCount(n) = 168·[n,3]₂` where `[n,3]₂` is a closed cubic
+  polynomial in `2^n`, the q-binomial recursion is
+  `[n+1,3]₂ = [n,3]₂ + 2^(n-2)·[n,2]₂` (Pascal-style, q=2) — the induction
+  step from level `n` to `n+1` would need to independently characterize how
+  many *new* qualifying triples appear that straddle the new top bit, and
+  that count is tied to `[n,2]₂` (2-dim subspace structure), not just
+  `[n,3]₂` itself; the line law's induction avoided this entirely because it
+  tracked a FIXED triple `(a,b,a^^^b)`, not a count over all triples, so it
+  never needed to reason about how many new triples appear.  A full
+  induction on `ordQualOrbit` would need a genuinely new idea for tracking
+  that 2-dim correction term, not a mechanical extension of what's here.
+  (3) NOT tried but worth flagging for the next attempt: whether `dpar`
+  (`tdepth`) has any closed form in terms of `popcount`/bit-position of
+  `a ^^^ b` was NOT investigated computationally this session beyond the
+  line-law-adjacent facts above — Tier 162's suggestion to brute-force
+  compare `tdepth(a,b)` against closed-form candidates across many pairs is
+  still untried and might be the fastest route to a cleaner handle on the
+  18-count than trying to induct on the count directly.
+
+  Derisked in scratch first as instructed: `.tmp/dpar_check.py`/
+  `recheck.py`/`dpar_subspace.py` (numeric ground truth: `dpar`-based
+  `ordQualOrbit(k)` matches `108·[k,3]₂` exactly for `k=0..5`, and the
+  per-subspace 18-count is invariant across ~30 random independent-triple
+  subspaces tested at level 5); the whole Lean proof was built and iterated
+  in an isolated scratch file importing the compiled `SounioZDFiberAntisym`
+  (`LEAN_PATH=".lake/build/lib/lean:."`, ~0.4–1s per compile) before being
+  ported into the real file — the full-file build (`lean -j1 -s65536`, no
+  `lake`) then confirmed **zero errors, zero new warnings** (34 total, all
+  pre-existing) in ~2m16s.  No `sorry`/new axioms/`native_decide` anywhere.
+  `tier162_hmult`'s `hdc` hypothesis itself is UNCHANGED/still open — this
+  update adds `dpar_line_law` + `qqual_independent` as new unconditional
+  lemmas alongside it, not a replacement.
+
+  Claim released: `bin/sounio-coord release --agent claude --lane
+  zd-e5-tier164-hdc --reason "line law (dpar_line_law) + qqual_independent
+  landed unconditionally; the 18-count itself (hdc) is still open — see this
+  entry for what was tried"`.  Recommendation for the next attempt: either
+  (a) brute-force search for a closed form of `dpar`/`tdepth` per Tier 162's
+  original suggestion (untried this session), or (b) find the right
+  induction that also tracks the 2-dim correction term implied by the
+  q-binomial Pascal recursion — a plain copy of the line law's induction
+  structure is not enough on its own.
