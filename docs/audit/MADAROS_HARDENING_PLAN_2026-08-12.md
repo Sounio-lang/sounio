@@ -26,8 +26,15 @@ checked-in `bin/madaros-linux-x86_64` can lag (still reports 4096 until rebuilt/
 
 **Lane B residual (stack floor):** with current-source Madaros, minimal hello still needs
 **64 MiB** stack (fails at 8/16/32). `IrModule.functions: [IrFunction; 8192]` remains
-inline (~11 MiB) and codegen still has multi-10 MiB frames. Next peel: functions table
-as arena handles + shrink by-value `IrFunction`/`IrModule` copies (B3-functions).
+inline (~11 MiB) and codegen still has multi-10 MiB frames.
+
+**B-nc peel (in flight, branch `fix/lane-b-nc-codebuffer-peel-20260813`):**
+- `CodeBuffer.bytes` shrunk 262144 → 64 (vestigial; payload is `NC_BIG_CODE`)
+- `trampoline_offset` takes `&NativeCompiler` (was by-value full NC)
+- by-value `emit_entry_trampoline` is a thin wrapper over `_into`; `wide_driver` calls into
+
+Next peel after remeasure: functions table as arena handles (B3-functions) and residual
+by-value `NativeCompiler` on `emit_builtin_*` / `persist_builtin_emit_into`.
 
 Re-measure: `MADAROS_RAW_BIN=artifacts/self-hosted/madaros bash scripts/dev/measure_madaros_stack_floor.sh`
 
