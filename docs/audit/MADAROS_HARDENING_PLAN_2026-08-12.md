@@ -26,8 +26,28 @@ checked-in `bin/madaros-linux-x86_64` can lag (still reports 4096 until rebuilt/
 
 **Lane B residual (stack floor):** with current-source Madaros, minimal hello still needs
 **64 MiB** stack (fails at 8/16/32). `IrModule.functions: [IrFunction; 8192]` remains
-inline (~11 MiB) and codegen still has multi-10 MiB frames. Next peel: functions table
-as arena handles + shrink by-value `IrFunction`/`IrModule` copies (B3-functions).
+inline (~11 MiB) and codegen still has multi-10 MiB frames.
+
+**B-nc peel (branch `fix/lane-b-nc-codebuffer-peel-20260813`, rebuilt):**
+- `CodeBuffer.bytes` shrunk 262144 → 64 (vestigial; payload is `NC_BIG_CODE`)
+- `trampoline_offset` takes `&NativeCompiler` (was by-value full NC)
+- by-value `emit_entry_trampoline` is a thin wrapper over `_into`; `wide_driver` calls into
+
+**Measured on current-source peel binary** (`artifacts/self-hosted/madaros-peel3`):
+
+| Metric | pre-peel | post-peel |
+|---|---:|---:|
+| ELF frames ≥1 MiB | 926 | 613 |
+| max `sub rsp` frame | 128.07 MiB | **54.32 MiB** |
+| hello stack floor | 64 MiB | **64 MiB** (unchanged) |
+| helper (+add3) floor | 128 MiB | **128 MiB** (unchanged) |
+
+The vestigial CodeBuffer tax is gone from the binary, but the hello path still
+hits a ≥32 MiB live frame (largest remaining is ~54 MiB). Next peel:
+functions table as arena handles (B3-functions) and residual by-value
+`NativeCompiler` on `emit_builtin_*` / `persist_builtin_emit_into`, plus
+`MachineModule`/`MachineFunction` arena (still ~1.3 MiB per function of
+inline MIR).
 
 Re-measure: `MADAROS_RAW_BIN=artifacts/self-hosted/madaros bash scripts/dev/measure_madaros_stack_floor.sh`
 
