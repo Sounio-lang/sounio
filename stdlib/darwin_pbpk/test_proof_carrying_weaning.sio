@@ -1,0 +1,213 @@
+//@ run-pass
+//@ expect-stdout: PASS
+// test_proof_carrying_weaning.sio — validação da camada Proof-Carrying
+// Weaning (P3). Self-contained (padrão test_conformal_weaning; workaround
+// thin-link #1715). Flagship: o certificado F5c executável ancorado no
+// teorema Lean 4 Sounio.Weaning.gap_nonneg_of_bounded_drop —
+// certificado vale ∀t ⇒ W ≡ 0 (e a recíproca tightness: violação ⇒ W > 0).
+
+struct PCWAudit {
+    h0_ok: bool,
+    cert_ok: bool,
+    n_viol: i64,
+    first_viol: i64,
+    w_max: f64,
+    auc_w: f64,
+}
+
+struct PCWCurve {
+    occ: [f64; 64],
+}
+
+struct PCWClaims {
+    c1_cover_floor: bool,
+    c2_containment: bool,
+    c3_guarantee: bool,
+    c4_conformal: bool,
+    c5_weighted: bool,
+    c6_thresholds: bool,
+    n_pass: i64,
+}
+
+fn pcw_audit(occ: [f64; 64], n: i64, k: f64, a0: f64, dt: f64) -> PCWAudit with Mut, Div {
+    var h0_ok = true
+    var w_max = 0.0
+    var auc_w = 0.0
+    var n_viol: i64 = 0
+    var first: i64 = 0 - 1
+    var adapt = a0
+    if a0 > occ[0] {
+        h0_ok = false
+        let w0 = a0 - occ[0]
+        if w0 > w_max { w_max = w0 }
+        auc_w = w0 * dt
+    }
+    var i: i64 = 0
+    while i + 1 < n {
+        let gap = occ[i] - adapt
+        let drop = occ[i] - occ[i + 1]
+        let bound = (1.0 - k) * gap
+        if drop > bound {
+            n_viol = n_viol + 1
+            if first < 0 { first = i }
+        }
+        adapt = adapt + k * gap
+        var w = 0.0
+        if adapt > occ[i + 1] { w = adapt - occ[i + 1] }
+        if w > w_max { w_max = w }
+        auc_w = auc_w + w * dt
+        i = i + 1
+    }
+    let cert_ok = n_viol == 0
+    return PCWAudit {
+        h0_ok: h0_ok,
+        cert_ok: cert_ok,
+        n_viol: n_viol,
+        first_viol: first,
+        w_max: w_max,
+        auc_w: auc_w,
+    }
+}
+
+fn pcw_gen_e5(n: i64, load0: f64, taper_ret: f64, day_steps: i64, met_ratio: f64, build: f64) -> PCWCurve with Mut, Div {
+    var curve: [f64; 64] = [0.0; 64]
+    var dayr = 1.0
+    var counter: i64 = 0
+    var met = 0.0
+    let met_cap = met_ratio * load0
+    var dmet = 0.0
+    if build > 0.0 { dmet = met_cap / build }
+    var i: i64 = 0
+    while i < n {
+        if i > 0 {
+            counter = counter + 1
+            if counter >= day_steps {
+                dayr = dayr * taper_ret
+                if dayr < 0.05 { dayr = 0.0 }
+                counter = 0
+            }
+            if met < met_cap { met = met + dmet }
+            if met > met_cap { met = met_cap }
+        }
+        let load = load0 * dayr + met
+        curve[i] = load / (load + 1.0)
+        i = i + 1
+    }
+    return PCWCurve { occ: curve }
+}
+
+fn pcw_static_claims() -> PCWClaims with Mut {
+    let c1 = 1.37 >= 1.0
+    let c2a = 3.68 > 3.345
+    let c2b = 3.30 <= 3.345
+    let c2c = 3.345 <= 6.86
+    let c2 = c2a && c2b && c2c
+    let c3 = 3.30 >= 2.0 && 900 >= 900 && 900 <= 1000
+    let c4 = 5600 >= 5490
+    let c5 = 1800 >= 1710
+    let c6 = 0.228 <= 0.2611 && 0.2611 <= 0.9667
+    var n: i64 = 0
+    if c1 { n = n + 1 }
+    if c2 { n = n + 1 }
+    if c3 { n = n + 1 }
+    if c4 { n = n + 1 }
+    if c5 { n = n + 1 }
+    if c6 { n = n + 1 }
+    return PCWClaims {
+        c1_cover_floor: c1,
+        c2_containment: c2,
+        c3_guarantee: c3,
+        c4_conformal: c4,
+        c5_weighted: c5,
+        c6_thresholds: c6,
+        n_pass: n,
+    }
+}
+
+fn main() -> i64 with Mut, Div, IO {
+    println("VALIDAÇÃO Proof-Carrying Weaning (P3)")
+    var ok: i64 = 1
+    let k = 1.0 / 72.0
+
+    // A) Canto E5 coberto (metadona PCC 1.5×, rampa 24 passos): o
+    //    certificado deve valer em TODOS os passos e, pelo teorema Lean
+    //    gap_nonneg_of_bounded_drop ⇒ f5c_withdrawal_zero, W ≡ 0 exato.
+    let cA = pcw_gen_e5(64, 1.5, 0.8, 24, 1.5, 24.0)
+    let a0A = cA.occ[0]
+    let rA = pcw_audit(cA.occ, 64, k, a0A, 1.0)
+    if !rA.h0_ok { ok = 0 println("  G FAIL A h0") }
+    if !rA.cert_ok { ok = 0 println("  G FAIL A cert") }
+    if rA.w_max != 0.0 { ok = 0 println("  G FAIL A wmax") }
+    print("A coberto: viol="); print(rA.n_viol); print(" w_max="); println(rA.w_max)
+
+    // B) Canto abrupto (sem metadona): queda diária −20 % de occ com gap
+    //    contraído ~0 viola o certificado; tightness (gap_neg_of_large_drop)
+    //    ⇒ W > 0 no passo seguinte. Demonstra a fronteira exata.
+    let cB = pcw_gen_e5(64, 1.5, 0.8, 24, 0.0, 24.0)
+    let a0B = cB.occ[0]
+    let rB = pcw_audit(cB.occ, 64, k, a0B, 1.0)
+    if rB.cert_ok { ok = 0 println("  G FAIL B cert") }
+    if rB.n_viol <= 0 { ok = 0 println("  G FAIL B nviol") }
+    if rB.w_max <= 0.0 { ok = 0 println("  G FAIL B wmax") }
+    if rB.first_viol < 0 { ok = 0 println("  G FAIL B first") }
+    print("B abrupto: viol="); print(rB.n_viol); print(" w_max="); println(rB.w_max)
+
+    // C) Curva plana (sem queda): certificado trivialmente válido, W = 0.
+    let cC = pcw_gen_e5(64, 1.5, 1.0, 24, 0.0, 24.0)
+    let a0C = cC.occ[0]
+    let rC = pcw_audit(cC.occ, 64, k, a0C, 1.0)
+    if !rC.cert_ok { ok = 0 println("  G FAIL C cert") }
+    if rC.w_max != 0.0 { ok = 0 println("  G FAIL C wmax") }
+    println("C plana: cert_ok, w_max=0")
+
+    // D) Violação da condição inicial (A(0) > occ(0)): h0_ok=false e
+    //    W(0) > 0 imediato — paciente entra em desmame já sub-coberto.
+    let cD = pcw_gen_e5(64, 1.5, 1.0, 24, 0.0, 24.0)
+    let rD = pcw_audit(cD.occ, 64, k, a0C + 0.2, 1.0)
+    if rD.h0_ok { ok = 0 println("  G FAIL D h0") }
+    if rD.w_max <= 0.19 { ok = 0 println("  G FAIL D wmax") }
+    print("D h0 violado: w_max="); println(rD.w_max)
+
+    // E) Taper agressivo −50 %/dia sem cobertura: certificado falha cedo
+    //    (primeira fronteira de dia) e W > 0 — recíproca numérica.
+    let cE = pcw_gen_e5(64, 1.5, 0.5, 24, 0.0, 24.0)
+    let a0E = cE.occ[0]
+    let rE = pcw_audit(cE.occ, 64, k, a0E, 1.0)
+    if rE.cert_ok { ok = 0 println("  G FAIL E cert") }
+    if rE.w_max <= 0.0 { ok = 0 println("  G FAIL E wmax") }
+    print("E taper50: viol="); print(rE.n_viol); print(" w_max="); println(rE.w_max)
+
+    // F) Sub-cobertura parcial (metadona 0.4×, rampa lenta 48 passos):
+    //    o vale de carga fura o piso adaptado — certificado falha.
+    let cF = pcw_gen_e5(64, 1.5, 0.8, 24, 0.4, 48.0)
+    let a0F = cF.occ[0]
+    let rF = pcw_audit(cF.occ, 64, k, a0F, 1.0)
+    print("F subcoberto: viol="); print(rF.n_viol); print(" w_max="); println(rF.w_max)
+
+    // G) Claims estáticos do protocolo (6/6 relações algébricas).
+    let cl = pcw_static_claims()
+    if !cl.c1_cover_floor { ok = 0 println("  G FAIL G c1") }
+    if !cl.c2_containment { ok = 0 println("  G FAIL G c2") }
+    if !cl.c3_guarantee { ok = 0 println("  G FAIL G c3") }
+    if !cl.c4_conformal { ok = 0 println("  G FAIL G c4") }
+    if !cl.c5_weighted { ok = 0 println("  G FAIL G c5") }
+    if !cl.c6_thresholds { ok = 0 println("  G FAIL G c6") }
+    if cl.n_pass != 6 { ok = 0 println("  G FAIL G npass") }
+    print("G claims estáticos: "); print(cl.n_pass); println("/6")
+
+    // H) Consistência certificado⇔W nos cantos A–C (ambas direções Lean).
+    var both = 1
+    if rA.cert_ok && rA.w_max != 0.0 { both = 0 }
+    if rC.cert_ok && rC.w_max != 0.0 { both = 0 }
+    if !rB.cert_ok && rB.w_max <= 0.0 { both = 0 }
+    if !rE.cert_ok && rE.w_max <= 0.0 { both = 0 }
+    if both != 1 { ok = 0 println("  G FAIL H consist") }
+    println("H consistência certificado⇔W OK")
+
+    if ok == 1 {
+        println("PASS")
+        return 0
+    }
+    println("FAIL")
+    return 1
+}

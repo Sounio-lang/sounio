@@ -685,3 +685,9 @@ lean_lib «SounioFoMethodXferFragment» where
 @[default_target]
 lean_lib «SounioFoMultimodFragment» where
 
+
+-- P3: Opioid weaning safety (F5c) — pure-ℚ discharge of the bounded-drop
+-- certificate ⇒ zero withdrawal pressure theorem + tightness direction.
+-- Import-free (Lean 4 core Rat only). Build: `lake build SounioOpioidWeaningSafety`.
+@[default_target]
+lean_lib «SounioOpioidWeaningSafety» where
