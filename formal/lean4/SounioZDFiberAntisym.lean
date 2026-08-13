@@ -28612,4 +28612,109 @@ theorem s3_reference_closed7 (k : Nat) :
   have htrace := trace_ref_entry_law (k+3)
   grind
 
+/-! ### Tier 161 — **★ THE DEVIATION LAW IS A THEOREM**
+
+    `D[tri3](m) = 1728 · 8^(m−j) · [j,3]₂` for the reference pairs `W = 2^j` against `W = 1`.
+
+    §57.49 left this on three obligations.  All three are now discharged:
+
+      (i)   the `s3` line of the transfer recursion    `s3_level_recursion`   (Tier 157)
+      (ii)  `Δcp2 = 0` on the references               `cp2_ref_eq`           (below)
+      (iii) one base case                              `dev_base`             (below)
+
+    **(ii) costs nothing.**  `cp2_pow2_labels` (Tier 157b) was proved for every `p`, and `p = 0`
+    IS the reference `W = 2^0 = 1`.  So `cp2 = −(H−2)(H−6)` on both sides of the comparison and
+    the difference vanishes — §57.49's measured "the coset coordinate is fibre-blind" is a
+    one-line corollary of a theorem the branch already had.
+
+    **(iii) is a subtraction of two closed forms.**  At `m = j` the label `W = 2^j` is the maximal
+    seam of its own level, so Tier 136's `s3_maximal_seam` gives one side and Tier 166's
+    `s3_reference_closed7` the other.  Both carry the SAME `poly(H) = H³ − 12H² + 28H − 16`, so
+    the difference is exactly the q-binomial term Tier 166 isolated.
+
+    **The induction is then immediate.**  Applying `s3_level_recursion` at `W = 2^j` and at
+    `W = 1` and subtracting, the inhomogeneity `24·cp2 + 72H − 176` is IDENTICAL on the two sides
+    by (ii), so `Δs3(m+1) = 8·Δs3(m)` — the eigenvalue-8 channel of `[[8,24],[0,4]]`, with no
+    recursion left in it.
+
+    `7`-cleared, as Tier 159, because the file is q-binomial-free:
+    `(H−2)(H−4)(H−8) = 64·21·[j,3]₂` with `H = 2^(j+1)`, so `9(H−2)(H−4)(H−8) = 7·1728·[j,3]₂`.
+
+    ⚠ SCOPE.  `j = k+3 ≥ 3`, inherited from Tier 166's `s3_reference_closed7`; levels `m ≥ j`.
+    UNMASKED `tri3`, so the `288·[m−1,2]₂` maximal-seam exception the lane carried since §57.9
+    does not appear — consistent with §57.49's reading of it as a mask artifact, though this tier
+    proves the clean law rather than that reading.
+
+    ⚠ PLACEMENT.  This section sits at the END of the file because it consumes Tier 166's
+    `s3_reference_closed7`; a first attempt to file it next to Tiers 157/159 failed to build for
+    exactly that reason. -/
+
+/-- **`Δcp2 = 0`.**  The coset coordinate is fibre-blind: `cp2` is the same `−(H−2)(H−6)` at
+    `W = 2^p` and at the reference `W = 1`, because `cp2_pow2_labels` covers `p = 0` too. -/
+theorem cp2_ref_eq (p j : Nat) :
+    sumLtI (2^(p+j+1)) (fun a => sumLtI (2^(p+j+1)) (fun b =>
+        P3 a b (2^p) (p+j) * P3 b (a ^^^ 2^p) (2^p) (p+j)))
+      = sumLtI (2^(p+j+1)) (fun a => sumLtI (2^(p+j+1)) (fun b =>
+          P3 a b 1 (p+j) * P3 b (a ^^^ 1) 1 (p+j))) := by
+  have h1 := cp2_pow2_labels p j
+  have h2 := cp2_pow2_labels 0 (p+j)
+  rw [Nat.zero_add, Nat.pow_zero] at h2
+  rw [h1, h2]
+
+/-- **THE BASE CASE**, `m = j`.  Tier 136's maximal-seam value minus Tier 166's reference value:
+    the two share the same `poly(H)`, so the difference IS the q-binomial term.
+    `7·Δ = 9(H−2)(H−4)(H−8)`, which is `7·1728·[j,3]₂`. -/
+theorem dev_base (k : Nat) :
+    7 * (tri3 (2^(k+4)) (fun x y => P3 x y (2^(k+3)) (k+3))
+          - tri3 (2^(k+4)) (fun x y => P3 x y 1 (k+3)))
+      = 9 * ((((2^(k+4) : Nat) : Int) - 2) * ((((2^(k+4) : Nat) : Int) - 4)
+          * (((2^(k+4) : Nat) : Int) - 8))) := by
+  have hs : sumLtI (2^(k+4)) (fun a => sumLtI (2^(k+4)) (fun b => sumLtI (2^(k+4)) (fun c =>
+        P3 a b (2^(k+3)) (k+3) * (P3 b c (2^(k+3)) (k+3) * P3 c a (2^(k+3)) (k+3)))))
+      = ((2^(k+4) : Nat) : Int) * ((2^(k+4) : Nat) : Int) * ((2^(k+4) : Nat) : Int)
+        - 12 * (((2^(k+4) : Nat) : Int) * ((2^(k+4) : Nat) : Int))
+        + 28 * ((2^(k+4) : Nat) : Int) - 16 := s3_maximal_seam (k+2)
+  have hr := s3_reference_closed7 k
+  unfold tri3
+  simp only []
+  rw [hs]
+  grind
+
+
+/-- **★ THE DEVIATION LAW.**  `7·D[tri3](m) = 8^(m−j)·9(H_j−2)(H_j−4)(H_j−8)` — i.e.
+    `D = 1728·8^(m−j)·[j,3]₂` — for reference labels `W = 2^j`, `j = k+3 ≥ 3`, every level
+    `m = j+i ≥ j`.  On the UNMASKED `tri3` there is no maximal-seam exception. -/
+theorem deviation_law (k i : Nat) :
+    7 * (tri3 (2^(k+3+i+1)) (fun x y => P3 x y (2^(k+3)) (k+3+i))
+          - tri3 (2^(k+3+i+1)) (fun x y => P3 x y 1 (k+3+i)))
+      = (((2^i : Nat) : Int) * ((2^i : Nat) : Int) * ((2^i : Nat) : Int))
+        * (9 * ((((2^(k+4) : Nat) : Int) - 2) * ((((2^(k+4) : Nat) : Int) - 4)
+            * (((2^(k+4) : Nat) : Int) - 8)))) := by
+  induction i with
+  | zero =>
+      have h0 : ((2^0 : Nat) : Int) = 1 := by decide
+      rw [h0]
+      have hb := dev_base k
+      grind
+  | succ i ih =>
+      have hWlt : (2:Nat)^(k+3) < 2^(k+3+i+1) := Nat.pow_lt_pow_right (by omega) (by omega)
+      have hW0 : (2:Nat)^(k+3) ≠ 0 := Nat.ne_of_gt (Nat.two_pow_pos (k+3))
+      have h1lt : (1:Nat) < 2^(k+3+i+1) := by
+        have := Nat.two_pow_pos (k+3+i+1)
+        have h2 : (2:Nat)^(k+3+i+1) = 2^(k+3+i) * 2 := Nat.pow_succ _ _
+        have := Nat.two_pow_pos (k+3+i)
+        omega
+      have hrs := s3_level_recursion (k+3+i) (2^(k+3)) hWlt hW0
+      have hrr := s3_level_recursion (k+3+i) 1 h1lt (by omega)
+      have hcp := cp2_ref_eq (k+3) i
+      have hpow : (2:Nat)^(k+3+(i+1)+1) = 2^(k+3+i+1) + 2^(k+3+i+1) := by
+        rw [show k+3+(i+1)+1 = (k+3+i+1)+1 from by omega, Nat.pow_succ]; omega
+      have hX : ((2^(i+1) : Nat) : Int) = 2 * ((2^i : Nat) : Int) := by
+        rw [Nat.pow_succ]; push_cast; grind
+      rw [hpow]
+      show 7 * (tri3 (2^(k+3+i+1) + 2^(k+3+i+1)) (fun x y => P3 x y (2^(k+3)) (k+3+i+1))
+            - tri3 (2^(k+3+i+1) + 2^(k+3+i+1)) (fun x y => P3 x y 1 (k+3+i+1))) = _
+      rw [hrs, hrr, hX, hcp]
+      grind
+
 end SounioZDFiberAntisym
