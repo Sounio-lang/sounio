@@ -22414,4 +22414,56 @@ theorem t1_route_outer (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
     sumLtI_single (2^(m+1)) 0 _ hp
   rw [c4, c7, c8]
 
+/-! ### Tier 145 — `T1`'s triple sum ROUTED end to end
+
+    Chaining Tier 123's `t1_summand` with the three routing stages (139, 141, 143).  The only work
+    beyond the chain is pulling `εσ(a)`, `εσ(b)` and `P3(a,b)` out of the `c`-sum, which is
+    `sumLtI_mul` twice under a congruence. -/
+
+theorem t1_routed (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+        P3 a b W m * (E01 b c W * P3 b c W m * (E10 c a W * P3 c a W m)))))
+      = sumLtI (2^(m+1)) (fun a => epsZero a * sigRow a W *
+            sumLtI (2^(m+1)) (fun b => epsZero b * sigRow b W *
+              (P3 a b W m * sumLtI (2^(m+1)) (fun c => epsZero c * (P3 b c W m * P3 c a W m)))))
+        + 2 * sumLtI (2^(m+1)) (fun a => epsZero a *
+            sumLtI (2^(m+1)) (fun b => epsZero b * sigRow b W *
+              (P3 a b W m * P3 b (a ^^^ W) W m)))
+        + 2 * sumLtI (2^(m+1)) (fun a => epsZero a * sigRow a W *
+            sumLtI (2^(m+1)) (fun b => epsZero b * (P3 a b W m * P3 (b ^^^ W) a W m)))
+        + epsZero W * sigRow W W * (-4 * epsZero 0 *
+            sumLtI (2^(m+1)) (fun b => epsZero b * sigRow b W * (P3 W b W m * P3 b 0 W m)))
+        + sumLtI (2^(m+1)) (fun a => epsZero a * sigRow a W *
+            (epsZero 0 * sigRow 0 W * (P3 a 0 W m * (-4 * (epsZero W * P3 W a W m)))))
+        + 4 * sumLtI (2^(m+1)) (fun a => epsZero (a ^^^ W) * P3 a a W m)
+        + epsZero W * sigRow W W * (epsZero W * sigRow W W * (P3 W W W m * (-8 * epsZero 0)))
+        + epsZero 0 * sigRow 0 W * (epsZero 0 * sigRow 0 W * (P3 0 0 W m * (-8 * epsZero W))) := by
+  have hin : ∀ a, a < 2^(m+1) →
+      sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+        P3 a b W m * (E01 b c W * P3 b c W m * (E10 c a W * P3 c a W m))))
+      = (epsZero a * sigRow a W) *
+          sumLtI (2^(m+1)) (fun b => (epsZero b * sigRow b W) * (P3 a b W m *
+            sumLtI (2^(m+1)) (fun c =>
+              epsZero c * ((tauW b c W * P3 b c W m) * (tauW c a W * P3 c a W m))))) := by
+    intro a ha
+    have hb : ∀ b, b < 2^(m+1) →
+        sumLtI (2^(m+1)) (fun c =>
+          P3 a b W m * (E01 b c W * P3 b c W m * (E10 c a W * P3 c a W m)))
+        = (epsZero a * sigRow a W) * ((epsZero b * sigRow b W) * (P3 a b W m *
+            sumLtI (2^(m+1)) (fun c =>
+              epsZero c * ((tauW b c W * P3 b c W m) * (tauW c a W * P3 c a W m))))) := by
+      intro b hb
+      have h1 : sumLtI (2^(m+1)) (fun c =>
+            P3 a b W m * (E01 b c W * P3 b c W m * (E10 c a W * P3 c a W m)))
+          = sumLtI (2^(m+1)) (fun c =>
+              ((epsZero a * sigRow a W) * ((epsZero b * sigRow b W) * P3 a b W m)) *
+                (epsZero c * ((tauW b c W * P3 b c W m) * (tauW c a W * P3 c a W m)))) :=
+        sumLtI_congr _ _ _ (fun c _ => by rw [t1_summand m a b c W hW0]; grind)
+      rw [h1, sumLtI_mul]
+      grind
+    rw [sumLtI_congr _ _ _ hb, sumLtI_mul]
+  rw [sumLtI_congr _ _ _ hin,
+      sumLtI_congr _ _ _ (fun a ha => by rw [t1_route_mid m a W ha hW hW0])]
+  exact t1_route_outer m W hW hW0
+
 end SounioZDFiberAntisym
