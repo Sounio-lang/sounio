@@ -869,7 +869,7 @@ pub fn lower_monolithic_public_probe_trace_set(enabled: bool) with Mut {
     LOWER_MONOLITHIC_PUBLIC_PROBE_TRACE = enabled
 }
 
-fn lower_monolithic_public_probe_boundary(label: string) with IO {
+fn lower_monolithic_public_probe_boundary(label: string) with Alloc, Panic, Div, IO {
     if LOWER_MONOLITHIC_PUBLIC_PROBE_TRACE {
         print("probe_monolithic_public_lower_boundary: ")
         print(label)
@@ -919,7 +919,7 @@ pub(crate) fn ir_register_knowledge_layout(table: StructLayoutTable) -> StructLa
 // `lower_array: seed_begin` (measured: fail 32 MiB, ok 48 MiB on madaros-peel3).
 // Isolate each materialisation in its own function so only one large frame is
 // live at a time; the returned Box is a pointer-sized value.
-fn lowerer_box_empty_module() -> Box<IrModule> with Alloc, Mut {
+fn lowerer_box_empty_module() -> Box<IrModule> with Panic, Div, Alloc, Mut {
     Box::new(ir_empty_module())
 }
 
@@ -1303,7 +1303,7 @@ fn lowerer_find_contest_id_for_span_index_ref(lo: &Lowerer, span: Span) -> i64 w
 fn lowerer_lookup_fn_id_by_name_ref(lo: &Lowerer, name: Name) -> i64 with Mut, Panic, Div {
     var i: i64 = 0
     while i < (*(*lo).module).fn_count {
-        if ir_name_eq((*ir_fn_get((*lo).module).fn_table_slot, i as usize).name, name) {
+        if ir_name_eq(ir_fn_get((*(*lo).module).fn_table_slot, i as usize).name, name) {
             return i
         }
         i = i + 1
@@ -1328,7 +1328,7 @@ pub fn ir_empty_program_summary() -> IrProgramSummary with Alloc, Mut {
     }
 }
 
-fn ir_empty_program_summary_flat() -> IrProgramSummaryFlat with Mut {
+fn ir_empty_program_summary_flat() -> IrProgramSummaryFlat with Alloc, Panic, Div, Mut {
     IrProgramSummaryFlat {
         module: ir_empty_module(),
         enum_variants: empty_enum_variant_table(),
@@ -1835,7 +1835,7 @@ fn lowerer_preseed_dep_items_into_acc_mut(
                                     }
                                 } else {
                                     if existing < (*(*lo).module).fn_count
-                                        && (*ir_fn_get((*lo).module).fn_table_slot, existing as usize).compile_strategy == IR_STRATEGY_BSS_GLOBAL
+                                        && ir_fn_get((*(*lo).module).fn_table_slot, existing as usize).compile_strategy == IR_STRATEGY_BSS_GLOBAL
                                     {
                                         lowerer_record_global_type_mut(lo, existing, &head.type_alias_ty)
                                     }
@@ -2218,7 +2218,7 @@ fn lowerer_preseed_fn_signature_mut(
 
     let strategy = lowerer_compute_strategy_from_ast_ref(return_type, effects)
     // Extract module Box + function slot to locals, mutate, write back once. The
-    // direct nested-lvalue form `(*ir_fn_get((*lo).module).fn_table_slot, fn_id).field = X` — notably
+    // direct nested-lvalue form `ir_fn_get((*(*lo).module).fn_table_slot, fn_id).field = X` — notably
     // the 512-byte aggregate store `.param_regs = [IR_INVALID_REG; 64]` — is miscompiled
     // by lean_single (two-level-nested-store defect): the aggregate lvalue base is
     // wrong and the write SIGSEGVs. This impl-method-signature preseed is the only
@@ -3101,9 +3101,17 @@ fn lowerer_preseed_program_items_mut(
                                 let fn_id_ps = lowerer_find_or_add_fn_id_mut(lo, name)
                                 if fn_id_ps >= 0 {
                                     if (*fd).is_kernel {
-                                        (*ir_fn_get((*lo).module).fn_table_slot, fn_id_ps as usize).compile_strategy = 6
+                                        { var mbox_k = (*lo).module
+                                        var slot_k = ir_fn_get((*mbox_k).fn_table_slot, fn_id_ps as usize)
+                                        slot_k.compile_strategy = 6
+                                        ir_fn_set((*mbox_k).fn_table_slot, fn_id_ps as usize, slot_k)
+                                        (*lo).module = mbox_k }
                                     } else if visibility_to_bool(head.visibility) {
-                                        (*ir_fn_get((*lo).module).fn_table_slot, fn_id_ps as usize).compile_strategy = 7
+                                        { var mbox_e = (*lo).module
+                                        var slot_e = ir_fn_get((*mbox_e).fn_table_slot, fn_id_ps as usize)
+                                        slot_e.compile_strategy = 7
+                                        ir_fn_set((*mbox_e).fn_table_slot, fn_id_ps as usize, slot_e)
+                                        (*lo).module = mbox_e }
                                         let exp_count = (*(*lo).module).export_count
                                         if exp_count < 64 {
                                             (*(*lo).module).export_names[exp_count as usize] = name
@@ -3417,7 +3425,7 @@ fn ir_fast_summary_preseed_items_owned(
     }
 }
 
-fn ir_fast_summary_seed_empty(epistemic: IrEpistemicSection) -> IrFastSummaryOwnedSeed with Mut {
+fn ir_fast_summary_seed_empty(epistemic: IrEpistemicSection) -> IrFastSummaryOwnedSeed with Alloc, Panic, Div, Mut {
     var module = ir_empty_module()
     module.epistemic = epistemic
     IrFastSummaryOwnedSeed {
@@ -4136,19 +4144,19 @@ fn lowerer_lower_fn_item_mut(
     if fn_id >= 0 && fn_id < (*(*lo).module).fn_count {
         // Field-by-field, not `let preserved = …`: that bound a whole
         // ~504 KB IrFunction to read seven scalars out of it.
-        (*reused).name = (*ir_fn_get((*lo).module).fn_table_slot, fn_id as usize).name
-        (*reused).compile_strategy = (*ir_fn_get((*lo).module).fn_table_slot, fn_id as usize).compile_strategy
-        (*reused).returns_float = (*ir_fn_get((*lo).module).fn_table_slot, fn_id as usize).returns_float
-        (*reused).return_fixed_array_len = (*ir_fn_get((*lo).module).fn_table_slot, fn_id as usize).return_fixed_array_len
-        (*reused).return_struct_name = (*ir_fn_get((*lo).module).fn_table_slot, fn_id as usize).return_struct_name
-        (*reused).first_param_is_ref = (*ir_fn_get((*lo).module).fn_table_slot, fn_id as usize).first_param_is_ref
-        (*reused).prof_counter_id = (*ir_fn_get((*lo).module).fn_table_slot, fn_id as usize).prof_counter_id
+        (*reused).name = ir_fn_get((*(*lo).module).fn_table_slot, fn_id as usize).name
+        (*reused).compile_strategy = ir_fn_get((*(*lo).module).fn_table_slot, fn_id as usize).compile_strategy
+        (*reused).returns_float = ir_fn_get((*(*lo).module).fn_table_slot, fn_id as usize).returns_float
+        (*reused).return_fixed_array_len = ir_fn_get((*(*lo).module).fn_table_slot, fn_id as usize).return_fixed_array_len
+        (*reused).return_struct_name = ir_fn_get((*(*lo).module).fn_table_slot, fn_id as usize).return_struct_name
+        (*reused).first_param_is_ref = ir_fn_get((*(*lo).module).fn_table_slot, fn_id as usize).first_param_is_ref
+        (*reused).prof_counter_id = ir_fn_get((*(*lo).module).fn_table_slot, fn_id as usize).prof_counter_id
         // #1649: carry the REGION over too, and do NOT drop this. This is exactly
         // where the arena conversion lost it: every field restored from the slot
         // EXCEPT the one saying where the instructions live, so every instruction
         // this function lowered went to quarantine. ir_reset_function_in_place
         // leaves the region invalid by design, so the restore must be explicit.
-        (*reused).region = (*ir_fn_get((*lo).module).fn_table_slot, fn_id as usize).region
+        (*reused).region = ir_fn_get((*(*lo).module).fn_table_slot, fn_id as usize).region
     }
     if (*reused).region.slot < 0 { ir_function_alloc_region(&! (*reused)) }
     (*lo).current_func = reused
@@ -4369,7 +4377,7 @@ lower_rss_mark("before_block")
     // Census AFTER the flush, so instr_count is the settled value. On overflow
     // instr_count is pinned at the cap and the true need is cap + dropped.
     if !(*lo).probe_mode && fn_id >= 0 && fn_id < IR_MAX_FUNCS {
-        let settled = (*ir_fn_get((*lo).module).fn_table_slot, fn_id as usize).instr_count
+        let settled = ir_fn_get((*(*lo).module).fn_table_slot, fn_id as usize).instr_count
         ir_instr_census_record(settled + IR_INSTR_OVERFLOW_COUNT, IR_INSTR_OVERFLOW_COUNT > 0)
     }
     if IR_INSTR_OVERFLOW_COUNT > 0 && !(*lo).probe_mode {
@@ -5986,7 +5994,7 @@ impl Lowerer {
         -1
     }
 
-    fn emit_i64_const(self, value: i64) -> (Lowerer, i64) with Mut, Panic, Div, IO {
+    fn emit_i64_const(self, value: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let pair = self.fresh_reg()
         let lo = pair.0
         let reg = pair.1
@@ -6083,7 +6091,7 @@ impl Lowerer {
         self.emit(ir_field_set(base_reg, field_idx, value_reg, field_name))
     }
 
-    fn emit_name_array_values(self, base_reg: i64, names: [Name; 16], count: i64, idx: i64) -> Lowerer with Mut, Panic, Div, IO {
+    fn emit_name_array_values(self, base_reg: i64, names: [Name; 16], count: i64, idx: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         if idx >= count || idx >= 16 {
             return self
         }
@@ -6690,7 +6698,7 @@ impl Lowerer {
         self.lower_array_repeat_literal_ref(&e)
     }
 
-    fn lower_name_array_literal(self, names: [Name; 16], count: i64) -> (Lowerer, i64) with Mut, Panic, Div, IO {
+    fn lower_name_array_literal(self, names: [Name; 16], count: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let pair_dst = self.fresh_reg()
         let lo1 = pair_dst.0
         let dst = pair_dst.1
@@ -6699,7 +6707,7 @@ impl Lowerer {
         (lo3, dst)
     }
 
-    fn lower_f64_array_literal(self, values: [f64; 16], count: i64) -> (Lowerer, i64) with Mut, Panic, Div, IO {
+    fn lower_f64_array_literal(self, values: [f64; 16], count: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let pair_dst = self.fresh_reg()
         let lo1 = pair_dst.0
         let dst = pair_dst.1
@@ -9660,7 +9668,7 @@ impl Lowerer {
         }
     }
 
-    fn fresh_reg(self) -> (Lowerer, i64) with Mut, Panic, Div, IO {
+    fn fresh_reg(self) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         if lo.current_fn < 0 || lo.current_fn >= lo.module.fn_count {
             if lo.probe_mode {
@@ -9744,7 +9752,7 @@ impl Lowerer {
         }
     }
 
-    fn fresh_label(self) -> (Lowerer, i64) with Mut, Panic, Div, IO {
+    fn fresh_label(self) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         if lo.current_fn < 0 || lo.current_fn >= lo.module.fn_count {
             let loe = lo.report_error_at(9036)
@@ -9757,7 +9765,7 @@ impl Lowerer {
         (lo, label)
     }
 
-    fn emit(self, instr: IrInstr) -> Lowerer with Mut, Panic, Div, IO {
+    fn emit(self, instr: IrInstr) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self
         if lo.current_fn < 0 || lo.current_fn >= lo.module.fn_count {
             if lo.probe_mode {
@@ -16900,7 +16908,7 @@ fn ir_call_needs_validated_patch(
     instr.arg_count + 1 == callee_param_counts[instr.fn_id as usize]
 }
 
-fn ir_module_has_instrumented_strategy(module: &IrModule) -> bool with Panic, Div {
+fn ir_module_has_instrumented_strategy(module: &IrModule) -> bool with Mut, Panic, Div {
     var i: i64 = 0
     while i < module.fn_count {
         if ir_fn_get(module.fn_table_slot, i as usize).compile_strategy == IR_STRATEGY_INSTRUMENTED {
