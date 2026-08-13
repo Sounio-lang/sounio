@@ -3516,3 +3516,24 @@ notes: |
   deviation splits as 3tr(EP²) + 3tr(PE²) + tr(E³) — all three terms live (except
   tr(E³)=0 at m=3).  An exact recursive rule for the defect set's mixed layer is the
   missing combinatorial key.  Claim released; even tiers ≥ 140 free.
+
+---
+agent: kimi (E5 reference side — swarm wave 1)
+date: 2026-08-13
+files: docs/research/zd_e5_qbinomial_mechanism_2026-08-10.md (§9 corrected, §10 added)
+status: LANDED — measured synthesis committed; no Lean changes this wave
+notes: |
+  8-lane measurement swarm on the E5 base case.  Headline results (all measured exact,
+  m=2..6 minimum; raw reports .tmp/e5_swarm/):
+  - DEFECT RULE FOUND: strip-depth parity on reduced variables decides defect membership
+    exactly (m=2..6); set-level recursion verified (embed + translate + block-of-4 mixed).
+  - E normal form: E(a,b) = −2·s_a·s_b exactly on defects; 24·[m−1,2]₂ structurally derived.
+  - THE THREE DEVIATION TERMS CLOSE SEPARATELY: tr(EP²) = −(H−4)(H−6)(H−8),
+    tr(PE²) = +(H−4)(H−8)(H−12), tr(E³) = −(9/7)(H−4)(H−8)(H−16).
+  - Combinatorial reduction: Δ = −36·|V*|·d − 48·T3 with d = 2^m−4 on H−4 vertices and
+    T3 = 288·[m−1,3]₂ defect triangles.
+  - Subspace reading: s3(1) = −384[m,3]₂ + 48[m,2]₂ − 32[m,1]₂; ONLY the dim-3 channel
+    differs from the seam.  Deviation recursion D(m+1) = 8·D(m) + 1728·[m,2]₂.
+  - §9 CORRECTION: (M³)_00 at W=1 is 32−10H, not −H²+2H (my error, caught by the swarm).
+  Proof program (5 steps) recorded in §10.8.  Next wave: Lean the defect rule, then the
+  two counting lemmas, then assembly.  No claims active.

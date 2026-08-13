@@ -527,11 +527,13 @@ level-(m) defect set contains two embedded copies of the level-(m−1) one (lo h
 translate by `2^m`) plus a new mixed layer (120 pairs at m=4). An exact recursive rule for
 the mixed layer is not yet isolated.
 
-**The diagonal of M³.** At `W = 1`: `(M³)_00 = −H² + 2H` (same value as the seam — exact at
-m=2,3,4), but the nonzero diagonal is NOT constant: at m=4 it takes three values —
-`+48` on `{1, 16, 17} = {W, 2^m, 2^m⊕W}`, `−48` on `{8, 9, 24, 25}` (the `2^(m−1)` labels
-and their translates), `−176` on the remaining 24. At m=3: two values, `{1,8,9}` at `+16`,
-the rest at `−16`.
+**The diagonal of M³.** At `W = 1`: `(M³)_00 = 32 − 10H` (m=3..9; ⚠ an earlier draft of
+this section said `−H² + 2H` — that was WRONG, it holds only at m=2 by coincidence;
+caught by the swarm's DIAGONAL lane).  The nonzero diagonal is NOT constant: at m=4 it
+takes three values — `+48` on `{1, 16, 17} = {W, 2^m, 2^m⊕W}`, `−48` on `{8, 9, 24, 25}`
+(the `2^(m−1)` labels and their translates), `−176` on the remaining 24. At m=3: two
+values, `{1,8,9}` at `+16`, the rest at `−16`.  The full rule (2-adic valuation classes)
+is in §10.
 
 **Trace decomposition.** Write `M = P + E` with `P` the entry-law matrix (the matrix the
 seam theorems would predict: `s_a s_b` off-diagonal, `−1` diagonal, `−s_a` column 0) and
@@ -546,3 +548,87 @@ So the whole deviation law is the interaction of the defect set with the predict
 the m=3 case has NO defect triangles (`tr(E³) = 0`), m=4 has plenty. The mixed terms do
 NOT vanish — any proof of the base case must evaluate all three, or find the cancellation
 between them. The per-term numbers do not split as clean multiples of `[m,3]₂` on their own.
+
+---
+
+## 10. The reference side, mapped by the swarm (kimi + 8 lanes, 2026-08-13)
+
+Eight parallel measurement lanes, each verified at m=2..6 (some to m=9); raw reports in
+`.tmp/e5_swarm/`.  **All statements below are measured exactly, not Lean-proved** — but
+they are set-level exact (zero mismatches on every entry/pair/triple at every level
+computed), and they turn E5's base case into a finite list of counting obligations.
+
+### 10.1 The defect set has an exact rule (DEFECT-RULE + DEFECT-RECURSION lanes)
+
+At `W = 1`, with `s_x = (−1)^popcount(x)` off the seam point (Tier 138), the coboundary
+fails on exactly `24·[m−1,2]₂` unordered pairs, and membership is decidable by a
+strip-depth parity: on reduced variables `A = a≫1, B = b≫1`, repeatedly delete the common
+binary prefix plus first differing bit; **defect iff the number of deletions is even**
+(equivalent computational and recursive forms verified).  Set-level recursion verified:
+level m = level-(m−1) embedded + its translate by 2^m + a mixed layer that is a
+block-of-4 blow-up of a complement-of-Q construction.  Structural identity on the mixed
+block: `M(a, b′+2^m) = cd_sigma(b′⊕1, a, m)·cd_sigma(b′, a⊕1, m)` (argument order matters).
+
+### 10.2 The defect matrix E is a pure coboundary flip with a normal form (DEFECT-ALGEBRA)
+
+`E = M − P` satisfies `E(a,b) = −2·s_a·s_b` exactly on defect pairs (amplitude never 4),
+`E = D(−2A₀)D` with `D = diag(s_x)`, rank_Q(E) = `2(2^{m−1}−1)`, GF(2) adjacency rank
+`2^m−4`.  Each pair of distinct nonzero c-orbits carries exactly 8 edges, which
+**structurally derives** the count `8·C(2^{m−1}−1,2) = 24·[m−1,2]₂`.  New sub-lemma
+(verified k=2..6): `cd_sigma` is antisymmetric on distinct nonzero arguments.
+
+### 10.3 The three deviation terms close SEPARATELY (DEVIATION-TERMS lane)
+
+    tr(EP²) = −(H−4)(H−6)(H−8)
+    tr(PE²) = +(H−4)(H−8)(H−12)
+    tr(E³)  = −(9/7)(H−4)(H−8)(H−16)   [= −48·T3 with T3 the defect-triangle count]
+
+verified m=2..6, with the polynomial identity `3tr(EP²) + 3tr(PE²) = −18(H−4)(H−8)` and
+total `−(9/7)(H−2)(H−4)(H−8) = −1728·[m,3]₂` identically.  Per defect pair the
+contributions are linear in H — the counting-proof target.
+
+### 10.4 The defect graph and its triangles (TWO-GRAPH lane)
+
+Triangle sign law (0 failures): `M(a,b)M(b,c)M(c,a) = Pprod·(−1)^k`, k = #defect edges.
+The defect graph on `V* = {x : x mod 2^m ≥ 2}` (|V*| = H−4) is connected, regular of
+degree `d = 2^m − 4`, and has `T3 = 288·[m−1,3]₂` defect triangles.  The deviation is
+fully combinatorial: **`Δ = −36·|V*|·d − 48·T3`**, i.e. a degree term plus a
+defect-triangle term.  (Refuted en route: "negative triples = triples containing a
+defect edge"; the 864·[m,3]₂ of §44 is the ORDERED net switched-triple count,
+`net = 144·[m,3]₂` unordered.)
+
+### 10.5 The diagonal rule (DIAGONAL-RULE lane)
+
+`K_a = (M³)_aa` at W=1 is governed by the 2-adic valuation of `a` (or `a−1` for odd a):
+master formula `K_a = (8u² − 6Hu + 18H − 80)/3` with `u = H/2^j`, verified at m=2..9.
+Generic class (a mod 8 ∈ {2..7}, 3H/4 labels): `−(H−8)(H−10)/3`.  `K_0 = 32 − 10H`
+(corrects §9).  M is NOT symmetric at W=1 — diagonal computations need `Σ_b (M²)_ab·M_ba`.
+
+### 10.6 The seam-vs-reference difference (DIFF-MATRIX lane)
+
+`M_ref = ε·M_seam·ε + C` with `ε` an explicit sign vector (`ε_x = −1` on
+`{x ∈ [2,2^m] : popcount odd} ∪ {x > 2^m : popcount even}`) and `C` supported exactly on
+the defect entries.  Since the conjugated term preserves the trace, **the entire
+deviation is attributable to the defect core C**.  No signed-permutation conjugation
+between the two matrices exists for m ≥ 3 — the E5 deviation IS the obstruction.
+
+### 10.7 The subspace reading (S3-RECURSION lane)
+
+    s3(1,m)  = −384·[m,3]₂ + 48·[m,2]₂ − 32·[m,1]₂
+    s3(2^m)  = 1344·[m,3]₂ + 48·[m,2]₂ − 32·[m,1]₂     [= poly(H)]
+
+— the dim-1 and dim-2 subspace weights are IDENTICAL at reference and seam; **the entire
+deviation is a dim-3-subspace weight shift of exactly −1728**.  Also: s3(1) satisfies
+`s3(m+1) = 8·s3(m) − 24H² + 264H − 464`, and the deviation recursion
+`D(m+1) = 8·D(m) + 1728·[m,2]₂` via q-Pascal — a provable-by-induction skeleton.
+
+### 10.8 The proof program, now finite
+
+1. Defect rule in Lean (Tier-family): the strip-depth parity or the level recursion
+   (§10.1), by induction through the cd_sigma top-bit branches.
+2. Degree regularity `d = 2^m − 4` on V* and the triangle count `T3 = 288·[m−1,3]₂`
+   (counting from the defect rule).
+3. `Δ = −36|V*|d − 48·T3` (two-graph reduction), or equivalently the three separate
+   trace forms (§10.3).
+4. `tr(P³) = poly(H)` (the predicted matrix's trace — currently only measured).
+5. Assembly: s3(1) = poly(H) − 1728·[m,3]₂ = −384[m,3]₂ + 48[m,2]₂ − 32[m,1]₂.
