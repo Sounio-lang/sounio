@@ -24955,4 +24955,34 @@ theorem core_pin_cba (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
   rw [h1, sumLtI_epsZero _ hp, sumLtI_sigRow (2^(m+1)) W hW, hs0]
   grind
 
+/-! ### Tier 151 — the routing's term 2 IS `R2`, by the coset reindexing
+
+    The one step of the `T1` assembly with content rather than bookkeeping.  Tier 145's second term
+    is `2·Σ_a ε(a)·Σ_b εσ(b)·P3(a,b)·P3(b, a⊕W)`, and `t1_R2` (Tier 135) is stated over `c` with the
+    seam shift on the FIRST argument.  They are the same sum under `a = c ⊕ W`, which is an
+    involution of `[0, 2^(m+1))` — so `sumLtI_reindex` applies with all three of its side conditions
+    cheap: `c ⊕ W` stays in range (`xorlt`), it is injective (cancel `W`), and it is onto, which
+    makes the "unhit indices vanish" hypothesis vacuous. -/
+
+theorem t1_term2_eq_R2 (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun a => epsZero a *
+        sumLtI (2^(m+1)) (fun b => epsZero b * sigRow b W *
+          (P3 a b W m * P3 b (a ^^^ W) W m)))
+      = sumLtI (2^(m+1)) (fun c => sumLtI (2^(m+1)) (fun b =>
+          epsZero (c ^^^ W) * ((epsZero b * sigRow b W) *
+            (P3 (c ^^^ W) b W m * P3 b c W m)))) := by
+  have hrange : ∀ a, a < 2^(m+1) → a ^^^ W < 2^(m+1) := fun a ha => xorlt ha hW
+  have hinj : ∀ a b, a < 2^(m+1) → b < 2^(m+1) → a ^^^ W = b ^^^ W → a = b := by
+    intro a b _ _ h
+    have := congrArg (fun x => x ^^^ W) h
+    simpa [xor_cancel] using this
+  have honto : ∀ x, x < 2^(m+1) → (∀ a, a < 2^(m+1) → a ^^^ W ≠ x) →
+      (fun a => epsZero a * sumLtI (2^(m+1)) (fun b => epsZero b * sigRow b W *
+        (P3 a b W m * P3 b (a ^^^ W) W m))) x = 0 := by
+    intro x hx h
+    exact absurd (xor_cancel x W) (h (x ^^^ W) (xorlt hx hW))
+  rw [sumLtI_reindex (2^(m+1)) (2^(m+1)) (fun c => c ^^^ W) _ hrange hinj honto]
+  refine sumLtI_congr _ _ _ (fun c _ => ?_)
+  rw [xor_cancel c W, ← sumLtI_mul]
+
 end SounioZDFiberAntisym
