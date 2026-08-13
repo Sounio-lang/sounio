@@ -15538,17 +15538,26 @@ impl Lowerer {
             lo_u = lo_u.emit(ir_load_imm(reg_u, 0))
             return (lo_u, reg_u)
         }
-        // `.len()` is intrinsic for arrays and open slices. It is accepted by
-        // the checker, but lowering it as an ordinary method invents a body-less
-        // `len` function and crashes the native path. String locals retain their
-        // separate string-length lowering below.
+        // `.len()` is intrinsic for strings, arrays, and open slices. It is
+        // accepted by the checker, but lowering it as an ordinary method invents
+        // a body-less `len` function and crashes the native path.
         if ir_name_eq(e.name, make_name("len")) {
             match e.args {
                 None => {
                     match e.left {
                         Some(recv) => {
-                            if (*recv).kind == ExprKind::ExprIdent
-                                && self.lookup_local_scalar_kind((*recv).name) != 3 {
+                            if self.expr_result_is_string_ref(&(*recv)) {
+                                let pair_b = self.lower_expr_ref(&(*recv))
+                                var lo = pair_b.0
+                                let base_reg = pair_b.1
+                                let fn_id = lowerer_find_or_add_fn_id_mut(&! lo, make_name("str_len"))
+                                let pair_d = lo.fresh_reg()
+                                lo = pair_d.0
+                                let dst = pair_d.1
+                                let len_args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_single(base_reg)))
+                                return (lo.emit(ir_call(dst, fn_id, make_name("str_len"), len_args, 1)), dst)
+                            }
+                            if (*recv).kind == ExprKind::ExprIdent {
                                 let pair_b = self.lower_expr_ref(&(*recv))
                                 var lo = pair_b.0
                                 let base_reg = pair_b.1
@@ -15568,7 +15577,14 @@ impl Lowerer {
                         None => {}
                     }
                 }
-                Some(_) => {}
+                Some(_) => {
+                    // The checker rejects non-zero arity with E010. Refuse here
+                    // too so a malformed or unchecked AST cannot fall through,
+                    // invent a body-less `len`, and crash native codegen.
+                    var lo_bad = self
+                    lowerer_mark_error(&! lo_bad)
+                    return (lo_bad, IR_INVALID_REG)
+                }
             }
         }
         // Impl methods are lowered as mangled free functions (ir_mangle_method_name).
