@@ -175,6 +175,21 @@ diferente que mascarava a causa raiz. Corrigido com `trap` que mata o
 
 **Confirmado 3× seguidas** com o aquecimento de ARP no lugar, taxa de
 8 Gbit/s, todas bit-exatas, zero perda real (`eth_in` delta ~7150-7190
-contra 7143 pacotes enviados, dentro do ruído de fundo). Ainda não é uma
-prova de que a intermitência acabou de vez — só três corridas — mas a causa
-agora tem um mecanismo plausível e testável, não é mais um mistério.
+contra 7143 pacotes enviados, dentro do ruído de fundo).
+
+## Confirmação: 10/10 (2026-08-13, final)
+
+`confirm10.sh` roda a medição 10 vezes seguidas (4.000.003 amostras, 8
+Gbit/s cada), recuperando e prosseguindo se alguma falhar. Resultado:
+**10/10 bit-exatas, zero perda real em todas.**
+
+```
+soma=4000003 (esperado 4000003)  eth_in delta=7148..7170  (7 valores distintos, 10 corridas)
+SAN_NET_BIT_EXATO × 10
+```
+
+Nenhuma recuperação foi necessária durante o lote — a correção do
+aquecimento de ARP segurou sozinha. Sem processo órfão ao final. Isso é
+throughput sustentável e reprodutível: **8 Gbit/s (~62,5 Msamples/s)**,
+confirmado com confiança estatística razoável, não mais uma amostra
+ambígua de 2-3 corridas.
