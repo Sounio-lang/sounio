@@ -25248,6 +25248,37 @@ theorem t1_master (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
   rw [t1_routed m W hW hW0]
   grind
 
+/-! ### Tier 155 — `T1` IN CLOSED FORM: every `H` cancels
+
+    Tier 153 left `T1` as `s3 + 4·cp2 − 6·(M³)₀₀ − 4·(M³)_WW + 64 − 36H`.  Both walks are already
+    theorems in the SAME quadratic form `Q = Σ_{b,c} P3(0,b)·P3(b,c)·P3(0,c)`:
+
+      `(M³)₀₀ = −Q + 2(2 − H)`      Tier 112, `walk3_eq_quad`     (unconditional)
+      `(M³)_WW = Q − 6H + 12`       Tier 124, `walk3_at_W`        (unconditional, seam included)
+
+    Substituting, the `Q`s do NOT cancel but every `H` does:
+
+      `6Q − 24 + 12H` `− 4Q + 24H − 48` `+ 64 − 36H`  `=`  `2Q − 8`
+
+    so **`T1 = s3 + 4·cp2 + 2·Q − 8`, level-independent and label-independent in its constant**.
+    This is unconditional: it uses neither Tier 119's `Q = 8H − 28` (which holds on the reachable
+    labels only) nor any seam hypothesis.  Feeding Tier 119 in gives the numeric closed form on
+    those labels; the identity above is the part that needs no such restriction. -/
+
+/-- **`T1 = s3 + 4·cp2 + 2·Q − 8`.**  The three walks of Tier 153 collapse to one quadratic form
+    and a constant — every `H` cancels. -/
+theorem t1_closed (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+        P3 a b W m * (E01 b c W * P3 b c W m * (E10 c a W * P3 c a W m)))))
+      = tri3 (2^(m+1)) (fun x y => P3 x y W m)
+        + 4 * sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun c =>
+            P3 a c W m * P3 c (a ^^^ W) W m))
+        + 2 * sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+            P3 0 b W m * (P3 b c W m * P3 0 c W m)))
+        - 8 := by
+  rw [t1_master m W hW hW0, walk3_eq_quad m W hW, walk3_at_W m W hW hW0]
+  grind
+
 
 /-! ### Tier 158 — spine isolation (`hiso`) at the reference (kimi)
 
