@@ -25382,6 +25382,70 @@ theorem s3_recursion_pow2 (p j : Nat) :
   rw [s3_level_recursion (p+j) (2^p) hWlt hW0, cp2_pow2_labels p j]
   grind
 
+/-! ### Tier 159 — **THE RECURSION SOLVED**: `s3` in closed form on the power-of-two labels
+
+    Tier 157b's numeric recursion is one affine map per level, so a closed form needs only its
+    base case — and the base case is already a theorem.  At `j = 0` the label `W = 2^p` IS the
+    maximal seam of level `p`, so `s3_maximal_seam` (Tier 136) is exactly `S(0)`:
+
+      `S(0) = A³ − 12A² + 28A − 16`,        `A = 2^(p+1)`
+
+    Iterating `S(j+1) = 8·S(j) − 24(H−2)(H−6) + 72H − 176` with `H = A·2^j`:
+
+      `S(j+1) = 8·S(j) − 24·A²·4^j + 264·A·2^j − 464`
+
+    The three particular solutions are `6A²·4^j` (from `4α = 8α − 24A²`), `−44A·2^j`
+    (from `2β = 8β + 264A`) and a CONSTANT that is not an integer — `γ = 8γ − 464` gives
+    `γ = 464/7`.  That is why the theorem below is stated as `7 · s3 = …` rather than `s3 = …`:
+    the honest closed form carries the geometric sum `(8^j − 1)/7`, and clearing the denominator
+    is cheaper than introducing a `Σ 8^i` definition.  Everything is integral — `8^j ≡ 1 mod 7`
+    makes `464 − 576·8^j` divisible by `7` at every `j`.
+
+    Numeric checks against the E5 table (`X = 2^j`, `A = 2^(p+1)`):
+      `p = 3, j = 0` (level 3, `H = 16`):  `s3 = 1456`   — the value Tier 136's docstring cites
+      `p = 3, j = 1` (level 4):            `s3 = 9264`   — closed form and one recursion step agree
+
+    ⚠ SCOPE.  `p ≥ 1` (the theorem is indexed by `k` with `p = k+1`), because `s3_maximal_seam`
+    is stated at `W = 2^(k+1)`.  The remaining label is the REFERENCE `W = 1`, which is the
+    concurrent lane's base case, not this one's. -/
+
+/-- **`s3` IN CLOSED FORM** at `W = 2^(k+1)`, every level above it.  With `A = 2^(k+2)` and
+    `X = 2^j`:  `7·s3 = (7A³ − 126A² + 504A − 576)·X³ + 42A²·X² − 308A·X + 464`.
+    Induction on `j`: base `s3_maximal_seam`, step `s3_recursion_pow2`. -/
+theorem s3_pow2_closed (k j : Nat) :
+    7 * tri3 (2^(k+1+j+1)) (fun x y => P3 x y (2^(k+1)) (k+1+j))
+      = (7 * (((2^(k+1+1) : Nat) : Int) * ((2^(k+1+1) : Nat) : Int) * ((2^(k+1+1) : Nat) : Int))
+          - 126 * (((2^(k+1+1) : Nat) : Int) * ((2^(k+1+1) : Nat) : Int))
+          + 504 * ((2^(k+1+1) : Nat) : Int) - 576)
+          * (((2^j : Nat) : Int) * ((2^j : Nat) : Int) * ((2^j : Nat) : Int))
+        + 42 * (((2^(k+1+1) : Nat) : Int) * ((2^(k+1+1) : Nat) : Int))
+            * (((2^j : Nat) : Int) * ((2^j : Nat) : Int))
+        - 308 * ((2^(k+1+1) : Nat) : Int) * ((2^j : Nat) : Int)
+        + 464 := by
+  induction j with
+  | zero =>
+      have h := s3_maximal_seam k
+      have h0 : ((2^0 : Nat) : Int) = 1 := by decide
+      rw [h, h0]
+      grind
+  | succ j ih =>
+      have hrec := s3_recursion_pow2 (k+1) j
+      have hidx : k+1+(j+1)+1 = (k+1+j+1)+1 := by omega
+      have hpow : (2:Nat)^(k+1+(j+1)+1) = 2^(k+1+j+1) + 2^(k+1+j+1) := by
+        rw [hidx, Nat.pow_succ]; omega
+      have hH : ((2^(k+1+j+1) : Nat) : Int)
+          = ((2^(k+1+1) : Nat) : Int) * ((2^j : Nat) : Int) := by
+        rw [show k+1+j+1 = (k+1+1)+j from by omega, Nat.pow_add]
+        push_cast
+        grind
+      have hX : ((2^(j+1) : Nat) : Int) = 2 * ((2^j : Nat) : Int) := by
+        rw [Nat.pow_succ]; push_cast; grind
+      rw [hpow]
+      show 7 * tri3 (2^(k+1+j+1) + 2^(k+1+j+1))
+          (fun x y => P3 x y (2^(k+1)) (k+1+j+1)) = _
+      rw [hrec, hX, hH]
+      grind
+
 
 /-! ### Tier 158 — spine isolation (`hiso`) at the reference (kimi)
 
