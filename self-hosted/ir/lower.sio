@@ -953,6 +953,33 @@ fn lowerer_new() -> Lowerer with Alloc, Mut {
 
 fn lowerer_new_with_epistemic(epistemic: &IrEpistemicSection) -> Lowerer with Alloc, Mut, Panic, Div, IO {
     var lo = lowerer_new()
+    // #1669: the module the codegen eventually sees is born one line up, in
+    // lowerer_new's `module: Box::new(ir_empty_module())`. Nothing has touched it
+    // yet here. If its untouched function slots already carry bits, the Box'd
+    // value arrives dirty and no per-function field can be trusted; if they are
+    // clean, something later dirties them and the search moves downstream.
+    //
+    // Placed HERE rather than inside lowerer_new because this function already
+    // carries IO -- adding an effect to lowerer_new would cascade to its eight
+    // callers, and effect cascades are what desynchronised the checker in #1649.
+    if str_eq(read_env("SOUNIO_FLOAT_BITS_PROBE"), "1") {
+        print("[float-bits] at_lowerer_new untouched8=")
+        print_int(ir_module_count_float_bits_untouched(&(*lo.module), 8))
+        print(" fn_count=")
+        print_int((*lo.module).fn_count)
+        // Apples-to-apples with the origin/main run: an EXISTING field with a
+        // known default of 0. If this is clean while the new field is dirty, the
+        // corruption is confined to the added field rather than general.
+        var k: i64 = 0
+        var dirty_ic: i64 = 0
+        while k < 8 {
+            if (*lo.module).functions[k as usize].instr_count != 0 { dirty_ic = dirty_ic + 1 }
+            k = k + 1
+        }
+        print(" of8_nonzero_instr_count=")
+        print_int(dirty_ic)
+        print("\n")
+    }
     (*lo.module).epistemic = (*epistemic)
     lo.epistemic_contests = lower_epistemic_contest_index_from_ref(epistemic)
     if lower_live_diag_enabled() {
@@ -1265,11 +1292,12 @@ fn lowerer_seed_module_from_summary(lo_in: Lowerer, summary: &IrProgramSummary) 
         if ic > 0 {
             var ji: i64 = 0
             while ji < ic && ji < IR_MAX_INSTRS {
-                func.instrs[ji as usize] = (*summary.module).functions[i as usize].instrs[ji as usize]
+                ir_arena_copy_slot(ir_region_slot_w(func.region, (ji)),ir_region_slot_r((*summary.module).functions[i as usize].region, (ji)))
                 ji = ji + 1
             }
             func.instr_count = ic
         }
+        if func.region.slot < 0 { ir_function_alloc_region(&! func) }
         (*module_box).functions[i as usize] = func
         i = i + 1
     }
@@ -1634,6 +1662,7 @@ fn lowerer_preseed_dep_items_into_acc_mut(
                                                 }
                                             }
                                         }
+                                        if fn_slot_sig.region.slot < 0 { ir_function_alloc_region(&! fn_slot_sig) }
                                         (*module_box_sig).functions[fn_id_sig as usize] = fn_slot_sig
                                         (*lo).module = module_box_sig
                                     }
@@ -1643,12 +1672,14 @@ fn lowerer_preseed_dep_items_into_acc_mut(
                                             var mbox_k = (*lo).module
                                             var slot_k = (*mbox_k).functions[fn_id_ps as usize]
                                             slot_k.compile_strategy = 6
+                                            if slot_k.region.slot < 0 { ir_function_alloc_region(&! slot_k) }
                                             (*mbox_k).functions[fn_id_ps as usize] = slot_k
                                             (*lo).module = mbox_k
                                         } else if visibility_to_bool(head.visibility) {
                                             var mbox_e = (*lo).module
                                             var slot_e = (*mbox_e).functions[fn_id_ps as usize]
                                             slot_e.compile_strategy = 7
+                                            if slot_e.region.slot < 0 { ir_function_alloc_region(&! slot_e) }
                                             (*mbox_e).functions[fn_id_ps as usize] = slot_e
                                             let exp_count = (*mbox_e).export_count
                                             if exp_count < 64 {
@@ -1683,6 +1714,7 @@ fn lowerer_preseed_dep_items_into_acc_mut(
                                         bss_slot.bss_size = bss_size
                                         bss_slot.hyper_algebra_kind = lower_typeexpr_bss_elem_size(&head.type_alias_ty)
                                         lower_apply_global_var_init(&! bss_slot, name)
+                                        if bss_slot.region.slot < 0 { ir_function_alloc_region(&! bss_slot) }
                                         (*mbox2).functions[bss_fn_id as usize] = bss_slot
                                         (*mbox2).bss_total_size = bss_off + aligned_size
                                         (*lo).module = mbox2
@@ -1899,11 +1931,12 @@ fn lowerer_new_from_program_summary_flat(summary: &IrProgramSummaryFlat, epistem
         if ic > 0 {
             var ji: i64 = 0
             while ji < ic && ji < IR_MAX_INSTRS {
-                func.instrs[ji as usize] = summary.module.functions[i as usize].instrs[ji as usize]
+                ir_arena_copy_slot(ir_region_slot_w(func.region, (ji)),ir_region_slot_r(summary.module.functions[i as usize].region, (ji)))
                 ji = ji + 1
             }
             func.instr_count = ic
         }
+        if func.region.slot < 0 { ir_function_alloc_region(&! func) }
         (*module_box).functions[i as usize] = func
         i = i + 1
     }
@@ -2023,6 +2056,20 @@ fn lowerer_find_or_add_fn_id_mut(lo: &! Lowerer, name: Name) -> i64 with Mut, Pa
     let idx = (*module_box).fn_count
     var fn_slot = (*module_box).functions[idx as usize]
     fn_slot.name = name
+    // Slots are NOT recycled dirty: IR_FLOAT_BITS_INHERITED, which accumulates
+    // the popcount of every slot at the moment it is allocated and before
+    // anything writes it, reads 0 across runs that lower 5 functions. The clear
+    // I put here on that theory was dead code and is gone; the counter stays,
+    // because it is what proved the theory wrong and would catch it becoming
+    // true. The real defect was in the instrument -- see the hoists in
+    // ir_module_count_float_bits.
+    IR_FLOAT_BITS_INHERITED = IR_FLOAT_BITS_INHERITED + ir_function_count_float_bits(&fn_slot)
+    // #1649: give this function its OWN region. It cannot be done in
+    // ir_empty_function(): `[ir_empty_function(); 2048]` evaluates once and
+    // copies, so every slot in a fresh module would share one region and the
+    // functions would overwrite each other's instructions.
+    ir_function_alloc_region(&! fn_slot)
+    if fn_slot.region.slot < 0 { ir_function_alloc_region(&! fn_slot) }
     (*module_box).functions[idx as usize] = fn_slot
     (*module_box).fn_count = idx + 1
     (*lo).module = module_box
@@ -2094,6 +2141,8 @@ fn lowerer_preseed_fn_signature_mut(
     fn_slot.instr_count = 0
     fn_slot.reg_count = 0
     fn_slot.label_count = 0
+    if fn_slot.region.slot < 0 { ir_function_alloc_region(&! fn_slot) }
+    if fn_slot.region.slot < 0 { ir_function_alloc_region(&! fn_slot) }
     (*module_box).functions[fn_id as usize] = fn_slot
     (*lo).module = module_box
 }
@@ -2287,6 +2336,7 @@ fn lowerer_preseed_external_bss_globals_mut(
                                     bss_slot.bss_size = bss_size
                                     bss_slot.hyper_algebra_kind = lower_typeexpr_bss_elem_size(&head.type_alias_ty)
                                     lower_apply_global_var_init(&! bss_slot, name)
+                                    if bss_slot.region.slot < 0 { ir_function_alloc_region(&! bss_slot) }
                                     (*mbox).functions[bss_fn_id as usize] = bss_slot
                                     (*mbox).bss_total_size = bss_off + aligned_size
                                     (*lo).module = mbox
@@ -2837,7 +2887,9 @@ fn lower_typeexpr_bss_elem_size(ty_opt: &Option<Box<TypeExpr>>) -> i64 with Pani
 // - count == 1: scalar or array-repeat fill → returns_float=1, prof_counter_id=word
 // - count  > 1: element-list → also pack words into instrs[] for per-element stores
 // Presence uses count (not value!=0) so a list starting with 0 still inits.
-fn lower_apply_global_var_init(slot: &! IrFunction, name: Name) with Mut, Div {
+// Panic is reachable: the arena accessors this walks (ir_region_slot_r/_w,
+// ir_arena_load/_store) are all `with Mut, Panic, Div`. Declared, per E035.
+fn lower_apply_global_var_init(slot: &! IrFunction, name: Name) with Mut, Panic, Div {
     // Wave15e: string literal globals (magic+len+bytes in GLOBAL_VAR_INIT_*).
     // Must run before the multi-word element-list path or magic words would be
     // mis-emitted as per-element BSS fills.
@@ -2859,9 +2911,9 @@ fn lower_apply_global_var_init(slot: &! IrFunction, name: Name) with Mut, Div {
     if count > 1 {
         var j: i64 = 0
         while j < count && j < IR_MAX_INSTRS {
-            var instr = (*slot).instrs[j as usize]
+            var instr = ir_arena_load(ir_region_slot_r((*slot).region, (j)))
             instr.imm_i64 = ast_global_var_init_nth(name, j)
-            (*slot).instrs[j as usize] = instr
+            ir_arena_store(ir_region_slot_w((*slot).region, (j)), instr)
             j = j + 1
         }
         (*slot).instr_count = j
@@ -2927,6 +2979,7 @@ fn lowerer_preseed_program_items_mut(
                                             }
                                         }
                                     }
+                                    if fn_slot_sig.region.slot < 0 { ir_function_alloc_region(&! fn_slot_sig) }
                                     (*module_box_sig).functions[fn_id_sig as usize] = fn_slot_sig
                                     (*lo).module = module_box_sig
                                 }
@@ -2959,6 +3012,7 @@ fn lowerer_preseed_program_items_mut(
                                     bss_slot.bss_size = bss_size
                                     bss_slot.hyper_algebra_kind = lower_typeexpr_bss_elem_size(&head.type_alias_ty)
                                     lower_apply_global_var_init(&! bss_slot, name)
+                                    if bss_slot.region.slot < 0 { ir_function_alloc_region(&! bss_slot) }
                                     (*mbox2).functions[bss_fn_id as usize] = bss_slot
                                     (*mbox2).bss_total_size = bss_off + aligned_size
                                     (*lo).module = mbox2
@@ -3011,7 +3065,9 @@ fn ir_fast_summary_find_or_add_fn_id(module: &! IrModule, name: Name) -> i64 wit
         return -1
     }
     let idx = module_value.fn_count
-    module_value.functions[idx as usize] = ir_empty_function()
+    var fresh_ir_fn = ir_empty_function()
+    ir_function_alloc_region(&! fresh_ir_fn)
+    module_value.functions[idx as usize] = fresh_ir_fn
     module_value.functions[idx as usize].name = name
     module_value.functions[idx as usize].param_regs = [IR_INVALID_REG; 64]
     module_value.fn_count = idx + 1
@@ -3137,7 +3193,9 @@ fn ir_fast_summary_find_or_add_fn_id_owned(module: IrModule, name: Name) -> (IrM
         return (module_value, -1)
     }
     let idx = module_value.fn_count
-    module_value.functions[idx as usize] = ir_empty_function()
+    var fresh_ir_fn = ir_empty_function()
+    ir_function_alloc_region(&! fresh_ir_fn)
+    module_value.functions[idx as usize] = fresh_ir_fn
     module_value.functions[idx as usize].name = name
     module_value.functions[idx as usize].param_regs = [IR_INVALID_REG; 64]
     module_value.fn_count = idx + 1
@@ -3399,6 +3457,7 @@ fn ir_fast_summary_preseed_items_seed_owned(
                                         bss_slot.bss_size = bss_size
                                         bss_slot.hyper_algebra_kind = lower_typeexpr_bss_elem_size(&item.type_alias_ty)
                                         lower_apply_global_var_init(&! bss_slot, name)
+                                        if bss_slot.region.slot < 0 { ir_function_alloc_region(&! bss_slot) }
                                         bss_mod.functions[bss_fid as usize] = bss_slot
                                         bss_mod.fn_count = bss_fid + 1
                                         bss_mod.bss_total_size = bss_mod.bss_total_size + aligned_size
@@ -3466,7 +3525,9 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                             }
                             if fn_id < 0 && module.fn_count < IR_MAX_FUNCS {
                                 fn_id = module.fn_count
-                                module.functions[fn_id as usize] = ir_empty_function()
+                                var fresh_ir_fn = ir_empty_function()
+                                ir_function_alloc_region(&! fresh_ir_fn)
+                                module.functions[fn_id as usize] = fresh_ir_fn
                                 module.functions[fn_id as usize].name = name
                                 module.functions[fn_id as usize].param_regs = [IR_INVALID_REG; 64]
                                 module.fn_count = fn_id + 1
@@ -3512,6 +3573,7 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                 bss_slot.bss_size = bss_size
                                 bss_slot.hyper_algebra_kind = lower_typeexpr_bss_elem_size(&item.type_alias_ty)
                                 lower_apply_global_var_init(&! bss_slot, name)
+                                if bss_slot.region.slot < 0 { ir_function_alloc_region(&! bss_slot) }
                                 bss_mod.functions[bss_fid as usize] = bss_slot
                                 bss_mod.fn_count = bss_fid + 1
                                 bss_mod.bss_total_size = bss_mod.bss_total_size + aligned_size
@@ -3557,7 +3619,9 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                                     }
                                                     if fn_id < 0 && module.fn_count < IR_MAX_FUNCS {
                                                         fn_id = module.fn_count
-                                                        module.functions[fn_id as usize] = ir_empty_function()
+                                                        var fresh_ir_fn = ir_empty_function()
+                                                        ir_function_alloc_region(&! fresh_ir_fn)
+                                                        module.functions[fn_id as usize] = fresh_ir_fn
                                                         module.functions[fn_id as usize].name = mangled
                                                         module.functions[fn_id as usize].param_regs = [IR_INVALID_REG; 64]
                                                         module.fn_count = fn_id + 1
@@ -3838,7 +3902,11 @@ fn lowerer_lower_fn_params_mut(
                     var current_func_box2 = (*lo).current_func
                     let instr_count = (*current_func_box2).instr_count
                     if instr_count < IR_MAX_INSTRS {
-                        (*current_func_box2).instrs[instr_count as usize] = ir_mark_float_reg(preg)
+                        ir_arena_store(ir_region_slot_w((*current_func_box2).region, (instr_count)), ir_mark_float_reg(preg))
+                        // #1669: this store bypasses Lowerer.emit, so the bit has
+                        // to be set beside it. f64 PARAMS are the purest orphan
+                        // fact -- there is no defining instruction to ride on.
+                        let _fb = ir_float_bits_set(&! (*current_func_box2), preg)
                         (*current_func_box2).instr_count = instr_count + 1
                         (*lo).current_func = current_func_box2
                     } else {
@@ -3961,7 +4029,14 @@ fn lowerer_lower_fn_item_mut(
         (*reused).return_struct_name = (*(*lo).module).functions[fn_id as usize].return_struct_name
         (*reused).first_param_is_ref = (*(*lo).module).functions[fn_id as usize].first_param_is_ref
         (*reused).prof_counter_id = (*(*lo).module).functions[fn_id as usize].prof_counter_id
+        // #1649: carry the REGION over too, and do NOT drop this. This is exactly
+        // where the arena conversion lost it: every field restored from the slot
+        // EXCEPT the one saying where the instructions live, so every instruction
+        // this function lowered went to quarantine. ir_reset_function_in_place
+        // leaves the region invalid by design, so the restore must be explicit.
+        (*reused).region = (*(*lo).module).functions[fn_id as usize].region
     }
+    if (*reused).region.slot < 0 { ir_function_alloc_region(&! (*reused)) }
     (*lo).current_func = reused
     (*lo).current_func_loaded = true
     (*lo).env = None
@@ -9581,9 +9656,22 @@ impl Lowerer {
             return lo.report_error_at(9056)
         }
         var current_func_box = lo.current_func
+        // #1669: record float-ness on the FUNCTION, at the moment it is asserted,
+        // instead of leaving it in the instruction stream where a later pass is
+        // entitled to drop it. One site; all 70 ir_mark_float_reg emitters keep
+        // their exact shape and get this for free.
+        //
+        // ANY instruction carrying the marker, not just IrNop. The first version
+        // matched nops only and the proof run failed: a call returning f64 gets
+        // the flag stamped on the CALL (`call_instr.imm_flags = ...`), and lowering
+        // uses both channels. Narrowing to nops recorded the orphan facts and
+        // silently missed every instruction-attached one.
+        if instr.imm_flags == IR_FLOAT_REG_MARKER_FLAG && instr.dst >= 0 {
+            let _fb = ir_float_bits_set(&! (*current_func_box), instr.dst)
+        }
         let instr_count = (*current_func_box).instr_count
         if instr_count < IR_MAX_INSTRS {
-            (*current_func_box).instrs[instr_count as usize] = instr
+            ir_arena_store(ir_region_slot_w((*current_func_box).region, (instr_count)), instr)
             (*current_func_box).instr_count = instr_count + 1
             lo.current_func = current_func_box
             lo
@@ -9678,7 +9766,7 @@ impl Lowerer {
         if count <= 0 {
             return false
         }
-        let last = self.current_func.instrs[count - 1]
+        let last = ir_arena_load(ir_region_slot_r(self.current_func.region, (count - 1)))
         last.op == IrOpcode::IrReturn
     }
 
@@ -11340,7 +11428,11 @@ impl Lowerer {
                     if lower_type_expr_is_f64(&(*list).head.ty) {
                         let instr_count = (*current_func).instr_count
                         if instr_count < IR_MAX_INSTRS {
-                            (*current_func).instrs[instr_count as usize] = ir_mark_float_reg(preg)
+                            // Pointer form: the surrounding code holds
+                            // `current_func` as a pointer, not a value.
+                            ir_arena_store(ir_region_slot_w((*current_func).region, (instr_count)), ir_mark_float_reg(preg))
+                            // #1669: second off-funnel param-marker store.
+                            let _fb = ir_float_bits_set(&! (*current_func), preg)
                             (*current_func).instr_count = instr_count + 1
                         } else {
                             lo = lo.report_error_at(10768)
@@ -13011,7 +13103,7 @@ impl Lowerer {
         var saw_return = false
         var i: i64 = 0
         while i < func.instr_count {
-            let instr = func.instrs[i as usize]
+            let instr = ir_arena_load(ir_region_slot_r(func.region, (i)))
             if instr.op == IrOpcode::IrCallIndirect {
                 call_count = call_count + 1
                 if instr.src1 != func.param_regs[0] { return false }
@@ -16649,6 +16741,19 @@ fn count_expr_list(elems: Option<Box<ExprList>>) -> i64 with Alloc, Mut, Div {
     count_expr_list_ref(&elems)
 }
 
+// #1649: materialise an arena-resident argument list. The flat pool is the
+// source of truth; this rebuilds the Box chain ONLY where something needs to
+// mutate it, so ir_arena_load can stay effect-free for its ~431 callers.
+fn ir_reg_list_from_arena(at: i64, n: i64) -> Option<Box<IrRegList>> with Mut, Panic, Div, Alloc {
+    var out = ir_empty_reg_list()
+    var k = n - 1
+    while k >= 0 {
+        out = ir_reg_list_prepend(ir_arena_arg_at(at, k), out)
+        k = k - 1
+    }
+    out
+}
+
 fn ir_reg_list_prepend(reg: i64, args: Option<Box<IrRegList>>) -> Option<Box<IrRegList>> with Alloc {
     Some(Box::new(IrRegList { head: reg, tail: args }))
 }
@@ -16679,7 +16784,7 @@ fn ir_module_has_instrumented_strategy(module: &IrModule) -> bool with Panic, Di
 fn ir_function_has_opcode(func: IrFunction, op: IrOpcode) -> bool with Mut, Panic, Div {
     var i: i64 = 0
     while i < func.instr_count {
-        if func.instrs[i as usize].op == op {
+        if (IR_A_OP[(ir_region_slot_r(func.region, (i))) as usize] as IrOpcode) == op {
             return true
         }
         i = i + 1
@@ -16690,7 +16795,7 @@ fn ir_function_has_opcode(func: IrFunction, op: IrOpcode) -> bool with Mut, Pani
 fn ir_function_has_opcode_ref(func: &! IrFunction, op: IrOpcode) -> bool with Mut, Panic, Div {
     var i: i64 = 0
     while i < func.instr_count {
-        if func.instrs[i as usize].op == op {
+        if (IR_A_OP[(ir_region_slot_r(func.region, (i))) as usize] as IrOpcode) == op {
             return true
         }
         i = i + 1
@@ -16704,10 +16809,10 @@ fn ir_function_insert_instr_front(func: &! IrFunction, instr: IrInstr) -> bool w
     }
     var i = func.instr_count
     while i > 0 {
-        func.instrs[i as usize] = func.instrs[(i - 1) as usize]
+        ir_arena_copy_slot(ir_region_slot_w(func.region, (i)),ir_region_slot_r(func.region, ((i - 1))))
         i = i - 1
     }
-    func.instrs[0] = instr
+    ir_arena_store(ir_region_slot_w(func.region, (0)), instr)
     func.instr_count = func.instr_count + 1
     true
 }
@@ -16738,7 +16843,7 @@ fn ir_patch_validated_calls_in_function(
 
     var scan_i: i64 = 0
     while scan_i < func.instr_count {
-        if ir_call_needs_validated_patch(fn_count, callee_strategies, callee_param_counts, func.instrs[scan_i as usize]) {
+        if ir_call_needs_validated_patch(fn_count, callee_strategies, callee_param_counts, ir_arena_load(ir_region_slot_r(func.region, (scan_i)))) {
             needs_patch = true
             break
         }
@@ -16760,15 +16865,24 @@ fn ir_patch_validated_calls_in_function(
 
     var i: i64 = 0
     while i < func.instr_count {
-        if ir_call_needs_validated_patch(fn_count, callee_strategies, callee_param_counts, func.instrs[i as usize]) {
+        if ir_call_needs_validated_patch(fn_count, callee_strategies, callee_param_counts, ir_arena_load(ir_region_slot_r(func.region, (i)))) {
             let validated_reg = if func.compile_strategy == IR_STRATEGY_INSTRUMENTED {
                 func.param_regs[0]
             } else {
                 shared_validated_reg
             }
-            var instr = func.instrs[i as usize]
+            // #1649: ir_arena_load deliberately does NOT rebuild call_args --
+            // that needs Alloc and it is called at ~431 sites, where forcing the
+            // effect cascades. Arena-resident arguments live in the flat pool.
+            // This site MUTATES the list, so it has to materialise it first, and
+            // it already carries Alloc. Without this the prepend below built onto
+            // an empty list and the call's original arguments were dropped --
+            // which is what failed self-test T10 and T11.
+            let rd_slot = ir_region_slot_r(func.region, (i))
+            var instr = ir_arena_load(rd_slot)
+            instr.call_args = ir_reg_list_from_arena(rd_slot, instr.arg_count)
             ir_patch_validated_call_instr(&! instr, validated_reg)
-            func.instrs[i as usize] = instr
+            ir_arena_store(ir_region_slot_w(func.region, (i)), instr)
             patch_count = patch_count + 1
         }
         i = i + 1
@@ -16800,7 +16914,7 @@ pub(crate) fn ir_patch_validated_calls(module: &! IrModule) -> IrValidatedPatchS
         var instr_i: i64 = 0
         let instr_count = module.functions[i as usize].instr_count
         while instr_i < instr_count {
-            if module.functions[i as usize].instrs[instr_i as usize].op == IrOpcode::IrCall {
+            if (IR_A_OP[(ir_region_slot_r(module.functions[i as usize].region, (instr_i))) as usize] as IrOpcode) == IrOpcode::IrCall {
                 has_call = true
                 instr_i = instr_count
             } else {
@@ -16810,6 +16924,7 @@ pub(crate) fn ir_patch_validated_calls(module: &! IrModule) -> IrValidatedPatchS
         if has_call {
             var func = module.functions[i as usize]
             ir_patch_validated_calls_in_function(module.fn_count, &callee_strategies, &callee_param_counts, &! func, &! stats)
+            if func.region.slot < 0 { ir_function_alloc_region(&! func) }
             module.functions[i as usize] = func
         }
         i = i + 1
