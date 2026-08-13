@@ -1399,7 +1399,7 @@ pub fn ir_region_slot_r(r: IrInstrRegion, idx: i64) -> i64 with Mut, Panic, Div 
 // and the handle stores the SLOT, not the base -- so every copy of a handle sees
 // the new base through the same indirection and growth cannot make a copy stale.
 // That is also what keeps this callable from the ~1425 write sites: `&!` through
-// a chain like `module.functions[0].region` does not typecheck.
+// a chain like `(*module.functions)[0].region` does not typecheck.
 //
 // A region is NOT allocated here. Writing into a function that was never given
 // one is a bug in the caller, and it is latched as a violation rather than
@@ -1612,7 +1612,7 @@ pub fn ir_module_seal_functions(module: &IrModule) -> i64 with Mut, Panic, Div {
     var i: i64 = 0
     while i < (*module).fn_count && i < IR_MAX_FUNCS {
         // Hoist the handle before taking its address. Do not "simplify" this
-        // back to `ir_region_seal(&(*module).functions[i as usize].region)`:
+        // back to `ir_region_seal(&(*(*module).functions)[i as usize].region)`:
         // that is what the first version did, and it sealed ZERO of seven
         // regions in a real compile while reporting nothing.
         //
@@ -1629,7 +1629,7 @@ pub fn ir_module_seal_functions(module: &IrModule) -> i64 with Mut, Panic, Div {
         //
         // Sealing writes IR_REGION_STATE, a global, so a copy of the handle is
         // all this needs -- nothing has to be written back to the module.
-        var r = (*module).functions[i as usize].region
+        var r = (*(*module).functions)[i as usize].region
         if ir_region_seal(&r) == IR_ARENA_OK {
             sealed = sealed + 1
         }
@@ -3157,8 +3157,13 @@ pub fn ir_empty_epistemic_section_boxed() -> Box<IrEpistemicSection> with Alloc,
     Box::new(ep)
 }
 
+// #B3 (2026-08-13): functions table lives on the heap so IrModule is a small
+// handle-like value. Box::new(ir_empty_module()) previously materialised a
+// ~9–13 MiB stack temp (measured stack-frame warning on ir_empty_module
+// return). Hello lower seed_begin SEGVd under a 32 MiB stack because of that.
+// Access: (*module.functions)[i] / (*(*module).functions)[i].
 pub struct IrModule {
-    pub functions: [IrFunction; 8192],
+    pub functions: *mut [IrFunction; 8192],
     pub fn_count: i64,
     pub string_table: [Name; 4096],
     pub string_count: i64,
@@ -5131,7 +5136,7 @@ pub fn ir_module_count_float_bits_untouched(module: &IrModule, n: i64) -> i64 wi
         if slot >= IR_MAX_FUNCS { return total }
         // Same hoist as the live counter: a reference into a boxed array element
         // reads a wrong address under the seed. See the commit that measured it.
-        var uslot = (*module).functions[slot as usize]
+        var uslot = (*(*module).functions)[slot as usize]
         var r: i64 = 0
         while r < ir_float_bits_capacity() {
             if ir_float_bits_get(&uslot, r) { total = total + 1 }
@@ -5150,14 +5155,14 @@ pub fn ir_module_count_float_bits(module: &IrModule) -> i64 with Mut, Panic, Div
     var fi: i64 = 0
     while fi < (*module).fn_count && fi < IR_MAX_FUNCS {
         // Hoist the element to a local BEFORE taking a reference to it. Taking
-        // &(*module).functions[i] directly is the same shape that made
+        // &(*(*module).functions)[i] directly is the same shape that made
         // ir_region_seal silently seal 0 of 7 regions until it was hoisted; that
         // fix worked but its mechanism was never explained. This is the probe
         // that explains it -- if the hoisted count differs from the in-place one,
         // the reference-into-a-boxed-array-element is computing a wrong address,
         // and every reading in this investigation came from a broken instrument
         // rather than from broken storage.
-        var fslot = (*module).functions[fi as usize]
+        var fslot = (*(*module).functions)[fi as usize]
         var r: i64 = 0
         while r < ir_float_bits_capacity() {
             if ir_float_bits_get(&fslot, r) { total = total + 1 }
@@ -5270,9 +5275,42 @@ pub fn ir_reset_function_in_place(f: &! IrFunction, name: Name) with Mut, Panic,
     (*f).first_param_is_ref = 0
 }
 
-pub fn ir_empty_module() -> IrModule {
+// Off-struct function tables (B3). Eight BSS slots so ir_empty_module does not
+// need Alloc (no effect cascade across the compiler). Zero-init via
+// ir_empty_function() at load; live slots are fully rewritten on use.
+// Concurrent multi-mod merge peaks well under 8 live modules.
+var IR_FN_TABLE_0: [IrFunction; 8192] = [ir_empty_function(); 8192]
+var IR_FN_TABLE_1: [IrFunction; 8192] = [ir_empty_function(); 8192]
+var IR_FN_TABLE_2: [IrFunction; 8192] = [ir_empty_function(); 8192]
+var IR_FN_TABLE_3: [IrFunction; 8192] = [ir_empty_function(); 8192]
+var IR_FN_TABLE_4: [IrFunction; 8192] = [ir_empty_function(); 8192]
+var IR_FN_TABLE_5: [IrFunction; 8192] = [ir_empty_function(); 8192]
+var IR_FN_TABLE_6: [IrFunction; 8192] = [ir_empty_function(); 8192]
+var IR_FN_TABLE_7: [IrFunction; 8192] = [ir_empty_function(); 8192]
+var IR_FN_TABLE_POOL_NEXT: i64 = 0
+
+fn ir_fn_table_ptr(slot: i64) -> *mut [IrFunction; 8192] with Mut {
+    if slot == 0 { return &! IR_FN_TABLE_0 }
+    if slot == 1 { return &! IR_FN_TABLE_1 }
+    if slot == 2 { return &! IR_FN_TABLE_2 }
+    if slot == 3 { return &! IR_FN_TABLE_3 }
+    if slot == 4 { return &! IR_FN_TABLE_4 }
+    if slot == 5 { return &! IR_FN_TABLE_5 }
+    if slot == 6 { return &! IR_FN_TABLE_6 }
+    &! IR_FN_TABLE_7
+}
+
+pub fn ir_empty_module() -> IrModule with Mut {
+    // Rotate through BSS slots. Does not clear prior contents — callers set
+    // fn_count = 0 and only read [0, fn_count). Soft wrap at 8.
+    let use_slot = IR_FN_TABLE_POOL_NEXT
+    IR_FN_TABLE_POOL_NEXT = use_slot + 1
+    if IR_FN_TABLE_POOL_NEXT >= 8 {
+        IR_FN_TABLE_POOL_NEXT = 0
+    }
+    let funcs = ir_fn_table_ptr(use_slot)
     IrModule {
-        functions: [ir_empty_function(); 8192],
+        functions: funcs,
         fn_count: 0,
         string_table: [ir_empty_name(); 4096],
         string_count: 0,
