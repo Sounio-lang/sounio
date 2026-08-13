@@ -105,3 +105,44 @@ corridas limpas depois disso (1000 e 4.000.003 amostras, ambas bit-exatas).
 **Para a próxima tentativa de medir throughput real:** não repetir a rajada
 sem controle. Um injetor com *pacing* (intervalo entre lotes, sweep
 crescente) é o próximo passo — ainda não escrito.
+
+## Segunda rodada: `sendmmsg` removido, throughput é INTERMITENTE (2026-08-13, tarde)
+
+Depois da recuperação acima, reescrevi `inject_san.c` para nunca mais usar
+`sendmmsg` — só `sendto`, um pacote por chamada de sistema, sempre, com
+*pacing* opcional por atraso entre chamadas (token bucket). Confirmado
+correto localmente (`pace_test.py`) antes de tocar na FPGA.
+
+**Não existe um teto limpo dependente de taxa.** O que a varredura mostrou:
+
+| tentativa | taxa | resultado |
+|---|---|---|
+| `sendto` sem pace (ritmo natural) | 12,6–13,4 Gbit/s | bit-exato, 3 vezes seguidas |
+| `sendto` sem pace (ritmo natural, variou) | 17,2 Gbit/s | **travou** |
+| `sendto` com pace | 8,0 Gbit/s | bit-exato, 2 vezes seguidas |
+| `sendto` com pace | 12,0 Gbit/s | bit-exato, 1 vez |
+| `sendto` com pace | **8,0 Gbit/s de novo** | **travou** |
+
+A mesma taxa (8 Gbit/s), com o mesmo código, a mesma coorte, o mesmo padrão
+de envio (um pacote por syscall, sem lote): passou duas vezes e falhou na
+terceira. Isso não é um limiar determinístico de banda — é um comportamento
+**intermitente** do `networklayer` do VNx (ou de algo na cadeia CMAC →
+networklayer → kernel) que uma taxa mais baixa não elimina, só reduz a
+frequência.
+
+**Conclusão honesta:** não há um número de throughput sustentável e
+reprodutível para reportar. O que existe é:
+- correção bit-exata, robusta, reproduzida repetidas vezes em 1000 e em
+  4.000.003 amostras — isso é o resultado publicável
+- uma taxa de transmissão que *às vezes* funciona até ~13 Gbit/s e falha
+  de forma imprevisível mesmo bem abaixo disso
+- uma recuperação sempre efetiva (`systemctl restart u250-vnx.service` +
+  reprogramação), usada ~6 vezes nesta sessão sem exceção
+
+**Não investigado:** a causa raiz da intermitência. Candidatos plausíveis,
+nenhum confirmado: efeito cumulativo de reprogramações repetidas na mesma
+sessão sem power-cycle real da placa; estado da tabela ARP/socket do
+networklayer degradando com uso; alguma condição de corrida no próprio
+`networklayer` de terceiros (VNx) que só aparece sob re-uso intenso. Medir
+isso exigiria uma bancada dedicada (não compartilhada) e provavelmente
+capturas de tráfego mais longas — fora do escopo de hoje.

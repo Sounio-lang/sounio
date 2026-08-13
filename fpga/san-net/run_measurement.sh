@@ -4,11 +4,17 @@
 # e primeiro pacote (que o cronometro do ctl_san inclui, subestimando o
 # throughput real).
 #
-# uso: ./run_measurement.sh <n_samples> <n_points> <porta-fpga>
+# uso: ./run_measurement.sh <n_samples> <n_points> <porta-fpga> [taxa-Gbit/s]
+#
+# taxa-Gbit/s: PACEIE sempre. 8 e 12 Gbit/s confirmados bit-exatos e
+# reproduziveis em 2026-08-13 (ver README); o "ritmo natural" do sendto sem
+# pace variou entre corridas (12,6 a 17,2 Gbit/s) e a variante mais rapida
+# TRAVOU o networklayer. Omitir a taxa aqui manda sem pace — nao faca isso.
 set -euo pipefail
 N_SAMPLES="${1:-4000003}"
 N_POINTS="${2:-7}"
 FPGA_PORT="${3:-62781}"
+TAXA="${4:-8}"
 INJ_HOST=root@10.100.100.1
 LOG=/root/ctl_med.log
 
@@ -25,7 +31,7 @@ done
 grep -q "ARMADO" "$LOG" || { echo "nao armou a tempo"; cat "$LOG"; exit 1; }
 
 ssh -o BatchMode=yes "$INJ_HOST" \
-    "/root/inject_san 10.100.100.50 $FPGA_PORT $N_SAMPLES $N_POINTS 140 50000"
+    "/root/inject_san 10.100.100.50 $FPGA_PORT $N_SAMPLES $N_POINTS 140 50000 $TAXA"
 
 for i in $(seq 1 60); do
     if grep -qE "SAN_NET_|TIMEOUT|FALHA" "$LOG" 2>/dev/null; then break; fi
