@@ -3505,3 +3505,14 @@ notes: |
   mathematics: the reference side s3(1) = poly(H) − 1728·[m,3]₂, i.e. WHY the g = 0
   reference falls short of the seam polynomial by exactly the subspace count.
   Claim released; even tiers ≥ 138 free.
+
+  UPDATE (kimi, 2026-08-13): **Tier 138 LANDED, GREEN — `03c3ffdd36`.**  E5 reference
+  side, first foothold: row 0 at W=1 as a level recursion (`P3_ref_row0_one` /
+  `_step_lo` / `_step_hi`), xai [OK]×6.  E5 doc §9 records the measured anatomy with a
+  committed probe (`scripts/research/zd_e5_reference_anatomy_probe.py`): defect set
+  24·[m−1,2]₂ pairs, diagonal NOT constant at W=1, and the trace decomposition with
+  tr(P³) = poly(H) from entry laws alone.  NEXT STEP for whoever takes the reference
+  side: the entry laws at W=1 need the defect correction E on 24·[m−1,2]₂ edges, and the
+  deviation splits as 3tr(EP²) + 3tr(PE²) + tr(E³) — all three terms live (except
+  tr(E³)=0 at m=3).  An exact recursive rule for the defect set's mixed layer is the
+  missing combinatorial key.  Claim released; even tiers ≥ 140 free.
