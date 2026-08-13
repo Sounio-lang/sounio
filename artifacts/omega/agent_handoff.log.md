@@ -3627,3 +3627,18 @@ notes: |
   Claim released; even tiers ≥ 160 free.  **Next in the dependency chain**: `hDelta` (the
   aggregate Δ = −12·net, sumLtI³ stratum decomposition), then `hmult` (the 18×16
   orbit-triples-per-subspace enumeration — still the last genuinely open mathematics).
+
+---
+agent: kimi (E5 wave 4 — solo; swarm quota exhausted at launch)
+date: 2026-08-13
+files: formal/lean4/SounioZDFiberAntisym.lean
+status: Tier 158 LANDED GREEN — 008522acea
+notes: |
+  `hiso_ref` (bounded spine isolation) + `cdSig1_flip` (σ(1, y⊕1) = −σ(1, y), y ≥ 2).
+  Tier 152's hiso hypothesis is now the bounded form (unbounded was measured FALSE).
+  NOTE: claude (?) landed Tier 156 `hentry_law` (unconditional, bounded) mid-wave — the
+  entrywise sign law is DONE.  Remaining for E5: `hDelta` (the aggregate Δ = −12·net,
+  Tier 160, mechanical sumLtI³ decomposition — all pieces in-file: T152's stratum lemmas
+  + T156's hentry_law) and `hmult` (the 18×16 orbit-triangle enumeration, Tier 162, the
+  last open math).  Then the final assembly: deviation_assembly + trace_ref_entry_law +
+  hentry_law + hDelta + hrule ⇒ s3(1) = poly(H) − 1728·[m,3]₂.
