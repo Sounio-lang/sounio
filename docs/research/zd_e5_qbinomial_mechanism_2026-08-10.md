@@ -506,3 +506,43 @@ S4 is no longer an unknown shape — it is a named cocycle column with a four-li
 
 Do **not** open a parallel copy of `cdSigma` on this lane while the tip owns the names; land as a
 tier in `SounioZDFiberAntisym.lean` when free.
+
+---
+
+## 9. Reference-side anatomy, measured (kimi, 2026-08-13)
+
+First measurements of the reference matrix `M = P3(·,·,1,m)` against the seam structure of
+Tiers 134–136.  **Everything in this section is a finite measurement** (reproducible:
+`scripts/research/zd_e5_reference_anatomy_probe.py`, same definitions as the Lean file),
+NOT Lean-proved; the only in-kernel piece is the row-0 law (Tier 138).
+
+**Row 0 (PROVED, Tier 138).** `s_x = (−1)^{popcount x}` except at the seam point `x = 1`,
+where `s_1 = +1`. As a level recursion: lo half level-independent, hi half sign-flipped,
+seam translate excepted.
+
+**The defect set.** The coboundary `P3(a,b)·s_a·s_b = 1` FAILS at `W = 1` on exactly
+`24·[m−1,2]₂` unordered pairs — measured at m=2,3,4 (0, 24, 168), so the formula is a
+three-point fit, not a theorem. Reproduce: `python3 scripts/research/zd_e5_reference_anatomy_probe.py`. The
+level-(m) defect set contains two embedded copies of the level-(m−1) one (lo half, and its
+translate by `2^m`) plus a new mixed layer (120 pairs at m=4). An exact recursive rule for
+the mixed layer is not yet isolated.
+
+**The diagonal of M³.** At `W = 1`: `(M³)_00 = −H² + 2H` (same value as the seam — exact at
+m=2,3,4), but the nonzero diagonal is NOT constant: at m=4 it takes three values —
+`+48` on `{1, 16, 17} = {W, 2^m, 2^m⊕W}`, `−48` on `{8, 9, 24, 25}` (the `2^(m−1)` labels
+and their translates), `−176` on the remaining 24. At m=3: two values, `{1,8,9}` at `+16`,
+the rest at `−16`.
+
+**Trace decomposition.** Write `M = P + E` with `P` the entry-law matrix (the matrix the
+seam theorems would predict: `s_a s_b` off-diagonal, `−1` diagonal, `−s_a` column 0) and
+`E` the defect correction. Then, measured exactly at m=2,3,4:
+
+    tr(P³) = H³ − 12H² + 28H − 16   — the seam polynomial, from the entry laws ALONE
+    Δs3    = 3·tr(EP²) + 3·tr(PE²) + tr(E³)
+           = −2880 + 1152 + 0        (m=3, total −1728 = −1728·[3,3]₂)
+           = −52416 + 40320 − 13824  (m=4, total −25920 = −1728·[4,3]₂)
+
+So the whole deviation law is the interaction of the defect set with the predicted matrix;
+the m=3 case has NO defect triangles (`tr(E³) = 0`), m=4 has plenty. The mixed terms do
+NOT vanish — any proof of the base case must evaluate all three, or find the cancellation
+between them. The per-term numbers do not split as clean multiples of `[m,3]₂` on their own.

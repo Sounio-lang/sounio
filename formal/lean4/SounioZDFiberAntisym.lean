@@ -20750,4 +20750,72 @@ theorem s3_maximal_seam (k : Nat) :
   grind
 
 
+/-! ### Tier 138 — row `0` at the reference label `W = 1` (kimi, E5 reference side)
+
+    The reference-side analog of Tier 134's `P3_seam_row0`.  Row `0` of `P3(·,·,1,·)`
+    obeys a two-clause level recursion — level-independent below the top bit
+    (`P3_ref_row0_step_lo`), sign-flipping above it except at the translate of the seam
+    point (`P3_ref_row0_step_hi`), with the seam point itself `+1` at every level
+    (`P3_ref_row0_one`, direct from `sigma_self`).  Unrolling gives the measured
+    characterisation `s_x = (−1)^{popcount x}` off the seam point (the `+2` in the hi step
+    is exactly what pushes the translates `1+2^j` ONTO the popcount rule).  Measured
+    first: 0 failures across levels 1→5.  This is the reference-side analog of
+    `P3_seam_row0`; entry laws are future work. -/
+
+/-- Row `0` at the reference, reduced one level: `P3(0,x) = −σ(1,x)`. -/
+private theorem P3_ref_row0_red (m x : Nat) (hx : x < 2^(m+1)) (hx0 : x ≠ 0) :
+    P3 0 x 1 m = - cdSigma 1 x (m+1) := by
+  have h1 : (1:Nat) < 2^(m+1) := by have := Nat.two_pow_pos (m+1); omega
+  have hred := P3_red 0 x 1 m (Nat.two_pow_pos (m+1)) hx h1 hx0
+  rw [hred, cdSig0', Nat.zero_xor]
+  grind
+
+/-- The seam point itself: `P3(0,1) = +1` at every level — the exception to the
+    popcount parity, computed directly from `sigma_self`. -/
+theorem P3_ref_row0_one (m : Nat) : P3 0 1 1 m = 1 := by
+  have hred := P3_ref_row0_red m 1 (by have := Nat.two_pow_pos (m+1); omega) (by decide)
+  rw [hred, sigma_self (m+1) 1 (by have := Nat.two_pow_pos (m+1); omega) (by decide)]
+  grind
+
+/-- **STEP, LO HALF.**  Row `0` at the reference is level-independent below the top bit. -/
+theorem P3_ref_row0_step_lo (m x : Nat) (hx : x < 2^(m+1)) (hx0 : x ≠ 0) :
+    P3 0 x 1 (m+1) = P3 0 x 1 m := by
+  have hx' : x < 2^(m+2) := by
+    have hpow : (2:Nat)^(m+2) = 2^(m+1) + 2^(m+1) := by
+      show (2:Nat)^(m+1+1) = 2^(m+1) + 2^(m+1)
+      rw [Nat.pow_succ, Nat.mul_comm, Nat.two_mul]
+    omega
+  rw [P3_ref_row0_red (m+1) x hx' hx0, P3_ref_row0_red m x hx hx0]
+  have h1 : (1:Nat) < 2^(m+1) := by have := Nat.two_pow_pos (m+1); omega
+  rw [R_ll 1 x m h1 hx]
+
+/-- **STEP, HI HALF.**  Above the top bit the sign FLIPS, except at the translate of the
+    seam point itself. -/
+theorem P3_ref_row0_step_hi (m x : Nat) (hx : x < 2^(m+1)) :
+    P3 0 (x + 2^(m+1)) 1 (m+1) = - P3 0 x 1 m + (if x = 1 then 2 else 0) := by
+  have h1 : (1:Nat) < 2^(m+1) := by have := Nat.two_pow_pos (m+1); omega
+  have hx' : x + 2^(m+1) < 2^(m+2) := by
+    have hpow : (2:Nat)^(m+2) = 2^(m+1) + 2^(m+1) := by
+      show (2:Nat)^(m+1+1) = 2^(m+1) + 2^(m+1)
+      rw [Nat.pow_succ, Nat.mul_comm, Nat.two_mul]
+    omega
+  have hx0' : x + 2^(m+1) ≠ 0 := by have := Nat.two_pow_pos (m+1); omega
+  rw [P3_ref_row0_red (m+1) (x + 2^(m+1)) hx' hx0']
+  have hr := R_lu 1 x m h1 hx
+  rw [hr]
+  by_cases hx0 : x = 0
+  · subst hx0
+    rw [if_neg (by decide : ¬(0:Nat) = 1), P3_zero_zero m 1, cdSig0]
+    grind
+  · by_cases hx1 : x = 1
+    · subst hx1
+      rw [if_pos rfl, P3_ref_row0_one m, sigma_self (m+1) 1 h1 (by decide)]
+      grind
+    · rw [if_neg hx1]
+      have hsy := antisym (m+1) 1 x h1 hx (by decide) hx0 (by
+        intro h; exact hx1 h.symm)
+      have hred := P3_ref_row0_red m x hx hx0
+      grind
+
+
 end SounioZDFiberAntisym
