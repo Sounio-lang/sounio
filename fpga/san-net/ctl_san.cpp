@@ -8,9 +8,11 @@
 // custou horas nesta placa configurar o cmac_0/networklayer_0, que sao a
 // gaiola QSFP SEM cabo; o caminho vivo e o par _1.
 //
-// build (no dl380):
-//   g++ -std=c++17 -O2 -o ctl_san ctl_san.cpp \
-//       -I/opt/xilinx/xrt/include -L/opt/xilinx/xrt/lib \
+// build e execucao (no dl380) — o setup.sh e' obrigatorio nos DOIS passos:
+// sem ele o link acha o header mas o binario nao acha libxrt_coreutil.so.2.
+//   source /opt/xilinx/xrt/setup.sh
+//   g++ -std=c++17 -O2 -Wno-deprecated-declarations -o ctl_san ctl_san.cpp
+//       -I/opt/xilinx/xrt/include -L/opt/xilinx/xrt/lib
 //       -lxrt_coreutil -lpthread -luuid
 //
 // cluster-ops 2026-08-13
@@ -21,10 +23,14 @@
 #include <string>
 #include <vector>
 #include <stdexcept>
+#include <chrono>
 #include <arpa/inet.h>
 #include "xrt/xrt_device.h"
 #include "xrt/xrt_kernel.h"
 #include "xrt/xrt_bo.h"
+// xrt::ip — acesso a registrador por NOME de CU. Na XRT 2.23 instalada no
+// dl380 este header vive sob experimental/, nao direto em xrt/.
+#include "xrt/experimental/xrt_ip.h"
 
 // ---- CMAC: offsets do kernel.xml do VNx (Ethernet/kernel.xml) ----
 static const uint32_t CMAC_RESET      = 0x0004;
