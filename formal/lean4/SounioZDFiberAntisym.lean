@@ -22335,4 +22335,83 @@ theorem deviation_assembly (k : Nat)
       (by grind) (by grind) (by grind) (by grind) hT3
     grind
 
+/-! ### Tier 143 — the routing's OUTER stage: the `a`-sum -/
+
+theorem t1_route_outer (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1)) (fun a => (epsZero a * sigRow a W) *
+        ((((((( sumLtI (2^(m+1)) (fun b => epsZero b * sigRow b W *
+                  (P3 a b W m * sumLtI (2^(m+1)) (fun c => epsZero c * (P3 b c W m * P3 c a W m))))
+            + 2 * epsZero (a ^^^ W) * sumLtI (2^(m+1)) (fun b => epsZero b * sigRow b W *
+                  (P3 a b W m * P3 b (a ^^^ W) W m)))
+            + 2 * sumLtI (2^(m+1)) (fun b => epsZero b * (P3 a b W m * P3 (b ^^^ W) a W m)))
+            + (if a = W then -4 * epsZero 0 * sumLtI (2^(m+1)) (fun b => epsZero b * sigRow b W *
+                  (P3 a b W m * P3 b 0 W m)) else 0))
+            + epsZero 0 * sigRow 0 W * (P3 a 0 W m * (-4 * (epsZero W * P3 W a W m))))
+            + epsZero a * sigRow a W * (P3 a a W m * (4 * epsZero (a ^^^ W))))
+            + (if a = W then epsZero W * sigRow W W * (P3 a W W m * (-8 * epsZero 0)) else 0))
+            + (if a = 0 then epsZero 0 * sigRow 0 W * (P3 a 0 W m * (-8 * epsZero W)) else 0)))
+      = sumLtI (2^(m+1)) (fun a => epsZero a * sigRow a W *
+            sumLtI (2^(m+1)) (fun b => epsZero b * sigRow b W *
+              (P3 a b W m * sumLtI (2^(m+1)) (fun c => epsZero c * (P3 b c W m * P3 c a W m)))))
+        + 2 * sumLtI (2^(m+1)) (fun a => epsZero a *
+            sumLtI (2^(m+1)) (fun b => epsZero b * sigRow b W *
+              (P3 a b W m * P3 b (a ^^^ W) W m)))
+        + 2 * sumLtI (2^(m+1)) (fun a => epsZero a * sigRow a W *
+            sumLtI (2^(m+1)) (fun b => epsZero b * (P3 a b W m * P3 (b ^^^ W) a W m)))
+        + epsZero W * sigRow W W * (-4 * epsZero 0 *
+            sumLtI (2^(m+1)) (fun b => epsZero b * sigRow b W * (P3 W b W m * P3 b 0 W m)))
+        + sumLtI (2^(m+1)) (fun a => epsZero a * sigRow a W *
+            (epsZero 0 * sigRow 0 W * (P3 a 0 W m * (-4 * (epsZero W * P3 W a W m)))))
+        + 4 * sumLtI (2^(m+1)) (fun a => epsZero (a ^^^ W) * P3 a a W m)
+        + epsZero W * sigRow W W * (epsZero W * sigRow W W * (P3 W W W m * (-8 * epsZero 0)))
+        + epsZero 0 * sigRow 0 W * (epsZero 0 * sigRow 0 W * (P3 0 0 W m * (-8 * epsZero W))) := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hd : ∀ a, (epsZero a * sigRow a W) * (epsZero a * sigRow a W) = 1 := by
+    intro a; unfold epsZero sigRow; grind
+  rw [sumLtI_congr _ _ (fun a =>
+        (epsZero a * sigRow a W *
+            sumLtI (2^(m+1)) (fun b => epsZero b * sigRow b W *
+              (P3 a b W m * sumLtI (2^(m+1)) (fun c => epsZero c * (P3 b c W m * P3 c a W m)))))
+        + 2 * (epsZero a *
+            sumLtI (2^(m+1)) (fun b => epsZero b * sigRow b W *
+              (P3 a b W m * P3 b (a ^^^ W) W m)))
+        + 2 * (epsZero a * sigRow a W *
+            sumLtI (2^(m+1)) (fun b => epsZero b * (P3 a b W m * P3 (b ^^^ W) a W m)))
+        + (if a = W then epsZero W * sigRow W W * (-4 * epsZero 0 *
+              sumLtI (2^(m+1)) (fun b => epsZero b * sigRow b W * (P3 W b W m * P3 b 0 W m)))
+            else 0)
+        + (epsZero a * sigRow a W *
+            (epsZero 0 * sigRow 0 W * (P3 a 0 W m * (-4 * (epsZero W * P3 W a W m)))))
+        + 4 * (epsZero (a ^^^ W) * P3 a a W m)
+        + (if a = W then epsZero W * sigRow W W *
+              (epsZero W * sigRow W W * (P3 W W W m * (-8 * epsZero 0))) else 0)
+        + (if a = 0 then epsZero 0 * sigRow 0 W *
+              (epsZero 0 * sigRow 0 W * (P3 0 0 W m * (-8 * epsZero W))) else 0))
+      (fun a ha => by
+        have hc := epsSig_coset a W hW0
+        have hsq := hd a
+        by_cases hq : a = W
+        · subst hq
+          by_cases hz : a = 0 <;> grind
+        · by_cases hz : a = 0
+          · subst hz; grind
+          · rw [if_neg hq, if_neg hq, if_neg hz]
+            grind)]
+  rw [sumLtI_add, sumLtI_add, sumLtI_add, sumLtI_add, sumLtI_add, sumLtI_add, sumLtI_add,
+      sumLtI_mul, sumLtI_mul, sumLtI_mul]
+  have c4 : sumLtI (2^(m+1)) (fun a => if a = W then epsZero W * sigRow W W * (-4 * epsZero 0 *
+        sumLtI (2^(m+1)) (fun b => epsZero b * sigRow b W * (P3 W b W m * P3 b 0 W m))) else 0)
+      = epsZero W * sigRow W W * (-4 * epsZero 0 *
+        sumLtI (2^(m+1)) (fun b => epsZero b * sigRow b W * (P3 W b W m * P3 b 0 W m))) :=
+    sumLtI_single (2^(m+1)) W _ hW
+  have c7 : sumLtI (2^(m+1)) (fun a => if a = W then epsZero W * sigRow W W *
+        (epsZero W * sigRow W W * (P3 W W W m * (-8 * epsZero 0))) else 0)
+      = epsZero W * sigRow W W * (epsZero W * sigRow W W * (P3 W W W m * (-8 * epsZero 0))) :=
+    sumLtI_single (2^(m+1)) W _ hW
+  have c8 : sumLtI (2^(m+1)) (fun a => if a = 0 then epsZero 0 * sigRow 0 W *
+        (epsZero 0 * sigRow 0 W * (P3 0 0 W m * (-8 * epsZero W))) else 0)
+      = epsZero 0 * sigRow 0 W * (epsZero 0 * sigRow 0 W * (P3 0 0 W m * (-8 * epsZero W))) :=
+    sumLtI_single (2^(m+1)) 0 _ hp
+  rw [c4, c7, c8]
+
 end SounioZDFiberAntisym
