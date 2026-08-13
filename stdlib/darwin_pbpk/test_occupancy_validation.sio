@@ -1,0 +1,101 @@
+//@ run-pass
+//@ expect-stdout: PASS
+// test_occupancy_validation.sio — validação do módulo pd/opioid_alpha2_occupancy
+// (F4 do estudo UTIped, Agourakis DC 2026). Self-contained (padrão
+// test_morphine_validation; workaround thin-link documentado na issue #1715).
+
+struct OccParams { ec50_ngml: f64, target_ngml: f64, mw: f64 }
+
+fn clonidine_occ_params() -> OccParams {
+    OccParams { ec50_ngml: 9.32, target_ngml: 2.0, mw: 230.09 }
+}
+fn dexmedetomidine_occ_params() -> OccParams {
+    OccParams { ec50_ngml: 1.0, target_ngml: 0.5, mw: 200.28 }
+}
+fn fentanyl_mu_params() -> OccParams {
+    OccParams { ec50_ngml: 1.0, target_ngml: 0.6, mw: 336.47 }
+}
+fn mu_tau_adapt_h() -> f64 { return 72.0 }
+
+fn occupancy(c_ngml: f64, p: OccParams) -> f64 with Div {
+    if c_ngml <= 0.0 { return 0.0 }
+    return c_ngml / (c_ngml + p.ec50_ngml)
+}
+fn adapt_step(adapt: f64, occ: f64, dt: f64, tau_h: f64) -> f64 with Div {
+    return adapt + dt * (occ - adapt) / tau_h
+}
+fn withdrawal_pressure(adapt: f64, occ: f64) -> f64 {
+    if adapt > occ { return adapt - occ }
+    return 0.0
+}
+
+fn main() -> i64 with Mut, Div, IO {
+    println("VALIDAÇÃO ocupação α2/μ + TMDD-lite (F4)")
+    var ok: i64 = 1
+
+    // A) EC50 ⇒ occ = 0.5 (clonidina 9.32, DEX 1.0, fentanil 1.0 ng/mL)
+    let o_clo = occupancy(9.32, clonidine_occ_params())
+    let o_dex = occupancy(1.0, dexmedetomidine_occ_params())
+    let o_fen = occupancy(1.0, fentanyl_mu_params())
+    print("A occ@EC50: clo="); print(o_clo); print(" dex="); print(o_dex)
+    print(" fent="); println(o_fen)
+    if o_clo < 0.499 || o_clo > 0.501 { ok = 0 println("  G FAIL clo EC50") }
+    if o_dex < 0.499 || o_dex > 0.501 { ok = 0 println("  G FAIL dex EC50") }
+    if o_fen < 0.499 || o_fen > 0.501 { ok = 0 println("  G FAIL fent EC50") }
+
+    // B) clonidina no alvo ANMF 2 ng/mL ⇒ occ ≈ 0.177 (tensão documentada)
+    let o_alvo = occupancy(2.0, clonidine_occ_params())
+    print("B occ clonidina @2 ng/mL="); print(o_alvo); println(" (gate [0.16,0.19])")
+    if o_alvo < 0.16 || o_alvo > 0.19 { ok = 0 println("  G FAIL occ alvo") }
+
+    // C) adaptação converge (10τ com occ 0.8 constante → A ≈ 0.8)
+    var a = 0.0
+    var i = 0.0
+    while i < 720.0 {
+        a = adapt_step(a, 0.8, 1.0, mu_tau_adapt_h())
+        i = i + 1.0
+    }
+    print("C A(10τ, occ 0.8)="); print(a); println(" (gate [0.79,0.80])")
+    if a < 0.79 || a > 0.801 { ok = 0 println("  G FAIL adapt converge") }
+
+    // D) W estrutural: coberto ⇒ 0; queda abrupta A=0.8→occ 0.2 ⇒ W=0.6
+    let w_cov = withdrawal_pressure(0.8, 0.9)
+    let w_drop = withdrawal_pressure(0.8, 0.2)
+    print("D W(coberto)="); print(w_cov); print(" W(queda)="); println(w_drop)
+    if w_cov != 0.0 { ok = 0 println("  G FAIL W coberto") }
+    if w_drop < 0.59 || w_drop > 0.61 { ok = 0 println("  G FAIL W queda") }
+
+    // E) teorema F5c in silico: perfil E5-like — occ 0.75 x 500h (constroi A),
+    //    depois sobe p/ 0.8 (metadona PCC cobre) ⇒ W permanece 0
+    var a2 = 0.0
+    var t = 0.0
+    var wmax = 0.0
+    while t < 720.0 {
+        var occ = 0.75
+        if t >= 500.0 { occ = 0.80 }
+        a2 = adapt_step(a2, occ, 1.0, mu_tau_adapt_h())
+        let w = withdrawal_pressure(a2, occ)
+        if w > wmax { wmax = w }
+        t = t + 1.0
+    }
+    print("E perfil E5-like: A(500h)="); print(a2); print(" W_max="); println(wmax)
+    if wmax != 0.0 { ok = 0 println("  G FAIL teorema W=0") }
+
+    // F) parada abrupta sem cobertura (braço real): occ cai p/ 0.1 ⇒ W sobe
+    var a3 = 0.0
+    var t3 = 0.0
+    while t3 < 500.0 {
+        a3 = adapt_step(a3, 0.75, 1.0, mu_tau_adapt_h())
+        t3 = t3 + 1.0
+    }
+    let w_abrupt = withdrawal_pressure(a3, 0.1)
+    print("F parada abrupta: A="); print(a3); print(" W="); println(w_abrupt)
+    if w_abrupt < 0.6 { ok = 0 println("  G FAIL W abrupto") }
+
+    if ok == 1 {
+        println("PASS")
+        return 0
+    }
+    println("FAIL")
+    return 1
+}
