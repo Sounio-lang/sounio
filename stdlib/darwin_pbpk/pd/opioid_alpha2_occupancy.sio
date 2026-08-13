@@ -1,0 +1,174 @@
+// darwin_pbpk/pd/opioid_alpha2_occupancy.sio — μ-opioid + α2-adrenergic
+// receptor occupancy and minimal tolerance/withdrawal dynamics (TMDD-lite).
+//
+// Pharmacodynamic bridge from plasma concentration (ng/mL) to fractional
+// receptor occupancy (competitive binding, Hill n=1):
+//
+//   occ(C) = C / (C + EC50)
+//
+// and the homeostatic adaptation model of Phases F5/F5c of the study
+// "Uncertainty-quantified PBPK modeling of opioid weaning in critically ill
+// children" (Agourakis DC, 2026):
+//
+//   dA/dt = (occ - A) / tau_adapt      adaptation state A tracks occupancy
+//   W(t)  = max(0, A - occ)            withdrawal pressure
+//
+// Structural theorem (Phase F5c): since A is a lagged average of occ,
+// A <= max historical occ; therefore W = 0 for ALL tau_adapt > 0 and ALL
+// EC50 > 0 whenever post-stop occupancy coverage (occ/occ_stop) stays >= 1 —
+// the uncertainty of W=0 is carried entirely by the PK coverage p-box.
+//
+// Retrospective falsification (61-patient PICU cohort): W does NOT predict
+// diagnosed withdrawal (AUC w_max 0.383, inverted — outcome measured under
+// rescue medication). W is a protocol TARGET, not a predictor.
+//
+// Literature:
+//   Yellepeddi VK et al. (2024) clonidine PBPK, functional EC50 alpha2
+//     40.5 nM = 9.32 ng/mL (AFE <= 2x vs clinical targets)
+//   ANMF (2025) clonidine minimum clinical target 2 ng/mL
+//   Ziesenitz VC et al. (2018) Clin Pharmacokinet 57:125-149 [fentanyl
+//     pediatric PK review; analgesic/sedative C50 0.6-3 ng/mL]
+//   Kumar P et al. (2008) Eur J Pharmacol 594:92-100 [dosing protocol
+//     determines mu-opioid receptor downregulation and tolerance]
+//   Grim TW et al. (2020) Biol Psychiatry 88:15-21 [mu receptor
+//     trafficking, internalization, downregulation, recycling]
+//   Huenseler C et al. (2014) clonidine 1 ug/kg/h reduces fentanyl +
+//     midazolam demand in ventilated neonates (RCT)
+//
+// Analogous in structure to pd/d2_occupancy.sio (drug-agnostic occupancy
+// with drug-specific parameter sets + epistemic priors).
+
+// ============================================================================
+// PARAMETERS + PRIORS
+// ============================================================================
+
+pub struct OccParams {
+    ec50_ngml:       f64,   // functional EC50 / Kd proxy (ng/mL plasma)
+    target_ngml:     f64,   // minimum clinical target concentration (ng/mL)
+    mw:              f64,   // molecular weight (g/mol)
+}
+
+pub struct OccEpParam {
+    mean:       f64,
+    variance:   f64,
+    confidence: f64,
+}
+
+pub struct OccPriors {
+    ec50: OccEpParam,
+}
+
+// ─── α2-adrenergic (weaning adjuvants) ──────────────────────────────────────
+
+// Clonidine (Yellepeddi 2024 PBPK functional EC50; ANMF 2025 target).
+// Tension documented in drugs/clonidine.sio: clinical target ≈ EC50/4.7 —
+// occupancy at 2 ng/mL is only ~0.18; we report against BOTH thresholds.
+pub fn clonidine_occ_params() -> OccParams {
+    OccParams { ec50_ngml: 9.32, target_ngml: 2.0, mw: 230.09 }
+}
+
+// Clonidine EC50 prior: AFE <= 2x (Yellepeddi PBPK qualification) → treat
+// 2x fold-error as ~2 SD on log scale: SD ≈ 0.5 * 9.32 / 2 ≈ 2.33 ng/mL
+// (CV 25%); variance = 5.43; confidence = 0.60 (single PBPK study, no
+// direct PET/radioligand confirmation in children — VERIFY).
+pub fn clonidine_occ_priors() -> OccPriors {
+    OccPriors {
+        ec50: OccEpParam { mean: 9.32, variance: 5.43, confidence: 0.60 },
+    }
+}
+
+// Dexmedetomidine: ~8x more alpha2-selective than clonidine; functional
+// EC50 ≈ 5 nM × 200.28 g/mol ≈ 1.0 ng/mL (VERIFY radioligand Ki range
+// 1.9-6.2 nM; ICU sedative target 0.2-0.7 ng/mL label).
+pub fn dexmedetomidine_occ_params() -> OccParams {
+    OccParams { ec50_ngml: 1.0, target_ngml: 0.5, mw: 200.28 }
+}
+pub fn dexmedetomidine_occ_priors() -> OccPriors {
+    // CV 40% assumed pending pediatric confirmation; confidence 0.45
+    OccPriors {
+        ec50: OccEpParam { mean: 1.0, variance: 0.16, confidence: 0.45 },
+    }
+}
+
+// ─── μ-opioid (withdrawal driver) ───────────────────────────────────────────
+
+// Fentanyl-equivalent EC50 for sedation-level μ occupancy: 1.0 ng/mL
+// (Ziesenitz 2018 range 0.6-3 ng/mL). Used with the COMBINED opioid load
+// metric (fentanyl + morphine/100 + methadone×equipotency ratio) of the
+// UTIped replay phases E1/F5.
+pub fn fentanyl_mu_params() -> OccParams {
+    OccParams { ec50_ngml: 1.0, target_ngml: 0.6, mw: 336.47 }
+}
+pub fn fentanyl_mu_priors() -> OccPriors {
+    // range 0.6-3 ng/mL as ~±2σ on log scale → σ_rel ≈ 40%; var = 0.16
+    // confidence 0.65 (clinical C50 literature consistent, no pediatric PET)
+    OccPriors {
+        ec50: OccEpParam { mean: 1.0, variance: 0.16, confidence: 0.65 },
+    }
+}
+
+// ─── Adaptation time constant ───────────────────────────────────────────────
+// Opioid tolerance develops over days of continuous exposure (Kumar 2008;
+// clinical iatrogenic withdrawal typically after ≥5-7d infusion).
+// Central 72h; sensitivity range 48-120h verified Knightian-harmless (F5c).
+pub fn mu_tau_adapt_h() -> f64 { return 72.0 }
+
+// ============================================================================
+// OCCUPANCY + TMDD-LITE DYNAMICS
+// ============================================================================
+
+// Fractional occupancy (competitive, Hill 1).
+pub fn occupancy(c_ngml: f64, p: OccParams) -> f64 with Div {
+    if c_ngml <= 0.0 { return 0.0 }
+    return c_ngml / (c_ngml + p.ec50_ngml)
+}
+
+// Occupancy relative to clinical target (coverage index, not binding):
+// >= 1 means at/above minimum target concentration.
+pub fn target_coverage(c_ngml: f64, p: OccParams) -> f64 with Div {
+    return c_ngml / p.target_ngml
+}
+
+// One Euler step of the adaptation state (dt, tau in hours).
+pub fn adapt_step(adapt: f64, occ: f64, dt: f64, tau_h: f64) -> f64 with Div {
+    return adapt + dt * (occ - adapt) / tau_h
+}
+
+// Withdrawal pressure: positive only when occupancy falls below the
+// adapted level. W = 0 structurally whenever occ coverage >= 1 (F5c).
+pub fn withdrawal_pressure(adapt: f64, occ: f64) -> f64 {
+    if adapt > occ { return adapt - occ }
+    return 0.0
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn test_occ_ec50_half() -> bool with Div {
+    let p = clonidine_occ_params()
+    let o = occupancy(9.32, p)
+    return o > 0.499 && o < 0.501
+}
+fn test_occ_target_clo() -> bool with Div {
+    // occupancy at ANMF minimum target 2 ng/mL ≈ 0.177 (documented tension)
+    let p = clonidine_occ_params()
+    let o = occupancy(2.0, p)
+    return o > 0.16 && o < 0.19
+}
+fn test_adapt_converges() -> bool with Div, Mut {
+    var a = 0.0
+    var i = 0.0
+    // 10 tau of constant occ 0.8 → A ≈ 0.8 (Euler dt=1h: (1-1/72)^720 ≈ 4e-5)
+    while i < 720.0 {
+        a = adapt_step(a, 0.8, 1.0, mu_tau_adapt_h())
+        i = i + 1.0
+    }
+    return a > 0.79 && a <= 0.8
+}
+fn test_w_zero_when_covered() -> bool {
+    return withdrawal_pressure(0.8, 0.9) == 0.0
+}
+fn test_w_positive_after_drop() -> bool {
+    return withdrawal_pressure(0.8, 0.2) > 0.59
+}
