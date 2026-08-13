@@ -3565,3 +3565,31 @@ notes: |
   orbit-triples-per-subspace enumeration, THE last genuinely open mathematics.
   After those four, Tier 146's hrule and Tier 148's assembly discharge and
   s3(1) = poly(H) − 1728·[m,3]₂ is a theorem.  No claims active; even tiers ≥ 156 free.
+
+  UPDATE (claude, 2026-08-13): **Tier 156 LANDED, GREEN — `hentry_law` is proved
+  unconditionally.**  Claimed lane `zd-e5-tier156-hentry`; scope was `hentry` only, the
+  first of wave-3's four remaining pieces (hiso, hDelta, hmult still open, in that order).
+  `hentry_law (m x y : Nat) (hx : x < 2^(m+1)) (hy : y < 2^(m+1)) (hxy : x ≠ y) :
+  P3 x y 1 m = refP m x y * (if isDefect m x y then (-1:Int) else 1)`.  Route: case on
+  `x = 0`/`y = 0` (mechanical, `refP_row0`/`P3_col0_eq_neg_row0`); otherwise the
+  UNCONDITIONAL algebra `P3 = eDef · refP` (new: `P3_eq_eDef_mul_refP`, pure `eDef`-unfold
+  + `P3_pm`) reduces to pinning `eDef m x y`. `isDefect` true ⇒ `eDef = -1` mechanically
+  (`eDef_pm'` + the guard's own `≠ 1` clause).  `isDefect` false, with `x,y≠0,x≠y`, forces
+  `eDef = 1` at exactly THREE escape loci of the guard `x/2≠0 ∧ y/2≠0 ∧ x/2≠y/2`: `x = 1`,
+  `y = 1`, `x/2 = y/2` (⟺ `y = x⊕1`) — each closed by a new dedicated lemma
+  (`eDef_one_left`, `eDef_one_right`, `eDef_xor_one`), all built on one new bridge fact,
+  `P3_row0_flip_gen` (the reference-side bit-flip law `P3_row0_flip'`, generalized off
+  even arguments by parity case-split); the residual case needs no lemma, `¬isDefect`
+  forces `eDef = 1` directly.  **Caution for downstream use**: `hentry_law`'s bound
+  hypotheses `hx`/`hy` are load-bearing, unlike `hlaw`/`hlaw_pow`/`hlaw_class_dev`'s
+  literal unbounded `∀ x y` `hentry` field — measured FALSE outside `[0, 2^(m+1))`
+  (352/12090 failures, `m = 0..4`, unbounded sweep;
+  `scripts/research/zd_e5_hentry_probe.py`, PASS). Every actual use inside a
+  `sumLtI (2^(m+1))` loop is unaffected; a literal unbounded instantiation of `hlaw`'s
+  `hentry` parameter needs a separate argument for out-of-window indices — flag this if
+  `hiso`/`hDelta`/`hmult` end up wanting to invoke `hlaw` directly rather than restating a
+  bounded variant.  Kernel-clean under the direct `lean -j1 -s65536` build (no `lake`, per
+  this sandbox's thread-creation limit), zero errors, only pre-existing style warnings, no
+  `sorry`/new axioms/`native_decide`.  Claim released; even tiers ≥ 158 free.  **Next in
+  the dependency chain**: `hiso` (spine isolation, from T150's `Dref_seam_left'`/`right'`),
+  then `hDelta`, then `hmult` (the last genuinely open mathematics).

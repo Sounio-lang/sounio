@@ -24689,4 +24689,213 @@ theorem core_pin_cb (m a W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
   rw [h1, sumLtI_epsZero _ hp, sumLtI_sigRow (2^(m+1)) W hW, hs0]
   grind
 
+/-! ## Tier 156 — `hentry`, the entrywise sign law (UNCONDITIONAL)
+
+    `hlaw` / `hlaw_pow` / `hlaw_class_dev` (Tier 152, just above) take the entrywise sign law
+    as a hypothesis parameter `hentry`.  This tier discharges it as a real theorem: off the
+    diagonal and within the level's window, `P3(x,y,1,m)` is the reference product `refP m x y`
+    corrected by the defect sign `(-1)^{[isDefect]}`.
+
+    Route (measured first, `scripts/research/zd_e5_hentry_probe.py`, `m = 0..6`, 21590 pairs,
+    0 failures within the window):
+
+    1. `x = 0` / `y = 0`: `isDefect` is `False` by definition (`x/2 = 0` resp. `y/2 = 0`), and
+       the identity is `refP_row0` resp. `P3_col0_eq_neg_row0` directly.
+    2. Otherwise (`x,y ≠ 0, x ≠ y`): the UNCONDITIONAL algebra `P3 = eDef · refP`
+       (`P3_eq_eDef_mul_refP`, pure `eDef`-unfolding plus `P3_pm`) reduces the goal to pinning
+       down `eDef m x y`.
+       - `isDefect` TRUE: `eDef ∈ {1,-1} \ {1} = {-1}` (`eDef_pm'` plus `isDefect`'s own
+         `eDef ≠ 1` clause) — mechanical.
+       - `isDefect` FALSE: the guard `x/2 ≠ 0 ∧ y/2 ≠ 0 ∧ x/2 ≠ y/2` fails at exactly one of
+         three loci (given `x,y ≠ 0, x ≠ y`): `x = 1`, `y = 1`, or `x/2 = y/2` (`⟺ y = x⊕1`).
+         Each locus gets `eDef = 1` from a dedicated lemma (`eDef_one_left`, `eDef_one_right`,
+         `eDef_xor_one`, all built from `P3_row0_flip_gen` — the reference-side analog of
+         `P3_row0_flip'` generalized off even arguments — plus `P3_red`/`sigma_self`/`antisym`);
+         the residual case (none of the three) forces `eDef = 1` directly from `¬isDefect`,
+         no lemma needed.
+
+    **The bound hypotheses `hx`/`hy` (`x, y < 2^(m+1)`) are load-bearing**, unlike `hlaw`'s
+    literal `∀ x y` (no bounds).  The identity is measured FALSE once `x` or `y` leaves the
+    level's window: e.g. `m = 0, x = 1, y = 2`: `P3 1 2 1 0 = 1` but
+    `refP 0 1 2 * (if isDefect 0 1 2 then -1 else 1) = -1` — 352 failures out of 12090 checked
+    pairs in an unbounded sweep over `m = 0..4`, `x,y < 3·2^(m+1)`.  This is not a proof gap:
+    `P3_col0_eq_neg_row0` and `antisym` themselves only hold within the level's window, so the
+    entry law genuinely needs it too.  Every use of `hentry_law` inside a `sumLtI (2^(m+1))`
+    loop (which is how `hlaw` is actually consumed downstream) is unaffected; a caller wanting
+    the literal unbounded `hlaw` hypothesis needs a separate argument for out-of-window
+    indices. -/
+
+private theorem rs_eq (m x : Nat) : rs m x = P3 0 x 1 m := rfl
+
+/-- Two naturals agreeing after `/2`, and distinct, differ by exactly one bit-`0` flip. -/
+private theorem eq_div2_iff_xor_one (x y : Nat) (hxy : x ≠ y) (hd : x / 2 = y / 2) :
+    y = x ^^^ 1 := by
+  by_cases hxp : x % 2 = 0
+  · have hy1 : y = x + 1 := by omega
+    rw [hy1]
+    exact (xor_one_of_even' x hxp).symm
+  · have hyp : y % 2 = 0 := by omega
+    have hx1 : x = y + 1 := by omega
+    have hxy1 : y ^^^ 1 = x := by rw [xor_one_of_even' y hyp, ← hx1]
+    have hcong : (y ^^^ 1) ^^^ 1 = x ^^^ 1 := congrArg (· ^^^ 1) hxy1
+    rw [xor_cancel y 1] at hcong
+    exact hcong
+
+/-- Row `0` of `P3(·,·,1,·)` flips sign under the bit-`0` involution off the seam point
+    `{0,1}` — the reference-side analog of `P3_row0_flip'`, generalized from even
+    arguments `2X` to arbitrary `y ∉ {0,1}` by splitting on parity and reusing
+    `P3_row0_flip'` (unconditional) in both directions. -/
+private theorem P3_row0_flip_gen (m y : Nat) (hy : y < 2^(m+1)) (hy0 : y ≠ 0) (hy1 : y ≠ 1) :
+    P3 0 (y ^^^ 1) 1 m = - P3 0 y 1 m := by
+  have hpow : (2:Nat)^(m+1) = 2^m + 2^m := by rw [Nat.pow_succ]; omega
+  by_cases hpar : y % 2 = 0
+  · obtain ⟨X, hXe⟩ : ∃ X, y = 2 * X := ⟨y / 2, by omega⟩
+    have hX0 : X ≠ 0 := by omega
+    have hXlt : X < 2^m := by omega
+    have hxor : y ^^^ 1 = 2 * X + 1 := by rw [hXe]; exact xor_one_of_even' (2*X) (by omega)
+    rw [hxor, hXe]
+    exact P3_row0_flip' m X hXlt hX0
+  · obtain ⟨X, hXe⟩ : ∃ X, y = 2 * X + 1 := ⟨y / 2, by omega⟩
+    have hX0 : X ≠ 0 := by omega
+    have hXlt : X < 2^m := by omega
+    have hxor : y ^^^ 1 = 2 * X := by
+      have hxe' : (2*X) ^^^ 1 = 2*X + 1 := xor_one_of_even' (2*X) (by omega)
+      have hxy : (2*X) ^^^ 1 = y := by rw [hxe', ← hXe]
+      have hstep : y ^^^ 1 = ((2*X) ^^^ 1) ^^^ 1 := by rw [hxy]
+      rw [hstep, xor_cancel (2*X) 1]
+    rw [hxor, hXe]
+    have h := P3_row0_flip' m X hXlt hX0
+    omega
+
+/-- Row `1` equals row `0` at the reference — the algebraic content behind `x = 1`
+    escaping the defect predicate: `P3(1,y,1,m) = P3(0,y,1,m)` for `y ∉ {0,1}`, via
+    `P3_red` on `(1,y)`, the row-0 reduction `P3_ref_row0_red`, `antisym`, and the
+    bit-`0` flip law `P3_row0_flip_gen`. -/
+private theorem P3_row1_eq_row0 (m y : Nat) (hy : y < 2^(m+1)) (hy0 : y ≠ 0) (hy1 : y ≠ 1) :
+    P3 1 y 1 m = P3 0 y 1 m := by
+  have h1 : (1:Nat) < 2^(m+1) := by have := Nat.two_pow_pos (m+1); omega
+  have hy1lt : y ^^^ 1 < 2^(m+1) := Nat.xor_lt_two_pow hy h1
+  have hy10 : y ^^^ 1 ≠ 0 := fun h => hy1 (xor_zero_eq y 1 h)
+  have hne : y ^^^ 1 ≠ 1 := by
+    intro h
+    apply hy0
+    have h2 : (y ^^^ 1) ^^^ 1 = (1:Nat) ^^^ 1 := congrArg (· ^^^ 1) h
+    rw [xor_cancel y 1, show (1:Nat) ^^^ 1 = 0 from by decide] at h2
+    exact h2
+  rw [P3_red 1 y 1 m h1 hy h1 hy0, Nat.xor_self, cdSig0, Int.mul_one]
+  have hanti := antisym (m+1) (y^^^1) 1 hy1lt h1 hy10 (by decide) hne
+  rw [hanti, Int.neg_neg]
+  have hred := P3_ref_row0_red m (y^^^1) hy1lt hy10
+  have hflip := P3_row0_flip_gen m y hy hy0 hy1
+  omega
+
+/-- **The unconditional algebraic identity behind `hentry`**: away from `0` and the
+    diagonal, `P3 = eDef · refP` — pure algebra from `eDef`'s definition
+    (`eDef m a b = P3 a b 1 m * (P3 0 a 1 m * P3 0 b 1 m)`), `refP`'s off-origin,
+    off-diagonal branch, and `P3_pm` (every `P3` value squares to `1`). No `isDefect`
+    guard needed: that only decides WHICH of `eDef`'s two values, `±1`, occurs. -/
+private theorem P3_eq_eDef_mul_refP (m x y : Nat) (hx0 : x ≠ 0) (hy0 : y ≠ 0) (hxy : x ≠ y) :
+    P3 x y 1 m = eDef m x y * refP m x y := by
+  have hrefP : refP m x y = P3 0 x 1 m * P3 0 y 1 m := by
+    unfold refP
+    rw [if_neg hx0, if_neg hy0, if_neg (fun h : y = x => hxy h.symm)]
+    rfl
+  rw [hrefP]
+  unfold eDef
+  rcases P3_pm x y 1 m with hA | hA <;>
+    rcases P3_pm 0 x 1 m with hB | hB <;>
+    rcases P3_pm 0 y 1 m with hC | hC <;>
+    rw [hA, hB, hC] <;> decide
+
+/-- **`x = 1` escapes the defect predicate WITH `eDef = 1`.**  `eDef m 1 y = 1` for
+    `y ∉ {0,1}` — the reason `isDefect`'s `x/2 ≠ 0` guard (which fails exactly at
+    `x = 1`) is the right guard, not an arbitrary exclusion: `P3(1,y) = P3(0,y)`
+    (`P3_row1_eq_row0`) makes `eDef m 1 y` collapse to `P3(0,y)·(P3(0,1)·P3(0,y))
+    = P3(0,y)²·P3(0,1) = 1·1 = 1`. -/
+theorem eDef_one_left (m y : Nat) (hy : y < 2^(m+1)) (hy0 : y ≠ 0) (hy1 : y ≠ 1) :
+    eDef m 1 y = 1 := by
+  unfold eDef
+  rw [P3_row1_eq_row0 m y hy hy0 hy1, P3_ref_row0_one m]
+  rcases P3_pm 0 y 1 m with h | h <;> rw [h] <;> decide
+
+/-- **`y = 1` escapes the defect predicate WITH `eDef = 1`**, by symmetry of `eDef`. -/
+theorem eDef_one_right (m x : Nat) (hx : x < 2^(m+1)) (hx0 : x ≠ 0) (hx1 : x ≠ 1) :
+    eDef m x 1 = 1 := by
+  have h1 : (1:Nat) < 2^(m+1) := by have := Nat.two_pow_pos (m+1); omega
+  rw [eDef_symm' m x 1 hx h1 hx0 (by decide)]
+  exact eDef_one_left m x hx hx0 hx1
+
+/-- **The `x/2 = y/2` escape WITH `eDef = 1`.**  For `x ≥ 2` (so `x, x⊕1 ∉ {0,1}`),
+    `eDef m x (x⊕1) = 1`: `P3(x, x⊕1) = -1` by `P3_red` plus `sigma_self` fired
+    TWICE (`(x⊕1)⊕1 = x` collapses both cocycle factors to the self-pairing `-1`),
+    and `P3(0,x)·P3(0,x⊕1) = -1` by `P3_row0_flip_gen`, so the product is `(-1)·(-1)`. -/
+theorem eDef_xor_one (m x : Nat) (hx : x < 2^(m+1)) (hx2 : 2 ≤ x) :
+    eDef m x (x ^^^ 1) = 1 := by
+  have h1 : (1:Nat) < 2^(m+1) := by have := Nat.two_pow_pos (m+1); omega
+  have hxlt1 : x ^^^ 1 < 2^(m+1) := Nat.xor_lt_two_pow hx h1
+  have hx0 : x ≠ 0 := by omega
+  have hx1 : x ≠ 1 := by omega
+  have hxx10 : x ^^^ 1 ≠ 0 := fun h => hx1 (xor_zero_eq x 1 h)
+  have hP3 : P3 x (x ^^^ 1) 1 m = -1 := by
+    rw [P3_red x (x^^^1) 1 m hx hxlt1 h1 hxx10]
+    have hxor2 : (x ^^^ 1) ^^^ 1 = x := xor_cancel x 1
+    rw [hxor2, sigma_self (m+1) x hx hx0, sigma_self (m+1) (x^^^1) hxlt1 hxx10]
+    decide
+  have hflip := P3_row0_flip_gen m x hx hx0 hx1
+  unfold eDef
+  rw [hP3, hflip]
+  rcases P3_pm 0 x 1 m with h | h <;> rw [h] <;> decide
+
+/-- **`hentry`, PROVED UNCONDITIONALLY (within the level's window).**  The entrywise
+    sign law that `hlaw` / `hlaw_pow` / `hlaw_class_dev` take as a hypothesis: off the
+    diagonal, `P3(x,y,1,m)` is the reference product `refP m x y` corrected by the
+    defect sign.  See the section docstring above for the full route and the measured
+    counterexample outside the window (why `hx`/`hy` are load-bearing here even though
+    `hlaw`'s own `hentry` field is stated without bounds). -/
+theorem hentry_law (m x y : Nat) (hx : x < 2^(m+1)) (hy : y < 2^(m+1)) (hxy : x ≠ y) :
+    P3 x y 1 m = refP m x y * (if isDefect m x y then (-1:Int) else 1) := by
+  by_cases hx0 : x = 0
+  · subst hx0
+    have hnd : ¬ isDefect m 0 y := by
+      intro h
+      obtain ⟨h1, -, -, -⟩ := h
+      omega
+    rw [if_neg hnd, Int.mul_one, refP_row0, rs_eq]
+  · by_cases hy0 : y = 0
+    · subst hy0
+      have hnd : ¬ isDefect m x 0 := by
+        intro h
+        obtain ⟨-, h2, -, -⟩ := h
+        omega
+      have hrefPval : refP m x 0 = - rs m x := by
+        unfold refP
+        rw [if_neg hx0, if_pos rfl]
+      rw [if_neg hnd, Int.mul_one, hrefPval, rs_eq]
+      have hcol0 := P3_col0_eq_neg_row0 m x 1 hx (by have := Nat.two_pow_pos (m+1); omega)
+      rw [if_neg hx0] at hcol0
+      omega
+    · by_cases hDef : isDefect m x y
+      · have heDef : eDef m x y = -1 := by
+          rcases eDef_pm' m x y with h | h
+          · exact absurd h hDef.2.2.2
+          · exact h
+        rw [if_pos hDef, P3_eq_eDef_mul_refP m x y hx0 hy0 hxy, heDef]
+        exact Int.mul_comm _ _
+      · have heDef : eDef m x y = 1 := by
+          by_cases hx1 : x = 1
+          · subst hx1
+            exact eDef_one_left m y hy hy0 (Ne.symm hxy)
+          · by_cases hy1 : y = 1
+            · subst hy1
+              exact eDef_one_right m x hx hx0 hx1
+            · by_cases hXY : x / 2 = y / 2
+              · have hx2 : 2 ≤ x := by omega
+                have hyeq : y = x ^^^ 1 := eq_div2_iff_xor_one x y hxy hXY
+                rw [hyeq]
+                exact eDef_xor_one m x hx hx2
+              · by_cases hne : eDef m x y = 1
+                · exact hne
+                · exact (hDef ⟨(by omega : x / 2 ≠ 0), (by omega : y / 2 ≠ 0), hXY, hne⟩).elim
+        rw [if_neg hDef, Int.mul_one, P3_eq_eDef_mul_refP m x y hx0 hy0 hxy, heDef, Int.one_mul]
+
 end SounioZDFiberAntisym
