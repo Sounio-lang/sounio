@@ -2,16 +2,24 @@
 //@ expect-stdout: PASS
 // clonidine_faseE4_valid.sio — validação clonidina Fase E4 (kernel UTIped PBPK28)
 // Parâmetros: LITERAIS extraídos do módulo canônico darwin_pbpk::drugs::clonidine
-// via clo_dump.sio (cluster, 12/08/2026; fonte única de verdade). Workaround
-// thin-link documentado: o Madaros v0.80 (toolchain 11/08) REGRIDU — pub fns
-// que chamam matemática local recursiva (powf→exp/ln) não cruzam a fronteira
-// de módulo (rc=12); morphine::r_ugt2b7 também falha. Rodar com
-// SOUNIO_SOUC_ENGINE=lean_single (ver issue #1715).
+// via clo_dump.sio (cluster, 12/08/2026; fonte única de verdade).
+//
+// NOTA DE ENGINE (corrigida 2026-08-13, review PR #1718): o "rc=12 thin-link"
+// originalmente atribuído a "pub fns que chamam matemática local recursiva não
+// cruzam a fronteira de módulo" era, na verdade, `with Mut` faltando nos
+// helpers locais (exp/ln/sqrt/powf/r_cl_potts) — Madaros aceita a chamada sem
+// o efeito declarado mas produz um binário inválido (SIGSEGV em runtime);
+// lean_single rejeita corretamente no typecheck. Com os `with Mut` corrigidos
+// no módulo E neste driver, import multimódulo + execução passam nos DOIS
+// engines (Madaros default e lean_single) — testado com um probe externo
+// chamando r_cl_potts/clonidine_cl_eff_lh/clonidine_kp/clonidine_pbpk_params.
+// Mantido self-contained (sem `use`) por simplicidade, não por necessidade.
 //
 // Âncoras (Potts & Larsson 2007, Paediatr Anaesth 17:924-33; pooled n=83):
 //   CL adulto 14.6 L/h/70kg · CL nascer 3.8 L/h/70kg (26%) · 82% adulto em
 //   1 ano · Vss 181.5 L/70kg (2.6 L/kg; modelo: 174.8 = 2.50, −4%)
-//   t½ lactente 11.4h (ANMF 2025; tensão documentada no cabeçalho do módulo)
+//   t½ lactente: analítico 8.60h / terminal simulado 7.44h (ANMF 11.4h,
+//   ver cabeçalho do módulo para a análise completa por idade)
 //   Enteral: F 0.55 (Larsson 2011) · ka 0.21/h (Arenas-Lopez 2014)
 //   Yellepeddi 2024 PBPK: 5 µg/kg q6h lactente → Css ~1–2 ng/mL
 //
@@ -27,7 +35,7 @@ struct Params28 {
 }
 
 // ─── Matemática (verbatim morphine_fase6_valid) ─────────────────────────────
-fn exp_f64(x: f64) -> f64 {
+fn exp_f64(x: f64) -> f64 with Mut {
     if x > 20.0 { return exp_f64(x / 2.0) * exp_f64(x / 2.0) }
     if x < 0.0 - 20.0 { return 1.0 / exp_f64(0.0 - x) }
     var sum = 1.0
@@ -36,7 +44,7 @@ fn exp_f64(x: f64) -> f64 {
     while i <= 20.0 { term = term * x / i; sum = sum + term; i = i + 1.0 }
     return sum
 }
-fn sqrt_f64(x: f64) -> f64 {
+fn sqrt_f64(x: f64) -> f64 with Mut {
     if x <= 0.0 { return 0.0 }
     var guess = x / 2.0
     if guess < 1.0 { guess = 1.0 }
@@ -44,7 +52,7 @@ fn sqrt_f64(x: f64) -> f64 {
     while i < 20.0 { guess = (guess + x / guess) / 2.0; i = i + 1.0 }
     return guess
 }
-fn ln_f64(x: f64) -> f64 {
+fn ln_f64(x: f64) -> f64 with Mut {
     if x <= 0.0 { return 0.0 - 1000000.0 }
     if x == 1.0 { return 0.0 }
     if x > 1.5 { return 2.0 * ln_f64(sqrt_f64(x)) }
@@ -56,7 +64,7 @@ fn ln_f64(x: f64) -> f64 {
     while i <= 30.0 { sum = sum + term / i; term = 0.0 - term * u; i = i + 1.0 }
     return sum
 }
-fn powf(b: f64, e: f64) -> f64 { return exp_f64(e * ln_f64(b)) }
+fn powf(b: f64, e: f64) -> f64 with Mut { return exp_f64(e * ln_f64(b)) }
 
 // ─── Passo CN (verbatim morphine_fase6_valid) ───────────────────────────────
 fn state_zero() -> State28 {
@@ -125,7 +133,7 @@ fn cn_step(state: State28, p: Params28, rel_mid: f64, dt: f64) -> State28 with M
 }
 
 // ─── Ontogenia Potts 2007 (réplica do módulo; gate B) ───────────────────────
-fn r_cl_potts_drv(pna_days: f64) -> f64 {
+fn r_cl_potts_drv(pna_days: f64) -> f64 with Mut {
     let x = pna_days / 7.0
     let u = x / 25.7
     let h = powf(u, 1.5)

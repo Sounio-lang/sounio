@@ -27,9 +27,19 @@
 // PEDIATRIA (âncoras de validação):
 //   CL ao nascer = 3.8 L/h/70kg (26% adulto) · maturação TM50 25.7 semanas
 //   PNA · 82% do adulto em 1 ano (Potts 2007)
-//   t½: 16.9h neonato / 11.4h lactente / 7.4h criança (ANMF 2025) — TENSÃO
-//   documentada: nosso Vss fixo + CL Potts implica t½ neo ~33h; ANMF sugere
-//   V menor ou CL maior no neonato. Coberto por GUM (CV V1 71%).
+//   t½: 16.9h neonato / 11.4h lactente / 7.4h criança (ANMF 2025). Modelo
+//   (Vss/CL escalados por peso via clonidine_pbpk_params_ped, analítico):
+//   valores exatos de clonidine_vss_l70()/clonidine_cl_eff_lh() em f64 cheio
+//   (não hand-calc arredondado — math-review xai/zai bateu ~14.8h/8.85h usando
+//   Vss=181.5 literário + menos casas decimais; aqui usamos Vss=174.8, o do
+//   próprio Kp do módulo):
+//   t½(7d/3.3kg)=14.55h (−14% vs ANMF) · t½(122d/6.15kg)=8.60h analítico /
+//   7.44h terminal simulado (driver E4, janela 4–10h pós-infusão) vs ANMF
+//   11.4h (−24%/−35%). Concordância razoável nas duas idades sem precisar
+//   de V menor ou CL maior — a nota anterior de "~33h" (−2× vs ANMF) era
+//   erro de conta (Vss de referência 70kg NÃO escalado por peso, dividido
+//   por um CL só parcialmente escalado); corrigido 2026-08-13, ver review
+//   PR #1718. Coberto por GUM (CV V1 71%).
 //   F oral criança ≈ 0.55 (Larsson 2011 tese KI) vs adulto 0.75–0.95
 //   ka enteral UTIped = 0.693/3.3h = 0.21/h (Arenas-Lopez 2014, lactentes)
 //
@@ -100,14 +110,14 @@ pub fn clonidine_logd() -> f64 { return 0.7 }   // calibrado Vss Potts (ver cabe
 pub fn clonidine_mw() -> f64 { return 230.09 }
 
 // ─── Matemática local (mesma família dos demais módulos) ────────────────────
-fn powf_local(b: f64, e: f64) -> f64 {
+fn powf_local(b: f64, e: f64) -> f64 with Mut {
     // b^e para b>0 via exp/ln (estilo morphine: 2 statements — inline
     // exp(ln) em 1 statement dispara rc=12 no thin-link do Madaros v0.80)
     if b <= 0.0 { return 0.0 }
     let l = ln_local(b)
     return exp_local(e * l)
 }
-fn exp_local(x: f64) -> f64 {
+fn exp_local(x: f64) -> f64 with Mut {
     if x > 20.0 {
         let h = exp_local(x / 2.0)
         return h * h
@@ -123,7 +133,7 @@ fn exp_local(x: f64) -> f64 {
     }
     return sum
 }
-fn ln_local(x: f64) -> f64 {
+fn ln_local(x: f64) -> f64 with Mut {
     if x <= 0.0 { return 0.0 - 1000000.0 }
     if x == 1.0 { return 0.0 }
     if x > 1.5 { return 2.0 * ln_local(sqrt_local(x)) }
@@ -139,7 +149,7 @@ fn ln_local(x: f64) -> f64 {
     }
     return sum
 }
-fn sqrt_local(x: f64) -> f64 {
+fn sqrt_local(x: f64) -> f64 with Mut {
     if x <= 0.0 { return 0.0 }
     var guess = x / 2.0
     if guess < 1.0 { guess = 1.0 }
@@ -152,7 +162,7 @@ fn sqrt_local(x: f64) -> f64 {
 }
 
 // ─── Ontogenia (forma Potts 2007; ver cabeçalho) ────────────────────────────
-pub fn r_cl_potts(pna_days: f64) -> f64 {
+pub fn r_cl_potts(pna_days: f64) -> f64 with Mut {
     // x^1.5/(25.7^1.5+x^1.5) = (x/25.7)^1.5 / (1 + (x/25.7)^1.5) — forma
     // r_ugt2b7 do morphine: UMA chamada powf por let (3× powf na mesma
     // expressão disparava rc=12 — bissecção C2, cluster 12/08/2026)
@@ -164,7 +174,7 @@ pub fn r_cl_potts(pna_days: f64) -> f64 {
 
 // ─── Clearance efetivo (L/h) ────────────────────────────────────────────────
 pub fn clonidine_cl_adult_70() -> f64 { return 14.6 }
-pub fn clonidine_cl_eff_lh(pna_days: f64, weight: f64) -> f64 with Div {
+pub fn clonidine_cl_eff_lh(pna_days: f64, weight: f64) -> f64 with Mut, Div {
     // alometria 0.75 (Anderson); um powf por let, estilo morphine
     let wr = powf_local(weight / 70.0, 0.75)
     let r = r_cl_potts(pna_days)
