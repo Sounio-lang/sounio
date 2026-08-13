@@ -25204,4 +25204,472 @@ theorem hiso_ref (m x y : Nat) (hx : x < 2^(m+1)) (hy : y < 2^(m+1))
       exact h4 (eDef_seam_translate_one (m'+1) y hy h2 h3')
 
 
+/-! ## Tier 160 — `hDelta`, the sign-law aggregate (UNCONDITIONAL)
+
+`deviation_assembly` (Tier 148) takes `hDelta : Delta = -12 * net` as a bare hypothesis,
+with `Delta` and `net` free `Int` variables scoped from its own signature — `Delta` was
+never given a concrete definition anywhere in the file.  Reading it off `trace_ref_entry_law`
+(the idealized trace's already-proven polynomial) and `stratum_net`'s own `hnetdef`, the
+natural reading is: `Delta := tr(M³) − tr(P³)` at the reference label `W = 1`, level
+`m = k+3` — the real `P3`-matrix cubed trace minus the idealized `refP`-matrix cubed trace,
+the SAME `sumLtI³` shape as `trace_ref_entry_law`'s LHS with `P3 · 1 m` in place of `refP m`
+for the first summand.  `hDelta_law` below proves `Delta = -12 * net` unconditionally from
+these two concrete definitions.
+
+**Route** (measured first, `scripts/research/zd_e5_hdelta_probe.py`, `k = 0..3`, exact):
+
+1. Split `Delta`'s defining double-triple-sum pointwise into degenerate triples
+   (`a=b ∨ b=c ∨ c=a`) and pairwise-distinct triples. Degenerate triples contribute
+   `0`: the real and idealized diagonals coincide (`P3_diag_eq_refP_diag`), and for
+   `x ≠ y`, `M(x,y)·M(y,x) = refP(x,y)·refP(y,x)` (`pair_eq_refP_pair`, from
+   `hentry_law` + `isDefect_symm'` + `sign² = 1`) — so every degenerate triple's
+   `Mp` and `Pp` agree termwise (`dpt_degenerate_zero`).
+2. For pairwise-distinct `a,b,c < 2^(m+1)`, a BOUNDED variant of `hlaw` (`hlaw_bdd`,
+   `hlaw`'s own proof with `hentry_law` in place of the unbounded `hentry` hypothesis)
+   gives `Mp = Pprod·(±1)^kcnt`. Both `Mprod − Pprod` and the triple `Pprod` itself
+   turn out to be FULLY permutation-symmetric on pairwise-distinct triples (not just
+   cyclically): `kcnt` is edge-set based (`isDefect_symm'` three times,
+   `kcnt_swap23`), and `refP_triple_prod`'s RHS depends only on `0 ∈ {a,b,c}`, itself
+   order-independent. This is proved as one swap fact (`dpt_swap23_bdd`) plus a free
+   cyclic fact (`dpt_cyc`, pure ring reassociation, no hypotheses).
+3. A generic "sixfold regrouping" engine (`dpt_six_regions` + `sixfold_regroup_cond`,
+   modeled on `cherry_decomp`'s six-order-region technique but for a fully
+   permutation-symmetric summand rather than an isDefect-indicator) turns any
+   ordered pairwise-distinct triple sum of such a summand into six copies of the
+   canonical `x<y<z` sum.
+4. On the canonical domain, `dpt_value_bdd` gives the pointwise value
+   `Mp − Pp = −2·(if kcnt odd then Pp else 0)`, which (via `refP_triple_prod`) is
+   EXACTLY `net`'s own `hnetdef` summand. Assembling: distinct-triple part
+   `= 6 · Σ_{x<y<z}(Mp−Pp) = 6·(−2·net) = −12·net`; degenerate part `= 0`; total
+   `Delta = −12·net`.
+
+No `sorry`, no Mathlib, no new axioms, no `native_decide`. -/
+
+/-- Generic: subtracting two triple sums termwise (the difference-of-sums to
+    sum-of-differences step `sumLtI3_add`'s proof mirrors, with `sumLtI_sub`). -/
+private theorem sumLtI3_sub (N : Nat) (F G : Nat → Nat → Nat → Int) :
+    sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c => F a b c - G a b c)))
+      = sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c => F a b c)))
+      - sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c => G a b c))) := by
+  rw [sumLtI_congr N _
+        (fun a => sumLtI N (fun b => sumLtI N (fun c => F a b c))
+                - sumLtI N (fun b => sumLtI N (fun c => G a b c)))
+        (fun a _ => by
+          rw [sumLtI_congr N _
+                (fun b => sumLtI N (fun c => F a b c) - sumLtI N (fun c => G a b c))
+                (fun b _ => sumLtI_sub N _ _),
+              sumLtI_sub]),
+      sumLtI_sub]
+
+/-! ### Sum-level permutation lemmas — the other three `S3` elements, generated
+    from `sumLtI_swap` (a transposition) and `sumLtI3_cyc` (a 3-cycle), exactly as
+    `cherry_region2..6` generate their reindexings, just packaged as reusable
+    building blocks for the fully-symmetric case. -/
+
+/-- Swap the outer two loop variables. -/
+private theorem sumLtI3_swap12 (N : Nat) (F : Nat → Nat → Nat → Int) :
+    sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c => F a b c)))
+      = sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c => F b a c))) :=
+  sumLtI_swap N N (fun a b => sumLtI N (fun c => F a b c))
+
+/-- Swap the inner two loop variables (fixed outer). -/
+private theorem sumLtI3_swap23 (N : Nat) (F : Nat → Nat → Nat → Int) :
+    sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c => F a b c)))
+      = sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c => F a c b))) :=
+  sumLtI_congr N _ _ (fun a _ => sumLtI_swap N N (fun b c => F a b c))
+
+/-- Cyclic shift the other way (`sumLtI3_cyc` applied twice). -/
+private theorem sumLtI3_cyc2 (N : Nat) (F : Nat → Nat → Nat → Int) :
+    sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c => F a b c)))
+      = sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c => F c a b))) := by
+  rw [sumLtI3_cyc N F, sumLtI3_cyc N (fun a b c => F b c a)]
+
+/-- The remaining transposition: swap outer and inner, fix the middle. -/
+private theorem sumLtI3_swap13 (N : Nat) (F : Nat → Nat → Nat → Int) :
+    sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c => F a b c)))
+      = sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c => F c b a))) := by
+  rw [sumLtI3_cyc2 N F, sumLtI3_swap12 N (fun a b c => F c a b)]
+
+/-- **`hlaw`, bounded**: `hlaw`'s own proof, with the unconditional (bounded)
+    `hentry_law` in place of the unbounded `hentry` hypothesis, stated in the
+    right-associated form `Delta`'s definition and `refP_triple_prod` both use. -/
+private theorem hlaw_bdd (m a b c : Nat) (ha : a < 2^(m+1)) (hb : b < 2^(m+1))
+    (hc : c < 2^(m+1)) (hab : a ≠ b) (hbc : b ≠ c) (hca : c ≠ a) :
+    P3 a b 1 m * (P3 b c 1 m * P3 c a 1 m)
+      = (if a = 0 ∨ b = 0 ∨ c = 0 then (-1:Int) else 1)
+        * (if kcnt m a b c % 2 = 1 then -1 else 1) := by
+  have hassoc : P3 a b 1 m * (P3 b c 1 m * P3 c a 1 m)
+      = P3 a b 1 m * P3 b c 1 m * P3 c a 1 m :=
+    (Int.mul_assoc (P3 a b 1 m) (P3 b c 1 m) (P3 c a 1 m)).symm
+  have hmul : refP m a b * (if isDefect m a b then (-1:Int) else 1)
+        * (refP m b c * (if isDefect m b c then (-1:Int) else 1))
+        * (refP m c a * (if isDefect m c a then (-1:Int) else 1))
+      = (refP m a b * (refP m b c * refP m c a))
+        * ((if isDefect m a b then (-1:Int) else 1)
+            * ((if isDefect m b c then (-1:Int) else 1)
+              * (if isDefect m c a then (-1:Int) else 1))) := by
+    grind
+  rw [hassoc, hentry_law m a b ha hb hab, hentry_law m b c hb hc hbc,
+      hentry_law m c a hc ha hca, hmul, refP_triple_prod m a b c hab hbc hca,
+      sign3_parity']
+
+/-- **`kcnt` is invariant under swapping the last two arguments** — its three
+    `isDefect` terms are the same three unordered edges either way
+    (`isDefect_symm'`, bounded). -/
+private theorem kcnt_swap23 (m a b c : Nat) (ha : a < 2^(m+1)) (hb : b < 2^(m+1))
+    (hc : c < 2^(m+1)) :
+    kcnt m a c b = kcnt m a b c := by
+  have e1 : (if isDefect m a c then (1:Nat) else 0) = (if isDefect m c a then (1:Nat) else 0) := by
+    by_cases h : isDefect m a c
+    · rw [if_pos h, if_pos (isDefect_symm' m a c ha hc h)]
+    · rw [if_neg h, if_neg (fun h' => h (isDefect_symm' m c a hc ha h'))]
+  have e2 : (if isDefect m c b then (1:Nat) else 0) = (if isDefect m b c then (1:Nat) else 0) := by
+    by_cases h : isDefect m c b
+    · rw [if_pos h, if_pos (isDefect_symm' m c b hc hb h)]
+    · rw [if_neg h, if_neg (fun h' => h (isDefect_symm' m b c hb hc h'))]
+  have e3 : (if isDefect m b a then (1:Nat) else 0) = (if isDefect m a b then (1:Nat) else 0) := by
+    by_cases h : isDefect m b a
+    · rw [if_pos h, if_pos (isDefect_symm' m b a hb ha h)]
+    · rw [if_neg h, if_neg (fun h' => h (isDefect_symm' m a b ha hb h'))]
+  unfold kcnt
+  rw [e1, e2, e3]
+  omega
+
+/-- **The `Mp − Pp` deviation is cyclic**, unconditionally: pure reassociation of
+    the two triple products, no hypotheses needed. -/
+private theorem dpt_cyc (m a b c : Nat) :
+    P3 a b 1 m * (P3 b c 1 m * P3 c a 1 m) - refP m a b * (refP m b c * refP m c a)
+      = P3 b c 1 m * (P3 c a 1 m * P3 a b 1 m) - refP m b c * (refP m c a * refP m a b) := by
+  grind
+
+/-- **The `Mp − Pp` deviation is swap-23 symmetric**, on pairwise-distinct bounded
+    triples: `kcnt_swap23` plus `hlaw_bdd`/`refP_triple_prod` applied to both
+    orderings, matched up by cases on which of `a,b,c` is `0`. -/
+private theorem dpt_swap23_bdd (m a b c : Nat) (ha : a < 2^(m+1)) (hb : b < 2^(m+1))
+    (hc : c < 2^(m+1)) (hab : a ≠ b) (hbc : b ≠ c) (hca : c ≠ a) :
+    P3 a b 1 m * (P3 b c 1 m * P3 c a 1 m) - refP m a b * (refP m b c * refP m c a)
+      = P3 a c 1 m * (P3 c b 1 m * P3 b a 1 m) - refP m a c * (refP m c b * refP m b a) := by
+  have hk := kcnt_swap23 m a b c ha hb hc
+  have hM1 := hlaw_bdd m a b c ha hb hc hab hbc hca
+  have hM2 := hlaw_bdd m a c b ha hc hb (Ne.symm hca) (Ne.symm hbc) (Ne.symm hab)
+  have hP1 := refP_triple_prod m a b c hab hbc hca
+  have hP2 := refP_triple_prod m a c b (Ne.symm hca) (Ne.symm hbc) (Ne.symm hab)
+  rw [hk] at hM2
+  by_cases ha0 : a = 0 <;> by_cases hb0 : b = 0 <;> by_cases hc0 : c = 0 <;>
+    simp [ha0, hb0, hc0] at hM1 hM2 hP1 hP2 <;> grind
+
+/-- **The six-order-regions decomposition (pointwise, generic).** Mirrors
+    `cherry_six_regions`'s technique for a general (not isDefect-specific)
+    per-triple value: exactly one of the six strict total orders of `a,b,c`
+    holds whenever they are pairwise distinct. -/
+private theorem dpt_six_regions (h : Nat → Nat → Nat → Int) (a b c : Nat) :
+    (if a ≠ b ∧ b ≠ c ∧ c ≠ a then h a b c else 0)
+    = (if a < b ∧ b < c then h a b c else 0)
+      + ((if a < c ∧ c < b then h a b c else 0)
+        + ((if b < a ∧ a < c then h a b c else 0)
+          + ((if b < c ∧ c < a then h a b c else 0)
+            + ((if c < a ∧ a < b then h a b c else 0)
+              + (if c < b ∧ b < a then h a b c else 0))))) := by
+  rcases Nat.lt_trichotomy a b with hab | hab | hab <;>
+    rcases Nat.lt_trichotomy b c with hbc | hbc | hbc <;>
+    rcases Nat.lt_trichotomy a c with hac | hac | hac <;>
+    simp_all <;> omega
+
+/-- **THE SIXFOLD REGROUPING (generic engine).** For an `h` whose deviation is
+    cyclic (`hcyc`) and swap-23 symmetric (`hswap`) ON pairwise-distinct bounded
+    triples — the exact shape `dpt_cyc`/`dpt_swap23_bdd` provide — the ordered
+    pairwise-distinct triple sum of `h` is six times the canonical `x<y<z` sum.
+    Built from `dpt_six_regions`'s pointwise split plus the five sum-level
+    permutation lemmas, following `cherry_decomp`'s six-region assembly template. -/
+private theorem sixfold_regroup_cond (h : Nat → Nat → Nat → Int) (N : Nat)
+    (hcyc : ∀ a b c, a < N → b < N → c < N → a ≠ b → b ≠ c → c ≠ a → h a b c = h b c a)
+    (hswap : ∀ a b c, a < N → b < N → c < N → a ≠ b → b ≠ c → c ≠ a → h a b c = h a c b) :
+    sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c =>
+      if a ≠ b ∧ b ≠ c ∧ c ≠ a then h a b c else 0)))
+    = 6 * sumLtI N (fun x => sumLtI N (fun y => sumLtI N (fun z =>
+        if x < y ∧ y < z then h x y z else 0))) := by
+  have h_swap12 : ∀ a b c, a < N → b < N → c < N → a ≠ b → b ≠ c → c ≠ a →
+      h a b c = h b a c := by
+    intro a b c ha hb hc hab hbc hca
+    rw [hcyc a b c ha hb hc hab hbc hca, hswap b c a hb hc ha hbc hca hab]
+  have h_cyc2 : ∀ a b c, a < N → b < N → c < N → a ≠ b → b ≠ c → c ≠ a →
+      h a b c = h c a b := by
+    intro a b c ha hb hc hab hbc hca
+    rw [hcyc a b c ha hb hc hab hbc hca, hcyc b c a hb hc ha hbc hca hab]
+  have h_swap13 : ∀ a b c, a < N → b < N → c < N → a ≠ b → b ≠ c → c ≠ a →
+      h a b c = h c b a := by
+    intro a b c ha hb hc hab hbc hca
+    rw [hcyc a b c ha hb hc hab hbc hca, hcyc b c a hb hc ha hbc hca hab,
+        hswap c a b hc ha hb hca hab hbc]
+  rw [sumLtI_congr N _ _ (fun a _ => sumLtI_congr N _ _ (fun b _ =>
+        sumLtI_congr N _ _ (fun c _ => dpt_six_regions h a b c))),
+      sumLtI3_add, sumLtI3_add, sumLtI3_add, sumLtI3_add, sumLtI3_add]
+  have hR1 : sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c =>
+        if a < b ∧ b < c then h a b c else 0)))
+      = sumLtI N (fun x => sumLtI N (fun y => sumLtI N (fun z =>
+          if x < y ∧ y < z then h x y z else 0))) := rfl
+  have hR2 : sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c =>
+        if a < c ∧ c < b then h a b c else 0)))
+      = sumLtI N (fun x => sumLtI N (fun y => sumLtI N (fun z =>
+          if x < y ∧ y < z then h x y z else 0))) := by
+    have step : sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c =>
+          if a < c ∧ c < b then h a b c else 0)))
+        = sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c =>
+          if a < c ∧ c < b then h a c b else 0))) :=
+      sumLtI_congr N _ _ (fun a ha => sumLtI_congr N _ _ (fun b hb =>
+        sumLtI_congr N _ _ (fun c hc => by
+          by_cases hcond : a < c ∧ c < b
+          · rw [if_pos hcond, if_pos hcond,
+                hswap a b c ha hb hc (by omega) (by omega) (by omega)]
+          · rw [if_neg hcond, if_neg hcond])))
+    rw [step]
+    exact (sumLtI3_swap23 N (fun x y z => if x < y ∧ y < z then h x y z else 0)).symm
+  have hR3 : sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c =>
+        if b < a ∧ a < c then h a b c else 0)))
+      = sumLtI N (fun x => sumLtI N (fun y => sumLtI N (fun z =>
+          if x < y ∧ y < z then h x y z else 0))) := by
+    have step : sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c =>
+          if b < a ∧ a < c then h a b c else 0)))
+        = sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c =>
+          if b < a ∧ a < c then h b a c else 0))) :=
+      sumLtI_congr N _ _ (fun a ha => sumLtI_congr N _ _ (fun b hb =>
+        sumLtI_congr N _ _ (fun c hc => by
+          by_cases hcond : b < a ∧ a < c
+          · rw [if_pos hcond, if_pos hcond,
+                h_swap12 a b c ha hb hc (by omega) (by omega) (by omega)]
+          · rw [if_neg hcond, if_neg hcond])))
+    rw [step]
+    exact (sumLtI3_swap12 N (fun x y z => if x < y ∧ y < z then h x y z else 0)).symm
+  have hR4 : sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c =>
+        if b < c ∧ c < a then h a b c else 0)))
+      = sumLtI N (fun x => sumLtI N (fun y => sumLtI N (fun z =>
+          if x < y ∧ y < z then h x y z else 0))) := by
+    have step : sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c =>
+          if b < c ∧ c < a then h a b c else 0)))
+        = sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c =>
+          if b < c ∧ c < a then h b c a else 0))) :=
+      sumLtI_congr N _ _ (fun a ha => sumLtI_congr N _ _ (fun b hb =>
+        sumLtI_congr N _ _ (fun c hc => by
+          by_cases hcond : b < c ∧ c < a
+          · rw [if_pos hcond, if_pos hcond,
+                hcyc a b c ha hb hc (by omega) (by omega) (by omega)]
+          · rw [if_neg hcond, if_neg hcond])))
+    rw [step]
+    exact (sumLtI3_cyc N (fun x y z => if x < y ∧ y < z then h x y z else 0)).symm
+  have hR5 : sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c =>
+        if c < a ∧ a < b then h a b c else 0)))
+      = sumLtI N (fun x => sumLtI N (fun y => sumLtI N (fun z =>
+          if x < y ∧ y < z then h x y z else 0))) := by
+    have step : sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c =>
+          if c < a ∧ a < b then h a b c else 0)))
+        = sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c =>
+          if c < a ∧ a < b then h c a b else 0))) :=
+      sumLtI_congr N _ _ (fun a ha => sumLtI_congr N _ _ (fun b hb =>
+        sumLtI_congr N _ _ (fun c hc => by
+          by_cases hcond : c < a ∧ a < b
+          · rw [if_pos hcond, if_pos hcond,
+                h_cyc2 a b c ha hb hc (by omega) (by omega) (by omega)]
+          · rw [if_neg hcond, if_neg hcond])))
+    rw [step]
+    exact (sumLtI3_cyc2 N (fun x y z => if x < y ∧ y < z then h x y z else 0)).symm
+  have hR6 : sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c =>
+        if c < b ∧ b < a then h a b c else 0)))
+      = sumLtI N (fun x => sumLtI N (fun y => sumLtI N (fun z =>
+          if x < y ∧ y < z then h x y z else 0))) := by
+    have step : sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c =>
+          if c < b ∧ b < a then h a b c else 0)))
+        = sumLtI N (fun a => sumLtI N (fun b => sumLtI N (fun c =>
+          if c < b ∧ b < a then h c b a else 0))) :=
+      sumLtI_congr N _ _ (fun a ha => sumLtI_congr N _ _ (fun b hb =>
+        sumLtI_congr N _ _ (fun c hc => by
+          by_cases hcond : c < b ∧ b < a
+          · rw [if_pos hcond, if_pos hcond,
+                h_swap13 a b c ha hb hc (by omega) (by omega) (by omega)]
+          · rw [if_neg hcond, if_neg hcond])))
+    rw [step]
+    exact (sumLtI3_swap13 N (fun x y z => if x < y ∧ y < z then h x y z else 0)).symm
+  rw [hR1, hR2, hR3, hR4, hR5, hR6]
+  omega
+
+/-- **The idealized and real diagonals coincide.** `refP m x x = -1` for `x ≠ 0`
+    (its own definition's `b = a` clause) and `= 1` for `x = 0`, matching
+    `P3_diag`/`P3_zero_zero` exactly. -/
+private theorem P3_diag_eq_refP_diag (m x : Nat) (hx : x < 2^(m+1)) :
+    P3 x x 1 m = refP m x x := by
+  by_cases hx0 : x = 0
+  · subst hx0
+    have hr : refP m 0 0 = 1 := by unfold refP; rw [if_pos rfl, if_pos rfl]
+    rw [P3_zero_zero m 1, hr]
+  · have h1 : (1:Nat) < 2^(m+1) := by have := Nat.two_pow_pos (m+1); omega
+    rw [P3_diag x 1 m hx h1 hx0]
+    unfold refP
+    rw [if_neg hx0, if_neg hx0, if_pos rfl]
+
+/-- **The `M`-pair and `refP`-pair products agree**, for ANY `x, y < 2^(m+1)`
+    (including `x = y`, via `P3_diag_eq_refP_diag`; for `x ≠ y`, via `hentry_law`
+    on both orderings, `isDefect_symm'` to unify their sign factors, and
+    `sign² = 1`). -/
+private theorem pair_eq_refP_pair (m x y : Nat) (hx : x < 2^(m+1)) (hy : y < 2^(m+1)) :
+    P3 x y 1 m * P3 y x 1 m = refP m x y * refP m y x := by
+  by_cases hxy : x = y
+  · subst hxy
+    rw [P3_diag_eq_refP_diag m x hx]
+  · have h1 := hentry_law m x y hx hy hxy
+    have h2 := hentry_law m y x hy hx (Ne.symm hxy)
+    have hiff : isDefect m x y ↔ isDefect m y x :=
+      ⟨isDefect_symm' m x y hx hy, isDefect_symm' m y x hy hx⟩
+    by_cases hD : isDefect m x y
+    · have hD' : isDefect m y x := hiff.mp hD
+      rw [h1, h2, if_pos hD, if_pos hD']
+      grind
+    · have hD' : ¬ isDefect m y x := fun h => hD (hiff.mpr h)
+      rw [h1, h2, if_neg hD, if_neg hD']
+      grind
+
+/-- **Degenerate triples contribute nothing to the deviation.** If any two of
+    `a, b, c` coincide, the shared-vertex diagonal factors match
+    (`P3_diag_eq_refP_diag`) and the remaining two-vertex product matches
+    (`pair_eq_refP_pair`), so `Mp = Pp` termwise. -/
+private theorem dpt_degenerate_zero (m a b c : Nat) (ha : a < 2^(m+1)) (hb : b < 2^(m+1))
+    (hc : c < 2^(m+1)) (hdeg : a = b ∨ b = c ∨ c = a) :
+    P3 a b 1 m * (P3 b c 1 m * P3 c a 1 m) - refP m a b * (refP m b c * refP m c a) = 0 := by
+  rcases hdeg with hab | hbc | hca
+  · rw [hab]
+    have hd : P3 b b 1 m = refP m b b := P3_diag_eq_refP_diag m b hb
+    have hp : P3 b c 1 m * P3 c b 1 m = refP m b c * refP m c b := pair_eq_refP_pair m b c hb hc
+    grind
+  · rw [hbc]
+    have hd : P3 c c 1 m = refP m c c := P3_diag_eq_refP_diag m c hc
+    have hp : P3 a c 1 m * P3 c a 1 m = refP m a c * refP m c a := pair_eq_refP_pair m a c ha hc
+    grind
+  · rw [hca]
+    have hd : P3 a a 1 m = refP m a a := P3_diag_eq_refP_diag m a ha
+    have hp : P3 a b 1 m * P3 b a 1 m = refP m a b * refP m b a := pair_eq_refP_pair m a b ha hb
+    grind
+
+/-- **The pointwise deviation value, bounded, pairwise-distinct.** `Mp − Pp =
+    −2·(if kcnt odd then Pp else 0)`: `hlaw_bdd` gives `Mp = Pp·(±1)^kcnt`, so the
+    difference is `Pp·((±1)^kcnt − 1)`, which is `0` when even and `−2·Pp` when odd. -/
+private theorem dpt_value_bdd (m x y z : Nat) (hx : x < 2^(m+1)) (hy : y < 2^(m+1))
+    (hz : z < 2^(m+1)) (hxy : x ≠ y) (hyz : y ≠ z) (hzx : z ≠ x) :
+    P3 x y 1 m * (P3 y z 1 m * P3 z x 1 m) - refP m x y * (refP m y z * refP m z x)
+      = -2 * (if kcnt m x y z % 2 = 1 then refP m x y * (refP m y z * refP m z x) else 0) := by
+  have hM := hlaw_bdd m x y z hx hy hz hxy hyz hzx
+  have hP := refP_triple_prod m x y z hxy hyz hzx
+  rw [hM, hP]
+  by_cases hk : kcnt m x y z % 2 = 1 <;> simp [hk] <;> omega
+
+/-- **TIER 160 HEADLINE — `hDelta`, the sign-law aggregate.** `Delta`, read off
+    `trace_ref_entry_law`'s LHS shape at `P3 · 1 m` versus `refP m` (the real
+    minus the idealized cubed trace at the reference label, level `m = k+3`), and
+    `net`, `stratum_net`'s own `hnetdef` sum (the signed odd-`kcnt` count), satisfy
+    `Delta = −12·net` — UNCONDITIONALLY, no hypotheses beyond the two definitions.
+    Assembled from: the degenerate/pairwise-distinct split (`dpt_degenerate_zero`),
+    the sixfold regrouping (`sixfold_regroup_cond` fed by `dpt_cyc`/`dpt_swap23_bdd`),
+    and the canonical-domain pointwise value (`dpt_value_bdd` + `refP_triple_prod`,
+    matching `net`'s own summand exactly). See the section docstring above for the
+    full route; verified numerically first
+    (`scripts/research/zd_e5_hdelta_probe.py`, `k = 0..3`, exact). -/
+theorem hDelta_law (k : Nat) (Delta net : Int)
+    (hDeltadef : Delta =
+        sumLtI (2^(k+4)) (fun a => sumLtI (2^(k+4)) (fun b => sumLtI (2^(k+4)) (fun c =>
+            P3 a b 1 (k+3) * (P3 b c 1 (k+3) * P3 c a 1 (k+3)))))
+      - sumLtI (2^(k+4)) (fun a => sumLtI (2^(k+4)) (fun b => sumLtI (2^(k+4)) (fun c =>
+            refP (k+3) a b * (refP (k+3) b c * refP (k+3) c a)))))
+    (hnetdef : net = sumLtI (2^(k+4)) (fun a => sumLtI (2^(k+4)) (fun b => sumLtI (2^(k+4)) (fun c =>
+      if a < b ∧ b < c ∧ kcnt (k+3) a b c % 2 = 1 then
+        (if a = 0 ∨ b = 0 ∨ c = 0 then (-1:Int) else 1)
+      else 0)))) :
+    Delta = -12 * net := by
+  have hcomb : Delta = sumLtI (2^(k+4)) (fun a => sumLtI (2^(k+4)) (fun b =>
+      sumLtI (2^(k+4)) (fun c =>
+        P3 a b 1 (k+3) * (P3 b c 1 (k+3) * P3 c a 1 (k+3))
+          - refP (k+3) a b * (refP (k+3) b c * refP (k+3) c a)))) := by
+    rw [hDeltadef]
+    exact (sumLtI3_sub (2^(k+4))
+      (fun a b c => P3 a b 1 (k+3) * (P3 b c 1 (k+3) * P3 c a 1 (k+3)))
+      (fun a b c => refP (k+3) a b * (refP (k+3) b c * refP (k+3) c a))).symm
+  have hsplit : sumLtI (2^(k+4)) (fun a => sumLtI (2^(k+4)) (fun b => sumLtI (2^(k+4)) (fun c =>
+        P3 a b 1 (k+3) * (P3 b c 1 (k+3) * P3 c a 1 (k+3))
+          - refP (k+3) a b * (refP (k+3) b c * refP (k+3) c a))))
+      = sumLtI (2^(k+4)) (fun a => sumLtI (2^(k+4)) (fun b => sumLtI (2^(k+4)) (fun c =>
+          if a ≠ b ∧ b ≠ c ∧ c ≠ a then
+            P3 a b 1 (k+3) * (P3 b c 1 (k+3) * P3 c a 1 (k+3))
+              - refP (k+3) a b * (refP (k+3) b c * refP (k+3) c a)
+          else 0)))
+        + sumLtI (2^(k+4)) (fun a => sumLtI (2^(k+4)) (fun b => sumLtI (2^(k+4)) (fun c =>
+          if ¬(a ≠ b ∧ b ≠ c ∧ c ≠ a) then
+            P3 a b 1 (k+3) * (P3 b c 1 (k+3) * P3 c a 1 (k+3))
+              - refP (k+3) a b * (refP (k+3) b c * refP (k+3) c a)
+          else 0))) := by
+    rw [← sumLtI3_add]
+    exact sumLtI_congr _ _ _ (fun a _ => sumLtI_congr _ _ _ (fun b _ =>
+      sumLtI_congr _ _ _ (fun c _ => by
+        by_cases h : a ≠ b ∧ b ≠ c ∧ c ≠ a <;> simp [h])))
+  have hdegzero : sumLtI (2^(k+4)) (fun a => sumLtI (2^(k+4)) (fun b => sumLtI (2^(k+4)) (fun c =>
+        if ¬(a ≠ b ∧ b ≠ c ∧ c ≠ a) then
+          P3 a b 1 (k+3) * (P3 b c 1 (k+3) * P3 c a 1 (k+3))
+            - refP (k+3) a b * (refP (k+3) b c * refP (k+3) c a)
+        else 0))) = 0 := by
+    rw [sumLtI_congr _ _ (fun _ => 0) (fun a ha => by
+          rw [sumLtI_congr _ _ (fun _ => 0) (fun b hb => by
+                rw [sumLtI_congr _ _ (fun _ => 0) (fun c hc => by
+                      by_cases h : ¬(a ≠ b ∧ b ≠ c ∧ c ≠ a)
+                      · rw [if_pos h]
+                        exact dpt_degenerate_zero (k+3) a b c ha hb hc (by omega)
+                      · rw [if_neg h]),
+                    sumLtI_zero]),
+              sumLtI_zero]),
+        sumLtI_zero]
+  have hregroup := sixfold_regroup_cond
+    (fun a b c => P3 a b 1 (k+3) * (P3 b c 1 (k+3) * P3 c a 1 (k+3))
+      - refP (k+3) a b * (refP (k+3) b c * refP (k+3) c a))
+    (2^(k+4))
+    (fun a b c _ _ _ _ _ _ => dpt_cyc (k+3) a b c)
+    (fun a b c ha hb hc hab hbc hca => dpt_swap23_bdd (k+3) a b c ha hb hc hab hbc hca)
+  have hpt : ∀ x y z, x < 2^(k+4) → y < 2^(k+4) → z < 2^(k+4) →
+      (if x < y ∧ y < z then
+        P3 x y 1 (k+3) * (P3 y z 1 (k+3) * P3 z x 1 (k+3))
+          - refP (k+3) x y * (refP (k+3) y z * refP (k+3) z x)
+      else 0)
+      = -2 * (if x < y ∧ y < z ∧ kcnt (k+3) x y z % 2 = 1 then
+          (if x = 0 ∨ y = 0 ∨ z = 0 then (-1:Int) else 1)
+        else 0) := by
+    intro x y z hx hy hz
+    by_cases hxyz : x < y ∧ y < z
+    · have hxy : x ≠ y := by omega
+      have hyz : y ≠ z := by omega
+      have hzx : z ≠ x := by omega
+      rw [if_pos hxyz, dpt_value_bdd (k+3) x y z hx hy hz hxy hyz hzx,
+          refP_triple_prod (k+3) x y z hxy hyz hzx]
+      by_cases hk : kcnt (k+3) x y z % 2 = 1
+      · have hcond : x < y ∧ y < z ∧ kcnt (k+3) x y z % 2 = 1 := ⟨hxyz.1, hxyz.2, hk⟩
+        rw [if_pos hk, if_pos hcond]
+      · have hncond : ¬ (x < y ∧ y < z ∧ kcnt (k+3) x y z % 2 = 1) := fun h => hk h.2.2
+        rw [if_neg hk, if_neg hncond]
+    · rw [if_neg hxyz, if_neg (fun h => hxyz ⟨h.1, h.2.1⟩)]
+      omega
+  have hcanon2 : sumLtI (2^(k+4)) (fun x => sumLtI (2^(k+4)) (fun y => sumLtI (2^(k+4)) (fun z =>
+        if x < y ∧ y < z then
+          P3 x y 1 (k+3) * (P3 y z 1 (k+3) * P3 z x 1 (k+3))
+            - refP (k+3) x y * (refP (k+3) y z * refP (k+3) z x)
+        else 0)))
+      = -2 * net := by
+    rw [sumLtI_congr _ _ _ (fun x hx => sumLtI_congr _ _ _ (fun y hy =>
+          sumLtI_congr _ _ _ (fun z hz => hpt x y z hx hy hz))), hnetdef]
+    have inner2 : ∀ x y, sumLtI (2^(k+4)) (fun z => -2 * (if x < y ∧ y < z ∧
+          kcnt (k+3) x y z % 2 = 1 then (if x = 0 ∨ y = 0 ∨ z = 0 then (-1:Int) else 1) else 0))
+        = -2 * sumLtI (2^(k+4)) (fun z => if x < y ∧ y < z ∧ kcnt (k+3) x y z % 2 = 1 then
+            (if x = 0 ∨ y = 0 ∨ z = 0 then (-1:Int) else 1) else 0) :=
+      fun x y => sumLtI_mul _ _ _
+    have inner1 : ∀ x, sumLtI (2^(k+4)) (fun y => sumLtI (2^(k+4)) (fun z => -2 * (if x < y ∧ y < z ∧
+          kcnt (k+3) x y z % 2 = 1 then (if x = 0 ∨ y = 0 ∨ z = 0 then (-1:Int) else 1) else 0)))
+        = -2 * sumLtI (2^(k+4)) (fun y => sumLtI (2^(k+4)) (fun z => if x < y ∧ y < z ∧
+            kcnt (k+3) x y z % 2 = 1 then (if x = 0 ∨ y = 0 ∨ z = 0 then (-1:Int) else 1) else 0)) := by
+      intro x
+      rw [sumLtI_congr _ _ _ (fun y _ => inner2 x y), sumLtI_mul]
+    rw [sumLtI_congr _ _ _ (fun x _ => inner1 x), sumLtI_mul]
+  rw [hcomb, hsplit, hdegzero, hregroup, hcanon2]
+  omega
+
 end SounioZDFiberAntisym

@@ -3642,3 +3642,52 @@ notes: |
   + T156's hentry_law) and `hmult` (the 18×16 orbit-triangle enumeration, Tier 162, the
   last open math).  Then the final assembly: deviation_assembly + trace_ref_entry_law +
   hentry_law + hDelta + hrule ⇒ s3(1) = poly(H) − 1728·[m,3]₂.
+
+  UPDATE (claude, 2026-08-13): **Tier 160 LANDED, GREEN — `hDelta_law` is proved
+  unconditionally.**  Claimed lane `zd-e5-tier160-hdelta`; scope was `hDelta` only, the
+  third of wave-3's four remaining
+  pieces (`hmult` still open, last).  `Delta` had never been given a concrete definition
+  anywhere in the file; read off `trace_ref_entry_law`'s LHS shape (real `P3`-cubed
+  trace minus idealized `refP`-cubed trace at `W=1`, level `m=k+3`) and `stratum_net`'s
+  own `hnetdef`, `hDelta_law (k) (Delta net : Int) (hDeltadef : Delta = Σ_{a,b,c<2^(k+4)}
+  P3ab·(P3bc·P3ca) − Σ refPab·(refPbc·refPca)) (hnetdef : <stratum_net's exact hnetdef
+  sum>) : Delta = -12 * net`.  Route (matches the plan in full): (1) split the defining
+  triple sum into degenerate triples (`a=b∨b=c∨c=a`) and pairwise-distinct ones;
+  degenerate triples contribute `0` since the real/idealized diagonals coincide
+  (`P3_diag_eq_refP_diag`, from `P3_diag`+`P3_zero_zero`+`refP`'s own `if`-chain) and
+  `M(x,y)·M(y,x) = refP(x,y)·refP(y,x)` for ANY `x,y<2^(m+1)` including `x=y`
+  (`pair_eq_refP_pair`, from `hentry_law` on both orderings + `isDefect_symm'` — NOTE
+  `isDefect_symm'` is a plain implication `isDefect m x y → isDefect m y x`, not an
+  `Iff`, tripped the first compile attempt); (2) a bounded `hlaw` variant (`hlaw_bdd`,
+  `hlaw`'s own proof with `hentry_law` swapped in for the unbounded `hentry` hypothesis,
+  per the caution flagged in the Tier 156/158 notes) shows the pairwise-distinct
+  deviation `Mp−Pp` is FULLY permutation-symmetric (not just cyclic): cyclic for free
+  (pure ring reassociation, `dpt_cyc`), and swap-23 symmetric via `kcnt_swap23`
+  (`isDefect_symm'` on all three edges) + `hlaw_bdd` + `refP_triple_prod` on both
+  orderings (`dpt_swap23_bdd`) — these two generators produce all six permutations;
+  (3) a NEW generic "sixfold regrouping" engine (`dpt_six_regions`, a trichotomy
+  case-split closed by `simp_all <;> omega`, plus `sixfold_regroup_cond`, assembled from
+  four new sum-level permutation lemmas `sumLtI3_swap12/23/13`+`sumLtI3_cyc2` built on
+  `sumLtI_swap`/`sumLtI3_cyc`) converts the ordered pairwise-distinct triple sum into six
+  copies of the canonical `x<y<z` sum — same six-order-region technique as
+  `cherry_decomp`'s, but for a fully-symmetric summand rather than an isDefect
+  indicator, so ONE canonical region suffices instead of `cherry`'s three centered
+  sums; (4) on the canonical domain, `dpt_value_bdd` gives `Mp−Pp =
+  −2·(if kcnt odd then Pp else 0)` pointwise (from `hlaw_bdd`'s `Mp=Pp·(±1)^kcnt`), which
+  via `refP_triple_prod` is EXACTLY `net`'s own `hnetdef` summand; assembling,
+  `Delta = 0 + 6·(−2·net) = −12·net`.  Verified numerically FIRST
+  (`scripts/research/zd_e5_hdelta_probe.py`, `k=0..3` exact: `Delta=-12*net` at
+  `H=16,32,64,128`; degenerate-zero, pair-law, and full-permutation-invariance all 0
+  failures) and the hardest machinery (the six-region split and the sixfold sum
+  regrouping, both with conditional hypotheses) was derisked in isolated scratch `.lean`
+  files (fast ~1-2s compiles) BEFORE touching the 25k-line file, given the ~2min full
+  build cost.  **Coordination note**: found this file mid-edit by a concurrent session
+  (kimi/codex landing Tier 158's `hiso_ref`+`cdSig1_flip`, commit `008522acea`) while
+  reading — did not touch their hunks, appended purely at the true end-of-file, and by
+  the time of commit their work had already landed on the branch tip so the diff is a
+  clean, isolated 468-line addition.  Kernel-clean under the direct `lean -j1 -s65536`
+  build (no `lake`), zero errors, zero NEW warnings (95 total, all pre-existing), no
+  `sorry`/new axioms/`native_decide`.  Claim released.  **The one remaining open piece
+  of E5 is `hmult`** (the 18×16 orbit-triples-per-subspace enumeration) — "the last
+  genuinely open mathematics."  After `hmult`, Tier 146's `hrule` and Tier 148's
+  assembly discharge and `s3(1) = poly(H) − 1728·[m,3]₂` is a theorem.
