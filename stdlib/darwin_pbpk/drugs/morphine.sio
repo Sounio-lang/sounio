@@ -21,7 +21,12 @@
 //   B/P = 1.0 · MW 285.34 · pKa 8.21 · logP 0.89 (base fraca hidrofílica)
 //   CL total = 84 L/h (1.2 L/h/kg; faixa 60–105: Mazoit 2007, Särkelä 1991,
 //             Lotsch 2002) · 90% hepático UGT / 10% renal inalterado
-//   Vss = 3.3 L/kg = 231 L (Mazoit 2007: V1 22.7 L, Vss ~3.3 L/kg)
+//   Vss lit. 3.3 L/kg = 231 L (Mazoit 2007: V1 22.7 L); modelo (Kp × V
+//   PBPK28 abaixo) reproduz 166 L = 2.4 L/kg (−28%; math-review
+//   xai/zai 2026-08-13 confirmou a aritmética do modelo E flagrou a
+//   lacuna vs. o alvo — TENSÃO real, não corrigida aqui: reduzir a −28%
+//   exigiria retunar Kp/volumes, decisão de calibração fora do escopo
+//   desta correção de PR; faixa publicada 1–6 L/kg cobre ambos)
 //   t½ terminal 2–3h (obs 1.7–4h)
 //
 // PEDIATRIA (âncoras de validação, literatura):
@@ -34,8 +39,13 @@
 //   r_UGT2B7(d) = 0.05 + 0.95·Hill(d; A50=60d, h=1.7)   [Badée 2019]
 //   r_OCT1(d)  = 0.10 + 0.90·Hill(d; A50=90d, h=2.0)   [Hahn 2019/2021]
 //   CLint(d) = CLint_adult × min(r_UGT2B7, r_OCT1)
-// Cross-check Fase 6: neonato 7d → CL ≈ 0.4–0.5 L/h/kg-eq (dentro do alvo);
-// lactente 4m → ≈ 0.8 L/h/kg-eq (≥80% adulto por kg a partir de ~6m). ✓
+// Cross-check Fase 6 (corrigido 2026-08-13, review PR #1714 — valores
+// anteriores eram estimativa manual, não batiam com morphine_cl_eff_lh()):
+// neonato 7d/3.5kg → CL/kg = 0.369 L/h/kg (dentro do alvo Bouwmeester/Lynn
+// 0.12–0.48); lactente 120d/6.5kg → CL/kg = 1.084 L/h/kg = 90% do
+// adulto/kg (84/70=1.2) — já ≥80% aos 4 meses, não apenas "a partir de
+// ~6m" como a nota antiga sugeria. ✓ (math-review xai/zai independente,
+// ver .claude/llm_offload_log.md)
 //
 // ONTOLOGIA (padrão stdlib/ontology: namespaces + triplas i64):
 //   (morfina, is_a, analgésico opioide) · (morfina, metabolized_by, UGT2B7)
@@ -88,13 +98,13 @@ pub fn morphine_fu() -> f64 { return 0.70 }
 pub fn morphine_rb() -> f64 { return 1.0 }
 
 // ─── Ontogenia ──────────────────────────────────────────────────────────────
-fn powf_local(b: f64, e: f64) -> f64 {
+fn powf_local(b: f64, e: f64) -> f64 with Mut {
     // b^e para b>0 via exp/ln (série; |ln b| moderado no domínio de uso)
     if b <= 0.0 { return 0.0 }
     let l = ln_local(b)
     return exp_local(e * l)
 }
-fn exp_local(x: f64) -> f64 {
+fn exp_local(x: f64) -> f64 with Mut {
     if x > 20.0 {
         let h = exp_local(x / 2.0)
         return h * h
@@ -110,7 +120,7 @@ fn exp_local(x: f64) -> f64 {
     }
     return sum
 }
-fn ln_local(x: f64) -> f64 {
+fn ln_local(x: f64) -> f64 with Mut {
     if x <= 0.0 { return 0.0 - 1000000.0 }
     if x == 1.0 { return 0.0 }
     if x > 1.5 { return 2.0 * ln_local(sqrt_local(x)) }
@@ -126,7 +136,7 @@ fn ln_local(x: f64) -> f64 {
     }
     return sum
 }
-fn sqrt_local(x: f64) -> f64 {
+fn sqrt_local(x: f64) -> f64 with Mut {
     if x <= 0.0 { return 0.0 }
     var guess = x / 2.0
     if guess < 1.0 { guess = 1.0 }
@@ -139,19 +149,19 @@ fn sqrt_local(x: f64) -> f64 {
 }
 
 // Fração da atividade adulta de UGT2B7 (Badée 2019; premissa Fase 6)
-pub fn r_ugt2b7(pna_days: f64) -> f64 {
+pub fn r_ugt2b7(pna_days: f64) -> f64 with Mut {
     let x = pna_days / 60.0
     let h = powf_local(x, 1.7)
     return 0.05 + 0.95 * h / (1.0 + h)
 }
 // Fração da abundância adulta de OCT1 (Hahn 2019/2021; premissa Fase 6)
-pub fn r_oct1(pna_days: f64) -> f64 {
+pub fn r_oct1(pna_days: f64) -> f64 with Mut {
     let x = pna_days / 90.0
     let h = powf_local(x, 2.0)
     return 0.10 + 0.90 * h / (1.0 + h)
 }
 // Elo limitante da cascata uptake→conjugação
-pub fn r_cascade(pna_days: f64) -> f64 {
+pub fn r_cascade(pna_days: f64) -> f64 with Mut {
     let a = r_ugt2b7(pna_days)
     let b = r_oct1(pna_days)
     if a < b { return a }
@@ -204,7 +214,7 @@ pub fn morphine_pbpk_params() -> PBPKParams14 with Div {
 // v,q ∝ w/70 (linear, convenção da suíte UTIped); CLint ∝ (w/70)·r_cascade;
 // CL_h resultante via well-stirred com Q_liver escalado → transição
 // flow-limited → uptake/metabolism-limited emerge do mecanismo.
-pub fn morphine_pbpk_params_ped(pna_days: f64, weight: f64) -> PBPKParams14 with Div {
+pub fn morphine_pbpk_params_ped(pna_days: f64, weight: f64) -> PBPKParams14 with Mut, Div {
     let wr = weight / 70.0
     let fu: f64 = 0.70
     let rb: f64 = 1.0
@@ -243,7 +253,7 @@ pub fn morphine_pbpk_params_ped(pna_days: f64, weight: f64) -> PBPKParams14 with
 
 // Clearance plasmático efetivo resultante (diagnóstico/validação):
 // CL_eff = cl_hepatic·fu·rb (convenção do ODE).
-pub fn morphine_cl_eff_lh(pna_days: f64, weight: f64) -> f64 with Div {
+pub fn morphine_cl_eff_lh(pna_days: f64, weight: f64) -> f64 with Mut, Div {
     let wr = weight / 70.0
     let q_liv = 90.0 * wr
     let clint = morphine_clint_adult() * wr * r_cascade(pna_days)

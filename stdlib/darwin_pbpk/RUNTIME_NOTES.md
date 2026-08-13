@@ -20,11 +20,22 @@ UTIped contornam cada uma de forma documentada.
    também `darwin_pbpk::tsit5_pbpk14::{PBPKParams14}` (dependência do módulo).
    *Workaround:* sempre importar a transitiva no root.
 
-3. **Structs locais + `use` no mesmo arquivo quebram o thin-link** (rc=12),
-   assim como funções de módulo que retornam arrays (`[f64; 14]`).
-   *Workaround:* drivers self-contained com literais extraídos do módulo
-   canônico via programa de dump (ex.: `tests/run-pass/morph_dump.sio`);
-   o módulo permanece a fonte única de verdade.
+3. ~~Structs locais + `use` no mesmo arquivo quebram o thin-link (rc=12),
+   assim como funções de módulo que retornam arrays.~~ **CORRIGIDO
+   2026-08-13 (review PR #1714): não era um bug de thin-link.** Era
+   `with Mut` faltando nos helpers matemáticos locais do módulo
+   (`powf_local`/`exp_local`/`ln_local`/`sqrt_local` e os `pub fn` que os
+   chamam: `r_ugt2b7`/`r_oct1`/`r_cascade`/`morphine_cl_eff_lh`/
+   `morphine_pbpk_params_ped`) — o compilador stage2/Madaros aceita a
+   chamada sem o efeito declarado mas rejeita (ou, dependendo da versão,
+   compila incorretamente) em vez de propagar o erro de forma óbvia.
+   Com os efeitos corrigidos, struct local + `use` no mesmo arquivo +
+   `pub fn` retornando `[f64; 14]` cruzando módulo funcionam normalmente
+   (testado: `morphine_kp()`, `morphine_v70()`, `morphine_pbpk_params()`
+   de fora do módulo, com uma struct local no arquivo importador).
+   Drivers desta suíte continuam self-contained por simplicidade/histórico,
+   não por necessidade — ver `test_clonidine_validation.sio` (PR #1718)
+   para o mesmo diagnóstico aplicado à clonidina.
 
 4. `print`/`println` fora de `main` → segfault (helpers devem ser puros).
 5. Tupla como retorno de função → segfault; usar struct + `return` explícito.
