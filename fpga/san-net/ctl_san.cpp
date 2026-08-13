@@ -24,6 +24,7 @@
 #include <vector>
 #include <stdexcept>
 #include <chrono>
+#include <thread>
 #include <arpa/inet.h>
 #include "xrt/xrt_device.h"
 #include "xrt/xrt_kernel.h"
@@ -58,6 +59,42 @@ static const uint32_t NL_ETH_IN    = 0x0410;
 static const uint32_t NL_ARP_IN    = 0x0440;
 static const uint32_t NL_ICMP_IN   = 0x0470;
 
+// Tamanhos vindos do kernel (krnl_san_scan_net.cpp), nao inventados:
+//   MAX_POINTS 8, HIST_BINS = MAX_POINTS, flop_t = ap_uint<64>
+static const uint32_t MAX_POINTS = 8;
+static const uint32_t HIST_BINS  = MAX_POINTS;
+
+// Golden model em software, para a corrida se auto-verificar. Reproduz o
+// mesmo LCG do inject_san e a mesma semantica do testbench aceito: o primeiro
+// ponto de saida cuja confianca alcanca q_delta vence; quem nao assenta cai no
+// head final e conta como catastrofe.
+struct Golden {
+    std::vector<uint32_t> hist;
+    uint32_t cat = 0;
+    uint64_t flops = 0;
+};
+
+static Golden golden(uint32_t n_samples, uint32_t n_points, uint32_t q_delta,
+                     const uint64_t *lut) {
+    Golden g;
+    g.hist.assign(HIST_BINS, 0);
+    uint32_t st = 12345u;
+    const uint32_t n_conf = n_points - 1;
+    for (uint32_t i = 0; i < n_samples; i++) {
+        uint32_t idx = n_points - 1;
+        bool achou = false;
+        for (uint32_t k = 0; k < n_conf; k++) {
+            st = st * 1103515245u + 12345u;
+            uint32_t q = (st >> 17) & 0x7FFF;   // igual ao injetor
+            if (!achou && q >= q_delta) { idx = k; achou = true; }
+        }
+        if (idx == n_points - 1) g.cat++;
+        g.hist[idx]++;
+        g.flops += lut[idx];
+    }
+    return g;
+}
+
 static uint32_t ip2i(const char *s) {
     in_addr a;
     if (inet_pton(AF_INET, s, &a) != 1) throw std::runtime_error(std::string("ip invalido: ") + s);
@@ -82,8 +119,10 @@ int main(int argc, char **argv) {
 
     const uint32_t FPGA_IP = ip2i("10.100.100.50");
     const uint32_t FPGA_GW = ip2i("10.100.100.1");
-    const uint32_t N_CONF  = n_points - 1;
-    const uint32_t N_BINS  = 256;
+    if (n_points < 2 || n_points > MAX_POINTS) {
+        fprintf(stderr, "n_points fora de 2..%u\n", MAX_POINTS);
+        return 2;
+    }
 
     try {
         xrt::device dev(0);
@@ -95,10 +134,19 @@ int main(int argc, char **argv) {
         cmac.write_register(CMAC_RSFEC_IND, 7);
         cmac.write_register(CMAC_RESET, 0xC0000000);
         cmac.write_register(CMAC_RESET, 0x0);
-        uint32_t st = cmac.read_register(CMAC_RX_STATUS);
+        // O alinhamento com RS-FEC NAO e' instantaneo — ler o status logo apos
+        // tirar o reset da sempre "sem sinal". O u250-vnx-init.sh, ja validado,
+        // espera 3 s; aqui sondamos ate 15 s, que tolera um link mais lento sem
+        // pagar o custo fixo quando ele sobe rapido.
+        uint32_t st = 0;
+        for (int tent = 0; tent < 60; tent++) {
+            st = cmac.read_register(CMAC_RX_STATUS);
+            if (st & 0x1) { printf("cmac_1 alinhou em ~%.1f s\n", tent * 0.25); break; }
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        }
         printf("cmac_1 rx_status=0x%X (%s)\n", st, (st & 0x1) ? "ALINHADO" : "SEM SINAL");
         if (!(st & 0x1)) {
-            fprintf(stderr, "ERRO: o link nao alinhou; sem isso nenhum beat chega.\n");
+            fprintf(stderr, "ERRO: o link nao alinhou em 15 s; sem isso nenhum beat chega.\n");
             return 3;
         }
 
@@ -126,23 +174,43 @@ int main(int argc, char **argv) {
         }
 
         // --- 3. Kernel: LUT de custo, escalares, buffers de saida ---
+        // Assinatura lida do PROPRIO artefato (xclbinutil --info), nao suposta:
+        //   0 samples_in (stream, AXIS)   1 lut          2 q_delta
+        //   3 n_points                    4 n_samples    5 hist_out
+        //   6 catastrophe_out             7 flops_out
+        // A porta de stream OCUPA o indice 0, entao os argumentos nao podem ser
+        // passados posicionalmente — tem de ser set_arg com indice explicito.
         xrt::kernel k(dev, uuid, "krnl_san_scan_net:{krnl_san_scan_net_1}");
-        auto bo_lut  = xrt::bo(dev, N_CONF * sizeof(uint32_t), k.group_id(0));
-        auto bo_hist = xrt::bo(dev, N_BINS * sizeof(uint32_t), k.group_id(5));
-        auto bo_cat  = xrt::bo(dev, sizeof(uint32_t),          k.group_id(6));
-        auto bo_flop = xrt::bo(dev, sizeof(uint64_t),          k.group_id(7));
+        auto bo_lut  = xrt::bo(dev, MAX_POINTS * sizeof(uint64_t), k.group_id(1));
+        auto bo_hist = xrt::bo(dev, HIST_BINS  * sizeof(uint32_t), k.group_id(5));
+        auto bo_cat  = xrt::bo(dev, sizeof(uint32_t),              k.group_id(6));
+        auto bo_flop = xrt::bo(dev, sizeof(uint64_t),              k.group_id(7));
 
-        // mesma LUT do artefato aceito: custo por configuracao
-        auto *lut = bo_lut.map<uint32_t *>();
-        for (uint32_t i = 0; i < N_CONF; i++) lut[i] = 1u << i;
+        // LUT identica a do testbench aceito: prefixos exatos de MAC, 64 bits,
+        // MAX_POINTS entradas com o indice saturado em n_points-1.
+        auto *lut = bo_lut.map<uint64_t *>();
+        for (uint32_t k_i = 0; k_i < MAX_POINTS; k_i++) {
+            uint32_t idx = (k_i < n_points) ? k_i : n_points - 1;
+            lut[k_i] = 1000000ULL * (idx + 1) * (idx + 1);
+        }
         bo_lut.sync(XCL_BO_SYNC_BO_TO_DEVICE);
-        std::memset(bo_hist.map<uint32_t *>(), 0, N_BINS * sizeof(uint32_t));
+        std::memset(bo_hist.map<uint32_t *>(), 0, HIST_BINS * sizeof(uint32_t));
         bo_hist.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+        *bo_cat.map<uint32_t *>()  = 0; bo_cat.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+        *bo_flop.map<uint64_t *>() = 0; bo_flop.sync(XCL_BO_SYNC_BO_TO_DEVICE);
 
         // O kernel BLOQUEIA no stream ate chegarem n_samples. Arma e volta:
         // quem alimenta e o inject_san, do outro lado da fibra.
         uint32_t eth0 = nl.read_register(NL_ETH_IN);
-        auto run = k(bo_lut, q_delta, n_points, n_samples, bo_hist, bo_cat, bo_flop);
+        xrt::run run(k);
+        run.set_arg(1, bo_lut);
+        run.set_arg(2, q_delta);
+        run.set_arg(3, n_points);
+        run.set_arg(4, n_samples);
+        run.set_arg(5, bo_hist);
+        run.set_arg(6, bo_cat);
+        run.set_arg(7, bo_flop);
+        run.start();
         printf("ARMADO — rode agora, no outro no:\n");
         printf("  ./inject_san 10.100.100.50 %u %u %u 140 %u\n",
                fpga_port, n_samples, n_points, inj_port);
@@ -168,15 +236,27 @@ int main(int argc, char **argv) {
         uint64_t flop = *bo_flop.map<uint64_t *>();
         auto *hist = bo_hist.map<uint32_t *>();
         uint64_t soma = 0;
-        for (uint32_t i = 0; i < N_BINS; i++) soma += hist[i];
+        for (uint32_t i = 0; i < HIST_BINS; i++) soma += hist[i];
 
-        printf("SAN_NET_OK n_samples=%u n_points=%u catastrofes=%u flops=%llu\n",
-               n_samples, n_points, cat, (unsigned long long)flop);
-        printf("  hist soma=%llu (esperado %u)  quadros eth_in delta=%u\n",
+        // --- 4. Confronto com o golden model ---
+        Golden g = golden(n_samples, n_points, q_delta, lut);
+        bool bate = (cat == g.cat) && (flop == g.flops);
+        for (uint32_t i = 0; i < HIST_BINS; i++) if (hist[i] != g.hist[i]) bate = false;
+
+        printf("SAN_NET n_samples=%u n_points=%u q_delta=%u\n", n_samples, n_points, q_delta);
+        printf("  fpga   cat=%-8u flops=%-16llu hist=", cat, (unsigned long long)flop);
+        for (uint32_t i = 0; i < HIST_BINS; i++) printf("%u ", hist[i]);
+        printf("\n  golden cat=%-8u flops=%-16llu hist=", g.cat, (unsigned long long)g.flops);
+        for (uint32_t i = 0; i < HIST_BINS; i++) printf("%u ", g.hist[i]);
+        printf("\n  soma=%llu (esperado %u)  quadros eth_in delta=%u\n",
                (unsigned long long)soma, n_samples, eth1 - eth0);
-        if (soma != n_samples)
-            fprintf(stderr, "AVISO: histograma nao fecha — houve perda de pacote UDP.\n");
-        return (soma == n_samples) ? 0 : 6;
+
+        if (soma != n_samples) {
+            fprintf(stderr, "FALHA: histograma nao fecha — houve perda de pacote UDP.\n");
+            return 6;
+        }
+        printf("SAN_NET_%s\n", bate ? "BIT_EXATO" : "DIVERGENTE");
+        return bate ? 0 : 7;
     } catch (const std::exception &e) {
         fprintf(stderr, "ERRO: %s\n", e.what());
         return 1;

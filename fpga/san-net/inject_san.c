@@ -84,43 +84,45 @@ int main(int argc, char **argv) {
     dst.sin_family = AF_INET; dst.sin_port = htons((uint16_t)port);
     if (inet_pton(AF_INET, ip, &dst.sin_addr) != 1) { fprintf(stderr, "ip invalido\n"); return 2; }
 
-    /* buffer de envio: um pacote = bpp beats */
-    size_t pkt_bytes = (size_t)bpp * BEAT_BYTES;
-    uint8_t *pkt = calloc(1, pkt_bytes);
-    if (!pkt) { perror("calloc"); return 1; }
-
     long n_beats = (n_samples + LANES - 1) / LANES;
-    long enviados = 0, pacotes = 0, bytes = 0;
-    double t0 = now_s();
 
-    long b = 0;
-    while (b < n_beats) {
-        int nb = (int)((n_beats - b < bpp) ? (n_beats - b) : bpp);
-        memset(pkt, 0, (size_t)nb * BEAT_BYTES);
-        for (int i = 0; i < nb; i++) {
-            uint8_t *beat = pkt + (size_t)i * BEAT_BYTES;
-            for (int p = 0; p < LANES; p++) {
-                long s = (b + i) * LANES + p;
-                uint8_t *rec = beat + p * (SAMPLE_BITS / 8);
-                if (s < n_samples)
-                    for (int k = 0; k < n_conf; k++)
-                        put_field(rec, k, (uint16_t)(lcg() >> 17)); /* 15 bits */
-            }
-        }
-        ssize_t w = sendto(fd, pkt, (size_t)nb * BEAT_BYTES, 0,
+    /* --- FASE 1: empacota TUDO na memoria, fora do cronometro ---
+       Medir geracao junto com transmissao mede o empacotador, nao o caminho
+       de dados: put_field faz 15 operacoes de bit por campo, e isso domina.
+       Primeira medicao ingenua deu 7,3 Msamples/s — era o custo do bit-twiddling
+       no host, nao a capacidade da fibra nem da FPGA. */
+    size_t total = (size_t)n_beats * BEAT_BYTES;
+    uint8_t *buf = calloc(1, total);
+    if (!buf) { perror("calloc"); return 1; }
+    double tp0 = now_s();
+    for (long s = 0; s < n_samples; s++) {
+        uint8_t *rec = buf + (s / LANES) * BEAT_BYTES + (s % LANES) * (SAMPLE_BITS / 8);
+        for (int k = 0; k < n_conf; k++)
+            put_field(rec, k, (uint16_t)(lcg() >> 17)); /* 15 bits */
+    }
+    double tpack = now_s() - tp0;
+
+    /* --- FASE 2: so a transmissao entra no cronometro --- */
+    long pacotes = 0, bytes = 0;
+    double t0 = now_s();
+    for (long b = 0; b < n_beats; ) {
+        long nb = (n_beats - b < bpp) ? (n_beats - b) : bpp;
+        ssize_t w = sendto(fd, buf + (size_t)b * BEAT_BYTES, (size_t)nb * BEAT_BYTES, 0,
                            (struct sockaddr *)&dst, sizeof dst);
-        if (w < 0) { perror("sendto"); free(pkt); close(fd); return 1; }
-        bytes += w; pacotes++; enviados += (long)nb * LANES;
-        b += nb;
+        if (w < 0) { perror("sendto"); free(buf); close(fd); return 1; }
+        bytes += w; pacotes++; b += nb;
     }
     double dt = now_s() - t0;
 
     printf("INJECT_SAN origem=:%d destino=%s:%d n_samples=%ld n_points=%d beats=%ld\n",
            sport, ip, port, n_samples, n_points, n_beats);
-    printf("  pacotes=%ld  bytes=%ld  tempo=%.3fs\n", pacotes, bytes, dt);
+    printf("  empacotamento (fora do cronometro): %.3fs = %.1f Msamples/s\n",
+           tpack, n_samples / tpack / 1e6);
+    printf("  transmissao: pacotes=%ld bytes=%ld tempo=%.4fs\n", pacotes, bytes, dt);
     printf("  taxa=%.1f Msamples/s  %.2f Gbit/s\n",
            n_samples / dt / 1e6, bytes * 8.0 / dt / 1e9);
-    /* baseline a bater: 511 Msamples/s via DMA (T3_GREEN) */
-    free(pkt); close(fd);
+    /* referencias: 511 Msamples/s via DMA (T3_GREEN); teto da fibra de 100G
+       com 128 bits por amostra = 781 Msamples/s a taxa de linha */
+    free(buf); close(fd);
     return 0;
 }
