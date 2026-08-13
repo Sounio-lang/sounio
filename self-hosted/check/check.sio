@@ -1747,11 +1747,27 @@ fn checker_lower_ref_like_type_mut(c: *mut Checker, inner_te: TypeExpr, is_mut_r
             Some(_) => {}
         }
     }
+    // Exact whole-name resolution FIRST. `inner_te` still carries the full path here, so the
+    // struct can be resolved by name_eq before the TypeEntry round-trip truncates the name to
+    // its 8-byte SRET window. Without this, ANY two structs sharing an 8-character prefix
+    // collide inside struct_table_find_by_buf8 and the FIRST one wins: `&TacrolimusEpParam`
+    // resolved to `TacrolimusOralParams`, so every field read through the ref (`ep.variance`,
+    // `ep.mean`) reported a spurious E012.
+    var named_struct_idx: i64 = 0 - 1
+    if inner_te.kind == TypeExprKind::TypeNamed {
+        let inner_full_name = checker_copy_string_list_to_name(inner_te.path.segments)
+        named_struct_idx = struct_table_find((*c).structs, inner_full_name)
+    }
     let inner_ty = checker_lower_type_expr_mut(c, inner_te)
     // inner_ty.name.buf[0..7] = first 8 chars of struct name (TypeEntry bytes 8-15 — SRET window).
     // Look up the struct table now (while the full Checker is accessible) and encode the index
     // in name.buf[0] so the field-access handler can find the struct without relying on name.len.
-    let struct_idx = struct_table_find_by_buf8((*c).structs, inner_ty.name.buf)
+    // The buf8 scan stays as the FALLBACK for shapes the exact lookup cannot serve
+    // (monomorphised generic names, module-qualified paths, non-named inner types).
+    var struct_idx = named_struct_idx
+    if struct_idx < 0 {
+        struct_idx = struct_table_find_by_buf8((*c).structs, inner_ty.name.buf)
+    }
     if is_mut_ref {
         ty_ref_mut_with_idx(inner_ty, struct_idx)
     } else {
@@ -5308,6 +5324,105 @@ fn checker_check_opt_block_inplace(c: *mut Checker, opt: Option<Box<Block> >) ->
 // path-expr anywhere in an `if … else if …` chain reaches checker_check_path_expr_inplace
 // and dodges the by-value check_path_expr SRET crash. The non-recursive work (bool check,
 // condition narrowing, branch-type compat) is faithful to the by-value original.
+// ============================================================
+// Branch-aware merge of linear consumption
+//
+// A linear value must be consumed on EVERY path, so the two arms of an `if` are
+// alternatives, not a sequence. Threading them sequentially -- what happens
+// without these three calls -- is wrong in both directions:
+//
+//   if c { use(t) } else { use(t) }   E039, though sound (the else-arm
+//                                     inherited the then-arm's consumption)
+//   if c { use(t) }                   accepted, though `t` survives unconsumed
+//                                     on the implicit else path
+//
+// These mutate (*c).borrows fields in place rather than going through BorrowEnv
+// methods. Two other shapes were built and measured and neither is usable:
+// by-value `self -> BorrowEnv` methods (three aggregate round-trips per `if`),
+// and `&!BorrowEnv` methods (mutations never land; reaching one through a
+// pointer segfaults).
+// ============================================================
+
+// Record the on-entry `consumed` state for this branch level.
+fn checker_branch_enter_inplace(c: *mut Checker) with Mut, Panic, Div, Alloc, IO {
+    let d = (*c).borrows.branch_depth
+    (*c).borrows.branch_depth = d + 1
+    // Beyond the tracked nesting depth the counter stays balanced but nothing is
+    // stored; the merge then leaves state alone, degrading to the old sequential
+    // behaviour rather than merging against a stale snapshot.
+    if d < MAX_BRANCH_LEVELS {
+        var i: i64 = 0
+        while i < (*c).borrows.count {
+            (*c).borrows.branch_snap[i * MAX_BRANCH_SNAP + 2 * d] = (*c).borrows.entries[i].consumed
+            i = i + 1
+        }
+    }
+}
+
+// Stash the end-of-then-arm state and rewind to the on-entry state, so the
+// else-arm is checked from the same starting point the then-arm had.
+fn checker_branch_then_done_inplace(c: *mut Checker) with Mut, Panic, Div, Alloc, IO {
+    let d = (*c).borrows.branch_depth - 1
+    if d >= 0 && d < MAX_BRANCH_LEVELS {
+        var i: i64 = 0
+        while i < (*c).borrows.count {
+            (*c).borrows.branch_snap[i * MAX_BRANCH_SNAP + 2 * d + 1] = (*c).borrows.entries[i].consumed
+            // Whole-element read-modify-write. Assigning THROUGH a nested place --
+            // `(*c).borrows.entries[i].consumed = ...`, i.e. deref -> field -> index ->
+            // field -- is not resolved by the lean_single front end, which is the seed
+            // that builds Madaros. It reports `unknown identifier consumed` and the
+            // emitted store lands somewhere else in the Checker (issue #1471). The rest
+            // of this file already uses this idiom for the same reason; see the
+            // TypeEnv.bindings update in checker_env_mark_mutable_inplace.
+            var be_rewind = (*c).borrows.entries[i as usize]
+            be_rewind.consumed = (*c).borrows.branch_snap[i * MAX_BRANCH_SNAP + 2 * d]
+            (*c).borrows.entries[i as usize] = be_rewind
+            i = i + 1
+        }
+    }
+}
+
+// Combine the two arms and report values consumed on only one path. A linear
+// binding is consumed after the `if` only if BOTH arms consumed it; if exactly
+// one did, its fate depends on a runtime condition, which linearity forbids.
+fn checker_merge_if_branches_inplace(c: *mut Checker) with Mut, Panic, Div, Alloc, IO {
+    let d = (*c).borrows.branch_depth - 1
+    if d < 0 {
+        return
+    }
+    (*c).borrows.branch_depth = d
+    if d >= MAX_BRANCH_LEVELS {
+        return
+    }
+    var mismatch: i64 = 0
+    var i: i64 = 0
+    while i < (*c).borrows.count {
+        if (*c).borrows.entries[i].is_linear && !(*c).borrows.branch_snap[i * MAX_BRANCH_SNAP + 2 * d] {
+            let then_consumed = (*c).borrows.branch_snap[i * MAX_BRANCH_SNAP + 2 * d + 1]
+            let else_consumed = (*c).borrows.entries[i].consumed
+            var be_merge = (*c).borrows.entries[i as usize]
+            if then_consumed != else_consumed {
+                mismatch = mismatch + 1
+                be_merge.consumed = true
+            } else {
+                be_merge.consumed = then_consumed
+            }
+            (*c).borrows.entries[i as usize] = be_merge
+        }
+        i = i + 1
+    }
+    if mismatch > 0 {
+        (*c).had_error = true
+        (*c).error_count = (*c).error_count + 1
+        (*c).diag_emitted = true
+        print("error[E040]: linear value not consumed on every path (")
+        print_int(mismatch)
+        print(" value(s) consumed in one branch only)\n")
+        print("   = help: a linear value must be consumed on both branches of an `if`, or on neither\n")
+        print("   = note: linear types enforce single-use semantics for resources\n")
+    }
+}
+
 fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let cond_ty = checker_check_opt_expr_inplace(c, e.left)
     // Condition must be bool (skip E006 when the condition already failed typechecking).
@@ -5331,8 +5446,13 @@ fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut
     if cond_guard.0 != 0 {
         (*c).refine_cond_env = refine_static_env_push((*c).refine_cond_env, cond_guard.1)
     }
+    checker_branch_enter_inplace(c)
     let then_ty = checker_check_opt_block_inplace(c, e.block)
+    checker_branch_then_done_inplace(c)
     (*c).refine_cond_env = saved_cond_env
+    // The `match` stays the TAIL expression and the merge is called from inside
+    // each arm: hoisting it into `let result = match { ... }` with trailing
+    // statements is a shape this compiler miscompiles.
     match e.else_expr {
         Some(else_e) => {
             let else_ty = checker_check_expr_inplace(c, *else_e)
@@ -5340,10 +5460,15 @@ fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut
             if !checker_types_compatible_inplace(c, then_ty, else_ty) {
                 checker_report_mismatch_inplace(c, e.span, 7, then_ty, else_ty)
             }
+            checker_merge_if_branches_inplace(c)
             then_ty
         }
         None => {
+            // No else-arm: nothing is consumed on that path, which is what
+            // branch_then_done rewound to, so the merge flags a value the
+            // then-arm consumed.
             (*c).refine_cond_env = saved_cond_env
+            checker_merge_if_branches_inplace(c)
             ty_unit()
         }
     }
@@ -5693,6 +5818,20 @@ fn checker_check_field_access_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
             knowledge_inner(base_ty)
         } else if name_matches_str7(e.name, 101, 112, 115, 105, 108, 111, 110) {
             // "epsilon" = [101, 112, 115, 105, 108, 111, 110]
+            ty_f64()
+        } else if name_matches_str8(e.name, 118, 97, 114, 105, 97, 110, 99, 101) {
+            // "variance" = [118, 97, 114, 105, 97, 110, 99, 101] — GUM sigma^2, IR field 1
+            // (ir_register_knowledge_layout, lower.sio). UNGATED, matching lean_single:
+            // only .value carries the `with Epistemic` gate (E170); .variance/.confidence
+            // read the uncertainty channel itself, not the point estimate.
+            ty_f64()
+        } else if name_matches_str10(e.name, 99, 111, 110, 102, 105, 100, 101, 110, 99, 101) {
+            // "confidence" = IR field 2 (ir_register_knowledge_layout).
+            // NOT an alias of `.epsilon` at runtime under Madaros: `.epsilon` typechecks
+            // as f64 but the lowering has no slot for it and reads 0.0, while lean_single
+            // returns the confidence. That is a separate PRE-EXISTING silent wrong-value
+            // defect (reproduced on both the unpatched and patched Madaros); `.confidence`
+            // reads the correct value and is what the darwin_pbpk sources use.
             ty_f64()
         } else {
             checker_report_no_field_inplace(c, e.span, e.name, base_ty)
@@ -6708,6 +6847,15 @@ fn checker_check_measure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
     ty_knowledge(v_ty, 0.0 - 1.0)
 }
 
+fn checker_check_knowledge_ctor_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    // Knowledge(v, e=<confidence>, prov=<provenance>) -> Knowledge<T>.
+    // Same shape as checker_check_measure_expr_inplace: T comes from the first argument,
+    // epsilon is left unspecified at the type level (-1) exactly as measure() does.
+    let first_arg = expr_list_head(e.args)
+    let v_ty = checker_check_opt_expr_inplace(c, first_arg)
+    ty_knowledge(v_ty, 0.0 - 1.0)
+}
+
 fn checker_check_variance_metric_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let first_arg = expr_list_head(e.args)
     let second_arg = expr_list_second(e.args)
@@ -7004,6 +7152,9 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     // by-value bridge below (which SRET-smashes on the 164KB Checker return).
     if call_expr_is_builtin_measure(e.left) {
         return checker_check_measure_expr_inplace(c, e)
+    }
+    if call_expr_is_builtin_knowledge_ctor(e.left) {
+        return checker_check_knowledge_ctor_expr_inplace(c, e)
     }
     if call_expr_is_builtin_variance_of(e.left) {
         return checker_check_variance_metric_expr_inplace(c, e)
@@ -13486,6 +13637,23 @@ fn call_expr_is_builtin_measure(opt: Option<Box<Expr> >) -> bool with Mut, Panic
                 return false
             }
             name_matches_str7((*expr).name, 109, 101, 97, 115, 117, 114, 101)
+        }
+        None => false
+    }
+}
+
+// `Knowledge(v, e=<confidence>, prov=<provenance>)` — the constructor-CALL form of the
+// epistemic literal (the other form is the struct literal `Knowledge { .. }`). lean_single
+// accepts it; Madaros used to resolve the callee ident `Knowledge` through the ordinary
+// env/fn_sigs path and reported E137 "use of undeclared variable", which is what kept four
+// dissertation PBPK sources out of the modular compiler.
+fn call_expr_is_builtin_knowledge_ctor(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            name_matches_str9((*expr).name, 75, 110, 111, 119, 108, 101, 100, 103, 101)
         }
         None => false
     }
@@ -19993,6 +20161,12 @@ impl Checker {
             } else if name_matches_str7(e.name, 101, 112, 115, 105, 108, 111, 110) {
                 // "epsilon" = [101, 112, 115, 105, 108, 111, 110]
                 (c, ty_f64())
+            } else if name_matches_str8(e.name, 118, 97, 114, 105, 97, 110, 99, 101) {
+                // "variance" — GUM sigma^2, IR field 1. Ungated (see the *mut twin above).
+                (c, ty_f64())
+            } else if name_matches_str10(e.name, 99, 111, 110, 102, 105, 100, 101, 110, 99, 101) {
+                // "confidence" — IR field 2.
+                (c, ty_f64())
             } else {
                 c = c.report_no_field(e.span, e.name, base_ty)
                 (c, ty_error())
@@ -20632,6 +20806,9 @@ impl Checker {
         }
         if call_expr_is_builtin_measure(e.left) {
             return self.check_measure_expr(e)
+        }
+        if call_expr_is_builtin_knowledge_ctor(e.left) {
+            return self.check_knowledge_ctor_expr(e)
         }
         if call_expr_is_builtin_variance_of(e.left) {
             return self.check_variance_metric_expr(e)
@@ -22646,6 +22823,16 @@ impl Checker {
     fn check_measure_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         // measure(v: T, uncertainty: f64) -> Knowledge<T>
         // Type-check first arg; T = type of value; result = Knowledge<T> with epsilon=-1 (unspecified)
+        let first_arg = expr_list_head(e.args)
+        let v_pair = self.check_opt_expr(first_arg)
+        let c = v_pair.0
+        let v_ty = v_pair.1
+        (c, ty_knowledge(v_ty, 0.0 - 1.0))
+    }
+
+    fn check_knowledge_ctor_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        // Knowledge(v, e=<confidence>, prov=<provenance>) -> Knowledge<T>; by-value twin of
+        // checker_check_knowledge_ctor_expr_inplace.
         let first_arg = expr_list_head(e.args)
         let v_pair = self.check_opt_expr(first_arg)
         let c = v_pair.0

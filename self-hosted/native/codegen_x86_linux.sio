@@ -210,7 +210,10 @@ pub fn native_v2_runtime_context_layout() -> NativeV2RuntimeContextLayout {
     NativeV2RuntimeContextLayout {
         language_visible: true,
         tracing_gc: true,
-        precise_stack_maps: true,
+        // Conservative, not precise: root_temp_counts == temp_count below treats
+        // every live temp as a GC root instead of deriving the live root set from
+        // the regalloc's actual liveness. See scripts/ci/precise_stack_maps_honesty_gate.sh.
+        precise_stack_maps: false,
         safepoints: true,
         deopt_enabled: true,
         osr_enabled: true,
@@ -5525,7 +5528,7 @@ fn find_main_index(module: &IrModule) -> i64 with Mut, Panic, Div {
 fn native_func_has_control_flow(func: IrFunction) -> bool with Mut, Panic, Div {
     var i: i64 = 0
     while i < func.instr_count {
-        let op = func.instrs[i as usize].op
+        let op = (IR_A_OP[(ir_region_slot_r(func.region, (i))) as usize] as IrOpcode)
         if op == IrOpcode::IrLabel { return true }
         if op == IrOpcode::IrJump { return true }
         if op == IrOpcode::IrBranchTrue { return true }
@@ -5612,7 +5615,7 @@ pub fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) 
     // Lower each IR instruction
     var ip = 0
     while ip < effective_func.instr_count {
-        lower_instr(&!c, effective_func.instrs[ip as usize])
+        lower_instr(&!c, ir_arena_load(ir_region_slot_r(effective_func.region, (ip))))
         ip = ip + 1
     }
 
@@ -6944,9 +6947,9 @@ fn nc_rodata_add_ir_instr_name(nc: &! NativeCompiler, func: &IrFunction, instr_i
     var len = (*nc).flat_rodata_len
     let offset = len
     var i = 0
-    let name_len = ir_name_at((*func).instrs[instr_index as usize].name_id).len
+    let name_len = ir_arena_name(ir_region_slot_r((*func).region, (instr_index))).len
     while i < name_len && len < 262144 {
-        NC_BIG_RODATA[len as usize] = ir_name_at((*func).instrs[instr_index as usize].name_id).buf[i as usize]
+        NC_BIG_RODATA[len as usize] = ir_arena_name(ir_region_slot_r((*func).region, (instr_index))).buf[i as usize]
         len = len + 1
         i = i + 1
     }
@@ -6976,12 +6979,12 @@ fn nc_rodata_add_name_value(nc: &! NativeCompiler, name: Name) -> i64 with Mut, 
 }
 
 fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64) -> bool with Mut, Panic, Div {
-    let lhs = (*func).instrs[instr_index as usize].src1
-    let rhs = (*func).instrs[instr_index as usize].src2
-    let dst = (*func).instrs[instr_index as usize].dst
-    let op = (*func).instrs[instr_index as usize].bin_op
+    let lhs = IR_A_SRC1[(ir_region_slot_r((*func).region, (instr_index))) as usize]
+    let rhs = IR_A_SRC2[(ir_region_slot_r((*func).region, (instr_index))) as usize]
+    let dst = IR_A_DST[(ir_region_slot_r((*func).region, (instr_index))) as usize]
+    let op = (IR_A_BIN_OP[(ir_region_slot_r((*func).region, (instr_index))) as usize] as BinaryOp)
 
-    let flags = (*func).instrs[instr_index as usize].imm_flags
+    let flags = IR_A_IMM_FLAGS[(ir_region_slot_r((*func).region, (instr_index))) as usize]
     let lhs_float_marked = (flags / 2) & 1
     let rhs_float_marked = (flags / 4) & 1
     let lhs_known_int = if lhs >= 0 && lhs < NC_MAX_VREGS && (*nc).is_float_reg[lhs as usize] == 2 { 1 } else { 0 }
@@ -7174,7 +7177,7 @@ fn nc_core_func_param_index(func: &IrFunction, reg: i64) -> i64 with Mut, Panic,
 }
 
 fn nc_core_load_call_arg_into(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64, arg_index: i64, preg: i64) -> bool with IO, Mut, Panic, Div {
-    let arg = nc_core_call_arg_at((*func).instrs[instr_index as usize].call_args, arg_index)
+    let arg = ir_arena_arg_at(ir_region_slot_r((*func).region, (instr_index)), arg_index)
     if arg < 0 {
         if native_v2_ir_trace_enabled() {
             print("NV2_IR missing_call_arg fn=")
@@ -7184,11 +7187,11 @@ fn nc_core_load_call_arg_into(nc: &! NativeCompiler, func: &IrFunction, instr_in
             print(" arg_index=")
             print_int(arg_index)
             print(" arg_count=")
-            print_int((*func).instrs[instr_index as usize].arg_count)
+            print_int(IR_A_ARG_COUNT[(ir_region_slot_r((*func).region, (instr_index))) as usize])
             print(" src1=")
-            print_int((*func).instrs[instr_index as usize].src1)
+            print_int(IR_A_SRC1[(ir_region_slot_r((*func).region, (instr_index))) as usize])
             print(" src2=")
-            print_int((*func).instrs[instr_index as usize].src2)
+            print_int(IR_A_SRC2[(ir_region_slot_r((*func).region, (instr_index))) as usize])
             print("\n")
         }
         return false
@@ -7198,7 +7201,7 @@ fn nc_core_load_call_arg_into(nc: &! NativeCompiler, func: &IrFunction, instr_in
 }
 
 fn nc_core_load_call_arg_to_rax(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64, arg_index: i64) -> bool with Mut, Panic, Div {
-    let arg = nc_core_call_arg_at((*func).instrs[instr_index as usize].call_args, arg_index)
+    let arg = ir_arena_arg_at(ir_region_slot_r((*func).region, (instr_index)), arg_index)
     if arg < 0 {
         return false
     }
@@ -7298,17 +7301,25 @@ fn nc_core_emit_println_i64_literal_sentinel_into(nc: &! NativeCompiler, value: 
 // lowering imm_flags bits (their loadimm+marker pair makes them CONFLICT here).
 fn nc_compute_float_types(nc: &! NativeCompiler, func: &IrFunction) with Mut, Panic, Div {
     var ty: [i64; 2048] = [0; 2048]
+    // #1669: seed the lattice from the function-scoped float bits before the
+    // fixpoint. Equivalent to today's marker-as-definition join -- join(UNKNOWN,
+    // FLOAT) = FLOAT -- and a later int def still drives the reg to CONFLICT.
+    var fb: i64 = 0
+    while fb < ir_float_bits_capacity() && IR_FLOAT_BITS_TRUSTED == 1 {
+        if ir_float_bits_get(func, fb) { ty[fb as usize] = 1 }
+        fb = fb + 1
+    }
     var changed = true
     var iters = 0
     while changed && iters < 24 {
         changed = false
         var i = 0
         while i < (*func).instr_count && i < IR_MAX_INSTRS {
-            let op = (*func).instrs[i as usize].op
-            let d = (*func).instrs[i as usize].dst
-            let s1 = (*func).instrs[i as usize].src1
-            let s2 = (*func).instrs[i as usize].src2
-            let fl = (*func).instrs[i as usize].imm_flags
+            let op = (IR_A_OP[(ir_region_slot_r((*func).region, (i))) as usize] as IrOpcode)
+            let d = IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize]
+            let s1 = IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize]
+            let s2 = IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize]
+            let fl = IR_A_IMM_FLAGS[(ir_region_slot_r((*func).region, (i))) as usize]
             // def: type produced by this instruction (-1 = produces no recorded def)
             var def = -1
             if op == IrOpcode::IrNop {
@@ -7316,7 +7327,7 @@ fn nc_compute_float_types(nc: &! NativeCompiler, func: &IrFunction) with Mut, Pa
             } else if op == IrOpcode::IrLoadImm {
                 def = 2
             } else if op == IrOpcode::IrUnaryOp {
-                let uop = (*func).instrs[i as usize].un_op
+                let uop = (IR_A_UN_OP[(ir_region_slot_r((*func).region, (i))) as usize] as UnaryOp)
                 if uop == UnaryOp::OpNeg {
                     let t1 = if s1 >= 0 && s1 < NC_MAX_VREGS { ty[s1 as usize] } else { 0 }
                     if t1 == 1 {
@@ -7334,7 +7345,7 @@ fn nc_compute_float_types(nc: &! NativeCompiler, func: &IrFunction) with Mut, Pa
             } else if op == IrOpcode::IrCall || op == IrOpcode::IrFieldGet || op == IrOpcode::IrIndexGet {
                 if fl == IR_FLOAT_REG_MARKER_FLAG { def = 1 } else { def = 2 }
             } else if op == IrOpcode::IrBinOp {
-                let bop = (*func).instrs[i as usize].bin_op
+                let bop = (IR_A_BIN_OP[(ir_region_slot_r((*func).region, (i))) as usize] as BinaryOp)
                 if bop == BinaryOp::OpAdd || bop == BinaryOp::OpSub || bop == BinaryOp::OpMul || bop == BinaryOp::OpDiv {
                     let lf = ((fl / 2) & 1) == 1
                     let rf = ((fl / 4) & 1) == 1
@@ -7400,11 +7411,95 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
     // IrReturn on unsplit oct_mul → fallthrough into the next function / main
     // re-entry storm). Always close the frame if no IrReturn/IrReturnSret was seen.
     var saw_return = false
+    // #1669: pre-mark from the function-scoped bits. The in-stream arm below stays
+    // during the soak; this is the channel that survives a pass deleting the nop.
+    var pfb: i64 = 0
+    while pfb < ir_float_bits_capacity() && IR_FLOAT_BITS_TRUSTED == 1 {
+        if ir_float_bits_get(func, pfb) { nc_core_mark_float_reg(nc, pfb) }
+        pfb = pfb + 1
+    }
+    // #1669 AGREEMENT PROBE, diagnostic only, off unless SOUNIO_FLOAT_AGREE=1.
+    // Before trusting the bitset we have to know what trusting it would CHANGE.
+    // bits_only is the whole point -- a register the bitset knows about and the
+    // in-stream marker does not, i.e. a marker some pass deleted. markers_only
+    // is the danger: information the bitset LOST.
+    //
+    // No scratch array on purpose. A [i64; 2048] here is 16 KB inside a function
+    // whose frame the compiler already warns about, and the first version of this
+    // probe killed the build with it. Set bits are few, so scanning per bit is
+    // cheaper than the table.
+    if str_eq(read_env("SOUNIO_FLOAT_AGREE"), "1") {
+        var n_bits: i64 = 0
+        var n_mark: i64 = 0
+        var n_bits_only: i64 = 0
+        var n_mark_only: i64 = 0
+
+        var mi: i64 = 0
+        while mi < (*func).instr_count && mi < IR_MAX_INSTRS {
+            let mslot = ir_region_slot_r((*func).region, (mi))
+            if (IR_A_OP[mslot as usize] as IrOpcode) == IrOpcode::IrNop
+                && IR_A_IMM_FLAGS[mslot as usize] == IR_FLOAT_REG_MARKER_FLAG {
+                let mr = IR_A_DST[mslot as usize]
+                n_mark = n_mark + 1
+                if mr >= 0 && !ir_float_bits_get(func, mr) { n_mark_only = n_mark_only + 1 }
+            }
+            mi = mi + 1
+        }
+
+        var r: i64 = 0
+        while r < ir_float_bits_capacity() {
+            if ir_float_bits_get(func, r) {
+                n_bits = n_bits + 1
+                var seen = false
+                var si: i64 = 0
+                while si < (*func).instr_count && si < IR_MAX_INSTRS {
+                    let sslot = ir_region_slot_r((*func).region, (si))
+                    if (IR_A_OP[sslot as usize] as IrOpcode) == IrOpcode::IrNop
+                        && IR_A_IMM_FLAGS[sslot as usize] == IR_FLOAT_REG_MARKER_FLAG
+                        && IR_A_DST[sslot as usize] == r {
+                        seen = true
+                        si = (*func).instr_count
+                    } else {
+                        si = si + 1
+                    }
+                }
+                if !seen { n_bits_only = n_bits_only + 1 }
+            }
+            r = r + 1
+        }
+
+        print("[float-agree] fn=")
+        print_int(fn_index)
+        print(" bits=")
+        print_int(n_bits)
+        print(" markers=")
+        print_int(n_mark)
+        print(" bits_only=")
+        print_int(n_bits_only)
+        print(" markers_only=")
+        print_int(n_mark_only)
+        print("\n")
+    }
     var i = 0
     while i < (*func).instr_count && i < IR_MAX_INSTRS {
-        let instr_op = (*func).instrs[i as usize].op
-        if instr_op == IrOpcode::IrNop && (*func).instrs[i as usize].imm_flags == IR_FLOAT_REG_MARKER_FLAG {
-            let mark_reg = (*func).instrs[i as usize].dst
+        // #1669 ORDERING FIX, under test. The up-front pre-mark above is applied
+        // BEFORE any instruction is processed, so anything that marks a register
+        // int later in the stream clobbers it -- which is precisely why the
+        // in-stream marker works and the bits do not: the marker is honoured at
+        // its position, the seed is not. Re-asserting the bits each step makes
+        // them positional too. Only registers whose bit is set are touched, and
+        // those are float by construction.
+        if IR_FLOAT_BITS_TRUSTED == 1 {
+            var rfb: i64 = 0
+            while rfb < ir_float_bits_capacity() {
+                if ir_float_bits_get(func, rfb) { nc_core_mark_float_reg(nc, rfb) }
+                rfb = rfb + 1
+            }
+        }
+        let instr_op = (IR_A_OP[(ir_region_slot_r((*func).region, (i))) as usize] as IrOpcode)
+        if instr_op == IrOpcode::IrNop && IR_A_IMM_FLAGS[(ir_region_slot_r((*func).region, (i))) as usize] == IR_FLOAT_REG_MARKER_FLAG
+ {
+            let mark_reg = IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize]
             // Always honor an explicit float-marker IrNop. The previous guard
             // skipped marking when is_float_reg[mark_reg]==2 (int), but a preceding
             // IrLoadImm sets =2 on f64 literals, so the guard vetoed the float mark
@@ -7413,14 +7508,23 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             // neutralizer; #478 is now fixed at source in lower.sio, so this marker
             // is only emitted for genuinely-float values. nc_core_mark_float_reg
             // bounds-checks internally.
-            nc_core_mark_float_reg(nc, mark_reg)
+            //
+            // The IR_FLOAT_NO_MARKERS switch belongs HERE, not on the arm's
+            // condition. Guarding the condition made a marker nop fall through
+            // to the following `else if` arms, changing emission rather than
+            // just withholding the mark -- so the first version of this
+            // experiment measured the fallthrough and I nearly reported it as
+            // "the bits do not carry it".
+            if IR_FLOAT_NO_MARKERS == 0 {
+                nc_core_mark_float_reg(nc, mark_reg)
+            }
         } else if instr_op == IrOpcode::IrLoadImm {
-            let imm_value = (*func).instrs[i as usize].imm_i64
+            let imm_value = IR_A_IMM_I64[(ir_region_slot_r((*func).region, (i))) as usize]
             if imm_value == (0 - 4242) {
                 if i < 1 {
                     return false
                 }
-                let prev_instr = (*func).instrs[(i - 1) as usize]
+                let prev_instr = ir_arena_load(ir_region_slot_r((*func).region, ((i - 1))))
                 if prev_instr.op != IrOpcode::IrLoadImm {
                     return false
                 }
@@ -7431,154 +7535,154 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
                 nc_core_store_rax_to_temp(nc, prev_instr.dst)
             } else {
                 nc_emit_mov_rax_imm(nc, imm_value)
-                nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
-                nc_core_mark_int_reg(nc, (*func).instrs[i as usize].dst)
+                nc_core_store_rax_to_temp(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
+                nc_core_mark_int_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
             }
         } else if instr_op == IrOpcode::IrLoadBool {
-            nc_emit_mov_rax_imm(nc, (*func).instrs[i as usize].imm_i64)
-            nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
-            nc_core_mark_int_reg(nc, (*func).instrs[i as usize].dst)
+            nc_emit_mov_rax_imm(nc, IR_A_IMM_I64[(ir_region_slot_r((*func).region, (i))) as usize])
+            nc_core_store_rax_to_temp(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
+            nc_core_mark_int_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
         } else if instr_op == IrOpcode::IrLoadFloat {
-            nc_emit_mov_rax_imm(nc, f64_to_bits((*func).instrs[i as usize].imm_f64))
-            nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
-            nc_core_mark_float_reg(nc, (*func).instrs[i as usize].dst)
+            nc_emit_mov_rax_imm(nc, f64_to_bits(IR_A_IMM_F64[(ir_region_slot_r((*func).region, (i))) as usize]))
+            nc_core_store_rax_to_temp(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
+            nc_core_mark_float_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
         } else if instr_op == IrOpcode::IrIntToFloat {
-            nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
+            nc_core_load_temp_to_rax(nc, IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize])
             nc_emit_cvtsi2sd_xmm0_rax(nc)
             nc_emit_movq_rax_xmm0(nc)
-            nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
-            nc_core_mark_float_reg(nc, (*func).instrs[i as usize].dst)
+            nc_core_store_rax_to_temp(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
+            nc_core_mark_float_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
         } else if instr_op == IrOpcode::IrFloatToInt {
-            nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
+            nc_core_load_temp_to_rax(nc, IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize])
             nc_emit_movq_xmm0_rax(nc)
             nc_emit_cvttsd2si_rax_xmm0(nc)
-            nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
-            nc_core_mark_int_reg(nc, (*func).instrs[i as usize].dst)
+            nc_core_store_rax_to_temp(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
+            nc_core_mark_int_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
         } else if instr_op == IrOpcode::IrLoadString {
             let str_offset = nc_rodata_add_ir_instr_name(nc, func, i)
             let lea_pos = (*nc).code.len
             nc_emit_lea_rax_rip_disp32(nc, 0)
             nc_add_rodata_reloc(nc, lea_pos + 3, str_offset)
-            nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
+            nc_core_store_rax_to_temp(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
         } else if instr_op == IrOpcode::IrFieldGet {
-            if (*func).instrs[i as usize].label_id == 1 {
-                native_v2_core_emit_load_ref_field_into(nc, (*func).instrs[i as usize].dst, (*func).instrs[i as usize].src1, (*func).instrs[i as usize].field_idx)
+            if IR_A_LABEL_ID[(ir_region_slot_r((*func).region, (i))) as usize] == 1 {
+                native_v2_core_emit_load_ref_field_into(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize], IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize], IR_A_FIELD_IDX[(ir_region_slot_r((*func).region, (i))) as usize])
             } else {
-                nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
+                nc_core_load_temp_to_rax(nc, IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize])
                 native_v2_resolve_handle_to_object_base_rax_into(nc)
-                nc_emit_mov_reg_imm(nc, 3, (*func).instrs[i as usize].field_idx + native_v2_object_header_size() / 8)
+                nc_emit_mov_reg_imm(nc, 3, IR_A_FIELD_IDX[(ir_region_slot_r((*func).region, (i))) as usize] + native_v2_object_header_size() / 8)
                 nc_emit_mov_rax_mem_rax_rbx8(nc)
-                nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
+                nc_core_store_rax_to_temp(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
             }
-            if (*func).instrs[i as usize].imm_flags == IR_FLOAT_REG_MARKER_FLAG || nc_core_field_is_float(nc, (*func).instrs[i as usize].src1, (*func).instrs[i as usize].field_idx) {
-                nc_core_mark_float_reg(nc, (*func).instrs[i as usize].dst)
+            if IR_A_IMM_FLAGS[(ir_region_slot_r((*func).region, (i))) as usize] == IR_FLOAT_REG_MARKER_FLAG || nc_core_field_is_float(nc, IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize], IR_A_FIELD_IDX[(ir_region_slot_r((*func).region, (i))) as usize]) {
+                nc_core_mark_float_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
             } else {
-                nc_core_mark_int_reg(nc, (*func).instrs[i as usize].dst)
+                nc_core_mark_int_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
             }
         } else if instr_op == IrOpcode::IrFieldSet {
-            if (*func).instrs[i as usize].label_id == 1 {
-                native_v2_core_emit_store_ref_field_into(nc, (*func).instrs[i as usize].src1, (*func).instrs[i as usize].field_idx, (*func).instrs[i as usize].src2)
+            if IR_A_LABEL_ID[(ir_region_slot_r((*func).region, (i))) as usize] == 1 {
+                native_v2_core_emit_store_ref_field_into(nc, IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize], IR_A_FIELD_IDX[(ir_region_slot_r((*func).region, (i))) as usize], IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize])
             } else {
-                nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
+                nc_core_load_temp_to_rax(nc, IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize])
                 native_v2_resolve_handle_to_object_base_rax_into(nc)
                 nc_emit_mov_rdx_rax(nc)
-                nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src2)
-                nc_emit_mov_reg_imm(nc, 3, (*func).instrs[i as usize].field_idx + native_v2_object_header_size() / 8)
+                nc_core_load_temp_to_rax(nc, IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize])
+                nc_emit_mov_reg_imm(nc, 3, IR_A_FIELD_IDX[(ir_region_slot_r((*func).region, (i))) as usize] + native_v2_object_header_size() / 8)
                 nc_emit_store_rax_mem_rdx_rbx8(nc)
             }
-            if (*func).instrs[i as usize].src2 >= 0 && (*func).instrs[i as usize].src2 < NC_MAX_VREGS {
-                if (*nc).is_float_reg[(*func).instrs[i as usize].src2 as usize] == 1 {
-                    nc_core_mark_float_field(nc, (*func).instrs[i as usize].src1, (*func).instrs[i as usize].field_idx)
+            if IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize] >= 0 && IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize] < NC_MAX_VREGS {
+                if (*nc).is_float_reg[IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize] as usize] == 1 {
+                    nc_core_mark_float_field(nc, IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize], IR_A_FIELD_IDX[(ir_region_slot_r((*func).region, (i))) as usize])
                 }
             }
         } else if instr_op == IrOpcode::IrIndexGet {
-            let base_reg = (*func).instrs[i as usize].src1
-            if (*func).instrs[i as usize].label_id == 4 {
+            let base_reg = IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize]
+            if IR_A_LABEL_ID[(ir_region_slot_r((*func).region, (i))) as usize] == 4 {
                 // BSS i8: sign-extend packed byte (parity with local [i8;N] box path).
                 native_v2_core_emit_raw_signed_byte_array_load_into(
                     nc,
-                    (*func).instrs[i as usize].dst,
+                    IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize],
                     base_reg,
-                    (*func).instrs[i as usize].src2,
+                    IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize],
                 )
-            } else if (*func).instrs[i as usize].label_id == 3 {
+            } else if IR_A_LABEL_ID[(ir_region_slot_r((*func).region, (i))) as usize] == 3 {
                 native_v2_core_emit_raw_byte_array_load_into(
                     nc,
-                    (*func).instrs[i as usize].dst,
+                    IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize],
                     base_reg,
-                    (*func).instrs[i as usize].src2,
+                    IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize],
                 )
-            } else if (*func).instrs[i as usize].label_id == 2 {
+            } else if IR_A_LABEL_ID[(ir_region_slot_r((*func).region, (i))) as usize] == 2 {
                 native_v2_core_emit_raw_array_load_into(
                     nc,
-                    (*func).instrs[i as usize].dst,
+                    IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize],
                     base_reg,
-                    (*func).instrs[i as usize].src2,
+                    IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize],
                 )
-            } else if (*func).instrs[i as usize].label_id == 1 {
+            } else if IR_A_LABEL_ID[(ir_region_slot_r((*func).region, (i))) as usize] == 1 {
                 native_v2_core_emit_ref_array_load_into(
                     nc,
-                    (*func).instrs[i as usize].dst,
+                    IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize],
                     base_reg,
-                    (*func).instrs[i as usize].src2,
+                    IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize],
                 )
             } else if nc_core_func_param_index(func, base_reg) >= 0 {
                 native_v2_core_emit_param_array_load_into(
                     nc,
-                    (*func).instrs[i as usize].dst,
+                    IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize],
                     base_reg,
-                    (*func).instrs[i as usize].src2,
+                    IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize],
                 )
             } else {
                 native_v2_core_emit_local_array_load_into(
                     nc,
-                    (*func).instrs[i as usize].dst,
+                    IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize],
                     base_reg,
-                    (*func).instrs[i as usize].src2,
+                    IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize],
                 )
             }
             let index_base_is_float_array = if base_reg >= 0 && base_reg < NC_MAX_VREGS { (*nc).is_float_reg[base_reg as usize] == 1 } else { false }
-            if (*func).instrs[i as usize].imm_flags == IR_FLOAT_REG_MARKER_FLAG || index_base_is_float_array {
-                nc_core_mark_float_reg(nc, (*func).instrs[i as usize].dst)
+            if IR_A_IMM_FLAGS[(ir_region_slot_r((*func).region, (i))) as usize] == IR_FLOAT_REG_MARKER_FLAG || index_base_is_float_array {
+                nc_core_mark_float_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
             } else {
-                nc_core_mark_int_reg(nc, (*func).instrs[i as usize].dst)
+                nc_core_mark_int_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
             }
         } else if instr_op == IrOpcode::IrIndexSet {
-            let base_reg = (*func).instrs[i as usize].src1
-            if (*func).instrs[i as usize].label_id == 3 {
+            let base_reg = IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize]
+            if IR_A_LABEL_ID[(ir_region_slot_r((*func).region, (i))) as usize] == 3 {
                 native_v2_core_emit_raw_byte_array_store_into(
                     nc,
                     base_reg,
-                    (*func).instrs[i as usize].src2,
-                    (*func).instrs[i as usize].imm_i64,
+                    IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize],
+                    IR_A_IMM_I64[(ir_region_slot_r((*func).region, (i))) as usize],
                 )
-            } else if (*func).instrs[i as usize].label_id == 2 {
+            } else if IR_A_LABEL_ID[(ir_region_slot_r((*func).region, (i))) as usize] == 2 {
                 native_v2_core_emit_raw_array_store_into(
                     nc,
                     base_reg,
-                    (*func).instrs[i as usize].src2,
-                    (*func).instrs[i as usize].imm_i64,
+                    IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize],
+                    IR_A_IMM_I64[(ir_region_slot_r((*func).region, (i))) as usize],
                 )
-            } else if (*func).instrs[i as usize].label_id == 1 {
+            } else if IR_A_LABEL_ID[(ir_region_slot_r((*func).region, (i))) as usize] == 1 {
                 native_v2_core_emit_ref_array_store_into(
                     nc,
                     base_reg,
-                    (*func).instrs[i as usize].src2,
-                    (*func).instrs[i as usize].imm_i64,
+                    IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize],
+                    IR_A_IMM_I64[(ir_region_slot_r((*func).region, (i))) as usize],
                 )
             } else if nc_core_func_param_index(func, base_reg) >= 0 {
                 native_v2_core_emit_param_array_store_into(
                     nc,
                     base_reg,
-                    (*func).instrs[i as usize].src2,
-                    (*func).instrs[i as usize].imm_i64,
+                    IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize],
+                    IR_A_IMM_I64[(ir_region_slot_r((*func).region, (i))) as usize],
                 )
             } else {
                 native_v2_core_emit_local_array_store_into(
                     nc,
                     base_reg,
-                    (*func).instrs[i as usize].src2,
-                    (*func).instrs[i as usize].imm_i64,
+                    IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize],
+                    IR_A_IMM_I64[(ir_region_slot_r((*func).region, (i))) as usize],
                 )
             }
         } else if instr_op == IrOpcode::IrArrayLen {
@@ -7588,27 +7692,31 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             // the array-literal site. This is exact for any element width and any
             // size bucket (payload_size is the over-allocated bucket capacity in
             // BYTES, not N — using payload_size>>3 over-iterated for small arrays).
-            if (*func).instrs[i as usize].label_id == 1 {
-                native_v2_ref_array_resolve_base_rax_into(nc, (*func).instrs[i as usize].src1)
+            // main's #1681 aggregate-element-ref path, ported to the SoA arena.
+            // Dropping the label_id==1 branch reintroduces #1678: the base of an
+            // aggregate element ref is loaded as a plain temp and the wrong
+            // address is dereferenced.
+            if IR_A_LABEL_ID[(ir_region_slot_r((*func).region, (i))) as usize] == 1 {
+                native_v2_ref_array_resolve_base_rax_into(nc, IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize])
             } else {
-                nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
+                nc_core_load_temp_to_rax(nc, IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize])
                 native_v2_resolve_handle_to_object_base_rax_into(nc)
             }
             nc_emit_load_rax_mem_rax_disp32(nc, native_v2_object_header_field_flags())
-            nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
-            nc_core_mark_int_reg(nc, (*func).instrs[i as usize].dst)
+            nc_core_store_rax_to_temp(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
+            nc_core_mark_int_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
         } else if instr_op == IrOpcode::IrBinOp {
             if !nc_emit_core_binop(nc, func, i) {
                 return false
             }
         } else if instr_op == IrOpcode::IrCopy {
-            nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
-            nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
-            if (*func).instrs[i as usize].src1 >= 0 && (*func).instrs[i as usize].src1 < NC_MAX_VREGS {
-                if (*nc).is_float_reg[(*func).instrs[i as usize].src1 as usize] == 1 {
-                    nc_core_mark_float_reg(nc, (*func).instrs[i as usize].dst)
+            nc_core_load_temp_to_rax(nc, IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize])
+            nc_core_store_rax_to_temp(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
+            if IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize] >= 0 && IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize] < NC_MAX_VREGS {
+                if (*nc).is_float_reg[IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize] as usize] == 1 {
+                    nc_core_mark_float_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
                 } else {
-                    nc_core_mark_int_reg(nc, (*func).instrs[i as usize].dst)
+                    nc_core_mark_int_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
                 }
             }
         } else if instr_op == IrOpcode::IrUnaryOp {
@@ -7619,9 +7727,9 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             // raw references (&x / &!x / *raw_ptr of a true &T) are NOT yet supported
             // in native_v2 — emitting lea/load for them produces code that crashes,
             // so fail LOUDLY (codegen error) rather than ship a silent miscompile.
-            let uop = (*func).instrs[i as usize].un_op
+            let uop = (IR_A_UN_OP[(ir_region_slot_r((*func).region, (i))) as usize] as UnaryOp)
             if uop == UnaryOp::OpNeg {
-                let src1 = (*func).instrs[i as usize].src1
+                let src1 = IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize]
                 let src1_marked_float = if src1 >= 0 && src1 < NC_MAX_VREGS && (*nc).is_float_reg[src1 as usize] == 1 { 1 } else { 0 }
                 let src1_typed_float = if src1 >= 0 && src1 < NC_MAX_VREGS && (*nc).reg_type[src1 as usize] == 1 { 1 } else { 0 }
                 if src1_marked_float == 1 || src1_typed_float == 1 {
@@ -7631,53 +7739,53 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
                     nc_emit_movq_xmm0_rax(nc)
                     nc_emit_subsd_xmm0_xmm1(nc)
                     nc_emit_movq_rax_xmm0(nc)
-                    nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
-                    nc_core_mark_float_reg(nc, (*func).instrs[i as usize].dst)
+                    nc_core_store_rax_to_temp(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
+                    nc_core_mark_float_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
                 } else {
                     nc_core_load_temp_to_rax(nc, src1)
                     nc_emit_neg_rax(nc)
-                    nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
-                    nc_core_mark_int_reg(nc, (*func).instrs[i as usize].dst)
+                    nc_core_store_rax_to_temp(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
+                    nc_core_mark_int_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
                 }
             } else if uop == UnaryOp::OpNot {
-                nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
+                nc_core_load_temp_to_rax(nc, IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize])
                 (*nc).code = emit_not_bool_rax((*nc).code)
-                nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
-                nc_core_mark_int_reg(nc, (*func).instrs[i as usize].dst)
+                nc_core_store_rax_to_temp(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
+                nc_core_mark_int_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
             } else if uop == UnaryOp::OpDeref {
                 // *p of a true reference: load the pointer value, then load from [p].
                 // (Box deref is lowered to IrFieldGet(0) earlier, so this is a raw ref.)
-                nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
+                nc_core_load_temp_to_rax(nc, IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize])
                 nc_emit_load_rax_mem_rax(nc)
-                nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
-                nc_core_mark_int_reg(nc, (*func).instrs[i as usize].dst)
+                nc_core_store_rax_to_temp(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
+                nc_core_mark_int_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
             } else if uop == UnaryOp::OpRef || uop == UnaryOp::OpRefMut {
                 // &x / &!x : address of x's stack slot. Escape safety (returning/leaking a
                 // ref to a frame-local) is enforced by the checker's escape analysis (E091);
                 // the common param-rooted case (&n passed to a fn) is sound.
-                nc_emit_lea_rax_rbp_disp32(nc, ir_slot_offset((*func).instrs[i as usize].src1))
-                nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
-                nc_core_mark_int_reg(nc, (*func).instrs[i as usize].dst)
+                nc_emit_lea_rax_rbp_disp32(nc, ir_slot_offset(IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize]))
+                nc_core_store_rax_to_temp(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
+                nc_core_mark_int_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
             } else {
                 return false
             }
         } else if instr_op == IrOpcode::IrStorePtr {
             // [src1] = src2 : store val through a raw pointer. val -> rbx, ptr -> rax, [rax]=rbx.
-            nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src2)
+            nc_core_load_temp_to_rax(nc, IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize])
             nc_emit_mov_rbx_rax(nc)
-            nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
+            nc_core_load_temp_to_rax(nc, IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize])
             nc_emit_store_rbx_to_mem_rax(nc)
         } else if instr_op == IrOpcode::IrAlloc {
             // field_idx carries the LOGICAL element count for array-literal allocs
             // (set by ir_alloc_array); every other alloc (ir_alloc) leaves it at the
             // -1 default, which we clamp to 0 so non-array objects keep flags = 0.
-            let alloc_elem_count_raw = (*func).instrs[i as usize].field_idx
+            let alloc_elem_count_raw = IR_A_FIELD_IDX[(ir_region_slot_r((*func).region, (i))) as usize]
             let alloc_elem_count = if alloc_elem_count_raw < 0 { 0 } else { alloc_elem_count_raw }
-            if !nc_core_emit_alloc_into(nc, (*func).instrs[i as usize].dst, (*func).instrs[i as usize].imm_i64, alloc_elem_count) {
+            if !nc_core_emit_alloc_into(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize], IR_A_IMM_I64[(ir_region_slot_r((*func).region, (i))) as usize], alloc_elem_count) {
                 return false
             }
         } else if instr_op == IrOpcode::IrCall {
-            let argc = (*func).instrs[i as usize].arg_count
+            let argc = IR_A_ARG_COUNT[(ir_region_slot_r((*func).region, (i))) as usize]
             if !nc_core_push_call_stack_args(nc, func, i, argc) { return false }
             if argc > 0 {
                 if !nc_core_load_call_arg_into(nc, func, i, 0, 7) { return false }
@@ -7699,24 +7807,24 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             }
             let call_pos = (*nc).code.len
             nc_emit_call_rel32_placeholder(nc)
-            nc_add_call_reloc(nc, call_pos + 1, (*func).instrs[i as usize].fn_id)
+            nc_add_call_reloc(nc, call_pos + 1, IR_A_FN_ID[(ir_region_slot_r((*func).region, (i))) as usize])
             let cleanup_bytes = nc_core_stack_call_cleanup_bytes(argc, 6)
             if cleanup_bytes > 0 {
                 nc_emit_add_rsp_imm32(nc, cleanup_bytes)
             }
-            if (*func).instrs[i as usize].dst >= 0 {
-                nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
-                if (*func).instrs[i as usize].imm_flags == IR_FLOAT_REG_MARKER_FLAG {
-                    nc_core_mark_float_reg(nc, (*func).instrs[i as usize].dst)
+            if IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize] >= 0 {
+                nc_core_store_rax_to_temp(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
+                if IR_A_IMM_FLAGS[(ir_region_slot_r((*func).region, (i))) as usize] == IR_FLOAT_REG_MARKER_FLAG {
+                    nc_core_mark_float_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
                 } else {
-                    nc_core_mark_int_reg(nc, (*func).instrs[i as usize].dst)
+                    nc_core_mark_int_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
                 }
             }
         } else if instr_op == IrOpcode::IrCallSret {
-            let argc = (*func).instrs[i as usize].arg_count
-            let dest_reg = (*func).instrs[i as usize].src1
+            let argc = IR_A_ARG_COUNT[(ir_region_slot_r((*func).region, (i))) as usize]
+            let dest_reg = IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize]
             if dest_reg < 0 { return false }
-            let first_arg = (*func).instrs[i as usize].field_idx
+            let first_arg = IR_A_FIELD_IDX[(ir_region_slot_r((*func).region, (i))) as usize]
             if !nc_core_push_sret_stack_args(nc, first_arg, argc) { return false }
             nc_emit_load_rbp_disp32_reg(nc, 7, ir_slot_offset(dest_reg))
             if argc > 0 {
@@ -7737,57 +7845,57 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             }
             let call_pos = (*nc).code.len
             nc_emit_call_rel32_placeholder(nc)
-            nc_add_call_reloc(nc, call_pos + 1, (*func).instrs[i as usize].fn_id)
+            nc_add_call_reloc(nc, call_pos + 1, IR_A_FN_ID[(ir_region_slot_r((*func).region, (i))) as usize])
             let cleanup_bytes = nc_core_stack_call_cleanup_bytes(argc, 5)
             if cleanup_bytes > 0 {
                 nc_emit_add_rsp_imm32(nc, cleanup_bytes)
             }
-            if (*func).instrs[i as usize].dst >= 0 {
-                nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
+            if IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize] >= 0 {
+                nc_core_store_rax_to_temp(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
             }
         } else if instr_op == IrOpcode::IrReturn {
-            nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
+            nc_core_load_temp_to_rax(nc, IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize])
             nc_emit_mov_rsp_rbp(nc)
             nc_emit_pop_rbp(nc)
             nc_emit_ret(nc)
             saw_return = true
         } else if instr_op == IrOpcode::IrReturnSret {
-            nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
+            nc_core_load_temp_to_rax(nc, IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize])
             nc_emit_mov_rsp_rbp(nc)
             nc_emit_pop_rbp(nc)
             nc_emit_ret(nc)
             saw_return = true
         } else if instr_op == IrOpcode::IrLabel {
-            nc_define_label(nc, (*func).instrs[i as usize].label_id)
+            nc_define_label(nc, IR_A_LABEL_ID[(ir_region_slot_r((*func).region, (i))) as usize])
         } else if instr_op == IrOpcode::IrJump {
             let jmp_pos = (*nc).code.len
             nc_emit_jmp_rel32(nc)
-            nc_add_label_patch(nc, jmp_pos + 1, (*func).instrs[i as usize].label_id)
+            nc_add_label_patch(nc, jmp_pos + 1, IR_A_LABEL_ID[(ir_region_slot_r((*func).region, (i))) as usize])
         } else if instr_op == IrOpcode::IrBranchFalse {
-            nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
+            nc_core_load_temp_to_rax(nc, IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize])
             nc_emit_test_rax_rax(nc)
             let jz_pos = (*nc).code.len
             nc_emit_jz_rel32(nc)
-            nc_add_label_patch(nc, jz_pos + 2, (*func).instrs[i as usize].label_id)
+            nc_add_label_patch(nc, jz_pos + 2, IR_A_LABEL_ID[(ir_region_slot_r((*func).region, (i))) as usize])
         } else if instr_op == IrOpcode::IrBranchTrue {
-            nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
+            nc_core_load_temp_to_rax(nc, IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize])
             nc_emit_test_rax_rax(nc)
             let jnz_pos = (*nc).code.len
             nc_emit_jnz_rel32(nc)
-            nc_add_label_patch(nc, jnz_pos + 2, (*func).instrs[i as usize].label_id)
+            nc_add_label_patch(nc, jnz_pos + 2, IR_A_LABEL_ID[(ir_region_slot_r((*func).region, (i))) as usize])
         } else if instr_op == IrOpcode::IrLoadFnRef {
             let lea_pos = (*nc).code.len
             nc_emit_lea_rax_rip_disp32(nc, 0)
-            nc_add_flat_reloc(nc, lea_pos + 3, 4, 1, (*func).instrs[i as usize].fn_id)
-            if (*func).instrs[i as usize].dst >= 0 {
-                nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
+            nc_add_flat_reloc(nc, lea_pos + 3, 4, 1, IR_A_FN_ID[(ir_region_slot_r((*func).region, (i))) as usize])
+            if IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize] >= 0 {
+                nc_core_store_rax_to_temp(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
             }
         } else if instr_op == IrOpcode::IrCallIndirect {
-            let argc = (*func).instrs[i as usize].arg_count
+            let argc = IR_A_ARG_COUNT[(ir_region_slot_r((*func).region, (i))) as usize]
             if argc > 2 {
                 return false
             }
-            let arg_pair = ir_reg_list_first_two((*func).instrs[i as usize].call_args)
+            let arg_pair = (ir_arena_arg_at(ir_region_slot_r((*func).region, (i)), 0), ir_arena_arg_at(ir_region_slot_r((*func).region, (i)), 1))
             if argc > 0 {
                 if arg_pair.0 < 0 { return false }
                 nc_emit_load_rbp_disp32_reg(nc, 7, ir_slot_offset(arg_pair.0))
@@ -7796,117 +7904,117 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
                 if arg_pair.1 < 0 { return false }
                 nc_emit_load_rbp_disp32_reg(nc, 6, ir_slot_offset(arg_pair.1))
             }
-            let fnref_reg = (*func).instrs[i as usize].src1
+            let fnref_reg = IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize]
             if fnref_reg < 0 { return false }
             nc_core_load_temp_to_rax(nc, fnref_reg)
             nc_emit_call_rax(nc)
-            if (*func).instrs[i as usize].dst >= 0 {
-                nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
+            if IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize] >= 0 {
+                nc_core_store_rax_to_temp(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
             }
         } else if instr_op == IrOpcode::IrNop {
             // no-op
         } else if instr_op == IrOpcode::IrWideAdd {
-            let dst_v = (*func).instrs[i as usize].dst
-            let lhs_v = (*func).instrs[i as usize].src1
-            let rhs_v = (*func).instrs[i as usize].src2
-            let limbs = (*func).instrs[i as usize].imm_i64
+            let dst_v = IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize]
+            let lhs_v = IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize]
+            let rhs_v = IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize]
+            let limbs = IR_A_IMM_I64[(ir_region_slot_r((*func).region, (i))) as usize]
             if dst_v < 0 || lhs_v < 0 || rhs_v < 0 || limbs < 1 {
                 return false
             }
             nc_wide_add_into(nc, lhs_v, rhs_v, dst_v, limbs)
         } else if instr_op == IrOpcode::IrWideSub {
-            let dst_v = (*func).instrs[i as usize].dst
-            let lhs_v = (*func).instrs[i as usize].src1
-            let rhs_v = (*func).instrs[i as usize].src2
-            let limbs = (*func).instrs[i as usize].imm_i64
+            let dst_v = IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize]
+            let lhs_v = IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize]
+            let rhs_v = IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize]
+            let limbs = IR_A_IMM_I64[(ir_region_slot_r((*func).region, (i))) as usize]
             if dst_v < 0 || lhs_v < 0 || rhs_v < 0 || limbs < 1 {
                 return false
             }
             nc_wide_sub_into(nc, lhs_v, rhs_v, dst_v, limbs)
         } else if instr_op == IrOpcode::IrWideMul {
-            let dst_v = (*func).instrs[i as usize].dst
-            let lhs_v = (*func).instrs[i as usize].src1
-            let rhs_v = (*func).instrs[i as usize].src2
-            let limbs = (*func).instrs[i as usize].imm_i64
+            let dst_v = IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize]
+            let lhs_v = IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize]
+            let rhs_v = IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize]
+            let limbs = IR_A_IMM_I64[(ir_region_slot_r((*func).region, (i))) as usize]
             if dst_v < 0 || lhs_v < 0 || rhs_v < 0 || limbs < 1 {
                 return false
             }
             nc_wide_mul_into(nc, lhs_v, rhs_v, dst_v, limbs)
         } else if instr_op == IrOpcode::IrWideCmp {
-            let dst_v = (*func).instrs[i as usize].dst
-            let lhs_v = (*func).instrs[i as usize].src1
-            let rhs_v = (*func).instrs[i as usize].src2
-            let limbs = (*func).instrs[i as usize].imm_i64
-            let cmp_op = (*func).instrs[i as usize].field_idx
+            let dst_v = IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize]
+            let lhs_v = IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize]
+            let rhs_v = IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize]
+            let limbs = IR_A_IMM_I64[(ir_region_slot_r((*func).region, (i))) as usize]
+            let cmp_op = IR_A_FIELD_IDX[(ir_region_slot_r((*func).region, (i))) as usize]
             if dst_v < 0 || lhs_v < 0 || rhs_v < 0 || limbs < 1 || limbs > 64 || cmp_op < 0 || cmp_op > 5 {
                 return false
             }
             nc_wide_cmp_into(nc, lhs_v, rhs_v, dst_v, limbs, cmp_op)
         } else if instr_op == IrOpcode::IrWideShrLimb {
-            let dst_v = (*func).instrs[i as usize].dst
-            let src_v = (*func).instrs[i as usize].src1
-            let shift = (*func).instrs[i as usize].src2
-            let limbs = (*func).instrs[i as usize].imm_i64
+            let dst_v = IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize]
+            let src_v = IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize]
+            let shift = IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize]
+            let limbs = IR_A_IMM_I64[(ir_region_slot_r((*func).region, (i))) as usize]
             if dst_v < 0 || src_v < 0 || limbs < 1 || shift < 0 {
                 return false
             }
             nc_wide_shr_limb_into(nc, src_v, dst_v, limbs, shift)
         } else if instr_op == IrOpcode::IrWideShr {
-            let dst_v = (*func).instrs[i as usize].dst
-            let src_v = (*func).instrs[i as usize].src1
-            let shift = (*func).instrs[i as usize].src2
-            let limbs = (*func).instrs[i as usize].imm_i64
+            let dst_v = IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize]
+            let src_v = IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize]
+            let shift = IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize]
+            let limbs = IR_A_IMM_I64[(ir_region_slot_r((*func).region, (i))) as usize]
             if dst_v < 0 || src_v < 0 || limbs < 1 || shift < 0 {
                 return false
             }
             nc_wide_shr_into(nc, src_v, dst_v, limbs, shift)
         } else if instr_op == IrOpcode::IrWideDiv {
-            let dst_v = (*func).instrs[i as usize].dst
-            let lhs_v = (*func).instrs[i as usize].src1
-            let rhs_v = (*func).instrs[i as usize].src2
-            let limbs = (*func).instrs[i as usize].imm_i64
+            let dst_v = IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize]
+            let lhs_v = IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize]
+            let rhs_v = IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize]
+            let limbs = IR_A_IMM_I64[(ir_region_slot_r((*func).region, (i))) as usize]
             if dst_v < 0 || lhs_v < 0 || rhs_v < 0 || limbs < 1 {
                 return false
             }
             nc_wide_div_single_into(nc, lhs_v, rhs_v, dst_v, limbs)
         } else if instr_op == IrOpcode::IrWideMod {
-            let dst_v = (*func).instrs[i as usize].dst
-            let lhs_v = (*func).instrs[i as usize].src1
-            let rhs_v = (*func).instrs[i as usize].src2
-            let limbs = (*func).instrs[i as usize].imm_i64
+            let dst_v = IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize]
+            let lhs_v = IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize]
+            let rhs_v = IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize]
+            let limbs = IR_A_IMM_I64[(ir_region_slot_r((*func).region, (i))) as usize]
             if dst_v < 0 || lhs_v < 0 || rhs_v < 0 || limbs < 1 {
                 return false
             }
             nc_wide_mod_single_into(nc, lhs_v, rhs_v, dst_v, limbs)
         } else if instr_op == IrOpcode::IrWideDivFull {
-            let dst_v = (*func).instrs[i as usize].dst
-            let lhs_v = (*func).instrs[i as usize].src1
-            let rhs_v = (*func).instrs[i as usize].src2
-            let limbs = (*func).instrs[i as usize].imm_i64
+            let dst_v = IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize]
+            let lhs_v = IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize]
+            let rhs_v = IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize]
+            let limbs = IR_A_IMM_I64[(ir_region_slot_r((*func).region, (i))) as usize]
             if dst_v < 0 || lhs_v < 0 || rhs_v < 0 || limbs < 1 {
                 return false
             }
             nc_wide_longdiv_into(nc, lhs_v, rhs_v, dst_v, limbs, 0)
         } else if instr_op == IrOpcode::IrWideModFull {
-            let dst_v = (*func).instrs[i as usize].dst
-            let lhs_v = (*func).instrs[i as usize].src1
-            let rhs_v = (*func).instrs[i as usize].src2
-            let limbs = (*func).instrs[i as usize].imm_i64
+            let dst_v = IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize]
+            let lhs_v = IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize]
+            let rhs_v = IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize]
+            let limbs = IR_A_IMM_I64[(ir_region_slot_r((*func).region, (i))) as usize]
             if dst_v < 0 || lhs_v < 0 || rhs_v < 0 || limbs < 1 {
                 return false
             }
             nc_wide_longdiv_into(nc, lhs_v, rhs_v, dst_v, limbs, 1)
         } else if instr_op == IrOpcode::IrLoadGlobal {
-            let bss_off = (*func).instrs[i as usize].imm_i64
+            let bss_off = IR_A_IMM_I64[(ir_region_slot_r((*func).region, (i))) as usize]
             let abs_addr = BSS_BASE_LINUX + bss_off
             nc_emit_mov_rax_imm(nc, abs_addr)
             nc_emit_load_rax_mem_rax(nc)
-            nc_core_store_rax_to_temp(nc, (*func).instrs[i as usize].dst)
-            nc_core_mark_int_reg(nc, (*func).instrs[i as usize].dst)
+            nc_core_store_rax_to_temp(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
+            nc_core_mark_int_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
         } else if instr_op == IrOpcode::IrStoreGlobal {
-            let bss_off = (*func).instrs[i as usize].imm_i64
+            let bss_off = IR_A_IMM_I64[(ir_region_slot_r((*func).region, (i))) as usize]
             let abs_addr = BSS_BASE_LINUX + bss_off
-            nc_core_load_temp_to_rax(nc, (*func).instrs[i as usize].src1)
+            nc_core_load_temp_to_rax(nc, IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize])
             nc_emit_mov_reg_imm(nc, 3, abs_addr)
             nc_emit_store_rax_mem_rbx_disp32(nc, 0)
         } else {
@@ -8280,16 +8388,16 @@ fn native_v2_fill_sret_main_fn(main_fn: &! IrFunction, plain_call: bool) with Mu
     (*main_fn).name.buf[2] = 105 as i8
     (*main_fn).name.buf[3] = 110 as i8
     (*main_fn).reg_count = 4
-    (*main_fn).instrs[0] = native_v2_ir_alloc(0, 64)
-    (*main_fn).instrs[1] = ir_load_imm(1, 7)
+    ir_arena_store(ir_region_slot_w((*main_fn).region, (0)), native_v2_ir_alloc(0, 64))
+    ir_arena_store(ir_region_slot_w((*main_fn).region, (1)), ir_load_imm(1, 7))
     if plain_call {
-        (*main_fn).instrs[2] = ir_call(2, 1, ir_name_from_bytes(109, 97, 107, 101, 4), Some(Box::new(ir_reg_list_single(0))), 1)
-        (*main_fn).instrs[3] = native_v2_ir_field_get(3, 0, 1, ir_name_from_bytes(102, 49, 0, 0, 2))
+        ir_arena_store(ir_region_slot_w((*main_fn).region, (2)), ir_call(2, 1, ir_name_from_bytes(109, 97, 107, 101, 4), Some(Box::new(ir_reg_list_single(0))), 1))
+        ir_arena_store(ir_region_slot_w((*main_fn).region, (3)), native_v2_ir_field_get(3, 0, 1, ir_name_from_bytes(102, 49, 0, 0, 2)))
     } else {
-        (*main_fn).instrs[2] = native_v2_ir_call_sret(2, 0, ir_name_from_bytes(109, 97, 107, 101, 4), 1, 1, 1)
-        (*main_fn).instrs[3] = native_v2_ir_field_get(3, 2, 1, ir_name_from_bytes(102, 49, 0, 0, 2))
+        ir_arena_store(ir_region_slot_w((*main_fn).region, (2)), native_v2_ir_call_sret(2, 0, ir_name_from_bytes(109, 97, 107, 101, 4), 1, 1, 1))
+        ir_arena_store(ir_region_slot_w((*main_fn).region, (3)), native_v2_ir_field_get(3, 2, 1, ir_name_from_bytes(102, 49, 0, 0, 2)))
     }
-    (*main_fn).instrs[4] = ir_return(3)
+    ir_arena_store(ir_region_slot_w((*main_fn).region, (4)), ir_return(3))
     (*main_fn).instr_count = 5
 }
 
@@ -8304,14 +8412,14 @@ fn native_v2_fill_sret_make_fn(make_fn: &! IrFunction) with Mut, Panic, Div {
     (*make_fn).param_count = 1
     (*make_fn).param_regs[0] = 1
     (*make_fn).reg_count = 6
-    (*make_fn).instrs[0] = native_v2_ir_field_set(0, 0, 1, ir_name_from_bytes(102, 48, 0, 0, 2))
-    (*make_fn).instrs[1] = ir_load_imm(2, 2)
-    (*make_fn).instrs[2] = ir_binop(3, 1, BinaryOp::OpMul, 2)
-    (*make_fn).instrs[3] = native_v2_ir_field_set(0, 1, 3, ir_name_from_bytes(102, 49, 0, 0, 2))
-    (*make_fn).instrs[4] = ir_load_imm(4, 1)
-    (*make_fn).instrs[5] = ir_binop(5, 1, BinaryOp::OpAdd, 4)
-    (*make_fn).instrs[6] = native_v2_ir_field_set(0, 2, 5, ir_name_from_bytes(102, 50, 0, 0, 2))
-    (*make_fn).instrs[7] = native_v2_ir_return_sret(0)
+    ir_arena_store(ir_region_slot_w((*make_fn).region, (0)), native_v2_ir_field_set(0, 0, 1, ir_name_from_bytes(102, 48, 0, 0, 2)))
+    ir_arena_store(ir_region_slot_w((*make_fn).region, (1)), ir_load_imm(2, 2))
+    ir_arena_store(ir_region_slot_w((*make_fn).region, (2)), ir_binop(3, 1, BinaryOp::OpMul, 2))
+    ir_arena_store(ir_region_slot_w((*make_fn).region, (3)), native_v2_ir_field_set(0, 1, 3, ir_name_from_bytes(102, 49, 0, 0, 2)))
+    ir_arena_store(ir_region_slot_w((*make_fn).region, (4)), ir_load_imm(4, 1))
+    ir_arena_store(ir_region_slot_w((*make_fn).region, (5)), ir_binop(5, 1, BinaryOp::OpAdd, 4))
+    ir_arena_store(ir_region_slot_w((*make_fn).region, (6)), native_v2_ir_field_set(0, 2, 5, ir_name_from_bytes(102, 50, 0, 0, 2)))
+    ir_arena_store(ir_region_slot_w((*make_fn).region, (7)), native_v2_ir_return_sret(0))
     (*make_fn).instr_count = 8
 }
 
@@ -9626,7 +9734,7 @@ fn emit_global_var_inits_into(nc: &! NativeCompiler, module: &IrModule) with Mut
                 // Prefer this over rep-stos fill even when bss_size is multi-word.
                 var ei: i64 = 0
                 while ei < func.instr_count {
-                    let word = func.instrs[ei as usize].imm_i64
+                    let word = IR_A_IMM_I64[(ir_region_slot_r(func.region, (ei))) as usize]
                     let addr = abs_addr + ei * elem
                     nc_emit_mov_rax_imm(nc, word)
                     nc_emit_mov_reg_imm(nc, 3, addr)
@@ -10757,7 +10865,8 @@ fn native_v2_trace_module_ir_ref(module: &IrModule) with IO, Mut, Panic, Div {
         print("\n")
         var ii: i64 = 0
         while ii < func.instr_count && ii < IR_MAX_INSTRS {
-            native_v2_trace_instr_ref(fi, ii, &func.instrs[ii as usize])
+            let traced_instr = ir_arena_load(ir_region_slot_r(func.region, (ii)))
+            native_v2_trace_instr_ref(fi, ii, &traced_instr)
             ii = ii + 1
         }
         fi = fi + 1
@@ -10830,6 +10939,13 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
         }
         __arena_reset(cg_arena_mark)
         fi = fi + 1
+    }
+    // #1649: report an arena contract breach BEFORE the unsupported-opcode
+    // bailout. A violated handle makes instructions read back as nops, which
+    // presents as "unsupported opcode" -- the rc=12 path returning first meant
+    // the real cause was latched and never printed.
+    if ir_arena_report_violation() {
+        return 22
     }
     if !compile_ok {
         return 12
