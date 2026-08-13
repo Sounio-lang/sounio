@@ -20959,4 +20959,1380 @@ theorem t1_route_mid (m a W : Nat) (ha : a < 2^(m+1)) (hW : W < 2^(m+1)) (hW0 : 
         sumLtI_single (2^(m+1)) 0 _ hp]
   rw [s2, s3, s4, s5, s6, s7, s8]
 
+
+
+
+/-! ## Tier 140 — the DEFECT RULE at the reference label `W = 1` (kimi, E5 lane)
+
+    The defect product `Dref a b m = P3 a b 1 m * P3 0 a 1 m * P3 0 b 1 m` (measured
+    `≠ 1` exactly on the defect set `D_m` of `.tmp/e5_swarm/DEFECT-RULE.md`) obeys an exact
+    LEVEL RECURSION, proved here in all four quadrants:
+
+    | quadrant | law |
+    |---|---|
+    | lo-lo   | `Dref_lo`     : `Dref a b (m+1) = Dref a b m` |
+    | hi-hi   | `Dref_hi`     : `Dref (a+H) (b+H) (m+1) = Dref a b m` (ALL `a,b ∈ [1,H)`) |
+    | lo-hi   | `Dref_mixed`  : closed form in level-`(k+1)` `cdSigma`s |
+    | hi-lo   | `Dref_mixed_mirror` |
+
+    The load-bearing entry identity (measured in `.tmp/e5_swarm/DEFECT_RECURSION.md`,
+    argument ORDER matters — the symmetric variant fails 150/900 at `m = 3`):
+
+      `P3 a (b + 2^(k+1)) 1 (k+1) = cdSigma (b^1) a (k+1) * cdSigma b (a^1) (k+1)`
+
+    proved as `P3_ref_mixed` by peeling the two `hi`-arguments with `R_lu`/`R_ul`
+    (two minus signs, which cancel).
+
+    All identities measured first (`.tmp/tier140_probe.py`, `.tmp/tier140_probe2.py`,
+    `.tmp/tier140_probe3.py`): 0 failures at `m = 0..4` for every theorem below,
+    including the corner cases `a = 1`, `b = a^1`, `b = 0`.
+
+    Duplicated private lemmas from the main file are suffixed `'`: `xor_lo_hi`,
+    `P3_ref_row0_red`. -/
+
+/-- **(i) THE MIXED-BLOCK IDENTITY.**  `P3` across the half-seam at the reference label
+    factors into two level-`(k+1)` cocycle values — the argument ORDER is the measured one
+    (`cd(b^1, a) · cd(b, a^1)`; the symmetric variant is false).  Two `R_ul` peelings
+    contribute the two minus signs that cancel. -/
+theorem P3_ref_mixed (k a b : Nat) (ha : a < 2^(k+1)) (ha0 : a ≠ 0) (hb : b < 2^(k+1)) :
+    P3 a (b + 2^(k+1)) 1 (k+1) = cdSigma (b^^^1) a (k+1) * cdSigma b (a^^^1) (k+1) := by
+  have h1 : (1:Nat) < 2^(k+1) := by have := Nat.two_pow_pos (k+1); omega
+  have h2 : (2:Nat)^(k+1+1) = 2^(k+1) + 2^(k+1) := by rw [Nat.pow_succ]; omega
+  have ha1 : a ^^^ 1 < 2^(k+1) := Nat.xor_lt_two_pow ha h1
+  have hb1 : b ^^^ 1 < 2^(k+1) := Nat.xor_lt_two_pow hb h1
+  have hbH : (b + 2^(k+1)) ^^^ 1 = (b ^^^ 1) + 2^(k+1) := by
+    rw [Nat.xor_comm (b + 2^(k+1)) 1, xor_lo_hi (k+1) 1 b (by omega) h1 hb, Nat.xor_comm 1 b]
+  have hbH0 : b + 2^(k+1) ≠ 0 := by have := Nat.two_pow_pos (k+1); omega
+  unfold P3 hi
+  rw [hbH,
+      R_lu a ((b^^^1) + 2^(k+1)) (k+1) (by omega) (by omega),
+      R_ul (b^^^1) a k hb1 ha, if_neg ha0,
+      R_ul (a^^^1) (b + 2^(k+1)) (k+1) (by omega) (by omega), if_neg hbH0,
+      R_lu (a^^^1) b k ha1 hb]
+  rcases cdSigma_pm (k+1) (b^^^1) a with hX | hX <;>
+    rcases cdSigma_pm (k+1) b (a^^^1) with hY | hY <;>
+    rw [hX, hY] <;> decide
+
+/-- The mirror of (i): `P3` with the FIRST index across the half-seam. -/
+theorem P3_ref_mixed_mirror (k a b : Nat) (ha : a < 2^(k+1)) (hb : b < 2^(k+1)) (hb0 : b ≠ 0) :
+    P3 (a + 2^(k+1)) b 1 (k+1) = cdSigma (a^^^1) b (k+1) * cdSigma a (b^^^1) (k+1) := by
+  have h1 : (1:Nat) < 2^(k+1) := by have := Nat.two_pow_pos (k+1); omega
+  have h2 : (2:Nat)^(k+1+1) = 2^(k+1) + 2^(k+1) := by rw [Nat.pow_succ]; omega
+  have haH0 : a + 2^(k+1) ≠ 0 := by have := Nat.two_pow_pos (k+1); omega
+  rw [P3_symm (a + 2^(k+1)) b 1 (k+1) (by omega) (by omega) (by omega) haH0 hb0,
+      P3_ref_mixed k b a hb hb0 ha]
+
+/-- **(ii), LO HALF.**  The lo/lo embedding law at the reference label — the `W = 1`
+    special case of Tier 66's `P3_level_stable`. -/
+theorem P3_ref_embed (m a b : Nat) (ha : a < 2^(m+1)) (hb : b < 2^(m+1)) :
+    P3 a b 1 (m+1) = P3 a b 1 m :=
+  P3_level_stable m a b 1 ha hb (by have := Nat.two_pow_pos (m+1); omega)
+
+/-- **(ii), HI HALF (bulk).**  The translate law at the reference label, for both indices
+    `≥ 2`.  At `W = 1` the coset-line case `b = a^1` does NOT need `antisym`: both sides
+    collapse to `-1` by `sigma_self`.  (Measured: the only failures of the raw translate law
+    inside `[1, 2^(m+1))²` are at exactly one of `a, b` equal to `1` — see
+    `P3_ref_translate_one`.) -/
+theorem P3_ref_translate (m a b : Nat) (ha : a < 2^(m+1)) (hb : b < 2^(m+1))
+    (ha2 : 2 ≤ a) (hb2 : 2 ≤ b) :
+    P3 (a + 2^(m+1)) (b + 2^(m+1)) 1 (m+1) = P3 a b 1 m := by
+  have h1 : (1:Nat) < 2^(m+1) := by have := Nat.two_pow_pos (m+1); omega
+  have h2 : (2:Nat)^(m+1+1) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  have ha1 : a ^^^ 1 < 2^(m+1) := Nat.xor_lt_two_pow ha h1
+  have hb1 : b ^^^ 1 < 2^(m+1) := Nat.xor_lt_two_pow hb h1
+  have ha10 : a ^^^ 1 ≠ 0 := fun h => by have := xor_zero_eq a 1 h; omega
+  have hb10 : b ^^^ 1 ≠ 0 := fun h => by have := xor_zero_eq b 1 h; omega
+  have haH : (a + 2^(m+1)) ^^^ 1 = (a ^^^ 1) + 2^(m+1) := by
+    rw [Nat.xor_comm (a + 2^(m+1)) 1, xor_lo_hi (m+1) 1 a (by omega) h1 ha, Nat.xor_comm 1 a]
+  have hbH : (b + 2^(m+1)) ^^^ 1 = (b ^^^ 1) + 2^(m+1) := by
+    rw [Nat.xor_comm (b + 2^(m+1)) 1, xor_lo_hi (m+1) 1 b (by omega) h1 hb, Nat.xor_comm 1 b]
+  have hbH0 : b + 2^(m+1) ≠ 0 := by have := Nat.two_pow_pos (m+1); omega
+  rw [P3_red a b 1 m ha hb h1 (by omega)]
+  unfold P3 hi
+  rw [haH, hbH,
+      R_lu (a + 2^(m+1)) ((b^^^1) + 2^(m+1)) (m+1) (by omega) (by omega),
+      R_uu (b^^^1) a m hb1 ha, if_neg (by omega),
+      R_ul ((a^^^1) + 2^(m+1)) (b + 2^(m+1)) (m+1) (by omega) (by omega), if_neg hbH0,
+      R_uu (a^^^1) b m ha1 hb, if_neg (by omega)]
+  by_cases hcos : b = a ^^^ 1
+  · -- the coset line: both sides collapse to `-1` via `sigma_self` (no `antisym` needed)
+    rw [hcos]
+    have haa : (a^^^1)^^^1 = a := by rw [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+    rw [haa, sigma_self (m+1) a ha (by omega), sigma_self (m+1) (a^^^1) ha1 ha10]
+    decide
+  · have hne1 : (b^^^1) ≠ a := by
+      intro h
+      apply hcos
+      have h2 : (b^^^1)^^^1 = a^^^1 := congrArg (· ^^^ 1) h
+      rw [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero] at h2
+      exact h2
+    have hanti1 := antisym (m+1) (b^^^1) a hb1 ha hb10 (by omega) hne1
+    have hanti2 := antisym (m+1) (a^^^1) b ha1 hb ha10 (by omega) (Ne.symm hcos)
+    rw [hanti1, hanti2]
+    rcases cdSigma_pm (m+1) a (b^^^1) with hX | hX <;>
+      rcases cdSigma_pm (m+1) b (a^^^1) with hY | hY <;>
+      rw [hX, hY] <;> decide
+
+/-- **(ii), HI HALF (border).**  Lifting `(1, b)` over the seam at the reference label
+    FLIPS the sign — exactly the failure locus of the raw translate law, and exactly what
+    Tier 138's `+2` correction in `P3_ref_row0_step_hi` absorbs in `Dref_hi`. -/
+theorem P3_ref_translate_one (m b : Nat) (hb : b < 2^(m+1)) (hb2 : 2 ≤ b) :
+    P3 (1 + 2^(m+1)) (b + 2^(m+1)) 1 (m+1) = - P3 1 b 1 m := by
+  have h1 : (1:Nat) < 2^(m+1) := by have := Nat.two_pow_pos (m+1); omega
+  have h2 : (2:Nat)^(m+1+1) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  have hb1 : b ^^^ 1 < 2^(m+1) := Nat.xor_lt_two_pow hb h1
+  have hb10 : b ^^^ 1 ≠ 0 := fun h => by have := xor_zero_eq b 1 h; omega
+  have hbH : (b + 2^(m+1)) ^^^ 1 = (b ^^^ 1) + 2^(m+1) := by
+    rw [Nat.xor_comm (b + 2^(m+1)) 1, xor_lo_hi (m+1) 1 b (by omega) h1 hb, Nat.xor_comm 1 b]
+  have h1H : (1 + 2^(m+1)) ^^^ 1 = 0 + 2^(m+1) := by
+    rw [Nat.xor_comm (1 + 2^(m+1)) 1, xor_lo_hi (m+1) 1 1 (by omega) h1 h1, Nat.xor_self]
+  have hbH0 : b + 2^(m+1) ≠ 0 := by have := Nat.two_pow_pos (m+1); omega
+  rw [P3_red 1 b 1 m h1 hb h1 (by omega), Nat.xor_self, cdSig0]
+  unfold P3 hi
+  rw [hbH, h1H,
+      R_lu (1 + 2^(m+1)) ((b^^^1) + 2^(m+1)) (m+1) (by omega) (by omega),
+      R_uu (b^^^1) 1 m hb1 h1, if_neg (by decide),
+      R_ul (0 + 2^(m+1)) (b + 2^(m+1)) (m+1) (by omega) (by omega), if_neg hbH0,
+      R_uu 0 b m (Nat.two_pow_pos (m+1)) hb, if_neg (by omega), cdSig0']
+  have hne1 : (b^^^1) ≠ 1 := by
+    intro h
+    have h2 : (b^^^1)^^^1 = 1^^^1 := congrArg (· ^^^ 1) h
+    rw [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero] at h2
+    omega
+  have hanti := antisym (m+1) (b^^^1) 1 hb1 h1 hb10 (by decide) hne1
+  rw [hanti]
+  rcases cdSigma_pm (m+1) 1 (b^^^1) with hX | hX <;> rw [hX] <;> decide
+
+/-- **The defect product at the reference label** (measured `= -1` exactly on the defect
+    set `D_m`). -/
+def Dref (a b m : Nat) : Int := P3 a b 1 m * P3 0 a 1 m * P3 0 b 1 m
+
+theorem Dref_pm (a b m : Nat) : Dref a b m = 1 ∨ Dref a b m = -1 := by
+  unfold Dref
+  rcases P3_pm a b 1 m with h1 | h1 <;> rcases P3_pm 0 a 1 m with h2 | h2 <;>
+    rcases P3_pm 0 b 1 m with h3 | h3 <;> rw [h1, h2, h3] <;> decide
+
+/-- **(iii), LO-LO QUADRANT.**  The defect product is level-stable below the seam. -/
+theorem Dref_lo (m a b : Nat) (ha : a < 2^(m+1)) (hb : b < 2^(m+1)) :
+    Dref a b (m+1) = Dref a b m := by
+  have h1 : (1:Nat) < 2^(m+1) := by have := Nat.two_pow_pos (m+1); omega
+  unfold Dref
+  rw [P3_level_stable m a b 1 ha hb h1,
+      P3_level_stable m 0 a 1 (Nat.two_pow_pos (m+1)) ha h1,
+      P3_level_stable m 0 b 1 (Nat.two_pow_pos (m+1)) hb h1]
+
+/-- **(iii), HI-HI QUADRANT.**  The defect product is translate-invariant across the seam
+    for ALL nonzero low indices — including the border `a = 1` / `b = 1`, where the raw
+    `P3` translate law fails but Tier 138's `+2` correction absorbs the flip.
+    (Measured: 0 failures at `m = 1..4`, all `a, b ∈ [1, 2^(m+1))`.) -/
+theorem Dref_hi (m a b : Nat) (ha : a < 2^(m+1)) (hb : b < 2^(m+1))
+    (ha0 : a ≠ 0) (hb0 : b ≠ 0) :
+    Dref (a + 2^(m+1)) (b + 2^(m+1)) (m+1) = Dref a b m := by
+  have h1 : (1:Nat) < 2^(m+1) := by have := Nat.two_pow_pos (m+1); omega
+  have h2 : (2:Nat)^(m+1+1) = 2^(m+1) + 2^(m+1) := by rw [Nat.pow_succ]; omega
+  have h1m2 : (1:Nat) < 2^(m+1+1) := by omega
+  unfold Dref
+  rw [P3_ref_row0_step_hi m a ha, P3_ref_row0_step_hi m b hb]
+  by_cases ha1 : a = 1
+  · rw [if_pos ha1]
+    by_cases hb1 : b = 1
+    · rw [if_pos hb1]
+      subst ha1; subst hb1
+      rw [P3_diag (1 + 2^(m+1)) 1 (m+1) (by omega) h1m2 (by omega),
+          P3_diag 1 1 m h1 h1 (by decide), P3_ref_row0_one m]
+      decide
+    · rw [if_neg hb1]
+      subst ha1
+      rw [P3_ref_translate_one m b hb (by omega), P3_ref_row0_one m]
+      rcases P3_pm 1 b 1 m with hp | hp <;> rcases P3_pm 0 b 1 m with hs | hs <;>
+        rw [hp, hs] <;> decide
+  · rw [if_neg ha1]
+    by_cases hb1 : b = 1
+    · rw [if_pos hb1]
+      subst hb1
+      rw [P3_symm (a + 2^(m+1)) (1 + 2^(m+1)) 1 (m+1) (by omega) (by omega) h1m2
+            (by omega) (by omega),
+          P3_ref_translate_one m a ha (by omega),
+          P3_symm 1 a 1 m h1 ha h1 (by decide) ha0,
+          P3_ref_row0_one m]
+      rcases P3_pm a 1 1 m with hp | hp <;> rcases P3_pm 0 a 1 m with hs | hs <;>
+        rw [hp, hs] <;> decide
+    · rw [if_neg hb1]
+      rw [P3_ref_translate m a b ha hb (by omega) (by omega)]
+      rcases P3_pm a b 1 m with hp | hp <;> rcases P3_pm 0 a 1 m with hs | hs <;>
+        rcases P3_pm 0 b 1 m with ht | ht <;> rw [hp, hs, ht] <;> decide
+
+/-- **(iii), LO-HI (MIXED) QUADRANT.**  The defect product across the half-seam in closed
+    form: four level-`(k+1)` cocycle values.  (Measured: 0 failures at `m = 1..4`,
+    all `a ∈ [1, 2^(k+1))`, `b ∈ [0, 2^(k+1))` — note `b = 0` is allowed.) -/
+theorem Dref_mixed (k a b : Nat) (ha : a < 2^(k+1)) (ha0 : a ≠ 0) (hb : b < 2^(k+1)) :
+    Dref a (b + 2^(k+1)) (k+1)
+      = cdSigma (b^^^1) a (k+1) * cdSigma b (a^^^1) (k+1) * cdSigma 1 a (k+1) * cdSigma b 1 (k+1) := by
+  have h1 : (1:Nat) < 2^(k+1) := by have := Nat.two_pow_pos (k+1); omega
+  have h2 : (2:Nat)^(k+1+1) = 2^(k+1) + 2^(k+1) := by rw [Nat.pow_succ]; omega
+  have hbH0 : b + 2^(k+1) ≠ 0 := by have := Nat.two_pow_pos (k+1); omega
+  unfold Dref
+  rw [P3_ref_mixed k a b ha ha0 hb,
+      P3_ref_row0_red (k+1) a (by omega) ha0,
+      P3_ref_row0_red (k+1) (b + 2^(k+1)) (by omega) hbH0,
+      R_ll 1 a k h1 ha,
+      R_lu 1 b k h1 hb]
+  rcases cdSigma_pm (k+1) (b^^^1) a with hA | hA <;>
+    rcases cdSigma_pm (k+1) b (a^^^1) with hB | hB <;>
+    rcases cdSigma_pm (k+1) 1 a with hC | hC <;>
+    rcases cdSigma_pm (k+1) b 1 with hD | hD <;>
+    rw [hA, hB, hC, hD] <;> decide
+
+/-- **(iii), HI-LO (MIXED) QUADRANT, mirror.** -/
+theorem Dref_mixed_mirror (k a b : Nat) (ha : a < 2^(k+1)) (hb : b < 2^(k+1)) (hb0 : b ≠ 0) :
+    Dref (a + 2^(k+1)) b (k+1)
+      = cdSigma (a^^^1) b (k+1) * cdSigma a (b^^^1) (k+1) * cdSigma a 1 (k+1) * cdSigma 1 b (k+1) := by
+  have h1 : (1:Nat) < 2^(k+1) := by have := Nat.two_pow_pos (k+1); omega
+  have h2 : (2:Nat)^(k+1+1) = 2^(k+1) + 2^(k+1) := by rw [Nat.pow_succ]; omega
+  have haH0 : a + 2^(k+1) ≠ 0 := by have := Nat.two_pow_pos (k+1); omega
+  unfold Dref
+  rw [P3_ref_mixed_mirror k a b ha hb hb0,
+      P3_ref_row0_red (k+1) (a + 2^(k+1)) (by omega) haH0,
+      P3_ref_row0_red (k+1) b (by omega) hb0,
+      R_lu 1 a k h1 ha,
+      R_ll 1 b k h1 hb]
+  rcases cdSigma_pm (k+1) (a^^^1) b with hA | hA <;>
+    rcases cdSigma_pm (k+1) a (b^^^1) with hB | hB <;>
+    rcases cdSigma_pm (k+1) a 1 with hC | hC <;>
+    rcases cdSigma_pm (k+1) 1 b with hD | hD <;>
+    rw [hA, hB, hC, hD] <;> decide
+
+
+
+
+
+/-! ### Tier 142 — the predicted trace: `tr(P³) = H³ − 12H² + 28H − 16` at `W = 1`
+
+    The E5 reference side's *entry-law matrix* `P`: explicit (no defect rule) —
+    `P(0,0) = 1`, row `0` is `s_b`, column `0` is `−s_a`, the nonzero diagonal is `−1`,
+    and off it `P(a,b) = s_a·s_b`, where `s_x = P3(0,x,1,m)` is Tier 138's sign vector
+    (`(−1)^popcount(x)` except `s_1 = +1`).  Measured first with
+    `scripts/research/zd_e5_reference_anatomy_probe.py`'s `P`: `tr(P³) = 1456` at `m = 3`,
+    `21360` at `m = 4`, `0/−32/−48` at `m = 0/1/2` — always `H³ − 12H² + 28H − 16`,
+    `H = 2^(m+1)`.  The proof ports Tier 136's six-piece architecture: the entire
+    computation uses only `s_x² = 1` and `s_0 = 1`, so the polynomial is independent of
+    the sign vector's actual values.  Helper lemmas duplicated from the main file's
+    private Tier-136 helpers are re-proved here for `refP` directly. -/
+
+/-- The reference-side sign vector `s_x = P3(0,x,1,m)`. -/
+private def rs (m x : Nat) : Int := P3 0 x 1 m
+
+/-- **The entry-law matrix at the reference `W = 1`** — explicit, no defect rule. -/
+private def refP (m a b : Nat) : Int :=
+  if a = 0 then (if b = 0 then 1 else rs m b)
+  else if b = 0 then -rs m a
+  else if b = a then -1
+  else rs m a * rs m b
+
+private theorem rs_sq (m x : Nat) : rs m x * rs m x = 1 := by
+  have h : rs m x = 1 ∨ rs m x = -1 := P3_pm 0 x 1 m
+  rcases h with h | h <;> rw [h] <;> grind
+
+private theorem rs_zero (m : Nat) : rs m 0 = 1 := P3_zero_zero m 1
+
+/-- Row `0` of `refP` is the sign vector. -/
+private theorem refP_row0 (m b : Nat) : refP m 0 b = rs m b := by
+  unfold refP
+  rw [if_pos rfl]
+  by_cases hb0 : b = 0
+  · subst hb0
+    rw [if_pos rfl, rs_zero]
+  · rw [if_neg hb0]
+
+/-- **Entry law, first factor.**  For `a ≠ 0`:
+`P(a,b) = s_a·s_b − 2[b=a] − 2·s_a·[b=0]`. -/
+private theorem refP_fst (m a b : Nat) (ha0 : a ≠ 0) :
+    refP m a b = rs m a * rs m b - 2 * (if b = a then (1:Int) else 0)
+      - 2 * rs m a * (if b = 0 then (1:Int) else 0) := by
+  unfold refP
+  rw [if_neg ha0]
+  by_cases hb0 : b = 0
+  · subst hb0
+    rw [if_pos rfl, if_neg (fun h : (0:Nat) = a => ha0 h.symm), rs_zero]
+    grind
+  · by_cases hba : b = a
+    · subst hba
+      rw [if_neg hb0, if_pos rfl]
+      have h := rs_sq m b
+      grind
+    · rw [if_neg hb0, if_neg hba]
+      grind
+
+/-- **Entry law, second factor.**  For `a ≠ 0`, every `c`: `P(c,a) = s_c·s_a − 2[c=a]`. -/
+private theorem refP_snd (m c a : Nat) (ha0 : a ≠ 0) :
+    refP m c a = rs m c * rs m a - 2 * (if c = a then (1:Int) else 0) := by
+  unfold refP
+  by_cases hc0 : c = 0
+  · subst hc0
+    rw [if_pos rfl, if_neg ha0, if_neg (fun h : (0:Nat) = a => ha0 h.symm), rs_zero]
+    grind
+  · rw [if_neg hc0, if_neg ha0]
+    by_cases hca : c = a
+    · subst hca
+      rw [if_pos rfl]
+      have h := rs_sq m c
+      grind
+    · rw [if_neg (fun h : a = c => hca h.symm), if_neg hca]
+      grind
+
+/-- Column `0` of `refP`: `1` at the origin, `−s` off it. -/
+private theorem refP_col0 (m c : Nat) :
+    refP m c 0 = if c = 0 then (1:Int) else -rs m c := by
+  unfold refP
+  by_cases hc0 : c = 0
+  · subst hc0
+    repeat rw [if_pos rfl]
+  · rw [if_neg hc0, if_pos rfl, if_neg hc0]
+
+/-- The row sum `Σ_c P(a,c)·s_c = s_a·(H−4)` for `a ≠ 0`. -/
+private theorem refS_row (m a : Nat) (ha : a < 2^(m+1)) (ha0 : a ≠ 0) :
+    sumLtI (2^(m+1)) (fun c => refP m a c * rs m c)
+      = rs m a * (((2^(m+1) : Nat) : Int) - 4) := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hpt : ∀ c, c < 2^(m+1) →
+      refP m a c * rs m c
+      = rs m a
+        + (if c = a then -2 * rs m a else 0)
+        + (if c = 0 then -2 * rs m a else 0) := by
+    intro c hc
+    rw [refP_fst m a c ha0]
+    have hsc := rs_sq m c
+    by_cases hca : c = a
+    · subst hca
+      rw [if_pos rfl, if_neg ha0]
+      grind
+    · by_cases hc0 : c = 0
+      · subst hc0
+        rw [if_neg (fun h : (0:Nat) = a => ha0 h.symm), if_pos rfl, rs_zero]
+        grind
+      · rw [if_neg hca, if_neg hc0]
+        grind
+  rw [sumLtI_congr _ _ _ hpt, sumLtI_add, sumLtI_add]
+  have hconst : sumLtI (2^(m+1)) (fun _ => rs m a)
+      = rs m a * ((2^(m+1) : Nat) : Int) := by
+    rw [sumLtI_congr _ _ (fun c => rs m a * (1:Int)) (fun c _ => by grind),
+        sumLtI_mul, sumLtI_one]
+  rw [hconst, sumLtI_single (2^(m+1)) a _ ha, sumLtI_single (2^(m+1)) 0 _ hp]
+  grind
+
+/-- The `b = 0` row sum: every `c` contributes `s_c² = 1`. -/
+private theorem refJ0 (m : Nat) :
+    sumLtI (2^(m+1)) (fun c => rs m c * rs m c) = ((2^(m+1) : Nat) : Int) := by
+  rw [sumLtI_congr _ _ (fun _ => (1:Int)) (fun c _ => rs_sq m c), sumLtI_one]
+
+/-- The row sum `R_b = Σ_c P(b,c)·s_c` evaluated: `H` at `b = 0`, `s_b·(H−4)` off it. -/
+private theorem refRval (m b : Nat) (hb : b < 2^(m+1)) :
+    sumLtI (2^(m+1)) (fun c => refP m b c * rs m c)
+      = if b = 0 then ((2^(m+1) : Nat) : Int)
+        else rs m b * (((2^(m+1) : Nat) : Int) - 4) := by
+  by_cases hb0 : b = 0
+  · subst hb0
+    rw [if_pos rfl,
+        sumLtI_congr _ _ (fun c => rs m c * rs m c) (fun c _ => by rw [refP_row0]),
+        refJ0]
+  · rw [if_neg hb0, refS_row m b hb hb0]
+
+/-- `Σ_b P(a,b)·R_b = s_a·(H²−8H+12)` for `a ≠ 0`: the `(H−2)²` main term, minus the
+`b = a` pin, minus the `b = 0` pin. -/
+private theorem refA1_inner (m a : Nat) (ha : a < 2^(m+1)) (ha0 : a ≠ 0) :
+    sumLtI (2^(m+1)) (fun b => refP m a b
+        * sumLtI (2^(m+1)) (fun c => refP m b c * rs m c))
+      = rs m a * ((((2^(m+1) : Nat) : Int)) * (((2^(m+1) : Nat) : Int))
+          - 8 * ((2^(m+1) : Nat) : Int) + 12) := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  rw [sumLtI_congr _ _ _ (fun b hb => congrArg (refP m a b * ·) (refRval m b hb))]
+  have hpt : ∀ b, b < 2^(m+1) →
+      refP m a b
+        * (if b = 0 then ((2^(m+1) : Nat) : Int)
+          else rs m b * (((2^(m+1) : Nat) : Int) - 4))
+      = rs m a * (((2^(m+1) : Nat) : Int) - 4)
+        + (if b = 0 then
+            rs m a * (4 - 2 * ((2^(m+1) : Nat) : Int)) else 0)
+        + (if b = a then
+            -2 * (rs m a * (((2^(m+1) : Nat) : Int) - 4)) else 0) := by
+    intro b hb
+    rw [refP_fst m a b ha0]
+    have hsqa := rs_sq m a
+    have hsqb := rs_sq m b
+    have hz := rs_zero m
+    by_cases hb0 : b = 0
+    · subst hb0
+      rw [if_pos rfl, if_neg (fun h : (0:Nat) = a => ha0 h.symm)]
+      grind
+    · by_cases hba : b = a
+      · subst hba
+        rw [if_neg ha0, if_pos rfl]
+        grind
+      · rw [if_neg hb0, if_neg hba]
+        grind
+  rw [sumLtI_congr _ _ _ hpt, sumLtI_add, sumLtI_add]
+  have hconst : sumLtI (2^(m+1)) (fun _ =>
+        rs m a * (((2^(m+1) : Nat) : Int) - 4))
+      = rs m a * (((2^(m+1) : Nat) : Int) - 4)
+        * ((2^(m+1) : Nat) : Int) := by
+    rw [sumLtI_congr _ _
+          (fun b => (rs m a * (((2^(m+1) : Nat) : Int) - 4)) * (1:Int))
+          (fun b _ => by grind),
+        sumLtI_mul, sumLtI_one]
+  rw [hconst, sumLtI_single (2^(m+1)) 0 _ hp, sumLtI_single (2^(m+1)) a _ ha]
+  grind
+
+/-- `Σ_b P(a,b)·P(b,a) = H − 2` for `a ≠ 0`: `+1` everywhere, `−1` at `b = 0`. -/
+private theorem refA2_inner (m a : Nat) (ha : a < 2^(m+1)) (ha0 : a ≠ 0) :
+    sumLtI (2^(m+1)) (fun b => refP m a b * refP m b a)
+      = ((2^(m+1) : Nat) : Int) - 2 := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hpt : ∀ b, b < 2^(m+1) →
+      refP m a b * refP m b a
+      = 1 + (if b = a then 4 - 4 * (rs m a * rs m b) else 0)
+        + (if b = 0 then -2 else 0) := by
+    intro b hb
+    rw [refP_fst m a b ha0, refP_snd m b a ha0]
+    have hsqa := rs_sq m a
+    have hsqb := rs_sq m b
+    have hz := rs_zero m
+    by_cases hb0 : b = 0
+    · subst hb0
+      rw [if_neg (fun h : (0:Nat) = a => ha0 h.symm), if_pos rfl]
+      grind
+    · by_cases hba : b = a
+      · subst hba
+        rw [if_neg ha0, if_pos rfl]
+        grind
+      · rw [if_neg hb0, if_neg hba]
+        grind
+  rw [sumLtI_congr _ _ _ hpt, sumLtI_add, sumLtI_add]
+  rw [sumLtI_one]
+  have hmid : sumLtI (2^(m+1)) (fun b =>
+        if b = a then 4 - 4 * (rs m a * rs m b) else 0)
+      = sumLtI (2^(m+1)) (fun b =>
+          if b = a then 4 - 4 * (rs m a * rs m a) else 0) :=
+    sumLtI_congr _ _ _ (fun b _ => by
+      by_cases h : b = a
+      · rw [if_pos h, if_pos h, h]
+      · rw [if_neg h, if_neg h])
+  rw [hmid, sumLtI_single (2^(m+1)) a _ ha, sumLtI_single (2^(m+1)) 0 _ hp]
+  have hsqa := rs_sq m a
+  grind
+
+/-- **THE DIAGONAL OF `P³` OFF INDEX `0`.**  For `a ≠ 0`, `(P³)_aa = (H−2)² − 6H + 12` —
+the same constant as Tier 136's seam diagonal: the value depends only on `s_x² = 1`. -/
+private theorem refK (m a : Nat) (ha : a < 2^(m+1)) (ha0 : a ≠ 0) :
+    sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+        refP m a b * (refP m b c * refP m c a)))
+      = (((2^(m+1) : Nat) : Int) - 2) * (((2^(m+1) : Nat) : Int) - 2)
+        - 6 * ((2^(m+1) : Nat) : Int) + 12 := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hsqa := rs_sq m a
+  -- split off the second entry law: P(c,a) = s_c·s_a − 2[c=a]
+  have hsplit : sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+        refP m a b * (refP m b c * refP m c a)))
+      = sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+            refP m a b * (refP m b c * (rs m c * rs m a))))
+        - sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+            (if c = a then 2 * (refP m a b * refP m b c) else 0))) := by
+    have hpt : ∀ b, b < 2^(m+1) → ∀ c, c < 2^(m+1) →
+        refP m a b * (refP m b c * refP m c a)
+        = refP m a b * (refP m b c * (rs m c * rs m a))
+          - (if c = a then 2 * (refP m a b * refP m b c) else 0) := by
+      intro b hb c hc
+      rw [refP_snd m c a ha0]
+      grind
+    rw [sumLtI_congr _ _ _ (fun b hb => sumLtI_congr _ _ _ (hpt b hb))]
+    have hnest : ∀ b, b < 2^(m+1) →
+        sumLtI (2^(m+1)) (fun c =>
+            refP m a b * (refP m b c * (rs m c * rs m a))
+            - (if c = a then 2 * (refP m a b * refP m b c) else 0))
+        = sumLtI (2^(m+1)) (fun c =>
+              refP m a b * (refP m b c * (rs m c * rs m a)))
+          - sumLtI (2^(m+1)) (fun c =>
+              (if c = a then 2 * (refP m a b * refP m b c) else 0)) :=
+      fun b _ => sumLtI_sub _ _ _
+    rw [sumLtI_congr _ _ _ hnest, sumLtI_sub]
+  rw [hsplit]
+  -- first piece: s_a · Σ_b P(a,b)·R_b = H²−8H+12
+  have hA1 : sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+        refP m a b * (refP m b c * (rs m c * rs m a))))
+      = ((2^(m+1) : Nat) : Int) * ((2^(m+1) : Nat) : Int)
+        - 8 * ((2^(m+1) : Nat) : Int) + 12 := by
+    have hper : ∀ b, b < 2^(m+1) →
+        sumLtI (2^(m+1)) (fun c =>
+            refP m a b * (refP m b c * (rs m c * rs m a)))
+        = refP m a b * rs m a
+          * sumLtI (2^(m+1)) (fun c => refP m b c * rs m c) := by
+      intro b hb
+      have hcongr := sumLtI_congr (2^(m+1))
+        (fun c => refP m a b * (refP m b c * (rs m c * rs m a)))
+        (fun c => (refP m a b * rs m a) * (refP m b c * rs m c))
+        (fun c _ => by grind)
+      rw [hcongr, sumLtI_mul]
+    rw [sumLtI_congr _ _ _ hper]
+    have hf : ∀ b, refP m a b * rs m a
+          * sumLtI (2^(m+1)) (fun c => refP m b c * rs m c)
+        = rs m a * (refP m a b
+            * sumLtI (2^(m+1)) (fun c => refP m b c * rs m c)) :=
+      fun b => by grind
+    rw [sumLtI_congr _ _ _ (fun b _ => hf b), sumLtI_mul, refA1_inner m a ha ha0]
+    grind
+  -- second piece: −2·Σ_b P(a,b)P(b,a) = −2(H−2)
+  have hA2 : sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+        (if c = a then 2 * (refP m a b * refP m b c) else 0)))
+      = 2 * (((2^(m+1) : Nat) : Int) - 2) := by
+    have hper : ∀ b, b < 2^(m+1) →
+        sumLtI (2^(m+1)) (fun c =>
+          (if c = a then 2 * (refP m a b * refP m b c) else 0))
+        = 2 * (refP m a b * refP m b a) := by
+      intro b hb
+      have hcongr := sumLtI_congr (2^(m+1))
+        (fun c => (if c = a then 2 * (refP m a b * refP m b c) else 0))
+        (fun c => (if c = a then 2 * (refP m a b * refP m b a) else 0))
+        (fun c _ => by
+          by_cases hca : c = a
+          · rw [if_pos hca, if_pos hca, hca]
+          · rw [if_neg hca, if_neg hca])
+      rw [hcongr, sumLtI_single (2^(m+1)) a _ ha]
+    rw [sumLtI_congr _ _ _ hper]
+    have hf : ∀ b, 2 * (refP m a b * refP m b a)
+        = 2 * ((refP m a b * refP m b a)) := fun b => rfl
+    rw [sumLtI_mul, refA2_inner m a ha ha0]
+  rw [hA1, hA2]
+  grind
+
+/-- **THE DIAGONAL OF `P³` AT INDEX `0`.**  `(P³)_00 = −H² + 2H` — via `refP_col0`
+the sum becomes `−Q + 2·(2−H)`. -/
+private theorem refK0 (m : Nat) :
+    sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+        refP m 0 b * (refP m b c * refP m c 0)))
+      = -(((2^(m+1) : Nat) : Int) * ((2^(m+1) : Nat) : Int))
+        + 2 * ((2^(m+1) : Nat) : Int) := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  -- pointwise: expand column 0
+  have hpt : ∀ b, b < 2^(m+1) → ∀ c, c < 2^(m+1) →
+      refP m 0 b * (refP m b c * refP m c 0)
+      = -(rs m b * (refP m b c * rs m c))
+        + (if c = 0 then 2 * (rs m b * refP m b c) else 0) := by
+    intro b hb c hc
+    rw [refP_row0, refP_col0 m c]
+    have hz := rs_zero m
+    by_cases hc0 : c = 0
+    · subst hc0
+      rw [if_pos rfl, if_pos rfl]
+      grind
+    · rw [if_neg hc0, if_neg hc0]
+      grind
+  -- inner sum per b
+  have hper : ∀ b, b < 2^(m+1) →
+      sumLtI (2^(m+1)) (fun c =>
+          refP m 0 b * (refP m b c * refP m c 0))
+      = -(rs m b * sumLtI (2^(m+1)) (fun c => refP m b c * rs m c))
+        + 2 * (rs m b * refP m b 0) := by
+    intro b hb
+    rw [sumLtI_congr _ _ _ (hpt b hb), sumLtI_add]
+    have hneg : sumLtI (2^(m+1)) (fun c =>
+          -(rs m b * (refP m b c * rs m c)))
+        = -(rs m b * sumLtI (2^(m+1)) (fun c => refP m b c * rs m c)) := by
+      rw [sumLtI_neg]
+      have hcongr := sumLtI_congr (2^(m+1))
+        (fun c => rs m b * (refP m b c * rs m c))
+        (fun c => rs m b * (refP m b c * rs m c))
+        (fun c _ => rfl)
+      rw [hcongr, sumLtI_mul]
+    have hsing : sumLtI (2^(m+1)) (fun c =>
+          (if c = 0 then 2 * (rs m b * refP m b c) else 0))
+        = 2 * (rs m b * refP m b 0) := by
+      have hcongr := sumLtI_congr (2^(m+1))
+        (fun c => (if c = 0 then 2 * (rs m b * refP m b c) else 0))
+        (fun c => (if c = 0 then 2 * (rs m b * refP m b 0) else 0))
+        (fun c _ => by
+          by_cases hc0 : c = 0
+          · rw [if_pos hc0, if_pos hc0, hc0]
+          · rw [if_neg hc0, if_neg hc0])
+      rw [hcongr, sumLtI_single (2^(m+1)) 0 _ hp]
+    rw [hneg, hsing]
+  rw [sumLtI_congr _ _ _ hper]
+  rw [sumLtI_congr _ _ _ (fun b _ => show
+      -(rs m b * sumLtI (2^(m+1)) (fun c => refP m b c * rs m c))
+        + 2 * (rs m b * refP m b 0)
+      = -(rs m b * sumLtI (2^(m+1)) (fun c => refP m b c * rs m c))
+        + (2 * (rs m b * refP m b 0)) from by grind)]
+  rw [sumLtI_add]
+  -- piece 1: −Σ_b s_b·R_b = −((H−4)·H + 4)
+  have hp1 : sumLtI (2^(m+1)) (fun b =>
+        -(rs m b * sumLtI (2^(m+1)) (fun c => refP m b c * rs m c)))
+      = -((((2^(m+1) : Nat) : Int) - 4) * ((2^(m+1) : Nat) : Int) + 4) := by
+    rw [sumLtI_neg]
+    have hcongr := sumLtI_congr (2^(m+1))
+      (fun b => rs m b * sumLtI (2^(m+1)) (fun c => refP m b c * rs m c))
+      (fun b => (((2^(m+1) : Nat) : Int) - 4) + (if b = 0 then 4 else 0))
+      (fun b hb => by
+        rw [refRval m b hb]
+        have hsqb := rs_sq m b
+        have hz := rs_zero m
+        by_cases hb0 : b = 0
+        · subst hb0
+          rw [if_pos rfl, if_pos rfl]
+          grind
+        · rw [if_neg hb0, if_neg hb0]
+          grind)
+    rw [hcongr, sumLtI_add]
+    have hconst : sumLtI (2^(m+1)) (fun _ => (((2^(m+1) : Nat) : Int) - 4))
+        = (((2^(m+1) : Nat) : Int) - 4) * ((2^(m+1) : Nat) : Int) := by
+      rw [sumLtI_congr _ _ (fun b => (((2^(m+1) : Nat) : Int) - 4) * (1:Int))
+            (fun b _ => by grind),
+          sumLtI_mul, sumLtI_one]
+    rw [hconst, sumLtI_single (2^(m+1)) 0 4 hp]
+  -- piece 2: 2·Σ_b s_b·P(b,0) = 2·(2−H)
+  have hp2 : sumLtI (2^(m+1)) (fun b => 2 * (rs m b * refP m b 0))
+      = 2 * (2 - ((2^(m+1) : Nat) : Int)) := by
+    rw [sumLtI_mul]
+    have hcongr := sumLtI_congr (2^(m+1))
+      (fun b => rs m b * refP m b 0)
+      (fun b => -1 + (if b = 0 then 2 else 0))
+      (fun b hb => by
+        rw [refP_col0 m b]
+        have hsqb := rs_sq m b
+        have hz := rs_zero m
+        by_cases hb0 : b = 0
+        · subst hb0
+          rw [if_pos rfl, if_pos rfl]
+          grind
+        · rw [if_neg hb0, if_neg hb0]
+          grind)
+    rw [hcongr, sumLtI_add, sumLtI_neg_one, sumLtI_single (2^(m+1)) 0 2 hp]
+    grind
+  rw [hp1, hp2]
+  grind
+
+/-- **THE PREDICTED TRACE** — `tr(P³) = H³ − 12H² + 28H − 16` at `W = 1`, `H = 2^(m+1)`.
+The constant nonzero diagonal `(H−2)² − 6H + 12` times `H−1`, plus the `−H² + 2H` of
+index `0`.  Level-3 value `1456` matches the E5 table; measured `m = 0..5` before
+proving. -/
+theorem trace_ref_entry_law (m : Nat) :
+    sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+        refP m a b * (refP m b c * refP m c a))))
+      = ((2^(m+1) : Nat) : Int) * ((2^(m+1) : Nat) : Int) * ((2^(m+1) : Nat) : Int)
+        - 12 * (((2^(m+1) : Nat) : Int) * ((2^(m+1) : Nat) : Int))
+        + 28 * ((2^(m+1) : Nat) : Int) - 16 := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  have hper : ∀ a, a < 2^(m+1) →
+      sumLtI (2^(m+1)) (fun b => sumLtI (2^(m+1)) (fun c =>
+          refP m a b * (refP m b c * refP m c a)))
+      = ((((2^(m+1) : Nat) : Int) - 2) * (((2^(m+1) : Nat) : Int) - 2)
+          - 6 * ((2^(m+1) : Nat) : Int) + 12)
+        + (if a = 0 then
+            (-(2 * (((2^(m+1) : Nat) : Int) * ((2^(m+1) : Nat) : Int)))
+              + 12 * ((2^(m+1) : Nat) : Int) - 16) else 0) := by
+    intro a ha
+    by_cases ha0 : a = 0
+    · subst ha0
+      rw [if_pos rfl, refK0 m]
+      grind
+    · rw [if_neg ha0, refK m a ha ha0]
+      grind
+  rw [sumLtI_congr _ _ _ hper, sumLtI_add]
+  have hconst : sumLtI (2^(m+1)) (fun _ =>
+        ((((2^(m+1) : Nat) : Int) - 2) * (((2^(m+1) : Nat) : Int) - 2)
+          - 6 * ((2^(m+1) : Nat) : Int) + 12))
+      = ((((2^(m+1) : Nat) : Int) - 2) * (((2^(m+1) : Nat) : Int) - 2)
+          - 6 * ((2^(m+1) : Nat) : Int) + 12) * ((2^(m+1) : Nat) : Int) := by
+    rw [sumLtI_congr _ _
+          (fun a => ((((2^(m+1) : Nat) : Int) - 2) * (((2^(m+1) : Nat) : Int) - 2)
+              - 6 * ((2^(m+1) : Nat) : Int) + 12) * (1:Int))
+          (fun a _ => by grind),
+        sumLtI_mul, sumLtI_one]
+  rw [hconst, sumLtI_single (2^(m+1)) 0 _ hp]
+  grind
+
+/-! #### The level-sums of the reference sign vector
+
+    `Σ_x s_x = 2` at every level (the popcount character sums to `0`; the seam point
+    `x = 1` contributes `+2` against the parity rule), by level induction through
+    Tier 138's two-clause recursion.  Not needed for the trace itself — the trace
+    computation only ever meets `s_x²` — but these are the reference-side analogs of
+    the seam row sums, recorded for future tiers. -/
+
+private theorem sumLtI_zero' (f : Nat → Int) : sumLtI 0 f = 0 := rfl
+
+private theorem sumLtI_succ' (n : Nat) (f : Nat → Int) :
+    sumLtI (n+1) f = sumLtI n f + f n := rfl
+
+private theorem sumLtI_two' (f : Nat → Int) : sumLtI 2 f = f 0 + f 1 := by
+  rw [show (2:Nat) = 1 + 1 from rfl, sumLtI_succ', sumLtI_succ', sumLtI_zero']
+  grind
+
+/-- **Level sum of the sign vector:** `Σ_x s_x = 2`. -/
+theorem ref_row0_sum (m : Nat) :
+    sumLtI (2^(m+1)) (fun x => rs m x) = 2 := by
+  induction m with
+  | zero =>
+    rw [show (2:Nat)^(0+1) = 2 from rfl, sumLtI_two', rs_zero,
+        show rs 0 1 = 1 from P3_ref_row0_one 0]
+    rfl
+  | succ m ih =>
+    have hpow : (2:Nat)^(m+1+1) = 2^(m+1) + 2^(m+1) := by
+      rw [Nat.pow_succ, Nat.mul_comm, Nat.two_mul]
+    have h1 : (1:Nat) < 2^(m+1) := by
+      have := Nat.two_pow_pos (m+1); omega
+    rw [hpow, sumLtI_shift]
+    -- lo half: level-independent
+    have hlo : sumLtI (2^(m+1)) (fun x => rs (m+1) x)
+        = sumLtI (2^(m+1)) (fun x => rs m x) := by
+      apply sumLtI_congr
+      intro x hx
+      by_cases hx0 : x = 0
+      · subst hx0
+        rw [rs_zero, rs_zero]
+      · exact P3_ref_row0_step_lo m x hx hx0
+    -- hi half: sign flip, plus the seam-point translate
+    have hhi : sumLtI (2^(m+1)) (fun i => rs (m+1) (2^(m+1) + i))
+        = - sumLtI (2^(m+1)) (fun x => rs m x) + 2 := by
+      have hpt : ∀ i, i < 2^(m+1) →
+          rs (m+1) (2^(m+1) + i) = - rs m i + (if i = 1 then (2:Int) else 0) := by
+        intro i hi
+        have hstep : rs (m+1) (i + 2^(m+1))
+            = - rs m i + (if i = 1 then (2:Int) else 0) :=
+          P3_ref_row0_step_hi m i hi
+        rw [Nat.add_comm (2^(m+1)) i]
+        exact hstep
+      rw [sumLtI_congr _ _ _ hpt, sumLtI_add, sumLtI_neg,
+          sumLtI_single (2^(m+1)) 1 2 h1]
+    rw [hlo, hhi, ih]
+    grind
+
+/-- **Quadratic level sum:** `Σ_x Σ_y s_x·s_y = (Σ_x s_x)² = 4`. -/
+theorem ref_row0_quad (m : Nat) :
+    sumLtI (2^(m+1)) (fun x => sumLtI (2^(m+1)) (fun y => rs m x * rs m y)) = 4 := by
+  rw [sumLtI_congr _ _ _
+        (fun x _ => sumLtI_mul (2^(m+1)) (rs m x) (fun y => rs m y)),
+      sumLtI_congr _ _ _
+        (fun x _ => congrArg (rs m x * ·) (ref_row0_sum m)),
+      sumLtI_mul_r, ref_row0_sum m]
+  rfl
+
+
+
+
+
+/-! ## Tier 144 (scratch) — defect-graph degree regularity, CONDITIONAL on the defect rule
+
+    From `.tmp/e5_swarm/DEFECT-RULE.md` and `.tmp/e5_swarm/two_graph.md`: the defect graph at
+    the reference label `W = 1` has vertex set `V* = {x : x % 2^m ≥ 2}` and is regular of
+    degree `2^m − 4`.  This tier proves the COUNT from the measured rule, taken as hypotheses
+    (the `hpt` pattern of `cp2_count`):
+
+    * `hflipL`/`hflipR`: bit-0-flip invariance of the E-entry off the boundary,
+    * `hR3`: the one-step recursion (R3) of the guarded reduced defect relation.
+
+    Bookkeeping: the partners of `x` pair up as `{2Y, 2Y+1}` over orbit indices `Y`; splitting
+    `Y` at `2^(m-1)` contributes, per orbit `i`, exactly one defect edge (`Rp` on one half,
+    `Rp'` on the other — they telescope, no knowledge of the level-`m-1` count needed).  So the
+    reduced degree is `2^(m-1) − 2` and the full degree is `2·(2^(m-1) − 2) = 2^m − 4`.
+
+    All hypotheses and the final count verified numerically at `m = 2,3,4,5`
+    (`.tmp/tier144_probe2.py`, zero mismatches). -/
+
+/-- The E5 reference-defect sign: `E(a,b) = P3(a,b,1,m)·s_a·s_b` with `s_x = P3(0,x,1,m)`. -/
+def eDef (m a b : Nat) : Int := P3 a b 1 m * (P3 0 a 1 m * P3 0 b 1 m)
+
+/-- The raw reduced defect on c-orbit indices `X = x/2`, `Y = y/2`. -/
+def rdef (n X Y : Nat) : Prop := eDef n (2*X) (2*Y) ≠ 1
+
+/-- The guarded reduced defect relation `R_n`: nonzero distinct orbit indices with `E = −1`. -/
+def Rp (n X Y : Nat) : Prop := X ≠ 0 ∧ Y ≠ 0 ∧ X ≠ Y ∧ rdef n X Y
+
+/-- Its guarded complement: the cross-orbit rule's input. -/
+def Rp' (n X Y : Nat) : Prop := X ≠ 0 ∧ Y ≠ 0 ∧ X ≠ Y ∧ ¬ rdef n X Y
+
+/-- Defect-graph adjacency on `[0, 2^(m+1))`: distinct nonzero orbits carrying `E = −1`. -/
+def isDefect (m x y : Nat) : Prop := x / 2 ≠ 0 ∧ y / 2 ≠ 0 ∧ x / 2 ≠ y / 2 ∧ eDef m x y ≠ 1
+
+instance decRp (n X Y : Nat) : Decidable (Rp n X Y) := by
+  delta Rp rdef; infer_instance
+
+instance decRp' (n X Y : Nat) : Decidable (Rp' n X Y) := by
+  delta Rp' rdef; infer_instance
+
+instance decIsDefect (m x y : Nat) : Decidable (isDefect m x y) := by
+  delta isDefect; infer_instance
+
+/-- Pairing consecutive indices: a sum over `2n` terms folds to `n` pairs. -/
+theorem sumLtI_pairs (n : Nat) (f : Nat → Int) :
+    sumLtI (2*n) f = sumLtI n (fun i => f (2*i) + f (2*i+1)) := by
+  induction n with
+  | zero => rfl
+  | succ n ih =>
+      rw [show 2*(n+1) = (2*n+1)+1 from by omega, sumLtI, sumLtI, ih, sumLtI]
+      show (sumLtI n (fun i => f (2*i) + f (2*i+1)) + f (2*n)) + f (2*n+1)
+        = sumLtI n (fun i => f (2*i) + f (2*i+1)) + (f (2*n) + f (2*n+1))
+      omega
+
+/-- Counting indices that avoid two distinct points `0` and `X`. -/
+theorem sumLtI_guard_cnt (n X : Nat) (hX : X < n) (hX0 : X ≠ 0) (hn : 0 < n) :
+    sumLtI n (fun i => if (X ≠ 0 ∧ i ≠ 0 ∧ X ≠ i) then (1:Int) else 0) = (n : Int) - 2 := by
+  rw [sumLtI_congr n _ (fun i => 1 - (if (i = 0 ∨ i = X) then (1:Int) else 0))
+        (fun i _ => by
+          by_cases h1 : i = 0
+          · subst h1
+            rw [if_neg (fun h => h.2.1 rfl), if_pos (Or.inl rfl)]; omega
+          · by_cases h2 : i = X
+            · subst h2
+              rw [if_neg (fun h => h.2.2 rfl), if_pos (Or.inr rfl)]; omega
+            · have h3 : X ≠ i := fun h => h2 h.symm
+              rw [if_pos ⟨hX0, h1, h3⟩, if_neg (fun h => h.elim h1 h2)]; omega),
+      sumLtI_sub n (fun _ => (1:Int)) _, sumLtI_one n,
+      cnt2 n 0 X hn hX (fun h => hX0 h.symm)]
+
+/-- **DEGREE REGULARITY, conditional on the defect rule** (level `m = k+2` form).
+    Each `x ∈ V*` has exactly `2^(k+2) − 4` defect partners. -/
+theorem defect_degree (k : Nat)
+    (hflipL : ∀ X b, X ≠ 0 → b / 2 ≠ 0 → X ≠ b / 2 →
+        eDef (k+2) (2*X+1) b = eDef (k+2) (2*X) b)
+    (hflipR : ∀ a Y, a / 2 ≠ 0 → Y ≠ 0 → a / 2 ≠ Y →
+        eDef (k+2) a (2*Y+1) = eDef (k+2) a (2*Y))
+    (hR3 : ∀ X Y, X < 2^(k+2) → Y < 2^(k+2) →
+        (Rp (k+2) X Y ↔
+          (X < 2^(k+1) ∧ Y < 2^(k+1) ∧ Rp (k+1) X Y) ∨
+          (2^(k+1) ≤ X ∧ 2^(k+1) ≤ Y ∧ Rp (k+1) (X - 2^(k+1)) (Y - 2^(k+1))) ∨
+          (X < 2^(k+1) ∧ 2^(k+1) ≤ Y ∧ Rp' (k+1) X (Y - 2^(k+1))) ∨
+          (2^(k+1) ≤ X ∧ Y < 2^(k+1) ∧ Rp' (k+1) (X - 2^(k+1)) Y)))
+    (x : Nat) (hx : x < 2^(k+3)) (hxV : x % 2^(k+2) ≥ 2) :
+    sumLtI (2^(k+3)) (fun y => if isDefect (k+2) x y then (1:Int) else 0)
+      = ((2^(k+2) - 4 : Nat) : Int) := by
+  have hp0 := Nat.two_pow_pos k
+  have hp1 := Nat.two_pow_pos (k+1)
+  have hpow1 : (2:Nat)^(k+1) = 2^k + 2^k := by rw [Nat.pow_succ 2 k]; omega
+  have hpow2 : (2:Nat)^(k+2) = 2^(k+1) + 2^(k+1) := by rw [Nat.pow_succ 2 (k+1)]; omega
+  have hpow3' : (2:Nat)^(k+3) = 2 * 2^(k+2) := by rw [Nat.pow_succ 2 (k+2)]; omega
+  obtain ⟨X, hX⟩ : ∃ X, X = x / 2 := ⟨x / 2, rfl⟩
+  -- the `V*` condition in orbit terms: `X ≠ 0` and `X ≠ 2^(k+1)`
+  have hXlt : X < 2^(k+2) := by omega
+  have hX0 : X ≠ 0 := by
+    by_cases hc : x < 2^(k+2)
+    · rw [Nat.mod_eq_of_lt hc] at hxV; omega
+    · have h1 : x % 2^(k+2) = x - 2^(k+2) := by
+        rw [Nat.mod_eq_sub_mod (by omega), Nat.mod_eq_of_lt (by omega)]
+      omega
+  have hXc : X ≠ 2^(k+1) := by
+    by_cases hc : x < 2^(k+2)
+    · rw [Nat.mod_eq_of_lt hc] at hxV; omega
+    · have h1 : x % 2^(k+2) = x - 2^(k+2) := by
+        rw [Nat.mod_eq_sub_mod (by omega), Nat.mod_eq_of_lt (by omega)]
+      omega
+  -- under the guard, the E-entry depends only on the orbit indices
+  have e1 : ∀ {Y : Nat}, X ≠ 0 → Y ≠ 0 → X ≠ Y →
+      eDef (k+2) x (2*Y) = eDef (k+2) (2*X) (2*Y) := by
+    intro Y hX0' hY0' hXY'
+    have hε : x % 2 = 0 ∨ x % 2 = 1 := by omega
+    rcases hε with hε | hε
+    · have h2x : 2*X = x := by omega
+      rw [h2x]
+    · have h2x : x = 2*X + 1 := by omega
+      rw [h2x]
+      exact hflipL X (2*Y) hX0' (by omega) (by omega)
+  have e2 : ∀ {Y : Nat}, X ≠ 0 → Y ≠ 0 → X ≠ Y →
+      eDef (k+2) x (2*Y+1) = eDef (k+2) (2*X) (2*Y) := by
+    intro Y hX0' hY0' hXY'
+    rw [hflipR x Y (by omega) hY0' (by omega)]
+    exact e1 hX0' hY0' hXY'
+  -- each orbit pair `{2Y, 2Y+1}` contributes 0 or 2 edges
+  have hpair : ∀ Y, Y < 2^(k+2) →
+      (if isDefect (k+2) x (2*Y) then (1:Int) else 0)
+        + (if isDefect (k+2) x (2*Y+1) then (1:Int) else 0)
+      = 2 * (if Rp (k+2) X Y then (1:Int) else 0) := by
+    intro Y _
+    have hiff1 : isDefect (k+2) x (2*Y) ↔ Rp (k+2) X Y := by
+      constructor
+      · intro h
+        obtain ⟨h1, h2, h3, h4⟩ := h
+        have h1' : X ≠ 0 := by omega
+        have hY0 : Y ≠ 0 := by omega
+        have hXY : X ≠ Y := by omega
+        exact ⟨h1', hY0, hXY, by rwa [e1 h1' hY0 hXY] at h4⟩
+      · intro h
+        obtain ⟨h1, h2, h3, h4⟩ := h
+        exact ⟨by omega, by omega, by omega, by rwa [e1 h1 h2 h3]⟩
+    have hiff2 : isDefect (k+2) x (2*Y+1) ↔ Rp (k+2) X Y := by
+      constructor
+      · intro h
+        obtain ⟨h1, h2, h3, h4⟩ := h
+        have h1' : X ≠ 0 := by omega
+        have hY0 : Y ≠ 0 := by omega
+        have hXY : X ≠ Y := by omega
+        exact ⟨h1', hY0, hXY, by rwa [e2 h1' hY0 hXY] at h4⟩
+      · intro h
+        obtain ⟨h1, h2, h3, h4⟩ := h
+        exact ⟨by omega, by omega, by omega, by rwa [e2 h1 h2 h3]⟩
+    by_cases hR : Rp (k+2) X Y
+    · rw [if_pos (hiff1.mpr hR), if_pos (hiff2.mpr hR), if_pos hR]; omega
+    · rw [if_neg (fun h => hR (hiff1.mp h)), if_neg (fun h => hR (hiff2.mp h)), if_neg hR]
+      omega
+  -- the reduced count: `2^(k+1) − 2` orbits, by the `Rp`/`Rp'` telescoping
+  have hT : sumLtI (2^(k+2)) (fun Y => if Rp (k+2) X Y then (1:Int) else 0)
+      = ((2^(k+1) : Nat) : Int) - 2 := by
+    rw [hpow2, sumLtI_shift (2^(k+1)) (2^(k+1))]
+    show sumLtI (2^(k+1)) (fun i => if Rp (k+2) X i then (1:Int) else 0)
+        + sumLtI (2^(k+1)) (fun i => if Rp (k+2) X (2^(k+1) + i) then (1:Int) else 0)
+        = ((2^(k+1) : Nat) : Int) - 2
+    by_cases hcase : X < 2^(k+1)
+    · -- low `X`: low orbits see `Rp (k+1) X i`, high orbits see its guarded complement
+      have hlow : ∀ i, i < 2^(k+1) →
+          (if Rp (k+2) X i then (1:Int) else 0)
+            = if Rp (k+1) X i then (1:Int) else 0 := by
+        intro i hi
+        have hiff : Rp (k+2) X i ↔ Rp (k+1) X i := by
+          rw [hR3 X i hXlt (by omega)]
+          constructor
+          · rintro (h | h | h | h)
+            · exact h.2.2
+            · omega
+            · omega
+            · omega
+          · intro h; exact Or.inl ⟨hcase, hi, h⟩
+        by_cases h : Rp (k+1) X i
+        · rw [if_pos (hiff.mpr h), if_pos h]
+        · rw [if_neg (fun hh => h (hiff.mp hh)), if_neg h]
+      have hhigh : ∀ i, i < 2^(k+1) →
+          (if Rp (k+2) X (2^(k+1) + i) then (1:Int) else 0)
+            = if Rp' (k+1) X i then (1:Int) else 0 := by
+        intro i hi
+        have hiff : Rp (k+2) X (2^(k+1) + i) ↔ Rp' (k+1) X i := by
+          rw [hR3 X (2^(k+1) + i) hXlt (by omega)]
+          constructor
+          · rintro (h | h | h | h)
+            · omega
+            · omega
+            · rw [show (2^(k+1) + i) - 2^(k+1) = i from by omega] at h; exact h.2.2
+            · omega
+          · intro h
+            refine Or.inr (Or.inr (Or.inl ⟨hcase, by omega, ?_⟩))
+            rwa [show (2^(k+1) + i) - 2^(k+1) = i from by omega]
+        by_cases h : Rp' (k+1) X i
+        · rw [if_pos (hiff.mpr h), if_pos h]
+        · rw [if_neg (fun hh => h (hiff.mp hh)), if_neg h]
+      have hcomb : ∀ i, i < 2^(k+1) →
+          (if Rp (k+1) X i then (1:Int) else 0) + (if Rp' (k+1) X i then (1:Int) else 0)
+            = if (X ≠ 0 ∧ i ≠ 0 ∧ X ≠ i) then (1:Int) else 0 := by
+        intro i _
+        by_cases h : rdef (k+1) X i <;> by_cases g1 : X = 0 <;> by_cases g2 : i = 0 <;>
+          by_cases g3 : X = i <;> simp [Rp, Rp', h, g1, g2, g3]
+      rw [sumLtI_congr (2^(k+1)) _ _ hlow, sumLtI_congr (2^(k+1)) _ _ hhigh, ← sumLtI_add]
+      show sumLtI (2^(k+1)) (fun i => (if Rp (k+1) X i then (1:Int) else 0)
+          + (if Rp' (k+1) X i then (1:Int) else 0)) = _
+      rw [sumLtI_congr (2^(k+1)) _ _ hcomb, sumLtI_guard_cnt (2^(k+1)) X hcase hX0 hp1]
+    · -- high `X = 2^(k+1) + X'`: the two halves swap roles
+      have hX'0 : X - 2^(k+1) ≠ 0 := by omega
+      have hX'lt : X - 2^(k+1) < 2^(k+1) := by omega
+      have hlow : ∀ i, i < 2^(k+1) →
+          (if Rp (k+2) X i then (1:Int) else 0)
+            = if Rp' (k+1) (X - 2^(k+1)) i then (1:Int) else 0 := by
+        intro i hi
+        have hiff : Rp (k+2) X i ↔ Rp' (k+1) (X - 2^(k+1)) i := by
+          rw [hR3 X i hXlt (by omega)]
+          constructor
+          · rintro (h | h | h | h)
+            · omega
+            · omega
+            · omega
+            · exact h.2.2
+          · intro h; exact Or.inr (Or.inr (Or.inr ⟨by omega, hi, h⟩))
+        by_cases h : Rp' (k+1) (X - 2^(k+1)) i
+        · rw [if_pos (hiff.mpr h), if_pos h]
+        · rw [if_neg (fun hh => h (hiff.mp hh)), if_neg h]
+      have hhigh : ∀ i, i < 2^(k+1) →
+          (if Rp (k+2) X (2^(k+1) + i) then (1:Int) else 0)
+            = if Rp (k+1) (X - 2^(k+1)) i then (1:Int) else 0 := by
+        intro i hi
+        have hiff : Rp (k+2) X (2^(k+1) + i) ↔ Rp (k+1) (X - 2^(k+1)) i := by
+          rw [hR3 X (2^(k+1) + i) hXlt (by omega)]
+          constructor
+          · rintro (h | h | h | h)
+            · omega
+            · rw [show (2^(k+1) + i) - 2^(k+1) = i from by omega] at h; exact h.2.2
+            · omega
+            · omega
+          · intro h
+            refine Or.inr (Or.inl ⟨by omega, by omega, ?_⟩)
+            rwa [show (2^(k+1) + i) - 2^(k+1) = i from by omega]
+        by_cases h : Rp (k+1) (X - 2^(k+1)) i
+        · rw [if_pos (hiff.mpr h), if_pos h]
+        · rw [if_neg (fun hh => h (hiff.mp hh)), if_neg h]
+      have hcomb : ∀ i, i < 2^(k+1) →
+          (if Rp' (k+1) (X - 2^(k+1)) i then (1:Int) else 0)
+            + (if Rp (k+1) (X - 2^(k+1)) i then (1:Int) else 0)
+            = if (X - 2^(k+1) ≠ 0 ∧ i ≠ 0 ∧ X - 2^(k+1) ≠ i) then (1:Int) else 0 := by
+        intro i _
+        by_cases h : rdef (k+1) (X - 2^(k+1)) i <;> by_cases g1 : X - 2^(k+1) = 0 <;>
+          by_cases g2 : i = 0 <;> by_cases g3 : X - 2^(k+1) = i <;>
+          simp [Rp, Rp', h, g1, g2, g3]
+      rw [sumLtI_congr (2^(k+1)) _ _ hlow, sumLtI_congr (2^(k+1)) _ _ hhigh, ← sumLtI_add]
+      show sumLtI (2^(k+1)) (fun i => (if Rp' (k+1) (X - 2^(k+1)) i then (1:Int) else 0)
+          + (if Rp (k+1) (X - 2^(k+1)) i then (1:Int) else 0)) = _
+      rw [sumLtI_congr (2^(k+1)) _ _ hcomb,
+        sumLtI_guard_cnt (2^(k+1)) (X - 2^(k+1)) hX'lt hX'0 hp1]
+  -- assemble: pair the sum, fold to orbits, apply the reduced count
+  rw [hpow3', sumLtI_pairs]
+  show sumLtI (2^(k+2)) (fun Y => (if isDefect (k+2) x (2*Y) then (1:Int) else 0)
+      + (if isDefect (k+2) x (2*Y+1) then (1:Int) else 0)) = _
+  rw [sumLtI_congr (2^(k+2)) _ (fun Y => 2 * (if Rp (k+2) X Y then (1:Int) else 0)) hpair,
+    sumLtI_mul, hT]
+  omega
+
+/-- **DEGREE REGULARITY, conditional on the defect rule** (general `m ≥ 2` form).
+    For every `x ∈ V* = {x : x % 2^m ≥ 2}`, the defect-partner count is `2^m − 4`. -/
+theorem defect_regular (m : Nat) (hm : 2 ≤ m)
+    (hflipL : ∀ X b, X ≠ 0 → b / 2 ≠ 0 → X ≠ b / 2 →
+        eDef m (2*X+1) b = eDef m (2*X) b)
+    (hflipR : ∀ a Y, a / 2 ≠ 0 → Y ≠ 0 → a / 2 ≠ Y →
+        eDef m a (2*Y+1) = eDef m a (2*Y))
+    (hR3 : ∀ X Y, X < 2^m → Y < 2^m →
+        (Rp m X Y ↔
+          (X < 2^(m-1) ∧ Y < 2^(m-1) ∧ Rp (m-1) X Y) ∨
+          (2^(m-1) ≤ X ∧ 2^(m-1) ≤ Y ∧ Rp (m-1) (X - 2^(m-1)) (Y - 2^(m-1))) ∨
+          (X < 2^(m-1) ∧ 2^(m-1) ≤ Y ∧ Rp' (m-1) X (Y - 2^(m-1))) ∨
+          (2^(m-1) ≤ X ∧ Y < 2^(m-1) ∧ Rp' (m-1) (X - 2^(m-1)) Y)))
+    (x : Nat) (hx : x < 2^(m+1)) (hxV : x % 2^m ≥ 2) :
+    sumLtI (2^(m+1)) (fun y => if isDefect m x y then (1:Int) else 0)
+      = ((2^m - 4 : Nat) : Int) := by
+  obtain ⟨k, rfl⟩ : ∃ k, m = k + 2 := ⟨m - 2, by omega⟩
+  exact defect_degree k hflipL hflipR hR3 x hx hxV
+
+
+
+
+/-! ### Tier 146 — DEFECT TRIANGLE COUNT (conditional) (kimi, E5 reference side)
+
+    The defect graph at the reference label `W = 1` (`E = M − P`, `M(a,b) = P3 a b 1 m`,
+    `H = 2^(m+1)`) has, measured at `m = 2..6` (`.tmp/e5_swarm/two_graph.md`,
+    `.tmp/tier146_probe.py`):
+
+      * defect-triangle count  `T3 = 288·[m−1,3]₂`  (0, 0, 288, 4320, 44640 at m = 2..6);
+      * every defect triangle has `M`-product `−1` (equivalently `E`-product `−8`);
+      * no defect triangle touches the isolated set `{0, 1, 2^m, 2^m+1}`.
+
+    The count itself is the hard enumeration (3-dim `F₂`-subspaces of `F₂^(m−1)`, 288
+    configurations each — the strip-depth parity has no closed form, DEFECT-ALGEBRA §7).
+    Following the `cp2_count` pattern, the count is the hypothesis `hrule` in PRODUCT
+    form (`288·[m−1,3]₂ = 96·(2^(m−1)−1)(2^(m−2)−1)(2^(m−3)−1)/7`, division-free as
+    `7·T3 = 96·prod`), and this tier proves:
+
+      1. `t3_count_poly` — the conversion to the `H`-polynomial
+         `112·T3 = 3·(H−4)(H−8)(H−16)`   (i.e. `T3 = (3/112)(H−4)(H−8)(H−16)`),
+         via `(H−4) = 4(2^(m−1)−1)`, `(H−8) = 8(2^(m−2)−1)`, `(H−16) = 16(2^(m−3)−1)`
+         and the constant match `16·96 = 3·4·8·16 = 1536`;
+      2. `t3_poly_to_count` — the same conversion read backwards;
+      3. `defect_triangle_M_prod` — CONDITIONAL on the measured triangle sign law
+         (`hlaw`, two-graph lane, 0 failures at m = 2..6): a triple with an ODD number
+         of defect edges and no `0`-vertex (every defect triangle: `k = 3`, and `0` is
+         isolated) has `M`-product `−1`;
+      4. `defect_triangle_E_prod` — the `E`-product form: `E = 2M` on each defect edge
+         (`M = −P` there, DEFECT-ALGEBRA §1 pure-flip law), so the `E`-product is `−8`;
+      5. `t3_vanishes_at_m3` — sanity: the product-form count forces `T3 = 0` at `m = 3`
+         (matches the measured `288·[2,3]₂ = 0`; the defect graph is triangle-free
+         below `m = 4`).
+
+    Measured before proving: `.tmp/tier146_probe.py` (conversion m = 2..6, direct
+    triangle enumeration m = 2,3,4: T3 exact, all M-products `−1`, no isolated vertex).
+    The 3-dim-subspace INDEXING (why 288 per subspace) remains open — it is the
+    depth-parity enumeration of DEFECT-ALGEBRA §7. -/
+
+/-- **THE COUNT, AS AN `H`-POLYNOMial (conditional).**  The defect-triangle count in
+    product form forces the polynomial form: `112·T3 = 3·(H−4)(H−8)(H−16)`. -/
+theorem t3_count_poly (m : Nat) (hm : 3 ≤ m) (T3 : Int)
+    (hrule : 7 * T3
+      = 96 * (((((2^(m-1) : Nat) : Int)) - 1) * (((((2^(m-2) : Nat) : Int)) - 1)
+          * (((2^(m-3) : Nat) : Int) - 1)))) :
+    112 * T3
+      = 3 * (((((2^(m+1) : Nat) : Int)) - 4) * (((((2^(m+1) : Nat) : Int)) - 8)
+          * ((((2^(m+1) : Nat) : Int)) - 16))) := by
+  have e1 : m + 1 = (m - 1) + 2 := by omega
+  have e2 : m + 1 = (m - 2) + 3 := by omega
+  have e3 : m + 1 = (m - 3) + 4 := by omega
+  have p1 : (2:Nat)^(m+1) = 4 * 2^(m-1) := by rw [e1, Nat.pow_add]; grind
+  have p2 : (2:Nat)^(m+1) = 8 * 2^(m-2) := by rw [e2, Nat.pow_add]; grind
+  have p3 : (2:Nat)^(m+1) = 16 * 2^(m-3) := by rw [e3, Nat.pow_add]; grind
+  have f4 : ((((2^(m+1) : Nat) : Int)) - 4) = 4 * (((((2^(m-1) : Nat) : Int)) - 1)) := by
+    grind
+  have f8 : ((((2^(m+1) : Nat) : Int)) - 8) = 8 * (((((2^(m-2) : Nat) : Int)) - 1)) := by
+    grind
+  have f16 : ((((2^(m+1) : Nat) : Int)) - 16) = 16 * (((((2^(m-3) : Nat) : Int)) - 1)) := by
+    grind
+  rw [f4, f8, f16]
+  have h1536 : 112 * T3
+      = 1536 * (((((2^(m-1) : Nat) : Int)) - 1) * (((((2^(m-2) : Nat) : Int)) - 1)
+          * (((2^(m-3) : Nat) : Int) - 1))) := by
+    have h7 : 112 * T3 = 16 * (7 * T3) := by grind
+    rw [h7, hrule]; grind
+  rw [h1536]; grind
+
+/-- **THE CONVERSION, BACKWARDS (conditional).**  The `H`-polynomial form forces the
+    product (q-binomial) form of the count. -/
+theorem t3_poly_to_count (m : Nat) (hm : 3 ≤ m) (T3 : Int)
+    (hpoly : 112 * T3
+      = 3 * (((((2^(m+1) : Nat) : Int)) - 4) * (((((2^(m+1) : Nat) : Int)) - 8)
+          * ((((2^(m+1) : Nat) : Int)) - 16)))) :
+    7 * T3
+      = 96 * (((((2^(m-1) : Nat) : Int)) - 1) * (((((2^(m-2) : Nat) : Int)) - 1)
+          * (((2^(m-3) : Nat) : Int) - 1))) := by
+  have e1 : m + 1 = (m - 1) + 2 := by omega
+  have e2 : m + 1 = (m - 2) + 3 := by omega
+  have e3 : m + 1 = (m - 3) + 4 := by omega
+  have p1 : (2:Nat)^(m+1) = 4 * 2^(m-1) := by rw [e1, Nat.pow_add]; grind
+  have p2 : (2:Nat)^(m+1) = 8 * 2^(m-2) := by rw [e2, Nat.pow_add]; grind
+  have p3 : (2:Nat)^(m+1) = 16 * 2^(m-3) := by rw [e3, Nat.pow_add]; grind
+  have f4 : ((((2^(m+1) : Nat) : Int)) - 4) = 4 * (((((2^(m-1) : Nat) : Int)) - 1)) := by
+    grind
+  have f8 : ((((2^(m+1) : Nat) : Int)) - 8) = 8 * (((((2^(m-2) : Nat) : Int)) - 1)) := by
+    grind
+  have f16 : ((((2^(m+1) : Nat) : Int)) - 16) = 16 * (((((2^(m-3) : Nat) : Int)) - 1)) := by
+    grind
+  rw [f4, f8, f16] at hpoly
+  have h7 : 112 * T3 = 16 * (7 * T3) := by grind
+  rw [h7] at hpoly
+  -- hpoly : 16 * (7 * T3) = 16 * (96 * prod); cancel the nonzero factor 16 over Int
+  have hdiff : (16:Int) * (7 * T3 - 96 * (((((2^(m-1) : Nat) : Int)) - 1)
+      * (((((2^(m-2) : Nat) : Int)) - 1) * (((2^(m-3) : Nat) : Int) - 1)))) = 0 := by
+    grind
+  rcases Int.mul_eq_zero.mp hdiff with h16 | hfac
+  · exact absurd h16 (by decide)
+  · grind
+
+/-- **DEFECT TRIANGLES ARE NEGATIVE (conditional on the triangle sign law).**
+    The two-graph lane measured, for every unordered distinct triple `{a,b,c}` at
+    `W = 1`:  `M(a,b)M(b,c)M(c,a) = Pprod·(−1)^k` with `k` the number of defect edges
+    of the triple and `Pprod = −1` iff `0 ∈ {a,b,c}` (0 failures at `m = 2..6`).
+    A defect triangle has `k = 3` (odd) and no `0`-vertex (vertex `0` is isolated in
+    the defect graph, DEFECT-ALGEBRA §1), so its `M`-product is `−1`.  The law is the
+    hypothesis `hlaw`; `k` is the triple's defect-edge count, `hk` its oddity, `h0`
+    the `0`-freeness. -/
+theorem defect_triangle_M_prod (m a b c k : Nat) (hk : k % 2 = 1)
+    (h0 : ¬ (a = 0 ∨ b = 0 ∨ c = 0))
+    (hlaw : P3 a b 1 m * P3 b c 1 m * P3 c a 1 m
+      = (if a = 0 ∨ b = 0 ∨ c = 0 then (-1:Int) else 1) * (if k % 2 = 1 then -1 else 1)) :
+    P3 a b 1 m * P3 b c 1 m * P3 c a 1 m = -1 := by
+  rw [hlaw, if_neg h0, if_pos hk]; grind
+
+/-- **THE `E`-PRODUCT FORM.**  On every defect edge `M = −P` (pure coboundary flip,
+    DEFECT-ALGEBRA §1), so `E = M − P = 2M` there; the defect triangle's `E`-product is
+    `8·(−1) = −8`.  Conditional on the same sign law `hlaw`. -/
+theorem defect_triangle_E_prod (m a b c k : Nat) (hk : k % 2 = 1)
+    (h0 : ¬ (a = 0 ∨ b = 0 ∨ c = 0))
+    (hlaw : P3 a b 1 m * P3 b c 1 m * P3 c a 1 m
+      = (if a = 0 ∨ b = 0 ∨ c = 0 then (-1:Int) else 1) * (if k % 2 = 1 then -1 else 1)) :
+    (2 * P3 a b 1 m) * ((2 * P3 b c 1 m) * (2 * P3 c a 1 m)) = -8 := by
+  have h := defect_triangle_M_prod m a b c k hk h0 hlaw
+  grind
+
+/-- **SANITY, `m = 3`.**  The product-form count already forces `T3 = 0` below
+    `m = 4` — the measured triangle-freeness of the `m = 3` defect graph
+    (bipartite circulant `C₁₂{±1,±5}`, DEFECT-ALGEBRA §5). -/
+theorem t3_vanishes_at_m3 (T3 : Int)
+    (hrule : 7 * T3
+      = 96 * (((((2^(3-1) : Nat) : Int)) - 1) * (((((2^(3-2) : Nat) : Int)) - 1)
+          * (((2^(3-3) : Nat) : Int) - 1)))) :
+    T3 = 0 := by
+  grind
+
+
+
+
+/-! ### Tier 148 — the DEVIATION ASSEMBLY (conditional)
+
+`tr(M³) − tr(P³) = −36·|V*|·d − 48·T3 = −(9/7)(H−2)(H−4)(H−8) = −1728·[m,3]₂`,
+with `M(a,b) = P3 a b 1 m`, `P` the entry-law matrix, `V*` the defect-vertex set,
+`d` the defect degree and `T3` the defect-triangle count.
+
+Conditional per the lane protocol: the counting results (regularity `d = 2^m − 4`
+on `V*`, `|V*| = H − 4`, handshake `2|D| = |V*|d`, stratum counts `N1`, `N2`,
+`T3 = 288·[m−1,3]₂`, net formula) and the triangle sign law
+(`M(a,b)M(b,c)M(c,a) = Pprod·(−1)^k`) enter as hypotheses.  What is PROVED here:
+
+1. the per-triple content of the sign law: an unordered triple's six ordered
+   orderings contribute `6·(Mprod − Pprod) ∈ {0, −12·Pprod}` to the deviation,
+   split by the parity of `k` (`triple_contrib_even/odd`);
+2. the counting assembly: the stratum counts give `net = 3|V*|d + 4·T3`, hence
+   `Delta = −12·net = −36|V*|d − 48·T3` (`deviation_net_count`, `deviation_value`);
+3. the closed form: clearing the `7` in `288·[m−1,3]₂` and the `21` in `[m,3]₂`,
+   `−36|V*|d − 48·T3 = −1728·[m,3]₂` and `7·Delta = −9(H−2)(H−4)(H−8)`
+   (`deviation_closed_qbin`, `deviation_Hform_cleared`);
+4. the headline `deviation_assembly`, chaining 1–3 at level `m = k + 3`.
+
+All arithmetic steps verified numerically at m = 2..6 against the two_graph
+report (.tmp/e5_swarm/two_graph.md) before proving; see .tmp/tier148_probe.py.
+The helpers `negOnePow_two_mul'`, `negOnePow_two_mul_add_one'` are scratch-local
+(primed per protocol; not present in the main file, which has no `Int.pow`
+parity lemmas).  Powers are formed on the `Nat` side and cast, per house style.
+-/
+
+/-- Helper: even powers of `−1`.  (Scratch-local, primed per protocol.) -/
+theorem negOnePow_two_mul' (t : Nat) : (-1 : Int) ^ (2 * t) = 1 := by
+  induction t with
+  | zero => rfl
+  | succ t ih =>
+      have e : 2 * (t + 1) = (2 * t + 1) + 1 := by omega
+      rw [e, Int.pow_succ, Int.pow_succ, ih]
+      grind
+
+/-- Helper: odd powers of `−1`. -/
+theorem negOnePow_two_mul_add_one' (t : Nat) : (-1 : Int) ^ (2 * t + 1) = -1 := by
+  rw [Int.pow_succ, negOnePow_two_mul']
+  grind
+
+/-- **Per-triple sign law, raw form.**  The six orderings of one unordered
+    triple contribute `6·(Mprod − Pprod)` to `tr(M³) − tr(P³)`; the sign law
+    `Mprod = Pprod·(−1)^k` rewrites that contribution. -/
+theorem triple_contrib_scaled (Mp Pp : Int) (k : Nat)
+    (hsign : Mp = Pp * (-1 : Int) ^ k) :
+    6 * (Mp - Pp) = 6 * (Pp * ((-1 : Int) ^ k - 1)) := by
+  grind
+
+/-- **Per-triple sign law, even `k`.**  A triple with an even number of defect
+    edges contributes nothing: its `M`-product equals its `P`-product. -/
+theorem triple_contrib_even (Mp Pp : Int) (t : Nat)
+    (hsign : Mp = Pp * (-1 : Int) ^ (2 * t)) :
+    Mp - Pp = 0 := by
+  rw [negOnePow_two_mul'] at hsign
+  grind
+
+/-- **Per-triple sign law, odd `k`.**  A triple with an odd number of defect
+    edges contributes `−12·Pprod` over its six orderings (each ordering flips
+    sign, `6 × 2 = 12`). -/
+theorem triple_contrib_odd (Mp Pp : Int) (t : Nat)
+    (hsign : Mp = Pp * (-1 : Int) ^ (2 * t + 1)) :
+    6 * (Mp - Pp) = -12 * Pp := by
+  rw [negOnePow_two_mul_add_one'] at hsign
+  grind
+
+/-- **THE COUNTING ASSEMBLY.**  From the stratum counts of the two_graph lane —
+    handshake `2|D| = |V*|·d`, cherries-minus-triangles `2·N2 = |V*|·d·(d−1) − 6·T3`,
+    the `k = 1` count `N1 = |D|(H−2) − 2N2 − 3T3`, and the net switched-triple
+    formula `net = N1 − 2|D| + T3` (sign law summed over the strata) — the net
+    count collapses to `3|V*|d + 4T3`, using only `|V*| = H−4` and `H = 2d+8`
+    (i.e. `|V*| = 2d + 4`, the regularity `d = 2^m − 4` on `V*`). -/
+theorem deviation_net_count (H V d D N1 N2 T3 net : Int)
+    (hHV : V = H - 4) (hHd : H = 2 * d + 8)
+    (hD : 2 * D = V * d)
+    (hN2 : 2 * N2 = V * d * (d - 1) - 6 * T3)
+    (hN1 : N1 = D * (H - 2) - 2 * N2 - 3 * T3)
+    (hnet : net = N1 - 2 * D + T3) :
+    net = 3 * (V * d) + 4 * T3 := by
+  -- 2·net = 2·D·V − 2·(V·d·(d−1)) + 8·T3 = V·d·(V − 2(d−1)) + 8·T3 = 6·V·d + 8·T3
+  have h2 : 2 * net = V * d * (V - 2 * (d - 1)) + 8 * T3 := by
+    have hDV : 2 * D * V = V * d * V := congrArg (· * V) hD
+    grind
+  grind
+
+/-- **Deviation value.**  `Delta = −12·net` (sign law: each switched unordered
+    triple contributes `−12`) with `net = 3|V*|d + 4T3` gives the
+    `k = 1` part `−36|V*|d` plus the defect-triangle part `−48·T3`. -/
+theorem deviation_value (Delta V d T3 net : Int)
+    (hDelta : Delta = -12 * net) (hnet : net = 3 * (V * d) + 4 * T3) :
+    Delta = -36 * (V * d) - 48 * T3 := by
+  grind
+
+/-- **Closed form, q-binomial factors cleared.**  With `a = 2^m, b = 2^(m−1),
+    c = 2^(m−2), e = 2^(m−3)`, the counting result `T3 = 288·[m−1,3]₂` in the
+    cleared form `7·T3 = 96·(b−1)(c−1)(e−1)` and `[m,3]₂` in the cleared form
+    `21·g3 = (a−1)(b−1)(c−1)`, the deviation closes:
+    `−36·(2a−4)(a−4) − 48·T3 = −1728·g3`.
+    (Key: `21·LHS = −1512·u − 216·u(a−8) = −216·u(a−1) = 21·RHS` with
+    `u = (a−2)(a−4)`, using `64(b−1)(c−1)(e−1) = (a−2)(a−4)(a−8)` and
+    `8(b−1)(c−1) = (a−2)(a−4)`.) -/
+theorem deviation_closed_qbin (a b c e T3 g3 : Int)
+    (hab : a = 2 * b) (hbc : b = 2 * c) (hce : c = 2 * e)
+    (hT3 : 7 * T3 = 96 * ((b - 1) * (c - 1) * (e - 1)))
+    (hg3 : 21 * g3 = (a - 1) * (b - 1) * (c - 1)) :
+    -36 * ((2 * a - 4) * (a - 4)) - 48 * T3 = -(1728 * g3) := by
+  have key : 21 * (-36 * ((2 * a - 4) * (a - 4)) - 48 * T3)
+      = 21 * (-(1728 * g3)) := by
+    grind
+  omega
+
+/-- **The `−(9/7)(H−2)(H−4)(H−8)` form, cleared.**  Same content with
+    `V = H − 4`, `d = a − 4`, `H = 2a`. -/
+theorem deviation_Hform_cleared (H a b c e T3 : Int)
+    (hH : H = 2 * a)
+    (hab : a = 2 * b) (hbc : b = 2 * c) (hce : c = 2 * e)
+    (hT3 : 7 * T3 = 96 * ((b - 1) * (c - 1) * (e - 1))) :
+    7 * (-36 * ((H - 4) * (a - 4)) - 48 * T3)
+      = -9 * ((H - 2) * (H - 4) * (H - 8)) := by
+  grind
+
+/-- **TIER 148 HEADLINE — the deviation assembly at level `m = k + 3`.**
+    Conditional on the two_graph counting results (hypotheses `hD`, `hN2`,
+    `hN1`, `hnet`, `hT3`, `hg3`: handshake, stratum counts, net formula,
+    `T3 = 288·[m−1,3]₂` and `[m,3]₂` cleared) and on the sign law's aggregate
+    consequence `hDelta : Delta = −12·net` (each odd-`k` unordered triple flips
+    sign, contributing `−12` over its six orderings — `triple_contrib_odd`),
+    the deviation `tr(M³) − tr(P³)` is simultaneously
+
+      `−36·|V*|·d − 48·T3`        (k=1 part + defect-triangle part),
+      `−1728·[m,3]₂`              (q-binomial closed form),
+      `−9(H−2)(H−4)(H−8)/7`       (cleared: `7·Delta = −9(H−2)(H−4)(H−8)`). -/
+theorem deviation_assembly (k : Nat)
+    (Delta D N1 N2 T3 net g3 : Int)
+    (hT3 : 7 * T3
+        = 96 * ((((2 ^ (k + 2) : Nat) : Int) - 1) * (((2 ^ (k + 1) : Nat) : Int) - 1)
+          * (((2 ^ k : Nat) : Int) - 1)))
+    (hg3 : 21 * g3
+        = (((2 ^ (k + 3) : Nat) : Int) - 1) * (((2 ^ (k + 2) : Nat) : Int) - 1)
+          * (((2 ^ (k + 1) : Nat) : Int) - 1))
+    (hD : 2 * D
+        = (((2 ^ (k + 4) : Nat) : Int) - 4) * (((2 ^ (k + 3) : Nat) : Int) - 4))
+    (hN2 : 2 * N2
+        = (((2 ^ (k + 4) : Nat) : Int) - 4) * (((2 ^ (k + 3) : Nat) : Int) - 4)
+          * ((((2 ^ (k + 3) : Nat) : Int) - 4) - 1) - 6 * T3)
+    (hN1 : N1 = D * (((2 ^ (k + 4) : Nat) : Int) - 2) - 2 * N2 - 3 * T3)
+    (hnet : net = N1 - 2 * D + T3)
+    (hDelta : Delta = -12 * net) :
+    Delta
+        = -36 * ((((2 ^ (k + 4) : Nat) : Int) - 4) * (((2 ^ (k + 3) : Nat) : Int) - 4))
+          - 48 * T3
+      ∧ Delta = -(1728 * g3)
+      ∧ 7 * Delta
+        = -9 * ((((2 ^ (k + 4) : Nat) : Int) - 2) * (((2 ^ (k + 4) : Nat) : Int) - 4)
+          * (((2 ^ (k + 4) : Nat) : Int) - 8)) := by
+  -- powers of 2 at level m = k+3, with X = 2^k cast to Int (house style: Nat side, cast)
+  have hX1 : ((2 ^ (k + 1) : Nat) : Int) = 2 * ((2 ^ k : Nat) : Int) := by
+    have h : (2 : Nat) ^ (k + 1) = 2 ^ k * 2 := by rw [Nat.pow_succ]
+    omega
+  have hX2 : ((2 ^ (k + 2) : Nat) : Int) = 4 * ((2 ^ k : Nat) : Int) := by
+    have h : (2 : Nat) ^ (k + 2) = 2 * 2 * 2 ^ k := by
+      rw [Nat.pow_succ, Nat.pow_succ]; omega
+    omega
+  have hX3 : ((2 ^ (k + 3) : Nat) : Int) = 8 * ((2 ^ k : Nat) : Int) := by
+    have h : (2 : Nat) ^ (k + 3) = 2 * 2 * 2 * 2 ^ k := by
+      rw [Nat.pow_succ, Nat.pow_succ, Nat.pow_succ]; omega
+    omega
+  have hX4 : ((2 ^ (k + 4) : Nat) : Int) = 16 * ((2 ^ k : Nat) : Int) := by
+    have h : (2 : Nat) ^ (k + 4) = 2 * 2 * 2 * 2 * 2 ^ k := by
+      rw [Nat.pow_succ, Nat.pow_succ, Nat.pow_succ, Nat.pow_succ]; omega
+    omega
+  -- the counting assembly at V = 2^(k+4) − 4, d = 2^(k+3) − 4, H = 2^(k+4)
+  have hnet' : net
+      = 3 * ((((2 ^ (k + 4) : Nat) : Int) - 4) * (((2 ^ (k + 3) : Nat) : Int) - 4))
+        + 4 * T3 :=
+    deviation_net_count _ _ _ _ _ _ _ _
+      rfl
+      (by grind)
+      hD hN2 hN1 hnet
+  have hval := deviation_value Delta _ _ T3 net hDelta hnet'
+  refine ⟨hval, ?_, ?_⟩
+  · -- −1728·[m,3]₂ form
+    have hcl := deviation_closed_qbin ((2 ^ (k + 3) : Nat) : Int)
+      ((2 ^ (k + 2) : Nat) : Int) ((2 ^ (k + 1) : Nat) : Int) ((2 ^ k : Nat) : Int)
+      T3 g3
+      (by grind) (by grind) (by grind) hT3 hg3
+    grind
+  · -- 7·Delta = −9(H−2)(H−4)(H−8) form
+    have hHf := deviation_Hform_cleared ((2 ^ (k + 4) : Nat) : Int)
+      ((2 ^ (k + 3) : Nat) : Int) ((2 ^ (k + 2) : Nat) : Int)
+      ((2 ^ (k + 1) : Nat) : Int) ((2 ^ k : Nat) : Int) T3
+      (by grind) (by grind) (by grind) (by grind) hT3
+    grind
+
 end SounioZDFiberAntisym
