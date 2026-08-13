@@ -3550,3 +3550,18 @@ notes: |
   in Dref_mixed, then induction on level).  Once that lands, discharge hflipL/hflipR/hR3
   (T144), hrule/hlaw (T146), the stratum counts (T148), and E5 closes.
   No claims active; even tiers ≥ 150 free.
+
+  UPDATE (kimi, 2026-08-13, wave 3): **Tiers 150–154 LANDED, GREEN — `c167369ae1`.**
+  The defect rule is now PROVED infrastructure: `Rp_R3` (the R3 recursion, unconditional),
+  `eDef_flipL/R` (bounded flips), and `defect_regular_free` (degree 2^m−4 on V*,
+  UNCONDITIONAL — Tier 144's hypotheses discharged; note Tier 144's original unbounded
+  hflipL/hflipR were FALSE and are now the bounded forms, measured counterexample in the
+  commit message).  Tier 152: hlaw + all four stratum counts in Tier 148's exact shapes.
+  Tier 154: the subspace count [n,3]₂ as a real sumLtI count, unconditional; hrule from
+  hmult.  **E5's remaining open pieces, in dependency order**: (1) `hentry` — the
+  entrywise sign law M = ±P (mechanical from eDef's definition + P3_pm + col0 law);
+  (2) `hiso` — spine isolation (from T150's Dref_seam_left'/right'); (3) `hDelta` — the
+  aggregate Δ = −12·net (sumLtI³ stratum decomposition); (4) `hmult` — the 18×16
+  orbit-triples-per-subspace enumeration, THE last genuinely open mathematics.
+  After those four, Tier 146's hrule and Tier 148's assembly discharge and
+  s3(1) = poly(H) − 1728·[m,3]₂ is a theorem.  No claims active; even tiers ≥ 156 free.
