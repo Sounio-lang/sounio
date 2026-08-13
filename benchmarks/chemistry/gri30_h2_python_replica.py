@@ -27,7 +27,7 @@ D = json.load(open(os.path.join(HERE, "gri30_h2_mechanism.json")))
 RX = D["reactions"]
 NR = len(RX)
 R_SI = 8.314462618
-P0 = 1.0e5
+P0 = 101325.0  # CHEMKIN/GRI standard state: 1 atm
 
 nasa = {s: D["species"][s]["coeffs"] for s in SP}
 A = [r["fwd"][0] for r in RX]
@@ -35,12 +35,14 @@ B = [r["fwd"][1] for r in RX]
 EA = [r["fwd"][2] for r in RX]
 TYPE = [{"arrhenius": 0, "three-body": 1, "falloff": 2}[r["type"]] for r in RX]
 reac = [[0.0] * NSP for _ in range(NR)]
+prod = [[0.0] * NSP for _ in range(NR)]
 nu = [[0.0] * NSP for _ in range(NR)]
 for i, r in enumerate(RX):
     for s, v in r["react"].items():
         reac[i][SP.index(s)] = v
         nu[i][SP.index(s)] -= v
     for s, v in r["prod"].items():
+        prod[i][SP.index(s)] = v
         nu[i][SP.index(s)] += v
 dn = [sum(nu[i]) for i in range(NR)]
 eff = [[1.0] * NSP for _ in range(NR)]
@@ -117,7 +119,7 @@ def rates_net(t, c, kc):
                 fwd *= c[s] ** reac[r][s]
         rev = kf / kc[r]
         for s in range(NSP):
-            p = reac[r][s] - nu[r][s]
+            p = prod[r][s]
             if p > 0:
                 rev *= c[s] ** p
         out.append(fwd - rev)

@@ -238,7 +238,7 @@ The result was verified computationally in Sounio and independently reproduced i
 
 ## Get started
 
-This checkout ships checked self-hosted compiler artifacts for Linux `x86_64`, macOS `arm64`, and macOS `x86_64` behind the host-aware `bin/souc` launcher, which is the official compiler entrypoint and routes to Madaros by default. No Rust build step is required for the default workflow.
+This checkout ships checked self-hosted compiler artifacts for Linux `x86_64` behind the host-aware `bin/souc` launcher, which is the official compiler entrypoint and routes to Madaros by default. The checked `bin/souc-*` binaries are Linux ELF artifacts; macOS is a cross-compile target rather than a host-native binary lane. No Rust build step is required for the default workflow.
 
 ```bash
 git clone https://github.com/sounio-lang/sounio.git
