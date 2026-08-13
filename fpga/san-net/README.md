@@ -146,3 +146,35 @@ networklayer degradando com uso; alguma condição de corrida no próprio
 `networklayer` de terceiros (VNx) que só aparece sob re-uso intenso. Medir
 isso exigiria uma bancada dedicada (não compartilhada) e provavelmente
 capturas de tráfego mais longas — fora do escopo de hoje.
+
+## Terceira rodada: a causa era ARP indo STALE, não o networklayer (2026-08-13, final)
+
+`ip neigh show 10.100.100.50` no injetor mostrava a entrada em **STALE**
+depois de qualquer hiato (editar um script, rodar `git commit`, etc.). Teste
+direto confirmou: `ping -c1` isolado, um por vez com 1s de intervalo, perdeu
+1 em cada poucos; um stream contínuo de 40 pings a 0,3s não perdeu nenhum.
+
+Isso bate exatamente com o padrão de falha observado: as três corridas que
+passaram seguidas (8, 8, 12 Gbit/s) ficaram próximas no tempo; a que falhou
+veio depois de eu editar e reimplantar `run_measurement.sh` — minutos de
+hiato no meio, tempo suficiente para a entrada ARP envelhecer.
+
+**Correção:** `run_measurement.sh` agora manda 3 pings (`ping -c3 -i0.2`)
+para a FPGA imediatamente antes da rajada de UDP. O ICMP echo-reply confirma
+o vizinho dos dois lados (kernel do injetor e `arp_server` da FPGA) antes do
+tráfego de dados começar.
+
+**Efeito colateral achado no caminho:** a primeira tentativa com o
+aquecimento falhou — mas não por causa do ARP. O script antigo usava
+`set -euo pipefail`; quando um passo falhava depois de armar, o `ctl_san`
+já lançado em segundo plano ficava **órfão**, segurando o contexto do
+dispositivo (`xrt::device`) aberto. A tentativa seguinte falhava com
+`ERRO: failed to open cu context: Invalid argument` — um sintoma totalmente
+diferente que mascarava a causa raiz. Corrigido com `trap` que mata o
+`ctl_san` armado se qualquer passo posterior falhar.
+
+**Confirmado 3× seguidas** com o aquecimento de ARP no lugar, taxa de
+8 Gbit/s, todas bit-exatas, zero perda real (`eth_in` delta ~7150-7190
+contra 7143 pacotes enviados, dentro do ruído de fundo). Ainda não é uma
+prova de que a intermitência acabou de vez — só três corridas — mas a causa
+agora tem um mecanismo plausível e testável, não é mais um mistério.
