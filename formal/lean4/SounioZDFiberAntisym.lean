@@ -24955,6 +24955,70 @@ theorem core_pin_cba (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
   rw [h1, sumLtI_epsZero _ hp, sumLtI_sigRow (2^(m+1)) W hW, hs0]
   grind
 
+/-! ## Tier 158 — `hiso`, spine isolation (UNCONDITIONAL)
+
+    `cherry_total` / `stratum_handshake` / `odd_has0_eq_k1` / `k1_has0_eq_edges` /
+    `k3_has0_vanishes` (and others) take spine isolation as a hypothesis parameter `hiso`:
+    at level `m = k+3`, every "spine" vertex `x` — `x < 2^(k+4)` with `x % 2^(k+3) < 2`, i.e.
+    `x ∈ {0, 1, 2^(k+3), 2^(k+3)+1}` — has no defect partner at all. This tier discharges it
+    as a real theorem.
+
+    Route (measured first, `scripts/research/zd_e5_hiso_probe.py`, `k = 0..5`, 4032 checks
+    within the window, 0 failures):
+
+    1. `x ∈ {0,1}`: `isDefect`'s own `x/2 ≠ 0` clause is false directly — no `eDef` needed.
+    2. `x ∈ {2^(k+3), 2^(k+3)+1}` (so `x/2 = 2^(k+2) ≠ 0`): split on `y/2`.
+       - `y/2 = 0`: `isDefect`'s `y/2 ≠ 0` clause fails.
+       - `y/2 = 2^(k+2)` (`y` itself on the spine): `isDefect`'s `x/2 ≠ y/2` clause fails.
+       - otherwise: `eDef (k+3) x y = 1`, from `eDef_seam_left'` directly for
+         `x = 2^(k+3)`, and for `x = 2^(k+3)+1` by chaining `eDef_flipL` (flip bit `0` of the
+         left argument, `2·2^(k+2)+1 ↦ 2·2^(k+2)`, landing back on `2^(k+3)`) with the same
+         `eDef_seam_left'` value.
+
+    **The bound hypothesis `hy` (`y < 2^(k+4)`) is load-bearing**, the same situation as
+    `hentry_law`'s `hx`/`hy`: measured FALSE for `y` outside the window
+    (`scripts/research/zd_e5_hiso_probe.py`, 120/5952 failures on an unbounded sweep of `y`,
+    `k = 0..4`) — off the spine, past the window, `x/2 ≠ y/2` no longer rescues the claim for
+    a vacuous reason and `eDef` itself is not `1` there in general (`eDef_seam_left'` and
+    `eDef_flipL` both carry their own window bounds on `y`/`b`, and genuinely need them).
+    Every actual use of `hiso`'s `y` argument in this file applies it to a `y` that is already
+    known `< 2^(k+4)` (always the outer `sumLtI` bound variable), so this bounded form is
+    exactly what those proofs need; a caller wanting the literal unbounded `hiso` hypothesis
+    needs a separate argument for out-of-window `y`. -/
+
+theorem hiso_law (k x : Nat) (hx : x < 2^(k+4)) (hxs : x % 2^(k+3) < 2)
+    (y : Nat) (hy : y < 2^(k+4)) :
+    ¬ isDefect (k+3) x y := by
+  intro hdef
+  obtain ⟨hx2, hy2, hxy2, hE⟩ := hdef
+  have hpow4 : (2:Nat)^(k+4) = 2^(k+3) + 2^(k+3) := by rw [Nat.pow_succ]; omega
+  have hxcase : x = 2^(k+3) ∨ x = 2^(k+3) + 1 := by
+    rcases Nat.lt_or_ge x (2^(k+3)) with hlt | hge
+    · exfalso
+      rw [Nat.mod_eq_of_lt hlt] at hxs
+      omega
+    · have hlt2 : x - 2^(k+3) < 2^(k+3) := by omega
+      rw [Nat.mod_eq_sub_mod hge, Nat.mod_eq_of_lt hlt2] at hxs
+      omega
+  have hApos2 : (0:Nat) < 2^(k+2) := Nat.two_pow_pos (k+2)
+  have hpow3 : (2:Nat)^(k+3) = 2 * 2^(k+2) := by rw [Nat.pow_succ]; omega
+  have hxdiv : x / 2 = 2^(k+2) := by rcases hxcase with h | h <;> rw [h, hpow3] <;> omega
+  rcases (by omega : y / 2 = 0 ∨ y / 2 = 2^(k+2) ∨ (y / 2 ≠ 0 ∧ y / 2 ≠ 2^(k+2)))
+    with hy0 | hyeq | ⟨hy2ne0, hyne⟩
+  · exact hy2 hy0
+  · exact hxy2 (by rw [hxdiv, hyeq])
+  · have hy0' : y ≠ 0 := by omega
+    have hyA : y ≠ 2^(k+3) := by
+      intro hcontra; apply hyne; rw [hcontra, hpow3]; omega
+    have hseam : eDef (k+3) (2^(k+3)) y = 1 := eDef_seam_left' (k+2) y hy hy0' hyA
+    rcases hxcase with h | h
+    · exact hE (by rw [h]; exact hseam)
+    · have h2X : (2:Nat)^(k+2) < 2^(k+3) := by omega
+      have hX0' : (2:Nat)^(k+2) ≠ 0 := by omega
+      have hflip := eDef_flipL (k+3) (by omega) (2^(k+2)) y h2X hy hX0' hy2ne0 (Ne.symm hyne)
+      rw [← hpow3] at hflip
+      exact hE (by rw [h, hflip]; exact hseam)
+
 /-! ### Tier 151 — the routing's term 2 IS `R2`, by the coset reindexing
 
     The one step of the `T1` assembly with content rather than bookkeeping.  Tier 145's second term

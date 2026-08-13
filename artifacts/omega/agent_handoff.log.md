@@ -3593,3 +3593,37 @@ notes: |
   `sorry`/new axioms/`native_decide`.  Claim released; even tiers ≥ 158 free.  **Next in
   the dependency chain**: `hiso` (spine isolation, from T150's `Dref_seam_left'`/`right'`),
   then `hDelta`, then `hmult` (the last genuinely open mathematics).
+
+  UPDATE (claude, 2026-08-13): **Tier 158 LANDED, GREEN — `hiso_law` is proved
+  unconditionally.**  Claimed lane `zd-e5-tier158-hiso`; scope was `hiso` only, the second
+  of wave-3's four remaining pieces (hDelta, hmult still open, in that order).
+  `hiso_law (k x : Nat) (hx : x < 2^(k+4)) (hxs : x % 2^(k+3) < 2) (y : Nat)
+  (hy : y < 2^(k+4)) : ¬ isDefect (k+3) x y` — spine isolation: every vertex
+  `x ∈ {0, 1, 2^(k+3), 2^(k+3)+1}` has no defect partner `y` in the window.  Route:
+  `x ∈ {0,1}` is immediate from `isDefect`'s own `x/2 ≠ 0` clause; for
+  `x ∈ {2^(k+3), 2^(k+3)+1}` (`x/2 = 2^(k+2) ≠ 0`), split on `y/2`: `y/2 = 0` or
+  `y/2 = 2^(k+2)` (`y` itself on the spine) kill `isDefect`'s other two negative clauses
+  directly, and the residual case gets `eDef (k+3) x y = 1` from `eDef_seam_left'`
+  directly (`x = 2^(k+3)`) chained with `eDef_flipL` (`x = 2^(k+3)+1`: flip bit `0` of the
+  left argument, landing back on the `x = 2^(k+3)` value).  **Caution, same shape as
+  `hentry_law`'s**: the bound hypothesis `hy` is load-bearing — measured FALSE for `y`
+  outside `[0, 2^(k+4))` (120/5952 failures on an unbounded sweep, `k = 0..4`;
+  `scripts/research/zd_e5_hiso_probe.py`, PASS), because off the spine and past the
+  window `x/2 ≠ y/2` no longer rescues the claim vacuously and `eDef_seam_left'`/
+  `eDef_flipL` both genuinely need their own window bounds on `y`/`b`.  Every actual
+  `hiso` call site in this file (`cherry_total`, `stratum_handshake`,
+  `odd_has0_eq_k1`/`k1_has0_eq_edges`/`k3_has0_vanishes`) applies `y` only when it is
+  already known `< 2^(k+4)` (the outer `sumLtI` bound variable), so the bounded form is
+  what those proofs actually need.  One proof snag along the way, noted for the next
+  tier: `omega` cannot reason through `x % A` for a symbolic (non-literal) modulus `A`
+  directly — it introduces the mod as a loosely-bounded fresh atom rather than linking it
+  to `x` and `A` via the Euclidean equation, so a direct `by omega` on a goal mixing
+  `x % 2^(k+3) < 2` with `x < 2^(k+4)` fails; the fix is the standard house pattern
+  (`Nat.mod_eq_of_lt` / `Nat.mod_eq_sub_mod` to eliminate the symbolic `%` by hand before
+  handing the rest to `omega`), matching what `vstar_count` already does elsewhere in this
+  file — division by a *literal* constant (`x / 2`) is unaffected and omega handles it
+  fine throughout.  Kernel-clean under the direct `lean -j1 -s65536` build (no `lake`),
+  zero errors, only pre-existing style warnings, no `sorry`/new axioms/`native_decide`.
+  Claim released; even tiers ≥ 160 free.  **Next in the dependency chain**: `hDelta` (the
+  aggregate Δ = −12·net, sumLtI³ stratum decomposition), then `hmult` (the 18×16
+  orbit-triples-per-subspace enumeration — still the last genuinely open mathematics).
