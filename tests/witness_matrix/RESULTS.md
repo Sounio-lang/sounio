@@ -124,3 +124,36 @@ Afirmação que a evidência sustenta: **o round-trip por f32 destrói a parte f
 perda ocorre no store (`as f32`) ou no load (`as f64` de volta) — não superespecificar sem uma
 sonda que separe os dois. O que está descartado: a comparação f32 (funciona nos dois sentidos)
 e a aritmética f64.
+
+---
+
+## Verificação pós-fix (2026-08-14, controlada)
+
+Três compiladores, mesma matriz:
+
+| Compilador | Resultado | w4 | w4b | w7 | w5 |
+|---|---|---|---|---|---|
+| `bin/souc` enviado (prebuilt 25/jul) | 11/13 | 0 | 100 | 20 | **42 OK** |
+| fonte da `main`, sem meus commits | **11/15** | 0 | 100 | 20 | **COMPILE-FAIL** |
+| fonte da `main` + meus commits | **14/15** | **12** | **150** | **30** | COMPILE-FAIL |
+
+Ou seja: os fixes fecham w4, w4b e w7 e **regridem zero** casos. O w5 falha de forma
+idêntica no controle sem os meus commits, logo **não é regressão minha**.
+
+### Achado independente: o binário enviado e a fonte da main divergem
+
+w5 (closure sem captura) **compila e roda 42** sob o `bin/souc` enviado, mas o compilador
+construído da fonte atual da `main` recusa:
+
+    error: IR instruction arena contract violated (invalid handle) on region slot -1 generation -1
+    Error: refusing to write a binary built on a violated IR arena contract
+
+A recusa em si é o comportamento certo (fail-closed, sem emitir binário). O problema é a
+divergência: `bin/madaros-linux-x86_64` é de 25 de julho e antecede a landing da arena de IR
+(PR #1695/#1651). Quem usa o compilador enviado vê closures funcionando; quem constrói da
+fonte, não. O gate que pegaria isso -- `madaros_full_gate` / `madaros_source_to_elf_gate` --
+roda **apenas** no workflow agendado `madaros-prebuilt-refresh.yml`, onde falha e um
+`::warning::` que pula o refresh e nunca deixa a main vermelha.
+
+Esta e exatamente a patologia que o Tier 1 item 4 do plano descreve: gate que existe e nunca
+bloqueia. Nao investiguei a causa da violacao da arena -- esta fora do escopo despachado.

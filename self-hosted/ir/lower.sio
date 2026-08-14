@@ -4487,36 +4487,17 @@ fn lowerer_lower_program_items_mut(
 
 // Sprint 87: helpers for ExprCast type-aware lowering
 fn lower_cast_type_is_f64(ct: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
-    match *ct {
-        Some(te) => {
-            let seg = (*te).path.segments
-            if seg.head_len != 3 { return false }
-            if seg.head_buf[0] as i64 != 102 { return false }   // 'f'
-            if seg.head_buf[1] as i64 != 54 { return false }    // '6'
-            if seg.head_buf[2] as i64 != 52 { return false }    // '4'
-            true
-        }
-        None => false,
-    }
-}
-
-// `as f32` was recognised by NEITHER the f64-target branch nor the integer
-// classifier, so a float source fell through to the float_to_int arm of
-// lower_cast_expr_ref and (1.5 as f32) became 1.0 -- a silent, value-destroying
-// truncation on a well-typed program. The backend represents f32 as f64, so a
-// float-to-f32 cast is a pass-through here.
-// KNOWN RESIDUAL (declared, not silent): this does NOT round to true single
-// precision -- it preserves the f64 value. Narrowing to real IEEE binary32
-// needs an f32 representation in the backend, which does not exist yet.
-fn lower_cast_type_is_f32(ct: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
+    // Accepts f32 as well -- see lower_type_expr_is_f64. `as f32` matched neither
+    // this nor the integer classifier, so a float source fell through to the
+    // float_to_int arm of lower_cast_expr_ref and (1.5 as f32) became 1.0.
     match *ct {
         Some(te) => {
             let seg = (*te).path.segments
             if seg.head_len != 3 { return false }
             if seg.head_buf[0] as i64 != 102 { return false }   // f
-            if seg.head_buf[1] as i64 != 51 { return false }    // 3
-            if seg.head_buf[2] as i64 != 50 { return false }    // 2
-            true
+            let is_64 = seg.head_buf[1] as i64 == 54 && seg.head_buf[2] as i64 == 52
+            let is_32 = seg.head_buf[1] as i64 == 51 && seg.head_buf[2] as i64 == 50
+            is_64 || is_32
         }
         None => false,
     }
@@ -4540,10 +4521,16 @@ fn lower_type_expr_is_f64(te: &TypeExpr) -> bool with Mut, Panic, Div {
     if (*te).kind != TypeExprKind::TypeNamed { return false }
     let seg = (*te).path.segments
     if seg.head_len != 3 { return false }
-    if seg.head_buf[0] as i64 != 102 { return false }   // 'f'
-    if seg.head_buf[1] as i64 != 54 { return false }    // '6'
-    if seg.head_buf[2] as i64 != 52 { return false }    // '4'
-    true
+    if seg.head_buf[0] as i64 != 102 { return false }   // f
+    // Accept BOTH f64 and f32: the backend has no separate f32 representation
+    // (f32 is carried as f64), so all 17 call sites of this predicate mean
+    // -- is this a float scalar? -- not -- is this spelled f64?. While f32 was
+    // rejected here, a local declared f32 got scalar_kind 0 instead of 2, so
+    // `x as f64` on it took the int_to_float arm and reinterpreted the bit
+    // pattern of a double as an integer.
+    let is_64 = seg.head_buf[1] as i64 == 54 && seg.head_buf[2] as i64 == 52
+    let is_32 = seg.head_buf[1] as i64 == 51 && seg.head_buf[2] as i64 == 50
+    is_64 || is_32
 }
 
 // println i64-segfault fix: mirror lower_type_expr_is_f64 for i64 so a struct
@@ -15437,7 +15424,7 @@ impl Lowerer {
                 wi = wi + 1
             }
             (lo2, dst)
-        } else if lower_cast_type_is_f64(&e.cast_type) || lower_cast_type_is_f32(&e.cast_type) {
+        } else if lower_cast_type_is_f64(&e.cast_type) {
             if source_is_float {
                 return (lo1, src_reg)
             }
