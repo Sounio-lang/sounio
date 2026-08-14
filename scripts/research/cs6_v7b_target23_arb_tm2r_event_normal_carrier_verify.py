@@ -433,6 +433,22 @@ def main() -> None:
             stats = result["carrier_stats"]
             if stats.get("section_anchored_reconditionings", 0) < 2:
                 fail("accepted transport lacks an event-local section anchor")
+            accepted = diagnostic.get("accepted_projection")
+            if not isinstance(accepted, dict):
+                fail("accepted transport lacks its accepted projection")
+            carriers = accepted.get("carriers")
+            if not isinstance(carriers, list) or not carriers:
+                fail("accepted projection has no carriers")
+            for carrier in carriers:
+                if not isinstance(carrier, dict):
+                    fail("accepted projection carrier is malformed")
+                weights = carrier.get("variable_weights")
+                if not isinstance(weights, list) or len(weights) < 6:
+                    fail("accepted projection lacks six primary weights")
+                if not all(interval(weight, "accepted primary weight")[1] > 0 for weight in weights[:6]):
+                    fail("accepted projection lost a primary symbolic variable")
+                if carrier.get("all_six_variable_weights_present") is not True:
+                    fail("accepted projection primary-weight flag is false")
         expected = (
             "IMPLEMENTATION_INCONSISTENCY"
             if result.get("implementation_checks_passed") is not True

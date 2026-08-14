@@ -665,6 +665,37 @@ def frozen_witness_state(
     return state
 
 
+def require_six_primary_weights(record: dict[str, object]) -> dict[str, object]:
+    """Re-evaluate symbolic preservation without treating carrier axes as sources."""
+    carriers = record.get("carriers")
+    if not isinstance(carriers, list) or not carriers:
+        return record
+    all_primary_present = True
+    for carrier in carriers:
+        if not isinstance(carrier, dict):
+            all_primary_present = False
+            continue
+        weights = carrier.get("variable_weights")
+        present = (
+            isinstance(weights, list)
+            and len(weights) >= PRIMARY_VARIABLES
+            and all(
+                isinstance(weight, list)
+                and len(weight) == 2
+                and Fraction(str(weight[1])) > 0
+                for weight in weights[:PRIMARY_VARIABLES]
+            )
+        )
+        carrier["all_six_variable_weights_present"] = present
+        all_primary_present = all_primary_present and present
+    record["all_six_variable_weights_present"] = all_primary_present
+    record["accepted"] = all_primary_present
+    record["status"] = (
+        "ACCEPTED" if all_primary_present else "EVENT_SYMBOLIC_DEPENDENCE_UNRESOLVED"
+    )
+    return record
+
+
 def lineage_one_step(state: list[base.TM2R]) -> tuple[list[base.TM2R], list[arb]]:
     original = base.recondition
     base.recondition = witness.prior.lineage_preserving_recondition
@@ -868,7 +899,20 @@ def run_transport(
         "initial_xi_eta_preserved",
         initial_weights[0].upper() > 0 and initial_weights[1].upper() > 0,
     )
-    diagnostic = witness.diagnose_upward_event(witness_state)
+    original_try_projection = witness.try_projection
+
+    def try_projection_with_primary_scope(
+        state: list[base.TM2R], reference_time: Fraction, label: str
+    ) -> dict[str, object]:
+        return require_six_primary_weights(
+            original_try_projection(state, reference_time, label)
+        )
+
+    witness.try_projection = try_projection_with_primary_scope
+    try:
+        diagnostic = witness.diagnose_upward_event(witness_state)
+    finally:
+        witness.try_projection = original_try_projection
     xi_eta_preserved: bool | None = None
     accepted = diagnostic.get("accepted_projection")
     if isinstance(accepted, dict):
@@ -882,6 +926,17 @@ def run_transport(
                 and Fraction(str(weights[1][1])) > 0
             )
     bool_check(checks, "event_normal_reconditioner_active", base.recondition is event_normal_recondition)
+    bool_check(
+        checks,
+        "symbolic_acceptance_scoped_to_six_primary_variables",
+        all(
+            carrier.get("all_six_variable_weights_present") is True
+            for attempt in diagnostic.get("projection_attempts", [])
+            if isinstance(attempt, dict) and attempt.get("accepted") is True
+            for carrier in attempt.get("carriers", [])
+            if isinstance(carrier, dict)
+        ),
+    )
     if xi_eta_preserved is not None:
         bool_check(checks, "terminal_xi_eta_coordinates_retained", xi_eta_preserved)
     transport_stats = stats_json()
@@ -953,6 +1008,23 @@ def main() -> None:
     bool_check(checks, "budget_receipt_hash_matches", sha256(budget_receipt) == EXPECTED_BUDGET_SHA256)
     bool_check(checks, "witness_classification_matches", witness_payload.get("classification") == "WITNESS_TRANSVERSALITY_UNRESOLVED")
     bool_check(checks, "budget_classification_matches", baseline.get("classification") == "DERIVATIVE_INTERVAL_REMAINDER_DOMINANT")
+    primary_scope_control = require_six_primary_weights(
+        {
+            "carriers": [
+                {
+                    "variable_weights": [
+                        *([["0", "1"]] * PRIMARY_VARIABLES),
+                        *([["0", "0"]] * CARRIER_VARIABLES),
+                    ]
+                }
+            ]
+        }
+    )
+    bool_check(
+        checks,
+        "six_primary_scope_ignores_zero_carrier_axes",
+        primary_scope_control.get("accepted") is True,
+    )
 
     result = (
         run_preflight(witness_payload, baseline, checks)
