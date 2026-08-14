@@ -115,3 +115,60 @@ métrica golden. Isso é ordens de magnitude menor do que "levar o corpus a 100%
 
 O deliverable único (um estranho instala e roda) continua valendo, e agora sem a premissa
 falsa de que era preciso rebaixar a versão para chegar lá.
+
+---
+
+## ATUALIZAÇÃO (2026-08-14, mesmo dia) — de "um defeito" para 6 de 7 lanes verdes
+
+A seção anterior generalizou cedo demais: dizer "um defeito, não sete" a partir de um
+trecho de saída, sem rodar cada lane. Terceira vez no mesmo dia que inferir em vez de
+medir me deu um número errado -- registrado aqui porque é padrão, não acaso.
+
+Medido lane por lane, eram **três causas distintas**:
+
+| Causa | Lanes | Tamanho |
+|---|---|---|
+| Export faltando (E175) + forma de import não suportada | nn, onn, math, spnn, quantnn | 5 lanes |
+| Módulo com erros de tipo genuínos (f32/f64, `.sqrt()`, `tanh` inexistente no backend) | qnn, math, snn | sobreposto acima |
+| Coerção de literal float→f32 ausente no checker (2 sites: contextual e operando binário) | onn, nn | via o defeito 1 |
+
+3 agentes em paralelo + 1 fix de compilador depois: **6 de 7 lanes compilam, rodam e emitem
+o marcador `HYPER_*_OK`**, partindo de 0.
+
+    test_hyper_math_e2e        compile=0 run=0 HYPER_MATH_OK
+    test_hyper_qnn_e2e         compile=0 run=0 HYPER_QNN_OK
+    test_spiking_e2e           compile=0 run=0 HYPER_SPNN_OK
+    test_quantum_e2e           compile=0 run=0 HYPER_QUANTNN_OK
+    test_hyper_onn_e2e         compile=0 run=0 HYPER_ONN_OK
+    test_hyper_quaternion_e2e  compile=0 run=0 HYPER_NN_OK
+    test_snn_e2e               compile=1 NO-ELF
+
+O `golden_mismatch` de `nn sum_w` do relato original também se resolveu sozinho: não era
+defeito separado, era o `nn` nunca tendo chegado a rodar. Agora emite `sum_w 2.000000`,
+igual ao `expected: 2.0` do gate.
+
+A correção de compilador que destravou 2 das 5 lanes do primeiro grupo (onn, nn) foi a
+coerção de literal float→f32 no checker -- que também fecha, do outro lado, o miscompile
+do Tier 0 (`as f32` truncava porque não havia caminho de coerção; ver `tests/witness_matrix/`).
+Os dois problemas eram o mesmo visto de dois ângulos.
+
+`snn` fica **FAIL_HONEST**, não contornado: falha em codegen nativo (crescer array de
+struct via `++`), reduzido a 5 linhas sem imports. Dava para "passar" mudando o tipo
+público de `SedenionLayer` para array fixo, mas isso esconderia um defeito de compilador
+atrás de uma mudança de API -- não fiz.
+
+### O que isso muda no caminho crítico
+
+A barra de `beta` (`stdlib_reliability_status.v1.json` = pass) está a **uma lane** de
+distância, não sete. Mas continua valendo a ressalva anterior: não posso declarar o gate
+oficial verde a partir de execução local -- e agora sei por quê de forma mais precisa.
+`scripts/stdlib/stdlib_hyper_execution_gate.sh:174` faz
+`export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"`, e essa é a
+**mesma linha em 50 scripts de CI** -- não bug isolado, padrão deliberado do repositório
+que vira armadilha quando `SOUNIO_STDLIB_PATH` está exportado globalmente (como o
+próprio `CLAUDE.md` manda fazer fora da raiz). Rodar o gate de um worktree lê a stdlib
+do checkout compartilhado. Mudar isso é decisão de arquitetura de CI sobre 50 arquivos,
+não conserto de uma linha -- registrado, não executado.
+
+Trabalho consolidado em `worktree-witness-matrix-20260814` (PR #1737), três lanes
+paralelas mergeadas sem conflito (conjuntos de arquivos disjuntos) + o fix final.
