@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# Tier 0 witness matrix.
+#
+# Measures the canonical witnesses from .claude/workflows/*-round.js against
+# WHATEVER compiler is handed to it. Every defect below is CLOSED on branch
+# integration/native-v2-honest (tip 60686c617b) and was NEVER MERGED to main.
+# This answers the only question that matters for launch: does the shipped
+# tree exhibit them? Measured 2026-08-14: 8/10 closed, w4 and w7 OPEN.
+#
+# Usage: bash tests/witness_matrix/run.sh [path-to-souc]
+set -u
+SOUC="${1:-./bin/souc}"
+SOUC="$(cd "$(dirname "$SOUC")" && pwd)/$(basename "$SOUC")"  # absolutise: run_mm/run_reject cd into the case dir
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+CASES="$ROOT/cases"
+TMP="$(mktemp -d)"
+PASS=0
+TOTAL=0
+OPEN=0
+
+run_value() {
+  id="$1"; file="$2"; want="$3"; wrong="$4"; origin="$5"
+  TOTAL=$((TOTAL+1))
+  elf="$TMP/$id.elf"
+  rm -f "$elf"
+  "$SOUC" compile "$file" -o "$elf" >"$TMP/$id.log" 2>&1
+  if [ ! -f "$elf" ]; then
+    printf "%-5s %-20s %-9s %-7s %s\\n" "$id" "COMPILE-FAIL" "-" "$want" "$origin"
+    OPEN=$((OPEN+1))
+    return
+  fi
+  chmod +x "$elf" 2>/dev/null
+  "$elf" >/dev/null 2>&1
+  got=$?
+  if [ "$got" = "$want" ]; then
+    status="CLOSED"; PASS=$((PASS+1))
+  elif [ "$got" = "$wrong" ]; then
+    status="OPEN-MISCOMPILE"; OPEN=$((OPEN+1))
+  else
+    status="OPEN-OTHER"; OPEN=$((OPEN+1))
+  fi
+  printf "%-5s %-20s %-9s %-7s %s\\n" "$id" "$status" "$got" "$want" "$origin"
+}
+
+run_reject() {
+  id="$1"; file="$2"; origin="$3"
+  TOTAL=$((TOTAL+1))
+  if (cd "$(dirname "$file")" && "$SOUC" check "$(basename "$file")" >/dev/null 2>&1); then
+    printf "%-5s %-20s %-9s %-7s %s\\n" "$id" "OPEN-ACCEPTS-ILLTYPED" "accepted" "REJECT" "$origin"
+    OPEN=$((OPEN+1))
+  else
+    printf "%-5s %-20s %-9s %-7s %s\\n" "$id" "CLOSED" "rejected" "REJECT" "$origin"
+    PASS=$((PASS+1))
+  fi
+}
+
+run_mm() {
+  id="$1"; want="$2"; origin="$3"
+  TOTAL=$((TOTAL+1))
+  rm -f "$TMP/$id.elf"
+  (cd "$CASES/mm" && "$SOUC" compile prog.sio -o "$TMP/$id.elf") >"$TMP/$id.log" 2>&1
+  if [ ! -f "$TMP/$id.elf" ]; then
+    printf "%-5s %-20s %-9s %-7s %s\\n" "$id" "COMPILE-FAIL" "-" "$want" "$origin"
+    OPEN=$((OPEN+1))
+    return
+  fi
+  chmod +x "$TMP/$id.elf" 2>/dev/null
+  "$TMP/$id.elf" >/dev/null 2>&1
+  got=$?
+  if [ "$got" = "$want" ]; then
+    printf "%-5s %-20s %-9s %-7s %s\\n" "$id" "CLOSED" "$got" "$want" "$origin"
+    PASS=$((PASS+1))
+  else
+    printf "%-5s %-20s %-9s %-7s %s\\n" "$id" "OPEN" "$got" "$want" "$origin"
+    OPEN=$((OPEN+1))
+  fi
+}
+
+echo "witness matrix -- compiler: $SOUC"
+"$SOUC" --version 2>&1 | head -1
+echo
+printf "%-5s %-20s %-9s %-7s %s\\n" ID STATUS GOT WANT ORIGIN
+
+run_value w1  "$CASES/w1_literal_coercion.sio"            0  99 "literal-coercion 4acea3a59e"
+run_value w2  "$CASES/w2_float_arith_params.sio"          7   0 "float-arith params 2286fb6d5d"
+run_value w3  "$CASES/w3_float_arith_fields.sio"          7   0 "float-arith fields c2a783f270"
+run_value w3c "$CASES/w3c_float_memlit_control.sio"       4  99 "CONTROL mem+literal"
+run_value w4  "$CASES/w4_f32_compare.sio"                12   0 "M1 a436a68712 -- see RESULTS.md: real cause is as-f32 truncation"
+run_value w4c "$CASES/w4c_f64_compare_control.sio"       12   0 "CONTROL f64 compare"
+run_value w5  "$CASES/w5_closure_nocapture.sio"          42   1 "M2 320f4d2352"
+run_value w6  "$CASES/w6_match_guard.sio"                 7 100 "soundness-3 BUG A 5ca40eee31"
+run_value w7  "$CASES/w7_enum_discriminant.sio"          30  20 "soundness-3 BUG B e71eac8d99"
+run_value w8  "$CASES/w8_field_index_collision.sio"      42  74 "soundness-3 BUG C 6534d904e5"
+run_value w8c "$CASES/w8c_field_nocollision_control.sio" 42  99 "CONTROL no collision"
+run_value w4b "$CASES/w4b_f32_roundtrip.sio"             150 100 "ROOT CAUSE of w4: as-f32 fell through to float_to_int"
+run_value w7b "$CASES/w7b_enum_reverse.sio"                1   2 "CONTROL (passes at baseline): a table reorder must not break Shape"
+run_value w11 "$CASES/w11_float_literal_f32.sio"          12  99 "float literal coercion to f32 (contextual + operator)"
+run_reject w12 "$CASES/w12_nonliteral_must_reject.sio" "CARDINAL: only literals coerce"
+run_reject w13 "$CASES/w13_magnitude_must_reject.sio" "CARDINAL: magnitude guard on f32 narrowing"
+run_mm    w9  42 "release wall 8765ca1dc4"
+run_reject w10 "$CASES/mm/prog2.sio" "import typecheck bypass e1ac6f7c87"
+
+echo
+echo "correct: $PASS/$TOTAL   open: $OPEN"
+rm -rf "$TMP"
+[ "$OPEN" = "0" ]
