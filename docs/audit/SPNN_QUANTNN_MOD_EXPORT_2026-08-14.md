@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.spnn-quantnn-mod-export-2026-08-14
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.spnn-quantnn-mod-export-2026-08-14
+-->
+
 # spnn / quantnn — FECHADAS, e a lição é o confundidor (2026-08-14)
 
 Status: **fechadas** (check rc=0 e run rc=0 nas duas, com HYPER_METRIC correto).
