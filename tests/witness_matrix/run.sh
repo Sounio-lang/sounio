@@ -94,6 +94,9 @@ run_value w8  "$CASES/w8_field_index_collision.sio"      42  74 "soundness-3 BUG
 run_value w8c "$CASES/w8c_field_nocollision_control.sio" 42  99 "CONTROL no collision"
 run_value w4b "$CASES/w4b_f32_roundtrip.sio"             150 100 "ROOT CAUSE of w4: as-f32 fell through to float_to_int"
 run_value w7b "$CASES/w7b_enum_reverse.sio"                1   2 "CONTROL (passes at baseline): a table reorder must not break Shape"
+run_value w11 "$CASES/w11_float_literal_f32.sio"          12  99 "float literal coercion to f32 (contextual + operator)"
+run_reject w12 "$CASES/w12_nonliteral_must_reject.sio" "CARDINAL: only literals coerce"
+run_reject w13 "$CASES/w13_magnitude_must_reject.sio" "CARDINAL: magnitude guard on f32 narrowing"
 run_mm    w9  42 "release wall 8765ca1dc4"
 run_reject w10 "$CASES/mm/prog2.sio" "import typecheck bypass e1ac6f7c87"
 
