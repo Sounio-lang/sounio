@@ -1,0 +1,476 @@
+//@ run-pass
+// examples/particle_physics/su2_fs_gevp.sio
+//
+// GEVP CASCADE + SAME-OPERATOR FINITE SIZE
+// ========================================
+// 1. Multi-β L=6 with mass cascade: GEVP3 → GEVP2 → contact
+// 2. Same-operator L6↔L8 @ β=2.3:
+//      contact/√χ  and  cascade/√χ  reported on BOTH volumes
+//    Primary FS = contact–contact (identical operator).
+//    Secondary FS = cascade–cascade when both ≥ GEVP2.
+//
+// CLAIM: stabilize multi-β mass source + honest same-operator FS.
+// NOT CLAIMED: continuum; infinite volume; Clay.
+//
+// Run:
+//   export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
+//   export SOUNIO_SOUC_ENGINE=lean_single
+//   ./bin/souc run examples/particle_physics/su2_fs_gevp.sio
+
+use particle_physics::lattice_gauge::{
+    lat_l, lat_nsites, lg_set_L, lg_seed, lattice_cold,
+    heatbath_thermalize, measure_ensemble_hb_multi_r,
+    measure_variational_3smear_hb, glueball_mass_cascade,
+    glueball_meff_log, gevp_3x3, gevp_mass, gevp_2x2,
+    sommer_r0_from_sigma, string_tension_ep,
+}
+use epistemic::knowledge::{ep_val, ep_std}
+
+fn fp6(v: f64) -> string with Mut, Div, Panic {
+    var x = v
+    var neg = false
+    if x < 0.0 { neg = true; x = 0.0 - x }
+    let n = (x * 1000000.0 + 0.5) as i64
+    var whole = n / 1000000
+    let frac = n % 1000000
+    var buf: [i8; 64] = [0; 64]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    var wrev: [i8; 16] = [0; 16]
+    var wlen: i64 = 0
+    if whole == 0 { wrev[0] = 48 as i8; wlen = 1 }
+    while whole > 0 && wlen < 15 {
+        wrev[wlen as usize] = (48 + whole % 10) as i8
+        wlen = wlen + 1
+        whole = whole / 10
+    }
+    var i = wlen - 1
+    while i >= 0 {
+        buf[pos as usize] = wrev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    buf[pos as usize] = 46 as i8
+    pos = pos + 1
+    var div: i64 = 100000
+    while div >= 1 {
+        buf[pos as usize] = (48 + (frac / div) % 10) as i8
+        pos = pos + 1
+        div = div / 10
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn i64s(v: i64) -> string with Mut, Div, Panic {
+    if v == 0 { return "0" }
+    var n = v
+    var neg = false
+    if n < 0 { neg = true; n = 0 - n }
+    var rev: [i8; 24] = [0; 24]
+    var len: i64 = 0
+    while n > 0 && len < 23 {
+        rev[len as usize] = (48 + n % 10) as i8
+        len = len + 1
+        n = n / 10
+    }
+    var buf: [i8; 32] = [0; 32]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    var i = len - 1
+    while i >= 0 {
+        buf[pos as usize] = rev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn sqrt_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    var k: i64 = 0
+    while k < 40 { g = 0.5 * (g + x / g); k = k + 1 }
+    g
+}
+
+fn abs_f(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn src_tag(s: i64) -> string {
+    if s == 3 { return "GEVP3" }
+    if s == 2 { return "GEVP2" }
+    if s == 1 { return "contact" }
+    "FAIL"
+}
+
+/// Measure cascade + contact + scale at one (L,β).
+/// Returns (m_cas, src, m_ct, srt2, r0s, mcas_r0, mct_r0, mcas_c2, mct_c2, ok)
+fn run_vol(
+    lat: &![f64; 65536],
+    sm0: &![f64; 65536],
+    sm1: &![f64; 65536],
+    sm2: &![f64; 65536],
+    tmp: &![f64; 65536],
+    beta: f64,
+    n_therm: i64,
+    n_meas: i64,
+    n_sep: i64,
+    alpha: f64,
+    n0: i64,
+    n1: i64,
+    n2: i64,
+    seed: i64,
+    c_sommer: f64
+) -> (f64, i64, f64, f64, f64, f64, f64, f64, f64, i64) with Mut, Div, Panic {
+    lg_seed(seed)
+    lattice_cold(lat)
+    let _p = heatbath_thermalize(lat, beta, n_therm)
+
+    var c00: [f64; 8] = [0.0; 8]
+    var c01: [f64; 8] = [0.0; 8]
+    var c02: [f64; 8] = [0.0; 8]
+    var c11: [f64; 8] = [0.0; 8]
+    var c12: [f64; 8] = [0.0; 8]
+    var c22: [f64; 8] = [0.0; 8]
+    let (_a, _b, _c) = measure_variational_3smear_hb(
+        lat, sm0, sm1, sm2, tmp,
+        beta, n_meas, n_sep, alpha, n0, n1, n2,
+        &!c00, &!c01, &!c02, &!c11, &!c12, &!c22
+    )
+    let (m_cas, src) = glueball_mass_cascade(
+        c00[0], c01[0], c02[0], c11[0], c12[0], c22[0],
+        c00[1], c01[1], c02[1], c11[1], c12[1], c22[1]
+    )
+    let (m_ct, ok_ct) = glueball_meff_log(c00[0], c00[1])
+    var mct: f64 = 0.0
+    if ok_ct == 1 { mct = m_ct }
+
+    var plaq_s: [f64; 256] = [0.0; 256]
+    var chi2_s: [f64; 256] = [0.0; 256]
+    var chi2_v: [i64; 256] = [0; 256]
+    var chi3_s: [f64; 256] = [0.0; 256]
+    var chi3_v: [i64; 256] = [0; 256]
+    let n_ctx: i64 = 18
+    let (_n2, _n3) = measure_ensemble_hb_multi_r(
+        lat, beta, n_ctx, n_sep,
+        &!plaq_s, &!chi2_s, &!chi2_v, &!chi3_s, &!chi3_v
+    )
+    let sep2 = string_tension_ep(&chi2_s, &chi2_v, n_ctx)
+    let sig2 = ep_val(&sep2)
+    let srt2 = sqrt_q(sig2)
+    let (r0s, ok_r0) = sommer_r0_from_sigma(sig2, c_sommer)
+
+    var mcas_r0: f64 = 0.0
+    var mct_r0: f64 = 0.0
+    var mcas_c2: f64 = 0.0
+    var mct_c2: f64 = 0.0
+    var has_cas: i64 = 0
+    if src == 1 { has_cas = 1 }
+    if src == 2 { has_cas = 1 }
+    if src == 3 { has_cas = 1 }
+    if has_cas == 1 {
+        if ok_r0 == 1 {
+            if r0s > 0.0 { mcas_r0 = m_cas * r0s }
+        }
+        if srt2 > 1.0e-12 { mcas_c2 = m_cas / srt2 }
+    }
+    if ok_ct == 1 {
+        if ok_r0 == 1 {
+            if r0s > 0.0 { mct_r0 = mct * r0s }
+        }
+        if srt2 > 1.0e-12 { mct_c2 = mct / srt2 }
+    }
+
+    var ok: i64 = 0
+    if has_cas == 1 { ok = 1 }
+    if ok_ct == 1 { ok = 1 }
+    (m_cas, src, mct, srt2, r0s, mcas_r0, mct_r0, mcas_c2, mct_c2, ok)
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("================================================================")
+    println(" SU(2) GEVP CASCADE + SAME-OPERATOR L6/L8 FS")
+    println("================================================================")
+    println("CLAIM: multi-β cascade mass + contact-contact finite size")
+    println("NOT CLAIMED: continuum; Clay")
+    println("")
+
+    let c_sommer: f64 = 1.65
+    let alpha: f64 = 0.4
+    let n0: i64 = 1
+    let n1: i64 = 2
+    let n2s: i64 = 4
+    let seed0: i64 = 20260813
+
+    var lat: [f64; 65536] = [0.0; 65536]
+    var sm0: [f64; 65536] = [0.0; 65536]
+    var sm1: [f64; 65536] = [0.0; 65536]
+    var sm2: [f64; 65536] = [0.0; 65536]
+    var tmp: [f64; 65536] = [0.0; 65536]
+
+    // ------------------------------------------------------------------
+    // A. Multi-β L=6 cascade
+    // ------------------------------------------------------------------
+    println("--- A. L=6 multi-β cascade  β∈{2.2,2.3,2.4,2.5} ---")
+    let _ = lg_set_L(6)
+    println("L=" ++ i64s(lat_l()) ++ " sites=" ++ i64s(lat_nsites()))
+    var betas: [f64; 4] = [2.2, 2.3, 2.4, 2.5]
+    let n_beta: i64 = 4
+    let n_therm6: i64 = 36
+    let n_meas6: i64 = 36
+    let n_sep6: i64 = 2
+
+    var mcas_b: [f64; 4] = [0.0; 4]
+    var mct_b: [f64; 4] = [0.0; 4]
+    var src_b: [i64; 4] = [0; 4]
+    var mcas_r0_b: [f64; 4] = [0.0; 4]
+    var mct_r0_b: [f64; 4] = [0.0; 4]
+    var mcas_c2_b: [f64; 4] = [0.0; 4]
+    var mct_c2_b: [f64; 4] = [0.0; 4]
+    var srt_b: [f64; 4] = [0.0; 4]
+    var n_ok: i64 = 0
+    var n_g3: i64 = 0
+    var n_g2: i64 = 0
+    var n_ct: i64 = 0
+
+    var ib: i64 = 0
+    while ib < n_beta {
+        let beta = betas[ib as usize]
+        var seed = seed0 + ib * 1009
+        if ib == 1 { seed = seed0 }
+        println("")
+        println("  β=" ++ fp6(beta))
+        let (mcas, src, mct, srt2, r0s, mcas_r0, mct_r0, mcas_c2, mct_c2, ok) = run_vol(
+            &!lat, &!sm0, &!sm1, &!sm2, &!tmp,
+            beta, n_therm6, n_meas6, n_sep6, alpha, n0, n1, n2s, seed, c_sommer
+        )
+        mcas_b[ib as usize] = mcas
+        mct_b[ib as usize] = mct
+        src_b[ib as usize] = src
+        mcas_r0_b[ib as usize] = mcas_r0
+        mct_r0_b[ib as usize] = mct_r0
+        mcas_c2_b[ib as usize] = mcas_c2
+        mct_c2_b[ib as usize] = mct_c2
+        srt_b[ib as usize] = srt2
+        if ok == 1 { n_ok = n_ok + 1 }
+        if src == 3 { n_g3 = n_g3 + 1 }
+        if src == 2 { n_g2 = n_g2 + 1 }
+        if src == 1 { n_ct = n_ct + 1 }
+        println("    cascade m=" ++ fp6(mcas) ++ " [" ++ src_tag(src) ++ "]"
+            ++ "  contact=" ++ fp6(mct))
+        println("    sqrt(chi2)=" ++ fp6(srt2) ++ "  r0_s=" ++ fp6(r0s))
+        println("    m_cas*r0=" ++ fp6(mcas_r0) ++ "  m_ct*r0=" ++ fp6(mct_r0))
+        println("    m_cas/s2=" ++ fp6(mcas_c2) ++ "  m_ct/s2=" ++ fp6(mct_c2))
+        ib = ib + 1
+    }
+
+    // means / spreads for cascade and contact separately
+    var sum_cr: f64 = 0.0
+    var sum_tr: f64 = 0.0
+    var sum_cc: f64 = 0.0
+    var sum_tc: f64 = 0.0
+    var nc: i64 = 0
+    var nt: i64 = 0
+    var mn_cr: f64 = 1.0e30
+    var mx_cr: f64 = 0.0
+    var mn_tr: f64 = 1.0e30
+    var mx_tr: f64 = 0.0
+    ib = 0
+    while ib < n_beta {
+        if src_b[ib as usize] != 0 && mcas_r0_b[ib as usize] > 0.0 {
+            let a = mcas_r0_b[ib as usize]
+            sum_cr = sum_cr + a
+            sum_cc = sum_cc + mcas_c2_b[ib as usize]
+            nc = nc + 1
+            if a < mn_cr { mn_cr = a }
+            if a > mx_cr { mx_cr = a }
+        }
+        if mct_r0_b[ib as usize] > 0.0 {
+            let a = mct_r0_b[ib as usize]
+            sum_tr = sum_tr + a
+            sum_tc = sum_tc + mct_c2_b[ib as usize]
+            nt = nt + 1
+            if a < mn_tr { mn_tr = a }
+            if a > mx_tr { mx_tr = a }
+        }
+        ib = ib + 1
+    }
+    var mean_cr: f64 = 0.0
+    var mean_tr: f64 = 0.0
+    var mean_cc: f64 = 0.0
+    var mean_tc: f64 = 0.0
+    if nc > 0 {
+        mean_cr = sum_cr / (nc as f64)
+        mean_cc = sum_cc / (nc as f64)
+    }
+    if nt > 0 {
+        mean_tr = sum_tr / (nt as f64)
+        mean_tc = sum_tc / (nt as f64)
+    }
+    var spr_cr: f64 = 0.0
+    var spr_tr: f64 = 0.0
+    if mean_cr > 1.0e-12 && mx_cr > mn_cr { spr_cr = (mx_cr - mn_cr) / mean_cr }
+    if mean_tr > 1.0e-12 && mx_tr > mn_tr { spr_tr = (mx_tr - mn_tr) / mean_tr }
+
+    println("")
+    println("  multi-β cascade: n=" ++ i64s(n_ok) ++ "  GEVP3=" ++ i64s(n_g3)
+        ++ " GEVP2=" ++ i64s(n_g2) ++ " contact=" ++ i64s(n_ct))
+    println("  ⟨m_cas·r0⟩=" ++ fp6(mean_cr) ++ " spread=" ++ fp6(spr_cr)
+        ++ "  ⟨m_cas/√χ⟩=" ++ fp6(mean_cc))
+    println("  ⟨m_ct ·r0⟩=" ++ fp6(mean_tr) ++ " spread=" ++ fp6(spr_tr)
+        ++ "  ⟨m_ct/√χ⟩=" ++ fp6(mean_tc))
+
+    // freeze L6 β=2.3
+    let mcas6 = mcas_b[1]
+    let src6 = src_b[1]
+    let mct6 = mct_b[1]
+    let mcas_r06 = mcas_r0_b[1]
+    let mct_r06 = mct_r0_b[1]
+    let mcas_c26 = mcas_c2_b[1]
+    let mct_c26 = mct_c2_b[1]
+
+    // ------------------------------------------------------------------
+    // B. L=8 same β=2.3 — same operator family
+    // ------------------------------------------------------------------
+    println("")
+    println("--- B. L=8 β=2.3 same-operator ---")
+    let ok8 = lg_set_L(8)
+    if ok8 == 0 {
+        println("FAIL lg_set_L(8)")
+        return 1
+    }
+    println("L=" ++ i64s(lat_l()) ++ " sites=" ++ i64s(lat_nsites()))
+    let n_therm8: i64 = 40
+    let n_meas8: i64 = 36
+    let n_sep8: i64 = 2
+    // same seed as L6 β=2.3 for comparable ensemble start (volume differs)
+    let seed8: i64 = seed0
+
+    let (mcas8, src8, mct8, srt8, r0s8, mcas_r08, mct_r08, mcas_c28, mct_c28, okv8) = run_vol(
+        &!lat, &!sm0, &!sm1, &!sm2, &!tmp,
+        2.3, n_therm8, n_meas8, n_sep8, alpha, n0, n1, n2s, seed8, c_sommer
+    )
+    println("  cascade m=" ++ fp6(mcas8) ++ " [" ++ src_tag(src8) ++ "]"
+        ++ "  contact=" ++ fp6(mct8))
+    println("  sqrt(chi2)=" ++ fp6(srt8) ++ "  r0_s=" ++ fp6(r0s8))
+    println("  m_cas*r0=" ++ fp6(mcas_r08) ++ "  m_ct*r0=" ++ fp6(mct_r08))
+    println("  m_cas/s2=" ++ fp6(mcas_c28) ++ "  m_ct/s2=" ++ fp6(mct_c28))
+
+    // Same-operator finite-size shifts
+    var fs_ct_r0: f64 = 0.0
+    var fs_ct_c2: f64 = 0.0
+    var fs_cas_r0: f64 = 0.0
+    var fs_cas_c2: f64 = 0.0
+    if mct_r06 > 1.0e-12 && mct_r08 > 1.0e-12 {
+        fs_ct_r0 = abs_f(mct_r08 - mct_r06) / mct_r06
+    }
+    if mct_c26 > 1.0e-12 && mct_c28 > 1.0e-12 {
+        fs_ct_c2 = abs_f(mct_c28 - mct_c26) / mct_c26
+    }
+    // cascade FS only if both are variational (src≥2)
+    var cas_both: i64 = 0
+    if src6 >= 2 && src8 >= 2 { cas_both = 1 }
+    if cas_both == 1 {
+        if mcas_r06 > 1.0e-12 && mcas_r08 > 1.0e-12 {
+            fs_cas_r0 = abs_f(mcas_r08 - mcas_r06) / mcas_r06
+        }
+        if mcas_c26 > 1.0e-12 && mcas_c28 > 1.0e-12 {
+            fs_cas_c2 = abs_f(mcas_c28 - mcas_c26) / mcas_c26
+        }
+    }
+
+    println("")
+    println("================================================================")
+    println(" SCOREBOARD")
+    println("================================================================")
+    println("multi-β cascade  ⟨m·r0⟩=" ++ fp6(mean_cr) ++ " spread=" ++ fp6(spr_cr)
+        ++ "  src mix G3/G2/ct=" ++ i64s(n_g3) ++ "/" ++ i64s(n_g2) ++ "/" ++ i64s(n_ct))
+    println("multi-β contact  ⟨m·r0⟩=" ++ fp6(mean_tr) ++ " spread=" ++ fp6(spr_tr))
+    println("L6 β=2.3  cas m/√χ=" ++ fp6(mcas_c26) ++ " [" ++ src_tag(src6) ++ "]"
+        ++ "  ct m/√χ=" ++ fp6(mct_c26))
+    println("L8 β=2.3  cas m/√χ=" ++ fp6(mcas_c28) ++ " [" ++ src_tag(src8) ++ "]"
+        ++ "  ct m/√χ=" ++ fp6(mct_c28))
+    println("FS contact–contact |Δ|/val  m·r0=" ++ fp6(fs_ct_r0)
+        ++ "  m/√χ=" ++ fp6(fs_ct_c2))
+    if cas_both == 1 {
+        println("FS cascade–cascade |Δ|/val  m·r0=" ++ fp6(fs_cas_r0)
+            ++ "  m/√χ=" ++ fp6(fs_cas_c2))
+    } else {
+        println("FS cascade–cascade: N/A (need src≥GEVP2 on both volumes)")
+    }
+    println("lit m/√σ ~ 3.5–4")
+
+    // ------------------------------------------------------------------
+    // GATES
+    // ------------------------------------------------------------------
+    println("")
+    println("================================================================")
+    println(" GATES")
+    println("================================================================")
+    let g_L8 = ok8 == 1 && lat_l() == 8
+    let g_multi = n_ok >= 3
+    let g_var = (n_g3 + n_g2) >= 2
+    let g_g3 = n_g3 >= 1
+    let g_cas_mean = mean_cr > 1.5 && mean_cr < 12.0
+    let g_ct_mean = mean_tr > 1.5 && mean_tr < 12.0
+    // contact multi-β spread — same operator, fair continuum sketch
+    let g_ct_spread = nt >= 3 && spr_tr > 0.0 && spr_tr <= 0.45
+    let g_cas_spread = nc >= 3 && spr_cr > 0.0 && spr_cr <= 0.55
+    let g_fs_ct = fs_ct_c2 > 0.0
+    let g_fs_ct_mild = g_fs_ct && fs_ct_c2 <= 0.35
+    let g_fs_cas = cas_both == 1 && fs_cas_c2 > 0.0
+    let g_fs_cas_mild = g_fs_cas && fs_cas_c2 <= 0.35
+    let g_L6 = mct_c26 > 1.0 && mcas_c26 > 0.5
+    let g_L8pt = mct_c28 > 1.0
+    let g_L8_phys = mct_c28 >= 2.0 && mct_c28 <= 8.0
+    let g_lit_ct = mean_tc >= 2.5 && mean_tc <= 6.0
+
+    if g_L8 { println("GATE L8_geometry: PASS") }
+    else { println("GATE L8_geometry: FAIL_HONEST") }
+    if g_multi { println("GATE multi_beta_mass: PASS  n=" ++ i64s(n_ok)) }
+    else { println("GATE multi_beta_mass: FAIL_HONEST") }
+    if g_var { println("GATE variational_pts: PASS  G3+G2=" ++ i64s(n_g3 + n_g2)) }
+    else { println("GATE variational_pts: FAIL_HONEST  G3=" ++ i64s(n_g3)
+        ++ " G2=" ++ i64s(n_g2)) }
+    if g_g3 { println("GATE gevp3_alive: PASS") }
+    else { println("GATE gevp3_alive: FAIL_HONEST") }
+    if g_cas_mean { println("GATE mean_cascade_r0: PASS  " ++ fp6(mean_cr)) }
+    else { println("GATE mean_cascade_r0: FAIL_HONEST") }
+    if g_ct_mean { println("GATE mean_contact_r0: PASS  " ++ fp6(mean_tr)) }
+    else { println("GATE mean_contact_r0: FAIL_HONEST") }
+    if g_ct_spread { println("GATE contact_beta_spread: PASS  " ++ fp6(spr_tr)) }
+    else { println("GATE contact_beta_spread: FAIL_HONEST  " ++ fp6(spr_tr)) }
+    if g_cas_spread { println("GATE cascade_beta_spread: PASS  " ++ fp6(spr_cr)) }
+    else { println("GATE cascade_beta_spread: FAIL_HONEST  " ++ fp6(spr_cr)) }
+    if g_L6 { println("GATE L6_beta23: PASS") }
+    else { println("GATE L6_beta23: FAIL_HONEST") }
+    if g_L8pt { println("GATE L8_beta23: PASS") }
+    else { println("GATE L8_beta23: FAIL_HONEST") }
+    if g_L8_phys { println("GATE L8_contact_ratio_phys: PASS  " ++ fp6(mct_c28)) }
+    else { println("GATE L8_contact_ratio_phys: FAIL_HONEST") }
+    if g_fs_ct_mild { println("GATE FS_contact_mild: PASS  " ++ fp6(fs_ct_c2)) }
+    else if g_fs_ct { println("GATE FS_contact_mild: FAIL_HONEST  " ++ fp6(fs_ct_c2)) }
+    else { println("GATE FS_contact_mild: FAIL_HONEST") }
+    if g_fs_cas_mild { println("GATE FS_cascade_mild: PASS  " ++ fp6(fs_cas_c2)) }
+    else if g_fs_cas { println("GATE FS_cascade_mild: FAIL_HONEST  " ++ fp6(fs_cas_c2)) }
+    else { println("GATE FS_cascade_mild: FAIL_HONEST  (need dual GEVP)") }
+    if g_lit_ct { println("GATE lit_contact_window: PASS  " ++ fp6(mean_tc)) }
+    else { println("GATE lit_contact_window: FAIL_HONEST  " ++ fp6(mean_tc)) }
+
+    println("")
+    println("VERDICT:")
+    println("  cascade ⟨m·r0⟩=" ++ fp6(mean_cr) ++ " (" ++ i64s(n_g3) ++ "G3+"
+        ++ i64s(n_g2) ++ "G2+" ++ i64s(n_ct) ++ "ct)  contact ⟨m·r0⟩=" ++ fp6(mean_tr))
+    println("  FS contact m/√χ: L6=" ++ fp6(mct_c26) ++ " → L8=" ++ fp6(mct_c28)
+        ++ "  shift=" ++ fp6(fs_ct_c2))
+    if g_multi && g_L8 && g_fs_ct {
+        println("  Same-operator FS live. Continuum not claimed.")
+    } else {
+        println("  Partial — see FAIL_HONEST.")
+    }
+
+    let _r = lg_set_L(4)
+    println("================================================================")
+    0
+}

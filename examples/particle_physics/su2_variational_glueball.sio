@@ -1,0 +1,284 @@
+//@ run-pass
+// examples/particle_physics/su2_variational_glueball.sio
+//
+// VARIATIONAL 2-SMEAR GEVP — ground-state projection at small τ
+// ==============================================================
+// After plateau diagnostic: L=6 has no single-operator τ-plateau.
+// This driver builds a 2×2 correlator matrix from two APE levels
+//   O0: light smear (n0=1)   O1: heavy smear (n1=4)
+// and solves the GEVP C(τ) v = λ C(τ0) v at τ0=0, τ=1:
+//   m_GEVP = −ln(λ_max) / (τ−τ0)
+//
+// CLAIM: variational ground-state mass estimate vs diagonal m_eff(0).
+// NOT CLAIMED: continuum; full GEVP multi-τ plateau; Clay.
+//
+// Run:
+//   export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
+//   export SOUNIO_SOUC_ENGINE=lean_single
+//   ./bin/souc run examples/particle_physics/su2_variational_glueball.sio
+
+use particle_physics::lattice_gauge::{
+    lat_l, lat_nsites, lg_set_L, lg_seed, lattice_cold,
+    heatbath_thermalize, measure_ensemble_hb,
+    measure_variational_2smear_hb, gevp_2x2, gevp_mass,
+    glueball_meff_log, plaquette_ep, string_tension_ep,
+}
+use epistemic::knowledge::{ep_val, ep_std}
+
+fn fp6(v: f64) -> string with Mut, Div, Panic {
+    var x = v
+    var neg = false
+    if x < 0.0 { neg = true; x = 0.0 - x }
+    let n = (x * 1000000.0 + 0.5) as i64
+    var whole = n / 1000000
+    let frac = n % 1000000
+    var buf: [i8; 64] = [0; 64]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    var wrev: [i8; 16] = [0; 16]
+    var wlen: i64 = 0
+    if whole == 0 { wrev[0] = 48 as i8; wlen = 1 }
+    while whole > 0 && wlen < 15 {
+        wrev[wlen as usize] = (48 + whole % 10) as i8
+        wlen = wlen + 1
+        whole = whole / 10
+    }
+    var i = wlen - 1
+    while i >= 0 {
+        buf[pos as usize] = wrev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    buf[pos as usize] = 46 as i8
+    pos = pos + 1
+    var div: i64 = 100000
+    while div >= 1 {
+        buf[pos as usize] = (48 + (frac / div) % 10) as i8
+        pos = pos + 1
+        div = div / 10
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn i64s(v: i64) -> string with Mut, Div, Panic {
+    if v == 0 { return "0" }
+    var n = v
+    var neg = false
+    if n < 0 { neg = true; n = 0 - n }
+    var rev: [i8; 24] = [0; 24]
+    var len: i64 = 0
+    while n > 0 && len < 23 {
+        rev[len as usize] = (48 + n % 10) as i8
+        len = len + 1
+        n = n / 10
+    }
+    var buf: [i8; 32] = [0; 32]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    var i = len - 1
+    while i >= 0 {
+        buf[pos as usize] = rev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn sqrt_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    var k: i64 = 0
+    while k < 40 { g = 0.5 * (g + x / g); k = k + 1 }
+    g
+}
+
+fn abs_f(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("================================================================")
+    println(" SU(2) VARIATIONAL 2-SMEAR GEVP — ground-state projection")
+    println("================================================================")
+    println("CLAIM: 2×2 GEVP mass vs diagonal m_eff(0) at small τ")
+    println("NOT CLAIMED: continuum; multi-τ GEVP plateau; Clay")
+    println("")
+
+    let _ = lg_set_L(6)
+    let L = lat_l()
+    let beta: f64 = 2.3
+    let n_therm: i64 = 25
+    let n_meas: i64 = 20
+    let n_sep: i64 = 2
+    let alpha: f64 = 0.4
+    let n0: i64 = 1
+    let n1: i64 = 4
+    let seed: i64 = 20260813
+
+    println("L=" ++ i64s(L) ++ " sites=" ++ i64s(lat_nsites())
+        ++ " β=" ++ fp6(beta) ++ "  HB+APE")
+    println("smear levels: n0=" ++ i64s(n0) ++ " (light)  n1=" ++ i64s(n1)
+        ++ " (heavy)  α=" ++ fp6(alpha))
+    println("therm=" ++ i64s(n_therm) ++ " meas=" ++ i64s(n_meas)
+        ++ " sep=" ++ i64s(n_sep))
+    println("")
+
+    var lat: [f64; 65536] = [0.0; 65536]
+    var sm0: [f64; 65536] = [0.0; 65536]
+    var sm1: [f64; 65536] = [0.0; 65536]
+    var tmp: [f64; 65536] = [0.0; 65536]
+    lg_seed(seed)
+    lattice_cold(&!lat)
+    println("--- heatbath thermalize ---")
+    let p_th = heatbath_thermalize(&!lat, beta, n_therm)
+    println("⟨P⟩ = " ++ fp6(p_th))
+
+    println("--- variational 2-smear correlators ---")
+    var c00: [f64; 8] = [0.0; 8]
+    var c01: [f64; 8] = [0.0; 8]
+    var c11: [f64; 8] = [0.0; 8]
+    let (mo0, mo1) = measure_variational_2smear_hb(
+        &!lat, &!sm0, &!sm1, &!tmp, beta, n_meas, n_sep,
+        alpha, n0, n1, &!c00, &!c01, &!c11
+    )
+    println("⟨O0⟩=" ++ fp6(mo0) ++ "  ⟨O1⟩=" ++ fp6(mo1))
+
+    println("C_ij(τ):")
+    var tau: i64 = 0
+    while tau < L {
+        println("  τ=" ++ i64s(tau)
+            ++ "  C00=" ++ fp6(c00[tau as usize])
+            ++ "  C01=" ++ fp6(c01[tau as usize])
+            ++ "  C11=" ++ fp6(c11[tau as usize]))
+        tau = tau + 1
+    }
+
+    // Diagonal m_eff(0) for each operator
+    let (m00, ok00) = glueball_meff_log(c00[0], c00[1])
+    let (m11, ok11) = glueball_meff_log(c11[0], c11[1])
+    println("")
+    println("diagonal m_eff(0):")
+    println("  light O0: " ++ fp6(m00) ++ " ok=" ++ i64s(ok00))
+    println("  heavy O1: " ++ fp6(m11) ++ " ok=" ++ i64s(ok11))
+
+    // GEVP at τ0=0, τ=1
+    let (lmax, ok_g) = gevp_2x2(
+        c00[1], c01[1], c11[1],
+        c00[0], c01[0], c11[0]
+    )
+    let (m_g, ok_mg) = gevp_mass(lmax, 1.0)
+    println("GEVP t0=0 -> t=1:")
+    println("  lmax=" ++ fp6(lmax))
+    println("  ok=" ++ i64s(ok_g))
+    println("  m_GEVP=" ++ fp6(m_g))
+    println("  m_ok=" ++ i64s(ok_mg))
+
+    // Optional: GEVP τ0=0 → τ=2 if C(2) usable
+    var m_g2: f64 = 0.0
+    var ok_mg2: i64 = 0
+    if c00[2] > 0.0 && c11[2] > 0.0 {
+        let (l2max, ok2) = gevp_2x2(
+            c00[2], c01[2], c11[2],
+            c00[0], c01[0], c11[0]
+        )
+        if ok2 == 1 {
+            let (mg2, okm2) = gevp_mass(l2max, 2.0)
+            m_g2 = mg2
+            ok_mg2 = okm2
+        }
+    }
+    println("GEVP t0=0 -> t=2: m=" ++ fp6(m_g2) ++ " ok=" ++ i64s(ok_mg2))
+
+    // GEVP consistency τ=1 vs τ=2
+    var gevp_plat_rel: f64 = 0.0
+    var gevp_plat_ok: i64 = 0
+    if ok_mg == 1 && ok_mg2 == 1 && m_g > 0.0 && m_g2 > 0.0 {
+        var d = m_g - m_g2
+        if d < 0.0 { d = 0.0 - d }
+        gevp_plat_rel = d / (0.5 * (m_g + m_g2))
+        if gevp_plat_rel <= 0.25 { gevp_plat_ok = 1 }
+    }
+    println("GEVP m(1)↔m(2) rel=" ++ fp6(gevp_plat_rel)
+        ++ " plateau_ok=" ++ i64s(gevp_plat_ok))
+
+    // Scale
+    println("")
+    println("--- Creutz scale ---")
+    var plaq_s: [f64; 256] = [0.0; 256]
+    var chi_s: [f64; 256] = [0.0; 256]
+    var chi_v: [i64; 256] = [0; 256]
+    let n_ctx: i64 = 12
+    let n_ok_c = measure_ensemble_hb(&!lat, beta, n_ctx, n_sep, &!plaq_s, &!chi_s, &!chi_v)
+    let pep = plaquette_ep(&plaq_s, n_ctx)
+    let sep = string_tension_ep(&chi_s, &chi_v, n_ctx)
+    let sig = ep_val(&sep)
+    let srt = sqrt_q(sig)
+    println("⟨P⟩=" ++ fp6(ep_val(&pep)) ++ "±" ++ fp6(ep_std(&pep))
+        ++ "  σa²=" ++ fp6(sig) ++ "±" ++ fp6(ep_std(&sep))
+        ++ "  √σa=" ++ fp6(srt) ++ "  n_ok=" ++ i64s(n_ok_c))
+
+    var r00: f64 = 0.0
+    var r11: f64 = 0.0
+    var rg: f64 = 0.0
+    if srt > 1.0e-12 {
+        if ok00 == 1 { r00 = m00 / srt }
+        if ok11 == 1 { r11 = m11 / srt }
+        if ok_mg == 1 { rg = m_g / srt }
+    }
+    println("")
+    println("SCOREBOARD m/√σ  (lit 0++ ~ 3.5–4):")
+    println("  diagonal light O0: " ++ fp6(r00))
+    println("  diagonal heavy O1: " ++ fp6(r11))
+    println("  GEVP λ_max:        " ++ fp6(rg) ++ "  ★ variational")
+    println("  prior contact m0:  ~3.5–3.8")
+
+    // Does GEVP pull mass down vs light contact? (excited-state removal)
+    var pulled: i64 = 0
+    if ok_mg == 1 && ok00 == 1 && m_g < m00 {
+        pulled = 1
+    }
+
+    println("")
+    println("================================================================")
+    println(" GATES")
+    println("================================================================")
+    let mat_pos = c00[0] > 0.0 && c11[0] > 0.0 && c00[1] > 0.0 && c11[1] > 0.0
+    let c_dec0 = c00[0] > c00[1] && c00[1] > 0.0
+    let c_dec1 = c11[0] > c11[1] && c11[1] > 0.0
+    let gevp_ok = ok_g == 1 && ok_mg == 1
+    let confining = sig > 0.0
+    let ratio_sane = ok_mg == 1 && rg > 1.0 && rg < 10.0
+    let in_lit = ok_mg == 1 && rg > 2.5 && rg < 5.5
+    let improves = pulled == 1
+
+    if mat_pos { println("GATE correlator_matrix_positive: PASS") }
+    else { println("GATE correlator_matrix_positive: FAIL_HONEST") }
+    if c_dec0 && c_dec1 { println("GATE diagonal_decays: PASS") }
+    else { println("GATE diagonal_decays: FAIL_HONEST") }
+    if gevp_ok { println("GATE gevp_mass_positive: PASS") }
+    else { println("GATE gevp_mass_positive: FAIL_HONEST") }
+    if confining { println("GATE creutz_confinement: PASS") }
+    else { println("GATE creutz_confinement: FAIL_HONEST") }
+    if ratio_sane { println("GATE gevp_ratio_phys_window: PASS") }
+    else { println("GATE gevp_ratio_phys_window: FAIL_HONEST") }
+    if in_lit { println("GATE gevp_ratio_lit_window: PASS  ★") }
+    else { println("GATE gevp_ratio_lit_window: FAIL_HONEST") }
+    if improves { println("GATE gevp_below_light_contact: PASS  (excited states reduced)") }
+    else { println("GATE gevp_below_light_contact: FAIL_HONEST") }
+    if gevp_plat_ok == 1 { println("GATE gevp_tau_consistency: PASS") }
+    else { println("GATE gevp_tau_consistency: FAIL_HONEST  (need larger T / more stats)") }
+
+    println("")
+    if gevp_ok {
+        println("VERDICT: variational GEVP mass m/√σ=" ++ fp6(rg))
+        if in_lit {
+            println("  in lit window — still not a τ-plateau continuum claim.")
+        }
+    } else {
+        println("VERDICT: GEVP failed — check C matrix conditioning / stats.")
+    }
+
+    let _r = lg_set_L(4)
+    println("================================================================")
+    0
+}

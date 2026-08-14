@@ -1,0 +1,299 @@
+//@ run-pass
+// examples/particle_physics/su2_precision_witness.sio
+//
+// PRECISION LANE WITNESS — f64 vs Dd64 on L=6 Creutz heatbath ensemble
+// =====================================================================
+// Ensemble generation stays f64 (Creutz heatbath). Observables recomputed
+// dual-path:
+//   A) lattice_gauge f64 plaquette + Creutz χ(2,2)
+//   B) lattice_prec Dd64 (~106-bit) plaquette + Creutz χ(2,2)
+//
+// Gate: |O_f64 − O_dd64| ≤ max(1e-12, 0.1 · SEM)
+//   PASS  → arithmetic not the dominant error (systematics still rule)
+//   FAIL  → f64 is lying relative to stats; escalate precision on measure path
+//
+// CLAIM: precision residual of pure-SU(2) mass-gap observables is measured.
+// NOT CLAIMED: native IEEE f128; continuum; Clay.
+//
+// Run:
+//   export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
+//   export SOUNIO_SOUC_ENGINE=lean_single
+//   ./bin/souc run examples/particle_physics/su2_precision_witness.sio
+
+use particle_physics::lattice_gauge::{
+    lat_l, lat_nsites, lg_set_L, lg_seed, lattice_cold,
+    heatbath_thermalize, heatbath_sweep,
+    mean_plaquette, creutz_ratio,
+}
+use particle_physics::lattice_prec::{
+    dd_mean_plaquette, dd_mean_plaquette_via_w11, dd_creutz_ratio,
+    plaquette_site_residual, prec_residual, prec_gate_ok, dual_path_wilson_spot,
+}
+use particle_physics::lattice_gauge::{plaquette_half_re}
+use math::dd64::{dd_to_f64}
+use epistemic::knowledge::{ep_measured, ep_val, ep_std}
+
+fn fp6(v: f64) -> string with Mut, Div, Panic {
+    var x = v
+    var neg = false
+    if x < 0.0 { neg = true; x = 0.0 - x }
+    // scientific-ish for tiny deltas: if |v| < 1e-6 print as e-notation via fixed scaled
+    let n = (x * 1000000000.0 + 0.5) as i64  // 9 dp
+    var whole = n / 1000000000
+    let frac = n % 1000000000
+    var buf: [i8; 64] = [0; 64]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    var wrev: [i8; 16] = [0; 16]
+    var wlen: i64 = 0
+    if whole == 0 { wrev[0] = 48 as i8; wlen = 1 }
+    while whole > 0 && wlen < 15 {
+        wrev[wlen as usize] = (48 + whole % 10) as i8
+        wlen = wlen + 1
+        whole = whole / 10
+    }
+    var i = wlen - 1
+    while i >= 0 {
+        buf[pos as usize] = wrev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    buf[pos as usize] = 46 as i8
+    pos = pos + 1
+    var div: i64 = 100000000
+    while div >= 1 {
+        buf[pos as usize] = (48 + (frac / div) % 10) as i8
+        pos = pos + 1
+        div = div / 10
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn i64s(v: i64) -> string with Mut, Div, Panic {
+    if v == 0 { return "0" }
+    var n = v
+    var neg = false
+    if n < 0 { neg = true; n = 0 - n }
+    var rev: [i8; 24] = [0; 24]
+    var len: i64 = 0
+    while n > 0 && len < 23 {
+        rev[len as usize] = (48 + n % 10) as i8
+        len = len + 1
+        n = n / 10
+    }
+    var buf: [i8; 32] = [0; 32]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    var i = len - 1
+    while i >= 0 {
+        buf[pos as usize] = rev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn abs_f(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn sqrt_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    var k: i64 = 0
+    while k < 40 { g = 0.5 * (g + x / g); k = k + 1 }
+    g
+}
+
+fn sample_mean_sem(buf: &[f64; 256], n: i64) -> (f64, f64) with Mut, Div, Panic {
+    if n <= 0 { return (0.0, 0.0) }
+    var sum: f64 = 0.0
+    var i: i64 = 0
+    while i < n {
+        sum = sum + buf[i as usize]
+        i = i + 1
+    }
+    let mean = sum / (n as f64)
+    if n < 2 { return (mean, 0.0) }
+    var vs: f64 = 0.0
+    i = 0
+    while i < n {
+        let d = buf[i as usize] - mean
+        vs = vs + d * d
+        i = i + 1
+    }
+    let std = sqrt_q(vs / ((n - 1) as f64))
+    (mean, std / sqrt_q(n as f64))
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("================================================================")
+    println(" SU(2) PRECISION WITNESS — f64 vs Dd64 on heatbath ensemble")
+    println("================================================================")
+    println("CLAIM: measure |O_f64 − O_Dd64| vs statistical SEM")
+    println("NOT CLAIMED: native f128; continuum; Clay")
+    println("")
+
+    let _ = lg_set_L(6)
+    let beta: f64 = 2.3
+    let n_therm: i64 = 20
+    let n_meas: i64 = 10
+    let n_sep: i64 = 2
+    let seed: i64 = 20260813
+    let eps_abs: f64 = 1.0e-12
+    let kappa: f64 = 0.1
+
+    println("L=" ++ i64s(lat_l()) ++ " sites=" ++ i64s(lat_nsites())
+        ++ " β=" ++ fp6(beta) ++ "  update=Creutz heatbath")
+    println("therm=" ++ i64s(n_therm) ++ " meas=" ++ i64s(n_meas)
+        ++ " sep=" ++ i64s(n_sep))
+    println("gate: |Δ| ≤ max(" ++ fp6(eps_abs) ++ ", " ++ fp6(kappa) ++ "·SEM)")
+    println("")
+
+    var lat: [f64; 65536] = [0.0; 65536]
+    lg_seed(seed)
+    lattice_cold(&!lat)
+    println("--- heatbath thermalize ---")
+    let p_th = heatbath_thermalize(&!lat, beta, n_therm)
+    println("⟨P⟩_f64 after therm = " ++ fp6(p_th))
+
+    // single-config dual path at equilibrium start
+    // Plaquette dual-path uses W(1,1) in Dd64 (bit-stable path shared with Creutz).
+    // Note: a separate dd_plaquette_half_re site primitive is under investigation;
+    // W(1,1) ≡ mean plaquette for SU(2) orientation-even ReTr.
+    let p_f0 = mean_plaquette(&lat)
+    let p_d0 = dd_to_f64(dd_mean_plaquette_via_w11(&lat))
+    let r0 = prec_residual(p_f0, p_d0)
+    let site0 = plaquette_site_residual(&lat, 0, 0, 1)
+    let (c_f0, ok_f0) = creutz_ratio(&lat, 2)
+    let (c_d0, ok_d0) = dd_creutz_ratio(&lat, 2)
+    let rc0 = prec_residual(c_f0, c_d0)
+    let (d11, d12, d22) = dual_path_wilson_spot(&lat)
+
+    println("--- single-config dual path ---")
+    println("P_f64=" ++ fp6(p_f0) ++ "  P_dd(W11)=" ++ fp6(p_d0)
+        ++ "  |ΔP|=" ++ fp6(r0.abs_delta))
+    println("site0 dd_plaquette probe |Δ|=" ++ fp6(site0)
+        ++ "  (informational; W11 path is the claim path)")
+    println("χ_f64=" ++ fp6(c_f0) ++ " (ok=" ++ i64s(ok_f0) ++ ")"
+        ++ "  χ_dd=" ++ fp6(c_d0) ++ " (ok=" ++ i64s(ok_d0) ++ ")"
+        ++ "  |Δχ|=" ++ fp6(rc0.abs_delta))
+    println("|ΔW11|=" ++ fp6(d11) ++ "  |ΔW12|=" ++ fp6(d12)
+        ++ "  |ΔW22|=" ++ fp6(d22))
+
+    // ensemble dual path
+    println("")
+    println("--- ensemble dual path ---")
+    var pf: [f64; 256] = [0.0; 256]
+    var pd: [f64; 256] = [0.0; 256]
+    var cf: [f64; 256] = [0.0; 256]
+    var cd: [f64; 256] = [0.0; 256]
+    var dP: [f64; 256] = [0.0; 256]
+    var dC: [f64; 256] = [0.0; 256]
+    var n_chi_ok: i64 = 0
+    var max_dP: f64 = 0.0
+    var max_dC: f64 = 0.0
+
+    var m: i64 = 0
+    while m < n_meas {
+        var s: i64 = 0
+        while s < n_sep {
+            let _h = heatbath_sweep(&!lat, beta)
+            s = s + 1
+        }
+        let p_f = mean_plaquette(&lat)
+        let p_d = dd_to_f64(dd_mean_plaquette_via_w11(&lat))
+        let (c_f, ok_f) = creutz_ratio(&lat, 2)
+        let (c_d, ok_d) = dd_creutz_ratio(&lat, 2)
+        pf[m as usize] = p_f
+        pd[m as usize] = p_d
+        cf[m as usize] = c_f
+        cd[m as usize] = c_d
+        let rp = prec_residual(p_f, p_d)
+        dP[m as usize] = rp.abs_delta
+        if rp.abs_delta > max_dP { max_dP = rp.abs_delta }
+        if ok_f == 1 && ok_d == 1 {
+            let rc = prec_residual(c_f, c_d)
+            dC[m as usize] = rc.abs_delta
+            if rc.abs_delta > max_dC { max_dC = rc.abs_delta }
+            n_chi_ok = n_chi_ok + 1
+        } else {
+            dC[m as usize] = 0.0
+        }
+        m = m + 1
+    }
+
+    let (mean_pf, sem_pf) = sample_mean_sem(&pf, n_meas)
+    let (mean_pd, _sem_pd) = sample_mean_sem(&pd, n_meas)
+    let (mean_cf, sem_cf) = sample_mean_sem(&cf, n_meas)
+    let (mean_cd, _sem_cd) = sample_mean_sem(&cd, n_meas)
+    let (mean_dP, _) = sample_mean_sem(&dP, n_meas)
+    let (mean_dC, _) = sample_mean_sem(&dC, n_meas)
+
+    let res_P = prec_residual(mean_pf, mean_pd)
+    let res_C = prec_residual(mean_cf, mean_cd)
+    let gate_P = prec_gate_ok(res_P.abs_delta, sem_pf, eps_abs, kappa)
+    let gate_C = prec_gate_ok(res_C.abs_delta, sem_cf, eps_abs, kappa)
+    let gate_maxP = prec_gate_ok(max_dP, sem_pf, eps_abs, kappa)
+    let gate_maxC = prec_gate_ok(max_dC, sem_cf, eps_abs, kappa)
+
+    let ep_P = ep_measured(mean_pf, sem_pf)
+    let ep_C = ep_measured(mean_cf, sem_cf)
+
+    println("⟨P⟩_f64 = " ++ fp6(ep_val(&ep_P)) ++ " ± " ++ fp6(ep_std(&ep_P)))
+    println("⟨P⟩_dd  = " ++ fp6(mean_pd))
+    println("|Δ⟨P⟩|  = " ++ fp6(res_P.abs_delta)
+        ++ "  mean_cfg|ΔP|=" ++ fp6(mean_dP)
+        ++ "  max_cfg|ΔP|=" ++ fp6(max_dP))
+    println("⟨χ⟩_f64 = " ++ fp6(ep_val(&ep_C)) ++ " ± " ++ fp6(ep_std(&ep_C))
+        ++ "  n_chi_both_ok=" ++ i64s(n_chi_ok) ++ "/" ++ i64s(n_meas))
+    println("⟨χ⟩_dd  = " ++ fp6(mean_cd))
+    println("|Δ⟨χ⟩|  = " ++ fp6(res_C.abs_delta)
+        ++ "  mean_cfg|Δχ|=" ++ fp6(mean_dC)
+        ++ "  max_cfg|Δχ|=" ++ fp6(max_dC))
+
+    // ratio of precision residual to SEM (how many "sigmas" of stats is arithmetic)
+    var ratio_P = 0.0
+    var ratio_C = 0.0
+    if sem_pf > 1.0e-30 { ratio_P = res_P.abs_delta / sem_pf }
+    if sem_cf > 1.0e-30 { ratio_C = res_C.abs_delta / sem_cf }
+    println("|Δ⟨P⟩|/SEM_P = " ++ fp6(ratio_P))
+    println("|Δ⟨χ⟩|/SEM_χ = " ++ fp6(ratio_C))
+
+    println("")
+    println("================================================================")
+    println(" GATES")
+    println("================================================================")
+    if gate_P == 1 { println("GATE plaquette_precision_vs_sem: PASS") }
+    else { println("GATE plaquette_precision_vs_sem: FAIL_HONEST_precision") }
+    if gate_C == 1 { println("GATE creutz_precision_vs_sem: PASS") }
+    else { println("GATE creutz_precision_vs_sem: FAIL_HONEST_precision") }
+    if gate_maxP == 1 { println("GATE max_config_plaquette_prec: PASS") }
+    else { println("GATE max_config_plaquette_prec: FAIL_HONEST_precision") }
+    if gate_maxC == 1 { println("GATE max_config_creutz_prec: PASS") }
+    else { println("GATE max_config_creutz_prec: FAIL_HONEST_precision") }
+
+    // scientific interpretation gate: if all precision PASS, systematics dominate
+    if gate_P == 1 && gate_C == 1 {
+        println("GATE arithmetic_not_dominant: PASS")
+        println("  → invest in plateau/volume/scale, not f128-everywhere")
+    } else {
+        println("GATE arithmetic_not_dominant: FAIL_HONEST")
+        println("  → escalate Dd64/f128 on measure path")
+    }
+
+    // Wilson spot residuals should be tiny
+    var w_ok = true
+    if d11 > 1.0e-10 { w_ok = false }
+    if d12 > 1.0e-10 { w_ok = false }
+    if d22 > 1.0e-10 { w_ok = false }
+    if w_ok { println("GATE wilson_spot_ulps: PASS") }
+    else { println("GATE wilson_spot_ulps: FAIL_HONEST_precision") }
+
+    let _ = lg_set_L(4)
+    println("")
+    println("INTERPRETATION: precision residual is a typed falsifier for f64.")
+    println("Native f128 remains the language destination; Dd64 is the witness now.")
+    println("================================================================")
+    0
+}

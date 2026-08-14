@@ -1,0 +1,352 @@
+//@ run-pass
+// examples/particle_physics/su3_l6_production.sio
+//
+// SU(3) L=6 PRODUCTION — multi-smear APE + multi-R Creutz + ratio SEM
+// ===================================================================
+// Stabilize spectral mass on L=6: try APE n∈{1,2,3}, pick primary by
+// ensemble m_eff validity then n_ok samples. Scale: χ(2,2) and χ(3,3).
+// Report m/√χ with GUM SEM via mass_over_sqrt_sigma_ep.
+//
+// CLAIM: SU(3) L=6 production path with multi-smear honesty.
+// NOT CLAIMED: continuum SU(3); lit-precision 0++; Clay; QCD.
+//
+// Run:
+//   export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
+//   export SOUNIO_SOUC_ENGINE=lean_single
+//   ./bin/souc run examples/particle_physics/su3_l6_production.sio
+
+use particle_physics::lattice_su3::{
+    su3_set_L, su3_lat_l, su3_nsites, su3_seed, su3_lattice_cold,
+    su3_heatbath_thermalize, su3_measure_glueball_thin_and_ape_hb,
+    su3_measure_ensemble_hb_multi_r, su3_glueball_meff_log,
+    su3_glueball_meff_ep, su3_string_tension_ep, su3_plaquette_ep,
+}
+use particle_physics::lattice_gauge::{mass_over_sqrt_sigma_ep, jackknife_mean}
+use epistemic::knowledge::{ep_val, ep_std}
+
+fn fp6(v: f64) -> string with Mut, Div, Panic {
+    var x = v
+    var neg = false
+    if x < 0.0 { neg = true; x = 0.0 - x }
+    let n = (x * 1000000.0 + 0.5) as i64
+    var whole = n / 1000000
+    let frac = n % 1000000
+    var buf: [i8; 64] = [0; 64]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    var wrev: [i8; 16] = [0; 16]
+    var wlen: i64 = 0
+    if whole == 0 { wrev[0] = 48 as i8; wlen = 1 }
+    while whole > 0 && wlen < 15 {
+        wrev[wlen as usize] = (48 + whole % 10) as i8
+        wlen = wlen + 1
+        whole = whole / 10
+    }
+    var i = wlen - 1
+    while i >= 0 {
+        buf[pos as usize] = wrev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    buf[pos as usize] = 46 as i8
+    pos = pos + 1
+    var div: i64 = 100000
+    while div >= 1 {
+        buf[pos as usize] = (48 + (frac / div) % 10) as i8
+        pos = pos + 1
+        div = div / 10
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn i64s(v: i64) -> string with Mut, Div, Panic {
+    if v == 0 { return "0" }
+    var n = v
+    var neg = false
+    if n < 0 { neg = true; n = 0 - n }
+    var rev: [i8; 24] = [0; 24]
+    var len: i64 = 0
+    while n > 0 && len < 23 {
+        rev[len as usize] = (48 + n % 10) as i8
+        len = len + 1
+        n = n / 10
+    }
+    var buf: [i8; 32] = [0; 32]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    var i = len - 1
+    while i >= 0 {
+        buf[pos as usize] = rev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn sqrt_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    var k: i64 = 0
+    while k < 40 { g = 0.5 * (g + x / g); k = k + 1 }
+    g
+}
+
+fn abs_f(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("================================================================")
+    println(" SU(3) L=6 PRODUCTION — multi-smear APE + multi-R Creutz")
+    println("================================================================")
+    println("CLAIM: stabilize APE 0++ on L=6; report m/√χ ± SEM")
+    println("NOT CLAIMED: continuum; lit-precision; Clay; QCD")
+    println("")
+
+    let okL = su3_set_L(6)
+    if okL == 0 {
+        println("FAIL su3_set_L(6)")
+        return 1
+    }
+    let beta: f64 = 5.7
+    let n_therm: i64 = 36
+    let n_meas: i64 = 32
+    let n_sep: i64 = 2
+    let alpha: f64 = 0.4
+    let seed0: i64 = 20260813
+
+    println("L=" ++ i64s(su3_lat_l()) ++ " sites=" ++ i64s(su3_nsites())
+        ++ " β=" ++ fp6(beta) ++ " HB")
+    println("therm=" ++ i64s(n_therm) ++ " meas=" ++ i64s(n_meas)
+        ++ " sep=" ++ i64s(n_sep) ++ " α=" ++ fp6(alpha))
+    println("smear scan n∈{1,2,3}")
+    println("")
+
+    var lat: [f64; 93312] = [0.0; 93312]
+    var sm: [f64; 93312] = [0.0; 93312]
+    var tmp: [f64; 93312] = [0.0; 93312]
+
+    // Shared thermalized start for smear scan: re-thermalize per n for independence
+    var ns_list: [i64; 3] = [1, 2, 3]
+    var m_thin_b: [f64; 3] = [0.0; 3]
+    var m_ape_b: [f64; 3] = [0.0; 3]
+    var sem_t_b: [f64; 3] = [0.0; 3]
+    var sem_a_b: [f64; 3] = [0.0; 3]
+    var nok_t_b: [i64; 3] = [0; 3]
+    var nok_a_b: [i64; 3] = [0; 3]
+    var ok_ens_t: [i64; 3] = [0; 3]
+    var ok_ens_a: [i64; 3] = [0; 3]
+
+    var ib: i64 = 0
+    while ib < 3 {
+        let ns = ns_list[ib as usize]
+        let seed = seed0 + ib * 101
+        println("--- smear n=" ++ i64s(ns) ++ " ---")
+        su3_seed(seed)
+        su3_lattice_cold(&!lat)
+        let pth = su3_heatbath_thermalize(&!lat, beta, n_therm)
+        println("  ⟨P⟩_therm=" ++ fp6(pth))
+
+        var c_t: [f64; 8] = [0.0; 8]
+        var c_a: [f64; 8] = [0.0; 8]
+        var mt_s: [f64; 256] = [0.0; 256]
+        var mt_v: [i64; 256] = [0; 256]
+        var ma_s: [f64; 256] = [0.0; 256]
+        var ma_v: [i64; 256] = [0; 256]
+        let (nt, na, _ot, _oa) = su3_measure_glueball_thin_and_ape_hb(
+            &!lat, &!sm, &!tmp, beta, n_meas, n_sep, alpha, ns,
+            &!c_t, &!c_a, &!mt_s, &!mt_v, &!ma_s, &!ma_v
+        )
+        let (mt, ot) = su3_glueball_meff_log(c_t[0], c_t[1])
+        let (ma, oa) = su3_glueball_meff_log(c_a[0], c_a[1])
+        let ept = su3_glueball_meff_ep(&mt_s, &mt_v, n_meas)
+        let epa = su3_glueball_meff_ep(&ma_s, &ma_v, n_meas)
+        let (jk_t, jks_t, njt) = jackknife_mean(&mt_s, &mt_v, n_meas, 1)
+        let (jk_a, jks_a, nja) = jackknife_mean(&ma_s, &ma_v, n_meas, 1)
+
+        m_thin_b[ib as usize] = mt
+        m_ape_b[ib as usize] = ma
+        sem_t_b[ib as usize] = ep_std(&ept)
+        sem_a_b[ib as usize] = ep_std(&epa)
+        if jks_t > 0.0 { sem_t_b[ib as usize] = jks_t }
+        if jks_a > 0.0 { sem_a_b[ib as usize] = jks_a }
+        nok_t_b[ib as usize] = nt
+        nok_a_b[ib as usize] = na
+        ok_ens_t[ib as usize] = ot
+        ok_ens_a[ib as usize] = oa
+
+        println("  C_thin 0,1=" ++ fp6(c_t[0]) ++ "," ++ fp6(c_t[1])
+            ++ "  C_ape=" ++ fp6(c_a[0]) ++ "," ++ fp6(c_a[1]))
+        println("  m_thin=" ++ fp6(mt) ++ " ok=" ++ i64s(ot)
+            ++ "  n_ok=" ++ i64s(nt) ++ "  jk=" ++ fp6(jk_t) ++ "±" ++ fp6(jks_t)
+            ++ " (n=" ++ i64s(njt) ++ ")")
+        println("  m_ape =" ++ fp6(ma) ++ " ok=" ++ i64s(oa)
+            ++ "  n_ok=" ++ i64s(na) ++ "  jk=" ++ fp6(jk_a) ++ "±" ++ fp6(jks_a)
+            ++ " (n=" ++ i64s(nja) ++ ")")
+        ib = ib + 1
+    }
+
+    // Scale on fresh ensemble after last smear run — re-therm for clean Creutz
+    println("")
+    println("--- Creutz multi-R scale ---")
+    su3_seed(seed0 + 900)
+    su3_lattice_cold(&!lat)
+    let _ps = su3_heatbath_thermalize(&!lat, beta, n_therm)
+    var plaq_s: [f64; 256] = [0.0; 256]
+    var chi2_s: [f64; 256] = [0.0; 256]
+    var chi2_v: [i64; 256] = [0; 256]
+    var chi3_s: [f64; 256] = [0.0; 256]
+    var chi3_v: [i64; 256] = [0; 256]
+    let n_ctx: i64 = 20
+    let (n2, n3) = su3_measure_ensemble_hb_multi_r(
+        &!lat, beta, n_ctx, n_sep,
+        &!plaq_s, &!chi2_s, &!chi2_v, &!chi3_s, &!chi3_v
+    )
+    let pep = su3_plaquette_ep(&plaq_s, n_ctx)
+    let sep2 = su3_string_tension_ep(&chi2_s, &chi2_v, n_ctx)
+    let sep3 = su3_string_tension_ep(&chi3_s, &chi3_v, n_ctx)
+    let sig2 = ep_val(&sep2)
+    let sig3 = ep_val(&sep3)
+    let srt2 = sqrt_q(sig2)
+    let srt3 = sqrt_q(sig3)
+    println("⟨P⟩=" ++ fp6(ep_val(&pep)) ++ "±" ++ fp6(ep_std(&pep)))
+    println("χ2=" ++ fp6(sig2) ++ "±" ++ fp6(ep_std(&sep2))
+        ++ " √=" ++ fp6(srt2) ++ " n_ok=" ++ i64s(n2))
+    println("χ3=" ++ fp6(sig3) ++ "±" ++ fp6(ep_std(&sep3))
+        ++ " √=" ++ fp6(srt3) ++ " n_ok=" ++ i64s(n3))
+
+    // Pick primary: prefer ensemble-valid APE with max n_ok, else thin
+    var best_i: i64 = 0
+    var best_score: i64 = 0 - 1
+    var best_is_ape: i64 = 0
+    ib = 0
+    while ib < 3 {
+        if ok_ens_a[ib as usize] == 1 {
+            let sc = nok_a_b[ib as usize] + 100
+            if sc > best_score {
+                best_score = sc
+                best_i = ib
+                best_is_ape = 1
+            }
+        }
+        ib = ib + 1
+    }
+    if best_is_ape == 0 {
+        ib = 0
+        while ib < 3 {
+            if ok_ens_t[ib as usize] == 1 {
+                let sc = nok_t_b[ib as usize]
+                if sc > best_score {
+                    best_score = sc
+                    best_i = ib
+                    best_is_ape = 0
+                }
+            }
+            ib = ib + 1
+        }
+    }
+
+    var m_pri: f64 = 0.0
+    var m_sem: f64 = 0.0
+    var tag = "FAIL"
+    if best_score >= 0 {
+        if best_is_ape == 1 {
+            m_pri = m_ape_b[best_i as usize]
+            m_sem = sem_a_b[best_i as usize]
+            tag = "APE"
+        } else {
+            m_pri = m_thin_b[best_i as usize]
+            m_sem = sem_t_b[best_i as usize]
+            tag = "thin"
+        }
+    }
+    let ns_best = ns_list[best_i as usize]
+
+    // ratio with GUM
+    let rep2 = mass_over_sqrt_sigma_ep(m_pri, m_sem, sig2, ep_std(&sep2))
+    let rep3 = mass_over_sqrt_sigma_ep(m_pri, m_sem, sig3, ep_std(&sep3))
+    let r2 = ep_val(&rep2)
+    let r3 = ep_val(&rep3)
+
+    println("")
+    println("================================================================")
+    println(" SCOREBOARD")
+    println("================================================================")
+    println("primary=[" ++ tag ++ " n=" ++ i64s(ns_best) ++ "]  m="
+        ++ fp6(m_pri) ++ "±" ++ fp6(m_sem))
+    println("m/√χ2=" ++ fp6(r2) ++ "±" ++ fp6(ep_std(&rep2)))
+    println("m/√χ3=" ++ fp6(r3) ++ "±" ++ fp6(ep_std(&rep3)))
+    println("lit SU(3) 0++ m/√σ ~ 3.5")
+
+    // smear stability: relative range of valid APE m
+    var n_ape_ok: i64 = 0
+    var mn_a: f64 = 1.0e30
+    var mx_a: f64 = 0.0
+    ib = 0
+    while ib < 3 {
+        if ok_ens_a[ib as usize] == 1 && m_ape_b[ib as usize] > 0.0 {
+            n_ape_ok = n_ape_ok + 1
+            if m_ape_b[ib as usize] < mn_a { mn_a = m_ape_b[ib as usize] }
+            if m_ape_b[ib as usize] > mx_a { mx_a = m_ape_b[ib as usize] }
+        }
+        ib = ib + 1
+    }
+    var spr_a: f64 = 0.0
+    if n_ape_ok >= 2 && mn_a > 1.0e-12 {
+        spr_a = (mx_a - mn_a) / (0.5 * (mx_a + mn_a))
+    }
+
+    println("")
+    println("================================================================")
+    println(" GATES")
+    println("================================================================")
+    let g_L6 = su3_lat_l() == 6
+    let g_ape_any = n_ape_ok >= 1
+    let g_ape_multi = n_ape_ok >= 2
+    let g_pri = m_pri > 0.1
+    let g_chi2 = n2 >= 5 && sig2 > 0.0
+    let g_chi3 = n3 >= 3 && sig3 > 0.0
+    let g_r2 = r2 > 0.5 && r2 < 15.0
+    let g_r2_lit = r2 >= 2.0 && r2 <= 6.0
+    let g_r2_sem = ep_std(&rep2) > 0.0 && ep_std(&rep2) < 0.5 * r2
+    let g_smear_stable = n_ape_ok >= 2 && spr_a <= 0.50
+    let g_ape_primary = best_is_ape == 1
+
+    if g_L6 { println("GATE L6_geometry: PASS") }
+    else { println("GATE L6_geometry: FAIL_HONEST") }
+    if g_ape_any { println("GATE ape_alive: PASS  n_smears_ok=" ++ i64s(n_ape_ok)) }
+    else { println("GATE ape_alive: FAIL_HONEST") }
+    if g_ape_multi { println("GATE ape_multi_smear: PASS") }
+    else { println("GATE ape_multi_smear: FAIL_HONEST") }
+    if g_ape_primary { println("GATE primary_is_ape: PASS  n=" ++ i64s(ns_best)) }
+    else { println("GATE primary_is_ape: FAIL_HONEST  (thin fallback)") }
+    if g_pri { println("GATE primary_mass: PASS  " ++ fp6(m_pri)) }
+    else { println("GATE primary_mass: FAIL_HONEST") }
+    if g_chi2 { println("GATE creutz_chi2: PASS") }
+    else { println("GATE creutz_chi2: FAIL_HONEST") }
+    if g_chi3 { println("GATE creutz_chi3: PASS") }
+    else { println("GATE creutz_chi3: FAIL_HONEST") }
+    if g_r2 { println("GATE m_over_chi2_phys: PASS  " ++ fp6(r2)) }
+    else { println("GATE m_over_chi2_phys: FAIL_HONEST") }
+    if g_r2_lit { println("GATE m_over_chi2_lit: PASS  " ++ fp6(r2)) }
+    else { println("GATE m_over_chi2_lit: FAIL_HONEST  " ++ fp6(r2)) }
+    if g_r2_sem { println("GATE ratio_sem_finite: PASS  ±" ++ fp6(ep_std(&rep2))) }
+    else { println("GATE ratio_sem_finite: FAIL_HONEST") }
+    if g_smear_stable { println("GATE smear_stable: PASS  spr=" ++ fp6(spr_a)) }
+    else { println("GATE smear_stable: FAIL_HONEST  spr=" ++ fp6(spr_a)) }
+
+    println("")
+    println("VERDICT:")
+    println("  primary " ++ tag ++ " n=" ++ i64s(ns_best)
+        ++ "  m/√χ2=" ++ fp6(r2) ++ "±" ++ fp6(ep_std(&rep2))
+        ++ "  m/√χ3=" ++ fp6(r3) ++ "±" ++ fp6(ep_std(&rep3)))
+    if g_ape_any && g_chi2 {
+        println("  SU(3) L=6 APE path live. No continuum claim.")
+    } else {
+        println("  Partial — see FAIL_HONEST.")
+    }
+
+    let _r = su3_set_L(4)
+    println("================================================================")
+    0
+}

@@ -1,0 +1,269 @@
+//@ run-pass
+// examples/particle_physics/su2_scale_gevp.sio
+//
+// MULTI-R SCALE + 3×3 GEVP — is m/√σ scale-setter dependent?
+// ===========================================================
+// Same L=6 HB + 3-smear 3×3 GEVP mass, but string tension from
+//   χ(2,2)  and  χ(3,3)  (Creutz at two loop sizes).
+// If m/√σ jumps when R changes, scale setting — not only the
+// spectral estimator — is polluting the lit-window game.
+//
+// CLAIM: quantify scale-setting systematics of the variational mass.
+// NOT CLAIMED: continuum; Clay; Sommer r0.
+//
+// Run:
+//   export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
+//   export SOUNIO_SOUC_ENGINE=lean_single
+//   ./bin/souc run examples/particle_physics/su2_scale_gevp.sio
+
+use particle_physics::lattice_gauge::{
+    lat_l, lat_nsites, lg_set_L, lg_seed, lattice_cold,
+    heatbath_thermalize, measure_ensemble_hb_multi_r,
+    measure_variational_3smear_hb, gevp_3x3, gevp_mass,
+    glueball_meff_log, plaquette_ep, string_tension_ep,
+}
+use epistemic::knowledge::{ep_val, ep_std, ep_measured}
+
+fn fp6(v: f64) -> string with Mut, Div, Panic {
+    var x = v
+    var neg = false
+    if x < 0.0 { neg = true; x = 0.0 - x }
+    let n = (x * 1000000.0 + 0.5) as i64
+    var whole = n / 1000000
+    let frac = n % 1000000
+    var buf: [i8; 64] = [0; 64]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    var wrev: [i8; 16] = [0; 16]
+    var wlen: i64 = 0
+    if whole == 0 { wrev[0] = 48 as i8; wlen = 1 }
+    while whole > 0 && wlen < 15 {
+        wrev[wlen as usize] = (48 + whole % 10) as i8
+        wlen = wlen + 1
+        whole = whole / 10
+    }
+    var i = wlen - 1
+    while i >= 0 {
+        buf[pos as usize] = wrev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    buf[pos as usize] = 46 as i8
+    pos = pos + 1
+    var div: i64 = 100000
+    while div >= 1 {
+        buf[pos as usize] = (48 + (frac / div) % 10) as i8
+        pos = pos + 1
+        div = div / 10
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn i64s(v: i64) -> string with Mut, Div, Panic {
+    if v == 0 { return "0" }
+    var n = v
+    var neg = false
+    if n < 0 { neg = true; n = 0 - n }
+    var rev: [i8; 24] = [0; 24]
+    var len: i64 = 0
+    while n > 0 && len < 23 {
+        rev[len as usize] = (48 + n % 10) as i8
+        len = len + 1
+        n = n / 10
+    }
+    var buf: [i8; 32] = [0; 32]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    var i = len - 1
+    while i >= 0 {
+        buf[pos as usize] = rev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn sqrt_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    var k: i64 = 0
+    while k < 40 { g = 0.5 * (g + x / g); k = k + 1 }
+    g
+}
+
+fn abs_f(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("================================================================")
+    println(" SU(2) MULTI-R SCALE + 3x3 GEVP")
+    println("================================================================")
+    println("CLAIM: scale-setting systematics of variational mass")
+    println("NOT CLAIMED: continuum; Sommer r0; Clay")
+    println("")
+
+    let _ = lg_set_L(6)
+    let beta: f64 = 2.3
+    let n_therm: i64 = 28
+    let n_meas: i64 = 32
+    let n_sep: i64 = 2
+    let alpha: f64 = 0.4
+    let n0: i64 = 1
+    let n1: i64 = 2
+    let n2: i64 = 4
+    let seed: i64 = 20260813
+
+    println("L=" ++ i64s(lat_l()) ++ " sites=" ++ i64s(lat_nsites())
+        ++ " beta=" ++ fp6(beta) ++ " HB")
+    println("smears n=" ++ i64s(n0) ++ "," ++ i64s(n1) ++ "," ++ i64s(n2)
+        ++ "  therm=" ++ i64s(n_therm) ++ " meas=" ++ i64s(n_meas))
+    println("")
+
+    var lat: [f64; 65536] = [0.0; 65536]
+    var sm0: [f64; 65536] = [0.0; 65536]
+    var sm1: [f64; 65536] = [0.0; 65536]
+    var sm2: [f64; 65536] = [0.0; 65536]
+    var tmp: [f64; 65536] = [0.0; 65536]
+    lg_seed(seed)
+    lattice_cold(&!lat)
+    println("--- heatbath thermalize ---")
+    let p_th = heatbath_thermalize(&!lat, beta, n_therm)
+    println("P=" ++ fp6(p_th))
+
+    // GEVP first (continues Markov chain)
+    println("--- 3-smear 3x3 GEVP ---")
+    var c00: [f64; 8] = [0.0; 8]
+    var c01: [f64; 8] = [0.0; 8]
+    var c02: [f64; 8] = [0.0; 8]
+    var c11: [f64; 8] = [0.0; 8]
+    var c12: [f64; 8] = [0.0; 8]
+    var c22: [f64; 8] = [0.0; 8]
+    let (_o0, _o1, _o2) = measure_variational_3smear_hb(
+        &!lat, &!sm0, &!sm1, &!sm2, &!tmp,
+        beta, n_meas, n_sep, alpha, n0, n1, n2,
+        &!c00, &!c01, &!c02, &!c11, &!c12, &!c22
+    )
+    let (md0, od0) = glueball_meff_log(c00[0], c00[1])
+    let (l3, ok3) = gevp_3x3(
+        c00[1], c01[1], c02[1], c11[1], c12[1], c22[1],
+        c00[0], c01[0], c02[0], c11[0], c12[0], c22[0]
+    )
+    let (m3, om3) = gevp_mass(l3, 1.0)
+    println("diag m0(light)=" ++ fp6(md0) ++ " ok=" ++ i64s(od0))
+    println("3x3 GEVP m=" ++ fp6(m3) ++ " lambda=" ++ fp6(l3)
+        ++ " ok=" ++ i64s(om3))
+
+    // Multi-R Creutz
+    println("--- multi-R Creutz scale ---")
+    var plaq_s: [f64; 256] = [0.0; 256]
+    var chi2_s: [f64; 256] = [0.0; 256]
+    var chi2_v: [i64; 256] = [0; 256]
+    var chi3_s: [f64; 256] = [0.0; 256]
+    var chi3_v: [i64; 256] = [0; 256]
+    let n_ctx: i64 = 16
+    let (n2, n3) = measure_ensemble_hb_multi_r(
+        &!lat, beta, n_ctx, n_sep,
+        &!plaq_s, &!chi2_s, &!chi2_v, &!chi3_s, &!chi3_v
+    )
+    let pep = plaquette_ep(&plaq_s, n_ctx)
+    let sep2 = string_tension_ep(&chi2_s, &chi2_v, n_ctx)
+    let sep3 = string_tension_ep(&chi3_s, &chi3_v, n_ctx)
+    let sig2 = ep_val(&sep2)
+    let sig3 = ep_val(&sep3)
+    let srt2 = sqrt_q(sig2)
+    let srt3 = sqrt_q(sig3)
+
+    println("P=" ++ fp6(ep_val(&pep)) ++ "+/-" ++ fp6(ep_std(&pep)))
+    println("chi(2,2)=" ++ fp6(sig2) ++ "+/-" ++ fp6(ep_std(&sep2))
+        ++ "  sqrt=" ++ fp6(srt2) ++ "  n_ok=" ++ i64s(n2) ++ "/" ++ i64s(n_ctx))
+    println("chi(3,3)=" ++ fp6(sig3) ++ "+/-" ++ fp6(ep_std(&sep3))
+        ++ "  sqrt=" ++ fp6(srt3) ++ "  n_ok=" ++ i64s(n3) ++ "/" ++ i64s(n_ctx))
+
+    var r_c2: f64 = 0.0
+    var r_c3: f64 = 0.0
+    var r_d2: f64 = 0.0
+    var r_d3: f64 = 0.0
+    if om3 == 1 {
+        if srt2 > 1.0e-12 { r_c2 = m3 / srt2 }
+        if srt3 > 1.0e-12 { r_c3 = m3 / srt3 }
+    }
+    if od0 == 1 {
+        if srt2 > 1.0e-12 { r_d2 = md0 / srt2 }
+        if srt3 > 1.0e-12 { r_d3 = md0 / srt3 }
+    }
+
+    // scale ratio chi3/chi2
+    var scale_ratio: f64 = 0.0
+    if sig2 > 1.0e-12 { scale_ratio = sig3 / sig2 }
+
+    // relative change of dimensionless mass when R:2->3
+    var r_shift: f64 = 0.0
+    var r_shift_ok: i64 = 0
+    if r_c2 > 1.0e-12 && r_c3 > 1.0e-12 {
+        r_shift = abs_f(r_c3 - r_c2) / r_c2
+        r_shift_ok = 1
+    }
+
+    println("")
+    println("SCOREBOARD m / sqrt(chi(R,R))  lit~3.5-4:")
+    println("  contact / chi2:  " ++ fp6(r_d2))
+    println("  contact / chi3:  " ++ fp6(r_d3))
+    println("  GEVP3  / chi2:   " ++ fp6(r_c2) ++ "  *** prior path")
+    println("  GEVP3  / chi3:   " ++ fp6(r_c3) ++ "  *** larger loop")
+    println("  chi3/chi2 = " ++ fp6(scale_ratio)
+        ++ "  (1 => scale R-independent on this volume)")
+    println("  |r3-r2|/r2 = " ++ fp6(r_shift)
+        ++ "  (dimensionless mass shift under scale change)")
+
+    println("")
+    println("================================================================")
+    println(" GATES")
+    println("================================================================")
+    let g_gevp = om3 == 1 && m3 > 0.0
+    let g_chi2 = n2 >= 3 && sig2 > 0.0
+    let g_chi3 = n3 >= 2 && sig3 > 0.0
+    let g_conf = g_chi2
+    let g_phys2 = g_gevp && r_c2 > 1.0 && r_c2 < 10.0
+    let g_phys3 = g_gevp && r_c3 > 1.0 && r_c3 < 10.0
+    let g_lit2 = g_gevp && r_c2 > 2.5 && r_c2 < 5.5
+    let g_lit3 = g_gevp && r_c3 > 2.5 && r_c3 < 5.5
+    // scale stability: dimensionless ratio shifts by < 25%
+    let g_scale_stable = r_shift_ok == 1 && r_shift <= 0.25
+    // both scales positive and ordered-ish (often chi decreases with R toward continuum sigma)
+    let g_both_scales = g_chi2 && g_chi3
+
+    if g_gevp { println("GATE gevp3_mass: PASS") }
+    else { println("GATE gevp3_mass: FAIL_HONEST") }
+    if g_chi2 { println("GATE creutz_chi2: PASS") }
+    else { println("GATE creutz_chi2: FAIL_HONEST") }
+    if g_chi3 { println("GATE creutz_chi3: PASS") }
+    else { println("GATE creutz_chi3: FAIL_HONEST  (noise at R=3 common on L=6)") }
+    if g_both_scales { println("GATE both_scales_live: PASS") }
+    else { println("GATE both_scales_live: FAIL_HONEST") }
+    if g_phys2 { println("GATE ratio_chi2_phys: PASS") }
+    else { println("GATE ratio_chi2_phys: FAIL_HONEST") }
+    if g_phys3 { println("GATE ratio_chi3_phys: PASS") }
+    else { println("GATE ratio_chi3_phys: FAIL_HONEST") }
+    if g_lit2 { println("GATE ratio_chi2_lit: PASS") }
+    else { println("GATE ratio_chi2_lit: FAIL_HONEST") }
+    if g_lit3 { println("GATE ratio_chi3_lit: PASS") }
+    else { println("GATE ratio_chi3_lit: FAIL_HONEST") }
+    if g_scale_stable { println("GATE scale_R_stability: PASS  star") }
+    else { println("GATE scale_R_stability: FAIL_HONEST  (m/sqrt(sig) depends on R)") }
+
+    println("")
+    if g_scale_stable {
+        println("VERDICT: dimensionless GEVP mass STABLE under R=2 vs R=3 scale.")
+    } else if g_both_scales {
+        println("VERDICT: scale setting MOVES m/sqrt(sig) by "
+            ++ fp6(r_shift) ++ " relative — lit-window claims are scale-fragile.")
+    } else {
+        println("VERDICT: cannot compare scales (chi3 weak/missing).")
+    }
+    println("  GEVP3/chi2=" ++ fp6(r_c2) ++ "  GEVP3/chi3=" ++ fp6(r_c3))
+
+    let _r = lg_set_L(4)
+    println("================================================================")
+    0
+}

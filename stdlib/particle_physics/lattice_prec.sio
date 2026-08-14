@@ -1,0 +1,308 @@
+// stdlib/particle_physics/lattice_prec.sio — Precision witness for pure SU(2) lattice
+//
+// Dual-path observables: same gauge field, two arithmetics
+//   path A: f64  (production lattice_gauge)
+//   path B: Dd64 (~106-bit expansion, math::dd64)
+//
+// CLAIM: quantify whether f64 roundoff contaminates plaquette / Creutz relative
+// to statistical SEM. Does NOT implement native IEEE binary128.
+//
+// Gate philosophy:
+//   if |O_f64 − O_dd64| > max(ε_abs, κ · SEM) → FAIL_HONEST_precision
+//   else arithmetic is not the dominant error (systematics still may be).
+//
+// References:
+//   Dekker / JMP2017 double-word arithmetic (via math::dd64)
+//   Creutz ratios: Phys. Rev. D21 (1980) 2308
+
+module particle_physics::lattice_prec
+
+use math::dd64::{
+    Dd64, dd_from_f64, dd_zero, dd_to_f64,
+    dd_add, dd_add_f64, dd_sub, dd_neg, dd_mul, dd_mul_f64, dd_div, dd_abs, dd_sqrt,
+}
+use particle_physics::lattice_gauge::{
+    lat_l, lat_nd, lat_nsites,
+    link_get, neighbour, plaquette_half_re, mean_plaquette,
+    wilson_loop_rect, creutz_ratio,
+}
+
+// ============================================================================
+// Dd64 SU(2) as unit quaternions (w,x,y,z)
+// ============================================================================
+
+fn dd_su2_mul(
+    aw: Dd64, ax: Dd64, ay: Dd64, az: Dd64,
+    bw: Dd64, bx: Dd64, by: Dd64, bz: Dd64
+) -> (Dd64, Dd64, Dd64, Dd64) with Mut, Div, Panic {
+    // w = aw*bw - ax*bx - ay*by - az*bz
+    let w = dd_sub(
+        dd_sub(dd_mul(aw, bw), dd_mul(ax, bx)),
+        dd_add(dd_mul(ay, by), dd_mul(az, bz))
+    )
+    // x = aw*bx + ax*bw + ay*bz - az*by
+    let x = dd_sub(
+        dd_add(dd_add(dd_mul(aw, bx), dd_mul(ax, bw)), dd_mul(ay, bz)),
+        dd_mul(az, by)
+    )
+    // y = aw*by - ax*bz + ay*bw + az*bx
+    let y = dd_add(
+        dd_add(dd_sub(dd_mul(aw, by), dd_mul(ax, bz)), dd_mul(ay, bw)),
+        dd_mul(az, bx)
+    )
+    // z = aw*bz + ax*by - ay*bx + az*bw
+    let z = dd_add(
+        dd_sub(dd_add(dd_mul(aw, bz), dd_mul(ax, by)), dd_mul(ay, bx)),
+        dd_mul(az, bw)
+    )
+    (w, x, y, z)
+}
+
+fn dd_su2_dag(w: Dd64, x: Dd64, y: Dd64, z: Dd64) -> (Dd64, Dd64, Dd64, Dd64) {
+    (w, dd_neg(x), dd_neg(y), dd_neg(z))
+}
+
+fn dd_from_link(lat: &[f64; 65536], s: i64, mu: i64) -> (Dd64, Dd64, Dd64, Dd64) with Mut, Div, Panic {
+    let (w, x, y, z) = link_get(lat, s, mu)
+    (dd_from_f64(w), dd_from_f64(x), dd_from_f64(y), dd_from_f64(z))
+}
+
+/// ½ Re Tr U_□ in Dd64 for plane (μ,ν) at site s.
+pub fn dd_plaquette_half_re(
+    lat: &[f64; 65536],
+    s: i64,
+    mu: i64,
+    nu: i64
+) -> Dd64 with Mut, Div, Panic {
+    let (u1w, u1x, u1y, u1z) = dd_from_link(lat, s, mu)
+    let s_mu = neighbour(s, mu, 1)
+    let (u2w, u2x, u2y, u2z) = dd_from_link(lat, s_mu, nu)
+    let s_nu = neighbour(s, nu, 1)
+    let (u3w0, u3x0, u3y0, u3z0) = dd_from_link(lat, s_nu, mu)
+    let (u3w, u3x, u3y, u3z) = dd_su2_dag(u3w0, u3x0, u3y0, u3z0)
+    let (u4w0, u4x0, u4y0, u4z0) = dd_from_link(lat, s, nu)
+    let (u4w, u4x, u4y, u4z) = dd_su2_dag(u4w0, u4x0, u4y0, u4z0)
+
+    let (p1w, p1x, p1y, p1z) = dd_su2_mul(u1w, u1x, u1y, u1z, u2w, u2x, u2y, u2z)
+    let (p2w, p2x, p2y, p2z) = dd_su2_mul(p1w, p1x, p1y, p1z, u3w, u3x, u3y, u3z)
+    let (pw, _px, _py, _pz) = dd_su2_mul(p2w, p2x, p2y, p2z, u4w, u4x, u4y, u4z)
+    pw
+}
+
+/// Mean plaquette formed in Dd64 products, averaged with Kahan on f64(hi+lo).
+/// Dominant FP risk is the SU(2) product chain; the mean of O(1) values is not.
+pub fn dd_mean_plaquette(lat: &[f64; 65536]) -> Dd64 with Mut, Div, Panic {
+    let Nd = lat_nd()
+    var sum: f64 = 0.0
+    var c: f64 = 0.0
+    var count: i64 = 0
+    var s: i64 = 0
+    let ns = lat_nsites()
+    while s < ns {
+        var mu: i64 = 0
+        while mu < Nd {
+            var nu: i64 = mu + 1
+            while nu < Nd {
+                let p = dd_to_f64(dd_plaquette_half_re(lat, s, mu, nu))
+                // Kahan
+                let y = p - c
+                let t = sum + y
+                c = (t - sum) - y
+                sum = t
+                count = count + 1
+                nu = nu + 1
+            }
+            mu = mu + 1
+        }
+        s = s + 1
+    }
+    if count == 0 { return dd_zero() }
+    dd_from_f64(sum / (count as f64))
+}
+
+/// Cross-check: W(1,1) dual-path mean (all μ≠ν). Orientation-even for SU(2).
+pub fn dd_mean_plaquette_via_w11(lat: &[f64; 65536]) -> Dd64 with Mut, Div, Panic {
+    dd_wilson_loop_rect(lat, 1, 1)
+}
+
+/// Single-plaquette residual at (s,μ,ν): |P_f64 − P_dd|.
+pub fn plaquette_site_residual(
+    lat: &[f64; 65536],
+    s: i64,
+    mu: i64,
+    nu: i64
+) -> f64 with Mut, Div, Panic {
+    let pf = plaquette_half_re(lat, s, mu, nu)
+    let pd = dd_to_f64(dd_plaquette_half_re(lat, s, mu, nu))
+    var d = pf - pd
+    if d < 0.0 { d = 0.0 - d }
+    d
+}
+
+/// Rectangular Wilson loop ½ Re Tr in Dd64 (averaged over origins & planes).
+pub fn dd_wilson_loop_rect(lat: &[f64; 65536], r: i64, t_len: i64) -> Dd64 with Mut, Div, Panic {
+    if r < 1 || t_len < 1 { return dd_zero() }
+    let L = lat_l()
+    if r >= L || t_len >= L { return dd_zero() }
+    let Nd = lat_nd()
+    var sum = dd_zero()
+    var count: i64 = 0
+    var s0: i64 = 0
+    let ns = lat_nsites()
+    while s0 < ns {
+        var mu: i64 = 0
+        while mu < Nd {
+            var nu: i64 = 0
+            while nu < Nd {
+                if nu != mu {
+                    var pw = dd_from_f64(1.0)
+                    var px = dd_zero()
+                    var py = dd_zero()
+                    var pz = dd_zero()
+                    var s = s0
+                    var step: i64 = 0
+                    while step < r {
+                        let (uw, ux, uy, uz) = dd_from_link(lat, s, mu)
+                        let (nw, nx, ny, nz) = dd_su2_mul(pw, px, py, pz, uw, ux, uy, uz)
+                        pw = nw; px = nx; py = ny; pz = nz
+                        s = neighbour(s, mu, 1)
+                        step = step + 1
+                    }
+                    step = 0
+                    while step < t_len {
+                        let (uw, ux, uy, uz) = dd_from_link(lat, s, nu)
+                        let (nw, nx, ny, nz) = dd_su2_mul(pw, px, py, pz, uw, ux, uy, uz)
+                        pw = nw; px = nx; py = ny; pz = nz
+                        s = neighbour(s, nu, 1)
+                        step = step + 1
+                    }
+                    step = 0
+                    while step < r {
+                        s = neighbour(s, mu, 0 - 1)
+                        let (uw0, ux0, uy0, uz0) = dd_from_link(lat, s, mu)
+                        let (uw, ux, uy, uz) = dd_su2_dag(uw0, ux0, uy0, uz0)
+                        let (nw, nx, ny, nz) = dd_su2_mul(pw, px, py, pz, uw, ux, uy, uz)
+                        pw = nw; px = nx; py = ny; pz = nz
+                        step = step + 1
+                    }
+                    step = 0
+                    while step < t_len {
+                        s = neighbour(s, nu, 0 - 1)
+                        let (uw0, ux0, uy0, uz0) = dd_from_link(lat, s, nu)
+                        let (uw, ux, uy, uz) = dd_su2_dag(uw0, ux0, uy0, uz0)
+                        let (nw, nx, ny, nz) = dd_su2_mul(pw, px, py, pz, uw, ux, uy, uz)
+                        pw = nw; px = nx; py = ny; pz = nz
+                        step = step + 1
+                    }
+                    sum = dd_add(sum, pw)
+                    count = count + 1
+                }
+                nu = nu + 1
+            }
+            mu = mu + 1
+        }
+        s0 = s0 + 1
+    }
+    if count == 0 { return dd_zero() }
+    dd_div(sum, dd_from_f64(count as f64))
+}
+
+/// ln via f64 of high-precision argument (captures product cancellation in ratio).
+fn ln_f64_local(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    var m = x
+    var e: i64 = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k: i64 = 1
+    while k < 30 {
+        term = term * t2
+        sum = sum + term / ((2 * k + 1) as f64)
+        k = k + 1
+    }
+    (e as f64) * 0.6931471805599453 + 2.0 * sum
+}
+
+/// Creutz χ(R,R) with Wilson loops in Dd64; log of ratio in f64.
+/// Returns (chi, valid).
+pub fn dd_creutz_ratio(lat: &[f64; 65536], r: i64) -> (f64, i64) with Mut, Div, Panic {
+    if r < 2 { return (0.0, 0) }
+    let w_rr = dd_wilson_loop_rect(lat, r, r)
+    let w_mm = dd_wilson_loop_rect(lat, r - 1, r - 1)
+    let w_rm = dd_wilson_loop_rect(lat, r, r - 1)
+    let w_mr = dd_wilson_loop_rect(lat, r - 1, r)
+    let num = dd_mul(w_rr, w_mm)
+    let den = dd_mul(w_rm, w_mr)
+    let den_f = dd_to_f64(den)
+    if den_f <= 1.0e-30 { return (0.0, 0) }
+    let ratio = dd_div(num, den)
+    let rf = dd_to_f64(ratio)
+    if rf <= 1.0e-30 || rf >= 1.0 { return (0.0, 0) }
+    (0.0 - ln_f64_local(rf), 1)
+}
+
+// ============================================================================
+// Dual-path residual
+// ============================================================================
+
+pub struct PrecResidual {
+    pub o_f64: f64,
+    pub o_dd64: f64,
+    pub abs_delta: f64,
+    pub rel_delta: f64,
+}
+
+pub fn prec_residual(o_f64: f64, o_dd64: f64) -> PrecResidual with Mut, Div, Panic {
+    var d = o_f64 - o_dd64
+    if d < 0.0 { d = 0.0 - d }
+    var rel = 0.0
+    var den = o_dd64
+    if den < 0.0 { den = 0.0 - den }
+    if den > 1.0e-30 {
+        rel = d / den
+    } else {
+        if d > 0.0 { rel = 1.0 }
+    }
+    PrecResidual { o_f64: o_f64, o_dd64: o_dd64, abs_delta: d, rel_delta: rel }
+}
+
+/// Precision gate: arithmetic OK if abs_delta <= max(eps_abs, kappa * sem).
+/// Returns 1 if PASS, 0 if FAIL_HONEST_precision.
+pub fn prec_gate_ok(abs_delta: f64, sem: f64, eps_abs: f64, kappa: f64) -> i64 {
+    var thr = eps_abs
+    let ksem = kappa * sem
+    if ksem > thr { thr = ksem }
+    if abs_delta <= thr { 1 } else { 0 }
+}
+
+/// Single-config dual path: f64 vs Dd64 plaquette + Creutz χ(2,2).
+/// Returns (P_f64, P_dd, chi_f64, chi_dd, chi_f_ok, chi_d_ok).
+pub fn dual_path_config(lat: &[f64; 65536]) -> (f64, f64, f64, f64, i64, i64) with Mut, Div, Panic {
+    let p_f = mean_plaquette(lat)
+    let p_d = dd_to_f64(dd_mean_plaquette(lat))
+    let (c_f, ok_f) = creutz_ratio(lat, 2)
+    let (c_d, ok_d) = dd_creutz_ratio(lat, 2)
+    (p_f, p_d, c_f, c_d, ok_f, ok_d)
+}
+
+/// Spot-check: max |P_f64 − P_dd| over a subsample of plaquettes (one plane sum already global).
+/// Also returns max abs residual on a few Wilson loops W(1,1), W(1,2), W(2,2).
+pub fn dual_path_wilson_spot(lat: &[f64; 65536]) -> (f64, f64, f64) with Mut, Div, Panic {
+    let w11_f = wilson_loop_rect(lat, 1, 1)
+    let w12_f = wilson_loop_rect(lat, 1, 2)
+    let w22_f = wilson_loop_rect(lat, 2, 2)
+    let w11_d = dd_to_f64(dd_wilson_loop_rect(lat, 1, 1))
+    let w12_d = dd_to_f64(dd_wilson_loop_rect(lat, 1, 2))
+    let w22_d = dd_to_f64(dd_wilson_loop_rect(lat, 2, 2))
+    var d11 = w11_f - w11_d
+    if d11 < 0.0 { d11 = 0.0 - d11 }
+    var d12 = w12_f - w12_d
+    if d12 < 0.0 { d12 = 0.0 - d12 }
+    var d22 = w22_f - w22_d
+    if d22 < 0.0 { d22 = 0.0 - d22 }
+    (d11, d12, d22)
+}

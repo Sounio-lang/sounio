@@ -1,0 +1,448 @@
+//@ run-pass
+// examples/particle_physics/dual_ym_scoreboard.sio
+//
+// DUAL YANG–MILLS SCOREBOARD — SU(2) + SU(3) BOLD PRODUCTION
+// ==========================================================
+// Single executable that freezes the dual pure-gauge mass-gap stack:
+//   A. SU(2) L=6 multi-β jackknife (β∈{2.2,2.3,2.4,2.5}) APE n=2
+//   B. SU(3) L=6 multi-β jackknife (β∈{5.5,5.7,5.9,6.1}) APE n=2
+//   C. Cross-group comparison of inv-var ⟨m/√σ⟩ vs lit ~3.5–4
+//
+// CLAIM: dual pure-gauge continuum *sketches* with honest SEM floors.
+// NOT CLAIMED: continuum limit; QCD; Clay Millennium.
+//
+// Run:
+//   export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
+//   export SOUNIO_SOUC_ENGINE=lean_single
+//   ./bin/souc run examples/particle_physics/dual_ym_scoreboard.sio
+
+use particle_physics::lattice_gauge::{
+    lat_l, lat_nsites, lg_set_L, lg_seed, lattice_cold,
+    heatbath_thermalize, measure_glueball_thin_and_ape_hb,
+    measure_ensemble_hb, glueball_meff_log,
+    string_tension_ep,
+    mass_over_sqrt_sigma_ep, jackknife_mean, inv_var_weighted_mean, sem_floor,
+}
+use particle_physics::lattice_su3::{
+    su3_set_L, su3_lat_l, su3_nsites, su3_seed, su3_lattice_cold,
+    su3_heatbath_thermalize, su3_measure_glueball_thin_and_ape_hb,
+    su3_measure_ensemble_hb, su3_glueball_meff_log,
+    su3_string_tension_ep,
+}
+use epistemic::knowledge::{ep_val, ep_std}
+
+fn fp6(v: f64) -> string with Mut, Div, Panic {
+    var x = v
+    var neg = false
+    if x < 0.0 { neg = true; x = 0.0 - x }
+    let n = (x * 1000000.0 + 0.5) as i64
+    var whole = n / 1000000
+    let frac = n % 1000000
+    var buf: [i8; 64] = [0; 64]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    var wrev: [i8; 16] = [0; 16]
+    var wlen: i64 = 0
+    if whole == 0 { wrev[0] = 48 as i8; wlen = 1 }
+    while whole > 0 && wlen < 15 {
+        wrev[wlen as usize] = (48 + whole % 10) as i8
+        wlen = wlen + 1
+        whole = whole / 10
+    }
+    var i = wlen - 1
+    while i >= 0 {
+        buf[pos as usize] = wrev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    buf[pos as usize] = 46 as i8
+    pos = pos + 1
+    var div: i64 = 100000
+    while div >= 1 {
+        buf[pos as usize] = (48 + (frac / div) % 10) as i8
+        pos = pos + 1
+        div = div / 10
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn i64s(v: i64) -> string with Mut, Div, Panic {
+    if v == 0 { return "0" }
+    var n = v
+    var neg = false
+    if n < 0 { neg = true; n = 0 - n }
+    var rev: [i8; 24] = [0; 24]
+    var len: i64 = 0
+    while n > 0 && len < 23 {
+        rev[len as usize] = (48 + n % 10) as i8
+        len = len + 1
+        n = n / 10
+    }
+    var buf: [i8; 32] = [0; 32]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    var i = len - 1
+    while i >= 0 {
+        buf[pos as usize] = rev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn abs_f(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+/// SU(2) one-β point. Returns (r, rsem, sig, ok)
+fn su2_point(
+    lat: &![f64; 65536],
+    sm: &![f64; 65536],
+    tmp: &![f64; 65536],
+    beta: f64,
+    n_therm: i64,
+    n_meas: i64,
+    n_sep: i64,
+    seed: i64
+) -> (f64, f64, f64, i64) with Mut, Div, Panic {
+    lg_seed(seed)
+    lattice_cold(lat)
+    let _p = heatbath_thermalize(lat, beta, n_therm)
+    var c_t: [f64; 8] = [0.0; 8]
+    var c_a: [f64; 8] = [0.0; 8]
+    var mt_s: [f64; 256] = [0.0; 256]
+    var mt_v: [i64; 256] = [0; 256]
+    var ma_s: [f64; 256] = [0.0; 256]
+    var ma_v: [i64; 256] = [0; 256]
+    let (_nt, _na, _ot, _oa) = measure_glueball_thin_and_ape_hb(
+        lat, sm, tmp, beta, n_meas, n_sep, 0.4, 2,
+        &!c_t, &!c_a, &!mt_s, &!mt_v, &!ma_s, &!ma_v
+    )
+    let (m_te, ote) = glueball_meff_log(c_t[0], c_t[1])
+    let (m_ae, oae) = glueball_meff_log(c_a[0], c_a[1])
+    let (_jkt, jks_t, _njt) = jackknife_mean(&mt_s, &mt_v, n_meas, 1)
+    let (_jka, jks_a, _nja) = jackknife_mean(&ma_s, &ma_v, n_meas, 1)
+    var m: f64 = 0.0
+    var msem: f64 = 0.0
+    if oae == 1 && m_ae > 0.15 {
+        m = m_ae
+        msem = sem_floor(jks_a, m_ae, 0.10)
+    } else if ote == 1 && m_te > 0.15 {
+        m = m_te
+        msem = sem_floor(jks_t, m_te, 0.10)
+    }
+    var plaq_s: [f64; 256] = [0.0; 256]
+    var chi_s: [f64; 256] = [0.0; 256]
+    var chi_v: [i64; 256] = [0; 256]
+    let n_ctx: i64 = 18
+    let _nc = measure_ensemble_hb(lat, beta, n_ctx, n_sep, &!plaq_s, &!chi_s, &!chi_v)
+    let sep = string_tension_ep(&chi_s, &chi_v, n_ctx)
+    let (jk_s, jks_s, _ns) = jackknife_mean(&chi_s, &chi_v, n_ctx, 1)
+    var sig = ep_val(&sep)
+    var ssem = ep_std(&sep)
+    if jk_s > 0.0 {
+        sig = jk_s
+        if jks_s > 0.0 { ssem = jks_s }
+    }
+    ssem = sem_floor(ssem, sig, 0.05)
+    var r: f64 = 0.0
+    var rsem: f64 = 0.0
+    var ok: i64 = 0
+    if m > 0.0 && sig > 0.0 {
+        let rep = mass_over_sqrt_sigma_ep(m, msem, sig, ssem)
+        r = ep_val(&rep)
+        rsem = ep_std(&rep)
+        if r > 0.5 { ok = 1 }
+    }
+    (r, rsem, sig, ok)
+}
+
+/// SU(3) one-β point. Returns (r, rsem, sig, ok)
+fn su3_point(
+    lat: &![f64; 93312],
+    sm: &![f64; 93312],
+    tmp: &![f64; 93312],
+    beta: f64,
+    n_therm: i64,
+    n_meas: i64,
+    n_sep: i64,
+    seed: i64
+) -> (f64, f64, f64, i64) with Mut, Div, Panic {
+    su3_seed(seed)
+    su3_lattice_cold(lat)
+    let _p = su3_heatbath_thermalize(lat, beta, n_therm)
+    var c_t: [f64; 8] = [0.0; 8]
+    var c_a: [f64; 8] = [0.0; 8]
+    var mt_s: [f64; 256] = [0.0; 256]
+    var mt_v: [i64; 256] = [0; 256]
+    var ma_s: [f64; 256] = [0.0; 256]
+    var ma_v: [i64; 256] = [0; 256]
+    let (_nt, _na, _ot, _oa) = su3_measure_glueball_thin_and_ape_hb(
+        lat, sm, tmp, beta, n_meas, n_sep, 0.4, 2,
+        &!c_t, &!c_a, &!mt_s, &!mt_v, &!ma_s, &!ma_v
+    )
+    let (m_te, ote) = su3_glueball_meff_log(c_t[0], c_t[1])
+    let (m_ae, oae) = su3_glueball_meff_log(c_a[0], c_a[1])
+    let (_jkt, jks_t, _njt) = jackknife_mean(&mt_s, &mt_v, n_meas, 1)
+    let (_jka, jks_a, _nja) = jackknife_mean(&ma_s, &ma_v, n_meas, 1)
+    var m: f64 = 0.0
+    var msem: f64 = 0.0
+    if oae == 1 && m_ae > 0.1 {
+        m = m_ae
+        msem = sem_floor(jks_a, m_ae, 0.10)
+    } else if ote == 1 && m_te > 0.1 {
+        m = m_te
+        msem = sem_floor(jks_t, m_te, 0.10)
+    }
+    var plaq_s: [f64; 256] = [0.0; 256]
+    var chi_s: [f64; 256] = [0.0; 256]
+    var chi_v: [i64; 256] = [0; 256]
+    let n_ctx: i64 = 16
+    let _nc = su3_measure_ensemble_hb(lat, beta, n_ctx, n_sep, &!plaq_s, &!chi_s, &!chi_v)
+    let sep = su3_string_tension_ep(&chi_s, &chi_v, n_ctx)
+    let (jk_s, jks_s, _ns) = jackknife_mean(&chi_s, &chi_v, n_ctx, 1)
+    var sig = ep_val(&sep)
+    var ssem = ep_std(&sep)
+    if jk_s > 0.0 {
+        sig = jk_s
+        if jks_s > 0.0 { ssem = jks_s }
+    }
+    ssem = sem_floor(ssem, sig, 0.05)
+    var r: f64 = 0.0
+    var rsem: f64 = 0.0
+    var ok: i64 = 0
+    if m > 0.0 && sig > 0.0 {
+        let rep = mass_over_sqrt_sigma_ep(m, msem, sig, ssem)
+        r = ep_val(&rep)
+        rsem = ep_std(&rep)
+        if r > 0.5 { ok = 1 }
+    }
+    (r, rsem, sig, ok)
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("================================================================")
+    println(" DUAL YANG–MILLS SCOREBOARD — SU(2) + SU(3)")
+    println("================================================================")
+    println("CLAIM: dual pure-gauge multi-β m/√σ sketches with honest SEM")
+    println("NOT CLAIMED: continuum limit; Clay; QCD")
+    println("")
+
+    let seed0: i64 = 20260813
+    let n_therm: i64 = 30
+    let n_meas: i64 = 28
+    let n_sep: i64 = 2
+
+    // ------------------------------------------------------------------
+    // A. SU(2)
+    // ------------------------------------------------------------------
+    println("--- A. SU(2) L=6 multi-β ---")
+    let _ = lg_set_L(6)
+    println("L=" ++ i64s(lat_l()) ++ " sites=" ++ i64s(lat_nsites()))
+    var b2: [f64; 4] = [2.2, 2.3, 2.4, 2.5]
+    var lat2: [f64; 65536] = [0.0; 65536]
+    var sm2: [f64; 65536] = [0.0; 65536]
+    var tmp2: [f64; 65536] = [0.0; 65536]
+    var r2: [f64; 8] = [0.0; 8]
+    var rs2: [f64; 8] = [0.0; 8]
+    var s2: [f64; 4] = [0.0; 4]
+    var n2ok: i64 = 0
+    var i: i64 = 0
+    while i < 4 {
+        let beta = b2[i as usize]
+        println("  β=" ++ fp6(beta))
+        let (r, rsem, sig, ok) = su2_point(
+            &!lat2, &!sm2, &!tmp2, beta, n_therm, n_meas, n_sep, seed0 + i * 19
+        )
+        r2[i as usize] = r
+        rs2[i as usize] = rsem
+        s2[i as usize] = sig
+        if ok == 1 { n2ok = n2ok + 1 }
+        println("    m/√σ=" ++ fp6(r) ++ "±" ++ fp6(rsem) ++ "  σa²=" ++ fp6(sig)
+            ++ "  ok=" ++ i64s(ok))
+        i = i + 1
+    }
+    let (rw2, rws2, chi22, nv2) = inv_var_weighted_mean(&r2, &rs2, 4)
+    var nd2: i64 = 0
+    if nv2 > 1 { nd2 = nv2 - 1 }
+    var cpd2: f64 = 0.0
+    if nd2 > 0 { cpd2 = chi22 / (nd2 as f64) }
+    var mn2: f64 = 1.0e30
+    var mx2: f64 = 0.0
+    i = 0
+    while i < 4 {
+        if r2[i as usize] > 0.0 {
+            if r2[i as usize] < mn2 { mn2 = r2[i as usize] }
+            if r2[i as usize] > mx2 { mx2 = r2[i as usize] }
+        }
+        i = i + 1
+    }
+    var spr2: f64 = 0.0
+    if rw2 > 1.0e-12 && mx2 > mn2 { spr2 = (mx2 - mn2) / rw2 }
+    var fall2: i64 = 0
+    var pair2: i64 = 0
+    i = 0
+    while i < 3 {
+        if s2[i as usize] > 0.0 && s2[(i + 1) as usize] > 0.0 {
+            pair2 = pair2 + 1
+            if s2[(i + 1) as usize] < s2[i as usize] { fall2 = fall2 + 1 }
+        }
+        i = i + 1
+    }
+    println("  SU(2) inv-var ⟨m/√σ⟩=" ++ fp6(rw2) ++ "±" ++ fp6(rws2)
+        ++ "  χ²/dof=" ++ fp6(cpd2) ++ "  spread=" ++ fp6(spr2)
+        ++ "  √σ↓ " ++ i64s(fall2) ++ "/" ++ i64s(pair2))
+
+    let _r = lg_set_L(4)
+
+    // ------------------------------------------------------------------
+    // B. SU(3)
+    // ------------------------------------------------------------------
+    println("")
+    println("--- B. SU(3) L=6 multi-β ---")
+    let ok3 = su3_set_L(6)
+    if ok3 == 0 {
+        println("FAIL su3_set_L(6)")
+        return 1
+    }
+    println("L=" ++ i64s(su3_lat_l()) ++ " sites=" ++ i64s(su3_nsites()))
+    var b3: [f64; 4] = [5.5, 5.7, 5.9, 6.1]
+    var lat3: [f64; 93312] = [0.0; 93312]
+    var sm3: [f64; 93312] = [0.0; 93312]
+    var tmp3: [f64; 93312] = [0.0; 93312]
+    var r3: [f64; 8] = [0.0; 8]
+    var rs3: [f64; 8] = [0.0; 8]
+    var s3: [f64; 4] = [0.0; 4]
+    var n3ok: i64 = 0
+    i = 0
+    while i < 4 {
+        let beta = b3[i as usize]
+        println("  β=" ++ fp6(beta))
+        let (r, rsem, sig, ok) = su3_point(
+            &!lat3, &!sm3, &!tmp3, beta, n_therm, n_meas, n_sep, seed0 + 1000 + i * 97
+        )
+        r3[i as usize] = r
+        rs3[i as usize] = rsem
+        s3[i as usize] = sig
+        if ok == 1 { n3ok = n3ok + 1 }
+        println("    m/√σ=" ++ fp6(r) ++ "±" ++ fp6(rsem) ++ "  σa²=" ++ fp6(sig)
+            ++ "  ok=" ++ i64s(ok))
+        i = i + 1
+    }
+    let (rw3, rws3, chi23, nv3) = inv_var_weighted_mean(&r3, &rs3, 4)
+    var nd3: i64 = 0
+    if nv3 > 1 { nd3 = nv3 - 1 }
+    var cpd3: f64 = 0.0
+    if nd3 > 0 { cpd3 = chi23 / (nd3 as f64) }
+    var mn3: f64 = 1.0e30
+    var mx3: f64 = 0.0
+    i = 0
+    while i < 4 {
+        if r3[i as usize] > 0.0 {
+            if r3[i as usize] < mn3 { mn3 = r3[i as usize] }
+            if r3[i as usize] > mx3 { mx3 = r3[i as usize] }
+        }
+        i = i + 1
+    }
+    var spr3: f64 = 0.0
+    if rw3 > 1.0e-12 && mx3 > mn3 { spr3 = (mx3 - mn3) / rw3 }
+    var fall3: i64 = 0
+    var pair3: i64 = 0
+    i = 0
+    while i < 3 {
+        if s3[i as usize] > 0.0 && s3[(i + 1) as usize] > 0.0 {
+            pair3 = pair3 + 1
+            if s3[(i + 1) as usize] < s3[i as usize] { fall3 = fall3 + 1 }
+        }
+        i = i + 1
+    }
+    println("  SU(3) inv-var ⟨m/√σ⟩=" ++ fp6(rw3) ++ "±" ++ fp6(rws3)
+        ++ "  χ²/dof=" ++ fp6(cpd3) ++ "  spread=" ++ fp6(spr3)
+        ++ "  √σ↓ " ++ i64s(fall3) ++ "/" ++ i64s(pair3))
+
+    let _s = su3_set_L(4)
+
+    // ------------------------------------------------------------------
+    // C. Dual comparison
+    // ------------------------------------------------------------------
+    var dual_gap: f64 = 0.0
+    if rw2 > 0.0 && rw3 > 0.0 {
+        dual_gap = abs_f(rw3 - rw2) / (0.5 * (rw2 + rw3))
+    }
+    // both near lit mid 3.7?
+    var d2: f64 = rw2 - 3.7
+    if d2 < 0.0 { d2 = 0.0 - d2 }
+    var d3: f64 = rw3 - 3.7
+    if d3 < 0.0 { d3 = 0.0 - d3 }
+
+    println("")
+    println("================================================================")
+    println(" DUAL SCOREBOARD")
+    println("================================================================")
+    println("SU(2) ⟨m/√σ⟩=" ++ fp6(rw2) ++ "±" ++ fp6(rws2)
+        ++ "  n=" ++ i64s(n2ok) ++ "  χ²/dof=" ++ fp6(cpd2) ++ "  spr=" ++ fp6(spr2))
+    println("SU(3) ⟨m/√σ⟩=" ++ fp6(rw3) ++ "±" ++ fp6(rws3)
+        ++ "  n=" ++ i64s(n3ok) ++ "  χ²/dof=" ++ fp6(cpd3) ++ "  spr=" ++ fp6(spr3))
+    println("|SU3−SU2|/(avg)=" ++ fp6(dual_gap)
+        ++ "  |SU2−3.7|=" ++ fp6(d2) ++ "  |SU3−3.7|=" ++ fp6(d3))
+    println("lit pure-gauge 0++ m/√σ ~ 3.5–4 (both groups)")
+
+    println("")
+    println("================================================================")
+    println(" GATES")
+    println("================================================================")
+    let g2_ok = n2ok >= 3
+    let g3_ok = n3ok >= 3
+    let g2_lit = rw2 >= 2.0 && rw2 <= 6.0
+    let g3_lit = rw3 >= 2.0 && rw3 <= 6.0
+    let g2_sem = rws2 > 0.0 && rws2 < 0.5 * rw2
+    let g3_sem = rws3 > 0.0 && rws3 < 0.5 * rw3
+    let g2_scale = fall2 * 2 >= pair2 && pair2 >= 2
+    let g3_scale = fall3 * 2 >= pair3 && pair3 >= 2
+    // honest multi-β: χ²/dof not exploding under floors (≤8)
+    let g2_chi = nd2 >= 2 && cpd2 > 0.0 && cpd2 <= 8.0
+    let g3_chi = nd3 >= 2 && cpd3 > 0.0 && cpd3 <= 8.0
+    let g_dual = g2_ok && g3_ok
+    let g_agree = dual_gap > 0.0 && dual_gap <= 0.50
+    let g_both_lit = g2_lit && g3_lit
+
+    if g2_ok { println("GATE SU2_multi_beta: PASS  n=" ++ i64s(n2ok)) }
+    else { println("GATE SU2_multi_beta: FAIL_HONEST") }
+    if g3_ok { println("GATE SU3_multi_beta: PASS  n=" ++ i64s(n3ok)) }
+    else { println("GATE SU3_multi_beta: FAIL_HONEST") }
+    if g2_lit { println("GATE SU2_lit_window: PASS  " ++ fp6(rw2)) }
+    else { println("GATE SU2_lit_window: FAIL_HONEST  " ++ fp6(rw2)) }
+    if g3_lit { println("GATE SU3_lit_window: PASS  " ++ fp6(rw3)) }
+    else { println("GATE SU3_lit_window: FAIL_HONEST  " ++ fp6(rw3)) }
+    if g2_sem { println("GATE SU2_sem: PASS") }
+    else { println("GATE SU2_sem: FAIL_HONEST") }
+    if g3_sem { println("GATE SU3_sem: PASS") }
+    else { println("GATE SU3_sem: FAIL_HONEST") }
+    if g2_scale { println("GATE SU2_sigma_falls: PASS") }
+    else { println("GATE SU2_sigma_falls: FAIL_HONEST") }
+    if g3_scale { println("GATE SU3_sigma_falls: PASS") }
+    else { println("GATE SU3_sigma_falls: FAIL_HONEST") }
+    if g2_chi { println("GATE SU2_chi2_honest: PASS  " ++ fp6(cpd2)) }
+    else { println("GATE SU2_chi2_honest: FAIL_HONEST  " ++ fp6(cpd2)) }
+    if g3_chi { println("GATE SU3_chi2_honest: PASS  " ++ fp6(cpd3)) }
+    else { println("GATE SU3_chi2_honest: FAIL_HONEST  " ++ fp6(cpd3)) }
+    if g_dual { println("GATE dual_both_live: PASS") }
+    else { println("GATE dual_both_live: FAIL_HONEST") }
+    if g_agree { println("GATE dual_group_agree: PASS  " ++ fp6(dual_gap)) }
+    else { println("GATE dual_group_agree: FAIL_HONEST  " ++ fp6(dual_gap)) }
+    if g_both_lit { println("GATE dual_both_lit: PASS") }
+    else { println("GATE dual_both_lit: FAIL_HONEST") }
+
+    println("")
+    println("VERDICT:")
+    println("  SU(2)=" ++ fp6(rw2) ++ "±" ++ fp6(rws2)
+        ++ "  SU(3)=" ++ fp6(rw3) ++ "±" ++ fp6(rws3)
+        ++ "  dual_gap=" ++ fp6(dual_gap))
+    if g_dual && g_both_lit {
+        println("  BOLD dual pure-gauge stack live. Continuum/Clay not claimed.")
+    } else {
+        println("  Partial — see FAIL_HONEST.")
+    }
+    println("================================================================")
+    0
+}

@@ -1,0 +1,1556 @@
+// stdlib/particle_physics/lattice_su3.sio — Pure SU(3) lattice gauge theory
+//
+// Computational mass-gap / confinement probe for SU(3) Yang–Mills (QCD glue).
+//
+// CLAIM BOUNDARY:
+//   Does NOT prove the Clay continuum mass gap. Implements Wilson SU(3) on
+//   L∈{4,6} with Cabibbo–Marinari-style SU(2)-subgroup Metropolis + heatbath,
+//   plaquettes, Wilson loops, Creutz χ, and Epistemic string tension.
+//
+// Storage: each link is a 3×3 complex matrix as 18 f64 (row-major, re/im pairs).
+//   Flat buffer max L=6: 6⁴·4·18 = 93312. Runtime L via su3_set_L.
+//
+// Action: S = (β/3) Σ_□ Re Tr(1 − U_□) = β Σ_□ (1 − ReTr(U_□)/3)
+//   (Wilson; β = 6/g₀² in continuum language)
+//
+// References:
+//   - Wilson, Phys. Rev. D10 (1974) 2445
+//   - Creutz, Phys. Rev. D21 (1980) 2308
+//   - Cabibbo & Marinari, Phys. Lett. B119 (1982) 387  (SU(2) subgroups)
+
+module particle_physics::lattice_su3
+
+use epistemic::knowledge::{Epistemic, ep_measured, ep_val, ep_std}
+
+// ============================================================================
+// GEOMETRY — runtime L ∈ {4,6}, 18 reals/link
+// ============================================================================
+
+var SU3_L: i64 = 4
+
+/// Set lattice extent. Allowed: 4 or 6. Returns 1 on success, 0 if rejected.
+pub fn su3_set_L(L: i64) -> i64 with Mut {
+    if L == 4 || L == 6 {
+        SU3_L = L
+        return 1
+    }
+    0
+}
+
+pub fn su3_lat_l() -> i64 { SU3_L }
+pub fn su3_lat_nd() -> i64 { 4 }
+
+pub fn su3_nsites() -> i64 with Mut, Div {
+    let L = SU3_L
+    L * L * L * L
+}
+
+pub fn su3_nlinks() -> i64 with Mut, Div {
+    4 * su3_nsites()
+}
+
+pub fn su3_comps() -> i64 { 18 }
+
+/// Used length of flat buffer (≤ 93312).
+pub fn su3_flat_len() -> i64 with Mut, Div {
+    su3_nlinks() * 18
+}
+
+/// Max flat capacity (L=6 → 6⁴·4·18 = 93312).
+pub fn su3_flat_cap() -> i64 { 93312 }
+
+// ============================================================================
+// MATH
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    if x > 1.0 { g = x * 0.5 }
+    var i: i64 = 0
+    while i < 50 { g = 0.5 * (g + x / g); i = i + 1 }
+    g
+}
+
+fn ln_f64(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    var m = x
+    var e: i64 = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k: i64 = 1
+    while k < 30 {
+        term = term * t2
+        sum = sum + term / ((2 * k + 1) as f64)
+        k = k + 1
+    }
+    (e as f64) * 0.6931471805599453 + 2.0 * sum
+}
+
+fn exp_f64(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 20.0 { return 485165195.0 }
+    if x < 0.0 - 20.0 { return 2.0611536e-9 }
+    var y = x
+    var inv = false
+    if y < 0.0 { y = 0.0 - y; inv = true }
+    let ln2 = 0.6931471805599453
+    var n: i64 = 0
+    while y > ln2 { y = y - ln2; n = n + 1 }
+    var sum = 1.0
+    var term = 1.0
+    var k: i64 = 1
+    while k < 20 {
+        term = term * y / (k as f64)
+        sum = sum + term
+        k = k + 1
+    }
+    var p2 = 1.0
+    var i: i64 = 0
+    while i < n { p2 = p2 * 2.0; i = i + 1 }
+    let r = sum * p2
+    if inv { 1.0 / r } else { r }
+}
+
+// ============================================================================
+// RNG
+// ============================================================================
+
+var SU3_RNG: i64 = 42424243
+
+pub fn su3_seed(seed: i64) with Mut {
+    if seed <= 0 { SU3_RNG = 42424243 } else { SU3_RNG = seed }
+}
+
+fn su3_uniform() -> f64 with Mut {
+    SU3_RNG = (1103515245 * SU3_RNG + 12345) % 2147483648
+    (SU3_RNG as f64) / 2147483648.0
+}
+
+// ============================================================================
+// SU(3) MATRIX AS [f64; 18]  row-major complex: (re,im)×9
+// ============================================================================
+
+fn idx(row: i64, col: i64) -> i64 {
+    // base index of real part of element (row,col)
+    2 * (3 * row + col)
+}
+
+pub fn su3_zero(m: &![f64; 18]) with Mut {
+    var i: i64 = 0
+    while i < 18 { m[i as usize] = 0.0; i = i + 1 }
+}
+
+pub fn su3_id(m: &![f64; 18]) with Mut {
+    su3_zero(m)
+    m[0] = 1.0
+    m[8] = 1.0
+    m[16] = 1.0
+}
+
+pub fn su3_copy(src: &[f64; 18], dst: &![f64; 18]) with Mut {
+    var i: i64 = 0
+    while i < 18 { dst[i as usize] = src[i as usize]; i = i + 1 }
+}
+
+/// C = A · B
+pub fn su3_mul(a: &[f64; 18], b: &[f64; 18], c: &![f64; 18]) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < 3 {
+        var j: i64 = 0
+        while j < 3 {
+            var re: f64 = 0.0
+            var im: f64 = 0.0
+            var k: i64 = 0
+            while k < 3 {
+                let ai = idx(i, k)
+                let bi = idx(k, j)
+                let ar = a[ai as usize]
+                let aim = a[(ai + 1) as usize]
+                let br = b[bi as usize]
+                let bim = b[(bi + 1) as usize]
+                re = re + ar * br - aim * bim
+                im = im + ar * bim + aim * br
+                k = k + 1
+            }
+            let ci = idx(i, j)
+            c[ci as usize] = re
+            c[(ci + 1) as usize] = im
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+/// B = A†
+pub fn su3_dag(a: &[f64; 18], b: &![f64; 18]) with Mut {
+    var i: i64 = 0
+    while i < 3 {
+        var j: i64 = 0
+        while j < 3 {
+            let ai = idx(i, j)
+            let bi = idx(j, i)
+            b[bi as usize] = a[ai as usize]
+            b[(bi + 1) as usize] = 0.0 - a[(ai + 1) as usize]
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+/// Re Tr(A)
+pub fn su3_re_trace(a: &[f64; 18]) -> f64 {
+    a[0] + a[8] + a[16]
+}
+
+/// Normalized plaquette contribution P = Re Tr(U)/3 ∈ [-1,1]
+pub fn su3_norm_trace(a: &[f64; 18]) -> f64 {
+    su3_re_trace(a) / 3.0
+}
+
+/// C = A + B (not group law — for staple sums)
+pub fn su3_add(a: &[f64; 18], b: &[f64; 18], c: &![f64; 18]) with Mut {
+    var i: i64 = 0
+    while i < 18 {
+        c[i as usize] = a[i as usize] + b[i as usize]
+        i = i + 1
+    }
+}
+
+pub fn su3_scale(a: &![f64; 18], s: f64) with Mut {
+    var i: i64 = 0
+    while i < 18 { a[i as usize] = a[i as usize] * s; i = i + 1 }
+}
+
+/// Project approximate matrix onto SU(3) via row Gram–Schmidt + det phase.
+pub fn su3_project(m: &![f64; 18]) with Mut, Div, Panic {
+    // Row 0 normalize
+    var n0: f64 = 0.0
+    var j: i64 = 0
+    while j < 3 {
+        let p = idx(0, j)
+        n0 = n0 + m[p as usize] * m[p as usize] + m[(p + 1) as usize] * m[(p + 1) as usize]
+        j = j + 1
+    }
+    n0 = sqrt_f64(n0)
+    if n0 < 1.0e-14 { su3_id(m); return }
+    j = 0
+    while j < 3 {
+        let p = idx(0, j)
+        m[p as usize] = m[p as usize] / n0
+        m[(p + 1) as usize] = m[(p + 1) as usize] / n0
+        j = j + 1
+    }
+    // Row 1 -= <r1,r0> r0
+    var cr: f64 = 0.0
+    var ci: f64 = 0.0
+    j = 0
+    while j < 3 {
+        let p0 = idx(0, j)
+        let p1 = idx(1, j)
+        // <r1,r0> = sum r1_j * conj(r0_j)
+        cr = cr + m[p1 as usize] * m[p0 as usize] + m[(p1 + 1) as usize] * m[(p0 + 1) as usize]
+        ci = ci + m[(p1 + 1) as usize] * m[p0 as usize] - m[p1 as usize] * m[(p0 + 1) as usize]
+        j = j + 1
+    }
+    j = 0
+    while j < 3 {
+        let p0 = idx(0, j)
+        let p1 = idx(1, j)
+        // r1 -= c * r0  with c = <r1,r0>
+        let r0r = m[p0 as usize]
+        let r0i = m[(p0 + 1) as usize]
+        m[p1 as usize] = m[p1 as usize] - (cr * r0r - ci * r0i)
+        m[(p1 + 1) as usize] = m[(p1 + 1) as usize] - (cr * r0i + ci * r0r)
+        j = j + 1
+    }
+    var n1: f64 = 0.0
+    j = 0
+    while j < 3 {
+        let p = idx(1, j)
+        n1 = n1 + m[p as usize] * m[p as usize] + m[(p + 1) as usize] * m[(p + 1) as usize]
+        j = j + 1
+    }
+    n1 = sqrt_f64(n1)
+    if n1 < 1.0e-14 { su3_id(m); return }
+    j = 0
+    while j < 3 {
+        let p = idx(1, j)
+        m[p as usize] = m[p as usize] / n1
+        m[(p + 1) as usize] = m[(p + 1) as usize] / n1
+        j = j + 1
+    }
+    // Row 2 = row0 × row1  (complex cross product for SU(3) third row)
+    // r2_i = ε_ijk conj?  For unitary: r2 = r0* × r1* with det +1:
+    // Standard: third row = conj(cross of first two rows as complex vectors)
+    // r2 = r0 × r1 where (a×b)_0 = a1 b2 - a2 b1, etc., then take conjugate for U(3)→SU(3)
+    let a0r = m[idx(0, 0) as usize]; let a0i = m[(idx(0, 0) + 1) as usize]
+    let a1r = m[idx(0, 1) as usize]; let a1i = m[(idx(0, 1) + 1) as usize]
+    let a2r = m[idx(0, 2) as usize]; let a2i = m[(idx(0, 2) + 1) as usize]
+    let b0r = m[idx(1, 0) as usize]; let b0i = m[(idx(1, 0) + 1) as usize]
+    let b1r = m[idx(1, 1) as usize]; let b1i = m[(idx(1, 1) + 1) as usize]
+    let b2r = m[idx(1, 2) as usize]; let b2i = m[(idx(1, 2) + 1) as usize]
+    // c = a × b  (complex)
+    // c0 = a1*b2 - a2*b1
+    let c0r = a1r * b2r - a1i * b2i - (a2r * b1r - a2i * b1i)
+    let c0i = a1r * b2i + a1i * b2r - (a2r * b1i + a2i * b1r)
+    let c1r = a2r * b0r - a2i * b0i - (a0r * b2r - a0i * b2i)
+    let c1i = a2r * b0i + a2i * b0r - (a0r * b2i + a0i * b2r)
+    let c2r = a0r * b1r - a0i * b1i - (a1r * b0r - a1i * b0i)
+    let c2i = a0r * b1i + a0i * b1r - (a1r * b0i + a1i * b0r)
+    // conjugate for proper orientation so det ≈ +1
+    m[idx(2, 0) as usize] = c0r
+    m[(idx(2, 0) + 1) as usize] = 0.0 - c0i
+    m[idx(2, 1) as usize] = c1r
+    m[(idx(2, 1) + 1) as usize] = 0.0 - c1i
+    m[idx(2, 2) as usize] = c2r
+    m[(idx(2, 2) + 1) as usize] = 0.0 - c2i
+}
+
+/// Random SU(2) near identity embedded in plane (p,q) ∈ {(0,1),(1,2),(0,2)}.
+/// Left-multiplies into `u` (in place via tmp).
+fn su3_left_mul_su2_plane(u: &![f64; 18], p: i64, q: i64, eps: f64, tmp: &![f64; 18], w: &![f64; 18]) with Mut, Div, Panic {
+    // Build W = block SU(2) on (p,q), identity elsewhere
+    su3_id(w)
+    let r1 = 2.0 * su3_uniform() - 1.0
+    let r2 = 2.0 * su3_uniform() - 1.0
+    let r3 = 2.0 * su3_uniform() - 1.0
+    let n = sqrt_f64(r1 * r1 + r2 * r2 + r3 * r3)
+    var x = 0.0
+    var y = 0.0
+    var z = 0.0
+    if n > 1.0e-12 {
+        let scale = eps * (2.0 * su3_uniform() - 1.0) / n
+        x = r1 * scale
+        y = r2 * scale
+        z = r3 * scale
+    }
+    var ww = 1.0 - x * x - y * y - z * z
+    if ww <= 0.0 { ww = 0.01 }
+    let wr = sqrt_f64(ww)
+    // SU(2) matrix: [[w+ix, y+iz], [-y+iz, w-ix]]
+    // as complex 2x2: (wr, x; y, z) mapping
+    // W_pp = wr + i x, W_pq = y + i z, W_qp = -y + i z, W_qq = wr - i x
+    let ipp = idx(p, p)
+    let ipq = idx(p, q)
+    let iqp = idx(q, p)
+    let iqq = idx(q, q)
+    w[ipp as usize] = wr
+    w[(ipp + 1) as usize] = x
+    w[ipq as usize] = y
+    w[(ipq + 1) as usize] = z
+    w[iqp as usize] = 0.0 - y
+    w[(iqp + 1) as usize] = z
+    w[iqq as usize] = wr
+    w[(iqq + 1) as usize] = 0.0 - x
+    // u <- W * u
+    su3_mul(w, u, tmp)
+    su3_copy(tmp, u)
+    su3_project(u)
+}
+
+// ============================================================================
+// LATTICE IO
+// ============================================================================
+
+pub fn su3_site_index(x: i64, y: i64, z: i64, t: i64) -> i64 {
+    let L = su3_lat_l()
+    let xx = ((x % L) + L) % L
+    let yy = ((y % L) + L) % L
+    let zz = ((z % L) + L) % L
+    let tt = ((t % L) + L) % L
+    xx + L * (yy + L * (zz + L * tt))
+}
+
+pub fn su3_site_coords(s: i64) -> (i64, i64, i64, i64) {
+    let L = su3_lat_l()
+    let x = s % L
+    let y = (s / L) % L
+    let z = (s / (L * L)) % L
+    let t = s / (L * L * L)
+    (x, y, z, t)
+}
+
+pub fn su3_neighbour(s: i64, mu: i64, sign: i64) -> i64 {
+    let (x, y, z, t) = su3_site_coords(s)
+    if mu == 0 { return su3_site_index(x + sign, y, z, t) }
+    if mu == 1 { return su3_site_index(x, y + sign, z, t) }
+    if mu == 2 { return su3_site_index(x, y, z + sign, t) }
+    su3_site_index(x, y, z, t + sign)
+}
+
+pub fn su3_link_base(s: i64, mu: i64) -> i64 {
+    (s * su3_lat_nd() + mu) * 18
+}
+
+pub fn su3_link_get(lat: &[f64; 93312], s: i64, mu: i64, out: &![f64; 18]) with Mut, Div, Panic {
+    let b = su3_link_base(s, mu)
+    var i: i64 = 0
+    while i < 18 {
+        out[i as usize] = lat[(b + i) as usize]
+        i = i + 1
+    }
+}
+
+pub fn su3_link_set(lat: &![f64; 93312], s: i64, mu: i64, mat: &[f64; 18]) with Mut, Div, Panic {
+    let b = su3_link_base(s, mu)
+    var i: i64 = 0
+    while i < 18 {
+        lat[(b + i) as usize] = mat[i as usize]
+        i = i + 1
+    }
+}
+
+pub fn su3_lattice_cold(lat: &![f64; 93312]) with Mut, Div, Panic {
+    var idm: [f64; 18] = [0.0; 18]
+    su3_id(&!idm)
+    var i: i64 = 0
+    let n = su3_nlinks()
+    while i < n {
+        let b = i * 18
+        var k: i64 = 0
+        while k < 18 {
+            lat[(b + k) as usize] = idm[k as usize]
+            k = k + 1
+        }
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// PLAQUETTE / STAPLE / METROPOLIS
+// ============================================================================
+
+/// U_□ = Uμ(s) Uν(s+μ) Uμ†(s+ν) Uν†(s); returns Re Tr / 3
+pub fn su3_plaquette_norm(
+    lat: &[f64; 93312],
+    s: i64,
+    mu: i64,
+    nu: i64
+) -> f64 with Mut, Div, Panic {
+    var u1: [f64; 18] = [0.0; 18]
+    var u2: [f64; 18] = [0.0; 18]
+    var u3: [f64; 18] = [0.0; 18]
+    var u4: [f64; 18] = [0.0; 18]
+    var t1: [f64; 18] = [0.0; 18]
+    var t2: [f64; 18] = [0.0; 18]
+    var t3: [f64; 18] = [0.0; 18]
+    var d3: [f64; 18] = [0.0; 18]
+    var d4: [f64; 18] = [0.0; 18]
+
+    su3_link_get(lat, s, mu, &!u1)
+    let s_mu = su3_neighbour(s, mu, 1)
+    su3_link_get(lat, s_mu, nu, &!u2)
+    let s_nu = su3_neighbour(s, nu, 1)
+    su3_link_get(lat, s_nu, mu, &!u3)
+    su3_dag(&u3, &!d3)
+    su3_link_get(lat, s, nu, &!u4)
+    su3_dag(&u4, &!d4)
+
+    su3_mul(&u1, &u2, &!t1)
+    su3_mul(&t1, &d3, &!t2)
+    su3_mul(&t2, &d4, &!t3)
+    su3_norm_trace(&t3)
+}
+
+pub fn su3_mean_plaquette(lat: &[f64; 93312]) -> f64 with Mut, Div, Panic {
+    var sum: f64 = 0.0
+    var count: i64 = 0
+    var s: i64 = 0
+    let ns = su3_nsites()
+    let Nd = su3_lat_nd()
+    while s < ns {
+        var mu: i64 = 0
+        while mu < Nd {
+            var nu: i64 = mu + 1
+            while nu < Nd {
+                sum = sum + su3_plaquette_norm(lat, s, mu, nu)
+                count = count + 1
+                nu = nu + 1
+            }
+            mu = mu + 1
+        }
+        s = s + 1
+    }
+    if count == 0 { return 0.0 }
+    sum / (count as f64)
+}
+
+/// Staple sum V such that U·V contributes to plaquettes (Metropolis force).
+fn su3_staple_sum(lat: &[f64; 93312], s: i64, mu: i64, out: &![f64; 18]) with Mut, Div, Panic {
+    su3_zero(out)
+    var acc: [f64; 18] = [0.0; 18]
+    var tmp: [f64; 18] = [0.0; 18]
+    var t1: [f64; 18] = [0.0; 18]
+    var t2: [f64; 18] = [0.0; 18]
+    var a: [f64; 18] = [0.0; 18]
+    var b: [f64; 18] = [0.0; 18]
+    var c: [f64; 18] = [0.0; 18]
+    var ad: [f64; 18] = [0.0; 18]
+    var cd: [f64; 18] = [0.0; 18]
+    let Nd = su3_lat_nd()
+    var nu: i64 = 0
+    while nu < Nd {
+        if nu != mu {
+            // Forward: Uν(s+μ) Uμ†(s+ν) Uν†(s)
+            let s_mu = su3_neighbour(s, mu, 1)
+            su3_link_get(lat, s_mu, nu, &!a)
+            let s_nu = su3_neighbour(s, nu, 1)
+            su3_link_get(lat, s_nu, mu, &!b)
+            su3_dag(&b, &!ad)
+            su3_link_get(lat, s, nu, &!c)
+            su3_dag(&c, &!cd)
+            su3_mul(&a, &ad, &!t1)
+            su3_mul(&t1, &cd, &!t2)
+            su3_add(out, &t2, &!acc)
+            su3_copy(&acc, out)
+
+            // Backward: Uν†(s+μ−ν) Uμ†(s−ν) Uν(s−ν)
+            let s_mnu = su3_neighbour(s, nu, 0 - 1)
+            let s_mu_mnu = su3_neighbour(s_mu, nu, 0 - 1)
+            su3_link_get(lat, s_mu_mnu, nu, &!a)
+            su3_dag(&a, &!ad)
+            su3_link_get(lat, s_mnu, mu, &!b)
+            su3_dag(&b, &!cd)
+            su3_link_get(lat, s_mnu, nu, &!c)
+            su3_mul(&ad, &cd, &!t1)
+            su3_mul(&t1, &c, &!t2)
+            su3_add(out, &t2, &!acc)
+            su3_copy(&acc, out)
+        }
+        nu = nu + 1
+    }
+}
+
+/// Re Tr(A · B)
+fn su3_re_tr_prod(a: &[f64; 18], b: &[f64; 18]) -> f64 with Mut, Div, Panic {
+    var tmp: [f64; 18] = [0.0; 18]
+    su3_mul(a, b, &!tmp)
+    su3_re_trace(&tmp)
+}
+
+/// Metropolis hit on one link using 3 SU(2) subgroup proposals.
+pub fn su3_metropolis_link(
+    lat: &![f64; 93312],
+    s: i64,
+    mu: i64,
+    beta: f64,
+    eps: f64
+) -> i64 with Mut, Div, Panic {
+    var u: [f64; 18] = [0.0; 18]
+    var staple: [f64; 18] = [0.0; 18]
+    var unew: [f64; 18] = [0.0; 18]
+    var tmp: [f64; 18] = [0.0; 18]
+    var w: [f64; 18] = [0.0; 18]
+    su3_link_get(lat, s, mu, &!u)
+    su3_staple_sum(lat, s, mu, &!staple)
+    var old_re = su3_re_tr_prod(&u, &staple)
+
+    var accepted: i64 = 0
+    // three Cabibbo–Marinari planes
+    var plane: i64 = 0
+    while plane < 3 {
+        var p: i64 = 0
+        var q: i64 = 1
+        if plane == 1 { p = 1; q = 2 }
+        if plane == 2 { p = 0; q = 2 }
+        su3_copy(&u, &!unew)
+        su3_left_mul_su2_plane(&!unew, p, q, eps, &!tmp, &!w)
+        let new_re = su3_re_tr_prod(&unew, &staple)
+        // S ~ −(β/3) Re Tr(U V)  ⇒  ΔS = (β/3)(old_re − new_re)
+        let dS = (beta / 3.0) * (old_re - new_re)
+        var acc = false
+        if dS <= 0.0 {
+            acc = true
+        } else {
+            if su3_uniform() < exp_f64(0.0 - dS) { acc = true }
+        }
+        if acc {
+            su3_copy(&unew, &!u)
+            old_re = new_re
+            accepted = accepted + 1
+        }
+        plane = plane + 1
+    }
+    su3_link_set(lat, s, mu, &u)
+    if accepted > 0 { 1 } else { 0 }
+}
+
+pub fn su3_metropolis_sweep(lat: &![f64; 93312], beta: f64, eps: f64) -> i64 with Mut, Div, Panic {
+    var acc: i64 = 0
+    var s: i64 = 0
+    let ns = su3_nsites()
+    let Nd = su3_lat_nd()
+    while s < ns {
+        var mu: i64 = 0
+        while mu < Nd {
+            acc = acc + su3_metropolis_link(lat, s, mu, beta, eps)
+            mu = mu + 1
+        }
+        s = s + 1
+    }
+    acc
+}
+
+pub fn su3_thermalize(lat: &![f64; 93312], beta: f64, eps: f64, n_sweeps: i64) -> f64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < n_sweeps {
+        let _a = su3_metropolis_sweep(lat, beta, eps)
+        i = i + 1
+    }
+    su3_mean_plaquette(lat)
+}
+
+// ============================================================================
+// CABIBBO–MARINARI HEATBATH (SU(2) subgroups — exact, no reject)
+// ============================================================================
+// Weight ∝ exp((β/3) Re Tr(U S)). Left mult V∈SU(2)_plane:
+//   exp((β/3) Re Tr(V U S)) = exp((β/3) Re Tr(V B)), B=U S.
+// Project B to the plane → quaternion staple of norm k; sample g with
+//   ξ = (2β/3) k,  then V = g · â†  embedded; U ← V U.
+// Ref: Cabibbo & Marinari, Phys. Lett. B119 (1982) 387.
+
+fn su3_hb_sample_a0(xi: f64) -> f64 with Mut, Div, Panic {
+    if xi < 1.0e-10 { return 2.0 * su3_uniform() - 1.0 }
+    var tries: i64 = 0
+    while tries < 400 {
+        let a = 2.0 * su3_uniform() - 1.0
+        let s2 = 1.0 - a * a
+        if s2 >= 0.0 {
+            let w = sqrt_f64(s2) * exp_f64(xi * (a - 1.0))
+            if su3_uniform() < w { return a }
+        }
+        tries = tries + 1
+    }
+    0.999
+}
+
+fn su3_hb_unit3() -> (f64, f64, f64) with Mut, Div, Panic {
+    var tries: i64 = 0
+    while tries < 100 {
+        let x = 2.0 * su3_uniform() - 1.0
+        let y = 2.0 * su3_uniform() - 1.0
+        let z = 2.0 * su3_uniform() - 1.0
+        let n2 = x * x + y * y + z * z
+        if n2 > 1.0e-12 && n2 <= 1.0 {
+            let inv = 1.0 / sqrt_f64(n2)
+            return (x * inv, y * inv, z * inv)
+        }
+        tries = tries + 1
+    }
+    (1.0, 0.0, 0.0)
+}
+
+fn su3_hb_gen_su2(xi: f64) -> (f64, f64, f64, f64) with Mut, Div, Panic {
+    let a0 = su3_hb_sample_a0(xi)
+    let s2 = 1.0 - a0 * a0
+    let s = if s2 > 0.0 { sqrt_f64(s2) } else { 0.0 }
+    let (nx, ny, nz) = su3_hb_unit3()
+    (a0, s * nx, s * ny, s * nz)
+}
+
+/// Extract unnormalised SU(2) quaternion from 2×2 block of 3×3 matrix `m` in plane (p,q).
+fn su3_plane_quat(m: &[f64; 18], p: i64, q: i64) -> (f64, f64, f64, f64) {
+    // M = [[m_pp, m_pq],[m_qp, m_qq]]
+    let ipp = idx(p, p)
+    let ipq = idx(p, q)
+    let iqp = idx(q, p)
+    let iqq = idx(q, q)
+    let app_r = m[ipp as usize]
+    let app_i = m[(ipp + 1) as usize]
+    let apq_r = m[ipq as usize]
+    let apq_i = m[(ipq + 1) as usize]
+    let aqp_r = m[iqp as usize]
+    let aqp_i = m[(iqp + 1) as usize]
+    let aqq_r = m[iqq as usize]
+    let aqq_i = m[(iqq + 1) as usize]
+    // Map to quaternion (standard embedding)
+    let w = 0.5 * (app_r + aqq_r)
+    let x = 0.5 * (app_i - aqq_i)
+    let y = 0.5 * (apq_r - aqp_r)
+    let z = 0.5 * (apq_i + aqp_i)
+    (w, x, y, z)
+}
+
+/// Embed unit quaternion as SU(2) in plane (p,q) of 3×3 identity, left-multiply into `u`.
+fn su3_embed_left_mul(
+    u: &![f64; 18],
+    p: i64,
+    q: i64,
+    gw: f64,
+    gx: f64,
+    gy: f64,
+    gz: f64,
+    tmp: &![f64; 18],
+    wmat: &![f64; 18]
+) with Mut, Div, Panic {
+    su3_id(wmat)
+    let ipp = idx(p, p)
+    let ipq = idx(p, q)
+    let iqp = idx(q, p)
+    let iqq = idx(q, q)
+    // [[w+ix, y+iz], [-y+iz, w-ix]]
+    wmat[ipp as usize] = gw
+    wmat[(ipp + 1) as usize] = gx
+    wmat[ipq as usize] = gy
+    wmat[(ipq + 1) as usize] = gz
+    wmat[iqp as usize] = 0.0 - gy
+    wmat[(iqp + 1) as usize] = gz
+    wmat[iqq as usize] = gw
+    wmat[(iqq + 1) as usize] = 0.0 - gx
+    su3_mul(wmat, u, tmp)
+    su3_copy(tmp, u)
+    su3_project(u)
+}
+
+/// Cabibbo–Marinari heatbath: three exact SU(2) subgroup hits. Always updates.
+pub fn su3_heatbath_link(
+    lat: &![f64; 93312],
+    s: i64,
+    mu: i64,
+    beta: f64
+) -> i64 with Mut, Div, Panic {
+    var u: [f64; 18] = [0.0; 18]
+    var staple: [f64; 18] = [0.0; 18]
+    var bmat: [f64; 18] = [0.0; 18]
+    var tmp: [f64; 18] = [0.0; 18]
+    var wmat: [f64; 18] = [0.0; 18]
+    su3_link_get(lat, s, mu, &!u)
+    su3_staple_sum(lat, s, mu, &!staple)
+
+    var plane: i64 = 0
+    while plane < 3 {
+        var p: i64 = 0
+        var q: i64 = 1
+        if plane == 1 { p = 1; q = 2 }
+        if plane == 2 { p = 0; q = 2 }
+
+        // B = U · S
+        su3_mul(&u, &staple, &!bmat)
+        let (bw, bx, by, bz) = su3_plane_quat(&bmat, p, q)
+        let k2 = bw * bw + bx * bx + by * by + bz * bz
+        if k2 > 1.0e-20 {
+            let k = sqrt_f64(k2)
+            let inv = 1.0 / k
+            let aw = bw * inv
+            let ax = bx * inv
+            let ay = by * inv
+            let az = bz * inv
+            // ξ = (2β/3) k   because Re Tr_2 = 2 g₀ k
+            let xi = (2.0 * beta / 3.0) * k
+            let (gw, gx, gy, gz) = su3_hb_gen_su2(xi)
+            // V = g · â†  then U ← V U
+            // â† = conj(â)
+            let adw = aw
+            let adx = 0.0 - ax
+            let ady = 0.0 - ay
+            let adz = 0.0 - az
+            // quaternion mul g * â†
+            let vw = gw * adw - gx * adx - gy * ady - gz * adz
+            let vx = gw * adx + gx * adw + gy * adz - gz * ady
+            let vy = gw * ady - gx * adz + gy * adw + gz * adx
+            let vz = gw * adz + gx * ady - gy * adx + gz * adw
+            let n2 = vw * vw + vx * vx + vy * vy + vz * vz
+            if n2 > 1.0e-20 {
+                let invn = 1.0 / sqrt_f64(n2)
+                su3_embed_left_mul(&!u, p, q, vw * invn, vx * invn, vy * invn, vz * invn, &!tmp, &!wmat)
+            }
+        }
+        plane = plane + 1
+    }
+    su3_link_set(lat, s, mu, &u)
+    1
+}
+
+pub fn su3_heatbath_sweep(lat: &![f64; 93312], beta: f64) -> i64 with Mut, Div, Panic {
+    var n: i64 = 0
+    var s: i64 = 0
+    let ns = su3_nsites()
+    let Nd = su3_lat_nd()
+    while s < ns {
+        var mu: i64 = 0
+        while mu < Nd {
+            n = n + su3_heatbath_link(lat, s, mu, beta)
+            mu = mu + 1
+        }
+        s = s + 1
+    }
+    n
+}
+
+/// Thermalise with Cabibbo–Marinari heatbath. Returns final ⟨P⟩=ReTr/3.
+pub fn su3_heatbath_thermalize(
+    lat: &![f64; 93312],
+    beta: f64,
+    n_sweeps: i64
+) -> f64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < n_sweeps {
+        let _n = su3_heatbath_sweep(lat, beta)
+        i = i + 1
+    }
+    su3_mean_plaquette(lat)
+}
+
+// ============================================================================
+// WILSON LOOPS / CREUTZ
+// ============================================================================
+
+pub fn su3_wilson_loop_rect(lat: &[f64; 93312], r: i64, t_len: i64) -> f64 with Mut, Div, Panic {
+    if r < 1 || t_len < 1 { return 0.0 }
+    let L = su3_lat_l()
+    if r >= L || t_len >= L { return 0.0 }
+    let Nd = su3_lat_nd()
+    var sum: f64 = 0.0
+    var count: i64 = 0
+    var prod: [f64; 18] = [0.0; 18]
+    var tmp: [f64; 18] = [0.0; 18]
+    var lnk: [f64; 18] = [0.0; 18]
+    var dlnk: [f64; 18] = [0.0; 18]
+    var s0: i64 = 0
+    let ns = su3_nsites()
+    while s0 < ns {
+        var mu: i64 = 0
+        while mu < Nd {
+            var nu: i64 = 0
+            while nu < Nd {
+                if nu != mu {
+                    su3_id(&!prod)
+                    var s = s0
+                    var step: i64 = 0
+                    while step < r {
+                        su3_link_get(lat, s, mu, &!lnk)
+                        su3_mul(&prod, &lnk, &!tmp)
+                        su3_copy(&tmp, &!prod)
+                        s = su3_neighbour(s, mu, 1)
+                        step = step + 1
+                    }
+                    step = 0
+                    while step < t_len {
+                        su3_link_get(lat, s, nu, &!lnk)
+                        su3_mul(&prod, &lnk, &!tmp)
+                        su3_copy(&tmp, &!prod)
+                        s = su3_neighbour(s, nu, 1)
+                        step = step + 1
+                    }
+                    step = 0
+                    while step < r {
+                        s = su3_neighbour(s, mu, 0 - 1)
+                        su3_link_get(lat, s, mu, &!lnk)
+                        su3_dag(&lnk, &!dlnk)
+                        su3_mul(&prod, &dlnk, &!tmp)
+                        su3_copy(&tmp, &!prod)
+                        step = step + 1
+                    }
+                    step = 0
+                    while step < t_len {
+                        s = su3_neighbour(s, nu, 0 - 1)
+                        su3_link_get(lat, s, nu, &!lnk)
+                        su3_dag(&lnk, &!dlnk)
+                        su3_mul(&prod, &dlnk, &!tmp)
+                        su3_copy(&tmp, &!prod)
+                        step = step + 1
+                    }
+                    sum = sum + su3_norm_trace(&prod)
+                    count = count + 1
+                }
+                nu = nu + 1
+            }
+            mu = mu + 1
+        }
+        s0 = s0 + 1
+    }
+    if count == 0 { return 0.0 }
+    sum / (count as f64)
+}
+
+pub fn su3_creutz_ratio(lat: &[f64; 93312], r: i64) -> (f64, i64) with Mut, Div, Panic {
+    if r < 2 { return (0.0, 0) }
+    let w_rr = su3_wilson_loop_rect(lat, r, r)
+    let w_mm = su3_wilson_loop_rect(lat, r - 1, r - 1)
+    let w_rm = su3_wilson_loop_rect(lat, r, r - 1)
+    let w_mr = su3_wilson_loop_rect(lat, r - 1, r)
+    let num = w_rr * w_mm
+    let den = w_rm * w_mr
+    if num <= 1.0e-30 || den <= 1.0e-30 { return (0.0, 0) }
+    let ratio = num / den
+    if ratio <= 1.0e-30 || ratio >= 1.0 { return (0.0, 0) }
+    (0.0 - ln_f64(ratio), 1)
+}
+
+// ============================================================================
+// ENSEMBLE + EPISTEMIC
+// ============================================================================
+
+pub fn su3_measure_ensemble(
+    lat: &![f64; 93312],
+    beta: f64,
+    eps: f64,
+    n_meas: i64,
+    n_sep: i64,
+    plaq_s: &![f64; 256],
+    chi_s: &![f64; 256],
+    chi_v: &![i64; 256]
+) -> i64 with Mut, Div, Panic {
+    var n_ok: i64 = 0
+    var m: i64 = 0
+    let n = if n_meas < 256 { n_meas } else { 256 }
+    while m < n {
+        var s: i64 = 0
+        while s < n_sep {
+            let _a = su3_metropolis_sweep(lat, beta, eps)
+            s = s + 1
+        }
+        plaq_s[m as usize] = su3_mean_plaquette(lat)
+        let (chi, ok) = su3_creutz_ratio(lat, 2)
+        chi_s[m as usize] = chi
+        chi_v[m as usize] = ok
+        if ok == 1 { n_ok = n_ok + 1 }
+        m = m + 1
+    }
+    n_ok
+}
+
+fn su3_sample_mean_std(buf: &[f64; 256], n: i64, valid: &[i64; 256], use_valid: i64) -> (f64, f64) with Mut, Div, Panic {
+    var sum: f64 = 0.0
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < n && i < 256 {
+        var take = true
+        if use_valid == 1 {
+            if valid[i as usize] == 0 { take = false }
+        }
+        if take {
+            sum = sum + buf[i as usize]
+            count = count + 1
+        }
+        i = i + 1
+    }
+    if count == 0 { return (0.0, 0.0) }
+    let mean = sum / (count as f64)
+    if count < 2 { return (mean, 0.0) }
+    var vs: f64 = 0.0
+    i = 0
+    while i < n && i < 256 {
+        var take = true
+        if use_valid == 1 {
+            if valid[i as usize] == 0 { take = false }
+        }
+        if take {
+            let d = buf[i as usize] - mean
+            vs = vs + d * d
+        }
+        i = i + 1
+    }
+    let std = sqrt_f64(vs / ((count - 1) as f64))
+    let sem = std / sqrt_f64(count as f64)
+    (mean, sem)
+}
+
+pub fn su3_plaquette_ep(plaq_s: &[f64; 256], n: i64) -> Epistemic with Mut, Div, Panic {
+    var dummy: [i64; 256] = [1; 256]
+    let (m, sem) = su3_sample_mean_std(plaq_s, n, &dummy, 0)
+    ep_measured(m, sem)
+}
+
+pub fn su3_string_tension_ep(chi_s: &[f64; 256], chi_v: &[i64; 256], n: i64) -> Epistemic with Mut, Div, Panic {
+    let (m, sem) = su3_sample_mean_std(chi_s, n, chi_v, 1)
+    if m <= 0.0 { return ep_measured(0.0, 0.0) }
+    ep_measured(m, sem)
+}
+
+/// Mass-gap proxy: m_gap a ≈ r · √(σ a²) with r≈3.5 for lightest SU(3) glueball/√σ
+/// (Morningstar–Peardon / Teper order of magnitude).
+pub fn su3_mass_gap_proxy_ep(sigma_a2: &Epistemic) -> Epistemic with Mut, Div, Panic {
+    let r_glue = 3.5
+    let s = ep_val(sigma_a2)
+    let us = ep_std(sigma_a2)
+    if s <= 0.0 { return ep_measured(0.0, 0.0) }
+    let root = sqrt_f64(s)
+    let u_root = us / (2.0 * root)
+    let val = r_glue * root
+    let unc = r_glue * u_root
+    Epistemic { val: val, variance: unc * unc, confidence: 450 }
+}
+
+// ============================================================================
+// APE SMEARING (spatial) + 0++ GLUEBALL SPECTRAL MASS
+// ============================================================================
+// O(t) = Σ_{x,y,z} Σ_{i<j spatial} ReTr(U_ij)/3
+// C(τ) = ⟨O(t)O(t+τ)⟩ − ⟨O⟩²
+// m_eff = ln(C(0)/C(1)) when C decays
+//
+// APE (spatial only): X = (1−α)U + (α/4) Σ C_staple,  Proj_SU(3)
+// Smoothing staples (≠ Metropolis force staples):
+//   C⁺ = Uν(s) Uμ(s+ν) Uν†(s+μ)
+
+pub fn su3_lattice_copy(src: &[f64; 93312], dst: &![f64; 93312]) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < 93312 {
+        dst[i as usize] = src[i as usize]
+        i = i + 1
+    }
+}
+
+/// Spatial APE staple sum for link U_μ(s), μ∈{0,1,2}.
+fn su3_ape_spatial_staple(lat: &[f64; 93312], s: i64, mu: i64, out: &![f64; 18]) with Mut, Div, Panic {
+    su3_zero(out)
+    var acc: [f64; 18] = [0.0; 18]
+    var a: [f64; 18] = [0.0; 18]
+    var b: [f64; 18] = [0.0; 18]
+    var c: [f64; 18] = [0.0; 18]
+    var ad: [f64; 18] = [0.0; 18]
+    var t1: [f64; 18] = [0.0; 18]
+    var t2: [f64; 18] = [0.0; 18]
+    var nu: i64 = 0
+    while nu < 3 {
+        if nu != mu {
+            // C⁺ = Uν(s) · Uμ(s+ν) · Uν†(s+μ)
+            su3_link_get(lat, s, nu, &!a)
+            let s_nu = su3_neighbour(s, nu, 1)
+            su3_link_get(lat, s_nu, mu, &!b)
+            let s_mu = su3_neighbour(s, mu, 1)
+            su3_link_get(lat, s_mu, nu, &!c)
+            su3_dag(&c, &!ad)
+            su3_mul(&a, &b, &!t1)
+            su3_mul(&t1, &ad, &!t2)
+            su3_add(out, &t2, &!acc)
+            su3_copy(&acc, out)
+
+            // C⁻ = Uν†(s−ν) · Uμ(s−ν) · Uν(s−ν+μ)
+            let s_mnu = su3_neighbour(s, nu, 0 - 1)
+            su3_link_get(lat, s_mnu, nu, &!a)
+            su3_dag(&a, &!ad)
+            su3_link_get(lat, s_mnu, mu, &!b)
+            let s_mnu_mu = su3_neighbour(s_mnu, mu, 1)
+            su3_link_get(lat, s_mnu_mu, nu, &!c)
+            su3_mul(&ad, &b, &!t1)
+            su3_mul(&t1, &c, &!t2)
+            su3_add(out, &t2, &!acc)
+            su3_copy(&acc, out)
+        }
+        nu = nu + 1
+    }
+}
+
+/// One spatial APE step: src → dst (temporal μ=3 copied).
+pub fn su3_ape_smear_step(
+    src: &[f64; 93312],
+    dst: &![f64; 93312],
+    alpha: f64
+) with Mut, Div, Panic {
+    let a = if alpha < 0.0 { 0.0 } else { if alpha > 0.99 { 0.99 } else { alpha } }
+    let w_u = 1.0 - a
+    let w_s = a / 4.0
+    var u: [f64; 18] = [0.0; 18]
+    var st: [f64; 18] = [0.0; 18]
+    var x: [f64; 18] = [0.0; 18]
+    var s: i64 = 0
+    let ns = su3_nsites()
+    while s < ns {
+        var mu: i64 = 0
+        while mu < 4 {
+            if mu == 3 {
+                su3_link_get(src, s, mu, &!u)
+                su3_link_set(dst, s, mu, &u)
+            } else {
+                su3_link_get(src, s, mu, &!u)
+                su3_ape_spatial_staple(src, s, mu, &!st)
+                var i: i64 = 0
+                while i < 18 {
+                    x[i as usize] = w_u * u[i as usize] + w_s * st[i as usize]
+                    i = i + 1
+                }
+                su3_project(&!x)
+                su3_link_set(dst, s, mu, &x)
+            }
+            mu = mu + 1
+        }
+        s = s + 1
+    }
+}
+
+/// n_smear APE steps with ping-pong buffers; result in `out`.
+pub fn su3_ape_smear_n(
+    lat: &[f64; 93312],
+    out: &![f64; 93312],
+    tmp: &![f64; 93312],
+    alpha: f64,
+    n_smear: i64
+) with Mut, Div, Panic {
+    if n_smear <= 0 {
+        su3_lattice_copy(lat, out)
+        return
+    }
+    su3_ape_smear_step(lat, tmp, alpha)
+    if n_smear == 1 {
+        su3_lattice_copy(tmp, out)
+        return
+    }
+    var k: i64 = 1
+    var in_tmp: i64 = 1
+    while k < n_smear {
+        if in_tmp == 1 {
+            su3_ape_smear_step(tmp, out, alpha)
+            in_tmp = 0
+        } else {
+            su3_ape_smear_step(out, tmp, alpha)
+            in_tmp = 1
+        }
+        k = k + 1
+    }
+    if in_tmp == 1 {
+        su3_lattice_copy(tmp, out)
+    }
+}
+
+/// Spatial 0++ operator on time slice t.
+pub fn su3_glueball_op_slice(lat: &[f64; 93312], t: i64) -> f64 with Mut, Div, Panic {
+    let L = su3_lat_l()
+    let tt = ((t % L) + L) % L
+    var sum: f64 = 0.0
+    var x: i64 = 0
+    while x < L {
+        var y: i64 = 0
+        while y < L {
+            var z: i64 = 0
+            while z < L {
+                let s = su3_site_index(x, y, z, tt)
+                sum = sum + su3_plaquette_norm(lat, s, 0, 1)
+                sum = sum + su3_plaquette_norm(lat, s, 0, 2)
+                sum = sum + su3_plaquette_norm(lat, s, 1, 2)
+                z = z + 1
+            }
+            y = y + 1
+        }
+        x = x + 1
+    }
+    sum
+}
+
+pub fn su3_glueball_ops_all(lat: &[f64; 93312], ops: &![f64; 8]) with Mut, Div, Panic {
+    let L = su3_lat_l()
+    var t: i64 = 0
+    while t < L && t < 8 {
+        ops[t as usize] = su3_glueball_op_slice(lat, t)
+        t = t + 1
+    }
+}
+
+pub fn su3_glueball_meff_log(c0: f64, c1: f64) -> (f64, i64) with Mut, Div, Panic {
+    if c0 <= 1.0e-30 || c1 <= 1.0e-30 { return (0.0, 0) }
+    if c1 >= c0 { return (0.0, 0) }
+    let m = ln_f64(c0 / c1)
+    if m <= 0.0 || m != m { return (0.0, 0) }
+    (m, 1)
+}
+
+/// Full connected C(τ) for thin + APE under heatbath (all τ = 0..L−1).
+/// Writes c_thin, c_ape. Returns (⟨O⟩_thin, ⟨O⟩_ape).
+/// Use with lattice_gauge::glueball_meff_scan + glueball_mass_claim for hard gates.
+pub fn su3_measure_glueball_correlator_full_hb(
+    lat: &![f64; 93312],
+    sm: &![f64; 93312],
+    tmp: &![f64; 93312],
+    beta: f64,
+    n_meas: i64,
+    n_sep: i64,
+    alpha: f64,
+    n_smear: i64,
+    c_thin: &![f64; 8],
+    c_ape: &![f64; 8]
+) -> (f64, f64) with Mut, Div, Panic {
+    var sum_oo_t: [f64; 8] = [0.0; 8]
+    var sum_oo_a: [f64; 8] = [0.0; 8]
+    var sum_o_t: f64 = 0.0
+    var sum_o_a: f64 = 0.0
+    var ops_t: [f64; 8] = [0.0; 8]
+    var ops_a: [f64; 8] = [0.0; 8]
+    let L = su3_lat_l()
+    let n = if n_meas < 256 { n_meas } else { 256 }
+    var m: i64 = 0
+    while m < n {
+        var s: i64 = 0
+        while s < n_sep {
+            let _a = su3_heatbath_sweep(lat, beta)
+            s = s + 1
+        }
+        su3_glueball_ops_all(lat, &!ops_t)
+        su3_ape_smear_n(lat, sm, tmp, alpha, n_smear)
+        su3_glueball_ops_all(sm, &!ops_a)
+        // accumulate OO(τ) and O
+        var mo_t: f64 = 0.0
+        var mo_a: f64 = 0.0
+        var tau: i64 = 0
+        while tau < L && tau < 8 {
+            var corr_t: f64 = 0.0
+            var corr_a: f64 = 0.0
+            var t: i64 = 0
+            while t < L {
+                let tp = (t + tau) % L
+                corr_t = corr_t + ops_t[t as usize] * ops_t[tp as usize]
+                corr_a = corr_a + ops_a[t as usize] * ops_a[tp as usize]
+                t = t + 1
+            }
+            let invL = 1.0 / (L as f64)
+            sum_oo_t[tau as usize] = sum_oo_t[tau as usize] + corr_t * invL
+            sum_oo_a[tau as usize] = sum_oo_a[tau as usize] + corr_a * invL
+            tau = tau + 1
+        }
+        var ts: i64 = 0
+        while ts < L && ts < 8 {
+            mo_t = mo_t + ops_t[ts as usize]
+            mo_a = mo_a + ops_a[ts as usize]
+            ts = ts + 1
+        }
+        let invL2 = 1.0 / (L as f64)
+        sum_o_t = sum_o_t + mo_t * invL2
+        sum_o_a = sum_o_a + mo_a * invL2
+        m = m + 1
+    }
+    let invn = 1.0 / (n as f64)
+    let mean_ot = sum_o_t * invn
+    let mean_oa = sum_o_a * invn
+    var tau: i64 = 0
+    while tau < 8 {
+        c_thin[tau as usize] = 0.0
+        c_ape[tau as usize] = 0.0
+        tau = tau + 1
+    }
+    tau = 0
+    while tau < L && tau < 8 {
+        c_thin[tau as usize] = sum_oo_t[tau as usize] * invn - mean_ot * mean_ot
+        c_ape[tau as usize] = sum_oo_a[tau as usize] * invn - mean_oa * mean_oa
+        tau = tau + 1
+    }
+    (mean_ot, mean_oa)
+}
+
+pub fn su3_glueball_meff_ep(samples: &[f64; 256], valid: &[i64; 256], n: i64) -> Epistemic with Mut, Div, Panic {
+    let (m, sem) = su3_sample_mean_std(samples, n, valid, 1)
+    if m <= 0.0 { return ep_measured(0.0, 0.0) }
+    Epistemic { val: m, variance: sem * sem, confidence: 500 }
+}
+
+/// Paired thin + APE 0++ measurement on the same SU(3) configs.
+/// Returns (n_ok_thin, n_ok_ape, mean_O_thin, mean_O_ape).
+pub fn su3_measure_glueball_thin_and_ape(
+    lat: &![f64; 93312],
+    sm: &![f64; 93312],
+    tmp: &![f64; 93312],
+    beta: f64,
+    eps: f64,
+    n_meas: i64,
+    n_sep: i64,
+    alpha: f64,
+    n_smear: i64,
+    c_thin: &![f64; 8],
+    c_ape: &![f64; 8],
+    meff_thin_s: &![f64; 256],
+    meff_thin_v: &![i64; 256],
+    meff_ape_s: &![f64; 256],
+    meff_ape_v: &![i64; 256]
+) -> (i64, i64, f64, f64) with Mut, Div, Panic {
+    var sum_o_t: f64 = 0.0
+    var sum_o_a: f64 = 0.0
+    var ops_t: [f64; 8] = [0.0; 8]
+    var ops_a: [f64; 8] = [0.0; 8]
+    var oo0_t: [f64; 256] = [0.0; 256]
+    var oo1_t: [f64; 256] = [0.0; 256]
+    var oo0_a: [f64; 256] = [0.0; 256]
+    var oo1_a: [f64; 256] = [0.0; 256]
+    let L = su3_lat_l()
+    let n = if n_meas < 256 { n_meas } else { 256 }
+    var m: i64 = 0
+
+    while m < n {
+        var s: i64 = 0
+        while s < n_sep {
+            let _a = su3_metropolis_sweep(lat, beta, eps)
+            s = s + 1
+        }
+        su3_glueball_ops_all(lat, &!ops_t)
+        su3_ape_smear_n(lat, sm, tmp, alpha, n_smear)
+        su3_glueball_ops_all(sm, &!ops_a)
+
+        var mo_t: f64 = 0.0
+        var mo_a: f64 = 0.0
+        var c0t: f64 = 0.0
+        var c1t: f64 = 0.0
+        var c0a: f64 = 0.0
+        var c1a: f64 = 0.0
+        var t: i64 = 0
+        while t < L {
+            mo_t = mo_t + ops_t[t as usize]
+            mo_a = mo_a + ops_a[t as usize]
+            let t1 = (t + 1) % L
+            c0t = c0t + ops_t[t as usize] * ops_t[t as usize]
+            c1t = c1t + ops_t[t as usize] * ops_t[t1 as usize]
+            c0a = c0a + ops_a[t as usize] * ops_a[t as usize]
+            c1a = c1a + ops_a[t as usize] * ops_a[t1 as usize]
+            t = t + 1
+        }
+        let invL = 1.0 / (L as f64)
+        sum_o_t = sum_o_t + mo_t * invL
+        sum_o_a = sum_o_a + mo_a * invL
+        oo0_t[m as usize] = c0t * invL
+        oo1_t[m as usize] = c1t * invL
+        oo0_a[m as usize] = c0a * invL
+        oo1_a[m as usize] = c1a * invL
+        m = m + 1
+    }
+
+    let invn = 1.0 / (n as f64)
+    let mean_ot = sum_o_t * invn
+    let mean_oa = sum_o_a * invn
+
+    var c0_t: f64 = 0.0
+    var c1_t: f64 = 0.0
+    var c0_a: f64 = 0.0
+    var c1_a: f64 = 0.0
+    m = 0
+    while m < n {
+        c0_t = c0_t + oo0_t[m as usize]
+        c1_t = c1_t + oo1_t[m as usize]
+        c0_a = c0_a + oo0_a[m as usize]
+        c1_a = c1_a + oo1_a[m as usize]
+        m = m + 1
+    }
+    c0_t = c0_t * invn - mean_ot * mean_ot
+    c1_t = c1_t * invn - mean_ot * mean_ot
+    c0_a = c0_a * invn - mean_oa * mean_oa
+    c1_a = c1_a * invn - mean_oa * mean_oa
+
+    var tau: i64 = 0
+    while tau < 8 {
+        c_thin[tau as usize] = 0.0
+        c_ape[tau as usize] = 0.0
+        tau = tau + 1
+    }
+    c_thin[0] = c0_t
+    c_thin[1] = c1_t
+    c_ape[0] = c0_a
+    c_ape[1] = c1_a
+
+    var n_ok_t: i64 = 0
+    var n_ok_a: i64 = 0
+    m = 0
+    while m < n {
+        let (mt, ot) = su3_glueball_meff_log(
+            oo0_t[m as usize] - mean_ot * mean_ot,
+            oo1_t[m as usize] - mean_ot * mean_ot
+        )
+        meff_thin_s[m as usize] = mt
+        meff_thin_v[m as usize] = ot
+        if ot == 1 { n_ok_t = n_ok_t + 1 }
+
+        let (ma, oa) = su3_glueball_meff_log(
+            oo0_a[m as usize] - mean_oa * mean_oa,
+            oo1_a[m as usize] - mean_oa * mean_oa
+        )
+        meff_ape_s[m as usize] = ma
+        meff_ape_v[m as usize] = oa
+        if oa == 1 { n_ok_a = n_ok_a + 1 }
+        m = m + 1
+    }
+    (n_ok_t, n_ok_a, mean_ot, mean_oa)
+}
+
+/// Thin+APE 0++ with Cabibbo–Marinari heatbath evolution (no Metropolis).
+pub fn su3_measure_glueball_thin_and_ape_hb(
+    lat: &![f64; 93312],
+    sm: &![f64; 93312],
+    tmp: &![f64; 93312],
+    beta: f64,
+    n_meas: i64,
+    n_sep: i64,
+    alpha: f64,
+    n_smear: i64,
+    c_thin: &![f64; 8],
+    c_ape: &![f64; 8],
+    meff_thin_s: &![f64; 256],
+    meff_thin_v: &![i64; 256],
+    meff_ape_s: &![f64; 256],
+    meff_ape_v: &![i64; 256]
+) -> (i64, i64, f64, f64) with Mut, Div, Panic {
+    var sum_o_t: f64 = 0.0
+    var sum_o_a: f64 = 0.0
+    var ops_t: [f64; 8] = [0.0; 8]
+    var ops_a: [f64; 8] = [0.0; 8]
+    var oo0_t: [f64; 256] = [0.0; 256]
+    var oo1_t: [f64; 256] = [0.0; 256]
+    var oo0_a: [f64; 256] = [0.0; 256]
+    var oo1_a: [f64; 256] = [0.0; 256]
+    let L = su3_lat_l()
+    let n = if n_meas < 256 { n_meas } else { 256 }
+    var m: i64 = 0
+
+    while m < n {
+        var s: i64 = 0
+        while s < n_sep {
+            let _a = su3_heatbath_sweep(lat, beta)
+            s = s + 1
+        }
+        su3_glueball_ops_all(lat, &!ops_t)
+        su3_ape_smear_n(lat, sm, tmp, alpha, n_smear)
+        su3_glueball_ops_all(sm, &!ops_a)
+
+        var mo_t: f64 = 0.0
+        var mo_a: f64 = 0.0
+        var c0t: f64 = 0.0
+        var c1t: f64 = 0.0
+        var c0a: f64 = 0.0
+        var c1a: f64 = 0.0
+        var t: i64 = 0
+        while t < L {
+            mo_t = mo_t + ops_t[t as usize]
+            mo_a = mo_a + ops_a[t as usize]
+            let t1 = (t + 1) % L
+            c0t = c0t + ops_t[t as usize] * ops_t[t as usize]
+            c1t = c1t + ops_t[t as usize] * ops_t[t1 as usize]
+            c0a = c0a + ops_a[t as usize] * ops_a[t as usize]
+            c1a = c1a + ops_a[t as usize] * ops_a[t1 as usize]
+            t = t + 1
+        }
+        let invL = 1.0 / (L as f64)
+        sum_o_t = sum_o_t + mo_t * invL
+        sum_o_a = sum_o_a + mo_a * invL
+        oo0_t[m as usize] = c0t * invL
+        oo1_t[m as usize] = c1t * invL
+        oo0_a[m as usize] = c0a * invL
+        oo1_a[m as usize] = c1a * invL
+        m = m + 1
+    }
+
+    let invn = 1.0 / (n as f64)
+    let mean_ot = sum_o_t * invn
+    let mean_oa = sum_o_a * invn
+
+    var c0_t: f64 = 0.0
+    var c1_t: f64 = 0.0
+    var c0_a: f64 = 0.0
+    var c1_a: f64 = 0.0
+    m = 0
+    while m < n {
+        c0_t = c0_t + oo0_t[m as usize]
+        c1_t = c1_t + oo1_t[m as usize]
+        c0_a = c0_a + oo0_a[m as usize]
+        c1_a = c1_a + oo1_a[m as usize]
+        m = m + 1
+    }
+    c0_t = c0_t * invn - mean_ot * mean_ot
+    c1_t = c1_t * invn - mean_ot * mean_ot
+    c0_a = c0_a * invn - mean_oa * mean_oa
+    c1_a = c1_a * invn - mean_oa * mean_oa
+
+    var tau: i64 = 0
+    while tau < 8 {
+        c_thin[tau as usize] = 0.0
+        c_ape[tau as usize] = 0.0
+        tau = tau + 1
+    }
+    c_thin[0] = c0_t
+    c_thin[1] = c1_t
+    c_ape[0] = c0_a
+    c_ape[1] = c1_a
+
+    var n_ok_t: i64 = 0
+    var n_ok_a: i64 = 0
+    m = 0
+    while m < n {
+        let (mt, ot) = su3_glueball_meff_log(
+            oo0_t[m as usize] - mean_ot * mean_ot,
+            oo1_t[m as usize] - mean_ot * mean_ot
+        )
+        meff_thin_s[m as usize] = mt
+        meff_thin_v[m as usize] = ot
+        if ot == 1 { n_ok_t = n_ok_t + 1 }
+
+        let (ma, oa) = su3_glueball_meff_log(
+            oo0_a[m as usize] - mean_oa * mean_oa,
+            oo1_a[m as usize] - mean_oa * mean_oa
+        )
+        meff_ape_s[m as usize] = ma
+        meff_ape_v[m as usize] = oa
+        if oa == 1 { n_ok_a = n_ok_a + 1 }
+        m = m + 1
+    }
+    (n_ok_t, n_ok_a, mean_ot, mean_oa)
+}
+
+/// Heatbath ensemble: plaquette + Creutz χ(R,R) for R=2 and R=3 (needs L≥6 for R=3).
+/// Returns (n_ok_chi2, n_ok_chi3).
+pub fn su3_measure_ensemble_hb_multi_r(
+    lat: &![f64; 93312],
+    beta: f64,
+    n_meas: i64,
+    n_sep: i64,
+    plaq_s: &![f64; 256],
+    chi2_s: &![f64; 256],
+    chi2_v: &![i64; 256],
+    chi3_s: &![f64; 256],
+    chi3_v: &![i64; 256]
+) -> (i64, i64) with Mut, Div, Panic {
+    var n2: i64 = 0
+    var n3: i64 = 0
+    var m: i64 = 0
+    let n = if n_meas < 256 { n_meas } else { 256 }
+    let L = su3_lat_l()
+    while m < n {
+        var s: i64 = 0
+        while s < n_sep {
+            let _a = su3_heatbath_sweep(lat, beta)
+            s = s + 1
+        }
+        plaq_s[m as usize] = su3_mean_plaquette(lat)
+        let (c2, o2) = su3_creutz_ratio(lat, 2)
+        chi2_s[m as usize] = c2
+        chi2_v[m as usize] = o2
+        if o2 == 1 { n2 = n2 + 1 }
+        if L > 4 {
+            let (c3, o3) = su3_creutz_ratio(lat, 3)
+            chi3_s[m as usize] = c3
+            chi3_v[m as usize] = o3
+            if o3 == 1 { n3 = n3 + 1 }
+        } else {
+            chi3_s[m as usize] = 0.0
+            chi3_v[m as usize] = 0
+        }
+        m = m + 1
+    }
+    (n2, n3)
+}
+
+pub fn su3_measure_ensemble_hb(
+    lat: &![f64; 93312],
+    beta: f64,
+    n_meas: i64,
+    n_sep: i64,
+    plaq_s: &![f64; 256],
+    chi_s: &![f64; 256],
+    chi_v: &![i64; 256]
+) -> i64 with Mut, Div, Panic {
+    var n_ok: i64 = 0
+    var m: i64 = 0
+    let n = if n_meas < 256 { n_meas } else { 256 }
+    while m < n {
+        var s: i64 = 0
+        while s < n_sep {
+            let _a = su3_heatbath_sweep(lat, beta)
+            s = s + 1
+        }
+        plaq_s[m as usize] = su3_mean_plaquette(lat)
+        let (chi, ok) = su3_creutz_ratio(lat, 2)
+        chi_s[m as usize] = chi
+        chi_v[m as usize] = ok
+        if ok == 1 { n_ok = n_ok + 1 }
+        m = m + 1
+    }
+    n_ok
+}
+

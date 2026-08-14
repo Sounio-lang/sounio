@@ -1,0 +1,202 @@
+//@ run-pass
+// examples/particle_physics/su2_mass_gap_probe.sio
+//
+// OPEN PROBLEM ATTACK — Yang–Mills mass gap (lattice computational probe)
+// ========================================================================
+// Clay Millennium Problem (Jaffe–Witten): pure Yang–Mills on R^4 has a mass gap
+// Δ > 0. This program does NOT prove that statement.
+//
+// What it DOES (executable, typed, uncertainty-honest):
+//   1. Pure SU(2) lattice gauge theory on a 4⁴ hypercube (Wilson action)
+//   2. Metropolis Monte Carlo thermalization + measurement
+//   3. Mean plaquette ⟨P⟩ (order-parameter of lattice coupling)
+//   4. Creutz ratio χ(2,2) → lattice string tension σ a² (area law / confinement)
+//   5. Mass-gap scale PROXY m_gap a ≈ 3.7 · √(σ a²)  (SU(2) 0++/√σ literature ratio)
+//   6. All observables as Epistemic — statistical SEM cannot be erased
+//
+// Run:
+//   export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
+//   export SOUNIO_SOUC_ENGINE=lean_single
+//   ./bin/souc run examples/particle_physics/su2_mass_gap_probe.sio
+//
+// Expected qualitative signals at β = 2.3 (scaling-ish region for SU(2)):
+//   ⟨P⟩  ~ 0.55–0.65
+//   χ(2,2) > 0 when area law is visible above noise on this tiny volume
+//   m_gap a > 0 proxy when χ>0
+//
+// Out of scope: continuum limit a→0, V→∞, rigorous spectral theory, SU(3) QCD.
+// Demetrios-line epistemic discipline: prefer FAIL_HONEST over inflated claims.
+
+use particle_physics::lattice_gauge::{
+    lat_l, lat_nd, lat_nsites, lat_nlinks,
+    lattice_cold, thermalize, measure_ensemble,
+    plaquette_ep, string_tension_ep, mass_gap_proxy_ep,
+    mean_plaquette, metropolis_sweep, lg_seed,
+    wilson_loop_rect, creutz_ratio,
+}
+use epistemic::knowledge::{ep_val, ep_std, ep_confidence}
+
+fn fp6(v: f64) -> string with Mut, Div, Panic {
+    var x = v
+    var neg = false
+    if x < 0.0 { neg = true; x = 0.0 - x }
+    let n = (x * 1000000.0 + 0.5) as i64
+    var whole = n / 1000000
+    let frac = n % 1000000
+    var buf: [i8; 64] = [0; 64]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    // whole digits reversed
+    var wrev: [i8; 16] = [0; 16]
+    var wlen: i64 = 0
+    if whole == 0 { wrev[0] = 48 as i8; wlen = 1 }
+    while whole > 0 && wlen < 15 {
+        wrev[wlen as usize] = (48 + whole % 10) as i8
+        wlen = wlen + 1
+        whole = whole / 10
+    }
+    var i = wlen - 1
+    while i >= 0 {
+        buf[pos as usize] = wrev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    buf[pos as usize] = 46 as i8
+    pos = pos + 1
+    var div: i64 = 100000
+    while div >= 1 {
+        buf[pos as usize] = (48 + (frac / div) % 10) as i8
+        pos = pos + 1
+        div = div / 10
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn i64s(v: i64) -> string with Mut, Div, Panic {
+    if v == 0 { return "0" }
+    var n = v
+    var neg = false
+    if n < 0 { neg = true; n = 0 - n }
+    var rev: [i8; 24] = [0; 24]
+    var len: i64 = 0
+    while n > 0 && len < 23 {
+        rev[len as usize] = (48 + n % 10) as i8
+        len = len + 1
+        n = n / 10
+    }
+    var buf: [i8; 32] = [0; 32]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    var i = len - 1
+    while i >= 0 {
+        buf[pos as usize] = rev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("================================================================")
+    println(" SU(2) LATTICE YANG–MILLS — MASS-GAP COMPUTATIONAL PROBE")
+    println(" Sounio particle_physics::lattice_gauge")
+    println("================================================================")
+    println("CLAIM: lattice confinement scale + glueball mass proxy")
+    println("NOT CLAIMED: continuum Clay mass-gap theorem")
+    println("")
+
+    let L = lat_l()
+    let Nd = lat_nd()
+    let ns = lat_nsites()
+    let nl = lat_nlinks()
+    println("Lattice: L=" ++ i64s(L) ++ "  Nd=" ++ i64s(Nd) ++ "  sites=" ++ i64s(ns) ++ "  links=" ++ i64s(nl))
+
+    // Coupling in the rough scaling window for pure SU(2)
+    let beta: f64 = 2.3
+    let eps: f64 = 0.35
+    // Demo budget — raise n_therm / n_meas on cluster for publication-grade stats
+    let n_therm: i64 = 40
+    let n_meas: i64 = 24
+    let n_sep: i64 = 4
+    let seed: i64 = 20260813
+
+    println("β = " ++ fp6(beta) ++ "   Metropolis ε = " ++ fp6(eps))
+    println("thermalization sweeps = " ++ i64s(n_therm))
+    println("measurements = " ++ i64s(n_meas) ++ "  separation = " ++ i64s(n_sep))
+    println("RNG seed = " ++ i64s(seed))
+    println("")
+
+    var lat: [f64; 65536] = [0.0; 65536]
+    lg_seed(seed)
+    lattice_cold(&!lat)
+    println("--- thermalizing (cold start) ---")
+    let p_after = thermalize(&!lat, beta, eps, n_therm)
+    println("plaquette after therm = " ++ fp6(p_after))
+
+    // Single-shot Wilson loops for transparency
+    let w11 = wilson_loop_rect(&lat, 1, 1)
+    let w12 = wilson_loop_rect(&lat, 1, 2)
+    let w22 = wilson_loop_rect(&lat, 2, 2)
+    println("W(1,1) = " ++ fp6(w11) ++ "  W(1,2) = " ++ fp6(w12) ++ "  W(2,2) = " ++ fp6(w22))
+    let (chi_now, chi_ok) = creutz_ratio(&lat, 2)
+    println("χ(2,2) single config = " ++ fp6(chi_now) ++ "  valid=" ++ i64s(chi_ok))
+    println("")
+
+    println("--- measuring ensemble ---")
+    var plaq_s: [f64; 256] = [0.0; 256]
+    var chi_s: [f64; 256] = [0.0; 256]
+    var chi_v: [i64; 256] = [0; 256]
+    let n_ok = measure_ensemble(&!lat, beta, eps, n_meas, n_sep, &!plaq_s, &!chi_s, &!chi_v)
+
+    let pep = plaquette_ep(&plaq_s, n_meas)
+    let sep = string_tension_ep(&chi_s, &chi_v, n_meas)
+    let mep = mass_gap_proxy_ep(&sep)
+
+    println("")
+    println("================================================================")
+    println(" RESULTS (Epistemic = value ± SEM, confidence /1000)")
+    println("================================================================")
+    println("⟨P⟩ plaquette     = " ++ fp6(ep_val(&pep)) ++ " ± " ++ fp6(ep_std(&pep))
+        ++ "   conf=" ++ i64s(ep_confidence(&pep)))
+    println("σ a² ≈ χ(2,2)     = " ++ fp6(ep_val(&sep)) ++ " ± " ++ fp6(ep_std(&sep))
+        ++ "   conf=" ++ i64s(ep_confidence(&sep)))
+    println("valid Creutz pts  = " ++ i64s(n_ok) ++ " / " ++ i64s(n_meas))
+    println("m_gap a proxy     = " ++ fp6(ep_val(&mep)) ++ " ± " ++ fp6(ep_std(&mep))
+        ++ "   conf=" ++ i64s(ep_confidence(&mep)))
+    println("  (proxy uses fixed r(0++/√σ)≈3.7; model error NOT in SEM)")
+    println("")
+
+    // Honest gates — scientific signals, not Clay proof
+    let p_ok = ep_val(&pep) > 0.4 && ep_val(&pep) < 0.95
+    let confining = ep_val(&sep) > 0.0 && n_ok >= 3
+    let gap_signal = ep_val(&mep) > 0.0 && confining
+
+    if p_ok {
+        println("GATE plaquette_in_physical_window: PASS")
+    } else {
+        println("GATE plaquette_in_physical_window: FAIL_HONEST")
+    }
+    if confining {
+        println("GATE area_law_creutz_positive: PASS  (lattice confinement scale visible)")
+    } else {
+        println("GATE area_law_creutz_positive: FAIL_HONEST  (need more stats / larger L / better β)")
+    }
+    if gap_signal {
+        println("GATE mass_gap_proxy_positive: PASS  (scale only — not continuum theorem)")
+    } else {
+        println("GATE mass_gap_proxy_positive: FAIL_HONEST")
+    }
+
+    println("")
+    println("NEXT (open, not done here):")
+    println("  • L=6,8 finite-size scan of χ(R,R) → continuum-extrapolation sketch")
+    println("  • SU(3) Wilson + heatbath (Kennedy–Pendleton)")
+    println("  • 0++ glueball correlator C(t)=⟨□(t)□(0)⟩ → m_G from cosh fit")
+    println("  • Epistemic β-variation band (scale-setting uncertainty)")
+    println("================================================================")
+
+    // Exit 0 even on FAIL_HONEST — the experiment ran; science may be inconclusive
+    0
+}

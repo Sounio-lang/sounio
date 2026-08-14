@@ -1,0 +1,321 @@
+//@ run-pass
+// examples/particle_physics/su2_variational_stability.sio
+//
+// MULTI-PAIR GEVP STABILITY — 3 smear levels, all 2×2 pairs
+// =========================================================
+// Prior single-pair GEVP (n=1 vs n=4) gave m/√σ≈1.71 (undershoot).
+// This run measures three APE depths n∈{1,2,4} and solves GEVP for
+// pairs (0,1), (0,2), (1,2) at τ0=0→τ=1 on the SAME heatbath stream.
+//
+// Stability = pairwise m_GEVP agree within tol; median ratio reported.
+//
+// CLAIM: quantify variational mass stability across smear pairs.
+// NOT CLAIMED: continuum; full 3×3 GEVP; Clay.
+//
+// Run:
+//   export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
+//   export SOUNIO_SOUC_ENGINE=lean_single
+//   ./bin/souc run examples/particle_physics/su2_variational_stability.sio
+
+use particle_physics::lattice_gauge::{
+    lat_l, lat_nsites, lg_set_L, lg_seed, lattice_cold,
+    heatbath_thermalize, measure_ensemble_hb,
+    measure_variational_3smear_hb, gevp_2x2, gevp_mass,
+    glueball_meff_log, plaquette_ep, string_tension_ep,
+}
+use epistemic::knowledge::{ep_val, ep_std}
+
+fn fp6(v: f64) -> string with Mut, Div, Panic {
+    var x = v
+    var neg = false
+    if x < 0.0 { neg = true; x = 0.0 - x }
+    let n = (x * 1000000.0 + 0.5) as i64
+    var whole = n / 1000000
+    let frac = n % 1000000
+    var buf: [i8; 64] = [0; 64]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    var wrev: [i8; 16] = [0; 16]
+    var wlen: i64 = 0
+    if whole == 0 { wrev[0] = 48 as i8; wlen = 1 }
+    while whole > 0 && wlen < 15 {
+        wrev[wlen as usize] = (48 + whole % 10) as i8
+        wlen = wlen + 1
+        whole = whole / 10
+    }
+    var i = wlen - 1
+    while i >= 0 {
+        buf[pos as usize] = wrev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    buf[pos as usize] = 46 as i8
+    pos = pos + 1
+    var div: i64 = 100000
+    while div >= 1 {
+        buf[pos as usize] = (48 + (frac / div) % 10) as i8
+        pos = pos + 1
+        div = div / 10
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn i64s(v: i64) -> string with Mut, Div, Panic {
+    if v == 0 { return "0" }
+    var n = v
+    var neg = false
+    if n < 0 { neg = true; n = 0 - n }
+    var rev: [i8; 24] = [0; 24]
+    var len: i64 = 0
+    while n > 0 && len < 23 {
+        rev[len as usize] = (48 + n % 10) as i8
+        len = len + 1
+        n = n / 10
+    }
+    var buf: [i8; 32] = [0; 32]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    var i = len - 1
+    while i >= 0 {
+        buf[pos as usize] = rev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn sqrt_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    var k: i64 = 0
+    while k < 40 { g = 0.5 * (g + x / g); k = k + 1 }
+    g
+}
+
+fn abs_f(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("================================================================")
+    println(" SU(2) 3-SMEAR MULTI-PAIR GEVP STABILITY")
+    println("================================================================")
+    println("CLAIM: variational mass consistency across smear pairs")
+    println("NOT CLAIMED: continuum; 3x3 GEVP; Clay")
+    println("")
+
+    let _ = lg_set_L(6)
+    let beta: f64 = 2.3
+    let n_therm: i64 = 25
+    let n_meas: i64 = 28
+    let n_sep: i64 = 2
+    let alpha: f64 = 0.4
+    let n0: i64 = 1
+    let n1: i64 = 2
+    let n2: i64 = 4
+    let seed: i64 = 20260813
+    let pair_tol: f64 = 0.30
+
+    println("L=" ++ i64s(lat_l()) ++ " sites=" ++ i64s(lat_nsites())
+        ++ " β=" ++ fp6(beta))
+    println("smears n=" ++ i64s(n0) ++ "," ++ i64s(n1) ++ "," ++ i64s(n2)
+        ++ " α=" ++ fp6(alpha))
+    println("therm=" ++ i64s(n_therm) ++ " meas=" ++ i64s(n_meas)
+        ++ " sep=" ++ i64s(n_sep) ++ " pair_tol=" ++ fp6(pair_tol))
+    println("")
+
+    var lat: [f64; 65536] = [0.0; 65536]
+    var sm0: [f64; 65536] = [0.0; 65536]
+    var sm1: [f64; 65536] = [0.0; 65536]
+    var sm2: [f64; 65536] = [0.0; 65536]
+    var tmp: [f64; 65536] = [0.0; 65536]
+    lg_seed(seed)
+    lattice_cold(&!lat)
+    println("--- heatbath thermalize ---")
+    let p_th = heatbath_thermalize(&!lat, beta, n_therm)
+    println("P=" ++ fp6(p_th))
+
+    println("--- 3-smear correlators ---")
+    var c00: [f64; 8] = [0.0; 8]
+    var c01: [f64; 8] = [0.0; 8]
+    var c02: [f64; 8] = [0.0; 8]
+    var c11: [f64; 8] = [0.0; 8]
+    var c12: [f64; 8] = [0.0; 8]
+    var c22: [f64; 8] = [0.0; 8]
+    let (mo0, mo1, mo2) = measure_variational_3smear_hb(
+        &!lat, &!sm0, &!sm1, &!sm2, &!tmp,
+        beta, n_meas, n_sep, alpha, n0, n1, n2,
+        &!c00, &!c01, &!c02, &!c11, &!c12, &!c22
+    )
+    println("O means: " ++ fp6(mo0) ++ "  " ++ fp6(mo1) ++ "  " ++ fp6(mo2))
+    println("C(0) diag: C00=" ++ fp6(c00[0]) ++ " C11=" ++ fp6(c11[0])
+        ++ " C22=" ++ fp6(c22[0]))
+    println("C(1) diag: C00=" ++ fp6(c00[1]) ++ " C11=" ++ fp6(c11[1])
+        ++ " C22=" ++ fp6(c22[1]))
+
+    // Diagonal m_eff(0)
+    let (md0, od0) = glueball_meff_log(c00[0], c00[1])
+    let (md1, od1) = glueball_meff_log(c11[0], c11[1])
+    let (md2, od2) = glueball_meff_log(c22[0], c22[1])
+    println("diag m_eff(0): n1=" ++ fp6(md0) ++ " ok=" ++ i64s(od0)
+        ++ "  n2=" ++ fp6(md1) ++ " ok=" ++ i64s(od1)
+        ++ "  n4=" ++ fp6(md2) ++ " ok=" ++ i64s(od2))
+
+    // Three pair GEVPs
+    let (l01, ok01) = gevp_2x2(c00[1], c01[1], c11[1], c00[0], c01[0], c11[0])
+    let (l02, ok02) = gevp_2x2(c00[1], c02[1], c22[1], c00[0], c02[0], c22[0])
+    let (l12, ok12) = gevp_2x2(c11[1], c12[1], c22[1], c11[0], c12[0], c22[0])
+    let (m01, om01) = gevp_mass(l01, 1.0)
+    let (m02, om02) = gevp_mass(l02, 1.0)
+    let (m12, om12) = gevp_mass(l12, 1.0)
+
+    println("")
+    println("GEVP pairs (t0=0 -> t=1):")
+    println("  (0,1) n1-n2: lmax=" ++ fp6(l01) ++ " m=" ++ fp6(m01)
+        ++ " ok=" ++ i64s(om01))
+    println("  (0,2) n1-n4: lmax=" ++ fp6(l02) ++ " m=" ++ fp6(m02)
+        ++ " ok=" ++ i64s(om02))
+    println("  (1,2) n2-n4: lmax=" ++ fp6(l12) ++ " m=" ++ fp6(m12)
+        ++ " ok=" ++ i64s(om12))
+
+    // Collect valid masses
+    var masses: [f64; 3] = [0.0; 3]
+    var n_ok: i64 = 0
+    if om01 == 1 { masses[n_ok as usize] = m01; n_ok = n_ok + 1 }
+    if om02 == 1 { masses[n_ok as usize] = m02; n_ok = n_ok + 1 }
+    if om12 == 1 { masses[n_ok as usize] = m12; n_ok = n_ok + 1 }
+
+    var m_mean: f64 = 0.0
+    var m_min: f64 = 0.0
+    var m_max: f64 = 0.0
+    if n_ok > 0 {
+        m_min = masses[0]
+        m_max = masses[0]
+        var i: i64 = 0
+        while i < n_ok {
+            m_mean = m_mean + masses[i as usize]
+            if masses[i as usize] < m_min { m_min = masses[i as usize] }
+            if masses[i as usize] > m_max { m_max = masses[i as usize] }
+            i = i + 1
+        }
+        m_mean = m_mean / (n_ok as f64)
+    }
+    var m_spread: f64 = 0.0
+    if m_mean > 1.0e-12 {
+        m_spread = (m_max - m_min) / m_mean
+    }
+    println("valid pairs=" ++ i64s(n_ok)
+        ++ "  mean_m=" ++ fp6(m_mean)
+        ++ "  min=" ++ fp6(m_min)
+        ++ "  max=" ++ fp6(m_max)
+        ++ "  spread=" ++ fp6(m_spread))
+
+    // pairwise relative agreement
+    var n_agree: i64 = 0
+    var n_pairs: i64 = 0
+    if om01 == 1 && om02 == 1 {
+        n_pairs = n_pairs + 1
+        var d = abs_f(m01 - m02) / (0.5 * (m01 + m02))
+        if d <= pair_tol { n_agree = n_agree + 1 }
+        println("  agree (01,02) rel=" ++ fp6(d))
+    }
+    if om01 == 1 && om12 == 1 {
+        n_pairs = n_pairs + 1
+        var d = abs_f(m01 - m12) / (0.5 * (m01 + m12))
+        if d <= pair_tol { n_agree = n_agree + 1 }
+        println("  agree (01,12) rel=" ++ fp6(d))
+    }
+    if om02 == 1 && om12 == 1 {
+        n_pairs = n_pairs + 1
+        var d = abs_f(m02 - m12) / (0.5 * (m02 + m12))
+        if d <= pair_tol { n_agree = n_agree + 1 }
+        println("  agree (02,12) rel=" ++ fp6(d))
+    }
+    println("pair agreements=" ++ i64s(n_agree) ++ "/" ++ i64s(n_pairs))
+
+    // Scale
+    println("")
+    println("--- Creutz scale ---")
+    var plaq_s: [f64; 256] = [0.0; 256]
+    var chi_s: [f64; 256] = [0.0; 256]
+    var chi_v: [i64; 256] = [0; 256]
+    let n_ctx: i64 = 12
+    let n_ok_c = measure_ensemble_hb(&!lat, beta, n_ctx, n_sep, &!plaq_s, &!chi_s, &!chi_v)
+    let pep = plaquette_ep(&plaq_s, n_ctx)
+    let sep = string_tension_ep(&chi_s, &chi_v, n_ctx)
+    let sig = ep_val(&sep)
+    let srt = sqrt_q(sig)
+    println("P=" ++ fp6(ep_val(&pep)) ++ "+/-" ++ fp6(ep_std(&pep))
+        ++ "  sig_a2=" ++ fp6(sig) ++ "+/-" ++ fp6(ep_std(&sep))
+        ++ "  sqrt_sig=" ++ fp6(srt) ++ "  n_ok=" ++ i64s(n_ok_c))
+
+    var r_mean: f64 = 0.0
+    var r01: f64 = 0.0
+    var r02: f64 = 0.0
+    var r12: f64 = 0.0
+    var rd0: f64 = 0.0
+    if srt > 1.0e-12 {
+        if n_ok > 0 { r_mean = m_mean / srt }
+        if om01 == 1 { r01 = m01 / srt }
+        if om02 == 1 { r02 = m02 / srt }
+        if om12 == 1 { r12 = m12 / srt }
+        if od0 == 1 { rd0 = md0 / srt }
+    }
+
+    println("")
+    println("SCOREBOARD m/sqrt(sig)  lit~3.5-4:")
+    println("  diag light n1:     " ++ fp6(rd0))
+    println("  GEVP pair (0,1):   " ++ fp6(r01))
+    println("  GEVP pair (0,2):   " ++ fp6(r02) ++ "  (prior single-pair path)")
+    println("  GEVP pair (1,2):   " ++ fp6(r12))
+    println("  GEVP mean:         " ++ fp6(r_mean) ++ "  ★")
+    println("  prior 1-pair GEVP: ~1.71")
+    println("  prior contact m0:  ~3.5-3.8")
+
+    println("")
+    println("================================================================")
+    println(" GATES")
+    println("================================================================")
+    let g_n = n_ok >= 2
+    let g_spread = n_ok >= 2 && m_spread <= pair_tol
+    let g_agree = n_pairs > 0 && n_agree * 2 >= n_pairs
+    let g_conf = sig > 0.0
+    let g_phys = n_ok >= 1 && r_mean > 1.0 && r_mean < 10.0
+    let g_lit = n_ok >= 1 && r_mean > 2.5 && r_mean < 5.5
+    let g_below = n_ok >= 1 && od0 == 1 && m_mean < md0
+    // stability vs prior undershoot: mean should not be wildly below 1.0
+    let g_not_collapse = n_ok >= 1 && r_mean > 1.2
+
+    if g_n { println("GATE multi_pair_ok: PASS") }
+    else { println("GATE multi_pair_ok: FAIL_HONEST") }
+    if g_conf { println("GATE creutz_confinement: PASS") }
+    else { println("GATE creutz_confinement: FAIL_HONEST") }
+    if g_phys { println("GATE mean_ratio_phys_window: PASS") }
+    else { println("GATE mean_ratio_phys_window: FAIL_HONEST") }
+    if g_lit { println("GATE mean_ratio_lit_window: PASS  star") }
+    else { println("GATE mean_ratio_lit_window: FAIL_HONEST") }
+    if g_below { println("GATE mean_below_light_contact: PASS") }
+    else { println("GATE mean_below_light_contact: FAIL_HONEST") }
+    if g_spread { println("GATE pair_mass_spread: PASS") }
+    else { println("GATE pair_mass_spread: FAIL_HONEST") }
+    if g_agree { println("GATE pair_agreement: PASS") }
+    else { println("GATE pair_agreement: FAIL_HONEST") }
+    if g_not_collapse { println("GATE no_gevp_collapse: PASS") }
+    else { println("GATE no_gevp_collapse: FAIL_HONEST") }
+
+    println("")
+    if g_spread && g_agree {
+        println("VERDICT: GEVP masses STABLE across pairs  mean m/sqrt(sig)="
+            ++ fp6(r_mean))
+    } else if n_ok >= 1 {
+        println("VERDICT: GEVP unstable or sparse  mean m/sqrt(sig)="
+            ++ fp6(r_mean) ++ "  spread=" ++ fp6(m_spread))
+        println("  Do not promote a single pair to a spectral mass.")
+    } else {
+        println("VERDICT: no valid GEVP pair.")
+    }
+
+    let _r = lg_set_L(4)
+    println("================================================================")
+    0
+}

@@ -1,0 +1,271 @@
+//@ run-pass
+// examples/particle_physics/heatbath_vs_metropolis.sio
+//
+// OPEN PROBLEM ATTACK — exact heatbath vs Metropolis (the dare)
+// ==============================================================
+// Creutz heatbath for SU(2) and Cabibbo–Marinari heatbath for SU(3)
+// replace reject/accept Metropolis with exact link sampling from the
+// Wilson Boltzmann weight. From a cold start we compare ⟨P⟩ after N
+// sweeps and measure Creutz confinement + Epistemic σ.
+//
+// CLAIM: heatbath thermalizes pure gauge theory without Metropolis reject.
+// NOT CLAIMED: Clay continuum mass gap; asymptotic scaling proof.
+//
+// Run:
+//   export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
+//   export SOUNIO_SOUC_ENGINE=lean_single
+//   ./bin/souc run examples/particle_physics/heatbath_vs_metropolis.sio
+
+use particle_physics::lattice_gauge::{
+    lg_set_L, lg_seed, lattice_cold, mean_plaquette,
+    metropolis_sweep, heatbath_sweep, heatbath_thermalize,
+    thermalize, measure_ensemble, plaquette_ep, string_tension_ep,
+    mass_gap_proxy_ep, creutz_ratio,
+}
+use particle_physics::lattice_su3::{
+    su3_seed, su3_lattice_cold, su3_mean_plaquette,
+    su3_metropolis_sweep, su3_heatbath_sweep, su3_heatbath_thermalize,
+    su3_measure_ensemble, su3_plaquette_ep, su3_string_tension_ep,
+    su3_mass_gap_proxy_ep, su3_creutz_ratio,
+}
+use epistemic::knowledge::{ep_val, ep_std, ep_confidence}
+
+fn fp6(v: f64) -> string with Mut, Div, Panic {
+    var x = v
+    var neg = false
+    if x < 0.0 { neg = true; x = 0.0 - x }
+    let n = (x * 1000000.0 + 0.5) as i64
+    var whole = n / 1000000
+    let frac = n % 1000000
+    var buf: [i8; 64] = [0; 64]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    var wrev: [i8; 16] = [0; 16]
+    var wlen: i64 = 0
+    if whole == 0 { wrev[0] = 48 as i8; wlen = 1 }
+    while whole > 0 && wlen < 15 {
+        wrev[wlen as usize] = (48 + whole % 10) as i8
+        wlen = wlen + 1
+        whole = whole / 10
+    }
+    var i = wlen - 1
+    while i >= 0 {
+        buf[pos as usize] = wrev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    buf[pos as usize] = 46 as i8
+    pos = pos + 1
+    var div: i64 = 100000
+    while div >= 1 {
+        buf[pos as usize] = (48 + (frac / div) % 10) as i8
+        pos = pos + 1
+        div = div / 10
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn i64s(v: i64) -> string with Mut, Div, Panic {
+    if v == 0 { return "0" }
+    var n = v
+    var neg = false
+    if n < 0 { neg = true; n = 0 - n }
+    var rev: [i8; 24] = [0; 24]
+    var len: i64 = 0
+    while n > 0 && len < 23 {
+        rev[len as usize] = (48 + n % 10) as i8
+        len = len + 1
+        n = n / 10
+    }
+    var buf: [i8; 32] = [0; 32]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    var i = len - 1
+    while i >= 0 {
+        buf[pos as usize] = rev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn abs_f(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("================================================================")
+    println(" HEATBATH vs METROPOLIS — the dare")
+    println(" Creutz SU(2)  ·  Cabibbo–Marinari SU(3)")
+    println("================================================================")
+    println("CLAIM: exact heatbath link sampling (no Metropolis reject)")
+    println("NOT CLAIMED: Clay continuum Yang–Mills mass gap")
+    println("")
+
+    // ---------- SU(2) ----------
+    let _ = lg_set_L(4)
+    let beta2: f64 = 2.3
+    let eps_m: f64 = 0.35
+    let n_eq: i64 = 30
+    let seed: i64 = 20260813
+
+    println("--- SU(2) β=" ++ fp6(beta2) ++ "  L=4  cold start  N_sweep=" ++ i64s(n_eq) ++ " ---")
+
+    var lat_m: [f64; 65536] = [0.0; 65536]
+    var lat_h: [f64; 65536] = [0.0; 65536]
+
+    lg_seed(seed)
+    lattice_cold(&!lat_m)
+    lg_seed(seed)
+    lattice_cold(&!lat_h)
+
+    println("sweep | ⟨P⟩ Metropolis | ⟨P⟩ Heatbath")
+    var sw: i64 = 0
+    while sw < n_eq {
+        let _a = metropolis_sweep(&!lat_m, beta2, eps_m)
+        let _b = heatbath_sweep(&!lat_h, beta2)
+        sw = sw + 1
+        // print every 5 sweeps + last
+        if sw % 5 == 0 || sw == n_eq {
+            let pm = mean_plaquette(&lat_m)
+            let ph = mean_plaquette(&lat_h)
+            println("  " ++ i64s(sw) ++ "  |  " ++ fp6(pm) ++ "  |  " ++ fp6(ph))
+        }
+    }
+
+    let p_m = mean_plaquette(&lat_m)
+    let p_h = mean_plaquette(&lat_h)
+    let (chi_m, ok_m) = creutz_ratio(&lat_m, 2)
+    let (chi_h, ok_h) = creutz_ratio(&lat_h, 2)
+    println("final SU(2): P_M=" ++ fp6(p_m) ++ " P_H=" ++ fp6(p_h)
+        ++ "  χ_M=" ++ fp6(chi_m) ++ "(ok=" ++ i64s(ok_m) ++ ")"
+        ++ "  χ_H=" ++ fp6(chi_h) ++ "(ok=" ++ i64s(ok_h) ++ ")")
+
+    // short measure on heatbath ensemble
+    var plaq_s: [f64; 256] = [0.0; 256]
+    var chi_s: [f64; 256] = [0.0; 256]
+    var chi_v: [i64; 256] = [0; 256]
+    // continue heatbath for measures
+    var n_meas: i64 = 16
+    var n_sep: i64 = 2
+    var mi: i64 = 0
+    while mi < n_meas {
+        var s: i64 = 0
+        while s < n_sep {
+            let _x = heatbath_sweep(&!lat_h, beta2)
+            s = s + 1
+        }
+        plaq_s[mi as usize] = mean_plaquette(&lat_h)
+        let (c, o) = creutz_ratio(&lat_h, 2)
+        chi_s[mi as usize] = c
+        chi_v[mi as usize] = o
+        mi = mi + 1
+    }
+    let pep2 = plaquette_ep(&plaq_s, n_meas)
+    let sep2 = string_tension_ep(&chi_s, &chi_v, n_meas)
+    let mep2 = mass_gap_proxy_ep(&sep2)
+    println("SU(2) heatbath ensemble: ⟨P⟩=" ++ fp6(ep_val(&pep2)) ++ "±" ++ fp6(ep_std(&pep2))
+        ++ "  σa²=" ++ fp6(ep_val(&sep2)) ++ "±" ++ fp6(ep_std(&sep2))
+        ++ "  m_proxy=" ++ fp6(ep_val(&mep2)))
+
+    // ---------- SU(3) ----------
+    let beta3: f64 = 5.7
+    let n_eq3: i64 = 18
+    println("")
+    println("--- SU(3) β=" ++ fp6(beta3) ++ "  L=4  cold start  N_sweep=" ++ i64s(n_eq3) ++ " ---")
+
+    var s3m: [f64; 93312] = [0.0; 93312]
+    var s3h: [f64; 93312] = [0.0; 93312]
+    su3_seed(seed)
+    su3_lattice_cold(&!s3m)
+    su3_seed(seed)
+    su3_lattice_cold(&!s3h)
+
+    println("sweep | ⟨P⟩ Metropolis | ⟨P⟩ CM-Heatbath")
+    sw = 0
+    while sw < n_eq3 {
+        let _a = su3_metropolis_sweep(&!s3m, beta3, 0.25)
+        let _b = su3_heatbath_sweep(&!s3h, beta3)
+        sw = sw + 1
+        if sw % 3 == 0 || sw == n_eq3 {
+            let pm = su3_mean_plaquette(&s3m)
+            let ph = su3_mean_plaquette(&s3h)
+            println("  " ++ i64s(sw) ++ "  |  " ++ fp6(pm) ++ "  |  " ++ fp6(ph))
+        }
+    }
+
+    let p3m = su3_mean_plaquette(&s3m)
+    let p3h = su3_mean_plaquette(&s3h)
+    let (c3m, o3m) = su3_creutz_ratio(&s3m, 2)
+    let (c3h, o3h) = su3_creutz_ratio(&s3h, 2)
+    println("final SU(3): P_M=" ++ fp6(p3m) ++ " P_H=" ++ fp6(p3h)
+        ++ "  χ_M=" ++ fp6(c3m) ++ "(ok=" ++ i64s(o3m) ++ ")"
+        ++ "  χ_H=" ++ fp6(c3h) ++ "(ok=" ++ i64s(o3h) ++ ")")
+
+    var p3s: [f64; 256] = [0.0; 256]
+    var c3s: [f64; 256] = [0.0; 256]
+    var c3v: [i64; 256] = [0; 256]
+    let n_meas3: i64 = 10
+    mi = 0
+    while mi < n_meas3 {
+        var s: i64 = 0
+        while s < n_sep {
+            let _x = su3_heatbath_sweep(&!s3h, beta3)
+            s = s + 1
+        }
+        p3s[mi as usize] = su3_mean_plaquette(&s3h)
+        let (c, o) = su3_creutz_ratio(&s3h, 2)
+        c3s[mi as usize] = c
+        c3v[mi as usize] = o
+        mi = mi + 1
+    }
+    let pep3 = su3_plaquette_ep(&p3s, n_meas3)
+    let sep3 = su3_string_tension_ep(&c3s, &c3v, n_meas3)
+    let mep3 = su3_mass_gap_proxy_ep(&sep3)
+    println("SU(3) heatbath ensemble: ⟨P⟩=" ++ fp6(ep_val(&pep3)) ++ "±" ++ fp6(ep_std(&pep3))
+        ++ "  σa²=" ++ fp6(ep_val(&sep3)) ++ "±" ++ fp6(ep_std(&sep3))
+        ++ "  m_proxy=" ++ fp6(ep_val(&mep3)))
+
+    println("")
+    println("================================================================")
+    println(" GATES")
+    println("================================================================")
+    // Heatbath should leave physical plaquette window
+    let su2_p_ok = ep_val(&pep2) > 0.45 && ep_val(&pep2) < 0.95
+    let su3_p_ok = ep_val(&pep3) > 0.40 && ep_val(&pep3) < 0.95
+    let su2_conf = ep_val(&sep2) > 0.0
+    let su3_conf = ep_val(&sep3) > 0.0
+    // Both algorithms should move off cold P=1
+    let su2_left_cold = p_m < 0.95 && p_h < 0.95
+    let su3_left_cold = p3m < 0.95 && p3h < 0.95
+    // Heatbath and Metropolis should agree roughly (same ensemble family)
+    let su2_agree = abs_f(p_h - p_m) < 0.25
+    let su3_agree = abs_f(p3h - p3m) < 0.30
+    // Heatbath always "accepts" — structural claim: final P in window after pure HB therm
+    let hb_only_ok = p_h > 0.45 && p_h < 0.95 && p3h > 0.40 && p3h < 0.95
+
+    if su2_left_cold { println("GATE su2_both_left_cold: PASS") }
+    else { println("GATE su2_both_left_cold: FAIL_HONEST") }
+    if su3_left_cold { println("GATE su3_both_left_cold: PASS") }
+    else { println("GATE su3_both_left_cold: FAIL_HONEST") }
+    if su2_p_ok { println("GATE su2_heatbath_plaquette: PASS") }
+    else { println("GATE su2_heatbath_plaquette: FAIL_HONEST") }
+    if su3_p_ok { println("GATE su3_heatbath_plaquette: PASS") }
+    else { println("GATE su3_heatbath_plaquette: FAIL_HONEST") }
+    if su2_conf { println("GATE su2_heatbath_confinement: PASS") }
+    else { println("GATE su2_heatbath_confinement: FAIL_HONEST") }
+    if su3_conf { println("GATE su3_heatbath_confinement: PASS") }
+    else { println("GATE su3_heatbath_confinement: FAIL_HONEST") }
+    if su2_agree { println("GATE su2_metro_hb_agree: PASS") }
+    else { println("GATE su2_metro_hb_agree: FAIL_HONEST") }
+    if su3_agree { println("GATE su3_metro_hb_agree: PASS") }
+    else { println("GATE su3_metro_hb_agree: FAIL_HONEST") }
+    if hb_only_ok { println("GATE heatbath_solo_physical: PASS") }
+    else { println("GATE heatbath_solo_physical: FAIL_HONEST") }
+
+    println("")
+    println("DARE STATUS: Creutz + Cabibbo–Marinari heatbath are executable in Sounio.")
+    println("OPEN NEXT: replace Metropolis pipelines with heatbath default · L=6 SU(3) HB")
+    println("================================================================")
+    0
+}

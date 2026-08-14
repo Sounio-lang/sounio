@@ -1,0 +1,434 @@
+//! examples/cayley_dickson_g2_derivation_basis.sio
+//!
+//! The one front from the audit of docs/papers/main/cayley_dickson_hierarchy_paper_2026-08-13.md
+//! that neither this investigation's earlier fixes nor the independent
+//! parallel Python-side correction pass (scripts/research/CORRECTIONS_SUMMARY.md,
+//! "Claude, verified by Kimi Code") has resolved: §9.5 there states plainly
+//! "G₂ decomposition of psychiatric signal | Still open: requires
+//! Leibniz-verified derivation formula + LEMON re-analysis." This file
+//! supplies the missing mathematical prerequisite — the Leibniz-verified
+//! formula already exists (examples/cayley_dickson_hook21_g2_verification.sio,
+//! D_{a,b}(x) = [[a,b],x] − 3(a,b,x), correct-formula Leibniz residual
+//! ~1e-9 vs the audited formula's 63/63 failures) — what is still missing
+//! is the actual **true 14-dimensional basis**, since the audited pipeline
+//! selected "top 14 by SVD singular-value magnitude" from the 21
+//! candidates, which is gauge-dependent and was found to keep 7
+//! non-derivation directions while dropping 7 genuine ones.
+//!
+//! This file builds all C(7,2)=21 candidate D_{a,b} operators with the
+//! CORRECT formula, represents each as a flattened 8x8=64 matrix (its
+//! action on each octonion basis vector), and extracts a genuine basis by
+//! incremental Gram-Schmidt: process the 21 candidates in a fixed order,
+//! keep a candidate as a new basis vector iff it is NOT already in the
+//! span of the accepted ones (residual norm above a numerical threshold),
+//! otherwise it is linearly dependent and dropped. This is basis
+//! selection by actual linear independence, not by singular-value
+//! magnitude — it cannot silently drop a genuine direction the way the
+//! audited SVD cutoff did.
+//!
+//! Verified claims this file makes, each backed by a printed number:
+//!   1. All 21 D_{a,b} satisfy the Leibniz law (already shown in the
+//!      companion hook21/G2 file; re-confirmed here for self-containment).
+//!   2. The incremental basis-extraction accepts EXACTLY 14 of the 21
+//!      candidates — an independent numerical confirmation of dim(g2)=14
+//!      using the CORRECT formula (the audited pipeline never verified
+//!      this; it just took "top 14" on faith).
+//!   3. Every one of the 21 original candidates (not just the 14 kept)
+//!      lies in the span of the accepted 14 to near-machine precision —
+//!      confirming the 21 candidates truly span (not exceed) a single
+//!      14-dimensional space, i.e. they are honestly redundant, not
+//!      independently informative directions being thrown away.
+//!
+//! What this file does NOT do: it does not re-run the LEMON EEG
+//! correlation analysis (that needs the real preprocessed cohort data,
+//! /workspace/data/lemon/preprocessed/*.npy per an earlier subagent
+//! finding — Python-side, not accessible from here) or replace
+//! scripts/research/g2_lemon_analysis.py's O-SSM feature extraction
+//! pipeline. It hands the next step a verified, correct 14-vector basis
+//! (printed below as which of the 21 (a,b) pairs were kept) instead of
+//! the flawed SVD selection — the necessary prerequisite for a correct
+//! re-analysis, not the re-analysis itself.
+//!
+//! RESULT (verified, exit 0): all 21 candidates satisfy the Leibniz law
+//! (max residual ~0); incremental Gram-Schmidt keeps EXACTLY 14 of them
+//! (D_{1,2} D_{1,3} D_{1,4} D_{1,5} D_{1,6} D_{1,7} D_{2,3} D_{2,4} D_{2,5}
+//! D_{2,6} D_{2,7} D_{4,5} D_{4,6} D_{4,7}) — an independent numerical
+//! confirmation of dim(g2)=14 from the CORRECT formula, not asserted on
+//! faith; the other 7 are exactly linearly dependent (residual 0.0), and
+//! every one of the 21 originals re-verifies as exactly in the span of
+//! the 14 kept (max residual 0.00000000) — the 21 candidates honestly
+//! span, not exceed, a 14-dimensional space.
+//!
+//! COMPILER BUG FOUND ALONG THE WAY (not fixed here, per this repo's
+//! forensic-dispatch protocol for self-hosted/ — flagged for that
+//! process instead): a basis-size counter declared as a module-level
+//! mutable global (`var BASIS_COUNT: i64 = 0`, and separately the
+//! array-wrapped form `var BASIS_COUNT: [i64;1] = [0;1]` — the workaround
+//! this repo's stdlib/algebra/sedenion.sio itself uses for a similar
+//! issue) both read back garbage (4297846, then 4297840 — consistently
+//! WRONG, not simply uninitialized-looking) at runtime under Madaros,
+//! regardless of declaration order relative to two large [f64;1344]
+//! globals declared in the same file. The only reliable fix found was to
+//! stop using a persistent global counter entirely and thread it through
+//! plain function parameters/return values instead (see try_add_to_basis
+//! below) — worth a real forensic dispatch, since the documented
+//! "array-wrapping" workaround for scalar globals did NOT hold here.
+//!
+//! Run: SOUNIO_STDLIB_PATH=$(pwd)/stdlib ./bin/souc run \
+//!        examples/cayley_dickson_g2_derivation_basis.sio
+
+// =============================================================================
+// PRINT HELPERS
+// =============================================================================
+
+fn print_i64(x: i64) with IO, Mut, Div, Panic {
+    if x < 0 { print("-"); print_i64(0 - x) }
+    else if x < 10 { print_digit(x) }
+    else { print_i64(x / 10); print_digit(x - (x / 10) * 10) }
+}
+fn print_digit(d: i64) with IO {
+    if d == 0 { print("0") } else if d == 1 { print("1") }
+    else if d == 2 { print("2") } else if d == 3 { print("3") }
+    else if d == 4 { print("4") } else if d == 5 { print("5") }
+    else if d == 6 { print("6") } else if d == 7 { print("7") }
+    else if d == 8 { print("8") } else { print("9") }
+}
+fn print_f64(x: f64, decimals: i64) with IO, Mut, Div, Panic {
+    if x < 0.0 { print("-"); print_f64(0.0 - x, decimals) }
+    else {
+        let int_part = x as i64
+        print_i64(int_part)
+        print(".")
+        var frac = x - (int_part as f64)
+        var d: i64 = 0
+        while d < decimals {
+            frac = frac * 10.0
+            let digit = frac as i64
+            print_digit(digit)
+            frac = frac - (digit as f64)
+            d = d + 1
+        }
+    }
+}
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x; var i: i64 = 0
+    while i < 30 { g = (g + x / g) / 2.0; i = i + 1 }
+    g
+}
+
+// =============================================================================
+// OCTONION PRODUCT (copied from stdlib/algebra/octonion.sio's XOR-consistent
+// Cayley-Dickson table, same as used throughout this investigation)
+// =============================================================================
+
+fn oct_mul(a: &[f64; 8], b: &[f64; 8], out: &![f64; 8]) with Mut, Div, NonAssoc {
+    var r0 = a[0]*b[0] - a[1]*b[1] - a[2]*b[2] - a[3]*b[3] - a[4]*b[4] - a[5]*b[5] - a[6]*b[6] - a[7]*b[7]
+    out[0] = r0
+    var r1 = a[0]*b[1] + a[1]*b[0] + a[2]*b[3] - a[3]*b[2] + a[4]*b[5] - a[5]*b[4] - a[6]*b[7] + a[7]*b[6]
+    out[1] = r1
+    var r2 = a[0]*b[2] + a[2]*b[0] - a[1]*b[3] + a[3]*b[1] + a[4]*b[6] - a[6]*b[4] + a[5]*b[7] - a[7]*b[5]
+    out[2] = r2
+    var r3 = a[0]*b[3] + a[3]*b[0] + a[1]*b[2] - a[2]*b[1] + a[4]*b[7] - a[7]*b[4] - a[5]*b[6] + a[6]*b[5]
+    out[3] = r3
+    var r4 = a[0]*b[4] + a[4]*b[0] - a[1]*b[5] + a[5]*b[1] - a[2]*b[6] + a[6]*b[2] - a[3]*b[7] + a[7]*b[3]
+    out[4] = r4
+    var r5 = a[0]*b[5] + a[5]*b[0] + a[1]*b[4] - a[4]*b[1] - a[2]*b[7] + a[7]*b[2] + a[3]*b[6] - a[6]*b[3]
+    out[5] = r5
+    var r6 = a[0]*b[6] + a[6]*b[0] + a[1]*b[7] - a[7]*b[1] + a[2]*b[4] - a[4]*b[2] - a[3]*b[5] + a[5]*b[3]
+    out[6] = r6
+    var r7 = a[0]*b[7] + a[7]*b[0] - a[1]*b[6] + a[6]*b[1] + a[2]*b[5] - a[5]*b[2] + a[3]*b[4] - a[4]*b[3]
+    out[7] = r7
+}
+
+fn oct_sub(a: &[f64; 8], b: &[f64; 8], out: &![f64; 8]) with Mut {
+    var i: i64 = 0
+    while i < 8 { out[i] = a[i] - b[i]; i = i + 1 }
+}
+
+fn oct_basis(idx: i64) -> [f64; 8] with Mut {
+    var o: [f64; 8] = [0.0; 8]
+    o[idx as usize] = 1.0
+    o
+}
+
+fn oct_associator(a: &[f64; 8], b: &[f64; 8], c: &[f64; 8], out: &![f64; 8]) with Mut, Div, NonAssoc {
+    var ab: [f64; 8] = [0.0; 8]
+    oct_mul(a, b, &!ab)
+    var ab_c: [f64; 8] = [0.0; 8]
+    oct_mul(&ab, c, &!ab_c)
+    var bc: [f64; 8] = [0.0; 8]
+    oct_mul(b, c, &!bc)
+    var a_bc: [f64; 8] = [0.0; 8]
+    oct_mul(a, &bc, &!a_bc)
+    oct_sub(&ab_c, &a_bc, out)
+}
+
+fn oct_comm(a: &[f64; 8], b: &[f64; 8], out: &![f64; 8]) with Mut, Div, NonAssoc {
+    var ab: [f64; 8] = [0.0; 8]
+    var ba: [f64; 8] = [0.0; 8]
+    oct_mul(a, b, &!ab)
+    oct_mul(b, a, &!ba)
+    oct_sub(&ab, &ba, out)
+}
+
+// Correct G2 derivation formula: D_{a,b}(x) = [[a,b],x] - 3(a,b,x).
+// Verified (companion file) to satisfy the Leibniz law to ~1e-9, unlike
+// the audited pipeline's bare commutator-of-left-multiplications formula.
+fn g2_deriv(a: &[f64; 8], b: &[f64; 8], x: &[f64; 8], out: &![f64; 8]) with Mut, Div, NonAssoc {
+    var comm_ab: [f64; 8] = [0.0; 8]
+    oct_comm(a, b, &!comm_ab)
+    var dcomm: [f64; 8] = [0.0; 8]
+    oct_comm(&comm_ab, x, &!dcomm)
+    var assoc: [f64; 8] = [0.0; 8]
+    oct_associator(a, b, x, &!assoc)
+    var i: i64 = 0
+    while i < 8 { out[i] = dcomm[i] - 3.0 * assoc[i]; i = i + 1 }
+}
+
+fn leibniz_residual(a: &[f64; 8], b: &[f64; 8], x: &[f64; 8], y: &[f64; 8]) -> f64 with Mut, Div, Panic, NonAssoc {
+    var xy: [f64; 8] = [0.0; 8]
+    oct_mul(x, y, &!xy)
+    var dxy: [f64; 8] = [0.0; 8]
+    g2_deriv(a, b, &xy, &!dxy)
+    var dx: [f64; 8] = [0.0; 8]
+    g2_deriv(a, b, x, &!dx)
+    var dy: [f64; 8] = [0.0; 8]
+    g2_deriv(a, b, y, &!dy)
+    var dx_y: [f64; 8] = [0.0; 8]
+    oct_mul(&dx, y, &!dx_y)
+    var x_dy: [f64; 8] = [0.0; 8]
+    oct_mul(x, &dy, &!x_dy)
+    var rhs: [f64; 8] = [0.0; 8]
+    var i: i64 = 0
+    while i < 8 { rhs[i] = dx_y[i] + x_dy[i]; i = i + 1 }
+    var resid: [f64; 8] = [0.0; 8]
+    oct_sub(&dxy, &rhs, &!resid)
+    var s = 0.0
+    i = 0
+    while i < 8 { s = s + resid[i]*resid[i]; i = i + 1 }
+    sqrt_f64(s)
+}
+
+// =============================================================================
+// 21 CANDIDATE DERIVATIONS AS FLATTENED 64-VECTORS
+// CAND[c][k*8+j] = (D_{a,b}(e_k))[j] — the (k,j) matrix entry of D_{a,b}
+// acting on the octonion basis, for candidate c = the c-th (a,b) pair.
+// =============================================================================
+
+// Flat 1D arrays (21*64=1344), not nested [[f64;64];21] — nested-array
+// double-indexed writes were the segfault source on the first attempt
+// (Madaros/JIT fragility with aggregate-element writes, matching the
+// "boxed-element ref hazard" class documented in this repo's compiler
+// notes). Flat storage with computed offset c*64+k is the safe pattern
+// used throughout this whole investigation's other artifacts.
+// NOTE: a "basis count" global (bare scalar AND array-of-1-wrapped
+// scalar) read garbage (4297846 / 4297840, not 0) at runtime regardless
+// of declaration order -- worse than the documented "JIT scalar-global
+// offset bug" this repo's sedenion.sio works around with array-wrapping.
+// Fix: no global counter at all -- threaded as a plain function
+// parameter/return value instead (see try_add_to_basis / main below).
+var CAND: [f64; 1344] = [0.0; 1344]
+var CAND_A: [i64; 21] = [0; 21]
+var CAND_B: [i64; 21] = [0; 21]
+
+fn build_candidates() with Mut, Div, NonAssoc {
+    var c: i64 = 0
+    var a: i64 = 1
+    while a <= 7 {
+        var b: i64 = a + 1
+        while b <= 7 {
+            CAND_A[c as usize] = a
+            CAND_B[c as usize] = b
+            let ea = oct_basis(a)
+            let eb = oct_basis(b)
+            var k: i64 = 0
+            while k < 8 {
+                let ek = oct_basis(k)
+                var dk: [f64; 8] = [0.0; 8]
+                g2_deriv(&ea, &eb, &ek, &!dk)
+                var j: i64 = 0
+                while j < 8 {
+                    CAND[(c * 64 + k * 8 + j) as usize] = dk[j as usize]
+                    j = j + 1
+                }
+                k = k + 1
+            }
+            c = c + 1
+            b = b + 1
+        }
+        a = a + 1
+    }
+}
+
+// =============================================================================
+// INCREMENTAL BASIS EXTRACTION (Gram-Schmidt over 64-dim vectors)
+// =============================================================================
+
+var BASIS: [f64; 1344] = [0.0; 1344]  // up to 21 slots x 64, expect 14 filled
+var BASIS_A: [i64; 21] = [0; 21]
+var BASIS_B: [i64; 21] = [0; 21]
+
+// All vectors live in flat CAND_RES / BASIS scratch, addressed by a base
+// offset (candidate index * 64 or basis-slot index * 64). No nested-array
+// or whole-[f64;64]-slice assignment anywhere below.
+
+var RESIDUAL: [f64; 64] = [0.0; 64]
+
+fn dot_residual_basis(off_basis: i64) -> f64 with Mut {
+    var s = 0.0
+    var i: i64 = 0
+    while i < 64 { s = s + RESIDUAL[i as usize] * BASIS[(off_basis + i) as usize]; i = i + 1 }
+    s
+}
+
+fn dot_basis_basis(off_basis: i64) -> f64 with Mut {
+    var s = 0.0
+    var i: i64 = 0
+    while i < 64 { s = s + BASIS[(off_basis + i) as usize] * BASIS[(off_basis + i) as usize]; i = i + 1 }
+    s
+}
+
+fn norm_residual() -> f64 with Mut, Div, Panic {
+    var s = 0.0
+    var i: i64 = 0
+    while i < 64 { s = s + RESIDUAL[i as usize] * RESIDUAL[i as usize]; i = i + 1 }
+    sqrt_f64(s)
+}
+
+const INDEP_THRESHOLD: f64 = 0.000001
+
+// Load CAND[cand_idx] into RESIDUAL, orthogonalize against the current
+// BASIS, and — if what remains is non-negligible — append it as a new
+// basis vector (element-by-element copy, never a whole-array assign).
+// `count` (current basis size) is a plain function parameter/return value
+// here, NOT a global -- a bare-scalar (or array-of-1-wrapped-scalar)
+// mutable global was found to read garbage at runtime (4297846/4297840
+// instead of 0) regardless of declaration order or array-wrapping; the
+// only reliable fix found was to stop using a persistent global for it
+// entirely and thread it through the call chain like any other value.
+fn try_add_to_basis(cand_idx: i64, a: i64, b: i64, count: i64) -> (f64, i64) with Mut, Div, Panic {
+    let coff = cand_idx * 64
+    var i: i64 = 0
+    while i < 64 { RESIDUAL[i as usize] = CAND[(coff + i) as usize]; i = i + 1 }
+    var bi: i64 = 0
+    while bi < count {
+        let boff = bi * 64
+        let uu = dot_basis_basis(boff)
+        let ru = dot_residual_basis(boff)
+        let coeff = ru / uu
+        var k: i64 = 0
+        while k < 64 { RESIDUAL[k as usize] = RESIDUAL[k as usize] - coeff * BASIS[(boff + k) as usize]; k = k + 1 }
+        bi = bi + 1
+    }
+    let rn = norm_residual()
+    var new_count = count
+    if rn > INDEP_THRESHOLD {
+        let noff = count * 64
+        var k2: i64 = 0
+        while k2 < 64 { BASIS[(noff + k2) as usize] = RESIDUAL[k2 as usize]; k2 = k2 + 1 }
+        BASIS_A[count as usize] = a
+        BASIS_B[count as usize] = b
+        new_count = count + 1
+    }
+    (rn, new_count)
+}
+
+// Residual norm of CAND[cand_idx] after projecting out the FULL final
+// basis — verifies every one of the 21 originals (not just the 14 kept)
+// lies in the span of the accepted basis.
+fn residual_after_basis(cand_idx: i64, count: i64) -> f64 with Mut, Div, Panic {
+    let coff = cand_idx * 64
+    var i: i64 = 0
+    while i < 64 { RESIDUAL[i as usize] = CAND[(coff + i) as usize]; i = i + 1 }
+    var bi: i64 = 0
+    while bi < count {
+        let boff = bi * 64
+        let uu = dot_basis_basis(boff)
+        let ru = dot_residual_basis(boff)
+        let coeff = ru / uu
+        var k: i64 = 0
+        while k < 64 { RESIDUAL[k as usize] = RESIDUAL[k as usize] - coeff * BASIS[(boff + k) as usize]; k = k + 1 }
+        bi = bi + 1
+    }
+    norm_residual()
+}
+
+// =============================================================================
+// MAIN
+// =============================================================================
+
+fn main() -> i32 with IO, Mut, Div, Panic, NonAssoc {
+    print("=== G2 derivation basis: correct Leibniz-verified formula, true rank (not SVD top-14) ===\n")
+
+    print("\n[1] Leibniz-law check on all 21 candidates (3 random (x,y) pairs each):\n")
+    var max_resid = 0.0
+    var a: i64 = 1
+    while a <= 7 {
+        var b: i64 = a + 1
+        while b <= 7 {
+            let ea = oct_basis(a)
+            let eb = oct_basis(b)
+            var trial: i64 = 0
+            while trial < 3 {
+                // deterministic pseudo-random probe vectors (no RNG needed:
+                // just sweep a few fixed basis combinations)
+                var x: [f64; 8] = [0.0; 8]
+                var y: [f64; 8] = [0.0; 8]
+                x[(trial as usize)] = 1.0; x[((trial + 3) as usize) % 8] = 0.5
+                y[((trial + 1) as usize) % 8] = 1.0; y[((trial + 5) as usize) % 8] = 0.3
+                let r = leibniz_residual(&ea, &eb, &x, &y)
+                if r > max_resid { max_resid = r }
+                trial = trial + 1
+            }
+            b = b + 1
+        }
+        a = a + 1
+    }
+    print("  max Leibniz residual over 63 (pair,trial) checks = "); print_f64(max_resid, 10)
+    print("  (should be ~0 -- confirms all 21 candidates are genuine derivations)\n")
+
+    build_candidates()
+
+    print("\n[2] Incremental basis extraction (Gram-Schmidt, in (a,b) lexicographic order):\n")
+    var count: i64 = 0
+    var c: i64 = 0
+    while c < 21 {
+        let (rn, new_count) = try_add_to_basis(c, CAND_A[c as usize], CAND_B[c as usize], count)
+        let kept = new_count > count
+        count = new_count
+        print("  ("); print_i64(CAND_A[c as usize]); print(","); print_i64(CAND_B[c as usize])
+        print("): residual_norm="); print_f64(rn, 6)
+        if kept { print("  KEPT (new basis vector)\n") } else { print("  dependent (dropped)\n") }
+        c = c + 1
+    }
+
+    print("\n[3] Basis size (should be 14, dim(g2), via honest rank -- not SVD magnitude cutoff): ")
+    print_i64(count); print("\n")
+
+    print("\n[4] Verify ALL 21 original candidates lie in the span of the "); print_i64(count)
+    print("-vector basis:\n")
+    var max_span_resid = 0.0
+    c = 0
+    while c < 21 {
+        let r = residual_after_basis(c, count)
+        if r > max_span_resid { max_span_resid = r }
+        c = c + 1
+    }
+    print("  max residual over all 21 candidates = "); print_f64(max_span_resid, 8)
+    print("  (should be ~0 -- confirms the 21 D_{a,b} span EXACTLY this ")
+    print_i64(count); print("-dim space, nothing more)\n")
+
+    print("\n[5] The verified basis -- 14 (a,b) pairs, ready to replace the audited\n")
+    print("    pipeline's flawed SVD-top-14 selection in scripts/research/g2_features.py:\n")
+    var bi: i64 = 0
+    while bi < count {
+        print("  G"); print_i64(bi); print(" <- D_{"); print_i64(BASIS_A[bi as usize])
+        print(","); print_i64(BASIS_B[bi as usize]); print("}\n")
+        bi = bi + 1
+    }
+
+    print("\n=== DONE ===\n")
+    0
+}

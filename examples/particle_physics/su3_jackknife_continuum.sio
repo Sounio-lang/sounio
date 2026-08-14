@@ -1,0 +1,326 @@
+//@ run-pass
+// examples/particle_physics/su3_jackknife_continuum.sio
+//
+// SU(3) MULTI-β JACKKNIFE CONTINUUM SKETCH (L=6)
+// ==============================================
+// APE n=2 primary + Creutz χ(2,2) on pure SU(3) L=6 HB.
+// β ∈ {5.5, 5.7, 5.9, 6.1}. Honest SEM floors + inv-var weighted mean.
+//
+// CLAIM: multi-β m/√σ sketch for SU(3) with Epistemic SEM.
+// NOT CLAIMED: continuum limit; QCD; Clay.
+//
+// Run:
+//   export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
+//   export SOUNIO_SOUC_ENGINE=lean_single
+//   ./bin/souc run examples/particle_physics/su3_jackknife_continuum.sio
+
+use particle_physics::lattice_su3::{
+    su3_set_L, su3_lat_l, su3_nsites, su3_seed, su3_lattice_cold,
+    su3_heatbath_thermalize, su3_measure_glueball_thin_and_ape_hb,
+    su3_measure_ensemble_hb, su3_glueball_meff_log,
+    su3_string_tension_ep, su3_plaquette_ep,
+}
+use particle_physics::lattice_gauge::{
+    mass_over_sqrt_sigma_ep, jackknife_mean, inv_var_weighted_mean, sem_floor,
+}
+use epistemic::knowledge::{ep_val, ep_std}
+
+fn fp6(v: f64) -> string with Mut, Div, Panic {
+    var x = v
+    var neg = false
+    if x < 0.0 { neg = true; x = 0.0 - x }
+    let n = (x * 1000000.0 + 0.5) as i64
+    var whole = n / 1000000
+    let frac = n % 1000000
+    var buf: [i8; 64] = [0; 64]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    var wrev: [i8; 16] = [0; 16]
+    var wlen: i64 = 0
+    if whole == 0 { wrev[0] = 48 as i8; wlen = 1 }
+    while whole > 0 && wlen < 15 {
+        wrev[wlen as usize] = (48 + whole % 10) as i8
+        wlen = wlen + 1
+        whole = whole / 10
+    }
+    var i = wlen - 1
+    while i >= 0 {
+        buf[pos as usize] = wrev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    buf[pos as usize] = 46 as i8
+    pos = pos + 1
+    var div: i64 = 100000
+    while div >= 1 {
+        buf[pos as usize] = (48 + (frac / div) % 10) as i8
+        pos = pos + 1
+        div = div / 10
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn i64s(v: i64) -> string with Mut, Div, Panic {
+    if v == 0 { return "0" }
+    var n = v
+    var neg = false
+    if n < 0 { neg = true; n = 0 - n }
+    var rev: [i8; 24] = [0; 24]
+    var len: i64 = 0
+    while n > 0 && len < 23 {
+        rev[len as usize] = (48 + n % 10) as i8
+        len = len + 1
+        n = n / 10
+    }
+    var buf: [i8; 32] = [0; 32]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    var i = len - 1
+    while i >= 0 {
+        buf[pos as usize] = rev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn sqrt_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    var k: i64 = 0
+    while k < 40 { g = 0.5 * (g + x / g); k = k + 1 }
+    g
+}
+
+/// Returns (m, msem, sig, ssem, r, rsem, ok, tag:1=ape 2=thin)
+fn run_beta(
+    lat: &![f64; 93312],
+    sm: &![f64; 93312],
+    tmp: &![f64; 93312],
+    beta: f64,
+    n_therm: i64,
+    n_meas: i64,
+    n_sep: i64,
+    alpha: f64,
+    n_smear: i64,
+    seed: i64
+) -> (f64, f64, f64, f64, f64, f64, i64, i64) with Mut, Div, Panic {
+    su3_seed(seed)
+    su3_lattice_cold(lat)
+    let _p = su3_heatbath_thermalize(lat, beta, n_therm)
+    var c_t: [f64; 8] = [0.0; 8]
+    var c_a: [f64; 8] = [0.0; 8]
+    var mt_s: [f64; 256] = [0.0; 256]
+    var mt_v: [i64; 256] = [0; 256]
+    var ma_s: [f64; 256] = [0.0; 256]
+    var ma_v: [i64; 256] = [0; 256]
+    let (nt, na, _ot, _oa) = su3_measure_glueball_thin_and_ape_hb(
+        lat, sm, tmp, beta, n_meas, n_sep, alpha, n_smear,
+        &!c_t, &!c_a, &!mt_s, &!mt_v, &!ma_s, &!ma_v
+    )
+    let (m_te, ote) = su3_glueball_meff_log(c_t[0], c_t[1])
+    let (m_ae, oae) = su3_glueball_meff_log(c_a[0], c_a[1])
+    let (_jk_t, jks_t, _njt) = jackknife_mean(&mt_s, &mt_v, n_meas, 1)
+    let (_jk_a, jks_a, _nja) = jackknife_mean(&ma_s, &ma_v, n_meas, 1)
+    let _nt = nt
+    let _na = na
+
+    var m: f64 = 0.0
+    var msem: f64 = 0.0
+    var tag: i64 = 0
+    if oae == 1 && m_ae > 0.1 {
+        m = m_ae
+        msem = sem_floor(jks_a, m_ae, 0.10)
+        tag = 1
+    } else if ote == 1 && m_te > 0.1 {
+        m = m_te
+        msem = sem_floor(jks_t, m_te, 0.10)
+        tag = 2
+    }
+
+    var plaq_s: [f64; 256] = [0.0; 256]
+    var chi_s: [f64; 256] = [0.0; 256]
+    var chi_v: [i64; 256] = [0; 256]
+    let n_ctx: i64 = 18
+    let _nc = su3_measure_ensemble_hb(lat, beta, n_ctx, n_sep, &!plaq_s, &!chi_s, &!chi_v)
+    let sep = su3_string_tension_ep(&chi_s, &chi_v, n_ctx)
+    let (jk_s, jks_s, _ns) = jackknife_mean(&chi_s, &chi_v, n_ctx, 1)
+    var sig = ep_val(&sep)
+    var ssem = ep_std(&sep)
+    if jk_s > 0.0 {
+        sig = jk_s
+        if jks_s > 0.0 { ssem = jks_s }
+    }
+    ssem = sem_floor(ssem, sig, 0.05)
+
+    var r: f64 = 0.0
+    var rsem: f64 = 0.0
+    var ok: i64 = 0
+    if tag > 0 && sig > 0.0 {
+        let rep = mass_over_sqrt_sigma_ep(m, msem, sig, ssem)
+        r = ep_val(&rep)
+        rsem = ep_std(&rep)
+        if r > 0.5 { ok = 1 }
+    }
+    (m, msem, sig, ssem, r, rsem, ok, tag)
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("================================================================")
+    println(" SU(3) JACKKNIFE MULTI-β CONTINUUM SKETCH  L=6")
+    println("================================================================")
+    println("CLAIM: multi-β m/√σ with honest SEM floors + inv-var mean")
+    println("NOT CLAIMED: continuum limit; QCD; Clay")
+    println("")
+
+    let okL = su3_set_L(6)
+    if okL == 0 {
+        println("FAIL su3_set_L(6)")
+        return 1
+    }
+    println("L=" ++ i64s(su3_lat_l()) ++ " sites=" ++ i64s(su3_nsites()))
+    var betas: [f64; 4] = [5.5, 5.7, 5.9, 6.1]
+    let n_beta: i64 = 4
+    let n_therm: i64 = 32
+    let n_meas: i64 = 28
+    let n_sep: i64 = 2
+    let alpha: f64 = 0.4
+    let n_smear: i64 = 2
+    let seed0: i64 = 20260813
+
+    var lat: [f64; 93312] = [0.0; 93312]
+    var sm: [f64; 93312] = [0.0; 93312]
+    var tmp: [f64; 93312] = [0.0; 93312]
+
+    var r_b: [f64; 8] = [0.0; 8]
+    var rs_b: [f64; 8] = [0.0; 8]
+    var m_b: [f64; 4] = [0.0; 4]
+    var s_b: [f64; 4] = [0.0; 4]
+    var tag_b: [i64; 4] = [0; 4]
+    var ok_b: [i64; 4] = [0; 4]
+    var n_ok: i64 = 0
+    var n_ape: i64 = 0
+
+    var ib: i64 = 0
+    while ib < n_beta {
+        let beta = betas[ib as usize]
+        let seed = seed0 + ib * 97
+        println("")
+        println("  β=" ++ fp6(beta))
+        let (m, msem, sig, ssem, r, rsem, ok, tag) = run_beta(
+            &!lat, &!sm, &!tmp, beta, n_therm, n_meas, n_sep, alpha, n_smear, seed
+        )
+        m_b[ib as usize] = m
+        s_b[ib as usize] = sig
+        r_b[ib as usize] = r
+        rs_b[ib as usize] = rsem
+        tag_b[ib as usize] = tag
+        ok_b[ib as usize] = ok
+        if ok == 1 { n_ok = n_ok + 1 }
+        if tag == 1 { n_ape = n_ape + 1 }
+        var tagn = "FAIL"
+        if tag == 1 { tagn = "APE" }
+        if tag == 2 { tagn = "thin" }
+        println("    [" ++ tagn ++ "] m=" ++ fp6(m) ++ "±" ++ fp6(msem)
+            ++ "  σa²=" ++ fp6(sig) ++ "±" ++ fp6(ssem))
+        println("    m/√σ=" ++ fp6(r) ++ "±" ++ fp6(rsem) ++ "  ok=" ++ i64s(ok))
+        ib = ib + 1
+    }
+
+    let (r_w, r_wsem, chi2, nv) = inv_var_weighted_mean(&r_b, &rs_b, n_beta)
+    var ndof: i64 = 0
+    if nv > 1 { ndof = nv - 1 }
+    var chi2pd: f64 = 0.0
+    if ndof > 0 { chi2pd = chi2 / (ndof as f64) }
+
+    var mn: f64 = 1.0e30
+    var mx: f64 = 0.0
+    ib = 0
+    while ib < n_beta {
+        if ok_b[ib as usize] == 1 {
+            let r = r_b[ib as usize]
+            if r < mn { mn = r }
+            if r > mx { mx = r }
+        }
+        ib = ib + 1
+    }
+    var spr: f64 = 0.0
+    if r_w > 1.0e-12 && mx > mn { spr = (mx - mn) / r_w }
+
+    var n_fall: i64 = 0
+    var n_pair: i64 = 0
+    ib = 0
+    while ib < n_beta - 1 {
+        if ok_b[ib as usize] == 1 && ok_b[(ib + 1) as usize] == 1 {
+            n_pair = n_pair + 1
+            if s_b[(ib + 1) as usize] < s_b[ib as usize] { n_fall = n_fall + 1 }
+        }
+        ib = ib + 1
+    }
+
+    println("")
+    println("================================================================")
+    println(" SCOREBOARD")
+    println("================================================================")
+    println("n_ok=" ++ i64s(n_ok) ++ "/" ++ i64s(n_beta) ++ "  APE_pts=" ++ i64s(n_ape))
+    println("inv-var ⟨m/√σ⟩=" ++ fp6(r_w) ++ "±" ++ fp6(r_wsem)
+        ++ "  spread=" ++ fp6(spr) ++ "  range=[" ++ fp6(mn) ++ "," ++ fp6(mx) ++ "]")
+    println("χ²/dof=" ++ fp6(chi2pd) ++ "  ndof=" ++ i64s(ndof))
+    println("√σ falls: " ++ i64s(n_fall) ++ "/" ++ i64s(n_pair))
+    println("lit SU(3) 0++ m/√σ ~ 3.5")
+
+    println("")
+    println("================================================================")
+    println(" GATES")
+    println("================================================================")
+    let g_L6 = su3_lat_l() == 6
+    let g_multi = n_ok >= 3
+    let g_ape = n_ape >= 2
+    let g_phys = r_w > 1.0 && r_w < 12.0
+    let g_lit = r_w >= 2.0 && r_w <= 6.0
+    let g_sem = r_wsem > 0.0 && r_wsem < 0.5 * r_w
+    let g_spread = n_ok >= 3 && spr > 0.0 && spr <= 0.60
+    let g_spread_tight = n_ok >= 3 && spr > 0.0 && spr <= 0.40
+    let g_chi2 = ndof >= 2 && chi2pd > 0.0 && chi2pd <= 4.0
+    let g_chi2_loose = ndof >= 2 && chi2pd > 0.0 && chi2pd <= 8.0
+    let g_scale = n_pair >= 2 && n_fall * 2 >= n_pair
+
+    if g_L6 { println("GATE L6_geometry: PASS") }
+    else { println("GATE L6_geometry: FAIL_HONEST") }
+    if g_multi { println("GATE multi_beta_ok: PASS  n=" ++ i64s(n_ok)) }
+    else { println("GATE multi_beta_ok: FAIL_HONEST") }
+    if g_ape { println("GATE ape_primary_pts: PASS  n=" ++ i64s(n_ape)) }
+    else { println("GATE ape_primary_pts: FAIL_HONEST") }
+    if g_phys { println("GATE weighted_mean_phys: PASS  " ++ fp6(r_w)) }
+    else { println("GATE weighted_mean_phys: FAIL_HONEST") }
+    if g_lit { println("GATE lit_window: PASS  " ++ fp6(r_w)) }
+    else { println("GATE lit_window: FAIL_HONEST  " ++ fp6(r_w)) }
+    if g_sem { println("GATE weighted_sem: PASS  ±" ++ fp6(r_wsem)) }
+    else { println("GATE weighted_sem: FAIL_HONEST") }
+    if g_spread_tight { println("GATE beta_spread_tight: PASS  " ++ fp6(spr)) }
+    else if g_spread { println("GATE beta_spread_tight: FAIL_HONEST  mild=" ++ fp6(spr)) }
+    else { println("GATE beta_spread_tight: FAIL_HONEST  " ++ fp6(spr)) }
+    if g_spread { println("GATE beta_spread_mild: PASS") }
+    else { println("GATE beta_spread_mild: FAIL_HONEST") }
+    if g_chi2 { println("GATE multi_beta_chi2: PASS  " ++ fp6(chi2pd)) }
+    else if g_chi2_loose { println("GATE multi_beta_chi2: FAIL_HONEST  loose=" ++ fp6(chi2pd)) }
+    else { println("GATE multi_beta_chi2: FAIL_HONEST  " ++ fp6(chi2pd)) }
+    if g_scale { println("GATE sigma_falls: PASS") }
+    else { println("GATE sigma_falls: FAIL_HONEST") }
+
+    println("")
+    println("VERDICT:")
+    println("  SU(3) inv-var ⟨m/√σ⟩=" ++ fp6(r_w) ++ "±" ++ fp6(r_wsem)
+        ++ "  χ²/dof=" ++ fp6(chi2pd) ++ "  spread=" ++ fp6(spr))
+    if g_multi && g_phys {
+        println("  SU(3) multi-β continuum sketch live. No continuum claim.")
+    } else {
+        println("  Partial — see FAIL_HONEST.")
+    }
+
+    let _r = su3_set_L(4)
+    println("================================================================")
+    0
+}

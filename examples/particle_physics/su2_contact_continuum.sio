@@ -1,0 +1,341 @@
+//@ run-pass
+// examples/particle_physics/su2_contact_continuum.sio
+//
+// CONTACT-ONLY MULTI-β CONTINUUM SKETCH (same operator)
+// =====================================================
+// Fixed operator: thin-plaquette contact m_eff(0) = ln C(0)/C(1) from
+// 3-smear diagonal C00 (lightest smear n=1). Scale: Creutz χ(2,2) + r0_σ.
+// Same operator at every β — no GEVP source-switching contamination.
+//
+// β ∈ {2.15, 2.25, 2.35, 2.45, 2.55} on L=6 HB.
+// Gates: scaling trends (√σ↓ with β), multi-β spread of m/√χ and m·r0_σ.
+//
+// CLAIM: same-operator multi-β continuum *sketch* with Epistemic σ.
+// NOT CLAIMED: continuum limit; Clay; variational ground state.
+//
+// Run:
+//   export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
+//   export SOUNIO_SOUC_ENGINE=lean_single
+//   ./bin/souc run examples/particle_physics/su2_contact_continuum.sio
+
+use particle_physics::lattice_gauge::{
+    lat_l, lat_nsites, lg_set_L, lg_seed, lattice_cold,
+    heatbath_thermalize, measure_ensemble_hb_multi_r,
+    measure_variational_3smear_hb, glueball_meff_log,
+    sommer_r0_from_sigma, string_tension_ep,
+}
+use epistemic::knowledge::{ep_val, ep_std}
+
+fn fp6(v: f64) -> string with Mut, Div, Panic {
+    var x = v
+    var neg = false
+    if x < 0.0 { neg = true; x = 0.0 - x }
+    let n = (x * 1000000.0 + 0.5) as i64
+    var whole = n / 1000000
+    let frac = n % 1000000
+    var buf: [i8; 64] = [0; 64]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    var wrev: [i8; 16] = [0; 16]
+    var wlen: i64 = 0
+    if whole == 0 { wrev[0] = 48 as i8; wlen = 1 }
+    while whole > 0 && wlen < 15 {
+        wrev[wlen as usize] = (48 + whole % 10) as i8
+        wlen = wlen + 1
+        whole = whole / 10
+    }
+    var i = wlen - 1
+    while i >= 0 {
+        buf[pos as usize] = wrev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    buf[pos as usize] = 46 as i8
+    pos = pos + 1
+    var div: i64 = 100000
+    while div >= 1 {
+        buf[pos as usize] = (48 + (frac / div) % 10) as i8
+        pos = pos + 1
+        div = div / 10
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn i64s(v: i64) -> string with Mut, Div, Panic {
+    if v == 0 { return "0" }
+    var n = v
+    var neg = false
+    if n < 0 { neg = true; n = 0 - n }
+    var rev: [i8; 24] = [0; 24]
+    var len: i64 = 0
+    while n > 0 && len < 23 {
+        rev[len as usize] = (48 + n % 10) as i8
+        len = len + 1
+        n = n / 10
+    }
+    var buf: [i8; 32] = [0; 32]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    var i = len - 1
+    while i >= 0 {
+        buf[pos as usize] = rev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn sqrt_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    var k: i64 = 0
+    while k < 40 { g = 0.5 * (g + x / g); k = k + 1 }
+    g
+}
+
+fn abs_f(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+/// Contact m_eff from light smear C00 + Creutz scale. Returns (m, srt2, r0s, m_r0, m_chi, ok)
+fn run_contact(
+    lat: &![f64; 65536],
+    sm0: &![f64; 65536],
+    sm1: &![f64; 65536],
+    sm2: &![f64; 65536],
+    tmp: &![f64; 65536],
+    beta: f64,
+    n_therm: i64,
+    n_meas: i64,
+    n_sep: i64,
+    alpha: f64,
+    seed: i64,
+    c_sommer: f64
+) -> (f64, f64, f64, f64, f64, i64) with Mut, Div, Panic {
+    lg_seed(seed)
+    lattice_cold(lat)
+    let _p = heatbath_thermalize(lat, beta, n_therm)
+    var c00: [f64; 8] = [0.0; 8]
+    var c01: [f64; 8] = [0.0; 8]
+    var c02: [f64; 8] = [0.0; 8]
+    var c11: [f64; 8] = [0.0; 8]
+    var c12: [f64; 8] = [0.0; 8]
+    var c22: [f64; 8] = [0.0; 8]
+    // n0=1 light smear for contact; others only needed for API
+    let (_a, _b, _c) = measure_variational_3smear_hb(
+        lat, sm0, sm1, sm2, tmp,
+        beta, n_meas, n_sep, alpha, 1, 2, 4,
+        &!c00, &!c01, &!c02, &!c11, &!c12, &!c22
+    )
+    let (m, okm) = glueball_meff_log(c00[0], c00[1])
+    var plaq_s: [f64; 256] = [0.0; 256]
+    var chi2_s: [f64; 256] = [0.0; 256]
+    var chi2_v: [i64; 256] = [0; 256]
+    var chi3_s: [f64; 256] = [0.0; 256]
+    var chi3_v: [i64; 256] = [0; 256]
+    let n_ctx: i64 = 20
+    let (_n2, _n3) = measure_ensemble_hb_multi_r(
+        lat, beta, n_ctx, n_sep,
+        &!plaq_s, &!chi2_s, &!chi2_v, &!chi3_s, &!chi3_v
+    )
+    let sep2 = string_tension_ep(&chi2_s, &chi2_v, n_ctx)
+    let sig2 = ep_val(&sep2)
+    let srt2 = sqrt_q(sig2)
+    let (r0s, okr) = sommer_r0_from_sigma(sig2, c_sommer)
+    var m_r0: f64 = 0.0
+    var m_chi: f64 = 0.0
+    var ok: i64 = 0
+    if okm == 1 && m > 0.15 && srt2 > 1.0e-12 {
+        m_chi = m / srt2
+        if okr == 1 && r0s > 0.0 { m_r0 = m * r0s }
+        ok = 1
+    }
+    (m, srt2, r0s, m_r0, m_chi, ok)
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("================================================================")
+    println(" SU(2) CONTACT-ONLY MULTI-β CONTINUUM SKETCH")
+    println("================================================================")
+    println("CLAIM: same-operator contact m/√χ and m·r0_σ vs β")
+    println("NOT CLAIMED: continuum limit; Clay; GEVP ground state")
+    println("")
+
+    let _ = lg_set_L(6)
+    println("L=" ++ i64s(lat_l()) ++ " sites=" ++ i64s(lat_nsites())
+        ++ " operator=contact C00 (n_smear=1)")
+    var betas: [f64; 5] = [2.15, 2.25, 2.35, 2.45, 2.55]
+    let n_beta: i64 = 5
+    let n_therm: i64 = 40
+    let n_meas: i64 = 40
+    let n_sep: i64 = 2
+    let alpha: f64 = 0.4
+    let c_sommer: f64 = 1.65
+    let seed0: i64 = 20260813
+
+    var lat: [f64; 65536] = [0.0; 65536]
+    var sm0: [f64; 65536] = [0.0; 65536]
+    var sm1: [f64; 65536] = [0.0; 65536]
+    var sm2: [f64; 65536] = [0.0; 65536]
+    var tmp: [f64; 65536] = [0.0; 65536]
+
+    var m_b: [f64; 5] = [0.0; 5]
+    var srt_b: [f64; 5] = [0.0; 5]
+    var r0_b: [f64; 5] = [0.0; 5]
+    var mr0_b: [f64; 5] = [0.0; 5]
+    var mchi_b: [f64; 5] = [0.0; 5]
+    var ok_b: [i64; 5] = [0; 5]
+    var n_ok: i64 = 0
+
+    var ib: i64 = 0
+    while ib < n_beta {
+        let beta = betas[ib as usize]
+        let seed = seed0 + ib * 17
+        println("")
+        println("  β=" ++ fp6(beta))
+        let (m, srt, r0s, mr0, mchi, ok) = run_contact(
+            &!lat, &!sm0, &!sm1, &!sm2, &!tmp,
+            beta, n_therm, n_meas, n_sep, alpha, seed, c_sommer
+        )
+        m_b[ib as usize] = m
+        srt_b[ib as usize] = srt
+        r0_b[ib as usize] = r0s
+        mr0_b[ib as usize] = mr0
+        mchi_b[ib as usize] = mchi
+        ok_b[ib as usize] = ok
+        if ok == 1 { n_ok = n_ok + 1 }
+        println("    m_ct=" ++ fp6(m) ++ "  √χ2=" ++ fp6(srt)
+            ++ "  r0_s=" ++ fp6(r0s) ++ "  ok=" ++ i64s(ok))
+        println("    m/√χ=" ++ fp6(mchi) ++ "  m·r0_s=" ++ fp6(mr0))
+        ib = ib + 1
+    }
+
+    // summary
+    var sum_c: f64 = 0.0
+    var sum_r: f64 = 0.0
+    var mn_c: f64 = 1.0e30
+    var mx_c: f64 = 0.0
+    var mn_r: f64 = 1.0e30
+    var mx_r: f64 = 0.0
+    var cnt: i64 = 0
+    ib = 0
+    while ib < n_beta {
+        if ok_b[ib as usize] == 1 {
+            let c = mchi_b[ib as usize]
+            let r = mr0_b[ib as usize]
+            sum_c = sum_c + c
+            sum_r = sum_r + r
+            cnt = cnt + 1
+            if c < mn_c { mn_c = c }
+            if c > mx_c { mx_c = c }
+            if r < mn_r { mn_r = r }
+            if r > mx_r { mx_r = r }
+        }
+        ib = ib + 1
+    }
+    var mean_c: f64 = 0.0
+    var mean_r: f64 = 0.0
+    if cnt > 0 {
+        mean_c = sum_c / (cnt as f64)
+        mean_r = sum_r / (cnt as f64)
+    }
+    var spr_c: f64 = 0.0
+    var spr_r: f64 = 0.0
+    if mean_c > 1.0e-12 && mx_c > mn_c { spr_c = (mx_c - mn_c) / mean_c }
+    if mean_r > 1.0e-12 && mx_r > mn_r { spr_r = (mx_r - mn_r) / mean_r }
+
+    // scaling: √σ should fall with β (more continuum-like)
+    var n_fall: i64 = 0
+    var n_pair: i64 = 0
+    ib = 0
+    while ib < n_beta - 1 {
+        if ok_b[ib as usize] == 1 && ok_b[(ib + 1) as usize] == 1 {
+            n_pair = n_pair + 1
+            if srt_b[(ib + 1) as usize] < srt_b[ib as usize] {
+                n_fall = n_fall + 1
+            }
+        }
+        ib = ib + 1
+    }
+
+    // rough linear slope dmchi/dβ from endpoints of ok points
+    var first_i: i64 = 0 - 1
+    var last_i: i64 = 0 - 1
+    ib = 0
+    while ib < n_beta {
+        if ok_b[ib as usize] == 1 {
+            if first_i < 0 { first_i = ib }
+            last_i = ib
+        }
+        ib = ib + 1
+    }
+    var slope: f64 = 0.0
+    if first_i >= 0 && last_i > first_i {
+        let db = betas[last_i as usize] - betas[first_i as usize]
+        if abs_f(db) > 1.0e-12 {
+            slope = (mchi_b[last_i as usize] - mchi_b[first_i as usize]) / db
+        }
+    }
+
+    println("")
+    println("================================================================")
+    println(" SCOREBOARD")
+    println("================================================================")
+    println("n_ok=" ++ i64s(n_ok) ++ "/" ++ i64s(n_beta)
+        ++ "  ⟨m/√χ⟩=" ++ fp6(mean_c) ++ " spread=" ++ fp6(spr_c)
+        ++ " range=[" ++ fp6(mn_c) ++ "," ++ fp6(mx_c) ++ "]")
+    println("  ⟨m·r0_σ⟩=" ++ fp6(mean_r) ++ " spread=" ++ fp6(spr_r)
+        ++ " range=[" ++ fp6(mn_r) ++ "," ++ fp6(mx_r) ++ "]")
+    println("  √σ falls with β: " ++ i64s(n_fall) ++ "/" ++ i64s(n_pair) ++ " pairs")
+    println("  endpoint slope dmchi/dβ=" ++ fp6(slope))
+    println("  lit m/√σ ~ 3.5–4")
+
+    println("")
+    println("================================================================")
+    println(" GATES")
+    println("================================================================")
+    let g_multi = n_ok >= 4
+    let g_phys = mean_c > 1.5 && mean_c < 10.0
+    let g_r0 = mean_r > 1.5 && mean_r < 12.0
+    // same-operator continuum sketch: spread ≤ 40%
+    let g_spread = cnt >= 4 && spr_c > 0.0 && spr_c <= 0.40
+    let g_spread_mild = cnt >= 4 && spr_c > 0.0 && spr_c <= 0.55
+    let g_scale = n_pair >= 2 && n_fall * 2 >= n_pair
+    let g_lit = mean_c >= 2.5 && mean_c <= 5.5
+    // slope not exploding (|dm/dβ| < 15 per unit β)
+    var aslope = slope
+    if aslope < 0.0 { aslope = 0.0 - aslope }
+    let g_slope = aslope < 15.0
+
+    if g_multi { println("GATE multi_beta_ok: PASS  n=" ++ i64s(n_ok)) }
+    else { println("GATE multi_beta_ok: FAIL_HONEST") }
+    if g_phys { println("GATE mean_m_chi_phys: PASS  " ++ fp6(mean_c)) }
+    else { println("GATE mean_m_chi_phys: FAIL_HONEST") }
+    if g_r0 { println("GATE mean_m_r0_phys: PASS  " ++ fp6(mean_r)) }
+    else { println("GATE mean_m_r0_phys: FAIL_HONEST") }
+    if g_spread { println("GATE contact_beta_spread_tight: PASS  " ++ fp6(spr_c)) }
+    else if g_spread_mild { println("GATE contact_beta_spread_tight: FAIL_HONEST  mild=" ++ fp6(spr_c)) }
+    else { println("GATE contact_beta_spread_tight: FAIL_HONEST  " ++ fp6(spr_c)) }
+    if g_spread_mild { println("GATE contact_beta_spread_mild: PASS") }
+    else { println("GATE contact_beta_spread_mild: FAIL_HONEST") }
+    if g_scale { println("GATE sigma_falls_with_beta: PASS  " ++ i64s(n_fall) ++ "/" ++ i64s(n_pair)) }
+    else { println("GATE sigma_falls_with_beta: FAIL_HONEST") }
+    if g_lit { println("GATE lit_window: PASS  " ++ fp6(mean_c)) }
+    else { println("GATE lit_window: FAIL_HONEST  " ++ fp6(mean_c)) }
+    if g_slope { println("GATE endpoint_slope_bounded: PASS  " ++ fp6(slope)) }
+    else { println("GATE endpoint_slope_bounded: FAIL_HONEST") }
+
+    println("")
+    println("VERDICT:")
+    println("  same-op contact ⟨m/√χ⟩=" ++ fp6(mean_c) ++ " spread=" ++ fp6(spr_c))
+    println("  ⟨m·r0_σ⟩=" ++ fp6(mean_r) ++ "  √σ↓ " ++ i64s(n_fall) ++ "/" ++ i64s(n_pair))
+    if g_multi && g_scale && g_phys {
+        println("  Contact continuum sketch live. No continuum claim.")
+    } else {
+        println("  Partial — see FAIL_HONEST.")
+    }
+
+    let _r = lg_set_L(4)
+    println("================================================================")
+    0
+}

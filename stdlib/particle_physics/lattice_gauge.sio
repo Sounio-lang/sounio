@@ -1,0 +1,2929 @@
+// stdlib/particle_physics/lattice_gauge.sio — Pure SU(2) lattice gauge theory
+//
+// Computational probe for the Yang–Mills mass-gap / confinement scale.
+//
+// CLAIM BOUNDARY (read before citing):
+//   This module does NOT prove the Clay Millennium Yang–Mills mass-gap problem.
+//   It implements Wilson's pure SU(2) lattice gauge theory (4D hypercubic),
+//   Metropolis Monte Carlo, Wilson loops, Creutz ratios, and an Epistemic
+//   string-tension estimator. Continuum limit, infinite volume, and a rigorous
+//   spectral gap are OUT OF SCOPE. What is in scope: a typed, reproducible
+//   lattice attack that cannot silently drop statistical uncertainty.
+//
+// Algebra: SU(2) ≅ unit quaternions  U = (w,x,y,z), ½ Re Tr U = w.
+// Action:  S = β Σ_□ (1 − ½ Re Tr U_□)     [Wilson, Phys. Rev. D10 (1974) 2445]
+//
+// Layout: runtime L ∈ {4,6,8}, Nd=4. Flat buffer max L=8 → 8⁴·4·4 = 65536 f64.
+//   site s = x + L·(y + L·(z + L·t)),  x,y,z,t ∈ {0..L−1}
+//   link base = (s·Nd + μ)·4, components [w,x,y,z]
+//   Default L=4 (backward compatible). Call lg_set_L(6|8) for finite-size step.
+//
+// References:
+//   - K. Wilson, Phys. Rev. D 10 (1974) 2445
+//   - M. Creutz, Phys. Rev. D 21 (1980) 2308  (Creutz ratios)
+//   - Bali, Phys. Rep. 343 (2001) 1           (string tension reviews)
+//   - Teper, arXiv:hep-th/9812187            (glueball / √σ ratios)
+
+module particle_physics::lattice_gauge
+
+use epistemic::knowledge::{Epistemic, ep_measured, ep_val, ep_std, ep_certain}
+
+// ============================================================================
+// GEOMETRY — runtime L ∈ {4,6,8}, Nd=4
+// ============================================================================
+
+// Active spatial/temporal extent. Default 4; set via lg_set_L before cold start.
+var LG_L: i64 = 4
+
+/// Set lattice extent. Allowed: 4, 6, or 8. Returns 1 on success, 0 if rejected.
+pub fn lg_set_L(L: i64) -> i64 with Mut {
+    if L == 4 || L == 6 || L == 8 {
+        LG_L = L
+        return 1
+    }
+    0
+}
+
+pub fn lat_l() -> i64 { LG_L }
+pub fn lat_nd() -> i64 { 4 }
+
+/// Nsites = L^4
+pub fn lat_nsites() -> i64 with Mut, Div {
+    let L = LG_L
+    L * L * L * L
+}
+
+/// Nlinks = Nd · Nsites
+pub fn lat_nlinks() -> i64 with Mut, Div {
+    4 * lat_nsites()
+}
+
+/// Used length of flat buffer (≤ 65536).
+pub fn lat_flat_len() -> i64 with Mut, Div {
+    4 * lat_nlinks()
+}
+
+/// Max flat capacity (L=8 → 8⁴·4·4 = 65536).
+pub fn lat_flat_cap() -> i64 { 65536 }
+
+// ============================================================================
+// MATH HELPERS (pure Sounio — no extern, lean_single / Madaros safe)
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    if x > 1.0 { g = x * 0.5 }
+    var i: i64 = 0
+    while i < 50 {
+        g = 0.5 * (g + x / g)
+        i = i + 1
+    }
+    g
+}
+
+fn ln_f64(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    var m = x
+    var e: i64 = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k: i64 = 1
+    while k < 30 {
+        term = term * t2
+        sum = sum + term / ((2 * k + 1) as f64)
+        k = k + 1
+    }
+    let ln2 = 0.6931471805599453
+    (e as f64) * ln2 + 2.0 * sum
+}
+
+fn exp_f64(x: f64) -> f64 with Mut, Div, Panic {
+    // Clamp extreme values for Metropolis stability
+    if x > 20.0 { return 485165195.0 }
+    if x < 0.0 - 20.0 { return 2.0611536e-9 }
+    var y = x
+    var inv = false
+    if y < 0.0 { y = 0.0 - y; inv = true }
+    // Taylor on [0, ln2] after reducing by powers of 2
+    let ln2 = 0.6931471805599453
+    var n: i64 = 0
+    while y > ln2 {
+        y = y - ln2
+        n = n + 1
+    }
+    var sum = 1.0
+    var term = 1.0
+    var k: i64 = 1
+    while k < 20 {
+        term = term * y / (k as f64)
+        sum = sum + term
+        k = k + 1
+    }
+    var p2 = 1.0
+    var i: i64 = 0
+    while i < n { p2 = p2 * 2.0; i = i + 1 }
+    let r = sum * p2
+    if inv { 1.0 / r } else { r }
+}
+
+fn cos_f64(x: f64) -> f64 with Mut {
+    let pi = 3.141592653589793
+    let two_pi = 2.0 * pi
+    var y = x
+    while y > pi { y = y - two_pi }
+    while y < 0.0 - pi { y = y + two_pi }
+    let x2 = y * y
+    let x4 = x2 * x2
+    let x6 = x4 * x2
+    let x8 = x4 * x4
+    1.0 - x2 / 2.0 + x4 / 24.0 - x6 / 720.0 + x8 / 40320.0
+}
+
+fn sin_f64(x: f64) -> f64 with Mut {
+    let pi = 3.141592653589793
+    let two_pi = 2.0 * pi
+    var y = x
+    while y > pi { y = y - two_pi }
+    while y < 0.0 - pi { y = y + two_pi }
+    let x2 = y * y
+    let x3 = y * x2
+    let x5 = x3 * x2
+    let x7 = x5 * x2
+    y - x3 / 6.0 + x5 / 120.0 - x7 / 5040.0
+}
+
+// ============================================================================
+// RNG (module-local LCG — independent of particle_physics::monte_carlo)
+// ============================================================================
+
+var LG_RNG: i64 = 987654321
+
+pub fn lg_seed(seed: i64) with Mut {
+    if seed <= 0 {
+        LG_RNG = 987654321
+    } else {
+        LG_RNG = seed
+    }
+}
+
+fn lg_uniform() -> f64 with Mut {
+    LG_RNG = (1103515245 * LG_RNG + 12345) % 2147483648
+    (LG_RNG as f64) / 2147483648.0
+}
+
+// ============================================================================
+// SU(2) AS UNIT QUATERNIONS  [w, x, y, z]
+// ============================================================================
+
+pub fn su2_id_w() -> f64 { 1.0 }
+pub fn su2_id_x() -> f64 { 0.0 }
+pub fn su2_id_y() -> f64 { 0.0 }
+pub fn su2_id_z() -> f64 { 0.0 }
+
+/// Quaternion product c = a · b  (SU(2) matrix product).
+pub fn su2_mul(
+    aw: f64, ax: f64, ay: f64, az: f64,
+    bw: f64, bx: f64, by: f64, bz: f64
+) -> (f64, f64, f64, f64) {
+    let cw = aw * bw - ax * bx - ay * by - az * bz
+    let cx = aw * bx + ax * bw + ay * bz - az * by
+    let cy = aw * by - ax * bz + ay * bw + az * bx
+    let cz = aw * bz + ax * by - ay * bx + az * bw
+    (cw, cx, cy, cz)
+}
+
+/// Hermitian conjugate: unit-quaternion inverse = conjugate.
+pub fn su2_dag(w: f64, x: f64, y: f64, z: f64) -> (f64, f64, f64, f64) {
+    (w, 0.0 - x, 0.0 - y, 0.0 - z)
+}
+
+/// ½ Re Tr U = w for SU(2).
+pub fn su2_half_re_trace(w: f64, x: f64, y: f64, z: f64) -> f64 {
+    w
+}
+
+/// Project back onto SU(2) (unit sphere in R^4).
+pub fn su2_normalize(w: f64, x: f64, y: f64, z: f64) -> (f64, f64, f64, f64) with Mut, Div, Panic {
+    let n2 = w * w + x * x + y * y + z * z
+    if n2 <= 1.0e-30 {
+        return (1.0, 0.0, 0.0, 0.0)
+    }
+    let inv = 1.0 / sqrt_f64(n2)
+    (w * inv, x * inv, y * inv, z * inv)
+}
+
+/// Random SU(2) near identity: U = exp(i ε · σ) ≈ (√(1−ε²), ε) with |ε| small.
+/// `eps` controls the proposal step (typical 0.2–0.5).
+pub fn su2_random_near_id(eps: f64) -> (f64, f64, f64, f64) with Mut, Div, Panic {
+    let r1 = 2.0 * lg_uniform() - 1.0
+    let r2 = 2.0 * lg_uniform() - 1.0
+    let r3 = 2.0 * lg_uniform() - 1.0
+    let n = sqrt_f64(r1 * r1 + r2 * r2 + r3 * r3)
+    if n < 1.0e-12 {
+        return (1.0, 0.0, 0.0, 0.0)
+    }
+    let scale = eps * (2.0 * lg_uniform() - 1.0) / n
+    let x = r1 * scale
+    let y = r2 * scale
+    let z = r3 * scale
+    let w2 = 1.0 - x * x - y * y - z * z
+    if w2 <= 0.0 {
+        return su2_normalize(0.1, x, y, z)
+    }
+    (sqrt_f64(w2), x, y, z)
+}
+
+// ============================================================================
+// LATTICE INDEXING
+// ============================================================================
+
+/// Site index from coordinates (periodic L=4).
+pub fn site_index(x: i64, y: i64, z: i64, t: i64) -> i64 {
+    let L = lat_l()
+    let xx = ((x % L) + L) % L
+    let yy = ((y % L) + L) % L
+    let zz = ((z % L) + L) % L
+    let tt = ((t % L) + L) % L
+    xx + L * (yy + L * (zz + L * tt))
+}
+
+/// Decode site → (x,y,z,t).
+pub fn site_coords(s: i64) -> (i64, i64, i64, i64) {
+    let L = lat_l()
+    let x = s % L
+    let y = (s / L) % L
+    let z = (s / (L * L)) % L
+    let t = s / (L * L * L)
+    (x, y, z, t)
+}
+
+/// Flat buffer base index for link U_μ(s).
+pub fn link_base(s: i64, mu: i64) -> i64 {
+    (s * lat_nd() + mu) * 4
+}
+
+/// Neighbour site in direction ±μ (sign = +1 or −1).
+pub fn neighbour(s: i64, mu: i64, sign: i64) -> i64 {
+    let (x, y, z, t) = site_coords(s)
+    if mu == 0 { return site_index(x + sign, y, z, t) }
+    if mu == 1 { return site_index(x, y + sign, z, t) }
+    if mu == 2 { return site_index(x, y, z + sign, t) }
+    site_index(x, y, z, t + sign)
+}
+
+// ============================================================================
+// LATTICE BUFFER IO  (flat [f64; 65536] of unit quaternions)
+// ============================================================================
+
+pub fn link_get(lat: &[f64; 65536], s: i64, mu: i64) -> (f64, f64, f64, f64) with Mut, Div, Panic {
+    let b = link_base(s, mu)
+    (lat[b as usize], lat[(b + 1) as usize], lat[(b + 2) as usize], lat[(b + 3) as usize])
+}
+
+pub fn link_set(lat: &![f64; 65536], s: i64, mu: i64, w: f64, x: f64, y: f64, z: f64) with Mut, Div, Panic {
+    let b = link_base(s, mu)
+    lat[b as usize] = w
+    lat[(b + 1) as usize] = x
+    lat[(b + 2) as usize] = y
+    lat[(b + 3) as usize] = z
+}
+
+/// Cold start: all links = identity (ordered phase / β→∞).
+pub fn lattice_cold(lat: &![f64; 65536]) with Mut, Div, Panic {
+    var i: i64 = 0
+    let n = lat_nlinks()
+    while i < n {
+        let b = i * 4
+        lat[b as usize] = 1.0
+        lat[(b + 1) as usize] = 0.0
+        lat[(b + 2) as usize] = 0.0
+        lat[(b + 3) as usize] = 0.0
+        i = i + 1
+    }
+}
+
+/// Hot start: Haar-ish random SU(2) on every link.
+pub fn lattice_hot(lat: &![f64; 65536]) with Mut, Div, Panic {
+    var i: i64 = 0
+    let n = lat_nlinks()
+    while i < n {
+        let a = 2.0 * lg_uniform() - 1.0
+        let b = 2.0 * lg_uniform() - 1.0
+        let c = 2.0 * lg_uniform() - 1.0
+        let d = 2.0 * lg_uniform() - 1.0
+        let (w, x, y, z) = su2_normalize(a, b, c, d)
+        let base = i * 4
+        lat[base as usize] = w
+        lat[(base + 1) as usize] = x
+        lat[(base + 2) as usize] = y
+        lat[(base + 3) as usize] = z
+        i = i + 1
+    }
+}
+
+/// Copy entire link field src → dst (active flat length only).
+pub fn lattice_copy(src: &[f64; 65536], dst: &![f64; 65536]) with Mut, Div, Panic {
+    var i: i64 = 0
+    let n = lat_flat_len()
+    while i < n {
+        dst[i as usize] = src[i as usize]
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// APE SMEARING (spatial links — glueball ground-state projection)
+// ============================================================================
+// One APE step (Albanese et al. / Morningstar–Peardon style):
+//   X_μ(x) = U_μ(x) + α Σ_{ν≠μ, ν spatial} staple_ν[U_μ]
+//   U'_μ   = Proj_SU(2)(X_μ) = normalize(X) for unit quaternions
+//
+// Temporal links (μ=3) are left unsmeared when spatial_only=1 (standard for
+// correlators that keep Euclidean time sharp).
+// Typical: α ≈ 0.4–0.5, n_smear ≈ 5–20.
+//
+// CLAIM: reduces UV / excited-state pollution in O(t). Does NOT change the
+// continuum mass; only the interpolating operator on a fixed ensemble.
+
+/// Spatial APE staple sum for link U_μ(s), ν ∈ {0,1,2}\{μ}.
+/// Orientation is the SMOOTHING staple (≠ Metropolis force staple):
+///   C⁺ = U_ν(s) U_μ(s+ν) U_ν†(s+μ)
+///   C⁻ = U_ν†(s−ν) U_μ(s−ν) U_ν(s−ν+μ)
+/// On a cold lattice C = n_st · 1 ∥ U, so U + αC stays ordered.
+/// (The Metropolis staple is the *other* three-link product with U·V = U_□.)
+fn ape_spatial_staple(
+    lat: &[f64; 65536],
+    s: i64,
+    mu: i64
+) -> (f64, f64, f64, f64) with Mut, Div, Panic {
+    var aw: f64 = 0.0
+    var ax: f64 = 0.0
+    var ay: f64 = 0.0
+    var az: f64 = 0.0
+    var nu: i64 = 0
+    while nu < 3 {
+        if nu != mu {
+            // Forward C⁺: Uν(s) · Uμ(s+ν) · Uν†(s+μ)
+            let (v0w, v0x, v0y, v0z) = link_get(lat, s, nu)
+            let s_nu = neighbour(s, nu, 1)
+            let (umw, umx, umy, umz) = link_get(lat, s_nu, mu)
+            let s_mu = neighbour(s, mu, 1)
+            let (v1w0, v1x0, v1y0, v1z0) = link_get(lat, s_mu, nu)
+            let (v1w, v1x, v1y, v1z) = su2_dag(v1w0, v1x0, v1y0, v1z0)
+            let (t1w, t1x, t1y, t1z) = su2_mul(v0w, v0x, v0y, v0z, umw, umx, umy, umz)
+            let (sfw, sfx, sfy, sfz) = su2_mul(t1w, t1x, t1y, t1z, v1w, v1x, v1y, v1z)
+            aw = aw + sfw; ax = ax + sfx; ay = ay + sfy; az = az + sfz
+
+            // Backward C⁻: Uν†(s−ν) · Uμ(s−ν) · Uν(s−ν+μ)
+            let s_mnu = neighbour(s, nu, 0 - 1)
+            let (vb0w, vb0x, vb0y, vb0z) = link_get(lat, s_mnu, nu)
+            let (vbw, vbx, vby, vbz) = su2_dag(vb0w, vb0x, vb0y, vb0z)
+            let (ubw, ubx, uby, ubz) = link_get(lat, s_mnu, mu)
+            let s_mnu_mu = neighbour(s_mnu, mu, 1)
+            let (vnw, vnx, vny, vnz) = link_get(lat, s_mnu_mu, nu)
+            let (t2w, t2x, t2y, t2z) = su2_mul(vbw, vbx, vby, vbz, ubw, ubx, uby, ubz)
+            let (sbw, sbx, sby, sbz) = su2_mul(t2w, t2x, t2y, t2z, vnw, vnx, vny, vnz)
+            aw = aw + sbw; ax = ax + sbx; ay = ay + sby; az = az + sbz
+        }
+        nu = nu + 1
+    }
+    (aw, ax, ay, az)
+}
+
+/// One APE step: read from `src`, write smeared field to `dst`.
+/// Stable weight (standard 3D spatial APE):
+///   X = (1−α)·U + (α / n_st)·Σ staples,  then Proj_SU(2)
+/// For spatial-only, n_st = 4 (two other spatial dirs × forward/backward).
+/// `alpha` ∈ (0,1); typical 0.4–0.5.  `spatial_only`=1 leaves μ=3 untouched.
+pub fn ape_smear_step(
+    src: &[f64; 65536],
+    dst: &![f64; 65536],
+    alpha: f64,
+    spatial_only: i64
+) with Mut, Div, Panic {
+    let ns = lat_nsites()
+    let Nd = lat_nd()
+    // spatial-only staples: 2*(3-1)=4; full 4D: 2*(4-1)=6
+    let n_st = if spatial_only == 1 { 4.0 } else { 6.0 }
+    let a = if alpha < 0.0 { 0.0 } else { if alpha > 0.99 { 0.99 } else { alpha } }
+    let w_u = 1.0 - a
+    let w_s = a / n_st
+    var s: i64 = 0
+    while s < ns {
+        var mu: i64 = 0
+        while mu < Nd {
+            let do_smear = if spatial_only == 1 { mu < 3 } else { true }
+            if do_smear {
+                let (uw, ux, uy, uz) = link_get(src, s, mu)
+                let (sw, sx, sy, sz) = ape_spatial_staple(src, s, mu)
+                let xw = w_u * uw + w_s * sw
+                let xx = w_u * ux + w_s * sx
+                let xy = w_u * uy + w_s * sy
+                let xz = w_u * uz + w_s * sz
+                let (nw, nx, ny, nz) = su2_normalize(xw, xx, xy, xz)
+                link_set(dst, s, mu, nw, nx, ny, nz)
+            } else {
+                let (w, x, y, z) = link_get(src, s, mu)
+                link_set(dst, s, mu, w, x, y, z)
+            }
+            mu = mu + 1
+        }
+        s = s + 1
+    }
+}
+
+/// Apply `n_smear` APE steps. Uses `tmp` as ping-pong buffer.
+/// Final smeared field is in `lat` (in-place via copy from last dst).
+/// Convention: even n → end in lat after copy; we always copy result into `out`.
+pub fn ape_smear_n(
+    lat: &[f64; 65536],
+    out: &![f64; 65536],
+    tmp: &![f64; 65536],
+    alpha: f64,
+    n_smear: i64,
+    spatial_only: i64
+) with Mut, Div, Panic {
+    if n_smear <= 0 {
+        lattice_copy(lat, out)
+        return
+    }
+    // step 0: lat → tmp
+    ape_smear_step(lat, tmp, alpha, spatial_only)
+    if n_smear == 1 {
+        lattice_copy(tmp, out)
+        return
+    }
+    var k: i64 = 1
+    // ping-pong: after odd steps result in tmp, after even in out
+    // start: result in tmp after step 0
+    var in_tmp: i64 = 1
+    while k < n_smear {
+        if in_tmp == 1 {
+            ape_smear_step(tmp, out, alpha, spatial_only)
+            in_tmp = 0
+        } else {
+            ape_smear_step(out, tmp, alpha, spatial_only)
+            in_tmp = 1
+        }
+        k = k + 1
+    }
+    if in_tmp == 1 {
+        lattice_copy(tmp, out)
+    }
+    // else already in out
+}
+
+// ============================================================================
+// PLAQUETTE AND ACTION
+// ============================================================================
+
+/// ½ Re Tr of the μν plaquette at site s:
+///   U_□ = Uμ(s) Uν(s+μ) Uμ†(s+ν) Uν†(s)
+pub fn plaquette_half_re(
+    lat: &[f64; 65536],
+    s: i64,
+    mu: i64,
+    nu: i64
+) -> f64 with Mut, Div, Panic {
+    let (u1w, u1x, u1y, u1z) = link_get(lat, s, mu)
+    let s_mu = neighbour(s, mu, 1)
+    let (u2w, u2x, u2y, u2z) = link_get(lat, s_mu, nu)
+    let s_nu = neighbour(s, nu, 1)
+    let (u3w0, u3x0, u3y0, u3z0) = link_get(lat, s_nu, mu)
+    let (u3w, u3x, u3y, u3z) = su2_dag(u3w0, u3x0, u3y0, u3z0)
+    let (u4w0, u4x0, u4y0, u4z0) = link_get(lat, s, nu)
+    let (u4w, u4x, u4y, u4z) = su2_dag(u4w0, u4x0, u4y0, u4z0)
+
+    let (p1w, p1x, p1y, p1z) = su2_mul(u1w, u1x, u1y, u1z, u2w, u2x, u2y, u2z)
+    let (p2w, p2x, p2y, p2z) = su2_mul(p1w, p1x, p1y, p1z, u3w, u3x, u3y, u3z)
+    let (pw, px, py, pz) = su2_mul(p2w, p2x, p2y, p2z, u4w, u4x, u4y, u4z)
+    su2_half_re_trace(pw, px, py, pz)
+}
+
+/// Mean plaquette ⟨P⟩ = average of ½ Re Tr U_□ over all oriented planes.
+/// For SU(2) at β=2.3, literature ⟨P⟩ ≈ 0.60 (Creutz 1980 order of magnitude).
+pub fn mean_plaquette(lat: &[f64; 65536]) -> f64 with Mut, Div, Panic {
+    let L = lat_l()
+    let Nd = lat_nd()
+    var sum: f64 = 0.0
+    var count: i64 = 0
+    var s: i64 = 0
+    let ns = lat_nsites()
+    while s < ns {
+        var mu: i64 = 0
+        while mu < Nd {
+            var nu: i64 = mu + 1
+            while nu < Nd {
+                sum = sum + plaquette_half_re(lat, s, mu, nu)
+                count = count + 1
+                nu = nu + 1
+            }
+            mu = mu + 1
+        }
+        s = s + 1
+    }
+    if count == 0 { return 0.0 }
+    sum / (count as f64)
+}
+
+/// Wilson action S = β Σ_□ (1 − P_□).
+pub fn wilson_action(lat: &[f64; 65536], beta: f64) -> f64 with Mut, Div, Panic {
+    let Nd = lat_nd()
+    var sum: f64 = 0.0
+    var s: i64 = 0
+    let ns = lat_nsites()
+    while s < ns {
+        var mu: i64 = 0
+        while mu < Nd {
+            var nu: i64 = mu + 1
+            while nu < Nd {
+                let p = plaquette_half_re(lat, s, mu, nu)
+                sum = sum + (1.0 - p)
+                nu = nu + 1
+            }
+            mu = mu + 1
+        }
+        s = s + 1
+    }
+    beta * sum
+}
+
+// ============================================================================
+// STAPLE + METROPOLIS UPDATE
+// ============================================================================
+
+/// Staple sum A for link Uμ(s): product of the three other links in every
+/// plaquette containing the link (forward and backward ν ≠ μ).
+/// Returned as an un-normalised quaternion (not in SU(2)).
+fn staple_sum(
+    lat: &[f64; 65536],
+    s: i64,
+    mu: i64
+) -> (f64, f64, f64, f64) with Mut, Div, Panic {
+    let Nd = lat_nd()
+    var aw: f64 = 0.0
+    var ax: f64 = 0.0
+    var ay: f64 = 0.0
+    var az: f64 = 0.0
+    var nu: i64 = 0
+    while nu < Nd {
+        if nu != mu {
+            // Forward staple: Uν(s+μ) Uμ†(s+ν) Uν†(s)
+            let s_mu = neighbour(s, mu, 1)
+            let (v1w, v1x, v1y, v1z) = link_get(lat, s_mu, nu)
+            let s_nu = neighbour(s, nu, 1)
+            let (u_fwd0w, u_fwd0x, u_fwd0y, u_fwd0z) = link_get(lat, s_nu, mu)
+            let (u_fwdw, u_fwdx, u_fwdy, u_fwdz) = su2_dag(u_fwd0w, u_fwd0x, u_fwd0y, u_fwd0z)
+            let (v0w, v0x, v0y, v0z) = link_get(lat, s, nu)
+            let (v0dw, v0dx, v0dy, v0dz) = su2_dag(v0w, v0x, v0y, v0z)
+            let (t1w, t1x, t1y, t1z) = su2_mul(v1w, v1x, v1y, v1z, u_fwdw, u_fwdx, u_fwdy, u_fwdz)
+            let (sfw, sfx, sfy, sfz) = su2_mul(t1w, t1x, t1y, t1z, v0dw, v0dx, v0dy, v0dz)
+            aw = aw + sfw
+            ax = ax + sfx
+            ay = ay + sfy
+            az = az + sfz
+
+            // Backward staple: Uν†(s+μ−ν) Uμ†(s−ν) Uν(s−ν)
+            let s_mnu = neighbour(s, nu, 0 - 1)
+            let s_mu_mnu = neighbour(s_mu, nu, 0 - 1)
+            let (vb0w, vb0x, vb0y, vb0z) = link_get(lat, s_mu_mnu, nu)
+            let (vbw, vbx, vby, vbz) = su2_dag(vb0w, vb0x, vb0y, vb0z)
+            let (ub0w, ub0x, ub0y, ub0z) = link_get(lat, s_mnu, mu)
+            let (ubw, ubx, uby, ubz) = su2_dag(ub0w, ub0x, ub0y, ub0z)
+            let (vnw, vnx, vny, vnz) = link_get(lat, s_mnu, nu)
+            let (t2w, t2x, t2y, t2z) = su2_mul(vbw, vbx, vby, vbz, ubw, ubx, uby, ubz)
+            let (sbw, sbx, sby, sbz) = su2_mul(t2w, t2x, t2y, t2z, vnw, vnx, vny, vnz)
+            aw = aw + sbw
+            ax = ax + sbx
+            ay = ay + sby
+            az = az + sbz
+        }
+        nu = nu + 1
+    }
+    (aw, ax, ay, az)
+}
+
+/// One Metropolis hit on link Uμ(s).
+/// Returns 1 if accepted, 0 if rejected.
+pub fn metropolis_link(
+    lat: &![f64; 65536],
+    s: i64,
+    mu: i64,
+    beta: f64,
+    eps: f64
+) -> i64 with Mut, Div, Panic {
+    let (uw, ux, uy, uz) = link_get(lat, s, mu)
+    let (sw, sx, sy, sz) = staple_sum(lat, s, mu)
+
+    // Plaquette convention: U_□ = U_μ · V_staple,  P = w(U·V) = ½ Re Tr U_□.
+    // Staple sum A = Σ V, so link action piece = −β w(U·A) (+ const).
+    // Therefore ΔS = β [w(U_old·A) − w(U_new·A)].
+    // (Do NOT dagger A here — that matches a different staple orientation convention.)
+    let (old_pw, _, _, _) = su2_mul(uw, ux, uy, uz, sw, sx, sy, sz)
+    let old_re = old_pw
+
+    let (rw, rx, ry, rz) = su2_random_near_id(eps)
+    let (nw, nx, ny, nz) = su2_mul(rw, rx, ry, rz, uw, ux, uy, uz)
+    let (nnw, nnx, nny, nnz) = su2_normalize(nw, nx, ny, nz)
+    let (new_pw, _, _, _) = su2_mul(nnw, nnx, nny, nnz, sw, sx, sy, sz)
+    let new_re = new_pw
+
+    let dS = beta * (old_re - new_re)
+    var accept: i64 = 0
+    if dS <= 0.0 {
+        accept = 1
+    } else {
+        let p = exp_f64(0.0 - dS)
+        if lg_uniform() < p {
+            accept = 1
+        }
+    }
+    if accept == 1 {
+        link_set(lat, s, mu, nnw, nnx, nny, nnz)
+    }
+    accept
+}
+
+/// One full lattice sweep: hit every link once. Returns acceptance count.
+pub fn metropolis_sweep(lat: &![f64; 65536], beta: f64, eps: f64) -> i64 with Mut, Div, Panic {
+    var accepted: i64 = 0
+    var s: i64 = 0
+    let ns = lat_nsites()
+    let Nd = lat_nd()
+    while s < ns {
+        var mu: i64 = 0
+        while mu < Nd {
+            accepted = accepted + metropolis_link(lat, s, mu, beta, eps)
+            mu = mu + 1
+        }
+        s = s + 1
+    }
+    accepted
+}
+
+/// Thermalise for n_sweeps; returns final mean plaquette.
+pub fn thermalize(
+    lat: &![f64; 65536],
+    beta: f64,
+    eps: f64,
+    n_sweeps: i64
+) -> f64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < n_sweeps {
+        let _acc = metropolis_sweep(lat, beta, eps)
+        i = i + 1
+    }
+    mean_plaquette(lat)
+}
+
+// ============================================================================
+// CREUTZ HEATBATH (exact SU(2) link update — no reject step)
+// ============================================================================
+// Weight for link with staple A:  ∝ exp(β w(U·A)),  w = ½ Re Tr.
+// Write A = k â (k=|A|, â unit).  Sample g ∈ SU(2) with
+//   P(g) ∝ √(1−g₀²) exp(β k g₀),   then  U ← g · â†.
+// References: Creutz, Phys. Rev. D21 (1980) 2308; Montvay–Münster §4.2.
+
+/// Sample g₀ ∈ [-1,1] from P(a) ∝ √(1−a²) e^{ξ a} by rejection.
+fn heatbath_sample_a0(xi: f64) -> f64 with Mut, Div, Panic {
+    if xi < 1.0e-10 {
+        return 2.0 * lg_uniform() - 1.0
+    }
+    // For large ξ the mass sits near +1; use capped trials
+    var tries: i64 = 0
+    while tries < 400 {
+        let a = 2.0 * lg_uniform() - 1.0
+        let s2 = 1.0 - a * a
+        if s2 < 0.0 {
+            tries = tries + 1
+            continue
+        }
+        // weight / e^ξ  = √(1−a²) e^{ξ(a−1)}  ≤ 1
+        let w = sqrt_f64(s2) * exp_f64(xi * (a - 1.0))
+        if lg_uniform() < w {
+            return a
+        }
+        tries = tries + 1
+    }
+    // fallback: near-identity real part
+    0.999
+}
+
+/// Random unit 3-vector (rejection on cube).
+fn random_unit3() -> (f64, f64, f64) with Mut, Div, Panic {
+    var tries: i64 = 0
+    while tries < 100 {
+        let x = 2.0 * lg_uniform() - 1.0
+        let y = 2.0 * lg_uniform() - 1.0
+        let z = 2.0 * lg_uniform() - 1.0
+        let n2 = x * x + y * y + z * z
+        if n2 > 1.0e-12 && n2 <= 1.0 {
+            let inv = 1.0 / sqrt_f64(n2)
+            return (x * inv, y * inv, z * inv)
+        }
+        tries = tries + 1
+    }
+    (1.0, 0.0, 0.0)
+}
+
+/// Sample SU(2) element with P ∝ exp(ξ g₀) √(1−g₀²) Haar measure on S³.
+pub fn su2_heatbath_generate(xi: f64) -> (f64, f64, f64, f64) with Mut, Div, Panic {
+    let a0 = heatbath_sample_a0(xi)
+    let s2 = 1.0 - a0 * a0
+    let s = if s2 > 0.0 { sqrt_f64(s2) } else { 0.0 }
+    let (nx, ny, nz) = random_unit3()
+    (a0, s * nx, s * ny, s * nz)
+}
+
+/// Creutz heatbath update of one link. Always accepted. Returns 1.
+pub fn heatbath_link(
+    lat: &![f64; 65536],
+    s: i64,
+    mu: i64,
+    beta: f64
+) -> i64 with Mut, Div, Panic {
+    let (sw, sx, sy, sz) = staple_sum(lat, s, mu)
+    let k2 = sw * sw + sx * sx + sy * sy + sz * sz
+    if k2 < 1.0e-20 {
+        // vanishing staple: Haar-random link
+        let (gw, gx, gy, gz) = su2_heatbath_generate(0.0)
+        link_set(lat, s, mu, gw, gx, gy, gz)
+        return 1
+    }
+    let k = sqrt_f64(k2)
+    let invk = 1.0 / k
+    let aw = sw * invk
+    let ax = sx * invk
+    let ay = sy * invk
+    let az = sz * invk
+    // â† = conjugate
+    let (adw, adx, ady, adz) = su2_dag(aw, ax, ay, az)
+    let xi = beta * k
+    let (gw, gx, gy, gz) = su2_heatbath_generate(xi)
+    // U = g · â†
+    let (uw, ux, uy, uz) = su2_mul(gw, gx, gy, gz, adw, adx, ady, adz)
+    let (nw, nx, ny, nz) = su2_normalize(uw, ux, uy, uz)
+    link_set(lat, s, mu, nw, nx, ny, nz)
+    1
+}
+
+/// Full lattice heatbath sweep. Returns number of links updated (= Nlinks).
+pub fn heatbath_sweep(lat: &![f64; 65536], beta: f64) -> i64 with Mut, Div, Panic {
+    var n: i64 = 0
+    var s: i64 = 0
+    let ns = lat_nsites()
+    let Nd = lat_nd()
+    while s < ns {
+        var mu: i64 = 0
+        while mu < Nd {
+            n = n + heatbath_link(lat, s, mu, beta)
+            mu = mu + 1
+        }
+        s = s + 1
+    }
+    n
+}
+
+/// Thermalise with Creutz heatbath. Returns final mean plaquette.
+pub fn heatbath_thermalize(
+    lat: &![f64; 65536],
+    beta: f64,
+    n_sweeps: i64
+) -> f64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < n_sweeps {
+        let _n = heatbath_sweep(lat, beta)
+        i = i + 1
+    }
+    mean_plaquette(lat)
+}
+
+// ============================================================================
+// WILSON LOOPS AND CREUTZ RATIO
+// ============================================================================
+
+/// Rectangular R×T Wilson loop ½ Re Tr W(R,T), averaged over all origins
+/// and plane orientations (μ spatial-like path of length R, ν of length T).
+///
+/// Construction: path product of R links in +μ, T in +ν, R in −μ, T in −ν.
+pub fn wilson_loop_rect(lat: &[f64; 65536], r: i64, t_len: i64) -> f64 with Mut, Div, Panic {
+    if r < 1 || t_len < 1 { return 0.0 }
+    let L = lat_l()
+    if r >= L || t_len >= L { return 0.0 }
+    let Nd = lat_nd()
+    var sum: f64 = 0.0
+    var count: i64 = 0
+    var s0: i64 = 0
+    let ns = lat_nsites()
+    while s0 < ns {
+        var mu: i64 = 0
+        while mu < Nd {
+            var nu: i64 = 0
+            while nu < Nd {
+                if nu != mu {
+                    // Build loop product starting at identity
+                    var pw: f64 = 1.0
+                    var px: f64 = 0.0
+                    var py: f64 = 0.0
+                    var pz: f64 = 0.0
+                    var s = s0
+                    // +μ × R
+                    var step: i64 = 0
+                    while step < r {
+                        let (uw, ux, uy, uz) = link_get(lat, s, mu)
+                        let (nw, nx, ny, nz) = su2_mul(pw, px, py, pz, uw, ux, uy, uz)
+                        pw = nw; px = nx; py = ny; pz = nz
+                        s = neighbour(s, mu, 1)
+                        step = step + 1
+                    }
+                    // +ν × T
+                    step = 0
+                    while step < t_len {
+                        let (uw, ux, uy, uz) = link_get(lat, s, nu)
+                        let (nw, nx, ny, nz) = su2_mul(pw, px, py, pz, uw, ux, uy, uz)
+                        pw = nw; px = nx; py = ny; pz = nz
+                        s = neighbour(s, nu, 1)
+                        step = step + 1
+                    }
+                    // −μ × R  (traverse dagger links going backward)
+                    step = 0
+                    while step < r {
+                        s = neighbour(s, mu, 0 - 1)
+                        let (uw0, ux0, uy0, uz0) = link_get(lat, s, mu)
+                        let (uw, ux, uy, uz) = su2_dag(uw0, ux0, uy0, uz0)
+                        let (nw, nx, ny, nz) = su2_mul(pw, px, py, pz, uw, ux, uy, uz)
+                        pw = nw; px = nx; py = ny; pz = nz
+                        step = step + 1
+                    }
+                    // −ν × T
+                    step = 0
+                    while step < t_len {
+                        s = neighbour(s, nu, 0 - 1)
+                        let (uw0, ux0, uy0, uz0) = link_get(lat, s, nu)
+                        let (uw, ux, uy, uz) = su2_dag(uw0, ux0, uy0, uz0)
+                        let (nw, nx, ny, nz) = su2_mul(pw, px, py, pz, uw, ux, uy, uz)
+                        pw = nw; px = nx; py = ny; pz = nz
+                        step = step + 1
+                    }
+                    sum = sum + su2_half_re_trace(pw, px, py, pz)
+                    count = count + 1
+                }
+                nu = nu + 1
+            }
+            mu = mu + 1
+        }
+        s0 = s0 + 1
+    }
+    if count == 0 { return 0.0 }
+    sum / (count as f64)
+}
+
+/// Creutz ratio χ(R,R) = −ln[ W(R,R) W(R−1,R−1) / (W(R,R−1) W(R−1,R)) ].
+/// For large R, χ(R,R) → σ a² (lattice string tension).
+/// Returns (chi, valid_flag as 1/0).
+pub fn creutz_ratio(lat: &[f64; 65536], r: i64) -> (f64, i64) with Mut, Div, Panic {
+    if r < 2 { return (0.0, 0) }
+    let w_rr = wilson_loop_rect(lat, r, r)
+    let w_mm = wilson_loop_rect(lat, r - 1, r - 1)
+    let w_rm = wilson_loop_rect(lat, r, r - 1)
+    let w_mr = wilson_loop_rect(lat, r - 1, r)
+    let num = w_rr * w_mm
+    let den = w_rm * w_mr
+    if num <= 1.0e-30 || den <= 1.0e-30 { return (0.0, 0) }
+    let ratio = num / den
+    if ratio <= 1.0e-30 { return (0.0, 0) }
+    // Area law → ratio < 1 → chi > 0. Guard floating noise.
+    if ratio >= 1.0 {
+        // Small positive loops / noise: report 0 with invalid
+        return (0.0, 0)
+    }
+    let chi = 0.0 - ln_f64(ratio)
+    (chi, 1)
+}
+
+// ============================================================================
+// EPISTEMIC STRING TENSION + MASS-GAP PROXY
+// ============================================================================
+
+/// Accumulate n_meas measurements separated by n_sep sweeps.
+/// Fills plaq_samples[0..n_meas) and chi2_samples[0..n_meas).
+/// Returns number of valid Creutz samples written.
+pub fn measure_ensemble(
+    lat: &![f64; 65536],
+    beta: f64,
+    eps: f64,
+    n_meas: i64,
+    n_sep: i64,
+    plaq_samples: &![f64; 256],
+    chi2_samples: &![f64; 256],
+    chi2_valid: &![i64; 256]
+) -> i64 with Mut, Div, Panic {
+    var n_ok: i64 = 0
+    var m: i64 = 0
+    let cap: i64 = 256
+    let n = if n_meas < cap { n_meas } else { cap }
+    while m < n {
+        var s: i64 = 0
+        while s < n_sep {
+            let _a = metropolis_sweep(lat, beta, eps)
+            s = s + 1
+        }
+        let p = mean_plaquette(lat)
+        plaq_samples[m as usize] = p
+        let (chi, ok) = creutz_ratio(lat, 2)
+        chi2_samples[m as usize] = chi
+        chi2_valid[m as usize] = ok
+        if ok == 1 { n_ok = n_ok + 1 }
+        m = m + 1
+    }
+    n_ok
+}
+
+/// Mean ± sample std of a buffer (population std with Bessel N−1 if N>1).
+pub fn sample_mean_std(buf: &[f64; 256], n: i64, valid: &[i64; 256], use_valid: i64) -> (f64, f64) with Mut, Div, Panic {
+    var sum: f64 = 0.0
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < n && i < 256 {
+        var take = true
+        if use_valid == 1 {
+            if valid[i as usize] == 0 { take = false }
+        }
+        if take {
+            sum = sum + buf[i as usize]
+            count = count + 1
+        }
+        i = i + 1
+    }
+    if count == 0 { return (0.0, 0.0) }
+    let mean = sum / (count as f64)
+    if count < 2 { return (mean, 0.0) }
+    var var_sum: f64 = 0.0
+    i = 0
+    while i < n && i < 256 {
+        var take = true
+        if use_valid == 1 {
+            if valid[i as usize] == 0 { take = false }
+        }
+        if take {
+            let d = buf[i as usize] - mean
+            var_sum = var_sum + d * d
+        }
+        i = i + 1
+    }
+    let std = sqrt_f64(var_sum / ((count - 1) as f64))
+    // Standard error of the mean
+    let sem = std / sqrt_f64(count as f64)
+    (mean, sem)
+}
+
+/// Epistemic mean plaquette from samples.
+pub fn plaquette_ep(plaq_samples: &[f64; 256], n: i64) -> Epistemic with Mut, Div, Panic {
+    var dummy: [i64; 256] = [1; 256]
+    let (m, sem) = sample_mean_std(plaq_samples, n, &dummy, 0)
+    ep_measured(m, sem)
+}
+
+/// Epistemic lattice string tension σ a² ≈ χ(2,2) from Creutz samples.
+pub fn string_tension_ep(chi2_samples: &[f64; 256], chi2_valid: &[i64; 256], n: i64) -> Epistemic with Mut, Div, Panic {
+    let (m, sem) = sample_mean_std(chi2_samples, n, chi2_valid, 1)
+    if m <= 0.0 {
+        return ep_measured(0.0, 0.0)
+    }
+    ep_measured(m, sem)
+}
+
+/// Enforce a relative SEM floor: max(sem, rel_floor · |val|).
+/// Prevents χ² collapse from underestimated jackknife errors.
+pub fn sem_floor(sem: f64, val: f64, rel_floor: f64) -> f64 with Mut, Div, Panic {
+    var v = val
+    if v < 0.0 { v = 0.0 - v }
+    var s = sem
+    if s < 0.0 { s = 0.0 }
+    let fl = rel_floor * v
+    if s < fl { s = fl }
+    s
+}
+
+/// Dimensionless mass ratio r = m / √σ with GUM SEM:
+///   σ_r / r = √( (σ_m/m)² + (½ σ_σ/σ)² )
+/// where σ here is the string tension (σa²), not the SEM symbol.
+/// Applies 8% relative floor on m and σ SEMs before propagation (honest multi-β).
+/// Returns Epistemic { val: r, variance: sem² }.
+pub fn mass_over_sqrt_sigma_ep(m: f64, m_sem: f64, sigma: f64, sigma_sem: f64) -> Epistemic with Mut, Div, Panic {
+    if m <= 0.0 || sigma <= 1.0e-30 {
+        return ep_measured(0.0, 0.0)
+    }
+    let srt = sqrt_f64(sigma)
+    if srt <= 1.0e-30 { return ep_measured(0.0, 0.0) }
+    let r = m / srt
+    // honest floors: statistical SEM often underestimates spectral systematics
+    let m_s = sem_floor(m_sem, m, 0.08)
+    let sig_s = sem_floor(sigma_sem, sigma, 0.05)
+    // d√σ / dσ = 1/(2√σ) ⇒ σ_√σ = σ_σ / (2√σ)
+    let srt_sem = sig_s / (2.0 * srt)
+    var rel2: f64 = 0.0
+    if m > 1.0e-30 { rel2 = rel2 + (m_s / m) * (m_s / m) }
+    if srt > 1.0e-30 { rel2 = rel2 + (srt_sem / srt) * (srt_sem / srt) }
+    let sem = r * sqrt_f64(rel2)
+    // conf 500: spectral+scale + floor systematics; continuum not included
+    Epistemic { val: r, variance: sem * sem, confidence: 500 }
+}
+
+/// Inverse-variance weighted mean of samples with SEMs.
+/// Returns (mean, sem, chi2, n). chi2 uses n−1 dof implicit in caller.
+pub fn inv_var_weighted_mean(
+    vals: &[f64; 8],
+    sems: &[f64; 8],
+    n: i64
+) -> (f64, f64, f64, i64) with Mut, Div, Panic {
+    var wsum: f64 = 0.0
+    var rw: f64 = 0.0
+    var nv: i64 = 0
+    var i: i64 = 0
+    while i < n && i < 8 {
+        let v = vals[i as usize]
+        var se = sems[i as usize]
+        if v > 0.0 {
+            if se < 1.0e-12 { se = 0.1 * v }
+            se = sem_floor(se, v, 0.05)
+            let w = 1.0 / (se * se)
+            wsum = wsum + w
+            rw = rw + w * v
+            nv = nv + 1
+        }
+        i = i + 1
+    }
+    if nv == 0 || wsum <= 0.0 { return (0.0, 0.0, 0.0, 0) }
+    let mean = rw / wsum
+    let sem = sqrt_f64(1.0 / wsum)
+    var chi2: f64 = 0.0
+    i = 0
+    while i < n && i < 8 {
+        let v = vals[i as usize]
+        var se = sems[i as usize]
+        if v > 0.0 {
+            if se < 1.0e-12 { se = 0.1 * v }
+            se = sem_floor(se, v, 0.05)
+            let d = (v - mean) / se
+            chi2 = chi2 + d * d
+        }
+        i = i + 1
+    }
+    (mean, sem, chi2, nv)
+}
+
+/// Delete-1 jackknife mean ± SEM for a sample buffer (valid mask optional).
+/// Returns (jk_mean, jk_sem, n_used).
+pub fn jackknife_mean(
+    buf: &[f64; 256],
+    valid: &[i64; 256],
+    n: i64,
+    use_valid: i64
+) -> (f64, f64, i64) with Mut, Div, Panic {
+    // collect valid indices into dense work array
+    var w: [f64; 256] = [0.0; 256]
+    var nv: i64 = 0
+    var i: i64 = 0
+    while i < n && i < 256 {
+        var take = true
+        if use_valid == 1 {
+            if valid[i as usize] == 0 { take = false }
+        }
+        if take {
+            w[nv as usize] = buf[i as usize]
+            nv = nv + 1
+        }
+        i = i + 1
+    }
+    if nv == 0 { return (0.0, 0.0, 0) }
+    if nv == 1 { return (w[0], 0.0, 1) }
+    var sum_all: f64 = 0.0
+    i = 0
+    while i < nv {
+        sum_all = sum_all + w[i as usize]
+        i = i + 1
+    }
+    let mean = sum_all / (nv as f64)
+    // jackknife replicates
+    var sum_jk: f64 = 0.0
+    var sum_jk2: f64 = 0.0
+    i = 0
+    while i < nv {
+        let lo = (sum_all - w[i as usize]) / ((nv - 1) as f64)
+        sum_jk = sum_jk + lo
+        sum_jk2 = sum_jk2 + lo * lo
+        i = i + 1
+    }
+    let mean_jk = sum_jk / (nv as f64)
+    // bias-corrected mean ≈ n*mean − (n−1)*mean_jk  (optional; report plain mean)
+    let _bc = (nv as f64) * mean - ((nv - 1) as f64) * mean_jk
+    var var_jk: f64 = 0.0
+    i = 0
+    while i < nv {
+        let lo = (sum_all - w[i as usize]) / ((nv - 1) as f64)
+        let d = lo - mean_jk
+        var_jk = var_jk + d * d
+        i = i + 1
+    }
+    // classic jackknife variance: (n−1)/n · Σ (θ_i − θ̄)²
+    let fac = ((nv - 1) as f64) / (nv as f64)
+    let sem = sqrt_f64(fac * var_jk)
+    (mean, sem, nv)
+}
+
+/// Mass-gap scale proxy: m_gap a ≈ r_0pp · √(σ a²)
+/// where r_0pp ≈ 3.7 is the pure-SU(2) 0++ glueball / √σ ratio
+/// (Teper, Bali reviews — order-of-magnitude, NOT a precision claim).
+///
+/// Uncertainty: GUM on √χ with fixed ratio (ratio model-error is NOT included;
+/// confidence is lowered to flag that).
+pub fn mass_gap_proxy_ep(sigma_a2: &Epistemic) -> Epistemic with Mut, Div, Panic {
+    let r_glue = 3.7
+    let s = ep_val(sigma_a2)
+    let us = ep_std(sigma_a2)
+    if s <= 0.0 {
+        return ep_measured(0.0, 0.0)
+    }
+    let root = sqrt_f64(s)
+    // d(√s)/ds = 1/(2√s) → u(√s) = us / (2 √s)
+    let u_root = us / (2.0 * root)
+    let val = r_glue * root
+    let unc = r_glue * u_root
+    // Lower confidence: model ratio fixed, continuum/V→∞ absent
+    Epistemic { val: val, variance: unc * unc, confidence: 500 }
+}
+
+/// Full pipeline helper: cold start → thermalize → measure → Epistemic reports.
+/// Returns (plaq_ep, sigma_ep, mgap_ep, n_valid_creutz).
+pub fn run_su2_mass_gap_probe(
+    lat: &![f64; 65536],
+    beta: f64,
+    eps: f64,
+    n_therm: i64,
+    n_meas: i64,
+    n_sep: i64,
+    seed: i64
+) -> (Epistemic, Epistemic, Epistemic, i64) with Mut, Div, Panic {
+    lg_seed(seed)
+    lattice_cold(lat)
+    let _p_therm = thermalize(lat, beta, eps, n_therm)
+    var plaq_s: [f64; 256] = [0.0; 256]
+    var chi_s: [f64; 256] = [0.0; 256]
+    var chi_v: [i64; 256] = [0; 256]
+    let n_ok = measure_ensemble(lat, beta, eps, n_meas, n_sep, &!plaq_s, &!chi_s, &!chi_v)
+    let pep = plaquette_ep(&plaq_s, n_meas)
+    let sep = string_tension_ep(&chi_s, &chi_v, n_meas)
+    let mep = mass_gap_proxy_ep(&sep)
+    (pep, sep, mep, n_ok)
+}
+
+// ============================================================================
+// 0++ GLUEBALL OPERATOR + SPECTRAL MASS GAP
+// ============================================================================
+// Operator: zero-momentum spatial plaquette sum on a fixed time slice
+//   O(t) = Σ_{x,y,z} Σ_{i<j ∈ {0,1,2}} ½ Re Tr U_{ij}(x,y,z,t)
+// This is the standard lattice scalar (0++) glueball interpolator built from
+// spatial plaquettes (Morningstar–Peardon / Teper reviews).
+//
+// Connected correlator on a periodic lattice of extent T = L:
+//   C(τ) = (1/T) Σ_t ⟨O(t) O(t+τ)⟩ − ⟨O⟩²
+// Effective mass (large-T free-particle / early-τ approx):
+//   m_eff(τ) = ln( C(τ) / C(τ+1) )   when C>0 decreasing
+// Periodic cosh form (when C(τ−1), C(τ), C(τ+1) available and positive):
+//   cosh(m) = (C(τ−1) + C(τ+1)) / (2 C(τ))
+//
+// CLAIM: spectral mass estimate of the lightest state coupling to O on THIS
+// finite lattice. NOT a continuum, infinite-volume, or Clay theorem result.
+
+/// Spatial 0++ glueball operator on time slice `t` (t ∈ 0..L−1).
+/// Sums ½ Re Tr of all spatial plaquettes (planes 01, 02, 12) over the L³ cube.
+pub fn glueball_op_slice(lat: &[f64; 65536], t: i64) -> f64 with Mut, Div, Panic {
+    let L = lat_l()
+    let tt = ((t % L) + L) % L
+    var sum: f64 = 0.0
+    var x: i64 = 0
+    while x < L {
+        var y: i64 = 0
+        while y < L {
+            var z: i64 = 0
+            while z < L {
+                let s = site_index(x, y, z, tt)
+                // spatial planes only: (0,1), (0,2), (1,2)
+                sum = sum + plaquette_half_re(lat, s, 0, 1)
+                sum = sum + plaquette_half_re(lat, s, 0, 2)
+                sum = sum + plaquette_half_re(lat, s, 1, 2)
+                z = z + 1
+            }
+            y = y + 1
+        }
+        x = x + 1
+    }
+    sum
+}
+
+/// Fill `ops[0..L)` with O(t) for all time slices on one configuration.
+pub fn glueball_ops_all(lat: &[f64; 65536], ops: &![f64; 8]) with Mut, Div, Panic {
+    let L = lat_l()
+    var t: i64 = 0
+    while t < L && t < 8 {
+        ops[t as usize] = glueball_op_slice(lat, t)
+        t = t + 1
+    }
+}
+
+/// Accumulate one configuration into correlator moments.
+/// `sum_oo[τ]` += (1/T) Σ_t O(t) O(t+τ)
+/// `sum_o`    += (1/T) Σ_t O(t)
+/// Call once per measured configuration; divide by n_meas at the end.
+pub fn glueball_accum(
+    ops: &[f64; 8],
+    sum_oo: &![f64; 8],
+    sum_o: &!f64
+) with Mut, Div, Panic {
+    let L = lat_l()
+    var mean_o: f64 = 0.0
+    var t: i64 = 0
+    while t < L {
+        mean_o = mean_o + ops[t as usize]
+        t = t + 1
+    }
+    mean_o = mean_o / (L as f64)
+    *sum_o = *sum_o + mean_o
+
+    var tau: i64 = 0
+    while tau < L && tau < 8 {
+        var corr: f64 = 0.0
+        t = 0
+        while t < L {
+            let tp = (t + tau) % L
+            corr = corr + ops[t as usize] * ops[tp as usize]
+            t = t + 1
+        }
+        corr = corr / (L as f64)
+        sum_oo[tau as usize] = sum_oo[tau as usize] + corr
+        tau = tau + 1
+    }
+}
+
+/// Finalise connected correlator: C(τ) = ⟨OO⟩_τ − ⟨O⟩².
+/// Writes into `c_out[0..L)`. Returns ⟨O⟩.
+pub fn glueball_connected(
+    sum_oo: &[f64; 8],
+    sum_o: f64,
+    n_meas: i64,
+    c_out: &![f64; 8]
+) -> f64 with Mut, Div, Panic {
+    if n_meas <= 0 { return 0.0 }
+    let inv = 1.0 / (n_meas as f64)
+    let mean_o = sum_o * inv
+    let mean_o2 = mean_o * mean_o
+    let L = lat_l()
+    var tau: i64 = 0
+    while tau < L && tau < 8 {
+        c_out[tau as usize] = sum_oo[tau as usize] * inv - mean_o2
+        tau = tau + 1
+    }
+    mean_o
+}
+
+/// Effective mass from two consecutive correlator points:
+///   m_eff = ln(C(τ)/C(τ+1))  when both positive and C(τ) > C(τ+1).
+/// Returns (m_eff, valid 0/1).
+pub fn glueball_meff_log(c_tau: f64, c_tau1: f64) -> (f64, i64) with Mut, Div, Panic {
+    if c_tau <= 1.0e-30 || c_tau1 <= 1.0e-30 { return (0.0, 0) }
+    if c_tau1 >= c_tau { return (0.0, 0) }
+    let ratio = c_tau / c_tau1
+    let m = ln_f64(ratio)
+    if m <= 0.0 || m != m { return (0.0, 0) }
+    (m, 1)
+}
+
+/// Periodic cosh effective mass at sink τ:
+///   cosh(m) = (C(τ−1) + C(τ+1)) / (2 C(τ))
+/// Returns (m, valid). Uses acosh via ln(z + √(z²−1)).
+pub fn glueball_meff_cosh(c_m1: f64, c0: f64, c_p1: f64) -> (f64, i64) with Mut, Div, Panic {
+    if c0 <= 1.0e-30 { return (0.0, 0) }
+    let z = (c_m1 + c_p1) / (2.0 * c0)
+    if z < 1.0 { return (0.0, 0) }
+    // acosh(z) = ln(z + sqrt(z² − 1))
+    let disc = z * z - 1.0
+    if disc < 0.0 { return (0.0, 0) }
+    let m = ln_f64(z + sqrt_f64(disc))
+    if m <= 0.0 || m != m { return (0.0, 0) }
+    (m, 1)
+}
+
+/// Jackknife-style SEM for m_eff(τ=0) from per-config correlator samples.
+/// `c0_samples[i]`, `c1_samples[i]` are connected C(0), C(1) on config i
+/// estimated via single-config subtraction of running mean (approx).
+/// Simpler approach: collect m_eff per config from raw OO products with
+/// global ⟨O⟩, then sample SEM. Here we take the ensemble C and assign SEM
+/// from the scatter of single-config log ratios when available.
+pub fn glueball_meff_ep_from_samples(
+    meff_samples: &[f64; 256],
+    meff_valid: &[i64; 256],
+    n: i64
+) -> Epistemic with Mut, Div, Panic {
+    let (m, sem) = sample_mean_std(meff_samples, n, meff_valid, 1)
+    if m <= 0.0 {
+        return ep_measured(0.0, 0.0)
+    }
+    // conf 600: spectral on tiny volume; excited-state contamination unquantified
+    Epistemic { val: m, variance: sem * sem, confidence: 600 }
+}
+
+/// Measure glueball correlator over an ensemble.
+/// After thermalization, takes n_meas samples separated by n_sep sweeps.
+/// Fills:
+///   c_mean[τ]     — connected C(τ)
+///   meff0_samples — per-config log m_eff from C(0)/C(1) single-config OO
+///   meff0_valid
+/// Returns (n_valid_meff, mean_O).
+pub fn measure_glueball_ensemble(
+    lat: &![f64; 65536],
+    beta: f64,
+    eps: f64,
+    n_meas: i64,
+    n_sep: i64,
+    c_mean: &![f64; 8],
+    meff0_samples: &![f64; 256],
+    meff0_valid: &![i64; 256]
+) -> (i64, f64) with Mut, Div, Panic {
+    var sum_oo: [f64; 8] = [0.0; 8]
+    var sum_o: f64 = 0.0
+    var ops: [f64; 8] = [0.0; 8]
+    // First pass: accumulate global moments for connected C(τ)
+    var m: i64 = 0
+    let cap: i64 = 256
+    let n = if n_meas < cap { n_meas } else { cap }
+    // Store per-config OO(0), OO(1), mean_O for second-pass single-config meff
+    var oo0: [f64; 256] = [0.0; 256]
+    var oo1: [f64; 256] = [0.0; 256]
+    var omean: [f64; 256] = [0.0; 256]
+
+    while m < n {
+        var s: i64 = 0
+        while s < n_sep {
+            let _a = metropolis_sweep(lat, beta, eps)
+            s = s + 1
+        }
+        glueball_ops_all(lat, &!ops)
+        // local OO products
+        let L = lat_l()
+        var mo: f64 = 0.0
+        var t: i64 = 0
+        while t < L {
+            mo = mo + ops[t as usize]
+            t = t + 1
+        }
+        mo = mo / (L as f64)
+        omean[m as usize] = mo
+        var c0: f64 = 0.0
+        var c1: f64 = 0.0
+        t = 0
+        while t < L {
+            let t1 = (t + 1) % L
+            c0 = c0 + ops[t as usize] * ops[t as usize]
+            c1 = c1 + ops[t as usize] * ops[t1 as usize]
+            t = t + 1
+        }
+        c0 = c0 / (L as f64)
+        c1 = c1 / (L as f64)
+        oo0[m as usize] = c0
+        oo1[m as usize] = c1
+        glueball_accum(&ops, &!sum_oo, &!sum_o)
+        m = m + 1
+    }
+
+    let mean_o = glueball_connected(&sum_oo, sum_o, n, c_mean)
+
+    // Per-config connected estimate using GLOBAL ⟨O⟩ (standard jackknife-lite)
+    var n_ok: i64 = 0
+    m = 0
+    while m < n {
+        let co = oo0[m as usize] - mean_o * mean_o
+        let c1 = oo1[m as usize] - mean_o * mean_o
+        let (me, ok) = glueball_meff_log(co, c1)
+        meff0_samples[m as usize] = me
+        meff0_valid[m as usize] = ok
+        if ok == 1 { n_ok = n_ok + 1 }
+        m = m + 1
+    }
+    (n_ok, mean_o)
+}
+
+/// Full spectral mass-gap pipeline:
+/// cold → therm → measure glueball C(τ) + Creutz string tension.
+/// Returns (plaq_ep, sigma_ep, meff_ep, n_valid_meff).
+pub fn run_su2_glueball_mass_gap(
+    lat: &![f64; 65536],
+    beta: f64,
+    eps: f64,
+    n_therm: i64,
+    n_meas: i64,
+    n_sep: i64,
+    seed: i64,
+    c_mean: &![f64; 8]
+) -> (Epistemic, Epistemic, Epistemic, i64) with Mut, Div, Panic {
+    lg_seed(seed)
+    lattice_cold(lat)
+    let _pt = thermalize(lat, beta, eps, n_therm)
+    var meff_s: [f64; 256] = [0.0; 256]
+    var meff_v: [i64; 256] = [0; 256]
+    let (n_ok, _mo) = measure_glueball_ensemble(
+        lat, beta, eps, n_meas, n_sep, c_mean, &!meff_s, &!meff_v
+    )
+    // also grab plaquette + creutz on final ensemble state (single-config + short re-measure)
+    var plaq_s: [f64; 256] = [0.0; 256]
+    var chi_s: [f64; 256] = [0.0; 256]
+    var chi_v: [i64; 256] = [0; 256]
+    // lightweight: n_meas/2 extra for plaquette/creutz context
+    let n_extra = if n_meas / 2 > 4 { n_meas / 2 } else { 4 }
+    let _nok2 = measure_ensemble(lat, beta, eps, n_extra, n_sep, &!plaq_s, &!chi_s, &!chi_v)
+    let pep = plaquette_ep(&plaq_s, n_extra)
+    let sep = string_tension_ep(&chi_s, &chi_v, n_extra)
+    let mep = glueball_meff_ep_from_samples(&meff_s, &meff_v, n_meas)
+    (pep, sep, mep, n_ok)
+}
+
+/// Measure 0++ correlator on APE-smeared spatial links each configuration.
+/// Thin-link Metropolis evolves `lat`; for each measurement we build `sm`
+/// with n_smear APE steps (alpha) and evaluate O(t) on `sm` only.
+/// Creutz/plaquette remain on thin links (string tension scale setting).
+pub fn measure_glueball_smeared_ensemble(
+    lat: &![f64; 65536],
+    sm: &![f64; 65536],
+    tmp: &![f64; 65536],
+    beta: f64,
+    eps: f64,
+    n_meas: i64,
+    n_sep: i64,
+    alpha: f64,
+    n_smear: i64,
+    c_mean: &![f64; 8],
+    meff0_samples: &![f64; 256],
+    meff0_valid: &![i64; 256]
+) -> (i64, f64) with Mut, Div, Panic {
+    var sum_oo: [f64; 8] = [0.0; 8]
+    var sum_o: f64 = 0.0
+    var ops: [f64; 8] = [0.0; 8]
+    var oo0: [f64; 256] = [0.0; 256]
+    var oo1: [f64; 256] = [0.0; 256]
+    var m: i64 = 0
+    let cap: i64 = 256
+    let n = if n_meas < cap { n_meas } else { cap }
+
+    while m < n {
+        var s: i64 = 0
+        while s < n_sep {
+            let _a = metropolis_sweep(lat, beta, eps)
+            s = s + 1
+        }
+        ape_smear_n(lat, sm, tmp, alpha, n_smear, 1)
+        glueball_ops_all(sm, &!ops)
+
+        let L = lat_l()
+        var mo: f64 = 0.0
+        var t: i64 = 0
+        while t < L {
+            mo = mo + ops[t as usize]
+            t = t + 1
+        }
+        mo = mo / (L as f64)
+        var c0: f64 = 0.0
+        var c1: f64 = 0.0
+        t = 0
+        while t < L {
+            let t1 = (t + 1) % L
+            c0 = c0 + ops[t as usize] * ops[t as usize]
+            c1 = c1 + ops[t as usize] * ops[t1 as usize]
+            t = t + 1
+        }
+        c0 = c0 / (L as f64)
+        c1 = c1 / (L as f64)
+        oo0[m as usize] = c0
+        oo1[m as usize] = c1
+        glueball_accum(&ops, &!sum_oo, &!sum_o)
+        m = m + 1
+    }
+
+    let mean_o = glueball_connected(&sum_oo, sum_o, n, c_mean)
+    var n_ok: i64 = 0
+    m = 0
+    while m < n {
+        let co = oo0[m as usize] - mean_o * mean_o
+        let c1c = oo1[m as usize] - mean_o * mean_o
+        let (me, ok) = glueball_meff_log(co, c1c)
+        meff0_samples[m as usize] = me
+        meff0_valid[m as usize] = ok
+        if ok == 1 { n_ok = n_ok + 1 }
+        m = m + 1
+    }
+    (n_ok, mean_o)
+}
+
+/// Paired thin + APE measurement on the SAME configurations.
+/// Evolves `lat` with Metropolis; each sample records O_thin and O_APE.
+/// Fills c_thin, c_ape connected correlators and per-config meff samples.
+/// Returns (n_ok_thin, n_ok_ape, mean_O_thin, mean_O_ape).
+pub fn measure_glueball_thin_and_ape(
+    lat: &![f64; 65536],
+    sm: &![f64; 65536],
+    tmp: &![f64; 65536],
+    beta: f64,
+    eps: f64,
+    n_meas: i64,
+    n_sep: i64,
+    alpha: f64,
+    n_smear: i64,
+    c_thin: &![f64; 8],
+    c_ape: &![f64; 8],
+    meff_thin_s: &![f64; 256],
+    meff_thin_v: &![i64; 256],
+    meff_ape_s: &![f64; 256],
+    meff_ape_v: &![i64; 256]
+) -> (i64, i64, f64, f64) with Mut, Div, Panic {
+    var sum_oo_t: [f64; 8] = [0.0; 8]
+    var sum_oo_a: [f64; 8] = [0.0; 8]
+    var sum_o_t: f64 = 0.0
+    var sum_o_a: f64 = 0.0
+    var ops_t: [f64; 8] = [0.0; 8]
+    var ops_a: [f64; 8] = [0.0; 8]
+    var oo0_t: [f64; 256] = [0.0; 256]
+    var oo1_t: [f64; 256] = [0.0; 256]
+    var oo0_a: [f64; 256] = [0.0; 256]
+    var oo1_a: [f64; 256] = [0.0; 256]
+    var m: i64 = 0
+    let n = if n_meas < 256 { n_meas } else { 256 }
+    let L = lat_l()
+
+    while m < n {
+        var s: i64 = 0
+        while s < n_sep {
+            let _a = metropolis_sweep(lat, beta, eps)
+            s = s + 1
+        }
+        // thin
+        glueball_ops_all(lat, &!ops_t)
+        // APE
+        ape_smear_n(lat, sm, tmp, alpha, n_smear, 1)
+        glueball_ops_all(sm, &!ops_a)
+
+        var c0t: f64 = 0.0
+        var c1t: f64 = 0.0
+        var c0a: f64 = 0.0
+        var c1a: f64 = 0.0
+        var t: i64 = 0
+        while t < L {
+            let t1 = (t + 1) % L
+            c0t = c0t + ops_t[t as usize] * ops_t[t as usize]
+            c1t = c1t + ops_t[t as usize] * ops_t[t1 as usize]
+            c0a = c0a + ops_a[t as usize] * ops_a[t as usize]
+            c1a = c1a + ops_a[t as usize] * ops_a[t1 as usize]
+            t = t + 1
+        }
+        let invL = 1.0 / (L as f64)
+        oo0_t[m as usize] = c0t * invL
+        oo1_t[m as usize] = c1t * invL
+        oo0_a[m as usize] = c0a * invL
+        oo1_a[m as usize] = c1a * invL
+        glueball_accum(&ops_t, &!sum_oo_t, &!sum_o_t)
+        glueball_accum(&ops_a, &!sum_oo_a, &!sum_o_a)
+        m = m + 1
+    }
+
+    let mo_t = glueball_connected(&sum_oo_t, sum_o_t, n, c_thin)
+    let mo_a = glueball_connected(&sum_oo_a, sum_o_a, n, c_ape)
+
+    var n_ok_t: i64 = 0
+    var n_ok_a: i64 = 0
+    m = 0
+    while m < n {
+        let (mt, ot) = glueball_meff_log(
+            oo0_t[m as usize] - mo_t * mo_t,
+            oo1_t[m as usize] - mo_t * mo_t
+        )
+        meff_thin_s[m as usize] = mt
+        meff_thin_v[m as usize] = ot
+        if ot == 1 { n_ok_t = n_ok_t + 1 }
+
+        let (ma, oa) = glueball_meff_log(
+            oo0_a[m as usize] - mo_a * mo_a,
+            oo1_a[m as usize] - mo_a * mo_a
+        )
+        meff_ape_s[m as usize] = ma
+        meff_ape_v[m as usize] = oa
+        if oa == 1 { n_ok_a = n_ok_a + 1 }
+        m = m + 1
+    }
+    (n_ok_t, n_ok_a, mo_t, mo_a)
+}
+
+/// Same as measure_glueball_thin_and_ape but evolves with Creutz heatbath (no Metropolis).
+pub fn measure_glueball_thin_and_ape_hb(
+    lat: &![f64; 65536],
+    sm: &![f64; 65536],
+    tmp: &![f64; 65536],
+    beta: f64,
+    n_meas: i64,
+    n_sep: i64,
+    alpha: f64,
+    n_smear: i64,
+    c_thin: &![f64; 8],
+    c_ape: &![f64; 8],
+    meff_thin_s: &![f64; 256],
+    meff_thin_v: &![i64; 256],
+    meff_ape_s: &![f64; 256],
+    meff_ape_v: &![i64; 256]
+) -> (i64, i64, f64, f64) with Mut, Div, Panic {
+    var sum_oo_t: [f64; 8] = [0.0; 8]
+    var sum_oo_a: [f64; 8] = [0.0; 8]
+    var sum_o_t: f64 = 0.0
+    var sum_o_a: f64 = 0.0
+    var ops_t: [f64; 8] = [0.0; 8]
+    var ops_a: [f64; 8] = [0.0; 8]
+    var oo0_t: [f64; 256] = [0.0; 256]
+    var oo1_t: [f64; 256] = [0.0; 256]
+    var oo0_a: [f64; 256] = [0.0; 256]
+    var oo1_a: [f64; 256] = [0.0; 256]
+    var m: i64 = 0
+    let n = if n_meas < 256 { n_meas } else { 256 }
+    let L = lat_l()
+
+    while m < n {
+        var s: i64 = 0
+        while s < n_sep {
+            let _a = heatbath_sweep(lat, beta)
+            s = s + 1
+        }
+        glueball_ops_all(lat, &!ops_t)
+        ape_smear_n(lat, sm, tmp, alpha, n_smear, 1)
+        glueball_ops_all(sm, &!ops_a)
+
+        var c0t: f64 = 0.0
+        var c1t: f64 = 0.0
+        var c0a: f64 = 0.0
+        var c1a: f64 = 0.0
+        var t: i64 = 0
+        while t < L {
+            let t1 = (t + 1) % L
+            c0t = c0t + ops_t[t as usize] * ops_t[t as usize]
+            c1t = c1t + ops_t[t as usize] * ops_t[t1 as usize]
+            c0a = c0a + ops_a[t as usize] * ops_a[t as usize]
+            c1a = c1a + ops_a[t as usize] * ops_a[t1 as usize]
+            t = t + 1
+        }
+        let invL = 1.0 / (L as f64)
+        oo0_t[m as usize] = c0t * invL
+        oo1_t[m as usize] = c1t * invL
+        oo0_a[m as usize] = c0a * invL
+        oo1_a[m as usize] = c1a * invL
+        glueball_accum(&ops_t, &!sum_oo_t, &!sum_o_t)
+        glueball_accum(&ops_a, &!sum_oo_a, &!sum_o_a)
+        m = m + 1
+    }
+
+    let mo_t = glueball_connected(&sum_oo_t, sum_o_t, n, c_thin)
+    let mo_a = glueball_connected(&sum_oo_a, sum_o_a, n, c_ape)
+
+    var n_ok_t: i64 = 0
+    var n_ok_a: i64 = 0
+    m = 0
+    while m < n {
+        let (mt, ot) = glueball_meff_log(
+            oo0_t[m as usize] - mo_t * mo_t,
+            oo1_t[m as usize] - mo_t * mo_t
+        )
+        meff_thin_s[m as usize] = mt
+        meff_thin_v[m as usize] = ot
+        if ot == 1 { n_ok_t = n_ok_t + 1 }
+
+        let (ma, oa) = glueball_meff_log(
+            oo0_a[m as usize] - mo_a * mo_a,
+            oo1_a[m as usize] - mo_a * mo_a
+        )
+        meff_ape_s[m as usize] = ma
+        meff_ape_v[m as usize] = oa
+        if oa == 1 { n_ok_a = n_ok_a + 1 }
+        m = m + 1
+    }
+    (n_ok_t, n_ok_a, mo_t, mo_a)
+}
+
+/// Creutz + plaquette ensemble evolved by heatbath.
+pub fn measure_ensemble_hb(
+    lat: &![f64; 65536],
+    beta: f64,
+    n_meas: i64,
+    n_sep: i64,
+    plaq_samples: &![f64; 256],
+    chi2_samples: &![f64; 256],
+    chi2_valid: &![i64; 256]
+) -> i64 with Mut, Div, Panic {
+    var n_ok: i64 = 0
+    var m: i64 = 0
+    let n = if n_meas < 256 { n_meas } else { 256 }
+    while m < n {
+        var s: i64 = 0
+        while s < n_sep {
+            let _a = heatbath_sweep(lat, beta)
+            s = s + 1
+        }
+        plaq_samples[m as usize] = mean_plaquette(lat)
+        let (chi, ok) = creutz_ratio(lat, 2)
+        chi2_samples[m as usize] = chi
+        chi2_valid[m as usize] = ok
+        if ok == 1 { n_ok = n_ok + 1 }
+        m = m + 1
+    }
+    n_ok
+}
+
+// ============================================================================
+// STATIC POTENTIAL / FORCE / SOMMER r0
+// ============================================================================
+// V(r) from Wilson loops: V(r;t) = −ln( W(r,t) / W(r,t+1) )
+//   (local mass in temporal direction; prefer largest usable t)
+// Force: F(r) = V(r) − V(r−1)   (a = 1)
+// Sommer: r0² F(r0) = c_sommer  with c_sommer = 1.65 (Sommer 1994)
+// Discrete: evaluate at half-integer rh = r − 0.5:
+//   c(r) = rh² * F(r); interpolate r where c(r) = 1.65.
+// Ref: Sommer, Nucl. Phys. B411 (1994) 839; Bali, Phys. Rep. 343 (2001) 1.
+
+/// V from consecutive temporal Wilson loops at fixed spatial r:
+///   V(r;t) = −ln( W(r,t+1) / W(r,t) ) = ln( W(r,t) / W(r,t+1) )
+/// (area law: W decreases with t ⇒ V > 0). Returns (V, ok).
+pub fn static_potential_local(w_t: f64, w_tp1: f64) -> (f64, i64) with Mut, Div, Panic {
+    if w_t <= 1.0e-30 || w_tp1 <= 1.0e-30 { return (0.0, 0) }
+    if w_tp1 >= w_t { return (0.0, 0) }
+    // ln(W_t / W_{t+1}) — NOT −ln(W_t/W_{t+1}) (that sign flips to negative)
+    let v = ln_f64(w_t / w_tp1)
+    if v <= 0.0 || v != v { return (0.0, 0) }
+    (v, 1)
+}
+
+/// Fill V[r] for r=1..r_max using W(r,t*)/W(r,t*+1) with t_star preferred.
+/// t_star is chosen as the largest t with both W positive and ratio valid,
+/// scanning t from t_max_pref down to 1. Writes v[1..r_max], vok[1..r_max]
+/// (index 0 unused). Returns number of valid r.
+pub fn static_potential_scan(
+    lat: &[f64; 65536],
+    r_max: i64,
+    t_max_pref: i64,
+    v: &![f64; 8],
+    vok: &![i64; 8]
+) -> i64 with Mut, Div, Panic {
+    let L = lat_l()
+    var n_ok: i64 = 0
+    var r: i64 = 0
+    while r < 8 {
+        v[r as usize] = 0.0
+        vok[r as usize] = 0
+        r = r + 1
+    }
+    r = 1
+    while r <= r_max && r < L {
+        var found: i64 = 0
+        var t = t_max_pref
+        if t >= L { t = L - 2 }
+        if t < 1 { t = 1 }
+        while t >= 1 {
+            let wt = wilson_loop_rect(lat, r, t)
+            let wtp = wilson_loop_rect(lat, r, t + 1)
+            let (vv, ok) = static_potential_local(wt, wtp)
+            if ok == 1 {
+                v[r as usize] = vv
+                vok[r as usize] = 1
+                n_ok = n_ok + 1
+                found = 1
+                // break
+                t = 0
+            } else {
+                if t == 1 { break }
+                t = t - 1
+            }
+        }
+        let _f = found
+        r = r + 1
+    }
+    n_ok
+}
+
+/// F(r) = V(r) − V(r−1) for r≥2. Writes f[r], fok[r].
+pub fn static_force_from_v(
+    v: &[f64; 8],
+    vok: &[i64; 8],
+    r_max: i64,
+    f: &![f64; 8],
+    fok: &![i64; 8]
+) -> i64 with Mut {
+    var n: i64 = 0
+    var r: i64 = 0
+    while r < 8 {
+        f[r as usize] = 0.0
+        fok[r as usize] = 0
+        r = r + 1
+    }
+    r = 2
+    while r <= r_max && r < 8 {
+        if vok[r as usize] == 1 && vok[(r - 1) as usize] == 1 {
+            let fr = v[r as usize] - v[(r - 1) as usize]
+            if fr > 0.0 {
+                f[r as usize] = fr
+                fok[r as usize] = 1
+                n = n + 1
+            }
+        }
+        r = r + 1
+    }
+    n
+}
+
+/// c(r) = (r − 0.5)² F(r)  — discrete Sommer probe at half-integer radius.
+pub fn sommer_c_of_r(r: i64, f_r: f64) -> f64 {
+    let rh = (r as f64) - 0.5
+    rh * rh * f_r
+}
+
+/// Interpolate Sommer r0 where rh² F = c_target (default 1.65).
+/// Scans r=2..r_max; linear interpolate in r between consecutive points
+/// that bracket c_target. Returns (r0, ok) with
+///   ok=1  bracket interpolate
+///   ok=2  outward linear extrapolate (c rising, last c < target, r0 < r_max+1.5)
+///   ok=0  nearest-half-integer fallback (d < 0.5) or fail (r0=0)
+pub fn sommer_r0_interpolate(
+    f: &[f64; 8],
+    fok: &[i64; 8],
+    r_max: i64,
+    c_target: f64
+) -> (f64, i64) with Mut, Div, Panic {
+    var r: i64 = 2
+    var prev_r: i64 = 0
+    var prev_c: f64 = 0.0
+    var have_prev: i64 = 0
+    var last_r: i64 = 0
+    var last_c: f64 = 0.0
+    var n_pts: i64 = 0
+    while r <= r_max && r < 8 {
+        if fok[r as usize] == 1 {
+            let c = sommer_c_of_r(r, f[r as usize])
+            if have_prev == 1 {
+                let below = prev_c < c_target && c >= c_target
+                let above = prev_c > c_target && c <= c_target
+                if below || above {
+                    let dc = c - prev_c
+                    if abs_f64(dc) < 1.0e-30 { return ((r as f64) - 0.5, 1) }
+                    let t = (c_target - prev_c) / dc
+                    let r0 = ((prev_r as f64) - 0.5) + t * (((r as f64) - 0.5) - ((prev_r as f64) - 0.5))
+                    if r0 > 0.0 { return (r0, 1) }
+                }
+            }
+            prev_r = r
+            prev_c = c
+            have_prev = 1
+            last_r = r
+            last_c = c
+            n_pts = n_pts + 1
+        }
+        r = r + 1
+    }
+    // Outward extrapolate only if force is not collapsing (F_last ≥ 0.7 F_prev)
+    // and c is rising toward target. Falling F + rising c is r² geometry, not physics.
+    if n_pts >= 2 && last_c > 0.0 && last_c < c_target {
+        var r2: i64 = 0
+        var c2: f64 = 0.0
+        var f2: f64 = 0.0
+        var seen: i64 = 0
+        r = 2
+        while r <= r_max && r < 8 {
+            if fok[r as usize] == 1 {
+                let c = sommer_c_of_r(r, f[r as usize])
+                if r < last_r {
+                    r2 = r
+                    c2 = c
+                    f2 = f[r as usize]
+                    seen = 1
+                }
+            }
+            r = r + 1
+        }
+        let f_last = f[last_r as usize]
+        let f_ok = f2 > 1.0e-30 && f_last >= 0.7 * f2
+        if seen == 1 && last_c > c2 && f_ok {
+            let drh = ((last_r as f64) - 0.5) - ((r2 as f64) - 0.5)
+            let dc = last_c - c2
+            if drh > 1.0e-12 && dc > 1.0e-12 {
+                let slope = dc / drh
+                let r0 = ((last_r as f64) - 0.5) + (c_target - last_c) / slope
+                let r_cap = (r_max as f64) + 1.5
+                if r0 > 0.5 && r0 <= r_cap {
+                    return (r0, 2)
+                }
+            }
+        }
+    }
+    // fallback: nearest half-integer if close
+    var best_r: i64 = 0
+    var best_d: f64 = 1.0e30
+    r = 2
+    while r <= r_max && r < 8 {
+        if fok[r as usize] == 1 {
+            let c = sommer_c_of_r(r, f[r as usize])
+            var d = c - c_target
+            if d < 0.0 { d = 0.0 - d }
+            if d < best_d {
+                best_d = d
+                best_r = r
+            }
+        }
+        r = r + 1
+    }
+    if best_r >= 2 && best_d < 0.5 {
+        return ((best_r as f64) - 0.5, 0)
+    }
+    (0.0, 0)
+}
+
+/// String-tension Sommer proxy: r0_σ = √(c_target / σ) assuming F→σ.
+/// Valid when asymptotic force ≈ Creutz χ. Returns (r0, ok).
+/// Used when force-based r0 cannot be interpolated on small L.
+pub fn sommer_r0_from_sigma(sigma: f64, c_target: f64) -> (f64, i64) with Mut, Div, Panic {
+    if sigma <= 1.0e-30 || c_target <= 0.0 { return (0.0, 0) }
+    let r0 = sqrt_f64(c_target / sigma)
+    if r0 <= 0.0 || r0 != r0 { return (0.0, 0) }
+    (r0, 1)
+}
+
+/// Ensemble-average static potential under heatbath.
+///
+/// Correct procedure (Bali / Sommer): average Wilson loops first, then form
+///   V(r) = −ln( ⟨W(r,t)⟩ / ⟨W(r,t+1)⟩ )
+/// Single-config V ratios fail monotonicity on L≤6 (noise dominates area law).
+/// Writes mean_v[r], n_valid_r[r]=1 if V(r) valid (else 0). Returns n_meas.
+pub fn measure_potential_hb(
+    lat: &![f64; 65536],
+    beta: f64,
+    n_meas: i64,
+    n_sep: i64,
+    r_max: i64,
+    t_max_pref: i64,
+    mean_v: &![f64; 8],
+    n_valid_r: &![i64; 8]
+) -> i64 with Mut, Div, Panic {
+    let L = lat_l()
+    // Flat sum W: idx = r*8 + t  for r,t ∈ 0..7 (r,t=0 unused)
+    var sum_w: [f64; 64] = [0.0; 64]
+    var m: i64 = 0
+    let n = if n_meas < 256 { n_meas } else { 256 }
+    var t_hi = t_max_pref + 1
+    if t_hi >= L { t_hi = L - 1 }
+    if t_hi < 2 { t_hi = 2 }
+    var r_hi = r_max
+    if r_hi >= L { r_hi = L - 1 }
+    if r_hi < 1 { r_hi = 1 }
+    while m < n {
+        var s: i64 = 0
+        while s < n_sep {
+            let _a = heatbath_sweep(lat, beta)
+            s = s + 1
+        }
+        var r: i64 = 1
+        while r <= r_hi {
+            var t: i64 = 1
+            while t <= t_hi {
+                let w = wilson_loop_rect(lat, r, t)
+                let idx = r * 8 + t
+                sum_w[idx as usize] = sum_w[idx as usize] + w
+                t = t + 1
+            }
+            r = r + 1
+        }
+        m = m + 1
+    }
+    // Zero outputs
+    var r0: i64 = 0
+    while r0 < 8 {
+        mean_v[r0 as usize] = 0.0
+        n_valid_r[r0 as usize] = 0
+        r0 = r0 + 1
+    }
+    if n <= 0 { return 0 }
+    let nf = n as f64
+    // V(r) from mean W, prefer largest t with valid ratio
+    var r: i64 = 1
+    while r <= r_hi && r < 8 {
+        var found: i64 = 0
+        var t = t_max_pref
+        if t >= L - 1 { t = L - 2 }
+        if t < 1 { t = 1 }
+        while t >= 1 && found == 0 {
+            let idx_t = r * 8 + t
+            let idx_tp = r * 8 + (t + 1)
+            let wt = sum_w[idx_t as usize] / nf
+            let wtp = sum_w[idx_tp as usize] / nf
+            let (vv, ok) = static_potential_local(wt, wtp)
+            if ok == 1 {
+                mean_v[r as usize] = vv
+                n_valid_r[r as usize] = 1
+                found = 1
+            } else {
+                if t == 1 { break }
+                t = t - 1
+            }
+        }
+        r = r + 1
+    }
+    n
+}
+
+/// Heatbath ensemble: plaquette + Creutz χ(R,R) for R=2 and R=3 (needs L≥4, L≥6).
+/// Returns (n_ok_chi2, n_ok_chi3).
+pub fn measure_ensemble_hb_multi_r(
+    lat: &![f64; 65536],
+    beta: f64,
+    n_meas: i64,
+    n_sep: i64,
+    plaq_samples: &![f64; 256],
+    chi2_samples: &![f64; 256],
+    chi2_valid: &![i64; 256],
+    chi3_samples: &![f64; 256],
+    chi3_valid: &![i64; 256]
+) -> (i64, i64) with Mut, Div, Panic {
+    var n2: i64 = 0
+    var n3: i64 = 0
+    var m: i64 = 0
+    let n = if n_meas < 256 { n_meas } else { 256 }
+    while m < n {
+        var s: i64 = 0
+        while s < n_sep {
+            let _a = heatbath_sweep(lat, beta)
+            s = s + 1
+        }
+        plaq_samples[m as usize] = mean_plaquette(lat)
+        let (c2, o2) = creutz_ratio(lat, 2)
+        chi2_samples[m as usize] = c2
+        chi2_valid[m as usize] = o2
+        if o2 == 1 { n2 = n2 + 1 }
+        let (c3, o3) = creutz_ratio(lat, 3)
+        chi3_samples[m as usize] = c3
+        chi3_valid[m as usize] = o3
+        if o3 == 1 { n3 = n3 + 1 }
+        m = m + 1
+    }
+    (n2, n3)
+}
+
+/// Heatbath ensemble: Creutz χ(R,R) for R=2,3,4 (needs L≥8 for R=4).
+/// Returns (n_ok_chi2, n_ok_chi3, n_ok_chi4).
+pub fn measure_ensemble_hb_multi_r4(
+    lat: &![f64; 65536],
+    beta: f64,
+    n_meas: i64,
+    n_sep: i64,
+    plaq_samples: &![f64; 256],
+    chi2_samples: &![f64; 256],
+    chi2_valid: &![i64; 256],
+    chi3_samples: &![f64; 256],
+    chi3_valid: &![i64; 256],
+    chi4_samples: &![f64; 256],
+    chi4_valid: &![i64; 256]
+) -> (i64, i64, i64) with Mut, Div, Panic {
+    var n2: i64 = 0
+    var n3: i64 = 0
+    var n4: i64 = 0
+    var m: i64 = 0
+    let n = if n_meas < 256 { n_meas } else { 256 }
+    let L = lat_l()
+    while m < n {
+        var s: i64 = 0
+        while s < n_sep {
+            let _a = heatbath_sweep(lat, beta)
+            s = s + 1
+        }
+        plaq_samples[m as usize] = mean_plaquette(lat)
+        let (c2, o2) = creutz_ratio(lat, 2)
+        chi2_samples[m as usize] = c2
+        chi2_valid[m as usize] = o2
+        if o2 == 1 { n2 = n2 + 1 }
+        let (c3, o3) = creutz_ratio(lat, 3)
+        chi3_samples[m as usize] = c3
+        chi3_valid[m as usize] = o3
+        if o3 == 1 { n3 = n3 + 1 }
+        if L > 4 {
+            let (c4, o4) = creutz_ratio(lat, 4)
+            chi4_samples[m as usize] = c4
+            chi4_valid[m as usize] = o4
+            if o4 == 1 { n4 = n4 + 1 }
+        } else {
+            chi4_samples[m as usize] = 0.0
+            chi4_valid[m as usize] = 0
+        }
+        m = m + 1
+    }
+    (n2, n3, n4)
+}
+
+// ============================================================================
+// MULTI-τ CORRELATOR + EFFECTIVE-MASS PLATEAU (spectral honesty)
+// ============================================================================
+// C(τ) for τ = 0..L−1 (periodic). m_eff(τ) = ln(C(τ)/C(τ+1)).
+// A true continuum glueball mass requires a τ-plateau; m_eff(0) alone is
+// UV-contaminated. On L=6 only τ∈{0,1,2} are independent (C(τ)=C(L−τ)).
+//
+// CLAIM: expose whether a plateau exists. FAIL_HONEST if m_eff(τ) drifts.
+
+/// Heatbath-evolved full connected correlators for thin + APE operators.
+/// Writes c_thin[0..L), c_ape[0..L). Returns (⟨O⟩_thin, ⟨O⟩_ape).
+pub fn measure_glueball_correlator_full_hb(
+    lat: &![f64; 65536],
+    sm: &![f64; 65536],
+    tmp: &![f64; 65536],
+    beta: f64,
+    n_meas: i64,
+    n_sep: i64,
+    alpha: f64,
+    n_smear: i64,
+    c_thin: &![f64; 8],
+    c_ape: &![f64; 8]
+) -> (f64, f64) with Mut, Div, Panic {
+    var sum_oo_t: [f64; 8] = [0.0; 8]
+    var sum_oo_a: [f64; 8] = [0.0; 8]
+    var sum_o_t: f64 = 0.0
+    var sum_o_a: f64 = 0.0
+    var ops_t: [f64; 8] = [0.0; 8]
+    var ops_a: [f64; 8] = [0.0; 8]
+    let n = if n_meas < 256 { n_meas } else { 256 }
+    var m: i64 = 0
+    while m < n {
+        var s: i64 = 0
+        while s < n_sep {
+            let _a = heatbath_sweep(lat, beta)
+            s = s + 1
+        }
+        glueball_ops_all(lat, &!ops_t)
+        ape_smear_n(lat, sm, tmp, alpha, n_smear, 1)
+        glueball_ops_all(sm, &!ops_a)
+        glueball_accum(&ops_t, &!sum_oo_t, &!sum_o_t)
+        glueball_accum(&ops_a, &!sum_oo_a, &!sum_o_a)
+        m = m + 1
+    }
+    let mo_t = glueball_connected(&sum_oo_t, sum_o_t, n, c_thin)
+    let mo_a = glueball_connected(&sum_oo_a, sum_o_a, n, c_ape)
+    (mo_t, mo_a)
+}
+
+/// Fill meff[τ] and valid[τ] for τ = 0 .. n_tau−1 from connected C[].
+/// n_tau typically L/2 (independent separations).
+pub fn glueball_meff_scan(
+    c: &[f64; 8],
+    n_tau: i64,
+    meff: &![f64; 8],
+    valid: &![i64; 8]
+) with Mut, Div, Panic {
+    var tau: i64 = 0
+    while tau < n_tau && tau < 7 {
+        let (m, ok) = glueball_meff_log(c[tau as usize], c[(tau + 1) as usize])
+        meff[tau as usize] = m
+        valid[tau as usize] = ok
+        tau = tau + 1
+    }
+    while tau < 8 {
+        meff[tau as usize] = 0.0
+        valid[tau as usize] = 0
+        tau = tau + 1
+    }
+}
+
+/// Plateau diagnostic between m_eff(τ0) and m_eff(τ1).
+/// Returns (rel_diff, ok) with rel_diff = |m0−m1| / mean if both valid.
+/// ok=1 if both valid and rel_diff <= tol.
+pub fn glueball_plateau_test(
+    m0: f64, ok0: i64,
+    m1: f64, ok1: i64,
+    tol: f64
+) -> (f64, i64) with Mut, Div, Panic {
+    if ok0 == 0 || ok1 == 0 { return (0.0, 0) }
+    if m0 <= 0.0 || m1 <= 0.0 { return (0.0, 0) }
+    var d = m0 - m1
+    if d < 0.0 { d = 0.0 - d }
+    let mean = 0.5 * (m0 + m1)
+    let rel = d / mean
+    if rel <= tol { (rel, 1) } else { (rel, 0) }
+}
+
+/// Prefer later τ for ground-state estimate: use highest τ with valid m_eff
+/// in 0..n_tau−1; fall back to τ=0. Returns (m, tau_used, ok).
+///
+/// WARNING: fallback to τ=0 is NOT a plateau mass. For spectral claims use
+/// `glueball_mass_claim` — it refuses to promote contact m_eff(0) to a gap.
+pub fn glueball_meff_best_tau(
+    meff: &[f64; 8],
+    valid: &[i64; 8],
+    n_tau: i64
+) -> (f64, i64, i64) with Mut {
+    var tau = n_tau - 1
+    if tau > 6 { tau = 6 }
+    while tau >= 0 {
+        if valid[tau as usize] == 1 && meff[tau as usize] > 0.0 {
+            return (meff[tau as usize], tau, 1)
+        }
+        if tau == 0 { break }
+        tau = tau - 1
+    }
+    (0.0, 0, 0)
+}
+
+// ============================================================================
+// HARD MASS-GAP CLAIM GATE (spectral honesty — no drift to contact)
+// ============================================================================
+// A pure-gauge mass *gap* claim requires a τ-plateau in m_eff(τ).
+// m_eff(0) alone is a UV/contact scale estimator, not a spectral gap.
+// status codes for glueball_mass_claim:
+//   0 = MASS_GAP_CLAIM_KILLED   — no usable spectrum; do not quote m/√σ as gap
+//   1 = CONTACT_UV_ONLY         — only m_eff(0); may quote as contact UV, never as gap
+//   2 = PLATEAU_MASS            — ≥1 consecutive pair (τ,τ+1) both valid, rel≤tol,
+//                                 and the pair involves τ≥0 with at least one of
+//                                 {τ,τ+1} ≥ 1 (i.e. not a single-point fiction)
+//
+// When status ≠ 2: m_gap MUST be treated as 0 for any gap ratio m/√σ.
+
+/// Count valid positive m_eff entries in 0..n_tau−1.
+pub fn glueball_n_valid_meff(valid: &[i64; 8], meff: &[f64; 8], n_tau: i64) -> i64 {
+    var n: i64 = 0
+    var t: i64 = 0
+    while t < n_tau && t < 8 {
+        if valid[t as usize] == 1 && meff[t as usize] > 0.0 { n = n + 1 }
+        t = t + 1
+    }
+    n
+}
+
+/// Hard mass-gap claim from m_eff(τ) scan.
+/// Returns (status, m_gap):
+///   status 0 = KILLED, m_gap=0
+///   status 1 = CONTACT_UV_ONLY (meff[0] valid only as UV; m_gap=0)
+///   status 2 = PLATEAU_MASS, m_gap = mean of a consecutive pair with rel≤tol
+/// Use glueball_n_valid_meff for n_valid; m_contact = meff[0] if valid[0].
+pub fn glueball_mass_claim(
+    meff: &[f64; 8],
+    valid: &[i64; 8],
+    n_tau: i64,
+    tol: f64
+) -> (i64, f64) with Mut, Div, Panic {
+    var m_contact: f64 = 0.0
+    if valid[0] == 1 && meff[0] > 0.0 { m_contact = meff[0] }
+
+    var best_m: f64 = 0.0
+    var best_rel: f64 = 1.0e30
+    var have_plat: i64 = 0
+    var t: i64 = 0
+    let t_max = n_tau - 1
+    while t < t_max && t < 7 {
+        let o0 = valid[t as usize]
+        let o1 = valid[(t + 1) as usize]
+        let m0 = meff[t as usize]
+        let m1 = meff[(t + 1) as usize]
+        if o0 == 1 && o1 == 1 && m0 > 0.0 && m1 > 0.0 {
+            var d = m0 - m1
+            if d < 0.0 { d = 0.0 - d }
+            let mean = 0.5 * (m0 + m1)
+            var rel = 0.0
+            if mean > 1.0e-30 { rel = d / mean }
+            if rel <= tol {
+                let mplat = mean
+                if have_plat == 0 || t >= 1 {
+                    best_m = mplat
+                    best_rel = rel
+                    have_plat = 1
+                } else if rel < best_rel {
+                    best_m = mplat
+                    best_rel = rel
+                }
+            }
+        }
+        t = t + 1
+    }
+
+    if have_plat == 1 && best_m > 0.0 {
+        return (2, best_m)
+    }
+    if m_contact > 0.0 {
+        return (1, 0.0)
+    }
+    (0, 0.0)
+}
+
+/// Gap ratio only if status==2; otherwise returns (0, 0) — hard kill.
+/// Call after glueball_mass_claim. Never promotes contact UV to gap.
+pub fn mass_gap_ratio_or_kill(
+    status: i64,
+    m_gap: f64,
+    sqrt_sigma: f64
+) -> (f64, i64) with Mut, Div, Panic {
+    if status != 2 { return (0.0, 0) }
+    if m_gap <= 0.0 || sqrt_sigma <= 1.0e-30 { return (0.0, 0) }
+    (m_gap / sqrt_sigma, 1)
+}
+
+// ============================================================================
+// VARIATIONAL 2-SMEAR + 2×2 GEVP (ground-state projection at small τ)
+// ============================================================================
+// Operators: O0 = light APE (n0 steps), O1 = heavy APE (n1 steps).
+// Correlator matrix C_ij(τ) = ⟨Oi(t) Oj(t+τ)⟩_t − ⟨Oi⟩⟨Oj⟩  (connected).
+// GEVP: C(τ) v = λ C(τ0) v.  Ground state ≈ largest λ (closest to 1).
+//   m = −ln(λ) / (τ − τ0)   for τ > τ0.
+// Ref: Luscher–Wolff; Morningstar–Peardon glueball spectroscopy.
+
+/// 2×2 GEVP: Cτ v = λ C0 v. Returns (λ_max, ok).
+/// Uses M = C0^{-1} Cτ and the quadratic eigenvalue formula.
+pub fn gevp_2x2(
+    c00: f64, c01: f64, c11: f64,
+    d00: f64, d01: f64, d11: f64
+) -> (f64, i64) with Mut, Div, Panic {
+    // C0 = [[d00,d01],[d01,d11]], Cτ = [[c00,c01],[c01,c11]]
+    let det0 = d00 * d11 - d01 * d01
+    if det0 <= 1.0e-30 { return (0.0, 0) }
+    let inv = 1.0 / det0
+    let m00 = inv * (d11 * c00 - d01 * c01)
+    let m01 = inv * (d11 * c01 - d01 * c11)
+    let m10 = inv * (0.0 - d01 * c00 + d00 * c01)
+    let m11 = inv * (0.0 - d01 * c01 + d00 * c11)
+    let tr = m00 + m11
+    let detm = m00 * m11 - m01 * m10
+    let disc = tr * tr - 4.0 * detm
+    if disc < 0.0 { return (0.0, 0) }
+    let s = sqrt_f64(disc)
+    let l1 = 0.5 * (tr + s)
+    let l2 = 0.5 * (tr - s)
+    var lmax = l1
+    if l2 > lmax { lmax = l2 }
+    if lmax <= 0.0 { return (lmax, 0) }
+    if lmax >= 1.0 { return (lmax, 0) }
+    (lmax, 1)
+}
+
+/// Mass from GEVP eigenvalue: m = −ln(λ) / dτ.
+pub fn gevp_mass(lambda: f64, dtau: f64) -> (f64, i64) with Mut, Div, Panic {
+    if lambda <= 1.0e-30 || lambda >= 1.0 { return (0.0, 0) }
+    if dtau <= 0.0 { return (0.0, 0) }
+    let m = (0.0 - ln_f64(lambda)) / dtau
+    if m <= 0.0 || m != m { return (0.0, 0) }
+    (m, 1)
+}
+
+/// Measure 2×2 connected correlator matrix at all τ with heatbath evolution.
+/// c_ij[τ] stored flat: idx = tau*4 + (0:00, 1:01, 2:10, 3:11) with c10=c01.
+/// For simplicity store only c00,c01,c11 per τ in three arrays of 8.
+/// Returns (mean_O0, mean_O1).
+pub fn measure_variational_2smear_hb(
+    lat: &![f64; 65536],
+    sm0: &![f64; 65536],
+    sm1: &![f64; 65536],
+    tmp: &![f64; 65536],
+    beta: f64,
+    n_meas: i64,
+    n_sep: i64,
+    alpha: f64,
+    n_smear0: i64,
+    n_smear1: i64,
+    c00: &![f64; 8],
+    c01: &![f64; 8],
+    c11: &![f64; 8]
+) -> (f64, f64) with Mut, Div, Panic {
+    var sum00: [f64; 8] = [0.0; 8]
+    var sum01: [f64; 8] = [0.0; 8]
+    var sum11: [f64; 8] = [0.0; 8]
+    var sum_o0: f64 = 0.0
+    var sum_o1: f64 = 0.0
+    var ops0: [f64; 8] = [0.0; 8]
+    var ops1: [f64; 8] = [0.0; 8]
+    let L = lat_l()
+    let n = if n_meas < 256 { n_meas } else { 256 }
+    var m: i64 = 0
+    while m < n {
+        var s: i64 = 0
+        while s < n_sep {
+            let _a = heatbath_sweep(lat, beta)
+            s = s + 1
+        }
+        ape_smear_n(lat, sm0, tmp, alpha, n_smear0, 1)
+        ape_smear_n(lat, sm1, tmp, alpha, n_smear1, 1)
+        glueball_ops_all(sm0, &!ops0)
+        glueball_ops_all(sm1, &!ops1)
+
+        var mo0: f64 = 0.0
+        var mo1: f64 = 0.0
+        var t: i64 = 0
+        while t < L {
+            mo0 = mo0 + ops0[t as usize]
+            mo1 = mo1 + ops1[t as usize]
+            t = t + 1
+        }
+        let invL = 1.0 / (L as f64)
+        mo0 = mo0 * invL
+        mo1 = mo1 * invL
+        sum_o0 = sum_o0 + mo0
+        sum_o1 = sum_o1 + mo1
+
+        var tau: i64 = 0
+        while tau < L && tau < 8 {
+            var s00: f64 = 0.0
+            var s01: f64 = 0.0
+            var s11: f64 = 0.0
+            t = 0
+            while t < L {
+                let tp = (t + tau) % L
+                s00 = s00 + ops0[t as usize] * ops0[tp as usize]
+                s01 = s01 + ops0[t as usize] * ops1[tp as usize]
+                s11 = s11 + ops1[t as usize] * ops1[tp as usize]
+                t = t + 1
+            }
+            sum00[tau as usize] = sum00[tau as usize] + s00 * invL
+            sum01[tau as usize] = sum01[tau as usize] + s01 * invL
+            sum11[tau as usize] = sum11[tau as usize] + s11 * invL
+            tau = tau + 1
+        }
+        m = m + 1
+    }
+
+    let invn = 1.0 / (n as f64)
+    let mean0 = sum_o0 * invn
+    let mean1 = sum_o1 * invn
+    var tau: i64 = 0
+    while tau < 8 {
+        c00[tau as usize] = 0.0
+        c01[tau as usize] = 0.0
+        c11[tau as usize] = 0.0
+        tau = tau + 1
+    }
+    tau = 0
+    while tau < L && tau < 8 {
+        c00[tau as usize] = sum00[tau as usize] * invn - mean0 * mean0
+        c01[tau as usize] = sum01[tau as usize] * invn - mean0 * mean1
+        c11[tau as usize] = sum11[tau as usize] * invn - mean1 * mean1
+        tau = tau + 1
+    }
+    (mean0, mean1)
+}
+
+/// Three smear levels O0,O1,O2 on one heatbath stream.
+/// Fills connected C_ij(τ) for i≤j as six arrays of length 8.
+/// Returns (⟨O0⟩, ⟨O1⟩, ⟨O2⟩).
+pub fn measure_variational_3smear_hb(
+    lat: &![f64; 65536],
+    sm0: &![f64; 65536],
+    sm1: &![f64; 65536],
+    sm2: &![f64; 65536],
+    tmp: &![f64; 65536],
+    beta: f64,
+    n_meas: i64,
+    n_sep: i64,
+    alpha: f64,
+    n0: i64,
+    n1: i64,
+    n2: i64,
+    c00: &![f64; 8],
+    c01: &![f64; 8],
+    c02: &![f64; 8],
+    c11: &![f64; 8],
+    c12: &![f64; 8],
+    c22: &![f64; 8]
+) -> (f64, f64, f64) with Mut, Div, Panic {
+    var s00: [f64; 8] = [0.0; 8]
+    var s01: [f64; 8] = [0.0; 8]
+    var s02: [f64; 8] = [0.0; 8]
+    var s11: [f64; 8] = [0.0; 8]
+    var s12: [f64; 8] = [0.0; 8]
+    var s22: [f64; 8] = [0.0; 8]
+    var sum0: f64 = 0.0
+    var sum1: f64 = 0.0
+    var sum2: f64 = 0.0
+    var o0: [f64; 8] = [0.0; 8]
+    var o1: [f64; 8] = [0.0; 8]
+    var o2: [f64; 8] = [0.0; 8]
+    let L = lat_l()
+    let n = if n_meas < 256 { n_meas } else { 256 }
+    var m: i64 = 0
+    while m < n {
+        var s: i64 = 0
+        while s < n_sep {
+            let _a = heatbath_sweep(lat, beta)
+            s = s + 1
+        }
+        ape_smear_n(lat, sm0, tmp, alpha, n0, 1)
+        ape_smear_n(lat, sm1, tmp, alpha, n1, 1)
+        ape_smear_n(lat, sm2, tmp, alpha, n2, 1)
+        glueball_ops_all(sm0, &!o0)
+        glueball_ops_all(sm1, &!o1)
+        glueball_ops_all(sm2, &!o2)
+
+        var mo0: f64 = 0.0
+        var mo1: f64 = 0.0
+        var mo2: f64 = 0.0
+        var t: i64 = 0
+        while t < L {
+            mo0 = mo0 + o0[t as usize]
+            mo1 = mo1 + o1[t as usize]
+            mo2 = mo2 + o2[t as usize]
+            t = t + 1
+        }
+        let invL = 1.0 / (L as f64)
+        mo0 = mo0 * invL
+        mo1 = mo1 * invL
+        mo2 = mo2 * invL
+        sum0 = sum0 + mo0
+        sum1 = sum1 + mo1
+        sum2 = sum2 + mo2
+
+        var tau: i64 = 0
+        while tau < L && tau < 8 {
+            var a00: f64 = 0.0
+            var a01: f64 = 0.0
+            var a02: f64 = 0.0
+            var a11: f64 = 0.0
+            var a12: f64 = 0.0
+            var a22: f64 = 0.0
+            t = 0
+            while t < L {
+                let tp = (t + tau) % L
+                a00 = a00 + o0[t as usize] * o0[tp as usize]
+                a01 = a01 + o0[t as usize] * o1[tp as usize]
+                a02 = a02 + o0[t as usize] * o2[tp as usize]
+                a11 = a11 + o1[t as usize] * o1[tp as usize]
+                a12 = a12 + o1[t as usize] * o2[tp as usize]
+                a22 = a22 + o2[t as usize] * o2[tp as usize]
+                t = t + 1
+            }
+            s00[tau as usize] = s00[tau as usize] + a00 * invL
+            s01[tau as usize] = s01[tau as usize] + a01 * invL
+            s02[tau as usize] = s02[tau as usize] + a02 * invL
+            s11[tau as usize] = s11[tau as usize] + a11 * invL
+            s12[tau as usize] = s12[tau as usize] + a12 * invL
+            s22[tau as usize] = s22[tau as usize] + a22 * invL
+            tau = tau + 1
+        }
+        m = m + 1
+    }
+
+    let invn = 1.0 / (n as f64)
+    let m0 = sum0 * invn
+    let m1 = sum1 * invn
+    let m2 = sum2 * invn
+    var tau: i64 = 0
+    while tau < 8 {
+        c00[tau as usize] = 0.0
+        c01[tau as usize] = 0.0
+        c02[tau as usize] = 0.0
+        c11[tau as usize] = 0.0
+        c12[tau as usize] = 0.0
+        c22[tau as usize] = 0.0
+        tau = tau + 1
+    }
+    tau = 0
+    while tau < L && tau < 8 {
+        c00[tau as usize] = s00[tau as usize] * invn - m0 * m0
+        c01[tau as usize] = s01[tau as usize] * invn - m0 * m1
+        c02[tau as usize] = s02[tau as usize] * invn - m0 * m2
+        c11[tau as usize] = s11[tau as usize] * invn - m1 * m1
+        c12[tau as usize] = s12[tau as usize] * invn - m1 * m2
+        c22[tau as usize] = s22[tau as usize] * invn - m2 * m2
+        tau = tau + 1
+    }
+    (m0, m1, m2)
+}
+
+// ============================================================================
+// 3×3 GEVP — principal correlator mass (no pair shopping)
+// ============================================================================
+// C(τ) v = λ C(τ0) v  ⇔  M v = λ v with M = C0^{-1} Cτ.
+// Ground state: largest λ ∈ (0,1),  m = −ln(λ)/(τ−τ0).
+// Inverse via explicit 3×3 adjugate; dominant eigenvalue via power iteration.
+
+/// det of 3×3 row-major matrix.
+pub fn mat3_det(a: &[f64; 9]) -> f64 {
+    a[0] * (a[4] * a[8] - a[5] * a[7])
+        - a[1] * (a[3] * a[8] - a[5] * a[6])
+        + a[2] * (a[3] * a[7] - a[4] * a[6])
+}
+
+/// Invert 3×3; returns 1 on success, 0 if |det| too small.
+pub fn mat3_inv(a: &[f64; 9], out: &![f64; 9]) -> i64 with Mut, Div, Panic {
+    let d = mat3_det(a)
+    var ad = d
+    if ad < 0.0 { ad = 0.0 - ad }
+    if ad <= 1.0e-30 { return 0 }
+    let inv = 1.0 / d
+    // cofactors transposed
+    out[0] = (a[4] * a[8] - a[5] * a[7]) * inv
+    out[1] = (a[2] * a[7] - a[1] * a[8]) * inv
+    out[2] = (a[1] * a[5] - a[2] * a[4]) * inv
+    out[3] = (a[5] * a[6] - a[3] * a[8]) * inv
+    out[4] = (a[0] * a[8] - a[2] * a[6]) * inv
+    out[5] = (a[2] * a[3] - a[0] * a[5]) * inv
+    out[6] = (a[3] * a[7] - a[4] * a[6]) * inv
+    out[7] = (a[1] * a[6] - a[0] * a[7]) * inv
+    out[8] = (a[0] * a[4] - a[1] * a[3]) * inv
+    1
+}
+
+/// C = A · B for 3×3 row-major.
+pub fn mat3_mul(a: &[f64; 9], b: &[f64; 9], c: &![f64; 9]) with Mut {
+    var i: i64 = 0
+    while i < 3 {
+        var j: i64 = 0
+        while j < 3 {
+            var s: f64 = 0.0
+            var k: i64 = 0
+            while k < 3 {
+                s = s + a[(i * 3 + k) as usize] * b[(k * 3 + j) as usize]
+                k = k + 1
+            }
+            c[(i * 3 + j) as usize] = s
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+/// Largest-magnitude eigenvalue of 3×3 via power iteration. Returns (λ, ok).
+pub fn mat3_eig_max_power(a: &[f64; 9], n_iter: i64) -> (f64, i64) with Mut, Div, Panic {
+    var v0: f64 = 1.0
+    var v1: f64 = 0.3
+    var v2: f64 = 0.1
+    var it: i64 = 0
+    var lam: f64 = 0.0
+    while it < n_iter {
+        let w0 = a[0] * v0 + a[1] * v1 + a[2] * v2
+        let w1 = a[3] * v0 + a[4] * v1 + a[5] * v2
+        let w2 = a[6] * v0 + a[7] * v1 + a[8] * v2
+        var n2 = w0 * w0 + w1 * w1 + w2 * w2
+        if n2 <= 1.0e-30 { return (0.0, 0) }
+        let invn = 1.0 / sqrt_f64(n2)
+        // Rayleigh quotient λ ≈ v·Av / v·v with new direction
+        let num = v0 * w0 + v1 * w1 + v2 * w2
+        let den = v0 * v0 + v1 * v1 + v2 * v2
+        if den > 1.0e-30 { lam = num / den }
+        v0 = w0 * invn
+        v1 = w1 * invn
+        v2 = w2 * invn
+        it = it + 1
+    }
+    // final Rayleigh
+    let w0 = a[0] * v0 + a[1] * v1 + a[2] * v2
+    let w1 = a[3] * v0 + a[4] * v1 + a[5] * v2
+    let w2 = a[6] * v0 + a[7] * v1 + a[8] * v2
+    let num = v0 * w0 + v1 * w1 + v2 * w2
+    let den = v0 * v0 + v1 * v1 + v2 * v2
+    if den <= 1.0e-30 { return (0.0, 0) }
+    lam = num / den
+    if lam <= 0.0 { return (lam, 0) }
+    if lam >= 1.0 { return (lam, 0) }
+    (lam, 1)
+}
+
+/// Build symmetric C matrix from correlator components at fixed τ.
+pub fn gevp_fill_c3(
+    c00: f64, c01: f64, c02: f64,
+    c11: f64, c12: f64, c22: f64,
+    out: &![f64; 9]
+) with Mut {
+    out[0] = c00; out[1] = c01; out[2] = c02
+    out[3] = c01; out[4] = c11; out[5] = c12
+    out[6] = c02; out[7] = c12; out[8] = c22
+}
+
+/// 3×3 GEVP principal λ: Cτ v = λ C0 v. Returns (λ_max, ok).
+pub fn gevp_3x3(
+    c00t: f64, c01t: f64, c02t: f64, c11t: f64, c12t: f64, c22t: f64,
+    c00z: f64, c01z: f64, c02z: f64, c11z: f64, c12z: f64, c22z: f64
+) -> (f64, i64) with Mut, Div, Panic {
+    var c0: [f64; 9] = [0.0; 9]
+    var ct: [f64; 9] = [0.0; 9]
+    var inv: [f64; 9] = [0.0; 9]
+    var m: [f64; 9] = [0.0; 9]
+    gevp_fill_c3(c00z, c01z, c02z, c11z, c12z, c22z, &!c0)
+    gevp_fill_c3(c00t, c01t, c02t, c11t, c12t, c22t, &!ct)
+    let ok_inv = mat3_inv(&c0, &!inv)
+    if ok_inv == 0 { return (0.0, 0) }
+    mat3_mul(&inv, &ct, &!m)
+    mat3_eig_max_power(&m, 40)
+}
+
+/// Mass from 3×3 GEVP λ.
+pub fn gevp3_mass(lambda: f64, dtau: f64) -> (f64, i64) with Mut, Div, Panic {
+    gevp_mass(lambda, dtau)
+}
+
+/// Multi-τ GEVP masses from a 3×3 correlator matrix C(τ).
+/// For each sink τ = t0+1 .. n_sink (inclusive max n_sink, τ < 8):
+///   GEVP C(τ)v = λ C(t0)v,  m[τ] = −ln(λ)/(τ−t0).
+/// meff[0..t0] left 0/invalid. Returns number of valid sink masses.
+/// Feed `meff`/`valid` into `glueball_mass_claim` for hard plateau gate.
+pub fn gevp3_meff_scan(
+    c00: &[f64; 8],
+    c01: &[f64; 8],
+    c02: &[f64; 8],
+    c11: &[f64; 8],
+    c12: &[f64; 8],
+    c22: &[f64; 8],
+    t0: i64,
+    n_sink: i64,
+    meff: &![f64; 8],
+    valid: &![i64; 8]
+) -> i64 with Mut, Div, Panic {
+    var k: i64 = 0
+    while k < 8 {
+        meff[k as usize] = 0.0
+        valid[k as usize] = 0
+        k = k + 1
+    }
+    if t0 < 0 || t0 > 5 { return 0 }
+    var n_ok: i64 = 0
+    var tau = t0 + 1
+    let t_hi = if n_sink < 7 { n_sink } else { 7 }
+    while tau <= t_hi && tau < 8 {
+        let dtau = (tau - t0) as f64
+        let (lam, ok_l) = gevp_3x3(
+            c00[tau as usize], c01[tau as usize], c02[tau as usize],
+            c11[tau as usize], c12[tau as usize], c22[tau as usize],
+            c00[t0 as usize], c01[t0 as usize], c02[t0 as usize],
+            c11[t0 as usize], c12[t0 as usize], c22[t0 as usize]
+        )
+        if ok_l == 1 {
+            let (m, ok_m) = gevp_mass(lam, dtau)
+            if ok_m == 1 {
+                meff[tau as usize] = m
+                valid[tau as usize] = 1
+                n_ok = n_ok + 1
+            }
+        }
+        tau = tau + 1
+    }
+    n_ok
+}
+
+/// Multi-τ 2×2 GEVP masses (operators 0,1 only) — often more stable than 3×3.
+/// Same contract as gevp3_meff_scan. Returns n_ok.
+pub fn gevp2_meff_scan(
+    c00: &[f64; 8],
+    c01: &[f64; 8],
+    c11: &[f64; 8],
+    t0: i64,
+    n_sink: i64,
+    meff: &![f64; 8],
+    valid: &![i64; 8]
+) -> i64 with Mut, Div, Panic {
+    var k: i64 = 0
+    while k < 8 {
+        meff[k as usize] = 0.0
+        valid[k as usize] = 0
+        k = k + 1
+    }
+    if t0 < 0 || t0 > 5 { return 0 }
+    var n_ok: i64 = 0
+    var tau = t0 + 1
+    let t_hi = if n_sink < 7 { n_sink } else { 7 }
+    while tau <= t_hi && tau < 8 {
+        let dtau = (tau - t0) as f64
+        let (lam, ok_l) = gevp_2x2(
+            c00[tau as usize], c01[tau as usize], c11[tau as usize],
+            c00[t0 as usize], c01[t0 as usize], c11[t0 as usize]
+        )
+        if ok_l == 1 {
+            let (m, ok_m) = gevp_mass(lam, dtau)
+            if ok_m == 1 {
+                meff[tau as usize] = m
+                valid[tau as usize] = 1
+                n_ok = n_ok + 1
+            }
+        }
+        tau = tau + 1
+    }
+    n_ok
+}
+
+/// Local GEVP effective mass between consecutive sinks (τ, τ+1) with ref C(τ).
+/// m_loc[τ] = −ln(λ)/(1) for GEVP C(τ+1)v = λ C(τ)v, τ = 0..n_tau−2.
+/// This is the multi-τ plateau diagnostic closest to classical m_eff(τ).
+pub fn gevp3_meff_local_scan(
+    c00: &[f64; 8],
+    c01: &[f64; 8],
+    c02: &[f64; 8],
+    c11: &[f64; 8],
+    c12: &[f64; 8],
+    c22: &[f64; 8],
+    n_tau: i64,
+    meff: &![f64; 8],
+    valid: &![i64; 8]
+) -> i64 with Mut, Div, Panic {
+    var k: i64 = 0
+    while k < 8 {
+        meff[k as usize] = 0.0
+        valid[k as usize] = 0
+        k = k + 1
+    }
+    var n_ok: i64 = 0
+    var tau: i64 = 0
+    let t_hi = n_tau - 1
+    while tau < t_hi && tau < 7 {
+        let (lam, ok_l) = gevp_3x3(
+            c00[(tau + 1) as usize], c01[(tau + 1) as usize], c02[(tau + 1) as usize],
+            c11[(tau + 1) as usize], c12[(tau + 1) as usize], c22[(tau + 1) as usize],
+            c00[tau as usize], c01[tau as usize], c02[tau as usize],
+            c11[tau as usize], c12[tau as usize], c22[tau as usize]
+        )
+        if ok_l == 1 {
+            let (m, ok_m) = gevp_mass(lam, 1.0)
+            if ok_m == 1 {
+                meff[tau as usize] = m
+                valid[tau as usize] = 1
+                n_ok = n_ok + 1
+            }
+        }
+        tau = tau + 1
+    }
+    n_ok
+}
+
+/// Cascade mass from 3-smear correlators at τ=0,1:
+///   prefer 3×3 GEVP → else best physical 2×2 pair → else contact C00.
+/// Physical GEVP must satisfy m ≥ 0.35 · m_contact when contact is valid
+/// (rejects collapsed eigenvalues). Returns (m, src) with
+///   src: 3=GEVP3, 2=GEVP2, 1=contact, 0=fail.
+/// Note: (f64,i64) 2-tuple — mixed 3-tuples are fragile under lean_single.
+pub fn glueball_mass_cascade(
+    c00_0: f64, c01_0: f64, c02_0: f64, c11_0: f64, c12_0: f64, c22_0: f64,
+    c00_1: f64, c01_1: f64, c02_1: f64, c11_1: f64, c12_1: f64, c22_1: f64
+) -> (f64, i64) with Mut, Div, Panic {
+    let src3: i64 = 3
+    let src2: i64 = 2
+    let src1: i64 = 1
+    let src0: i64 = 0
+    let (m_ct, ok_ct) = glueball_meff_log(c00_0, c00_1)
+    // 3×3
+    let (l3, o3) = gevp_3x3(
+        c00_1, c01_1, c02_1, c11_1, c12_1, c22_1,
+        c00_0, c01_0, c02_0, c11_0, c12_0, c22_0
+    )
+    let (m3, om3) = gevp_mass(l3, 1.0)
+    if om3 == 1 && m3 > 0.15 {
+        var ok3: i64 = 1
+        if ok_ct == 1 && m3 < 0.35 * m_ct { ok3 = 0 }
+        if ok3 == 1 { return (m3, src3) }
+    }
+    // 2×2 pairs: (0,1), (0,2), (1,2) — take lightest physical
+    var best_m: f64 = 0.0
+    var have: i64 = 0
+    let (l01, o01) = gevp_2x2(c00_1, c01_1, c11_1, c00_0, c01_0, c11_0)
+    let (m01, om01) = gevp_mass(l01, 1.0)
+    if om01 == 1 && m01 > 0.15 {
+        var okp: i64 = 1
+        if ok_ct == 1 && m01 < 0.35 * m_ct { okp = 0 }
+        if okp == 1 {
+            best_m = m01
+            have = 1
+        }
+    }
+    let (l02, o02) = gevp_2x2(c00_1, c02_1, c22_1, c00_0, c02_0, c22_0)
+    let (m02, om02) = gevp_mass(l02, 1.0)
+    if om02 == 1 && m02 > 0.15 {
+        var okp: i64 = 1
+        if ok_ct == 1 && m02 < 0.35 * m_ct { okp = 0 }
+        if okp == 1 {
+            if have == 0 || m02 < best_m {
+                best_m = m02
+                have = 1
+            }
+        }
+    }
+    let (l12, o12) = gevp_2x2(c11_1, c12_1, c22_1, c11_0, c12_0, c22_0)
+    let (m12, om12) = gevp_mass(l12, 1.0)
+    if om12 == 1 && m12 > 0.15 {
+        var okp: i64 = 1
+        if ok_ct == 1 && m12 < 0.35 * m_ct { okp = 0 }
+        if okp == 1 {
+            if have == 0 || m12 < best_m {
+                best_m = m12
+                have = 1
+            }
+        }
+    }
+    let _o3 = o3
+    let _o01 = o01
+    let _o02 = o02
+    let _o12 = o12
+    let _l3 = l3
+    if have == 1 { return (best_m, src2) }
+    if ok_ct == 1 && m_ct > 0.15 { return (m_ct, src1) }
+    (0.0, src0)
+}

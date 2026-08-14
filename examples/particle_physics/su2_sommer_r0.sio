@@ -1,0 +1,347 @@
+//@ run-pass
+// examples/particle_physics/su2_sommer_r0.sio
+//
+// SOMMER r0 + 3×3 GEVP — scale beyond single-R Creutz
+// ====================================================
+// Static potential V(r) from Wilson W(r,t)/W(r,t+1), force F(r)=V(r)-V(r-1),
+// Sommer r0 from rh² F(r) = 1.65 (Sommer 1994). Report
+//   m_GEVP * r0   and   m_GEVP / √χ(2,2)   side by side.
+//
+// Prior multi-R Creutz: m/√σ jumped 2.44→3.22 when R:2→3 (scale-fragile).
+// This asks whether r0 gives a more stable dimensionless mass.
+//
+// CLAIM: executable Sommer scale + variational mass on L=6 HB.
+// NOT CLAIMED: continuum r0; Clay; infinite-volume potential.
+//
+// Run:
+//   export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
+//   export SOUNIO_SOUC_ENGINE=lean_single
+//   ./bin/souc run examples/particle_physics/su2_sommer_r0.sio
+
+use particle_physics::lattice_gauge::{
+    lat_l, lat_nsites, lg_set_L, lg_seed, lattice_cold,
+    heatbath_thermalize, measure_ensemble_hb_multi_r,
+    measure_variational_3smear_hb, gevp_3x3, gevp_mass,
+    measure_potential_hb, static_force_from_v, sommer_c_of_r,
+    sommer_r0_interpolate, sommer_r0_from_sigma, glueball_meff_log,
+    plaquette_ep, string_tension_ep,
+}
+use epistemic::knowledge::{ep_val, ep_std}
+
+fn fp6(v: f64) -> string with Mut, Div, Panic {
+    var x = v
+    var neg = false
+    if x < 0.0 { neg = true; x = 0.0 - x }
+    let n = (x * 1000000.0 + 0.5) as i64
+    var whole = n / 1000000
+    let frac = n % 1000000
+    var buf: [i8; 64] = [0; 64]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    var wrev: [i8; 16] = [0; 16]
+    var wlen: i64 = 0
+    if whole == 0 { wrev[0] = 48 as i8; wlen = 1 }
+    while whole > 0 && wlen < 15 {
+        wrev[wlen as usize] = (48 + whole % 10) as i8
+        wlen = wlen + 1
+        whole = whole / 10
+    }
+    var i = wlen - 1
+    while i >= 0 {
+        buf[pos as usize] = wrev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    buf[pos as usize] = 46 as i8
+    pos = pos + 1
+    var div: i64 = 100000
+    while div >= 1 {
+        buf[pos as usize] = (48 + (frac / div) % 10) as i8
+        pos = pos + 1
+        div = div / 10
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn i64s(v: i64) -> string with Mut, Div, Panic {
+    if v == 0 { return "0" }
+    var n = v
+    var neg = false
+    if n < 0 { neg = true; n = 0 - n }
+    var rev: [i8; 24] = [0; 24]
+    var len: i64 = 0
+    while n > 0 && len < 23 {
+        rev[len as usize] = (48 + n % 10) as i8
+        len = len + 1
+        n = n / 10
+    }
+    var buf: [i8; 32] = [0; 32]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    var i = len - 1
+    while i >= 0 {
+        buf[pos as usize] = rev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn sqrt_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    var k: i64 = 0
+    while k < 40 { g = 0.5 * (g + x / g); k = k + 1 }
+    g
+}
+
+fn abs_f(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn nvr_ok(nvr: &[i64; 8], r_max: i64) -> bool with Mut {
+    var r: i64 = 1
+    var n: i64 = 0
+    while r <= r_max {
+        if nvr[r as usize] > 0 { n = n + 1 }
+        r = r + 1
+    }
+    n >= 2
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("================================================================")
+    println(" SU(2) SOMMER r0 + 3x3 GEVP")
+    println("================================================================")
+    println("CLAIM: Sommer scale + variational mass; compare to Creutz scales")
+    println("NOT CLAIMED: continuum r0; Clay")
+    println("")
+
+    let _ = lg_set_L(6)
+    let beta: f64 = 2.3
+    let n_therm: i64 = 28
+    let n_meas: i64 = 28
+    let n_sep: i64 = 2
+    let alpha: f64 = 0.4
+    let n0: i64 = 1
+    let n1: i64 = 2
+    let n2: i64 = 4
+    let seed: i64 = 20260813
+    let c_sommer: f64 = 1.65
+
+    println("L=" ++ i64s(lat_l()) ++ " sites=" ++ i64s(lat_nsites())
+        ++ " beta=" ++ fp6(beta))
+    println("therm=" ++ i64s(n_therm) ++ " meas=" ++ i64s(n_meas)
+        ++ " smears=" ++ i64s(n0) ++ "," ++ i64s(n1) ++ "," ++ i64s(n2))
+    println("Sommer c = r^2 F(r) = " ++ fp6(c_sommer))
+    println("")
+
+    var lat: [f64; 65536] = [0.0; 65536]
+    var sm0: [f64; 65536] = [0.0; 65536]
+    var sm1: [f64; 65536] = [0.0; 65536]
+    var sm2: [f64; 65536] = [0.0; 65536]
+    var tmp: [f64; 65536] = [0.0; 65536]
+    lg_seed(seed)
+    lattice_cold(&!lat)
+    println("--- heatbath thermalize ---")
+    let p_th = heatbath_thermalize(&!lat, beta, n_therm)
+    println("P=" ++ fp6(p_th))
+
+    // GEVP
+    println("--- 3x3 GEVP ---")
+    var c00: [f64; 8] = [0.0; 8]
+    var c01: [f64; 8] = [0.0; 8]
+    var c02: [f64; 8] = [0.0; 8]
+    var c11: [f64; 8] = [0.0; 8]
+    var c12: [f64; 8] = [0.0; 8]
+    var c22: [f64; 8] = [0.0; 8]
+    let (_a, _b, _c) = measure_variational_3smear_hb(
+        &!lat, &!sm0, &!sm1, &!sm2, &!tmp,
+        beta, n_meas, n_sep, alpha, n0, n1, n2,
+        &!c00, &!c01, &!c02, &!c11, &!c12, &!c22
+    )
+    let (md0, od0) = glueball_meff_log(c00[0], c00[1])
+    let (l3, ok3) = gevp_3x3(
+        c00[1], c01[1], c02[1], c11[1], c12[1], c22[1],
+        c00[0], c01[0], c02[0], c11[0], c12[0], c22[0]
+    )
+    let (m3, om3) = gevp_mass(l3, 1.0)
+    println("m_contact=" ++ fp6(md0) ++ " ok=" ++ i64s(od0))
+    println("m_GEVP3=" ++ fp6(m3) ++ " lambda=" ++ fp6(l3) ++ " ok=" ++ i64s(om3))
+
+    // Static potential
+    println("--- static potential / force / Sommer r0 ---")
+    var mean_v: [f64; 8] = [0.0; 8]
+    var nvr: [i64; 8] = [0; 8]
+    let r_max: i64 = 3
+    let t_pref: i64 = 2
+    let _nm = measure_potential_hb(
+        &!lat, beta, n_meas, n_sep, r_max, t_pref, &!mean_v, &!nvr
+    )
+    println("V(r):")
+    var r: i64 = 1
+    while r <= r_max {
+        println("  r=" ++ i64s(r) ++ "  V=" ++ fp6(mean_v[r as usize])
+            ++ "  n=" ++ i64s(nvr[r as usize]))
+        r = r + 1
+    }
+
+    // force from mean V — treat mean_v as vok if nvr>0
+    var vok: [i64; 8] = [0; 8]
+    r = 0
+    while r < 8 {
+        if nvr[r as usize] > 0 { vok[r as usize] = 1 }
+        r = r + 1
+    }
+    var f: [f64; 8] = [0.0; 8]
+    var fok: [i64; 8] = [0; 8]
+    let nf = static_force_from_v(&mean_v, &vok, r_max, &!f, &!fok)
+    println("F(r)=V(r)-V(r-1)  n_force=" ++ i64s(nf))
+    r = 2
+    while r <= r_max {
+        if fok[r as usize] == 1 {
+            let c = sommer_c_of_r(r, f[r as usize])
+            println("  r=" ++ i64s(r) ++ "  F=" ++ fp6(f[r as usize])
+                ++ "  (r-0.5)^2 F=" ++ fp6(c))
+        }
+        r = r + 1
+    }
+
+    let (r0, ok_r0) = sommer_r0_interpolate(&f, &fok, r_max, c_sommer)
+    println("Sommer r0_F=" ++ fp6(r0) ++ " ok=" ++ i64s(ok_r0)
+        ++ "  (1=interp, 2=extrap, 0=nearest/fail)")
+
+    // Creutz multi-R for comparison
+    println("--- Creutz chi(2,2) and chi(3,3) ---")
+    var plaq_s: [f64; 256] = [0.0; 256]
+    var chi2_s: [f64; 256] = [0.0; 256]
+    var chi2_v: [i64; 256] = [0; 256]
+    var chi3_s: [f64; 256] = [0.0; 256]
+    var chi3_v: [i64; 256] = [0; 256]
+    let n_ctx: i64 = 14
+    let (n2, n3) = measure_ensemble_hb_multi_r(
+        &!lat, beta, n_ctx, n_sep,
+        &!plaq_s, &!chi2_s, &!chi2_v, &!chi3_s, &!chi3_v
+    )
+    let sep2 = string_tension_ep(&chi2_s, &chi2_v, n_ctx)
+    let sep3 = string_tension_ep(&chi3_s, &chi3_v, n_ctx)
+    let sig2 = ep_val(&sep2)
+    let sig3 = ep_val(&sep3)
+    let srt2 = sqrt_q(sig2)
+    let srt3 = sqrt_q(sig3)
+    println("chi2=" ++ fp6(sig2) ++ "+/-" ++ fp6(ep_std(&sep2))
+        ++ " sqrt=" ++ fp6(srt2) ++ " n_ok=" ++ i64s(n2))
+    println("chi3=" ++ fp6(sig3) ++ "+/-" ++ fp6(ep_std(&sep3))
+        ++ " sqrt=" ++ fp6(srt3) ++ " n_ok=" ++ i64s(n3))
+
+    // String-tension Sommer proxy r0_σ = √(c/σ) when force path cannot hit c=1.65
+    let (r0s, ok_r0s) = sommer_r0_from_sigma(sig2, c_sommer)
+    println("Sommer r0_sigma=" ++ fp6(r0s) ++ " ok=" ++ i64s(ok_r0s)
+        ++ "  (proxy F->sigma from Creutz chi2)")
+
+    // Dimensionless masses
+    var m_r0: f64 = 0.0
+    var m_r0s: f64 = 0.0
+    var m_c2: f64 = 0.0
+    var m_c3: f64 = 0.0
+    var c_r0: f64 = 0.0
+    var c_r0s: f64 = 0.0
+    var c_c2: f64 = 0.0
+    var c_c3: f64 = 0.0
+    if om3 == 1 {
+        if r0 > 1.0e-12 { m_r0 = m3 * r0 }
+        if r0s > 1.0e-12 { m_r0s = m3 * r0s }
+        if srt2 > 1.0e-12 { m_c2 = m3 / srt2 }
+        if srt3 > 1.0e-12 { m_c3 = m3 / srt3 }
+    }
+    if od0 == 1 {
+        if r0 > 1.0e-12 { c_r0 = md0 * r0 }
+        if r0s > 1.0e-12 { c_r0s = md0 * r0s }
+        if srt2 > 1.0e-12 { c_c2 = md0 / srt2 }
+        if srt3 > 1.0e-12 { c_c3 = md0 / srt3 }
+    }
+
+    // r0 * sqrt(sigma) — continuum pure-gauge ~1.1–1.2
+    var r0_srt2: f64 = 0.0
+    var r0s_srt2: f64 = 0.0
+    if r0 > 0.0 && srt2 > 0.0 { r0_srt2 = r0 * srt2 }
+    if r0s > 0.0 && srt2 > 0.0 { r0s_srt2 = r0s * srt2 }
+
+    println("")
+    println("SCOREBOARD dimensionless masses:")
+    println("  GEVP3 * r0_F:      " ++ fp6(m_r0) ++ "   (force Sommer)")
+    println("  GEVP3 * r0_sigma:  " ++ fp6(m_r0s) ++ "   (sigma proxy)")
+    println("  GEVP3 / sqrt(chi2):" ++ fp6(m_c2) ++ "   (prior Creutz R2)")
+    println("  GEVP3 / sqrt(chi3):" ++ fp6(m_c3))
+    println("  contact * r0_F:    " ++ fp6(c_r0))
+    println("  contact * r0_sigma:" ++ fp6(c_r0s))
+    println("  contact / sqrt(chi2):" ++ fp6(c_c2))
+    println("  r0_F * sqrt(chi2): " ++ fp6(r0_srt2))
+    println("  r0_s * sqrt(chi2): " ++ fp6(r0s_srt2) ++ "   (=sqrt(c)=1.28 if pure)")
+    println("  lit m/sqrt(sig)~3.5-4; m*r0~4 if r0*sqrt(sig)~1.1")
+
+    var shift_c: f64 = 0.0
+    if m_c2 > 1.0e-12 && m_c3 > 1.0e-12 {
+        shift_c = abs_f(m_c3 - m_c2) / m_c2
+    }
+
+    println("")
+    println("================================================================")
+    println(" GATES")
+    println("================================================================")
+    let g_gevp = om3 == 1
+    let g_v = nvr_ok(&nvr, r_max)
+    let g_f = nf > 0
+    let g_r0 = (ok_r0 == 1 || ok_r0 == 2) && r0 > 0.5 && r0 < 6.0
+    let g_r0_interp = ok_r0 == 1 && r0 > 0.5 && r0 < 5.0
+    let g_r0s = ok_r0s == 1 && r0s > 0.5 && r0s < 6.0
+    let g_chi2 = n2 >= 3 && sig2 > 0.0
+    let g_chi3 = n3 >= 2 && sig3 > 0.0
+    let g_mr0 = g_gevp && m_r0 > 0.5 && m_r0 < 15.0
+    let g_mr0s = g_gevp && m_r0s > 0.5 && m_r0s < 15.0
+    let g_mc2 = g_gevp && m_c2 > 1.0 && m_c2 < 10.0
+    let g_creutz_shift = shift_c > 0.0 && shift_c <= 0.25
+    let g_sommer_live = g_v && g_f
+
+    if g_gevp { println("GATE gevp3_mass: PASS") }
+    else { println("GATE gevp3_mass: FAIL_HONEST") }
+    if g_v { println("GATE potential_V_r: PASS") }
+    else { println("GATE potential_V_r: FAIL_HONEST") }
+    if g_f { println("GATE force_F_r: PASS") }
+    else { println("GATE force_F_r: FAIL_HONEST") }
+    if g_r0_interp { println("GATE sommer_r0_interpolated: PASS  star") }
+    else if g_r0 && ok_r0 == 2 { println("GATE sommer_r0_interpolated: FAIL_HONEST  (extrap r0_F=" ++ fp6(r0) ++ ")") }
+    else { println("GATE sommer_r0_interpolated: FAIL_HONEST") }
+    if g_r0s { println("GATE sommer_r0_sigma_proxy: PASS") }
+    else { println("GATE sommer_r0_sigma_proxy: FAIL_HONEST") }
+    if g_sommer_live { println("GATE sommer_path_live: PASS  (V+F executable)") }
+    else { println("GATE sommer_path_live: FAIL_HONEST") }
+    if g_chi2 { println("GATE creutz_chi2: PASS") }
+    else { println("GATE creutz_chi2: FAIL_HONEST") }
+    if g_chi3 { println("GATE creutz_chi3: PASS") }
+    else { println("GATE creutz_chi3: FAIL_HONEST") }
+    if g_mr0 { println("GATE m_gevp_times_r0_F: PASS") }
+    else { println("GATE m_gevp_times_r0_F: FAIL_HONEST") }
+    if g_mr0s { println("GATE m_gevp_times_r0_sigma: PASS") }
+    else { println("GATE m_gevp_times_r0_sigma: FAIL_HONEST") }
+    if g_mc2 { println("GATE m_gevp_over_chi2_phys: PASS") }
+    else { println("GATE m_gevp_over_chi2_phys: FAIL_HONEST") }
+    if g_creutz_shift { println("GATE creutz_R_stable: PASS") }
+    else { println("GATE creutz_R_stable: FAIL_HONEST  (shift=" ++ fp6(shift_c) ++ ")") }
+
+    println("")
+    println("VERDICT:")
+    println("  m*r0_F=" ++ fp6(m_r0) ++ "  m*r0_s=" ++ fp6(m_r0s)
+        ++ "  m/sqrt(chi2)=" ++ fp6(m_c2) ++ "  m/sqrt(chi3)=" ++ fp6(m_c3))
+    if g_r0_interp {
+        println("  Force-Sommer r0 bracketed; primary scale is r0_F.")
+    } else if g_r0s {
+        println("  Force c(r)<1.65 on L=6: use r0_sigma proxy; path V+F still live.")
+    } else {
+        println("  Sommer scale incomplete — report Creutz-only.")
+    }
+
+    let _r = lg_set_L(4)
+    println("================================================================")
+    0
+}

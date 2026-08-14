@@ -1,0 +1,288 @@
+//@ run-pass
+// examples/particle_physics/su2_meff_plateau.sio
+//
+// SPECTRAL HONESTY — multi-τ m_eff(τ) plateau on L=6 heatbath + APE
+// ==================================================================
+// Prior production used m_eff = ln(C(0)/C(1)) only (UV-sensitive).
+// This driver measures the full connected C(τ) and
+//   m_eff(τ) = ln(C(τ)/C(τ+1)) for τ = 0,1,2
+// on pure SU(2) L=6 with Creutz heatbath + APE 0++.
+//
+// CLAIM: diagnose plateau (or FAIL_HONEST if m_eff drifts in τ).
+// NOT CLAIMED: continuum; infinite volume; Clay; GEVP multi-operator.
+//
+// On L=6 only τ≤2 are independent (C(τ)=C(6−τ)). A real plateau needs
+// larger T; this run makes the limitation *visible* instead of silent.
+//
+// Run:
+//   export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
+//   export SOUNIO_SOUC_ENGINE=lean_single
+//   ./bin/souc run examples/particle_physics/su2_meff_plateau.sio
+
+use particle_physics::lattice_gauge::{
+    lat_l, lat_nsites, lg_set_L, lg_seed, lattice_cold,
+    heatbath_thermalize, measure_ensemble_hb,
+    measure_glueball_correlator_full_hb,
+    glueball_meff_scan, glueball_plateau_test, glueball_meff_best_tau,
+    glueball_meff_cosh, plaquette_ep, string_tension_ep,
+}
+use epistemic::knowledge::{ep_val, ep_std}
+
+fn fp6(v: f64) -> string with Mut, Div, Panic {
+    var x = v
+    var neg = false
+    if x < 0.0 { neg = true; x = 0.0 - x }
+    let n = (x * 1000000.0 + 0.5) as i64
+    var whole = n / 1000000
+    let frac = n % 1000000
+    var buf: [i8; 64] = [0; 64]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    var wrev: [i8; 16] = [0; 16]
+    var wlen: i64 = 0
+    if whole == 0 { wrev[0] = 48 as i8; wlen = 1 }
+    while whole > 0 && wlen < 15 {
+        wrev[wlen as usize] = (48 + whole % 10) as i8
+        wlen = wlen + 1
+        whole = whole / 10
+    }
+    var i = wlen - 1
+    while i >= 0 {
+        buf[pos as usize] = wrev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    buf[pos as usize] = 46 as i8
+    pos = pos + 1
+    var div: i64 = 100000
+    while div >= 1 {
+        buf[pos as usize] = (48 + (frac / div) % 10) as i8
+        pos = pos + 1
+        div = div / 10
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn i64s(v: i64) -> string with Mut, Div, Panic {
+    if v == 0 { return "0" }
+    var n = v
+    var neg = false
+    if n < 0 { neg = true; n = 0 - n }
+    var rev: [i8; 24] = [0; 24]
+    var len: i64 = 0
+    while n > 0 && len < 23 {
+        rev[len as usize] = (48 + n % 10) as i8
+        len = len + 1
+        n = n / 10
+    }
+    var buf: [i8; 32] = [0; 32]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    var i = len - 1
+    while i >= 0 {
+        buf[pos as usize] = rev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn sqrt_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    var k: i64 = 0
+    while k < 40 { g = 0.5 * (g + x / g); k = k + 1 }
+    g
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("================================================================")
+    println(" SU(2) m_eff(τ) PLATEAU — spectral honesty")
+    println("================================================================")
+    println("CLAIM: diagnose τ-plateau of 0++ effective mass (HB+APE)")
+    println("NOT CLAIMED: continuum; Clay; multi-operator GEVP")
+    println("")
+
+    let _ = lg_set_L(6)
+    let L = lat_l()
+    let beta: f64 = 2.3
+    let n_therm: i64 = 25
+    let n_meas: i64 = 24
+    let n_sep: i64 = 2
+    let alpha: f64 = 0.4
+    let n_smear: i64 = 3
+    let seed: i64 = 20260813
+    let plateau_tol: f64 = 0.25
+
+    println("L=" ++ i64s(L) ++ " sites=" ++ i64s(lat_nsites())
+        ++ " β=" ++ fp6(beta) ++ "  update=Creutz heatbath")
+    println("therm=" ++ i64s(n_therm) ++ " meas=" ++ i64s(n_meas)
+        ++ " sep=" ++ i64s(n_sep) ++ " APE α=" ++ fp6(alpha)
+        ++ " n=" ++ i64s(n_smear))
+    println("plateau tol |m0−m1|/mean ≤ " ++ fp6(plateau_tol))
+    println("")
+
+    var lat: [f64; 65536] = [0.0; 65536]
+    var sm: [f64; 65536] = [0.0; 65536]
+    var tmp: [f64; 65536] = [0.0; 65536]
+    lg_seed(seed)
+    lattice_cold(&!lat)
+    println("--- heatbath thermalize ---")
+    let p_th = heatbath_thermalize(&!lat, beta, n_therm)
+    println("⟨P⟩ after therm = " ++ fp6(p_th))
+
+    println("--- full C(τ) thin + APE ---")
+    var c_thin: [f64; 8] = [0.0; 8]
+    var c_ape: [f64; 8] = [0.0; 8]
+    let (mo_t, mo_a) = measure_glueball_correlator_full_hb(
+        &!lat, &!sm, &!tmp, beta, n_meas, n_sep, alpha, n_smear,
+        &!c_thin, &!c_ape
+    )
+    println("⟨O⟩ thin=" ++ fp6(mo_t) ++ "  APE=" ++ fp6(mo_a))
+
+    println("C_thin(τ):")
+    var tau: i64 = 0
+    while tau < L {
+        println("  C(" ++ i64s(tau) ++ ") = " ++ fp6(c_thin[tau as usize]))
+        tau = tau + 1
+    }
+    println("C_APE(τ):")
+    tau = 0
+    while tau < L {
+        println("  C(" ++ i64s(tau) ++ ") = " ++ fp6(c_ape[tau as usize]))
+        tau = tau + 1
+    }
+
+    // m_eff scan — independent τ up to L/2 - 1 = 2
+    let n_tau: i64 = 3
+    var meff_t: [f64; 8] = [0.0; 8]
+    var meff_a: [f64; 8] = [0.0; 8]
+    var vok_t: [i64; 8] = [0; 8]
+    var vok_a: [i64; 8] = [0; 8]
+    glueball_meff_scan(&c_thin, n_tau, &!meff_t, &!vok_t)
+    glueball_meff_scan(&c_ape, n_tau, &!meff_a, &!vok_a)
+
+    println("")
+    println("m_eff(τ) = ln C(τ)/C(τ+1):")
+    println("  τ | thin m_eff | ok | APE m_eff | ok")
+    tau = 0
+    while tau < n_tau {
+        println("  " ++ i64s(tau)
+            ++ " | " ++ fp6(meff_t[tau as usize])
+            ++ " | " ++ i64s(vok_t[tau as usize])
+            ++ " | " ++ fp6(meff_a[tau as usize])
+            ++ " | " ++ i64s(vok_a[tau as usize]))
+        tau = tau + 1
+    }
+
+    // cosh at τ=1 if possible (uses C0,C1,C2)
+    let (m_cosh_t, ok_ct) = glueball_meff_cosh(c_thin[0], c_thin[1], c_thin[2])
+    let (m_cosh_a, ok_ca) = glueball_meff_cosh(c_ape[0], c_ape[1], c_ape[2])
+    println("m_eff cosh@τ=1 thin=" ++ fp6(m_cosh_t) ++ " ok=" ++ i64s(ok_ct)
+        ++ "  APE=" ++ fp6(m_cosh_a) ++ " ok=" ++ i64s(ok_ca))
+
+    // plateau tests
+    let (rel_t01, plat_t01) = glueball_plateau_test(
+        meff_t[0], vok_t[0], meff_t[1], vok_t[1], plateau_tol
+    )
+    let (rel_a01, plat_a01) = glueball_plateau_test(
+        meff_a[0], vok_a[0], meff_a[1], vok_a[1], plateau_tol
+    )
+    let (rel_a12, plat_a12) = glueball_plateau_test(
+        meff_a[1], vok_a[1], meff_a[2], vok_a[2], plateau_tol
+    )
+    println("plateau thin  τ0↔τ1: rel=" ++ fp6(rel_t01) ++ " ok=" ++ i64s(plat_t01))
+    println("plateau APE   τ0↔τ1: rel=" ++ fp6(rel_a01) ++ " ok=" ++ i64s(plat_a01))
+    println("plateau APE   τ1↔τ2: rel=" ++ fp6(rel_a12) ++ " ok=" ++ i64s(plat_a12))
+
+    let (m_best_a, tau_best, ok_best) = glueball_meff_best_tau(&meff_a, &vok_a, n_tau)
+    println("APE best-τ mass: m=" ++ fp6(m_best_a) ++ " at τ=" ++ i64s(tau_best)
+        ++ " ok=" ++ i64s(ok_best))
+    println("APE contact m_eff(0)=" ++ fp6(meff_a[0])
+        ++ "  (production path used this alone)")
+
+    // scale setting
+    println("")
+    println("--- Creutz scale (heatbath) ---")
+    var plaq_s: [f64; 256] = [0.0; 256]
+    var chi_s: [f64; 256] = [0.0; 256]
+    var chi_v: [i64; 256] = [0; 256]
+    let n_ctx: i64 = 12
+    let n_ok_c = measure_ensemble_hb(&!lat, beta, n_ctx, n_sep, &!plaq_s, &!chi_s, &!chi_v)
+    let pep = plaquette_ep(&plaq_s, n_ctx)
+    let sep = string_tension_ep(&chi_s, &chi_v, n_ctx)
+    let sig = ep_val(&sep)
+    let srt = sqrt_q(sig)
+    println("⟨P⟩=" ++ fp6(ep_val(&pep)) ++ "±" ++ fp6(ep_std(&pep))
+        ++ "  σa²=" ++ fp6(sig) ++ "±" ++ fp6(ep_std(&sep))
+        ++ "  √σa=" ++ fp6(srt) ++ "  n_ok=" ++ i64s(n_ok_c))
+
+    var r0: f64 = 0.0
+    var r_best: f64 = 0.0
+    if srt > 1.0e-12 {
+        if vok_a[0] == 1 { r0 = meff_a[0] / srt }
+        if ok_best == 1 { r_best = m_best_a / srt }
+    }
+    println("m_eff(0)/√σ  APE = " ++ fp6(r0) ++ "   (old production-style)")
+    println("m_eff(best)/√σ   = " ++ fp6(r_best) ++ "   lit 0++ ~ 3.5–4")
+    println("L=6 prior production (m0 only) ≈ 3.81")
+
+    // UV contamination index: how much m_eff drops from τ=0 to later
+    var uv_drop: f64 = 0.0
+    if vok_a[0] == 1 && ok_best == 1 && meff_a[0] > 0.0 {
+        uv_drop = (meff_a[0] - m_best_a) / meff_a[0]
+    }
+    println("UV-drop (m0−m_best)/m0 = " ++ fp6(uv_drop)
+        ++ "  (>0 means contact mass was high)")
+
+    println("")
+    println("================================================================")
+    println(" GATES")
+    println("================================================================")
+    let c_dec_a = c_ape[0] > 0.0 && c_ape[1] > 0.0 && c_ape[0] > c_ape[1]
+    let c_dec_a2 = c_ape[1] > 0.0 && c_ape[2] > 0.0  // may not strictly decrease
+    let m0_ok = vok_a[0] == 1
+    let m1_ok = vok_a[1] == 1
+    let any_later = (vok_a[1] == 1) || (vok_a[2] == 1)
+    let confining = sig > 0.0
+    // plateau: APE τ0↔τ1 within tol OR τ1↔τ2
+    let plateau = (plat_a01 == 1) || (plat_a12 == 1)
+    // honest: if we only have m0, no plateau claim
+    let plateau_earned = plateau && any_later
+    let ratio_sane = ok_best == 1 && r_best > 1.0 && r_best < 10.0
+    // contact vs later: if m0 >> m_best, production overstated mass
+    let contact_flag = vok_a[0] == 1 && ok_best == 1 && uv_drop > 0.15
+
+    if c_dec_a { println("GATE ape_C_decays_01: PASS") }
+    else { println("GATE ape_C_decays_01: FAIL_HONEST") }
+    if m0_ok { println("GATE meff0_positive: PASS") }
+    else { println("GATE meff0_positive: FAIL_HONEST") }
+    if m1_ok { println("GATE meff1_positive: PASS") }
+    else { println("GATE meff1_positive: FAIL_HONEST  (need larger T / more stats)") }
+    if confining { println("GATE creutz_confinement: PASS") }
+    else { println("GATE creutz_confinement: FAIL_HONEST") }
+    if ratio_sane { println("GATE best_ratio_phys_window: PASS") }
+    else { println("GATE best_ratio_phys_window: FAIL_HONEST") }
+    if plateau_earned { println("GATE meff_plateau: PASS") }
+    else { println("GATE meff_plateau: FAIL_HONEST  (no τ-stable mass on this L)") }
+    if contact_flag {
+        println("GATE contact_mass_inflated: FLAG  (m_eff(0) UV-high vs later τ)")
+    } else {
+        println("GATE contact_mass_inflated: clear  (or insufficient later τ)")
+    }
+
+    // comparison: if production used m0 and plateau fails, demote confidence narrative
+    if plateau_earned {
+        println("VERDICT: plateau mass available — prefer m_eff(best)/√σ=" ++ fp6(r_best))
+    } else {
+        println("VERDICT: NO PLATEAU on L=6 with this operator/stats.")
+        println("  Production r≈3.81 from m_eff(0) remains a contact-scale estimate.")
+        println("  Next: larger T, variational smear basis, more measurements.")
+    }
+
+    let _r = lg_set_L(4)
+    println("================================================================")
+    0
+}

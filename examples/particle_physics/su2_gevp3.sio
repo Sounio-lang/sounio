@@ -1,0 +1,294 @@
+//@ run-pass
+// examples/particle_physics/su2_gevp3.sio
+//
+// 3×3 GEVP PRINCIPAL MASS — no pair shopping
+// ==========================================
+// Three APE levels n∈{1,2,4} → full 3×3 correlator matrix → single
+// principal GEVP eigenvalue (power iteration on C0^{-1} Cτ).
+// Compare to multi-pair 2×2 mean (prior: unstable, mean ratio ~2.17).
+//
+// CLAIM: one variational ground-state mass from 3×3 GEVP.
+// NOT CLAIMED: continuum; multi-τ plateau; Clay.
+//
+// Run:
+//   export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
+//   export SOUNIO_SOUC_ENGINE=lean_single
+//   ./bin/souc run examples/particle_physics/su2_gevp3.sio
+
+use particle_physics::lattice_gauge::{
+    lat_l, lat_nsites, lg_set_L, lg_seed, lattice_cold,
+    heatbath_thermalize, measure_ensemble_hb,
+    measure_variational_3smear_hb, gevp_2x2, gevp_mass, gevp_3x3,
+    glueball_meff_log, plaquette_ep, string_tension_ep,
+}
+use epistemic::knowledge::{ep_val, ep_std}
+
+fn fp6(v: f64) -> string with Mut, Div, Panic {
+    var x = v
+    var neg = false
+    if x < 0.0 { neg = true; x = 0.0 - x }
+    let n = (x * 1000000.0 + 0.5) as i64
+    var whole = n / 1000000
+    let frac = n % 1000000
+    var buf: [i8; 64] = [0; 64]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    var wrev: [i8; 16] = [0; 16]
+    var wlen: i64 = 0
+    if whole == 0 { wrev[0] = 48 as i8; wlen = 1 }
+    while whole > 0 && wlen < 15 {
+        wrev[wlen as usize] = (48 + whole % 10) as i8
+        wlen = wlen + 1
+        whole = whole / 10
+    }
+    var i = wlen - 1
+    while i >= 0 {
+        buf[pos as usize] = wrev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    buf[pos as usize] = 46 as i8
+    pos = pos + 1
+    var div: i64 = 100000
+    while div >= 1 {
+        buf[pos as usize] = (48 + (frac / div) % 10) as i8
+        pos = pos + 1
+        div = div / 10
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn i64s(v: i64) -> string with Mut, Div, Panic {
+    if v == 0 { return "0" }
+    var n = v
+    var neg = false
+    if n < 0 { neg = true; n = 0 - n }
+    var rev: [i8; 24] = [0; 24]
+    var len: i64 = 0
+    while n > 0 && len < 23 {
+        rev[len as usize] = (48 + n % 10) as i8
+        len = len + 1
+        n = n / 10
+    }
+    var buf: [i8; 32] = [0; 32]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    var i = len - 1
+    while i >= 0 {
+        buf[pos as usize] = rev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn sqrt_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    var k: i64 = 0
+    while k < 40 { g = 0.5 * (g + x / g); k = k + 1 }
+    g
+}
+
+fn abs_f(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("================================================================")
+    println(" SU(2) 3x3 GEVP PRINCIPAL MASS")
+    println("================================================================")
+    println("CLAIM: single variational ground-state mass from 3x3 GEVP")
+    println("NOT CLAIMED: continuum; multi-tau plateau; Clay")
+    println("")
+
+    let _ = lg_set_L(6)
+    let beta: f64 = 2.3
+    let n_therm: i64 = 30
+    let n_meas: i64 = 36
+    let n_sep: i64 = 2
+    let alpha: f64 = 0.4
+    let n0: i64 = 1
+    let n1: i64 = 2
+    let n2: i64 = 4
+    let seed: i64 = 20260813
+
+    println("L=" ++ i64s(lat_l()) ++ " sites=" ++ i64s(lat_nsites())
+        ++ " beta=" ++ fp6(beta))
+    println("smears n=" ++ i64s(n0) ++ "," ++ i64s(n1) ++ "," ++ i64s(n2)
+        ++ " alpha=" ++ fp6(alpha))
+    println("therm=" ++ i64s(n_therm) ++ " meas=" ++ i64s(n_meas)
+        ++ " sep=" ++ i64s(n_sep))
+    println("")
+
+    var lat: [f64; 65536] = [0.0; 65536]
+    var sm0: [f64; 65536] = [0.0; 65536]
+    var sm1: [f64; 65536] = [0.0; 65536]
+    var sm2: [f64; 65536] = [0.0; 65536]
+    var tmp: [f64; 65536] = [0.0; 65536]
+    lg_seed(seed)
+    lattice_cold(&!lat)
+    println("--- heatbath thermalize ---")
+    let p_th = heatbath_thermalize(&!lat, beta, n_therm)
+    println("P=" ++ fp6(p_th))
+
+    println("--- 3-smear correlators ---")
+    var c00: [f64; 8] = [0.0; 8]
+    var c01: [f64; 8] = [0.0; 8]
+    var c02: [f64; 8] = [0.0; 8]
+    var c11: [f64; 8] = [0.0; 8]
+    var c12: [f64; 8] = [0.0; 8]
+    var c22: [f64; 8] = [0.0; 8]
+    let (mo0, mo1, mo2) = measure_variational_3smear_hb(
+        &!lat, &!sm0, &!sm1, &!sm2, &!tmp,
+        beta, n_meas, n_sep, alpha, n0, n1, n2,
+        &!c00, &!c01, &!c02, &!c11, &!c12, &!c22
+    )
+    println("O means: " ++ fp6(mo0) ++ " " ++ fp6(mo1) ++ " " ++ fp6(mo2))
+    println("C0 matrix:")
+    println("  " ++ fp6(c00[0]) ++ "  " ++ fp6(c01[0]) ++ "  " ++ fp6(c02[0]))
+    println("  " ++ fp6(c01[0]) ++ "  " ++ fp6(c11[0]) ++ "  " ++ fp6(c12[0]))
+    println("  " ++ fp6(c02[0]) ++ "  " ++ fp6(c12[0]) ++ "  " ++ fp6(c22[0]))
+    println("C1 matrix:")
+    println("  " ++ fp6(c00[1]) ++ "  " ++ fp6(c01[1]) ++ "  " ++ fp6(c02[1]))
+    println("  " ++ fp6(c01[1]) ++ "  " ++ fp6(c11[1]) ++ "  " ++ fp6(c12[1]))
+    println("  " ++ fp6(c02[1]) ++ "  " ++ fp6(c12[1]) ++ "  " ++ fp6(c22[1]))
+
+    // Diagonal contact
+    let (md0, od0) = glueball_meff_log(c00[0], c00[1])
+    let (md1, od1) = glueball_meff_log(c11[0], c11[1])
+    let (md2, od2) = glueball_meff_log(c22[0], c22[1])
+    println("diag m_eff(0): " ++ fp6(md0) ++ " / " ++ fp6(md1) ++ " / " ++ fp6(md2))
+
+    // Pair 2x2 (reference)
+    let (l01, o01) = gevp_2x2(c00[1], c01[1], c11[1], c00[0], c01[0], c11[0])
+    let (l02, o02) = gevp_2x2(c00[1], c02[1], c22[1], c00[0], c02[0], c22[0])
+    let (l12, o12) = gevp_2x2(c11[1], c12[1], c22[1], c11[0], c12[0], c22[0])
+    let (m01, om01) = gevp_mass(l01, 1.0)
+    let (m02, om02) = gevp_mass(l02, 1.0)
+    let (m12, om12) = gevp_mass(l12, 1.0)
+    println("2x2 pairs m: " ++ fp6(m01) ++ " ok=" ++ i64s(om01)
+        ++ "  " ++ fp6(m02) ++ " ok=" ++ i64s(om02)
+        ++ "  " ++ fp6(m12) ++ " ok=" ++ i64s(om12))
+
+    // 3x3 GEVP
+    let (l3, ok3) = gevp_3x3(
+        c00[1], c01[1], c02[1], c11[1], c12[1], c22[1],
+        c00[0], c01[0], c02[0], c11[0], c12[0], c22[0]
+    )
+    let (m3, om3) = gevp_mass(l3, 1.0)
+    println("")
+    println("3x3 GEVP t0=0 -> t=1:")
+    println("  lambda_max=" ++ fp6(l3) ++ "  ok=" ++ i64s(ok3))
+    println("  m_3x3=" ++ fp6(m3) ++ "  ok=" ++ i64s(om3))
+
+    // optional t=2 if diagonals positive
+    var m3b: f64 = 0.0
+    var om3b: i64 = 0
+    if c00[2] > 0.0 && c11[2] > 0.0 && c22[2] > 0.0 {
+        let (l3b, ok3b) = gevp_3x3(
+            c00[2], c01[2], c02[2], c11[2], c12[2], c22[2],
+            c00[0], c01[0], c02[0], c11[0], c12[0], c22[0]
+        )
+        if ok3b == 1 {
+            let (mb, ob) = gevp_mass(l3b, 2.0)
+            m3b = mb
+            om3b = ob
+        }
+    }
+    println("3x3 GEVP t0=0 -> t=2: m=" ++ fp6(m3b) ++ " ok=" ++ i64s(om3b))
+
+    // Scale
+    println("")
+    println("--- Creutz scale ---")
+    var plaq_s: [f64; 256] = [0.0; 256]
+    var chi_s: [f64; 256] = [0.0; 256]
+    var chi_v: [i64; 256] = [0; 256]
+    let n_ctx: i64 = 12
+    let n_ok_c = measure_ensemble_hb(&!lat, beta, n_ctx, n_sep, &!plaq_s, &!chi_s, &!chi_v)
+    let pep = plaquette_ep(&plaq_s, n_ctx)
+    let sep = string_tension_ep(&chi_s, &chi_v, n_ctx)
+    let sig = ep_val(&sep)
+    let srt = sqrt_q(sig)
+    println("P=" ++ fp6(ep_val(&pep)) ++ "+/-" ++ fp6(ep_std(&pep))
+        ++ "  sig_a2=" ++ fp6(sig) ++ "  sqrt_sig=" ++ fp6(srt)
+        ++ "  n_ok=" ++ i64s(n_ok_c))
+
+    var r3: f64 = 0.0
+    var r_pair_mean: f64 = 0.0
+    var r_d0: f64 = 0.0
+    var n_pair: i64 = 0
+    var sum_pair: f64 = 0.0
+    if srt > 1.0e-12 {
+        if om3 == 1 { r3 = m3 / srt }
+        if od0 == 1 { r_d0 = md0 / srt }
+        if om01 == 1 { sum_pair = sum_pair + m01 / srt; n_pair = n_pair + 1 }
+        if om02 == 1 { sum_pair = sum_pair + m02 / srt; n_pair = n_pair + 1 }
+        if om12 == 1 { sum_pair = sum_pair + m12 / srt; n_pair = n_pair + 1 }
+        if n_pair > 0 { r_pair_mean = sum_pair / (n_pair as f64) }
+    }
+
+    println("")
+    println("SCOREBOARD m/sqrt(sig) lit~3.5-4:")
+    println("  diag light:     " ++ fp6(r_d0))
+    println("  2x2 pair mean:  " ++ fp6(r_pair_mean))
+    println("  3x3 GEVP:       " ++ fp6(r3) ++ "  ***")
+    println("  prior pair mean ~2.17  single-pair ~1.71  contact ~3.5")
+
+    // 3x3 vs pair mean consistency
+    var cons_rel: f64 = 0.0
+    var cons_ok: i64 = 0
+    if om3 == 1 && n_pair >= 2 && r_pair_mean > 0.0 {
+        cons_rel = abs_f(r3 - r_pair_mean) / r_pair_mean
+        if cons_rel <= 0.35 { cons_ok = 1 }
+    }
+
+    // below contact
+    var below: i64 = 0
+    if om3 == 1 && od0 == 1 && m3 < md0 { below = 1 }
+
+    println("")
+    println("================================================================")
+    println(" GATES")
+    println("================================================================")
+    let g_mat = c00[0] > 0.0 && c11[0] > 0.0 && c22[0] > 0.0
+        && c00[1] > 0.0 && c11[1] > 0.0 && c22[1] > 0.0
+    let g_3 = om3 == 1
+    let g_conf = sig > 0.0
+    let g_phys = om3 == 1 && r3 > 1.0 && r3 < 10.0
+    let g_lit = om3 == 1 && r3 > 2.5 && r3 < 5.5
+    let g_below = below == 1
+    let g_cons = cons_ok == 1
+    let g_not_collapse = om3 == 1 && r3 > 1.2
+
+    if g_mat { println("GATE c_matrix_positive: PASS") }
+    else { println("GATE c_matrix_positive: FAIL_HONEST") }
+    if g_3 { println("GATE gevp3_mass_positive: PASS") }
+    else { println("GATE gevp3_mass_positive: FAIL_HONEST") }
+    if g_conf { println("GATE creutz_confinement: PASS") }
+    else { println("GATE creutz_confinement: FAIL_HONEST") }
+    if g_phys { println("GATE gevp3_ratio_phys: PASS") }
+    else { println("GATE gevp3_ratio_phys: FAIL_HONEST") }
+    if g_lit { println("GATE gevp3_ratio_lit: PASS  star") }
+    else { println("GATE gevp3_ratio_lit: FAIL_HONEST") }
+    if g_below { println("GATE gevp3_below_contact: PASS") }
+    else { println("GATE gevp3_below_contact: FAIL_HONEST") }
+    if g_cons { println("GATE gevp3_vs_pair_mean: PASS") }
+    else { println("GATE gevp3_vs_pair_mean: FAIL_HONEST") }
+    if g_not_collapse { println("GATE no_gevp3_collapse: PASS") }
+    else { println("GATE no_gevp3_collapse: FAIL_HONEST") }
+
+    println("")
+    println("VERDICT: 3x3 GEVP m/sqrt(sig)=" ++ fp6(r3)
+        ++ "  vs pair-mean=" ++ fp6(r_pair_mean)
+        ++ "  contact=" ++ fp6(r_d0))
+    if g_lit {
+        println("  in lit window — still not a multi-tau plateau continuum claim.")
+    } else {
+        println("  not lit-stable; refuse continuum mass language.")
+    }
+
+    let _r = lg_set_L(4)
+    println("================================================================")
+    0
+}

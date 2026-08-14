@@ -1,0 +1,443 @@
+//! stdlib/medical/kg_symbolic.sio — Neuro-symbolic consistency layer over
+//! medical KG embeddings.
+//!
+//! Bridges the embedding scorers of stdlib/medical/kg_reason.sio (TransE /
+//! DistMult / RotatE ensemble) with the verified dense EL+ closure engine of
+//! stdlib/ontology/elplus.sio.  A pure embedding ranker will happily score
+//! (aspirin, treats, BRCA1) at the top of a candidate list when the geometry
+//! says so; this module materializes a small TYPE TBox from the entity_type
+//! tags of the MedKG and turns ontological disjointness into a conflict
+//! relation over predicted triples, so type-inconsistent predictions are
+//! masked before ranking.
+//!
+//! Model (dense variant, capacities of ontology::elplus: <= 64 concepts,
+//! <= 8 roles):
+//!
+//!   concept 0            TOP
+//!   concepts 1..6        DRUG DISEASE GENE PROTEIN PATHWAY SYMPTOM
+//!                        (mirrors MedEntity.entity_type 0..5, +1)
+//!   concept 7            CHEMICAL, with stated DRUG <= CHEMICAL
+//!   concepts 8..13       exists r.TOP for the six relation roles
+//!                        r = rel_type 0..5 (treats, causes, targets,
+//!                        interacts, associated_with, inhibits)
+//!
+//! Stated axioms:
+//!
+//!   DRUG <= CHEMICAL
+//!   exists r.TOP <= Dom(r)      (EL+ domain encoding; the range side
+//!                                TOP <= forall r.Rng(r) is NOT expressible
+//!                                in EL+, so ranges live in a table checked
+//!                                through the same conflict oracle)
+//!
+//!   Dom/Rng tables (rel_type -> concept):
+//!     treats          DRUG    -> DISEASE
+//!     causes          DRUG    -> SYMPTOM
+//!     targets         DRUG    -> PROTEIN
+//!     interacts       PROTEIN -> PROTEIN
+//!     associated_with GENE    -> DISEASE
+//!     inhibits        DRUG    -> PROTEIN
+//!
+//! Disjointness (drives the conflict oracle):
+//!   the six primitive types are pairwise disjoint, and CHEMICAL is
+//!   disjoint from {DISEASE, GENE, PROTEIN, PATHWAY, SYMPTOM}.
+//!
+//! Violation semantics: a candidate (h, r, t) is a violation iff the
+//! entailment set of type(h) conflicts with Dom(r), or the entailment set
+//! of type(t) conflicts with Rng(r), where conflict is the EL+ deductive
+//! conflict relation (elplus_derive_conflicts over the closed matrix).
+//! Because the primitive types are pairwise disjoint this flags exactly the
+//! type-mismatched predictions, e.g. (aspirin, treats, BRCA1): BRCA1 is a
+//! GENE, Rng(treats) = DISEASE, GENE disjoint DISEASE.
+//!
+//! Epistemic status: the symbolic mask is crisp, but the embedding score it
+//! gates carries the GUM first-order uncertainty of kg_reason
+//! (med_score_uncertainty over u_embedding).  kg_score_constrained returns
+//! both, plus a boundary_uncertain flag: when the propagated uncertainty
+//! exceeds the caller's tolerance, the accept/reject decision at the mask
+//! boundary is itself epistemically unreliable and should be reviewed
+//! rather than auto-filtered.
+//!
+//! CLAIMS SPLIT:
+//!   * Proven: logical fidelity of the conflict oracle only — the boolean
+//!     closure/conflict coincide with EL+ entailment over the interned
+//!     concept universe (formal/OntologyELPlusClosureComplete.lean,
+//!     theorems subBPlusC_iff / conflictBPlusC_iff).
+//!   * NOT established: adequacy of this hand-built type TBox for any real
+//!     biomedical KG, completeness of the six-type partition, or any
+//!     precision/recall figure on real data.  The precision numbers in
+//!     examples/clinical/kg_neuro_symbolic_demo.sio are a synthetic unit
+//!     fixture, not a validated drug-repurposing result.
+//!
+//! NOTE: use NAMED imports (`use medical::kg_symbolic::{...}`). The
+//! qualified form miscompiles on the current Madaros imported-module
+//! native lane (see docs/compiler/KNOWN_LIMITATIONS.md).  All cross-module
+//! calls here stay at <= 8 parameters for the same reason (the 14-parameter
+//! elplus_fixpoint is avoided in favour of elplus_fixpoint_packed).
+
+use ontology::elplus::{
+    elplus_role_closure,
+    elplus_seed,
+    elplus_fixpoint_packed,
+    elplus_derive_conflicts
+}
+use medical::kg_reason::{
+    MedKG,
+    med_score_transe,
+    med_score_distmult,
+    med_score_rotate,
+    med_score_uncertainty
+}
+
+// ── Concept ids (dense EL+ universe, stride 64) ──────────────────────────
+pub const KG_CON_TOP: i64 = 0
+pub const KG_CON_DRUG: i64 = 1
+pub const KG_CON_DISEASE: i64 = 2
+pub const KG_CON_GENE: i64 = 3
+pub const KG_CON_PROTEIN: i64 = 4
+pub const KG_CON_PATHWAY: i64 = 5
+pub const KG_CON_SYMPTOM: i64 = 6
+pub const KG_CON_CHEMICAL: i64 = 7
+// First existential id: exists r.TOP for role r is KG_CON_EX_BASE + r.
+pub const KG_CON_EX_BASE: i64 = 8
+// Number of interned concepts.
+pub const KG_TBOX_NC: i64 = 14
+// Number of roles (= number of MedRelation rel_type codes used).
+pub const KG_TBOX_NR: i64 = 6
+
+/// Closed type TBox materialized from the MedKG entity_type partition.
+/// s and redges are the CLOSED dense EL+ matrices (output of
+/// elplus_fixpoint_packed); disj is the stated disjointness matrix;
+/// dom/rng map rel_type (0..7) to domain/range concept ids.
+pub struct KgSymbolicTBox {
+    pub s: [bool; 4096],
+    pub redges: [bool; 32768],
+    pub disj: [bool; 4096],
+    pub dom: [i64; 8],
+    pub rng: [i64; 8],
+    pub nc: i64,
+    pub nr: i64,
+    pub rounds: i64,
+}
+
+/// Hybrid score with epistemic status (see module header).
+pub struct KgConstrainedScore {
+    // Embedding ensemble score minus the mask penalty (0 if consistent).
+    pub score: f64,
+    // GUM first-order uncertainty propagated from u_embedding of h and t.
+    pub u_score: f64,
+    // Symbolic verdict: head/tail entailment sets conflict with Dom/Rng.
+    pub violation: bool,
+    // u_score exceeds the caller's boundary tolerance.
+    pub boundary_uncertain: bool,
+}
+
+/// Map a MedEntity.entity_type (0=drug, 1=disease, 2=gene, 3=protein,
+/// 4=pathway, 5=symptom) to its TBox concept id; -1 for unknown tags.
+///
+/// # Complexity
+/// O(1)
+pub fn kg_entity_type_concept(etype: i32) -> i64 {
+    if etype == 0 { return KG_CON_DRUG }
+    if etype == 1 { return KG_CON_DISEASE }
+    if etype == 2 { return KG_CON_GENE }
+    if etype == 3 { return KG_CON_PROTEIN }
+    if etype == 4 { return KG_CON_PATHWAY }
+    if etype == 5 { return KG_CON_SYMPTOM }
+    return 0 - 1
+}
+
+/// Domain concept of a relation type (reads the TBox table).
+///
+/// # Complexity
+/// O(1)
+pub fn kg_tbox_domain(tbox: &KgSymbolicTBox, rel_type: i32) -> i64 with Div, Panic {
+    return tbox.dom[rel_type]
+}
+
+/// Range concept of a relation type (reads the TBox table).
+///
+/// # Complexity
+/// O(1)
+pub fn kg_tbox_range(tbox: &KgSymbolicTBox, rel_type: i32) -> i64 with Div, Panic {
+    return tbox.rng[rel_type]
+}
+
+/// Subsumption query over the CLOSED TBox matrix: does concept a subsume
+/// to concept b?  (Includes derived entailments such as
+/// exists treats.TOP <= CHEMICAL via DRUG <= CHEMICAL.)
+///
+/// # Complexity
+/// O(1)
+pub fn kg_tbox_subsumes(tbox: &KgSymbolicTBox, a: i64, b: i64) -> bool with Div, Panic {
+    return tbox.s[a * 64 + b]
+}
+
+/// Role-edge query over the CLOSED TBox role cube: does concept c have a
+/// derived edge (role, c, f)?  (stoR derives (r, exists r.TOP, TOP).)
+///
+/// # Complexity
+/// O(1)
+pub fn kg_tbox_edge(tbox: &KgSymbolicTBox, role: i64, c: i64, f: i64) -> bool with Div, Panic {
+    return tbox.redges[(role * 64 + c) * 64 + f]
+}
+
+/// Build and close the dense type TBox (<= 64 concepts, 6 roles).
+/// Runs the 8-rule EL+ completion to fixpoint via elplus_fixpoint_packed
+/// and fills the Dom/Rng tables and the disjointness matrix.
+///
+/// # Complexity
+/// Bounded by the dense capacities; O(rounds * 64^3) worst case, tiny in
+/// practice for 14 concepts.
+pub fn kg_type_tbox_init() -> KgSymbolicTBox with Mut, Div, Panic {
+    // ── Concept table (packed ABI of elplus_fixpoint_packed) ────────────
+    var pack: [i64; 704] = [0; 704]
+    // ckind: TOP kind 1; atoms kind 0 with carg1 = own id; existentials
+    // kind 3 with carg1 = role, carg2 = filler.
+    pack[KG_CON_TOP] = 1
+    var a: i64 = 1
+    while a <= KG_CON_CHEMICAL {
+        pack[a] = 0
+        pack[64 + a] = a
+        a = a + 1
+    }
+    var r: i64 = 0
+    while r < KG_TBOX_NR {
+        let ex = KG_CON_EX_BASE + r
+        pack[ex] = 3
+        pack[64 + ex] = r
+        pack[128 + ex] = KG_CON_TOP
+        // exid[r * 64 + TOP] = ex (rest stay 0 -> patched to -1 below).
+        pack[192 + r * 64 + KG_CON_TOP] = ex + 1
+        r = r + 1
+    }
+    // exid cells default to -1 (absent); interned cells were stored +1.
+    var i: i64 = 0
+    while i < 512 {
+        pack[192 + i] = pack[192 + i] - 1
+        i = i + 1
+    }
+
+    var chains: [i64; 24] = [0; 24]
+    var dims: [i64; 4] = [0; 4]
+    dims[0] = 0
+    dims[1] = KG_TBOX_NC
+    dims[2] = KG_TBOX_NC
+    dims[3] = KG_TBOX_NR
+
+    var rclos: [bool; 64] = [false; 64]
+    elplus_role_closure(&!rclos, KG_TBOX_NR)
+
+    // ── Stated inclusions and fixpoint ──────────────────────────────────
+    var s: [bool; 4096] = [false; 4096]
+    var redges: [bool; 32768] = [false; 32768]
+    elplus_seed(&!s, KG_TBOX_NC, KG_CON_TOP)
+    s[KG_CON_DRUG * 64 + KG_CON_CHEMICAL] = true
+    r = 0
+    while r < KG_TBOX_NR {
+        s[(KG_CON_EX_BASE + r) * 64 + kg_tbox_domain_const(r)] = true
+        r = r + 1
+    }
+    let rounds = elplus_fixpoint_packed(&!s, &!redges, &pack, &rclos, &chains, &dims)
+
+    // ── Disjointness: six primitive types pairwise, CHEMICAL disjoint
+    //    from every non-DRUG primitive (chemicals vs biological entities).
+    var disj: [bool; 4096] = [false; 4096]
+    a = KG_CON_DRUG
+    while a <= KG_CON_SYMPTOM {
+        var b: i64 = a + 1
+        while b <= KG_CON_SYMPTOM {
+            disj[a * 64 + b] = true
+            disj[b * 64 + a] = true
+            b = b + 1
+        }
+        a = a + 1
+    }
+    b = KG_CON_DISEASE
+    while b <= KG_CON_SYMPTOM {
+        disj[KG_CON_CHEMICAL * 64 + b] = true
+        disj[b * 64 + KG_CON_CHEMICAL] = true
+        b = b + 1
+    }
+
+    var tbox = KgSymbolicTBox {
+        s: [false; 4096],
+        redges: [false; 32768],
+        disj: [false; 4096],
+        dom: [0; 8],
+        rng: [0; 8],
+        nc: KG_TBOX_NC,
+        nr: KG_TBOX_NR,
+        rounds: rounds,
+    }
+    i = 0
+    while i < 4096 {
+        tbox.s[i] = s[i]
+        tbox.disj[i] = disj[i]
+        i = i + 1
+    }
+    i = 0
+    while i < 32768 {
+        tbox.redges[i] = redges[i]
+        i = i + 1
+    }
+    r = 0
+    while r < 8 {
+        tbox.dom[r] = kg_tbox_domain_const(r)
+        tbox.rng[r] = kg_tbox_range_const(r)
+        r = r + 1
+    }
+    return tbox
+}
+
+/// Domain table as a pure function of rel_type (single source of truth;
+/// kg_type_tbox_init materializes it into the struct).
+///
+/// # Complexity
+/// O(1)
+pub fn kg_tbox_domain_const(rel_type: i64) -> i64 {
+    if rel_type == 0 { return KG_CON_DRUG }      // treats
+    if rel_type == 1 { return KG_CON_DRUG }      // causes
+    if rel_type == 2 { return KG_CON_DRUG }      // targets
+    if rel_type == 3 { return KG_CON_PROTEIN }   // interacts
+    if rel_type == 4 { return KG_CON_GENE }      // associated_with
+    if rel_type == 5 { return KG_CON_DRUG }      // inhibits
+    return KG_CON_TOP
+}
+
+/// Range table as a pure function of rel_type.
+///
+/// # Complexity
+/// O(1)
+pub fn kg_tbox_range_const(rel_type: i64) -> i64 {
+    if rel_type == 0 { return KG_CON_DISEASE }   // treats
+    if rel_type == 1 { return KG_CON_SYMPTOM }   // causes
+    if rel_type == 2 { return KG_CON_PROTEIN }   // targets
+    if rel_type == 3 { return KG_CON_PROTEIN }   // interacts
+    if rel_type == 4 { return KG_CON_DISEASE }   // associated_with
+    if rel_type == 5 { return KG_CON_PROTEIN }   // inhibits
+    return KG_CON_TOP
+}
+
+/// Mark the type-inconsistent candidates among n triples (n <= 64).
+///
+/// For each triple k the head entity is asserted under BOTH its type
+/// concept and Dom(r), and the tail under BOTH its type concept and
+/// Rng(r); elplus_derive_conflicts then flags a triple iff the head
+/// assertion pair or the tail assertion pair reaches a disjoint concept
+/// pair through the EL+ closure.  Entity ids are namespaced per triple
+/// (ent = k) so only the domain pair (slots 4k, 4k+1) and the range pair
+/// (slots 4k+2, 4k+3) of the SAME triple can conflict — a valid triple
+/// whose head and tail types are merely different (drug treats disease)
+/// is NOT a conflict.
+///
+/// # Parameters
+/// - `tbox`: closed TBox from `kg_type_tbox_init`.
+/// - `kg`: the knowledge graph (entity_type / rel_type tags are read).
+/// - `heads`, `rels`, `tails`: candidate triples (index < n used).
+/// - `n`: number of candidates (0 <= n <= 64).
+/// - `mask`: output, mask[k] = true iff candidate k violates the TBox
+///   (fully overwritten for index < n).
+///
+/// # Complexity
+/// O(n^2 * nc^2) from the conflict derivation, plus O(n) tag lookups.
+///
+/// # References
+/// - formal/OntologyELPlusClosureComplete.lean, theorem
+///   `conflictBPlusC_iff`: the boolean conflict oracle IS the deductive
+///   conflict relation over conceptUniv.
+pub fn kg_violation_mask(
+    tbox: &KgSymbolicTBox,
+    kg: &MedKG,
+    heads: &[i32; 64],
+    rels: &[i32; 64],
+    tails: &[i32; 64],
+    n: i64,
+    mask: &![bool; 64]
+) with Mut, Div, Panic {
+    var ent: [i64; 256] = [0; 256]
+    var cls: [i64; 256] = [0; 256]
+    var conf_pair: [bool; 65536] = [false; 65536]
+    // Local copies of the closed matrices: references INTO a borrowed
+    // struct are not passed across module boundaries on the current lane.
+    var s_loc: [bool; 4096] = [false; 4096]
+    var disj_loc: [bool; 4096] = [false; 4096]
+    var i: i64 = 0
+    while i < 4096 {
+        s_loc[i] = tbox.s[i]
+        disj_loc[i] = tbox.disj[i]
+        i = i + 1
+    }
+    var nn: i64 = n
+    if nn > 64 { nn = 64 }
+    if nn < 0 { nn = 0 }
+    var k: i64 = 0
+    while k < nn {
+        let rt = kg.relations[rels[k]].rel_type
+        ent[k * 4] = k
+        cls[k * 4] = kg_entity_type_concept(kg.entities[heads[k]].entity_type)
+        ent[k * 4 + 1] = k
+        cls[k * 4 + 1] = tbox.dom[rt]
+        ent[k * 4 + 2] = k
+        cls[k * 4 + 2] = kg_entity_type_concept(kg.entities[tails[k]].entity_type)
+        ent[k * 4 + 3] = k
+        cls[k * 4 + 3] = tbox.rng[rt]
+        k = k + 1
+    }
+    elplus_derive_conflicts(&!conf_pair, nn * 4, &ent, &cls, &s_loc, &disj_loc, tbox.nc)
+    k = 0
+    while k < nn {
+        mask[k] = conf_pair[(k * 4) * 256 + (k * 4 + 1)]
+               || conf_pair[(k * 4 + 2) * 256 + (k * 4 + 3)]
+        k = k + 1
+    }
+}
+
+/// Hybrid neuro-symbolic score: the TransE/DistMult/RotatE ensemble of
+/// kg_reason gated by the EL+ violation mask.
+///
+/// score = ensemble(h, r, t) - (penalty if violation else 0)
+///
+/// A large `penalty` (e.g. 1.0e6) is a HARD mask — violating candidates
+/// sink below any plausible embedding score.  A small penalty is a SOFT
+/// mask — the symbolic signal competes with the geometry instead of
+/// overriding it.  The GUM uncertainty of the embedding pair (h, t) is
+/// propagated unchanged (the mask is crisp and adds no variance), and
+/// `boundary_uncertain` reports whether that uncertainty exceeds
+/// `u_boundary`, i.e. whether the accept/reject decision at the mask
+/// boundary is itself epistemically reliable.
+///
+/// # Complexity
+/// O(16) scoring + one n=1 kg_violation_mask.
+pub fn kg_score_constrained(
+    tbox: &KgSymbolicTBox,
+    kg: &MedKG,
+    h: i32,
+    r: i32,
+    t: i32,
+    penalty: f64,
+    u_boundary: f64
+) -> KgConstrainedScore with Mut, Div, Panic {
+    var heads: [i32; 64] = [0; 64]
+    var rels: [i32; 64] = [0; 64]
+    var tails: [i32; 64] = [0; 64]
+    var mask: [bool; 64] = [false; 64]
+    heads[0] = h
+    rels[0] = r
+    tails[0] = t
+    kg_violation_mask(tbox, kg, &heads, &rels, &tails, 1, &!mask)
+
+    let s_transe = med_score_transe(kg, h, r, t)
+    let s_distmult = med_score_distmult(kg, h, r, t)
+    let s_rotate = med_score_rotate(kg, h, r, t)
+    var score = (s_transe + s_distmult + s_rotate) / 3.0
+    if mask[0] {
+        score = score - penalty
+    }
+    let u = med_score_uncertainty(kg, h, t)
+    KgConstrainedScore {
+        score: score,
+        u_score: u,
+        violation: mask[0],
+        boundary_uncertain: u > u_boundary,
+    }
+}

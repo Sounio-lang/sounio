@@ -1,0 +1,261 @@
+//@ run-pass
+// examples/particle_physics/su2_glueball_mass_gap.sio
+//
+// OPEN PROBLEM ATTACK — Yang–Mills spectral mass gap (0++ glueball)
+// ==================================================================
+// Builds on lattice_gauge.sio (Wilson SU(2), Metropolis, Creutz).
+// This driver extracts a SPECTRAL mass estimate from the connected
+// correlator of the spatial-plaquette 0++ operator:
+//
+//   O(t) = Σ_{x,y,z} Σ_{i<j spatial} ½ Re Tr U_ij(x,t)
+//   C(τ) = ⟨O(t) O(t+τ)⟩_t − ⟨O⟩²
+//   m_eff(0) = ln( C(0) / C(1) )
+//
+// CLAIM: finite-lattice spectral gap of the lightest state coupling to O.
+// NOT CLAIMED: continuum limit, infinite volume, Clay Millennium proof.
+//
+// Run:
+//   export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
+//   export SOUNIO_SOUC_ENGINE=lean_single
+//   ./bin/souc run examples/particle_physics/su2_glueball_mass_gap.sio
+
+use particle_physics::lattice_gauge::{
+    lat_l, lat_nd, lat_nsites,
+    lg_seed, lattice_cold, thermalize, mean_plaquette,
+    metropolis_sweep, creutz_ratio, wilson_loop_rect,
+    glueball_ops_all, glueball_accum, glueball_connected,
+    glueball_meff_log, glueball_meff_cosh,
+    glueball_meff_ep_from_samples, measure_glueball_ensemble,
+    plaquette_ep, string_tension_ep, mass_gap_proxy_ep,
+    measure_ensemble,
+}
+use epistemic::knowledge::{Epistemic, ep_val, ep_std, ep_confidence}
+
+fn fp6(v: f64) -> string with Mut, Div, Panic {
+    var x = v
+    var neg = false
+    if x < 0.0 { neg = true; x = 0.0 - x }
+    let n = (x * 1000000.0 + 0.5) as i64
+    var whole = n / 1000000
+    let frac = n % 1000000
+    var buf: [i8; 64] = [0; 64]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    var wrev: [i8; 16] = [0; 16]
+    var wlen: i64 = 0
+    if whole == 0 { wrev[0] = 48 as i8; wlen = 1 }
+    while whole > 0 && wlen < 15 {
+        wrev[wlen as usize] = (48 + whole % 10) as i8
+        wlen = wlen + 1
+        whole = whole / 10
+    }
+    var i = wlen - 1
+    while i >= 0 {
+        buf[pos as usize] = wrev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    buf[pos as usize] = 46 as i8
+    pos = pos + 1
+    var div: i64 = 100000
+    while div >= 1 {
+        buf[pos as usize] = (48 + (frac / div) % 10) as i8
+        pos = pos + 1
+        div = div / 10
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn i64s(v: i64) -> string with Mut, Div, Panic {
+    if v == 0 { return "0" }
+    var n = v
+    var neg = false
+    if n < 0 { neg = true; n = 0 - n }
+    var rev: [i8; 24] = [0; 24]
+    var len: i64 = 0
+    while n > 0 && len < 23 {
+        rev[len as usize] = (48 + n % 10) as i8
+        len = len + 1
+        n = n / 10
+    }
+    var buf: [i8; 32] = [0; 32]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    var i = len - 1
+    while i >= 0 {
+        buf[pos as usize] = rev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("================================================================")
+    println(" SU(2) 0++ GLUEBALL — SPECTRAL MASS-GAP PROBE")
+    println(" Sounio particle_physics::lattice_gauge")
+    println("================================================================")
+    println("CLAIM: finite-lattice m_eff from connected C(τ) of spatial □")
+    println("NOT CLAIMED: continuum Clay Yang–Mills mass-gap theorem")
+    println("")
+
+    let L = lat_l()
+    println("Lattice: L=" ++ i64s(L) ++ "  Nd=" ++ i64s(lat_nd()) ++ "  sites=" ++ i64s(lat_nsites()))
+
+    let beta: f64 = 2.3
+    let eps: f64 = 0.35
+    let n_therm: i64 = 50
+    let n_meas: i64 = 40
+    let n_sep: i64 = 4
+    let seed: i64 = 20260813
+
+    println("β=" ++ fp6(beta) ++ "  ε=" ++ fp6(eps)
+        ++ "  therm=" ++ i64s(n_therm)
+        ++ "  meas=" ++ i64s(n_meas)
+        ++ "  sep=" ++ i64s(n_sep)
+        ++ "  seed=" ++ i64s(seed))
+    println("")
+
+    var lat: [f64; 65536] = [0.0; 65536]
+    lg_seed(seed)
+    lattice_cold(&!lat)
+    println("--- thermalizing ---")
+    let p_th = thermalize(&!lat, beta, eps, n_therm)
+    println("plaquette after therm = " ++ fp6(p_th))
+
+    println("--- measuring 0++ correlator ensemble ---")
+    var c_mean: [f64; 8] = [0.0; 8]
+    var meff_s: [f64; 256] = [0.0; 256]
+    var meff_v: [i64; 256] = [0; 256]
+    let (n_ok, mean_o) = measure_glueball_ensemble(
+        &!lat, beta, eps, n_meas, n_sep, &!c_mean, &!meff_s, &!meff_v
+    )
+
+    println("⟨O⟩ (spatial plaquette sum / slice) = " ++ fp6(mean_o))
+    println("Connected C(τ):")
+    var tau: i64 = 0
+    while tau < L {
+        println("  C(" ++ i64s(tau) ++ ") = " ++ fp6(c_mean[tau as usize]))
+        tau = tau + 1
+    }
+
+    // PRIMARY estimator: ensemble connected C(τ) → log m_eff
+    // (standard lattice practice; per-config log is diagnostic only)
+    let (m_log, ok_log) = glueball_meff_log(c_mean[0], c_mean[1])
+    println("m_eff log  from ⟨C⟩: " ++ fp6(m_log) ++ "  valid=" ++ i64s(ok_log))
+
+    // Cosh form at τ=1 if L>=3: uses C(0), C(1), C(2)
+    // On L=4, C(2) is the midpoint and often noise-dominated / negative.
+    var m_cosh: f64 = 0.0
+    var ok_cosh: i64 = 0
+    if L >= 3 {
+        let (mc, oc) = glueball_meff_cosh(c_mean[0], c_mean[1], c_mean[2])
+        m_cosh = mc
+        ok_cosh = oc
+    }
+    println("m_eff cosh at τ=1: " ++ fp6(m_cosh) ++ "  valid=" ++ i64s(ok_cosh)
+        ++ "  (often FAIL on L=4: C(2) noise)")
+
+    let meff_cfg = glueball_meff_ep_from_samples(&meff_s, &meff_v, n_meas)
+    println("m_eff per-config log (diagnostic): "
+        ++ fp6(ep_val(&meff_cfg)) ++ " ± " ++ fp6(ep_std(&meff_cfg))
+        ++ "  conf=" ++ i64s(ep_confidence(&meff_cfg))
+        ++ "  n_valid=" ++ i64s(n_ok) ++ "/" ++ i64s(n_meas))
+
+    // Primary Epistemic: ensemble m_log; SEM from per-config scatter when available,
+    // else conservative 20% relative (flags L=4 / no-smear systematics).
+    var meff_primary_val = m_log
+    var meff_primary_sem = 0.0
+    if ok_log == 1 {
+        if ep_val(&meff_cfg) > 0.0 && ep_std(&meff_cfg) > 0.0 {
+            // scale per-config SEM to ensemble central value scatter proxy
+            meff_primary_sem = ep_std(&meff_cfg)
+        } else {
+            meff_primary_sem = 0.2 * m_log
+        }
+    }
+    // conf 450: spectral gap on L=4 without smearing — excited states dominate C(0)/C(1)
+    let meff_ep = Epistemic {
+        val: meff_primary_val,
+        variance: meff_primary_sem * meff_primary_sem,
+        confidence: 450
+    }
+    println("m_eff PRIMARY (ensemble ⟨C⟩): "
+        ++ fp6(ep_val(&meff_ep)) ++ " ± " ++ fp6(ep_std(&meff_ep))
+        ++ "  conf=" ++ i64s(ep_confidence(&meff_ep)))
+
+    // Context: Creutz string tension + proxy on a short re-measure
+    println("")
+    println("--- context: Creutz string tension ---")
+    var plaq_s: [f64; 256] = [0.0; 256]
+    var chi_s: [f64; 256] = [0.0; 256]
+    var chi_v: [i64; 256] = [0; 256]
+    let n_ctx: i64 = 16
+    let n_ok_c = measure_ensemble(&!lat, beta, eps, n_ctx, n_sep, &!plaq_s, &!chi_s, &!chi_v)
+    let pep = plaquette_ep(&plaq_s, n_ctx)
+    let sep = string_tension_ep(&chi_s, &chi_v, n_ctx)
+    let proxy = mass_gap_proxy_ep(&sep)
+
+    println("⟨P⟩           = " ++ fp6(ep_val(&pep)) ++ " ± " ++ fp6(ep_std(&pep)))
+    println("σ a² ≈ χ(2,2) = " ++ fp6(ep_val(&sep)) ++ " ± " ++ fp6(ep_std(&sep))
+        ++ "  valid=" ++ i64s(n_ok_c) ++ "/" ++ i64s(n_ctx))
+    println("proxy 3.7√σ a = " ++ fp6(ep_val(&proxy)) ++ " ± " ++ fp6(ep_std(&proxy)))
+
+    // Dimensionless ratio m_eff / √σ
+    // Literature pure-SU(2) 0++/√σ ≈ 3.5–4. On L=4 without smearing, C(0)/C(1)
+    // is UV/excited-state contaminated → ratio often too large → FAIL_HONEST is correct.
+    var ratio: f64 = 0.0
+    var ratio_ok: i64 = 0
+    let sig = ep_val(&sep)
+    let me = ep_val(&meff_ep)
+    if sig > 1.0e-12 && me > 0.0 && ok_log == 1 {
+        var g = sig
+        var k: i64 = 0
+        while k < 40 { g = 0.5 * (g + sig / g); k = k + 1 }
+        ratio = me / g
+        ratio_ok = 1
+    }
+    println("m_eff / √(σ a²) = " ++ fp6(ratio) ++ "  (lit 0++ ~ 3.5–4; L=4 no-smear is rough)")
+
+    println("")
+    println("================================================================")
+    println(" GATES")
+    println("================================================================")
+    let c_decay = c_mean[0] > 0.0 && c_mean[1] > 0.0 && c_mean[0] > c_mean[1]
+    let gap_pos = ok_log == 1 && ep_val(&meff_ep) > 0.0
+    let confining = ep_val(&sep) > 0.0
+    // Accept broad window: L=4 excited-state pollution can push ratio high
+    let ratio_sane = ratio_ok == 1 && ratio > 0.5 && ratio < 20.0
+
+    if c_decay {
+        println("GATE correlator_decays: PASS")
+    } else {
+        println("GATE correlator_decays: FAIL_HONEST")
+    }
+    if gap_pos {
+        println("GATE spectral_meff_positive: PASS  (finite-lattice gap signal)")
+    } else {
+        println("GATE spectral_meff_positive: FAIL_HONEST")
+    }
+    if confining {
+        println("GATE creutz_confinement: PASS")
+    } else {
+        println("GATE creutz_confinement: FAIL_HONEST")
+    }
+    if ratio_sane {
+        println("GATE meff_over_sqrt_sigma_order1: PASS")
+    } else {
+        println("GATE meff_over_sqrt_sigma_order1: FAIL_HONEST  (need smear / larger L)")
+    }
+
+    println("")
+    println("OPEN NEXT:")
+    println("  • variational basis (APE smear) to kill excited states")
+    println("  • L=6,8 T=2L for cosh plateau")
+    println("  • SU(3) heatbath + multi-state fit")
+    println("  • continuum extrapolation of m_G / √σ")
+    println("================================================================")
+    0
+}

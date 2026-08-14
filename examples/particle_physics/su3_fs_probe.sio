@@ -1,0 +1,270 @@
+//@ run-pass
+// examples/particle_physics/su3_fs_probe.sio
+//
+// SU(3) L=4 → L=6 FINITE-SIZE PROBE
+// =================================
+// Same-operator contact (thin 0++) + Creutz χ(2,2) on pure SU(3) Wilson
+// with Cabibbo–Marinari heatbath. Compare L=4 vs L=6 at β=5.7.
+//
+// CLAIM: SU(3) L=6 geometry live + same-op FS diagnostic.
+// NOT CLAIMED: continuum SU(3); QCD; Clay.
+//
+// Run:
+//   export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
+//   export SOUNIO_SOUC_ENGINE=lean_single
+//   ./bin/souc run examples/particle_physics/su3_fs_probe.sio
+
+use particle_physics::lattice_su3::{
+    su3_set_L, su3_lat_l, su3_nsites, su3_seed, su3_lattice_cold,
+    su3_heatbath_thermalize, su3_measure_glueball_thin_and_ape_hb,
+    su3_measure_ensemble_hb, su3_glueball_meff_log,
+    su3_string_tension_ep, su3_plaquette_ep,
+}
+use epistemic::knowledge::{ep_val, ep_std}
+
+fn fp6(v: f64) -> string with Mut, Div, Panic {
+    var x = v
+    var neg = false
+    if x < 0.0 { neg = true; x = 0.0 - x }
+    let n = (x * 1000000.0 + 0.5) as i64
+    var whole = n / 1000000
+    let frac = n % 1000000
+    var buf: [i8; 64] = [0; 64]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    var wrev: [i8; 16] = [0; 16]
+    var wlen: i64 = 0
+    if whole == 0 { wrev[0] = 48 as i8; wlen = 1 }
+    while whole > 0 && wlen < 15 {
+        wrev[wlen as usize] = (48 + whole % 10) as i8
+        wlen = wlen + 1
+        whole = whole / 10
+    }
+    var i = wlen - 1
+    while i >= 0 {
+        buf[pos as usize] = wrev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    buf[pos as usize] = 46 as i8
+    pos = pos + 1
+    var div: i64 = 100000
+    while div >= 1 {
+        buf[pos as usize] = (48 + (frac / div) % 10) as i8
+        pos = pos + 1
+        div = div / 10
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn i64s(v: i64) -> string with Mut, Div, Panic {
+    if v == 0 { return "0" }
+    var n = v
+    var neg = false
+    if n < 0 { neg = true; n = 0 - n }
+    var rev: [i8; 24] = [0; 24]
+    var len: i64 = 0
+    while n > 0 && len < 23 {
+        rev[len as usize] = (48 + n % 10) as i8
+        len = len + 1
+        n = n / 10
+    }
+    var buf: [i8; 32] = [0; 32]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    var i = len - 1
+    while i >= 0 {
+        buf[pos as usize] = rev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn sqrt_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    var k: i64 = 0
+    while k < 40 { g = 0.5 * (g + x / g); k = k + 1 }
+    g
+}
+
+fn abs_f(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+/// Returns (m_thin, m_ape, srt, m_t_chi, m_a_chi, ok) ok:1=thin 2=ape both 3
+fn run_su3(
+    lat: &![f64; 93312],
+    sm: &![f64; 93312],
+    tmp: &![f64; 93312],
+    beta: f64,
+    n_therm: i64,
+    n_meas: i64,
+    n_sep: i64,
+    alpha: f64,
+    n_smear: i64,
+    seed: i64
+) -> (f64, f64, f64, f64, f64, i64) with IO, Mut, Div, Panic {
+    su3_seed(seed)
+    su3_lattice_cold(lat)
+    let _p = su3_heatbath_thermalize(lat, beta, n_therm)
+    var c_thin: [f64; 8] = [0.0; 8]
+    var c_ape: [f64; 8] = [0.0; 8]
+    var mt_s: [f64; 256] = [0.0; 256]
+    var mt_v: [i64; 256] = [0; 256]
+    var ma_s: [f64; 256] = [0.0; 256]
+    var ma_v: [i64; 256] = [0; 256]
+    let (_nt, _na, _ot, _oa) = su3_measure_glueball_thin_and_ape_hb(
+        lat, sm, tmp, beta, n_meas, n_sep, alpha, n_smear,
+        &!c_thin, &!c_ape, &!mt_s, &!mt_v, &!ma_s, &!ma_v
+    )
+    let (m_t, ok_t) = su3_glueball_meff_log(c_thin[0], c_thin[1])
+    let (m_a, ok_a) = su3_glueball_meff_log(c_ape[0], c_ape[1])
+
+    var plaq_s: [f64; 256] = [0.0; 256]
+    var chi_s: [f64; 256] = [0.0; 256]
+    var chi_v: [i64; 256] = [0; 256]
+    let n_ctx: i64 = 12
+    let _nc = su3_measure_ensemble_hb(lat, beta, n_ctx, n_sep, &!plaq_s, &!chi_s, &!chi_v)
+    let sep = su3_string_tension_ep(&chi_s, &chi_v, n_ctx)
+    let pep = su3_plaquette_ep(&plaq_s, n_ctx)
+    let sig = ep_val(&sep)
+    let srt = sqrt_q(sig)
+    println("    P=" ++ fp6(ep_val(&pep)) ++ "  √χ=" ++ fp6(srt)
+        ++ "  sem_χ=" ++ fp6(ep_std(&sep)))
+
+    var mt: f64 = 0.0
+    var ma: f64 = 0.0
+    var mtc: f64 = 0.0
+    var mac: f64 = 0.0
+    var ok: i64 = 0
+    if ok_t == 1 && m_t > 0.05 { mt = m_t }
+    if ok_a == 1 && m_a > 0.05 { ma = m_a }
+    if srt > 1.0e-12 {
+        if mt > 0.0 { mtc = mt / srt; ok = 1 }
+        if ma > 0.0 { mac = ma / srt; if ok == 1 { ok = 3 } else { ok = 2 } }
+    }
+    (mt, ma, srt, mtc, mac, ok)
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("================================================================")
+    println(" SU(3) L=4 → L=6 FINITE-SIZE PROBE")
+    println("================================================================")
+    println("CLAIM: SU(3) L=6 geometry + same-op thin/APE FS at β=5.7")
+    println("NOT CLAIMED: continuum; QCD; Clay")
+    println("")
+
+    let beta: f64 = 5.7
+    let alpha: f64 = 0.4
+    let n_smear: i64 = 2
+    let seed0: i64 = 20260813
+
+    var lat: [f64; 93312] = [0.0; 93312]
+    var sm: [f64; 93312] = [0.0; 93312]
+    var tmp: [f64; 93312] = [0.0; 93312]
+
+    // L=4
+    println("--- L=4 ---")
+    let ok4 = su3_set_L(4)
+    if ok4 == 0 {
+        println("FAIL su3_set_L(4)")
+        return 1
+    }
+    println("L=" ++ i64s(su3_lat_l()) ++ " sites=" ++ i64s(su3_nsites()))
+    let n_therm4: i64 = 24
+    let n_meas4: i64 = 18
+    let n_sep4: i64 = 2
+    let (mt4, ma4, srt4, mtc4, mac4, okv4) = run_su3(
+        &!lat, &!sm, &!tmp, beta, n_therm4, n_meas4, n_sep4, alpha, n_smear, seed0
+    )
+    println("  m_thin=" ++ fp6(mt4) ++ "  m_ape=" ++ fp6(ma4)
+        ++ "  m_t/√χ=" ++ fp6(mtc4) ++ "  m_a/√χ=" ++ fp6(mac4)
+        ++ "  ok=" ++ i64s(okv4))
+
+    // L=6
+    println("")
+    println("--- L=6 ---")
+    let ok6 = su3_set_L(6)
+    if ok6 == 0 {
+        println("FAIL su3_set_L(6)")
+        return 1
+    }
+    println("L=" ++ i64s(su3_lat_l()) ++ " sites=" ++ i64s(su3_nsites()))
+    let n_therm6: i64 = 28
+    let n_meas6: i64 = 16
+    let n_sep6: i64 = 2
+    let (mt6, ma6, srt6, mtc6, mac6, okv6) = run_su3(
+        &!lat, &!sm, &!tmp, beta, n_therm6, n_meas6, n_sep6, alpha, n_smear, seed0 + 6
+    )
+    println("  m_thin=" ++ fp6(mt6) ++ "  m_ape=" ++ fp6(ma6)
+        ++ "  m_t/√χ=" ++ fp6(mtc6) ++ "  m_a/√χ=" ++ fp6(mac6)
+        ++ "  ok=" ++ i64s(okv6))
+
+    // FS shifts
+    var fs_t: f64 = 0.0
+    var fs_a: f64 = 0.0
+    if mtc4 > 1.0e-12 && mtc6 > 1.0e-12 {
+        fs_t = abs_f(mtc6 - mtc4) / mtc4
+    }
+    if mac4 > 1.0e-12 && mac6 > 1.0e-12 {
+        fs_a = abs_f(mac6 - mac4) / mac4
+    }
+
+    println("")
+    println("================================================================")
+    println(" SCOREBOARD")
+    println("================================================================")
+    println("β=" ++ fp6(beta) ++ "  L4 m_t/√χ=" ++ fp6(mtc4) ++ "  L6=" ++ fp6(mtc6)
+        ++ "  FS_thin=" ++ fp6(fs_t))
+    println("            L4 m_a/√χ=" ++ fp6(mac4) ++ "  L6=" ++ fp6(mac6)
+        ++ "  FS_ape=" ++ fp6(fs_a))
+    println("lit SU(3) 0++ m/√σ ~ 3.5")
+
+    println("")
+    println("================================================================")
+    println(" GATES")
+    println("================================================================")
+    let g_L6 = ok6 == 1 && su3_lat_l() == 6 && su3_nsites() == 1296
+    let g_L4pt = okv4 >= 1 && mtc4 > 0.2
+    let g_L6pt = okv6 >= 1 && mtc6 > 0.2
+    let g_fs = fs_t > 0.0
+    let g_fs_mild = g_fs && fs_t <= 0.50
+    let g_phys4 = mtc4 >= 0.5 && mtc4 <= 12.0
+    let g_phys6 = mtc6 >= 0.5 && mtc6 <= 12.0
+    let g_scale = srt4 > 0.0 && srt6 > 0.0
+
+    if g_L6 { println("GATE L6_geometry: PASS  sites=1296") }
+    else { println("GATE L6_geometry: FAIL_HONEST") }
+    if g_L4pt { println("GATE L4_point: PASS") }
+    else { println("GATE L4_point: FAIL_HONEST") }
+    if g_L6pt { println("GATE L6_point: PASS") }
+    else { println("GATE L6_point: FAIL_HONEST") }
+    if g_scale { println("GATE creutz_both: PASS") }
+    else { println("GATE creutz_both: FAIL_HONEST") }
+    if g_phys4 { println("GATE L4_ratio_phys: PASS  " ++ fp6(mtc4)) }
+    else { println("GATE L4_ratio_phys: FAIL_HONEST") }
+    if g_phys6 { println("GATE L6_ratio_phys: PASS  " ++ fp6(mtc6)) }
+    else { println("GATE L6_ratio_phys: FAIL_HONEST") }
+    if g_fs_mild { println("GATE FS_thin_mild: PASS  " ++ fp6(fs_t)) }
+    else if g_fs { println("GATE FS_thin_mild: FAIL_HONEST  " ++ fp6(fs_t)) }
+    else { println("GATE FS_thin_mild: FAIL_HONEST") }
+    if fs_a > 0.0 && fs_a <= 0.50 { println("GATE FS_ape_mild: PASS  " ++ fp6(fs_a)) }
+    else if fs_a > 0.0 { println("GATE FS_ape_mild: FAIL_HONEST  " ++ fp6(fs_a)) }
+    else { println("GATE FS_ape_mild: FAIL_HONEST") }
+
+    println("")
+    println("VERDICT:")
+    println("  SU(3) L6 live. thin m/√χ L4=" ++ fp6(mtc4) ++ " → L6=" ++ fp6(mtc6)
+        ++ "  (shift " ++ fp6(fs_t) ++ ")")
+    if g_L6 && g_L6pt {
+        println("  Finite-size path open. No continuum claim.")
+    } else {
+        println("  Partial — see FAIL_HONEST.")
+    }
+
+    let _r = su3_set_L(4)
+    println("================================================================")
+    0
+}

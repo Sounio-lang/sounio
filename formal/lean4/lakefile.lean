@@ -722,6 +722,11 @@ lean_lib «SounioFoMultimodFragment» where
 @[default_target]
 lean_lib «SounioZDFiberAntisym» where
 
+-- E5 L4 pure-arithmetic package (F closed under (T)+(C)). Separate from the tip:
+-- no import of SounioZDFiberAntisym; safe to build in parallel with E4b tiers.
+@[default_target]
+lean_lib «SounioZDE5Inductive» where
+
 @[default_target]
 lean_lib «SounioZDChi» where
 

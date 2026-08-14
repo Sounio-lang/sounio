@@ -1,0 +1,261 @@
+//@ run-pass
+// examples/particle_physics/su2_glueball_L6.sio
+//
+// OPEN PROBLEM ATTACK — finite-size step L=4 → L=6
+// ==================================================
+// Same physics stack as su2_glueball_smeared.sio, on a larger volume:
+//   pure SU(2) Wilson · Metropolis · Creutz σ · paired thin/APE 0++ m_eff
+//
+// L=6 allows R≤2 Creutz with better bulk and C(τ) out to τ=3 without
+// midpoint-only noise of L=4. Still NOT continuum / Clay.
+//
+// Run:
+//   export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
+//   export SOUNIO_SOUC_ENGINE=lean_single
+//   ./bin/souc run examples/particle_physics/su2_glueball_L6.sio
+
+use particle_physics::lattice_gauge::{
+    lat_l, lat_nsites, lat_nlinks, lat_flat_len, lg_set_L,
+    lg_seed, lattice_cold, thermalize, mean_plaquette,
+    measure_glueball_thin_and_ape,
+    measure_ensemble, plaquette_ep, string_tension_ep, mass_gap_proxy_ep,
+    glueball_meff_log, glueball_meff_ep_from_samples,
+    creutz_ratio, wilson_loop_rect,
+}
+use epistemic::knowledge::{Epistemic, ep_val, ep_std, ep_confidence}
+
+fn fp6(v: f64) -> string with Mut, Div, Panic {
+    var x = v
+    var neg = false
+    if x < 0.0 { neg = true; x = 0.0 - x }
+    let n = (x * 1000000.0 + 0.5) as i64
+    var whole = n / 1000000
+    let frac = n % 1000000
+    var buf: [i8; 64] = [0; 64]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    var wrev: [i8; 16] = [0; 16]
+    var wlen: i64 = 0
+    if whole == 0 { wrev[0] = 48 as i8; wlen = 1 }
+    while whole > 0 && wlen < 15 {
+        wrev[wlen as usize] = (48 + whole % 10) as i8
+        wlen = wlen + 1
+        whole = whole / 10
+    }
+    var i = wlen - 1
+    while i >= 0 {
+        buf[pos as usize] = wrev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    buf[pos as usize] = 46 as i8
+    pos = pos + 1
+    var div: i64 = 100000
+    while div >= 1 {
+        buf[pos as usize] = (48 + (frac / div) % 10) as i8
+        pos = pos + 1
+        div = div / 10
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn i64s(v: i64) -> string with Mut, Div, Panic {
+    if v == 0 { return "0" }
+    var n = v
+    var neg = false
+    if n < 0 { neg = true; n = 0 - n }
+    var rev: [i8; 24] = [0; 24]
+    var len: i64 = 0
+    while n > 0 && len < 23 {
+        rev[len as usize] = (48 + n % 10) as i8
+        len = len + 1
+        n = n / 10
+    }
+    var buf: [i8; 32] = [0; 32]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    var i = len - 1
+    while i >= 0 {
+        buf[pos as usize] = rev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn sqrt_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    var k: i64 = 0
+    while k < 40 { g = 0.5 * (g + x / g); k = k + 1 }
+    g
+}
+
+fn meff_primary(m_log: f64, ok: i64, cfg: &Epistemic, conf: i64) -> Epistemic with Mut, Div, Panic {
+    if ok == 0 {
+        return Epistemic { val: 0.0, variance: 0.0, confidence: 0 }
+    }
+    var sem = 0.2 * m_log
+    if ep_val(cfg) > 0.0 && ep_std(cfg) > 0.0 {
+        sem = ep_std(cfg)
+    }
+    Epistemic { val: m_log, variance: sem * sem, confidence: conf }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("================================================================")
+    println(" SU(2) L=6 FINITE-SIZE — APE 0++ + CREUTZ MASS-GAP PROBE")
+    println("================================================================")
+    println("CLAIM: larger volume improves spectral/scale stability vs L=4")
+    println("NOT CLAIMED: continuum Clay Yang–Mills mass-gap theorem")
+    println("")
+
+    let okL = lg_set_L(6)
+    if okL == 0 {
+        println("FAIL: lg_set_L(6) rejected")
+        return 1
+    }
+    let L = lat_l()
+    println("L=" ++ i64s(L) ++ "  sites=" ++ i64s(lat_nsites())
+        ++ "  links=" ++ i64s(lat_nlinks())
+        ++ "  flat=" ++ i64s(lat_flat_len()))
+
+    let beta: f64 = 2.3
+    let eps: f64 = 0.35
+    // L=6 is ~5× heavier than L=4 — keep demo budget finite
+    let n_therm: i64 = 40
+    let n_meas: i64 = 28
+    let n_sep: i64 = 3
+    let seed: i64 = 20260813
+    let alpha: f64 = 0.4
+    let n_smear: i64 = 3
+
+    println("β=" ++ fp6(beta) ++ " therm=" ++ i64s(n_therm)
+        ++ " meas=" ++ i64s(n_meas) ++ " sep=" ++ i64s(n_sep)
+        ++ " seed=" ++ i64s(seed))
+    println("APE α=" ++ fp6(alpha) ++ " n_smear=" ++ i64s(n_smear))
+    println("")
+
+    var lat: [f64; 65536] = [0.0; 65536]
+    var sm: [f64; 65536] = [0.0; 65536]
+    var tmp: [f64; 65536] = [0.0; 65536]
+
+    lg_seed(seed)
+    lattice_cold(&!lat)
+    println("--- thermalize ---")
+    let p_th = thermalize(&!lat, beta, eps, n_therm)
+    println("⟨P⟩ after therm = " ++ fp6(p_th))
+
+    // single-config Wilson loops for transparency
+    let w11 = wilson_loop_rect(&lat, 1, 1)
+    let w22 = wilson_loop_rect(&lat, 2, 2)
+    let (chi2, chi2ok) = creutz_ratio(&lat, 2)
+    println("W(1,1)=" ++ fp6(w11) ++ " W(2,2)=" ++ fp6(w22)
+        ++ " χ(2,2)=" ++ fp6(chi2) ++ " ok=" ++ i64s(chi2ok))
+
+    println("--- paired thin + APE ---")
+    var c_thin: [f64; 8] = [0.0; 8]
+    var c_ape: [f64; 8] = [0.0; 8]
+    var mt_s: [f64; 256] = [0.0; 256]
+    var mt_v: [i64; 256] = [0; 256]
+    var ma_s: [f64; 256] = [0.0; 256]
+    var ma_v: [i64; 256] = [0; 256]
+
+    let (n_ok_t, n_ok_a, mo_t, mo_a) = measure_glueball_thin_and_ape(
+        &!lat, &!sm, &!tmp, beta, eps, n_meas, n_sep,
+        alpha, n_smear,
+        &!c_thin, &!c_ape,
+        &!mt_s, &!mt_v, &!ma_s, &!ma_v
+    )
+
+    let (m_thin, ok_thin) = glueball_meff_log(c_thin[0], c_thin[1])
+    let (m_ape, ok_ape) = glueball_meff_log(c_ape[0], c_ape[1])
+    let cfg_t = glueball_meff_ep_from_samples(&mt_s, &mt_v, n_meas)
+    let cfg_a = glueball_meff_ep_from_samples(&ma_s, &ma_v, n_meas)
+    // L=6: slightly higher conf than L=4 for APE
+    let ep_thin = meff_primary(m_thin, ok_thin, &cfg_t, 500)
+    let ep_ape = meff_primary(m_ape, ok_ape, &cfg_a, 600)
+
+    println("⟨O⟩ thin=" ++ fp6(mo_t) ++ " APE=" ++ fp6(mo_a))
+    println("C_thin: C0=" ++ fp6(c_thin[0]) ++ " C1=" ++ fp6(c_thin[1])
+        ++ " C2=" ++ fp6(c_thin[2]) ++ " C3=" ++ fp6(c_thin[3]))
+    println("C_APE:  C0=" ++ fp6(c_ape[0]) ++ " C1=" ++ fp6(c_ape[1])
+        ++ " C2=" ++ fp6(c_ape[2]) ++ " C3=" ++ fp6(c_ape[3]))
+    println("m_eff thin=" ++ fp6(ep_val(&ep_thin)) ++ "±" ++ fp6(ep_std(&ep_thin))
+        ++ " conf=" ++ i64s(ep_confidence(&ep_thin))
+        ++ " n_ok=" ++ i64s(n_ok_t) ++ "/" ++ i64s(n_meas))
+    println("m_eff APE =" ++ fp6(ep_val(&ep_ape)) ++ "±" ++ fp6(ep_std(&ep_ape))
+        ++ " conf=" ++ i64s(ep_confidence(&ep_ape))
+        ++ " n_ok=" ++ i64s(n_ok_a) ++ "/" ++ i64s(n_meas))
+
+    println("--- Creutz scale ---")
+    var plaq_s: [f64; 256] = [0.0; 256]
+    var chi_s: [f64; 256] = [0.0; 256]
+    var chi_v: [i64; 256] = [0; 256]
+    let n_ctx: i64 = 12
+    let n_ok_c = measure_ensemble(&!lat, beta, eps, n_ctx, n_sep, &!plaq_s, &!chi_s, &!chi_v)
+    let pep = plaquette_ep(&plaq_s, n_ctx)
+    let sep = string_tension_ep(&chi_s, &chi_v, n_ctx)
+    let proxy = mass_gap_proxy_ep(&sep)
+    let sig = ep_val(&sep)
+    let sqrt_sig = sqrt_q(sig)
+
+    println("⟨P⟩=" ++ fp6(ep_val(&pep)) ++ "±" ++ fp6(ep_std(&pep))
+        ++ " σa²=" ++ fp6(sig) ++ "±" ++ fp6(ep_std(&sep))
+        ++ " √σa=" ++ fp6(sqrt_sig) ++ " n_ok=" ++ i64s(n_ok_c))
+    println("proxy 3.7√σ a=" ++ fp6(ep_val(&proxy)))
+
+    var r_thin: f64 = 0.0
+    var r_ape: f64 = 0.0
+    if sqrt_sig > 1.0e-12 {
+        if ok_thin == 1 { r_thin = ep_val(&ep_thin) / sqrt_sig }
+        if ok_ape == 1 { r_ape = ep_val(&ep_ape) / sqrt_sig }
+    }
+    println("m_eff/√σ thin=" ++ fp6(r_thin) ++ " APE=" ++ fp6(r_ape)
+        ++ " lit~3.5–4")
+    println("L=4 reference (prior run): thin~4.63 APE~2.90")
+
+    println("")
+    println("================================================================")
+    println(" GATES")
+    println("================================================================")
+    let L_ok = L == 6 && lat_nsites() == 1296
+    let plaq_ok = ep_val(&pep) > 0.4 && ep_val(&pep) < 0.95
+    let thin_decay = c_thin[0] > 0.0 && c_thin[1] > 0.0 && c_thin[0] > c_thin[1]
+    let ape_decay = c_ape[0] > 0.0 && c_ape[1] > 0.0 && c_ape[0] > c_ape[1]
+    let both_gap = ok_thin == 1 && ok_ape == 1
+    let confining = sig > 0.0
+    let ape_healthy = mo_a > 100.0
+    let ratio_sane = ok_ape == 1 && r_ape > 0.5 && r_ape < 20.0
+    // finite-size: APE ratio in broader physical band on L=6
+    let phys_window = ok_ape == 1 && r_ape > 1.5 && r_ape < 8.0
+
+    if L_ok { println("GATE lattice_L6: PASS") }
+    else { println("GATE lattice_L6: FAIL_HONEST") }
+    if plaq_ok { println("GATE plaquette_physical: PASS") }
+    else { println("GATE plaquette_physical: FAIL_HONEST") }
+    if thin_decay { println("GATE thin_correlator_decays: PASS") }
+    else { println("GATE thin_correlator_decays: FAIL_HONEST") }
+    if ape_decay { println("GATE ape_correlator_decays: PASS") }
+    else { println("GATE ape_correlator_decays: FAIL_HONEST") }
+    if both_gap { println("GATE both_spectral_positive: PASS") }
+    else { println("GATE both_spectral_positive: FAIL_HONEST") }
+    if confining { println("GATE creutz_confinement: PASS") }
+    else { println("GATE creutz_confinement: FAIL_HONEST") }
+    if ape_healthy { println("GATE ape_operator_healthy: PASS") }
+    else { println("GATE ape_operator_healthy: FAIL_HONEST") }
+    if ratio_sane { println("GATE ape_ratio_order1: PASS") }
+    else { println("GATE ape_ratio_order1: FAIL_HONEST") }
+    if phys_window { println("GATE ape_ratio_phys_window: PASS") }
+    else { println("GATE ape_ratio_phys_window: FAIL_HONEST") }
+
+    // restore default L so other modules in same process see L=4
+    let _r = lg_set_L(4)
+
+    println("")
+    println("OPEN NEXT: L=8 · multi-β continuum sketch · SU(3) heatbath")
+    println("================================================================")
+    0
+}

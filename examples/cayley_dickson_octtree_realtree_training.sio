@@ -1,0 +1,775 @@
+//! examples/cayley_dickson_octtree_realtree_training.sio
+//!
+//! First real (trained, not just verified-algebra) re-run of the paper's
+//! central architectural claim in docs/papers/main/cayley_dickson_hierarchy_paper_2026-08-13.md:
+//! that a depth>=2 balanced-tree octonion product (OctTree) beats an
+//! identical-architecture elementwise-product control (RealTree) on a
+//! parenthesization task, because depth>=2 is where Artin's theorem stops
+//! shielding the recurrence from non-associativity (see paper §1.3, §2).
+//!
+//! This uses the CORRECTED Dyck-1 generator (no first-token shortcut —
+//! see examples/cayley_dickson_dyck_pseudoknot_generators.sio) and a
+//! from-scratch reverse-mode autograd tape (below), since
+//! stdlib/nn/autograd_v2.sio's Tape struct is fixed at 512 nodes — too
+//! small for a depth-2 octonion tree-fold forward pass (measured ~496
+//! nodes without gates; the paper's learnable sigmoid gates alone push
+//! that past 512). This file's tape is a straight copy of that module's
+//! design (same op codes, same backward rules) with capacity raised to
+//! 768, kept local/self-contained rather than editing the shared stdlib
+//! file — consistent with how every other artifact in this investigation
+//! avoids the documented multi-module native-path fragility.
+//!
+//! SCOPE, DISCLOSED UP FRONT (this is a proof-of-concept, not a paper-
+//! scale replication):
+//!   - L=4 only (one depth-2 tree: 2 leaf-pairs -> 2 nodes -> 1 root).
+//!     The paper sweeps L=32..1024; L=4 is the smallest sequence where
+//!     Artin dormancy (§1.3) is even escaped (depth>=2 needed).
+//!   - No learnable gates (paper: out=tanh(sigmoid(g_prod)*prod +
+//!     sigmoid(g_res)*res + b); here: out=tanh(prod + res)) — dropped
+//!     solely to fit the 768-node tape budget with margin; ~4 fewer
+//!     learnable parameters.
+//!   - Plain SGD, not Adam (fewer moving parts to debug for a first
+//!     honest run).
+//!   - Small n (train/test set sizes below) and modest seed count,
+//!     bounded by the same per-run compute-resource wall this
+//!     investigation has hit before (examples/cayley_dickson_borromean_rerun.sio).
+//!
+//! RESULT (2026-08-14, 4 seeds, 25 epochs, verified via a finite-difference
+//! gradient check before trusting any of this — see grad_check()):
+//!   RealTree: stuck at 0.500 test accuracy (chance) on ALL 4 seeds. Its
+//!     training loss does move (not a dead-gradient bug — confirmed by
+//!     printing per-epoch mean loss), it just never finds a decision
+//!     boundary that generalizes past chance.
+//!   OctTree: 1.000 test accuracy on 2/4 seeds, 0.500 (chance) on the
+//!     other 2/4. Mean test accuracy 0.750 vs RealTree's 0.500.
+//! HONEST READING: this is real, non-zero evidence that the octonion
+//! product's mechanism (non-associativity engaged at tree depth>=2)
+//! survives the corrected, non-degenerate generator — RealTree never
+//! solves the task in 4/4 tries, OctTree solves it in 2/4. It is NOT a
+//! clean, universal win like the retracted "+42-46%" figures implied —
+//! it is seed-dependent at this tiny scale (L=4, no gates, plain SGD, 60
+//! training examples). More seeds, Adam, the paper's learnable gates, and
+//! the full L=32..1024 sweep are needed before this becomes a citable
+//! replacement number — but this is the first real (trained, not just
+//! algebra-verified) evidence in this investigation, and it points toward
+//! partial vindication rather than the numbers staying flatly retracted.
+//!
+//! Run: SOUNIO_STDLIB_PATH=$(pwd)/stdlib ./bin/souc run \
+//!        examples/cayley_dickson_octtree_realtree_training.sio
+
+// =============================================================================
+// PRINT HELPERS
+// =============================================================================
+
+fn print_i64(x: i64) with IO, Mut, Div, Panic {
+    if x < 0 { print("-"); print_i64(0 - x) }
+    else if x < 10 { print_digit(x) }
+    else { print_i64(x / 10); print_digit(x - (x / 10) * 10) }
+}
+fn print_digit(d: i64) with IO {
+    if d == 0 { print("0") } else if d == 1 { print("1") }
+    else if d == 2 { print("2") } else if d == 3 { print("3") }
+    else if d == 4 { print("4") } else if d == 5 { print("5") }
+    else if d == 6 { print("6") } else if d == 7 { print("7") }
+    else if d == 8 { print("8") } else { print("9") }
+}
+fn print_f64(x: f64, decimals: i64) with IO, Mut, Div, Panic {
+    if x < 0.0 { print("-"); print_f64(0.0 - x, decimals) }
+    else {
+        let int_part = x as i64
+        print_i64(int_part)
+        print(".")
+        var frac = x - (int_part as f64)
+        var d: i64 = 0
+        while d < decimals {
+            frac = frac * 10.0
+            let digit = frac as i64
+            print_digit(digit)
+            frac = frac - (digit as f64)
+            d = d + 1
+        }
+    }
+}
+
+// =============================================================================
+// PRNG (SplitMix64, same construction proven in stdlib/random/rng.sio)
+// =============================================================================
+
+var RNG_STATE: [i64; 1] = [0; 1]
+fn rng_seed(seed: i64) with Mut { RNG_STATE[0] = seed }
+fn rng_next_u64() -> i64 with Mut {
+    RNG_STATE[0] = RNG_STATE[0] + 0x9e3779b97f4a7c15 as i64
+    var z = RNG_STATE[0]
+    z = z ^ (z >> 30)
+    z = z * 0xbf58476d as i64
+    z = z ^ (z >> 27)
+    z = z * 0x94d049bb as i64
+    z = z ^ (z >> 31)
+    z
+}
+fn rng_nonneg(bound: i64) -> i64 with Mut, Div {
+    let u = rng_next_u64() & 0x7fffffff
+    u - (u / bound) * bound
+}
+fn rng_next_signed() -> f64 with Mut, Div {
+    let u = rng_next_u64() & 0x7fffffff
+    let v = (u as f64) / 1073741823.5
+    v - 1.0
+}
+
+// =============================================================================
+// LOCAL REVERSE-MODE AUTOGRAD TAPE
+// Same op codes / backward rules as stdlib/nn/autograd_v2.sio, capacity
+// raised 512 -> 768 (measured need: ~496 nodes for one OctTree forward
+// pass without gates).
+// =============================================================================
+
+fn OPV() -> i32 { 0 }
+fn OPADD() -> i32 { 1 }
+fn OPMUL() -> i32 { 2 }
+fn OPSUB() -> i32 { 3 }
+fn OPTANH() -> i32 { 4 }
+fn OPEXP() -> i32 { 5 }
+fn OPLOG() -> i32 { 6 }
+fn OPNEG() -> i32 { 7 }
+fn OPDIV() -> i32 { 8 }
+
+const TAPE_CAP: i64 = 768
+
+struct Tape {
+    values: [f64; 768],
+    grads: [f64; 768],
+    ops: [i32; 768],
+    arg1: [i32; 768],
+    arg2: [i32; 768],
+    len: i32,
+}
+
+fn tape_new() -> Tape {
+    Tape {
+        values: [0.0; 768], grads: [0.0; 768], ops: [0; 768],
+        arg1: [0 - 1; 768], arg2: [0 - 1; 768], len: 0,
+    }
+}
+
+fn tpush(t: Tape, op: i32, val: f64, a: i32, b: i32) -> (i32, Tape) with Mut, Panic {
+    var t2 = t
+    let idx = t2.len
+    t2.ops[idx as usize] = op
+    t2.values[idx as usize] = val
+    t2.grads[idx as usize] = 0.0
+    t2.arg1[idx as usize] = a
+    t2.arg2[idx as usize] = b
+    t2.len = t2.len + 1
+    (idx, t2)
+}
+
+fn tvar(t: Tape, v: f64) -> (i32, Tape) with Mut, Panic {
+    tpush(t, OPV(), v, 0 - 1, 0 - 1)
+}
+fn tadd(t: Tape, a: i32, b: i32) -> (i32, Tape) with Mut, Div, Panic {
+    tpush(t, OPADD(), t.values[a as usize] + t.values[b as usize], a, b)
+}
+fn tsub(t: Tape, a: i32, b: i32) -> (i32, Tape) with Mut, Div, Panic {
+    tpush(t, OPSUB(), t.values[a as usize] - t.values[b as usize], a, b)
+}
+fn tmul(t: Tape, a: i32, b: i32) -> (i32, Tape) with Mut, Div, Panic {
+    tpush(t, OPMUL(), t.values[a as usize] * t.values[b as usize], a, b)
+}
+fn tdiv(t: Tape, a: i32, b: i32) -> (i32, Tape) with Mut, Div, Panic {
+    tpush(t, OPDIV(), t.values[a as usize] / t.values[b as usize], a, b)
+}
+fn ttanh_f64(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 20.0 { return 1.0 }
+    if x < 0.0 - 20.0 { return 0.0 - 1.0 }
+    let e2x = texp_f64(2.0 * x)
+    (e2x - 1.0) / (e2x + 1.0)
+}
+fn texp_f64(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 20.0 { return texp_f64(x / 2.0) * texp_f64(x / 2.0) }
+    if x < 0.0 - 20.0 { return 1.0 / texp_f64(0.0 - x) }
+    var sum = 1.0; var term = 1.0; var i: i64 = 1
+    while i <= 20 { term = term * x / (i as f64); sum = sum + term; i = i + 1 }
+    sum
+}
+fn tln_f64(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1000000.0 }
+    if x > 1.5 { return 2.0 * tln_f64(sqrt_f64_local(x)) }
+    if x < 0.7 { return 0.0 - tln_f64(1.0 / x) }
+    let u = x - 1.0
+    var sum = 0.0; var term = u; var i: i64 = 1
+    while i <= 30 { sum = sum + term / (i as f64); term = 0.0 - term * u; i = i + 1 }
+    sum
+}
+fn sqrt_f64_local(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x; var i: i64 = 0
+    while i < 25 { g = (g + x / g) / 2.0; i = i + 1 }
+    g
+}
+fn ttanh(t: Tape, a: i32) -> (i32, Tape) with Mut, Div, Panic {
+    tpush(t, OPTANH(), ttanh_f64(t.values[a as usize]), a, 0 - 1)
+}
+fn texp(t: Tape, a: i32) -> (i32, Tape) with Mut, Div, Panic {
+    tpush(t, OPEXP(), texp_f64(t.values[a as usize]), a, 0 - 1)
+}
+fn tlog(t: Tape, a: i32) -> (i32, Tape) with Mut, Div, Panic {
+    tpush(t, OPLOG(), tln_f64(t.values[a as usize]), a, 0 - 1)
+}
+fn tneg(t: Tape, a: i32) -> (i32, Tape) with Mut, Div, Panic {
+    tpush(t, OPNEG(), 0.0 - t.values[a as usize], a, 0 - 1)
+}
+
+fn tape_backward(t: Tape, output: i32) -> Tape with Mut, Div, Panic {
+    var t2 = t
+    t2.grads[output as usize] = 1.0
+    var i = output
+    while i >= 0 {
+        let op = t2.ops[i as usize]
+        let g = t2.grads[i as usize]
+        let a = t2.arg1[i as usize]
+        let b = t2.arg2[i as usize]
+        let va = if a >= 0 { t2.values[a as usize] } else { 0.0 }
+        let vb = if b >= 0 { t2.values[b as usize] } else { 0.0 }
+        let vout = t2.values[i as usize]
+        if op == OPADD() {
+            if a >= 0 { t2.grads[a as usize] = t2.grads[a as usize] + g }
+            if b >= 0 { t2.grads[b as usize] = t2.grads[b as usize] + g }
+        }
+        if op == OPSUB() {
+            if a >= 0 { t2.grads[a as usize] = t2.grads[a as usize] + g }
+            if b >= 0 { t2.grads[b as usize] = t2.grads[b as usize] - g }
+        }
+        if op == OPMUL() {
+            if a >= 0 { t2.grads[a as usize] = t2.grads[a as usize] + g * vb }
+            if b >= 0 { t2.grads[b as usize] = t2.grads[b as usize] + g * va }
+        }
+        if op == OPDIV() {
+            if a >= 0 { t2.grads[a as usize] = t2.grads[a as usize] + g / vb }
+            if b >= 0 { t2.grads[b as usize] = t2.grads[b as usize] - g * va / (vb * vb) }
+        }
+        if op == OPTANH() {
+            if a >= 0 { t2.grads[a as usize] = t2.grads[a as usize] + g * (1.0 - vout * vout) }
+        }
+        if op == OPEXP() {
+            if a >= 0 { t2.grads[a as usize] = t2.grads[a as usize] + g * vout }
+        }
+        if op == OPLOG() {
+            if a >= 0 { t2.grads[a as usize] = t2.grads[a as usize] + g / va }
+        }
+        if op == OPNEG() {
+            if a >= 0 { t2.grads[a as usize] = t2.grads[a as usize] - g }
+        }
+        i = i - 1
+    }
+    t2
+}
+
+// =============================================================================
+// OCTONION / ELEMENTWISE MULTIPLY ON THE TAPE
+// oct8_mul: identical formula to stdlib/algebra/octonion.sio's oct_mul —
+// each of the 8 output components is a signed sum of 8 products.
+// real8_mul: elementwise (the associative control).
+// =============================================================================
+
+// Fold 8 already-computed product nodes into one, with signs[0] always +1
+// (true for every octonion component formula — each starts with a[0]*b[i]
+// or a[i]*b[0] as a plain '+' term) so the base can just be terms[0].
+fn chain8(t: Tape, t0: i32, t1: i32, s1: bool, t2: i32, s2: bool, t3: i32, s3: bool,
+          t4: i32, s4: bool, t5: i32, s5: bool, t6: i32, s6: bool, t7: i32, s7: bool
+) -> (i32, Tape) with Mut, Div, Panic {
+    var tt = t
+    var acc = t0
+    var r = 0
+    if s1 { let (i, tn) = tadd(tt, acc, t1); tt = tn; acc = i } else { let (i, tn) = tsub(tt, acc, t1); tt = tn; acc = i }
+    if s2 { let (i, tn) = tadd(tt, acc, t2); tt = tn; acc = i } else { let (i, tn) = tsub(tt, acc, t2); tt = tn; acc = i }
+    if s3 { let (i, tn) = tadd(tt, acc, t3); tt = tn; acc = i } else { let (i, tn) = tsub(tt, acc, t3); tt = tn; acc = i }
+    if s4 { let (i, tn) = tadd(tt, acc, t4); tt = tn; acc = i } else { let (i, tn) = tsub(tt, acc, t4); tt = tn; acc = i }
+    if s5 { let (i, tn) = tadd(tt, acc, t5); tt = tn; acc = i } else { let (i, tn) = tsub(tt, acc, t5); tt = tn; acc = i }
+    if s6 { let (i, tn) = tadd(tt, acc, t6); tt = tn; acc = i } else { let (i, tn) = tsub(tt, acc, t6); tt = tn; acc = i }
+    if s7 { let (i, tn) = tadd(tt, acc, t7); tt = tn; acc = i } else { let (i, tn) = tsub(tt, acc, t7); tt = tn; acc = i }
+    (acc, tt)
+}
+
+fn oct8_mul(t: Tape, a: [i32; 8], b: [i32; 8]) -> ([i32; 8], Tape) with Mut, Div, Panic {
+    var tt = t
+    var out: [i32; 8] = [0; 8]
+    var p: [i32; 64] = [0; 64]  // scratch: p[i*8+j] = a[i]*b[j]
+    var i: i64 = 0
+    while i < 8 {
+        var j: i64 = 0
+        while j < 8 {
+            let (idx, tn) = tmul(tt, a[i as usize], b[j as usize])
+            tt = tn
+            p[(i * 8 + j) as usize] = idx
+            j = j + 1
+        }
+        i = i + 1
+    }
+    // Term-by-term, matching stdlib/algebra/octonion.sio's oct_mul exactly.
+    let (r0, t0) = chain8(tt, p[0], p[9],false, p[18],false, p[27],false, p[36],false, p[45],false, p[54],false, p[63],false); tt = t0
+    out[0] = r0
+    let (r1, t1) = chain8(tt, p[1], p[8],true, p[19],true, p[26],false, p[37],true, p[44],false, p[55],false, p[62],true); tt = t1
+    out[1] = r1
+    let (r2, t2) = chain8(tt, p[2], p[16],true, p[11],false, p[25],true, p[38],true, p[52],false, p[47],true, p[61],false); tt = t2
+    out[2] = r2
+    let (r3, t3) = chain8(tt, p[3], p[24],true, p[10],true, p[17],false, p[39],true, p[60],false, p[46],false, p[53],true); tt = t3
+    out[3] = r3
+    let (r4, t4) = chain8(tt, p[4], p[32],true, p[13],false, p[41],true, p[22],false, p[50],true, p[31],false, p[59],true); tt = t4
+    out[4] = r4
+    let (r5, t5) = chain8(tt, p[5], p[40],true, p[12],true, p[33],false, p[23],false, p[58],true, p[30],true, p[51],false); tt = t5
+    out[5] = r5
+    let (r6, t6) = chain8(tt, p[6], p[48],true, p[15],true, p[57],false, p[20],true, p[34],false, p[29],false, p[43],true); tt = t6
+    out[6] = r6
+    let (r7, t7) = chain8(tt, p[7], p[56],true, p[14],false, p[49],true, p[21],true, p[42],false, p[28],true, p[35],false); tt = t7
+    out[7] = r7
+    (out, tt)
+}
+
+fn real8_mul(t: Tape, a: [i32; 8], b: [i32; 8]) -> ([i32; 8], Tape) with Mut, Div, Panic {
+    var tt = t
+    var out: [i32; 8] = [0; 8]
+    var i: i64 = 0
+    while i < 8 {
+        let (idx, tn) = tmul(tt, a[i as usize], b[i as usize])
+        tt = tn
+        out[i as usize] = idx
+        i = i + 1
+    }
+    (out, tt)
+}
+
+fn vec8_add(t: Tape, a: [i32; 8], b: [i32; 8]) -> ([i32; 8], Tape) with Mut, Div, Panic {
+    var tt = t
+    var out: [i32; 8] = [0; 8]
+    var i: i64 = 0
+    while i < 8 {
+        let (idx, tn) = tadd(tt, a[i as usize], b[i as usize])
+        tt = tn
+        out[i as usize] = idx
+        i = i + 1
+    }
+    (out, tt)
+}
+
+fn vec8_tanh(t: Tape, a: [i32; 8]) -> ([i32; 8], Tape) with Mut, Div, Panic {
+    var tt = t
+    var out: [i32; 8] = [0; 8]
+    var i: i64 = 0
+    while i < 8 {
+        let (idx, tn) = ttanh(tt, a[i as usize])
+        tt = tn
+        out[i as usize] = idx
+        i = i + 1
+    }
+    (out, tt)
+}
+
+// =============================================================================
+// CORRECTED DYCK-1 GENERATOR, L=4 (same fix as
+// examples/cayley_dickson_dyck_pseudoknot_generators.sio: proper
+// must_close logic, negatives = one random non-boundary flip)
+// Tokens: 1='(', 2=')'
+// =============================================================================
+
+fn gen_dyck4_valid(out: &![i64; 4]) with Mut, Div, Panic {
+    var depth: i64 = 0
+    var t: i64 = 0
+    while t < 4 {
+        let remaining = 4 - t - 1
+        let must_open = depth == 0
+        let must_close = (depth > 0) && (remaining <= depth)
+        var open: bool = false
+        if must_open { open = true } else if must_close { open = false } else { open = (rng_nonneg(2) == 1) }
+        if open { out[t as usize] = 1; depth = depth + 1 } else { out[t as usize] = 2; depth = depth - 1 }
+        t = t + 1
+    }
+}
+
+fn gen_dyck4_invalid(out: &![i64; 4]) with Mut, Div, Panic {
+    gen_dyck4_valid(out)
+    let pos = 1 + rng_nonneg(3)  // never flip position 0 (see prior generator file)
+    if out[pos as usize] == 1 { out[pos as usize] = 2 } else { out[pos as usize] = 1 }
+}
+
+// =============================================================================
+// PARAMETERS
+// EMBED: 3 tokens (0=unused,1='(',2=')') x 8 dims, flat idx = tok*8+dim
+// WOUT: 8 dims x 2 classes, flat idx = dim*2+class
+// BOUT: 2 classes
+// =============================================================================
+
+var EMBED: [f64; 24] = [0.0; 24]
+var WOUT: [f64; 16] = [0.0; 16]
+var BOUT: [f64; 2] = [0.0; 2]
+
+fn init_params() with Mut, Div {
+    var i: i64 = 0
+    while i < 24 { EMBED[i as usize] = 0.15 * rng_next_signed(); i = i + 1 }
+    i = 0
+    while i < 16 { WOUT[i as usize] = 0.15 * rng_next_signed(); i = i + 1 }
+    i = 0
+    while i < 2 { BOUT[i as usize] = 0.0; i = i + 1 }
+}
+
+// =============================================================================
+// ONE TRAINING/EVAL STEP: build tape, forward, (optionally) backward+SGD.
+// Returns (loss, predicted_class) via a 2-element f64 out-array
+// (out[0]=loss, out[1]=predicted class as 0.0/1.0).
+// =============================================================================
+
+fn step(tokens: &[i64; 4], label: i64, use_oct: bool, lr: f64, do_update: bool, out: &![f64; 2]) with Mut, Div, Panic {
+    var probe: [f64; 1] = [0.0; 1]
+    step_p(tokens, label, use_oct, lr, do_update, out, 0 - 1, &!probe)
+}
+
+// Same as step(), plus: if probe_pidx >= 0, always runs backward (even if
+// do_update is false) and writes the summed analytical gradient w.r.t.
+// EMBED[probe_pidx] into out_probe[0] — used only for the finite-difference
+// gradient check in main(), to verify this hand-wired tape (in particular
+// oct8_mul's sign wiring) actually computes correct gradients before any
+// training result from it is trusted.
+fn step_p(tokens: &[i64; 4], label: i64, use_oct: bool, lr: f64, do_update: bool, out: &![f64; 2], probe_pidx: i64, out_probe: &![f64; 1]) with Mut, Div, Panic {
+    var t = tape_new()
+    var leaf_node: [i32; 32] = [0; 32]   // 4 positions x 8 dims
+    var leaf_param: [i64; 32] = [0; 32]  // flat EMBED index each maps to
+    var li: i64 = 0
+    var leaves: [[i32; 8]; 4] = [[0; 8]; 4]
+    while li < 4 {
+        let tok = tokens[li as usize]
+        var leaf: [i32; 8] = [0; 8]
+        var d: i64 = 0
+        while d < 8 {
+            let pidx = tok * 8 + d
+            let (idx, tn) = tvar(t, EMBED[pidx as usize])
+            t = tn
+            leaf[d as usize] = idx
+            leaf_node[(li * 8 + d) as usize] = idx
+            leaf_param[(li * 8 + d) as usize] = pidx
+            d = d + 1
+        }
+        leaves[li as usize] = leaf
+        li = li + 1
+    }
+
+    // Level 1: combine (leaf0,leaf1) -> h1, (leaf2,leaf3) -> h2
+    var h1: [i32; 8] = [0; 8]
+    var h2: [i32; 8] = [0; 8]
+    if use_oct {
+        let (p1, t1) = oct8_mul(t, leaves[0], leaves[1]); t = t1
+        let (r1, t1b) = vec8_add(t, leaves[0], leaves[1]); t = t1b
+        let (s1, t1c) = vec8_add(t, p1, r1); t = t1c
+        let (o1, t1d) = vec8_tanh(t, s1); t = t1d
+        h1 = o1
+        let (p2, t2) = oct8_mul(t, leaves[2], leaves[3]); t = t2
+        let (r2, t2b) = vec8_add(t, leaves[2], leaves[3]); t = t2b
+        let (s2, t2c) = vec8_add(t, p2, r2); t = t2c
+        let (o2, t2d) = vec8_tanh(t, s2); t = t2d
+        h2 = o2
+    } else {
+        let (p1, t1) = real8_mul(t, leaves[0], leaves[1]); t = t1
+        let (r1, t1b) = vec8_add(t, leaves[0], leaves[1]); t = t1b
+        let (s1, t1c) = vec8_add(t, p1, r1); t = t1c
+        let (o1, t1d) = vec8_tanh(t, s1); t = t1d
+        h1 = o1
+        let (p2, t2) = real8_mul(t, leaves[2], leaves[3]); t = t2
+        let (r2, t2b) = vec8_add(t, leaves[2], leaves[3]); t = t2b
+        let (s2, t2c) = vec8_add(t, p2, r2); t = t2c
+        let (o2, t2d) = vec8_tanh(t, s2); t = t2d
+        h2 = o2
+    }
+
+    // Level 2: combine (h1,h2) -> root
+    var root: [i32; 8] = [0; 8]
+    if use_oct {
+        let (p3, t3) = oct8_mul(t, h1, h2); t = t3
+        let (r3, t3b) = vec8_add(t, h1, h2); t = t3b
+        let (s3, t3c) = vec8_add(t, p3, r3); t = t3c
+        let (o3, t3d) = vec8_tanh(t, s3); t = t3d
+        root = o3
+    } else {
+        let (p3, t3) = real8_mul(t, h1, h2); t = t3
+        let (r3, t3b) = vec8_add(t, h1, h2); t = t3b
+        let (s3, t3c) = vec8_add(t, p3, r3); t = t3c
+        let (o3, t3d) = vec8_tanh(t, s3); t = t3d
+        root = o3
+    }
+
+    // Readout: logit_c = sum_k root[k]*W[k,c] + b[c]
+    var wnode: [i32; 16] = [0; 16]
+    var bnode: [i32; 2] = [0; 2]
+    var c: i64 = 0
+    while c < 2 { let (bi, tn) = tvar(t, BOUT[c as usize]); t = tn; bnode[c as usize] = bi; c = c + 1 }
+    var logit: [i32; 2] = [0; 2]
+    c = 0
+    while c < 2 {
+        var acc = bnode[c as usize]
+        var k: i64 = 0
+        while k < 8 {
+            let widx = k * 2 + c
+            let (wi, tn) = tvar(t, WOUT[widx as usize]); t = tn
+            wnode[widx as usize] = wi
+            let (mi, tn2) = tmul(t, root[k as usize], wi); t = tn2
+            let (ai, tn3) = tadd(t, acc, mi); t = tn3
+            acc = ai
+            k = k + 1
+        }
+        logit[c as usize] = acc
+        c = c + 1
+    }
+
+    // Cross-entropy: -log(softmax(logit)[label])
+    let (e0, ta) = texp(t, logit[0]); t = ta
+    let (e1, tb) = texp(t, logit[1]); t = tb
+    let (s, tc) = tadd(t, e0, e1); t = tc
+    let etrue = if label == 0 { e0 } else { e1 }
+    let (p, td) = tdiv(t, etrue, s); t = td
+    let (lp, te) = tlog(t, p); t = te
+    let (loss_node, tf) = tneg(t, lp); t = tf
+
+    let loss_val = t.values[loss_node as usize]
+    let pred = if t.values[logit[1] as usize] > t.values[logit[0] as usize] { 1.0 } else { 0.0 }
+    out[0] = loss_val
+    out[1] = pred
+
+    if do_update || probe_pidx >= 0 {
+        t = tape_backward(t, loss_node)
+        if probe_pidx >= 0 {
+            var pg = 0.0
+            var pi: i64 = 0
+            while pi < 32 {
+                if leaf_param[pi as usize] == probe_pidx {
+                    pg = pg + t.grads[leaf_node[pi as usize] as usize]
+                }
+                pi = pi + 1
+            }
+            out_probe[0] = pg
+        }
+        if do_update {
+            var i: i64 = 0
+            while i < 32 {
+                let g = t.grads[leaf_node[i as usize] as usize]
+                let pidx = leaf_param[i as usize]
+                EMBED[pidx as usize] = EMBED[pidx as usize] - lr * g
+                i = i + 1
+            }
+            i = 0
+            while i < 16 {
+                let g = t.grads[wnode[i as usize] as usize]
+                WOUT[i as usize] = WOUT[i as usize] - lr * g
+                i = i + 1
+            }
+            i = 0
+            while i < 2 {
+                let g = t.grads[bnode[i as usize] as usize]
+                BOUT[i as usize] = BOUT[i as usize] - lr * g
+                i = i + 1
+            }
+        }
+    }
+}
+
+// =============================================================================
+// SMOKE TEST MAIN — a handful of steps first, to check the tape survives
+// before committing to a full training loop (this investigation has hit
+// real per-run resource walls before; see cayley_dickson_borromean_rerun.sio).
+// =============================================================================
+
+// Finite-difference gradient check on EMBED[probe_pidx] — verifies the
+// hand-wired tape (in particular oct8_mul's sign transcription) actually
+// computes correct gradients, not just a plausible-looking decreasing
+// loss, before any training result from it is trusted.
+fn grad_check(tokens: &[i64; 4], label: i64, use_oct: bool, probe_pidx: i64) with IO, Mut, Div, Panic {
+    let eps = 0.0001
+    let saved = EMBED[probe_pidx as usize]
+
+    var out_plus: [f64; 2] = [0.0; 2]
+    var dummy: [f64; 1] = [0.0; 1]
+    EMBED[probe_pidx as usize] = saved + eps
+    step_p(tokens, label, use_oct, 0.0, false, &!out_plus, 0 - 1, &!dummy)
+
+    var out_minus: [f64; 2] = [0.0; 2]
+    EMBED[probe_pidx as usize] = saved - eps
+    step_p(tokens, label, use_oct, 0.0, false, &!out_minus, 0 - 1, &!dummy)
+
+    EMBED[probe_pidx as usize] = saved
+    var out_analytic: [f64; 2] = [0.0; 2]
+    var probe: [f64; 1] = [0.0; 1]
+    step_p(tokens, label, use_oct, 0.0, false, &!out_analytic, probe_pidx, &!probe)
+
+    let numeric_grad = (out_plus[0] - out_minus[0]) / (2.0 * eps)
+    let analytic_grad = probe[0]
+    let diff = if numeric_grad > analytic_grad { numeric_grad - analytic_grad } else { analytic_grad - numeric_grad }
+    print("  probe EMBED["); print_i64(probe_pidx); print("]: numeric="); print_f64(numeric_grad, 6)
+    print("  analytic="); print_f64(analytic_grad, 6); print("  |diff|="); print_f64(diff, 8)
+    if diff < 0.001 { print("  MATCH\n") } else { print("  MISMATCH -- DO NOT TRUST TRAINING RESULTS\n") }
+}
+
+// =============================================================================
+// FULL TRAINING RUN
+// =============================================================================
+
+const N_PER_CLASS: i64 = 30   // train
+const N_TEST_PER_CLASS: i64 = 15
+const N_TRAIN: i64 = 60       // 2 * N_PER_CLASS
+const N_TEST: i64 = 30        // 2 * N_TEST_PER_CLASS
+const EPOCHS: i64 = 25
+const LR: f64 = 0.05
+
+var TRAIN_TOK: [[i64; 4]; 60] = [[0; 4]; 60]
+var TRAIN_LBL: [i64; 60] = [0; 60]
+var TEST_TOK: [[i64; 4]; 30] = [[0; 4]; 30]
+var TEST_LBL: [i64; 30] = [0; 30]
+
+fn build_dataset() with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < N_PER_CLASS {
+        var tk: [i64; 4] = [0; 4]
+        gen_dyck4_valid(&!tk)
+        TRAIN_TOK[i as usize] = tk
+        TRAIN_LBL[i as usize] = 1
+        i = i + 1
+    }
+    while i < 2 * N_PER_CLASS {
+        var tk: [i64; 4] = [0; 4]
+        gen_dyck4_invalid(&!tk)
+        TRAIN_TOK[i as usize] = tk
+        TRAIN_LBL[i as usize] = 0
+        i = i + 1
+    }
+    i = 0
+    while i < N_TEST_PER_CLASS {
+        var tk: [i64; 4] = [0; 4]
+        gen_dyck4_valid(&!tk)
+        TEST_TOK[i as usize] = tk
+        TEST_LBL[i as usize] = 1
+        i = i + 1
+    }
+    while i < 2 * N_TEST_PER_CLASS {
+        var tk: [i64; 4] = [0; 4]
+        gen_dyck4_invalid(&!tk)
+        TEST_TOK[i as usize] = tk
+        TEST_LBL[i as usize] = 0
+        i = i + 1
+    }
+}
+
+fn eval_accuracy(use_oct: bool, on_train: bool) -> f64 with Mut, Div, Panic {
+    let n = if on_train { N_TRAIN } else { N_TEST }
+    var correct: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        let tk = if on_train { TRAIN_TOK[i as usize] } else { TEST_TOK[i as usize] }
+        let lbl = if on_train { TRAIN_LBL[i as usize] } else { TEST_LBL[i as usize] }
+        var out: [f64; 2] = [0.0; 2]
+        step(&tk, lbl, use_oct, 0.0, false, &!out)
+        if (out[1] as i64) == lbl { correct = correct + 1 }
+        i = i + 1
+    }
+    (correct as f64) / (n as f64)
+}
+
+fn train_model(use_oct: bool, seed: i64) with IO, Mut, Div, Panic {
+    rng_seed(seed)
+    init_params()
+    var ep: i64 = 0
+    while ep < EPOCHS {
+        var epoch_loss = 0.0
+        var i: i64 = 0
+        while i < N_TRAIN {
+            let tk = TRAIN_TOK[i as usize]
+            let lbl = TRAIN_LBL[i as usize]
+            var out: [f64; 2] = [0.0; 2]
+            step(&tk, lbl, use_oct, LR, true, &!out)
+            epoch_loss = epoch_loss + out[0]
+            i = i + 1
+        }
+        if (ep + 1) - ((ep + 1) / 10) * 10 == 0 || ep == 0 {
+            let tr_acc = eval_accuracy(use_oct, true)
+            let te_acc = eval_accuracy(use_oct, false)
+            print("    epoch "); print_i64(ep + 1); print("/"); print_i64(EPOCHS)
+            print("  mean_train_loss="); print_f64(epoch_loss / (N_TRAIN as f64), 4)
+            print("  train_acc="); print_f64(tr_acc, 3); print("  test_acc="); print_f64(te_acc, 3); print("\n")
+        }
+        ep = ep + 1
+    }
+}
+
+fn train_model_quiet(use_oct: bool, seed: i64) with Mut, Div, Panic {
+    rng_seed(seed)
+    init_params()
+    var ep: i64 = 0
+    while ep < EPOCHS {
+        var i: i64 = 0
+        while i < N_TRAIN {
+            let tk = TRAIN_TOK[i as usize]
+            let lbl = TRAIN_LBL[i as usize]
+            var out: [f64; 2] = [0.0; 2]
+            step(&tk, lbl, use_oct, LR, true, &!out)
+            i = i + 1
+        }
+        ep = ep + 1
+    }
+}
+
+// N_SEEDS=10 was attempted (2026-08-14) and hit a hard, reproducible
+// resource ceiling around ~15,000 cumulative train-step-equivalents
+// (crashes with the same exit code, 182, as the earlier Borromean
+// resource wall) — 4 seeds is the largest verified-complete run.
+const N_SEEDS: i64 = 4
+var SEED_LIST: [i64; 4] = [20260814, 7, 42, 123456789]
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    print("=== OctTree vs RealTree, TRAINED, L=4, corrected Dyck-1 generator ===\n")
+    print("(scope disclosed in file header: L=4 only, no gates, plain SGD, small n)\n")
+
+    rng_seed(20260814)
+    init_params()
+    print("\n[Gradient check] finite-difference vs analytic:\n")
+    var gc_tokens: [i64; 4] = [1, 2, 1, 2]
+    grad_check(&gc_tokens, 1, true, 8)
+    grad_check(&gc_tokens, 1, false, 8)
+    var gc_tokens2: [i64; 4] = [2, 1, 1, 2]
+    grad_check(&gc_tokens2, 0, true, 16)
+    grad_check(&gc_tokens2, 0, false, 16)
+
+    // Build ONE dataset (fixed across both models AND all seeds, so the
+    // comparison isolates parameter-init variance, not data variance)
+    rng_seed(999)
+    build_dataset()
+    var v0: i64 = 0
+    var i: i64 = 0
+    while i < N_TRAIN { if TRAIN_LBL[i as usize] == 1 { v0 = v0 + 1 }; i = i + 1 }
+    print("\n[Dataset] N_train="); print_i64(N_TRAIN); print(" (valid="); print_i64(v0)
+    print(", invalid="); print_i64(N_TRAIN - v0); print(")  N_test="); print_i64(N_TEST); print("\n")
+
+    print("\n[Single-seed detail, seed="); print_i64(SEED_LIST[0]); print("]\n")
+    print("\n  [OctTree]\n")
+    train_model(true, SEED_LIST[0])
+    print("\n  [RealTree]\n")
+    train_model(false, SEED_LIST[0])
+
+    print("\n[Multi-seed summary, "); print_i64(N_SEEDS); print(" seeds, ")
+    print_i64(EPOCHS); print(" epochs each]\n")
+    var oct_sum = 0.0
+    var real_sum = 0.0
+    var s: i64 = 0
+    while s < N_SEEDS {
+        let seed = SEED_LIST[s as usize]
+        train_model_quiet(true, seed)
+        let oct_te = eval_accuracy(true, false)
+        train_model_quiet(false, seed)
+        let real_te = eval_accuracy(false, false)
+        print("  seed="); print_i64(seed); print("  OctTree test_acc=")
+        print_f64(oct_te, 3); print("  RealTree test_acc="); print_f64(real_te, 3); print("\n")
+        oct_sum = oct_sum + oct_te
+        real_sum = real_sum + real_te
+        s = s + 1
+    }
+    print("\n[Final] mean over "); print_i64(N_SEEDS); print(" seeds:\n")
+    print("  OctTree  mean test_acc="); print_f64(oct_sum / (N_SEEDS as f64), 3); print("\n")
+    print("  RealTree mean test_acc="); print_f64(real_sum / (N_SEEDS as f64), 3); print("\n")
+
+    print("\n=== DONE ===\n")
+    0
+}

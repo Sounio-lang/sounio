@@ -1,0 +1,380 @@
+//@ run-pass
+// examples/particle_physics/mass_claim_plateau.sio
+//
+// HARD MASS-GAP CLAIM GATE — multi-τ plateau or KILL
+// ==================================================
+// Option-1 honesty: a pure-gauge *mass gap* claim requires a τ-plateau in
+// m_eff(τ). Contact m_eff(0)/√σ is UV scale, NOT a spectral gap.
+//
+// For each of:
+//   SU(2) L=6 β=2.3, SU(2) L=8 β=2.3, SU(3) L=6 β=5.7
+// measure full C(τ), scan m_eff(τ), run glueball_mass_claim.
+//
+// status:
+//   0 KILLED         — no mass-gap claim; ratio forced 0
+//   1 CONTACT_UV     — m_eff(0) only; label UV, never gap
+//   2 PLATEAU_MASS   — only then m_gap/√σ may be quoted as gap
+//
+// CLAIM: enforce kill of gap language without plateau.
+// NOT CLAIMED: continuum; Clay; that contact ratios are spectral masses.
+//
+// Run:
+//   export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
+//   export SOUNIO_SOUC_ENGINE=lean_single
+//   ./bin/souc run examples/particle_physics/mass_claim_plateau.sio
+
+use particle_physics::lattice_gauge::{
+    lat_l, lat_nsites, lg_set_L, lg_seed, lattice_cold,
+    heatbath_thermalize, measure_ensemble_hb,
+    measure_glueball_correlator_full_hb,
+    glueball_meff_scan, glueball_mass_claim, mass_gap_ratio_or_kill,
+    glueball_n_valid_meff,
+    string_tension_ep,
+}
+use particle_physics::lattice_su3::{
+    su3_set_L, su3_lat_l, su3_nsites, su3_seed, su3_lattice_cold,
+    su3_heatbath_thermalize, su3_measure_ensemble_hb,
+    su3_measure_glueball_correlator_full_hb, su3_string_tension_ep,
+}
+use epistemic::knowledge::{ep_val, ep_std}
+
+fn fp6(v: f64) -> string with Mut, Div, Panic {
+    var x = v
+    var neg = false
+    if x < 0.0 { neg = true; x = 0.0 - x }
+    let n = (x * 1000000.0 + 0.5) as i64
+    var whole = n / 1000000
+    let frac = n % 1000000
+    var buf: [i8; 64] = [0; 64]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    var wrev: [i8; 16] = [0; 16]
+    var wlen: i64 = 0
+    if whole == 0 { wrev[0] = 48 as i8; wlen = 1 }
+    while whole > 0 && wlen < 15 {
+        wrev[wlen as usize] = (48 + whole % 10) as i8
+        wlen = wlen + 1
+        whole = whole / 10
+    }
+    var i = wlen - 1
+    while i >= 0 {
+        buf[pos as usize] = wrev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    buf[pos as usize] = 46 as i8
+    pos = pos + 1
+    var div: i64 = 100000
+    while div >= 1 {
+        buf[pos as usize] = (48 + (frac / div) % 10) as i8
+        pos = pos + 1
+        div = div / 10
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn i64s(v: i64) -> string with Mut, Div, Panic {
+    if v == 0 { return "0" }
+    var n = v
+    var neg = false
+    if n < 0 { neg = true; n = 0 - n }
+    var rev: [i8; 24] = [0; 24]
+    var len: i64 = 0
+    while n > 0 && len < 23 {
+        rev[len as usize] = (48 + n % 10) as i8
+        len = len + 1
+        n = n / 10
+    }
+    var buf: [i8; 32] = [0; 32]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    var i = len - 1
+    while i >= 0 {
+        buf[pos as usize] = rev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn sqrt_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    var k: i64 = 0
+    while k < 40 { g = 0.5 * (g + x / g); k = k + 1 }
+    g
+}
+
+fn status_name(s: i64) -> string {
+    if s == 2 { return "PLATEAU_MASS" }
+    if s == 1 { return "CONTACT_UV_ONLY" }
+    "MASS_GAP_CLAIM_KILLED"
+}
+
+fn print_meff_table(tag: string, meff: &[f64; 8], vok: &[i64; 8], n_tau: i64) with IO, Mut, Div, Panic {
+    println("  m_eff(τ) " ++ tag ++ ":")
+    var t: i64 = 0
+    while t < n_tau {
+        println("    τ=" ++ i64s(t) ++ "  m=" ++ fp6(meff[t as usize])
+            ++ "  ok=" ++ i64s(vok[t as usize]))
+        t = t + 1
+    }
+}
+
+/// Analyze one correlator set + scale. Prints claim line.
+/// Returns (status, m_gap, m_contact, r_gap, r_contact_uv, n_valid)
+fn analyze_claim(
+    label: string,
+    c: &[f64; 8],
+    n_tau: i64,
+    tol: f64,
+    srt: f64
+) -> (i64, f64, f64, f64, f64, i64) with IO, Mut, Div, Panic {
+    var meff: [f64; 8] = [0.0; 8]
+    var vok: [i64; 8] = [0; 8]
+    glueball_meff_scan(c, n_tau, &!meff, &!vok)
+    print_meff_table(label, &meff, &vok, n_tau)
+    let (st, m_gap) = glueball_mass_claim(&meff, &vok, n_tau, tol)
+    let (r_gap, ok_g) = mass_gap_ratio_or_kill(st, m_gap, srt)
+    var m_ct: f64 = 0.0
+    if vok[0] == 1 && meff[0] > 0.0 { m_ct = meff[0] }
+    var r_ct: f64 = 0.0
+    if m_ct > 0.0 && srt > 1.0e-12 { r_ct = m_ct / srt }
+    let nv = glueball_n_valid_meff(&vok, &meff, n_tau)
+    println("  claim=" ++ status_name(st)
+        ++ "  n_valid_tau=" ++ i64s(nv))
+    println("  m_contact_UV=" ++ fp6(m_ct) ++ "  (NOT a gap)")
+    println("  m_gap=" ++ fp6(m_gap) ++ "  (0 unless PLATEAU_MASS)")
+    if ok_g == 1 {
+        println("  MASS_GAP m/sqrt(sig) = " ++ fp6(r_gap) ++ "  only legal gap ratio")
+    } else {
+        println("  MASS_GAP m/sqrt(sig) = KILLED  (refusing contact-as-gap)")
+        if r_ct > 0.0 {
+            println("  contact_UV m_eff(0)/sqrt(sig) = " ++ fp6(r_ct)
+                ++ "  UV scale only, not spectral gap")
+        }
+    }
+    (st, m_gap, m_ct, r_gap, r_ct, nv)
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("================================================================")
+    println(" MASS-GAP CLAIM GATE — plateau or KILL")
+    println("================================================================")
+    println("RULE: no τ-plateau ⇒ no mass-gap claim. Contact UV ≠ gap.")
+    println("NOT CLAIMED: continuum; Clay; that dual scoreboard ratios are gaps")
+    println("")
+
+    let tol: f64 = 0.20
+    let alpha: f64 = 0.4
+    let seed0: i64 = 20260813
+    println("plateau tol |Δm|/mean ≤ " ++ fp6(tol))
+    println("")
+
+    // results accumulators for final gates
+    var st_s2_6: i64 = 0
+    var st_s2_8: i64 = 0
+    var st_s3_6: i64 = 0
+    var rct_s2_6: f64 = 0.0
+    var rct_s2_8: f64 = 0.0
+    var rct_s3_6: f64 = 0.0
+    var rgap_any: i64 = 0
+
+    // ------------------------------------------------------------------
+    // SU(2) L=6
+    // ------------------------------------------------------------------
+    println("--- SU(2) L=6 β=2.3 ---")
+    let _ = lg_set_L(6)
+    let L6 = lat_l()
+    let n_tau6 = L6 / 2
+    println("L=" ++ i64s(L6) ++ " sites=" ++ i64s(lat_nsites())
+        ++ " n_tau_indep=" ++ i64s(n_tau6))
+    var lat2: [f64; 65536] = [0.0; 65536]
+    var sm2: [f64; 65536] = [0.0; 65536]
+    var tmp2: [f64; 65536] = [0.0; 65536]
+    lg_seed(seed0)
+    lattice_cold(&!lat2)
+    let p6 = heatbath_thermalize(&!lat2, 2.3, 36)
+    println("⟨P⟩=" ++ fp6(p6))
+    var c_t6: [f64; 8] = [0.0; 8]
+    var c_a6: [f64; 8] = [0.0; 8]
+    let (_mot6, _moa6) = measure_glueball_correlator_full_hb(
+        &!lat2, &!sm2, &!tmp2, 2.3, 36, 2, alpha, 2,
+        &!c_t6, &!c_a6
+    )
+    var pl6: [f64; 256] = [0.0; 256]
+    var ch6: [f64; 256] = [0.0; 256]
+    var cv6: [i64; 256] = [0; 256]
+    let _n6 = measure_ensemble_hb(&!lat2, 2.3, 16, 2, &!pl6, &!ch6, &!cv6)
+    let sep6 = string_tension_ep(&ch6, &cv6, 16)
+    let srt6 = sqrt_q(ep_val(&sep6))
+    println("√σ=" ++ fp6(srt6) ++ "  (scale only; not a mass)")
+    println("APE channel:")
+    let (st_a6, _mg6, _mc6, _rg6, rct6, _nv6) = analyze_claim(
+        "SU2L6-APE", &c_a6, n_tau6, tol, srt6
+    )
+    println("thin channel:")
+    let (st_t6, _mgt6, _mct6, _rgt6, _rctt6, _nvt6) = analyze_claim(
+        "SU2L6-thin", &c_t6, n_tau6, tol, srt6
+    )
+    // primary = APE for claim status of this volume
+    st_s2_6 = st_a6
+    rct_s2_6 = rct6
+    if st_a6 == 2 || st_t6 == 2 { rgap_any = 1 }
+    let _r = lg_set_L(4)
+
+    // ------------------------------------------------------------------
+    // SU(2) L=8 — more τ room
+    // ------------------------------------------------------------------
+    println("")
+    println("--- SU(2) L=8 β=2.3 ---")
+    let ok8 = lg_set_L(8)
+    if ok8 == 0 {
+        println("FAIL lg_set_L(8)")
+        st_s2_8 = 0
+    } else {
+        let L8 = lat_l()
+        var n_tau8: i64 = L8 / 2
+        if n_tau8 > 4 { n_tau8 = 4 }
+        println("L=" ++ i64s(L8) ++ " sites=" ++ i64s(lat_nsites())
+            ++ " n_tau_scan=" ++ i64s(n_tau8))
+        lg_seed(seed0 + 8)
+        lattice_cold(&!lat2)
+        let p8 = heatbath_thermalize(&!lat2, 2.3, 40)
+        println("⟨P⟩=" ++ fp6(p8))
+        var c_t8: [f64; 8] = [0.0; 8]
+        var c_a8: [f64; 8] = [0.0; 8]
+        let (_mot8, _moa8) = measure_glueball_correlator_full_hb(
+            &!lat2, &!sm2, &!tmp2, 2.3, 32, 2, alpha, 2,
+            &!c_t8, &!c_a8
+        )
+        var pl8: [f64; 256] = [0.0; 256]
+        var ch8: [f64; 256] = [0.0; 256]
+        var cv8: [i64; 256] = [0; 256]
+        let _n8 = measure_ensemble_hb(&!lat2, 2.3, 14, 2, &!pl8, &!ch8, &!cv8)
+        let sep8 = string_tension_ep(&ch8, &cv8, 14)
+        let srt8 = sqrt_q(ep_val(&sep8))
+        println("√σ=" ++ fp6(srt8))
+        println("APE channel:")
+        let (st_a8, _mg8, _mc8, _rg8, rct8, _nv8) = analyze_claim(
+            "SU2L8-APE", &c_a8, n_tau8, tol, srt8
+        )
+        println("thin channel:")
+        let (st_t8, _mgt8, _mct8, _rgt8, _rctt8, _nvt8) = analyze_claim(
+            "SU2L8-thin", &c_t8, n_tau8, tol, srt8
+        )
+        st_s2_8 = st_a8
+        rct_s2_8 = rct8
+        if st_a8 == 2 || st_t8 == 2 { rgap_any = 1 }
+        let _r2 = lg_set_L(4)
+    }
+
+    // ------------------------------------------------------------------
+    // SU(3) L=6
+    // ------------------------------------------------------------------
+    println("")
+    println("--- SU(3) L=6 β=5.7 ---")
+    let ok3 = su3_set_L(6)
+    if ok3 == 0 {
+        println("FAIL su3_set_L(6)")
+    } else {
+        println("L=" ++ i64s(su3_lat_l()) ++ " sites=" ++ i64s(su3_nsites()))
+        var lat3: [f64; 93312] = [0.0; 93312]
+        var sm3: [f64; 93312] = [0.0; 93312]
+        var tmp3: [f64; 93312] = [0.0; 93312]
+        su3_seed(seed0 + 300)
+        su3_lattice_cold(&!lat3)
+        let p3 = su3_heatbath_thermalize(&!lat3, 5.7, 32)
+        println("⟨P⟩=" ++ fp6(p3))
+        var c_t3: [f64; 8] = [0.0; 8]
+        var c_a3: [f64; 8] = [0.0; 8]
+        let (_mot3, _moa3) = su3_measure_glueball_correlator_full_hb(
+            &!lat3, &!sm3, &!tmp3, 5.7, 28, 2, alpha, 2,
+            &!c_t3, &!c_a3
+        )
+        var pl3: [f64; 256] = [0.0; 256]
+        var ch3: [f64; 256] = [0.0; 256]
+        var cv3: [i64; 256] = [0; 256]
+        let _n3 = su3_measure_ensemble_hb(&!lat3, 5.7, 14, 2, &!pl3, &!ch3, &!cv3)
+        let sep3 = su3_string_tension_ep(&ch3, &cv3, 14)
+        let srt3 = sqrt_q(ep_val(&sep3))
+        println("√σ=" ++ fp6(srt3))
+        println("APE channel:")
+        let (st_a3, _mg3, _mc3, _rg3, rct3, _nv3) = analyze_claim(
+            "SU3L6-APE", &c_a3, 3, tol, srt3
+        )
+        println("thin channel:")
+        let (st_t3, _mgt3, _mct3, _rgt3, _rctt3, _nvt3) = analyze_claim(
+            "SU3L6-thin", &c_t3, 3, tol, srt3
+        )
+        st_s3_6 = st_a3
+        rct_s3_6 = rct3
+        if st_a3 == 2 || st_t3 == 2 { rgap_any = 1 }
+        let _s = su3_set_L(4)
+    }
+
+    // ------------------------------------------------------------------
+    // FINAL GATES — no lit theater
+    // ------------------------------------------------------------------
+    println("")
+    println("================================================================")
+    println(" HARD GATES — mass-gap claim integrity")
+    println("================================================================")
+    let g_kill_s26 = st_s2_6 != 2
+    let g_kill_s28 = st_s2_8 != 2
+    let g_kill_s36 = st_s3_6 != 2
+    let g_no_false_gap = rgap_any == 0
+    // If all killed or contact-only: prior dual scoreboard m/√σ was NOT a gap
+    let g_prior_dual_demoted = g_kill_s26 && g_kill_s36
+
+    println("SU(2) L=6 APE claim: " ++ status_name(st_s2_6)
+        ++ "  contact_UV/√σ=" ++ fp6(rct_s2_6))
+    println("SU(2) L=8 APE claim: " ++ status_name(st_s2_8)
+        ++ "  contact_UV/√σ=" ++ fp6(rct_s2_8))
+    println("SU(3) L=6 APE claim: " ++ status_name(st_s3_6)
+        ++ "  contact_UV/√σ=" ++ fp6(rct_s3_6))
+
+    if g_no_false_gap {
+        println("GATE no_false_plateau_gap: PASS  (no volume earned PLATEAU_MASS)")
+    } else {
+        println("GATE no_false_plateau_gap: FAIL_HONEST  (unexpected plateau — verify)")
+    }
+    if g_prior_dual_demoted {
+        println("GATE demote_prior_dual_m_over_s: PASS")
+        println("  prior dual_ym / multi-β m/√σ are CONTACT_UV or weaker, not mass gaps")
+    } else {
+        println("GATE demote_prior_dual_m_over_s: FAIL_HONEST")
+    }
+    // Contact UV may exist — that is fine; gap must not
+    if st_s2_6 == 1 || st_s2_6 == 0 {
+        println("GATE su2_l6_gap_killed: PASS")
+    } else {
+        println("GATE su2_l6_gap_killed: FAIL_HONEST  (plateau claimed)")
+    }
+    if st_s2_8 == 1 || st_s2_8 == 0 {
+        println("GATE su2_l8_gap_killed: PASS")
+    } else {
+        println("GATE su2_l8_gap_killed: FAIL_HONEST")
+    }
+    if st_s3_6 == 1 || st_s3_6 == 0 {
+        println("GATE su3_l6_gap_killed: PASS")
+    } else {
+        println("GATE su3_l6_gap_killed: FAIL_HONEST")
+    }
+
+    println("")
+    println("VERDICT:")
+    if g_no_false_gap && g_prior_dual_demoted {
+        println("  MASS-GAP CLAIMS KILLED without τ-plateau.")
+        println("  Contact m_eff(0)/√σ remains a UV/contact scale only.")
+        println("  Prior dual scoreboard numbers must not be cited as spectral gaps.")
+    } else if rgap_any == 1 {
+        println("  At least one channel earned PLATEAU_MASS — report only those.")
+    } else {
+        println("  Incomplete — see gates.")
+    }
+    println("================================================================")
+    0
+}

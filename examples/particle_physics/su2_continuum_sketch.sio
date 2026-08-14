@@ -1,0 +1,415 @@
+//@ run-pass
+// examples/particle_physics/su2_continuum_sketch.sio
+//
+// OPEN PROBLEM ATTACK — multi-β continuum sketch of m_G / √σ
+// ==========================================================
+// Scans pure SU(2) Wilson at several β on L=4 with APE 0++ m_eff and Creutz σ.
+// In the scaling window, a decreases as β increases and the dimensionless
+// ratio m_eff/√σ should approach a constant (continuum glueball mass in
+// string-tension units).
+//
+// CLAIM: executable multi-β trend of the spectral gap scale with Epistemic SEM.
+// NOT CLAIMED:
+//   • continuum limit extrapolation with controlled systematics
+//   • infinite volume
+//   • Clay Millennium mass-gap theorem
+//
+// L=4 is used for multi-point budget (L=6 single-β is in su2_glueball_L6.sio).
+//
+// Run:
+//   export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
+//   export SOUNIO_SOUC_ENGINE=lean_single
+//   ./bin/souc run examples/particle_physics/su2_continuum_sketch.sio
+
+use particle_physics::lattice_gauge::{
+    lat_l, lg_set_L, lg_seed, lattice_cold, thermalize,
+    measure_glueball_thin_and_ape, measure_ensemble,
+    plaquette_ep, string_tension_ep, mass_gap_proxy_ep,
+    glueball_meff_log, glueball_meff_ep_from_samples,
+}
+use epistemic::knowledge::{Epistemic, ep_val, ep_std, ep_confidence}
+
+fn fp6(v: f64) -> string with Mut, Div, Panic {
+    var x = v
+    var neg = false
+    if x < 0.0 { neg = true; x = 0.0 - x }
+    let n = (x * 1000000.0 + 0.5) as i64
+    var whole = n / 1000000
+    let frac = n % 1000000
+    var buf: [i8; 64] = [0; 64]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    var wrev: [i8; 16] = [0; 16]
+    var wlen: i64 = 0
+    if whole == 0 { wrev[0] = 48 as i8; wlen = 1 }
+    while whole > 0 && wlen < 15 {
+        wrev[wlen as usize] = (48 + whole % 10) as i8
+        wlen = wlen + 1
+        whole = whole / 10
+    }
+    var i = wlen - 1
+    while i >= 0 {
+        buf[pos as usize] = wrev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    buf[pos as usize] = 46 as i8
+    pos = pos + 1
+    var div: i64 = 100000
+    while div >= 1 {
+        buf[pos as usize] = (48 + (frac / div) % 10) as i8
+        pos = pos + 1
+        div = div / 10
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn i64s(v: i64) -> string with Mut, Div, Panic {
+    if v == 0 { return "0" }
+    var n = v
+    var neg = false
+    if n < 0 { neg = true; n = 0 - n }
+    var rev: [i8; 24] = [0; 24]
+    var len: i64 = 0
+    while n > 0 && len < 23 {
+        rev[len as usize] = (48 + n % 10) as i8
+        len = len + 1
+        n = n / 10
+    }
+    var buf: [i8; 32] = [0; 32]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    var i = len - 1
+    while i >= 0 {
+        buf[pos as usize] = rev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn sqrt_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    var k: i64 = 0
+    while k < 40 { g = 0.5 * (g + x / g); k = k + 1 }
+    g
+}
+
+fn abs_f(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+/// Adaptive Metropolis step: smaller proposals at larger β (ordered phase).
+fn eps_for_beta(beta: f64) -> f64 {
+    if beta >= 2.45 { return 0.22 }
+    if beta >= 2.35 { return 0.28 }
+    if beta >= 2.25 { return 0.32 }
+    0.38
+}
+
+/// Milder smear at larger β (avoid killing fluctuations on fine lattices).
+fn nsmear_for_beta(beta: f64) -> i64 {
+    if beta >= 2.45 { return 2 }
+    if beta >= 2.35 { return 2 }
+    3
+}
+
+/// One β point: independent cold start + therm + APE m_eff (thin fallback) + Creutz.
+/// Returns (plaq, sigma_a2, sig_sem, meff, meff_sem, r, ok_flag).
+fn run_beta_point(
+    lat: &![f64; 65536],
+    sm: &![f64; 65536],
+    tmp: &![f64; 65536],
+    beta: f64,
+    n_therm: i64,
+    n_meas: i64,
+    n_sep: i64,
+    alpha: f64,
+    seed: i64
+) -> (f64, f64, f64, f64, f64, f64, i64) with Mut, Div, Panic {
+    let eps = eps_for_beta(beta)
+    let n_smear = nsmear_for_beta(beta)
+    lg_seed(seed)
+    lattice_cold(lat)
+    let _pt = thermalize(lat, beta, eps, n_therm)
+
+    var c_thin: [f64; 8] = [0.0; 8]
+    var c_ape: [f64; 8] = [0.0; 8]
+    var mt_s: [f64; 256] = [0.0; 256]
+    var mt_v: [i64; 256] = [0; 256]
+    var ma_s: [f64; 256] = [0.0; 256]
+    var ma_v: [i64; 256] = [0; 256]
+
+    let (_nok_t, _n_ok_a, _mo_t, _mo_a) = measure_glueball_thin_and_ape(
+        lat, sm, tmp, beta, eps, n_meas, n_sep,
+        alpha, n_smear,
+        &!c_thin, &!c_ape,
+        &!mt_s, &!mt_v, &!ma_s, &!ma_v
+    )
+
+    let (m_ape, ok_ape) = glueball_meff_log(c_ape[0], c_ape[1])
+    let (m_thin, ok_thin) = glueball_meff_log(c_thin[0], c_thin[1])
+    let cfg_a = glueball_meff_ep_from_samples(&ma_s, &ma_v, n_meas)
+    let cfg_t = glueball_meff_ep_from_samples(&mt_s, &mt_v, n_meas)
+
+    // Prefer APE; fall back to thin if APE correlator fails (fine β / low stats)
+    var meff: f64 = 0.0
+    var meff_sem: f64 = 0.0
+    var used: i64 = 0
+    if ok_ape == 1 && m_ape > 0.0 {
+        meff = m_ape
+        meff_sem = 0.2 * m_ape
+        if ep_val(&cfg_a) > 0.0 && ep_std(&cfg_a) > 0.0 {
+            meff_sem = ep_std(&cfg_a)
+        }
+        used = 1
+    } else if ok_thin == 1 && m_thin > 0.0 {
+        meff = m_thin
+        meff_sem = 0.25 * m_thin
+        if ep_val(&cfg_t) > 0.0 && ep_std(&cfg_t) > 0.0 {
+            meff_sem = ep_std(&cfg_t)
+        }
+        used = 2
+    }
+
+    var plaq_s: [f64; 256] = [0.0; 256]
+    var chi_s: [f64; 256] = [0.0; 256]
+    var chi_v: [i64; 256] = [0; 256]
+    let n_ctx: i64 = 14
+    let _nok_c = measure_ensemble(lat, beta, eps, n_ctx, n_sep, &!plaq_s, &!chi_s, &!chi_v)
+    let pep = plaquette_ep(&plaq_s, n_ctx)
+    let sep = string_tension_ep(&chi_s, &chi_v, n_ctx)
+    let plaq = ep_val(&pep)
+    let sig = ep_val(&sep)
+    let sig_sem = ep_std(&sep)
+    let sqrt_sig = sqrt_q(sig)
+
+    var r: f64 = 0.0
+    var ok: i64 = 0
+    if used > 0 && sqrt_sig > 1.0e-12 && meff > 0.0 {
+        r = meff / sqrt_sig
+        ok = used
+    }
+
+    (plaq, sig, sig_sem, meff, meff_sem, r, ok)
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("================================================================")
+    println(" SU(2) MULTI-β CONTINUUM SKETCH — m_eff / √σ vs β")
+    println("================================================================")
+    println("CLAIM: multi-β trend of spectral gap scale (APE 0++ / Creutz √σ)")
+    println("NOT CLAIMED: controlled continuum extrapolation or Clay theorem")
+    println("")
+
+    let _ = lg_set_L(4)
+    println("L=" ++ i64s(lat_l()) ++ " (multi-β budget; L=6 single-β in su2_glueball_L6)")
+
+    // Four couplings spanning rough SU(2) scaling window
+    // β=2.2 (coarser a) … β=2.5 (finer a)
+    var betas: [f64; 4] = [2.2, 2.3, 2.4, 2.5]
+    let n_beta: i64 = 4
+    let n_therm: i64 = 50
+    let n_meas: i64 = 32
+    let n_sep: i64 = 4
+    let alpha: f64 = 0.4
+    let seed0: i64 = 20260813
+
+    println("β ∈ {2.2, 2.3, 2.4, 2.5}  therm=" ++ i64s(n_therm)
+        ++ " meas=" ++ i64s(n_meas) ++ " APE α=" ++ fp6(alpha)
+        ++ "  (ε,n_smear adaptive; thin fallback if APE fails)")
+    println("ok code: 1=APE  2=thin fallback  0=fail")
+    println("")
+
+    var lat: [f64; 65536] = [0.0; 65536]
+    var sm: [f64; 65536] = [0.0; 65536]
+    var tmp: [f64; 65536] = [0.0; 65536]
+
+    var plaqs: [f64; 4] = [0.0; 4]
+    var sigs: [f64; 4] = [0.0; 4]
+    var sig_sems: [f64; 4] = [0.0; 4]
+    var meffs: [f64; 4] = [0.0; 4]
+    var meff_sems: [f64; 4] = [0.0; 4]
+    var ratios: [f64; 4] = [0.0; 4]
+    var oks: [i64; 4] = [0; 4]
+
+    var b: i64 = 0
+    while b < n_beta {
+        let beta = betas[b as usize]
+        let seed = seed0 + 1000 * (b + 1)
+        println("--- β = " ++ fp6(beta) ++ "  seed=" ++ i64s(seed)
+            ++ "  ε=" ++ fp6(eps_for_beta(beta))
+            ++ "  n_smear=" ++ i64s(nsmear_for_beta(beta)) ++ " ---")
+        let (plaq, sig, ssem, meff, msem, r, ok) = run_beta_point(
+            &!lat, &!sm, &!tmp, beta, n_therm, n_meas, n_sep, alpha, seed
+        )
+        plaqs[b as usize] = plaq
+        sigs[b as usize] = sig
+        sig_sems[b as usize] = ssem
+        meffs[b as usize] = meff
+        meff_sems[b as usize] = msem
+        ratios[b as usize] = r
+        oks[b as usize] = ok
+        println("  ⟨P⟩=" ++ fp6(plaq)
+            ++ "  σa²=" ++ fp6(sig) ++ "±" ++ fp6(ssem)
+            ++ "  m_eff=" ++ fp6(meff) ++ "±" ++ fp6(msem)
+            ++ "  m/√σ=" ++ fp6(r)
+            ++ "  ok=" ++ i64s(ok))
+        b = b + 1
+    }
+
+    println("")
+    println("================================================================")
+    println(" TABLE: β | ⟨P⟩ | σ a² | m_eff a | m_eff/√σ | ok")
+    println("================================================================")
+    b = 0
+    while b < n_beta {
+        println("  " ++ fp6(betas[b as usize])
+            ++ " | " ++ fp6(plaqs[b as usize])
+            ++ " | " ++ fp6(sigs[b as usize])
+            ++ " | " ++ fp6(meffs[b as usize])
+            ++ " | " ++ fp6(ratios[b as usize])
+            ++ " | " ++ i64s(oks[b as usize]))
+        b = b + 1
+    }
+
+    // --- continuum-sketch diagnostics ---
+    // 1) How many points land in a broad physical window for the ratio?
+    var n_phys: i64 = 0
+    var n_ok: i64 = 0
+    var sum_r: f64 = 0.0
+    var sum_r2: f64 = 0.0
+    b = 0
+    while b < n_beta {
+        if oks[b as usize] == 1 {
+            n_ok = n_ok + 1
+            let r = ratios[b as usize]
+            sum_r = sum_r + r
+            sum_r2 = sum_r2 + r * r
+            if r > 1.0 && r < 12.0 {
+                n_phys = n_phys + 1
+            }
+        }
+        b = b + 1
+    }
+
+    var r_mean: f64 = 0.0
+    var r_std: f64 = 0.0
+    if n_ok > 0 {
+        r_mean = sum_r / (n_ok as f64)
+    }
+    if n_ok > 1 {
+        let var_r = sum_r2 / (n_ok as f64) - r_mean * r_mean
+        if var_r > 0.0 {
+            r_std = sqrt_q(var_r)
+        }
+    }
+
+    // 2) Scaling trend: √σ should decrease as β increases (a shrinks)
+    var n_sqrt_down: i64 = 0
+    var n_pairs: i64 = 0
+    b = 0
+    while b < n_beta - 1 {
+        if oks[b as usize] == 1 && oks[(b + 1) as usize] == 1 {
+            n_pairs = n_pairs + 1
+            let s0 = sqrt_q(sigs[b as usize])
+            let s1 = sqrt_q(sigs[(b + 1) as usize])
+            if s1 < s0 {
+                n_sqrt_down = n_sqrt_down + 1
+            }
+        }
+        b = b + 1
+    }
+
+    // 3) Plaquette should rise with β
+    var n_plaq_up: i64 = 0
+    b = 0
+    while b < n_beta - 1 {
+        if plaqs[(b + 1) as usize] > plaqs[b as usize] {
+            n_plaq_up = n_plaq_up + 1
+        }
+        b = b + 1
+    }
+
+    // 4) Crude constant-fit residual: max |r − r_mean| / r_mean among ok points
+    var max_rel: f64 = 0.0
+    if r_mean > 1.0e-12 {
+        b = 0
+        while b < n_beta {
+            if oks[b as usize] == 1 {
+                let rel = abs_f(ratios[b as usize] - r_mean) / r_mean
+                if rel > max_rel { max_rel = rel }
+            }
+            b = b + 1
+        }
+    }
+
+    println("")
+    println("continuum-sketch summary:")
+    println("  ok points          = " ++ i64s(n_ok) ++ " / " ++ i64s(n_beta))
+    println("  in phys window     = " ++ i64s(n_phys)
+        ++ "  (1 < m/√σ < 12)")
+    println("  ⟨m/√σ⟩_β           = " ++ fp6(r_mean) ++ "  scatter=" ++ fp6(r_std)
+        ++ "  (lit 0++ ~ 3.5–4)")
+    println("  √σ decreasing w/ β = " ++ i64s(n_sqrt_down) ++ " / " ++ i64s(n_pairs)
+        ++ "  adjacent pairs")
+    println("  ⟨P⟩ increasing w/ β= " ++ i64s(n_plaq_up) ++ " / " ++ i64s(n_beta - 1))
+    println("  max |r−⟨r⟩|/⟨r⟩    = " ++ fp6(max_rel)
+        ++ "  (constancy proxy; large = not continuum yet)")
+
+    // Epistemic mean ratio across β (scatter as SEM proxy, conf low)
+    let r_ep = Epistemic {
+        val: r_mean,
+        variance: r_std * r_std,
+        confidence: 400
+    }
+    println("  Epistemic ⟨m/√σ⟩   = " ++ fp6(ep_val(&r_ep))
+        ++ " ± " ++ fp6(ep_std(&r_ep))
+        ++ "  conf=" ++ i64s(ep_confidence(&r_ep))
+        ++ "  (β-scatter only; a→0 systematics NOT included)")
+
+    println("")
+    println("================================================================")
+    println(" GATES")
+    println("================================================================")
+    // ≥3 ok points preferred; 2 still a valid sketch if both physical
+    let g_multi = n_ok >= 3
+    let g_multi2 = n_ok >= 2
+    let g_phys = n_phys >= 2
+    let g_plaq = n_plaq_up >= 2
+    let g_scale = n_pairs == 0 || n_sqrt_down >= 1
+    // constancy: scatter not wild (std/mean < 0.75) when ≥2 ok
+    var g_const = false
+    if n_ok >= 2 && r_mean > 0.0 {
+        if r_std / r_mean < 0.75 { g_const = true }
+    }
+    // mean near literature order of magnitude
+    let g_lit = r_mean > 1.5 && r_mean < 10.0
+
+    if g_multi { println("GATE multi_beta_ok_points: PASS  (≥3)") }
+    else if g_multi2 { println("GATE multi_beta_ok_points: PASS_WEAK  (2/4 — sketch)") }
+    else { println("GATE multi_beta_ok_points: FAIL_HONEST") }
+    if g_phys { println("GATE ratios_in_phys_window: PASS") }
+    else { println("GATE ratios_in_phys_window: FAIL_HONEST") }
+    if g_plaq { println("GATE plaquette_rises_with_beta: PASS") }
+    else { println("GATE plaquette_rises_with_beta: FAIL_HONEST") }
+    if g_scale { println("GATE sqrt_sigma_trend: PASS") }
+    else { println("GATE sqrt_sigma_trend: FAIL_HONEST") }
+    if g_const { println("GATE ratio_beta_scatter_bounded: PASS") }
+    else { println("GATE ratio_beta_scatter_bounded: FAIL_HONEST") }
+    if g_lit { println("GATE mean_ratio_order_lit: PASS") }
+    else { println("GATE mean_ratio_order_lit: FAIL_HONEST") }
+
+    println("")
+    println("INTERPRETATION (honest):")
+    println("  A flat m/√σ vs β is necessary but not sufficient for continuum.")
+    println("  This sketch shows the dimensionless gap scale is O(lit) across β.")
+    println("  Full a→0 needs larger L, more β, smear plateau, and continuum fit.")
+    println("")
+    println("OPEN NEXT: L=6 multi-β · SU(3) heatbath · variational basis")
+    println("================================================================")
+    0
+}

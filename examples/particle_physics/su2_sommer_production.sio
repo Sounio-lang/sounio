@@ -1,0 +1,488 @@
+//@ run-pass
+// examples/particle_physics/su2_sommer_production.sio
+//
+// BOLD PRODUCTION — L=8 volume + multi-β Sommer scale
+// =====================================================
+// Finite-size and continuum *sketch* (not continuum limit):
+//   A. L=6 multi-β β∈{2.2,2.3,2.4,2.5}: 3×3 GEVP + Creutz χ2/χ3 + r0_σ
+//   B. L=8 β=2.3: 3×3 GEVP + Creutz χ2/χ3/χ4 + r0_σ  (volume step)
+// Scoreboard: m_GEVP · r0_σ  and  m_GEVP / √χ  across β and L.
+//
+// CLAIM: executable multi-β + L=8 scale/mass production with Epistemic σ.
+// NOT CLAIMED: continuum extrapolation; Clay; infinite-volume spectrum.
+//
+// Run:
+//   export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
+//   export SOUNIO_SOUC_ENGINE=lean_single
+//   ./bin/souc run examples/particle_physics/su2_sommer_production.sio
+
+use particle_physics::lattice_gauge::{
+    lat_l, lat_nsites, lg_set_L, lg_seed, lattice_cold,
+    heatbath_thermalize, measure_ensemble_hb_multi_r,
+    measure_ensemble_hb_multi_r4,
+    measure_variational_3smear_hb, gevp_3x3, gevp_mass,
+    sommer_r0_from_sigma, glueball_meff_log, string_tension_ep,
+}
+use epistemic::knowledge::{ep_val, ep_std}
+
+fn fp6(v: f64) -> string with Mut, Div, Panic {
+    var x = v
+    var neg = false
+    if x < 0.0 { neg = true; x = 0.0 - x }
+    let n = (x * 1000000.0 + 0.5) as i64
+    var whole = n / 1000000
+    let frac = n % 1000000
+    var buf: [i8; 64] = [0; 64]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    var wrev: [i8; 16] = [0; 16]
+    var wlen: i64 = 0
+    if whole == 0 { wrev[0] = 48 as i8; wlen = 1 }
+    while whole > 0 && wlen < 15 {
+        wrev[wlen as usize] = (48 + whole % 10) as i8
+        wlen = wlen + 1
+        whole = whole / 10
+    }
+    var i = wlen - 1
+    while i >= 0 {
+        buf[pos as usize] = wrev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    buf[pos as usize] = 46 as i8
+    pos = pos + 1
+    var div: i64 = 100000
+    while div >= 1 {
+        buf[pos as usize] = (48 + (frac / div) % 10) as i8
+        pos = pos + 1
+        div = div / 10
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn i64s(v: i64) -> string with Mut, Div, Panic {
+    if v == 0 { return "0" }
+    var n = v
+    var neg = false
+    if n < 0 { neg = true; n = 0 - n }
+    var rev: [i8; 24] = [0; 24]
+    var len: i64 = 0
+    while n > 0 && len < 23 {
+        rev[len as usize] = (48 + n % 10) as i8
+        len = len + 1
+        n = n / 10
+    }
+    var buf: [i8; 32] = [0; 32]
+    var pos: i64 = 0
+    if neg { buf[0] = 45 as i8; pos = 1 }
+    var i = len - 1
+    while i >= 0 {
+        buf[pos as usize] = rev[i as usize]
+        pos = pos + 1
+        if i == 0 { break }
+        i = i - 1
+    }
+    str_from_bytes(buf, pos)
+}
+
+fn sqrt_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    var k: i64 = 0
+    while k < 40 { g = 0.5 * (g + x / g); k = k + 1 }
+    g
+}
+
+fn abs_f(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+/// One (L,β) production point: therm → GEVP3 → multi-R Creutz → r0_σ.
+/// Primary mass = GEVP if physical; else contact (flag ok_src: 1=GEVP 2=contact 0=fail).
+/// Returns (m_pri, m_gevp, m_contact, srt2, srt3, r0s, m_r0s, m_c2, ok_src, lambda)
+fn run_point(
+    lat: &![f64; 65536],
+    sm0: &![f64; 65536],
+    sm1: &![f64; 65536],
+    sm2: &![f64; 65536],
+    tmp: &![f64; 65536],
+    beta: f64,
+    n_therm: i64,
+    n_meas: i64,
+    n_sep: i64,
+    alpha: f64,
+    n0: i64,
+    n1: i64,
+    n2: i64,
+    seed: i64,
+    c_sommer: f64,
+    do_chi4: i64
+) -> (f64, f64, f64, f64, f64, f64, f64, f64, i64, f64) with IO, Mut, Div, Panic {
+    lg_seed(seed)
+    lattice_cold(lat)
+    let _p = heatbath_thermalize(lat, beta, n_therm)
+
+    var c00: [f64; 8] = [0.0; 8]
+    var c01: [f64; 8] = [0.0; 8]
+    var c02: [f64; 8] = [0.0; 8]
+    var c11: [f64; 8] = [0.0; 8]
+    var c12: [f64; 8] = [0.0; 8]
+    var c22: [f64; 8] = [0.0; 8]
+    let (_a, _b, _c) = measure_variational_3smear_hb(
+        lat, sm0, sm1, sm2, tmp,
+        beta, n_meas, n_sep, alpha, n0, n1, n2,
+        &!c00, &!c01, &!c02, &!c11, &!c12, &!c22
+    )
+    let (md0, od0) = glueball_meff_log(c00[0], c00[1])
+    let (l3, ok3) = gevp_3x3(
+        c00[1], c01[1], c02[1], c11[1], c12[1], c22[1],
+        c00[0], c01[0], c02[0], c11[0], c12[0], c22[0]
+    )
+    let (m3, om3) = gevp_mass(l3, 1.0)
+    var m_gevp: f64 = 0.0
+    if om3 == 1 { m_gevp = m3 }
+    var m_contact: f64 = 0.0
+    if od0 == 1 { m_contact = md0 }
+
+    // Physical GEVP: positive, and not collapsed vs contact (reject m < 0.35*contact)
+    var ok_g: i64 = 0
+    if om3 == 1 && m_gevp > 0.15 {
+        if od0 == 0 {
+            ok_g = 1
+        } else if m_gevp >= 0.35 * m_contact {
+            ok_g = 1
+        }
+        // else collapse — keep m_gevp for diagnostics, ok_g=0
+    }
+
+    var plaq_s: [f64; 256] = [0.0; 256]
+    var chi2_s: [f64; 256] = [0.0; 256]
+    var chi2_v: [i64; 256] = [0; 256]
+    var chi3_s: [f64; 256] = [0.0; 256]
+    var chi3_v: [i64; 256] = [0; 256]
+    var chi4_s: [f64; 256] = [0.0; 256]
+    var chi4_v: [i64; 256] = [0; 256]
+    let n_ctx: i64 = 18
+    var n4: i64 = 0
+    if do_chi4 == 1 {
+        let (_a2, _b2, c) = measure_ensemble_hb_multi_r4(
+            lat, beta, n_ctx, n_sep,
+            &!plaq_s, &!chi2_s, &!chi2_v, &!chi3_s, &!chi3_v, &!chi4_s, &!chi4_v
+        )
+        n4 = c
+    } else {
+        let (_a2, _b2) = measure_ensemble_hb_multi_r(
+            lat, beta, n_ctx, n_sep,
+            &!plaq_s, &!chi2_s, &!chi2_v, &!chi3_s, &!chi3_v
+        )
+    }
+    let sep2 = string_tension_ep(&chi2_s, &chi2_v, n_ctx)
+    let sep3 = string_tension_ep(&chi3_s, &chi3_v, n_ctx)
+    let sig2 = ep_val(&sep2)
+    let sig3 = ep_val(&sep3)
+    let srt2 = sqrt_q(sig2)
+    let srt3 = sqrt_q(sig3)
+    let (r0s, ok_r0s) = sommer_r0_from_sigma(sig2, c_sommer)
+
+    // Primary mass: prefer physical GEVP, else contact
+    var m_pri: f64 = 0.0
+    var ok_src: i64 = 0
+    if ok_g == 1 {
+        m_pri = m_gevp
+        ok_src = 1
+    } else if od0 == 1 && m_contact > 0.15 {
+        m_pri = m_contact
+        ok_src = 2
+    }
+
+    var m_r0s: f64 = 0.0
+    var m_c2: f64 = 0.0
+    if ok_src > 0 {
+        if ok_r0s == 1 && r0s > 0.0 { m_r0s = m_pri * r0s }
+        if srt2 > 1.0e-12 { m_c2 = m_pri / srt2 }
+    }
+
+    if do_chi4 == 1 && n4 > 0 {
+        let sep4 = string_tension_ep(&chi4_s, &chi4_v, n_ctx)
+        let sig4 = ep_val(&sep4)
+        let srt4 = sqrt_q(sig4)
+        println("    chi4=" ++ fp6(sig4) ++ "+/-" ++ fp6(ep_std(&sep4))
+            ++ " sqrt=" ++ fp6(srt4) ++ " n_ok=" ++ i64s(n4))
+        if ok_src > 0 && srt4 > 1.0e-12 {
+            println("    m_pri/sqrt(chi4)=" ++ fp6(m_pri / srt4))
+        }
+    }
+    (m_pri, m_gevp, m_contact, srt2, srt3, r0s, m_r0s, m_c2, ok_src, l3)
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("================================================================")
+    println(" SU(2) BOLD PRODUCTION — L=8 + multi-β Sommer")
+    println("================================================================")
+    println("CLAIM: multi-β m*r0_σ + L=8 finite-size step (GEVP3)")
+    println("NOT CLAIMED: continuum limit; Clay; infinite volume")
+    println("")
+
+    let c_sommer: f64 = 1.65
+    let alpha: f64 = 0.4
+    let n0: i64 = 1
+    let n1: i64 = 2
+    let n2s: i64 = 4
+    let seed0: i64 = 20260813
+
+    var lat: [f64; 65536] = [0.0; 65536]
+    var sm0: [f64; 65536] = [0.0; 65536]
+    var sm1: [f64; 65536] = [0.0; 65536]
+    var sm2: [f64; 65536] = [0.0; 65536]
+    var tmp: [f64; 65536] = [0.0; 65536]
+
+    // ------------------------------------------------------------------
+    // A. L=6 multi-β continuum sketch
+    // ------------------------------------------------------------------
+    println("--- A. L=6 multi-β  β∈{2.2,2.3,2.4,2.5} ---")
+    let ok6 = lg_set_L(6)
+    if ok6 == 0 {
+        println("FAIL lg_set_L(6)")
+        return 1
+    }
+    println("L=" ++ i64s(lat_l()) ++ " sites=" ++ i64s(lat_nsites()))
+    var betas: [f64; 4] = [2.2, 2.3, 2.4, 2.5]
+    let n_beta: i64 = 4
+    let n_therm6: i64 = 32
+    let n_meas6: i64 = 30
+    let n_sep6: i64 = 2
+
+    var m_r0s_b: [f64; 4] = [0.0; 4]
+    var m_c2_b: [f64; 4] = [0.0; 4]
+    var m_pri_b: [f64; 4] = [0.0; 4]
+    var m_g_b: [f64; 4] = [0.0; 4]
+    var m_ct_b: [f64; 4] = [0.0; 4]
+    var r0s_b: [f64; 4] = [0.0; 4]
+    var srt2_b: [f64; 4] = [0.0; 4]
+    var srt3_b: [f64; 4] = [0.0; 4]
+    var ok_b: [i64; 4] = [0; 4]
+    var n_ok_beta: i64 = 0
+    var n_gevp_beta: i64 = 0
+
+    var ib: i64 = 0
+    while ib < n_beta {
+        let beta = betas[ib as usize]
+        println("")
+        println("  β=" ++ fp6(beta))
+        // Distinct seeds; β=2.3 uses production anchor seed
+        var seed = seed0 + ib * 1009
+        if ib == 1 { seed = seed0 }
+        let (mpri, mg, mct, srt2, srt3, r0s, mr0s, mc2, oks, lam) = run_point(
+            &!lat, &!sm0, &!sm1, &!sm2, &!tmp,
+            beta, n_therm6, n_meas6, n_sep6, alpha, n0, n1, n2s, seed, c_sommer, 0
+        )
+        m_pri_b[ib as usize] = mpri
+        m_g_b[ib as usize] = mg
+        m_ct_b[ib as usize] = mct
+        m_r0s_b[ib as usize] = mr0s
+        m_c2_b[ib as usize] = mc2
+        r0s_b[ib as usize] = r0s
+        srt2_b[ib as usize] = srt2
+        srt3_b[ib as usize] = srt3
+        ok_b[ib as usize] = oks
+        if oks > 0 { n_ok_beta = n_ok_beta + 1 }
+        if oks == 1 { n_gevp_beta = n_gevp_beta + 1 }
+        var src = "FAIL"
+        if oks == 1 { src = "GEVP" }
+        if oks == 2 { src = "contact" }
+        println("    m_pri=" ++ fp6(mpri) ++ " [" ++ src ++ "]  m_GEVP=" ++ fp6(mg)
+            ++ "  m_ct=" ++ fp6(mct) ++ "  λ=" ++ fp6(lam))
+        println("    chi2 sqrt=" ++ fp6(srt2) ++ "  chi3 sqrt=" ++ fp6(srt3)
+            ++ "  r0_s=" ++ fp6(r0s))
+        println("    m*r0_s=" ++ fp6(mr0s) ++ "  m/sqrt(chi2)=" ++ fp6(mc2))
+        if srt3 > 1.0e-12 && oks > 0 {
+            println("    m/sqrt(chi3)=" ++ fp6(mpri / srt3))
+        }
+        ib = ib + 1
+    }
+
+    // multi-β trend stats (any primary mass source)
+    var sum_mr: f64 = 0.0
+    var sum_mc: f64 = 0.0
+    var cnt_t: i64 = 0
+    ib = 0
+    while ib < n_beta {
+        if ok_b[ib as usize] > 0 && m_r0s_b[ib as usize] > 0.0 {
+            sum_mr = sum_mr + m_r0s_b[ib as usize]
+            sum_mc = sum_mc + m_c2_b[ib as usize]
+            cnt_t = cnt_t + 1
+        }
+        ib = ib + 1
+    }
+    var mean_mr: f64 = 0.0
+    var mean_mc: f64 = 0.0
+    if cnt_t > 0 {
+        mean_mr = sum_mr / (cnt_t as f64)
+        mean_mc = sum_mc / (cnt_t as f64)
+    }
+    // spread = max-min / mean
+    var mn_mr: f64 = 1.0e30
+    var mx_mr: f64 = 0.0
+    var mn_mc: f64 = 1.0e30
+    var mx_mc: f64 = 0.0
+    ib = 0
+    while ib < n_beta {
+        if ok_b[ib as usize] > 0 {
+            let a = m_r0s_b[ib as usize]
+            let b = m_c2_b[ib as usize]
+            if a > 0.0 {
+                if a < mn_mr { mn_mr = a }
+                if a > mx_mr { mx_mr = a }
+            }
+            if b > 0.0 {
+                if b < mn_mc { mn_mc = b }
+                if b > mx_mc { mx_mc = b }
+            }
+        }
+        ib = ib + 1
+    }
+    var spread_mr: f64 = 0.0
+    var spread_mc: f64 = 0.0
+    if mean_mr > 1.0e-12 && mx_mr > mn_mr {
+        spread_mr = (mx_mr - mn_mr) / mean_mr
+    }
+    if mean_mc > 1.0e-12 && mx_mc > mn_mc {
+        spread_mc = (mx_mc - mn_mc) / mean_mc
+    }
+
+    println("")
+    println("  L=6 multi-β summary:")
+    println("    n_ok_beta=" ++ i64s(n_ok_beta) ++ "/" ++ i64s(n_beta)
+        ++ "  n_gevp=" ++ i64s(n_gevp_beta))
+    println("    ⟨m·r0_σ⟩=" ++ fp6(mean_mr) ++ "  spread=" ++ fp6(spread_mr)
+        ++ "  range=[" ++ fp6(mn_mr) ++ "," ++ fp6(mx_mr) ++ "]")
+    println("    ⟨m/√χ2⟩=" ++ fp6(mean_mc) ++ "  spread=" ++ fp6(spread_mc)
+        ++ "  range=[" ++ fp6(mn_mc) ++ "," ++ fp6(mx_mc) ++ "]")
+
+    // freeze L=6 β=2.3 for finite-size compare
+    let m_r0s_L6 = m_r0s_b[1]
+    let m_c2_L6 = m_c2_b[1]
+    let m_pri_L6 = m_pri_b[1]
+    let ok_L6 = ok_b[1]
+
+    // ------------------------------------------------------------------
+    // B. L=8 volume step at β=2.3
+    // ------------------------------------------------------------------
+    println("")
+    println("--- B. L=8 volume step  β=2.3  (chi2/3/4) ---")
+    let ok8 = lg_set_L(8)
+    if ok8 == 0 {
+        println("FAIL lg_set_L(8) — buffer/geometry reject")
+        return 1
+    }
+    println("L=" ++ i64s(lat_l()) ++ " sites=" ++ i64s(lat_nsites())
+        ++ " flat_need=" ++ i64s(lat_nsites() * 16))
+    let n_therm8: i64 = 40
+    let n_meas8: i64 = 32
+    let n_sep8: i64 = 2
+    let beta8: f64 = 2.3
+    let seed8: i64 = seed0 + 8000
+
+    let (mpri8, mg8, mct8, srt2_8, srt3_8, r0s8, mr0s8, mc2_8, oks8, lam8) = run_point(
+        &!lat, &!sm0, &!sm1, &!sm2, &!tmp,
+        beta8, n_therm8, n_meas8, n_sep8, alpha, n0, n1, n2s, seed8, c_sommer, 1
+    )
+    var src8 = "FAIL"
+    if oks8 == 1 { src8 = "GEVP" }
+    if oks8 == 2 { src8 = "contact" }
+    println("  m_pri=" ++ fp6(mpri8) ++ " [" ++ src8 ++ "]  m_GEVP=" ++ fp6(mg8)
+        ++ "  m_ct=" ++ fp6(mct8) ++ "  λ=" ++ fp6(lam8))
+    println("  chi2 sqrt=" ++ fp6(srt2_8) ++ "  chi3 sqrt=" ++ fp6(srt3_8)
+        ++ "  r0_s=" ++ fp6(r0s8))
+    println("  m*r0_s=" ++ fp6(mr0s8) ++ "  m/sqrt(chi2)=" ++ fp6(mc2_8))
+    if srt3_8 > 1.0e-12 && oks8 > 0 {
+        println("  m/sqrt(chi3)=" ++ fp6(mpri8 / srt3_8))
+    }
+
+    // finite-size shifts at β=2.3
+    var fs_mr: f64 = 0.0
+    var fs_mc: f64 = 0.0
+    if ok_L6 > 0 && oks8 > 0 && m_r0s_L6 > 1.0e-12 && mr0s8 > 1.0e-12 {
+        fs_mr = abs_f(mr0s8 - m_r0s_L6) / m_r0s_L6
+    }
+    if ok_L6 > 0 && oks8 > 0 && m_c2_L6 > 1.0e-12 && mc2_8 > 1.0e-12 {
+        fs_mc = abs_f(mc2_8 - m_c2_L6) / m_c2_L6
+    }
+
+    println("")
+    println("================================================================")
+    println(" SCOREBOARD")
+    println("================================================================")
+    println("L=6 multi-β  ⟨m·r0_σ⟩=" ++ fp6(mean_mr) ++ "  ⟨m/√χ2⟩=" ++ fp6(mean_mc)
+        ++ "  (src: GEVP preferred, contact fallback)")
+    println("L=6 β=2.3    m·r0_σ=" ++ fp6(m_r0s_L6) ++ "  m/√χ2=" ++ fp6(m_c2_L6)
+        ++ "  m_pri=" ++ fp6(m_pri_L6) ++ " src=" ++ i64s(ok_L6))
+    println("L=8 β=2.3    m·r0_σ=" ++ fp6(mr0s8) ++ "  m/√χ2=" ++ fp6(mc2_8)
+        ++ "  m_pri=" ++ fp6(mpri8) ++ " src=" ++ i64s(oks8))
+    println("finite-size |Δ|/val  m·r0_σ:" ++ fp6(fs_mr) ++ "  m/√χ2:" ++ fp6(fs_mc))
+    println("lit m/√σ ~ 3.5–4;  m·r0 ~ 4 if r0√σ ~ 1.1")
+
+    // ------------------------------------------------------------------
+    // GATES
+    // ------------------------------------------------------------------
+    println("")
+    println("================================================================")
+    println(" GATES")
+    println("================================================================")
+    let g_L8 = ok8 == 1 && lat_l() == 8
+    let g_multi = n_ok_beta >= 3
+    let g_gevp_some = n_gevp_beta >= 1
+    let g_L6_pt = ok_L6 > 0 && m_r0s_L6 > 0.5
+    let g_L8_pt = oks8 > 0 && mr0s8 > 0.5
+    let g_mr_phys = mean_mr > 1.0 && mean_mr < 12.0
+    let g_mc_phys = mean_mc > 1.0 && mean_mc < 12.0
+    let g_beta_stable = cnt_t >= 3 && spread_mr > 0.0 && spread_mr <= 0.55
+    let g_fs_ok = g_L6_pt && g_L8_pt && fs_mr > 0.0
+    let g_fs_mild = g_fs_ok && fs_mr <= 0.45
+    let g_lit_loose = mean_mr >= 2.0 && mean_mr <= 7.0
+    let g_L8_chi = srt2_8 > 0.0 && srt3_8 > 0.0
+    // L=8 mass not collapsed into UV-junk ratio
+    let g_L8_ratio = mc2_8 >= 1.5 && mc2_8 <= 10.0
+
+    if g_L8 { println("GATE L8_geometry: PASS") }
+    else { println("GATE L8_geometry: FAIL_HONEST") }
+    if g_multi { println("GATE multi_beta_mass: PASS  n=" ++ i64s(n_ok_beta)
+        ++ " gevp=" ++ i64s(n_gevp_beta)) }
+    else { println("GATE multi_beta_mass: FAIL_HONEST") }
+    if g_gevp_some { println("GATE gevp_alive_somewhere: PASS") }
+    else { println("GATE gevp_alive_somewhere: FAIL_HONEST  (contact-only)") }
+    if g_L6_pt { println("GATE L6_beta23_point: PASS") }
+    else { println("GATE L6_beta23_point: FAIL_HONEST") }
+    if g_L8_pt { println("GATE L8_beta23_point: PASS") }
+    else { println("GATE L8_beta23_point: FAIL_HONEST") }
+    if g_L8_chi { println("GATE L8_creutz_live: PASS") }
+    else { println("GATE L8_creutz_live: FAIL_HONEST") }
+    if g_L8_ratio { println("GATE L8_ratio_phys: PASS  " ++ fp6(mc2_8)) }
+    else { println("GATE L8_ratio_phys: FAIL_HONEST  " ++ fp6(mc2_8)) }
+    if g_mr_phys { println("GATE mean_m_r0s_phys: PASS  " ++ fp6(mean_mr)) }
+    else { println("GATE mean_m_r0s_phys: FAIL_HONEST") }
+    if g_mc_phys { println("GATE mean_m_chi2_phys: PASS  " ++ fp6(mean_mc)) }
+    else { println("GATE mean_m_chi2_phys: FAIL_HONEST") }
+    if g_beta_stable { println("GATE multi_beta_spread: PASS  " ++ fp6(spread_mr)) }
+    else { println("GATE multi_beta_spread: FAIL_HONEST  " ++ fp6(spread_mr)) }
+    if g_fs_mild { println("GATE finite_size_mild: PASS  " ++ fp6(fs_mr)) }
+    else if g_fs_ok { println("GATE finite_size_mild: FAIL_HONEST  shift=" ++ fp6(fs_mr)) }
+    else { println("GATE finite_size_mild: FAIL_HONEST") }
+    if g_lit_loose { println("GATE lit_window_loose: PASS") }
+    else { println("GATE lit_window_loose: FAIL_HONEST  mean=" ++ fp6(mean_mr)) }
+
+    println("")
+    println("VERDICT:")
+    println("  multi-β ⟨m·r0_σ⟩=" ++ fp6(mean_mr) ++ " spread=" ++ fp6(spread_mr)
+        ++ "  gevp_pts=" ++ i64s(n_gevp_beta))
+    println("  L6→L8 @β=2.3  m·r0_σ: " ++ fp6(m_r0s_L6) ++ " → " ++ fp6(mr0s8)
+        ++ "  (shift " ++ fp6(fs_mr) ++ ")")
+    if g_multi && g_L8_pt && g_L8 {
+        println("  BOLD path live: L=8 geometry + multi-β scale. No continuum claim.")
+    } else {
+        println("  Partial — see FAIL_HONEST gates.")
+    }
+
+    let _r = lg_set_L(4)
+    println("================================================================")
+    0
+}
