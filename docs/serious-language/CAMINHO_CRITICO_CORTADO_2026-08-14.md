@@ -58,3 +58,60 @@ rebuildar o prebuilt (o enviado é de 25/jul), e assistir uma pessoa de fora rod
 data -- pela `RELEASE_POLICY.md`, releases são orientados a evento, não a calendário.
 Recomendação: o deliverable acima vem DEPOIS da submissão. Ele é pequeno o bastante para
 caber antes se houver vontade, mas então é ele sozinho.
+
+---
+
+## CORREÇÃO (2026-08-14, mesmo dia) — o corte acima partia de um número errado
+
+O operador desconfiou do "~32% verde" e estava certo. Medi.
+
+### 1. O corpus, medido hoje: 62%, não 32%
+
+`bash scripts/dev/corpus_census.sh` sobre os 2.538 arquivos versionados:
+
+    stdlib     total=1567   OK=1059   (67%)   REJECT=508   TIMEOUT=0  CRASH=0
+    examples   total=971    OK=506    (52%)   REJECT=464   TIMEOUT=0  CRASH=1
+    TOTAL      1565 / 2538 aceitos por souc check
+
+O 32% vinha de `docs/EPISTEMIC_RELEASE_STATUS.md` (638/2003) e estava errado de três formas
+somadas: é doc da **branch órfã**, medido em **junho**, sobre um corpus **500 arquivos menor**.
+Aplicá-lo à main de hoje foi exatamente a falha que esta sessão passou o tempo todo evitando --
+e o plano original já dizia que o entregável era ESCREVER o censo, não escolher um dos quatro
+números publicados. Escolhi um.
+
+Ressalva do próprio censo: `souc check` não é `compile+run`. Por CLAUDE.md princípio 3, check
+mais um caller é o teste de existência para bibliotecas -- mas 62% aceito NÃO significa 62%
+executável. É uma pergunta estritamente mais forte e este script não a responde.
+
+### 2. A barra de `beta` não é o corpus -- e o gate nomeado está VERMELHO hoje
+
+A política aponta para um artefato específico. O commitado
+(`artifacts/stdlib/stdlib_reliability_status.v1.json`, gerado 2026-05-12) diz:
+
+    totals: pass=251 fail=0 skip=0    status_summary: pass
+
+Ou seja, no papel a barra de beta está cumprida e `1.0.0-beta.6` NÃO é overclaim.
+Minha recomendação de descer para alpha estava errada.
+
+Mas re-rodando `bash scripts/stdlib_reliability_gate.sh` hoje: **fail**. O sub-gate de
+execução hyper dá `pass=0 fail=7`, e os 7 têm a MESMA causa raiz:
+
+    closure parser incomplete: invalid raw AST node
+
+Atinge nn, onn, qnn, snn, spnn, quantnn e math (hyper). Mais um `golden_mismatch`
+(`lane=nn metric=sum_w missing_metric`). É **um defeito, não sete**.
+
+Hipótese não verificada: pode ser da mesma família do `w5` (closure + arena de IR). Não medi.
+
+NÃO commitei o flip pass->fail dos artefatos: a execução foi local, num worktree com o
+compilador modificado, e eu não descartei esse confundidor. O número precisa ser reproduzido
+em CI limpa antes de virar registro oficial.
+
+### 3. O corte revisado
+
+O corpus SAI do caminho crítico -- não por rebaixar o rótulo, mas porque nunca foi a barra.
+A distância para um `beta` defensável é: **uma causa raiz no parser de closures** + uma
+métrica golden. Isso é ordens de magnitude menor do que "levar o corpus a 100%".
+
+O deliverable único (um estranho instala e roda) continua valendo, e agora sem a premissa
+falsa de que era preciso rebaixar a versão para chegar lá.
