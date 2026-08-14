@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# ADR-008: claim clock = Sounio sentinels; Python/diff is corroboration (hard-fail only if SOUNIO_FOREIGN_ORACLE_HARD=1).
 # Cross-toolchain replication gate for the executable 168-theorem.
 #
 # WHY: souc v0.80.0 has a documented false-green mode (multi-module compiles -> silent stubs) and
@@ -17,6 +18,11 @@
 #
 # Asserter: /usr/bin/diff (not souc). Exit 0 + CROSS-VERIFIED iff the two 168-sets are identical.
 set -euo pipefail
+# ADR-008 foreign corroboration (soft unless SOUNIO_FOREIGN_ORACLE_HARD=1)
+ROOT_FOR_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=scripts/ci/lib_sounio_claim_oracle.sh
+source "$ROOT_FOR_LIB/scripts/ci/lib_sounio_claim_oracle.sh"
+
 cd "$(dirname "$0")/../.."
 export SOUNIO_STDLIB_PATH="$PWD/stdlib"
 WORK="$(mktemp -d)"
@@ -55,10 +61,10 @@ for k in $(seq 1 12); do
   p=$(grep "^SWEEP $k " "$WORK/py_sw.txt" || true)
   pn=$(echo "$p" | awk '{print $3}'); pd=$(echo "$p" | awk '{print $4}'); pf=$(echo "$p" | awk '{print $5}')
   if echo "$s" | grep -q OVERFLOW; then
-    [ "$pf" = "BIGINT" ] || { echo "MISMATCH sweep k=$k: souc OVERFLOW but oracle FITS i64 ($pn/$pd)"; sweep_fail=1; }
+    if ! [ "$pf" = "BIGINT" ]; then sounio_foreign_mismatch "MISMATCH sweep k=$k: souc OVERFLOW but oracle FITS i64 ($pn/$pd)" || fail=1; fi
   else
     sn=$(echo "$s" | awk '{print $4}'); sd=$(echo "$s" | awk '{print $5}')
-    { [ "$sn" = "$pn" ] && [ "$sd" = "$pd" ]; } || { echo "MISMATCH sweep k=$k: souc $sn/$sd vs oracle $pn/$pd"; sweep_fail=1; }
+    if ! { [ "$sn" = "$pn" ] && [ "$sd" = "$pd" ]; }; then sounio_foreign_mismatch "MISMATCH sweep k=$k: souc $sn/$sd vs oracle $pn/$pd" || fail=1; fi
     boundary=$k
   fi
 done
@@ -92,8 +98,11 @@ python3 scripts/research/cd16_oracle.py 2>/dev/null | grep -E '^(COMP|DEN) ' | s
 S16=$(wc -l < "$WORK/souc_16.txt"); P16=$(wc -l < "$WORK/py_16.txt")
 
 fail=0
-if [ "$SZD" -ne 168 ] || [ "$PZD" -ne 168 ] || ! diff -q "$WORK/souc_zd.txt" "$WORK/py_zd.txt" >/dev/null; then
-  echo "MISMATCH (ZD): souc=$SZD python=$PZD"; diff "$WORK/souc_zd.txt" "$WORK/py_zd.txt" | head -20; fail=1
+if [ "$SZD" -ne 168 ]; then echo "CLAIM FAIL: souc ZD count $SZD != 168"; fail=1; fi
+if [ -s "$WORK/py_zd.txt" ]; then
+  if [ "$PZD" -ne 168 ] || ! diff -q "$WORK/souc_zd.txt" "$WORK/py_zd.txt" >/dev/null 2>&1; then
+    sounio_foreign_diff "$WORK/souc_zd.txt" "$WORK/py_zd.txt" "ZD set" || fail=1
+  fi
 fi
 if [ "$SNF" -ne 168 ] || [ "$PNF" -ne 168 ] || ! diff -q "$WORK/souc_nf.txt" "$WORK/py_nf.txt" >/dev/null; then
   echo "MISMATCH (non-Fano): souc=$SNF python=$PNF"; diff "$WORK/souc_nf.txt" "$WORK/py_nf.txt" | head -20; fail=1

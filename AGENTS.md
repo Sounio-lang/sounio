@@ -96,6 +96,15 @@ Those are distribution/template surfaces, not the active repo root behavior.
 ### Codex authority
 This file (`AGENTS.md`) is the active Codex source of truth for this repo.
 
+### Claim-oracle / semantic clock (language product)
+Language and library **claims** have a single executable clock: **Sounio under
+Madaros (`bin/souc`)**. Peer runtimes (Python, mpmath, SciPy, …) may measure or
+differential-test; they must not define expected values for claim pass/fail.
+Binding decision: [`docs/decisions/adr-008-claim-oracle-semantic-clock.md`](docs/decisions/adr-008-claim-oracle-semantic-clock.md).
+Founder framing: `FOUNDER_INTENT.md` § “Single semantic clock”.
+Residual foreign judges: `artifacts/audit/claim_oracle_inventory.tsv`
+(regenerate with `bash scripts/dev/claim_oracle_inventory.sh`).
+
 ### Shared reality
 Executable repo scripts and actual file layout are the source of truth for:
 - compiler resolution

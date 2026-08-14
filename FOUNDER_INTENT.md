@@ -2,7 +2,7 @@
 
 Status: binding project context for AI collaborators  
 Owner: Demetrios Chiuratto Agourakis  
-Last revised: 2026-07-11
+Last revised: 2026-08-06
 
 ## Why this document exists
 
@@ -85,6 +85,29 @@ Common forms of erasure include:
 
 Sounio exists to make such losses observable, typed, testable, and, where
 possible, impossible to perform silently.
+
+## Single semantic clock (language product)
+
+Sounio is a programming language written from scratch. It is not a
+wrapper around another language's meaning.
+
+**Executable authority for language and library claims is Sounio under
+the default compiler (Madaros). No peer runtime (Python, mpmath, SciPy,
+or any other) may define what a Sounio claim “should” evaluate to.**
+
+Foreign tools may measure, corroborate, or differential-test (bug
+hunting). Lean may prove. The C/stage0 fixed-point is bootstrap
+integrity only (ADR-006). None of these is a second product semantics.
+
+Binding decision: **ADR-008**
+(`docs/decisions/adr-008-claim-oracle-semantic-clock.md`).  
+Inventory of residual foreign claim judges:
+`artifacts/audit/claim_oracle_inventory.tsv`
+(scanner: `scripts/dev/claim_oracle_inventory.sh`).
+
+Silent replacement of a Sounio claim oracle by a foreign golden is a
+form of the erasure listed above: provenance of truth demoted until the
+hypothesis under test is no longer the language itself.
 
 ## Creative method
 
