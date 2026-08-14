@@ -60,10 +60,10 @@ A testemunha original atribuía isto à comparação f32. **A atribuição está
 | f32 `x > y` com 2.5/1.0 | 66 | 66 — comparação OK |
 | f32 `x > y` com 1.5/1.0 | **0** | 12 |
 
-A comparação f32 funciona nos dois sentidos. O que quebra é o **cast**: `1.5 as f32` vira `1.0`
+A comparação f32 funciona nos dois sentidos. O que quebra é o **round-trip f32**: `1.5 as f32` vira `1.0`
 e `2.5 as f32` vira `2.0` — truncamento em direção a zero, como se fosse conversão inteira.
 A testemunha `1.5 > 1.0` falha porque vira `1.0 > 1.0`; `2.5 > 1.0` passa por acidente
-(`2.0 > 1.0`). **`as f64` preserva.** Locus provável: o lowering de `as f32`, não o de comparação.
+(`2.0 > 1.0`). **f64 puro preserva.** Locus: o caminho de conversão f32, não o de comparação (ver sonda discriminante abaixo).
 
 Para uma linguagem cuja tese é impedir que um backend *silently lower away scientific meaning*,
 este é o pior caso possível: uma conversão de precisão que destrói o valor sem diagnóstico.
@@ -102,3 +102,25 @@ aqui em vez de silenciosamente corrigido, porque um gate que erra para o lado do
 FAIL treina o leitor a ignorá-lo.
 
 Contagem final do gate: **11/13 corretas, 2 abertas**, exit 1.
+
+### w4 — sonda discriminante (correção de atribuição)
+
+Objeção correta a uma primeira versão desta análise: **todas** as sondas iniciais multiplicavam
+dois valores f32, e as FACTS da rodada dizem que *f32 é representado como f64 no backend*. Logo
+elas não separavam "o cast trunca" de "a multiplicação f32 está quebrada".
+
+Sonda com um único f32 no caminho aritmético:
+
+    let x: f32 = 1.5 as f32
+    let d: f64 = x as f64
+    let t: f64 = d * 100.0     // multiplicação puramente f64
+    t as i64                    // obtido: 100 | correto: 150
+
+Como a multiplicação aqui é f64 pura (e o controle f64 puro dá 150), a multiplicação f32 está
+**descartada** como causa. O valor já chega truncado.
+
+Afirmação que a evidência sustenta: **o round-trip por f32 destrói a parte fracionária**
+(`(1.5 as f32) as f64` = 1.0, enquanto `1.5 as f64` = 1.5). As sondas **não** distinguem se a
+perda ocorre no store (`as f32`) ou no load (`as f64` de volta) — não superespecificar sem uma
+sonda que separe os dois. O que está descartado: a comparação f32 (funciona nos dois sentidos)
+e a aritmética f64.
