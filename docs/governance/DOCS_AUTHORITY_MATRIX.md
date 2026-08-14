@@ -262,6 +262,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.sigsegv-pbpk28-private-struct-2026-06-02 | repo_only | docs/audit/SIGSEGV_PBPK28_PRIVATE_STRUCT_2026-06-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.sounio-release-production-readiness-2026-06-22 | repo_only | docs/audit/SOUNIO_RELEASE_PRODUCTION_READINESS_2026-06-22.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.sounio-science-flex-2026-07-27 | repo_only | docs/audit/SOUNIO_SCIENCE_FLEX_2026-07-27.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.spnn-quantnn-mod-export-2026-08-14 | repo_only | docs/audit/SPNN_QUANTNN_MOD_EXPORT_2026-08-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.sret-large-struct-smtcontext.dispatch | repo_only | docs/audit/sret_large_struct_smtcontext/DISPATCH.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.stats-madaros-singlefile-smoke-2026-07-18 | repo_only | docs/audit/STATS_MADAROS_SINGLEFILE_SMOKE_2026-07-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.stats-ols-diag-e2e-vertical-2026-07-18 | repo_only | docs/audit/STATS_OLS_DIAG_E2E_VERTICAL_2026-07-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
