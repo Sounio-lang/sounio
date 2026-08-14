@@ -4500,6 +4500,28 @@ fn lower_cast_type_is_f64(ct: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, D
     }
 }
 
+// `as f32` was recognised by NEITHER the f64-target branch nor the integer
+// classifier, so a float source fell through to the float_to_int arm of
+// lower_cast_expr_ref and (1.5 as f32) became 1.0 -- a silent, value-destroying
+// truncation on a well-typed program. The backend represents f32 as f64, so a
+// float-to-f32 cast is a pass-through here.
+// KNOWN RESIDUAL (declared, not silent): this does NOT round to true single
+// precision -- it preserves the f64 value. Narrowing to real IEEE binary32
+// needs an f32 representation in the backend, which does not exist yet.
+fn lower_cast_type_is_f32(ct: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
+    match *ct {
+        Some(te) => {
+            let seg = (*te).path.segments
+            if seg.head_len != 3 { return false }
+            if seg.head_buf[0] as i64 != 102 { return false }   // f
+            if seg.head_buf[1] as i64 != 51 { return false }    // 3
+            if seg.head_buf[2] as i64 != 50 { return false }    // 2
+            true
+        }
+        None => false,
+    }
+}
+
 fn lower_cast_type_is_i64(ct: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
     match *ct {
         Some(te) => {
@@ -10795,6 +10817,29 @@ impl Lowerer {
         -1
     }
 
+    // Lookup keyed by the FULL path (enum + variant).
+    // Discriminants restart at 0 per enum, so keying on the variant name alone
+    // returns the first match across ALL enums: with `enum Shape{Quad,Mark}` and
+    // `enum Color{Red,Green,Mark}` both present, Color::Mark resolved to the
+    // Shape discriminant instead of its own, and the match arm silently ran the
+    // wrong body on a well-typed program.
+    // Falls back to the unqualified lookup when the enum is unknown here (e.g. an
+    // unregistered imported enum) so nothing that resolves today starts failing.
+    fn lookup_variant_discriminant_by_path(self, enum_name: Name, variant_name: Name) -> i64 with Mut, Panic, Div {
+        if enum_name.len > 0 {
+            var i: i64 = 0
+            while i < (*self.enum_variants).count {
+                if ir_name_eq((*self.enum_variants).entries[i as usize].variant_name, variant_name) {
+                    if ir_name_eq((*self.enum_variants).entries[i as usize].enum_name, enum_name) {
+                        return (*self.enum_variants).entries[i as usize].discriminant
+                    }
+                }
+                i = i + 1
+            }
+        }
+        self.lookup_variant_discriminant(variant_name)
+    }
+
     // Phase 3.2: Register struct field layout
     fn register_struct_fields_ref(self, type_name: Name, fields: &Option<Box<FieldDefList>>, idx: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self
@@ -13688,7 +13733,7 @@ impl Lowerer {
                 lo
             } else {
                 // Enum variant: compare scrutinee to discriminant
-                let disc = self.lookup_variant_discriminant(variant_name)
+                let disc = self.lookup_variant_discriminant_by_path(ir_path_qualifier_name(pat.path), variant_name)
                 if disc >= 0 {
                     let pair_l = self.fresh_label()
                     var lo = pair_l.0
@@ -15392,7 +15437,7 @@ impl Lowerer {
                 wi = wi + 1
             }
             (lo2, dst)
-        } else if lower_cast_type_is_f64(&e.cast_type) {
+        } else if lower_cast_type_is_f64(&e.cast_type) || lower_cast_type_is_f32(&e.cast_type) {
             if source_is_float {
                 return (lo1, src_reg)
             }
@@ -16389,7 +16434,7 @@ impl Lowerer {
                     let lo2 = lo.emit(ir_load_imm(reg, 0))
                     return (lo2, reg)
                 }
-                let disc = self.lookup_variant_discriminant(variant_name)
+                let disc = self.lookup_variant_discriminant_by_path(ir_path_qualifier_name(e.path), variant_name)
                 if disc >= 0 {
                     let pair = self.fresh_reg()
                     let lo = pair.0

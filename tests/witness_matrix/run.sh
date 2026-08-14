@@ -92,6 +92,8 @@ run_value w6  "$CASES/w6_match_guard.sio"                 7 100 "soundness-3 BUG
 run_value w7  "$CASES/w7_enum_discriminant.sio"          30  20 "soundness-3 BUG B e71eac8d99"
 run_value w8  "$CASES/w8_field_index_collision.sio"      42  74 "soundness-3 BUG C 6534d904e5"
 run_value w8c "$CASES/w8c_field_nocollision_control.sio" 42  99 "CONTROL no collision"
+run_value w4b "$CASES/w4b_f32_roundtrip.sio"             150 100 "ROOT CAUSE of w4: as-f32 fell through to float_to_int"
+run_value w7b "$CASES/w7b_enum_reverse.sio"                1   2 "CONTROL (passes at baseline): a table reorder must not break Shape"
 run_mm    w9  42 "release wall 8765ca1dc4"
 run_reject w10 "$CASES/mm/prog2.sio" "import typecheck bypass e1ac6f7c87"
 
