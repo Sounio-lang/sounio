@@ -169,11 +169,25 @@ Added an explicit `system` case to `append_extern_c_stubs()` in
 declaring `cmd: &[i8;1024]` (fixing Repro 1's `E001` type-mismatch, which was a fallthrough to the
 generic single-arg `i64`-typed stub, not a marshaling failure) and implementing a real
 `fork`+`execve("/bin/sh","-c",cmd)`+`wait4` sequence via raw `syscall6` calls, mirroring the
-already-proven pattern in `self-hosted/lsp/server.sio`'s `run_souc_check()`. Built via
-`scripts/dev/souc-build-lock.sh` (Stage-0-only rebuild of `lean_single.sio`; **the full
-`make build` gen1→gen2→gen3 fixed-point bootstrap has not yet been re-verified against this
-change** — CLAUDE.md notes this IS the relevant fixed-point check for this file, so that remains
-outstanding).
+already-proven pattern in `self-hosted/lsp/server.sio`'s `run_souc_check()`. Re-verified via the full `make build`
+gen1→gen2→gen3 fixed-point bootstrap (`scripts/dev/souc-build-lock.sh make build`): **✓ FIXED
+POINT OK**, `gen2.elf` == `gen3.elf` (md5 `37c1cf8a43ab74143994ec77b9a45e5e`) — the fix does not
+break self-compilation.
+
+**Reproducing this requires building from source, not the prebuilt `bin/souc-lean-single-x86_64`.**
+That ELF is not a build of `self-hosted/compiler/lean_single.sio` at all — running it directly
+prints a `mini_native` usage banner, a different, unrelated compiler tool. `bin/souc`'s
+`SOUNIO_SOUC_ENGINE=lean_single` alias is wired to exactly this file (`LEAN_SINGLE="$ROOT_DIR/bin/
+souc-lean-single-x86_64"` in `bin/souc`), so `SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run
+examples/cayley_dickson_lemon_g2_ffi.sio` silently exits 1 with no output — it does not contain
+this fix and cannot run this file's `extern "C"` block correctly regardless. The tested, working
+path is `scripts/dev/souc-build-lock.sh make build` (produces a fixed-point-verified `./gen3.elf`
+at the repo root) followed by invoking `./gen3.elf <src.sio> <out.elf> && ./<out.elf>` directly —
+this is what `examples/cayley_dickson_lemon_g2_ffi.sio`'s own header and this paper's §7 now
+document. Whether `bin/souc-lean-single-x86_64` should be refreshed from a current `lean_single.sio`
+build (so the documented `SOUNIO_SOUC_ENGINE=lean_single` alias works again) is a separate,
+unresolved question — replacing a committed binary artifact was judged out of scope for this
+dispatch and left to a future change.
 
 Verified working end-to-end: `examples/cayley_dickson_lemon_g2_ffi.sio` now runs its
 `extern "C" { fn system(cmd: &[i8;1024]) -> i32 }` call, genuinely forks and execs a Python bridge
