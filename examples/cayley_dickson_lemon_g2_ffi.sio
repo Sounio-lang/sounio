@@ -45,37 +45,49 @@
 //!     investigation has followed throughout: try, measure, scale down,
 //!     document, never silently fabricate a smaller-but-unlabeled result.
 //!
-//! RESULT (2026-08-14, n=15 real subjects, real EEG, real endpoint
-//! scores, 15 downsampled timesteps, mean not median): G12 (D_{4,6}) is
-//! the strongest generator -- rho(rumination)=-0.531, rho(neuroticism)=
-//! -0.549 -- and the F1 aggregate is markedly weaker than several
-//! individual generators (rho(rumination)=-0.062, rho(neuroticism)=
-//! -0.310). Both of these are QUALITATIVELY consistent with the
-//! retracted paper's original hypothesis (a specific G2 direction
-//! carries more signal than the aggregate; G12 specifically was one of
-//! the two generators the original analysis highlighted). This is NOT a
-//! statistically validated finding: n=15 is small (|rho| needs to
-//! exceed roughly 0.51 for uncorrected two-tailed p<0.05 at this n, so
-//! G12 is right at that boundary, not clearly significant), no p-values
-//! or FDR correction are computed, and two independent-analysis choices
-//! (downsampling to 15/1000 timesteps, mean instead of median) further
-//! separate this from the original design. Treat this as: the corrected
-//! pipeline runs end-to-end on real data and produces a plausible,
-//! not-obviously-wrong pattern -- a necessary condition for the original
-//! hypothesis to be reinstated, not a sufficient one.
+//! RESULT (2026-08-15, n=15 real subjects, real EEG, real endpoint
+//! scores, 15 downsampled timesteps, mean not median, run END-TO-END
+//! through the native Sounio extern "C" FFI -- no out-of-band Python
+//! step): G12 (D_{4,6}) is the strongest generator -- rho(rumination)=
+//! -0.531, rho(neuroticism)=-0.550 -- and the F1 aggregate is weaker than
+//! several individual generators on the rumination axis (rho(rumination)=
+//! -0.350, rho(neuroticism)=-0.135). Both of these are QUALITATIVELY
+//! consistent with the retracted paper's original hypothesis (a specific
+//! G2 direction carries more signal than the aggregate; G12 specifically
+//! was one of the two generators the original analysis highlighted). This
+//! supersedes an earlier "2026-08-14" figure previously recorded here from
+//! a manually-orchestrated run: that run predates bug #6 below (a global
+//! array always reading element 0) being found and fixed, so its per-
+//! generator breakdown cannot be trusted even though it happened to agree
+//! on G12 -- only THIS number (reproduced identically across repeat runs
+//! of the checked-in file) is verified. This is NOT a statistically
+//! validated finding: n=15 is small (|rho| needs to exceed roughly 0.51
+//! for uncorrected two-tailed p<0.05 at this n, so G12 is right at that
+//! boundary, not clearly significant), no p-values or FDR correction are
+//! computed, and two independent-analysis choices (downsampling to
+//! 15/1000 timesteps, mean instead of median) further separate this from
+//! the original design. Treat this as: the corrected pipeline runs
+//! end-to-end on real data and produces a plausible, not-obviously-wrong
+//! pattern -- a necessary condition for the original hypothesis to be
+//! reinstated, not a sufficient one.
 //!
-//! Run (bridge must be run manually first -- see the CONFIRMED COMPILER
-//! BUG note at the end of this file for why):
-//!   python3 scripts/research/lemon_ffi_bridge.py 15 15 <BRIDGE_PATH>
-//!   SOUNIO_STDLIB_PATH=$(pwd)/stdlib ./bin/souc run \
-//!     examples/cayley_dickson_lemon_g2_ffi.sio
+//! Run (the extern "C" system() FFI now genuinely invokes the Python
+//! bridge itself -- see the FFI FIX note at the end of this file. Requires
+//! SOUNIO_SOUC_ENGINE=lean_single; the system() fix lives only in
+//! lean_single, not the default Madaros engine):
+//!   SOUNIO_STDLIB_PATH=$(pwd)/stdlib SOUNIO_SOUC_ENGINE=lean_single \
+//!     ./bin/souc run examples/cayley_dickson_lemon_g2_ffi.sio
 
 const N_SUBJECTS: i64 = 15
 const N_T: i64 = 15
-const BRIDGE_PATH: string = "/workspace/.home/openvscode-server/.agents/claude-2/.claude/jobs/f7926023/tmp/lemon_g2_bridge.csv"
+// NOT `const BRIDGE_PATH: string = ...` -- a module-level `const string`
+// passed to read_file() reproducibly returns 0 bytes even for a file that
+// has existed since before the process started (bug #5 below); a local
+// `let` bound to the same literal inside main() reads correctly. Kept as
+// a plain string literal at the one call site instead.
 
 extern "C" {
-    fn system(cmd: &[i8; 512]) -> i32
+    fn system(cmd: &[i8; 1024]) -> i32
 }
 
 // =============================================================================
@@ -210,8 +222,12 @@ fn g2_deriv(a: &[f64; 8], b: &[f64; 8], x: &[f64; 8], out: &![f64; 8]) with Mut,
 // all 21 originals confirmed in its span to residual 0.0) — NOT the
 // audited pipeline's gauge-dependent SVD-top-14 selection.
 const N_GEN: i64 = 14
-var GEN_A: [i64; 14] = [1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 4, 4, 4]
-var GEN_B: [i64; 14] = [2, 3, 4, 5, 6, 7, 3, 4, 5, 6, 7, 5, 6, 7]
+// NOT module-level `var GEN_A/GEN_B: [i64;14]` -- a global mutable array
+// indexed by a runtime loop variable reproducibly reads element 0 for
+// every index (bug #6 below; confirmed with a single global array, no
+// other globals present, local arrays and &-reference parameters both
+// unaffected). Declared locally in main() and threaded through as
+// `&[i64;14]` parameters instead.
 
 fn oct_norm(a: &[f64; 8]) -> f64 with Mut, Div, Panic {
     var s = 0.0
@@ -282,11 +298,11 @@ fn ossm_step(h_in: [f64; 8], A: [f64; 8], B: [f64; 56], x: [f64; 7]) -> [f64; 8]
 // pipeline's per-epoch median, chosen to avoid per-timestep storage/sort
 // under this investigation's demonstrated resource ceiling) and to a
 // simple aggregate-associator "F1" analogue.
-fn accumulate_g2(subj_idx: i64, h0: &[f64; 8], h1: &[f64; 8]) with Mut, Div, Panic, NonAssoc {
+fn accumulate_g2(subj_idx: i64, h0: &[f64; 8], h1: &[f64; 8], gen_a: &[i64; 14], gen_b: &[i64; 14]) with Mut, Div, Panic, NonAssoc {
     var g: i64 = 0
     while g < N_GEN {
-        let ea = oct_basis(GEN_A[g])
-        let eb = oct_basis(GEN_B[g])
+        let ea = oct_basis(gen_a[g as usize])
+        let eb = oct_basis(gen_b[g as usize])
         var d0: [f64; 8] = [0.0; 8]
         g2_deriv(&ea, &eb, h0, &!d0)
         var d1: [f64; 8] = [0.0; 8]
@@ -349,7 +365,7 @@ fn spearman(a: &[f64; 15], b: &[f64; 15], n: i64) -> f64 with Mut, Div, Panic {
     cov / sqrt_f64(va * vb)
 }
 
-fn report_correlations(n: i64) with IO, Mut, Div, Panic {
+fn report_correlations(n: i64, gen_a: &[i64; 14], gen_b: &[i64; 14]) with IO, Mut, Div, Panic {
     print("\n[Real-data correlations] Spearman rho, n="); print_i64(n)
     print(" subjects, uncorrected (see file header for the multiple-comparisons caveat):\n")
     var g: i64 = 0
@@ -359,8 +375,8 @@ fn report_correlations(n: i64) with IO, Mut, Div, Panic {
         while i < n { feat[i as usize] = SUBJ_G2[(i * N_GEN + g) as usize]; i = i + 1 }
         let rho_rum = spearman(&feat, &SUBJ_RUM, n)
         let rho_neu = spearman(&feat, &SUBJ_NEU, n)
-        print("  G"); print_i64(g); print(" (D_{"); print_i64(GEN_A[g as usize]); print(",")
-        print_i64(GEN_B[g as usize]); print("})  rho(rumination)="); print_f64(rho_rum, 3)
+        print("  G"); print_i64(g); print(" (D_{"); print_i64(gen_a[g as usize]); print(",")
+        print_i64(gen_b[g as usize]); print("})  rho(rumination)="); print_f64(rho_rum, 3)
         print("  rho(neuroticism)="); print_f64(rho_neu, 3); print("\n")
         g = g + 1
     }
@@ -374,13 +390,17 @@ fn report_correlations(n: i64) with IO, Mut, Div, Panic {
 // FFI: invoke the Python data bridge (pure I/O -- no science, see header)
 // =============================================================================
 
+// Routes through the short, checked-in scripts/research/lemon_ffi_bridge_wrapper.sh
+// rather than building the full python3-plus-args command inline: a long
+// `cmd` string (~100+ chars observed) crashes/hangs the fixed system()
+// stub (see that script's header comment and the FFI dispatch's addendum).
 fn run_bridge() with IO, Mut, Panic, Div {
     print("[FFI] invoking Python bridge (system(), extern \"C\") for real LEMON data...\n")
-    var cmd: [i8; 512] = [0; 512]
-    let s = "python3 /workspace/sounio/scripts/research/lemon_ffi_bridge.py 15 15 /workspace/.home/openvscode-server/.agents/claude-2/.claude/jobs/f7926023/tmp/lemon_g2_bridge.csv"
+    var cmd: [i8; 1024] = [0; 1024]
+    let s = "sh /workspace/sounio/scripts/research/lemon_ffi_bridge_wrapper.sh"
     var i: i64 = 0
     let n = str_len(s) as i64
-    while i < n && i < 511 {
+    while i < n && i < 1023 {
         cmd[i as usize] = str_char_at(s, i as usize) as i8
         i = i + 1
     }
@@ -400,20 +420,29 @@ var SUBJ_F1: [f64; 15] = [0.0; 15]
 fn main() -> i32 with IO, Mut, Div, Panic, NonAssoc {
     print("=== G2 / LEMON re-analysis on REAL data, via Sounio FFI -> Python bridge ===\n")
 
-    // run_bridge() is called here to show the INTENDED architecture (the
-    // extern "C" system() FFI pattern from
-    // self-hosted/compiler/pkg/registry_client.sio), but it is currently
-    // a confirmed no-op in this Madaros build -- see the CONFIRMED
-    // COMPILER BUG note at the end of this file. It returns rc=0
-    // ("success") without ever actually invoking python3. Until that is
-    // fixed, run the bridge manually first:
-    //   python3 scripts/research/lemon_ffi_bridge.py 15 15 <BRIDGE_PATH>
-    // before running this file, or the read below will find no file /
-    // stale data (both were independently observed and misled an earlier
-    // pass of this investigation -- see the note).
+    // Local, not module-level global (see the N_GEN comment above -- a
+    // global array here reproducibly read element 0 for every index).
+    var gen_a: [i64; 14] = [1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 4, 4, 4]
+    var gen_b: [i64; 14] = [2, 3, 4, 5, 6, 7, 3, 4, 5, 6, 7, 5, 6, 7]
+
+    // run_bridge() invokes the real extern "C" system() FFI, fixed in
+    // self-hosted/compiler/lean_single.sio's append_extern_c_stubs()
+    // (docs/audit/EXTERN_C_FFI_SILENT_NOOP_DISPATCH_2026-08-13.md, Track B).
+    // This genuinely forks+execve's the wrapper script and runs python3 --
+    // it is no longer a no-op under lean_single (Madaros/Track A remains
+    // open, see the dispatch doc).
     run_bridge()
 
-    let text = read_file(BRIDGE_PATH)
+    // sync() (syscall 162, no args) between the system()-forked child's
+    // write and this process's read_file(): without it, read_file()
+    // observed the file as 0 bytes immediately after the child exited,
+    // even though wait4() had already returned and the data was correct
+    // moments later from a fresh process. Root cause not fully isolated;
+    // sync() reliably closes the window (confirmed via ffi_probe_readtest3).
+    syscall6(162, 0, 0, 0, 0, 0, 0)
+
+    let bridge_path = "/workspace/.home/openvscode-server/.agents/claude-2/.claude/jobs/f7926023/tmp/lemon_g2_bridge.csv"
+    let text = read_file(bridge_path)
     print("[read] bridge CSV length = "); print_i64(str_len(text) as i64); print(" bytes\n")
 
     // Manual CSV parse (format fully controlled by lemon_ffi_bridge.py:
@@ -497,7 +526,7 @@ fn main() -> i32 with IO, Mut, Div, Panic, NonAssoc {
             while c < 7 { x[c as usize] = parse_f64(text, field_starts[4 + c], field_ends[4 + c]); c = c + 1 }
             h0 = ossm_step(h0, A0, B0, x)
             h1 = ossm_step(h1, A1, B1, x)
-            accumulate_g2(n_subj, &h0, &h1)
+            accumulate_g2(n_subj, &h0, &h1, &gen_a, &gen_b)
         }
         t_in_subj = t_in_subj + 1
     }
@@ -506,32 +535,36 @@ fn main() -> i32 with IO, Mut, Div, Panic, NonAssoc {
 
     print("\n[Loaded] "); print_i64(n_total); print(" real subjects, "); print_i64(N_T); print(" timesteps each\n")
 
-    report_correlations(n_total)
+    report_correlations(n_total, &gen_a, &gen_b)
 
     print("\n=== DONE ===\n")
     0
 }
 
 // =============================================================================
-// TWO CONFIRMED COMPILER/RUNTIME BUGS FOUND WHILE BUILDING THIS FILE
-// (neither fixed here, per this repo's forensic-dispatch protocol for
-// self-hosted/ -- flagged for that process instead; both worked around
-// in THIS file so it runs correctly despite them)
+// COMPILER/RUNTIME BUGS FOUND WHILE BUILDING THIS FILE
+// (self-hosted/ fixes follow this repo's forensic-dispatch protocol; see
+// docs/audit/EXTERN_C_FFI_SILENT_NOOP_DISPATCH_2026-08-13.md for #1's
+// full writeup. #2-#4 are worked around in THIS file, not patched.)
 // =============================================================================
 //
-// 1. `extern "C" { fn system(cmd: &[i8;N]) -> i32 }` is a NON-FUNCTIONAL
-//    no-op in this build, despite being declared and called in
-//    self-hosted/compiler/pkg/registry_client.sio and despite
-//    type-checking and "running" cleanly. Decisive test: a minimal probe
-//    (system("touch <path>")) prints "returned code: 0" (claimed
-//    success) both via `souc run` and via `souc compile` + executing the
-//    resulting ELF directly -- but the touched file is never created,
-//    in either case. The shell command is never actually invoked. This
-//    means run_bridge() above cannot actually run the Python data
-//    bridge; the bridge CSV must currently be produced out-of-band
-//    (plain `python3 scripts/research/lemon_ffi_bridge.py ...` from a
-//    shell) before this file is run. `read_file()` on an existing path
-//    DOES work correctly (confirmed: read 37,232 real bytes below).
+// 1. `extern "C" { fn system(cmd: &[i8;N]) -> i32 }` was a NON-FUNCTIONAL
+//    no-op under BOTH Madaros and (pre-fix) lean_single, despite being
+//    declared and called in self-hosted/compiler/pkg/registry_client.sio
+//    and despite type-checking and "running" cleanly (that file's own
+//    call site was never itself verified -- it fails identically on both
+//    engines). Decisive test: system("touch <path>") claimed success
+//    (rc=0) without ever creating the file, under `souc run` and under a
+//    compiled ELF alike.
+//    STATUS: FIXED for lean_single only (Track B) -- an explicit `system`
+//    case was added to append_extern_c_stubs() in
+//    self-hosted/compiler/lean_single.sio, implementing real
+//    fork+execve("/bin/sh","-c",cmd)+wait4 via raw syscalls (mirroring
+//    self-hosted/lsp/server.sio's proven pattern). Verified: run_bridge()
+//    above genuinely invokes python3 and the bridge CSV is written by
+//    THIS program's own execution, no out-of-band step required -- but
+//    only when run with SOUNIO_SOUC_ENGINE=lean_single (see the file
+//    header). Track A (porting the fix to Madaros) remains OPEN.
 //
 // 2. A `[[f64;8];7]` (nested array) function parameter caused a SILENT
 //    HANG, not a crash or wrong answer: `ossm_step`'s first version took
@@ -552,3 +585,62 @@ fn main() -> i32 with IO, Mut, Div, Panic, NonAssoc {
 //    fix and did NOT resolve the hang on its own -- the nested-array
 //    parameter was the actual cause, confirmed by testing each change in
 //    isolation.
+//
+// 3. The fixed lean_single `system()` (see #1) crashes (SIGSEGV) or hangs
+//    (100% CPU spin, no child ever forked per `ps`) on command strings
+//    roughly 100+ characters long; ~94 chars confirmed working, a padded
+//    ~137-char probe confirmed broken. Root cause not isolated (fork
+//    argv/envp buffer sizing is the leading suspect, unconfirmed). Worked
+//    around by routing the actual invocation through a short, checked-in
+//    wrapper script (scripts/research/lemon_ffi_bridge_wrapper.sh) so the
+//    `system()` argument itself stays well under the safe length.
+//
+// 4. `read_file()` observed a file the same process had just
+//    system()-forked a child to write as 0 bytes, even after wait4()
+//    (inside the system() stub) had already returned and the file
+//    demonstrably had correct content moments later from a fresh
+//    process. Reproduced in isolation (ffi_probe_readtest.sio/2/3):
+//    reading twice in the same process still returned 0 bytes both
+//    times; a separate process read the same path correctly (37,232
+//    bytes); inserting `syscall6(162,0,0,0,0,0,0)` (sync(), no args)
+//    between the system() call and read_file() reliably closed the
+//    window (confirmed: 37,232 bytes, matching the real file size).
+//    Applied as the fix in main() above. Root cause not fully isolated
+//    (plausible: a caching/visibility artefact of the underlying
+//    filesystem across the fork boundary, not standard POSIX behaviour
+//    on ext4 -- unconfirmed).
+//
+// 5. `read_file()` given a module-level `const string` path (even with
+//    #4's sync() applied, and even for a file that had existed since
+//    before the process started -- i.e. unrelated to #4's fork-write
+//    timing) reproducibly returned 0 bytes, while the SAME literal
+//    string bound to a local `let` inside main(), or passed through a
+//    helper fn's `string` parameter, read correctly (ffi_probe_letpath.sio:
+//    37,232 bytes via all three of local let / fn param / inline literal;
+//    ffi_probe_const_only.sio, no system()/sync() involved at all: 0
+//    bytes via a bare top-level const). This file's original
+//    `const BRIDGE_PATH: string = ...` was the actual cause of every
+//    "[read] bridge CSV length = 0 bytes" observed while debugging #4 --
+//    #4's sync() fix is independently real (see its own probes) but was
+//    NOT what was breaking THIS file. Fixed by inlining the path as a
+//    local `let bridge_path = "..."` in main() instead of a module-level
+//    const.
+//
+// 6. A module-level mutable `var arr: [T;N]` array, indexed with a
+//    runtime-computed index (`arr[i as usize]`), reproducibly reads
+//    element 0 for every index, PURELY ON READ -- writes to the same kind
+//    of global (SUBJ_G2 elsewhere in this file, written every timestep
+//    then read back with a computed index in report_correlations) are
+//    unaffected, which is why this was not caught until GEN_A/GEN_B
+//    (write-once-at-init, read-many) were added. Reproduced with a single
+//    global i64 array in an otherwise-trivial file, no other globals
+//    present (ffi_probe_genarr3.sio: g=0..13 all print A=1, the element-0
+//    value) -- rules out the "large globals collide" explanation already
+//    on file for the BASIS_COUNT scalar bug (see
+//    examples/cayley_dickson_g2_derivation_basis.sio's history); this is
+//    a distinct defect. A local array (ffi_probe_genarr4.sio) and a local
+//    array passed by `&[T;N]` reference into another function
+//    (ffi_probe_genarr5.sio) both read correctly at every index. Fixed by
+//    declaring GEN_A/GEN_B as locals in main() and threading them into
+//    accumulate_g2()/report_correlations() as `&[i64;14]` parameters,
+//    matching this file's existing BASIS_COUNT-style workaround pattern.

@@ -9,10 +9,13 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.extern-c
 
 # `extern "C"` FFI calls silently no-op under default Madaros — dispatch
 
-**Date:** 2026-08-13
+**Date:** 2026-08-13 (Track B implemented and verified 2026-08-15)
 **Toolchain:** `./bin/souc` → Madaros v0.80.0 (default engine); cross-checked against `SOUNIO_SOUC_ENGINE=lean_single`
 **Owner:** unassigned (self-hosted/native FFI + self-hosted/compiler/lean_single.sio's `strip_extern_blocks`)
-**Status:** forensic dispatch (per CLAUDE.md §8 / Architecture note — do not patch `self-hosted/` ad hoc)
+**Status:** Track B (lean_single `system()` stub) **implemented and verified** — see "Track B implementation" below.
+Track A (Madaros) remains **open**, unpatched. Applied under explicit, twice-repeated user
+authorization ("arrume o FFI") to patch `self-hosted/compiler/lean_single.sio` directly, as an
+exception to the default dispatch-only protocol for this one file/track.
 
 ## Why this dispatch
 
@@ -158,6 +161,66 @@ determine, never actually been runtime- or typecheck-verified end-to-end under e
 3. `stdlib::os::process::process_id()` (and the other `stdlib/os/`, `stdlib/mem/`,
    `stdlib/sync/mutex.sio` callers `KNOWN_LIMITATIONS.md` credits to this fix) verified directly,
    once the unrelated import-resolution blocker noted above is out of the way.
+
+## Track B implementation (done, 2026-08-15)
+
+Added an explicit `system` case to `append_extern_c_stubs()` in
+`self-hosted/compiler/lean_single.sio` (immediately before the existing `malloc`/`free` case),
+declaring `cmd: &[i8;1024]` (fixing Repro 1's `E001` type-mismatch, which was a fallthrough to the
+generic single-arg `i64`-typed stub, not a marshaling failure) and implementing a real
+`fork`+`execve("/bin/sh","-c",cmd)`+`wait4` sequence via raw `syscall6` calls, mirroring the
+already-proven pattern in `self-hosted/lsp/server.sio`'s `run_souc_check()`. Built via
+`scripts/dev/souc-build-lock.sh` (Stage-0-only rebuild of `lean_single.sio`; **the full
+`make build` gen1→gen2→gen3 fixed-point bootstrap has not yet been re-verified against this
+change** — CLAUDE.md notes this IS the relevant fixed-point check for this file, so that remains
+outstanding).
+
+Verified working end-to-end: `examples/cayley_dickson_lemon_g2_ffi.sio` now runs its
+`extern "C" { fn system(cmd: &[i8;1024]) -> i32 }` call, genuinely forks and execs a Python bridge
+script, and reads back real data produced by that child process — all within the same Sounio
+program, no out-of-band shell step. Confirmed reproducible across repeat runs (identical Spearman
+correlation output).
+
+### Secondary bugs found while verifying Track B (not part of Track B; not yet independently dispatched)
+
+These surfaced only once `system()` genuinely started working and downstream code paths that had
+never actually executed before ran for the first time. None are patched in `self-hosted/`; all are
+worked around in `examples/cayley_dickson_lemon_g2_ffi.sio` (see that file's trailing comment block,
+items #3–#6, for the full repro/isolation detail). Listed here for continuity since they were found
+in the same investigation as Track B; each may warrant its own dedicated dispatch doc before any
+`self-hosted/` fix is attempted, per this repo's protocol.
+
+- **#3 — `system()` command-string length threshold.** The Track B stub crashes (SIGSEGV) or hangs
+  on command strings roughly 100+ characters (94 chars confirmed working, ~137 confirmed broken).
+  Root cause not isolated (fork argv/envp buffer sizing is the leading suspect). Worked around with
+  a short, checked-in wrapper script (`scripts/research/lemon_ffi_bridge_wrapper.sh`) rather than
+  building a long command string inline.
+- **#4 — read-after-fork-write staleness.** `read_file()` on a path a `system()`-forked child had
+  just written, called from the same parent process, reproducibly returned 0 bytes immediately
+  after `wait4()` returned — even though the same path read correctly moments later from a fresh
+  process. Inserting `syscall6(162,0,0,0,0,0,0)` (`sync()`, no args) between the `system()` call and
+  the `read_file()` call reliably fixed it. Root cause not fully isolated (plausible filesystem
+  write-visibility artefact across the fork boundary; not standard POSIX behaviour on ext4,
+  unconfirmed).
+- **#5 — `read_file()` with a module-level `const string` argument.** Independent of #4: a
+  `const PATH: string = "..."` declared at module scope and passed to `read_file(PATH)` reproducibly
+  returned 0 bytes, even for a file that existed before the process started (no FFI/timing
+  involved at all). The identical literal bound to a local `let` inside a function, or passed
+  through a helper function's `string` parameter, read correctly. This — not #4 — was the actual
+  cause of every 0-byte read observed while first integrating Track B into the LEMON pipeline file;
+  #4's `sync()` fix is independently real (isolated with literal-string probes) but was not what was
+  breaking that integration. Fixed by inlining the path as a local `let` instead of a module `const`.
+- **#6 — global mutable array reads stuck at element 0.** A module-level `var arr: [T;N]`, indexed
+  with a runtime-computed index (`arr[i as usize]`), reproducibly returned element 0 for every `i`
+  — reproduced with a single global `[i64;14]` array in an otherwise-trivial file, no other globals
+  present, ruling out the previously-documented "large globals collide" explanation for the
+  unrelated `BASIS_COUNT` scalar bug. Writes to a same-shape global (`SUBJ_G2` elsewhere in the same
+  file, written every timestep and read back with a computed index) were unaffected — this is a
+  read-only-after-init defect, not a general array-addressing one, which is why it was not caught
+  until a write-once/read-many global (`GEN_A`/`GEN_B`, the 14 G2-generator index pairs) was added.
+  A local array, and a local array passed by `&[T;N]` reference into another function, both read
+  correctly at every index. Fixed by making the arrays locals in `main()` and threading them through
+  as `&[i64;14]` parameters.
 
 ## Impact if unaddressed
 
