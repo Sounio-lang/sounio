@@ -155,6 +155,7 @@ def validate_stats(value: object, label: str, complete_history: bool) -> None:
         fail(f"{label} stats are absent")
     reconditionings = value.get("reconditionings")
     anchored = value.get("section_anchored_reconditionings")
+    anchor_input_checks = value.get("section_anchor_input_checks")
     anchor_checks = value.get("section_anchor_checks")
     reconstructions = value.get("generator_reconstructions")
     checks = value.get("reconstruction_checks")
@@ -164,6 +165,8 @@ def validate_stats(value: object, label: str, complete_history: bool) -> None:
         fail(f"{label} has no reconditionings")
     if not isinstance(anchored, int) or not 0 <= anchored <= reconditionings:
         fail(f"{label} section-anchored count is inconsistent")
+    if anchor_input_checks != anchored:
+        fail(f"{label} section-anchor input check count is inconsistent")
     if anchor_checks != anchored:
         fail(f"{label} section-anchor check count is inconsistent")
     if not isinstance(reconstructions, int) or reconstructions <= 0 or checks != reconstructions:
@@ -193,6 +196,8 @@ def validate_budget(value: object, label: str) -> Fraction:
     enclosure = interval(value.get("range"), f"{label} range")
     exact_width = enclosure[1] - enclosure[0]
     width = rational(value.get("width_q"), f"{label} width")
+    if width <= 0:
+        fail(f"{label} width is not strictly positive")
     tolerance = Fraction(1, 2**230)
     if width < exact_width or width - exact_width > tolerance:
         fail(f"{label} width disagrees with range")
@@ -275,7 +280,7 @@ def validate_mode(
         )
         if rational(analysis.get("baseline_derivative_width_q"), f"{mode} baseline") != expected_baseline:
             fail(f"{mode} {name} baseline width is incorrect")
-        improvement = expected_baseline / width if width else Fraction(0)
+        improvement = expected_baseline / width
         if rational(analysis.get("derivative_width_improvement_factor_q"), f"{mode} endpoint improvement") != improvement:
             fail(f"{mode} {name} endpoint improvement is incorrect")
         if analysis.get("target_improvement_met") is not (improvement >= 18):
@@ -297,7 +302,7 @@ def validate_mode(
         initial.get("conditioned_initial_derivative_budget"), f"{mode} conditioned initial"
     )
     interval(initial.get("carrier_one_step_tube_derivative"), f"{mode} one-step tube")
-    improvement = lineage_width / carrier_width if carrier_width else Fraction(0)
+    improvement = lineage_width / carrier_width
     if rational(initial.get("one_step_derivative_width_improvement_factor_q"), f"{mode} one-step improvement") != improvement:
         fail(f"{mode} one-step improvement factor is incorrect")
     margin = lineage_width - carrier_width
@@ -331,6 +336,10 @@ def validate_mode(
         and stats["kernel_orthogonality_checks"] == expected_kernel_checks
         and stats["normal_form_checks"] == stats["reconditionings"]
         and stats["section_anchored_reconditionings"] > 0
+        and stats["section_anchor_input_checks"]
+        == stats["section_anchored_reconditionings"]
+        and stats["section_anchor_checks"]
+        == stats["section_anchored_reconditionings"]
         and section_anchor_exact
     )
     if initial.get("generator_reconstruction_certificate") is not certificate:
@@ -449,6 +458,26 @@ def main() -> None:
                     fail("accepted projection lost a primary symbolic variable")
                 if carrier.get("all_six_variable_weights_present") is not True:
                     fail("accepted projection primary-weight flag is false")
+                derivative = interval(carrier.get("event_derivative"), "accepted derivative")
+                normal = interval(carrier.get("event_normal"), "accepted normal")
+                if derivative[0] <= 0 or normal[0] <= 0:
+                    fail("accepted projection is not strictly upward-transversal")
+            if accepted.get("projected_leaves") != len(carriers):
+                fail("accepted projection leaf count is inconsistent")
+            if accepted.get("all_six_variable_weights_present") is not True:
+                fail("accepted projection aggregate primary-weight flag is false")
+            early = diagnostic.get("accepted_before_production_boundary") is True
+            if early:
+                if diagnostic.get("status") != "LOCAL_INTERVAL_NEWTON_ACCEPTED_BEFORE_FROZEN_CONTROL":
+                    fail("early accepted projection has wrong status")
+                if diagnostic.get("production_boundary_reproduced") is not False:
+                    fail("early accepted projection falsely reproduces the frozen refusal")
+                if diagnostic.get("historical_frozen_refusal_control_superseded") is not True:
+                    fail("early accepted projection lacks its historical-control boundary")
+                if diagnostic.get("early_projection") != accepted:
+                    fail("early accepted projection changed during promotion")
+            elif diagnostic.get("production_boundary_reproduced") is not True:
+                fail("ordinary accepted projection lacks the frozen control boundary")
         expected = (
             "IMPLEMENTATION_INCONSISTENCY"
             if result.get("implementation_checks_passed") is not True

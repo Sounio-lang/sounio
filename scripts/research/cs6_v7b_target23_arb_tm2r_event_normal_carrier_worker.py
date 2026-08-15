@@ -43,6 +43,7 @@ CARRIER_NAMES = ("sigma0", "sigma1", "sigma2", "sigma3")
 class CarrierStats:
     reconditionings: int = 0
     section_anchored_reconditionings: int = 0
+    section_anchor_input_checks: int = 0
     section_anchor_checks: int = 0
     generator_reconstructions: int = 0
     coefficient_uncertainty_generators: int = 0
@@ -570,6 +571,7 @@ def event_normal_recondition(state: list[base.TM2R]) -> list[base.TM2R]:
     """Use an ambient carrier, except that an exact section remains exact."""
     w_range = state[2].range()
     if w_range.lower() == 0 and w_range.upper() == 0:
+        STATS.section_anchor_input_checks += 1
         return _carrier_recondition(state, SECTION_ROWS, "section_anchored")
     return _carrier_recondition(state, (0, 1, 2, 3), "ambient_event_normal")
 
@@ -578,6 +580,7 @@ def stats_json() -> dict[str, object]:
     return {
         "reconditionings": STATS.reconditionings,
         "section_anchored_reconditionings": STATS.section_anchored_reconditionings,
+        "section_anchor_input_checks": STATS.section_anchor_input_checks,
         "section_anchor_checks": STATS.section_anchor_checks,
         "generator_reconstructions": STATS.generator_reconstructions,
         "coefficient_uncertainty_generators": STATS.coefficient_uncertainty_generators,
@@ -696,6 +699,48 @@ def require_six_primary_weights(record: dict[str, object]) -> dict[str, object]:
     return record
 
 
+def promote_early_projection(diagnostic: dict[str, object]) -> dict[str, object]:
+    """Accept a rigorous projection that precedes the obsolete frozen refusal."""
+    if diagnostic.get("status") != "EARLY_ACCEPTANCE_BEFORE_FROZEN_REFUSAL":
+        return diagnostic
+    early = diagnostic.get("early_projection")
+    if not isinstance(early, dict) or early.get("accepted") is not True:
+        return diagnostic
+    carriers = early.get("carriers")
+    if not isinstance(carriers, list) or not carriers:
+        return diagnostic
+    if early.get("projected_leaves") != len(carriers):
+        return diagnostic
+    for carrier in carriers:
+        if not isinstance(carrier, dict):
+            return diagnostic
+        derivative = carrier.get("event_derivative")
+        normal = carrier.get("event_normal")
+        weights = carrier.get("variable_weights")
+        if not (
+            isinstance(derivative, list)
+            and len(derivative) == 2
+            and Fraction(str(derivative[0])) > 0
+            and isinstance(normal, list)
+            and len(normal) == 2
+            and Fraction(str(normal[0])) > 0
+            and isinstance(weights, list)
+            and len(weights) >= PRIMARY_VARIABLES
+            and all(Fraction(str(weight[1])) > 0 for weight in weights[:PRIMARY_VARIABLES])
+            and carrier.get("all_six_variable_weights_present") is True
+        ):
+            return diagnostic
+    promoted = dict(diagnostic)
+    promoted.update(
+        status="LOCAL_INTERVAL_NEWTON_ACCEPTED_BEFORE_FROZEN_CONTROL",
+        accepted=True,
+        accepted_projection=early,
+        accepted_before_production_boundary=True,
+        historical_frozen_refusal_control_superseded=True,
+    )
+    return promoted
+
+
 def lineage_one_step(state: list[base.TM2R]) -> tuple[list[base.TM2R], list[arb]]:
     original = base.recondition
     base.recondition = witness.prior.lineage_preserving_recondition
@@ -731,7 +776,12 @@ def preflight_mode(
         baseline_budget = baseline["analyses"][name]["derivative_budget"]
         baseline_width = Fraction(str(baseline_budget["width_q"]))
         conditioned_width = Fraction(str(conditioned_budget["width_q"]))
-        improvement = baseline_width / conditioned_width if conditioned_width else Fraction(0)
+        if not conditioned_width:
+            raise base.Refusal(
+                "EVENT_NORMAL_ZERO_WIDTH_UNREPRESENTABLE",
+                "the rational receipt schema cannot encode an infinite improvement factor",
+            )
+        improvement = baseline_width / conditioned_width
         lower = Fraction(str(conditioned_budget["range"][0]))
         analyses[name] = {
             "state_range_hull_containments_forensic": contains_before,
@@ -763,7 +813,12 @@ def preflight_mode(
     carrier_step_budget = exact_budget(carrier_step)
     lineage_width = Fraction(str(lineage_step_budget["width_q"]))
     carrier_width = Fraction(str(carrier_step_budget["width_q"]))
-    step_improvement = lineage_width / carrier_width if carrier_width else Fraction(0)
+    if not carrier_width:
+        raise base.Refusal(
+            "EVENT_NORMAL_ZERO_WIDTH_UNREPRESENTABLE",
+            "the rational receipt schema cannot encode an infinite one-step improvement",
+        )
+    step_improvement = lineage_width / carrier_width
     width_margin = lineage_width - carrier_width
     receipt_rounding_tolerance = Fraction(1, 2**230)
     projected_control = [
@@ -810,6 +865,10 @@ def preflight_mode(
         and stats["kernel_orthogonality_checks"] == expected_kernel_checks
         and stats["normal_form_checks"] == stats["reconditionings"]
         and stats["section_anchored_reconditionings"] > 0
+        and stats["section_anchor_input_checks"]
+        == stats["section_anchored_reconditionings"]
+        and stats["section_anchor_checks"]
+        == stats["section_anchored_reconditionings"]
         and section_anchor_exact
     )
     initial_analysis["generator_reconstruction_certificate"] = reconstruction_certified
@@ -910,7 +969,9 @@ def run_transport(
 
     witness.try_projection = try_projection_with_primary_scope
     try:
-        diagnostic = witness.diagnose_upward_event(witness_state)
+        diagnostic = promote_early_projection(
+            witness.diagnose_upward_event(witness_state)
+        )
     finally:
         witness.try_projection = original_try_projection
     xi_eta_preserved: bool | None = None
@@ -926,6 +987,13 @@ def run_transport(
                 and Fraction(str(weights[1][1])) > 0
             )
     bool_check(checks, "event_normal_reconditioner_active", base.recondition is event_normal_recondition)
+    if diagnostic.get("accepted_before_production_boundary") is True:
+        bool_check(
+            checks,
+            "early_acceptance_explicitly_supersedes_historical_control",
+            diagnostic.get("production_boundary_reproduced") is False
+            and diagnostic.get("historical_frozen_refusal_control_superseded") is True,
+        )
     bool_check(
         checks,
         "symbolic_acceptance_scoped_to_six_primary_variables",
@@ -945,6 +1013,8 @@ def run_transport(
             checks,
             "accepted_projection_used_exact_section_anchor",
             transport_stats["section_anchored_reconditionings"] >= 2
+            and transport_stats["section_anchor_input_checks"]
+            == transport_stats["section_anchored_reconditionings"]
             and transport_stats["section_anchor_checks"]
             == transport_stats["section_anchored_reconditionings"],
         )
@@ -1024,6 +1094,36 @@ def main() -> None:
         checks,
         "six_primary_scope_ignores_zero_carrier_axes",
         primary_scope_control.get("accepted") is True,
+    )
+    early_control_projection = require_six_primary_weights(
+        {
+            "carriers": [
+                {
+                    "event_derivative": ["1", "2"],
+                    "event_normal": ["3", "4"],
+                    "variable_weights": [
+                        *([["0", "1"]] * PRIMARY_VARIABLES),
+                        *([["0", "0"]] * CARRIER_VARIABLES),
+                    ],
+                }
+            ],
+            "projected_leaves": 1,
+        }
+    )
+    early_control = promote_early_projection(
+        {
+            "status": "EARLY_ACCEPTANCE_BEFORE_FROZEN_REFUSAL",
+            "accepted": False,
+            "early_projection": early_control_projection,
+            "production_boundary_reproduced": False,
+        }
+    )
+    bool_check(
+        checks,
+        "rigorous_early_projection_supersedes_only_historical_control",
+        early_control.get("accepted") is True
+        and early_control.get("accepted_projection") == early_control_projection
+        and early_control.get("production_boundary_reproduced") is False,
     )
 
     result = (

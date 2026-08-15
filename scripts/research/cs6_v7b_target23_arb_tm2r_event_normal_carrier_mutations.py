@@ -86,6 +86,10 @@ def corrupt_anchor_checks(payload: dict[str, object]) -> None:
     initial(payload)["stats"]["section_anchor_checks"] = 0
 
 
+def corrupt_anchor_input_checks(payload: dict[str, object]) -> None:
+    initial(payload)["stats"]["section_anchor_input_checks"] = 0
+
+
 def corrupt_anchor_flag(payload: dict[str, object]) -> None:
     initial(payload)["section_anchor_control_exact_w"] = False
 
@@ -180,6 +184,7 @@ def main() -> None:
         "normal_form_count": corrupt_normal_form_count,
         "anchor_count": corrupt_anchor_count,
         "anchor_checks": corrupt_anchor_checks,
+        "anchor_input_checks": corrupt_anchor_input_checks,
         "anchor_flag": corrupt_anchor_flag,
         "history": corrupt_history,
         "component_variables": corrupt_component_variables,
