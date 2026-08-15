@@ -36,21 +36,28 @@ OPEN_IDS=""
 # declared open ONLY by exact id + reason below. The gate fails if the actual
 # open set differs from this set in ANY direction -- new opens, or a declared
 # residual silently starting to pass (promotion must be witnessed, not assumed).
-DECLARED_OPEN="w5 w14"
-# w5 and w14 are BOTH open, ONLY on a Madaros built fresh from current
-# main.sio source (not on the checked-in prebuilt bin/madaros-linux-x86_64,
-# which predates them and which run_value's default "souc compile" resolves
-# to -- so the default invocation of this script never exercises either).
-# w5:  closure-capture path fails codegen (M2 320f4d2352 origin).
-# w14: --native-v2-emit-scalar fails with "IR instruction arena contract
-#      violated (invalid handle) on region slot -1 generation -1".
-# Confirmed 2026-08-15 on a raw ELF (no souc/madaros wrapper, no
-# MADAROS_STACK_KB involved) and on a same-day rebuild (not staleness).
-# Both surfaced together on the first fresh-from-source run this script was
-# ever given -- consistent with (not yet proven to be) one arena-contract
-# defect manifesting on two distinct native-v2 entry points. Tracked here so
-# neither can be silently reintroduced, silently fixed, or silently merged
-# under "fixed" without the fix actually being witnessed.
+DECLARED_OPEN="w16"
+# w5 and w14 were open 2026-08-14/15 on a Madaros built fresh from current
+# main.sio source: ir_empty_function() leaves its region unallocated by
+# design (see ir_function_alloc_region's comment in ir.sio), and both the
+# --native-v2-emit-{scalar,call,call5,call6} witness-harness builders in
+# main.sio (38 call sites across the file) AND lower_closure_expr_ref in
+# lower.sio (the real closure-lowering path) were never given the
+# allocation call when the arena landed -- every one of them hit "IR
+# instruction arena contract violated ... region slot -1 generation -1".
+# FIXED in the same commit that removed them from this list: main.sio gained
+# the missing ir_function_alloc_region call at all 38 sites; lower.sio's
+# closure path gained the same guard used by every other real-function
+# lowering entry point. Verified by running: all four --native-v2-emit-*
+# probes emit correct-value ELFs, and w5's no-capture closure compiles and
+# runs to 42.
+#
+# w16 is a DIFFERENT, newly-discovered defect the arena bug had been masking
+# (fail-closed hid it): a capturing closure called DIRECTLY computes
+# correctly, but the SAME capture passed as an argument to a higher-order
+# function and called through the fn-pointer parameter silently drops the
+# captured value -- a real silent miscompile, not a crash or reject. Left
+# open and undisguised rather than folded into "closures are fixed."
 
 run_value() {
   id="$1"; file="$2"; want="$3"; wrong="$4"; origin="$5"
@@ -158,6 +165,7 @@ run_value w4b "$CASES/w4b_f32_roundtrip.sio"             150 100 "ROOT CAUSE of 
 run_value w7b "$CASES/w7b_enum_reverse.sio"                1   2 "CONTROL (passes at baseline): a table reorder must not break Shape"
 run_value w11 "$CASES/w11_float_literal_f32.sio"          12  99 "float literal coercion to f32 (contextual + operator)"
 run_value w15 "$CASES/w15_field_triple_collision.sio"     42  99 "soundness-3 BUG C residue: 3-field same-first-letter collision"
+run_value w16 "$CASES/w16_hof_capturing_closure.sio"     130  30 "NEW 2026-08-15: capturing closure via HOF fn-pointer drops the capture"
 run_reject w12 "$CASES/w12_nonliteral_must_reject.sio" "CARDINAL: only literals coerce"
 run_reject w13 "$CASES/w13_magnitude_must_reject.sio" "CARDINAL: magnitude guard on f32 narrowing"
 run_mm    w9  42 "release wall 8765ca1dc4"
