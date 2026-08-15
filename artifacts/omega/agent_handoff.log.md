@@ -3814,3 +3814,69 @@ notes: |
   general labels (the recursion side, §57.50's obligations (0)-(i), and the T1/T2/T3
   assembly at arbitrary W — off-seam (M³)_WW = 2(H−8) same-level is also still open).
   No claims active; even tiers ≥ 168 free.
+
+  UPDATE (claude, 2026-08-15): **E3/(III) scoped — Phase 1 confirms the `g=0`-only reading;
+  Phase 2 lands the one piece that generalizes for free.** Task: with E4+E5 closed (`deviation_law`,
+  Tier 161; `s3_reference_closed7`, Tier 166), the DAG's last measured edge is E3 — "the
+  within-fibre deviation of `tr(A³)` ignores `g`" — flagged as "the dangerous one" since if false
+  the whole E4/E5 apparatus is about the wrong reference class.
+
+  **Phase 1 finding, verified against both the doc and the Lean, not assumed**: `deviation_law` is
+  entirely a `g = 0` statement. It compares `W = 2^j` against `W = 1` — both satisfy
+  `g(W) = (W ∧ (W−1)) ≫ 3 = 0` (every power of two clears its own only set bit). E3/(III) needs the
+  general statement: for EVERY Fano-orbit fibre (`g` arbitrary, reference point `gnorm(W) = 8g+1`),
+  `D(W) = tr(A³)(W) − tr(A³)(8g+1)` depends only on `lsb(W)`, not on `g` — confirmed numerically
+  with 0 exceptions at `n = 6..9` via `scripts/research/zd_v1_III_deviation_probe.py 6 7 8 9`
+  ("D determined by lsb alone? YES" at every tested `n`).
+
+  Auditing `deviation_law`'s three obligations against the actual Lean (not the docs' claims) shows
+  they split sharply:
+
+  - **(i) the transfer step, `s3_level_recursion` (Tier 157) — GENERALIZES FOR FREE.** Its
+    signature is `(m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)` — no `g` restriction, no power-of-two
+    restriction. It already covers every label.
+  - **(ii) the `cp2` closed form, `cp2_pow2_labels`/`cp2_ref_eq` — `g = 0`-SPECIFIC, and provably
+    so.** `cp2_count`'s own docstring: the pointwise four-sign law it needs "FAILS off `g = 0`... at
+    `m = 4, W = 9` the generic class already carries both values." The closed form
+    `cp2 = −(H−2)(H−6)` is not even claimed to be the right closed form for general `g`.
+  - **(iii) the base case, `dev_base`/`s3_reference_closed7` — heavily `g = 0`-specific.** It rests
+    on ~2500 lines of defect-graph combinatorics (`isDefect`, `stratum_handshake`/`N1`/`N2`/`net`,
+    `hDelta_law`, `tier162_hmult`, `tier164_hdc`, `hiso_ref`, `defect_regular_free`) whose base
+    facts are hardcoded to the `W = 1`/`W = 2^(m−1)` graphs — `hiso_ref`'s case split is literally
+    `x ∈ {0, 1, 2^m, 2^m+1}`. `InteriorMask`'s docstring already names the obstruction to reusing
+    `resB_pow2_top`'s proof at a general label: "at the maximal seam both matrices are rank-one,
+    which cannot hold at other labels." The research log's §54.2/§54.3 (written before this
+    session, but about exactly this gap) record TWO closed routes to a general base case — a
+    `g`-dependent correction to a `§18.1`-shaped high-branch recursion, and a "third invariant"
+    alongside `t3'`/`t2'` — both refuted by exact search over the accessible range. Neither is a
+    small tier's worth of work; re-deriving (iii) for a parametrized family of fibres is comparable
+    in scope to redoing a large fraction of Tiers 90–166.
+
+  **Phase 2, landed**: `s3_deviation_step` + `s3_deviation_scales` (Tier 167, this commit) —
+  `s3_level_recursion` applied to an ARBITRARY pair of labels `W, V` (not just `2^j` and `1`) and
+  subtracted, conditional only on the two labels sharing a `cp2`-sum at each level along the way.
+  This makes obligation (i)'s free generalization an actual reusable theorem instead of a claim, and
+  gives the next attempt the exact reduction: E3 is now, in Lean, "supply `hcp` (obligation (ii),
+  general) and the base value (obligation (iii), general)" — nothing else is missing from the
+  architecture. Neither hypothesis is discharged here; both remain genuinely open. Derisked in an
+  isolated scratch file first (`LEAN_PATH=".lake/build/lib/lean:."`, ~0.4-0.7s per compile, after a
+  baseline full-file build to populate the missing `.olean`); full-file build after landing:
+  zero `error:` lines, `formal/lean4/SounioZDFiberAntisym.lean` now 28832 lines. No `sorry`,
+  no `axiom`, no `native_decide`, no Mathlib.
+
+  DAG doc updated: `docs/research/zd_completeness_pincer_dag_2026-08-10.md`'s E3 section gets an
+  inline `UPDATE 2026-08-15` block (E3 left as **MEASURED** — conservative, no unconditional general
+  theorem exists) answering its own "is E3 a consequence of E6+E8, or the open V1?" question: NEITHER
+  — it needs (ii)/(iii)'s machinery re-derived for a general fibre.
+
+  **Recommendation for the next attempt**: (ii) is probably the more tractable of the two remaining
+  gaps — it is "only" a fibre-constancy statement (already measured 30/30 classes), and the file's
+  own convention (state the general theorem conditional on a hypothesis, discharge the hypothesis
+  separately per class) already fits it; the open question is whether `cp2`'s pointwise structure
+  admits a per-`g` sign law analogous to `cp2_count`'s `hpt`, or a genuinely different technique
+  (e.g. a bijective/`Ncnt`-style argument, since `Ncnt_closed_gnorm` already proves the analogous
+  fibre-constancy for `tr(A²)` unconditionally — worth checking whether that proof technique
+  transfers to `cp2` before trying a pointwise sign law again). (iii) — the general base case — is
+  the harder, "dangerous" piece: both natural closed routes are refuted (§54.2/§54.3), and the
+  existing machinery's rank-one-at-the-maximal-seam argument is stated (in `InteriorMask`'s
+  docstring) not to transfer. No claims active; lane `zd-e3-iii-general-fibre` released.

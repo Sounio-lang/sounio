@@ -36,6 +36,27 @@ status, so that nothing downstream is built on a fit.
 
 Three measured edges sit in the chain: **E3, E4, E5**. Fable's count is confirmed against the tree.
 
+> **UPDATE 2026-08-15 (claude, lane `zd-e3-iii-general-fibre`).** E4 and E5 are now Lean theorems —
+> `deviation_law` (Tier 161, `f6676d1cab`) and `s3_reference_closed7` (Tier 166, `b1a927f047`),
+> audited in `docs/audit/ZD_DEVIATION_LAW_DEPENDENCY_AUDIT_2026-08-13.md`. **E3 is still MEASURED,
+> not proved, and this is the answer to the open question below: E3 is NEITHER a corollary of E6
+> plus E8's orbit action NOR discharged by `deviation_law`.** `deviation_law` is a `g = 0`-only
+> statement — both labels it compares (`W = 2^j`, `W = 1`) satisfy `g(W) = 0` — and auditing its
+> three obligations against the file shows they do not generalize uniformly: obligation (i), the
+> transfer step (`s3_level_recursion`, Tier 157), is ALREADY stated for every `W ≠ 0` with no `g`
+> restriction, so it generalizes for free (now packaged as `s3_deviation_step`/`s3_deviation_scales`,
+> Tier 167). Obligations (ii) and (iii) do not: `cp2_count`'s own docstring records that its
+> pointwise sign law fails off `g = 0` ("at `m = 4, W = 9` the generic class already carries both
+> values"), and obligation (iii)'s ~2500 lines of defect-graph combinatorics (`isDefect`,
+> `hDelta_law`, `tier162_hmult`, `tier164_hdc`, `hiso_ref`, …) are built on the specific vertex
+> structure of the `W = 1`/`W = 2^(m−1)` graphs — `InteriorMask`'s own docstring already names the
+> obstruction to reusing `resB_pow2_top`'s proof at other labels ("at the maximal seam both matrices
+> are rank-one, which cannot hold at other labels"). So closing E3 needs the (ii)/(iii) machinery
+> re-derived for a parametrized family of Fano-orbit fibres, not a mechanical generalization — see
+> the handoff log entry dated 2026-08-15 for the full scoping. Numerically, E3's general form (`D`
+> depends only on `lsb(W)`, for every `g`, not just `g = 0`) is confirmed with 0 exceptions,
+> `n = 6..9`, via `scripts/research/zd_v1_III_deviation_probe.py`.
+
 - **E3 is the dangerous one.** If the within-fibre deviation does not ignore `g`, the reference pairs
   do not represent their classes and E4/E5 are about the wrong objects. It must be closed or
   declared. Open question, recorded here rather than assumed: is E3 a consequence of E6 (which

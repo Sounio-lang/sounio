@@ -28717,4 +28717,116 @@ theorem deviation_law (k i : Nat) :
       rw [hrs, hrr, hX, hcp]
       grind
 
+/-! ### Tier 167 — E3/(III) scoped: the transfer step of the deviation law GENERALIZES FOR FREE
+
+    `deviation_law` (Tier 161) is a `g = 0`-only statement: both labels it compares, `W = 2^j` and
+    `W = 1`, satisfy `g(W) = (W ∧ (W−1)) ≫ 3 = 0`.  E3/(III) — "the within-fibre deviation of
+    `tr(A³)` ignores `g`" — needs the analogous law for a GENERAL Fano-orbit fibre, `g ≠ 0`, not
+    just this one special orbit.  `scripts/research/zd_v1_III_deviation_probe.py` confirms the
+    general statement numerically with 0 exceptions at `n = 6..9`: `D(W) = tr(A³)(W) − tr(A³)(8g+1)`
+    depends only on `lsb(W)`, for every `g`-fibre, not only `g = 0`.
+
+    Auditing `deviation_law`'s three obligations against the file shows they split sharply:
+
+      (i)   `s3_level_recursion` (Tier 157) — **already stated for every `W ≠ 0`, no `g`
+            restriction**.  Nothing in it is specific to powers of two.
+      (ii)  `cp2_pow2_labels`/`cp2_ref_eq` — genuinely `g = 0`-specific.  `cp2_count`'s own
+            docstring records that the pointwise four-sign law it needs FAILS off `g = 0`
+            ("at `m = 4, W = 9` the generic class already carries both values").
+      (iii) `dev_base`/`s3_reference_closed7` — built on ~2500 lines of defect-graph combinatorics
+            (`isDefect`, `stratum_handshake`/`N1`/`N2`/`net`, `hDelta_law`, `tier162_hmult`,
+            `tier164_hdc`, `hiso_ref`, `defect_regular_free`) whose base facts are hardcoded to the
+            `W = 1` / `W = 2^(m−1)` graphs (`hiso_ref`'s case split is literally
+            `x ∈ {0, 1, 2^m, 2^m+1}`).  `InteriorMask`'s docstring already names the obstruction:
+            the maximal-seam proof "does not generalise (at the maximal seam both matrices are
+            rank-one, which cannot hold at other labels)".
+
+    So (i) generalizes for free and (ii)/(iii) do not — this tier makes (i)'s generalization an
+    actual theorem instead of a claim.  `s3_deviation_step` is `s3_level_recursion` applied to an
+    ARBITRARY pair of labels `W, V` (not just `2^j` and `1`) and subtracted, conditional only on
+    the two labels sharing a `cp2`-sum at that level.  `s3_deviation_scales` iterates it: given
+    that `cp2`-agreement across every intermediate level from `j` to `j+i`, the `tri3` deviation
+    between `W` and `V` scales by exactly `8^i` — the homogeneous half of the deviation law, for
+    ANY two labels, not only the `g = 0` reference pair.  `deviation_law` itself does NOT reduce to
+    a corollary of this (its induction interleaves `cp2_ref_eq` at each level with
+    `s3_level_recursion`, which is what `hcp` abstracts here), but the two theorems below give the
+    next attempt exactly the reusable piece obligation (i) contributes, with the real content of
+    (ii)/(iii) left as explicit hypotheses instead of buried in an induction.
+
+    ⚠ SCOPE.  Neither theorem below asserts `Δcp2 = 0` or the general base case — both remain open,
+    and are exactly what generalizing (ii)/(iii) above would have to supply.  No claim is made that
+    closing them is a small step; §54.2/§54.3 of the research log record two closed routes to the
+    general base case (a `g`-dependent correction of the `§18.1`-shaped recursion, and a "third
+    invariant" alongside `t3'`/`t2'`), both refuted by exact search. -/
+
+/-- **Obligation (i), for ANY two labels.** `s3_level_recursion` applied to `W` and to `V`,
+    subtracted: if the two labels' `cp2`-sums agree at level `m`, the `tri3` deviation between them
+    scales by `8` going to level `m+1`. No restriction to powers of two or to `g = 0`. -/
+theorem s3_deviation_step (m W V : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0)
+    (hV : V < 2^(m+1)) (hV0 : V ≠ 0)
+    (hcp : sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun c =>
+        P3 a c W m * P3 c (a ^^^ W) W m))
+      = sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun c =>
+        P3 a c V m * P3 c (a ^^^ V) V m))) :
+    tri3 (2^(m+1) + 2^(m+1)) (fun x y => P3 x y W (m+1))
+      - tri3 (2^(m+1) + 2^(m+1)) (fun x y => P3 x y V (m+1))
+      = 8 * (tri3 (2^(m+1)) (fun x y => P3 x y W m) - tri3 (2^(m+1)) (fun x y => P3 x y V m)) := by
+  have h1 := s3_level_recursion m W hW hW0
+  have h2 := s3_level_recursion m V hV hV0
+  rw [h1, h2, hcp]
+  omega
+
+/-- **The homogeneous half of the deviation law, for ANY two labels sharing a level-`j` origin.**
+    Given `cp2`-agreement of `W` and `V` at every level from `j` up to (not including) `j+i`, the
+    `tri3` deviation between them at level `j+i` is `8^i` times the deviation at level `j`. This is
+    exactly `deviation_law`'s induction shape with `W = 2^j`/`V = 1` replaced by arbitrary labels
+    and `cp2_ref_eq` replaced by the hypothesis `hcp` — the piece of E3/(III) that (i) alone
+    supplies; obligations (ii) (`hcp` itself, for a general fibre) and (iii) (the base value at
+    `i = 0`) are NOT discharged here. -/
+theorem s3_deviation_scales (j i W V : Nat) (hW : W < 2^(j+1)) (hW0 : W ≠ 0)
+    (hV : V < 2^(j+1)) (hV0 : V ≠ 0)
+    (hcp : ∀ i', i' < i →
+        sumLtI (2^(j+i'+1)) (fun a => sumLtI (2^(j+i'+1)) (fun c =>
+            P3 a c W (j+i') * P3 c (a ^^^ W) W (j+i')))
+          = sumLtI (2^(j+i'+1)) (fun a => sumLtI (2^(j+i'+1)) (fun c =>
+            P3 a c V (j+i') * P3 c (a ^^^ V) V (j+i')))) :
+    tri3 (2^(j+i+1)) (fun x y => P3 x y W (j+i))
+        - tri3 (2^(j+i+1)) (fun x y => P3 x y V (j+i))
+      = (((2^i : Nat) : Int) * ((2^i : Nat) : Int) * ((2^i : Nat) : Int))
+        * (tri3 (2^(j+1)) (fun x y => P3 x y W j) - tri3 (2^(j+1)) (fun x y => P3 x y V j)) := by
+  induction i with
+  | zero =>
+      have h0 : ((2^0 : Nat) : Int) = 1 := by decide
+      show (tri3 (2^(j+1)) (fun x y => P3 x y W j) - tri3 (2^(j+1)) (fun x y => P3 x y V j))
+        = (((2^0:Nat):Int) * ((2^0:Nat):Int) * ((2^0:Nat):Int))
+          * (tri3 (2^(j+1)) (fun x y => P3 x y W j) - tri3 (2^(j+1)) (fun x y => P3 x y V j))
+      rw [h0]
+      grind
+  | succ i ih =>
+      have hcp' : ∀ i', i' < i →
+          sumLtI (2^(j+i'+1)) (fun a => sumLtI (2^(j+i'+1)) (fun c =>
+              P3 a c W (j+i') * P3 c (a ^^^ W) W (j+i')))
+            = sumLtI (2^(j+i'+1)) (fun a => sumLtI (2^(j+i'+1)) (fun c =>
+              P3 a c V (j+i') * P3 c (a ^^^ V) V (j+i'))) :=
+        fun i' hi' => hcp i' (by omega)
+      have ihc := ih hcp'
+      have hWlt : W < 2^(j+i+1) := by
+        have : (2:Nat)^(j+1) ≤ 2^(j+i+1) := Nat.pow_le_pow_right (by omega) (by omega)
+        omega
+      have hVlt : V < 2^(j+i+1) := by
+        have : (2:Nat)^(j+1) ≤ 2^(j+i+1) := Nat.pow_le_pow_right (by omega) (by omega)
+        omega
+      have hcpi := hcp i (by omega)
+      have hstep := s3_deviation_step (j+i) W V hWlt hW0 hVlt hV0 hcpi
+      have hpow : (2:Nat)^(j+i+1+1) = 2^(j+i+1) + 2^(j+i+1) := by
+        rw [Nat.pow_succ]; omega
+      have hX : ((2^(i+1) : Nat) : Int) = 2 * ((2^i : Nat) : Int) := by
+        rw [Nat.pow_succ]; push_cast; grind
+      show (tri3 (2^(j+i+1+1)) (fun x y => P3 x y W (j+i+1))
+            - tri3 (2^(j+i+1+1)) (fun x y => P3 x y V (j+i+1)))
+        = (((2^(i+1):Nat):Int) * ((2^(i+1):Nat):Int) * ((2^(i+1):Nat):Int))
+          * (tri3 (2^(j+1)) (fun x y => P3 x y W j) - tri3 (2^(j+1)) (fun x y => P3 x y V j))
+      rw [hpow, hstep, ihc, hX]
+      grind
+
 end SounioZDFiberAntisym
