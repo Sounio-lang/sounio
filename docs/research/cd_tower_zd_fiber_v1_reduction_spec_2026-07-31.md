@@ -5835,7 +5835,18 @@ exception; the masked object deviates by exactly `288·[m−1,2]₂` — both re
 numbers independently (2016, 10080, 44640 against `288·{7,35,155}`). The mask is the only
 `j = m`-sensitive operation in play, so the clean law is the native one.
 
-**Status: measured, and the proof is now three finite obligations instead of an open law.**
+**★ STATUS 2026-08-13: ALL THREE OBLIGATIONS ARE DISCHARGED — THE LAW IS A LEAN THEOREM.**
+`deviation_law` (`formal/lean4/SounioZDFiberAntisym.lean`, Tier 161, `f6676d1cab`), kernel-clean,
+scope `j ≥ 3` and levels `m ≥ j`. (i) is `s3_level_recursion` (Tier 157, `369e0c34cd`) — and note
+the `s3` row alone was enough, `cp2`'s and `cp3`'s rows were never needed for the law. (ii) is
+`cp2_ref_eq`, a corollary of `cp2_pow2_labels` (Tier 157b), which holds for every `p` including
+`p = 0`, i.e. the reference `W = 1` itself. (iii) is `dev_base` (Tier 161), the subtraction of
+`s3_maximal_seam` (Tier 136) and `s3_reference_closed7` (Tier 166) — the two share the same
+`poly(H)`, so the difference IS the q-binomial term. Audit of the external half:
+`docs/audit/ZD_DEVIATION_LAW_DEPENDENCY_AUDIT_2026-08-13.md`. The paragraph below is preserved as
+written on 2026-08-08.
+
+**Status (as of 2026-08-08): measured, and the proof is now three finite obligations instead of an open law.**
 (i) derive the three-line recursion from `tri3_level_transfer` (Lean, Tier 90); (ii) prove
 `Δcp2 = 0` on references; (iii) compute one base case. Both providers passed the derivation and the
 artifact reading, and corrected two accounting slips of mine: the 13-component tally (3 dynamic + 8
@@ -5847,6 +5858,12 @@ closed forms + 2 bookkeeping, not "8 + 3"), and that the augmentation needs `H²
 §57.49 left the deviation law resting on three obligations stated in words. Each is now an exact
 identity, verified; none is yet a Lean theorem, and the honest report is that converting them cost
 one afternoon and proving them will cost tiers.
+
+> **★ SUPERSEDED 2026-08-13.** All three are now Lean theorems — see the status block in §57.49.
+> The cost estimate below held: obligation (i) took Tiers 153/155/157 (T1 closed, T1 in closed
+> form, the level recursion), and (ii)+(iii) then fell out in a single tier because `cp2`'s closed
+> form had already been proved for every power-of-two label. The analysis in the rest of this
+> section is preserved as written and is still the right reading of what the obligations ARE.
 
 **(i) The transfer step.** Not decomposable into the three ε-sums separately — measured, `T1`, `T2`
 and `T3` are each OUTSIDE the span of `{s3, cp2, cp3, 1, H, H², H³}`; only their combination is
