@@ -195,3 +195,40 @@ não é decisão de arquitetura de CI sobre 50 arquivos -- é uma nota de opera�
 para agentes em worktree, que devem sempre setar `SOUNIO_STDLIB_PATH`
 explicitamente para o próprio worktree (ou rodar `unset SOUNIO_STDLIB_PATH`
 antes de qualquer `souc`/gate) em vez de confiar no fallback do script.
+
+### ATUALIZAÇÃO 2026-08-15 — a MESMA armadilha existe para `SOUC_BIN`, e ela
+### invalidou uma alegação já publicada num commit
+
+O commit `751e495b2c` (fix do arena de IR, mergeado via PR #1741) alegou:
+*"Regression-checked: `scripts/run_sio_test_suite.sh closure` gives
+byte-identical pass/fail/skip counts against both the pre-fix and post-fix
+builds."* Essa alegação está **sem sustentação pelo método descrito** --
+medido depois, não antes de publicar, o que é exatamente o tipo de erro que
+uma auditoria adversarial pega.
+
+`SOUC_BIN` vem exportado globalmente no pod interativo (`SOUC_BIN=/workspace/sounio/bin/souc`),
+e `scripts/lib/resolve_souc.sh`'s `_sounio_resolve_bin()` respeita uma
+`SOUC_BIN` pré-setada ANTES de tentar `$ROOT_DIR/bin/souc` do próprio
+worktree. Resultado: a suíte `closure` nunca rodou contra o binário
+corrigido desta sessão -- rodou contra o `bin/souc` do checkout
+compartilhado o tempo todo, independente de `MADAROS_RAW_BIN`. Os números
+"idênticos" antes/depois não provavam ausência de regressão; provavam que a
+suíte não tinha testado a mudança.
+
+Refeito com `unset SOUC_BIN` (e `MADAROS_RAW_BIN` apontando para o build do
+worktree): baseline pré-fix tinha 16 falhas na suíte `closure`; pós-fix tem
+15 -- **duas** falhas resolvidas de verdade (`closure_basic.sio`,
+`closure_effect_transparent_hof.sio`, ambas o caso simples que w5 testemunha)
+e **um** achado novo, não uma regressão: `closure_effect_escape.sio` estava
+"passando" (rejeitado corretamente) pelo motivo ERRADO -- o lowering
+crashava no mesmo bug de arena antes de alcançar o vazamento de efeito real
+que o teste pretende verificar. `souc check` nesse arquivo hoje retorna
+`check: OK`; o verificador de efeitos não pega o vazamento de `IO` através
+de uma HOF sem anotação. Gap pré-existente em `self-hosted/check/`, não
+relacionado ao fix de lowering, documentado como `w17` (não corrigido).
+
+Lição: `SOUNIO_STDLIB_PATH` não é o único var de ambiente do pod que
+sombreia um worktree -- `SOUC_BIN` faz o mesmo, e é mais perigoso porque
+seu efeito é silencioso (a suíte roda, dá números, só que sobre o binário
+errado). Antes de qualquer checagem de regressão neste pod: `unset SOUC_BIN
+SOUNIO_STDLIB_PATH` primeiro.
