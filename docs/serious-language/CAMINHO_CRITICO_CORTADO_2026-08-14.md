@@ -172,3 +172,26 @@ não conserto de uma linha -- registrado, não executado.
 
 Trabalho consolidado em `worktree-witness-matrix-20260814` (PR #1737), três lanes
 paralelas mergeadas sem conflito (conjuntos de arquivos disjuntos) + o fix final.
+
+### ATUALIZAÇÃO 2026-08-15 — SOUNIO_STDLIB_PATH NÃO é bug de CI real
+
+O parágrafo acima ("mudar isso é decisão de arquitetura de CI sobre 50 arquivos")
+superestimava o escopo. Medido, não inferido:
+`grep -rn SOUNIO_STDLIB_PATH .github/workflows/*.yml` retorna só duas linhas, as
+duas em `madaros-prebuilt-refresh.yml`, as duas locais a um único step
+(`export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"`) -- não há export global em nenhum
+workflow. E cada runner do GitHub Actions é um checkout efêmero e isolado: não
+existe "árvore compartilhada" para um export vazar. O padrão
+`export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"` nos 50
+scripts é seguro em CI -- a variável nunca chega pré-setada de fora.
+
+A armadilha é real, mas só existe no pod interativo multi-agente, onde
+`CLAUDE.md` manda exportar `SOUNIO_STDLIB_PATH` fora da raiz do checkout
+principal: qualquer worktree que rode um desses 50 scripts sem sobrescrever a
+variável lê a stdlib do checkout compartilhado, não a própria. Já mordeu esta
+sessão uma vez (a falsa conclusão "pub não é honrado em mod.sio", retraída em
+`f0e7869765`) e a lane paralela B independentemente. Escopo do item, portanto:
+não é decisão de arquitetura de CI sobre 50 arquivos -- é uma nota de operação
+para agentes em worktree, que devem sempre setar `SOUNIO_STDLIB_PATH`
+explicitamente para o próprio worktree (ou rodar `unset SOUNIO_STDLIB_PATH`
+antes de qualquer `souc`/gate) em vez de confiar no fallback do script.
