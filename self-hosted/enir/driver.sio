@@ -1,0 +1,358 @@
+// Native compiler-owned ENIR driver for E1 shadow validation and E2 direct
+// source lowering/execution. It remains separate from production codegen.
+
+use enir::ir::*
+use enir::parser::*
+use enir::canonical::*
+use enir::verify::*
+use enir::hash::*
+use enir::shadow_fixture::*
+use enir::source_lower::*
+use enir::interpreter::*
+use enir::mir::*
+use enir::mir_cfg::*
+use enir::mir_join::*
+
+fn enir_driver_read(path: string) -> string with IO, Mut, Panic, Div, Alloc {
+    let size = file_size(path)
+    if size <= 0 || size > 65536 { panic("ENIR input must contain 1..65536 bytes") }
+    let bytes = read_file(path)
+    str_from_bytes(bytes, size)
+}
+
+fn enir_driver_verify_text(input: string) -> EnirModule with IO, Mut, Panic, Div, Alloc {
+    let parsed = enir_parse(input)
+    if !parsed.ok {
+        print("enir-shadow-error|phase=parse|code=")
+        print_int(parsed.error_code)
+        print("\n")
+        panic("ENIR parse failed")
+    }
+    let rc = enir_verify(parsed.module)
+    if rc != 0 {
+        print("enir-shadow-error|phase=verify|code=")
+        print_int(rc)
+        print("\n")
+        panic("ENIR semantic verification failed")
+    }
+    if enir_print_canonical(parsed.module) != input { panic("ENIR input is not canonical") }
+    parsed.module
+}
+
+fn enir_driver_emit() with IO, Mut, Panic, Div, Alloc {
+    let module = enir_shadow_fixture()
+    let rc = enir_verify(module)
+    if rc != 0 {
+        print("enir-shadow-error|phase=fixture|code=")
+        print_int(rc)
+        print("\n")
+        panic("compiler-owned ENIR fixture failed verification")
+    }
+    print(enir_print_canonical(module))
+}
+
+fn enir_driver_roundtrip(path: string) with IO, Mut, Panic, Div, Alloc {
+    let input = enir_driver_read(path)
+    let module = enir_driver_verify_text(input)
+    let canonical = enir_print_canonical(module)
+    let reparsed = enir_parse(canonical)
+    if !reparsed.ok || enir_verify(reparsed.module) != 0 { panic("ENIR reparse failed") }
+    if enir_print_canonical(reparsed.module) != canonical { panic("ENIR roundtrip changed bytes") }
+    print(canonical)
+}
+
+fn enir_driver_verify(path: string) with IO, Mut, Panic, Div, Alloc {
+    let input = enir_driver_read(path)
+    let module = enir_driver_verify_text(input)
+    var receipt = "enir-shadow-ok|hash=" ++ enir_i64_string(enir_canonical_hash_l64(input))
+    receipt = receipt ++ "|types=" ++ enir_i64_string(module.type_count)
+    receipt = receipt ++ "|values=" ++ enir_i64_string(module.value_count)
+    receipt = receipt ++ "|provenance=" ++ enir_i64_string(module.provenance_count)
+    receipt = receipt ++ "|policies=" ++ enir_i64_string(module.policy_count)
+    receipt = receipt ++ "|ops=" ++ enir_i64_string(module.op_count)
+    receipt = receipt ++ "|programs=" ++ enir_i64_string(module.program_count)
+    receipt = receipt ++ "|observations=" ++ enir_i64_string(module.observation_count) ++ "\n"
+    print(receipt)
+}
+
+fn enir_driver_lower(path: string, profile: i64) with IO, Mut, Panic, Div, Alloc {
+    let source = enir_driver_read(path)
+    let lowered = if profile == enir_profile_eisa_v1() {
+        enir_lower_source_v1(source)
+    } else {
+        if profile == enir_profile_eisa_v2() { enir_lower_source_v2(source) } else { enir_lower_source(source) }
+    }
+    if !lowered.ok {
+        var error = "enir-lower-error|line=" ++ enir_i64_string(lowered.error_line)
+        error = error ++ "|code=" ++ enir_i64_string(lowered.error_code) ++ "\n"
+        print(error)
+        panic("source-to-ENIR lowering failed")
+    }
+    print(enir_print_canonical(lowered.module))
+}
+
+fn enir_driver_lower_join(path: string) with IO, Mut, Panic, Div, Alloc {
+    let source = enir_driver_read(path)
+    let lowered = enir_lower_source_join_v2(source)
+    if !lowered.ok {
+        var error = "enir-lower-error|line=" ++ enir_i64_string(lowered.error_line)
+        error = error ++ "|code=" ++ enir_i64_string(lowered.error_code) ++ "\n"
+        print(error)
+        panic("source-to-join-ENIR lowering failed")
+    }
+    print(enir_print_canonical(lowered.module))
+}
+
+fn enir_driver_run(path: string) with IO, Mut, Panic, Div, Alloc {
+    let input = enir_driver_read(path)
+    let module = enir_driver_verify_text(input)
+    if module.stage != ENIR_STAGE_LOWERED { panic("ENIR run requires a lowered module") }
+    let result = enir_interpret(module)
+    if !result.ok {
+        var error = "enir-exec-error|code=" ++ enir_i64_string(result.error_code)
+        error = error ++ "|executed_ops=" ++ enir_i64_string(result.executed_ops)
+        error = error ++ "|observations=" ++ enir_i64_string(result.observations) ++ "\n"
+        print(error)
+        panic("ENIR interpretation failed")
+    }
+    var receipt = "enir-exec-ok|module=" ++ enir_name_to_string(module.name)
+    receipt = receipt ++ "|module_hash=" ++ enir_i64_string(enir_canonical_hash_l64(input))
+    receipt = receipt ++ "|executed_ops=" ++ enir_i64_string(result.executed_ops)
+    receipt = receipt ++ "|observations=" ++ enir_i64_string(result.observations)
+    if enir_schema_has_cfg(module.schema_version) {
+        receipt = receipt ++ "|fuel_initial=" ++ enir_i64_string(module.fuel_limit)
+        receipt = receipt ++ "|fuel_left=" ++ enir_i64_string(result.fuel_left)
+        receipt = receipt ++ "|stop_kind=" ++ enir_i64_string(result.stop_kind)
+        receipt = receipt ++ "|last_write=" ++ enir_i64_string(result.last_write)
+        receipt = receipt ++ "|branch_poisoned=" ++ enir_i64_string(result.branch_poisoned)
+        receipt = receipt ++ "|frail_branches=" ++ enir_i64_string(result.frail_branches)
+    }
+    receipt = receipt ++ "\n"
+    print(receipt)
+}
+
+fn enir_driver_read_mir(path: string) -> EnirMirModule with IO, Mut, Panic, Div, Alloc {
+    let input = enir_driver_read(path)
+    let parsed = enir_mir_parse(input)
+    if !parsed.ok {
+        print("mir-error|phase=parse|code=" ++ enir_i64_string(parsed.error_code) ++ "\n")
+        panic("MIR parse failed")
+    }
+    let rc = enir_mir_verify(parsed.module)
+    if rc != 0 {
+        print("mir-error|phase=verify|code=" ++ enir_i64_string(rc) ++ "\n")
+        panic("MIR verification failed")
+    }
+    if enir_mir_print(parsed.module) != input { panic("MIR input is not canonical") }
+    parsed.module
+}
+
+fn enir_driver_lower_mir(path: string) with IO, Mut, Panic, Div, Alloc {
+    let input = enir_driver_read(path)
+    let source = enir_driver_verify_text(input)
+    let lowered = enir_lower_to_mir(source, enir_canonical_hash_l64(input))
+    if !lowered.ok {
+        print("mir-lower-error|code=" ++ enir_i64_string(lowered.error_code) ++ "\n")
+        panic("ENIR-to-MIR lowering failed")
+    }
+    print(enir_mir_print(lowered.module))
+}
+
+fn enir_driver_verify_mir(path: string) with IO, Mut, Panic, Div, Alloc {
+    let input = enir_driver_read(path)
+    let module = enir_driver_read_mir(path)
+    var out = "mir-ok|hash=" ++ enir_i64_string(enir_canonical_hash_l64(input))
+    out = out ++ "|source_enir_hash=" ++ enir_i64_string(module.source_enir_hash)
+    out = out ++ "|values=" ++ enir_i64_string(module.value_count)
+    out = out ++ "|instructions=" ++ enir_i64_string(module.instr_count)
+    out = out ++ "|observations=" ++ enir_i64_string(module.observation_count) ++ "\n"
+    print(out)
+}
+
+fn enir_driver_validate_mir(enir_path: string, mir_path: string) with IO, Mut, Panic, Div, Alloc {
+    let enir_input = enir_driver_read(enir_path)
+    let source = enir_driver_verify_text(enir_input)
+    let mir_input = enir_driver_read(mir_path)
+    let mir = enir_driver_read_mir(mir_path)
+    let rc = enir_mir_validate_relation(source, mir, enir_canonical_hash_l64(enir_input))
+    if rc != 0 {
+        print("mir-relation-error|code=" ++ enir_i64_string(rc) ++ "\n")
+        panic("ENIR-to-MIR relation failed")
+    }
+    var out = "mir-relation-ok|enir_hash=" ++ enir_i64_string(enir_canonical_hash_l64(enir_input))
+    out = out ++ "|mir_hash=" ++ enir_i64_string(enir_canonical_hash_l64(mir_input))
+    out = out ++ "|values=" ++ enir_i64_string(mir.value_count)
+    out = out ++ "|instructions=" ++ enir_i64_string(mir.instr_count)
+    out = out ++ "|observations=" ++ enir_i64_string(mir.observation_count) ++ "\n"
+    print(out)
+}
+
+fn enir_driver_run_mir(path: string) with IO, Mut, Panic, Div, Alloc {
+    let input = enir_driver_read(path)
+    let module = enir_driver_read_mir(path)
+    let result = enir_mir_interpret(module)
+    if !result.ok {
+        print("mir-exec-error|code=" ++ enir_i64_string(result.error_code) ++ "\n")
+        panic("MIR interpretation failed")
+    }
+    var out = "mir-exec-ok|module=" ++ enir_name_to_string(module.name)
+    out = out ++ "|mir_hash=" ++ enir_i64_string(enir_canonical_hash_l64(input))
+    out = out ++ "|source_enir_hash=" ++ enir_i64_string(module.source_enir_hash)
+    out = out ++ "|executed_instrs=" ++ enir_i64_string(result.executed_instrs)
+    out = out ++ "|observations=" ++ enir_i64_string(result.observations)
+    out = out ++ "|fuel_initial=" ++ enir_i64_string(module.fuel_limit)
+    out = out ++ "|fuel_left=" ++ enir_i64_string(result.fuel_left)
+    out = out ++ "|last_write=" ++ enir_i64_string(result.last_write) ++ "\n"
+    print(out)
+}
+
+fn enir_driver_read_cfg_mir(path: string) -> EnirCfgMirModule with IO, Mut, Panic, Div, Alloc {
+    let input = enir_driver_read(path)
+    let parsed = enir_cfg_mir_parse(input)
+    if !parsed.ok { print("cmir-error|phase=parse|code=" ++ enir_i64_string(parsed.error_code) ++ "\n"); panic("CFG MIR parse failed") }
+    let rc = enir_cfg_mir_verify(parsed.module)
+    if rc != 0 { print("cmir-error|phase=verify|code=" ++ enir_i64_string(rc) ++ "\n"); panic("CFG MIR verification failed") }
+    if enir_cfg_mir_print(parsed.module) != input { panic("CFG MIR input is not canonical") }
+    parsed.module
+}
+
+fn enir_driver_lower_cfg_mir(path: string) with IO, Mut, Panic, Div, Alloc {
+    let input = enir_driver_read(path); let source = enir_driver_verify_text(input)
+    let lowered = enir_lower_to_cfg_mir(source, enir_canonical_hash_l64(input))
+    if !lowered.ok { print("cmir-lower-error|code=" ++ enir_i64_string(lowered.error_code) ++ "\n"); panic("ENIR-to-CFG-MIR lowering failed") }
+    print(enir_cfg_mir_print(lowered.module))
+}
+
+fn enir_driver_verify_cfg_mir(path: string) with IO, Mut, Panic, Div, Alloc {
+    let input = enir_driver_read(path); let module = enir_driver_read_cfg_mir(path)
+    var out = "cmir-ok|hash=" ++ enir_i64_string(enir_canonical_hash_l64(input))
+    out = out ++ "|source_enir_hash=" ++ enir_i64_string(module.source_enir_hash)
+    out = out ++ "|blocks=" ++ enir_i64_string(module.block_count) ++ "|edges=" ++ enir_i64_string(module.edge_count)
+    out = out ++ "|memory_versions=" ++ enir_i64_string(module.memory_version_count) ++ "|memory_phis=" ++ enir_i64_string(module.memory_phi_count)
+    out = out ++ "|instructions=" ++ enir_i64_string(module.instr_count) ++ "|observations=" ++ enir_i64_string(module.observation_count) ++ "\n"; print(out)
+}
+
+fn enir_driver_validate_cfg_mir(enir_path: string, mir_path: string) with IO, Mut, Panic, Div, Alloc {
+    let enir_input = enir_driver_read(enir_path); let source = enir_driver_verify_text(enir_input)
+    let mir_input = enir_driver_read(mir_path); let mir = enir_driver_read_cfg_mir(mir_path)
+    let rc = enir_cfg_mir_validate_relation(source, mir, enir_canonical_hash_l64(enir_input))
+    if rc != 0 { print("cmir-relation-error|code=" ++ enir_i64_string(rc) ++ "\n"); panic("ENIR-to-CFG-MIR relation failed") }
+    var out = "cmir-relation-ok|enir_hash=" ++ enir_i64_string(enir_canonical_hash_l64(enir_input))
+    out = out ++ "|cmir_hash=" ++ enir_i64_string(enir_canonical_hash_l64(mir_input))
+    out = out ++ "|blocks=" ++ enir_i64_string(mir.block_count) ++ "|memory_versions=" ++ enir_i64_string(mir.memory_version_count) ++ "|memory_phis=" ++ enir_i64_string(mir.memory_phi_count) ++ "\n"; print(out)
+}
+
+fn enir_driver_run_cfg_mir(path: string) with IO, Mut, Panic, Div, Alloc {
+    let input = enir_driver_read(path); let module = enir_driver_read_cfg_mir(path); let result = enir_cfg_mir_interpret(module)
+    if !result.ok { print("cmir-exec-error|code=" ++ enir_i64_string(result.error_code) ++ "\n"); panic("CFG MIR interpretation failed") }
+    var out = "cmir-exec-ok|module=" ++ enir_name_to_string(module.name) ++ "|cmir_hash=" ++ enir_i64_string(enir_canonical_hash_l64(input))
+    out = out ++ "|source_enir_hash=" ++ enir_i64_string(module.source_enir_hash) ++ "|executed_instrs=" ++ enir_i64_string(result.executed_instrs)
+    out = out ++ "|observations=" ++ enir_i64_string(result.observations) ++ "|fuel_initial=" ++ enir_i64_string(module.fuel_limit) ++ "|fuel_left=" ++ enir_i64_string(result.fuel_left)
+    out = out ++ "|stop_kind=" ++ enir_i64_string(result.stop_kind) ++ "|last_write=" ++ enir_i64_string(result.last_write) ++ "|branch_poisoned=" ++ enir_i64_string(result.branch_poisoned) ++ "|frail_branches=" ++ enir_i64_string(result.frail_branches) ++ "\n"; print(out)
+}
+
+fn enir_driver_read_join_mir(path: string) -> EnirJoinMirModule with IO, Mut, Panic, Div, Alloc {
+    let input = enir_driver_read(path)
+    let parsed = enir_join_mir_parse(input)
+    if !parsed.ok { print("jmir-error|phase=parse|code=" ++ enir_i64_string(parsed.error_code) ++ "\n"); panic("Join MIR parse failed") }
+    let rc = enir_join_mir_verify(parsed.module)
+    if rc != 0 { print("jmir-error|phase=verify|code=" ++ enir_i64_string(rc) ++ "\n"); panic("Join MIR verification failed") }
+    if enir_join_mir_print(parsed.module) != input { panic("Join MIR input is not canonical") }
+    parsed.module
+}
+
+fn enir_driver_lower_join_mir(path: string) with IO, Mut, Panic, Div, Alloc {
+    let input = enir_driver_read(path); let source = enir_driver_verify_text(input)
+    let lowered = enir_lower_to_join_mir(source, enir_canonical_hash_l64(input))
+    if !lowered.ok { print("jmir-lower-error|code=" ++ enir_i64_string(lowered.error_code) ++ "\n"); panic("ENIR-to-Join-MIR lowering failed") }
+    print(enir_join_mir_print(lowered.module))
+}
+
+fn enir_driver_verify_join_mir(path: string) with IO, Mut, Panic, Div, Alloc {
+    let input = enir_driver_read(path); let module = enir_driver_read_join_mir(path)
+    var out = "jmir-ok|hash=" ++ enir_i64_string(enir_canonical_hash_l64(input))
+    out = out ++ "|source_enir_hash=" ++ enir_i64_string(module.source_enir_hash)
+    out = out ++ "|blocks=" ++ enir_i64_string(module.block_count) ++ "|edges=" ++ enir_i64_string(module.edge_count)
+    out = out ++ "|scalar_phis=" ++ enir_i64_string(module.scalar_phi_count) ++ "|memory_versions=" ++ enir_i64_string(module.memory_version_count) ++ "|memory_phis=" ++ enir_i64_string(module.memory_phi_count)
+    out = out ++ "|instructions=" ++ enir_i64_string(module.instr_count) ++ "|observations=" ++ enir_i64_string(module.observation_count) ++ "\n"; print(out)
+}
+
+fn enir_driver_validate_join_mir(enir_path: string, mir_path: string) with IO, Mut, Panic, Div, Alloc {
+    let enir_input = enir_driver_read(enir_path); let source = enir_driver_verify_text(enir_input)
+    let mir_input = enir_driver_read(mir_path); let mir = enir_driver_read_join_mir(mir_path)
+    let rc = enir_join_mir_validate_relation(source, mir, enir_canonical_hash_l64(enir_input))
+    if rc != 0 { print("jmir-relation-error|code=" ++ enir_i64_string(rc) ++ "\n"); panic("ENIR-to-Join-MIR relation failed") }
+    var out = "jmir-relation-ok|enir_hash=" ++ enir_i64_string(enir_canonical_hash_l64(enir_input))
+    out = out ++ "|jmir_hash=" ++ enir_i64_string(enir_canonical_hash_l64(mir_input))
+    out = out ++ "|blocks=" ++ enir_i64_string(mir.block_count) ++ "|scalar_phis=" ++ enir_i64_string(mir.scalar_phi_count) ++ "|memory_versions=" ++ enir_i64_string(mir.memory_version_count) ++ "|memory_phis=" ++ enir_i64_string(mir.memory_phi_count) ++ "\n"; print(out)
+}
+
+fn enir_driver_run_join_mir(path: string) with IO, Mut, Panic, Div, Alloc {
+    let input = enir_driver_read(path); let module = enir_driver_read_join_mir(path); let result = enir_join_mir_interpret(module)
+    if !result.ok { print("jmir-exec-error|code=" ++ enir_i64_string(result.error_code) ++ "\n"); panic("Join MIR interpretation failed") }
+    var out = "jmir-exec-ok|module=" ++ enir_name_to_string(module.name) ++ "|jmir_hash=" ++ enir_i64_string(enir_canonical_hash_l64(input))
+    out = out ++ "|source_enir_hash=" ++ enir_i64_string(module.source_enir_hash) ++ "|executed_instrs=" ++ enir_i64_string(result.executed_instrs)
+    out = out ++ "|observations=" ++ enir_i64_string(result.observations) ++ "|fuel_initial=" ++ enir_i64_string(module.fuel_limit) ++ "|fuel_left=" ++ enir_i64_string(result.fuel_left)
+    out = out ++ "|stop_kind=" ++ enir_i64_string(result.stop_kind) ++ "|last_write=" ++ enir_i64_string(result.last_write) ++ "|branch_poisoned=" ++ enir_i64_string(result.branch_poisoned) ++ "|frail_branches=" ++ enir_i64_string(result.frail_branches) ++ "\n"; print(out)
+}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    let argc = arg_count()
+    if argc == 1 && get_arg(0) == "emit" {
+        enir_driver_emit()
+        return
+    }
+    if argc == 2 && get_arg(0) == "roundtrip" {
+        enir_driver_roundtrip(get_arg(1))
+        return
+    }
+    if argc == 2 && get_arg(0) == "verify" {
+        enir_driver_verify(get_arg(1))
+        return
+    }
+    if argc == 2 && get_arg(0) == "lower" {
+        enir_driver_lower(get_arg(1), enir_profile_eisa_v0())
+        return
+    }
+    if argc == 2 && get_arg(0) == "lower-v1" {
+        enir_driver_lower(get_arg(1), enir_profile_eisa_v1())
+        return
+    }
+    if argc == 2 && get_arg(0) == "lower-v2" {
+        enir_driver_lower(get_arg(1), enir_profile_eisa_v2())
+        return
+    }
+    if argc == 2 && get_arg(0) == "lower-join-v2" {
+        enir_driver_lower_join(get_arg(1))
+        return
+    }
+    if argc == 2 && get_arg(0) == "run" {
+        enir_driver_run(get_arg(1))
+        return
+    }
+    if argc == 2 && get_arg(0) == "lower-mir" {
+        enir_driver_lower_mir(get_arg(1))
+        return
+    }
+    if argc == 2 && get_arg(0) == "verify-mir" {
+        enir_driver_verify_mir(get_arg(1))
+        return
+    }
+    if argc == 2 && get_arg(0) == "run-mir" {
+        enir_driver_run_mir(get_arg(1))
+        return
+    }
+    if argc == 3 && get_arg(0) == "validate-mir" {
+        enir_driver_validate_mir(get_arg(1), get_arg(2))
+        return
+    }
+    if argc == 2 && get_arg(0) == "lower-cfg-mir" { enir_driver_lower_cfg_mir(get_arg(1)); return }
+    if argc == 2 && get_arg(0) == "verify-cfg-mir" { enir_driver_verify_cfg_mir(get_arg(1)); return }
+    if argc == 2 && get_arg(0) == "run-cfg-mir" { enir_driver_run_cfg_mir(get_arg(1)); return }
+    if argc == 3 && get_arg(0) == "validate-cfg-mir" { enir_driver_validate_cfg_mir(get_arg(1), get_arg(2)); return }
+    if argc == 2 && get_arg(0) == "lower-join-mir" { enir_driver_lower_join_mir(get_arg(1)); return }
+    if argc == 2 && get_arg(0) == "verify-join-mir" { enir_driver_verify_join_mir(get_arg(1)); return }
+    if argc == 2 && get_arg(0) == "run-join-mir" { enir_driver_run_join_mir(get_arg(1)); return }
+    if argc == 3 && get_arg(0) == "validate-join-mir" { enir_driver_validate_join_mir(get_arg(1), get_arg(2)); return }
+    panic("usage: madaros-enir <command> <artifact>")
+}
