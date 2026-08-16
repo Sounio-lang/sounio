@@ -36,6 +36,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.architecture.kaxi-bidirectional-return-channel | repo_only | docs/architecture/KAXI_BIDIRECTIONAL_RETURN_CHANNEL.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.kaxi-bidirectional.v1 | repo_only | docs/architecture/kaxi_bidirectional.v1.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.llvm-codegen | historical | docs/architecture/LLVM_CODEGEN.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.architecture.madaros-v2-eisa-semantic-ir | repo_only | docs/architecture/MADAROS_V2_EISA_SEMANTIC_IR.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.mir-cranelift-integration-report | historical | docs/architecture/MIR_CRANELIFT_INTEGRATION_REPORT.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.mir-optimization-pases-documentation | historical | docs/architecture/MIR_OPTIMIZATION_PASES_DOCUMENTATION.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.mir-optimization-strategy | historical | docs/architecture/MIR_OPTIMIZATION_STRATEGY.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -165,6 +166,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.madaros-dual-gum-knowledge-import-2026-07-19 | repo_only | docs/audit/MADAROS_DUAL_GUM_KNOWLEDGE_IMPORT_2026-07-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-engine-parity-harvest-1-2-3-2026-07-28 | repo_only | docs/audit/MADAROS_ENGINE_PARITY_HARVEST_1_2_3_2026-07-28.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-engine-parity-nongum-cluster-2026-07-28 | repo_only | docs/audit/MADAROS_ENGINE_PARITY_NONGUM_CLUSTER_2026-07-28.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.madaros-enir-driver-native-lower-139-dispatch-2026-08-16 | repo_only | docs/audit/MADAROS_ENIR_DRIVER_NATIVE_LOWER_139_DISPATCH_2026-08-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-enum-variant-sigsegv-2026-06-20 | repo_only | docs/audit/MADAROS_ENUM_VARIANT_SIGSEGV_2026-06-20.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-field-if-i64-2026-07-26 | repo_only | docs/audit/MADAROS_FIELD_IF_I64_2026-07-26.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-fo-cross-fn-return-2026-07-28 | repo_only | docs/audit/MADAROS_FO_CROSS_FN_RETURN_2026-07-28.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
