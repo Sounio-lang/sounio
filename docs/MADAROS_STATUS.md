@@ -80,8 +80,11 @@ It does not replace the compiler proof. It prevents drift in the committed agent
 instructions, `bin/souc` default-wrapper contract, `scripts/dev/e2e_gate.sh`, and
 `scripts/ci/madaros_full_gate.sh` coverage.
 
-Independently verified at `17d1157be` (fresh build from source, **not** a
-prebuilt artifact) — **10/10 PASS**:
+Freshly verified on 2026-08-16 at `f8c158ebb0` on
+`lane/codex-1/20260814` (fresh build from source, **not** a prebuilt
+artifact) — **10/10 PASS, 0 FAIL**. The raw log is
+`/tmp/ws-a-madaros-full-gate-2026-08-16.log` (SHA-256
+`da186a8fcc3014cfe518ad7b556a85ab59df7dc8e2182bbe2933ddb81a184eda`):
 
 ```
 PASS: version
@@ -93,11 +96,19 @@ PASS: source build to native ELF
 PASS: source run
 PASS: native-v2 ABI/backend witnesses
 PASS: package manager self-test
+PASS: current-source imported dereferenced f64-array lowering
 ```
 
-Re-verified at the current tip (fresh build from source through `051ddf9ae`,
-which lands a 7-bug IR/SSA/codegen batch; `fns=9612`) — same result, all checks
-PASS. The green state is not tip-fragile.
+The previous February-era status claimed 10/10 but named only nine checks. The
+fresh gate names and passes the tenth check above. Its source build reports
+`fns=10711`, up from the older documented `fns=9612` (+1099, +11.4%). The
+pass/fail result is unchanged at 10/10; the gate coverage and compiler size have
+drifted.
+
+The Omega JSON files now carry this fresh Madaros receipt separately from their
+seven historical Omega/HLIR/GPU steps. Those seven steps were not rerun by
+`madaros-full-gate`, so their evidence timestamp remains 2026-02-26 rather than
+being falsely promoted to current evidence.
 
 The previously-dangerous bad-input case is fixed on **both** paths (clean error,
 `rc=1`, **no SIGSEGV**):
