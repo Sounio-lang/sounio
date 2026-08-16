@@ -45,7 +45,21 @@ A bodyless extern declaration gets `compile_strategy = lowerer_compute_strategy_
 
 `lower_call_extern` (`self-hosted/native/lower_ir.sio:983-1004`) emits `call rel32` placeholders and records `ExternReloc` entries (`:995-998`), but `extern_relocs` has **zero consumers** in the tree (only the declaration at `self-hosted/native/frame.sio:328` and the two population lines). Wiring it up means building real ELF dynamic linking (`.dynamic`/`.dynsym`/DT_NEEDED, PLT/GOT) into the native emitter — a large, risky surface for no additional capability over the builtin route below. Rejected.
 
-## Chosen route: the live builtin registry
+## Step 0 — empirical result (route refined, 2026-08-16)
+
+The dispatch's caveat demanded the by-name chain be verified before any emitter was written. It was, with three probes under default `bin/souc`:
+
+1. `extern "C" { fn sqrt(x: f64) -> f64 }` then `sqrt(4.0)` → **exactly 0.0** (fabricated), while the same call with **no declaration** → 2.0. 
+2. `extern "C" { fn str_len(s: string) -> i64 }` then `str_len("abcd")` → **broken**, while undeclared `str_len` works everywhere.
+3. Undeclared `getpid()` and `zzz_nosuchfn()` both fail check with E137 — the checker resolves undeclared names only through its runtime-builtin table (`checker_collect_runtime_builtins_inplace`, `self-hosted/check/check.sio:3302`, whose own comment documents the same failure class from 2026-07-13).
+
+Conclusion: a bodyless extern `FnDef` **lowers as a real function whose body returns 0, and that fn shadows the by-name builtin resolution** — for names already in the registry, not just absent ones. Adding registry ids alone would change nothing. The route is therefore refined to the lean_single `strip_extern_blocks` concept, ported to the Madaros parser (the "Chosen route" machinery below remains the backend half):
+
+- **Parser** (`items.sio`): every extern "C" declaration — not just the first — is rewritten into an ordinary Sounio wrapper fn preserving the declared signature, whose body forwards to a `ffi_<name>` intrinsic (distinct name ⇒ no shadow). Extra declarations in a brace block go through a pending buffer drained by both item loops in `mod.sio` (fixing M1 in the same change). An extern whose intrinsic has no checker+registry entry now fails at the wrapper's inner call with a clear E137 — the "fail with a clear, documented error" the parent dispatch Track B asked for.
+- **Checker** (`check.sio:3302` table): bind `ffi_getpid`/`ffi_getppid` (PR-A1); `ffi_system` is added only together with its emitter (PR-A2), so an unimplemented `system()` stays a check-time error rather than a runtime zero.
+- **Registry + emitters** (`codegen_x86_linux.sio`): ids 31/32 (getpid/getppid, syscalls 39/110) — this is where the original "add ids" route applied, and it is necessary, just not sufficient.
+
+
 
 `ir_module_ensure_builtin_call_targets` (`self-hosted/compiler/module_frontend.sio:2154`, invoked at `:2264` and `:6134`) scans every `IrCall`/`IrCallSret` **by callee name**, asks `native_v2_builtin_id_for_name` (`self-hosted/native/codegen_x86_linux.sio:6575`), and if the target is missing appends an empty stub fn and rebinds the call site (`:2173-2189`). `native_v2_builtin_id_for_func_ref` (`:1102`) then hands any `instr_count == 0` function to `native_v2_emit_builtin_by_id_into` (`:6627`), which emits a hand-coded body (idiom: `emit_builtin_heap_alloc_into` `:3445`, syscall form `:3482-3483`).
 
@@ -57,9 +71,9 @@ The registry already carries `heap_alloc`/`heap_free` (ids 23/24) and the float 
 
 ## Sequenced execution (this lane)
 
-1. **PR-A1** — `getpid`(31)/`getppid`(32) builtins in `codegen_x86_linux.sio` only (`mov eax,39; syscall; ret` / `mov eax,110; syscall; ret`). Acceptance: `tests/run-pass/ffi_integer_return.sio` — **currently RED on the default suite** (`getpid()==0`) — turns green; new `tests/run-pass/ffi_getppid_return.sio` passes. Note this alone does not fix multi-decl blocks (M1) — `ffi_integer_return.sio` declares a single fn, which is why it can land first.
-2. **PR-A2** — `system()` builtin: fork(57)/execve(59, `"/bin/sh"`,`"-c"`,cmd)/wait4(61), `rdi`=cmd on entry, string literals via the data-reloc mechanism `native_v2_persist_builtin_emit_into` (`:4089`) documents. Halt-partial (allowlist only) is an acceptable outcome if literal placement proves disproportionate — recorded now, per "halt is a deliverable".
-3. **PR-A3** — M1: `items.sio` records every declaration of a brace-form block into a pending buffer (module-global `[Item;16]`, house style of `parser.sio:89-117` parallel arrays; overflow >16 → `had_error` + tagged message — largest in-tree block is 7), drained by **both** item-collection loops in `self-hosted/parser/mod.sio` (`parse_program_loop` `:16-47` AND `parse_items_loop` `:69-88` — missing the second makes the boot4-safe entry point diverge silently). Acceptance: new `tests/run-pass/ffi_extern_block_multi_decl.sio` (E137 before, green after) + the baseline table above re-run.
+1. **PR-A1** — the full refined route for `getpid`/`getppid`: parser wrapper rewrite (fixes M1 as a side effect — every declaration of a brace block becomes an item), checker entries `ffi_getpid`/`ffi_getppid`, registry ids 31/32 + emitters (`mov rax,39; syscall; ret` / `mov rax,110; syscall; ret`) in `codegen_x86_linux.sio`. Acceptance: `tests/run-pass/ffi_integer_return.sio` — **currently RED on the default suite** (`getpid()==0`) — turns green; new `tests/run-pass/ffi_getppid_return.sio` and `tests/run-pass/ffi_extern_block_multi_decl.sio` (two declarations in one block — the M1 shape) pass; the four stdlib baselines above re-run.
+2. **PR-A2** — `system()` builtin: checker entry `ffi_system` + id 33 + emitter fork(57)/execve(59, `"/bin/sh"`,`"-c"`,cmd)/wait4(61), `rdi`=cmd on entry, string literals via the data-reloc mechanism `native_v2_persist_builtin_emit_into` (`:4089`) documents. Then remove `ffi_system_exec.sio`'s `//@ ignore` (the test runs under the default engine) and add a Madaros arm to `scripts/ci/ffi_extern_c_gate.sh`. Halt-partial (allowlist without `system`) is an acceptable outcome if literal placement proves disproportionate — recorded now, per "halt is a deliverable".
+3. **PR-A3** — folded into PR-A1 by the step-0 refinement (the wrapper rewrite emits every declaration; there is no longer a separate parser change).
 
 ## Acceptance gate (the parent dispatch's list, for this track)
 

@@ -2,8 +2,8 @@
 topic_id: repo.docs.audit.module-const-string-read-file-zero-bytes-dispatch-2026-08-16
 authority: repo_only
 audience: users
-last_validated: 2026-08-16
-validated_by: claude
+last_validated: 2026-03-07
+validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.module-const-string-read-file-zero-bytes-dispatch-2026-08-16
 -->
 

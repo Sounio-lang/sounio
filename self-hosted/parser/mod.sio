@@ -13,6 +13,29 @@ use parser::exprs::*
 use parser::stmts::*
 use parser::items::*
 
+// Track A: extern "C" brace blocks emit one wrapper item per declaration;
+// items beyond the first arrive queued in reverse (items.sio). Reverse them
+// back into declaration order and push each onto the reversed accumulator so
+// the final reverse_item_list_opt lands them after the block's first item,
+// in order.
+fn pending_extern_push_all(cur: Option<Box<ItemList>>, rev: Option<Box<ItemList>>) -> Option<Box<ItemList>> with Mut, Alloc {
+    match cur {
+        None => rev
+        Some(node) => {
+            let rest = (*node).tail
+            let rev2 = Some(Box::new(ItemList { head: (*node).head, tail: rev }))
+            pending_extern_push_all(rest, rev2)
+        }
+    }
+}
+
+fn drain_pending_extern_into(rev: Option<Box<ItemList>>) -> Option<Box<ItemList>> with Mut, Alloc {
+    match parser_drain_pending_extern_items() {
+        None => rev
+        Some(p) => pending_extern_push_all(reverse_item_list_opt(Some(p)), rev)
+    }
+}
+
 fn parse_program_loop(mut_p: Parser) -> Program with Mut, IO, Panic, Div, Alloc {
     var p = mut_p
     var rev_items_opt: Option<Box<ItemList>> = None
@@ -40,6 +63,8 @@ fn parse_program_loop(mut_p: Parser) -> Program with Mut, IO, Panic, Div, Alloc 
         if item.kind != ItemKind::ItemClaim {
             rev_items_opt = Some(Box::new(ItemList { head: item, tail: rev_items_opt }))
         }
+        // Track A: append any extern "C" wrappers queued by this item.
+        rev_items_opt = drain_pending_extern_into(rev_items_opt)
     }
 
     parser_set_last_errors(p.had_error, p.error_count)
@@ -82,6 +107,8 @@ fn parse_items_loop(mut_p: Parser) -> Option<Box<ItemList>> with Mut, IO, Panic,
         if item.kind != ItemKind::ItemClaim {
             rev_items_opt = Some(Box::new(ItemList { head: item, tail: rev_items_opt }))
         }
+        // Track A: append any extern "C" wrappers queued by this item.
+        rev_items_opt = drain_pending_extern_into(rev_items_opt)
     }
     parser_set_last_errors(p.had_error, p.error_count)
     reverse_item_list_opt(rev_items_opt)
