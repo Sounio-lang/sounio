@@ -1,0 +1,494 @@
+// Madaros v2 EpistemicNumericIR (ENIR) canonical shadow data model.
+//
+// E1 is deliberately disconnected from lowering and codegen. These structs are
+// compiler-owned semantic artifacts used by the parser, printer, verifier, and
+// deterministic hash surface.
+
+// These numeric values are stable parts of the canonical on-disk format.
+pub let ENIR_SCHEMA_VERSION: i64 = 1
+pub let ENIR_SCHEMA_CFG_VERSION: i64 = 2
+pub let ENIR_SCHEMA_JOIN_VERSION: i64 = 3
+pub let ENIR_STAGE_SHADOW: i64 = 1
+pub let ENIR_STAGE_LOWERED: i64 = 2
+pub let ENIR_MAX_TYPES: i64 = 16
+pub let ENIR_MAX_VALUES: i64 = 128
+pub let ENIR_MAX_PROVENANCE: i64 = 128
+pub let ENIR_MAX_POLICIES: i64 = 16
+pub let ENIR_MAX_OPS: i64 = 128
+pub let ENIR_MAX_OBSERVATIONS: i64 = 64
+pub let ENIR_NAME_CAP: i64 = 64
+pub let ENIR_MAX_BLOCKS: i64 = 16
+pub let ENIR_MAX_BLOCK_ARGS: i64 = 32
+pub let ENIR_MAX_EDGES: i64 = 32
+pub let ENIR_MAX_EDGE_ARGS: i64 = 4
+
+pub fn enir_value_f64() -> i64 { 4 }
+
+pub fn enir_error_exact() -> i64 { 0 }
+pub fn enir_error_dd64() -> i64 { 1 }
+pub fn enir_error_qd128() -> i64 { 2 }
+pub fn enir_error_static_bound() -> i64 { 3 }
+
+pub fn enir_uncertainty_exact() -> i64 { 0 }
+pub fn enir_uncertainty_gum1() -> i64 { 1 }
+pub fn enir_uncertainty_interval() -> i64 { 2 }
+pub fn enir_uncertainty_pbox() -> i64 { 3 }
+pub fn enir_uncertainty_unknown() -> i64 { 4 }
+
+pub fn enir_profile_eisa_v0() -> i64 { 0 }
+pub fn enir_profile_eisa_v1() -> i64 { 1 }
+pub fn enir_profile_eisa_v2() -> i64 { 2 }
+pub fn enir_profile_general() -> i64 { 3 }
+
+pub fn enir_fp_positive_zero() -> i64 { 0 }
+pub fn enir_fp_negative_zero() -> i64 { 1 }
+pub fn enir_fp_subnormal() -> i64 { 2 }
+pub fn enir_fp_normal() -> i64 { 3 }
+pub fn enir_fp_positive_infinity() -> i64 { 4 }
+pub fn enir_fp_negative_infinity() -> i64 { 5 }
+pub fn enir_fp_quiet_nan() -> i64 { 6 }
+pub fn enir_fp_signaling_nan() -> i64 { 7 }
+
+pub fn enir_status_clean() -> i64 { 0 }
+pub fn enir_status_poisoned() -> i64 { 1 }
+pub fn enir_status_trapped() -> i64 { 2 }
+pub fn enir_status_unsupported() -> i64 { 3 }
+
+pub fn enir_branch_policy_count_only() -> i64 { 0 }
+pub fn enir_gate_policy_10_100() -> i64 { 0 }
+
+pub fn enir_op_econst() -> i64 { 0 }
+pub fn enir_op_eload() -> i64 { 1 }
+pub fn enir_op_eadd() -> i64 { 2 }
+pub fn enir_op_esub() -> i64 { 3 }
+pub fn enir_op_emul() -> i64 { 4 }
+pub fn enir_op_ediv() -> i64 { 5 }
+pub fn enir_op_esqrt() -> i64 { 6 }
+pub fn enir_op_egate() -> i64 { 7 }
+pub fn enir_op_estore() -> i64 { 8 }
+pub fn enir_op_emov() -> i64 { 9 }
+pub fn enir_op_ebr() -> i64 { 10 }
+pub fn enir_op_ebrz() -> i64 { 11 }
+pub fn enir_op_ebrn() -> i64 { 12 }
+pub fn enir_op_ehalt() -> i64 { 13 }
+
+pub fn enir_observation_gate() -> i64 { 0 }
+pub fn enir_observation_fuel() -> i64 { 1 }
+
+pub fn enir_term_halt() -> i64 { 0 }
+pub fn enir_term_jump() -> i64 { 1 }
+pub fn enir_term_branch_zero() -> i64 { 2 }
+pub fn enir_term_branch_negative() -> i64 { 3 }
+pub fn enir_transform_block_arg() -> i64 { 100 }
+
+pub fn enir_schema_has_cfg(schema: i64) -> bool {
+    schema == ENIR_SCHEMA_CFG_VERSION || schema == ENIR_SCHEMA_JOIN_VERSION
+}
+
+pub fn enir_cfg_op_allowed(opcode: i64) -> bool {
+    opcode == enir_op_econst() || opcode == enir_op_eload() ||
+    (opcode >= enir_op_eadd() && opcode <= enir_op_egate()) ||
+    opcode == enir_op_estore() || opcode == enir_op_emov()
+}
+
+pub struct EnirName {
+    pub buf: [i8; 64],
+    pub len: i64,
+}
+
+pub fn enir_name_empty() -> EnirName {
+    EnirName { buf: [0; 64], len: 0 }
+}
+
+pub fn enir_name_from_string(s: string) -> EnirName with Mut, Panic, Div {
+    var out = enir_name_empty()
+    let n = str_len(s)
+    if n <= 0 || n > ENIR_NAME_CAP { return out }
+    var i: i64 = 0
+    while i < n {
+        let ch = str_char_at(s, i) as i64
+        // Canonical names are printable ASCII without the field/newline bytes.
+        if ch < 33 || ch > 126 || ch == 124 { return enir_name_empty() }
+        out.buf[i as usize] = ch as i8
+        i = i + 1
+    }
+    out.len = n
+    out
+}
+
+pub fn enir_name_eq(a: EnirName, b: EnirName) -> bool {
+    if a.len != b.len { return false }
+    var i: i64 = 0
+    while i < a.len {
+        if a.buf[i as usize] != b.buf[i as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
+pub fn enir_name_to_string(n: EnirName) -> string with Mut, Panic, Div, Alloc {
+    str_from_bytes(n.buf, n.len)
+}
+
+pub struct EnirType {
+    pub id: i64,
+    pub value_kind: i64,
+    pub error_kind: i64,
+    pub uncertainty_kind: i64,
+    pub status_tracked: i64,
+    pub provenance_tracked: i64,
+    pub profile: i64,
+}
+
+pub fn enir_type_empty() -> EnirType {
+    EnirType {
+        id: -1,
+        value_kind: -1,
+        error_kind: -1,
+        uncertainty_kind: -1,
+        status_tracked: 0,
+        provenance_tracked: 0,
+        profile: -1,
+    }
+}
+
+// Symbolic SSA value descriptor. known_bits=0 means runtime bits/class/error
+// words are not statically known; the fields remain present and canonical.
+pub struct EnirValue {
+    pub id: i64,
+    pub type_id: i64,
+    pub known_bits: i64,
+    pub value_bits: i64,
+    pub fp_class: i64,
+    pub error0_bits: i64,
+    pub error1_bits: i64,
+    pub error2_bits: i64,
+    pub error3_bits: i64,
+    pub uncertainty_bits: i64,
+    pub status_kind: i64,
+    pub status_reason: i64,
+    pub provenance_id: i64,
+}
+
+pub fn enir_value_empty() -> EnirValue {
+    EnirValue {
+        id: -1,
+        type_id: -1,
+        known_bits: 0,
+        value_bits: 0,
+        fp_class: -1,
+        error0_bits: 0,
+        error1_bits: 0,
+        error2_bits: 0,
+        error3_bits: 0,
+        uncertainty_bits: 0,
+        status_kind: -1,
+        status_reason: -1,
+        provenance_id: -1,
+    }
+}
+
+pub struct EnirProvenance {
+    pub id: i64,
+    pub source_span_id: i64,
+    pub input_origin_id: i64,
+    pub transform_id: i64,
+    pub assumption_id: i64,
+    pub policy_id: i64,
+}
+
+pub fn enir_provenance_empty() -> EnirProvenance {
+    EnirProvenance {
+        id: -1,
+        source_span_id: -1,
+        input_origin_id: -1,
+        transform_id: -1,
+        assumption_id: -1,
+        policy_id: -1,
+    }
+}
+
+pub struct EnirPolicy {
+    pub id: i64,
+    pub name: EnirName,
+    pub branch_kind: i64,
+    pub gate_kind: i64,
+}
+
+pub fn enir_policy_empty() -> EnirPolicy {
+    EnirPolicy {
+        id: -1,
+        name: enir_name_empty(),
+        branch_kind: -1,
+        gate_kind: -1,
+    }
+}
+
+pub struct EnirOp {
+    pub id: i64,
+    pub opcode: i64,
+    pub result_id: i64,
+    pub type_id: i64,
+    pub a: i64,
+    pub b: i64,
+    pub target: i64,
+    pub policy_id: i64,
+    pub memory_slot: i64,
+    pub fuel_cost: i64,
+}
+
+pub fn enir_op_empty() -> EnirOp {
+    EnirOp {
+        id: -1,
+        opcode: -1,
+        result_id: -1,
+        type_id: -1,
+        a: -1,
+        b: -1,
+        target: -1,
+        policy_id: -1,
+        memory_slot: -1,
+        fuel_cost: -1,
+    }
+}
+
+pub struct EnirObservation {
+    pub id: i64,
+    pub program_name: EnirName,
+    pub ordinal: i64,
+    pub kind: i64,
+}
+
+pub fn enir_observation_empty() -> EnirObservation {
+    EnirObservation {
+        id: -1,
+        program_name: enir_name_empty(),
+        ordinal: -1,
+        kind: -1,
+    }
+}
+
+pub struct EnirBlock {
+    pub id: i64,
+    pub first_op: i64,
+    pub op_count: i64,
+    pub arg_start: i64,
+    pub arg_count: i64,
+    pub terminator_kind: i64,
+    pub condition_value: i64,
+    pub edge0: i64,
+    pub edge1: i64,
+    pub terminator_fuel_cost: i64,
+}
+
+pub fn enir_block_empty() -> EnirBlock {
+    EnirBlock {
+        id: -1,
+        first_op: -1,
+        op_count: -1,
+        arg_start: -1,
+        arg_count: 0,
+        terminator_kind: -1,
+        condition_value: -1,
+        edge0: -1,
+        edge1: -1,
+        terminator_fuel_cost: -1,
+    }
+}
+
+pub struct EnirBlockArg {
+    pub id: i64,
+    pub block_id: i64,
+    pub ordinal: i64,
+    pub value_id: i64,
+    pub type_id: i64,
+    pub provenance_id: i64,
+}
+
+pub fn enir_block_arg_empty() -> EnirBlockArg {
+    EnirBlockArg { id: -1, block_id: -1, ordinal: -1, value_id: -1, type_id: -1, provenance_id: -1 }
+}
+
+pub struct EnirEdge {
+    pub id: i64,
+    pub from_block: i64,
+    pub to_block: i64,
+    pub arg_count: i64,
+    pub arg0: i64,
+    pub arg1: i64,
+    pub arg2: i64,
+    pub arg3: i64,
+}
+
+pub fn enir_edge_empty() -> EnirEdge {
+    EnirEdge { id: -1, from_block: -1, to_block: -1, arg_count: 0, arg0: -1, arg1: -1, arg2: -1, arg3: -1 }
+}
+
+pub struct EnirModule {
+    pub schema_version: i64,
+    pub stage: i64,
+    pub name: EnirName,
+    pub profile: i64,
+    pub fuel_limit: i64,
+    pub types: [EnirType; 16],
+    pub type_count: i64,
+    pub values: [EnirValue; 128],
+    pub value_count: i64,
+    pub provenance: [EnirProvenance; 128],
+    pub provenance_count: i64,
+    pub policies: [EnirPolicy; 16],
+    pub policy_count: i64,
+    pub ops: [EnirOp; 128],
+    pub op_count: i64,
+    pub observations: [EnirObservation; 64],
+    pub observation_count: i64,
+    pub blocks: [EnirBlock; 16],
+    pub block_count: i64,
+    pub block_args: [EnirBlockArg; 32],
+    pub block_arg_count: i64,
+    pub edges: [EnirEdge; 32],
+    pub edge_count: i64,
+    pub program_count: i64,
+    pub declared_type_count: i64,
+    pub declared_value_count: i64,
+    pub declared_provenance_count: i64,
+    pub declared_policy_count: i64,
+    pub declared_op_count: i64,
+    pub declared_observation_count: i64,
+    pub declared_block_count: i64,
+    pub declared_block_arg_count: i64,
+    pub declared_edge_count: i64,
+    pub declared_program_count: i64,
+}
+
+pub fn enir_module_empty() -> EnirModule {
+    EnirModule {
+        schema_version: ENIR_SCHEMA_VERSION,
+        stage: ENIR_STAGE_SHADOW,
+        name: enir_name_empty(),
+        profile: -1,
+        fuel_limit: -1,
+        types: [EnirType { id: -1, value_kind: -1, error_kind: -1, uncertainty_kind: -1, status_tracked: 0, provenance_tracked: 0, profile: -1 }; 16],
+        type_count: 0,
+        values: [EnirValue { id: -1, type_id: -1, known_bits: 0, value_bits: 0, fp_class: -1, error0_bits: 0, error1_bits: 0, error2_bits: 0, error3_bits: 0, uncertainty_bits: 0, status_kind: -1, status_reason: -1, provenance_id: -1 }; 128],
+        value_count: 0,
+        provenance: [EnirProvenance { id: -1, source_span_id: -1, input_origin_id: -1, transform_id: -1, assumption_id: -1, policy_id: -1 }; 128],
+        provenance_count: 0,
+        policies: [EnirPolicy { id: -1, name: EnirName { buf: [0; 64], len: 0 }, branch_kind: -1, gate_kind: -1 }; 16],
+        policy_count: 0,
+        ops: [EnirOp { id: -1, opcode: -1, result_id: -1, type_id: -1, a: -1, b: -1, target: -1, policy_id: -1, memory_slot: -1, fuel_cost: -1 }; 128],
+        op_count: 0,
+        observations: [EnirObservation { id: -1, program_name: EnirName { buf: [0; 64], len: 0 }, ordinal: -1, kind: -1 }; 64],
+        observation_count: 0,
+        blocks: [EnirBlock { id: -1, first_op: -1, op_count: -1, arg_start: -1, arg_count: 0, terminator_kind: -1, condition_value: -1, edge0: -1, edge1: -1, terminator_fuel_cost: -1 }; 16],
+        block_count: 0,
+        block_args: [EnirBlockArg { id: -1, block_id: -1, ordinal: -1, value_id: -1, type_id: -1, provenance_id: -1 }; 32],
+        block_arg_count: 0,
+        edges: [EnirEdge { id: -1, from_block: -1, to_block: -1, arg_count: 0, arg0: -1, arg1: -1, arg2: -1, arg3: -1 }; 32],
+        edge_count: 0,
+        program_count: 0,
+        declared_type_count: -1,
+        declared_value_count: -1,
+        declared_provenance_count: -1,
+        declared_policy_count: -1,
+        declared_op_count: -1,
+        declared_observation_count: -1,
+        declared_block_count: -1,
+        declared_block_arg_count: -1,
+        declared_edge_count: -1,
+        declared_program_count: -1,
+    }
+}
+
+pub fn enir_module_push_value(m: EnirModule, value: EnirValue) -> EnirModule with Mut, Panic {
+    var out = m
+    if out.value_count >= ENIR_MAX_VALUES { return out }
+    out.values[out.value_count as usize] = value
+    out.value_count = out.value_count + 1
+    out
+}
+
+pub fn enir_module_push_provenance(m: EnirModule, provenance: EnirProvenance) -> EnirModule with Mut, Panic {
+    var out = m
+    if out.provenance_count >= ENIR_MAX_PROVENANCE { return out }
+    out.provenance[out.provenance_count as usize] = provenance
+    out.provenance_count = out.provenance_count + 1
+    out
+}
+
+pub fn enir_module_push_type(m: EnirModule, ty: EnirType) -> EnirModule with Mut, Panic {
+    var out = m
+    if out.type_count >= ENIR_MAX_TYPES { return out }
+    out.types[out.type_count as usize] = ty
+    out.type_count = out.type_count + 1
+    out
+}
+
+pub fn enir_module_push_policy(m: EnirModule, policy: EnirPolicy) -> EnirModule with Mut, Panic {
+    var out = m
+    if out.policy_count >= ENIR_MAX_POLICIES { return out }
+    out.policies[out.policy_count as usize] = policy
+    out.policy_count = out.policy_count + 1
+    out
+}
+
+pub fn enir_module_push_op(m: EnirModule, op: EnirOp) -> EnirModule with Mut, Panic {
+    var out = m
+    if out.op_count >= ENIR_MAX_OPS { return out }
+    out.ops[out.op_count as usize] = op
+    out.op_count = out.op_count + 1
+    out
+}
+
+pub fn enir_module_push_observation(m: EnirModule, obs: EnirObservation) -> EnirModule with Mut, Panic {
+    var out = m
+    if out.observation_count >= ENIR_MAX_OBSERVATIONS { return out }
+    out.observations[out.observation_count as usize] = obs
+    out.observation_count = out.observation_count + 1
+    out
+}
+
+pub fn enir_module_push_block(m: EnirModule, block: EnirBlock) -> EnirModule with Mut, Panic {
+    var out = m
+    if out.block_count >= ENIR_MAX_BLOCKS { return out }
+    out.blocks[out.block_count as usize] = block
+    out.block_count = out.block_count + 1
+    out
+}
+
+pub fn enir_module_push_block_arg(m: EnirModule, arg: EnirBlockArg) -> EnirModule with Mut, Panic {
+    var out = m
+    if out.block_arg_count >= ENIR_MAX_BLOCK_ARGS { return out }
+    out.block_args[out.block_arg_count as usize] = arg
+    out.block_arg_count = out.block_arg_count + 1
+    out
+}
+
+pub fn enir_module_push_edge(m: EnirModule, edge: EnirEdge) -> EnirModule with Mut, Panic {
+    var out = m
+    if out.edge_count >= ENIR_MAX_EDGES { return out }
+    out.edges[out.edge_count as usize] = edge
+    out.edge_count = out.edge_count + 1
+    out
+}
+
+pub fn enir_module_finalize_counts(m: EnirModule, programs: i64) -> EnirModule with Mut {
+    var out = m
+    out.program_count = programs
+    out.declared_type_count = out.type_count
+    out.declared_value_count = out.value_count
+    out.declared_provenance_count = out.provenance_count
+    out.declared_policy_count = out.policy_count
+    out.declared_op_count = out.op_count
+    out.declared_observation_count = out.observation_count
+    out.declared_program_count = programs
+    out
+}
+
+pub fn enir_module_finalize_cfg_counts(m: EnirModule, programs: i64) -> EnirModule with Mut {
+    var out = enir_module_finalize_counts(m, programs)
+    out.declared_block_count = out.block_count
+    out.declared_block_arg_count = out.block_arg_count
+    out.declared_edge_count = out.edge_count
+    out
+}

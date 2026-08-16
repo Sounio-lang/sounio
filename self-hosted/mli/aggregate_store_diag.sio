@@ -1,0 +1,72 @@
+// Aggregate-store diagnostic — NOT part of the S1 gate (always exits 0).
+//
+// Pins the two Madaros native-v2 aggregate shapes measured on this lane
+// (2026-08-16, lane mli-s1) that forced MLI's SoA instruction pool:
+//
+//   SHAPE 1 (SIGSEGV, not reproduced here because it crashes): storing a
+//   360 B struct nested 3 deep (MliInst, which contains 4x MliOperand, each
+//   containing MliKind) into an array element field:
+//       var blk = <struct with field instrs: [MliInst; 32]>
+//       blk.instrs[0] = inst          // segfaults at runtime
+//   Repro recipe: revert mli/ir.sio to an AoS MliBlock { instrs: [MliInst; 32] }
+//   and run any builder fixture. Smaller elements survive: [MliKind; N] (48 B,
+//   flat) and [MliOperand; N] (80 B, depth 2) element stores are fine — see
+//   probes below.
+//
+//   SHAPE 2 (SILENT misaddress — the dangerous one, probed live below):
+//   scalar field writes through &!Struct into an array-of-struct element,
+//   f.blocks[b].field = v, land at wrong offsets: sibling fields / sibling
+//   elements are clobbered. Observed as MLI blk_id[0] flipping to 1 and
+//   has_term reading true after unrelated writes. This diagnostic reports
+//   OBSERVED/NOT_OBSERVED so the witness-matrix lane can track the fix
+//   (#1678/#1749 family).
+
+use mli::ir::*
+
+pub struct DiagBox {
+    pub blocks: [MliBlock; 4],
+    pub tail: i64,
+}
+
+fn write_count(d: &!DiagBox, i: i64, v: i64) with Mut, Panic {
+    d.blocks[i].instr_count = v
+}
+
+fn write_id(d: &!DiagBox, i: i64, v: i64) with Mut, Panic {
+    d.blocks[i].id = v
+}
+
+fn main() -> i64 with IO, Mut, Panic {
+    println("aggregate_store_diag: begin")
+
+    var d = DiagBox {
+        blocks: [MliBlock { id: 0, instr_count: 0, has_term: false }; 4],
+        tail: 12345,
+    }
+
+    write_id(&!d, 0, 10)
+    write_id(&!d, 1, 11)
+    write_id(&!d, 2, 12)
+    write_count(&!d, 1, 77)
+
+    var bad: i64 = 0
+    if d.blocks[0].id != 10 { bad = bad + 1 }
+    if d.blocks[1].id != 11 { bad = bad + 1 }
+    if d.blocks[2].id != 12 { bad = bad + 1 }
+    if d.blocks[3].id != 0 { bad = bad + 1 }
+    if d.blocks[1].instr_count != 77 { bad = bad + 1 }
+    if d.blocks[0].instr_count != 0 { bad = bad + 1 }
+    if d.blocks[2].instr_count != 0 { bad = bad + 1 }
+    if d.tail != 12345 { bad = bad + 1 }
+
+    if bad == 0 {
+        println("aggregate_store_diag: NOT_OBSERVED (nested scalar field writes are clean)")
+    } else {
+        print("aggregate_store_diag: OBSERVED (")
+        print_int(bad)
+        print(" misaddressed cells) — #1678/#1749 family still live for this shape")
+        print("\n")
+    }
+    println("aggregate_store_diag: end")
+    0
+}

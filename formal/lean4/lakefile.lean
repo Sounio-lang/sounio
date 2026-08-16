@@ -685,3 +685,8 @@ lean_lib «SounioFoMethodXferFragment» where
 @[default_target]
 lean_lib «SounioFoMultimodFragment» where
 
+
+-- P3: Opioid weaning safety (F5c) — MOVED to sibling repo
+-- ../sounio-pbpk-sedation-weaning/formal/lean4/SounioOpioidWeaningSafety.lean
+-- (see stdlib/darwin_pbpk/WEANING_MOVED.md). Build there:
+--   cd ../sounio-pbpk-sedation-weaning/formal/lean4 && lake build SounioOpioidWeaningSafety
