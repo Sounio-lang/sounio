@@ -220,10 +220,111 @@ A wave-3 cross-validation script that diffs this corpus's results against
 one of those libraries would be a high-value add — tracked under WS-G
 V0-D followups, not wave 1.
 
-## Lane claim
+## Lane claim (Wave 1 arithmetic)
 
-The Sounio coordination bus records this lane as claimed by
+The Sounio coordination bus records the original arithmetic corpus as claimed by
 `minimax-cli3` for the intent `WS-G MPFR f128/f256 test vectors` against
 file scope `tests/vectors/f128_f256/**`. See
 `docs/internal/coordination/MADAROS_FOCUS_PLAN_2026-08-16.md` §1 WS-G
-and §3 Wave 1.
+and §3 Wave 1. Commit: `8ce767f33b`.
+
+---
+
+## Wave 3 extension — literal / boundary / double-rounding vectors
+
+**Agent:** grok-cli1 · lane `ws-g-ref-vectors` · 2026-08-16  
+**Disposition of Wave 1 corpus:** **REUSED** (not replaced). Arithmetic
+`f128.jsonl` / `f256.jsonl` and `gen/mpfr_vector_gen.c` unchanged from
+`8ce767f33b`. New files only.
+
+### Why a second corpus
+
+V0-B probes check that a **source literal** becomes the correct wide bit
+pattern. The arithmetic corpus answers “what is a⊕b?” — necessary for V0-D,
+insufficient for V0-B. In particular, a parser that widens through `f64`
+is self-consistent against itself and still wrong on every
+`double_rounds_differs=true` case.
+
+### Toolchain (this generation)
+
+| Component | Version |
+|---|---|
+| GCC | host `gcc` on Ubuntu 24.04 pod |
+| MPFR | **4.2.1** (`pkg-config --modversion mpfr`) |
+| GMP | linked via `-lgmp` |
+| Rounding | `MPFR_RNDN` (IEEE round-ties-to-even) |
+| Extended precision | 2048 bits before RNE to target |
+
+Build / run:
+
+```
+cd tests/vectors/f128_f256/gen
+gcc -O2 -Wall -Wextra -Wno-unused-function \
+  -o literal_boundary_gen literal_boundary_gen.c -lmpfr -lgmp
+./run_literal_boundary.sh
+```
+
+Exact invocation per vector (also inlined in each JSON `provenance` field):
+
+```
+mpfr_set_str(s, 0, MPFR_RNDN);           # parse source (decimal or hexfloat)
+direct:  mpfr_set(y, x, MPFR_RNDN) at p=113 (f128) or p=237 (f256); encode wire
+via_f64: mpfr_set(d, x, MPFR_RNDN) at p=53; encode that real as binaryN
+double_rounds_differs := (direct wire != via_f64 wire)
+```
+
+### Coverage (literal corpora)
+
+| Family | f128 | f256 | Notes |
+|---|---:|---:|---|
+| exactly_representable | 17 | 17 | 0, ±1, dyadics, hexfloat 1.0/2.0/0.5 |
+| provably_not_representable | 6 | 6 | 0.1, 0.2, 0.3, π/e digit strings |
+| subnormal | 4 | 3 | min subnormal 2^(emin−(p−1)), neighbors |
+| min_normal | 2 | 2 | ±2^emin |
+| max_finite | 2 | 1 | all-ones trailing at emax |
+| ulp_neighbors | 4 | 2 | 1.0, 1+ulp, ulp(1.0) |
+| double_rounding_trap | 10 | 10 | cases where via_f64 ≠ direct |
+| literal_boundary | 8 | 8 | 1e0, 1E0, 0X1.0P+0, equiv spellings |
+| **Total** | **53** | **49** | |
+
+Measured `double_rounds_differs=true`: **18** (f128) + **16** (f256) = **34**
+(includes traps plus some non-trap family rows that still differ, e.g. 0.1
+under `provably_not_representable`).
+
+### Spot checks (this session)
+
+| Input | Expected property | Result |
+|---|---|---|
+| `1` → binary128 | exp=16383, trailing=0, limbs hi=`0x3fff000000000000` | PASS |
+| `0x1p-16494` | min subnormal, limbs `[1,0]` | PASS |
+| `0x1p-16382` | min normal, exp_biased=1 | PASS |
+| `0.1` direct vs via_f64 | `double_rounds_differs=true`; trailing `…999a` vs `…a000…` | PASS |
+
+### Output hashes (literal corpora, this generation)
+
+```
+literal_boundary_f128.jsonl  53 lines
+  md5    = e8ab21e596603c7aa37ebb70fd14e673
+  sha256 = 4b7804f0d70016770fb8bda4b67beb9226be1cebf9dc02f3771a4a7fcdbfa52d
+
+literal_boundary_f256.jsonl  49 lines
+  md5    = 7727492e8fc930bfdf304ace65f8e47d
+  sha256 = 574161d42fe10379d42198c03474a7b0b1daa39235111c45c2e8e28a7017a4c3
+```
+
+Re-check: `md5sum tests/vectors/f128_f256/literal_boundary_*.jsonl`
+
+### How grok-cli3 V0-B probes should consume these
+
+1. For each vector with `source_kind` decimal/hexfloat, emit a Sounio literal
+   (once V0-B accepts them) or a payload constant built from `expected.limbs`.
+2. Assert the compiled/checked constant matches `expected` bit-for-bit.
+3. **Must include** every `double_rounds_differs=true` row — these fail any
+   widen-f64 shortcut that still passes pure dyadic cases.
+4. Do **not** use Sounio output as the oracle for these files.
+
+### What was not done here
+
+- SoftFloat / libbid cross-check of the arithmetic corpora (still future).
+- Regeneration of minimax arithmetic JSONL (left frozen at `8ce767f33b` hashes).
+- Sounio probes or ladder gate scripts (grok-cli3 ownership).

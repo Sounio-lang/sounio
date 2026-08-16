@@ -9,29 +9,44 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.tests.vectors.f128-
 
 # f128 / f256 MPFR Test-Vector Corpus
 
-External-oracle test vectors for IEEE-754 binary128 and binary256 arithmetic
-and comparison, generated from MPFR (the Multiple Precision Floating-Point
-Reliable Library). Used to gate Sounio's future softfloat f128/f256
-implementation (WS-G V0-D in the Madaros focus plan).
+External-oracle test vectors for IEEE-754 binary128 and binary256, generated
+from **MPFR** (not Sounio). Two families:
 
-This directory contains **vectors only** — no Sounio arithmetic. The
-generator lives in `gen/`; the corpora are `f128.jsonl` and `f256.jsonl`.
+| Family | Files | Role |
+|---|---|---|
+| **Arithmetic ops** (Wave 1, minimax-cli3) | `f128.jsonl`, `f256.jsonl` | add/sub/mul/div/cmp vs MPFR — gates V0-D softfloat |
+| **Literal / boundary** (Wave 3, grok-cli1) | `literal_boundary_f128.jsonl`, `literal_boundary_f256.jsonl` | source string → bit pattern; **double-rounding traps** for V0-B/V0-C probes |
+
+A probe that checks Sounio only against Sounio cannot detect a systematically
+wrong implementation. These corpora are the external ground truth.
 
 ## Files
 
 ```
 tests/vectors/f128_f256/
-├── README.md                # this file
-├── GENERATION_RECEIPT.md    # how every vector was produced, with hashes
-├── f128.jsonl               # 4414 vectors, one per line
-├── f256.jsonl               # 4411 vectors, one per line
+├── README.md                      # this file
+├── GENERATION_RECEIPT.md          # provenance + hashes (both generators)
+├── f128.jsonl                     # 4414 arithmetic vectors (minimax-cli3)
+├── f256.jsonl                     # 4411 arithmetic vectors
+├── literal_boundary_f128.jsonl    # 53 literal/boundary vectors (Wave 3)
+├── literal_boundary_f256.jsonl    # 49 literal/boundary vectors
 └── gen/
-    ├── mpfr_vector_gen.c    # the generator (C, MPFR + GMP)
-    ├── run.sh               # rebuild + regenerate wrapper
-    └── .gitignore           # excludes the compiled binary
+    ├── mpfr_vector_gen.c          # arithmetic corpus generator
+    ├── run.sh
+    ├── literal_boundary_gen.c     # literal + double-round generator
+    ├── run_literal_boundary.sh
+    └── .gitignore
 ```
 
-## Quickstart for consumers
+## Relationship to minimax-cli3 (`8ce767f33b`)
+
+**Reused, not replaced.** The arithmetic corpora and `mpfr_vector_gen.c` are
+kept byte-identical to commit `8ce767f33b`. Wave 3 **extends** the directory
+with a second generator and two new JSONL files aimed at V0-B literal probes
+(especially double-rounding traps that a widen-from-f64 parser shortcut
+passes while still being wrong).
+
+## Quickstart — arithmetic (V0-D)
 
 ```python
 import json
@@ -40,43 +55,59 @@ with open("tests/vectors/f128_f256/f128.jsonl") as f:
         v = json.loads(line)
         op = v["op"]                       # e.g. "f128_add"
         a, b, r = v["a"], v["b"], v["result"]
-        # a, b, r are dicts with class/sign/exponent/trailing_hex/limbs
-        # for cmp_* ops, r is a plain bool
 ```
 
-For Sounio consumers: each vector's `limbs` field is exactly the
-little-endian `i64` sequence an `IrWideNumericPayloadPool` entry takes
-(2 limbs for f128, 4 limbs for f256) — see
-`self-hosted/compiler/f128_f256_numeric_payload_probe.sio`.
+## Quickstart — literal boundary (V0-B / V0-C)
+
+```python
+import json
+with open("tests/vectors/f128_f256/literal_boundary_f128.jsonl") as f:
+    for line in f:
+        v = json.loads(line)
+        lit = v["source_literal"]          # e.g. "0.1", "0x1p-16494"
+        expected = v["expected"]           # direct string→binaryN (MPFR RNE)
+        via_f64 = v["via_f64"]             # string→f64 RNE→widen
+        if v["double_rounds_differs"]:
+            # a correct f128 parse must match expected, NOT via_f64
+            ...
+```
+
+Families in the literal corpora:
+
+| `family` | Meaning |
+|---|---|
+| `exactly_representable` | Dyadic / integer values with unique encoding |
+| `provably_not_representable` | Non-dyadic decimals (need RNE) |
+| `subnormal` | Min subnormal and near-range hexfloat |
+| `min_normal` | Smallest positive normal |
+| `max_finite` | Largest finite magnitude |
+| `ulp_neighbors` | 1.0 ± ulp and ulp-as-value |
+| `double_rounding_trap` | Direct vs via-f64 encodings **differ** |
+| `literal_boundary` | Spelling variants (1e0, 0X1.0P+0, …) |
+
+Every vector carries a `provenance` object: tool, version, rounding mode,
+invocation sketch, generator path, notes. Magic constants without derivation
+are forbidden.
+
+`limbs` is little-endian `i64` payload matching
+`IrWideNumericPayloadPool` (2 limbs f128, 4 limbs f256).
 
 ## Regenerating
 
 ```sh
 cd tests/vectors/f128_f256/gen
-./run.sh
+./run.sh                     # arithmetic corpora
+./run_literal_boundary.sh    # literal/boundary corpora
 ```
 
-Records tool versions, seeds, and hashes to stderr; updates
-`f128.jsonl` and `f256.jsonl` in the parent directory. Output is
-deterministic for a given toolchain — see `GENERATION_RECEIPT.md` for the
-fixed PCG seed and the build command.
+## Why MPFR
 
-## Why MPFR and not "another f128 library"
-
-MPFR is the standard, well-tested arbitrary-precision reference; it gives
-us effectively infinite precision for the computation step, and we then
-apply IEEE-754 RNE rounding manually to land on the target format. This
-isolates the rounding-logic correctness question (which is what bites
-implementations) from the question "is MPFR correct at large precision"
-(whose answer is "yes, with extreme thoroughness" — see the MPFR
-correctness proofs).
-
-A *separate* cross-check against a non-MPFR oracle (e.g. SoftFloat,
-libbid) is a wave-3 follow-up; see the receipt's "Cross-validation
-against an independent oracle (future work)" section.
+MPFR is the standard extended-precision reference. Arithmetic vectors compute
+at high precision then apply IEEE-754 RNE. Literal vectors parse the source
+string at 2048-bit precision then RNE to binary128/256; the via-f64 path
+rounds to 53-bit precision first. Neither path uses Sounio.
 
 ## Lane / coordination
 
-Lane `ws-g-mpfr-vectors`, agent `minimax-cli3`, per
-`docs/internal/coordination/MADAROS_FOCUS_PLAN_2026-08-16.md` §1 WS-G
-and §3 Wave 1.
+- Wave 1 arithmetic: `minimax-cli3` / `ws-g-mpfr-vectors` (`8ce767f33b`)
+- Wave 3 literal extension: `grok-cli1` / `ws-g-ref-vectors`
