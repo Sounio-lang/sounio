@@ -46,6 +46,20 @@ echo "commit=$COMMIT  host=$(hostname)  souc=$("$SOUC" --version 2>&1 | head -1)
 
 pass(){ echo "  PASS  $1"; }
 fail(){ echo "  FAIL  $1"; FAILED=1; }
+
+# STRUCTURAL arm (the func_ref-path guard). A per-name EXECUTION witness proves
+# only the path it happens to exercise; it says nothing about the func_ref
+# authority the mirror checks. So assert the #1622 mirror directly: every name
+# the checker allowlists (removes E219 for) must appear in the backend authority
+# native_v2_builtin_id_for_func_ref under the SAME spelling. This is exactly the
+# invariant a name like `free` vs recogniser `free_extern` violated silently —
+# a byte-match that resolves at runtime while the declared authority disagrees.
+echo "--- STRUCTURAL: checker allowlist <-> backend func_ref authority mirror ---"
+if bash "$ROOT_DIR/scripts/ci/extern_builtin_mirror_gate.sh" > "$TMPDIR/ffi-mirror.log" 2>&1; then
+  pass "extern-builtin mirror: checker and backend agree (no drift)"
+else
+  fail "extern-builtin mirror drift: $(grep -E '^[-+]' "$TMPDIR/ffi-mirror.log" | tr '\n' ' ')"
+fi
 run(){ timeout 120 "$SOUC" run "$1" 2>&1; }
 check(){ timeout 120 "$SOUC" check "$1" 2>&1; }
 compile(){ timeout 120 "$SOUC" compile "$1" -o "$2" 2>&1; }
