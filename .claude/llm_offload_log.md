@@ -2,6 +2,12 @@
 
 | Date | Provider | Task | Target | Outcome | Note |
 |---|---|---|---|---|---|
+| 2026-08-16 | (follow-up fix) | math-review remediation | sibling fentanyl.sio dual template | ADDRESSED | Unified P14 anatomy to PBPK28 v70/q70; CL 55 documented as runtime vs 61.3 historical gate; added parity_fentanyl (CL_obs≈55.47, Vss(Kp)=533). Gates ALL CHECKS PASSED on remote lean_single. |
+| 2026-08-16 | xai/grok-4.5 | math-review | sibling src/core/pbpk28_bridge.sio (PBPK28 wire) | REVIEWED_WITH_FINDINGS | DISAGREE FAIL on cl_central=·fu·rb direction: kept product form — Params14 stores cl=CL/(fu·rb) per fentanyl ODE; comment expanded. OK index order + weight scale. |
+| 2026-08-16 | xai/grok-4.5 | math-review | sibling src/drugs/fentanyl.sio (PBPK28 arrays/PS) | REVIEWED_WITH_FINDINGS | FAIL dual P14 vs P28 anatomic templates (known; P14 provenance / P28 runtime). FAIL CL gate 61.3 vs param 55 (pre-existing). PS=10×Q algebra OK. No fix this wire beyond documenting dual templates. |
+| 2026-08-16 | xai/grok-4.5 | math-review | sibling src/scenarios/weaning_e2e.sio | REVIEWED_WITH_FINDINGS | FAIL header said geometric taper but body abrupt-stop — header fixed. k_sample=dt_sample/τ OK. |
+| 2026-08-16 | deepseek | review | sibling morphine/clonidine after PBPK28 wire | FAIL_HONEST | DeepSeek ERROR again (auth/provider). Fallback xAI. |
+| 2026-08-16 | xai/grok-4.5 (fallback) | review | sibling morphine.sio + clonidine.sio PBPK28 profiles | REVIEWED_WITH_FINDINGS | Clinical findings logged; gates green on canonical CN (parity_morphine/clonidine + weaning_e2e lean_single). No additional BLOCKER fix in this wire. |
 | 2026-08-16 | xai/grok-4.5 | math-review | sibling src/pd/opioid_alpha2_occupancy.sio (weaning split) | REVIEWED_WITH_FINDINGS | Algebra OK; FAIL on clonidine AFE→SD prior (not log-normal); FAIL overclaim coverage⇔W≡0 structural theorem; tighten to conditional lemma. Raw: remote /tmp/weaning-offload-results/math_occ (from /tmp/llm-offload-46zY6v). |
 | 2026-08-16 | xai/grok-4.5 | math-review | sibling src/proof_carrying_weaning.sio | REVIEWED_WITH_FINDINGS | F5c algebra + Lean bridge OK; FAIL overclaim “re-derives evidence” / static C1–C6 literals; C1 coverage>1 semantics dubious. Raw: /tmp/weaning-offload-results/math_pcw. |
 | 2026-08-16 | xai/grok-4.5 | math-review | sibling formal/lean4/SounioOpioidWeaningSafety.lean | REVIEWED_WITH_FINDINGS | Core ℚ F5c lemmas OK (lake build green); FAIL unverified empirical attachments (61/61, 1.37) and p-box→certificate glue in comments. Raw: /tmp/weaning-offload-results/math_lean. |

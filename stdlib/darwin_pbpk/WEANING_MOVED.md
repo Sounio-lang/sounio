@@ -21,8 +21,11 @@ Local checkout: `../sounio-pbpk-sedation-weaning`
 | `tests/stdlib/darwin_pbpk/test_clonidine_validation.sio` | `tests/test_clonidine_validation.sio` |
 | `formal/lean4/SounioOpioidWeaningSafety.lean` | `formal/lean4/SounioOpioidWeaningSafety.lean` |
 
-Drug modules now import slim local `core::pbpk_params14::{PBPKParams14}`
-(not `darwin_pbpk::tsit5_pbpk14`). The Tsit5 solver stays in this kernel.
+Drug modules now export `pbpk28_params_*` for the canonical
+`darwin_pbpk::tsit5_pbpk28::pbpk28_full_cn_step` runtime (CN, not Tsit5).
+`PBPKParams14` remains provenance (fu/rb); conversion is
+`core/pbpk28_bridge.sio` in the sibling. The Tsit5-14 solver stays unused
+by the weaning package.
 
 ## What stays here
 
