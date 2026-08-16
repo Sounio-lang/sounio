@@ -52,3 +52,6 @@ específicas do estudo e drivers Euler/CN vivem lá.
 
 - Weaning / opioid–α2: `../sounio-pbpk-sedation-weaning` (`WEANING_MOVED.md`).
 - Midazolam CYP3A DDI e core Tsit5/PBPK28/GUM: este stdlib.
+- Madaros native **run** of imported `pbpk28_full_cn_step`: OPEN SIGSEGV —
+  `docs/audit/MADAROS_IMPORTED_PBPK28_CN_SIGSEGV_2026-08-16.md`. Sibling gates use
+  `SOUNIO_SOUC_ENGINE=lean_single`.
