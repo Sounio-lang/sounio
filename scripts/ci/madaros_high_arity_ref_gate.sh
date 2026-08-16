@@ -112,11 +112,59 @@ expect_ir_wall_rejected() {
   echo "[madaros-high-arity-ref] PASS label=$label rc=$rc elf=absent diagnostic=IR_MAX_INSTRS"
 }
 
+calibrate_ir_wall_witness() {
+  local seed="$FIXTURE_DIR/ir_max_instrs_negative.sio"
+  local generated="$WORK/ir_max_instrs_negative.sio"
+  local elf="$WORK/ir_max_instrs_calibration.elf"
+  local log="$WORK/ir_max_instrs_calibration.compile.log"
+  local copies=1
+
+  while ((copies <= 64)); do
+    awk -v copies="$copies" '
+      /^    acc = / { body[++n] = $0; next }
+      /^    acc$/ {
+        for (copy = 0; copy < copies; copy++)
+          for (i = 1; i <= n; i++) print body[i]
+        print
+        next
+      }
+      { print }
+    ' "$seed" >"$generated"
+    rm -f "$elf"
+
+    set +e
+    MADAROS_RAW_BIN="$RAW_MADAROS" "$ROOT_DIR/bin/madaros" compile \
+      "$generated" -o "$elf" >"$log" 2>&1
+    local rc=$?
+    set -e
+
+    if [[ "$rc" -eq 0 ]]; then
+      [[ -s "$elf" ]] || fail "IR wall calibration emitted no ELF below the wall"
+      copies=$((copies * 2))
+      continue
+    fi
+    if ! grep -Fq 'function `oversized_ir_body` needs' "$log" ||
+       ! grep -Fq 'IR instructions but IR_MAX_INSTRS is' "$log" || [[ -e "$elf" ]]; then
+      cat "$log" >&2 || true
+      fail "IR wall calibration did not fail closed"
+    fi
+
+    local measured
+    measured="$(sed -n 's/.*needs \([0-9][0-9]*\) IR instructions but IR_MAX_INSTRS is \([0-9][0-9]*\).*/needed=\1 cap=\2/p' "$log" | head -1)"
+    echo "[madaros-high-arity-ref] calibrated_ir_wall copies=$copies $measured"
+    return 0
+  done
+  fail "IR wall calibration remained below the compiler limit after 64 copies"
+}
+
 run_case same_file "$FIXTURE_DIR/same_file.sio" MADAROS_HIGH_ARITY_REF_SAME_OK
 run_case imported "$FIXTURE_DIR/imported_main.sio" MADAROS_HIGH_ARITY_REF_IMPORTED_OK
+run_case float_bit_reset "$FIXTURE_DIR/float_bit_inheritance_main.sio" MADAROS_FLOAT_BIT_RESET_OK
 expect_reborrow_rejected reborrow_same "$FIXTURE_DIR/reborrow_negative_same.sio"
 expect_reborrow_rejected reborrow_imported "$FIXTURE_DIR/reborrow_negative_imported.sio"
-expect_ir_wall_rejected ir_max_instrs_same "$FIXTURE_DIR/ir_max_instrs_negative.sio"
-expect_ir_wall_rejected ir_max_instrs_imported "$FIXTURE_DIR/ir_max_instrs_imported_main.sio"
+calibrate_ir_wall_witness
+expect_ir_wall_rejected ir_max_instrs_same "$WORK/ir_max_instrs_negative.sio"
+cp "$FIXTURE_DIR/ir_max_instrs_imported_main.sio" "$WORK/ir_max_instrs_imported_main.sio"
+expect_ir_wall_rejected ir_max_instrs_imported "$WORK/ir_max_instrs_imported_main.sio"
 
-echo "[madaros-high-arity-ref] PASS: argc=20..23 ordering, stack ref offsets=120/128/136/144, 20-input+3-output direct/bare calls, explicit reborrow rejection, and same/imported fail-closed IR wall"
+echo "[madaros-high-arity-ref] PASS: argc=20..23 ordering, stack ref offsets=120/128/136/144, float-bit reset, explicit reborrow rejection, and calibrated same/imported fail-closed IR wall"

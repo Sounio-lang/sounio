@@ -4487,14 +4487,17 @@ fn lowerer_lower_program_items_mut(
 
 // Sprint 87: helpers for ExprCast type-aware lowering
 fn lower_cast_type_is_f64(ct: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
+    // Accepts f32 as well -- see lower_type_expr_is_f64. `as f32` matched neither
+    // this nor the integer classifier, so a float source fell through to the
+    // float_to_int arm of lower_cast_expr_ref and (1.5 as f32) became 1.0.
     match *ct {
         Some(te) => {
             let seg = (*te).path.segments
             if seg.head_len != 3 { return false }
-            if seg.head_buf[0] as i64 != 102 { return false }   // 'f'
-            if seg.head_buf[1] as i64 != 54 { return false }    // '6'
-            if seg.head_buf[2] as i64 != 52 { return false }    // '4'
-            true
+            if seg.head_buf[0] as i64 != 102 { return false }   // f
+            let is_64 = seg.head_buf[1] as i64 == 54 && seg.head_buf[2] as i64 == 52
+            let is_32 = seg.head_buf[1] as i64 == 51 && seg.head_buf[2] as i64 == 50
+            is_64 || is_32
         }
         None => false,
     }
@@ -4518,10 +4521,16 @@ fn lower_type_expr_is_f64(te: &TypeExpr) -> bool with Mut, Panic, Div {
     if (*te).kind != TypeExprKind::TypeNamed { return false }
     let seg = (*te).path.segments
     if seg.head_len != 3 { return false }
-    if seg.head_buf[0] as i64 != 102 { return false }   // 'f'
-    if seg.head_buf[1] as i64 != 54 { return false }    // '6'
-    if seg.head_buf[2] as i64 != 52 { return false }    // '4'
-    true
+    if seg.head_buf[0] as i64 != 102 { return false }   // f
+    // Accept BOTH f64 and f32: the backend has no separate f32 representation
+    // (f32 is carried as f64), so all 17 call sites of this predicate mean
+    // -- is this a float scalar? -- not -- is this spelled f64?. While f32 was
+    // rejected here, a local declared f32 got scalar_kind 0 instead of 2, so
+    // `x as f64` on it took the int_to_float arm and reinterpreted the bit
+    // pattern of a double as an integer.
+    let is_64 = seg.head_buf[1] as i64 == 54 && seg.head_buf[2] as i64 == 52
+    let is_32 = seg.head_buf[1] as i64 == 51 && seg.head_buf[2] as i64 == 50
+    is_64 || is_32
 }
 
 // println i64-segfault fix: mirror lower_type_expr_is_f64 for i64 so a struct
@@ -10795,6 +10804,29 @@ impl Lowerer {
         -1
     }
 
+    // Lookup keyed by the FULL path (enum + variant).
+    // Discriminants restart at 0 per enum, so keying on the variant name alone
+    // returns the first match across ALL enums: with `enum Shape{Quad,Mark}` and
+    // `enum Color{Red,Green,Mark}` both present, Color::Mark resolved to the
+    // Shape discriminant instead of its own, and the match arm silently ran the
+    // wrong body on a well-typed program.
+    // Falls back to the unqualified lookup when the enum is unknown here (e.g. an
+    // unregistered imported enum) so nothing that resolves today starts failing.
+    fn lookup_variant_discriminant_by_path(self, enum_name: Name, variant_name: Name) -> i64 with Mut, Panic, Div {
+        if enum_name.len > 0 {
+            var i: i64 = 0
+            while i < (*self.enum_variants).count {
+                if ir_name_eq((*self.enum_variants).entries[i as usize].variant_name, variant_name) {
+                    if ir_name_eq((*self.enum_variants).entries[i as usize].enum_name, enum_name) {
+                        return (*self.enum_variants).entries[i as usize].discriminant
+                    }
+                }
+                i = i + 1
+            }
+        }
+        self.lookup_variant_discriminant(variant_name)
+    }
+
     // Phase 3.2: Register struct field layout
     fn register_struct_fields_ref(self, type_name: Name, fields: &Option<Box<FieldDefList>>, idx: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self
@@ -13688,7 +13720,7 @@ impl Lowerer {
                 lo
             } else {
                 // Enum variant: compare scrutinee to discriminant
-                let disc = self.lookup_variant_discriminant(variant_name)
+                let disc = self.lookup_variant_discriminant_by_path(ir_path_qualifier_name(pat.path), variant_name)
                 if disc >= 0 {
                     let pair_l = self.fresh_label()
                     var lo = pair_l.0
@@ -16200,7 +16232,18 @@ impl Lowerer {
         (lo3, dst_reg)
     }
 
+    // Keep binary recursion out of the monolithic expression dispatcher frame.
+    // lower_expr_non_binary_ref carries enough branch-local storage to reserve
+    // multiple MiB; retaining it for every node in a left-associated binary
+    // spine exhausted the launcher's 256 MiB stack before lowering began.
     fn lower_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if e.kind == ExprKind::ExprBinary {
+            return self.lower_binary_expr_ref(e)
+        }
+        self.lower_expr_non_binary_ref(e)
+    }
+
+    fn lower_expr_non_binary_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         if self.probe_mode && lower_body_diag_enabled() {
             print("lower_probe: expr_kind=")
             if e.kind == ExprKind::ExprIntLit { print("int") }
@@ -16378,7 +16421,7 @@ impl Lowerer {
                     let lo2 = lo.emit(ir_load_imm(reg, 0))
                     return (lo2, reg)
                 }
-                let disc = self.lookup_variant_discriminant(variant_name)
+                let disc = self.lookup_variant_discriminant_by_path(ir_path_qualifier_name(e.path), variant_name)
                 if disc >= 0 {
                     let pair = self.fresh_reg()
                     let lo = pair.0
@@ -16728,6 +16771,15 @@ impl Lowerer {
         // param_count and produced a malformed closure body.
         lo.current_fn = closure_fn_id
         lo.current_func = lowerer_box_empty_function()
+        // lowerer_box_empty_function() -> ir_empty_function() leaves region invalid
+        // by design (see ir_function_alloc_region's own comment: array-repeat
+        // initialisers would alias every slot to the same region if it allocated
+        // eagerly). Every OTHER real-function lowering entry point allocates here
+        // before writing instructions (e.g. the (*reused).region.slot < 0 guard
+        // above); the closure path skipped it, so any ir_arena_store into this
+        // function's body hit region slot -1 generation -1 -- closures miscompiled
+        // to a refused build on any Madaros built after the arena landing.
+        if (*lo.current_func).region.slot < 0 { ir_function_alloc_region(&! (*lo.current_func)) }
         (*lo.current_func).name = closure_name
         lo.current_func_loaded = true
         lo.locals = lowerer_box_empty_locals()

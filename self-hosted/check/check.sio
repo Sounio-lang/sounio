@@ -5102,6 +5102,25 @@ fn checker_narrow_literal_operand_ty(operand_ty: TypeEntry, operand_was_int_lit:
     operand_ty
 }
 
+// Float mirror of checker_narrow_literal_operand_ty. `i32 + 1` already worked
+// because an i64 literal operand adopts a non-i64 integer peer; `f32 + 1.0` did
+// not, because nothing adopted the float peer. Same asymmetry as the contextual
+// path, one level down.
+// The magnitude guard lives on the LET/ARG path (checker_expected_accepts_float_literal);
+// here the literal is already bounded by having a f32 peer that type-checked.
+fn checker_narrow_float_literal_operand_ty(operand_ty: TypeEntry, operand_was_float_lit: bool, peer_ty: TypeEntry) -> TypeEntry {
+    if !operand_was_float_lit {
+        return operand_ty
+    }
+    if operand_ty.kind != TypeKind::TyF64 {
+        return operand_ty
+    }
+    if is_float_type(peer_ty) && peer_ty.kind != TypeKind::TyF64 {
+        return peer_ty
+    }
+    operand_ty
+}
+
 // *mut ExprBinary handler (split-and-bridge): check the OPERANDS in place — so a nested
 // enum path-expr (e.g. `c == Color::Red`) reaches checker_check_path_expr_inplace and
 // dodges the by-value check_path_expr SRET crash — then bridge to the by-value op-typing
@@ -5110,16 +5129,20 @@ fn checker_narrow_literal_operand_ty(operand_ty: TypeEntry, operand_was_int_lit:
 fn checker_check_binary_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let left_ty = checker_check_opt_expr_inplace(c, e.left)
     let left_was_int_lit = (*c).last_literal_kind == 1
+    let left_was_float_lit = (*c).last_literal_kind == 2
     (*c).last_literal_kind = 0
     let right_ty = checker_check_opt_expr_inplace(c, e.right)
     let right_was_int_lit = (*c).last_literal_kind == 1
+    let right_was_float_lit = (*c).last_literal_kind == 2
     (*c).last_literal_kind = 0
     let narrowed_left = checker_narrow_literal_operand_ty(left_ty, left_was_int_lit, right_ty)
     let narrowed_right = checker_narrow_literal_operand_ty(right_ty, right_was_int_lit, left_ty)
+    let narrowed_left_f = checker_narrow_float_literal_operand_ty(narrowed_left, left_was_float_lit, right_ty)
+    let narrowed_right_f = checker_narrow_float_literal_operand_ty(narrowed_right, right_was_float_lit, left_ty)
     // Call the *mut tail (returns only TypeEntry) — NOT the by-value bridge, whose
     // (Checker, TypeEntry) return became a 12MB local held across this fn's recursion
     // → N-deep stack overflow on deeply-nested exprs. The tail is non-recursive.
-    checker_check_binary_with_operand_types_inplace(c, e, narrowed_left, narrowed_right)
+    checker_check_binary_with_operand_types_inplace(c, e, narrowed_left_f, narrowed_right_f)
 }
 
 
@@ -15342,6 +15365,54 @@ fn checker_expected_accepts_int_literal(actual_ty: TypeEntry, expected_ty: TypeE
     actual_ty.kind == TypeKind::TyI64 && is_integer_type(expected_ty)
 }
 
+// Float-literal contextual coercion, the mirror of the int-literal path above.
+// Int literals are born i64 and adopt any integer type; float literals are born
+// f64 and adopted NOTHING, so `let x: f32 = 1.5` and passing 1.5 to an f32
+// parameter both rejected. That is what forced `as f32` everywhere -- and the
+// as-f32 lowering was silently truncating (see tests/witness_matrix w4b).
+fn checker_expr_is_float_literal_like(e: Expr) -> bool {
+    if e.kind == ExprKind::ExprFloatLit {
+        return true
+    }
+    if e.kind == ExprKind::ExprUnary && e.un_op == UnaryOp::OpNeg {
+        match e.left {
+            Some(inner) => (*inner).kind == ExprKind::ExprFloatLit
+            None => false
+        }
+    } else {
+        false
+    }
+}
+
+fn checker_float_literal_magnitude(e: Expr) -> f64 {
+    var v: f64 = 0.0
+    if e.kind == ExprKind::ExprFloatLit {
+        v = e.float_val
+    } else {
+        match e.left {
+            Some(inner) => { v = (*inner).float_val }
+            None => { v = 0.0 }
+        }
+    }
+    if v < 0.0 { 0.0 - v } else { v }
+}
+
+// CARDINAL: only LITERALS coerce, and never out of range. A float literal wider
+// than f32 max must still REJECT -- the literal-holes round found `let x: f32 =
+// 1e300` being accepted once the coercion was added without this guard.
+fn checker_expected_accepts_float_literal(e: Expr, actual_ty: TypeEntry, expected_ty: TypeEntry) -> bool {
+    if actual_ty.kind != TypeKind::TyF64 {
+        return false
+    }
+    if !is_float_type(expected_ty) {
+        return false
+    }
+    if expected_ty.kind == TypeKind::TyF64 {
+        return true
+    }
+    checker_float_literal_magnitude(e) <= 3.4028235e38
+}
+
 fn checker_array_sizes_compatible(actual_ty: TypeEntry, expected_ty: TypeEntry) -> bool {
     if actual_ty.array_size == -1 || expected_ty.array_size == -1 {
         return true
@@ -15381,6 +15452,9 @@ fn checker_contextual_expr_compatible(expr: Expr, actual_ty: TypeEntry, expected
         return true
     }
     if checker_expr_is_int_literal_like(expr) && checker_expected_accepts_int_literal(actual_ty, expected_ty) {
+        return true
+    }
+    if checker_expr_is_float_literal_like(expr) && checker_expected_accepts_float_literal(expr, actual_ty, expected_ty) {
         return true
     }
     checker_array_int_literal_compatible(expr, actual_ty, expected_ty)

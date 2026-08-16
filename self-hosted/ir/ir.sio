@@ -3595,6 +3595,33 @@ fn ir_string_list_last(sl: StringList) -> Name with Mut, Panic, Div, Alloc {
     }
 }
 
+// Second-to-last segment of a path (e.g. "Enum" from "Enum::Variant", and from
+// "module::Enum::Variant" too). Empty name when the path has fewer than two
+// segments, so callers can fall back to an unqualified lookup.
+fn ir_string_list_second_last(sl: StringList) -> Name with Mut, Panic, Div, Alloc {
+    match sl.tail {
+        Some(rest) => {
+            match (*rest).tail {
+                Some(_) => ir_string_list_second_last(*rest),
+                _ => ir_name_from_string_list(sl),
+            }
+        }
+        _ => ir_empty_name(),
+    }
+}
+
+// Get the qualifier of a path: "Color" from "Color::Mark".
+// Enum variant discriminants restart at 0 per enum, so a lookup keyed only on
+// the variant name collides across enums that share a variant name. Callers
+// pair this with the variant name to key the lookup by the full path.
+pub fn ir_path_qualifier_name(p: AstPath) -> Name with Mut, Panic, Div, Alloc {
+    if p.seg_count <= 1 {
+        ir_empty_name()
+    } else {
+        ir_string_list_second_last(p.segments)
+    }
+}
+
 // Check if a name is "Some" (for Option matching)
 pub fn ir_name_is_some(n: Name) -> bool {
     n.len == 4 && n.buf[0] == 83 as i8 && n.buf[1] == 111 as i8 && n.buf[2] == 109 as i8 && n.buf[3] == 101 as i8
@@ -5268,6 +5295,14 @@ pub fn ir_reset_function_in_place(f: &! IrFunction, name: Name) with Mut, Panic,
     (*f).sret_dest_reg = -1
     (*f).bss_size = 0
     (*f).first_param_is_ref = 0
+    // The reusable function Box retains this side table independently of the
+    // instruction region. Leaving bits set makes registers in the next
+    // function inherit float classification from the previous function.
+    var fw: i64 = 0
+    while fw < 64 {
+        (*f).float_reg_bits[fw as usize] = 0
+        fw = fw + 1
+    }
 }
 
 pub fn ir_empty_module() -> IrModule {

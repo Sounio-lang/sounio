@@ -33,6 +33,7 @@ const ACTIVE_RESEARCH_DOCS = new Set([
   'docs/research/RESEARCH_VALIDATION_SUMMARY.md',
   'docs/research/epistemic_algebra_review.md',
   'docs/research/vancomycin-uncertainty.md',
+  'docs/research/rna_cayley_dickson_confirmatory_preregistration_2026-08-09.md',
 ]);
 
 const WEBSITE_DOC_OVERRIDES = {
