@@ -968,33 +968,40 @@ fn items_reverse_item_list_loop(
 var EXTERN_BLOCK_ACTIVE: i64 = 0
 var EXTERN_BLOCK_VIS_KIND: i64 = 0
 
-fn ffi_name_path(name: Name, span: Span) -> Expr with Panic {
-    var seg = StringList { head_buf: [0; 128], head_len: 0, tail: None }
-    seg.head_buf[0] = 102 as i8   // 'f'
-    seg.head_buf[1] = 102 as i8   // 'f'
-    seg.head_buf[2] = 105 as i8   // 'i'
-    seg.head_buf[3] = 95 as i8    // '_'
+fn ffi_name_path(name: Name, span: Span) -> Expr with Mut, Panic {
+    // ExprIdent, NOT ExprPath: only ident-shaped callees go through the
+    // checker's normal name resolution, so only they E137 on unknown names.
+    // A path-shaped callee silently escaped checking, and an unimplemented
+    // ffi_<name> intrinsic compiled to a no-op call returning 0 — the exact
+    // fail-open behavior this dispatch exists to close (Fase 3.4).
+    var n = empty_name()
+    n.buf[0] = 102 as i8   // 'f'
+    n.buf[1] = 102 as i8   // 'f'
+    n.buf[2] = 105 as i8   // 'i'
+    n.buf[3] = 95 as i8    // '_'
     var bi: i64 = 0
     while bi < name.len && bi < 123 {
-        seg.head_buf[(4 + bi) as usize] = name.buf[bi as usize]
+        n.buf[(4 + bi) as usize] = name.buf[bi as usize]
         bi = bi + 1
     }
-    seg.head_len = 4 + name.len
-    var e = mk_expr(ExprKind::ExprPath, span)
-    e.path = AstPath { segments: seg, seg_count: 1 }
+    n.len = 4 + bi
+    var e = mk_expr(ExprKind::ExprIdent, span)
+    e.name = n
     e
 }
 
-fn param_name_path(pl: ParamList, span: Span) -> Expr with Panic {
-    var seg = StringList { head_buf: [0; 128], head_len: 0, tail: None }
+fn param_name_path(pl: ParamList, span: Span) -> Expr with Mut, Panic {
+    // Ident-shaped for the same reason as ffi_name_path: parameter
+    // references must resolve through the ordinary local-variable path.
+    var n = empty_name()
     var bi: i64 = 0
     while bi < pl.head.name.len && bi < 128 {
-        seg.head_buf[bi as usize] = pl.head.name.buf[bi as usize]
+        n.buf[bi as usize] = pl.head.name.buf[bi as usize]
         bi = bi + 1
     }
-    seg.head_len = pl.head.name.len
-    var e = mk_expr(ExprKind::ExprPath, span)
-    e.path = AstPath { segments: seg, seg_count: 1 }
+    n.len = pl.head.name.len
+    var e = mk_expr(ExprKind::ExprIdent, span)
+    e.name = n
     e
 }
 
@@ -1009,15 +1016,22 @@ fn extern_forward_args_list(pl: ParamList, span: Span) -> ExprList with Panic, A
     }
 }
 
-fn extern_wrapper_fn_def(name: Name, params_opt: Option<Box<ParamList>>, ret_ty: Option<Box<TypeExpr>>, span: Span) -> FnDef with Panic, Alloc {
+fn extern_wrapper_fn_def(name: Name, params_opt: Option<Box<ParamList>>, ret_ty: Option<Box<TypeExpr>>, span: Span) -> FnDef with Mut, Panic, Alloc {
     var call = mk_expr(ExprKind::ExprCall, span)
     call.left = Some(Box::new(ffi_name_path(name, span)))
+    // Rebind the params list instead of reusing params_opt after the match
+    // consumed it — the old use-after-move was latent only because the
+    // getpid/getppid wrappers have no parameters.
+    var params_kept: Option<Box<ParamList>> = None
     match params_opt {
         None => {}
-        Some(first) => { call.args = Some(Box::new(extern_forward_args_list(*first, span))) }
+        Some(first) => {
+            call.args = Some(Box::new(extern_forward_args_list(*first, span)))
+            params_kept = Some(first)
+        }
     }
     let stmt = Stmt { kind: StmtKind::StmtExpr, span: span, name: empty_name(), ty: None, expr: Some(Box::new(call)), target: None, assign_op: AssignOp::AssignEq }
-    FnDef { name: name, params: params_opt, return_type: ret_ty, effects: None, body: Block { stmts: Some(Box::new(StmtList { head: stmt, tail: None })), span: span }, span: span, is_kernel: false }
+    FnDef { name: name, params: params_kept, return_type: ret_ty, effects: None, body: Block { stmts: Some(Box::new(StmtList { head: stmt, tail: None })), span: span }, span: span, is_kernel: false }
 }
 
 fn extern_wrapper_item(visibility: Visibility, name: Name, params_opt: Option<Box<ParamList>>, ret_ty: Option<Box<TypeExpr>>, span: Span) -> Item with Panic, Alloc {
