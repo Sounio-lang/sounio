@@ -18,10 +18,10 @@ port plan + preflight amendments from
 **Frontier worktree:** `/workspace/.wt/mir-study` → `origin/canon/madaros-v2-sota` @ `97b5259497`.  
 **Constraint (study):** did **not** edit `self-hosted/` on main; this file is the write product.
 
-**Preflight amendments folded (2026-08-16):** C2 (BASE_REF re-anchor), C4
-(Madaros parse + dual receipt), C5 (`loop_closed` semantic fix), C6 (WS-B
-ordering vs ENIR serialisation). C1 payload census → see §6.1 /
-`docs/architecture/WS_C_PR1_PAYLOAD_CENSUS.md`.
+**Preflight amendments folded (2026-08-16):** C1 (payload census: **63**
+files, not ~23), C2 (BASE_REF re-anchor), C4 (Madaros parse + dual receipt),
+C5 (`loop_closed` semantic fix), C6 (WS-B ordering vs ENIR serialisation).
+C1 authority: `docs/architecture/WS_C_PR1_PAYLOAD_CENSUS.md` (§4.1, §6.1).
 
 ---
 
@@ -183,21 +183,63 @@ Findings from `docs/architecture/WS_C_D_PREFLIGHT_REVIEW_2026-08-16.md`. None ov
 
 ### 4.1 C1 · Gate payload files (PR1/PR2 inventory)
 
-E-gates hard-reference frontier-only oracle/fixture files under `tools/eisa/`
-(~23 files measured missing on main: `eisa_enir_v1_oracle.sio`,
-`eisa_enir_v1_loop_oracle.sio`, and ~21 `eisa_enir_v1_*/v2_*.eisa` fixtures).
+**Authority:** `docs/architecture/WS_C_PR1_PAYLOAD_CENSUS.md` (codex-2,
+2026-08-16). Source refs in that file: `origin/main` @ `03416657fa`,
+`origin/canon/madaros-v2-sota` @ `97b525949`.
 
-**Canonical census (when landed):** `docs/architecture/WS_C_PR1_PAYLOAD_CENSUS.md`
-(codex-2, lane for C1 enumeration).
+**Headline (preflight was low by ~3×):** the preflight’s “~23 files” figure
+counted only the `tools/eisa` delta. Following every reference the gate
+scripts actually make — shell references, Python verifier references,
+verifier `PROGRAMS` fixture expansions, recursive regression-gate calls, and
+the `self-hosted/enir/driver.sio` import closure each gate build needs — the
+requested **E1/E2/E3** gate stack needs **63 files absent from `origin/main`**:
 
-> **PLACEHOLDER — C1 census not yet present on this branch.**  
-> When `WS_C_PR1_PAYLOAD_CENSUS.md` lands, fold its file counts and per-gate
-> transitive lists into §6 PR1/PR2 acceptance. Until then, PR1 **must not**
-> open without either that census or an equivalent measured
-> `comm -23` of `tools/eisa` frontier→main.
+| Class | Count | Role |
+|---|---:|---|
+| Gate scripts (`scripts/dev/madaros_v2_e*`) | **14** | E1, E2A–E2H, E3A–E3E shells |
+| Python verifiers | **13** | Pair with gates (E3E has shell only) |
+| `self-hosted/enir/` driver-closure | **14** | Common build closure for every gate |
+| `tools/eisa/` oracle + fixture | **22** | First needed at E2B; grows through E3E |
+| **Total add-list** | **63** | |
 
-Also flag (preflight C3, not expanded here): shared oracles
-(`tools/eisa/eisa_evm_run.sio`, `stdlib/math/qd128.sio`, `stdlib/eisa/`) have
+**Excluded (not in the 63):**
+
+- `tools/eisa/eisa_enir_c2_rump.eisa` — frontier-only, but owned by the **C2**
+  gate (`madaros_v2_c2_v0_gate.sh`), not E1/E2/E3.
+- `$TMP_DIR` negative fixtures generated inside gate scripts — not repository
+  payload.
+
+**Per-gate transitive counts** (from the census; each includes the shared 14
+enir files + inherited regression chain):
+
+| Gate | Transitive missing on main |
+|---|---:|
+| E1 shadow | 16 |
+| E2A lowering | 18 |
+| E2B CFG | 21 |
+| E2C fuel/blockargs | 24 |
+| E2D rump DD | 27 |
+| E2E qd128 | 35 |
+| E2F rump qd | 38 |
+| E2G fuel/control/frail | 43 |
+| E2H memory/move/poison | 48 |
+| E3A MIR qd128 | 50 |
+| E3B MIR memory | 52 |
+| E3C CFG memory SSA | 56 |
+| E3D multipred SSA | 60 |
+| E3E equal-value distinct event | 17 (no regression chain; +2 fixtures) |
+
+Exact path lists and “which PR carries what” are decided by the **per-gate
+transitive lists** in `WS_C_PR1_PAYLOAD_CENSUS.md` — not by this summary table
+alone. Consolidated add-list is the union (63).
+
+**Present-but-changed watchlist** (on main already; content differs from
+canon — not add-list, but PR2+ may need behavioural accounting / C3):
+`bin/souc-lean-single-x86_64`, `scripts/dev/souc-build-lock.sh`,
+`self-hosted/compiler/main.sio`, `stdlib/math/qd128.sio`,
+`tools/eisa/eisa_evm_run.sio`.
+
+Also flag (preflight C3): shared oracles above plus `stdlib/eisa/` have
 **drifted** on main; WS-F (EISA Madaros port) collocates on the same surface —
 coord claim boundary before PR2+.
 
@@ -352,14 +394,14 @@ blocked on a false ENIR-safety premise.
 
 **What it is:**
 
-1. On a branch from **current main**, add the frontier payload per §6 / C1 census:
-   - `self-hosted/enir/**` (14 files), with **C4/C5 repairs** in PR1
-   - gate scripts + Python verifiers (PR2+)
-   - `tools/eisa/` oracle/fixture payload (C1 — must be enumerated)
-   - `bin/madaros-enir` wrapper
-   - `docs/architecture/MADAROS_V2_EISA_SEMANTIC_IR.md` (and optional `MIR_*` refresh)
-2. Wire gates into CI behind E1–E3D (or umbrella `enir_pipeline_gate.sh` first),
-   with **§4.2 BASE_REF re-anchor** (PR2).
+1. On a branch from **current main**, add the frontier payload per
+   `WS_C_PR1_PAYLOAD_CENSUS.md` (**63** files total; see §4.1 / §6.1):
+   - **PR1:** `self-hosted/enir/**` (**14** driver-closure files) with **C4/C5
+     repairs**, `bin/madaros-enir`, `MADAROS_V2_EISA_SEMANTIC_IR.md`
+   - **PR2:** remaining **49** files = 14 gate scripts + 13 Python verifiers +
+     22 `tools/eisa/` oracles/fixtures, with **§4.2 BASE_REF** re-anchor on
+     every landed gate script
+2. Wire gates into CI behind E1–E3D (or umbrella `enir_pipeline_gate.sh` first).
 3. **Compile driver under seed *and* Madaros check** (PR1 acceptance §4.3).  
    Enir **source** fixes stay inside `enir/` until both receipts green.  
    **Gate scripts are out of that boundary** (§4.2 point 4).
@@ -372,20 +414,31 @@ blocked on a false ENIR-safety premise.
 - Preserves executable gates + Python oracles.
 - Aligns with shadow-lane discipline (once BASE_REF is re-anchored for main).
 
-**Cons / cost (updated)**
+**Cons / cost (updated after C1 census)**
 - Must re-validate every gate under **current** seed/Madaros.
-- **PR1:** Madaros parse rewrites (`mir_join.sio`) + **semantic** `loop_closed` fix + dual receipts.
-- **PR2:** BASE_REF re-anchor (+1–2 days), tools/eisa payload, possible oracle re-validation vs main’s drifted EISA (C3).
+- **PR1:** Madaros parse rewrites (`mir_join.sio`) + **semantic** `loop_closed` fix + dual receipts. File count stays **14 enir** (already budgeted); hard work is repair, not bulk.
+- **PR2 grows vs preflight:** not “~23 `tools/eisa` + E1”, but **49**
+  non-enir files (14 scripts + 13 verifiers + 22 fixtures). BASE_REF surgery
+  multiplies across **14** gate scripts, not one. Possible oracle re-validation
+  vs main’s drifted EISA (C3 / present-but-changed watchlist).
 - Shared-surface coord with WS-F.
 - Multi-week for true production MIR→codegen remains after E3D (by design).
 
-**Effort estimate (amended):**
-- **PR1 (days 1–4):** subtree add + C4 rewrites + C5 semantic fix + seed ELF + Madaros check receipts.  
-- **PR2 (days 5–8):** gate BASE_REF surgery + E1 green + payload from census.  
-- **PR3–4 (days 9–14+):** E2A–E3D cascade under main toolchain.  
+**Effort estimate (re-checked against 63-file census):**
+- **PR1 (days 1–4 — holds):** 14 enir subtree add + C4 rewrites + C5 semantic fix + seed ELF + Madaros check receipts + wrapper/docs. **Does not absorb the 49-file gate/payload surprise.**
+- **PR2 (days 5–10 — +2 days vs prior “5–8”):** bulk-add the 49 gate/payload files; BASE_REF re-anchor on all 14 gate scripts; E1 green as acceptance (E2+/E3 scripts may land present-but-not-yet-green). Mechanical bulk is cheap; BASE_REF ×14 + C3 drift is the real cost.
+- **PR3–4 (days 11–16+):** E2A–E3D cascade under main toolchain — **file-add work shrinks** if PR2 already landed the full 49; cascade is mostly green/FAIL_HONEST.
 - Wave 2+: resume lettered expansion (post-E3D scope).
 
-**Verdict:** **Approved default.** Isolation claim holds; preflight items are scoped, not route-killers.
+**PR-stack shape verdict:** **PR1/PR2 split still holds** — do **not** dump
+gates into PR1 (would muddle dual-receipt acceptance) and do **not** hold PR1
+for the 49-file payload. Prefer PR2 as the **bulk gate+payload** landing so
+PR3–4 are cascade-only. Optional micro-split (PR2a = E1+BASE_REF pattern,
+PR2b = remaining payload) only if review bandwidth forces it; default is one
+PR2 bulk add.
+
+**Verdict:** **Approved default.** Isolation claim holds; C1 multiplies PR2
+review surface (~3× preflight tools/eisa estimate), not the route choice.
 
 ---
 
@@ -428,18 +481,30 @@ optional reading of frontier gates as oracles only.
 4. **PR1 is not hostage to WS-B** (§4.5); fleet may still prefer SOIR green before PR2 cascade for CI bandwidth.  
 5. After E1–E3D green on main, treat **post-E3D general SSA / ABI / MachineIR** as a new lettered tranche — do not silently expand E3D claims (also relevant to WS-D MLI S2 feed).
 
-### 6.1 Suggested PR stack (Route B, amended)
+### 6.1 Suggested PR stack (Route B, amended — C1 folded)
 
-| PR | Content | Acceptance (must) |
+**Census authority:** `docs/architecture/WS_C_PR1_PAYLOAD_CENSUS.md`.
+Per-gate transitive lists there decide which PR must already contain which
+paths for a given gate to run. Union add-list = **63** files
+(14 enir + 14 scripts + 13 verifiers + 22 `tools/eisa`). Exclude C2-only
+`eisa_enir_c2_rump.eisa` and `$TMP_DIR` fixtures.
+
+| PR | Content (file budget from census) | Acceptance (must) |
 |---|---|---|
-| **PR1** | `self-hosted/enir/**` + `bin/madaros-enir` + `MADAROS_V2_EISA_SEMANTIC_IR.md`; **rewrite `mir_join.sio` C4 sites**; **fix `loop_closed` C5**; optional payload from census if ready | (a) seed driver ELF; (b) **Madaros `souc check` green** (or FAIL_HONEST list); (c) no production IR/codegen edits |
-| **PR2** | E1 gate + Python verifier; **BASE_REF re-anchor per §4.2**; `tools/eisa/` payload per **`WS_C_PR1_PAYLOAD_CENSUS.md`** | E1 green on clean CI; PR-range frozen-surface check fails closed if IR touched |
-| **PR3** | E2A–E2H gates (may split) | Cascade under re-anchored discipline; oracle policy vs main drift documented |
-| **PR4** | E3A–E3D (+ E3E) | FULL gates green or FAIL_HONEST with receipts |
+| **PR1** | **14** `self-hosted/enir/**` (driver closure) + `bin/madaros-enir` + `MADAROS_V2_EISA_SEMANTIC_IR.md`; **rewrite `mir_join.sio` C4 sites**; **fix `loop_closed` C5**. **No** gate scripts / verifiers / `tools/eisa` bulk (keeps dual-receipt surface clean) | (a) seed driver ELF; (b) **Madaros `souc check` green** (or FAIL_HONEST list); (c) no production IR/codegen edits |
+| **PR2** | **49** remaining add-list files: **14** `scripts/dev/madaros_v2_e*` gates + **13** Python verifiers + **22** `tools/eisa/` oracles/fixtures; **BASE_REF re-anchor per §4.2 on every landed gate script** | **E1 green** on clean CI (E1 transitive = 16 = 14 enir from PR1 + E1 `.sh` + E1 `.py`); PR-range frozen-surface check fails closed if IR touched; remaining E2/E3 scripts may be present-but-not-green |
+| **PR3** | E2A–E2H cascade (may split); **no new payload** if PR2 bulk-landed the 49 | Cascade under re-anchored discipline; oracle policy vs main drift (C3 / present-but-changed watchlist) documented |
+| **PR4** | E3A–E3D (+ E3E) cascade | FULL gates green or FAIL_HONEST with receipts |
 | **PR5** | Optional umbrella `scripts/ci/enir_pipeline_gate.sh` + madaros_full_gate hooks | CI wiring only |
 
-**C1 census reference:** `docs/architecture/WS_C_PR1_PAYLOAD_CENSUS.md`  
-> **PLACEHOLDER:** file not yet on this branch. Fold numbers into PR1/PR2 rows when codex-2 lands it.
+**Effort vs preflight (~23 files):**
+
+| Item | Pre-census estimate | Post-census (this amendment) |
+|---|---|---|
+| PR1 | days 1–4 | **days 1–4 holds** (14 enir + C4/C5; not the 3× surprise) |
+| PR2 | days 5–8 | **days 5–10** (49-file bulk + BASE_REF ×14 scripts + E1 green) |
+| PR3–4 | days 9–14+ | **days 11–16+** if PR2 bulk-lands; cascade-heavy, add-light |
+| Stack shape | PR1 enir / PR2 E1+payload / PR3–4 cascade | **Shape holds.** Do not move the 49 into PR1. Prefer one PR2 bulk over splitting PR1. |
 
 No production `use enir::` from `compiler/main.sio` until a later explicit integration tranche (post-WS-D MLI design).
 
@@ -472,9 +537,10 @@ MB=$(git merge-base origin/main HEAD)
 comm -12 <(git diff --name-only $MB HEAD | sort) \
          <(git diff --name-only $MB origin/main | sort)
 
-# tools/eisa payload missing on main (C1 sketch)
+# tools/eisa delta only (incomplete vs full gate stack — use census)
 comm -23 <(git ls-tree -r --name-only origin/canon/madaros-v2-sota tools/eisa | sort) \
          <(git ls-tree -r --name-only origin/main tools/eisa | sort)
+# Full E1/E2/E3 add-list: docs/architecture/WS_C_PR1_PAYLOAD_CENSUS.md (63 files)
 ```
 
 ---
@@ -496,8 +562,8 @@ comm -23 <(git ls-tree -r --name-only origin/canon/madaros-v2-sota tools/eisa | 
 | Study worktree | `/workspace/.wt/mir-study` @ `97b525949` |
 | Amendment worktree | `/workspace/.wt/amend-mir` @ branch `amend/mir-port-plan-20260816` |
 | Preflight review | `docs/architecture/WS_C_D_PREFLIGHT_REVIEW_2026-08-16.md` |
-| C1 payload census | `docs/architecture/WS_C_PR1_PAYLOAD_CENSUS.md` (**placeholder** until codex-2) |
-| Coord claim | `grok-cli1` / `amend-mir-port-plan` |
-| Next port action | PR1 per §6.1 after C1 census (or interim payload list); PR2 BASE_REF |
+| C1 payload census | `docs/architecture/WS_C_PR1_PAYLOAD_CENSUS.md` (**landed**; **63** = 14+13+14+22) |
+| Coord claim | `grok-cli1` / `amend-mir-port-plan` (release after this amendment) |
+| Next port action | PR1 per §6.1 (14 enir + C4/C5 + dual receipts); PR2 bulk 49 + BASE_REF ×14 + E1 green |
 
-*End of WS-C port plan (route study + preflight amendments).*
+*End of WS-C port plan (route study + preflight amendments + C1 census fold).*
