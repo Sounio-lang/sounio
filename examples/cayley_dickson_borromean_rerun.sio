@@ -54,21 +54,57 @@
 //!      nonzero. At n=15/class this looked like a real effect (hook
 //!      AUROC=0.25); at n=25/class it moved MUCH closer to chance (hook
 //!      AUROC=0.32) — the direction a small-sample artifact would move.
+//!
+//! RESULT (2026-08-15, n=50/class, K_PERMS=2000 label reshuffles, seed
+//! 20260814 -- reproduced byte-for-byte across repeat runs): hook
+//! AUROC=0.392 (Cohen's d=-0.42, permutation p=0.060) and associator
+//! AUROC=0.416 (d=-0.25, p=0.154). NEITHER survives an uncorrected
+//! p<0.05 threshold (hook is borderline at p=0.06). DO NOT read the
+//! AUROC series (n=15: 0.25 -> n=25: 0.32 -> n=50: 0.39, hook) as
+//! "shrinking toward chance" -- a math-review pass caught an earlier
+//! draft of this docstring making exactly that claim as an over-read:
+//! Cohen's d has been essentially flat since n=25 (-0.44 -> -0.42, not
+//! still shrinking). At n=50 specifically, AUROC ~= Phi(d/sqrt(2))
+//! applied to that stable d predicts ~=0.38, close to the observed 0.39
+//! -- a single-point match, NOT validation of the whole n=15->25->50
+//! trajectory: at n=15/25, applying the same link to that n's (still-
+//! moving) d gives a HIGHER predicted AUROC than what was actually
+//! observed (predicted~=0.31 vs observed 0.25 at n=15; ~=0.38 vs 0.32 at
+//! n=25) -- the link overpredicts AUROC at small n, the opposite of what
+//! a naive "small-n AUROC biased toward 0.5" story needs to hold across
+//! the whole series. That's further reason not to over-read the
+//! trajectory in EITHER direction, not support for the stable-effect
+//! reading beyond the single n=50 match above.
 //! HONEST BOTTOM LINE: with every identified confound and structural
-//! degeneracy fixed, this experiment is consistent with chance but not
-//! yet powered enough to say so with confidence. Treat the original
-//! paper's numbers, the initial flat retraction, AND this file's own
-//! n=15 intermediate result as all superseded by the n=25 state below,
-//! which is itself provisional pending a larger n and a proper
-//! permutation-test p-value — not a re-affirmed conclusion either way.
-//! See the paper's §9 for how this is now reported.
+//! degeneracy fixed AND a real permutation-test p-value computed for the
+//! first time, this experiment FAILS TO REJECT the null at alpha=0.05 --
+//! which is not the same as CONFIRMING the null (p=0.06 is compatible
+//! with both a real small effect and no effect at all; no CI, power
+//! curve, or equivalence test was computed to tell them apart). What
+//! changed is that there is now a real, if inconclusive, statistical
+//! test in place of "underpowered to say anything." n=75/class was ALSO attempted and hit
+//! Madaros's documented resource ceiling (exit 182, the same one already
+//! hit at 4 seeds in examples/cayley_dickson_octtree_realtree_training.sio
+//! and examples/cayley_dickson_sedentree_realtree16_training.sio); n=50
+//! is the largest verified-complete scale for this file's current
+//! structure. Treat the original paper's numbers, the initial flat
+//! retraction, and this file's own n=15/n=25 (no p-value) intermediate
+//! results as all superseded by the numbers above. See the paper's §9
+//! for how this is now reported.
 //!
 //! Run: SOUNIO_STDLIB_PATH=$(pwd)/stdlib ./bin/souc run \
 //!        examples/cayley_dickson_borromean_rerun.sio
+//!      (this file needs no extern "C" FFI -- unlike the LEMON pilot,
+//!      Madaros, the default engine, is the right tool here. It was
+//!      checked against SOUNIO_SOUC_ENGINE=lean_single too: that engine's
+//!      effect checker rejects this file's sin_f64/sqrt_f64 for reasons
+//!      that did not reproduce under direct inspection or under Madaros's
+//!      own checker (`souc check` reports clean) -- not investigated
+//!      further since Madaros already runs this file correctly.)
 
 const PATH_T: i64 = 100
-const N_SAMPLES: i64 = 25   // per class
-const MAXN: i64 = 128       // >= 2*N_SAMPLES, scratch array size for AUROC
+const N_SAMPLES: i64 = 50   // per class
+const MAXN: i64 = 256       // >= 2*N_SAMPLES, scratch array size for AUROC
 
 // =============================================================================
 // PRINT HELPERS
@@ -132,7 +168,7 @@ fn rng_next_unit() -> f64 with Mut, Div {
     (rng_next_signed() + 1.0) / 2.0  // uniform [0,1]
 }
 
-fn sin_f64(x: f64) -> f64 {
+fn sin_f64(x: f64) -> f64 with Div {
     var v = x
     while v > 3.14159265358979 { v = v - 6.28318530717959 }
     while v < 0.0 - 3.14159265358979 { v = v + 6.28318530717959 }
@@ -146,9 +182,9 @@ fn sin_f64(x: f64) -> f64 {
     term = 0.0 - term * x2 / 110.0; sum = sum + term
     sum
 }
-fn cos_f64(x: f64) -> f64 { sin_f64(x + 1.5707963267949) }
+fn cos_f64(x: f64) -> f64 with Div { sin_f64(x + 1.5707963267949) }
 
-fn sqrt_f64(x: f64) -> f64 with Panic {
+fn sqrt_f64(x: f64) -> f64 with Div, Panic {
     if x <= 0.0 { return 0.0 }
     var g = x
     var i: i64 = 0
@@ -411,7 +447,7 @@ fn compute_hook_features(out: &![f64; 2]) with Mut, Div, Panic, NonAssoc {
 // STATS: AUROC (Mann-Whitney rank formula) + Cohen's d
 // =============================================================================
 
-fn auroc(scores: &[f64; 128], labels: &[i64; 128], n: i64, n_pos: i64, n_neg: i64) -> f64 with Mut, Div, Panic {
+fn auroc(scores: &[f64; 256], labels: &[i64; 256], n: i64, n_pos: i64, n_neg: i64) -> f64 with Mut, Div, Panic {
     var rank_sum_pos = 0.0
     var i: i64 = 0
     while i < n {
@@ -430,7 +466,7 @@ fn auroc(scores: &[f64; 128], labels: &[i64; 128], n: i64, n_pos: i64, n_neg: i6
     (rank_sum_pos - npf * (npf + 1.0) / 2.0) / (npf * (n_neg as f64))
 }
 
-fn mean_of(scores: &[f64; 128], labels: &[i64; 128], n: i64, target_label: i64) -> f64 with Mut, Div, Panic {
+fn mean_of(scores: &[f64; 256], labels: &[i64; 256], n: i64, target_label: i64) -> f64 with Mut, Div, Panic {
     var s = 0.0; var c: i64 = 0
     var i: i64 = 0
     while i < n {
@@ -440,7 +476,7 @@ fn mean_of(scores: &[f64; 128], labels: &[i64; 128], n: i64, target_label: i64) 
     s / (c as f64)
 }
 
-fn std_of(scores: &[f64; 128], labels: &[i64; 128], n: i64, target_label: i64, mean: f64) -> f64 with Mut, Div, Panic {
+fn std_of(scores: &[f64; 256], labels: &[i64; 256], n: i64, target_label: i64, mean: f64) -> f64 with Mut, Div, Panic {
     var s = 0.0; var c: i64 = 0
     var i: i64 = 0
     while i < n {
@@ -453,12 +489,48 @@ fn std_of(scores: &[f64; 128], labels: &[i64; 128], n: i64, target_label: i64, m
     sqrt_f64(s / (c as f64))
 }
 
-fn cohens_d(scores: &[f64; 128], labels: &[i64; 128], n: i64) -> f64 with Mut, Div, Panic {
+fn cohens_d(scores: &[f64; 256], labels: &[i64; 256], n: i64) -> f64 with Mut, Div, Panic {
     let m1 = mean_of(scores, labels, n, 1)
     let m0 = mean_of(scores, labels, n, 0)
     let s1 = std_of(scores, labels, n, 1, m1)
     let s0 = std_of(scores, labels, n, 0, m0)
     (m1 - m0) / sqrt_f64((s1*s1 + s0*s0) / 2.0)
+}
+
+// =============================================================================
+// PERMUTATION TEST (Fisher-Yates reshuffle of the label/class assignment,
+// AUROC recomputed each draw, two-sided on |AUROC-0.5|): the real
+// significance test this file's own trailing note has flagged as missing
+// since n=15/class. Scores are the already-computed, expensive-to-generate
+// per-sample features; only the label assignment is reshuffled per draw,
+// so K_PERMS draws cost K_PERMS AUROC evaluations (O(n^2) each), not
+// K_PERMS path regenerations.
+// =============================================================================
+
+const K_PERMS: i64 = 2000
+
+fn permutation_p_value(scores: &[f64; 256], n: i64, n_pos: i64, n_neg: i64, observed_auc: f64) -> f64 with Mut, Div, Panic {
+    let observed_dev = if observed_auc > 0.5 { observed_auc - 0.5 } else { 0.5 - observed_auc }
+    var perm_labels: [i64; 256] = [0; 256]
+    var count_extreme: i64 = 0
+    var p: i64 = 0
+    while p < K_PERMS {
+        var i: i64 = 0
+        while i < n { perm_labels[i as usize] = if i < n_pos { 1 } else { 0 }; i = i + 1 }
+        var j: i64 = n - 1
+        while j > 0 {
+            let r = rng_nonneg(j + 1)
+            let tmp = perm_labels[j as usize]
+            perm_labels[j as usize] = perm_labels[r as usize]
+            perm_labels[r as usize] = tmp
+            j = j - 1
+        }
+        let perm_auc = auroc(scores, &perm_labels, n, n_pos, n_neg)
+        let perm_dev = if perm_auc > 0.5 { perm_auc - 0.5 } else { 0.5 - perm_auc }
+        if perm_dev >= observed_dev { count_extreme = count_extreme + 1 }
+        p = p + 1
+    }
+    (count_extreme as f64) / (K_PERMS as f64)
 }
 
 // =============================================================================
@@ -507,9 +579,9 @@ fn main() -> i32 with IO, Mut, Div, Panic, NonAssoc {
     print("  (original confound was 0.138 vs 1.435, ~10x apart; these should be close)\n")
 
     // --- Generate N_SAMPLES per class, collect hook_mean/assoc_mean ---
-    var hook_scores: [f64; 128] = [0.0; 128]
-    var assoc_scores: [f64; 128] = [0.0; 128]
-    var labels: [i64; 128] = [0; 128]
+    var hook_scores: [f64; 256] = [0.0; 256]
+    var assoc_scores: [f64; 256] = [0.0; 256]
+    var labels: [i64; 256] = [0; 256]
     var idx: i64 = 0
 
     var s: i64 = 0
@@ -556,28 +628,55 @@ fn main() -> i32 with IO, Mut, Div, Panic, NonAssoc {
     print("  AUROC="); print_f64(assoc_auc, 4)
     print("  Cohen's d="); print_f64(assoc_d, 4); print("\n")
 
+    print("\n[Permutation test] "); print_i64(K_PERMS); print(" label reshuffles,\n")
+    print(" two-sided on |AUROC-0.5| (the real significance test this file's own\n")
+    print(" prior version flagged as missing -- p = fraction of reshuffled label\n")
+    print(" assignments whose |AUROC-0.5| is at least as large as the observed one):\n")
+    let hook_p = permutation_p_value(&hook_scores, n_total, N_SAMPLES, N_SAMPLES, hook_auc)
+    let assoc_p = permutation_p_value(&assoc_scores, n_total, N_SAMPLES, N_SAMPLES, assoc_auc)
+    print("  [2,1]-hook:   p="); print_f64(hook_p, 4); print("\n")
+    print("  associator:   p="); print_f64(assoc_p, 4); print("\n")
+
     print("\n[Interpretation, honest, final state]:\n")
-    print(" Three defects fixed in sequence: (1) roughness confound, (2) operands\n")
+    print(" Four defects fixed in sequence: (1) roughness confound, (2) operands\n")
     print(" confined to the associative quaternion subalgebra (hook=assoc=0 by a\n")
     print(" theorem, verified), (3) operands confined to a fixed 3-imaginary-\n")
     print(" direction span (hook=0 for ANY coefficients/permutation within that\n")
     print(" span, also a general fact, verified with 3 unrelated slot/role\n")
-    print(" schemes). Escaping (3) required a genuinely 4th independent basis\n")
-    print(" direction per operand (here: a one-step delay-embedded feature).\n")
-    print(" With that: [2,1]-hook and associator are BOTH now genuinely nonzero\n")
-    print(" for the first time in this investigation. At n=15/class the AUROC\n")
-    print(" looked like a real effect (hook 0.25, assoc 0.31); at n=25/class both\n")
-    print(" moved MUCH closer to chance (hook 0.32, assoc 0.34) with shrunken\n")
-    print(" Cohen's d — the direction a small-sample artifact would move, though\n")
-    print(" n=25 is still too small to conclude either way. HONEST BOTTOM LINE:\n")
-    print(" once every identified confound and structural degeneracy is fixed,\n")
-    print(" this experiment is consistent with chance but not yet powered enough\n")
-    print(" to state that with confidence — the original paper's AUROC numbers,\n")
-    print(" the flat retraction, AND this file's own earlier (n=15, 3-slot)\n")
-    print(" intermediate results should all be treated as superseded by this\n")
-    print(" state, which is itself provisional pending a larger n and a\n")
-    print(" permutation-test p-value.\n")
+    print(" schemes), (4) escaping (3) required a genuinely 4th independent\n")
+    print(" basis direction per operand (here: a one-step delay-embedded\n")
+    print(" feature). With that: [2,1]-hook and associator are BOTH now\n")
+    print(" genuinely nonzero for the first time in this investigation.\n")
+    print(" DO NOT read the AUROC series (n=15: 0.25/0.31, n=25: 0.32/0.34,\n")
+    print(" n=50: 0.39/0.42, hook/associator) as \"shrinking toward chance\" --\n")
+    print(" Cohen's d for the hook has been essentially flat since n=25\n")
+    print(" (-0.44 -> -0.42, not still shrinking). At n=50 specifically,\n")
+    print(" AUROC ~= Phi(d/sqrt(2)) applied to that stable d predicts ~0.38,\n")
+    print(" close to the observed 0.39 -- a SINGLE-POINT match, not\n")
+    print(" validation of the whole n=15->25->50 trajectory: at n=15/25 the\n")
+    print(" same link (applied to that n's still-moving d) predicts a HIGHER\n")
+    print(" AUROC than observed (~0.31 vs 0.25 at n=15; ~0.38 vs 0.32 at\n")
+    print(" n=25) -- overpredicting, the opposite of what \"small-n AUROC\n")
+    print(" biased toward 0.5\" needs across the whole series.\n")
+    print(" That's enough to make \"the effect is decaying to zero\" an\n")
+    print(" unearned reading, without establishing the reverse (a stable\n")
+    print(" small effect) either. Read the printed p-values above as a\n")
+    print(" genuine hypothesis\n")
+    print(" test, not as proof either way: p<0.05 (two-sided, uncorrected\n")
+    print(" across the 2 features tested here) would mean the AUROCs above are\n")
+    print(" unlikely under the null; p>=0.05 (what was actually observed, hook\n")
+    print(" p=0.06 borderline) means this run FAILS TO REJECT the null -- which\n")
+    print(" is not the same as CONFIRMING it. No CI, power curve, or\n")
+    print(" equivalence test (TOST) was computed to adjudicate between \"no\n")
+    print(" effect\" and \"stable small effect,\" and the resource ceiling that\n")
+    print(" blocked n=75/class is exactly what would be needed to try. What IS\n")
+    print(" true: this is now a real, if inconclusive, statistical test, not a\n")
+    print(" provisional \"not yet powered to test at all\" state -- the original\n")
+    print(" paper's AUROC numbers, the flat retraction, and this file's own\n")
+    print(" earlier (n=15/n=25, no p-value) intermediate results are all\n")
+    print(" superseded by the numbers above, but so is any \"resolved to\n")
+    print(" chance\" reading of them.\n")
 
-    print("\n=== DONE (honest, still-provisional result — see printed interpretation) ===\n")
+    print("\n=== DONE ===\n")
     0
 }
