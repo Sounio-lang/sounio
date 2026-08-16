@@ -2,6 +2,7 @@
 
 | Date | Provider | Task | Target | Outcome | Note |
 |---|---|---|---|---|---|
+| 2026-08-16 | cursor-2 | math-review | xai | self-hosted/mli/ir.sio (MLI S1 kind model, D2 exclusions qd128≠f128 / no-i128 / Bool-not-Flags) | NO MATHEMATICAL CONTENT TO REVIEW — kind model is structural; checkpoint pass, no formulas shipped in S1 | /tmp/llm-offload-jYMfT6 (session-local) |
 | 2026-08-06 | cursor | math-review | xai | SounioNonUnitaryNWA.lean | OK interaction §4; DISAGREE WARN4 — discharge_interaction explicit | docs/research/particle_handler_interaction_math_review_offload.txt |
 | 2026-08-06 | cursor | math-review | xai | SounioEffects.lean | OK 1+3; DISAGREE WARN 2 (mask_comm all pairs) + WARN 4 (discharge_interaction is explicit) | docs/research/particle_handler_interaction_math_review_offload.txt |
 | 2026-08-06 | cursor | math-review | xai | SounioNonUnitaryNWA.lean | OK 1+3; DISAGREE 2 (identity handlers like ApproxCausal) | docs/research/particle_nunwa_lean_math_review_offload.txt |
