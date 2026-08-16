@@ -444,6 +444,22 @@ MliBlock    { id, instrs, term }   // NO block params
 If a future feed needs SSA joins inside MLI, that is a **versioned extension**
 (`MliBlock.params`), not the S1 default.
 
+**S1 storage layout (measured constraint, 2026-08-16 — binding for S2+):**
+the shapes above are the *logical* model; the S1 implementation
+(`self-hosted/mli/ir.sio`) stores instructions as a **struct-of-arrays pool**
+on `MliFunction` (scalar columns + `[MliOperand; N]` columns; `MliInst` and
+`MliBlock` are assembled views via `mli_inst_get`/`mli_inst_put` and
+`mli_block_get`), and block metadata as scalar SoA columns. This is **not** an
+arbitrary choice: AoS layout (`blk.instrs[i] = inst`) miscompiles under
+current Madaros native-v2 — depth-3 aggregate element stores SIGSEGV and
+scalar field writes into array-of-struct elements through `&!` misaddress
+silently (#1678/#1749 residual family; same remedy the IR arena took in
+#1717). Evidence and acceptance gate:
+[`../audit/MADAROS_NESTED_AGGREGATE_ELEMENT_STORE_DISPATCH_2026-08-16.md`](../audit/MADAROS_NESTED_AGGREGATE_ELEMENT_STORE_DISPATCH_2026-08-16.md);
+live witness: `self-hosted/mli/aggregate_store_diag.sio`. S2's `ir_to_mli`
+must build through the pool accessors and must not "simplify" back to AoS
+while that witness still prints `OBSERVED`.
+
 **R0 constraint (Phase-2):** single return, no exception edges, SysV x86-64 only;
 function must come from **`ir_to_mli`** (or hand-built MLI fixture), **not** raw EMIR.
 
@@ -780,3 +796,4 @@ Select:
 | 2026-08-16 | D2: QD128 kind; no Int128; Bool not Flags; no block-params/φ in MLI |
 | 2026-08-16 | D3: O5 pin Madaros native-v2 session binary; S3 = emitter mimic |
 | 2026-08-16 | D4: `X86_*` rename or header note = WS-C PR1 precondition |
+| 2026-08-16 | S1 landed (`lane/cursor-2/mli-s1-20260816` @ `ab572a62d9`): §4.4 storage-layout note — SoA instruction pool as measured response to the nested-aggregate-element-store miscompile (cursor-2, lane mli-s1) |
